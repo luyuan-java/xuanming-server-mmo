@@ -1,0 +1,36 @@
+// Java 版内部契约：游戏节点在线目录（存 Redis，带 TTL，节点定期刷新）。
+// gateway 按它挑 gate；scene-manager 按它分配场景；gate 按它连 scene。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+message GateNodeInfo {
+  uint32 zone_id = 1;
+  uint32 node_id = 2;
+  string instance_id = 3;
+  // 客户端连接地址（对外通告的 IP / 端口）。
+  string client_host = 4;
+  uint32 client_port = 5;
+  uint32 player_count = 6;
+  // 排空中：不再分配新玩家。
+  bool draining = 7;
+}
+
+message SceneNodeInfo {
+  uint32 zone_id = 1;
+  uint32 node_id = 2;
+  string instance_id = 3;
+  // gate 连 scene 用的节点链路地址。
+  string link_host = 4;
+  uint32 link_port = 5;
+  repeated SceneEntry scenes = 6;
+}
+
+message SceneEntry {
+  uint64 scene_id = 1;
+  uint32 scene_config_id = 2;
+  uint32 player_count = 3;
+}

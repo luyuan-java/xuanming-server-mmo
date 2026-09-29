@@ -1,0 +1,22 @@
+// Java 版内部契约：场景分配（xm-scene-manager 提供，Dubbo Triple）。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+message AssignSceneRequest {
+  uint32 zone_id = 1;
+  uint64 player_id = 2;
+  // 期望进入的场景配置（上次所在场景）；0 表示用默认主世界。
+  uint32 preferred_scene_config_id = 3;
+}
+
+message AssignSceneResponse {
+  // 非 0 表示没有可用场景。
+  uint32 tip_id = 1;
+  uint32 scene_node_id = 2;
+  uint64 scene_id = 3;
+  uint32 scene_config_id = 4;
+}

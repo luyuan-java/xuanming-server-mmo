@@ -14,6 +14,9 @@
     <modules>
         <module>xm-proto</module>
         <module>xm-table</module>
+        <module>xm-net</module>
+        <module>xm-common</module>
+        <module>xm-api</module>
     </modules>
 
     <properties>
@@ -70,6 +73,31 @@
             <dependency>
                 <groupId>com.game</groupId>
                 <artifactId>xm-table</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
+                <artifactId>xm-net</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
+                <artifactId>xm-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
+                <artifactId>xm-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
+                <artifactId>xm-discovery</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
+                <artifactId>xm-player-store</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

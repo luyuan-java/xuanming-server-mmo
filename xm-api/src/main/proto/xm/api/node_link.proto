@@ -1,0 +1,73 @@
+// Java 版内部契约：gate ↔ scene 节点链路（Netty 长连接，4 字节长度头 + 本信封）。
+// gate 主动连 scene，一条连接双向复用。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+message NodeLinkFrame {
+  oneof body {
+    LinkHello hello = 1;
+    LinkHelloAck hello_ack = 2;
+    PlayerEnter player_enter = 3;
+    PlayerEnterResult player_enter_result = 4;
+    PlayerLeave player_leave = 5;
+    ClientForward client_forward = 6;
+    ToClient to_client = 7;
+  }
+}
+
+// gate → scene：链路首帧。
+message LinkHello {
+  uint32 gate_node_id = 1;
+  string gate_instance_id = 2;
+  uint32 zone_id = 3;
+}
+
+// scene → gate：握手结果；zone 不符等情况 accepted=false 并随后断开。
+message LinkHelloAck {
+  uint32 scene_node_id = 1;
+  string scene_instance_id = 2;
+  uint32 zone_id = 3;
+  bool accepted = 4;
+  string reason = 5;
+}
+
+// gate → scene：把会话上的玩家送进场景。
+message PlayerEnter {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  uint64 scene_id = 3;
+  uint64 owner_epoch = 4;
+}
+
+// scene → gate：进场结果。失败时 gate 解绑会话上的场景并把 tip 发给客户端。
+message PlayerEnterResult {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  uint32 tip_id = 3;
+}
+
+// gate → scene：玩家离开（断线或主动离开），scene 写回数据并移除玩家。
+message PlayerLeave {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  bool voluntary = 3;
+}
+
+// gate → scene：进场后的客户端消息。
+message ClientForward {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  uint32 message_id = 3;
+  bytes body = 4;
+  uint64 request_id = 5;
+}
+
+// scene → gate：下行给一个或多个会话的消息；message_content 是 MessageContent 的序列化字节，gate 原样用客户端帧下发。
+message ToClient {
+  repeated uint32 session_ids = 1;
+  bytes message_content = 2;
+}

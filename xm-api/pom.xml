@@ -10,22 +10,14 @@
         <version>0.1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>xm-proto</artifactId>
-    <name>xm-proto</name>
-    <description>
-        两版共享的协议契约：src/main/proto 由 tools/ContractSync.java 从 mmorpg 同步（派生物，不许手改），
-        另附消息号 / 事件号注册表的运行时读取。
-    </description>
+    <artifactId>xm-api</artifactId>
+    <name>xm-api</name>
+    <description>Java 版内部契约：Dubbo 服务接口与内部 protobuf 消息（包 xm.api，不是客户端契约）</description>
 
     <dependencies>
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -38,10 +30,6 @@
                     <sourceDirectories>
                         <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
                     </sourceDirectories>
-                    <!-- MessageIdRegistry 在运行时读这份 descriptor set 枚举所有服务 / 方法；保留自定义 option（OptionIsClientProtocolService）。 -->
-                    <outputDescriptorFile>${project.build.outputDirectory}/contract/contract.desc</outputDescriptorFile>
-                    <outputDescriptorIncludeImports>true</outputDescriptorIncludeImports>
-                    <outputDescriptorRetainOptions>true</outputDescriptorRetainOptions>
                 </configuration>
             </plugin>
         </plugins>

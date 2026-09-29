@@ -1,0 +1,77 @@
+// Java 版内部契约：gate 把客户端消息转给后端（Dubbo Triple）。只在 Java 版内部使用，不是客户端契约。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// 会话上下文：gate 发往后端的每个客户端调用都带上。后端只信任 gate 填的这些字段。
+message SessionContext {
+  uint32 gate_node_id = 1;
+  // gate 进程实例 uuid：节点号会被复用，靠它区分新旧进程。
+  string gate_instance_id = 2;
+  uint32 session_id = 3;
+  uint32 zone_id = 4;
+  // 已认证账号；未登录为空。
+  string account = 5;
+  // 已绑定玩家；未进游戏为 0。
+  uint64 player_id = 6;
+  string client_ip = 7;
+}
+
+message ClientCall {
+  SessionContext session = 1;
+  uint32 message_id = 2;
+  // 请求消息的序列化字节（类型由 message_id 决定）。
+  bytes body = 3;
+  // ClientRequest.id，原样回显给客户端。
+  uint64 request_id = 4;
+}
+
+message ClientReply {
+  // 应答消息的序列化字节；为空且 tip_id 为 0 时 gate 不回包。
+  bytes body = 1;
+  // 非 0 表示失败：gate 放进 MessageContent.error_message.id。
+  uint32 tip_id = 2;
+  repeated string tip_parameters = 3;
+  // 给 gate 的会话指令，按顺序执行。
+  repeated SessionDirective directives = 4;
+}
+
+message SessionDirective {
+  oneof kind {
+    BindAccount bind_account = 1;
+    EnterScene enter_scene = 2;
+    CloseSession close_session = 3;
+  }
+}
+
+// 登录成功：把账号绑到会话上，之后的调用都带着它。
+message BindAccount {
+  string account = 1;
+}
+
+// 进游戏：gate 把会话绑定到玩家，并经节点链路把玩家送进指定场景节点的指定场景。
+message EnterScene {
+  uint64 player_id = 1;
+  uint32 scene_node_id = 2;
+  uint64 scene_id = 3;
+  // 玩家数据归属围栏：scene 写回时必须带上，旧 epoch 的写入会被拒绝。
+  uint64 owner_epoch = 4;
+}
+
+// 让 gate 关闭会话（先把 tip 发给客户端，再断开）。
+message CloseSession {
+  uint32 tip_id = 1;
+}
+
+// gate 通知后端会话结束（断线或主动离开）。
+message SessionClosed {
+  SessionContext session = 1;
+  // true = 客户端主动 LeaveGame；false = 断线。
+  bool voluntary = 2;
+}
+
+message Ack {
+}
