@@ -1,0 +1,74 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+
+
+enum team_error {
+  kTeam_errorOK = 0;
+
+  kTeamNotInApplicants = 4000;
+
+  kTeamPlayerId = 4001;
+
+  kTeamMembersFull = 4002;
+
+  kTeamMemberInTeam = 4003;
+
+  kTeamMemberNotInTeam = 4004;
+
+  kTeamKickSelf = 4005;
+
+  kTeamKickNotLeader = 4006;
+
+  kTeamAppointSelf = 4007;
+
+  kTeamAppointLeaderNotLeader = 4008;
+
+  kTeamFull = 4009;
+
+  kTeamInApplicantList = 4010;
+
+  kTeamNotInApplicantList = 4011;
+
+  kTeamListMaxSize = 4012;
+
+  kTeamHasNotTeamId = 4013;
+
+  kTeamDismissNotLeader = 4014;
+
+  kTeamMemberListFull = 4015;
+
+  kTeamCreateTeamMaxMemberSize = 4016;
+
+  kTeamPlayerNotFound = 4017;
+
+  kTeamNotLeader = 4018;
+
+  kTeamHomeZoneUnknown = 4019;
+
+  kTeamCrossZoneDenied = 4020;
+
+  kTeamInviteNotFound = 4021;
+
+  kTeamInviteLimit = 4022;
+
+  kTeamInMatch = 4023;
+
+  kTeamMemberOffline = 4024;
+
+  kTeamMemberInBattle = 4025;
+
+  kTeamMemberNotReady = 4026;
+
+  kTeamDungeonNotOpen = 4027;
+
+  kTeamSizeExceeded = 4028;
+
+  kTeamStateChanged = 4029;
+
+  kTeamInternal = 4030;
+
+};

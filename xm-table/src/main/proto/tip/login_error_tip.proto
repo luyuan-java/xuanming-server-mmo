@@ -1,0 +1,82 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+
+
+enum login_error {
+  kLogin_errorOK = 0;
+
+  kLoginAccountNotFound = 2000;
+
+  kLoginAccountPlayerFull = 2001;
+
+  kLoginCreatePlayerUnLoadAccount = 2002;
+
+  kLoginCreatePlayerConnectionHasNotAccount = 2003;
+
+  kLoginUnLogin = 2004;
+
+  kLoginInProgress = 2005;
+
+  kLoginPlayerGuidError = 2006;
+
+  kLoginEnteringGame = 2007;
+
+  kLoginPlaying = 2008;
+
+  kLoginCreatingPlayer = 2009;
+
+  kLoginWaitingEnterGame = 2010;
+
+  kLoginEnterGameGuid = 2011;
+
+  kLoginAccountNameEmpty = 2012;
+
+  kLoginCreateConnectionAccountEmpty = 2013;
+
+  kLoginEnterGameConnectionAccountEmpty = 2014;
+
+  kLoginUnknownError = 2015;
+
+  kLoginSessionDisconnect = 2016;
+
+  kLoginBeKickByAnOtherAccount = 2017;
+
+  kLoginSessionIdNotFound = 2018;
+
+  kLoginFsmFailed = 2019;
+
+  kLoginDataSerializeFailed = 2020;
+
+  kLoginRedisError = 2021;
+
+  kLoginDataParseFailed = 2022;
+
+  kLoginRedisSetFailed = 2023;
+
+  kTooManyDevices = 2024;
+
+  kLoginFSMLoadFailed = 2025;
+
+  kLoginFSMEventFailed = 2026;
+
+  kLoginAccountDataLoadFaile = 2027;
+
+  kLoginSessionNotFound = 2028;
+
+  kLoginAccountDataLoadFailed = 2029;
+
+  kLoginFsmInvalidEvent = 2030;
+
+  kLoginTimeout = 2031;
+
+  kRoleNameInvalid = 2032;
+
+  kRoleNameTaken = 2033;
+
+  kRoleNameSensitive = 2034;
+
+};

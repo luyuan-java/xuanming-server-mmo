@@ -1,0 +1,76 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+
+
+enum guild_error {
+  kGuild_errorOK = 0;
+
+  kGuildAlreadyInGuild = 14000;
+
+  kGuildNotFound = 14001;
+
+  kGuildNotInGuild = 14002;
+
+  kGuildFull = 14003;
+
+  kGuildLeaderCantLeave = 14004;
+
+  kGuildNotLeader = 14005;
+
+  kGuildNoPermission = 14006;
+
+  kGuildNotRanked = 14007;
+
+  kGuildIdGenUnavailable = 14008;
+
+  kGuildNameInvalid = 14009;
+
+  kGuildNameTaken = 14010;
+
+  kGuildAnnouncementTooLong = 14011;
+
+  kGuildHomeZoneUnknown = 14012;
+
+  kGuildZoneMerging = 14013;
+
+  kGuildTargetNotMember = 14014;
+
+  kGuildCannotTargetSelf = 14015;
+
+  kGuildRankTooLow = 14016;
+
+  kGuildOfficerLimit = 14017;
+
+  kGuildApplicationNotFound = 14018;
+
+  kGuildApplicationLimit = 14019;
+
+  kGuildApplicationQueueFull = 14020;
+
+  kGuildBusyRetry = 14021;
+
+  kGuildFundsInsufficient = 14022;
+
+  kGuildMaxLevel = 14023;
+
+  kGuildDonateLimit = 14024;
+
+  kGuildCurrencyInsufficient = 14025;
+
+  kGuildAssetPending = 14026;
+
+  kGuildAssetRejected = 14027;
+
+  kGuildShopGoodsNotFound = 14028;
+
+  kGuildShopLevelTooLow = 14029;
+
+  kGuildShopLimit = 14030;
+
+  kGuildContributionInsufficient = 14031;
+
+};

@@ -1,0 +1,47 @@
+syntax = "proto3";
+option java_package = "com.game.proto.scene_manager";
+option java_multiple_files = true;
+package scene_node;
+
+import "proto/common/asset/asset_op.proto";
+import "proto/common/base/empty.proto";
+import "proto/scene/scene.proto";
+
+option go_package = "scene_manager/scene_manager";
+
+// Dedicated gRPC-only control plane for Scene nodes.
+// This avoids the C++ grpc plugin limitation with cc_generic_services=true
+// on the legacy Scene RPC proto.
+service SceneNodeGrpc {
+  rpc CreateScene(CreateSceneRequest) returns (CreateSceneResponse) {}
+  rpc DestroyScene(DestroySceneRequest) returns (Empty) {}
+  // ReleasePlayer is called by SceneManager on the player's previous scene node
+  // when the player is being routed to a different scene node (cross-node scene
+  // change). The old node persists the player to Redis, drops the entity, and
+  // frees the session mapping so the new node can load fresh from Redis.
+  rpc ReleasePlayer(ReleasePlayerRequest) returns (Empty) {}
+
+  // ---- 回合制战斗 gather 管线(docs/design/turn-based-battle-server.md §3.1/§5.3)----
+  // 消息定义共用 proto/scene/scene.proto 里的那一份(全局包,与 CreateSceneRequest
+  // 同款双服务共享模式):muduo Scene 服务与本 gRPC 控制面同签名,match(Go)走本面。
+  // match 对每个参战者调用:冻结玩家(挂 InBattleComp)+ 返回战斗快照;
+  // error_message.id != 0 即拒绝,且不留任何冻结痕迹。
+  rpc PrepareBattle(PrepareBattleRequest) returns (PrepareBattleResponse) {}
+  // gather 失败的逐人回滚:battle_id 匹配才解冻,迟到/重复取消幂等忽略。
+  rpc CancelBattlePrepare(CancelBattlePrepareRequest) returns (Empty) {}
+
+  // ---- 通用资产通道(docs/design/guild-phase2/04-asset-channel.md §S4)----
+  // 结局写在 response.outcome;gRPC status 恒为 OK。同 seq 重复调用只读答复。
+  rpc AssetDebit(AssetOpRequest) returns (AssetOpResponse) {}
+  // 未见过的 seq 记 REJECTED 占位(reason=0);见过则回原结局。允许用于任何流。
+  rpc AssetAbortDebit(AssetOpRequest) returns (AssetOpResponse) {}
+  rpc AssetCredit(AssetOpRequest) returns (AssetOpResponse) {}
+}
+
+message ReleasePlayerRequest {
+  uint64 player_id = 1;
+  // Optional: target scene id the player is moving to (for logging only).
+  uint64 target_scene_id = 2;
+  // Optional: target node id the player is moving to (for logging only).
+  string target_node_id = 3;
+}

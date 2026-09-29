@@ -1,0 +1,68 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+
+
+enum scene_error {
+  kScene_errorOK = 0;
+
+  kEnterSceneNotFound = 3000;
+
+  kEnterSceneNotFull = 3001;
+
+  kEnterSceneMainFull = 3002;
+
+  kEnterNodeUnavailable = 3003;
+
+  kEnterSceneServerType = 3004;
+
+  kEnterSceneParamError = 3005;
+
+  kEnterSceneSceneFull = 3006;
+
+  kEnterSceneSceneNotFound = 3007;
+
+  kEnterSceneYouInCurrentScene = 3008;
+
+  kEnterSceneEnterCrossRoomScene = 3009;
+
+  kEnterSceneGsInfoNull = 3010;
+
+  kEnterSceneGsFull = 3011;
+
+  kEnterSceneYourSceneIsNull = 3012;
+
+  kEnterSceneChangeSceneOffLine = 3013;
+
+  kEnterSceneChangingScene = 3014;
+
+  kEnterSceneChangingGs = 3015;
+
+  kChangeScenePlayerQueueNotFound = 3016;
+
+  kChangeScenePlayerQueueFull = 3017;
+
+  kChangeScenePlayerQueueComponentGsNull = 3018;
+
+  kChangeScenePlayerQueueComponentEmpty = 3019;
+
+  kChangeSceneEnQueueNotSameGs = 3020;
+
+  kInvalidEnterSceneParameters = 3021;
+
+  kCheckEnterSceneCreator = 3022;
+
+  kEnterSceneFailed = 3023;
+
+  kZoneTravelTargetZoneNotFound = 3024;
+
+  kZoneTravelInBattle = 3025;
+
+  kZoneTravelInTeam = 3026;
+
+  kZoneTravelTargetBusy = 3027;
+
+};

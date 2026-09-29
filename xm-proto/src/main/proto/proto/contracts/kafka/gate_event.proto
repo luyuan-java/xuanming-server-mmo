@@ -1,0 +1,116 @@
+syntax = "proto3";
+option java_package = "com.game.proto.contracts.kafka";
+option java_multiple_files = true;
+package contracts.kafka;
+
+option go_package = "contracts/kafka";
+
+import "proto/common/base/message.proto";
+
+// In-process events decoded from Gate Kafka transport payloads.
+// These are intentionally modeled like node event protos so handlers can stay split by file/domain.
+message RoutePlayerEvent {
+  uint32 session_id = 1;
+  uint32 target_node_id = 2;
+  uint64 scene_id = 3;        // Scene instance GUID allocated by SceneManager
+  uint64 player_id = 4;
+  // 玩家归属 zone(数据落库目的地),由 scene_manager 从 data_service 取后随路由下发;
+  // 0 表示未知,scene 侧 fail-closed 落进程 zone 并计数告警。见 cross-zone-scene-travel.md CZ-3。
+  uint32 home_zone_id = 5;
+  // 本次路由决策铸造的归属 epoch(scene_manager INCR player:{id}:owner_epoch 得到)。
+  // 必须随事件下发,节点不得自行读 Redis:两次改派挨近时后到者才持有最新值。
+  // 见 scene-owner-reentry-barrier.md §3.3。
+  uint64 owner_epoch = 6;
+}
+
+message KickPlayerEvent {
+  uint32 session_id = 1;
+}
+
+// Sent by Gate when a player TCP connection drops.
+// Consumed by player_locator to start disconnect lease.
+message PlayerDisconnectedEvent {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  string gate_id = 3;
+  string gate_instance_id = 4;
+}
+
+// Published by player_locator when disconnect lease expires (player didn't reconnect).
+// Consumed by Scene to clean up player entity, and Gate to clean up stale session.
+message PlayerLeaseExpiredEvent {
+  uint64 player_id = 1;
+  uint32 session_id = 2;
+  string scene_node_id = 3;
+  uint64 scene_id = 4;
+  string gate_id = 5;
+  string gate_instance_id = 6;
+}
+
+// Sent by Login/player_locator to bind a session to Gate.
+message BindSessionEvent {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  uint32 session_version = 3;
+  uint32 enter_gs_type = 4;  // LOGIN_FIRST / LOGIN_RECONNECT / LOGIN_REPLACE
+}
+
+// Sent by SceneManager to Gate when a player requests a cross-zone scene.
+// Gate forwards the redirect info to the client so it can reconnect to the target zone's Gate.
+message RedirectToGateEvent {
+  uint64 player_id = 1;
+  uint32 session_id = 2;
+  string target_gate_ip = 3;
+  uint32 target_gate_port = 4;
+  bytes  token_payload = 5;    // serialized GateTokenPayload for target gate
+  bytes  token_signature = 6;  // HMAC-SHA256 signature
+  int64  token_deadline = 7;   // unix seconds
+}
+
+// Go service pushes a single message to a player's client via Gate.
+// Flow: Go service -> Kafka gate-{gate_id} -> Gate -> client TCP
+message PushToPlayerEvent {
+  uint32 session_id = 1;
+  MessageContent message_content = 2;
+}
+
+// Go service broadcasts the same message to multiple players on the same Gate.
+// Sender groups players by gate_id and sends one Kafka message per Gate.
+// Flow: Go service -> Kafka gate-{gate_id} -> Gate -> N client TCP connections
+message BroadcastToPlayersEvent {
+  repeated uint32 session_list = 1;
+  MessageContent message_content = 2;
+  uint32 session_bitmap_base = 3;
+  bytes session_bitmap = 4;
+}
+
+// Scene-wide broadcast: Gate iterates all sessions with matching scene_id.
+// More compact than session_list when broadcasting to most/all players in a scene.
+message BroadcastToSceneEvent {
+  uint64 scene_id = 1;
+  MessageContent message_content = 2;
+}
+
+// Server-wide broadcast: Gate sends to ALL connected sessions.
+// Caller sends one message per Gate node.
+message BroadcastToAllEvent {
+  MessageContent message_content = 1;
+}
+
+// 回合制战斗:把 session 的 BattleNodeService 绑定指到指定 battle 节点。
+// 发送方:battle 节点(CreateBattle 成功后)或 scene(RECONNECT 且玩家仍在战斗时重挂)。
+// gate 处理:照 RoutePlayerEvent 模式,SessionInfo 按 nodeType 多绑定,scene 绑定不受影响。
+message BindBattleEvent {
+  uint32 session_id = 1;
+  uint32 battle_node_id = 2;
+  uint64 battle_id = 3;
+  uint64 player_id = 4;
+}
+
+// 回合制战斗:解除 session 的 BattleNodeService 绑定(战斗结束/作废)。
+// battle_id 不匹配当前绑定时忽略(防迟到的解绑清掉新战斗)。
+message UnbindBattleEvent {
+  uint32 session_id = 1;
+  uint64 battle_id = 2;
+  uint64 player_id = 3;
+}

@@ -1,0 +1,32 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+option java_outer_classname = "MonsterTableOuterClass";
+option java_multiple_files = true;
+
+
+message Monsterdrop {
+	uint32 drop_item = 1;
+	uint32 drop_count = 2;
+	uint32 drop_rate = 3;
+}
+
+message MonsterTable {
+	uint32 id = 1;
+	uint64 health = 2;
+	uint64 strength = 3;
+	uint64 armor = 4;
+	uint64 resistance = 5;
+	uint64 critchance = 6;
+	uint64 speed = 7;
+	uint64 exp_reward = 8;
+	uint64 gold_reward = 9;
+	repeated Monsterdrop drop = 10;
+}
+
+message MonsterTableData {
+	repeated MonsterTable data = 1;
+}

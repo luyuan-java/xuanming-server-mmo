@@ -1,0 +1,136 @@
+﻿syntax = "proto3";
+option java_package = "com.game.proto.scene_manager";
+option java_multiple_files = true;
+package scene_manager;
+
+import "proto/common/base/node.proto";
+import "proto/common/base/empty.proto";
+import "proto/contracts/kafka/gate_command.proto";
+
+option go_package = "scene_manager/scene_manager";
+
+// Scene type: main world (persistent) vs instance (on-demand, has lifecycle).
+enum SceneType {
+  SCENE_TYPE_UNSPECIFIED = 0;
+  // Persistent main-world scene. Created at startup, never auto-destroyed.
+  SCENE_TYPE_MAIN_WORLD  = 1;
+  // On-demand instance (dungeon, arena, etc.). Created per request, auto-destroyed when idle.
+  SCENE_TYPE_INSTANCE    = 2;
+}
+
+// SceneManager Service: Responsible for scene creation/destruction and player-scene routing.
+service SceneManager {
+  // Create a scene on a specific node (implemented by the Scene node)
+  rpc CreateScene(CreateSceneRequest) returns (CreateSceneResponse) {}
+
+  // Destroy a scene
+  rpc DestroyScene(DestroySceneRequest) returns (Empty) {}
+
+  // Login/player_locator requests a player to enter a scene
+  rpc EnterScene(EnterSceneRequest) returns (EnterSceneResponse) {}
+
+  // Login/player_locator requests a player to leave a scene
+  rpc LeaveScene(LeaveSceneRequest) returns (Empty) {}
+}
+
+message CreateSceneRequest {
+  // Scene config ID (map template)
+  uint64 scene_conf_id = 1;
+  // Optional: Specify creation on a specific Scene node (used for main world hash assignment)
+  string target_node_id = 2;
+  // Scene type. Main world scenes are persistent; instances have lifecycle management.
+  SceneType scene_type = 3;
+  // Creator player IDs (for instance access control)
+  repeated uint64 creator_ids = 4;
+  // Zone ID: which zone this scene belongs to.
+  uint32 zone_id = 5;
+  // Mirror co-location: when > 0, create the new scene on the SAME node that
+  // already hosts this source scene. Rationale: mirrors are structural copies
+  // of a world scene, so co-locating them reuses already-loaded map/AI/spawn
+  // data and avoids cross-node handoff on client scene switches.
+  // Falls back to GetBestNode if the source node is dead or overloaded.
+  uint64 source_scene_id = 6;
+  // Mirror config ID forwarded to the C++ SceneNode (set on SceneInfoComp).
+  // 0 = not a mirror. Independent of source_scene_id so the caller can tag
+  // the mirror even when the source node is inferred via other means.
+  uint32 mirror_config_id = 7;
+}
+
+message CreateSceneResponse {
+  // Global scene ID (allocated by SceneManager)
+  uint64 scene_id = 1;
+  // ID of the node where it resides
+  string node_id = 2;
+  // Creation result: 0 for success, non-zero for error code
+  uint32 error_code = 3;
+  string error_message = 4;
+  // Echo of CreateSceneRequest.creator_ids. Lets async callers (notably the
+  // C++ SceneNode that initiated a mirror create on behalf of a player) drive
+  // a follow-up EnterScene without keeping per-call request state. Empty when
+  // the request had no creators (system-initiated creates, etc.).
+  repeated uint64 creator_ids = 5;
+}
+
+message DestroySceneRequest {
+  uint64 scene_id = 1;
+  // Zone ID: which zone this scene belongs to.
+  uint32 zone_id = 2;
+}
+
+message EnterSceneRequest {
+  uint64 player_id = 1;
+  uint64 scene_id = 2;          // Target scene (if known). 0 = allocate via scene_conf_id.
+  uint32 session_id = 3;        // Gate session ID
+  string request_id = 4;        // Idempotency ID (optional)
+  string gate_id = 5;           // Gate Node ID
+  string gate_instance_id = 6;  // Gate Instance ID (for Kafka message validation)
+  // Zone ID: which zone the target scene belongs to.
+  uint32 zone_id = 7;
+  // Scene config ID (map template). Required when scene_id == 0.
+  // Used to resolve the actual scene instance from main_scene_channels.
+  uint64 scene_conf_id = 8;
+  // Zone ID of the player's current Gate. Used to detect cross-zone transitions.
+  uint32 gate_zone_id = 9;
+  // 应答关联号:scene_manager 只在 EnterSceneResponse.correlation_id 里原样回显它。
+  // - 不进 request_id 的去重与指纹(算指纹前清零),不参与任何路由判定。它和 request_id 语义相反:
+  //   幂等键要求同一逻辑操作重试时取同一个值,关联号要求每次发送取不同的值、只认最新一次,
+  //   所以不能复用 request_id(复用会让每条交接请求多一次 SETNX/EVAL,还会带出假的"执行中")。
+  // - 取值是发送方线程内的单调号:scene 进程所有 EnterScene 都经统一出口发出,恒非 0;
+  //   0 表示调用方不需要按请求对应答(如 login)。
+  // - 请求侧后续新字段从 11 起用。
+  uint64 correlation_id = 10;
+}
+
+message EnterSceneResponse {
+  uint32 error_code = 1;
+  string error_message = 2;
+  // Non-empty when cross-zone redirect is needed instead of direct routing.
+  // Client should disconnect from current Gate and reconnect to the target Gate.
+  RedirectToGateInfo redirect = 3;
+  // 原样回显请求里的 player_id。scene 节点的 EnterScene 是异步 gRPC,应答回调里没有
+  // 请求上下文;传送 / 疏散这类"发起方还要根据结果收尾"的调用靠它把应答对回玩家。
+  uint64 player_id = 4;
+  // 5:留给 GO-2 的 owner_epoch 回显。
+  // 原样回显 EnterSceneRequest.correlation_id。scene 节点靠它把应答对回"哪一次发送"
+  // (player_id 只用来找实体):只有号匹配的应答才算本代传送交接的证据。
+  // 去重重放时回显的是本次请求的值,不是被缓存那次的值。
+  // 0 表示请求没带,或者 scene_manager 是旧版没回显;此时 scene 退回按 player_id 对应答。
+  uint64 correlation_id = 6;
+}
+
+// Redirect info returned when player needs to switch to a different zone's Gate.
+message RedirectToGateInfo {
+  string target_gate_ip = 1;
+  uint32 target_gate_port = 2;
+  bytes  token_payload = 3;    // serialized GateTokenPayload for target gate
+  bytes  token_signature = 4;  // HMAC-SHA256 signature
+  int64  token_deadline = 5;   // unix seconds
+}
+
+message LeaveSceneRequest {
+  uint64 player_id = 1;
+  uint64 scene_id = 2;
+  string request_id = 3;
+  // Zone ID: which zone the target scene belongs to.
+  uint32 zone_id = 4;
+}

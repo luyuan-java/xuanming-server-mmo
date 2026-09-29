@@ -1,0 +1,230 @@
+syntax = "proto3";
+option java_package = "com.game.proto.guild";
+option java_multiple_files = true;
+package guildpb;
+
+option go_package = "guild/proto/guild";
+
+import "proto/db/proto_option.proto";
+
+// 帮会独占库 mmorpg_guild 的表结构,唯一事实源(port-decisions D-14,§8 已修订)。
+// - 建表 / 加列只经 go/schemamigrate(go/guild 的 -migrate 与启动期 Schema.AutoMigrate);业务 SQL 手写。
+// - D-14 §2:主键只用整数 / 枚举列;string 列建成 MEDIUMTEXT,进索引只按 191 前缀;每表至多一个唯一键。
+// - 改表纪律见 docs/design/guild-phase2/01-storage.md §6.4:新表 / 新字段只追加;OptionIndex 组只能追加到末尾,
+//   不得调序;已有唯一键或索引组的列一旦改动,开发期必须删库重建。
+// - 与 guild.proto 同包:message 一律带 Record 后缀,枚举值一律带枚举名前缀。
+// - 本文件不进客户端 tools/gen_proto.ps1 清单,不定义 service。
+// - 加锁顺序:guild → guild_player_state → guild_member → guild_application → guild_player_op_seq
+//   → guild_asset_op → guild_daily_counter → guild_activity_progress → guild_trial_battle(同上文档 §2.1)。
+// - 后续表由 B5 / B6a / B6b 在本文件追加 message,并在 go/guild/internal/data/tables.go 追加。
+
+message GuildRecord {
+  option(OptionTableName) = "guild";
+  option(OptionPrimaryKey) = "guild_id";
+  option(OptionUniqueKey) = "name_norm";      // 生成 uk_guild;帮名全服唯一,判重只看规范化值
+  option(OptionIndex) = "zone_id;leader_id";  // idx_guild_0 = 合服 / 分区榜重建;idx_guild_1 = 按会长查
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 guild_id = 1;        // data_service 号段 biz_tag=guild
+  string name = 2;            // 展示名:TrimSpace 后原样保存,不建索引;≤ MaxGuildNameRunes=24
+  uint64 leader_id = 3;       // 与 guild_member.role=3 同事务维护
+  uint32 level = 4;           // 建帮写 1;B5 升级改写
+  string announcement = 5;    // ≤ MaxAnnouncementBytes=600
+  uint64 create_time_ms = 6;
+  uint32 max_members = 7;     // 建帮写入;B5 起按 GuildLevel.max_members 改写
+  uint32 zone_id = 8;         // 帮会归属 zone;merge_zone 步骤 3 改写
+  int64 score = 9;            // 排行分权威副本;Redis ZSET 由 RebuildRanks 重建
+  uint64 funds = 10;          // 帮会资金;B1 恒为 0,B5 起写入
+  string name_norm = 11;      // data.GuildNameNorm(name):NFKC → TrimSpace → 小写;≤ 48 rune(远小于 191 前缀)
+  // 追加区:从 12 起。
+}
+
+message GuildPlayerStateRecord {
+  option(OptionTableName) = "guild_player_state";
+  option(OptionPrimaryKey) = "player_id";
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 player_id = 1;       // 每玩家一行,只作串行化锁行(§2.1 规则 3);INSERT IGNORE 于事务外建行
+  uint64 updated_ms = 2;      // 最近一次加锁写入的时刻,仅诊断用
+  // 追加区:从 3 起。刻意不存"待审申请数":帮会侧批量删过期申请、解散删申请都不锁申请人行,计数会漂;
+  // 上限判定一律在持有本行锁后对 guild_application 做加锁计数(§2.1 规则 4)。
+}
+
+message GuildMemberRecord {
+  option(OptionTableName) = "guild_member";
+  option(OptionPrimaryKey) = "guild_id,player_id";
+  option(OptionUniqueKey) = "player_id";      // 生成 uk_guild_member;一人至多一个帮
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 guild_id = 1;
+  uint64 player_id = 2;
+  uint32 role = 3;                   // 0 成员 / 1 长老 / 3 帮主(D-4;权限比较走 constants.Rank)
+  uint64 join_time_ms = 4;
+  uint64 last_active_ms = 5;         // 目前只在入帮时写入
+  uint64 contribution_total = 6;     // 累计帮贡,只增;B5 起写入
+  uint64 contribution_balance = 7;   // 可消费帮贡;商店扣减;B5 起写入
+  // 追加区:从 8 起。
+}
+
+message GuildApplicationRecord {
+  option(OptionTableName) = "guild_application";
+  option(OptionPrimaryKey) = "guild_id,player_id";
+  option(OptionIndex) = "player_id;expire_ms";  // idx_guild_application_0 = 本人申请;idx_guild_application_1 = 过期清理
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 guild_id = 1;
+  uint64 player_id = 2;        // 申请人
+  uint64 apply_ms = 3;         // 最近一次申请(重复申请会刷新)的时刻
+  uint64 expire_ms = 4;        // apply_ms + GuildRule.application_expire_hours × 3600000
+  // 追加区:从 5 起(B2)。只存待审;通过、拒绝、撤销、过期都删行。
+}
+
+// ── 资产三表(B5a)────────────────────────────────────────────────
+// 完整定义出自 docs/design/guild-phase2/90-consistency.md 第 2 部分 §1(X-01:各节正文都只给了增量)。
+// guild 经通用资产通道(go/shared/assetop)向 scene 发"扣货币 / 发物品"指令:
+// guild_player_op_seq 发每个 (玩家, 流) 的序号,guild_asset_op 是指令账本(outbox),
+// guild_daily_counter 记每日 / 每周用量。三张表的列名被 go/shared/assetop 的 SQL 直接引用,改名前先查那边。
+//
+// 业务 SQL 一律绑定下面三个枚举的生成常量,不写数字字面量(`status = 1` 这类写法评审直接拒)。
+
+// 与 assetop.Status 语义一一映射;数值由本枚举定(1 基:0 留给"漏写状态列的行",它不会被当成未决行领走)。
+// guild.proto 的 GuildAssetOrderStatus 是它的客户端镜像,数值逐项相同,新增状态两边同加。
+enum GuildAssetOpStatus {
+  GUILD_ASSET_OP_STATUS_UNSPECIFIED = 0;
+  GUILD_ASSET_OP_STATUS_PENDING = 1;
+  GUILD_ASSET_OP_STATUS_APPLIED = 2;
+  GUILD_ASSET_OP_STATUS_REJECTED = 3;
+  GUILD_ASSET_OP_STATUS_ABORTED = 4;
+  GUILD_ASSET_OP_STATUS_APPLIED_PARTIAL = 5;  // 只终结:不做对侧账、不自动清理,转人工补偿(X-15)
+}
+
+enum GuildAssetOpKind {
+  GUILD_ASSET_OP_KIND_UNSPECIFIED = 0;
+  GUILD_ASSET_OP_KIND_DONATE = 1;           // 捐献:GUILD_DEBIT 流扣货币
+  GUILD_ASSET_OP_KIND_SHOP = 2;             // 商店:GUILD_CREDIT 流发物品
+  GUILD_ASSET_OP_KIND_ACTIVITY_REWARD = 3;  // 活动发奖(B6):GUILD_CREDIT 流
+  // 没有"捐献退款":用户决策 D2(README §3)——离帮 / 被踢 / 解散后已扣款的捐献照记给帮会、不退款。
+  // 90 清单原文里的 DONATE_REFUND = 4 随之作废,4 号未占用。
+}
+
+enum GuildDailyCounterKind {
+  GUILD_DAILY_COUNTER_KIND_UNSPECIFIED = 0;
+  GUILD_DAILY_COUNTER_KIND_DONATE = 1;
+  GUILD_DAILY_COUNTER_KIND_SHOP = 2;
+  GUILD_DAILY_COUNTER_KIND_ACTIVITY = 3;    // B6
+}
+
+message GuildPlayerOpSeqRecord {              // 锁序位置 5
+  option(OptionTableName) = "guild_player_op_seq";
+  option(OptionPrimaryKey) = "player_id,stream";
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 player_id = 1;
+  uint32 stream = 2;           // AssetOpStream 数值(本文件不 import asset_op.proto,避免库表定义依赖通道协议)
+  uint64 next_seq = 3;
+  uint64 updated_ms = 4;
+  uint64 epoch = 5;            // 建行毫秒,>0;库恢复手册显式抬高(04-asset-channel.md §4.31)
+  // 追加区:从 6 起。行由 assetop.EnsureSeqRow 在事务外 INSERT IGNORE 建,事务内只加锁读改。
+}
+
+message GuildAssetOpRecord {                  // 锁序位置 6
+  option(OptionTableName) = "guild_asset_op";
+  option(OptionPrimaryKey) = "op_id";
+  option(OptionUniqueKey) = "player_id,stream,stream_epoch,seq";  // 生成 uk_guild_asset_op;同一序号只可能有一条指令
+  // idx_guild_asset_op_0 = 到期领取 / 终态清理 / 回档前检查(B5d);
+  // idx_guild_asset_op_1 = 按帮查;
+  // idx_guild_asset_op_2 = AllocateSeq 对未决行加锁读、离帮提前截止、本人待结算列表(只扫未决行)。
+  // 索引名从 0 起编号,组只能追加到末尾、不得调序(见文件头改表纪律)。
+  option(OptionIndex) = "status,next_attempt_ms;guild_id,op_id;player_id,stream,stream_epoch,status,seq";
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 op_id = 1;              // data_service 号段 biz_tag=guild_asset_op;同时作资产通道的 correlation_id
+  uint64 player_id = 2;
+  uint32 stream = 3;             // AssetOpStream 数值
+  uint64 seq = 4;
+  uint64 guild_id = 5;           // 发起时绑定的帮会;结算一律记给它,不看结算时玩家在哪个帮(D2)
+  GuildAssetOpKind kind = 6;
+  GuildAssetOpStatus status = 7;
+  uint32 durable = 8;            // 0/1:scene 是否已确认落盘
+  uint32 attempts = 9;
+  uint64 next_attempt_ms = 10;   // 未决:下次重投时刻;终态:终结时刻(清理与回档检查按它判龄)
+  uint64 deadline_ms = 11;       // 只有 DONATE 非 0;到期改发中止。商店 / 活动发奖恒 0,永不中止
+  bytes payload = 12;            // AssetBundle 序列化字节
+  uint32 ref_id = 13;            // donate_id / goods_id / activity_id
+  uint32 ref_count = 14;         // 捐献恒 1;商店为份数
+  uint32 period_key = 15;        // 占用的计数行周期键(gameday.DayKey / WeekKey);0 = 未占计数行,退回时跳过
+  uint64 contribution_delta = 16;  // 捐献:应得帮贡;商店:已扣帮贡(永久拒绝时退回)
+  uint64 funds_delta = 17;       // 捐献:应记帮会资金
+  uint32 reason_tip_id = 18;     // 终态原因,只在终结时写一次(APPLIED / ABORTED 写 0)
+  uint64 created_ms = 19;
+  uint64 updated_ms = 20;
+  uint64 lease_until_ms = 21;    // 领取租约截止;0 = 未被领取
+  uint64 lease_token = 22;       // 领取令牌;Reschedule 须匹配,不匹配 = 租约已被别的副本接走
+  uint32 tx_type = 23;           // TransactionType 数值,重投时原样带上
+  uint32 last_outcome = 24;      // 最近一次 AssetOpOutcome(诊断)
+  uint32 last_reason = 25;       // 最近一次 scene 回的 reason:每次 Reschedule / Finalize 覆盖;PENDING 视图展示它;兼作部分发放粘性标记
+  uint64 stream_epoch = 26;      // = 分号时 guild_player_op_seq.epoch
+  string resolved_by = 27;       // 人工终结(assetopfix)写:操作人,代码侧限 ≤64
+  string resolve_reason = 28;    // 人工终结原因,代码侧限 ≤191
+  // 追加区:从 29 起。
+}
+
+message GuildDailyCounterRecord {             // 锁序位置 7
+  option(OptionTableName) = "guild_daily_counter";
+  option(OptionPrimaryKey) = "player_id,counter_kind,ref_id,period_key";
+  option(OptionIndex) = "period_key";  // idx_guild_daily_counter_0:过期清理按周期键范围删,否则全表扫
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 player_id = 1;
+  GuildDailyCounterKind counter_kind = 2;
+  uint32 ref_id = 3;           // donate_id / goods_id / activity_id
+  uint32 period_key = 4;       // gameday.DayKey(8 位)或 WeekKey(6 位);两个数值域不相交
+  uint32 used_count = 5;       // 含结算中的占用;REJECTED / ABORTED 时退回
+  uint64 updated_ms = 6;
+  // 追加区:从 7 起。计数一律用带上限的 upsert 改写,不得"锁不存在的行再插入"(X-13)。
+}
+
+// ── 帮会活动(B6a)────────────────────────────────────────────────
+// 设计:docs/design/guild-phase2/06-activities.md §6.5(表)、§6.11–§6.14(事务与解散)。
+// 周期口径(README §3 U1):个人次数不在本表,挂在 guild_daily_counter(counter_kind = ACTIVITY,按游戏日,
+// 换帮不重置);本表只记**帮会级**进度,按活动档期 —— 点灯阈值、团圆锁存、资金只发一次,都以这一行为准。
+//
+// 锁序位置 8:guild_daily_counter(7)之后,B6b 的 guild_trial_battle(9)/ guild_trial_reward_owed(10)之前。
+// 本表任一行的锁定者 / 写者都必须先持有同一 guild_id 的 guild 行锁(灯会、团圆、历练结算、解散的第一把锁都是它),
+// 本表的行因此在帮会粒度上被 guild 行串行。取锁序列与理由见 go/guild/internal/data/tables.go。
+//
+// 刻意没有二级索引:读写都是完整主键点操作或 guild_id 主键前缀(视图读、解散删)。v1 不清理旧期行
+// (每帮每天至多 3 行);v1.1 若按 period_key 清理需要加 OptionIndex = "period_key" —— schemamigrate 对已存在的表
+// 不补建普通索引(只告警),上线前要么定下来、要么开发期删库重建。
+message GuildActivityProgressRecord {         // 锁序位置 8
+  option(OptionTableName) = "guild_activity_progress";
+  option(OptionPrimaryKey) = "guild_id,activity_id,period_key";
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+
+  uint64 guild_id = 1;
+  uint32 activity_id = 2;            // GuildActivity.id
+  // 帮会期键 activity.GuildPeriodKey:灯会 / 团圆 = 档期 start_at_ms 当天的游戏日键(一届活动跨多天仍是同一行);
+  // start / end 都为 0 的常开行(仅开发)退化为当天游戏日键;历练 = 开战时的游戏日键(每日计资金胜场上限)。
+  uint32 period_key = 3;
+  uint32 progress_count = 4;         // 灯会:本档期点灯人次;历练:本游戏日已计资金胜场;团圆不用(恒 0)
+  uint64 threshold_reached_ms = 5;   // 0 = 未达;非 0 = 首次达成时刻。锁存:写一次后不再改,团圆据此跨游戏日仍可领
+  uint32 funds_granted = 6;          // 0/1:本期帮会资金已发。与阈值判定在同一把 guild 行锁下读改,保证只发一次
+  uint64 updated_ms = 7;
+  // 追加区:从 8 起。
+}

@@ -1,0 +1,13 @@
+syntax = "proto3";
+option java_package = "com.game.proto.common.constants";
+option java_multiple_files = true;
+option go_package = "common/constants";
+
+// gRPC operation type enum
+enum GrpcOperation {
+    READ = 0;         // Read operation
+    INIT = 1;         // Init operation
+    WRITE = 2;        // Write operation
+    WRITES_DONE = 3;  // Writes done
+    FINISH = 4;       // Operation finished
+}

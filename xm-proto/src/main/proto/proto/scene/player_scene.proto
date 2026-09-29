@@ -1,0 +1,110 @@
+syntax = "proto3";
+option java_package = "com.game.proto.scene";
+option java_multiple_files = true;
+option go_package = "scene";
+
+import "proto/db/proto_option.proto";
+import "proto/common/base/tip.proto";
+import "proto/common/base/empty.proto";
+import "proto/common/component/actor_comp.proto";
+import "proto/scene/scene_info.proto";
+
+option cc_generic_services = true;
+option (OptionFileDefaultNode) = NODE_SCENE;
+
+message EnterSceneC2SRequest
+{
+  SceneInfoComp scene_info = 1;
+}
+
+message EnterSceneC2SResponse
+{
+	TipInfoMessage error_message = 1;
+}
+
+message EnterSceneS2C
+{
+  SceneInfoComp scene_info = 1;
+}
+
+message SceneInfoS2C
+{
+  repeated SceneInfoComp scene_info = 1;
+}
+
+message SceneInfoRequest
+{
+}
+
+message SceneInfoResponse
+{
+  repeated SceneInfoComp scene_info = 1;
+}
+
+enum ActorType
+{
+	ACTOR_TYPE_NONE = 0;
+	ACTOR_TYPE_PLAYER = 1;
+	ACTOR_TYPE_NPC = 2;
+}
+
+message ActorCreateS2C
+{
+	uint64 entity = 1;
+	Transform transform = 2;
+	ActorType actor_type = 3;
+	uint64 guid = 4;
+	uint64 config_id = 5;
+	string appearance_id = 6; // 玩家稳定外观 ID；NPC 留空。
+	uint32 class_id = 7; // 旧玩家 appearance_id 为空时供客户端兼容。
+	uint32 gender = 8;
+}
+
+message ActorDestroyS2C
+{
+	uint64 entity = 1;
+}
+
+message ActorListCreateS2C
+{
+	repeated ActorCreateS2C actor_list = 1;
+}
+
+message ActorListDestroyS2C
+{
+	repeated uint64 entity = 1;
+}
+
+// 跨 zone 场景传送(docs/design/cross-zone-scene-travel.md CZ-7)。
+// 应答无错 = 已受理:scene 已冻结玩家并开始存盘,**不代表已到达**。
+//   到达   = 之后收到 msg 124 RedirectToGate,客户端按 RedirectFlow 连到目标 zone;
+//   未成   = 之后收到 SendTipToClient(kZoneTravel* tip),scene 已解冻,玩家留在原地。
+// 加在 SceneSceneClientPlayer 而不是 ScenePlayer:后者是 gate→scene 的内部服务,没有
+// OptionIsClientProtocolService,客户端包会在 gate 被当成非法包。
+message TravelToZoneRequest
+{
+	uint32 target_zone_id = 1;
+	uint32 scene_config_id = 2; // 目标地图;0 = 由目标 zone 的 scene_manager 按世界频道表挑默认大世界
+}
+
+message TravelToZoneResponse
+{
+	TipInfoMessage error_message = 1; // 同步拒绝码(CZ-6 校验不过);生成的 handler 头会调 mutable_error_message()
+}
+
+service SceneSceneClientPlayer
+{
+  option (OptionIsPlayerService) = true;
+  option (OptionIsClientProtocolService) = true;
+
+  rpc EnterScene (EnterSceneC2SRequest) returns (EnterSceneC2SResponse);
+  rpc NotifyEnterScene (EnterSceneS2C) returns (Empty);
+  rpc SceneInfoC2S (SceneInfoRequest) returns (Empty);
+  rpc NotifySceneInfo (SceneInfoS2C) returns (Empty);
+  rpc NotifyActorCreate (ActorCreateS2C) returns (Empty);
+  rpc NotifyActorDestroy (ActorDestroyS2C) returns (Empty);
+  rpc NotifyActorListCreate (ActorListCreateS2C) returns (Empty);
+  rpc NotifyActorListDestroy (ActorListDestroyS2C) returns (Empty);
+  // 只能追加在末尾:CallMethod 按 method index 分发,插到中间会让后面所有方法移位。
+  rpc TravelToZone (TravelToZoneRequest) returns (TravelToZoneResponse);
+}

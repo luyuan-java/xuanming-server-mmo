@@ -1,0 +1,11 @@
+syntax = "proto3";
+option java_package = "com.game.proto.common.component";
+option java_multiple_files = true;
+option go_package = "common/component";
+
+
+
+message GameNodePlayerInfoComp
+{
+  uint32 player_size = 1;
+}

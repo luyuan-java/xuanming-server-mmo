@@ -1,0 +1,50 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+
+
+enum common_error {
+  kCommon_errorOK = 0;
+
+  kSuccess = 1000;
+
+  kInvalidTableId = 1001;
+
+  kInvalidTableData = 1002;
+
+  kServiceUnavailable = 1003;
+
+  kEntityIsNull = 1004;
+
+  kInvalidParameter = 1005;
+
+  kFeatureUnavailable = 1006;
+
+  kIndexOutOfRange = 1007;
+
+  kRateLimitExceeded = 1008;
+
+  kThisEntityIsInvalid = 1009;
+
+  kMessageSizeExceeded = 1010;
+
+  kSessionNotFound = 1011;
+
+  kPlayerNotFoundInSession = 1012;
+
+  kMessageIdNotFound = 1013;
+
+  kRequestMessageParseError = 1014;
+
+  kArraySizeTooLargeInMessage = 1015;
+
+  kResponseMessageParseError = 1016;
+
+  kNegativeValueInMessage = 1017;
+
+  kFailedToRegisterTheNode = 1018;
+
+};

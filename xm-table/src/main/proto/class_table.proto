@@ -1,0 +1,25 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+option java_outer_classname = "ClassTableOuterClass";
+option java_multiple_files = true;
+
+
+message ClassTable {
+	uint32 id = 1;
+	repeated uint32 skill = 2;
+	uint64 init_health = 3;
+	uint64 init_mana = 4;
+	uint64 init_strength = 5;
+	uint64 init_armor = 6;
+	uint64 init_resistance = 7;
+	uint64 init_critchance = 8;
+	uint64 init_speed = 9;
+}
+
+message ClassTableData {
+	repeated ClassTable data = 1;
+}

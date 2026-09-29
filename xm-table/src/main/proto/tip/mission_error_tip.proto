@@ -1,0 +1,26 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+
+
+enum mission_error {
+  kMission_errorOK = 0;
+
+  kMissionTypeAlreadyExists = 5000;
+
+  kMissionAlreadyCompleted = 5001;
+
+  kMissionIdNotInRewardList = 5002;
+
+  kPlayerMissionComponentNotFound = 5003;
+
+  kMissionIdRepeated = 5004;
+
+  kConditionIdOutOfRange = 5005;
+
+  kMissionNotInProgress = 5006;
+
+};

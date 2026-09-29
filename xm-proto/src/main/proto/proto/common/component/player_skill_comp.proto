@@ -1,0 +1,15 @@
+syntax = "proto3";
+option java_package = "com.game.proto.common.component";
+option java_multiple_files = true;
+option go_package = "common/component";
+
+
+
+message PlayerSkillComp {
+  uint64 id = 1; 
+  uint32 skill_table_id = 2; 
+}
+
+message PlayerSkillListComp {
+  repeated PlayerSkillComp skill_list = 1;
+}

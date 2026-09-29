@@ -1,0 +1,15 @@
+syntax = "proto3";
+option java_package = "com.game.proto.common.event";
+option java_multiple_files = true;
+option go_package = "common/event";
+
+
+
+message OnConnect2Login
+{
+  uint64 entity = 1;
+}
+
+message OnServerStart
+{
+}

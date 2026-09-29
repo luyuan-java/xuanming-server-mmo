@@ -1,0 +1,13 @@
+syntax = "proto3";
+option java_package = "com.game.proto.common.constants";
+option java_multiple_files = true;
+option go_package = "common/constants";
+
+
+enum eFunctionSwitchBitType
+{
+	kFunctionSwitchTeam = 0;//
+	kFunctionSwitchFriends = 1;//
+};
+
+

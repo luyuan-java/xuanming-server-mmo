@@ -1,0 +1,18 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+
+
+enum bag {
+  kBagOK = 0;
+
+  kUseItem = 2;
+
+  kActivityRewardItem = 3;
+
+  kMissionRewardItem = 4;
+
+};

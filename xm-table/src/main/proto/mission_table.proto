@@ -1,0 +1,25 @@
+
+syntax = "proto3";
+
+option go_package = "generated/pb/table";
+
+option java_package = "com.game.table";
+option java_outer_classname = "MissionTableOuterClass";
+option java_multiple_files = true;
+
+
+message MissionTable {
+	uint32 id = 1;
+	repeated uint32 condition_id = 2;
+	uint32 mission_type = 3;
+	uint32 mission_sub_type = 4;
+	uint32 condition_order = 5;
+	uint32 auto_reward = 6;
+	uint32 reward_id = 7;
+	repeated uint32 next_mission_id = 8;
+	repeated uint32 target_count = 9;
+}
+
+message MissionTableData {
+	repeated MissionTable data = 1;
+}
