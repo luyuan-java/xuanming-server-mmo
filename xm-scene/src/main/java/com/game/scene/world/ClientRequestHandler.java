@@ -15,6 +15,9 @@ import com.game.proto.PlayerSkillListComp;
 import com.game.proto.EnterSceneC2SRequest;
 import com.game.proto.EnterSceneC2SResponse;
 import com.game.proto.ListSkillsResponse;
+import com.game.proto.MoveStartC2S;
+import com.game.proto.MoveStopC2S;
+import com.game.proto.MoveSyncC2S;
 import com.game.proto.ReleaseSkillRequest;
 import com.game.proto.ReleaseSkillResponse;
 import com.game.proto.SceneInfoComp;
@@ -36,7 +39,9 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>静默丢弃（不回包）：会话不在本节点或还在加载、player_id 与会话不符、消息号未知或不是 scene 的客户端服务、
  *       请求体解析失败；</li>
- *   <li>应答类型是 {@code Empty} 的方法（所有 Notify*、SceneInfoC2S）不回包；</li>
+ *   <li>应答类型是 {@code Empty} 的方法（所有 Notify*、SceneInfoC2S、移动三条上行）不回包；客户端发来的 S2C 方向方法号
+ *       （130 / 133 / 135 / 137 等）静默忽略；</li>
+ *   <li>通过会话与消息号校验的每条消息都刷新该玩家的活跃帧（挂机判定，见 {@link SceneWorld#touch}）；</li>
  *   <li>应答的 {@code message_id} 同请求、{@code id} 回显请求号；应答里的 {@code error_message} 总是带上
  *       （成功时 id=0，与基线线上形态一致）；</li>
  *   <li>首批未实现的方法回 {@code kFeatureUnavailable}(1006)，不断连、不抛异常。</li>
@@ -83,6 +88,7 @@ public final class ClientRequestHandler {
             return;
         }
         MessageMethod method = found.get();
+        world.touch(player);
         Message request;
         try {
             request = method.requestPrototype().getParserForType().parseFrom(forward.getBody());
@@ -93,7 +99,13 @@ public final class ClientRequestHandler {
 
         int messageId = method.messageId();
         long requestId = forward.getRequestId();
-        if (messageId == ids.listSkills()) {
+        if (messageId == ids.moveSync()) {
+            world.applyMove(player, MoveInput.of((MoveSyncC2S) request));
+        } else if (messageId == ids.moveStart()) {
+            world.applyMove(player, MoveInput.of((MoveStartC2S) request));
+        } else if (messageId == ids.moveStop()) {
+            world.applyMove(player, MoveInput.of((MoveStopC2S) request));
+        } else if (messageId == ids.listSkills()) {
             listSkills(player, messageId, requestId);
         } else if (messageId == ids.releaseSkill()) {
             releaseSkill(player, (ReleaseSkillRequest) request, messageId, requestId);
@@ -128,7 +140,7 @@ public final class ClientRequestHandler {
     /**
      * 84：技能不存在或未拥有回 {@code kInvalidTableId}(1001)。基线写的 1001 会被 TRANSFER_ERROR_MESSAGE 覆盖成空 tip
      * （契约文档 §7.5），Java 版如实回码；robot 对任何非空 error_message 都只记告警，不受影响。
-     * 成功时先向自己和视野内玩家广播 70，再回应答（与基线同序）。战斗结算（冷却、消耗、命中）首批不做。
+     * 成功时先向自己和看得见自己的玩家广播 70，再回应答（与基线同序）。战斗结算（冷却、消耗、命中）首批不做。
      */
     private void releaseSkill(ScenePlayer player, ReleaseSkillRequest request, int messageId, long requestId) {
         int skillTableId = request.getSkillTableId();
@@ -143,7 +155,7 @@ public final class ClientRequestHandler {
                     .setSkillTableId(skillTableId)
                     .setPosition(request.getPosition())
                     .build();
-            world.broadcastToSelfAndViewers(player, push(ids.notifySkillUsed(), used));
+            world.broadcastToSelfAndWatchers(player, push(ids.notifySkillUsed(), used));
         }
         world.sendTo(player, reply(messageId, requestId,
                 ReleaseSkillResponse.newBuilder().setErrorMessage(tip(tipId)).build()));

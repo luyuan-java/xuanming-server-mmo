@@ -1,17 +1,27 @@
 package com.game.scene.world;
 
-import com.game.proto.Transform;
+import com.game.proto.ActorBaseAttributesS2C;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorType;
+import com.game.proto.Rotation;
+import com.game.proto.Transform;
 import java.util.List;
 
 /**
  * 场景里的一个玩家（一次进场一个实例）。只在场景逻辑线程上读写。
  *
  * <p>{@code entity} 是场景内实体号（雪花号，恒非 0，一次进场内稳定），客户端用它做技能目标；
- * 它与 {@code playerId}（ActorCreateS2C.guid）不是一回事。
+ * 它与 {@code playerId}（ActorCreateS2C.guid、66 的 entity_id）不是一回事。
+ *
+ * <p>位置只能经所在 {@link Scene} 改（{@link Scene#relocate}），这样格子索引与视野刷新不会漏；
+ * 本类只保存状态，规则在 {@link SceneWorld}。
  */
 public final class ScenePlayer {
+
+    /** 66 的脏位：transform（location + rotation）。 */
+    static final int DIRTY_TRANSFORM = 1;
+    /** 66 的脏位：velocity。 */
+    static final int DIRTY_VELOCITY = 1 << 1;
 
     private final long playerId;
     private final long entity;
@@ -23,11 +33,19 @@ public final class ScenePlayer {
     private final int level;
     /** 拥有的技能（skill_table_id，保序）。首批不持久化技能，每次进场按配表发放，见 SceneWorld 注释。 */
     private final List<Integer> skills;
+    private final MoveGuard moveGuard;
     private Scene scene;
     private Vec3 position;
+    /** 最近一次移动上报的朝向；从没上报过为 null（66 的 transform 就不带 rotation，基线同）。 */
+    private Rotation rotation;
+    /** 当前速度（已截断到信任上限）；(0,0,0) 为静止。 */
+    private Vec3 velocity = Vec3.ORIGIN;
+    private int syncDirty;
+    /** 最近一次收到该玩家客户端消息时的帧号（挂机判定）。 */
+    private long lastActiveFrame;
 
     ScenePlayer(long playerId, long entity, SessionKey session, long ownerEpoch, int classId, int gender,
-                String appearanceId, int level, List<Integer> skills, Vec3 position) {
+                String appearanceId, int level, List<Integer> skills, Vec3 position, long nowNanos) {
         this.playerId = playerId;
         this.entity = entity;
         this.session = session;
@@ -38,6 +56,7 @@ public final class ScenePlayer {
         this.level = level;
         this.skills = List.copyOf(skills);
         this.position = position;
+        this.moveGuard = new MoveGuard(position, nowNanos);
     }
 
     public long playerId() {
@@ -88,12 +107,53 @@ public final class ScenePlayer {
         return position;
     }
 
+    public Vec3 velocity() {
+        return velocity;
+    }
+
+    Rotation rotation() {
+        return rotation;
+    }
+
+    MoveGuard moveGuard() {
+        return moveGuard;
+    }
+
+    long lastActiveFrame() {
+        return lastActiveFrame;
+    }
+
+    int syncDirty() {
+        return syncDirty;
+    }
+
     void setScene(Scene scene) {
         this.scene = scene;
     }
 
+    /** 只由 {@link Scene#relocate}（在场景内）或换场景时（不在任何场景里）调用。 */
     void setPosition(Vec3 position) {
         this.position = position;
+    }
+
+    void setRotation(Rotation rotation) {
+        this.rotation = rotation;
+    }
+
+    void setVelocity(Vec3 velocity) {
+        this.velocity = velocity;
+    }
+
+    void markActive(long frame) {
+        this.lastActiveFrame = frame;
+    }
+
+    void markDirty(int bits) {
+        syncDirty |= bits;
+    }
+
+    void clearDirty() {
+        syncDirty = 0;
     }
 
     /**
@@ -110,6 +170,30 @@ public final class ScenePlayer {
                 .setClassId(classId)
                 .setGender(gender)
                 .build();
+    }
+
+    /**
+     * 66 {@code ActorBaseAttributesS2C}：只写 {@code dirty} 指定的字段（契约文档 AOI §5.1）。
+     * <ul>
+     *   <li>{@code entity_id} 每条都带，取 player_id（guid 口径，不是场景实体号）——修基线缺口：基线移动触发的 66 不带它，
+     *       观察者无法归属；字段是加出来的，旧客户端忽略也不出错；</li>
+     *   <li>transform：location 总在，rotation 上报过才在（全零也写，线上为 {@code 12 00}），scale 从不写；</li>
+     *   <li>velocity：脏就写，<b>全零也写</b>（线上 {@code 1a 00}，表示「停了」）。</li>
+     * </ul>
+     */
+    ActorBaseAttributesS2C toBaseAttributes(int dirty) {
+        ActorBaseAttributesS2C.Builder builder = ActorBaseAttributesS2C.newBuilder().setEntityId(playerId);
+        if ((dirty & DIRTY_TRANSFORM) != 0) {
+            Transform.Builder transform = Transform.newBuilder().setLocation(position.toProto());
+            if (rotation != null) {
+                transform.setRotation(rotation);
+            }
+            builder.setTransform(transform);
+        }
+        if ((dirty & DIRTY_VELOCITY) != 0) {
+            builder.setVelocity(velocity.toVelocity());
+        }
+        return builder.build();
     }
 
     PlayerSave toSave() {

@@ -2,6 +2,8 @@ package com.game.gate.link;
 
 import com.game.api.proto.LinkHello;
 import com.game.api.proto.NodeLinkFrame;
+import com.game.gate.metrics.GateMetrics;
+import com.game.gate.metrics.GateMetrics.LinkDrop;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -28,6 +30,7 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
     private final LinkConnector connector;
     private final LinkSettings settings;
     private final BooleanSupplier newLinksAllowed;
+    private final GateMetrics metrics;
     private final ConcurrentHashMap<Integer, SceneLink> links = new ConcurrentHashMap<>();
     private final AtomicLong generations = new AtomicLong();
     private volatile SceneLinkListener listener;
@@ -38,18 +41,20 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
      *                        建链时刻的鉴权时间戳与 MAC，见 {@link LinkHellos}）；在链路 I/O 线程上调用，不得阻塞。
      *                        scene 回的 ack 必须与它同 zone
      * @param newLinksAllowed 现在能不能新建链路（节点号租约有效）；任意线程调用，不得阻塞
+     * @param metrics         链路指标（帧收发、丢帧、状态变化）
      */
     public SceneLinkManager(Supplier<LinkHello> hellos, LinkConnector connector, LinkSettings settings,
-                            BooleanSupplier newLinksAllowed) {
+                            BooleanSupplier newLinksAllowed, GateMetrics metrics) {
         this.hellos = hellos;
         this.connector = connector;
         this.settings = settings;
         this.newLinksAllowed = newLinksAllowed;
+        this.metrics = metrics;
     }
 
-    /** 总允许新建链路（测试用）。 */
+    /** 总允许新建链路、不记指标（测试用）。 */
     public SceneLinkManager(Supplier<LinkHello> hellos, LinkConnector connector, LinkSettings settings) {
-        this(hellos, connector, settings, () -> true);
+        this(hellos, connector, settings, () -> true, GateMetrics.noop());
     }
 
     /** 绑定事件监听器；必须在第一次 {@link #send} 之前调用，且只能调一次。 */
@@ -74,6 +79,7 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
             if (link == null) {
                 if (!newLinksAllowed.getAsBoolean()) {
                     log.warn("本 gate 节点号租约无效，不新建 scene 链路，丢弃一帧 node={} type={}", sceneNodeId, frame.getBodyCase());
+                    metrics.linkDropped(LinkDrop.LEASE_INVALID, 1);
                     return 0;
                 }
                 link = links.computeIfAbsent(sceneNodeId, id -> new SceneLink(id, generations.incrementAndGet(), this));
@@ -85,7 +91,13 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
             links.remove(sceneNodeId, link);
         }
         log.warn("scene 链路层不可用，丢弃一帧 node={} type={}", sceneNodeId, frame.getBodyCase());
+        metrics.linkDropped(LinkDrop.UNAVAILABLE, 1);
         return 0;
+    }
+
+    /** 当前链路数（建链中 + 就绪；指标用，弱一致）。 */
+    public int linkCount() {
+        return links.size();
     }
 
     /** 判死全部链路（进程退出时，在会话都关掉之后调用）。 */
@@ -120,5 +132,9 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
 
     SceneLinkListener listener() {
         return listener;
+    }
+
+    GateMetrics metrics() {
+        return metrics;
     }
 }

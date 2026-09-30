@@ -11,6 +11,8 @@ import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.ToClient;
+import com.game.gate.metrics.GateMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.time.Duration;
@@ -28,9 +30,12 @@ class SceneLinkTest {
 
     private final List<SceneLink> connects = new ArrayList<>();
     private final RecordingListener listener = new RecordingListener();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final GateMetrics metrics = new GateMetrics(meters);
 
     private SceneLinkManager manager(int maxQueued, LinkConnector connector) {
-        SceneLinkManager manager = new SceneLinkManager(() -> HELLO, connector, new LinkSettings(Duration.ZERO, maxQueued));
+        SceneLinkManager manager = new SceneLinkManager(() -> HELLO, connector, new LinkSettings(Duration.ZERO, maxQueued),
+                () -> true, metrics);
         manager.bindListener(listener);
         return manager;
     }
@@ -214,7 +219,7 @@ class SceneLinkTest {
     void 租约无效时不新建链路_发往没有活链路的节点返回0_已就绪的链路照常发() {
         AtomicBoolean leaseValid = new AtomicBoolean(true);
         SceneLinkManager manager = new SceneLinkManager(() -> HELLO, connects::add, new LinkSettings(Duration.ZERO, 100),
-                leaseValid::get);
+                leaseValid::get, metrics);
         manager.bindListener(listener);
         long gen = manager.send(NODE, enter(1));
         EmbeddedChannel ready = new EmbeddedChannel(new SceneLinkHandler(connects.get(0)));
@@ -228,13 +233,14 @@ class SceneLinkTest {
         assertThat(connects).hasSize(1);
         assertThat(manager.send(NODE, forward(1))).as("已就绪的链路照常发").isEqualTo(gen);
         assertThat(((NodeLinkFrame) ready.readOutbound()).hasClientForward()).isTrue();
+        assertThat(dropped("lease_invalid")).isEqualTo(1);
     }
 
     @Test
     void 建链途中租约失效_连上后不握手_排队的进场帧回报失败() {
         AtomicBoolean leaseValid = new AtomicBoolean(true);
         SceneLinkManager manager = new SceneLinkManager(() -> HELLO, connects::add, new LinkSettings(Duration.ZERO, 100),
-                leaseValid::get);
+                leaseValid::get, metrics);
         manager.bindListener(listener);
         long gen = manager.send(NODE, enter(7));
 
@@ -244,6 +250,65 @@ class SceneLinkTest {
         assertThat((Object) ch.readOutbound()).as("不发握手").isNull();
         assertThat(ch.isOpen()).isFalse();
         assertThat(listener.undeliverable).containsExactly(new Event(NODE, gen, 7));
+    }
+
+    // ---------------------------------------------------------------- 指标
+
+    @Test
+    void 指标_建链就绪断链与帧收发按类型计数() {
+        SceneLinkManager manager = manager();
+        manager.send(NODE, enter(1));
+        manager.send(NODE, forward(1));
+        assertThat(event("connecting")).isEqualTo(1);
+        assertThat(frames("out", "player_enter")).as("排队中不算发出").isZero();
+        assertThat(manager.linkCount()).isEqualTo(1);
+
+        EmbeddedChannel ch = new EmbeddedChannel(new SceneLinkHandler(connects.get(0)));
+        ch.writeInbound(ack(NODE, 1, true));
+        manager.send(NODE, leave(1));
+        ch.writeInbound(NodeLinkFrame.newBuilder().setToClient(ToClient.newBuilder().addSessionIds(1)).build());
+
+        assertThat(event("ready")).isEqualTo(1);
+        assertThat(frames("out", "hello")).isEqualTo(1);
+        assertThat(frames("out", "player_enter")).as("就绪时补发").isEqualTo(1);
+        assertThat(frames("out", "client_forward")).isEqualTo(1);
+        assertThat(frames("out", "player_leave")).isEqualTo(1);
+        assertThat(frames("in", "hello_ack")).isEqualTo(1);
+        assertThat(frames("in", "to_client")).isEqualTo(1);
+
+        ch.close();
+        assertThat(event("down")).isEqualTo(1);
+        assertThat(event("connect_failed")).isZero();
+        assertThat(manager.linkCount()).isZero();
+    }
+
+    @Test
+    void 指标_建链失败丢掉的排队帧与排队溢出() {
+        SceneLinkManager overflowing = manager(1, connects::add);
+        overflowing.send(NODE, forward(1));
+        overflowing.send(NODE, enter(9));
+        assertThat(dropped("queue_full")).isEqualTo(1);
+
+        SceneLinkManager failing = manager(100, link -> link.fail("连不上"));
+        failing.send(NODE + 1, enter(5));
+        assertThat(event("connect_failed")).isEqualTo(1);
+        assertThat(dropped("link_failed")).as("排队中的进场帧随建链失败丢弃").isEqualTo(1);
+
+        failing.close();
+        assertThat(failing.send(NODE + 1, enter(6))).isZero();
+        assertThat(dropped("unavailable")).isEqualTo(1);
+    }
+
+    private double frames(String direction, String type) {
+        return meters.get("xm.gate.link.frames").tag("direction", direction).tag("type", type).counter().count();
+    }
+
+    private double event(String event) {
+        return meters.get("xm.gate.link.events").tag("event", event).counter().count();
+    }
+
+    private double dropped(String reason) {
+        return meters.get("xm.gate.link.dropped").tag("reason", reason).counter().count();
     }
 
     // ---------------------------------------------------------------- 工具

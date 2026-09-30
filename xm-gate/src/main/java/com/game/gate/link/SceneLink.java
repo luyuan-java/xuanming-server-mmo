@@ -4,6 +4,8 @@ import com.game.api.proto.LinkHello;
 import com.game.api.proto.LinkHelloAck;
 import com.game.api.proto.NodeLinkFrame;
 import com.game.api.proto.PlayerEnter;
+import com.game.gate.metrics.GateMetrics.LinkDrop;
+import com.game.gate.metrics.GateMetrics.LinkEvent;
 import io.netty.channel.Channel;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -83,6 +85,7 @@ public final class SceneLink {
             if (state == State.READY) {
                 if (channel.isWritable()) {
                     channel.writeAndFlush(frame);
+                    manager.metrics().linkFrameOut(frame.getBodyCase());
                     return generation;
                 }
                 overWaterMark = true;
@@ -95,6 +98,7 @@ public final class SceneLink {
                     queue.add(frame);
                 } else {
                     log.warn("scene 链路未就绪且排队已满，丢弃一帧 node={} gen={} type={}", nodeId, generation, frame.getBodyCase());
+                    manager.metrics().linkDropped(LinkDrop.QUEUE_FULL, 1);
                     overflowed = frame.hasPlayerEnter() ? frame.getPlayerEnter() : null;
                 }
             }
@@ -106,6 +110,7 @@ public final class SceneLink {
         }
         if (startConnect) {
             log.info("开始建立 scene 链路 node={} gen={}", nodeId, generation);
+            manager.metrics().linkEvent(LinkEvent.CONNECTING);
             manager.connector().connect(this);
         }
         if (overflowed != null) {
@@ -135,6 +140,7 @@ public final class SceneLink {
             sentHello = hello;
         }
         ch.writeAndFlush(NodeLinkFrame.newBuilder().setHello(hello).build());
+        manager.metrics().linkFrameOut(NodeLinkFrame.BodyCase.HELLO);
         long timeoutMs = manager.settings().helloTimeout().toMillis();
         if (timeoutMs > 0) {
             ch.eventLoop().schedule(() -> {
@@ -147,6 +153,7 @@ public final class SceneLink {
 
     /** 链路上收到一帧（链路 I/O 线程）。 */
     void onFrame(NodeLinkFrame frame) {
+        manager.metrics().linkFrameIn(frame.getBodyCase());
         switch (frame.getBodyCase()) {
             case HELLO_ACK -> onHelloAck(frame.getHelloAck());
             case TO_CLIENT -> {
@@ -196,10 +203,12 @@ public final class SceneLink {
             flushed = queue.size();
             for (NodeLinkFrame queued : queue) {
                 channel.write(queued);
+                manager.metrics().linkFrameOut(queued.getBodyCase());
             }
             queue.clear();
             channel.flush();
         }
+        manager.metrics().linkEvent(LinkEvent.READY);
         log.info("scene 链路就绪 node={} gen={} instance={} 补发={}", nodeId, generation, ack.getSceneInstanceId(), flushed);
     }
 
@@ -207,6 +216,7 @@ public final class SceneLink {
     void fail(String reason) {
         List<PlayerEnter> undeliverable = new ArrayList<>();
         boolean wasReady;
+        int discarded;
         Channel ch;
         synchronized (this) {
             if (state == State.DEAD) {
@@ -219,10 +229,13 @@ public final class SceneLink {
                     undeliverable.add(queued.getPlayerEnter());
                 }
             }
+            discarded = queue.size();
             queue.clear();
             ch = channel;
             channel = null;
         }
+        manager.metrics().linkEvent(wasReady ? LinkEvent.DOWN : LinkEvent.CONNECT_FAILED);
+        manager.metrics().linkDropped(LinkDrop.LINK_FAILED, discarded);
         manager.onLinkDead(this);
         if (ch != null) {
             ch.close();

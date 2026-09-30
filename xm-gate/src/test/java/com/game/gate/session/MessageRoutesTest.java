@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
+import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -44,15 +45,30 @@ class MessageRoutesTest {
     @Test
     void 进场后的客户端消息路由到scene域() {
         int listSkills = registry.requireId("SceneSkillClientPlayer", "ListSkills");
-        assertThat(routes.clientRoute(listSkills)).isEqualTo(new MessageRoute(listSkills, ClientDispatcher.DOMAIN_SCENE));
+        assertThat(routes.clientRoute(listSkills)).isEqualTo(new MessageRoute(listSkills, ClientDispatcher.DOMAIN_SCENE,
+                true, "SceneSkillClientPlayer.ListSkills"));
     }
 
     @Test
     void Java版未接入的客户端服务路由到unsupported() {
-        int friendMessage = registry.all().stream()
+        MessageMethod friend = registry.all().stream()
                 .filter(m -> m.clientService() && m.serviceName().equals("ClientPlayerFriend"))
-                .findFirst().orElseThrow().messageId();
-        assertThat(routes.clientRoute(friendMessage)).isEqualTo(new MessageRoute(friendMessage, MessageRoutes.BACKEND_UNSUPPORTED));
+                .findFirst().orElseThrow();
+        MessageRoute route = routes.clientRoute(friend.messageId());
+        assertThat(route.domain()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
+        assertThat(route.method()).isEqualTo("ClientPlayerFriend." + friend.methodName());
+    }
+
+    @Test
+    void 指标用的方法名是服务点方法_只来自客户端白名单且互不相同() {
+        // method 是 xm.gate.client.requests 的标签：取值集合 = 客户端白名单，基数有界、不随公网流量增长。
+        List<String> methods = registry.all().stream()
+                .filter(MessageMethod::clientService)
+                .map(m -> routes.clientRoute(m.messageId()).method())
+                .toList();
+        assertThat(methods).doesNotHaveDuplicates().allMatch(name -> name.matches("\\w+\\.\\w+"));
+        assertThat(routes.clientRoute(registry.requireId("ClientPlayerLogin", "Login")).method())
+                .isEqualTo("ClientPlayerLogin.Login");
     }
 
     @Test

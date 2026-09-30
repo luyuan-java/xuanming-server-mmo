@@ -36,7 +36,8 @@ public interface MessageRoutes {
         Map<Integer, MessageRoute> table = new HashMap<>();
         for (MessageMethod method : registry.all()) {
             if (method.clientService()) {
-                table.put(method.messageId(), new MessageRoute(method.messageId(), backendOf(method), hasResponse(method)));
+                table.put(method.messageId(), new MessageRoute(method.messageId(), backendOf(method), hasResponse(method),
+                        method.serviceName() + "." + method.methodName()));
             }
         }
         Map<Integer, MessageRoute> frozen = Map.copyOf(table);

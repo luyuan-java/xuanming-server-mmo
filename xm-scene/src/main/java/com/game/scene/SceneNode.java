@@ -20,8 +20,10 @@ import com.game.scene.ownership.OwnerLeaseRenewer;
 import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.world.ClientRequestHandler;
+import com.game.scene.world.SceneClock;
 import com.game.scene.world.SceneMessageIds;
 import com.game.scene.world.SceneTables;
+import com.game.scene.world.SceneTicker;
 import com.game.scene.world.SceneWorld;
 import io.netty.channel.DefaultEventLoop;
 import io.netty.util.concurrent.DefaultThreadFactory;
@@ -35,6 +37,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,7 +53,8 @@ import org.springframework.context.SmartLifecycle;
  *
  * <p>线程：
  * <ul>
- *   <li>{@code scene-logic}（1 个 {@link DefaultEventLoop}）：唯一拥有场景 / 玩家 / 链路登记表的线程；</li>
+ *   <li>{@code scene-logic}（1 个 {@link DefaultEventLoop}）：唯一拥有场景 / 玩家 / 链路登记表的线程；
+ *       场景帧（20 FPS，{@link SceneTicker}）也以定时任务跑在它上面，与客户端消息串行，不需要锁；</li>
  *   <li>{@code scene-link-*}：Netty 链路 I/O，只做编解码与握手，事件投递到逻辑线程（每条链路有积压上限，见 NodeLinkHandler）；</li>
  *   <li>{@code scene-storage}：有界线程池，执行 MySQL 阻塞调用（加载、写回、释放、续约），结果投递回逻辑线程；</li>
  *   <li>{@code scene-sched}：节点号续租、节点目录发布、归属续约的调度（Redis I/O；MySQL 交给存储线程池）。</li>
@@ -87,6 +91,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile ThreadPoolExecutor storageExecutor;
     private volatile GateLinks links;
     private volatile SceneWorld world;
+    private volatile ScheduledFuture<?> frameTask;
     private volatile NodeLinkServer linkServer;
     private volatile SceneDirectoryPublisher publisher;
     private volatile OwnerLeaseRenewer leaseRenewer;
@@ -142,7 +147,8 @@ public class SceneNode implements SmartLifecycle {
         StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic);
 
         GateLinks gateLinks = new GateLinks();
-        SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId);
+        SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
+                SceneClock.SYSTEM);
         links = gateLinks;
         world = sceneWorld;
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables);
@@ -150,6 +156,10 @@ public class SceneNode implements SmartLifecycle {
             tables.worldSceneConfigIds().forEach(sceneWorld::createScene);
             return null;
         });
+        // 场景帧：固定周期触发，SceneTicker 按单调时钟补帧（每次最多 5 帧），帧内异常只记日志、不让定时任务停掉。
+        SceneTicker ticker = new SceneTicker(sceneWorld::step, SceneClock.SYSTEM::nanoTime);
+        long periodNanos = SceneTicker.STEP_NANOS;
+        frameTask = logicLoop.scheduleAtFixedRate(ticker, periodNanos, periodNanos, TimeUnit.NANOSECONDS);
 
         // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
         takeoverSubscriber = new OwnerTakeoverSubscriber(
@@ -231,6 +241,11 @@ public class SceneNode implements SmartLifecycle {
         }
         if (server != null) {
             server.closeLinks();
+        }
+        ScheduledFuture<?> frames = frameTask;
+        if (frames != null) {
+            // 停帧：写回之后不再外推（写回任务与帧同在逻辑线程上串行，取消只是省掉之后的空帧）。
+            frames.cancel(false);
         }
         SceneWorld w = world;
         GateLinks g = links;

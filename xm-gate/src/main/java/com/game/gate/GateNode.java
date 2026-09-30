@@ -14,6 +14,7 @@ import com.game.gate.link.LinkSettings;
 import com.game.gate.link.NettyLinkConnector;
 import com.game.gate.link.SceneLinkManager;
 import com.game.gate.link.SceneNodeResolver;
+import com.game.gate.metrics.GateMetrics;
 import com.game.gate.session.ClientDispatcher;
 import com.game.gate.session.ClientPipeline;
 import com.game.gate.session.GateIdentity;
@@ -79,6 +80,7 @@ public final class GateNode {
     private final int zoneId;
     private final String advertiseHost;
     private final Path tableDir;
+    private final GateMetrics metrics;
     private final String instanceId = UUID.randomUUID().toString();
     private final NodeDirectory<GateNodeInfo> gateDirectory;
 
@@ -100,9 +102,11 @@ public final class GateNode {
     /**
      * @param linkAuth gate → scene 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 scene 一致）
      * @param tableDir 配置表目录（只读 MessageLimiter 表做按消息号限频）
+     * @param metrics  gate 指标（会话层与链路层共用一份）
      */
     public GateNode(RedissonClient redis, MessageIdRegistry messageIdRegistry, GateTokens tokens, NodeLinkAuth linkAuth,
-                    ClientMessageService login, GateProperties properties, int zoneId, String advertiseHost, Path tableDir) {
+                    ClientMessageService login, GateProperties properties, int zoneId, String advertiseHost, Path tableDir,
+                    GateMetrics metrics) {
         this.redis = redis;
         this.messageIdRegistry = messageIdRegistry;
         this.tokens = tokens;
@@ -112,6 +116,7 @@ public final class GateNode {
         this.zoneId = zoneId;
         this.advertiseHost = advertiseHost;
         this.tableDir = tableDir;
+        this.metrics = metrics;
         this.gateDirectory = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
     }
 
@@ -151,15 +156,18 @@ public final class GateNode {
                 new LinkHellos(identity.nodeId(), instanceId, zoneId, heldLease.leaseEpoch(), linkAuth, InstantSource.system()),
                 new NettyLinkConnector(resolver, linkResolver, linkGroup, properties.linkConnectTimeout()),
                 new LinkSettings(properties.linkHelloTimeout(), properties.linkMaxQueuedFrames()),
-                heldLease::isValid);
+                heldLease::isValid, metrics);
 
         int tipMessageId = messageIdRegistry.requireId("SceneClientPlayerCommon", "SendTipToClient");
         MessageLimits messageLimits = TableMessageLimits.load(tableDir);
         ClientDispatcher dispatcher = new ClientDispatcher(identity, tokens, InstantSource.system(),
                 MessageRoutes.of(messageIdRegistry), tipMessageId, login, links, registry,
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
-                        messageLimits));
+                        messageLimits), metrics);
         links.bindListener(new SceneEventRouter(registry, dispatcher));
+        // 状态量由抓取线程读：会话表与链路表都是并发容器，size() 线程安全、不阻塞。
+        metrics.bindSessionCount(registry::size);
+        metrics.bindSceneLinkCount(links::linkCount);
 
         bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("gate-accept"));
         workerGroup = new NioEventLoopGroup(properties.workerThreads(), new DefaultThreadFactory("gate-io"));

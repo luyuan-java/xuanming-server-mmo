@@ -17,6 +17,7 @@ import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakePlayerRepository.Release;
 import com.game.scene.testing.FakeSceneTables;
+import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingSink;
 import com.game.scene.testing.RecordingSink.EnterResult;
 import com.game.scene.testing.RecordingSink.Kicked;
@@ -43,7 +44,7 @@ class SceneWorldTest {
         sink = new RecordingSink();
         repo = new FakePlayerRepository();
         AtomicLong ids = new AtomicLong(1000);
-        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, ids::incrementAndGet);
+        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, ids::incrementAndGet, new ManualClock());
         scene = world.createScene(1);
     }
 
@@ -59,6 +60,12 @@ class SceneWorldTest {
         assertThat(IDS.releaseSkill()).isEqualTo(84);
         assertThat(IDS.enterScene()).isEqualTo(63);
         assertThat(IDS.sceneInfoC2S()).isEqualTo(43);
+        assertThat(IDS.notifyActorListDestroy()).isEqualTo(64);
+        assertThat(IDS.syncBaseAttribute()).isEqualTo(66);
+        assertThat(IDS.moveStart()).isEqualTo(134);
+        assertThat(IDS.moveSync()).isEqualTo(132);
+        assertThat(IDS.moveStop()).isEqualTo(131);
+        assertThat(IDS.notifyMoveAck()).isEqualTo(137);
         assertThat(SceneWorld.KICKED_BY_ANOTHER).isEqualTo(KICKED);
     }
 

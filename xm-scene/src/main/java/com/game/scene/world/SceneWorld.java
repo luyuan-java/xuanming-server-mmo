@@ -5,11 +5,13 @@ import static com.game.scene.world.SceneMessageIds.push;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
-import com.game.proto.MessageContent;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorDestroyS2C;
 import com.game.proto.ActorListCreateS2C;
+import com.game.proto.ActorListDestroyS2C;
 import com.game.proto.EnterSceneS2C;
+import com.game.proto.MessageContent;
+import com.game.proto.MoveAckS2C;
 import com.game.scene.world.PlayerRepository.LoadResult;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
@@ -20,31 +22,42 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 场景节点上的全部场景与玩家状态，以及进场 / 离场 / 换场景的规则。
+ * 场景节点上的全部场景与玩家状态，以及进场 / 离场 / 换场景 / 移动 / 视野 / 属性同步的规则。
  *
- * <p><b>线程模型</b>：本类不加锁，所有方法只能在场景逻辑线程上调用（包括 {@link PlayerRepository#load} 的回调）。
- * 阻塞 I/O 全在 {@link PlayerRepository} 实现里，出站全经 {@link ClientSink}，所以本类可以脱离 Netty / MySQL 单测。
+ * <p><b>线程模型</b>：本类不加锁，所有方法只能在场景逻辑线程上调用（包括 {@link PlayerRepository#load} 的回调与
+ * {@link #step()}）。阻塞 I/O 全在 {@link PlayerRepository} 实现里，出站全经 {@link ClientSink}，时间经 {@link SceneClock}，
+ * 所以本类可以脱离 Netty / MySQL / 真实时钟单测。
  *
  * <p><b>进场下行顺序</b>（契约文档 {@code docs/reference/mmorpg-client-contract-scene.md} §3）：
- * 79 NotifyEnterScene → 21 NotifyActorCreate(自己) → 47 NotifyActorListCreate(视野内他人，非空才发)
- * → 给视野内他人补发 21(新进场者)，最后给 gate 回 {@code PlayerEnterResult}。与基线的两处差异是有意修复：
+ * 79 NotifyEnterScene → 21 NotifyActorCreate(自己) → 47 NotifyActorListCreate(进场者看得见的人，非空才发)
+ * → 给看得见进场者的人补发 21(新进场者)，最后给 gate 回 {@code PlayerEnterResult}。与基线的两处差异是有意修复：
  * 每次进场成功都发 79 / 21（基线同场景幂等早退不发）；老观察者会收到新进场者的 21（基线收不到）。
  * 进场失败只回 {@code PlayerEnterResult{tip=3023}}，给客户端的 23 由 gate 发（见 {@code failEnter}）。
  * 进场结果总是回显这次进场的 owner_epoch，gate 据此丢弃同一会话上更早一次进场的迟到结果。
  *
- * <p><b>视野</b>：同场景内三维距离不超过 {@link #VIEW_RADIUS}，逐人比较。首批没有移动，玩家数量小，
- * 不做格子 AOI；上移动同步时要换成格子索引。
+ * <p><b>视野</b>：每个场景一个 {@link ViewIndex}（均匀方格 + 双向兴趣列表，规则见该类）。进场 / 离场当场发 21 / 47 / 51；
+ * 移动带来的进出视野在帧里合并成每个观察者一条 47、一条 64。51、66、70 的收件人都是「看得见该玩家的人」，
+ * 所以客户端收到某实体的任何推送之前一定先收到过它的创建消息，收到销毁消息之后不会再收到它的推送。
+ *
+ * <p><b>移动</b>（契约文档 {@code mmorpg-client-contract-movement.md}）：134 / 132 / 131 在收到时当场裁决（{@link #applyMove}），
+ * 永不回包；只有裁决位置与上报位置水平偏差 &gt; 0.5 m 时给本人发 137。
+ *
+ * <p><b>帧</b>（{@link #step()}，20 FPS，由 {@link SceneTicker} 驱动）：外推（含挂机停推）→ 视野刷新并发 47 / 64 →
+ * 偶数帧属性同步（66）→ 帧号 +1。外推放在视野刷新之前，这一帧的 47 / 64 与随后的 66 用的是同一份位置
+ * （基线是视野 → 外推 → 同步，移动带来的 47 / 64 晚一帧；两种顺序都满足「47 先于 66、64 之后不再有 66」）。
  *
  * <p><b>归属</b>（xm-player-store 的 PlayerStore「归属协议」）：
  * <ul>
  *   <li>进场要求库里的 {@code owner_epoch} 等于 gate 带来的 epoch（login 进游戏时夺得），且不低于本节点上同一玩家
  *       现有实例的 epoch；</li>
- *   <li>玩家离开（主动 / 断线 / 链路断开 / 停服）一律「最终写回并释放」（{@link PlayerRepository#save}）；
+ *   <li>玩家离开（主动 / 断线 / 链路断开 / 停服）一律「最终写回并释放」（{@link PlayerRepository#save}），
+ *       写回的是离开这一刻的位置（外推在同一线程上，离开之后不会再推）；
  *       没进成的进场（失败、取消、链路断开时还在加载）只释放（{@link PlayerRepository#release}），
  *       否则那份归属要等租约过期才能再被夺取；</li>
  *   <li>login 发来接管请求（{@link #onTakeoverRequested}，别的会话要进这个角色）：持有该 epoch 的实例写回释放，
@@ -59,9 +72,6 @@ public final class SceneWorld {
 
     private static final Logger log = LoggerFactory.getLogger(SceneWorld.class);
 
-    /** 基线 {@code ViewRadius.radius = 10}（player_lifecycle.cpp InitPlayerFromAllData）。 */
-    public static final double VIEW_RADIUS = 10.0;
-
     private static final int ENTER_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
     /** 被别的会话接管 / 失去归属时推给旧会话的 tip（基线顶号同码，经 23 推送，本里程碑不发 34）。 */
     static final int KICKED_BY_ANOTHER = LoginErrorTip.login_error.kLoginBeKickByAnOtherAccount_VALUE;
@@ -72,21 +82,27 @@ public final class SceneWorld {
     private final PlayerRepository repository;
     /** 场景号与实体号的发号器（本节点的雪花），必须恒非 0。 */
     private final LongSupplier idGenerator;
+    private final SceneClock clock;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
     private final Map<SessionKey, ScenePlayer> playersBySession = new HashMap<>();
     /** 已收到 PlayerEnter、正在加载存档的会话。离开 / 断链时删掉即取消，加载回来发现不在就丢弃。 */
     private final Map<SessionKey, PendingEnter> pendingEnters = new HashMap<>();
+    /** 帧内视野变化的复用缓冲（只在 {@link #step()} 里用）。 */
+    private final ViewChanges viewChanges = new ViewChanges();
     private boolean acceptingEnters = true;
+    /** 已跑过的帧数（下一帧的帧号）。偶数帧做属性同步。 */
+    private long frame;
 
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
-                      LongSupplier idGenerator) {
+                      LongSupplier idGenerator, SceneClock clock) {
         this.tables = tables;
         this.ids = ids;
         this.sink = sink;
         this.repository = repository;
         this.idGenerator = idGenerator;
+        this.clock = clock;
     }
 
     // ------------------------------------------------------------------ 场景
@@ -246,7 +262,7 @@ public final class SceneWorld {
 
         ScenePlayer player = new ScenePlayer(playerId, nextId(), key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
-                resolveEnterPosition(scene.configId(), savedConfigId, savedPosition));
+                resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), clock.nanoTime());
         playersById.put(playerId, player);
         playersBySession.put(key, player);
         enterScene(player, scene);
@@ -266,23 +282,22 @@ public final class SceneWorld {
         return tables.spawnPoint(targetConfigId);
     }
 
+    /**
+     * 放进场景并当场发进场下行。基线进场落位会置 Transform 脏位、之后发一条不带 entity_id 的 66；
+     * 这里不置：21 / 47 已经带了位置，那条 66 对客户端没有新信息（scene 契约文档 §7.4「可以不发」）。
+     */
     private void enterScene(ScenePlayer player, Scene scene) {
         player.setScene(scene);
-        List<ScenePlayer> others = viewersOf(player);
-        scene.add(player);
+        player.markActive(frame);
+        ViewIndex.Entered entered = scene.add(player);
 
         ActorCreateS2C self = player.toActorCreate();
         sendTo(player, push(ids.notifyEnterScene(), EnterSceneS2C.newBuilder().setSceneInfo(scene.info()).build()));
         sendTo(player, push(ids.notifyActorCreate(), self));
-        if (others.isEmpty()) {
-            return;
+        if (!entered.seen().isEmpty()) {
+            sendTo(player, push(ids.notifyActorListCreate(), actorList(entered.seen())));
         }
-        ActorListCreateS2C.Builder list = ActorListCreateS2C.newBuilder();
-        for (ScenePlayer other : others) {
-            list.addActorList(other.toActorCreate());
-        }
-        sendTo(player, push(ids.notifyActorListCreate(), list.build()));
-        broadcast(others, push(ids.notifyActorCreate(), self));
+        broadcast(entered.seers(), push(ids.notifyActorCreate(), self));
     }
 
     /**
@@ -305,20 +320,152 @@ public final class SceneWorld {
 
     // ------------------------------------------------------------------ 换场景（本节点内）
 
-    /** 离开当前场景（旧视野收到 51）再进入目标场景（79 / 21 / 47 / 21）。换地图落到出生点，同图换线保留坐标。 */
+    /**
+     * 离开当前场景（看得见它的人收到 51）再进入目标场景（79 / 21 / 47 / 21）。换地图落到出生点，同图换线保留坐标。
+     * 换场景时停下（速度清零）并把位移校验的锚点移到落点：新场景里的人从 21 看到的是静止的它，客户端的下一条移动上行
+     * 会重新带上速度。
+     */
     void switchScene(ScenePlayer player, Scene target) {
         Scene from = player.scene();
         if (from == target) {
             return;
         }
-        List<ScenePlayer> oldViewers = viewersOf(player);
-        from.remove(player);
-        broadcast(oldViewers, destroyMessage(player));
-        if (target.configId() != from.configId()) {
-            player.setPosition(tables.spawnPoint(target.configId()));
-        }
+        broadcast(from.remove(player), destroyMessage(player));
+        Vec3 at = target.configId() != from.configId() ? tables.spawnPoint(target.configId()) : player.position();
+        player.setPosition(at);
+        player.setVelocity(Vec3.ORIGIN);
+        player.moveGuard().reset(at, clock.nanoTime());
         enterScene(player, target);
         log.info("玩家换场景 player={} {} -> {}", player.playerId(), from.sceneId(), target.sceneId());
+    }
+
+    // ------------------------------------------------------------------ 移动
+
+    /**
+     * 134 MoveStart / 132 MoveSync / 131 MoveStop（契约文档 movement §4.3）。应答是 {@code Empty}，任何情况都不回包。
+     * <ol>
+     *   <li>位置、朝向、速度有任何非有限值：整条静默丢弃，状态不变（基线不查，NaN 会进 Transform 并被广播）；</li>
+     *   <li>位置：经 {@link MoveGuard} 位移校验（Java 版比基线严：基线无导航网格时原样接受任何坐标），超额度就沿上报方向截断；</li>
+     *   <li>朝向：用请求里的 rotation 整体覆盖（请求没带就是全零，基线同）；</li>
+     *   <li>速度：MoveStart / MoveSync 按三维模长截断到 10 m/s，MoveStop 清零；Transform 与 Velocity 都置脏位
+     *       （即使值没变，基线同），下一个偶数帧的 66 带上；</li>
+     *   <li>裁决位置与上报位置水平偏差 &gt; 0.5 m：给本人发 137，{@code server_velocity} 填<b>处理完这条输入之后</b>的速度
+     *       （基线填的是之前的速度；客户端据此重演预测，处理后的才对，契约文档 §9 第 4 条）。</li>
+     * </ol>
+     * 位置变化在下一帧的视野刷新里重新判定进出视野。
+     */
+    void applyMove(ScenePlayer player, MoveInput input) {
+        if (!input.isFinite()) {
+            log.debug("移动输入含非有限值，丢弃 player={} input_seq={}", player.playerId(), input.inputSeq());
+            return;
+        }
+        Vec3 accepted = player.moveGuard().admit(input.location(), clock.nanoTime());
+        player.scene().relocate(player, accepted);
+        player.setRotation(input.rotation());
+        player.setVelocity(MovementRules.clampSpeed(input.velocity()));
+        player.markDirty(ScenePlayer.DIRTY_TRANSFORM | ScenePlayer.DIRTY_VELOCITY);
+        if (MovementRules.needsCorrection(accepted, input.location())) {
+            log.debug("移动纠偏 player={} input_seq={} 上报={} 裁决={}", player.playerId(), input.inputSeq(),
+                    input.location(), accepted);
+            sendTo(player, push(ids.notifyMoveAck(), MoveAckS2C.newBuilder()
+                    .setInputSeq(input.inputSeq())
+                    .setServerLocation(accepted.toLocation())
+                    .setServerVelocity(player.velocity().toVelocity())
+                    .setServerTimeMs(clock.epochMillis())
+                    .build()));
+        }
+    }
+
+    /** 收到该玩家的任一客户端消息：刷新活跃帧（挂机判定的唯一输入，基线 LastActiveFrameComp）。 */
+    void touch(ScenePlayer player) {
+        player.markActive(frame);
+    }
+
+    // ------------------------------------------------------------------ 帧
+
+    /**
+     * 跑一帧（固定步长 {@link MovementRules#STEP_SECONDS}）：外推 → 视野刷新（47 / 64）→ 偶数帧属性同步（66）→ 帧号 +1。
+     * 由 {@link SceneTicker} 在场景逻辑线程上调用。没有移动、没有脏字段时只是遍历一遍玩家，不分配。
+     */
+    public void step() {
+        for (Scene scene : scenes.values()) {
+            integrate(scene);
+            scene.refreshViews(viewChanges);
+            emitViewChanges();
+        }
+        if (frame % 2 == 0) {
+            for (Scene scene : scenes.values()) {
+                syncAttributes(scene);
+            }
+        }
+        frame++;
+    }
+
+    long frame() {
+        return frame;
+    }
+
+    /**
+     * 服务器外推（基线 MovementSystem）：速度非零的玩家 {@code location += velocity × 0.05}，置 Transform 脏位。
+     * 连续 {@link MovementRules#AFK_FRAMES} 帧没有任何客户端消息即停推（基线 AfkSystem）；停推时把速度清零并置脏位，
+     * 让看得见它的人收到一条「停了」的 66——基线停推但不清速度，观察者的客户端按旧速度一直外推下去。
+     * 没有导航网格，不做撞墙夹持（与基线无导航场景一致）。
+     */
+    private void integrate(Scene scene) {
+        for (ScenePlayer player : scene.players()) {
+            Vec3 velocity = player.velocity();
+            if (velocity.isOrigin()) {
+                continue;
+            }
+            if (frame - player.lastActiveFrame() >= MovementRules.AFK_FRAMES) {
+                player.setVelocity(Vec3.ORIGIN);
+                player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+                log.debug("玩家 {} 帧内无消息，停止外推 player={}", MovementRules.AFK_FRAMES, player.playerId());
+                continue;
+            }
+            scene.relocate(player, player.position().plusScaled(velocity, MovementRules.STEP_SECONDS));
+            player.markDirty(ScenePlayer.DIRTY_TRANSFORM);
+        }
+    }
+
+    /** 把本次视野刷新的变化发出去：每个观察者先一条 47（新看见的）、再一条 64（看不见了的），与基线同序。 */
+    private void emitViewChanges() {
+        if (viewChanges.isEmpty()) {
+            return;
+        }
+        viewChanges.forEach((watcher, delta) -> {
+            if (!delta.added().isEmpty()) {
+                sendTo(watcher, push(ids.notifyActorListCreate(), actorList(delta.added())));
+            }
+            if (!delta.removed().isEmpty()) {
+                ActorListDestroyS2C.Builder destroyed = ActorListDestroyS2C.newBuilder();
+                for (ScenePlayer target : delta.removed()) {
+                    destroyed.addEntity(target.entity());
+                }
+                sendTo(watcher, push(ids.notifyActorListDestroy(), destroyed.build()));
+            }
+        });
+        viewChanges.clear();
+    }
+
+    /**
+     * 属性同步（基线 ActorStateAttributeSyncSystem，偶数帧，每个玩家最多 10 Hz）：有脏字段的玩家把脏字段拼成一条 66，
+     * 序列化一次，发给看得见它的人（不含自己：自己的移动靠客户端预测 + 137 纠偏），发完清脏位。
+     * 没人看得见它时<b>保留</b>脏位，等第一次有人看见时把积压的字段一次发出（基线同）。
+     */
+    private void syncAttributes(Scene scene) {
+        for (ScenePlayer player : scene.players()) {
+            int dirty = player.syncDirty();
+            if (dirty == 0) {
+                continue;
+            }
+            Set<ScenePlayer> watchers = scene.watchers(player);
+            if (watchers.isEmpty()) {
+                continue;
+            }
+            broadcast(watchers, push(ids.syncBaseAttribute(), player.toBaseAttributes(dirty)));
+            player.clearDirty();
+        }
     }
 
     // ------------------------------------------------------------------ 离场
@@ -345,7 +492,7 @@ public final class SceneWorld {
         log.info("玩家离场 player={} session={} 主动={}", player.playerId(), key, leave.getVoluntary());
     }
 
-    /** gate 链路断开：取消这条链路上的进场（释放归属），移除其上全部玩家（视野内他人收到 51）并写回。幂等。 */
+    /** gate 链路断开：取消这条链路上的进场（释放归属），移除其上全部玩家（看得见它们的人收到 51）并写回。幂等。 */
     public void onLinkClosed(long linkId) {
         for (Iterator<PendingEnter> it = pendingEnters.values().iterator(); it.hasNext(); ) {
             PendingEnter pending = it.next();
@@ -418,12 +565,15 @@ public final class SceneWorld {
                 player.ownerEpoch(), reason);
     }
 
+    /**
+     * 移出场景（看得见它的人收到 51，离开者什么也收不到）并按需写回。写回的坐标就是此刻的位置：
+     * 外推与写回在同一线程上，移除之后这个实例不会再被推（基线要先 StopMotionForExit 清速度，这里不需要）。
+     */
     private void removePlayer(ScenePlayer player, boolean save) {
-        List<ScenePlayer> viewers = viewersOf(player);
-        player.scene().remove(player);
+        List<ScenePlayer> watchers = player.scene().remove(player);
         playersById.remove(player.playerId(), player);
         playersBySession.remove(player.session(), player);
-        broadcast(viewers, destroyMessage(player));
+        broadcast(watchers, destroyMessage(player));
         if (save) {
             repository.save(player.toSave());
         }
@@ -442,7 +592,7 @@ public final class SceneWorld {
 
     /**
      * 停服：拒绝新进场、取消加载中的进场（释放归属）、把在场玩家全部写回并释放、清空（不再给客户端发消息）。
-     * 返回写回人数。
+     * 返回写回人数。之后 {@link #step()} 没有玩家可推，是空操作。
      */
     public int shutdown() {
         acceptingEnters = false;
@@ -466,26 +616,19 @@ public final class SceneWorld {
         return playersBySession.get(key);
     }
 
-    /** 同场景内、视野半径内的其他玩家，按进场顺序。 */
-    List<ScenePlayer> viewersOf(ScenePlayer player) {
-        List<ScenePlayer> viewers = new ArrayList<>();
-        for (ScenePlayer other : player.scene().players()) {
-            if (other != player && other.position().within(player.position(), VIEW_RADIUS)) {
-                viewers.add(other);
-            }
-        }
-        return viewers;
-    }
-
     void sendTo(ScenePlayer player, MessageContent content) {
         sink.send(player.session().linkId(), List.of(player.session().sessionId()), content);
     }
 
-    /** 发给自己和视野内他人（基线 BroadcastMessageToVisiblePlayers 的收件人包括施法者自己）。 */
-    void broadcastToSelfAndViewers(ScenePlayer player, MessageContent content) {
-        List<ScenePlayer> recipients = new ArrayList<>();
+    /**
+     * 发给自己和看得见自己的人（70 SkillUsed）。基线的收件人不含施法者本人，Java 版现有行为含本人
+     * （契约文档 AOI §7 第 8 条；改之前要到客户端仓库核对是否会重复播放），这里只把「视野内」换成兴趣列表。
+     */
+    void broadcastToSelfAndWatchers(ScenePlayer player, MessageContent content) {
+        Set<ScenePlayer> watchers = player.scene().watchers(player);
+        List<ScenePlayer> recipients = new ArrayList<>(watchers.size() + 1);
         recipients.add(player);
-        recipients.addAll(viewersOf(player));
+        recipients.addAll(watchers);
         broadcast(recipients, content);
     }
 
@@ -500,6 +643,14 @@ public final class SceneWorld {
                     .add(recipient.session().sessionId());
         }
         sessionsByLink.forEach((linkId, sessionIds) -> sink.send(linkId, sessionIds, content));
+    }
+
+    private static ActorListCreateS2C actorList(Collection<ScenePlayer> actors) {
+        ActorListCreateS2C.Builder list = ActorListCreateS2C.newBuilder();
+        for (ScenePlayer actor : actors) {
+            list.addActorList(actor.toActorCreate());
+        }
+        return list.build();
     }
 
     private long nextId() {

@@ -3,6 +3,7 @@ package com.game.gate.session;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.common.token.GateTokens;
+import com.game.gate.metrics.GateMetrics;
 import com.game.net.client.ClientFrames;
 import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
@@ -12,6 +13,7 @@ import com.game.proto.MessageContent;
 import com.game.proto.TipInfoMessage;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -36,10 +38,11 @@ class ClientPipelineTest {
 
     private final GateTokens tokens = GateTokens.ofUtf8("pipeline-secret");
     private final SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final ClientDispatcher dispatcher = new ClientDispatcher(
             new GateIdentity(GATE_NODE, "gate-uuid", 1), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
             id -> id == 77 ? new MessageRoute(id, "scene") : null, 23, new FakeLogin(), new FakeLinks(), registry,
-            new GateLimits(8, 50, Duration.ZERO));
+            new GateLimits(8, 50, Duration.ZERO), new GateMetrics(meters));
 
     @Test
     void robot写法的握手帧通过_下发帧名是全名加零结尾() throws Exception {
@@ -85,6 +88,8 @@ class ClientPipelineTest {
         assertThat((Object) ch.readOutbound()).isNull();
         assertThat(ch.isOpen()).isFalse();
         assertThat(registry.size()).isZero();
+        assertThat(meters.get("xm.gate.client.invalid.frames").tag("reason", "unknown_type").counter().count()).isEqualTo(1);
+        assertThat(meters.get("xm.gate.disconnects").tag("reason", "invalid_frame").counter().count()).isEqualTo(1);
     }
 
     // ---------------------------------------------------------------- 工具

@@ -14,6 +14,7 @@ import com.game.proto.ListSkillsRequest;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
+import com.game.scene.testing.ManualClock;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.Scene;
 import com.game.scene.world.SceneWorld;
@@ -46,7 +47,7 @@ class SceneLinkServiceTest {
         GateLinks links = new GateLinks();
         FakeSceneTables tables = new FakeSceneTables();
         AtomicLong ids = new AtomicLong(9000);
-        world = new SceneWorld(tables, Contracts.IDS, links, repo, ids::incrementAndGet);
+        world = new SceneWorld(tables, Contracts.IDS, links, repo, ids::incrementAndGet, new ManualClock());
         scene = world.createScene(1);
         ClientRequestHandler requests = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, tables);
         service = new SceneLinkService(IDENTITY, links, world, requests);

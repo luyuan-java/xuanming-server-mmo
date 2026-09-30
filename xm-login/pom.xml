@@ -52,6 +52,25 @@
             <groupId>com.game</groupId>
             <artifactId>xm-player-store</artifactId>
         </dependency>
+        <!-- 可观测性（architecture.md §11）：业务入口是 Dubbo；这里的 Tomcat 只挂 actuator 管理端点（health / prometheus），
+             端口与绑定地址见 application.yaml 的 server.*。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

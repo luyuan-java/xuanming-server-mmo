@@ -1,5 +1,6 @@
 package com.game.gate.session;
 
+import com.game.gate.metrics.GateMetrics.DisconnectReason;
 import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
 import io.netty.channel.ChannelHandlerContext;
@@ -32,6 +33,7 @@ public final class ClientChannelHandler extends ChannelInboundHandlerAdapter {
         session = registry.open(ctx.channel(), peerIp(ctx.channel().remoteAddress()));
         if (session == null) {
             log.warn("会话号已耗尽，拒绝新连接 peer={}", ctx.channel().remoteAddress());
+            dispatcher.metrics().disconnected(DisconnectReason.SESSION_ID_EXHAUSTED);
             ctx.close();
             return;
         }
@@ -68,6 +70,9 @@ public final class ClientChannelHandler extends ChannelInboundHandlerAdapter {
         if (!ctx.channel().isWritable()) {
             log.warn("客户端写缓冲超过高水位，断开 session={} peer={}",
                     session == null ? "-" : Integer.toUnsignedString(session.sessionId()), ctx.channel().remoteAddress());
+            if (ctx.channel().isActive()) {
+                dispatcher.metrics().disconnected(DisconnectReason.WRITE_BUFFER_FULL);
+            }
             ctx.close();
         }
         ctx.fireChannelWritabilityChanged();

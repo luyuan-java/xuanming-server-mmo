@@ -19,6 +19,7 @@ import com.game.api.proto.SessionDirective;
 import com.game.api.proto.ToClient;
 import com.game.api.proto.UnbindPlayer;
 import com.game.common.token.GateTokens;
+import com.game.gate.metrics.GateMetrics;
 import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
@@ -26,6 +27,8 @@ import com.game.proto.GateTokenPayload;
 import com.game.proto.MessageContent;
 import com.game.proto.TipInfoMessage;
 import com.google.protobuf.ByteString;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.time.Duration;
 import java.time.Instant;
@@ -62,9 +65,11 @@ class ClientDispatcherTest {
     private final FakeLogin login = new FakeLogin();
     private final FakeLinks links = new FakeLinks();
     private final SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final GateMetrics metrics = new GateMetrics(meters);
     private final ClientDispatcher dispatcher = new ClientDispatcher(
             new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
-            ROUTES, TIP_MSG, login, links, registry, new GateLimits(4, 3, Duration.ZERO));
+            ROUTES, TIP_MSG, login, links, registry, new GateLimits(4, 3, Duration.ZERO), metrics);
     private final SceneEventRouter router = new SceneEventRouter(registry, dispatcher);
 
     // ================================================================ 握手
@@ -808,7 +813,7 @@ class ClientDispatcherTest {
                 InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES, TIP_MSG, login, links, registry,
                 new GateLimits(16, 3, Duration.ZERO,
                         MessageLimits.of(Map.of(SCENE_MSG, new MessageLimit(2, Duration.ofSeconds(1))))),
-                nanos::get);
+                metrics, nanos::get);
         EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, limited));
         ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
         ch.readOutbound();
@@ -838,6 +843,98 @@ class ClientDispatcherTest {
         assertThat(ch.isOpen()).isTrue();
         ch.writeInbound(request(8, SCENE_MSG, "g"));
         assertThat(ch.isOpen()).isFalse();
+
+        assertThat(requests("scene", SCENE_MSG, "rate_limited")).isEqualTo(3);
+        assertThat(requests("scene", SCENE_MSG, "forwarded")).isEqualTo(4);
+        assertThat(disconnects("illegal_packets")).isEqualTo(1);
+    }
+
+    // ================================================================ 指标
+
+    @Test
+    void 指标_握手结果与主动断开原因() {
+        verified();
+        EmbeddedChannel rejected = connect();
+        rejected.writeInbound(verifyRequest(GATE_NODE + 1, NOW + 600));
+        EmbeddedChannel noHandshake = connect();
+        noHandshake.writeInbound(request(1, LOGIN_MSG, "x"));
+
+        assertThat(handshakes("ok")).isEqualTo(1);
+        assertThat(handshakes("wrong_gate")).isEqualTo(1);
+        assertThat(handshakes("missing")).isEqualTo(1);
+        assertThat(disconnects("handshake_rejected")).isEqualTo(1);
+        assertThat(disconnects("no_handshake")).isEqualTo(1);
+        assertThat(requests("login", LOGIN_MSG, "forwarded")).as("没握手的请求不算客户端请求").isZero();
+    }
+
+    @Test
+    void 指标_请求按路由与方法计去向_login调用计耗时() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, 99_999, "x"));
+        ch.writeInbound(request(2, GUILD_MSG, "x"));
+        ch.writeInbound(request(3, SCENE_MSG, "x"));
+        ch.writeInbound(request(4, LOGIN_MSG, "x"));
+        login.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        ch.writeInbound(request(5, LOGIN_MSG, "x"));
+        login.fail(new IllegalStateException("超时"));
+        ch.runPendingTasks();
+
+        assertThat(meters.get("xm.gate.client.requests").tag("route", "unknown").tag("method", "unknown")
+                .tag("result", "unknown_message").counter().count()).isEqualTo(1);
+        assertThat(requests("guild", GUILD_MSG, "unsupported")).isEqualTo(1);
+        assertThat(requests("scene", SCENE_MSG, "not_in_scene")).isEqualTo(1);
+        assertThat(requests("login", LOGIN_MSG, "forwarded")).isEqualTo(2);
+        assertThat(loginCalls("handle", "ok")).isEqualTo(1);
+        assertThat(loginCalls("handle", "error")).isEqualTo(1);
+    }
+
+    @Test
+    void 指标_断线时排队中的请求计dropped_会话结束通知计login调用() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, LOGIN_MSG, "a"));
+        ch.writeInbound(request(2, LOGIN_MSG, "b"));
+        ch.writeInbound(request(3, LOGIN_MSG, "c"));
+
+        ch.close();
+        login.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+
+        assertThat(requests("login", LOGIN_MSG, "forwarded")).isEqualTo(1);
+        assertThat(requests("login", LOGIN_MSG, "dropped")).isEqualTo(2);
+        assertThat(loginCalls("sessionClosed", "ok")).isEqualTo(1);
+    }
+
+    @Test
+    void 指标_被踢计一次主动断开() {
+        EmbeddedChannel ch = loggedInAndEntered();
+        router.onPlayerKicked(SCENE_NODE, links.generation, PlayerKicked.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setOwnerEpoch(5).setTipId(2017).build());
+        ch.runPendingTasks();
+
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(disconnects("kicked")).isEqualTo(1);
+        assertThat(disconnects("scene_link_down")).isZero();
+    }
+
+    private double handshakes(String result) {
+        return meters.get("xm.gate.handshakes").tag("result", result).counter().count();
+    }
+
+    private double disconnects(String reason) {
+        return meters.get("xm.gate.disconnects").tag("reason", reason).counter().count();
+    }
+
+    /** 测试路由的方法名缺省是消息号本身（见 {@link MessageRoute}）；没出现过的组合计 0。 */
+    private double requests(String route, int messageId, String result) {
+        Counter counter = meters.find("xm.gate.client.requests").tag("route", route)
+                .tag("method", Integer.toString(messageId)).tag("result", result).counter();
+        return counter == null ? 0 : counter.count();
+    }
+
+    private double loginCalls(String method, String result) {
+        return meters.get("xm.gate.backend.calls").tag("backend", "login").tag("method", method).tag("result", result)
+                .timer().count();
     }
 
     // ================================================================ 工具

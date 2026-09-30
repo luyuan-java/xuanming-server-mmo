@@ -6,6 +6,8 @@ import com.game.common.token.DubboCallAuth;
 import com.game.common.token.GateTokens;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
+import com.game.gate.metrics.GateMetrics;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.apache.dubbo.config.spring.ReferenceBean;
@@ -58,16 +60,22 @@ public class GateConfiguration {
         return new ReferenceBean<>();
     }
 
+    /** gate 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
+    @Bean
+    public GateMetrics gateMetrics(MeterRegistry meterRegistry) {
+        return new GateMetrics(meterRegistry);
+    }
+
     /**
      * @param tableDir 配置表目录（只读 MessageLimiter 表做按消息号限频），相对进程工作目录；从别处启动时用 XM_TABLE_DIR 覆盖
      */
     @Bean
     public GateNode gateNode(RedissonClient redis, MessageIdRegistry messageIdRegistry, GateTokens gateTokens,
                              NodeLinkAuth nodeLinkAuth, ClientMessageService loginClientMessageService,
-                             GateProperties properties, @Value("${xm.zone-id:1}") int zoneId,
+                             GateProperties properties, GateMetrics gateMetrics, @Value("${xm.zone-id:1}") int zoneId,
                              @Value("${xm.advertise-host:127.0.0.1}") String advertiseHost,
                              @Value("${xm.table-dir:config-data/tables}") String tableDir) {
         return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService, properties,
-                zoneId, advertiseHost, Path.of(tableDir));
+                zoneId, advertiseHost, Path.of(tableDir), gateMetrics);
     }
 }

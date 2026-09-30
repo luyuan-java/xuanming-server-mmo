@@ -26,6 +26,7 @@ import com.game.proto.SkillUsedS2C;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
+import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingSink;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -53,7 +54,7 @@ class ClientRequestHandlerTest {
         repo = new FakePlayerRepository();
         AtomicLong ids = new AtomicLong(5000);
         FakeSceneTables tables = new FakeSceneTables();
-        world = new SceneWorld(tables, IDS, sink, repo, ids::incrementAndGet);
+        world = new SceneWorld(tables, IDS, sink, repo, ids::incrementAndGet, new ManualClock());
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, tables);
         scene1 = world.createScene(1);
         scene2 = world.createScene(2);

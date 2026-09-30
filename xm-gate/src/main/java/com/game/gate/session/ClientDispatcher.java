@@ -17,6 +17,11 @@ import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
 import com.game.common.token.GateTokens;
 import com.game.gate.link.SceneLinks;
+import com.game.gate.metrics.GateMetrics;
+import com.game.gate.metrics.GateMetrics.DisconnectReason;
+import com.game.gate.metrics.GateMetrics.HandshakeResult;
+import com.game.gate.metrics.GateMetrics.LoginCall;
+import com.game.gate.metrics.GateMetrics.RequestResult;
 import com.game.gate.session.ClientSession.PendingRequest;
 import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
@@ -25,6 +30,7 @@ import com.game.proto.MessageContent;
 import com.game.proto.TipInfoMessage;
 import com.game.table.CommonErrorTip;
 import com.game.table.SceneErrorTip;
+import io.micrometer.core.instrument.Timer;
 import java.time.InstantSource;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -81,21 +87,24 @@ public final class ClientDispatcher {
     private final SceneLinks links;
     private final SessionRegistry registry;
     private final GateLimits limits;
+    private final GateMetrics metrics;
     private final AtomicLong securityRejections = new AtomicLong();
 
     /**
      * @param tipMessageId 服务端推 tip 用的消息号（{@code SceneClientPlayerCommon.SendTipToClient}，现为 23）
      * @param login        login 后端（Dubbo group {@code login}）
+     * @param metrics      会话层指标（握手、请求去向、主动断开、login 调用耗时）
      */
     public ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
-                            ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits) {
-        this(identity, tokens, clock, routes, tipMessageId, login, links, registry, limits, System::nanoTime);
+                            ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
+                            GateMetrics metrics) {
+        this(identity, tokens, clock, routes, tipMessageId, login, links, registry, limits, metrics, System::nanoTime);
     }
 
     /** 同上；限频用的单调时钟可注入（测试用）。 */
     ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                      ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
-                     LongSupplier nanoClock) {
+                     GateMetrics metrics, LongSupplier nanoClock) {
         this.identity = identity;
         this.tokens = tokens;
         this.clock = clock;
@@ -105,7 +114,13 @@ public final class ClientDispatcher {
         this.links = links;
         this.registry = registry;
         this.limits = limits;
+        this.metrics = metrics;
         this.nanoClock = nanoClock;
+    }
+
+    /** 同一会话层的指标（{@link ClientChannelHandler} / {@link ClientPipeline} 的连接级事件也记在这里）。 */
+    GateMetrics metrics() {
+        return metrics;
     }
 
     // ================================================================ 连接生命周期
@@ -114,6 +129,10 @@ public final class ClientDispatcher {
         s.scheduleHandshakeTimeout(limits.handshakeTimeout(), () -> {
             if (!s.verified && !s.closed) {
                 logRejection("handshake_timeout", s);
+                if (!s.closing) {
+                    metrics.handshake(HandshakeResult.TIMEOUT);
+                    metrics.disconnected(DisconnectReason.HANDSHAKE_TIMEOUT);
+                }
                 closeNow(s);
             }
         });
@@ -132,6 +151,8 @@ public final class ClientDispatcher {
                 identity.nodeId(), identity.zoneId(), clock.instant().getEpochSecond());
         if (!verdict.ok()) {
             logRejection("token_" + verdict.failure(), s);
+            metrics.handshake(HandshakeResult.of(verdict.failure()));
+            metrics.disconnected(DisconnectReason.HANDSHAKE_REJECTED);
             s.closing = true;
             s.cancelHandshakeTimeout();
             s.sendThenClose(ClientTokenVerifyResponse.newBuilder()
@@ -142,26 +163,34 @@ public final class ClientDispatcher {
         }
         s.verified = true;
         s.cancelHandshakeTimeout();
+        metrics.handshake(HandshakeResult.OK);
         s.send(VERIFY_OK);
     }
 
     public void onRequest(ClientSession s, ClientRequest request) {
         if (s.closing || s.closed) {
+            if (s.verified) {
+                countRequest(routes.clientRoute(request.getMessageId()), RequestResult.DROPPED);
+            }
             return;
         }
         if (!s.verified) {
             // 断线自动重连的 robot 会在未握手的新连接上直接发业务包（robot 契约 §7.3）：拒绝并断开，不回包。
             logRejection("request_before_token_verify", s);
+            metrics.handshake(HandshakeResult.MISSING);
+            metrics.disconnected(DisconnectReason.NO_HANDSHAKE);
             closeNow(s);
             return;
         }
         MessageRoute route = routes.clientRoute(request.getMessageId());
         if (route == null) {
+            countRequest(null, RequestResult.UNKNOWN_MESSAGE);
             registerIllegal(s, "unknown_message_id", request.getMessageId());
             return;
         }
         if (request.getSerializedSize() > MAX_REQUEST_BYTES) {
             s.send(envelopeError(request, TIP_MESSAGE_SIZE_EXCEEDED));
+            countRequest(route, RequestResult.OVERSIZED);
             registerIllegal(s, "oversized", request.getMessageId());
             return;
         }
@@ -169,12 +198,15 @@ public final class ClientDispatcher {
                 nanoClock.getAsLong())) {
             // C++ CheckMessageLimit 同形：信封错误 1008，计非法包（持续超频的连接到阈值被断开），不转发。
             s.send(envelopeError(request, TIP_RATE_LIMIT_EXCEEDED));
+            countRequest(route, RequestResult.RATE_LIMITED);
             registerIllegal(s, "rate_limited", request.getMessageId());
             return;
         }
         if (s.pending.size() >= limits.maxPendingRequests()) {
             log.warn("会话待处理请求超限，断开 session={} pending={} message_id={}",
                     sid(s), s.pending.size(), request.getMessageId());
+            countRequest(route, RequestResult.OVERFLOW);
+            metrics.disconnected(DisconnectReason.PENDING_OVERFLOW);
             closeNow(s);
             return;
         }
@@ -190,7 +222,7 @@ public final class ClientDispatcher {
         s.closed = true;
         s.closing = true;
         s.cancelHandshakeTimeout();
-        s.pending.clear();
+        discardPending(s);
         leaveScene(s, false);
         if (s.inFlight) {
             // 等在途的 login 调用完成后再通知 login（见 onLoginCompleted），否则 login 可能先收到断线、后处理完进游戏。
@@ -213,11 +245,15 @@ public final class ClientDispatcher {
 
     private void dispatch(ClientSession s, PendingRequest p) {
         switch (p.route().domain()) {
-            case DOMAIN_LOGIN -> callLogin(s, p.request());
-            case DOMAIN_SCENE -> forwardToScene(s, p.request());
+            case DOMAIN_LOGIN -> {
+                countRequest(p.route(), RequestResult.FORWARDED);
+                callLogin(s, p.request());
+            }
+            case DOMAIN_SCENE -> countRequest(p.route(), forwardToScene(s, p.request()));
             default -> {
                 // Java 版尚未实现的后端域（friend / guild / battle ...）：与 C++ 找不到目标节点时同形。
                 log.debug("消息域未接入 Java 版 session={} message_id={} domain={}", sid(s), p.route().messageId(), p.route().domain());
+                countRequest(p.route(), RequestResult.UNSUPPORTED);
                 sendTip(s, TIP_SERVICE_UNAVAILABLE);
             }
         }
@@ -232,6 +268,7 @@ public final class ClientDispatcher {
                 .build();
         s.inFlight = true;
         s.loginTouched = true;
+        Timer.Sample sample = metrics.startTimer();
         CompletableFuture<ClientReply> future;
         try {
             future = login.handle(call);
@@ -241,7 +278,10 @@ public final class ClientDispatcher {
         if (future == null) {
             future = CompletableFuture.failedFuture(new IllegalStateException("login 返回了 null future"));
         }
-        future.whenComplete((reply, error) -> s.execute(() -> onLoginCompleted(s, request, reply, error)));
+        future.whenComplete((reply, error) -> {
+            metrics.loginCallCompleted(LoginCall.HANDLE, sample, error == null && reply != null);
+            s.execute(() -> onLoginCompleted(s, request, reply, error));
+        });
     }
 
     private void onLoginCompleted(ClientSession s, ClientRequest request, ClientReply reply, Throwable error) {
@@ -373,6 +413,7 @@ public final class ClientDispatcher {
 
     private void closeByServer(ClientSession s, int tipId) {
         log.info("login 指示关闭会话 session={} tip={}", sid(s), tipId);
+        metrics.disconnected(DisconnectReason.SERVER_DIRECTIVE);
         s.closing = true;
         if (tipId != 0) {
             s.sendThenClose(tip(tipId));
@@ -393,11 +434,12 @@ public final class ClientDispatcher {
         log.info("会话离开游戏 session={} player_id={} scene_node_id={}", sid(s), playerId, sceneNodeId);
     }
 
-    private void forwardToScene(ClientSession s, ClientRequest request) {
+    /** 转给会话所在的 scene；返回这个请求在 gate 的去向（记指标用）。 */
+    private RequestResult forwardToScene(ClientSession s, ClientRequest request) {
         if (s.sceneNodeId == 0) {
             // 与 C++ HandleTcpNodeMessage 找不到场景节点时同形。
             sendTip(s, TIP_SERVICE_UNAVAILABLE);
-            return;
+            return RequestResult.NOT_IN_SCENE;
         }
         ClientForward forward = ClientForward.newBuilder()
                 .setSessionId(s.sessionId())
@@ -406,7 +448,8 @@ public final class ClientDispatcher {
                 .setBody(request.getBody())
                 .setRequestId(request.getId())
                 .build();
-        links.send(s.sceneNodeId, NodeLinkFrame.newBuilder().setClientForward(forward).build());
+        long gen = links.send(s.sceneNodeId, NodeLinkFrame.newBuilder().setClientForward(forward).build());
+        return gen == 0 ? RequestResult.LINK_UNAVAILABLE : RequestResult.FORWARDED;
     }
 
     // ================================================================ scene 链路事件（已由 SceneEventRouter 投递到会话线程）
@@ -467,8 +510,9 @@ public final class ClientDispatcher {
         if (s.closing) {
             return;
         }
+        metrics.disconnected(DisconnectReason.KICKED);
         s.closing = true;
-        s.pending.clear();
+        discardPending(s);
         if (kicked.getTipId() != 0) {
             s.sendThenClose(tip(kicked.getTipId()));
         } else {
@@ -483,6 +527,9 @@ public final class ClientDispatcher {
         // scene 那一侧已随链路丢掉这个会话（并负责释放 / 写回）；gate 关闭连接，客户端重连后重新进场。链路已断，不发 PlayerLeave。
         log.info("scene 链路断开，关闭其上的会话 session={} player_id={} node={}", sid(s), s.scenePlayerId, sceneNodeId);
         unbindScene(s);
+        if (!s.closing) {
+            metrics.disconnected(DisconnectReason.SCENE_LINK_DOWN);
+        }
         closeNow(s);
     }
 
@@ -528,17 +575,22 @@ public final class ClientDispatcher {
                 .setPlayerId(playerId)
                 .setOwnerEpoch(ownerEpoch)
                 .build();
+        Timer.Sample sample = metrics.startTimer();
         try {
             CompletableFuture<?> future = login.abandonEnter(event);
             if (future != null) {
                 future.whenComplete((ack, error) -> {
+                    metrics.loginCallCompleted(LoginCall.ABANDON_ENTER, sample, error == null);
                     if (error != null) {
                         log.warn("通知 login 释放未送达进场的归属失败（等租约过期） player_id={} epoch={} 原因={}",
                                 playerId, ownerEpoch, rootCause(error).toString());
                     }
                 });
+            } else {
+                metrics.loginCallCompleted(LoginCall.ABANDON_ENTER, sample, false);
             }
         } catch (RuntimeException e) {
+            metrics.loginCallCompleted(LoginCall.ABANDON_ENTER, sample, false);
             log.warn("通知 login 释放未送达进场的归属失败（等租约过期） player_id={} epoch={} 原因={}",
                     playerId, ownerEpoch, e.toString());
         }
@@ -553,17 +605,22 @@ public final class ClientDispatcher {
 
     private void notifyLoginClosed(ClientSession s) {
         SessionClosed event = SessionClosed.newBuilder().setSession(context(s)).setVoluntary(false).build();
+        Timer.Sample sample = metrics.startTimer();
         try {
             CompletableFuture<?> future = login.sessionClosed(event);
             if (future != null) {
                 future.whenComplete((ack, error) -> {
+                    metrics.loginCallCompleted(LoginCall.SESSION_CLOSED, sample, error == null);
                     if (error != null) {
                         log.warn("通知 login 会话结束失败 session={} player_id={} 原因={}",
                                 sid(s), event.getSession().getPlayerId(), rootCause(error).toString());
                     }
                 });
+            } else {
+                metrics.loginCallCompleted(LoginCall.SESSION_CLOSED, sample, false);
             }
         } catch (RuntimeException e) {
+            metrics.loginCallCompleted(LoginCall.SESSION_CLOSED, sample, false);
             log.warn("通知 login 会话结束失败 session={} 原因={}", sid(s), e.toString());
         }
     }
@@ -586,8 +643,26 @@ public final class ClientDispatcher {
         int threshold = limits.illegalPacketThreshold();
         if (threshold > 0 && s.illegalPackets >= threshold) {
             log.warn("非法包达到阈值，断开 session={} count={} reason={} message_id={}", sid(s), s.illegalPackets, reason, messageId);
+            metrics.disconnected(DisconnectReason.ILLEGAL_PACKETS);
             closeNow(s);
         }
+    }
+
+    /** 记一个请求的去向；{@code route} 为 null 表示消息号不认识。 */
+    private void countRequest(MessageRoute route, RequestResult result) {
+        if (route == null) {
+            metrics.request(null, null, result);
+        } else {
+            metrics.request(route.domain(), route.method(), result);
+        }
+    }
+
+    /** 会话关闭时丢弃还没处理的排队请求（逐个计 {@code dropped}，每个请求在 gate 只计一次去向）。 */
+    private void discardPending(ClientSession s) {
+        for (PendingRequest p : s.pending) {
+            countRequest(p.route(), RequestResult.DROPPED);
+        }
+        s.pending.clear();
     }
 
     /** 信封错误：{@code MessageContent{message_id=请求号, id=请求 id, error_message{tip}}}（C++ 同形，客户端按 message_id 对上请求）。 */

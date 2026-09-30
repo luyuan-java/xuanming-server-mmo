@@ -1,5 +1,7 @@
 package com.game.gate.session;
 
+import com.game.gate.metrics.GateMetrics;
+import com.game.gate.metrics.GateMetrics.DisconnectReason;
 import com.game.net.client.ClientFrameDecoder;
 import com.game.net.client.ClientFrameEncoder;
 import com.game.net.client.ClientFrames;
@@ -31,8 +33,11 @@ public final class ClientPipeline {
     }
 
     public static void install(ChannelPipeline pipeline, SessionRegistry registry, ClientDispatcher dispatcher) {
+        GateMetrics metrics = dispatcher.metrics();
         pipeline.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED, ClientFrames.DEFAULT_MAX_LEN, (ctx, e) -> {
             // 非法帧由公网流量决定，采样记录；解码器随后关闭连接。
+            metrics.invalidFrame(e.reason());
+            metrics.disconnected(DisconnectReason.INVALID_FRAME);
             long n = BAD_FRAMES.getAndIncrement();
             if ((n & 0x3FF) == 0) {
                 log.info("非法客户端帧（每 1024 次采样一条） reason={} peer={} total={}", e.reason(), ctx.channel().remoteAddress(), n + 1);
