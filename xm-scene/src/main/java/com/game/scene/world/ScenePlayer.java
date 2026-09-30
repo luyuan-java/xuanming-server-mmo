@@ -144,6 +144,29 @@ public final class ScenePlayer {
         this.velocity = velocity;
     }
 
+    /**
+     * 停下（速度清零，不置脏位）：离场写回 / 被接管 / 停服前、换场景时调用（基线 StopMotionForExit）。
+     * 离场时实体随即被销毁（旁人收到 51），不需要再发「停了」的 66；换场景后新场景的人从 21 看到的本来就是静止的它。
+     */
+    void stopMotion() {
+        this.velocity = Vec3.ORIGIN;
+    }
+
+    /**
+     * 有人刚开始看见它（进视野 / 进场）：21 / 47 只带位置，朝向与速度要靠 66 补上（基线缺口 9：移动中的实体进视野时
+     * 显示为静止，要等它下次改速度）。朝向上报过就置 transform 脏位（transform 带 rotation），在动就置 velocity 脏位，
+     * 下一个同步帧（≤ 100 ms）的 66 一并带给全部观察者——不另发单播，66 的「每实体每 100 ms 至多一条」不被打破；
+     * 老观察者多收一次相同的值，无害。从没上报过朝向、静止的实体，21 / 47 已是全部状态，什么也不置。
+     */
+    void markFullStateForNewWatcher() {
+        if (rotation != null) {
+            syncDirty |= DIRTY_TRANSFORM;
+        }
+        if (!velocity.isOrigin()) {
+            syncDirty |= DIRTY_VELOCITY;
+        }
+    }
+
     void markActive(long frame) {
         this.lastActiveFrame = frame;
     }

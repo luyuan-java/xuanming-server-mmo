@@ -105,6 +105,65 @@ class GridIndexTest {
     }
 
     @Test
+    void 按条目取邻域_与按坐标取邻域同序同内容_含自己() {
+        grid.insert("b", 5, 5);
+        grid.insert("a", 6, 6);
+        grid.insert("w", -5, 5);
+        grid.insert("far", 45, 5);
+
+        List<String> around = new ArrayList<>();
+        grid.collectAround("a", around);
+        List<String> near = new ArrayList<>();
+        grid.collectNear(6, 6, near);
+
+        assertThat(around).containsExactly("w", "b", "a").isEqualTo(near);
+        assertThatThrownBy(() -> grid.collectAround("ghost", new ArrayList<>()))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void 格子反复建出与回收之后_邻格引用仍与按坐标查表一致() {
+        // 随机插入 / 移动 / 删除，逼出「邻格先回收再重建」「一格回收时两侧邻格都要摘掉引用」等情形，
+        // 每一步都拿按条目取邻域（走邻格引用）和按坐标查表对照。
+        Random random = new Random(20260930L);
+        GridIndex<Integer> index = new GridIndex<>(20);
+        double[][] at = new double[40][];
+        for (int step = 0; step < 20_000; step++) {
+            int item = random.nextInt(at.length);
+            double x = (random.nextDouble() - 0.5) * 200;
+            double y = (random.nextDouble() - 0.5) * 200;
+            if (at[item] == null) {
+                index.insert(item, x, y);
+                at[item] = new double[] {x, y};
+            } else if (random.nextInt(4) == 0) {
+                assertThat(index.remove(item)).isTrue();
+                at[item] = null;
+                continue;
+            } else {
+                index.move(item, x, y);
+                at[item][0] = x;
+                at[item][1] = y;
+            }
+            assertSameNeighborhood(index, item, at[item], step);
+            if (step % 97 == 0) {
+                for (int other = 0; other < at.length; other++) {
+                    if (at[other] != null) {
+                        assertSameNeighborhood(index, other, at[other], step);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void assertSameNeighborhood(GridIndex<Integer> index, int item, double[] at, int step) {
+        List<Integer> around = new ArrayList<>();
+        index.collectAround(item, around);
+        List<Integer> near = new ArrayList<>();
+        index.collectNear(at[0], at[1], near);
+        assertThat(around).as("第 %s 步，条目 %s", step, item).isEqualTo(near);
+    }
+
+    @Test
     void 边长不小于半径时_半径内的点一定在邻域里() {
         Random random = new Random(20260930L);
         double radius = 20;

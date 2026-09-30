@@ -127,6 +127,21 @@ Java 代码不得依赖这套目录，具体做法：
 - **scene**：**一个逻辑线程拥有全部场景状态**（Netty `DefaultEventLoop`）。I/O 线程只做解码，把消息投递给逻辑线程
   （每条链路有积压上限，见 §4.2）；阻塞 I/O（MySQL / Redis）在有界的存储线程池上执行，结果再投递回逻辑线程。
   场景状态只在逻辑线程读写，不加锁。
+- **scene 场景帧**（`SceneTicker` + `SceneWorld.step`）：20 FPS 定时任务同样跑在逻辑线程上，与客户端消息串行。
+  固定步长累加器（夹 ±1s、每次最多补 5 帧，多出的整帧时间只扣不补），帧内异常只记日志、不让定时任务停掉。
+  每帧顺序：外推（速度非零的 `location += v × 0.05`，600 帧无任何客户端消息即停推）→ 视野刷新并发 47 / 64 →
+  偶数帧属性同步 66 → 帧号 +1。移动上行（134 / 132 / 131）在两帧之间收到时当场裁决，位置变化登记到下一帧的视野刷新。
+  视野索引（`ViewIndex`：20 m 方格 3×3 邻域 + 双向兴趣列表）每个场景一份、只归逻辑线程所有。
+  重判节奏：静止的人位置一变（含刚停步、挂机停推）下一帧就按精确位置重判；移动中的人相对上次重判累计位移 ≥ 1 m 才重判，
+  不足的留在待刷新名单里——进 / 出视野在移动中最多晚约 1 m 位移，换来人群里每人每帧一次 3×3 扫描降到约每走 1 m 一次。
+  每次重判 O(3×3 格内人数 + 兴趣列表长度)，候选直接取格子里的兴趣状态（不按玩家查表），双方的表都满时连距离都不算。
+  待刷新名单、候选缓冲、视野变化缓冲都复用，按条目取邻域走格子间的引用、不查表不装箱；帧内不新建集合，
+  仅有的分配是集合迭代器与外推的新坐标（小对象）。没人移动、没有脏字段的帧只遍历一遍玩家、不发消息。
+  出生点人群基准 `ViewCrowdBenchmarkTest`（默认跳过，`-Dxm.bench=true` 开启）：N 人全在出生点 15 m 内、1–9 m/s 随机走，
+  2026-09-30 本机整帧均值 1000 人 42.7 ms → 4.2 ms（p99 8.8 ms）、2000 人 174.5 ms → 22.4 ms（p99 48.9 ms，
+  其中偶数帧 66 扇出约 8 ms）；2000 人挤在 15 m 内的极端密度下尾延迟仍贴着 50 ms 预算，真要承载需分散出生点。
+  帧里不做任何阻塞 I/O（写回 / 释放都交给存储线程池）。规则与客户端可见行为见
+  `docs/reference/mmorpg-client-contract-{movement,aoi}.md` 与 PARITY「移动」「视野」「属性同步」各行。
 - **scene 停服**（`SceneNode.release`）：摘目录 → 停监听 → 停接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来）→
   把「写回全部在场玩家」投递到逻辑线程，**用整个停服预算**（`xm.scene.shutdown-save-timeout`）等它执行完 →
   写回都交给存储线程池之后才关池，并用剩余预算等落库；预算用完写回还没开始执行就取消它并记一条 ERROR（带大致人数），
@@ -232,7 +247,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 
 | 进程 | 抓取地址（默认） | 说明 |
 |---|---|---|
-| xm-gateway | `http://127.0.0.1:18081/actuator/prometheus` | 与客户端 `/api` 同一端口；面向公网部署时必须分开（`MANAGEMENT_SERVER_PORT` + `MANAGEMENT_SERVER_ADDRESS` 绑内网，或入口网关拦掉 `/actuator`） |
+| xm-gateway | `http://127.0.0.1:18105/actuator/prometheus` | 管理专用端口，默认只绑本机（`XM_MANAGEMENT_ADDRESS`）；对外的 18081 只有 `/api` |
 | xm-login | `http://127.0.0.1:18101/actuator/prometheus` | 管理专用端口 |
 | xm-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
 | xm-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
@@ -282,7 +297,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_logic_task_run_seconds` | Timer | — | 逻辑任务的执行耗时（抛异常的也计） |
 | scene | `xm_scene_tick_seconds` | Timer | — | 一帧的耗时（外推 + 视野刷新 + 广播），20 FPS、每帧一次；超过 50ms 桶即超预算 |
 | scene | `xm_scene_broadcast_seconds` | Timer | `kind`=view_changes / attribute_sync | 帧内广播阶段（组包、序列化、交给链路）：view_changes = 47 / 64，每帧一次；attribute_sync = 66，偶数帧一次（均为全部场景合计） |
-| scene | `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值丢弃 |
+| scene | `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值或坐标超出世界范围（±1e7 m）丢弃 |
 | scene | `xm_scene_aoi_changes_total` | Counter | `change`=enter / leave | 视野变化通知，一对（观察者, 目标）计一次：enter = 进场的 47 条目与给旁人的 21、帧内 47 条目；leave = 离场 / 换场景的 51、帧内 64 条目。离场者自己的列表静默清空，不计 |
 | scene | `xm_scene_storage_writes_seconds` | Timer | `op`=save / release，`result`=released / fenced / failed / rejected | 玩家数据写（写回并释放 / 只释放）的结局与耗时（含瞬时故障重试），每个写任务恰好计一次：已落库并释放 / 围栏拒绝（不是故障）/ 重试用尽或非瞬时故障 / 存储线程池拒绝（耗时记 0）。停服时 `shutdownNow` 丢弃的写只进 ERROR 日志 |
 | scene | `executor_*{name="scene-storage"}` | Micrometer 标准线程池指标 | — | 存储线程池排队（`executor_queued_tasks`）/ 剩余容量 / 活跃 / 完成数 |

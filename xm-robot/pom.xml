@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>xm-robot</artifactId>
+    <name>xm-robot</name>
+    <description>
+        端到端探针客户端（纯 Java：Netty + JDK HttpClient + Jackson）：按客户端契约走 assign-gate → 握手 → 登录 / 建角 / 进游戏，
+        跑冒烟（smoke）与移动（movement）场景并按契约断言。不是服务端进程，不依赖 Spring。
+    </description>
+
+    <dependencies>
+        <!-- 客户端契约：消息号注册表与生成的消息类 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-proto</artifactId>
+        </dependency>
+        <!-- 客户端帧编解码（与 C++ ProtobufCodec 逐字节一致） -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-net</artifactId>
+        </dependency>
+        <!-- tip 码枚举（导表器生成，不手写数字）：进游戏撞上「归属仍被持有」时按 kLoginInProgress 重试 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-table</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 只借用它把依赖打成一个可 java -jar 的包（JarLauncher 启动普通 main，不引入 Spring 运行时） -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.game.robot.RobotMain</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

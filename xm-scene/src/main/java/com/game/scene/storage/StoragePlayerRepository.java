@@ -262,15 +262,27 @@ public final class StoragePlayerRepository implements PlayerRepository {
                 new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()));
     }
 
+    /**
+     * 写回行。坐标含 NaN / ±Inf 时改写成 (0,0,0) 并记 ERROR：JDBC 驱动拒绝非有限的 double
+     * （Connector/J 默认 {@code allowNanAndInf=false}，按非瞬时故障处理），整条写回会失败——等级、场景、位置都丢，
+     * 归属也放不掉、要等租约过期。(0,0,0) 是「没有有效坐标」，下次进场落到出生点；其余字段照常写回并释放。
+     * 场景逻辑保证坐标有限，走到这里说明上游漏了校验，所以记 ERROR 而不是静默改写。
+     */
     static PlayerRow toRow(PlayerSave save) {
+        Vec3 position = save.position();
+        if (!position.isFinite()) {
+            log.error("写回坐标含非有限值，改写为 (0,0,0) 后照常写回（上游校验遗漏） player={} epoch={} scene_config={} pos={}",
+                    Long.toUnsignedString(save.playerId()), save.ownerEpoch(), save.sceneConfigId(), position);
+            position = Vec3.ORIGIN;
+        }
         PlayerRow row = new PlayerRow();
         row.setPlayerId(save.playerId());
         row.setOwnerEpoch(save.ownerEpoch());
         row.setLevel(save.level());
         row.setSceneConfigId(save.sceneConfigId());
-        row.setPosX(save.position().x());
-        row.setPosY(save.position().y());
-        row.setPosZ(save.position().z());
+        row.setPosX(position.x());
+        row.setPosY(position.y());
+        row.setPosZ(position.z());
         return row;
     }
 }

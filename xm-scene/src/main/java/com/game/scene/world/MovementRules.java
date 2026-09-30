@@ -17,17 +17,35 @@ final class MovementRules {
     static final double STEP_SECONDS = 0.05;
     /** 连续这么多帧（30 秒）没有任何客户端消息即视为挂机，停止外推（基线 AfkSystem 600 帧）。 */
     static final long AFK_FRAMES = 600;
+    /**
+     * 世界坐标范围（米）：上报位置任一分量的绝对值超过它，整条输入丢弃（基线不查）。取 1e7 m（一万公里），
+     * 远大于任何地图（UE 默认世界约 ±10 km），正常客户端碰不到。它保证坐标差、水平距离、三维距离的平方都不会溢出：
+     * 否则位移截断能从两个有限输入算出 ±Inf / NaN，有限但极大的高度也会让视野距离恒为「看不见」，并被写回、下次进场沿用。
+     */
+    static final double WORLD_LIMIT = 1e7;
 
     private MovementRules() {
     }
 
-    /** 三维模长超过 {@link #MAX_TRUSTED_SPEED} 时等比缩放到它，方向不变；否则原样返回。 */
+    /** 三个分量都有限且绝对值不超过 {@link #WORLD_LIMIT}（NaN / ±Inf 一律不在世界内）。 */
+    static boolean insideWorld(Vec3 position) {
+        return Math.abs(position.x()) <= WORLD_LIMIT && Math.abs(position.y()) <= WORLD_LIMIT
+                && Math.abs(position.z()) <= WORLD_LIMIT;
+    }
+
+    /**
+     * 三维模长超过 {@link #MAX_TRUSTED_SPEED} 时等比缩放到它，方向不变；否则原样返回。{@code velocity} 必须有限。
+     * 分量极大（1e154 量级以上）时模长的平方会溢出成 Infinity，直接相除会把速度缩成 0、丢掉方向，
+     * 所以先按最大分量归一（各分量落在 [-1, 1]），再缩放到上限。
+     */
     static Vec3 clampSpeed(Vec3 velocity) {
         double speed = velocity.length();
         if (speed <= MAX_TRUSTED_SPEED) {
             return velocity;
         }
-        return velocity.scaled(MAX_TRUSTED_SPEED / speed);
+        double largest = Math.max(Math.abs(velocity.x()), Math.max(Math.abs(velocity.y()), Math.abs(velocity.z())));
+        Vec3 normalized = velocity.scaled(1.0 / largest);
+        return normalized.scaled(MAX_TRUSTED_SPEED / normalized.length());
     }
 
     /** 裁决位置是否偏离上报位置到需要给本人发 137 的程度（水平距离严格大于阈值）。 */

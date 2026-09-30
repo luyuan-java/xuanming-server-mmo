@@ -115,6 +115,126 @@ class ViewIndexTest {
     }
 
     @Test
+    void 两次刷新之间多次移动只登记一次_刷新后重新登记() {
+        ScenePlayer a = player(1, 0, 0, 0);
+        ScenePlayer b = player(2, 30, 0, 0);
+        view.enter(a);
+        view.enter(b);
+
+        moveTo(b, 25, 0, 0);
+        moveTo(b, 15, 0, 0);
+        moveTo(b, 8, 0, 0);
+        assertThat(view.pendingMoves()).isEqualTo(1);
+        view.refresh(changes);
+        assertThat(changes.of(a).added()).containsExactly(b);
+        assertThat(view.pendingMoves()).isZero();
+
+        moveTo(a, 1, 0, 0);
+        assertThat(view.pendingMoves()).isEqualTo(1);
+    }
+
+    // ------------------------------------------------------------------ 重判节奏：移动中累计 1 m、静止立即
+
+    @Test
+    void 静止的人挪一点_下次刷新立即重判() {
+        ScenePlayer a = player(1, 180, 200, 0);
+        ScenePlayer b = player(2, 180, 210.2, 0);
+        view.enter(a);
+        view.enter(b);
+
+        moveTo(b, 180, 209.9, 0);
+        view.refresh(changes);
+
+        assertThat(view.watching(a)).containsExactly(b);
+        assertThat(view.watching(b)).containsExactly(a);
+        assertThat(view.pendingMoves()).isZero();
+    }
+
+    @Test
+    void 移动中累计位移不足1米_推迟重判并留在名单里_够1米再判() {
+        ScenePlayer a = player(1, 180, 200, 0);
+        ScenePlayer b = player(2, 180, 210.5, 0);
+        view.enter(a);
+        view.enter(b);
+        b.setVelocity(new Vec3(0, -1, 0));
+
+        moveTo(b, 180, 209.9, 0);
+        view.refresh(changes);
+        assertThat(view.watching(a)).as("已在 10 m 内，但只走了 0.6 m：推迟").isEmpty();
+        assertThat(changes.isEmpty()).isTrue();
+        assertThat(view.pendingMoves()).isEqualTo(1);
+
+        moveTo(b, 180, 209.5, 0);
+        view.refresh(changes);
+        assertThat(view.watching(a)).as("累计 1 m").containsExactly(b);
+        assertThat(view.watching(b)).containsExactly(a);
+        assertThat(changes.of(a).added()).containsExactly(b);
+        assertThat(changes.of(b).added()).containsExactly(a);
+        assertThat(view.pendingMoves()).isZero();
+    }
+
+    @Test
+    void 推迟中的人停下_即使位置不再变_下次刷新按停下的位置重判() {
+        ScenePlayer a = player(1, 180, 200, 0);
+        ScenePlayer b = player(2, 180, 210.3, 0);
+        view.enter(a);
+        view.enter(b);
+        b.setVelocity(new Vec3(0, -1, 0));
+        moveTo(b, 180, 209.9, 0);
+        view.refresh(changes);
+        assertThat(view.watching(a)).isEmpty();
+
+        // 停步 / 挂机停推：速度清零，位置不动。
+        b.setVelocity(Vec3.ORIGIN);
+        view.refresh(changes);
+
+        assertThat(view.watching(a)).containsExactly(b);
+        assertThat(view.watching(b)).containsExactly(a);
+        assertThat(view.pendingMoves()).isZero();
+    }
+
+    @Test
+    void 出视野同样按1米节奏_推迟期间仍在表里_够1米就删_不漏删() {
+        ScenePlayer a = player(1, 0, 0, 0);
+        ScenePlayer b = player(2, 0, 5, 0);
+        view.enter(a);
+        view.enter(b);
+        moveTo(b, 0, 19.5, 0);
+        view.refresh(changes);
+        assertThat(view.watching(a)).as("19.5 m 仍在滞回带内").containsExactly(b);
+        b.setVelocity(new Vec3(0, 1, 0));
+
+        moveTo(b, 0, 20.4, 0);
+        view.refresh(changes);
+        assertThat(view.watching(a)).as("超过 20 m，但只走了 0.9 m：推迟").containsExactly(b);
+
+        moveTo(b, 0, 20.6, 0);
+        view.refresh(changes);
+        assertThat(view.watching(a)).isEmpty();
+        assertThat(view.watching(b)).isEmpty();
+        assertThat(changes.of(a).removed()).containsExactly(b);
+        assertThat(changes.of(b).removed()).containsExactly(a);
+    }
+
+    @Test
+    void 推迟中的人离开_待刷新名单一起清掉() {
+        ScenePlayer a = player(1, 0, 0, 0);
+        ScenePlayer b = player(2, 0, 12, 0);
+        view.enter(a);
+        view.enter(b);
+        b.setVelocity(new Vec3(0, -1, 0));
+        moveTo(b, 0, 11.5, 0);
+        view.refresh(changes);
+        assertThat(view.pendingMoves()).isEqualTo(1);
+
+        view.leave(b);
+        view.refresh(changes);
+
+        assertThat(view.pendingMoves()).isZero();
+        assertThat(changes.isEmpty()).isTrue();
+    }
+
+    @Test
     void 没人移动时刷新什么都不做() {
         view.enter(player(1, 0, 0, 0));
         view.enter(player(2, 1, 0, 0));

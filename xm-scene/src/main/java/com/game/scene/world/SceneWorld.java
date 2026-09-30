@@ -25,6 +25,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -47,6 +48,8 @@ import org.slf4j.LoggerFactory;
  * <p><b>视野</b>：每个场景一个 {@link ViewIndex}（均匀方格 + 双向兴趣列表，规则见该类）。进场 / 离场当场发 21 / 47 / 51；
  * 移动带来的进出视野在帧里合并成每个观察者一条 47、一条 64。51、66、70 的收件人都是「看得见该玩家的人」，
  * 所以客户端收到某实体的任何推送之前一定先收到过它的创建消息，收到销毁消息之后不会再收到它的推送。
+ * 21 / 47 只带位置；有新观察者时把目标的朝向 / 速度置脏，下一个同步帧的 66 补给全部观察者（修基线缺口 9，
+ * 不另发单播，66 仍是每实体每 100 ms 至多一条）。
  *
  * <p><b>移动</b>（契约文档 {@code mmorpg-client-contract-movement.md}）：134 / 132 / 131 在收到时当场裁决（{@link #applyMove}），
  * 永不回包；只有裁决位置与上报位置水平偏差 &gt; 0.5 m 时给本人发 137。
@@ -60,7 +63,8 @@ import org.slf4j.LoggerFactory;
  *   <li>进场要求库里的 {@code owner_epoch} 等于 gate 带来的 epoch（login 进游戏时夺得），且不低于本节点上同一玩家
  *       现有实例的 epoch；</li>
  *   <li>玩家离开（主动 / 断线 / 链路断开 / 停服）一律「最终写回并释放」（{@link PlayerRepository#save}），
- *       写回的是离开这一刻的位置（外推在同一线程上，离开之后不会再推）；
+ *       先清速度再写回（基线 StopMotionForExit 的顺序），写回的是离开这一刻的位置（外推在同一线程上，离开之后不会再推）；
+ *       之后到来的移动输入找不到实例，直接丢弃；
  *       没进成的进场（失败、取消、链路断开时还在加载）只释放（{@link PlayerRepository#release}），
  *       否则那份归属要等租约过期才能再被夺取；</li>
  *   <li>login 发来接管请求（{@link #onTakeoverRequested}，别的会话要进这个角色）：持有该 epoch 的实例写回释放，
@@ -295,11 +299,12 @@ public final class SceneWorld {
     }
 
     /**
-     * 进场落位（基线 EnsureValidEnterLocation，Java 版没有导航网格）：存档坐标属于同一场景配置且不是 (0,0,0) 就沿用；
+     * 进场落位（基线 EnsureValidEnterLocation，Java 版没有导航网格）：存档坐标属于同一场景配置、在世界范围内
+     * （{@link MovementRules#insideWorld}，旧版本可能写进过极端坐标）且不是 (0,0,0) 就沿用；
      * 换地图、新号或坐标无效一律落到目标场景出生点。
      */
     private Vec3 resolveEnterPosition(int targetConfigId, int savedConfigId, Vec3 saved) {
-        if (savedConfigId == targetConfigId && saved.isFinite() && !saved.isOrigin()) {
+        if (savedConfigId == targetConfigId && MovementRules.insideWorld(saved) && !saved.isOrigin()) {
             return saved;
         }
         return tables.spawnPoint(targetConfigId);
@@ -315,6 +320,13 @@ public final class SceneWorld {
         ViewIndex.Entered entered = scene.add(player);
         publishPopulation(scene.configId());
         metrics.aoiEntered(entered.seen().size() + entered.seers().size());
+        // 新观察者只从 21 / 47 拿到位置：朝向、速度由下一个同步帧的 66 补上（见 markFullStateForNewWatcher）。
+        for (ScenePlayer seen : entered.seen()) {
+            seen.markFullStateForNewWatcher();
+        }
+        if (!entered.seers().isEmpty()) {
+            player.markFullStateForNewWatcher();
+        }
 
         ActorCreateS2C self = player.toActorCreate();
         sendTo(player, push(ids.notifyEnterScene(), EnterSceneS2C.newBuilder().setSceneInfo(scene.info()).build()));
@@ -361,7 +373,7 @@ public final class SceneWorld {
         broadcast(oldWatchers, destroyMessage(player));
         Vec3 at = target.configId() != from.configId() ? tables.spawnPoint(target.configId()) : player.position();
         player.setPosition(at);
-        player.setVelocity(Vec3.ORIGIN);
+        player.stopMotion();
         player.moveGuard().reset(at, clock.nanoTime());
         enterScene(player, target);
         log.info("玩家换场景 player={} {} -> {}", player.playerId(), from.sceneId(), target.sceneId());
@@ -372,23 +384,33 @@ public final class SceneWorld {
     /**
      * 134 MoveStart / 132 MoveSync / 131 MoveStop（契约文档 movement §4.3）。应答是 {@code Empty}，任何情况都不回包。
      * <ol>
-     *   <li>位置、朝向、速度有任何非有限值：整条静默丢弃，状态不变（基线不查，NaN 会进 Transform 并被广播）；</li>
-     *   <li>位置：经 {@link MoveGuard} 位移校验（Java 版比基线严：基线无导航网格时原样接受任何坐标），超额度就沿上报方向截断；</li>
+     *   <li>位置、朝向、速度有任何非有限值，或位置任一分量超出世界范围 ±{@link MovementRules#WORLD_LIMIT}：
+     *       整条静默丢弃，状态不变、不发 137（基线不查，NaN 会进 Transform 并被广播，极端坐标原样接受）；</li>
+     *   <li>位置：经 {@link MoveGuard} 位移校验（Java 版比基线严：基线无导航网格时原样接受任何坐标），超额度就把水平分量
+     *       沿上报方向截断，高度取上报值；校验给不出有限位置时同样整条丢弃（上一条已挡住，属纵深防御）；</li>
      *   <li>朝向：用请求里的 rotation 整体覆盖（请求没带就是全零，基线同）；</li>
      *   <li>速度：MoveStart / MoveSync 按三维模长截断到 10 m/s，MoveStop 清零；Transform 与 Velocity 都置脏位
      *       （即使值没变，基线同），下一个偶数帧的 66 带上；</li>
      *   <li>裁决位置与上报位置水平偏差 &gt; 0.5 m：给本人发 137，{@code server_velocity} 填<b>处理完这条输入之后</b>的速度
      *       （基线填的是之前的速度；客户端据此重演预测，处理后的才对，契约文档 §9 第 4 条）。</li>
      * </ol>
-     * 位置变化在下一帧的视野刷新里重新判定进出视野。
+     * 位置变化在帧内的视野刷新里重新判定进出视野（{@link ViewIndex} 的重判节奏：静止立即，移动中每累计 1 m）。
      */
     void applyMove(ScenePlayer player, MoveInput input) {
-        if (!input.isFinite()) {
+        if (!input.isAcceptable()) {
             metrics.move(MoveResult.INVALID);
-            log.debug("移动输入含非有限值，丢弃 player={} input_seq={}", player.playerId(), input.inputSeq());
+            log.debug("移动输入含非有限值或坐标超出世界范围，丢弃 player={} input_seq={}", player.playerId(),
+                    input.inputSeq());
             return;
         }
-        Vec3 accepted = player.moveGuard().admit(input.location(), clock.nanoTime());
+        Optional<Vec3> admitted = player.moveGuard().admit(input.location(), clock.nanoTime());
+        if (admitted.isEmpty()) {
+            metrics.move(MoveResult.INVALID);
+            log.warn("位移校验给不出有限位置，丢弃（上游范围检查应已挡住） player={} input_seq={} 上报={} 锚点={}",
+                    player.playerId(), input.inputSeq(), input.location(), player.moveGuard().anchor());
+            return;
+        }
+        Vec3 accepted = admitted.get();
         player.scene().relocate(player, accepted);
         player.setRotation(input.rotation());
         player.setVelocity(MovementRules.clampSpeed(input.velocity()));
@@ -417,7 +439,7 @@ public final class SceneWorld {
 
     /**
      * 跑一帧（固定步长 {@link MovementRules#STEP_SECONDS}）：外推 → 视野刷新（47 / 64）→ 偶数帧属性同步（66）→ 帧号 +1。
-     * 由 {@link SceneTicker} 在场景逻辑线程上调用。没有移动、没有脏字段时只是遍历一遍玩家，不分配。
+     * 由 {@link SceneTicker} 在场景逻辑线程上调用。没有移动、没有脏字段时只是遍历一遍玩家，不新建集合、不发消息。
      * 指标：整帧耗时每帧记一次；两个广播阶段（全部场景合计）每执行一次记一次——视野变化每帧、属性同步偶数帧。
      */
     public void step() {
@@ -479,6 +501,9 @@ public final class SceneWorld {
             metrics.aoiLeft(delta.removed().size());
             if (!delta.added().isEmpty()) {
                 sendTo(watcher, push(ids.notifyActorListCreate(), actorList(delta.added())));
+                for (ScenePlayer target : delta.added()) {
+                    target.markFullStateForNewWatcher();
+                }
             }
             if (!delta.removed().isEmpty()) {
                 ActorListDestroyS2C.Builder destroyed = ActorListDestroyS2C.newBuilder();
@@ -609,10 +634,13 @@ public final class SceneWorld {
     }
 
     /**
-     * 移出场景（看得见它的人收到 51，离开者什么也收不到）并按需写回。写回的坐标就是此刻的位置：
-     * 外推与写回在同一线程上，移除之后这个实例不会再被推（基线要先 StopMotionForExit 清速度，这里不需要）。
+     * 移出场景（看得见它的人收到 51，离开者什么也收不到）并按需写回，顺序同基线退出流程：
+     * 先停下（速度清零，StopMotionForExit）→ 离开场景（51）→ 写回此刻的位置（含 z）。
+     * 外推与写回在同一线程上，停下之后到写回之间不会再被推；实例移出后不在任何场景的玩家列表里，此后不再外推，
+     * 迟到的移动输入按会话找不到它、直接丢弃，写回的状态不会再变。
      */
     private void removePlayer(ScenePlayer player, boolean save) {
+        player.stopMotion();
         List<ScenePlayer> watchers = player.scene().remove(player);
         playersById.remove(player.playerId(), player);
         playersBySession.remove(player.session(), player);
@@ -647,6 +675,7 @@ public final class SceneWorld {
         pendingEnters.clear();
         List<ScenePlayer> all = List.copyOf(playersById.values());
         for (ScenePlayer player : all) {
+            player.stopMotion();
             repository.save(player.toSave());
         }
         playersById.clear();

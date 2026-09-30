@@ -58,11 +58,6 @@ public record Vec3(double x, double y, double z) {
         return new Vec3(x * factor, y * factor, z * factor);
     }
 
-    /** 从本点向 {@code to} 走 {@code fraction}（0 = 本点，1 = to），三个分量同比例。 */
-    public Vec3 towards(Vec3 to, double fraction) {
-        return new Vec3(x + (to.x - x) * fraction, y + (to.y - y) * fraction, z + (to.z - z) * fraction);
-    }
-
     public Vector3 toProto() {
         return Vector3.newBuilder().setX(x).setY(y).setZ(z).build();
     }

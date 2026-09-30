@@ -525,11 +525,12 @@ class SceneWorldTest {
         // 额度 0：原地不动，偏差远超阈值，回 137。
         world.applyMove(player, standAt(new Vec3(300, 200, 0)));
         world.applyMove(player, standAt(new Vec3(Double.NaN, 200, 0)));
+        world.applyMove(player, standAt(new Vec3(204, 200, 1.7e308)));
 
         assertThat(moves("accepted")).isEqualTo(2);
         assertThat(moves("clamped")).isEqualTo(1);
         assertThat(moves("corrected")).isEqualTo(1);
-        assertThat(moves("invalid")).isEqualTo(1);
+        assertThat(moves("invalid")).as("非有限值、超出世界范围各一条").isEqualTo(2);
         assertThat(sink.messageIdsTo(LINK, 11)).as("只有纠偏那条回 137").containsExactly(137);
     }
 

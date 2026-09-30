@@ -73,7 +73,7 @@ public final class SceneMetrics {
         CLAMPED,
         /** 被截断且水平偏差超过 0.5 m，给本人回了 137 纠偏。 */
         CORRECTED,
-        /** 位置 / 朝向 / 速度含非有限值，整条丢弃。 */
+        /** 位置 / 朝向 / 速度含非有限值，或位置超出世界范围（±1e7 m），整条丢弃。 */
         INVALID
     }
 

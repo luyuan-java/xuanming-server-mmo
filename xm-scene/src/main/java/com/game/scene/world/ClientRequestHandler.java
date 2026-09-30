@@ -44,7 +44,9 @@ import org.slf4j.LoggerFactory;
  *   <li>通过会话与消息号校验的每条消息都刷新该玩家的活跃帧（挂机判定，见 {@link SceneWorld#touch}）；</li>
  *   <li>应答的 {@code message_id} 同请求、{@code id} 回显请求号；应答里的 {@code error_message} 总是带上
  *       （成功时 id=0，与基线线上形态一致）；</li>
- *   <li>首批未实现的方法回 {@code kFeatureUnavailable}(1006)，不断连、不抛异常。</li>
+ *   <li>首批未实现的方法回 {@code kFeatureUnavailable}(1006)，不断连、不抛异常。136 TeleportRequest 也在其中：
+ *       回 {@code TeleportRequestC2SResponse{error_message{1006}}}，之后不发 130（基线是空桩，回 id=0 的空 tip，
+ *       同样什么都不做；Java 如实说「不支持」，PARITY 登记为有意差异）。</li>
  * </ul>
  */
 public final class ClientRequestHandler {

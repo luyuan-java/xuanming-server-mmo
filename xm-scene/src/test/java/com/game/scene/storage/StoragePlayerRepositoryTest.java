@@ -119,6 +119,27 @@ class StoragePlayerRepositoryTest {
         assertThat(writes("save", "failed").count()).isZero();
     }
 
+    @Test
+    void 回归_写回坐标非有限_改写为原点_其余照常写回并释放() {
+        when(store.saveStateAndRelease(any())).thenReturn(true);
+        StoragePlayerRepository repository =
+                new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+
+        // JDBC 驱动默认拒绝 NaN / ±Inf：不改写的话整条写回失败，等级 / 场景丢失、归属放不掉。
+        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, Double.NaN, Double.NEGATIVE_INFINITY)));
+
+        ArgumentCaptor<PlayerRow> row = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store).saveStateAndRelease(row.capture());
+        assertThat(row.getValue().getOwnerEpoch()).isEqualTo(9L);
+        assertThat(row.getValue().getLevel()).isEqualTo(4);
+        assertThat(row.getValue().getSceneConfigId()).isEqualTo(2);
+        assertThat(row.getValue().getPosX()).isZero();
+        assertThat(row.getValue().getPosY()).isZero();
+        assertThat(row.getValue().getPosZ()).isZero();
+        assertThat(writes("save", "released").count()).isEqualTo(1);
+        assertThat(repository.writeFailures()).isZero();
+    }
+
     // ------------------------------------------------------------------ 写失败：重试与记录
 
     private final List<Long> sleeps = new ArrayList<>();

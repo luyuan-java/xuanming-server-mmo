@@ -24,6 +24,7 @@
         <module>xm-scene</module>
         <module>xm-gate</module>
         <module>xm-gateway</module>
+        <module>xm-robot</module>
     </modules>
 
     <properties>

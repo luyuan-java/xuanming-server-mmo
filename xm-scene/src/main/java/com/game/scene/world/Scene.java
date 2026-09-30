@@ -21,6 +21,8 @@ public final class Scene {
     /** 进场时整体拷给客户端（79 的 scene_info）。主世界频道 mirror / dungeon 为 0、creators 为空。 */
     private final SceneInfoComp info;
     private final Map<Long, ScenePlayer> players = new LinkedHashMap<>();
+    /** 只读视图建一次复用：帧内每帧要遍历两遍（外推、属性同步），不为每次遍历新建包装对象。 */
+    private final Collection<ScenePlayer> playersView = Collections.unmodifiableCollection(players.values());
     private final ViewIndex view = new ViewIndex();
 
     Scene(long sceneId, int configId) {
@@ -48,8 +50,9 @@ public final class Scene {
         return players.size();
     }
 
+    /** 本场景的玩家（只读、按进场顺序）。遍历期间不得进出场景（外推与同步都不会）。 */
     Collection<ScenePlayer> players() {
-        return Collections.unmodifiableCollection(players.values());
+        return playersView;
     }
 
     /** 玩家进入本场景（位置已定）：登记并按当前位置建立视野。返回双方各自新看见了谁。 */
@@ -66,13 +69,20 @@ public final class Scene {
         return view.leave(player);
     }
 
-    /** 本场景内玩家的位置变化（移动输入、外推）：更新坐标与格子，下一帧的视野刷新重新判定它。 */
+    /**
+     * 本场景内玩家的位置变化（移动输入、外推）：更新坐标与格子，之后的视野刷新重新判定它。
+     * 非有限坐标是上游校验的漏洞（移动输入在裁决前已丢弃）：抛 {@link IllegalArgumentException}，位置保持原样——
+     * 先检查再写，NaN / ±Inf 不会进 Transform、66、137 与写回。
+     */
     void relocate(ScenePlayer player, Vec3 position) {
+        if (!position.isFinite()) {
+            throw new IllegalArgumentException("位置必须有限 player=" + player.playerId() + " position=" + position);
+        }
         player.setPosition(position);
         view.moved(player);
     }
 
-    /** 本帧的视野刷新：处理上次刷新以来移动过的玩家，变化记进 {@code out}。 */
+    /** 本帧的视野刷新：重判位置变过的玩家（节奏见 {@link ViewIndex}），变化记进 {@code out}。 */
     void refreshViews(ViewChanges out) {
         view.refresh(out);
     }

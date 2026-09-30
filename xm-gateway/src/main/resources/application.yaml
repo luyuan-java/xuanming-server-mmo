@@ -17,6 +17,10 @@ spring:
 # 面向公网部署时必须把它与 /api 分开：设 MANAGEMENT_SERVER_PORT（另起端口）+ MANAGEMENT_SERVER_ADDRESS（绑内网地址），
 # 或在入口网关上拦掉 /actuator（architecture.md §11）。
 management:
+  # 管理端点与对外的 /api 分开：独立端口、默认只绑本机（与其他进程一致），公网入口永远看不到 /actuator
+  server:
+    port: 18105
+    address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
   endpoints:
     web:
       exposure:

@@ -33,9 +33,13 @@ record MoveInput(Vec3 location, Rotation rotation, Vec3 velocity, int inputSeq) 
                 stop.getInputSeq());
     }
 
-    /** 位置、朝向、速度全部有限。非有限输入整条丢弃（基线不查，会把 NaN 写进 Transform 并广播出去）。 */
-    boolean isFinite() {
-        return location.isFinite() && velocity.isFinite()
+    /**
+     * 可以进入裁决：位置在世界范围内（{@link MovementRules#insideWorld}，隐含有限），朝向、速度全部有限。
+     * 否则整条丢弃（基线不查：NaN 会写进 Transform 并广播出去，极端坐标原样接受）。
+     * 速度只要求有限：模长由 {@link MovementRules#clampSpeed} 截断，分量再大也不会溢出。
+     */
+    boolean isAcceptable() {
+        return MovementRules.insideWorld(location) && velocity.isFinite()
                 && Double.isFinite(rotation.getX()) && Double.isFinite(rotation.getY())
                 && Double.isFinite(rotation.getZ());
     }
