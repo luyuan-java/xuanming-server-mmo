@@ -1,5 +1,6 @@
 syntax = "proto3";
 option java_package = "com.game.proto.friend";
+option java_outer_classname = "FriendFriendTableOuterClass";
 option java_multiple_files = true;
 package friendpb;
 

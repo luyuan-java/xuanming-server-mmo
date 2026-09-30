@@ -1,0 +1,42 @@
+# xm-scene-manager 默认（local）配置：Dubbo 直连、不需要 Nacos 服务端。进程从仓库根目录启动。
+# 用 Nacos 做注册中心时加 --spring.profiles.active=nacos（见 application-nacos.yaml）。
+# 秘密只从环境变量注入：
+#   XM_DUBBO_SECRET  Dubbo 调用方鉴权密钥（必填，xm-login / xm-scene-manager / xm-gate 必须一致；缺失即拒绝启动）
+spring:
+  application:
+    name: xm-scene-manager
+  main:
+    web-application-type: none
+    # Dubbo / Netty 线程都是守护线程，靠它让非 Web 进程常驻；上下文关闭时退出。
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+xm:
+  # 对外通告地址（Dubbo 注册 / 通告用）；非本机部署用环境变量 XM_ADVERTISE_HOST 覆盖。
+  # 注意它不是绑定地址：Dubbo 把 127.* 视为无效绑定地址，host=127.0.0.1 时实际监听 0.0.0.0（DUBBO_IP_TO_BIND 也不接受回环），
+  # 端口无法只绑本机——调用方鉴权（XM_DUBBO_SECRET）是必需的；生产用 DUBBO_IP_TO_BIND 绑内网网卡并配防火墙。
+  advertise-host: 127.0.0.1
+  # 配置表目录（导表器 .pb 产物），相对进程工作目录；从别处启动时用 XM_TABLE_DIR 覆盖。
+  table-dir: config-data/tables
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  # scene-manager:
+  #   # 默认世界地图（scene_config_id）。不配 = World 表按表序第一行的 scene_id（当前为 1）。
+  #   default-world-config-id: 1
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    # 同机多个 Dubbo 进程会抢 QoS 端口 22222。
+    qos-enable: false
+  protocol:
+    name: tri
+    port: 20882
+    host: ${xm.advertise-host}
+  registry:
+    address: N/A
+  provider:
+    timeout: 3000

@@ -26,7 +26,8 @@
 // DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 // THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 syntax = "proto3";
-option java_package = "com.game.proto.common.base";
+option java_package = "com.game.proto";
+option java_outer_classname = "CommonBaseEmptyOuterClass";
 option java_multiple_files = true;
 
 option go_package = "common/base";

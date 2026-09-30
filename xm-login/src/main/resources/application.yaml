@@ -1,0 +1,85 @@
+# xm-login 默认（local）配置：Dubbo 直连、不需要 Nacos 服务端。进程从仓库根目录启动（table-dir 是相对路径）。
+# 用 Nacos 做注册中心时加 --spring.profiles.active=nacos（见 application-nacos.yaml）。
+#
+# 秘密只从环境变量注入，不写进本文件：
+#   XM_LOGIN_DEV_PASSWORD  开发口令（xm.login.mode=dev 时必填，缺失即拒绝启动）
+#   XM_MYSQL_PASSWORD      MySQL 密码（本机无密码的 root 可不设）
+#   XM_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填，xm-login / xm-scene-manager / xm-gate 必须一致；缺失即拒绝启动）
+spring:
+  application:
+    name: xm-login
+  main:
+    web-application-type: none
+    # Dubbo / Netty 线程都是守护线程，靠它让非 Web 进程常驻；上下文关闭时退出。
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    # createDatabaseIfNotExist：本地开发首次启动自动建库 xm_java。connect / socket 超时给阻塞 I/O 设上界，
+    # 数据库卡死时请求在客户端 15s 预算内失败，而不是把 login-worker 线程永久挂住。
+    url: jdbc:mysql://127.0.0.1:3306/xm_java?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000
+    username: ${XM_MYSQL_USER:root}
+    password: ${XM_MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    druid:
+      initial-size: 2
+      min-idle: 2
+      max-active: 32
+      # 取连接最多等 3s（Druid 默认 -1 = 无限等）。
+      max-wait: 3000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+  sql:
+    init:
+      # 表结构只由 xm-login 初始化（建表语句幂等：CREATE TABLE IF NOT EXISTS）。
+      mode: always
+      schema-locations: classpath:db/xm-player-schema.sql
+      encoding: UTF-8
+      continue-on-error: false
+
+xm:
+  # 对外通告地址（Dubbo 注册 / 通告用）；非本机部署用环境变量 XM_ADVERTISE_HOST 覆盖。
+  # 注意它不是绑定地址：Dubbo 把 127.* 视为无效绑定地址，host=127.0.0.1 时实际监听 0.0.0.0（DUBBO_IP_TO_BIND 也不接受回环），
+  # 端口无法只绑本机——调用方鉴权（XM_DUBBO_SECRET）是必需的；生产用 DUBBO_IP_TO_BIND 绑内网网卡并配防火墙。
+  advertise-host: 127.0.0.1
+  zone-id: 1
+  # 配置表目录（导表器 .pb 产物），相对进程工作目录；从别处启动时用 XM_TABLE_DIR 覆盖。
+  table-dir: config-data/tables
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  dubbo:
+    scene-manager-url: tri://127.0.0.1:20882
+  login:
+    # dev：启用开发口令认证（账号前缀白名单 + XM_LOGIN_DEV_PASSWORD）；prod：关闭，口令登录一律 2000（fail-closed）。
+    # 生产部署必须显式改成 prod。配置缺省（不写这一项）时代码按 prod 处理。
+    mode: dev
+    dev-account-prefixes:
+      - robot_
+      - dev_
+    max-players-per-account: 5
+    worker-threads: 16
+    worker-queue-capacity: 1024
+    # 进游戏时等 scene-manager 分配结果的上限（Dubbo 调用本身 3s 超时，这里是兜底）。
+    scene-assign-timeout: 5s
+    # 进游戏夺取数据归属时，上一个写者（旧实例）还没写回释放：请它让出并等待的上限，之后回 2005。
+    # 与 scene-assign-timeout 之和须小于客户端 EnterGame 的 15s 预算。
+    owner-claim-wait: 3s
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    # 同机多个 Dubbo 进程会抢 QoS 端口 22222。
+    qos-enable: false
+  protocol:
+    name: tri
+    port: 20881
+    host: ${xm.advertise-host}
+  registry:
+    address: N/A
+  provider:
+    timeout: 10000
+  consumer:
+    check: false

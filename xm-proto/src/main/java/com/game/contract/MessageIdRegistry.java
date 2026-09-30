@@ -1,6 +1,6 @@
 package com.game.contract;
 
-import com.game.proto.db.ProtoOption;
+import com.google.protobuf.Descriptors;
 import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
 import com.google.protobuf.DescriptorProtos.FileDescriptorSet;
 import com.google.protobuf.DescriptorProtos.FileOptions;
@@ -43,6 +43,9 @@ public final class MessageIdRegistry {
     public static final String DESCRIPTOR_SET_RESOURCE = "contract/contract.desc";
 
     private static final String CONTRACT_PROTO_PREFIX = "proto/";
+    /** 服务级自定义 option 的扩展字段名（mmorpg proto 里 {@code extend google.protobuf.ServiceOptions} 的字段名）。 */
+    static final String OPTION_IS_CLIENT_PROTOCOL_SERVICE = "OptionIsClientProtocolService";
+    static final String OPTION_IS_PLAYER_SERVICE = "OptionIsPlayerService";
 
     private final Map<Integer, MessageMethod> byId;
     private final Map<String, Integer> idByKey;
@@ -134,7 +137,8 @@ public final class MessageIdRegistry {
 
     private static MessageMethod toMessageMethod(int id, MethodDescriptor method, ClassLoader loader) {
         ServiceDescriptor service = method.getService();
-        boolean client = service.getOptions().getExtension(ProtoOption.optionIsClientProtocolService);
+        boolean client = serviceOptionIsTrue(service, OPTION_IS_CLIENT_PROTOCOL_SERVICE);
+        boolean player = serviceOptionIsTrue(service, OPTION_IS_PLAYER_SERVICE);
         return new MessageMethod(
                 id,
                 service.getName(),
@@ -143,14 +147,21 @@ public final class MessageIdRegistry {
                 defaultInstance(method.getInputType(), loader),
                 defaultInstance(method.getOutputType(), loader),
                 client,
-                domainOf(service.getFile().getName()));
+                player);
     }
 
-    /** {@code proto/login/login.proto} → {@code login}。 */
-    static String domainOf(String protoFileName) {
-        String rest = protoFileName.substring(CONTRACT_PROTO_PREFIX.length());
-        int slash = rest.indexOf('/');
-        return slash < 0 ? "" : rest.substring(0, slash);
+    /**
+     * 按扩展字段<b>名字</b>读服务上的布尔自定义 option，不引用定义它的生成类：那个类名由 proto 文件路径推出，
+     * mmorpg 整理目录时会变（见 docs/design/architecture.md §1）。生成代码构建描述符时已用扩展注册表解析过 option，
+     * 所以扩展字段出现在 {@code getAllFields()} 里。
+     */
+    static boolean serviceOptionIsTrue(ServiceDescriptor service, String optionName) {
+        for (Map.Entry<Descriptors.FieldDescriptor, Object> e : service.getOptions().getAllFields().entrySet()) {
+            if (e.getKey().isExtension() && e.getKey().getName().equals(optionName)) {
+                return Boolean.TRUE.equals(e.getValue());
+            }
+        }
+        return false;
     }
 
     /**

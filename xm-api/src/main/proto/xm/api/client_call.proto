@@ -15,7 +15,7 @@ message SessionContext {
   uint32 zone_id = 4;
   // 已认证账号；未登录为空。
   string account = 5;
-  // 已绑定玩家；未进游戏为 0。
+  // 已绑定玩家；未进游戏（含进场失败、LeaveGame 之后）为 0。login 据此拒绝已在游戏里的会话再次 EnterGame / CreatePlayer。
   uint64 player_id = 6;
   string client_ip = 7;
 }
@@ -30,9 +30,13 @@ message ClientCall {
 }
 
 message ClientReply {
-  // 应答消息的序列化字节；为空且 tip_id 为 0 时 gate 不回包。
+  // 应答消息的序列化字节，可以是 0 字节（proto3 全默认值的应答序列化后就是空，如新账号的 LoginResponse）。
+  // 业务错误写在应答体自己的 error_message 字段里（客户端契约：robot / 客户端只看应答体，不看信封）。
+  // 是否回包不看 body 是否为空，由 gate 按契约的应答类型决定：应答类型不是 Empty 的方法一律回包（哪怕 0 字节）；
+  // 应答类型是 Empty 的方法只在 tip_id 非 0 时回包。
   bytes body = 1;
-  // 非 0 表示失败：gate 放进 MessageContent.error_message.id。
+  // 只表示传输层失败（后端没能按方法处理这次调用：消息号不认识、请求体解析失败等），gate 放进
+  // MessageContent.error_message.id。业务错误不用这个字段。
   uint32 tip_id = 2;
   repeated string tip_parameters = 3;
   // 给 gate 的会话指令，按顺序执行。
@@ -44,6 +48,7 @@ message SessionDirective {
     BindAccount bind_account = 1;
     EnterScene enter_scene = 2;
     CloseSession close_session = 3;
+    UnbindPlayer unbind_player = 4;
   }
 }
 
@@ -66,11 +71,25 @@ message CloseSession {
   uint32 tip_id = 1;
 }
 
+// 离开游戏（LeaveGame 成功）：gate 向会话所在 scene 节点发 PlayerLeave{voluntary=true}（不在场景里则不发），
+// 并清掉会话上的玩家与场景绑定；账号绑定保留，客户端可以回到选角。
+message UnbindPlayer {
+}
+
 // gate 通知后端会话结束（断线或主动离开）。
 message SessionClosed {
   SessionContext session = 1;
   // true = 客户端主动 LeaveGame；false = 断线。
   bool voluntary = 2;
+}
+
+// gate 通知 login：一条 EnterScene 指令没有送到任何 scene（会话已在关闭、链路层已关、建链失败），
+// 这次进游戏夺得的归属（player_id, owner_epoch）没有写者，login 可以立即释放，不必等租约过期。
+// 只在 gate 确定 PlayerEnter 从未写上链路时才发；已写出的进场由 scene 负责释放。
+message AbandonedEnter {
+  SessionContext session = 1;
+  uint64 player_id = 2;
+  uint64 owner_epoch = 3;
 }
 
 message Ack {

@@ -1,13 +1,10 @@
 package com.game.common.token;
 
-import com.game.proto.common.base.GateTokenPayload;
+import com.game.proto.GateTokenPayload;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.nio.charset.StandardCharsets;
-import java.security.InvalidKeyException;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -21,15 +18,10 @@ import javax.crypto.spec.SecretKeySpec;
  */
 public final class GateTokens {
 
-    private static final String ALGORITHM = "HmacSHA256";
-
     private final SecretKeySpec key;
 
     public GateTokens(byte[] secret) {
-        if (secret == null || secret.length == 0) {
-            throw new IllegalArgumentException("gate 令牌密钥不能为空");
-        }
-        this.key = new SecretKeySpec(secret.clone(), ALGORITHM);
+        this.key = HmacSha256Hex.key(secret, "gate 令牌密钥");
     }
 
     public static GateTokens ofUtf8(String secret) {
@@ -70,13 +62,7 @@ public final class GateTokens {
     }
 
     private String hexHmac(byte[] payload) {
-        try {
-            Mac mac = Mac.getInstance(ALGORITHM);
-            mac.init(key);
-            return HexFormat.of().formatHex(mac.doFinal(payload));
-        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
-            throw new IllegalStateException("HMAC-SHA256 不可用", e);
-        }
+        return HmacSha256Hex.hex(key, payload);
     }
 
     public enum Failure {

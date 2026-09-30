@@ -1,0 +1,305 @@
+package com.game.scene;
+
+import com.game.api.proto.SceneEntry;
+import com.game.api.proto.SceneNodeInfo;
+import com.game.common.id.Snowflake;
+import com.game.common.token.NodeLinkAuth;
+import com.game.contract.MessageIdRegistry;
+import com.game.discovery.NodeDirectory;
+import com.game.discovery.NodeIdLease;
+import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
+import com.game.player.store.PlayerStore;
+import com.game.scene.discovery.SceneDirectoryPublisher;
+import com.game.scene.link.GateLinks;
+import com.game.scene.link.LinkIdentity;
+import com.game.scene.link.NodeLinkHandler;
+import com.game.scene.link.NodeLinkServer;
+import com.game.scene.link.SceneLinkService;
+import com.game.scene.ownership.OwnerLeaseRenewer;
+import com.game.scene.ownership.OwnerTakeoverSubscriber;
+import com.game.scene.storage.StoragePlayerRepository;
+import com.game.scene.world.ClientRequestHandler;
+import com.game.scene.world.SceneMessageIds;
+import com.game.scene.world.SceneTables;
+import com.game.scene.world.SceneWorld;
+import io.netty.channel.DefaultEventLoop;
+import io.netty.util.concurrent.DefaultThreadFactory;
+import java.time.Duration;
+import java.time.InstantSource;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.ByteArrayCodec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.SmartLifecycle;
+
+/**
+ * 场景节点的装配与生命周期（组合根）。启动、停止的顺序都写在这里，别处不隐式创建线程。
+ *
+ * <p>线程：
+ * <ul>
+ *   <li>{@code scene-logic}（1 个 {@link DefaultEventLoop}）：唯一拥有场景 / 玩家 / 链路登记表的线程；</li>
+ *   <li>{@code scene-link-*}：Netty 链路 I/O，只做编解码与握手，事件投递到逻辑线程（每条链路有积压上限，见 NodeLinkHandler）；</li>
+ *   <li>{@code scene-storage}：有界线程池，执行 MySQL 阻塞调用（加载、写回、释放、续约），结果投递回逻辑线程；</li>
+ *   <li>{@code scene-sched}：节点号续租、节点目录发布、归属续约的调度（Redis I/O；MySQL 交给存储线程池）。</li>
+ * </ul>
+ *
+ * <p>节点号租约丢失时（号可能已被别的实例占用，雪花号与目录条目都会撞）：停止刷新目录、关闭监听、
+ * 拒绝新进场；已在场玩家继续服务直到离开，由运维决定何时重启。
+ */
+public class SceneNode implements SmartLifecycle {
+
+    private static final Logger log = LoggerFactory.getLogger(SceneNode.class);
+
+    /** 节点号即雪花 worker（10 位），0 保留不用。 */
+    static final int MIN_NODE_ID = 1;
+    static final int MAX_NODE_ID = Snowflake.MAX_WORKER;
+    static final Duration LEASE_TTL = Duration.ofSeconds(15);
+    /** 其他线程同步等待逻辑线程执行一个任务的上限（目录快照、归属快照、启动建场景）。停服写回不用它，用整个停服预算。 */
+    private static final long LOGIC_CALL_TIMEOUT_MS = 5_000;
+
+    private final SceneNodeProperties props;
+    private final RedissonClient redis;
+    private final PlayerStore playerStore;
+    private final MessageIdRegistry registry;
+    private final SceneTables tables;
+    private final NodeLinkAuth linkAuth;
+    private final String instanceId = UUID.randomUUID().toString();
+    /** 最近一次目录快照里的在线人数（停服写回没能执行时报告用，任意线程可读）。 */
+    private final AtomicInteger approxPlayers = new AtomicInteger();
+
+    // 以下在 start() 里依序创建、release() 里逆序释放；租约丢失回调在调度线程上读取，所以都是 volatile。
+    private volatile ScheduledExecutorService scheduler;
+    private volatile NodeIdLease lease;
+    private volatile DefaultEventLoop logicLoop;
+    private volatile ThreadPoolExecutor storageExecutor;
+    private volatile GateLinks links;
+    private volatile SceneWorld world;
+    private volatile NodeLinkServer linkServer;
+    private volatile SceneDirectoryPublisher publisher;
+    private volatile OwnerLeaseRenewer leaseRenewer;
+    private volatile OwnerTakeoverSubscriber takeoverSubscriber;
+    private volatile boolean running;
+
+    /**
+     * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
+     */
+    public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
+                     MessageIdRegistry registry, SceneTables tables, NodeLinkAuth linkAuth) {
+        this.props = props;
+        this.redis = redis;
+        this.playerStore = playerStore;
+        this.registry = registry;
+        this.tables = tables;
+        this.linkAuth = linkAuth;
+    }
+
+    @Override
+    public synchronized void start() {
+        if (running) {
+            return;
+        }
+        try {
+            doStart();
+            running = true;
+        } catch (Exception e) {
+            release();
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            throw new IllegalStateException("场景节点启动失败", e);
+        }
+    }
+
+    private void doStart() throws Exception {
+        SceneNodeProperties.SceneSettings settings = props.scene();
+        int zoneId = props.zoneId();
+        SceneMessageIds ids = SceneMessageIds.resolve(registry);
+
+        scheduler = Executors.newScheduledThreadPool(2, new DefaultThreadFactory("scene-sched", true));
+        lease = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE, zoneId, MIN_NODE_ID, MAX_NODE_ID, instanceId,
+                LEASE_TTL, this::onLeaseLost);
+        int nodeId = lease.nodeId();
+        Snowflake snowflake = new Snowflake(nodeId);
+
+        logicLoop = new DefaultEventLoop(new DefaultThreadFactory("scene-logic"));
+        Executor logic = this::runOnLogic;
+        storageExecutor = new ThreadPoolExecutor(settings.storageThreads(), settings.storageThreads(),
+                0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(settings.storageQueueCapacity()),
+                new DefaultThreadFactory("scene-storage"), new ThreadPoolExecutor.AbortPolicy());
+        StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic);
+
+        GateLinks gateLinks = new GateLinks();
+        SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId);
+        links = gateLinks;
+        world = sceneWorld;
+        ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables);
+        callOnLogic(() -> {
+            tables.worldSceneConfigIds().forEach(sceneWorld::createScene);
+            return null;
+        });
+
+        // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
+        takeoverSubscriber = new OwnerTakeoverSubscriber(
+                redis.getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE),
+                (playerId, epoch) -> postToLogic(() -> sceneWorld.onTakeoverRequested(playerId, epoch)));
+        takeoverSubscriber.start();
+        leaseRenewer = new OwnerLeaseRenewer(() -> callOnLogic(sceneWorld::ownedPlayers), playerStore, storageExecutor,
+                lost -> postToLogic(() -> sceneWorld.onOwnershipLost(lost)));
+        leaseRenewer.start(scheduler);
+
+        LinkIdentity identity = new LinkIdentity(nodeId, instanceId, zoneId);
+        SceneLinkService linkService = new SceneLinkService(identity, gateLinks, sceneWorld, requests);
+        AtomicLong linkIds = new AtomicLong();
+        Duration handshakeTimeout = settings.linkHandshakeTimeout();
+        int maxPendingFrames = settings.linkMaxPendingFrames();
+        linkServer = new NodeLinkServer(settings.linkIoThreads());
+        int linkPort = linkServer.start(settings.linkBindHost(), settings.linkPort(),
+                () -> new NodeLinkHandler(identity, linkAuth, InstantSource.system(), linkService, logic, linkIds,
+                        handshakeTimeout, maxPendingFrames));
+
+        SceneNodeInfo info = SceneNodeInfo.newBuilder()
+                .setZoneId(zoneId)
+                .setNodeId(nodeId)
+                .setInstanceId(instanceId)
+                .setLinkHost(props.advertiseHost())
+                .setLinkPort(linkPort)
+                .build();
+        publisher = new SceneDirectoryPublisher(new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser()), info,
+                () -> callOnLogic(() -> {
+                    List<SceneEntry> entries = sceneWorld.sceneEntries();
+                    approxPlayers.set(entries.stream().mapToInt(SceneEntry::getPlayerCount).sum());
+                    return entries;
+                }));
+        publisher.start(scheduler);
+
+        log.info("场景节点已启动 zone={} node_id={} instance={} link={}:{} 场景数={}", zoneId, nodeId, instanceId,
+                props.advertiseHost(), linkPort, tables.worldSceneConfigIds().size());
+    }
+
+    @Override
+    public synchronized void stop() {
+        if (!running) {
+            return;
+        }
+        running = false;
+        log.info("场景节点停止中");
+        release();
+        log.info("场景节点已停止");
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
+
+    /**
+     * 按启动的逆序释放，每一步都容忍前面没建出来（启动失败时也走这里）：
+     * 摘目录 → 停监听 → 停接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
+     * → 逻辑线程上写回全部玩家并关链路，写回提交之后才关存储线程池并等写回落库（{@link SceneShutdown}，共用一个停服预算）
+     * → 关线程 → 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
+     */
+    private void release() {
+        SceneDirectoryPublisher p = publisher;
+        NodeIdLease l = lease;
+        if (p != null) {
+            p.stop(l != null && !l.isLost());
+        }
+        NodeLinkServer server = linkServer;
+        if (server != null) {
+            server.stopAccepting();
+        }
+        OwnerTakeoverSubscriber subscriber = takeoverSubscriber;
+        if (subscriber != null) {
+            subscriber.stop();
+        }
+        OwnerLeaseRenewer renewer = leaseRenewer;
+        if (renewer != null) {
+            renewer.stop();
+        }
+        if (server != null) {
+            server.closeLinks();
+        }
+        SceneWorld w = world;
+        GateLinks g = links;
+        ThreadPoolExecutor storage = storageExecutor;
+        DefaultEventLoop loop = logicLoop;
+        if (loop != null && w != null && g != null && storage != null) {
+            SceneShutdown.Result result = SceneShutdown.writeBackThenDrainStorage(loop, () -> {
+                int count = w.shutdown();
+                g.closeAll();
+                return count;
+            }, storage, props.scene().shutdownSaveTimeout(), approxPlayers::get, System::nanoTime);
+            log.info("停服写回 已执行={} 人数={} 丢弃存储任务={}", result.writeBackRan(), result.playersSubmitted(),
+                    result.droppedTasks());
+        } else if (storage != null) {
+            storage.shutdownNow();
+        }
+        if (server != null) {
+            server.shutdown();
+        }
+        if (loop != null) {
+            loop.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
+        }
+        if (l != null) {
+            l.close();
+        }
+        ScheduledExecutorService sched = scheduler;
+        if (sched != null) {
+            sched.shutdownNow();
+        }
+    }
+
+    /** 租约丢失回调（调度线程上，只调一次）。 */
+    private void onLeaseLost() {
+        log.error("场景节点号租约丢失：停止刷新节点目录、关闭链路监听、拒绝新进场；在场玩家继续服务至离开，请尽快重启本节点");
+        SceneDirectoryPublisher p = publisher;
+        if (p != null) {
+            p.stop(false);
+        }
+        NodeLinkServer server = linkServer;
+        if (server != null) {
+            server.stopAccepting();
+        }
+        SceneWorld w = world;
+        if (w != null) {
+            postToLogic(w::stopAcceptingEnters);
+        }
+    }
+
+    /** 投递到逻辑线程；逻辑线程已停（停服中）时丢弃并记 DEBUG。 */
+    private void postToLogic(Runnable task) {
+        try {
+            runOnLogic(task);
+        } catch (RejectedExecutionException e) {
+            log.debug("逻辑线程已停止，丢弃任务");
+        }
+    }
+
+    /** 投递到逻辑线程；任务里的异常记错误日志，不让它悄悄吞掉。逻辑线程已停时抛 {@link RejectedExecutionException}。 */
+    private void runOnLogic(Runnable task) {
+        logicLoop.execute(() -> {
+            try {
+                task.run();
+            } catch (RuntimeException e) {
+                log.error("场景逻辑任务异常", e);
+            }
+        });
+    }
+
+    private <T> T callOnLogic(Callable<T> task) throws Exception {
+        return logicLoop.submit(task).get(LOGIC_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+    }
+}

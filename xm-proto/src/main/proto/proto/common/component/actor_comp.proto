@@ -1,5 +1,6 @@
 syntax = "proto3";
-option java_package = "com.game.proto.common.component";
+option java_package = "com.game.proto";
+option java_outer_classname = "CommonComponentActorCompOuterClass";
 option java_multiple_files = true;
 option go_package = "common/component";
 

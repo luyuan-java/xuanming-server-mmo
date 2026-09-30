@@ -1,0 +1,45 @@
+# xm-gate 默认（local）配置：Dubbo 直连 login，不需要 Nacos。从仓库根目录启动。
+# 秘密只从环境变量注入（缺失即启动失败）：
+#   XM_GATE_TOKEN_SECRET  gate 令牌密钥，须与 xm-gateway 一致
+#   XM_NODE_LINK_SECRET   gate → scene 节点链路握手密钥，须与 xm-scene 一致
+#   XM_DUBBO_SECRET       Dubbo 调用方鉴权密钥，须与 xm-login / xm-scene-manager 一致
+spring:
+  application:
+    name: xm-gate
+  main:
+    web-application-type: none
+
+xm:
+  zone-id: 1
+  # 写进节点目录、由 gateway 下发给客户端的 gate 地址
+  advertise-host: 127.0.0.1
+  # 配置表目录（只读 MessageLimiter 表：按消息号限频，缺省每秒 3 条），相对进程工作目录；从别处启动时用 XM_TABLE_DIR 覆盖。
+  table-dir: config-data/tables
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  dubbo:
+    login-url: tri://127.0.0.1:20881
+  gate:
+    client-port: 11000
+    worker-threads: 0
+    link-threads: 2
+    max-pending-requests: 64
+    illegal-packet-threshold: 50
+    handshake-timeout: 30s
+    link-connect-timeout: 3s
+    link-hello-timeout: 5s
+    link-max-queued-frames: 10000
+    shutdown-drain-timeout: 3s
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    # 同机多个 Dubbo 进程会抢 QoS 端口 22222
+    qos-enable: false
+  registry:
+    address: N/A
+  consumer:
+    check: false
+    # 与 mmorpg 路由服 ForwardTimeoutMs 一致；robot 登录各步等 15s
+    timeout: 5000

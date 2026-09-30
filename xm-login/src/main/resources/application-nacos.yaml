@@ -1,0 +1,9 @@
+# nacos profile：Dubbo 注册到 Nacos（只做 Dubbo 注册中心，见 architecture.md §6），
+# 同时清空直连 URL，让对 scene-manager 的引用改走注册中心发现。
+dubbo:
+  registry:
+    address: nacos://${XM_NACOS_ADDR:127.0.0.1:8848}
+
+xm:
+  dubbo:
+    scene-manager-url: ""

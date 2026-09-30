@@ -12,12 +12,33 @@
 
     <artifactId>xm-api</artifactId>
     <name>xm-api</name>
-    <description>Java 版内部契约：Dubbo 服务接口与内部 protobuf 消息（包 xm.api，不是客户端契约）</description>
+    <description>Java 版内部契约：Dubbo 服务接口、调用方鉴权过滤器与内部 protobuf 消息（包 xm.api，不是客户端契约）</description>
 
     <dependencies>
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <!-- Dubbo 调用鉴权的 MAC 算法（DubboCallAuth） -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+        </dependency>
+        <!-- 只有 com.game.api.auth 的 Dubbo 过滤器用到；optional：不用 Dubbo 的进程（xm-scene 等）不会被带进 Dubbo，
+             用 Dubbo 的进程自己已依赖 dubbo-spring-boot-starter -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -30,6 +51,8 @@
                     <sourceDirectories>
                         <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
                     </sourceDirectories>
+                    <!-- 本模块的 proto 不 import 任何依赖里的 proto；不扫描项目依赖，免得把 Dubbo 的传递依赖也拉来解析 -->
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
                 </configuration>
             </plugin>
         </plugins>

@@ -1,0 +1,34 @@
+# xm-gateway：客户端 HTTP 入口（区服列表、分配 gate）。进程从仓库根目录启动。
+# 必需环境变量：XM_GATE_TOKEN_SECRET（gate 令牌签名密钥，须与 xm-gate 一致；缺失则启动失败）。
+server:
+  port: 18081
+  shutdown: graceful
+
+spring:
+  application:
+    name: xm-gateway
+  jackson:
+    # 客户端契约：JSON 键一律 snake_case（Go robot / UE 客户端按下划线键名解析）。
+    property-naming-strategy: SNAKE_CASE
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+xm:
+  zone-id: 1
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+    # 单条命令最坏阻塞 = (retry-attempts + 1) × timeout-ms + retry-attempts × retry-delay-ms，
+    # 必须低于客户端 HTTP 超时（robot 单次 assign-gate 等 5s）；默认 2×2000+200 = 4.2s（见 RedisProperties）。
+    connect-timeout-ms: 2000
+    timeout-ms: 2000
+    retry-attempts: 1
+    retry-delay-ms: 200
+  gateway:
+    # 区服列表：顺序即 /api/server-list 的展示顺序。status 取 OPEN / MAINTENANCE / CLOSED，必填。
+    # maintenance-msg 只在 MAINTENANCE / CLOSED 时随区服列表下发。
+    zones:
+      - zone-id: ${xm.zone-id}
+        name: 一区
+        status: OPEN
+        recommended: true

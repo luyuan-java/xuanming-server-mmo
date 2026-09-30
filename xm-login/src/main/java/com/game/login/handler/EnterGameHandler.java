@@ -1,0 +1,272 @@
+package com.game.login.handler;
+
+import com.game.api.SceneDirectoryService;
+import com.game.api.proto.AssignSceneRequest;
+import com.game.api.proto.AssignSceneResponse;
+import com.game.api.proto.EnterScene;
+import com.game.api.proto.SessionContext;
+import com.game.api.proto.SessionDirective;
+import com.game.login.dispatch.ClientMessageHandler;
+import com.game.login.dispatch.HandlerReply;
+import com.game.login.dispatch.InFlightKeys;
+import com.game.login.dispatch.Tips;
+import com.game.login.ownership.OwnerTakeovers;
+import com.game.player.store.PlayerRow;
+import com.game.player.store.PlayerStore;
+import com.game.player.store.PlayerStore.ClaimResult;
+import com.game.proto.TipInfoMessage;
+import com.game.proto.login.EnterGameRequest;
+import com.game.proto.login.EnterGameResponse;
+import com.game.table.LoginErrorTip;
+import com.game.table.SceneErrorTip;
+import com.google.protobuf.Message;
+import java.time.Duration;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.function.LongSupplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * EnterGame（26）：校验角色归属 → 向 scene-manager 要落点 → 夺取玩家数据归属（owner_epoch 自增）→
+ * 回 {@code EnterGameResponse{player_id}}，并让 gate 把会话绑定到玩家、送进 (场景节点, 场景)。
+ *
+ * <p>客户端可见契约（mmorpg 登录契约 §6）：
+ * <ul>
+ *   <li>无会话 → 2018；会话未登录，或会话上已绑定玩家（不论是不是同一个角色）→ 2028。
+ *       与基线一致：基线进游戏成功即删除登录会话，之后的 EnterGame 一律 2028。会话回到「已登录、未进游戏」有两条路：
+ *       LeaveGame（gate 解绑玩家），或进场景异步失败（gate 收到 3023 时同样解绑玩家）——所以失败后可在同一连接上重试。
+ *       <b>不放行「同一角色再次 EnterGame」</b>：那会在旧实例的最终写回落库之前夺权，旧写回被围栏拒掉、在线进度全部丢失；</li>
+ *   <li>同一角色的进场在途 → 2005；角色不存在或不属于本账号 → 2011；</li>
+ *   <li>scene-manager 回 tip → 原样放进 {@code error_message}；调用失败 / 超时 → 3023 kEnterSceneFailed；</li>
+ *   <li>归属仍被上一个写者持有（旧实例还没写回释放、租约也没过期）：请持有者让出（{@link OwnerTakeovers}，
+ *       旧会话被踢下线），在 {@code claimWait} 内退避重试夺权；等不到 → 2005 kLoginInProgress，客户端稍后重试；</li>
+ *   <li>成功：{@code player_id} = 请求值，不设置 {@code error_message}，合服相关两个字段保持默认（0 / false）。</li>
+ * </ul>
+ *
+ * <p>线程：归属校验、夺权在工作线程上同步查库；等 scene-manager 与退避重试都是异步组合，不阻塞任何线程。
+ * 在途闸门一直持有到整条异步链结束。
+ *
+ * <p>数据一致性：owner_epoch 在分配到场景之后才夺取，分配失败不产生夺权；夺权只在上一个写者已释放（最终写回已落库）
+ * 或其租约已过期时成功（{@link PlayerStore#claimOwnership}），新写者加载到的一定是上一个写者写回后的状态。
+ */
+public final class EnterGameHandler implements ClientMessageHandler<EnterGameRequest> {
+
+    private static final Logger log = LoggerFactory.getLogger(EnterGameHandler.class);
+
+    /** 夺权撞上仍被持有的归属后，第一次重试前等多久；之后每次翻倍，封顶 {@link #MAX_CLAIM_BACKOFF}。 */
+    static final Duration FIRST_CLAIM_BACKOFF = Duration.ofMillis(100);
+    static final Duration MAX_CLAIM_BACKOFF = Duration.ofMillis(800);
+
+    private final PlayerStore store;
+    private final SceneDirectoryService sceneDirectory;
+    private final OwnerTakeovers takeovers;
+    private final Executor executor;
+    private final Function<Duration, Executor> timer;
+    private final LongSupplier nanoClock;
+    private final int defaultZoneId;
+    private final Duration assignTimeout;
+    private final Duration claimWait;
+    private final InFlightKeys<Long> playersInFlight = new InFlightKeys<>();
+
+    /**
+     * @param takeovers     归属仍被持有时请持有者让出
+     * @param executor      login 工作线程池（查库、夺权在上面执行）
+     * @param defaultZoneId 会话没带 zone 时用的 zone（本 login 的 zone）
+     * @param assignTimeout 等 scene-manager 结果的兜底上限；超时按调用失败处理，保证在途闸门一定释放
+     * @param claimWait     归属仍被持有时最多等多久（期间退避重试夺权），之后回 2005
+     */
+    public EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                            Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait) {
+        this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait,
+                delay -> CompletableFuture.delayedExecutor(delay.toMillis(), TimeUnit.MILLISECONDS),
+                System::nanoTime);
+    }
+
+    /**
+     * 同上；退避计时与单调时钟可注入（测试用）。
+     *
+     * @param timer     给定延迟后执行一个很轻的任务（只负责把重试交回工作线程池，不在上面做阻塞 I/O）
+     * @param nanoClock 单调时钟（纳秒），只用于等待截止时间
+     */
+    EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                     Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
+                     Function<Duration, Executor> timer, LongSupplier nanoClock) {
+        this.store = store;
+        this.sceneDirectory = sceneDirectory;
+        this.takeovers = takeovers;
+        this.executor = executor;
+        this.defaultZoneId = defaultZoneId;
+        this.assignTimeout = assignTimeout;
+        this.claimWait = claimWait;
+        this.timer = timer;
+        this.nanoClock = nanoClock;
+    }
+
+    @Override
+    public String methodName() {
+        return "EnterGame";
+    }
+
+    @Override
+    public Class<EnterGameRequest> requestType() {
+        return EnterGameRequest.class;
+    }
+
+    @Override
+    public Class<EnterGameResponse> responseType() {
+        return EnterGameResponse.class;
+    }
+
+    @Override
+    public CompletableFuture<HandlerReply> handle(SessionContext session, EnterGameRequest request) {
+        if (session.getSessionId() == 0) {
+            return done(error(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE));
+        }
+        String account = session.getAccount();
+        long playerId = request.getPlayerId();
+        if (account.isEmpty() || session.getPlayerId() != 0) {
+            return done(error(LoginErrorTip.login_error.kLoginSessionNotFound_VALUE));
+        }
+        if (!playersInFlight.tryAcquire(playerId)) {
+            log.info("同一角色进场在途，拒绝 player={} session={}", playerId, session.getSessionId());
+            return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
+        }
+        CompletableFuture<HandlerReply> result;
+        try {
+            result = enter(session, account, playerId);
+        } catch (RuntimeException e) {
+            playersInFlight.release(playerId);
+            throw e;
+        }
+        return result.whenComplete((reply, error) -> playersInFlight.release(playerId));
+    }
+
+    private CompletableFuture<HandlerReply> enter(SessionContext session, String account, long playerId) {
+        Optional<PlayerRow> row = store.findPlayer(playerId);
+        if (row.isEmpty() || !account.equals(row.get().getAccount())) {
+            log.info("进游戏拒绝：角色不属于本账号 account={} player={} 存在={}", account, playerId, row.isPresent());
+            return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
+        }
+        int zoneId = session.getZoneId() != 0 ? session.getZoneId() : defaultZoneId;
+        AssignSceneRequest assignRequest = AssignSceneRequest.newBuilder()
+                .setZoneId(zoneId)
+                .setPlayerId(playerId)
+                .setPreferredSceneConfigId(row.get().getSceneConfigId())
+                .build();
+        return callAssign(assignRequest)
+                .handleAsync((assigned, failure) -> afterAssign(session, playerId, assigned, failure), executor)
+                .thenCompose(Function.identity());
+    }
+
+    /** 把同步抛出、返回 null、超时都统一成一个一定会完成的 future（copy 出来再加超时，不改动 Dubbo 的 future）。 */
+    private CompletableFuture<AssignSceneResponse> callAssign(AssignSceneRequest request) {
+        CompletableFuture<AssignSceneResponse> future;
+        try {
+            future = sceneDirectory.assign(request);
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+        if (future == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("scene-manager 返回了 null future"));
+        }
+        return future.copy().orTimeout(assignTimeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, AssignSceneResponse assigned,
+                                                        Throwable failure) {
+        if (failure != null) {
+            Throwable cause = failure instanceof CompletionException && failure.getCause() != null
+                    ? failure.getCause() : failure;
+            log.warn("进游戏失败：场景分配调用失败 player={} session={}: {}", playerId, session.getSessionId(), cause.toString());
+            return done(error(SceneErrorTip.scene_error.kEnterSceneFailed_VALUE));
+        }
+        if (assigned.getTipId() != 0) {
+            log.info("进游戏失败：场景分配拒绝 player={} tip={}", playerId, assigned.getTipId());
+            return done(error(assigned.getTipId()));
+        }
+        long deadline = nanoClock.getAsLong() + claimWait.toNanos();
+        return claim(session, playerId, assigned, deadline, FIRST_CLAIM_BACKOFF);
+    }
+
+    /** 在工作线程上夺权一次；仍被持有就请持有者让出，退避后在工作线程上再试，直到截止时间。 */
+    private CompletableFuture<HandlerReply> claim(SessionContext session, long playerId, AssignSceneResponse assigned,
+                                                  long deadline, Duration backoff) {
+        ClaimResult result = store.claimOwnership(playerId);
+        if (result instanceof ClaimResult.Claimed claimed) {
+            return done(accepted(session, playerId, assigned, claimed.ownerEpoch()));
+        }
+        if (result instanceof ClaimResult.NotFound) {
+            log.warn("进游戏失败：夺权时角色已不存在 player={}", playerId);
+            return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
+        }
+        long heldEpoch = ((ClaimResult.Held) result).ownerEpoch();
+        takeovers.request(playerId, heldEpoch);
+        long remainingNanos = deadline - nanoClock.getAsLong();
+        if (remainingNanos <= 0) {
+            log.warn("进游戏失败：玩家数据归属仍被持有，{} 内没等到释放 player={} session={} held_epoch={}",
+                    claimWait, playerId, session.getSessionId(), heldEpoch);
+            return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
+        }
+        log.info("玩家数据归属仍被持有，已请持有者让出，{}ms 后重试夺权 player={} session={} held_epoch={}",
+                Math.min(backoff.toMillis(), TimeUnit.NANOSECONDS.toMillis(remainingNanos)), playerId,
+                session.getSessionId(), heldEpoch);
+        Duration delay = backoff.compareTo(Duration.ofNanos(remainingNanos)) < 0 ? backoff : Duration.ofNanos(remainingNanos);
+        Duration nextBackoff = backoff.multipliedBy(2).compareTo(MAX_CLAIM_BACKOFF) < 0
+                ? backoff.multipliedBy(2) : MAX_CLAIM_BACKOFF;
+        return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, assigned, deadline, nextBackoff));
+    }
+
+    /**
+     * 延迟后在工作线程上完成的 future。工作队列满（拒绝）时以异常完成——链一定会结束，在途闸门一定会释放
+     * （不能直接用 {@code delayedExecutor(…, executor)}：到点后投递被拒只会被吞掉，future 永远不完成）。
+     */
+    private CompletableFuture<Void> onWorkerAfter(Duration delay) {
+        CompletableFuture<Void> ready = new CompletableFuture<>();
+        try {
+            timer.apply(delay).execute(() -> {
+                try {
+                    executor.execute(() -> ready.complete(null));
+                } catch (RejectedExecutionException e) {
+                    ready.completeExceptionally(e);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            ready.completeExceptionally(e);
+        }
+        return ready;
+    }
+
+    private static HandlerReply accepted(SessionContext session, long playerId, AssignSceneResponse assigned, long epoch) {
+        log.info("进游戏受理 player={} gate={} session={} scene_node={} scene={} scene_config={} owner_epoch={}",
+                playerId, session.getGateNodeId(), session.getSessionId(), assigned.getSceneNodeId(),
+                assigned.getSceneId(), assigned.getSceneConfigId(), epoch);
+        EnterGameResponse response = EnterGameResponse.newBuilder().setPlayerId(playerId).build();
+        SessionDirective directive = SessionDirective.newBuilder()
+                .setEnterScene(EnterScene.newBuilder()
+                        .setPlayerId(playerId)
+                        .setSceneNodeId(assigned.getSceneNodeId())
+                        .setSceneId(assigned.getSceneId())
+                        .setOwnerEpoch(epoch))
+                .build();
+        return HandlerReply.of(response, directive);
+    }
+
+    @Override
+    public Optional<Message> failureBody(TipInfoMessage tip) {
+        return Optional.of(EnterGameResponse.newBuilder().setErrorMessage(tip).build());
+    }
+
+    private static HandlerReply error(int tipId) {
+        return HandlerReply.of(EnterGameResponse.newBuilder().setErrorMessage(Tips.of(tipId)).build());
+    }
+
+    private static CompletableFuture<HandlerReply> done(HandlerReply reply) {
+        return CompletableFuture.completedFuture(reply);
+    }
+}

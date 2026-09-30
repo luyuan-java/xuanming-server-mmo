@@ -1,5 +1,6 @@
 syntax = "proto3";
 option java_package = "com.game.proto.login";
+option java_outer_classname = "LoginLoginOuterClass";
 option java_multiple_files = true;
 
 option go_package = "login/proto/login";

@@ -1,0 +1,18 @@
+// Java 版内部契约：玩家数据归属（player.owner_epoch）的接管请求。
+// 走 Redis pub/sub（频道名见 xm-discovery 的 RedisKeys.ownerTakeoverTopic），login 发、全部 scene 节点收。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// login 进游戏夺权时发现归属仍被持有（上一个写者没释放、租约也没过期），请持有者让出：
+// 持有这个 (player_id, owner_epoch) 实例的 scene 写回并释放归属、把旧会话踢下线（23 {2017} 后断开）。
+// 投递不保证（pub/sub）；login 在等待窗口内每次重试夺权都会重发，scene 处理幂等。
+message OwnerTakeover {
+  uint64 player_id = 1;
+  // 请求让出的 epoch（login 读到的当前持有 epoch）。只有持有的正是这个 epoch 的实例才让出，
+  // 迟到的旧请求碰不到之后新进场的实例。
+  uint64 owner_epoch = 2;
+}

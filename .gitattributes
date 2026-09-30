@@ -1,0 +1,10 @@
+# 仓库内文本统一 LF（跨平台一致；Windows 上的 autocrlf 不再改写工作区文件）
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制：配置表数据（protobuf 序列化）与 jar
+*.pb binary
+*.jar binary

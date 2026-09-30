@@ -10,6 +10,8 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -18,9 +20,11 @@ import java.util.stream.Stream;
  * <p>两版共享的只有客户端契约（mmorpg AGENTS.md §12）：proto 源、消息号 / 事件号注册表、
  * 导表器生成的配表 proto 与表数据。这些文件在本仓库里是<b>派生物</b>，不许手改，只能用本工具重新同步。
  *
- * <p>唯一的改写：给 {@code proto/} 下的文件注入 {@code java_package}（按目录区分）和
- * {@code java_multiple_files}。这两个选项只影响 Java 类的落点，不改 descriptor 全名，也不改线格式，
- * 所以与 C++/Go 端逐字节兼容。
+ * <p>契约 proto 按源仓库的相对路径原样存放（import 语句里写死了路径），视作第三方快照；
+ * <b>Java 代码不依赖这套目录</b>：包名按 proto package 决定，路由按服务语义决定（见 docs/design/architecture.md §1）。
+ *
+ * <p>唯一的改写：注入 {@code java_package}、{@code java_outer_classname}、{@code java_multiple_files}。
+ * 这些选项只影响 Java 类的落点，不改 descriptor 全名，也不改线格式，所以与 C++/Go 端逐字节兼容。
  *
  * <p>用法（JDK 21 单文件运行）：
  * <pre>java tools/ContractSync.java --mmorpg D:/luyuan/wuxingqitan/mmorpg --commit 766cb037c</pre>
@@ -80,10 +84,11 @@ public final class ContractSync {
                 continue;
             }
             String text = Files.readString(file, StandardCharsets.UTF_8);
-            String javaPackage = javaPackageFor(rel);
+            String javaPackage = javaPackageFor(text);
+            String outerClass = outerClassNameFor(rel);
             Path target = outRoot.resolve(rel);
             Files.createDirectories(target.getParent());
-            Files.writeString(target, injectJavaOptions(text, javaPackage), StandardCharsets.UTF_8);
+            Files.writeString(target, injectJavaOptions(text, javaPackage, outerClass), StandardCharsets.UTF_8);
             count++;
         }
         return count;
@@ -147,20 +152,60 @@ public final class ContractSync {
         return count;
     }
 
-    static String javaPackageFor(String relPath) {
-        // proto/common/base/tip.proto -> com.game.proto.common.base
-        String dir = relPath.substring("proto/".length());
-        int slash = dir.lastIndexOf('/');
-        String sub = slash < 0 ? "" : dir.substring(0, slash).replace('/', '.');
-        return sub.isEmpty() ? PROTO_JAVA_PACKAGE_ROOT : PROTO_JAVA_PACKAGE_ROOT + "." + sub;
+    private static final Pattern PROTO_PACKAGE = Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;");
+
+    /**
+     * Java 包名只由 proto 的 {@code package} 声明决定，<b>与 mmorpg 的目录结构无关</b>：
+     * mmorpg 会整理目录，按目录推包名会让 Java 代码在下次同步时整片失效。
+     * <ul>
+     *   <li>无 package（绝大多数客户端消息）→ {@code com.game.proto}：proto 全名在同一次编译里全局唯一，平铺不会撞名；</li>
+     *   <li>有 package → {@code com.game.proto.<package>}，末段的 Go 风格后缀 {@code pb} 去掉（{@code loginpb} → {@code login}）。</li>
+     * </ul>
+     */
+    static String javaPackageFor(String protoText) {
+        Matcher m = PROTO_PACKAGE.matcher(protoText);
+        if (!m.find()) {
+            return PROTO_JAVA_PACKAGE_ROOT;
+        }
+        String pkg = m.group(1).toLowerCase(java.util.Locale.ROOT);
+        if (pkg.endsWith("pb") && pkg.length() > 2 && pkg.lastIndexOf('.') < pkg.length() - 3) {
+            pkg = pkg.substring(0, pkg.length() - 2);
+        }
+        return PROTO_JAVA_PACKAGE_ROOT + "." + pkg;
     }
 
-    static String injectJavaOptions(String text, String javaPackage) {
-        if (text.contains("option java_package")) {
-            throw new IllegalStateException("源 proto 已自带 java_package，需确认后再调整同步规则");
+    /**
+     * 外部类名 = 相对路径驼峰 + OuterClass（{@code proto/scene/scene.proto} → {@code SceneSceneOuterClass}），按构造唯一。
+     * 不显式指定时 protoc 只检查同一文件内的重名，同 Java 包里另一个文件的同名类型会撞出
+     * "Tried to write the same file twice"（实例：item_comp.proto 的外部类 ItemComp 与另一文件的 message ItemComp；
+     * 两个无 package 的 scene.proto）。外部类只被 MessageIdRegistry 反射使用，手写代码不引用，所以名字带路径无妨。
+     */
+    static String outerClassNameFor(String relPath) {
+        String path = relPath.startsWith("proto/") ? relPath.substring("proto/".length()) : relPath;
+        String base = path.endsWith(".proto") ? path.substring(0, path.length() - ".proto".length()) : path;
+        StringBuilder camel = new StringBuilder();
+        boolean capNext = true;
+        for (char c : base.toCharArray()) {
+            if (Character.isLetter(c)) {
+                camel.append(capNext ? Character.toUpperCase(c) : c);
+                capNext = false;
+            } else if (Character.isDigit(c)) {
+                camel.append(c);
+                capNext = true;
+            } else {
+                capNext = true;
+            }
+        }
+        return camel + "OuterClass";
+    }
+
+    static String injectJavaOptions(String text, String javaPackage, String outerClass) {
+        if (text.contains("option java_package") || text.contains("option java_outer_classname")) {
+            throw new IllegalStateException("源 proto 已自带 java_package / java_outer_classname，需确认后再调整同步规则");
         }
         StringBuilder injected = new StringBuilder();
         injected.append("option java_package = \"").append(javaPackage).append("\";\n");
+        injected.append("option java_outer_classname = \"").append(outerClass).append("\";\n");
         if (!text.contains("option java_multiple_files")) {
             injected.append("option java_multiple_files = true;\n");
         }

@@ -1,0 +1,54 @@
+# xm-scene 本地配置。进程从仓库根目录启动（配置表默认读 config-data/tables）。
+# 环境变量（秘密只从这里注入，不进仓库）：
+#   XM_NODE_LINK_SECRET gate → scene 节点链路握手密钥（必填，须与 xm-gate 一致；缺失即启动失败）
+#   XM_MYSQL_USER      MySQL 用户（默认 root）
+#   XM_MYSQL_PASSWORD  MySQL 密码（本机无密码的 root 可不设；与 xm-login 同口径）。
+#                      注意：Spring Boot 绑定属性时不会因占位符无法解析而失败，所以这里必须带空默认值，
+#                      否则未设置时会把字面量 "${XM_MYSQL_PASSWORD}" 当密码发给 MySQL。
+#                      密码错时启动阶段 Druid 建初始连接即失败（fail-fast）。
+spring:
+  application:
+    name: xm-scene
+  main:
+    web-application-type: none
+  lifecycle:
+    # 停服写回（xm.scene.shutdown-save-timeout）要在这个上限之内完成
+    timeout-per-shutdown-phase: 30s
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # connect / socket 超时给阻塞 I/O 设上界（与 xm-login 同口径）：数据库卡死时存储线程不会被无限挂住，
+    # 写回在重试预算内失败并记 ERROR，停服也不会卡在等写回上。
+    url: "jdbc:mysql://127.0.0.1:3306/xm_java?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
+    username: ${XM_MYSQL_USER:root}
+    password: ${XM_MYSQL_PASSWORD:}
+    druid:
+      # 与存储线程数（xm.scene.storage-threads）匹配，多给一点余量
+      initial-size: 2
+      min-idle: 2
+      max-active: 8
+      max-wait: 3000
+  sql:
+    init:
+      # 表结构只由 xm-login 初始化（xm-player-store 的约定），场景节点只读写
+      mode: never
+
+xm:
+  zone-id: 1
+  advertise-host: 127.0.0.1
+  table-dir: config-data/tables
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  scene:
+    # 链路握手有共享密钥鉴权（XM_NODE_LINK_SECRET），但链路不加密、窗口内握手可重放：默认只绑本机；
+    # 多机部署改内网地址，仍要靠网络隔离保证只有 gate 能连
+    link-bind-host: 127.0.0.1
+    link-port: 21000
+    link-io-threads: 2
+    link-handshake-timeout: 10s
+    storage-threads: 4
+    storage-queue-capacity: 10000
+    # 停服写回的总预算：写回任务在逻辑线程上排队 + 落库共用这一个上限
+    shutdown-save-timeout: 15s
+    # 每条 gate 链路投递给逻辑线程还没执行完的帧数上限，到了就暂停读这条链路（背压），降到一半恢复
+    link-max-pending-frames: 10000

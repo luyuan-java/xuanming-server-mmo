@@ -16,17 +16,26 @@ message NodeLinkFrame {
     PlayerLeave player_leave = 5;
     ClientForward client_forward = 6;
     ToClient to_client = 7;
+    PlayerKicked player_kicked = 8;
   }
 }
 
-// gate → scene：链路首帧。
+// gate → scene：链路首帧。gate 每次建链都重新生成（时间戳取建链时刻）。
 message LinkHello {
   uint32 gate_node_id = 1;
   string gate_instance_id = 2;
   uint32 zone_id = 3;
+  // 鉴权时间戳（Unix 秒）；scene 要求与本地时钟相差不超过 60s。
+  uint64 auth_timestamp = 4;
+  // HMAC-SHA256(XM_NODE_LINK_SECRET, "gate_node_id|gate_instance_id|zone_id|lease_epoch|auth_timestamp") 的
+  // 64 字节小写 hex ASCII（数字按无符号十进制）。算法唯一出处：xm-common 的 com.game.common.token.NodeLinkAuth。
+  bytes auth_mac = 5;
+  // gate 节点号租约的防护代次（fencing token）：同一 (zone, gate 节点号) 每被占用一次单调加一（Redis INCR）。
+  // scene 对同一 gate 节点号只接受代次不低于现有链路的新链路：丢了租约的旧 gate 进程顶不掉新持有者的链路。
+  uint64 lease_epoch = 6;
 }
 
-// scene → gate：握手结果；zone 不符等情况 accepted=false 并随后断开。
+// scene → gate：握手结果；鉴权失败、zone 不符等情况 accepted=false 并随后断开。
 message LinkHelloAck {
   uint32 scene_node_id = 1;
   string scene_instance_id = 2;
@@ -43,11 +52,24 @@ message PlayerEnter {
   uint64 owner_epoch = 4;
 }
 
-// scene → gate：进场结果。失败时 gate 解绑会话上的场景并把 tip 发给客户端。
+// scene → gate：进场结果。失败时 gate 解绑会话上的场景与玩家（会话回到「已登录、未进游戏」）并把 tip 发给客户端。
 message PlayerEnterResult {
   uint32 session_id = 1;
   uint64 player_id = 2;
   uint32 tip_id = 3;
+  // 回显这次进场的 PlayerEnter.owner_epoch。gate 只接受与会话当前绑定的那次进场同 epoch 的结果：
+  // 同一会话、同一链路代次上更早一次进场的迟到结果据此丢弃，不会解绑掉新的进场。
+  uint64 owner_epoch = 4;
+}
+
+// scene → gate：scene 已把会话上的玩家移出场景（数据归属被别的会话接管——顶号，或本实例失去了归属），
+// 该写回的已经写回。gate 解绑会话上的场景（不再发 PlayerLeave），推 23 TipInfoMessage{tip_id} 后关闭连接。
+// gate 只处理 (节点, 链路代次, player_id, owner_epoch) 都与会话当前绑定一致的帧。
+message PlayerKicked {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  uint64 owner_epoch = 3;
+  uint32 tip_id = 4;
 }
 
 // gate → scene：玩家离开（断线或主动离开），scene 写回数据并移除玩家。

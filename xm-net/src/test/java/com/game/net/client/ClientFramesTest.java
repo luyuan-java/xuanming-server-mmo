@@ -2,9 +2,9 @@ package com.game.net.client;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.game.proto.common.base.ClientRequest;
-import com.game.proto.common.base.ClientTokenVerifyRequest;
-import com.game.proto.common.base.MessageContent;
+import com.game.proto.ClientRequest;
+import com.game.proto.ClientTokenVerifyRequest;
+import com.game.proto.MessageContent;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
 import io.netty.buffer.ByteBuf;

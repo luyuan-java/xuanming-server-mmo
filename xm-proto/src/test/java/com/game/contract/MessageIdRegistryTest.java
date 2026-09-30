@@ -24,7 +24,7 @@ class MessageIdRegistryTest {
         assertThat(login.serviceName()).isEqualTo("ClientPlayerLogin");
         assertThat(login.methodName()).isEqualTo("Login");
         assertThat(login.clientService()).isTrue();
-        assertThat(login.domain()).isEqualTo("login");
+        assertThat(login.playerService()).isFalse();
         assertThat(login.requestPrototype().getDescriptorForType().getFullName()).isEqualTo("loginpb.LoginRequest");
 
         assertThat(registry.requireId("ClientPlayerLogin", "CreatePlayer")).isEqualTo(14);
@@ -34,14 +34,15 @@ class MessageIdRegistryTest {
     }
 
     @Test
-    void 场景下行与进场后的客户端消息属于_scene_域() {
+    void 场景下行与进场后的客户端消息是玩家服务_由_scene_处理() {
         MessageMethod notifyEnter = registry.byId(79).orElseThrow();
         assertThat(notifyEnter.key()).isEqualTo("SceneSceneClientPlayerNotifyEnterScene");
-        assertThat(notifyEnter.domain()).isEqualTo("scene");
+        assertThat(notifyEnter.playerService()).isTrue();
 
         MessageMethod listSkills = registry.byId(77).orElseThrow();
         assertThat(listSkills.key()).isEqualTo("SceneSkillClientPlayerListSkills");
         assertThat(listSkills.clientService()).isTrue();
+        assertThat(listSkills.playerService()).isTrue();
     }
 
     @Test
@@ -52,8 +53,14 @@ class MessageIdRegistryTest {
     }
 
     @Test
-    void 与_message_id_txt_行数一致() {
-        assertThat(registry.all().size() + registry.unresolvedKeys().size()).isEqualTo(239);
+    void 与_message_id_txt_的条目数一致() throws Exception {
+        // 不写死条目数：契约每次同步都可能追加消息号
+        int entries;
+        try (var in = MessageIdRegistry.class.getClassLoader().getResourceAsStream(MessageIdRegistry.MESSAGE_ID_RESOURCE)) {
+            entries = MessageIdRegistry.parseMessageIds(in).size();
+        }
+        assertThat(entries).isPositive();
+        assertThat(registry.all().size() + registry.unresolvedKeys().size()).isEqualTo(entries);
     }
 
     @Test

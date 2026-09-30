@@ -1,5 +1,6 @@
 syntax = "proto3";
-option java_package = "com.game.proto.db";
+option java_package = "com.game.proto";
+option java_outer_classname = "DbDbOuterClass";
 option java_multiple_files = true;
 
 option go_package = "db/proto/db";

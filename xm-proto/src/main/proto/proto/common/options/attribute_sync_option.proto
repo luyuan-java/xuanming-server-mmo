@@ -1,5 +1,6 @@
 syntax = "proto3";
-option java_package = "com.game.proto.common.options";
+option java_package = "com.game.proto";
+option java_outer_classname = "CommonOptionsAttributeSyncOptionOuterClass";
 option java_multiple_files = true;
 
 import "google/protobuf/descriptor.proto";

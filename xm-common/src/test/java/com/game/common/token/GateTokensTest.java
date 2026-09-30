@@ -2,7 +2,7 @@ package com.game.common.token;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.game.proto.common.base.GateTokenPayload;
+import com.game.proto.GateTokenPayload;
 import com.google.protobuf.ByteString;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;

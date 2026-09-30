@@ -1,5 +1,6 @@
 syntax = "proto3";
 option java_package = "com.game.proto.client_rpc_router";
+option java_outer_classname = "ClientRpcRouterClientRpcRouterOuterClass";
 option java_multiple_files = true;
 package client_rpc_router;
 

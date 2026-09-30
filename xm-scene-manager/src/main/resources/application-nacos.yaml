@@ -1,0 +1,5 @@
+# nacos profile：Dubbo 注册到 Nacos（只做 Dubbo 注册中心，见 architecture.md §6）。
+# 本进程只提供服务、不引用其他 Dubbo 服务，因此没有需要清空的直连 URL。
+dubbo:
+  registry:
+    address: nacos://${XM_NACOS_ADDR:127.0.0.1:8848}
