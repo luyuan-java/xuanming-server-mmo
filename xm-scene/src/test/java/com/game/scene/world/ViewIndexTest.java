@@ -109,8 +109,9 @@ class ViewIndexTest {
         assertThat(changes.of(b).added()).containsExactly(c);
         assertThat(changes.of(a).removed()).containsExactly(b);
         assertThat(changes.of(c).added()).containsExactly(b);
+        // doesNotContainAnyElementsOf 遇到空的 removed 会直接抛 IllegalArgumentException（AssertJ 要求参照集非空），改用逐个判断。
         changes.forEach((watcher, delta) ->
-                assertThat(delta.added()).as("同一次刷新里不会既加又删").doesNotContainAnyElementsOf(delta.removed()));
+                assertThat(delta.added()).as("同一次刷新里不会既加又删").noneMatch(delta.removed()::contains));
     }
 
     @Test

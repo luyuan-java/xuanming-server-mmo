@@ -3,6 +3,7 @@ package com.game.scene;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.player.store.PlayerStore;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.world.PlayerSave;
 import com.game.scene.world.Vec3;
@@ -55,7 +56,7 @@ class SceneShutdownTest {
             savedPlayers.add(inv.<com.game.player.store.PlayerRow>getArgument(0).getPlayerId());
             return true;
         });
-        return new StoragePlayerRepository(store, storage, logic);
+        return new StoragePlayerRepository(store, storage, logic, SceneMetrics.noop());
     }
 
     @Test

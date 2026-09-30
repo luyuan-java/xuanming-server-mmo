@@ -220,15 +220,15 @@ Java 代码不得依赖这套目录，具体做法：
 ## 10. 首批不做（后续批次）
 
 排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、背包 / 任务 / 货币等玩法系统、Kafka 事件、GM / 管理接口、
-服务级限流 / 熔断（Sentinel）、周期存盘、scene 的低基数指标（逻辑队列积压、链路在途帧、写回失败目前只有日志与进程内计数；
-gate / login / scene-manager / gateway 已接，见 §11）、合服与 TiDB 数据层。
+服务级限流 / 熔断（Sentinel）、周期存盘、合服与 TiDB 数据层。
+（低基数运行指标五个进程都已接入，见 §11。）
 顶号已按 §7 第 2 步实现（旧连接收 23 {2017} 后断开，不发 34）。进度逐项登记在 `PARITY.md`。
 
 ## 11. 可观测性（指标）
 
 每个进程用 **Micrometer** 记指标，经 **Spring Boot Actuator** 以 Prometheus 文本格式导出（选型见 tech-stack.md）。
 指标名与标签只在每个进程的一个类里定义，业务代码只调语义方法：gate `GateMetrics`、login `LoginMetrics`、
-scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`。
+scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`。
 
 | 进程 | 抓取地址（默认） | 说明 |
 |---|---|---|
@@ -236,17 +236,21 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`。
 | xm-login | `http://127.0.0.1:18101/actuator/prometheus` | 管理专用端口 |
 | xm-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
 | xm-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
-| xm-scene | —（下一步接入） | |
+| xm-scene | `http://127.0.0.1:18104/actuator/prometheus` | 管理专用端口；同机多个 scene 实例要各用 `SERVER_PORT` 错开（与链路端口一样） |
 
-- **非 Web 进程的管理端口**：gate / login / scene-manager 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
+- **非 Web 进程的管理端口**：gate / login / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
   Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。
   默认只绑 `127.0.0.1`（与 mmorpg 开发环境的 Prometheus 端口同口径），跨机抓取用 `XM_MANAGEMENT_ADDRESS` 指定内网地址；
   端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。只暴露 `health` 与 `prometheus` 两个端点。
 - **公共标签**：`application=<进程名>`。实例由 Prometheus 的抓取目标区分，不在进程里加实例标签。
 - **基数约束**（AGENTS.md §5）：不以 player_id / session_id / 账号 / IP / zone_id 作标签。消息维度只用 `服务.方法`
   （`MessageIdRegistry` 的客户端白名单，有界），不认识的消息号一律归 `unknown`——公网流量造不出新的时间序列；
-  其余标签都是代码里的枚举。
-- **延迟**：Timer 用固定的 SLO 桶（gate / login 5ms～10s 共 11 个，scene-manager 1ms～1s 共 8 个），不开百分位直方图。
+  scene 的场景维度只用场景配置号 `scene_config`（场景只在启动时按配置表建出，之后不再新增），不用场景实例号 / 实体号 /
+  gate 节点号 / 链路号；其余标签都是代码里的枚举。
+- **延迟**：Timer 用固定的 SLO 桶（gate / login 5ms～10s 共 11 个，scene-manager 1ms～1s 共 8 个，scene 逻辑线程内
+  0.1ms～1s 共 12 个、含一帧预算 50ms，scene 存储写 5ms～10s 共 11 个），不开百分位直方图。
+- **scene 的线程所有权**（§5）：抓取线程不读场景状态。在线人数由逻辑线程在人数变化后推送绝对值；逻辑线程队列长度、
+  gate 链路连接数、存储线程池状态由线程安全的计数（Netty 任务队列、`ChannelGroup`、`ThreadPoolExecutor`）直接读。
 - **JVM / 进程 / Tomcat / HTTP 请求**等通用指标由 Actuator 自带（`jvm_*`、`process_*`、`http_server_requests_*` ……）。
 
 业务指标（Prometheus 名；计数器带 `_total`，Timer 导出 `_seconds_count` / `_sum` / `_max` / `_bucket`）：
@@ -272,6 +276,20 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`。
 | login | `executor_*{name="login-worker"}` | Micrometer 标准线程池指标 | — | 工作线程池排队 / 活跃 / 完成数（队列满见 `xm_login_requests{result="overloaded"}`） |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
 | gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 400 / 404 / 500 / 503，`reason`=ok / 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；8 个已知组合启动即注册 |
+| scene | `xm_scene_players` | Gauge | `scene_config`=场景配置号 | 该配置下的在线玩家数（同配置各频道合计；加载中的进场不算）。建场景即注册、初值 0 |
+| scene | `xm_scene_logic_pending_tasks` | Gauge | — | 逻辑线程待执行的任务数（链路帧、存储回调、归属事件；不含定时的帧任务）。上界 ≈ gate 数 × `link-max-pending-frames` |
+| scene | `xm_scene_logic_task_wait_seconds` | Timer | — | 逻辑任务从投递到开始执行的排队等待（经 `SceneNode.runOnLogic` 投递的全部任务；同步的目录 / 归属快照不计） |
+| scene | `xm_scene_logic_task_run_seconds` | Timer | — | 逻辑任务的执行耗时（抛异常的也计） |
+| scene | `xm_scene_tick_seconds` | Timer | — | 一帧的耗时（外推 + 视野刷新 + 广播），20 FPS、每帧一次；超过 50ms 桶即超预算 |
+| scene | `xm_scene_broadcast_seconds` | Timer | `kind`=view_changes / attribute_sync | 帧内广播阶段（组包、序列化、交给链路）：view_changes = 47 / 64，每帧一次；attribute_sync = 66，偶数帧一次（均为全部场景合计） |
+| scene | `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值丢弃 |
+| scene | `xm_scene_aoi_changes_total` | Counter | `change`=enter / leave | 视野变化通知，一对（观察者, 目标）计一次：enter = 进场的 47 条目与给旁人的 21、帧内 47 条目；leave = 离场 / 换场景的 51、帧内 64 条目。离场者自己的列表静默清空，不计 |
+| scene | `xm_scene_storage_writes_seconds` | Timer | `op`=save / release，`result`=released / fenced / failed / rejected | 玩家数据写（写回并释放 / 只释放）的结局与耗时（含瞬时故障重试），每个写任务恰好计一次：已落库并释放 / 围栏拒绝（不是故障）/ 重试用尽或非瞬时故障 / 存储线程池拒绝（耗时记 0）。停服时 `shutdownNow` 丢弃的写只进 ERROR 日志 |
+| scene | `executor_*{name="scene-storage"}` | Micrometer 标准线程池指标 | — | 存储线程池排队（`executor_queued_tasks`）/ 剩余容量 / 活跃 / 完成数 |
+| scene | `xm_scene_gate_links` | Gauge | — | 接入本节点的 gate 链路连接数（含握手中） |
+| scene | `xm_scene_link_frames_total` | Counter | `direction`=in / out，`type`=链路帧类型 | gate ↔ scene 链路帧（in = 从链路收到，含握手帧；out = 已交给链路写出，含 hello_ack） |
+| scene | `xm_scene_link_dropped_total` | Counter | `reason`=link_gone / write_buffer_full | 没发出去的 scene → gate 链路帧：链路已注销 / 已断开；出站缓冲越过高水位（随即断链） |
+| scene | `xm_scene_link_backpressure_pauses_total` | Counter | — | 逻辑线程积压到 `link-max-pending-frames`、暂停读取某条链路的次数（§4.2 背压） |
 
-未覆盖（后续）：xm-scene 的指标；Druid 连接池指标（Spring Boot 只认 Hikari / DBCP2 / Tomcat 等连接池的元数据）；
-Dubbo 与 Redisson 自带指标未接入。
+未覆盖（后续）：Druid 连接池指标（Spring Boot 只认 Hikari / DBCP2 / Tomcat 等连接池的元数据）；
+Dubbo 与 Redisson 自带指标未接入；scene 的进场加载（成功 / 失败 / 耗时）未单独计，进场失败目前只有 WARN 日志。

@@ -1,0 +1,169 @@
+package com.game.scene.metrics;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import com.game.api.proto.NodeLinkFrame;
+import com.game.scene.metrics.SceneMetrics.BroadcastKind;
+import com.game.scene.metrics.SceneMetrics.LinkDrop;
+import com.game.scene.metrics.SceneMetrics.MoveResult;
+import com.game.scene.metrics.SceneMetrics.StorageOp;
+import com.game.scene.metrics.SceneMetrics.WriteResult;
+import io.micrometer.core.instrument.MockClock;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleConfig;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
+import java.time.Duration;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.junit.jupiter.api.Test;
+
+class SceneMetricsTest {
+
+    private final MockClock clock = new MockClock();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry(SimpleConfig.DEFAULT, clock);
+    private final SceneMetrics metrics = new SceneMetrics(meters);
+
+    @Test
+    void 逻辑任务_排队等待从投递起算_执行耗时从开始起算() {
+        Runnable timed = metrics.timeLogicTask(() -> clock.add(Duration.ofMillis(3)));
+        clock.add(Duration.ofMillis(40));
+
+        timed.run();
+
+        Timer wait = meters.get("xm.scene.logic.task.wait").timer();
+        Timer run = meters.get("xm.scene.logic.task.run").timer();
+        assertThat(wait.count()).isEqualTo(1);
+        assertThat(wait.totalTime(TimeUnit.MILLISECONDS)).isEqualTo(40);
+        assertThat(run.count()).isEqualTo(1);
+        assertThat(run.totalTime(TimeUnit.MILLISECONDS)).isEqualTo(3);
+    }
+
+    @Test
+    void 逻辑任务抛异常_执行耗时照记_异常照抛() {
+        Runnable timed = metrics.timeLogicTask(() -> {
+            clock.add(Duration.ofMillis(2));
+            throw new IllegalStateException("boom");
+        });
+
+        assertThatThrownBy(timed::run).isInstanceOf(IllegalStateException.class);
+        assertThat(meters.get("xm.scene.logic.task.run").timer().count()).isEqualTo(1);
+    }
+
+    @Test
+    void 场景人数_按配置各一条Gauge_推的是绝对值() {
+        metrics.scenePlayers(1, 3);
+        metrics.scenePlayers(2, 0);
+        metrics.scenePlayers(1, 5);
+
+        assertThat(meters.find("xm.scene.players").gauges()).hasSize(2);
+        assertThat(meters.get("xm.scene.players").tag("scene_config", "1").gauge().value()).isEqualTo(5);
+        assertThat(meters.get("xm.scene.players").tag("scene_config", "2").gauge().value()).isZero();
+    }
+
+    @Test
+    void 状态量回调由抓取时读取() {
+        AtomicInteger pending = new AtomicInteger(7);
+        AtomicInteger links = new AtomicInteger(2);
+        metrics.bindLogicQueue(pending::get);
+        metrics.bindGateLinkCount(links::get);
+
+        pending.set(11);
+
+        assertThat(meters.get("xm.scene.logic.pending.tasks").gauge().value()).isEqualTo(11);
+        assertThat(meters.get("xm.scene.gate.links").gauge().value()).isEqualTo(2);
+    }
+
+    @Test
+    void 存储线程池_导出标准线程池指标_名字是scene_storage() {
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(8));
+        try {
+            metrics.bindStorageExecutor(executor);
+
+            assertThat(meters.get("executor.queued").tag("name", "scene-storage").gauge().value()).isZero();
+            assertThat(meters.get("executor.queue.remaining").tag("name", "scene-storage").gauge().value()).isEqualTo(8);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * 固化 architecture.md §11 里写的 Prometheus 名字与标签：换 Micrometer 版本或改名时这里先红。
+     * 同时检查导出的标签只有本类定义的低基数维度（不会冒出 player_id / session_id 之类）。
+     */
+    @Test
+    void Prometheus导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        SceneMetrics exported = new SceneMetrics(prometheus);
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(8));
+        try {
+            exported.bindLogicQueue(() -> 0);
+            exported.bindGateLinkCount(() -> 1);
+            exported.bindStorageExecutor(executor);
+            exported.scenePlayers(1, 2);
+            exported.timeLogicTask(() -> { }).run();
+            exported.tick(TimeUnit.MILLISECONDS.toNanos(3));
+            exported.broadcast(BroadcastKind.VIEW_CHANGES, 1_000);
+            exported.move(MoveResult.ACCEPTED);
+            exported.aoiEntered(2);
+            exported.aoiLeft(1);
+            exported.storageWrite(StorageOp.SAVE, WriteResult.RELEASED, TimeUnit.MILLISECONDS.toNanos(8));
+            exported.linkFrameIn(NodeLinkFrame.BodyCase.HELLO);
+            exported.linkFrameOut(NodeLinkFrame.BodyCase.TO_CLIENT);
+            exported.linkFrameDropped(LinkDrop.LINK_GONE);
+            exported.linkReadPaused();
+
+            String text = prometheus.scrape();
+
+            assertThat(text).contains(
+                    "xm_scene_players{scene_config=\"1\"} 2",
+                    "xm_scene_logic_pending_tasks ",
+                    "xm_scene_gate_links 1",
+                    "xm_scene_logic_task_wait_seconds_count 1",
+                    "xm_scene_logic_task_run_seconds_count 1",
+                    "xm_scene_tick_seconds_bucket{le=\"0.05\"} 1",
+                    "xm_scene_broadcast_seconds_count{kind=\"view_changes\"} 1",
+                    "xm_scene_broadcast_seconds_count{kind=\"attribute_sync\"} 0",
+                    "xm_scene_moves_total{result=\"accepted\"} 1",
+                    "xm_scene_moves_total{result=\"invalid\"} 0",
+                    "xm_scene_aoi_changes_total{change=\"enter\"} 2",
+                    "xm_scene_aoi_changes_total{change=\"leave\"} 1",
+                    "xm_scene_storage_writes_seconds_count{op=\"save\",result=\"released\"} 1",
+                    "xm_scene_storage_writes_seconds_count{op=\"release\",result=\"fenced\"} 0",
+                    "xm_scene_link_frames_total{direction=\"in\",type=\"hello\"} 1",
+                    "xm_scene_link_frames_total{direction=\"out\",type=\"to_client\"} 1",
+                    "xm_scene_link_dropped_total{reason=\"link_gone\"} 1",
+                    "xm_scene_link_backpressure_pauses_total 1",
+                    "executor_queued_tasks{name=\"scene-storage\"}");
+            assertThat(labelNames(text, "xm_scene_"))
+                    .isSubsetOf("scene_config", "kind", "result", "change", "op", "direction", "type", "reason", "le");
+        } finally {
+            executor.shutdownNow();
+            prometheus.close();
+        }
+    }
+
+    private static Set<String> labelNames(String scrape, String prefix) {
+        Set<String> names = new TreeSet<>();
+        Pattern label = Pattern.compile("([a-z_]+)=\"");
+        for (String line : scrape.split("\n")) {
+            int brace = line.indexOf('{');
+            if (!line.startsWith(prefix) || brace < 0) {
+                continue;
+            }
+            Matcher m = label.matcher(line.substring(brace));
+            while (m.find()) {
+                names.add(m.group(1));
+            }
+        }
+        return names;
+    }
+}

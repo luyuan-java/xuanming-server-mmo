@@ -55,7 +55,8 @@ class StoragePlayerRepositoryTest {
         row.setPosY(2.5);
         row.setPosZ(3.5);
         when(store.findPlayer(1001)).thenReturn(Optional.of(row));
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+        StoragePlayerRepository repository =
+                new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
         repository.load(1001, results::add);
@@ -70,7 +71,8 @@ class StoragePlayerRepositoryTest {
     void 加载未命中与异常() {
         when(store.findPlayer(1)).thenReturn(Optional.empty());
         when(store.findPlayer(2)).thenThrow(new IllegalStateException("db down"));
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+        StoragePlayerRepository repository =
+                new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
         repository.load(1, results::add);
@@ -84,7 +86,8 @@ class StoragePlayerRepositoryTest {
 
     @Test
     void 存储线程池拒绝_按加载失败异步回调() {
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new RejectingExecutorService(), logic, metrics);
+        StoragePlayerRepository repository =
+                new StoragePlayerRepository(store, new RejectingExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
         repository.load(1, results::add);
@@ -97,7 +100,8 @@ class StoragePlayerRepositoryTest {
     @Test
     void 写回带上owner_epoch围栏字段并释放归属() {
         when(store.saveStateAndRelease(any())).thenReturn(false);
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+        StoragePlayerRepository repository =
+                new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
 
         repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
 
