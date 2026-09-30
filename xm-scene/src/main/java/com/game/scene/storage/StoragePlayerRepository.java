@@ -2,6 +2,9 @@ package com.game.scene.storage;
 
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
+import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.StorageOp;
+import com.game.scene.metrics.SceneMetrics.WriteResult;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository;
 import com.game.scene.world.PlayerSave;
@@ -36,6 +39,8 @@ import org.springframework.dao.TransientDataAccessException;
  *   <li>重试用尽、非瞬时故障、线程池拒绝、停服时被丢弃：记 ERROR，带 player_id / epoch / 场景配置 / 坐标，供人工修复；
  *       累加 {@link #writeFailures()}（进程内计数，不带 player_id 维度）。</li>
  * </ul>
+ * 每个写任务的结局（已释放 / 围栏拒绝 / 失败 / 被拒）与耗时恰好记一次指标（{@link SceneMetrics#storageWrite}）；
+ * 停服时被 {@code shutdownNow} 丢弃的任务不经过这里，由停服流程逐条记 ERROR（进程随即退出，指标已无人抓取）。
  * 权衡（首批）：只在离场时写回、没有周期存盘，进程被 kill 时本次在线期间的增量（换图后的地图与坐标）会丢；
  * 归属租约过期后玩家可以重新进入，读到的是上次离场时的存档。
  *
@@ -77,19 +82,22 @@ public final class StoragePlayerRepository implements PlayerRepository {
     private final Sleeper sleeper;
     private final LongUnaryOperator jitter;
     private final LongSupplier nanoClock;
+    private final SceneMetrics metrics;
     private final AtomicLong writeFailures = new AtomicLong();
 
-    public StoragePlayerRepository(PlayerStore store, ExecutorService storageExecutor, Executor logicExecutor) {
+    public StoragePlayerRepository(PlayerStore store, ExecutorService storageExecutor, Executor logicExecutor,
+                                   SceneMetrics metrics) {
         this(store, storageExecutor, logicExecutor, RetryPolicy.DEFAULT, Thread::sleep,
-                backoff -> ThreadLocalRandom.current().nextLong(backoff / 2 + 1), System::nanoTime);
+                backoff -> ThreadLocalRandom.current().nextLong(backoff / 2 + 1), System::nanoTime, metrics);
     }
 
     /**
      * @param jitter    给定本次退避毫秒数，返回额外加上的随机毫秒数（避免多个存储线程同时重试）
-     * @param nanoClock 单调时钟，只用于重试截止时间
+     * @param nanoClock 单调时钟，用于重试截止时间与写耗时指标
      */
     public StoragePlayerRepository(PlayerStore store, ExecutorService storageExecutor, Executor logicExecutor,
-                                   RetryPolicy retry, Sleeper sleeper, LongUnaryOperator jitter, LongSupplier nanoClock) {
+                                   RetryPolicy retry, Sleeper sleeper, LongUnaryOperator jitter, LongSupplier nanoClock,
+                                   SceneMetrics metrics) {
         this.store = store;
         this.storageExecutor = storageExecutor;
         this.logicExecutor = logicExecutor;
@@ -97,6 +105,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
         this.sleeper = sleeper;
         this.jitter = jitter;
         this.nanoClock = nanoClock;
+        this.metrics = metrics;
     }
 
     /** 最终失败（丢失）的写次数：重试用尽、非瞬时故障、线程池拒绝。停服时被丢弃的由调用方另计。 */
@@ -148,6 +157,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
         } catch (RejectedExecutionException e) {
             // 线程池积压上万或已关闭。写回丢失：玩家数据回到上次落库的状态；只释放丢失：归属等租约过期。
             writeFailures.incrementAndGet();
+            metrics.storageWrite(task.op(), WriteResult.REJECTED, 0);
             log.error("存储线程池拒绝写任务，本次写丢失（需人工修复） {}", task.describe());
         }
     }
@@ -159,17 +169,18 @@ public final class StoragePlayerRepository implements PlayerRepository {
         return task instanceof WriteTask write ? Optional.of(write.describe()) : Optional.empty();
     }
 
-    private void runWithRetry(WriteTask task) {
+    /** 在存储线程上执行一个写任务（含重试），返回结局；失败已记 ERROR 并计入 {@link #writeFailures()}。 */
+    private WriteResult runWithRetry(WriteTask task) {
         long deadline = nanoClock.getAsLong() + retry.deadline().toNanos();
         long backoffMs = retry.firstBackoff().toMillis();
         for (int attempt = 1; ; attempt++) {
             try {
                 if (task.apply()) {
                     log.debug("{}完成", task.describe());
-                } else {
-                    log.warn("{}被归属围栏拒绝（epoch 已被新的进场取代、已释放或玩家已不存在），丢弃", task.describe());
+                    return WriteResult.RELEASED;
                 }
-                return;
+                log.warn("{}被归属围栏拒绝（epoch 已被新的进场取代、已释放或玩家已不存在），丢弃", task.describe());
+                return WriteResult.FENCED;
             } catch (RuntimeException e) {
                 boolean transientError = isTransient(e);
                 long waitMs = backoffMs + Math.max(0, jitter.applyAsLong(backoffMs));
@@ -178,7 +189,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
                         || remainingNanos <= TimeUnit.MILLISECONDS.toNanos(waitMs)) {
                     writeFailures.incrementAndGet();
                     log.error("{}失败，放弃（需人工修复） 尝试={} 瞬时故障={}", task.describe(), attempt, transientError, e);
-                    return;
+                    return WriteResult.FAILED;
                 }
                 log.warn("{}遇到瞬时故障，{}ms 后重试 尝试={}: {}", task.describe(), waitMs, attempt, e.toString());
                 try {
@@ -187,7 +198,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
                     Thread.currentThread().interrupt();
                     writeFailures.incrementAndGet();
                     log.error("{}重试等待被中断（停服），放弃（需人工修复）", task.describe());
-                    return;
+                    return WriteResult.FAILED;
                 }
                 backoffMs = Math.min(backoffMs * 2, retry.deadline().toMillis());
             }
@@ -221,7 +232,13 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
         @Override
         public void run() {
-            runWithRetry(this);
+            long started = nanoClock.getAsLong();
+            WriteResult result = runWithRetry(this);
+            metrics.storageWrite(op(), result, nanoClock.getAsLong() - started);
+        }
+
+        StorageOp op() {
+            return save != null ? StorageOp.SAVE : StorageOp.RELEASE;
         }
 
         boolean apply() {

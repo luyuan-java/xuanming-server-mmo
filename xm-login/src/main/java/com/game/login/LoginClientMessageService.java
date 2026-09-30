@@ -10,6 +10,8 @@ import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionContext;
 import com.game.login.dispatch.ClientMessageDispatcher;
 import com.game.login.dispatch.LoginWorkerPool;
+import com.game.login.metrics.LoginMetrics;
+import com.game.login.metrics.LoginMetrics.AbandonResult;
 import com.game.player.store.PlayerStore;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -32,20 +34,24 @@ public class LoginClientMessageService implements ClientMessageService {
     private final ClientMessageDispatcher dispatcher;
     private final PlayerStore store;
     private final Executor executor;
+    private final LoginMetrics metrics;
 
     /**
      * @param workers login 工作线程池（释放归属是阻塞 MySQL 调用，不在 Dubbo 线程上做）
+     * @param metrics 未送达进场的释放结果计数
      */
     @Autowired
-    public LoginClientMessageService(ClientMessageDispatcher dispatcher, PlayerStore store, LoginWorkerPool workers) {
-        this(dispatcher, store, (Executor) workers);
+    public LoginClientMessageService(ClientMessageDispatcher dispatcher, PlayerStore store, LoginWorkerPool workers,
+                                     LoginMetrics metrics) {
+        this(dispatcher, store, (Executor) workers, metrics);
     }
 
     /** 测试用：阻塞调用放到给定的执行器上。 */
-    LoginClientMessageService(ClientMessageDispatcher dispatcher, PlayerStore store, Executor executor) {
+    LoginClientMessageService(ClientMessageDispatcher dispatcher, PlayerStore store, Executor executor, LoginMetrics metrics) {
         this.dispatcher = dispatcher;
         this.store = store;
         this.executor = executor;
+        this.metrics = metrics;
     }
 
     @Override
@@ -79,6 +85,7 @@ public class LoginClientMessageService implements ClientMessageService {
         if (playerId == 0 || epoch == 0) {
             log.warn("忽略非法的未送达进场通知 gate={} session={} player={} epoch={}",
                     session.getGateNodeId(), session.getSessionId(), playerId, epoch);
+            metrics.abandonedEnter(AbandonResult.INVALID);
             return CompletableFuture.completedFuture(Ack.getDefaultInstance());
         }
         CompletableFuture<Ack> done = new CompletableFuture<>();
@@ -86,15 +93,18 @@ public class LoginClientMessageService implements ClientMessageService {
             executor.execute(() -> {
                 try {
                     boolean released = store.releaseOwnership(playerId, epoch);
+                    metrics.abandonedEnter(released ? AbandonResult.RELEASED : AbandonResult.STALE);
                     log.info("进场未送达，释放归属 gate={} session={} player={} epoch={} 释放={}",
                             session.getGateNodeId(), session.getSessionId(), playerId, epoch, released);
                 } catch (RuntimeException e) {
+                    metrics.abandonedEnter(AbandonResult.FAILED);
                     log.warn("进场未送达，释放归属失败（等租约过期兜底） player={} epoch={}: {}", playerId, epoch, e.toString());
                 } finally {
                     done.complete(Ack.getDefaultInstance());
                 }
             });
         } catch (RejectedExecutionException e) {
+            metrics.abandonedEnter(AbandonResult.OVERLOADED);
             log.warn("login 工作队列已满，未送达进场的归属等租约过期 player={} epoch={}", playerId, epoch);
             done.complete(Ack.getDefaultInstance());
         }

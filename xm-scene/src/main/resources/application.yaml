@@ -10,7 +10,8 @@ spring:
   application:
     name: xm-scene
   main:
-    web-application-type: none
+    # 只为管理端点起一个 Servlet 容器（Tomcat）；gate 节点链路（Netty）不经过它（architecture.md §11）。
+    web-application-type: servlet
   lifecycle:
     # 停服写回（xm.scene.shutdown-save-timeout）要在这个上限之内完成
     timeout-per-shutdown-phase: 30s
@@ -31,6 +32,28 @@ spring:
     init:
       # 表结构只由 xm-login 初始化（xm-player-store 的约定），场景节点只读写
       mode: never
+
+# 管理端点：http://127.0.0.1:18104/actuator/health 与 /actuator/prometheus，这个 HTTP 端口上只有 actuator。
+# 默认只绑本机；要被别的机器上的 Prometheus 抓取时用 XM_MANAGEMENT_ADDRESS 指定内网地址（不要暴露到公网）。
+# 端口可用 SERVER_PORT 覆盖（同机起多个 scene 实例时必须各不相同，与 link-port 一样；Windows 上避开保留端口段 50060-50159）。
+server:
+  port: 18104
+  address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
+  # 管理端口上没有需要排空的业务请求。
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
 
 xm:
   zone-id: 1

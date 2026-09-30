@@ -220,6 +220,58 @@ Java 代码不得依赖这套目录，具体做法：
 ## 10. 首批不做（后续批次）
 
 排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、背包 / 任务 / 货币等玩法系统、Kafka 事件、GM / 管理接口、
-服务级限流 / 熔断（Sentinel）、周期存盘、低基数指标（gate / scene 还没接 Micrometer：逻辑队列积压、链路在途帧、
-限流拒绝、写回失败目前只有日志与进程内计数）、合服与 TiDB 数据层。
+服务级限流 / 熔断（Sentinel）、周期存盘、scene 的低基数指标（逻辑队列积压、链路在途帧、写回失败目前只有日志与进程内计数；
+gate / login / scene-manager / gateway 已接，见 §11）、合服与 TiDB 数据层。
 顶号已按 §7 第 2 步实现（旧连接收 23 {2017} 后断开，不发 34）。进度逐项登记在 `PARITY.md`。
+
+## 11. 可观测性（指标）
+
+每个进程用 **Micrometer** 记指标，经 **Spring Boot Actuator** 以 Prometheus 文本格式导出（选型见 tech-stack.md）。
+指标名与标签只在每个进程的一个类里定义，业务代码只调语义方法：gate `GateMetrics`、login `LoginMetrics`、
+scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`。
+
+| 进程 | 抓取地址（默认） | 说明 |
+|---|---|---|
+| xm-gateway | `http://127.0.0.1:18081/actuator/prometheus` | 与客户端 `/api` 同一端口；面向公网部署时必须分开（`MANAGEMENT_SERVER_PORT` + `MANAGEMENT_SERVER_ADDRESS` 绑内网，或入口网关拦掉 `/actuator`） |
+| xm-login | `http://127.0.0.1:18101/actuator/prometheus` | 管理专用端口 |
+| xm-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
+| xm-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
+| xm-scene | —（下一步接入） | |
+
+- **非 Web 进程的管理端口**：gate / login / scene-manager 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
+  Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。
+  默认只绑 `127.0.0.1`（与 mmorpg 开发环境的 Prometheus 端口同口径），跨机抓取用 `XM_MANAGEMENT_ADDRESS` 指定内网地址；
+  端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。只暴露 `health` 与 `prometheus` 两个端点。
+- **公共标签**：`application=<进程名>`。实例由 Prometheus 的抓取目标区分，不在进程里加实例标签。
+- **基数约束**（AGENTS.md §5）：不以 player_id / session_id / 账号 / IP / zone_id 作标签。消息维度只用 `服务.方法`
+  （`MessageIdRegistry` 的客户端白名单，有界），不认识的消息号一律归 `unknown`——公网流量造不出新的时间序列；
+  其余标签都是代码里的枚举。
+- **延迟**：Timer 用固定的 SLO 桶（gate / login 5ms～10s 共 11 个，scene-manager 1ms～1s 共 8 个），不开百分位直方图。
+- **JVM / 进程 / Tomcat / HTTP 请求**等通用指标由 Actuator 自带（`jvm_*`、`process_*`、`http_server_requests_*` ……）。
+
+业务指标（Prometheus 名；计数器带 `_total`，Timer 导出 `_seconds_count` / `_sum` / `_max` / `_bucket`）：
+
+| 进程 | 指标 | 类型 | 标签 | 含义 |
+|---|---|---|---|---|
+| gate | `xm_gate_sessions_active` | Gauge | — | 当前会话数（含未握手、正在收尾的） |
+| gate | `xm_gate_scene_links` | Gauge | — | 到各 scene 节点的链路数（建链中 + 就绪） |
+| gate | `xm_gate_handshakes_total` | Counter | `result`=ok / bad_signature / bad_payload / wrong_gate / wrong_zone / expired / timeout / missing | 令牌握手结果（missing = 没握手就发业务包） |
+| gate | `xm_gate_client_requests_total` | Counter | `route`=login / scene / unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / overflow / dropped | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。C++ 的「非法包」= unknown_message + oversized + rate_limited；限频拒绝 = rate_limited |
+| gate | `xm_gate_client_invalid_frames_total` | Counter | `reason`=invalid_length / checksum / invalid_name_len / unknown_type / parse | 解码层非法帧（随即断开） |
+| gate | `xm_gate_disconnects_total` | Counter | `reason`=handshake_timeout / handshake_rejected / no_handshake / illegal_packets / pending_overflow / write_buffer_full / invalid_frame / session_id_exhausted / server_directive / kicked / scene_link_down | gate 主动断开的连接（客户端自己断开、停服 / 丢租约的批量关闭不计） |
+| gate | `xm_gate_backend_calls_seconds` | Timer | `backend`=login，`method`=handle / sessionClosed / abandonEnter，`result`=ok / error | 对 login 的 Dubbo 调用耗时（带 tip 的应答算 ok；超时 / 不可用算 error） |
+| gate | `xm_gate_link_frames_total` | Counter | `direction`=out / in，`type`=链路帧类型（hello / player_enter / client_forward / to_client ……） | gate ↔ scene 链路帧（out = 已写上链路，排队中不算） |
+| gate | `xm_gate_link_dropped_total` | Counter | `reason`=lease_invalid / queue_full / link_failed / unavailable | 没发出去的链路帧 |
+| gate | `xm_gate_link_events_total` | Counter | `event`=connecting / ready / connect_failed / down | 链路状态变化 |
+| login | `xm_login_requests_seconds` | Timer | `method`=Login / CreatePlayer / EnterGame / LeaveGame / Disconnect / unrouted，`result`=ok / business_error / internal_error / overloaded / bad_request / unsupported | 每个客户端请求的耗时与结果（含工作队列排队）；business_error = 应答体带 `error_message` |
+| login | `xm_login_owner_claims_seconds` | Timer | `outcome`=claimed / waited / timeout / not_found / error | EnterGame 夺取归属这一步（§7）：第一次夺到 / 请持有者让出后夺到（顶号、快速重进）/ 等不到回 2005 / 角色已不存在 / 故障 |
+| login | `xm_login_owner_takeover_requests_total` | Counter | — | 请持有者让出的次数（每次重试都会再请一次） |
+| login | `xm_login_backend_calls_seconds` | Timer | `backend`=scene-manager，`method`=assign，`result`=ok / rejected / error | 场景分配调用耗时 |
+| login | `xm_login_players_created_total` | Counter | — | 新建成功的角色（应答丢失后的重试命中已建角色不计） |
+| login | `xm_login_abandoned_enters_total` | Counter | `result`=released / stale / failed / overloaded / invalid | gate 通知进场未送达后代为释放归属的结果 |
+| login | `executor_*{name="login-worker"}` | Micrometer 标准线程池指标 | — | 工作线程池排队 / 活跃 / 完成数（队列满见 `xm_login_requests{result="overloaded"}`） |
+| scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
+| gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 400 / 404 / 500 / 503，`reason`=ok / 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；8 个已知组合启动即注册 |
+
+未覆盖（后续）：xm-scene 的指标；Druid 连接池指标（Spring Boot 只认 Hikari / DBCP2 / Tomcat 等连接池的元数据）；
+Dubbo 与 Redisson 自带指标未接入。

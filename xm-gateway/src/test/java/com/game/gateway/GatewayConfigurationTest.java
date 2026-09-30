@@ -6,6 +6,8 @@ import static org.mockito.Mockito.mock;
 import com.game.gateway.assign.AssignGateService;
 import com.game.gateway.zone.ZoneCatalog;
 import com.game.gateway.zone.ZoneStatus;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -15,7 +17,8 @@ class GatewayConfigurationTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(GatewayConfiguration.class)
-            .withBean(RedissonClient.class, () -> mock(RedissonClient.class));
+            .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new);
 
     private static final String[] ONE_ZONE = {
             "xm.gateway.zones[0].zone-id=1",

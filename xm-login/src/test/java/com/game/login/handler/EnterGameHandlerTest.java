@@ -18,6 +18,7 @@ import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.EnterScene;
 import com.game.api.proto.SessionContext;
 import com.game.login.dispatch.HandlerReply;
+import com.game.login.metrics.LoginMetrics;
 import com.game.login.ownership.OwnerTakeovers;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
@@ -26,6 +27,7 @@ import com.game.proto.login.EnterGameRequest;
 import com.game.proto.login.EnterGameResponse;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -58,8 +60,10 @@ class EnterGameHandlerTest {
     /** 单调时钟（纳秒），测试手动拨动；退避用同步执行器，不真等。 */
     private final AtomicLong nanos = new AtomicLong(1_000_000_000L);
     private final List<Duration> backoffs = new ArrayList<>();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final LoginMetrics metrics = new LoginMetrics(meters);
     private final EnterGameHandler handler = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
-            Duration.ofMillis(200), CLAIM_WAIT, delay -> {
+            Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> {
                 backoffs.add(delay);
                 return Runnable::run;
             }, nanos::get);
@@ -107,6 +111,10 @@ class EnterGameHandlerTest {
         verify(scenes).assign(request.capture());
         assertThat(request.getValue()).isEqualTo(AssignSceneRequest.newBuilder()
                 .setZoneId(7).setPlayerId(PLAYER).setPreferredSceneConfigId(3).build());
+
+        assertThat(assigns("ok")).isEqualTo(1);
+        assertThat(claims("claimed")).isEqualTo(1);
+        assertThat(meters.get("xm.login.owner.takeover.requests").counter().count()).isZero();
     }
 
     @Test
@@ -154,6 +162,12 @@ class EnterGameHandlerTest {
         assertThat(reply.directives().get(0).getEnterScene().getOwnerEpoch()).isEqualTo(5);
         verify(takeovers, times(2)).request(PLAYER, 4);
         assertThat(backoffs).as("退避翻倍").containsExactly(Duration.ofMillis(100), Duration.ofMillis(200));
+
+        assertThat(claims("waited")).as("等持有者让出后夺到").isEqualTo(1);
+        assertThat(claims("claimed")).isZero();
+        assertThat(meters.get("xm.login.owner.claims").tag("outcome", "waited").timer().totalTime(TimeUnit.MILLISECONDS))
+                .as("耗时取注入的单调时钟：两次各 150ms").isEqualTo(300);
+        assertThat(meters.get("xm.login.owner.takeover.requests").counter().count()).isEqualTo(2);
     }
 
     @Test
@@ -168,6 +182,7 @@ class EnterGameHandlerTest {
         verify(store, times(3)).claimOwnership(PLAYER);
         verify(takeovers, times(3)).request(PLAYER, 4);
         assertThat(backoffs).allSatisfy(delay -> assertThat(delay).isLessThanOrEqualTo(EnterGameHandler.MAX_CLAIM_BACKOFF));
+        assertThat(claims("timeout")).isEqualTo(1);
 
         // 等待链结束后在途闸门已释放：下一次（持有者已释放）能进。
         when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.Claimed(5));
@@ -194,6 +209,9 @@ class EnterGameHandlerTest {
 
         assertError(enter(SESSION, PLAYER), noScene);
         verify(store, never()).claimOwnership(anyLong());
+        assertThat(assigns("rejected")).isEqualTo(1);
+        assertThat(meters.get("xm.login.owner.claims").timers()).as("分配失败不走到夺权")
+                .allSatisfy(timer -> assertThat(timer.count()).isZero());
     }
 
     @Test
@@ -209,6 +227,7 @@ class EnterGameHandlerTest {
         assertError(enter(SESSION, PLAYER), failed);
 
         verify(store, never()).claimOwnership(anyLong());
+        assertThat(assigns("error")).isEqualTo(3);
     }
 
     @Test
@@ -234,13 +253,14 @@ class EnterGameHandlerTest {
             task.run();
         };
         EnterGameHandler busy = new EnterGameHandler(store, scenes, takeovers, firstOnly, 1, Duration.ofMillis(200),
-                CLAIM_WAIT, delay -> Runnable::run, nanos::get);
+                CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get);
         when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.Held(4));
 
         assertThatThrownBy(() -> busy.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build())
                 .orTimeout(5, TimeUnit.SECONDS).join())
                 .isInstanceOf(CompletionException.class)
                 .hasCauseInstanceOf(RejectedExecutionException.class);
+        assertThat(claims("error")).as("异常结束的夺权链记 error").isEqualTo(1);
 
         executions.set(0);
         when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.Claimed(5));
@@ -254,6 +274,7 @@ class EnterGameHandlerTest {
         when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.NotFound());
         assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE);
         verify(takeovers, never()).request(anyLong(), anyLong());
+        assertThat(claims("not_found")).isEqualTo(1);
     }
 
     @Test
@@ -277,8 +298,19 @@ class EnterGameHandlerTest {
     void 夺权故障_future异常完成且释放闸门() throws Exception {
         doThrow(new IllegalStateException("db down")).when(store).claimOwnership(PLAYER);
         assertThatThrownBy(() -> enter(SESSION, PLAYER)).isInstanceOf(CompletionException.class);
+        assertThat(claims("error")).as("第一次夺权就抛出也记 error").isEqualTo(1);
 
         doReturn(new ClaimResult.Claimed(6)).when(store).claimOwnership(PLAYER);
         assertThat(enter(SESSION, PLAYER).directives().get(0).getEnterScene().getOwnerEpoch()).isEqualTo(6);
+        assertThat(claims("claimed")).isEqualTo(1);
+    }
+
+    private double claims(String outcome) {
+        return meters.get("xm.login.owner.claims").tag("outcome", outcome).timer().count();
+    }
+
+    private double assigns(String result) {
+        return meters.get("xm.login.backend.calls").tag("backend", "scene-manager").tag("method", "assign")
+                .tag("result", result).timer().count();
     }
 }

@@ -3,9 +3,11 @@ package com.game.scene;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.player.store.PlayerStore;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.GeneratedSceneTables;
 import com.game.scene.world.SceneTables;
 import com.game.table.AllTable;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.redisson.api.RedissonClient;
@@ -50,9 +52,16 @@ public class SceneNodeConfiguration {
         return NodeLinkAuth.requireFromEnvValue(environment.getProperty(NodeLinkAuth.SECRET_ENV));
     }
 
+    /** scene 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
+    @Bean
+    public SceneMetrics sceneMetrics(MeterRegistry meterRegistry) {
+        return new SceneMetrics(meterRegistry);
+    }
+
     @Bean
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
-                               MessageIdRegistry registry, SceneTables tables, NodeLinkAuth nodeLinkAuth) {
-        return new SceneNode(props, redis, playerStore, registry, tables, nodeLinkAuth);
+                               MessageIdRegistry registry, SceneTables tables, NodeLinkAuth nodeLinkAuth,
+                               SceneMetrics sceneMetrics) {
+        return new SceneNode(props, redis, playerStore, registry, tables, nodeLinkAuth, sceneMetrics);
     }
 }

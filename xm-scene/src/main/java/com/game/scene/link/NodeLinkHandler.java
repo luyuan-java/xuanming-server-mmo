@@ -3,6 +3,7 @@ package com.game.scene.link;
 import com.game.api.proto.LinkHello;
 import com.game.api.proto.NodeLinkFrame;
 import com.game.common.token.NodeLinkAuth;
+import com.game.scene.metrics.SceneMetrics;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
@@ -34,6 +35,8 @@ import org.slf4j.LoggerFactory;
  *       而不是在逻辑线程的任务队列里无限增长直到 OOM。</li>
  * </ol>
  * 握手成功的回包由逻辑线程在登记链路后发出（见 {@link LinkInbound#linkOpened}），保证 gate 收到 ack 时链路已可用。
+ *
+ * <p>指标：收到的每一帧（{@code xm.scene.link.frames{direction=in}}）、握手拒绝的回包（out）、背压暂停次数。
  */
 public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkFrame> {
 
@@ -53,6 +56,7 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
     private final Duration handshakeTimeout;
     private final int maxPendingFrames;
     private final int resumePendingFrames;
+    private final SceneMetrics metrics;
 
     // 以下字段只在本连接的 EventLoop 上读写。
     private State state = State.HANDSHAKING;
@@ -71,9 +75,11 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
      * @param clock            校验握手时间戳用的时钟
      * @param linkIds          进程内共享的链路号计数器（从 1 起），保证链路号不复用
      * @param maxPendingFrames 这条链路已投递未执行的帧数上限，达到即暂停读；降到一半以下恢复
+     * @param metrics          收帧与背压计数（进程内共享一份）
      */
     public NodeLinkHandler(LinkIdentity identity, NodeLinkAuth auth, InstantSource clock, LinkInbound inbound,
-                           Executor logicExecutor, AtomicLong linkIds, Duration handshakeTimeout, int maxPendingFrames) {
+                           Executor logicExecutor, AtomicLong linkIds, Duration handshakeTimeout, int maxPendingFrames,
+                           SceneMetrics metrics) {
         if (maxPendingFrames < 2) {
             throw new IllegalArgumentException("maxPendingFrames 至少为 2: " + maxPendingFrames);
         }
@@ -86,6 +92,7 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
         this.handshakeTimeout = handshakeTimeout;
         this.maxPendingFrames = maxPendingFrames;
         this.resumePendingFrames = maxPendingFrames / 2;
+        this.metrics = metrics;
     }
 
     @Override
@@ -101,6 +108,7 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, NodeLinkFrame frame) {
+        metrics.linkFrameIn(frame.getBodyCase());
         switch (state) {
             case HANDSHAKING -> handshake(ctx, frame);
             case OPEN -> {
@@ -156,6 +164,7 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
         cancelHandshakeTimer();
         state = State.REJECTED;
         ctx.writeAndFlush(identity.ack(false, reason)).addListener(ChannelFutureListener.CLOSE);
+        metrics.linkFrameOut(NodeLinkFrame.BodyCase.HELLO_ACK);
     }
 
     @Override
@@ -187,6 +196,7 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
             readPaused = true;
             pausedFlag = true;
             ctx.channel().config().setAutoRead(false);
+            metrics.linkReadPaused();
             log.warn("场景逻辑线程积压，暂停读取 gate 链路 link={} 积压帧={}", linkId, pending);
             // 置暂停标记之前逻辑线程可能已经消化到恢复线以下（那时它看不到标记、不会安排恢复）：这里补查一次。
             if (pendingFrames.get() <= resumePendingFrames) {

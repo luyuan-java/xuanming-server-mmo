@@ -18,6 +18,7 @@ import com.game.login.character.CharacterRules;
 import com.game.login.character.PlayerIdGenerator;
 import com.game.login.character.RoleNameRules;
 import com.game.login.dispatch.HandlerReply;
+import com.game.login.metrics.LoginMetrics;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
 import com.game.player.store.PlayerStore.CreateOutcome;
@@ -26,6 +27,7 @@ import com.game.player.store.PlayerStore.CreateStatus;
 import com.game.proto.login.CreatePlayerRequest;
 import com.game.proto.login.CreatePlayerResponse;
 import com.game.table.LoginErrorTip;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -53,6 +55,7 @@ class CreatePlayerHandlerTest {
     private final IntSupplier randomByte = () -> generated[0]++ / 6;
     /** 每次事务版建角收到的候选名。 */
     private final List<List<String>> candidates = new ArrayList<>();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
 
     private CreatePlayerHandler handler;
 
@@ -85,7 +88,11 @@ class CreatePlayerHandlerTest {
             }
             return new CreateOutcome(CreateStatus.NAME_TAKEN, existing);
         });
-        handler = new CreatePlayerHandler(store, rules, ids, randomByte, ZONE, 5);
+        handler = new CreatePlayerHandler(store, rules, ids, randomByte, ZONE, 5, new LoginMetrics(meters));
+    }
+
+    private double playersCreated() {
+        return meters.get("xm.login.players.created").counter().count();
     }
 
     private static CreatePlayerResponse response(HandlerReply reply) throws Exception {
@@ -126,6 +133,7 @@ class CreatePlayerHandlerTest {
         assertThat(row.getZoneId()).isEqualTo(ZONE);
         assertThat(row.getName()).isEqualTo("道友aaaaaa");
         assertThat(Snowflake.workerOf(row.getPlayerId())).isEqualTo(3);
+        assertThat(playersCreated()).isEqualTo(1);
 
         assertThat(response.getPlayersList()).extracting(w -> w.getPlayer().getPlayerId())
                 .containsExactly(100L, row.getPlayerId());

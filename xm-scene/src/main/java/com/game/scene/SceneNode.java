@@ -16,6 +16,7 @@ import com.game.scene.link.LinkIdentity;
 import com.game.scene.link.NodeLinkHandler;
 import com.game.scene.link.NodeLinkServer;
 import com.game.scene.link.SceneLinkService;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.ownership.OwnerLeaseRenewer;
 import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.storage.StoragePlayerRepository;
@@ -62,6 +63,9 @@ import org.springframework.context.SmartLifecycle;
  *
  * <p>节点号租约丢失时（号可能已被别的实例占用，雪花号与目录条目都会撞）：停止刷新目录、关闭监听、
  * 拒绝新进场；已在场玩家继续服务直到离开，由运维决定何时重启。
+ *
+ * <p>指标（{@link SceneMetrics}，architecture.md §11）：这里绑定逻辑线程队列长度、gate 链路连接数与存储线程池的状态量，
+ * 并给经 {@link #runOnLogic} 投递的每个逻辑任务计排队与执行耗时；其余指标由各组件自己记。
  */
 public class SceneNode implements SmartLifecycle {
 
@@ -80,6 +84,7 @@ public class SceneNode implements SmartLifecycle {
     private final MessageIdRegistry registry;
     private final SceneTables tables;
     private final NodeLinkAuth linkAuth;
+    private final SceneMetrics metrics;
     private final String instanceId = UUID.randomUUID().toString();
     /** 最近一次目录快照里的在线人数（停服写回没能执行时报告用，任意线程可读）。 */
     private final AtomicInteger approxPlayers = new AtomicInteger();
@@ -100,15 +105,17 @@ public class SceneNode implements SmartLifecycle {
 
     /**
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
+     * @param metrics  scene 指标（各组件共用一份）
      */
     public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
-                     MessageIdRegistry registry, SceneTables tables, NodeLinkAuth linkAuth) {
+                     MessageIdRegistry registry, SceneTables tables, NodeLinkAuth linkAuth, SceneMetrics metrics) {
         this.props = props;
         this.redis = redis;
         this.playerStore = playerStore;
         this.registry = registry;
         this.tables = tables;
         this.linkAuth = linkAuth;
+        this.metrics = metrics;
     }
 
     @Override
@@ -140,15 +147,21 @@ public class SceneNode implements SmartLifecycle {
         Snowflake snowflake = new Snowflake(nodeId);
 
         logicLoop = new DefaultEventLoop(new DefaultThreadFactory("scene-logic"));
+        // 状态量回调读 volatile 字段（抓取线程上调用，线程安全、不阻塞），组件还没建出来或已释放时报 0。
+        metrics.bindLogicQueue(() -> {
+            DefaultEventLoop loop = logicLoop;
+            return loop == null ? 0 : loop.pendingTasks();
+        });
         Executor logic = this::runOnLogic;
         storageExecutor = new ThreadPoolExecutor(settings.storageThreads(), settings.storageThreads(),
                 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(settings.storageQueueCapacity()),
                 new DefaultThreadFactory("scene-storage"), new ThreadPoolExecutor.AbortPolicy());
-        StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic);
+        metrics.bindStorageExecutor(storageExecutor);
+        StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics);
 
-        GateLinks gateLinks = new GateLinks();
+        GateLinks gateLinks = new GateLinks(metrics);
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
-                SceneClock.SYSTEM);
+                SceneClock.SYSTEM, metrics);
         links = gateLinks;
         world = sceneWorld;
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables);
@@ -171,14 +184,18 @@ public class SceneNode implements SmartLifecycle {
         leaseRenewer.start(scheduler);
 
         LinkIdentity identity = new LinkIdentity(nodeId, instanceId, zoneId);
-        SceneLinkService linkService = new SceneLinkService(identity, gateLinks, sceneWorld, requests);
+        SceneLinkService linkService = new SceneLinkService(identity, gateLinks, sceneWorld, requests, metrics);
         AtomicLong linkIds = new AtomicLong();
         Duration handshakeTimeout = settings.linkHandshakeTimeout();
         int maxPendingFrames = settings.linkMaxPendingFrames();
         linkServer = new NodeLinkServer(settings.linkIoThreads());
+        metrics.bindGateLinkCount(() -> {
+            NodeLinkServer server = linkServer;
+            return server == null ? 0 : server.connectionCount();
+        });
         int linkPort = linkServer.start(settings.linkBindHost(), settings.linkPort(),
                 () -> new NodeLinkHandler(identity, linkAuth, InstantSource.system(), linkService, logic, linkIds,
-                        handshakeTimeout, maxPendingFrames));
+                        handshakeTimeout, maxPendingFrames, metrics));
 
         SceneNodeInfo info = SceneNodeInfo.newBuilder()
                 .setZoneId(zoneId)
@@ -303,15 +320,19 @@ public class SceneNode implements SmartLifecycle {
         }
     }
 
-    /** 投递到逻辑线程；任务里的异常记错误日志，不让它悄悄吞掉。逻辑线程已停时抛 {@link RejectedExecutionException}。 */
+    /**
+     * 投递到逻辑线程；任务里的异常记错误日志，不让它悄悄吞掉。逻辑线程已停时抛 {@link RejectedExecutionException}。
+     * 每个任务计排队等待与执行耗时（{@code xm.scene.logic.task.wait} / {@code .run}）：链路帧、存储回调、接管与失去归属
+     * 都经这里；同步调用（{@link #callOnLogic}：目录 / 归属快照）与定时的帧任务不经过这里（帧耗时另记）。
+     */
     private void runOnLogic(Runnable task) {
-        logicLoop.execute(() -> {
+        logicLoop.execute(metrics.timeLogicTask(() -> {
             try {
                 task.run();
             } catch (RuntimeException e) {
                 log.error("场景逻辑任务异常", e);
             }
-        });
+        }));
     }
 
     private <T> T callOnLogic(Callable<T> task) throws Exception {

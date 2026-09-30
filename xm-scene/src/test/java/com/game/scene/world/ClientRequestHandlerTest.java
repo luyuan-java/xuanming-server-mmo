@@ -23,6 +23,7 @@ import com.game.proto.SceneInfoComp;
 import com.game.proto.SceneInfoRequest;
 import com.game.proto.SceneInfoS2C;
 import com.game.proto.SkillUsedS2C;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
@@ -54,7 +55,7 @@ class ClientRequestHandlerTest {
         repo = new FakePlayerRepository();
         AtomicLong ids = new AtomicLong(5000);
         FakeSceneTables tables = new FakeSceneTables();
-        world = new SceneWorld(tables, IDS, sink, repo, ids::incrementAndGet, new ManualClock());
+        world = new SceneWorld(tables, IDS, sink, repo, ids::incrementAndGet, new ManualClock(), SceneMetrics.noop());
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, tables);
         scene1 = world.createScene(1);
         scene2 = world.createScene(2);

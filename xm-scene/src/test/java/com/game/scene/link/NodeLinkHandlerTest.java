@@ -7,7 +7,9 @@ import com.game.api.proto.LinkHelloAck;
 import com.game.api.proto.NodeLinkFrame;
 import com.game.api.proto.PlayerLeave;
 import com.game.common.token.NodeLinkAuth;
+import com.game.scene.metrics.SceneMetrics;
 import com.google.protobuf.ByteString;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.Channel;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.time.Duration;
@@ -28,10 +30,14 @@ class NodeLinkHandlerTest {
     private static final String GATE_INSTANCE = "gate-instance";
 
     private RecordingInbound inbound;
+    private SimpleMeterRegistry meters;
+    private SceneMetrics metrics;
 
     @BeforeEach
     void setUp() {
         inbound = new RecordingInbound();
+        meters = new SimpleMeterRegistry();
+        metrics = new SceneMetrics(meters);
     }
 
     // ------------------------------------------------------------------ 鉴权
@@ -103,6 +109,8 @@ class NodeLinkHandlerTest {
         assertThat(ack.getZoneId()).isEqualTo(1);
         assertThat(channel.isOpen()).isFalse();
         assertThat(inbound.events).isEmpty();
+        assertThat(frames("in", "hello")).isEqualTo(1);
+        assertThat(frames("out", "hello_ack")).as("拒绝回包也算出站帧").isEqualTo(1);
     }
 
     @Test
@@ -141,6 +149,9 @@ class NodeLinkHandlerTest {
 
         assertThat(inbound.events).containsExactly("opened:1:5", "frame:1:PLAYER_LEAVE", "closed:1");
         assertThat(inbound.lastOpenedChannel).isSameAs(channel);
+        assertThat(frames("in", "hello")).isEqualTo(1);
+        assertThat(frames("in", "player_leave")).isEqualTo(1);
+        assertThat(frames("out", "hello_ack")).as("握手成功的回包由逻辑线程登记链路后发（SceneLinkService）").isZero();
     }
 
     @Test
@@ -181,7 +192,7 @@ class NodeLinkHandlerTest {
         List<Runnable> logicQueue = new ArrayList<>();
         EmbeddedChannel channel = new EmbeddedChannel(new NodeLinkHandler(IDENTITY, AUTH,
                 InstantSource.fixed(Instant.ofEpochSecond(NOW)), inbound, logicQueue::add, new AtomicLong(),
-                Duration.ofSeconds(10), 4));
+                Duration.ofSeconds(10), 4, metrics));
         channel.writeInbound(hello(5, 1, NOW));
         logicQueue.remove(0).run();
         NodeLinkFrame leave = NodeLinkFrame.newBuilder()
@@ -192,8 +203,10 @@ class NodeLinkHandlerTest {
             channel.writeInbound(leave);
         }
         assertThat(channel.config().isAutoRead()).as("3 帧积压，未到上限").isTrue();
+        assertThat(pauses()).isZero();
         channel.writeInbound(leave);
         assertThat(channel.config().isAutoRead()).as("4 帧积压，到上限暂停读").isFalse();
+        assertThat(pauses()).isEqualTo(1);
 
         logicQueue.remove(0).run();
         channel.runPendingTasks();
@@ -206,13 +219,22 @@ class NodeLinkHandlerTest {
         logicQueue.forEach(Runnable::run);
         assertThat(inbound.events).containsExactly("opened:1:5", "frame:1:PLAYER_LEAVE", "frame:1:PLAYER_LEAVE",
                 "frame:1:PLAYER_LEAVE", "frame:1:PLAYER_LEAVE");
+        assertThat(pauses()).as("恢复不计，只计暂停").isEqualTo(1);
     }
 
     // ------------------------------------------------------------------ 工具
 
     private EmbeddedChannel newChannel(Duration handshakeTimeout) {
         return new EmbeddedChannel(new NodeLinkHandler(IDENTITY, AUTH, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
-                inbound, Runnable::run, new AtomicLong(), handshakeTimeout, 100));
+                inbound, Runnable::run, new AtomicLong(), handshakeTimeout, 100, metrics));
+    }
+
+    private double frames(String direction, String type) {
+        return meters.get("xm.scene.link.frames").tag("direction", direction).tag("type", type).counter().count();
+    }
+
+    private double pauses() {
+        return meters.get("xm.scene.link.backpressure.pauses").counter().count();
     }
 
     private static NodeLinkFrame hello(int gateNodeId, int zoneId, long authTimestamp) {

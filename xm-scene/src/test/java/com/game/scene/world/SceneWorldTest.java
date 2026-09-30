@@ -12,7 +12,9 @@ import com.game.proto.ActorDestroyS2C;
 import com.game.proto.ActorListCreateS2C;
 import com.game.proto.ActorType;
 import com.game.proto.EnterSceneS2C;
+import com.game.proto.Rotation;
 import com.game.proto.SceneInfoComp;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakePlayerRepository.Release;
@@ -21,6 +23,7 @@ import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingSink;
 import com.game.scene.testing.RecordingSink.EnterResult;
 import com.game.scene.testing.RecordingSink.Kicked;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,6 +39,8 @@ class SceneWorldTest {
 
     private RecordingSink sink;
     private FakePlayerRepository repo;
+    private ManualClock clock;
+    private SimpleMeterRegistry meters;
     private SceneWorld world;
     private Scene scene;
 
@@ -43,8 +48,11 @@ class SceneWorldTest {
     void setUp() {
         sink = new RecordingSink();
         repo = new FakePlayerRepository();
+        clock = new ManualClock();
+        meters = new SimpleMeterRegistry();
         AtomicLong ids = new AtomicLong(1000);
-        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, ids::incrementAndGet, new ManualClock());
+        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, ids::incrementAndGet, clock,
+                new SceneMetrics(meters));
         scene = world.createScene(1);
     }
 
@@ -450,6 +458,107 @@ class SceneWorldTest {
         assertThat(sink.kicks()).containsExactly(new Kicked(LINK, 11, 1001, 3, KICKED));
         assertThat(world.playerCount()).isEqualTo(1);
         assertThat(world.ownedPlayers()).containsExactly(new OwnedPlayer(1002, 1));
+    }
+
+    // ------------------------------------------------------------------ 指标
+
+    @Test
+    void 指标_场景配置在线人数_同配置各频道合计_随进场换图离场停服更新_进场失败不计() {
+        Scene channel2 = world.createScene(1);
+        Scene map2 = world.createScene(2);
+        repo.putNewPlayer(1001, 1);
+        repo.putNewPlayer(1002, 1);
+        repo.putNewPlayer(1003, 1);
+        assertThat(scenePlayers(1)).as("建场景即注册，初值 0").isZero();
+        assertThat(scenePlayers(2)).isZero();
+
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        enter(LINK, 12, 1002, channel2.sceneId(), 1);
+        enter(LINK, 13, 1003, scene.sceneId(), 9);
+        assertThat(scenePlayers(1)).as("两条频道合计；epoch 不符的进场失败不计").isEqualTo(2);
+
+        world.switchScene(world.playerBySession(new SessionKey(LINK, 12)), map2);
+        assertThat(scenePlayers(1)).isEqualTo(1);
+        assertThat(scenePlayers(2)).isEqualTo(1);
+
+        world.onPlayerLeave(LINK, leave(11, 1001));
+        assertThat(scenePlayers(1)).isZero();
+
+        world.shutdown();
+        assertThat(scenePlayers(2)).isZero();
+    }
+
+    @Test
+    void 指标_视野进出按观察者与目标一对计一次_离场者自己的列表静默清空不计() {
+        repo.putNewPlayer(1001, 1);
+        repo.putNewPlayer(1002, 1);
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        assertThat(aoiChanges("enter")).as("场景里没有别人").isZero();
+        enter(LINK, 12, 1002, scene.sceneId(), 1);
+        assertThat(aoiChanges("enter")).as("进场者的 47 一个条目 + 给先到者的 21").isEqualTo(2);
+
+        ScenePlayer second = world.playerBySession(new SessionKey(LINK, 12));
+        world.applyMove(second, standAt(new Vec3(180 + 23, 200, 0)));
+        world.step();
+        assertThat(aoiChanges("leave")).as("走出离开半径：双方各一条 64").isEqualTo(2);
+
+        clock.advanceMillis(2_000);
+        world.applyMove(second, standAt(FakeSceneTables.SPAWN_1));
+        world.step();
+        assertThat(aoiChanges("enter")).as("走回视野：双方各一条 47").isEqualTo(4);
+
+        world.onPlayerLeave(LINK, leave(12, 1002));
+        assertThat(aoiChanges("leave")).as("只有旁观者收到 51").isEqualTo(3);
+    }
+
+    @Test
+    void 指标_移动裁决_原样接受_截断不纠偏_截断并纠偏_非有限值丢弃() {
+        repo.putNewPlayer(1001, 1);
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        ScenePlayer player = world.playerBySession(new SessionKey(LINK, 11));
+        sink.clear();
+
+        world.applyMove(player, standAt(new Vec3(181, 200, 0)));
+        world.applyMove(player, standAt(new Vec3(203.8, 200, 0)));
+        // 额度（24 m，时钟不走不回填）只剩 0.2 m：截到 204.0，偏差 0.4 m 不超过纠偏阈值。
+        world.applyMove(player, standAt(new Vec3(204.4, 200, 0)));
+        // 额度 0：原地不动，偏差远超阈值，回 137。
+        world.applyMove(player, standAt(new Vec3(300, 200, 0)));
+        world.applyMove(player, standAt(new Vec3(Double.NaN, 200, 0)));
+
+        assertThat(moves("accepted")).isEqualTo(2);
+        assertThat(moves("clamped")).isEqualTo(1);
+        assertThat(moves("corrected")).isEqualTo(1);
+        assertThat(moves("invalid")).isEqualTo(1);
+        assertThat(sink.messageIdsTo(LINK, 11)).as("只有纠偏那条回 137").containsExactly(137);
+    }
+
+    @Test
+    void 指标_每帧记一次帧耗时_视野广播每帧一次_属性同步偶数帧一次() {
+        world.step();
+        world.step();
+        world.step();
+
+        assertThat(meters.get("xm.scene.tick").timer().count()).isEqualTo(3);
+        assertThat(meters.get("xm.scene.broadcast").tag("kind", "view_changes").timer().count()).isEqualTo(3);
+        assertThat(meters.get("xm.scene.broadcast").tag("kind", "attribute_sync").timer().count()).isEqualTo(2);
+    }
+
+    private double scenePlayers(int sceneConfigId) {
+        return meters.get("xm.scene.players").tag("scene_config", Integer.toString(sceneConfigId)).gauge().value();
+    }
+
+    private double aoiChanges(String change) {
+        return meters.get("xm.scene.aoi.changes").tag("change", change).counter().count();
+    }
+
+    private double moves(String result) {
+        return meters.get("xm.scene.moves").tag("result", result).counter().count();
+    }
+
+    /** 站定在某处（速度 0）的移动上行。 */
+    private static MoveInput standAt(Vec3 location) {
+        return new MoveInput(location, Rotation.getDefaultInstance(), Vec3.ORIGIN, 1);
     }
 
     // ------------------------------------------------------------------ 工具

@@ -10,6 +10,7 @@ import com.game.login.dispatch.ClientMessageHandler;
 import com.game.login.dispatch.HandlerReply;
 import com.game.login.dispatch.InFlightKeys;
 import com.game.login.dispatch.Tips;
+import com.game.login.metrics.LoginMetrics;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
 import com.game.proto.TipInfoMessage;
@@ -54,21 +55,24 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     private final IntSupplier randomByte;
     private final int zoneId;
     private final int maxPlayersPerAccount;
+    private final LoginMetrics metrics;
     private final InFlightKeys<String> accountsInFlight = new InFlightKeys<>();
 
     /**
      * @param randomByte           生成名用的随机字节源（生产为 SecureRandom），见 {@link PlayerNames#generate}
      * @param zoneId               本 login 所在 zone，写进新角色的 {@code zone_id}
      * @param maxPlayersPerAccount 每账号角色上限
+     * @param metrics              新建成功的角色计数
      */
     public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
-                               IntSupplier randomByte, int zoneId, int maxPlayersPerAccount) {
+                               IntSupplier randomByte, int zoneId, int maxPlayersPerAccount, LoginMetrics metrics) {
         this.store = store;
         this.rules = rules;
         this.playerIds = playerIds;
         this.randomByte = randomByte;
         this.zoneId = zoneId;
         this.maxPlayersPerAccount = maxPlayersPerAccount;
+        this.metrics = metrics;
     }
 
     @Override
@@ -184,7 +188,10 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
 
         PlayerStore.CreateOutcome outcome = store.createPlayerWithinCap(row, maxPlayersPerAccount, candidates);
         return switch (outcome.status()) {
-            case CREATED -> created(account, row, outcome.existing());
+            case CREATED -> {
+                metrics.playerCreated();
+                yield created(account, row, outcome.existing());
+            }
             case PLAYER_FULL -> {
                 log.info("角色数已达上限（事务内判定）account={} count={}", account, outcome.existing().size());
                 yield error(LoginErrorTip.login_error.kLoginAccountPlayerFull_VALUE);

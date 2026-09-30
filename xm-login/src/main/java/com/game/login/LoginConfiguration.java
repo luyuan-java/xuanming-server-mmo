@@ -19,9 +19,11 @@ import com.game.login.handler.DisconnectHandler;
 import com.game.login.handler.EnterGameHandler;
 import com.game.login.handler.LeaveGameHandler;
 import com.game.login.handler.LoginHandler;
+import com.game.login.metrics.LoginMetrics;
 import com.game.login.ownership.OwnerTakeovers;
 import com.game.login.ownership.RedisOwnerTakeovers;
 import com.game.player.store.PlayerStore;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -63,6 +65,12 @@ public class LoginConfiguration {
     @Bean
     public MessageIdRegistry messageIdRegistry() {
         return MessageIdRegistry.loadFromClasspath();
+    }
+
+    /** login 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
+    @Bean
+    public LoginMetrics loginMetrics(MeterRegistry meterRegistry) {
+        return new LoginMetrics(meterRegistry);
     }
 
     /** 同步加载全部配置表并自检；失败即启动失败，Dubbo 不会暴露服务。 */
@@ -124,10 +132,10 @@ public class LoginConfiguration {
     @Bean
     public CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
                                                    PlayerIdGenerator playerIds, LoginProperties props,
-                                                   @Value("${xm.zone-id:1}") int zoneId) {
+                                                   LoginMetrics loginMetrics, @Value("${xm.zone-id:1}") int zoneId) {
         SecureRandom random = new SecureRandom();
         return new CreatePlayerHandler(store, characterRules, playerIds, () -> random.nextInt(256),
-                zoneId, props.maxPlayersPerAccount());
+                zoneId, props.maxPlayersPerAccount(), loginMetrics);
     }
 
     /** 归属接管请求（Redis pub/sub，全部 scene 节点订阅）。 */
@@ -139,9 +147,9 @@ public class LoginConfiguration {
     @Bean
     public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers,
                                              LoginWorkerPool loginWorkerPool, LoginProperties props,
-                                             @Value("${xm.zone-id:1}") int zoneId) {
+                                             LoginMetrics loginMetrics, @Value("${xm.zone-id:1}") int zoneId) {
         return new EnterGameHandler(store, sceneDirectory, ownerTakeovers, loginWorkerPool, zoneId,
-                props.sceneAssignTimeout(), props.ownerClaimWait());
+                props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics);
     }
 
     /**
@@ -166,8 +174,8 @@ public class LoginConfiguration {
     @Bean
     public ClientMessageDispatcher clientMessageDispatcher(MessageIdRegistry registry,
                                                            List<ClientMessageHandler<?>> handlers,
-                                                           LoginWorkerPool loginWorkerPool) {
-        ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry, handlers, loginWorkerPool);
+                                                           LoginWorkerPool loginWorkerPool, LoginMetrics loginMetrics) {
+        ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry, handlers, loginWorkerPool, loginMetrics);
         log.info("login 接管的消息号={}", dispatcher.routedMessageIds());
         return dispatcher;
     }

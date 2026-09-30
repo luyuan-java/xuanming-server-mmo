@@ -15,6 +15,7 @@ import com.game.login.auth.DevPasswordRule;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.handler.LeaveGameHandler;
 import com.game.login.handler.LoginHandler;
+import com.game.login.metrics.LoginMetrics;
 import com.game.player.store.PlayerStore;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.login.CreatePlayerRequest;
@@ -29,6 +30,8 @@ import com.game.proto.login.LoginResponse;
 import com.game.table.CommonErrorTip;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -110,8 +113,11 @@ class ClientMessageDispatcherTest {
     private final StubHandler<LoginNodeDisconnectRequest> disconnect = new StubHandler<>("Disconnect",
             LoginNodeDisconnectRequest.class, LoginEmptyResponse.class, tip -> Optional.empty());
 
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final LoginMetrics metrics = new LoginMetrics(meters);
+
     private ClientMessageDispatcher dispatcher(Executor executor) {
-        return new ClientMessageDispatcher(registry, List.of(login, create, enter, leave, disconnect), executor);
+        return new ClientMessageDispatcher(registry, List.of(login, create, enter, leave, disconnect), executor, metrics);
     }
 
     private static ClientCall call(int messageId, Message body) {
@@ -120,6 +126,12 @@ class ClientMessageDispatcherTest {
 
     private static ClientCall call(int messageId, ByteString body) {
         return ClientCall.newBuilder().setSession(SESSION).setMessageId(messageId).setBody(body).setRequestId(42).build();
+    }
+
+    /** 没出现过的组合计 0。 */
+    private long requests(String method, String result) {
+        Timer timer = meters.find("xm.login.requests").tag("method", method).tag("result", result).timer();
+        return timer == null ? 0 : timer.count();
     }
 
     @Test
@@ -173,7 +185,8 @@ class ClientMessageDispatcherTest {
 
     @Test
     void LeaveGame真处理器_无应答体只带UnbindPlayer指令() {
-        ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry, List.of(new LeaveGameHandler()), DIRECT);
+        ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry, List.of(new LeaveGameHandler()), DIRECT,
+                metrics);
         ClientCall inGame = call(17, LeaveGameRequest.getDefaultInstance()).toBuilder()
                 .setSession(SESSION.toBuilder().setAccount("robot_0001").setPlayerId(9))
                 .build();
@@ -198,6 +211,8 @@ class ClientMessageDispatcherTest {
         ClientReply notImplemented = dispatcher.dispatch(call(refreshToken, ByteString.EMPTY)).join();
         assertThat(notImplemented.getTipId()).isEqualTo(CommonErrorTip.common_error.kFeatureUnavailable_VALUE);
         assertThat(notImplemented.getBody()).isEmpty();
+
+        assertThat(requests(LoginMetrics.UNROUTED, "unsupported")).as("方法标签不随消息号增长").isEqualTo(2);
     }
 
     @Test
@@ -209,6 +224,7 @@ class ClientMessageDispatcherTest {
         assertThat(reply.getTipId()).isEqualTo(CommonErrorTip.common_error.kRequestMessageParseError_VALUE);
         assertThat(reply.getBody()).isEmpty();
         assertThat(login.received).isEmpty();
+        assertThat(requests("Login", "bad_request")).isEqualTo(1);
     }
 
     @Test
@@ -225,6 +241,9 @@ class ClientMessageDispatcherTest {
 
         ClientReply enterReply = dispatcher.dispatch(call(26, EnterGameRequest.getDefaultInstance())).join();
         assertThat(EnterGameResponse.parseFrom(enterReply.getBody()).getErrorMessage().getId()).isEqualTo(UNAVAILABLE);
+
+        assertThat(requests("Login", "internal_error")).as("同步抛出").isEqualTo(1);
+        assertThat(requests("EnterGame", "internal_error")).as("future 异常完成").isEqualTo(1);
     }
 
     @Test
@@ -245,18 +264,35 @@ class ClientMessageDispatcherTest {
 
         assertThat(CreatePlayerResponse.parseFrom(reply.getBody()).getErrorMessage().getId()).isEqualTo(UNAVAILABLE);
         assertThat(create.received).isEmpty();
+        assertThat(requests("CreatePlayer", "overloaded")).isEqualTo(1);
+    }
+
+    @Test
+    void 指标_业务拒绝与成功按应答体的error_message区分() {
+        login.behavior = r -> CompletableFuture.completedFuture(HandlerReply.of(LoginResponse.getDefaultInstance()));
+        enter.behavior = r -> CompletableFuture.completedFuture(HandlerReply.of(EnterGameResponse.newBuilder()
+                .setErrorMessage(TipInfoMessage.newBuilder().setId(2028)).build()));
+        ClientMessageDispatcher dispatcher = dispatcher(DIRECT);
+
+        dispatcher.dispatch(call(48, LoginRequest.getDefaultInstance())).join();
+        dispatcher.dispatch(call(26, EnterGameRequest.getDefaultInstance())).join();
+        dispatcher.dispatch(call(17, LeaveGameRequest.getDefaultInstance())).join();
+
+        assertThat(requests("Login", "ok")).as("全默认值的成功应答（0 字节）也是成功").isEqualTo(1);
+        assertThat(requests("EnterGame", "business_error")).isEqualTo(1);
+        assertThat(requests("LeaveGame", "ok")).as("空应答类型不回包，按成功计").isEqualTo(1);
     }
 
     @Test
     void 处理器类型与契约不符时启动失败() {
         StubHandler<CreatePlayerRequest> wrong = new StubHandler<>("Login", CreatePlayerRequest.class,
                 LoginResponse.class, tip -> Optional.empty());
-        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(wrong), DIRECT))
+        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(wrong), DIRECT, metrics))
                 .isInstanceOf(IllegalStateException.class);
 
         StubHandler<LoginRequest> wrongResponse = new StubHandler<>("Login", LoginRequest.class,
                 LoginEmptyResponse.class, tip -> Optional.empty());
-        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(wrongResponse), DIRECT))
+        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(wrongResponse), DIRECT, metrics))
                 .isInstanceOf(IllegalStateException.class);
     }
 
@@ -264,9 +300,9 @@ class ClientMessageDispatcherTest {
     void 方法缺号或重复时启动失败() {
         StubHandler<LoginRequest> missing = new StubHandler<>("NoSuchMethod", LoginRequest.class,
                 LoginResponse.class, tip -> Optional.empty());
-        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(missing), DIRECT))
+        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(missing), DIRECT, metrics))
                 .isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(login, login), DIRECT))
+        assertThatThrownBy(() -> new ClientMessageDispatcher(registry, List.of(login, login), DIRECT, metrics))
                 .isInstanceOf(IllegalStateException.class);
     }
 
@@ -276,7 +312,7 @@ class ClientMessageDispatcherTest {
         when(store.listPlayers("robot_0001")).thenReturn(List.of());
         LoginHandler realLogin = new LoginHandler(LoginAuthenticator.withDevPassword(
                 new DevPasswordRule("secret", List.of("robot_"))), store);
-        ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry, List.of(realLogin), DIRECT);
+        ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry, List.of(realLogin), DIRECT, metrics);
 
         ClientReply reply = dispatcher.dispatch(call(48,
                 LoginRequest.newBuilder().setAccount("robot_0001").setPassword("secret").build())).join();
@@ -286,5 +322,6 @@ class ClientMessageDispatcherTest {
         assertThat(response.hasErrorMessage()).isFalse();
         assertThat(reply.getDirectivesList()).extracting(d -> d.getBindAccount().getAccount())
                 .containsExactly("robot_0001");
+        assertThat(requests("Login", "ok")).isEqualTo(1);
     }
 }

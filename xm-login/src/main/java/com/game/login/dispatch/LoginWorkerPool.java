@@ -1,5 +1,9 @@
 package com.game.login.dispatch;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.binder.MeterBinder;
+import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Executor;
@@ -17,10 +21,17 @@ import org.slf4j.LoggerFactory;
  *
  * <p>关闭：先停止接新任务，最多等 {@code drainTimeout} 让在途任务跑完，再中断剩余任务。
  * 在途任务的阻塞 I/O 有 socket 超时兜底，所以正常情况下都能在等待期内结束。
+ *
+ * <p>指标：作为 {@link MeterBinder} 由 Spring Boot 自动绑定到注册表，导出 Micrometer 标准的线程池指标
+ * （{@code executor.queued} / {@code executor.active} / {@code executor.completed} / {@code executor.queue.remaining} …，
+ * 标签 {@code name=login-worker}）；队列满被拒的请求见 {@code xm.login.requests{result=overloaded}}。
  */
-public final class LoginWorkerPool implements Executor, AutoCloseable {
+public final class LoginWorkerPool implements Executor, AutoCloseable, MeterBinder {
 
     private static final Logger log = LoggerFactory.getLogger(LoginWorkerPool.class);
+
+    /** 线程池指标的 {@code name} 标签。 */
+    static final String METRICS_NAME = "login-worker";
 
     private final ThreadPoolExecutor pool;
     private final Duration drainTimeout;
@@ -36,6 +47,12 @@ public final class LoginWorkerPool implements Executor, AutoCloseable {
     @Override
     public void execute(Runnable task) {
         pool.execute(task);
+    }
+
+    /** 只绑定线程池的只读状态，不包装执行器（{@link #execute} 的拒绝语义不变）。 */
+    @Override
+    public void bindTo(MeterRegistry registry) {
+        new ExecutorServiceMetrics(pool, METRICS_NAME, Tags.empty()).bindTo(registry);
     }
 
     @Override

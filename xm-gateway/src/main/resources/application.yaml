@@ -13,6 +13,18 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 10s
 
+# 管理端点：http://127.0.0.1:18081/actuator/health 与 /actuator/prometheus（与客户端 HTTP 接口同一个端口，本地开发用）。
+# 面向公网部署时必须把它与 /api 分开：设 MANAGEMENT_SERVER_PORT（另起端口）+ MANAGEMENT_SERVER_ADDRESS（绑内网地址），
+# 或在入口网关上拦掉 /actuator（architecture.md §11）。
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
 xm:
   zone-id: 1
   redis:

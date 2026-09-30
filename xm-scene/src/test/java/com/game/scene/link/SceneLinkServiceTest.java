@@ -11,6 +11,7 @@ import com.game.api.proto.ToClient;
 import com.game.common.token.NodeLinkAuth;
 import com.game.proto.MessageContent;
 import com.game.proto.ListSkillsRequest;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
@@ -18,6 +19,7 @@ import com.game.scene.testing.ManualClock;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.Scene;
 import com.game.scene.world.SceneWorld;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.time.Duration;
 import java.time.Instant;
@@ -40,17 +42,19 @@ class SceneLinkServiceTest {
     private Scene scene;
     private SceneLinkService service;
     private final AtomicLong linkIds = new AtomicLong();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final SceneMetrics metrics = new SceneMetrics(meters);
 
     @BeforeEach
     void setUp() {
         repo = new FakePlayerRepository();
-        GateLinks links = new GateLinks();
+        GateLinks links = new GateLinks(metrics);
         FakeSceneTables tables = new FakeSceneTables();
         AtomicLong ids = new AtomicLong(9000);
-        world = new SceneWorld(tables, Contracts.IDS, links, repo, ids::incrementAndGet, new ManualClock());
+        world = new SceneWorld(tables, Contracts.IDS, links, repo, ids::incrementAndGet, new ManualClock(), metrics);
         scene = world.createScene(1);
         ClientRequestHandler requests = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, tables);
-        service = new SceneLinkService(IDENTITY, links, world, requests);
+        service = new SceneLinkService(IDENTITY, links, world, requests, metrics);
     }
 
     @Test
@@ -78,6 +82,14 @@ class SceneLinkServiceTest {
         List<NodeLinkFrame> replies = drain(gate);
         assertThat(toClientIds(replies)).containsExactly(77);
         assertThat(MessageContent.parseFrom(replies.get(0).getToClient().getMessageContent()).getId()).isEqualTo(5L);
+
+        // 链路帧计数与实际收发一致：收 hello / player_enter / client_forward，发 hello_ack / 3 个 to_client / player_enter_result。
+        assertThat(frames("in", "hello")).isEqualTo(1);
+        assertThat(frames("in", "player_enter")).isEqualTo(1);
+        assertThat(frames("in", "client_forward")).isEqualTo(1);
+        assertThat(frames("out", "hello_ack")).isEqualTo(1);
+        assertThat(frames("out", "to_client")).isEqualTo(3);
+        assertThat(frames("out", "player_enter_result")).isEqualTo(1);
     }
 
     @Test
@@ -111,6 +123,7 @@ class SceneLinkServiceTest {
 
         assertThat(ack.getHelloAck().getAccepted()).isFalse();
         assertThat(ack.getHelloAck().getReason()).isEqualTo(SceneLinkService.STALE_LEASE_REASON);
+        assertThat(frames("out", "hello_ack")).as("接受一次 + 拒绝一次").isEqualTo(2);
         assertThat(zombie.isOpen()).isFalse();
         assertThat(current.isOpen()).as("新持有者的链路不受影响").isTrue();
         assertThat(world.playerCount()).isEqualTo(1);
@@ -167,7 +180,7 @@ class SceneLinkServiceTest {
     private EmbeddedChannel open(int gateNodeId, String gateInstanceId, long leaseEpoch) {
         EmbeddedChannel channel = new EmbeddedChannel(new NodeLinkHandler(IDENTITY, AUTH,
                 InstantSource.fixed(Instant.ofEpochSecond(NOW)), service, Runnable::run, linkIds, Duration.ofSeconds(10),
-                100));
+                100, metrics));
         channel.writeInbound(NodeLinkFrame.newBuilder()
                 .setHello(LinkHello.newBuilder()
                         .setGateNodeId(gateNodeId)
@@ -178,6 +191,10 @@ class SceneLinkServiceTest {
                         .setAuthMac(AUTH.sign(gateNodeId, gateInstanceId, 1, leaseEpoch, NOW)))
                 .build());
         return channel;
+    }
+
+    private double frames(String direction, String type) {
+        return meters.get("xm.scene.link.frames").tag("direction", direction).tag("type", type).counter().count();
     }
 
     private static List<NodeLinkFrame> drain(EmbeddedChannel channel) {

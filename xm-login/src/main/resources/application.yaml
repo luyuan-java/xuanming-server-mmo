@@ -9,8 +9,9 @@ spring:
   application:
     name: xm-login
   main:
-    web-application-type: none
-    # Dubbo / Netty 线程都是守护线程，靠它让非 Web 进程常驻；上下文关闭时退出。
+    # 只为管理端点起一个 Servlet 容器（Tomcat）；Dubbo 端口不经过它（architecture.md §11）。
+    web-application-type: servlet
+    # Dubbo / Netty 线程都是守护线程，靠它让进程常驻（不依赖管理端口的 Tomcat 线程）；上下文关闭时退出。
     keep-alive: true
   lifecycle:
     timeout-per-shutdown-phase: 20s
@@ -37,6 +38,28 @@ spring:
       schema-locations: classpath:db/xm-player-schema.sql
       encoding: UTF-8
       continue-on-error: false
+
+# 管理端点：http://127.0.0.1:18101/actuator/health 与 /actuator/prometheus，这个 HTTP 端口上只有 actuator。
+# 默认只绑本机；要被别的机器上的 Prometheus 抓取时用 XM_MANAGEMENT_ADDRESS 指定内网地址（不要暴露到公网）。
+# 端口可用 SERVER_PORT 覆盖（Windows 上避开保留端口段 50060-50159）。
+server:
+  port: 18101
+  address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
+  # 管理端口上没有需要排空的业务请求。
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
 
 xm:
   # 对外通告地址（Dubbo 注册 / 通告用）；非本机部署用环境变量 XM_ADVERTISE_HOST 覆盖。

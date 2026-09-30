@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.proto.NodeLinkFrame;
 import com.game.api.proto.PlayerKicked;
 import com.game.proto.MessageContent;
+import com.game.scene.metrics.SceneMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.List;
@@ -12,7 +14,8 @@ import org.junit.jupiter.api.Test;
 
 class GateLinksTest {
 
-    private final GateLinks links = new GateLinks();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final GateLinks links = new GateLinks(new SceneMetrics(meters));
 
     @Test
     void 同一gate节点号_代次更低的新链路被拒_相同或更高的顶替() {
@@ -42,6 +45,23 @@ class GateLinksTest {
 
         assertThat(((NodeLinkFrame) ch.readOutbound()).getPlayerKicked()).isEqualTo(PlayerKicked.newBuilder()
                 .setSessionId(11).setPlayerId(1001).setOwnerEpoch(4).setTipId(2017).build());
+        assertThat(framesOut("player_kicked")).isEqualTo(1);
+    }
+
+    @Test
+    void 出站帧按类型计数_链路已注销或已断开的帧计为丢弃() {
+        EmbeddedChannel ch = new EmbeddedChannel();
+        links.register(1, 5, "gate", 1, ch);
+
+        links.send(1, List.of(11, 12), MessageContent.newBuilder().setMessageId(79).build());
+        links.enterResult(1, 11, 1001, 3, 0);
+        links.send(2, List.of(21), MessageContent.newBuilder().setMessageId(79).build());
+        ch.close();
+        links.send(1, List.of(11), MessageContent.newBuilder().setMessageId(51).build());
+
+        assertThat(framesOut("to_client")).as("一帧可带多个会话，按帧计").isEqualTo(1);
+        assertThat(framesOut("player_enter_result")).isEqualTo(1);
+        assertThat(dropped("link_gone")).as("未登记的链路 + 已断开的链路").isEqualTo(2);
     }
 
     @Test
@@ -57,5 +77,15 @@ class GateLinksTest {
         links.send(1, List.of(11), MessageContent.newBuilder().setMessageId(79).build());
 
         assertThat(ch.isOpen()).isFalse();
+        assertThat(dropped("write_buffer_full")).isEqualTo(1);
+        assertThat(framesOut("to_client")).isZero();
+    }
+
+    private double framesOut(String type) {
+        return meters.get("xm.scene.link.frames").tag("direction", "out").tag("type", type).counter().count();
+    }
+
+    private double dropped(String reason) {
+        return meters.get("xm.scene.link.dropped").tag("reason", reason).counter().count();
     }
 }

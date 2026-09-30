@@ -5,6 +5,8 @@ import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.ToClient;
 import com.game.proto.MessageContent;
+import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.LinkDrop;
 import com.game.scene.world.ClientSink;
 import io.netty.channel.Channel;
 import java.util.ArrayList;
@@ -45,6 +47,12 @@ public final class GateLinks implements ClientSink {
 
     private final Map<Long, Link> byLinkId = new HashMap<>();
     private final Map<Integer, Link> byGateNode = new HashMap<>();
+    private final SceneMetrics metrics;
+
+    /** @param metrics 出站帧与丢弃帧计数（{@code xm.scene.link.frames{direction=out}} / {@code xm.scene.link.dropped}） */
+    public GateLinks(SceneMetrics metrics) {
+        this.metrics = metrics;
+    }
 
     /** 登记新链路。租约代次低于同 gate 节点号现有链路的一律拒绝。 */
     public Registration register(long linkId, int gateNodeId, String gateInstanceId, long leaseEpoch, Channel channel) {
@@ -124,10 +132,12 @@ public final class GateLinks implements ClientSink {
         Link link = byLinkId.get(linkId);
         if (link == null || !link.channel().isActive()) {
             // 链路已断：gate 侧的会话随链路一起失效，丢弃即可。
+            metrics.linkFrameDropped(LinkDrop.LINK_GONE);
             return;
         }
         if (!link.channel().isWritable()) {
             // 出站缓冲越过高水位：gate 读不动。断链（其上玩家经 linkClosed 按断线写回），不丢单帧、不无限堆积。
+            metrics.linkFrameDropped(LinkDrop.WRITE_BUFFER_FULL);
             log.error("gate 链路出站缓冲超过高水位，断开链路 link={} gate_node={} 距恢复可写还差字节={}", linkId,
                     link.gateNodeId(), link.channel().bytesBeforeWritable());
             link.channel().close();
@@ -135,5 +145,6 @@ public final class GateLinks implements ClientSink {
         }
         // Channel 的写是线程安全的：Netty 把它排到该连接的 I/O 线程上执行，同一链路上的帧保持提交顺序。
         link.channel().writeAndFlush(frame);
+        metrics.linkFrameOut(frame.getBodyCase());
     }
 }

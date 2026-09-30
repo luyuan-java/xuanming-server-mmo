@@ -2,6 +2,7 @@ package com.game.scene.link;
 
 import com.game.api.proto.LinkHello;
 import com.game.api.proto.NodeLinkFrame;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.SceneWorld;
 import io.netty.channel.Channel;
@@ -25,12 +26,16 @@ public final class SceneLinkService implements LinkInbound {
     private final GateLinks links;
     private final SceneWorld world;
     private final ClientRequestHandler requests;
+    private final SceneMetrics metrics;
 
-    public SceneLinkService(LinkIdentity identity, GateLinks links, SceneWorld world, ClientRequestHandler requests) {
+    /** @param metrics 握手回包（hello_ack）的出站计数；其余出站帧由 {@link GateLinks} 计 */
+    public SceneLinkService(LinkIdentity identity, GateLinks links, SceneWorld world, ClientRequestHandler requests,
+                            SceneMetrics metrics) {
         this.identity = identity;
         this.links = links;
         this.world = world;
         this.requests = requests;
+        this.metrics = metrics;
     }
 
     /** 拒绝过期租约代次时给 gate 的原因。 */
@@ -46,6 +51,7 @@ public final class SceneLinkService implements LinkInbound {
                     hello.getGateNodeId(), hello.getGateInstanceId(), Long.toUnsignedString(hello.getLeaseEpoch()),
                     current.linkId(), current.gateInstanceId(), Long.toUnsignedString(current.leaseEpoch()));
             channel.writeAndFlush(identity.ack(false, STALE_LEASE_REASON)).addListener(ChannelFutureListener.CLOSE);
+            metrics.linkFrameOut(NodeLinkFrame.BodyCase.HELLO_ACK);
             return;
         }
         GateLinks.Link replaced = registration.replaced();
@@ -57,6 +63,7 @@ public final class SceneLinkService implements LinkInbound {
             replaced.channel().close();
         }
         channel.writeAndFlush(identity.ack(true, ""));
+        metrics.linkFrameOut(NodeLinkFrame.BodyCase.HELLO_ACK);
     }
 
     @Override

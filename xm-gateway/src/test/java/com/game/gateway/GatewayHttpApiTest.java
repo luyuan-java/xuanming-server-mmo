@@ -17,6 +17,7 @@ import com.game.gateway.gate.GateSource;
 import com.game.gateway.serverlist.ServerListController;
 import com.game.proto.GateTokenPayload;
 import com.google.protobuf.ByteString;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
@@ -27,6 +28,8 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
@@ -39,7 +42,7 @@ import org.springframework.test.web.servlet.RequestBuilder;
  * 走真实装配（{@link GatewayConfiguration} + application.yaml 的 Jackson 配置），只把 gate 目录换成替身，不需要 Redis。
  */
 @WebMvcTest(controllers = {AssignGateController.class, ServerListController.class})
-@Import(GatewayConfiguration.class)
+@Import({GatewayConfiguration.class, GatewayHttpApiTest.Meters.class})
 @TestPropertySource(properties = {
         GatewayConfiguration.TOKEN_SECRET_ENV + "=" + GatewayHttpApiTest.SECRET,
         "xm.gateway.zones[0].zone-id=1",
@@ -64,11 +67,28 @@ class GatewayHttpApiTest {
     /** Go {@code base64.StdEncoding}：标准字母表、必须带填充。 */
     private static final String STD_BASE64 = "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$";
 
+    /** WebMvcTest 切片不带指标自动配置：给一个内存注册表，顺便用来核对 assign-gate 的结局计数。 */
+    @TestConfiguration(proxyBeanMethods = false)
+    static class Meters {
+        @Bean
+        SimpleMeterRegistry simpleMeterRegistry() {
+            return new SimpleMeterRegistry();
+        }
+    }
+
     @Autowired
     private MockMvc mvc;
 
+    @Autowired
+    private SimpleMeterRegistry meters;
+
     @MockitoBean
     private GateSource gateSource;
+
+    private double assignOutcomes(int code, String reason) {
+        return meters.get("xm.gateway.assign.gate").tag("code", Integer.toString(code)).tag("reason", reason)
+                .counter().count();
+    }
 
     private static GateNodeInfo gate(int nodeId, int playerCount, boolean draining) {
         return GateNodeInfo.newBuilder()
@@ -109,6 +129,7 @@ class GatewayHttpApiTest {
     void 准入_键名类型与robot解析结构一致_令牌可被选中的gate验过() throws Exception {
         when(gateSource.listGates(1)).thenReturn(List.of(gate(4, 3, false)));
         long before = Instant.now().getEpochSecond();
+        double admittedBefore = assignOutcomes(0, "ok");
 
         JsonNode resp = assignGate("{\"zone_id\":1}");
 
@@ -138,6 +159,8 @@ class GatewayHttpApiTest {
 
         GateTokens.Verdict verdict = TOKENS.verify(ByteString.copyFrom(payload), ByteString.copyFrom(signature), 4, 1, after);
         assertThat(verdict.ok()).isTrue();
+        // 同一测试类的各用例共用一个缓存的上下文（同一个注册表），只比增量。
+        assertThat(assignOutcomes(0, "ok") - admittedBefore).isEqualTo(1);
     }
 
     @Test
@@ -190,10 +213,13 @@ class GatewayHttpApiTest {
 
     @Test
     void 未知区服_404_且不读gate目录() throws Exception {
+        double before = assignOutcomes(404, "zone_not_found");
         assertRejected(assignGate("{\"zone_id\":99}"), 404, "zone_not_found");
         assertRejected(assignGate("{\"zone_id\":0}"), 404, "zone_not_found");
         assertRejected(assignGate("{}"), 404, "zone_not_found");
         verifyNoInteractions(gateSource);
+        assertThat(assignOutcomes(404, "zone_not_found") - before).as("标签不带 zone_id，未知区服不会造出新序列").isEqualTo(3);
+        assertThat(meters.find("xm.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(8);
     }
 
     @Test
@@ -222,11 +248,13 @@ class GatewayHttpApiTest {
 
     @Test
     void 请求体不合法_仍回HTTP200与业务码() throws Exception {
+        double before = assignOutcomes(400, "bad_request");
         assertRejected(assignGate("{"), 400, "bad_request");
         assertRejected(assignGate("{\"zone_id\":\"abc\"}"), 400, "bad_request");
         assertRejected(call(post("/api/assign-gate").contentType(MediaType.TEXT_PLAIN).content("zone_id=1")),
                 400, "bad_request");
         verifyNoInteractions(gateSource);
+        assertThat(assignOutcomes(400, "bad_request") - before).as("异常处理器兜底的路径也计数").isEqualTo(3);
     }
 
     // ---------------------------------------------------------------- server-list

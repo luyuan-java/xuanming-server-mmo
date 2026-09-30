@@ -12,6 +12,9 @@ import com.game.proto.ActorListDestroyS2C;
 import com.game.proto.EnterSceneS2C;
 import com.game.proto.MessageContent;
 import com.game.proto.MoveAckS2C;
+import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.BroadcastKind;
+import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.world.PlayerRepository.LoadResult;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
@@ -67,6 +70,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>技能</b>：xm-player-store 目前没有技能列，每次进场都按配表发放初始技能（等同基线「新号」），
  * 老号存档里的技能要等存储补列后再接。
+ *
+ * <p><b>指标</b>（{@link SceneMetrics}）：场景配置下的在线人数在每次人数变化后推送绝对值；移动裁决、视野变化通知、
+ * 帧与帧内广播耗时（经 {@link SceneClock} 计时）都在这里记，与规则写在同一处，不另设观察者。
  */
 public final class SceneWorld {
 
@@ -83,6 +89,7 @@ public final class SceneWorld {
     /** 场景号与实体号的发号器（本节点的雪花），必须恒非 0。 */
     private final LongSupplier idGenerator;
     private final SceneClock clock;
+    private final SceneMetrics metrics;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -96,13 +103,14 @@ public final class SceneWorld {
     private long frame;
 
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
-                      LongSupplier idGenerator, SceneClock clock) {
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics) {
         this.tables = tables;
         this.ids = ids;
         this.sink = sink;
         this.repository = repository;
         this.idGenerator = idGenerator;
         this.clock = clock;
+        this.metrics = metrics;
     }
 
     // ------------------------------------------------------------------ 场景
@@ -110,8 +118,23 @@ public final class SceneWorld {
     public Scene createScene(int configId) {
         Scene scene = new Scene(nextId(), configId);
         scenes.put(scene.sceneId(), scene);
+        publishPopulation(configId);
         log.info("创建场景 scene_id={} scene_config_id={}", scene.sceneId(), configId);
         return scene;
+    }
+
+    /**
+     * 把某场景配置下的在线人数（各频道合计）推给指标。场景只在启动时建、数量很少，按配置现数一遍即可；
+     * 推的是绝对值，任何一次人数变化后推都能纠正之前的偏差。
+     */
+    private void publishPopulation(int configId) {
+        int players = 0;
+        for (Scene scene : scenes.values()) {
+            if (scene.configId() == configId) {
+                players += scene.playerCount();
+            }
+        }
+        metrics.scenePlayers(configId, players);
     }
 
     /** 节点目录快照（scene-manager 按它分配场景）。 */
@@ -290,6 +313,8 @@ public final class SceneWorld {
         player.setScene(scene);
         player.markActive(frame);
         ViewIndex.Entered entered = scene.add(player);
+        publishPopulation(scene.configId());
+        metrics.aoiEntered(entered.seen().size() + entered.seers().size());
 
         ActorCreateS2C self = player.toActorCreate();
         sendTo(player, push(ids.notifyEnterScene(), EnterSceneS2C.newBuilder().setSceneInfo(scene.info()).build()));
@@ -330,7 +355,10 @@ public final class SceneWorld {
         if (from == target) {
             return;
         }
-        broadcast(from.remove(player), destroyMessage(player));
+        List<ScenePlayer> oldWatchers = from.remove(player);
+        publishPopulation(from.configId());
+        metrics.aoiLeft(oldWatchers.size());
+        broadcast(oldWatchers, destroyMessage(player));
         Vec3 at = target.configId() != from.configId() ? tables.spawnPoint(target.configId()) : player.position();
         player.setPosition(at);
         player.setVelocity(Vec3.ORIGIN);
@@ -356,6 +384,7 @@ public final class SceneWorld {
      */
     void applyMove(ScenePlayer player, MoveInput input) {
         if (!input.isFinite()) {
+            metrics.move(MoveResult.INVALID);
             log.debug("移动输入含非有限值，丢弃 player={} input_seq={}", player.playerId(), input.inputSeq());
             return;
         }
@@ -364,7 +393,10 @@ public final class SceneWorld {
         player.setRotation(input.rotation());
         player.setVelocity(MovementRules.clampSpeed(input.velocity()));
         player.markDirty(ScenePlayer.DIRTY_TRANSFORM | ScenePlayer.DIRTY_VELOCITY);
-        if (MovementRules.needsCorrection(accepted, input.location())) {
+        boolean correct = MovementRules.needsCorrection(accepted, input.location());
+        metrics.move(correct ? MoveResult.CORRECTED
+                : accepted.equals(input.location()) ? MoveResult.ACCEPTED : MoveResult.CLAMPED);
+        if (correct) {
             log.debug("移动纠偏 player={} input_seq={} 上报={} 裁决={}", player.playerId(), input.inputSeq(),
                     input.location(), accepted);
             sendTo(player, push(ids.notifyMoveAck(), MoveAckS2C.newBuilder()
@@ -386,19 +418,28 @@ public final class SceneWorld {
     /**
      * 跑一帧（固定步长 {@link MovementRules#STEP_SECONDS}）：外推 → 视野刷新（47 / 64）→ 偶数帧属性同步（66）→ 帧号 +1。
      * 由 {@link SceneTicker} 在场景逻辑线程上调用。没有移动、没有脏字段时只是遍历一遍玩家，不分配。
+     * 指标：整帧耗时每帧记一次；两个广播阶段（全部场景合计）每执行一次记一次——视野变化每帧、属性同步偶数帧。
      */
     public void step() {
+        long start = clock.nanoTime();
+        long viewBroadcastNanos = 0;
         for (Scene scene : scenes.values()) {
             integrate(scene);
             scene.refreshViews(viewChanges);
+            long emitStart = clock.nanoTime();
             emitViewChanges();
+            viewBroadcastNanos += clock.nanoTime() - emitStart;
         }
+        metrics.broadcast(BroadcastKind.VIEW_CHANGES, viewBroadcastNanos);
         if (frame % 2 == 0) {
+            long syncStart = clock.nanoTime();
             for (Scene scene : scenes.values()) {
                 syncAttributes(scene);
             }
+            metrics.broadcast(BroadcastKind.ATTRIBUTE_SYNC, clock.nanoTime() - syncStart);
         }
         frame++;
+        metrics.tick(clock.nanoTime() - start);
     }
 
     long frame() {
@@ -434,6 +475,8 @@ public final class SceneWorld {
             return;
         }
         viewChanges.forEach((watcher, delta) -> {
+            metrics.aoiEntered(delta.added().size());
+            metrics.aoiLeft(delta.removed().size());
             if (!delta.added().isEmpty()) {
                 sendTo(watcher, push(ids.notifyActorListCreate(), actorList(delta.added())));
             }
@@ -573,6 +616,8 @@ public final class SceneWorld {
         List<ScenePlayer> watchers = player.scene().remove(player);
         playersById.remove(player.playerId(), player);
         playersBySession.remove(player.session(), player);
+        publishPopulation(player.scene().configId());
+        metrics.aoiLeft(watchers.size());
         broadcast(watchers, destroyMessage(player));
         if (save) {
             repository.save(player.toSave());
@@ -606,7 +651,10 @@ public final class SceneWorld {
         }
         playersById.clear();
         playersBySession.clear();
-        scenes.values().forEach(Scene::clear);
+        for (Scene scene : scenes.values()) {
+            scene.clear();
+            metrics.scenePlayers(scene.configId(), 0);
+        }
         return all.size();
     }
 

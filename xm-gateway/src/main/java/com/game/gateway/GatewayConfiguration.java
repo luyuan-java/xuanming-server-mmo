@@ -1,11 +1,13 @@
 package com.game.gateway;
 
 import com.game.common.token.GateTokens;
+import com.game.gateway.assign.AssignGateMetrics;
 import com.game.gateway.assign.AssignGateService;
 import com.game.gateway.gate.GateSource;
 import com.game.gateway.gate.GateTokenIssuer;
 import com.game.gateway.gate.RedisGateSource;
 import com.game.gateway.zone.ZoneCatalog;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.security.SecureRandom;
 import java.time.Clock;
 import org.redisson.api.RedissonClient;
@@ -53,5 +55,11 @@ public class GatewayConfiguration {
     @Bean
     public AssignGateService assignGateService(ZoneCatalog zones, GateSource gates, GateTokenIssuer issuer) {
         return new AssignGateService(zones, gates, issuer);
+    }
+
+    /** assign-gate 结局计数，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
+    @Bean
+    public AssignGateMetrics assignGateMetrics(MeterRegistry meterRegistry) {
+        return new AssignGateMetrics(meterRegistry);
     }
 }

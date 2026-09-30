@@ -77,6 +77,11 @@ public final class NodeLinkServer {
         return boundPort;
     }
 
+    /** 当前接入的 gate 链路连接数（含握手中）。线程安全、不阻塞，供指标抓取线程读。 */
+    public int connectionCount() {
+        return links.size();
+    }
+
     /** 关闭监听端口，不再接受新的 gate 连接；已建立的链路不受影响。幂等。 */
     public void stopAccepting() {
         Channel channel = serverChannel;

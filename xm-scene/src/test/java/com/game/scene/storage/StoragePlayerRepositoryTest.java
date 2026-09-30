@@ -9,10 +9,13 @@ import static org.mockito.Mockito.when;
 
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository.LoadResult;
 import com.game.scene.world.PlayerSave;
 import com.game.scene.world.Vec3;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -35,6 +38,8 @@ class StoragePlayerRepositoryTest {
     /** 记录投递到「逻辑线程」的任务，由测试手动执行，验证回调不在 load 调用栈内。 */
     private final List<Runnable> logicTasks = new ArrayList<>();
     private final Executor logic = logicTasks::add;
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final SceneMetrics metrics = new SceneMetrics(meters);
 
     @Test
     void 加载命中_映射成PlayerData并投递回逻辑线程() {
@@ -50,7 +55,7 @@ class StoragePlayerRepositoryTest {
         row.setPosY(2.5);
         row.setPosZ(3.5);
         when(store.findPlayer(1001)).thenReturn(Optional.of(row));
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic);
+        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
         repository.load(1001, results::add);
@@ -65,7 +70,7 @@ class StoragePlayerRepositoryTest {
     void 加载未命中与异常() {
         when(store.findPlayer(1)).thenReturn(Optional.empty());
         when(store.findPlayer(2)).thenThrow(new IllegalStateException("db down"));
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic);
+        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
         repository.load(1, results::add);
@@ -79,7 +84,7 @@ class StoragePlayerRepositoryTest {
 
     @Test
     void 存储线程池拒绝_按加载失败异步回调() {
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new RejectingExecutorService(), logic);
+        StoragePlayerRepository repository = new StoragePlayerRepository(store, new RejectingExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
         repository.load(1, results::add);
@@ -92,7 +97,7 @@ class StoragePlayerRepositoryTest {
     @Test
     void 写回带上owner_epoch围栏字段并释放归属() {
         when(store.saveStateAndRelease(any())).thenReturn(false);
-        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic);
+        StoragePlayerRepository repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
 
         repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
 
@@ -106,6 +111,8 @@ class StoragePlayerRepositoryTest {
         assertThat(row.getValue().getPosY()).isEqualTo(8);
         assertThat(row.getValue().getPosZ()).isEqualTo(9);
         assertThat(repository.writeFailures()).as("围栏拒绝不是故障").isZero();
+        assertThat(writes("save", "fenced").count()).isEqualTo(1);
+        assertThat(writes("save", "failed").count()).isZero();
     }
 
     // ------------------------------------------------------------------ 写失败：重试与记录
@@ -119,7 +126,11 @@ class StoragePlayerRepositoryTest {
                 millis -> {
                     sleeps.add(millis);
                     nanos[0] += TimeUnit.MILLISECONDS.toNanos(millis);
-                }, backoff -> 0, () -> nanos[0]);
+                }, backoff -> 0, () -> nanos[0], metrics);
+    }
+
+    private Timer writes(String op, String result) {
+        return meters.get("xm.scene.storage.writes").tag("op", op).tag("result", result).timer();
     }
 
     @Test
@@ -135,6 +146,8 @@ class StoragePlayerRepositoryTest {
         verify(store, times(3)).saveStateAndRelease(any());
         assertThat(sleeps).containsExactly(200L, 400L);
         assertThat(repository.writeFailures()).isZero();
+        assertThat(writes("save", "released").count()).as("重试后成功只计一次").isEqualTo(1);
+        assertThat(writes("save", "released").totalTime(TimeUnit.MILLISECONDS)).as("耗时含重试等待").isEqualTo(600);
     }
 
     @Test
@@ -146,6 +159,7 @@ class StoragePlayerRepositoryTest {
 
         verify(store, times(3)).saveStateAndRelease(any());
         assertThat(repository.writeFailures()).isEqualTo(1);
+        assertThat(writes("save", "failed").count()).isEqualTo(1);
     }
 
     @Test
@@ -183,6 +197,7 @@ class StoragePlayerRepositoryTest {
 
         verify(store, times(2)).releaseOwnership(1001, 9);
         assertThat(repository.writeFailures()).isZero();
+        assertThat(writes("release", "released").count()).isEqualTo(1);
     }
 
     @Test
@@ -190,6 +205,7 @@ class StoragePlayerRepositoryTest {
         StoragePlayerRepository rejecting = retrying(new RejectingExecutorService());
         rejecting.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
         assertThat(rejecting.writeFailures()).isEqualTo(1);
+        assertThat(writes("save", "rejected").count()).isEqualTo(1);
 
         List<Runnable> queued = new ArrayList<>();
         StoragePlayerRepository queuing = retrying(new DirectExecutorService() {

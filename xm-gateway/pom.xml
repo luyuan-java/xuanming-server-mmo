@@ -35,6 +35,20 @@
             <groupId>com.game</groupId>
             <artifactId>xm-discovery</artifactId>
         </dependency>
+        <!-- 可观测性（architecture.md §11）：actuator 管理端点（health / prometheus）挂在同一个 HTTP 端口的 /actuator 下。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
