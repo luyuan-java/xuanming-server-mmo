@@ -13,6 +13,7 @@
 
     <modules>
         <module>xm-proto</module>
+        <module>xm-table-codegen</module>
         <module>xm-table</module>
         <module>xm-net</module>
         <module>xm-common</module>
@@ -100,6 +101,11 @@
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
+                <artifactId>xm-table-codegen</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
                 <artifactId>xm-table</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -134,6 +140,11 @@
     <build>
         <pluginManagement>
             <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                </plugin>
                 <plugin>
                     <groupId>io.github.ascopes</groupId>
                     <artifactId>protobuf-maven-plugin</artifactId>

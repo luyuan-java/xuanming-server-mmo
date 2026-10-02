@@ -55,7 +55,8 @@ class MessageRateLimiterTest {
     @Test
     void 表文件不存在拒绝启动() {
         assertThatThrownBy(() -> TableMessageLimits.load(Path.of("no-such-dir-for-test")))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(com.game.table.load.TableLoadException.class)
+                .hasMessageContaining("配置表目录不存在");
     }
 
     @Test

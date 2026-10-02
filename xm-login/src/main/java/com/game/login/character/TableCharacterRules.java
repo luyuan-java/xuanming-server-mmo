@@ -1,64 +1,64 @@
 package com.game.login.character;
 
-import com.game.table.AllTable;
-import com.game.table.ClassTableData;
-import com.game.table.ClassTableManager;
-import com.game.table.RoleNameRuleTableManager;
-import java.nio.file.Files;
+import com.game.table.ClassRows;
+import com.game.table.ConfigTables;
 import java.nio.file.Path;
 
 /**
- * 以导表器生成的全局表管理器为数据源的 {@link CharacterRules}。
+ * 以配置表（{@link ConfigTables}）为数据源的 {@link CharacterRules}。
  *
- * <p>只能经 {@link #load(Path)} 得到：它同步加载全部配置表（{@code AllTable.loadTables(dir, true)}，读 .pb）
- * 并立刻自检建角要用的两张表，任何一项不合格都抛异常让进程起不来——宁可启动失败，也不等到有人建角才发现。
+ * <p>只能经 {@link #load(Path)} 得到：它加载并整体校验全部配置表，立刻算出建角要用的默认职业与起名规则，
+ * 任何一项不合格都抛异常让进程起不来——宁可启动失败，也不等到有人建角才发现。
  * 表在进程对外服务（Dubbo 暴露）之前加载完，此后只读。
  */
 public final class TableCharacterRules implements CharacterRules {
 
-    private TableCharacterRules() {
+    private final ClassRows classes;
+    private final int defaultClassId;
+    private final RoleNameRules roleNameRules;
+
+    private TableCharacterRules(ClassRows classes, int defaultClassId, RoleNameRules roleNameRules) {
+        this.classes = classes;
+        this.defaultClassId = defaultClassId;
+        this.roleNameRules = roleNameRules;
     }
 
     /**
-     * @param tableDir 导表器 .pb 产物目录
-     * @throws IllegalStateException 目录不存在、加载失败或自检不通过
+     * @param tableDir 导表器产物目录（manifest.json + 各表 .pb）
+     * @throws com.game.table.load.TableLoadException 目录不存在、数据不完整或被改动
+     * @throws IllegalStateException                  Class 表为空或 RoleNameRule 不合法
      */
     public static TableCharacterRules load(Path tableDir) {
-        if (!Files.isDirectory(tableDir)) {
-            throw new IllegalStateException("配置表目录不存在: " + tableDir.toAbsolutePath()
-                    + "（进程须从仓库根目录启动，或用 xm.table-dir 指定）");
+        return from(ConfigTables.load(tableDir));
+    }
+
+    static TableCharacterRules from(ConfigTables tables) {
+        ClassRows classes = tables.classTable();
+        if (classes.size() == 0) {
+            throw new IllegalStateException("Class 表为空，无法确定默认职业");
         }
+        RoleNameRules nameRules;
         try {
-            AllTable.loadTables(tableDir.toString(), true);
-        } catch (Exception e) {
-            throw new IllegalStateException("加载配置表失败: " + tableDir.toAbsolutePath(), e);
+            nameRules = RoleNameRules.fromRow(tables.roleNameRule().find(RoleNameRules.ROW_ID).orElse(null));
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("RoleNameRule 不合法: " + e.getMessage(), e);
         }
-        TableCharacterRules rules = new TableCharacterRules();
-        rules.defaultClassId();
-        rules.roleNameRules();
-        return rules;
+        // 默认职业 = Class 表按表序第一行（与 mmorpg createplayerlogic 一致）。
+        return new TableCharacterRules(classes, classes.all().get(0).getId(), nameRules);
     }
 
     @Override
     public int defaultClassId() {
-        ClassTableData all = ClassTableManager.getInstance().findAll();
-        if (all.getDataCount() == 0) {
-            throw new IllegalStateException("Class 表为空，无法确定默认职业");
-        }
-        return all.getData(0).getId();
+        return defaultClassId;
     }
 
     @Override
     public boolean classExists(int classId) {
-        return ClassTableManager.getInstance().exists(classId);
+        return classes.contains(classId);
     }
 
     @Override
     public RoleNameRules roleNameRules() {
-        try {
-            return RoleNameRules.fromRow(RoleNameRuleTableManager.getInstance().findById(RoleNameRules.ROW_ID));
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException("RoleNameRule 不合法: " + e.getMessage(), e);
-        }
+        return roleNameRules;
     }
 }

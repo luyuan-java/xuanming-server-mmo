@@ -1,17 +1,28 @@
-
 syntax = "proto3";
-
-option go_package = "generated/pb/table";
-
 option java_package = "com.game.table";
-option java_outer_classname = "GlobalVariableTableOuterClass";
+option java_outer_classname = "GlobalvariableTableOuterClass";
 option java_multiple_files = true;
 
+// GlobalVariable 表的权威 schema。源表 data/GlobalVariable.xlsx。
+//
+// 本文件不参与 protoc 编译,也不进任何语言的构建;导表器直接文本解析它。
+// 字段号是从 generated/code/proto/globalvariable_table.proto 抄来的现状值,**只增不改、删字段用 reserved**。
+
+package mmorpg.cfgtable.v1;
+
+import "cfg_options.proto";
 
 message GlobalVariableTable {
-	uint32 id = 1;
-}
+  option (cfg_sheet)       = "GlobalVariable";
+  option (cfg_source_file) = "GlobalVariable.xlsx";
+  option (cfg_primary_key) = "id";
 
-message GlobalVariableTableData {
-	repeated GlobalVariableTable data = 1;
+  uint32 id = 1;
+  reserved 9001; // designer：cfg_owner = "designer"，不进服务端产物（ContractSync 改写）
+  reserved 9002; // constants_name：cfg_owner = "constants_name"，不进服务端产物（ContractSync 改写）
+  reserved 9003; // to_uint32：cfg_owner = ""，不进服务端产物（ContractSync 改写）
+  reserved 9004; // to_int32：cfg_owner = ""，不进服务端产物（ContractSync 改写）
+  reserved 9005; // to_string：cfg_owner = ""，不进服务端产物（ContractSync 改写）
+  reserved 9006; // to_float：cfg_owner = ""，不进服务端产物（ContractSync 改写）
+  reserved 9007; // to_double：cfg_owner = ""，不进服务端产物（ContractSync 改写）
 }

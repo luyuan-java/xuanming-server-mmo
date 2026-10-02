@@ -28,6 +28,6 @@ class TableCharacterRulesTest {
     @Test
     void 目录不存在启动失败() {
         assertThatThrownBy(() -> TableCharacterRules.load(Path.of("no-such-dir-for-test")))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(com.game.table.load.TableLoadException.class);
     }
 }

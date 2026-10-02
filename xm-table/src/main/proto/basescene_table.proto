@@ -1,21 +1,26 @@
-
 syntax = "proto3";
-
-option go_package = "generated/pb/table";
-
 option java_package = "com.game.table";
-option java_outer_classname = "BaseSceneTableOuterClass";
+option java_outer_classname = "BasesceneTableOuterClass";
 option java_multiple_files = true;
 
+// BaseScene 表的权威 schema。源表 data/BaseScene.xlsx。
+//
+// 本文件不参与 protoc 编译,也不进任何语言的构建;导表器直接文本解析它。
+// 字段号是从 generated/code/proto/basescene_table.proto 抄来的现状值,**只增不改、删字段用 reserved**。
+
+package mmorpg.cfgtable.v1;
+
+import "cfg_options.proto";
 
 message BaseSceneTable {
-	uint32 id = 1;
-	string nav_bin_file = 2;
-	double spawn_x = 3;
-	double spawn_y = 4;
-	double spawn_z = 5;
-}
+  option (cfg_sheet)       = "BaseScene";
+  option (cfg_source_file) = "BaseScene.xlsx";
+  option (cfg_primary_key) = "id";
 
-message BaseSceneTableData {
-	repeated BaseSceneTable data = 1;
+  uint32 id = 1;
+  string nav_bin_file = 2;
+  // 服务器 Z-up 出生坐标。Unity (x,y,z) 对应服务器 (z,x,y)。
+  double spawn_x = 3;
+  double spawn_y = 4;
+  double spawn_z = 5;
 }

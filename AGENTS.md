@@ -15,9 +15,11 @@
 - **两版共享的只有客户端契约**：客户端 ↔ gate 帧格式与握手、`proto/` 里客户端可见的消息、消息号、tip 码、配置表数据、
   客户端访问的 HTTP 接口形状。这些由 `tools/ContractSync.java` 从 mmorpg 同步，**不许手改**：
   - `xm-proto/src/main/proto/**`、`xm-proto/src/main/resources/contract/**`
-  - `xm-table/src/main/proto/**`、`xm-table/src/main/java/com/game/table/**`
+  - `xm-table/src/main/proto/**`、`xm-table/src/main/java/com/game/table/TableConstants.java`
   - `config-data/tables/**`、`contract/SOURCE.properties`
   改契约先改 mmorpg，再运行 `java tools/ContractSync.java --mmorpg <mmorpg 根目录>` 同步，两边同批提交。
+  `--check` 只比对不写入（不一致退出码 1）。配置表的 Java 访问代码不再同步，由 `xm-table-codegen` 在编译期按权威 schema
+  生成（见 `docs/design/config-tables.md`）。
 - **服务端内部按 Java 惯用方式实现，不照抄 C++/Go**。Java 版有自己的库表与 Redis 键空间，不与 C++/Go 服务混部。
 - **目录、模块、工具都按 Java 标准自行组织，不对应 mmorpg 的目录结构**；Java 代码不得依赖同步来的 proto 所在目录
   （包名按 proto package，路由按服务语义，见 `docs/design/architecture.md` §1）。工具也用 Java 写。

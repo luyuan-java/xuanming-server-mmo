@@ -1,20 +1,24 @@
-
 syntax = "proto3";
-
-option go_package = "generated/pb/table";
-
 option java_package = "com.game.table";
-option java_outer_classname = "MessageLimiterTableOuterClass";
+option java_outer_classname = "MessagelimiterTableOuterClass";
 option java_multiple_files = true;
 
+// MessageLimiter 表的权威 schema。源表 data/MessageLimiter.xlsx。
+//
+// 本文件不参与 protoc 编译,也不进任何语言的构建;导表器直接文本解析它。
+// 字段号是从 generated/code/proto/messagelimiter_table.proto 抄来的现状值,**只增不改、删字段用 reserved**。
+
+package mmorpg.cfgtable.v1;
+
+import "cfg_options.proto";
 
 message MessageLimiterTable {
-	uint32 id = 1;
-	uint32 max_requests = 2;
-	uint32 time_window = 3;
-	uint32 tip_message = 4;
-}
+  option (cfg_sheet)       = "MessageLimiter";
+  option (cfg_source_file) = "MessageLimiter.xlsx";
+  option (cfg_primary_key) = "id";
 
-message MessageLimiterTableData {
-	repeated MessageLimiterTable data = 1;
+  uint32 id = 1;
+  uint32 max_requests = 2;
+  uint32 time_window = 3;
+  uint32 tip_message = 4 [(cfg_tip_ref) = true];
 }

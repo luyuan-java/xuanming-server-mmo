@@ -1,19 +1,25 @@
-
 syntax = "proto3";
-
-option go_package = "generated/pb/table";
-
 option java_package = "com.game.table";
 option java_outer_classname = "MirrorTableOuterClass";
 option java_multiple_files = true;
 
+// Mirror 表的权威 schema。源表 data/Mirror.xlsx。
+//
+// 本文件不参与 protoc 编译,也不进任何语言的构建;导表器直接文本解析它。
+// 字段号是从 generated/code/proto/mirror_table.proto 抄来的现状值,**只增不改、删字段用 reserved**。
+
+package mmorpg.cfgtable.v1;
+
+import "cfg_options.proto";
 
 message MirrorTable {
-	uint32 id = 1;
-	uint32 scene_id = 2;
-	uint32 main_scene_id = 3;
-}
+  option (cfg_sheet)       = "Mirror";
+  option (cfg_source_file) = "Mirror.xlsx";
+  option (cfg_primary_key) = "id";
 
-message MirrorTableData {
-	repeated MirrorTable data = 1;
+  uint32 id = 1;
+  // FK -> BaseScene.id
+  uint32 scene_id = 2 [(cfg_fk) = "BaseScene"];
+  // FK -> World.id
+  uint32 main_scene_id = 3 [(cfg_fk) = "World"];
 }

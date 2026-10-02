@@ -24,7 +24,8 @@ MMORPG 服务器的 **Java 实现**，与 C++/Go 版（[luyuan-cpp/xuanming-serv
 | 模块 | 说明 |
 |---|---|
 | `xm-proto` | 客户端契约 proto（从 C++/Go 版同步）与消息号注册表 |
-| `xm-table` | 配置表（导表器生成）|
+| `xm-table` | 配置表：同步来的权威 schema 与表数据；`ConfigTables` 由 `xm-table-codegen` 编译期生成，加载时校验 sha256 / 行数 / 外键 |
+| `xm-table-codegen` | 配置表代码生成器（javac 注解处理器，只在编译期用）|
 | `xm-net` | Netty 编解码：客户端帧、节点间链路 |
 | `xm-common` | 雪花 ID、令牌签名等无框架公共件 |
 | `xm-api` | 服务间契约：Dubbo 接口与内部 protobuf 消息 |
@@ -58,6 +59,7 @@ tools/local/stop-slice.sh
 
 ```bash
 java tools/ContractSync.java --mmorpg <C++/Go 版仓库根目录>
+java tools/ContractSync.java --mmorpg <C++/Go 版仓库根目录> --check   # 只检查是否一致（CI 用）
 ```
 
 契约相关文件是同步产物，不要手改；同步来源的 commit 记录在 `contract/SOURCE.properties`。

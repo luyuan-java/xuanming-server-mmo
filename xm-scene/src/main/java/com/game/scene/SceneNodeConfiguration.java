@@ -4,11 +4,10 @@ import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.player.store.PlayerStore;
 import com.game.scene.metrics.SceneMetrics;
-import com.game.scene.world.GeneratedSceneTables;
+import com.game.scene.world.ConfigSceneTables;
 import com.game.scene.world.SceneTables;
-import com.game.table.AllTable;
+import com.game.table.ConfigTables;
 import io.micrometer.core.instrument.MeterRegistry;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
@@ -35,15 +34,10 @@ public class SceneNodeConfiguration {
     }
 
     @Bean
-    public SceneTables sceneTables(SceneNodeProperties props) throws Exception {
-        Path dir = Path.of(props.tableDir()).toAbsolutePath().normalize();
-        if (!Files.isDirectory(dir)) {
-            throw new IllegalStateException("配置表目录不存在: " + dir
-                    + "（进程需从仓库根目录启动，或把 xm.table-dir 配成绝对路径）");
-        }
-        AllTable.loadTables(dir.toString(), true);
-        log.info("配置表已加载 dir={}", dir);
-        return GeneratedSceneTables.fromLoadedTables();
+    public SceneTables sceneTables(SceneNodeProperties props) {
+        ConfigTables tables = ConfigTables.load(Path.of(props.tableDir()));
+        log.info("配置表已加载 dir={} 行数={}", Path.of(props.tableDir()).toAbsolutePath().normalize(), tables.rowCounts());
+        return ConfigSceneTables.from(tables);
     }
 
     /** gate 链路握手鉴权。密钥只从环境变量 {@code XM_NODE_LINK_SECRET} 读，缺失即启动失败（不允许无鉴权的链路）。 */

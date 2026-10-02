@@ -1,7 +1,7 @@
 package com.game.scenemanager;
 
 import com.game.table.WorldTable;
-import com.game.table.WorldTableData;
+import java.util.List;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -41,9 +41,9 @@ public record WorldSceneConfigs(int defaultConfigId, Set<Integer> worldConfigIds
      * @param overrideDefault 显式指定的默认世界地图（scene_config_id）；为 null 时取表序第一行的 {@code scene_id}。
      *                        指定值必须是 World 表登记过的世界地图，否则抛 {@link IllegalArgumentException}（启动即失败）。
      */
-    public static WorldSceneConfigs fromWorldTable(WorldTableData table, Integer overrideDefault) {
+    public static WorldSceneConfigs fromWorldTable(List<WorldTable> table, Integer overrideDefault) {
         Set<Integer> ids = new LinkedHashSet<>();
-        for (WorldTable row : table.getDataList()) {
+        for (WorldTable row : table) {
             // scene_id 为 0 的行是坏数据（0 不是合法的场景配置），跳过而不是让它变成「默认地图」。
             if (row.getSceneId() != 0) {
                 ids.add(row.getSceneId());

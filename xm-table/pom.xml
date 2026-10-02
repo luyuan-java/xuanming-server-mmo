@@ -13,9 +13,15 @@
     <artifactId>xm-table</artifactId>
     <name>xm-table</name>
     <description>
-        配置表与 tip 码：proto 与 com.game.table 下的表管理器都由 mmorpg 的导表器生成，
-        经 tools/ContractSync.java 同步进来（派生物，不许手改）。
+        配置表与 tip 码。src/main/proto 是 mmorpg 导表器的权威 schema 与 tip / operator 枚举（tools/ContractSync.java 同步，
+        派生物，不许手改）；com.game.table.ConfigTables 与各表的 Rows 视图由 xm-table-codegen 在编译期按 schema 生成；
+        com.game.table.load 是它们共用的手写运行时（读 manifest 校验数据文件、索引工具）。
     </description>
+
+    <properties>
+        <!-- protoc 输出的描述符集（含 import 的 cfg_options.proto），注解处理器据此生成表访问代码 -->
+        <table.descriptor.set>${project.build.directory}/table-descriptors/config-tables.binpb</table.descriptor.set>
+    </properties>
 
     <dependencies>
         <dependency>
@@ -23,8 +29,15 @@
             <artifactId>protobuf-java</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.google.protobuf</groupId>
-            <artifactId>protobuf-java-util</artifactId>
+            <!-- 读 manifest.json；版本由 Spring Boot BOM 管理 -->
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 只在编译期作为注解处理器使用，不进运行时、不传递 -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-table-codegen</artifactId>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -42,7 +55,31 @@
                     <sourceDirectories>
                         <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
                     </sourceDirectories>
+                    <outputDescriptorFile>${table.descriptor.set}</outputDescriptorFile>
+                    <outputDescriptorIncludeImports>true</outputDescriptorIncludeImports>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <proc>full</proc>
+                            <compilerArgs>
+                                <arg>-Axm.table.descriptorSet=${table.descriptor.set}</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <!-- 测试编译不再生成一份表访问代码（否则 test-classes 里会有一份同名副本） -->
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <proc>none</proc>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

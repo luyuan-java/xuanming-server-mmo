@@ -4,15 +4,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.table.WorldTable;
-import com.game.table.WorldTableData;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class WorldSceneConfigsTest {
 
     @Test
     void 默认取表序第一行的scene_id而不是行id() {
-        WorldTableData table = table(row(7, 3), row(1, 5));
+        List<WorldTable> table = table(row(7, 3), row(1, 5));
 
         WorldSceneConfigs configs = WorldSceneConfigs.fromWorldTable(table, null);
 
@@ -24,7 +24,7 @@ class WorldSceneConfigsTest {
 
     @Test
     void 显式指定的默认地图必须是世界地图() {
-        WorldTableData table = table(row(1, 3), row(2, 5));
+        List<WorldTable> table = table(row(1, 3), row(2, 5));
 
         assertThat(WorldSceneConfigs.fromWorldTable(table, 5).defaultConfigId()).isEqualTo(5);
         assertThatThrownBy(() -> WorldSceneConfigs.fromWorldTable(table, 9))
@@ -34,7 +34,7 @@ class WorldSceneConfigsTest {
 
     @Test
     void 空表启动失败() {
-        assertThatThrownBy(() -> WorldSceneConfigs.fromWorldTable(WorldTableData.getDefaultInstance(), null))
+        assertThatThrownBy(() -> WorldSceneConfigs.fromWorldTable(List.of(), null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -59,16 +59,12 @@ class WorldSceneConfigsTest {
     @Test
     void 配置表目录不存在时启动失败() {
         assertThatThrownBy(() -> SceneManagerConfiguration.loadWorldSceneConfigs(Path.of("no-such-table-dir"), null))
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(com.game.table.load.TableLoadException.class)
                 .hasMessageContaining("配置表目录不存在");
     }
 
-    private static WorldTableData table(WorldTable... rows) {
-        WorldTableData.Builder b = WorldTableData.newBuilder();
-        for (WorldTable r : rows) {
-            b.addData(r);
-        }
-        return b.build();
+    private static List<WorldTable> table(WorldTable... rows) {
+        return List.of(rows);
     }
 
     private static WorldTable row(int id, int sceneId) {

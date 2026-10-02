@@ -1,32 +1,44 @@
-
 syntax = "proto3";
-
-option go_package = "generated/pb/table";
-
 option java_package = "com.game.table";
 option java_outer_classname = "MonsterTableOuterClass";
 option java_multiple_files = true;
 
+// Monster 表的权威 schema。源表 data/Monster.xlsx。
+//
+// 本文件不参与 protoc 编译,也不进任何语言的构建;导表器直接文本解析它。
+// 字段号是从 generated/code/proto/monster_table.proto 抄来的现状值,**只增不改、删字段用 reserved**。
 
+package mmorpg.cfgtable.v1;
+
+import "cfg_options.proto";
+
+// 掉落槽。子字段号必须是 1..N 连续,子字段名必须以 "drop_" 开头(导表器按此绑定物理列)。
+// 产物里的子消息名恒为 <Sheet><字段名> = Monsterdrop,这里照此命名以免两边不一致。
 message Monsterdrop {
-	uint32 drop_item = 1;
-	uint32 drop_count = 2;
-	uint32 drop_rate = 3;
+  // FK -> Item.id。0 = 空槽
+  uint32 drop_item = 1;
+  // 掉落数量。0 视为空槽(坏表判定在运行时做,子字段上的 fk 导表器不校验)
+  uint32 drop_count = 2;
+  // 掉落概率,万分比整数(10000 = 必掉)。用整数是为了让引擎掷点保持确定性
+  uint32 drop_rate = 3;
 }
 
 message MonsterTable {
-	uint32 id = 1;
-	uint64 health = 2;
-	uint64 strength = 3;
-	uint64 armor = 4;
-	uint64 resistance = 5;
-	uint64 critchance = 6;
-	uint64 speed = 7;
-	uint64 exp_reward = 8;
-	uint64 gold_reward = 9;
-	repeated Monsterdrop drop = 10;
-}
+  option (cfg_sheet)       = "Monster";
+  option (cfg_source_file) = "Monster.xlsx";
+  option (cfg_primary_key) = "id";
 
-message MonsterTableData {
-	repeated MonsterTable data = 1;
+  uint32 id = 1;
+  // 战斗属性与掉落。字段号抄自 generated/code/proto/monster_table.proto,纯追加,1 号未动。
+  uint64 health = 2;
+  uint64 strength = 3;
+  uint64 armor = 4;
+  uint64 resistance = 5;
+  uint64 critchance = 6;
+  uint64 speed = 7;
+  uint64 exp_reward = 8;
+  uint64 gold_reward = 9;
+  // 击杀掉落。每槽 (物品 id, 数量, 万分比概率) 三列,整槽要么三格全填要么全空(半空槽会被导表器并进上一槽)
+  repeated Monsterdrop drop = 10 [(cfg_slots) = 2];
+  reserved 9001; // designer：cfg_owner = "designer"，不进服务端产物（ContractSync 改写）
 }
