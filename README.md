@@ -29,7 +29,7 @@ MMORPG 服务器的 **Java 实现**，与 C++/Go 版（[luyuan-cpp/xuanming-serv
 | `xm-net` | Netty 编解码：客户端帧、节点间链路 |
 | `xm-common` | 雪花 ID、令牌签名等无框架公共件 |
 | `xm-api` | 服务间契约：Dubbo 接口与内部 protobuf 消息 |
-| `xm-discovery` | Redis 上的节点号租约与节点在线目录 |
+| `xm-discovery` | Redis 上的节点号租约、节点目录、玩家在线目录与服务端 → 玩家推送 |
 | `xm-player-store` | 账号 / 玩家持久化与归属围栏 |
 | `xm-gateway` `xm-gate` `xm-login` `xm-scene-manager` `xm-scene` | 各进程 |
 

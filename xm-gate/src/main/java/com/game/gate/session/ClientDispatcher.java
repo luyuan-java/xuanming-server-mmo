@@ -21,6 +21,7 @@ import com.game.gate.metrics.GateMetrics;
 import com.game.gate.metrics.GateMetrics.DisconnectReason;
 import com.game.gate.metrics.GateMetrics.HandshakeResult;
 import com.game.gate.metrics.GateMetrics.LoginCall;
+import com.game.gate.metrics.GateMetrics.PushResult;
 import com.game.gate.metrics.GateMetrics.RequestResult;
 import com.game.gate.session.ClientSession.PendingRequest;
 import com.game.proto.ClientRequest;
@@ -88,23 +89,25 @@ public final class ClientDispatcher {
     private final SessionRegistry registry;
     private final GateLimits limits;
     private final GateMetrics metrics;
+    private final PresenceRecorder presence;
     private final AtomicLong securityRejections = new AtomicLong();
 
     /**
      * @param tipMessageId 服务端推 tip 用的消息号（{@code SceneClientPlayerCommon.SendTipToClient}，现为 23）
      * @param login        login 后端（Dubbo group {@code login}）
      * @param metrics      会话层指标（握手、请求去向、主动断开、login 调用耗时）
+     * @param presence     玩家在线目录的写入口（进场确认 / 场景绑定结束时调用）
      */
     public ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                             ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
-                            GateMetrics metrics) {
-        this(identity, tokens, clock, routes, tipMessageId, login, links, registry, limits, metrics, System::nanoTime);
+                            GateMetrics metrics, PresenceRecorder presence) {
+        this(identity, tokens, clock, routes, tipMessageId, login, links, registry, limits, metrics, presence, System::nanoTime);
     }
 
     /** 同上；限频用的单调时钟可注入（测试用）。 */
     ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                      ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
-                     GateMetrics metrics, LongSupplier nanoClock) {
+                     GateMetrics metrics, PresenceRecorder presence, LongSupplier nanoClock) {
         this.identity = identity;
         this.tokens = tokens;
         this.clock = clock;
@@ -115,6 +118,7 @@ public final class ClientDispatcher {
         this.registry = registry;
         this.limits = limits;
         this.metrics = metrics;
+        this.presence = presence;
         this.nanoClock = nanoClock;
     }
 
@@ -477,6 +481,10 @@ public final class ClientDispatcher {
             return;
         }
         if (result.getTipId() == 0) {
+            if (!s.closing && !s.presenceOnline) {
+                s.presenceOnline = true;
+                presence.online(s.scenePlayerId, s.sessionId(), s.sceneOwnerEpoch);
+            }
             return;
         }
         log.info("scene 拒绝进场 session={} player_id={} node={} tip={}", sid(s), s.scenePlayerId, sceneNodeId,
@@ -520,6 +528,37 @@ public final class ClientDispatcher {
         }
     }
 
+    // ================================================================ 服务端推送（GatePush，会话所属 EventLoop 上）
+
+    /**
+     * 服务端经推送通道发给玩家的消息：只发给「scene 已确认进场、在游戏里的正是这个玩家、没在关闭」的会话（玩家栅栏），
+     * 否则丢弃（至多一次，业务方以拉取兜底）。消息原样下发（推送的 id 为 0）。
+     */
+    public PushResult deliverPush(ClientSession s, long playerId, MessageContent content) {
+        if (!pushable(s, playerId)) {
+            return PushResult.NOT_BOUND;
+        }
+        s.send(content);
+        return PushResult.DELIVERED;
+    }
+
+    /** 服务端经推送通道踢下线：栅栏同 {@link #deliverPush}；推 23 {tip} 后关闭（断线流程照常：离场写回、通知 login）。 */
+    public PushResult kickByServer(ClientSession s, long playerId, int tipId) {
+        if (!pushable(s, playerId)) {
+            return PushResult.NOT_BOUND;
+        }
+        log.info("服务端踢下线 session={} player_id={} tip={}", sid(s), playerId, tipId);
+        metrics.disconnected(DisconnectReason.SERVER_KICK);
+        s.closing = true;
+        discardPending(s);
+        s.sendThenClose(tip(tipId));
+        return PushResult.DELIVERED;
+    }
+
+    private static boolean pushable(ClientSession s, long playerId) {
+        return !s.closed && !s.closing && s.presenceOnline && s.scenePlayerId == playerId;
+    }
+
     public void onSceneLinkDown(ClientSession s, int sceneNodeId, long linkGen) {
         if (s.closed || !s.boundTo(sceneNodeId, linkGen)) {
             return;
@@ -553,7 +592,12 @@ public final class ClientDispatcher {
         unbindScene(s);
     }
 
-    private static void unbindScene(ClientSession s) {
+    /** 解绑场景：场景绑定结束的唯一出口，在线目录同时撤销（离场、进场失败、被踢、链路断开、断线都经过这里）。 */
+    private void unbindScene(ClientSession s) {
+        if (s.presenceOnline) {
+            s.presenceOnline = false;
+            presence.offline(s.scenePlayerId, s.sessionId());
+        }
         s.sceneNodeId = 0;
         s.sceneLinkGen = 0;
         s.scenePlayerId = 0;

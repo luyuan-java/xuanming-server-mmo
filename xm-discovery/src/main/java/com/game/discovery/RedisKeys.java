@@ -33,4 +33,20 @@ public final class RedisKeys {
     public static String ownerTakeoverTopic() {
         return PREFIX + "owner-takeover";
     }
+
+    /**
+     * 玩家在线目录：{@code xm:presence:{player_id}}，值为 {@code xm.api.PlayerPresence} protobuf，带 TTL；
+     * gate 是唯一写者（进场写、离场带条件删、在线续期），任何服务可读。player_id 全服唯一（雪花），不分 zone。
+     */
+    public static String presence(long playerId) {
+        return PREFIX + "presence:" + Long.toUnsignedString(playerId);
+    }
+
+    /**
+     * 服务端 → gate 的推送频道：{@code xm:gate-push:{zone}:{gate 节点号}}，消息为 {@code xm.api.GatePush} protobuf。
+     * 每个 gate 节点订阅自己的频道；节点号按 zone 分配，所以频道名带 zone。
+     */
+    public static String gatePushTopic(int zoneId, int gateNodeId) {
+        return PREFIX + "gate-push:" + zoneId + ":" + gateNodeId;
+    }
 }

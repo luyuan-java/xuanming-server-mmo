@@ -67,9 +67,10 @@ class ClientDispatcherTest {
     private final SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final GateMetrics metrics = new GateMetrics(meters);
+    private final RecordingPresence presence = new RecordingPresence();
     private final ClientDispatcher dispatcher = new ClientDispatcher(
             new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
-            ROUTES, TIP_MSG, login, links, registry, new GateLimits(4, 3, Duration.ZERO), metrics);
+            ROUTES, TIP_MSG, login, links, registry, new GateLimits(4, 3, Duration.ZERO), metrics, presence);
     private final SceneEventRouter router = new SceneEventRouter(registry, dispatcher);
 
     // ================================================================ 握手
@@ -572,6 +573,94 @@ class ClientDispatcherTest {
         assertThat(links.last().frame().hasClientForward()).isTrue();
     }
 
+    // ================================================================ 在线目录与服务端推送
+
+    /** 已进场且 scene 已确认（在线目录里有它）的会话。 */
+    private EmbeddedChannel confirmedInGame() {
+        EmbeddedChannel ch = enteredScene();
+        router.onPlayerEnterResult(SCENE_NODE, links.generation, PlayerEnterResult.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setOwnerEpoch(5).build());
+        ch.runPendingTasks();
+        return ch;
+    }
+
+    private ClientSession session() {
+        return registry.get(sessionId());
+    }
+
+    private static MessageContent pushMessage() {
+        return MessageContent.newBuilder().setMessageId(235).setSerializedMessage(ByteString.copyFromUtf8("evt")).build();
+    }
+
+    @Test
+    void scene确认进场才登记在线_离开游戏时撤销() {
+        EmbeddedChannel ch = enteredScene();
+        assertThat(presence.events).as("进场帧发出但 scene 还没确认").isEmpty();
+
+        router.onPlayerEnterResult(SCENE_NODE, links.generation, PlayerEnterResult.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setOwnerEpoch(5).build());
+        ch.runPendingTasks();
+        assertThat(presence.events).containsExactly(new RecordingPresence.Event(true, PLAYER, sessionId(), 5));
+
+        ch.writeInbound(request(2, LEAVE_MSG, "leave"));
+        login.complete(unbindReply());
+        ch.runPendingTasks();
+        assertThat(presence.events).last().isEqualTo(new RecordingPresence.Event(false, PLAYER, sessionId(), 0));
+    }
+
+    @Test
+    void 进场被拒不登记在线() {
+        EmbeddedChannel ch = enteredScene();
+        router.onPlayerEnterResult(SCENE_NODE, links.generation, PlayerEnterResult.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setOwnerEpoch(5).setTipId(3023).build());
+        ch.runPendingTasks();
+        assertThat(presence.events).isEmpty();
+    }
+
+    @Test
+    void 断线_被踢_链路断开都撤销在线() {
+        EmbeddedChannel a = confirmedInGame();
+        a.close();
+        a.runPendingTasks();
+        assertThat(presence.events).last().isEqualTo(new RecordingPresence.Event(false, PLAYER, sessionId(), 0));
+    }
+
+    @Test
+    void 推送只发给在游戏里的目标玩家_玩家栅栏() {
+        EmbeddedChannel ch = confirmedInGame();
+        assertThat(dispatcher.deliverPush(session(), PLAYER + 1, pushMessage()))
+                .as("会话上在游戏里的不是这个玩家").isEqualTo(GateMetrics.PushResult.NOT_BOUND);
+        assertThat((Object) ch.readOutbound()).isNull();
+
+        assertThat(dispatcher.deliverPush(session(), PLAYER, pushMessage())).isEqualTo(GateMetrics.PushResult.DELIVERED);
+        MessageContent pushed = ch.readOutbound();
+        assertThat(pushed).isEqualTo(pushMessage());
+    }
+
+    @Test
+    void 未确认进场的会话不收推送() {
+        enteredScene();
+        assertThat(dispatcher.deliverPush(session(), PLAYER, pushMessage())).isEqualTo(GateMetrics.PushResult.NOT_BOUND);
+    }
+
+    @Test
+    void 服务端踢下线_推tip后关闭_随后照常离场() {
+        EmbeddedChannel ch = confirmedInGame();
+        int framesBefore = links.sent.size();
+        ClientSession kicked = session();
+
+        assertThat(dispatcher.kickByServer(kicked, PLAYER, 2017)).isEqualTo(GateMetrics.PushResult.DELIVERED);
+        ch.runPendingTasks();
+
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(2017);
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(disconnects("server_kick")).isEqualTo(1);
+        assertThat(links.sent.subList(framesBefore, links.sent.size()))
+                .as("断线流程让 scene 放掉玩家").anySatisfy(f -> assertThat(f.frame().hasPlayerLeave()).isTrue());
+        assertThat(presence.events).last().isEqualTo(new RecordingPresence.Event(false, PLAYER, sessionId(), 0));
+        assertThat(dispatcher.kickByServer(kicked, PLAYER, 2017)).as("已关闭的会话不再处理").isEqualTo(GateMetrics.PushResult.NOT_BOUND);
+    }
+
     @Test
     void 建链失败时进场失败推3023并解绑() {
         EmbeddedChannel ch = enteredScene();
@@ -813,7 +902,7 @@ class ClientDispatcherTest {
                 InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES, TIP_MSG, login, links, registry,
                 new GateLimits(16, 3, Duration.ZERO,
                         MessageLimits.of(Map.of(SCENE_MSG, new MessageLimit(2, Duration.ofSeconds(1))))),
-                metrics, nanos::get);
+                metrics, PresenceRecorder.NONE, nanos::get);
         EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, limited));
         ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
         ch.readOutbound();

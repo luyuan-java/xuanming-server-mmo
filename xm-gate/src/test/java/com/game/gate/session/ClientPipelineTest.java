@@ -42,7 +42,7 @@ class ClientPipelineTest {
     private final ClientDispatcher dispatcher = new ClientDispatcher(
             new GateIdentity(GATE_NODE, "gate-uuid", 1), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
             id -> id == 77 ? new MessageRoute(id, "scene") : null, 23, new FakeLogin(), new FakeLinks(), registry,
-            new GateLimits(8, 50, Duration.ZERO), new GateMetrics(meters));
+            new GateLimits(8, 50, Duration.ZERO), new GateMetrics(meters), PresenceRecorder.NONE);
 
     @Test
     void robot写法的握手帧通过_下发帧名是全名加零结尾() throws Exception {

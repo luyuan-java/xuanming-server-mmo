@@ -54,6 +54,11 @@ public final class ClientSession {
     long scenePlayerId;
     /** 进场帧里的 owner_epoch：只认同一次进场的结果 / 踢出通知，丢弃更早一次进场的迟到帧。 */
     long sceneOwnerEpoch;
+    /**
+     * scene 已确认进场，{@link #scenePlayerId} 已登记进玩家在线目录（{@link PresenceRecorder#online}）；
+     * 场景绑定结束或会话关闭时撤销。服务端推送（{@code GatePush}）只发给这种状态下、玩家对得上的会话。
+     */
+    boolean presenceOnline;
     /** 向 login 发过调用：断线时要通知 login 清理。 */
     boolean loginTouched;
     /** 待处理的上行请求（按到达顺序）；login 调用在途时后续请求在此排队，保证同一会话严格串行。 */
@@ -85,8 +90,8 @@ public final class ClientSession {
         return channel;
     }
 
-    /** 把任务投递到会话所属线程。EventLoop 已关闭（进程退出中）时丢弃。 */
-    void execute(Runnable task) {
+    /** 把任务投递到会话所属线程（别的线程要动会话一律经它）。EventLoop 已关闭（进程退出中）时丢弃。 */
+    public void execute(Runnable task) {
         try {
             channel.eventLoop().execute(task);
         } catch (RejectedExecutionException e) {

@@ -38,6 +38,7 @@ public final class GateMetrics {
     static final String LINK_FRAMES = "xm.gate.link.frames";
     static final String LINK_DROPPED = "xm.gate.link.dropped";
     static final String LINK_EVENTS = "xm.gate.link.events";
+    static final String PUSHES = "xm.gate.pushes";
 
     /** 不在客户端白名单里的消息号（以及没有路由的请求）统一用的标签值。 */
     public static final String UNKNOWN = "unknown";
@@ -118,7 +119,9 @@ public final class GateMetrics {
         /** scene 发来 PlayerKicked（顶号 / 失去归属）。 */
         KICKED,
         /** 会话所在的 scene 链路断开。 */
-        SCENE_LINK_DOWN
+        SCENE_LINK_DOWN,
+        /** 服务端经推送通道踢下线（GatePush.kick_tip_id）。 */
+        SERVER_KICK
     }
 
     /** gate 对 login 的 Dubbo 调用（{@code ClientMessageService} 的方法）。 */
@@ -145,6 +148,26 @@ public final class GateMetrics {
         DOWN
     }
 
+    /** 服务端推送的种类（{@code xm.gate.pushes{kind}}）。 */
+    public enum PushKind {
+        MESSAGE,
+        KICK
+    }
+
+    /** 服务端推送对每个目标会话的结局（{@code xm.gate.pushes{result}}），每个目标恰好计一次。 */
+    public enum PushResult {
+        /** 已写给客户端（踢下线：已推 tip 并开始关闭）。 */
+        DELIVERED,
+        /** 会话号在本 gate 上已不存在。 */
+        NO_SESSION,
+        /** 会话还在，但已不在游戏里、正在关闭或在游戏里的不是目标玩家（玩家栅栏）。 */
+        NOT_BOUND,
+        /** 推送指向的 gate 实例不是本进程（节点号被复用前的旧条目）：整条丢弃，按目标数计。 */
+        STALE_INSTANCE,
+        /** 消息格式不对（解析失败、没有动作、MessageContent 损坏）：整条丢弃，按目标数计（无目标计 1）。 */
+        INVALID
+    }
+
     /** 没发出去的链路帧（{@code xm.gate.link.dropped{reason}}）。 */
     public enum LinkDrop {
         /** 本 gate 节点号租约无效，不新建链路。 */
@@ -163,6 +186,7 @@ public final class GateMetrics {
     private final Map<ClientFrameException.Reason, Counter> invalidFrames;
     private final Map<LinkEvent, Counter> linkEvents;
     private final Map<LinkDrop, Counter> linkDrops;
+    private final Map<PushKind, Map<PushResult, Counter>> pushes;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesOut;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesIn;
     private final Map<LoginCall, Timer> loginCallsOk;
@@ -177,6 +201,18 @@ public final class GateMetrics {
                 "解码层非法的客户端帧（随即断开）");
         this.linkEvents = counters(LinkEvent.class, LINK_EVENTS, "event", "gate → scene 链路状态变化");
         this.linkDrops = counters(LinkDrop.class, LINK_DROPPED, "reason", "没发出去的 gate → scene 链路帧");
+        this.pushes = new EnumMap<>(PushKind.class);
+        for (PushKind kind : PushKind.values()) {
+            EnumMap<PushResult, Counter> byResult = new EnumMap<>(PushResult.class);
+            for (PushResult result : PushResult.values()) {
+                byResult.put(result, Counter.builder(PUSHES)
+                        .description("服务端经推送通道发给会话的消息 / 踢下线，按目标会话计结局")
+                        .tag("kind", tagValue(kind))
+                        .tag("result", tagValue(result))
+                        .register(registry));
+            }
+            pushes.put(kind, byResult);
+        }
         this.framesOut = frameCounters("out");
         this.framesIn = frameCounters("in");
         this.loginCallsOk = loginTimers("ok");
@@ -262,6 +298,10 @@ public final class GateMetrics {
 
     public void linkEvent(LinkEvent event) {
         linkEvents.get(event).increment();
+    }
+
+    public void push(PushKind kind, PushResult result, int targets) {
+        pushes.get(kind).get(result).increment(targets);
     }
 
     public void linkDropped(LinkDrop reason, int frames) {

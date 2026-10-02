@@ -9,6 +9,10 @@ import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
+import com.game.discovery.presence.PlayerPresenceDirectory;
+import com.game.gate.presence.GatePresence;
+import com.game.gate.presence.GatePushSubscriber;
 import com.game.gate.link.LinkHellos;
 import com.game.gate.link.LinkSettings;
 import com.game.gate.link.NettyLinkConnector;
@@ -46,6 +50,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.ByteArrayCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -98,6 +103,10 @@ public final class GateNode {
     private EventLoopGroup linkGroup;
     private volatile Channel serverChannel;
     private volatile ScheduledFuture<?> publishTask;
+    /** 本 gate 在玩家在线目录里的条目（gate 是唯一写者）。 */
+    private volatile GatePresence presence;
+    /** 本 gate 的服务端推送频道订阅。 */
+    private volatile GatePushSubscriber pushSubscriber;
 
     /**
      * @param linkAuth gate → scene 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 scene 一致）
@@ -141,6 +150,8 @@ public final class GateNode {
                 SessionIdAllocator.MIN_NODE_ID, SessionIdAllocator.MAX_NODE_ID, instanceId, LEASE_TTL, this::onLeaseLost);
         GateIdentity identity = new GateIdentity(lease.nodeId(), instanceId, zoneId);
         registry = new SessionRegistry(new SessionIdAllocator(identity.nodeId()));
+        presence = new GatePresence(new PlayerPresenceDirectory(redis), zoneId, identity.nodeId(), instanceId,
+                System::currentTimeMillis);
 
         // scene 链路：寻址查 Redis（阻塞）放在单独线程，连接放在链路 I/O 线程。
         linkGroup = new NioEventLoopGroup(properties.linkThreads(), new DefaultThreadFactory("gate-link"));
@@ -163,8 +174,14 @@ public final class GateNode {
         ClientDispatcher dispatcher = new ClientDispatcher(identity, tokens, InstantSource.system(),
                 MessageRoutes.of(messageIdRegistry), tipMessageId, login, links, registry,
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
-                        messageLimits), metrics);
+                        messageLimits), metrics, presence);
         links.bindListener(new SceneEventRouter(registry, dispatcher));
+        // 服务端 → 玩家推送：订阅本 gate 的频道（任何服务按在线目录找到本 gate 后发布到这里）。
+        pushSubscriber = new GatePushSubscriber(
+                redis.getTopic(RedisKeys.gatePushTopic(zoneId, identity.nodeId()), ByteArrayCodec.INSTANCE),
+                instanceId, registry, dispatcher, metrics);
+        pushSubscriber.start();
+        presence.start(scheduler);
         // 状态量由抓取线程读：会话表与链路表都是并发容器，size() 线程安全、不阻塞。
         metrics.bindSessionCount(registry::size);
         metrics.bindSceneLinkCount(links::linkCount);
@@ -225,9 +242,11 @@ public final class GateNode {
         log.error("gate 节点号租约丢失：停止接受新连接、不再新建 scene 链路、关闭全部会话 node_id={} instance={} 会话数={}",
                 lease.nodeId(), instanceId, sessions == null ? 0 : sessions.size());
         stopAccepting(false);
+        stopPush();
         if (sessions != null) {
             sessions.closeAll();
         }
+        stopPresence();
     }
 
     private void stopAccepting(boolean removeDirectoryEntry) {
@@ -264,10 +283,12 @@ public final class GateNode {
         stopped = true;
         log.info("gate 正在退出");
         stopAccepting(true);
+        stopPush();
         if (registry != null) {
             registry.closeAll();
             awaitSessionsDrained(properties.shutdownDrainTimeout());
         }
+        stopPresence();
         if (links != null) {
             links.close();
         }
@@ -284,6 +305,21 @@ public final class GateNode {
             scheduler.shutdownNow();
         }
         log.info("gate 已退出");
+    }
+
+    private void stopPush() {
+        GatePushSubscriber subscriber = pushSubscriber;
+        if (subscriber != null) {
+            subscriber.stop();
+        }
+    }
+
+    /** 停续期并撤销剩下的在线目录条目（正常收尾的会话已在断线流程里撤销自己的）。 */
+    private void stopPresence() {
+        GatePresence p = presence;
+        if (p != null) {
+            p.stop();
+        }
     }
 
     private void awaitSessionsDrained(Duration timeout) {

@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+// 玩家在线目录与服务端 → 玩家推送的 Redis 值 / 消息格式（只在 Java 版内部使用；归 xm-discovery 所有）。
+// 在线目录：Redis xm:presence:{player_id}（带 TTL，gate 是唯一写者）。推送：Redis pub/sub 频道 xm:gate-push:{zone}:{gate 节点号}。
+// 见 docs/design/architecture.md §4.3。
+
+package xm.discovery;
+
+option java_package = "com.game.discovery.proto";
+option java_multiple_files = true;
+
+// 一个在游戏里的玩家此刻在哪个 gate 的哪个会话上。gate 在 scene 确认进场后写入、离场 / 断线时带条件删除、在线期间续期。
+message PlayerPresence {
+  uint64 player_id = 1;
+  uint32 zone_id = 2;
+  uint32 gate_node_id = 3;
+  // 写入它的 gate 进程实例：推送按它过滤，节点号被新进程复用时旧条目不会把消息投给新进程。
+  string gate_instance_id = 4;
+  uint32 session_id = 5;
+  // 进入游戏的时刻（Unix 毫秒）。值在线期间不变，带条件删除 / 续期靠逐字节比较。
+  int64 online_since_ms = 6;
+  // 这次进游戏夺得的数据归属 epoch：同一玩家的两次登录以它定先后，迟到的旧登录不得覆盖新登录的条目。
+  uint64 owner_epoch = 7;
+}
+
+// 服务端 → 指定 gate 的一条下行指令。至多一次：gate 不在线、频道抖动、玩家刚好下线都会丢，业务方以拉取兜底。
+message GatePush {
+  // 目标 gate 实例，与收到它的 gate 不符即丢弃。
+  string gate_instance_id = 1;
+  repeated PushTarget targets = 2;
+  oneof action {
+    // 发给客户端的 MessageContent 序列化字节（推送的 id 为 0）。
+    bytes message_content = 3;
+    // 推 23 {tip} 后断开连接（踢下线）。
+    uint32 kick_tip_id = 4;
+  }
+}
+
+message PushTarget {
+  uint32 session_id = 1;
+  // 玩家栅栏：会话上此刻在游戏里的不是这个玩家（会话号已复用、已换角色）就不发。
+  uint64 player_id = 2;
+}
