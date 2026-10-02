@@ -10,6 +10,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 不给任何可以写进仓库的配置入口。
  *
  * @param clientPort             客户端 TCP 端口
+ * @param advertisePort          写进节点目录、由 gateway 下发给客户端的端口；缺省 = clientPort。经 NodePort / hostPort / 端口映射
+ *                               对外时与监听端口不同（同 mmorpg `NodeInfo.client_endpoint` 的 port）
  * @param workerThreads          客户端 I/O 线程数；0 = Netty 默认（CPU 核数 × 2）
  * @param linkThreads            scene 链路 I/O 线程数
  * @param maxPendingRequests     单会话最多排队的上行请求（login 调用在途时后续请求排队），超出断开
@@ -23,6 +25,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties("xm.gate")
 public record GateProperties(
         Integer clientPort,
+        Integer advertisePort,
         Integer workerThreads,
         Integer linkThreads,
         Integer maxPendingRequests,
@@ -35,6 +38,7 @@ public record GateProperties(
 
     public GateProperties {
         clientPort = clientPort == null ? 11000 : clientPort;
+        advertisePort = advertisePort == null || advertisePort == 0 ? clientPort : advertisePort;
         workerThreads = workerThreads == null ? 0 : workerThreads;
         linkThreads = linkThreads == null ? 2 : linkThreads;
         maxPendingRequests = maxPendingRequests == null ? 64 : maxPendingRequests;
@@ -46,6 +50,9 @@ public record GateProperties(
         shutdownDrainTimeout = shutdownDrainTimeout == null ? Duration.ofSeconds(3) : shutdownDrainTimeout;
         if (clientPort <= 0 || clientPort > 65535) {
             throw new IllegalArgumentException("xm.gate.client-port 非法: " + clientPort);
+        }
+        if (advertisePort < 0 || advertisePort > 65535) {
+            throw new IllegalArgumentException("xm.gate.advertise-port 非法: " + advertisePort);
         }
         if (linkThreads <= 0) {
             throw new IllegalArgumentException("xm.gate.link-threads 必须为正: " + linkThreads);

@@ -13,6 +13,7 @@
 |---|---|---|---|
 | 0.1.0-SNAPSHOT | `766cb037c` | 2026-09-29 | 移植起点：仓库骨架 + 登录进场景竖切（端到端已验证） |
 | 0.1.0-SNAPSHOT | `9c9c012b7` | 2026-09-29 | 契约同步到 mmorpg HEAD：proto 111 → 113 个文件（新增 guild_internal、match_internal），消息号追加 239–243（帮会活动 / 试炼，Java 版 gate 暂回「服务不可用」）；配表数据无变化；竖切端到端复验通过 |
+| 0.1.0-SNAPSHOT | `26ceb70ca` | 2026-10-02 | 契约同步到 mmorpg HEAD：只有两处变化——`NodeInfo` 新增服务端内部字段 `client_endpoint = 11`（gate / battle 自报的客户端可达地址，Java 版节点目录不用 `NodeInfo`，见「客户端可达地址」行）、`player_battle.proto` 注释；消息号、事件号、配表数据均无变化。`clean install` 全部 543 个单测通过（5 个默认跳过） |
 
 ## 功能对齐
 
@@ -46,3 +47,4 @@
 | 属性同步 66 `ActorBaseAttributesS2C`（移动广播的唯一通道） | `cpp/libs/services/scene/actor/attribute/system/actor_state_attribute_sync.cpp` | `9c9c012b7` | xm-scene | 0.1.0-SNAPSHOT | 已对齐（行为有意不同，协议不变） | 偶数帧（每实体每 100 ms 至多一条）、只带脏字段（脏子消息全零也写：停步 `1a 00`、空朝向 `12 00`）、发给看得见它的人（不含自己）、没人看得见时保留脏位；从不发 65 / 55 / 82 / 68 / 75 与 133 / 135 / 130。**有意差异**（mmorpg 待做）：每条都带 `entity_id = player_id`（基线移动触发的 66 不带，观察者无法归属；字段是加出来的，旧客户端忽略也不出错）；有新观察者时把目标的朝向 / 速度置脏，下一个同步帧的 66 一并补上（基线缺口 9：移动中的实体进视野时显示为静止），不另发单播，不打破 100 ms 节奏 |
 | 136 TeleportRequest | `player_movement_handler.cpp`（空桩） | `9c9c012b7` | xm-scene | 0.1.0-SNAPSHOT | 不适用（行为有意不同） | Java 回 `TeleportRequestC2SResponse{error_message{1006 kFeatureUnavailable}}`（信封 `message_id=136`、`id`=请求号），基线回 `error_message{id=0}`（受理但什么都不做）；两者之后都不发 130。robot 从不发 136 |
 | 70 SkillUsed 的收件人 | `combat/skill/system/skill.cpp` `BroadcastSkillUsedMessage`（不含施法者本人） | `9c9c012b7` | xm-scene | 0.1.0-SNAPSHOT | **mmorpg 待做**（Java 行为保留） | Java 发给施法者本人 + 看得见他的人。2026-09-30 已核对客户端（`../mmorpg-client`，Unity C# 客户端）：技能表现只由 70 驱动（`GameClient.cs` 的 NotifySkillUsed 处理器调 `SkillFx`，不区分是否本地玩家），84 回包在客户端只打「unhandled」日志、无本地预测，所以发给施法者不会重复播放；反而基线不发给本人时，施法者看不到自己的施法表现。33（打断）同理只打日志。结论：Java 保持；mmorpg 侧应改为也发给施法者。客户端若日后加本地预测，再在 70 处理器里跳过本地实体 |
+| 节点客户端可达地址（advertised client endpoint：通告给客户端的 host / port 可与监听地址不同） | `proto/common/base/common.proto` `NodeInfo.client_endpoint`；login `CandidatesForZone`、scene_manager `RedirectToGate`、battle `BuildAssignment` | `26ceb70ca` | xm-gate、xm-gateway | 0.1.0-SNAPSHOT | 已对齐（gate 部分） | Java：`xm.advertise-host` + `xm.gate.advertise-port`（环境变量 `XM_GATE_ADVERTISE_PORT`，缺省 = 监听端口）写进节点目录 `GateNodeInfo.client_host / client_port`，gateway 原样下发。mmorpg 的 `require` 开关（external 模式缺地址即跳过节点）Java 不需要：Java 的通告地址总有值（缺省 127.0.0.1）。gate 重定向与 battle 分配的通告地址随这两个功能一起做 |

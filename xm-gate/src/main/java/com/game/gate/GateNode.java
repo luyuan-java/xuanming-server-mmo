@@ -187,8 +187,8 @@ public final class GateNode {
                 .bind(properties.clientPort())
                 .syncUninterruptibly()
                 .channel();
-        log.info("gate 已启动 zone={} node_id={} instance={} 客户端端口={} 通告地址={}",
-                zoneId, identity.nodeId(), instanceId, properties.clientPort(), advertiseHost);
+        log.info("gate 已启动 zone={} node_id={} instance={} 客户端端口={} 通告地址={}:{}",
+                zoneId, identity.nodeId(), instanceId, properties.clientPort(), advertiseHost, properties.advertisePort());
 
         publishTask = scheduler.scheduleAtFixedRate(this::publish, 0, PUBLISH_PERIOD.toMillis(), TimeUnit.MILLISECONDS);
     }
@@ -203,7 +203,7 @@ public final class GateNode {
                 .setNodeId(lease.nodeId())
                 .setInstanceId(instanceId)
                 .setClientHost(advertiseHost)
-                .setClientPort(properties.clientPort())
+                .setClientPort(properties.advertisePort())
                 .setPlayerCount(registry.size())
                 .setDraining(false)
                 .build();
