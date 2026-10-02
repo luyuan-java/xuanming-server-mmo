@@ -41,6 +41,7 @@ public final class SceneMetrics {
     static final String TICK = "xm.scene.tick";
     static final String BROADCAST = "xm.scene.broadcast";
     static final String MOVES = "xm.scene.moves";
+    static final String PERIODIC_SAVES = "xm.scene.periodic.saves";
     static final String AOI_CHANGES = "xm.scene.aoi.changes";
     static final String STORAGE_WRITES = "xm.scene.storage.writes";
     static final String GATE_LINKS = "xm.scene.gate.links";
@@ -77,6 +78,18 @@ public final class SceneMetrics {
         INVALID
     }
 
+    /** 周期存盘对一个到期玩家的处理（{@code xm.scene.periodic.saves{result}}），每人每次到期恰好计一次。 */
+    public enum PeriodicSave {
+        /** 与上次落库的快照不同，提交了在线存盘。 */
+        WRITTEN,
+        /** 与上次落库的快照相同，跳过（脏比对快路径）。 */
+        UNCHANGED,
+        /** 上一次在线存盘还没回来，本次跳过（下个周期再比）。 */
+        IN_FLIGHT,
+        /** 存储线程池积压（续约 / 最终写回优先），推到下个周期。 */
+        DEFERRED
+    }
+
     /** 帧内的广播阶段（{@code xm.scene.broadcast{kind}}）。 */
     public enum BroadcastKind {
         /** 视野变化：每个观察者一条 47 / 64（每帧一次，全部场景合计）。 */
@@ -90,13 +103,17 @@ public final class SceneMetrics {
         /** 最终写回并释放归属（离场、断线、被接管、停服）。 */
         SAVE,
         /** 只释放归属（没进成的进场）。 */
-        RELEASE
+        RELEASE,
+        /** 在线存盘（周期存盘，不释放归属）。 */
+        PROGRESS
     }
 
     /** 存储写的结局（{@code xm.scene.storage.writes{result}}），每个写任务恰好计一次。 */
     public enum WriteResult {
         /** 已落库并释放归属。 */
         RELEASED,
+        /** 已落库（在线存盘，不释放归属）。 */
+        SAVED,
         /** 被 owner_epoch 围栏拒绝（归属已被新的进场取代、已释放或玩家已不存在）：不是故障，什么也没写。 */
         FENCED,
         /** 重试用尽、非瞬时故障或重试等待被中断：写丢失，已记 ERROR 待人工修复。 */
@@ -120,6 +137,7 @@ public final class SceneMetrics {
     private final Timer tick;
     private final Map<BroadcastKind, Timer> broadcasts;
     private final Map<MoveResult, Counter> moves;
+    private final Map<PeriodicSave, Counter> periodicSaves;
     private final Counter aoiEntered;
     private final Counter aoiLeft;
     private final Map<StorageOp, Map<WriteResult, Timer>> storageWrites;
@@ -145,6 +163,7 @@ public final class SceneMetrics {
                     .register(registry));
         }
         this.moves = counters(MoveResult.class, MOVES, "result", "移动上行的裁决结果");
+        this.periodicSaves = counters(PeriodicSave.class, PERIODIC_SAVES, "result", "周期存盘对到期玩家的处理（写 / 未变跳过 / 在途跳过 / 存储积压推迟）");
         this.aoiEntered = aoiCounter("enter");
         this.aoiLeft = aoiCounter("leave");
         this.storageWrites = new EnumMap<>(StorageOp.class);
@@ -152,7 +171,7 @@ public final class SceneMetrics {
             EnumMap<WriteResult, Timer> byResult = new EnumMap<>(WriteResult.class);
             for (WriteResult result : WriteResult.values()) {
                 byResult.put(result, Timer.builder(STORAGE_WRITES)
-                        .description("玩家数据写（写回并释放 / 只释放）的结局与耗时（含瞬时故障重试）")
+                        .description("玩家数据写（写回并释放 / 只释放 / 在线存盘）的结局与耗时（含瞬时故障重试）")
                         .tag("op", tagValue(op))
                         .tag("result", tagValue(result))
                         .serviceLevelObjectives(STORAGE_BUCKETS)
@@ -273,6 +292,10 @@ public final class SceneMetrics {
     // ================================================================ 存储
 
     /** 一个存储写任务结束（{@code xm.scene.storage.writes{op, result}}）；耗时从存储线程开始执行起算，含重试等待。 */
+    public void periodicSave(PeriodicSave result) {
+        periodicSaves.get(result).increment();
+    }
+
     public void storageWrite(StorageOp op, WriteResult result, long elapsedNanos) {
         storageWrites.get(op).get(result).record(Math.max(0, elapsedNanos), TimeUnit.NANOSECONDS);
     }

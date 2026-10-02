@@ -5,6 +5,7 @@ import static com.game.scene.world.SceneMessageIds.push;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
+import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorDestroyS2C;
 import com.game.proto.ActorListCreateS2C;
@@ -15,7 +16,9 @@ import com.game.proto.MoveAckS2C;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BroadcastKind;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
+import com.game.scene.metrics.SceneMetrics.PeriodicSave;
 import com.game.scene.world.PlayerRepository.LoadResult;
+import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
 import java.util.ArrayList;
@@ -70,6 +73,10 @@ import org.slf4j.LoggerFactory;
  *   <li>login 发来接管请求（{@link #onTakeoverRequested}，别的会话要进这个角色）：持有该 epoch 的实例写回释放，
  *       并通知 gate 把旧会话踢下线（23 {2017}）；</li>
  *   <li>续约报告失去归属（{@link #onOwnershipLost}）：实例的写回只会被围栏拒掉，立即移除（不写回）并踢掉会话。</li>
+ *   <li>周期存盘（{@link #saveDuePlayers}，每秒一次）：{@code player_id} 对周期取模等于当前槽号的玩家到期，每人每周期恰好一次；
+ *       与上次确认落库的快照相同就跳过（基线脏比较快路径），不同才提交在线存盘（{@link PlayerRepository#saveProgress}，不释放归属）。
+ *       同一玩家同时至多一个在途；成功才更新快照（失败下个周期按最新状态重写）；被围栏拒绝 = 已失去归属，按续约失去归属处理。
+ *       在线存盘要求归属未释放，迟到的在线存盘盖不过已提交的最终写回，所以离场不必等在途的在线存盘。</li>
  * </ul>
  *
  * <p><b>技能</b>：xm-player-store 目前没有技能列，每次进场都按配表发放初始技能（等同基线「新号」），
@@ -103,6 +110,10 @@ public final class SceneWorld {
     /** 帧内视野变化的复用缓冲（只在 {@link #step()} 里用）。 */
     private final ViewChanges viewChanges = new ViewChanges();
     private boolean acceptingEnters = true;
+    /** 停服开始后不再做周期存盘（最终写回由 {@link #shutdown()} 统一做）。 */
+    private boolean periodicSaveStopped;
+    /** 周期存盘已走过的秒数（槽号 = 它对存盘周期取模）。 */
+    private long saveSecond;
     /** 已跑过的帧数（下一帧的帧号）。偶数帧做属性同步。 */
     private long frame;
 
@@ -271,6 +282,7 @@ public final class SceneWorld {
         int savedConfigId = data.sceneConfigId();
         Vec3 savedPosition = data.position();
         int level = data.level();
+        PlayerState state = data.state();
         List<Integer> skills = tables.initialSkills();
         if (previous != null) {
             // 本节点上还挂着这个玩家的旧实例，而库里的归属已经被这次进场夺走——只会发生在旧实例失去归属之后
@@ -280,6 +292,7 @@ public final class SceneWorld {
             savedConfigId = previous.scene().configId();
             savedPosition = previous.position();
             level = previous.level();
+            state = previous.persistentState();
             skills = previous.skills();
             removePlayer(previous, false);
             if (!previous.session().equals(key)) {
@@ -289,7 +302,9 @@ public final class SceneWorld {
 
         ScenePlayer player = new ScenePlayer(playerId, nextId(), key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
-                resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), clock.nanoTime());
+                resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime());
+        // 脏比对基准是库里此刻的样子（不是刚建出来的内存状态）：接管旧实例、出生点改派等与库不同的情形，第一次到期就会写。
+        player.markPersisted(data.asPersisted());
         playersById.put(playerId, player);
         playersBySession.put(key, player);
         enterScene(player, scene);
@@ -626,6 +641,70 @@ public final class SceneWorld {
         }
     }
 
+    // ------------------------------------------------------------------ 周期存盘
+
+    /**
+     * 周期存盘的一秒（每秒在逻辑线程上调一次）：{@code player_id} 对 {@code intervalSeconds} 取模等于本秒槽号的玩家到期，
+     * 每人每周期恰好一次、单次工作量约为在线人数 / 周期秒数（基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS 的分槽做法）。
+     * 停服开始后什么也不做。
+     *
+     * @return 本次提交的在线存盘数
+     */
+    public int saveDuePlayers(int intervalSeconds) {
+        if (intervalSeconds <= 0) {
+            throw new IllegalArgumentException("存盘周期必须为正: " + intervalSeconds);
+        }
+        long slot = saveSecond++ % intervalSeconds;
+        if (periodicSaveStopped) {
+            return 0;
+        }
+        int submitted = 0;
+        for (ScenePlayer player : playersById.values()) {
+            if (Long.remainderUnsigned(player.playerId(), intervalSeconds) != slot) {
+                continue;
+            }
+            if (player.progressSaveInFlight()) {
+                metrics.periodicSave(PeriodicSave.IN_FLIGHT);
+                continue;
+            }
+            PlayerSave snapshot = player.toSave();
+            if (snapshot.equals(player.lastPersisted())) {
+                metrics.periodicSave(PeriodicSave.UNCHANGED);
+                continue;
+            }
+            if (!repository.acceptsProgress()) {
+                // 存储积压：这一轮余下的到期玩家都推到下个周期，不把续约 / 最终写回堵在后面。
+                metrics.periodicSave(PeriodicSave.DEFERRED);
+                continue;
+            }
+            player.setProgressSaveInFlight(true);
+            metrics.periodicSave(PeriodicSave.WRITTEN);
+            repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result));
+            submitted++;
+        }
+        return submitted;
+    }
+
+    /** 在线存盘的结局（逻辑线程）。实例可能已经离场（离场不等在途的在线存盘），那就只清在途标记。 */
+    private void onProgressSaved(ScenePlayer player, PlayerSave snapshot, ProgressResult result) {
+        player.setProgressSaveInFlight(false);
+        switch (result) {
+            case SAVED -> player.markPersisted(snapshot);
+            case FAILED -> {
+                // 失败不等于没写进去（提交阶段断连时结局未知）：库里是什么不再确定，作废比对基准，下个周期无条件重写。
+                player.markPersisted(null);
+                log.warn("在线存盘失败，下个周期按最新状态重写 player={} epoch={}", player.playerId(), player.ownerEpoch());
+            }
+            case FENCED -> {
+                // 归属已被夺走（epoch 变了）或已释放：实例写回只会被拒，按续约发现失去归属处理。离场后才回来的不动。
+                if (playersById.get(player.playerId()) == player) {
+                    removePlayer(player, false);
+                    kick(player, "在线存盘被归属围栏拒绝（已失去数据归属）");
+                }
+            }
+        }
+    }
+
     private void kick(ScenePlayer player, String reason) {
         sink.playerKicked(player.session().linkId(), player.session().sessionId(), player.playerId(),
                 player.ownerEpoch(), KICKED_BY_ANOTHER);
@@ -669,6 +748,7 @@ public final class SceneWorld {
      */
     public int shutdown() {
         acceptingEnters = false;
+        periodicSaveStopped = true;
         for (PendingEnter pending : pendingEnters.values()) {
             releaseClaim(pending.playerId(), pending.ownerEpoch());
         }

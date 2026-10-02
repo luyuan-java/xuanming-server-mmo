@@ -1,10 +1,13 @@
 package com.game.scene.world;
 
+import com.game.player.store.state.Facing;
+import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorBaseAttributesS2C;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorType;
 import com.game.proto.Rotation;
 import com.game.proto.Transform;
+import com.google.protobuf.UnknownFieldSet;
 import java.util.List;
 
 /**
@@ -36,8 +39,19 @@ public final class ScenePlayer {
     private final MoveGuard moveGuard;
     private Scene scene;
     private Vec3 position;
-    /** 最近一次移动上报的朝向；从没上报过为 null（66 的 transform 就不带 rotation，基线同）。 */
+    /**
+     * 最近一次移动上报的朝向（持久化在 {@code player_state.facing}，进场时恢复）；
+     * 从没上报过为 null（66 的 transform 就不带 rotation，基线同）。
+     */
     private Rotation rotation;
+    /**
+     * 加载到的状态里本版本不认识的组件（更新版本写入的字段）。写回时原样带上，滚动升级 / 回滚期间旧版本节点不会把它们抹掉。
+     */
+    private final UnknownFieldSet unknownStateFields;
+    /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
+    private PlayerSave lastPersisted;
+    /** 一次在线存盘已提交、结果还没回来：期间不再提交新的（结果回来后下个周期再比）。 */
+    private boolean progressSaveInFlight;
     /** 当前速度（已截断到信任上限）；(0,0,0) 为静止。 */
     private Vec3 velocity = Vec3.ORIGIN;
     private int syncDirty;
@@ -46,6 +60,14 @@ public final class ScenePlayer {
 
     ScenePlayer(long playerId, long entity, SessionKey session, long ownerEpoch, int classId, int gender,
                 String appearanceId, int level, List<Integer> skills, Vec3 position, long nowNanos) {
+        this(playerId, entity, session, ownerEpoch, classId, gender, appearanceId, level, skills, position,
+                PlayerState.getDefaultInstance(), nowNanos);
+    }
+
+    /** @param state 持久化的玩法组件（从未写过为默认实例），这里把各组件恢复到内存状态 */
+    ScenePlayer(long playerId, long entity, SessionKey session, long ownerEpoch, int classId, int gender,
+                String appearanceId, int level, List<Integer> skills, Vec3 position, PlayerState state,
+                long nowNanos) {
         this.playerId = playerId;
         this.entity = entity;
         this.session = session;
@@ -57,6 +79,11 @@ public final class ScenePlayer {
         this.skills = List.copyOf(skills);
         this.position = position;
         this.moveGuard = new MoveGuard(position, nowNanos);
+        if (state.hasFacing()) {
+            Facing f = state.getFacing();
+            this.rotation = Rotation.newBuilder().setX(f.getX()).setY(f.getY()).setZ(f.getZ()).build();
+        }
+        this.unknownStateFields = state.getUnknownFields();
     }
 
     public long playerId() {
@@ -220,6 +247,31 @@ public final class ScenePlayer {
     }
 
     PlayerSave toSave() {
-        return new PlayerSave(playerId, ownerEpoch, level, scene.configId(), position);
+        return new PlayerSave(playerId, ownerEpoch, level, scene.configId(), position, persistentState());
+    }
+
+    /** 当前内存状态里需要持久化的玩法组件。新增组件时在这里写、在构造器里恢复。 */
+    PlayerState persistentState() {
+        PlayerState.Builder state = PlayerState.newBuilder().setUnknownFields(unknownStateFields);
+        if (rotation != null) {
+            state.setFacing(Facing.newBuilder().setX(rotation.getX()).setY(rotation.getY()).setZ(rotation.getZ()));
+        }
+        return state.build();
+    }
+
+    PlayerSave lastPersisted() {
+        return lastPersisted;
+    }
+
+    void markPersisted(PlayerSave save) {
+        this.lastPersisted = save;
+    }
+
+    boolean progressSaveInFlight() {
+        return progressSaveInFlight;
+    }
+
+    void setProgressSaveInFlight(boolean inFlight) {
+        this.progressSaveInFlight = inFlight;
     }
 }

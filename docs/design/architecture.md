@@ -173,7 +173,7 @@ Java 代码不得依赖这套目录，具体做法：
 
 ## 7. 存储
 
-- MySQL 库 `xm_java`（与 mmorpg 的库隔离）：`account`、`player`；建表脚本在 `xm-player-store/src/main/resources/db/xm-player-schema.sql`
+- MySQL 库 `xm_java`（与 mmorpg 的库隔离）：`account`、`player`、`player_state`（各玩法系统的持久化组件，protobuf `xm.storage.PlayerState`，与 `player` 行同事务、同围栏写入）；建表脚本在 `xm-player-store/src/main/resources/db/xm-player-schema.sql`
   （只 `CREATE TABLE IF NOT EXISTS`，存量库的结构变更按 [db-migrations.md](db-migrations.md) 手工迁移）。
 - 玩家名全服唯一且大小写 / 全半角不敏感：唯一索引 `uk_player_name_key` 建在 `name_key` 上，键只由 `PlayerStore.nameKey` 计算
   （NFKC → 去首尾空白 → `Locale.ROOT` 小写）。建角撞到主键（`player_id` 重号）是不变量被破坏，抛异常，不报「重名」。
@@ -203,7 +203,9 @@ Java 代码不得依赖这套目录，具体做法：
 - **写回失败**：scene 对可恢复的瞬时故障（取不到连接、连接断开、锁等待 / 查询超时）在 5s 预算内退避重试最多 3 次；
   最终失败、线程池拒绝、停服丢弃都记 ERROR（带 player_id / epoch / 场景 / 坐标，供人工修复）并计数。
   scene 的 JDBC URL 带 `connectTimeout=3000&socketTimeout=10000`（与 login 同口径），库卡死时存储线程不会被无限挂住。
-  首批没有周期存盘：进程被 kill 时本次在线期间的增量（换图后的地图与坐标）会丢。
+  **在线周期存盘**（`xm.scene.save-interval`，缺省 300s，同基线）：每秒一个槽，`player_id` 对周期取模等于槽号的玩家到期，
+  与上次确认落库的快照相同就跳过，不同才写（带围栏、不释放；要求归属未释放，所以迟到的在线存盘盖不过最终写回）。
+  进程被 kill 时丢的是最近一次在线存盘之后的增量。最终写回失败（重试用尽）时盘上至少是最近一次在线存盘的状态。
 
 ## 8. 登录进场景调用链（首批竖切）
 
@@ -236,7 +238,7 @@ Java 代码不得依赖这套目录，具体做法：
 ## 10. 首批不做（后续批次）
 
 排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、背包 / 任务 / 货币等玩法系统、Kafka 事件、GM / 管理接口、
-服务级限流 / 熔断（Sentinel）、周期存盘、合服与 TiDB 数据层。
+服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，见 §7。）
 （低基数运行指标五个进程都已接入，见 §11。）
 顶号已按 §7 第 2 步实现（旧连接收 23 {2017} 后断开，不发 34）。进度逐项登记在 `PARITY.md`。
 
@@ -300,7 +302,8 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_broadcast_seconds` | Timer | `kind`=view_changes / attribute_sync | 帧内广播阶段（组包、序列化、交给链路）：view_changes = 47 / 64，每帧一次；attribute_sync = 66，偶数帧一次（均为全部场景合计） |
 | scene | `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值或坐标超出世界范围（±1e7 m）丢弃 |
 | scene | `xm_scene_aoi_changes_total` | Counter | `change`=enter / leave | 视野变化通知，一对（观察者, 目标）计一次：enter = 进场的 47 条目与给旁人的 21、帧内 47 条目；leave = 离场 / 换场景的 51、帧内 64 条目。离场者自己的列表静默清空，不计 |
-| scene | `xm_scene_storage_writes_seconds` | Timer | `op`=save / release，`result`=released / fenced / failed / rejected | 玩家数据写（写回并释放 / 只释放）的结局与耗时（含瞬时故障重试），每个写任务恰好计一次：已落库并释放 / 围栏拒绝（不是故障）/ 重试用尽或非瞬时故障 / 存储线程池拒绝（耗时记 0）。停服时 `shutdownNow` 丢弃的写只进 ERROR 日志 |
+| scene | `xm_scene_storage_writes_seconds` | Timer | `op`=save / release / progress，`result`=released / saved / fenced / failed / rejected | 玩家数据写（写回并释放 / 只释放 / 在线存盘）的结局与耗时（含瞬时故障重试），每个写任务恰好计一次：已落库并释放 / 已落库未释放（在线存盘）/ 围栏拒绝（不是故障）/ 重试用尽或非瞬时故障 / 存储线程池拒绝（耗时记 0）。停服时 `shutdownNow` 丢弃的写只进 ERROR 日志 |
+| scene | `xm_scene_periodic_saves_total` | Counter | `result`=written / unchanged / in_flight / deferred | 周期存盘对每个到期玩家的处理，每人每次到期恰好计一次：有变化提交了在线存盘 / 与上次落库相同跳过 / 上一次还在途跳过 / 存储线程池积压（排队 ≥ 线程数 × 2）推到下个周期 |
 | scene | `executor_*{name="scene-storage"}` | Micrometer 标准线程池指标 | — | 存储线程池排队（`executor_queued_tasks`）/ 剩余容量 / 活跃 / 完成数 |
 | scene | `xm_scene_gate_links` | Gauge | — | 接入本节点的 gate 链路连接数（含握手中） |
 | scene | `xm_scene_link_frames_total` | Counter | `direction`=in / out，`type`=链路帧类型 | gate ↔ scene 链路帧（in = 从链路收到，含握手帧；out = 已交给链路写出，含 hello_ack） |

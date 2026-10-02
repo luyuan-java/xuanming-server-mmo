@@ -75,3 +75,5 @@ xm:
     shutdown-save-timeout: 15s
     # 每条 gate 链路投递给逻辑线程还没执行完的帧数上限，到了就暂停读这条链路（背压），降到一半恢复
     link-max-pending-frames: 10000
+    # 在线周期存盘：每人每周期至多写一次（没变化不写），0 = 只在离场时写回（基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS 缺省 300）
+    save-interval: ${XM_SCENE_SAVE_INTERVAL:300s}

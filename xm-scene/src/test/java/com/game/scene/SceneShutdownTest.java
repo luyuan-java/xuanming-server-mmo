@@ -52,7 +52,7 @@ class SceneShutdownTest {
 
     private StoragePlayerRepository repository() {
         PlayerStore store = Mockito.mock(PlayerStore.class);
-        Mockito.when(store.saveStateAndRelease(Mockito.any())).thenAnswer(inv -> {
+        Mockito.when(store.saveStateAndRelease(Mockito.any(), Mockito.any())).thenAnswer(inv -> {
             savedPlayers.add(inv.<com.game.player.store.PlayerRow>getArgument(0).getPlayerId());
             return true;
         });

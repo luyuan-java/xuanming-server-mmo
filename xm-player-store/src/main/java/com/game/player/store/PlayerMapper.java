@@ -63,6 +63,30 @@ public interface PlayerMapper {
             """)
     int updateStateAndRelease(PlayerRow row);
 
+    /**
+     * 带围栏的在线存盘（不释放）：只有仍由这个 epoch 持有、且尚未释放时才写。
+     * {@code owner_released = 0} 这一条让迟到的在线存盘永远盖不过已经提交的最终写回（最终写回会置 1）。
+     */
+    @Update("""
+            UPDATE player
+               SET level = #{level}, scene_config_id = #{sceneConfigId},
+                   pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ}, updated_at = #{updatedAt}
+             WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
+            """)
+    int updateStateHeld(PlayerRow row);
+
+    @Select("SELECT data FROM player_state WHERE player_id = #{playerId}")
+    PlayerStateRow selectState(@Param("playerId") long playerId);
+
+    /** 写玩家状态组件（存在即覆盖）。必须在已通过围栏的同一事务里调用，见 {@link PlayerStore#saveState}。 */
+    @Insert("""
+            INSERT INTO player_state (player_id, data, saved_epoch, updated_at)
+            VALUES (#{playerId}, #{data}, #{savedEpoch}, #{updatedAt})
+            ON DUPLICATE KEY UPDATE data = VALUES(data), saved_epoch = VALUES(saved_epoch), updated_at = VALUES(updated_at)
+            """)
+    int upsertState(@Param("playerId") long playerId, @Param("data") byte[] data, @Param("savedEpoch") long savedEpoch,
+                    @Param("updatedAt") long updatedAt);
+
     /** 带围栏的释放（不写状态）：只释放仍由这个 epoch 持有的归属，否则影响 0 行。 */
     @Update("""
             UPDATE player SET owner_released = 1, updated_at = #{now}

@@ -3,6 +3,7 @@ package com.game.scene.testing;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository;
 import com.game.scene.world.PlayerSave;
+import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.scene.world.Vec3;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -48,6 +49,45 @@ public final class FakePlayerRepository implements PlayerRepository {
     @Override
     public void release(long playerId, long ownerEpoch) {
         releases.add(new Release(playerId, ownerEpoch));
+    }
+
+    /** 一次挂起的在线存盘：测试决定何时、以什么结局完成（模拟结果投递回逻辑线程）。 */
+    public record PendingProgress(PlayerSave save, Consumer<ProgressResult> callback) {
+
+        public void complete(ProgressResult result) {
+            callback.accept(result);
+        }
+    }
+
+    private final Deque<PendingProgress> progress = new ArrayDeque<>();
+    private boolean acceptsProgress = true;
+
+    @Override
+    public boolean acceptsProgress() {
+        return acceptsProgress;
+    }
+
+    /** 模拟存储积压（false = 不接在线存盘）。 */
+    public void setAcceptsProgress(boolean accepts) {
+        this.acceptsProgress = accepts;
+    }
+
+    @Override
+    public void saveProgress(PlayerSave save, Consumer<ProgressResult> onDone) {
+        progress.add(new PendingProgress(save, onDone));
+    }
+
+    /** 取出最早一个挂起的在线存盘。 */
+    public PendingProgress takeProgress() {
+        PendingProgress p = progress.poll();
+        if (p == null) {
+            throw new IllegalStateException("没有挂起的在线存盘");
+        }
+        return p;
+    }
+
+    public int pendingProgress() {
+        return progress.size();
     }
 
     public List<Release> releases() {

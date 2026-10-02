@@ -7,6 +7,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
 import com.game.api.proto.ClientForward;
+import com.game.player.store.state.Facing;
+import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorBaseAttributesS2C;
 import com.game.proto.ActorDestroyS2C;
 import com.game.proto.ActorListCreateS2C;
@@ -529,7 +531,8 @@ class MovementSyncTest {
         world.onPlayerLeave(LINK, leave(11, 1001));
 
         assertThat(velocityAtSave).as("写回时速度已清零").containsExactly(Vec3.ORIGIN);
-        assertThat(repo.saves()).containsExactly(new PlayerSave(1001, 1, 1, 1, atLeave));
+        assertThat(repo.saves()).as("朝向随写回一起持久化").containsExactly(new PlayerSave(1001, 1, 1, 1, atLeave,
+                PlayerState.newBuilder().setFacing(Facing.newBuilder().setZ(90)).build()));
         assertThat(sink.messageIdsTo(LINK, 12)).containsExactly(51);
         assertThat(ActorDestroyS2C.parseFrom(sink.to(LINK, 12).get(0).getSerializedMessage()).getEntity())
                 .isEqualTo(a.entity());
@@ -661,6 +664,11 @@ class MovementSyncTest {
             @Override
             public void release(long playerId, long ownerEpoch) {
                 inner.release(playerId, ownerEpoch);
+            }
+
+            @Override
+            public void saveProgress(PlayerSave save, Consumer<ProgressResult> onDone) {
+                inner.saveProgress(save, onDone);
             }
         };
         AtomicLong ids = new AtomicLong(9000);

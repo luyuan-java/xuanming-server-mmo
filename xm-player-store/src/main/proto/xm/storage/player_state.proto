@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+// 玩家在线状态的持久化载体：Java 版自有格式，不与 mmorpg 共享（两版各有库表，不混部）。
+// 存在 player_state.data（MEDIUMBLOB），与 player 行在同一个事务里、同一个 owner_epoch 围栏下写入。
+//
+// 演进规则（存量数据靠它向前兼容）：
+//   - 每个玩法系统一个组件字段，只增不改；字段号一经使用不复用，删字段写 reserved。
+//   - 组件内部同样只增不改；读到默认值（老数据没有这个组件）必须是「初始状态」的合法表示。
+//   - 不放在 player 表里有独立列的字段（等级、场景、坐标），避免两处真相。
+
+package xm.storage;
+
+option java_package = "com.game.player.store.state";
+option java_multiple_files = true;
+
+message PlayerState {
+  // 朝向：最近一次移动上报的 rotation；没有上报过时不设（进场后不带朝向，与基线一致）。
+  Facing facing = 1;
+}
+
+message Facing {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}

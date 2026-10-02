@@ -30,3 +30,13 @@ CREATE TABLE IF NOT EXISTS player (
     UNIQUE KEY uk_player_name_key (name_key),
     KEY idx_player_account (account)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- 玩家在线状态（各玩法系统的组件），protobuf xm.storage.PlayerState。与 player 行在同一事务里、同一 owner_epoch 围栏下写入：
+-- 先带围栏更新 player 行（行锁串行同一玩家的写者），成功才 upsert 本表。没有这一行 = 从未写过 = 全部组件取初始状态。
+CREATE TABLE IF NOT EXISTS player_state (
+    player_id    BIGINT UNSIGNED NOT NULL,
+    data         MEDIUMBLOB      NOT NULL COMMENT 'xm.storage.PlayerState 序列化字节',
+    saved_epoch  BIGINT UNSIGNED NOT NULL COMMENT '写入这份数据的 owner_epoch（排障用；围栏判定在 player 行上）',
+    updated_at   BIGINT          NOT NULL COMMENT 'Unix 毫秒',
+    PRIMARY KEY (player_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;

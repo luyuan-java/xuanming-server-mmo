@@ -1,8 +1,10 @@
 package com.game.scene;
 
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
+import org.springframework.boot.convert.DurationUnit;
 
 /**
  * 场景节点配置（前缀 {@code xm}；{@code xm.redis.*} 由 xm-discovery 的 RedisProperties 绑定，这里不重复）。
@@ -41,6 +43,8 @@ public record SceneNodeProperties(
      * @param shutdownSaveTimeout   停服时等待写回完成的上限（写回任务在逻辑线程上排队 + 落库，共用这一个预算）
      * @param linkMaxPendingFrames  每条 gate 链路已投递给逻辑线程、还没执行完的帧数上限；达到即暂停读这条链路，
      *                              降到一半以下恢复（背压，逻辑线程的任务队列因此有界）
+     * @param saveInterval          在线周期存盘的周期（整秒；同基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS，缺省 300s）：
+     *                              每人每周期至多写一次、没变化不写；0 = 关闭（只在离场时写回）。不带单位的数字按秒
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -50,7 +54,8 @@ public record SceneNodeProperties(
             @DefaultValue("4") int storageThreads,
             @DefaultValue("10000") int storageQueueCapacity,
             @DefaultValue("15s") Duration shutdownSaveTimeout,
-            @DefaultValue("10000") int linkMaxPendingFrames) {
+            @DefaultValue("10000") int linkMaxPendingFrames,
+            @DefaultValue("300s") @DurationUnit(ChronoUnit.SECONDS) Duration saveInterval) {
 
         public SceneSettings {
             if (linkPort < 0 || linkPort > 65535) {
@@ -61,6 +66,9 @@ public record SceneNodeProperties(
             }
             if (linkMaxPendingFrames < 2) {
                 throw new IllegalArgumentException("xm.scene.link-max-pending-frames 至少为 2: " + linkMaxPendingFrames);
+            }
+            if (saveInterval.isNegative() || saveInterval.toMillis() % 1000 != 0 || saveInterval.toSeconds() > 86_400) {
+                throw new IllegalArgumentException("xm.scene.save-interval 必须是 0 到 1 天之间的整秒: " + saveInterval);
             }
         }
     }

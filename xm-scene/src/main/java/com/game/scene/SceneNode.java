@@ -97,6 +97,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile GateLinks links;
     private volatile SceneWorld world;
     private volatile ScheduledFuture<?> frameTask;
+    private volatile ScheduledFuture<?> saveTask;
     private volatile NodeLinkServer linkServer;
     private volatile SceneDirectoryPublisher publisher;
     private volatile OwnerLeaseRenewer leaseRenewer;
@@ -173,6 +174,17 @@ public class SceneNode implements SmartLifecycle {
         SceneTicker ticker = new SceneTicker(sceneWorld::step, SceneClock.SYSTEM::nanoTime);
         long periodNanos = SceneTicker.STEP_NANOS;
         frameTask = logicLoop.scheduleAtFixedRate(ticker, periodNanos, periodNanos, TimeUnit.NANOSECONDS);
+        // 周期存盘：每秒一个槽（同在逻辑线程上，与帧和客户端消息串行）；周期为 0 = 关闭（只在离场时写回）。
+        int saveIntervalSeconds = (int) settings.saveInterval().toSeconds();
+        if (saveIntervalSeconds > 0) {
+            saveTask = logicLoop.scheduleAtFixedRate(() -> {
+                try {
+                    sceneWorld.saveDuePlayers(saveIntervalSeconds);
+                } catch (RuntimeException e) {
+                    log.error("周期存盘这一秒出错，下一秒照常", e);
+                }
+            }, 1, 1, TimeUnit.SECONDS);
+        }
 
         // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
         takeoverSubscriber = new OwnerTakeoverSubscriber(
@@ -239,6 +251,12 @@ public class SceneNode implements SmartLifecycle {
      * → 关线程 → 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
      */
     private void release() {
+        ScheduledFuture<?> saves = saveTask;
+        if (saves != null) {
+            // 第一步就停周期存盘：最终写回由下面的停服写回统一做，不让新提交的在线存盘排在停服写回前面占停服预算
+            // （SceneWorld.shutdown 也会挡掉之后到期的槽）。
+            saves.cancel(false);
+        }
         SceneDirectoryPublisher p = publisher;
         NodeIdLease l = lease;
         if (p != null) {

@@ -12,9 +12,14 @@
 
     <artifactId>xm-player-store</artifactId>
     <name>xm-player-store</name>
-    <description>账号 / 玩家持久化（MyBatis + Druid + MySQL）与玩家归属围栏</description>
+    <description>账号 / 玩家持久化（MyBatis + Druid + MySQL）、玩家状态载体（protobuf）与玩家归属围栏</description>
 
     <dependencies>
+        <dependency>
+            <!-- 玩家状态载体 xm.storage.PlayerState（Java 版自有存储格式） -->
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>
             <artifactId>mybatis-spring-boot-starter</artifactId>
@@ -48,4 +53,19 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

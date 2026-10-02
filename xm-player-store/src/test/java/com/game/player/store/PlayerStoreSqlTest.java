@@ -3,6 +3,8 @@ package com.game.player.store;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.player.store.PlayerStore.ClaimResult;
+import com.game.player.store.state.Facing;
+import com.game.player.store.state.PlayerState;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -21,14 +23,16 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * 真实 SQL（H2 的 MySQL 兼容模式 + 生产建表脚本 + 生产 Mapper + Spring 事务代理），不连外部库。
+ * 真实 SQL（缺省 H2 的 MySQL 兼容模式；{@code -Dxm.it.mysql=...} 时连真 MySQL）+ 生产建表脚本 + 生产 Mapper + Spring 事务代理。
  * 覆盖归属协议（夺权 / 释放 / 续约 / 租约过期）与建角上限在并发事务下的行为。
  *
  * <p>H2 的重键错误码与 MySQL 不同（PlayerStore 按 MySQL 1062 认索引名），所以「撞名」分支只在 {@link PlayerStoreTest} 里测。
@@ -37,6 +41,12 @@ class PlayerStoreSqlTest {
 
     private static final String ACCOUNT = "robot_0001";
     private static final AtomicLong CLOCK = new AtomicLong();
+    /**
+     * 设了 {@code -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306} 就改跑真 MySQL（用户 {@code xm.it.mysql.user}，缺省 root；
+     * 口令取环境变量 XM_MYSQL_PASSWORD），否则用 H2 的 MySQL 兼容模式。
+     */
+    private static final String MYSQL_URL = System.getProperty("xm.it.mysql");
+    private static final java.util.Queue<String> MYSQL_DATABASES = new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     private AnnotationConfigApplicationContext context;
     private PlayerStore store;
@@ -55,7 +65,11 @@ class PlayerStoreSqlTest {
 
     @AfterEach
     void tearDown() {
+        DataSource ds = context.getBean(DataSource.class);
         context.close();
+        for (String database = MYSQL_DATABASES.poll(); database != null; database = MYSQL_DATABASES.poll()) {
+            new JdbcTemplate(ds).execute("DROP DATABASE IF EXISTS " + database);
+        }
     }
 
     private long newPlayer(long playerId, String name) {
@@ -88,15 +102,66 @@ class PlayerStoreSqlTest {
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
         assertThat(store.claimOwnership(p)).as("上一个写者没释放、租约没过期").isEqualTo(new ClaimResult.Held(1));
 
-        assertThat(store.saveStateAndRelease(save(p, 1, 2, 42.5))).isTrue();
+        assertThat(store.saveStateAndRelease(save(p, 1, 2, 42.5), PlayerState.getDefaultInstance())).isTrue();
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
         PlayerRow loaded = store.findPlayer(p).orElseThrow();
         assertThat(loaded.getOwnerEpoch()).isEqualTo(2);
         assertThat(loaded.getSceneConfigId()).as("新写者加载到的是上一个写者的最终写回").isEqualTo(2);
         assertThat(loaded.getPosX()).isEqualTo(42.5);
 
-        assertThat(store.saveStateAndRelease(save(p, 1, 9, 0))).as("旧 epoch 的写回被围栏拒绝").isFalse();
+        assertThat(store.saveStateAndRelease(save(p, 1, 9, 0), PlayerState.getDefaultInstance())).as("旧 epoch 的写回被围栏拒绝").isFalse();
         assertThat(store.findPlayer(p).orElseThrow().getSceneConfigId()).isEqualTo(2);
+    }
+
+    private static PlayerState facing(double x) {
+        return PlayerState.newBuilder().setFacing(Facing.newBuilder().setX(x).setY(1).setZ(2)).build();
+    }
+
+    @Test
+    void 从未写过状态组件时读到默认实例() {
+        long p = newPlayer(1101, "丁");
+        assertThat(store.loadState(p)).isEqualTo(PlayerState.getDefaultInstance());
+    }
+
+    @Test
+    void 在线存盘不释放_最终写回后状态组件与player行一起落库() {
+        long p = newPlayer(1102, "戊");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+
+        assertThat(store.saveStateHeld(save(p, 1, 2, 10), facing(0.5))).isTrue();
+        assertThat(store.loadState(p)).isEqualTo(facing(0.5));
+        assertThat(store.findPlayer(p).orElseThrow().getPosX()).isEqualTo(10);
+        assertThat(store.claimOwnership(p)).as("在线存盘不释放归属").isEqualTo(new ClaimResult.Held(1));
+
+        assertThat(store.saveStateAndRelease(save(p, 1, 2, 20), facing(0.75))).isTrue();
+        assertThat(store.loadState(p)).isEqualTo(facing(0.75));
+        assertThat(store.findPlayer(p).orElseThrow().getPosX()).isEqualTo(20);
+    }
+
+    @Test
+    void 迟到的在线存盘盖不过已提交的最终写回() {
+        long p = newPlayer(1103, "己");
+        store.claimOwnership(p);
+        assertThat(store.saveStateAndRelease(save(p, 1, 2, 20), facing(0.75))).isTrue();
+
+        assertThat(store.saveStateHeld(save(p, 1, 2, 99), facing(9))).as("同 epoch，但已释放").isFalse();
+        assertThat(store.loadState(p)).isEqualTo(facing(0.75));
+        assertThat(store.findPlayer(p).orElseThrow().getPosX()).isEqualTo(20);
+    }
+
+    @Test
+    void 旧epoch的在线存盘被围栏拒绝_状态组件不变() {
+        long p = newPlayer(1104, "庚");
+        store.claimOwnership(p);
+        store.saveStateAndRelease(save(p, 1, 2, 20), facing(0.75));
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+
+        assertThat(store.saveStateHeld(save(p, 1, 2, 99), facing(9))).isFalse();
+        assertThat(store.saveStateAndRelease(save(p, 1, 2, 99), facing(9))).isFalse();
+        assertThat(store.loadState(p)).isEqualTo(facing(0.75));
+
+        assertThat(store.saveStateHeld(save(p, 2, 2, 30), facing(1))).isTrue();
+        assertThat(store.loadState(p)).isEqualTo(facing(1));
     }
 
     @Test
@@ -210,9 +275,20 @@ class PlayerStoreSqlTest {
 
         @Bean
         DataSource dataSource() {
-            JdbcDataSource ds = new JdbcDataSource();
-            ds.setURL("jdbc:h2:mem:xm_" + UUID.randomUUID().toString().replace("-", "")
-                    + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
+            String database = "xm_it_" + UUID.randomUUID().toString().replace("-", "");
+            DataSource ds;
+            if (MYSQL_URL != null) {
+                // 真 MySQL：每个用例一个临时库（URL 里 createDatabaseIfNotExist），用例结束删库。
+                ds = new DriverManagerDataSource(MYSQL_URL + "/" + database
+                        + "?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true",
+                        System.getProperty("xm.it.mysql.user", "root"),
+                        System.getenv().getOrDefault("XM_MYSQL_PASSWORD", ""));
+                MYSQL_DATABASES.add(database);
+            } else {
+                JdbcDataSource h2 = new JdbcDataSource();
+                h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
+                ds = h2;
+            }
             new ResourceDatabasePopulator(new ClassPathResource("db/xm-player-schema.sql")).execute(ds);
             return ds;
         }

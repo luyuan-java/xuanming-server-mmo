@@ -1,5 +1,7 @@
 package com.game.player.store;
 
+import com.game.player.store.state.PlayerState;
+import com.google.protobuf.InvalidProtocolBufferException;
 import java.sql.SQLException;
 import java.text.Normalizer;
 import java.time.Duration;
@@ -35,8 +37,9 @@ import org.springframework.transaction.annotation.Transactional;
  *       不会被新 epoch 的围栏拒掉；</li>
  *   <li>持有期间写者（scene）每 {@link #OWNER_LEASE} 的 1/3 调一次 {@link #renewOwnerLeases} 续约；续不上的归属已被别人夺走，
  *       写者必须立刻丢弃内存实例（它的写回只会被围栏拒绝）；</li>
- *   <li>写者离开时用 {@link #saveStateAndRelease} 写回并释放；没进成场景（进场失败 / 取消 / 从未送达）用
- *       {@link #releaseOwnership} 只释放。两者都带 epoch 围栏，旧写者碰不到新 epoch。</li>
+ *   <li>持有期间写者可用 {@link #saveStateHeld} 在线存盘（不释放）；离开时用 {@link #saveStateAndRelease} 写回并释放；
+ *       没进成场景（进场失败 / 取消 / 从未送达）用
+ *       {@link #releaseOwnership} 只释放。都带 epoch 围栏，旧写者碰不到新 epoch。</li>
  * </ol>
  * 租约用各进程的墙钟（login 判过期、scene 续约）：两端时钟偏差必须远小于 {@link #OWNER_LEASE}（部署要求 NTP）。
  *
@@ -217,13 +220,53 @@ public class PlayerStore {
     }
 
     /**
-     * 写者离开：带围栏写回玩家状态（等级、所在场景、坐标）并释放归属。
+     * 写者离开：带围栏写回玩家状态（player 行的等级、所在场景、坐标 + {@code player_state} 组件）并释放归属。
+     * 一个事务：先更新 player 行（围栏 + 行锁），通过才写组件，组件写失败整体回滚。
      *
      * @return false 表示 epoch 已过期（被新的进场夺权）或玩家已不存在，本次写入被丢弃
      */
-    public boolean saveStateAndRelease(PlayerRow row) {
+    @Transactional
+    public boolean saveStateAndRelease(PlayerRow row, PlayerState state) {
         row.setUpdatedAt(clockMs.getAsLong());
-        return mapper.updateStateAndRelease(row) == 1;
+        if (mapper.updateStateAndRelease(row) != 1) {
+            return false;
+        }
+        mapper.upsertState(row.getPlayerId(), state.toByteArray(), row.getOwnerEpoch(), row.getUpdatedAt());
+        return true;
+    }
+
+    /**
+     * 写者在线存盘：同 {@link #saveStateAndRelease}，但不释放归属；归属已释放（最终写回已提交）时也拒绝，
+     * 所以迟到的在线存盘盖不过最终写回。
+     *
+     * @return false 表示 epoch 已过期、已释放或玩家已不存在，本次写入被丢弃
+     */
+    @Transactional
+    public boolean saveStateHeld(PlayerRow row, PlayerState state) {
+        row.setUpdatedAt(clockMs.getAsLong());
+        if (mapper.updateStateHeld(row) != 1) {
+            return false;
+        }
+        mapper.upsertState(row.getPlayerId(), state.toByteArray(), row.getOwnerEpoch(), row.getUpdatedAt());
+        return true;
+    }
+
+    /**
+     * 读玩家状态组件。从未写过返回默认实例（全部组件取初始状态）。
+     *
+     * @throws IllegalStateException 存量字节解析失败（损坏）：调用方按加载失败处理，不让玩家带着丢了组件的状态进场
+     */
+    public PlayerState loadState(long playerId) {
+        PlayerStateRow row = mapper.selectState(playerId);
+        byte[] data = row == null ? null : row.getData();
+        if (data == null) {
+            return PlayerState.getDefaultInstance();
+        }
+        try {
+            return PlayerState.parseFrom(data);
+        } catch (InvalidProtocolBufferException e) {
+            throw new IllegalStateException("player_state 解析失败 player_id=" + Long.toUnsignedString(playerId), e);
+        }
     }
 
     /**

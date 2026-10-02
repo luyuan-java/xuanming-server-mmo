@@ -1,5 +1,6 @@
 package com.game.player.store;
 
+import com.game.player.store.state.PlayerState;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -211,7 +212,8 @@ class PlayerStoreTest {
         PlayerRow save = row(9, "x");
         save.setOwnerEpoch(6);
         when(mapper.updateStateAndRelease(save)).thenReturn(1);
-        assertThat(store.saveStateAndRelease(save)).isTrue();
+        assertThat(store.saveStateAndRelease(save, PlayerState.getDefaultInstance())).isTrue();
         assertThat(save.getUpdatedAt()).isEqualTo(1_000L);
+        verify(mapper).upsertState(9, new byte[0], 6, 1_000L);
     }
 }
