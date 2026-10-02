@@ -65,7 +65,7 @@ public final class ClientSession {
     final ArrayDeque<PendingRequest> pending = new ArrayDeque<>();
     /** 有一个 login 调用在途。 */
     boolean inFlight;
-    /** 非法包计数（未知消息号、超长、超频），达到阈值断开。 */
+    /** 非法包计数（未知消息号、超长、超频、运行模式不放行的 GM 指令），达到阈值断开。 */
     int illegalPackets;
     /** 按消息号的发送频率限制（C++ MessageLimiter 同义）。 */
     final MessageRateLimiter rateLimiter = new MessageRateLimiter();

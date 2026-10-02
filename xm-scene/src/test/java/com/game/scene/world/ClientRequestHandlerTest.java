@@ -3,8 +3,10 @@ package com.game.scene.world;
 import static com.game.scene.world.SceneWorldTest.assertLocation;
 import static com.game.scene.world.SceneWorldTest.enterFrame;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.proto.ClientForward;
+import com.game.common.RunMode;
 import com.game.proto.MessageContent;
 import com.game.proto.PlayerSkillComp;
 import com.game.proto.Vector3;
@@ -33,6 +35,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -202,6 +205,51 @@ class ClientRequestHandlerTest {
         assertThat(toA.get(0).getId()).isEqualTo(77L);
         GetCurrencyListResponse response = GetCurrencyListResponse.parseFrom(toA.get(0).getSerializedMessage());
         assertThat(response.getErrorMessage().getId()).isEqualTo(1006);
+    }
+
+    @Test
+    void 功能注册_重复_请求类型不符_非scene客户端服务_启动即失败() {
+        FakeSceneTables tables = new FakeSceneTables();
+        SceneFeature duplicate = r -> r.on("SceneSkillClientPlayer", "ListSkills", ListSkillsRequest.class, (call, req) -> { });
+        SceneFeature wrongType = r -> r.on("SceneCurrencyClientPlayer", "GetCurrencyList", ListSkillsRequest.class,
+                (call, req) -> { });
+        SceneFeature notScene = r -> r.on("ClientPlayerLogin", "Login", Message.class, (call, req) -> { });
+
+        for (SceneFeature feature : List.of(duplicate, wrongType, notScene)) {
+            assertThatThrownBy(() -> new ClientRequestHandler(world, Contracts.REGISTRY, IDS, tables, RunMode.DEV,
+                    List.of(feature))).isInstanceOf(IllegalStateException.class);
+        }
+    }
+
+    @Test
+    void 处理器没回_抛异常_回两次_应答类型不符_客户端都恰好收到一个应答() throws Exception {
+        int getCurrencyList = Contracts.REGISTRY.requireId("SceneCurrencyClientPlayer", "GetCurrencyList");
+        AtomicInteger mode = new AtomicInteger();
+        GetCurrencyListResponse ok = GetCurrencyListResponse.newBuilder().setErrorMessage(SceneMessageIds.tip(0)).build();
+        SceneFeature buggy = r -> r.on("SceneCurrencyClientPlayer", "GetCurrencyList", GetCurrencyListRequest.class,
+                (call, req) -> {
+                    switch (mode.get()) {
+                        case 0 -> { }
+                        case 1 -> throw new IllegalArgumentException("boom");
+                        case 2 -> {
+                            call.reply(ok);
+                            call.reply(ok);
+                        }
+                        default -> call.reply(ListSkillsResponse.getDefaultInstance());
+                    }
+                });
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, new FakeSceneTables(), RunMode.DEV,
+                List.of(buggy));
+
+        for (int i = 0; i < 4; i++) {
+            mode.set(i);
+            forward(11, 1001, getCurrencyList, GetCurrencyListRequest.getDefaultInstance(), 100 + i);
+        }
+
+        List<MessageContent> replies = sink.to(LINK, 11);
+        assertThat(replies).extracting(MessageContent::getId).containsExactly(100L, 101L, 102L, 103L);
+        assertThat(replies).extracting(r -> GetCurrencyListResponse.parseFrom(r.getSerializedMessage())
+                .getErrorMessage().getId()).containsExactly(1006, 1006, 0, 1006);
     }
 
     @Test

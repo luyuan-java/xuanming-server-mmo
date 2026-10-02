@@ -49,6 +49,7 @@ class ClientDispatcherTest {
     private static final int ENTER_GAME_MSG = 26;
     private static final int LEAVE_MSG = 17;
     private static final int SCENE_MSG = 77;
+    private static final int GM_MSG = 37;
     private static final int GUILD_MSG = 500;
     private static final int SCENE_NODE = 7;
     private static final long PLAYER = 42L;
@@ -57,6 +58,7 @@ class ClientDispatcherTest {
         case LOGIN_MSG, CREATE_MSG, ENTER_GAME_MSG -> new MessageRoute(id, "login");
         case LEAVE_MSG -> new MessageRoute(id, "login", false);
         case SCENE_MSG -> new MessageRoute(id, "scene");
+        case GM_MSG -> new MessageRoute(id, "scene", true, Integer.toString(id), true);
         case GUILD_MSG -> new MessageRoute(id, "guild");
         default -> null;
     };
@@ -894,6 +896,39 @@ class ClientDispatcherTest {
     }
 
     // ================================================================ 按消息号限频（C++ MessageLimiter）
+
+    @Test
+    void 生产模式拒绝GM指令_推23的1006_计非法包_不转发() {
+        EmbeddedChannel ch = enteredScene();
+        int framesBefore = links.sent.size();
+
+        ch.writeInbound(request(5, GM_MSG, "gm"));
+
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(1006);
+        assertThat(links.sent).as("不转发给 scene").hasSize(framesBefore);
+        assertThat(requests("scene", GM_MSG, "gm_rejected")).isEqualTo(1);
+        assertThat(session().illegalPackets).isEqualTo(1);
+    }
+
+    @Test
+    void 开发模式放行GM指令给scene() {
+        ClientDispatcher dev = new ClientDispatcher(new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens,
+                InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES, TIP_MSG, login, links, registry,
+                new GateLimits(4, 3, Duration.ZERO, MessageLimits.UNLIMITED, true), metrics, presence);
+        EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, dev));
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
+        ch.readOutbound();
+        ch.writeInbound(request(1, ENTER_GAME_MSG, "enter"));
+        login.complete(enterGameReply());
+        ch.runPendingTasks();
+        ch.readOutbound();
+        int framesBefore = links.sent.size();
+
+        ch.writeInbound(request(5, GM_MSG, "gm"));
+
+        assertThat(links.sent).hasSize(framesBefore + 1);
+        assertThat(links.last().frame().getClientForward().getMessageId()).isEqualTo(GM_MSG);
+    }
 
     @Test
     void 超频回1008信封错误_不转发_计非法包_窗口滑过后恢复() {

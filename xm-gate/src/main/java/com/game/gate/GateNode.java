@@ -3,6 +3,7 @@ package com.game.gate;
 import com.game.api.ClientMessageService;
 import com.game.api.proto.GateNodeInfo;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.common.RunMode;
 import com.game.common.token.GateTokens;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
@@ -86,6 +87,8 @@ public final class GateNode {
     private final String advertiseHost;
     private final Path tableDir;
     private final GateMetrics metrics;
+    /** 运行模式：只决定 GM 类客户端指令放不放行（prod 拒绝）。 */
+    private final RunMode runMode;
     private final String instanceId = UUID.randomUUID().toString();
     private final NodeDirectory<GateNodeInfo> gateDirectory;
 
@@ -115,7 +118,8 @@ public final class GateNode {
      */
     public GateNode(RedissonClient redis, MessageIdRegistry messageIdRegistry, GateTokens tokens, NodeLinkAuth linkAuth,
                     ClientMessageService login, GateProperties properties, int zoneId, String advertiseHost, Path tableDir,
-                    GateMetrics metrics) {
+                    GateMetrics metrics, RunMode runMode) {
+        this.runMode = runMode;
         this.redis = redis;
         this.messageIdRegistry = messageIdRegistry;
         this.tokens = tokens;
@@ -174,7 +178,7 @@ public final class GateNode {
         ClientDispatcher dispatcher = new ClientDispatcher(identity, tokens, InstantSource.system(),
                 MessageRoutes.of(messageIdRegistry), tipMessageId, login, links, registry,
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
-                        messageLimits), metrics, presence);
+                        messageLimits, runMode.allowsGmCommands()), metrics, presence);
         links.bindListener(new SceneEventRouter(registry, dispatcher));
         // 服务端 → 玩家推送：订阅本 gate 的频道（任何服务按在线目录找到本 gate 后发布到这里）。
         pushSubscriber = new GatePushSubscriber(
@@ -204,8 +208,9 @@ public final class GateNode {
                 .bind(properties.clientPort())
                 .syncUninterruptibly()
                 .channel();
-        log.info("gate 已启动 zone={} node_id={} instance={} 客户端端口={} 通告地址={}:{}",
-                zoneId, identity.nodeId(), instanceId, properties.clientPort(), advertiseHost, properties.advertisePort());
+        log.info("gate 已启动 zone={} node_id={} instance={} 客户端端口={} 通告地址={}:{} 运行模式={}（GM 指令{}）",
+                zoneId, identity.nodeId(), instanceId, properties.clientPort(), advertiseHost, properties.advertisePort(),
+                runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
 
         publishTask = scheduler.scheduleAtFixedRate(this::publish, 0, PUBLISH_PERIOD.toMillis(), TimeUnit.MILLISECONDS);
     }

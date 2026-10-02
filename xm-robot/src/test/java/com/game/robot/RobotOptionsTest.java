@@ -56,6 +56,16 @@ class RobotOptionsTest {
     }
 
     @Test
+    void currency_缺省期望放行_deny可选_其他取值报错() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("currency", "--run-tag", "x1"), ENV, NOW);
+        assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.CURRENCY);
+        assertThat(o.expectGmAllowed()).isTrue();
+        assertThat(RobotOptions.parse(List.of("currency", "--expect-gm", "deny"), ENV, NOW).expectGmAllowed()).isFalse();
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("currency", "--expect-gm", "maybe"), ENV, NOW))
+                .hasMessageContaining("--expect-gm");
+    }
+
+    @Test
     void toString_不带口令() throws Exception {
         assertThat(RobotOptions.parse(List.of("smoke"), ENV, NOW).toString()).doesNotContain("dev-secret").contains("***");
     }

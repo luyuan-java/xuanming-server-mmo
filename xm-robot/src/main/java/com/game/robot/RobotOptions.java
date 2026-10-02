@@ -1,5 +1,6 @@
 package com.game.robot;
 
+import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.ExpectJump;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.SmokeScenario;
@@ -14,7 +15,9 @@ import java.util.regex.Pattern;
  * 探针的运行参数。取值优先级：命令行 {@code --名字 值}（或 {@code --名字=值}）&gt; 环境变量 &gt; 缺省值。
  * 开发口令只从环境变量 {@value #PASSWORD_ENV} 读（不进命令行、不进 shell 历史、不打印）。
  *
- * @param runTag 移动场景的账号标签：账号为 {@code 前缀 + mv + 标签 + _a / _b}；缺省按当前时间生成，每次都是新号
+ * @param runTag          移动 / 货币场景的账号标签：账号为 {@code 前缀 + mv + 标签 + _a / _b}、{@code 前缀 + cur + 标签}；
+ *                        缺省按当前时间生成，每次都是新号
+ * @param expectGmAllowed 货币场景：服务端运行模式放行 GM 指令（allow）还是拒绝（deny）
  */
 public record RobotOptions(
         Scenario scenario,
@@ -28,6 +31,7 @@ public record RobotOptions(
         Duration enterSceneTimeout,
         Duration observeTimeout,
         ExpectJump expectJump,
+        boolean expectGmAllowed,
         String password) {
 
     public static final String PASSWORD_ENV = "XM_LOGIN_DEV_PASSWORD";
@@ -38,7 +42,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT
+        SMOKE, MOVEMENT, CURRENCY
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -55,7 +59,9 @@ public record RobotOptions(
         OBSERVE_TIMEOUT("observe-timeout-ms", "XM_ROBOT_OBSERVE_TIMEOUT_MS", "2000",
                 "movement：每条移动输入后 B 收到 66、跳跃后 A 收到 137、等 21 / 47 的上限"),
         EXPECT_JUMP("expect-jump", "XM_ROBOT_EXPECT_JUMP", "auto",
-                "movement 跳跃检查的期望：auto（纠偏或 fail-open 都接受）/ correct（必须回 137）/ accept（必须原样接受）");
+                "movement 跳跃检查的期望：auto（纠偏或 fail-open 都接受）/ correct（必须回 137）/ accept（必须原样接受）"),
+        EXPECT_GM("expect-gm", "XM_ROBOT_EXPECT_GM", "allow",
+                "currency：服务端运行模式的期望：allow（dev / test，GM 指令生效）/ deny（prod，gate 推 23 {1006} 且不转发）");
 
         final String arg;
         final String env;
@@ -106,7 +112,7 @@ public record RobotOptions(
             }
         }
         if (scenario == null) {
-            throw new UsageException("缺少子命令（smoke 或 movement）");
+            throw new UsageException("缺少子命令（smoke / movement / currency）");
         }
 
         String gateway = value(Opt.GATEWAY, given, env);
@@ -135,14 +141,20 @@ public record RobotOptions(
         } catch (IllegalArgumentException e) {
             throw new UsageException("--expect-jump 只能是 auto / correct / accept：" + value(Opt.EXPECT_JUMP, given, env));
         }
+        String expectGm = value(Opt.EXPECT_GM, given, env);
+        if (!expectGm.equals("allow") && !expectGm.equals("deny")) {
+            throw new UsageException("--expect-gm 只能是 allow / deny：" + expectGm);
+        }
         String password = env.get(PASSWORD_ENV);
         if (password == null || password.isEmpty()) {
             throw new UsageException("需要环境变量 " + PASSWORD_ENV + "（与 xm-login 相同的开发口令）");
         }
 
-        String longest = scenario == Scenario.SMOKE
-                ? SmokeScenario.accountName(prefix, count)
-                : MovementScenario.accountName(prefix, runTag, "a");
+        String longest = switch (scenario) {
+            case SMOKE -> SmokeScenario.accountName(prefix, count);
+            case MOVEMENT -> MovementScenario.accountName(prefix, runTag, "a");
+            case CURRENCY -> CurrencyScenario.accountName(prefix, runTag);
+        };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
         }
@@ -150,15 +162,17 @@ public record RobotOptions(
         return new RobotOptions(scenario, gateway, zone, prefix, count, runTag,
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
-                expectJump, password);
+                expectJump, expectGm.equals("allow"), password);
     }
 
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
+        out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
+                + "或按 --expect-gm deny 核对生产模式的拒绝\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -175,14 +189,15 @@ public record RobotOptions(
         return "RobotOptions[scenario=" + scenario + ", gateway=" + gatewayUrl + ", zone=" + zoneId + ", prefix="
                 + accountPrefix + ", count=" + count + ", runTag=" + runTag + ", connectTimeout=" + connectTimeout
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
-                + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", password=***]";
+                + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
+                + ", password=***]";
     }
 
     private static Scenario parseScenario(String arg) throws UsageException {
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency）");
         }
     }
 

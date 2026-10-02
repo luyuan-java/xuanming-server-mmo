@@ -16,6 +16,15 @@ option java_multiple_files = true;
 message PlayerState {
   // 朝向：最近一次移动上报的 rotation；没有上报过时不设（进场后不带朝向，与基线一致）。
   Facing facing = 1;
+  // 货币。
+  CurrencyState currency = 2;
+}
+
+message CurrencyState {
+  // 下标 = 币种（0 金币、1 钻石、2 绑钻，同 mmorpg kCurrency*）；缺的槽按 0。
+  repeated uint64 balances = 1;
+  // GM 封禁获取的币种（按封禁先后）。
+  repeated uint32 blocked_types = 2;
 }
 
 message Facing {

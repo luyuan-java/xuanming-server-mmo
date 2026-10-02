@@ -32,4 +32,23 @@ public record MessageMethod(
     public String key() {
         return serviceName + methodName;
     }
+
+    /**
+     * GM 类指令：方法名是 {@code Gm} / {@code Debug} / {@code Test} 后跟大写字母（{@code GmAddCurrency}、{@code DebugXxx}）。
+     * 按名字判定而不是维护一份消息号清单：Java 没有生成的消息号常量，写死的号表会随 mmorpg 重新生成而漂移；
+     * 新增的 GM 方法也不会漏闸（基线 gate 的清单要手工登记）。
+     */
+    public boolean gmCommand() {
+        return isGmName(methodName);
+    }
+
+    static boolean isGmName(String name) {
+        for (String prefix : new String[] {"Gm", "Debug", "Test"}) {
+            if (name.startsWith(prefix) && name.length() > prefix.length()
+                    && Character.isUpperCase(name.charAt(prefix.length()))) {
+                return true;
+            }
+        }
+        return false;
+    }
 }

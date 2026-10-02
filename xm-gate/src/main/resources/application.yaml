@@ -34,6 +34,8 @@ management:
 
 xm:
   zone-id: 1
+  # 运行模式：只有 dev / test 放行 GM 类客户端指令（Gm* / Debug* / Test*），其余一律按 prod 拒绝
+  run-mode: ${XM_RUN_MODE:prod}
   # 写进节点目录、由 gateway 下发给客户端的 gate 地址
   advertise-host: 127.0.0.1
   # 配置表目录（只读 MessageLimiter 表：按消息号限频，缺省每秒 3 条），相对进程工作目录；从别处启动时用 XM_TABLE_DIR 覆盖。

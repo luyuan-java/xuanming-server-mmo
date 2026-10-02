@@ -72,6 +72,7 @@ public final class ClientDispatcher {
     static final String DOMAIN_SCENE = "scene";
 
     static final int TIP_SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
+    static final int TIP_FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
     static final int TIP_MESSAGE_SIZE_EXCEEDED = CommonErrorTip.common_error.kMessageSizeExceeded_VALUE;
     static final int TIP_RATE_LIMIT_EXCEEDED = CommonErrorTip.common_error.kRateLimitExceeded_VALUE;
     static final int TIP_ENTER_SCENE_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
@@ -204,6 +205,17 @@ public final class ClientDispatcher {
             s.send(envelopeError(request, TIP_RATE_LIMIT_EXCEEDED));
             countRequest(route, RequestResult.RATE_LIMITED);
             registerIllegal(s, "rate_limited", request.getMessageId());
+            return;
+        }
+        if (route.gm() && !limits.gmCommandsAllowed()) {
+            // GM 闸第一道锁（C++ ClassifyGmClientMessage，排在体积 / 限频之后）：推 23 {1006}、计非法包、不转发。
+            // scene 入口按同一判据还有第二道锁，防绕开 gate 直连链路端口。
+            // 逐条只打 DEBUG（同基线：拒绝发生在踢线阈值之前，逐条 WARN 会让这道闸本身成为日志放大面）；
+            // 趋势看指标 xm_gate_client_requests_total{result="gm_rejected"}，踢线有 WARN
+            log.debug("运行模式不允许 GM 指令，拒绝 session={} method={}", sid(s), route.method());
+            s.send(tip(TIP_FEATURE_UNAVAILABLE));
+            countRequest(route, RequestResult.GM_REJECTED);
+            registerIllegal(s, "gm_rejected", request.getMessageId());
             return;
         }
         if (s.pending.size() >= limits.maxPendingRequests()) {

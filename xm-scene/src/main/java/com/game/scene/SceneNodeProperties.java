@@ -14,13 +14,15 @@ import org.springframework.boot.convert.DurationUnit;
  * @param tableDir      配置表 .pb 目录；默认相对路径 {@code config-data/tables}，要求进程从仓库根目录启动，
  *                      否则配成绝对路径
  * @param scene         场景节点自身的参数
+ * @param runMode       运行模式（{@code RunMode}）：只有 dev / test 放行 GM 类客户端指令，其余一律按 prod 拒绝
  */
 @ConfigurationProperties("xm")
 public record SceneNodeProperties(
         @DefaultValue("1") int zoneId,
         @DefaultValue("127.0.0.1") String advertiseHost,
         @DefaultValue("config-data/tables") String tableDir,
-        @DefaultValue SceneSettings scene) {
+        @DefaultValue SceneSettings scene,
+        @DefaultValue("prod") String runMode) {
 
     public SceneNodeProperties {
         if (zoneId <= 0) {

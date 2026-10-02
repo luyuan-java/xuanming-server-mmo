@@ -4,6 +4,7 @@ import com.game.api.ClientMessageService;
 import com.game.api.DubboGroups;
 import com.game.common.token.DubboCallAuth;
 import com.game.common.token.GateTokens;
+import com.game.common.RunMode;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.gate.metrics.GateMetrics;
@@ -12,6 +13,7 @@ import java.nio.file.Path;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.apache.dubbo.config.spring.ReferenceBean;
 import org.redisson.api.RedissonClient;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -74,8 +76,13 @@ public class GateConfiguration {
                              NodeLinkAuth nodeLinkAuth, ClientMessageService loginClientMessageService,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${xm.zone-id:1}") int zoneId,
                              @Value("${xm.advertise-host:127.0.0.1}") String advertiseHost,
-                             @Value("${xm.table-dir:config-data/tables}") String tableDir) {
+                             @Value("${xm.table-dir:config-data/tables}") String tableDir,
+                             @Value("${xm.run-mode:prod}") String runMode) {
+        if (!RunMode.isRecognized(runMode)) {
+            LoggerFactory.getLogger(GateConfiguration.class)
+                    .warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", runMode);
+        }
         return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService, properties,
-                zoneId, advertiseHost, Path.of(tableDir), gateMetrics);
+                zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode));
     }
 }

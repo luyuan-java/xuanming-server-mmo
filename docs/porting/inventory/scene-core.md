@@ -44,7 +44,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: scene-client-dispatch
 - behavior: 任一 repeated / map 字段元素数 > 20（递归进非 repeated 子消息）或任一 int32/int64（含 repeated）为负 → ProcessClientPlayerMessage 静默丢弃不回包；InvokePlayerService 路径回 kArraySizeTooLargeInMessage / kNegativeValueInMessage。
 - internal: 反射遍历描述符，与具体方法无关。
-- java: missing — `ClientRequestHandler` 只做解析，无规模 / 负数校验（grep ProtoFieldChecker/negative 无结果）。
+- java: done（2026-10-02，批次 2.1）— `RequestFieldCheck`，scene 分发入口解析后、GM 闸前执行；单测 `RequestFieldCheckTest`。
 - size: S
 - robot: none
 - hazards: 只检查 int32/int64，不查 sint/uint；不递归进 repeated 子消息；阈值 20 对 AllocateAttributePoints 的 map 足够（维度 4 个），以后若有合法 >20 的列表会被静默吞掉。

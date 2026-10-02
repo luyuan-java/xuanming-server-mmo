@@ -2,6 +2,7 @@ package com.game.scene;
 
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.common.RunMode;
 import com.game.common.id.Snowflake;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
@@ -10,6 +11,8 @@ import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.player.store.PlayerStore;
+import com.game.scene.audit.AssetAudit;
+import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.discovery.SceneDirectoryPublisher;
 import com.game.scene.link.GateLinks;
 import com.game.scene.link.LinkIdentity;
@@ -165,7 +168,13 @@ public class SceneNode implements SmartLifecycle {
                 SceneClock.SYSTEM, metrics);
         links = gateLinks;
         world = sceneWorld;
-        ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables);
+        RunMode runMode = RunMode.parse(props.runMode());
+        if (!RunMode.isRecognized(props.runMode())) {
+            log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
+        }
+        ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables, runMode,
+                List.of(new CurrencyFeature(AssetAudit.log())));
+        log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         callOnLogic(() -> {
             tables.worldSceneConfigIds().forEach(sceneWorld::createScene);
             return null;

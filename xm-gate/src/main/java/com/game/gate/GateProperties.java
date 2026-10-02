@@ -15,7 +15,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param workerThreads          客户端 I/O 线程数；0 = Netty 默认（CPU 核数 × 2）
  * @param linkThreads            scene 链路 I/O 线程数
  * @param maxPendingRequests     单会话最多排队的上行请求（login 调用在途时后续请求排队），超出断开
- * @param illegalPacketThreshold 非法包（未知消息号 / 超长）累计到此数断开；0 = 不断开（C++ 默认 50）
+ * @param illegalPacketThreshold 非法包（未知消息号 / 超长 / 超频 / 运行模式不放行的 GM 指令）累计到此数断开；0 = 不断开（C++ 默认 50）
  * @param handshakeTimeout       连上后必须在此时间内完成令牌握手；0 = 不限
  * @param linkConnectTimeout     连 scene 的 TCP 连接超时
  * @param linkHelloTimeout       连上 scene 后等握手应答的上限

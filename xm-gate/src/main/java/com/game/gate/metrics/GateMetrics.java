@@ -78,7 +78,7 @@ public final class GateMetrics {
 
     /**
      * 已握手会话上的一个 {@code ClientRequest} 在 gate 的最终去向（{@code xm.gate.client.requests{result}}），每个请求恰好计一次。
-     * {@code unknown_message} / {@code oversized} / {@code rate_limited} 三种即 C++ gate 的「非法包」。
+     * {@code unknown_message} / {@code oversized} / {@code rate_limited} / {@code gm_rejected} 四种即 C++ gate 的「非法包」。
      */
     public enum RequestResult {
         /** 已交给后端（login 调用已发出 / scene 帧已被链路层受理）。login 调用的结果另见 {@code xm.gate.backend.calls}。 */
@@ -95,6 +95,8 @@ public final class GateMetrics {
         OVERSIZED,
         /** 按消息号超频：回 1008，计非法包。 */
         RATE_LIMITED,
+        /** GM 类指令而运行模式不是 dev / test：推 23 {1006}，计非法包，不转发。 */
+        GM_REJECTED,
         /** 会话排队请求超限：断开。 */
         OVERFLOW,
         /** 会话已在关闭，排队中或迟到的请求被丢弃。 */

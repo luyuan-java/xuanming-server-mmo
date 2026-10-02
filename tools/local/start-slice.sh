@@ -16,6 +16,11 @@ cd "$(dirname "$0")/../.."
 : "${XM_NODE_LINK_SECRET:?需要环境变量 XM_NODE_LINK_SECRET（gate → scene 链路密钥）}"
 : "${XM_DUBBO_SECRET:?需要环境变量 XM_DUBBO_SECRET（Dubbo 调用方鉴权密钥）}"
 
+# 运行模式：本机切片缺省 dev（放行 Gm* / Debug* / Test* 客户端指令，同基线 tools/scripts/start_game.ps1）；
+# 进程自身缺省 prod，部署链不设它即拒绝。要在本机验证生产行为：XM_RUN_MODE=prod tools/local/start-slice.sh
+export XM_RUN_MODE="${XM_RUN_MODE:-dev}"
+echo "运行模式 XM_RUN_MODE=$XM_RUN_MODE"
+
 mkdir -p run/logs run/pids
 
 # 模块名 就绪端口

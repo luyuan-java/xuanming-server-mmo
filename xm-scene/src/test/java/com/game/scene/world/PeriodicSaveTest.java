@@ -5,6 +5,7 @@ import static com.game.scene.world.SceneWorldTest.leave;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.player.store.state.CurrencyState;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.Rotation;
@@ -19,6 +20,7 @@ import com.game.scene.testing.RecordingSink.Kicked;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.google.protobuf.UnknownFieldSet;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -152,6 +154,24 @@ class PeriodicSaveTest {
 
         assertThat(player.persistentState()).isEqualTo(stored);
         assertThat(world.saveDuePlayers(1)).as("与库里一致（含不认识的组件）").isZero();
+    }
+
+    @Test
+    void 组件内不认识的字段也原样带回_全0余额时货币组件不被省略() {
+        UnknownFieldSet debts = UnknownFieldSet.newBuilder()
+                .addField(3, UnknownFieldSet.Field.newBuilder().addVarint(7).build()).build();
+        long id = 1000;
+        for (CurrencyState currency : List.of(
+                CurrencyState.newBuilder().addBalances(5).addBalances(0).addBalances(0).setUnknownFields(debts).build(),
+                CurrencyState.newBuilder().addBalances(0).addBalances(0).addBalances(0).setUnknownFields(debts).build())) {
+            PlayerState stored = FACING_EAST.toBuilder().setCurrency(currency).build();
+            repo.put(new PlayerData(id, 1, 2, 0, "", 5, 1, SAVED_AT, stored));
+            ScenePlayer player = enter((int) id, id);
+
+            assertThat(player.persistentState()).isEqualTo(stored);
+            id++;
+        }
+        assertThat(world.saveDuePlayers(1)).as("与库里一致（含组件内不认识的字段）").isZero();
     }
 
     @Test

@@ -7,6 +7,7 @@ import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorType;
 import com.game.proto.Rotation;
 import com.game.proto.Transform;
+import com.game.scene.player.Wallet;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.List;
 
@@ -48,6 +49,8 @@ public final class ScenePlayer {
      * 加载到的状态里本版本不认识的组件（更新版本写入的字段）。写回时原样带上，滚动升级 / 回滚期间旧版本节点不会把它们抹掉。
      */
     private final UnknownFieldSet unknownStateFields;
+    /** 货币。 */
+    private final Wallet wallet;
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
     private PlayerSave lastPersisted;
     /** 一次在线存盘已提交、结果还没回来：期间不再提交新的（结果回来后下个周期再比）。 */
@@ -84,6 +87,7 @@ public final class ScenePlayer {
             this.rotation = Rotation.newBuilder().setX(f.getX()).setY(f.getY()).setZ(f.getZ()).build();
         }
         this.unknownStateFields = state.getUnknownFields();
+        this.wallet = state.hasCurrency() ? Wallet.restore(state.getCurrency()) : Wallet.empty();
     }
 
     public long playerId() {
@@ -256,7 +260,15 @@ public final class ScenePlayer {
         if (rotation != null) {
             state.setFacing(Facing.newBuilder().setX(rotation.getX()).setY(rotation.getY()).setZ(rotation.getZ()));
         }
+        if (!wallet.isPristine()) {
+            state.setCurrency(wallet.toState());
+        }
         return state.build();
+    }
+
+    /** 玩家的货币（逻辑线程上读写）。 */
+    public Wallet wallet() {
+        return wallet;
     }
 
     PlayerSave lastPersisted() {

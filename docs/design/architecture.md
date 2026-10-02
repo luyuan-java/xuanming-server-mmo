@@ -139,6 +139,30 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 - **语义**：至多一次（玩家不在线不推；gate 掉线、频道抖动、玩家恰好下线都丢），业务方以客户端拉取兜底，推送失败不回传成业务失败——
   与基线一致。不选 Kafka：推送要求低延迟、按节点寻址、丢了可接受，Redis pub/sub（已用于 §7 的接管请求）足够；Kafka 留给需要持久与重放的审计 / 流水。
 
+### 4.4 进场后的客户端请求：scene 侧按功能注册、GM 闸两道锁
+
+- **分发**（`ClientRequestHandler`）：gate 转来的 `ClientForward` 先过会话 / player_id / 消息号 / 请求体校验，
+  再过字段规模与负数校验（`RequestFieldCheck`，同基线 `ProtoFieldChecker`：任一 repeated / map 字段元素数 > 20、
+  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币是 `CurrencyFeature`，以后的属性 / 背包 / 任务同样各成一个），
+  场景核心（移动、技能、换场景、场景信息）由 `ClientRequestHandler` 自己注册。注册时校验：方法在契约里、属于标了
+  `OptionIsPlayerService` 的客户端服务、请求类型与契约一致、没有重复——任一不符启动即失败。
+- **处理器契约**（`PlayerRequestHandler` + `PlayerCall`）：在场景逻辑线程上调用；经 `call.reply(...)` 回应答，`message_id` 同请求、
+  `id` 回显请求号；每条请求至多回一次，应答类型必须与契约一致，`Empty` 应答的方法不能回。处理器没回、回错类型、抛异常
+  （记 ERROR，逻辑线程继续）时由分发补回 `kFeatureUnavailable`(1006)，客户端不会卡在等应答上。没有处理器的方法同样回 1006
+  （`Empty` 应答的方法静默忽略）。
+- **运行模式**（`xm-common` 的 `RunMode`，环境变量 `XM_RUN_MODE`，每个进程各读自己的）：`dev` / `test` 放行 GM 类客户端指令，
+  其余（含未设、写错）一律按 `prod` 拒绝；取值大小写不敏感、去首尾空白，别名同基线（development / local / testing /
+  production / release / live），写错的值启动时打 WARN。进程缺省 prod（部署链不设即拒绝）；`tools/local/start-slice.sh`
+缺省设 dev（同基线 `start_game.ps1`），`XM_RUN_MODE=prod` 可在本机验证生产行为。
+- **GM 指令的判据**（`MessageMethod.gmCommand()`）：方法名以 `Gm` / `Debug` / `Test` 开头、紧跟一个大写字母。按名字而不是号表：
+  新加的 GM 方法不需要任何人记得登记。
+  - **第一道锁在 gate**（`ClientDispatcher`，排在体积与限频之后，被拒的包照样占限频额度）：推 23 `{1006}`、计非法包（到阈值断开）、
+    不转发；计入 `xm_gate_client_requests_total{result="gm_rejected"}`，逐条只打 DEBUG（防日志放大）。
+  - **第二道锁在 scene 分发入口**：GM 方法在 scene 的运行模式不放行时回应答内 `error_message{1006}`、不调处理器（打 WARN——
+    走到这里说明 gate 与 scene 的运行模式不一致，或有人绕开了 gate）。
+- **资产流水**（`AssetAudit`）：货币变动成功后记一条（玩家、币种、增减、前后余额、原因），批次 2.3 之前写到日志
+  `xm.audit.asset`（INFO），2.3 改为 Kafka 审计流。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -258,8 +282,8 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 
 ## 10. 首批不做（后续批次）
 
-排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、背包 / 任务 / 货币等玩法系统、Kafka 事件、GM / 管理接口、
-服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，见 §7。）
+排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、背包 / 任务等玩法系统、Kafka 事件、GM 管理接口（HTTP / 签名），
+服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，见 §7；货币与 GM 客户端指令闸见 §4.4。）
 （低基数运行指标五个进程都已接入，见 §11。）
 顶号已按 §7 第 2 步实现（旧连接收 23 {2017} 后断开，不发 34）。进度逐项登记在 `PARITY.md`。
 
@@ -299,7 +323,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | gate | `xm_gate_sessions_active` | Gauge | — | 当前会话数（含未握手、正在收尾的） |
 | gate | `xm_gate_scene_links` | Gauge | — | 到各 scene 节点的链路数（建链中 + 就绪） |
 | gate | `xm_gate_handshakes_total` | Counter | `result`=ok / bad_signature / bad_payload / wrong_gate / wrong_zone / expired / timeout / missing | 令牌握手结果（missing = 没握手就发业务包） |
-| gate | `xm_gate_client_requests_total` | Counter | `route`=login / scene / unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / overflow / dropped | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。C++ 的「非法包」= unknown_message + oversized + rate_limited；限频拒绝 = rate_limited |
+| gate | `xm_gate_client_requests_total` | Counter | `route`=login / scene / unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / gm_rejected / overflow / dropped | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。C++ 的「非法包」= unknown_message + oversized + rate_limited + gm_rejected；限频拒绝 = rate_limited |
 | gate | `xm_gate_client_invalid_frames_total` | Counter | `reason`=invalid_length / checksum / invalid_name_len / unknown_type / parse | 解码层非法帧（随即断开） |
 | gate | `xm_gate_disconnects_total` | Counter | `reason`=handshake_timeout / handshake_rejected / no_handshake / illegal_packets / pending_overflow / write_buffer_full / invalid_frame / session_id_exhausted / server_directive / kicked / scene_link_down / server_kick | gate 主动断开的连接（客户端自己断开、停服 / 丢租约的批量关闭不计） |
 | gate | `xm_gate_pushes_total` | Counter | `kind`=message / kick，`result`=delivered / no_session / not_bound / stale_instance / invalid | 服务端推送（§4.3）对每个目标会话的结局：已下发 / 会话号已不存在 / 会话不在游戏里或玩家对不上（栅栏）/ 指向别的 gate 实例 / 格式不对 |

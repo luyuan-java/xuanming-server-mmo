@@ -46,6 +46,24 @@ class MessageIdRegistryTest {
     }
 
     @Test
+    void GM类指令按方法名认出_客户端可发的GM指令都在scene() {
+        assertThat(MessageMethod.isGmName("GmAddCurrency")).isTrue();
+        assertThat(MessageMethod.isGmName("DebugDump")).isTrue();
+        assertThat(MessageMethod.isGmName("TestPing")).isTrue();
+        assertThat(MessageMethod.isGmName("Gmail")).as("前缀后必须是大写字母").isFalse();
+        assertThat(MessageMethod.isGmName("Testament")).isFalse();
+        assertThat(MessageMethod.isGmName("GetCurrencyList")).isFalse();
+        // 基线 GM 清单里的客户端 GM 号全部认得出（按名字找，不写死号码）
+        for (String key : List.of("SceneCurrencyClientPlayerGmAddCurrency", "SceneCurrencyClientPlayerGmDeductCurrency",
+                "SceneCurrencyClientPlayerGmBlockCurrency", "SceneCurrencyClientPlayerGmUnblockCurrency")) {
+            MessageMethod method = registry.all().stream().filter(m -> m.key().equals(key)).findFirst().orElseThrow();
+            assertThat(method.gmCommand()).as(key).isTrue();
+            assertThat(method.clientService() && method.playerService()).as(key).isTrue();
+        }
+        assertThat(registry.byId(48).orElseThrow().gmCommand()).isFalse();
+    }
+
+    @Test
     void 解析不到的只有未同步的_etcd_服务() {
         List<String> etcdServices = List.of("KV", "Watch", "Lease", "Cluster", "Maintenance", "Auth");
         assertThat(registry.unresolvedKeys()).isNotEmpty()
