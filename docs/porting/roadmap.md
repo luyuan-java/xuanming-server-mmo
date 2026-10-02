@@ -16,17 +16,17 @@
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
 | 1.1 | 玩家数据组件化持久化（`player_state` 组件 blob，带 owner_epoch 围栏）+ 在线周期存盘 + 脏比对跳过（「最终写回失败后持续重试直到成功」仍待做，见 PARITY） | player-persistent-data-model、player-data-record、periodic-dirty-save、periodic-autosave、save-failure-durability | ✅ `9103f78` |
-| 1.2 | 玩家在线目录（player → gate / session / scene）+ 服务端向在线玩家推送通道（tip / 踢线 / 业务推送） | player-presence-directory、player-push-channel、gate-command-channel、sm-gate-command-channel、server-push-tip-kick-redirect、kick-player |
-| 1.3 | 非 scene 客户端服务的后端路由（gate 路由表 → 各 Dubbo 服务）+ 按方法热关停 | other-backend-routing、social-backend-routing、contract-service-backend-routing、rpc-killswitch、killswitch |
-| 1.4 | 请求字段规模校验、客户端 GM 指令闸（gate + scene） | request-field-sanity-check、gm-client-message-gate、client-gm-gate |
+| 1.2 | 玩家在线目录（player → gate / session / scene）+ 服务端向在线玩家推送通道（tip / 踢线 / 业务推送） | player-presence-directory、player-push-channel、gate-command-channel、sm-gate-command-channel、server-push-tip-kick-redirect、kick-player | ✅ `832c0a3`（场景 / 全服广播随首个用到的功能做） |
+| 1.3 | 非 scene 客户端服务的后端路由（gate 路由表 → 各 Dubbo 服务）+ 按方法热关停 | other-backend-routing、social-backend-routing、contract-service-backend-routing、rpc-killswitch、killswitch | ➡ 并入 4.1（gate 侧每接一个后端只加一行，与首个社交服务一起做，免得空转） |
+| 1.4 | 请求字段规模校验、客户端 GM 指令闸（gate + scene） | request-field-sanity-check、gm-client-message-gate、client-gm-gate | ➡ GM 闸并入 2.1（第一个 GM 指令随货币来）；字段校验随各 handler |
 | 1.5 | 公共件：游戏日 / 游戏周切点、永久 GUID 号段、表达式列求值、表内 tip 引用校验 | game-day、game-day-periods、guid-segment-alloc、id-segment-allocator、table-expression-columns、table-tip-ref-validation |
 
 ## 阶段 2：角色成长（scene 内玩法）
 
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
-| 2.1 | 属性：二级属性重算、属性面板（167/170）、加点 / 洗点 / 自动加点（168/172/173）、方案（174/171/169）、GM 设等级（175）、等级、行为互斥表 | derived-attribute-recalc、attribute-panel、attribute-allocate-reset-auto、attribute-schemes、gm-set-player-level、player-level、actor-action-state、actor-attribute-calculator；robot attribute-smoke |
-| 2.2 | 货币：加 / 扣 / 余额、列表与 GM 指令（54/37/49/94/95）、欠款抵扣、获取封禁 | currency-core、currency-client-and-gm、currency-debt-clawback、gain-block |
+| 2.1 | 货币：加 / 扣 / 余额、列表与 GM 指令（54/37/49/94/95）、客户端 GM 闸（gate + scene，运行模式）、scene 请求分发改为按功能注册、获取封禁（属性洗点 / 方案要扣金币，所以货币在属性之前） | currency-core、currency-client-and-gm、currency-debt-clawback、gain-block |
+| 2.2 | 属性：二级属性重算、属性面板（167/170）、加点 / 洗点 / 自动加点（168/172/173）、方案（174/171/169）、GM 设等级（175）、等级、行为互斥表 | derived-attribute-recalc、attribute-panel、attribute-allocate-reset-auto、attribute-schemes、gm-set-player-level、player-level、actor-action-state、actor-attribute-calculator；robot attribute-smoke |
 | 2.3 | 资产流水与审计（Kafka）、获取异常检测、玩家快照 | transaction-log、kafka-client-infra、kafka-audit-pipeline、anomaly-detector、player-snapshot |
 | 2.4 | 背包：容器（堆叠 / 格子 / 四个包）、编排、持久化、读取 / 整理（191/192）、装备栏规则 | bag-core-container、bag-orchestration-service、bag-persistence、bag-client-get-sort、equip-slot-rules |
 | 2.5 | 条件 + 奖励 + 任务（193/194/195）+ 活动列表（190）；robot features-smoke | condition-eval、mission-*、activity-list、activity-schedule-list |
