@@ -25,7 +25,7 @@ import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
 
 /**
- * 属性加点的客户端方法（{@code SceneAttributeClientPlayer}，167–175）。规则在 {@link AttributeSystem}，这里只翻译协议：
+ * 属性加点的客户端方法（{@code SceneAttributeClientPlayer}，167–175）。规则在 {@link AttributeService}，这里只翻译协议：
  * <ul>
  *   <li>成功：{@code error_message{0}} + 全量面板（173 是 {@code pool_id} 回显 + 建议，174 另带新方案 id）；</li>
  *   <li>拒绝：只回 {@code error_message{拒绝码}}，不带面板 / 建议（同基线：客户端保留旧面板）；</li>
@@ -37,11 +37,11 @@ public final class AttributeFeature implements SceneFeature {
 
     private static final String SERVICE = "SceneAttributeClientPlayer";
 
-    private final AttributeSystem system;
+    private final AttributeService service;
     private final int notifyPanelChanged;
 
-    public AttributeFeature(AttributeSystem system, MessageIdRegistry registry) {
-        this.system = system;
+    public AttributeFeature(AttributeService service, MessageIdRegistry registry) {
+        this.service = service;
         this.notifyPanelChanged = registry.requireId(SERVICE, "NotifyAttributePanelChanged");
     }
 
@@ -51,7 +51,7 @@ public final class AttributeFeature implements SceneFeature {
                 GetAttributePanelResponse.newBuilder().setErrorMessage(tip(0)).setPanel(panel(call)).build()));
         r.on(SERVICE, "AllocateAttributePoints", AllocateAttributePointsRequest.class, this::allocate);
         r.on(SERVICE, "ResetAttributePoints", ResetAttributePointsRequest.class, (call, req) -> {
-            int tipId = system.reset(call.player(), req.getPoolId());
+            int tipId = service.reset(call.player(), req.getPoolId());
             ResetAttributePointsResponse.Builder response = ResetAttributePointsResponse.newBuilder()
                     .setErrorMessage(tip(tipId));
             if (tipId == 0) {
@@ -61,7 +61,7 @@ public final class AttributeFeature implements SceneFeature {
         });
         r.on(SERVICE, "AutoAllocateAttributePoints", AutoAllocateAttributePointsRequest.class, this::autoAllocate);
         r.on(SERVICE, "CreateAttributeScheme", CreateAttributeSchemeRequest.class, (call, req) -> {
-            AttributeSystem.SchemeCreation created = system.createScheme(call.player(), req.getName());
+            AttributeService.SchemeCreation created = service.createScheme(call.player(), req.getName());
             CreateAttributeSchemeResponse.Builder response = CreateAttributeSchemeResponse.newBuilder()
                     .setErrorMessage(tip(created.tipId()));
             if (created.tipId() == 0) {
@@ -70,7 +70,7 @@ public final class AttributeFeature implements SceneFeature {
             call.reply(response.build());
         });
         r.on(SERVICE, "SwitchAttributeScheme", SwitchAttributeSchemeRequest.class, (call, req) -> {
-            int tipId = system.switchScheme(call.player(), req.getSchemeId());
+            int tipId = service.switchScheme(call.player(), req.getSchemeId());
             SwitchAttributeSchemeResponse.Builder response = SwitchAttributeSchemeResponse.newBuilder()
                     .setErrorMessage(tip(tipId));
             if (tipId == 0) {
@@ -79,7 +79,7 @@ public final class AttributeFeature implements SceneFeature {
             call.reply(response.build());
         });
         r.on(SERVICE, "RenameAttributeScheme", RenameAttributeSchemeRequest.class, (call, req) -> {
-            int tipId = system.renameScheme(call.player(), req.getSchemeId(), req.getName());
+            int tipId = service.renameScheme(call.player(), req.getSchemeId(), req.getName());
             RenameAttributeSchemeResponse.Builder response = RenameAttributeSchemeResponse.newBuilder()
                     .setErrorMessage(tip(tipId));
             if (tipId == 0) {
@@ -93,8 +93,8 @@ public final class AttributeFeature implements SceneFeature {
     /** 168：池号为 0 或目标为空 → 1005（先于写前置，同基线处理器）。 */
     private void allocate(PlayerCall call, AllocateAttributePointsRequest request) {
         int tipId = request.getPoolId() == 0 || request.getAllocatedCount() == 0
-                ? AttributeSystem.INVALID_PARAMETER
-                : system.allocate(call.player(), request.getPoolId(), request.getAllocatedMap());
+                ? AttributeService.INVALID_PARAMETER
+                : service.allocate(call.player(), request.getPoolId(), request.getAllocatedMap());
         AllocateAttributePointsResponse.Builder response = AllocateAttributePointsResponse.newBuilder()
                 .setErrorMessage(tip(tipId));
         if (tipId == 0) {
@@ -105,7 +105,7 @@ public final class AttributeFeature implements SceneFeature {
 
     /** 173：成功时回显池号并带建议（全部维度的目标已分配）；拒绝只回 tip。 */
     private void autoAllocate(PlayerCall call, AutoAllocateAttributePointsRequest request) {
-        AttributeSystem.AutoAllocation result = system.autoAllocate(call.player(), request.getPoolId());
+        AttributeService.AutoAllocation result = service.autoAllocate(call.player(), request.getPoolId());
         AutoAllocateAttributePointsResponse.Builder response = AutoAllocateAttributePointsResponse.newBuilder()
                 .setErrorMessage(tip(result.tipId()));
         if (result.tipId() == 0) {
@@ -120,7 +120,7 @@ public final class AttributeFeature implements SceneFeature {
      * 以后宝宝（路线图 2.8：重算并推 184）与任务（2.5：等级条件事件）接在推 170 之后、回应答之前。
      */
     private void gmSetLevel(PlayerCall call, GmSetPlayerLevelRequest request) {
-        int tipId = system.gmSetLevel(call.player(), request.getLevel());
+        int tipId = service.gmSetLevel(call.player(), request.getLevel());
         GmSetPlayerLevelResponse.Builder response = GmSetPlayerLevelResponse.newBuilder().setErrorMessage(tip(tipId));
         if (tipId == 0) {
             call.push(notifyPanelChanged, AttributePanelChangedS2C.newBuilder().setPanel(panel(call)).build());
@@ -130,6 +130,6 @@ public final class AttributeFeature implements SceneFeature {
     }
 
     private AttributePanelInfo panel(PlayerCall call) {
-        return system.buildPanel(call.player());
+        return service.buildPanel(call.player());
     }
 }

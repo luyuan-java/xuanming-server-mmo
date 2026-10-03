@@ -12,7 +12,7 @@ import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.player.store.PlayerStore;
 import com.game.scene.attribute.AttributeFeature;
-import com.game.scene.attribute.AttributeSystem;
+import com.game.scene.attribute.AttributeService;
 import com.game.scene.attribute.AttributeTables;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.currency.CurrencyFeature;
@@ -171,7 +171,7 @@ public class SceneNode implements SmartLifecycle {
         StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics);
 
         GateLinks gateLinks = new GateLinks(metrics);
-        AttributeSystem attributes = new AttributeSystem(attributeTables, SceneClock.SYSTEM, AssetAudit.log());
+        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, AssetAudit.log());
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, attributes::initializeOnLoad);
         links = gateLinks;

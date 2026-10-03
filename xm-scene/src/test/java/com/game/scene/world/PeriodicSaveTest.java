@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-/** 在线周期存盘：分槽、脏比对、在途、结局处理，以及持久化组件（朝向）随进场恢复。 */
+/** 在线周期存盘：分槽、脏比对、在途、结局处理，以及持久化数据（朝向）随进场恢复。 */
 class PeriodicSaveTest {
 
     private static final long LINK = 1;
@@ -73,7 +73,7 @@ class PeriodicSaveTest {
     }
 
     @Test
-    void 朝向随进场从持久化组件恢复() {
+    void 朝向随进场从持久化数据恢复() {
         ScenePlayer player = enterUnchanged(11, 1000);
         assertThat(player.rotation()).isEqualTo(Rotation.newBuilder().setZ(90).build());
         assertThat(player.persistentState()).isEqualTo(FACING_EAST);
@@ -145,7 +145,7 @@ class PeriodicSaveTest {
     }
 
     @Test
-    void 不认识的组件原样带回_更新版本写入的数据不被抹掉() {
+    void 不认识的玩法数据原样带回_更新版本写入的数据不被抹掉() {
         UnknownFieldSet future = UnknownFieldSet.newBuilder()
                 .addField(99, UnknownFieldSet.Field.newBuilder().addVarint(7).build()).build();
         PlayerState stored = FACING_EAST.toBuilder().setUnknownFields(future).build();
@@ -153,11 +153,11 @@ class PeriodicSaveTest {
         ScenePlayer player = enter(11, 1000);
 
         assertThat(player.persistentState()).isEqualTo(stored);
-        assertThat(world.saveDuePlayers(1)).as("与库里一致（含不认识的组件）").isZero();
+        assertThat(world.saveDuePlayers(1)).as("与库里一致（含不认识的玩法数据）").isZero();
     }
 
     @Test
-    void 组件内不认识的字段也原样带回_全0余额时货币组件不被省略() {
+    void 玩法数据内不认识的字段也原样带回_全0余额时货币数据不被省略() {
         UnknownFieldSet debts = UnknownFieldSet.newBuilder()
                 .addField(3, UnknownFieldSet.Field.newBuilder().addVarint(7).build()).build();
         long id = 1000;
@@ -171,7 +171,7 @@ class PeriodicSaveTest {
             assertThat(player.persistentState()).isEqualTo(stored);
             id++;
         }
-        assertThat(world.saveDuePlayers(1)).as("与库里一致（含组件内不认识的字段）").isZero();
+        assertThat(world.saveDuePlayers(1)).as("与库里一致（含玩法数据内不认识的字段）").isZero();
     }
 
     @Test

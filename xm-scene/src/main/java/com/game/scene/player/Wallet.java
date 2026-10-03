@@ -66,7 +66,7 @@ public final class Wallet {
         return new Wallet(new long[TYPE_COUNT], new ArrayList<>(), UnknownFieldSet.getDefaultInstance());
     }
 
-    /** 从持久化组件恢复。存档里多出来的币种与不认识的字段（更新版本写的）原样保留，少的币种补 0。 */
+    /** 从持久化数据恢复。存档里多出来的币种与不认识的字段（更新版本写的）原样保留，少的币种补 0。 */
     public static Wallet restore(CurrencyState state) {
         long[] balances = new long[Math.max(TYPE_COUNT, state.getBalancesCount())];
         for (int i = 0; i < state.getBalancesCount(); i++) {
@@ -146,7 +146,7 @@ public final class Wallet {
         return comp.build();
     }
 
-    /** 从没动过（全 0、无封禁、没有多余币种槽、没有不认识的字段）：持久化时可以省略整个组件，读回来仍是 {@link #empty()}。 */
+    /** 从没动过（全 0、无封禁、没有多余币种槽、没有不认识的字段）：持久化时可以省略整段，读回来仍是 {@link #empty()}。 */
     public boolean isPristine() {
         if (balances.length != TYPE_COUNT || !blocked.isEmpty() || !unknownFields.asMap().isEmpty()) {
             return false;

@@ -220,8 +220,8 @@ public class PlayerStore {
     }
 
     /**
-     * 写者离开：带围栏写回玩家状态（player 行的等级、所在场景、坐标 + {@code player_state} 组件）并释放归属。
-     * 一个事务：先更新 player 行（围栏 + 行锁），通过才写组件，组件写失败整体回滚。
+     * 写者离开：带围栏写回玩家状态（player 行的等级、所在场景、坐标 + {@code player_state} 玩法数据）并释放归属。
+     * 一个事务：先更新 player 行（围栏 + 行锁），通过才写玩法数据，玩法数据写失败整体回滚。
      *
      * @return false 表示 epoch 已过期（被新的进场夺权）或玩家已不存在，本次写入被丢弃
      */
@@ -252,9 +252,9 @@ public class PlayerStore {
     }
 
     /**
-     * 读玩家状态组件。从未写过返回默认实例（全部组件取初始状态）。
+     * 读玩家玩法数据。从未写过返回默认实例（各玩法都取初始状态）。
      *
-     * @throws IllegalStateException 存量字节解析失败（损坏）：调用方按加载失败处理，不让玩家带着丢了组件的状态进场
+     * @throws IllegalStateException 存量字节解析失败（损坏）：调用方按加载失败处理，不让玩家带着丢了玩法数据的状态进场
      */
     public PlayerState loadState(long playerId) {
         PlayerStateRow row = mapper.selectState(playerId);

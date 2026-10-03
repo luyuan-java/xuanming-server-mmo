@@ -78,7 +78,7 @@ public interface PlayerMapper {
     @Select("SELECT data FROM player_state WHERE player_id = #{playerId}")
     PlayerStateRow selectState(@Param("playerId") long playerId);
 
-    /** 写玩家状态组件（存在即覆盖）。必须在已通过围栏的同一事务里调用，见 {@link PlayerStore#saveState}。 */
+    /** 写玩家玩法数据（存在即覆盖）。必须在已通过围栏的同一事务里调用，见 {@link PlayerStore#saveState}。 */
     @Insert("""
             INSERT INTO player_state (player_id, data, saved_epoch, updated_at)
             VALUES (#{playerId}, #{data}, #{savedEpoch}, #{updatedAt})

@@ -102,13 +102,13 @@ ALTER TABLE player DROP COLUMN owner_lease_until, DROP COLUMN owner_released;
 
 回滚后必须同时回退代码：新代码的夺权 / 写回 / 续约 SQL 引用这两列，跑在旧表上进游戏会失败（1003）。
 
-## M3：玩家状态组件表 `player_state`（2026-10-02）
+## M3：玩家玩法数据表 `player_state`（2026-10-02）
 
 **变更**：新增表 `player_state`（`player_id` 主键、`data` MEDIUMBLOB = `xm.storage.PlayerState`、`saved_epoch`、`updated_at`），
-存各玩法系统的持久化组件（首个组件：朝向）。在线存盘与离场写回都在同一事务里先带围栏更新 `player` 行，通过才 upsert 本表。
+存各玩法的持久化数据（首个玩法数据：朝向）。在线存盘与离场写回都在同一事务里先带围栏更新 `player` 行，通过才 upsert 本表。
 
 **新库 / 存量库**：都无需手工操作——这是新表，建表脚本的 `CREATE TABLE IF NOT EXISTS` 启动时自动建出。
-存量玩家没有这一行，读到默认实例（全部组件取初始状态），第一次写回或在线存盘时补上。
+存量玩家没有这一行，读到默认实例（各玩法都取初始状态），第一次写回或在线存盘时补上。
 
 **核对**：
 
@@ -116,4 +116,4 @@ ALTER TABLE player DROP COLUMN owner_lease_until, DROP COLUMN owner_released;
 SHOW CREATE TABLE player_state;
 ```
 
-**回滚**：回退代码即可；表可留着（旧代码不读不写它），确需删除再 `DROP TABLE player_state;`（组件数据随之丢失）。
+**回滚**：回退代码即可；表可留着（旧代码不读不写它），确需删除再 `DROP TABLE player_state;`（玩法数据随之丢失）。

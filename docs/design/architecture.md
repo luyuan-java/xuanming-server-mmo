@@ -166,7 +166,7 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   抛异常按进场失败处理并释放归属）——玩法在这里按配表规整恢复出来的状态、算派生值（属性系统：清掉表里已删的维度、按等级收敛超量分配、
   算二级属性）。处理器需要按顺序先推一条再回应答时用 `PlayerCall.push`（信封 id 0，客户端按推送处理），例如 GM 设等级先推 170 面板。
   配置表在 Spring 里是一份不可变快照（`ConfigTables` bean），各玩法的视图（`SceneTables`、`AttributeTables`）都从它构建。
-- **属性加点**（`AttributeFeature` + `AttributeSystem`，规则同基线 `PlayerAttributeSystem`，纯规则在 `AttributeRules`）：
+- **属性加点**（`AttributeFeature` + `AttributeService`，规则同基线 `PlayerAttributeSystem`，纯规则在 `AttributeRules`）：
   方案与已分配点存 `player_state.attribute`（只存非 0；从没动过的不写）；点数总量按等级与表现算，二级属性与当前气血 / 法力
   不落库、每次加载重算（当前值进场回满：Java 版还没有伤害来源，持久化随路线图 2.7）。等级仍在 `player.level` 列，读存档时压回上限 85
   （`PlayerLevels`）。写操作成功回全量面板、拒绝只回 tip；170 只在等级变化后推（基线唯一的推送点）。
@@ -200,7 +200,8 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   把「写回全部在场玩家」投递到逻辑线程，**用整个停服预算**（`xm.scene.shutdown-save-timeout`）等它执行完 →
   写回都交给存储线程池之后才关池，并用剩余预算等落库；预算用完写回还没开始执行就取消它并记一条 ERROR（带大致人数），
   存储池没排空就 `shutdownNow` 并逐条记下被丢弃的写回（player_id / epoch / 场景 / 坐标）。实现与测试：`SceneShutdown`。
-- 场景对象：普通 Java 对象 + 按实体组织的组件字段，不引入 ECS 库（无达标的库，见选型表）。
+- 场景对象：普通 Java 领域对象，不用 ECS（实体 / 组件 / 系统）：玩家的各玩法状态是 `ScenePlayer` 持有的字段对象（`Wallet`、`PlayerAttributes` ……），
+  规则在对应的服务类里（`AttributeService` 等），基线的 entt 组件 / 系统按「领域对象 + 服务」翻译，不照搬。
 
 ## 6. 服务发现与部署 profile
 
@@ -226,7 +227,7 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 
 ## 7. 存储
 
-- MySQL 库 `xm_java`（与 mmorpg 的库隔离）：`account`、`player`、`player_state`（各玩法系统的持久化组件，protobuf `xm.storage.PlayerState`，与 `player` 行同事务、同围栏写入）；建表脚本在 `xm-player-store/src/main/resources/db/xm-player-schema.sql`
+- MySQL 库 `xm_java`（与 mmorpg 的库隔离）：`account`、`player`、`player_state`（各玩法的持久化数据，protobuf `xm.storage.PlayerState`，与 `player` 行同事务、同围栏写入）；建表脚本在 `xm-player-store/src/main/resources/db/xm-player-schema.sql`
   （只 `CREATE TABLE IF NOT EXISTS`，存量库的结构变更按 [db-migrations.md](db-migrations.md) 手工迁移）。
 - 玩家名全服唯一且大小写 / 全半角不敏感：唯一索引 `uk_player_name_key` 建在 `name_key` 上，键只由 `PlayerStore.nameKey` 计算
   （NFKC → 去首尾空白 → `Locale.ROOT` 小写）。建角撞到主键（`player_id` 重号）是不变量被破坏，抛异常，不报「重名」。

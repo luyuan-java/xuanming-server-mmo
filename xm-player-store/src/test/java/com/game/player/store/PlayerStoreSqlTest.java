@@ -128,13 +128,13 @@ class PlayerStoreSqlTest {
     }
 
     @Test
-    void 从未写过状态组件时读到默认实例() {
+    void 从未写过玩法数据时读到默认实例() {
         long p = newPlayer(1101, "丁");
         assertThat(store.loadState(p)).isEqualTo(PlayerState.getDefaultInstance());
     }
 
     @Test
-    void 在线存盘不释放_最终写回后状态组件与player行一起落库() {
+    void 在线存盘不释放_最终写回后玩法数据与player行一起落库() {
         long p = newPlayer(1102, "戊");
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
 
@@ -160,7 +160,7 @@ class PlayerStoreSqlTest {
     }
 
     @Test
-    void 旧epoch的在线存盘被围栏拒绝_状态组件不变() {
+    void 旧epoch的在线存盘被围栏拒绝_玩法数据不变() {
         long p = newPlayer(1104, "庚");
         store.claimOwnership(p);
         store.saveStateAndRelease(save(p, 1, 2, 20), facing(0.75));

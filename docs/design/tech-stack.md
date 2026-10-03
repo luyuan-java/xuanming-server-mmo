@@ -24,7 +24,7 @@ star 数为 2026-09-29 GitHub API 实测。
 | 指标 | Micrometer（`micrometer-core`）+ `micrometer-registry-prometheus`，经 `spring-boot-starter-actuator` 导出（版本均由 Spring Boot 3.5.16 BOM 管理：Micrometer 1.15.12、Prometheus Java client 1.3.10） | — | Dropwizard Metrics、直接用 Prometheus client | 属于「Spring Boot 管理的依赖」，不受 star 门槛约束。端点、端口与指标清单见 architecture.md §11。gate / login / scene-manager / scene 本身不是 Web 进程，为管理端点引入 `spring-boot-starter-web`（Tomcat，只挂 actuator，4 个线程、默认只绑本机）；不引入 Spring 之外的 HTTP 服务器 |
 | 测试 | JUnit 5 / Mockito / AssertJ（spring-boot-starter-test 自带） | — | Testcontainers (8.7K) | 集成测试用仓库自带的 docker compose |
 | 测试用内存数据库（仅 test 作用域） | H2（Spring Boot BOM 管理的版本，当前 2.3.232） | — | HSQLDB、Derby | xm-player-store 的 `PlayerStoreSqlTest` 以 MySQL 兼容模式跑生产建表脚本与 Mapper，验证归属夺权 / 释放 / 续约与建角上限的 SQL 和事务语义，不需要外部 MySQL。按本表规则属于「随 Spring Boot 管理的依赖」，不受 star 门槛约束；只进测试 classpath。H2 的重键错误码与 MySQL 不同，「撞名」分支仍由替身测试覆盖 |
-| ECS | 不引入（无 ≥2 万 star 的 Java ECS 库） | — | Artemis-odb、Ashley（均 < 3K） | 场景用普通对象 + 组件表，见 architecture.md §5 |
+| ECS | 不引入，也不手写 ECS 模式（无 ≥2 万 star 的 Java ECS 库；Java 版没有 entt，按领域对象 + 服务实现） | — | Artemis-odb、Ashley（均 < 3K） | 场景用普通领域对象，见 architecture.md §5 |
 
 ## 传递依赖说明
 

@@ -308,7 +308,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: player-class, player-level, player-persistent-data-model
 - behavior: 六项（气血上限 / 法力上限 / 物攻 / 法攻 / 速度 / 防御）= 职业初值 + Σ(自然成长×等级 + 外部加成)×每点系数 + 已分配点按百分比公式（标准基础 = 职业初值 + 自然成长×85 级；增量 = 标准×比例×E(n)÷d）；max_health 至少 1；速度直写 BaseAttributes.speed、护甲每次按 Class.init_armor 直写；当前 HP/MP：升级按绝对增量补、降级只夹，其余（加载 / 加点 / 切方案 / 洗点）按比例保持（活着至少留 1，防「改属性当治疗」）；加载与等级变化时先收敛「已分配 > 总量」（整池清零返还）。
 - internal: 宝宝共用同一套纯规则（PetSystem）；DerivedAttributesComp 不落库，每次登录重算。
-- java: done（2026-10-03，批次 2.2）— `AttributeSystem.recalculate` / 纯规则 `AttributeRules`，同序累加逐值一致（真实配表单测）；当前气血 / 法力不持久化、进场回满（2.7 再持久化）。
+- java: done（2026-10-03，批次 2.2）— `AttributeService.recalculate` / 纯规则 `AttributeRules`，同序累加逐值一致（真实配表单测）；当前气血 / 法力不持久化、进场回满（2.7 再持久化）。
 - size: M
 - robot: attribute_smoke（基线）
 - hazards: 登录时 oldMax=0，补增量分支进不去，需靠 TopUpToDerivedMax 回满阵亡玩家；浮点 floor 取整，Java 用 double 同序累加才能逐值一致。

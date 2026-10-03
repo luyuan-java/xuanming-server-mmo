@@ -44,9 +44,9 @@ import org.slf4j.LoggerFactory;
  * </pre>
  * 浮点按基线同序累加，六项各自累加完再向下取整（气血上限至少 1），与基线逐值一致。
  */
-public final class AttributeSystem {
+public final class AttributeService {
 
-    private static final Logger log = LoggerFactory.getLogger(AttributeSystem.class);
+    private static final Logger log = LoggerFactory.getLogger(AttributeService.class);
 
     static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     static final int POOL_NOT_FOUND = AttributeErrorTip.attribute_error.kAttributePoolNotFound_VALUE;
@@ -89,7 +89,7 @@ public final class AttributeSystem {
     private final SceneClock clock;
     private final AssetAudit audit;
 
-    public AttributeSystem(AttributeTables tables, SceneClock clock, AssetAudit audit) {
+    public AttributeService(AttributeTables tables, SceneClock clock, AssetAudit audit) {
         this.tables = tables;
         this.clock = clock;
         this.audit = audit;
@@ -579,12 +579,12 @@ public final class AttributeSystem {
     private static int tipOf(AllocError error) {
         return switch (error) {
             case OK -> 0;
-            case POOL_LOCKED -> AttributeSystem.POOL_LOCKED;
+            case POOL_LOCKED -> AttributeService.POOL_LOCKED;
             case DIMENSION_NOT_IN_POOL -> DIMENSION_NOT_FOUND;
-            case CANNOT_DECREASE -> AttributeSystem.CANNOT_DECREASE;
-            case CAP_EXCEEDED -> AttributeSystem.CAP_EXCEEDED;
+            case CANNOT_DECREASE -> AttributeService.CANNOT_DECREASE;
+            case CAP_EXCEEDED -> AttributeService.CAP_EXCEEDED;
             case NOT_ENOUGH_POINTS -> POINTS_NOT_ENOUGH;
-            case NOTHING_TO_CHANGE -> AttributeSystem.NOTHING_TO_CHANGE;
+            case NOTHING_TO_CHANGE -> AttributeService.NOTHING_TO_CHANGE;
         };
     }
 

@@ -15,7 +15,7 @@
 
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
-| 1.1 | 玩家数据组件化持久化（`player_state` 组件 blob，带 owner_epoch 围栏）+ 在线周期存盘 + 脏比对跳过（「最终写回失败后持续重试直到成功」仍待做，见 PARITY） | player-persistent-data-model、player-data-record、periodic-dirty-save、periodic-autosave、save-failure-durability | ✅ `9103f78` |
+| 1.1 | 玩家数据按玩法分段持久化（`player_state` 玩法数据 blob，带 owner_epoch 围栏）+ 在线周期存盘 + 脏比对跳过（「最终写回失败后持续重试直到成功」仍待做，见 PARITY） | player-persistent-data-model、player-data-record、periodic-dirty-save、periodic-autosave、save-failure-durability | ✅ `9103f78` |
 | 1.2 | 玩家在线目录（player → gate / session / scene）+ 服务端向在线玩家推送通道（tip / 踢线 / 业务推送） | player-presence-directory、player-push-channel、gate-command-channel、sm-gate-command-channel、server-push-tip-kick-redirect、kick-player | ✅ `832c0a3`（场景 / 全服广播随首个用到的功能做） |
 | 1.3 | 非 scene 客户端服务的后端路由（gate 路由表 → 各 Dubbo 服务）+ 按方法热关停 | other-backend-routing、social-backend-routing、contract-service-backend-routing、rpc-killswitch、killswitch | ➡ 并入 4.1（gate 侧每接一个后端只加一行，与首个社交服务一起做，免得空转） |
 | 1.4 | 请求字段规模校验、客户端 GM 指令闸（gate + scene） | request-field-sanity-check、gm-client-message-gate、client-gm-gate | ✅ `a8ccc0d`（并入 2.1：GM 闸两道锁；字段规模与负数校验做在 scene 分发入口，对全部 scene 客户端请求生效） |

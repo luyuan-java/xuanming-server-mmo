@@ -83,7 +83,7 @@ class StoragePlayerRepositoryTest {
     }
 
     @Test
-    void 加载带上持久化组件() {
+    void 加载带上持久化数据() {
         PlayerRow row = new PlayerRow();
         row.setPlayerId(1001);
         row.setOwnerEpoch(6);
@@ -102,7 +102,7 @@ class StoragePlayerRepositoryTest {
     }
 
     @Test
-    void 组件损坏按加载失败处理() {
+    void 玩法数据损坏按加载失败处理() {
         PlayerRow row = new PlayerRow();
         row.setPlayerId(1001);
         when(store.findPlayer(1001)).thenReturn(Optional.of(row));

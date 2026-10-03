@@ -180,7 +180,7 @@ class CurrencyFeatureTest {
     }
 
     @Test
-    void 没动过钱包_存档不带货币组件() {
+    void 没动过钱包_存档不带货币数据() {
         start(RunMode.DEV, null);
         call("GetCurrencyList", GetCurrencyListRequest.getDefaultInstance(), 1);
 

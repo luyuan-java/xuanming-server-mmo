@@ -48,7 +48,7 @@ public final class ScenePlayer {
      */
     private Rotation rotation;
     /**
-     * 加载到的状态里本版本不认识的组件（更新版本写入的字段）。写回时原样带上，滚动升级 / 回滚期间旧版本节点不会把它们抹掉。
+     * 加载到的状态里本版本不认识的玩法数据（更新版本写入的字段）。写回时原样带上，滚动升级 / 回滚期间旧版本节点不会把它们抹掉。
      */
     private final UnknownFieldSet unknownStateFields;
     /** 货币。 */
@@ -71,7 +71,7 @@ public final class ScenePlayer {
                 PlayerState.getDefaultInstance(), nowNanos);
     }
 
-    /** @param state 持久化的玩法组件（从未写过为默认实例），这里把各组件恢复到内存状态 */
+    /** @param state 持久化的玩法数据（从未写过为默认实例），这里把各玩法数据恢复到内存状态 */
     ScenePlayer(long playerId, long entity, SessionKey session, long ownerEpoch, int classId, int gender,
                 String appearanceId, int level, List<Integer> skills, Vec3 position, PlayerState state,
                 long nowNanos) {
@@ -264,7 +264,7 @@ public final class ScenePlayer {
         return new PlayerSave(playerId, ownerEpoch, level, scene.configId(), position, persistentState());
     }
 
-    /** 当前内存状态里需要持久化的玩法组件。新增组件时在这里写、在构造器里恢复。 */
+    /** 当前内存状态里需要持久化的玩法数据。新增玩法数据时在这里写、在构造器里恢复。 */
     PlayerState persistentState() {
         PlayerState.Builder state = PlayerState.newBuilder().setUnknownFields(unknownStateFields);
         if (rotation != null) {

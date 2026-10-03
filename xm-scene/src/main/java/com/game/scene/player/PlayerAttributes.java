@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 玩家的属性加点状态（只在场景逻辑线程上读写；规则在 {@code com.game.scene.attribute.AttributeSystem}，本类只存状态）。
+ * 玩家的属性加点状态（只在场景逻辑线程上读写；规则在 {@code com.game.scene.attribute.AttributeService}，本类只存状态）。
  *
  * <p>落库的只有加点方案（{@code player_state.attribute}）；点数总量按等级与表实时换算，二级属性与当前气血 / 法力
  * 每次加载重算（{@link #derived()} 等不落库）。从没动过的状态（只有默认方案、没分配过点、没切换过）不写进存档，
@@ -114,7 +114,7 @@ public final class PlayerAttributes {
         return new PlayerAttributes(new ArrayList<>(), 0, 0, 0, UnknownFieldSet.getDefaultInstance());
     }
 
-    /** 从持久化组件恢复，并补齐缺省（基线 EnsureComp）。 */
+    /** 从持久化数据恢复，并补齐缺省（基线 EnsureComp）。 */
     public static PlayerAttributes restore(AttributeState state) {
         List<Scheme> schemes = new ArrayList<>(state.getSchemesCount());
         for (AttributeScheme stored : state.getSchemesList()) {
@@ -220,7 +220,7 @@ public final class PlayerAttributes {
         this.mana = mana;
     }
 
-    /** 从没动过：只有默认方案、没分配过点、没切换过、没有不认识的字段。持久化时可以省略整个组件，读回来仍是 {@link #empty()}。 */
+    /** 从没动过：只有默认方案、没分配过点、没切换过、没有不认识的字段。持久化时可以省略整段，读回来仍是 {@link #empty()}。 */
     public boolean isPristine() {
         return schemes.size() == 1 && schemes.get(0).isDefault() && activeSchemeId == DEFAULT_SCHEME_ID
                 && nextSchemeId == DEFAULT_SCHEME_ID + 1 && lastSwitchTime == 0 && unknownFields.asMap().isEmpty();

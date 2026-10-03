@@ -98,13 +98,13 @@ class AttributeFeatureTest {
     }
 
     private void start(RunMode mode, int classId, int level, PlayerState state) {
-        AttributeSystem system = new AttributeSystem(tables, clock, audit);
+        AttributeService service = new AttributeService(tables, clock, audit);
         AtomicLong ids = new AtomicLong(5000);
         FakeSceneTables sceneTables = new FakeSceneTables();
         world = new SceneWorld(sceneTables, Contracts.IDS, sink, repo, ids::incrementAndGet, clock, SceneMetrics.noop(),
-                system::initializeOnLoad);
+                service::initializeOnLoad);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, sceneTables, mode,
-                List.of(new AttributeFeature(system, Contracts.REGISTRY)));
+                List.of(new AttributeFeature(service, Contracts.REGISTRY)));
         Scene scene = world.createScene(1);
         repo.put(new PlayerData(PLAYER, 1, classId, 1, "", level, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
@@ -449,7 +449,7 @@ class AttributeFeatureTest {
     }
 
     @Test
-    void 没动过加点_存档不带属性组件_查面板不算改动() throws Exception {
+    void 没动过加点_存档不带属性数据_查面板不算改动() throws Exception {
         start();
         panel();
 
