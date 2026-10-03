@@ -22,6 +22,8 @@ message PlayerState {
   AttributeState attribute = 3;
   // 背包（四个固定包：0 人物背包、1 仓库、2 装备栏、3 临时格，同 mmorpg BagType）。
   BagState bag = 4;
+  // 任务（mmorpg QuestAllData 的 Java 自有对应；只有 scope 0 可操作，不存 scope 层）。
+  MissionState mission = 5;
 }
 
 // 背包（mmorpg BagAllData 的 Java 自有对应；基线的动态包没有生产创建点，不存）。
@@ -79,4 +81,23 @@ message AttributeScheme {
   string name = 2;
   // dimension_id → 已分配点（只存非 0；所属池由表 AttributeDimension 决定）。
   map<uint32, uint32> allocated = 3;
+}
+
+// 任务状态。三个列表都按 mission_id 无符号升序写出（周期存盘按值比对脏数据，顺序必须确定）；
+// 表里已删除的任务 id 照样保留（列表里显示 configured=false）。
+message MissionState {
+  // 进行中的任务。
+  repeated ActiveMission active = 1;
+  // 已完成的任务（终态，不会重开）。
+  repeated uint32 completed_ids = 2;
+  // 可领奖的任务（正常应 ⊆ completed_ids；不一致时 195 回 1002，同基线）。
+  repeated uint32 claimable_ids = 3;
+}
+
+message ActiveMission {
+  uint32 mission_id = 1;
+  // 下标 = Mission.condition_id 的下标（顺序任务靠它定位当前格）；与表里条件数不一致时永不推进、永不完成（同基线，不修补）。
+  repeated uint32 progress = 2;
+  // 接取时刻（UTC 毫秒，基线 mission_begin_time；客户端不可见，完成后不再保留）。
+  uint64 accepted_at_ms = 3;
 }

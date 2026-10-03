@@ -19,4 +19,10 @@ public final class WorldTestAccess {
         return new ScenePlayer(playerId, 10_000 + playerId, new SessionKey(1, (int) playerId), 1, 1, 0, "", 1,
                 java.util.List.of(), Vec3.ORIGIN, 0L);
     }
+
+    /** 从存档恢复的玩家实例（不在任何场景里；进场规整由调用方自己跑）。 */
+    public static ScenePlayer player(long playerId, int level, com.game.player.store.state.PlayerState state) {
+        return new ScenePlayer(playerId, 10_000 + playerId, new SessionKey(1, (int) playerId), 1, 1, 0, "", level,
+                java.util.List.of(), Vec3.ORIGIN, state, 0L);
+    }
 }

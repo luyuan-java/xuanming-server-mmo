@@ -75,6 +75,15 @@ class RobotOptionsTest {
     }
 
     @Test
+    void features_账号带feat标签() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("features", "--run-tag", "x1"), ENV, NOW);
+        assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.FEATURES);
+        assertThat(com.game.robot.scenario.FeaturesScenario.accountName(o.accountPrefix(), o.runTag()))
+                .isEqualTo("robot_java_featx1");
+        assertThat(RobotOptions.usage()).contains("features");
+    }
+
+    @Test
     void toString_不带口令() throws Exception {
         assertThat(RobotOptions.parse(List.of("smoke"), ENV, NOW).toString()).doesNotContain("dev-secret").contains("***");
     }

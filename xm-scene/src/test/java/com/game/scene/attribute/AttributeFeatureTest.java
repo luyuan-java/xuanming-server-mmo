@@ -85,6 +85,8 @@ class AttributeFeatureTest {
     private final FakePlayerRepository repo = new FakePlayerRepository();
     private final ManualClock clock = new ManualClock();
     private final List<Audited> audits = new ArrayList<>();
+    /** 等级连带（任务等级事实）被调到时：已发出的消息数 + 等级。 */
+    private final List<String> levelEvents = new ArrayList<>();
     private final AssetAudit audit = (CurrencyAudit) (playerId, type, delta, before, after, reason) ->
             audits.add(new Audited(playerId, type, delta, before, after, reason));
     private SceneWorld world;
@@ -106,7 +108,8 @@ class AttributeFeatureTest {
         world = new SceneWorld(sceneTables, Contracts.IDS, sink, repo, ids::incrementAndGet, clock, SceneMetrics.noop(),
                 service::initializeOnLoad, com.game.scene.world.PlayerSnapshots.NONE);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, sceneTables, mode,
-                List.of(new AttributeFeature(service, Contracts.REGISTRY)));
+                List.of(new AttributeFeature(service, Contracts.REGISTRY,
+                        player -> levelEvents.add(sink.to(LINK, SESSION).size() + ":" + player.level()))));
         Scene scene = world.createScene(1);
         repo.put(new PlayerData(PLAYER, 1, classId, 1, "", level, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
@@ -180,6 +183,7 @@ class AttributeFeatureTest {
         assertThat(pushed.getPools(0).getTotal() - 5).isEqualTo(145);
         assertThat(pushed.getPools(0).getResetCostGold()).isEqualTo(500);
         assertDerived(pushed, 2000, 2000, 1500, 1200, 1320, 1800);
+        assertThat(levelEvents).as("等级连带在推 170 之后、回应答之前").containsExactly("1:30");
         assertThat(pushed.getDerived().getHealth()).isEqualTo(2000);
         assertThat(pushed.getDerived().getMana()).isEqualTo(2000);
         assertThat(player().level()).isEqualTo(30);
@@ -197,6 +201,7 @@ class AttributeFeatureTest {
             assertThat(response.getErrorMessage().getId()).as("level=%d", bad).isEqualTo(1005);
             assertThat(response.hasPanel()).isFalse();
         }
+        assertThat(levelEvents).as("同一等级也发，越界不发").containsExactly("1:1");
         assertThat(player().level()).isEqualTo(1);
     }
 

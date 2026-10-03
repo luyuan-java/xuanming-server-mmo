@@ -37,6 +37,10 @@ import com.game.scene.link.NodeLinkHandler;
 import com.game.scene.link.NodeLinkServer;
 import com.game.scene.link.SceneLinkService;
 import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.mission.ActivityFeature;
+import com.game.scene.mission.MissionFeature;
+import com.game.scene.mission.MissionService;
+import com.game.scene.mission.MissionTables;
 import com.game.scene.ownership.OwnerLeaseRenewer;
 import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.player.ItemGuids;
@@ -113,6 +117,7 @@ public class SceneNode implements SmartLifecycle {
     private final SceneTables tables;
     private final AttributeTables attributeTables;
     private final BagTables bagTables;
+    private final MissionTables missionTables;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final AuditProperties audit;
@@ -142,13 +147,14 @@ public class SceneNode implements SmartLifecycle {
     /**
      * @param attributeTables 属性加点配表视图（与 {@code tables} 来自同一份配表快照）
      * @param bagTables       背包配表视图（同上）
+     * @param missionTables   任务配表视图（同上）
      * @param audit    资产审计管线配置（Kafka）
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
      * @param metrics  scene 指标（各组件共用一份）
      */
     public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
                      MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables, BagTables bagTables,
-                     NodeLinkAuth linkAuth, SceneMetrics metrics, AuditProperties audit) {
+                     MissionTables missionTables, NodeLinkAuth linkAuth, SceneMetrics metrics, AuditProperties audit) {
         this.props = props;
         this.redis = redis;
         this.playerStore = playerStore;
@@ -156,6 +162,7 @@ public class SceneNode implements SmartLifecycle {
         this.tables = tables;
         this.attributeTables = attributeTables;
         this.bagTables = bagTables;
+        this.missionTables = missionTables;
         this.linkAuth = linkAuth;
         this.metrics = metrics;
         this.audit = audit;
@@ -211,14 +218,16 @@ public class SceneNode implements SmartLifecycle {
         BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
         startGainBlockSync(currency, bags, settings);
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
+        MissionService missions = new MissionService(missionTables, bags, SceneClock.SYSTEM);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
-        // 进场景前的规整：先背包（坏档拒绝进场），再属性
+        // 进场景前的规整：先背包（坏档拒绝进场），再属性，最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, player -> {
                     bags.initializeOnLoad(player);
                     attributes.initializeOnLoad(player);
+                    missions.initializeOnLoad(player);
                 }, snapshots);
         links = gateLinks;
         world = sceneWorld;
@@ -227,7 +236,8 @@ public class SceneNode implements SmartLifecycle {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables, runMode,
-                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry), new BagFeature(bags)));
+                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry, missions::onLevelChanged),
+                        new BagFeature(bags), new MissionFeature(missions), new ActivityFeature(missions)));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         callOnLogic(() -> {
             tables.worldSceneConfigIds().forEach(sceneWorld::createScene);

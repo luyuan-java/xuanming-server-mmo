@@ -6,6 +6,7 @@ import com.game.contract.MessageIdRegistry;
 import com.game.player.store.PlayerStore;
 import com.game.scene.attribute.AttributeTables;
 import com.game.scene.bag.BagTables;
+import com.game.scene.mission.MissionTables;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.ConfigSceneTables;
 import com.game.scene.world.SceneTables;
@@ -59,6 +60,11 @@ public class SceneNodeConfiguration {
         return BagTables.from(tables);
     }
 
+    @Bean
+    public MissionTables missionTables(ConfigTables tables) {
+        return MissionTables.from(tables);
+    }
+
     /** gate 链路握手鉴权。密钥只从环境变量 {@code XM_NODE_LINK_SECRET} 读，缺失即启动失败（不允许无鉴权的链路）。 */
     @Bean
     public NodeLinkAuth nodeLinkAuth(Environment environment) {
@@ -74,9 +80,9 @@ public class SceneNodeConfiguration {
     @Bean
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
-                               BagTables bagTables, NodeLinkAuth nodeLinkAuth, SceneMetrics sceneMetrics,
-                               AuditProperties audit) {
-        return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, bagTables, nodeLinkAuth,
-                sceneMetrics, audit);
+                               BagTables bagTables, MissionTables missionTables, NodeLinkAuth nodeLinkAuth,
+                               SceneMetrics sceneMetrics, AuditProperties audit) {
+        return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, bagTables, missionTables,
+                nodeLinkAuth, sceneMetrics, audit);
     }
 }

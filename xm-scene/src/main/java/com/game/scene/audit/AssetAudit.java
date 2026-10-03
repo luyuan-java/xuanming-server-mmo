@@ -26,6 +26,8 @@ public interface AssetAudit {
         ATTRIBUTE_RESET,
         /** 开新加点方案的金币（同上）。 */
         ATTRIBUTE_SCHEME_CREATE,
+        /** 任务奖励（基线 TX_QUEST_REWARD）。 */
+        QUEST_REWARD,
         /** 系统发放的物品（基线 TX_SYSTEM_GRANT：没有更具体来源的入包）。 */
         SYSTEM_GRANT,
         /** 物品销毁（基线 TX_ITEM_DESTROY）：临时格淘汰、整理合并掉的空实例。 */

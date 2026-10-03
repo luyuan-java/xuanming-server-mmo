@@ -13,6 +13,8 @@ option java_multiple_files = true;
 // 变动原因。与 mmorpg TransactionType 含义相同的沿用其数值；Java 独有的从 1001 起。
 enum TransactionReason {
   TX_REASON_UNSPECIFIED = 0;
+  // 任务奖励（同 mmorpg TX_QUEST_REWARD）
+  TX_QUEST_REWARD = 7;
   // 系统发放（同 mmorpg TX_SYSTEM_GRANT：没有更具体来源的入包）
   TX_SYSTEM_GRANT = 8;
   // GM 凭空发放 / 扣除（同 mmorpg TX_GM_GRANT / TX_GM_DEDUCT）

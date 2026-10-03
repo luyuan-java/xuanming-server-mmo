@@ -23,6 +23,7 @@ import com.game.proto.SwitchAttributeSchemeRequest;
 import com.game.proto.SwitchAttributeSchemeResponse;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
+import com.game.scene.world.ScenePlayer;
 
 /**
  * 属性加点的客户端方法（{@code SceneAttributeClientPlayer}，167–175）。规则在 {@link AttributeService}，这里只翻译协议：
@@ -39,9 +40,17 @@ public final class AttributeFeature implements SceneFeature {
 
     private final AttributeService service;
     private final int notifyPanelChanged;
+    private final LevelListener levelListener;
 
-    public AttributeFeature(AttributeService service, MessageIdRegistry registry) {
+    /** 等级设定成功后的连带（任务的等级条件事实）。 */
+    @FunctionalInterface
+    public interface LevelListener {
+        void levelChanged(ScenePlayer player);
+    }
+
+    public AttributeFeature(AttributeService service, MessageIdRegistry registry, LevelListener levelListener) {
         this.service = service;
+        this.levelListener = levelListener;
         this.notifyPanelChanged = registry.requireId(SERVICE, "NotifyAttributePanelChanged");
     }
 
@@ -116,14 +125,15 @@ public final class AttributeFeature implements SceneFeature {
     }
 
     /**
-     * 175：设等级成功后按基线升级事件的顺序做连带——（已重算）→ 推 170 → 回应答（应答里的面板在推送之后构建）。
-     * 以后宝宝（路线图 2.8：重算并推 184）与任务（2.5：等级条件事件）接在推 170 之后、回应答之前。
+     * 175：设等级成功后按基线升级事件的顺序做连带——（已重算）→ 推 170 →（宝宝重算并推 184，路线图 2.8）→ 任务等级条件事实
+     * （等级没变也发，同基线）→ 回应答（应答里的面板在推送之后构建）。
      */
     private void gmSetLevel(PlayerCall call, GmSetPlayerLevelRequest request) {
         int tipId = service.gmSetLevel(call.player(), request.getLevel());
         GmSetPlayerLevelResponse.Builder response = GmSetPlayerLevelResponse.newBuilder().setErrorMessage(tip(tipId));
         if (tipId == 0) {
             call.push(notifyPanelChanged, AttributePanelChangedS2C.newBuilder().setPanel(panel(call)).build());
+            levelListener.levelChanged(call.player());
             response.setPanel(panel(call));
         }
         call.reply(response.build());

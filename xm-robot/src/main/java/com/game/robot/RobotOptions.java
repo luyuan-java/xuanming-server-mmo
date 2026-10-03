@@ -5,6 +5,7 @@ import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.ExpectJump;
+import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.SmokeScenario;
@@ -48,7 +49,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -57,7 +58,7 @@ public record RobotOptions(
         ZONE("zone", "XM_ROBOT_ZONE", "1", "区号（assign-gate 的 zone_id，≥ 1）"),
         PREFIX("prefix", "XM_ROBOT_ACCOUNT_PREFIX", "robot_java_", "账号前缀（须在 xm-login 的开发账号前缀白名单里）"),
         COUNT("count", "XM_ROBOT_COUNT", "3", "smoke 的账号数（1–" + MAX_COUNT + "）"),
-        RUN_TAG("run-tag", "XM_ROBOT_RUN_TAG", null, "movement 的账号标签 [a-z0-9]{1,16}；缺省按当前时间生成（每次新号）"),
+        RUN_TAG("run-tag", "XM_ROBOT_RUN_TAG", null, "smoke 以外各子命令的账号标签 [a-z0-9]{1,16}；缺省按当前时间生成（每次新号）"),
         CONNECT_TIMEOUT("connect-timeout-ms", "XM_ROBOT_CONNECT_TIMEOUT_MS", "5000", "HTTP 与 TCP 建连超时"),
         REQUEST_TIMEOUT("request-timeout-ms", "XM_ROBOT_REQUEST_TIMEOUT_MS", "15000",
                 "握手、登录、建角、进游戏、ListSkills 各自等应答的上限；movement 里也是 A 断开后等 51 的上限"),
@@ -121,7 +122,7 @@ public record RobotOptions(
             }
         }
         if (scenario == null) {
-            throw new UsageException("缺少子命令（smoke / movement / currency / attribute / audit / guard / bag）");
+            throw new UsageException("缺少子命令（smoke / movement / currency / attribute / audit / guard / bag / features）");
         }
 
         String gateway = value(Opt.GATEWAY, given, env);
@@ -167,6 +168,7 @@ public record RobotOptions(
             case AUDIT -> AuditScenario.accountName(prefix, runTag);
             case GUARD -> GuardScenario.accountName(prefix, runTag);
             case BAG -> BagScenario.accountName(prefix, runTag);
+            case FEATURES -> FeaturesScenario.accountName(prefix, runTag);
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -182,7 +184,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -195,6 +197,8 @@ public record RobotOptions(
                 + "一次加钻石 100001 → scene 获取异常告警恰好 +1；需要 Redis、xm-data 与运维令牌\n");
         out.append("  bag       背包（191/192）：四个包的空包布局、非法 bag_type 回 1005、不可整理的包回 1005、整理幂等、"
                 + "背包里的货币同 54、重登原样\n");
+        out.append("  features  任务 / 活动（193/194/195/190）：新号列表与不可接原因、三个未排期活动、接取拒绝码、接 12 进行中、"
+                + "同类型 5000、未完成领奖 5002、重登列表原样\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -213,7 +217,6 @@ public record RobotOptions(
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
                 + ", dataUrl=" + dataUrl + ", sceneMetricsUrl=" + sceneMetricsUrl
-                + ", dataUrl=" + dataUrl + ", sceneMetricsUrl=" + sceneMetricsUrl
                 + ", password=***]";
     }
 
@@ -221,7 +224,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features）");
         }
     }
 

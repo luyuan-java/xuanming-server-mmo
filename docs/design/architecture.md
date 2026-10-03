@@ -145,7 +145,7 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 
 - **分发**（`ClientRequestHandler`）：gate 转来的 `ClientForward` 先过会话 / player_id / 消息号 / 请求体校验，
   再过字段规模与负数校验（`RequestFieldCheck`，同基线 `ProtoFieldChecker`：任一 repeated / map 字段元素数 > 20、
-  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`，以后的任务等同样各成一个），
+  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`、任务 `MissionFeature`、活动 `ActivityFeature`，以后的玩法同样各成一个），
   场景核心（移动、技能、换场景、场景信息）由 `ClientRequestHandler` 自己注册。注册时校验：方法在契约里、属于标了
   `OptionIsPlayerService` 的客户端服务、请求类型与契约一致、没有重复——任一不符启动即失败。
 - **处理器契约**（`PlayerRequestHandler` + `PlayerCall`）：在场景逻辑线程上调用；经 `call.reply(...)` 回应答，`message_id` 同请求、
@@ -252,6 +252,31 @@ mmorpg：`cpp/libs/modules/bag/*`（实例层 / 布局层 / 准入 / 淘汰，�
   容量只在不是缺省值时才存，各层不认识的字段原样带回。加载分两步：构造玩家实例时只原样收下（构造不能抛），进场景前
   `BagService.initializeOnLoad` 按配表规整——结构性损坏（guid 为 0 / 全 1 或重复、物品数超过容量）抛异常按进场失败处理（fail-closed，
   坏档不会被当成空包存回去），格子问题重新落位，不认识的 bag_type 原样隔离写回。与位置、货币同一份记录、同一次写（围栏写回）。
+
+### 4.8 任务、条件与活动列表
+
+mmorpg：`cpp/libs/modules/{mission,condition}/**` + `PlayerMissionSystem`（接取闸 / 回填 / 领奖）+ `PlayerActivityScheduleSystem` +
+`player_feature_snapshot`（列表）。Java 版（`com.game.scene.mission`，只在逻辑线程上调用）：
+
+- **配表视图 `MissionTables`**（不可变）：任务行、条件行、奖励（按基线 BuildRewardItems 合并成物品 → 数量）、活动排期。表快照不变，
+  所以基线每次接取都要重算的**静态闸**在加载时一次算好：条件是否有事实来源（击杀 1 / 等级 6 / 完成任务 8，其余类别与有时效的条件 1003）、
+  击杀条件有没有打得到的怪（副本 × 怪物表，空列表 = 任何可达怪物）、比较符 / 目标 / 计数方式是否合法（1002 / 1003）。只依赖玩家状态的判定
+  留给服务，错误码先后同基线。表是同步来的契约，加载只对用不上的数据告警、不拒绝启动。
+- **事实与推进**：事实是 `MissionFact(类别, 参数, 量, 只推进某任务)`（不复用同步来的 proto 类型）。来源：GM 175 成功后的等级事实
+  （`AttributeFeature` 的等级连带，推 170 之后、回应答之前，等级没变也发）、接取回填、完成任务事实；击杀事实的入口
+  `MissionService.onMonsterKilled` 等回合制战斗结算（6.3）接入。纯规则在 `ConditionRules`（比较符、参数匹配、累计封顶 / 持有覆盖）。
+  玩家身上的派生索引（类别 → 关注它的进行中任务、被占用的类型）不持久化，加载时重建、接取 / 完成时维护。
+- **完成后的连锁同步执行**：一次操作（接取 / 一条事实）开一个有界工作队列，在本次操作结束前排空：同一条事实按任务号升序扇出，
+  本条事实完成的任务按任务号升序处理（腾出类型 → 记完成 → 有奖励置待领、自动领奖的立即领，失败保留待领 →「完成任务 X」事实与后续任务排队）；
+  先排空全部事实再逐个走完整接取闸接后续任务（接取失败只记日志）——否则后续任务的接取回填与在途的完成事实会重复计数。
+  基线把这三件事塞进事件队列而线上从不派发，Java 按设计意图做（PARITY 记为有意差异）。
+- **领奖**：领奖闸只看资格（不看背包空间，同基线），物品经 `BagService` 整批进人物背包，流水原因 `QUEST_REWARD`（TX_QUEST_REWARD = 7，
+  extra 带任务号），成功才清待领；失败（满包 6006、发不出号 6004、全服禁发 1005）保留领奖资格。
+- **持久化**：`player_state.mission`（`MissionState`：进行中（每格进度、接取时间）/ 已完成 / 待领，都按任务号无符号升序写出），
+  不认识的字段原样带回，从没接过任务的不写。存档不校验：格数与表不符的任务永不推进（同基线），表里删掉的任务照样显示（configured=false）、
+  不占类型、不再推进。
+- **客户端**：`MissionFeature`（193 / 194 / 195 都回完整列表，失败只回 tip）、`ActivityFeature`（190：任务类型 2 的行按排期算状态，
+  窗口 `[start, end)` 按 uint64 无符号比较，开放时再跑接取闸决定能否参与）。列表每行都跑只读的接取 / 领奖闸，一次请求只读一次时钟。
 
 ## 5. 线程模型
 

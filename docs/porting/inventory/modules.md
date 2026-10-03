@@ -12,8 +12,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 190 活动列表、191/192 背包读取 / 整理、193/194/195 任务列表 / 接取 / 领奖、54 货币列表，外加仅 dev/test 开放的 37/49/94/95 GM 货币指令；
 **没有穿脱装备、使用物品、丢弃、拆分、移动格子、扩容的客户端 RPC**（物品只在回合制战斗里作为药品使用），物品入包只来自战斗掉落、任务奖励与通用资产通道。
 持久化全部随 `player_database` 一条记录（`bag_component` / `mission_component` / `currency`）落盘。Java 版现状（2026-10-03）：
-货币（54、37/49/94/95，批次 2.1）、资产流水 / 快照 / 全服禁发 / 异常检测（2.3）、背包（191/192，2.4）已做，玩家数据存 `player_state` 一份 protobuf；
-任务 / 活动（190、193–195）随 2.5，`xm-scene` 目前对它们回 1006 kFeatureUnavailable。
+货币（54、37/49/94/95，批次 2.1）、资产流水 / 快照 / 全服禁发 / 异常检测（2.3）、背包（191/192，2.4）、任务 / 活动（190、193–195，2.5）已做，玩家数据存 `player_state` 一份 protobuf。
 
 ## 功能
 
@@ -41,7 +40,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: bag-core-container, gain-block, transaction-log, anomaly-detector, 跨节点换图冻结（`PlayerLifecycleSystem::IsCrossZoneFrozen`）
 - behavior: 每个入口先判跨 zone / 换节点冻结（AddItem(s) 回 1005 `kInvalidParameter`；RemoveItemsByGuid 回 27003 `kAssetFrozen`），再判全服禁发、每玩家 GM 禁发（都回 1005），然后调容器，最后按每个写入 / 淘汰 / 销毁 / 扣除的实例落流水（TX_SYSTEM_GRANT / TX_QUEST_REWARD / TX_ITEM_AWARD / TX_ITEM_DESTROY / TX_AUCTION_SELL，带 correlation_id 与来源 extra）并喂异常检测。`SortByPlayerRequest` = 玩家显式整理（唯一会重排的入口）；自动整理必须显式选 `kMergeOnly`。战斗掉落：先入主包；失败时按「入包前后持有量差」只把**没进去的余量**改投临时格（防复制），两处都失败只记 ERROR（物品丢失）。
 - internal: Java 需要一个 `BagService` 门面：冻结 / 禁发闸、流水回执、`mutated` 语义（失败时包是否已改动，资产通道据此区分 RETRY 与 APPLIED+partial）。闸门（战斗中、冻结）**不得下沉**到容器层，否则战斗结算会被自己拦住。
-- java: partial（2026-10-03，批次 2.4）— `com.game.scene.bag.BagService`：冻结闸（随 5.2，目前放行）→ 全服物品禁发 1005 → 容器 → 入包流水（每配置一条）+ 淘汰 / 整理退役销毁流水 + 物品获取异常检测；mutated 语义由整批原子取代（失败即未改动）。战斗掉落 / 任务奖励 / 资产通道入口随 6.x / 2.5 / 2.9
+- java: partial（2026-10-03，批次 2.4）— `com.game.scene.bag.BagService`：冻结闸（随 5.2，目前放行）→ 全服物品禁发 1005 → 容器 → 入包流水（每配置一条）+ 淘汰 / 整理退役销毁流水 + 物品获取异常检测；mutated 语义由整批原子取代（失败即未改动）。任务奖励入口 2.5 已接；战斗掉落 / 资产通道入口随 6.x / 2.9
 - size: M
 - robot: Go `features_battle_smoke.go`（掉落 / 消耗）；Java none
 - hazards: ① 物品禁发回 1005，而货币禁发回 27005 `kAssetBlocked`，两套口径不一致；② `AddItem` 流水只记 `PrimaryWrittenGuid`（一次拆成多堆时只记第一个 guid，数量记整批）；③ 冻结拒绝时背包回 1005（终局类），货币回 27003（RETRY 类）；④ 每玩家 `PlayerItemBlockList` 全仓**从未 emplace**，GM 物品禁发实际不可用（见 gain-block）。
@@ -212,9 +211,9 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - behavior: 只开放 scope 0（普通任务；1 成就、2 日常只保存不操作，其它 scope → 1005）。接取门禁 `CheckAccept`（顺序即错误码优先级）：实体 / guid 无效或冻结 → 1009 / 1005；无任务组件 → 1003；表无此 id → 1001；无 bit 位 / 无条件 / `condition_order>1` → 1002；已接 → 5004 `kMissionIdRepeated`；已完成或待领 → 5001；同 (type, sub_type) 已有进行中 → 5000 `kMissionTypeAlreadyExists`；条件查不到 / 比较符不是 ≥ > == / 目标为 0 → 1002；条件类别不是 1 击杀 / 6 等级 / 8 完成任务、`valid_duration≠0`、用了 condition2–4 槽、击杀类无「副本里真实可达的怪」、`quantity_type>1` 或非等级类用 quantity_type=1 → 1003；奖励表不可发 → 1002；type 2 不在开放窗口 → 1006。
   接取后为每个条件建一格进度并按条件类别建索引，记 `mission_begin_time`，立即回填当前等级与「已完成任务」历史事实（只推进新接的这一个，历史每个任务至多贡献一次）。完成：所有槽达标 → 从进行中移除、置完成位；有奖励时 `auto_reward=1` 先置待领位再投递自动发奖事件，否则只置待领位；投递 `next_mission_id` 的自动接取（同样走完整门禁）与「完成任务 X」条件事件。顺序目标（`condition_order=1`）一条事实只推进当前第一个未达标格。
 - internal: 状态全在玩家内存，随玩家记录保存（见 mission-persistence）。Java 需要：场景线程内的任务状态（进行中 map + 完成 / 待领位集合 + (type,subtype) 占用集 + 条件类别 → 任务索引）。
-- java: missing
+- java: done（2026-10-03，批次 2.5）— `com.game.scene.mission.MissionService` + `com.game.scene.player.PlayerMissions`：接取闸先后与错误码、回填、顺序 / 并行推进、封顶 / 覆盖同基线；完成后的自动领奖 / 链式接取 / 完成事实同步执行（有界工作队列，hazard ①，PARITY 记为有意差异）；冻结闸随 5.2
 - size: L
-- robot: Go `robot/features_smoke_scenario.go`（`accept_mission_id` / `claim_mission_id` 显式选项）；Java none
+- robot: Go `robot/features_smoke_scenario.go`（`accept_mission_id` / `claim_mission_id` 显式选项）；Java xm-robot `features`（接取闸错误码、接取 12 / 13，不依赖战斗的部分）
 - hazards: ① **生产上 `tlsEcs.dispatcher.update()` 从未被调用**（全仓只有单测调用；生产里仅有的三处 `enqueue` 都在 `mission.cpp:358/374/383`），所以 enqueue 的三类事件永远不派发：自动发奖退化成「待领、需玩家手动 195」，链式后续任务不会自动接取（玩家可在列表里手动接），「完成任务 X」条件对**已在进行中**的任务不会实时推进（只在接取时回填），且队列无限增长（内存泄漏）。Java 应按语义同步执行，并在 PARITY 记为有意差异；② `E_MISSION_TIME_OUT / E_MISSION_FAILD` 没有任何代码会设置；③ `AbandonMission` 存在但无客户端协议；④ `CompleteAllMissions`（GM 批量完成，无副作用）与正常完成路径不能合并。
 
 ### condition-eval — 条件判定（Condition 表）
@@ -224,7 +223,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: none
 - behavior: 比较符 0 `>=`、1 `>`、2 `<=`、3 `<`、4 `==`，越界视为不满足；目标 = Mission.target_count[i]（>0 时）否则 Condition.target_count。槽匹配：每个**非空**槽 conditionK 必须包含事件的第 K 个 id（槽内 ANY、槽间 ALL），全空槽匹配任何事件，事件不带 id 一律不推进。等级类（6）特殊：condition1 是等级门槛表（事件等级 ≥ 任一即可），进度 = 当前等级（覆盖而非累加）；`quantity_type=1` 也是覆盖语义；累加型在目标处饱和（`>` 饱和到 target+1），封顶 u32。
 - internal: 纯函数，Java 一个工具类即可。
-- java: missing
+- java: done（2026-10-03，批次 2.5）— `com.game.scene.mission.ConditionRules`（纯规则，单测逐条对照）；静态可用性（来源 / 可达怪物 / 比较符 / 计数方式）在 `MissionTables` 加载时一次算好
 - size: S
 - robot: none
 - hazards: ① 枚举里还有 2 对话 NPC、3 完成指定条件、4 使用物品、5 交互、7 自定义，均无事实来源，接取门禁直接挡掉；② `ClampIfFulfilled` 有实现无生产调用。
@@ -236,7 +235,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: 回合制战斗结算（另一区域）、等级变化（属性区域的 175 GmSetPlayerLevel；经验系统未接）、mission-core
 - behavior: 击杀只认战斗最终结算里的真实击杀（受结算幂等账本保护，重投不会重复推进）；升级事实带新等级；冻结中的玩家丢弃条件事件。
 - internal: Java 需要一个场景线程内的「玩法事实」分发点（击杀 / 等级 / 任务完成），任务系统订阅。
-- java: missing — Java 无战斗、无等级变化来源（`PlayerData.level` 只读不变）
+- java: partial（2026-10-03，批次 2.5）— 等级事实：GM 175 成功后推 170 之后、回应答之前发（`AttributeFeature` 等级连带）；接取回填；「完成任务 X」事实同步扇出到已在进行中的任务（基线线上不派发，见 mission-core hazard ①）；击杀事实入口 `MissionService.onMonsterKilled` 等 6.3 回合制战斗结算接入
 - size: S
 - robot: Go `features_battle_smoke.go`（打怪推进击杀任务）
 - hazards: 实际可推进的只有击杀（需战斗）与等级（只有 GM 改等级）；Java 在战斗与等级系统落地前，任务只能接、不能完成。
@@ -249,9 +248,9 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - behavior: 列表 = 任务表全部行（scope 0）∪ 存档里每个 scope 的进行中 / 完成 / 待领 id（含表里已删除的），按 (scope, id) 升序。每条 `PlayerMissionInfo`：状态 CLAIMABLE > COMPLETED > ACTIVE（或 FAILED）> NOT_ACCEPTED；`configured=false` 时 reason「任务配置暂不可用」；`can_accept / can_claim` 复用正式门禁的只读检查；不可操作时给中文 `unavailable_reason`（「完成任务目标后领取奖励」「任务已完成」「任务已失效」「当前状态暂不可领奖，请稍后重试」「请先完成同类型任务」、type 2 用排期原因、1003 →「任务所需玩法暂未开放」、其它「当前条件下暂不可接取」）；objectives 按目标下标逐格给出 category / target / progress / completed（已完成任务不伪造计数，只给 completed=true），`name / description` 恒空；`state_persistent` = 有任务组件。
   194 / 195 成功后回整份新列表；失败回 tip（错误码见 mission-core / mission-reward-grant），列表为空。客户端：领奖成功后自动重拉 191。
 - internal: Java 在 `ClientRequestHandler` 加三个方法；时间用服务器 UTC 毫秒。
-- java: missing — 当前回 1006
+- java: done（2026-10-03，批次 2.5）— `com.game.scene.mission.MissionFeature`：列表键集、排序、状态优先级、不可用原因、目标展示、失败只回 tip 同基线；robot `features` 场景（不依赖战斗的部分）
 - size: M
-- robot: Go `features_smoke_scenario.go`；Java none
+- robot: Go `features_smoke_scenario.go`；Java xm-robot `features`（193 / 194 / 195 / 190，不依赖战斗的部分）
 - hazards: ① 失败时 194 / 195 不带列表，客户端须重拉 193；② 每次 193 都对**全表**跑一遍接取 / 领奖门禁（含遍历 Dungeon×Monster 判可达），表大时是热点；③ 字符串原因是客户端直接展示的文案，Java 必须逐字一致。
 
 ### mission-reward-grant — 任务奖励发放（Reward 表 → 背包）
@@ -259,12 +258,12 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - client messages: 195（与自动发奖）
 - tables: Reward（`reward[2]{reward_item, reward_count}`）、Item、Mission.reward_id / auto_reward
 - depends on: bag-orchestration-service, mission-core
-- behavior: 奖励只解释为**物品**（不发货币）：每条 item / count 必须非 0 且物品存在、同物品累加不溢出，否则 1002；奖励为空 1002。领奖资格：不在待领 → 已完成回 12000 `kRewardAlreadyClaimed`，否则 5002 `kMissionIdNotInRewardList`；待领但完成位缺失（存档不一致）→ 1002；`reward_id=0` → 1002；无背包组件 → 1003。发放进人物背包（kInventory，不淘汰），流水 TX_QUEST_REWARD；整批预检失败（满包 6005 等）不改包、不消耗领取权；**发放成功后才清待领位**（同一事件循环内同步，无竞态窗口）。
+- behavior: 奖励只解释为**物品**（不发货币）：每条 item / count 必须非 0 且物品存在、同物品累加不溢出，否则 1002；奖励为空 1002。领奖资格：不在待领 → 已完成回 12000 `kRewardAlreadyClaimed`，否则 5002 `kMissionIdNotInRewardList`；待领但完成位缺失（存档不一致）→ 1002；`reward_id=0` → 1002；无背包组件 → 1003。发放进人物背包（kInventory，不淘汰），流水 TX_QUEST_REWARD；整批预检失败（批量满包 6006 `kBagItemNotStacked`、发不出号 6004、被封禁 1005）不改包、不消耗领取权；**发放成功后才清待领位**（同一事件循环内同步，无竞态窗口）。
 - internal: Java 同样「先入包、后清领取位」，两者随同一次写回落盘。
-- java: missing
+- java: done（2026-10-03，批次 2.5）— `MissionTables` 加载时按基线规则合并奖励；`MissionService.claim` 经 `BagService` 整批进人物背包（满包 6006、发不出号 6004、全服禁发 1005，失败保留领奖资格），流水 TX_QUEST_REWARD = 7、extra 带任务号；每玩家物品禁发基线无生产写入方，不做
 - size: S
 - robot: Go `features_smoke_scenario.go`（claim 选项）
-- hazards: ① 批量入包失败可能已部分写入（`mutated`），但领奖路径不看 `mutated`，重试会重复发放已入包的那部分——人物背包不淘汰，部分写入只在多物品奖励中途铸号失败时出现，概率低但存在；② reward 模块的 bitset 工具是死代码，不需要移植。
+- hazards: ① （已澄清）基线整批入包前在 `Bag::ReserveForBatchAdd` 按整批实例数预检铸号（`bag_system.cpp:250-257`），Java `Bag.add` 规划后一次铸齐整批 guid 再改状态，两边都不会半批写入，领奖失败重试不会重复发放；② reward 模块的 bitset 工具是死代码，不需要移植。
 
 ### mission-persistence — 任务持久化与旧格式迁移
 - mmorpg: `services/scene/player/system/mission_marshal.{h,cpp}`、`player_database_loader.cpp:110/152`、`proto/common/database/bag_quest_mail_data.proto`（`QuestAllData` / `QuestScopeData` / `QuestEntry`）、`proto/common/component/mission_comp.proto`
@@ -273,7 +272,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: mission-core
 - behavior: 存：`scoped_state_present=true` + 每个 scope 一条 `{scope, mission_list（进行中 + begin_time，清掉 complete_missions 位图字节）, completed_mission_ids, claimable_mission_ids}`（id 列表升序，含表里已删除的任务 id，避免历史状态被静默丢弃）。取：新格式按 scope 还原；旧格式（`active` / `completed`）迁移：state 3 = 已领、state 2 = 已完成待领、其余为进行中并补齐进度槽；最后重建条件 / 类型索引并确保 scope 0 存在。
 - internal: 与背包、货币同一条玩家记录同一次写回。
-- java: missing
+- java: done（2026-10-03，批次 2.5）— `player_state.mission`（Java 自有 `MissionState`，只有 scope 0、平的；进行中 / 已完成 / 待领按任务号无符号升序写出、未知字段带回、重复条目第一个为准）；没有旧格式要迁移
 - size: S
 - robot: none
 - hazards: ① 完成状态以「任务 id 列表」持久化，运行时用 bit index（表里没有 bit 位的 id 进 unmapped 集合）；② 旧格式迁移只有 Go/C++ 历史存档需要，Java 新库不需要。
@@ -285,9 +284,9 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: mission-core（`CheckAccept` 决定 can_participate；194 对 type 2 也查开放窗口）
 - behavior: 回 `{activities（按 activity_id 升序）, server_time_ms}`。状态：无排期行或 `enabled=false` → UNSCHEDULED「活动尚未排期，敬请期待」；now < start → UPCOMING「活动尚未开始」；now ≥ end → ENDED「活动已结束」（区间左闭右开）；否则 OPEN。排期配置非法（start=0 而 end≠0、end ≤ start、enabled 但窗口全 0、id 不匹配）→ 该条清空并给「活动配置异常，暂不可参与」。OPEN 但不能接：已接 / 已完成 →「请在任务页查看活动进度」、同类型 →「请先完成同类型活动任务」、其它 →「活动所需玩法或当前状态暂不满足参与条件」。name / description / icon_key 恒空。
 - internal: 纯读，时间源用服务器 UTC 毫秒（Java 用 `SceneClock` 同源时钟以便单测）。
-- java: missing
+- java: done（2026-10-03，批次 2.5）— `com.game.scene.mission.{ActivitySchedules,ActivityFeature}`：190 同基线（未排期不带窗口、[start, end) 按 uint64 无符号、非法窗口启用 / 停用都清零回 1002、开放时再跑接取闸定原因）；参与走 194
 - size: S
-- robot: Go `features_smoke_scenario.go`（读活动）
+- robot: Go `features_smoke_scenario.go`（读活动）；Java xm-robot `features`（读活动）
 - hazards: ① 窗口用绝对毫秒（`baseline_*`），没有周期 / 每日重复语义；② 排期配置异常时该条目 `activity_id` 也被清成 0，客户端会看到一条 id=0 的活动。
 
 ### asset-op-channel — 通用资产通道（scene 侧 AssetDebit / AbortDebit / Credit）
@@ -325,5 +324,5 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 7. **审计落点**：Java 没有 Kafka。资产流水 / 快照是先引入 spring-kafka，还是直接异步写 `xm_java` 的流水 / 快照表？（两者都只是审计，不影响玩法结果。）
 8. **全服禁发**：基线是 thread_local 且无写入口，等于不存在。Java 是否需要真正可用的全服禁发（Nacos 配置推送）？若做属于有意增强。
 9. **任务表数据的可达性**：Mission 17 行里有多少行能通过接取门禁（依赖 Dungeon×Monster 可达与条件类别 1/6/8）？Java 在战斗 / 等级系统落地前，任务只能接不能完成，验收口径需要先定。
-10. **领奖部分写入**：多物品奖励中途失败时基线不看 `mutated`，重试可能重复发放；Java 是否要先整体预检铸号（Snowflake 不会耗尽，问题基本消失）并在 PARITY 记录？
+10. ~~**领奖部分写入**~~ 已澄清：基线 `ReserveForBatchAdd` 整批预检铸号，Java `Bag.add` 整批原子，失败不改包、不消耗领奖资格，不需要额外幂等。
 
