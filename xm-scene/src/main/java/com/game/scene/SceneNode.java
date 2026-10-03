@@ -2,6 +2,9 @@ package com.game.scene;
 
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.audit.AuditProperties;
+import com.game.audit.AuditTopics;
+import com.game.audit.KafkaTopicAdmin;
 import com.game.common.RunMode;
 import com.game.common.id.Snowflake;
 import com.game.common.token.NodeLinkAuth;
@@ -15,8 +18,12 @@ import com.game.scene.attribute.AttributeFeature;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.attribute.AttributeTables;
 import com.game.scene.audit.AssetAudit;
+import com.game.scene.audit.AuditPipeline;
+import com.game.scene.audit.KafkaAssetAudit;
 import com.game.scene.currency.CurrencyFeature;
+import com.game.scene.currency.CurrencyService;
 import com.game.scene.discovery.SceneDirectoryPublisher;
+import com.game.scene.id.SceneGuids;
 import com.game.scene.link.GateLinks;
 import com.game.scene.link.LinkIdentity;
 import com.game.scene.link.NodeLinkHandler;
@@ -81,6 +88,10 @@ public class SceneNode implements SmartLifecycle {
     static final int MIN_NODE_ID = 1;
     static final int MAX_NODE_ID = Snowflake.MAX_WORKER;
     static final Duration LEASE_TTL = Duration.ofSeconds(15);
+    /** 全服发号租约的作用域：0 = 全服（不按 zone 分，见 NodeTypes.SCENE_GUID）。 */
+    static final int GUID_LEASE_SCOPE = 0;
+    /** Kafka 不可达时重试核对审计 topic 的间隔。 */
+    static final long AUDIT_REVERIFY_SECONDS = 30;
     /** 其他线程同步等待逻辑线程执行一个任务的上限（目录快照、归属快照、启动建场景）。停服写回不用它，用整个停服预算。 */
     private static final long LOGIC_CALL_TIMEOUT_MS = 5_000;
 
@@ -92,6 +103,7 @@ public class SceneNode implements SmartLifecycle {
     private final AttributeTables attributeTables;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
+    private final AuditProperties audit;
     private final String instanceId = UUID.randomUUID().toString();
     /** 最近一次目录快照里的在线人数（停服写回没能执行时报告用，任意线程可读）。 */
     private final AtomicInteger approxPlayers = new AtomicInteger();
@@ -99,6 +111,8 @@ public class SceneNode implements SmartLifecycle {
     // 以下在 start() 里依序创建、release() 里逆序释放；租约丢失回调在调度线程上读取，所以都是 volatile。
     private volatile ScheduledExecutorService scheduler;
     private volatile NodeIdLease lease;
+    private volatile NodeIdLease guidLease;
+    private volatile AuditPipeline auditPipeline;
     private volatile DefaultEventLoop logicLoop;
     private volatile ThreadPoolExecutor storageExecutor;
     private volatile GateLinks links;
@@ -113,12 +127,13 @@ public class SceneNode implements SmartLifecycle {
 
     /**
      * @param attributeTables 属性加点配表视图（与 {@code tables} 来自同一份配表快照）
+     * @param audit    资产审计管线配置（Kafka）
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
      * @param metrics  scene 指标（各组件共用一份）
      */
     public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
                      MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
-                     NodeLinkAuth linkAuth, SceneMetrics metrics) {
+                     NodeLinkAuth linkAuth, SceneMetrics metrics, AuditProperties audit) {
         this.props = props;
         this.redis = redis;
         this.playerStore = playerStore;
@@ -127,6 +142,7 @@ public class SceneNode implements SmartLifecycle {
         this.attributeTables = attributeTables;
         this.linkAuth = linkAuth;
         this.metrics = metrics;
+        this.audit = audit;
     }
 
     @Override
@@ -171,7 +187,8 @@ public class SceneNode implements SmartLifecycle {
         StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics);
 
         GateLinks gateLinks = new GateLinks(metrics);
-        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, AssetAudit.log());
+        CurrencyService currency = new CurrencyService(startAudit(zoneId, nodeId, settings));
+        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, attributes::initializeOnLoad);
         links = gateLinks;
@@ -181,7 +198,7 @@ public class SceneNode implements SmartLifecycle {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables, runMode,
-                List.of(new CurrencyFeature(AssetAudit.log()), new AttributeFeature(attributes, registry)));
+                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry)));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         callOnLogic(() -> {
             tables.worldSceneConfigIds().forEach(sceneWorld::createScene);
@@ -320,6 +337,15 @@ public class SceneNode implements SmartLifecycle {
         if (loop != null) {
             loop.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
         }
+        // 写回之后（逻辑线程已停、不再产生审计记录）才发完审计队列，最后交还发号租约：反过来别的实例可能拿到同一个 worker、发重号
+        AuditPipeline pipeline = auditPipeline;
+        if (pipeline != null) {
+            pipeline.close(props.scene().auditFlushTimeout());
+        }
+        NodeIdLease guids = guidLease;
+        if (guids != null) {
+            guids.close();
+        }
         if (l != null) {
             l.close();
         }
@@ -327,6 +353,38 @@ public class SceneNode implements SmartLifecycle {
         if (sched != null) {
             sched.shutdownNow();
         }
+    }
+
+    /**
+     * 资产审计：占全服发号租约、建审计管线并核对 topic。分区契约不符抛出（拒绝启动）；Kafka 不可达（含地址解析不了）
+     * 时启动线程最多等 {@code xm.audit.init-timeout} 后告警并照常启动，后台每 30 秒重试，期间流水完整写兜底日志。关闭审计（{@code xm.audit.enabled=false}）时只写本地审计日志。
+     */
+    private AssetAudit startAudit(int zoneId, int nodeId, SceneNodeProperties.SceneSettings settings) {
+        if (!audit.enabled()) {
+            log.warn("资产流水未接 Kafka（xm.audit.enabled=false），只写本地日志 {}", AssetAudit.LOGGER);
+            return AssetAudit.log();
+        }
+        NodeIdLease guids = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
+                Snowflake.MAX_WORKER, instanceId, LEASE_TTL,
+                () -> log.error("全服发号租约丢失：资产流水发不出号、改写兜底日志，请尽快重启本节点"));
+        guidLease = guids;
+        String clientId = "xm-scene-audit-z" + zoneId + "-n" + nodeId;
+        int generation = audit.topicGeneration();
+        AuditPipeline pipeline = new AuditPipeline(
+                () -> AuditPipeline.kafkaProducer(audit.bootstrapServers(), clientId, settings.auditMaxBlock()),
+                () -> new KafkaTopicAdmin(audit.bootstrapServers(), clientId + "-admin"),
+                AuditTopics.all(generation), AuditTopics.transactionLog(generation).name(), audit.replicationFactor(),
+                audit.initTimeout(), new SceneGuids(new Snowflake(guids.nodeId()), guids::isValid),
+                settings.auditQueueCapacity(), metrics);
+        auditPipeline = pipeline;
+        // 第一次核对在启动线程上同步做（分区契约不符才能拒绝启动）；Kafka 不可达时最多等 init-timeout 后照常启动。
+        // 之后每 30 秒一次：没核对通过（或生产者进入致命状态被丢弃）就在审计线程上重试，已通过时立即返回
+        pipeline.verifyNow();
+        scheduler.scheduleWithFixedDelay(pipeline::requestVerify, AUDIT_REVERIFY_SECONDS, AUDIT_REVERIFY_SECONDS,
+                TimeUnit.SECONDS);
+        log.info("资产审计就绪 kafka={} topic 代次={} 发号 worker={} topic 已核对={}", audit.bootstrapServers(), generation,
+                guids.nodeId(), pipeline.verified());
+        return new KafkaAssetAudit(pipeline, SceneClock.SYSTEM, zoneId);
     }
 
     /** 租约丢失回调（调度线程上，只调一次）。 */

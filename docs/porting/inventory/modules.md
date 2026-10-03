@@ -151,7 +151,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: id-segment-client（tx_id 走 `txlog` 号段）、Kafka
 - behavior: 每次货币增减、补缴抵扣、物品创建 / 销毁 / 淘汰 / 整理退役 / 转移都发一条 `TransactionLogEntry{tx_id, timestamp(秒), tx_type(27 种), from/to_player, item_uuid, item_config_id, item_quantity, currency_type, currency_delta, balance_before/after, correlation_id, extra, zone_id}`；topic 有效名 = `transaction_log_topic_g<N>`（N 来自部署配置 `AuditTopicGeneration`，0 当 1，与 Go 消费端同一规则）；分区键 = from_player 否则 to_player（按玩家有序）；生产者盖 zone_id。fire-and-forget：拿不到 tx_id 时**整条丢弃**（fail-closed，记 ERROR），Kafka 发送失败只记日志。
 - internal: Java 版有自己的存储且不与 Go data_service 混部，所以 Java 需要：自己的流水 topic（或直接异步批量写 MySQL `xm_java` 的流水表）、全局唯一 tx_id（Java 现成 `com.game.common.id.Snowflake` + 节点号租约即可，不必照抄号段）、按玩家分区有序。只是审计，不影响玩法结果。
-- java: missing — Java 尚未引入 Kafka（`docs/design/tech-stack.md` 记为后续批次）
+- java: done（2026-10-03，批次 2.3a）— 货币变动经 `CurrencyService` → `KafkaAssetAudit` → `AuditPipeline` 发 `xm-transaction-log-g<N>`，xm-data 落 `transaction_log`；号用全服号段租约上的雪花（不照抄号段）；没被确认的完整写兜底日志。物品类流水随背包批次
 - size: M
 - robot: none（Go 侧只有单测）
 - hazards: ① 流水是「尽力而为」：Kafka 不可用或号段耗尽时资产照改、流水丢失，回滚 / 追溯链会断；② `timestamp` 只到秒，同一秒多条要靠 tx_id 排序，而号段 tx_id 不保证时间序；③ 裸 topic 名会被 broker 自动建成 1 分区，消费端分区契约永久失配——世代后缀是硬约束。

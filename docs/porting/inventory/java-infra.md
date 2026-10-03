@@ -241,7 +241,7 @@
 - depends on: none
 - behavior: 运维可见：broker 不可用时节点照常启动（后台重连），但若 topic 分区数与契约不符则拒绝启动；生产失败日志限流（窗口内前 N 条逐条、其余计数并在窗口过期 / 重建 / 析构时补报）。
 - internal: 生产者：幂等（acks=all）、本地队列满先 poll(0) 再重试一次（不阻塞主循环）、ERR__FATAL 时按最小间隔重建实例、purge 回执计数但不再触发重建、停机有界 flush；消费者：`session.timeout.ms=45000`、`max.poll.interval.ms=900000`、可选显式分区 assign + 从末尾开始 + 不提交 offset（控制面用）、后台线程 poll 并把解码后的回调投递回节点 EventLoop；`DecodeKafkaProtoPayload<T>` 空载荷 / 解析失败只记日志丢弃。Java 版：spring-kafka（tech-stack 已选），等价配置为 `enable.idempotence=true`、手动 `assign()` + `seekToEnd()` + `enable.auto.commit=false`，回调投递到 scene 逻辑线程 / gate EventLoop（§3 线程所有权）。
-- java: missing — 无 spring-kafka 依赖、无任何 Kafka 代码（tech-stack.md「首批竖切未用到，后续批次用」）。
+- java: partial（2026-10-03，批次 2.3a）— `xm-audit`（topic 规格、启动期核对：缺就建、分区不符拒绝启动、消费方校正配置）+ scene `AuditPipeline`（专用线程、幂等生产者、兜底日志）+ xm-data `ConsumerLoop`（落库成功才提交、可恢复故障暂停重试、毒丸隔离）。用官方 kafka-clients，不用 spring-kafka 容器。生产者进入致命状态时丢弃、由 30 秒一次的核对重建。尚缺：生产失败日志限流（现在每条失败都打 WARN）；通用消费封装（把解码后的回调投递到 scene 逻辑线程 / gate EventLoop，以及控制面用的显式 assign + seekToEnd + 不提交模式），随首个需要它的批次。
 - size: M
 - robot: none
 - hazards: ① broker 自动建 topic（`auto.create.topics.enable` + `num.partitions=1`）抢在 topic-init 之前会建出 1 分区的 topic，显式分区的消费者永远收不到——必须启动期核对分区数（mmorpg 只在「查到且不等」时拒绝启动，查不到只告警）。② 共享分区上提交 offset 会互相覆盖，所以控制面消费者禁止提交。③ C++ 的 900s max.poll.interval 掩盖了主循环卡顿，Java 若用 group 消费需另配。
@@ -265,7 +265,7 @@
 - depends on: kafka-client-infra
 - behavior: 运维可见：资产变更流水与玩家快照异步落 data_service 库（流水按 tx_id 主键 INSERT IGNORE 幂等、快照按 snapshot_guid 去重），供客服查询 / 回档；异常检测命中发告警 topic。topic 代次 g<N> 与 data_service 配置对齐，分区数不可原地扩。
 - internal: 生产方 C++ scene，消费方 go/data_service（攒批落库）。Java 版需要：scene 侧在资产变更点产出流水 / 快照事件（Kafka 或直接写库）+ 落库消费者。
-- java: missing — Java 版尚无货币 / 背包等资产系统，也无流水表。
+- java: partial（2026-10-03，批次 2.3a）— 资产流水 topic `xm-transaction-log-g<N>`（6 分区、30 天、不限大小）+ xm-data 落 `transaction_log`；玩家快照随 2.3b，异常告警改为日志 + 指标（2.3c，无 Kafka topic）。
 - size: M（不含各资产系统本身；业务归 data_service / 资产区域，这里只登记基础管线）
 - robot: robot.currency-crash.yaml（currency_crash_window_scenario.go）、robot.data_stress.yaml
 - hazards: ① retention 必须逐 topic 显式声明且大于消费者最长滞后（C++ 900s poll 间隔），topic-init 会校验；继承 broker 默认（compose 里 30 min）会在消费者积压时丢审计数据。② 快照「先查后插」非原子，并发同 guid 依赖唯一键兜底。

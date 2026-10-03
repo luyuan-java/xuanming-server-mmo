@@ -12,7 +12,6 @@ import com.game.proto.GmDeductCurrencyRequest;
 import com.game.proto.GmDeductCurrencyResponse;
 import com.game.proto.GmUnblockCurrencyRequest;
 import com.game.proto.GmUnblockCurrencyResponse;
-import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.AssetAudit.Reason;
 import com.game.scene.player.Wallet;
 import com.game.scene.world.PlayerCall;
@@ -21,16 +20,16 @@ import com.game.scene.world.SceneFeature;
 /**
  * 货币的客户端方法（{@code SceneCurrencyClientPlayer}）：54 GetCurrencyList 与 GM 的加 / 扣 / 封禁 / 解封（37 / 49 / 94 / 95）。
  * GM 方法先过运行模式闸（gate 一道、scene 分发入口一道，见 {@code ClientRequestHandler}），这里只做业务。
- * 规则与 tip 码见 {@link Wallet}；成功的变动记一条资产流水（{@link AssetAudit}，GM 发放 / 扣除单独记原因）。
+ * 规则与 tip 码见 {@link Wallet}；成功的变动经 {@link CurrencyService} 记一条资产流水（GM 发放 / 扣除单独记原因）。
  */
 public final class CurrencyFeature implements SceneFeature {
 
     private static final String SERVICE = "SceneCurrencyClientPlayer";
 
-    private final AssetAudit audit;
+    private final CurrencyService currency;
 
-    public CurrencyFeature(AssetAudit audit) {
-        this.audit = audit;
+    public CurrencyFeature(CurrencyService currency) {
+        this.currency = currency;
     }
 
     @Override
@@ -49,11 +48,9 @@ public final class CurrencyFeature implements SceneFeature {
 
     /** 37：成功回 {@code balance_after}；拒绝只回 tip（同基线：失败时不设 balance_after）。 */
     private void gmAdd(PlayerCall call, GmAddCurrencyRequest request) {
-        Wallet.Change change = call.player().wallet().add(request.getCurrencyType(), request.getAmount());
+        Wallet.Change change = currency.add(call.player(), request.getCurrencyType(), request.getAmount(), Reason.GM_GRANT);
         GmAddCurrencyResponse.Builder response = GmAddCurrencyResponse.newBuilder().setErrorMessage(tip(change.tipId()));
         if (change.ok()) {
-            audit.currencyChanged(call.player().playerId(), change.type(), request.getAmount(), change.before(),
-                    change.after(), Reason.GM_GRANT);
             response.setBalanceAfter(change.after());
         }
         call.reply(response.build());
@@ -61,11 +58,10 @@ public final class CurrencyFeature implements SceneFeature {
 
     /** 49：同 37。 */
     private void gmDeduct(PlayerCall call, GmDeductCurrencyRequest request) {
-        Wallet.Change change = call.player().wallet().deduct(request.getCurrencyType(), request.getAmount());
+        Wallet.Change change = currency.deduct(call.player(), request.getCurrencyType(), request.getAmount(),
+                Reason.GM_DEDUCT);
         GmDeductCurrencyResponse.Builder response = GmDeductCurrencyResponse.newBuilder().setErrorMessage(tip(change.tipId()));
         if (change.ok()) {
-            audit.currencyChanged(call.player().playerId(), change.type(), -request.getAmount(), change.before(),
-                    change.after(), Reason.GM_DEDUCT);
             response.setBalanceAfter(change.after());
         }
         call.reply(response.build());

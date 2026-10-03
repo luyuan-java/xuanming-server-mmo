@@ -4,7 +4,7 @@
 #   tools/local/start-slice.sh
 # XM_NODE_LINK_SECRET 是 gate → scene 节点链路握手密钥，xm-gate 与 xm-scene 读同一个值（本脚本把同一环境传给两者）。
 # XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-gate 读同一个值。
-# 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379 已就绪；已执行 ./mvnw -DskipTests install；
+# 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379、Kafka 127.0.0.1:9092（资产流水，xm-scene 生产、xm-data 消费）已就绪；已执行 ./mvnw -DskipTests install；
 # 存量库已按 docs/design/db-migrations.md 迁移到最新结构（M2 起 player 表多了 owner_released / owner_lease_until）。
 # 进程按依赖顺序启动，每个都等端口就绪再起下一个；日志在 run/logs/，PID 在 run/pids/。
 set -euo pipefail
@@ -21,12 +21,21 @@ cd "$(dirname "$0")/../.."
 export XM_RUN_MODE="${XM_RUN_MODE:-dev}"
 echo "运行模式 XM_RUN_MODE=$XM_RUN_MODE"
 
+# xm-data 运维接口令牌：没设就生成一个本机随机令牌写进 run/xm-admin-token（run/ 不进仓库；robot audit 场景从这里读）
+mkdir -p run
+if [[ -z "${XM_ADMIN_TOKEN:-}" ]]; then
+  XM_ADMIN_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  printf "%s" "$XM_ADMIN_TOKEN" > run/xm-admin-token
+fi
+export XM_ADMIN_TOKEN
+
 mkdir -p run/logs run/pids
 
 # 模块名 就绪端口
 SERVICES=(
   "xm-scene-manager 20882"
   "xm-login 20881"
+  "xm-data 18106"
   "xm-scene 21000"
   "xm-gate 11000"
   "xm-gateway 18081"

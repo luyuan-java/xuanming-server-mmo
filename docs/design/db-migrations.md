@@ -117,3 +117,20 @@ SHOW CREATE TABLE player_state;
 ```
 
 **回滚**：回退代码即可；表可留着（旧代码不读不写它），确需删除再 `DROP TABLE player_state;`（玩法数据随之丢失）。
+
+---
+
+## M4：资产流水表 `transaction_log`（2026-10-03，xm-data 建）
+
+**原因**：资产审计管线（architecture.md §4.5）的落库表。建表脚本是 `xm-data/src/main/resources/db/xm-data-schema.sql`，
+由 **xm-data** 启动时执行（`CREATE TABLE IF NOT EXISTS`），与玩家表的脚本分开、互不改动。
+
+**新库 / 存量库**：都无需手工操作——这是新表，xm-data 第一次启动时建出来。
+
+**核对**：
+
+```sql
+SHOW CREATE TABLE transaction_log;
+```
+
+**回滚**：回退代码即可；表可留着（旧代码不读不写它）。审计数据有留存要求时不要删表。

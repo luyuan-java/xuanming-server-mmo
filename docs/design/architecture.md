@@ -38,11 +38,13 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-api` | 库 | Dubbo 服务接口、调用方鉴权过滤器（§4.1）与内部 protobuf 消息（包 `xm.api`，只在 Java 版内部使用） |
 | `xm-discovery` | 库 | Redis（Redisson）上的节点号租约、游戏节点在线目录、玩家在线目录与服务端推送（§4.3） |
 | `xm-player-store` | 库 | 账号 / 玩家持久化（MyBatis）与玩家归属围栏 |
+| `xm-audit` | 库 | 资产审计管线的共享件：Java 自有的流水消息格式（包 `xm.audit`）、Kafka topic 规格（带代次后缀）与启动期核对（§4.5） |
 | `xm-gateway` | 进程（Spring Boot Web） | 区服列表、分配 gate 并签发 gate 令牌 |
 | `xm-login` | 进程（Spring Boot + Dubbo） | 登录、建角、进游戏、离开 / 断线 |
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景目录：玩家该进哪个场景节点的哪个场景 |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送 |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
+| `xm-data` | 进程（Spring Boot Web） | 审计数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维查询（§4.5） |
 
 依赖方向单向：进程模块 → `xm-api` / `xm-net` / `xm-player-store` / `xm-discovery` → `xm-common` / `xm-proto` / `xm-table`。
 
@@ -160,8 +162,8 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
     不转发；计入 `xm_gate_client_requests_total{result="gm_rejected"}`，逐条只打 DEBUG（防日志放大）。
   - **第二道锁在 scene 分发入口**：GM 方法在 scene 的运行模式不放行时回应答内 `error_message{1006}`、不调处理器（打 WARN——
     走到这里说明 gate 与 scene 的运行模式不一致，或有人绕开了 gate）。
-- **资产流水**（`AssetAudit`）：货币变动成功后记一条（玩家、币种、增减、前后余额、原因），批次 2.3 之前写到日志
-  `xm.audit.asset`（INFO），2.3 改为 Kafka 审计流。
+- **资产流水**（`AssetAudit`）：货币变动一律经 `CurrencyService`（唯一入口），成功后记一条（玩家、币种、增减、前后余额、原因）；
+  生产实现 `KafkaAssetAudit` 经审计管线发往 Kafka（§4.5），`xm.audit.enabled=false` 时只写本地日志 `xm.audit.asset`。
 - **玩法的加载钩子与连带推送**：`SceneWorld` 在玩家实例建好、进场景之前调用 `PlayerInitializer`（进场与接管旧实例都走；
   抛异常按进场失败处理并释放归属）——玩法在这里按配表规整恢复出来的状态、算派生值（属性系统：清掉表里已删的维度、按等级收敛超量分配、
   算二级属性）。处理器需要按顺序先推一条再回应答时用 `PlayerCall.push`（信封 id 0，客户端按推送处理），例如 GM 设等级先推 170 面板。
@@ -171,6 +173,38 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   不落库、每次加载重算（当前值进场回满：Java 版还没有伤害来源，持久化随路线图 2.7）。等级仍在 `player.level` 列，读存档时压回上限 85
   （`PlayerLevels`）。写操作成功回全量面板、拒绝只回 tip；170 只在等级变化后推（基线唯一的推送点）。
 
+### 4.5 资产审计管线（scene → Kafka → xm-data → MySQL）
+
+mmorpg：scene 的 `TransactionLogSystem` 发 Kafka `transaction_log_topic_g<N>`，go/data_service 攒批落全局库。Java 版有自己的格式、
+topic 与存储（不与 Go 混部）：
+
+- **格式与 topic**（`xm-audit`）：Java 自有 proto `xm.audit.TransactionLogRecord`（原因沿用 mmorpg TransactionType 的数值，
+  Java 独有的从 1001 起；时间是毫秒；`kind` 区分货币 / 物品——币种 0 是金币，只看币种分不出来）。topic `xm-transaction-log-g<代次>`，
+  6 分区、保留 30 天且不限大小（显式声明，不继承 broker 默认）。代次 `XM_AUDIT_TOPIC_GENERATION` 两端必须一致；分区数是契约，
+  改分区数就升代次换新 topic，绝不原地扩（会让同一玩家的键换分区、打乱顺序）。分区键 = 扣减方玩家号，否则获得方（无符号十进制），
+  同一玩家的流水进同一分区、按产生顺序。
+- **启动期核对**（`AuditTopicInitializer`）：两端都「缺就按规格建、存在就核对分区数」，不符拒绝启动；xm-data（topic 的主人）还把
+  保留策略校正到规格并读回。第一次核对在启动线程上同步做（契约不符才能拒绝启动）；Kafka 不可达（含地址解析不了）时最多等
+  `xm.audit.init-timeout`（缺省 10s）后告警并照常启动，后台每 30 秒重试；scene 在核对通过前不发送（broker 若开着自动建 topic，
+  会建出默认分区数、契约永久失配），这期间的流水只进兜底日志。
+- **scene 生产**（`AuditPipeline`）：逻辑线程只组装不可变草稿、投进有界队列（不阻塞、不抛异常——钱包已改，处理器再失败只会让客户端
+  误以为没成）；发号、序列化、`producer.send`（可能因元数据 / 缓冲阻塞到 `max.block.ms`）都在专用的 `scene-audit` 线程上，
+  单线程保住同一玩家的顺序。生产者幂等（acks=all），第一次核对通过时才建（地址解析不了时构造器就会抛，不能挡住启动）；
+  send 同步抛 KafkaException 说明生产者已不可用（致命状态 / 已关闭），丢弃后由下一次 30 秒核对重建。号来自全服号段租约（§9）。没被 Kafka 确认的每条记录（队列满 / 发不出号 /
+  未核对 / 发送或投递失败 / 停服没发完）都完整写进兜底日志 `xm.audit.fallback` 并计 `xm_scene_audit_records_total{result}`——
+  资产照改，流水不丢（同 mmorpg：审计尽力而为、不影响玩法；mmorpg 失败只记一行 ERROR，Java 记全量可回灌）。
+  停服：写回之后（逻辑线程已停）有界发完队列、关生产者，最后交还发号租约。
+- **xm-data 消费**（`ConsumerLoop`，每个 topic 一条线程一个 KafkaConsumer）：一次拉取的记录在**一个**库事务里按位点顺序落库
+  （`INSERT ... ON DUPLICATE KEY UPDATE` 主键幂等，不用 INSERT IGNORE——严格模式下它会把数据错误降成警告），落库成功才
+  `commitSync` 位点，崩在两者之间只会重放。可恢复的库故障：暂停全部分区（继续 poll 保住组成员身份）、退避 1s→30s 原批次重试，
+  不提交、不跳过——宁可积压不丢；数据错误（SQLState 22 / 23）逐行隔离，坏行写毒丸日志 `xm.audit.poison` 后跳过；解不出 / 字段非法的
+  记录跳过并计数。重平衡收走了待落库批次的分区就整批作废（位点没提交，新主人会重新拿到）。可多实例（同组分摊分区）。
+- **保留期**：`xm.data.retention.transaction-log`，缺省 0 = 永久保留（同 mmorpg）；设了就每小时分批 DELETE。
+- **运维查询**（xm-data 管理端口 18106，缺省只绑本机）：`GET /admin/transaction-log?player=&since=&until=&limit=`，按（时间、流水号）升序；
+  uint64 字段输出为十进制字符串。鉴权（过滤器只按容器规范化后的路径 `/admin/*` 生效，`/admin;x/`、`/%61dmin/` 之类绕不过）：
+  共享令牌 `XM_ADMIN_TOKEN`（请求头 `X-Xm-Admin-Token`，常数时间比较，未配置一律 503）+ 必填
+  操作人 `X-Xm-Operator`（UTF-8，1–64 字符、不含控制字符）；每次调用（含处理中抛异常的，按 500 记）都记运维审计日志 `xm.audit.admin`。本机切片脚本没设令牌时生成一个写进 `run/xm-admin-token`。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -178,7 +212,8 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   **按消息号限频**（C++ `MessageLimiter` 同义）：每个会话、每个消息号一个滑动窗口，上限取 MessageLimiter 表
   （`xm.table-dir` 下的 `messagelimiter.pb`，与 mmorpg 同一份配表），表里没有的缺省每秒 3 条；超频回
   `MessageContent{message_id, id, error_message{1008 kRateLimitExceeded}}`、不转发、计非法包（到阈值断开）。
-- **scene**：**一个逻辑线程拥有全部场景状态**（Netty `DefaultEventLoop`）。I/O 线程只做解码，把消息投递给逻辑线程
+- **scene**：**一个逻辑线程拥有全部场景状态**（Netty `DefaultEventLoop`）。审计记录（资产流水）在专用的 `scene-audit` 线程上发往 Kafka（§4.5），
+  逻辑线程只投递不可变草稿。I/O 线程只做解码，把消息投递给逻辑线程
   （每条链路有积压上限，见 §4.2）；阻塞 I/O（MySQL / Redis）在有界的存储线程池上执行，结果再投递回逻辑线程。
   场景状态只在逻辑线程读写，不加锁。
 - **scene 场景帧**（`SceneTicker` + `SceneWorld.step`）：20 FPS 定时任务同样跑在逻辑线程上，与客户端消息串行。
@@ -288,6 +323,9 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 
 - `player_id`：雪花（41 位毫秒 / 10 位 worker / 12 位序号），worker 为 `xm-login` 的节点号；只由 `xm-login` 产生。
 - `session_id`（uint32，仅服务端内部）：`[gate 节点号 15 位][序号 17 位]`，跳过 0 与在用号。
+- 资产流水号 `tx_id`（以后的快照号、物品 uuid）：雪花，worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0）——
+  场景节点自己的租约按 zone 分，两个 zone 的第一台 scene 会拿到同一个 worker、发出相同的号，落库按主键去重就会静默吞掉一条。
+  停服时先发完审计队列再交还这个租约（反过来别的实例可能拿到同一个 worker 发重号）。
 
 ## 10. 首批不做（后续批次）
 
@@ -309,6 +347,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | xm-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
 | xm-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
 | xm-scene | `http://127.0.0.1:18104/actuator/prometheus` | 管理专用端口；同机多个 scene 实例要各用 `SERVER_PORT` 错开（与链路端口一样） |
+| xm-data | `http://127.0.0.1:18106/actuator/prometheus` | Web 进程：同一端口上还有带令牌的运维接口 `/admin/**`（§4.5），默认只绑本机 |
 
 - **非 Web 进程的管理端口**：gate / login / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
   Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。

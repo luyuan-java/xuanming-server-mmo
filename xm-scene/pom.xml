@@ -48,6 +48,11 @@
             <groupId>com.game</groupId>
             <artifactId>xm-player-store</artifactId>
         </dependency>
+        <!-- 资产审计：流水格式与 topic 规格；Kafka 生产者在审计线程上 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-audit</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>io.netty</groupId>

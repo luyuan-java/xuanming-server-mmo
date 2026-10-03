@@ -5,8 +5,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * 资产流水（审计）出口：每次资产变动成功后调用一次（场景逻辑线程上，不得阻塞）。
- * mmorpg 发 Kafka {@code TransactionLogEntry}；Java 版在流水管线（路线图 2.3）接入前，先写专用日志
- * {@value #LOGGER}（一行一条、键值对，可被日志采集），语义同基线：尽力而为，只是审计，不影响玩法结果。
+ * 生产实现是 {@link KafkaAssetAudit}：经审计管线（{@link AuditPipeline}）发往 Kafka，xm-data 落库（architecture.md §4.5）；
+ * {@link #log()} 只在关闭管线（{@code xm.audit.enabled=false}）时用，写专用日志 {@value #LOGGER}。
+ * 语义同基线：尽力而为，只是审计，不影响玩法结果。
  */
 public interface AssetAudit {
 
@@ -31,7 +32,7 @@ public interface AssetAudit {
      */
     void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason);
 
-    /** 写专用日志的实现。 */
+    /** 写专用日志的实现（关闭审计管线时用；测试里也常用 lambda 代替）。 */
     static AssetAudit log() {
         Logger log = LoggerFactory.getLogger(LOGGER);
         return (playerId, currencyType, delta, before, after, reason) -> log.info(

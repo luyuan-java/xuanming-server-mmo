@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>xm-audit</artifactId>
+    <name>xm-audit</name>
+    <description>资产审计管线的共享件：Java 自有的流水 / 快照消息格式（xm.audit）、Kafka topic 规格与启动期核对。生产方 xm-scene，消费方 xm-data</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <!-- Apache Kafka 官方客户端（版本由 Spring Boot BOM 管理）；不用 spring-kafka 的监听容器，线程归属显式掌握 -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <!-- 只用 @ConfigurationProperties / @DefaultValue 绑定 xm.audit.*（生产方与消费方同一份配置口径） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

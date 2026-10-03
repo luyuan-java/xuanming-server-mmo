@@ -33,6 +33,7 @@ import com.game.proto.SwitchAttributeSchemeRequest;
 import com.game.proto.SwitchAttributeSchemeResponse;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.AssetAudit.Reason;
+import com.game.scene.currency.CurrencyService;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.Wallet;
@@ -98,7 +99,7 @@ class AttributeFeatureTest {
     }
 
     private void start(RunMode mode, int classId, int level, PlayerState state) {
-        AttributeService service = new AttributeService(tables, clock, audit);
+        AttributeService service = new AttributeService(tables, clock, new CurrencyService(audit));
         AtomicLong ids = new AtomicLong(5000);
         FakeSceneTables sceneTables = new FakeSceneTables();
         world = new SceneWorld(sceneTables, Contracts.IDS, sink, repo, ids::incrementAndGet, clock, SceneMetrics.noop(),

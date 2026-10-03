@@ -50,6 +50,8 @@ public final class SceneMetrics {
     static final String LINK_PAUSES = "xm.scene.link.backpressure.pauses";
     /** 存储线程池的 Micrometer 标准线程池指标（{@code executor_*}）的 {@code name} 标签。 */
     static final String STORAGE_EXECUTOR_NAME = "scene-storage";
+    static final String AUDIT_RECORDS = "xm.scene.audit.records";
+    static final String AUDIT_EXECUTOR_NAME = "scene-audit";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -122,6 +124,40 @@ public final class SceneMetrics {
         REJECTED
     }
 
+    /** 审计记录的种类（{@code xm.scene.audit.records{kind}}）。 */
+    public enum AuditKind {
+        /** 资产流水。 */
+        TRANSACTION,
+        /** 玩家快照。 */
+        SNAPSHOT
+    }
+
+    /**
+     * 审计记录的结局（{@code xm.scene.audit.records{result}}），每条恰好计一次。除 ACKED 外都已把记录完整写进
+     * 兜底日志 {@code xm.audit.fallback}（快照只记元数据）。
+     */
+    public enum AuditResult {
+        /** Kafka 已确认。 */
+        ACKED,
+        /**
+         * 投递失败：Kafka 回调报错——包括 send 时等元数据 / 缓冲超过 max.block.ms（KafkaProducer 对这类错误不抛、直接回调）、
+         * 投递超时、broker 拒绝、停服时没发完。Kafka 不可达时主要计在这里。
+         */
+        DELIVERY_FAILED,
+        /** send 调用本身抛异常：生产者进入致命状态 / 已关闭、线程被中断等（致命状态会丢弃生产者，下次核对重建）。 */
+        SEND_ERROR,
+        /** 审计线程队列满。 */
+        QUEUE_FULL,
+        /** 发不出全局唯一号（号段租约失效或时钟回拨）。 */
+        NO_ID,
+        /** topic 还没核对通过（broker 不可达或分区契约不符）：不发，免得自动建出错的分区数。 */
+        UNVERIFIED,
+        /** 超过大小上限（快照）。 */
+        OVERSIZE,
+        /** 停服时还排在审计线程队列里、来不及发。 */
+        SHUTDOWN_DROPPED
+    }
+
     /** 没发出去的 scene → gate 链路帧（{@code xm.scene.link.dropped{reason}}）。 */
     public enum LinkDrop {
         /** 链路已注销或已断开（其上会话随链路一起失效）。 */
@@ -145,6 +181,7 @@ public final class SceneMetrics {
     private final Map<NodeLinkFrame.BodyCase, Counter> framesOut;
     private final Map<LinkDrop, Counter> linkDrops;
     private final Counter linkPauses;
+    private final Map<AuditKind, Map<AuditResult, Counter>> auditRecords;
     /** 场景配置号 → 在线人数（逻辑线程写，抓取线程读）。首次出现时注册 Gauge。 */
     private final ConcurrentHashMap<Integer, AtomicInteger> scenePlayers = new ConcurrentHashMap<>();
 
@@ -185,6 +222,18 @@ public final class SceneMetrics {
         this.linkPauses = Counter.builder(LINK_PAUSES)
                 .description("逻辑线程积压到上限、暂停读取 gate 链路的次数（背压）")
                 .register(registry);
+        this.auditRecords = new EnumMap<>(AuditKind.class);
+        for (AuditKind kind : AuditKind.values()) {
+            EnumMap<AuditResult, Counter> byResult = new EnumMap<>(AuditResult.class);
+            for (AuditResult result : AuditResult.values()) {
+                byResult.put(result, Counter.builder(AUDIT_RECORDS)
+                        .description("审计记录（资产流水 / 玩家快照）发往 Kafka 的结局；非 acked 的已写兜底日志")
+                        .tag("kind", tagValue(kind))
+                        .tag("result", tagValue(result))
+                        .register(registry));
+            }
+            auditRecords.put(kind, byResult);
+        }
     }
 
     /** 不导出任何指标的实例（测试 / 不关心指标的装配用）：没有子注册表的 {@link CompositeMeterRegistry} 上计量器都是空操作。 */
@@ -215,6 +264,11 @@ public final class SceneMetrics {
      */
     public void bindStorageExecutor(ExecutorService executor) {
         new ExecutorServiceMetrics(executor, STORAGE_EXECUTOR_NAME, Tags.empty()).bindTo(registry);
+    }
+
+    /** 审计线程池（{@code executor.*{name="scene-audit"}}）：排队长度即发往 Kafka 的积压。 */
+    public void bindAuditExecutor(ExecutorService executor) {
+        new ExecutorServiceMetrics(executor, AUDIT_EXECUTOR_NAME, Tags.empty()).bindTo(registry);
     }
 
     /**
@@ -314,6 +368,11 @@ public final class SceneMetrics {
 
     public void linkFrameDropped(LinkDrop reason) {
         linkDrops.get(reason).increment();
+    }
+
+    /** 一条审计记录的结局（任意线程，含 Kafka 生产者的回调线程）。 */
+    public void auditRecord(AuditKind kind, AuditResult result) {
+        auditRecords.get(kind).get(result).increment();
     }
 
     /** 一条链路因逻辑线程积压而暂停读取（{@code xm.scene.link.backpressure.pauses}）。 */

@@ -9,6 +9,7 @@ import com.game.scene.attribute.AttributeRules.AllocError;
 import com.game.scene.attribute.AttributeRules.PoolRule;
 import com.game.scene.attribute.AttributeRules.Validation;
 import com.game.scene.audit.AssetAudit;
+import com.game.scene.currency.CurrencyService;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerAttributes.Derived;
 import com.game.scene.player.PlayerAttributes.Scheme;
@@ -87,12 +88,12 @@ public final class AttributeService {
 
     private final AttributeTables tables;
     private final SceneClock clock;
-    private final AssetAudit audit;
+    private final CurrencyService currency;
 
-    public AttributeService(AttributeTables tables, SceneClock clock, AssetAudit audit) {
+    public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency) {
         this.tables = tables;
         this.clock = clock;
-        this.audit = audit;
+        this.currency = currency;
     }
 
     // ------------------------------------------------------------------ 加载
@@ -536,16 +537,11 @@ public final class AttributeService {
         if (cost == 0) {
             return 0;
         }
-        Wallet wallet = player.wallet();
-        if (Long.compareUnsigned(wallet.balance(Wallet.GOLD), cost) < 0) {
+        if (Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), cost) < 0) {
             return GOLD_NOT_ENOUGH;
         }
-        Wallet.Change change = wallet.deduct(Wallet.GOLD, cost);
-        if (!change.ok()) {
-            return change.tipId();
-        }
-        audit.currencyChanged(player.playerId(), Wallet.GOLD, -cost, change.before(), change.after(), reason);
-        return 0;
+        Wallet.Change change = currency.deduct(player, Wallet.GOLD, cost, reason);
+        return change.ok() ? 0 : change.tipId();
     }
 
     /** 当前等级下重置本池的金币：低于免费等级免费（0 = 不设免费等级）。 */

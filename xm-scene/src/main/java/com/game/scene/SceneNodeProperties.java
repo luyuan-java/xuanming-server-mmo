@@ -45,6 +45,9 @@ public record SceneNodeProperties(
      * @param shutdownSaveTimeout   停服时等待写回完成的上限（写回任务在逻辑线程上排队 + 落库，共用这一个预算）
      * @param linkMaxPendingFrames  每条 gate 链路已投递给逻辑线程、还没执行完的帧数上限；达到即暂停读这条链路，
      *                              降到一半以下恢复（背压，逻辑线程的任务队列因此有界）
+     * @param auditQueueCapacity    审计线程（资产流水发往 Kafka）的队列上限；满了新记录只写兜底日志
+     * @param auditMaxBlock         审计线程上 Kafka 发送的最长阻塞（元数据 / 缓冲；只阻塞审计线程）
+     * @param auditFlushTimeout     停服时等审计记录发完的上限
      * @param saveInterval          在线周期存盘的周期（整秒；同基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS，缺省 300s）：
      *                              每人每周期至多写一次、没变化不写；0 = 关闭（只在离场时写回）。不带单位的数字按秒
      */
@@ -57,7 +60,10 @@ public record SceneNodeProperties(
             @DefaultValue("10000") int storageQueueCapacity,
             @DefaultValue("15s") Duration shutdownSaveTimeout,
             @DefaultValue("10000") int linkMaxPendingFrames,
-            @DefaultValue("300s") @DurationUnit(ChronoUnit.SECONDS) Duration saveInterval) {
+            @DefaultValue("300s") @DurationUnit(ChronoUnit.SECONDS) Duration saveInterval,
+            @DefaultValue("10000") int auditQueueCapacity,
+            @DefaultValue("2s") Duration auditMaxBlock,
+            @DefaultValue("5s") Duration auditFlushTimeout) {
 
         public SceneSettings {
             if (linkPort < 0 || linkPort > 65535) {
@@ -65,6 +71,9 @@ public record SceneNodeProperties(
             }
             if (linkIoThreads < 1 || storageThreads < 1 || storageQueueCapacity < 1) {
                 throw new IllegalArgumentException("xm.scene 的线程数与队列上限必须为正数");
+            }
+            if (auditQueueCapacity < 1 || auditMaxBlock.isNegative() || auditFlushTimeout.isNegative()) {
+                throw new IllegalArgumentException("xm.scene.audit-* 配置非法");
             }
             if (linkMaxPendingFrames < 2) {
                 throw new IllegalArgumentException("xm.scene.link-max-pending-frames 至少为 2: " + linkMaxPendingFrames);

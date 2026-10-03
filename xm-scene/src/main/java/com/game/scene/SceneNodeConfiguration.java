@@ -1,5 +1,6 @@
 package com.game.scene;
 
+import com.game.audit.AuditProperties;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.player.store.PlayerStore;
@@ -24,7 +25,7 @@ import org.springframework.core.env.Environment;
  * {@link RedissonClient} 来自 xm-discovery，{@link PlayerStore} 来自 xm-player-store 的自动装配。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(SceneNodeProperties.class)
+@EnableConfigurationProperties({SceneNodeProperties.class, AuditProperties.class})
 public class SceneNodeConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(SceneNodeConfiguration.class);
@@ -67,7 +68,8 @@ public class SceneNodeConfiguration {
     @Bean
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
-                               NodeLinkAuth nodeLinkAuth, SceneMetrics sceneMetrics) {
-        return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, nodeLinkAuth, sceneMetrics);
+                               NodeLinkAuth nodeLinkAuth, SceneMetrics sceneMetrics, AuditProperties audit) {
+        return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, nodeLinkAuth, sceneMetrics,
+                audit);
     }
 }

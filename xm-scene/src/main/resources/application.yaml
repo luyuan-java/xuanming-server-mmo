@@ -57,6 +57,11 @@ management:
 
 xm:
   zone-id: 1
+  # 资产审计（流水发往 Kafka，xm-data 消费落库）。topic 代次必须与 xm-data 一致；enabled: false 时只写本地审计日志
+  audit:
+    enabled: ${XM_AUDIT_ENABLED:true}
+    bootstrap-servers: ${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+    topic-generation: ${XM_AUDIT_TOPIC_GENERATION:1}
   # 运行模式：只有 dev / test 放行 GM 类客户端指令（Gm* / Debug* / Test*），其余一律按 prod 拒绝（与 gate 同一个环境变量）
   run-mode: ${XM_RUN_MODE:prod}
   advertise-host: 127.0.0.1
@@ -79,3 +84,8 @@ xm:
     link-max-pending-frames: 10000
     # 在线周期存盘：每人每周期至多写一次（没变化不写），0 = 只在离场时写回（基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS 缺省 300）
     save-interval: ${XM_SCENE_SAVE_INTERVAL:300s}
+
+logging:
+  level:
+    # Kafka 客户端（资产流水生产者）在 INFO 级别会整段打印配置，压到 WARN
+    org.apache.kafka: WARN

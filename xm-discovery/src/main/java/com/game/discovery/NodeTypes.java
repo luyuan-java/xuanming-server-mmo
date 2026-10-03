@@ -13,6 +13,11 @@ public final class NodeTypes {
     public static final String SCENE = "scene";
     /** xm-login：player_id 雪花 worker 的租约（不发布目录）。 */
     public static final String LOGIN = "login";
+    /**
+     * xm-scene：全服唯一号（资产流水号、快照号）的雪花 worker 租约，作用域 0（全服）。与 {@link #SCENE} 的按 zone 租约分开：
+     * 按 zone 分会让不同 zone 的 scene 拿到同一个 worker、发出相同的号。
+     */
+    public static final String SCENE_GUID = "scene-guid";
 
     private NodeTypes() {
     }

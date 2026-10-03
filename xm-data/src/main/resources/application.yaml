@@ -1,0 +1,57 @@
+# xm-data 本地配置。环境变量（秘密只从这里注入，不进仓库）：
+#   XM_MYSQL_USER / XM_MYSQL_PASSWORD  MySQL 账号（与 xm-login / xm-scene 同口径；空口令时可不设）
+#   XM_KAFKA_BOOTSTRAP_SERVERS        Kafka 地址（缺省 127.0.0.1:9092）
+#   XM_AUDIT_TOPIC_GENERATION         审计 topic 代次（必须与 xm-scene 一致，缺省 1）
+#   XM_ADMIN_TOKEN                    运维接口令牌；不设则 /admin/** 一律 503
+spring:
+  application:
+    name: xm-data
+  lifecycle:
+    # 停止消费者（唤醒轮询、等线程退出）在这个上限内完成；SmartLifecycle 停在数据源销毁之前
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # useAffectedRows=true：ON DUPLICATE KEY UPDATE 的受影响行数 = 新插入的行数（重放的重复行计 0）
+    url: "jdbc:mysql://127.0.0.1:3306/xm_java?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=30000&useAffectedRows=true"
+    username: ${XM_MYSQL_USER:root}
+    password: ${XM_MYSQL_PASSWORD:}
+    druid:
+      initial-size: 1
+      min-idle: 1
+      max-active: 4
+      max-wait: 3000
+  sql:
+    init:
+      # 只建本服务自己的表（CREATE TABLE IF NOT EXISTS）
+      mode: always
+      schema-locations: classpath:db/xm-data-schema.sql
+
+# 管理端口：actuator（health / prometheus）+ 运维接口 /admin/**。默认只绑本机，不要暴露到公网。
+server:
+  port: 18106
+  address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+xm:
+  audit:
+    bootstrap-servers: ${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+    topic-generation: ${XM_AUDIT_TOPIC_GENERATION:1}
+  data:
+    admin-token: ${XM_ADMIN_TOKEN:}
+    retention:
+      # 资产流水保留期；0 = 永久保留（同 mmorpg）
+      transaction-log: ${XM_DATA_TXLOG_RETENTION:0s}
+
+logging:
+  level:
+    # Kafka 客户端在 INFO 级别会整段打印配置，压到 WARN
+    org.apache.kafka: WARN
