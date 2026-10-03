@@ -27,7 +27,7 @@
 |---|---|---|---|
 | 2.1 | 货币：加 / 扣 / 余额、列表与 GM 指令（54/37/49/94/95）、客户端 GM 闸（gate + scene，运行模式）、scene 请求分发改为按功能注册、获取封禁（属性洗点 / 方案要扣金币，所以货币在属性之前） | currency-core、currency-client-and-gm、currency-debt-clawback、gain-block | ✅ `a8ccc0d`（玩家级 GM 封禁已做；补缴债务 currency-debt-clawback 移到 2.9 资产通道（基线目前没有生产调用方挂债），全服产出封禁 gain-block 移到 2.3 与异常检测一起） |
 | 2.2 | 属性：二级属性重算、属性面板（167/170）、加点 / 洗点 / 自动加点（168/172/173）、方案（174/171/169）、GM 设等级（175）、等级 | derived-attribute-recalc、attribute-panel、attribute-allocate-reset-auto、attribute-schemes、gm-set-player-level、player-level；robot attribute-smoke | ✅ `787f497`（行为互斥表 actor-action-state 移到 2.6、运行时属性重算位 actor-attribute-calculator 移到 2.7：当前表数据下两者都没有客户端可见效果；当前气血 / 法力持久化随 2.7） |
-| 2.3 | 资产流水与审计（Kafka）、获取异常检测、全服产出封禁、玩家快照 | transaction-log、kafka-client-infra、kafka-audit-pipeline、anomaly-detector、gain-block、player-snapshot | 2.3a 资产流水管线 ✅ `c7939d2`；2.3b 玩家快照 ✅；2.3c 全服产出封禁 + 获取异常检测 待做 |
+| 2.3 | 资产流水与审计（Kafka）、获取异常检测、全服产出封禁、玩家快照 | transaction-log、kafka-client-infra、kafka-audit-pipeline、anomaly-detector、gain-block、player-snapshot | 2.3a 资产流水管线 ✅ `c7939d2`；2.3b 玩家快照 ✅ `b9519f0`；2.3c 全服产出封禁 + 获取异常检测 待做 |
 | 2.4 | 背包：容器（堆叠 / 格子 / 四个包）、编排、持久化、读取 / 整理（191/192）、装备栏规则 | bag-core-container、bag-orchestration-service、bag-persistence、bag-client-get-sort、equip-slot-rules |
 | 2.5 | 条件 + 奖励 + 任务（193/194/195）+ 活动列表（190）；robot features-smoke | condition-eval、mission-*、activity-list、activity-schedule-list |
 | 2.6 | 技能：冷却、施法阶段与打断（33）、伤害结算、行为互斥表（放技能前的状态检查） | skill-cooldown、skill-cast-phases-interrupt、realtime-skill-damage、combat-damage-rules、actor-action-combat-state、actor-action-state |
