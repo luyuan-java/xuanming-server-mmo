@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.DoubleSupplier;
 import java.util.function.IntSupplier;
 
 /**
@@ -52,6 +53,11 @@ public final class SceneMetrics {
     static final String STORAGE_EXECUTOR_NAME = "scene-storage";
     static final String AUDIT_RECORDS = "xm.scene.audit.records";
     static final String AUDIT_EXECUTOR_NAME = "scene-audit";
+    static final String GAIN_BLOCK_ENTRIES = "xm.scene.gain.block.entries";
+    static final String GAIN_BLOCK_SYNC_AGE = "xm.scene.gain.block.sync.age";
+    static final String GAIN_BLOCK_SYNC_FAILURES = "xm.scene.gain.block.sync.failures";
+    static final String GAIN_BLOCKED = "xm.scene.gain.blocked";
+    static final String GAIN_ANOMALIES = "xm.scene.gain.anomalies";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -269,6 +275,43 @@ public final class SceneMetrics {
     /** 审计线程池（{@code executor.*{name="scene-audit"}}）：排队长度即发往 Kafka 的积压。 */
     public void bindAuditExecutor(ExecutorService executor) {
         new ExecutorServiceMetrics(executor, AUDIT_EXECUTOR_NAME, Tags.empty()).bindTo(registry);
+    }
+
+    /**
+     * 全服产出封禁名单的同步状态：名单条目数（{@code xm.scene.gain.block.entries}）与距上次成功同步的秒数
+     * （{@code xm.scene.gain.block.sync.age}，同步一直失败时持续增长——名单可能已过时，要告警）。回调在抓取线程上调用，
+     * 必须线程安全、不阻塞。
+     */
+    public void bindGainBlocks(IntSupplier entries, DoubleSupplier syncAgeSeconds) {
+        Gauge.builder(GAIN_BLOCK_ENTRIES, () -> entries.getAsInt())
+                .description("本节点当前生效的全服产出封禁条目数")
+                .register(registry);
+        Gauge.builder(GAIN_BLOCK_SYNC_AGE, () -> syncAgeSeconds.getAsDouble())
+                .description("距上次成功从 Redis 同步全服产出封禁名单的秒数")
+                .baseUnit("seconds")
+                .register(registry);
+    }
+
+    /** 全服产出封禁名单同步失败一次（{@code xm.scene.gain.block.sync.failures}；沿用上次的名单）。 */
+    public void gainBlockSyncFailed() {
+        Counter.builder(GAIN_BLOCK_SYNC_FAILURES).description("全服产出封禁名单同步失败（沿用上次的名单）")
+                .register(registry).increment();
+    }
+
+    /** 一次获取被全服产出封禁拒绝（{@code xm.scene.gain.blocked{category}}，category 取固定集合）。 */
+    public void gainBlocked(String category) {
+        Counter.builder(GAIN_BLOCKED).description("被全服产出封禁拒绝的获取").tag("category", category)
+                .register(registry).increment();
+    }
+
+    /**
+     * 一次获取异常告警（{@code xm.scene.gain.anomalies{category, currency_type}}）。currency_type 只取已知币种
+     * （个位数），物品类告警不带 config id（高基数，见 AGENTS §5），玩家号只进日志。
+     */
+    public void gainAnomaly(String category, String currencyType) {
+        Counter.builder(GAIN_ANOMALIES).description("获取异常告警（滑动窗口内次数或累计量超阈值，每次越线计一次）")
+                .tag("category", category).tag("currency_type", currencyType)
+                .register(registry).increment();
     }
 
     /**

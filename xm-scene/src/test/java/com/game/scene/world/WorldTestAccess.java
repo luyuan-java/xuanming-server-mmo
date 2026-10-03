@@ -13,4 +13,10 @@ public final class WorldTestAccess {
     public static com.game.player.store.state.PlayerState persistentState(ScenePlayer player) {
         return player.persistentState();
     }
+
+    /** 一个不在任何场景里的新玩家实例（全新钱包 / 窗口）。 */
+    public static ScenePlayer player(long playerId) {
+        return new ScenePlayer(playerId, 10_000 + playerId, new SessionKey(1, (int) playerId), 1, 1, 0, "", 1,
+                java.util.List.of(), Vec3.ORIGIN, 0L);
+    }
 }

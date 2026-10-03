@@ -1,8 +1,10 @@
 package com.game.data;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.audit.AuditProperties;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.data.admin.AdminAuthFilter;
+import com.game.data.gainblock.GainBlockStore;
 import com.game.data.metrics.DataMetrics;
 import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
@@ -10,6 +12,8 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import org.mybatis.spring.annotation.MapperScan;
 import org.mybatis.spring.boot.autoconfigure.ConfigurationCustomizer;
+import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -35,11 +39,22 @@ public class DataConfiguration {
     }
 
     @Bean
+    public Clock clock() {
+        return Clock.systemUTC();
+    }
+
+    /** 全服产出封禁名单（Redis；客户端第一次用到时才创建，Redis 不可用不挡住启动与审计消费）。 */
+    @Bean
+    public GainBlockStore gainBlockStore(ObjectProvider<RedissonClient> redis, ObjectMapper json) {
+        return new GainBlockStore(redis, json);
+    }
+
+    @Bean
     public DataNode dataNode(AuditProperties audit, DataProperties props, TransactionLogMapper transactionLog,
                              PlayerSnapshotMapper playerSnapshot, PlatformTransactionManager transactionManager,
-                             DataMetrics metrics) {
+                             DataMetrics metrics, Clock clock) {
         return new DataNode(audit, props, transactionLog, playerSnapshot, new TransactionTemplate(transactionManager),
-                metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), "xm-data-admin"), Clock.systemUTC());
+                metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), "xm-data-admin"), clock);
     }
 
     @Bean

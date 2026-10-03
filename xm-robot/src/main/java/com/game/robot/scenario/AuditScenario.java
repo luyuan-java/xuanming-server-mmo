@@ -23,9 +23,6 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -89,15 +86,7 @@ public final class AuditScenario {
 
     /** 运维令牌：环境变量优先，否则本机切片脚本生成的文件；都没有为 null。 */
     public static String resolveAdminToken(String fromEnv) {
-        if (fromEnv != null && !fromEnv.isBlank()) {
-            return fromEnv.strip();
-        }
-        try {
-            Path file = Path.of("run", "xm-admin-token");
-            return Files.exists(file) ? Files.readString(file, StandardCharsets.UTF_8).strip() : null;
-        } catch (IOException e) {
-            return null;
-        }
+        return com.game.robot.client.AdminClient.resolveToken(fromEnv);
     }
 
     public String account() {

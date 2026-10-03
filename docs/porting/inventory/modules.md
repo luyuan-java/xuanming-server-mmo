@@ -139,7 +139,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: none
 - behavior: 入口顺序：全服封禁 → 每玩家封禁 → 正常逻辑。币种被封 → 27005；物品被封 → 1005。全服名单 `BlockGlobal/UnblockGlobal/ClearAllGlobalBlocks` 设计为「紧急止血：所有人不得再获得物品 30045」。
 - internal: 全服名单是 **thread_local** 集合，没有任何加载 / 热更 / GM 写入路径（`BlockGlobal` 只在单测里调用）；每玩家物品名单 `PlayerItemBlockList` 全仓没有 emplace，`PlayerItemBlockComp` 也不进存档。Java 若做：全服名单应来自配置中心（Nacos）或 Redis 并在所有场景节点生效，每玩家名单进玩家记录。
-- java: missing
+- java: partial（2026-10-03，批次 2.3c）— 全服币种名单在 Redis `xm:gain-block:currency`，xm-data 运维接口读写（令牌 + 操作人 + 原因），scene `GainBlockSync` 经 pub/sub + 10s 周期同步到逻辑线程；判定顺序同基线（全服 → 本人 → 入账，都是 27005）。尚缺：物品名单（随背包批次）。对应 hazard ①（Java 有写入口、全节点生效）
 - size: S
 - robot: none
 - hazards: ① 生产上**完全不可用**：全服名单无写入口且按线程隔离（多线程 scene 上只封一个线程）；每玩家物品名单从未挂载；只有币种的每玩家封禁（94 / 95）真正生效；② 币种 / 物品的拒绝码不一致（27005 vs 1005）。
@@ -163,7 +163,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: Kafka
 - behavior: 每玩家 × 每币种 / 每物品 config 一个滑动窗口（默认 600s 内 > 50 次或累计 > 100000 即告警），告警打 WARN 并发 JSON 到 Kafka `anomaly_alert_topic`（无世代后缀）。只告警、不拦截、不影响玩法。
 - internal: 阈值全是 thread_local 默认值，没有任何配置加载；Java 可用 Micrometer 计数 + 日志告警替代，**禁止**把 player_id 作为指标 label（AGENTS §5）。
-- java: missing
+- java: partial（2026-10-03，批次 2.3c）— `GainAnomalyDetector`：每玩家 × 每币种滑动窗口（挂在玩家实例上，hazard ③ 不存在），阈值来自配置、可按币种覆盖，越线只告警一次（hazard ②），告警走日志 `xm.audit.anomaly` + 指标（不带玩家号；hazard ① 不发 Kafka）。尚缺：物品窗口（随背包批次）
 - size: S
 - robot: none
 - hazards: ① `anomaly_alert_topic` 在 Go / Java 全仓**没有消费者**，告警只在日志里有用；② 超阈值后每次获取都再告警一次（无去抖），刷怪 / 批量领奖时会刷屏；③ 桶按 `entt::entity` 而非 player_id 索引，实体复用依赖下线时 ClearPlayer。

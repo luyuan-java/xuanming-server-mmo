@@ -84,6 +84,14 @@ xm:
     link-max-pending-frames: 10000
     # 在线周期存盘：每人每周期至多写一次（没变化不写），0 = 只在离场时写回（基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS 缺省 300）
     save-interval: ${XM_SCENE_SAVE_INTERVAL:300s}
+    # 全服产出封禁名单（Redis，xm-data 运维接口写）的兜底重读周期；变更通知走 pub/sub、秒级生效
+    gain-block-refresh: 10s
+    # 获取异常检测（只告警）：缺省同基线，600 秒内超过 50 次或累计超过 100000；某一维填 0 只关这一维。
+    # 按币种覆盖：currency.<币种>.window / max-count / max-amount（没写的项取内置缺省）
+    anomaly:
+      window: 600s
+      max-count: 50
+      max-amount: 100000
 
 logging:
   level:

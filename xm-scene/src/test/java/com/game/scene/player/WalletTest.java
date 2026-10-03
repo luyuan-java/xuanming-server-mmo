@@ -79,4 +79,16 @@ class WalletTest {
         assertThat(w.isPristine()).isFalse();
         assertThat(Wallet.restore(CurrencyState.newBuilder().addBalances(5).build()).balance(Wallet.DIAMOND)).isZero();
     }
+
+    @Test
+    void 全服封禁排在参数校验之后_本人封禁之前_都回27005() {
+        Wallet w = Wallet.empty();
+        assertThat(w.add(Wallet.GOLD, 0, true).tipId()).as("参数错误先判").isEqualTo(1005);
+        assertThat(w.add(Wallet.TYPE_COUNT, 5, true).tipId()).isEqualTo(1005);
+        Wallet.Change blocked = w.add(Wallet.GOLD, 5, true);
+        assertThat(blocked).isEqualTo(new Wallet.Change(Wallet.BLOCKED, Wallet.GOLD, 0, 0));
+        assertThat(blocked.tipId()).isEqualTo(27005);
+        assertThat(w.add(Wallet.GOLD, 5, false).ok()).isTrue();
+        assertThat(w.balance(Wallet.GOLD)).isEqualTo(5);
+    }
 }

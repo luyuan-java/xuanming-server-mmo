@@ -44,7 +44,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景目录：玩家该进哪个场景节点的哪个场景 |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送 |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
-| `xm-data` | 进程（Spring Boot Web） | 审计数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维查询（§4.5） |
+| `xm-data` | 进程（Spring Boot Web） | 审计与运维数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维接口：查询（§4.5）、全服产出封禁（§4.6） |
 
 依赖方向单向：进程模块 → `xm-api` / `xm-net` / `xm-player-store` / `xm-discovery` → `xm-common` / `xm-proto` / `xm-table`。
 
@@ -211,6 +211,28 @@ topic 与存储（不与 Go 混部）：
   `GET /admin/player-snapshots?player=&since=&until=&limit=` 给快照元数据与玩法数据字节数（不回本体）。uint64 字段输出为十进制字符串。鉴权（过滤器只按容器规范化后的路径 `/admin/*` 生效，`/admin;x/`、`/%61dmin/` 之类绕不过）：
   共享令牌 `XM_ADMIN_TOKEN`（请求头 `X-Xm-Admin-Token`，常数时间比较，未配置一律 503）+ 必填
   操作人 `X-Xm-Operator`（UTF-8，1–64 字符、不含控制字符）；每次调用（含处理中抛异常的，按 500 记）都记运维审计日志 `xm.audit.admin`。本机切片脚本没设令牌时生成一个写进 `run/xm-admin-token`。
+
+### 4.6 资产防护：全服产出封禁与获取异常检测
+
+mmorpg：`GainBlockService` 的全服名单是 thread_local 集合、没有任何写入口（生产上不可用）；`AnomalyDetector` 阈值写死、告警发一个
+没有消费者的 Kafka topic。Java 版把两者做成能用的：
+
+- **全服产出封禁**（紧急止血：名单上的币种所有人都不得再获得）：名单在 Redis Hash `xm:gain-block:currency`（字段 = 币种号，值 =
+  操作人 / 时刻 / 原因 JSON），全服一份、不分 zone。唯一写者是 xm-data 运维接口：`GET /admin/gain-blocks`、
+  `PUT /admin/gain-blocks/currency/{id}?reason=`（幂等）、`DELETE /admin/gain-blocks/currency/{id}?reason=`（幂等），鉴权同 §4.5，
+  改动另记一行 `xm.audit.admin`（带原因）。写完发 pub/sub `xm:gain-block-changed`（尽力而为）。
+  scene 的 `GainBlockSync` 在专用单线程 `scene-gain-block` 上读名单（阻塞 I/O 不上逻辑线程；单线程串行，旧快照盖不过新的），
+  不可变快照 `GlobalGainBlocks` 投递到逻辑线程换进 `CurrencyService`。触发：启动时同步读一次（读不到拒绝启动；第一份在接受 gate
+  链路之前排进逻辑线程）、收到通知就重读（重读期间的多次通知合并成一次）、`xm.scene.gain-block-refresh`（缺省 10s）周期兜底
+  （通知会丢）。重读失败沿用上次名单，计 `xm_scene_gain_block_sync_failures_total`，`xm_scene_gain_block_sync_age_seconds`
+  随之增长（要告警）。判定顺序同基线 AddCurrency：参数（1005）→ 全服封禁 → 本人封禁（都是 27005）→ 入账；被全服名单拒绝的计
+  `xm_scene_gain_blocked_total`。xm-data 的 Redis 客户端第一次用到才连：Redis 不可用时这三个接口回 503，审计消费不受影响。
+  物品名单随背包批次加。
+- **获取异常检测**（`GainAnomalyDetector`，只告警、不拦截）：每玩家 × 每币种一个滑动窗口（挂在场景内的玩家实例上，不持久化，
+  离开 / 换实例即清空），成功加币后记一次（量取请求数额）。阈值 `xm.scene.anomaly.*`（缺省同基线：600 秒内超过 50 次或累计超过
+  100000），可按币种覆盖（`xm.scene.anomaly.currency.<币种>.*`）；某一维填 0 只关这一维。越线时告警一次（日志 `xm.audit.anomaly`
+  带玩家号 + `xm_scene_gain_anomalies_total{category, currency_type}` 不带玩家号），仍在线外的后续获取不重复告警，某次获取到来时窗口已回到线内（含过期清空）就重新武装。
+  累计量饱和于 `Long.MAX_VALUE`（不回绕）。
 
 ## 5. 线程模型
 
@@ -410,6 +432,11 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_link_frames_total` | Counter | `direction`=in / out，`type`=链路帧类型 | gate ↔ scene 链路帧（in = 从链路收到，含握手帧；out = 已交给链路写出，含 hello_ack） |
 | scene | `xm_scene_link_dropped_total` | Counter | `reason`=link_gone / write_buffer_full | 没发出去的 scene → gate 链路帧：链路已注销 / 已断开；出站缓冲越过高水位（随即断链） |
 | scene | `xm_scene_link_backpressure_pauses_total` | Counter | — | 逻辑线程积压到 `link-max-pending-frames`、暂停读取某条链路的次数（§4.2 背压） |
+| scene | `xm_scene_gain_block_entries` | Gauge | — | 本节点当前生效的全服产出封禁条目数（§4.6） |
+| scene | `xm_scene_gain_block_sync_age_seconds` | Gauge | — | 距上次成功从 Redis 同步封禁名单的秒数；同步一直失败时持续增长（名单可能过时，要告警） |
+| scene | `xm_scene_gain_block_sync_failures_total` | Counter | — | 封禁名单同步失败次数（沿用上次的名单） |
+| scene | `xm_scene_gain_blocked_total` | Counter | `category`=currency | 被全服产出封禁拒绝的获取 |
+| scene | `xm_scene_gain_anomalies_total` | Counter | `category`=currency，`currency_type`=币种号 | 获取异常告警：滑动窗口内次数或累计量越线，每次越线计一次（玩家号只进日志 `xm.audit.anomaly`） |
 
 未覆盖（后续）：Druid 连接池指标（Spring Boot 只认 Hikari / DBCP2 / Tomcat 等连接池的元数据）；
 Dubbo 与 Redisson 自带指标未接入；scene 的进场加载（成功 / 失败 / 耗时）未单独计，进场失败目前只有 WARN 日志。

@@ -12,12 +12,12 @@ import java.util.List;
 /**
  * 玩家的货币（只在场景逻辑线程上读写）。规则与 tip 码同 mmorpg {@code CurrencySystem}：
  * <ul>
- *   <li>加：数额 ≤ 0 → 1005；币种越界 → 1005；本人被 GM 封禁该币种 → 27005 {@code kAssetBlocked}；然后入账；</li>
+ *   <li>加：数额 ≤ 0 → 1005；币种越界 → 1005；该币种被全服产出封禁或本人被 GM 封禁 → 27005 {@code kAssetBlocked}；然后入账；</li>
  *   <li>扣：数额 ≤ 0 → 1005；币种越界 → 1005；余额不足 → 27000 {@code kAssetCurrencyInsufficient}（玩家看得懂的终局拒绝）；</li>
  *   <li>纯参数校验排在状态判定之前（同基线：资产通道对编程错误不能无限重投）。</li>
  * </ul>
  * 与基线的差异（有意）：加币溢出（基线 uint64 无检查、GM 可加到回绕）回 1005、余额不变；
- * 余额上限因此是 {@code Long.MAX_VALUE}（客户端协议是 uint64，取值不变）。跨区冻结（27003）与全服禁发随对应功能接入。
+ * 余额上限因此是 {@code Long.MAX_VALUE}（客户端协议是 uint64，取值不变）。跨区冻结（27003）随跨节点换图接入。
  * 补缴欠款（基线 debts）没有任何生产调用方能挂上，暂不做。
  */
 public final class Wallet {
@@ -32,7 +32,8 @@ public final class Wallet {
     public static final int TYPE_COUNT = 3;
 
     static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
-    static final int BLOCKED = AssetErrorTip.asset_error.kAssetBlocked_VALUE;
+    /** 被封禁获取（全服或本人）：27005 {@code kAssetBlocked}。 */
+    public static final int BLOCKED = AssetErrorTip.asset_error.kAssetBlocked_VALUE;
     static final int INSUFFICIENT = AssetErrorTip.asset_error.kAssetCurrencyInsufficient_VALUE;
 
     /**
@@ -90,10 +91,19 @@ public final class Wallet {
     }
 
     public Change add(int type, long amount) {
+        return add(type, amount, false);
+    }
+
+    /**
+     * 加币，判定顺序同基线 AddCurrency：参数（1005）→ 全服产出封禁 → 本人封禁（都是 27005）→ 溢出（1005）→ 入账。
+     *
+     * @param globallyBlocked 该币种在全服产出封禁名单上（由 {@code CurrencyService} 判定后传入）
+     */
+    public Change add(int type, long amount, boolean globallyBlocked) {
         if (amount <= 0 || !known(type)) {
             return rejected(INVALID_PARAMETER, type);
         }
-        if (isBlocked(type)) {
+        if (globallyBlocked || isBlocked(type)) {
             return rejected(BLOCKED, type);
         }
         long before = balances[type];

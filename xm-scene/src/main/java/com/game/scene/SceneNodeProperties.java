@@ -1,7 +1,10 @@
 package com.game.scene;
 
+import com.game.scene.audit.GainAnomalyDetector;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
+import java.util.HashMap;
+import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.boot.convert.DurationUnit;
@@ -51,6 +54,8 @@ public record SceneNodeProperties(
      * @param snapshotMaxBytes      一份玩家快照序列化后的上限（超了丢弃并记 ERROR；须小于 Kafka 生产者 / broker 的单条消息上限 1MB）
      * @param saveInterval          在线周期存盘的周期（整秒；同基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS，缺省 300s）：
      *                              每人每周期至多写一次、没变化不写；0 = 关闭（只在离场时写回）。不带单位的数字按秒
+     * @param gainBlockRefresh      全服产出封禁名单的兜底重读周期（变更通知走 Redis pub/sub，可能丢）
+     * @param anomaly               获取异常检测的阈值
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -65,9 +70,14 @@ public record SceneNodeProperties(
             @DefaultValue("10000") int auditQueueCapacity,
             @DefaultValue("2s") Duration auditMaxBlock,
             @DefaultValue("5s") Duration auditFlushTimeout,
-            @DefaultValue("1000000") int snapshotMaxBytes) {
+            @DefaultValue("1000000") int snapshotMaxBytes,
+            @DefaultValue("10s") Duration gainBlockRefresh,
+            @DefaultValue AnomalySettings anomaly) {
 
         public SceneSettings {
+            if (gainBlockRefresh.compareTo(Duration.ofSeconds(1)) < 0) {
+                throw new IllegalArgumentException("xm.scene.gain-block-refresh 至少 1s: " + gainBlockRefresh);
+            }
             if (linkPort < 0 || linkPort > 65535) {
                 throw new IllegalArgumentException("xm.scene.link-port 超出范围: " + linkPort);
             }
@@ -84,6 +94,48 @@ public record SceneNodeProperties(
             if (saveInterval.isNegative() || saveInterval.toMillis() % 1000 != 0 || saveInterval.toSeconds() > 86_400) {
                 throw new IllegalArgumentException("xm.scene.save-interval 必须是 0 到 1 天之间的整秒: " + saveInterval);
             }
+        }
+    }
+
+    /**
+     * 获取异常检测（{@code xm.scene.anomaly}；缺省同基线 AnomalyThreshold：600 秒内超过 50 次或累计超过 100000 即告警）。
+     * 某一维填 0 只关掉这一维，两维都填 0 关掉检测。窗口 1 秒到 1 天，不带单位的数字按秒。
+     *
+     * @param currency 按币种覆盖（键是币种号，如 {@code xm.scene.anomaly.currency.0.max-amount=5000000}）；
+     *                 覆盖里没写的项取内置缺省（600s / 50 / 100000），不继承上面的全局值
+     */
+    public record AnomalySettings(
+            @DefaultValue("600s") @DurationUnit(ChronoUnit.SECONDS) Duration window,
+            @DefaultValue("50") int maxCount,
+            @DefaultValue("100000") long maxAmount,
+            Map<Integer, Threshold> currency) {
+
+        public AnomalySettings {
+            // 紧凑构造器里字段还没赋值，校验与归一只能用参数
+            new GainAnomalyDetector.Threshold(window, maxCount, maxAmount);
+            currency = currency == null ? Map.of() : Map.copyOf(currency);
+        }
+
+        public GainAnomalyDetector.Threshold defaults() {
+            return new GainAnomalyDetector.Threshold(window, maxCount, maxAmount);
+        }
+
+        public Map<Integer, GainAnomalyDetector.Threshold> currencyThresholds() {
+            Map<Integer, GainAnomalyDetector.Threshold> out = new HashMap<>();
+            currency.forEach((type, t) -> out.put(type, new GainAnomalyDetector.Threshold(t.window(), t.maxCount(),
+                    t.maxAmount())));
+            return out;
+        }
+    }
+
+    /** 某币种的阈值覆盖。 */
+    public record Threshold(
+            @DefaultValue("600s") @DurationUnit(ChronoUnit.SECONDS) Duration window,
+            @DefaultValue("50") int maxCount,
+            @DefaultValue("100000") long maxAmount) {
+
+        public Threshold {
+            new GainAnomalyDetector.Threshold(window, maxCount, maxAmount);
         }
     }
 }

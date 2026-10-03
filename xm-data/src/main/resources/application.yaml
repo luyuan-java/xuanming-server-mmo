@@ -45,6 +45,10 @@ xm:
   audit:
     bootstrap-servers: ${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
     topic-generation: ${XM_AUDIT_TOPIC_GENERATION:1}
+  # 全服产出封禁名单的读写（运维接口 /admin/gain-blocks），与 xm-scene 同一个库；客户端第一次用到时才连
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
   data:
     admin-token: ${XM_ADMIN_TOKEN:}
     retention:

@@ -90,4 +90,13 @@ class AdminAuthFilterTest {
         assertThat(meters.get("xm.data.admin.requests").tag("op", "other").counter().count()).isEqualTo(1);
         assertThat(meters.find("xm.data.admin.requests").tag("op", "/admin/whatever-12345").counter()).isNull();
     }
+
+    @Test
+    void 指标op标签_已知接口固定值_封禁子路径归一_其余other() {
+        assertThat(AdminAuthFilter.opOf("/admin/transaction-log")).isEqualTo("transaction_log");
+        assertThat(AdminAuthFilter.opOf("/admin/player-snapshots")).isEqualTo("player_snapshots");
+        assertThat(AdminAuthFilter.opOf("/admin/gain-blocks")).isEqualTo("gain_blocks");
+        assertThat(AdminAuthFilter.opOf("/admin/gain-blocks/currency/123456")).isEqualTo("gain_blocks");
+        assertThat(AdminAuthFilter.opOf("/admin/gain-blocksX")).isEqualTo("other");
+    }
 }

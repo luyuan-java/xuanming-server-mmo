@@ -2,6 +2,7 @@ package com.game.robot;
 
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
+import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.ExpectJump;
 import com.game.robot.scenario.MovementScenario;
@@ -46,7 +47,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -66,9 +67,9 @@ public record RobotOptions(
                 "movement 跳跃检查的期望：auto（纠偏或 fail-open 都接受）/ correct（必须回 137）/ accept（必须原样接受）"),
         EXPECT_GM("expect-gm", "XM_ROBOT_EXPECT_GM", "allow",
                 "currency / attribute：服务端运行模式的期望：allow（dev / test，GM 指令生效）/ deny（prod，gate 推 23 {1006} 且不转发）"),
-        DATA_URL("data-url", "XM_ROBOT_DATA_URL", "http://127.0.0.1:18106", "audit：xm-data 管理端口（运维查询）"),
+        DATA_URL("data-url", "XM_ROBOT_DATA_URL", "http://127.0.0.1:18106", "audit / guard：xm-data 管理端口（运维接口）"),
         SCENE_METRICS_URL("scene-metrics-url", "XM_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
-                "audit：xm-scene 管理端口（抓审计指标）");
+                "audit / guard：xm-scene 管理端口（抓指标）");
 
         final String arg;
         final String env;
@@ -119,7 +120,7 @@ public record RobotOptions(
             }
         }
         if (scenario == null) {
-            throw new UsageException("缺少子命令（smoke / movement / currency / attribute / audit）");
+            throw new UsageException("缺少子命令（smoke / movement / currency / attribute / audit / guard）");
         }
 
         String gateway = value(Opt.GATEWAY, given, env);
@@ -163,6 +164,7 @@ public record RobotOptions(
             case CURRENCY -> CurrencyScenario.accountName(prefix, runTag);
             case ATTRIBUTE -> AttributeScenario.accountName(prefix, runTag);
             case AUDIT -> AuditScenario.accountName(prefix, runTag);
+            case GUARD -> GuardScenario.accountName(prefix, runTag);
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -178,7 +180,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -187,6 +189,8 @@ public record RobotOptions(
                 + "跨 60 秒冷却切方案 → 重登原样 → 洗点扣金币（约 70 秒）；--expect-gm deny 只核对 GM 设等级被拒\n");
         out.append("  audit     资产流水：GM 加 / 扣（含被拒的）→ 经 xm-data 运维查询核对恰好成功的几笔落库、顺序与字段；"
                 + "需要 Kafka、xm-data 与运维令牌（XM_ADMIN_TOKEN 或 run/xm-admin-token）\n");
+        out.append("  guard     资产防护：经 xm-data 运维接口全服封禁绑钻 → GM 加绑钻被拒 27005 → 解封恢复；"
+                + "一次加钻石 100001 → scene 获取异常告警恰好 +1；需要 Redis、xm-data 与运维令牌\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -213,7 +217,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard）");
         }
     }
 

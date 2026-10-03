@@ -5,7 +5,9 @@ import com.game.robot.client.MessageIds;
 import com.game.robot.client.RobotClient;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.scenario.AttributeScenario;
+import com.game.robot.client.AdminClient;
 import com.game.robot.scenario.AuditScenario;
+import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.MovementScenario;
@@ -65,6 +67,14 @@ public final class RobotMain {
                             options.requestTimeout(), options.dataUrl(), options.sceneMetricsUrl(),
                             AuditScenario.resolveAdminToken(env.get("XM_ADMIN_TOKEN")));
                     title = "xm-robot audit：" + scenario.account() + "，" + target + " data=" + options.dataUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.GUARD) {
+                    GuardScenario scenario = new GuardScenario(flow, registry, options.accountPrefix(), options.runTag(),
+                            options.requestTimeout(), new AdminClient(options.dataUrl(),
+                            AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
+                            options.sceneMetricsUrl());
+                    title = "xm-robot guard：" + scenario.account() + "，" + target + " data=" + options.dataUrl();
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.ATTRIBUTE) {

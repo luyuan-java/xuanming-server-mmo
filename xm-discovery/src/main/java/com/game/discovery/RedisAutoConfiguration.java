@@ -12,8 +12,13 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Lazy;
 
-/** 提供 {@link RedissonClient}。不用 redisson-spring-boot-starter：它会带进 Lettuce（见选型表）。 */
+/**
+ * 提供 {@link RedissonClient}。不用 redisson-spring-boot-starter：它会带进 Lettuce（见选型表）。
+ * 客户端懒创建（第一次注入 / 取用时才连 Redis）：常驻依赖 Redis 的服务在启动装配时就注入它，照样启动即连、连不上就拒绝启动；
+ * 只在个别运维接口里用 Redis 的服务（xm-data）经 {@code ObjectProvider} 取用，Redis 不可用时不挡住启动与主业务。
+ */
 @AutoConfiguration
 @EnableConfigurationProperties(RedisProperties.class)
 public class RedisAutoConfiguration {
@@ -21,6 +26,7 @@ public class RedisAutoConfiguration {
     private static final Logger log = LoggerFactory.getLogger(RedisAutoConfiguration.class);
 
     @Bean(destroyMethod = "shutdown")
+    @Lazy
     @ConditionalOnMissingBean
     public RedissonClient redissonClient(RedisProperties props) {
         Config config = new Config();

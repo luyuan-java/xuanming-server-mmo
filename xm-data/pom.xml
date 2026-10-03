@@ -10,12 +10,16 @@
     </parent>
     <artifactId>xm-data</artifactId>
     <name>xm-data</name>
-    <description>审计数据服务（Spring Boot）：消费资产流水等审计 topic、幂等落 MySQL（xm_java），提供带令牌的运维查询接口</description>
+    <description>审计与运维数据服务（Spring Boot）：消费资产流水、玩家快照等审计 topic、幂等落 MySQL（xm_java）；带令牌的运维接口（查询、全服产出封禁）</description>
 
     <dependencies>
         <dependency>
             <groupId>com.game</groupId>
             <artifactId>xm-audit</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-discovery</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

@@ -19,10 +19,13 @@ import com.game.scene.attribute.AttributeService;
 import com.game.scene.attribute.AttributeTables;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.AuditPipeline;
+import com.game.scene.audit.GainAnomalyDetector;
 import com.game.scene.audit.KafkaAssetAudit;
 import com.game.scene.audit.KafkaPlayerSnapshots;
 import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.currency.GainBlockSync;
+import com.game.scene.currency.RedisGainBlockSource;
 import com.game.scene.discovery.SceneDirectoryPublisher;
 import com.game.scene.id.SceneGuids;
 import com.game.scene.link.GateLinks;
@@ -60,6 +63,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.ByteArrayCodec;
+import org.redisson.client.codec.StringCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
@@ -125,6 +129,8 @@ public class SceneNode implements SmartLifecycle {
     private volatile SceneDirectoryPublisher publisher;
     private volatile OwnerLeaseRenewer leaseRenewer;
     private volatile OwnerTakeoverSubscriber takeoverSubscriber;
+    private volatile GainBlockSync gainBlockSync;
+    private volatile int gainBlockListener = -1;
     private volatile boolean running;
 
     /**
@@ -189,7 +195,10 @@ public class SceneNode implements SmartLifecycle {
         StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics);
 
         GateLinks gateLinks = new GateLinks(metrics);
-        CurrencyService currency = new CurrencyService(startAudit(zoneId, nodeId, settings));
+        GainAnomalyDetector anomalies = new GainAnomalyDetector(settings.anomaly().defaults(),
+                settings.anomaly().currencyThresholds(), SceneClock.SYSTEM, metrics);
+        CurrencyService currency = new CurrencyService(startAudit(zoneId, nodeId, settings), anomalies, metrics);
+        startGainBlockSync(currency, settings);
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
@@ -285,7 +294,7 @@ public class SceneNode implements SmartLifecycle {
 
     /**
      * 按启动的逆序释放，每一步都容忍前面没建出来（启动失败时也走这里）：
-     * 摘目录 → 停监听 → 停接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
+     * 摘目录 → 停监听 → 停封禁名单同步、接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
      * → 逻辑线程上写回全部玩家并关链路，写回提交之后才关存储线程池并等写回落库（{@link SceneShutdown}，共用一个停服预算）
      * → 关线程 → 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
      */
@@ -305,6 +314,7 @@ public class SceneNode implements SmartLifecycle {
         if (server != null) {
             server.stopAccepting();
         }
+        stopGainBlockSync();
         OwnerTakeoverSubscriber subscriber = takeoverSubscriber;
         if (subscriber != null) {
             subscriber.stop();
@@ -407,6 +417,45 @@ public class SceneNode implements SmartLifecycle {
         SceneWorld w = world;
         if (w != null) {
             postToLogic(w::stopAcceptingEnters);
+        }
+    }
+
+    /**
+     * 全服产出封禁名单：先起同步线程并订阅变更通知，再同步读第一份（读不到就拒绝启动）——这样读的同时来的变更不会漏。
+     * 名单投递到逻辑线程换上；第一份在接受 gate 链路之前就排进逻辑线程，所以第一个玩家请求到来时名单已生效。
+     */
+    private void startGainBlockSync(CurrencyService currency, SceneNodeProperties.SceneSettings settings) {
+        GainBlockSync sync = new GainBlockSync(new RedisGainBlockSource(redis),
+                blocks -> postToLogic(() -> currency.applyGlobalBlocks(blocks)), metrics, SceneClock.SYSTEM::nanoTime);
+        gainBlockSync = sync;
+        // 状态量经 volatile 字段读当前实例（同 bindLogicQueue）：节点停了再起也不会读到旧实例
+        metrics.bindGainBlocks(() -> {
+            GainBlockSync s = gainBlockSync;
+            return s == null ? 0 : s.entries();
+        }, () -> {
+            GainBlockSync s = gainBlockSync;
+            return s == null ? Double.NaN : s.syncAgeSeconds();
+        });
+        sync.start(settings.gainBlockRefresh());
+        gainBlockListener = redis.getTopic(RedisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE)
+                .addListener(String.class, (channel, category) -> sync.requestRefresh());
+        sync.loadNow();
+    }
+
+    /** 先停同步线程（中断可能卡在 Redis 上的重读），再取消订阅；之后迟到的通知遇到已停的同步直接忽略。 */
+    private void stopGainBlockSync() {
+        GainBlockSync sync = gainBlockSync;
+        if (sync != null) {
+            sync.stop();
+        }
+        int listener = gainBlockListener;
+        if (listener >= 0) {
+            try {
+                redis.getTopic(RedisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE).removeListener(listener);
+            } catch (RuntimeException e) {
+                log.warn("取消订阅全服产出封禁变更通知失败", e);
+            }
+            gainBlockListener = -1;
         }
     }
 

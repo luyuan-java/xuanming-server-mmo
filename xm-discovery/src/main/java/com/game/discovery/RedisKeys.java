@@ -49,4 +49,18 @@ public final class RedisKeys {
     public static String gatePushTopic(int zoneId, int gateNodeId) {
         return PREFIX + "gate-push:" + zoneId + ":" + gateNodeId;
     }
+
+    /**
+     * 全服产出封禁名单：{@code xm:gain-block:{category}}（category 目前只有 {@code currency}），Hash，字段为被封的 id
+     * （十进制），值为封禁元数据 JSON（操作人、时刻、原因，只给运维看）。全服一份、不分 zone；xm-data 运维接口是唯一写者，
+     * 全部 scene 节点读。
+     */
+    public static String gainBlocks(String category) {
+        return PREFIX + "gain-block:" + category;
+    }
+
+    /** 全服产出封禁名单变更通知的 pub/sub 频道：{@code xm:gain-block-changed}，消息体是 category（收到就重读名单）。 */
+    public static String gainBlockChangedTopic() {
+        return PREFIX + "gain-block-changed";
+    }
 }
