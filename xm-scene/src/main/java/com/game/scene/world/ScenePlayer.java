@@ -7,6 +7,7 @@ import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorType;
 import com.game.proto.Rotation;
 import com.game.proto.Transform;
+import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.Wallet;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.List;
@@ -34,7 +35,8 @@ public final class ScenePlayer {
     private final int classId;
     private final int gender;
     private final String appearanceId;
-    private final int level;
+    /** 等级（存档列 player.level；加载时已压回上限）。只经属性系统改（GM 设等级），规则见 PlayerLevels。 */
+    private int level;
     /** 拥有的技能（skill_table_id，保序）。首批不持久化技能，每次进场按配表发放，见 SceneWorld 注释。 */
     private final List<Integer> skills;
     private final MoveGuard moveGuard;
@@ -51,6 +53,8 @@ public final class ScenePlayer {
     private final UnknownFieldSet unknownStateFields;
     /** 货币。 */
     private final Wallet wallet;
+    /** 属性加点（方案落库；二级属性与当前气血 / 法力由属性系统在加载时算出）。 */
+    private final PlayerAttributes attributes;
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
     private PlayerSave lastPersisted;
     /** 一次在线存盘已提交、结果还没回来：期间不再提交新的（结果回来后下个周期再比）。 */
@@ -88,6 +92,7 @@ public final class ScenePlayer {
         }
         this.unknownStateFields = state.getUnknownFields();
         this.wallet = state.hasCurrency() ? Wallet.restore(state.getCurrency()) : Wallet.empty();
+        this.attributes = state.hasAttribute() ? PlayerAttributes.restore(state.getAttribute()) : PlayerAttributes.empty();
     }
 
     public long playerId() {
@@ -120,6 +125,11 @@ public final class ScenePlayer {
 
     public int level() {
         return level;
+    }
+
+    /** 只供属性系统调用（GM 设等级；调用方负责校验 1..85 并随后重算）。 */
+    public void setLevel(int level) {
+        this.level = level;
     }
 
     public List<Integer> skills() {
@@ -263,12 +273,20 @@ public final class ScenePlayer {
         if (!wallet.isPristine()) {
             state.setCurrency(wallet.toState());
         }
+        if (!attributes.isPristine()) {
+            state.setAttribute(attributes.toState());
+        }
         return state.build();
     }
 
     /** 玩家的货币（逻辑线程上读写）。 */
     public Wallet wallet() {
         return wallet;
+    }
+
+    /** 玩家的属性加点状态（逻辑线程上读写；写入只经属性系统）。 */
+    public PlayerAttributes attributes() {
+        return attributes;
     }
 
     PlayerSave lastPersisted() {

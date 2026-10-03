@@ -46,6 +46,17 @@ class StoragePlayerRepositoryTest {
     private final SceneMetrics metrics = new SceneMetrics(meters);
 
     @Test
+    void 等级列超出int的无符号值饱和到int上限_进场再压回等级上限() {
+        PlayerRow row = new PlayerRow();
+        row.setPlayerId(1001);
+        row.setLevel(4_294_967_295L);
+
+        assertThat(StoragePlayerRepository.toData(row, null).level()).isEqualTo(Integer.MAX_VALUE);
+        row.setLevel(30);
+        assertThat(StoragePlayerRepository.toData(row, null).level()).isEqualTo(30);
+    }
+
+    @Test
     void 加载命中_映射成PlayerData并投递回逻辑线程() {
         PlayerRow row = new PlayerRow();
         row.setPlayerId(1001);

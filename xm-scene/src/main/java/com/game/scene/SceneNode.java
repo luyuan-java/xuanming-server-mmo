@@ -11,6 +11,9 @@ import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.player.store.PlayerStore;
+import com.game.scene.attribute.AttributeFeature;
+import com.game.scene.attribute.AttributeSystem;
+import com.game.scene.attribute.AttributeTables;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.discovery.SceneDirectoryPublisher;
@@ -86,6 +89,7 @@ public class SceneNode implements SmartLifecycle {
     private final PlayerStore playerStore;
     private final MessageIdRegistry registry;
     private final SceneTables tables;
+    private final AttributeTables attributeTables;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final String instanceId = UUID.randomUUID().toString();
@@ -108,16 +112,19 @@ public class SceneNode implements SmartLifecycle {
     private volatile boolean running;
 
     /**
+     * @param attributeTables 属性加点配表视图（与 {@code tables} 来自同一份配表快照）
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
      * @param metrics  scene 指标（各组件共用一份）
      */
     public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
-                     MessageIdRegistry registry, SceneTables tables, NodeLinkAuth linkAuth, SceneMetrics metrics) {
+                     MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
+                     NodeLinkAuth linkAuth, SceneMetrics metrics) {
         this.props = props;
         this.redis = redis;
         this.playerStore = playerStore;
         this.registry = registry;
         this.tables = tables;
+        this.attributeTables = attributeTables;
         this.linkAuth = linkAuth;
         this.metrics = metrics;
     }
@@ -164,8 +171,9 @@ public class SceneNode implements SmartLifecycle {
         StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics);
 
         GateLinks gateLinks = new GateLinks(metrics);
+        AttributeSystem attributes = new AttributeSystem(attributeTables, SceneClock.SYSTEM, AssetAudit.log());
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
-                SceneClock.SYSTEM, metrics);
+                SceneClock.SYSTEM, metrics, attributes::initializeOnLoad);
         links = gateLinks;
         world = sceneWorld;
         RunMode runMode = RunMode.parse(props.runMode());
@@ -173,7 +181,7 @@ public class SceneNode implements SmartLifecycle {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables, runMode,
-                List.of(new CurrencyFeature(AssetAudit.log())));
+                List.of(new CurrencyFeature(AssetAudit.log()), new AttributeFeature(attributes, registry)));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         callOnLogic(() -> {
             tables.worldSceneConfigIds().forEach(sceneWorld::createScene);

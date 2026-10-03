@@ -308,7 +308,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: player-class, player-level, player-persistent-data-model
 - behavior: 六项（气血上限 / 法力上限 / 物攻 / 法攻 / 速度 / 防御）= 职业初值 + Σ(自然成长×等级 + 外部加成)×每点系数 + 已分配点按百分比公式（标准基础 = 职业初值 + 自然成长×85 级；增量 = 标准×比例×E(n)÷d）；max_health 至少 1；速度直写 BaseAttributes.speed、护甲每次按 Class.init_armor 直写；当前 HP/MP：升级按绝对增量补、降级只夹，其余（加载 / 加点 / 切方案 / 洗点）按比例保持（活着至少留 1，防「改属性当治疗」）；加载与等级变化时先收敛「已分配 > 总量」（整池清零返还）。
 - internal: 宝宝共用同一套纯规则（PetSystem）；DerivedAttributesComp 不落库，每次登录重算。
-- java: missing — Java 无属性组件（grep health / Attribute 无业务代码），xm-table 已有上述表的访问代码。
+- java: done（2026-10-03，批次 2.2）— `AttributeSystem.recalculate` / 纯规则 `AttributeRules`，同序累加逐值一致（真实配表单测）；当前气血 / 法力不持久化、进场回满（2.7 再持久化）。
 - size: M
 - robot: attribute_smoke（基线）
 - hazards: 登录时 oldMax=0，补增量分支进不去，需靠 TopUpToDerivedMax 回满阵亡玩家；浮点 floor 取整，Java 用 double 同序累加才能逐值一致。
@@ -320,19 +320,19 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: derived-attribute-recalc
 - behavior: 全量面板（客户端零配表、整体覆盖）：只列角色池 / 角色维度；池 total / remaining / dimension_cap / unlocked / unlock_level / reset_cost_gold（低于 reset_free_below_level 免费）；维度 allocated / value（自然成长×等级+已分配+加成，只是点数）/ cap / sort；方案列表、active_scheme_id、max_schemes（表 0 → 1）、create_scheme_cost_gold（已有方案数 < free_scheme_count 免费）、switch_cooldown_until（last_switch + 冷却）；derived 六项 + 当前 health/mana；level。升级 / GM 改等级后主动推 170。
 - internal: 写操作成功后应答都带全量面板（客户端不做增量合并）。
-- java: missing — 167/170 未实现，167 当前回 `GetAttributePanelResponse{error_message=1006}`；Unity 客户端 `Game/Attribute/AttributeClient.cs`、`UI/Ugui/Attribute/AttributePanel.cs` 已在用。
+- java: done（2026-10-03，批次 2.2）— `AttributeFeature` 167 / 175 后推 170（只在等级变化后推，同基线）。
 - size: M
 - robot: attribute_smoke
-- hazards: 首次访问用 EnsureComp 补默认方案（id 1、名「方案1」）——读接口也会写组件，Java 移植时注意这是「加载即补」而非读时副作用。
+- hazards: 首次访问用 EnsureComp 补默认方案（id 1、名「方案一」）——读接口也会写组件，Java 移植时注意这是「加载即补」而非读时副作用。
 
 ### attribute-allocate-reset-auto — 加点 / 洗点 / 自动加点建议（168 / 172 / 173）
 - mmorpg: player_attribute_handler.cpp；player_attribute.cpp Allocate / Reset / AutoAllocate / CheckWritable；attribute_allocation_rules.h ValidateAllocation / DistributePoints
 - client messages: 168 AllocateAttributePoints (C2S)、172 ResetAttributePoints (C2S)、173 AutoAllocateAttributePoints (C2S)
 - tables: AttributePool、AttributeDimension、AttributeAutoPlan（class_id 专属优先、0 兜底；dimension/weight）、AttributeRule
 - depends on: derived-attribute-recalc, attribute-panel, currency（扣金币）
-- behavior: 写前置：冻结中 1005、战斗在途 25011；168：pool_id=0 或 map 空 → 1005；池不存在 / 宝宝池 25000、锁定 25001、维度不属该池 25002、只增不减 25004、超单项上限 25005、超剩余 25003、无变化 25014；提交的是「目标已分配」全量幂等，缺省维度不变。172：本池已用 0 → 25014；先扣金币（不足 25012，扣费失败原样回货币码）再清点。173：只算不落；锁定 25001、无方案 25013、剩余 0 → 25014；有上限池按优先序灌满、无上限按权重比例；应答带 pool_id + suggested。成功应答（168/172）带全量面板。
+- behavior: 写前置（168 / 172；173 自动加点不过写前置，只校验实体）：冻结中 1005、战斗在途 25011；168：pool_id=0 或 map 空 → 1005；池不存在 / 宝宝池 25000、锁定 25001、维度不属该池 25002、只增不减 25004、超单项上限 25005、超剩余 25003、无变化 25014；提交的是「目标已分配」全量幂等，缺省维度不变。172：本池已用 0 → 25014；先扣金币（不足 25012，扣费失败原样回货币码）再清点。173：只算不落；锁定 25001、无方案 25013、剩余 0 → 25014；有上限池按优先序灌满、无上限按权重比例；应答带 pool_id + suggested。成功应答（168/172）带全量面板。
 - internal: 写后 Recalculate(kAllocate / kReset)。
-- java: missing — 三条都回 1006。
+- java: done（2026-10-03，批次 2.2）— 拒绝码与判定顺序同基线；冻结 / 战斗两道写前置待交接冻结（5.2 / 5.4）与回合制战斗（6.3）接入。
 - size: M
 - robot: attribute_smoke
 - hazards: 拒绝码必须经 TLS tip 写入（直接写 response 会被覆盖成 0）；客户端按响应体 error_message 判拒绝。
@@ -344,7 +344,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: attribute-panel, derived-attribute-recalc, currency
 - behavior: 写前置同加点（冻结 1005、战斗 25011，改名也拦）；174：达上限 25007；名字空 → 「方案N」；名非法 25009（UTF-8 码点数 ≤ 上限、无控制字符、截断序列非法、至少一个可见码点——全空格 / 零宽 / U+3000 等不算）；超出免费数扣金币（不足 25012）；scheme_id 取 next_scheme_id 自增；应答带 scheme_id + 面板。171：不存在 25006、已是当前 25010、冷却中 25008（Unix 秒、按墙钟）；切换后按 kSchemeSwitch 重算。169：名非法 25009、不存在 25006。
 - internal: 加载时删掉表里已不存在的维度分配（改表自愈返还点数）。
-- java: missing — 三条都回 1006。
+- java: done（2026-10-03，批次 2.2）— 同上。
 - size: M
 - robot: attribute_smoke（含 switchSchemeWaitingCooldown）
 - hazards: 冷却用墙钟 NowSecondsUTC，回拨时钟可提前切换；方案名校验与客户端 IsNullOrWhiteSpace 对齐，Java 用 codePoint 遍历时注意代理对与非法 UTF-8 已在 proto 解析层被拒的差异。
@@ -356,7 +356,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: client-gm-gate, player-level, attribute-panel
 - behavior: 非 dev/test 回 1006；冻结 / 战斗前置同加点；等级不在 1..85 → 1005；写 LevelComp 后触发 PlayerUpgradeEvent（重算 + 推 170 + 宠物重算推列表 + 任务条件 LevelUp）；应答带全量面板。
 - internal: 直接写等级，不经经验。
-- java: missing — 回 1006。
+- java: done（2026-10-03，批次 2.2）— 175 → 重算 → 推 170 → 应答；不推 184（宝宝 2.8）、不发任务等级事件（2.5）。
 - size: S
 - robot: attribute_smoke（dev 模式）
 - hazards: 降级同样触发 PlayerUpgradeEvent（名字叫升级），HP 只夹不补；GM 设等级后若玩家未下线即崩，等级只在周期 / 离场存盘时落盘。
@@ -368,7 +368,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: derived-attribute-recalc
 - behavior: 新号等级 1；读档等级 0 视为 1；>85 压回 85（上限曾从 200 下调）并在随后收敛中返还多余属性点；升级事件：重算属性 + 推面板 + 宠物等级跟随主人重算推列表 + 任务 ConditionEvent(kConditionLevelUp, new_level)。全仓没有经验值组件 / 升级结算，只有 GM 能改等级。
 - internal: PlayerUpgradeEvent 是其它系统挂钩点。
-- java: partial — `player.level` 列存在、`ScenePlayer.level` 随写回落库（`PlayerSave.level`）；无上限压回、无升级事件、无改等级入口。经验系统两版都没有。
+- java: done（2026-10-03，批次 2.2）— `PlayerLevels`：读存档超上限压回 85（SceneWorld 进场），GM 设等级 1..85；经验系统两版都没有。
 - size: S
 - robot: attribute_smoke
 - hazards: 基线 exp_gain 被静默丢弃（战斗奖励里的经验不入账），移植时不要当成已有行为。
@@ -404,7 +404,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: none（被技能 / 组队跟随 / 坐骑使用）
 - behavior: 状态集合 Combat / TeamFollow / Mounted；执行行为前遍历当前状态：任一互斥 → 回该格的 state_tip；可打断的先发打断事件并移除状态；成功后加上成功状态。目前只有放技能接入（进入 Combat 状态）。
 - internal: 先快照状态键再遍历（打断会删 map 元素，原写法 UB）。
-- java: missing — Java ReleaseSkill 只校验技能存在 / 拥有（`ClientRequestHandler.releaseSkill`），无状态互斥。
+- java: missing（移到路线图 2.6；当前表数据下无客户端可见效果，见 PARITY「行为互斥表」行）— Java ReleaseSkill 只校验技能存在 / 拥有（`ClientRequestHandler.releaseSkill`），无状态互斥。
 - size: S
 - robot: robot_smoke（skill）
 - hazards: Combat 状态加上后全仓没有移除路径（脱战逻辑在 combat_state 区域），移植前先确认基线是否会永久处于 Combat。
@@ -416,7 +416,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: attribute-sync-66, buff / combat_state（combat 区域）
 - behavior: 每帧在属性同步之前处理脏位：kMoveSpeed = Σ buff 加速 − 减速、下限 0，写 MoveSpeedComp（不碰运动矢量 Velocity；移速属性目前无 S2C 通道）；kCombatState = 把 CombatStateCollectionComp 的键投影成 CombatStateFlagsComp 并置 66 脏位（含 entity_id）；kHealth / kEnergy 为 TODO 空实现；冻结实体跳过。
 - internal: 位图脏标记组件。
-- java: missing — Java 66 只同步 transform / rotation / velocity（PARITY 属性同步行），无 buff / 战斗状态。
+- java: missing（移到路线图 2.7；当前数据下无客户端可见效果，见 PARITY「运行时属性重算位」行）— Java 66 只同步 transform / rotation / velocity（PARITY 属性同步行），无 buff / 战斗状态。
 - size: S
 - robot: none
 - hazards: 旧实现把移速 buff 灌进 Velocity 导致角色沿 (1,1,1) 漂移并落库（已修）；旧实现战斗状态三层皆错（死组件、不置脏位、值写 false）。
@@ -560,6 +560,6 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 3. Java 是否要引入「世界频道数 / 扩缩容 / 场景排空」：目前每个 scene 节点各建一份全部 World 地图，scene-manager 只挑人数最少者；多节点时同一 World 地图的频道数 = 节点数，与基线（SM 统一编排）不同。
 4. 基线 PlayerLoginEvent 对 LOGIN_FIRST / RECONNECT / REPLACE 全是 TODO：Java 做短线重连时 enter_gs_type 是否需要下发 / 使用，还是继续只靠「写回 + 重载」？
 5. 基线有意的「错误码被 TLS tip 覆盖成 0」（ReleaseSkill 1001）在属性系统里不存在（属性 handler 都走 SetTip），Java 统一如实回码即可；其它区域的 handler 需逐个核对是否属于被覆盖的那一类。
-6. ActorActionState 的 Combat 状态在基线放技能后只有打断能移除——是否意味着基线玩家放过一次技能后永久处于 Combat？移植前需与 combat_state 区域对齐脱战规则。
+6. ~~ActorActionState 的 Combat 状态在基线放技能后只有打断能移除——是否意味着基线玩家放过一次技能后永久处于 Combat？~~ 已答（2026-10-03）：是，表里没有打断格，Combat 加上后直到实体销毁才消失（不落库，重登即清）；但没有任何读者，无可观察效果。见 PARITY「行为互斥表」行。
 7. 登录 / 登出快照（SnapshotSystem SNAPSHOT_LOGIN / LOGOUT）与资产账本属于回档 / 资产区域，本清单未单列；Detour crowd（SceneCrowdSystem）与导航网格落位属于 spatial 区域。
 8. 周期存盘落地时 Java 的写回顺序保证：周期写与离场最终写都在存储线程池，需按玩家串行（或带单调版本号）避免旧快照后写覆盖新快照。

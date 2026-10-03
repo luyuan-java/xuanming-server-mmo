@@ -24,6 +24,7 @@ import com.game.scene.testing.RecordingSink;
 import com.game.scene.testing.RecordingSink.EnterResult;
 import com.game.scene.testing.RecordingSink.Kicked;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
@@ -567,6 +568,44 @@ class SceneWorldTest {
     private void enter(long linkId, int sessionId, long playerId, long sceneId, long epoch) {
         world.onPlayerEnter(linkId, enterFrame(sessionId, playerId, sceneId, epoch));
         repo.completeAll();
+    }
+
+    @Test
+    void 玩家初始化钩子在进场景前调用_抛异常按进场失败处理并释放归属() {
+        List<Long> initialized = new ArrayList<>();
+        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, new AtomicLong(1000)::incrementAndGet, clock,
+                new SceneMetrics(meters), player -> {
+                    initialized.add(player.playerId());
+                    assertThat(player.scene()).as("钩子在进场景之前").isNull();
+                    if (player.playerId() == 1002) {
+                        throw new IllegalStateException("坏状态");
+                    }
+                });
+        scene = world.createScene(1);
+        repo.putNewPlayer(1001, 1);
+        repo.putNewPlayer(1002, 1);
+
+        world.onPlayerEnter(LINK, enterFrame(11, 1001, scene.sceneId(), 1));
+        repo.completeAll();
+        sink.clear();
+        world.onPlayerEnter(LINK, enterFrame(12, 1002, scene.sceneId(), 1));
+        repo.completeAll();
+
+        assertThat(initialized).containsExactly(1001L, 1002L);
+        assertThat(world.playerBySession(new SessionKey(LINK, 11))).isNotNull();
+        assertEnterFailed(12, 1002, 1);
+    }
+
+    @Test
+    void 存档等级超上限_进场压回85() {
+        repo.put(new PlayerData(1001, 1, 3, 1, "", 200, 0, Vec3.ORIGIN));
+        repo.put(new PlayerData(1002, 1, 3, 1, "", Integer.MAX_VALUE, 0, Vec3.ORIGIN));
+        world.onPlayerEnter(LINK, enterFrame(11, 1001, scene.sceneId(), 1));
+        world.onPlayerEnter(LINK, enterFrame(12, 1002, scene.sceneId(), 1));
+        repo.completeAll();
+
+        assertThat(world.playerBySession(new SessionKey(LINK, 11)).level()).isEqualTo(85);
+        assertThat(world.playerBySession(new SessionKey(LINK, 12)).level()).isEqualTo(85);
     }
 
     private long entityOf(long linkId, int sessionId) {

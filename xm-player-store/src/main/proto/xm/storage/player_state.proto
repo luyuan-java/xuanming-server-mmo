@@ -18,6 +18,8 @@ message PlayerState {
   Facing facing = 1;
   // 货币。
   CurrencyState currency = 2;
+  // 属性加点：方案与已分配点。点数总量（按等级与表换算）、二级属性都不落库，每次加载重算。
+  AttributeState attribute = 3;
 }
 
 message CurrencyState {
@@ -31,4 +33,23 @@ message Facing {
   double x = 1;
   double y = 2;
   double z = 3;
+}
+
+// 属性加点（mmorpg PlayerAttributeComp 的 Java 自有对应；基线的额外点 bonus_points / 外部加成 bonus_values 没有写入方，暂不存）。
+message AttributeState {
+  // 加点方案，按创建先后（面板按这个顺序列出）。
+  repeated AttributeScheme schemes = 1;
+  // 当前生效方案；0 = 未初始化（加载时补默认方案）。
+  uint32 active_scheme_id = 2;
+  // 方案 id 自增游标（id 不复用）；0 = 未初始化（加载时取已有最大 id + 1）。
+  uint32 next_scheme_id = 3;
+  // 上次切换方案的 Unix 秒（切换冷却）。
+  uint64 last_switch_time = 4;
+}
+
+message AttributeScheme {
+  uint32 scheme_id = 1;
+  string name = 2;
+  // dimension_id → 已分配点（只存非 0；所属池由表 AttributeDimension 决定）。
+  map<uint32, uint32> allocated = 3;
 }

@@ -118,6 +118,16 @@ class PlayerStoreSqlTest {
     }
 
     @Test
+    void 等级列存了超出int的无符号值_照样读出来不让整行加载失败() {
+        // Connector/J 读 INT UNSIGNED 进 int 时超出 int 会抛 NumberOutOfRange（H2 不复现，只在真 MySQL 上跑）
+        org.junit.jupiter.api.Assumptions.assumeTrue(MYSQL_URL != null, "需要 -Dxm.it.mysql");
+        long p = newPlayer(1201, "戊");
+        new JdbcTemplate(context.getBean(DataSource.class)).update("UPDATE player SET level = 4294967295 WHERE player_id = ?", p);
+
+        assertThat(store.findPlayer(p).orElseThrow().getLevel()).isEqualTo(4294967295L);
+    }
+
+    @Test
     void 从未写过状态组件时读到默认实例() {
         long p = newPlayer(1101, "丁");
         assertThat(store.loadState(p)).isEqualTo(PlayerState.getDefaultInstance());

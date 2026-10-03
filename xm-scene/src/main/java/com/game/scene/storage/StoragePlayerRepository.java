@@ -336,8 +336,10 @@ public final class StoragePlayerRepository implements PlayerRepository {
     }
 
     static PlayerData toData(PlayerRow row, PlayerState state) {
+        // 等级列是 INT UNSIGNED：超出 int 的值（只可能来自手工改库）饱和到 int 上限，进场时由 PlayerLevels 压回等级上限（同基线）
+        int level = (int) Math.min(row.getLevel(), Integer.MAX_VALUE);
         return new PlayerData(row.getPlayerId(), row.getOwnerEpoch(), row.getClassId(), row.getGender(),
-                row.getAppearanceId(), row.getLevel(), row.getSceneConfigId(),
+                row.getAppearanceId(), level, row.getSceneConfigId(),
                 new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()), state);
     }
 

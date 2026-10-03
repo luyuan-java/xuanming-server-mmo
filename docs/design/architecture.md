@@ -162,6 +162,14 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
     走到这里说明 gate 与 scene 的运行模式不一致，或有人绕开了 gate）。
 - **资产流水**（`AssetAudit`）：货币变动成功后记一条（玩家、币种、增减、前后余额、原因），批次 2.3 之前写到日志
   `xm.audit.asset`（INFO），2.3 改为 Kafka 审计流。
+- **玩法的加载钩子与连带推送**：`SceneWorld` 在玩家实例建好、进场景之前调用 `PlayerInitializer`（进场与接管旧实例都走；
+  抛异常按进场失败处理并释放归属）——玩法在这里按配表规整恢复出来的状态、算派生值（属性系统：清掉表里已删的维度、按等级收敛超量分配、
+  算二级属性）。处理器需要按顺序先推一条再回应答时用 `PlayerCall.push`（信封 id 0，客户端按推送处理），例如 GM 设等级先推 170 面板。
+  配置表在 Spring 里是一份不可变快照（`ConfigTables` bean），各玩法的视图（`SceneTables`、`AttributeTables`）都从它构建。
+- **属性加点**（`AttributeFeature` + `AttributeSystem`，规则同基线 `PlayerAttributeSystem`，纯规则在 `AttributeRules`）：
+  方案与已分配点存 `player_state.attribute`（只存非 0；从没动过的不写）；点数总量按等级与表现算，二级属性与当前气血 / 法力
+  不落库、每次加载重算（当前值进场回满：Java 版还没有伤害来源，持久化随路线图 2.7）。等级仍在 `player.level` 列，读存档时压回上限 85
+  （`PlayerLevels`）。写操作成功回全量面板、拒绝只回 tip；170 只在等级变化后推（基线唯一的推送点）。
 
 ## 5. 线程模型
 

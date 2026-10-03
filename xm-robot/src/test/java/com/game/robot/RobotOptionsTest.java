@@ -66,6 +66,15 @@ class RobotOptionsTest {
     }
 
     @Test
+    void attribute_账号带at标签_同样认expect_gm() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("attribute", "--run-tag", "x1", "--expect-gm", "deny"), ENV, NOW);
+        assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.ATTRIBUTE);
+        assertThat(o.expectGmAllowed()).isFalse();
+        assertThat(com.game.robot.scenario.AttributeScenario.accountName(o.accountPrefix(), o.runTag()))
+                .isEqualTo("robot_java_atx1");
+    }
+
+    @Test
     void toString_不带口令() throws Exception {
         assertThat(RobotOptions.parse(List.of("smoke"), ENV, NOW).toString()).doesNotContain("dev-secret").contains("***");
     }

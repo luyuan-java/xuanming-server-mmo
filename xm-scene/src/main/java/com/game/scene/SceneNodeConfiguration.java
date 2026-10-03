@@ -3,6 +3,7 @@ package com.game.scene;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.player.store.PlayerStore;
+import com.game.scene.attribute.AttributeTables;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.ConfigSceneTables;
 import com.game.scene.world.SceneTables;
@@ -33,11 +34,22 @@ public class SceneNodeConfiguration {
         return MessageIdRegistry.loadFromClasspath();
     }
 
+    /** 配置表快照（不可变）；各玩法的视图都从这一份构建，保证同一次加载。 */
     @Bean
-    public SceneTables sceneTables(SceneNodeProperties props) {
+    public ConfigTables configTables(SceneNodeProperties props) {
         ConfigTables tables = ConfigTables.load(Path.of(props.tableDir()));
         log.info("配置表已加载 dir={} 行数={}", Path.of(props.tableDir()).toAbsolutePath().normalize(), tables.rowCounts());
+        return tables;
+    }
+
+    @Bean
+    public SceneTables sceneTables(ConfigTables tables) {
         return ConfigSceneTables.from(tables);
+    }
+
+    @Bean
+    public AttributeTables attributeTables(ConfigTables tables) {
+        return AttributeTables.from(tables);
     }
 
     /** gate 链路握手鉴权。密钥只从环境变量 {@code XM_NODE_LINK_SECRET} 读，缺失即启动失败（不允许无鉴权的链路）。 */
@@ -54,8 +66,8 @@ public class SceneNodeConfiguration {
 
     @Bean
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
-                               MessageIdRegistry registry, SceneTables tables, NodeLinkAuth nodeLinkAuth,
-                               SceneMetrics sceneMetrics) {
-        return new SceneNode(props, redis, playerStore, registry, tables, nodeLinkAuth, sceneMetrics);
+                               MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
+                               NodeLinkAuth nodeLinkAuth, SceneMetrics sceneMetrics) {
+        return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, nodeLinkAuth, sceneMetrics);
     }
 }

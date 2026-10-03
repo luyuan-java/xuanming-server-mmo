@@ -54,6 +54,14 @@ public final class PlayerCall {
         world.sendTo(player, SceneMessageIds.reply(method.messageId(), requestId, response));
     }
 
+    /**
+     * 处理过程中给本人推一条服务器消息（信封 {@code id} 为 0，客户端按推送处理，不会当成本请求的应答）。
+     * 用于有顺序要求的连带推送，例如 GM 设等级先推 170 面板再回应答。
+     */
+    public void push(int messageId, Message body) {
+        world.sendTo(player, SceneMessageIds.push(messageId, body));
+    }
+
     boolean replied() {
         return replied;
     }

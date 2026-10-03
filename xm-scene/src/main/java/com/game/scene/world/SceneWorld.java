@@ -17,6 +17,7 @@ import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BroadcastKind;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.metrics.SceneMetrics.PeriodicSave;
+import com.game.scene.player.PlayerLevels;
 import com.game.scene.world.PlayerRepository.LoadResult;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.table.LoginErrorTip;
@@ -101,6 +102,7 @@ public final class SceneWorld {
     private final LongSupplier idGenerator;
     private final SceneClock clock;
     private final SceneMetrics metrics;
+    private final PlayerInitializer playerInitializer;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -119,6 +121,14 @@ public final class SceneWorld {
 
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, PlayerInitializer.NONE);
+    }
+
+    /** @param playerInitializer 玩家实例建好后、进场景前调用（玩法按配表规整状态、算派生值） */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer) {
+        this.playerInitializer = playerInitializer;
         this.tables = tables;
         this.ids = ids;
         this.sink = sink;
@@ -281,7 +291,10 @@ public final class SceneWorld {
 
         int savedConfigId = data.sceneConfigId();
         Vec3 savedPosition = data.position();
-        int level = data.level();
+        int level = PlayerLevels.clampStored(data.level());
+        if (level != data.level()) {
+            log.warn("存档等级超出上限，压回 {} player={} 存档等级={}", level, playerId, Integer.toUnsignedLong(data.level()));
+        }
         PlayerState state = data.state();
         List<Integer> skills = tables.initialSkills();
         if (previous != null) {
@@ -303,6 +316,13 @@ public final class SceneWorld {
         ScenePlayer player = new ScenePlayer(playerId, nextId(), key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime());
+        try {
+            playerInitializer.initialize(player);
+        } catch (RuntimeException e) {
+            log.error("玩家状态初始化失败 player={}", playerId, e);
+            failEnter(key, playerId, epoch, "玩家状态初始化失败");
+            return;
+        }
         // 脏比对基准是库里此刻的样子（不是刚建出来的内存状态）：接管旧实例、出生点改派等与库不同的情形，第一次到期就会写。
         player.markPersisted(data.asPersisted());
         playersById.put(playerId, player);

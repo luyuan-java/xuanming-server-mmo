@@ -17,7 +17,11 @@ public interface AssetAudit {
         /** GM 凭空发放（与玩法产出分开记：审计要一眼分出 GM 造的币）。 */
         GM_GRANT,
         /** GM 扣除。 */
-        GM_DEDUCT
+        GM_DEDUCT,
+        /** 属性洗点的金币（基线记通用消费 TX_CURRENCY_DEDUCT，Java 分开记原因）。 */
+        ATTRIBUTE_RESET,
+        /** 开新加点方案的金币（同上）。 */
+        ATTRIBUTE_SCHEME_CREATE
     }
 
     /**
