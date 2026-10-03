@@ -1,4 +1,4 @@
-package com.game.scene.currency;
+package com.game.scene.gainblock;
 
 import com.game.discovery.RedisKeys;
 import java.util.HashSet;
@@ -9,12 +9,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 从 Redis 读全服产出封禁名单（{@code xm:gain-block:currency} 的字段）。阻塞调用，只在 {@link GainBlockSync} 的同步线程上用。
- * 字段不是合法的非负 int（写者是 xm-data 运维接口，会先校验）就跳过并告警。
+ * 从 Redis 读全服产出封禁名单（{@code xm:gain-block:currency} 与 {@code xm:gain-block:item} 的字段）。阻塞调用，
+ * 只在 {@link GainBlockSync} 的同步线程（及启动线程）上用。字段不是合法的非负 int（写者是 xm-data 运维接口，会先校验）就跳过并告警。
  */
 public final class RedisGainBlockSource implements GainBlockSync.Source {
 
-    static final String CURRENCY = "currency";
+    public static final String CURRENCY = RedisKeys.GAIN_BLOCK_CURRENCY;
+    public static final String ITEM = RedisKeys.GAIN_BLOCK_ITEM;
 
     private static final Logger log = LoggerFactory.getLogger(RedisGainBlockSource.class);
 
@@ -25,10 +26,12 @@ public final class RedisGainBlockSource implements GainBlockSync.Source {
     }
 
     @Override
-    public Set<Integer> loadCurrencies() {
-        Set<String> fields = redis.<String, String>getMap(RedisKeys.gainBlocks(CURRENCY), StringCodec.INSTANCE)
-                .readAllKeySet();
-        return parse(fields);
+    public GlobalGainBlocks load() {
+        return new GlobalGainBlocks(read(CURRENCY), read(ITEM));
+    }
+
+    private Set<Integer> read(String category) {
+        return parse(redis.<String, String>getMap(RedisKeys.gainBlocks(category), StringCodec.INSTANCE).readAllKeySet());
     }
 
     static Set<Integer> parse(Set<String> fields) {

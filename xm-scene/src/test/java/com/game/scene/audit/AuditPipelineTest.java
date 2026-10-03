@@ -424,4 +424,33 @@ class AuditPipelineTest {
         await().atMost(Duration.ofSeconds(5)).until(() -> count("unverified") == 1);
         assertThat(snapshotCount("send_error")).isEqualTo(1);
     }
+
+    @Test
+    void 物品流水_入包记获得方_销毁记扣减方_带关联号与附加信息_过长的附加信息换成截断标记() throws Exception {
+        AuditPipeline p = pipeline(10);
+        p.verifyNow();
+        KafkaAssetAudit audit = new KafkaAssetAudit(p, new ManualClock(), 3);
+
+        audit.itemGained(1001, 77, 10, 1500, Reason.SYSTEM_GRANT, 42, "{\"a\":1}");
+        audit.itemDestroyed(1001, 78, 1, 1, Reason.ITEM_DESTROY, 0, "x".repeat(AssetAudit.MAX_EXTRA + 1));
+        await().atMost(Duration.ofSeconds(5)).until(() -> producer.history().size() == 2);
+
+        TransactionLogRecord gained = TransactionLogRecord.parseFrom(producer.history().get(0).value());
+        TransactionLogRecord destroyed = TransactionLogRecord.parseFrom(producer.history().get(1).value());
+        assertThat(gained.getKind()).isEqualTo(AssetKind.ASSET_ITEM);
+        assertThat(gained.getReason()).isEqualTo(TransactionReason.TX_SYSTEM_GRANT);
+        assertThat(gained.getToPlayer()).isEqualTo(1001);
+        assertThat(gained.getFromPlayer()).isZero();
+        assertThat(gained.getItemUuid()).isEqualTo(77);
+        assertThat(gained.getItemConfigId()).isEqualTo(10);
+        assertThat(gained.getItemQuantity()).isEqualTo(1500);
+        assertThat(gained.getCorrelationId()).isEqualTo(42);
+        assertThat(gained.getExtra()).isEqualTo("{\"a\":1}");
+        assertThat(gained.getZoneId()).isEqualTo(3);
+        assertThat(destroyed.getReason()).isEqualTo(TransactionReason.TX_ITEM_DESTROY);
+        assertThat(destroyed.getFromPlayer()).isEqualTo(1001);
+        assertThat(destroyed.getToPlayer()).isZero();
+        assertThat(destroyed.getExtra()).isEqualTo(AssetAudit.EXTRA_TRUNCATED);
+        assertThat(producer.history().get(0).key()).isEqualTo("1001");
+    }
 }

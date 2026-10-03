@@ -103,17 +103,20 @@ public record SceneNodeProperties(
      *
      * @param currency 按币种覆盖（键是币种号，如 {@code xm.scene.anomaly.currency.0.max-amount=5000000}）；
      *                 覆盖里没写的项取内置缺省（600s / 50 / 100000），不继承上面的全局值
+     * @param item     按物品配置覆盖（键是物品配置号，如 {@code xm.scene.anomaly.item.10.max-count=200}），规则同上
      */
     public record AnomalySettings(
             @DefaultValue("600s") @DurationUnit(ChronoUnit.SECONDS) Duration window,
             @DefaultValue("50") int maxCount,
             @DefaultValue("100000") long maxAmount,
-            Map<Integer, Threshold> currency) {
+            Map<Integer, Threshold> currency,
+            Map<Integer, Threshold> item) {
 
         public AnomalySettings {
             // 紧凑构造器里字段还没赋值，校验与归一只能用参数
             new GainAnomalyDetector.Threshold(window, maxCount, maxAmount);
             currency = currency == null ? Map.of() : Map.copyOf(currency);
+            item = item == null ? Map.of() : Map.copyOf(item);
         }
 
         public GainAnomalyDetector.Threshold defaults() {
@@ -121,14 +124,22 @@ public record SceneNodeProperties(
         }
 
         public Map<Integer, GainAnomalyDetector.Threshold> currencyThresholds() {
+            return thresholds(currency);
+        }
+
+        public Map<Integer, GainAnomalyDetector.Threshold> itemThresholds() {
+            return thresholds(item);
+        }
+
+        private static Map<Integer, GainAnomalyDetector.Threshold> thresholds(Map<Integer, Threshold> overrides) {
             Map<Integer, GainAnomalyDetector.Threshold> out = new HashMap<>();
-            currency.forEach((type, t) -> out.put(type, new GainAnomalyDetector.Threshold(t.window(), t.maxCount(),
+            overrides.forEach((key, t) -> out.put(key, new GainAnomalyDetector.Threshold(t.window(), t.maxCount(),
                     t.maxAmount())));
             return out;
         }
     }
 
-    /** 某币种的阈值覆盖。 */
+    /** 某币种 / 物品配置的阈值覆盖。 */
     public record Threshold(
             @DefaultValue("600s") @DurationUnit(ChronoUnit.SECONDS) Duration window,
             @DefaultValue("50") int maxCount,

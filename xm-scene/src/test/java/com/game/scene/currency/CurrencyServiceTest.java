@@ -5,8 +5,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.GainAnomalyDetector;
 import com.game.scene.audit.GainAnomalyDetector.Threshold;
+import com.game.scene.gainblock.GlobalGainBlocks;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.player.Wallet;
+import com.game.scene.testing.CurrencyAudit;
 import com.game.scene.testing.ManualClock;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.WorldTestAccess;
@@ -22,10 +24,10 @@ class CurrencyServiceTest {
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final List<Long> audited = new ArrayList<>();
-    private final AssetAudit audit = (playerId, type, delta, before, after, reason) -> audited.add(delta);
+    private final AssetAudit audit = (CurrencyAudit) (playerId, type, delta, before, after, reason) -> audited.add(delta);
     private final SceneMetrics metrics = new SceneMetrics(meters);
     private final CurrencyService service = new CurrencyService(audit, new GainAnomalyDetector(
-            new Threshold(Duration.ofSeconds(60), 0, 100), Map.of(), new ManualClock(), metrics), metrics);
+            new Threshold(Duration.ofSeconds(60), 0, 100), Map.of(), Map.of(), new ManualClock(), metrics), metrics);
     private final ScenePlayer player = WorldTestAccess.player(1001);
 
     private double counter(String name, String tag, String value) {
@@ -35,7 +37,7 @@ class CurrencyServiceTest {
 
     @Test
     void 全服封禁的币种加不进_回27005_不记流水不进异常窗口_计封禁拒绝_换名单后恢复() {
-        service.applyGlobalBlocks(new GlobalGainBlocks(Set.of(Wallet.DIAMOND)));
+        service.applyGlobalBlocks(new GlobalGainBlocks(Set.of(Wallet.DIAMOND), Set.of()));
 
         Wallet.Change blocked = service.add(player, Wallet.DIAMOND, 500, AssetAudit.Reason.GM_GRANT);
 

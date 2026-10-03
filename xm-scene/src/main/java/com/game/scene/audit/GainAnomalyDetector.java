@@ -10,7 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 获取异常检测（基线 AnomalyDetector）：每玩家 × 每币种一个滑动窗口，窗口内获取次数或累计量超过阈值就告警。
+ * 获取异常检测（基线 AnomalyDetector）：每玩家 × 每币种 / 每物品配置一个滑动窗口，窗口内获取次数或累计量超过阈值就告警。
  * 只告警、不拦截、不影响玩法。逻辑线程上调用（窗口挂在玩家实例上，见 {@code GainWindows}）。
  *
  * <p>告警写日志 {@value #LOGGER}（带玩家号）并计 {@code xm.scene.gain.anomalies{category, currency_type}}（不带玩家号）。
@@ -22,6 +22,7 @@ public final class GainAnomalyDetector {
 
     public static final String LOGGER = "xm.audit.anomaly";
     static final String CURRENCY = "currency";
+    static final String ITEM = "item";
 
     private static final Logger log = LoggerFactory.getLogger(LOGGER);
 
@@ -62,23 +63,26 @@ public final class GainAnomalyDetector {
 
     private final Threshold defaults;
     private final Map<Integer, Threshold> currencyOverrides;
+    private final Map<Integer, Threshold> itemOverrides;
     private final SceneClock clock;
     private final SceneMetrics metrics;
 
     /**
      * @param currencyOverrides 按币种覆盖的阈值（没有的币种用 {@code defaults}）
+     * @param itemOverrides     按物品配置覆盖的阈值（同上）
      */
-    public GainAnomalyDetector(Threshold defaults, Map<Integer, Threshold> currencyOverrides, SceneClock clock,
-                               SceneMetrics metrics) {
+    public GainAnomalyDetector(Threshold defaults, Map<Integer, Threshold> currencyOverrides,
+                               Map<Integer, Threshold> itemOverrides, SceneClock clock, SceneMetrics metrics) {
         this.defaults = defaults;
         this.currencyOverrides = Map.copyOf(currencyOverrides);
+        this.itemOverrides = Map.copyOf(itemOverrides);
         this.clock = clock;
         this.metrics = metrics;
     }
 
     /** 全部关闭（测试 / 不需要检测的装配）。 */
     public static GainAnomalyDetector off() {
-        return new GainAnomalyDetector(Threshold.OFF, Map.of(), SceneClock.SYSTEM, SceneMetrics.noop());
+        return new GainAnomalyDetector(Threshold.OFF, Map.of(), Map.of(), SceneClock.SYSTEM, SceneMetrics.noop());
     }
 
     /**
@@ -91,7 +95,40 @@ public final class GainAnomalyDetector {
         if (t.off()) {
             return false;
         }
+        if (!record(player.gainWindows().currency(type), t, amount)) {
+            return false;
+        }
         GainWindow w = player.gainWindows().currency(type);
+        log.warn("anomaly category={} player={} currency_type={} count={} total={} max_count={} max_amount={} window_s={}",
+                CURRENCY, Long.toUnsignedString(player.playerId()), type, w.count(), w.total(), t.maxCount(),
+                t.maxAmount(), t.window().toSeconds());
+        metrics.gainAnomaly(CURRENCY, Integer.toString(type));
+        return true;
+    }
+
+    /**
+     * 记一次物品获取（入包成功之后，每个配置一次，量取请求数量，同基线 RecordItemGain）。指标不带配置号（高基数），只进日志。
+     *
+     * @return 这一次让窗口越线并告警了
+     */
+    public boolean itemGained(ScenePlayer player, int configId, long quantity) {
+        Threshold t = itemOverrides.getOrDefault(configId, defaults);
+        if (t.off()) {
+            return false;
+        }
+        if (!record(player.gainWindows().item(configId), t, quantity)) {
+            return false;
+        }
+        GainWindow w = player.gainWindows().item(configId);
+        log.warn("anomaly category={} player={} config_id={} count={} total={} max_count={} max_amount={} window_s={}",
+                ITEM, Long.toUnsignedString(player.playerId()), Integer.toUnsignedString(configId), w.count(), w.total(),
+                t.maxCount(), t.maxAmount(), t.window().toSeconds());
+        metrics.gainAnomaly(ITEM, SceneMetrics.NO_CURRENCY_TYPE);
+        return true;
+    }
+
+    /** 记一次获取；返回这一次是否让窗口越线（且此前未处于告警中）。 */
+    private boolean record(GainWindow w, Threshold t, long amount) {
         long now = clock.nanoTime();
         w.prune(now, t.windowNanos());
         if (!t.exceededBy(w)) {
@@ -103,10 +140,6 @@ public final class GainAnomalyDetector {
             return false;
         }
         w.alerting(true);
-        log.warn("anomaly category={} player={} currency_type={} count={} total={} max_count={} max_amount={} window_s={}",
-                CURRENCY, Long.toUnsignedString(player.playerId()), type, w.count(), w.total(), t.maxCount(),
-                t.maxAmount(), t.window().toSeconds());
-        metrics.gainAnomaly(CURRENCY, Integer.toString(type));
         return true;
     }
 }

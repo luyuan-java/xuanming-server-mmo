@@ -8,6 +8,7 @@ import com.game.proto.ActorType;
 import com.game.proto.Rotation;
 import com.game.proto.Transform;
 import com.game.scene.player.GainWindows;
+import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.Wallet;
 import com.google.protobuf.UnknownFieldSet;
@@ -56,6 +57,8 @@ public final class ScenePlayer {
     private final Wallet wallet;
     /** 属性加点（方案落库；二级属性与当前气血 / 法力由属性系统在加载时算出）。 */
     private final PlayerAttributes attributes;
+    /** 四个固定背包（存档原样收下，进场景前由背包服务按配表规整）。 */
+    private final PlayerBags bags;
     /** 获取滑动窗口（获取异常检测；不持久化，随实例清空）。 */
     private final GainWindows gainWindows = new GainWindows();
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
@@ -96,6 +99,7 @@ public final class ScenePlayer {
         this.unknownStateFields = state.getUnknownFields();
         this.wallet = state.hasCurrency() ? Wallet.restore(state.getCurrency()) : Wallet.empty();
         this.attributes = state.hasAttribute() ? PlayerAttributes.restore(state.getAttribute()) : PlayerAttributes.empty();
+        this.bags = state.hasBag() ? PlayerBags.restore(state.getBag()) : PlayerBags.empty();
     }
 
     public long playerId() {
@@ -279,6 +283,9 @@ public final class ScenePlayer {
         if (!attributes.isPristine()) {
             state.setAttribute(attributes.toState());
         }
+        if (!bags.isPristine()) {
+            state.setBag(bags.toState());
+        }
         return state.build();
     }
 
@@ -290,6 +297,11 @@ public final class ScenePlayer {
     /** 玩家的属性加点状态（逻辑线程上读写；写入只经属性系统）。 */
     public PlayerAttributes attributes() {
         return attributes;
+    }
+
+    /** 玩家的四个固定背包（逻辑线程上读写；写入只经背包服务）。 */
+    public PlayerBags bags() {
+        return bags;
     }
 
     /** 玩家的获取滑动窗口（逻辑线程上读写；只由获取异常检测使用）。 */

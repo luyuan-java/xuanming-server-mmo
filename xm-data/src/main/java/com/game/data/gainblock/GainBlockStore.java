@@ -21,8 +21,10 @@ import org.springframework.beans.factory.ObjectProvider;
  */
 public final class GainBlockStore {
 
-    /** 目前支持的类别（物品随背包批次加）。 */
-    public static final String CURRENCY = "currency";
+    /** 类别：币种（币种号）、物品（物品配置号）。名字即 Redis 键段与 scene 侧的读取类别。 */
+    public static final String CURRENCY = RedisKeys.GAIN_BLOCK_CURRENCY;
+    public static final String ITEM = RedisKeys.GAIN_BLOCK_ITEM;
+    public static final List<String> CATEGORIES = List.of(CURRENCY, ITEM);
 
     /** 一条封禁。 */
     public record Entry(int id, String operator, long timeMs, String reason) {

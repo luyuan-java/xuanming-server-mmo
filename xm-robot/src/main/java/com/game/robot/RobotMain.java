@@ -1,15 +1,16 @@
 package com.game.robot;
 
 import com.game.contract.MessageIdRegistry;
+import com.game.robot.client.AdminClient;
 import com.game.robot.client.MessageIds;
 import com.game.robot.client.RobotClient;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.scenario.AttributeScenario;
-import com.game.robot.client.AdminClient;
 import com.game.robot.scenario.AuditScenario;
-import com.game.robot.scenario.GuardScenario;
+import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CurrencyScenario;
+import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.SmokeScenario;
 import java.io.PrintStream;
@@ -75,6 +76,12 @@ public final class RobotMain {
                             AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
                             options.sceneMetricsUrl());
                     title = "xm-robot guard：" + scenario.account() + "，" + target + " data=" + options.dataUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.BAG) {
+                    BagScenario scenario = new BagScenario(flow, registry, options.accountPrefix(), options.runTag(),
+                            options.requestTimeout());
+                    title = "xm-robot bag：" + scenario.account() + "，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.ATTRIBUTE) {

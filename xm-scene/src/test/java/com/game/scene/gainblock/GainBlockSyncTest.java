@@ -1,4 +1,4 @@
-package com.game.scene.currency;
+package com.game.scene.gainblock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,13 +33,13 @@ class GainBlockSyncTest {
         return sync;
     }
 
-    private Set<Integer> load() {
+    private GlobalGainBlocks load() {
         loads.incrementAndGet();
         RuntimeException e = failure.get();
         if (e != null) {
             throw e;
         }
-        return remote.get();
+        return new GlobalGainBlocks(remote.get(), Set.of());
     }
 
     @AfterEach
@@ -99,7 +99,7 @@ class GainBlockSyncTest {
                     Thread.currentThread().interrupt();
                 }
             }
-            return remote.get();
+            return new GlobalGainBlocks(remote.get(), Set.of());
         });
         s.loadNow();
         s.start(Duration.ofHours(1));
@@ -129,7 +129,7 @@ class GainBlockSyncTest {
         CountDownLatch inLoad = new CountDownLatch(1);
         GainBlockSync s = sync(() -> {
             if (loads.incrementAndGet() == 1) {
-                return Set.of();
+                return GlobalGainBlocks.NONE;
             }
             inLoad.countDown();
             try {
@@ -138,7 +138,7 @@ class GainBlockSyncTest {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("被中断", e);
             }
-            return Set.of();
+            return GlobalGainBlocks.NONE;
         });
         s.loadNow();
         s.start(Duration.ofHours(1));

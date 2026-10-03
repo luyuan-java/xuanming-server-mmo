@@ -4,6 +4,10 @@ package com.game.discovery;
 public final class RedisKeys {
 
     public static final String PREFIX = "xm:";
+    /** 全服产出封禁的类别：币种（字段是币种号）。写者（xm-data）与读者（scene）共用这一个出处。 */
+    public static final String GAIN_BLOCK_CURRENCY = "currency";
+    /** 全服产出封禁的类别：物品（字段是物品配置号）。 */
+    public static final String GAIN_BLOCK_ITEM = "item";
 
     private RedisKeys() {
     }
@@ -51,8 +55,8 @@ public final class RedisKeys {
     }
 
     /**
-     * 全服产出封禁名单：{@code xm:gain-block:{category}}（category 目前只有 {@code currency}），Hash，字段为被封的 id
-     * （十进制），值为封禁元数据 JSON（操作人、时刻、原因，只给运维看）。全服一份、不分 zone；xm-data 运维接口是唯一写者，
+     * 全服产出封禁名单：{@code xm:gain-block:{category}}（category 是 {@link #GAIN_BLOCK_CURRENCY} 或
+     * {@link #GAIN_BLOCK_ITEM}），Hash，字段为被封的 id（十进制），值为封禁元数据 JSON（操作人、时刻、原因，只给运维看）。全服一份、不分 zone；xm-data 运维接口是唯一写者，
      * 全部 scene 节点读。
      */
     public static String gainBlocks(String category) {

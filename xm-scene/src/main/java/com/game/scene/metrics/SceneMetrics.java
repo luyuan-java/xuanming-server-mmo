@@ -304,9 +304,12 @@ public final class SceneMetrics {
                 .register(registry).increment();
     }
 
+    /** 物品类告警的 currency_type 标签值（同一指标的每条序列标签键要一致）。 */
+    public static final String NO_CURRENCY_TYPE = "none";
+
     /**
      * 一次获取异常告警（{@code xm.scene.gain.anomalies{category, currency_type}}）。currency_type 只取已知币种
-     * （个位数），物品类告警不带 config id（高基数，见 AGENTS §5），玩家号只进日志。
+     * （个位数），物品类告警填 {@value #NO_CURRENCY_TYPE}、不带 config id（高基数，见 AGENTS §5），玩家号与配置号只进日志。
      */
     public void gainAnomaly(String category, String currencyType) {
         Counter.builder(GAIN_ANOMALIES).description("获取异常告警（滑动窗口内次数或累计量超阈值，每次越线计一次）")

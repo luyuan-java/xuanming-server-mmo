@@ -101,4 +101,26 @@ class GainBlockControllerTest {
         assertThatThrownBy(() -> mvc.perform(get("/admin/gain-blocks")))
                 .hasRootCauseInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    void 物品类别同样可封可解_列表两类都列_未知类别404() throws Exception {
+        when(store.block(GainBlockStore.ITEM, 10, "ops", NOW, "刷药")).thenReturn(new GainBlockStore.Entry(10, "ops", NOW,
+                "刷药"));
+        when(store.list(GainBlockStore.CURRENCY)).thenReturn(List.of());
+        when(store.list(GainBlockStore.ITEM)).thenReturn(List.of(new GainBlockStore.Entry(10, "ops", NOW, "刷药")));
+        when(store.unblock(GainBlockStore.ITEM, 10)).thenReturn(false);
+
+        mvc.perform(put("/admin/gain-blocks/item/10").param("reason", "刷药").header(AdminAuthFilter.OPERATOR_HEADER, "ops"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(10));
+        mvc.perform(get("/admin/gain-blocks"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.currency").isEmpty())
+                .andExpect(jsonPath("$.item[0].id").value(10));
+        mvc.perform(delete("/admin/gain-blocks/item/10").param("reason", "修好了"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.removed").value(false));
+        mvc.perform(put("/admin/gain-blocks/pet/1").param("reason", "x")).andExpect(status().isNotFound());
+        mvc.perform(delete("/admin/gain-blocks/pet/1").param("reason", "x")).andExpect(status().isNotFound());
+    }
 }

@@ -11,9 +11,9 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 以及横切的审计设施（全服 / 每玩家禁发、Kafka 资产流水、异常检测告警、登录 / 登出快照、永久 GUID 号段）。客户端可见面很小：
 190 活动列表、191/192 背包读取 / 整理、193/194/195 任务列表 / 接取 / 领奖、54 货币列表，外加仅 dev/test 开放的 37/49/94/95 GM 货币指令；
 **没有穿脱装备、使用物品、丢弃、拆分、移动格子、扩容的客户端 RPC**（物品只在回合制战斗里作为药品使用），物品入包只来自战斗掉落、任务奖励与通用资产通道。
-持久化全部随 `player_database` 一条记录（`bag_component` / `mission_component` / `currency`）落盘。Java 版目前**整个区域都没有实现**：
-`xm-scene` 对 190–195、54、37/49/94/95 一律回 1006 kFeatureUnavailable，`xm-player-store` 表里只有位置 / 等级等列，没有 Kafka；
-只有配表访问层（`ItemRows` / `EquipSlotRows` / `MissionRows` / `ConditionRows` / `RewardRows` / `ActivityScheduleRows` / `GlobalVariableRows`）已就绪。
+持久化全部随 `player_database` 一条记录（`bag_component` / `mission_component` / `currency`）落盘。Java 版现状（2026-10-03）：
+货币（54、37/49/94/95，批次 2.1）、资产流水 / 快照 / 全服禁发 / 异常检测（2.3）、背包（191/192，2.4）已做，玩家数据存 `player_state` 一份 protobuf；
+任务 / 活动（190、193–195）随 2.5，`xm-scene` 目前对它们回 1006 kFeatureUnavailable。
 
 ## 功能
 
@@ -29,7 +29,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
   整理 `MergeAndCompact`：合并同种零头 + 回收 size==0 实例；`kMergeOnly` 一格不挪，`kMergeAndReorder` 按 (config 升序, size 降序) 重铺 0..n-1；已最优时早退返回 changed=false；装备栏 / 格子布局永不重排。
   错误码：6004 `kBagAddItemInvalidParam`（零数量 / 查不到表 / 铸号源不可用 / 预设 guid 撞车）、6005 `kBagAddItemBagFull`、1002 `kInvalidTableData`。
 - internal: 纯内存 ECS 组件，单线程。Java 需要：`PlayerBags`（4 个固定包 + 可选动态包）、实例表（guid → config/size/acquire_seq）、布局（扁平 / 具名槽）、准入 / 淘汰策略接口，规划-预留-提交的三段 API；所有写只在场景逻辑线程。
-- java: missing — `xm-scene` 无任何背包代码；只有 `com.game.table.ItemRows` / `EquipSlotRows` 可读
+- java: done（2026-10-03，批次 2.4）— `com.game.scene.player.{Bag,BagItem,BagType,PlayerBags}`：四个固定包、堆叠、装备栏按部位分桶、临时格 FIFO 淘汰（不动点）、合并 + 重排；批量入包整批原子（含淘汰与铸号），遍历顺序确定（入包序号, guid）。未移植基线无生产调用方的单件 / 预设 guid 入包、各种扣除、扩容、准入策略、动态包、GridLayout；夹紧扣除随 6.3
 - size: L
 - robot: Go `robot/features_smoke_scenario.go`（只读 191 / 可选 192），`robot/features_battle_smoke.go`（掉落入包）；Java xm-robot none
 - hazards: ① `RemoveItems` / `RemoveItemsClamped` 只扣数量、留下 size==0 的「僵尸堆」直到下一次整理，`GetBag` 不过滤，客户端会看到 count=0 的物品；② 临时格 FIFO 会**静默销毁**玩家最早的东西（只落 LogItemDestroy 流水，不通知客户端）；③ 批量入包「返回失败 ≠ 包未变」：临时格可能已淘汰、前几个 config 可能已写入（`mutated` 出参）；④ 装备栏槽号 = EquipSlot.id，若表里 id ≥ 容量 10 该槽永远不可用；⑤ 还原路径故意比活玩法宽松（位置可变、物品不丢，见 bag-persistence）；⑥ `ExpandCapacity` 存在但无生产调用（容量不可解锁）。
@@ -41,7 +41,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: bag-core-container, gain-block, transaction-log, anomaly-detector, 跨节点换图冻结（`PlayerLifecycleSystem::IsCrossZoneFrozen`）
 - behavior: 每个入口先判跨 zone / 换节点冻结（AddItem(s) 回 1005 `kInvalidParameter`；RemoveItemsByGuid 回 27003 `kAssetFrozen`），再判全服禁发、每玩家 GM 禁发（都回 1005），然后调容器，最后按每个写入 / 淘汰 / 销毁 / 扣除的实例落流水（TX_SYSTEM_GRANT / TX_QUEST_REWARD / TX_ITEM_AWARD / TX_ITEM_DESTROY / TX_AUCTION_SELL，带 correlation_id 与来源 extra）并喂异常检测。`SortByPlayerRequest` = 玩家显式整理（唯一会重排的入口）；自动整理必须显式选 `kMergeOnly`。战斗掉落：先入主包；失败时按「入包前后持有量差」只把**没进去的余量**改投临时格（防复制），两处都失败只记 ERROR（物品丢失）。
 - internal: Java 需要一个 `BagService` 门面：冻结 / 禁发闸、流水回执、`mutated` 语义（失败时包是否已改动，资产通道据此区分 RETRY 与 APPLIED+partial）。闸门（战斗中、冻结）**不得下沉**到容器层，否则战斗结算会被自己拦住。
-- java: missing
+- java: partial（2026-10-03，批次 2.4）— `com.game.scene.bag.BagService`：冻结闸（随 5.2，目前放行）→ 全服物品禁发 1005 → 容器 → 入包流水（每配置一条）+ 淘汰 / 整理退役销毁流水 + 物品获取异常检测；mutated 语义由整批原子取代（失败即未改动）。战斗掉落 / 任务奖励 / 资产通道入口随 6.x / 2.5 / 2.9
 - size: M
 - robot: Go `features_battle_smoke.go`（掉落 / 消耗）；Java none
 - hazards: ① 物品禁发回 1005，而货币禁发回 27005 `kAssetBlocked`，两套口径不一致；② `AddItem` 流水只记 `PrimaryWrittenGuid`（一次拆成多堆时只记第一个 guid，数量记整批）；③ 冻结拒绝时背包回 1005（终局类），货币回 27003（RETRY 类）；④ 每玩家 `PlayerItemBlockList` 全仓**从未 emplace**，GM 物品禁发实际不可用（见 gain-block）。
@@ -53,7 +53,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: bag-core-container
 - behavior: 存：`capacities[4]` + 每个实例一条 `ItemEntry{item_uuid, config_id, stack_size, pos, bag_type, acquire_seq}` + 动态包 `{bag_id, capacity, profile_id, items}`。取：先 Reset → 恢复容量（拒绝压到已占格以下）→ 逐件 `InsertItemForRestore`：非法 guid / 重复 guid 跳过并 ERROR；装备栏优先按**当前表**的部位找空槽，其次用快照 pos，再不行自动选位；`bag_type` 越界的条目丢弃（WARN）。还原不跑堆叠、不落流水、不查禁发。`acquire_seq=0`（旧档）按重放顺序补盖。
 - internal: 与位置、货币、任务同一条玩家记录、同一次写回（资产与账本一起落盘、一起丢）。Java：在 xm-player-store 加背包存储（建议 protobuf blob 列或子表），写回走现有 `owner_epoch` 围栏；客户端不可见，格式 Java 自定。
-- java: missing — `xm-player-store/src/main/resources/db/xm-player-schema.sql` 只有位置 / 等级 / 归属列；`PlayerData` / `PlayerSave` 无背包
+- java: done（2026-10-03，批次 2.4）— `player_state.bag`（Java 自有 `BagState` / `BagItemState`，按 (bag_type, 格子) 写出、未知字段带回）；构造时原样收下、进场前规整：结构性损坏拒绝进场（不丢物品）、格子问题重新落位、不认识的 bag_type 隔离写回、数量 0 丢弃、序号 0 补盖；容量只在非缺省时存（对应 hazard ①②③）
 - size: M
 - robot: none（Go `features_smoke` 只读当下状态）
 - hazards: ① 还原时具名槽按**当前**表落位：策划改了部位，老装备会换槽甚至进不了装备栏而被「自动选位」塞进任意空槽；② 容量来自存档而非表，存档里的容量永远不会被新版本的起始容量抬高（`kBagMaxCapacity` 改大对老玩家无效）；③ bag_type 越界的条目被**丢弃**（与「物品不能丢」原则矛盾，只记 WARN）。
@@ -66,7 +66,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - behavior: GetBag 纯读取（不合堆、不整理、不创建组件）：`bag_type >= 4` → 1005；无背包组件 → 1003；两层不一致或容量 > u32 → 1002；实体无效 → 1009。成功时 `BagInfo{items（按 item_id 升序）, layout{bag_type, capacity, slots（按 slot 升序，width=height=1）, can_sort = bag_type∈{0,1}}, currency = 整个 CurrencyComp}`；`name/description/icon_key` 恒空（表无展示列）。
   SortBag：只允许 0 / 1（否则 1005）；**回合制战斗中（InBattleComp）→ 1005**；跨 zone 冻结 → BagService 回 1005；成功执行 `kMergeAndReorder`，回整包快照 + `changed`（已最优为 false）。任何失败都 `clear_bag()` 并把 tip 写进 `error_message`。客户端：错误显示「读取背包失败（错误码 N）」，任务领奖成功后自动重拉背包。
 - internal: 应答在场景逻辑线程上直接构造；Java 只需在 `ClientRequestHandler` 加两个方法 + BagInfo 组装。
-- java: missing — `xm-scene/src/main/java/com/game/scene/world/ClientRequestHandler.java` 对未实现方法回 1006
+- java: done（2026-10-03，批次 2.4）— `com.game.scene.bag.BagFeature`：191 / 192 同基线校验顺序与应答形态（无符号 bag_type、布局总在、按 item_id / 格子排序、货币 = 54 的 wallet.toClient()，不带 debts——hazard ① 不存在；不留僵尸——hazard ②）；战斗中禁止整理随 6.3。robot `bag` 场景
 - size: M
 - robot: Go `robot/features_smoke_scenario.go`（`readBag`，`features_smoke.sort_bag` 选项）、`robot/logic/gameobject/player_features_test.go`；Java xm-robot none
 - hazards: ① BagInfo.currency 是 ECS 里 `CurrencyComp` 的整份拷贝，含**加载时**的 `debts`（GM 操作员名、原因）与 `blocked_types`——泄露 GM 信息且是过期数据（运行期欠款在 `PlayerCurrencyComp`，见 currency-debt-clawback）；② 不过滤 size==0 僵尸实例；③ 战斗中拒绝整理用的是通用 1005，客户端无法区分「战斗中」与「参数错」。
@@ -78,7 +78,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: bag-core-container
 - behavior: 进装备栏的物品必须 `equip_kind>0` 且有空的同部位槽；装备栏永不淘汰、永不整理重排；`GetBag(bag_type=2)` 可读出装备栏（can_sort=false）。没有穿戴后属性加成（属性系统不读装备栏）。
 - internal: Java 实现装备栏时需同一套「部位分桶」reserve（不能用格子数判满，基线 2026 年修过「第 3 只手镯通过预检、commit 半批」的 bug）。
-- java: missing
+- java: done（2026-10-03，批次 2.4）— 装备栏按部位分桶的 reserve 与放置同一判据（第三只手镯整批拒绝、零写入）；还原优先用存档格子（本部位空槽），用不上的槽行加载时告警。穿脱 RPC 基线也没有
 - size: S（只规则）；若要做真正的穿脱 + 属性加成需先在 mmorpg 定契约（XL，不在基线）
 - robot: none
 - hazards: 槽号直接用 EquipSlot.id，必须 < 装备栏容量 10；规则全在表里，C++ 没写死任何槽号。
@@ -139,7 +139,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: none
 - behavior: 入口顺序：全服封禁 → 每玩家封禁 → 正常逻辑。币种被封 → 27005；物品被封 → 1005。全服名单 `BlockGlobal/UnblockGlobal/ClearAllGlobalBlocks` 设计为「紧急止血：所有人不得再获得物品 30045」。
 - internal: 全服名单是 **thread_local** 集合，没有任何加载 / 热更 / GM 写入路径（`BlockGlobal` 只在单测里调用）；每玩家物品名单 `PlayerItemBlockList` 全仓没有 emplace，`PlayerItemBlockComp` 也不进存档。Java 若做：全服名单应来自配置中心（Nacos）或 Redis 并在所有场景节点生效，每玩家名单进玩家记录。
-- java: partial（2026-10-03，批次 2.3c）— 全服币种名单在 Redis `xm:gain-block:currency`，xm-data 运维接口读写（令牌 + 操作人 + 原因），scene `GainBlockSync` 经 pub/sub + 10s 周期同步到逻辑线程；判定顺序同基线（全服 → 本人 → 入账，都是 27005）。尚缺：物品名单（随背包批次）。对应 hazard ①（Java 有写入口、全节点生效）
+- java: partial（2026-10-03，批次 2.3c）— 全服币种名单在 Redis `xm:gain-block:currency`，xm-data 运维接口读写（令牌 + 操作人 + 原因），scene `GainBlockSync` 经 pub/sub + 10s 周期同步到逻辑线程；判定顺序同基线（全服 → 本人 → 入账，都是 27005）；物品名单 `xm:gain-block:item`（批次 2.4，被封回 1005 同基线口径）。每玩家物品禁发基线从未挂载，不做。对应 hazard ①（Java 有写入口、全节点生效）
 - size: S
 - robot: none
 - hazards: ① 生产上**完全不可用**：全服名单无写入口且按线程隔离（多线程 scene 上只封一个线程）；每玩家物品名单从未挂载；只有币种的每玩家封禁（94 / 95）真正生效；② 币种 / 物品的拒绝码不一致（27005 vs 1005）。
@@ -163,7 +163,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: Kafka
 - behavior: 每玩家 × 每币种 / 每物品 config 一个滑动窗口（默认 600s 内 > 50 次或累计 > 100000 即告警），告警打 WARN 并发 JSON 到 Kafka `anomaly_alert_topic`（无世代后缀）。只告警、不拦截、不影响玩法。
 - internal: 阈值全是 thread_local 默认值，没有任何配置加载；Java 可用 Micrometer 计数 + 日志告警替代，**禁止**把 player_id 作为指标 label（AGENTS §5）。
-- java: partial（2026-10-03，批次 2.3c）— `GainAnomalyDetector`：每玩家 × 每币种滑动窗口（挂在玩家实例上，hazard ③ 不存在），阈值来自配置、可按币种覆盖，越线只告警一次（hazard ②），告警走日志 `xm.audit.anomaly` + 指标（不带玩家号；hazard ① 不发 Kafka）。尚缺：物品窗口（随背包批次）
+- java: partial（2026-10-03，批次 2.3c）— `GainAnomalyDetector`：每玩家 × 每币种滑动窗口（挂在玩家实例上，hazard ③ 不存在），阈值来自配置、可按币种覆盖，越线只告警一次（hazard ②），告警走日志 `xm.audit.anomaly` + 指标（不带玩家号；hazard ① 不发 Kafka）；物品窗口随批次 2.4 接入（与币种分开存）
 - size: S
 - robot: none
 - hazards: ① `anomaly_alert_topic` 在 Go / Java 全仓**没有消费者**，告警只在日志里有用；② 超阈值后每次获取都再告警一次（无去抖），刷怪 / 批量领奖时会刷屏；③ 桶按 `entt::entity` 而非 player_id 索引，实体复用依赖下线时 ClearPlayer。

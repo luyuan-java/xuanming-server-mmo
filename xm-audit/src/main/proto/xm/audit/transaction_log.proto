@@ -13,9 +13,13 @@ option java_multiple_files = true;
 // 变动原因。与 mmorpg TransactionType 含义相同的沿用其数值；Java 独有的从 1001 起。
 enum TransactionReason {
   TX_REASON_UNSPECIFIED = 0;
+  // 系统发放（同 mmorpg TX_SYSTEM_GRANT：没有更具体来源的入包）
+  TX_SYSTEM_GRANT = 8;
   // GM 凭空发放 / 扣除（同 mmorpg TX_GM_GRANT / TX_GM_DEDUCT）
   TX_GM_GRANT = 9;
   TX_GM_DEDUCT = 10;
+  // 物品销毁（同 mmorpg TX_ITEM_DESTROY）：临时格淘汰（数量 = 真实堆叠数）、整理时合并掉的空实例（数量 0）
+  TX_ITEM_DESTROY = 13;
   // 属性洗点的金币（mmorpg 记通用消费 TX_CURRENCY_DEDUCT）
   TX_ATTRIBUTE_RESET = 1001;
   // 开新加点方案的金币（同上）
@@ -44,7 +48,7 @@ message TransactionLogRecord {
   int64 currency_delta = 8;
   uint64 balance_before = 9;
   uint64 balance_after = 10;
-  // 物品变动（kind = ASSET_ITEM，随背包批次接入）
+  // 物品变动（kind = ASSET_ITEM）：入包记获得方 to_player，销毁 / 淘汰记扣减方 from_player（同 mmorpg LogItemCreate / LogItemDestroy）
   uint64 item_uuid = 11;
   uint32 item_config_id = 12;
   uint32 item_quantity = 13;

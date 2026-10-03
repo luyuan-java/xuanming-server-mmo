@@ -20,7 +20,7 @@ class GainAnomalyDetectorTest {
     private final ScenePlayer player = WorldTestAccess.player(1001);
 
     private GainAnomalyDetector detector(Threshold defaults, Map<Integer, Threshold> overrides) {
-        return new GainAnomalyDetector(defaults, overrides, clock, new SceneMetrics(meters));
+        return new GainAnomalyDetector(defaults, overrides, Map.of(), clock, new SceneMetrics(meters));
     }
 
     private double alerts(int type) {
@@ -104,5 +104,27 @@ class GainAnomalyDetectorTest {
         assertThatThrownBy(() -> new Threshold(Duration.ofMillis(999), 50, 100_000))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(new Threshold(Duration.ofDays(1), 50, 100_000).window()).isEqualTo(Duration.ofDays(1));
+    }
+
+    private double itemAlerts() {
+        var counter = meters.find("xm.scene.gain.anomalies").tag("category", "item").tag("currency_type", "none")
+                .counter();
+        return counter == null ? 0 : counter.count();
+    }
+
+    @Test
+    void 物品与币种的窗口分开计数_号相同也互不影响_物品告警不带配置号() {
+        GainAnomalyDetector d = new GainAnomalyDetector(new Threshold(Duration.ofSeconds(60), 1, 0), Map.of(),
+                Map.of(7, Threshold.OFF), clock, new SceneMetrics(meters));
+
+        assertThat(d.currencyGained(player, 0, 1)).isFalse();
+        assertThat(d.itemGained(player, 0, 1)).as("物品 0 与金币 0 各算各的").isFalse();
+        assertThat(d.itemGained(player, 0, 1)).isTrue();
+        assertThat(d.itemGained(player, 7, 1_000_000)).as("物品 7 覆盖为关闭").isFalse();
+        assertThat(d.itemGained(player, 7, 1_000_000)).isFalse();
+        assertThat(alerts(0)).isZero();
+        assertThat(itemAlerts()).isEqualTo(1);
+        assertThat(meters.find("xm.scene.gain.anomalies").tag("category", "item").counters())
+                .allSatisfy(c -> assertThat(c.getId().getTag("currency_type")).isEqualTo("none"));
     }
 }

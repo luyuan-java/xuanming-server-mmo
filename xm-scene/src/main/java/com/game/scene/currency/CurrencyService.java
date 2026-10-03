@@ -2,6 +2,8 @@ package com.game.scene.currency;
 
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.GainAnomalyDetector;
+import com.game.scene.gainblock.GlobalGainBlocks;
+import com.game.scene.gainblock.RedisGainBlockSource;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.player.Wallet;
 import com.game.scene.world.ScenePlayer;

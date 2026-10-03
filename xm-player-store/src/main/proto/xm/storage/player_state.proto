@@ -20,6 +20,33 @@ message PlayerState {
   CurrencyState currency = 2;
   // 属性加点：方案与已分配点。点数总量（按等级与表换算）、二级属性都不落库，每次加载重算。
   AttributeState attribute = 3;
+  // 背包（四个固定包：0 人物背包、1 仓库、2 装备栏、3 临时格，同 mmorpg BagType）。
+  BagState bag = 4;
+}
+
+// 背包（mmorpg BagAllData 的 Java 自有对应；基线的动态包没有生产创建点，不存）。
+message BagState {
+  // 各背包容量，下标 = bag_type；缺的项或 0 = 取当前版本的缺省容量（100 / 200 / 10 / 200）。
+  // 只在有包不是缺省容量时才写（目前没有扩容入口，所以总是空），缺省容量的包写 0：以后调高缺省容量，老玩家也一并生效。
+  // 下标 4 起是本版本不认识的背包的容量，原样保留、写回。
+  repeated uint32 capacities = 1;
+  // 全部物品实例，按 (bag_type, pos) 升序写出（周期存盘按值比对脏数据，顺序必须确定）。
+  repeated BagItemState items = 2;
+}
+
+// 一个物品实例（mmorpg ItemEntry 的 Java 自有对应）。
+message BagItemState {
+  // 实例 guid：全服唯一的雪花号（场景节点在全服号段租约上发），永不为 0。
+  uint64 item_uuid = 1;
+  uint32 config_id = 2;
+  // 堆叠数（不可叠加物品恒为 1）。
+  uint32 stack_size = 3;
+  // 格子号；装备栏里就是 EquipSlot.id。
+  uint32 pos = 4;
+  // 所在背包（0–3）；本版本不认识的值原样保留、写回（滚动升级 / 回滚期间不丢东西）。
+  uint32 bag_type = 5;
+  // 入包序号（临时格先进先出淘汰的依据）；0 = 老数据，加载时按出现顺序补盖。
+  uint64 acquire_seq = 6;
 }
 
 message CurrencyState {

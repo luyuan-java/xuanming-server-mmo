@@ -1,9 +1,8 @@
-package com.game.scene.currency;
+package com.game.scene.gainblock;
 
 import com.game.scene.metrics.SceneMetrics;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
-import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -30,7 +29,7 @@ public final class GainBlockSync {
     /** 名单来源（阻塞调用；失败抛异常）。 */
     @FunctionalInterface
     public interface Source {
-        Set<Integer> loadCurrencies();
+        GlobalGainBlocks load();
     }
 
     private final Source source;
@@ -56,7 +55,7 @@ public final class GainBlockSync {
 
     /** 启动时同步读一次并交出；失败直接抛（调用方据此拒绝启动）。 */
     public synchronized GlobalGainBlocks loadNow() {
-        GlobalGainBlocks blocks = new GlobalGainBlocks(source.loadCurrencies());
+        GlobalGainBlocks blocks = source.load();
         accept(blocks);
         return blocks;
     }
@@ -120,7 +119,7 @@ public final class GainBlockSync {
     /** 同步线程上：重读并交出，失败沿用上次（包内可见供测试直接驱动）。 */
     synchronized void refreshQuietly() {
         try {
-            accept(new GlobalGainBlocks(source.loadCurrencies()));
+            accept(source.load());
             if (failing) {
                 failing = false;
                 log.info("全服产出封禁名单同步恢复");
@@ -142,7 +141,7 @@ public final class GainBlockSync {
         lastSuccessNanos = nanoTime.getAsLong();
         entries = blocks.size();
         if (!blocks.equals(last)) {
-            log.info("全服产出封禁名单 币种={}", blocks.currencies());
+            log.info("全服产出封禁名单 币种={} 物品={}", blocks.currencies(), blocks.items());
             last = blocks;
         }
         onLoaded.accept(blocks);

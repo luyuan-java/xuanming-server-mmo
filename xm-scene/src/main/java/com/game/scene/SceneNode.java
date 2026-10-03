@@ -17,6 +17,9 @@ import com.game.player.store.PlayerStore;
 import com.game.scene.attribute.AttributeFeature;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.attribute.AttributeTables;
+import com.game.scene.bag.BagFeature;
+import com.game.scene.bag.BagService;
+import com.game.scene.bag.BagTables;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.AuditPipeline;
 import com.game.scene.audit.GainAnomalyDetector;
@@ -24,9 +27,9 @@ import com.game.scene.audit.KafkaAssetAudit;
 import com.game.scene.audit.KafkaPlayerSnapshots;
 import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.currency.CurrencyService;
-import com.game.scene.currency.GainBlockSync;
-import com.game.scene.currency.RedisGainBlockSource;
 import com.game.scene.discovery.SceneDirectoryPublisher;
+import com.game.scene.gainblock.GainBlockSync;
+import com.game.scene.gainblock.RedisGainBlockSource;
 import com.game.scene.id.SceneGuids;
 import com.game.scene.link.GateLinks;
 import com.game.scene.link.LinkIdentity;
@@ -36,6 +39,7 @@ import com.game.scene.link.SceneLinkService;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.ownership.OwnerLeaseRenewer;
 import com.game.scene.ownership.OwnerTakeoverSubscriber;
+import com.game.scene.player.ItemGuids;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.PlayerSnapshots;
@@ -49,6 +53,7 @@ import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
 import java.time.InstantSource;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
@@ -107,6 +112,7 @@ public class SceneNode implements SmartLifecycle {
     private final MessageIdRegistry registry;
     private final SceneTables tables;
     private final AttributeTables attributeTables;
+    private final BagTables bagTables;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final AuditProperties audit;
@@ -135,12 +141,13 @@ public class SceneNode implements SmartLifecycle {
 
     /**
      * @param attributeTables 属性加点配表视图（与 {@code tables} 来自同一份配表快照）
+     * @param bagTables       背包配表视图（同上）
      * @param audit    资产审计管线配置（Kafka）
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
      * @param metrics  scene 指标（各组件共用一份）
      */
     public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
-                     MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
+                     MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables, BagTables bagTables,
                      NodeLinkAuth linkAuth, SceneMetrics metrics, AuditProperties audit) {
         this.props = props;
         this.redis = redis;
@@ -148,6 +155,7 @@ public class SceneNode implements SmartLifecycle {
         this.registry = registry;
         this.tables = tables;
         this.attributeTables = attributeTables;
+        this.bagTables = bagTables;
         this.linkAuth = linkAuth;
         this.metrics = metrics;
         this.audit = audit;
@@ -196,15 +204,22 @@ public class SceneNode implements SmartLifecycle {
 
         GateLinks gateLinks = new GateLinks(metrics);
         GainAnomalyDetector anomalies = new GainAnomalyDetector(settings.anomaly().defaults(),
-                settings.anomaly().currencyThresholds(), SceneClock.SYSTEM, metrics);
-        CurrencyService currency = new CurrencyService(startAudit(zoneId, nodeId, settings), anomalies, metrics);
-        startGainBlockSync(currency, settings);
+                settings.anomaly().currencyThresholds(), settings.anomaly().itemThresholds(), SceneClock.SYSTEM, metrics);
+        SceneGuids sceneGuids = acquireSceneGuids();
+        AssetAudit assetAudit = startAudit(zoneId, nodeId, settings, sceneGuids);
+        CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics);
+        BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
+        startGainBlockSync(currency, bags, settings);
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
+        // 进场景前的规整：先背包（坏档拒绝进场），再属性
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
-                SceneClock.SYSTEM, metrics, attributes::initializeOnLoad, snapshots);
+                SceneClock.SYSTEM, metrics, player -> {
+                    bags.initializeOnLoad(player);
+                    attributes.initializeOnLoad(player);
+                }, snapshots);
         links = gateLinks;
         world = sceneWorld;
         RunMode runMode = RunMode.parse(props.runMode());
@@ -212,7 +227,7 @@ public class SceneNode implements SmartLifecycle {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, tables, runMode,
-                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry)));
+                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry), new BagFeature(bags)));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         callOnLogic(() -> {
             tables.worldSceneConfigIds().forEach(sceneWorld::createScene);
@@ -371,18 +386,42 @@ public class SceneNode implements SmartLifecycle {
     }
 
     /**
-     * 资产审计：占全服发号租约、建审计管线并核对 topic。分区契约不符抛出（拒绝启动）；Kafka 不可达（含地址解析不了）
+     * 全服发号：占全服范围的号段租约（{@code NodeTypes.SCENE_GUID}），只建一个 {@link SceneGuids}，物品 uuid、资产流水号、快照号
+     * 共用（两个同 worker 的雪花实例会发出相同的号）。不论审计开不开都要：物品入包离不开它。
+     */
+    private SceneGuids acquireSceneGuids() {
+        NodeIdLease guids = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
+                Snowflake.MAX_WORKER, instanceId, LEASE_TTL,
+                () -> log.error("全服发号租约丢失：物品入包发不出号（回 6004）、资产流水改写兜底日志，请尽快重启本节点"));
+        guidLease = guids;
+        log.info("全服发号就绪 worker={}", guids.nodeId());
+        return new SceneGuids(new Snowflake(guids.nodeId()), guids::isValid);
+    }
+
+    /** 物品 guid：一次铸齐一批，任何一个发不出来就整批放弃（调用方零写入地回 6004）。 */
+    private static ItemGuids itemGuids(SceneGuids guids) {
+        return count -> {
+            long[] out = new long[count];
+            for (int i = 0; i < count; i++) {
+                OptionalLong id = guids.tryNext();
+                if (id.isEmpty()) {
+                    return null;
+                }
+                out[i] = id.getAsLong();
+            }
+            return out;
+        };
+    }
+
+    /**
+     * 资产审计：建审计管线并核对 topic（号用全服发号）。分区契约不符抛出（拒绝启动）；Kafka 不可达（含地址解析不了）
      * 时启动线程最多等 {@code xm.audit.init-timeout} 后告警并照常启动，后台每 30 秒重试，期间流水完整写兜底日志。关闭审计（{@code xm.audit.enabled=false}）时只写本地审计日志。
      */
-    private AssetAudit startAudit(int zoneId, int nodeId, SceneNodeProperties.SceneSettings settings) {
+    private AssetAudit startAudit(int zoneId, int nodeId, SceneNodeProperties.SceneSettings settings, SceneGuids guids) {
         if (!audit.enabled()) {
             log.warn("资产流水未接 Kafka（xm.audit.enabled=false），只写本地日志 {}", AssetAudit.LOGGER);
             return AssetAudit.log();
         }
-        NodeIdLease guids = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
-                Snowflake.MAX_WORKER, instanceId, LEASE_TTL,
-                () -> log.error("全服发号租约丢失：资产流水发不出号、改写兜底日志，请尽快重启本节点"));
-        guidLease = guids;
         String clientId = "xm-scene-audit-z" + zoneId + "-n" + nodeId;
         int generation = audit.topicGeneration();
         AuditPipeline pipeline = new AuditPipeline(
@@ -390,7 +429,7 @@ public class SceneNode implements SmartLifecycle {
                 () -> new KafkaTopicAdmin(audit.bootstrapServers(), clientId + "-admin"),
                 AuditTopics.all(generation), AuditTopics.transactionLog(generation).name(),
                 AuditTopics.playerSnapshot(generation).name(), settings.snapshotMaxBytes(), audit.replicationFactor(),
-                audit.initTimeout(), new SceneGuids(new Snowflake(guids.nodeId()), guids::isValid),
+                audit.initTimeout(), guids,
                 settings.auditQueueCapacity(), metrics);
         auditPipeline = pipeline;
         // 第一次核对在启动线程上同步做（分区契约不符才能拒绝启动）；Kafka 不可达时最多等 init-timeout 后照常启动。
@@ -398,8 +437,8 @@ public class SceneNode implements SmartLifecycle {
         pipeline.verifyNow();
         scheduler.scheduleWithFixedDelay(pipeline::requestVerify, AUDIT_REVERIFY_SECONDS, AUDIT_REVERIFY_SECONDS,
                 TimeUnit.SECONDS);
-        log.info("资产审计就绪 kafka={} topic 代次={} 发号 worker={} topic 已核对={}", audit.bootstrapServers(), generation,
-                guids.nodeId(), pipeline.verified());
+        log.info("资产审计就绪 kafka={} topic 代次={} topic 已核对={}", audit.bootstrapServers(), generation,
+                pipeline.verified());
         return new KafkaAssetAudit(pipeline, SceneClock.SYSTEM, zoneId);
     }
 
@@ -424,9 +463,11 @@ public class SceneNode implements SmartLifecycle {
      * 全服产出封禁名单：先起同步线程并订阅变更通知，再同步读第一份（读不到就拒绝启动）——这样读的同时来的变更不会漏。
      * 名单投递到逻辑线程换上；第一份在接受 gate 链路之前就排进逻辑线程，所以第一个玩家请求到来时名单已生效。
      */
-    private void startGainBlockSync(CurrencyService currency, SceneNodeProperties.SceneSettings settings) {
-        GainBlockSync sync = new GainBlockSync(new RedisGainBlockSource(redis),
-                blocks -> postToLogic(() -> currency.applyGlobalBlocks(blocks)), metrics, SceneClock.SYSTEM::nanoTime);
+    private void startGainBlockSync(CurrencyService currency, BagService bags, SceneNodeProperties.SceneSettings settings) {
+        GainBlockSync sync = new GainBlockSync(new RedisGainBlockSource(redis), blocks -> postToLogic(() -> {
+            currency.applyGlobalBlocks(blocks);
+            bags.applyGlobalBlocks(blocks);
+        }), metrics, SceneClock.SYSTEM::nanoTime);
         gainBlockSync = sync;
         // 状态量经 volatile 字段读当前实例（同 bindLogicQueue）：节点停了再起也不会读到旧实例
         metrics.bindGainBlocks(() -> {

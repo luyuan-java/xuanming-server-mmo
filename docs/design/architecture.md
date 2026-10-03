@@ -145,7 +145,7 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 
 - **分发**（`ClientRequestHandler`）：gate 转来的 `ClientForward` 先过会话 / player_id / 消息号 / 请求体校验，
   再过字段规模与负数校验（`RequestFieldCheck`，同基线 `ProtoFieldChecker`：任一 repeated / map 字段元素数 > 20、
-  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币是 `CurrencyFeature`，以后的属性 / 背包 / 任务同样各成一个），
+  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`，以后的任务等同样各成一个），
   场景核心（移动、技能、换场景、场景信息）由 `ClientRequestHandler` 自己注册。注册时校验：方法在契约里、属于标了
   `OptionIsPlayerService` 的客户端服务、请求类型与契约一致、没有重复——任一不符启动即失败。
 - **处理器契约**（`PlayerRequestHandler` + `PlayerCall`）：在场景逻辑线程上调用；经 `call.reply(...)` 回应答，`message_id` 同请求、
@@ -217,22 +217,41 @@ topic 与存储（不与 Go 混部）：
 mmorpg：`GainBlockService` 的全服名单是 thread_local 集合、没有任何写入口（生产上不可用）；`AnomalyDetector` 阈值写死、告警发一个
 没有消费者的 Kafka topic。Java 版把两者做成能用的：
 
-- **全服产出封禁**（紧急止血：名单上的币种所有人都不得再获得）：名单在 Redis Hash `xm:gain-block:currency`（字段 = 币种号，值 =
+- **全服产出封禁**（紧急止血：名单上的币种 / 物品所有人都不得再获得）：名单在 Redis Hash `xm:gain-block:{currency|item}`（字段 = 币种号 / 物品配置号，值 =
   操作人 / 时刻 / 原因 JSON），全服一份、不分 zone。唯一写者是 xm-data 运维接口：`GET /admin/gain-blocks`、
-  `PUT /admin/gain-blocks/currency/{id}?reason=`（幂等）、`DELETE /admin/gain-blocks/currency/{id}?reason=`（幂等），鉴权同 §4.5，
+  `PUT /admin/gain-blocks/{currency|item}/{id}?reason=`（幂等）、`DELETE /admin/gain-blocks/{currency|item}/{id}?reason=`（幂等），鉴权同 §4.5，
   改动另记一行 `xm.audit.admin`（带原因）。写完发 pub/sub `xm:gain-block-changed`（尽力而为）。
   scene 的 `GainBlockSync` 在专用单线程 `scene-gain-block` 上读名单（阻塞 I/O 不上逻辑线程；单线程串行，旧快照盖不过新的），
-  不可变快照 `GlobalGainBlocks` 投递到逻辑线程换进 `CurrencyService`。触发：启动时同步读一次（读不到拒绝启动；第一份在接受 gate
+  不可变快照 `GlobalGainBlocks` 投递到逻辑线程换进 `CurrencyService` 与 `BagService`。触发：启动时同步读一次（读不到拒绝启动；第一份在接受 gate
   链路之前排进逻辑线程）、收到通知就重读（重读期间的多次通知合并成一次）、`xm.scene.gain-block-refresh`（缺省 10s）周期兜底
   （通知会丢）。重读失败沿用上次名单，计 `xm_scene_gain_block_sync_failures_total`，`xm_scene_gain_block_sync_age_seconds`
   随之增长（要告警）。判定顺序同基线 AddCurrency：参数（1005）→ 全服封禁 → 本人封禁（都是 27005）→ 入账；被全服名单拒绝的计
   `xm_scene_gain_blocked_total`。xm-data 的 Redis 客户端第一次用到才连：Redis 不可用时这三个接口回 503，审计消费不受影响。
-  物品名单随背包批次加。
-- **获取异常检测**（`GainAnomalyDetector`，只告警、不拦截）：每玩家 × 每币种一个滑动窗口（挂在场景内的玩家实例上，不持久化，
-  离开 / 换实例即清空），成功加币后记一次（量取请求数额）。阈值 `xm.scene.anomaly.*`（缺省同基线：600 秒内超过 50 次或累计超过
-  100000），可按币种覆盖（`xm.scene.anomaly.currency.<币种>.*`）；某一维填 0 只关这一维。越线时告警一次（日志 `xm.audit.anomaly`
+  物品被全服名单拒绝回 1005（基线物品口径，与币种的 27005 不同），判在入包规则之前（数量为 0 也回 1005）。
+- **获取异常检测**（`GainAnomalyDetector`，只告警、不拦截）：每玩家 × 每币种 / 每物品配置一个滑动窗口（两类分开存；挂在场景内的玩家实例上，不持久化，
+  离开 / 换实例即清空），成功加币 / 入包后记一次（量取请求数额）。阈值 `xm.scene.anomaly.*`（缺省同基线：600 秒内超过 50 次或累计超过
+  100000），可按币种 / 物品配置覆盖（`xm.scene.anomaly.currency.<币种>.*`、`.item.<配置号>.*`；物品告警的 currency_type 填 none）；某一维填 0 只关这一维。越线时告警一次（日志 `xm.audit.anomaly`
   带玩家号 + `xm_scene_gain_anomalies_total{category, currency_type}` 不带玩家号），仍在线外的后续获取不重复告警，某次获取到来时窗口已回到线内（含过期清空）就重新武装。
   累计量饱和于 `Long.MAX_VALUE`（不回绕）。
+
+### 4.7 背包（四个固定包、批量入包、整理、持久化）
+
+mmorpg：`cpp/libs/modules/bag/*`（实例层 / 布局层 / 准入 / 淘汰，规划 → 预留 → 提交）+ `BagService` 编排 + `bag_marshal` 落盘。Java 版：
+
+- **领域对象**（`com.game.scene.player`，只在逻辑线程上读写）：`PlayerBags` 持四个 `Bag`——人物背包（100）、仓库（200）、装备栏（10）、
+  临时格（200），编号即协议 / 存档里的 bag_type。`Bag` 是实例（guid → 物品）+ 格子（格子号 → 物品）两层，实例数 ≤ 容量。
+  扁平包 first-fit；装备栏按 `Item.equip_kind` ↔ `EquipSlot` 行分桶（同部位的几种配置共享槽位预算，槽号须小于容量），永不淘汰、永不重排；
+  临时格满了按（入包序号, guid）淘汰最早的实例，先算到不动点（被挤掉的零头不能再并入）再动手。
+- **写入口只有 `BagService`**（`com.game.scene.bag`）：冻结闸（随 5.2，基线回 1005；目前放行）→ 全服物品禁发（1005）→
+  `Bag.add` 整批原子（规划 → 一次铸齐号 → 淘汰 → 并堆 → 切新实例；任何失败零写入）→ 每个配置一条入包流水 + 物品获取异常检测，
+  每个被淘汰的实例一条销毁流水。战斗中禁止扣减之类的闸放在各玩法入口（基线 D48：结算在战斗标记还挂着时应用）。
+  物品 guid 来自全服 `SceneGuids`（§9），一批要的号先一次铸齐，铸不出来回 6004。
+- **整理**（192）：只允许人物背包与仓库；合并同配置零头、回收空实例（各记一条数量 0 的销毁流水）、按（配置升序、数量降序、入包先后）重铺到 0..n-1；
+  已最优（按相邻格比较）时什么都不改、changed=false——狂点整理不刷流水、不触发存盘。
+- **持久化**：`player_state.bag`（`BagState` / `BagItemState`，Java 自有格式），按 (bag_type, 格子) 升序写出（周期存盘按值比对），
+  容量只在不是缺省值时才存，各层不认识的字段原样带回。加载分两步：构造玩家实例时只原样收下（构造不能抛），进场景前
+  `BagService.initializeOnLoad` 按配表规整——结构性损坏（guid 为 0 / 全 1 或重复、物品数超过容量）抛异常按进场失败处理（fail-closed，
+  坏档不会被当成空包存回去），格子问题重新落位，不认识的 bag_type 原样隔离写回。与位置、货币同一份记录、同一次写（围栏写回）。
 
 ## 5. 线程模型
 
@@ -352,13 +371,13 @@ mmorpg：`GainBlockService` 的全服名单是 thread_local 集合、没有任�
 
 - `player_id`：雪花（41 位毫秒 / 10 位 worker / 12 位序号），worker 为 `xm-login` 的节点号；只由 `xm-login` 产生。
 - `session_id`（uint32，仅服务端内部）：`[gate 节点号 15 位][序号 17 位]`，跳过 0 与在用号。
-- 资产流水号 `tx_id`、玩家快照号 `snapshot_id`（以后的物品 uuid）：雪花，worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0）——
+- 物品 uuid、资产流水号 `tx_id`、玩家快照号 `snapshot_id`：雪花，共用一个 `SceneGuids`，worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0；不论审计开不开都占）——
   场景节点自己的租约按 zone 分，两个 zone 的第一台 scene 会拿到同一个 worker、发出相同的号，落库按主键去重就会静默吞掉一条。
   停服时先发完审计队列再交还这个租约（反过来别的实例可能拿到同一个 worker 发重号）。
 
 ## 10. 首批不做（后续批次）
 
-排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、背包 / 任务等玩法系统、Kafka 事件、GM 管理接口（HTTP / 签名），
+排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、任务等玩法系统、Kafka 事件、GM 管理接口（HTTP / 签名），
 服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，见 §7；货币与 GM 客户端指令闸见 §4.4。）
 （低基数运行指标五个进程都已接入，见 §11。）
 顶号已按 §7 第 2 步实现（旧连接收 23 {2017} 后断开，不发 34）。进度逐项登记在 `PARITY.md`。

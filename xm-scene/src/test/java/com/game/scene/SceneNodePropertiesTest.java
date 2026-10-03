@@ -25,6 +25,7 @@ class SceneNodePropertiesTest {
         assertThat(s.gainBlockRefresh()).isEqualTo(Duration.ofSeconds(10));
         assertThat(s.anomaly().defaults()).isEqualTo(Threshold.DEFAULT);
         assertThat(s.anomaly().currencyThresholds()).isEmpty();
+        assertThat(s.anomaly().itemThresholds()).isEmpty();
     }
 
     @Test
@@ -32,12 +33,15 @@ class SceneNodePropertiesTest {
         SceneNodeProperties.SceneSettings s = bind(Map.of(
                 "xm.scene.anomaly.max-count", "0",
                 "xm.scene.anomaly.currency.0.max-amount", "5000000",
-                "xm.scene.anomaly.currency.1.window", "60s")).scene();
+                "xm.scene.anomaly.currency.1.window", "60s",
+                "xm.scene.anomaly.item.10.max-count", "200")).scene();
 
         assertThat(s.anomaly().defaults()).isEqualTo(new Threshold(Duration.ofSeconds(600), 0, 100_000));
         assertThat(s.anomaly().currencyThresholds()).containsOnly(
                 Map.entry(0, new Threshold(Duration.ofSeconds(600), 50, 5_000_000)),
                 Map.entry(1, new Threshold(Duration.ofSeconds(60), 50, 100_000)));
+        assertThat(s.anomaly().itemThresholds()).containsOnly(
+                Map.entry(10, new Threshold(Duration.ofSeconds(600), 200, 100_000)));
 
         assertThat(bind(Map.of("xm.scene.anomaly.window", "600")).scene().anomaly().window())
                 .as("不带单位按秒").isEqualTo(Duration.ofSeconds(600));

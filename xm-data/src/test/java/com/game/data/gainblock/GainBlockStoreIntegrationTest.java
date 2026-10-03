@@ -35,14 +35,14 @@ class GainBlockStoreIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("xm.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        redis.getKeys().delete(RedisKeys.gainBlocks(GainBlockStore.CURRENCY));
+        redis.getKeys().delete(RedisKeys.gainBlocks(GainBlockStore.CURRENCY), RedisKeys.gainBlocks(GainBlockStore.ITEM));
         store = new GainBlockStore(new StaticListableBeanFactory(Map.of("redis", redis))
                 .getBeanProvider(RedissonClient.class), new ObjectMapper());
     }
 
     @AfterEach
     void tearDown() {
-        redis.getKeys().delete(RedisKeys.gainBlocks(GainBlockStore.CURRENCY));
+        redis.getKeys().delete(RedisKeys.gainBlocks(GainBlockStore.CURRENCY), RedisKeys.gainBlocks(GainBlockStore.ITEM));
         redis.shutdown();
     }
 
@@ -79,5 +79,14 @@ class GainBlockStoreIntegrationTest {
         redis.<String, String>getMap(RedisKeys.gainBlocks(GainBlockStore.CURRENCY), StringCodec.INSTANCE)
                 .fastPut("5", "不是 JSON");
         assertThat(store.list(GainBlockStore.CURRENCY)).containsExactly(new GainBlockStore.Entry(5, "", 0, ""));
+    }
+
+    @Test
+    void 物品类别是独立的名单() {
+        store.block(GainBlockStore.ITEM, 10, "ops", 1, "刷药");
+        assertThat(store.list(GainBlockStore.ITEM)).containsExactly(new GainBlockStore.Entry(10, "ops", 1, "刷药"));
+        assertThat(store.list(GainBlockStore.CURRENCY)).isEmpty();
+        assertThat(redis.<String, String>getMap(RedisKeys.gainBlocks(GainBlockStore.ITEM), StringCodec.INSTANCE)
+                .readAllKeySet()).containsExactly("10");
     }
 }

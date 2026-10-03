@@ -37,6 +37,7 @@ import com.game.scene.currency.CurrencyService;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.Wallet;
+import com.game.scene.testing.CurrencyAudit;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
@@ -84,7 +85,7 @@ class AttributeFeatureTest {
     private final FakePlayerRepository repo = new FakePlayerRepository();
     private final ManualClock clock = new ManualClock();
     private final List<Audited> audits = new ArrayList<>();
-    private final AssetAudit audit = (playerId, type, delta, before, after, reason) ->
+    private final AssetAudit audit = (CurrencyAudit) (playerId, type, delta, before, after, reason) ->
             audits.add(new Audited(playerId, type, delta, before, after, reason));
     private SceneWorld world;
     private ClientRequestHandler handler;
