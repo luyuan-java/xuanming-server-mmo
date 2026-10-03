@@ -15,6 +15,16 @@ final class AuditFallbackLog {
 
     private static final Logger log = LoggerFactory.getLogger(LOGGER);
 
+    /** 快照只记元数据（玩法数据可能很大，不进日志；回档素材以库与 Kafka 为准）。 */
+    void snapshot(AuditPipeline.SnapshotDraft d, long snapshotId, int size, AuditResult result) {
+        log.warn("snapshot result={} snapshot_id={} player={} cause={} time_ms={} zone={} epoch={} level={} scene_config={} "
+                        + "pos=({},{},{}) bytes={}",
+                result.name().toLowerCase(java.util.Locale.ROOT), Long.toUnsignedString(snapshotId),
+                Long.toUnsignedString(d.save().playerId()), d.cause(), d.timeMs(), Integer.toUnsignedString(d.zoneId()),
+                Long.toUnsignedString(d.save().ownerEpoch()), d.save().level(), d.save().sceneConfigId(),
+                d.save().position().x(), d.save().position().y(), d.save().position().z(), size);
+    }
+
     void transaction(TransactionLogRecord r, AuditResult result) {
         log.warn("transaction result={} tx_id={} time_ms={} reason={} kind={} from={} to={} currency_type={} delta={} "
                         + "before={} after={} item_uuid={} item_config_id={} item_quantity={} correlation_id={} zone={} extra={}",

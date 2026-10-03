@@ -50,6 +50,8 @@ xm:
     retention:
       # 资产流水保留期；0 = 永久保留（同 mmorpg）
       transaction-log: ${XM_DATA_TXLOG_RETENTION:0s}
+      # 玩家快照保留期；0 = 永久保留（同 mmorpg）
+      player-snapshot: ${XM_DATA_SNAPSHOT_RETENTION:0s}
 
 logging:
   level:

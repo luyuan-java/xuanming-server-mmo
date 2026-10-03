@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+// 玩家快照：进场 / 离场时的一份完整可回档状态（Java 版自有格式，不与 mmorpg 的 PlayerSnapshotEntry 共享）。
+// 内容就是场景写回玩家数据时落库的那份（player 行的可变字段 + player_state 玩法数据），日后回档可以原样写回。
+// 每条 Kafka 消息是一条 PlayerSnapshotRecord；键 = 玩家号的无符号十进制。
+//
+// 演进规则：只增不改，字段号与枚举值一经使用不复用。
+
+package xm.audit;
+
+option java_package = "com.game.audit.proto";
+option java_multiple_files = true;
+
+// 触发原因（数值同 mmorpg SnapshotTrigger）。
+enum SnapshotCause {
+  SNAPSHOT_CAUSE_UNSPECIFIED = 0;
+  // 进入场景（每次进场一份，含接管旧实例）
+  SNAPSHOT_LOGIN = 1;
+  // 离开场景（主动离开、断线、停服）
+  SNAPSHOT_LOGOUT = 2;
+}
+
+message PlayerSnapshotRecord {
+  // 全服唯一（雪花号，同流水号的号段租约）；0 = 无效
+  uint64 snapshot_id = 1;
+  uint64 player_id = 2;
+  // 拍快照的 Unix 毫秒
+  int64 time_ms = 3;
+  SnapshotCause cause = 4;
+  // 拍快照时玩家所在的 zone
+  uint32 zone_id = 5;
+  // 拍快照时的归属代次（owner_epoch）
+  uint64 owner_epoch = 6;
+  uint32 level = 7;
+  uint32 scene_config_id = 8;
+  double pos_x = 9;
+  double pos_y = 10;
+  double pos_z = 11;
+  // 序列化后的 xm.storage.PlayerState（与 player_state.data 同格式）
+  bytes player_state = 12;
+}

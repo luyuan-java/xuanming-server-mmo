@@ -4,6 +4,7 @@ import com.game.audit.AuditProperties;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.data.admin.AdminAuthFilter;
 import com.game.data.metrics.DataMetrics;
+import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
@@ -35,9 +36,10 @@ public class DataConfiguration {
 
     @Bean
     public DataNode dataNode(AuditProperties audit, DataProperties props, TransactionLogMapper transactionLog,
-                             PlatformTransactionManager transactionManager, DataMetrics metrics) {
-        return new DataNode(audit, props, transactionLog, new TransactionTemplate(transactionManager), metrics,
-                () -> new KafkaTopicAdmin(audit.bootstrapServers(), "xm-data-admin"), Clock.systemUTC());
+                             PlayerSnapshotMapper playerSnapshot, PlatformTransactionManager transactionManager,
+                             DataMetrics metrics) {
+        return new DataNode(audit, props, transactionLog, playerSnapshot, new TransactionTemplate(transactionManager),
+                metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), "xm-data-admin"), Clock.systemUTC());
     }
 
     @Bean

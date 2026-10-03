@@ -37,6 +37,8 @@ class AuditPipelineTest {
 
     private static final int GENERATION = 1;
     private static final String TOPIC = AuditTopics.transactionLog(GENERATION).name();
+    private static final String SNAPSHOT_TOPIC = AuditTopics.playerSnapshot(GENERATION).name();
+    private static final int SNAPSHOT_MAX_BYTES = 2_000;
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private MockProducer<String, byte[]> producer =
@@ -102,7 +104,7 @@ class AuditPipelineTest {
             }
             producersMade.incrementAndGet();
             return producer;
-        }, () -> admin, AuditTopics.all(GENERATION), TOPIC, (short) 1,
+        }, () -> admin, AuditTopics.all(GENERATION), TOPIC, SNAPSHOT_TOPIC, SNAPSHOT_MAX_BYTES, (short) 1,
                 Duration.ofSeconds(1), guids, queueCapacity, new SceneMetrics(meters));
         return pipeline;
     }
@@ -291,5 +293,135 @@ class AuditPipelineTest {
         await().atMost(Duration.ofSeconds(5)).until(() -> count("acked") == 1);
         assertThat(producersMade.get()).isEqualTo(2);
         assertThat(count("send_error")).isEqualTo(1);
+    }
+
+    private double snapshotCount(String result) {
+        return meters.get("xm.scene.audit.records").tag("kind", "snapshot").tag("result", result).counter().count();
+    }
+
+    private static com.game.scene.world.PlayerSave save(long playerId, int padding) {
+        com.game.player.store.state.PlayerState.Builder state = com.game.player.store.state.PlayerState.newBuilder();
+        if (padding > 0) {
+            state.setUnknownFields(com.google.protobuf.UnknownFieldSet.newBuilder()
+                    .addField(999, com.google.protobuf.UnknownFieldSet.Field.newBuilder()
+                            .addLengthDelimited(com.google.protobuf.ByteString.copyFrom(new byte[padding])).build())
+                    .build());
+        }
+        return new com.game.scene.world.PlayerSave(playerId, 42, 17, 3, new com.game.scene.world.Vec3(1.5, 0.75, -2.25),
+                state.build());
+    }
+
+    @Test
+    void 快照发往快照topic_键是玩家号_带玩法数据原样字节_确认后计acked() throws Exception {
+        AuditPipeline p = pipeline(10);
+        p.verifyNow();
+        assertThat(admin.partitions).containsEntry(SNAPSHOT_TOPIC, 3);
+        com.game.scene.world.PlayerSave s = save(1001, 100);
+        KafkaPlayerSnapshots snapshots = new KafkaPlayerSnapshots(p, new ManualClock(), 5);
+
+        snapshots.capture(s, com.game.scene.world.PlayerSnapshots.Cause.LOGOUT);
+        await().atMost(Duration.ofSeconds(5)).until(() -> producer.history().size() == 1);
+        ProducerRecord<String, byte[]> sent = producer.history().get(0);
+        producer.completeNext();
+
+        assertThat(sent.topic()).isEqualTo("xm-player-snapshot-g1");
+        assertThat(sent.key()).isEqualTo("1001");
+        com.game.audit.proto.PlayerSnapshotRecord record = com.game.audit.proto.PlayerSnapshotRecord.parseFrom(sent.value());
+        assertThat(Snowflake.workerOf(record.getSnapshotId())).isEqualTo(7);
+        assertThat(record.getPlayerId()).isEqualTo(1001);
+        assertThat(record.getCause()).isEqualTo(com.game.audit.proto.SnapshotCause.SNAPSHOT_LOGOUT);
+        assertThat(record.getTimeMs()).isEqualTo(ManualClock.EPOCH_MILLIS_START);
+        assertThat(record.getZoneId()).isEqualTo(5);
+        assertThat(record.getOwnerEpoch()).isEqualTo(42);
+        assertThat(record.getLevel()).isEqualTo(17);
+        assertThat(record.getSceneConfigId()).isEqualTo(3);
+        assertThat(record.getPosX()).isEqualTo(1.5);
+        assertThat(record.getPosY()).isEqualTo(0.75);
+        assertThat(record.getPosZ()).isEqualTo(-2.25);
+        assertThat(record.getPlayerState()).isEqualTo(s.state().toByteString());
+        await().atMost(Duration.ofSeconds(5)).until(() -> snapshotCount("acked") == 1);
+        for (com.game.scene.world.PlayerSnapshots.Cause cause : com.game.scene.world.PlayerSnapshots.Cause.values()) {
+            assertThat(KafkaPlayerSnapshots.causeOf(cause))
+                    .isNotEqualTo(com.game.audit.proto.SnapshotCause.SNAPSHOT_CAUSE_UNSPECIFIED);
+        }
+    }
+
+    @Test
+    void 快照超过上限不发_计oversize_未核对计unverified() {
+        AuditPipeline p = pipeline(10);
+        p.submitSnapshot(new AuditPipeline.SnapshotDraft(save(1001, 0),
+                com.game.audit.proto.SnapshotCause.SNAPSHOT_LOGIN, 1, 1));
+        await().atMost(Duration.ofSeconds(5)).until(() -> snapshotCount("unverified") == 1);
+
+        p.verifyNow();
+        p.submitSnapshot(new AuditPipeline.SnapshotDraft(save(1001, SNAPSHOT_MAX_BYTES),
+                com.game.audit.proto.SnapshotCause.SNAPSHOT_LOGIN, 1, 1));
+        p.submitSnapshot(new AuditPipeline.SnapshotDraft(save(1002, 0),
+                com.game.audit.proto.SnapshotCause.SNAPSHOT_LOGIN, 1, 1));
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> snapshotCount("oversize") == 1 && producer.history().size() == 1);
+        assertThat(producer.history().get(0).key()).isEqualTo("1002");
+        assertThat(count("oversize")).isZero();
+    }
+
+    private static AuditPipeline.SnapshotDraft snapshotDraft(long playerId) {
+        return new AuditPipeline.SnapshotDraft(save(playerId, 0), com.game.audit.proto.SnapshotCause.SNAPSHOT_LOGOUT, 1, 1);
+    }
+
+    @Test
+    void 快照投递失败计delivery_failed_队列满计queue_full_都只算快照不算流水() {
+        AuditPipeline p = pipeline(1);
+        p.verifyNow();
+        p.submitSnapshot(snapshotDraft(1001));
+        await().atMost(Duration.ofSeconds(5)).until(() -> producer.history().size() == 1);
+        producer.errorNext(new RuntimeException("broker 拒绝"));
+        await().atMost(Duration.ofSeconds(5)).until(() -> snapshotCount("delivery_failed") == 1);
+
+        leaseGate = new CountDownLatch(1);
+        p.submitSnapshot(snapshotDraft(1002));
+        await().atMost(Duration.ofSeconds(5)).until(() -> meters.get("executor.active").tag("name", "scene-audit")
+                .gauge().value() == 1);
+        p.submitSnapshot(snapshotDraft(1003));
+        p.submitSnapshot(snapshotDraft(1004));
+
+        assertThat(snapshotCount("queue_full")).isEqualTo(1);
+        assertThat(count("queue_full")).isZero();
+        assertThat(count("delivery_failed")).isZero();
+    }
+
+    @Test
+    void 停服_没发完的快照逐条计shutdown_dropped() {
+        AuditPipeline p = pipeline(10);
+        p.verifyNow();
+        leaseGate = new CountDownLatch(1);
+        p.submitSnapshot(snapshotDraft(1001));
+        await().atMost(Duration.ofSeconds(5)).until(() -> meters.get("executor.active").tag("name", "scene-audit")
+                .gauge().value() == 1);
+        p.submitSnapshot(snapshotDraft(1002));
+        p.submitSnapshot(snapshotDraft(1003));
+
+        p.close(Duration.ofMillis(200));
+        pipeline = null;
+
+        assertThat(snapshotCount("shutdown_dropped")).isEqualTo(2);
+        assertThat(count("shutdown_dropped")).isZero();
+        assertThat(producer.closed()).isTrue();
+    }
+
+    @Test
+    void 快照发送时生产者进入致命状态_只计一次_丢弃生产者_之后的流水走未核对() {
+        AuditPipeline p = pipeline(10);
+        p.verifyNow();
+        MockProducer<String, byte[]> broken = producer;
+        broken.sendException = new org.apache.kafka.common.KafkaException(
+                "Cannot perform send because at least one previous transactional or idempotent request has failed");
+
+        p.submitSnapshot(snapshotDraft(1001));
+        await().atMost(Duration.ofSeconds(5)).until(() -> snapshotCount("send_error") == 1);
+        await().atMost(Duration.ofSeconds(5)).until(() -> !p.verified());
+        assertThat(broken.closed()).isTrue();
+        p.submitTransaction(draft(0, 1001, 6));
+        await().atMost(Duration.ofSeconds(5)).until(() -> count("unverified") == 1);
+        assertThat(snapshotCount("send_error")).isEqualTo(1);
     }
 }

@@ -175,7 +175,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: id-segment-client（`snapshot` 号段）、Kafka、完整玩家 marshal（含 bag / mission / currency）
 - behavior: 登录完成与登出时把 `player_database` 与 `player_database_1` 两个 blob 整份序列化，包成 `PlayerSnapshotEntry{snapshot_id, player_id, snapshot_time, trigger, 两个 blob, schema_version="v1", zone_id, total_bytes}` 发 `player_snapshot_topic_g<N>`（键 = player_id）。号段没号或 Kafka 失败就跳过（fail-closed，记 ERROR），不影响正常存盘。
 - internal: Java 若要回滚能力：在写回同一时刻把玩家记录整份拷到 `xm_java.player_snapshot`（异步、可丢），ID 用 Java Snowflake。回滚执行本身属于 data_service / GM 运维面（另一区域），基线 scene 侧也还没实现。
-- java: missing
+- java: done（2026-10-03，批次 2.3b）— `SceneWorld` 进场成功拍 LOGIN、离场 / 停服写回拍 LOGOUT（与写回同一份 `PlayerSave`），经 `AuditPipeline` 发 `xm-player-snapshot-g<N>`；号用全服雪花；序列化后超 `xm.scene.snapshot-max-bytes` 丢弃并计数（对应 hazard ③）；不记 total_bytes（hazard ①）
 - size: S
 - robot: none
 - hazards: ① `total_bytes` 是第一次序列化时的长度，写进字段后再序列化长度会变（varint 位数），记录值比实际小几个字节；② 快照只在登录 / 登出两个时刻，长在线玩家没有中间点；③ 无压缩，整份玩家记录进 Kafka，玩家记录变大时单条消息可能超 broker 上限。

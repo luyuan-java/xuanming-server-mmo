@@ -205,12 +205,12 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - client messages: none
 - tables: none
 - depends on: id-segment-allocator（snapshot 段）、player-data-record
-- behavior: PlayerSnapshotEntry{snapshot_id, player_id, snapshot_time, trigger(LOGIN/LOGOUT/PERIODIC/PRE_TRADE/PRE_MAINTENANCE/GM_MANUAL), player_database_blob, player_database_1_blob, schema_version, zone_id=捕获时所在 zone} → topic `player_snapshot_topic_g1`（3 分区）；消费者逐条落 `player_snapshot`（source=1、snapshot_guid=snapshot_id、operator="scene-node"），用单条 `INSERT … SELECT … WHERE NOT EXISTS` 按 guid 去重（间隙锁防并发双写）；超 MEDIUMBLOB（2^24-1）/ id 为 0 / 解不出 → 跳过并计数；库故障停住不提交。
+- behavior: PlayerSnapshotEntry{snapshot_id, player_id, snapshot_time, trigger(LOGIN/LOGOUT/PERIODIC/PRE_TRADE/PRE_MAINTENANCE/GM_MANUAL), player_database_blob, player_database_1_blob, schema_version, zone_id=捕获时所在 zone} → topic `player_snapshot_topic_g1`（3 分区）；消费者逐条落 `player_snapshot`（source=1、snapshot_guid=snapshot_id、operator="scene-node"），MySQL 上按存储型生成列 `snapshot_guid_nz = NULLIF(snapshot_guid, 0)` 上的唯一键 `uk_snapshot_guid_nz` 用 `INSERT … ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)` 去重；建 store 时探测一次，唯一键不在（未迁移 / DDL 回滚 / TiDB）才退回单条 `INSERT … SELECT … WHERE NOT EXISTS`（间隙锁，并发会成环、靠有界 1213 重试吸收）；超 MEDIUMBLOB（2^24-1）/ id 为 0 / 解不出 → 跳过并计数；库故障停住不提交。
 - internal: 全局库 player_snapshot（自增主键，索引 player_id、snapshot_guid、(zone_id, created_at)）。Java 需要：周期 / 登录登出快照（含全部组件）与保留策略，供回档使用。
-- java: missing
+- java: partial（2026-10-03，批次 2.3b）— xm-data 第二条 `ConsumerLoop` 落 `xm_java.player_snapshot`（主键即快照号、ODKU 幂等，不需要基线的生成列唯一键与启动探测）；保留期 `xm.data.retention.player-snapshot`（缺省永久）；运维查询 `GET /admin/player-snapshots` 只给元数据。尚缺：周期快照、回档读路径（随 GM 回档批次）
 - size: M
 - robot: robot.currency-crash.yaml（currency-crash-snapshot 模式采集崩溃窗口快照）
-- hazards: snapshot_guid 不能做 UNIQUE（GM 行恒 0），去重全靠单语句 + 部署 Recreate 策略；GM 读路径一律只看 source=0，source=1 的 proto blob 还没有任何回档读路径（`ListSceneSnapshotsByPlayer` 未接 RPC）——快照在落库但用不上。
+- hazards: 唯一键是独立迁移，未迁移 / TiDB 时去重退回 NOT EXISTS 形态（TiDB 上去重失效）；GM 读路径一律只看 source=0，source=1 的 proto blob 还没有任何回档读路径（`ListSceneSnapshotsByPlayer` 未接 RPC）——快照在落库但用不上。
 
 ### gm-snapshot-diff — GM 快照 / 差异查看 / 事件快照
 - mmorpg: `go/data_service/internal/logic/snapshot_logic.go`（CreatePlayerSnapshot / ListPlayerSnapshots / GetPlayerSnapshotDiff / resolveSnapshot）、`recall_logic.go` CreateEventSnapshot、`internal/server/dataserviceserver.go`、`proto/data_service/data_service.proto`

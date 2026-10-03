@@ -6,12 +6,19 @@ import com.game.audit.AuditTopicInitializer;
 import com.game.audit.AuditTopics;
 import com.game.audit.TopicAdmin;
 import com.game.data.consume.ConsumerLoop;
+import com.game.data.consume.ConsumerLoop.Decoder;
+import com.game.data.consume.ConsumerLoop.Sink;
 import com.game.data.metrics.DataMetrics;
+import com.game.data.snapshot.PlayerSnapshotDecoder;
+import com.game.data.snapshot.PlayerSnapshotSink;
+import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
 import com.game.data.txlog.TransactionLogDecoder;
 import com.game.data.txlog.TransactionLogSink;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -29,8 +36,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * xm-data 的运行时：启动时核对审计 topic（{@link AuditTopicInitializer.Mode#OWN}：缺就建、分区数不符拒绝启动、配置校正到规格），
- * 然后为每个审计 topic 起一条消费线程。第一次核对在启动线程上同步做（契约不符才能拒绝启动）；Kafka 不可达（含地址解析不了）
- * 时最多等 {@code xm.audit.init-timeout} 后照常启动，后台每 30 秒重试核对，通过后再起消费者。
+ * 然后为每个审计 topic 起一条消费线程（资产流水、玩家快照）。第一次核对在启动线程上同步做（契约不符才能拒绝启动）；
+ * Kafka 不可达（含地址解析不了）时最多等 {@code xm.audit.init-timeout} 后照常启动，后台每 30 秒重试核对，通过后再起消费者。
  * 另有一条保留期清理线程。停止发生在数据源销毁之前（SmartLifecycle），未提交的批次留给下次启动重放。
  */
 public final class DataNode implements SmartLifecycle {
@@ -38,6 +45,7 @@ public final class DataNode implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(DataNode.class);
 
     static final String TRANSACTION_LOG = "transaction_log";
+    static final String PLAYER_SNAPSHOT = "player_snapshot";
     private static final long INIT_RETRY_SECONDS = 30;
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     private static final long RESTART_DELAY_MILLIS = 5_000;
@@ -45,21 +53,29 @@ public final class DataNode implements SmartLifecycle {
     private final AuditProperties audit;
     private final DataProperties props;
     private final TransactionLogMapper transactionLog;
+    private final PlayerSnapshotMapper playerSnapshot;
     private final TransactionTemplate tx;
     private final DataMetrics metrics;
     private final Supplier<TopicAdmin> adminFactory;
     private final Clock clock;
     private volatile boolean running;
-    private volatile ConsumerLoop<?> transactionLoop;
+    private final List<Worker> workers = new ArrayList<>();
     private Thread initThread;
-    private Thread transactionThread;
     private ScheduledExecutorService retention;
 
-    public DataNode(AuditProperties audit, DataProperties props, TransactionLogMapper transactionLog, TransactionTemplate tx,
-                    DataMetrics metrics, Supplier<TopicAdmin> adminFactory, Clock clock) {
+    /** 一条消费线程与它当前的消费循环（监督重启时换新循环）。 */
+    private static final class Worker {
+        Thread thread;
+        volatile ConsumerLoop<?> loop;
+    }
+
+    public DataNode(AuditProperties audit, DataProperties props, TransactionLogMapper transactionLog,
+                    PlayerSnapshotMapper playerSnapshot, TransactionTemplate tx, DataMetrics metrics,
+                    Supplier<TopicAdmin> adminFactory, Clock clock) {
         this.audit = audit;
         this.props = props;
         this.transactionLog = transactionLog;
+        this.playerSnapshot = playerSnapshot;
         this.tx = tx;
         this.metrics = metrics;
         this.adminFactory = adminFactory;
@@ -72,6 +88,7 @@ public final class DataNode implements SmartLifecycle {
             return;
         }
         metrics.registerConsumer(TRANSACTION_LOG);
+        metrics.registerConsumer(PLAYER_SNAPSHOT);
         running = true;
         // 第一次核对在启动线程上同步做：分区契约不符直接抛出、进程拒绝启动
         boolean verified = verify();
@@ -115,39 +132,50 @@ public final class DataNode implements SmartLifecycle {
         if (!running) {
             return;
         }
-        String topic = AuditTopics.transactionLog(audit.topicGeneration()).name();
-        DataProperties.Consumer settings = props.transactionLog();
-        TransactionLogSink sink = new TransactionLogSink(transactionLog, tx, settings.insertChunk(), clock);
-        transactionThread = new Thread(() -> {
+        int generation = audit.topicGeneration();
+        DataProperties.TransactionLogConsumer txSettings = props.transactionLog();
+        startConsumer(TRANSACTION_LOG, "data-txlog", AuditTopics.transactionLog(generation).name(), txSettings,
+                new TransactionLogDecoder(), new TransactionLogSink(transactionLog, tx, txSettings.insertChunk(), clock));
+        DataProperties.PlayerSnapshotConsumer snapshotSettings = props.playerSnapshot();
+        startConsumer(PLAYER_SNAPSHOT, "data-snapshot", AuditTopics.playerSnapshot(generation).name(), snapshotSettings,
+                new PlayerSnapshotDecoder(),
+                new PlayerSnapshotSink(playerSnapshot, tx, snapshotSettings.insertChunk(), clock));
+    }
+
+    private <R> void startConsumer(String name, String threadName, String topic, DataProperties.ConsumerSettings settings,
+                                   Decoder<R> decoder, Sink<R> sink) {
+        Worker worker = new Worker();
+        worker.thread = new Thread(() -> {
             // 监督：消费循环意外退出（非停止）时换一个新的 KafkaConsumer 重来；未提交的批次会被重新消费
             while (running) {
-                ConsumerLoop<?> loop;
+                ConsumerLoop<R> loop;
                 try {
-                    loop = new ConsumerLoop<>(TRANSACTION_LOG, newConsumer(settings), topic, new TransactionLogDecoder(),
-                            sink, metrics, POLL_TIMEOUT, props.dbRetry().initial(), props.dbRetry().max());
+                    loop = new ConsumerLoop<>(name, newConsumer(settings), topic, decoder, sink, metrics, POLL_TIMEOUT,
+                            props.dbRetry().initial(), props.dbRetry().max());
                 } catch (RuntimeException e) {
-                    log.error("创建资产流水 KafkaConsumer 失败，{} 毫秒后重试", RESTART_DELAY_MILLIS, e);
+                    log.error("创建 {} 的 KafkaConsumer 失败，{} 毫秒后重试", name, RESTART_DELAY_MILLIS, e);
                     sleepQuietly(RESTART_DELAY_MILLIS);
                     continue;
                 }
-                transactionLoop = loop;
+                worker.loop = loop;
                 if (!running) {
-                    // stop() 可能在发布这个循环之前读的 transactionLoop：自己收尾（run 会订阅后立即退出并关闭消费者）
+                    // stop() 可能在发布这个循环之前读的 worker.loop：自己收尾（run 会订阅后立即退出并关闭消费者）
                     loop.stop();
                 }
                 try {
                     loop.run();
                 } catch (RuntimeException e) {
-                    log.error("资产流水消费循环异常，{} 毫秒后重启", RESTART_DELAY_MILLIS, e);
+                    log.error("{} 消费循环异常，{} 毫秒后重启", name, RESTART_DELAY_MILLIS, e);
                     sleepQuietly(RESTART_DELAY_MILLIS);
                 }
             }
-        }, "data-txlog");
-        transactionThread.start();
-        log.info("资产流水消费者已启动 topic={} group={}", topic, settings.group());
+        }, threadName);
+        workers.add(worker);
+        worker.thread.start();
+        log.info("{} 消费者已启动 topic={} group={}", name, topic, settings.group());
     }
 
-    private Consumer<String, byte[]> newConsumer(DataProperties.Consumer settings) {
+    private Consumer<String, byte[]> newConsumer(DataProperties.ConsumerSettings settings) {
         Properties p = new Properties();
         p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, audit.bootstrapServers());
         p.put(ConsumerConfig.GROUP_ID_CONFIG, settings.group());
@@ -164,6 +192,11 @@ public final class DataNode implements SmartLifecycle {
         DataProperties.Retention r = props.retention();
         if (r.transactionLog().isZero()) {
             log.info("资产流水永久保留（xm.data.retention.transaction-log=0）");
+        }
+        if (r.playerSnapshot().isZero()) {
+            log.info("玩家快照永久保留（xm.data.retention.player-snapshot=0）");
+        }
+        if (r.transactionLog().isZero() && r.playerSnapshot().isZero()) {
             return;
         }
         retention = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -171,30 +204,45 @@ public final class DataNode implements SmartLifecycle {
             t.setDaemon(true);
             return t;
         });
-        retention.scheduleWithFixedDelay(this::purgeTransactionLog, r.interval().toMillis(), r.interval().toMillis(),
+        retention.scheduleWithFixedDelay(this::purgeExpired, r.interval().toMillis(), r.interval().toMillis(),
                 TimeUnit.MILLISECONDS);
     }
 
-    /** 分批删掉超过保留期的流水（每批之间歇 100ms，避免长事务与大锁）。 */
-    void purgeTransactionLog() {
+    /** 各表各自按保留期清理（保留期为 0 的表不动）。 */
+    void purgeExpired() {
         DataProperties.Retention r = props.retention();
-        long before = clock.millis() - r.transactionLog().toMillis();
+        purge(TRANSACTION_LOG, r.transactionLog(), transactionLog::deleteOlderThan);
+        purge(PLAYER_SNAPSHOT, r.playerSnapshot(), playerSnapshot::deleteOlderThan);
+    }
+
+    @FunctionalInterface
+    private interface BatchDelete {
+        int deleteOlderThan(long before, int limit);
+    }
+
+    /** 分批删掉超过保留期的行（每批之间歇 100ms，避免长事务与大锁）。 */
+    private void purge(String table, Duration keep, BatchDelete delete) {
+        if (keep.isZero()) {
+            return;
+        }
+        int batch = props.retention().batch();
+        long before = clock.millis() - keep.toMillis();
         try {
             long total = 0;
             int deleted;
             do {
-                deleted = transactionLog.deleteOlderThan(before, r.batch());
+                deleted = delete.deleteOlderThan(before, batch);
                 total += deleted;
-                if (deleted == r.batch()) {
+                if (deleted == batch) {
                     sleepQuietly(100);
                 }
-            } while (running && deleted == r.batch());
-            metrics.retentionDeleted(TRANSACTION_LOG, total);
+            } while (running && deleted == batch);
+            metrics.retentionDeleted(table, total);
             if (total > 0) {
-                log.info("保留期清理 transaction_log 删除 {} 行（早于 {}）", total, before);
+                log.info("保留期清理 {} 删除 {} 行（早于 {}）", table, total, before);
             }
         } catch (RuntimeException e) {
-            log.warn("保留期清理失败，下个周期再试：{}", e.toString());
+            log.warn("保留期清理 {} 失败，下个周期再试：{}", table, e.toString());
         }
     }
 
@@ -207,11 +255,16 @@ public final class DataNode implements SmartLifecycle {
         if (initThread != null) {
             initThread.interrupt();
         }
-        ConsumerLoop<?> loop = transactionLoop;
-        if (loop != null) {
-            loop.stop();
+        // 先让所有循环一起开始收尾，再逐个等线程退出（总耗时取最慢的一条，而不是相加）
+        for (Worker worker : workers) {
+            ConsumerLoop<?> loop = worker.loop;
+            if (loop != null) {
+                loop.stop();
+            }
         }
-        join(transactionThread);
+        for (Worker worker : workers) {
+            join(worker.thread);
+        }
         if (retention != null) {
             retention.shutdownNow();
         }
@@ -224,9 +277,6 @@ public final class DataNode implements SmartLifecycle {
     }
 
     private static void join(Thread thread) {
-        if (thread == null) {
-            return;
-        }
         try {
             thread.join(10_000);
         } catch (InterruptedException e) {

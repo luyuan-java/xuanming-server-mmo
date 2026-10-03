@@ -6,11 +6,14 @@ import com.game.audit.AuditTopicContractException;
 import com.game.audit.AuditTopicInitializer;
 import com.game.audit.TopicAdmin;
 import com.game.audit.TopicSpec;
+import com.game.audit.proto.PlayerSnapshotRecord;
+import com.game.audit.proto.SnapshotCause;
 import com.game.audit.proto.TransactionLogRecord;
 import com.game.scene.id.SceneGuids;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.AuditKind;
 import com.game.scene.metrics.SceneMetrics.AuditResult;
+import com.game.scene.world.PlayerSave;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
 import java.util.List;
@@ -59,6 +62,8 @@ public final class AuditPipeline {
     private final Supplier<TopicAdmin> adminFactory;
     private final List<TopicSpec> topics;
     private final String transactionTopic;
+    private final String snapshotTopic;
+    private final int snapshotMaxBytes;
     private final short replicationFactor;
     private final Duration verifyTimeout;
     private final SceneGuids guids;
@@ -71,16 +76,20 @@ public final class AuditPipeline {
     /**
      * @param topics           要核对的全部审计 topic（{@code AuditTopics.all(generation)}）
      * @param transactionTopic 资产流水 topic 名（属于 {@code topics}）
+     * @param snapshotTopic    玩家快照 topic 名（属于 {@code topics}）
+     * @param snapshotMaxBytes 一条快照序列化后的上限（超了丢弃并记 ERROR；须小于生产者与 broker 的消息上限）
      * @param queueCapacity    审计线程队列上限；满了新记录走兜底日志
      */
     public AuditPipeline(Supplier<Producer<String, byte[]>> producerFactory, Supplier<TopicAdmin> adminFactory,
                          List<TopicSpec> topics,
-                         String transactionTopic, short replicationFactor, Duration verifyTimeout, SceneGuids guids,
-                         int queueCapacity, SceneMetrics metrics) {
+                         String transactionTopic, String snapshotTopic, int snapshotMaxBytes, short replicationFactor,
+                         Duration verifyTimeout, SceneGuids guids, int queueCapacity, SceneMetrics metrics) {
         this.producerFactory = producerFactory;
         this.adminFactory = adminFactory;
         this.topics = List.copyOf(topics);
         this.transactionTopic = transactionTopic;
+        this.snapshotTopic = snapshotTopic;
+        this.snapshotMaxBytes = snapshotMaxBytes;
         this.replicationFactor = replicationFactor;
         this.verifyTimeout = verifyTimeout;
         this.guids = guids;
@@ -234,6 +243,94 @@ public final class AuditPipeline {
         metrics.auditRecord(AuditKind.TRANSACTION, result);
     }
 
+    // ------------------------------------------------------------------ 玩家快照
+
+    /**
+     * 一份快照草稿（不可变）：玩法数据的序列化与组装都在审计线程上做，逻辑线程只投递这个。
+     *
+     * @param save 写回用的那份玩家数据（player 行可变字段 + 玩法数据）
+     */
+    public record SnapshotDraft(PlayerSave save, SnapshotCause cause, long timeMs, int zoneId) {
+    }
+
+    /** 交一份玩家快照。从不阻塞、从不抛异常。 */
+    public void submitSnapshot(SnapshotDraft draft) {
+        try {
+            executor.execute(new SnapshotTask(draft));
+        } catch (RejectedExecutionException e) {
+            lostSnapshot(draft, 0, 0, AuditResult.QUEUE_FULL);
+        } catch (RuntimeException e) {
+            log.error("提交玩家快照失败", e);
+            lostSnapshot(draft, 0, 0, AuditResult.SEND_ERROR);
+        }
+    }
+
+    /** 审计线程上：发号、组装、序列化、大小核对、发送。 */
+    private void sendSnapshot(SnapshotDraft draft) {
+        if (!verified) {
+            lostSnapshot(draft, 0, 0, AuditResult.UNVERIFIED);
+            return;
+        }
+        OptionalLong snapshotId = guids.tryNext();
+        if (snapshotId.isEmpty()) {
+            lostSnapshot(draft, 0, 0, AuditResult.NO_ID);
+            return;
+        }
+        PlayerSave save = draft.save();
+        byte[] bytes = PlayerSnapshotRecord.newBuilder()
+                .setSnapshotId(snapshotId.getAsLong())
+                .setPlayerId(save.playerId())
+                .setTimeMs(draft.timeMs())
+                .setCause(draft.cause())
+                .setZoneId(draft.zoneId())
+                .setOwnerEpoch(save.ownerEpoch())
+                .setLevel(save.level())
+                .setSceneConfigId(save.sceneConfigId())
+                .setPosX(save.position().x())
+                .setPosY(save.position().y())
+                .setPosZ(save.position().z())
+                .setPlayerState(save.state().toByteString())
+                .build()
+                .toByteArray();
+        if (bytes.length > snapshotMaxBytes) {
+            log.error("玩家快照超过上限 {} 字节，丢弃 player={} 大小={}", snapshotMaxBytes,
+                    Long.toUnsignedString(save.playerId()), bytes.length);
+            lostSnapshot(draft, snapshotId.getAsLong(), bytes.length, AuditResult.OVERSIZE);
+            return;
+        }
+        ProducerRecord<String, byte[]> message = new ProducerRecord<>(snapshotTopic,
+                AuditKeys.playerKey(save.playerId()), bytes);
+        AtomicBoolean settled = new AtomicBoolean();
+        Producer<String, byte[]> current = producer;
+        long id = snapshotId.getAsLong();
+        try {
+            current.send(message, (metadata, error) -> {
+                if (!settled.compareAndSet(false, true)) {
+                    return;
+                }
+                if (error == null) {
+                    metrics.auditRecord(AuditKind.SNAPSHOT, AuditResult.ACKED);
+                } else {
+                    log.warn("玩家快照投递失败 snapshot_id={}：{}", Long.toUnsignedString(id), error.toString());
+                    lostSnapshot(draft, id, bytes.length, AuditResult.DELIVERY_FAILED);
+                }
+            });
+        } catch (RuntimeException e) {
+            if (settled.compareAndSet(false, true)) {
+                log.warn("玩家快照发送失败 snapshot_id={}：{}", Long.toUnsignedString(id), e.toString());
+                lostSnapshot(draft, id, bytes.length, AuditResult.SEND_ERROR);
+            }
+            if (e instanceof KafkaException && !(e instanceof InterruptException)) {
+                discardProducer(current, e);
+            }
+        }
+    }
+
+    private void lostSnapshot(SnapshotDraft draft, long snapshotId, int size, AuditResult result) {
+        fallback.snapshot(draft, snapshotId, size, result);
+        metrics.auditRecord(AuditKind.SNAPSHOT, result);
+    }
+
     // ------------------------------------------------------------------ 停服
 
     /**
@@ -257,6 +354,8 @@ public final class AuditPipeline {
             for (Runnable task : left) {
                 if (task instanceof TransactionTask t) {
                     lost(t.draft, AuditResult.SHUTDOWN_DROPPED);
+                } else if (task instanceof SnapshotTask s) {
+                    lostSnapshot(s.draft, 0, 0, AuditResult.SHUTDOWN_DROPPED);
                 }
             }
             log.error("审计线程在停服预算内没发完，{} 条记录写进兜底日志", left.size());
@@ -282,6 +381,25 @@ public final class AuditPipeline {
             } catch (RuntimeException e) {
                 log.error("资产流水处理异常", e);
                 lost(draft, AuditResult.SEND_ERROR);
+            }
+        }
+    }
+
+    /** 带着快照草稿的任务。 */
+    private final class SnapshotTask implements Runnable {
+        final SnapshotDraft draft;
+
+        SnapshotTask(SnapshotDraft draft) {
+            this.draft = draft;
+        }
+
+        @Override
+        public void run() {
+            try {
+                sendSnapshot(draft);
+            } catch (RuntimeException e) {
+                log.error("玩家快照处理异常", e);
+                lostSnapshot(draft, 0, 0, AuditResult.SEND_ERROR);
             }
         }
     }

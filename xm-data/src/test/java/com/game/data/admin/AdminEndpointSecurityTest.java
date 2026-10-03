@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import com.game.data.metrics.DataMetrics;
+import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.net.URI;
@@ -44,6 +45,11 @@ class AdminEndpointSecurityTest {
         }
 
         @Bean
+        PlayerSnapshotMapper playerSnapshotMapper() {
+            return mock(PlayerSnapshotMapper.class);
+        }
+
+        @Bean
         FilterRegistrationBean<AdminAuthFilter> adminAuthFilter() {
             FilterRegistrationBean<AdminAuthFilter> registration = new FilterRegistrationBean<>(
                     new AdminAuthFilter("secret", new DataMetrics(new SimpleMeterRegistry())));
@@ -70,10 +76,13 @@ class AdminEndpointSecurityTest {
         assertThat(status("/%61dmin/transaction-log?player=1", false)).isEqualTo(401);
         assertThat(status("/adm%69n/transaction-log?player=1", false)).isEqualTo(401);
         assertThat(status("/admin/transaction-log;y=2?player=1", false)).isEqualTo(401);
+        assertThat(status("/admin/player-snapshots?player=1", false)).isEqualTo(401);
+        assertThat(status("/%61dmin/player-snapshots?player=1", false)).isEqualTo(401);
     }
 
     @Test
     void 带令牌放行() throws Exception {
         assertThat(status("/admin/transaction-log?player=1", true)).isEqualTo(200);
+        assertThat(status("/admin/player-snapshots?player=1", true)).isEqualTo(200);
     }
 }

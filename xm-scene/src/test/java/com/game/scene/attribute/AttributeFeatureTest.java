@@ -103,7 +103,7 @@ class AttributeFeatureTest {
         AtomicLong ids = new AtomicLong(5000);
         FakeSceneTables sceneTables = new FakeSceneTables();
         world = new SceneWorld(sceneTables, Contracts.IDS, sink, repo, ids::incrementAndGet, clock, SceneMetrics.noop(),
-                service::initializeOnLoad);
+                service::initializeOnLoad, com.game.scene.world.PlayerSnapshots.NONE);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, sceneTables, mode,
                 List.of(new AttributeFeature(service, Contracts.REGISTRY)));
         Scene scene = world.createScene(1);

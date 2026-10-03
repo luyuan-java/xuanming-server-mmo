@@ -1,5 +1,7 @@
 package com.game.data.admin;
 
+import com.game.data.store.PlayerSnapshotEntry;
+import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogEntry;
 import com.game.data.store.TransactionLogMapper;
 import java.util.ArrayList;
@@ -14,20 +16,23 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * 运维查询：某玩家的资产流水（客服 / 回档排查用）。鉴权见 {@link AdminAuthFilter}。
+ * 运维查询：某玩家的资产流水与快照（客服 / 回档排查用）。鉴权见 {@link AdminAuthFilter}。
  * uint64 字段（流水号、玩家号、余额……）在 JSON 里一律是十进制字符串，免得 JavaScript 读成浮点丢精度。
  */
 @RestController
 public class AuditQueryController {
 
     public static final String TRANSACTION_LOG_PATH = "/admin/transaction-log";
+    public static final String PLAYER_SNAPSHOTS_PATH = "/admin/player-snapshots";
     static final int DEFAULT_LIMIT = 100;
     static final int MAX_LIMIT = 1000;
 
     private final TransactionLogMapper transactionLog;
+    private final PlayerSnapshotMapper playerSnapshot;
 
-    public AuditQueryController(TransactionLogMapper transactionLog) {
+    public AuditQueryController(TransactionLogMapper transactionLog, PlayerSnapshotMapper playerSnapshot) {
         this.transactionLog = transactionLog;
+        this.playerSnapshot = playerSnapshot;
     }
 
     /**
@@ -42,15 +47,8 @@ public class AuditQueryController {
                                                     @RequestParam(name = "since", defaultValue = "0") long since,
                                                     @RequestParam(name = "until", defaultValue = "9223372036854775807") long until,
                                                     @RequestParam(name = "limit", defaultValue = "" + DEFAULT_LIMIT) int limit) {
-        long playerId;
-        try {
-            playerId = Long.parseUnsignedLong(player);
-        } catch (NumberFormatException e) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "player 必须是无符号十进制整数");
-        }
-        if (limit < 1 || limit > MAX_LIMIT) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit 必须在 1–" + MAX_LIMIT + " 之间");
-        }
+        long playerId = parsePlayer(player);
+        checkLimit(limit);
         Map<Long, TransactionLogEntry> merged = new LinkedHashMap<>();
         for (TransactionLogEntry e : transactionLog.findByFromPlayer(playerId, since, until, limit)) {
             merged.put(e.getTxId(), e);
@@ -62,6 +60,35 @@ public class AuditQueryController {
         rows.sort(Comparator.comparingLong(TransactionLogEntry::getTimeMs)
                 .thenComparing(TransactionLogEntry::getTxId, Long::compareUnsigned));
         return rows.stream().limit(limit).map(AuditQueryController::view).toList();
+    }
+
+    /**
+     * 玩家的快照元数据（不含玩法数据本体，只给字节数），按（时间、快照号）升序，至多 {@code limit} 条。
+     * 参数同 {@link #transactionLog}。
+     */
+    @GetMapping(PLAYER_SNAPSHOTS_PATH)
+    public List<Map<String, Object>> playerSnapshots(@RequestParam("player") String player,
+                                                     @RequestParam(name = "since", defaultValue = "0") long since,
+                                                     @RequestParam(name = "until", defaultValue = "9223372036854775807") long until,
+                                                     @RequestParam(name = "limit", defaultValue = "" + DEFAULT_LIMIT) int limit) {
+        long playerId = parsePlayer(player);
+        checkLimit(limit);
+        return playerSnapshot.findByPlayer(playerId, since, until, limit).stream()
+                .map(AuditQueryController::view).toList();
+    }
+
+    private static long parsePlayer(String player) {
+        try {
+            return Long.parseUnsignedLong(player);
+        } catch (NumberFormatException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "player 必须是无符号十进制整数");
+        }
+    }
+
+    private static void checkLimit(int limit) {
+        if (limit < 1 || limit > MAX_LIMIT) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit 必须在 1–" + MAX_LIMIT + " 之间");
+        }
     }
 
     private static Map<String, Object> view(TransactionLogEntry e) {
@@ -82,6 +109,24 @@ public class AuditQueryController {
         out.put("correlationId", Long.toUnsignedString(e.getCorrelationId()));
         out.put("extra", e.getExtra());
         out.put("zoneId", Integer.toUnsignedLong(e.getZoneId()));
+        out.put("ingestedAt", e.getIngestedAt());
+        return out;
+    }
+
+    private static Map<String, Object> view(PlayerSnapshotEntry e) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("snapshotId", Long.toUnsignedString(e.getSnapshotId()));
+        out.put("playerId", Long.toUnsignedString(e.getPlayerId()));
+        out.put("timeMs", e.getTimeMs());
+        out.put("cause", e.getCause());
+        out.put("zoneId", Integer.toUnsignedLong(e.getZoneId()));
+        out.put("ownerEpoch", Long.toUnsignedString(e.getOwnerEpoch()));
+        out.put("level", Integer.toUnsignedLong(e.getLevel()));
+        out.put("sceneConfigId", Integer.toUnsignedLong(e.getSceneConfigId()));
+        out.put("posX", e.getPosX());
+        out.put("posY", e.getPosY());
+        out.put("posZ", e.getPosZ());
+        out.put("stateBytes", e.getStateBytes());
         out.put("ingestedAt", e.getIngestedAt());
         return out;
     }

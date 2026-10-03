@@ -194,14 +194,21 @@ topic 与存储（不与 Go 混部）：
   未核对 / 发送或投递失败 / 停服没发完）都完整写进兜底日志 `xm.audit.fallback` 并计 `xm_scene_audit_records_total{result}`——
   资产照改，流水不丢（同 mmorpg：审计尽力而为、不影响玩法；mmorpg 失败只记一行 ERROR，Java 记全量可回灌）。
   停服：写回之后（逻辑线程已停）有界发完队列、关生产者，最后交还发号租约。
+- **玩家快照**（`PlayerSnapshots` → `KafkaPlayerSnapshots`，同一条管线）：进场成功（回了进场结果之后，用内存状态——接管旧实例时
+  库里那份是旧的）拍 LOGIN，离场 / 停服写回时拍 LOGOUT（与写回**同一份** `PlayerSave`）；失去归属的移除不写回、也不拍。
+  `xm.audit.PlayerSnapshotRecord` 带快照号（同一个雪花）、触发原因、zone、owner_epoch、等级、场景、坐标和玩法数据原样字节，
+  发 `xm-player-snapshot-g<代次>`（3 分区，键 = 玩家号，保留同流水）。组装与序列化在审计线程上；序列化后超过
+  `xm.scene.snapshot-max-bytes`（缺省 1000000，须低于生产者 / broker 的 1MB 单条上限）就丢弃、记 ERROR、计 `result=oversize`。
+  没被确认的只把元数据写进兜底日志（玩法数据不进日志）。快照是回档素材，丢一份不影响玩法；周期存盘不拍。
 - **xm-data 消费**（`ConsumerLoop`，每个 topic 一条线程一个 KafkaConsumer）：一次拉取的记录在**一个**库事务里按位点顺序落库
   （`INSERT ... ON DUPLICATE KEY UPDATE` 主键幂等，不用 INSERT IGNORE——严格模式下它会把数据错误降成警告），落库成功才
   `commitSync` 位点，崩在两者之间只会重放。可恢复的库故障：暂停全部分区（继续 poll 保住组成员身份）、退避 1s→30s 原批次重试，
   不提交、不跳过——宁可积压不丢；数据错误（SQLState 22 / 23）逐行隔离，坏行写毒丸日志 `xm.audit.poison` 后跳过；解不出 / 字段非法的
   记录跳过并计数。重平衡收走了待落库批次的分区就整批作废（位点没提交，新主人会重新拿到）。可多实例（同组分摊分区）。
-- **保留期**：`xm.data.retention.transaction-log`，缺省 0 = 永久保留（同 mmorpg）；设了就每小时分批 DELETE。
+  快照落 `player_snapshot`（主键快照号、玩法数据 MEDIUMBLOB），单条可达约 1MB，所以拉取（50）与多行 INSERT 分块（10）都小。
+- **保留期**：`xm.data.retention.transaction-log` / `player-snapshot`，缺省 0 = 永久保留（同 mmorpg）；设了就每小时分批 DELETE。
 - **运维查询**（xm-data 管理端口 18106，缺省只绑本机）：`GET /admin/transaction-log?player=&since=&until=&limit=`，按（时间、流水号）升序；
-  uint64 字段输出为十进制字符串。鉴权（过滤器只按容器规范化后的路径 `/admin/*` 生效，`/admin;x/`、`/%61dmin/` 之类绕不过）：
+  `GET /admin/player-snapshots?player=&since=&until=&limit=` 给快照元数据与玩法数据字节数（不回本体）。uint64 字段输出为十进制字符串。鉴权（过滤器只按容器规范化后的路径 `/admin/*` 生效，`/admin;x/`、`/%61dmin/` 之类绕不过）：
   共享令牌 `XM_ADMIN_TOKEN`（请求头 `X-Xm-Admin-Token`，常数时间比较，未配置一律 503）+ 必填
   操作人 `X-Xm-Operator`（UTF-8，1–64 字符、不含控制字符）；每次调用（含处理中抛异常的，按 500 记）都记运维审计日志 `xm.audit.admin`。本机切片脚本没设令牌时生成一个写进 `run/xm-admin-token`。
 
@@ -212,7 +219,7 @@ topic 与存储（不与 Go 混部）：
   **按消息号限频**（C++ `MessageLimiter` 同义）：每个会话、每个消息号一个滑动窗口，上限取 MessageLimiter 表
   （`xm.table-dir` 下的 `messagelimiter.pb`，与 mmorpg 同一份配表），表里没有的缺省每秒 3 条；超频回
   `MessageContent{message_id, id, error_message{1008 kRateLimitExceeded}}`、不转发、计非法包（到阈值断开）。
-- **scene**：**一个逻辑线程拥有全部场景状态**（Netty `DefaultEventLoop`）。审计记录（资产流水）在专用的 `scene-audit` 线程上发往 Kafka（§4.5），
+- **scene**：**一个逻辑线程拥有全部场景状态**（Netty `DefaultEventLoop`）。审计记录（资产流水、玩家快照）在专用的 `scene-audit` 线程上发往 Kafka（§4.5），
   逻辑线程只投递不可变草稿。I/O 线程只做解码，把消息投递给逻辑线程
   （每条链路有积压上限，见 §4.2）；阻塞 I/O（MySQL / Redis）在有界的存储线程池上执行，结果再投递回逻辑线程。
   场景状态只在逻辑线程读写，不加锁。
@@ -323,7 +330,7 @@ topic 与存储（不与 Go 混部）：
 
 - `player_id`：雪花（41 位毫秒 / 10 位 worker / 12 位序号），worker 为 `xm-login` 的节点号；只由 `xm-login` 产生。
 - `session_id`（uint32，仅服务端内部）：`[gate 节点号 15 位][序号 17 位]`，跳过 0 与在用号。
-- 资产流水号 `tx_id`（以后的快照号、物品 uuid）：雪花，worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0）——
+- 资产流水号 `tx_id`、玩家快照号 `snapshot_id`（以后的物品 uuid）：雪花，worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0）——
   场景节点自己的租约按 zone 分，两个 zone 的第一台 scene 会拿到同一个 worker、发出相同的号，落库按主键去重就会静默吞掉一条。
   停服时先发完审计队列再交还这个租约（反过来别的实例可能拿到同一个 worker 发重号）。
 

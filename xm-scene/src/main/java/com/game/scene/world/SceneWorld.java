@@ -103,6 +103,7 @@ public final class SceneWorld {
     private final SceneClock clock;
     private final SceneMetrics metrics;
     private final PlayerInitializer playerInitializer;
+    private final PlayerSnapshots snapshots;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -121,14 +122,18 @@ public final class SceneWorld {
 
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics) {
-        this(tables, ids, sink, repository, idGenerator, clock, metrics, PlayerInitializer.NONE);
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, PlayerInitializer.NONE, PlayerSnapshots.NONE);
     }
 
-    /** @param playerInitializer 玩家实例建好后、进场景前调用（玩法按配表规整状态、算派生值） */
+    /**
+     * @param playerInitializer 玩家实例建好后、进场景前调用（玩法按配表规整状态、算派生值）
+     * @param snapshots         进场 / 离场写回时各拍一份玩家快照（回档素材）
+     */
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
-                      PlayerInitializer playerInitializer) {
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots) {
         this.playerInitializer = playerInitializer;
+        this.snapshots = snapshots;
         this.tables = tables;
         this.ids = ids;
         this.sink = sink;
@@ -329,6 +334,8 @@ public final class SceneWorld {
         playersBySession.put(key, player);
         enterScene(player, scene);
         sink.enterResult(key.linkId(), key.sessionId(), playerId, epoch, 0);
+        // 用内存状态拍（接管旧实例时库里那份是旧的）
+        snapshots.capture(player.toSave(), PlayerSnapshots.Cause.LOGIN);
         log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={}", playerId, key,
                 scene.sceneId(), player.entity(), player.ownerEpoch(), previous != null);
     }
@@ -747,7 +754,9 @@ public final class SceneWorld {
         metrics.aoiLeft(watchers.size());
         broadcast(watchers, destroyMessage(player));
         if (save) {
-            repository.save(player.toSave());
+            PlayerSave written = player.toSave();
+            repository.save(written);
+            snapshots.capture(written, PlayerSnapshots.Cause.LOGOUT);
         }
     }
 
@@ -776,7 +785,9 @@ public final class SceneWorld {
         List<ScenePlayer> all = List.copyOf(playersById.values());
         for (ScenePlayer player : all) {
             player.stopMotion();
-            repository.save(player.toSave());
+            PlayerSave written = player.toSave();
+            repository.save(written);
+            snapshots.capture(written, PlayerSnapshots.Cause.LOGOUT);
         }
         playersById.clear();
         playersBySession.clear();

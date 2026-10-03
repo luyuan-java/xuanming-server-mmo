@@ -134,3 +134,18 @@ SHOW CREATE TABLE transaction_log;
 ```
 
 **回滚**：回退代码即可；表可留着（旧代码不读不写它）。审计数据有留存要求时不要删表。
+
+## M5：玩家快照表 `player_snapshot`（2026-10-03，xm-data 建）
+
+**原因**：玩家快照（architecture.md §4.5）的落库表，与 M4 同一份建表脚本 `xm-data/src/main/resources/db/xm-data-schema.sql`，
+由 **xm-data** 启动时执行（`CREATE TABLE IF NOT EXISTS`）。
+
+**新库 / 存量库**：都无需手工操作——新表，升级后的 xm-data 第一次启动时建出来。
+
+**核对**：
+
+```sql
+SHOW CREATE TABLE player_snapshot;
+```
+
+**回滚**：回退代码即可；表可留着（旧代码不读不写它）。快照是回档素材，有留存要求时不要删表。

@@ -25,3 +25,24 @@ CREATE TABLE IF NOT EXISTS transaction_log (
     KEY idx_txlog_to (to_player, time_ms),
     KEY idx_txlog_time (time_ms)
 );
+
+-- 玩家快照（xm.audit.PlayerSnapshotRecord）：上线 / 下线时的整份玩家数据，回档与客服排查的素材。
+-- 主键 snapshot_id 让重放幂等；玩法数据原样存字节（scene 侧上限约 1MB，MEDIUMBLOB 足够）。
+CREATE TABLE IF NOT EXISTS player_snapshot (
+    snapshot_id     BIGINT UNSIGNED NOT NULL COMMENT '全服唯一快照号（场景节点的雪花号）',
+    player_id       BIGINT UNSIGNED NOT NULL,
+    time_ms         BIGINT          NOT NULL COMMENT '采集时刻的 Unix 毫秒',
+    cause           INT UNSIGNED    NOT NULL COMMENT 'xm.audit.SnapshotCause',
+    zone_id         INT UNSIGNED    NOT NULL,
+    owner_epoch     BIGINT UNSIGNED NOT NULL COMMENT '采集时持有的归属 epoch',
+    level           INT UNSIGNED    NOT NULL,
+    scene_config_id INT UNSIGNED    NOT NULL,
+    pos_x           DOUBLE          NOT NULL,
+    pos_y           DOUBLE          NOT NULL,
+    pos_z           DOUBLE          NOT NULL,
+    player_state    MEDIUMBLOB      NOT NULL COMMENT 'xm.storage.PlayerState 序列化字节（原样）',
+    ingested_at     BIGINT          NOT NULL COMMENT 'xm-data 落库的 Unix 毫秒',
+    PRIMARY KEY (snapshot_id),
+    KEY idx_snapshot_player (player_id, time_ms),
+    KEY idx_snapshot_time (time_ms)
+);

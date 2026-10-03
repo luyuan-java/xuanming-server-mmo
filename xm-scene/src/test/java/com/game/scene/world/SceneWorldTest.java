@@ -573,6 +573,7 @@ class SceneWorldTest {
     @Test
     void 玩家初始化钩子在进场景前调用_抛异常按进场失败处理并释放归属() {
         List<Long> initialized = new ArrayList<>();
+        List<Long> snapshotted = new ArrayList<>();
         world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, new AtomicLong(1000)::incrementAndGet, clock,
                 new SceneMetrics(meters), player -> {
                     initialized.add(player.playerId());
@@ -580,7 +581,7 @@ class SceneWorldTest {
                     if (player.playerId() == 1002) {
                         throw new IllegalStateException("坏状态");
                     }
-                });
+                }, (save, cause) -> snapshotted.add(save.playerId()));
         scene = world.createScene(1);
         repo.putNewPlayer(1001, 1);
         repo.putNewPlayer(1002, 1);
@@ -592,8 +593,72 @@ class SceneWorldTest {
         repo.completeAll();
 
         assertThat(initialized).containsExactly(1001L, 1002L);
+        assertThat(snapshotted).as("进场失败的不拍 LOGIN").containsExactly(1001L);
         assertThat(world.playerBySession(new SessionKey(LINK, 11))).isNotNull();
         assertEnterFailed(12, 1002, 1);
+    }
+
+    @Test
+    void 快照钩子_进场成功记LOGIN_离场记LOGOUT且与写回是同一份_失去归属不记_停服逐人LOGOUT() {
+        record Captured(PlayerSave save, PlayerSnapshots.Cause cause) {
+        }
+        List<Captured> captured = new ArrayList<>();
+        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, new AtomicLong(1000)::incrementAndGet, clock,
+                new SceneMetrics(meters), PlayerInitializer.NONE, (save, cause) -> captured.add(new Captured(save, cause)));
+        scene = world.createScene(1);
+        repo.putNewPlayer(1001, 1);
+        repo.putNewPlayer(1002, 2);
+        repo.putNewPlayer(1003, 3);
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        enter(LINK, 12, 1002, scene.sceneId(), 2);
+        enter(LINK, 13, 1003, scene.sceneId(), 3);
+        world.onPlayerEnter(LINK, enterFrame(14, 1004, scene.sceneId(), 4));
+        repo.completeAll();
+
+        assertThat(captured).extracting(c -> c.save().playerId(), Captured::cause).containsExactly(
+                org.assertj.core.groups.Tuple.tuple(1001L, PlayerSnapshots.Cause.LOGIN),
+                org.assertj.core.groups.Tuple.tuple(1002L, PlayerSnapshots.Cause.LOGIN),
+                org.assertj.core.groups.Tuple.tuple(1003L, PlayerSnapshots.Cause.LOGIN));
+        captured.clear();
+
+        world.onPlayerLeave(LINK, leave(11, 1001));
+        assertThat(captured).hasSize(1);
+        assertThat(captured.get(0).cause()).isEqualTo(PlayerSnapshots.Cause.LOGOUT);
+        assertThat(captured.get(0).save()).isSameAs(repo.saves().get(repo.saves().size() - 1));
+
+        world.onOwnershipLost(List.of(new OwnedPlayer(1002, 2)));
+        assertThat(captured).hasSize(1);
+
+        world.shutdown();
+        assertThat(captured).hasSize(2);
+        assertThat(captured.get(1).cause()).isEqualTo(PlayerSnapshots.Cause.LOGOUT);
+        assertThat(captured.get(1).save()).isSameAs(repo.saves().get(repo.saves().size() - 1));
+        assertThat(captured.get(1).save().playerId()).isEqualTo(1003);
+    }
+
+    @Test
+    void 快照钩子_接管旧实例的进场_LOGIN用旧实例的内存状态而不是库里的旧档_旧实例不记LOGOUT() {
+        List<PlayerSave> logins = new ArrayList<>();
+        List<PlayerSave> logouts = new ArrayList<>();
+        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, new AtomicLong(1000)::incrementAndGet, clock,
+                new SceneMetrics(meters), PlayerInitializer.NONE,
+                (save, cause) -> (cause == PlayerSnapshots.Cause.LOGIN ? logins : logouts).add(save));
+        scene = world.createScene(1);
+        repo.putNewPlayer(1001, 1);
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        ScenePlayer old = world.playerBySession(new SessionKey(LINK, 11));
+        assertThat(old.wallet().add(0, 777).ok()).isTrue();
+        logins.clear();
+        // 旧实例续约失败、租约过期后被强制夺权（epoch 2）：库里仍是没有金币的旧档
+        repo.putNewPlayer(1001, 2);
+
+        enter(LINK, 21, 1001, scene.sceneId(), 2);
+
+        assertThat(logouts).isEmpty();
+        assertThat(logins).hasSize(1);
+        assertThat(logins.get(0).ownerEpoch()).isEqualTo(2);
+        assertThat(logins.get(0).state().getCurrency().getBalances(0)).isEqualTo(777);
+        assertThat(logins.get(0).state()).isEqualTo(old.persistentState());
     }
 
     @Test

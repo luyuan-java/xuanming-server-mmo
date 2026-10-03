@@ -20,6 +20,7 @@ import com.game.scene.attribute.AttributeTables;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.AuditPipeline;
 import com.game.scene.audit.KafkaAssetAudit;
+import com.game.scene.audit.KafkaPlayerSnapshots;
 import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.currency.CurrencyService;
 import com.game.scene.discovery.SceneDirectoryPublisher;
@@ -34,6 +35,7 @@ import com.game.scene.ownership.OwnerLeaseRenewer;
 import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.world.ClientRequestHandler;
+import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.SceneClock;
 import com.game.scene.world.SceneMessageIds;
 import com.game.scene.world.SceneTables;
@@ -189,8 +191,11 @@ public class SceneNode implements SmartLifecycle {
         GateLinks gateLinks = new GateLinks(metrics);
         CurrencyService currency = new CurrencyService(startAudit(zoneId, nodeId, settings));
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
+        AuditPipeline pipeline = auditPipeline;
+        PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
+                : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
-                SceneClock.SYSTEM, metrics, attributes::initializeOnLoad);
+                SceneClock.SYSTEM, metrics, attributes::initializeOnLoad, snapshots);
         links = gateLinks;
         world = sceneWorld;
         RunMode runMode = RunMode.parse(props.runMode());
@@ -373,7 +378,8 @@ public class SceneNode implements SmartLifecycle {
         AuditPipeline pipeline = new AuditPipeline(
                 () -> AuditPipeline.kafkaProducer(audit.bootstrapServers(), clientId, settings.auditMaxBlock()),
                 () -> new KafkaTopicAdmin(audit.bootstrapServers(), clientId + "-admin"),
-                AuditTopics.all(generation), AuditTopics.transactionLog(generation).name(), audit.replicationFactor(),
+                AuditTopics.all(generation), AuditTopics.transactionLog(generation).name(),
+                AuditTopics.playerSnapshot(generation).name(), settings.snapshotMaxBytes(), audit.replicationFactor(),
                 audit.initTimeout(), new SceneGuids(new Snowflake(guids.nodeId()), guids::isValid),
                 settings.auditQueueCapacity(), metrics);
         auditPipeline = pipeline;

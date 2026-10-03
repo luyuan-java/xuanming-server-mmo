@@ -48,6 +48,7 @@ public record SceneNodeProperties(
      * @param auditQueueCapacity    审计线程（资产流水发往 Kafka）的队列上限；满了新记录只写兜底日志
      * @param auditMaxBlock         审计线程上 Kafka 发送的最长阻塞（元数据 / 缓冲；只阻塞审计线程）
      * @param auditFlushTimeout     停服时等审计记录发完的上限
+     * @param snapshotMaxBytes      一份玩家快照序列化后的上限（超了丢弃并记 ERROR；须小于 Kafka 生产者 / broker 的单条消息上限 1MB）
      * @param saveInterval          在线周期存盘的周期（整秒；同基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS，缺省 300s）：
      *                              每人每周期至多写一次、没变化不写；0 = 关闭（只在离场时写回）。不带单位的数字按秒
      */
@@ -63,7 +64,8 @@ public record SceneNodeProperties(
             @DefaultValue("300s") @DurationUnit(ChronoUnit.SECONDS) Duration saveInterval,
             @DefaultValue("10000") int auditQueueCapacity,
             @DefaultValue("2s") Duration auditMaxBlock,
-            @DefaultValue("5s") Duration auditFlushTimeout) {
+            @DefaultValue("5s") Duration auditFlushTimeout,
+            @DefaultValue("1000000") int snapshotMaxBytes) {
 
         public SceneSettings {
             if (linkPort < 0 || linkPort > 65535) {
@@ -72,7 +74,8 @@ public record SceneNodeProperties(
             if (linkIoThreads < 1 || storageThreads < 1 || storageQueueCapacity < 1) {
                 throw new IllegalArgumentException("xm.scene 的线程数与队列上限必须为正数");
             }
-            if (auditQueueCapacity < 1 || auditMaxBlock.isNegative() || auditFlushTimeout.isNegative()) {
+            if (auditQueueCapacity < 1 || auditMaxBlock.isNegative() || auditFlushTimeout.isNegative()
+                    || snapshotMaxBytes < 1) {
                 throw new IllegalArgumentException("xm.scene.audit-* 配置非法");
             }
             if (linkMaxPendingFrames < 2) {

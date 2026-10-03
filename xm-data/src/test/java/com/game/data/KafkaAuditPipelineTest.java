@@ -12,12 +12,17 @@ import com.game.audit.AuditTopics;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.audit.TopicSpec;
 import com.game.audit.proto.AssetKind;
+import com.game.audit.proto.PlayerSnapshotRecord;
+import com.game.audit.proto.SnapshotCause;
 import com.game.audit.proto.TransactionLogRecord;
 import com.game.audit.proto.TransactionReason;
 import com.game.data.consume.ConsumerLoop;
 import com.game.data.metrics.DataMetrics;
+import com.game.data.snapshot.PlayerSnapshotDecoder;
+import com.game.data.snapshot.PlayerSnapshotRow;
 import com.game.data.txlog.TransactionLogDecoder;
 import com.game.data.txlog.TransactionLogRow;
+import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
@@ -135,6 +140,44 @@ class KafkaAuditPipelineTest {
         second.stop();
         thread2.join(10_000);
         assertThat(replayed).doesNotContainAnyElementsOf(txIds);
+    }
+
+    @Test
+    void 快照接近大小上限也能经真broker缺省配置往返() throws Exception {
+        String topic = AuditTopics.playerSnapshot(GENERATION).name();
+        try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "xm-it-admin")) {
+            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+        }
+        long snapshotId = System.currentTimeMillis() * 1000;
+        PlayerSnapshotRecord.Builder builder = PlayerSnapshotRecord.newBuilder().setSnapshotId(snapshotId).setPlayerId(1001)
+                .setTimeMs(1).setCause(SnapshotCause.SNAPSHOT_LOGOUT).setZoneId(1).setOwnerEpoch(1).setLevel(1);
+        // 凑到 scene 侧缺省上限（xm.scene.snapshot-max-bytes=1000000）以内的最大值附近
+        builder.setPlayerState(ByteString.copyFrom(new byte[999_900 - builder.build().getSerializedSize()]));
+        byte[] value = builder.build().toByteArray();
+        assertThat(value.length).isBetween(999_000, 1_000_000);
+        Properties pp = new Properties();
+        pp.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP);
+        pp.put(ProducerConfig.ACKS_CONFIG, "all");
+        try (KafkaProducer<String, byte[]> producer =
+                     new KafkaProducer<>(pp, new StringSerializer(), new ByteArraySerializer())) {
+            producer.send(new ProducerRecord<>(topic, AuditKeys.playerKey(1001), value)).get();
+        }
+
+        Map<Long, Integer> stored = new ConcurrentHashMap<>();
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        DataMetrics metrics = new DataMetrics(meters);
+        metrics.registerConsumer("it-snapshot");
+        ConsumerLoop<PlayerSnapshotRow> loop = new ConsumerLoop<>("it-snapshot", consumer("xm-it-snapshot-" + snapshotId),
+                topic, new PlayerSnapshotDecoder(), rows -> {
+                    rows.forEach(r -> stored.put(r.snapshotId(), r.playerState().length));
+                    return rows.size();
+                }, metrics, Duration.ofMillis(200), Duration.ofMillis(100), Duration.ofSeconds(1));
+        Thread thread = new Thread(loop);
+        thread.start();
+        await().atMost(Duration.ofSeconds(60)).until(() -> stored.containsKey(snapshotId));
+        loop.stop();
+        thread.join(10_000);
+        assertThat(stored.get(snapshotId)).isEqualTo(builder.getPlayerState().size());
     }
 
     private static KafkaConsumer<String, byte[]> consumer(String group) {

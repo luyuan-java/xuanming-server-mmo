@@ -15,6 +15,10 @@ public final class AuditTopics {
     public static final String TRANSACTION_LOG_BASE = "xm-transaction-log";
     /** 资产流水的分区数（同 mmorpg transaction_log_topic 的 6 分区）。 */
     public static final int TRANSACTION_LOG_PARTITIONS = 6;
+    /** 玩家快照 topic 的基名。 */
+    public static final String PLAYER_SNAPSHOT_BASE = "xm-player-snapshot";
+    /** 玩家快照的分区数（同 mmorpg player_snapshot_topic 的 3 分区）。 */
+    public static final int PLAYER_SNAPSHOT_PARTITIONS = 3;
     /** 保留 30 天（逐 topic 显式声明，不继承 broker 默认；大小不设上限，免得消费者积压时丢审计数据）。 */
     static final Map<String, String> RETENTION = Map.of(
             "retention.ms", "2592000000",
@@ -36,8 +40,12 @@ public final class AuditTopics {
         return new TopicSpec(name(TRANSACTION_LOG_BASE, generation), TRANSACTION_LOG_PARTITIONS, RETENTION);
     }
 
+    public static TopicSpec playerSnapshot(int generation) {
+        return new TopicSpec(name(PLAYER_SNAPSHOT_BASE, generation), PLAYER_SNAPSHOT_PARTITIONS, RETENTION);
+    }
+
     /** 当前代次的全部审计 topic（生产方与消费方都核对这一组）。 */
     public static List<TopicSpec> all(int generation) {
-        return List.of(transactionLog(generation));
+        return List.of(transactionLog(generation), playerSnapshot(generation));
     }
 }
