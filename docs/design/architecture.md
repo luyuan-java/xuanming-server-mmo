@@ -35,6 +35,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-table-codegen` | 库（编译期） | javac 注解处理器：读 protoc 描述符集，按 schema 生成类型安全的表访问代码；不进运行时 |
 | `xm-common` | 库 | 雪花 ID、节点号租约、gate 令牌签名、时间源等无框架公共件 |
 | `xm-net` | 库 | Netty：客户端帧编解码（兼容 C++ `ProtobufCodec`）、节点链路编解码 |
+| `xm-pbmysql` | 库（纯 JDBC） | proto → MySQL 表映射（用户自有 proto2mysql 的 Java 实现）：建表 DDL、只扩不缩的结构同步、按消息 CRUD（§7） |
 | `xm-api` | 库 | Dubbo 服务接口、调用方鉴权过滤器（§4.1）与内部 protobuf 消息（包 `xm.api`，只在 Java 版内部使用） |
 | `xm-discovery` | 库 | Redis（Redisson）上的节点号租约、游戏节点在线目录、玩家在线目录与服务端推送（§4.3） |
 | `xm-player-store` | 库 | 账号 / 玩家持久化（MyBatis）与玩家归属围栏 |
@@ -428,6 +429,27 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
   快照 15 s 过期变 UNKNOWN）。时刻一律整数（开放 / 公告时刻 Unix 秒，创建 / 更新 Unix 毫秒）。
 - 玩家名全服唯一且大小写 / 全半角不敏感：唯一索引 `uk_player_name_key` 建在 `name_key` 上，键只由 `PlayerStore.nameKey` 计算
   （NFKC → 去首尾空白 → `Locale.ROOT` 小写）。建角撞到主键（`player_id` 重号）是不变量被破坏，抛异常，不报「重名」。
+- **proto 声明的表（xm-pbmysql）**：行本身就是一条 protobuf message 的表（好友、邮件、帮会等社交服务；
+  mmorpg `proto/db`、`proto/friend/friend_table.proto`、`proto/guild/guild_db.proto` 里带 `OptionTableName` 的消息）
+  不手写 DDL 与 Mapper，用 `com.game.pbmysql.PbMysql`（用户自有库 proto2mysql 的 Java 实现，对齐 Go v0.2.0）：
+  1. **声明**：表名 / 主键 / 索引 / 唯一键 / 自增 / TiDB 选项写在 message option 上（本模块的 `proto2mysql/proto2mysql_option.proto`
+     或 mmorpg 的 `proto/db/proto_option.proto`，按扩展字段号读，两套同号）；必要时注册时传 `TableOption` 覆盖。
+     每个字段一列、列注释 `pb:N` 记字段号；标量按类型落列，子消息 / repeated / map 落 MEDIUMBLOB（wire 裸字节），
+     Timestamp 落 `DATETIME(6)`（UTC、可空）；主键 / 唯一键里的 string / bytes 是 `VARCHAR(N) utf8mb4_0900_bin` / `VARBINARY(N)` 整列
+     （默认 N = 191，`max_length` 可调）。真实 oneof、sint / fixed 类型、浮点主键、repeated Timestamp 在注册时就拒绝。
+  2. **建表 / 升级**：服务启动时在一条自动提交的连接上 `syncAll`：表不存在就建；存在则**只扩不缩**——只 ADD 缺的列、索引、唯一键
+     （以及线上完全没有的主键），从不 MODIFY / CHANGE / DROP。线上列比 proto 窄、缺 `pb:N` 注释、NULL / DEFAULT / 自增属性不同、
+     同名索引或主键定义不同、按字段号认出的改名都抛 `SchemaDriftException`（列出差异与对齐所需语句，本表不执行任何 DDL），
+     服务应当起不来、由人工迁移。整轮持 MySQL 咨询锁，多副本同时冷启动不会互相撞 DDL。字段号永不复用（删字段写 `reserved`），
+     改名 / 改类型走 expand→migrate→contract。滚动发布期间旧副本重启只会看到「线上多出来的列 / 索引」，不会回退。
+  3. **读写**：所有方法都接收调用方的 `Connection`，事务边界由业务代码掌握（同一事务里改多行、`findOneByPkForUpdate` 锁行）。
+     语句全部显式列出列、参数绑定；读回按列名取值。`save` 是整行保存（备用唯一键撞上别的行时抛 `DuplicateKeyException`
+     而不是改那一行），`upsert` 是单语句 ODKU（撞上别的行时静默不改），`insertIgnore` 只把 1062 解释成「已存在」。
+     `updateByPk` 写整行（零值照写，与 Go 版只写已赋值字段的 `Update` 不同），只改部分列用 `updateFieldsByPk`。
+  4. **注意**：`where` 参数是裸 SQL，取值一律走参数；uint64 / uint32 的大值（Java long / int 为负）作 `where` 参数时要用 `PbMysql.uint64(..)` / `PbMysql.uint32(..)` 换成无符号值
+     （`findAllByKvIn` 知道列类型，自动换）。proto3 `optional` 的 presence 不落库（读回的 0 带 presence，与 Go 版相同）。
+     阻塞 I/O：只能在存储线程池里调，不得在 Netty I/O 线程或场景逻辑线程上调（AGENTS.md §3 线程所有权）。
+  `player` / `player_state`（归属围栏、按玩法拼装的状态载体）仍走 MyBatis + 手写脚本，不迁到 xm-pbmysql。
 - Redis：全部键带前缀 `xm:`，默认 DB 12（与 mmorpg 的开发数据隔离）。
 - **每账号角色上限**（默认 5）由数据库保证：`PlayerStore.createPlayerWithinCap` 在一个事务里先 `SELECT ... FOR UPDATE`
   锁账号行（主键记录锁，无间隙锁）、再数角色、再逐个候选名插入。锁住之后才建立一致性读快照，所以一定看得到上一个持锁者

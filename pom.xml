@@ -17,6 +17,7 @@
         <module>xm-table</module>
         <module>xm-net</module>
         <module>xm-common</module>
+        <module>xm-pbmysql</module>
         <module>xm-api</module>
         <module>xm-discovery</module>
         <module>xm-player-store</module>
@@ -127,6 +128,11 @@
             <dependency>
                 <groupId>com.game</groupId>
                 <artifactId>xm-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
+                <artifactId>xm-pbmysql</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

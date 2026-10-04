@@ -1,0 +1,207 @@
+// xm-pbmysql 测试用表消息。表选项用本模块的 proto2mysql/proto2mysql_option.proto 声明（已知扩展路径）。
+// golang_test / account / third_party_account / tidb_hotspot 与 Go 版 proto2mysql 测试里的同名消息逐字段相同，
+// 用来对拍 Go 版的建表语句。
+syntax = "proto3";
+
+package pbmysql_test;
+
+import "google/protobuf/timestamp.proto";
+import "proto2mysql/proto2mysql_option.proto";
+
+option java_package = "com.game.pbmysql.testpb";
+option java_multiple_files = true;
+
+option (proto2mysql.db) = true;
+
+enum Tier {
+  TIER_UNSPECIFIED = 0;
+  TIER_GOLD = 1;
+  TIER_SILVER = 2;
+}
+
+message Player {
+  uint64 player_id = 1;
+  string name = 2;
+}
+
+// Go 版 internal/testpb 的 golang_test。
+message GolangTest {
+  option (proto2mysql.table_name)         = "golang_test";
+  option (proto2mysql.primary_key)        = "id";
+  option (proto2mysql.auto_increment_key) = "id";
+
+  uint32 id = 1;
+  string ip = 2;
+  uint32 port = 3;
+  uint32 group_id = 4;
+  Player player = 5;
+  uint64 player_id = 6;
+}
+
+// Go 版 tools/proto2sql/testdata/account.proto。
+message Account {
+  option (proto2mysql.table_name)         = "account";
+  option (proto2mysql.primary_key)        = "id";
+  option (proto2mysql.auto_increment_key) = "id";
+  option (proto2mysql.index)              = "name";
+  option (proto2mysql.unique_key)         = "email";
+
+  uint64 id    = 1;
+  string name  = 2;
+  string email = 3;
+  int32  level = 4;
+  bool   vip   = 5;
+}
+
+// Go 版 tools/proto2sql/testdata/string_key.proto。
+message ThirdPartyAccount {
+  option (proto2mysql.table_name)         = "third_party_account";
+  option (proto2mysql.primary_key)        = "id";
+  option (proto2mysql.auto_increment_key) = "id";
+  option (proto2mysql.unique_key)         = "provider,provider_id";
+
+  uint64 id          = 1;
+  string provider    = 2 [(proto2mysql.max_length) = 32];
+  string provider_id = 3 [(proto2mysql.max_length) = 255];
+  bytes  token_hash  = 4;
+}
+
+// Go 版 tools/proto2sql/testdata/tidb_hotspot.proto。
+message TidbHotspot {
+  option (proto2mysql.table_name)             = "tidb_hotspot";
+  option (proto2mysql.primary_key)            = "player_id";
+  option (proto2mysql.tidb_nonclustered_pk)   = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  bytes  data      = 2;
+}
+
+// 每种支持的标量各一列，uint64 主键。
+message ScalarRow {
+  option (proto2mysql.table_name)  = "scalar_row";
+  option (proto2mysql.primary_key) = "id";
+
+  uint64 id   = 1;
+  int32  i32  = 2;
+  uint32 u32  = 3;
+  int64  i64  = 4;
+  uint64 u64  = 5;
+  float  f32  = 6;
+  double f64  = 7;
+  bool   flag = 8;
+  string text = 9;
+  bytes  blob = 10;
+  Tier   tier = 11;
+}
+
+// 联合主键 + bytes 唯一键（max_length）+ 可空列 + Timestamp + 容器 + 子消息 + proto3 optional + 各类索引。
+message KitchenSink {
+  option (proto2mysql.table_name)  = "kitchen_sink";
+  option (proto2mysql.primary_key) = "owner_id,slot";
+  option (proto2mysql.index)       = "created_at;note;tags";
+  option (proto2mysql.unique_key)  = "token";
+
+  uint64 owner_id                      = 1;
+  uint32 slot                          = 2;
+  bytes  token                         = 3 [(proto2mysql.max_length) = 64];
+  string note                          = 4;
+  int32  score                         = 5 [(proto2mysql.nullable) = true];
+  google.protobuf.Timestamp created_at = 6;
+  repeated uint32 tags                 = 7;
+  map<string, int64> counters          = 8;
+  Player owner                         = 9;
+  optional int64 opt_value             = 10;
+  Tier tier                            = 11;
+}
+
+// 联合唯一键里的 string 键列 + 自增非主键列（普通索引第一列）+ TiDB AUTO_ID_CACHE。
+message StringKeyRow {
+  option (proto2mysql.table_name)             = "string_key_row";
+  option (proto2mysql.primary_key)            = "sub";
+  option (proto2mysql.auto_increment_key)     = "seq";
+  option (proto2mysql.index)                  = "seq; provider , sub";
+  option (proto2mysql.unique_key)             = " provider , email ";
+  option (proto2mysql.tidb_auto_id_cache_one) = true;
+
+  string sub      = 1 [(proto2mysql.max_length) = 255];
+  string provider = 2 [(proto2mysql.max_length) = 32];
+  string email    = 3;
+  uint64 seq      = 4;
+  string bio      = 5 [(proto2mysql.nullable) = true];
+}
+
+// 表名 62 个字符：表名本身合法，但 idx_<表名>_0 / uk_<表名> 超过 64，要按 FNV-1a 截断。
+message LongNameRow {
+  option (proto2mysql.table_name) = "a_very_long_table_name_for_identifier_truncation_check_0123456";
+  option (proto2mysql.primary_key) = "id";
+  option (proto2mysql.index)       = "v";
+  option (proto2mysql.unique_key)  = "k";
+
+  uint64 id = 1;
+  string k  = 2;
+  uint64 v  = 3;
+}
+
+// 真实 oneof：必须被拒绝。
+message OneofRow {
+  option (proto2mysql.table_name)  = "oneof_row";
+  option (proto2mysql.primary_key) = "id";
+
+  uint64 id = 1;
+  oneof choice {
+    int32  a = 2;
+    string b = 3;
+  }
+}
+
+// sint32：没有 MySQL 列映射，必须被拒绝。
+message SintRow {
+  option (proto2mysql.table_name) = "sint_row";
+
+  uint64 id = 1;
+  sint32 z  = 2;
+}
+
+// repeated Timestamp：Java 版拒绝（Go 版建成 DATETIME(6) 却写序列化字节）。
+message RepeatedTimestampRow {
+  option (proto2mysql.table_name) = "repeated_timestamp_row";
+
+  uint64 id = 1;
+  repeated google.protobuf.Timestamp times = 2;
+}
+
+// 结构同步集成测试：v1 → v2 同一张表，v2 新增两列、一个索引、一个唯一键。
+message SyncItemV1 {
+  option (proto2mysql.table_name)  = "pbm_sync_item";
+  option (proto2mysql.primary_key) = "id";
+  option (proto2mysql.index)       = "owner_id";
+
+  uint64 id       = 1;
+  uint64 owner_id = 2;
+  string name     = 3;
+}
+
+message SyncItemV2 {
+  option (proto2mysql.table_name)  = "pbm_sync_item";
+  option (proto2mysql.primary_key) = "id";
+  option (proto2mysql.index)       = "owner_id;level";
+  option (proto2mysql.unique_key)  = "code";
+
+  uint64 id       = 1;
+  uint64 owner_id = 2;
+  string name     = 3;
+  int32  level    = 4;
+  string code     = 5 [(proto2mysql.max_length) = 32];
+}
+
+// 漂移检测集成测试：线上预先建成更窄 / 可空 / 缺注释 / 改了名的列。
+message DriftRow {
+  option (proto2mysql.table_name)  = "pbm_drift";
+  option (proto2mysql.primary_key) = "id";
+
+  uint64 id   = 1;
+  string name = 2;
+  int64  v    = 3;
+}

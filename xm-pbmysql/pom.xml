@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>xm-pbmysql</artifactId>
+    <name>xm-pbmysql</name>
+    <description>
+        proto → MySQL 表映射：用户自有库 proto2mysql（Go v0.2.0）的 Java 实现。proto 描述符 → 建表 DDL、只扩不缩的结构同步、
+        行 ↔ 消息的 CRUD。纯 JDBC，不依赖 Spring；所有读写都接收调用方的 java.sql.Connection，事务由调用方掌握。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 只用于测试：mmorpg 的表消息（friend / guild）用 mmorpg 自己的 proto/db/proto_option.proto 声明表选项，
+             验证同号选项在「另一套扩展定义」下也能读出、建出与 Go 版相同的 DDL -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-proto</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 只用于 -Dxm.it.mysql=... 开启的真 MySQL 集成测试；版本由 Spring Boot BOM 管理 -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <!-- 选项定义 import 了 google/protobuf/descriptor.proto，取自 protobuf-java 依赖（不能 ignoreProjectDependencies） -->
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                </configuration>
+                <executions>
+                    <!-- 测试用表消息：import 本模块的选项定义（src/main/proto）与 google/protobuf/timestamp.proto（取自 protobuf-java）。
+                         不扫描测试依赖（spring-boot-starter-test 的传递依赖不必解析）；
+                         刻意不 import mmorpg 的 proto_option.proto：两份定义在 MessageOptions 上同号，同一次 protoc 编译会报扩展号冲突 -->
+                    <execution>
+                        <id>generate-test</id>
+                        <goals>
+                            <goal>generate-test</goal>
+                        </goals>
+                        <configuration>
+                            <sourceDirectories>
+                                <sourceDirectory>${project.basedir}/src/test/proto</sourceDirectory>
+                            </sourceDirectories>
+                            <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                            <importDependencies>
+                                <importDependency>
+                                    <groupId>com.google.protobuf</groupId>
+                                    <artifactId>protobuf-java</artifactId>
+                                    <version>${protobuf.version}</version>
+                                    <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                                </importDependency>
+                            </importDependencies>
+                            <importPaths>
+                                <importPath>${project.basedir}/src/main/proto</importPath>
+                            </importPaths>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
