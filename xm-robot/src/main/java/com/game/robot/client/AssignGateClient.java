@@ -71,7 +71,7 @@ public final class AssignGateClient {
      *
      * @throws RobotException 非 200、不是 JSON 对象、{@code code≠0}、准入但缺 gate 地址 / 端口、Base64 非法
      */
-    static GateAssignment parse(int httpStatus, String body) throws RobotException {
+    public static GateAssignment parse(int httpStatus, String body) throws RobotException {
         if (httpStatus != 200) {
             throw new RobotException("assign-gate 应答 HTTP " + httpStatus + "（契约恒为 200，业务结果放 body.code）："
                     + abbreviate(body));

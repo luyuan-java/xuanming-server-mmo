@@ -34,9 +34,14 @@ public final class GatePicker {
 
     /** @return 选中的 gate；没有任何可连接的条目时为空 */
     public static Optional<GateNodeInfo> pick(int zoneId, List<GateNodeInfo> gates) {
+        return eligible(zoneId, gates).stream().min(LEAST_LOADED);
+    }
+
+    /** 规则 1、2 之后剩下的 gate（放行循环要在一批里按自己记的已分配人数摊开，所以单独给出）；没有时为空表。 */
+    public static List<GateNodeInfo> eligible(int zoneId, List<GateNodeInfo> gates) {
         List<GateNodeInfo> connectable = gates.stream().filter(g -> isConnectable(zoneId, g)).toList();
         if (connectable.isEmpty()) {
-            return Optional.empty();
+            return List.of();
         }
         List<GateNodeInfo> accepting = connectable.stream().filter(g -> !g.getDraining()).toList();
         if (accepting.isEmpty()) {
@@ -44,7 +49,7 @@ public final class GatePicker {
                     zoneId, connectable.size());
             accepting = connectable;
         }
-        return accepting.stream().min(LEAST_LOADED);
+        return accepting;
     }
 
     private static boolean isConnectable(int zoneId, GateNodeInfo gate) {

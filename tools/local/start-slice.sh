@@ -29,6 +29,9 @@ if [[ -z "${XM_ADMIN_TOKEN:-}" ]]; then
 fi
 export XM_ADMIN_TOKEN
 
+# 登录排队：进程缺省关闭（同基线 Queue.Enabled=false）；本机切片打开，robot 全程走快速通道，queue 场景压容量验证排队与放行
+export XM_GATEWAY_QUEUE_ENABLED="${XM_GATEWAY_QUEUE_ENABLED:-true}"
+
 mkdir -p run/logs run/pids
 
 # 模块名 就绪端口

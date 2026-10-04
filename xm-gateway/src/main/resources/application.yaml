@@ -69,6 +69,15 @@ xm:
         status: OPEN
         recommended: true
         sort-order: 1
+    # 登录排队（同基线 login.yaml Queue 段）：缺省关闭；打开后区服满员时 assign-gate 回 100 + 排队令牌，客户端轮询 /api/queue-status。
+    # 容量取区服目录的 capacity（/admin/zones 可改）。
+    queue:
+      enabled: ${XM_GATEWAY_QUEUE_ENABLED:false}
+      entry-ttl: 1h
+      admit-ttl: 60s
+      retry-after-ms: 2000
+      soft-cap-multiplier: 1.5
+      dispatch-interval: 1s
 
 dubbo:
   application:

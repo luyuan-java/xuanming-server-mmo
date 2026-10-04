@@ -1,5 +1,6 @@
 package com.game.gateway;
 
+import com.game.gateway.queue.QueueSettings;
 import com.game.gateway.zone.SeedZone;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -11,11 +12,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 不给任何可以写进仓库的配置入口。
  *
  * @param seedZones 启动时播种的区服（库里没有才插入）；区服目录本身在 MySQL {@code zone_config}，运维经 xm-data 改
+ * @param queue     登录排队（缺省关闭）
  */
 @ConfigurationProperties("xm.gateway")
-public record GatewayProperties(List<SeedZone> seedZones) {
+public record GatewayProperties(List<SeedZone> seedZones, QueueSettings queue) {
 
     public GatewayProperties {
         seedZones = seedZones == null ? List.of() : List.copyOf(seedZones);
+        queue = queue == null ? QueueSettings.disabled() : queue;
     }
 }

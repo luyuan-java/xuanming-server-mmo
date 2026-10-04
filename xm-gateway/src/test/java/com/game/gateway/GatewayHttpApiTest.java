@@ -94,6 +94,10 @@ class GatewayHttpApiTest {
     @MockitoBean
     private AccountLoginService accountLogin;
 
+    /** 登录排队的存储要 Redis；本测试排队关闭，不会真的调到它。 */
+    @MockitoBean
+    private org.redisson.api.RedissonClient redisson;
+
     @MockitoBean
     private GatewayStore store;
 
@@ -247,7 +251,7 @@ class GatewayHttpApiTest {
         assertRejected(assignGate("{}"), 404, "zone_not_found");
         verifyNoInteractions(gateSource);
         assertThat(assignOutcomes(404, "zone_not_found") - before).as("标签不带 zone_id，未知区服不会造出新序列").isEqualTo(3);
-        assertThat(meters.find("xm.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(10);
+        assertThat(meters.find("xm.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(13);
     }
 
     @Test
@@ -349,6 +353,18 @@ class GatewayHttpApiTest {
         when(probe.loadLevel(2)).thenReturn(Optional.of(ZoneHealthProbe.LoadLevel.FULL));
         JsonNode maintenance = call(get("/api/server-list")).get("zones").get(1);
         assertThat(maintenance.has("load_level")).as("只在显示 OPEN 时下发").isFalse();
+    }
+
+    @Test
+    void 排队轮询_缺令牌410_排队关闭410_键名snake_case() throws Exception {
+        JsonNode missing = call(post("/api/queue-status").contentType(MediaType.APPLICATION_JSON).content("{\"zone_id\":1}"));
+        assertThat(missing.get("code").intValue()).isEqualTo(410);
+        assertThat(missing.get("error").asText()).isEqualTo("missing_queue_token");
+        JsonNode disabled = call(post("/api/queue-status").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"zone_id\":1,\"queue_token\":\"t\"}"));
+        assertThat(disabled.get("code").intValue()).isEqualTo(410);
+        assertThat(disabled.get("error").asText()).isEqualTo("queue_disabled");
+        assertThat(keys(disabled)).doesNotContain("queue_source", "queue_rank", "queue_total", "retry_after_ms");
     }
 
     @Test

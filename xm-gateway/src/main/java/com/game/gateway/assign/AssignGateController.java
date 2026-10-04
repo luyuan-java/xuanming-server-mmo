@@ -23,8 +23,16 @@ public class AssignGateController {
 
     @PostMapping("/assign-gate")
     public AssignGateResponse assignGate(@RequestBody AssignGateRequest request) {
-        AssignGateResponse response = service.assign(request.zoneId());
+        AssignGateResponse response = service.assign(request.zoneId(), request.queueToken());
         metrics.record(response);
+        return response;
+    }
+
+    /** 排队轮询：形状同 assign-gate 的应答（100 继续排、0 带 gate 令牌、410 从 assign-gate 重来）。 */
+    @PostMapping("/queue-status")
+    public AssignGateResponse queueStatus(@RequestBody QueueStatusRequest request) {
+        AssignGateResponse response = service.queueStatus(request.zoneId(), request.queueToken());
+        metrics.recordQueueStatus(response);
         return response;
     }
 }

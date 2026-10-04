@@ -12,11 +12,19 @@ import com.game.gateway.gate.GateTokenIssuer;
 import com.game.gateway.gate.RedisGateSource;
 import com.game.gateway.login.LoginHttpMetrics;
 import com.game.gateway.login.LoginHttpService;
+import com.game.gateway.queue.LoginQueue;
+import com.game.gateway.queue.QueueCapacity;
+import com.game.gateway.queue.QueueDispatcher;
+import com.game.gateway.queue.QueueDispatcherRunner;
+import com.game.gateway.queue.QueueSettings;
+import com.game.gateway.queue.QueueTokens;
 import com.game.gateway.store.GatewayStore;
 import com.game.gateway.zone.SeedZone;
 import com.game.gateway.zone.ZoneDirectory;
 import com.game.gateway.zone.ZoneHealthProbe;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.util.concurrent.Executors;
@@ -92,16 +100,57 @@ public class GatewayConfiguration {
 
     @Bean
     public GateTokenIssuer gateTokenIssuer(Environment environment, Clock clock) {
+        return new GateTokenIssuer(GateTokens.ofUtf8(gateSecret(environment)), clock, new SecureRandom());
+    }
+
+    private static String gateSecret(Environment environment) {
         String secret = environment.getProperty(TOKEN_SECRET_ENV);
         if (secret == null || secret.isBlank()) {
             throw new IllegalStateException("缺少环境变量 " + TOKEN_SECRET_ENV + "（gate 令牌签名密钥，须与 xm-gate 一致）");
         }
-        return new GateTokenIssuer(GateTokens.ofUtf8(secret), clock, new SecureRandom());
+        return secret;
+    }
+
+    /** 登录排队的存储（构造不碰 Redis；排队关闭时也建，没有调用方）。 */
+    @Bean
+    public LoginQueue loginQueue(RedissonClient redis, GatewayProperties properties, Clock clock) {
+        return new LoginQueue(redis, clock::millis, properties.queue().entryTtl(), properties.queue().admitTtl());
     }
 
     @Bean
-    public AssignGateService assignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer) {
-        return new AssignGateService(zones, gates, issuer);
+    public QueueCapacity queueCapacity(GatewayProperties properties) {
+        return new QueueCapacity(properties.queue().softCapMultiplier());
+    }
+
+    @Bean
+    public AssignGateService assignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer,
+                                               GatewayProperties properties, LoginQueue queue, QueueCapacity capacity,
+                                               Environment environment, Clock clock) {
+        QueueSettings settings = properties.queue();
+        AssignGateService.Queueing queueing = null;
+        if (settings.enabled()) {
+            queueing = new AssignGateService.Queueing(queue, capacity,
+                    new QueueTokens(gateSecret(environment).getBytes(StandardCharsets.UTF_8)), settings.retryAfterMs());
+            log.info("登录排队已打开 条目有效期={} 放行有效期={} 软上限倍数={}", settings.entryTtl(), settings.admitTtl(),
+                    settings.softCapMultiplier());
+        }
+        return new AssignGateService(zones, gates, issuer, queueing, clock);
+    }
+
+    /**
+     * 排队放行循环（全部 xm-gateway 里只有拿到选主锁的那个在放行）。与 {@link #assignGateService} 读同一个绑定好的开关，
+     * 不用 {@code @ConditionalOnProperty}：后者按字面比较，{@code enabled: yes} 之类会出现「排队开了、放行循环没起」——全区卡死。
+     */
+    @Bean(destroyMethod = "close")
+    public QueueDispatcherRunner queueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones,
+                                                 GateSource gates, RedissonClient redis, GatewayProperties properties,
+                                                 MeterRegistry meterRegistry) {
+        if (!properties.queue().enabled()) {
+            return QueueDispatcherRunner.idle();
+        }
+        Counter admits = Counter.builder("xm.gateway.queue.admits").description("排队放行的人数").register(meterRegistry);
+        return new QueueDispatcherRunner(redis, properties.queue().dispatchInterval(),
+                leadership -> new QueueDispatcher(queue, capacity, zones, gates, leadership, admits::increment));
     }
 
     @Bean

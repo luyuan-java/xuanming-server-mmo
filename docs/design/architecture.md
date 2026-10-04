@@ -454,7 +454,9 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
 
 0. （可选，HTTP 登录路径）客户端 `POST /api/login` → `xm-gateway` → Dubbo `AccountLoginService` → `xm-login`：认证、取 / 建账号、
    签一对令牌、回角色列表（不绑会话、不查设备数）；令牌到期前 `POST /api/refresh-token` 轮换。
-1. 客户端 `POST /api/assign-gate` → `xm-gateway`：按 zone 取 gate 列表，选在线人数最少者，签 `GateTokenPayload`（TTL 600s）。
+1. 客户端 `POST /api/assign-gate` → `xm-gateway`：区服准入（§7）→ 按 zone 取 gate 列表，选在线人数最少者，签 `GateTokenPayload`（TTL 600s）。
+   登录排队打开时（`xm.gateway.queue.enabled`）：队列空且快速通道原子占位成功才直接签，否则回 100 + 排队令牌，客户端轮询
+   `POST /api/queue-status` 直到 0（带 gate 令牌）；放行由拿到 Redis 选主锁的那个 gateway 每秒按「容量 − 在线 − 未过期占位」从队头放（弹出与写放行槽同一段 Lua，按 50 个一段摊到各 gate；客户端取走放行槽后占位再留 15 s，等 gate 发布人数）。
 2. 客户端 TCP 连 gate，首包 `ClientTokenVerifyRequest` → gate 本地验签（常数时间比较）。
 3. `Login(48)` → gate → `xm-login`：鉴权、账号锁、设备数上限（窗口内第 4 个连接 2024）、
    取 / 建账号、口令 / 三方登录签一对令牌（access token 登录不签），回角色列表；`ClientReply` 指示 gate 把账号绑到会话。
@@ -551,7 +553,8 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | login | `xm_login_abandoned_enters_total` | Counter | `result`=released / stale / failed / overloaded / invalid | gate 通知进场未送达后代为释放归属的结果 |
 | login | `executor_*{name="login-worker"}` | Micrometer 标准线程池指标 | — | 工作线程池排队 / 活跃 / 完成数（队列满见 `xm_login_requests{result="overloaded"}`） |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
-| gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 400 / 404 / 500 / 503，`reason`=ok / 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；10 个已知组合启动即注册 |
+| gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 100 / 400 / 404 / 410 / 500 / 503，`reason`=ok / 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；13 个已知组合启动即注册（`xm_gateway_queue_status_total` 同形，8 个） |
+| gateway | `xm_gateway_queue_admits_total` | Counter | — | 登录排队放行的人数（只有拿到选主锁的那个 gateway 在放行，见「登录排队」） |
 | gateway | `xm_gateway_login_total` | Counter | `endpoint`=login / refresh，`code`=0 / 401 / 500 | HTTP 登录 / 刷新令牌的结局（应答体业务码）；6 个已知组合启动即注册 |
 | scene | `xm_scene_players` | Gauge | `scene_config`=场景配置号 | 该配置下的在线玩家数（同配置各频道合计；加载中的进场不算）。建场景即注册、初值 0 |
 | scene | `xm_scene_logic_pending_tasks` | Gauge | — | 逻辑线程待执行的任务数（链路帧、存储回调、归属事件；不含定时的帧任务）。上界 ≈ gate 数 × `link-max-pending-frames` |

@@ -2,6 +2,7 @@ package com.game.robot;
 
 import com.game.contract.MessageIdRegistry;
 import com.game.robot.client.AdminClient;
+import com.game.robot.client.GatewayHttp;
 import com.game.robot.client.LoginHttpClient;
 import com.game.robot.client.MessageIds;
 import com.game.robot.client.RobotClient;
@@ -15,6 +16,7 @@ import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
+import com.game.robot.scenario.QueueScenario;
 import com.game.robot.scenario.ReconnectScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
@@ -92,6 +94,13 @@ public final class RobotMain {
                             options.zoneId(), options.password(), options.accountPrefix(), options.runTag(),
                             options.requestTimeout());
                     title = "xm-robot token：" + scenario.account() + "，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.QUEUE) {
+                    QueueScenario scenario = new QueueScenario(client, new AdminClient(options.dataUrl(),
+                            AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
+                            new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), options.zoneId());
+                    title = "xm-robot queue：区 " + options.zoneId() + "，" + target + " data=" + options.dataUrl();
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.ZONES) {

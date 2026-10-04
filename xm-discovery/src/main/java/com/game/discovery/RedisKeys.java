@@ -55,6 +55,40 @@ public final class RedisKeys {
         return PREFIX + "location:" + Long.toUnsignedString(playerId);
     }
 
+    /** 登录排队：区的队列 {@code xm:login-queue:{zone}}，ZSET（成员 = 排队号，分数 = 入队毫秒）。xm-gateway 读写。 */
+    public static String loginQueue(int zoneId) {
+        return PREFIX + "login-queue:" + zoneId;
+    }
+
+    /**
+     * 登录排队：区里已放行、还没进到 gate 的占位 {@code xm:login-queue-admitted:{zone}}，ZSET（成员 = 排队号或 {@code fast:<uuid>}，
+     * 分数 = 占位到期毫秒，过期的计数前清掉；客户端取走放行槽后再留 15 s，等 gate 把人数发布出来）。
+     */
+    public static String loginQueueAdmitted(int zoneId) {
+        return PREFIX + "login-queue-admitted:" + zoneId;
+    }
+
+    /**
+     * 登录排队：放行时选好的 gate {@code xm:login-queue-admit:{queue_id}}（{@code xm.api.GateNodeInfo}，带 TTL，取走即删）。
+     * 放行脚本拿 {@code loginQueueAdmit("")} 当前缀拼键，排队号必须在键尾。
+     */
+    public static String loginQueueAdmit(String queueId) {
+        return PREFIX + "login-queue-admit:" + queueId;
+    }
+
+    /**
+     * 登录排队：一个排队条目的元数据 {@code xm:login-queue-meta:{queue_id}}，Hash（zone / created / admitted；取走放行槽后加
+     * taken_by / slot——同一请求被 Redisson 重发时据此认出），带 TTL。放行脚本拿 {@code loginQueueMeta("")} 当前缀拼键，排队号必须在键尾。
+     */
+    public static String loginQueueMeta(String queueId) {
+        return PREFIX + "login-queue-meta:" + queueId;
+    }
+
+    /** 登录排队：放行循环的选主锁 {@code xm:login-queue-dispatcher}（全部 xm-gateway 只有一个在放行）。 */
+    public static String loginQueueDispatcherLock() {
+        return PREFIX + "login-queue-dispatcher";
+    }
+
     /**
      * 服务端 → gate 的推送频道：{@code xm:gate-push:{zone}:{gate 节点号}}，消息为 {@code xm.api.GatePush} protobuf。
      * 每个 gate 节点订阅自己的频道；节点号按 zone 分配，所以频道名带 zone。
