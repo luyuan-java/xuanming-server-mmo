@@ -30,7 +30,7 @@
 | 2.3 | 资产流水与审计（Kafka）、获取异常检测、全服产出封禁、玩家快照 | transaction-log、kafka-client-infra、kafka-audit-pipeline、anomaly-detector、gain-block、player-snapshot | 2.3a 资产流水管线 ✅ `c7939d2`；2.3b 玩家快照 ✅ `b9519f0`；2.3c 全服产出封禁 + 获取异常检测 ✅ `625f10a` |
 | 2.4 | 背包：容器（堆叠 / 格子 / 四个包）、编排、持久化、读取 / 整理（191/192）、装备栏规则 | bag-core-container、bag-orchestration-service、bag-persistence、bag-client-get-sort、equip-slot-rules | ✅ `580e2cd` |
 | 2.5 | 条件 + 奖励 + 任务（193/194/195）+ 活动列表（190）；robot features-smoke | condition-eval、mission-*、activity-list、activity-schedule-list | ✅ `3557267`（完成后的自动领奖 / 链式接取 / 完成事实同步执行，基线线上不派发——PARITY 有意差异；完成 / 领奖成功的端到端随 6.3 击杀来源） |
-| 2.6 | 技能：冷却、施法阶段与打断（33）、伤害结算、行为互斥表（放技能前的状态检查） | skill-cooldown、skill-cast-phases-interrupt、realtime-skill-damage、combat-damage-rules、actor-action-combat-state、actor-action-state |
+| 2.6 | 技能：冷却、施法阶段与打断（33）、伤害结算、行为互斥表（放技能前的状态检查） | skill-cooldown、skill-cast-phases-interrupt、realtime-skill-damage、combat-damage-rules、actor-action-combat-state、actor-action-state | ✅ `a79a469`（冷却 / 后摇 / 引导按设计意图生效，基线线上只有前摇——PARITY 有意差异；伤害只移植纯公式 CombatDamageRules，实时技能命中两版都不生效、不接；66 combat_state_flags 随 2.7） |
 | 2.7 | buff 核心与效果、运行时属性重算位与战斗状态（66 combat_state_flags）、死亡 / 复活、新号初始化与登录回满（当前气血 / 法力持久化） | realtime-buff-core、realtime-buff-effects、actor-attribute-calculator、death-revive、new-player-init-and-revive |
 | 2.8 | 宝宝系统；robot pet-smoke | pet-system-core |
 | 2.9 | 通用资产通道（跨服务发放 / 扣除，幂等账本）、补缴债务（加币先抵扣） | asset-channel、asset-op-channel、asset-op-ledger-read、currency-debt-clawback |
