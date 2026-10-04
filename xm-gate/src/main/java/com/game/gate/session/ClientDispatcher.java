@@ -387,9 +387,11 @@ public final class ClientDispatcher {
             return;
         }
         if (error != null || reply == null) {
+            // 同基线路由服（forwardlogic.go：上游任何错误或超时都翻成带请求 id 的信封 1003）：回带 id 的信封，客户端当场按信封错误处理；
+            // 只推 23 {1003} 不回应答的话，客户端要等自己的 15 s 请求超时才知道失败（trade-spec T8）。
             log.warn("{} 调用失败 session={} message_id={} 原因={}", domain, sid(s), request.getMessageId(),
                     rootCause(error).toString());
-            sendTip(s, TIP_SERVICE_UNAVAILABLE);
+            s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
         } else {
             replyToClient(s, request, reply);
         }

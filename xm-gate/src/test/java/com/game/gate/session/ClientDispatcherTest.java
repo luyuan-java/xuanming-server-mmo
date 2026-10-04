@@ -483,14 +483,19 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 好友后端调用失败推23服务不可用_同一会话串行() {
+    void 好友后端调用失败回带请求id的信封1003_同一会话串行() {
+        // 同基线路由服：上游错误 / 超时翻成带请求 id 的信封 1003（不是推 23 tip 让客户端等到自己超时）
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, FRIEND_MSG, "a"));
         ch.writeInbound(request(2, FRIEND_MSG, "b"));
         assertThat(friend.calls).as("上一个没完成不发下一个").hasSize(1);
         friend.fail(new IllegalStateException("no provider"));
         ch.runPendingTasks();
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply.getMessageId()).isEqualTo(FRIEND_MSG);
+        assertThat(reply.getId()).isEqualTo(1);
+        assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(reply.getSerializedMessage()).as("没有业务回包").isEmpty();
         assertThat(friend.calls).hasSize(2);
     }
 

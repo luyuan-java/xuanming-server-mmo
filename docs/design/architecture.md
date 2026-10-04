@@ -83,7 +83,7 @@ Java 代码不得依赖这套目录，具体做法：
   后端内部按消息号派发到具体处理方法。
 - 失败分层（客户端契约）：**业务错误写进应答体自己的 `error_message`**（放在 `ClientReply.body` 里）；
   `ClientReply.tip_id` 只表示传输层失败（消息号不认识、请求体解析失败），gate 放进 `MessageContent.error_message`；
-  调用本身失败（超时 / 后端不可用）gate 推 23 `{1003}`。
+  调用本身失败（超时 / 后端不可用）：login 推 23 `{1003}`；friend / chat / team / guild 等后端域回带请求 id 的信封 1003（同基线路由服 forwardlogic，客户端当场按信封错误处理，不必等自己的请求超时）。
 - 是否回包由 gate 按契约里该方法的应答类型决定，不看 body 是否为空：非 `Empty` 应答一律回包（哪怕 0 字节），
   `Empty` 应答只在 `tip_id≠0` 时回包；会话指令无论回不回包都执行。
 - 服务对服务的调用用各自的类型化接口（如 `SceneDirectoryService`；`AccountLoginService`：xm-gateway 的 HTTP 登录 / 刷新令牌调 xm-login，
