@@ -72,7 +72,7 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
         }
     }
 
-    /** 指标的 op 标签：已知接口取固定值，全服产出封禁 / 区服目录 / 公告 / 白名单的各子路径各归成一个，其余一律 other。 */
+    /** 指标的 op 标签：已知接口取固定值，全服产出封禁 / 区服目录 / 公告 / 白名单 / gate 排空的各子路径各归成一个，其余一律 other。 */
     static String opOf(String path) {
         String known = KNOWN_OPS.get(path);
         if (known != null) {
@@ -86,6 +86,9 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
         }
         if (under(path, AnnouncementAdminController.PATH)) {
             return "announcements";
+        }
+        if (under(path, GateDrainAdminController.PATH)) {
+            return "gates";
         }
         return under(path, WhitelistAdminController.PATH) ? "whitelist" : "other";
     }

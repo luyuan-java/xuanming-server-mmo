@@ -25,9 +25,18 @@ echo "运行模式 XM_RUN_MODE=$XM_RUN_MODE"
 mkdir -p run
 if [[ -z "${XM_ADMIN_TOKEN:-}" ]]; then
   XM_ADMIN_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-  printf "%s" "$XM_ADMIN_TOKEN" > run/xm-admin-token
+  (umask 077; printf "%s" "$XM_ADMIN_TOKEN" > run/xm-admin-token)
+  chmod 600 run/xm-admin-token
 fi
 export XM_ADMIN_TOKEN
+
+# GM 签名停机密钥（xm-gate / xm-scene 的 /gm/graceful-shutdown，tools/GmShutdown.java 签名用）：没设就生成本机随机密钥写进 run/xm-gm-admin-secret（只有本用户可读）
+if [[ -z "${XM_GM_ADMIN_SECRET:-}" ]]; then
+  XM_GM_ADMIN_SECRET=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  (umask 077; printf "%s" "$XM_GM_ADMIN_SECRET" > run/xm-gm-admin-secret)
+  chmod 600 run/xm-gm-admin-secret
+fi
+export XM_GM_ADMIN_SECRET
 
 # 登录排队：进程缺省关闭（同基线 Queue.Enabled=false）；本机切片打开，robot 全程走快速通道，queue 场景压容量验证排队与放行
 export XM_GATEWAY_QUEUE_ENABLED="${XM_GATEWAY_QUEUE_ENABLED:-true}"

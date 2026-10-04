@@ -83,6 +83,12 @@ xm:
       dispatch-interval: 1s
     # 开服限流（同基线 gate.rate-limit）：缺省关闭；本机切片打开。/api/login 与 /api/assign-gate（不带排队令牌的）依次判
     # 分波 → IP 令牌桶（IPv6 按 /64）→ 区令牌桶（全部 gateway 共享；空时退回 IP 令牌）→ 同一身份同一 IP 的冷却；Redis 出错放行。
+    # gate 排空判定（同基线 login GateDrain）：运维经 xm-data 给 gate 打排空标记后，新玩家不再分到它；在线 ≤ 阈值或从打标记起等满
+    # deadline 就写 drained 信号（不踢人），运维 / 缩容脚本看到它才下线实例。deadline 为 0 表示只认人走干净。
+    gate-drain:
+      drained-below-players: 0
+      deadline: 25m
+      interval: 5s
     rate-limit:
       enabled: ${XM_GATEWAY_RATE_LIMIT_ENABLED:false}
       zone-default-rps: 500

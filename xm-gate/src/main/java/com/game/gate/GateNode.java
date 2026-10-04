@@ -93,11 +93,12 @@ public final class GateNode {
     private final NodeDirectory<GateNodeInfo> gateDirectory;
 
     private boolean started;
-    private boolean stopped;
+    private volatile boolean stopped;
     private volatile boolean acceptingStopped;
     private ScheduledExecutorService scheduler;
     private ExecutorService linkResolver;
-    private NodeIdLease lease;
+    /** 管理端口的 GM 停机请求在 Tomcat 线程上读它，所以 volatile。 */
+    private volatile NodeIdLease lease;
     /** 租约丢失回调在调度线程上读它，所以 volatile。 */
     private volatile SessionRegistry registry;
     private SceneLinkManager links;
@@ -213,6 +214,27 @@ public final class GateNode {
                 runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
 
         publishTask = scheduler.scheduleAtFixedRate(this::publish, 0, PUBLISH_PERIOD.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /** 本 gate 的节点号；还没启动、已退出或租约已丢为 0。任意线程可调。 */
+    public int nodeId() {
+        NodeIdLease l = lease;
+        return l == null || stopped || l.isLost() ? 0 : l.nodeId();
+    }
+
+    public int zoneId() {
+        return zoneId;
+    }
+
+    /** 本进程的实例 id（启动时随机生成，写进节点目录条目）。 */
+    public String instanceId() {
+        return instanceId;
+    }
+
+    /** 当前会话数（含未完成登录的连接）。任意线程可调。 */
+    public int sessionCount() {
+        SessionRegistry r = registry;
+        return r == null ? 0 : r.size();
     }
 
     /** 每 5s 刷新一次节点目录条目（TTL 15s）。在后台线程上执行，阻塞 Redis 调用不碰 I/O 线程。 */

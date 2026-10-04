@@ -1,10 +1,13 @@
 package com.game.gateway;
 
 import com.game.api.AccountLoginService;
+import com.game.api.proto.GateNodeInfo;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.common.token.GateTokens;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.drain.GateDrainMarks;
+import com.game.gateway.drain.GateDrainMonitor;
 import com.game.gateway.assign.AssignGateMetrics;
 import com.game.gateway.assign.AssignGateService;
 import com.game.gateway.gate.GateSource;
@@ -99,6 +102,23 @@ public class GatewayConfiguration {
                 Thread.ofPlatform().name("gateway-zone-probe").daemon(true).factory());
         long period = ZoneHealthProbe.INTERVAL.toMillis();
         scheduler.scheduleWithFixedDelay(probe::probe, 1000, period, TimeUnit.MILLISECONDS);
+        return scheduler;
+    }
+
+    /** gate 排空判定（每个 gateway 都跑，写入幂等），读原始 gate 目录与排空标记、写 drained 信号。 */
+    @Bean
+    public GateDrainMonitor gateDrainMonitor(ZoneDirectory zones, RedissonClient redis, GatewayProperties properties) {
+        NodeDirectory<GateNodeInfo> gates = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
+        GateDrainMarks marks = new GateDrainMarks(redis);
+        return new GateDrainMonitor(zones::zones, gates::list, marks, properties.gateDrain(), marks::serverTimeSec);
+    }
+
+    @Bean(destroyMethod = "shutdownNow")
+    public ScheduledExecutorService gateDrainScheduler(GateDrainMonitor monitor, GatewayProperties properties) {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().name("gateway-gate-drain").daemon(true).factory());
+        long period = properties.gateDrain().interval().toMillis();
+        scheduler.scheduleWithFixedDelay(monitor::tick, period, period, TimeUnit.MILLISECONDS);
         return scheduler;
     }
 

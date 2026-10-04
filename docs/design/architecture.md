@@ -395,6 +395,23 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
 - **gate 丢了租约**（fail-closed）：停止接客、停止上报目录、不再新建 scene 链路，并关闭全部现有会话（会话号高位就是这个节点号，
   新持有者会发出同样的会话号）；各会话照常走断线流程，经仍然就绪的旧链路让 scene 放掉玩家（写回）并通知 login。
 - 节点类型名（`gate` / `scene` / `login`，Redis 键段）只有一个出处：`xm-discovery` 的 `NodeTypes`。
+- **gate 排空**（计划内缩容不卡玩家，同基线 gatedrain）：运维经 xm-data `POST /admin/gates/drain` 给 gate 的**当前实例**打排空标记
+  （`xm:gate-draining:{zone}:{node}`，值 `Redis 服务器时间秒:实例 id`，必须带 TTL——打标记的人挂了容量不会永久蒸发；TTL 须长于
+  gateway 的 deadline、至多 86400 s；打上之后本区没有接客的 gate 时不带 `force` 拒，这项检查与写在同一段 Lua 里）；
+  xm-gateway 读 gate 目录时一次 MGET 叠加标记（只认同实例的，读不到按没人在排空放行），`GatePicker` 剔除排空中的、全部排空时忽略标记；
+  每个 gateway 每 5 s 跑一轮判定（时间取 Redis 的 TIME）：在线 ≤ 阈值（0）或从打标记起等满 deadline（25 min）就写
+  `xm:gate-drained:{zone}:{node}`（理由 below_threshold / deadline，TTL 不超过排空标记、只在标记仍是判定时那一份时写），
+  不再满足时撤掉 drained，没在排空的清掉残留，旧实例留下的标记（节点号已被新实例复用）比较并删除。**只自动化判定、不踢人**：
+  剩下的玩家靠「实例下线 → 重连 → assign-gate 已剔除它」改派；何时下线由运维看 drained 决定，下线后
+  `DELETE /admin/gates/drain/{zone}/{node}` 清标记。
+- **GM 签名停机**（同基线 Gate / Scene.GmGracefulShutdown）：gate / scene 管理端口上的 `GET /gm/identity`（回区、节点号、实例 id、
+  方法名）与 `POST /gm/graceful-shutdown`，**只收本机来的请求**（`XM_GM_ALLOW_REMOTE=true` 才放开）。签名信封与原因全在请求头里
+  （`X-Xm-Gm-Operator / Timestamp / Nonce / Signature / Reason`，原因百分号编码、至多 256 字符，没有请求体），HMAC-SHA256 签 canonical
+  `方法名\n区:节点号:实例\n操作人\n时间戳\nnonce\n原因`（`GmRequestAuth` + `GmShutdownHandler`：密钥只从 `XM_GM_ADMIN_SECRET` 读、
+  没配一律拒；时间窗 300 s；nonce 2 × 窗口内去重、表满即拒；绑区与实例——Java 节点号按区分配、重启后复用，只绑节点号的签名能拿去停
+  别的区同号节点或重启后的新进程）。通过回 `affected_count`（gate 会话数 / scene 在线人数），应答写出后走正常停机
+  （gate：停接客 → 关会话；scene：摘目录 → 断链 → 写回全部玩家）；拒绝只打 ERROR、回 403 不带原因。签名工具
+  `java tools/GmShutdown.java --url --operator [--reason] [--expect-node]`（先取身份再签）。
 - Redis 客户端超时（`xm.redis.connect-timeout-ms` / `timeout-ms` / `retry-attempts` / `retry-delay-ms`，
   默认 2000 / 2000 / 1 / 200）：单条命令最坏阻塞 = (重试 + 1) × 响应超时 + 重试 × 间隔 = 4.2s，
   低于客户端 HTTP 超时 5s（Redisson 自带默认值下可达二十多秒）。
@@ -499,8 +516,9 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
 
 ## 10. 首批不做（后续批次）
 
-排队、跨 zone、战斗、任务等玩法系统、Kafka 事件、GM 管理接口（HTTP / 签名），
-服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，短线重连已于 2026-10-04 补上，见 §7；货币与 GM 客户端指令闸见 §4.4。）
+跨 zone、战斗等玩法系统、Kafka 事件、GM 管理接口（除远程停机外），
+服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，短线重连已于 2026-10-04 补上，见 §7；货币与 GM 客户端指令闸见 §4.4；登录排队与开服限流见 §8；
+  gate 排空与 GM 签名停机见 §6。）
 （低基数运行指标五个进程都已接入，见 §11。）
 顶号已按 §7 第 2 步实现（旧连接收 23 {2017} 后断开，不发 34）。进度逐项登记在 `PARITY.md`。
 
@@ -522,7 +540,9 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 - **非 Web 进程的管理端口**：gate / login / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
   Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。
   默认只绑 `127.0.0.1`（与 mmorpg 开发环境的 Prometheus 端口同口径），跨机抓取用 `XM_MANAGEMENT_ADDRESS` 指定内网地址；
-  端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。只暴露 `health` 与 `prometheus` 两个端点。
+  端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。actuator 只暴露 `health` 与 `prometheus` 两个端点。
+  gate / scene 的这个端口上另有 GM 签名停机的 `GET /gm/identity` 与 `POST /gm/graceful-shutdown`（§6）：它们只收本机来的请求，
+  为跨机抓取放宽 `XM_MANAGEMENT_ADDRESS` 不会把它们一起暴露（确需远程调用时另设 `XM_GM_ALLOW_REMOTE=true`）。
 - **公共标签**：`application=<进程名>`。实例由 Prometheus 的抓取目标区分，不在进程里加实例标签。
 - **基数约束**（AGENTS.md §5）：不以 player_id / session_id / 账号 / IP / zone_id 作标签。消息维度只用 `服务.方法`
   （`MessageIdRegistry` 的客户端白名单，有界），不认识的消息号一律归 `unknown`——公网流量造不出新的时间序列；

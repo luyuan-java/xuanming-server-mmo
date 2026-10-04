@@ -22,6 +22,11 @@
             <artifactId>xm-discovery</artifactId>
         </dependency>
         <dependency>
+            <!-- gate 排空运维接口读 gate 目录（xm.api.GateNodeInfo） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-api</artifactId>
+        </dependency>
+        <dependency>
             <!-- 区服目录 / 白名单 / 登录公告的运维接口（表由 xm-gateway 建，这里只读写） -->
             <groupId>com.game</groupId>
             <artifactId>xm-gateway-store</artifactId>

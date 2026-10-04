@@ -55,6 +55,22 @@ public final class RedisKeys {
         return PREFIX + "location:" + Long.toUnsignedString(playerId);
     }
 
+    /**
+     * gate 排空标记 {@code xm:gate-draining:{zone}:{node}}：值为打标记时刻（Redis 服务器时间，Unix 秒），必须带 TTL——
+     * 打标记的人中途挂了，到期后这台 gate 自动重新接客（容量不会永久蒸发）。xm-data 运维接口写，xm-gateway 读。
+     */
+    public static String gateDraining(int zoneId, int nodeId) {
+        return PREFIX + "gate-draining:" + zoneId + ":" + nodeId;
+    }
+
+    /**
+     * gate 已排空到可以安全下线 {@code xm:gate-drained:{zone}:{node}}：值为判定理由（below_threshold / deadline），
+     * TTL 取排空标记的剩余 TTL（不比它活得久）。xm-gateway 的排空判定循环写，运维 / 缩容脚本读。
+     */
+    public static String gateDrained(int zoneId, int nodeId) {
+        return PREFIX + "gate-drained:" + zoneId + ":" + nodeId;
+    }
+
     /** 登录排队：区的队列 {@code xm:login-queue:{zone}}，ZSET（成员 = 排队号，分数 = 入队毫秒）。xm-gateway 读写。 */
     public static String loginQueue(int zoneId) {
         return PREFIX + "login-queue:" + zoneId;

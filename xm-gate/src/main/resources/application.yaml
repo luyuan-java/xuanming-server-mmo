@@ -10,7 +10,8 @@ spring:
     # 只为管理端点起一个 Servlet 容器（Tomcat）；客户端端口、scene 链路、Dubbo 都不经过它（architecture.md §11）。
     web-application-type: servlet
 
-# 管理端点：http://127.0.0.1:18103/actuator/health 与 /actuator/prometheus，这个 HTTP 端口上只有 actuator。
+# 管理端点：http://127.0.0.1:18103/actuator/health 与 /actuator/prometheus；另有 GM 签名停机 /gm/identity、/gm/graceful-shutdown
+# （只收本机来的请求，XM_GM_ALLOW_REMOTE=true 才放开；密钥 XM_GM_ADMIN_SECRET，没配一律拒），没有别的业务接口。
 # 默认只绑本机；要被别的机器上的 Prometheus 抓取时用 XM_MANAGEMENT_ADDRESS 指定内网地址（不要暴露到公网）。
 # 端口可用 SERVER_PORT 覆盖（Windows 上避开保留端口段 50060-50159）。
 server:

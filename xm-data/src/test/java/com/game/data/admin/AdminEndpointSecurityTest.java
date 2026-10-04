@@ -36,7 +36,8 @@ class AdminEndpointSecurityTest {
     @Configuration(proxyBeanMethods = false)
     @ImportAutoConfiguration({ServletWebServerFactoryAutoConfiguration.class, DispatcherServletAutoConfiguration.class,
             WebMvcAutoConfiguration.class, HttpMessageConvertersAutoConfiguration.class, JacksonAutoConfiguration.class})
-    @Import(AuditQueryController.class)
+    // gate 排空运维接口：上下文里没有 Redis 客户端也能起来（Redis 懒加载，第一次调用这些接口时才建）
+    @Import({AuditQueryController.class, GateDrainAdminController.class})
     static class App {
 
         @Bean
@@ -78,6 +79,7 @@ class AdminEndpointSecurityTest {
         assertThat(status("/admin/transaction-log;y=2?player=1", false)).isEqualTo(401);
         assertThat(status("/admin/player-snapshots?player=1", false)).isEqualTo(401);
         assertThat(status("/%61dmin/player-snapshots?player=1", false)).isEqualTo(401);
+        assertThat(status("/%61dmin/gates/1", false)).as("gate 排空运维接口同样要令牌").isEqualTo(401);
     }
 
     @Test

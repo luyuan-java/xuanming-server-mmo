@@ -4,17 +4,24 @@ import com.game.api.ClientMessageService;
 import com.game.api.DubboGroups;
 import com.game.common.token.DubboCallAuth;
 import com.game.common.token.GateTokens;
+import com.game.common.token.GmRequestAuth;
+import com.game.common.token.GmShutdownHandler;
 import com.game.common.RunMode;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
+import com.game.gate.admin.GmShutdownController;
 import com.game.gate.metrics.GateMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.concurrent.locks.LockSupport;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.apache.dubbo.config.spring.ReferenceBean;
 import org.redisson.api.RedissonClient;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.SpringApplication;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
@@ -22,6 +29,9 @@ import org.springframework.core.env.Environment;
 /** gate 的装配。秘密只从环境变量读，缺失即启动失败（fail-closed）。 */
 @Configuration(proxyBeanMethods = false)
 public class GateConfiguration {
+
+    /** GM 停机受理到开始停机之间留给应答写出的时间。 */
+    static final Duration GM_EXIT_DELAY = Duration.ofMillis(300);
 
     /** 环境变量名：gateway 用同一密钥签发令牌，gate 验签。 */
     static final String TOKEN_SECRET_ENV = "XM_GATE_TOKEN_SECRET";
@@ -84,5 +94,37 @@ public class GateConfiguration {
         }
         return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService, properties,
                 zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode));
+    }
+
+    /** GM 签名停机的校验（密钥只从环境变量 XM_GM_ADMIN_SECRET 读，没配一律拒）。 */
+    @Bean
+    public GmRequestAuth gmRequestAuth(Environment environment) {
+        GmRequestAuth auth = GmRequestAuth.fromEnvValues(environment.getProperty(GmRequestAuth.SECRET_ENV),
+                environment.getProperty(GmRequestAuth.SKEW_ENV), () -> System.currentTimeMillis() / 1000);
+        if (!auth.configured()) {
+            LoggerFactory.getLogger(GateConfiguration.class).info("没配 {}：GM 签名停机一律拒绝", GmRequestAuth.SECRET_ENV);
+        }
+        return auth;
+    }
+
+    /**
+     * GM 签名停机的受理（只收本机来的请求；确需远程调用时设 XM_GM_ALLOW_REMOTE=true——管理端口为了 Prometheus 跨机抓取
+     * 绑到内网地址时，停机接口不该跟着暴露）。
+     */
+    @Bean
+    public GmShutdownHandler gmShutdownHandler(GmRequestAuth gmRequestAuth, GateNode gateNode,
+                                               @Value("${XM_GM_ALLOW_REMOTE:false}") boolean allowRemote) {
+        return new GmShutdownHandler(GmShutdownController.METHOD, gmRequestAuth,
+                () -> new GmShutdownHandler.Identity(gateNode.zoneId(), gateNode.nodeId(), gateNode.instanceId()),
+                gateNode::sessionCount, allowRemote);
+    }
+
+    /** GM 停机受理后：等应答写出，再按正常流程关 Spring 上下文（触发 {@link GateNode#stop()}）并退出进程。 */
+    @Bean
+    public GmShutdownController.ProcessExit gmProcessExit(ConfigurableApplicationContext context) {
+        return () -> Thread.ofPlatform().name("gm-shutdown").start(() -> {
+            LockSupport.parkNanos(GM_EXIT_DELAY.toNanos());
+            System.exit(SpringApplication.exit(context, () -> 0));
+        });
     }
 }

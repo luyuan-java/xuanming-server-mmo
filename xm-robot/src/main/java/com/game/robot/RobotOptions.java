@@ -55,7 +55,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -75,7 +75,7 @@ public record RobotOptions(
                 "movement 跳跃检查的期望：auto（纠偏或 fail-open 都接受）/ correct（必须回 137）/ accept（必须原样接受）"),
         EXPECT_GM("expect-gm", "XM_ROBOT_EXPECT_GM", "allow",
                 "currency / attribute：服务端运行模式的期望：allow（dev / test，GM 指令生效）/ deny（prod，gate 推 23 {1006} 且不转发）"),
-        DATA_URL("data-url", "XM_ROBOT_DATA_URL", "http://127.0.0.1:18106", "audit / guard / zones / queue：xm-data 管理端口（运维接口）"),
+        DATA_URL("data-url", "XM_ROBOT_DATA_URL", "http://127.0.0.1:18106", "audit / guard / zones / queue / drain：xm-data 管理端口（运维接口）"),
         SCENE_METRICS_URL("scene-metrics-url", "XM_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
                 "audit / guard：xm-scene 管理端口（抓指标）"),
         TABLE_DIR("table-dir", "XM_ROBOT_TABLE_DIR", "config-data/tables",
@@ -184,6 +184,7 @@ public record RobotOptions(
             case ZONES -> prefix + runTag;
             case QUEUE -> prefix + runTag;
             case RATELIMIT -> RateLimitScenario.accountName(prefix, runTag);
+            case DRAIN -> prefix + runTag;
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -199,7 +200,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -228,6 +229,8 @@ public record RobotOptions(
                 + " gate 令牌并连 gate → 令牌只取一次（410）；需要排队已打开（XM_GATEWAY_QUEUE_ENABLED）与运维令牌\n");
         out.append("  ratelimit 开服限流：同账号连登第二次 429 ACCOUNT_COOLDOWN、assign-gate 不撞 login 的冷却 → 连发 assign-gate 到 429"
                 + " IP_RATE_LIMIT → 等桶补满后照常；需要限流已打开（XM_GATEWAY_RATE_LIMIT_ENABLED，缺省阈值）\n");
+        out.append("  drain     gate 排空：经 xm-data 给本区 gate 打排空标记（最后一台不带 force 409）→ 全部排空时 assign-gate 照常 →"
+                + " 没人在线时判定为 drained → 撤销；需要运维令牌\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -253,7 +256,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain）");
         }
     }
 

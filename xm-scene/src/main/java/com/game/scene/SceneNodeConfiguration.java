@@ -1,9 +1,12 @@
 package com.game.scene;
 
 import com.game.audit.AuditProperties;
+import com.game.common.token.GmRequestAuth;
+import com.game.common.token.GmShutdownHandler;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.player.store.PlayerStore;
+import com.game.scene.admin.GmShutdownController;
 import com.game.scene.attribute.AttributeTables;
 import com.game.scene.bag.BagTables;
 import com.game.scene.mission.MissionTables;
@@ -15,10 +18,15 @@ import com.game.scene.world.SceneTables;
 import com.game.table.ConfigTables;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.concurrent.locks.LockSupport;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.SpringApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
@@ -33,6 +41,9 @@ import org.springframework.core.env.Environment;
 public class SceneNodeConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(SceneNodeConfiguration.class);
+
+    /** GM 停机受理到开始停机之间留给应答写出的时间。 */
+    static final Duration GM_EXIT_DELAY = Duration.ofMillis(300);
 
     @Bean
     public MessageIdRegistry messageIdRegistry() {
@@ -97,5 +108,37 @@ public class SceneNodeConfiguration {
                                SceneMetrics sceneMetrics, AuditProperties audit) {
         return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, bagTables, missionTables,
                 skillTables, petTables, nodeLinkAuth, sceneMetrics, audit);
+    }
+
+    /** GM 签名停机的校验（密钥只从环境变量 XM_GM_ADMIN_SECRET 读，没配一律拒）。 */
+    @Bean
+    public GmRequestAuth gmRequestAuth(Environment environment) {
+        GmRequestAuth auth = GmRequestAuth.fromEnvValues(environment.getProperty(GmRequestAuth.SECRET_ENV),
+                environment.getProperty(GmRequestAuth.SKEW_ENV), () -> System.currentTimeMillis() / 1000);
+        if (!auth.configured()) {
+            log.info("没配 {}：GM 签名停机一律拒绝", GmRequestAuth.SECRET_ENV);
+        }
+        return auth;
+    }
+
+    /**
+     * GM 签名停机的受理（只收本机来的请求；确需远程调用时设 XM_GM_ALLOW_REMOTE=true——管理端口为了 Prometheus 跨机抓取
+     * 绑到内网地址时，停机接口不该跟着暴露）。
+     */
+    @Bean
+    public GmShutdownHandler gmShutdownHandler(GmRequestAuth gmRequestAuth, SceneNode sceneNode,
+                                               @Value("${XM_GM_ALLOW_REMOTE:false}") boolean allowRemote) {
+        return new GmShutdownHandler(GmShutdownController.METHOD, gmRequestAuth,
+                () -> new GmShutdownHandler.Identity(sceneNode.zoneId(), sceneNode.nodeId(), sceneNode.instanceId()),
+                sceneNode::onlinePlayerCount, allowRemote);
+    }
+
+    /** GM 停机受理后：等应答写出，再按正常流程关 Spring 上下文（触发 {@link SceneNode#stop()} 写回全部玩家）并退出进程。 */
+    @Bean
+    public GmShutdownController.ProcessExit gmProcessExit(ConfigurableApplicationContext context) {
+        return () -> Thread.ofPlatform().name("gm-shutdown").start(() -> {
+            LockSupport.parkNanos(GM_EXIT_DELAY.toNanos());
+            System.exit(SpringApplication.exit(context, () -> 0));
+        });
     }
 }

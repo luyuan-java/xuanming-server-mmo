@@ -359,6 +359,37 @@ public class SceneNode implements SmartLifecycle {
         return running;
     }
 
+    /** 本场景节点的节点号；没在运行（没启动、正在停）为 0。任意线程可调。 */
+    public int nodeId() {
+        NodeIdLease l = lease;
+        return running && l != null ? l.nodeId() : 0;
+    }
+
+    public int zoneId() {
+        return props.zoneId();
+    }
+
+    /** 本进程的实例 id（启动时随机生成，写进节点目录条目）。 */
+    public String instanceId() {
+        return instanceId;
+    }
+
+    /** 在线玩家数（到逻辑线程上数）；没在运行或逻辑线程没及时应答为 -1。任意线程可调（阻塞至多一个逻辑调用超时）。 */
+    public int onlinePlayerCount() {
+        SceneWorld w = world;
+        if (!running || w == null) {
+            return -1;
+        }
+        try {
+            return callOnLogic(w::playerCount);
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return -1;
+        }
+    }
+
     /** 资产通道的进程内入口（任意线程可调）；节点没启动过为 null。 */
     public AssetOpEndpoint assetOps() {
         return assetOps;
