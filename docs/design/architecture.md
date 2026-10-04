@@ -639,6 +639,11 @@ mmorpg：`go/match/internal/team`（与匹配同进程）+ C++ scene `player_tea
 - 物品 uuid、资产流水号 `tx_id`、玩家快照号 `snapshot_id`：雪花，共用一个 `SceneGuids`，worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0；不论审计开不开都占）——
   场景节点自己的租约按 zone 分，两个 zone 的第一台 scene 会拿到同一个 worker、发出相同的号，落库按主键去重就会静默吞掉一条。
   停服时先发完审计队列再交还这个租约（反过来别的实例可能拿到同一个 worker 发重号）。
+- `team_id`、`guild_id`：雪花，worker 取各自服务的全服租约（`NodeTypes.TEAM` / `NodeTypes.GUILD`，作用域 0）。
+- **不移植号段服务**（基线 data_service `AllocateIdSegment` + 各节点的号段客户端，盘点 id-segment-allocator / guid-segment-alloc）：
+  Java 的永久号一律「雪花 + 节点号租约」——发号前检查租约仍有效、时钟回拨拒发，worker 不重叠由租约保证；
+  客户端只要求这些号非 0、唯一（uint64），不依赖号段的值域（基线号段值域 < 2^55，与存量雪花号不相交——Java 没有存量号段号，无此约束）。
+  场景内的临时 id（实体、场景实例）用场景节点自己的雪花（`SceneWorld.nextId`）。
 
 ## 10. 首批不做（后续批次）
 

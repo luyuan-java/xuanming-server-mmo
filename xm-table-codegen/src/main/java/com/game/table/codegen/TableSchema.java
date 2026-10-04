@@ -11,8 +11,9 @@ import java.util.function.UnaryOperator;
  *
  * @param javaPackage 生成代码与行消息类所在的 Java 包（全部表必须同包）
  * @param tables      按表名排序
+ * @param tipCodes    合法的 tip 码（{@code tip/*.proto} 里全部枚举值，含 0），升序；表内 tip 引用列按它校验
  */
-record TableSchema(String javaPackage, List<Table> tables) {
+record TableSchema(String javaPackage, List<Table> tables, List<Long> tipCodes) {
 
     Optional<Table> table(String sheet) {
         return tables.stream().filter(t -> t.sheet().equals(sheet)).findFirst();
@@ -20,7 +21,7 @@ record TableSchema(String javaPackage, List<Table> tables) {
 
     /** 对每张表的每个字段做同一个变换（用于把访问器名换成 protoc 实际生成的名字）。 */
     TableSchema mapFields(java.util.function.BiFunction<Table, Field, Field> fn) {
-        return new TableSchema(javaPackage, tables.stream().map(t -> t.mapFields(f -> fn.apply(t, f))).toList());
+        return new TableSchema(javaPackage, tables.stream().map(t -> t.mapFields(f -> fn.apply(t, f))).toList(), tipCodes);
     }
 
     /** 字段值在 Java 里的类型。枚举字段一律按数值（{@code getXxxValue()}）处理。 */
@@ -88,6 +89,31 @@ record TableSchema(String javaPackage, List<Table> tables) {
     }
 
     /**
+     * tip 引用：整型列标了 {@code cfg_tip_ref}，或列名含 {@code tip}（同导表器 validate_tip_references 按 Excel 列判定；
+     * 结构体列展开后的子列同样纳入，如 {@code ActorActionState.state[].state_tip}）。
+     *
+     * @param field      表的列（{@code subField == null} 时它本身就是 tip 列）
+     * @param structType 结构体列的 Java 简单类名（{@code subField} 非空时）
+     * @param subField   结构体里的 tip 子列；null = 列本身
+     */
+    record TipRef(Field field, String structType, Field subField) {
+
+        String label(String sheet) {
+            return sheet + "." + field.name() + (subField == null ? "" : "." + subField.name());
+        }
+    }
+
+    /**
+     * 表达式列（{@code cfg_expr_type} / {@code cfg_expr_param}）：字符串列存公式，按声明的参数名求值。
+     *
+     * @param field      字符串标量列
+     * @param resultType {@code cfg_expr_type}（目前只支持 {@code double}，同基线）
+     * @param params     {@code cfg_expr_param}，按声明顺序（生成的求值方法按这个顺序收参数）
+     */
+    record Expression(Field field, String resultType, List<String> params) {
+    }
+
+    /**
      * @param sheet           表名（cfg_sheet）
      * @param sourceFile      源 Excel 文件名（cfg_source_file），只用于注释
      * @param rowClass        行消息的 Java 简单类名（protoc 生成）
@@ -97,9 +123,12 @@ record TableSchema(String javaPackage, List<Table> tables) {
      * @param indexes         索引（标量或 repeated 标量；repeated 时按每个元素建索引）
      * @param foreignKeys     外键
      * @param fields          全部服务端字段
+     * @param tipRefs         tip 引用列（整型列标了 {@code cfg_tip_ref}，或列名含 {@code tip}；同导表器 validate_tip_references）
+     * @param expressions     表达式列
      */
     record Table(String sheet, String sourceFile, String rowClass, Field primaryKey, boolean multiPrimaryKey,
-                 List<Key> keys, List<Field> indexes, List<ForeignKey> foreignKeys, List<Field> fields) {
+                 List<Key> keys, List<Field> indexes, List<ForeignKey> foreignKeys, List<Field> fields,
+                 List<TipRef> tipRefs, List<Expression> expressions) {
 
         String rowsClass() {
             return sheet + "Rows";
@@ -131,7 +160,9 @@ record TableSchema(String javaPackage, List<Table> tables) {
                     indexes.stream().map(same).toList(),
                     foreignKeys.stream().map(fk -> new ForeignKey(same.apply(fk.field()), fk.targetSheet(), fk.targetColumn(),
                             fk.option())).toList(),
-                    mapped);
+                    mapped,
+                    tipRefs.stream().map(r -> new TipRef(same.apply(r.field()), r.structType(), r.subField())).toList(),
+                    expressions.stream().map(e -> new Expression(same.apply(e.field()), e.resultType(), e.params())).toList());
         }
     }
 }

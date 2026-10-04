@@ -1,10 +1,12 @@
 package com.game.table.codegen;
 
+import com.game.table.codegen.TableSchema.Expression;
 import com.game.table.codegen.TableSchema.Field;
 import com.game.table.codegen.TableSchema.ForeignKey;
 import com.game.table.codegen.TableSchema.Key;
 import com.game.table.codegen.TableSchema.Kind;
 import com.game.table.codegen.TableSchema.Table;
+import com.game.table.codegen.TableSchema.TipRef;
 import com.google.protobuf.DescriptorProtos.DescriptorProto;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;
 import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
@@ -40,9 +42,19 @@ final class TableSchemaReader {
     private static final String MESSAGE_OPTIONS = ".google.protobuf.MessageOptions";
     private static final String FIELD_OPTIONS = ".google.protobuf.FieldOptions";
     private static final String DEFAULT_PRIMARY_KEY = "id";
+    /** tip 码枚举所在的目录（同步来的 {@code xm-table/src/main/proto/tip/*.proto}；描述符集里的文件名相对 proto 源根）。 */
+    static final String TIP_PROTO_DIR = "tip/";
+    /** 导表器 validate_tip_references 认的整型（不含 fixed / 枚举 / bool）。 */
+    private static final Set<FieldDescriptorProto.Type> TIP_INTEGER_TYPES = Set.of(
+            FieldDescriptorProto.Type.TYPE_INT32, FieldDescriptorProto.Type.TYPE_UINT32, FieldDescriptorProto.Type.TYPE_INT64,
+            FieldDescriptorProto.Type.TYPE_UINT64, FieldDescriptorProto.Type.TYPE_SINT32, FieldDescriptorProto.Type.TYPE_SINT64);
+    /** 表达式里的白名单函数名（参数名不得与之相同）；与 xm-table 运行时 TableExpression 一致。 */
+    static final Set<String> EXPRESSION_FUNCTIONS = Set.of("min", "max", "abs", "floor", "ceil", "random");
 
     private final Map<String, Integer> messageExt = new HashMap<>();
     private final Map<String, Integer> fieldExt = new HashMap<>();
+    /** 全部顶层消息（全名 → 描述），结构体列据此找子列。 */
+    private final Map<String, DescriptorProto> messages = new HashMap<>();
 
     private TableSchemaReader() {
     }
@@ -76,11 +88,16 @@ final class TableSchemaReader {
 
     private TableSchema readTables(FileDescriptorSet set) {
         if (!messageExt.containsKey("cfg_sheet")) {
-            return new TableSchema("", List.of());
+            return new TableSchema("", List.of(), List.of());
         }
         List<Table> tables = new ArrayList<>();
         Set<String> packages = new HashSet<>();
         Set<String> sheets = new HashSet<>();
+        for (FileDescriptorProto file : set.getFileList()) {
+            for (DescriptorProto message : file.getMessageTypeList()) {
+                messages.put((file.getPackage().isEmpty() ? "." : "." + file.getPackage() + ".") + message.getName(), message);
+            }
+        }
         for (FileDescriptorProto file : set.getFileList()) {
             for (DescriptorProto message : file.getMessageTypeList()) {
                 Optional<String> sheet = stringOption(message.getOptions().getUnknownFields(), messageExt, "cfg_sheet");
@@ -101,8 +118,10 @@ final class TableSchemaReader {
             throw new SchemaException("配置表 proto 的 java_package 不一致: " + packages);
         }
         tables.sort(Comparator.comparing(Table::sheet));
-        TableSchema schema = new TableSchema(packages.isEmpty() ? "" : packages.iterator().next(), List.copyOf(tables));
+        TableSchema schema = new TableSchema(packages.isEmpty() ? "" : packages.iterator().next(), List.copyOf(tables),
+                tipCodes(set));
         validateForeignKeys(schema);
+        validateTipRefs(schema);
         return schema;
     }
 
@@ -124,6 +143,8 @@ final class TableSchemaReader {
         List<Key> keys = new ArrayList<>();
         List<Field> indexes = new ArrayList<>();
         List<ForeignKey> foreignKeys = new ArrayList<>();
+        List<TipRef> tipRefs = new ArrayList<>();
+        List<Expression> expressions = new ArrayList<>();
         for (FieldDescriptorProto fd : message.getFieldList()) {
             UnknownFieldSet opts = fd.getOptions().getUnknownFields();
             if (!isServerOwned(opts)) {
@@ -132,6 +153,21 @@ final class TableSchemaReader {
             Field field = toField(fd, message.getName(), mapEntries);
             fields.add(field);
             String where = sheet + "." + field.name();
+            // tip 引用：同导表器 validate_tip_references——整型列标了 tip_ref，或列名含 tip（大小写不敏感）都纳入
+            boolean explicitTip = boolOption(opts, "cfg_tip_ref");
+            if (TIP_INTEGER_TYPES.contains(fd.getType()) && (explicitTip || field.name().toLowerCase(Locale.ROOT).contains("tip"))) {
+                tipRefs.add(new TipRef(field, null, null));
+            } else if (explicitTip) {
+                throw new SchemaException(where + ": cfg_tip_ref 只能标在整型列上");
+            }
+            structTipRefs(where, fd, field, mapEntries, tipRefs);
+            Optional<String> exprType = stringOption(opts, fieldExt, "cfg_expr_type");
+            List<String> exprParams = stringOptions(opts, fieldExt, "cfg_expr_param");
+            if (exprType.isPresent()) {
+                expressions.add(expression(where, field, exprType.get().trim(), exprParams));
+            } else if (!exprParams.isEmpty()) {
+                throw new SchemaException(where + ": 有 cfg_expr_param 却没有 cfg_expr_type");
+            }
             boolean multi = boolOption(opts, "cfg_multi");
             if (field.name().equals(pkName)) {
                 requireScalarKey(where, field);
@@ -169,7 +205,89 @@ final class TableSchemaReader {
             throw new SchemaException(sheet + ": 找不到主键列 " + pkName);
         }
         return new Table(sheet, sourceFile, message.getName(), primaryKey, multiPrimaryKey,
-                List.copyOf(keys), List.copyOf(indexes), List.copyOf(foreignKeys), List.copyOf(fields));
+                List.copyOf(keys), List.copyOf(indexes), List.copyOf(foreignKeys), List.copyOf(fields),
+                List.copyOf(tipRefs), List.copyOf(expressions));
+    }
+
+    /**
+     * 结构体列（非 map 的消息字段）展开后的 tip 子列：导表器按 Excel 列判定，结构体的子列在 Excel 里就是普通列（如 {@code state_tip}），
+     * 同样按「整型 + 标了 tip_ref 或名字含 tip」纳入。
+     */
+    private void structTipRefs(String where, FieldDescriptorProto fd, Field field, Set<String> mapEntries, List<TipRef> out) {
+        if (fd.getType() != FieldDescriptorProto.Type.TYPE_MESSAGE) {
+            return;
+        }
+        String typeName = fd.getTypeName();
+        String simple = typeName.substring(typeName.lastIndexOf('.') + 1);
+        if (mapEntries.contains(simple)) {
+            return;
+        }
+        DescriptorProto struct = messages.get(typeName);
+        if (struct == null) {
+            throw new SchemaException(where + ": 找不到结构体类型 " + typeName + "（只支持同一描述符集里的顶层消息）");
+        }
+        for (FieldDescriptorProto sub : struct.getFieldList()) {
+            boolean explicit = boolOption(sub.getOptions().getUnknownFields(), "cfg_tip_ref");
+            if (TIP_INTEGER_TYPES.contains(sub.getType()) && (explicit || sub.getName().toLowerCase(Locale.ROOT).contains("tip"))) {
+                out.add(new TipRef(field, simple, toField(sub, struct.getName(), Set.of())));
+            } else if (explicit) {
+                throw new SchemaException(where + "." + sub.getName() + ": cfg_tip_ref 只能标在整型列上");
+            }
+        }
+    }
+
+    /** 表达式列：字符串标量；结果类型只支持 double（基线 ExcelExpression 的唯一用法）；参数名是标识符、不重复、不与函数名撞。 */
+    private static Expression expression(String where, Field field, String resultType, List<String> params) {
+        if (field.kind() != Kind.STRING || field.repeated()) {
+            throw new SchemaException(where + ": cfg_expr_type 只能标在字符串标量列上");
+        }
+        if (!resultType.equals("double")) {
+            throw new SchemaException(where + ": cfg_expr_type 只支持 double，实际 " + resultType);
+        }
+        Set<String> seen = new HashSet<>();
+        List<String> names = new ArrayList<>();
+        for (String raw : params) {
+            String name = raw.trim();
+            if (!name.matches("[A-Za-z_][A-Za-z0-9_]*") || EXPRESSION_FUNCTIONS.contains(name)) {
+                throw new SchemaException(where + ": cfg_expr_param 不是合法的参数名: " + raw);
+            }
+            if (!seen.add(name)) {
+                throw new SchemaException(where + ": cfg_expr_param 重复: " + name);
+            }
+            names.add(name);
+        }
+        return new Expression(field, resultType, List.copyOf(names));
+    }
+
+    /** 合法 tip 码：{@code tip/} 目录下各 proto 的顶层枚举的全部取值（导表器 enum_gen 产出的就是当前活动的码），外加 0。 */
+    private static List<Long> tipCodes(FileDescriptorSet set) {
+        java.util.TreeSet<Long> codes = new java.util.TreeSet<>();
+        for (FileDescriptorProto file : set.getFileList()) {
+            if (!file.getName().startsWith(TIP_PROTO_DIR)) {
+                continue;
+            }
+            for (var e : file.getEnumTypeList()) {
+                for (var v : e.getValueList()) {
+                    codes.add((long) v.getNumber());
+                }
+            }
+        }
+        if (!codes.isEmpty()) {
+            codes.add(0L);
+        }
+        return List.copyOf(codes);
+    }
+
+    private static void validateTipRefs(TableSchema schema) {
+        if (!schema.tipCodes().isEmpty()) {
+            return;
+        }
+        for (Table table : schema.tables()) {
+            if (!table.tipRefs().isEmpty()) {
+                throw new SchemaException(table.tipRefs().get(0).label(table.sheet())
+                        + ": 有 tip 引用列，但描述符集里没有 " + TIP_PROTO_DIR + "*.proto 的 tip 枚举，无法校验");
+            }
+        }
     }
 
     private void validateForeignKeys(TableSchema schema) {
@@ -235,6 +353,15 @@ final class TableSchemaReader {
         }
         List<Long> varints = opts.getField(number).getVarintList();
         return !varints.isEmpty() && varints.get(varints.size() - 1) != 0;
+    }
+
+    /** repeated string option 的全部取值（按出现顺序）。 */
+    private static List<String> stringOptions(UnknownFieldSet opts, Map<String, Integer> ext, String name) {
+        Integer number = ext.get(name);
+        if (number == null || !opts.hasField(number)) {
+            return List.of();
+        }
+        return opts.getField(number).getLengthDelimitedList().stream().map(b -> b.toStringUtf8()).toList();
     }
 
     private static Optional<String> stringOption(UnknownFieldSet opts, Map<String, Integer> ext, String name) {

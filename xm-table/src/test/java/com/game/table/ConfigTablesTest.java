@@ -164,6 +164,51 @@ class ConfigTablesTest {
     }
 
     @Test
+    void danglingTipReferenceIsRejected() throws IOException {
+        // 表内 tip 引用（显式 cfg_tip_ref 与结构体里名字含 tip 的子列）必须是 0 或现存的 tip 码，同导表器 validate_tip_references。
+        Path dir = copyTables();
+        rewriteRows(dir, MessageLimiterRows.SHEET, MessageLimiterRows.DATA_FILE, MessageLimiterTable.parser(),
+                rows -> rows.set(0, ((MessageLimiterTable) rows.get(0)).toBuilder().setTipMessage(987654).build()));
+        rewriteRows(dir, ActorActionStateRows.SHEET, ActorActionStateRows.DATA_FILE, ActorActionStateTable.parser(),
+                rows -> rows.set(0, ((ActorActionStateTable) rows.get(0)).toBuilder()
+                        .addState(ActorActionStatestate.newBuilder().setStateTip(-1)).build()));
+        assertThatThrownBy(() -> ConfigTables.load(dir))
+                .isInstanceOf(TableLoadException.class)
+                .hasMessageContaining("tip 引用校验失败")
+                .hasMessageContaining("MessageLimiter.tip_message")
+                .hasMessageContaining("987654")
+                .hasMessageContaining("ActorActionState.state.state_tip")
+                .hasMessageContaining("4294967295");
+    }
+
+    @Test
+    void expressionColumnsCompileAndEvaluate() {
+        ConfigTables tables = ConfigTables.load(TABLES);
+        for (SkillTable row : tables.skill().all()) {
+            double v = tables.skill().evalDamage(row, 2);
+            assertThat(v).as("Skill %d 的 damage 公式 \"%s\"", row.getId(), row.getDamage()).isFinite();
+        }
+        for (BuffTable row : tables.buff().all()) {
+            assertThat(tables.buff().evalHealthRegeneration(row, 3, 1000)).isFinite();
+            assertThat(tables.buff().evalBonusDamage(row)).isFinite();
+        }
+        SkillTable foreign = SkillTable.newBuilder().setId(1).setDamage("1").build();
+        assertThatThrownBy(() -> tables.skill().evalDamage(foreign, 1)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("不属于这份快照");
+    }
+
+    @Test
+    void malformedExpressionIsRejectedAtLoad() throws IOException {
+        Path dir = copyTables();
+        rewriteRows(dir, SkillRows.SHEET, SkillRows.DATA_FILE, SkillTable.parser(),
+                rows -> rows.set(0, ((SkillTable) rows.get(0)).toBuilder().setDamage("100*lvl").build()));
+        assertThatThrownBy(() -> ConfigTables.load(dir))
+                .isInstanceOf(TableLoadException.class)
+                .hasMessageContaining("表达式列 damage")
+                .hasMessageContaining("lvl");
+    }
+
+    @Test
     void foreignKeyIntoEmptyTargetIsSkipped() throws IOException {
         // 目标表为空（BaseScene 不在 manifest 里）：与导表器一致，跳过并告警，不拒绝启动。
         Path dir = copyTables();

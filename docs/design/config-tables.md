@@ -49,6 +49,8 @@ int id = TableConstants.GlobalVariable.ABNORMAL_LOGOUT;                     // �
 | `cfg_key` + `cfg_multi`，或非主键标量列只标 `cfg_multi` | `findAllByX(key)` → `List` |
 | `cfg_index`（标量或 repeated，repeated 按每个元素建） | `findAllByX(key)` → `List` |
 | `cfg_fk = "T"` / `"T.col"`、`cfg_gfk = "T"` | 加载时校验，不生成方法 |
+| `cfg_tip_ref`，或整型列名含 `tip`（含结构体列的子列） | 加载时校验 tip 引用，不生成方法（§3 第 6 条） |
+| `cfg_expr_type = "double"` + `cfg_expr_param`（字符串列存公式） | 加载时逐行预编译；生成 `evalXxx(row, 参数…)` 与带 `RandomGenerator` 的重载（§3 第 7 条） |
 
 全部返回值不可变；`ConfigTables` 是一份不可变快照，热更 = 加载新快照、整体替换引用（同一快照内各表一致）。
 
@@ -62,6 +64,13 @@ int id = TableConstants.GlobalVariable.ABNORMAL_LOGOUT;                     // �
 4. 主键（未声明 `cfg_multi`）不重复；
 5. **外键**：每个非空取值（不是 0 / -1 / 空串，与导表器口径一致）都能在目标列里找到，失配全部列出（前 50 条）；
    目标列没有任何非空取值（空表）时跳过并告警——与导表器一致（「无法校验」不是「校验失败」）。
+6. **tip 引用**（基线导表器 enum_gen.py validate_tip_references 在生成前做同一检查）：整型列标了 `cfg_tip_ref`，或列名含 `tip`
+   （大小写不敏感；结构体列展开后的子列同样纳入，如 `ActorActionState.state.state_tip`），每个取值必须是 0 或同步来的
+   `tip/*.proto` 里现存的码（码表由 codegen 编译期从描述符集取出），失配全部列出（前 50 条）——tip 码轴重排后表里的旧数字不能静默变成未知码；
+7. **表达式列**（`cfg_expr_type` / `cfg_expr_param`，基线 C++ exprtk、Go 不支持）：每行公式加载时编译成不可变语法树（`TableExpression`），
+   语法错误、引用未声明的参数、未知函数或参数个数不对即失败；只收 数字、声明过的参数、`+ - * / %`、`^`（右结合，高于一元负号）、括号、
+   `min / max / abs / floor / ceil / random()`；空串按 0。求值无状态、线程安全，`random()` 由调用方注入随机源（缺省 ThreadLocalRandom）。
+   与基线的差别：基线编译失败不检查（返回值未定义）、每次求值重新编译、「先设参数再取值」共享可变状态。
 
 schema 里有、manifest 没登记的表按空表处理并告警（正常同步不会出现：还没导出的表根本不同步）。
 

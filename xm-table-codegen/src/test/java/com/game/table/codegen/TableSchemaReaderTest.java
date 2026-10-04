@@ -7,6 +7,8 @@ import com.game.table.codegen.TableSchema.Kind;
 import com.game.table.codegen.TableSchema.Table;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.DescriptorProtos.DescriptorProto;
+import com.google.protobuf.DescriptorProtos.EnumDescriptorProto;
+import com.google.protobuf.DescriptorProtos.EnumValueDescriptorProto;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Label;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Type;
@@ -27,7 +29,8 @@ class TableSchemaReaderTest {
 
     private static final Map<String, Integer> MSG_EXT = Map.of("cfg_sheet", 1001, "cfg_source_file", 1002, "cfg_primary_key", 1003);
     private static final Map<String, Integer> FIELD_EXT = Map.of(
-            "cfg_owner", 2002, "cfg_key", 2005, "cfg_multi", 2006, "cfg_index", 2007, "cfg_fk", 2010, "cfg_gfk", 2011);
+            "cfg_owner", 2002, "cfg_key", 2005, "cfg_multi", 2006, "cfg_index", 2007, "cfg_fk", 2010, "cfg_gfk", 2011,
+            "cfg_tip_ref", 2009, "cfg_expr_type", 2012, "cfg_expr_param", 2013);
 
     @Test
     void readsKeysIndexesAndForeignKeys() {
@@ -113,6 +116,74 @@ class TableSchemaReaderTest {
     }
 
     @Test
+    void tipReferenceColumns() {
+        FileDescriptorProto tips = FileDescriptorProto.newBuilder().setName("tip/x_error_tip.proto")
+                .addEnumType(EnumDescriptorProto.newBuilder().setName("x_error")
+                        .addValue(EnumValueDescriptorProto.newBuilder().setName("kXOK").setNumber(0))
+                        .addValue(EnumValueDescriptorProto.newBuilder().setName("kXBad").setNumber(1003)))
+                .build();
+        FileDescriptorProto struct = FileDescriptorProto.newBuilder().setName("state.proto")
+                .addMessageType(DescriptorProto.newBuilder().setName("Statestate")
+                        .addField(field("state_mode", 1, Type.TYPE_UINT32, false))
+                        .addField(field("state_tip", 2, Type.TYPE_UINT32, false)))
+                .build();
+        FileDescriptorSet set = set(table("Limiter",
+                field("id", 1, Type.TYPE_UINT32, false),
+                field("tip_message", 2, Type.TYPE_UINT32, false),
+                withBool(field("skill_type", 3, Type.TYPE_UINT32, true), "cfg_tip_ref"),
+                field("tooltip", 4, Type.TYPE_STRING, false),
+                field("Tip_Fixed", 5, Type.TYPE_FIXED32, false),
+                field("state", 6, Type.TYPE_MESSAGE, true).toBuilder().setTypeName(".Statestate").build()))
+                .toBuilder().addFile(tips).addFile(struct).build();
+
+        TableSchema schema = TableSchemaReader.read(set);
+
+        assertThat(schema.tipCodes()).containsExactly(0L, 1003L);
+        Table t = schema.table("Limiter").orElseThrow();
+        assertThat(t.tipRefs()).extracting(r -> r.label("Limiter"))
+                .as("名字含 tip 的整型列、显式 tip_ref、结构体里名字含 tip 的子列；字符串与 fixed32 不纳入")
+                .containsExactly("Limiter.tip_message", "Limiter.skill_type", "Limiter.state.state_tip");
+        assertThat(t.tipRefs().get(2).structType()).isEqualTo("Statestate");
+    }
+
+    @Test
+    void rejectsTipRefOnNonIntegerAndTipRefsWithoutTipEnums() {
+        assertThatThrownBy(() -> TableSchemaReader.read(set(table("Limiter", field("id", 1, Type.TYPE_UINT32, false),
+                withBool(field("msg", 2, Type.TYPE_STRING, false), "cfg_tip_ref")))))
+                .hasMessageContaining("cfg_tip_ref 只能标在整型列上");
+        assertThatThrownBy(() -> TableSchemaReader.read(set(table("Limiter", field("id", 1, Type.TYPE_UINT32, false),
+                field("tip_message", 2, Type.TYPE_UINT32, false)))))
+                .hasMessageContaining("无法校验");
+    }
+
+    @Test
+    void expressionColumns() {
+        TableSchema schema = TableSchemaReader.read(set(table("Buff", field("id", 1, Type.TYPE_UINT32, false),
+                withOpt(withOpt(withOpt(field("regen", 2, Type.TYPE_STRING, false), "cfg_expr_type", "double"),
+                        "cfg_expr_param", "level"), "cfg_expr_param", "health"),
+                withOpt(field("bonus", 3, Type.TYPE_STRING, false), "cfg_expr_type", "double"))));
+        assertThat(schema.table("Buff").orElseThrow().expressions())
+                .extracting(e -> e.field().name() + ":" + e.resultType() + ":" + e.params())
+                .containsExactly("regen:double:[level, health]", "bonus:double:[]");
+
+        assertThatThrownBy(() -> TableSchemaReader.read(set(table("Buff", field("id", 1, Type.TYPE_UINT32, false),
+                withOpt(field("regen", 2, Type.TYPE_UINT32, false), "cfg_expr_type", "double")))))
+                .hasMessageContaining("字符串标量列");
+        assertThatThrownBy(() -> TableSchemaReader.read(set(table("Buff", field("id", 1, Type.TYPE_UINT32, false),
+                withOpt(field("regen", 2, Type.TYPE_STRING, false), "cfg_expr_type", "int")))))
+                .hasMessageContaining("只支持 double");
+        assertThatThrownBy(() -> TableSchemaReader.read(set(table("Buff", field("id", 1, Type.TYPE_UINT32, false),
+                withOpt(field("regen", 2, Type.TYPE_STRING, false), "cfg_expr_param", "level")))))
+                .hasMessageContaining("没有 cfg_expr_type");
+        for (String bad : new String[] {"1level", "min", "le vel"}) {
+            assertThatThrownBy(() -> TableSchemaReader.read(set(table("Buff", field("id", 1, Type.TYPE_UINT32, false),
+                    withOpt(withOpt(field("regen", 2, Type.TYPE_STRING, false), "cfg_expr_type", "double"),
+                            "cfg_expr_param", bad))))).as(bad)
+                    .hasMessageContaining("cfg_expr_param");
+        }
+    }
+
+    @Test
     void noOptionsFileMeansNoTables() {
         FileDescriptorSet set = FileDescriptorSet.newBuilder()
                 .addFile(FileDescriptorProto.newBuilder().setName("x.proto")
@@ -160,7 +231,7 @@ class TableSchemaReaderTest {
 
     private static FieldDescriptorProto withOpt(FieldDescriptorProto f, String option, String value) {
         UnknownFieldSet merged = UnknownFieldSet.newBuilder(f.getOptions().getUnknownFields())
-                .addField(FIELD_EXT.get(option), lengthDelimited(value)).build();
+                .mergeField(FIELD_EXT.get(option), lengthDelimited(value)).build();
         return f.toBuilder().setOptions(FieldOptions.newBuilder().setUnknownFields(merged)).build();
     }
 

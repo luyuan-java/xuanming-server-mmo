@@ -1,10 +1,12 @@
 package com.game.table.codegen;
 
+import com.game.table.codegen.TableSchema.Expression;
 import com.game.table.codegen.TableSchema.Field;
 import com.game.table.codegen.TableSchema.ForeignKey;
 import com.game.table.codegen.TableSchema.Key;
 import com.game.table.codegen.TableSchema.Kind;
 import com.game.table.codegen.TableSchema.Table;
+import com.game.table.codegen.TableSchema.TipRef;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -41,15 +43,29 @@ final class TableSourceGenerator {
         Field pk = t.primaryKey();
         s.line("package " + pkg + ";");
         s.line();
+        boolean hasExpressions = !t.expressions().isEmpty();
+        if (hasExpressions) {
+            s.line("import " + LOAD_PKG + ".TableExpression;");
+        }
         s.line("import " + LOAD_PKG + ".TableIndexes;");
         s.line("import " + LOAD_PKG + ".TableLoadException;");
+        if (hasExpressions) {
+            s.line("import java.util.Collections;");
+        }
         s.line("import java.util.HashMap;");
+        if (hasExpressions) {
+            s.line("import java.util.IdentityHashMap;");
+        }
         s.line("import java.util.List;");
         s.line("import java.util.Map;");
         s.line("import java.util.NoSuchElementException;");
         s.line("import java.util.Optional;");
         s.line("import java.util.Set;");
         s.line("import java.util.TreeSet;");
+        if (hasExpressions) {
+            s.line("import java.util.concurrent.ThreadLocalRandom;");
+            s.line("import java.util.random.RandomGenerator;");
+        }
         s.line("import javax.annotation.processing.Generated;");
         s.line();
         s.line("/**");
@@ -74,10 +90,16 @@ final class TableSourceGenerator {
         for (Field f : t.indexes()) {
             s.line("private final Map<" + f.kind().boxed + ", List<" + row + ">> by" + f.pascal() + ";");
         }
+        for (Expression e : t.expressions()) {
+            s.line("/** 表达式列 {@code " + e.field().name() + "} 的参数（cfg_expr_param，按声明顺序）。 */");
+            s.line("private static final List<String> " + paramsConstant(e) + " = List.of(" + quotedList(e.params()) + ");");
+            s.line("/** 每行预编译好的 {@code " + e.field().name() + "} 公式（按行对象身份查）。 */");
+            s.line("private final Map<" + row + ", TableExpression> " + expressionsField(e) + ";");
+        }
         s.line();
 
-        // 构造：建键与索引，唯一键重复直接拒绝。
-        s.line("/** @throws TableLoadException 主键重复（主键没有声明 cfg_multi 时） */");
+        // 构造：建键与索引，唯一键重复直接拒绝；表达式列逐行预编译，编译失败直接拒绝。
+        s.line("/** @throws TableLoadException 主键重复（主键没有声明 cfg_multi 时）、表达式列编译失败 */");
         s.open(t.rowsClass() + "(List<" + row + "> rows)");
         s.line("this.rows = List.copyOf(rows);");
         s.line("Map<" + pk.kind().boxed + ", " + (t.multiPrimaryKey() ? "List<" + row + ">" : row) + "> byId = new HashMap<>();");
@@ -91,7 +113,14 @@ final class TableSourceGenerator {
         for (Field f : t.indexes()) {
             s.line("Map<" + f.kind().boxed + ", List<" + row + ">> by" + f.pascal() + " = new HashMap<>();");
         }
+        for (Expression e : t.expressions()) {
+            s.line("Map<" + row + ", TableExpression> " + expressionsField(e) + " = new IdentityHashMap<>();");
+        }
         s.open("for (" + row + " row : this.rows)");
+        for (Expression e : t.expressions()) {
+            s.line(expressionsField(e) + ".put(row, TableExpression.compile(SHEET, \"" + e.field().name() + "\", row." + pk.getter()
+                    + ", row." + e.field().getter() + ", " + paramsConstant(e) + "));");
+        }
         if (t.multiPrimaryKey()) {
             s.line("TableIndexes.add(byId, row." + pk.getter() + ", row);");
         } else {
@@ -132,6 +161,9 @@ final class TableSourceGenerator {
         for (Field f : t.indexes()) {
             String map = "by" + f.pascal();
             s.line("this." + map + " = TableIndexes.freeze(" + map + ");");
+        }
+        for (Expression e : t.expressions()) {
+            s.line("this." + expressionsField(e) + " = Collections.unmodifiableMap(" + expressionsField(e) + ");");
         }
         s.close();
         s.line();
@@ -190,8 +222,69 @@ final class TableSourceGenerator {
             s.line("return by" + f.pascal() + ".getOrDefault(key, List.of());");
             s.close();
         }
+        for (Expression e : t.expressions()) {
+            expressionAccessors(s, row, e);
+        }
+        if (!t.expressions().isEmpty()) {
+            s.line();
+            s.open("private static TableExpression expressionOf(Map<" + row + ", TableExpression> expressions, " + row
+                    + " row, String column)");
+            s.line("TableExpression expression = expressions.get(row);");
+            s.open("if (expression == null)");
+            s.line("throw new IllegalArgumentException(\"配置表 \" + SHEET + \" 的行不属于这份快照（表达式列 \" + column + \"）\");");
+            s.close();
+            s.line("return expression;");
+            s.close();
+        }
         s.close();
         return s.toString();
+    }
+
+    /** 表达式列的两个求值方法：缺省随机源（{@code random()} 用 ThreadLocalRandom）与注入随机源。 */
+    private static void expressionAccessors(Src s, String row, Expression e) {
+        String method = "eval" + e.field().pascal();
+        StringBuilder params = new StringBuilder();
+        StringBuilder args = new StringBuilder();
+        for (String p : e.params()) {
+            String name = javaName(p);
+            params.append(", double ").append(name);
+            args.append(args.isEmpty() ? "" : ", ").append(name);
+        }
+        String desc = "表达式列 {@code " + e.field().name() + "}（" + e.resultType()
+                + (e.params().isEmpty() ? "，无参数" : "；参数 " + String.join("、", e.params())) + "）";
+        s.line();
+        s.line("/** " + desc + "：按该行的公式求值（{@code random()} 用 ThreadLocalRandom）。 */");
+        s.open("public double " + method + "(" + row + " row" + params + ")");
+        s.line("return " + method + "(row" + (args.isEmpty() ? "" : ", " + args) + ", ThreadLocalRandom.current());");
+        s.close();
+        s.line();
+        s.line("/** " + desc + "：按该行的公式求值，{@code random()} 取 {@code random}。 */");
+        s.open("public double " + method + "(" + row + " row" + params + ", RandomGenerator random)");
+        s.line("return expressionOf(" + expressionsField(e) + ", row, \"" + e.field().name() + "\").evaluate(new double[] {" + args
+                + "}, random);");
+        s.close();
+    }
+
+    private static String paramsConstant(Expression e) {
+        return e.field().name().toUpperCase(java.util.Locale.ROOT) + "_PARAMS";
+    }
+
+    private static String expressionsField(Expression e) {
+        return JavaNames.underscoresToCamelCase(e.field().name(), false) + "Expressions";
+    }
+
+    private static String quotedList(java.util.List<String> values) {
+        StringBuilder sb = new StringBuilder();
+        for (String v : values) {
+            sb.append(sb.isEmpty() ? "" : ", ").append('"').append(v).append('"');
+        }
+        return sb.toString();
+    }
+
+    private static String javaName(String param) {
+        String camel = JavaNames.underscoresToCamelCase(param, false);
+        return JavaNames.SourceVersionKeywords.isKeyword(camel) || camel.equals("row") || camel.equals("random")
+                ? camel + "Value" : camel;
     }
 
     // ---------------------------------------------------------------- ConfigTables
@@ -202,6 +295,7 @@ final class TableSourceGenerator {
         s.line();
         s.line("import " + LOAD_PKG + ".ForeignKeyProblems;");
         s.line("import " + LOAD_PKG + ".TableSource;");
+        s.line("import " + LOAD_PKG + ".TipReferenceProblems;");
         s.line("import java.nio.file.Path;");
         s.line("import java.util.HashSet;");
         s.line("import java.util.LinkedHashMap;");
@@ -224,6 +318,12 @@ final class TableSourceGenerator {
             names.append(names.isEmpty() ? "" : ", ").append('"').append(t.sheet()).append('"');
         }
         s.line("public static final Set<String> SHEETS = Set.of(" + names + ");");
+        s.line("/** 合法 tip 码（同步来的 tip/*.proto 全部枚举值，含 0），升序；表内 tip 引用列按它校验。 */");
+        StringBuilder codes = new StringBuilder();
+        for (long code : schema.tipCodes()) {
+            codes.append(codes.isEmpty() ? "" : ", ").append(code).append('L');
+        }
+        s.line("private static final long[] TIP_CODES = {" + codes + "};");
         s.line();
         for (Table t : schema.tables()) {
             s.line("private final " + t.rowsClass() + " " + t.accessor() + ";");
@@ -249,6 +349,9 @@ final class TableSourceGenerator {
         s.line("ForeignKeyProblems problems = new ForeignKeyProblems();");
         s.line("tables.checkForeignKeys(problems);");
         s.line("problems.throwIfAny();");
+        s.line("TipReferenceProblems tipProblems = new TipReferenceProblems(TIP_CODES);");
+        s.line("tables.checkTipReferences(tipProblems);");
+        s.line("tipProblems.throwIfAny();");
         s.line("return tables;");
         s.close();
         s.line();
@@ -269,8 +372,50 @@ final class TableSourceGenerator {
         s.close();
         s.line();
         foreignKeyChecks(s, schema);
+        s.line();
+        tipReferenceChecks(s, schema);
         s.close();
         return s.toString();
+    }
+
+    private static void tipReferenceChecks(Src s, TableSchema schema) {
+        s.line("/**");
+        s.line(" * 表内 tip 引用（整型列标了 cfg_tip_ref，或列名含 tip）：每个取值必须是 0 或一个当前活动的 tip 码");
+        s.line(" * （同导表器 enum_gen.py validate_tip_references；tip 码轴重排后表里的旧数字不能静默变成未知码）。");
+        s.line(" */");
+        s.open("private void checkTipReferences(TipReferenceProblems problems)");
+        for (Table t : schema.tables()) {
+            for (TipRef ref : t.tipRefs()) {
+                String label = ref.label(t.sheet());
+                String rowKey = "row." + t.primaryKey().getter();
+                Field f = ref.field();
+                s.open("for (" + t.rowClass() + " row : " + t.accessor() + ".all())");
+                if (ref.subField() == null) {
+                    emitTipCheck(s, label, rowKey, "row", f);
+                } else if (f.repeated()) {
+                    s.open("for (" + ref.structType() + " struct : row." + f.getter() + ")");
+                    emitTipCheck(s, label, rowKey, "struct", ref.subField());
+                    s.close();
+                } else {
+                    s.open("");
+                    s.line(ref.structType() + " struct = row." + f.getter() + ";");
+                    emitTipCheck(s, label, rowKey, "struct", ref.subField());
+                    s.close();
+                }
+                s.close();
+            }
+        }
+        s.close();
+    }
+
+    private static void emitTipCheck(Src s, String label, String rowKey, String receiver, Field f) {
+        if (f.repeated()) {
+            s.open("for (" + f.kind().primitive + " value : " + receiver + "." + f.getter() + ")");
+            s.line("problems.check(\"" + label + "\", " + rowKey + ", value);");
+            s.close();
+        } else {
+            s.line("problems.check(\"" + label + "\", " + rowKey + ", " + receiver + "." + f.getter() + ");");
+        }
     }
 
     private static void foreignKeyChecks(Src s, TableSchema schema) {
