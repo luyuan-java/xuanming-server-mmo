@@ -33,6 +33,15 @@
         </dependency>
         <dependency>
             <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 热关停的规则条数 / 同步失败 / 短路次数指标 -->
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
             <artifactId>xm-api</artifactId>
             <scope>test</scope>
         </dependency>

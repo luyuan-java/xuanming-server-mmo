@@ -18,6 +18,7 @@ import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionDirective;
 import com.game.api.proto.ToClient;
 import com.game.api.proto.UnbindPlayer;
+import com.game.common.killswitch.KillSwitch;
 import com.game.common.token.GateTokens;
 import com.game.gate.metrics.GateMetrics;
 import com.game.proto.ClientRequest;
@@ -537,6 +538,40 @@ class ClientDispatcherTest {
         ch.runPendingTasks();
         assertThat(friend.calls).hasSize(2);
         assertThat(friend.calls.get(1).getSession().getPlayerId()).as("按入队时的身份转发").isEqualTo(PLAYER);
+    }
+
+    @Test
+    void 热关停_命中规则回信封1003不转发_精确规则可豁免_规则清空后恢复() {
+        KillSwitch killSwitch = new KillSwitch(-1, System::nanoTime);
+        KillSwitch.installGlobal(killSwitch);
+        try {
+            EmbeddedChannel ch = verified();
+            // 测试路由的方法名是消息号本身（全路径 /234），规则键用它；生产路由是 /friendpb.ClientPlayerFriend/AddFriend
+            killSwitch.setRules(Map.of("*", new KillSwitch.Rule(true, "止血", 0)));
+            ch.writeInbound(request(1, FRIEND_MSG, "a"));
+            MessageContent reply = ch.readOutbound();
+            assertThat(reply.getMessageId()).isEqualTo(FRIEND_MSG);
+            assertThat(reply.getId()).isEqualTo(1);
+            assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+            assertThat(friend.calls).isEmpty();
+            assertThat(requests("friend", FRIEND_MSG, "killed")).isEqualTo(1);
+
+            // 精确规则 deny=false 把自己从服务通配里豁免出来
+            killSwitch.setRules(Map.of("*", new KillSwitch.Rule(true, "", 0),
+                    Integer.toString(FRIEND_MSG), new KillSwitch.Rule(false, "", 0)));
+            ch.writeInbound(request(2, FRIEND_MSG, "b"));
+            assertThat(friend.calls).hasSize(1);
+            friend.complete(ClientReply.getDefaultInstance());
+            ch.runPendingTasks();
+            ch.readOutbound();
+
+            killSwitch.setRules(Map.of());
+            ch.writeInbound(request(3, FRIEND_MSG, "c"));
+            assertThat(friend.calls).hasSize(2);
+            assertThat(ch.isOpen()).as("被关停不算非法包").isTrue();
+        } finally {
+            KillSwitch.installGlobal(null);
+        }
     }
 
     @Test

@@ -17,6 +17,7 @@ import com.game.robot.scenario.DrainScenario;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.FriendScenario;
 import com.game.robot.scenario.GuardScenario;
+import com.game.robot.scenario.KillSwitchScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.QueueScenario;
@@ -105,6 +106,13 @@ public final class RobotMain {
                             AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
                             new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), options.zoneId());
                     title = "xm-robot queue：区 " + options.zoneId() + "，" + target + " data=" + options.dataUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.KILLSWITCH) {
+                    KillSwitchScenario scenario = new KillSwitchScenario(flow, new AdminClient(options.dataUrl(),
+                            AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()), registry,
+                            options.accountPrefix(), options.runTag());
+                    title = "xm-robot killswitch：" + scenario.account() + "，" + target + " data=" + options.dataUrl();
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.CHAT) {

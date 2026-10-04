@@ -32,7 +32,8 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
     /** 指标的 op 标签只取已知接口（任意路径不得变成标签值，否则可被刷成高基数）。 */
     private static final Map<String, String> KNOWN_OPS = Map.of(
             AuditQueryController.TRANSACTION_LOG_PATH, "transaction_log",
-            AuditQueryController.PLAYER_SNAPSHOTS_PATH, "player_snapshots");
+            AuditQueryController.PLAYER_SNAPSHOTS_PATH, "player_snapshots",
+            KillSwitchAdminController.PATH, "killswitch");
 
     private final byte[] token;
     private final DataMetrics metrics;

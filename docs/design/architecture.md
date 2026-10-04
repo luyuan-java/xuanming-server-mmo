@@ -403,6 +403,26 @@ mmorpg：`go/chat`（v1：世界频道 + 私聊）。Java 版是独立进程 xm-
 - **错误语义同基线**：业务结果全部 in-band（tip 不带参数）；会话没绑定玩家回 in-band 1005（chat 的会话拦截器放行到逻辑层）；
   队伍 / 系统 / 未指定频道 1006；Redis 故障 1003。处理全程异步（只发 Redis 异步命令），不占 Dubbo 线程、不需要工作线程池。
 
+### 4.15 按方法热关停（运维止血阀）
+
+mmorpg：`go/shared/killswitch`（etcd `/mmorpg/killswitch/<规则键>`，各 Go 服务的 gRPC 拦截器）。Java 版：
+
+- **规则源**：Redis 哈希 `xm:killswitch`（字段 = 规则键，值 = 规则），经 xm-data 运维接口 `GET / PUT / DELETE /admin/killswitch` 读写（带令牌、进审计日志）。
+  打开 `xm.killswitch.enabled` 的进程（gate / login / scene-manager / friend / chat）每秒全量读一次（`RedisKillSwitchSync`），
+  整份替换进程内快照（`com.game.common.killswitch.KillSwitch`，原子引用，热路径只读）。字段名经 `KillSwitch.normalizePattern`
+  去首尾空白与开头的斜杠（读规则、运维接口写 / 删都用它；几个原始字段规范化后同名时规范形字段胜出、记 ERROR；DELETE 把同名的原始字段全删）；
+  值同基线：空 = 放行，JSON `{"deny":bool,"reason":"…","code":0–16}`（顶层值之后还有内容算写坏），或 true / 1 / on / deny / yes 与
+  false / 0 / off / no / allow；写坏的值整条忽略、打 ERROR。
+- **失联**：读失败保留上一份快照；距上次成功同步超过 `xm.killswitch.stale-after`（缺省 60 s）整份作废、全放行（同基线 fail-open：止血阀不能变成停服开关）。
+- **匹配**（同基线顺序，首个命中即定）：`pkg.Service/Method` → `Service/Method` → `pkg.Service/*` → `Service/*` → `*`；精确规则写 `deny=false` 可以把自己从通配里豁免。
+- **两处检查**：
+  - gate 按客户端方法查（`/friendpb.ClientPlayerFriend/AddFriend` 这种全名，由消息号路由表带出），位置在体积 / 限频 / GM 闸之后、转发之前，
+    对 login / scene / friend / chat 全部客户端方法生效；命中回信封 1003、不计非法包、结果计 `killed`。
+  - Dubbo 提供方过滤器（`KillSwitchProviderFilter`，在鉴权之前）按本仓库接口方法查（`com.game.api.SceneDirectoryService/assign`、
+    `AccountLoginService/*`，方法名区分大小写），命中抛 `RpcException(FORBIDDEN)`、不进业务。**不查 `ClientMessageService.handle`**：
+    那是 gate 转发客户端消息的通道，客户端方法已在 gate 上查过；再按它查一次，全局 `*` 会把 gate 已精确豁免的客户端方法再拦下来。
+- **指标**：`xm_killswitch_rules`、`xm_killswitch_sync_failures_total`、`xm_killswitch_blocked_total{method}`（方法名来自路由表 / 接口定义，有界）。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -643,7 +663,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | gate | `xm_gate_sessions_active` | Gauge | — | 当前会话数（含未握手、正在收尾的） |
 | gate | `xm_gate_scene_links` | Gauge | — | 到各 scene 节点的链路数（建链中 + 就绪） |
 | gate | `xm_gate_handshakes_total` | Counter | `result`=ok / bad_signature / bad_payload / wrong_gate / wrong_zone / expired / timeout / missing | 令牌握手结果（missing = 没握手就发业务包） |
-| gate | `xm_gate_client_requests_total` | Counter | `route`=login / scene / unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / gm_rejected / overflow / dropped | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。C++ 的「非法包」= unknown_message + oversized + rate_limited + gm_rejected；限频拒绝 = rate_limited |
+| gate | `xm_gate_client_requests_total` | Counter | `route`=login / scene / unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / gm_rejected / killed / overflow / dropped | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。C++ 的「非法包」= unknown_message + oversized + rate_limited + gm_rejected；限频拒绝 = rate_limited |
 | gate | `xm_gate_client_invalid_frames_total` | Counter | `reason`=invalid_length / checksum / invalid_name_len / unknown_type / parse | 解码层非法帧（随即断开） |
 | gate | `xm_gate_disconnects_total` | Counter | `reason`=handshake_timeout / handshake_rejected / no_handshake / illegal_packets / pending_overflow / write_buffer_full / invalid_frame / session_id_exhausted / server_directive / kicked / scene_link_down / server_kick | gate 主动断开的连接（客户端自己断开、停服 / 丢租约的批量关闭不计） |
 | gate | `xm_gate_pushes_total` | Counter | `kind`=message / kick，`result`=delivered / no_session / not_bound / stale_instance / invalid | 服务端推送（§4.3）对每个目标会话的结局：已下发 / 会话号已不存在 / 会话不在游戏里或玩家对不上（栅栏）/ 指向别的 gate 实例 / 格式不对 |
@@ -672,6 +692,9 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | chat | `xm_chat_sends_total`、`xm_chat_pulls_total` | Counter | `channel`=world / private / team / system / unspecified / unknown，`outcome`=ok / duplicate / in_flight / no_session / bad_request / channel_unavailable / too_long / rate_limited / storage_error | 发言 / 拉取的结局（同基线 chat_send_total / chat_pull_total，全部组合启动即注册） |
 | chat | `xm_chat_requests_seconds` | Timer | `method`=SendChat / PullChatHistory / unrouted，`result`=ok / business_error / internal_error / bad_request / unsupported | 每个客户端请求的耗时与结果 |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
+| 开了热关停的进程 | `xm_killswitch_rules` | Gauge | — | 当前生效的规则条数（快照作废后为 0） |
+| 开了热关停的进程 | `xm_killswitch_sync_failures_total` | Counter | — | 从 Redis 读规则失败的次数（§4.15） |
+| 开了热关停的进程 | `xm_killswitch_blocked_total` | Counter | `method`=被拒的方法（gate：客户端 服务.方法；Dubbo：接口短名/方法） | 被热关停拒绝的调用 |
 | gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 100 / 400 / 404 / 410 / 429 / 500 / 503，`reason`=ok / queueing（登录排队）/ ratelimit（限流排队）/ 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；16 个已知组合启动即注册（`xm_gateway_queue_status_total` 同形，8 个） |
 | gateway | `xm_gateway_queue_admits_total` | Counter | — | 登录排队放行的人数（只有拿到选主锁的那个 gateway 在放行，见「登录排队」） |
 | gateway | `xm_gateway_login_total` | Counter | `endpoint`=login / refresh，`code`=0 / 100 / 401 / 429 / 500 | HTTP 登录 / 刷新令牌的结局（应答体业务码；100 / 429 只有 login 会出现）；8 个已知组合启动即注册 |

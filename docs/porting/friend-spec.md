@@ -1440,7 +1440,7 @@ DELETE FROM friend_capacity WHERE player_id = ? AND friend_count = 0 AND created
 | 请求体解析失败 | 信封 1003（gRPC Internal 经路由服翻译） | 建议 `tip_id=1003`，与基线对齐；login 的惯例是 1014（`ClientMessageDispatcher.java:170-178`），见 D11 | 信封 |
 | 工作队列满 | 无直接对应（预算到期 → in-band 1003） | in-band 1003 应答体 | 回包 |
 | friend 超时或不可用 | 信封 1003（路由服） | Dubbo future 异常 | gate 推 23{1003}，与 login 同形（`ClientDispatcher.java:326-328`），这是已有差异 |
-| killswitch | 信封 1003 | Java 没有对应机制 | — |
+| killswitch | 信封 1003 | gate 按客户端方法查（批次 1.3 补上，见 architecture.md §4.15） | 信封 1003 |
 | 超频 | 信封 1008 | — | gate 拦截，计非法包（`ClientDispatcher.java:204-211`） |
 | 包体超过 1 KB | 信封 1010 | — | gate 拦截（`ClientDispatcher.java:198-203`） |
 

@@ -46,8 +46,10 @@ class MessageRoutesTest {
     @Test
     void 进场后的客户端消息路由到scene域() {
         int listSkills = registry.requireId("SceneSkillClientPlayer", "ListSkills");
-        assertThat(routes.clientRoute(listSkills)).isEqualTo(new MessageRoute(listSkills, ClientDispatcher.DOMAIN_SCENE,
-                true, "SceneSkillClientPlayer.ListSkills"));
+        MessageRoute route = routes.clientRoute(listSkills);
+        assertThat(route).isEqualTo(new MessageRoute(listSkills, ClientDispatcher.DOMAIN_SCENE, true,
+                "SceneSkillClientPlayer.ListSkills", false, route.rpcPath()));
+        assertThat(route.rpcPath()).endsWith("SceneSkillClientPlayer/ListSkills").startsWith("/");
     }
 
     @Test
@@ -64,7 +66,7 @@ class MessageRoutesTest {
     void 好友服务路由到friend域_推送方法也在白名单里由后端拒() {
         int addFriend = registry.requireId("ClientPlayerFriend", "AddFriend");
         assertThat(routes.clientRoute(addFriend)).isEqualTo(new MessageRoute(addFriend, DubboGroups.FRIEND, true,
-                "ClientPlayerFriend.AddFriend"));
+                "ClientPlayerFriend.AddFriend", false, "/friendpb.ClientPlayerFriend/AddFriend"));
         // 235 NotifyFriendEvent 是 S2C 推送，与 C2S 同处一个服务：gate 照样转给 friend 后端，由后端按方法拒（回 1003）
         int notify = registry.requireId("ClientPlayerFriend", "NotifyFriendEvent");
         assertThat(routes.clientRoute(notify).domain()).isEqualTo(DubboGroups.FRIEND);
@@ -74,7 +76,8 @@ class MessageRoutesTest {
     @Test
     void 聊天服务路由到chat域() {
         int send = registry.requireId("ClientPlayerChat", "SendChat");
-        assertThat(routes.clientRoute(send)).isEqualTo(new MessageRoute(send, DubboGroups.CHAT, true, "ClientPlayerChat.SendChat"));
+        assertThat(routes.clientRoute(send)).isEqualTo(new MessageRoute(send, DubboGroups.CHAT, true, "ClientPlayerChat.SendChat",
+                false, "/chatpb.ClientPlayerChat/SendChat"));
     }
 
     @Test

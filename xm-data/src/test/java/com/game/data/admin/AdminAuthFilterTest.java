@@ -104,6 +104,7 @@ class AdminAuthFilterTest {
         assertThat(AdminAuthFilter.opOf("/admin/zonesX")).isEqualTo("other");
         assertThat(AdminAuthFilter.opOf("/admin/gates/drain/1/3")).isEqualTo("gates");
         assertThat(AdminAuthFilter.opOf("/admin/gatesX")).isEqualTo("other");
+        assertThat(AdminAuthFilter.opOf("/admin/killswitch")).isEqualTo("killswitch");
         assertThat(AdminAuthFilter.printable("/admin/whitelist/1/a\nforged")).isEqualTo("/admin/whitelist/1/a?forged");
         assertThat(AdminAuthFilter.printable(null)).isNull();
     }

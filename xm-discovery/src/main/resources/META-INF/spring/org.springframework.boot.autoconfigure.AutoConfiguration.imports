@@ -1,1 +1,2 @@
 com.game.discovery.RedisAutoConfiguration
+com.game.discovery.killswitch.KillSwitchAutoConfiguration

@@ -1,2 +1,3 @@
 xmAuthConsumer=com.game.api.auth.DubboAuthConsumerFilter
 xmAuthProvider=com.game.api.auth.DubboAuthProviderFilter
+xmKillSwitchProvider=com.game.api.killswitch.KillSwitchProviderFilter

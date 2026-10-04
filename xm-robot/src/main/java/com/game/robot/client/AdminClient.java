@@ -68,6 +68,11 @@ public final class AdminClient {
         return send("DELETE", pathAndQuery);
     }
 
+    /** PUT 一个 JSON 请求体（热关停规则）。 */
+    public JsonNode put(String path, String jsonBody) throws RobotException {
+        return send("PUT", path, HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8));
+    }
+
     /** POST 一个 JSON 请求体（区服目录 / 公告 / 白名单的运维接口）。 */
     public JsonNode post(String path, String jsonBody) throws RobotException {
         return send("POST", path, HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8));
@@ -89,7 +94,6 @@ public final class AdminClient {
                 return null;
             }
             if (response.statusCode() != 200) {
-
                 throw new RobotException("xm-data 运维接口 " + method + " " + pathAndQuery + " 返回 "
                         + response.statusCode() + "：" + response.body());
             }

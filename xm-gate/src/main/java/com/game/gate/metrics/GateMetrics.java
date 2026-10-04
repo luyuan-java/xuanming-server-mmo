@@ -97,6 +97,8 @@ public final class GateMetrics {
         RATE_LIMITED,
         /** GM 类指令而运行模式不是 dev / test：推 23 {1006}，计非法包，不转发。 */
         GM_REJECTED,
+        /** 命中热关停规则：回信封 1003（同基线经路由服看到的形状），不转发、不计非法包。 */
+        KILLED,
         /** 会话排队请求超限：断开。 */
         OVERFLOW,
         /** 会话已在关闭，排队中或迟到的请求被丢弃。 */

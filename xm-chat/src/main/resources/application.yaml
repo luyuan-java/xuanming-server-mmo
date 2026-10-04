@@ -33,6 +33,9 @@ management:
       application: ${spring.application.name}
 
 xm:
+  # 按方法热关停（运维止血阀）：每秒全量读 Redis 哈希 xm:killswitch；失联超过 60 s 整体放行（fail-open）
+  killswitch:
+    enabled: true
   advertise-host: 127.0.0.1
   redis:
     address: redis://127.0.0.1:6379

@@ -15,6 +15,7 @@ import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
+import com.game.common.killswitch.KillSwitch;
 import com.game.common.token.GateTokens;
 import com.game.gate.link.SceneLinks;
 import com.game.gate.metrics.GateMetrics;
@@ -37,6 +38,7 @@ import java.time.InstantSource;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -241,6 +243,16 @@ public final class ClientDispatcher {
             s.send(tip(TIP_FEATURE_UNAVAILABLE));
             countRequest(route, RequestResult.GM_REJECTED);
             registerIllegal(s, "gm_rejected", request.getMessageId());
+            return;
+        }
+        Optional<KillSwitch> killSwitch = KillSwitch.global();
+        if (killSwitch.isPresent() && killSwitch.get().blocked(route.rpcPath()).isPresent()) {
+            // 热关停（运维止血阀）：在限频之后、转发之前（同基线：gate 先按消息号限频，服务端拦截器再短路）；
+            // 客户端看到的是信封 1003，与基线经路由服看到的一致；不计非法包
+            log.debug("方法被热关停，拒绝 session={} method={}", sid(s), route.method());
+            killSwitch.get().recordBlocked(route.method());
+            countRequest(route, RequestResult.KILLED);
+            s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
             return;
         }
         ClientMessageService backend = backends.get(route.domain());

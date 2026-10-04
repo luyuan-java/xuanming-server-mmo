@@ -129,6 +129,14 @@ public final class RedisKeys {
         return PREFIX + "chat:{rl:" + Long.toUnsignedString(playerId) + "}";
     }
 
+    /**
+     * 热关停规则 {@code xm:killswitch}（哈希：字段 = 规则键 {@code pkg.Service/Method}、{@code Service/*}、{@code *}，值 = 规则；
+     * 各进程每秒全量读一次，见 {@code RedisKillSwitchSync}）。运维经 xm-data 的 {@code /admin/killswitch} 写。
+     */
+    public static String killSwitch() {
+        return PREFIX + "killswitch";
+    }
+
     /** 登录排队：区的队列 {@code xm:login-queue:{zone}}，ZSET（成员 = 排队号，分数 = 入队毫秒）。xm-gateway 读写。 */
     public static String loginQueue(int zoneId) {
         return PREFIX + "login-queue:" + zoneId;

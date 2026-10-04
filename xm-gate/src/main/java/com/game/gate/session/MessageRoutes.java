@@ -39,7 +39,8 @@ public interface MessageRoutes {
         for (MessageMethod method : registry.all()) {
             if (method.clientService()) {
                 table.put(method.messageId(), new MessageRoute(method.messageId(), backendOf(method), hasResponse(method),
-                        method.serviceName() + "." + method.methodName(), method.gmCommand()));
+                        method.serviceName() + "." + method.methodName(), method.gmCommand(),
+                        "/" + method.method().getService().getFullName() + "/" + method.methodName()));
             }
         }
         Map<Integer, MessageRoute> frozen = Map.copyOf(table);

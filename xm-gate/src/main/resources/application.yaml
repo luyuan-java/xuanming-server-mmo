@@ -34,6 +34,9 @@ management:
       application: ${spring.application.name}
 
 xm:
+  # 按方法热关停（运维止血阀）：每秒全量读 Redis 哈希 xm:killswitch；失联超过 60 s 整体放行（fail-open）
+  killswitch:
+    enabled: true
   zone-id: 1
   # 运行模式：只有 dev / test 放行 GM 类客户端指令（Gm* / Debug* / Test*），其余一律按 prod 拒绝
   run-mode: ${XM_RUN_MODE:prod}
