@@ -83,7 +83,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - java: partial — `xm-player-store` 的 `player` 表只有 class_id / gender / appearance_id / level / scene_config_id / pos_x,y,z（`xm-player-schema.sql`、`PlayerSave` 只写 level + 场景 + 坐标）；朝向、技能、属性、背包、货币等全无存储位置。需要设计可扩展的玩家数据载体（按系统分表或 proto blob 列）并保证同事务落盘。
 - size: L
 - robot: MovementScenario 重登核对坐标
-- hazards: 基线 class_id 未随 PlayerAllData 下发，初值与 ResolveClassRow 一律取 Class 表首行；角色名副本只读不写。Java 若拆多表必须在一个事务里与 owner_epoch 围栏一起写，否则重现「资产落了账本没落」。
+- hazards: 基线新号初值与阵亡回满硬编码取 Class 表首行（player_database_loader.cpp:44），ResolveClassRow 按真实 class_id 取行（Go player_class_backfill.go 回填）；角色名副本只读不写。Java 若拆多表必须在一个事务里与 owner_epoch 围栏一起写，否则重现「资产落了账本没落」。
 
 ### player-exit-save — 离场：停运动、摘场景、写回、收敛后销毁
 - mmorpg: player_lifecycle.cpp（HandleExitGameNode / FinishExitAfterPersist / StopMotionForExit / DetachFromScene / DestroyPlayer）、player_exit_intent.h、handler/rpc/player/player_lifecycle_handler.cpp（9 ExitGame）、s2s_player_scene_handler.cpp（69 LeaveScene）
@@ -308,7 +308,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: player-class, player-level, player-persistent-data-model
 - behavior: 六项（气血上限 / 法力上限 / 物攻 / 法攻 / 速度 / 防御）= 职业初值 + Σ(自然成长×等级 + 外部加成)×每点系数 + 已分配点按百分比公式（标准基础 = 职业初值 + 自然成长×85 级；增量 = 标准×比例×E(n)÷d）；max_health 至少 1；速度直写 BaseAttributes.speed、护甲每次按 Class.init_armor 直写；当前 HP/MP：升级按绝对增量补、降级只夹，其余（加载 / 加点 / 切方案 / 洗点）按比例保持（活着至少留 1，防「改属性当治疗」）；加载与等级变化时先收敛「已分配 > 总量」（整池清零返还）。
 - internal: 宝宝共用同一套纯规则（PetSystem）；DerivedAttributesComp 不落库，每次登录重算。
-- java: done（2026-10-03，批次 2.2）— `AttributeService.recalculate` / 纯规则 `AttributeRules`，同序累加逐值一致（真实配表单测）；当前气血 / 法力不持久化、进场回满（2.7 再持久化）。
+- java: done（2026-10-03，批次 2.2）— `AttributeService.recalculate` / 纯规则 `AttributeRules`，同序累加逐值一致（真实配表单测）；当前气血 / 法力 2.7 起落 `player_state.vitals`（满血满蓝不写），加载按新上限往下夹、阵亡 / 无记录回满（architecture.md §4.10、PARITY「死亡 / 复活」行）。
 - size: M
 - robot: attribute_smoke（基线）
 - hazards: 登录时 oldMax=0，补增量分支进不去，需靠 TopUpToDerivedMax 回满阵亡玩家；浮点 floor 取整，Java 用 double 同序累加才能逐值一致。
@@ -378,9 +378,9 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - client messages: 21 / 47 ActorCreateS2C.class_id（S2C push）；14 CreatePlayer.class_id（login）
 - tables: Class（skill×3、init_health / mana / strength / armor / resistance / critchance / speed）、AttributeAllocRatio、AttributeAutoPlan
 - depends on: none
-- behavior: class_id 存在 PlayerUint32Comp.class；属性重算、自动加点按职业取行，取不到退回 Class 首行；新号初始基础属性与阵亡回满目前一律用 Class 首行（class_id 未随 PlayerAllData 打通）；不能转职。
+- behavior: class_id 存在 PlayerUint32Comp.class；属性重算、自动加点按职业取行，取不到退回 Class 首行；新号初始基础属性与阵亡回满硬编码用 Class 首行（player_database_loader.cpp Get(0)；class_id 本身已由 Go 回填进存档），登录复活随后再由 TopUpToDerivedMax 顶到按真实职业算出的上限；不能转职。
 - internal: none
-- java: partial — 建角选职业与校验在 xm-login（`TableCharacterRules.classExists`，0 取首行），`player.class_id` 落库，`ScenePlayer.classId` 进 21 / 47；无任何职业属性效果（属性系统未做）。
+- java: partial — 建角选职业与校验在 xm-login（`TableCharacterRules.classExists`，0 取首行），`player.class_id` 落库，`ScenePlayer.classId` 进 21 / 47；属性重算按真实 class_id 取行（`AttributeTables.classRow`，0 或查不到时退回首行，批次 2.2）；成长属性不存，用到时现算。
 - size: S
 - robot: robot_smoke（建角）
 - hazards: 基线「按首行」是临时口径，Java 若直接按真实 class_id 取行会与基线数值不同（Class 表各行初值目前相同，暂无差异）。
@@ -392,7 +392,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: player-class, derived-attribute-recalc, player-persistent-data-model
 - behavior: 首登授予 Class 表**全部职业**技能的并集（去重、跳过不存在的技能，持久化进技能列表）；每次加载删掉技能列表里表中已不存在 / 重复的技能；基础属性全 0（health/strength/speed 皆 0）= 新号按 Class 初值初始化，health==0 而成长属性在 = 阵亡，只回满 HP/MP 到二级属性上限；残血一律不动（残血带出战斗）；登录时抓一份登录快照供回档。
 - internal: ViewRadius=10 在建实体时挂。
-- java: partial — 技能 = `ConfigSceneTables.initialSkills()`（同样是全部职业技能并集，存在于 Skill 表），但不持久化、每次进场现算；无注册时间、无基础属性 / 复活、无登录快照、无任务初始化。
+- java: partial（2026-10-03，批次 2.7）— 技能 = `ConfigSceneTables.initialSkills()`（全部职业技能并集），不持久化、每次进场现算（PARITY 已登记）；登录快照有（`SceneWorld`）、任务索引初始化有（`MissionService.initializeOnLoad`）；注册时间对应 `player.created_at`（基线该值客户端不可见）；当前气血 / 法力持久化与加载复活见 PARITY「死亡 / 复活」行；成长属性不存（用到时现算），所以下面「判新号」的隐患在 Java 不存在
 - size: S
 - robot: robot_smoke（ListSkills 非空）
 - hazards: 判新号只看三项为 0，若某职业 init_strength / init_speed 配成 0 会把阵亡玩家当新号重置成长属性。
@@ -416,7 +416,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: attribute-sync-66, buff / combat_state（combat 区域）
 - behavior: 每帧在属性同步之前处理脏位：kMoveSpeed = Σ buff 加速 − 减速、下限 0，写 MoveSpeedComp（不碰运动矢量 Velocity；移速属性目前无 S2C 通道）；kCombatState = 把 CombatStateCollectionComp 的键投影成 CombatStateFlagsComp 并置 66 脏位（含 entity_id）；kHealth / kEnergy 为 TODO 空实现；冻结实体跳过。
 - internal: 位图脏标记组件。
-- java: missing（移到路线图 2.7；当前数据下无客户端可见效果，见 PARITY「运行时属性重算位」行）— Java 66 只同步 transform / rotation / velocity（PARITY 属性同步行），无 buff / 战斗状态。
+- java: not_applicable（2026-10-03，批次 2.7）— 两版都未生效、不移植：kHealth / kEnergy 是空实现，移速没有读者，combat_state_flags 只由沉默 buff 驱动而玩家身上永远挂不上实时 buff（PARITY「运行时属性重算位」「实时 buff 框架与效果」行）。Java 66 只同步 transform / rotation / velocity
 - size: S
 - robot: none
 - hazards: 旧实现把移速 buff 灌进 Velocity 导致角色沿 (1,1,1) 漂移并落库（已修）；旧实现战斗状态三层皆错（死组件、不置脏位、值写 false）。

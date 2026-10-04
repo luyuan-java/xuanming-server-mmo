@@ -169,8 +169,8 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   算二级属性）。处理器需要按顺序先推一条再回应答时用 `PlayerCall.push`（信封 id 0，客户端按推送处理），例如 GM 设等级先推 170 面板。
   配置表在 Spring 里是一份不可变快照（`ConfigTables` bean），各玩法的视图（`SceneTables`、`AttributeTables`）都从它构建。
 - **属性加点**（`AttributeFeature` + `AttributeService`，规则同基线 `PlayerAttributeSystem`，纯规则在 `AttributeRules`）：
-  方案与已分配点存 `player_state.attribute`（只存非 0；从没动过的不写）；点数总量按等级与表现算，二级属性与当前气血 / 法力
-  不落库、每次加载重算（当前值进场回满：Java 版还没有伤害来源，持久化随路线图 2.7）。等级仍在 `player.level` 列，读存档时压回上限 85
+  方案与已分配点存 `player_state.attribute`（只存非 0；从没动过的不写）；点数总量按等级与表现算，二级属性
+  不落库、每次加载重算；当前气血 / 法力落 `player_state.vitals`（满血满蓝不写），进场按新上限往下夹，阵亡或没有记录的回满（§4.10）。等级仍在 `player.level` 列，读存档时压回上限 85
   （`PlayerLevels`）。写操作成功回全量面板、拒绝只回 tip；170 只在等级变化后推（基线唯一的推送点）。
 
 ### 4.5 资产审计管线（scene → Kafka → xm-data → MySQL）
@@ -285,7 +285,7 @@ mmorpg：`combat/skill/system/skill.cpp`（ReleaseSkill → CheckSkillPrerequisi
 - **配表视图 `SkillTables`**：技能行（类型位、目标方式位、能否打断、前摇 / 后摇 / 引导时长换成纳秒、冷却组）、冷却组时长、
   行为互斥表、战斗状态表、技能许可表。表是同步来的契约，加载只告警。
 - **运行态 `PlayerSkillState`**（挂在场景内的玩家实例上，不持久化，接管 / 重新进场即清空）：进行中的一次施法（阶段 + 截止时刻）、
-  冷却组开始时刻、行为状态、战斗状态（buff 写入，路线图 2.7）。
+  冷却组开始时刻、行为状态、战斗状态（只有实时 buff 会写，两版线上都恒空）。
 - **`SkillService.release`**：顺序同基线（技能存在且已拥有 → 目标 → 冷却 → 施法阶段 → 技能许可 → 行为互斥 → 战斗状态互斥），
   纯规则在 `SkillRules`。阶段**不起定时器**：截止时刻存在玩家身上，下次放技能时按截止时刻顺次结算（前摇 → 引导 → 后摇，
   每段从上一段的截止时刻起算），阶段进行中时新技能可打断则推 33 并取消旧施法，否则 7000。冷却、后摇、引导按设计意图生效
@@ -293,6 +293,16 @@ mmorpg：`combat/skill/system/skill.cpp`（ReleaseSkill → CheckSkillPrerequisi
   给施法者的顺序 33 → 70 → 84 应答。目标按场景实体号在本节点上找人（`SceneWorld.playerByEntity`，任意场景，同基线）。
 - **伤害**：纯公式 `com.game.common.combat.CombatDamageRules`（xm-common，实时与回合制共用）已移植；实时技能命中（伤害、效果 buff、
   死亡）两版都不生效，等气血同步、死亡复活一起设计。
+
+### 4.10 当前气血 / 法力与基础复活
+
+- **存储**：`player_state.vitals`（`Vitals{health, mana}`，uint64）。满血满蓝时不写，读回来没有这段就按上限回满——上限没被调高时
+  与写出结果一样，改表调高上限后满血玩家读档到新上限（基线保留旧绝对值，PARITY「死亡 / 复活」②）；新号与老存档也走这条；不满时写出。
+  二级属性（上限）仍每次加载重算，不落库；成长属性不存：护甲 / 速度同基线每次重算（速度取二级属性），力量 / 抗性 / 暴击用到时由职业表即时算出。
+- **加载**（`AttributeService.initializeOnLoad`）：存档值按新上限往下夹（旧上限视为 0，同基线 RescaleCurrent：活着的只夹不补），
+  再套纯规则 `PlayerRevive.reviveIfDead`：气血 0（阵亡或没有记录）→ 按上限回满；活着（含残血）不动。
+- **写入点**：今天只有属性重算会改当前值（升级补增量、其余按比例）；回合制战斗结算的回写与结算复活随 6.3，同用 `PlayerRevive`。
+  实时伤害两版都不可达，没有实时死亡状态。
 
 ## 5. 线程模型
 

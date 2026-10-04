@@ -40,7 +40,10 @@ public final class PlayerSkillState {
     private final Map<Integer, Long> cooldownStarts = new HashMap<>();
     /** 当前行为状态（基线 eActorState：0 战斗、1 跟随、2 骑乘），按编号升序遍历。 */
     private final TreeSet<Integer> actionStates = new TreeSet<>();
-    /** 当前战斗状态（基线 eActorCombatState：1 沉默）→ 来源 buff 号。由 buff（路线图 2.7）写入；2.6 恒空。 */
+    /**
+     * 当前战斗状态（基线 eActorCombatState：1 沉默）→ 来源 buff 号。只有实时 buff（沉默）会写，而基线实时 buff 线上从不挂到玩家身上，
+     * 两版都恒空（PARITY「实时 buff」行）；回合制战斗的沉默在引擎内另算（路线图 6.x）。
+     */
     private final TreeMap<Integer, Set<Long>> combatStates = new TreeMap<>();
 
     public Cast cast() {

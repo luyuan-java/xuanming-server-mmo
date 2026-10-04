@@ -24,6 +24,15 @@ message PlayerState {
   BagState bag = 4;
   // 任务（mmorpg QuestAllData 的 Java 自有对应；只有 scope 0 可操作，不存 scope 层）。
   MissionState mission = 5;
+  // 当前气血 / 法力（mmorpg BaseAttributesComp.health / mana 的 Java 自有对应；力量 / 护甲等成长属性不存，用到时由职业表即时算出）。
+  // 没有这段 = 满血满蓝（新号、2.7 之前的存档、或写盘那一刻正好满）：进场按上限回满，与基线新号回满同义。
+  Vitals vitals = 6;
+}
+
+// 当前气血 / 法力。health == 0 = 阵亡：进场按上限回满（基础复活）；活着的进场只按新上限往下夹，不补。
+message Vitals {
+  uint64 health = 1;
+  uint64 mana = 2;
 }
 
 // 背包（mmorpg BagAllData 的 Java 自有对应；基线的动态包没有生产创建点，不存）。

@@ -2,6 +2,7 @@ package com.game.scene.player;
 
 import com.game.player.store.state.AttributeScheme;
 import com.game.player.store.state.AttributeState;
+import com.game.player.store.state.Vitals;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -12,12 +13,13 @@ import java.util.Map;
 /**
  * 玩家的属性加点状态（只在场景逻辑线程上读写；规则在 {@code com.game.scene.attribute.AttributeService}，本类只存状态）。
  *
- * <p>落库的只有加点方案（{@code player_state.attribute}）；点数总量按等级与表实时换算，二级属性与当前气血 / 法力
- * 每次加载重算（{@link #derived()} 等不落库）。从没动过的状态（只有默认方案、没分配过点、没切换过）不写进存档，
+ * <p>落库的是加点方案（{@code player_state.attribute}）与当前气血 / 法力（{@code player_state.vitals}）；点数总量按等级与表实时换算，
+ * 二级属性每次加载重算（{@link #derived()} 不落库）。从没动过的状态（只有默认方案、没分配过点、没切换过）不写进存档，
  * 读回来仍是 {@link #empty()}——新号存档与以前一致，周期存盘的脏比对也不受影响。
  *
- * <p>当前气血 / 法力暂不持久化：Java 版还没有任何伤害来源，每次进场按上限回满（基线对新号 / 阵亡者同样回满），
- * 随死亡 / 复活批次（路线图 2.7）改为持久化。
+ * <p>当前气血 / 法力满血满蓝时不写（{@link #vitalsFull()}），读回来没有这段就按上限回满（{@link PlayerRevive}）——
+ * 上限没被调高时与写出结果一样，改表调高上限时满血玩家读到新上限（PARITY「死亡 / 复活」②）；
+ * 不满时写出，进场只按新上限往下夹（同基线 RescaleCurrent），阵亡（气血 0）回满。
  */
 public final class PlayerAttributes {
 
@@ -96,8 +98,11 @@ public final class PlayerAttributes {
 
     // ---- 不落库，每次加载重算
     private Derived derived = Derived.ZERO;
+    // ---- 当前气血 / 法力（uint64，读档时大于 2^63 的饱和到 Long.MAX_VALUE，反正都会被上限夹住）
     private long health;
     private long mana;
+    /** 存档里气血法力段本版本不认识的字段：原样带回。 */
+    private UnknownFieldSet vitalsUnknownFields = UnknownFieldSet.getDefaultInstance();
 
     private PlayerAttributes(List<Scheme> schemes, int activeSchemeId, int nextSchemeId, long lastSwitchTime,
                              UnknownFieldSet unknownFields) {
@@ -202,12 +207,12 @@ public final class PlayerAttributes {
         this.derived = derived;
     }
 
-    /** 当前气血（不落库）。 */
+    /** 当前气血。 */
     public long health() {
         return health;
     }
 
-    /** 当前法力（不落库）。 */
+    /** 当前法力。 */
     public long mana() {
         return mana;
     }
@@ -224,6 +229,29 @@ public final class PlayerAttributes {
     public boolean isPristine() {
         return schemes.size() == 1 && schemes.get(0).isDefault() && activeSchemeId == DEFAULT_SCHEME_ID
                 && nextSchemeId == DEFAULT_SCHEME_ID + 1 && lastSwitchTime == 0 && unknownFields.asMap().isEmpty();
+    }
+
+    /** 从存档恢复当前气血 / 法力（进场规整前；规整时按新上限夹、阵亡回满）。 */
+    public void restoreVitals(Vitals vitals) {
+        this.health = saturate(vitals.getHealth());
+        this.mana = saturate(vitals.getMana());
+        this.vitalsUnknownFields = vitals.getUnknownFields();
+    }
+
+    /**
+     * 满血满蓝且没有不认识的字段：持久化时省略这段，读回来按上限回满——上限不变或调低时与写出结果一样；
+     * 改表调高上限时会回满到新上限（写出则保留旧绝对值，PARITY「死亡 / 复活」②）。
+     */
+    public boolean vitalsFull() {
+        return health == derived.maxHealth() && mana == derived.maxMana() && vitalsUnknownFields.asMap().isEmpty();
+    }
+
+    public Vitals toVitals() {
+        return Vitals.newBuilder().setHealth(health).setMana(mana).setUnknownFields(vitalsUnknownFields).build();
+    }
+
+    private static long saturate(long unsigned) {
+        return unsigned < 0 ? Long.MAX_VALUE : unsigned;
     }
 
     public AttributeState toState() {

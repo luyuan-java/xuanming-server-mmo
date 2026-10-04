@@ -9,6 +9,7 @@ import com.game.common.RunMode;
 import com.game.player.store.state.AttributeScheme;
 import com.game.player.store.state.AttributeState;
 import com.game.player.store.state.PlayerState;
+import com.game.player.store.state.Vitals;
 import com.game.proto.AllocateAttributePointsRequest;
 import com.game.proto.AllocateAttributePointsResponse;
 import com.game.proto.AttributeDimensionInfo;
@@ -453,6 +454,45 @@ class AttributeFeatureTest {
         sink.clear();
         start(RunMode.DEV, 1, save.level(), save.state());
         assertThat(panel()).isEqualTo(before);
+    }
+
+    @Test
+    void 残血残蓝随离场写回_重新进场保留_0法力也保留() throws Exception {
+        start();
+        player().attributes().setHealth(100);
+        player().attributes().setMana(0);
+
+        world.onPlayerLeave(LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER).setVoluntary(true).build());
+        PlayerSave save = repo.saves().getLast();
+        assertThat(save.state().getVitals()).isEqualTo(Vitals.newBuilder().setHealth(100).setMana(0).build());
+
+        sink.clear();
+        start(RunMode.DEV, 1, save.level(), save.state());
+        assertThat(panel().getDerived().getHealth()).isEqualTo(100);
+        assertThat(panel().getDerived().getMana()).as("活着的只夹不补：0 法力仍是 0（同基线）").isZero();
+    }
+
+    @Test
+    void 满血满蓝不写气血段_读回来按上限回满() throws Exception {
+        start();
+        panel();
+
+        world.onPlayerLeave(LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER).setVoluntary(true).build());
+
+        assertThat(repo.saves().getLast().state().hasVitals()).isFalse();
+    }
+
+    @Test
+    void 阵亡存档进场回满_活着的超上限存档值夹到上限_uint64极大值不变负数() throws Exception {
+        start(RunMode.DEV, 1, 1, PlayerState.newBuilder().setVitals(Vitals.newBuilder().setHealth(0).setMana(5)).build());
+        DerivedAttributeInfo dead = panel().getDerived();
+        assertThat(dead.getHealth()).as("阵亡：基础复活回满").isEqualTo(dead.getMaxHealth());
+        assertThat(dead.getMana()).isEqualTo(dead.getMaxMana());
+
+        start(RunMode.DEV, 1, 1, PlayerState.newBuilder().setVitals(Vitals.newBuilder().setHealth(-1).setMana(99_999)).build());
+        DerivedAttributeInfo huge = panel().getDerived();
+        assertThat(huge.getHealth()).isEqualTo(huge.getMaxHealth());
+        assertThat(huge.getMana()).isEqualTo(huge.getMaxMana());
     }
 
     @Test

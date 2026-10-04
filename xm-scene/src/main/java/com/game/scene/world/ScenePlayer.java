@@ -57,7 +57,7 @@ public final class ScenePlayer {
     private final UnknownFieldSet unknownStateFields;
     /** 货币。 */
     private final Wallet wallet;
-    /** 属性加点（方案落库；二级属性与当前气血 / 法力由属性系统在加载时算出）。 */
+    /** 属性加点（方案落库；当前气血 / 法力不满时落 player_state.vitals，进场由属性系统按新上限夹取 / 复活；二级属性加载时算出）。 */
     private final PlayerAttributes attributes;
     /** 四个固定背包（存档原样收下，进场景前由背包服务按配表规整）。 */
     private final PlayerBags bags;
@@ -105,6 +105,9 @@ public final class ScenePlayer {
         this.unknownStateFields = state.getUnknownFields();
         this.wallet = state.hasCurrency() ? Wallet.restore(state.getCurrency()) : Wallet.empty();
         this.attributes = state.hasAttribute() ? PlayerAttributes.restore(state.getAttribute()) : PlayerAttributes.empty();
+        if (state.hasVitals()) {
+            attributes.restoreVitals(state.getVitals());
+        }
         this.bags = state.hasBag() ? PlayerBags.restore(state.getBag()) : PlayerBags.empty();
         this.missions = state.hasMission() ? PlayerMissions.restore(state.getMission()) : PlayerMissions.empty();
     }
@@ -289,6 +292,9 @@ public final class ScenePlayer {
         }
         if (!attributes.isPristine()) {
             state.setAttribute(attributes.toState());
+        }
+        if (!attributes.vitalsFull()) {
+            state.setVitals(attributes.toVitals());
         }
         if (!bags.isPristine()) {
             state.setBag(bags.toState());

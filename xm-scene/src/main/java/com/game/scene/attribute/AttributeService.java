@@ -14,6 +14,7 @@ import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerAttributes.Derived;
 import com.game.scene.player.PlayerAttributes.Scheme;
 import com.game.scene.player.PlayerLevels;
+import com.game.scene.player.PlayerRevive;
 import com.game.scene.player.Wallet;
 import com.game.scene.world.SceneClock;
 import com.game.scene.world.ScenePlayer;
@@ -100,7 +101,8 @@ public final class AttributeService {
 
     /**
      * 玩家实例建好后调用一次（进场与接管都会走到）：清掉表里已不存在的维度（改表后老存档自愈、点数返还）、
-     * 按当前等级收敛超量分配、算出二级属性，并把当前气血 / 法力回满（Java 版暂不持久化当前值，见 {@link PlayerAttributes}）。
+     * 按当前等级收敛超量分配、算出二级属性；当前气血 / 法力按新上限往下夹（存档值，登录时旧上限视为 0，同基线 RescaleCurrent），
+     * 阵亡或没有记录（新号 / 满血时不写）的按上限回满（基线 ApplyClassInitialAttributesOrRevive + TopUpToDerivedMax）。
      */
     public void initializeOnLoad(ScenePlayer player) {
         PlayerAttributes attributes = player.attributes();
@@ -112,14 +114,11 @@ public final class AttributeService {
             }
         }
         recalculate(player, RecalcReason.LOAD);
-        // 基线 TopUpToDerivedMax（新号 / 阵亡者加载后回满）
         Derived derived = attributes.derived();
-        if (derived.maxHealth() > 0) {
-            attributes.setHealth(derived.maxHealth());
-        }
-        if (derived.maxMana() > 0) {
-            attributes.setMana(derived.maxMana());
-        }
+        PlayerRevive.Result vitals = PlayerRevive.reviveIfDead(attributes.health(), attributes.mana(),
+                derived.maxHealth(), derived.maxMana());
+        attributes.setHealth(vitals.health());
+        attributes.setMana(vitals.mana());
     }
 
     // ------------------------------------------------------------------ 重算

@@ -105,7 +105,7 @@ mmorpg has two combat stacks. (1) Realtime combat in the scene (cpp/libs/service
 - depends on: table-expression-evaluator
 - behavior: AddOrUpdateBuff steps: entity valid → drop silently if frozen or in battle → row exists → immunity (any existing buff's immune_tag covers a tag of the new buff → 8001 kBuffTargetImmuneToBuff) → dispel existing buffs whose tag hits the new dispel_tag (a pure Dispel type-35 buff is consumed and not added) → same table and same processed_caster gives layer+1 up to max_layer, with refresh as a TODO → otherwise a new entry. duration>0 schedules an expiry timer; duration==0 expires immediately; infinite_duration keeps it. Sub-buffs are added to the holder; target_sub_buff goes to the other side. Periodic: per-frame accumulator, interval seconds, interval_count limit (0 = unlimited), at most 5 ticks per frame, re-lookup after each callback. Frozen entities are excluded from ticking.
 - internal: BuffListComp is a map buffId → entry. Buff ids come from an id generator. Buffs are not persisted in the baseline, though the battle snapshot reads them.
-- java: missing — none
+- java: not_applicable（2026-10-03，批次 2.7）— 基线生产里挂 buff 的入口只有 skill.cpp TriggerSkillEffect（技能上下文从不挂到玩家，不可达）与子 buff 递归，玩家身上永远没有实时 buff；不移植，PARITY「实时 buff 框架与效果」登记。回合制的 buff 镜像随 6.x
 - size: L
 - robot: none
 - hazards: Callbacks can re-enter and erase the current buff, so always re-look it up by id (several fixed C++ use-after-free bugs). OnBuffRefresh is a TODO, so duration is not reset on restack in realtime, while the turn engine does reset it. Buffs have no S2C at all, so this is invisible to clients. Current data: Skill.effect lists buff 1 eight times; buff 1 has duration 0 (instant) and dispel_tag Control, which matches its own tag.
@@ -117,7 +117,7 @@ mmorpg has two combat stacks. (1) Realtime combat in the scene (cpp/libs/service
 - depends on: realtime-buff-core; actor-action-combat-state
 - behavior: Silence (31): start/destroy fire CombatStateAdded/Removed. Stealth (33): maintains StealthedTagComp, and the AOI hides stealthed targets. Move speed boost/reduction (13/0): recomputes MoveSpeedComp = sum(boost) - sum(reduction), floored at 0, with no S2C and no effect on movement validation. NextBasicAttack (36): on the next given damage, adds bonus_damage, removes itself and applies sub_buff and target_sub_buff. NoDamageOrSkillHitInLastSeconds (43): each interval, if idle ≤ combat_idle_seconds it adds sub-buffs once; taking damage or being hit by a skill resets the timer and strips the sub-buffs. HealthRegenerationBasedOnLostHealth (42): heals per interval by formula(level, lost HP), capped at max_health.
 - internal: Hooks on the buff lifecycle and damage events.
-- java: missing — none
+- java: not_applicable（2026-10-03，批次 2.7）— 同上（没有 buff 能挂上，效果全不可达；66 combat_state_flags 不发、移速加成没有读者）
 - size: M
 - robot: none
 - hazards: The idle-time check compares milliseconds against combat_idle_seconds (a unit mismatch in the baseline). Regen uses get<> on derived attributes and level; in C++ it would throw or UB if they are missing. Stun and freeze have no realtime implementation; they only exist in the turn engine.
@@ -129,10 +129,10 @@ mmorpg has two combat stacks. (1) Realtime combat in the scene (cpp/libs/service
 - depends on: player base attributes / attribute-allocation (other area)
 - behavior: A brand-new character (health, strength and speed all 0) gets the Class init_* stats plus full HP/MP. A dead character (health 0 with stats present) on login, or after a battle settlement with is_dead or health 0, is restored to full HP/MP at the DerivedAttributes max, falling back to Class init values. Alive characters are untouched, so they keep reduced HP after battle. PrepareBattle rejects players at 0 HP with kFeatureUnavailable 1006. Realtime death has no state, no client notification and no revive flow.
 - internal: Pure rule plus ECS entry points.
-- java: missing — PlayerData/ScenePlayer have no HP, MP or base attributes.
+- java: partial（2026-10-03，批次 2.7）— 当前气血 / 法力落 `player_state.vitals`（满血满蓝不写）；加载按新上限往下夹、`PlayerRevive.reviveIfDead` 阵亡 / 没有记录回满；结算复活与 0 血拒绝开战随 6.3。成长属性不存（护甲 / 速度同基线每次重算，力量 / 抗性 / 暴击用到时由职业表即时算出）。**Correction:** settlement revive only checks health == 0 (ReviveBaseAttributesIfDead re-checks), not "is_dead or health 0"; class_id is threaded through by Go (`player_class_backfill.go`), only init / revive hard-code the first Class row
 - size: S
 - robot: battle_smoke (implicit: repeated battles need a revived player)
-- hazards: Revive must use the derived max, not the Class init value, or level growth is lost (a C++ bug fix). class_id is not threaded through, so the first Class row is used.
+- hazards: Revive must use the derived max, not the Class init value, or level growth is lost (a C++ bug fix). Init / revive hard-code the first Class row (player_database_loader.cpp:44); recalc (ResolveClassRow) uses the real class_id (backfilled by Go).
 
 ### realtime-npc-monster-ai — 实时场景 NPC/怪物刷新与 AI(基线未实现)
 - mmorpg: cpp/nodes/scene/handler/event/npc_event_handler.cpp (stub); cpp/libs/services/scene/spatial/system/scene_crowd.cpp (dtCrowd agent, unused); cpp/libs/services/scene/spatial/constants/aoi_priority.h (kBoss/kQuestNpc tags only); cpp/libs/services/scene/spatial/system/nav_query.cpp FindPath (no callers)
