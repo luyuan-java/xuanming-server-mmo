@@ -12,7 +12,7 @@
 
     <artifactId>xm-gateway</artifactId>
     <name>xm-gateway</name>
-    <description>客户端 HTTP 入口（Spring Boot Web）：区服列表、分配 gate 并签发 gate 令牌</description>
+    <description>客户端 HTTP 入口（Spring Boot Web）：区服列表、分配 gate 并签发 gate 令牌、HTTP 登录与刷新令牌（经 Dubbo 调 xm-login）</description>
 
     <dependencies>
         <dependency>
@@ -34,6 +34,16 @@
         <dependency>
             <groupId>com.game</groupId>
             <artifactId>xm-discovery</artifactId>
+        </dependency>
+        <!-- HTTP 登录 / 刷新令牌经 Dubbo 调 xm-login（AccountLoginService） -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-spring-boot-starter</artifactId>
+        </dependency>
+        <!-- 只在 nacos profile 下生效（dubbo.registry.address=nacos://...）；默认注册中心为 N/A、Dubbo 直连 -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-nacos-spring-boot-starter</artifactId>
         </dependency>
         <!-- 可观测性（architecture.md §11）：actuator 管理端点（health / prometheus）挂在同一个 HTTP 端口的 /actuator 下。 -->
         <dependency>
@@ -59,6 +69,16 @@
 
     <build>
         <plugins>
+            <!-- 整进程测试（@SpringBootTest）会起 Dubbo 调用方：调用方鉴权过滤器只从环境变量读密钥，这里给一个仅测试用的假值（不是任何环境的真密钥） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <XM_DUBBO_SECRET>xm-gateway-unit-test-only</XM_DUBBO_SECRET>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

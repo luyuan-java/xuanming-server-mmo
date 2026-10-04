@@ -313,4 +313,15 @@ class EnterGameHandlerTest {
         return meters.get("xm.login.backend.calls").tag("backend", "scene-manager").tag("method", "assign")
                 .tag("result", result).timer().count();
     }
+
+    @Test
+    void 设备数续期被拒_回拒绝码_不查角色不分配场景() throws Exception {
+        EnterGameHandler limited = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
+                Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get,
+                session -> LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE);
+        HandlerReply reply = limited.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
+        assertThat(response(reply).getErrorMessage().getId()).isEqualTo(LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE);
+        org.mockito.Mockito.verifyNoInteractions(scenes);
+        verify(store, never()).findPlayer(org.mockito.ArgumentMatchers.anyLong());
+    }
 }

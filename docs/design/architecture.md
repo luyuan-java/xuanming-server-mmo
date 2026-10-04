@@ -39,8 +39,8 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-discovery` | 库 | Redis（Redisson）上的节点号租约、游戏节点在线目录、玩家在线目录与服务端推送（§4.3） |
 | `xm-player-store` | 库 | 账号 / 玩家持久化（MyBatis）与玩家归属围栏 |
 | `xm-audit` | 库 | 资产审计管线的共享件：Java 自有的流水消息格式（包 `xm.audit`）、Kafka topic 规格（带代次后缀）与启动期核对（§4.5） |
-| `xm-gateway` | 进程（Spring Boot Web） | 区服列表、分配 gate 并签发 gate 令牌 |
-| `xm-login` | 进程（Spring Boot + Dubbo） | 登录、建角、进游戏、离开 / 断线 |
+| `xm-gateway` | 进程（Spring Boot Web + Dubbo 调用方） | 区服列表、分配 gate 并签发 gate 令牌、HTTP 登录与刷新令牌（经 Dubbo 调 xm-login） |
+| `xm-login` | 进程（Spring Boot + Dubbo） | 登录（含 access / refresh 令牌、设备数上限）、建角、进游戏、离开 / 断线 |
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景目录：玩家该进哪个场景节点的哪个场景 |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送 |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
@@ -80,13 +80,14 @@ Java 代码不得依赖这套目录，具体做法：
   调用本身失败（超时 / 后端不可用）gate 推 23 `{1003}`。
 - 是否回包由 gate 按契约里该方法的应答类型决定，不看 body 是否为空：非 `Empty` 应答一律回包（哪怕 0 字节），
   `Empty` 应答只在 `tip_id≠0` 时回包；会话指令无论回不回包都执行。
-- 服务对服务的调用用各自的类型化接口（如 `SceneDirectoryService`）。
+- 服务对服务的调用用各自的类型化接口（如 `SceneDirectoryService`；`AccountLoginService`：xm-gateway 的 HTTP 登录 / 刷新令牌调 xm-login，
+  参数与返回值直接用客户端契约里的 loginpb 消息，调用方不重试——刷新是一次性轮换，重试会拿已作废的 refresh 再打一次）。
 - `ClientMessageService.abandonEnter(AbandonedEnter)`：gate 确定一条 `EnterScene` 指令的 `PlayerEnter` 从未写上链路
   （会话已在关闭、链路层已关、建链失败）时通知 login，login 带 epoch 围栏释放这次夺得的归属（见 §7），玩家不必等租约过期。
 - **调用方鉴权（必需）**：Dubbo 把 `127.*` 视为无效绑定地址，`dubbo.protocol.host=127.0.0.1` 实际监听 `0.0.0.0`
   （`DUBBO_IP_TO_BIND` 也不接受回环地址），login（20881）/ scene-manager（20882）的端口**无法只绑本机**，
   而 `ClientMessageService` 完全信任调用方填的 `SessionContext`。所以 Java 版进程间的每次 Dubbo 调用都要带鉴权附件：
-  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-gate 必填，缺失即拒绝启动），
+  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-gate / xm-gateway 必填，缺失即拒绝启动），
   调用方附 `xm-auth-ts`（Unix 秒）与 `xm-auth-mac = HMAC-SHA256(secret, "接口全名|方法名|ts")` 的 64 字节小写 hex，
   提供方常数时间比较 MAC、再验 ts 与本地时钟相差 ≤ 60s，不过即抛 `RpcException(AUTHORIZATION)`，不进入业务代码，
   对外原因只有一句「调用方鉴权失败」。算法唯一出处 `xm-common` 的 `DubboCallAuth`，过滤器在 `xm-api` 的
@@ -435,9 +436,13 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
 
 ## 8. 登录进场景调用链（首批竖切）
 
+0. （可选，HTTP 登录路径）客户端 `POST /api/login` → `xm-gateway` → Dubbo `AccountLoginService` → `xm-login`：认证、取 / 建账号、
+   签一对令牌、回角色列表（不绑会话、不查设备数）；令牌到期前 `POST /api/refresh-token` 轮换。
 1. 客户端 `POST /api/assign-gate` → `xm-gateway`：按 zone 取 gate 列表，选在线人数最少者，签 `GateTokenPayload`（TTL 600s）。
 2. 客户端 TCP 连 gate，首包 `ClientTokenVerifyRequest` → gate 本地验签（常数时间比较）。
-3. `Login(48)` → gate → `xm-login`：鉴权（开发模式口令）、取 / 建账号，回角色列表；`ClientReply` 指示 gate 把账号绑到会话。
+3. `Login(48)` → gate → `xm-login`：鉴权（开发模式口令，或 HTTP 登录拿到的 access token）、账号锁、设备数上限（窗口内第 4 个连接 2024）、
+   取 / 建账号、口令登录签一对令牌（access token 登录不签），回角色列表；`ClientReply` 指示 gate 把账号绑到会话。
+   设备数：同一账号「已绑定、没在游戏里」的连接至多 3 个（建角 / 进游戏前也续期，名单满回 2024），进场指令发出 / 会话结束时注销。
 4. 角色为空时 `CreatePlayer(14)` → `xm-login`：按配表生成名字与默认职业，写 `player` 表，回角色列表。
 5. `EnterGame(26)` → `xm-login`：会话已绑定玩家（不论是不是同一角色）→ 2028（基线进游戏成功即删登录会话）；
    校验角色归属 → `SceneDirectoryService` 选场景 → 夺取归属（§7：上一个写者没释放就请它让出并等待，等不到回 2005）→
@@ -525,6 +530,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | login | `executor_*{name="login-worker"}` | Micrometer 标准线程池指标 | — | 工作线程池排队 / 活跃 / 完成数（队列满见 `xm_login_requests{result="overloaded"}`） |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
 | gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 400 / 404 / 500 / 503，`reason`=ok / 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；8 个已知组合启动即注册 |
+| gateway | `xm_gateway_login_total` | Counter | `endpoint`=login / refresh，`code`=0 / 401 / 500 | HTTP 登录 / 刷新令牌的结局（应答体业务码）；6 个已知组合启动即注册 |
 | scene | `xm_scene_players` | Gauge | `scene_config`=场景配置号 | 该配置下的在线玩家数（同配置各频道合计；加载中的进场不算）。建场景即注册、初值 0 |
 | scene | `xm_scene_logic_pending_tasks` | Gauge | — | 逻辑线程待执行的任务数（链路帧、存储回调、归属事件；不含定时的帧任务）。上界 ≈ gate 数 × `link-max-pending-frames` |
 | scene | `xm_scene_logic_task_wait_seconds` | Timer | — | 逻辑任务从投递到开始执行的排队等待（经 `SceneNode.runOnLogic` 投递的全部任务；同步的目录 / 归属快照不计） |

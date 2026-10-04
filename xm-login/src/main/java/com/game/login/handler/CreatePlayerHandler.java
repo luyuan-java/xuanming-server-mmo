@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 import java.util.function.IntSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +57,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     private final int zoneId;
     private final int maxPlayersPerAccount;
     private final LoginMetrics metrics;
+    private final Function<SessionContext, Integer> deviceRenewal;
     private final InFlightKeys<String> accountsInFlight = new InFlightKeys<>();
 
     /**
@@ -66,6 +68,16 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
      */
     public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
                                IntSupplier randomByte, int zoneId, int maxPlayersPerAccount, LoginMetrics metrics) {
+        this(store, rules, playerIds, randomByte, zoneId, maxPlayersPerAccount, metrics, session -> null);
+    }
+
+    /**
+     * @param deviceRenewal 建角前续期会话的设备数登记（{@code AccountLogin::renewDevice}）：回拒绝码（2024 / 2023）即拒绝，null 放行
+     */
+    public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                               IntSupplier randomByte, int zoneId, int maxPlayersPerAccount, LoginMetrics metrics,
+                               Function<SessionContext, Integer> deviceRenewal) {
+        this.deviceRenewal = deviceRenewal;
         this.store = store;
         this.rules = rules;
         this.playerIds = playerIds;
@@ -98,6 +110,10 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         String account = session.getAccount();
         if (account.isEmpty() || session.getPlayerId() != 0) {
             return done(error(LoginErrorTip.login_error.kLoginSessionNotFound_VALUE));
+        }
+        Integer refused = deviceRenewal.apply(session);
+        if (refused != null) {
+            return done(error(refused));
         }
         if (!accountsInFlight.tryAcquire(account)) {
             log.info("同一账号建角在途，拒绝 account={} session={}", account, session.getSessionId());

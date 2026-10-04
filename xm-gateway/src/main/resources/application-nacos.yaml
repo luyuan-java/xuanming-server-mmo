@@ -1,0 +1,8 @@
+# nacos profile：Dubbo 走 Nacos 注册中心，直连 URL 置空。启动加 --spring.profiles.active=nacos。
+dubbo:
+  registry:
+    address: nacos://${XM_NACOS_ADDR:127.0.0.1:8848}
+
+xm:
+  dubbo:
+    login-url: ""

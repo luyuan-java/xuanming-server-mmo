@@ -12,7 +12,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.api.proto.GateNodeInfo;
 import com.game.common.token.GateTokens;
+import com.game.api.AccountLoginService;
 import com.game.gateway.assign.AssignGateController;
+import com.game.gateway.login.LoginController;
+import com.game.proto.AccountSimplePlayer;
+import com.game.proto.TipInfoMessage;
+import com.game.proto.login.AccountSimplePlayerWrapper;
+import com.game.proto.login.LoginResponse;
+import com.game.proto.login.RefreshTokenResponse;
+import java.util.concurrent.CompletableFuture;
 import com.game.gateway.gate.GateSource;
 import com.game.gateway.serverlist.ServerListController;
 import com.game.proto.GateTokenPayload;
@@ -36,12 +44,14 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.RequestBuilder;
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
 
 /**
  * HTTP 契约测试：按 Go robot 的解析方式核对 JSON 键名（snake_case）、类型、业务码，以及签出的令牌能被 gate 侧验过。
  * 走真实装配（{@link GatewayConfiguration} + application.yaml 的 Jackson 配置），只把 gate 目录换成替身，不需要 Redis。
  */
-@WebMvcTest(controllers = {AssignGateController.class, ServerListController.class})
+@WebMvcTest(controllers = {AssignGateController.class, ServerListController.class, LoginController.class})
 @Import({GatewayConfiguration.class, GatewayHttpApiTest.Meters.class})
 @TestPropertySource(properties = {
         GatewayConfiguration.TOKEN_SECRET_ENV + "=" + GatewayHttpApiTest.SECRET,
@@ -84,6 +94,9 @@ class GatewayHttpApiTest {
 
     @MockitoBean
     private GateSource gateSource;
+
+    @MockitoBean
+    private AccountLoginService accountLogin;
 
     private double assignOutcomes(int code, String reason) {
         return meters.get("xm.gateway.assign.gate").tag("code", Integer.toString(code)).tag("reason", reason)
@@ -291,5 +304,69 @@ class GatewayHttpApiTest {
         assertThat(keys(closed)).containsExactlyInAnyOrder("zone_id", "name", "status", "is_new", "recommended");
         assertThat(closed.get("zone_id").intValue()).isEqualTo(3);
         assertThat(closed.get("status").asText()).isEqualTo("CLOSED");
+    }
+
+    // ---------------------------------------------------------------- HTTP 登录 / 刷新令牌
+
+    /** 控制器返回 future：先确认进入异步，再取异步派发后的应答体。 */
+    private JsonNode callAsync(RequestBuilder request) throws Exception {
+        var started = mvc.perform(request).andExpect(MockMvcResultMatchers.request().asyncStarted()).andReturn();
+        String body = mvc.perform(MockMvcRequestBuilders.asyncDispatch(started))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        return JSON.readTree(body);
+    }
+
+    @Test
+    void 登录成功_键名与robot解析结构一致_没有值的字段不出现() throws Exception {
+        when(accountLogin.login(org.mockito.ArgumentMatchers.any())).thenReturn(CompletableFuture.completedFuture(
+                LoginResponse.newBuilder()
+                        .addPlayers(AccountSimplePlayerWrapper.newBuilder().setPlayer(AccountSimplePlayer.newBuilder()
+                                .setPlayerId(11).setName("道友aaaaaa")))
+                        .setAccessToken("a".repeat(43)).setRefreshToken("r".repeat(43))
+                        .setAccessTokenExpire(100).setRefreshTokenExpire(200).build()));
+
+        JsonNode resp = callAsync(post("/api/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"zone_id\":1,\"account\":\"robot_0001\",\"password\":\"p\",\"device_id\":\"d\"}"));
+
+        assertThat(keys(resp)).containsExactlyInAnyOrder("code", "players", "access_token", "refresh_token",
+                "access_token_expire", "refresh_token_expire");
+        assertThat(resp.get("code").intValue()).isZero();
+        assertThat(resp.get("access_token").asText()).hasSize(43);
+        assertThat(resp.get("access_token_expire").isIntegralNumber()).isTrue();
+        assertThat(keys(resp.get("players").get(0))).containsExactlyInAnyOrder("player_id", "name", "level");
+        assertThat(resp.get("players").get(0).get("player_id").longValue()).isEqualTo(11);
+    }
+
+    @Test
+    void 登录被拒是401_未知区是500_刷新空令牌是401且不调login() throws Exception {
+        when(accountLogin.login(org.mockito.ArgumentMatchers.any())).thenReturn(CompletableFuture.completedFuture(
+                LoginResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder().setId(2000)).build()));
+        JsonNode rejected = callAsync(post("/api/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"zone_id\":1,\"account\":\"robot_0001\",\"password\":\"bad\"}"));
+        assertThat(keys(rejected)).containsExactlyInAnyOrder("code", "message");
+        assertThat(rejected.get("code").intValue()).isEqualTo(401);
+
+        JsonNode unknownZone = callAsync(post("/api/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"zone_id\":9,\"account\":\"robot_0001\",\"password\":\"p\"}"));
+        assertThat(unknownZone.get("code").intValue()).isEqualTo(500);
+
+        JsonNode empty = callAsync(post("/api/refresh-token").contentType(MediaType.APPLICATION_JSON).content("{}"));
+        assertThat(empty.get("code").intValue()).isEqualTo(401);
+        assertThat(empty.get("message").asText()).isEqualTo("empty_refresh_token");
+        org.mockito.Mockito.verify(accountLogin, org.mockito.Mockito.never())
+                .refreshToken(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void 刷新成功带回新的一对() throws Exception {
+        when(accountLogin.refreshToken(org.mockito.ArgumentMatchers.any())).thenReturn(CompletableFuture.completedFuture(
+                RefreshTokenResponse.newBuilder().setAccessToken("a2").setRefreshToken("r2")
+                        .setAccessTokenExpire(1).setRefreshTokenExpire(2).build()));
+        JsonNode resp = callAsync(post("/api/refresh-token").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"refresh_token\":\"r1\"}"));
+        assertThat(keys(resp)).containsExactlyInAnyOrder("code", "access_token", "refresh_token", "access_token_expire",
+                "refresh_token_expire");
+        assertThat(resp.get("refresh_token").asText()).isEqualTo("r2");
     }
 }

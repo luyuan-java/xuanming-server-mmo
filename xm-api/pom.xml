@@ -24,6 +24,11 @@
             <groupId>com.game</groupId>
             <artifactId>xm-common</artifactId>
         </dependency>
+        <!-- AccountLoginService 直接用客户端契约里的 loginpb 消息做参数 / 返回值 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-proto</artifactId>
+        </dependency>
         <!-- 只有 com.game.api.auth 的 Dubbo 过滤器用到；optional：不用 Dubbo 的进程（xm-scene 等）不会被带进 Dubbo，
              用 Dubbo 的进程自己已依赖 dubbo-spring-boot-starter -->
         <dependency>

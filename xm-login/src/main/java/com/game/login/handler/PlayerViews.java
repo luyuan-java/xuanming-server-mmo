@@ -7,7 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** 存储行 → 客户端角色列表条目。只填契约里有的六个字段（这个消息没有 level）。 */
-final class PlayerViews {
+public final class PlayerViews {
 
     private PlayerViews() {
     }
@@ -25,7 +25,7 @@ final class PlayerViews {
     }
 
     /** 保持入参顺序（存储按建角先后排好，{@code players[0]} 是最早的角色）。 */
-    static List<AccountSimplePlayerWrapper> wrapAll(List<PlayerRow> rows) {
+    public static List<AccountSimplePlayerWrapper> wrapAll(List<PlayerRow> rows) {
         List<AccountSimplePlayerWrapper> out = new ArrayList<>(rows.size());
         for (PlayerRow row : rows) {
             out.add(wrap(row));

@@ -15,6 +15,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param sceneAssignTimeout    进游戏时等 scene-manager 分配结果的兜底上限
  * @param ownerClaimWait        进游戏夺取玩家数据归属时，归属仍被上一个写者持有，最多等它释放多久（期间退避重试），之后回 2005；
  *                              加上场景分配的上限必须小于客户端 EnterGame 的 15s 预算
+ * @param accessTokenTtl        access token 有效期（基线 2h）
+ * @param refreshTokenTtl       refresh token 有效期（基线 720h）
+ * @param maxDevicesPerAccount  每账号处于「已登录、未进游戏」窗口的连接上限（基线 3，超出回 2024）
+ * @param deviceSessionTtl      一次设备登记的有效期（基线 SessionExpireMin = 30 分钟；没注销干净的按它自愈）
  */
 @ConfigurationProperties("xm.login")
 public record LoginProperties(
@@ -24,7 +28,11 @@ public record LoginProperties(
         Integer workerThreads,
         Integer workerQueueCapacity,
         Duration sceneAssignTimeout,
-        Duration ownerClaimWait) {
+        Duration ownerClaimWait,
+        Duration accessTokenTtl,
+        Duration refreshTokenTtl,
+        Integer maxDevicesPerAccount,
+        Duration deviceSessionTtl) {
 
     public static final String MODE_DEV = "dev";
     public static final String MODE_PROD = "prod";
@@ -50,10 +58,24 @@ public record LoginProperties(
         } else if (ownerClaimWait.isNegative()) {
             throw new IllegalArgumentException("xm.login.owner-claim-wait 不能为负: " + ownerClaimWait);
         }
+        accessTokenTtl = positiveOr(accessTokenTtl, Duration.ofHours(2), "access-token-ttl");
+        refreshTokenTtl = positiveOr(refreshTokenTtl, Duration.ofHours(720), "refresh-token-ttl");
+        maxDevicesPerAccount = positiveOr(maxDevicesPerAccount, 3, "max-devices-per-account");
+        deviceSessionTtl = positiveOr(deviceSessionTtl, Duration.ofMinutes(30), "device-session-ttl");
     }
 
     public boolean devMode() {
         return MODE_DEV.equals(mode);
+    }
+
+    private static Duration positiveOr(Duration value, Duration fallback, String name) {
+        if (value == null) {
+            return fallback;
+        }
+        if (value.isNegative() || value.isZero()) {
+            throw new IllegalArgumentException("xm.login." + name + " 必须为正: " + value);
+        }
+        return value;
     }
 
     private static int positiveOr(Integer value, int fallback, String name) {

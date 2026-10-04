@@ -335,4 +335,13 @@ class CreatePlayerHandlerTest {
         assertThat(create(CreatePlayerRequest.getDefaultInstance()).hasErrorMessage()).isFalse();
         assertError(response(nested.get()), LoginErrorTip.login_error.kLoginInProgress_VALUE);
     }
+
+    @Test
+    void 设备数续期被拒_回拒绝码_不碰存储() throws Exception {
+        CreatePlayerHandler limited = new CreatePlayerHandler(store, rules, ids, randomByte, ZONE, 5,
+                new LoginMetrics(meters), session -> LoginErrorTip.login_error.kTooManyDevices_VALUE);
+        assertError(response(limited.handle(SESSION, CreatePlayerRequest.getDefaultInstance()).join()),
+                LoginErrorTip.login_error.kTooManyDevices_VALUE);
+        verify(store, never()).listPlayers(org.mockito.ArgumentMatchers.anyString());
+    }
 }

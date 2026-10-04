@@ -89,6 +89,12 @@ xm:
     # 进游戏夺取数据归属时，上一个写者（旧实例）还没写回释放：请它让出并等待的上限，之后回 2005。
     # 与 scene-assign-timeout 之和须小于客户端 EnterGame 的 15s 预算。
     owner-claim-wait: 3s
+    # access / refresh 令牌有效期（基线 2h / 720h）；令牌存 Redis，全服共用、不分 zone。
+    access-token-ttl: 2h
+    refresh-token-ttl: 720h
+    # 每账号处于「已登录（TCP Login）、未进游戏」窗口的连接上限（基线 3，超出回 2024），与一次登记的有效期（没注销干净的按它自愈）。
+    max-devices-per-account: 3
+    device-session-ttl: 30m
 
 dubbo:
   application:

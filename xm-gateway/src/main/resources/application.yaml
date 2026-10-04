@@ -1,5 +1,6 @@
-# xm-gateway：客户端 HTTP 入口（区服列表、分配 gate）。进程从仓库根目录启动。
-# 必需环境变量：XM_GATE_TOKEN_SECRET（gate 令牌签名密钥，须与 xm-gate 一致；缺失则启动失败）。
+# xm-gateway：客户端 HTTP 入口（区服列表、分配 gate、HTTP 登录与刷新令牌）。进程从仓库根目录启动。
+# 必需环境变量：XM_GATE_TOKEN_SECRET（gate 令牌签名密钥，须与 xm-gate 一致）、XM_DUBBO_SECRET（Dubbo 调用鉴权，须与 xm-login 一致）；
+# 缺失则启动失败。
 server:
   port: 18081
   shutdown: graceful
@@ -40,6 +41,9 @@ xm:
     timeout-ms: 2000
     retry-attempts: 1
     retry-delay-ms: 200
+  dubbo:
+    # xm-login 的 Dubbo 地址（HTTP 登录 / 刷新令牌）；nacos profile 置空走注册中心。
+    login-url: tri://127.0.0.1:20881
   gateway:
     # 区服列表：顺序即 /api/server-list 的展示顺序。status 取 OPEN / MAINTENANCE / CLOSED，必填。
     # maintenance-msg 只在 MAINTENANCE / CLOSED 时随区服列表下发。
@@ -48,3 +52,16 @@ xm:
         name: 一区
         status: OPEN
         recommended: true
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    # 同机多个 Dubbo 进程会抢 QoS 端口 22222
+    qos-enable: false
+  registry:
+    address: N/A
+  consumer:
+    check: false
+    # 调 xm-login 的超时（同基线 login.grpc.timeout-ms = 3000）：须小于客户端 HTTP 的 5 s，失败才能带着 {code:500} 回给客户端。
+    timeout: 3000

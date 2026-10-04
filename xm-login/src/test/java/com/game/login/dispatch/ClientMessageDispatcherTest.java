@@ -11,11 +11,14 @@ import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
 import com.game.contract.MessageIdRegistry;
+import com.game.login.account.AccountLogin;
 import com.game.login.auth.DevPasswordRule;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.handler.LeaveGameHandler;
 import com.game.login.handler.LoginHandler;
 import com.game.login.metrics.LoginMetrics;
+import com.game.login.testing.InMemoryLoginDevices;
+import com.game.login.testing.InMemoryLoginTokens;
 import com.game.player.store.PlayerStore;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.login.CreatePlayerRequest;
@@ -310,8 +313,9 @@ class ClientMessageDispatcherTest {
     void 与真实Login处理器串起来_成功应答不带error_message() throws Exception {
         PlayerStore store = mock(PlayerStore.class);
         when(store.listPlayers("robot_0001")).thenReturn(List.of());
-        LoginHandler realLogin = new LoginHandler(LoginAuthenticator.withDevPassword(
-                new DevPasswordRule("secret", List.of("robot_"))), store);
+        InMemoryLoginTokens tokens = new InMemoryLoginTokens();
+        LoginHandler realLogin = new LoginHandler(new AccountLogin(LoginAuthenticator.withDevPassword(
+                new DevPasswordRule("secret", List.of("robot_")), tokens), store, tokens, new InMemoryLoginDevices(3)));
         ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry, List.of(realLogin), DIRECT, metrics);
 
         ClientReply reply = dispatcher.dispatch(call(48,

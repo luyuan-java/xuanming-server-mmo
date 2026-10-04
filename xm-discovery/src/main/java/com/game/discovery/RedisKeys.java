@@ -67,4 +67,38 @@ public final class RedisKeys {
     public static String gainBlockChangedTopic() {
         return PREFIX + "gain-block-changed";
     }
+
+    /**
+     * 登录 access token：{@code xm:login:access:{token}}，值为令牌数据 JSON（账号、认证方式、设备号、签发秒），TTL = access 有效期。
+     * 令牌是 43 字符的 base64url（不含 {@code :}）；不分 zone（同一账号在哪个区都能用）。
+     */
+    public static String loginAccessToken(String token) {
+        return PREFIX + "login:access:" + token;
+    }
+
+    /** 登录 refresh token：{@code xm:login:refresh:{token}}，值同 access，TTL = refresh 有效期；一次性（轮换时原子取走）。 */
+    public static String loginRefreshToken(String token) {
+        return PREFIX + "login:refresh:" + token;
+    }
+
+    /** 账号的活跃 refresh token 集合：{@code xm:login:account-refresh:{account}}，ZSET，成员是 token、分数是它的过期 Unix 秒。 */
+    public static String loginAccountRefresh(String account) {
+        return PREFIX + "login:account-refresh:" + account;
+    }
+
+    /**
+     * 账号处于「已登录、未进游戏」窗口的连接：{@code xm:login:devices:{account}}，ZSET，成员是会话键（gate 实例 / 会话号）、
+     * 分数是该成员的过期 Unix 毫秒（设备数上限按它自愈）。
+     */
+    public static String loginDevices(String account) {
+        return PREFIX + "login:devices:" + account;
+    }
+
+    /**
+     * 会话当前计在哪个账号的设备名单里：{@code xm:login:device-session:{会话键}}，值为账号，TTL 同设备登记。
+     * 断线时 gate 记的账号可能是空的（登录应答没送到 gate），按它找回名单注销。
+     */
+    public static String loginDeviceSession(String sessionKey) {
+        return PREFIX + "login:device-session:" + sessionKey;
+    }
 }

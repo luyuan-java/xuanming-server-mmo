@@ -6,6 +6,7 @@ import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.login.account.AccountLogin;
 import com.game.login.auth.DevPasswordRule;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.character.CharacterRules;
@@ -19,13 +20,19 @@ import com.game.login.handler.DisconnectHandler;
 import com.game.login.handler.EnterGameHandler;
 import com.game.login.handler.LeaveGameHandler;
 import com.game.login.handler.LoginHandler;
+import com.game.login.handler.RefreshTokenHandler;
 import com.game.login.metrics.LoginMetrics;
 import com.game.login.ownership.OwnerTakeovers;
 import com.game.login.ownership.RedisOwnerTakeovers;
+import com.game.login.session.LoginDevices;
+import com.game.login.session.RedisLoginDevices;
+import com.game.login.token.LoginTokens;
+import com.game.login.token.RedisLoginTokens;
 import com.game.player.store.PlayerStore;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -82,19 +89,33 @@ public class LoginConfiguration {
         return rules;
     }
 
+    /** access / refresh 令牌（Redis；全服共用、不分 zone）。 */
     @Bean
-    public LoginAuthenticator loginAuthenticator(LoginProperties props,
+    public LoginTokens loginTokens(RedissonClient redis, LoginProperties props) {
+        return new RedisLoginTokens(redis, Clock.systemUTC(), props.accessTokenTtl(), props.refreshTokenTtl(),
+                new SecureRandom());
+    }
+
+    /** 每账号设备数上限（Redis）。 */
+    @Bean
+    public LoginDevices loginDevices(RedissonClient redis, LoginProperties props) {
+        return new RedisLoginDevices(redis, Clock.systemUTC(), props.deviceSessionTtl(), props.maxDevicesPerAccount());
+    }
+
+    @Bean
+    public LoginAuthenticator loginAuthenticator(LoginProperties props, LoginTokens loginTokens,
                                                  @Value("${XM_LOGIN_DEV_PASSWORD:}") String devPassword) {
         if (!props.devMode()) {
             log.info("xm.login.mode=prod：开发口令认证关闭，口令登录一律失败");
-            return LoginAuthenticator.passwordDisabled();
+            return LoginAuthenticator.passwordDisabled(loginTokens);
         }
         if (devPassword == null || devPassword.isEmpty()) {
             throw new IllegalStateException("xm.login.mode=dev 需要环境变量 XM_LOGIN_DEV_PASSWORD（开发口令），拒绝启动");
         }
         log.warn("开发口令认证已启用（xm.login.mode=dev），账号前缀白名单={}；生产环境必须设为 prod",
                 props.devAccountPrefixes());
-        return LoginAuthenticator.withDevPassword(new DevPasswordRule(devPassword, props.devAccountPrefixes()));
+        return LoginAuthenticator.withDevPassword(new DevPasswordRule(devPassword, props.devAccountPrefixes()),
+                loginTokens);
     }
 
     @Bean(destroyMethod = "close")
@@ -124,18 +145,31 @@ public class LoginConfiguration {
         return new PlayerIdGenerator(new Snowflake(playerIdLease.nodeId()), playerIdLease::isValid);
     }
 
+    /** 登录主流程（TCP 48 与 HTTP 登录共用，同一份账号在途闸门）。 */
     @Bean
-    public LoginHandler loginHandler(LoginAuthenticator authenticator, PlayerStore store) {
-        return new LoginHandler(authenticator, store);
+    public AccountLogin accountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens loginTokens,
+                                     LoginDevices loginDevices) {
+        return new AccountLogin(authenticator, store, loginTokens, loginDevices);
+    }
+
+    @Bean
+    public LoginHandler loginHandler(AccountLogin accountLogin) {
+        return new LoginHandler(accountLogin);
+    }
+
+    @Bean
+    public RefreshTokenHandler refreshTokenHandler(LoginTokens loginTokens) {
+        return new RefreshTokenHandler(loginTokens);
     }
 
     @Bean
     public CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
                                                    PlayerIdGenerator playerIds, LoginProperties props,
-                                                   LoginMetrics loginMetrics, @Value("${xm.zone-id:1}") int zoneId) {
+                                                   LoginMetrics loginMetrics, AccountLogin accountLogin,
+                                                   @Value("${xm.zone-id:1}") int zoneId) {
         SecureRandom random = new SecureRandom();
         return new CreatePlayerHandler(store, characterRules, playerIds, () -> random.nextInt(256),
-                zoneId, props.maxPlayersPerAccount(), loginMetrics);
+                zoneId, props.maxPlayersPerAccount(), loginMetrics, accountLogin::renewDevice);
     }
 
     /** 归属接管请求（Redis pub/sub，全部 scene 节点订阅）。 */
@@ -147,9 +181,10 @@ public class LoginConfiguration {
     @Bean
     public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers,
                                              LoginWorkerPool loginWorkerPool, LoginProperties props,
-                                             LoginMetrics loginMetrics, @Value("${xm.zone-id:1}") int zoneId) {
+                                             LoginMetrics loginMetrics, AccountLogin accountLogin,
+                                             @Value("${xm.zone-id:1}") int zoneId) {
         return new EnterGameHandler(store, sceneDirectory, ownerTakeovers, loginWorkerPool, zoneId,
-                props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics);
+                props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice);
     }
 
     /**

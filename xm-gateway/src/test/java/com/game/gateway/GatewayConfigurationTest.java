@@ -3,7 +3,9 @@ package com.game.gateway;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import com.game.api.AccountLoginService;
 import com.game.gateway.assign.AssignGateService;
+import com.game.gateway.login.LoginHttpService;
 import com.game.gateway.zone.ZoneCatalog;
 import com.game.gateway.zone.ZoneStatus;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -18,7 +20,8 @@ class GatewayConfigurationTest {
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(GatewayConfiguration.class)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
-            .withBean(MeterRegistry.class, SimpleMeterRegistry::new);
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+            .withBean(AccountLoginService.class, () -> mock(AccountLoginService.class));
 
     private static final String[] ONE_ZONE = {
             "xm.gateway.zones[0].zone-id=1",
@@ -52,7 +55,7 @@ class GatewayConfigurationTest {
         runner.withPropertyValues(ONE_ZONE)
                 .withPropertyValues(GatewayConfiguration.TOKEN_SECRET_ENV + "=s")
                 .run(ctx -> {
-                    assertThat(ctx).hasNotFailed().hasSingleBean(AssignGateService.class);
+                    assertThat(ctx).hasNotFailed().hasSingleBean(AssignGateService.class).hasSingleBean(LoginHttpService.class);
                     assertThat(ctx.getBean(ZoneCatalog.class).find(1).orElseThrow().status()).isEqualTo(ZoneStatus.OPEN);
                 });
     }

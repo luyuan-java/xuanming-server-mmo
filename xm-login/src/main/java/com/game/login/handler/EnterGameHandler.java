@@ -79,6 +79,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     private final Duration assignTimeout;
     private final Duration claimWait;
     private final LoginMetrics metrics;
+    private final Function<SessionContext, Integer> deviceRenewal;
     private final InFlightKeys<Long> playersInFlight = new InFlightKeys<>();
 
     /**
@@ -93,8 +94,18 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                             Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
                             LoginMetrics metrics) {
         this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
+                session -> null);
+    }
+
+    /**
+     * @param deviceRenewal 进游戏前续期会话的设备数登记（{@code AccountLogin::renewDevice}）：回拒绝码（2024 / 2023）即拒绝，null 放行
+     */
+    public EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                            Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
+                            LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal) {
+        this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
                 delay -> CompletableFuture.delayedExecutor(delay.toMillis(), TimeUnit.MILLISECONDS),
-                System::nanoTime);
+                System::nanoTime, deviceRenewal);
     }
 
     /**
@@ -106,6 +117,15 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
                      Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
                      LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock) {
+        this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics, timer,
+                nanoClock, session -> null);
+    }
+
+    EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                     Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
+                     LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock,
+                     Function<SessionContext, Integer> deviceRenewal) {
+        this.deviceRenewal = deviceRenewal;
         this.store = store;
         this.sceneDirectory = sceneDirectory;
         this.takeovers = takeovers;
@@ -142,6 +162,10 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         long playerId = request.getPlayerId();
         if (account.isEmpty() || session.getPlayerId() != 0) {
             return done(error(LoginErrorTip.login_error.kLoginSessionNotFound_VALUE));
+        }
+        Integer refused = deviceRenewal.apply(session);
+        if (refused != null) {
+            return done(error(refused));
         }
         if (!playersInFlight.tryAcquire(playerId)) {
             log.info("同一角色进场在途，拒绝 player={} session={}", playerId, session.getSessionId());
