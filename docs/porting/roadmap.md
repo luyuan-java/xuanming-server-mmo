@@ -55,7 +55,7 @@
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
 | 4.0 | xm-pbmysql：proto2mysql 的 Java 实现（建表 DDL、只扩不缩同步、按消息 CRUD） | — | ✅ `0fae75f`（DDL 与 Go 逐字节相同；updateByPk 写整行——PARITY 有意差异）|
-| 4.1 | 好友（申请 / 同意 / 删除 / 列表 / 黑名单 / 推荐 / 在线目录 / 推送）；robot friend-smoke | friend-* |
+| 4.1 | 好友（申请 / 同意 / 删除 / 列表 / 黑名单 / 推荐 / 在线目录 / 推送）；robot friend-smoke | friend-* | ✅ 4.1a `85f7aef`（核心与推送）、4.1b `c0b3cd1`（推荐 / 在线目录 / 清理）；规格 docs/porting/friend-spec.md，有意差异见 PARITY「好友」行 |
 | 4.2 | 聊天（世界 / 私聊、历史、限速）；robot chat-smoke | chat-send、chat-history |
 | 4.3 | 组队（名册 / 申请邀请 / 推送 / 场景投影与跟随）；robot team-smoke | team-roster、team-apply-invite、team-notify、team-scene-follow |
 | 4.4 | 帮会核心（建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 申请审批 / 推送 220 / 排行）；robot guild-smoke | guild-* 核心段 |
