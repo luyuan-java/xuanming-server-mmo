@@ -22,8 +22,8 @@ import java.util.TreeMap;
  */
 public final class BagService {
 
-    /** 物品被封禁 / 玩家冻结（基线物品口径回 1005，与货币的 27005 / 27003 不同——都是客户端契约）。 */
-    static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    /** 物品被封禁 / 玩家冻结（基线物品口径回 1005，与货币的 27005 / 27003 不同——都是客户端契约）。入包的容器本身不回 1005，所以 1005 一定是闸拒的。 */
+    public static final int REFUSED = CommonErrorTip.common_error.kInvalidParameter_VALUE;
 
     private final BagTables tables;
     private final ItemGuids guids;
@@ -69,14 +69,14 @@ public final class BagService {
     public Bag.AddResult addItems(ScenePlayer player, BagType type, Map<Integer, Long> counts, AssetAudit.Reason reason,
                                   long correlationId, String extra) {
         if (!writable(player)) {
-            return new Bag.AddResult(INVALID_PARAMETER, java.util.List.of(), java.util.List.of());
+            return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
         }
         TreeMap<Integer, Long> ordered = new TreeMap<>(Integer::compareUnsigned);
         ordered.putAll(counts);
         for (int configId : ordered.keySet()) {
             if (globalBlocks.blocksItem(configId)) {
                 metrics.gainBlocked(RedisGainBlockSource.ITEM);
-                return new Bag.AddResult(INVALID_PARAMETER, java.util.List.of(), java.util.List.of());
+                return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
             }
         }
         Bag.AddResult result = player.bags().bag(type).add(ordered, tables, guids);

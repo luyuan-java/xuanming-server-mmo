@@ -211,4 +211,39 @@ class PeriodicSaveTest {
     void 存盘周期必须为正() {
         assertThatThrownBy(() -> world.saveDuePlayers(0)).isInstanceOf(IllegalArgumentException.class);
     }
+
+    // ------------------------------------------------------------------ 立即存盘（资产通道用）
+
+    @Test
+    void 立即存盘_与库相同不写_不同就写_在途不叠加_积压不提交_不计周期指标() {
+        ScenePlayer player = enterUnchanged(11, 1000);
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.UNCHANGED);
+        assertThat(repo.pendingProgress()).isZero();
+
+        player.wallet().add(0, 5);
+        repo.setAcceptsProgress(false);
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.DEFERRED);
+        repo.setAcceptsProgress(true);
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.WRITTEN);
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.IN_FLIGHT);
+        assertThat(repo.pendingProgress()).isEqualTo(1);
+        assertThat(player.persistedState().hasCurrency()).as("结局回来之前快照不变").isFalse();
+
+        repo.takeProgress().complete(ProgressResult.SAVED);
+        assertThat(player.persistedState().getCurrency().getBalances(0)).isEqualTo(5);
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.UNCHANGED);
+        assertThat(periodic("written")).isZero();
+    }
+
+    @Test
+    void 立即存盘_离场后或停服后不提交() {
+        ScenePlayer player = enterChanged(11, 1000);
+        world.onPlayerLeave(LINK, leave(11, 1000));
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.STOPPED);
+
+        ScenePlayer other = enterChanged(12, 1001);
+        world.shutdown();
+        assertThat(world.requestSave(other)).isEqualTo(SceneWorld.SaveRequest.STOPPED);
+        assertThat(repo.pendingProgress()).isZero();
+    }
 }

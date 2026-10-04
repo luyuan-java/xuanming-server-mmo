@@ -7,7 +7,17 @@ import java.util.List;
 /** 记下全部资产流水的测试用审计出口。 */
 public final class RecordingAssetAudit implements AssetAudit {
 
-    public record Currency(long playerId, int type, long delta, long before, long after, Reason reason) {
+    public record Currency(long playerId, int type, long delta, long before, long after, Reason reason,
+                           long correlationId, String extra) {
+
+        public Currency(long playerId, int type, long delta, long before, long after, Reason reason) {
+            this(playerId, type, delta, before, after, reason, 0, "");
+        }
+
+        public Currency(long playerId, int type, long delta, long before, long after, Reason reason,
+                        long correlationId) {
+            this(playerId, type, delta, before, after, reason, correlationId, "");
+        }
     }
 
     /** @param gained true = 入包（to_player），false = 销毁（from_player） */
@@ -19,8 +29,9 @@ public final class RecordingAssetAudit implements AssetAudit {
     public final List<Item> items = new ArrayList<>();
 
     @Override
-    public void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason) {
-        currencies.add(new Currency(playerId, currencyType, delta, before, after, reason));
+    public void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason,
+                                long correlationId, String extra) {
+        currencies.add(new Currency(playerId, currencyType, delta, before, after, reason, correlationId, extra));
     }
 
     @Override

@@ -22,8 +22,11 @@ public final class KafkaAssetAudit implements AssetAudit {
     }
 
     @Override
-    public void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason) {
+    public void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason,
+                                long correlationId, String extra) {
         TransactionLogRecord.Builder record = TransactionLogRecord.newBuilder()
+                .setCorrelationId(correlationId)
+                .setExtra(boundedExtra(extra))
                 .setTimeMs(clock.epochMillis())
                 .setReason(reasonOf(reason))
                 .setKind(AssetKind.ASSET_CURRENCY)
@@ -86,6 +89,14 @@ public final class KafkaAssetAudit implements AssetAudit {
             case ATTRIBUTE_SCHEME_CREATE -> TransactionReason.TX_ATTRIBUTE_SCHEME_CREATE;
             case PET_RESET -> TransactionReason.TX_PET_RESET;
             case PET_RENAME -> TransactionReason.TX_PET_RENAME;
+            case DEFERRED_CLAWBACK -> TransactionReason.TX_DEFERRED_CLAWBACK;
+            case GUILD_DONATE -> TransactionReason.TX_GUILD_DONATE;
+            case GUILD_SHOP -> TransactionReason.TX_GUILD_SHOP;
+            case GUILD_ACTIVITY_REWARD -> TransactionReason.TX_GUILD_ACTIVITY_REWARD;
+            case AUCTION_SELL -> TransactionReason.TX_AUCTION_SELL;
+            case AUCTION_BUY -> TransactionReason.TX_AUCTION_BUY;
+            case TRADE -> TransactionReason.TX_TRADE;
+            case MAIL_ATTACHMENT -> TransactionReason.TX_MAIL_ATTACHMENT;
             case QUEST_REWARD -> TransactionReason.TX_QUEST_REWARD;
             case SYSTEM_GRANT -> TransactionReason.TX_SYSTEM_GRANT;
             case ITEM_DESTROY -> TransactionReason.TX_ITEM_DESTROY;

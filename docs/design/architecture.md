@@ -318,6 +318,30 @@ mmorpg：`player_pet.cpp`（PetSystem）+ `pet_rules.h` + `player_pet_handler.cp
   再发任务等级事实，最后回 175 应答（同基线升级事件顺序）。
 - **号与随机**：宝宝号用与物品同一个全服号源（`SceneGuids`）；资质随机数只在逻辑线程上用。写闸（冻结 / 战斗中）随 5.2 / 6.3 接入。
 
+### 4.12 通用资产通道（scene 侧）
+
+mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（scene），调用方 go guild / trade。用途：别的服务给**在线**
+玩家扣货币、发货币与物品，每条恰好生效一次。Java 版 scene 侧在 `com.game.scene.asset`，调用方随 4.5（帮会经济）/ 4.x（交易）接入：
+
+- **契约**（`xm-api` `xm.api.AssetOpRequest / AssetOpResponse`，Java 内部自有格式，字段语义与数值同基线）：请求带 (player_id, 流, 流纪元, seq)、
+  关联号、流水原因、一包资产、调用方签名；应答是结局 APPLIED（partial）/ REJECTED / RETRY / NOT_HERE / UNKNOWN + 原因 tip + durable。
+  调用方只在 APPLIED / REJECTED 且 durable 时终结这条 seq，否则用同一 seq 重查；RETRY / NOT_HERE / UNKNOWN 都没记账、不得终结：RETRY / NOT_HERE 稍后照常重投，UNKNOWN（信封畸形、验签失败、纪元过期、跳号过远、seq 滑出窗口）要告警转人工。
+- **账本** `AssetOpLedger`（领域对象，存 `player_state.asset_ledger`，与资产同一份记录、同一次围栏写，不存在「资产落了账本没落」）：
+  每条流 1024 位窗口（seen / applied 两组位）+ 拒绝原因环 + 部分发放名单，规则逐条同基线；加载时校验，不自洽就原样保留并让该玩家
+  的通道 fail-closed（RETRY 27005），绝不把坏账本当空账本（那会把已应用的 seq 重新看成未见、二次扣款）。
+- **验签** `AssetOpAuth`：每个调用方一把密钥、独占两条流（guild：1 / 2，trade：3 / 4；SYSTEM_CREDIT 没有合法调用方），密钥只从环境变量
+  `XM_ASSET_OP_SECRET_GUILD / _TRADE` 注入；规范串格式与基线逐字节相同。
+- **流程** `AssetOpService.handle`（逻辑线程）：信封 / 流方向 / 流水原因白名单 → 验签 → 找人 → 账本损坏 → 分类（已见只读答复；滑出窗口 /
+  跳号 / 旧纪元回 UNKNOWN 0 不猜结局）→ 归属围栏（owner_epoch 为 0 回 RETRY 27003）→ 中止占位 → 包内容（确定性失败记 REJECTED 27004）
+  → 扣款（余额不足记 REJECTED 27000）/ 发放（货币预检 → 物品整批 → 货币）。闸只在这一层，不下沉到 `CurrencyService` / `BagService`。
+- **durable**：只看最近一次确认落库的快照（`ScenePlayer.persistedState()`）里有没有这条结局，不另建水位；记账后立刻
+  `SceneWorld.requestSave`，不在调用里等落盘；已见未 durable 的重查 500 ms 内至多补存一次（限频时刻挂在账本实例上，不持久化）。
+- **入口** `AssetOpEndpoint`：任意线程调用，投递到逻辑线程、future 带回结局；`SceneNode.assetOps()` 暴露给以后的跨进程传输。
+- **接管守卫**（`SceneWorld` 进场）：本节点接管失去归属的旧实例时，库里仍是旧实例最近一次落库的样子才沿用旧内存，否则以库为准——
+  别的节点期间写过库（含已回报 durable 的资产结局）时，沿用旧内存会把它们盖掉。
+- **补缴欠款**（`Wallet.Debt`，休眠：没有挂欠款的入口，同基线）：加币时未冻结、未过期的欠款先抵 min(收入, 剩余)，还清即删；
+  流水先记 +收入、再记 −抵扣（TX_DEFERRED_CLAWBACK），共用关联号、前后余额首尾相接。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。

@@ -14,6 +14,9 @@ import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.player.store.PlayerStore;
+import com.game.scene.asset.AssetOpAuth;
+import com.game.scene.asset.AssetOpEndpoint;
+import com.game.scene.asset.AssetOpService;
 import com.game.scene.attribute.AttributeFeature;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.attribute.AttributeTables;
@@ -143,6 +146,8 @@ public class SceneNode implements SmartLifecycle {
     private volatile ThreadPoolExecutor storageExecutor;
     private volatile GateLinks links;
     private volatile SceneWorld world;
+    /** 资产通道的进程内入口（跨进程传输随路线图 4.5 接入）。 */
+    private volatile AssetOpEndpoint assetOps;
     private volatile ScheduledFuture<?> frameTask;
     private volatile ScheduledFuture<?> saveTask;
     private volatile NodeLinkServer linkServer;
@@ -228,7 +233,7 @@ public class SceneNode implements SmartLifecycle {
                 settings.anomaly().currencyThresholds(), settings.anomaly().itemThresholds(), SceneClock.SYSTEM, metrics);
         SceneGuids sceneGuids = acquireSceneGuids();
         AssetAudit assetAudit = startAudit(zoneId, nodeId, settings, sceneGuids);
-        CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics);
+        CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics, SceneClock.SYSTEM);
         BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
         startGainBlockSync(currency, bags, settings);
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
@@ -247,9 +252,12 @@ public class SceneNode implements SmartLifecycle {
                     attributes.initializeOnLoad(player);
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
+                    AssetOpService.checkLedgerOnLoad(player);
                 }, snapshots);
         links = gateLinks;
         world = sceneWorld;
+        assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
+                AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM));
         RunMode runMode = RunMode.parse(props.runMode());
         if (!RunMode.isRecognized(props.runMode())) {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
@@ -337,6 +345,11 @@ public class SceneNode implements SmartLifecycle {
     @Override
     public boolean isRunning() {
         return running;
+    }
+
+    /** 资产通道的进程内入口（任意线程可调）；节点没启动过为 null。 */
+    public AssetOpEndpoint assetOps() {
+        return assetOps;
     }
 
     /**

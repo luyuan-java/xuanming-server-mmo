@@ -29,6 +29,37 @@ message PlayerState {
   Vitals vitals = 6;
   // 宝宝（mmorpg PlayerPetComp 的 Java 自有对应）。没有这段 = 没有宝宝、未出战。
   PetState pets = 7;
+  // 通用资产通道的幂等账本（mmorpg PlayerAssetOpLedgerComp 的 Java 自有对应），与资产同一份记录、同一次围栏写：
+  // 扣款 / 发放与「这条 seq 已经处理过」原子落盘。没有这段 = 从没收到过资产通道请求。
+  AssetOpLedgerState asset_ledger = 8;
+}
+
+// 资产通道账本：每条流一本，按流号升序。
+message AssetOpLedgerState {
+  repeated AssetOpStreamLedgerState streams = 1;
+}
+
+// 一条流的账本：1024 位窗口覆盖 (watermark, watermark + 1024]，位 i ↔ seq = watermark + 1 + i（第 i / 64 个字的第 i % 64 位）。
+message AssetOpStreamLedgerState {
+  // 流号（1 帮会扣、2 帮会发、3 交易扣、4 交易发、5 系统发）。
+  uint32 stream = 1;
+  uint64 watermark = 2;
+  // 已见 / 已应用位图，各恰好 16 个字；applied ⊆ seen，已见未应用 = 已拒。
+  repeated fixed64 seen_bits = 3;
+  repeated fixed64 applied_bits = 4;
+  // 窗口内被拒 seq 的原因（只收非 0 原因，按 seq 升序，至多 64 条）。
+  repeated AssetOpRejectionState rejections = 5;
+  // 本纪元见过的最大 seq（跳号上限的基准）。
+  uint64 max_seq = 6;
+  // 流纪元（调用方建这本 seq 时的毫秒）；更大的纪元整条流重置。
+  uint64 stream_epoch = 7;
+  // 窗口内部分发放的 seq（按升序，至多 64 条）。
+  repeated uint64 partial_seqs = 8;
+}
+
+message AssetOpRejectionState {
+  uint64 seq = 1;
+  uint32 reason_tip_id = 2;
 }
 
 // 宝宝：实例按获得顺序；二级属性与点数总量不落库（按资质 + 已分配 + 等级现算）。
@@ -97,6 +128,24 @@ message CurrencyState {
   repeated uint64 balances = 1;
   // GM 封禁获取的币种（按封禁先后）。
   repeated uint32 blocked_types = 2;
+  // 补缴欠款（mmorpg CurrencyComp.debts 的 Java 自有对应），按币种升序：之后到账的该币种收入先抵欠款。
+  // 目前没有任何写入入口（同基线：GM 挂欠款随路线图 7.2），只会来自存档。
+  repeated CurrencyDebtState debts = 3;
+}
+
+// 一笔补缴欠款。
+message CurrencyDebtState {
+  uint32 currency_type = 1;
+  // 欠款总额与已抵扣额；剩余 = owed − paid，还清即删。
+  uint64 owed = 2;
+  uint64 paid = 3;
+  // GM 冻结：暂停自动抵扣。
+  bool frozen = 4;
+  // 到期时间（Unix 秒，0 = 不过期）；过期后不再抵扣（不删）。
+  uint64 expires_at = 5;
+  string reason = 6;
+  string gm_operator = 7;
+  uint64 created_at = 8;
 }
 
 message Facing {

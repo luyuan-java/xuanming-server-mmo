@@ -7,6 +7,7 @@ import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorType;
 import com.game.proto.Rotation;
 import com.game.proto.Transform;
+import com.game.scene.asset.AssetOpLedger;
 import com.game.scene.player.GainWindows;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
@@ -68,6 +69,8 @@ public final class ScenePlayer {
     private final PlayerMissions missions;
     /** 宝宝（存档原样收下，进场景前由宝宝服务纠正出战号、同步等级）。 */
     private final PlayerPets pets;
+    /** 资产通道幂等账本（与资产同一份记录、同一次围栏写；加载时校验，损坏则原样带回并关闭该玩家的资产通道）。 */
+    private final AssetOpLedger assetLedger;
     /** 获取滑动窗口（获取异常检测；不持久化，随实例清空）。 */
     private final GainWindows gainWindows = new GainWindows();
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
@@ -114,6 +117,7 @@ public final class ScenePlayer {
         this.bags = state.hasBag() ? PlayerBags.restore(state.getBag()) : PlayerBags.empty();
         this.missions = state.hasMission() ? PlayerMissions.restore(state.getMission()) : PlayerMissions.empty();
         this.pets = state.hasPets() ? PlayerPets.restore(state.getPets()) : PlayerPets.empty();
+        this.assetLedger = state.hasAssetLedger() ? AssetOpLedger.restore(state.getAssetLedger()) : AssetOpLedger.empty();
     }
 
     public long playerId() {
@@ -309,6 +313,9 @@ public final class ScenePlayer {
         if (!pets.isPristine()) {
             state.setPets(pets.toState());
         }
+        if (!assetLedger.isPristine()) {
+            state.setAssetLedger(assetLedger.toState());
+        }
         return state.build();
     }
 
@@ -340,6 +347,18 @@ public final class ScenePlayer {
     /** 玩家的任务（逻辑线程上读写；写入只经任务服务）。 */
     public PlayerMissions missions() {
         return missions;
+    }
+
+    /** 玩家的资产通道账本（逻辑线程上读写；写入只经资产通道）。 */
+    public AssetOpLedger assetLedger() {
+        return assetLedger;
+    }
+
+    /**
+     * 最近一次确认落库的玩法数据（资产通道据此判 durable：结局出现在这份里才算已落盘）；null = 不确定（上次在线存盘结局不明）。
+     */
+    public PlayerState persistedState() {
+        return lastPersisted == null ? null : lastPersisted.state();
     }
 
     /** 玩家的获取滑动窗口（逻辑线程上读写；只由获取异常检测使用）。 */

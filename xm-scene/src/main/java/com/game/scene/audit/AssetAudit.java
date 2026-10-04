@@ -35,7 +35,23 @@ public interface AssetAudit {
         /** 系统发放的物品（基线 TX_SYSTEM_GRANT：没有更具体来源的入包）。 */
         SYSTEM_GRANT,
         /** 物品销毁（基线 TX_ITEM_DESTROY）：临时格淘汰、整理合并掉的空实例。 */
-        ITEM_DESTROY
+        ITEM_DESTROY,
+        /** 补缴抵扣（基线 TX_DEFERRED_CLAWBACK）：到账的收入先抵欠款。 */
+        DEFERRED_CLAWBACK,
+        /** 以下是资产通道按请求的流水原因（数值同基线 TransactionType）：帮会捐献扣款。 */
+        GUILD_DONATE,
+        /** 帮会商店发物。 */
+        GUILD_SHOP,
+        /** 帮会活动发奖。 */
+        GUILD_ACTIVITY_REWARD,
+        /** 聚宝斋卖出扣款（交易二期）。 */
+        AUCTION_SELL,
+        /** 聚宝斋买到发放（交易二期）。 */
+        AUCTION_BUY,
+        /** 玩家间交易发放（交易二期）。 */
+        TRADE,
+        /** 邮件附件（预留）。 */
+        MAIL_ATTACHMENT
     }
 
     /**
@@ -43,7 +59,24 @@ public interface AssetAudit {
      * @param before 变动前余额
      * @param after  变动后余额
      */
-    void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason);
+    default void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason) {
+        currencyChanged(playerId, currencyType, delta, before, after, reason, 0, "");
+    }
+
+    /** 带关联号的货币流水（资产通道的单号）。 */
+    default void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason,
+                                 long correlationId) {
+        currencyChanged(playerId, currencyType, delta, before, after, reason, correlationId, "");
+    }
+
+    /**
+     * 完整形态：补缴抵扣与它跟随的那笔收入共用一个关联号，抵扣那条带附加信息（同基线 {@code {"debt_remaining":N}}）。
+     *
+     * @param correlationId 关联号（0 = 无）
+     * @param extra         附加信息 JSON（空 = 无）
+     */
+    void currencyChanged(long playerId, int currencyType, long delta, long before, long after, Reason reason,
+                         long correlationId, String extra);
 
     /**
      * 物品入包（获得方 to_player，同基线 LogItemCreate）：每个配置一条。
@@ -66,9 +99,10 @@ public interface AssetAudit {
         return new AssetAudit() {
             @Override
             public void currencyChanged(long playerId, int currencyType, long delta, long before, long after,
-                                        Reason reason) {
-                log.info("currency player={} type={} delta={} before={} after={} reason={}",
-                        Long.toUnsignedString(playerId), currencyType, delta, before, after, reason);
+                                        Reason reason, long correlationId, String extra) {
+                log.info("currency player={} type={} delta={} before={} after={} reason={} correlation={} extra={}",
+                        Long.toUnsignedString(playerId), currencyType, delta, Long.toUnsignedString(before),
+                        Long.toUnsignedString(after), reason, Long.toUnsignedString(correlationId), extra);
             }
 
             @Override

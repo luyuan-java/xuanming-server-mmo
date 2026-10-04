@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
+import com.game.player.store.state.CurrencyState;
+import com.game.player.store.state.PlayerState;
 import com.game.proto.MessageContent;
 import com.game.proto.Vector3;
 import com.game.proto.ActorCreateS2C;
@@ -264,6 +266,41 @@ class SceneWorldTest {
         assertThat(repo.saves()).isEmpty();
         assertThat(world.playerBySession(new SessionKey(LINK, 21))).isNotNull();
         assertThat(world.playerCount()).isEqualTo(2);
+    }
+
+    @Test
+    void 旧实例失去归属期间别的节点写过库_以库为准_不沿用旧内存() {
+        repo.putNewPlayer(1001, 1);
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        ScenePlayer old = world.playerBySession(new SessionKey(LINK, 11));
+        assertThat(old.wallet().add(0, 777).ok()).isTrue();
+        // 别的节点夺权（epoch 2）并写过库（金币 50、换了图），之后又被这次进场夺权（epoch 3）
+        PlayerState written = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder()
+                .addBalances(50).addBalances(0).addBalances(0)).build();
+        repo.put(new PlayerData(1001, 3, 3, 1, "look-1001", 1, 1, new Vec3(30, 40, 0), written));
+
+        enter(LINK, 21, 1001, scene.sceneId(), 3);
+
+        ScenePlayer now = world.playerBySession(new SessionKey(LINK, 21));
+        assertThat(now.wallet().balance(0)).isEqualTo(50);
+        assertThat(now.position()).isEqualTo(new Vec3(30, 40, 0));
+        assertThat(sink.kicks()).containsExactly(new Kicked(LINK, 11, 1001, 1, KICKED));
+        assertThat(repo.saves()).isEmpty();
+    }
+
+    @Test
+    void 旧实例上次在线存盘结局不明_以库为准() {
+        repo.putNewPlayer(1001, 1);
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        ScenePlayer old = world.playerBySession(new SessionKey(LINK, 11));
+        old.wallet().add(0, 777);
+        assertThat(world.requestSave(old)).isEqualTo(SceneWorld.SaveRequest.WRITTEN);
+        repo.takeProgress().complete(PlayerRepository.ProgressResult.FAILED);
+        repo.putNewPlayer(1001, 2);
+
+        enter(LINK, 21, 1001, scene.sceneId(), 2);
+
+        assertThat(world.playerBySession(new SessionKey(LINK, 21)).wallet().balance(0)).isZero();
     }
 
     @Test

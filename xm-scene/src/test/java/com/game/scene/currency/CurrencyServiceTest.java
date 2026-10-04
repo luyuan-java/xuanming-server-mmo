@@ -27,7 +27,8 @@ class CurrencyServiceTest {
     private final AssetAudit audit = (CurrencyAudit) (playerId, type, delta, before, after, reason) -> audited.add(delta);
     private final SceneMetrics metrics = new SceneMetrics(meters);
     private final CurrencyService service = new CurrencyService(audit, new GainAnomalyDetector(
-            new Threshold(Duration.ofSeconds(60), 0, 100), Map.of(), Map.of(), new ManualClock(), metrics), metrics);
+            new Threshold(Duration.ofSeconds(60), 0, 100), Map.of(), Map.of(), new ManualClock(), metrics), metrics,
+            new ManualClock());
     private final ScenePlayer player = WorldTestAccess.player(1001);
 
     private double counter(String name, String tag, String value) {

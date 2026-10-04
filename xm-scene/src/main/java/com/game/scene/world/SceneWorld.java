@@ -306,14 +306,23 @@ public final class SceneWorld {
         List<Integer> skills = tables.initialSkills();
         if (previous != null) {
             // 本节点上还挂着这个玩家的旧实例，而库里的归属已经被这次进场夺走——只会发生在旧实例失去归属之后
-            // （续约失败、租约过期被强制夺权，续约检测还没来得及移除它）。旧实例的内存状态比库里新（只在离场时写回），
-            // 沿用它；它的 epoch 已过期，写回只会被围栏拒绝，所以不写。旧实例挂在别的会话上时，告诉 gate 把那个会话踢掉，
-            // 不让它悬空（请求转到 scene 后找不到玩家、收不到任何提示）。
-            savedConfigId = previous.scene().configId();
-            savedPosition = previous.position();
-            level = previous.level();
-            state = previous.persistentState();
-            skills = previous.skills();
+            // （续约失败、租约过期被强制夺权，续约检测还没来得及移除它）。它的 epoch 已过期，写回只会被围栏拒绝，所以不写。
+            // 旧实例挂在别的会话上时，告诉 gate 把那个会话踢掉，不让它悬空（请求转到 scene 后找不到玩家、收不到任何提示）。
+            if (previous.ownerEpoch() == epoch
+                    || previous.lastPersisted() != null && sameContent(previous.lastPersisted(), data.asPersisted())) {
+                // 同一 epoch 的重复进场（旧实例仍持有归属，不可能有别的写者），或库里仍是旧实例最近一次确认写进去的样子
+                // （期间没有别的节点写过）：旧实例的内存只会更新，沿用它。
+                savedConfigId = previous.scene().configId();
+                savedPosition = previous.position();
+                level = previous.level();
+                state = previous.persistentState();
+                skills = previous.skills();
+            } else {
+                // 期间别的节点夺过归属并写过库（或旧实例上次存盘结局不明）：库里那份才是权威，沿用旧内存会把别人已落库的改动
+                // （含资产通道已回报 durable 的结局）整个盖掉。旧实例没落库的改动随之作废，与宕机丢失同等。
+                log.warn("接管旧实例时库里的数据已不是它最近一次落库的样子，以库为准 player={} 旧epoch={} 新epoch={}",
+                        playerId, previous.ownerEpoch(), epoch);
+            }
             removePlayer(previous, false);
             if (!previous.session().equals(key)) {
                 kick(previous, "被新的进场接管（旧实例已失去归属）");
@@ -341,6 +350,12 @@ public final class SceneWorld {
         snapshots.capture(player.toSave(), PlayerSnapshots.Cause.LOGIN);
         log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={}", playerId, key,
                 scene.sceneId(), player.entity(), player.ownerEpoch(), previous != null);
+    }
+
+    /** 两份写回内容相同（不比 owner_epoch：库里的 epoch 已被这次进场夺权改掉）。 */
+    private static boolean sameContent(PlayerSave a, PlayerSave b) {
+        return a.level() == b.level() && a.sceneConfigId() == b.sceneConfigId() && a.position().equals(b.position())
+                && a.state().equals(b.state());
     }
 
     /**
@@ -693,26 +708,61 @@ public final class SceneWorld {
             if (Long.remainderUnsigned(player.playerId(), intervalSeconds) != slot) {
                 continue;
             }
-            if (player.progressSaveInFlight()) {
-                metrics.periodicSave(PeriodicSave.IN_FLIGHT);
-                continue;
-            }
-            PlayerSave snapshot = player.toSave();
-            if (snapshot.equals(player.lastPersisted())) {
-                metrics.periodicSave(PeriodicSave.UNCHANGED);
-                continue;
-            }
-            if (!repository.acceptsProgress()) {
+            switch (submitProgress(player)) {
+                case IN_FLIGHT -> metrics.periodicSave(PeriodicSave.IN_FLIGHT);
+                case UNCHANGED -> metrics.periodicSave(PeriodicSave.UNCHANGED);
                 // 存储积压：这一轮余下的到期玩家都推到下个周期，不把续约 / 最终写回堵在后面。
-                metrics.periodicSave(PeriodicSave.DEFERRED);
-                continue;
+                case DEFERRED -> metrics.periodicSave(PeriodicSave.DEFERRED);
+                case WRITTEN -> {
+                    metrics.periodicSave(PeriodicSave.WRITTEN);
+                    submitted++;
+                }
+                case STOPPED -> {
+                }
             }
-            player.setProgressSaveInFlight(true);
-            metrics.periodicSave(PeriodicSave.WRITTEN);
-            repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result));
-            submitted++;
         }
         return submitted;
+    }
+
+    /** 一次立即存盘请求的结局（{@link #requestSave}）。 */
+    public enum SaveRequest {
+        /** 已提交在线存盘，结局回来后更新落库快照。 */
+        WRITTEN,
+        /** 与最近一次确认落库的快照相同：库里已是此刻的样子，不写。 */
+        UNCHANGED,
+        /** 已有一次在线存盘在途（它的快照可能不含最新改动，回来后下次请求 / 下个周期再比）。 */
+        IN_FLIGHT,
+        /** 存储积压，没提交。 */
+        DEFERRED,
+        /** 已停服或该实例已不在本节点，没提交。 */
+        STOPPED
+    }
+
+    /**
+     * 立刻为这个玩家提交一次在线存盘（不等周期）：资产通道记账后要尽快落盘、据实回报 durable（基线 SavePlayerToRedis）。
+     * 规则同周期存盘（同一玩家至多一个在途、与落库快照相同就不写、存储积压就不提交），只是不按槽号。
+     */
+    public SaveRequest requestSave(ScenePlayer player) {
+        if (periodicSaveStopped || playersById.get(player.playerId()) != player) {
+            return SaveRequest.STOPPED;
+        }
+        return submitProgress(player);
+    }
+
+    private SaveRequest submitProgress(ScenePlayer player) {
+        if (player.progressSaveInFlight()) {
+            return SaveRequest.IN_FLIGHT;
+        }
+        PlayerSave snapshot = player.toSave();
+        if (snapshot.equals(player.lastPersisted())) {
+            return SaveRequest.UNCHANGED;
+        }
+        if (!repository.acceptsProgress()) {
+            return SaveRequest.DEFERRED;
+        }
+        player.setProgressSaveInFlight(true);
+        repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result));
+        return SaveRequest.WRITTEN;
     }
 
     /** 在线存盘的结局（逻辑线程）。实例可能已经离场（离场不等在途的在线存盘），那就只清在途标记。 */
@@ -807,6 +857,11 @@ public final class SceneWorld {
 
     ScenePlayer playerBySession(SessionKey key) {
         return playersBySession.get(key);
+    }
+
+    /** 按 player_id 找本节点上的玩家（已进场的实例；加载中的不算）；没有为 null。 */
+    public ScenePlayer playerById(long playerId) {
+        return playersById.get(playerId);
     }
 
     /** 按场景实体号找本节点上的玩家（任意场景）；没有为 null。 */

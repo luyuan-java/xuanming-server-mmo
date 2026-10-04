@@ -233,7 +233,8 @@ class AuditPipelineTest {
 
         audit.currencyChanged(1001, 1, 500, 0, 500, Reason.GM_GRANT);
         audit.currencyChanged(1001, 0, -500, 600, 100, Reason.ATTRIBUTE_RESET);
-        await().atMost(Duration.ofSeconds(5)).until(() -> producer.history().size() == 2);
+        audit.currencyChanged(1001, 0, -30, -2L, 7, Reason.DEFERRED_CLAWBACK, Long.MIN_VALUE, "{\"debt_remaining\":0}");
+        await().atMost(Duration.ofSeconds(5)).until(() -> producer.history().size() == 3);
 
         List<TransactionLogRecord> records = producer.history().stream().map(r -> {
             try {
@@ -251,6 +252,11 @@ class AuditPipelineTest {
         assertThat(records.get(1).getReason()).isEqualTo(TransactionReason.TX_ATTRIBUTE_RESET);
         assertThat(records.get(1).getCurrencyDelta()).isEqualTo(-500);
         assertThat(producer.history().get(1).key()).isEqualTo("1001");
+        assertThat(records.get(2).getCorrelationId()).as("关联号按 uint64 原样带上").isEqualTo(Long.MIN_VALUE);
+        assertThat(records.get(2).getExtra()).isEqualTo("{\"debt_remaining\":0}");
+        assertThat(records.get(2).getBalanceBefore()).isEqualTo(-2L);
+        assertThat(records.get(2).getReason()).isEqualTo(TransactionReason.TX_DEFERRED_CLAWBACK);
+        assertThat(records.get(0).getCorrelationId()).isZero();
         for (Reason reason : Reason.values()) {
             assertThat(KafkaAssetAudit.reasonOf(reason)).isNotEqualTo(TransactionReason.TX_REASON_UNSPECIFIED);
         }

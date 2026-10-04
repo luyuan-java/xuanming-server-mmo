@@ -1,6 +1,7 @@
 package com.game.data.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.game.data.admin.AuditQueryController;
 import com.game.data.snapshot.PlayerSnapshotRow;
@@ -91,6 +92,32 @@ class AuditStoreSqlTest {
         assertThat(query.transactionLog("1001", 150, Long.MAX_VALUE, 100)).extracting(m -> m.get("txId"))
                 .containsExactly("3");
         assertThat(query.transactionLog("1001", 0, Long.MAX_VALUE, 1)).hasSize(1);
+    }
+
+    @Test
+    void 无符号列越过2的63次方_原样落库原样读回() {
+        // H2 的 BIGINT 没有无符号，≥ 2^63 的值只在真 MySQL 上验
+        assumeTrue(MYSQL_URL != null, "需要 -Dxm.it.mysql");
+        long hugeBalance = -1L;               // 2^64 − 1：补缴抵扣链的中间余额最多到 2^64 − 2
+        long hugeCorrelation = Long.MIN_VALUE; // 2^63：调用方给的单号
+        TransactionLogRow row = new TransactionLogRow(-2L, 100, 25, 1, 0, 1001, 0, 110, Long.MAX_VALUE - 10,
+                hugeBalance, -3L, -4, -5, hugeCorrelation, "", -6);
+
+        assertThat(sink.insert(List.of(row))).isEqualTo(1);
+
+        TransactionLogEntry e = mapper.findByToPlayer(1001, 0, Long.MAX_VALUE, 10).get(0);
+        assertThat(e.getTxId()).isEqualTo(-2L);
+        assertThat(e.getBalanceBefore()).isEqualTo(Long.MAX_VALUE - 10);
+        assertThat(e.getBalanceAfter()).isEqualTo(hugeBalance);
+        assertThat(e.getItemUuid()).isEqualTo(-3L);
+        assertThat(e.getItemConfigId()).isEqualTo(-4);
+        assertThat(e.getItemQuantity()).isEqualTo(-5);
+        assertThat(e.getCorrelationId()).isEqualTo(hugeCorrelation);
+        assertThat(e.getZoneId()).isEqualTo(-6);
+        Map<String, Object> view = new AuditQueryController(mapper, snapshotMapper)
+                .transactionLog("1001", 0, Long.MAX_VALUE, 10).get(0);
+        assertThat(view).containsEntry("balanceAfter", "18446744073709551615")
+                .containsEntry("correlationId", "9223372036854775808").containsEntry("itemQuantity", 4294967291L);
     }
 
     @Test

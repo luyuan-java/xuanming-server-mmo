@@ -1,0 +1,83 @@
+// Java 版内部契约：通用资产通道（其他服务给在线玩家扣货币 / 发货币与物品，幂等账本保证每条 seq 恰好处理一次）。
+// 对应 mmorpg proto/common/asset/asset_op.proto + scene_node_service 的 AssetDebit / AssetAbortDebit / AssetCredit，
+// 但是 Java 自有格式（mmorpg 那份是服务端内部协议，不在两版共享的客户端契约里）。字段语义与数值同基线，签名串格式也同基线。
+// 只在 Java 版内部使用；传输（Dubbo）随路线图 4.5 帮会经济接入，目前 scene 侧在进程内提供。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// 流：每条流一个调用方独占、一个方向（同 mmorpg AssetOpStream 数值）。
+enum AssetStream {
+  ASSET_STREAM_UNSPECIFIED = 0;
+  ASSET_STREAM_GUILD_DEBIT = 1;
+  ASSET_STREAM_GUILD_CREDIT = 2;
+  ASSET_STREAM_TRADE_DEBIT = 3;
+  ASSET_STREAM_TRADE_CREDIT = 4;
+  // 预留（邮件 / GM 发物），目前没有调用方被允许用它。
+  ASSET_STREAM_SYSTEM_CREDIT = 5;
+}
+
+// 结局（同 mmorpg AssetOpOutcome 数值）。
+enum AssetOutcome {
+  // 请求畸形 / 验签失败 / 纪元过期 / 跳号过远 / seq 已滑出窗口：调用方告警、转人工，不终结。
+  ASSET_OUTCOME_UNKNOWN = 0;
+  // 已应用（可能带 partial = true：部分发放，转人工补偿）。
+  ASSET_OUTCOME_APPLIED = 1;
+  ASSET_OUTCOME_REJECTED = 2;
+  // 暂时条件（冻结 / 战斗 / 背包满 …），未记账，同一 seq 稍后重投。
+  ASSET_OUTCOME_RETRY = 3;
+  // 玩家不在本节点，未记账。
+  ASSET_OUTCOME_NOT_HERE = 4;
+}
+
+message AssetCurrency {
+  uint32 currency_type = 1;
+  uint64 amount = 2;
+}
+
+message AssetItem {
+  uint32 config_id = 1;
+  uint32 count = 2;
+}
+
+// 一包资产。item_uuids / pet_id 是按实例扣发（交易托管二期），目前一律记账拒绝。
+message AssetBundle {
+  repeated AssetCurrency currencies = 1;
+  repeated AssetItem items = 2;
+  repeated uint64 item_uuids = 3;
+  uint64 pet_id = 4;
+}
+
+// 调用方签名：HMAC-SHA256(调用方密钥, 规范串) 的小写十六进制；规范串见 scene 的 AssetOpAuth（同基线 mmorpg-asset-op/v1）。
+message AssetAuth {
+  string caller = 1;
+  uint64 timestamp_ms = 2;
+  string signature_hex = 3;
+}
+
+message AssetOpRequest {
+  uint64 player_id = 1;
+  AssetStream stream = 2;
+  // 流内序号（≥ 1），调用方单调分配；(玩家, 流, 纪元, seq) 是幂等键。
+  uint64 seq = 3;
+  // 业务关联号（调用方的单号），进资产流水。
+  uint64 correlation_id = 4;
+  // 流水原因（mmorpg TransactionType 数值，按流白名单校验）。
+  uint32 tx_type = 5;
+  AssetBundle bundle = 6;
+  // 流纪元（调用方建这本 seq 时的毫秒，≥ 1）。
+  uint64 stream_epoch = 7;
+  AssetAuth auth = 8;
+}
+
+message AssetOpResponse {
+  AssetOutcome outcome = 1;
+  // 原因提示码（asset_error 27000–27008 等；0 = 无）。
+  uint32 reason = 2;
+  // 结局已经落进最近一次确认写成功的存档（调用方只在 APPLIED / REJECTED 且 durable 时终结这条 seq）。
+  bool durable = 3;
+  bool partial = 4;
+}
