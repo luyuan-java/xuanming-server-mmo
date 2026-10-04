@@ -88,7 +88,7 @@ class MissionFeatureTest {
                     bags.initializeOnLoad(player);
                     service.initializeOnLoad(player);
                 }, PlayerSnapshots.NONE);
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, sceneTables, RunMode.DEV,
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
                 List.of(new MissionFeature(service), new ActivityFeature(service)));
         Scene scene = world.createScene(1);
         repo.put(new PlayerData(PLAYER, 1, 3, 1, "", 1, 0, Vec3.ORIGIN, state));

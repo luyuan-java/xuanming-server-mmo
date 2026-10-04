@@ -8,7 +8,7 @@ gate 经 muduo RPC 投递 `PlayerEnterGameNode` / `ProcessClientPlayerMessage`�
 「Redis owner_epoch CAS + Kafka DBTask」，带脏快照比较、退出收敛、断线释放标记（A1′/A2′）与跨节点 / 跨 zone 归属交接（冻结 + handoff 标记 + 看门狗）。
 场景实例由 Go scene_manager 按 World / Dungeon / Mirror 表经 gRPC `CreateScene` 下发，scene 只登记；客户端换图（63）、跨 zone 传送（226）、镜像副本都绕 scene_manager 往返。
 Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 / AOI / 66、owner_epoch 围栏写回（MySQL）、顶号、停服写回；
-缺：属性点 / 方案 / 面板（167–175）、等级经验、周期存盘、跨节点换图、副本 / 镜像、断线重连租约、跨 zone 传送、GM 闸、ActorActionState 等。
+缺：属性点 / 方案 / 面板（167–175）、等级经验、周期存盘、跨节点换图、副本 / 镜像、断线重连租约、跨 zone 传送、GM 闸等（ActorActionState 已随 2.6 接入）。
 状态判定以 `D:\work\xuanming-server-mmo` 的 grep 结果为准（2026-10-02）。
 
 ## 功能
@@ -35,7 +35,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - java: done — `xm-scene/.../world/ClientRequestHandler.java`（会话 + player_id 校验、解析失败丢弃、Empty 不回包、未实现方法回 1006、touch 刷新活跃帧）。「退出中」状态 Java 不存在（离场即移除，后到消息按会话找不到丢弃），不适用。
 - size: M
 - robot: robot_smoke、MovementScenario
-- hazards: 基线 handler 若直接写 response->error_message 会被 TLS 空 tip 覆盖成成功（ReleaseSkill 的 1001 实际下发为 0；player_scene_handler 曾因此 7 处拒绝全部失效）——Java 如实回码属有意差异，需在 PARITY 保持登记；GM 分支必须清 TLS tip，否则污染下一条请求。
+- hazards: 基线 handler 若直接写 response->error_message 会被 TLS 空 tip 覆盖成成功（ReleaseSkill 的 1001 实际下发为 0；player_scene_handler 曾因此 7 处拒绝全部失效）——Java 如实回码属有意差异，2026-10-03 起在 PARITY「放技能 84 的校验链」行登记（此前只写在 Javadoc 里）；GM 分支必须清 TLS tip，否则污染下一条请求。
 
 ### request-field-sanity-check — 请求字段规模与负数校验
 - mmorpg: scene_handler.cpp（三个入口都调）、cpp/libs/engine/core/utils/proto/proto_field_checker.cpp、network_constants.h（kProtoFieldCheckerThreshold=20）
@@ -399,12 +399,12 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 
 ### actor-action-state — 行为 / 状态互斥表（ActorActionState）
 - mmorpg: actor/action_state/system/actor_action_state.cpp、constants/actor_state.h；combat/skill/system/skill.cpp（ReleaseSkill 调 TryPerformAction(kActorActionUseSkill, kActorStateCombat)）；handler/event/actor_event_handler.cpp（InterruptCurrentStateEvent）
-- client messages: 84 ReleaseSkill 的拒绝 tip（表配的 state_tip）、33 NotifySkillInterrupted（打断）
+- client messages: 84 ReleaseSkill 的拒绝 tip（表配的 state_tip）（打断事件的处理器为空，与 33 无关；33 是施法阶段的打断）
 - tables: ActorActionState（按行为：每个状态的 state_mode 0=互斥 / 1=允许 / 2=打断 + state_tip）、ActorActionCombatState
 - depends on: none（被技能 / 组队跟随 / 坐骑使用）
 - behavior: 状态集合 Combat / TeamFollow / Mounted；执行行为前遍历当前状态：任一互斥 → 回该格的 state_tip；可打断的先发打断事件并移除状态；成功后加上成功状态。目前只有放技能接入（进入 Combat 状态）。
 - internal: 先快照状态键再遍历（打断会删 map 元素，原写法 UB）。
-- java: missing（移到路线图 2.6；当前表数据下无客户端可见效果，见 PARITY「行为互斥表」行）— Java ReleaseSkill 只校验技能存在 / 拥有（`ClientRequestHandler.releaseSkill`），无状态互斥。
+- java: done（2026-10-03，批次 2.6）— `SkillRules.tryPerformAction / validateCombatStates / checkSkillPermission` 在 `SkillService.release` 里（表提示 1000 放行、0 按配置错回 1002；「战斗」状态永久加上、不持久化）；当前表数据下无客户端可见效果，见 PARITY「行为互斥表」行。
 - size: S
 - robot: robot_smoke（skill）
 - hazards: Combat 状态加上后全仓没有移除路径（脱战逻辑在 combat_state 区域），移植前先确认基线是否会永久处于 Combat。

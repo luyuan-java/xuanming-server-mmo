@@ -71,7 +71,7 @@ class MovementSyncTest {
         AtomicLong ids = new AtomicLong(7000);
         FakeSceneTables tables = new FakeSceneTables();
         world = new SceneWorld(tables, IDS, sink, repo, ids::incrementAndGet, clock, SceneMetrics.noop());
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, tables);
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS);
         scene = world.createScene(1);
     }
 
@@ -674,7 +674,7 @@ class MovementSyncTest {
         AtomicLong ids = new AtomicLong(9000);
         FakeSceneTables tables = new FakeSceneTables();
         world = new SceneWorld(tables, IDS, sink, wrapped, ids::incrementAndGet, clock, SceneMetrics.noop());
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, tables);
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS);
         scene = world.createScene(1);
     }
 

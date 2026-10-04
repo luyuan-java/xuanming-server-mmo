@@ -65,6 +65,7 @@ class SceneWorldTest {
         assertThat(IDS.notifyActorDestroy()).isEqualTo(51);
         assertThat(IDS.notifySceneInfo()).isEqualTo(31);
         assertThat(IDS.notifySkillUsed()).isEqualTo(70);
+        assertThat(IDS.notifySkillInterrupted()).isEqualTo(33);
         assertThat(IDS.listSkills()).isEqualTo(77);
         assertThat(IDS.releaseSkill()).isEqualTo(84);
         assertThat(IDS.enterScene()).isEqualTo(63);

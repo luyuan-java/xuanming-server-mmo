@@ -62,7 +62,7 @@ class CurrencyFeatureTest {
         FakeSceneTables tables = new FakeSceneTables();
         AtomicLong ids = new AtomicLong(5000);
         world = new SceneWorld(tables, Contracts.IDS, sink, repo, ids::incrementAndGet, new ManualClock(), SceneMetrics.noop());
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, tables, mode,
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, mode,
                 List.of(new CurrencyFeature(new CurrencyService(audit))));
         scene = world.createScene(1);
         repo.put(new PlayerData(PLAYER, 1, 3, 1, "", 1, 0, Vec3.ORIGIN, state));

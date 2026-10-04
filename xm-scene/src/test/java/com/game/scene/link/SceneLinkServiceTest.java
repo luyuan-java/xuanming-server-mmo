@@ -53,7 +53,7 @@ class SceneLinkServiceTest {
         AtomicLong ids = new AtomicLong(9000);
         world = new SceneWorld(tables, Contracts.IDS, links, repo, ids::incrementAndGet, new ManualClock(), metrics);
         scene = world.createScene(1);
-        ClientRequestHandler requests = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, tables);
+        ClientRequestHandler requests = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS);
         service = new SceneLinkService(IDENTITY, links, world, requests, metrics);
     }
 

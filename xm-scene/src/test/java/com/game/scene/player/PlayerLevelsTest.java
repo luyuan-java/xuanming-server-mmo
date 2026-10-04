@@ -2,10 +2,17 @@ package com.game.scene.player;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.combat.CombatDamageRules;
 import org.junit.jupiter.api.Test;
 
 /** 对照 mmorpg {@code PlayerLevelRulesTest}。 */
 class PlayerLevelsTest {
+
+    @Test
+    void 伤害公式的等级系数封顶与玩家等级上限一致() {
+        // 基线 combat_damage_rules_test LevelFactorCapMatchesPlayerLevelCap
+        assertThat(CombatDamageRules.LEVEL_FACTOR_MAX_LEVEL).isEqualTo(PlayerLevels.MAX_LEVEL);
+    }
 
     @Test
     void GM设等级只接受1到85() {

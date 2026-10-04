@@ -145,8 +145,8 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 
 - **分发**（`ClientRequestHandler`）：gate 转来的 `ClientForward` 先过会话 / player_id / 消息号 / 请求体校验，
   再过字段规模与负数校验（`RequestFieldCheck`，同基线 `ProtoFieldChecker`：任一 repeated / map 字段元素数 > 20、
-  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`、任务 `MissionFeature`、活动 `ActivityFeature`，以后的玩法同样各成一个），
-  场景核心（移动、技能、换场景、场景信息）由 `ClientRequestHandler` 自己注册。注册时校验：方法在契约里、属于标了
+  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`、任务 `MissionFeature`、活动 `ActivityFeature`、放技能 `SkillFeature`，以后的玩法同样各成一个），
+  场景核心（移动、技能列表 77、换场景、场景信息）由 `ClientRequestHandler` 自己注册。注册时校验：方法在契约里、属于标了
   `OptionIsPlayerService` 的客户端服务、请求类型与契约一致、没有重复——任一不符启动即失败。
 - **处理器契约**（`PlayerRequestHandler` + `PlayerCall`）：在场景逻辑线程上调用；经 `call.reply(...)` 回应答，`message_id` 同请求、
   `id` 回显请求号；每条请求至多回一次，应答类型必须与契约一致，`Empty` 应答的方法不能回。处理器没回、回错类型、抛异常
@@ -277,6 +277,22 @@ mmorpg：`cpp/libs/modules/{mission,condition}/**` + `PlayerMissionSystem`（接
   不占类型、不再推进。
 - **客户端**：`MissionFeature`（193 / 194 / 195 都回完整列表，失败只回 tip）、`ActivityFeature`（190：任务类型 2 的行按排期算状态，
   窗口 `[start, end)` 按 uint64 无符号比较，开放时再跑接取闸决定能否参与）。列表每行都跑只读的接取 / 领奖闸，一次请求只读一次时钟。
+
+### 4.9 放技能（校验链、施法阶段、冷却）
+
+mmorpg：`combat/skill/system/skill.cpp`（ReleaseSkill → CheckSkillPrerequisites → 70 → 前摇定时器）+ 行为 / 战斗状态系统。Java 版（`com.game.scene.skill`，只在逻辑线程上调用）：
+
+- **配表视图 `SkillTables`**：技能行（类型位、目标方式位、能否打断、前摇 / 后摇 / 引导时长换成纳秒、冷却组）、冷却组时长、
+  行为互斥表、战斗状态表、技能许可表。表是同步来的契约，加载只告警。
+- **运行态 `PlayerSkillState`**（挂在场景内的玩家实例上，不持久化，接管 / 重新进场即清空）：进行中的一次施法（阶段 + 截止时刻）、
+  冷却组开始时刻、行为状态、战斗状态（buff 写入，路线图 2.7）。
+- **`SkillService.release`**：顺序同基线（技能存在且已拥有 → 目标 → 冷却 → 施法阶段 → 技能许可 → 行为互斥 → 战斗状态互斥），
+  纯规则在 `SkillRules`。阶段**不起定时器**：截止时刻存在玩家身上，下次放技能时按截止时刻顺次结算（前摇 → 引导 → 后摇，
+  每段从上一段的截止时刻起算），阶段进行中时新技能可打断则推 33 并取消旧施法，否则 7000。冷却、后摇、引导按设计意图生效
+  （基线线上只有前摇生效，PARITY 记为有意差异）。70 / 33 发给施法者本人 + 看得见他的人（`SceneWorld.broadcastToSelfAndWatchers`），
+  给施法者的顺序 33 → 70 → 84 应答。目标按场景实体号在本节点上找人（`SceneWorld.playerByEntity`，任意场景，同基线）。
+- **伤害**：纯公式 `com.game.common.combat.CombatDamageRules`（xm-common，实时与回合制共用）已移植；实时技能命中（伤害、效果 buff、
+  死亡）两版都不生效，等气血同步、死亡复活一起设计。
 
 ## 5. 线程模型
 
@@ -468,6 +484,8 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_tick_seconds` | Timer | — | 一帧的耗时（外推 + 视野刷新 + 广播），20 FPS、每帧一次；超过 50ms 桶即超预算 |
 | scene | `xm_scene_broadcast_seconds` | Timer | `kind`=view_changes / attribute_sync | 帧内广播阶段（组包、序列化、交给链路）：view_changes = 47 / 64，每帧一次；attribute_sync = 66，偶数帧一次（均为全部场景合计） |
 | scene | `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值或坐标超出世界范围（±1e7 m）丢弃 |
+| scene | `xm_scene_skill_releases_total` | Counter | `result`=ok / unknown_skill / invalid_target / cooldown / uninterruptible / state_rejected | 放技能（84）的裁决，每条恰好计一次（§4.9）；不带技能号（客户端可控）与玩家号 |
+| scene | `xm_scene_skill_interrupts_total` | Counter | — | 放技能打断了进行中的施法（推了 33）的次数 |
 | scene | `xm_scene_aoi_changes_total` | Counter | `change`=enter / leave | 视野变化通知，一对（观察者, 目标）计一次：enter = 进场的 47 条目与给旁人的 21、帧内 47 条目；leave = 离场 / 换场景的 51、帧内 64 条目。离场者自己的列表静默清空，不计 |
 | scene | `xm_scene_storage_writes_seconds` | Timer | `op`=save / release / progress，`result`=released / saved / fenced / failed / rejected | 玩家数据写（写回并释放 / 只释放 / 在线存盘）的结局与耗时（含瞬时故障重试），每个写任务恰好计一次：已落库并释放 / 已落库未释放（在线存盘）/ 围栏拒绝（不是故障）/ 重试用尽或非瞬时故障 / 存储线程池拒绝（耗时记 0）。停服时 `shutdownNow` 丢弃的写只进 ERROR 日志 |
 | scene | `xm_scene_periodic_saves_total` | Counter | `result`=written / unchanged / in_flight / deferred | 周期存盘对每个到期玩家的处理，每人每次到期恰好计一次：有变化提交了在线存盘 / 与上次落库相同跳过 / 上一次还在途跳过 / 存储线程池积压（排队 ≥ 线程数 × 2）推到下个周期 |

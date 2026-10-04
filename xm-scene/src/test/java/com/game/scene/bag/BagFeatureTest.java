@@ -81,7 +81,7 @@ class BagFeatureTest {
         FakeSceneTables sceneTables = new FakeSceneTables();
         world = new SceneWorld(sceneTables, Contracts.IDS, sink, repo, new AtomicLong(5000)::incrementAndGet,
                 new ManualClock(), SceneMetrics.noop(), service::initializeOnLoad, PlayerSnapshots.NONE);
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, sceneTables, RunMode.DEV,
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
                 List.of(new BagFeature(service)));
         Scene scene = world.createScene(1);
         repo.put(new PlayerData(PLAYER, 1, 3, 1, "", 1, 0, Vec3.ORIGIN, state));

@@ -58,6 +58,8 @@ public final class SceneMetrics {
     static final String GAIN_BLOCK_SYNC_FAILURES = "xm.scene.gain.block.sync.failures";
     static final String GAIN_BLOCKED = "xm.scene.gain.blocked";
     static final String GAIN_ANOMALIES = "xm.scene.gain.anomalies";
+    static final String SKILL_RELEASES = "xm.scene.skill.releases";
+    static final String SKILL_INTERRUPTS = "xm.scene.skill.interrupts";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -84,6 +86,22 @@ public final class SceneMetrics {
         CORRECTED,
         /** 位置 / 朝向 / 速度含非有限值，或位置超出世界范围（±1e7 m），整条丢弃。 */
         INVALID
+    }
+
+    /** 一次放技能（84）的裁决（{@code xm.scene.skill.releases{result}}），每条恰好计一次。 */
+    public enum SkillResult {
+        /** 成功（广播了 70）。 */
+        OK,
+        /** 技能不存在或未拥有（1001）。 */
+        UNKNOWN_SKILL,
+        /** 目标不合法（7001）。 */
+        INVALID_TARGET,
+        /** 冷却中（7003）。 */
+        COOLDOWN,
+        /** 施法 / 引导 / 后摇中且新技能不能打断（7000）。 */
+        UNINTERRUPTIBLE,
+        /** 行为互斥表 / 战斗状态 / 技能许可表拒绝（表里的提示码）。 */
+        STATE_REJECTED
     }
 
     /** 周期存盘对一个到期玩家的处理（{@code xm.scene.periodic.saves{result}}），每人每次到期恰好计一次。 */
@@ -179,6 +197,8 @@ public final class SceneMetrics {
     private final Timer tick;
     private final Map<BroadcastKind, Timer> broadcasts;
     private final Map<MoveResult, Counter> moves;
+    private final Map<SkillResult, Counter> skillReleases;
+    private final Counter skillInterrupts;
     private final Map<PeriodicSave, Counter> periodicSaves;
     private final Counter aoiEntered;
     private final Counter aoiLeft;
@@ -206,6 +226,9 @@ public final class SceneMetrics {
                     .register(registry));
         }
         this.moves = counters(MoveResult.class, MOVES, "result", "移动上行的裁决结果");
+        this.skillReleases = counters(SkillResult.class, SKILL_RELEASES, "result", "放技能（84）的裁决结果");
+        this.skillInterrupts = Counter.builder(SKILL_INTERRUPTS).description("放技能打断了进行中的施法（推了 33），每次打断计一次")
+                .register(registry);
         this.periodicSaves = counters(PeriodicSave.class, PERIODIC_SAVES, "result", "周期存盘对到期玩家的处理（写 / 未变跳过 / 在途跳过 / 存储积压推迟）");
         this.aoiEntered = aoiCounter("enter");
         this.aoiLeft = aoiCounter("leave");
@@ -367,6 +390,14 @@ public final class SceneMetrics {
 
     public void move(MoveResult result) {
         moves.get(result).increment();
+    }
+
+    public void skillRelease(SkillResult result) {
+        skillReleases.get(result).increment();
+    }
+
+    public void skillInterrupted() {
+        skillInterrupts.increment();
     }
 
     /**

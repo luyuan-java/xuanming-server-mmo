@@ -84,6 +84,15 @@ class RobotOptionsTest {
     }
 
     @Test
+    void skill_两个账号带sk标签() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("skill", "--run-tag", "x1"), ENV, NOW);
+        assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.SKILL);
+        assertThat(com.game.robot.scenario.SkillScenario.accountName(o.accountPrefix(), o.runTag(), "a"))
+                .isEqualTo("robot_java_skx1a");
+        assertThat(RobotOptions.usage()).contains("skill");
+    }
+
+    @Test
     void toString_不带口令() throws Exception {
         assertThat(RobotOptions.parse(List.of("smoke"), ENV, NOW).toString()).doesNotContain("dev-secret").contains("***");
     }

@@ -107,7 +107,7 @@ class AttributeFeatureTest {
         FakeSceneTables sceneTables = new FakeSceneTables();
         world = new SceneWorld(sceneTables, Contracts.IDS, sink, repo, ids::incrementAndGet, clock, SceneMetrics.noop(),
                 service::initializeOnLoad, com.game.scene.world.PlayerSnapshots.NONE);
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, sceneTables, mode,
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, mode,
                 List.of(new AttributeFeature(service, Contracts.REGISTRY,
                         player -> levelEvents.add(sink.to(LINK, SESSION).size() + ":" + player.level()))));
         Scene scene = world.createScene(1);

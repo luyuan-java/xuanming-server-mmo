@@ -13,6 +13,7 @@ import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
+import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import java.io.PrintStream;
 import java.util.List;
@@ -77,6 +78,12 @@ public final class RobotMain {
                             AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
                             options.sceneMetricsUrl());
                     title = "xm-robot guard：" + scenario.account() + "，" + target + " data=" + options.dataUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.SKILL) {
+                    SkillScenario scenario = new SkillScenario(flow, registry, options.accountPrefix(), options.runTag(),
+                            options.requestTimeout(), options.observeTimeout());
+                    title = "xm-robot skill：" + scenario.accountA() + " 等，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.FEATURES) {

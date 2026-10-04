@@ -11,6 +11,7 @@ import com.game.scene.player.GainWindows;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerMissions;
+import com.game.scene.player.PlayerSkillState;
 import com.game.scene.player.Wallet;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.List;
@@ -60,6 +61,8 @@ public final class ScenePlayer {
     private final PlayerAttributes attributes;
     /** 四个固定背包（存档原样收下，进场景前由背包服务按配表规整）。 */
     private final PlayerBags bags;
+    /** 技能运行态（施法阶段、冷却、行为 / 战斗状态；不持久化，随实例清空）。 */
+    private final PlayerSkillState skillState = new PlayerSkillState();
     /** 任务（存档原样收下，派生索引由任务服务在进场景前重建）。 */
     private final PlayerMissions missions;
     /** 获取滑动窗口（获取异常检测；不持久化，随实例清空）。 */
@@ -309,6 +312,11 @@ public final class ScenePlayer {
     /** 玩家的四个固定背包（逻辑线程上读写；写入只经背包服务）。 */
     public PlayerBags bags() {
         return bags;
+    }
+
+    /** 玩家的技能运行态（逻辑线程上读写；写入只经技能服务）。 */
+    public PlayerSkillState skillState() {
+        return skillState;
     }
 
     /** 玩家的任务（逻辑线程上读写；写入只经任务服务）。 */

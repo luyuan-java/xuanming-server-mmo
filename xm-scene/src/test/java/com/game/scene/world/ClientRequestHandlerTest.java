@@ -9,7 +9,6 @@ import com.game.api.proto.ClientForward;
 import com.game.common.RunMode;
 import com.game.proto.MessageContent;
 import com.game.proto.PlayerSkillComp;
-import com.game.proto.Vector3;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorDestroyS2C;
 import com.game.proto.EnterSceneC2SRequest;
@@ -19,12 +18,9 @@ import com.game.proto.GetCurrencyListRequest;
 import com.game.proto.GetCurrencyListResponse;
 import com.game.proto.ListSkillsRequest;
 import com.game.proto.ListSkillsResponse;
-import com.game.proto.ReleaseSkillRequest;
-import com.game.proto.ReleaseSkillResponse;
 import com.game.proto.SceneInfoComp;
 import com.game.proto.SceneInfoRequest;
 import com.game.proto.SceneInfoS2C;
-import com.game.proto.SkillUsedS2C;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
@@ -59,7 +55,7 @@ class ClientRequestHandlerTest {
         AtomicLong ids = new AtomicLong(5000);
         FakeSceneTables tables = new FakeSceneTables();
         world = new SceneWorld(tables, IDS, sink, repo, ids::incrementAndGet, new ManualClock(), SceneMetrics.noop());
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, tables);
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS);
         scene1 = world.createScene(1);
         scene2 = world.createScene(2);
         repo.putNewPlayer(1001, 1);
@@ -87,48 +83,6 @@ class ClientRequestHandlerTest {
                 .extracting(PlayerSkillComp::getSkillTableId).containsExactly(1, 2, 13);
         assertThat(response.getSkillList().getSkillListList())
                 .extracting(PlayerSkillComp::getId).containsOnly(0L);
-    }
-
-    @Test
-    void ReleaseSkill_拥有的技能_先广播70再回空tip() throws Exception {
-        enter(12, 1002, scene1);
-        long entityA = entityOf(11);
-        long entityB = entityOf(12);
-        sink.clear();
-
-        Vector3 position = Vector3.newBuilder().setX(1).setY(2).setZ(3).build();
-        forward(11, 1001, IDS.releaseSkill(), ReleaseSkillRequest.newBuilder()
-                .setSkillTableId(2).setTargetId(entityB).setPosition(position).build(), 7);
-
-        List<MessageContent> toA = sink.to(LINK, 11);
-        assertThat(toA).extracting(MessageContent::getMessageId).containsExactly(70, 84);
-        SkillUsedS2C used = SkillUsedS2C.parseFrom(toA.get(0).getSerializedMessage());
-        assertThat(used.getEntity()).isEqualTo(entityA);
-        assertThat(used.getTargetEntityList()).containsExactly(entityB);
-        assertThat(used.getSkillTableId()).isEqualTo(2);
-        assertThat(used.getPosition()).isEqualTo(position);
-        assertThat(used.getTimeStamp()).isZero();
-
-        MessageContent reply = toA.get(1);
-        assertThat(reply.getId()).isEqualTo(7L);
-        ReleaseSkillResponse response = ReleaseSkillResponse.parseFrom(reply.getSerializedMessage());
-        assertThat(response.hasErrorMessage()).isTrue();
-        assertThat(response.getErrorMessage().getId()).isZero();
-
-        assertThat(sink.messageIdsTo(LINK, 12)).containsExactly(70);
-    }
-
-    @Test
-    void ReleaseSkill_未拥有或不存在的技能_回1001且不广播() throws Exception {
-        forward(11, 1001, IDS.releaseSkill(), ReleaseSkillRequest.newBuilder().setSkillTableId(5).build(), 1);
-        forward(11, 1001, IDS.releaseSkill(), ReleaseSkillRequest.newBuilder().setSkillTableId(99).build(), 2);
-
-        List<MessageContent> toA = sink.to(LINK, 11);
-        assertThat(toA).extracting(MessageContent::getMessageId).containsExactly(84, 84);
-        for (MessageContent reply : toA) {
-            assertThat(ReleaseSkillResponse.parseFrom(reply.getSerializedMessage()).getErrorMessage().getId())
-                    .isEqualTo(1001);
-        }
     }
 
     @Test
@@ -216,7 +170,7 @@ class ClientRequestHandlerTest {
         SceneFeature notScene = r -> r.on("ClientPlayerLogin", "Login", Message.class, (call, req) -> { });
 
         for (SceneFeature feature : List.of(duplicate, wrongType, notScene)) {
-            assertThatThrownBy(() -> new ClientRequestHandler(world, Contracts.REGISTRY, IDS, tables, RunMode.DEV,
+            assertThatThrownBy(() -> new ClientRequestHandler(world, Contracts.REGISTRY, IDS, RunMode.DEV,
                     List.of(feature))).isInstanceOf(IllegalStateException.class);
         }
     }
@@ -238,7 +192,7 @@ class ClientRequestHandlerTest {
                         default -> call.reply(ListSkillsResponse.getDefaultInstance());
                     }
                 });
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, new FakeSceneTables(), RunMode.DEV,
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, RunMode.DEV,
                 List.of(buggy));
 
         for (int i = 0; i < 4; i++) {

@@ -73,7 +73,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-scene-client-player（视野广播）、actor 属性 / 战斗状态、svc-scene-player-sync
 - behavior: 84 未知技能 / 未拥有 → 1001 kInvalidTableId；校验冷却 kSkillCooldownNotReady、状态 kSkillCannotBeCastInCurrentState、目标 kSkillInvalidTarget(Id)、前置 kSkillPrerequisites、buff 限制；施法点定时器（普通 / 引导技能）后结算伤害（暴击 ×2）、加 buff、扣资源 / 物品、起冷却；被打断广播 33；70 广播给可见玩家（基线不含施法者本人）；77 的 skill_list 必须存在（空列表也要有，robot 靠它发就绪信号）
 - internal: 伤害事件、buff 系统、冷却组件、跨 zone 冻结目标丢弃伤害
-- java: partial — `ClientRequestHandler.listSkills / releaseSkill`（只校验存在与拥有并广播 70，含施法者本人——PARITY 登记 mmorpg 待改）；缺冷却 / 消耗 / 命中 / 伤害 / buff / 33
+- java: partial（2026-10-03，批次 2.6）— 77 `ClientRequestHandler.listSkills`（场景核心）；84 `com.game.scene.skill.{SkillTables,SkillRules,SkillService,SkillFeature}`：真实 1001、目标 7001、冷却 7003、施法阶段 7000 / 打断推 33（冷却与后摇按设计意图生效）、状态表；70 / 33 含施法者本人（PARITY 登记 mmorpg 待改）。缺：消耗、命中 / 伤害、buff、7004 / 7002（随 6.3）。robot `skill` 场景覆盖
 - size: XL（战斗结算 + buff 应拆成「技能校验与冷却」M、「伤害结算」M、「buff 系统」L）
 - robot: robot-stress-smoke（AI 85% 发 84）、robot-features-smoke；Java xm-robot smoke（77 非空）
 - hazards: 基线写的 1001 会被 TRANSFER_ERROR_MESSAGE 覆盖成空 tip（Java 如实回码）；施法者收不到自己的 70 时 Unity 客户端看不到自己施法表现（`GameClient.cs` 只由 70 驱动 SkillFx）

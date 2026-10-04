@@ -18,11 +18,8 @@ import com.game.proto.MoveStopC2S;
 import com.game.proto.MoveSyncC2S;
 import com.game.proto.PlayerSkillComp;
 import com.game.proto.PlayerSkillListComp;
-import com.game.proto.ReleaseSkillRequest;
-import com.game.proto.ReleaseSkillResponse;
 import com.game.proto.SceneInfoComp;
 import com.game.proto.SceneInfoS2C;
-import com.game.proto.SkillUsedS2C;
 import com.game.proto.TipInfoMessage;
 import com.game.table.CommonErrorTip;
 import com.game.table.SceneErrorTip;
@@ -51,14 +48,14 @@ import org.slf4j.LoggerFactory;
  *   <li>没有处理器的方法回 {@code kFeatureUnavailable}(1006)，不断连、不抛异常。136 TeleportRequest 也在其中
  *       （基线是空桩，回 id=0 的空 tip；Java 如实说「不支持」，PARITY 登记为有意差异）。</li>
  * </ul>
- * 处理器按功能注册（{@link SceneFeature}）；本类自己注册场景核心的移动、技能、换场景、场景信息。
+ * 处理器按功能注册（{@link SceneFeature}）；本类自己注册场景核心的移动、技能列表（77）、换场景、场景信息
+ * （放技能 84 在 {@code SkillFeature}）。
  */
 public final class ClientRequestHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ClientRequestHandler.class);
 
     private static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
-    private static final int INVALID_TABLE_ID = CommonErrorTip.common_error.kInvalidTableId_VALUE;
     private static final int ENTER_PARAM_ERROR = SceneErrorTip.scene_error.kEnterSceneParamError_VALUE;
     private static final int ENTER_IN_CURRENT_SCENE = SceneErrorTip.scene_error.kEnterSceneYouInCurrentScene_VALUE;
     private static final int ENTER_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
@@ -69,25 +66,23 @@ public final class ClientRequestHandler {
     private final SceneWorld world;
     private final MessageIdRegistry registry;
     private final SceneMessageIds ids;
-    private final SceneTables tables;
     private final RunMode runMode;
     private final Map<Integer, Registered> handlers = new HashMap<>();
 
     /** 只有场景核心功能、生产运行模式（测试用）。 */
-    public ClientRequestHandler(SceneWorld world, MessageIdRegistry registry, SceneMessageIds ids, SceneTables tables) {
-        this(world, registry, ids, tables, RunMode.PROD, List.of());
+    public ClientRequestHandler(SceneWorld world, MessageIdRegistry registry, SceneMessageIds ids) {
+        this(world, registry, ids, RunMode.PROD, List.of());
     }
 
     /**
      * @param runMode  运行模式：只决定 GM 类指令放不放行
      * @param features 玩法功能（各自注册自己的方法；同一方法注册两次启动即失败）
      */
-    public ClientRequestHandler(SceneWorld world, MessageIdRegistry registry, SceneMessageIds ids, SceneTables tables,
+    public ClientRequestHandler(SceneWorld world, MessageIdRegistry registry, SceneMessageIds ids,
                                 RunMode runMode, List<SceneFeature> features) {
         this.world = world;
         this.registry = registry;
         this.ids = ids;
-        this.tables = tables;
         this.runMode = runMode;
         registerCore();
         SceneFeature.Registrar registrar = new SceneFeature.Registrar() {
@@ -107,7 +102,6 @@ public final class ClientRequestHandler {
         register(ids.moveStart(), MoveStartC2S.class, (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
         register(ids.moveStop(), MoveStopC2S.class, (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
         register(ids.listSkills(), Message.class, (call, req) -> listSkills(call));
-        register(ids.releaseSkill(), ReleaseSkillRequest.class, this::releaseSkill);
         register(ids.enterScene(), EnterSceneC2SRequest.class, this::enterScene);
         // 应答是 Empty 不回包，改推 31（基线 player_scene_handler.cpp SceneInfoC2S）。
         register(ids.sceneInfoC2S(), Message.class, (call, req) -> world.sendTo(call.player(),
@@ -204,30 +198,6 @@ public final class ClientRequestHandler {
             list.addSkillList(PlayerSkillComp.newBuilder().setSkillTableId(skillTableId));
         }
         call.reply(ListSkillsResponse.newBuilder().setErrorMessage(tip(0)).setSkillList(list).build());
-    }
-
-    /**
-     * 84：技能不存在或未拥有回 {@code kInvalidTableId}(1001)。基线写的 1001 会被 TRANSFER_ERROR_MESSAGE 覆盖成空 tip
-     * （契约文档 §7.5），Java 版如实回码；robot 对任何非空 error_message 都只记告警，不受影响。
-     * 成功时先向自己和看得见自己的玩家广播 70，再回应答（与基线同序）。战斗结算（冷却、消耗、命中）首批不做。
-     */
-    private void releaseSkill(PlayerCall call, ReleaseSkillRequest request) {
-        ScenePlayer player = call.player();
-        int skillTableId = request.getSkillTableId();
-        int tipId = 0;
-        if (!tables.skillExists(skillTableId) || !player.hasSkill(skillTableId)) {
-            tipId = INVALID_TABLE_ID;
-            log.debug("放技能被拒：技能不存在或未拥有 player={} skill_table_id={}", player.playerId(), skillTableId);
-        } else {
-            SkillUsedS2C used = SkillUsedS2C.newBuilder()
-                    .setEntity(player.entity())
-                    .addTargetEntity(request.getTargetId())
-                    .setSkillTableId(skillTableId)
-                    .setPosition(request.getPosition())
-                    .build();
-            world.broadcastToSelfAndWatchers(player, push(ids.notifySkillUsed(), used));
-        }
-        call.reply(ReleaseSkillResponse.newBuilder().setErrorMessage(tip(tipId)).build());
     }
 
     /**

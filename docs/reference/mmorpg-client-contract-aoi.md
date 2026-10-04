@@ -255,7 +255,7 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 | `entity_id` | 1 | uint64 | 用 `try_get<uint64_t>` 取组件，也就是 **`Guid` 组件 = player_id**（`using Guid = uint64_t`）。**不是**场景实体号 |
 | `transform` | 2 | Transform | **整份**拷贝 Transform 组件：`location` 总在；`rotation` 在上报过移动或存档里有值时才在；`scale` 基线从不写 |
 | `velocity` | 3 | Velocity | 整份拷贝 Velocity 组件（已夹到 ≤ 10 m/s） |
-| `combat_state_flags` | 4 | `CombatStateFlagsComp{map<uint32,bool> state_flags=1}` | 键是当前激活的 `eCombatState`（目前只有 `kSilence=0`），值恒为 true；状态清空时为空 map |
+| `combat_state_flags` | 4 | `CombatStateFlagsComp{map<uint32,bool> state_flags=1}` | 键是当前激活的 `eActorCombatState`（沉默 = 1；proto 里的 `eCombatState{kSilence=0}` 没有任何代码用），值恒为 true；状态清空时为空 map |
 
 **只序列化脏字段**，发出后清对应的脏位。没有任何脏字段时不发。脏位的来源：
 
@@ -384,7 +384,7 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
   - 收件人是 `watchedBy(发送者)`，不含发送者本人。
   - 表为空时保留脏位。子消息存在性按 §5.1 处理。
   - 可选：给新观察者发完创建消息后，紧跟一条该实体的全量 66（transform + velocity），修缺口 9。
-- **70 / 33**：收件人改为 `watchedBy(施法者)`，**不含施法者本人**，与基线实现一致（缺口 8）。
+- **70 / 33**：~~收件人改为 `watchedBy(施法者)`、不含施法者本人~~——已作废：2026-09-30 核对客户端后 Java 保留发给本人（PARITY「70 SkillUsed 的收件人」行），33 自 2026-10-03 用同一规则。
   - UE 客户端对自己放的技能很可能在本地播放；再发 70 给本人，有重复播放的风险。改之前要到客户端仓库核对。
   - robot 只统计 70 的数量，单机器人跑时这个数会变成 0，但不影响冒烟判定。
 - `SceneMessageIds` 需要补上：`NotifyActorListDestroy`(64)、`ScenePlayerSync/SyncBaseAttribute`(66)、`SceneMovementClientPlayer/{MoveStart, MoveSync, MoveStop, NotifyMoveAck, TeleportRequest}`、`NotifySkillInterrupted`(33)。一律按名字解析。
@@ -420,7 +420,7 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 - [ ] 任一方位置变化都重新判断能否进视野（缺口 3）。出视野沿用「离开 7 格邻域」。
 - [ ] 每条 66 都带 `entity_id`（缺口 5）。
 - [ ] 51 只发给 `watchedBy`（缺口 7）。
-- [ ] 70 / 33 不发给施法者（缺口 8）。这一条修正的是 Java 现有的偏离，先到客户端仓库核对。
+- [x] ~~70 / 33 不发给施法者（缺口 8）~~：已核对客户端，决定保留发给本人（PARITY「70 SkillUsed 的收件人」行）。
 - [ ] 可选：给新观察者补发一条全量 66（缺口 9）。
 
 **验证（写单测，按 AGENTS.md §4 用 `clean install` 跑）**

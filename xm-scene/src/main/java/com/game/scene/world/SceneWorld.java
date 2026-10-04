@@ -108,6 +108,8 @@ public final class SceneWorld {
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
     private final Map<SessionKey, ScenePlayer> playersBySession = new HashMap<>();
+    /** 场景实体号 → 玩家（节点内全部场景；技能目标按实体号找人，同基线 actorRegistry）。 */
+    private final Map<Long, ScenePlayer> playersByEntity = new HashMap<>();
     /** 已收到 PlayerEnter、正在加载存档的会话。离开 / 断链时删掉即取消，加载回来发现不在就丢弃。 */
     private final Map<SessionKey, PendingEnter> pendingEnters = new HashMap<>();
     /** 帧内视野变化的复用缓冲（只在 {@link #step()} 里用）。 */
@@ -332,6 +334,7 @@ public final class SceneWorld {
         player.markPersisted(data.asPersisted());
         playersById.put(playerId, player);
         playersBySession.put(key, player);
+        playersByEntity.put(player.entity(), player);
         enterScene(player, scene);
         sink.enterResult(key.linkId(), key.sessionId(), playerId, epoch, 0);
         // 用内存状态拍（接管旧实例时库里那份是旧的）
@@ -750,6 +753,7 @@ public final class SceneWorld {
         List<ScenePlayer> watchers = player.scene().remove(player);
         playersById.remove(player.playerId(), player);
         playersBySession.remove(player.session(), player);
+        playersByEntity.remove(player.entity(), player);
         publishPopulation(player.scene().configId());
         metrics.aoiLeft(watchers.size());
         broadcast(watchers, destroyMessage(player));
@@ -791,6 +795,7 @@ public final class SceneWorld {
         }
         playersById.clear();
         playersBySession.clear();
+        playersByEntity.clear();
         for (Scene scene : scenes.values()) {
             scene.clear();
             metrics.scenePlayers(scene.configId(), 0);
@@ -804,15 +809,20 @@ public final class SceneWorld {
         return playersBySession.get(key);
     }
 
+    /** 按场景实体号找本节点上的玩家（任意场景）；没有为 null。 */
+    public ScenePlayer playerByEntity(long entity) {
+        return playersByEntity.get(entity);
+    }
+
     void sendTo(ScenePlayer player, MessageContent content) {
         sink.send(player.session().linkId(), List.of(player.session().sessionId()), content);
     }
 
     /**
-     * 发给自己和看得见自己的人（70 SkillUsed）。基线的收件人不含施法者本人，Java 版现有行为含本人
-     * （契约文档 AOI §7 第 8 条；改之前要到客户端仓库核对是否会重复播放），这里只把「视野内」换成兴趣列表。
+     * 发给自己和看得见自己的人（70 SkillUsed、33 SkillInterrupted）。基线的收件人不含施法者本人，Java 版含本人
+     * （PARITY「70 收件人」行：客户端只按 70 播特效、33 只记日志），「视野内」换成兴趣列表。
      */
-    void broadcastToSelfAndWatchers(ScenePlayer player, MessageContent content) {
+    public void broadcastToSelfAndWatchers(ScenePlayer player, MessageContent content) {
         Set<ScenePlayer> watchers = player.scene().watchers(player);
         List<ScenePlayer> recipients = new ArrayList<>(watchers.size() + 1);
         recipients.add(player);
