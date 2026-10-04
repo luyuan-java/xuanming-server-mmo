@@ -14,6 +14,10 @@ public interface PlayerMapper {
     @Insert("INSERT IGNORE INTO account (account, created_at) VALUES (#{account}, #{createdAt})")
     int insertAccountIfAbsent(@Param("account") String account, @Param("createdAt") long createdAt);
 
+    /** 账号的口令记录（主键精确匹配，utf8mb4_bin）；账号不存在返回 null。 */
+    @Select("SELECT account, password_hash FROM account WHERE account = #{account}")
+    AccountPassword selectAccountPassword(@Param("account") String account);
+
     /**
      * 锁住账号行（主键上的记录锁，不带间隙锁），同一账号的建角在所有 login 实例之间串行。
      * 必须是事务里的<b>第一条</b>语句，见 {@link PlayerStore#createPlayerWithinCap}。账号不存在返回 null。

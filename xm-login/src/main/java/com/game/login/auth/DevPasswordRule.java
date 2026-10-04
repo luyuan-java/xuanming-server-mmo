@@ -6,6 +6,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 开发口令认证规则（与 mmorpg {@code DevelopmentPasswordProvider} 同义）：受控的开发 / 机器人登录入口，不是生产口令实现。
@@ -22,7 +23,7 @@ import java.util.List;
  *
  * <p>不可变，线程安全。共享密钥只保存摘要，不保留明文。
  */
-public final class DevPasswordRule {
+public final class DevPasswordRule implements PasswordAuthenticator {
 
     public static final int MAX_ACCOUNT_CHARS = 64;
 
@@ -49,6 +50,11 @@ public final class DevPasswordRule {
         }
         this.secretDigest = sha256(sharedSecret);
         this.accountPrefixes = List.copyOf(prefixes);
+    }
+
+    @Override
+    public Optional<String> authenticate(String account, String password) {
+        return accepts(account, password) ? Optional.of(account) : Optional.empty();
     }
 
     public boolean accepts(String account, String password) {

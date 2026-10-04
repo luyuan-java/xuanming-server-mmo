@@ -440,8 +440,14 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
    签一对令牌、回角色列表（不绑会话、不查设备数）；令牌到期前 `POST /api/refresh-token` 轮换。
 1. 客户端 `POST /api/assign-gate` → `xm-gateway`：按 zone 取 gate 列表，选在线人数最少者，签 `GateTokenPayload`（TTL 600s）。
 2. 客户端 TCP 连 gate，首包 `ClientTokenVerifyRequest` → gate 本地验签（常数时间比较）。
-3. `Login(48)` → gate → `xm-login`：鉴权（开发模式口令，或 HTTP 登录拿到的 access token）、账号锁、设备数上限（窗口内第 4 个连接 2024）、
-   取 / 建账号、口令登录签一对令牌（access token 登录不签），回角色列表；`ClientReply` 指示 gate 把账号绑到会话。
+3. `Login(48)` → gate → `xm-login`：鉴权、账号锁、设备数上限（窗口内第 4 个连接 2024）、
+   取 / 建账号、口令 / 三方登录签一对令牌（access token 登录不签），回角色列表；`ClientReply` 指示 gate 把账号绑到会话。
+   鉴权按 `auth_type` 选（`LoginAuthenticator`，都在 login 工作线程上阻塞执行，任何失败回 2000）：
+   - `""` / `password`：开发口令（`xm.login.mode=dev`，共享密钥 + 账号前缀）与生产口令（`xm.login.auth.password.enabled`，
+     读 `account.password_hash` 的 Argon2id，KDF 并发槽限流、未知账号跑 dummy）二选一，同时打开拒绝启动，都没开 = 失败；
+   - `access_token`：HTTP 登录或此前 TCP 登录签的 access token，账号取令牌里的；
+   - `satoken` / `wechat` / `qq` / `netease`：`xm.login.auth.*` 配了才注册，`auth_token` 换账号（Sa-Token 读它自己的 Redis；
+     微信 / QQ 调开放平台，5 s 超时）。秘密只从环境变量读。存量账号的口令哈希由离线工具 `PasswordAdmin` 写一次。
    设备数：同一账号「已绑定、没在游戏里」的连接至多 3 个（建角 / 进游戏前也续期，名单满回 2024），进场指令发出 / 会话结束时注销。
 4. 角色为空时 `CreatePlayer(14)` → `xm-login`：按配表生成名字与默认职业，写 `player` 表，回角色列表。
 5. `EnterGame(26)` → `xm-login`：会话已绑定玩家（不论是不是同一角色）→ 2028（基线进游戏成功即删登录会话）；

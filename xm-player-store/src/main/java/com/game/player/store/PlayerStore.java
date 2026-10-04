@@ -87,6 +87,11 @@ public class PlayerStore {
         return mapper.selectByAccount(account);
     }
 
+    /** 账号的口令记录（生产口令认证用，只读）；账号不存在为空。 */
+    public Optional<AccountPassword> findAccountPassword(String account) {
+        return Optional.ofNullable(mapper.selectAccountPassword(account));
+    }
+
     public int countPlayers(String account) {
         return mapper.countByAccount(account);
     }

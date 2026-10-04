@@ -95,6 +95,16 @@ class PlayerStoreSqlTest {
 
     // ================================================================ 归属协议
 
+
+    @Test
+    void 口令记录_新账号没有口令_写入后读回规范账号与哈希_不存在的账号为空() {
+        assertThat(store.findAccountPassword(ACCOUNT)).contains(new AccountPassword(ACCOUNT, null));
+        new JdbcTemplate(context.getBean(javax.sql.DataSource.class))
+                .update("UPDATE account SET password_hash = ? WHERE account = ?", "$argon2id$v=19$x", ACCOUNT);
+        assertThat(store.findAccountPassword(ACCOUNT)).contains(new AccountPassword(ACCOUNT, "$argon2id$v=19$x"));
+        assertThat(store.findAccountPassword("robot_9999")).isEmpty();
+        assertThat(store.findAccountPassword("ROBOT_0001")).as("utf8mb4_bin：大小写敏感").isEmpty();
+    }
     @Test
     void 新角色可直接夺权_持有期间再夺回Held_最终写回释放后才能再夺且读到写回的状态() {
         long p = newPlayer(1001, "甲");

@@ -1,12 +1,15 @@
 package com.game.login.auth;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.login.auth.LoginAuthenticator.Authenticated;
 import com.game.login.testing.InMemoryLoginTokens;
 import com.game.login.token.TokenPair;
 import com.game.proto.login.LoginRequest;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class LoginAuthenticatorTest {
@@ -72,5 +75,42 @@ class LoginAuthenticatorTest {
         assertThat(disabled.authenticate(request("", "robot_0001", SECRET))).isEmpty();
         TokenPair pair = tokens.issue("robot_0001", "wechat", "");
         assertThat(disabled.authenticate(accessToken(pair.accessToken(), ""))).isPresent();
+    }
+
+    @Test
+    void 外部认证按类型注册_账号来自外部_请求里的account忽略_出错与未注册都失败() {
+        LoginAuthenticator auth = new LoginAuthenticator(null, tokens, Map.of(
+                "wechat", token -> token.equals("good") ? Optional.of("wx_u1") : Optional.empty(),
+                "qq", token -> {
+                    throw new IllegalStateException("三方认证 HTTP 请求失败: ConnectException");
+                }));
+        LoginRequest wechat = LoginRequest.newBuilder().setAuthType("wechat").setAuthToken("good")
+                .setAccount("robot_ignored").build();
+        assertThat(auth.authenticate(wechat)).contains(new Authenticated("wx_u1", "wechat"));
+        assertThat(new Authenticated("wx_u1", "wechat").issuesTokens()).isTrue();
+        assertThat(auth.authenticate(wechat.toBuilder().setAuthToken("bad").build())).isEmpty();
+        assertThat(auth.authenticate(LoginRequest.newBuilder().setAuthType("qq").setAuthToken("t").build())).isEmpty();
+        assertThat(auth.authenticate(LoginRequest.newBuilder().setAuthType("satoken").setAuthToken("t").build()))
+                .as("没注册").isEmpty();
+        assertThat(auth.externalTypes()).containsExactlyInAnyOrder("wechat", "qq");
+    }
+
+    @Test
+    void 认证出的账号放不进账号列按失败() {
+        LoginAuthenticator auth = new LoginAuthenticator(null, tokens, Map.of("satoken", Optional::of));
+        assertThat(auth.authenticate(LoginRequest.newBuilder().setAuthType("satoken").setAuthToken("a".repeat(64))
+                .build())).isPresent();
+        assertThat(auth.authenticate(LoginRequest.newBuilder().setAuthType("satoken").setAuthToken("a".repeat(65))
+                .build())).isEmpty();
+        assertThat(auth.authenticate(LoginRequest.newBuilder().setAuthType("satoken").setAuthToken(" lead")
+                .build())).isEmpty();
+    }
+
+    @Test
+    void 外部认证不能占用password与access_token() {
+        assertThatThrownBy(() -> new LoginAuthenticator(null, tokens, Map.of("password", token -> Optional.empty())))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new LoginAuthenticator(null, tokens, Map.of("access_token", token -> Optional.empty())))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

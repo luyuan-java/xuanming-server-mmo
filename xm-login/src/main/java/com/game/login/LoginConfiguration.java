@@ -6,8 +6,15 @@ import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisProperties;
 import com.game.login.account.AccountLogin;
 import com.game.login.auth.DevPasswordRule;
+import com.game.login.auth.ExternalAuthProviders;
+import com.game.login.auth.NeteaseProvider;
+import com.game.login.auth.PasswordAuthenticator;
+import com.game.login.auth.ProductionPasswordAuthenticator;
+import com.game.login.auth.QqProvider;
+import com.game.login.auth.WeChatProvider;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.character.CharacterRules;
 import com.game.login.character.PlayerIdGenerator;
@@ -40,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.redisson.api.RedissonClient;
+import org.redisson.config.ConstantDelay;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -103,19 +111,91 @@ public class LoginConfiguration {
     }
 
     @Bean
-    public LoginAuthenticator loginAuthenticator(LoginProperties props, LoginTokens loginTokens,
+    public LoginAuthenticator loginAuthenticator(LoginProperties props, LoginAuthProperties auth, LoginTokens loginTokens,
+                                                 PlayerStore store, ExternalAuthProviders externalAuth,
                                                  @Value("${XM_LOGIN_DEV_PASSWORD:}") String devPassword) {
+        PasswordAuthenticator password = passwordAuthenticator(props, auth.password(), store, devPassword);
+        LoginAuthenticator authenticator = new LoginAuthenticator(password, loginTokens, externalAuth.asMap());
+        log.info("登录认证：口令={} 外部认证={}", password == null ? "关闭" : password.getClass().getSimpleName(),
+                authenticator.externalTypes());
+        return authenticator;
+    }
+
+    /**
+     * 口令认证二选一（同 mmorpg InitAuthProviders）：开发共享密钥（{@code xm.login.mode=dev}）与生产 Argon2id
+     * （{@code xm.login.auth.password.enabled}）互斥，同时打开拒绝启动；都没开 = 口令登录一律失败（fail-closed）。
+     */
+    static PasswordAuthenticator passwordAuthenticator(LoginProperties props, LoginAuthProperties.PasswordAuth production,
+                                                       PlayerStore store, String devPassword) {
+        if (props.devMode() && production.enabled()) {
+            throw new IllegalStateException("xm.login.mode=dev（开发口令）与 xm.login.auth.password.enabled（生产口令）不能同时打开");
+        }
+        if (production.enabled()) {
+            log.info("生产口令认证已启用（account.password_hash 的 Argon2id，只读） KDF 并发={} 等槽={}",
+                    production.kdfConcurrency(), production.kdfWait());
+            return new ProductionPasswordAuthenticator(store::findAccountPassword, production.kdfConcurrency(),
+                    production.kdfWait());
+        }
         if (!props.devMode()) {
-            log.info("xm.login.mode=prod：开发口令认证关闭，口令登录一律失败");
-            return LoginAuthenticator.passwordDisabled(loginTokens);
+            log.info("xm.login.mode=prod 且没开生产口令认证：口令登录一律失败");
+            return null;
         }
         if (devPassword == null || devPassword.isEmpty()) {
             throw new IllegalStateException("xm.login.mode=dev 需要环境变量 XM_LOGIN_DEV_PASSWORD（开发口令），拒绝启动");
         }
         log.warn("开发口令认证已启用（xm.login.mode=dev），账号前缀白名单={}；生产环境必须设为 prod",
                 props.devAccountPrefixes());
-        return LoginAuthenticator.withDevPassword(new DevPasswordRule(devPassword, props.devAccountPrefixes()),
-                loginTokens);
+        return new DevPasswordRule(devPassword, props.devAccountPrefixes());
+    }
+
+    /**
+     * 按配置注册的外部认证（Sa-Token / 微信 / QQ / 网易）；秘密只从环境变量读，缺了拒绝启动。
+     * Sa-Token 的 Redis 客户端最后建：前面的校验失败时不留下一个没人关的客户端（它的线程不是守护线程，会让启动失败的进程退不掉）。
+     */
+    @Bean(destroyMethod = "close")
+    public ExternalAuthProviders externalAuthProviders(LoginAuthProperties auth, RedisProperties redisProps) {
+        ExternalAuthProviders providers = new ExternalAuthProviders();
+        if (auth.wechat() != null) {
+            String secret = System.getenv(LoginAuthProperties.WECHAT_SECRET_ENV);
+            if (secret == null || secret.isBlank()) {
+                throw new IllegalStateException("配置了微信认证但缺少环境变量 " + LoginAuthProperties.WECHAT_SECRET_ENV + "，拒绝启动");
+            }
+            providers.add("wechat", new WeChatProvider(auth.wechat().appId(), secret, auth.wechat().endpoint()));
+            log.info("外部认证已注册：wechat（endpoint={}）", auth.wechat().endpoint() == null ? "生产" : auth.wechat().endpoint());
+        }
+        if (auth.qq() != null) {
+            providers.add("qq", new QqProvider(auth.qq().appId(), auth.qq().endpoint()));
+            log.info("外部认证已注册：qq（endpoint={}）", auth.qq().endpoint() == null ? "生产" : auth.qq().endpoint());
+        }
+        if (auth.netease() != null && auth.netease().enabled()) {
+            providers.add("netease", new NeteaseProvider());
+            log.info("外部认证已注册：netease（占位，恒失败）");
+        }
+        if (auth.satoken() != null) {
+            org.redisson.config.Config config = new org.redisson.config.Config();
+            // 超时 / 重试与本进程的业务 Redis 同一套上界（RedisProperties）：Redisson 默认值下 Sa-Token Redis 失联时
+            // 一次认证能占住 login 工作线程二十多秒
+            var server = config.useSingleServer().setAddress(auth.satoken().redisAddress())
+                    .setDatabase(auth.satoken().database())
+                    .setConnectTimeout(redisProps.connectTimeoutMs())
+                    .setTimeout(redisProps.timeoutMs())
+                    .setRetryAttempts(redisProps.retryAttempts())
+                    .setRetryDelay(new ConstantDelay(Duration.ofMillis(redisProps.retryDelayMs())));
+            String redisPassword = System.getenv(LoginAuthProperties.SATOKEN_REDIS_PASSWORD_ENV);
+            if (redisPassword != null && !redisPassword.isEmpty()) {
+                server.setPassword(redisPassword);
+            }
+            RedissonClient satokenRedis = org.redisson.Redisson.create(config);
+            try {
+                providers.satoken(satokenRedis, auth.satoken().tokenName(), auth.satoken().loginType());
+            } catch (RuntimeException e) {
+                satokenRedis.shutdown();
+                throw e;
+            }
+            log.info("外部认证已注册：satoken（db={} token-name={} login-type={}）", auth.satoken().database(),
+                    auth.satoken().tokenName(), auth.satoken().loginType());
+        }
+        return providers;
     }
 
     @Bean(destroyMethod = "close")

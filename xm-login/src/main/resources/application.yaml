@@ -75,7 +75,8 @@ xm:
   dubbo:
     scene-manager-url: tri://127.0.0.1:20882
   login:
-    # dev：启用开发口令认证（账号前缀白名单 + XM_LOGIN_DEV_PASSWORD）；prod：关闭，口令登录一律 2000（fail-closed）。
+    # dev：启用开发口令认证（账号前缀白名单 + XM_LOGIN_DEV_PASSWORD）；prod：关闭开发口令——生产口令（Argon2id）另由
+    # xm.login.auth.password.enabled 打开（见下方 auth 段），两者都没开时口令登录一律 2000（fail-closed）。
     # 生产部署必须显式改成 prod。配置缺省（不写这一项）时代码按 prod 处理。
     mode: dev
     dev-account-prefixes:
@@ -95,6 +96,26 @@ xm:
     # 每账号处于「已登录（TCP Login）、未进游戏」窗口的连接上限（基线 3，超出回 2024），与一次登记的有效期（没注销干净的按它自愈）。
     max-devices-per-account: 3
     device-session-ttl: 30m
+    # 认证（同 mmorpg login.yaml 的 PasswordAuth / AuthProviders）：没写的一项 = 不启用。秘密只从环境变量读。
+    # auth:
+    #   # 生产口令认证：读 account.password_hash 的 Argon2id（存量账号的哈希用 PasswordAdmin 工具写）；与 mode=dev 互斥
+    #   password:
+    #     enabled: true
+    #     kdf-concurrency: 2      # 每次 KDF 占 64 MiB，上限 8
+    #     kdf-wait: 500ms         # 等槽上限，最多 5s
+    #   satoken:                  # Sa-Token 认证服务的 Redis（口令取环境变量 XM_SATOKEN_REDIS_PASSWORD）
+    #     redis-address: redis://127.0.0.1:6379
+    #     database: 0
+    #     token-name: satoken
+    #     login-type: login
+    #   wechat:                   # app secret 取环境变量 XM_WECHAT_APP_SECRET
+    #     app-id: wx...
+    #     endpoint: ""            # 空 = https://api.weixin.qq.com；可指向本地假服务
+    #   qq:
+    #     app-id: "100000001"
+    #     endpoint: ""            # 空 = https://graph.qq.com
+    #   netease:
+    #     enabled: true           # 占位，恒失败（同基线）
 
 dubbo:
   application:

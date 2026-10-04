@@ -48,6 +48,11 @@
             <groupId>com.game</groupId>
             <artifactId>xm-discovery</artifactId>
         </dependency>
+        <!-- 生产口令认证的 Argon2id（Argon2BytesGenerator） -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.game</groupId>
             <artifactId>xm-player-store</artifactId>
@@ -74,6 +79,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 只用于测试：存量口令迁移工具（tools/PasswordAdmin）对 MySQL 兼容模式的内存库跑真实 SQL；版本由 Spring Boot BOM 管理 -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

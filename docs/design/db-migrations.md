@@ -149,3 +149,35 @@ SHOW CREATE TABLE player_snapshot;
 ```
 
 **回滚**：回退代码即可；表可留着（旧代码不读不写它）。快照是回档素材，有留存要求时不要删表。
+
+## M6：账号口令哈希列 `account.password_hash`（2026-10-04）
+
+**原因**：生产口令认证（批次 3.2，PARITY「生产口令认证」行）读账号的 Argon2id 哈希。哈希放在 `account` 表新加的一列，
+登录只读不写；哈希由离线工具 `com.game.login.tools.PasswordAdmin` 给既有账号写入一次（不注册、不改密）。
+
+**新库**：无需操作（建表脚本已带这一列）。
+
+**存量库**（在 `xm_java` 上执行；只加一列可空列，不必停服）：
+
+```sql
+ALTER TABLE account
+    ADD COLUMN password_hash VARCHAR(255) NULL
+        COMMENT 'Argon2id PHC 串；NULL = 该账号不能口令登录（生产口令认证只读，登录不写）'
+        AFTER created_at;
+```
+
+**核对**：
+
+```sql
+SHOW CREATE TABLE account;                                   -- 有 password_hash 列
+SELECT COUNT(*) FROM account WHERE password_hash IS NOT NULL; -- 迁移后为 0，之后随 PasswordAdmin 增加
+```
+
+**回滚**：
+
+```sql
+ALTER TABLE account DROP COLUMN password_hash;
+```
+
+回滚后必须同时回退代码，或关掉生产口令认证（`xm.login.auth.password.enabled=false`）：新代码的口令查询引用这一列，
+跑在旧表上口令登录一律失败（查询出错按认证失败处理，不影响 dev 口令与三方登录）。

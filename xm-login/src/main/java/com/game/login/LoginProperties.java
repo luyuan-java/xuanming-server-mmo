@@ -7,7 +7,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 /**
  * xm-login 业务配置（{@code xm.login.*}）。缺省值按 fail-closed 取：不写 {@code mode} 即 {@code prod}（关闭开发口令）。
  *
- * @param mode                  {@code dev} 启用开发口令认证；{@code prod} 关闭（口令登录一律失败）
+ * @param mode                  {@code dev} 启用开发口令认证；{@code prod} 关闭开发口令（生产 Argon2id 口令另由 {@code xm.login.auth.password.enabled} 打开，都没开时口令登录一律失败）
  * @param devAccountPrefixes    开发口令认证允许的账号前缀
  * @param maxPlayersPerAccount  每账号角色上限（mmorpg 默认 5）
  * @param workerThreads         阻塞工作线程数（MySQL 等阻塞 I/O 都在这组线程上跑，不占 Dubbo 线程）

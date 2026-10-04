@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS account (
     account     VARCHAR(64)     NOT NULL,
     created_at  BIGINT          NOT NULL COMMENT 'Unix 毫秒',
+    password_hash VARCHAR(255)  NULL COMMENT 'Argon2id PHC 串；NULL = 该账号不能口令登录（生产口令认证只读，登录不写）',
     PRIMARY KEY (account)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 
