@@ -20,6 +20,7 @@
         <module>xm-api</module>
         <module>xm-discovery</module>
         <module>xm-player-store</module>
+        <module>xm-gateway-store</module>
         <module>xm-audit</module>
         <module>xm-scene-manager</module>
         <module>xm-login</module>
@@ -141,6 +142,11 @@
             <dependency>
                 <groupId>com.game</groupId>
                 <artifactId>xm-player-store</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.game</groupId>
+                <artifactId>xm-gateway-store</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

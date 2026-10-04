@@ -6,9 +6,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import com.game.gateway.zone.Zone;
-import com.game.gateway.zone.ZoneCatalog;
-import com.game.gateway.zone.ZoneStatus;
+import com.game.gateway.store.ZoneManualStatus;
+import com.game.gateway.store.ZoneRow;
+import com.game.gateway.zone.ZoneDirectory;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -36,14 +36,18 @@ import org.springframework.test.web.servlet.MockMvc;
 @AutoConfigureObservability(tracing = false)
 // xm.zone-id 显式钉住，免得开发机上的 XM_ZONE_ID 环境变量改掉默认区服。
 @TestPropertySource(properties = {GatewayConfiguration.TOKEN_SECRET_ENV + "=boot-test-secret", "xm.zone-id=1",
-        "management.server.port=0"})
+        "management.server.port=0",
+        // MySQL 换成 MySQL 兼容模式的内存库：建表脚本与启动播种照常执行
+        "spring.datasource.driver-class-name=org.h2.Driver",
+        "spring.datasource.url=jdbc:h2:mem:gwapp;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
+        "spring.datasource.username=sa", "spring.datasource.password="})
 class GatewayApplicationTest {
 
     @MockitoBean
     private RedissonClient redisson;
 
     @Autowired
-    private ZoneCatalog zones;
+    private ZoneDirectory zones;
 
     @Autowired
     private MockMvc mvc;
@@ -63,8 +67,8 @@ class GatewayApplicationTest {
 
     @Test
     void 默认配置_一区开放且推荐() throws Exception {
-        Zone zone = zones.find(1).orElseThrow();
-        assertThat(zone.status()).isEqualTo(ZoneStatus.OPEN);
+        ZoneRow zone = zones.find(1).orElseThrow();
+        assertThat(zone.status()).as("按配置播种").isEqualTo(ZoneManualStatus.OPEN);
         assertThat(zone.recommended()).isTrue();
 
         mvc.perform(get("/api/server-list"))

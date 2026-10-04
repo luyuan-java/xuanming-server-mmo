@@ -5,8 +5,8 @@ import com.game.gateway.gate.GatePicker;
 import com.game.gateway.gate.GateSource;
 import com.game.gateway.gate.GateTokenIssuer;
 import com.game.gateway.gate.GateTokenIssuer.IssuedGateToken;
-import com.game.gateway.zone.Zone;
-import com.game.gateway.zone.ZoneCatalog;
+import com.game.gateway.store.ZoneRow;
+import com.game.gateway.zone.ZoneDirectory;
 import java.util.List;
 import java.util.Optional;
 import org.slf4j.Logger;
@@ -24,18 +24,26 @@ public final class AssignGateService {
 
     private static final Logger log = LoggerFactory.getLogger(AssignGateService.class);
 
-    private final ZoneCatalog zones;
+    private final ZoneDirectory zones;
     private final GateSource gates;
     private final GateTokenIssuer issuer;
 
-    public AssignGateService(ZoneCatalog zones, GateSource gates, GateTokenIssuer issuer) {
+    public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer) {
         this.zones = zones;
         this.gates = gates;
         this.issuer = issuer;
     }
 
     public AssignGateResponse assign(int zoneId) {
-        Optional<Zone> zone = zones.find(zoneId);
+        Optional<ZoneRow> zone;
+        try {
+            zone = zones.find(zoneId);
+        } catch (RuntimeException e) {
+            // 区服表读不到：fail-closed（同基线 zone_admission_unavailable）
+            log.error("读取区服目录失败，拒绝分配 zone={}", zoneId, e);
+            return AssignGateResponse.rejected(AssignGateResponse.CODE_INTERNAL,
+                    AssignGateResponse.ERR_ZONE_ADMISSION_UNAVAILABLE);
+        }
         if (zone.isEmpty()) {
             return AssignGateResponse.rejected(AssignGateResponse.CODE_ZONE_NOT_FOUND, AssignGateResponse.ERR_ZONE_NOT_FOUND);
         }
@@ -47,6 +55,11 @@ public final class AssignGateService {
             case CLOSED -> {
                 return AssignGateResponse.rejected(AssignGateResponse.CODE_ZONE_UNAVAILABLE,
                         AssignGateResponse.ERR_ZONE_CLOSED);
+            }
+            case PREVIEW -> {
+                // 同基线：白名单不参与准入（assign-gate 的 account 未经认证，按它放行等于谁都能进），一律未开放
+                return AssignGateResponse.rejected(AssignGateResponse.CODE_ZONE_UNAVAILABLE,
+                        AssignGateResponse.ERR_ZONE_NOT_OPEN);
             }
             case OPEN -> {
                 // 放行，继续选 gate。

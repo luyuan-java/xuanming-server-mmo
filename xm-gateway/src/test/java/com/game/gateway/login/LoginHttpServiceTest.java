@@ -10,9 +10,8 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.game.api.AccountLoginService;
-import com.game.gateway.zone.Zone;
-import com.game.gateway.zone.ZoneCatalog;
-import com.game.gateway.zone.ZoneStatus;
+import com.game.gateway.store.ZoneRow;
+import com.game.gateway.zone.ZoneDirectory;
 import com.game.proto.AccountSimplePlayer;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.login.AccountSimplePlayerWrapper;
@@ -29,10 +28,13 @@ import org.mockito.ArgumentCaptor;
 
 class LoginHttpServiceTest {
 
+    private static final ZoneDirectory ZONES = new ZoneDirectory(
+            () -> List.of(new ZoneRow(1, "一区", 0, 5000, "", null, true, 1, 0, 0)), System::nanoTime);
+
     private final AccountLoginService login = mock(AccountLoginService.class);
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final LoginHttpService service = new LoginHttpService(login,
-            new ZoneCatalog(List.of(new Zone(1, "一区", ZoneStatus.OPEN, true, null))), new LoginHttpMetrics(meters));
+            ZONES, new LoginHttpMetrics(meters));
 
     private static HttpLoginRequest password(long zone) {
         return new HttpLoginRequest(zone, "robot_0001", "secret", null, null, "dev-1");
@@ -95,20 +97,18 @@ class LoginHttpServiceTest {
         AccountLoginService registryEmpty = mock(AccountLoginService.class);
         when(registryEmpty.login(any())).thenThrow(
                 new RpcException(RpcException.FORBIDDEN_EXCEPTION, "No provider available from registry"));
-        assertThat(new LoginHttpService(registryEmpty, new ZoneCatalog(List.of(new Zone(1, "一区", ZoneStatus.OPEN, true,
-                null))), new LoginHttpMetrics(meters)).login(password(1)).join().message())
+        assertThat(new LoginHttpService(registryEmpty, ZONES, new LoginHttpMetrics(meters)).login(password(1)).join().message())
                 .as("注册中心里一个提供方都没有").isEqualTo("login_unavailable");
         AccountLoginService overloaded = mock(AccountLoginService.class);
         when(overloaded.login(any())).thenReturn(CompletableFuture.failedFuture(
                 new RpcException(new java.util.concurrent.RejectedExecutionException("login 工作队列满"))));
-        assertThat(new LoginHttpService(overloaded, new ZoneCatalog(List.of(new Zone(1, "一区", ZoneStatus.OPEN, true,
-                null))), new LoginHttpMetrics(meters)).login(password(1)).join().message())
+        assertThat(new LoginHttpService(overloaded, ZONES, new LoginHttpMetrics(meters)).login(password(1)).join().message())
                 .as("login 工作队列满").isEqualTo("login_unavailable");
 
         AccountLoginService broken = mock(AccountLoginService.class);
         when(broken.login(any())).thenReturn(CompletableFuture.failedFuture(new IllegalStateException("db down")));
         LoginHttpService other = new LoginHttpService(broken,
-                new ZoneCatalog(List.of(new Zone(1, "一区", ZoneStatus.OPEN, true, null))), new LoginHttpMetrics(meters));
+                ZONES, new LoginHttpMetrics(meters));
         assertThat(other.login(password(1)).join()).isEqualTo(HttpLoginResponse.error(500, "internal_error"));
         when(broken.login(any())).thenReturn(null);
         assertThat(other.login(password(1)).join().code()).isEqualTo(500);
@@ -120,6 +120,16 @@ class LoginHttpServiceTest {
         assertThat(service.login(password(0)).join().message()).isEqualTo("unknown_zone");
         assertThat(service.login(password(1L << 40)).join().message()).isEqualTo("unknown_zone");
         verify(login, never()).login(any());
+    }
+
+    @Test
+    void 区服目录读不到_跳过区号核对照常登录() {
+        when(login.login(any())).thenReturn(CompletableFuture.completedFuture(LoginResponse.getDefaultInstance()));
+        LoginHttpService broken = new LoginHttpService(login, new ZoneDirectory(() -> {
+            throw new IllegalStateException("MySQL 不可达");
+        }, System::nanoTime), new LoginHttpMetrics(meters));
+        assertThat(broken.login(password(1)).join().code()).isZero();
+        verify(login).login(any());
     }
 
     @Test

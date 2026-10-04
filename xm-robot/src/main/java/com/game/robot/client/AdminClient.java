@@ -68,13 +68,28 @@ public final class AdminClient {
         return send("DELETE", pathAndQuery);
     }
 
+    /** POST 一个 JSON 请求体（区服目录 / 公告 / 白名单的运维接口）。 */
+    public JsonNode post(String path, String jsonBody) throws RobotException {
+        return send("POST", path, HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8));
+    }
+
     private JsonNode send(String method, String pathAndQuery) throws RobotException {
+        return send(method, pathAndQuery, HttpRequest.BodyPublishers.noBody());
+    }
+
+    /** 200 返回应答 JSON；204 返回 null；其余状态抛出。 */
+    private JsonNode send(String method, String pathAndQuery, HttpRequest.BodyPublisher body) throws RobotException {
         HttpRequest request = HttpRequest.newBuilder(URI.create(dataUrl + pathAndQuery)).timeout(timeout)
                 .header("X-Xm-Admin-Token", token).header("X-Xm-Operator", OPERATOR)
-                .method(method, HttpRequest.BodyPublishers.noBody()).build();
+                .header("Content-Type", "application/json")
+                .method(method, body).build();
         try {
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 204) {
+                return null;
+            }
             if (response.statusCode() != 200) {
+
                 throw new RobotException("xm-data 运维接口 " + method + " " + pathAndQuery + " 返回 "
                         + response.statusCode() + "：" + response.body());
             }

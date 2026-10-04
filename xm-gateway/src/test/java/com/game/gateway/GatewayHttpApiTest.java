@@ -23,6 +23,13 @@ import com.game.proto.login.RefreshTokenResponse;
 import java.util.concurrent.CompletableFuture;
 import com.game.gateway.gate.GateSource;
 import com.game.gateway.serverlist.ServerListController;
+import com.game.gateway.announcement.AnnouncementController;
+import com.game.gateway.store.AnnouncementRow;
+import com.game.gateway.store.GatewayStore;
+import com.game.gateway.store.ZoneRow;
+import com.game.gateway.zone.ZoneHealthProbe;
+import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import com.game.proto.GateTokenPayload;
 import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -51,22 +58,11 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
  * HTTP 契约测试：按 Go robot 的解析方式核对 JSON 键名（snake_case）、类型、业务码，以及签出的令牌能被 gate 侧验过。
  * 走真实装配（{@link GatewayConfiguration} + application.yaml 的 Jackson 配置），只把 gate 目录换成替身，不需要 Redis。
  */
-@WebMvcTest(controllers = {AssignGateController.class, ServerListController.class, LoginController.class})
+@WebMvcTest(controllers = {AssignGateController.class, ServerListController.class, LoginController.class,
+        AnnouncementController.class})
 @Import({GatewayConfiguration.class, GatewayHttpApiTest.Meters.class})
 @TestPropertySource(properties = {
         GatewayConfiguration.TOKEN_SECRET_ENV + "=" + GatewayHttpApiTest.SECRET,
-        "xm.gateway.zones[0].zone-id=1",
-        "xm.gateway.zones[0].name=一区",
-        "xm.gateway.zones[0].status=OPEN",
-        "xm.gateway.zones[0].recommended=true",
-        "xm.gateway.zones[0].maintenance-msg=开放区不该下发公告",
-        "xm.gateway.zones[1].zone-id=2",
-        "xm.gateway.zones[1].name=二区",
-        "xm.gateway.zones[1].status=MAINTENANCE",
-        "xm.gateway.zones[1].maintenance-msg=停服维护中",
-        "xm.gateway.zones[2].zone-id=3",
-        "xm.gateway.zones[2].name=三区",
-        "xm.gateway.zones[2].status=CLOSED",
 })
 class GatewayHttpApiTest {
 
@@ -97,6 +93,25 @@ class GatewayHttpApiTest {
 
     @MockitoBean
     private AccountLoginService accountLogin;
+
+    @MockitoBean
+    private GatewayStore store;
+
+    @MockitoBean
+    private ZoneHealthProbe probe;
+
+    /** 一区开放推荐、二区维护、三区关闭、四区预告（新区、带开放时刻）；健康探测缺省未知。 */
+    @BeforeEach
+    void zones() {
+        long now = System.currentTimeMillis();
+        when(store.zones()).thenReturn(List.of(
+                new ZoneRow(1, "一区", 0, 100, "开放区不该下发公告", null, true, 1, 0, 0),
+                new ZoneRow(2, "二区", 1, 5000, "停服维护中", null, false, 2, 0, 0),
+                new ZoneRow(3, "三区", 2, 5000, "", null, false, 3, 0, 0),
+                new ZoneRow(4, "四区", 3, 5000, "", 1_900_000_000L, false, 4, now, now)));
+        when(probe.health(anyInt())).thenReturn(ZoneHealthProbe.Health.UNKNOWN);
+        when(probe.loadLevel(anyInt())).thenReturn(Optional.empty());
+    }
 
     private double assignOutcomes(int code, String reason) {
         return meters.get("xm.gateway.assign.gate").tag("code", Integer.toString(code)).tag("reason", reason)
@@ -232,7 +247,7 @@ class GatewayHttpApiTest {
         assertRejected(assignGate("{}"), 404, "zone_not_found");
         verifyNoInteractions(gateSource);
         assertThat(assignOutcomes(404, "zone_not_found") - before).as("标签不带 zone_id，未知区服不会造出新序列").isEqualTo(3);
-        assertThat(meters.find("xm.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(8);
+        assertThat(meters.find("xm.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(10);
     }
 
     @Test
@@ -279,7 +294,7 @@ class GatewayHttpApiTest {
         assertThat(keys(resp)).containsExactly("zones");
         JsonNode zones = resp.get("zones");
         assertThat(zones.isArray()).isTrue();
-        assertThat(zones.size()).isEqualTo(3);
+        assertThat(zones.size()).isEqualTo(4);
 
         JsonNode open = zones.get(0);
         assertThat(keys(open)).containsExactlyInAnyOrder("zone_id", "name", "status", "is_new", "recommended");
@@ -301,10 +316,65 @@ class GatewayHttpApiTest {
         assertThat(maintenance.get("recommended").booleanValue()).isFalse();
 
         JsonNode closed = zones.get(2);
-        assertThat(keys(closed)).containsExactlyInAnyOrder("zone_id", "name", "status", "is_new", "recommended");
+        assertThat(keys(closed)).as("同基线：关闭区文案为空也下发空串").containsExactlyInAnyOrder(
+                "zone_id", "name", "status", "maintenance_msg", "is_new", "recommended");
         assertThat(closed.get("zone_id").intValue()).isEqualTo(3);
         assertThat(closed.get("status").asText()).isEqualTo("CLOSED");
+        assertThat(closed.get("maintenance_msg").asText()).isEmpty();
+
+        JsonNode preview = zones.get(3);
+        assertThat(keys(preview)).containsExactlyInAnyOrder("zone_id", "name", "status", "open_time", "is_new",
+                "recommended");
+        assertThat(preview.get("status").asText()).isEqualTo("PREVIEW");
+        assertThat(preview.get("open_time").isIntegralNumber()).isTrue();
+        assertThat(preview.get("open_time").longValue()).isEqualTo(1_900_000_000L);
+        assertThat(preview.get("is_new").booleanValue()).as("7 天内创建").isTrue();
     }
+
+    @Test
+    void 区服列表_叠加健康探测_无gate显示维护_健康时下发负载档() throws Exception {
+        when(probe.health(1)).thenReturn(ZoneHealthProbe.Health.HEALTHY);
+        when(probe.loadLevel(1)).thenReturn(Optional.of(ZoneHealthProbe.LoadLevel.BUSY));
+        JsonNode open = call(get("/api/server-list")).get("zones").get(0);
+        assertThat(open.get("status").asText()).isEqualTo("OPEN");
+        assertThat(open.get("load_level").asText()).isEqualTo("BUSY");
+
+        when(probe.health(1)).thenReturn(ZoneHealthProbe.Health.DOWN);
+        JsonNode down = call(get("/api/server-list")).get("zones").get(0);
+        assertThat(down.get("status").asText()).isEqualTo("MAINTENANCE");
+        assertThat(down.has("load_level")).isFalse();
+        assertThat(down.get("maintenance_msg").asText()).isEqualTo("开放区不该下发公告");
+
+        when(probe.health(2)).thenReturn(ZoneHealthProbe.Health.HEALTHY);
+        when(probe.loadLevel(2)).thenReturn(Optional.of(ZoneHealthProbe.LoadLevel.FULL));
+        JsonNode maintenance = call(get("/api/server-list")).get("zones").get(1);
+        assertThat(maintenance.has("load_level")).as("只在显示 OPEN 时下发").isFalse();
+    }
+
+    @Test
+    void 预告区_503_zone_not_open_且不读gate目录() throws Exception {
+        assertRejected(assignGate("{\"zone_id\":4}"), 503, "zone_not_open");
+        verifyNoInteractions(gateSource);
+    }
+
+    // ---------------------------------------------------------------- 登录公告
+
+    @Test
+    void 登录公告_只含生效中的_时刻为Unix秒_没有不输出() throws Exception {
+        when(store.activeAnnouncements(org.mockito.ArgumentMatchers.anyLong())).thenReturn(List.of(
+                new AnnouncementRow(9, "维护通知", "今晚维护", "maintenance", 1_800_000_000L, 1_800_003_600L, 5),
+                new AnnouncementRow(3, "欢迎", null, "notice", null, null, 1)));
+        JsonNode resp = call(get("/api/announcement"));
+        assertThat(keys(resp)).containsExactly("items");
+        JsonNode first = resp.get("items").get(0);
+        assertThat(keys(first)).containsExactlyInAnyOrder("id", "title", "content", "type", "start_time", "end_time");
+        assertThat(first.get("id").longValue()).isEqualTo(9);
+        assertThat(first.get("start_time").longValue()).isEqualTo(1_800_000_000L);
+        JsonNode second = resp.get("items").get(1);
+        assertThat(keys(second)).containsExactlyInAnyOrder("id", "title", "content", "type");
+        assertThat(second.get("content").isNull()).isTrue();
+    }
+
 
     // ---------------------------------------------------------------- HTTP 登录 / 刷新令牌
 

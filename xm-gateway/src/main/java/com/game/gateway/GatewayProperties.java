@@ -1,6 +1,6 @@
 package com.game.gateway;
 
-import com.game.gateway.zone.Zone;
+import com.game.gateway.zone.SeedZone;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -10,8 +10,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * <p>gate 令牌密钥不在这里：它只从环境变量 {@code XM_GATE_TOKEN_SECRET} 读（见 {@link GatewayConfiguration}），
  * 不给任何可以写进仓库的配置入口。
  *
- * @param zones 区服列表，顺序即区服列表展示顺序；校验见 {@link com.game.gateway.zone.ZoneCatalog}
+ * @param seedZones 启动时播种的区服（库里没有才插入）；区服目录本身在 MySQL {@code zone_config}，运维经 xm-data 改
  */
 @ConfigurationProperties("xm.gateway")
-public record GatewayProperties(List<Zone> zones) {
+public record GatewayProperties(List<SeedZone> seedZones) {
+
+    public GatewayProperties {
+        seedZones = seedZones == null ? List.of() : List.copyOf(seedZones);
+    }
 }

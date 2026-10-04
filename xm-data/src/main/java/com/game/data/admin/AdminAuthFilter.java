@@ -65,20 +65,38 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
             }
         } finally {
             audit.info("admin operator={} method={} path={} query={} remote={} status={}",
-                    operator == null ? "<invalid>" : operator, request.getMethod(), path, request.getQueryString(),
+                    operator == null ? "<invalid>" : operator, request.getMethod(), printable(path),
+                    printable(request.getQueryString()),
                     request.getRemoteAddr(), status);
             metrics.adminRequest(opOf(path), Integer.toString(status));
         }
     }
 
-    /** 指标的 op 标签：已知接口取固定值，全服产出封禁的各子路径归成一个，其余一律 other。 */
+    /** 指标的 op 标签：已知接口取固定值，全服产出封禁 / 区服目录 / 公告 / 白名单的各子路径各归成一个，其余一律 other。 */
     static String opOf(String path) {
         String known = KNOWN_OPS.get(path);
         if (known != null) {
             return known;
         }
-        return path.equals(GainBlockController.PATH) || path.startsWith(GainBlockController.PATH + "/")
-                ? "gain_blocks" : "other";
+        if (under(path, GainBlockController.PATH)) {
+            return "gain_blocks";
+        }
+        if (under(path, ZoneAdminController.PATH)) {
+            return "zones";
+        }
+        if (under(path, AnnouncementAdminController.PATH)) {
+            return "announcements";
+        }
+        return under(path, WhitelistAdminController.PATH) ? "whitelist" : "other";
+    }
+
+    private static boolean under(String path, String prefix) {
+        return path.equals(prefix) || path.startsWith(prefix + "/");
+    }
+
+    /** 写审计日志前把控制字符换成 ?（路径是解码后的，%0A 之类会变成真换行，可伪造日志行）。 */
+    static String printable(String value) {
+        return value == null ? null : value.replaceAll("\\p{Cntrl}", "?");
     }
 
     /** 容器规范化后的路径（已解码、已去掉 ;参数）。 */

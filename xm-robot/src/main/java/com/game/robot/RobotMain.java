@@ -19,6 +19,7 @@ import com.game.robot.scenario.ReconnectScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TokenScenario;
+import com.game.robot.scenario.ZonesScenario;
 import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.List;
@@ -91,6 +92,13 @@ public final class RobotMain {
                             options.zoneId(), options.password(), options.accountPrefix(), options.runTag(),
                             options.requestTimeout());
                     title = "xm-robot token：" + scenario.account() + "，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.ZONES) {
+                    ZonesScenario scenario = new ZonesScenario(new AdminClient(options.dataUrl(),
+                            AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
+                            options.gatewayUrl(), options.zoneId(), options.runTag(), options.requestTimeout());
+                    title = "xm-robot zones：临时区 " + scenario.tempZone() + "，" + target + " data=" + options.dataUrl();
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.RECONNECT) {

@@ -30,6 +30,8 @@ public final class AssignGateMetrics {
                 new Key(AssignGateResponse.CODE_ZONE_NOT_FOUND, AssignGateResponse.ERR_ZONE_NOT_FOUND),
                 new Key(AssignGateResponse.CODE_ZONE_UNAVAILABLE, AssignGateResponse.ERR_ZONE_MAINTENANCE),
                 new Key(AssignGateResponse.CODE_ZONE_UNAVAILABLE, AssignGateResponse.ERR_ZONE_CLOSED),
+                new Key(AssignGateResponse.CODE_ZONE_UNAVAILABLE, AssignGateResponse.ERR_ZONE_NOT_OPEN),
+                new Key(AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_ZONE_ADMISSION_UNAVAILABLE),
                 new Key(AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_NO_GATE_AVAILABLE),
                 new Key(AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_GATE_DIRECTORY_UNAVAILABLE),
                 new Key(AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_INTERNAL));

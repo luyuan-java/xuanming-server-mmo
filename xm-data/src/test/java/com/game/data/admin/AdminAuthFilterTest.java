@@ -98,5 +98,11 @@ class AdminAuthFilterTest {
         assertThat(AdminAuthFilter.opOf("/admin/gain-blocks")).isEqualTo("gain_blocks");
         assertThat(AdminAuthFilter.opOf("/admin/gain-blocks/currency/123456")).isEqualTo("gain_blocks");
         assertThat(AdminAuthFilter.opOf("/admin/gain-blocksX")).isEqualTo("other");
+        assertThat(AdminAuthFilter.opOf("/admin/zones/3/maintenance")).isEqualTo("zones");
+        assertThat(AdminAuthFilter.opOf("/admin/announcements")).isEqualTo("announcements");
+        assertThat(AdminAuthFilter.opOf("/admin/whitelist/1/robot_0001")).isEqualTo("whitelist");
+        assertThat(AdminAuthFilter.opOf("/admin/zonesX")).isEqualTo("other");
+        assertThat(AdminAuthFilter.printable("/admin/whitelist/1/a\nforged")).isEqualTo("/admin/whitelist/1/a?forged");
+        assertThat(AdminAuthFilter.printable(null)).isNull();
     }
 }

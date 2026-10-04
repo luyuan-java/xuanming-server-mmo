@@ -1,7 +1,7 @@
 package com.game.gateway.login;
 
 import com.game.api.AccountLoginService;
-import com.game.gateway.zone.ZoneCatalog;
+import com.game.gateway.zone.ZoneDirectory;
 import com.game.proto.AccountSimplePlayer;
 import com.game.proto.login.AccountSimplePlayerWrapper;
 import com.game.proto.login.LoginRequest;
@@ -24,10 +24,11 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>login 回业务错误（error_message）一律 401，message 带 {@code upstream_err=<tip>}（客户端重新认证）；</li>
  *   <li>调用失败：超时 / 网络 / 没有可用的 login → 500 {@code login_unavailable}；其余异常 → 500 {@code internal_error}；</li>
- *   <li>区不在区服列表里 → 500 {@code unknown_zone}（基线按区路由 login，找不到该区的 login 同样是 5xx 一类）；</li>
+ *   <li>区不在区服目录里 → 500 {@code unknown_zone}（基线按区路由 login，找不到该区的 login 同样是 5xx 一类）；
+ *       区服目录读不到时跳过这项核对（基线不查区服表；登录不放人进游戏，进场仍经 assign-gate 的 fail-closed 准入）；</li>
  *   <li>refresh 为空 → 401 {@code empty_refresh_token}，不调 login；不重试（重试会拿已作废的 refresh 再打一次）。</li>
  * </ul>
- * 不记口令 / 令牌。线程安全、不阻塞（返回 future）。
+ * 不记口令 / 令牌。线程安全；只有查区服目录（1 s 缓存，过期时读一次 MySQL）在调用线程上阻塞，其余返回 future。
  */
 public final class LoginHttpService {
 
@@ -39,18 +40,29 @@ public final class LoginHttpService {
     static final String EMPTY_REFRESH_TOKEN = "empty_refresh_token";
 
     private final AccountLoginService login;
-    private final ZoneCatalog zones;
+    private final ZoneDirectory zones;
     private final LoginHttpMetrics metrics;
 
-    public LoginHttpService(AccountLoginService login, ZoneCatalog zones, LoginHttpMetrics metrics) {
+    public LoginHttpService(AccountLoginService login, ZoneDirectory zones, LoginHttpMetrics metrics) {
         this.login = login;
         this.zones = zones;
         this.metrics = metrics;
     }
 
     public CompletableFuture<HttpLoginResponse> login(HttpLoginRequest request) {
-        if (request.zoneId() <= 0 || request.zoneId() > Integer.MAX_VALUE
-                || zones.find((int) request.zoneId()).isEmpty()) {
+        boolean known;
+        if (request.zoneId() <= 0 || request.zoneId() > Integer.MAX_VALUE) {
+            known = false;
+        } else {
+            try {
+                known = zones.find((int) request.zoneId()).isPresent();
+            } catch (RuntimeException e) {
+                // 读不到区服目录时不挡登录（基线 /api/login 根本不查区服表）：登录本身不放人进游戏，进场仍经 assign-gate 的 fail-closed 准入
+                log.warn("读取区服目录失败，HTTP 登录跳过区号核对 zone={}: {}", request.zoneId(), e.toString());
+                known = true;
+            }
+        }
+        if (!known) {
             return done(recordLogin(HttpLoginResponse.error(HttpLoginResponse.CODE_INTERNAL, UNKNOWN_ZONE)));
         }
         LoginRequest rpc = LoginRequest.newBuilder()

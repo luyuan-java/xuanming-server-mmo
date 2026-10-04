@@ -22,6 +22,11 @@
             <artifactId>xm-discovery</artifactId>
         </dependency>
         <dependency>
+            <!-- 区服目录 / 白名单 / 登录公告的运维接口（表由 xm-gateway 建，这里只读写） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-gateway-store</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>

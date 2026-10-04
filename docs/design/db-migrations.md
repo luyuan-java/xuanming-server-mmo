@@ -181,3 +181,22 @@ ALTER TABLE account DROP COLUMN password_hash;
 
 回滚后必须同时回退代码，或关掉生产口令认证（`xm.login.auth.password.enabled=false`）：新代码的口令查询引用这一列，
 跑在旧表上口令登录一律失败（查询出错按认证失败处理，不影响 dev 口令与三方登录）。
+
+## M7：区服目录 / 白名单 / 登录公告表 `zone_config`、`zone_whitelist`、`announcement`（2026-10-04，xm-gateway 建）
+
+**原因**：区服目录改为可运行时修改（批次 3.4a，PARITY「区服目录与运维接口」「登录公告」「区服白名单」行）。建表脚本是
+`xm-gateway-store/src/main/resources/db/xm-gateway-schema.sql`，由 **xm-gateway** 启动时执行（`CREATE TABLE IF NOT EXISTS`），
+随后按 `xm.gateway.seed-zones` 播种库里没有的区（已有的不动）。xm-data 的运维接口只读写、不建表。
+播种的区以首次插入的时刻为创建时刻（同基线 schema 播种用 CURRENT_TIMESTAMP），所以升级后第一次启动播种出的区 7 天内在区服列表里显示为新区（`is_new`）。
+
+**新库 / 存量库**：都无需手工操作——新表，升级后的 xm-gateway 第一次启动时建出来并播种。原来写在
+`xm.gateway.zones` 里的区服配置改名为 `xm.gateway.seed-zones`（只在库里没有该区时生效）；之后改状态 / 文案走 `/admin/zones`。
+
+**核对**：
+
+```sql
+SHOW CREATE TABLE zone_config;
+SELECT zone_id, name, manual_status, recommended, sort_order FROM zone_config;
+```
+
+**回滚**：回退代码即可；表可留着（旧代码不读不写它，区服回到读静态配置）。

@@ -35,6 +35,11 @@
             <groupId>com.game</groupId>
             <artifactId>xm-discovery</artifactId>
         </dependency>
+        <dependency>
+            <!-- 区服目录 / 公告的库表（MySQL xm_java）：准入、区服列表、公告读它；运维经 xm-data 写 -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-gateway-store</artifactId>
+        </dependency>
         <!-- HTTP 登录 / 刷新令牌经 Dubbo 调 xm-login（AccountLoginService） -->
         <dependency>
             <groupId>org.apache.dubbo</groupId>
@@ -63,6 +68,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 只用于测试：整体启动时以 MySQL 兼容模式的内存库代替 MySQL（版本由 Spring Boot BOM 管理） -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

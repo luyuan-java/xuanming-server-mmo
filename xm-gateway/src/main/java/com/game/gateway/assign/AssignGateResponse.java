@@ -39,6 +39,8 @@ public record AssignGateResponse(
     public static final String ERR_ZONE_NOT_FOUND = "zone_not_found";
     public static final String ERR_ZONE_MAINTENANCE = "zone_maintenance";
     public static final String ERR_ZONE_CLOSED = "zone_closed";
+    public static final String ERR_ZONE_NOT_OPEN = "zone_not_open";
+    public static final String ERR_ZONE_ADMISSION_UNAVAILABLE = "zone_admission_unavailable";
     public static final String ERR_NO_GATE_AVAILABLE = "no_gate_available";
     public static final String ERR_GATE_DIRECTORY_UNAVAILABLE = "gate_directory_unavailable";
     public static final String ERR_INTERNAL = "internal_error";
