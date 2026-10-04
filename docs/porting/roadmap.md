@@ -43,7 +43,7 @@
 | 3.2 | 生产口令认证（Argon2id）与第三方认证 | login-production-password、login-third-party-auth、satoken-auth-service | ✅ `5294cc1`（另含存量口令迁移工具 PasswordAdmin；satoken-auth-service（基线 java/springboot_satoken_auth_starter）本身就是 Java 进程，Java 版当外部组件复用、只读它写的 Redis，不另行移植） |
 | 3.3 | 短线重连：30s 断线租约、回原节点复用实体、租约到期收口 | short-reconnect-lease、reconnect-resume、lease-expired-zombie-close | ✅ `ff1797b`（玩家位置记录 + 30 s 重连租约；不复用内存实例、租约到期无收口动作——PARITY 有意差异；首登改为同基线落默认主世界；更正参考契约里基线「重连回原场景」的错误描述）|
 | 3.4 | 登录排队、开服限流、区服目录 / 健康探测 / 运维接口 / 公告 / 白名单 | login-queue、login-queue-dispatcher、gateway-rate-limit、gateway-zone-*、admin-api-auth、gateway-announcement | 3.4a 区服目录 / 健康探测 / 运维接口 / 公告 / 白名单 ✅ `46e65ec`（运维接口放在 xm-data 的运维面）；3.4b 登录排队 ✅ `554405f`（弹出与放行同一段 Lua、取走后占位再留 15 s、放行摊到各 gate——PARITY 有意差异）；3.4c 开服限流 ✅ `cf9fb96`（Redis Lua 令牌桶、先 IP 桶后区桶、冷却按身份哈希 + IP、IPv6 按 /64——PARITY 有意差异）|
-| 3.5 | GM 签名停机、gate 排空与滚动替换 | gm-graceful-shutdown、gm-graceful-shutdown-rpc、gate-drain、gate-drain-ops |
+| 3.5 | GM 签名停机、gate 排空与滚动替换 | gm-graceful-shutdown、gm-graceful-shutdown-rpc、gate-drain、gate-drain-ops | ✅ `3f7ec8f`（签名绑「区:节点号:实例」、只收本机；排空标记绑实例、运维入口在 xm-data——PARITY 有意差异；K8s 滚动替换编排随部署批次）|
 
 ## 阶段 4：社交服务（每个服务一个 Spring Boot 进程模块）
 
