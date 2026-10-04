@@ -39,7 +39,7 @@
 
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
-| 3.1 | access / refresh token、HTTP `/api/login`、`/api/refresh-token`、设备数上限 | login-access-refresh-token、http-login、gateway-http-login、gateway-refresh-token、login-device-limit；robot e2e-http |
+| 3.1 | access / refresh token、HTTP `/api/login`、`/api/refresh-token`、设备数上限 | login-access-refresh-token、http-login、gateway-http-login、gateway-refresh-token、login-device-limit；robot e2e-http | ✅ `6922bc4`（robot `token` 覆盖 e2e-http 链路；登录限流排队随 3.4） |
 | 3.2 | 生产口令认证（Argon2id）与第三方认证 | login-production-password、login-third-party-auth、satoken-auth-service |
 | 3.3 | 短线重连：30s 断线租约、回原节点复用实体、租约到期收口 | short-reconnect-lease、reconnect-resume、lease-expired-zombie-close |
 | 3.4 | 登录排队、开服限流、区服目录 / 健康探测 / 运维接口 / 公告 / 白名单 | login-queue、login-queue-dispatcher、gateway-rate-limit、gateway-zone-*、admin-api-auth、gateway-announcement |
