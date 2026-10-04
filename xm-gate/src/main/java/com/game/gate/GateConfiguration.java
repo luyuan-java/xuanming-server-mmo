@@ -91,6 +91,14 @@ public class GateConfiguration {
         return new ReferenceBean<>();
     }
 
+    /** 聊天后端（Dubbo group = proto 域 chat，xm-chat 提供）；直连 {@code xm.dubbo.chat-url}，nacos profile 置空走注册中心。 */
+    @Bean
+    @DubboReference(group = DubboGroups.CHAT, check = false, url = "${xm.dubbo.chat-url:}",
+            methods = @Method(name = "handle", retries = 0))
+    public ReferenceBean<ClientMessageService> chatClientMessageService() {
+        return new ReferenceBean<>();
+    }
+
     /** gate 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
     @Bean
     public GateMetrics gateMetrics(MeterRegistry meterRegistry) {
@@ -105,6 +113,7 @@ public class GateConfiguration {
                              NodeLinkAuth nodeLinkAuth,
                              @Qualifier("loginClientMessageService") ClientMessageService loginClientMessageService,
                              @Qualifier("friendClientMessageService") ClientMessageService friendClientMessageService,
+                             @Qualifier("chatClientMessageService") ClientMessageService chatClientMessageService,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${xm.zone-id:1}") int zoneId,
                              @Value("${xm.advertise-host:127.0.0.1}") String advertiseHost,
                              @Value("${xm.table-dir:config-data/tables}") String tableDir,
@@ -114,7 +123,8 @@ public class GateConfiguration {
                     .warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", runMode);
         }
         return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
-                Map.of(DubboGroups.FRIEND, friendClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
+                Map.of(DubboGroups.FRIEND, friendClientMessageService,
+                        DubboGroups.CHAT, chatClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
                 gateMetrics, RunMode.parse(runMode));
     }
 

@@ -1,0 +1,4 @@
+# nacos profile：Dubbo 注册到 Nacos（只做 Dubbo 注册中心，见 architecture.md §6）；gate 改走注册中心发现 chat。
+dubbo:
+  registry:
+    address: nacos://${XM_NACOS_ADDR:127.0.0.1:8848}

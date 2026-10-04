@@ -52,12 +52,12 @@ class MessageRoutesTest {
 
     @Test
     void Java版未接入的客户端服务路由到unsupported() {
-        MessageMethod chat = registry.all().stream()
-                .filter(m -> m.clientService() && m.serviceName().equals("ClientPlayerChat"))
+        MessageMethod team = registry.all().stream()
+                .filter(m -> m.clientService() && m.serviceName().equals("ClientPlayerTeam"))
                 .findFirst().orElseThrow();
-        MessageRoute route = routes.clientRoute(chat.messageId());
+        MessageRoute route = routes.clientRoute(team.messageId());
         assertThat(route.domain()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
-        assertThat(route.method()).isEqualTo("ClientPlayerChat." + chat.methodName());
+        assertThat(route.method()).isEqualTo("ClientPlayerTeam." + team.methodName());
     }
 
     @Test
@@ -69,6 +69,12 @@ class MessageRoutesTest {
         int notify = registry.requireId("ClientPlayerFriend", "NotifyFriendEvent");
         assertThat(routes.clientRoute(notify).domain()).isEqualTo(DubboGroups.FRIEND);
         assertThat(routes.clientRoute(notify).hasResponse()).as("应答类型是 Empty").isFalse();
+    }
+
+    @Test
+    void 聊天服务路由到chat域() {
+        int send = registry.requireId("ClientPlayerChat", "SendChat");
+        assertThat(routes.clientRoute(send)).isEqualTo(new MessageRoute(send, DubboGroups.CHAT, true, "ClientPlayerChat.SendChat"));
     }
 
     @Test

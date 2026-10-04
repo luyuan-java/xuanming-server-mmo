@@ -1,0 +1,65 @@
+# xm-chat 默认（local）配置：Dubbo 直连、不需要 Nacos 服务端。用 Nacos 做注册中心时加 --spring.profiles.active=nacos。
+#
+# 秘密只从环境变量注入，不写进本文件：
+#   XM_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填，与 xm-gate 一致；缺失即拒绝启动）
+#
+# ⚠ 历史 LIST 是这类数据的唯一副本：生产 Redis 须 maxmemory-policy=noeviction（同基线 ChatRedis 要求）。
+spring:
+  application:
+    name: xm-chat
+  main:
+    web-application-type: servlet
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+# 管理端点：http://127.0.0.1:18108/actuator/health 与 /actuator/prometheus。
+server:
+  port: 18108
+  address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+xm:
+  advertise-host: 127.0.0.1
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  chat:
+    # 缺省值同 mmorpg go/chat（etc/chat.yaml）。
+    max-content-bytes: 512
+    rate-limit-per-second: 5
+    history-max-entries: 200
+    history-ttl: 7d
+    history-default-limit: 20
+    history-max-limit: 50
+    request-id-ttl: 60s
+    request-budget: 3500ms
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    qos-enable: false
+  protocol:
+    name: tri
+    port: 20884
+    host: ${xm.advertise-host}
+  registry:
+    address: N/A
+  provider:
+    timeout: 10000
+  consumer:
+    check: false

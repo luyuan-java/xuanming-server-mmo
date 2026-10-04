@@ -11,6 +11,9 @@ public final class DubboGroups {
     /** 好友（{@code proto/friend/...}），由 xm-friend 提供。 */
     public static final String FRIEND = "friend";
 
+    /** 聊天（{@code proto/chat/...}），由 xm-chat 提供。 */
+    public static final String CHAT = "chat";
+
     private DubboGroups() {
     }
 }

@@ -7,3 +7,4 @@ xm:
   dubbo:
     login-url: ""
     friend-url: ""
+    chat-url: ""

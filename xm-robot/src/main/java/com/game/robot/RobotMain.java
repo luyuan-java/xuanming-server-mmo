@@ -10,6 +10,7 @@ import com.game.robot.flow.PlayerFlow;
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
+import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.DrainScenario;
@@ -104,6 +105,12 @@ public final class RobotMain {
                             AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
                             new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), options.zoneId());
                     title = "xm-robot queue：区 " + options.zoneId() + "，" + target + " data=" + options.dataUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.CHAT) {
+                    ChatScenario scenario = new ChatScenario(flow, registry, options.accountPrefix(), options.runTag(),
+                            options.requestTimeout());
+                    title = "xm-robot chat：" + scenario.accountA() + " 等，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.FRIEND) {

@@ -44,6 +44,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-gateway` | 进程（Spring Boot Web + Dubbo 调用方） | 区服列表（区服目录 + 健康探测）、分配 gate 并签发 gate 令牌（区服准入）、HTTP 登录与刷新令牌（经 Dubbo 调 xm-login）、登录公告 |
 | `xm-login` | 进程（Spring Boot + Dubbo） | 登录（含 access / refresh 令牌、设备数上限）、建角、进游戏、离开 / 断线 |
 | `xm-friend` | 进程（Spring Boot + Dubbo） | 好友：申请 / 同意 / 拒绝 / 删除 / 列表 / 黑名单与好友事件推送（Dubbo group `friend`，端口 20883；四张表经 xm-pbmysql，§4.13） |
+| `xm-chat` | 进程（Spring Boot + Dubbo） | 聊天 v1：世界频道与私聊的发言（校验、幂等、限速、落历史）与拉取历史（Dubbo group `chat`，端口 20884；数据只在 Redis，§4.14） |
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景目录：玩家该进哪个场景节点的哪个场景 |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送 |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
@@ -90,7 +91,7 @@ Java 代码不得依赖这套目录，具体做法：
 - **调用方鉴权（必需）**：Dubbo 把 `127.*` 视为无效绑定地址，`dubbo.protocol.host=127.0.0.1` 实际监听 `0.0.0.0`
   （`DUBBO_IP_TO_BIND` 也不接受回环地址），login（20881）/ scene-manager（20882）的端口**无法只绑本机**，
   而 `ClientMessageService` 完全信任调用方填的 `SessionContext`。所以 Java 版进程间的每次 Dubbo 调用都要带鉴权附件：
-  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-friend / xm-gate / xm-gateway 必填，缺失即拒绝启动），
+  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-friend / xm-chat / xm-gate / xm-gateway 必填，缺失即拒绝启动），
   调用方附 `xm-auth-ts`（Unix 秒）与 `xm-auth-mac = HMAC-SHA256(secret, "接口全名|方法名|ts")` 的 64 字节小写 hex，
   提供方常数时间比较 MAC、再验 ts 与本地时钟相差 ≤ 60s，不过即抛 `RpcException(AUTHORIZATION)`，不进入业务代码，
   对外原因只有一句「调用方鉴权失败」。算法唯一出处 `xm-common` 的 `DubboCallAuth`，过滤器在 `xm-api` 的
@@ -388,6 +389,20 @@ mmorpg：`go/friend`（go-zero gRPC，经 client_rpc_router 转发）。Java 版
 - **清理**（`FriendSweep`，缺省 `report_only` 只数不删）：终态好友申请（过保留期、`status IN (2,3)`）与零好友容量行，候选普通读后
   逐行按主键自动提交删（WHERE 复核条件），存在 `updated_ms = 0` 的终态行时只数不删；首轮随机抖动、固定延迟不叠轮、单轮预算 min(间隔, 30 s)。
 
+### 4.14 聊天服务（xm-chat）
+
+mmorpg：`go/chat`（v1：世界频道 + 私聊）。Java 版是独立进程 xm-chat（Dubbo group `chat`，端口 20884），gate 经同一套按会话的后端队列转发：
+
+- **数据只在 Redis**：世界频道 `xm:chat:{world}:log`（全服一条）、私聊 `xm:chat:{p:<小号>:<大号>}:log`（双方同一把键）——LIST、新在前，
+  每次写入「LPUSH + LTRIM 到 200 条 + 续期 7 天」一段 Lua；发言幂等键 `xm:chat:{req:<pid>}:<request_id>`、限速计数 `xm:chat:{rl:<pid>}`。
+  历史是尽力而为的窗口（同基线：Redis 重启即清空），生产 Redis 须 `noeviction`。
+- **发言**（61）：先做全部纯校验（会话 → 消息 → 频道 → 内容 ≤ 512 字节且 trim 后非空 → request_id ≤ 64 字节），再按 幂等 → 限速 → 写入 碰 Redis：
+  幂等键先占成 `pending:<随机 token>`（SET NX EX 60），写入成功后改 `done`，占住之后任何一步失败都释放（值相等才删）；同 request_id 重发读到
+  done 回成功、读到 pending 回 1008；限速每人每秒 5 条。发言人取会话、时刻由服务端盖、内容存 trim 后的值；不推送（各自拉取）。
+- **拉取**（28）：LRANGE 最近 N 条（0 取 20，上限 50），坏条目跳过，按 send_time_ms 稳定倒序；私聊键由（会话里的自己, peer）决定。
+- **错误语义同基线**：业务结果全部 in-band（tip 不带参数）；会话没绑定玩家回 in-band 1005（chat 的会话拦截器放行到逻辑层）；
+  队伍 / 系统 / 未指定频道 1006；Redis 故障 1003。处理全程异步（只发 Redis 异步命令），不占 Dubbo 线程、不需要工作线程池。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -591,19 +606,20 @@ mmorpg：`go/friend`（go-zero gRPC，经 client_rpc_router 转发）。Java 版
 
 每个进程用 **Micrometer** 记指标，经 **Spring Boot Actuator** 以 Prometheus 文本格式导出（选型见 tech-stack.md）。
 指标名与标签只在每个进程的一个类里定义，业务代码只调语义方法：gate `GateMetrics`、login `LoginMetrics`、
-scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`。
+scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`。
 
 | 进程 | 抓取地址（默认） | 说明 |
 |---|---|---|
 | xm-gateway | `http://127.0.0.1:18105/actuator/prometheus` | 管理专用端口，默认只绑本机（`XM_MANAGEMENT_ADDRESS`）；对外的 18081 只有 `/api` |
 | xm-login | `http://127.0.0.1:18101/actuator/prometheus` | 管理专用端口 |
 | xm-friend | `http://127.0.0.1:18107/actuator/prometheus` | 管理专用端口 |
+| xm-chat | `http://127.0.0.1:18108/actuator/prometheus` | 管理专用端口 |
 | xm-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
 | xm-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
 | xm-scene | `http://127.0.0.1:18104/actuator/prometheus` | 管理专用端口；同机多个 scene 实例要各用 `SERVER_PORT` 错开（与链路端口一样） |
 | xm-data | `http://127.0.0.1:18106/actuator/prometheus` | Web 进程：同一端口上还有带令牌的运维接口 `/admin/**`（§4.5），默认只绑本机 |
 
-- **非 Web 进程的管理端口**：gate / login / friend / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
+- **非 Web 进程的管理端口**：gate / login / friend / chat / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
   Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。
   默认只绑 `127.0.0.1`（与 mmorpg 开发环境的 Prometheus 端口同口径），跨机抓取用 `XM_MANAGEMENT_ADDRESS` 指定内网地址；
   端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。actuator 只暴露 `health` 与 `prometheus` 两个端点。
@@ -631,7 +647,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | gate | `xm_gate_client_invalid_frames_total` | Counter | `reason`=invalid_length / checksum / invalid_name_len / unknown_type / parse | 解码层非法帧（随即断开） |
 | gate | `xm_gate_disconnects_total` | Counter | `reason`=handshake_timeout / handshake_rejected / no_handshake / illegal_packets / pending_overflow / write_buffer_full / invalid_frame / session_id_exhausted / server_directive / kicked / scene_link_down / server_kick | gate 主动断开的连接（客户端自己断开、停服 / 丢租约的批量关闭不计） |
 | gate | `xm_gate_pushes_total` | Counter | `kind`=message / kick，`result`=delivered / no_session / not_bound / stale_instance / invalid | 服务端推送（§4.3）对每个目标会话的结局：已下发 / 会话号已不存在 / 会话不在游戏里或玩家对不上（栅栏）/ 指向别的 gate 实例 / 格式不对 |
-| gate | `xm_gate_backend_calls_seconds` | Timer | `backend`=login / friend，`method`=handle / sessionClosed / abandonEnter（friend 只有 handle），`result`=ok / error | 对后端的 Dubbo 调用耗时（带 tip 的应答算 ok；超时 / 不可用算 error） |
+| gate | `xm_gate_backend_calls_seconds` | Timer | `backend`=login / friend / chat，`method`=handle / sessionClosed / abandonEnter（friend / chat 只有 handle），`result`=ok / error | 对后端的 Dubbo 调用耗时（带 tip 的应答算 ok；超时 / 不可用算 error） |
 | gate | `xm_gate_link_frames_total` | Counter | `direction`=out / in，`type`=链路帧类型（hello / player_enter / client_forward / to_client ……） | gate ↔ scene 链路帧（out = 已写上链路，排队中不算） |
 | gate | `xm_gate_link_dropped_total` | Counter | `reason`=lease_invalid / queue_full / link_failed / unavailable | 没发出去的链路帧 |
 | gate | `xm_gate_link_events_total` | Counter | `event`=connecting / ready / connect_failed / down | 链路状态变化 |
@@ -653,6 +669,8 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | friend | `xm_friend_directory_quota_total` | Counter | `outcome`=allowed / rejected / error | 在线目录翻页的每分钟配额（error = Redis 故障被拒，fail-closed） |
 | friend | `xm_friend_sweep_pending_rows`、`xm_friend_sweep_idle_capacity_rows` | Gauge | `mode`=report_only / delete | 清理看到的过期终态申请 / 零好友容量行（受 batch-limit 封顶；合法模式每轮都刷含 0，长期不变说明清理没在跑） |
 | friend | `executor_*{name="friend-worker"}` | Micrometer 标准线程池指标 | — | 工作线程池状态（队列满见 `xm_friend_requests{result="overloaded"}`） |
+| chat | `xm_chat_sends_total`、`xm_chat_pulls_total` | Counter | `channel`=world / private / team / system / unspecified / unknown，`outcome`=ok / duplicate / in_flight / no_session / bad_request / channel_unavailable / too_long / rate_limited / storage_error | 发言 / 拉取的结局（同基线 chat_send_total / chat_pull_total，全部组合启动即注册） |
+| chat | `xm_chat_requests_seconds` | Timer | `method`=SendChat / PullChatHistory / unrouted，`result`=ok / business_error / internal_error / bad_request / unsupported | 每个客户端请求的耗时与结果 |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
 | gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 100 / 400 / 404 / 410 / 429 / 500 / 503，`reason`=ok / queueing（登录排队）/ ratelimit（限流排队）/ 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；16 个已知组合启动即注册（`xm_gateway_queue_status_total` 同形，8 个） |
 | gateway | `xm_gateway_queue_admits_total` | Counter | — | 登录排队放行的人数（只有拿到选主锁的那个 gateway 在放行，见「登录排队」） |
