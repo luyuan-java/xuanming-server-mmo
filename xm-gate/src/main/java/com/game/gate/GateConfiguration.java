@@ -99,6 +99,17 @@ public class GateConfiguration {
         return new ReferenceBean<>();
     }
 
+    /**
+     * 组队后端（Dubbo group = proto 域 team，xm-team 提供）；直连 {@code xm.dubbo.team-url}，nacos profile 置空走注册中心。
+     * 写路径（建队、同意、踢人……）不幂等，{@code handle} 必须不重试（team-spec §6.2）。
+     */
+    @Bean
+    @DubboReference(group = DubboGroups.TEAM, check = false, url = "${xm.dubbo.team-url:}",
+            methods = @Method(name = "handle", retries = 0))
+    public ReferenceBean<ClientMessageService> teamClientMessageService() {
+        return new ReferenceBean<>();
+    }
+
     /** gate 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
     @Bean
     public GateMetrics gateMetrics(MeterRegistry meterRegistry) {
@@ -114,6 +125,7 @@ public class GateConfiguration {
                              @Qualifier("loginClientMessageService") ClientMessageService loginClientMessageService,
                              @Qualifier("friendClientMessageService") ClientMessageService friendClientMessageService,
                              @Qualifier("chatClientMessageService") ClientMessageService chatClientMessageService,
+                             @Qualifier("teamClientMessageService") ClientMessageService teamClientMessageService,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${xm.zone-id:1}") int zoneId,
                              @Value("${xm.advertise-host:127.0.0.1}") String advertiseHost,
                              @Value("${xm.table-dir:config-data/tables}") String tableDir,
@@ -124,7 +136,8 @@ public class GateConfiguration {
         }
         return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
                 Map.of(DubboGroups.FRIEND, friendClientMessageService,
-                        DubboGroups.CHAT, chatClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
+                        DubboGroups.CHAT, chatClientMessageService,
+                        DubboGroups.TEAM, teamClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
                 gateMetrics, RunMode.parse(runMode));
     }
 

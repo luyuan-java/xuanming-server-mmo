@@ -4,7 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.discovery.RedisKeys;
 import com.game.friend.metrics.FriendMetrics;
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayList;
 import java.util.List;

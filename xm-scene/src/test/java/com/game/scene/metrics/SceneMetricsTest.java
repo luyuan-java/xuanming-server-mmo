@@ -151,6 +151,24 @@ class SceneMetricsTest {
         }
     }
 
+    /** 组队跟随的结局启动即注册（初值 0），导出名 {@code xm_scene_team_follow_total{result}}（team-spec §6.10 第 8 条）。 */
+    @Test
+    void 组队跟随指标_启动即注册_导出名() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String result : new String[] {"followed", "same_scene", "not_in_team", "projection_missing",
+                    "not_member", "leader_not_on_node", "is_leader", "stale", "read_error"}) {
+                assertThat(before).contains("xm_scene_team_follow_total{result=\"" + result + "\"} 0");
+            }
+            exported.teamFollow(SceneMetrics.TeamFollowResult.FOLLOWED);
+            assertThat(prometheus.scrape()).contains("xm_scene_team_follow_total{result=\"followed\"} 1");
+        } finally {
+            prometheus.close();
+        }
+    }
+
     private static Set<String> labelNames(String scrape, String prefix) {
         Set<String> names = new TreeSet<>();
         Pattern label = Pattern.compile("([a-z_]+)=\"");

@@ -7,10 +7,13 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
@@ -220,23 +223,101 @@ public final class PlayerPresenceDirectory {
         int offline = 0;
         int errors = 0;
         for (int i = 0; i < ids.size(); i++) {
-            byte[] value = raw.get(keys[i]);
-            if (value == null) {
-                offline++;
-                continue;
-            }
-            try {
-                PlayerPresence presence = PlayerPresence.parseFrom(value);
-                if (presence.getPlayerId() != ids.get(i)) {
-                    errors++;
-                } else {
-                    online.put(ids.get(i), presence);
-                }
-            } catch (InvalidProtocolBufferException e) {
-                errors++;
+            PresenceRead read = strictRead(ids.get(i), raw.get(keys[i]));
+            switch (read.status()) {
+                case ONLINE -> online.put(ids.get(i), read.presence());
+                case ABSENT -> offline++;
+                case ERROR -> errors++;
             }
         }
         return new StrictLookup(online, offline, errors);
+    }
+
+    /**
+     * 严格逐人读的一项结果（{@link #findEachStrictAsync}）：{@code presence} 只在 {@link Status#ONLINE} 时非 null。
+     */
+    public record PresenceRead(Status status, PlayerPresence presence) {
+
+        public enum Status {
+            /** 条目存在、能解码、player_id 与键一致：此刻在游戏里。 */
+            ONLINE,
+            /** 没有条目：不在游戏里（gate 已删或已过期）。 */
+            ABSENT,
+            /** 读失败（整个往返出错）、条目损坏或与键不符：在线状态未知，不能当成离线。 */
+            ERROR
+        }
+
+        private static final PresenceRead ABSENT_READ = new PresenceRead(Status.ABSENT, null);
+        private static final PresenceRead ERROR_READ = new PresenceRead(Status.ERROR, null);
+
+        public PresenceRead {
+            if ((status == Status.ONLINE) != (presence != null)) {
+                throw new IllegalArgumentException("只有 ONLINE 带条目: " + status);
+            }
+        }
+
+        public static PresenceRead online(PlayerPresence presence) {
+            return new PresenceRead(Status.ONLINE, presence);
+        }
+
+        public static PresenceRead absent() {
+            return ABSENT_READ;
+        }
+
+        public static PresenceRead error() {
+            return ERROR_READ;
+        }
+    }
+
+    /**
+     * 严格逐人读（一次 MGET，不阻塞调用线程）：每个玩家各给一个 {@link PresenceRead}——在线 / 不在线 / 出错（条目损坏、与键不符）。
+     * 整个往返失败（Redis 故障、超时、客户端已关闭）时<b>每个玩家都是 ERROR</b>，返回的 future 正常完成、从不异常完成：
+     * 组队的会话四态（team-spec §6.6，D3）要按人 fail-closed，一个读失败不能让整个请求失败（基线 go/match/internal/team/presence.go:56-57
+     * 「MGET 整批失败或单项解析失败 → SessionUnknown」）。与 {@link #findAllStrictAsync} 的区别：那个只回计数，不说出错的是谁。
+     *
+     * @return 键覆盖全部入参（去重，保持入参顺序），不可修改
+     */
+    public CompletableFuture<Map<Long, PresenceRead>> findEachStrictAsync(Collection<Long> playerIds) {
+        List<Long> ids = playerIds.stream().distinct().toList();
+        if (ids.isEmpty()) {
+            return CompletableFuture.completedFuture(Map.of());
+        }
+        String[] keys = ids.stream().map(RedisKeys::presence).toArray(String[]::new);
+        CompletableFuture<Map<String, byte[]>> mget;
+        try {
+            mget = redis.getBuckets(ByteArrayCodec.INSTANCE).<byte[]>getAsync(keys).toCompletableFuture();
+        } catch (RuntimeException e) {
+            mget = CompletableFuture.failedFuture(e);
+        }
+        return mget.handle((raw, error) -> {
+            Map<Long, PresenceRead> reads = new LinkedHashMap<>();
+            if (error != null) {
+                log.warn("在线目录逐人严格读失败，{} 人按在线状态未知处理: {}", ids.size(), error.toString());
+                ids.forEach(id -> reads.put(id, PresenceRead.error()));
+                return Collections.unmodifiableMap(reads);
+            }
+            for (int i = 0; i < ids.size(); i++) {
+                PresenceRead read = strictRead(ids.get(i), raw.get(keys[i]));
+                if (read.status() == PresenceRead.Status.ERROR) {
+                    log.warn("在线目录条目损坏或与键不符，按在线状态未知处理 player={}", Long.toUnsignedString(ids.get(i)));
+                }
+                reads.put(ids.get(i), read);
+            }
+            return Collections.unmodifiableMap(reads);
+        });
+    }
+
+    /** 严格解码一个条目：没有 → ABSENT；损坏或与键不符 → ERROR（不降级成离线）。 */
+    private static PresenceRead strictRead(long playerId, byte[] raw) {
+        if (raw == null) {
+            return PresenceRead.absent();
+        }
+        try {
+            PlayerPresence presence = PlayerPresence.parseFrom(raw);
+            return presence.getPlayerId() == playerId ? PresenceRead.online(presence) : PresenceRead.error();
+        } catch (InvalidProtocolBufferException e) {
+            return PresenceRead.error();
+        }
     }
 
     private static Optional<PlayerPresence> decode(long playerId, byte[] raw) {

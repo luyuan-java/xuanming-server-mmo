@@ -17,7 +17,7 @@
 |---|---|---|---|
 | 1.1 | 玩家数据按玩法分段持久化（`player_state` 玩法数据 blob，带 owner_epoch 围栏）+ 在线周期存盘 + 脏比对跳过（「最终写回失败后持续重试直到成功」仍待做，见 PARITY） | player-persistent-data-model、player-data-record、periodic-dirty-save、periodic-autosave、save-failure-durability | ✅ `9103f78` |
 | 1.2 | 玩家在线目录（player → gate / session / scene）+ 服务端向在线玩家推送通道（tip / 踢线 / 业务推送） | player-presence-directory、player-push-channel、gate-command-channel、sm-gate-command-channel、server-push-tip-kick-redirect、kick-player | ✅ `832c0a3`（场景 / 全服广播随首个用到的功能做） |
-| 1.3 | 非 scene 客户端服务的后端路由（gate 路由表 → 各 Dubbo 服务）+ 按方法热关停 | other-backend-routing、social-backend-routing、contract-service-backend-routing、rpc-killswitch、killswitch | 后端路由并入 4.1 ✅；按方法热关停 ✅（提交号见 git log「热关停」） |
+| 1.3 | 非 scene 客户端服务的后端路由（gate 路由表 → 各 Dubbo 服务）+ 按方法热关停 | other-backend-routing、social-backend-routing、contract-service-backend-routing、rpc-killswitch、killswitch | 后端路由并入 4.1 ✅；按方法热关停 ✅ `8a4726f` |
 | 1.4 | 请求字段规模校验、客户端 GM 指令闸（gate + scene） | request-field-sanity-check、gm-client-message-gate、client-gm-gate | ✅ `a8ccc0d`（并入 2.1：GM 闸两道锁；字段规模与负数校验做在 scene 分发入口，对全部 scene 客户端请求生效） |
 | 1.5 | 公共件：游戏日 / 游戏周切点、永久 GUID 号段、表达式列求值、表内 tip 引用校验 | game-day、game-day-periods、guid-segment-alloc、id-segment-allocator、table-expression-columns、table-tip-ref-validation |
 

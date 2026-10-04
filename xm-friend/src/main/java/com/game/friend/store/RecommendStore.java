@@ -1,6 +1,6 @@
 package com.game.friend.store;
 
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import java.math.BigInteger;
 import java.sql.Connection;
 import java.sql.PreparedStatement;

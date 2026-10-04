@@ -10,7 +10,7 @@ import com.game.friend.store.FriendStore.BlockResult;
 import com.game.friend.store.FriendStore.FriendEdge;
 import com.game.friend.store.FriendStore.RejectResult;
 import com.game.friend.store.FriendStore.RemoveResult;
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import com.game.friend.store.pb.FriendBlockRow;
 import com.game.friend.store.pb.FriendCapacityRow;
 import com.game.friend.store.pb.FriendEdgeRow;

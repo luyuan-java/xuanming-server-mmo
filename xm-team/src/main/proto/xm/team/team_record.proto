@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+// 组队权威记录的存储格式（只在 Java 版内部使用；归 xm-team 所有）。
+// Redis xm:{team}:rec:<team_id> 是 Hash：字段 ver = 版本号（十进制，首次 1，每次提交严格 +1），字段 pb = 本消息。
+// 形状同 mmorpg proto/team/team.proto 的 TeamRecord（字段号一致），但不依赖同步来的契约 proto（team-spec D18）。
+// 所有时间字段都是 Redis TIME 口径的毫秒（唯一时钟源，team-spec §1.10），不用各实例的墙钟。
+
+package xm.team;
+
+option java_package = "com.game.team.proto";
+option java_multiple_files = true;
+
+message TeamRecord {
+  uint64 team_id = 1;
+  uint64 leader_id = 2;
+  // 建队者的 home zone，不为 0。
+  uint32 zone_id = 3;
+  uint64 created_at_ms = 4;
+  // 集合语义，顺序看 join_seq；落盘前按 (join_seq, player_id) 升序排。
+  repeated TeamMemberRecord members = 5;
+  repeated TeamApplicationRecord applications = 6;
+  repeated TeamInviteRecord invites = 7;
+  uint32 next_join_seq = 8;
+  // 非空 = 开战锁持有者（uuid）；过了截止即视为无锁（字段不自动清，等下次加锁覆盖或释放清空）。
+  string match_lock_token = 9;
+  uint64 match_lock_expire_at_ms = 10;
+  // 集合语义：加锁时的开战名单；锁有效期间必等于 members 的 player_id 集合。
+  repeated uint64 match_lock_roster = 11;
+}
+
+message TeamMemberRecord {
+  uint64 player_id = 1;
+  uint32 zone_id = 2;
+  uint64 joined_at_ms = 3;
+  uint32 join_seq = 4;
+}
+
+message TeamApplicationRecord {
+  uint64 player_id = 1;
+  // 申请人的 home zone。
+  uint32 zone_id = 2;
+  // 首次申请时刻（重复申请只刷新 expire_at_ms）。
+  uint64 applied_at_ms = 3;
+  uint64 expire_at_ms = 4;
+}
+
+message TeamInviteRecord {
+  uint64 invitee_id = 1;
+  // 最近一次的邀请人。
+  uint64 inviter_id = 2;
+  // 被邀请人的 home zone。
+  uint32 zone_id = 3;
+  // 首次邀请时刻（重复邀请只刷新 expire_at_ms 与 inviter_id）。
+  uint64 invited_at_ms = 4;
+  uint64 expire_at_ms = 5;
+}

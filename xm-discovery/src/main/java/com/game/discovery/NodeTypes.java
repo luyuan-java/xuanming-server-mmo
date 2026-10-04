@@ -18,6 +18,8 @@ public final class NodeTypes {
      * 按 zone 分会让不同 zone 的 scene 拿到同一个 worker、发出相同的号。
      */
     public static final String SCENE_GUID = "scene-guid";
+    /** xm-team：team_id 雪花 worker 的租约，作用域 0（全服；理由同 {@link #SCENE_GUID}）。 */
+    public static final String TEAM = "team";
 
     private NodeTypes() {
     }

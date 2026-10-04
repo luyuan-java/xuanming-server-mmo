@@ -14,6 +14,7 @@ import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
+import com.game.discovery.team.TeamMembershipReader;
 import com.game.player.store.PlayerStore;
 import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpEndpoint;
@@ -56,6 +57,7 @@ import com.game.scene.ownership.OwnerLeaseRenewer;
 import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.player.ItemGuids;
 import com.game.scene.storage.StoragePlayerRepository;
+import com.game.scene.team.TeamFollowService;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.SceneClock;
@@ -248,6 +250,9 @@ public class SceneNode implements SmartLifecycle {
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
+        // 组队跟随：进场 / 换场景后异步读成员关系（Redis I/O 不在逻辑线程上等），结果投递回逻辑线程（team-spec §6.10）
+        TeamMembershipReader teamMemberships = new TeamMembershipReader(redis);
+        TeamFollowService teamFollow = new TeamFollowService(teamMemberships::readAsync, logic, metrics);
         // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, player -> {
@@ -256,7 +261,7 @@ public class SceneNode implements SmartLifecycle {
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
-                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId));
+                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId), teamFollow);
         links = gateLinks;
         world = sceneWorld;
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,

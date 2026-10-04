@@ -25,6 +25,7 @@ import com.game.robot.scenario.RateLimitScenario;
 import com.game.robot.scenario.ReconnectScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
+import com.game.robot.scenario.TeamScenario;
 import com.game.robot.scenario.TokenScenario;
 import com.game.robot.scenario.ZonesScenario;
 import java.io.PrintStream;
@@ -119,6 +120,12 @@ public final class RobotMain {
                     ChatScenario scenario = new ChatScenario(flow, registry, options.accountPrefix(), options.runTag(),
                             options.requestTimeout());
                     title = "xm-robot chat：" + scenario.accountA() + " 等，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.TEAM) {
+                    TeamScenario scenario = new TeamScenario(flow, registry, Path.of(options.tableDir()),
+                            options.accountPrefix(), options.runTag(), options.zoneId(), options.requestTimeout());
+                    title = "xm-robot team：" + scenario.accountA() + " 等，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.FRIEND) {

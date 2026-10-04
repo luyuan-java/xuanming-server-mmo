@@ -27,6 +27,7 @@
         <module>xm-login</module>
         <module>xm-friend</module>
         <module>xm-chat</module>
+        <module>xm-team</module>
         <module>xm-scene</module>
         <module>xm-gate</module>
         <module>xm-gateway</module>

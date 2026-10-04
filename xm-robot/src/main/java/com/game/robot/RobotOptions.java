@@ -16,6 +16,7 @@ import com.game.robot.scenario.RateLimitScenario;
 import com.game.robot.scenario.ReconnectScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
+import com.game.robot.scenario.TeamScenario;
 import com.game.robot.scenario.TokenScenario;
 import java.time.Duration;
 import java.util.EnumMap;
@@ -58,7 +59,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN, FRIEND, CHAT, KILLSWITCH
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN, FRIEND, CHAT, KILLSWITCH, TEAM
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -82,7 +83,7 @@ public record RobotOptions(
         SCENE_METRICS_URL("scene-metrics-url", "XM_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
                 "audit / guard：xm-scene 管理端口（抓指标）"),
         TABLE_DIR("table-dir", "XM_ROBOT_TABLE_DIR", "config-data/tables",
-                "reconnect：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点）");
+                "reconnect / team：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点；team 选换图目标）");
 
         final String arg;
         final String env;
@@ -191,6 +192,7 @@ public record RobotOptions(
             case FRIEND -> FriendScenario.accountName(prefix, runTag, "a");
             case CHAT -> ChatScenario.accountName(prefix, runTag, "a");
             case KILLSWITCH -> KillSwitchScenario.accountName(prefix, runTag);
+            case TEAM -> TeamScenario.accountName(prefix, runTag, "a");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -206,7 +208,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -240,6 +242,9 @@ public record RobotOptions(
         out.append("  friend / chat  好友 / 聊天端到端（两三个机器人互相申请、私聊、拉历史）\n");
         out.append("  killswitch 按方法热关停：经 xm-data 写规则 → 信封 1003、精确豁免、全局 * 豁免、Dubbo 层关停场景分配 → 删规则恢复；"
                 + "需要运维令牌。<只在隔离的本机切片上跑>：规则全服共享，演练期间几秒内会关掉整个区的客户端请求与进游戏\n");
+        out.append("  team      组队（A / B / D 三个新号 + 一个已登出的 E）：建队 / 申请 / 同意 / 重放 / 邀请 / 拒绝 / 接受 / 踢人 / 转让 / "
+                + "拒绝申请与各推送 → A 换图 B 跟随（读 --table-dir 的 World 表）→ 开战 4027（4.3 不开战）→ 解散；"
+                + "另钉 4003 / 4005 / 4006 / 4007 / 4013 / 4017、MEMBER_ONLINE、上行 213 不回包；跨区步骤单 zone 时跳过\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -265,7 +270,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team）");
         }
     }
 

@@ -19,6 +19,7 @@ import com.game.scene.metrics.SceneMetrics.BroadcastKind;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.metrics.SceneMetrics.PeriodicSave;
 import com.game.scene.player.PlayerLevels;
+import com.game.scene.team.TeamFollow;
 import com.game.scene.world.PlayerRepository.LoadResult;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.table.LoginErrorTip;
@@ -108,6 +109,7 @@ public final class SceneWorld {
     private final PlayerInitializer playerInitializer;
     private final PlayerSnapshots snapshots;
     private final PlayerLocations locations;
+    private final TeamFollow teamFollow;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -148,9 +150,19 @@ public final class SceneWorld {
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots, locations,
+                TeamFollow.NONE);
+    }
+
+    /** @param teamFollow 进场 / 换场景之后的组队跟随检查（team-spec §6.10；缺省不跟随） */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
+                      TeamFollow teamFollow) {
         this.playerInitializer = playerInitializer;
         this.snapshots = snapshots;
         this.locations = locations;
+        this.teamFollow = teamFollow;
         this.tables = tables;
         this.ids = ids;
         this.sink = sink;
@@ -370,6 +382,8 @@ public final class SceneWorld {
         snapshots.capture(player.toSave(), PlayerSnapshots.Cause.LOGIN);
         log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={}", playerId, key,
                 scene.sceneId(), player.entity(), player.ownerEpoch(), previous != null);
+        // 进场（登录 / 重连 / 顶号）之后查组队跟随：异步读，结果回到逻辑线程（team-spec §6.10）
+        teamFollow.onEnteredScene(this, player);
     }
 
     /** 两份写回内容相同（不比 owner_epoch：库里的 epoch 已被这次进场夺权改掉）。 */
@@ -440,9 +454,9 @@ public final class SceneWorld {
     /**
      * 离开当前场景（看得见它的人收到 51）再进入目标场景（79 / 21 / 47 / 21）。换地图落到出生点，同图换线保留坐标。
      * 换场景时停下（速度清零）并把位移校验的锚点移到落点：新场景里的人从 21 看到的是静止的它，客户端的下一条移动上行
-     * 会重新带上速度。
+     * 会重新带上速度。换完同步调组队跟随钩子（{@link TeamFollow}；被跟随换场景也调，它已与队长同场景，不会循环）。
      */
-    void switchScene(ScenePlayer player, Scene target) {
+    public void switchScene(ScenePlayer player, Scene target) {
         Scene from = player.scene();
         if (from == target) {
             return;
@@ -458,6 +472,7 @@ public final class SceneWorld {
         enterScene(player, target);
         locations.entered(player);
         log.info("玩家换场景 player={} {} -> {}", player.playerId(), from.sceneId(), target.sceneId());
+        teamFollow.onEnteredScene(this, player);
     }
 
     // ------------------------------------------------------------------ 移动

@@ -1,4 +1,4 @@
-package com.game.friend.support;
+package com.game.common.deadline;
 
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
@@ -45,7 +45,7 @@ public final class Deadline {
         }
     }
 
-    /** 依赖（Redis / MySQL / 在线目录）故障：上层一律定性为 1003。 */
+    /** 依赖（Redis / MySQL / 在线目录）故障：上层定性为服务的故障码（好友 1003、组队 4030）。 */
     public static final class DependencyException extends RuntimeException {
 
         public DependencyException(String message, Throwable cause) {

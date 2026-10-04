@@ -28,7 +28,8 @@ public interface MessageRoutes {
     Map<String, String> SERVICE_BACKENDS = Map.of(
             "ClientPlayerLogin", DubboGroups.LOGIN,
             "ClientPlayerFriend", DubboGroups.FRIEND,
-            "ClientPlayerChat", DubboGroups.CHAT);
+            "ClientPlayerChat", DubboGroups.CHAT,
+            "ClientPlayerTeam", DubboGroups.TEAM);
 
     /** 客户端可发的消息号的路由；消息号不存在或不属于客户端协议服务时返回 null。 */
     MessageRoute clientRoute(int messageId);

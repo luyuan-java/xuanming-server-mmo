@@ -14,6 +14,9 @@ public final class DubboGroups {
     /** 聊天（{@code proto/chat/...}），由 xm-chat 提供。 */
     public static final String CHAT = "chat";
 
+    /** 组队（{@code proto/team/...}），由 xm-team 提供。 */
+    public static final String TEAM = "team";
+
     private DubboGroups() {
     }
 }

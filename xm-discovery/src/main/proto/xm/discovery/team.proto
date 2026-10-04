@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+// 组队投影的 Redis 值（只在 Java 版内部使用；归 xm-discovery 所有：写者 xm-team、读者 xm-scene 都依赖它）。
+// Redis xm:{team}:info:<team_id>（String），由 xm-team 在写权威记录的同一段 Lua 里一起写（见 docs/porting/team-spec.md §1.3、D18）。
+// 形状同 mmorpg proto/common/component/team_comp.proto 的 TeamInfo，但不依赖同步来的契约 proto。
+
+package xm.discovery;
+
+option java_package = "com.game.discovery.proto";
+option java_multiple_files = true;
+
+message TeamInfo {
+  uint64 team_id = 1;
+  uint64 leader_id = 2;
+  // 集合语义（写者按 join_seq 升序只为确定性），读者不得依赖顺序。
+  repeated uint64 members = 3;
+}

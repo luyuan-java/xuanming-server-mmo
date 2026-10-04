@@ -1,5 +1,6 @@
 package com.game.friend;
 
+import com.alibaba.druid.pool.DruidDataSource;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
@@ -12,7 +13,7 @@ import com.game.friend.directory.RedissonDirectoryRedis;
 import com.game.friend.dispatch.FriendDispatcher;
 import com.game.friend.dispatch.FriendWorkerPool;
 import com.game.friend.metrics.FriendMetrics;
-import com.game.friend.profile.PlayerProfiles;
+import com.game.common.player.PlayerProfiles;
 import com.game.friend.quota.DirectoryQuota;
 import com.game.friend.quota.FriendRequestQuota;
 import com.game.friend.service.FriendService;
@@ -118,7 +119,10 @@ public class FriendConfiguration {
 
     @Bean
     public PlayerProfiles playerProfiles(DataSource dataSource, FriendProperties props) {
-        return new PlayerProfiles(dataSource, (int) Math.max(1, props.queryTimeout().toSeconds()));
+        // Druid 能按次限等连接：取连接不超过请求剩余预算（连接池的固定 max-wait 不认预算，见 PlayerProfiles.ConnectionSource）
+        PlayerProfiles.ConnectionSource connections = dataSource instanceof DruidDataSource druid
+                ? druid::getConnection : maxWait -> dataSource.getConnection();
+        return new PlayerProfiles(connections, (int) Math.max(1, props.queryTimeout().toSeconds()));
     }
 
     @Bean

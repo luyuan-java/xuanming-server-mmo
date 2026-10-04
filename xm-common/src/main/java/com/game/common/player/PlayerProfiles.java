@@ -1,7 +1,7 @@
-package com.game.friend.profile;
+package com.game.common.player;
 
-import com.game.friend.support.Deadline;
-import com.game.friend.support.Deadline.DependencyException;
+import com.game.common.deadline.Deadline;
+import com.game.common.deadline.Deadline.DependencyException;
 import java.math.BigInteger;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -18,29 +18,43 @@ import org.slf4j.LoggerFactory;
 /**
  * 玩家展示资料（name / level / class_id / gender / appearance_id / home zone），读 {@code xm_java.player}。
  *
- * <p>与基线的有意差异（spec D4）：基线读 Redis {@code PlayerAllData} 缓存再向 data_service 补名字与 home zone；Java 版没有这两套组件，
- * player 表字段齐全（name 恒非空、zone_id 即 home zone），等级到存盘才更新（在线玩家可能滞后）。
+ * <p>好友、组队共用（与基线的有意差异见两者 spec 的 D4）：基线读 Redis {@code PlayerAllData} 缓存再向 data_service 补名字与 home zone；
+ * Java 版没有这两套组件，player 表字段齐全（name 恒非空、zone_id 即 home zone），等级到存盘才更新（在线玩家可能滞后）。
  *
- * <p>两种读法：{@link #load}（好友列表用，失败语义照基线：每批 64 人，某批失败或预算用完 → 打 ERROR、停在这一批、返回已读到的部分，不回 tip）；
- * {@link #loadStrict}（在线目录用：读失败就是依赖故障，抛 {@link DependencyException}）。找不到的行不在结果里。
+ * <p>两种读法：{@link #load}（展示用，失败语义照基线：每批 64 人，某批失败或预算用完 → 打 ERROR、停在这一批、返回已读到的部分，不回 tip）；
+ * {@link #loadStrict}（读失败就是依赖故障，抛 {@link DependencyException}）。找不到的行不在结果里。
  * 每条语句的查询超时取请求预算的剩余（向上取整到秒）。阻塞 JDBC，只在工作线程上调用。
  */
 public final class PlayerProfiles {
 
     private static final Logger log = LoggerFactory.getLogger(PlayerProfiles.class);
 
-    /** 好友列表补资料的每批人数（基线 friend_profiles.go 按 64 人一批读缓存与 data_service）。 */
+    /** 补资料的每批人数（基线 friend_profiles.go 按 64 人一批读缓存与 data_service）。 */
     public static final int BATCH = 64;
 
     /** 一个玩家的展示资料。数值字段是 uint32 的位模式（列是 INT UNSIGNED）。 */
     public record Profile(long playerId, String name, int level, int classId, int gender, String appearanceId, int zoneId) {
     }
 
-    private final DataSource dataSource;
+    /**
+     * 按等待上限取连接（连接池满 / 连不上时最多等这么久）。连接池的固定 max-wait 不认请求预算：一次请求碰两次 MySQL 就可能拖过
+     * gate 的 Dubbo 超时，所以用池子支持的「本次最多等 N 毫秒」（Druid {@code getConnection(long)}）。
+     */
+    @FunctionalInterface
+    public interface ConnectionSource {
+        Connection get(long maxWaitMillis) throws SQLException;
+    }
+
+    private final ConnectionSource connections;
     private final int queryTimeoutCapSeconds;
 
+    /** 取连接不受预算约束（只用池子自己的 max-wait）；能按次限等的池子用 {@link #PlayerProfiles(ConnectionSource, int)}。 */
     public PlayerProfiles(DataSource dataSource, int queryTimeoutCapSeconds) {
-        this.dataSource = dataSource;
+        this(maxWait -> dataSource.getConnection(), queryTimeoutCapSeconds);
+    }
+
+    public PlayerProfiles(ConnectionSource connections, int queryTimeoutCapSeconds) {
+        this.connections = connections;
         this.queryTimeoutCapSeconds = queryTimeoutCapSeconds;
     }
 
@@ -52,7 +66,7 @@ public final class PlayerProfiles {
             try {
                 readBatch(batch, deadline, out);
             } catch (SQLException | RuntimeException e) {
-                log.error("[friend] 好友展示资料补全失败（第 {} 批起未填）: {}", from / BATCH + 1, e.toString());
+                log.error("玩家展示资料补全失败（第 {} 批起未填）: {}", from / BATCH + 1, e.toString());
                 break;
             }
         }
@@ -89,19 +103,35 @@ public final class PlayerProfiles {
         return out;
     }
 
+    /**
+     * 一条 IN 语句。三处都受剩余预算约束：取连接最多等剩余时长；语句带 {@code MAX_EXECUTION_TIME} 提示（服务端按毫秒中止 SELECT）；
+     * JDBC 查询超时（只能按秒）兜底网络停顿。
+     */
     private void readBatch(List<Long> batch, Deadline deadline, Map<Long, Profile> out) throws SQLException {
         long remaining = deadline.remainingMillis();
         if (remaining <= 0) {
             throw new DependencyException("读玩家资料超过请求预算");
         }
-        int timeout = (int) Math.max(1, (remaining + 999) / 1000);
-        if (queryTimeoutCapSeconds > 0) {
-            timeout = Math.min(timeout, queryTimeoutCapSeconds);
+        try (Connection c = connections.get(remaining)) {
+            remaining = deadline.remainingMillis();
+            if (remaining <= 0) {
+                throw new DependencyException("读玩家资料超过请求预算（等连接用完了预算）");
+            }
+            int timeout = (int) Math.max(1, (remaining + 999) / 1000);
+            if (queryTimeoutCapSeconds > 0) {
+                timeout = Math.min(timeout, queryTimeoutCapSeconds);
+            }
+            String sql = "SELECT /*+ MAX_EXECUTION_TIME(" + remaining + ") */ player_id, name, level, class_id, gender,"
+                    + " appearance_id, zone_id FROM player WHERE player_id IN ("
+                    + String.join(",", Collections.nCopies(batch.size(), "?")) + ")";
+            query(c, sql, timeout, batch, out);
         }
-        String sql = "SELECT player_id, name, level, class_id, gender, appearance_id, zone_id FROM player WHERE player_id IN ("
-                + String.join(",", Collections.nCopies(batch.size(), "?")) + ")";
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setQueryTimeout(timeout);
+    }
+
+    private static void query(Connection c, String sql, int timeoutSeconds, List<Long> batch, Map<Long, Profile> out)
+            throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setQueryTimeout(timeoutSeconds);
             for (int i = 0; i < batch.size(); i++) {
                 long id = batch.get(i);
                 ps.setObject(i + 1, id >= 0 ? (Object) id : new BigInteger(Long.toUnsignedString(id)));

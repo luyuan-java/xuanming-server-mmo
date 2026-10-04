@@ -6,6 +6,7 @@ import com.game.api.DubboGroups;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -54,12 +55,35 @@ class MessageRoutesTest {
 
     @Test
     void Java版未接入的客户端服务路由到unsupported() {
-        MessageMethod team = registry.all().stream()
-                .filter(m -> m.clientService() && m.serviceName().equals("ClientPlayerTeam"))
+        // 不钉具体服务名：哪个服务先接入由批次决定，这里取任意一个「既不是玩家服务、也不在后端表里」的客户端服务。
+        MessageMethod unsupported = registry.all().stream()
+                .filter(m -> m.clientService() && !m.playerService()
+                        && !MessageRoutes.SERVICE_BACKENDS.containsKey(m.serviceName()))
                 .findFirst().orElseThrow();
-        MessageRoute route = routes.clientRoute(team.messageId());
+        MessageRoute route = routes.clientRoute(unsupported.messageId());
         assertThat(route.domain()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
-        assertThat(route.method()).isEqualTo("ClientPlayerTeam." + team.methodName());
+        assertThat(route.method()).isEqualTo(unsupported.serviceName() + "." + unsupported.methodName());
+    }
+
+    @Test
+    void 组队服务路由到team域_三个推送占位不回包_其余都回包() {
+        // team-spec §6.2 / §10.3：ClientPlayerTeam 的 15 个号全部转给 xm-team（推送占位也转，由后端回空体）；
+        // 203 / 213 / 215 的应答类型是 Empty → gate 不回包（D13），12 个 C2S 的应答是 TeamResponse / ListMyInvitesResponse → 一律回包。
+        List<String> pushes = List.of("NotifyTeamEvent", "NotifyTeamSnapshot", "NotifyTeamInvite");
+        List<String> requests = List.of("CreateTeam", "GetMyTeam", "ApplyJoinTeam", "HandleApplication", "InviteToTeam",
+                "RespondInvite", "ListMyInvites", "LeaveTeam", "KickMember", "TransferLeader", "DisbandTeam", "StartTeamMatch");
+        List<MessageMethod> team = registry.all().stream()
+                .filter(m -> m.serviceName().equals("ClientPlayerTeam")).toList();
+        assertThat(team).as("契约里 ClientPlayerTeam 的方法").extracting(MessageMethod::methodName)
+                .containsExactlyInAnyOrderElementsOf(Stream.concat(pushes.stream(), requests.stream()).toList());
+        for (MessageMethod method : team) {
+            MessageRoute route = routes.clientRoute(method.messageId());
+            assertThat(route).as(method.key()).isNotNull();
+            assertThat(route.domain()).as(method.key()).isEqualTo(DubboGroups.TEAM);
+            assertThat(route.hasResponse()).as(method.key()).isEqualTo(!pushes.contains(method.methodName()));
+            assertThat(route.method()).isEqualTo("ClientPlayerTeam." + method.methodName());
+            assertThat(route.rpcPath()).isEqualTo("/teampb.ClientPlayerTeam/" + method.methodName());
+        }
     }
 
     @Test

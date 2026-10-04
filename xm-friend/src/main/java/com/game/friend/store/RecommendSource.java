@@ -1,7 +1,7 @@
 package com.game.friend.store;
 
 import com.game.friend.store.RecommendStore.Candidate;
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import java.sql.SQLException;
 import java.util.List;
 

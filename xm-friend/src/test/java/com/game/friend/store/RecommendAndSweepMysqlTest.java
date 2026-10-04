@@ -5,7 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.friend.store.RecommendStore.Candidate;
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import com.game.friend.sweep.FriendSweep;
 import com.game.friend.store.pb.FriendBlockRow;
 import com.game.friend.store.pb.FriendCapacityRow;

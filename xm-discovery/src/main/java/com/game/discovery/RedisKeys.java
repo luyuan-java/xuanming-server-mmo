@@ -130,6 +130,30 @@ public final class RedisKeys {
     }
 
     /**
+     * 组队权威记录 {@code xm:{team}:rec:<team_id>}（Hash：{@code ver} 版本号、{@code pb} TeamRecord；空闲 24 h 过期）。
+     * 组队的四类键统一 hash tag {@code {team}}：写脚本一次要原子写记录、投影与多名玩家的索引，将来上 Cluster 仍同槽（team-spec D2）。
+     * 只经 xm-team 的 Lua 写。
+     */
+    public static String teamRecord(long teamId) {
+        return PREFIX + "{team}:rec:" + Long.toUnsignedString(teamId);
+    }
+
+    /** 组队投影 {@code xm:{team}:info:<team_id>}（String：{@code xm.discovery.TeamInfo}；xm-team 与记录同一段 Lua 写，xm-scene 读）。 */
+    public static String teamInfo(long teamId) {
+        return PREFIX + "{team}:info:" + Long.toUnsignedString(teamId);
+    }
+
+    /** 玩家的组队索引 {@code xm:{team}:player:<player_id>}（Hash：{@code tid} 所在队，无队为 "0"；{@code epoch} 成员关系版本）。 */
+    public static String teamPlayer(long playerId) {
+        return PREFIX + "{team}:player:" + Long.toUnsignedString(playerId);
+    }
+
+    /** 被邀请人的邀请反查 {@code xm:{team}:invite:<player_id>}（ZSET：成员 = team_id，分数 = expire_at_ms；TTL 1 h）。 */
+    public static String teamInvite(long playerId) {
+        return PREFIX + "{team}:invite:" + Long.toUnsignedString(playerId);
+    }
+
+    /**
      * 热关停规则 {@code xm:killswitch}（哈希：字段 = 规则键 {@code pkg.Service/Method}、{@code Service/*}、{@code *}，值 = 规则；
      * 各进程每秒全量读一次，见 {@code RedisKillSwitchSync}）。运维经 xm-data 的 {@code /admin/killswitch} 写。
      */

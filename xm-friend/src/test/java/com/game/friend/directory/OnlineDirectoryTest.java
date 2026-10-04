@@ -4,9 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.discovery.proto.PlayerPresence;
-import com.game.friend.profile.PlayerProfiles.Profile;
-import com.game.friend.support.Deadline;
-import com.game.friend.support.Deadline.DependencyException;
+import com.game.common.player.PlayerProfiles.Profile;
+import com.game.common.deadline.Deadline;
+import com.game.common.deadline.Deadline.DependencyException;
 import com.game.proto.friend.RecommendEntry;
 import java.util.ArrayList;
 import java.util.HashMap;

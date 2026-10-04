@@ -18,7 +18,7 @@ import com.game.friend.service.FriendService;
 import com.game.friend.service.RecommendService;
 import com.game.friend.store.FriendStore;
 import com.game.friend.store.RecommendStore;
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import com.game.proto.friend.AddFriendRequest;
 import com.game.proto.friend.AddFriendResponse;
 import com.game.proto.friend.GetFriendListResponse;

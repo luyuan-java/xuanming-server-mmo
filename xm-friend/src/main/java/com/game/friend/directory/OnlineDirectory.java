@@ -2,9 +2,9 @@ package com.game.friend.directory;
 
 import com.game.common.text.GoSpaces;
 import com.game.discovery.proto.PlayerPresence;
-import com.game.friend.profile.PlayerProfiles.Profile;
-import com.game.friend.support.Deadline;
-import com.game.friend.support.Deadline.DependencyException;
+import com.game.common.player.PlayerProfiles.Profile;
+import com.game.common.deadline.Deadline;
+import com.game.common.deadline.Deadline.DependencyException;
 import com.game.proto.friend.RecommendEntry;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.nio.charset.StandardCharsets;

@@ -60,6 +60,7 @@ public final class SceneMetrics {
     static final String GAIN_ANOMALIES = "xm.scene.gain.anomalies";
     static final String SKILL_RELEASES = "xm.scene.skill.releases";
     static final String SKILL_INTERRUPTS = "xm.scene.skill.interrupts";
+    static final String TEAM_FOLLOW = "xm.scene.team.follow";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -122,6 +123,31 @@ public final class SceneMetrics {
         VIEW_CHANGES,
         /** 属性同步：66（偶数帧一次，全部场景合计）。 */
         ATTRIBUTE_SYNC
+    }
+
+    /**
+     * 一次组队跟随检查（进场 / 换场景后读成员关系，team-spec §6.10）的结局（{@code xm.scene.team.follow{result}}），
+     * 每次读回来恰好计一次（队长进场扇出时，每个被扇出的成员各自再读一次、各计一次）。
+     */
+    public enum TeamFollowResult {
+        /** 换到了本节点上队长所在的场景实例。 */
+        FOLLOWED,
+        /** 已与队长同场景，什么都不做。 */
+        SAME_SCENE,
+        /** 不在队（索引 tid 为 0 或索引键缺失）。 */
+        NOT_IN_TEAM,
+        /** 在队但投影缺失，或投影与索引对不上（team_id 不符、leader_id 为 0）。 */
+        PROJECTION_MISSING,
+        /** 投影的成员里没有自己（索引刚过时）。 */
+        NOT_MEMBER,
+        /** 队长不在本节点（跨节点、跨 zone、离线）。 */
+        LEADER_NOT_ON_NODE,
+        /** 自己就是队长：自己进场时扇出给本节点的其他成员，被跟随 / 被扇出触发时什么都不做。 */
+        IS_LEADER,
+        /** 读回来时玩家已离开或已重新进场（不是发起读时的那个实例），丢弃。 */
+        STALE,
+        /** 读失败（Redis 故障 / 超时）、索引 / 投影损坏，或检查本身出错：不跟随。 */
+        READ_ERROR
     }
 
     /** 存储写的种类（{@code xm.scene.storage.writes{op}}）。 */
@@ -200,6 +226,7 @@ public final class SceneMetrics {
     private final Map<SkillResult, Counter> skillReleases;
     private final Counter skillInterrupts;
     private final Map<PeriodicSave, Counter> periodicSaves;
+    private final Map<TeamFollowResult, Counter> teamFollows;
     private final Counter aoiEntered;
     private final Counter aoiLeft;
     private final Map<StorageOp, Map<WriteResult, Timer>> storageWrites;
@@ -230,6 +257,7 @@ public final class SceneMetrics {
         this.skillInterrupts = Counter.builder(SKILL_INTERRUPTS).description("放技能打断了进行中的施法（推了 33），每次打断计一次")
                 .register(registry);
         this.periodicSaves = counters(PeriodicSave.class, PERIODIC_SAVES, "result", "周期存盘对到期玩家的处理（写 / 未变跳过 / 在途跳过 / 存储积压推迟）");
+        this.teamFollows = counters(TeamFollowResult.class, TEAM_FOLLOW, "result", "组队跟随检查（进场 / 换场景后读成员关系）的结局");
         this.aoiEntered = aoiCounter("enter");
         this.aoiLeft = aoiCounter("leave");
         this.storageWrites = new EnumMap<>(StorageOp.class);
@@ -398,6 +426,11 @@ public final class SceneMetrics {
 
     public void skillInterrupted() {
         skillInterrupts.increment();
+    }
+
+    /** 一次组队跟随检查的结局（逻辑线程）。 */
+    public void teamFollow(TeamFollowResult result) {
+        teamFollows.get(result).increment();
     }
 
     /**

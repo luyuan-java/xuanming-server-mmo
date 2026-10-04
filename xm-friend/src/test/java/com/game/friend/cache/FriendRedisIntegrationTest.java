@@ -6,7 +6,7 @@ import com.game.discovery.RedisKeys;
 import com.game.friend.metrics.FriendMetrics;
 import com.game.friend.metrics.FriendMetrics.CacheKind;
 import com.game.friend.quota.FriendRequestQuota;
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import com.game.friend.store.FriendStore.FriendEdge;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;

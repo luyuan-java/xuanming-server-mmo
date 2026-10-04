@@ -7,7 +7,7 @@ import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import com.game.friend.metrics.FriendMetrics;
 import com.game.friend.metrics.FriendMetrics.RequestResult;
-import com.game.friend.support.Deadline;
+import com.game.common.deadline.Deadline;
 import com.game.friend.service.FriendService;
 import com.game.friend.service.RecommendService;
 import com.game.proto.TipInfoMessage;
