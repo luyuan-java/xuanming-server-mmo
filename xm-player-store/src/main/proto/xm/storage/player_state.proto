@@ -27,6 +27,38 @@ message PlayerState {
   // 当前气血 / 法力（mmorpg BaseAttributesComp.health / mana 的 Java 自有对应；力量 / 护甲等成长属性不存，用到时由职业表即时算出）。
   // 没有这段 = 满血满蓝（新号、2.7 之前的存档、或写盘那一刻正好满）：进场按上限回满，与基线新号回满同义。
   Vitals vitals = 6;
+  // 宝宝（mmorpg PlayerPetComp 的 Java 自有对应）。没有这段 = 没有宝宝、未出战。
+  PetState pets = 7;
+}
+
+// 宝宝：实例按获得顺序；二级属性与点数总量不落库（按资质 + 已分配 + 等级现算）。
+message PetState {
+  repeated PetEntry pets = 1;
+  // 出战中的宝宝；0 = 未出战。
+  uint64 active_pet_id = 2;
+}
+
+// 一只宝宝（mmorpg PetInstance 的 Java 自有对应）。
+message PetEntry {
+  // 全服唯一的雪花号（场景节点在全服号段租约上发，与物品同一个号源）。
+  uint64 pet_id = 1;
+  // 种类（Pet 表 id）。
+  uint32 pet_table_id = 2;
+  // 玩家改的名字；空 = 用 Pet.name。
+  string name = 3;
+  // 等级（= min(主人等级, Pet.level_cap)，每次重算同步；存下来供离线展示与加载时按旧等级换算当前值）。
+  uint32 level = 4;
+  // 维度号 → 已分配点（只存非 0）。
+  map<uint32, uint32> allocated = 5;
+  // 维度号 → 资质（万分比，10000 = 100%），出生时在 Pet.aptitude_min / max 之间随机，之后不变；缺键按 10000。
+  map<uint32, uint32> aptitude = 6;
+  // 当前气血 / 法力（回合制战斗结算回写，残血跨登录保留）。
+  uint64 health = 7;
+  uint64 mana = 8;
+  // 获得时间（Unix 秒）。
+  uint64 created_at = 9;
+  // 实例学会的技能（技能书是二期，恒空；种类自带技能不抄进实例）。
+  repeated uint32 skill_table_ids = 10;
 }
 
 // 当前气血 / 法力。health == 0 = 阵亡：进场按上限回满（基础复活）；活着的进场只按新上限往下夹，不补。

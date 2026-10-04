@@ -145,7 +145,7 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 
 - **分发**（`ClientRequestHandler`）：gate 转来的 `ClientForward` 先过会话 / player_id / 消息号 / 请求体校验，
   再过字段规模与负数校验（`RequestFieldCheck`，同基线 `ProtoFieldChecker`：任一 repeated / map 字段元素数 > 20、
-  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`、任务 `MissionFeature`、活动 `ActivityFeature`、放技能 `SkillFeature`，以后的玩法同样各成一个），
+  任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`、任务 `MissionFeature`、活动 `ActivityFeature`、放技能 `SkillFeature`、宝宝 `PetFeature`，以后的玩法同样各成一个），
   场景核心（移动、技能列表 77、换场景、场景信息）由 `ClientRequestHandler` 自己注册。注册时校验：方法在契约里、属于标了
   `OptionIsPlayerService` 的客户端服务、请求类型与契约一致、没有重复——任一不符启动即失败。
 - **处理器契约**（`PlayerRequestHandler` + `PlayerCall`）：在场景逻辑线程上调用；经 `call.reply(...)` 回应答，`message_id` 同请求、
@@ -303,6 +303,20 @@ mmorpg：`combat/skill/system/skill.cpp`（ReleaseSkill → CheckSkillPrerequisi
   再套纯规则 `PlayerRevive.reviveIfDead`：气血 0（阵亡或没有记录）→ 按上限回满；活着（含残血）不动。
 - **写入点**：今天只有属性重算会改当前值（升级补增量、其余按比例）；回合制战斗结算的回写与结算复活随 6.3，同用 `PlayerRevive`。
   实时伤害两版都不可达，没有实时死亡状态。
+
+### 4.11 宝宝
+
+mmorpg：`player_pet.cpp`（PetSystem）+ `pet_rules.h` + `player_pet_handler.cpp`。Java 版：
+
+- **领域对象** `com.game.scene.player.PlayerPets`（只在逻辑线程上读写）：实例按获得顺序（号、种类、名字、等级、已分配、资质、
+  当前气血法力、获得时间）+ 出战号；存 `player_state.pets`，没有宝宝时整段省略。二级属性与点数总量不落库、不缓存，需要时现算
+  （资质 + 已分配 + 等级是唯一真相）。
+- **规则** `com.game.scene.pet`：纯规则 `PetRules`（等级跟随主人并受种类上限夹、维度值、二级属性按资质放大、成长率）；
+  `PetTables`（Pet / PetRule + 宝宝池 owner_type=1 的维度，按维度号升序——资质槽位按这个顺序对应）；`PetService` 是宝宝的唯一写入口，
+  点数总量 / 目标已分配校验 / 自动加点 / 按比例保持气血复用角色的 `AttributeRules`；`PetFeature` 注册 181–189。
+- **主人等级连带**：`AttributeFeature` 的等级连带在推 170 之后先让 `PetFeature` 重算全部宝宝并推 184（没有宝宝也推空列表），
+  再发任务等级事实，最后回 175 应答（同基线升级事件顺序）。
+- **号与随机**：宝宝号用与物品同一个全服号源（`SceneGuids`）；资质随机数只在逻辑线程上用。写闸（冻结 / 战斗中）随 5.2 / 6.3 接入。
 
 ## 5. 线程模型
 

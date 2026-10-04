@@ -356,7 +356,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: client-gm-gate, player-level, attribute-panel
 - behavior: 非 dev/test 回 1006；冻结 / 战斗前置同加点；等级不在 1..85 → 1005；写 LevelComp 后触发 PlayerUpgradeEvent（重算 + 推 170 + 宠物重算推列表 + 任务条件 LevelUp）；应答带全量面板。
 - internal: 直接写等级，不经经验。
-- java: done（2026-10-03，批次 2.2）— 175 → 重算 → 推 170 → 应答；不推 184（宝宝 2.8）、不发任务等级事件（2.5）。
+- java: done（2026-10-03，批次 2.2）— 175 → 重算 → 推 170 → 应答；2026-10-03 起同基线连带：推 170 → 宝宝重算并推 184（2.8）→ 任务等级事实（2.5）→ 应答。
 - size: S
 - robot: attribute_smoke（dev 模式）
 - hazards: 降级同样触发 PlayerUpgradeEvent（名字叫升级），HP 只夹不补；GM 设等级后若玩家未下线即崩，等级只在周期 / 离场存盘时落盘。

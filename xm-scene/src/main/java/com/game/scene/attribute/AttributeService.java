@@ -13,6 +13,7 @@ import com.game.scene.currency.CurrencyService;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerAttributes.Derived;
 import com.game.scene.player.PlayerAttributes.Scheme;
+import com.game.scene.player.NameRules;
 import com.game.scene.player.PlayerLevels;
 import com.game.scene.player.PlayerRevive;
 import com.game.scene.player.Wallet;
@@ -590,33 +591,8 @@ public final class AttributeService {
         return "方案" + ordinal;
     }
 
-    /**
-     * 方案名：非空、码点数不超表定上限、不含控制字符（U+0000–U+001F、U+007F）、至少一个可见码点
-     * （全空格 / 零宽空格 / U+3000 / U+FEFF 之类不算，与客户端 IsNullOrWhiteSpace 对齐）。
-     * 非法 UTF-8 在协议解析层就被拒（请求整条丢弃），到不了这里。
-     */
+    /** 方案名：规则同宝宝名（{@link NameRules}），码点数上限取表。 */
     boolean isSchemeNameValid(String name) {
-        if (name.isEmpty()) {
-            return false;
-        }
-        long codePoints = 0;
-        boolean visible = false;
-        for (int i = 0; i < name.length(); ) {
-            int cp = name.codePointAt(i);
-            if (cp < 0x20 || cp == 0x7F) {
-                return false;
-            }
-            i += Character.charCount(cp);
-            codePoints++;
-            if (!isInvisible(cp)) {
-                visible = true;
-            }
-        }
-        return visible && codePoints <= tables.schemeNameMaxLen();
-    }
-
-    private static boolean isInvisible(int cp) {
-        return cp == 0x20 || cp == 0xA0 || (cp >= 0x2000 && cp <= 0x200F) || cp == 0x2028 || cp == 0x2029
-                || cp == 0x202F || cp == 0x205F || cp == 0x2060 || cp == 0x3000 || cp == 0xFEFF;
+        return NameRules.isValidDisplayName(name, tables.schemeNameMaxLen());
     }
 }

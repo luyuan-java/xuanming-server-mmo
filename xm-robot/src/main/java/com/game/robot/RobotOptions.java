@@ -8,6 +8,7 @@ import com.game.robot.scenario.ExpectJump;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
+import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import java.time.Duration;
@@ -50,7 +51,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -123,7 +124,7 @@ public record RobotOptions(
             }
         }
         if (scenario == null) {
-            throw new UsageException("缺少子命令（smoke / movement / currency / attribute / audit / guard / bag / features / skill）");
+            throw new UsageException("缺少子命令（smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet）");
         }
 
         String gateway = value(Opt.GATEWAY, given, env);
@@ -171,6 +172,7 @@ public record RobotOptions(
             case BAG -> BagScenario.accountName(prefix, runTag);
             case FEATURES -> FeaturesScenario.accountName(prefix, runTag);
             case SKILL -> SkillScenario.accountName(prefix, runTag, "a");
+            case PET -> PetScenario.accountName(prefix, runTag);
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -186,7 +188,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -203,6 +205,8 @@ public record RobotOptions(
                 + "同类型 5000、未完成领奖 5002、重登列表原样\n");
         out.append("  skill     放技能（84/70/33）：A、B 两个新号同场景，拒绝码 1001 / 7001、70 广播、前摇 7000、打断推 33、"
                 + "后摇 7000、冷却 7003（约 8 秒）\n");
+        out.append("  pet       宝宝（181–189、184）：GM 发放、池隔离、主人升级带动与推送、自动加点 / 加点 / 拒绝码、出战、"
+                + "洗点扣 300 / 改名扣 200（按 54 余额核对）、重登原样、收回；需要 dev 运行模式\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -228,7 +232,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet）");
         }
     }
 

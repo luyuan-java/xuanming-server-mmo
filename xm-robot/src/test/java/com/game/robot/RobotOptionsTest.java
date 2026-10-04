@@ -93,6 +93,15 @@ class RobotOptionsTest {
     }
 
     @Test
+    void pet_账号带pet标签() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("pet", "--run-tag", "x1"), ENV, NOW);
+        assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.PET);
+        assertThat(com.game.robot.scenario.PetScenario.accountName(o.accountPrefix(), o.runTag()))
+                .isEqualTo("robot_java_petx1");
+        assertThat(RobotOptions.usage()).contains("pet ");
+    }
+
+    @Test
     void toString_不带口令() throws Exception {
         assertThat(RobotOptions.parse(List.of("smoke"), ENV, NOW).toString()).doesNotContain("dev-secret").contains("***");
     }

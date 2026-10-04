@@ -110,7 +110,7 @@ class AttributeFeatureTest {
                 service::initializeOnLoad, com.game.scene.world.PlayerSnapshots.NONE);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, mode,
                 List.of(new AttributeFeature(service, Contracts.REGISTRY,
-                        player -> levelEvents.add(sink.to(LINK, SESSION).size() + ":" + player.level()))));
+                        call -> levelEvents.add(sink.to(LINK, SESSION).size() + ":" + call.player().level()))));
         Scene scene = world.createScene(1);
         repo.put(new PlayerData(PLAYER, 1, classId, 1, "", level, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()

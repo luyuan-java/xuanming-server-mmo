@@ -41,6 +41,9 @@ import com.game.scene.mission.ActivityFeature;
 import com.game.scene.mission.MissionFeature;
 import com.game.scene.mission.MissionService;
 import com.game.scene.mission.MissionTables;
+import com.game.scene.pet.PetFeature;
+import com.game.scene.pet.PetService;
+import com.game.scene.pet.PetTables;
 import com.game.scene.skill.SkillFeature;
 import com.game.scene.skill.SkillService;
 import com.game.scene.skill.SkillTables;
@@ -61,6 +64,7 @@ import java.time.Duration;
 import java.time.InstantSource;
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.SplittableRandom;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
@@ -122,6 +126,7 @@ public class SceneNode implements SmartLifecycle {
     private final BagTables bagTables;
     private final MissionTables missionTables;
     private final SkillTables skillTables;
+    private final PetTables petTables;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final AuditProperties audit;
@@ -153,14 +158,15 @@ public class SceneNode implements SmartLifecycle {
      * @param bagTables       背包配表视图（同上）
      * @param missionTables   任务配表视图（同上）
      * @param skillTables     技能配表视图（同上）
+     * @param petTables       宝宝配表视图（同上）
      * @param audit    资产审计管线配置（Kafka）
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
      * @param metrics  scene 指标（各组件共用一份）
      */
     public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
                      MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables, BagTables bagTables,
-                     MissionTables missionTables, SkillTables skillTables, NodeLinkAuth linkAuth, SceneMetrics metrics,
-                     AuditProperties audit) {
+                     MissionTables missionTables, SkillTables skillTables, PetTables petTables, NodeLinkAuth linkAuth,
+                     SceneMetrics metrics, AuditProperties audit) {
         this.props = props;
         this.redis = redis;
         this.playerStore = playerStore;
@@ -170,6 +176,7 @@ public class SceneNode implements SmartLifecycle {
         this.bagTables = bagTables;
         this.missionTables = missionTables;
         this.skillTables = skillTables;
+        this.petTables = petTables;
         this.linkAuth = linkAuth;
         this.metrics = metrics;
         this.audit = audit;
@@ -227,14 +234,18 @@ public class SceneNode implements SmartLifecycle {
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
         MissionService missions = new MissionService(missionTables, bags, SceneClock.SYSTEM);
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
+        PetService petService = new PetService(petTables, currency, itemGuids(sceneGuids), SceneClock.SYSTEM,
+                new SplittableRandom());
+        PetFeature pets = new PetFeature(petService, registry);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
-        // 进场景前的规整：先背包（坏档拒绝进场），再属性，最后重建任务索引
+        // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, player -> {
                     bags.initializeOnLoad(player);
                     attributes.initializeOnLoad(player);
+                    petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
                 }, snapshots);
         links = gateLinks;
@@ -244,9 +255,11 @@ public class SceneNode implements SmartLifecycle {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode,
-                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry, missions::onLevelChanged),
-                        new BagFeature(bags), new MissionFeature(missions), new ActivityFeature(missions),
-                        new SkillFeature(skills)));
+                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
+                    pets.onOwnerLevelChanged(call);
+                    missions.onLevelChanged(call.player());
+                }), new BagFeature(bags), new MissionFeature(missions), new ActivityFeature(missions),
+                        new SkillFeature(skills), pets));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         callOnLogic(() -> {
             tables.worldSceneConfigIds().forEach(sceneWorld::createScene);

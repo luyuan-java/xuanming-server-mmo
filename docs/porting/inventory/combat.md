@@ -357,7 +357,7 @@ mmorpg has two combat stacks. (1) Realtime combat in the scene (cpp/libs/service
 - depends on: currency; attribute-allocation rules (other area)
 - behavior: Errors use pet_error 26000–26016: not found, row missing, slot full (PetRule.max_pets, default 1), owner level below unlock_level, already active / not active, invalid name (name_max_len default 8), in battle, not enough points, points cannot decrease, dimension cap, gold not enough (reset and rename cost gold; renaming to the same name is free and returns NothingToChange), no auto plan. Only one pet can be summoned at a time. Pet level follows the owner, capped by level_cap. The full PetListInfo is returned in each response.
 - internal: PlayerPetComp is persisted. Trade primitives (RemovePetForTrade/RestorePetFromSnapshot) exist for the 聚宝斋 marketplace.
-- java: missing — none
+- java: done（2026-10-03，批次 2.8）— `com.game.scene.pet.{PetTables,PetRules,PetService,PetFeature}` + `PlayerPets`（`player_state.pets`）：181–189 与主人升级推 184，规则 / 拒绝码 / 判定顺序同基线；写闸随 5.2 / 6.3，战斗接缝随 6.3，交易原语随聚宝斋资产托管（trade-asset-escrow-channel，未排批次；基线无调用方）。robot `pet` 场景
 - size: L
 - robot: pet_smoke
 - hazards: It sits outside the assigned combat directories and may also be inventoried under the player/attribute area, so de-duplicate. summon_cooldown_seconds and kPetSummonCooldown appear unused in the baseline.

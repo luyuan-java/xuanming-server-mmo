@@ -26,6 +26,9 @@ enum TransactionReason {
   TX_ATTRIBUTE_RESET = 1001;
   // 开新加点方案的金币（同上）
   TX_ATTRIBUTE_SCHEME_CREATE = 1002;
+  // 宝宝洗点 / 改名的金币（mmorpg 记通用消费 TX_CURRENCY_DEDUCT）
+  TX_PET_RESET = 1003;
+  TX_PET_RENAME = 1004;
 }
 
 // 资产种类：货币类型 0 是金币，只看 currency_type 分不出「货币」还是「物品」，所以单列。

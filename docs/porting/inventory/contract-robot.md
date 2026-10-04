@@ -145,7 +145,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-attribute-client-player（属性点池机制复用，pool owner = pet）、svc-scene-currency-client-player
 - behavior: PetListInfo{pets[], active_pet_id, max_pets, rename_cost_gold}；错误 kPetNotFound / kPetSlotFull / kPetOwnerLevelNotEnough / kPetGoldNotEnough / kPetAlreadyActive / kPetPointsNotEnough / kPetNothingToChange / kPetTableRowMissing；同时只一只出战；变化推 184；187 走 GM 闸
 - internal: 宝宝实例持久化、宝宝属性派生、战斗中宝宝参战（player_battle.cpp 读宝宝）
-- java: missing — scene 回 1006
+- java: done（2026-10-03，批次 2.8）— `com.game.scene.pet.{PetTables,PetRules,PetService,PetFeature}`，见 PARITY「宝宝」行
 - size: L
 - robot: robot-pet-smoke、robot-features-smoke
 - hazards: 成长率万分比由服务器算；宝宝 id 是雪花 uint64
@@ -449,7 +449,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-pet-client-player、svc-scene-attribute-client-player、svc-scene-currency-client-player
 - behavior: 账号 robot_9102；断言：列表全量非空；角色面板不得出现宝宝池、宝宝维度必须全属宝宝池（owner_type 分流）；主人 1→30 级时宝宝等级跟涨、点数 +145；洗点后 remaining == total；Auto 只算不落；提交后剩余归零二级属性变大；幂等 kPetNothingToChange；减少被拒 kPetPointsCannotDecrease；不存在 pet_id kPetNotFound；召唤后 active_pet_id 指向它、重复召唤 kPetAlreadyActive；重登一致；收回后 active 归零、再收回 kPetNotActive；输出 PET_SMOKE_OK / FAIL
 - internal: 需 dev 运行模式
-- java: missing
+- java: done（2026-10-03，批次 2.8）— xm-robot `pet` 场景（新号，另加改名 / 洗点按 54 余额核对扣费）
 - size: S
 - robot: 本身
 - hazards: 宝宝等级派生自主人（不独立升级）
