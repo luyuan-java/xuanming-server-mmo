@@ -7,6 +7,7 @@ import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisProperties;
+import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.login.account.AccountLogin;
 import com.game.login.auth.DevPasswordRule;
 import com.game.login.auth.ExternalAuthProviders;
@@ -259,12 +260,13 @@ public class LoginConfiguration {
     }
 
     @Bean
-    public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers,
+    public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers, RedissonClient redis,
                                              LoginWorkerPool loginWorkerPool, LoginProperties props,
                                              LoginMetrics loginMetrics, AccountLogin accountLogin,
                                              @Value("${xm.zone-id:1}") int zoneId) {
         return new EnterGameHandler(store, sceneDirectory, ownerTakeovers, loginWorkerPool, zoneId,
-                props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice);
+                props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice,
+                new PlayerLocationDirectory(redis)::find);
     }
 
     /**

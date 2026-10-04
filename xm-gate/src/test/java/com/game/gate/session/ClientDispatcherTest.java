@@ -56,7 +56,7 @@ class ClientDispatcherTest {
 
     private static final MessageRoutes ROUTES = id -> switch (id) {
         case LOGIN_MSG, CREATE_MSG, ENTER_GAME_MSG -> new MessageRoute(id, "login");
-        case LEAVE_MSG -> new MessageRoute(id, "login", false);
+        case LEAVE_MSG -> new MessageRoute(id, "login", false, "ClientPlayerLogin.LeaveGame");
         case SCENE_MSG -> new MessageRoute(id, "scene");
         case GM_MSG -> new MessageRoute(id, "scene", true, Integer.toString(id), true);
         case GUILD_MSG -> new MessageRoute(id, "guild");
@@ -399,7 +399,7 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 断线时LeaveGame在途_迟到的UnbindPlayer只清身份_只发一次被动PlayerLeave() {
+    void 断线时LeaveGame在途_按主动离开发一次PlayerLeave_迟到的UnbindPlayer只清身份() {
         EmbeddedChannel ch = enteredScene();
         ch.writeInbound(request(2, LEAVE_MSG, ""));
         ch.close();
@@ -409,10 +409,25 @@ class ClientDispatcherTest {
 
         List<PlayerLeave> leaves = links.sent.stream().filter(s -> s.frame().hasPlayerLeave())
                 .map(s -> s.frame().getPlayerLeave()).toList();
-        assertThat(leaves).extracting(PlayerLeave::getVoluntary).containsExactly(false);
+        assertThat(leaves).as("客户端发完 17 即关连接：按干净登出处理").extracting(PlayerLeave::getVoluntary)
+                .containsExactly(true);
         assertThat(login.closed).hasSize(1);
         assertThat(login.closed.get(0).getSession().getPlayerId()).isZero();
         assertThat(registry.size()).isZero();
+    }
+
+    @Test
+    void LeaveGame调用失败之后断线_按被动离开() {
+        EmbeddedChannel ch = enteredScene();
+        ch.writeInbound(request(2, LEAVE_MSG, ""));
+        login.fail(new IllegalStateException("超时"));
+        ch.runPendingTasks();
+        ch.close();
+
+        List<PlayerLeave> leaves = links.sent.stream().filter(s -> s.frame().hasPlayerLeave())
+                .map(s -> s.frame().getPlayerLeave()).toList();
+        assertThat(leaves).as("LeaveGame 没成功，玩家还在游戏里：断线留重连租约").extracting(PlayerLeave::getVoluntary)
+                .containsExactly(false);
     }
 
     // ================================================================ 其他路由与入口校验
@@ -889,7 +904,7 @@ class ClientDispatcherTest {
                 .map(s -> s.frame().getPlayerLeave()).toList();
         assertThat(leaves).singleElement().satisfies(leave -> {
             assertThat(leave.getPlayerId()).isEqualTo(PLAYER);
-            assertThat(leave.getVoluntary()).isFalse();
+            assertThat(leave.getVoluntary()).as("LeaveGame 在途").isTrue();
         });
         assertThat(login.closed).hasSize(1);
         assertThat(registry.size()).isZero();

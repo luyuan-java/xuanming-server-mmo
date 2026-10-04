@@ -55,6 +55,38 @@ class SceneAssignerTest {
     }
 
     @Test
+    void 带原场景实例且还在_直接用它不看人数() {
+        source.add(node(1, scene(101, 2, 80)));
+        source.add(node(2, scene(201, 2, 0)));
+
+        assertSuccess(assign(2, 1, 101), 1, 101, 2);
+    }
+
+    @Test
+    void 原场景实例已不在_按原地图选人数最少的() {
+        source.add(node(1, scene(102, 2, 9)));
+        source.add(node(2, scene(201, 2, 3)));
+
+        assertSuccess(assign(2, 1, 101), 2, 201, 2);
+    }
+
+    @Test
+    void 原场景号对上但节点号对不上_不算原实例() {
+        source.add(node(1, scene(101, 1, 9)));
+        source.add(node(2, scene(201, 1, 0)));
+
+        assertSuccess(assign(1, 2, 101), 2, 201, 1);
+    }
+
+    @Test
+    void 原实例所在节点条目不完整_不用它() {
+        source.add(node(1, scene(101, 2, 0)).toBuilder().setLinkHost("").build());
+        source.add(node(2, scene(201, 2, 5)));
+
+        assertSuccess(assign(2, 1, 101), 2, 201, 2);
+    }
+
+    @Test
     void 人数并列时取节点号小的() {
         source.add(node(9, scene(901, 1, 3)));
         source.add(node(4, scene(401, 1, 3)));
@@ -149,6 +181,16 @@ class SceneAssignerTest {
                 .setZoneId(ZONE)
                 .setPlayerId(42)
                 .setPreferredSceneConfigId(preferredConfigId)
+                .build());
+    }
+
+    private AssignSceneResponse assign(int preferredConfigId, int preferredNodeId, long preferredSceneId) {
+        return assigner.assign(AssignSceneRequest.newBuilder()
+                .setZoneId(ZONE)
+                .setPlayerId(42)
+                .setPreferredSceneConfigId(preferredConfigId)
+                .setPreferredSceneNodeId(preferredNodeId)
+                .setPreferredSceneId(preferredSceneId)
                 .build());
     }
 

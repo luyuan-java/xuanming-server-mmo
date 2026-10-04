@@ -65,6 +65,11 @@ public final class ClientSession {
     final ArrayDeque<PendingRequest> pending = new ArrayDeque<>();
     /** 有一个 login 调用在途。 */
     boolean inFlight;
+    /**
+     * 有一个 LeaveGame（17）排队或在途、还没回来：这时断线按主动离开通知 scene（客户端约定「发完 17 即关连接、不等应答」，
+     * 不能把这次干净登出当成断线、留 30 s 重连租约）。LeaveGame 的调用回来后减掉（关闭途中成功的不减，留给断线流程按主动离开发）。
+     */
+    int leaveGameRequests;
     /** 非法包计数（未知消息号、超长、超频、运行模式不放行的 GM 指令），达到阈值断开。 */
     int illegalPackets;
     /** 按消息号的发送频率限制（C++ MessageLimiter 同义）。 */

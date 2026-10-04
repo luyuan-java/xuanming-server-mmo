@@ -14,6 +14,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>规则：
  * <ol>
+ *   <li>原实例：请求带了 {@code preferred_scene_id}（login 读到的玩家位置记录：在线顶号 / 断线重连租约内），该实例还在
+ *       本 zone 可用节点的目录里就直接用它，不看人数（基线 scene_manager 注释里的设计意图；它实际只按 location 定 zone、落默认主世界，见 PARITY）；不在了走下一条。</li>
  *   <li>目标地图：请求带了 {@code preferred_scene_config_id}，它是世界地图、且本 zone 有可用节点承载它 → 用它；
  *       否则用默认世界地图（{@link WorldSceneConfigs#defaultConfigId()}）。与 mmorpg「解析失败回落默认大世界」一致。</li>
  *   <li>在承载目标地图的场景里挑 {@code player_count} 最小的；并列时取节点号小的，再并列取场景号小的（结果确定，便于排查）。</li>
@@ -60,8 +62,12 @@ public final class SceneAssigner {
         List<SceneNodeInfo> nodes = source.list(zoneId).stream().filter(n -> isUsable(n, zoneId)).toList();
 
         int preferred = request.getPreferredSceneConfigId();
-        Candidate best = null;
-        if (preferred != 0) {
+        Candidate best = findInstance(nodes, request.getPreferredSceneNodeId(), request.getPreferredSceneId());
+        if (best == null && request.getPreferredSceneId() != 0) {
+            log.info("原场景实例已不在，按地图重选 player={} node={} scene={} preferred={}", request.getPlayerId(),
+                    request.getPreferredSceneNodeId(), Long.toUnsignedString(request.getPreferredSceneId()), preferred);
+        }
+        if (best == null && preferred != 0) {
             if (worldConfigs.isWorld(preferred)) {
                 best = pickLeastLoaded(nodes, preferred);
             } else {
@@ -85,6 +91,24 @@ public final class SceneAssigner {
                 .setSceneId(best.scene.getSceneId())
                 .setSceneConfigId(best.scene.getSceneConfigId())
                 .build();
+    }
+
+    /** 在（已过滤的）可用节点上找指定的场景实例（玩家位置记录里的原实例）；没指定或已不在返回 null。 */
+    private static Candidate findInstance(List<SceneNodeInfo> nodes, int nodeId, long sceneId) {
+        if (sceneId == 0) {
+            return null;
+        }
+        for (SceneNodeInfo node : nodes) {
+            if (node.getNodeId() != nodeId) {
+                continue;
+            }
+            for (SceneEntry scene : node.getScenesList()) {
+                if (scene.getSceneId() == sceneId) {
+                    return new Candidate(node.getNodeId(), scene);
+                }
+            }
+        }
+        return null;
     }
 
     /** 在（已过滤的）可用节点上挑承载 {@code configId} 的人数最少的场景；没有返回 null。 */

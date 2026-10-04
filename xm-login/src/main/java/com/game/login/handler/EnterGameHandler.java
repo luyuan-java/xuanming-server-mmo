@@ -6,6 +6,7 @@ import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.EnterScene;
 import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
+import com.game.discovery.proto.PlayerLocation;
 import com.game.login.dispatch.ClientMessageHandler;
 import com.game.login.dispatch.HandlerReply;
 import com.game.login.dispatch.InFlightKeys;
@@ -46,6 +47,7 @@ import org.slf4j.LoggerFactory;
  *       LeaveGame（gate 解绑玩家），或进场景异步失败（gate 收到 3023 时同样解绑玩家）——所以失败后可在同一连接上重试。
  *       <b>不放行「同一角色再次 EnterGame」</b>：那会在旧实例的最终写回落库之前夺权，旧写回被围栏拒掉、在线进度全部丢失；</li>
  *   <li>同一角色的进场在途 → 2005；角色不存在或不属于本账号 → 2011；</li>
+ *   <li>落点：有玩家位置记录（在线顶号 / 断线 30 s 重连租约内）送回原场景实例，没有（首登 / LeaveGame 后 / 租约过期）落默认主世界；</li>
  *   <li>scene-manager 回 tip → 原样放进 {@code error_message}；调用失败 / 超时 → 3023 kEnterSceneFailed；</li>
  *   <li>归属仍被上一个写者持有（旧实例还没写回释放、租约也没过期）：请持有者让出（{@link OwnerTakeovers}，
  *       旧会话被踢下线），在 {@code claimWait} 内退避重试夺权；等不到 → 2005 kLoginInProgress，客户端稍后重试；</li>
@@ -80,6 +82,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     private final Duration claimWait;
     private final LoginMetrics metrics;
     private final Function<SessionContext, Integer> deviceRenewal;
+    private final PlayerLocationLookup locations;
     private final InFlightKeys<Long> playersInFlight = new InFlightKeys<>();
 
     /**
@@ -104,8 +107,19 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                             Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
                             LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal) {
         this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
+                deviceRenewal, PlayerLocationLookup.NONE);
+    }
+
+    /**
+     * @param locations 玩家位置记录（在线 / 断线重连租约内）：有就送回原场景实例，没有按首登落默认主世界
+     */
+    public EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                            Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
+                            LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                            PlayerLocationLookup locations) {
+        this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
                 delay -> CompletableFuture.delayedExecutor(delay.toMillis(), TimeUnit.MILLISECONDS),
-                System::nanoTime, deviceRenewal);
+                System::nanoTime, deviceRenewal, locations);
     }
 
     /**
@@ -118,13 +132,14 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                      Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
                      LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock) {
         this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics, timer,
-                nanoClock, session -> null);
+                nanoClock, session -> null, PlayerLocationLookup.NONE);
     }
 
     EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
                      Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
                      LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock,
-                     Function<SessionContext, Integer> deviceRenewal) {
+                     Function<SessionContext, Integer> deviceRenewal, PlayerLocationLookup locations) {
+        this.locations = locations;
         this.deviceRenewal = deviceRenewal;
         this.store = store;
         this.sceneDirectory = sceneDirectory;
@@ -188,15 +203,41 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
         }
         int zoneId = session.getZoneId() != 0 ? session.getZoneId() : defaultZoneId;
-        AssignSceneRequest assignRequest = AssignSceneRequest.newBuilder()
-                .setZoneId(zoneId)
-                .setPlayerId(playerId)
-                .setPreferredSceneConfigId(row.get().getSceneConfigId())
-                .build();
+        AssignSceneRequest.Builder assign = AssignSceneRequest.newBuilder().setZoneId(zoneId).setPlayerId(playerId);
+        applyLocation(assign, playerId, zoneId, row.get());
+        AssignSceneRequest assignRequest = assign.build();
         long assignStart = nanoClock.getAsLong();
         return callAssign(assignRequest)
-                .handleAsync((assigned, failure) -> afterAssign(session, playerId, assigned, failure, assignStart), executor)
+                .handleAsync((assigned, failure) -> afterAssign(session, playerId, assignRequest, assigned, failure, assignStart),
+                        executor)
                 .thenCompose(Function.identity());
+    }
+
+    /**
+     * 落点（对应基线 resolveEnterSceneRoute；基线在 zone 内只按 location 定 zone、落默认主世界，Java 回原实例，见 PARITY）：有本 zone 的位置记录（在线顶号、断线 30 s 重连租约内）
+     * 就请 scene-manager 送回原场景实例（不在了按原地图选）；没有（首登、LeaveGame 干净登出、租约过期）不指定，落默认主世界。
+     * 读记录出错时退化成按存档里上次所在的地图选（不让 Redis 抖动把老玩家送回主城出生点）。
+     */
+    private void applyLocation(AssignSceneRequest.Builder assign, long playerId, int zoneId, PlayerRow row) {
+        Optional<PlayerLocation> location;
+        try {
+            location = locations.find(playerId);
+        } catch (RuntimeException e) {
+            log.warn("读玩家位置失败，按存档里的地图选场景 player={}: {}", playerId, e.toString());
+            assign.setPreferredSceneConfigId(row.getSceneConfigId());
+            return;
+        }
+        if (location.isEmpty()) {
+            return;
+        }
+        PlayerLocation at = location.get();
+        if (at.getZoneId() != zoneId) {
+            log.info("玩家位置在别的 zone，按首登落点 player={} 位置zone={} 本次zone={}", playerId, at.getZoneId(), zoneId);
+            return;
+        }
+        assign.setPreferredSceneConfigId(at.getSceneConfigId())
+                .setPreferredSceneNodeId(at.getSceneNodeId())
+                .setPreferredSceneId(at.getSceneId());
     }
 
     /** 把同步抛出、返回 null、超时都统一成一个一定会完成的 future（copy 出来再加超时，不改动 Dubbo 的 future）。 */
@@ -213,8 +254,8 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return future.copy().orTimeout(assignTimeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, AssignSceneResponse assigned,
-                                                        Throwable failure, long assignStart) {
+    private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, AssignSceneRequest routed,
+                                                        AssignSceneResponse assigned, Throwable failure, long assignStart) {
         long assignElapsed = nanoClock.getAsLong() - assignStart;
         if (failure != null) {
             metrics.sceneAssignCompleted(AssignResult.ERROR, assignElapsed);
@@ -234,7 +275,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         long deadline = claimStart + claimWait.toNanos();
         CompletableFuture<ClaimStep> chain;
         try {
-            chain = claim(session, playerId, assigned, deadline, FIRST_CLAIM_BACKOFF, false);
+            chain = claim(session, playerId, routed, assigned, deadline, FIRST_CLAIM_BACKOFF, false);
         } catch (RuntimeException e) {
             metrics.ownerClaimCompleted(ClaimOutcome.ERROR, nanoClock.getAsLong() - claimStart);
             throw e;
@@ -251,13 +292,14 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      *
      * @param retried 之前已经撞上过「仍被持有」（夺到时记为 {@link ClaimOutcome#WAITED}）
      */
-    private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, AssignSceneResponse assigned,
-                                               long deadline, Duration backoff, boolean retried) {
+    private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, AssignSceneRequest routed,
+                                               AssignSceneResponse assigned, long deadline, Duration backoff,
+                                               boolean retried) {
         ClaimResult result = store.claimOwnership(playerId);
         if (result instanceof ClaimResult.Claimed claimed) {
-            return CompletableFuture.completedFuture(new ClaimStep(
-                    accepted(session, playerId, assigned, claimed.ownerEpoch()),
-                    retried ? ClaimOutcome.WAITED : ClaimOutcome.CLAIMED));
+            ClaimOutcome outcome = retried ? ClaimOutcome.WAITED : ClaimOutcome.CLAIMED;
+            return rerouteIfStale(playerId, routed, assigned).thenApply(target -> new ClaimStep(
+                    accepted(session, playerId, target, claimed.ownerEpoch()), outcome));
         }
         if (result instanceof ClaimResult.NotFound) {
             log.warn("进游戏失败：夺权时角色已不存在 player={}", playerId);
@@ -280,7 +322,49 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         Duration delay = backoff.compareTo(Duration.ofNanos(remainingNanos)) < 0 ? backoff : Duration.ofNanos(remainingNanos);
         Duration nextBackoff = backoff.multipliedBy(2).compareTo(MAX_CLAIM_BACKOFF) < 0
                 ? backoff.multipliedBy(2) : MAX_CLAIM_BACKOFF;
-        return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, assigned, deadline, nextBackoff, true));
+        return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, routed, assigned, deadline,
+                nextBackoff, true));
+    }
+
+    /**
+     * 夺到归属后再看一眼位置记录：路由时用的记录在夺权期间被上一个持有者改掉了（LeaveGame 之后紧跟着 EnterGame：
+     * 读记录时 scene 还没处理离场，登出墓碑在夺权等释放的这段时间才落下）就按新的记录重新分配一次——同基线「LeaveGame 之后按首登」。
+     * 只在路由用了记录时才看；读出错或重新分配失败都沿用第一次的结果（只影响落点，不影响归属）。
+     */
+    private CompletableFuture<AssignSceneResponse> rerouteIfStale(long playerId, AssignSceneRequest routed,
+                                                                  AssignSceneResponse assigned) {
+        if (routed.getPreferredSceneId() == 0) {
+            return CompletableFuture.completedFuture(assigned);
+        }
+        Optional<PlayerLocation> now;
+        try {
+            now = locations.find(playerId);
+        } catch (RuntimeException e) {
+            log.warn("夺权后复查玩家位置失败，沿用原落点 player={}: {}", playerId, e.toString());
+            return CompletableFuture.completedFuture(assigned);
+        }
+        Optional<PlayerLocation> usable = now.filter(at -> at.getZoneId() == routed.getZoneId());
+        if (usable.isPresent() && usable.get().getSceneNodeId() == routed.getPreferredSceneNodeId()
+                && usable.get().getSceneId() == routed.getPreferredSceneId()) {
+            return CompletableFuture.completedFuture(assigned);
+        }
+        AssignSceneRequest.Builder again = AssignSceneRequest.newBuilder().setZoneId(routed.getZoneId()).setPlayerId(playerId);
+        usable.ifPresent(at -> again.setPreferredSceneConfigId(at.getSceneConfigId())
+                .setPreferredSceneNodeId(at.getSceneNodeId())
+                .setPreferredSceneId(at.getSceneId()));
+        log.info("夺权期间玩家位置变了（如 LeaveGame 的登出墓碑），重新分配场景 player={} 原落点={}/{} 现记录={}", playerId,
+                routed.getPreferredSceneNodeId(), routed.getPreferredSceneId(), usable.isPresent() ? "有" : "无");
+        long start = nanoClock.getAsLong();
+        return callAssign(again.build()).handle((target, failure) -> {
+            long elapsed = nanoClock.getAsLong() - start;
+            if (failure != null || target.getTipId() != 0) {
+                metrics.sceneAssignCompleted(failure != null ? AssignResult.ERROR : AssignResult.REJECTED, elapsed);
+                log.warn("重新分配场景失败，沿用原落点 player={}", playerId);
+                return assigned;
+            }
+            metrics.sceneAssignCompleted(AssignResult.OK, elapsed);
+            return target;
+        });
     }
 
     /**

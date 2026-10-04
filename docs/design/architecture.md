@@ -434,6 +434,15 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
   与上次确认落库的快照相同就跳过，不同才写（带围栏、不释放；要求归属未释放，所以迟到的在线存盘盖不过最终写回）。
   进程被 kill 时丢的是最近一次在线存盘之后的增量。最终写回失败（重试用尽）时盘上至少是最近一次在线存盘的状态。
 
+- **玩家位置与短线重连**（`PlayerLocationDirectory`，Redis `xm:location:{player_id}`）：持有归属的 scene 是唯一写者，
+  每次写带本次进场内单调递增的序号与完整的此刻状态，按 (epoch, 序号) 只收更新的写（Redisson 的命令会乱序）——进场 / 换场景写当前场景实例
+  （TTL 60 s，在线每 20 s 一槽续期）、断线（连接断开、gate 链路断开）写成 30 s 重连租约、LeaveGame 写成登出墓碑；被接管 / 失去归属 / 停服不动（新持有者覆盖或按 TTL 消失）。写都是异步的，不阻塞逻辑线程，
+  写不上只退化成按首登落点。login 进游戏时读：有本 zone 的记录（在线顶号、断线租约内重连）就请 scene-manager 送回原实例
+  （还在就不看人数直接用，不在了按原地图），没有（首登、干净登出、租约过期）落默认主世界（World 表第一行）；
+  夺到归属后复查一次（LeaveGame 紧跟 EnterGame 时墓碑可能晚到）。gate 在 LeaveGame 在途 / 排队时断线也按主动离开通知 scene。
+  基线在 zone 内只按 location 定 zone、落默认主世界，回原实例是 Java 的有意差异（PARITY「短线重连与落点」⑥）。
+  重连不复用内存实例：断线照常最终写回并释放，重连按新 epoch 从库重载（与基线「退出存盘在途时取消退出」不同，见 PARITY）。
+
 ## 8. 登录进场景调用链（首批竖切）
 
 0. （可选，HTTP 登录路径）客户端 `POST /api/login` → `xm-gateway` → Dubbo `AccountLoginService` → `xm-login`：认证、取 / 建账号、
@@ -451,7 +460,7 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
    设备数：同一账号「已绑定、没在游戏里」的连接至多 3 个（建角 / 进游戏前也续期，名单满回 2024），进场指令发出 / 会话结束时注销。
 4. 角色为空时 `CreatePlayer(14)` → `xm-login`：按配表生成名字与默认职业，写 `player` 表，回角色列表。
 5. `EnterGame(26)` → `xm-login`：会话已绑定玩家（不论是不是同一角色）→ 2028（基线进游戏成功即删登录会话）；
-   校验角色归属 → `SceneDirectoryService` 选场景 → 夺取归属（§7：上一个写者没释放就请它让出并等待，等不到回 2005）→
+   校验角色归属 → 读玩家位置记录（§7）→ `SceneDirectoryService` 选场景（有记录回原实例，没有落默认主世界）→ 夺取归属（§7：上一个写者没释放就请它让出并等待，等不到回 2005）→
    回 `EnterGameResponse`，并指示 gate「把会话绑定到该玩家并送进 (场景节点, 场景)」。
 6. gate 通过节点链路发 `PlayerEnter` → scene 加载玩家（存储线程池）→ 逻辑线程建玩家、进场景 →
    下发 `NotifyEnterScene(79)` 等初始同步。**进场失败**（scene 回 3023、建链失败、链路层已关）：gate 推 23 {3023}，
@@ -477,8 +486,8 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
 
 ## 10. 首批不做（后续批次）
 
-排队、短线重连（30s 断线租约、回到原位置）、跨 zone、战斗、任务等玩法系统、Kafka 事件、GM 管理接口（HTTP / 签名），
-服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，见 §7；货币与 GM 客户端指令闸见 §4.4。）
+排队、跨 zone、战斗、任务等玩法系统、Kafka 事件、GM 管理接口（HTTP / 签名），
+服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，短线重连已于 2026-10-04 补上，见 §7；货币与 GM 客户端指令闸见 §4.4。）
 （低基数运行指标五个进程都已接入，见 §11。）
 顶号已按 §7 第 2 步实现（旧连接收 23 {2017} 后断开，不发 34）。进度逐项登记在 `PARITY.md`。
 

@@ -9,6 +9,7 @@ import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
+import com.game.robot.scenario.ReconnectScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TokenScenario;
@@ -42,6 +43,7 @@ public record RobotOptions(
         boolean expectGmAllowed,
         String dataUrl,
         String sceneMetricsUrl,
+        String tableDir,
         String password) {
 
     public static final String PASSWORD_ENV = "XM_LOGIN_DEV_PASSWORD";
@@ -52,7 +54,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -74,7 +76,9 @@ public record RobotOptions(
                 "currency / attribute：服务端运行模式的期望：allow（dev / test，GM 指令生效）/ deny（prod，gate 推 23 {1006} 且不转发）"),
         DATA_URL("data-url", "XM_ROBOT_DATA_URL", "http://127.0.0.1:18106", "audit / guard：xm-data 管理端口（运维接口）"),
         SCENE_METRICS_URL("scene-metrics-url", "XM_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
-                "audit / guard：xm-scene 管理端口（抓指标）");
+                "audit / guard：xm-scene 管理端口（抓指标）"),
+        TABLE_DIR("table-dir", "XM_ROBOT_TABLE_DIR", "config-data/tables",
+                "reconnect：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点）");
 
         final String arg;
         final String env;
@@ -175,6 +179,7 @@ public record RobotOptions(
             case SKILL -> SkillScenario.accountName(prefix, runTag, "a");
             case PET -> PetScenario.accountName(prefix, runTag);
             case TOKEN -> TokenScenario.accountName(prefix, runTag);
+            case RECONNECT -> ReconnectScenario.accountName(prefix, runTag);
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -184,13 +189,13 @@ public record RobotOptions(
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
-                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), password);
+                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), value(Opt.TABLE_DIR, given, env), password);
     }
 
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -211,6 +216,8 @@ public record RobotOptions(
                 + "洗点扣 300 / 改名扣 200（按 54 余额核对）、重登原样、收回；需要 dev 运行模式\n");
         out.append("  token     令牌与 HTTP 登录：/api/login 口令登录拿令牌（错口令 401、未知区 500）→ TCP access token 登录不签新令牌 → "
                 + "127 / HTTP 刷新轮换、用过的作废 → 旧 access 仍可用 → 同账号第 4 个未进游戏的连接 2024、断开一个后放行\n");
+        out.append("  reconnect 落点：首登落默认主世界 → 63 换图 → 断开立即重连回原实例原位置 → 顶号时旧连接收 23 {2017}、"
+                + "新连接回原实例 → LeaveGame 后再进按首登落默认主世界出生点；读 --table-dir 的 World / BaseScene 表\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -228,7 +235,7 @@ public record RobotOptions(
                 + accountPrefix + ", count=" + count + ", runTag=" + runTag + ", connectTimeout=" + connectTimeout
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
-                + ", dataUrl=" + dataUrl + ", sceneMetricsUrl=" + sceneMetricsUrl
+                + ", dataUrl=" + dataUrl + ", sceneMetricsUrl=" + sceneMetricsUrl + ", tableDir=" + tableDir
                 + ", password=***]";
     }
 
@@ -236,7 +243,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect）");
         }
     }
 

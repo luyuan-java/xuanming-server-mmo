@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+// 玩家位置记录的 Redis 值（只在 Java 版内部使用；归 xm-discovery 所有）。
+// Redis xm:location:{player_id}，Hash：字段 e = owner_epoch（十进制），字段 q = 写序号，字段 s = 状态（o 在线 / l 重连租约 / x 已登出），字段 v = 本消息。scene 节点（数据归属的持有者）是唯一写者。
+// 见 docs/design/architecture.md §7「玩家位置与短线重连」。
+
+package xm.discovery;
+
+option java_package = "com.game.discovery.proto";
+option java_multiple_files = true;
+
+// 玩家的数据归属此刻（在线）或刚才（断线后的重连租约内）在哪个场景实例。login 进游戏时按它把玩家送回原场景实例
+// （对应 mmorpg scene_manager 的 PlayerLocation 与 player_locator 的断线租约；基线在 zone 内只用它定 zone，Java 回原实例，见 PARITY）。
+message PlayerLocation {
+  uint64 player_id = 1;
+  uint32 zone_id = 2;
+  uint32 scene_node_id = 3;
+  // 场景实例号（雪花，进程内创建时发，跨进程重启不重复）：目录里找不到同号的实例 = 原实例已不在。
+  uint64 scene_id = 4;
+  uint32 scene_config_id = 5;
+  // 写入它的那次进场夺得的归属 epoch：同一玩家的两次进场以它定先后，旧持有者迟到的写不覆盖新持有者的记录。
+  uint64 owner_epoch = 6;
+}

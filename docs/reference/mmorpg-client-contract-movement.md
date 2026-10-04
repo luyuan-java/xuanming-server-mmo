@@ -292,7 +292,8 @@ scene 调到空 handler、应答是 `Empty`，结果是**静默无动作**（`pl
 - **周期存盘**：缺省每 300s 一轮（`SCENE_PLAYER_SAVE_INTERVAL_SECONDS`，0 = 关），按 `playerId % 300` 分槽每秒存一部分
   （`core/system/redis.cpp:99-160`）。scene 崩溃最多丢 300s 的位置。
 - **再进场**（`spatial/system/scene_spawn.cpp:91-149`）：同图、坐标在网格上就保留（高度吸附）；不在网格上或为 (0,0,0) → 出生点；
-  无导航网格的场景只修 (0,0,0)。换图一律出生点。出生点取 BaseScene 表 `spawn_x/y/z`，缺省 (180,200,0)。
+  无导航网格的场景只修 (0,0,0)。会话内换图一律出生点；跨登录不算换图（player_database 不存地图，`player_scene.cpp:59-65` 只和内存里的旧场景比），
+  存档坐标在目标地图网格上合法就原样保留。出生点取 BaseScene 表 `spawn_x/y/z`，缺省 (180,200,0)。
 - Java 现状：只在离场时写回，没有周期存盘（`docs/design/architecture.md` §7）；这对客户端不可见，只影响崩溃时的丢失窗口。
 
 ---

@@ -47,6 +47,8 @@ public final class ScenePlayer {
     private final List<Integer> skills;
     private final MoveGuard moveGuard;
     private Scene scene;
+    /** 位置记录的写序号（本次进场内单调递增，见 PlayerLocationDirectory；只在逻辑线程上读写）。 */
+    private long locationSeq;
     private Vec3 position;
     /**
      * 最近一次移动上报的朝向（持久化在 {@code player_state.facing}，进场时恢复）；
@@ -195,6 +197,21 @@ public final class ScenePlayer {
 
     void setScene(Scene scene) {
         this.scene = scene;
+    }
+
+    /** 下一次写位置记录用的序号。 */
+    public long nextLocationSeq() {
+        return ++locationSeq;
+    }
+
+    /** 最近一次写位置记录用的序号（在线续期不递增）。 */
+    public long locationSeq() {
+        return locationSeq;
+    }
+
+    /** 同一 epoch 的重复进场接替旧实例时接着它的序号往下数（否则新实例的写会被当成乱序的旧写丢掉）。 */
+    void continueLocationSeq(long from) {
+        locationSeq = Math.max(locationSeq, from);
     }
 
     /** 只由 {@link Scene#relocate}（在场景内）或换场景时（不在任何场景里）调用。 */

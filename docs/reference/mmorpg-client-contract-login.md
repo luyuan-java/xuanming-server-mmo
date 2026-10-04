@@ -340,7 +340,7 @@ Schema 是 `RoleNameRuleTable{id=1,min_chars=2,max_chars=3,generated_prefix=4,ge
 4. 写入 Online 会话，通过 Kafka 发 `BindSessionEvent` 给 gate。gate 只记录 player_id，**不向客户端发任何东西**（`cpp/nodes/gate/handler/event/gate_event_handler.cpp:199-234`）。
 5. 调用 SceneManager.EnterScene，gate_zone 设为本 zone，超时 5000ms（login.yaml:143）。落点规则（646-683 行）：
    - FirstLogin：本 zone。
-   - 重连或顶号：ZoneId=0，由服务端按玩家 location 决定。
+   - 重连或顶号：ZoneId=0，由服务端按玩家 location 决定去哪个 zone；zone 内仍落默认主世界人数最少的频道（scene 契约 §1 第 5 条）。
 6. Scene 推送 **NotifyEnterScene（79）** 以及场景相关消息，内容见 scene 契约。机器人收到 79 后才认为场景就绪（`robot/logic/handler/scene_scene_client_player_notify_enter_scene.go:15`）。
 7. 链路成功收尾时删除 `login_session:{sid}` 并从设备集合移除（352 行）。
 
@@ -395,7 +395,7 @@ Schema 是 `RoleNameRuleTable{id=1,min_chars=2,max_chars=3,generated_prefix=4,ge
 | 设备数超限（处于 Login→EnterGame 窗口的连接超过 3 条） | 2024 |
 | 同一角色并发 EnterGame，或上一条异步链还没结束 | 2005。压测记录里有 `enter game: server error id:2005`（`robot/login_test_results.csv:12`） |
 | **顶号**：旧会话仍在线，新连接对同一角色 EnterGame | 旧连接先收到 **msg 34**，负载 `MessageContent{message_id:34, serialized: GameKickPlayerRequest{reason: TipInfoMessage{id: 2017 kLoginBeKickByAnOtherAccount}}}`，随后 gate 执行 `shutdown()`（`gate_event_handler.cpp:108-140`；`GameKickPlayerRequest{TipInfoMessage reason=1; string operator=2}` 见 `proto/scene/client_player_common.proto:12-15`）。新连接收到正常的 26 应答，接着收到 79 |
-| **短线重连**：旧会话处于断线租约内（30s）且账号相同 | 不踢任何连接；新连接正常收到 26，接着收到 79；落点由 location 决定 |
+| **短线重连**：旧会话处于断线租约内（30s）且账号相同 | 不踢任何连接；新连接正常收到 26，接着收到 79；location 只决定 zone，zone 内落默认主世界人数最少的频道（scene 契约 §1 第 5 条） |
 | 租约过期，或曾经 LeaveGame | 按 FirstLogin 处理 |
 | 跨区重定向（dev 默认关闭，`RedirectOnEnterEnabled: false`，login.yaml:205） | msg 124 `RedirectToGateNotify`；26 同步应答仍然是成功 |
 | 断线租约到期而 TCP 还挂着 | gate 执行 forceClose，没有任何通知消息（`gate_event_handler.cpp:146-198`） |
@@ -464,6 +464,6 @@ robot_smoke 不走这条路，只有 `use_http_login: true` 时才用。
 10. [ ] CreatePlayer 和 EnterGame 要求本连接先成功 Login，否则返回 2028。EnterGame 成功收尾后清掉登录会话。
 11. [ ] EnterGame 同步应答：成功时 `player_id` = 请求值，**不带** error_message，`post_merge_notice_ts=0`，`force_rename_required=false`。之后异步推送 NotifyEnterScene(79)，可以早于或晚于 26 应答到达，必须在 60s 内送达。异步失败推 msg 23 `{3023}`。
 12. [ ] 角色不属于本账号返回 2011；同一角色的进场还在进行中（或同一账号并发 Login、并发建角）返回 2005。
-13. [ ] 顶号：旧连接先收到 msg 34 `GameKickPlayerRequest{reason:{id:2017}}`，然后被关闭；新连接正常进场。30s 断线租约内同一账号重进不踢任何连接，回到原位置。
+13. [ ] 顶号：旧连接先收到 msg 34 `GameKickPlayerRequest{reason:{id:2017}}`，然后被关闭；新连接正常进场。30s 断线租约内同一账号重进不踢任何连接（落点见 scene 契约 §1 第 5 条：zone 内落默认主世界，不保证回原场景）。
 14. [ ] LeaveGame(17) 和 Disconnect(58) 接受空请求体，返回空应答或不回应答都可以，但不能断开连接或报错。机器人发完 17 和 58 就立即关闭 TCP。TCP 断开本身要按“断线 → 30s 租约”处理。
 15. [ ] 延迟预算：Login、CreatePlayer、EnterGame 的同步应答各自必须在 15s 内返回；ListSkills(77) 的应答应在 5s 内返回。

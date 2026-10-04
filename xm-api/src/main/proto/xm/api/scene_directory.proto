@@ -9,8 +9,12 @@ option java_multiple_files = true;
 message AssignSceneRequest {
   uint32 zone_id = 1;
   uint64 player_id = 2;
-  // 期望进入的场景配置（上次所在场景）；0 表示用默认主世界。
+  // 期望进入的场景配置；0 表示用默认主世界。login 只在有玩家位置记录（在线 / 断线重连租约内）时填，取记录里的配置。
   uint32 preferred_scene_config_id = 3;
+  // 期望回到的场景实例（玩家位置记录里的节点与场景号；0 = 没有）。该实例还在目录里就直接用它（不看人数），
+  // 不在了按 preferred_scene_config_id 选（Java 的行为；基线在 zone 内只按 location 定 zone、落默认主世界，见 PARITY）。
+  uint32 preferred_scene_node_id = 4;
+  uint64 preferred_scene_id = 5;
 }
 
 message AssignSceneResponse {

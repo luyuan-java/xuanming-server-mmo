@@ -64,6 +64,8 @@ import org.slf4j.LoggerFactory;
 public final class ClientDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(ClientDispatcher.class);
+    /** LeaveGame 在契约里的方法名（服务裸名.方法名）。 */
+    private static final String LEAVE_GAME_METHOD = "ClientPlayerLogin.LeaveGame";
 
     /** C++ kMaxClientMessageSize：整个 ClientRequest 序列化后超过 1KB 即拒绝。 */
     static final int MAX_REQUEST_BYTES = 1024;
@@ -226,6 +228,9 @@ public final class ClientDispatcher {
             closeNow(s);
             return;
         }
+        if (isLeaveGame(route)) {
+            s.leaveGameRequests++;
+        }
         s.pending.add(new PendingRequest(route, request));
         drain(s);
     }
@@ -239,7 +244,7 @@ public final class ClientDispatcher {
         s.closing = true;
         s.cancelHandshakeTimeout();
         discardPending(s);
-        leaveScene(s, false);
+        leaveScene(s, s.leaveGameRequests > 0);
         if (s.inFlight) {
             // 等在途的 login 调用完成后再通知 login（见 onLoginCompleted），否则 login 可能先收到断线、后处理完进游戏。
             return;
@@ -302,6 +307,11 @@ public final class ClientDispatcher {
 
     private void onLoginCompleted(ClientSession s, ClientRequest request, ClientReply reply, Throwable error) {
         s.inFlight = false;
+        boolean succeededWhileClosing = (s.closing || s.closed) && error == null && reply != null;
+        if (isLeaveGame(routes.clientRoute(request.getMessageId())) && s.leaveGameRequests > 0 && !succeededWhileClosing) {
+            // 关闭途中成功的 LeaveGame 不清：它的 UnbindPlayer 来不及照常发主动离开，留给断线流程按主动离开发
+            s.leaveGameRequests--;
+        }
         if (s.closing || s.closed) {
             // 连接已断（或正在断）：不再向客户端发送，只把身份变化记到会话上，让给 login 的断线通知带上最终身份；
             // 没送出去的进场由 login 释放归属。
@@ -591,6 +601,11 @@ public final class ClientDispatcher {
      *
      * @param voluntary true = 客户端主动 LeaveGame；false = 断线 / 换进别的场景
      */
+    /** 路由是不是 LeaveGame（17）：按契约方法名认，不写死消息号。 */
+    private static boolean isLeaveGame(MessageRoute route) {
+        return route != null && LEAVE_GAME_METHOD.equals(route.method());
+    }
+
     private void leaveScene(ClientSession s, boolean voluntary) {
         if (s.sceneNodeId == 0) {
             return;

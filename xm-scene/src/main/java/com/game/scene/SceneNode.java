@@ -13,6 +13,7 @@ import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
+import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.player.store.PlayerStore;
 import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpEndpoint;
@@ -39,6 +40,7 @@ import com.game.scene.link.LinkIdentity;
 import com.game.scene.link.NodeLinkHandler;
 import com.game.scene.link.NodeLinkServer;
 import com.game.scene.link.SceneLinkService;
+import com.game.scene.location.RedisPlayerLocations;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.mission.ActivityFeature;
 import com.game.scene.mission.MissionFeature;
@@ -150,6 +152,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile AssetOpEndpoint assetOps;
     private volatile ScheduledFuture<?> frameTask;
     private volatile ScheduledFuture<?> saveTask;
+    private volatile ScheduledFuture<?> locationTask;
     private volatile NodeLinkServer linkServer;
     private volatile SceneDirectoryPublisher publisher;
     private volatile OwnerLeaseRenewer leaseRenewer;
@@ -253,7 +256,7 @@ public class SceneNode implements SmartLifecycle {
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
-                }, snapshots);
+                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId));
         links = gateLinks;
         world = sceneWorld;
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
@@ -288,6 +291,15 @@ public class SceneNode implements SmartLifecycle {
                 }
             }, 1, 1, TimeUnit.SECONDS);
         }
+
+        // 玩家位置续期：每秒一个槽，每人每 20 s 一次（异步发出，不阻塞逻辑线程）。
+        locationTask = logicLoop.scheduleAtFixedRate(() -> {
+            try {
+                sceneWorld.refreshDueLocations();
+            } catch (RuntimeException e) {
+                log.error("玩家位置续期这一秒出错，下一秒照常", e);
+            }
+        }, 1, 1, TimeUnit.SECONDS);
 
         // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
         takeoverSubscriber = new OwnerTakeoverSubscriber(
@@ -359,6 +371,10 @@ public class SceneNode implements SmartLifecycle {
      * → 关线程 → 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
      */
     private void release() {
+        ScheduledFuture<?> locationRefresh = locationTask;
+        if (locationRefresh != null) {
+            locationRefresh.cancel(false);
+        }
         ScheduledFuture<?> saves = saveTask;
         if (saves != null) {
             // 第一步就停周期存盘：最终写回由下面的停服写回统一做，不让新提交的在线存盘排在停服写回前面占停服预算

@@ -54,7 +54,7 @@
 2. scene_manager 收到 `scene_conf_id==0` 时取 `defaultWorldConfID()`，也就是 **World 表第一行的 `scene_id`**（`go/scene_manager/internal/logic/enterscenelogic.go:1228-1256`、`world_init.go:578-588`）。
 3. `generated/tables/world.json` 第一行是 `{id:1, scene_id:1}`，所以**首登场景配置 id = 1**。它对应 `basescene.json` 的 id 1：`nav_bin_file:"data/scene_nav_bin/main_scene.bin"`，出生点 `spawn_x:180.0, spawn_y:200.0, spawn_z:0.0`。
 4. 具体频道（`scene_id`，雪花号）由 `ReserveBestWorldChannelForEnter` 选负载最低的一条。场景实体上的 `SceneInfoComp` 在 CreateScene 时填写：`scene_config_id=config_id`、`scene_id`、`mirror_config_id`、`dungeon_config_id`、`creators`（`cpp/nodes/scene/handler/grpc/scene_node_service.cpp:42-49`、`scene_handler.cpp:895-902`）。世界频道的 mirror/dungeon 都是 0，`creators` 为空。
-5. 断线重连或顶号时 `ZoneId=0`，由 scene_manager 按 location 决定落点，通常回到原场景。主动登出后 location 被清掉，下次登录仍按 FirstLogin 规则落到 World 第一行。
+5. 断线重连或顶号时 `ZoneId=0`、`SceneId=0`、不带地图：scene_manager 只用 location 决定**去哪个 zone**（`enterscenelogic.go:355-364`），zone 内仍按第 2、4 条落默认主世界人数最少的频道；只有选中的频道恰好是玩家原来所在的那个时才走「同落点重连」捷径（`:492`、`:630-640`）。它注释里写的「去向按 location 决定」在 zone 内并没有生效。主动登出后 location 被清掉，下次登录同样按 FirstLogin 规则落到 World 第一行。（2026-10-04 更正：此前这里写「通常回到原场景」，不对。）
 
 ### 出生坐标来源
 逻辑在 `cpp/libs/services/scene/spatial/system/scene_spawn.cpp:91-149` `EnsureValidEnterLocation`，由 `player_scene.cpp:102` 调用。
@@ -64,7 +64,7 @@
   - 该配置有导航网格：先对当前坐标做 `SnapToMesh`。成功就只吸附；失败就取出生点，并吸附到网格。
   - 没有导航网格，且坐标为 (0,0,0)：直接取出生点。
 - 出生点优先取 BaseScene 表的 `spawn_x/y/z`（要求有限且不全为 0）；否则用常量 `kTianyongSpawn` = (180, 200, 0)（`spatial/constants/nav.h:35-37`；`scene_spawn.cpp:45-63`）。
-- 换地图（`mapChanged`：新旧 `scene_config_id` 不同）一律落到目标出生点。同图换线保留坐标。
+- 换地图（`mapChanged`：新旧 `scene_config_id` 不同）一律落到目标出生点。同图换线保留坐标。`mapChanged` 只和内存里的旧场景比（会话内换图）；重新登录时没有旧场景、库里也不存地图，不算换图，按下一条保留存档坐标。
 - 老玩家的 `Transform` 来自存档 `player_database.transform`（`proto/common/database/mysql_database_table.proto:110`）。只要在网格上就保留。
 - **Java 若没有导航网格：首登坐标 = (180.0, 200.0, 0.0)。**
 

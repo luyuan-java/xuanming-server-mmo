@@ -17,6 +17,7 @@ import com.game.api.proto.AssignSceneRequest;
 import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.EnterScene;
 import com.game.api.proto.SessionContext;
+import com.game.discovery.proto.PlayerLocation;
 import com.game.login.dispatch.HandlerReply;
 import com.game.login.metrics.LoginMetrics;
 import com.game.login.ownership.OwnerTakeovers;
@@ -109,8 +110,8 @@ class EnterGameHandlerTest {
 
         ArgumentCaptor<AssignSceneRequest> request = ArgumentCaptor.forClass(AssignSceneRequest.class);
         verify(scenes).assign(request.capture());
-        assertThat(request.getValue()).isEqualTo(AssignSceneRequest.newBuilder()
-                .setZoneId(7).setPlayerId(PLAYER).setPreferredSceneConfigId(3).build());
+        assertThat(request.getValue()).as("没有位置记录：不指定落点（默认主世界），不看存档里的地图")
+                .isEqualTo(AssignSceneRequest.newBuilder().setZoneId(7).setPlayerId(PLAYER).build());
 
         assertThat(assigns("ok")).isEqualTo(1);
         assertThat(claims("claimed")).isEqualTo(1);
@@ -318,10 +319,86 @@ class EnterGameHandlerTest {
     void 设备数续期被拒_回拒绝码_不查角色不分配场景() throws Exception {
         EnterGameHandler limited = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
                 Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get,
-                session -> LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE);
+                session -> LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE, PlayerLocationLookup.NONE);
         HandlerReply reply = limited.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
         assertThat(response(reply).getErrorMessage().getId()).isEqualTo(LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE);
         org.mockito.Mockito.verifyNoInteractions(scenes);
         verify(store, never()).findPlayer(org.mockito.ArgumentMatchers.anyLong());
+    }
+    private AssignSceneRequest assignWith(PlayerLocationLookup locations) {
+        EnterGameHandler located = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
+                Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get, session -> null,
+                locations);
+        located.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
+        ArgumentCaptor<AssignSceneRequest> request = ArgumentCaptor.forClass(AssignSceneRequest.class);
+        verify(scenes).assign(request.capture());
+        return request.getValue();
+    }
+
+    private static PlayerLocation location(int zoneId) {
+        return PlayerLocation.newBuilder().setPlayerId(PLAYER).setZoneId(zoneId).setSceneNodeId(4)
+                .setSceneId(99_000_001L).setSceneConfigId(2).setOwnerEpoch(4).build();
+    }
+
+    @Test
+    void 有本zone的位置记录_请scene_manager送回原场景实例() {
+        AssignSceneRequest request = assignWith(id -> Optional.of(location(7)));
+        assertThat(request).isEqualTo(AssignSceneRequest.newBuilder().setZoneId(7).setPlayerId(PLAYER)
+                .setPreferredSceneConfigId(2).setPreferredSceneNodeId(4).setPreferredSceneId(99_000_001L).build());
+    }
+
+    @Test
+    void 位置记录在别的zone_按首登不指定落点() {
+        AssignSceneRequest request = assignWith(id -> Optional.of(location(8)));
+        assertThat(request).isEqualTo(AssignSceneRequest.newBuilder().setZoneId(7).setPlayerId(PLAYER).build());
+    }
+
+    @Test
+    void 读位置记录出错_退化成按存档里的地图选() {
+        AssignSceneRequest request = assignWith(id -> {
+            throw new IllegalStateException("Redis 不可达");
+        });
+        assertThat(request).isEqualTo(AssignSceneRequest.newBuilder().setZoneId(7).setPlayerId(PLAYER)
+                .setPreferredSceneConfigId(3).build());
+    }
+    private HandlerReply enterWith(PlayerLocationLookup locations) {
+        EnterGameHandler located = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
+                Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get, session -> null,
+                locations);
+        return located.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
+    }
+
+    @Test
+    void 夺权期间位置记录被登出墓碑取代_按首登重新分配_进场指令用新落点() {
+        AssignSceneResponse home = AssignSceneResponse.newBuilder().setSceneNodeId(5).setSceneId(77L).setSceneConfigId(1)
+                .build();
+        when(scenes.assign(any())).thenReturn(CompletableFuture.completedFuture(ASSIGNED),
+                CompletableFuture.completedFuture(home));
+        AtomicInteger reads = new AtomicInteger();
+        HandlerReply reply = enterWith(id -> reads.getAndIncrement() == 0 ? Optional.of(location(7)) : Optional.empty());
+
+        ArgumentCaptor<AssignSceneRequest> requests = ArgumentCaptor.forClass(AssignSceneRequest.class);
+        verify(scenes, times(2)).assign(requests.capture());
+        assertThat(requests.getAllValues().get(1)).isEqualTo(AssignSceneRequest.newBuilder().setZoneId(7)
+                .setPlayerId(PLAYER).build());
+        assertThat(reply.directives().get(0).getEnterScene().getSceneId()).isEqualTo(77L);
+        assertThat(reply.directives().get(0).getEnterScene().getSceneNodeId()).isEqualTo(5);
+    }
+
+    @Test
+    void 夺权后位置记录没变_不重新分配() {
+        HandlerReply reply = enterWith(id -> Optional.of(location(7)));
+        verify(scenes, times(1)).assign(any());
+        assertThat(reply.directives().get(0).getEnterScene().getSceneId()).isEqualTo(99_000_001L);
+    }
+
+    @Test
+    void 重新分配失败_沿用第一次的落点() {
+        when(scenes.assign(any())).thenReturn(CompletableFuture.completedFuture(ASSIGNED),
+                CompletableFuture.failedFuture(new IllegalStateException("scene-manager 不可达")));
+        AtomicInteger reads = new AtomicInteger();
+        HandlerReply reply = enterWith(id -> reads.getAndIncrement() == 0 ? Optional.of(location(7)) : Optional.empty());
+        verify(scenes, times(2)).assign(any());
+        assertThat(reply.directives().get(0).getEnterScene().getSceneId()).isEqualTo(99_000_001L);
     }
 }

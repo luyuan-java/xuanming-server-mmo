@@ -47,6 +47,15 @@ public final class RedisKeys {
     }
 
     /**
+     * 玩家位置：{@code xm:location:{player_id}}，Hash（字段 {@code e} = owner_epoch 十进制、{@code q} = 写序号、{@code s} = 状态 o 在线 / l 重连租约 / x 已登出、
+     * {@code v} = {@code xm.discovery.PlayerLocation}），带 TTL；持有归属的 scene 节点是唯一写者（进场 / 换场景写、在线续期、
+     * 断线写成重连租约、主动离开写成登出墓碑；按 (epoch, 写序号) 只收更新的写），login 进游戏时读。
+     */
+    public static String playerLocation(long playerId) {
+        return PREFIX + "location:" + Long.toUnsignedString(playerId);
+    }
+
+    /**
      * 服务端 → gate 的推送频道：{@code xm:gate-push:{zone}:{gate 节点号}}，消息为 {@code xm.api.GatePush} protobuf。
      * 每个 gate 节点订阅自己的频道；节点号按 zone 分配，所以频道名带 zone。
      */

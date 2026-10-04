@@ -15,10 +15,12 @@ import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
+import com.game.robot.scenario.ReconnectScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TokenScenario;
 import java.io.PrintStream;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -89,6 +91,12 @@ public final class RobotMain {
                             options.zoneId(), options.password(), options.accountPrefix(), options.runTag(),
                             options.requestTimeout());
                     title = "xm-robot token：" + scenario.account() + "，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.RECONNECT) {
+                    ReconnectScenario scenario = new ReconnectScenario(flow, ids, registry, Path.of(options.tableDir()),
+                            options.accountPrefix(), options.runTag(), options.requestTimeout(), options.observeTimeout());
+                    title = "xm-robot reconnect：" + scenario.account() + "，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.PET) {

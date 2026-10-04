@@ -5,6 +5,7 @@ import static com.game.scene.world.SceneMessageIds.push;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
+import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorDestroyS2C;
@@ -93,6 +94,8 @@ public final class SceneWorld {
     private static final int ENTER_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
     /** 被别的会话接管 / 失去归属时推给旧会话的 tip（基线顶号同码，经 23 推送，本里程碑不发 34）。 */
     static final int KICKED_BY_ANOTHER = LoginErrorTip.login_error.kLoginBeKickByAnOtherAccount_VALUE;
+    /** 位置续期的槽数（每秒一个槽）：每个在线玩家每这么多秒续一次。 */
+    static final int LOCATION_REFRESH_SLOTS = (int) PlayerLocationDirectory.REFRESH_INTERVAL.toSeconds();
 
     private final SceneTables tables;
     private final SceneMessageIds ids;
@@ -104,6 +107,7 @@ public final class SceneWorld {
     private final SceneMetrics metrics;
     private final PlayerInitializer playerInitializer;
     private final PlayerSnapshots snapshots;
+    private final PlayerLocations locations;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -119,6 +123,8 @@ public final class SceneWorld {
     private boolean periodicSaveStopped;
     /** 周期存盘已走过的秒数（槽号 = 它对存盘周期取模）。 */
     private long saveSecond;
+    /** 位置续期已走过的秒数（槽号 = 它对 {@link #LOCATION_REFRESH_SLOTS} 取模）。 */
+    private long locationSecond;
     /** 已跑过的帧数（下一帧的帧号）。偶数帧做属性同步。 */
     private long frame;
 
@@ -134,8 +140,17 @@ public final class SceneWorld {
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots,
+                PlayerLocations.NONE);
+    }
+
+    /** @param locations 玩家位置记录（进场 / 换场景写、在线续期、断线缩到重连租约、主动离开删），login 进游戏时按它落点 */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations) {
         this.playerInitializer = playerInitializer;
         this.snapshots = snapshots;
+        this.locations = locations;
         this.tables = tables;
         this.ids = ids;
         this.sink = sink;
@@ -294,6 +309,7 @@ public final class SceneWorld {
         ScenePlayer sessionOccupant = playersBySession.get(key);
         if (sessionOccupant != null && sessionOccupant != previous) {
             removePlayer(sessionOccupant, true);
+            locations.loggedOut(sessionOccupant);
         }
 
         int savedConfigId = data.sceneConfigId();
@@ -332,6 +348,9 @@ public final class SceneWorld {
         ScenePlayer player = new ScenePlayer(playerId, nextId(), key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime());
+        if (previous != null && previous.ownerEpoch() == epoch) {
+            player.continueLocationSeq(previous.locationSeq());
+        }
         try {
             playerInitializer.initialize(player);
         } catch (RuntimeException e) {
@@ -346,6 +365,7 @@ public final class SceneWorld {
         playersByEntity.put(player.entity(), player);
         enterScene(player, scene);
         sink.enterResult(key.linkId(), key.sessionId(), playerId, epoch, 0);
+        locations.entered(player);
         // 用内存状态拍（接管旧实例时库里那份是旧的）
         snapshots.capture(player.toSave(), PlayerSnapshots.Cause.LOGIN);
         log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={}", playerId, key,
@@ -436,6 +456,7 @@ public final class SceneWorld {
         player.stopMotion();
         player.moveGuard().reset(at, clock.nanoTime());
         enterScene(player, target);
+        locations.entered(player);
         log.info("玩家换场景 player={} {} -> {}", player.playerId(), from.sceneId(), target.sceneId());
     }
 
@@ -604,6 +625,10 @@ public final class SceneWorld {
         if (pending != null && pending.playerId() == leave.getPlayerId()) {
             pendingEnters.remove(key);
             releaseClaim(pending.playerId(), pending.ownerEpoch());
+            if (leave.getVoluntary()) {
+                // 加载中就 LeaveGame：同样是干净登出，盖掉更早那次进场留下的位置记录（断线则留着，它就是重连租约）
+                locations.loggedOutWhileLoading(pending.playerId(), pending.ownerEpoch());
+            }
             log.info("进场加载中离开，取消本次进场 player={} session={}", leave.getPlayerId(), key);
         }
         ScenePlayer player = playersBySession.get(key);
@@ -617,6 +642,12 @@ public final class SceneWorld {
             return;
         }
         removePlayer(player, true);
+        // 主动离开（LeaveGame）= 干净登出：删位置记录，下次进游戏按首登落点；断线留 30 s 重连租约（同基线断线租约）
+        if (leave.getVoluntary()) {
+            locations.loggedOut(player);
+        } else {
+            locations.disconnected(player);
+        }
         log.info("玩家离场 player={} session={} 主动={}", player.playerId(), key, leave.getVoluntary());
     }
 
@@ -637,6 +668,7 @@ public final class SceneWorld {
         }
         for (ScenePlayer player : onLink) {
             removePlayer(player, true);
+            locations.disconnected(player);
         }
         if (!onLink.isEmpty()) {
             log.info("gate 链路断开，移除其上玩家 link={} 人数={}", linkId, onLink.size());
@@ -722,6 +754,26 @@ public final class SceneWorld {
             }
         }
         return submitted;
+    }
+
+    /**
+     * 位置续期的一秒（每秒在逻辑线程上调一次）：{@code player_id} 对 {@link #LOCATION_REFRESH_SLOTS} 取模等于本秒槽号的在线玩家
+     * 续一次位置记录的 TTL，每人每 {@link PlayerLocationDirectory#REFRESH_INTERVAL} 恰好一次。
+     *
+     * @return 本次续期的人数
+     */
+    public int refreshDueLocations() {
+        long slot = locationSecond++ % LOCATION_REFRESH_SLOTS;
+        List<ScenePlayer> due = new ArrayList<>();
+        for (ScenePlayer player : playersById.values()) {
+            if (Long.remainderUnsigned(player.playerId(), LOCATION_REFRESH_SLOTS) == slot) {
+                due.add(player);
+            }
+        }
+        if (!due.isEmpty()) {
+            locations.refresh(due);
+        }
+        return due.size();
     }
 
     /** 一次立即存盘请求的结局（{@link #requestSave}）。 */
