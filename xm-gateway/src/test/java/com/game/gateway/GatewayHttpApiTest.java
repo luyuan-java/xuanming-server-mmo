@@ -1,7 +1,9 @@
 package com.game.gateway;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -27,6 +29,8 @@ import com.game.gateway.announcement.AnnouncementController;
 import com.game.gateway.store.AnnouncementRow;
 import com.game.gateway.store.GatewayStore;
 import com.game.gateway.store.ZoneRow;
+import com.game.gateway.ratelimit.RateLimitDecision;
+import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.zone.ZoneHealthProbe;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
@@ -104,6 +108,10 @@ class GatewayHttpApiTest {
     @MockitoBean
     private ZoneHealthProbe probe;
 
+    /** 开服限流：缺省放行；限流用例按需改判定（判定逻辑本身见 RateLimiterTest）。 */
+    @MockitoBean
+    private RateLimiter limiter;
+
     /** 一区开放推荐、二区维护、三区关闭、四区预告（新区、带开放时刻）；健康探测缺省未知。 */
     @BeforeEach
     void zones() {
@@ -115,6 +123,7 @@ class GatewayHttpApiTest {
                 new ZoneRow(4, "四区", 3, 5000, "", 1_900_000_000L, false, 4, now, now)));
         when(probe.health(anyInt())).thenReturn(ZoneHealthProbe.Health.UNKNOWN);
         when(probe.loadLevel(anyInt())).thenReturn(Optional.empty());
+        when(limiter.check(anyInt(), any(), any(), any())).thenReturn(RateLimitDecision.pass());
     }
 
     private double assignOutcomes(int code, String reason) {
@@ -251,7 +260,7 @@ class GatewayHttpApiTest {
         assertRejected(assignGate("{}"), 404, "zone_not_found");
         verifyNoInteractions(gateSource);
         assertThat(assignOutcomes(404, "zone_not_found") - before).as("标签不带 zone_id，未知区服不会造出新序列").isEqualTo(3);
-        assertThat(meters.find("xm.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(13);
+        assertThat(meters.find("xm.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(16);
     }
 
     @Test
@@ -454,5 +463,62 @@ class GatewayHttpApiTest {
         assertThat(keys(resp)).containsExactlyInAnyOrder("code", "access_token", "refresh_token", "access_token_expire",
                 "refresh_token_expire");
         assertThat(resp.get("refresh_token").asText()).isEqualTo("r2");
+    }
+
+    // ---------------------------------------------------------------- 开服限流
+
+    @Test
+    void 限流_assign排队100带ratelimit来源_429_IP取对端不信伪造的XFF_准入在前() throws Exception {
+        double queuedBefore = assignOutcomes(100, "ratelimit");
+        double deniedBefore = assignOutcomes(429, "IP_RATE_LIMIT");
+        when(limiter.check(eq(1), eq("127.0.0.1"), eq("acc"), eq(RateLimiter.Scope.ASSIGN)))
+                .thenReturn(RateLimitDecision.queue(1500, 7), RateLimitDecision.deny(RateLimitDecision.IP_RATE_LIMIT));
+        RequestBuilder request = post("/api/assign-gate").contentType(MediaType.APPLICATION_JSON)
+                .header("X-Forwarded-For", "6.6.6.6").content("{\"zone_id\":1,\"account\":\"acc\"}");
+
+        JsonNode queued = call(request);
+        assertThat(keys(queued)).as("gate_port / token_deadline 是基本类型，恒输出（见 AssignGateResponse）")
+                .containsExactlyInAnyOrder("code", "gate_port", "token_deadline", "retry_after_ms", "queue_source", "queue_pos");
+        assertThat(queued.get("code").intValue()).isEqualTo(100);
+        assertThat(queued.get("queue_source").asText()).isEqualTo("ratelimit");
+        assertThat(queued.get("retry_after_ms").longValue()).isEqualTo(1500);
+        assertThat(queued.get("queue_pos").longValue()).isEqualTo(7);
+
+        JsonNode denied = call(request);
+        assertRejected(denied, 429, "IP_RATE_LIMIT");
+        assertThat(assignOutcomes(100, "ratelimit") - queuedBefore).isEqualTo(1);
+        assertThat(assignOutcomes(429, "IP_RATE_LIMIT") - deniedBefore).isEqualTo(1);
+        verifyNoInteractions(gateSource);
+
+        assertRejected(assignGate("{\"zone_id\":9}"), 404, "zone_not_found");
+        org.mockito.Mockito.verify(limiter, org.mockito.Mockito.never()).check(eq(9), any(), any(), any());
+    }
+
+    @Test
+    void 限流_登录排队100带QUEUEING_429_三方令牌当冷却身份_刷新不限流() throws Exception {
+        when(limiter.check(eq(1), eq("127.0.0.1"), eq("robot_0001"), eq(RateLimiter.Scope.LOGIN)))
+                .thenReturn(RateLimitDecision.queue(2000, 3));
+        JsonNode queued = callAsync(post("/api/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"zone_id\":1,\"account\":\"robot_0001\",\"password\":\"p\"}"));
+        assertThat(keys(queued)).containsExactlyInAnyOrder("code", "message", "retry_after_ms", "queue_pos");
+        assertThat(queued.get("code").intValue()).isEqualTo(100);
+        assertThat(queued.get("message").asText()).isEqualTo("QUEUEING");
+        assertThat(queued.get("retry_after_ms").longValue()).isEqualTo(2000);
+        assertThat(queued.get("queue_pos").longValue()).isEqualTo(3);
+
+        when(limiter.check(eq(1), eq("127.0.0.1"), eq("token:oauth-code"), eq(RateLimiter.Scope.LOGIN)))
+                .thenReturn(RateLimitDecision.deny(RateLimitDecision.ACCOUNT_COOLDOWN));
+        JsonNode denied = callAsync(post("/api/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"zone_id\":1,\"auth_type\":\"wechat\",\"auth_token\":\"oauth-code\"}"));
+        assertThat(keys(denied)).containsExactlyInAnyOrder("code", "message");
+        assertThat(denied.get("code").intValue()).isEqualTo(429);
+        assertThat(denied.get("message").asText()).isEqualTo("ACCOUNT_COOLDOWN");
+        org.mockito.Mockito.verify(accountLogin, org.mockito.Mockito.never()).login(any());
+
+        when(accountLogin.refreshToken(any())).thenReturn(CompletableFuture.completedFuture(
+                RefreshTokenResponse.newBuilder().setAccessToken("a2").setRefreshToken("r2").build()));
+        callAsync(post("/api/refresh-token").contentType(MediaType.APPLICATION_JSON).content("{\"refresh_token\":\"r1\"}"));
+        call(post("/api/queue-status").contentType(MediaType.APPLICATION_JSON).content("{\"zone_id\":1}"));
+        org.mockito.Mockito.verify(limiter, org.mockito.Mockito.times(2)).check(anyInt(), any(), any(), any());
     }
 }

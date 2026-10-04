@@ -4,6 +4,9 @@
 server:
   port: 18081
   shutdown: graceful
+  # 不让 Spring / Tomcat 按 X-Forwarded-* 改写对端地址（在 Kubernetes 上缺省会自动装 RemoteIpValve）：客户端 IP 只由
+  # ClientIpResolver 按 xm.gateway.rate-limit.trusted-proxies 解析，没配可信代理时一律取 socket 对端。
+  forward-headers-strategy: none
 
 spring:
   application:
@@ -78,6 +81,26 @@ xm:
       retry-after-ms: 2000
       soft-cap-multiplier: 1.5
       dispatch-interval: 1s
+    # 开服限流（同基线 gate.rate-limit）：缺省关闭；本机切片打开。/api/login 与 /api/assign-gate（不带排队令牌的）依次判
+    # 分波 → IP 令牌桶（IPv6 按 /64）→ 区令牌桶（全部 gateway 共享；空时退回 IP 令牌）→ 同一身份同一 IP 的冷却；Redis 出错放行。
+    rate-limit:
+      enabled: ${XM_GATEWAY_RATE_LIMIT_ENABLED:false}
+      zone-default-rps: 500
+      zone-default-burst: 1000
+      # zone-overrides:
+      #   1: { rps: 2000, burst: 5000 }
+      ip-rps: 5
+      ip-burst: 20
+      account-cooldown-ms: 5000
+      # 可信代理网段（CIDR）：只有对端在这里面才看 X-Forwarded-For。放在负载均衡后面时必须配，否则所有请求共用一个 IP 桶。
+      trusted-proxies: []
+      wave:
+        enabled: false
+        # 打开分波时必填（Unix 秒）：各副本按同一个起点算波次
+        # start-epoch-sec: 1790000000
+        # schedule:
+        #   - { offset-sec: 0, allow-zones: [1, 2] }
+        #   - { offset-sec: 120, allow-zones: [-1] }   # -1 = 全部区
 
 dubbo:
   application:

@@ -16,7 +16,8 @@ star 数为 2026-09-29 GitHub API 实测。
 | Redis 客户端 | Redisson 3.50.0（核心包） | 24.4K | Jedis (12.4K)、Lettuce (5.8K) | 不用 redisson-spring-boot-starter：它会带进 Lettuce |
 | SQL 映射 | MyBatis（mybatis-spring-boot-starter 3.0.5） | 20.4K | MyBatis-Plus (17.5K)、Hibernate | |
 | 连接池 | Druid（druid-spring-boot-3-starter 1.2.28） | 28.2K | HikariCP (21.2K) | 同类取 star 最高 |
-| 限流 / 熔断 | Sentinel | 23.1K | resilience4j (10.8K) | 后续批次 |
+| 限流 / 熔断 | Sentinel | 23.1K | resilience4j (10.8K) | 进程内限流 / 熔断，后续批次（gateway 的开服限流见下一行） |
+| 开服限流（gateway 多副本共享的令牌桶） | Redis Lua 令牌桶（经 Redisson `RScript`，不加依赖） | — | Bucket4j（2.6K，基线用它 + Redis）、Sentinel 集群流控 | Bucket4j 不到 2 万 star；Sentinel 的集群流控要另起 token server，按 IP 的热点参数限流是进程内统计，多副本下不是一个桶。一段 Lua 原子地「按流逝时间补充、取一个」就是分布式令牌桶（与 Bucket4j 的贪心补充同算法），冷却用 `SET NX PX`。见 PARITY「开服限流」行 |
 | 通用工具 / 本地缓存 | Guava 33.4.0-jre | 51.9K | Caffeine (17.9K) | |
 | 注册中心之外的节点在线目录 | Redis（Redisson `RMapCache`，条目带 TTL） | — | — | 见 architecture.md §6 |
 | 序列化（协议） | Protobuf 4.35.1 | 72.1K | — | 与 mmorpg 的 protoc 35.1 同代，生成代码对运行时有强校验 |

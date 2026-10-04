@@ -1,6 +1,8 @@
 package com.game.gateway.login;
 
 import com.game.api.AccountLoginService;
+import com.game.gateway.ratelimit.RateLimitDecision;
+import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.zone.ZoneDirectory;
 import com.game.proto.AccountSimplePlayer;
 import com.game.proto.login.AccountSimplePlayerWrapper;
@@ -26,9 +28,11 @@ import org.slf4j.LoggerFactory;
  *   <li>调用失败：超时 / 网络 / 没有可用的 login → 500 {@code login_unavailable}；其余异常 → 500 {@code internal_error}；</li>
  *   <li>区不在区服目录里 → 500 {@code unknown_zone}（基线按区路由 login，找不到该区的 login 同样是 5xx 一类）；
  *       区服目录读不到时跳过这项核对（基线不查区服表；登录不放人进游戏，进场仍经 assign-gate 的 fail-closed 准入）；</li>
+ *   <li>开服限流（{@link RateLimiter}，区号核对之后、调 login 之前）：排队 → 100 {@code QUEUEING}；拒绝 → 429；
+ *       冷却身份 = 账号，三方认证没有账号时用 auth_token（只进哈希）。refresh 不限流（同基线：游戏内正常续期不能被挡）；</li>
  *   <li>refresh 为空 → 401 {@code empty_refresh_token}，不调 login；不重试（重试会拿已作废的 refresh 再打一次）。</li>
  * </ul>
- * 不记口令 / 令牌。线程安全；只有查区服目录（1 s 缓存，过期时读一次 MySQL）在调用线程上阻塞，其余返回 future。
+ * 不记口令 / 令牌。线程安全；查区服目录（1 s 缓存，过期时读一次 MySQL）与限流（Redis，限流打开时）在调用线程上阻塞，其余返回 future。
  */
 public final class LoginHttpService {
 
@@ -42,21 +46,35 @@ public final class LoginHttpService {
     private final AccountLoginService login;
     private final ZoneDirectory zones;
     private final LoginHttpMetrics metrics;
+    private final RateLimiter limiter;
 
     public LoginHttpService(AccountLoginService login, ZoneDirectory zones, LoginHttpMetrics metrics) {
+        this(login, zones, metrics, null);
+    }
+
+    /** @param limiter 开服限流；为 null 表示不限流 */
+    public LoginHttpService(AccountLoginService login, ZoneDirectory zones, LoginHttpMetrics metrics, RateLimiter limiter) {
         this.login = login;
         this.zones = zones;
         this.metrics = metrics;
+        this.limiter = limiter;
     }
 
     public CompletableFuture<HttpLoginResponse> login(HttpLoginRequest request) {
+        return login(request, null);
+    }
+
+    /** @param clientIp 客户端 IP（限流用） */
+    public CompletableFuture<HttpLoginResponse> login(HttpLoginRequest request, String clientIp) {
         boolean known;
+        boolean verified = true;
         if (request.zoneId() <= 0 || request.zoneId() > Integer.MAX_VALUE) {
             known = false;
         } else {
             try {
                 known = zones.find((int) request.zoneId()).isPresent();
             } catch (RuntimeException e) {
+                verified = false;
                 // 读不到区服目录时不挡登录（基线 /api/login 根本不查区服表）：登录本身不放人进游戏，进场仍经 assign-gate 的 fail-closed 准入
                 log.warn("读取区服目录失败，HTTP 登录跳过区号核对 zone={}: {}", request.zoneId(), e.toString());
                 known = true;
@@ -64,6 +82,19 @@ public final class LoginHttpService {
         }
         if (!known) {
             return done(recordLogin(HttpLoginResponse.error(HttpLoginResponse.CODE_INTERNAL, UNKNOWN_ZONE)));
+        }
+        if (limiter != null) {
+            // 区号没核对上（目录读不到）时不判区桶：不按请求里的任意区号建桶键（分波照判）
+            RateLimitDecision decision = verified
+                    ? limiter.check((int) request.zoneId(), clientIp, identity(request), RateLimiter.Scope.LOGIN)
+                    : limiter.checkUnverifiedZone((int) request.zoneId(), clientIp, identity(request),
+                            RateLimiter.Scope.LOGIN);
+            if (decision.kind() == RateLimitDecision.Kind.QUEUE) {
+                return done(recordLogin(HttpLoginResponse.queueing(decision.retryAfterMs(), decision.queuePos())));
+            }
+            if (decision.kind() == RateLimitDecision.Kind.DENY) {
+                return done(recordLogin(HttpLoginResponse.error(HttpLoginResponse.CODE_RATE_LIMITED, decision.reason())));
+            }
         }
         LoginRequest rpc = LoginRequest.newBuilder()
                 .setAccount(nullToEmpty(request.account()))
@@ -167,6 +198,17 @@ public final class LoginHttpService {
 
     private static <T> CompletableFuture<T> done(T value) {
         return CompletableFuture.completedFuture(value);
+    }
+
+    /** 限流冷却的身份（同基线 effectiveAccount）：账号；三方认证没有账号时用 auth_token；都没有为 null（不判冷却）。 */
+    static String identity(HttpLoginRequest request) {
+        if (request.account() != null && !request.account().isBlank()) {
+            return request.account();
+        }
+        if (request.authToken() != null && !request.authToken().isBlank()) {
+            return "token:" + request.authToken();
+        }
+        return null;
     }
 
     private static String nullToEmpty(String value) {

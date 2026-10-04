@@ -18,6 +18,10 @@ import com.game.gateway.queue.QueueDispatcher;
 import com.game.gateway.queue.QueueDispatcherRunner;
 import com.game.gateway.queue.QueueSettings;
 import com.game.gateway.queue.QueueTokens;
+import com.game.gateway.ratelimit.ClientIpResolver;
+import com.game.gateway.ratelimit.RateLimitSettings;
+import com.game.gateway.ratelimit.RateLimiter;
+import com.game.gateway.ratelimit.RedisRateLimitStore;
 import com.game.gateway.store.GatewayStore;
 import com.game.gateway.zone.SeedZone;
 import com.game.gateway.zone.ZoneDirectory;
@@ -125,7 +129,7 @@ public class GatewayConfiguration {
     @Bean
     public AssignGateService assignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer,
                                                GatewayProperties properties, LoginQueue queue, QueueCapacity capacity,
-                                               Environment environment, Clock clock) {
+                                               RateLimiter rateLimiter, Environment environment, Clock clock) {
         QueueSettings settings = properties.queue();
         AssignGateService.Queueing queueing = null;
         if (settings.enabled()) {
@@ -134,7 +138,24 @@ public class GatewayConfiguration {
             log.info("登录排队已打开 条目有效期={} 放行有效期={} 软上限倍数={}", settings.entryTtl(), settings.admitTtl(),
                     settings.softCapMultiplier());
         }
-        return new AssignGateService(zones, gates, issuer, queueing, clock);
+        return new AssignGateService(zones, gates, issuer, queueing, rateLimiter, clock);
+    }
+
+    /** 开服限流（关闭时 check 一律放行，不碰 Redis；存储出错 fail-open）。 */
+    @Bean
+    public RateLimiter rateLimiter(RedissonClient redis, GatewayProperties properties, Clock clock) {
+        RateLimitSettings settings = properties.rateLimit();
+        if (settings.enabled()) {
+            log.info("开服限流已打开 区桶 {}/s 容量 {}（覆盖 {} 个区）IP 桶 {}/s 容量 {} 冷却 {} ms 分波={}", settings.zoneDefaultRps(),
+                    settings.zoneDefaultBurst(), settings.zoneOverrides().size(), settings.ipRps(), settings.ipBurst(),
+                    settings.accountCooldownMs(), settings.wave().enabled());
+        }
+        return new RateLimiter(settings, new RedisRateLimitStore(redis), clock::millis);
+    }
+
+    @Bean
+    public ClientIpResolver clientIpResolver(GatewayProperties properties) {
+        return new ClientIpResolver(properties.rateLimit().trustedProxies());
     }
 
     /**
@@ -160,8 +181,8 @@ public class GatewayConfiguration {
 
     @Bean
     public LoginHttpService loginHttpService(AccountLoginService accountLoginService, ZoneDirectory zones,
-                                             LoginHttpMetrics loginHttpMetrics) {
-        return new LoginHttpService(accountLoginService, zones, loginHttpMetrics);
+                                             LoginHttpMetrics loginHttpMetrics, RateLimiter rateLimiter) {
+        return new LoginHttpService(accountLoginService, zones, loginHttpMetrics, rateLimiter);
     }
 
     /** assign-gate 结局计数，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */

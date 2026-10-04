@@ -8,6 +8,8 @@ import com.game.gateway.gate.GateTokenIssuer.IssuedGateToken;
 import com.game.gateway.queue.LoginQueue;
 import com.game.gateway.queue.QueueCapacity;
 import com.game.gateway.queue.QueueTokens;
+import com.game.gateway.ratelimit.RateLimitDecision;
+import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.store.ZoneRow;
 import com.game.gateway.zone.ZoneDirectory;
 import java.time.Clock;
@@ -17,7 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 分配 gate：区服准入 → （排队打开时）快速通道 / 入队 / 轮询 → 读 gate 目录 → 挑人数最少的 gate → 签令牌。
+ * 分配 gate：区服准入 → （排队打开时带令牌）轮询 → 开服限流 → （排队打开时）快速通道 / 入队 → 读 gate 目录 → 挑人数最少的 gate → 签令牌。
  *
  * <p>全部失败路径 fail-closed：区服不存在 / 不开放、目录不可达、没有可连接的 gate、排队存储出错，都不签令牌，
  * 以 {@link AssignGateResponse} 的业务码返回（HTTP 恒 200）。区服准入在一切之前，维护中的区不会触达 Redis；
@@ -30,6 +32,10 @@ import org.slf4j.LoggerFactory;
  *   <li>否则入队回 100（{@code queue_source="login"}、令牌、名次从 0 起、队长、建议轮询间隔）。</li>
  * </ol>
  * 与基线不同：<b>不做「账号已有在线会话就绕过排队」</b>——assign-gate 的 account 未经认证，按它绕过等于谁都能报一个在线账号插队。
+ *
+ * <p>开服限流（{@link RateLimiter}，同基线 AssignGateRateLimiter）：排队中的轮询不过限流（排队本身就是节流）；其余请求在区服准入之后、
+ * 碰排队存储之前判——与基线不同，基线先限流再准入：不存在的区号也会建一个区桶键（谁都能按任意区号造键），维护中的区也消耗令牌。
+ * 排队关闭时 {@code queue_token} 照收不用，也就不能拿它绕过限流。
  *
  * <p>线程模型：无可变状态，线程安全；会阻塞读 Redis / MySQL（区服目录缓存过期时），只在 Servlet 请求线程上调用。
  */
@@ -45,6 +51,7 @@ public final class AssignGateService {
     private final GateSource gates;
     private final GateTokenIssuer issuer;
     private final Queueing queueing;
+    private final RateLimiter limiter;
     private final Clock clock;
 
     /** 不排队。 */
@@ -55,10 +62,20 @@ public final class AssignGateService {
     /** @param queueing 排队依赖；为 null 表示排队关闭 */
     public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
                              Clock clock) {
+        this(zones, gates, issuer, queueing, null, clock);
+    }
+
+    /**
+     * @param queueing 排队依赖；为 null 表示排队关闭
+     * @param limiter  开服限流；为 null 表示不限流
+     */
+    public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
+                             RateLimiter limiter, Clock clock) {
         this.zones = zones;
         this.gates = gates;
         this.issuer = issuer;
         this.queueing = queueing;
+        this.limiter = limiter;
         this.clock = clock;
     }
 
@@ -66,14 +83,31 @@ public final class AssignGateService {
         return assign(zoneId, null);
     }
 
-    /** @param queueToken 客户端带来的排队令牌（可为空） */
     public AssignGateResponse assign(int zoneId, String queueToken) {
+        return assign(zoneId, queueToken, null, null);
+    }
+
+    /**
+     * @param queueToken 客户端带来的排队令牌（可为空）
+     * @param clientIp   客户端 IP（限流用）
+     * @param account    请求体里的账号（未经认证，只当限流冷却的身份）
+     */
+    public AssignGateResponse assign(int zoneId, String queueToken, String clientIp, String account) {
         AssignGateResponse rejected = admission(zoneId);
         if (rejected != null) {
             return rejected;
         }
         if (queueing != null && queueToken != null && !queueToken.isBlank()) {
             return poll(zoneId, queueToken);
+        }
+        if (limiter != null) {
+            RateLimitDecision decision = limiter.check(zoneId, clientIp, account, RateLimiter.Scope.ASSIGN);
+            if (decision.kind() == RateLimitDecision.Kind.QUEUE) {
+                return AssignGateResponse.rateLimitQueueing(decision.retryAfterMs(), decision.queuePos());
+            }
+            if (decision.kind() == RateLimitDecision.Kind.DENY) {
+                return AssignGateResponse.rejected(AssignGateResponse.CODE_RATE_LIMITED, decision.reason());
+            }
         }
         List<GateNodeInfo> candidates;
         try {

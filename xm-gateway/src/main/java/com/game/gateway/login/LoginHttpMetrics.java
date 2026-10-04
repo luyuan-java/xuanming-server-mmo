@@ -27,6 +27,8 @@ public final class LoginHttpMetrics {
                 counter(endpoint, code);
             }
         }
+        counter(LOGIN, HttpLoginResponse.CODE_QUEUEING);
+        counter(LOGIN, HttpLoginResponse.CODE_RATE_LIMITED);
     }
 
     public void login(int code) {

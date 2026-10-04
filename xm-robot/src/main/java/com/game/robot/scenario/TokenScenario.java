@@ -103,7 +103,8 @@ public final class TokenScenario {
         if (!shapeOk) {
             return;
         }
-        JsonNode badPassword = http.loginWithPassword(zoneId, account, password + "x");
+        // 换一个账号：本机切片打开了开服限流，同一账号同一 IP 5 s 内第二次 /api/login 回 429 ACCOUNT_COOLDOWN
+        JsonNode badPassword = http.loginWithPassword(zoneId, account + "b", password + "x");
         report.check(badPassword.get("code").asInt() == 401, "HTTP 错口令回 401", "code=" + badPassword.get("code"), REF);
         JsonNode badZone = http.loginWithPassword(999, account, password);
         report.check(badZone.get("code").asInt() == 500, "HTTP 未知区回 500", "code=" + badZone.get("code")

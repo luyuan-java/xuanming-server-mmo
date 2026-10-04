@@ -1,6 +1,7 @@
 package com.game.gateway.queue;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -17,6 +18,8 @@ import com.game.gateway.assign.AssignGateResponse;
 import com.game.gateway.assign.AssignGateService;
 import com.game.gateway.gate.GateSource;
 import com.game.gateway.gate.GateTokenIssuer;
+import com.game.gateway.ratelimit.RateLimitDecision;
+import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.store.ZoneRow;
 import com.game.gateway.zone.ZoneDirectory;
 import java.nio.charset.StandardCharsets;
@@ -140,5 +143,26 @@ class QueueAssignTest {
                 new GateTokenIssuer(GateTokens.ofUtf8("s"), CLOCK, new SecureRandom()));
         assertThat(off.assign(1, "q").code()).isZero();
         assertThat(off.queueStatus(1, "q").error()).isEqualTo("queue_disabled");
+    }
+
+    @Test
+    void 带令牌轮询不过限流_不带令牌的过限流_排队关闭时令牌绕不过限流() {
+        RateLimiter limiter = mock(RateLimiter.class);
+        when(limiter.check(anyInt(), any(), any(), any())).thenReturn(RateLimitDecision.deny(RateLimitDecision.IP_RATE_LIMIT));
+        GateTokenIssuer issuer = new GateTokenIssuer(GateTokens.ofUtf8("s"), CLOCK, new SecureRandom());
+        AssignGateService limited = new AssignGateService(zones, gates, issuer,
+                new AssignGateService.Queueing(queue, new QueueCapacity(1.5), tokens, 2000), limiter, CLOCK);
+        String id = QueueTokens.newQueueId();
+        when(queue.lookup(1, id)).thenReturn(new LoginQueue.Waiting(0, 1));
+
+        assertThat(limited.assign(1, tokens.sign(id, 1, CLOCK.millis() / 1000 + 60), "1.1.1.1", "a").code()).isEqualTo(100);
+        verifyNoInteractions(limiter);
+        AssignGateResponse denied = limited.assign(1, null, "1.1.1.1", "a");
+        assertThat(denied.code()).isEqualTo(429);
+        assertThat(denied.error()).isEqualTo("IP_RATE_LIMIT");
+        verify(queue, never()).enqueue(anyInt());
+
+        AssignGateService off = new AssignGateService(zones, gates, issuer, null, limiter, CLOCK);
+        assertThat(off.assign(1, "q", "1.1.1.1", "a").code()).isEqualTo(429);
     }
 }

@@ -31,6 +31,8 @@ export XM_ADMIN_TOKEN
 
 # 登录排队：进程缺省关闭（同基线 Queue.Enabled=false）；本机切片打开，robot 全程走快速通道，queue 场景压容量验证排队与放行
 export XM_GATEWAY_QUEUE_ENABLED="${XM_GATEWAY_QUEUE_ENABLED:-true}"
+# 开服限流：进程缺省关闭（同基线 gate.rate-limit.enabled=false）；本机切片打开（缺省阈值），ratelimit 场景验证 IP 桶与冷却
+export XM_GATEWAY_RATE_LIMIT_ENABLED="${XM_GATEWAY_RATE_LIMIT_ENABLED:-true}"
 
 mkdir -p run/logs run/pids
 

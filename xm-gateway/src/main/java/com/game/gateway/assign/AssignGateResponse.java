@@ -21,7 +21,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  *       {@code queue_unavailable} / {@code internal_error}；</li>
  *   <li>{@code 400 bad_request}：请求体不是合法 JSON（Java 版补充，mmorpg 此时回 Spring 默认的 HTTP 400）。</li>
  * </ul>
- * 限流（100 + {@code queue_source="ratelimit"} / 429）随 3.4c。
+ * 开服限流打开时（不带 {@code queue_token} 的请求）：{@code 100} + {@code queue_source="ratelimit"}（{@code retry_after_ms}、
+ * {@code queue_pos}）过一会原样重发；{@code 429} + {@code IP_RATE_LIMIT} / {@code ACCOUNT_COOLDOWN}（与 mmorpg 同文）。
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record AssignGateResponse(
@@ -36,7 +37,8 @@ public record AssignGateResponse(
         String queueSource,
         String queueToken,
         Long queueRank,
-        Long queueTotal) {
+        Long queueTotal,
+        Long queuePos) {
 
     public static final int CODE_OK = 0;
     public static final int CODE_QUEUEING = 100;
@@ -45,6 +47,7 @@ public record AssignGateResponse(
     public static final int CODE_ZONE_NOT_FOUND = 404;
     public static final int CODE_INTERNAL = 500;
     public static final int CODE_ZONE_UNAVAILABLE = 503;
+    public static final int CODE_RATE_LIMITED = 429;
 
     public static final String ERR_BAD_REQUEST = "bad_request";
     public static final String ERR_ZONE_NOT_FOUND = "zone_not_found";
@@ -60,20 +63,30 @@ public record AssignGateResponse(
     public static final String ERR_QUEUE_DISABLED = "queue_disabled";
     public static final String ERR_QUEUE_UNAVAILABLE = "queue_unavailable";
     public static final String QUEUE_SOURCE_LOGIN = "login";
+    public static final String QUEUE_SOURCE_RATELIMIT = "ratelimit";
 
     public static AssignGateResponse admitted(String gateIp, int gatePort, byte[] tokenPayload, byte[] tokenSignature,
                                               long tokenDeadline) {
         return new AssignGateResponse(CODE_OK, gateIp, gatePort, tokenPayload, tokenSignature, tokenDeadline, null, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public static AssignGateResponse rejected(int code, String error) {
-        return new AssignGateResponse(code, null, 0, null, null, 0, error, null, null, null, null, null);
+        return new AssignGateResponse(code, null, 0, null, null, 0, error, null, null, null, null, null, null);
     }
 
     /** 登录排队中（同基线 loginQueueing）：{@code rank} 从 0 起。 */
     public static AssignGateResponse loginQueueing(String queueToken, long rank, long total, long retryAfterMs) {
         return new AssignGateResponse(CODE_QUEUEING, null, 0, null, null, 0, null, retryAfterMs, QUEUE_SOURCE_LOGIN,
-                queueToken, rank, total);
+                queueToken, rank, total, null);
+    }
+
+    /**
+     * 开服限流排队（同基线 queueing）：{@code queue_source="ratelimit"}，客户端过 {@code retry_after_ms} 原样重发 assign-gate；
+     * {@code queue_pos} 是估计值（区桶余量；分波未开放时 -1）。
+     */
+    public static AssignGateResponse rateLimitQueueing(long retryAfterMs, long queuePos) {
+        return new AssignGateResponse(CODE_QUEUEING, null, 0, null, null, 0, null, retryAfterMs, QUEUE_SOURCE_RATELIMIT,
+                null, null, null, queuePos);
     }
 }

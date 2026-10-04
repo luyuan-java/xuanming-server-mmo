@@ -76,4 +76,17 @@ class AssignGateClientTest {
                 "{\"code\":0,\"gate_ip\":\"h\",\"gate_port\":1,\"token_payload\":[1,2]}"))
                 .hasMessageContaining("token_payload");
     }
+
+    @Test
+    void 开服限流按retry_after退避_其余不重试() {
+        assertThat(AssignGateClient.rateLimitBackoffMs("{\"code\":100,\"queue_source\":\"ratelimit\",\"retry_after_ms\":1500}"))
+                .isEqualTo(1500);
+        assertThat(AssignGateClient.rateLimitBackoffMs("{\"code\":100,\"queue_source\":\"ratelimit\",\"retry_after_ms\":0}"))
+                .as("≤0 按 2 s（同 Go robot）").isEqualTo(2000);
+        assertThat(AssignGateClient.rateLimitBackoffMs("{\"code\":429,\"error\":\"IP_RATE_LIMIT\"}")).isEqualTo(1000);
+        assertThat(AssignGateClient.rateLimitBackoffMs("{\"code\":100,\"queue_source\":\"login\"}")).as("登录排队不重试").isEqualTo(-1);
+        assertThat(AssignGateClient.rateLimitBackoffMs("{\"code\":429,\"error\":\"ACCOUNT_COOLDOWN\"}")).isEqualTo(-1);
+        assertThat(AssignGateClient.rateLimitBackoffMs("{\"code\":0}")).isEqualTo(-1);
+        assertThat(AssignGateClient.rateLimitBackoffMs("not json")).isEqualTo(-1);
+    }
 }

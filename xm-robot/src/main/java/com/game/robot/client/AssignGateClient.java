@@ -20,12 +20,16 @@ import java.util.Base64;
  *   <li>只接受 HTTP 200，业务结果在 body 的 {@code code}；JSON 键 snake_case；</li>
  *   <li>{@code token_payload} / {@code token_signature} 是<b>标准 Base64</b>（带填充）字符串。</li>
  * </ul>
- * 不做 Go robot 的 30 次退避重试与排队（100 / 410）轮询：探针要的是「这一次准入是否符合契约」，失败即报告。
+ * 开服限流（100 + {@code queue_source="ratelimit"}、429 {@code IP_RATE_LIMIT}）按 {@code retry_after_ms} 退避重发（≤0 按 2 s，同 Go robot；
+ * 429 按 1 s），累计至多 {@link #RATE_LIMIT_BUDGET}——本机全部机器人共用 127.0.0.1 一个 IP 桶，多账号同时进场会撞上。
+ * 其余不重试：不做 Go robot 的 30 次退避重试与登录排队（100 login / 410）轮询，探针要的是「这一次准入是否符合契约」，失败即报告。
  * 线程安全（{@link HttpClient} 与 {@link ObjectMapper} 都可共享）。
  */
 public final class AssignGateClient {
 
     static final String PATH = "/api/assign-gate";
+    /** 开服限流退避的累计上限（smoke 满 200 个账号时等 IP 桶补完约 36 s）。 */
+    static final Duration RATE_LIMIT_BUDGET = Duration.ofSeconds(60);
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -44,6 +48,23 @@ public final class AssignGateClient {
     }
 
     public GateAssignment assign(int zoneId) throws RobotException {
+        long deadline = System.nanoTime() + RATE_LIMIT_BUDGET.toNanos();
+        while (true) {
+            HttpResponse<String> response = send(zoneId);
+            long backoff = response.statusCode() == 200 ? rateLimitBackoffMs(response.body()) : -1;
+            if (backoff < 0 || System.nanoTime() + backoff * 1_000_000L > deadline) {
+                return parse(response.statusCode(), response.body());
+            }
+            try {
+                Thread.sleep(backoff);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RobotException("assign-gate 被中断", e);
+            }
+        }
+    }
+
+    private HttpResponse<String> send(int zoneId) throws RobotException {
         HttpRequest request = HttpRequest.newBuilder(endpoint)
                 .timeout(timeout)
                 .header("Content-Type", "application/json")
@@ -58,7 +79,29 @@ public final class AssignGateClient {
             Thread.currentThread().interrupt();
             throw new RobotException("assign-gate 被中断", e);
         }
-        return parse(response.statusCode(), response.body());
+        return response;
+    }
+
+    /** 开服限流时该等多少毫秒再发；不是限流（或应答不是 JSON）为 -1。纯函数，便于单测。 */
+    static long rateLimitBackoffMs(String body) {
+        JsonNode root;
+        try {
+            root = JSON.readTree(body);
+        } catch (JsonProcessingException e) {
+            return -1;
+        }
+        if (root == null || !root.isObject()) {
+            return -1;
+        }
+        int code = root.path("code").asInt(-1);
+        if (code == 100 && "ratelimit".equals(root.path("queue_source").asText())) {
+            long retry = root.path("retry_after_ms").asLong(0);
+            return retry > 0 ? retry : 2000;
+        }
+        if (code == 429 && "IP_RATE_LIMIT".equals(root.path("error").asText())) {
+            return 1000;
+        }
+        return -1;
     }
 
     /** 请求体：与 Go robot 首次请求逐字节相同。 */

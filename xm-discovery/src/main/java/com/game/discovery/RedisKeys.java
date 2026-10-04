@@ -84,6 +84,24 @@ public final class RedisKeys {
         return PREFIX + "login-queue-meta:" + queueId;
     }
 
+    /** 开服限流：区的令牌桶 {@code xm:rl:zone:{zone}}（Hash：t = 余量 ×1000、ms = 上次补充毫秒），闲置 1 h 过期。xm-gateway 读写。 */
+    public static String rateLimitZone(int zoneId) {
+        return PREFIX + "rl:zone:" + zoneId;
+    }
+
+    /** 开服限流：单 IP 的令牌桶 {@code xm:rl:ip:{ip}}（同区桶的形状），闲置 1 h 过期。{@code ip} 是解析好的 IP 字面量（或对端地址）。 */
+    public static String rateLimitIp(String ip) {
+        return PREFIX + "rl:ip:" + ip;
+    }
+
+    /**
+     * 开服限流：同一身份同一 IP 的冷却 {@code xm:rl:cd:{scope}:{subject}}（scope = login / assign；subject = 身份的 SHA-256 前缀 + IP），
+     * TTL = 冷却时长。
+     */
+    public static String rateLimitCooldown(String scope, String subject) {
+        return PREFIX + "rl:cd:" + scope + ":" + subject;
+    }
+
     /** 登录排队：放行循环的选主锁 {@code xm:login-queue-dispatcher}（全部 xm-gateway 只有一个在放行）。 */
     public static String loginQueueDispatcherLock() {
         return PREFIX + "login-queue-dispatcher";
