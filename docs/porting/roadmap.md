@@ -32,7 +32,7 @@
 | 2.5 | 条件 + 奖励 + 任务（193/194/195）+ 活动列表（190）；robot features-smoke | condition-eval、mission-*、activity-list、activity-schedule-list | ✅ `3557267`（完成后的自动领奖 / 链式接取 / 完成事实同步执行，基线线上不派发——PARITY 有意差异；完成 / 领奖成功的端到端随 6.3 击杀来源） |
 | 2.6 | 技能：冷却、施法阶段与打断（33）、伤害结算、行为互斥表（放技能前的状态检查） | skill-cooldown、skill-cast-phases-interrupt、realtime-skill-damage、combat-damage-rules、actor-action-combat-state、actor-action-state | ✅ `a79a469`（冷却 / 后摇 / 引导按设计意图生效，基线线上只有前摇——PARITY 有意差异；伤害只移植纯公式 CombatDamageRules，实时技能命中两版都不生效、不接；66 combat_state_flags 随 2.7） |
 | 2.7 | buff 核心与效果、运行时属性重算位与战斗状态（66 combat_state_flags）、死亡 / 复活、新号初始化与登录回满（当前气血 / 法力持久化） | realtime-buff-core、realtime-buff-effects、actor-attribute-calculator、death-revive、new-player-init-and-revive | ✅ `f368901`（当前气血 / 法力落 player_state.vitals、加载复活；实时 buff / 属性重算位 / 66 combat_state_flags 基线线上不可达，两版都未生效、登记不移植；结算复活与 0 血拒绝开战随 6.3） |
-| 2.8 | 宝宝系统；robot pet-smoke | pet-system-core |
+| 2.8 | 宝宝系统；robot pet-smoke | pet-system-core | ✅ `6ff0e34`（写闸随 5.2 / 6.3，战斗接缝随 6.3，交易原语随聚宝斋资产托管） |
 | 2.9 | 通用资产通道（跨服务发放 / 扣除，幂等账本）、补缴债务（加币先抵扣） | asset-channel、asset-op-channel、asset-op-ledger-read、currency-debt-clawback |
 
 ## 阶段 3：登录与网关补全
