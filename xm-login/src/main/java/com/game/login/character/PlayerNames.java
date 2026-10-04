@@ -1,6 +1,6 @@
 package com.game.login.character;
 
-import com.game.login.support.GoSpaces;
+import com.game.common.text.GoSpaces;
 import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;

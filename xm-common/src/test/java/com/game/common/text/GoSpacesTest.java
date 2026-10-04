@@ -1,4 +1,4 @@
-package com.game.login.support;
+package com.game.common.text;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

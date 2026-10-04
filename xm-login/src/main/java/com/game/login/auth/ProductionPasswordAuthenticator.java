@@ -1,6 +1,6 @@
 package com.game.login.auth;
 
-import com.game.login.support.GoSpaces;
+import com.game.common.text.GoSpaces;
 import com.game.player.store.AccountPassword;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;

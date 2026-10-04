@@ -1,4 +1,4 @@
-package com.game.login.support;
+package com.game.common.text;
 
 /**
  * 与 Go {@code unicode.IsSpace} / {@code strings.TrimSpace} 同义的空白判定。
