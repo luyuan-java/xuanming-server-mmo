@@ -23,6 +23,7 @@ import com.game.gate.metrics.GateMetrics.HandshakeResult;
 import com.game.gate.metrics.GateMetrics.LoginCall;
 import com.game.gate.metrics.GateMetrics.PushResult;
 import com.game.gate.metrics.GateMetrics.RequestResult;
+import com.game.gate.session.ClientSession.BackendPending;
 import com.game.gate.session.ClientSession.PendingRequest;
 import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
@@ -33,7 +34,9 @@ import com.game.table.CommonErrorTip;
 import com.game.table.SceneErrorTip;
 import io.micrometer.core.instrument.Timer;
 import java.time.InstantSource;
+import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -88,6 +91,8 @@ public final class ClientDispatcher {
     private final MessageRoutes routes;
     private final int tipMessageId;
     private final ClientMessageService login;
+    /** login 以外的客户端消息后端：Dubbo group（= 消息域）→ 服务（friend ……）。 */
+    private final Map<String, ClientMessageService> backends;
     private final SceneLinks links;
     private final SessionRegistry registry;
     private final GateLimits limits;
@@ -104,19 +109,37 @@ public final class ClientDispatcher {
     public ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                             ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
                             GateMetrics metrics, PresenceRecorder presence) {
-        this(identity, tokens, clock, routes, tipMessageId, login, links, registry, limits, metrics, presence, System::nanoTime);
+        this(identity, tokens, clock, routes, tipMessageId, login, Map.of(), links, registry, limits, metrics, presence,
+                System::nanoTime);
+    }
+
+    /** @param backends login 以外的客户端消息后端（消息域 → Dubbo 服务），没有的域回「服务不可用」 */
+    public ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
+                            ClientMessageService login, Map<String, ClientMessageService> backends, SceneLinks links,
+                            SessionRegistry registry, GateLimits limits, GateMetrics metrics, PresenceRecorder presence) {
+        this(identity, tokens, clock, routes, tipMessageId, login, backends, links, registry, limits, metrics, presence,
+                System::nanoTime);
     }
 
     /** 同上；限频用的单调时钟可注入（测试用）。 */
     ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                      ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
                      GateMetrics metrics, PresenceRecorder presence, LongSupplier nanoClock) {
+        this(identity, tokens, clock, routes, tipMessageId, login, Map.of(), links, registry, limits, metrics, presence,
+                nanoClock);
+    }
+
+    ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
+                     ClientMessageService login, Map<String, ClientMessageService> backends, SceneLinks links,
+                     SessionRegistry registry, GateLimits limits, GateMetrics metrics, PresenceRecorder presence,
+                     LongSupplier nanoClock) {
         this.identity = identity;
         this.tokens = tokens;
         this.clock = clock;
         this.routes = routes;
         this.tipMessageId = tipMessageId;
         this.login = login;
+        this.backends = Map.copyOf(backends);
         this.links = links;
         this.registry = registry;
         this.limits = limits;
@@ -220,6 +243,11 @@ public final class ClientDispatcher {
             registerIllegal(s, "gm_rejected", request.getMessageId());
             return;
         }
+        ClientMessageService backend = backends.get(route.domain());
+        if (backend != null) {
+            enqueueBackend(s, route, request, backend);
+            return;
+        }
         if (s.pending.size() >= limits.maxPendingRequests()) {
             log.warn("会话待处理请求超限，断开 session={} pending={} message_id={}",
                     sid(s), s.pending.size(), request.getMessageId());
@@ -272,12 +300,88 @@ public final class ClientDispatcher {
             }
             case DOMAIN_SCENE -> countRequest(p.route(), forwardToScene(s, p.request()));
             default -> {
-                // Java 版尚未实现的后端域（friend / guild / battle ...）：与 C++ 找不到目标节点时同形。
+                // Java 版尚未实现的后端域（guild / battle ...）：与 C++ 找不到目标节点时同形。
                 log.debug("消息域未接入 Java 版 session={} message_id={} domain={}", sid(s), p.route().messageId(), p.route().domain());
                 countRequest(p.route(), RequestResult.UNSUPPORTED);
                 sendTip(s, TIP_SERVICE_UNAVAILABLE);
             }
         }
+    }
+
+    // ================================================================ login 以外的后端（friend ……）
+
+    /**
+     * 入该后端自己的队列（基线 C++ gate 路由模式本就不按会话串行这些域）：同一后端的请求仍串行（写后读看得到自己的写），
+     * 但不占会话唯一的 {@link ClientSession#inFlight}，不阻塞 login / scene。队列满（与会话上限同值）断开。
+     */
+    private void enqueueBackend(ClientSession s, MessageRoute route, ClientRequest request, ClientMessageService backend) {
+        ArrayDeque<BackendPending> queue = s.backendQueues.computeIfAbsent(route.domain(), d -> new ArrayDeque<>());
+        if (queue.size() >= limits.maxPendingRequests()) {
+            log.warn("会话 {} 后端待处理请求超限，断开 session={} pending={} message_id={}", route.domain(), sid(s),
+                    queue.size(), request.getMessageId());
+            countRequest(route, RequestResult.OVERFLOW);
+            metrics.disconnected(DisconnectReason.PENDING_OVERFLOW);
+            closeNow(s);
+            return;
+        }
+        queue.add(new BackendPending(route, request, context(s)));
+        drainBackend(s, route.domain(), backend);
+    }
+
+    private void drainBackend(ClientSession s, String domain, ClientMessageService backend) {
+        ArrayDeque<BackendPending> queue = s.backendQueues.get(domain);
+        while (queue != null && !queue.isEmpty() && !s.backendInFlight.contains(domain) && !s.closing && !s.closed) {
+            BackendPending next = queue.poll();
+            countRequest(next.route(), RequestResult.FORWARDED);
+            callBackend(s, domain, backend, next.request(), next.session());
+        }
+    }
+
+    /**
+     * login 以外的客户端消息后端：与 login 同一条 Dubbo 契约（{@link ClientMessageService#handle}）。这些后端不下发会话指令，
+     * 断线不等它们（断线通知只给 login）；身份取请求<b>入队时</b>的会话快照（排队期间离开游戏 / 换角色进游戏不会把它算到新角色头上），
+     * 由后端按其中的玩家号判定（没进游戏的会话照常转发，由后端回它自己的码）。
+     */
+    private void callBackend(ClientSession s, String domain, ClientMessageService backend, ClientRequest request,
+                             SessionContext session) {
+        ClientCall call = ClientCall.newBuilder()
+                .setSession(session)
+                .setMessageId(request.getMessageId())
+                .setBody(request.getBody())
+                .setRequestId(request.getId())
+                .build();
+        s.backendInFlight.add(domain);
+        Timer.Sample sample = metrics.startTimer();
+        CompletableFuture<ClientReply> future;
+        try {
+            future = backend.handle(call);
+        } catch (RuntimeException e) {
+            future = CompletableFuture.failedFuture(e);
+        }
+        if (future == null) {
+            future = CompletableFuture.failedFuture(new IllegalStateException(domain + " 返回了 null future"));
+        }
+        future.whenComplete((reply, error) -> {
+            metrics.backendCallCompleted(domain, sample, error == null && reply != null);
+            s.execute(() -> onBackendCompleted(s, domain, backend, request, reply, error));
+        });
+    }
+
+    private void onBackendCompleted(ClientSession s, String domain, ClientMessageService backend, ClientRequest request,
+                                    ClientReply reply, Throwable error) {
+        s.backendInFlight.remove(domain);
+        if (s.closing || s.closed) {
+            // 连接已断：不再向客户端发送；断线流程不等这些后端（会话可能已释放），什么都不用补
+            return;
+        }
+        if (error != null || reply == null) {
+            log.warn("{} 调用失败 session={} message_id={} 原因={}", domain, sid(s), request.getMessageId(),
+                    rootCause(error).toString());
+            sendTip(s, TIP_SERVICE_UNAVAILABLE);
+        } else {
+            replyToClient(s, request, reply);
+        }
+        drainBackend(s, domain, backend);
     }
 
     private void callLogin(ClientSession s, ClientRequest request) {
@@ -734,6 +838,12 @@ public final class ClientDispatcher {
             countRequest(p.route(), RequestResult.DROPPED);
         }
         s.pending.clear();
+        for (ArrayDeque<BackendPending> queue : s.backendQueues.values()) {
+            for (BackendPending p : queue) {
+                countRequest(p.route(), RequestResult.DROPPED);
+            }
+            queue.clear();
+        }
     }
 
     /** 信封错误：{@code MessageContent{message_id=请求号, id=请求 id, error_message{tip}}}（C++ 同形，客户端按 message_id 对上请求）。 */

@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>xm-friend</artifactId>
+    <name>xm-friend</name>
+    <description>好友服（Spring Boot + Dubbo 提供方，group friend）：申请 / 同意 / 拒绝 / 删除 / 列表 / 黑名单与推送；四张表经 xm-pbmysql 建表</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-spring-boot-starter</artifactId>
+        </dependency>
+        <!-- 只在 nacos profile 下生效（dubbo.registry.address=nacos://...）；默认配置注册中心为 N/A、走直连 URL -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-nacos-spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-proto</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-table</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-pbmysql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- 可观测性（architecture.md §11）：业务入口是 Dubbo；这里的 Tomcat 只挂 actuator 管理端点（health / prometheus） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <!-- 只编译本模块的表定义（import xm-pbmysql 的选项定义）；不扫描全部项目依赖：xm-proto 里 mmorpg 的
+                         proto_option.proto 与 pbmysql 的选项在 MessageOptions 上同号，同一次编译会撞扩展号 -->
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                    <importDependencies>
+                        <importDependency>
+                            <groupId>com.google.protobuf</groupId>
+                            <artifactId>protobuf-java</artifactId>
+                            <version>${protobuf.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                        <importDependency>
+                            <groupId>com.game</groupId>
+                            <artifactId>xm-pbmysql</artifactId>
+                            <version>${project.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                    </importDependencies>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.game.friend.FriendApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

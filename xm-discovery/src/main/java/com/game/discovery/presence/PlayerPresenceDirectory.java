@@ -135,6 +135,29 @@ public final class PlayerPresenceDirectory {
                 .thenApply(raw -> decode(playerId, raw));
     }
 
+    /**
+     * 严格单查（不阻塞调用线程）：不在线为空；条目损坏或与键不符时<b>异常完成</b>（{@link IllegalStateException}），
+     * 不降级成「不在线」——调用方据此区分「对方离线」与「在线目录坏了」。
+     */
+    public CompletionStage<Optional<PlayerPresence>> findStrictAsync(long playerId) {
+        return redis.<byte[]>getBucket(RedisKeys.presence(playerId), ByteArrayCodec.INSTANCE).getAsync().thenApply(raw -> {
+            if (raw == null) {
+                return Optional.<PlayerPresence>empty();
+            }
+            PlayerPresence presence;
+            try {
+                presence = PlayerPresence.parseFrom(raw);
+            } catch (InvalidProtocolBufferException e) {
+                throw new IllegalStateException("在线目录条目损坏 player=" + Long.toUnsignedString(playerId), e);
+            }
+            if (presence.getPlayerId() != playerId) {
+                throw new IllegalStateException("在线目录条目与键不符 key_player=" + Long.toUnsignedString(playerId)
+                        + " value_player=" + Long.toUnsignedString(presence.getPlayerId()));
+            }
+            return Optional.of(presence);
+        });
+    }
+
     /** {@link #findAll} 的异步版（一次往返，不阻塞调用线程）。 */
     public CompletionStage<Map<Long, PlayerPresence>> findAllAsync(Collection<Long> playerIds) {
         if (playerIds.isEmpty()) {
@@ -149,6 +172,71 @@ public final class PlayerPresenceDirectory {
             }
             return online;
         });
+    }
+
+    /**
+     * 严格批量读的结果：{@code online} 只含在线且条目完好的玩家；{@code offline} 是没有条目的个数；
+     * {@code errors} 是读失败（该批 MGET 出错）、条目损坏或与键不符的个数——调用方据此判「在线状态未知」，不能当成离线。
+     */
+    public record StrictLookup(Map<Long, PlayerPresence> online, int offline, int errors) {
+    }
+
+    /**
+     * 严格批量读（同 mmorpg friend BatchOnlineStatus）：去重、剔除 0，按 {@code batchSize} 分批 MGET（不阻塞调用线程）；
+     * 某批出错只把这一批记为错误、其余批照常读。与 {@link #findAllAsync} 不同：损坏 / 身份不符的条目计入 {@code errors}，
+     * 不降级成离线——「好友在线状态未知」不能当离线（客户端据此禁邀）。
+     */
+    public CompletionStage<StrictLookup> findAllStrictAsync(Collection<Long> playerIds, int batchSize) {
+        List<Long> ids = playerIds.stream().filter(id -> id != 0).distinct().toList();
+        if (ids.isEmpty()) {
+            return java.util.concurrent.CompletableFuture.completedFuture(new StrictLookup(Map.of(), 0, 0));
+        }
+        int size = batchSize > 0 ? batchSize : 256;
+        List<java.util.concurrent.CompletableFuture<StrictLookup>> batches = new ArrayList<>();
+        for (int from = 0; from < ids.size(); from += size) {
+            List<Long> batch = ids.subList(from, Math.min(ids.size(), from + size));
+            String[] keys = batch.stream().map(RedisKeys::presence).toArray(String[]::new);
+            batches.add(redis.getBuckets(ByteArrayCodec.INSTANCE).<byte[]>getAsync(keys).toCompletableFuture()
+                    .handle((raw, error) -> error != null ? new StrictLookup(Map.of(), 0, batch.size())
+                            : strict(batch, keys, raw)));
+        }
+        return java.util.concurrent.CompletableFuture.allOf(batches.toArray(java.util.concurrent.CompletableFuture[]::new))
+                .thenApply(done -> {
+                    Map<Long, PlayerPresence> online = new HashMap<>();
+                    int offline = 0;
+                    int errors = 0;
+                    for (java.util.concurrent.CompletableFuture<StrictLookup> batch : batches) {
+                        StrictLookup part = batch.join();
+                        online.putAll(part.online());
+                        offline += part.offline();
+                        errors += part.errors();
+                    }
+                    return new StrictLookup(online, offline, errors);
+                });
+    }
+
+    private static StrictLookup strict(List<Long> ids, String[] keys, Map<String, byte[]> raw) {
+        Map<Long, PlayerPresence> online = new HashMap<>();
+        int offline = 0;
+        int errors = 0;
+        for (int i = 0; i < ids.size(); i++) {
+            byte[] value = raw.get(keys[i]);
+            if (value == null) {
+                offline++;
+                continue;
+            }
+            try {
+                PlayerPresence presence = PlayerPresence.parseFrom(value);
+                if (presence.getPlayerId() != ids.get(i)) {
+                    errors++;
+                } else {
+                    online.put(ids.get(i), presence);
+                }
+            } catch (InvalidProtocolBufferException e) {
+                errors++;
+            }
+        }
+        return new StrictLookup(online, offline, errors);
     }
 
     private static Optional<PlayerPresence> decode(long playerId, byte[] raw) {

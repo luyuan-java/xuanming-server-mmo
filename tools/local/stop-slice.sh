@@ -3,7 +3,7 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
-for name in xm-gateway xm-gate xm-scene xm-data xm-login xm-scene-manager; do
+for name in xm-gateway xm-gate xm-scene xm-data xm-friend xm-login xm-scene-manager; do
   pidfile="run/pids/$name.pid"
   [[ -f "$pidfile" ]] || continue
   pid=$(cat "$pidfile")

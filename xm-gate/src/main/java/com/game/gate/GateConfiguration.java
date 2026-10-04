@@ -13,12 +13,15 @@ import com.game.gate.admin.GmShutdownController;
 import com.game.gate.metrics.GateMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
+import java.util.Map;
 import java.time.Duration;
 import java.util.concurrent.locks.LockSupport;
 import org.apache.dubbo.config.annotation.DubboReference;
+import org.apache.dubbo.config.annotation.Method;
 import org.apache.dubbo.config.spring.ReferenceBean;
 import org.redisson.api.RedissonClient;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -65,10 +68,26 @@ public class GateConfiguration {
         return DubboCallAuth.requireFromEnvValue(System.getenv(DubboCallAuth.SECRET_ENV));
     }
 
-    /** login 后端（Dubbo group = proto 域 login）。local profile 直连 {@code xm.dubbo.login-url}，nacos profile 该值置空走注册中心。 */
+    /**
+     * login 后端（Dubbo group = proto 域 login）。local profile 直连 {@code xm.dubbo.login-url}，nacos profile 该值置空走注册中心。
+     * {@code handle} 不重试：客户端消息不幂等（建角、加好友……），Dubbo 缺省的 failover 会在超时后重发同一次调用；
+     * 断线通知（sessionClosed）幂等，保留缺省重试。
+     */
     @Bean
-    @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${xm.dubbo.login-url:}")
+    @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${xm.dubbo.login-url:}",
+            methods = @Method(name = "handle", retries = 0))
     public ReferenceBean<ClientMessageService> loginClientMessageService() {
+        return new ReferenceBean<>();
+    }
+
+    /**
+     * 好友后端（Dubbo group = proto 域 friend，xm-friend 提供）。local profile 直连 {@code xm.dubbo.friend-url}，nacos profile
+     * 置空走注册中心。xm-friend 没起来时调用失败，客户端收到「服务不可用」。
+     */
+    @Bean
+    @DubboReference(group = DubboGroups.FRIEND, check = false, url = "${xm.dubbo.friend-url:}",
+            methods = @Method(name = "handle", retries = 0))
+    public ReferenceBean<ClientMessageService> friendClientMessageService() {
         return new ReferenceBean<>();
     }
 
@@ -83,7 +102,9 @@ public class GateConfiguration {
      */
     @Bean
     public GateNode gateNode(RedissonClient redis, MessageIdRegistry messageIdRegistry, GateTokens gateTokens,
-                             NodeLinkAuth nodeLinkAuth, ClientMessageService loginClientMessageService,
+                             NodeLinkAuth nodeLinkAuth,
+                             @Qualifier("loginClientMessageService") ClientMessageService loginClientMessageService,
+                             @Qualifier("friendClientMessageService") ClientMessageService friendClientMessageService,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${xm.zone-id:1}") int zoneId,
                              @Value("${xm.advertise-host:127.0.0.1}") String advertiseHost,
                              @Value("${xm.table-dir:config-data/tables}") String tableDir,
@@ -92,8 +113,9 @@ public class GateConfiguration {
             LoggerFactory.getLogger(GateConfiguration.class)
                     .warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", runMode);
         }
-        return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService, properties,
-                zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode));
+        return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
+                Map.of(DubboGroups.FRIEND, friendClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
+                gateMetrics, RunMode.parse(runMode));
     }
 
     /** GM 签名停机的校验（密钥只从环境变量 XM_GM_ADMIN_SECRET 读，没配一律拒）。 */

@@ -2,6 +2,7 @@ package com.game.gate.session;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.DubboGroups;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import java.util.List;
@@ -51,12 +52,23 @@ class MessageRoutesTest {
 
     @Test
     void Java版未接入的客户端服务路由到unsupported() {
-        MessageMethod friend = registry.all().stream()
-                .filter(m -> m.clientService() && m.serviceName().equals("ClientPlayerFriend"))
+        MessageMethod chat = registry.all().stream()
+                .filter(m -> m.clientService() && m.serviceName().equals("ClientPlayerChat"))
                 .findFirst().orElseThrow();
-        MessageRoute route = routes.clientRoute(friend.messageId());
+        MessageRoute route = routes.clientRoute(chat.messageId());
         assertThat(route.domain()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
-        assertThat(route.method()).isEqualTo("ClientPlayerFriend." + friend.methodName());
+        assertThat(route.method()).isEqualTo("ClientPlayerChat." + chat.methodName());
+    }
+
+    @Test
+    void 好友服务路由到friend域_推送方法也在白名单里由后端拒() {
+        int addFriend = registry.requireId("ClientPlayerFriend", "AddFriend");
+        assertThat(routes.clientRoute(addFriend)).isEqualTo(new MessageRoute(addFriend, DubboGroups.FRIEND, true,
+                "ClientPlayerFriend.AddFriend"));
+        // 235 NotifyFriendEvent 是 S2C 推送，与 C2S 同处一个服务：gate 照样转给 friend 后端，由后端按方法拒（回 1003）
+        int notify = registry.requireId("ClientPlayerFriend", "NotifyFriendEvent");
+        assertThat(routes.clientRoute(notify).domain()).isEqualTo(DubboGroups.FRIEND);
+        assertThat(routes.clientRoute(notify).hasResponse()).as("应答类型是 Empty").isFalse();
     }
 
     @Test

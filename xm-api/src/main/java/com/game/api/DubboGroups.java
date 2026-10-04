@@ -8,6 +8,9 @@ public final class DubboGroups {
 
     public static final String LOGIN = "login";
 
+    /** 好友（{@code proto/friend/...}），由 xm-friend 提供。 */
+    public static final String FRIEND = "friend";
+
     private DubboGroups() {
     }
 }

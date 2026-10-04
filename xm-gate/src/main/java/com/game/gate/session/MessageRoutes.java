@@ -26,7 +26,8 @@ public interface MessageRoutes {
 
     /** 非玩家服务的客户端服务 → 后端。新接入一个后端就在这里加一行。 */
     Map<String, String> SERVICE_BACKENDS = Map.of(
-            "ClientPlayerLogin", DubboGroups.LOGIN);
+            "ClientPlayerLogin", DubboGroups.LOGIN,
+            "ClientPlayerFriend", DubboGroups.FRIEND);
 
     /** 客户端可发的消息号的路由；消息号不存在或不属于客户端协议服务时返回 null。 */
     MessageRoute clientRoute(int messageId);

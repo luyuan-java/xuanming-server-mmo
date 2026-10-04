@@ -71,6 +71,64 @@ public final class RedisKeys {
         return PREFIX + "gate-drained:" + zoneId + ":" + nodeId;
     }
 
+    /**
+     * 好友列表缓存 {@code xm:friend:{<player_id>}:list}（xm-friend 读写）：JSON 数组 {@code [{friend_player_id, since_ms}]}，
+     * 带 TTL；同一玩家的键共用 hash tag，上 Cluster 时两条 Lua 碰到的键同槽。玩家号按无符号十进制。
+     */
+    public static String friendList(long playerId) {
+        return PREFIX + "friend:{" + Long.toUnsignedString(playerId) + "}:list";
+    }
+
+    /** 入站好友申请缓存 {@code xm:friend:{<player_id>}:req}（形状同 {@link #friendList}）。 */
+    public static String friendPending(long playerId) {
+        return PREFIX + "friend:{" + Long.toUnsignedString(playerId) + "}:req";
+    }
+
+    /**
+     * 好友缓存的代次键 {@code <数据键>:gen}：写路径失效时写一个新的唯一值（带 TTL）再删数据键，回填只在代次未变时写——
+     * 防「写之前读到旧快照的回填」在写之后落地。
+     */
+    public static String friendCacheGeneration(String dataKey) {
+        return dataKey + ":gen";
+    }
+
+    /** 发好友申请的每分钟配额计数 {@code xm:friend:{<player_id>}:quota}（固定窗口，INCR + EXPIRE）。 */
+    public static String friendRequestQuota(long playerId) {
+        return PREFIX + "friend:{" + Long.toUnsignedString(playerId) + "}:quota";
+    }
+
+    /** 在线目录翻页的每分钟配额计数 {@code xm:friend:{<player_id>}:dir-quota}（固定窗口，INCR + EXPIRE）。 */
+    public static String friendDirectoryQuota(long playerId) {
+        return PREFIX + "friend:{" + Long.toUnsignedString(playerId) + "}:dir-quota";
+    }
+
+    /** 在线目录条目的键前缀（{@link #presence} 的前缀；在线目录按它 SCAN）。 */
+    public static String presencePrefix() {
+        return PREFIX + "presence:";
+    }
+
+    /** 世界频道聊天历史 {@code xm:chat:{world}:log}（LIST，新在前，全服一条，xm-chat 读写）。 */
+    public static String chatWorldLog() {
+        return PREFIX + "chat:{world}:log";
+    }
+
+    /** 私聊历史 {@code xm:chat:{p:<小号>:<大号>}:log}：两个玩家号按无符号排序，A→B 与 B→A 写同一把键。 */
+    public static String chatPrivateLog(long a, long b) {
+        long lo = Long.compareUnsigned(a, b) <= 0 ? a : b;
+        long hi = lo == a ? b : a;
+        return PREFIX + "chat:{p:" + Long.toUnsignedString(lo) + ":" + Long.toUnsignedString(hi) + "}:log";
+    }
+
+    /** 发言的幂等键 {@code xm:chat:{req:<player_id>}:<request_id>}（SET NX EX；request_id 由客户端给、≤ 64 字节）。 */
+    public static String chatRequestId(long playerId, String requestId) {
+        return PREFIX + "chat:{req:" + Long.toUnsignedString(playerId) + "}:" + requestId;
+    }
+
+    /** 发言的每秒限速计数 {@code xm:chat:{rl:<player_id>}}。 */
+    public static String chatRateLimit(long playerId) {
+        return PREFIX + "chat:{rl:" + Long.toUnsignedString(playerId) + "}";
+    }
+
     /** 登录排队：区的队列 {@code xm:login-queue:{zone}}，ZSET（成员 = 排队号，分数 = 入队毫秒）。xm-gateway 读写。 */
     public static String loginQueue(int zoneId) {
         return PREFIX + "login-queue:" + zoneId;

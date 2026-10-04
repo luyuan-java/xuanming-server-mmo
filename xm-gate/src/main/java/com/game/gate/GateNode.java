@@ -43,6 +43,7 @@ import io.netty.util.concurrent.DefaultThreadFactory;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.InstantSource;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -82,6 +83,8 @@ public final class GateNode {
     private final GateTokens tokens;
     private final NodeLinkAuth linkAuth;
     private final ClientMessageService login;
+    /** login 以外的客户端消息后端（消息域 → Dubbo 服务）。 */
+    private final Map<String, ClientMessageService> backends;
     private final GateProperties properties;
     private final int zoneId;
     private final String advertiseHost;
@@ -113,19 +116,21 @@ public final class GateNode {
     private volatile GatePushSubscriber pushSubscriber;
 
     /**
+     * @param backends login 以外的客户端消息后端（消息域 → Dubbo 服务，friend ……）
      * @param linkAuth gate → scene 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 scene 一致）
      * @param tableDir 配置表目录（只读 MessageLimiter 表做按消息号限频）
      * @param metrics  gate 指标（会话层与链路层共用一份）
      */
     public GateNode(RedissonClient redis, MessageIdRegistry messageIdRegistry, GateTokens tokens, NodeLinkAuth linkAuth,
-                    ClientMessageService login, GateProperties properties, int zoneId, String advertiseHost, Path tableDir,
-                    GateMetrics metrics, RunMode runMode) {
+                    ClientMessageService login, Map<String, ClientMessageService> backends, GateProperties properties,
+                    int zoneId, String advertiseHost, Path tableDir, GateMetrics metrics, RunMode runMode) {
         this.runMode = runMode;
         this.redis = redis;
         this.messageIdRegistry = messageIdRegistry;
         this.tokens = tokens;
         this.linkAuth = linkAuth;
         this.login = login;
+        this.backends = Map.copyOf(backends);
         this.properties = properties;
         this.zoneId = zoneId;
         this.advertiseHost = advertiseHost;
@@ -177,7 +182,7 @@ public final class GateNode {
         int tipMessageId = messageIdRegistry.requireId("SceneClientPlayerCommon", "SendTipToClient");
         MessageLimits messageLimits = TableMessageLimits.load(tableDir);
         ClientDispatcher dispatcher = new ClientDispatcher(identity, tokens, InstantSource.system(),
-                MessageRoutes.of(messageIdRegistry), tipMessageId, login, links, registry,
+                MessageRoutes.of(messageIdRegistry), tipMessageId, login, backends, links, registry,
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
                         messageLimits, runMode.allowsGmCommands()), metrics, presence);
         links.bindListener(new SceneEventRouter(registry, dispatcher));

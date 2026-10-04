@@ -6,6 +6,7 @@ import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.ExpectJump;
 import com.game.robot.scenario.FeaturesScenario;
+import com.game.robot.scenario.FriendScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
@@ -55,7 +56,7 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN, FRIEND
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -185,6 +186,7 @@ public record RobotOptions(
             case QUEUE -> prefix + runTag;
             case RATELIMIT -> RateLimitScenario.accountName(prefix, runTag);
             case DRAIN -> prefix + runTag;
+            case FRIEND -> FriendScenario.accountName(prefix, runTag, "a");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -256,7 +258,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend）");
         }
     }
 

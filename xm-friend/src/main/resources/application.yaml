@@ -1,0 +1,87 @@
+# xm-friend 默认（local）配置：Dubbo 直连、不需要 Nacos 服务端。用 Nacos 做注册中心时加 --spring.profiles.active=nacos。
+#
+# 秘密只从环境变量注入，不写进本文件：
+#   XM_MYSQL_PASSWORD      MySQL 密码（本机无密码的 root 可不设）
+#   XM_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填，与 xm-gate 一致；缺失即拒绝启动）
+spring:
+  application:
+    name: xm-friend
+  main:
+    # 只为管理端点起一个 Servlet 容器；Dubbo 端口不经过它。
+    web-application-type: servlet
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    # 会话级 READ COMMITTED（friend-spec.md §1.4：只有事务设 RC 不够，事务外的自动提交语句——ensure、Reject、Unblock——
+    # 会落回 RR、拿到间隙锁）；STRICT_TRANS_TABLES 同基线 DSN；innodb_lock_wait_timeout=3 给锁等待设上界（默认 50 s 远超 3.5 s 预算）；
+    # socketTimeout 4 s ≤ 整请求预算之上的余量；useAffectedRows 与 xm-data 一致。
+    url: "jdbc:mysql://127.0.0.1:3306/xm_java?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=3"
+    username: ${XM_MYSQL_USER:root}
+    password: ${XM_MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    druid:
+      initial-size: 2
+      min-idle: 2
+      max-active: 32
+      max-wait: 3000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+      # 2 = READ COMMITTED（连接池按它设置每条连接；URL 里的会话变量是第二道保证）
+      default-transaction-isolation: 2
+
+# 管理端点：http://127.0.0.1:18107/actuator/health 与 /actuator/prometheus。
+server:
+  port: 18107
+  address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+xm:
+  advertise-host: 127.0.0.1
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  friend:
+    # 缺省值同 mmorpg go/friend（friend-spec.md §0.4）；启动时校验（max-friends ≤ 300、request-budget ≤ 4 s）。
+    max-friends: 200
+    max-pending-requests: 50
+    max-incoming-requests: 200
+    max-blocks: 200
+    request-quota-per-minute: 10
+    list-read-hard-limit: 1000
+    cache-ttl: 30m
+    request-budget: 3500ms
+    push-timeout: 1500ms
+    query-timeout: 3s
+    worker-threads: 16
+    worker-queue-capacity: 1024
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    qos-enable: false
+  protocol:
+    name: tri
+    port: 20883
+    host: ${xm.advertise-host}
+  registry:
+    address: N/A
+  provider:
+    timeout: 10000
+  consumer:
+    check: false

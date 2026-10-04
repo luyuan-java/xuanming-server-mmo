@@ -1,11 +1,16 @@
 package com.game.gate.session;
 
+import com.game.api.proto.SessionContext;
 import com.game.proto.ClientRequest;
 import com.google.protobuf.Message;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -65,6 +70,12 @@ public final class ClientSession {
     final ArrayDeque<PendingRequest> pending = new ArrayDeque<>();
     /** 有一个 login 调用在途。 */
     boolean inFlight;
+    /**
+     * login 以外的后端（friend ……）各自的上行队列与在途标记（键 = 消息域）：同一后端的请求串行（写后读），
+     * 但不占 {@link #inFlight}、不阻塞 login / scene——一个慢的好友调用不能让移动等 scene 消息排满上限而断线。
+     */
+    final Map<String, ArrayDeque<BackendPending>> backendQueues = new HashMap<>();
+    final Set<String> backendInFlight = new HashSet<>();
     /**
      * 有一个 LeaveGame（17）排队或在途、还没回来：这时断线按主动离开通知 scene（客户端约定「发完 17 即关连接、不等应答」，
      * 不能把这次干净登出当成断线、留 30 s 重连租约）。LeaveGame 的调用回来后减掉（关闭途中成功的不减，留给断线流程按主动离开发）。
@@ -138,5 +149,12 @@ public final class ClientSession {
 
     /** 一条已通过入口校验、等待按序处理的上行请求。 */
     record PendingRequest(MessageRoute route, ClientRequest request) {
+    }
+
+    /**
+     * 排在后端队列里的请求，带着<b>入队时</b>的会话身份快照：排队期间会话可能离开游戏、换角色进游戏（login 的调用不排在好友后面），
+     * 按发出时的身份转发会把它当成别的角色的请求。
+     */
+    record BackendPending(MessageRoute route, ClientRequest request, SessionContext session) {
     }
 }

@@ -49,10 +49,13 @@ public final class PlayerPushes {
         this.directory = directory;
     }
 
-    /** 推一条消息给一个玩家。{@code messageContent} 是客户端协议的 {@code MessageContent}（id 填 0）。 */
+    /**
+     * 推一条消息给一个玩家。{@code messageContent} 是客户端协议的 {@code MessageContent}（id 填 0）。
+     * 在线目录条目损坏或与键不符时 stage 异常完成（不当成「不在线」：那是故障，不是离线）。
+     */
     public CompletionStage<Outcome> pushToPlayer(long playerId, MessageLite messageContent) {
         ByteString content = messageContent.toByteString();
-        return directory.findAsync(playerId).thenCompose(found -> found.isEmpty()
+        return directory.findStrictAsync(playerId).thenCompose(found -> found.isEmpty()
                 ? CompletableFuture.completedFuture(Outcome.OFFLINE)
                 : publish(found.get(), List.of(found.get()), GatePush.newBuilder().setMessageContent(content)));
     }

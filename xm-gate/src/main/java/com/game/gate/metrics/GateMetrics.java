@@ -193,6 +193,8 @@ public final class GateMetrics {
     private final Map<NodeLinkFrame.BodyCase, Counter> framesIn;
     private final Map<LoginCall, Timer> loginCallsOk;
     private final Map<LoginCall, Timer> loginCallsFailed;
+    /** login 以外的后端：键 = backend + "/ok" 或 "/error"（只有 gate 配置的几个后端）。 */
+    private final Map<String, Timer> backendTimers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<RequestKey, Counter> requests = new ConcurrentHashMap<>();
 
     public GateMetrics(MeterRegistry registry) {
@@ -286,6 +288,20 @@ public final class GateMetrics {
     /** 一次 login 调用结束（{@code xm.gate.backend.calls{backend=login, method, result}}）；ok = 正常应答（含带 tip 的应答）。 */
     public void loginCallCompleted(LoginCall call, Timer.Sample sample, boolean ok) {
         sample.stop((ok ? loginCallsOk : loginCallsFailed).get(call));
+    }
+
+    /**
+     * 一次 login 以外的客户端消息后端（friend ……）调用结束（{@code xm.gate.backend.calls{backend, method=handle, result}}）。
+     * backend 取值只来自 gate 配置的后端集合（{@code MessageRoutes.SERVICE_BACKENDS}），基数有界。
+     */
+    public void backendCallCompleted(String backend, Timer.Sample sample, boolean ok) {
+        sample.stop(backendTimers.computeIfAbsent(backend + (ok ? "/ok" : "/error"), k -> Timer.builder(BACKEND_CALLS)
+                .description("gate 对后端的 Dubbo 调用耗时（从发出到应答回到回调）")
+                .tag("backend", backend)
+                .tag("method", "handle")
+                .tag("result", ok ? "ok" : "error")
+                .serviceLevelObjectives(LATENCY_BUCKETS)
+                .register(registry)));
     }
 
     // ================================================================ scene 链路

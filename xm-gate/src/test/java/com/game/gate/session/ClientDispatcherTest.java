@@ -51,6 +51,7 @@ class ClientDispatcherTest {
     private static final int SCENE_MSG = 77;
     private static final int GM_MSG = 37;
     private static final int GUILD_MSG = 500;
+    private static final int FRIEND_MSG = 234;
     private static final int SCENE_NODE = 7;
     private static final long PLAYER = 42L;
 
@@ -60,11 +61,14 @@ class ClientDispatcherTest {
         case SCENE_MSG -> new MessageRoute(id, "scene");
         case GM_MSG -> new MessageRoute(id, "scene", true, Integer.toString(id), true);
         case GUILD_MSG -> new MessageRoute(id, "guild");
+        case FRIEND_MSG -> new MessageRoute(id, "friend");
         default -> null;
     };
 
     private final GateTokens tokens = GateTokens.ofUtf8("test-secret");
     private final FakeLogin login = new FakeLogin();
+    /** friend 后端（与 login 同一条 Dubbo 契约，复用同一个替身）。 */
+    private final FakeLogin friend = new FakeLogin();
     private final FakeLinks links = new FakeLinks();
     private final SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
@@ -72,7 +76,8 @@ class ClientDispatcherTest {
     private final RecordingPresence presence = new RecordingPresence();
     private final ClientDispatcher dispatcher = new ClientDispatcher(
             new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
-            ROUTES, TIP_MSG, login, links, registry, new GateLimits(4, 3, Duration.ZERO), metrics, presence);
+            ROUTES, TIP_MSG, login, Map.of("friend", friend), links, registry, new GateLimits(4, 3, Duration.ZERO), metrics,
+            presence);
     private final SceneEventRouter router = new SceneEventRouter(registry, dispatcher);
 
     // ================================================================ 握手
@@ -447,6 +452,91 @@ class ClientDispatcherTest {
         assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat(login.calls).isEmpty();
         assertThat(ch.isOpen()).isTrue();
+    }
+
+    @Test
+    void 好友域消息转给friend后端_带会话_应答原样回客户端_不碰login() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(9, FRIEND_MSG, "add"));
+        assertThat(login.calls).isEmpty();
+        assertThat(friend.calls).hasSize(1);
+        ClientCall call = friend.calls.get(0);
+        assertThat(call.getMessageId()).isEqualTo(FRIEND_MSG);
+        assertThat(call.getRequestId()).isEqualTo(9);
+        assertThat(call.getBody().toStringUtf8()).isEqualTo("add");
+        assertThat(call.getSession().getSessionId()).isNotZero();
+
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
+        ch.runPendingTasks();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply.getMessageId()).isEqualTo(FRIEND_MSG);
+        assertThat(reply.getId()).isEqualTo(9);
+        assertThat(reply.getSerializedMessage().toStringUtf8()).isEqualTo("friend-resp");
+        assertThat(login.closed).as("只和 friend 打过交道的连接断开不通知 login").isEmpty();
+    }
+
+    @Test
+    void 好友后端调用失败推23服务不可用_同一会话串行() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, FRIEND_MSG, "a"));
+        ch.writeInbound(request(2, FRIEND_MSG, "b"));
+        assertThat(friend.calls).as("上一个没完成不发下一个").hasSize(1);
+        friend.fail(new IllegalStateException("no provider"));
+        ch.runPendingTasks();
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(friend.calls).hasSize(2);
+    }
+
+    @Test
+    void 好友调用在途时断线_不等它_迟到的应答丢掉() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, FRIEND_MSG, "a"));
+        ch.writeInbound(request(2, FRIEND_MSG, "b"));
+        ch.close();
+        assertThat(registry.size()).as("断线流程只等 login，不等好友调用").isZero();
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("late")).build());
+        ch.runPendingTasks();
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(friend.calls).as("排队的那个随断线丢掉").hasSize(1);
+        assertThat(requests("friend", FRIEND_MSG, "dropped")).isEqualTo(1);
+    }
+
+    @Test
+    void 好友调用在途不阻塞login与scene() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, FRIEND_MSG, "slow"));
+        ch.writeInbound(request(2, LOGIN_MSG, "x"));
+        assertThat(login.calls).as("好友调用没回来，login 照常发").hasSize(1);
+        login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(LOGIN_MSG);
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(FRIEND_MSG);
+    }
+
+    @Test
+    void 排队的好友请求带入队时的身份_期间离开游戏不算到别的角色头上() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, ENTER_GAME_MSG, "x"));
+        login.complete(ClientReply.newBuilder()
+                .setBody(ByteString.copyFromUtf8("enter-resp"))
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(BindAccount.newBuilder().setAccount("robot_0001")))
+                .addDirectives(SessionDirective.newBuilder().setEnterScene(enterScene()))
+                .build());
+        ch.runPendingTasks();
+        ch.readOutbound();
+
+        ch.writeInbound(request(2, FRIEND_MSG, "slow"));
+        ch.writeInbound(request(3, FRIEND_MSG, "queued"));
+        ch.writeInbound(request(4, LEAVE_MSG, ""));
+        login.complete(unbindReply()); // 好友调用还在途，login 先把玩家解绑
+        ch.runPendingTasks();
+
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
+        ch.runPendingTasks();
+        assertThat(friend.calls).hasSize(2);
+        assertThat(friend.calls.get(1).getSession().getPlayerId()).as("按入队时的身份转发").isEqualTo(PLAYER);
     }
 
     @Test

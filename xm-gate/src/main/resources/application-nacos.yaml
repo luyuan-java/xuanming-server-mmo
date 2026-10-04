@@ -6,3 +6,4 @@ dubbo:
 xm:
   dubbo:
     login-url: ""
+    friend-url: ""

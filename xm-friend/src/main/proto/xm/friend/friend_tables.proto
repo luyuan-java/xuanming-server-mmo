@@ -1,0 +1,73 @@
+// xm-friend 的四张表（xm_java 库），经 xm-pbmysql 建表 / 补列 / 补索引（只扩展、从不删改）。
+// 形状与 mmorpg proto/friend/friend_table.proto 一致（表名、列、主键、二级索引、没有唯一键），但这是 Java 版自己的一份：
+// 同步来的那份是契约产物、不许手改，Java 的库表也不该随 mmorpg 漂移。
+// 字段号永不复用：删字段用 reserved 占住（pbmysql 按列注释 pb:N 识别字段）。
+// 「守卫之后只用完整主键点锁」的纪律以「四张表都没有唯一键」为前提（docs/porting/friend-spec.md §1.4），加唯一键前先回去核对。
+syntax = "proto3";
+
+package xm.friend;
+
+import "proto2mysql/proto2mysql_option.proto";
+
+option java_package = "com.game.friend.store.pb";
+option java_multiple_files = true;
+option java_outer_classname = "FriendTablesProto";
+option (proto2mysql.db) = true;
+
+// 好友边：一对好友存成双向两行，同一事务里同增同减。
+message FriendEdgeRow {
+  option (proto2mysql.table_name) = "friend";
+  option (proto2mysql.primary_key) = "player_id,friend_player_id";
+  option (proto2mysql.index) = "friend_player_id";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  uint64 friend_player_id = 2;
+  uint64 since_ms = 3;  // 结为好友的时刻（同意时取一次，两个方向共用）
+}
+
+// 好友申请：每对 (from, to) 至多一行；status 1 待处理 / 2 已同意 / 3 已拒绝。
+message FriendRequestRow {
+  option (proto2mysql.table_name) = "friend_request";
+  option (proto2mysql.primary_key) = "from_player_id,to_player_id";
+  option (proto2mysql.index) = "to_player_id,status;status,updated_ms";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 from_player_id = 1;
+  uint64 to_player_id = 2;
+  uint64 request_time_ms = 3;  // 最近一次发起的时刻（复用终态行重新申请时刷新）
+  uint32 status = 4;
+  uint64 updated_ms = 5;       // 状态最后一次变更的时刻：凡改 status 的语句都在同一句里写它
+}
+
+// 容量守卫行：friend_count 是权威好友数，与 friend 表边数同事务同增同减；写路径先锁双方的这一行（升序）。
+message FriendCapacityRow {
+  option (proto2mysql.table_name) = "friend_capacity";
+  option (proto2mysql.primary_key) = "player_id";
+  option (proto2mysql.index) = "friend_count,created_ms";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  uint32 friend_count = 2;
+  uint64 created_ms = 3;  // 本行被（重新）建出、或最近一次 friend_count 减少的时刻（回收保留期从此起算）
+}
+
+// 黑名单：单向。
+message FriendBlockRow {
+  option (proto2mysql.table_name) = "friend_block";
+  option (proto2mysql.primary_key) = "player_id,blocked_player_id";
+  option (proto2mysql.index) = "blocked_player_id";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  uint64 blocked_player_id = 2;
+  uint64 since_ms = 3;  // 拉黑时刻（重复拉黑不刷新）
+}

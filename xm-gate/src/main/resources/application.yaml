@@ -46,6 +46,8 @@ xm:
     database: 12
   dubbo:
     login-url: tri://127.0.0.1:20881
+    # 好友后端 xm-friend（Dubbo group friend）
+    friend-url: tri://127.0.0.1:20883
   gate:
     client-port: 11000
     # 对外通告的客户端端口（经 NodePort / 端口映射对外时与 client-port 不同）；0 或不配 = client-port
