@@ -69,6 +69,16 @@ xm:
     query-timeout: 3s
     worker-threads: 16
     worker-queue-capacity: 1024
+    recommend:
+      default-limit: 10
+      max-limit: 20          # 硬天花板 20
+      max-exclude: 64        # exclude_player_ids 超过即 1005（不截断）
+    sweep:
+      # report_only：只数不删、积压 > 0 打告警日志；确认数字合理后再切 delete（同基线缺省）
+      mode: report_only
+      interval: 5m
+      retention-days: 7
+      batch-limit: 1000
 
 dubbo:
   application:

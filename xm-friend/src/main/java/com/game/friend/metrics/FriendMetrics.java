@@ -2,13 +2,16 @@ package com.game.friend.metrics;
 
 import com.game.friend.store.JdbcFriendStore;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * xm-friend 的低基数指标（Micrometer，经 actuator 以 Prometheus 格式导出）。指标名与标签只在这里定义。
@@ -30,6 +33,9 @@ public final class FriendMetrics implements JdbcFriendStore.Events {
     static final String CACHE_INVALIDATION_FAILURES = "xm.friend.cache.invalidation.failures";
     static final String GUARD_RETRIES = "xm.friend.guard.retries";
     static final String COUNT_UNDERFLOWS = "xm.friend.count.underflows";
+    static final String DIRECTORY_QUOTA = "xm.friend.directory.quota";
+    static final String SWEEP_PENDING_ROWS = "xm.friend.sweep.pending.rows";
+    static final String SWEEP_IDLE_CAPACITY_ROWS = "xm.friend.sweep.idle.capacity.rows";
 
     public static final String UNROUTED = "unrouted";
 
@@ -81,6 +87,10 @@ public final class FriendMetrics implements JdbcFriendStore.Events {
     private final Counter guardMissingRow;
     private final Counter guardEnsureDeadlock;
     private final Counter countUnderflows;
+    private final Map<QuotaOutcome, Counter> directoryQuota = new EnumMap<>(QuotaOutcome.class);
+    /** 清理积压（受 batch-limit 封顶）：键 = 模式（report_only / delete），启动即建为 0。 */
+    private final Map<String, AtomicLong> sweepPending = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> sweepIdle = new ConcurrentHashMap<>();
 
     public FriendMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -123,6 +133,23 @@ public final class FriendMetrics implements JdbcFriendStore.Events {
                 .tag("kind", "ensure_deadlock").register(registry);
         this.countUnderflows = Counter.builder(COUNT_UNDERFLOWS)
                 .description("friend_count 减到 0 以下被拦截的次数（计数与边数已脱节，需要人工排查）").register(registry);
+        for (QuotaOutcome outcome : QuotaOutcome.values()) {
+            directoryQuota.put(outcome, Counter.builder(DIRECTORY_QUOTA)
+                    .description("在线目录翻页的每分钟配额判定（故障时拒绝：fail-closed）")
+                    .tag("outcome", tagValue(outcome)).register(registry));
+        }
+        for (String mode : List.of("report_only", "delete")) {
+            AtomicLong pending = new AtomicLong();
+            AtomicLong idle = new AtomicLong();
+            sweepPending.put(mode, pending);
+            sweepIdle.put(mode, idle);
+            Gauge.builder(SWEEP_PENDING_ROWS, pending, AtomicLong::get)
+                    .description("清理看到的已过保留期的终态好友申请（受 batch-limit 封顶：等于它只说明积压 ≥ 一批；长期不变说明清理没在跑）")
+                    .tag("mode", mode).register(registry);
+            Gauge.builder(SWEEP_IDLE_CAPACITY_ROWS, idle, AtomicLong::get)
+                    .description("清理看到的已过保留期的零好友容量行（受 batch-limit 封顶）")
+                    .tag("mode", mode).register(registry);
+        }
     }
 
     public Timer.Sample startTimer() {
@@ -144,6 +171,25 @@ public final class FriendMetrics implements JdbcFriendStore.Events {
 
     public void push(PushReason reason, PushOutcome outcome) {
         pushes.get(reason).get(outcome).increment();
+    }
+
+    public void directoryQuota(QuotaOutcome outcome) {
+        directoryQuota.get(outcome).increment();
+    }
+
+    /** 清理的两个 Gauge（模式只取 report_only / delete，别的不刷）。 */
+    public void sweepPendingRows(String mode, long value) {
+        AtomicLong gauge = sweepPending.get(mode);
+        if (gauge != null) {
+            gauge.set(value);
+        }
+    }
+
+    public void sweepIdleCapacityRows(String mode, long value) {
+        AtomicLong gauge = sweepIdle.get(mode);
+        if (gauge != null) {
+            gauge.set(value);
+        }
     }
 
     public void quota(QuotaOutcome outcome) {

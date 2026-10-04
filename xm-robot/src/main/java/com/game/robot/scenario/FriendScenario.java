@@ -19,6 +19,7 @@ import com.game.proto.friend.GetPendingRequestsRequest;
 import com.game.proto.friend.GetPendingRequestsResponse;
 import com.game.proto.friend.ListBlocksRequest;
 import com.game.proto.friend.ListBlocksResponse;
+import com.game.proto.friend.RecommendEntry;
 import com.game.proto.friend.RecommendFriendsRequest;
 import com.game.proto.friend.RecommendFriendsResponse;
 import com.game.proto.friend.RejectFriendRequest;
@@ -50,7 +51,7 @@ import java.util.Optional;
  *   <li>B 同意：A 收到 235 {REQUEST_ACCEPTED, by = B}；双方好友列表互见，A 看到 B 在线、last_active_ms ≠ 0、名字非空；</li>
  *   <li>C 拉黑 A：C 的黑名单有 A；A→C、C→A 的申请都回 15007（同一个中性码）；</li>
  *   <li>Java 增项：C 加 B → B 拒绝 → 再拒 15005，B 的入站申请里不再有 C；</li>
- *   <li>推荐：批次 4.1b 之前回 in-band 1006（功能未开放）；</li>
+ *   <li>推荐：limit 50 钳到 ≤ 20、不含自己 / 好友 / 拉黑的人；exclude 65 条 → 1005；在线目录按编号翻页找到在线的 B、非法游标 → 1005；</li>
  *   <li>A 经 gate 上行 235 → 拿不到业务回包，信封 tip = 1003；</li>
  *   <li>清理：A 删 B（之后 A 的列表里没有 B——写后立刻读到新值）、C 解除拉黑 A。</li>
  * </ol>
@@ -62,13 +63,14 @@ public final class FriendScenario {
     private static final String REF = "PARITY「好友」行";
     /** 好友写消息 gate 限频 5/s、读 10/s（按会话）：相邻请求留间隔。 */
     private static final Duration CALL_SPACING = Duration.ofMillis(250);
+    /** 推荐（119）gate 限频 1 次 / 秒。 */
+    private static final Duration RECOMMEND_SPACING = Duration.ofMillis(1100);
     private static final int ALREADY_SENT = FriendErrorTip.friend_error.kFriendRequestAlreadySent_VALUE;
     private static final int BLOCKED = FriendErrorTip.friend_error.kFriendBlocked_VALUE;
     private static final int NO_PENDING = FriendErrorTip.friend_error.kFriendNoPendingRequest_VALUE;
     private static final int CANNOT_ADD_SELF = FriendErrorTip.friend_error.kFriendCannotAddSelf_VALUE;
     private static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     private static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
-    private static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
 
     private final PlayerFlow flow;
     private final String accountA;
@@ -209,10 +211,42 @@ public final class FriendScenario {
             report.check(afterReject.getRequestsList().stream().noneMatch(r -> r.getFromPlayerId() == idc),
                     "拒绝之后 B 的入站申请里没有 C", afterReject.getRequestsCount() + " 条", REF);
 
-            // 6. 推荐（4.1b 之前）
+            // 6. 推荐（弱断言：内容取决于全库数据）：limit = 50 被钳到 ≤ 20；不推自己、已是好友的 B、有拉黑关系的 C
             RecommendFriendsResponse rec = call(ca, recommend, RecommendFriendsRequest.newBuilder().setLimit(50).build(),
-                    RecommendFriendsResponse.parser());
-            expectTip(report, "推荐在批次 4.1b 之前回 1006（功能未开放）", FEATURE_UNAVAILABLE, rec.getErrorMessage());
+                    RecommendFriendsResponse.parser(), RECOMMEND_SPACING);
+            List<Long> recommended = rec.getCandidatesList().stream().map(RecommendEntry::getCandidatePlayerId).toList();
+            report.check(tipOf(rec.getErrorMessage()) == 0 && !rec.getOnlineDirectory() && recommended.size() <= 20
+                            && !recommended.contains(ida) && !recommended.contains(idb) && !recommended.contains(idc),
+                    "推荐：limit 50 钳到 ≤ 20，不含自己 / 好友 B / 拉黑的 C", "tip=" + tipOf(rec.getErrorMessage()) + " 条数="
+                            + recommended.size(), REF);
+            RecommendFriendsRequest.Builder tooMany = RecommendFriendsRequest.newBuilder();
+            for (long i = 1; i <= 65; i++) {
+                tooMany.addExcludePlayerIds(i);
+            }
+            expectTip(report, "exclude 65 条 → 1005（不截断）", INVALID_PARAMETER,
+                    call(ca, recommend, tooMany.build(), RecommendFriendsResponse.parser(), RECOMMEND_SPACING).getErrorMessage());
+
+            // 6b. 在线目录：按 B 的编号筛选翻页，直到看到 B 或遍历结束；每页都带 online_directory = true
+            boolean foundB = false;
+            boolean allFlagged = true;
+            String cursor = "";
+            int pages = 0;
+            do {
+                RecommendFriendsResponse page = call(ca, recommend, RecommendFriendsRequest.newBuilder().setOnlineOnly(true)
+                        .setLimit(20).setCursor(cursor).setQuery(Long.toUnsignedString(idb)).build(),
+                        RecommendFriendsResponse.parser(), RECOMMEND_SPACING);
+                allFlagged &= page.getOnlineDirectory() && tipOf(page.getErrorMessage()) == 0;
+                foundB |= page.getCandidatesList().stream().anyMatch(e -> e.getCandidatePlayerId() == idb && e.getIsOnline()
+                        && !e.getName().isEmpty() && e.getLastActiveMs() > 0);
+                cursor = page.getNextCursor();
+                pages++;
+            } while (!foundB && !cursor.isEmpty() && pages < 20 && allFlagged);
+            report.check(allFlagged && foundB, "在线目录按编号找到在线的 B（每页 online_directory = true）",
+                    "翻了 " + pages + " 页", REF);
+            RecommendFriendsResponse badCursor = call(ca, recommend, RecommendFriendsRequest.newBuilder().setOnlineOnly(true)
+                    .setCursor("bad").build(), RecommendFriendsResponse.parser(), RECOMMEND_SPACING);
+            report.check(badCursor.getOnlineDirectory() && tipOf(badCursor.getErrorMessage()) == INVALID_PARAMETER,
+                    "在线目录非法游标 → 1005（带 online_directory）", "tip=" + tipOf(badCursor.getErrorMessage()), REF);
 
             // 7. 上行 235
             int before = ca.inbox().size();
@@ -270,7 +304,12 @@ public final class FriendScenario {
 
     private <T extends Message> T call(GameConnection connection, int messageId, Message body, Parser<T> parser)
             throws RobotException {
-        pause();
+        return call(connection, messageId, body, parser, CALL_SPACING);
+    }
+
+    private <T extends Message> T call(GameConnection connection, int messageId, Message body, Parser<T> parser,
+                                       Duration spacing) throws RobotException {
+        pause(spacing);
         return connection.call(messageId, body, parser, requestTimeout);
     }
 
@@ -282,9 +321,9 @@ public final class FriendScenario {
         return tip == null ? 0 : tip.getId();
     }
 
-    private static void pause() throws RobotException {
+    private static void pause(Duration spacing) throws RobotException {
         try {
-            Thread.sleep(CALL_SPACING.toMillis());
+            Thread.sleep(spacing.toMillis());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RobotException("等待被中断", e);

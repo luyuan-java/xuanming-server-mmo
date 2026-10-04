@@ -26,7 +26,6 @@ import com.game.proto.friend.FriendRequestStatus;
 import com.game.proto.friend.GetFriendListRequest;
 import com.game.proto.friend.GetPendingRequestsRequest;
 import com.game.proto.friend.ListBlocksRequest;
-import com.game.proto.friend.RecommendFriendsRequest;
 import com.game.proto.friend.RejectFriendRequest;
 import com.game.proto.friend.RemoveFriendRequest;
 import com.game.proto.friend.UnblockRequest;
@@ -314,12 +313,6 @@ class FriendServiceTest {
             assertThat(b.getSinceMs()).isEqualTo(66);
         });
         assertThat(onlineCalls).isZero(); // 黑名单刻意不带在线状态
-    }
-
-    @Test
-    void 推荐在4点1b之前回1006() {
-        assertThat(service().recommendFriends(ME, RecommendFriendsRequest.getDefaultInstance(), deadline())
-                .getErrorMessage().getId()).isEqualTo(1006);
     }
 
     // ================================================================ 工具

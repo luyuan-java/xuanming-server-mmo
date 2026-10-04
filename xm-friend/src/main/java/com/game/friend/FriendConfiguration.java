@@ -2,22 +2,31 @@ package com.game.friend;
 
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.friend.cache.FriendCache;
 import com.game.friend.cache.RedissonFriendCacheRedis;
+import com.game.friend.directory.OnlineDirectory;
+import com.game.friend.directory.RedissonDirectoryRedis;
 import com.game.friend.dispatch.FriendDispatcher;
 import com.game.friend.dispatch.FriendWorkerPool;
 import com.game.friend.metrics.FriendMetrics;
 import com.game.friend.profile.PlayerProfiles;
+import com.game.friend.quota.DirectoryQuota;
 import com.game.friend.quota.FriendRequestQuota;
 import com.game.friend.service.FriendService;
+import com.game.friend.service.RecommendService;
 import com.game.friend.store.FriendStore;
 import com.game.friend.store.JdbcFriendStore;
+import com.game.friend.store.RecommendPivot;
+import com.game.friend.store.RecommendStore;
+import com.game.friend.store.SweepStore;
 import com.game.friend.store.pb.FriendBlockRow;
 import com.game.friend.store.pb.FriendCapacityRow;
 import com.game.friend.store.pb.FriendEdgeRow;
 import com.game.friend.store.pb.FriendRequestRow;
+import com.game.friend.sweep.FriendSweep;
 import com.game.pbmysql.PbMysql;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.Connection;
@@ -123,15 +132,48 @@ public class FriendConfiguration {
                 registry.requireId(FriendDispatcher.SERVICE, "NotifyFriendEvent"));
     }
 
+    /** 推荐（mutual / random 两条 SQL）与在线目录（SCAN {@code xm:presence:*} + player 表）。 */
+    @Bean
+    public RecommendService recommendService(DataSource dataSource, RedissonClient redis, PlayerProfiles profiles,
+                                             PlayerPresenceDirectory presence, FriendMetrics metrics, FriendProperties props) {
+        int queryTimeout = (int) Math.max(1, props.queryTimeout().toSeconds());
+        RecommendStore store = new RecommendStore(dataSource, queryTimeout, RecommendPivot::pick);
+        OnlineDirectory directory = new OnlineDirectory(new RedissonDirectoryRedis(redis, RedisKeys.presencePrefix()),
+                RedisKeys.presencePrefix(), profiles::loadStrictOnce);
+        FriendProperties.Recommend r = props.recommend();
+        return new RecommendService(store, directory, DirectoryQuota.redisson(redis, metrics), profiles::loadStrict,
+                ids -> presence.findAllStrictAsync(ids, props.listReadHardLimit()), metrics, r.defaultLimit(), r.maxLimit(),
+                r.maxExclude());
+    }
+
+    /** 后台清理：终态好友申请与零好友容量行（缺省 report_only 只数不删）。 */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public FriendSweep friendSweep(DataSource dataSource, FriendMetrics metrics, FriendProperties props) {
+        FriendProperties.Sweep s = props.sweep();
+        return new FriendSweep(new SweepStore(dataSource, (int) Math.max(1, props.queryTimeout().toSeconds())),
+                s.mode(), s.interval(), s.retentionDays(), s.batchLimit(), System::currentTimeMillis,
+                new FriendSweep.Gauges() {
+                    @Override
+                    public void pendingRows(String mode, long value) {
+                        metrics.sweepPendingRows(mode, value);
+                    }
+
+                    @Override
+                    public void idleCapacityRows(String mode, long value) {
+                        metrics.sweepIdleCapacityRows(mode, value);
+                    }
+                });
+    }
+
     @Bean(destroyMethod = "close")
     public FriendWorkerPool friendWorkerPool(FriendProperties props) {
         return new FriendWorkerPool(props.workerThreads(), props.workerQueueCapacity(), WORKER_DRAIN_TIMEOUT);
     }
 
     @Bean
-    public FriendDispatcher friendDispatcher(MessageIdRegistry registry, FriendService service, FriendWorkerPool workers,
-                                             FriendMetrics metrics, FriendProperties props) {
-        FriendDispatcher dispatcher = new FriendDispatcher(registry, service, workers, metrics,
+    public FriendDispatcher friendDispatcher(MessageIdRegistry registry, FriendService service, RecommendService recommend,
+                                             FriendWorkerPool workers, FriendMetrics metrics, FriendProperties props) {
+        FriendDispatcher dispatcher = new FriendDispatcher(registry, service, recommend, workers, metrics,
                 props.requestBudget().toMillis());
         log.info("friend 接管的消息号={} 限额 好友={} 出站={} 入站={} 黑名单={} 每分钟申请={}", dispatcher.routedMessageIds(),
                 props.maxFriends(), props.maxPendingRequests(), props.maxIncomingRequests(), props.maxBlocks(),

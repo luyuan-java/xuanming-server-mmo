@@ -378,7 +378,15 @@ mmorpg：`go/friend`（go-zero gRPC，经 client_rpc_router 转发）。Java 版
 - **推送**：只有发申请（推给对方 REQUEST_RECEIVED）与同意（推给原申请人 REQUEST_ACCEPTED），经 `PlayerPushes`（§4.3），
   至多一次、fire-and-forget；拒绝 / 删除 / 拉黑不推（不暴露拒绝方在线、被拉黑者不该知道）。
 - **配额**：每人每分钟 10 次发申请（INCR + EXPIRE 一段 Lua，固定窗口）；Redis 出错放行（防刷不是防作弊，硬上限都在 MySQL 里）。
-- 推荐（含在线目录）与清理（sweep）随批次 4.1b；在那之前推荐回 in-band 1006。
+- **推荐**（RecommendFriends，`RecommendService`）：普通推荐两级——好友的好友（共同好友数降序、同数随机）→ 随机锚点兜底
+  （在 friend 表真实的 MIN / MAX 之间取锚点，只看锚点起 1024 个去重玩家的窗口，不回绕）；两条 SQL 逐字照搬基线（`STRAIGHT_JOIN`、
+  按方向拆开的 NOT EXISTS、`SEMIJOIN(FIRSTMATCH)` + `FORCE INDEX (PRIMARY)`），扫描量与全服 pending 数、「拉黑我的人数」无关；
+  任一级出错回 1003、不做部分降级；在线态读不到就当离线。exclude 超过 64 条回 1005（不截断）。
+- **在线目录**（`online_only`）：在一段只读 Lua 里 `SCAN xm:presence:* COUNT 64`，每页至多 4 轮、单批 ≤ 1024 个键、键按字典序，
+  游标 `v1:<scan>:<offset>`；条目存在、能解码、玩家号一致就算在线，资料与 home zone 取 player 表（名字为空、职业为 0、与调用者 home zone
+  不同的不列）；每人每分钟 60 页（故障时拒绝）；先校验游标与 query 再计额度。不排除好友与拉黑关系（同基线）。
+- **清理**（`FriendSweep`，缺省 `report_only` 只数不删）：终态好友申请（过保留期、`status IN (2,3)`）与零好友容量行，候选普通读后
+  逐行按主键自动提交删（WHERE 复核条件），存在 `updated_ms = 0` 的终态行时只数不删；首轮随机抖动、固定延迟不叠轮、单轮预算 min(间隔, 30 s)。
 
 ## 5. 线程模型
 
@@ -642,6 +650,8 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | friend | `xm_friend_cache_invalidation_failures_total` | Counter | — | 写已提交但缓存失效失败的键数（该键最多陈旧一个 TTL） |
 | friend | `xm_friend_guard_retries_total` | Counter | `kind`=missing_row / ensure_deadlock | 容量守卫的重试；正常运行时应恒为 0 |
 | friend | `xm_friend_count_underflows_total` | Counter | — | 好友计数减到 0 以下被拦截（计数与边数脱节，需人工排查） |
+| friend | `xm_friend_directory_quota_total` | Counter | `outcome`=allowed / rejected / error | 在线目录翻页的每分钟配额（error = Redis 故障被拒，fail-closed） |
+| friend | `xm_friend_sweep_pending_rows`、`xm_friend_sweep_idle_capacity_rows` | Gauge | `mode`=report_only / delete | 清理看到的过期终态申请 / 零好友容量行（受 batch-limit 封顶；合法模式每轮都刷含 0，长期不变说明清理没在跑） |
 | friend | `executor_*{name="friend-worker"}` | Micrometer 标准线程池指标 | — | 工作线程池状态（队列满见 `xm_friend_requests{result="overloaded"}`） |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
 | gateway | `xm_gateway_assign_gate_total` | Counter | `code`=0 / 100 / 400 / 404 / 410 / 429 / 500 / 503，`reason`=ok / queueing（登录排队）/ ratelimit（限流排队）/ 应答体 `error` 文案 | assign-gate 结局（含请求体不合法、未预期异常被兜底的路径）；16 个已知组合启动即注册（`xm_gateway_queue_status_total` 同形，8 个） |

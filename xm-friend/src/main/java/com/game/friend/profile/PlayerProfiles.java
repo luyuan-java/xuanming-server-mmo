@@ -29,7 +29,7 @@ public final class PlayerProfiles {
 
     private static final Logger log = LoggerFactory.getLogger(PlayerProfiles.class);
 
-    /** 每批人数（基线 online_directory.go 的 64）。 */
+    /** 好友列表补资料的每批人数（基线 friend_profiles.go 按 64 人一批读缓存与 data_service）。 */
     public static final int BATCH = 64;
 
     /** 一个玩家的展示资料。数值字段是 uint32 的位模式（列是 INT UNSIGNED）。 */
@@ -68,6 +68,23 @@ public final class PlayerProfiles {
             } catch (SQLException e) {
                 throw new DependencyException("读玩家资料失败", e);
             }
+        }
+        return out;
+    }
+
+    /**
+     * 一条 IN 语句读完（在线目录每轮一次：同基线每轮一次批查，不按 64 拆成多条）；调用方保证 id 数有界（在线目录单批 ≤ 1024）。
+     * 读失败或预算用完抛 {@link DependencyException}。
+     */
+    public Map<Long, Profile> loadStrictOnce(List<Long> playerIds, Deadline deadline) {
+        Map<Long, Profile> out = new HashMap<>();
+        if (playerIds.isEmpty()) {
+            return out;
+        }
+        try {
+            readBatch(playerIds, deadline, out);
+        } catch (SQLException e) {
+            throw new DependencyException("读玩家资料失败", e);
         }
         return out;
     }

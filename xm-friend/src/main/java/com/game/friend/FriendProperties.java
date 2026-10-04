@@ -19,6 +19,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param queryTimeout          每条 SQL 查询超时的上限（缺省 3 s；实际取它与剩余预算的较小者，不得超过预算）
  * @param workerThreads         阻塞工作线程数（MySQL / 等 Redis 都在这组线程上，不占 Dubbo 线程）
  * @param workerQueueCapacity   工作队列上限；满了直接回 1003，不无限堆积
+ * @param recommend             推荐与在线目录（{@link Recommend}）
+ * @param sweep                 后台清理（{@link Sweep}）
  */
 @ConfigurationProperties("xm.friend")
 public record FriendProperties(
@@ -33,7 +35,9 @@ public record FriendProperties(
         Duration pushTimeout,
         Duration queryTimeout,
         Integer workerThreads,
-        Integer workerQueueCapacity) {
+        Integer workerQueueCapacity,
+        Recommend recommend,
+        Sweep sweep) {
 
     /** 好友数硬天花板（基线 maxFriendsCeiling）。 */
     public static final int MAX_FRIENDS_CEILING = 300;
@@ -64,10 +68,64 @@ public record FriendProperties(
         }
         workerThreads = positiveOr(workerThreads, 16, "worker-threads");
         workerQueueCapacity = positiveOr(workerQueueCapacity, 1024, "worker-queue-capacity");
+        recommend = recommend == null ? new Recommend(null, null, null) : recommend;
+        sweep = sweep == null ? new Sweep(null, null, null, null) : sweep;
     }
 
     public FriendLimits limits() {
         return new FriendLimits(maxFriends, maxPendingRequests, maxIncomingRequests, maxBlocks);
+    }
+
+    /**
+     * 推荐（{@code xm.friend.recommend.*}）。
+     *
+     * @param defaultLimit 请求 limit = 0 时的取值（缺省 10，不得大于上限）
+     * @param maxLimit     limit 上限（缺省 20，硬天花板 20）
+     * @param maxExclude   exclude_player_ids 条数上限（缺省 64；超了回 1005，不截断）
+     */
+    public record Recommend(Integer defaultLimit, Integer maxLimit, Integer maxExclude) {
+
+        public static final int MAX_LIMIT_CEILING = 20;
+
+        public Recommend {
+            defaultLimit = positiveOr(defaultLimit, 10, "recommend.default-limit");
+            maxLimit = positiveOr(maxLimit, 20, "recommend.max-limit");
+            if (maxLimit > MAX_LIMIT_CEILING) {
+                throw new IllegalArgumentException("xm.friend.recommend.max-limit 不能超过 " + MAX_LIMIT_CEILING + ": " + maxLimit);
+            }
+            if (defaultLimit > maxLimit) {
+                throw new IllegalArgumentException("xm.friend.recommend.default-limit（" + defaultLimit
+                        + "）不能大于 max-limit（" + maxLimit + "）");
+            }
+            maxExclude = positiveOr(maxExclude, 64, "recommend.max-exclude");
+        }
+    }
+
+    /**
+     * 后台清理（{@code xm.friend.sweep.*}）：终态好友申请与零好友容量行。
+     *
+     * @param mode          {@code report_only}（缺省：只数不删，积压 &gt; 0 打告警日志）或 {@code delete}
+     * @param interval      节拍（缺省 5m）；单轮预算 min(interval, 30 s)
+     * @param retentionDays 保留天数（缺省 7，[1, 36500]）；也是容量行回收的保留期
+     * @param batchLimit    一轮至多处理的行数（缺省 1000）
+     */
+    public record Sweep(String mode, Duration interval, Integer retentionDays, Integer batchLimit) {
+
+        public Sweep {
+            mode = mode == null ? "report_only" : mode;
+            if (!mode.equals("report_only") && !mode.equals("delete")) {
+                throw new IllegalArgumentException("xm.friend.sweep.mode 只能是 report_only 或 delete: '" + mode + "'");
+            }
+            interval = positiveOr(interval, Duration.ofMinutes(5), "sweep.interval");
+            if (interval.compareTo(Duration.ofSeconds(1)) < 0) {
+                throw new IllegalArgumentException("xm.friend.sweep.interval 至少 1 秒: " + interval);
+            }
+            retentionDays = positiveOr(retentionDays, 7, "sweep.retention-days");
+            if (retentionDays > 36500) {
+                throw new IllegalArgumentException("xm.friend.sweep.retention-days 不能超过 36500: " + retentionDays);
+            }
+            batchLimit = positiveOr(batchLimit, 1000, "sweep.batch-limit");
+        }
     }
 
     private static Duration positiveOr(Duration value, Duration fallback, String name) {

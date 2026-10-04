@@ -9,6 +9,7 @@ import com.game.friend.metrics.FriendMetrics;
 import com.game.friend.metrics.FriendMetrics.RequestResult;
 import com.game.friend.support.Deadline;
 import com.game.friend.service.FriendService;
+import com.game.friend.service.RecommendService;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.friend.AcceptFriendRequest;
 import com.game.proto.friend.AddFriendRequest;
@@ -89,8 +90,8 @@ public final class FriendDispatcher {
     /**
      * @throws IllegalStateException 方法在 message_id.txt 里缺号、或类型与契约不符（同步产物与代码脱节）
      */
-    public FriendDispatcher(MessageIdRegistry registry, FriendService service, Executor executor, FriendMetrics metrics,
-                            long budgetMillis) {
+    public FriendDispatcher(MessageIdRegistry registry, FriendService service, RecommendService recommend, Executor executor,
+                            FriendMetrics metrics, long budgetMillis) {
         this.registry = registry;
         this.executor = executor;
         this.metrics = metrics;
@@ -106,7 +107,7 @@ public final class FriendDispatcher {
         add(byId, "Block", BlockRequest.class, service::block);
         add(byId, "Unblock", UnblockRequest.class, service::unblock);
         add(byId, "ListBlocks", ListBlocksRequest.class, service::listBlocks);
-        add(byId, "RecommendFriends", RecommendFriendsRequest.class, service::recommendFriends);
+        add(byId, "RecommendFriends", RecommendFriendsRequest.class, recommend::recommendFriends);
         this.routes = Collections.unmodifiableMap(byId);
     }
 

@@ -41,8 +41,6 @@ import com.game.proto.friend.GetPendingRequestsRequest;
 import com.game.proto.friend.GetPendingRequestsResponse;
 import com.game.proto.friend.ListBlocksRequest;
 import com.game.proto.friend.ListBlocksResponse;
-import com.game.proto.friend.RecommendFriendsRequest;
-import com.game.proto.friend.RecommendFriendsResponse;
 import com.game.proto.friend.RejectFriendRequest;
 import com.game.proto.friend.RejectFriendResponse;
 import com.game.proto.friend.RemoveFriendRequest;
@@ -381,13 +379,6 @@ public final class FriendService {
             response.addBlocks(BlockEntry.newBuilder().setBlockedPlayerId(row.blockedPlayerId()).setSinceMs(row.sinceMs()));
         }
         return response.build();
-    }
-
-    /** 推荐与在线目录随批次 4.1b；在那之前回 1006 功能未开放（客户端把 1006 当确定拒绝，不重连）。 */
-    public RecommendFriendsResponse recommendFriends(long me, RecommendFriendsRequest request, Deadline deadline) {
-        return RecommendFriendsResponse.newBuilder()
-                .setErrorMessage(tip(CommonErrorTip.common_error.kFeatureUnavailable_VALUE, "recommend not available"))
-                .build();
     }
 
     // ================================================================ 推送

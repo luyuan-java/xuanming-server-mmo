@@ -10,10 +10,14 @@ import com.game.discovery.presence.PlayerPresenceDirectory.StrictLookup;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.friend.cache.FriendCache;
 import com.game.friend.cache.InMemoryCacheRedis;
+import com.game.friend.directory.OnlineDirectory;
 import com.game.friend.metrics.FriendMetrics;
+import com.game.friend.quota.DirectoryQuota;
 import com.game.friend.quota.FriendRequestQuota;
 import com.game.friend.service.FriendService;
+import com.game.friend.service.RecommendService;
 import com.game.friend.store.FriendStore;
+import com.game.friend.store.RecommendStore;
 import com.game.friend.support.Deadline;
 import com.game.proto.friend.AddFriendRequest;
 import com.game.proto.friend.AddFriendResponse;
@@ -89,7 +93,11 @@ class FriendDispatcherTest {
                 ids -> CompletableFuture.completedFuture(new StrictLookup(Map.of(), 0, 0)),
                 (to, content) -> CompletableFuture.completedFuture(PlayerPushes.Outcome.OFFLINE),
                 metrics, 1000, Duration.ofMillis(100), System::currentTimeMillis, NOTIFY);
-        return new FriendDispatcher(REGISTRY, service, executor, metrics, 3500);
+        RecommendService recommend = new RecommendService(new RecommendStore(null, 1, (lo, span) -> 0),
+                new OnlineDirectory(null, "xm:presence:", (ids, d) -> Map.of()),
+                new DirectoryQuota(k -> CompletableFuture.completedFuture(1L), metrics), (ids, d) -> Map.of(),
+                ids -> CompletableFuture.completedFuture(new StrictLookup(Map.of(), 0, 0)), metrics, 10, 20, 64);
+        return new FriendDispatcher(REGISTRY, service, recommend, executor, metrics, 3500);
     }
 
     private static ClientCall call(int messageId, long playerId, ByteString body) {

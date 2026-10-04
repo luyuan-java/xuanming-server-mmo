@@ -487,6 +487,68 @@ class JdbcFriendStoreMysqlTest {
         assertThat(countRows("friend_request")).isZero();
     }
 
+    @Test
+    void 并发_回收与四条写路径同时跑_不出错不出1213_不变量成立() throws Exception {
+        JdbcFriendStore s = store(LIMITS);
+        SweepStore sweeper = new SweepStore(dataSource, 10);
+        java.util.concurrent.atomic.AtomicBoolean writersDone = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicLong swept = new java.util.concurrent.atomic.AtomicLong();
+        List<Callable<Object>> tasks = new ArrayList<>();
+        for (int w = 0; w < 4; w++) {
+            long a = 9000 + w * 2L;
+            long b = a + 1;
+            tasks.add(() -> {
+                for (int i = 0; i < 12; i++) {
+                    age(a, b); // 让这一对的容量行可被回收，逼出「守卫缺行 → 重补」
+                    assertThat(s.addRequest(a, b, d())).isEqualTo(AddResult.OK);
+                    age(a, b);
+                    assertThat(s.accept(a, b, d())).isEqualTo(AcceptResult.OK);
+                    age(a, b);
+                    assertThat(s.remove(a, b, d())).isEqualTo(RemoveResult.REMOVED);
+                    age(a, b);
+                    assertThat(s.block(a, b, d())).isEqualTo(BlockResult.OK);
+                    s.unblock(a, b, d());
+                }
+                return null;
+            });
+        }
+        for (int r = 0; r < 4; r++) {
+            tasks.add(() -> {
+                while (!writersDone.get()) {
+                    SweepStore.Result result = sweeper.sweepIdleCapacityRows("delete", 1, 1000, System.currentTimeMillis(),
+                            () -> true);
+                    assertThat(result.error()).isNull();
+                    swept.addAndGet(result.deleted());
+                }
+                return null;
+            });
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(tasks.size());
+        try {
+            List<Future<Object>> futures = new ArrayList<>();
+            for (Callable<Object> task : tasks) {
+                futures.add(pool.submit(task));
+            }
+            for (int i = 0; i < 4; i++) {
+                futures.get(i).get(120, TimeUnit.SECONDS);
+            }
+            writersDone.set(true);
+            for (int i = 4; i < futures.size(); i++) {
+                futures.get(i).get(60, TimeUnit.SECONDS);
+            }
+        } finally {
+            writersDone.set(true);
+            pool.shutdownNow();
+        }
+        assertThat(swept.get()).isPositive();
+        assertInvariants();
+    }
+
+    /** 把这一对玩家的容量行改成「很早以前建的」（只有零好友的行会被回收）。 */
+    private static void age(long a, long b) throws SQLException {
+        exec("UPDATE friend_capacity SET created_ms = 2 WHERE player_id IN (" + a + "," + b + ")");
+    }
+
     private static void deleteCapacity(long playerId) {
         try {
             exec("DELETE FROM friend_capacity WHERE player_id = " + playerId);
@@ -514,6 +576,9 @@ class JdbcFriendStoreMysqlTest {
         assertPointLookup(JdbcFriendStore.UPDATE_REQUEST_STATUS, 16, 3, 1L, 1L, 4L, 1);
         assertPointLookup(JdbcFriendStore.DELETE_EDGE, 16, 1L, 2L);
         assertPointLookup(JdbcFriendStore.DECREMENT_COUNT, 8, 1L, 1L);
+        // 清理的逐行删也是按完整主键（提交点复核条件只是附加过滤）
+        assertPointLookup(SweepStore.DELETE_TERMINAL, 16, 1L, 4L, 2, 3, Long.MAX_VALUE);
+        assertPointLookup(SweepStore.DELETE_IDLE_CAPACITY, 8, 1L, Long.MAX_VALUE);
     }
 
     private static void assertPointLookup(String sql, int keyLen, Object... args) throws SQLException {
