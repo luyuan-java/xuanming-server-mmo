@@ -51,7 +51,10 @@ class ClientDispatcherTest {
     private static final int LEAVE_MSG = 17;
     private static final int SCENE_MSG = 77;
     private static final int GM_MSG = 37;
-    private static final int GUILD_MSG = 500;
+    /** 未接入 Java 版的后端域（夹具里不配后端）。 */
+    private static final int BATTLE_MSG = 500;
+    /** 帮会推送占位 220（应答类型 Empty：tip 为 0 不回包，tip ≠ 0 回信封）。 */
+    private static final int GUILD_NOTIFY_MSG = 220;
     private static final int FRIEND_MSG = 234;
     private static final int SCENE_NODE = 7;
     private static final long PLAYER = 42L;
@@ -61,7 +64,8 @@ class ClientDispatcherTest {
         case LEAVE_MSG -> new MessageRoute(id, "login", false, "ClientPlayerLogin.LeaveGame");
         case SCENE_MSG -> new MessageRoute(id, "scene");
         case GM_MSG -> new MessageRoute(id, "scene", true, Integer.toString(id), true);
-        case GUILD_MSG -> new MessageRoute(id, "guild");
+        case BATTLE_MSG -> new MessageRoute(id, "battle");
+        case GUILD_NOTIFY_MSG -> new MessageRoute(id, "guild", false, "GuildService.NotifyGuildChanged");
         case FRIEND_MSG -> new MessageRoute(id, "friend");
         default -> null;
     };
@@ -70,6 +74,8 @@ class ClientDispatcherTest {
     private final FakeLogin login = new FakeLogin();
     /** friend 后端（与 login 同一条 Dubbo 契约，复用同一个替身）。 */
     private final FakeLogin friend = new FakeLogin();
+    /** guild 后端（同上）。 */
+    private final FakeLogin guild = new FakeLogin();
     private final FakeLinks links = new FakeLinks();
     private final SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
@@ -77,8 +83,8 @@ class ClientDispatcherTest {
     private final RecordingPresence presence = new RecordingPresence();
     private final ClientDispatcher dispatcher = new ClientDispatcher(
             new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
-            ROUTES, TIP_MSG, login, Map.of("friend", friend), links, registry, new GateLimits(4, 3, Duration.ZERO), metrics,
-            presence);
+            ROUTES, TIP_MSG, login, Map.of("friend", friend, "guild", guild), links, registry,
+            new GateLimits(4, 3, Duration.ZERO), metrics, presence);
     private final SceneEventRouter router = new SceneEventRouter(registry, dispatcher);
 
     // ================================================================ 握手
@@ -449,7 +455,7 @@ class ClientDispatcherTest {
     @Test
     void 未接入Java版的域推23服务不可用() {
         EmbeddedChannel ch = verified();
-        ch.writeInbound(request(5, GUILD_MSG, "x"));
+        ch.writeInbound(request(5, BATTLE_MSG, "x"));
         assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat(login.calls).isEmpty();
         assertThat(ch.isOpen()).isTrue();
@@ -538,6 +544,47 @@ class ClientDispatcherTest {
         ch.runPendingTasks();
         assertThat(friend.calls).hasSize(2);
         assertThat(friend.calls.get(1).getSession().getPlayerId()).as("按入队时的身份转发").isEqualTo(PLAYER);
+    }
+
+    @Test
+    void 帮会推送占位220上行_后端回tip时带请求id回信封_tip为0不回包() {
+        // guild-spec §7.3 / §11.5：220 的应答类型是 Empty，后端对客户端上行回 tip_id = 1003；
+        // gate 照样回信封（带请求 id、没有业务体），客户端按请求 id 对上，不会卡到超时
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(7, GUILD_NOTIFY_MSG, "uplink"));
+        assertThat(guild.calls).hasSize(1);
+        assertThat(friend.calls).as("guild 域只发给 guild 后端").isEmpty();
+        assertThat(guild.calls.get(0).getMessageId()).isEqualTo(GUILD_NOTIFY_MSG);
+        guild.complete(ClientReply.newBuilder().setTipId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build());
+        ch.runPendingTasks();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply.getMessageId()).isEqualTo(GUILD_NOTIFY_MSG);
+        assertThat(reply.getId()).isEqualTo(7);
+        assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(reply.getSerializedMessage()).as("没有业务回包").isEmpty();
+
+        ch.writeInbound(request(8, GUILD_NOTIFY_MSG, "uplink"));
+        guild.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        assertThat((Object) ch.readOutbound()).as("Empty 应答且 tip 为 0 不回包").isNull();
+    }
+
+    @Test
+    void 帮会调用在途不阻塞好友与login() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, GUILD_NOTIFY_MSG, "slow"));
+        ch.writeInbound(request(2, FRIEND_MSG, "f"));
+        ch.writeInbound(request(3, LOGIN_MSG, "l"));
+        assertThat(friend.calls).as("guild 调用没回来，friend 照常发").hasSize(1);
+        assertThat(login.calls).as("guild 调用没回来，login 照常发").hasSize(1);
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
+        login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
+        ch.runPendingTasks();
+        assertThat(List.of(((MessageContent) ch.readOutbound()).getMessageId(), ((MessageContent) ch.readOutbound()).getMessageId()))
+                .containsExactlyInAnyOrder(FRIEND_MSG, LOGIN_MSG);
+        guild.complete(ClientReply.newBuilder().setTipId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(GUILD_NOTIFY_MSG);
     }
 
     @Test
@@ -1135,7 +1182,7 @@ class ClientDispatcherTest {
     void 指标_请求按路由与方法计去向_login调用计耗时() {
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, 99_999, "x"));
-        ch.writeInbound(request(2, GUILD_MSG, "x"));
+        ch.writeInbound(request(2, BATTLE_MSG, "x"));
         ch.writeInbound(request(3, SCENE_MSG, "x"));
         ch.writeInbound(request(4, LOGIN_MSG, "x"));
         login.complete(ClientReply.getDefaultInstance());
@@ -1146,7 +1193,7 @@ class ClientDispatcherTest {
 
         assertThat(meters.get("xm.gate.client.requests").tag("route", "unknown").tag("method", "unknown")
                 .tag("result", "unknown_message").counter().count()).isEqualTo(1);
-        assertThat(requests("guild", GUILD_MSG, "unsupported")).isEqualTo(1);
+        assertThat(requests("battle", BATTLE_MSG, "unsupported")).isEqualTo(1);
         assertThat(requests("scene", SCENE_MSG, "not_in_scene")).isEqualTo(1);
         assertThat(requests("login", LOGIN_MSG, "forwarded")).isEqualTo(2);
         assertThat(loginCalls("handle", "ok")).isEqualTo(1);

@@ -17,6 +17,7 @@ import com.game.robot.scenario.DrainScenario;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.FriendScenario;
 import com.game.robot.scenario.GuardScenario;
+import com.game.robot.scenario.GuildScenario;
 import com.game.robot.scenario.KillSwitchScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
@@ -126,6 +127,12 @@ public final class RobotMain {
                     TeamScenario scenario = new TeamScenario(flow, registry, Path.of(options.tableDir()),
                             options.accountPrefix(), options.runTag(), options.zoneId(), options.requestTimeout());
                     title = "xm-robot team：" + scenario.accountA() + " 等，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.GUILD) {
+                    GuildScenario scenario = new GuildScenario(flow, registry, options.accountPrefix(), options.runTag(),
+                            options.zoneId(), options.requestTimeout());
+                    title = "xm-robot guild：" + scenario.accountA() + " 等，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.FRIEND) {

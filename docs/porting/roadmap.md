@@ -58,7 +58,7 @@
 | 4.1 | 好友（申请 / 同意 / 删除 / 列表 / 黑名单 / 推荐 / 在线目录 / 推送）；robot friend-smoke | friend-* | ✅ 4.1a `85f7aef`（核心与推送）、4.1b `c0b3cd1`（推荐 / 在线目录 / 清理）；规格 docs/porting/friend-spec.md，有意差异见 PARITY「好友」行 |
 | 4.2 | 聊天（世界 / 私聊、历史、限速）；robot chat-smoke | chat-send、chat-history | ✅ `dd7b80b`（独立进程 xm-chat；处理全程异步——PARITY「聊天」行）|
 | 4.3 | 组队（名册 / 申请邀请 / 推送 / 场景投影与跟随）；robot team-smoke | team-roster、team-apply-invite、team-notify、team-scene-follow | ✅ `05ffdf9`（独立进程 xm-team；在线四态取 presence + location、跟随走本节点内存、整队开战恒回 4027 待 6.4——PARITY「组队」行）|
-| 4.4 | 帮会核心（建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 申请审批 / 推送 220 / 排行）；robot guild-smoke | guild-* 核心段 |
+| 4.4 | 帮会核心（建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 申请审批 / 推送 220 / 排行）；robot guild-smoke | guild-* 核心段 | ✅（提交见 git log「批次 4.4」；独立进程 xm-guild、过载回 in-band 14021、经济 / 活动号暂回 1006——PARITY「帮会核心」行）|
 | 4.5 | 帮会经济（资产指令账本与投递、捐献、升级、商店）；robot guild-economy | guild-asset-*、guild-donate、guild-upgrade、guild-shop |
 | 4.6 | 帮会活动（公共底座、列表、灯会、团圆、同道历练 239–243） | guild-activity-*、guild-lantern、guild-reunion、guild-trial |
 | 4.7 | 聚宝斋只读面（浏览 / 详情 / 收藏 / 货架）；robot trade-smoke | trade-browse-listings、trade-listing-detail、trade-favorite、trade-my-shelf |

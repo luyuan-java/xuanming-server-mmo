@@ -54,6 +54,8 @@ xm:
     chat-url: tri://127.0.0.1:20884
     # 组队后端 xm-team（Dubbo group team）
     team-url: tri://127.0.0.1:20885
+    # 帮会后端 xm-guild（Dubbo group guild）
+    guild-url: tri://127.0.0.1:20886
   gate:
     client-port: 11000
     # 对外通告的客户端端口（经 NodePort / 端口映射对外时与 client-port 不同）；0 或不配 = client-port

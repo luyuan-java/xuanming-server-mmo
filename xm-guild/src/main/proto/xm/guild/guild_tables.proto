@@ -1,0 +1,97 @@
+// xm-guild 的四张核心表（xm_java 库），经 xm-pbmysql 建表 / 补列 / 补索引（只扩展、从不删改）。guild-spec §1.2、§7.5。
+//
+// 形状与 mmorpg proto/guild/guild_db.proto 的 GuildRecord / GuildPlayerStateRecord / GuildMemberRecord / GuildApplicationRecord
+// 逐字段相同（表名、列、字段号、主键、唯一键、二级索引、TiDB 选项），生成的 DDL 与 Go proto2mysql 逐字节相同
+// （store 包的 GuildTablesTest 拿同步来的 com.game.proto.guild.*Record 对拍）。但这是 Java 版自己的一份：
+// 同步来的那份是契约产物、不许手改，Java 的库表也不该随 mmorpg 漂移（先例 xm-friend/src/main/proto/xm/friend/friend_tables.proto）。
+//
+// 改表纪律（guild_db.proto:11-12）：字段只追加、字段号永不复用（删字段用 reserved 占住，pbmysql 按列注释 pb:N 识别字段）；
+// index 组只能追加到末尾，不得调序（idx_<表>_<序号> 按位置命名）。追加区：GuildRow 从 12、GuildPlayerStateRow 从 3、
+// GuildMemberRow 从 8、GuildApplicationRow 从 5 起。
+//
+// message 的声明顺序就是全库表间锁序（tables.go:15-21）：G guild < S guild_player_state < M guild_member < A guild_application；
+// 4.5 / 4.6 依次在本文件末尾追加 Q guild_player_op_seq(5) < O guild_asset_op(6) < C guild_daily_counter(7) < P guild_activity_progress(8)
+// （字段号照抄 guild_db.proto:96-228，含三个枚举、uk_guild_asset_op 与三组索引；guild-spec §1.4、§6.2）。
+// 任何事务都不得在持有靠后表的行锁之后回头去锁靠前的表（两个登记例外见 JdbcGuildStore 类注释）。
+syntax = "proto3";
+
+package xm.guild;
+
+import "proto2mysql/proto2mysql_option.proto";
+
+option java_package = "com.game.guild.store.pb";
+option java_multiple_files = true;
+option java_outer_classname = "GuildTablesProto";
+option (proto2mysql.db) = true;
+
+// G：帮会行（guild_db.proto:19-40）。
+message GuildRow {
+  option (proto2mysql.table_name) = "guild";
+  option (proto2mysql.primary_key) = "guild_id";
+  option (proto2mysql.unique_key) = "name_norm";      // uk_guild：帮名全服唯一（不分 zone），判重只看规范化值
+  option (proto2mysql.index) = "zone_id;leader_id";   // idx_guild_0 = 合服工具 / 分区；idx_guild_1 = 按帮主（服务内无查询使用，§9.1 第 14 条）
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 guild_id = 1;        // xm-guild 自己的全服雪花（NodeTypes.GUILD，作用域 0；D8）
+  string name = 2;            // 展示名：Go 口径 TrimSpace 后原样保存（不做 NFKC），≤ 24 码点，不进索引
+  uint64 leader_id = 3;       // 与 guild_member.role=3 同事务维护；只有转让会改
+  uint32 level = 4;           // 建帮写 1；4.5 升级改写
+  string announcement = 5;    // ≤ 600 UTF-8 字节（logic 校验）；读时 COALESCE(announcement, '')
+  uint64 create_time_ms = 6;  // 建帮时刻（服务进程时钟）
+  uint32 max_members = 7;     // 建帮写 GuildLevel[1].max_members；4.5 升级改写；申请 / 审批判满读的是这一列
+  uint32 zone_id = 8;         // 归属区：清榜与事务内合服闸门的权威来源
+  int64 score = 9;            // 排行分的权威副本，ZSET 由它重建（绝对值写入）
+  uint64 funds = 10;          // 帮会资金：建帮写 0，4.5 起写入
+  string name_norm = 11;      // NFKC → TrimSpace → 逐码点小写，≤ 48 码点；不声明 max_length，保持缺省 VARCHAR(191)（与 Go DDL 逐字相同）
+  // 追加区：从 12 起。
+}
+
+// S：玩家串行化守卫行（guild_db.proto:42-53）。每玩家一行，只作锁行；player_id = 0 是全局插入守卫哨兵行（启动期建好、永不删除）。
+message GuildPlayerStateRow {
+  option (proto2mysql.table_name) = "guild_player_state";
+  option (proto2mysql.primary_key) = "player_id";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;       // 行由 INSERT IGNORE 在业务事务外（全局插入守卫下的短事务里）建出，永不删除
+  uint64 updated_ms = 2;      // 建行时刻，只供诊断
+  // 追加区：从 3 起。刻意不存「待审申请数」：别的路径删申请时不锁申请人行，计数会漂。
+}
+
+// M：帮会成员（guild_db.proto:55-71）。
+message GuildMemberRow {
+  option (proto2mysql.table_name) = "guild_member";
+  option (proto2mysql.primary_key) = "guild_id,player_id";
+  option (proto2mysql.unique_key) = "player_id";      // uk_guild_member：一人至多一个帮
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 guild_id = 1;
+  uint64 player_id = 2;
+  uint32 role = 3;                   // 0 成员 / 1 长老 / 3 帮主（2 是空号；权限比较一律换算成 GuildRoles.Rank）
+  uint64 join_time_ms = 4;
+  uint64 last_active_ms = 5;         // 只在入帮时写入（恒等于 join_time_ms，§9.1 第 12 条）
+  uint64 contribution_total = 6;     // 累计帮贡；4.4 写 0，4.5 起写入
+  uint64 contribution_balance = 7;   // 可消费帮贡；4.4 写 0，4.5 起写入
+  // 追加区：从 8 起。
+}
+
+// A：待审入帮申请（guild_db.proto:73-86）。只存待审：通过、拒绝、撤回、过期、解散都删行。
+message GuildApplicationRow {
+  option (proto2mysql.table_name) = "guild_application";
+  option (proto2mysql.primary_key) = "guild_id,player_id";
+  option (proto2mysql.index) = "player_id;expire_ms";  // idx_guild_application_0 = 本人申请；idx_guild_application_1 = 过期清理
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 guild_id = 1;
+  uint64 player_id = 2;        // 申请人
+  uint64 apply_ms = 3;         // 最近一次申请（同帮重复申请会刷新）的时刻
+  uint64 expire_ms = 4;        // apply_ms + GuildRule.application_expire_hours × 3 600 000
+  // 追加区：从 5 起。
+}

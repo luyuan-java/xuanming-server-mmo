@@ -17,6 +17,9 @@ public final class DubboGroups {
     /** 组队（{@code proto/team/...}），由 xm-team 提供。 */
     public static final String TEAM = "team";
 
+    /** 帮会（{@code proto/guild/...}，服务 {@code guildpb.GuildService}），由 xm-guild 提供。 */
+    public static final String GUILD = "guild";
+
     private DubboGroups() {
     }
 }

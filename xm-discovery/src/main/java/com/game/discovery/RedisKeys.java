@@ -85,11 +85,17 @@ public final class RedisKeys {
     }
 
     /**
-     * 好友缓存的代次键 {@code <数据键>:gen}：写路径失效时写一个新的唯一值（带 TTL）再删数据键，回填只在代次未变时写——
-     * 防「写之前读到旧快照的回填」在写之后落地。
+     * 版本化缓存的代次键 {@code <数据键>:gen}（好友、帮会共用这一条规则）：写路径失效时写一个新的唯一值（带 TTL）再删数据键，
+     * 回填只在代次未变时写——防「写之前读到旧快照的回填」在写之后落地。与数据键共用 hash tag（数据键里的 {@code {...}} 原样保留），
+     * 两段 Lua 在 Cluster 下同槽。
      */
-    public static String friendCacheGeneration(String dataKey) {
+    public static String cacheGeneration(String dataKey) {
         return dataKey + ":gen";
+    }
+
+    /** 好友缓存的代次键 {@code <数据键>:gen}（即 {@link #cacheGeneration}；保留原名，键形状不变）。 */
+    public static String friendCacheGeneration(String dataKey) {
+        return cacheGeneration(dataKey);
     }
 
     /** 发好友申请的每分钟配额计数 {@code xm:friend:{<player_id>}:quota}（固定窗口，INCR + EXPIRE）。 */
@@ -151,6 +157,67 @@ public final class RedisKeys {
     /** 被邀请人的邀请反查 {@code xm:{team}:invite:<player_id>}（ZSET：成员 = team_id，分数 = expire_at_ms；TTL 1 h）。 */
     public static String teamInvite(long playerId) {
         return PREFIX + "{team}:invite:" + Long.toUnsignedString(playerId);
+    }
+
+    /**
+     * 帮会快照缓存 {@code xm:guild:{g:<guild_id>}:snap}（xm-guild 读写）：值为 xm-guild 自有的 {@code xm.guild.GuildSnapshot} protobuf
+     * （字段同基线 GuildData，含 score / funds / 成员帮贡），带 TTL；代次键是 {@link #cacheGeneration}（{@code …:snap:gen}）。
+     * 基线 {@code guild:v2:{id}}（guild_repo.go:136-140）。帮会号按无符号十进制。
+     */
+    public static String guildSnapshot(long guildId) {
+        return PREFIX + "guild:{g:" + Long.toUnsignedString(guildId) + "}:snap";
+    }
+
+    /**
+     * 玩家 → 帮会映射缓存 {@code xm:guild:{p:<player_id>}:gid}：值为帮会号的无符号十进制，<b>未入帮的 0 也缓存</b>，带 TTL；
+     * 代次键是 {@link #cacheGeneration}（{@code …:gid:gen}）。基线 {@code player_guild:v2:{id}}（guild_repo.go:142-144、:258）。
+     */
+    public static String guildOfPlayer(long playerId) {
+        return PREFIX + "guild:{p:" + Long.toUnsignedString(playerId) + "}:gid";
+    }
+
+    /**
+     * 入帮申请推送冷却 {@code xm:guild:{g:<guild_id>}:apply-push:<player_id>}（{@code SET NX PX 60000}，值 "1"）：
+     * 同一（帮会, 申请人）60 s 内至多推一次 APPLICATION_RECEIVED。基线 {@code guild:apply_push:{g}:{p}}（guild_manage_repo.go:683-700）。
+     */
+    public static String guildApplyPush(long guildId, long playerId) {
+        return PREFIX + "guild:{g:" + Long.toUnsignedString(guildId) + "}:apply-push:" + Long.toUnsignedString(playerId);
+    }
+
+    /**
+     * 帮会全服榜 {@code xm:guild:{rank}:all}（ZSET：成员 = 帮会号无符号十进制，分数 = 排行分）。排行的全部键共用 hash tag {@code {rank}}，
+     * 多键 Lua 与换榜的 RENAME 在 Cluster 下同槽（guild-spec D16）。基线 {@code guild_rank}（guild_repo.go:154）。
+     */
+    public static String guildRankAll() {
+        return PREFIX + "guild:{rank}:all";
+    }
+
+    /** 帮会区榜 {@code xm:guild:{rank}:zone:<zone_id>}（形状同 {@link #guildRankAll}；只放 zone ≠ 0 的帮）。基线 {@code guild_rank:zone:{z}}。 */
+    public static String guildRankZone(int zoneId) {
+        return PREFIX + "guild:{rank}:zone:" + Integer.toUnsignedString(zoneId);
+    }
+
+    /**
+     * 帮会区榜索引 {@code xm:guild:{rank}:zones}（SET：成员 = 出现过区榜的 zone_id 无符号十进制），代替基线的 {@code SCAN guild_rank:zone:*}：
+     * 入榜脚本 SADD、重建换榜时整体重写，清榜按它找全部区榜键。
+     */
+    public static String guildRankZones() {
+        return PREFIX + "guild:{rank}:zones";
+    }
+
+    /** 帮会排行维护锁 {@code xm:guild:{rank}:lock}（值 = 持有者令牌，PX 30 s 并由持有者续期）。基线 {@code guild_rank:maintenance_lock}（5 min）。 */
+    public static String guildRankLock() {
+        return PREFIX + "guild:{rank}:lock";
+    }
+
+    /** 重建排行的全服榜临时键 {@code xm:guild:{rank}:tmp:<token>:all}（带 PEXPIRE，换榜时 RENAME 成正式键）。 */
+    public static String guildRankTmpAll(String token) {
+        return PREFIX + "guild:{rank}:tmp:" + token + ":all";
+    }
+
+    /** 重建排行的区榜临时键 {@code xm:guild:{rank}:tmp:<token>:zone:<zone_id>}。 */
+    public static String guildRankTmpZone(String token, int zoneId) {
+        return PREFIX + "guild:{rank}:tmp:" + token + ":zone:" + Integer.toUnsignedString(zoneId);
     }
 
     /**

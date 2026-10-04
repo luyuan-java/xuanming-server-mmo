@@ -46,6 +46,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-friend` | 进程（Spring Boot + Dubbo） | 好友：申请 / 同意 / 拒绝 / 删除 / 列表 / 黑名单与好友事件推送（Dubbo group `friend`，端口 20883；四张表经 xm-pbmysql，§4.13） |
 | `xm-chat` | 进程（Spring Boot + Dubbo） | 聊天 v1：世界频道与私聊的发言（校验、幂等、限速、落历史）与拉取历史（Dubbo group `chat`，端口 20884；数据只在 Redis，§4.14） |
 | `xm-team` | 进程（Spring Boot + Dubbo） | 组队：建队 / 申请 / 邀请 / 离队 / 踢人 / 转让 / 解散、队伍快照与邀请推送（Dubbo group `team`，端口 20885；权威数据只在 Redis，§4.16） |
+| `xm-guild` | 进程（Spring Boot + Dubbo） | 帮会核心：建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 转让 / 申请审批 / 推送 220 / 排行（Dubbo group `guild`，端口 20886；四张表经 xm-pbmysql，快照缓存与排行在 Redis，§4.17） |
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景目录：玩家该进哪个场景节点的哪个场景 |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送 |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
@@ -92,7 +93,7 @@ Java 代码不得依赖这套目录，具体做法：
 - **调用方鉴权（必需）**：Dubbo 把 `127.*` 视为无效绑定地址，`dubbo.protocol.host=127.0.0.1` 实际监听 `0.0.0.0`
   （`DUBBO_IP_TO_BIND` 也不接受回环地址），login（20881）/ scene-manager（20882）的端口**无法只绑本机**，
   而 `ClientMessageService` 完全信任调用方填的 `SessionContext`。所以 Java 版进程间的每次 Dubbo 调用都要带鉴权附件：
-  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-friend / xm-chat / xm-team / xm-gate / xm-gateway 必填，缺失即拒绝启动），
+  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-friend / xm-chat / xm-team / xm-guild / xm-gate / xm-gateway 必填，缺失即拒绝启动），
   调用方附 `xm-auth-ts`（Unix 秒）与 `xm-auth-mac = HMAC-SHA256(secret, "接口全名|方法名|ts")` 的 64 字节小写 hex，
   提供方常数时间比较 MAC、再验 ts 与本地时钟相差 ≤ 60s，不过即抛 `RpcException(AUTHORIZATION)`，不进入业务代码，
   对外原因只有一句「调用方鉴权失败」。算法唯一出处 `xm-common` 的 `DubboCallAuth`，过滤器在 `xm-api` 的
@@ -449,6 +450,26 @@ mmorpg：`go/match/internal/team`（与匹配同进程）+ C++ scene `player_tea
   回到逻辑线程处理——不是队长且队长在本节点另一个场景实例 → 同步 `switchScene` 到队长所在实例；队长自己进场 → 对本节点其他成员各检查一次
   （只跟随、不再扇出）。跨节点 / 跨 zone 不跟随（同基线）。不发、不收 scene 刷新事件（scene 不缓存 TeamId，进场时现读）。
 
+### 4.17 帮会核心（xm-guild）
+
+mmorpg：`go/guild`。Java 版是独立进程 xm-guild（Dubbo group `guild`，端口 20886，管理端口 18110），gate 把 `guildpb.GuildService` 的
+28 个消息号经按会话的后端队列转过来（`handle` 不重试）。规格与逐条出处见 `docs/porting/guild-spec.md`：
+
+- **权威数据在 MySQL**（`xm_java` 库四张表：`guild` / `guild_player_state` / `guild_member` / `guild_application`，Java 自有
+  `xm/guild/guild_tables.proto` 经 xm-pbmysql 建表，DDL 与 Go proto2mysql 逐字节相同），业务 SQL 手写；连接会话级 RC、
+  `innodb_lock_wait_timeout=1`、`useAffectedRows=true`。所有写走同一个事务基座 `GuildTx`：原始 JDBC 事务、按固定锁序（G → S → M → A，
+  同表内按无符号 id 升序）`FOR UPDATE`，授权一律对锁住的行判；1213 整体重跑 ≤ 3 次、1205 / 子预算（1500 ms，解散 2500 ms）用完 /
+  COMMIT 结果不明都归一为写冲突 14021；建帮与申请的「全局插入守卫」靠 `guild_player_state` 行与哨兵行 0。
+- **Redis 只做缓存与排行**：帮会快照与玩家→帮会映射是版本化 cache-aside（代次 = UUID + Redis TIME，回填遇代次不符即放弃，按键单飞），
+  提交之后先失效（失败的键后台按 100 / 400 / 1600 ms 重试）再推送；授权从不看缓存。排行 ZSET（全服 + 各区 + 区索引）由 MySQL 的
+  `score` 列权威重建（启动时全量重建、维护锁 30 s + 续期）。
+- **前置顺序同基线**：会话 → 归属区（`player.zone_id`）→ 合服闸门（4.4 恒放行）→ 业务前置 → 事务；请求体里的 player_id / zone_id 一律忽略。
+- **错误语义**：业务拒绝 in-band（帮会段 tip，parameters 是基线的英文原因串）；依赖故障 / 处理器异常回**信封 1003**（同基线：客户端随之隔离帮会模块）；
+  过载（工作队列满、排队超预算）回 in-band 14021「帮会操作繁忙」（客户端遇到任何信封错误会停用帮会直到重登，暂时过载不能用信封）；
+  上行 8（UpdateGuildScore）/ 220 回信封 1003；4.5 / 4.6 的 10 个号暂回 in-band 1006。
+- **推送 220**（`GuildChangedS2C{kind, guild_id, actor, target}`）经 `PlayerPushes`，失效缓存之后发，失败不影响回包；
+  申请入帮通知帮主有 60 s 冷却（`SET NX`）。guild_id 由全服雪花租约（`NodeTypes.GUILD`）发，失败回 in-band 14008。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -657,7 +678,7 @@ mmorpg：`go/match/internal/team`（与匹配同进程）+ C++ scene `player_tea
 
 每个进程用 **Micrometer** 记指标，经 **Spring Boot Actuator** 以 Prometheus 文本格式导出（选型见 tech-stack.md）。
 指标名与标签只在每个进程的一个类里定义，业务代码只调语义方法：gate `GateMetrics`、login `LoginMetrics`、
-scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`。
+scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`、guild `GuildMetrics`。
 
 | 进程 | 抓取地址（默认） | 说明 |
 |---|---|---|
@@ -666,12 +687,13 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | xm-friend | `http://127.0.0.1:18107/actuator/prometheus` | 管理专用端口 |
 | xm-chat | `http://127.0.0.1:18108/actuator/prometheus` | 管理专用端口 |
 | xm-team | `http://127.0.0.1:18109/actuator/prometheus` | 管理专用端口 |
+| xm-guild | `http://127.0.0.1:18110/actuator/prometheus` | 管理专用端口 |
 | xm-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
 | xm-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
 | xm-scene | `http://127.0.0.1:18104/actuator/prometheus` | 管理专用端口；同机多个 scene 实例要各用 `SERVER_PORT` 错开（与链路端口一样） |
 | xm-data | `http://127.0.0.1:18106/actuator/prometheus` | Web 进程：同一端口上还有带令牌的运维接口 `/admin/**`（§4.5），默认只绑本机 |
 
-- **非 Web 进程的管理端口**：gate / login / friend / chat / team / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
+- **非 Web 进程的管理端口**：gate / login / friend / chat / team / guild / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
   Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。
   默认只绑 `127.0.0.1`（与 mmorpg 开发环境的 Prometheus 端口同口径），跨机抓取用 `XM_MANAGEMENT_ADDRESS` 指定内网地址；
   端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。actuator 只暴露 `health` 与 `prometheus` 两个端点。
@@ -730,6 +752,13 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | team | `xm_team_matches_total` | Counter | `outcome`=rejected / internal / unknown_code / success / gather_failed / ticket_failed | 整队开战（4.3 只会出现 rejected，6.4 接开战） |
 | team | `xm_team_cross_zone_allowed` | Gauge | — | 是否允许跨区组队（多实例取值不一致时用它观察） |
 | team | `executor_*{name="team-worker"}`、`{name="team-push"}` | Micrometer 标准线程池指标 | — | 请求工作池 / 推送执行器 |
+| guild | `xm_guild_requests_seconds` | Timer | `method`=GuildService 的方法名 / unrouted，`result`=ok / business_error / fault（in-band 14008）/ internal_error（信封 1003）/ overloaded / bad_request / unauthenticated / forbidden / unsupported | 每个客户端请求的耗时与结果（基线 serverbase 的 rpc_inband_* 与 rpc_duration_seconds） |
+| guild | `xm_guild_pushes_total` | Counter | `kind`=13 个变更种类的小写串 / other，`outcome`=ok / offline / error / session_error | 推送 220 按收件人计 |
+| guild | `xm_guild_tx_deadlocks_total`、`xm_guild_tx_budget_exceeded_total`、`xm_guild_tx_lock_wait_timeouts_total` | Counter | `op`=固定集合（create / set_role / kick / transfer / leave / apply / cancel / review / disband / announcement / verify_mapping / score / insert_guard 及 4.5 / 4.6 预留） | 事务死锁重跑 / 子预算用完 / 1205 |
+| guild | `xm_guild_cache_invalidation_failures_total` | Counter | `op` | 提交后失效缓存，后台重试用尽 |
+| guild | `xm_guild_cache_total` | Counter | `cache`=snapshot / mapping，`result`=hit / miss / fill_skipped / fill_failed / error | 帮会快照与玩家→帮会映射缓存 |
+| guild | `xm_guild_profile_lookup_failures_total`、`xm_guild_online_lookups_total{outcome}`、`xm_guild_rank_ops_total{op,outcome}` | Counter | 见左 | 展示名读失败、在线批量读（ok / timeout / error）、排行写 / 删 / 重建（ok / lock_timeout / error） |
+| guild | `executor_*{name="guild-worker"}` | Micrometer 标准线程池指标 | — | 请求工作池 |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
 | 开了热关停的进程 | `xm_killswitch_rules` | Gauge | — | 当前生效的规则条数（快照作废后为 0） |
 | 开了热关停的进程 | `xm_killswitch_sync_failures_total` | Counter | — | 从 Redis 读规则失败的次数（§4.15） |

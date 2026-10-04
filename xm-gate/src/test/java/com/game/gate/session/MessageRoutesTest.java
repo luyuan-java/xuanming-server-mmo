@@ -3,6 +3,7 @@ package com.game.gate.session;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.DubboGroups;
+import com.game.common.killswitch.KillSwitch;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import java.util.List;
@@ -84,6 +85,42 @@ class MessageRoutesTest {
             assertThat(route.method()).isEqualTo("ClientPlayerTeam." + method.methodName());
             assertThat(route.rpcPath()).isEqualTo("/teampb.ClientPlayerTeam/" + method.methodName());
         }
+    }
+
+    @Test
+    void 帮会服务28个号都路由到guild域_220不回包_8回包_热关停键与基线同名() {
+        // guild-spec §0.2 / §7.2 / §11.5：GuildService 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，
+        // 全部 28 个号（含只对内部开放的 8 与推送占位 220）转给 xm-guild，由后端按方法回信封 1003；
+        // 220 的应答类型是 Empty → tip 为 0 时 gate 不回包（tip ≠ 0 照样回信封，ClientDispatcher.replyToClient）。
+        List<String> core = List.of("CreateGuild", "GetGuild", "GetPlayerGuild", "LeaveGuild", "DisbandGuild",
+                "SetAnnouncement", "SetGuildMemberRole", "KickGuildMember", "TransferGuildLeader", "ApplyJoinGuild",
+                "CancelGuildApplication", "ListMyGuildApplications", "ListGuildApplications", "ReviewGuildApplication",
+                "GetGuildRank", "GetGuildRankByGuild");
+        List<String> internalAndPush = List.of("UpdateGuildScore", "NotifyGuildChanged");
+        List<String> economyAndActivity = List.of("GetGuildDonateOptions", "DonateToGuild", "UpgradeGuild", "GetGuildShop",
+                "BuyGuildShopGoods", "GetGuildActivities", "LightGuildLantern", "ClaimGuildReunion", "StartGuildTrial",
+                "RespondGuildTrialInvite");
+        List<MessageMethod> guild = registry.all().stream().filter(m -> m.serviceName().equals("GuildService")).toList();
+        assertThat(guild).as("契约里 GuildService 的方法").extracting(MessageMethod::methodName)
+                .containsExactlyInAnyOrderElementsOf(Stream.of(core, internalAndPush, economyAndActivity)
+                        .flatMap(List::stream).toList())
+                .hasSize(28);
+        for (MessageMethod method : guild) {
+            MessageRoute route = routes.clientRoute(method.messageId());
+            assertThat(route).as(method.key()).isNotNull();
+            assertThat(route.domain()).as(method.key()).isEqualTo(DubboGroups.GUILD);
+            assertThat(route.hasResponse()).as(method.key()).isEqualTo(!method.methodName().equals("NotifyGuildChanged"));
+            assertThat(route.method()).isEqualTo("GuildService." + method.methodName());
+            assertThat(route.gm()).as(method.key()).isFalse();
+            // 热关停规则按 rpcPath 匹配：与基线 etcd 键 /mmorpg/killswitch/guildpb.GuildService/<Method> 同名（guild-spec §7.2、D17）
+            assertThat(route.rpcPath()).isEqualTo("/guildpb.GuildService/" + method.methodName());
+            assertThat(KillSwitch.matchKeys(route.rpcPath()))
+                    .contains("guildpb.GuildService/" + method.methodName(), "guildpb.GuildService/*");
+        }
+        assertThat(routes.clientRoute(registry.requireId("GuildService", "NotifyGuildChanged")).hasResponse())
+                .as("220 应答是 Empty").isFalse();
+        assertThat(routes.clientRoute(registry.requireId("GuildService", "UpdateGuildScore")).hasResponse())
+                .as("8 应答是 UpdateGuildScoreResponse").isTrue();
     }
 
     @Test

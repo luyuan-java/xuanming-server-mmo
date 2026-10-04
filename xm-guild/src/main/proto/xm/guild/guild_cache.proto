@@ -1,0 +1,38 @@
+// xm-guild 的缓存值格式（只在 Java 版内部使用；归 xm-guild 所有，guild-spec §7.7、D10）。
+// Redis xm:guild:{g:<guild_id>}:snap 的值就是一条 GuildSnapshot（ByteArrayCodec 原样存取），带 TTL（xm.guild.cache-ttl，缺省 30 min）。
+// 形状同基线 go/guild/internal/data/guild_repo.go:86-114 的 GuildData / MemberData（基线存 JSON），但不依赖同步来的契约 proto：
+// 契约产物不许手改，Java 的缓存格式也不该随 mmorpg 漂移。基线的 Online 是 json:"-"、不入缓存，这里同样没有。
+// pending_application_count 不进缓存（guild-spec §1.11：它随申请变化，而申请写不失效快照）。
+// 字段号只追加、永不复用；改形状不需要迁移——旧值解不出新字段就是缺省值，最多陈旧一个 TTL。
+syntax = "proto3";
+
+package xm.guild;
+
+option java_package = "com.game.guild.cache.pb";
+option java_multiple_files = true;
+option java_outer_classname = "GuildCacheProto";
+
+// 一个帮会的完整快照：guild 行 + 全部 guild_member 行（loadGuild 装配，guild_repo.go:460-498）。
+message GuildSnapshot {
+  uint64 guild_id = 1;
+  string name = 2;              // 展示名（trim 后原样）
+  uint64 leader_id = 3;
+  uint32 level = 4;
+  string announcement = 5;
+  uint64 create_time_ms = 6;
+  uint32 max_members = 7;
+  uint32 zone_id = 8;           // 帮会归属区（合服后会被改写，快照最多陈旧一个 TTL；清榜只信事务内读到的 zone）
+  int64 score = 9;              // 排行分的 MySQL 权威副本（ZSET 只是读加速）
+  uint64 funds = 10;            // 帮会资金；4.4 恒 0，4.5 起写入
+  repeated GuildMemberSnapshot members = 11;  // player_id 无符号升序
+}
+
+// 一名成员（guild_member 行）。
+message GuildMemberSnapshot {
+  uint64 player_id = 1;
+  uint32 role = 2;              // 持久化编码 0 成员 / 1 长老 / 3 帮主（2 是空号），比较权限一律换算成 Rank
+  uint64 join_time_ms = 3;
+  uint64 last_active_ms = 4;    // 只在插入成员行时写 now，恒等于 join_time_ms（基线照搬）
+  uint64 contribution_total = 5;    // 累计帮贡；4.4 恒 0，4.5 起写入
+  uint64 contribution_balance = 6;  // 可消费帮贡；4.4 恒 0，4.5 起写入
+}

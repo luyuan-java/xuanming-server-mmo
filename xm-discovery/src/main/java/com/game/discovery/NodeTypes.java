@@ -20,6 +20,8 @@ public final class NodeTypes {
     public static final String SCENE_GUID = "scene-guid";
     /** xm-team：team_id 雪花 worker 的租约，作用域 0（全服；理由同 {@link #SCENE_GUID}）。 */
     public static final String TEAM = "team";
+    /** xm-guild：guild_id 雪花 worker 的租约，作用域 0（全服；理由同 {@link #SCENE_GUID}）。 */
+    public static final String GUILD = "guild";
 
     private NodeTypes() {
     }
