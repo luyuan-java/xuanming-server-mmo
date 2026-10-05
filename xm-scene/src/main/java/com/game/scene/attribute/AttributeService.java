@@ -526,10 +526,11 @@ public final class AttributeService {
     /**
      * 写操作统一前置（基线 CheckWritable，加点 / 洗点 / 开方案 / 切方案 / 改名 / GM 设等级都过这里，自动加点不过）。
      * 基线在这里拒绝两种情形：跨 zone / 跨节点交接冻结中（1005）与回合制战斗在途（25011 kAttributeInBattle）。
-     * Java 版两样都还不存在（交接冻结随路线图 5.2 / 5.4、回合制战斗随 6.3），接入时在这里补上；目前恒放行。
+     * 冻结已接入：跨节点换图的交出事务在途（{@link ScenePlayer#frozen()}）回 1005（客户端入口另按冻结策略收拢，scene-handoff-spec §5.9，
+     * 这里是纵深防御；选目标中不冻结）。173 自动加点只算不落、不过这道闸，冻结中由分发入口回 1005（D9）。回合制战斗随 6.3 接入。
      */
     private int checkWritable(ScenePlayer player) {
-        return 0;
+        return player.frozen() ? INVALID_PARAMETER : 0;
     }
 
     /** 扣金币（cost 为 uint64）：0 不扣；余额不足回 25012（基线 CanAfford）；扣成功记一条流水。 */

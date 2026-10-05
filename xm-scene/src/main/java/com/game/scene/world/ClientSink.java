@@ -28,4 +28,15 @@ public interface ClientSink {
      * gate 推 23 {@code TipInfoMessage{tipId}} 后关闭这个会话，不再发 PlayerLeave。
      */
     void playerKicked(long linkId, int sessionId, long playerId, long ownerEpoch, int tipId);
+
+    /**
+     * 跨节点换图的改绑指令（{@code PlayerTransfer}，scene-handoff-spec §5.3、§5.7）：交出事务已提交（{@code fromEpoch} → {@code toEpoch}），
+     * 实例已从本节点移除；gate 校验绑定后改绑到 {@code targetNodeId} 并向它发 {@code PlayerEnter{targetSceneId, toEpoch, transfer}}。
+     * 与发给该会话的其余下行走同一条链路、保持提交顺序。
+     *
+     * @param onWriteFailed 帧已交给链路、但最终没写出去（异步写失败）时调用；实现负责把它投递回场景逻辑线程执行
+     * @return false = 链路已断 / 不可写，帧<b>确定</b>没写出（{@code onWriteFailed} 不会再被调用）
+     */
+    boolean playerTransfer(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch, int targetNodeId,
+                           long targetSceneId, Runnable onWriteFailed);
 }

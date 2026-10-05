@@ -15,6 +15,7 @@ import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerLeave;
+import com.game.api.proto.PlayerTransfer;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionDirective;
 import com.game.api.proto.ToClient;
@@ -1150,16 +1151,19 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 更早一次进场的迟到建链失败回报_忽略() {
+    void 更早一次进场的迟到建链失败回报_只请login放弃那一次的epoch_不解绑新的进场() {
         EmbeddedChannel ch = reenteredWithNewEpoch();
 
         router.onEnterUndeliverable(SCENE_NODE, links.generation, links.sent.get(0).frame().getPlayerEnter());
         ch.runPendingTasks();
 
         assertThat((Object) ch.readOutbound()).isNull();
-        assertThat(login.abandoned).isEmpty();
+        assertThat(login.abandoned).as("那一帧从未写上链路：一律放弃它的 epoch（带围栏，已被取代时 login 侧什么也不做）")
+                .extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 5L));
         ch.writeInbound(request(9, SCENE_MSG, "skills"));
         assertThat(links.last().frame().hasClientForward()).isTrue();
+        assertThat(links.last().frame().getClientForward().getPlayerId()).isEqualTo(PLAYER);
     }
 
     // ================================================================ 数据归属被接管：scene 踢出
@@ -1220,6 +1224,391 @@ class ClientDispatcherTest {
         });
         assertThat(login.closed).hasSize(1);
         assertThat(registry.size()).isZero();
+    }
+
+    // ================================================================ 跨节点换图改绑（批次 5.2，scene-handoff-spec §5.7 / §10.4）
+
+    /** 源节点链路代次（{@link FakeLinks} 的缺省代次）。 */
+    private static final long SOURCE_GEN = 11;
+    private static final int TARGET_NODE = 8;
+    private static final long TARGET_SCENE = 901;
+    /** 到目标节点的链路代次。 */
+    private static final long TARGET_GEN = 21;
+
+    /** 源节点发来的改绑指令（会话 = 最早那个会话，玩家 = PLAYER）。 */
+    private PlayerTransfer transfer(long fromEpoch, long toEpoch) {
+        return PlayerTransfer.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER)
+                .setFromEpoch(fromEpoch).setToEpoch(toEpoch)
+                .setTargetSceneNodeId(TARGET_NODE).setTargetSceneId(TARGET_SCENE)
+                .build();
+    }
+
+    private PlayerEnterResult enterResult(long ownerEpoch, int tipId) {
+        return PlayerEnterResult.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setOwnerEpoch(ownerEpoch).setTipId(tipId).build();
+    }
+
+    private ToClient toClient(MessageContent content) {
+        return ToClient.newBuilder().addSessionIds(sessionId()).setMessageContent(content.toByteString()).build();
+    }
+
+    /** 已在源节点确认进场（epoch 5，代次 11），收到改绑指令（5 → 6）后改绑到目标节点（代次 21）、还没收到目标节点结果的会话。 */
+    private EmbeddedChannel transferred() {
+        EmbeddedChannel ch = confirmedInGame();
+        links.generation = TARGET_GEN;
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        ch.runPendingTasks();
+        assertThat(links.last().sceneNodeId()).isEqualTo(TARGET_NODE);
+        assertThat(links.last().frame().getPlayerEnter().getTransfer()).isTrue();
+        return ch;
+    }
+
+    private List<FakeLinks.Sent> sentSince(int index) {
+        return links.sent.subList(index, links.sent.size());
+    }
+
+    private double sceneTransfers(String result) {
+        return meters.get("xm.gate.scene.transfers").tag("result", result).counter().count();
+    }
+
+    @Test
+    void 改绑_不给源节点发PlayerLeave_向目标节点发交出进场_在线登记保持_目标确认后以新epoch重登在线() {
+        EmbeddedChannel ch = confirmedInGame();
+        int framesBefore = links.sent.size();
+        links.generation = TARGET_GEN;
+
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        ch.runPendingTasks();
+
+        assertThat(sentSince(framesBefore)).as("只向目标节点发一帧交出进场，不给源节点发 PlayerLeave")
+                .containsExactly(new FakeLinks.Sent(TARGET_NODE, NodeLinkFrame.newBuilder()
+                        .setPlayerEnter(PlayerEnter.newBuilder()
+                                .setSessionId(sessionId()).setPlayerId(PLAYER).setSceneId(TARGET_SCENE)
+                                .setOwnerEpoch(6).setTransfer(true))
+                        .build()));
+        assertThat((Object) ch.readOutbound()).as("改绑本身对客户端不可见").isNull();
+        assertThat(presence.events).as("gap 期间不撤在线登记")
+                .containsExactly(new RecordingPresence.Event(true, PLAYER, sessionId(), 5));
+        assertThat(dispatcher.deliverPush(session(), PLAYER, pushMessage())).as("gap 期间服务端推送照常送达")
+                .isEqualTo(GateMetrics.PushResult.DELIVERED);
+        assertThat((Object) ch.readOutbound()).isEqualTo(pushMessage());
+
+        ch.writeInbound(request(9, SCENE_MSG, "x"));
+        assertThat(links.last().sceneNodeId()).as("上行转发到目标节点").isEqualTo(TARGET_NODE);
+        assertThat(links.last().frame().getClientForward().getPlayerId()).isEqualTo(PLAYER);
+
+        MessageContent enterNotify = MessageContent.newBuilder().setMessageId(79).build();
+        router.onToClient(TARGET_NODE, TARGET_GEN, toClient(enterNotify));
+        router.onPlayerEnterResult(TARGET_NODE, TARGET_GEN, enterResult(6, 0));
+        ch.runPendingTasks();
+
+        assertThat((Object) ch.readOutbound()).as("目标节点的 79 照常下发").isEqualTo(enterNotify);
+        assertThat(presence.events).as("目标确认后以新 epoch 重登（在线标记一直为 true 也要重登）")
+                .containsExactly(new RecordingPresence.Event(true, PLAYER, sessionId(), 5),
+                        new RecordingPresence.Event(true, PLAYER, sessionId(), 6));
+        assertThat(ch.isOpen()).isTrue();
+        assertThat(login.abandoned).isEmpty();
+        assertThat(sceneTransfers("rebound")).isEqualTo(1);
+        assertThat(sceneTransfers("entered")).isEqualTo(1);
+        assertThat(meters.get("xm.gate.link.frames").tag("direction", "in").tag("type", "player_transfer").counter())
+                .as("链路帧计数器按帧类型自动出现").isNotNull();
+    }
+
+    @Test
+    void 改绑之前源节点的下行照常下发_之后源节点的迟到帧全部丢弃() {
+        EmbeddedChannel ch = confirmedInGame();
+        MessageContent before = MessageContent.newBuilder().setMessageId(63).setId(3).build();
+        MessageContent after = MessageContent.newBuilder().setMessageId(66).build();
+        links.generation = TARGET_GEN;
+
+        router.onToClient(SCENE_NODE, SOURCE_GEN, toClient(before));
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        router.onToClient(SCENE_NODE, SOURCE_GEN, toClient(after));
+        router.onPlayerKicked(SCENE_NODE, SOURCE_GEN, PlayerKicked.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setOwnerEpoch(5).setTipId(2017).build());
+        router.onPlayerEnterResult(SCENE_NODE, SOURCE_GEN, enterResult(5, 3023));
+        router.onLinkDown(SCENE_NODE, SOURCE_GEN);
+        ch.runPendingTasks();
+
+        assertThat((Object) ch.readOutbound()).as("同链路先到的下行（冻结中请求的应答）照常下发").isEqualTo(before);
+        assertThat((Object) ch.readOutbound()).as("改绑后源节点的下行 / 踢出 / 进场结果都不再属于这个会话").isNull();
+        assertThat(ch.isOpen()).as("源节点链路断开不影响已改绑的会话").isTrue();
+        ch.writeInbound(request(9, SCENE_MSG, "x"));
+        assertThat(links.last().sceneNodeId()).isEqualTo(TARGET_NODE);
+    }
+
+    @Test
+    void 过期的改绑指令_请login放弃新epoch_不改绑() {
+        EmbeddedChannel ch = confirmedInGame();
+        int framesBefore = links.sent.size();
+
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN + 1, transfer(5, 6));
+        router.onPlayerTransfer(SCENE_NODE + 1, SOURCE_GEN, transfer(5, 6));
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6).toBuilder().setPlayerId(PLAYER + 1).build());
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(4, 7));
+        ch.runPendingTasks();
+
+        assertThat(login.abandoned).as("代次 / 节点 / 玩家 / from_epoch 任一对不上都按过期放弃 to_epoch")
+                .extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 6L), tuple(PLAYER, 6L), tuple(PLAYER + 1, 6L), tuple(PLAYER, 7L));
+        assertThat(sentSince(framesBefore)).as("不改绑、不发进场").isEmpty();
+        assertThat(sceneTransfers("stale")).isEqualTo(4);
+        assertThat(sceneTransfers("rebound")).isZero();
+
+        MessageContent notify = MessageContent.newBuilder().setMessageId(66).build();
+        router.onToClient(SCENE_NODE, SOURCE_GEN, toClient(notify));
+        ch.runPendingTasks();
+        assertThat((Object) ch.readOutbound()).as("仍绑定在源节点").isEqualTo(notify);
+        assertThat(presence.events).containsExactly(new RecordingPresence.Event(true, PLAYER, sessionId(), 5));
+    }
+
+    @Test
+    void 会话不在场景里或正在关闭_改绑指令按过期放弃() {
+        // 会话号被复用给一个还没进游戏的新会话：绑定对不上
+        EmbeddedChannel fresh = verified();
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        fresh.runPendingTasks();
+        assertThat(login.abandoned).extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 6L));
+        assertThat(links.sent).isEmpty();
+        assertThat(fresh.isOpen()).isTrue();
+
+        // 正在关闭（推了 tip、等写完再关）的会话：不改绑，断线流程照常让源节点处理
+        fresh.writeInbound(request(1, ENTER_GAME_MSG, "enter"));
+        login.complete(enterGameReply());
+        fresh.runPendingTasks();
+        int framesBefore = links.sent.size();
+        session().closing = true;
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        fresh.runPendingTasks();
+        assertThat(login.abandoned).hasSize(2);
+        assertThat(sentSince(framesBefore)).isEmpty();
+        assertThat(sceneTransfers("stale")).isEqualTo(2);
+    }
+
+    @Test
+    void 会话已断开并从会话表释放_路由层照样请login放弃新epoch() {
+        EmbeddedChannel ch = confirmedInGame();
+        ch.close();
+        ch.runPendingTasks();
+        assertThat(registry.size()).isZero();
+        int framesBefore = links.sent.size();
+
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+
+        assertThat(login.abandoned).hasSize(1);
+        AbandonedEnter abandoned = login.abandoned.get(0);
+        assertThat(abandoned.getPlayerId()).isEqualTo(PLAYER);
+        assertThat(abandoned.getOwnerEpoch()).isEqualTo(6);
+        assertThat(abandoned.getSession().getGateNodeId()).isEqualTo(GATE_NODE);
+        assertThat(abandoned.getSession().getGateInstanceId()).isEqualTo("gate-uuid");
+        assertThat(abandoned.getSession().getZoneId()).isEqualTo(ZONE);
+        assertThat(abandoned.getSession().getSessionId()).isEqualTo(sessionId());
+        assertThat(sentSince(framesBefore)).isEmpty();
+        assertThat(sceneTransfers("orphan")).isEqualTo(1);
+    }
+
+    @Test
+    void 重复的改绑指令_不放弃目标节点正在用的新epoch() {
+        EmbeddedChannel ch = transferred();
+        int framesBefore = links.sent.size();
+
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        ch.runPendingTasks();
+
+        assertThat(login.abandoned).isEmpty();
+        assertThat(sentSince(framesBefore)).isEmpty();
+        assertThat(sceneTransfers("rebound")).isEqualTo(1);
+        assertThat(sceneTransfers("stale")).isEqualTo(1);
+        assertThat(ch.isOpen()).isTrue();
+    }
+
+    @Test
+    void 改绑后到目标的链路层不可用_放弃新epoch_推3023后断开_原因transfer_failed() {
+        EmbeddedChannel ch = confirmedInGame();
+        int framesBefore = links.sent.size();
+        links.generation = 0;
+
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        ch.runPendingTasks();
+
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(3023);
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(login.abandoned).extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 6L));
+        assertThat(sentSince(framesBefore)).as("只有那帧没受理的交出进场，没有 PlayerLeave")
+                .allSatisfy(s -> assertThat(s.frame().hasPlayerLeave()).isFalse());
+        assertThat(presence.events).last().isEqualTo(new RecordingPresence.Event(false, PLAYER, sessionId(), 0));
+        assertThat(login.closed).hasSize(1);
+        assertThat(login.closed.get(0).getSession().getPlayerId()).isEqualTo(PLAYER);
+        assertThat(registry.size()).isZero();
+        assertThat(disconnects("transfer_failed")).isEqualTo(1);
+        assertThat(sceneTransfers("rebound")).isEqualTo(1);
+        assertThat(sceneTransfers("link_unavailable")).isEqualTo(1);
+    }
+
+    @Test
+    void 目标节点拒绝交出进场_推tip后断开_不回大厅_不发PlayerLeave() {
+        EmbeddedChannel ch = transferred();
+        int framesBefore = links.sent.size();
+
+        router.onPlayerEnterResult(TARGET_NODE, TARGET_GEN, enterResult(6, 3023));
+        ch.runPendingTasks();
+
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(3023);
+        assertThat(ch.isOpen()).as("对照「进场被 scene 拒绝时解绑场景并推 tip」：交出进场失败不回大厅").isFalse();
+        assertThat(sentSince(framesBefore)).as("目标节点已拒绝并释放，不再发 PlayerLeave").isEmpty();
+        assertThat(login.abandoned).as("目标节点见过这次进场，由它释放").isEmpty();
+        assertThat(presence.events).last().isEqualTo(new RecordingPresence.Event(false, PLAYER, sessionId(), 0));
+        assertThat(login.closed).hasSize(1);
+        assertThat(disconnects("transfer_failed")).isEqualTo(1);
+        assertThat(sceneTransfers("enter_failed")).isEqualTo(1);
+    }
+
+    @Test
+    void 交出进场帧没能送到目标节点_放弃新epoch_推3023后断开() {
+        EmbeddedChannel ch = transferred();
+        PlayerEnter enter = links.last().frame().getPlayerEnter();
+        int framesBefore = links.sent.size();
+
+        router.onEnterUndeliverable(TARGET_NODE, TARGET_GEN, enter);
+        ch.runPendingTasks();
+
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(3023);
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(login.abandoned).extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 6L));
+        assertThat(sentSince(framesBefore)).isEmpty();
+        assertThat(disconnects("transfer_failed")).isEqualTo(1);
+        assertThat(sceneTransfers("undeliverable")).isEqualTo(1);
+    }
+
+    @Test
+    void 改绑后断线_PlayerLeave发往目标节点() {
+        EmbeddedChannel ch = transferred();
+        ch.close();
+        ch.runPendingTasks();
+
+        assertThat(links.last().sceneNodeId()).isEqualTo(TARGET_NODE);
+        assertThat(links.last().frame().getPlayerLeave()).isEqualTo(PlayerLeave.newBuilder()
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setVoluntary(false).build());
+        assertThat(login.closed).hasSize(1);
+        assertThat(disconnects("transfer_failed")).isZero();
+    }
+
+    @Test
+    void 改绑后LeaveGame_主动PlayerLeave发往目标节点_目标迟到的成功结果不再登记在线() {
+        EmbeddedChannel ch = transferred();
+        ch.writeInbound(request(2, LEAVE_MSG, ""));
+        login.complete(unbindReply());
+        ch.runPendingTasks();
+
+        assertThat(links.last().sceneNodeId()).isEqualTo(TARGET_NODE);
+        assertThat(links.last().frame().getPlayerLeave().getVoluntary()).isTrue();
+        assertThat(presence.events).last().isEqualTo(new RecordingPresence.Event(false, PLAYER, sessionId(), 0));
+
+        router.onPlayerEnterResult(TARGET_NODE, TARGET_GEN, enterResult(6, 0));
+        ch.runPendingTasks();
+        assertThat(presence.events).last().isEqualTo(new RecordingPresence.Event(false, PLAYER, sessionId(), 0));
+        assertThat(ch.isOpen()).isTrue();
+    }
+
+    @Test
+    void 改绑后目标链路断开_关闭会话() {
+        EmbeddedChannel ch = transferred();
+        int framesBefore = links.sent.size();
+
+        router.onLinkDown(TARGET_NODE, TARGET_GEN);
+        ch.runPendingTasks();
+
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(sentSince(framesBefore)).as("链路已断，不发 PlayerLeave").isEmpty();
+        assertThat(disconnects("scene_link_down")).isEqualTo(1);
+    }
+
+    @Test
+    void 非法的改绑指令_推3023后断开_绑定不动_断线照常让源节点放掉() {
+        EmbeddedChannel ch = confirmedInGame();
+        int framesBefore = links.sent.size();
+
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6).toBuilder().setTargetSceneNodeId(0).build());
+        ch.runPendingTasks();
+
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(3023);
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(login.abandoned).extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 6L));
+        assertThat(sentSince(framesBefore)).as("没改绑：断线流程向源节点发 PlayerLeave")
+                .containsExactly(new FakeLinks.Sent(SCENE_NODE, NodeLinkFrame.newBuilder()
+                        .setPlayerLeave(PlayerLeave.newBuilder().setSessionId(sessionId()).setPlayerId(PLAYER))
+                        .build()));
+        assertThat(sceneTransfers("invalid")).isEqualTo(1);
+        assertThat(disconnects("transfer_failed")).isEqualTo(1);
+    }
+
+    @Test
+    void 新epoch不大于旧epoch的改绑指令_按非法处理_不放弃任何epoch() {
+        EmbeddedChannel ch = confirmedInGame();
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 5));
+        ch.runPendingTasks();
+
+        assertThat(tipOf(ch.readOutbound())).as("不当成重复帧忽略：会话不能挂在可能已移除实例的源节点上").isEqualTo(3023);
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(login.abandoned).as("不能拿一个不比旧 epoch 新的值去放弃（可能就是源节点自己持有的）").isEmpty();
+        assertThat(sceneTransfers("invalid")).isEqualTo(1);
+    }
+
+    // ================================================================ 没送到 scene 的进场帧一律放弃（G10）
+
+    @Test
+    void 会话已断开并从会话表释放后_建链失败回报照样请login释放归属() {
+        EmbeddedChannel ch = enteredScene();
+        PlayerEnter enter = links.sent.get(0).frame().getPlayerEnter();
+        ch.close();
+        ch.runPendingTasks();
+        assertThat(registry.size()).isZero();
+
+        router.onEnterUndeliverable(SCENE_NODE, SOURCE_GEN, enter);
+
+        assertThat(login.abandoned).extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 5L));
+        assertThat(login.abandoned.get(0).getSession().getSessionId()).isEqualTo(sessionId());
+        assertThat(sceneTransfers("undeliverable")).as("普通进场不计改绑指标").isZero();
+    }
+
+    @Test
+    void 会话已关闭但还在会话表里_建链失败回报照样请login释放归属() {
+        EmbeddedChannel ch = enteredScene();
+        PlayerEnter enter = links.sent.get(0).frame().getPlayerEnter();
+        ch.writeInbound(request(2, LOGIN_MSG, "x"));
+        ch.close();
+        ch.runPendingTasks();
+        assertThat(registry.size()).as("login 调用在途：断线流程等它回来才释放会话").isEqualTo(1);
+
+        router.onEnterUndeliverable(SCENE_NODE, SOURCE_GEN, enter);
+        ch.runPendingTasks();
+        assertThat(login.abandoned).extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 5L));
+
+        login.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        assertThat(registry.size()).isZero();
+    }
+
+    @Test
+    void 改绑后断线_交出进场帧随建链失败没送到目标_路由层照样放弃新epoch() {
+        EmbeddedChannel ch = transferred();
+        PlayerEnter enter = links.last().frame().getPlayerEnter();
+        ch.close();
+        ch.runPendingTasks();
+        assertThat(registry.size()).isZero();
+
+        router.onEnterUndeliverable(TARGET_NODE, TARGET_GEN, enter);
+
+        assertThat(login.abandoned).extracting(AbandonedEnter::getPlayerId, AbandonedEnter::getOwnerEpoch)
+                .containsExactly(tuple(PLAYER, 6L));
+        assertThat(sceneTransfers("undeliverable")).isEqualTo(1);
     }
 
     // ================================================================ 按消息号限频（C++ MessageLimiter）

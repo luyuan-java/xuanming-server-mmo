@@ -12,6 +12,7 @@ import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerLeave;
+import com.game.api.proto.PlayerTransfer;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
@@ -24,6 +25,7 @@ import com.game.gate.metrics.GateMetrics.HandshakeResult;
 import com.game.gate.metrics.GateMetrics.LoginCall;
 import com.game.gate.metrics.GateMetrics.PushResult;
 import com.game.gate.metrics.GateMetrics.RequestResult;
+import com.game.gate.metrics.GateMetrics.SceneTransferResult;
 import com.game.gate.session.ClientSession.BackendPending;
 import com.game.gate.session.ClientSession.PendingRequest;
 import com.game.proto.ClientRequest;
@@ -49,8 +51,9 @@ import org.slf4j.LoggerFactory;
 /**
  * 会话层核心逻辑：令牌握手、按消息号路由、login 应答与会话指令、scene 链路事件、断线。
  *
- * <p>线程模型：所有 {@code on*} 方法都必须在会话所属的 EventLoop 上调用
- * （{@link ClientChannelHandler} 与 {@link SceneEventRouter} 保证）。本类自身不持有会话可变状态。
+ * <p>线程模型：所有带 {@link ClientSession} 参数的 {@code on*} 方法都必须在会话所属的 EventLoop 上调用
+ * （{@link ClientChannelHandler} 与 {@link SceneEventRouter} 保证）；{@code on*WithoutSession} 不碰会话状态，任意线程可调。
+ * 本类自身不持有会话可变状态。
  *
  * <p>客户端可见行为以 mmorpg C++ gate（{@code client_message_processor.cpp}）与 {@code docs/reference/} 的契约为准：
  * <ul>
@@ -64,6 +67,9 @@ import org.slf4j.LoggerFactory;
  *   <li>进场景失败（scene 回 3023、建链失败、链路层已关）：推 23 {3023}，会话回到「已登录、未进游戏」（玩家绑定清零），
  *       客户端可在同一连接上重试 EnterGame 或回选角建角（login 契约 §6.3）；</li>
  *   <li>数据归属被别的会话接管（scene 发来 {@code PlayerKicked}）：推 23 {2017} 后断开（本里程碑不发 34）。</li>
+ *   <li>跨节点换图（源 scene 发来 {@code PlayerTransfer}）：会话改绑到目标节点，不发 PlayerLeave、在线登记保持，客户端只看到
+ *       目标节点的 79 / 21 / 47；交出之后没能落到目标节点（目标节点拒绝、链路不可用 / 建链失败）推 23 {3023 或目标节点的 tip}
+ *       后断开——不回大厅、不弹回源场景、不发 34（scene-handoff-spec §5.7，D5 / D11）。</li>
  * </ul>
  */
 public final class ClientDispatcher {
@@ -610,7 +616,10 @@ public final class ClientDispatcher {
         s.send(content);
     }
 
-    /** scene 的进场结果。只认会话当前绑定的那次进场（节点、链路代次、玩家、epoch 都对得上）；失败即回到未进游戏。 */
+    /**
+     * scene 的进场结果。只认会话当前绑定的那次进场（节点、链路代次、玩家、epoch 都对得上）。
+     * 普通进场失败即回到未进游戏；交出进场（{@link ClientSession#transferEntering}）失败推 23 {tip} 后断开。
+     */
     public void onPlayerEnterResult(ClientSession s, int sceneNodeId, long linkGen, PlayerEnterResult result) {
         if (s.closed || !s.boundTo(sceneNodeId, linkGen) || s.scenePlayerId != result.getPlayerId()) {
             return;
@@ -618,6 +627,10 @@ public final class ClientDispatcher {
         if (result.getOwnerEpoch() != s.sceneOwnerEpoch) {
             log.debug("丢弃更早一次进场的迟到结果 session={} player_id={} 结果 epoch={} 当前 epoch={} tip={}", sid(s),
                     result.getPlayerId(), result.getOwnerEpoch(), s.sceneOwnerEpoch, result.getTipId());
+            return;
+        }
+        if (s.transferEntering) {
+            onTransferEnterResult(s, sceneNodeId, result);
             return;
         }
         if (result.getTipId() == 0) {
@@ -632,15 +645,182 @@ public final class ClientDispatcher {
         failEnter(s, result.getTipId());
     }
 
-    /** 进场帧没能送到 scene（建链失败 / 排队溢出）：scene 从未见过它，告诉 login 释放归属；失败即回到未进游戏。 */
-    public void onEnterUndeliverable(ClientSession s, int sceneNodeId, long linkGen, PlayerEnter enter) {
-        if (s.closed || !s.boundTo(sceneNodeId, linkGen) || s.scenePlayerId != enter.getPlayerId()
-                || s.sceneOwnerEpoch != enter.getOwnerEpoch()) {
+    /**
+     * 交出进场的结果。成功：<b>无条件</b>以新 epoch 重登在线目录——gap 期间 {@code presenceOnline} 一直为 true（服务端推送照常送达），
+     * 只看这个标记就不会重登，在线条目会停在旧 epoch（目录以 epoch 高者为准，新 epoch 的条目覆盖旧的）。
+     * 失败：目标节点已释放这次进场的 epoch，源节点的实例早已移除，推 23 {tip} 后断开（不回大厅）。
+     */
+    private void onTransferEnterResult(ClientSession s, int sceneNodeId, PlayerEnterResult result) {
+        s.transferEntering = false;
+        if (result.getTipId() == 0) {
+            metrics.sceneTransfer(SceneTransferResult.ENTERED);
+            log.info("跨节点换图进场成功 session={} player_id={} node={} epoch={}", sid(s), s.scenePlayerId, sceneNodeId,
+                    s.sceneOwnerEpoch);
+            if (!s.closing) {
+                s.presenceOnline = true;
+                presence.online(s.scenePlayerId, s.sessionId(), s.sceneOwnerEpoch);
+            }
             return;
         }
-        abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), "建链失败");
+        metrics.sceneTransfer(SceneTransferResult.ENTER_FAILED);
+        log.warn("目标 scene 拒绝跨节点换图进场，断开 session={} player_id={} node={} epoch={} tip={}", sid(s),
+                s.scenePlayerId, sceneNodeId, s.sceneOwnerEpoch, result.getTipId());
+        failTransfer(s, result.getTipId());
+    }
+
+    /**
+     * 进场帧没能送到 scene（建链失败 / 排队溢出）：scene 从未见过它，<b>一律</b>告诉 login 释放这次进场的归属——
+     * 不要求会话仍绑定在这次进场上、会话已关闭也一样（修 G10：之前会话已关闭时那份归属只能等租约过期）。
+     * 会话仍在这次进场上时：普通进场回到未进游戏；交出进场推 23 {3023} 后断开。
+     */
+    public void onEnterUndeliverable(ClientSession s, int sceneNodeId, long linkGen, PlayerEnter enter) {
+        boolean current = !s.closed && s.boundTo(sceneNodeId, linkGen) && s.scenePlayerId == enter.getPlayerId()
+                && s.sceneOwnerEpoch == enter.getOwnerEpoch();
+        abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), current ? "建链失败" : "建链失败（会话已不在这次进场上）");
+        if (enter.getTransfer()) {
+            metrics.sceneTransfer(SceneTransferResult.UNDELIVERABLE);
+        }
+        if (!current) {
+            return;
+        }
         // 与 scene 进场失败同一个码（scene 契约 §3.5：23 TipInfoMessage{3023}）。
+        if (s.transferEntering) {
+            log.warn("跨节点换图进场帧没能送到目标 scene，断开 session={} player_id={} node={} epoch={}", sid(s),
+                    enter.getPlayerId(), sceneNodeId, enter.getOwnerEpoch());
+            failTransfer(s, TIP_ENTER_SCENE_FAILED);
+            return;
+        }
         failEnter(s, TIP_ENTER_SCENE_FAILED);
+    }
+
+    /**
+     * 路由层找不到会话（已断开并从会话表释放，或会话线程已停）时没送到 scene 的进场帧：同样请 login 释放（G10）。
+     * 不碰任何会话状态，任意线程可调。
+     */
+    public void onEnterUndeliverableWithoutSession(int sceneNodeId, long linkGen, PlayerEnter enter) {
+        if (enter.getTransfer()) {
+            metrics.sceneTransfer(SceneTransferResult.UNDELIVERABLE);
+        }
+        abandonEnter(sessionlessContext(enter.getSessionId()), enter.getPlayerId(), enter.getOwnerEpoch(),
+                "建链失败（会话已释放）");
+    }
+
+    // ================================================================ 跨节点换图改绑（批次 5.2，scene-handoff-spec §5.7）
+
+    /**
+     * 源 scene 的改绑指令。源节点已用一笔带围栏的交出事务把冻结快照落库、把归属从 from_epoch 推进到 to_epoch（E → E+1），
+     * 实例已从源节点移除；E+1 只为这一帧铸出，{@code PlayerEnter{E+1}} 也只会由这个会话发出。
+     * <ul>
+     *   <li>会话已关闭 / 正在关闭，或绑定对不上（节点、链路代次、玩家、from_epoch 任一不符；会话号被复用给新会话时同样不符）：
+     *       过期帧，请 login 带围栏放弃 E+1，不改绑；</li>
+     *   <li>否则就地改绑（{@link #rebindForTransfer}）。</li>
+     * </ul>
+     * 改绑之后源节点的迟到帧（ToClient、PlayerKicked{E}、PlayerEnterResult{E}、链路断开）因 (节点, 代次) 不再匹配被丢弃；
+     * 改绑之前源节点发出的下行（冻结中请求的应答等）与本帧同链路、按序先到，照常下发。
+     */
+    public void onPlayerTransfer(ClientSession s, int sceneNodeId, long linkGen, PlayerTransfer transfer) {
+        long playerId = transfer.getPlayerId();
+        long fromEpoch = transfer.getFromEpoch();
+        long toEpoch = transfer.getToEpoch();
+        if (!s.closed && toEpoch > fromEpoch && s.scenePlayerId == playerId && s.sceneOwnerEpoch == toEpoch) {
+            // 会话已按这条指令改绑过（E+1 只由这一次交出铸出，会话绑定到 E+1 只能是因为它）：重复帧不能当过期处理，
+            // 否则会放弃目标节点正在用的 E+1。链路是 TCP、scene 只发一次，正常不会出现。
+            log.warn("重复的改绑指令，忽略 session={} player_id={} node={} epoch={}→{}", sid(s), playerId, sceneNodeId,
+                    fromEpoch, toEpoch);
+            metrics.sceneTransfer(SceneTransferResult.STALE);
+            return;
+        }
+        if (s.closed || s.closing || !s.boundTo(sceneNodeId, linkGen) || s.scenePlayerId != playerId
+                || s.sceneOwnerEpoch != fromEpoch) {
+            log.info("改绑指令已过期（会话已离开 / 已关闭 / 已换进别处），放弃新 epoch session={} player_id={} node={} gen={} epoch={}→{} "
+                            + "会话绑定 node={} gen={} player_id={} epoch={}", sid(s), playerId, sceneNodeId, linkGen, fromEpoch,
+                    toEpoch, s.sceneNodeId, s.sceneLinkGen, s.scenePlayerId, s.sceneOwnerEpoch);
+            metrics.sceneTransfer(SceneTransferResult.STALE);
+            abandonEnter(s, playerId, toEpoch, "改绑指令已过期");
+            return;
+        }
+        if (transfer.getTargetSceneNodeId() == 0 || toEpoch <= fromEpoch) {
+            // scene 的缺陷，不该出现。绑定不动：断线流程照常向源节点发 PlayerLeave（源节点若其实还持有实例就写回释放，
+            // 已交出就只记位置）；新 epoch 合法时一并放弃。
+            log.error("非法的改绑指令，断开 session={} player_id={} node={} 目标 node={} scene_id={} epoch={}→{}", sid(s),
+                    playerId, sceneNodeId, transfer.getTargetSceneNodeId(), transfer.getTargetSceneId(), fromEpoch, toEpoch);
+            metrics.sceneTransfer(SceneTransferResult.INVALID);
+            if (toEpoch > fromEpoch) {
+                abandonEnter(s, playerId, toEpoch, "改绑指令非法");
+            }
+            closeForTransfer(s, TIP_ENTER_SCENE_FAILED);
+            return;
+        }
+        rebindForTransfer(s, transfer);
+    }
+
+    /**
+     * 路由层找不到会话（已断开并从会话表释放，或会话线程已停）时的改绑指令：E+1 不会再有人为它发 PlayerEnter，
+     * 请 login 带围栏放弃（scene-handoff-spec §5.7：会话关闭后很快就从会话表删除，不在路由层收尾这份归属就只能等租约过期）。
+     * 不碰任何会话状态，任意线程可调。
+     */
+    public void onPlayerTransferWithoutSession(int sceneNodeId, long linkGen, PlayerTransfer transfer) {
+        log.info("改绑指令的会话已不在，放弃新 epoch session={} player_id={} node={} gen={} epoch={}→{}",
+                Integer.toUnsignedString(transfer.getSessionId()), transfer.getPlayerId(), sceneNodeId, linkGen,
+                transfer.getFromEpoch(), transfer.getToEpoch());
+        metrics.sceneTransfer(SceneTransferResult.ORPHAN);
+        abandonEnter(sessionlessContext(transfer.getSessionId()), transfer.getPlayerId(), transfer.getToEpoch(),
+                "改绑指令的会话已释放");
+    }
+
+    /**
+     * 就地改绑：<b>不发</b> PlayerLeave（源节点已移除实例）、<b>不撤</b>在线登记（gap 期间服务端推送不经 scene，照常送达）；
+     * 绑定改为 (目标节点, 新代次, 同一玩家, E+1) 并标记交出进场中，再向目标节点发 {@code PlayerEnter{transfer = true}}。
+     * 链路层不可用（send 返回 0）：放弃 E+1，推 23 {3023} 后断开。
+     */
+    private void rebindForTransfer(ClientSession s, PlayerTransfer transfer) {
+        int fromNode = s.sceneNodeId;
+        int targetNode = transfer.getTargetSceneNodeId();
+        s.sceneNodeId = targetNode;
+        s.sceneLinkGen = 0;
+        s.sceneOwnerEpoch = transfer.getToEpoch();
+        s.transferEntering = true;
+        metrics.sceneTransfer(SceneTransferResult.REBOUND);
+        PlayerEnter enter = PlayerEnter.newBuilder()
+                .setSessionId(s.sessionId())
+                .setPlayerId(s.scenePlayerId)
+                .setSceneId(transfer.getTargetSceneId())
+                .setOwnerEpoch(transfer.getToEpoch())
+                .setTransfer(true)
+                .build();
+        long gen = links.send(targetNode, NodeLinkFrame.newBuilder().setPlayerEnter(enter).build());
+        if (gen == 0) {
+            log.warn("跨节点换图改绑后到目标 scene 的链路层不可用，断开 session={} player_id={} 目标 node={} epoch={}", sid(s),
+                    enter.getPlayerId(), targetNode, enter.getOwnerEpoch());
+            metrics.sceneTransfer(SceneTransferResult.LINK_UNAVAILABLE);
+            abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), "链路层不可用");
+            failTransfer(s, TIP_ENTER_SCENE_FAILED);
+            return;
+        }
+        s.sceneLinkGen = gen;
+        log.info("会话跨节点换图改绑 session={} player_id={} node={}→{} scene_id={} link_gen={} epoch={}→{}", sid(s),
+                enter.getPlayerId(), fromNode, targetNode, transfer.getTargetSceneId(), gen, transfer.getFromEpoch(),
+                transfer.getToEpoch());
+    }
+
+    /**
+     * 交出之后没能落到目标节点：解绑场景（不发 PlayerLeave——目标节点要么没见过这次进场、要么已拒绝并释放；在线登记撤销），
+     * 推 23 {tip} 后断开。不回大厅（会话上没有可回的场景）、不弹回源场景、不发 34（D5 / D11）。
+     * 客户端重连后按位置记录与归属重新进游戏：E+1 已释放时立即可进，否则至多等租约过期。
+     */
+    private void failTransfer(ClientSession s, int tipId) {
+        unbindScene(s);
+        closeForTransfer(s, tipId);
+    }
+
+    private void closeForTransfer(ClientSession s, int tipId) {
+        if (s.closing) {
+            return;
+        }
+        metrics.disconnected(DisconnectReason.TRANSFER_FAILED);
+        s.closing = true;
+        discardPending(s);
+        s.sendThenClose(tip(tipId != 0 ? tipId : TIP_ENTER_SCENE_FAILED));
     }
 
     /**
@@ -747,20 +927,28 @@ public final class ClientDispatcher {
         s.sceneLinkGen = 0;
         s.scenePlayerId = 0;
         s.sceneOwnerEpoch = 0;
+        s.transferEntering = false;
+    }
+
+    private void abandonEnter(ClientSession s, long playerId, long ownerEpoch, String reason) {
+        abandonEnter(context(s), playerId, ownerEpoch, reason);
     }
 
     /**
-     * 一次进游戏夺得的归属确定没有送到任何 scene（PlayerEnter 从未写上链路）：告诉 login 释放（带 epoch 围栏），
-     * 玩家不必等归属租约过期就能再进。尽力而为，失败只记日志。
+     * 一份归属确定没有送到任何 scene（进游戏夺得的或跨节点交出铸出的，对应的 PlayerEnter 从未写上链路 / 不会再发）：
+     * 告诉 login 释放（带 epoch 围栏：已被新的夺权取代或已释放时什么也不做），玩家不必等归属租约过期就能再进。
+     * 尽力而为，失败只记日志。只读不可变字段、异步 Dubbo，任意线程可调。
+     *
+     * @param session 只用于 login 侧日志（会话已释放时由 {@link #sessionlessContext} 补齐）
      */
-    private void abandonEnter(ClientSession s, long playerId, long ownerEpoch, String reason) {
+    private void abandonEnter(SessionContext session, long playerId, long ownerEpoch, String reason) {
         if (playerId == 0 || ownerEpoch == 0) {
             return;
         }
         log.info("进场未送达 scene，请 login 释放归属 session={} player_id={} epoch={} 原因={}",
-                sid(s), playerId, ownerEpoch, reason);
+                Integer.toUnsignedString(session.getSessionId()), playerId, ownerEpoch, reason);
         AbandonedEnter event = AbandonedEnter.newBuilder()
-                .setSession(context(s))
+                .setSession(session)
                 .setPlayerId(playerId)
                 .setOwnerEpoch(ownerEpoch)
                 .build();
@@ -823,6 +1011,16 @@ public final class ClientDispatcher {
                 .setAccount(s.account)
                 .setPlayerId(s.playerId)
                 .setClientIp(s.clientIp())
+                .build();
+    }
+
+    /** 会话已不在会话表里时的上下文：只有本 gate 的身份与帧里的会话号（login 只拿它打日志）。 */
+    private SessionContext sessionlessContext(int sessionId) {
+        return SessionContext.newBuilder()
+                .setGateNodeId(identity.nodeId())
+                .setGateInstanceId(identity.instanceId())
+                .setSessionId(sessionId)
+                .setZoneId(identity.zoneId())
                 .build();
     }
 

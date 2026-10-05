@@ -60,6 +60,12 @@ class ViewCrowdBenchmarkTest {
         @Override
         public void playerKicked(long linkId, int sessionId, long playerId, long ownerEpoch, int tipId) {
         }
+
+        @Override
+        public boolean playerTransfer(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch,
+                                      int targetNodeId, long targetSceneId, Runnable onWriteFailed) {
+            return true;
+        }
     };
 
     @Test

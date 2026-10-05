@@ -11,6 +11,7 @@ import com.game.proto.PlayerMissionStatus;
 import com.game.scene.mission.MissionTables.MissionDef;
 import com.game.scene.mission.MissionTables.Slot;
 import com.game.scene.player.PlayerMissions;
+import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
 import com.game.scene.world.ScenePlayer;
@@ -42,15 +43,16 @@ public final class MissionFeature implements SceneFeature {
         this.missions = missions;
     }
 
+    /** 冻结策略（scene-handoff-spec §5.9）：193 只读；194 / 195 GATED，由 {@link MissionService} 的冻结闸回 1005。 */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "GetMissionList", GetMissionListRequest.class,
+        r.on(SERVICE, "GetMissionList", GetMissionListRequest.class, FreezePolicy.READ_ONLY,
                 (call, request) -> reply(call, MissionService.OK, missions.nowMillis()));
-        r.on(SERVICE, "AcceptMission", MissionActionRequest.class, (call, request) -> {
+        r.on(SERVICE, "AcceptMission", MissionActionRequest.class, FreezePolicy.GATED, (call, request) -> {
             long now = missions.nowMillis();
             reply(call, missions.accept(call.player(), request.getScope(), request.getMissionId(), now), now);
         });
-        r.on(SERVICE, "ClaimMissionReward", MissionActionRequest.class, (call, request) -> {
+        r.on(SERVICE, "ClaimMissionReward", MissionActionRequest.class, FreezePolicy.GATED, (call, request) -> {
             long now = missions.nowMillis();
             reply(call, missions.claim(call.player(), request.getScope(), request.getMissionId()), now);
         });

@@ -100,6 +100,36 @@ class PetServiceTest {
 
     // ------------------------------------------------------------------ 发放与列表
 
+    /**
+     * 跨节点换图冻结中（交出事务在途，scene-handoff-spec §0.5）：写操作都回 1005（基线 CheckWritable），零写入、不扣金币；
+     * 自动加点只算不落、不过写前置（同基线），照常回建议；选目标中不冻结。
+     */
+    @Test
+    void 冻结中写操作都回1005_零写入零流水_自动加点照常_选目标中不冻结() {
+        long petId = grant(1);
+        player.wallet().add(Wallet.GOLD, 10_000);
+        assertThat(service.allocate(player, petId, Map.of(403, 2L))).isZero();
+        audit.currencies.clear();
+        PlayerState before = WorldTestAccess.persistentState(player);
+        WorldTestAccess.startFreezing(player);
+
+        assertThat(service.summon(player, petId)).isEqualTo(1005);
+        assertThat(service.recall(player)).isEqualTo(1005);
+        assertThat(service.allocate(player, petId, Map.of(403, 3L))).isEqualTo(1005);
+        assertThat(service.reset(player, petId)).isEqualTo(1005);
+        assertThat(service.rename(player, petId, "小白")).isEqualTo(1005);
+        assertThat(service.grant(player, 1).tip()).isEqualTo(1005);
+        assertThat(service.autoAllocate(player, petId).tip()).as("只算不落，不过写前置").isZero();
+        assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        assertThat(audit.currencies).isEmpty();
+
+        WorldTestAccess.clearSwitch(player);
+        WorldTestAccess.startResolving(player);
+        assertThat(service.summon(player, petId)).isZero();
+        assertThat(service.rename(player, petId, "小白")).isZero();
+        assertThat(audit.currencies).as("改名扣 200 金币").hasSize(1);
+    }
+
     @Test
     void 新号列表为空_带可携带上限与改名金币() {
         PetListInfo list = service.buildList(player);

@@ -45,7 +45,8 @@ public record WorldChannelProperties(
 
     /** 频道放置模式（§4.6.3）。 */
     public enum Coverage {
-        /** 每个活节点对每张 World 图至少 1 个 ACTIVE 频道；新频道放在该图 ACTIVE 数最少的活节点（并列取节点号小的）。5.2 之前的缺省（Q1）。 */
+        /** 每个活节点对每张 World 图至少 1 个 ACTIVE 频道；新频道放在该图 ACTIVE 数最少的活节点（并列取节点号小的）。缺省（Q1）；
+         *  5.2 上线后仍保持缺省，双节点切片与 robot 验证跨节点换图后再切 hash（scene-handoff-spec Q4）。 */
         PER_NODE,
         /** 落点 = FNV-1a32(conf*1000+slot) 无符号取模活节点（按数值升序）；补建与再平衡同一个键（D5）。 */
         HASH

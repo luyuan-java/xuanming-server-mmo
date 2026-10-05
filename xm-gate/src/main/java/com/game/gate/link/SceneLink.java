@@ -46,6 +46,8 @@ public final class SceneLink {
     private final SceneLinkManager manager;
 
     private State state = State.NEW;
+    /** 曾经握手成功（到过 READY）：判死之后仍为 true。 */
+    private boolean handshaken;
     private final ArrayDeque<NodeLinkFrame> queue = new ArrayDeque<>();
     private Channel channel;
     /** 本连接发出的握手帧（每次建链现生成：鉴权时间戳取建链时刻）；ack 的 zone 与它比对。 */
@@ -67,6 +69,10 @@ public final class SceneLink {
 
     synchronized State state() {
         return state;
+    }
+
+    private synchronized boolean handshaken() {
+        return handshaken;
     }
 
     /**
@@ -151,24 +157,43 @@ public final class SceneLink {
         }
     }
 
-    /** 链路上收到一帧（链路 I/O 线程）。 */
+    /**
+     * 链路上收到一帧（链路 I/O 线程）。
+     *
+     * <p>scene 发来的业务下行（ToClient / PlayerEnterResult / PlayerKicked / PlayerTransfer）用<b>同一条</b>规则：只要这条链路握手成功过
+     * （对端身份核对过）就按到达顺序交给监听器，判死（DEAD）之后、连接真正关上之前读到的也照样交——判死可能来自别的线程
+     * （会话线程发现出站高水位），I/O 线程上这一批已读到的帧仍在逐个处理。不能只放行改绑指令而丢掉它前面的下行：
+     * 会话按改绑去了目标节点、之后的断链事件因已不绑定这条链路而被忽略，源节点在 PlayerTransfer 之前发的应答 / 推送就永远丢了
+     * （违背「PlayerTransfer 之前的 ToClient 照常下发」）。过期帧由会话线程按绑定（节点 + 代次）、玩家与 epoch 过滤；
+     * 仍绑定在这个死代次上的会话随后被断链事件关闭。从未握手成功的连接上来的帧不可信，忽略（这种连接上也不可能有已进场的会话）。
+     */
     void onFrame(NodeLinkFrame frame) {
         manager.metrics().linkFrameIn(frame.getBodyCase());
         switch (frame.getBodyCase()) {
             case HELLO_ACK -> onHelloAck(frame.getHelloAck());
             case TO_CLIENT -> {
-                if (state() == State.READY) {
+                if (handshaken()) {
                     manager.listener().onToClient(nodeId, generation, frame.getToClient());
                 }
             }
             case PLAYER_ENTER_RESULT -> {
-                if (state() == State.READY) {
+                if (handshaken()) {
                     manager.listener().onPlayerEnterResult(nodeId, generation, frame.getPlayerEnterResult());
                 }
             }
             case PLAYER_KICKED -> {
-                if (state() == State.READY) {
+                if (handshaken()) {
                     manager.listener().onPlayerKicked(nodeId, generation, frame.getPlayerKicked());
+                }
+            }
+            case PLAYER_TRANSFER -> {
+                // 改绑指令尤其不能丢：源节点已交出归属，丢了它新 epoch 就没人放弃、只能等租约过期。由会话线程按绑定裁决改绑或放弃。
+                if (handshaken()) {
+                    manager.listener().onPlayerTransfer(nodeId, generation, frame.getPlayerTransfer());
+                } else {
+                    log.warn("未握手成功的 scene 链路上收到改绑指令，忽略 node={} gen={} session={} player_id={}", nodeId,
+                            generation, Integer.toUnsignedString(frame.getPlayerTransfer().getSessionId()),
+                            frame.getPlayerTransfer().getPlayerId());
                 }
             }
             default -> log.warn("scene 链路收到不该由 scene 发出的帧，忽略 node={} type={}", nodeId, frame.getBodyCase());
@@ -200,6 +225,7 @@ public final class SceneLink {
                 return;
             }
             state = State.READY;
+            handshaken = true;
             flushed = queue.size();
             for (NodeLinkFrame queued : queue) {
                 channel.write(queued);

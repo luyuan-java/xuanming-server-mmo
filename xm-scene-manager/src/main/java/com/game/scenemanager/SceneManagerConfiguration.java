@@ -15,7 +15,8 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * 装配：配置表 → {@link WorldSceneConfigs}；Redis 节点目录 → {@link SceneNodeSource}；目录 + 软预占（{@code xm:world:*}）→
- * {@link ChannelSelector}；三者 → {@link SceneAssigner}。主世界频道的控制面在 {@code com.game.scenemanager.world.WorldChannelConfiguration}。
+ * {@link ChannelSelector}；三者 → {@link SceneAssigner}（进游戏）与 {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）。
+ * 主世界频道的控制面在 {@code com.game.scenemanager.world.WorldChannelConfiguration}。
  * {@link RedissonClient} 由 xm-discovery 的自动配置提供（{@code xm.redis.*}）。
  */
 @Configuration(proxyBeanMethods = false)
@@ -54,6 +55,13 @@ public class SceneManagerConfiguration {
     @Bean
     public SceneAssigner sceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector channelSelector) {
         return new SceneAssigner(source, worldConfigs, channelSelector);
+    }
+
+    /** 在线换图选跨节点目标（批次 5.2，scene-handoff-spec §5.4）：与进游戏分配共用目录、世界地图集合与选频道 + 软预占。 */
+    @Bean
+    public SwitchTargetSelector switchTargetSelector(SceneNodeSource source, WorldSceneConfigs worldConfigs,
+                                                     ChannelSelector channelSelector) {
+        return new SwitchTargetSelector(source, worldConfigs, channelSelector);
     }
 
     /**

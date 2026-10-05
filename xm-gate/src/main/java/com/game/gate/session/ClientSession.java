@@ -48,7 +48,10 @@ public final class ClientSession {
      * 它随 {@code SessionContext.player_id} 发给 login，login 据此拒绝已在游戏里的会话再次进游戏 / 建角。
      */
     long playerId;
-    /** 所在 scene 节点；0 = 不在场景里。以下四个「场景绑定」字段同生同灭（{@code unbindScene} 一起清）。 */
+    /**
+     * 所在 scene 节点；0 = 不在场景里。以下四个「场景绑定」字段与 {@link #transferEntering} 同生同灭（{@code unbindScene} 一起清）。
+     * 绑定的建立有两个入口：login 的 EnterScene 指令（进游戏），以及源 scene 的 PlayerTransfer（跨节点换图改绑）。
+     */
     int sceneNodeId;
     /** 进场帧所在的节点链路代次；与 {@link #sceneNodeId} 一起判定下行 / 链路事件是否属于本会话的当前场景。 */
     long sceneLinkGen;
@@ -59,6 +62,12 @@ public final class ClientSession {
     long scenePlayerId;
     /** 进场帧里的 owner_epoch：只认同一次进场的结果 / 踢出通知，丢弃更早一次进场的迟到帧。 */
     long sceneOwnerEpoch;
+    /**
+     * 当前绑定是跨节点换图的交出进场、目标节点还没回结果（{@code PlayerEnter.transfer = true} 已发出）。
+     * 这期间进场失败（目标节点拒绝、建链失败）不回大厅，推 23 {tip} 后断开：源节点已交出、实例已移除，会话上没有可回的场景。
+     * 由进场结果、未送达回报、链路断开、断线四条路径之一终结（后三条经 {@code unbindScene}）。
+     */
+    boolean transferEntering;
     /**
      * scene 已确认进场，{@link #scenePlayerId} 已登记进玩家在线目录（{@link PresenceRecorder#online}）；
      * 场景绑定结束或会话关闭时撤销。服务端推送（{@code GatePush}）只发给这种状态下、玩家对得上的会话。
@@ -106,12 +115,17 @@ public final class ClientSession {
         return channel;
     }
 
-    /** 把任务投递到会话所属线程（别的线程要动会话一律经它）。EventLoop 已关闭（进程退出中）时丢弃。 */
-    public void execute(Runnable task) {
+    /**
+     * 把任务投递到会话所属线程（别的线程要动会话一律经它）。EventLoop 已关闭（进程退出中）时丢弃并返回 false，
+     * 需要善后的调用方（例如必须放弃归属的链路事件）据此自己收尾。
+     */
+    public boolean execute(Runnable task) {
         try {
             channel.eventLoop().execute(task);
+            return true;
         } catch (RejectedExecutionException e) {
             log.debug("会话线程已关闭，丢弃任务 session={}", Integer.toUnsignedString(sessionId));
+            return false;
         }
     }
 

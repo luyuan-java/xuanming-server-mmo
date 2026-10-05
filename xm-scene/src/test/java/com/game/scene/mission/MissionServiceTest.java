@@ -170,6 +170,36 @@ class MissionServiceTest {
         assertThat(service.accept(player, 0, 12)).isZero();
     }
 
+    /**
+     * 跨节点换图冻结中（交出事务在途，scene-handoff-spec §0.5）：接取 / 领奖回 1005、条件事实丢弃（基线 player_mission 与
+     * mission_event_handler 同样丢），零写入、不发奖；解冻后照常推进、领奖。
+     */
+    @Test
+    void 冻结中接取领奖回1005_条件事实丢弃_零写入零流水_解冻后照常() {
+        player = withMissions(state().addCompletedIds(14).addClaimableIds(14).build());
+        assertThat(service.accept(player, 0, 4)).isZero();
+        audit.items.clear();
+        PlayerState before = WorldTestAccess.persistentState(player);
+        WorldTestAccess.startFreezing(player);
+
+        assertThat(service.accept(player, 0, 12)).isEqualTo(1005);
+        assertThat(service.claim(player, 0, 14)).isEqualTo(1005);
+        assertThat(service.checkAccept(player, 0, 12, clock.epochMillis())).as("列表里的可接取同样为否").isEqualTo(1005);
+        kill(1, 1);
+        service.onLevelChanged(player);
+
+        assertThat(missions().isAccepted(4)).as("击杀事实被丢弃，任务没推进").isTrue();
+        assertThat(progress(4, 0)).isZero();
+        assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        assertThat(audit.items).isEmpty();
+
+        WorldTestAccess.clearSwitch(player);
+        kill(1, 1);
+        assertThat(missions().isComplete(4)).isTrue();
+        assertThat(service.claim(player, 0, 14)).isZero();
+        assertThat(questRewards()).isNotEmpty();
+    }
+
     @Test
     void 待领但未完成的存档也算已完成_接取回5001() {
         player = withMissions(state().addClaimableIds(4).build());

@@ -223,9 +223,12 @@ public final class MissionService {
         cascade.drain();
     }
 
-    /** 跨服冻结随跨服（5.x）接入：冻结期间拒绝接取 / 领奖、丢弃事实（基线 1005）。 */
+    /**
+     * 冻结闸：跨节点换图的交出事务在途（{@link ScenePlayer#frozen()}）时拒绝接取 / 领奖（1005）、丢弃条件事实（基线 player_mission 与
+     * mission_event_handler 同样丢）——冻结快照已在写库，之后的进度随实例移除而丢，丢在入口才不会与快照分叉。选目标中不冻结。
+     */
     private static boolean writable(ScenePlayer player) {
-        return true;
+        return !player.frozen();
     }
 
     // ------------------------------------------------------------------ 连锁

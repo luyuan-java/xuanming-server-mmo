@@ -670,6 +670,16 @@ class MovementSyncTest {
             public void saveProgress(PlayerSave save, Consumer<ProgressResult> onDone) {
                 inner.saveProgress(save, onDone);
             }
+
+            @Override
+            public void handOff(PlayerSave frozen, Consumer<HandOffOutcome> onDone) {
+                inner.handOff(frozen, onDone);
+            }
+
+            @Override
+            public void probe(HandOffOutcome.Failed failed, Consumer<ProbeOutcome> onDone) {
+                inner.probe(failed, onDone);
+            }
         };
         AtomicLong ids = new AtomicLong(9000);
         FakeSceneTables tables = new FakeSceneTables();

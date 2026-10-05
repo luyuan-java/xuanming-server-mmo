@@ -22,6 +22,7 @@ import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.Scene;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
+import com.game.scene.world.WorldTestAccess;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -243,6 +244,21 @@ class TeamFollowServiceTest {
 
         assertThat(sceneOf(M1)).isSameAs(map1);
         assertThat(count(TeamFollowResult.SAME_SCENE)).isEqualTo(1);
+        assertThat(count(TeamFollowResult.FOLLOWED)).isZero();
+    }
+
+    @Test
+    void 自己有在途的跨节点换图_不跟随_计switching() {
+        team(LEADER, LEADER, M1);
+        enter(LEADER, map2);
+        settle();
+        ScenePlayer m1 = enter(M1, map1);
+        WorldTestAccess.startResolving(m1);
+
+        settle();
+
+        assertThat(sceneOf(M1)).as("换图的结局优先（scene-handoff-spec §5.5）").isSameAs(map1);
+        assertThat(count(TeamFollowResult.SWITCHING)).isEqualTo(1);
         assertThat(count(TeamFollowResult.FOLLOWED)).isZero();
     }
 

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.scene.audit.GainAnomalyDetector.Threshold;
+import com.game.scene.storage.HandOffSettings;
 import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,50 @@ class SceneNodePropertiesTest {
                 .isInstanceOf(BindException.class);
         assertThatThrownBy(() -> bind(Map.of("xm.scene.channel-plan-poll-interval", "2m")))
                 .isInstanceOf(BindException.class);
+    }
+
+    @Test
+    void 交出参数_缺省边际15秒语句时限3秒_可覆盖_越界拒启() {
+        SceneNodeProperties.SceneSettings s = bind(Map.of()).scene();
+        assertThat(s.transferLeaseMargin()).isEqualTo(Duration.ofSeconds(15));
+        assertThat(s.transferProbeStatementTimeout()).isEqualTo(Duration.ofSeconds(3));
+        assertThat(s.handOff()).isEqualTo(HandOffSettings.DEFAULT);
+
+        SceneNodeProperties.SceneSettings custom = bind(Map.of("xm.scene.transfer-lease-margin", "12s",
+                "xm.scene.transfer-probe-statement-timeout", "2s")).scene();
+        assertThat(custom.handOff()).isEqualTo(new HandOffSettings(Duration.ofSeconds(12), Duration.ofSeconds(2)));
+
+        // 续约周期 10s < M < 租约 30s − 续约周期 = 20s（不含端点）；语句时限 ≥ 1s 且 < M
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.transfer-lease-margin", "10s"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.transfer-lease-margin", "20s"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.transfer-lease-margin", "11s",
+                "xm.scene.transfer-probe-statement-timeout", "11s"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.transfer-probe-statement-timeout", "500ms")))
+                .isInstanceOf(BindException.class);
+        assertThat(bind(Map.of("xm.scene.transfer-lease-margin", "19s")).scene().transferLeaseMargin())
+                .isEqualTo(Duration.ofSeconds(19));
+    }
+
+    @Test
+    void 跨节点换图_scene_manager地址_选目标超时_墓碑存活_缺省与越界拒启() {
+        SceneNodeProperties.SceneSettings s = bind(Map.of()).scene();
+        assertThat(s.sceneManagerUrl()).isEqualTo("tri://127.0.0.1:20882");
+        assertThat(s.switchResolveTimeout()).isEqualTo(Duration.ofSeconds(4));
+        assertThat(s.transferTombstoneTtl()).isEqualTo(Duration.ofSeconds(30));
+
+        SceneNodeProperties.SceneSettings custom = bind(Map.of("xm.scene.scene-manager-url", "tri://10.0.0.5:20882",
+                "xm.scene.switch-resolve-timeout", "3500ms", "xm.scene.transfer-tombstone-ttl", "45s")).scene();
+        assertThat(custom.sceneManagerUrl()).isEqualTo("tri://10.0.0.5:20882");
+        assertThat(custom.switchResolveTimeout()).isEqualTo(Duration.ofMillis(3500));
+        assertThat(custom.transferTombstoneTtl()).isEqualTo(Duration.ofSeconds(45));
+
+        // 本地兜底超时必须大于 scene-manager 的 Dubbo 超时 3s
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.switch-resolve-timeout", "3s"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.switch-resolve-timeout", "31s"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.scene-manager-url", " "))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.transfer-tombstone-ttl", "500ms")))
+                .isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.transfer-tombstone-ttl", "6m"))).isInstanceOf(BindException.class);
     }
 
     @Test

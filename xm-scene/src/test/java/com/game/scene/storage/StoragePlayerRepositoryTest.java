@@ -2,18 +2,24 @@ package com.game.scene.storage;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.game.player.store.OwnerState;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
+import com.game.player.store.PlayerStore.HandOffResult;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.PlayerData;
+import com.game.scene.world.PlayerRepository.HandOffAttempts;
+import com.game.scene.world.PlayerRepository.HandOffOutcome;
 import com.game.scene.world.PlayerRepository.LoadResult;
+import com.game.scene.world.PlayerRepository.ProbeOutcome;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.scene.world.PlayerSave;
 import com.game.scene.world.Vec3;
@@ -35,6 +41,7 @@ import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.TransactionTimedOutException;
 
 class StoragePlayerRepositoryTest {
 
@@ -387,6 +394,295 @@ class StoragePlayerRepositoryTest {
         assertThat(StoragePlayerRepository.describeDropped(queued.get(1))).hasValueSatisfying(text -> assertThat(text)
                 .contains("释放").contains("1002").contains("epoch=3"));
         assertThat(StoragePlayerRepository.describeDropped(() -> { })).isEmpty();
+    }
+
+    // ------------------------------------------------------------------ 交出与探测（scene-handoff-spec §5.2）
+
+    private final long[] wall = {1_000_000L};
+    private static final PlayerSave FROZEN = new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9),
+            PlayerState.newBuilder().setFacing(Facing.newBuilder().setX(3)).build());
+
+    /** 墙钟与单调时钟都由测试驱动；退避等待同时推进两者。 */
+    private StoragePlayerRepository handing(ExecutorService executor, Executor logicExecutor) {
+        return new StoragePlayerRepository(store, executor, logicExecutor,
+                new StoragePlayerRepository.RetryPolicy(3, Duration.ofMillis(200), Duration.ofSeconds(5)),
+                HandOffSettings.DEFAULT,
+                millis -> {
+                    sleeps.add(millis);
+                    nanos[0] += TimeUnit.MILLISECONDS.toNanos(millis);
+                    wall[0] += millis;
+                }, backoff -> 0, () -> nanos[0], () -> wall[0], metrics);
+    }
+
+    private StoragePlayerRepository handing() {
+        return handing(new DirectExecutorService(), logic);
+    }
+
+    private HandOffResult attemptHandOff() {
+        return store.handOffOwnership(any(), any(), anyLong(), anyLong(), any());
+    }
+
+    private <T> List<T> runLogic(List<T> results) {
+        new ArrayList<>(logicTasks).forEach(Runnable::run);
+        logicTasks.clear();
+        return results;
+    }
+
+    private static HandOffOutcome.Failed failed(long firstAttemptNanos, Long... leases) {
+        return new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(firstAttemptNanos, List.of(leases)));
+    }
+
+    @Test
+    void 交出成功_带冻结快照与围栏_新租约是现在加租约_剩余租约下限是现在加安全边际_结局投递回逻辑线程() {
+        when(attemptHandOff()).thenReturn(new HandOffResult.HandedOff(10));
+        List<HandOffOutcome> results = new ArrayList<>();
+
+        handing().handOff(FROZEN, results::add);
+
+        assertThat(results).as("回调不在调用栈内").isEmpty();
+        assertThat(runLogic(results)).containsExactly(new HandOffOutcome.HandedOff(10));
+        ArgumentCaptor<PlayerRow> row = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store).handOffOwnership(row.capture(), org.mockito.ArgumentMatchers.eq(FROZEN.state()),
+                org.mockito.ArgumentMatchers.eq(1_030_000L), org.mockito.ArgumentMatchers.eq(1_015_000L),
+                org.mockito.ArgumentMatchers.eq(Duration.ofSeconds(3)));
+        assertThat(row.getValue().getPlayerId()).isEqualTo(1001L);
+        assertThat(row.getValue().getOwnerEpoch()).isEqualTo(9L);
+        assertThat(row.getValue().getSceneConfigId()).isEqualTo(2);
+        assertThat(row.getValue().getPosX()).isEqualTo(7);
+        assertThat(writes("handoff", "handed_off").count()).isEqualTo(1);
+    }
+
+    @Test
+    void 交出没提交_租约不足与围栏拒绝原样回报_不重试() {
+        when(attemptHandOff())
+                .thenReturn(new HandOffResult.LeaseTooShort(new OwnerState(9, false, 1_010_000)))
+                .thenReturn(new HandOffResult.Fenced(new OwnerState(12, false, 1_030_000)))
+                .thenReturn(new HandOffResult.Fenced(null));
+        StoragePlayerRepository repository = handing();
+        List<HandOffOutcome> results = new ArrayList<>();
+
+        repository.handOff(FROZEN, results::add);
+        repository.handOff(FROZEN, results::add);
+        repository.handOff(FROZEN, results::add);
+
+        assertThat(runLogic(results)).containsExactly(new HandOffOutcome.LeaseTooShort(), new HandOffOutcome.Fenced(),
+                new HandOffOutcome.Fenced());
+        assertThat(sleeps).isEmpty();
+        assertThat(writes("handoff", "lease_too_short").count()).isEqualTo(1);
+        assertThat(writes("handoff", "fenced").count()).isEqualTo(2);
+    }
+
+    @Test
+    void 重试改判_第一次已提交但应答丢失_第二次读到E加1未释放且租约是第一次写下的_回已交出() {
+        when(attemptHandOff())
+                .thenThrow(new QueryTimeoutException("提交应答丢失"))
+                .thenReturn(new HandOffResult.Fenced(new OwnerState(10, false, 1_030_000)));
+        List<HandOffOutcome> results = new ArrayList<>();
+
+        handing().handOff(FROZEN, results::add);
+
+        assertThat(runLogic(results)).containsExactly(new HandOffOutcome.HandedOff(10));
+        verify(store).handOffOwnership(any(), any(), org.mockito.ArgumentMatchers.eq(1_030_000L), anyLong(), any());
+        verify(store).handOffOwnership(any(), any(), org.mockito.ArgumentMatchers.eq(1_030_200L),
+                org.mockito.ArgumentMatchers.eq(1_015_200L), any());
+        assertThat(writes("handoff", "handed_off").count()).isEqualTo(1);
+        assertThat(writes("handoff", "fenced").count()).isZero();
+    }
+
+    @Test
+    void 重试不改判_租约不是自己写的_或已释放_或epoch不是E加1_或就是本次尝试的值() {
+        StoragePlayerRepository repository = handing();
+        List<HandOffOutcome> results = new ArrayList<>();
+        for (OwnerState other : List.of(new OwnerState(10, false, 999), new OwnerState(10, true, 1_030_000),
+                new OwnerState(11, false, 1_030_000))) {
+            org.mockito.Mockito.reset(store);
+            wall[0] = 1_000_000;
+            when(attemptHandOff()).thenThrow(new QueryTimeoutException("应答丢失"))
+                    .thenReturn(new HandOffResult.Fenced(other));
+            repository.handOff(FROZEN, results::add);
+        }
+        org.mockito.Mockito.reset(store);
+        wall[0] = 1_000_000;
+        when(attemptHandOff()).thenReturn(new HandOffResult.Fenced(new OwnerState(10, false, 1_030_000)));
+        repository.handOff(FROZEN, results::add);
+
+        assertThat(runLogic(results)).as("第一次尝试影响 0 行时库里的租约值不可能是它写的").containsOnly(new HandOffOutcome.Fenced())
+                .hasSize(4);
+    }
+
+    @Test
+    void 交出重试用尽_结局不明_带上首次尝试时刻与每次的租约值_不计入写丢失() {
+        nanos[0] = 7_000;
+        when(attemptHandOff()).thenThrow(new CannotGetJdbcConnectionException("库挂了"));
+        List<HandOffOutcome> results = new ArrayList<>();
+
+        StoragePlayerRepository repository = handing();
+        repository.handOff(FROZEN, results::add);
+
+        assertThat(runLogic(results)).containsExactly(failed(7_000, 1_030_000L, 1_030_200L, 1_030_600L));
+        assertThat(sleeps).containsExactly(200L, 400L);
+        assertThat(repository.writeFailures()).isZero();
+        assertThat(writes("handoff", "failed").count()).isEqualTo(1);
+    }
+
+    @Test
+    void 交出被线程池拒绝_结局不明但尝试为空_探测不读库直接判没提交() {
+        StoragePlayerRepository repository = handing(new RejectingExecutorService(), logic);
+        List<HandOffOutcome> handOffs = new ArrayList<>();
+
+        repository.handOff(FROZEN, handOffs::add);
+        assertThat(handOffs).as("仍异步回调").isEmpty();
+        HandOffOutcome outcome = runLogic(handOffs).get(0);
+        assertThat(outcome).isEqualTo(new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(0, List.of())));
+
+        List<ProbeOutcome> probes = new ArrayList<>();
+        repository.probe((HandOffOutcome.Failed) outcome, probes::add);
+        assertThat(probes).isEmpty();
+        assertThat(runLogic(probes)).containsExactly(new ProbeOutcome.NotCommitted());
+        verify(store, org.mockito.Mockito.never()).probeOwnership(anyLong(), any());
+        assertThat(writes("handoff", "rejected").count()).isEqualTo(1);
+        assertThat(writes("probe", "not_committed").count()).isEqualTo(1);
+    }
+
+    @Test
+    void 探测_读到原epoch未释放判没提交_读到E加1未释放且租约是自己写的判已交出() {
+        when(store.probeOwnership(1001, Duration.ofSeconds(3)))
+                .thenReturn(Optional.of(new OwnerState(9, false, 1_029_000)))
+                .thenReturn(Optional.of(new OwnerState(10, false, 1_030_200)));
+        StoragePlayerRepository repository = handing();
+        List<ProbeOutcome> results = new ArrayList<>();
+
+        repository.probe(failed(0, 1_030_000L, 1_030_200L), results::add);
+        repository.probe(failed(0, 1_030_000L, 1_030_200L), results::add);
+
+        assertThat(results).as("回调不在调用栈内").isEmpty();
+        assertThat(runLogic(results)).containsExactly(new ProbeOutcome.NotCommitted(), new ProbeOutcome.HandedOff(10));
+        assertThat(writes("probe", "not_committed").count()).isEqualTo(1);
+        assertThat(writes("probe", "handed_off").count()).isEqualTo(1);
+    }
+
+    @Test
+    void 探测_别人的租约值_已释放_epoch不对_玩家不存在_一律判失去() {
+        when(store.probeOwnership(anyLong(), any()))
+                .thenReturn(Optional.of(new OwnerState(10, false, 1_031_234)))
+                .thenReturn(Optional.of(new OwnerState(10, true, 1_030_000)))
+                .thenReturn(Optional.of(new OwnerState(9, true, 1_030_000)))
+                .thenReturn(Optional.of(new OwnerState(11, false, 1_030_000)))
+                .thenReturn(Optional.empty());
+        StoragePlayerRepository repository = handing();
+        List<ProbeOutcome> results = new ArrayList<>();
+
+        for (int i = 0; i < 5; i++) {
+            repository.probe(failed(0, 1_030_000L), results::add);
+        }
+
+        assertThat(runLogic(results)).hasSize(5).containsOnly(new ProbeOutcome.Lost());
+        assertThat(writes("probe", "lost").count()).isEqualTo(5);
+    }
+
+    @Test
+    void 探测_读失败在截止前退避重试_读到结论为止() {
+        when(store.probeOwnership(anyLong(), any()))
+                .thenThrow(new QueryTimeoutException("锁等待超时"))
+                .thenThrow(new BadSqlGrammarException("probe", "SELECT", new SQLException("任何读失败都重试")))
+                .thenReturn(Optional.of(new OwnerState(9, false, 1_029_000)));
+        List<ProbeOutcome> results = new ArrayList<>();
+
+        handing().probe(failed(0, 1_030_000L), results::add);
+
+        assertThat(runLogic(results)).containsExactly(new ProbeOutcome.NotCommitted());
+        assertThat(sleeps).containsExactly(200L, 400L);
+    }
+
+    @Test
+    void 探测_一直读不到_到首次尝试起M减2秒判失去_每次读受语句时限() {
+        when(store.probeOwnership(anyLong(), any())).thenAnswer(inv -> {
+            nanos[0] += Duration.ofSeconds(3).toNanos();
+            throw new QueryTimeoutException("锁一直被占");
+        });
+        List<ProbeOutcome> results = new ArrayList<>();
+
+        handing().probe(failed(0, 1_030_000L), results::add);
+
+        assertThat(runLogic(results)).containsExactly(new ProbeOutcome.Lost());
+        // 读 0→3s、等 0.2、读 3.2→6.2、等 0.4、读 6.6→9.6、等 0.8、读 10.4→13.4 > 截止 13s
+        verify(store, times(4)).probeOwnership(anyLong(), any());
+        assertThat(sleeps).containsExactly(200L, 400L, 800L);
+        assertThat(writes("probe", "lost").count()).isEqualTo(1);
+    }
+
+    @Test
+    void 探测_截止已过也至少读一次_读到就给结论() {
+        nanos[0] = Duration.ofSeconds(60).toNanos();
+        when(store.probeOwnership(anyLong(), any()))
+                .thenReturn(Optional.of(new OwnerState(10, false, 1_030_000)))
+                .thenThrow(new QueryTimeoutException("超时"));
+        StoragePlayerRepository repository = handing();
+        List<ProbeOutcome> results = new ArrayList<>();
+
+        repository.probe(failed(0, 1_030_000L), results::add);
+        repository.probe(failed(0, 1_030_000L), results::add);
+
+        assertThat(runLogic(results)).containsExactly(new ProbeOutcome.HandedOff(10), new ProbeOutcome.Lost());
+        assertThat(sleeps).isEmpty();
+    }
+
+    @Test
+    void 探测被线程池拒绝_判失去() {
+        List<ProbeOutcome> results = new ArrayList<>();
+
+        handing(new RejectingExecutorService(), logic).probe(failed(0, 1_030_000L), results::add);
+
+        assertThat(runLogic(results)).containsExactly(new ProbeOutcome.Lost());
+        assertThat(writes("probe", "rejected").count()).isEqualTo(1);
+    }
+
+    @Test
+    void 结局投递被拒_已交出的由存储线程带围栏释放新epoch_其余结局只丢弃() {
+        Executor stopped = task -> {
+            throw new RejectedExecutionException("逻辑线程已停");
+        };
+        when(attemptHandOff()).thenReturn(new HandOffResult.HandedOff(10))
+                .thenReturn(new HandOffResult.Fenced(new OwnerState(12, false, 1)));
+        when(store.probeOwnership(anyLong(), any())).thenReturn(Optional.of(new OwnerState(10, false, 1_030_000)))
+                .thenReturn(Optional.of(new OwnerState(9, false, 1_029_000)));
+        when(store.releaseOwnership(1001, 10)).thenReturn(true);
+        StoragePlayerRepository repository = handing(new DirectExecutorService(), stopped);
+
+        repository.handOff(FROZEN, outcome -> { });
+        repository.handOff(FROZEN, outcome -> { });
+        repository.probe(failed(0, 1_030_000L), outcome -> { });
+        repository.probe(failed(0, 1_030_000L), outcome -> { });
+
+        verify(store, times(2)).releaseOwnership(1001, 10);
+        verify(store, times(2)).releaseOwnership(anyLong(), anyLong());
+        assertThat(writes("release", "released").count()).isEqualTo(2);
+    }
+
+    @Test
+    void 停服丢弃的交出与探测任务能逐条描述() {
+        List<Runnable> queued = new ArrayList<>();
+        StoragePlayerRepository queuing = handing(new DirectExecutorService() {
+            @Override
+            public void execute(Runnable command) {
+                queued.add(command);
+            }
+        }, logic);
+
+        queuing.handOff(FROZEN, outcome -> { });
+        queuing.probe(failed(0, 1_030_000L), outcome -> { });
+
+        assertThat(StoragePlayerRepository.describeDropped(queued.get(0))).hasValueSatisfying(text -> assertThat(text)
+                .contains("交出").contains("1001").contains("epoch=9").contains("scene_config=2"));
+        assertThat(StoragePlayerRepository.describeDropped(queued.get(1))).hasValueSatisfying(text -> assertThat(text)
+                .contains("探测").contains("1001").contains("1030000"));
+    }
+
+    @Test
+    void 事务时限到期按瞬时故障重试() {
+        assertThat(StoragePlayerRepository.isTransient(new TransactionTimedOutException("事务时限已到"))).isTrue();
+        assertThat(StoragePlayerRepository.isTransient(new QueryTimeoutException("语句超时"))).isTrue();
+        assertThat(StoragePlayerRepository.isTransient(new IllegalStateException("交出后 epoch 不是 E+1"))).isFalse();
     }
 
     /** 同步执行的线程池替身。 */

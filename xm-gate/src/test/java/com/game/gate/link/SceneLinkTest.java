@@ -10,6 +10,7 @@ import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerLeave;
+import com.game.api.proto.PlayerTransfer;
 import com.game.api.proto.ToClient;
 import com.game.gate.metrics.GateMetrics;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -213,6 +214,69 @@ class SceneLinkTest {
         assertThat(connects).hasSize(2);
     }
 
+    // ---------------------------------------------------------------- 跨节点换图改绑指令（批次 5.2）
+
+    @Test
+    void 改绑指令_握手前忽略_就绪后带上代次转给监听器_判死之后到达的照样转给监听器() {
+        SceneLinkManager manager = manager();
+        long gen = manager.send(NODE, enter(1));
+        SceneLink link = connects.get(0);
+        EmbeddedChannel ch = new EmbeddedChannel(new SceneLinkHandler(link));
+
+        ch.writeInbound(transfer(1));
+        assertThat(listener.transfers).as("握手前对端身份未核对，改绑指令不可信").isEmpty();
+
+        ch.writeInbound(ack(NODE, 1, true));
+        ch.writeInbound(transfer(1));
+        assertThat(listener.transfers).containsExactly(new Event(NODE, gen, 1));
+
+        ch.close();
+        // 判死与读帧在不同线程上交错（出站高水位判死来自会话线程）：握手成功过的链路上已收到的改绑指令不能丢，
+        // 丢了源节点交出的新 epoch 就没人放弃
+        link.onFrame(transfer(2));
+        assertThat(listener.transfers).containsExactly(new Event(NODE, gen, 1), new Event(NODE, gen, 2));
+        assertThat(frames("in", "player_transfer")).isEqualTo(3);
+    }
+
+    @Test
+    void 从未握手成功就判死的链路_之后到达的改绑指令与其它下行都忽略() {
+        SceneLinkManager manager = manager();
+        manager.send(NODE, enter(1));
+        SceneLink link = connects.get(0);
+        EmbeddedChannel ch = new EmbeddedChannel(new SceneLinkHandler(link));
+        ch.writeInbound(ack(NODE, 1, false));
+        assertThat(ch.isOpen()).isFalse();
+
+        link.onFrame(toClient(1));
+        link.onFrame(enterResult(1));
+        link.onFrame(kicked(1));
+        link.onFrame(transfer(1));
+        assertThat(listener.order).isEmpty();
+    }
+
+    @Test
+    void 就绪后被别的线程判死_已读到的下行与改绑指令同一规则_按到达顺序全部转给监听器() {
+        SceneLinkManager manager = manager();
+        long gen = manager.send(NODE, enter(1));
+        SceneLink link = connects.get(0);
+        EmbeddedChannel ch = new EmbeddedChannel(new SceneLinkHandler(link));
+        ch.writeInbound(ack(NODE, 1, true));
+
+        // 会话线程发现出站高水位判死链路（关连接只是排进 I/O 线程）；I/O 线程上这一批已读到的帧仍逐个处理：
+        // 源节点在 PlayerTransfer 之前发的应答 / 推送不能丢——会话随改绑去了目标节点，之后的断链事件不会再关它
+        link.fail("出站缓冲超过高水位（scene 读不动）");
+        link.onFrame(toClient(1));
+        link.onFrame(enterResult(2));
+        link.onFrame(kicked(3));
+        link.onFrame(transfer(1));
+
+        assertThat(listener.order).containsExactly("link_down", "to_client:1", "enter_result:2", "kicked:3", "transfer:1");
+        assertThat(listener.toClient).containsExactly(new Event(NODE, gen, 1));
+        assertThat(listener.enterResults).containsExactly(new Event(NODE, gen, 2));
+        assertThat(listener.kicked).containsExactly(new Event(NODE, gen, 3));
+        assertThat(listener.transfers).containsExactly(new Event(NODE, gen, 1));
+    }
+
     // ---------------------------------------------------------------- 节点号租约无效：不新建链路
 
     @Test
@@ -325,6 +389,29 @@ class SceneLinkTest {
                 .build();
     }
 
+    private static NodeLinkFrame transfer(long playerId) {
+        return NodeLinkFrame.newBuilder()
+                .setPlayerTransfer(PlayerTransfer.newBuilder().setSessionId((int) playerId).setPlayerId(playerId)
+                        .setFromEpoch(5).setToEpoch(6).setTargetSceneNodeId(NODE + 1).setTargetSceneId(901))
+                .build();
+    }
+
+    private static NodeLinkFrame toClient(int sessionId) {
+        return NodeLinkFrame.newBuilder().setToClient(ToClient.newBuilder().addSessionIds(sessionId)).build();
+    }
+
+    private static NodeLinkFrame enterResult(int sessionId) {
+        return NodeLinkFrame.newBuilder()
+                .setPlayerEnterResult(PlayerEnterResult.newBuilder().setSessionId(sessionId).setPlayerId(sessionId))
+                .build();
+    }
+
+    private static NodeLinkFrame kicked(int sessionId) {
+        return NodeLinkFrame.newBuilder()
+                .setPlayerKicked(PlayerKicked.newBuilder().setSessionId(sessionId).setPlayerId(sessionId).setTipId(2017))
+                .build();
+    }
+
     private static NodeLinkFrame leave(long playerId) {
         return NodeLinkFrame.newBuilder()
                 .setPlayerLeave(PlayerLeave.newBuilder().setSessionId((int) playerId).setPlayerId(playerId))
@@ -348,22 +435,34 @@ class SceneLinkTest {
         final List<Event> toClient = new ArrayList<>();
         final List<Event> enterResults = new ArrayList<>();
         final List<Event> kicked = new ArrayList<>();
+        final List<Event> transfers = new ArrayList<>();
         final List<Event> undeliverable = new ArrayList<>();
         final List<Event> linkDown = new ArrayList<>();
+        /** 业务下行与断链事件的到达顺序（类型:会话号 / 玩家号）。 */
+        final List<String> order = new ArrayList<>();
 
         @Override
         public void onToClient(int sceneNodeId, long linkGen, ToClient message) {
             toClient.add(new Event(sceneNodeId, linkGen, message.getSessionIds(0)));
+            order.add("to_client:" + message.getSessionIds(0));
         }
 
         @Override
         public void onPlayerEnterResult(int sceneNodeId, long linkGen, PlayerEnterResult result) {
             enterResults.add(new Event(sceneNodeId, linkGen, result.getSessionId()));
+            order.add("enter_result:" + result.getSessionId());
         }
 
         @Override
         public void onPlayerKicked(int sceneNodeId, long linkGen, PlayerKicked message) {
             kicked.add(new Event(sceneNodeId, linkGen, message.getSessionId()));
+            order.add("kicked:" + message.getSessionId());
+        }
+
+        @Override
+        public void onPlayerTransfer(int sceneNodeId, long linkGen, PlayerTransfer transfer) {
+            transfers.add(new Event(sceneNodeId, linkGen, transfer.getPlayerId()));
+            order.add("transfer:" + transfer.getPlayerId());
         }
 
         @Override
@@ -374,6 +473,7 @@ class SceneLinkTest {
         @Override
         public void onLinkDown(int sceneNodeId, long linkGen) {
             linkDown.add(new Event(sceneNodeId, linkGen, 0));
+            order.add("link_down");
         }
     }
 }

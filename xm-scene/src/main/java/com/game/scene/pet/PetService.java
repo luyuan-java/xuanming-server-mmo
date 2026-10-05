@@ -40,8 +40,8 @@ import org.slf4j.LoggerFactory;
  * 宝宝的任何写入只经本类；每个改动点数或等级的写操作之后都重算（同步等级 + 按新上限处理当前气血法力）。
  * 二级属性不落库、不缓存，需要时由资质 + 已分配 + 等级现算。
  *
- * <p>返回值 0 = 成功，否则是提示码（pet_error 26000–26016 等）。写操作的前置闸（基线 CheckWritable：跨 zone 冻结 1005、
- * 回合制战斗中 26008）随 5.2 / 6.3 接入，目前恒放行。
+ * <p>返回值 0 = 成功，否则是提示码（pet_error 26000–26016 等）。写操作的前置闸（基线 CheckWritable）：跨节点换图冻结中 1005
+ * （已接入，scene-handoff-spec §5.9）；回合制战斗中 26008 随 6.3 接入。
  */
 public final class PetService {
 
@@ -490,11 +490,12 @@ public final class PetService {
     // ------------------------------------------------------------------ 内部
 
     /**
-     * 写操作统一前置（基线 CheckWritable：跨 zone 冻结 1005、回合制战斗中 26008）。Java 两样都还不存在
-     * （交接冻结随 5.2 / 5.4、回合制战斗随 6.3），接入时在这里补上；目前恒放行。
+     * 写操作统一前置（基线 CheckWritable）：跨节点换图的交出事务在途（{@link ScenePlayer#frozen()}）回 1005——客户端入口已按冻结策略
+     * 收拢（scene-handoff-spec §5.9），这里是纵深防御；选目标中（RESOLVING）不冻结。回合制战斗中 26008 随 6.3 接入。
+     * 自动加点只算不落，不过这道闸（同基线）。
      */
     private static int checkWritable(ScenePlayer player) {
-        return OK;
+        return player.frozen() ? INVALID_PARAMETER : OK;
     }
 
     /** 扣金币（uint64）：0 不扣；余额不足回 26013；扣成功记一条流水（货币服务内部还有封禁等校验）。 */

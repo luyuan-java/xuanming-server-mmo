@@ -3,6 +3,8 @@ package com.game.scene.testing;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository;
 import com.game.scene.world.PlayerSave;
+import com.game.scene.world.PlayerRepository.HandOffOutcome;
+import com.game.scene.world.PlayerRepository.ProbeOutcome;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.scene.world.Vec3;
 import java.util.ArrayDeque;
@@ -88,6 +90,61 @@ public final class FakePlayerRepository implements PlayerRepository {
 
     public int pendingProgress() {
         return progress.size();
+    }
+
+    /** 一次挂起的交出：测试决定何时、以什么结局完成（模拟结局投递回逻辑线程）。 */
+    public record PendingHandOff(PlayerSave frozen, Consumer<HandOffOutcome> callback) {
+
+        public void complete(HandOffOutcome outcome) {
+            callback.accept(outcome);
+        }
+    }
+
+    /** 一次挂起的探测：测试决定何时、以什么结局完成。 */
+    public record PendingProbe(HandOffOutcome.Failed failed, Consumer<ProbeOutcome> callback) {
+
+        public void complete(ProbeOutcome outcome) {
+            callback.accept(outcome);
+        }
+    }
+
+    private final Deque<PendingHandOff> handOffs = new ArrayDeque<>();
+    private final Deque<PendingProbe> probes = new ArrayDeque<>();
+
+    @Override
+    public void handOff(PlayerSave frozen, Consumer<HandOffOutcome> onDone) {
+        handOffs.add(new PendingHandOff(frozen, onDone));
+    }
+
+    @Override
+    public void probe(HandOffOutcome.Failed failed, Consumer<ProbeOutcome> onDone) {
+        probes.add(new PendingProbe(failed, onDone));
+    }
+
+    /** 取出最早一个挂起的交出。 */
+    public PendingHandOff takeHandOff() {
+        PendingHandOff h = handOffs.poll();
+        if (h == null) {
+            throw new IllegalStateException("没有挂起的交出");
+        }
+        return h;
+    }
+
+    public int pendingHandOffs() {
+        return handOffs.size();
+    }
+
+    /** 取出最早一个挂起的探测。 */
+    public PendingProbe takeProbe() {
+        PendingProbe p = probes.poll();
+        if (p == null) {
+            throw new IllegalStateException("没有挂起的探测");
+        }
+        return p;
+    }
+
+    public int pendingProbes() {
+        return probes.size();
     }
 
     public List<Release> releases() {

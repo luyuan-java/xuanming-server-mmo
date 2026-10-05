@@ -62,7 +62,9 @@ import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.player.ItemGuids;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.team.TeamFollowService;
+import com.game.scene.transfer.SceneManagerSwitchTargets;
 import com.game.scene.world.ClientRequestHandler;
+import com.game.scene.world.CrossNodeSwitch;
 import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.SceneClock;
 import com.game.scene.world.SceneMessageIds;
@@ -107,7 +109,9 @@ import org.springframework.context.SmartLifecycle;
  *   <li>{@code scene-sched}：节点号续租、节点目录发布、归属续约、主世界频道计划拉取（{@link ChannelPlanFollower}，批次 5.1）的调度
  *       （Redis I/O；MySQL 交给存储线程池；拉到的计划投递逻辑线程应用）；</li>
  *   <li>资产通道（architecture.md §4.12）：Dubbo Triple 的 I/O 与业务线程只把请求投递到逻辑线程；逻辑线程上完成的结局由
- *       {@code scene-asset-reply}（2 条，队列由在途上限 {@code xm.scene.asset-op-max-inflight} 兜住）切出来回写，Dubbo 的序列化不占逻辑线程。</li>
+ *       {@code scene-asset-reply}（2 条，队列由在途上限 {@code xm.scene.asset-op-max-inflight} 兜住）切出来回写，Dubbo 的序列化不占逻辑线程；</li>
+ *   <li>{@code scene-switch-rpc}（1 条，{@link SceneManagerSwitchTargets}）：跨节点换图向 scene-manager 选目标的建引用与发起调用，
+ *       结果投递回逻辑线程（批次 5.2）。</li>
  * </ul>
  *
  * <p>节点号租约丢失时（号可能已被别的实例占用，雪花号与目录条目都会撞）：停止刷新目录、关闭监听、
@@ -159,6 +163,8 @@ public class SceneNode implements SmartLifecycle {
     private volatile AuditPipeline auditPipeline;
     private volatile DefaultEventLoop logicLoop;
     private volatile ThreadPoolExecutor storageExecutor;
+    /** 玩家存储（停服时关存储线程池之前，等在途交出 / 探测的结局处理完）。 */
+    private volatile StoragePlayerRepository playerRepository;
     private volatile GateLinks links;
     private volatile SceneWorld world;
     /** 资产通道的进程内入口（跨进程传输 {@link #assetRpc} 接在它外面）。 */
@@ -175,6 +181,8 @@ public class SceneNode implements SmartLifecycle {
     private volatile NodeLinkServer linkServer;
     private volatile SceneDirectoryPublisher publisher;
     private volatile OwnerLeaseRenewer leaseRenewer;
+    /** 跨节点换图选目标的 scene-manager 客户端（逻辑线程停了之后才关）。 */
+    private volatile SceneManagerSwitchTargets switchTargets;
     private volatile OwnerTakeoverSubscriber takeoverSubscriber;
     private volatile GainBlockSync gainBlockSync;
     private volatile int gainBlockListener = -1;
@@ -249,9 +257,11 @@ public class SceneNode implements SmartLifecycle {
                 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(settings.storageQueueCapacity()),
                 new DefaultThreadFactory("scene-storage"), new ThreadPoolExecutor.AbortPolicy());
         metrics.bindStorageExecutor(storageExecutor);
-        StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics);
+        StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics,
+                settings.handOff());
+        playerRepository = repository;
 
-        GateLinks gateLinks = new GateLinks(metrics);
+        GateLinks gateLinks = new GateLinks(metrics, logic);
         GainAnomalyDetector anomalies = new GainAnomalyDetector(settings.anomaly().defaults(),
                 settings.anomaly().currencyThresholds(), settings.anomaly().itemThresholds(), SceneClock.SYSTEM, metrics);
         LeaseGatedSnowflake sceneGuids = acquireSceneGuids();
@@ -271,6 +281,16 @@ public class SceneNode implements SmartLifecycle {
         // 组队跟随：进场 / 换场景后异步读成员关系（Redis I/O 不在逻辑线程上等），结果投递回逻辑线程（team-spec §6.10）
         TeamMembershipReader teamMemberships = new TeamMembershipReader(redis);
         TeamFollowService teamFollow = new TeamFollowService(teamMemberships::readAsync, logic, metrics);
+        // 跨节点换图（批次 5.2，scene-handoff-spec §5.4–§5.8）：选目标经 Dubbo 直连 scene-manager（引用在第一次调用时才建，不阻塞启动）；
+        // 交出进场成功后的立即续约经 leaseRenewer（它在下面才建，所以经 volatile 字段转一手，还没建出来 / 已停时跳过，周期续约兜底）
+        switchTargets = SceneManagerSwitchTargets.dubbo(settings.sceneManagerUrl(), zoneId, nodeId, logic,
+                settings.switchResolveTimeout());
+        CrossNodeSwitch crossNode = new CrossNodeSwitch(nodeId, switchTargets, owned -> {
+            OwnerLeaseRenewer renewer = leaseRenewer;
+            if (renewer != null) {
+                renewer.renewSoon(owned);
+            }
+        }, settings.switchResolveTimeout(), settings.transferTombstoneTtl());
         // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, player -> {
@@ -279,11 +299,12 @@ public class SceneNode implements SmartLifecycle {
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
-                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId), teamFollow);
+                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId), teamFollow,
+                crossNode);
         links = gateLinks;
         world = sceneWorld;
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
-                AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM));
+                AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM, metrics));
         // 资产通道的跨进程提供方：先建好（导出在接受链路之后、发布目录之前）。回写池队列无界，但同时排队的至多是在途上限条
         assetReplyExecutor = new ThreadPoolExecutor(ASSET_REPLY_THREADS, ASSET_REPLY_THREADS, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(), new DefaultThreadFactory("scene-asset-reply", true));
@@ -460,8 +481,9 @@ public class SceneNode implements SmartLifecycle {
     /**
      * 按启动的逆序释放，每一步都容忍前面没建出来（启动失败时也走这里）：
      * 停频道计划拉取与排空推进 → 摘目录（资产通道的调用方随之找不到本节点）→ 停监听 → 停封禁名单同步、接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
-     * → 逻辑线程上写回全部玩家并关链路，写回提交之后才关存储线程池并等写回落库（{@link SceneShutdown}，共用一个停服预算）
-     * → 资产通道反导出 → 关线程（逻辑线程停之后才关资产回写池）→ 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
+     * → 逻辑线程上写回全部玩家并关链路，写回提交之后先等在途交出 / 探测的结局在逻辑线程上处理完（其中的「释放 E+1」赶在关池前提交），
+     * 再关存储线程池并等写回落库（{@link SceneShutdown}，共用一个停服预算）
+     * → 资产通道反导出 → 关线程（逻辑线程停之后才关选目标客户端与资产回写池）→ 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
      */
     private void release() {
         // 第一步停频道计划拉取（§4.10.5）：停服期间不再按计划建 / 排空场景；正在跑的一次最多再应用完这一版
@@ -513,12 +535,16 @@ public class SceneNode implements SmartLifecycle {
         GateLinks g = links;
         ThreadPoolExecutor storage = storageExecutor;
         DefaultEventLoop loop = logicLoop;
+        StoragePlayerRepository repo = playerRepository;
         if (loop != null && w != null && g != null && storage != null) {
+            // 写回之后、关存储线程池之前等在途交出 / 探测的结局在逻辑线程上处理完：其中「释放 E+1」要赶在关池之前提交
+            SceneShutdown.TransferSettlement transfers =
+                    repo == null ? SceneShutdown.TransferSettlement.NONE : repo::awaitTransfersSettled;
             SceneShutdown.Result result = SceneShutdown.writeBackThenDrainStorage(loop, () -> {
                 int count = w.shutdown();
                 g.closeAll();
                 return count;
-            }, storage, props.scene().shutdownSaveTimeout(), approxPlayers::get, System::nanoTime);
+            }, transfers, storage, props.scene().shutdownSaveTimeout(), approxPlayers::get, System::nanoTime);
             log.info("停服写回 已执行={} 人数={} 丢弃存储任务={}", result.writeBackRan(), result.playersSubmitted(),
                     result.droppedTasks());
         } else if (storage != null) {
@@ -536,6 +562,12 @@ public class SceneNode implements SmartLifecycle {
         }
         if (loop != null) {
             loop.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
+        }
+        // 选目标客户端在逻辑线程停之后才关：之后不会再有新的选目标请求（迟到的结果投递被拒、丢弃）
+        SceneManagerSwitchTargets targets = switchTargets;
+        if (targets != null) {
+            targets.close();
+            switchTargets = null;
         }
         // 回写池在逻辑线程停之后才关：之后不会再有逻辑线程上完成的结局（关闭后迟到的完成由提供方退回到完成线程上直接回写）
         ThreadPoolExecutor replies = assetReplyExecutor;

@@ -1,6 +1,8 @@
 package com.game.scene;
 
 import com.game.scene.audit.GainAnomalyDetector;
+import com.game.scene.storage.HandOffSettings;
+import com.game.scene.transfer.SceneManagerSwitchTargets;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
@@ -62,6 +64,15 @@ public record SceneNodeProperties(
      *                              应 ≥ 调用方副本数 × 每副本 Workers + 同步投递并发（guild-economy-spec Q9）
      * @param channelPlanPollInterval 主世界频道计划的拉取周期（缺省 1s，100ms～1min；scene-channels-spec §4.10.1、§5.3）：每周期读一次版本号，
      *                              变了才整读计划；排空推进另挂在每秒任务上，与它无关
+     * @param transferLeaseMargin   跨节点换图交出归属时要求的剩余租约下限 M（缺省 15s；scene-handoff-spec §5.2、§6.2）：
+     *                              须在续约周期 10s 与 租约 − 续约周期 20s 之间（不含端点），见 {@link HandOffSettings}
+     * @param transferProbeStatementTimeout 交出事务（不含提交）与交出探测加锁读的时限（缺省 3s，≥ 1s 且小于 transfer-lease-margin）：
+     *                              行锁被占时尝试以超时失败（重试 / 探测），而不是在冻结里一直等
+     * @param sceneManagerUrl       跨节点换图选目标（scene-manager {@code selectSwitchTarget}）的直连地址（缺省 {@code tri://127.0.0.1:20882}，
+     *                              与 login 同；scene-handoff-spec §5.4、§6.2）。本批只支持直连（scene 没带 Nacos 注册中心依赖），不能为空
+     * @param switchResolveTimeout  选目标的本地兜底超时（缺省 4s；须大于 scene-manager 的 Dubbo 提供方超时 3s、不超过 30s）：到时推 23 {1003}，
+     *                              也决定 63 在途槽（RESOLVING，期间再发 63 回 3014）的寿命
+     * @param transferTombstoneTtl  交出墓碑的存活时长（缺省 30s，1s～5min）：与 PlayerTransfer 在链路上交叉的 PlayerLeave 靠它按旧 epoch 补写位置
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -81,9 +92,29 @@ public record SceneNodeProperties(
             @DefaultValue AnomalySettings anomaly,
             @DefaultValue("21100") int assetRpcPort,
             @DefaultValue("256") int assetOpMaxInflight,
-            @DefaultValue("1s") Duration channelPlanPollInterval) {
+            @DefaultValue("1s") Duration channelPlanPollInterval,
+            @DefaultValue("15s") Duration transferLeaseMargin,
+            @DefaultValue("3s") Duration transferProbeStatementTimeout,
+            @DefaultValue("tri://127.0.0.1:20882") String sceneManagerUrl,
+            @DefaultValue("4s") Duration switchResolveTimeout,
+            @DefaultValue("30s") Duration transferTombstoneTtl) {
 
         public SceneSettings {
+            // 启动期校验（不满足即拒启）：续约周期 < M < 租约 − 续约周期，语句时限 < M
+            new HandOffSettings(transferLeaseMargin, transferProbeStatementTimeout);
+            if (sceneManagerUrl == null || sceneManagerUrl.isBlank()) {
+                throw new IllegalArgumentException("xm.scene.scene-manager-url 不能为空（跨节点换图选目标的直连地址）");
+            }
+            // 本地兜底超时必须大于 Dubbo 单次超时：正常的超时由 Dubbo 先报，兜底只管建引用卡住等情形
+            if (switchResolveTimeout.compareTo(SceneManagerSwitchTargets.DUBBO_TIMEOUT) <= 0
+                    || switchResolveTimeout.compareTo(Duration.ofSeconds(30)) > 0) {
+                throw new IllegalArgumentException("xm.scene.switch-resolve-timeout 必须大于 scene-manager 的 Dubbo 超时 "
+                        + SceneManagerSwitchTargets.DUBBO_TIMEOUT + " 且不超过 30s: " + switchResolveTimeout);
+            }
+            if (transferTombstoneTtl.compareTo(Duration.ofSeconds(1)) < 0
+                    || transferTombstoneTtl.compareTo(Duration.ofMinutes(5)) > 0) {
+                throw new IllegalArgumentException("xm.scene.transfer-tombstone-ttl 必须在 1s～5min 之间: " + transferTombstoneTtl);
+            }
             if (channelPlanPollInterval.compareTo(Duration.ofMillis(100)) < 0
                     || channelPlanPollInterval.compareTo(Duration.ofMinutes(1)) > 0) {
                 throw new IllegalArgumentException("xm.scene.channel-plan-poll-interval 必须在 100ms～1min 之间: "
@@ -114,6 +145,11 @@ public record SceneNodeProperties(
             if (saveInterval.isNegative() || saveInterval.toMillis() % 1000 != 0 || saveInterval.toSeconds() > 86_400) {
                 throw new IllegalArgumentException("xm.scene.save-interval 必须是 0 到 1 天之间的整秒: " + saveInterval);
             }
+        }
+
+        /** 交出归属在存储层的参数（已在构造时校验）。 */
+        public HandOffSettings handOff() {
+            return new HandOffSettings(transferLeaseMargin, transferProbeStatementTimeout);
         }
     }
 

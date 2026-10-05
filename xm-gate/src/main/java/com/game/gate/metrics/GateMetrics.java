@@ -39,6 +39,7 @@ public final class GateMetrics {
     static final String LINK_DROPPED = "xm.gate.link.dropped";
     static final String LINK_EVENTS = "xm.gate.link.events";
     static final String PUSHES = "xm.gate.pushes";
+    static final String SCENE_TRANSFERS = "xm.gate.scene.transfers";
 
     /** 不在客户端白名单里的消息号（以及没有路由的请求）统一用的标签值。 */
     public static final String UNKNOWN = "unknown";
@@ -125,7 +126,37 @@ public final class GateMetrics {
         /** 会话所在的 scene 链路断开。 */
         SCENE_LINK_DOWN,
         /** 服务端经推送通道踢下线（GatePush.kick_tip_id）。 */
-        SERVER_KICK
+        SERVER_KICK,
+        /**
+         * 跨节点换图交出之后没能落到目标节点（目标节点拒绝、到目标的链路不可用 / 建链失败、改绑指令非法）：
+         * 推 23 {tip} 后断开，不回大厅、不发 34（scene-handoff-spec D5 / D11）。
+         */
+        TRANSFER_FAILED
+    }
+
+    /**
+     * 跨节点换图改绑（源 scene 的 {@code PlayerTransfer}）在 gate 的结局（{@code xm.gate.scene.transfers{result}}）。
+     * 每条改绑指令恰好计 {@code rebound} / {@code stale} / {@code orphan} / {@code invalid} 之一；
+     * 每次 {@code rebound} 至多再计 {@code entered} / {@code enter_failed} / {@code link_unavailable} / {@code undeliverable} 之一
+     * （之间断线、离开游戏、目标链路断开的不计）。勾稽：scene 侧 {@code transfers{handed_off}} ≈ rebound + stale + orphan。
+     */
+    public enum SceneTransferResult {
+        /** 会话已改绑到目标节点，并向它发出（或尝试发出）{@code PlayerEnter{transfer = true}}。 */
+        REBOUND,
+        /** 会话线程上判定过期（会话已关闭 / 正在关闭，或绑定对不上）：请 login 放弃新 epoch，不改绑。 */
+        STALE,
+        /** 路由层找不到会话（已断开并从会话表释放）：请 login 放弃新 epoch。 */
+        ORPHAN,
+        /** 绑定对得上但帧内容非法（目标节点为 0、新 epoch 不大于旧 epoch）：推 23 {3023} 后断开。 */
+        INVALID,
+        /** 改绑后到目标节点的链路层不可用（send 返回 0）：放弃新 epoch，推 23 {3023} 后断开。 */
+        LINK_UNAVAILABLE,
+        /** 交出进场帧没能送到目标节点（建链失败 / 排队溢出）：放弃新 epoch；会话仍在这次进场上时推 23 {3023} 后断开。 */
+        UNDELIVERABLE,
+        /** 目标节点确认交出进场。 */
+        ENTERED,
+        /** 目标节点拒绝交出进场（已由目标节点释放新 epoch）：推 23 {tip} 后断开。 */
+        ENTER_FAILED
     }
 
     /** gate 对 login 的 Dubbo 调用（{@code ClientMessageService} 的方法）。 */
@@ -191,6 +222,7 @@ public final class GateMetrics {
     private final Map<LinkEvent, Counter> linkEvents;
     private final Map<LinkDrop, Counter> linkDrops;
     private final Map<PushKind, Map<PushResult, Counter>> pushes;
+    private final Map<SceneTransferResult, Counter> sceneTransfers;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesOut;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesIn;
     private final Map<LoginCall, Timer> loginCallsOk;
@@ -219,6 +251,8 @@ public final class GateMetrics {
             }
             pushes.put(kind, byResult);
         }
+        this.sceneTransfers = counters(SceneTransferResult.class, SCENE_TRANSFERS, "result",
+                "跨节点换图改绑指令（scene 的 PlayerTransfer）在 gate 的结局");
         this.framesOut = frameCounters("out");
         this.framesIn = frameCounters("in");
         this.loginCallsOk = loginTimers("ok");
@@ -318,6 +352,11 @@ public final class GateMetrics {
 
     public void linkEvent(LinkEvent event) {
         linkEvents.get(event).increment();
+    }
+
+    /** 跨节点换图改绑的一个结局（见 {@link SceneTransferResult} 的计数口径）。 */
+    public void sceneTransfer(SceneTransferResult result) {
+        sceneTransfers.get(result).increment();
     }
 
     public void push(PushKind kind, PushResult result, int targets) {

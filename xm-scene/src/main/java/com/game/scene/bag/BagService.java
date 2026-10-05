@@ -18,7 +18,8 @@ import java.util.TreeMap;
  * 成功后连带记资产流水、做获取异常检测。各玩法不直接改背包。
  *
  * <p>闸只在这一层和更外面的入口：战斗中禁止扣减之类的闸放在各玩法的入口（基线 D48：战斗结算是在战斗标记还挂着时应用的，
- * 闸下沉到这里会把结算自己拦住）。跨节点换图冻结随 5.2 接入（基线回 1005），目前恒放行。
+ * 闸下沉到这里会把结算自己拦住）。跨节点换图冻结中（交出事务在途，{@link ScenePlayer#frozen()}）一切写都回 1005（基线 BagService
+ * 同码）：客户端入口已按冻结策略收拢（scene-handoff-spec §5.9），这里是纵深防御，挡住经内部路径（任务领奖、资产通道）漏进来的写。
  */
 public final class BagService {
 
@@ -110,8 +111,11 @@ public final class BagService {
         return result;
     }
 
-    /** 冻结闸：跨节点换图 / 跨 zone 交接在途时拒绝写（基线回 1005）。Java 还没有交接冻结（5.2），恒放行。 */
+    /**
+     * 冻结闸：跨节点换图的交出事务在途（{@link ScenePlayer#frozen()}）时拒绝写（基线回 1005）——冻结快照已在写库，之后的改动会随实例移除而丢。
+     * 选目标中（RESOLVING）不冻结，照常写。跨 zone 交接（5.4）共用同一个冻结状态。
+     */
     private static boolean writable(ScenePlayer player) {
-        return true;
+        return !player.frozen();
     }
 }

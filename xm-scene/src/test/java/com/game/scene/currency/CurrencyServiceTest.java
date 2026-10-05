@@ -66,6 +66,44 @@ class CurrencyServiceTest {
         assertThat(counter("xm.scene.gain.blocked", "category", "currency")).isZero();
     }
 
+    /**
+     * 跨节点换图冻结中（交出事务在途，scene-handoff-spec §0.5）：加 / 扣在参数校验之后回 27003，预检同口径；GM 封禁 / 解封回 1005；
+     * 余额、封禁、异常窗口都不动，不记流水。选目标中不冻结。
+     */
+    @Test
+    void 冻结中加扣回27003_参数错仍回1005_封禁解封回1005_零改动零流水_选目标中照常() {
+        service.add(player, Wallet.GOLD, 100, AssetAudit.Reason.GM_GRANT);
+        audited.clear();
+        com.game.player.store.state.PlayerState before = WorldTestAccess.persistentState(player);
+        WorldTestAccess.startFreezing(player);
+
+        Wallet.Change add = service.add(player, Wallet.GOLD, 5, AssetAudit.Reason.GM_GRANT);
+        Wallet.Change deduct = service.deduct(player, Wallet.GOLD, 5, AssetAudit.Reason.GM_DEDUCT);
+
+        assertThat(add.tipId()).isEqualTo(27003);
+        assertThat(add.before()).isEqualTo(100);
+        assertThat(add.after()).isEqualTo(100);
+        assertThat(deduct.tipId()).isEqualTo(27003);
+        assertThat(service.checkAdd(player, Wallet.GOLD, 5, 0)).as("预检与加币同口径").isEqualTo(27003);
+        assertThat(service.add(player, Wallet.GOLD, 0, AssetAudit.Reason.GM_GRANT).tipId())
+                .as("参数错先判：解冻后照样失败的请求不该拿到可重投的 27003").isEqualTo(1005);
+        assertThat(service.deduct(player, 9, 5, AssetAudit.Reason.GM_DEDUCT).tipId()).isEqualTo(1005);
+        assertThat(service.block(player, Wallet.DIAMOND)).isEqualTo(1005);
+        assertThat(service.unblock(player, Wallet.DIAMOND)).isEqualTo(1005);
+        assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        assertThat(audited).isEmpty();
+        assertThat(player.gainWindows().currency(Wallet.GOLD).count()).isEqualTo(1);
+
+        WorldTestAccess.clearSwitch(player);
+        WorldTestAccess.startResolving(player);
+        assertThat(service.add(player, Wallet.GOLD, 5, AssetAudit.Reason.GM_GRANT).ok()).isTrue();
+        assertThat(service.deduct(player, Wallet.GOLD, 5, AssetAudit.Reason.GM_DEDUCT).ok()).isTrue();
+        assertThat(service.block(player, Wallet.DIAMOND)).isZero();
+        assertThat(player.wallet().isBlocked(Wallet.DIAMOND)).isTrue();
+        assertThat(service.unblock(player, Wallet.DIAMOND)).isZero();
+        assertThat(audited).containsExactly(5L, -5L);
+    }
+
     @Test
     void 成功加币才进异常检测_扣币不算获取() {
         service.add(player, Wallet.GOLD, 100, AssetAudit.Reason.GM_GRANT);

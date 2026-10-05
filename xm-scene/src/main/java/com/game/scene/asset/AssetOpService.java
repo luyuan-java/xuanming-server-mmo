@@ -15,6 +15,8 @@ import com.game.scene.asset.AssetOpLedger.RecordKind;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.bag.BagService;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.FrozenRejection;
 import com.game.scene.player.Bag;
 import com.game.scene.player.BagType;
 import com.game.scene.player.Wallet;
@@ -44,10 +46,14 @@ import org.slf4j.LoggerFactory;
  *   <li>不在调用里等落盘：记账后立刻请求存盘并如实回报 durable（结局出现在最近一次确认落库的存档里），调用方用同一 seq 重查直到
  *       durable = true 才终结；已见未 durable 的重查每 500 ms 至多再触发一次存盘。</li>
  * </ul>
- * 闸门只在这一层，<b>不下沉</b>到 {@link CurrencyService} / {@link BagService}（战斗结算、任务发奖等内部路径共用它们，基线 D48）。
- * 与基线的差异：冻结 / 归属交接在途（27003）随 5.x 跨节点、战斗中（27002）随 6.x 回合制战斗接入（Java 版目前没有这两种状态，
- * 相应的闸恒放行）；退出存盘在途在 Java 版不存在（离场当场移除实例，之后的请求是 NOT_HERE）；Java 的批量入包整批原子，不会「写了一半」，
- * 所以物品段不会产生部分发放；货币净入账溢出在任何改动之前预检、记 REJECTED 27004（基线 uint64 无检查）。
+ * 闸门在这一层判、判在记账之前，<b>不依赖</b> {@link CurrencyService} / {@link BagService} 里的闸（战斗结算、任务发奖等内部路径共用它们，
+ * 基线 D48；那两层的冻结闸只是纵深防御）。冻结（跨节点换图的交出事务在途，{@link ScenePlayer#frozen()}）：未见 seq 一律 RETRY 27003、
+ * 不记账（scene-handoff-spec §5.9；同基线「冻结或交接在途都回 RETRY」）——交出提交后玩家到了目标节点，调用方重投先得 NOT_HERE、
+ * 按位置记录改投目标节点；没提交就原地解冻，重投照常应用。选目标中（RESOLVING）不冻结、照常应用；已见 seq 冻结中照常只读答复
+ * （durable 看最近一次落库快照，冻结中不补存——交出就是这个玩家唯一的写，提交后由目标节点据实回报）。
+ * 与基线的差异：战斗中（27002）随 6.x 回合制战斗接入（相应的闸恒放行）；退出存盘在途在 Java 版不存在（离场当场移除实例，
+ * 之后的请求是 NOT_HERE）；Java 的批量入包整批原子，不会「写了一半」，所以物品段不会产生部分发放；货币净入账溢出在任何改动之前预检、
+ * 记 REJECTED 27004（基线 uint64 无检查）。
  */
 public final class AssetOpService {
 
@@ -95,14 +101,22 @@ public final class AssetOpService {
     private final BagService bags;
     private final AssetOpAuth auth;
     private final SceneClock clock;
+    private final SceneMetrics metrics;
 
+    /** 不出指标（测试用）。 */
     public AssetOpService(SceneWorld world, CurrencyService currency, BagService bags, AssetOpAuth auth,
                           SceneClock clock) {
+        this(world, currency, bags, auth, clock, SceneMetrics.noop());
+    }
+
+    public AssetOpService(SceneWorld world, CurrencyService currency, BagService bags, AssetOpAuth auth,
+                          SceneClock clock, SceneMetrics metrics) {
         this.world = world;
         this.currency = currency;
         this.bags = bags;
         this.auth = auth;
         this.clock = clock;
+        this.metrics = metrics;
     }
 
     /** 进场景前（{@code PlayerInitializer}）：账本加载时判了损坏就大声报一次（该玩家的资产通道随之关闭，原数据不改写）。 */
@@ -193,11 +207,20 @@ public final class AssetOpService {
                 // 继续走闸门
             }
         }
-        // 5. 改动闸门（未见 seq 才走到这里）。冻结 / 交接在途随 5.x 接入；退出存盘在途在 Java 版就是 NOT_HERE。
+        // 5. 改动闸门（未见 seq 才走到这里，判在记账之前）。退出存盘在途在 Java 版就是 NOT_HERE。
         if (!fenced(player)) {
             // 存盘没有归属围栏：记下的结局可能被旧节点晚到的写回抹掉。中止占位也是一笔账本改动，同样要挡
             log.warn("[AssetOp] blocked: owner_epoch unknown rpc={} player={} stream={} seq={}", rpc.wireName(),
                     Long.toUnsignedString(request.getPlayerId()), stream, Long.toUnsignedString(request.getSeq()));
+            return answer(AssetOutcome.ASSET_OUTCOME_RETRY, FROZEN);
+        }
+        if (player.frozen()) {
+            // 交出事务在途：冻结快照已在写库，此刻的改动（含中止占位）会随实例移除而丢。不记账，调用方稍后重投
+            // （提交了就到目标节点办，没提交就原地解冻后照常办）。选目标中（RESOLVING）不冻结，不在这里挡
+            metrics.frozenRejection(FrozenRejection.ASSET_OP);
+            log.info("[AssetOp] blocked: player frozen (cross-node transfer in flight) rpc={} player={} stream={} seq={}",
+                    rpc.wireName(), Long.toUnsignedString(request.getPlayerId()), stream,
+                    Long.toUnsignedString(request.getSeq()));
             return answer(AssetOutcome.ASSET_OUTCOME_RETRY, FROZEN);
         }
         // 6. 中止占位：给未见 seq 记一个 REJECTED（原因 0），此后这条 seq 永远拒绝
@@ -323,6 +346,10 @@ public final class AssetOpService {
         // (a) 货币预检：封禁与溢出都必须在任何改动之前判掉
         for (AssetCurrency c : bundle.getCurrenciesList()) {
             int tip = currency.checkAdd(player, c.getCurrencyType(), c.getAmount(), nowSeconds);
+            if (tip == Wallet.FROZEN) {
+                // 第 5 步已挡掉冻结，同一线程上到不了这里；万一到了也只能是暂时条件，不记账
+                return answer(AssetOutcome.ASSET_OUTCOME_RETRY, FROZEN);
+            }
             if (tip == Wallet.BLOCKED) {
                 return rejectAndRecord(player, request, BLOCKED, nowMs);
             }
@@ -391,7 +418,11 @@ public final class AssetOpService {
             return answer(AssetOutcome.ASSET_OUTCOME_RETRY, BAG_FULL);
         }
         if (tip == BagService.REFUSED) {
-            // 入包的闸只有冻结与封禁两种，冻结在 Java 版还不存在：走到这里就是封禁——终局拒绝，记账
+            if (player.frozen()) {
+                // 入包的闸只有冻结与封禁两种；冻结第 5 步已挡掉、到不了这里，万一到了按暂时条件处理，不能记成终局拒绝
+                return answer(AssetOutcome.ASSET_OUTCOME_RETRY, FROZEN);
+            }
+            // 走到这里就是封禁——终局拒绝，记账
             return rejectAndRecord(player, request, BLOCKED, nowMs);
         }
         if (tip == Bag.INVALID_PARAM) {
@@ -453,7 +484,8 @@ public final class AssetOpService {
                     .setReason(ledger.rejectionReason(stream, request.getSeq()));
         }
         boolean durable = durable(player, request, applied);
-        if (!durable && fenced(player)) {
+        // 冻结中不补存（交出就是这个玩家唯一的写，冻结快照里已有这条结局；提交后由目标节点据实回报 durable）
+        if (!durable && fenced(player) && !player.frozen()) {
             // 限频：调用方按 100 / 200 / 400 ms 重查，不限频会把序列化 + 比对打成热路径
             if (!ledger.persistRequestedWithin(nowMs, RESAVE_MIN_INTERVAL_MS)) {
                 durable = persistAndProbe(player, request, applied, nowMs);

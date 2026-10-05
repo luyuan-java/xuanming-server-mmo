@@ -17,6 +17,7 @@ message NodeLinkFrame {
     ClientForward client_forward = 6;
     ToClient to_client = 7;
     PlayerKicked player_kicked = 8;
+    PlayerTransfer player_transfer = 9;
   }
 }
 
@@ -50,9 +51,13 @@ message PlayerEnter {
   uint64 player_id = 2;
   uint64 scene_id = 3;
   uint64 owner_epoch = 4;
+  // true = 跨节点换图的交出进场（gate 收到源节点的 PlayerTransfer 后改绑发出，owner_epoch 是交出铸出的 E+1）。
+  // 目标节点据此不拍 LOGIN 快照、计交出进场指标、进场后立即续约一次归属租约；其余照普通进场处理（库里 epoch 不符同样回 3023）。
+  bool transfer = 5;
 }
 
-// scene → gate：进场结果。失败时 gate 解绑会话上的场景与玩家（会话回到「已登录、未进游戏」）并把 tip 发给客户端。
+// scene → gate：进场结果。普通进场失败时 gate 解绑会话上的场景与玩家（会话回到「已登录、未进游戏」）并把 tip 发给客户端；
+// 交出进场（PlayerEnter.transfer = true）失败时不回大厅：gate 推 23 TipInfoMessage{tip_id} 后断开连接（目标节点已释放这次进场的 epoch）。
 message PlayerEnterResult {
   uint32 session_id = 1;
   uint64 player_id = 2;
@@ -70,6 +75,22 @@ message PlayerKicked {
   uint64 player_id = 2;
   uint64 owner_epoch = 3;
   uint32 tip_id = 4;
+}
+
+// scene → gate：跨节点换图的改绑指令。源节点已用一笔带围栏的交出事务把冻结快照落库并把归属从 from_epoch 推进到 to_epoch（E → E+1），
+// 实例已从本节点移除。gate 在会话所属 EventLoop 上校验 (节点, 链路代次, player_id, from_epoch) 都与会话当前绑定一致后改绑到
+// target_scene_node_id，不发 PlayerLeave、不撤在线登记，再向目标节点发 PlayerEnter{scene_id = target_scene_id, owner_epoch = to_epoch, transfer = true}。
+// 绑定对不上（过期帧）或会话已不在时，gate 带围栏放弃 to_epoch（abandonEnter），不改绑。
+// 与源节点发给该会话的其余下行走同一条链路、保持先后：PlayerTransfer 之前的 ToClient 照常下发，之后源节点的迟到帧因绑定已变被丢弃。
+message PlayerTransfer {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  uint64 from_epoch = 3;
+  uint64 to_epoch = 4;
+  uint32 target_scene_node_id = 5;
+  uint64 target_scene_id = 6;
+  // 预留给批次 5.4 跨 zone 传送的重定向（gate 地址 + 令牌，gate 推 124 而不是改绑）。
+  reserved 7;
 }
 
 // gate → scene：玩家离开（断线或主动离开），scene 写回数据并移除玩家。

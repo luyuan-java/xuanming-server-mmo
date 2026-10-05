@@ -10,6 +10,12 @@
 # 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379、Kafka 127.0.0.1:9092（资产流水，xm-scene 生产、xm-data 消费）已就绪；已执行 ./mvnw -DskipTests install；
 # 存量库已按 docs/design/db-migrations.md 迁移到最新结构（M2 起 player 表多了 owner_released / owner_lease_until）。
 # 进程按依赖顺序启动，每个都等端口就绪再起下一个；日志在 run/logs/，PID 在 run/pids/。
+#
+# 场景节点数 XM_SCENE_NODES（批次 5.2 跨节点换图，scene-handoff-spec §10.7）：缺省 1（与以前相同）；=2 时再起第二个 xm-scene 实例
+# （日志 / PID 名 xm-scene-2，链路 21001、资产通道 21101、管理端口 18114；节点号由 Redis 租约自动分到不同的号）。
+# scene-manager 保持 per-node 覆盖，两个节点各有每张世界图一个频道：robot cross-node 场景据此判断「同图不同 scene_id = 不同节点」。
+#   XM_SCENE_NODES=2 tools/local/start-slice.sh
+# XM_SCENE_MANAGER_URL：scene → scene-manager 选跨节点目标的直连地址（xm.scene.scene-manager-url，local profile），缺省 tri://127.0.0.1:20882。
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -63,6 +69,14 @@ export XM_GATEWAY_QUEUE_ENABLED="${XM_GATEWAY_QUEUE_ENABLED:-true}"
 # 开服限流：进程缺省关闭（同基线 gate.rate-limit.enabled=false）；本机切片打开（缺省阈值），ratelimit 场景验证 IP 桶与冷却
 export XM_GATEWAY_RATE_LIMIT_ENABLED="${XM_GATEWAY_RATE_LIMIT_ENABLED:-true}"
 
+XM_SCENE_NODES="${XM_SCENE_NODES:-1}"
+if [[ "$XM_SCENE_NODES" != "1" && "$XM_SCENE_NODES" != "2" ]]; then
+  echo "XM_SCENE_NODES 只能是 1 或 2：$XM_SCENE_NODES" >&2
+  exit 1
+fi
+XM_SCENE_MANAGER_URL="${XM_SCENE_MANAGER_URL:-tri://127.0.0.1:20882}"
+echo "场景节点数 XM_SCENE_NODES=$XM_SCENE_NODES"
+
 mkdir -p run/logs run/pids
 
 # 模块名 就绪端口…（一个进程可以列多个端口，逐个等到可连再起下一个）
@@ -75,10 +89,32 @@ SERVICES=(
   "xm-guild 20886"
   "xm-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
   "xm-data 18106"
-  "xm-scene 21000 21100"   # 节点链路 link-port；资产通道 Dubbo Triple（xm.scene.asset-rpc-port，xm-guild 按节点目录直连）
+  "xm-scene"              # 场景节点：起 XM_SCENE_NODES 个实例，端口见下面的 SCENE_NODES
   "xm-gate 11000"
   "xm-gateway 18081"
 )
+
+# 场景节点实例：实例名（日志 / PID 文件名） 节点链路 link-port  资产通道 asset-rpc-port  管理端口 server.port
+# 资产通道是 Dubbo Triple（xm.scene.asset-rpc-port，同 XM_SCENE_ASSET_RPC_PORT；xm-guild 按节点目录直连）；管理端口同 SERVER_PORT（actuator 指标、GM 停机）。
+# 同机多实例三个端口都必须各不相同（xm-scene application.yaml 的约定）；端口用命令行参数传入，优先级高于配置文件与环境变量。
+SCENE_NODES=(
+  "xm-scene   21000 21100 18104"
+  "xm-scene-2 21001 21101 18114"
+)
+
+# 起一个进程：$1 实例名（日志 run/logs/<实例名>.log、PID run/pids/<实例名>.pid），$2 模块名（找可执行 jar），其余原样作为进程的命令行参数
+launch() {
+  local instance=$1 module=$2 jar
+  shift 2
+  jar=$(ls "$module"/target/"$module"-*.jar 2>/dev/null | grep -v -- '-plain' | head -1 || true)
+  if [[ -z "$jar" ]]; then
+    echo "找不到 $module 的可执行 jar，先 ./mvnw -DskipTests install" >&2
+    exit 1
+  fi
+  echo "启动 $instance ($jar)"
+  java -jar "$jar" "$@" > "run/logs/$instance.log" 2>&1 &
+  echo $! > "run/pids/$instance.pid"
+}
 
 wait_port() {
   local port=$1 name=$2 deadline=$((SECONDS + 90))
@@ -98,9 +134,10 @@ wait_port() {
 # 主世界频道就绪（批次 5.1，scene-channels-spec §5.2）：scene 节点启动时只建计划里已有的本节点频道，计划还没有本节点（冷 Redis、
 # 重启时旧记录已被领导者按死节点删掉）就不带频道起来，等 scene-manager 领导者下一拍（≤ 5 s）铺上、节点下一次拉取（≤ 1 s）建出、
 # 立即补发目录后才分得到。端口就绪不代表能进游戏：等管理端口上的 xm_scene_channels{state="active"} ≥ 1 再起 gate / gateway。
+# 每个 scene 实例各等各的（$2 是该实例的管理端口）：第二个节点的频道由领导者按 per-node 覆盖在它加入后的下一拍铺上。
 wait_world_channels() {
-  local name=$1 deadline=$((SECONDS + 60)) active
-  until active=$(curl -fsS "http://127.0.0.1:18104/actuator/prometheus" 2>/dev/null \
+  local name=$1 port=$2 deadline=$((SECONDS + 60)) active
+  until active=$(curl -fsS "http://127.0.0.1:$port/actuator/prometheus" 2>/dev/null \
       | grep -E '^xm_scene_channels\{.*state="active"' | awk '{print int($NF)}' | head -1) && [[ "${active:-0}" -ge 1 ]]; do
     if ! kill -0 "$(cat "run/pids/$name.pid")" 2>/dev/null; then
       echo "[$name] 进程已退出，看 run/logs/$name.log" >&2
@@ -116,23 +153,31 @@ wait_world_channels() {
   sleep 1
 }
 
+# 依次起 XM_SCENE_NODES 个场景节点，每个都等链路 / 资产通道端口与主世界频道就绪再起下一个
+start_scene_nodes() {
+  local i instance link rpc mgmt
+  for ((i = 0; i < XM_SCENE_NODES; i++)); do
+    read -r instance link rpc mgmt <<<"${SCENE_NODES[$i]}"
+    launch "$instance" xm-scene --server.port="$mgmt" --xm.scene.link-port="$link" \
+        --xm.scene.asset-rpc-port="$rpc" --xm.scene.scene-manager-url="$XM_SCENE_MANAGER_URL"
+    wait_port "$link" "$instance"
+    wait_port "$rpc" "$instance"
+    wait_world_channels "$instance" "$mgmt"
+    echo "  $instance 就绪（链路 $link、资产通道 $rpc、管理端口 $mgmt）"
+  done
+}
+
 for entry in "${SERVICES[@]}"; do
   read -r name ports <<<"$entry"
-  jar=$(ls "$name"/target/"$name"-*.jar 2>/dev/null | grep -v -- '-plain' | head -1 || true)
-  if [[ -z "$jar" ]]; then
-    echo "找不到 $name 的可执行 jar，先 ./mvnw -DskipTests install" >&2
-    exit 1
+  if [[ "$name" == "xm-scene" ]]; then
+    start_scene_nodes
+    continue
   fi
-  echo "启动 $name ($jar)"
-  java -jar "$jar" > "run/logs/$name.log" 2>&1 &
-  echo $! > "run/pids/$name.pid"
+  launch "$name" "$name"
   for port in $ports; do
     wait_port "$port" "$name"
   done
-  if [[ "$name" == "xm-scene" ]]; then
-    wait_world_channels "$name"
-  fi
   echo "  $name 就绪（端口 $ports）"
 done
 
-echo "全部就绪。停止：tools/local/stop-slice.sh"
+echo "全部就绪（场景节点 $XM_SCENE_NODES 个）。停止：tools/local/stop-slice.sh"

@@ -74,7 +74,7 @@ class SceneShutdownTest {
             repository.save(new PlayerSave(2, 1, 1, 1, Vec3.ORIGIN));
             repository.save(new PlayerSave(3, 1, 1, 1, Vec3.ORIGIN));
             return 3;
-        }, storage, Duration.ofSeconds(10), () -> 3, System::nanoTime);
+        }, SceneShutdown.TransferSettlement.NONE, storage, Duration.ofSeconds(10), () -> 3, System::nanoTime);
 
         assertThat(result).isEqualTo(new SceneShutdown.Result(true, 3, 0));
         assertThat(savedPlayers).containsExactlyInAnyOrder(1L, 2L, 3L);
@@ -92,7 +92,7 @@ class SceneShutdownTest {
             ran.set(true);
             repository.save(new PlayerSave(1, 1, 1, 1, Vec3.ORIGIN));
             return 1;
-        }, storage, Duration.ofMillis(200), () -> 1, System::nanoTime);
+        }, SceneShutdown.TransferSettlement.NONE, storage, Duration.ofMillis(200), () -> 1, System::nanoTime);
 
         unblock.countDown();
         logic.submit(() -> { }).get(5, TimeUnit.SECONDS);
@@ -118,7 +118,7 @@ class SceneShutdownTest {
                 });
                 slow.execute(() -> { });
                 return 2;
-            }, slow, Duration.ofMillis(200), () -> 2, System::nanoTime);
+            }, SceneShutdown.TransferSettlement.NONE, slow, Duration.ofMillis(200), () -> 2, System::nanoTime);
 
             assertThat(result).isEqualTo(new SceneShutdown.Result(true, 2, 1));
         } finally {

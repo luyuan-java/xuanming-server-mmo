@@ -11,9 +11,12 @@ import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
 import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -71,6 +74,13 @@ public final class SceneMetrics {
     static final String CHANNEL_PLAN_APPLIES = "xm.scene.channel.plan.applies";
     static final String CHANNEL_PLAN_POLL_FAILURES = "xm.scene.channel.plan.poll.failures";
     static final String CHANNEL_RELOCATIONS = "xm.scene.channel.relocations";
+    static final String SWITCH_RESOLVES = "xm.scene.switch.resolves";
+    static final String TRANSFERS = "xm.scene.transfers";
+    static final String TRANSFER_FREEZE = "xm.scene.transfer.freeze";
+    static final String TRANSFERS_IN_FLIGHT = "xm.scene.transfers.in.flight";
+    static final String TRANSFER_ENTERS = "xm.scene.transfer.enters";
+    static final String TRANSFER_POST_FREEZE_MUTATIONS = "xm.scene.transfer.post.freeze.mutations";
+    static final String FROZEN_REJECTIONS = "xm.scene.frozen.rejections";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -87,6 +97,16 @@ public final class SceneMetrics {
             Duration.ofMillis(100), Duration.ofMillis(250), Duration.ofMillis(500), Duration.ofSeconds(1),
             Duration.ofMillis(2500), Duration.ofSeconds(5), Duration.ofSeconds(10)};
 
+    /**
+     * 跨节点换图冻结时长（从冻结到交出结局处理完：一笔交出事务，结局不明时再加一次探测，上界约 M = 15 s）的桶边界：
+     * 存储写那组加上 15 s / 20 s（逻辑线程那组止于 1 s，装不下带重试的库事务）。
+     */
+    static final Duration[] TRANSFER_FREEZE_BUCKETS = {
+            Duration.ofMillis(5), Duration.ofMillis(10), Duration.ofMillis(25), Duration.ofMillis(50),
+            Duration.ofMillis(100), Duration.ofMillis(250), Duration.ofMillis(500), Duration.ofSeconds(1),
+            Duration.ofMillis(2500), Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofSeconds(15),
+            Duration.ofSeconds(20)};
+
     /** 一条移动上行（134 / 132 / 131）的裁决结果（{@code xm.scene.moves{result}}），每条恰好计一次。 */
     public enum MoveResult {
         /** 上报位置原样接受。 */
@@ -96,7 +116,9 @@ public final class SceneMetrics {
         /** 被截断且水平偏差超过 0.5 m，给本人回了 137 纠偏。 */
         CORRECTED,
         /** 位置 / 朝向 / 速度含非有限值，或位置超出世界范围（±1e7 m），整条丢弃。 */
-        INVALID
+        INVALID,
+        /** 玩家在冻结中（跨节点换图交出在途，scene-handoff-spec §5.9 DROP），整条静默丢弃。 */
+        FROZEN
     }
 
     /** 一次放技能（84）的裁决（{@code xm.scene.skill.releases{result}}），每条恰好计一次。 */
@@ -154,6 +176,8 @@ public final class SceneMetrics {
         LEADER_NOT_ON_NODE,
         /** 队长所在的频道在排空中（批次 5.1 §4.13）：不跟进去，等队长被改派后由它的进场扇出把队伍收拢。 */
         LEADER_SCENE_DRAINING,
+        /** 自己有在途的跨节点换图（选目标中或冻结中，scene-handoff-spec §5.5）：不跟随，换图的结局优先。 */
+        SWITCHING,
         /** 自己就是队长：自己进场时扇出给本节点的其他成员，被跟随 / 被扇出触发时什么都不做。 */
         IS_LEADER,
         /** 读回来时玩家已离开或已重新进场（不是发起读时的那个实例），丢弃。 */
@@ -162,14 +186,30 @@ public final class SceneMetrics {
         READ_ERROR
     }
 
-    /** 存储写的种类（{@code xm.scene.storage.writes{op}}）。 */
+    /** 存储写的种类（{@code xm.scene.storage.writes{op}}）。每种只登记它可能出现的结局（不建恒为 0 的组合）。 */
     public enum StorageOp {
         /** 最终写回并释放归属（离场、断线、被接管、停服）。 */
-        SAVE,
+        SAVE(WriteResult.RELEASED, WriteResult.FENCED, WriteResult.FAILED, WriteResult.REJECTED),
         /** 只释放归属（没进成的进场）。 */
-        RELEASE,
+        RELEASE(WriteResult.RELEASED, WriteResult.FENCED, WriteResult.FAILED, WriteResult.REJECTED),
         /** 在线存盘（周期存盘，不释放归属）。 */
-        PROGRESS
+        PROGRESS(WriteResult.SAVED, WriteResult.FENCED, WriteResult.FAILED, WriteResult.REJECTED),
+        /** 交出归属（跨节点换图：写回冻结快照 + epoch 加一，一笔事务）。FAILED / REJECTED = 结局不明，交给探测。 */
+        HANDOFF(WriteResult.HANDED_OFF, WriteResult.LEASE_TOO_SHORT, WriteResult.FENCED, WriteResult.FAILED,
+                WriteResult.REJECTED),
+        /** 交出结局不明之后的加锁读探测（只读）。 */
+        PROBE(WriteResult.HANDED_OFF, WriteResult.NOT_COMMITTED, WriteResult.LOST, WriteResult.REJECTED);
+
+        private final Set<WriteResult> results;
+
+        StorageOp(WriteResult first, WriteResult... rest) {
+            this.results = Collections.unmodifiableSet(EnumSet.of(first, rest));
+        }
+
+        /** 这种写可能出现的结局。 */
+        public Set<WriteResult> results() {
+            return results;
+        }
     }
 
     /** 存储写的结局（{@code xm.scene.storage.writes{result}}），每个写任务恰好计一次。 */
@@ -180,10 +220,18 @@ public final class SceneMetrics {
         SAVED,
         /** 被 owner_epoch 围栏拒绝（归属已被新的进场取代、已释放或玩家已不存在）：不是故障，什么也没写。 */
         FENCED,
-        /** 重试用尽、非瞬时故障或重试等待被中断：写丢失，已记 ERROR 待人工修复。 */
+        /** 重试用尽、非瞬时故障或重试等待被中断：写丢失，已记 ERROR 待人工修复（交出是「结局不明」，交给探测，不算丢失）。 */
         FAILED,
-        /** 存储线程池拒绝（积压满或已关闭）：写丢失，已记 ERROR；没有执行，耗时记 0。 */
-        REJECTED
+        /** 存储线程池拒绝（积压满或已关闭）：写丢失，已记 ERROR；没有执行，耗时记 0。交出被拒按结局不明交给探测，探测被拒按 LOST。 */
+        REJECTED,
+        /** 已交出（交出提交，或探测认出自己的提交）：epoch 加一、未释放、冻结快照已落库。 */
+        HANDED_OFF,
+        /** 交出没提交：剩余租约不足安全边际，什么也没改。 */
+        LEASE_TOO_SHORT,
+        /** 探测：交出没提交（仍由交出方持有、未释放），也不会再提交。 */
+        NOT_COMMITTED,
+        /** 探测：截止前判定不了，或读到别人的归属 / 已释放 / 玩家不存在，按失去归属处理（fail-closed）。 */
+        LOST
     }
 
     /** 审计记录的种类（{@code xm.scene.audit.records{kind}}）。 */
@@ -258,7 +306,68 @@ public final class SceneMetrics {
         /** 本节点两者都没有：原地不动，下一次推进再试（per-node 覆盖模式下不会出现）。 */
         BLOCKED,
         /** 进场加载完成时目标频道已在排空，改进本节点的兄弟频道。 */
-        ENTER_REDIRECT
+        ENTER_REDIRECT,
+        /** 玩家在跨节点换图的冻结中（交出事务在途，scene-handoff-spec §5.5）：这次不改派，交出结局出来后实例即离开或解冻再改派。 */
+        SWITCHING
+    }
+
+    /**
+     * 63 远端去向的选目标结果（{@code xm.scene.switch.resolves{result}}，scene-handoff-spec §7.2），每次远端选目标恰好计一次。
+     * 只计经 scene-manager 的那部分；本节点直接解析掉的 63 不计。
+     */
+    public enum SwitchResolve {
+        /** 结果在本节点（目录过时或选中本节点另一个频道）：同步换场景。 */
+        LOCAL,
+        /** 结果在别的节点：冻结、提交交出。 */
+        REMOTE,
+        /** 结果就是当前场景：什么都不发。 */
+        SAME,
+        /** scene-manager 业务拒绝，或结果指向本节点却不在本节点 / 在排空：推 23 {3023}。 */
+        REJECTED,
+        /** 调用失败、本地兜底超时或应答残缺：推 23 {1003}。 */
+        ERROR,
+        /** 结果回来时实例已离开 / 已重新进场 / 换图已作废：丢弃。 */
+        STALE
+    }
+
+    /** 一次交出的结局（{@code xm.scene.transfers{result}}，scene-handoff-spec §7.2），每次冻结恰好终结一次。 */
+    public enum TransferResult {
+        /** 已交出并把 PlayerTransfer 交给了链路。 */
+        HANDED_OFF,
+        /** 没提交：剩余租约不足安全边际，原地解冻、推 23 {3023}。 */
+        LEASE_TOO_SHORT,
+        /** 没提交：归属已不是本实例的，移除并踢 2017。 */
+        FENCED,
+        /** 结局不明，探测确认没提交：原地解冻、推 23 {3023}。 */
+        ABORTED_IN_PLACE,
+        /** 结局不明且探测判定不了（或读到已失去）：移除并踢 3023（fail-closed）。 */
+        LOST_UNKNOWN,
+        /** 已交出，但冻结中会话已离开（或实例已被停服 / 换角色移出）：源节点释放新 epoch。 */
+        LEFT,
+        /** 已交出，但冻结中被请求让出（顶号）：源节点释放新 epoch、踢旧会话 2017。 */
+        TAKEN_OVER,
+        /** 已交出，但写 PlayerTransfer 时链路已断 / 不可写：源节点释放新 epoch、写重连租约。 */
+        LINK_GONE
+    }
+
+    /**
+     * 冻结闸（跨节点换图交出在途，scene-handoff-spec §5.9）在入口挡掉的一次操作（{@code xm.scene.frozen.rejections{kind}}）。
+     * 只计入口集中闸；GATED 方法由服务闸回的基线码不计（它们照常进处理器）。
+     */
+    public enum FrozenRejection {
+        /** 客户端请求按缺省 / 声明的 REJECT 回了应答内 1005。 */
+        REQUEST,
+        /** 资产通道的未见 seq 回 RETRY 27003（未记账，调用方稍后重投）。 */
+        ASSET_OP,
+        /** 移动上行（134 / 132 / 131）静默丢弃（DROP）。 */
+        MOVE
+    }
+
+    /** 目标节点上交出进场（{@code PlayerEnter.transfer = true}）的结果（{@code xm.scene.transfer.enters{result}}）。 */
+    public enum TransferEnter {
+        OK,
+        /** 回了失败的 PlayerEnterResult（场景不在、停止接客、epoch 不符、加载失败、初始化失败）。取消（离开 / 断链 / 接管 / 停服）不计。 */
+        FAILED
     }
 
     /** 没发出去的 scene → gate 链路帧（{@code xm.scene.link.dropped{reason}}）。 */
@@ -266,7 +375,12 @@ public final class SceneMetrics {
         /** 链路已注销或已断开（其上会话随链路一起失效）。 */
         LINK_GONE,
         /** 出站缓冲越过高水位（gate 读不动）：丢掉这一帧并断开链路。 */
-        WRITE_BUFFER_FULL
+        WRITE_BUFFER_FULL,
+        /**
+         * 帧已交给链路、随后异步写失败（链路在冲刷前关闭）。目前只对 PlayerTransfer 挂了写结果监听（源节点据此释放新 epoch，
+         * scene-handoff-spec §5.5），其余帧的异步失败随链路断开处理、不单独计。
+         */
+        WRITE_FAILED
     }
 
     private final MeterRegistry registry;
@@ -292,6 +406,14 @@ public final class SceneMetrics {
     private final Map<ChannelPlanApply, Counter> channelPlanApplies;
     private final Counter channelPlanPollFailures;
     private final Map<ChannelRelocation, Counter> channelRelocations;
+    private final Map<SwitchResolve, Counter> switchResolves;
+    private final Map<TransferResult, Counter> transfers;
+    private final Timer transferFreeze;
+    private final Map<TransferEnter, Counter> transferEnters;
+    private final Counter postFreezeMutations;
+    private final Map<FrozenRejection, Counter> frozenRejections;
+    /** 冻结中（交出在途）的玩家数（逻辑线程推绝对值，抓取线程读）。 */
+    private final AtomicInteger transfersInFlight = new AtomicInteger();
     /** 本节点承载中 / 排空中的频道数（逻辑线程推绝对值，抓取线程读）。 */
     private final AtomicInteger activeChannels = new AtomicInteger();
     private final AtomicInteger drainingChannels = new AtomicInteger();
@@ -323,9 +445,9 @@ public final class SceneMetrics {
         this.storageWrites = new EnumMap<>(StorageOp.class);
         for (StorageOp op : StorageOp.values()) {
             EnumMap<WriteResult, Timer> byResult = new EnumMap<>(WriteResult.class);
-            for (WriteResult result : WriteResult.values()) {
+            for (WriteResult result : op.results()) {
                 byResult.put(result, Timer.builder(STORAGE_WRITES)
-                        .description("玩家数据写（写回并释放 / 只释放 / 在线存盘）的结局与耗时（含瞬时故障重试）")
+                        .description("玩家数据写（写回并释放 / 只释放 / 在线存盘 / 交出 / 交出探测）的结局与耗时（含瞬时故障重试）")
                         .tag("op", tagValue(op))
                         .tag("result", tagValue(result))
                         .serviceLevelObjectives(STORAGE_BUCKETS)
@@ -380,6 +502,24 @@ public final class SceneMetrics {
                 .register(registry);
         this.channelRelocations = counters(ChannelRelocation.class, CHANNEL_RELOCATIONS, "result",
                 "排空频道里的玩家改派 / 进场重定向（每人每次计一次）");
+        // 跨节点换图（批次 5.2，scene-handoff-spec §7.2）：全部预注册，不带 player / zone / 场景实例号 / 节点号
+        this.switchResolves = counters(SwitchResolve.class, SWITCH_RESOLVES, "result",
+                "63 远端去向的选目标结果（经 scene-manager 的每次恰好计一次）");
+        this.transfers = counters(TransferResult.class, TRANSFERS, "result", "跨节点换图交出的结局（每次冻结恰好终结一次）");
+        this.transferFreeze = Timer.builder(TRANSFER_FREEZE)
+                .description("跨节点换图的冻结时长（从冻结到交出结局处理完）")
+                .serviceLevelObjectives(TRANSFER_FREEZE_BUCKETS)
+                .register(registry);
+        Gauge.builder(TRANSFERS_IN_FLIGHT, transfersInFlight, AtomicInteger::get)
+                .description("冻结中（交出在途）的玩家数")
+                .register(registry);
+        this.transferEnters = counters(TransferEnter.class, TRANSFER_ENTERS, "result",
+                "目标节点上交出进场（PlayerEnter.transfer）的结果");
+        this.postFreezeMutations = Counter.builder(TRANSFER_POST_FREEZE_MUTATIONS)
+                .description("交出提交后发现冻结期间状态被改过（漏掉的冻结闸），应恒为 0")
+                .register(registry);
+        this.frozenRejections = counters(FrozenRejection.class, FROZEN_REJECTIONS, "kind",
+                "冻结闸（跨节点换图交出在途）在入口挡掉的操作：request = 回 1005，asset_op = 资产通道 RETRY 27003，move = 移动上行静默丢");
     }
 
     /** 不导出任何指标的实例（测试 / 不关心指标的装配用）：没有子注册表的 {@link CompositeMeterRegistry} 上计量器都是空操作。 */
@@ -499,6 +639,39 @@ public final class SceneMetrics {
         channelRelocations.get(result).increment();
     }
 
+    // ================================================================ 跨节点换图（批次 5.2）
+
+    /** 一次远端选目标的结果（逻辑线程）。 */
+    public void switchResolve(SwitchResolve result) {
+        switchResolves.get(result).increment();
+    }
+
+    /** 一次交出终结（逻辑线程）：计结局，并记从冻结到此刻的冻结时长。 */
+    public void transfer(TransferResult result, long frozenNanos) {
+        transfers.get(result).increment();
+        transferFreeze.record(Math.max(0, frozenNanos), TimeUnit.NANOSECONDS);
+    }
+
+    /** 冻结中的玩家数（逻辑线程在变化后推绝对值）。 */
+    public void transfersInFlight(int count) {
+        transfersInFlight.set(count);
+    }
+
+    /** 目标节点上一次交出进场的结果（逻辑线程）。 */
+    public void transferEnter(TransferEnter result) {
+        transferEnters.get(result).increment();
+    }
+
+    /** 交出提交后发现冻结期间状态被改过（逻辑线程；应恒为 0，非 0 说明有入口漏了冻结闸）。 */
+    public void postFreezeMutation() {
+        postFreezeMutations.increment();
+    }
+
+    /** 冻结闸在入口挡掉一次操作（逻辑线程：请求分发、资产通道）。 */
+    public void frozenRejection(FrozenRejection kind) {
+        frozenRejections.get(kind).increment();
+    }
+
     // ================================================================ 逻辑线程
 
     /**
@@ -567,13 +740,19 @@ public final class SceneMetrics {
 
     // ================================================================ 存储
 
-    /** 一个存储写任务结束（{@code xm.scene.storage.writes{op, result}}）；耗时从存储线程开始执行起算，含重试等待。 */
     public void periodicSave(PeriodicSave result) {
         periodicSaves.get(result).increment();
     }
 
+    /**
+     * 一个存储写任务结束（{@code xm.scene.storage.writes{op, result}}）；耗时从存储线程开始执行起算，含重试等待。
+     * 不在 {@link StorageOp#results()} 里的组合不记（调用方的编程错误；不抛，存储线程还要接着投递结局）。
+     */
     public void storageWrite(StorageOp op, WriteResult result, long elapsedNanos) {
-        storageWrites.get(op).get(result).record(Math.max(0, elapsedNanos), TimeUnit.NANOSECONDS);
+        Timer timer = storageWrites.get(op).get(result);
+        if (timer != null) {
+            timer.record(Math.max(0, elapsedNanos), TimeUnit.NANOSECONDS);
+        }
     }
 
     // ================================================================ gate 链路

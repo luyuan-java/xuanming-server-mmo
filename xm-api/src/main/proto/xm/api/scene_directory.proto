@@ -24,3 +24,26 @@ message AssignSceneResponse {
   uint64 scene_id = 3;
   uint32 scene_config_id = 4;
 }
+
+// scene → scene-manager：在线换图（63）本节点解析不了时，选跨节点的目标场景（批次 5.2）。
+// scene-manager 只做选择：不铸 epoch、不写位置记录、不碰归属；归属交接由源节点的交出事务完成。
+message SelectSwitchTargetRequest {
+  uint32 zone_id = 1;
+  uint64 player_id = 2;
+  // 发起换图的玩家当前所在的节点与场景实例。
+  uint32 from_scene_node_id = 3;
+  uint64 from_scene_id = 4;
+  // 期望的场景实例；非 0 时只按它解析（找不到或在排空中即拒，不回落到「按地图挑」）。
+  uint64 want_scene_id = 5;
+  // 期望的场景配置（地图）；want_scene_id 为 0 时按它选频道（排除 from_scene_id），
+  // want_scene_id 非 0 时用来校验该场景的配置（不符即拒）；0 表示不指定。
+  uint32 want_scene_config_id = 6;
+}
+
+message SelectSwitchTargetResponse {
+  // 0 = 选中；非 0 是 scene-manager 的拒绝码（只进日志与指标，scene 对客户端一律推 3023）。
+  uint32 tip_id = 1;
+  uint32 scene_node_id = 2;
+  uint64 scene_id = 3;
+  uint32 scene_config_id = 4;
+}

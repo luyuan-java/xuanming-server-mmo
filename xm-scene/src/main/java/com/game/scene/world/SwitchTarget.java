@@ -1,8 +1,8 @@
 package com.game.scene.world;
 
 /**
- * 客户端换场景（63）解析出的去向（{@link SceneWorld#resolveSwitchTarget}，scene-channels-spec §4.12、§0.4）。
- * 5.1 只有本节点内的去向；跨节点（5.2）届时再加一种「远端」去向，由 {@link ClientRequestHandler} 接上 scene-manager 往返。
+ * 客户端换场景（63）解析出的去向（{@link SceneWorld#resolveSwitchTarget}，scene-channels-spec §4.12、scene-handoff-spec §5.5）。
+ * 本节点内的去向同步完成；远端去向由 {@link ClientRequestHandler} 先回应答、再经 scene-manager 选目标（批次 5.2）。
  */
 sealed interface SwitchTarget {
 
@@ -10,7 +10,14 @@ sealed interface SwitchTarget {
     record Local(Scene scene) implements SwitchTarget {
     }
 
-    /** 拒绝，应答带这个 tip（目标不在本节点、在排空中、本节点该图没有承载中的频道 → 3023）。 */
+    /**
+     * 本节点解析不了，交给 scene-manager 选（批次 5.2）：显式 scene_id 不在本节点；或只带主世界地图而本节点没有该图的承载中频道
+     * （5.1 的 per-node 覆盖下只在该图频道全在排空时出现，切 hash 覆盖后常见）。不带节点号：节点由 scene-manager 定（Q9）。
+     */
+    record Remote() implements SwitchTarget {
+    }
+
+    /** 拒绝，应答带这个 tip（指定的场景在排空中、地图不是主世界、跨节点换图没装配 → 3023）。 */
     record Reject(int tip) implements SwitchTarget {
     }
 }

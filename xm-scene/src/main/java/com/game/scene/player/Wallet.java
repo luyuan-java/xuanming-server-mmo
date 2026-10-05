@@ -20,7 +20,8 @@ import java.util.TreeMap;
  *   <li>纯参数校验排在状态判定之前（同基线：资产通道对编程错误不能无限重投）。</li>
  * </ul>
  * 与基线的差异（有意）：加币溢出（基线 uint64 无检查、GM 可加到回绕）回 1005、余额与欠款都不变——按抵欠款之后的
- * 净入账判（先算后改）；余额上限因此是 {@code Long.MAX_VALUE}（客户端协议是 uint64，取值不变）。跨区冻结（27003）随跨节点换图接入。
+ * 净入账判（先算后改）；余额上限因此是 {@code Long.MAX_VALUE}（客户端协议是 uint64，取值不变）。
+ * 跨节点换图冻结（27003 {@link #FROZEN}，排在纯参数校验之后、封禁之前，同基线）由 {@code CurrencyService} 判——钱包不认识玩家状态。
  * 补缴欠款目前没有任何写入入口（同基线：GM 挂欠款的指令是空桩，随路线图 7.2），只会来自存档。
  */
 public final class Wallet {
@@ -38,6 +39,11 @@ public final class Wallet {
     /** 被封禁获取（全服或本人）：27005 {@code kAssetBlocked}。 */
     public static final int BLOCKED = AssetErrorTip.asset_error.kAssetBlocked_VALUE;
     static final int INSUFFICIENT = AssetErrorTip.asset_error.kAssetCurrencyInsufficient_VALUE;
+    /**
+     * 玩家冻结中（跨节点换图的交出事务在途）：27003 {@code kAssetFrozen}。会自己消失的条件，调用方稍后重投即可，不是终局拒绝
+     * （基线特意不用 1005：资产通道要据此区分「重投」与「坏请求」）。
+     */
+    public static final int FROZEN = AssetErrorTip.asset_error.kAssetFrozen_VALUE;
 
     /**
      * 一次加 / 扣的结局。
@@ -177,10 +183,19 @@ public final class Wallet {
         return new Change(0, type, before, balances[type], clawback);
     }
 
+    /**
+     * 纯参数校验（加 / 扣共用）：数额 ≤ 0 或币种越界回 1005，否则 0。排在冻结、封禁这些会自己消失或要记账的状态判定之前
+     * （同基线：冻结中的玩家传一个越界币种，不该拿到 RETRY 类的 27003，那是解冻之后照样失败的请求）。
+     */
+    public static int checkRequest(int type, long amount) {
+        return amount <= 0 || !known(type) ? INVALID_PARAMETER : 0;
+    }
+
     /** 不改任何状态、只回答 {@link #add(int, long, boolean, long)} 现在会回什么：0 = 会成，否则是拒绝码。 */
     public int checkAdd(int type, long amount, boolean globallyBlocked, long nowSeconds) {
-        if (amount <= 0 || !known(type)) {
-            return INVALID_PARAMETER;
+        int invalid = checkRequest(type, amount);
+        if (invalid != 0) {
+            return invalid;
         }
         if (globallyBlocked || isBlocked(type)) {
             return BLOCKED;
@@ -199,8 +214,9 @@ public final class Wallet {
     }
 
     public Change deduct(int type, long amount) {
-        if (amount <= 0 || !known(type)) {
-            return rejected(INVALID_PARAMETER, type);
+        int invalid = checkRequest(type, amount);
+        if (invalid != 0) {
+            return rejected(invalid, type);
         }
         long before = balances[type];
         if (before < amount) {
@@ -266,11 +282,12 @@ public final class Wallet {
         return state.build();
     }
 
-    private boolean known(int type) {
+    private static boolean known(int type) {
         return type >= 0 && type < TYPE_COUNT;
     }
 
-    private Change rejected(int tipId, int type) {
+    /** 一次被拒的加 / 扣：余额不变（before = after = 当前余额）。 */
+    public Change rejected(int tipId, int type) {
         long current = balance(type);
         return new Change(tipId, type, current, current);
     }

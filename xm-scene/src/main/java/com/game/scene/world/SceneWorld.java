@@ -24,10 +24,17 @@ import com.game.scene.metrics.SceneMetrics.ChannelPlanApply;
 import com.game.scene.metrics.SceneMetrics.ChannelRelocation;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.metrics.SceneMetrics.PeriodicSave;
+import com.game.scene.metrics.SceneMetrics.SwitchResolve;
+import com.game.scene.metrics.SceneMetrics.TransferEnter;
+import com.game.scene.metrics.SceneMetrics.TransferResult;
 import com.game.scene.player.PlayerLevels;
 import com.game.scene.team.TeamFollow;
+import com.game.scene.world.PlayerRepository.HandOffOutcome;
 import com.game.scene.world.PlayerRepository.LoadResult;
+import com.game.scene.world.PlayerRepository.ProbeOutcome;
 import com.game.scene.world.PlayerRepository.ProgressResult;
+import com.game.scene.world.RemoteSwitchTargets.Selection;
+import com.game.table.CommonErrorTip;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
 import java.util.ArrayList;
@@ -40,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -98,16 +106,32 @@ import org.slf4j.LoggerFactory;
  * 进场加载完成时改进兄弟频道。对应基线 C++ CreateScene / DestroyScene（cpp/nodes/scene/handler/grpc/scene_node_service.cpp:19-125）
  * 与 BeginSceneDrain（cpp/libs/services/scene/player/system/player_lifecycle.cpp:2140-2363），Java 不经 RPC、不跨进程（D3、D8）。
  *
+ * <p><b>跨节点换图</b>（批次 5.2，scene-handoff-spec §5.5–§5.8；装配见 {@link CrossNodeSwitch}）：63 的目标本节点解析不了时
+ * （{@link SwitchTarget.Remote}）先回应答 {@code {0}}、进 RESOLVING，经 scene-manager 选目标（{@link RemoteSwitchTargets}）；结果在别的节点就
+ * 冻结（停下 → 拍冻结快照 → FREEZING）并提交一笔<b>交出</b>事务（{@link PlayerRepository#handOff}：带围栏写回快照 + epoch E→E+1，原子）。
+ * 交出提交后移除实例（旁人 51，不写回、不拍快照）、留墓碑，经同一条链路给 gate 发 {@code PlayerTransfer}，gate 改绑后由目标节点
+ * 按普通进场加载 E+1（{@code PlayerEnter.transfer = true}：不拍 LOGIN 快照、立即续约一次）。冻结中的离开 / 接管只记下，等交出结局出来再处理；
+ * 冻结中续约报失去 E、在线存盘被围栏拒都不踢人（交出提交后 E 当然写不进去），由交出结局裁决。新 epoch E+1 的释放方只有三个且互斥：
+ * 源节点（只在 PlayerTransfer 确定没发出时）、gate 的 abandonEnter（只在 PlayerEnter{E+1} 确定没发出时）、目标节点的进场失败 / 离场。
+ *
  * <p><b>指标</b>（{@link SceneMetrics}）：场景配置下的在线人数在每次人数变化后推送绝对值；移动裁决、视野变化通知、
- * 帧与帧内广播耗时（经 {@link SceneClock} 计时）、频道数与计划应用 / 改派都在这里记，与规则写在同一处，不另设观察者。
+ * 帧与帧内广播耗时（经 {@link SceneClock} 计时）、频道数与计划应用 / 改派、跨节点换图的选目标 / 交出 / 交出进场都在这里记，
+ * 与规则写在同一处，不另设观察者。
  */
 public final class SceneWorld {
 
     private static final Logger log = LoggerFactory.getLogger(SceneWorld.class);
 
     private static final int ENTER_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
+    /** 选目标调用失败 / 超时时推的 tip（基线第一跳 gRPC 传输失败推 23 {1003}，player_lifecycle.cpp:3195-3216）。 */
+    private static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 被别的会话接管 / 失去归属时推给旧会话的 tip（基线顶号同码，经 23 推送，本里程碑不发 34）。 */
     static final int KICKED_BY_ANOTHER = LoginErrorTip.login_error.kLoginBeKickByAnOtherAccount_VALUE;
+    /**
+     * RESOLVING 槽比选目标的本地兜底超时多活的时长：结果回调由实现保证恰好一次（兜底超时到了也会回），这个槽只防回调丢失
+     * 让玩家永远卡在 3014；多给 1 s，正常的超时结果总是先于槽过期回来。
+     */
+    static final long RESOLVE_SLOT_GRACE_NANOS = TimeUnit.SECONDS.toNanos(1);
     /** 位置续期的槽数（每秒一个槽）：每个在线玩家每这么多秒续一次。 */
     static final int LOCATION_REFRESH_SLOTS = (int) PlayerLocationDirectory.REFRESH_INTERVAL.toSeconds();
 
@@ -126,6 +150,7 @@ public final class SceneWorld {
     private final PlayerSnapshots snapshots;
     private final PlayerLocations locations;
     private final TeamFollow teamFollow;
+    private final CrossNodeSwitch crossNode;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -147,6 +172,12 @@ public final class SceneWorld {
     private long locationSecond;
     /** 已跑过的帧数（下一帧的帧号）。偶数帧做属性同步。 */
     private long frame;
+    /** 跨节点换图的令牌（单调递增，只用于日志对照）。 */
+    private long switchTokens;
+    /** 冻结中（交出在途）的玩家数（指标 {@code xm.scene.transfers.in.flight}）。 */
+    private int transfersInFlight;
+    /** 交出后留下的墓碑（会话 → 墓碑；见 {@link TransferTombstone}）。过期的在每秒的位置续期里清掉。 */
+    private final Map<SessionKey, TransferTombstone> transferTombstones = new HashMap<>();
 
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics) {
@@ -177,6 +208,16 @@ public final class SceneWorld {
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
                       TeamFollow teamFollow) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots, locations,
+                teamFollow, CrossNodeSwitch.DISABLED);
+    }
+
+    /** @param crossNode 跨节点换图的装配（批次 5.2；{@link CrossNodeSwitch#DISABLED} = 63 的远端去向回 3023） */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
+                      TeamFollow teamFollow, CrossNodeSwitch crossNode) {
+        this.crossNode = crossNode;
         this.playerInitializer = playerInitializer;
         this.snapshots = snapshots;
         this.locations = locations;
@@ -374,7 +415,8 @@ public final class SceneWorld {
      * <b>不存盘、不动归属</b>：玩家留在同一进程、owner_epoch 不变，所以省掉基线的「存盘 → handoff 标记 → EnterScene(0,0)」
      * （player_lifecycle.cpp:2140-2363）；基线落默认大世界（B1），Java 同图优先（D8）。
      * 人数为 0 且没有指向它的在途进场 → 销毁（基线 DestroyScene「先排空再销毁」，scene_node_service.cpp:91-121）。
-     * 每次应用计划后与每秒各调一次（逻辑线程）。6.3 起战斗冻结中的玩家要跳过、等下一次推进。
+     * 每次应用计划后与每秒各调一次（逻辑线程）。跨节点换图冻结中（FREEZING）的玩家跳过、等下一次推进（计 {@code switching}，
+     * scene-handoff-spec §5.5；选目标中的 RESOLVING 不冻结，照常改派）；6.3 起战斗冻结中的玩家同样要跳过。
      *
      * @return 本次销毁的场景数
      */
@@ -400,14 +442,24 @@ public final class SceneWorld {
         if (from.playerCount() == 0) {
             return;
         }
-        for (ScenePlayer player : List.copyOf(from.players())) {
+        List<ScenePlayer> movable = new ArrayList<>(from.playerCount());
+        for (ScenePlayer player : from.players()) {
+            if (player.frozen()) {
+                // 跨节点换图冻结中（scene-handoff-spec §5.5）：冻结快照与内存必须一致，这次不改派；交出结局出来后实例离开或解冻，下一次推进再看
+                metrics.channelRelocation(ChannelRelocation.SWITCHING);
+            } else {
+                movable.add(player);
+            }
+        }
+        for (int i = 0; i < movable.size(); i++) {
+            ScenePlayer player = movable.get(i);
             if (player.scene() != from) {
                 continue;
             }
             Scene to = relocationTarget(from);
             if (to == null) {
                 // 去向只取决于本节点的频道，与玩家无关：一个找不到，剩下的也找不到
-                for (int i = 0; i < from.playerCount(); i++) {
+                for (int j = i; j < movable.size(); j++) {
                     metrics.channelRelocation(ChannelRelocation.BLOCKED);
                 }
                 if (from.firstRelocationBlocked()) {
@@ -491,53 +543,74 @@ public final class SceneWorld {
     }
 
     /**
-     * 客户端换场景（63）的去向（scene-channels-spec §4.12）：
+     * 客户端换场景（63）的去向（scene-channels-spec §4.12，scene-handoff-spec §5.5、D6）：
      * <ul>
-     *   <li>指定了 scene_id：本节点上的这个场景、且在承载中才放行；在排空中拒绝（D11，基线放行、B5）；不在本节点拒绝（跨节点随 5.2）；</li>
+     *   <li>指定了 scene_id：本节点上的这个场景、且在承载中才放行；在排空中拒绝（D11，基线放行、B5）；不在本节点 → 远端（scene-manager 在全 zone
+     *       目录里找，不回落到按地图挑）；</li>
      *   <li>只带当前地图（基线 scene_manager 在全 zone 该图频道里预占最少者，enterscenelogic.go:1267-1286、world_init.go:437-513）：
      *       在本节点同图承载中频道里选人数最少的，当前场景的人数含自己；并列<b>优先留在原地</b>，再取 scene_id 小的（D17，基线并列取 SMEMBERS
-     *       顺序第一个、B13）；当前场景在排空中就不算它。选回原场景 = 应答成功、不发 79（基线挑回原频道走同落点重连，同样不发）；</li>
-     *   <li>只带别的地图：本节点该图承载中频道里人数最少的（并列取 scene_id 小的）。</li>
+     *       顺序第一个、B13）；当前场景在排空中就不算它，本节点再没有该图的承载中频道 → 远端。选回原场景 = 应答成功、不发 79
+     *       （基线挑回原频道走同落点重连，同样不发）；</li>
+     *   <li>只带别的地图：本节点该图承载中频道里人数最少的（并列取 scene_id 小的）；本节点没有时，是主世界图 → 远端（5.1 切 hash 覆盖后才常见；
+     *       per-node 覆盖下每节点每图都有频道，Q4），不是 → 拒绝（scene-manager 同样不为非主世界图选频道，省一次往返）。</li>
      * </ul>
-     * 本节点选不到一律回 3023。
+     * 只带地图时先在本节点选、本节点没有才跨节点（D6：少一次库写与客户端重新加载）。跨节点换图没装配（{@link CrossNodeSwitch#DISABLED}）时
+     * 远端一律按 5.1 回 3023。
      */
     SwitchTarget resolveSwitchTarget(Scene current, long sceneId, int configId) {
         if (sceneId != 0) {
             Scene target = scenes.get(sceneId);
-            return target == null || target.draining() ? new SwitchTarget.Reject(ENTER_FAILED)
-                    : new SwitchTarget.Local(target);
+            if (target == null) {
+                return remoteOrReject();
+            }
+            return target.draining() ? new SwitchTarget.Reject(ENTER_FAILED) : new SwitchTarget.Local(target);
         }
         if (configId == current.configId()) {
             Scene other = leastLoadedActive(configId, current);
             if (current.draining()) {
-                return other == null ? new SwitchTarget.Reject(ENTER_FAILED) : new SwitchTarget.Local(other);
+                return other == null ? remoteOrReject() : new SwitchTarget.Local(other);
             }
             return new SwitchTarget.Local(other != null && other.playerCount() < current.playerCount() ? other : current);
         }
         Scene best = leastLoadedActive(configId, null);
-        return best == null ? new SwitchTarget.Reject(ENTER_FAILED) : new SwitchTarget.Local(best);
+        if (best != null) {
+            return new SwitchTarget.Local(best);
+        }
+        return tables.worldSceneConfigIds().contains(configId) ? remoteOrReject() : new SwitchTarget.Reject(ENTER_FAILED);
+    }
+
+    private SwitchTarget remoteOrReject() {
+        return crossNode.enabled() ? new SwitchTarget.Remote() : new SwitchTarget.Reject(ENTER_FAILED);
     }
 
     // ------------------------------------------------------------------ 进场
 
+    /**
+     * gate 发来的进场（登录 / 重连 / 顶号，或跨节点换图的交出进场 {@code transfer = true}）。两者走同一套加载与归属校验
+     * （库里 epoch 不是请求的 epoch 就 3023），交出进场只多三点（scene-handoff-spec §5.8）：不拍 LOGIN 快照（D8）、计
+     * {@code xm.scene.transfer.enters}、进场成功后立即单独续约一次新 epoch。落位规则相同：交出事务写的是源场景的地图与坐标，
+     * 所以同图保留坐标、换图落出生点（D10）。
+     */
     public void onPlayerEnter(long linkId, PlayerEnter enter) {
         SessionKey key = new SessionKey(linkId, enter.getSessionId());
         long playerId = enter.getPlayerId();
         long epoch = enter.getOwnerEpoch();
+        boolean transfer = enter.getTransfer();
         if (!acceptingEnters) {
-            failEnter(key, playerId, epoch, "本节点已停止接收新玩家");
+            failEnter(key, playerId, epoch, transfer, "本节点已停止接收新玩家");
             return;
         }
         if (playerId == 0 || enter.getSessionId() == 0) {
-            failEnter(key, playerId, epoch, "player_id 或 session_id 为 0");
+            failEnter(key, playerId, epoch, transfer, "player_id 或 session_id 为 0");
             return;
         }
         // 排空中的场景照样放行：在途进场挡住它的销毁，加载完成时改进兄弟频道（§4.10.4）
         if (!scenes.containsKey(enter.getSceneId())) {
-            failEnter(key, playerId, epoch, "场景不在本节点 scene_id=" + Long.toUnsignedString(enter.getSceneId()));
+            failEnter(key, playerId, epoch, transfer,
+                    "场景不在本节点 scene_id=" + Long.toUnsignedString(enter.getSceneId()));
             return;
         }
-        PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch);
+        PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer);
         PendingEnter replaced = pendingEnters.put(key, pending);
         if (replaced != null) {
             log.warn("同一会话在加载完成前再次进场，只处理最新一次 player={} session={}", playerId, key);
@@ -553,6 +626,7 @@ public final class SceneWorld {
         SessionKey key = pending.session();
         long playerId = pending.playerId();
         long epoch = pending.ownerEpoch();
+        boolean transfer = pending.transfer();
         if (pendingEnters.get(key) != pending) {
             // 取消这次进场的一方（离开 / 断链 / 被取代 / 接管 / 停服）已经负责释放归属。
             log.info("进场加载返回时会话已离开或已被新的进场取代，丢弃 player={} session={}", playerId, key);
@@ -563,29 +637,32 @@ public final class SceneWorld {
         if (!(result instanceof LoadResult.Found found)) {
             if (result instanceof LoadResult.Failed failed) {
                 log.error("加载玩家数据失败 player={}", playerId, failed.error());
-                failEnter(key, playerId, epoch, "加载玩家数据失败");
+                failEnter(key, playerId, epoch, transfer, "加载玩家数据失败");
             } else {
-                failEnter(key, playerId, epoch, "玩家不存在");
+                failEnter(key, playerId, epoch, transfer, "玩家不存在");
             }
             return;
         }
         PlayerData data = found.data();
         if (!acceptingEnters) {
-            failEnter(key, playerId, epoch, "本节点已停止接收新玩家");
+            failEnter(key, playerId, epoch, transfer, "本节点已停止接收新玩家");
             return;
         }
         if (data.ownerEpoch() != epoch) {
-            failEnter(key, playerId, epoch, "owner_epoch 不符（库里 " + data.ownerEpoch() + "，请求 " + epoch + "），进场请求已过期");
+            failEnter(key, playerId, epoch, transfer,
+                    "owner_epoch 不符（库里 " + data.ownerEpoch() + "，请求 " + epoch + "），进场请求已过期");
             return;
         }
         ScenePlayer previous = playersById.get(playerId);
         if (previous != null && previous.ownerEpoch() > epoch) {
-            failEnter(key, playerId, epoch, "本节点已有更新归属的实例（epoch " + previous.ownerEpoch() + "），进场请求已过期");
+            failEnter(key, playerId, epoch, transfer,
+                    "本节点已有更新归属的实例（epoch " + previous.ownerEpoch() + "），进场请求已过期");
             return;
         }
         Scene scene = scenes.get(pending.sceneId());
         if (scene == null) {
-            failEnter(key, playerId, epoch, "场景不在本节点 scene_id=" + Long.toUnsignedString(pending.sceneId()));
+            failEnter(key, playerId, epoch, transfer,
+                    "场景不在本节点 scene_id=" + Long.toUnsignedString(pending.sceneId()));
             return;
         }
         if (scene.draining()) {
@@ -601,6 +678,8 @@ public final class SceneWorld {
         }
 
         // 同一会话上挂着另一个玩家（gate 复用会话换角色）：按正常离开处理，它自己的 epoch 仍有效，写回并释放。
+        // 它若正冻结在交出中：写回与在途交出谁先提交都安全（写回先 → 交出被围栏拒；交出先 → 写回被拒、结局出来时释放新 epoch），
+        // removePlayer 会把那次换图标成「已移出」，结局只做收尾。
         ScenePlayer sessionOccupant = playersBySession.get(key);
         if (sessionOccupant != null && sessionOccupant != previous) {
             removePlayer(sessionOccupant, true);
@@ -636,7 +715,7 @@ public final class SceneWorld {
             }
             removePlayer(previous, false);
             if (!previous.session().equals(key)) {
-                kick(previous, "被新的进场接管（旧实例已失去归属）");
+                kick(previous, KICKED_BY_ANOTHER, "被新的进场接管（旧实例已失去归属）");
             }
         }
 
@@ -650,7 +729,7 @@ public final class SceneWorld {
             playerInitializer.initialize(player);
         } catch (RuntimeException e) {
             log.error("玩家状态初始化失败 player={}", playerId, e);
-            failEnter(key, playerId, epoch, "玩家状态初始化失败");
+            failEnter(key, playerId, epoch, transfer, "玩家状态初始化失败");
             return;
         }
         // 脏比对基准是库里此刻的样子（不是刚建出来的内存状态）：接管旧实例、出生点改派等与库不同的情形，第一次到期就会写。
@@ -661,11 +740,18 @@ public final class SceneWorld {
         enterScene(player, scene);
         sink.enterResult(key.linkId(), key.sessionId(), playerId, epoch, 0);
         locations.entered(player);
-        // 用内存状态拍（接管旧实例时库里那份是旧的）
-        snapshots.capture(player.toSave(), PlayerSnapshots.Cause.LOGIN);
-        log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={}", playerId, key,
-                scene.sceneId(), player.entity(), player.ownerEpoch(), previous != null);
-        // 进场（登录 / 重连 / 顶号）之后查组队跟随：异步读，结果回到逻辑线程（team-spec §6.10）
+        if (transfer) {
+            // 交出进场（scene-handoff-spec §5.8）：不是登录，不拍 LOGIN 快照（D8，冻结快照已在库里）。新 epoch 的租约从源节点提交交出时起算，
+            // 中间隔着 gate 建链、握手与加载，立即单独续约一次把余量拉回来（Q5），不等下一轮周期续约。
+            metrics.transferEnter(TransferEnter.OK);
+            crossNode.renewSoon().accept(new OwnedPlayer(playerId, epoch));
+        } else {
+            // 用内存状态拍（接管旧实例时库里那份是旧的）
+            snapshots.capture(player.toSave(), PlayerSnapshots.Cause.LOGIN);
+        }
+        log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={} 交出进场={}", playerId, key,
+                scene.sceneId(), player.entity(), player.ownerEpoch(), previous != null, transfer);
+        // 进场（登录 / 重连 / 顶号 / 交出进场）之后查组队跟随：异步读，结果回到逻辑线程（team-spec §6.10）
         teamFollow.onEnteredScene(this, player);
     }
 
@@ -718,10 +804,13 @@ public final class SceneWorld {
      * 进场失败只回 {@code PlayerEnterResult{tip=3023}}（回显 epoch），客户端看到的 23 {@code TipInfoMessage{3023}} 由 gate 发
      * （xm-api node_link.proto 约定「失败时 gate 解绑会话上的场景与玩家并把 tip 发给客户端」）。scene 再直推一条 23
      * 会让客户端收到两次同一提示。同时释放这次进场夺得的归属（带围栏：它已被更新的夺权取代时什么也不做），
-     * 客户端重试进游戏不必等租约过期。
+     * 客户端重试进游戏不必等租约过期。交出进场（{@code transfer}）同样处理：gate 据结果推 23 后断开（不回大厅），释放的是交出铸出的 E+1。
      */
-    private void failEnter(SessionKey key, long playerId, long epoch, String reason) {
-        log.warn("进场失败 player={} session={} epoch={} 原因={}", playerId, key, epoch, reason);
+    private void failEnter(SessionKey key, long playerId, long epoch, boolean transfer, String reason) {
+        log.warn("进场失败 player={} session={} epoch={} 交出进场={} 原因={}", playerId, key, epoch, transfer, reason);
+        if (transfer) {
+            metrics.transferEnter(TransferEnter.FAILED);
+        }
         sink.enterResult(key.linkId(), key.sessionId(), playerId, epoch, ENTER_FAILED);
         releaseClaim(playerId, epoch);
     }
@@ -738,10 +827,16 @@ public final class SceneWorld {
      * 离开当前场景（看得见它的人收到 51）再进入目标场景（79 / 21 / 47 / 21）。换地图落到出生点，同图换线保留坐标。
      * 换场景时停下（速度清零）并把位移校验的锚点移到落点：新场景里的人从 21 看到的是静止的它，客户端的下一条移动上行
      * 会重新带上速度。换完同步调组队跟随钩子（{@link TeamFollow}；被跟随换场景也调，它已与队长同场景，不会循环）。
+     * 冻结中（交出在途）的玩家不换（调用方都已挡掉：63 回 3014、排空改派与组队跟随跳过；这里是纵深防御，记 ERROR）。
      */
     public void switchScene(ScenePlayer player, Scene target) {
         Scene from = player.scene();
         if (from == target) {
+            return;
+        }
+        if (player.frozen()) {
+            log.error("冻结中的玩家不能换场景（调用方漏了冻结闸），忽略 player={} {} -> {}", Long.toUnsignedString(player.playerId()),
+                    Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(target.sceneId()));
             return;
         }
         List<ScenePlayer> oldWatchers = from.remove(player);
@@ -757,6 +852,374 @@ public final class SceneWorld {
         log.info("玩家换场景 player={} {} -> {}", Long.toUnsignedString(player.playerId()),
                 Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(target.sceneId()));
         teamFollow.onEnteredScene(this, player);
+    }
+
+    // ------------------------------------------------------------------ 跨节点换图（批次 5.2，scene-handoff-spec §5.5）
+
+    /**
+     * 63 的「在途」判定（回 3014，基线 IsSceneChangeBusy）：选目标中（RESOLVING）或冻结中（FREEZING）为 true。
+     * RESOLVING 槽过了期限（结果回调丢了，正常不会）就作废、不再挡，迟到的结果按过期丢弃。
+     */
+    boolean switchInFlight(ScenePlayer player) {
+        PlayerSwitch sw = player.switching();
+        if (sw == null) {
+            return false;
+        }
+        if (sw.phase() == SwitchPhase.RESOLVING && clock.nanoTime() - sw.resolveDeadlineNanos() >= 0) {
+            log.warn("选目标的结果过了期限还没回来，作废这次换图 player={} token={}", Long.toUnsignedString(player.playerId()),
+                    sw.token());
+            player.setSwitching(null);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 63 的远端去向已受理（应答 {@code {0}} 已回）：进 RESOLVING，请 scene-manager 选目标。不冻结——玩家照常游玩，
+     * 离场 / 断链 / 接管 / 失去归属照现有逻辑处理；结果回来时实例已不在或换图已作废就丢弃（计 stale）。
+     */
+    void beginRemoteSwitch(ScenePlayer player, long wantSceneId, int wantConfigId) {
+        if (!crossNode.enabled()) {
+            throw new IllegalStateException("跨节点换图没装配，不该解析出远端去向");
+        }
+        long token = ++switchTokens;
+        PlayerSwitch sw = new PlayerSwitch(token, wantSceneId, wantConfigId,
+                clock.nanoTime() + crossNode.resolveTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
+        player.setSwitching(sw);
+        log.info("跨节点换图：请 scene-manager 选目标 player={} token={} 当前 scene_id={} 指定 scene_id={} scene_config_id={}",
+                Long.toUnsignedString(player.playerId()), token, Long.toUnsignedString(player.scene().sceneId()),
+                Long.toUnsignedString(wantSceneId), wantConfigId);
+        crossNode.targets().select(player.playerId(), player.scene().sceneId(), wantSceneId, wantConfigId,
+                selection -> onSwitchTargetSelected(player, sw, selection));
+    }
+
+    /** 选目标的结果（逻辑线程）。先核对实例与令牌（§5.5 第 4 步），再按结果分派。 */
+    private void onSwitchTargetSelected(ScenePlayer player, PlayerSwitch sw, Selection selection) {
+        if (playersById.get(player.playerId()) != player || player.switching() != sw
+                || sw.phase() != SwitchPhase.RESOLVING) {
+            metrics.switchResolve(SwitchResolve.STALE);
+            log.debug("选目标的结果回来时实例已离开 / 已重新进场 / 换图已作废，丢弃 player={} token={}",
+                    Long.toUnsignedString(player.playerId()), sw.token());
+            return;
+        }
+        switch (selection) {
+            case Selection.Failed failed -> {
+                player.setSwitching(null);
+                metrics.switchResolve(SwitchResolve.ERROR);
+                log.warn("选目标调用失败，留在原地 player={} token={}: {}", Long.toUnsignedString(player.playerId()),
+                        sw.token(), failed.reason());
+                pushTip(player, SERVICE_UNAVAILABLE);
+            }
+            case Selection.Refused refused -> {
+                player.setSwitching(null);
+                metrics.switchResolve(SwitchResolve.REJECTED);
+                log.info("scene-manager 拒绝换图目标，留在原地 player={} token={} tip={}",
+                        Long.toUnsignedString(player.playerId()), sw.token(), refused.tipId());
+                pushTip(player, ENTER_FAILED);
+            }
+            case Selection.Chosen chosen -> onSwitchTargetChosen(player, sw, chosen);
+        }
+    }
+
+    private void onSwitchTargetChosen(ScenePlayer player, PlayerSwitch sw, Selection.Chosen chosen) {
+        Scene local = scenes.get(chosen.sceneId());
+        if (local != null) {
+            // 结果在本节点：目录过时（63 时还不在 / 已在排空），或只带地图时选中本节点另一个频道
+            player.setSwitching(null);
+            if (local == player.scene()) {
+                metrics.switchResolve(SwitchResolve.SAME);
+                return;
+            }
+            if (local.draining()) {
+                metrics.switchResolve(SwitchResolve.REJECTED);
+                log.info("选中的本节点场景在排空，留在原地 player={} scene_id={}", Long.toUnsignedString(player.playerId()),
+                        Long.toUnsignedString(local.sceneId()));
+                pushTip(player, ENTER_FAILED);
+                return;
+            }
+            metrics.switchResolve(SwitchResolve.LOCAL);
+            switchScene(player, local);
+            return;
+        }
+        if (chosen.sceneNodeId() == 0 || chosen.sceneId() == 0) {
+            player.setSwitching(null);
+            metrics.switchResolve(SwitchResolve.ERROR);
+            log.error("scene-manager 的选目标应答残缺（节点号或场景号为 0），留在原地 player={} 应答={}",
+                    Long.toUnsignedString(player.playerId()), chosen);
+            pushTip(player, SERVICE_UNAVAILABLE);
+            return;
+        }
+        if (chosen.sceneNodeId() == crossNode.localNodeId()) {
+            // 指向本节点却不在本节点：目录过时（场景已销毁）。绝不交给自己（同一实例不能换 epoch）
+            player.setSwitching(null);
+            metrics.switchResolve(SwitchResolve.REJECTED);
+            log.warn("选目标指向本节点上已不存在的场景，留在原地 player={} scene_id={}",
+                    Long.toUnsignedString(player.playerId()), Long.toUnsignedString(chosen.sceneId()));
+            pushTip(player, ENTER_FAILED);
+            return;
+        }
+        metrics.switchResolve(SwitchResolve.REMOTE);
+        freeze(player, sw, chosen);
+    }
+
+    /**
+     * 冻结并提交交出（§5.5「目标在别的节点」）：停下（旁人收到「停了」的 66，服务器不再外推）→ 拍冻结快照 → FREEZING →
+     * {@link PlayerRepository#handOff}。冻结前已在途的在线存盘不等：它与交出都带 (E, 未释放) 围栏，谁先提交都安全。
+     */
+    private void freeze(ScenePlayer player, PlayerSwitch sw, Selection.Chosen target) {
+        if (!player.velocity().isOrigin()) {
+            player.stopMotion();
+            player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+        }
+        PlayerSave snapshot = player.toSave();
+        sw.freeze(target.sceneNodeId(), target.sceneId(), target.sceneConfigId(), snapshot, clock.nanoTime());
+        transfersInFlight++;
+        metrics.transfersInFlight(transfersInFlight);
+        log.info("跨节点换图：冻结并提交交出 player={} token={} epoch={} → node={} scene_id={} scene_config_id={}",
+                Long.toUnsignedString(player.playerId()), sw.token(), player.ownerEpoch(), target.sceneNodeId(),
+                Long.toUnsignedString(target.sceneId()), target.sceneConfigId());
+        repository.handOff(snapshot, outcome -> onHandOffDone(player, sw, outcome));
+    }
+
+    /** 交出的结局（逻辑线程）。 */
+    private void onHandOffDone(ScenePlayer player, PlayerSwitch sw, HandOffOutcome outcome) {
+        if (player.switching() != sw || sw.phase() != SwitchPhase.FREEZING) {
+            log.error("交出结局到达时换图状态不符（同一次交出的结局回了两次？），忽略 player={} token={} 结局={}",
+                    Long.toUnsignedString(player.playerId()), sw.token(), outcome);
+            return;
+        }
+        switch (outcome) {
+            case HandOffOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
+            case HandOffOutcome.LeaseTooShort ignored -> unfreezeInPlace(player, sw, TransferResult.LEASE_TOO_SHORT);
+            case HandOffOutcome.Fenced ignored -> onTransferFenced(player, sw);
+            case HandOffOutcome.Failed failed -> {
+                // 结局不明（重试用尽 / 线程池拒绝）：加锁读探测，截止前给出确定结论；仍然冻结
+                log.warn("交出结局不明，探测归属 player={} token={} epoch={} 尝试={}",
+                        Long.toUnsignedString(player.playerId()), sw.token(), player.ownerEpoch(),
+                        failed.attempts().leases().size());
+                repository.probe(failed, probed -> onProbeDone(player, sw, probed));
+            }
+        }
+    }
+
+    /** 交出探测的结局（逻辑线程）。 */
+    private void onProbeDone(ScenePlayer player, PlayerSwitch sw, ProbeOutcome outcome) {
+        if (player.switching() != sw || sw.phase() != SwitchPhase.FREEZING) {
+            log.error("交出探测结局到达时换图状态不符，忽略 player={} token={} 结局={}",
+                    Long.toUnsignedString(player.playerId()), sw.token(), outcome);
+            return;
+        }
+        switch (outcome) {
+            case ProbeOutcome.NotCommitted ignored -> unfreezeInPlace(player, sw, TransferResult.ABORTED_IN_PLACE);
+            case ProbeOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
+            case ProbeOutcome.Lost ignored -> onTransferLost(player, sw);
+        }
+    }
+
+    /**
+     * 已交出（库里 E+1、未释放、冻结快照已落库）。冻结中没有别的事：移除实例（旁人 51，不写回、不拍 LOGOUT）→ 留墓碑 →
+     * 经同一条链路发 PlayerTransfer。帧确定没写出（链路已断 / 不可写）→ 源节点释放 E+1、位置以 (E, 序号+1) 转重连租约。
+     * 冻结中会话已离开 / 被请求让出 → 不发 PlayerTransfer（没人会拿 E+1 进场，释放安全），照离开 / 接管收尾。
+     */
+    private void onHandedOff(ScenePlayer player, PlayerSwitch sw, long newEpoch) {
+        long playerId = player.playerId();
+        long fromEpoch = player.ownerEpoch();
+        if (newEpoch != fromEpoch + 1) {
+            // 存储层保证 = E+1（同一行锁内读回）；对不上照样按库里的值走，只留 ERROR 待查
+            log.error("交出后的 epoch 不是 E+1 player={} E={} 新={}", Long.toUnsignedString(playerId), fromEpoch, newEpoch);
+        }
+        if (sw.detached()) {
+            // 实例已被停服 / 换角色 / 接替移出（那条路径已写回，必被围栏拒）：PlayerTransfer 没发、也不会发，新 epoch 只有本节点知道
+            finishTransfer(player, sw, TransferResult.LEFT);
+            repository.release(playerId, newEpoch);
+            log.info("交出已提交但实例已移出世界，释放新 epoch player={} epoch {}→{}", Long.toUnsignedString(playerId),
+                    fromEpoch, newEpoch);
+            return;
+        }
+        if (!player.toSave().equals(sw.snapshot())) {
+            // 冻结快照已经落库、内存却在冻结期间被改过：改动随实例移除而丢失。说明有入口漏了冻结闸（§5.9 事后检测），应恒为 0
+            metrics.postFreezeMutation();
+            log.error("冻结期间玩家状态被改过（漏掉的冻结闸），这部分改动随交出丢失 player={} token={}",
+                    Long.toUnsignedString(playerId), sw.token());
+        }
+        switch (sw.pendingAbort()) {
+            case LEAVE -> {
+                finishTransfer(player, sw, TransferResult.LEFT);
+                removePlayer(player, false);
+                repository.release(playerId, newEpoch);
+                writeLeaveLocation(player, sw.leaveVoluntary());
+                log.info("交出已提交但冻结中会话已离开，释放新 epoch player={} epoch {}→{} 主动={}",
+                        Long.toUnsignedString(playerId), fromEpoch, newEpoch, sw.leaveVoluntary());
+            }
+            case TAKEOVER -> {
+                finishTransfer(player, sw, TransferResult.TAKEN_OVER);
+                removePlayer(player, false);
+                repository.release(playerId, newEpoch);
+                kick(player, KICKED_BY_ANOTHER, "冻结中数据归属被新的进游戏接管（交出已提交，释放新 epoch）");
+            }
+            case NONE -> sendTransfer(player, sw, newEpoch);
+        }
+    }
+
+    private void sendTransfer(ScenePlayer player, PlayerSwitch sw, long newEpoch) {
+        long playerId = player.playerId();
+        SessionKey session = player.session();
+        player.setSwitching(null);
+        removePlayer(player, false);
+        TransferTombstone tombstone = new TransferTombstone(session, newEpoch, player,
+                clock.nanoTime() + crossNode.tombstoneTtl().toNanos());
+        boolean written = sink.playerTransfer(session.linkId(), session.sessionId(), playerId, player.ownerEpoch(),
+                newEpoch, sw.targetNodeId(), sw.targetSceneId(), () -> onTransferWriteFailed(tombstone));
+        if (!written) {
+            // 帧确定没写出：gate 不知道 E+1（它随链路断开关会话），由源节点释放；位置转重连租约（重连回到原场景，库里就是冻结快照）
+            finishTransfer(player, sw, TransferResult.LINK_GONE);
+            repository.release(playerId, newEpoch);
+            locations.disconnected(player);
+            log.warn("交出已提交但到 gate 的链路已断 / 不可写，释放新 epoch player={} epoch {}→{}",
+                    Long.toUnsignedString(playerId), player.ownerEpoch(), newEpoch);
+            return;
+        }
+        purgeExpiredTombstones();
+        transferTombstones.put(session, tombstone);
+        finishTransfer(player, sw, TransferResult.HANDED_OFF);
+        log.info("跨节点换图：已交出并通知 gate 改绑 player={} token={} epoch {}→{} → node={} scene_id={}",
+                Long.toUnsignedString(playerId), sw.token(), player.ownerEpoch(), newEpoch, sw.targetNodeId(),
+                Long.toUnsignedString(sw.targetSceneId()));
+    }
+
+    /**
+     * PlayerTransfer 交给链路之后异步写失败（链路在冲刷前关闭；逻辑线程）：gate 没收到改绑指令、不会发 PlayerEnter{E+1}，源节点释放 E+1；
+     * 位置转重连租约（交叉的 leave 已按墓碑写过就不再写）。
+     */
+    private void onTransferWriteFailed(TransferTombstone tombstone) {
+        transferTombstones.remove(tombstone.session(), tombstone);
+        repository.release(tombstone.playerId(), tombstone.toEpoch());
+        if (tombstone.markLocationWritten()) {
+            locations.disconnected(tombstone.removed());
+        }
+        log.warn("PlayerTransfer 没写出去，释放新 epoch player={} epoch {}→{}", Long.toUnsignedString(tombstone.playerId()),
+                tombstone.fromEpoch(), tombstone.toEpoch());
+    }
+
+    /** 交出没提交（剩余租约不足 / 探测确认没提交）：原地解冻。冻结中会话已离开 / 被请求让出的，照现有离开 / 接管流程写回并释放 E。 */
+    private void unfreezeInPlace(ScenePlayer player, PlayerSwitch sw, TransferResult result) {
+        finishTransfer(player, sw, result);
+        if (sw.detached()) {
+            return;
+        }
+        switch (sw.pendingAbort()) {
+            case LEAVE -> {
+                removePlayer(player, true);
+                writeLeaveLocation(player, sw.leaveVoluntary());
+                log.info("交出没提交，冻结中会话已离开，写回并释放 player={} 结局={}", Long.toUnsignedString(player.playerId()),
+                        result);
+            }
+            case TAKEOVER -> {
+                removePlayer(player, true);
+                kick(player, KICKED_BY_ANOTHER, "冻结中数据归属被新的进游戏接管（交出没提交，写回并释放）");
+            }
+            case NONE -> {
+                log.info("交出没提交，原地解冻 player={} token={} 结局={}", Long.toUnsignedString(player.playerId()),
+                        sw.token(), result);
+                pushTip(player, ENTER_FAILED);
+            }
+        }
+    }
+
+    /** 交出被围栏拒：归属已不是本实例的（租约过期被夺），同续约失去归属——移除（不写回）并踢 2017；会话已离开的不踢。 */
+    private void onTransferFenced(ScenePlayer player, PlayerSwitch sw) {
+        finishTransfer(player, sw, TransferResult.FENCED);
+        if (sw.detached()) {
+            return;
+        }
+        removePlayer(player, false);
+        if (sw.pendingAbort() != PlayerSwitch.PendingAbort.LEAVE) {
+            kick(player, KICKED_BY_ANOTHER, "交出时发现已失去数据归属");
+        } else {
+            log.warn("交出时发现已失去数据归属（会话已离开） player={}", Long.toUnsignedString(player.playerId()));
+        }
+    }
+
+    /**
+     * 交出结局不明且探测判定不了（锁等待超时、读到别人的归属 / 已释放）：fail-closed，移除（不写回、不释放）并踢 3023
+     * （gate 推 23 {3023} 后断开，D5）。可能已提交（E+1 无人持有，等租约过期）或已被夺。会话已离开的不踢。
+     */
+    private void onTransferLost(ScenePlayer player, PlayerSwitch sw) {
+        finishTransfer(player, sw, TransferResult.LOST_UNKNOWN);
+        if (sw.detached()) {
+            return;
+        }
+        removePlayer(player, false);
+        if (sw.pendingAbort() != PlayerSwitch.PendingAbort.LEAVE) {
+            kick(player, ENTER_FAILED, "交出结局无法确认（fail-closed）");
+        } else {
+            log.warn("交出结局无法确认（会话已离开） player={}", Long.toUnsignedString(player.playerId()));
+        }
+    }
+
+    /** 一次交出终结：摘掉换图状态（之后 removePlayer 不再把它当「冻结中被移出」）、计结局与冻结时长。 */
+    private void finishTransfer(ScenePlayer player, PlayerSwitch sw, TransferResult result) {
+        if (player.switching() == sw) {
+            player.setSwitching(null);
+        }
+        transfersInFlight--;
+        metrics.transfersInFlight(transfersInFlight);
+        metrics.transfer(result, clock.nanoTime() - sw.frozenAtNanos());
+    }
+
+    /** 冻结中会话离开 / 所在链路断开：只记下，等交出结局（同一玩家只有一个写在途；实例与旁人视野保持到结局回来）。 */
+    private boolean deferLeaveIfFrozen(ScenePlayer player, boolean voluntary) {
+        PlayerSwitch sw = player.switching();
+        if (sw == null || sw.phase() != SwitchPhase.FREEZING) {
+            return false;
+        }
+        sw.requestLeave(voluntary);
+        log.info("冻结中会话离开，等交出结局再处理 player={} token={} 主动={}", Long.toUnsignedString(player.playerId()),
+                sw.token(), voluntary);
+        return true;
+    }
+
+    /**
+     * 实例已不在时到来的 PlayerLeave：若这个会话刚交出（墓碑在、玩家对得上、没过期），就是与 PlayerTransfer 在链路上交叉的那条——
+     * 按 voluntary 用 (E, 序号+1) 写登出墓碑或重连租约（gate 随后把那次 transfer 当过期并放弃 E+1）。绝不释放 E+1。
+     */
+    private boolean consumeTransferTombstone(SessionKey key, PlayerLeave leave) {
+        TransferTombstone tombstone = transferTombstones.get(key);
+        if (tombstone == null || tombstone.playerId() != leave.getPlayerId()) {
+            return false;
+        }
+        transferTombstones.remove(key);
+        if (tombstone.expired(clock.nanoTime())) {
+            return false;
+        }
+        if (tombstone.markLocationWritten()) {
+            writeLeaveLocation(tombstone.removed(), leave.getVoluntary());
+        }
+        log.info("交出后迟到的离开（与 PlayerTransfer 在链路上交叉），按旧 epoch 补写位置 player={} session={} 主动={}",
+                Long.toUnsignedString(tombstone.playerId()), key, leave.getVoluntary());
+        return true;
+    }
+
+    private void purgeExpiredTombstones() {
+        if (transferTombstones.isEmpty()) {
+            return;
+        }
+        long now = clock.nanoTime();
+        transferTombstones.values().removeIf(tombstone -> tombstone.expired(now));
+    }
+
+    /** 离开后的位置记录：主动离开写登出墓碑，断线写重连租约（同 {@link #onPlayerLeave}）。 */
+    private void writeLeaveLocation(ScenePlayer player, boolean voluntary) {
+        if (voluntary) {
+            locations.loggedOut(player);
+        } else {
+            locations.disconnected(player);
+        }
+    }
+
+    /** 给本人推 23 {@code TipInfoMessage{tip}}（异步换图的结局，应答早已回过）。 */
+    private void pushTip(ScenePlayer player, int tipId) {
+        sendTo(player, push(ids.sendTipToClient(), SceneMessageIds.tip(tipId)));
     }
 
     // ------------------------------------------------------------------ 移动
@@ -932,7 +1395,9 @@ public final class SceneWorld {
         }
         ScenePlayer player = playersBySession.get(key);
         if (player == null) {
-            log.debug("离开的会话不在本节点（已离开或已被顶替） player={} session={}", leave.getPlayerId(), key);
+            if (!consumeTransferTombstone(key, leave)) {
+                log.debug("离开的会话不在本节点（已离开或已被顶替） player={} session={}", leave.getPlayerId(), key);
+            }
             return;
         }
         if (player.playerId() != leave.getPlayerId()) {
@@ -940,17 +1405,20 @@ public final class SceneWorld {
                     leave.getPlayerId(), player.playerId(), key);
             return;
         }
+        if (deferLeaveIfFrozen(player, leave.getVoluntary())) {
+            return;
+        }
         removePlayer(player, true);
         // 主动离开（LeaveGame）= 干净登出：删位置记录，下次进游戏按首登落点；断线留 30 s 重连租约（同基线断线租约）
-        if (leave.getVoluntary()) {
-            locations.loggedOut(player);
-        } else {
-            locations.disconnected(player);
-        }
+        writeLeaveLocation(player, leave.getVoluntary());
         log.info("玩家离场 player={} session={} 主动={}", player.playerId(), key, leave.getVoluntary());
     }
 
-    /** gate 链路断开：取消这条链路上的进场（释放归属），移除其上全部玩家（看得见它们的人收到 51）并写回。幂等。 */
+    /**
+     * gate 链路断开：取消这条链路上的进场（释放归属），移除其上全部玩家（看得见它们的人收到 51）并写回。幂等。
+     * 冻结中（交出在途）的玩家只记下「断线离开」，实例保留到交出结局出来（见「跨节点换图」）；这条链路上的交出墓碑随之作废
+     * （之后不会再有从它来的 PlayerLeave）。
+     */
     public void onLinkClosed(long linkId) {
         for (Iterator<PendingEnter> it = pendingEnters.values().iterator(); it.hasNext(); ) {
             PendingEnter pending = it.next();
@@ -965,12 +1433,18 @@ public final class SceneWorld {
                 onLink.add(player);
             }
         }
+        int removed = 0;
         for (ScenePlayer player : onLink) {
+            if (deferLeaveIfFrozen(player, false)) {
+                continue;
+            }
             removePlayer(player, true);
             locations.disconnected(player);
+            removed++;
         }
+        transferTombstones.keySet().removeIf(session -> session.linkId() == linkId);
         if (!onLink.isEmpty()) {
-            log.info("gate 链路断开，移除其上玩家 link={} 人数={}", linkId, onLink.size());
+            log.info("gate 链路断开，移除其上玩家 link={} 人数={} 冻结中待结局={}", linkId, removed, onLink.size() - removed);
         }
     }
 
@@ -980,12 +1454,21 @@ public final class SceneWorld {
      * login 请本节点让出 (playerId, ownerEpoch)：别的会话要进这个角色（顶号），或上次离开的写回还没落库。
      * 持有正是这个 epoch 的实例写回并释放、通知 gate 踢掉它的会话；还在加载中的进场取消并释放。
      * 别的 epoch（更旧或更新）一律不动：迟到的接管请求碰不到之后新进场的实例。幂等。
+     * 冻结中（交出在途）的实例只记下「被请求让出」，等交出结局：没提交就照这里写回并释放、踢旧会话；已提交就释放 E+1、踢旧会话
+     * （login 退避期内重试会再发，那时 E 已释放或 E+1 已释放）。交出提交后对 E+1 的让出请求在源节点什么也碰不到，由目标节点处理。
      */
     public void onTakeoverRequested(long playerId, long ownerEpoch) {
         ScenePlayer player = playersById.get(playerId);
         if (player != null && player.ownerEpoch() == ownerEpoch) {
+            PlayerSwitch sw = player.switching();
+            if (sw != null && sw.phase() == SwitchPhase.FREEZING) {
+                sw.requestTakeover();
+                log.info("冻结中被请求让出，等交出结局再处理 player={} token={} epoch={}",
+                        Long.toUnsignedString(playerId), sw.token(), ownerEpoch);
+                return;
+            }
             removePlayer(player, true);
-            kick(player, "数据归属被新的进游戏接管");
+            kick(player, KICKED_BY_ANOTHER, "数据归属被新的进游戏接管");
             return;
         }
         for (Iterator<PendingEnter> it = pendingEnters.values().iterator(); it.hasNext(); ) {
@@ -1006,13 +1489,19 @@ public final class SceneWorld {
     /**
      * 续约报告这些归属已经不在本节点手里（epoch 被夺走、已释放或玩家已删）：对应实例的写回只会被围栏拒绝，
      * 立即移除（不写回）并踢掉会话，不让一个没有归属的实例继续被玩、被别人看见。epoch 对不上的（已离开后又进来）不动。
+     * 冻结中（交出在途）的实例忽略：交出提交之后 E 当然续不上，交出结局会裁决它的去留（scene-handoff-spec §5.5）。
      */
     public void onOwnershipLost(Collection<OwnedPlayer> lost) {
         for (OwnedPlayer owned : lost) {
             ScenePlayer player = playersById.get(owned.playerId());
             if (player != null && player.ownerEpoch() == owned.ownerEpoch()) {
+                if (player.frozen()) {
+                    log.info("续约报告失去归属，但实例正冻结在交出中，交给交出结局裁决 player={} epoch={}",
+                            Long.toUnsignedString(owned.playerId()), owned.ownerEpoch());
+                    continue;
+                }
                 removePlayer(player, false);
-                kick(player, "续约发现已失去数据归属");
+                kick(player, KICKED_BY_ANOTHER, "续约发现已失去数据归属");
             }
         }
     }
@@ -1062,6 +1551,7 @@ public final class SceneWorld {
      * @return 本次续期的人数
      */
     public int refreshDueLocations() {
+        purgeExpiredTombstones();
         long slot = locationSecond++ % LOCATION_REFRESH_SLOTS;
         List<ScenePlayer> due = new ArrayList<>();
         for (ScenePlayer player : playersById.values()) {
@@ -1092,6 +1582,7 @@ public final class SceneWorld {
     /**
      * 立刻为这个玩家提交一次在线存盘（不等周期）：资产通道记账后要尽快落盘、据实回报 durable（基线 SavePlayerToRedis）。
      * 规则同周期存盘（同一玩家至多一个在途、与落库快照相同就不写、存储积压就不提交），只是不按槽号。
+     * 冻结中（交出在途）回 {@link SaveRequest#IN_FLIGHT}：那笔交出就是它的写（scene-handoff-spec §5.5）。
      */
     public SaveRequest requestSave(ScenePlayer player) {
         if (periodicSaveStopped || playersById.get(player.playerId()) != player) {
@@ -1101,7 +1592,8 @@ public final class SceneWorld {
     }
 
     private SaveRequest submitProgress(ScenePlayer player) {
-        if (player.progressSaveInFlight()) {
+        if (player.progressSaveInFlight() || player.frozen()) {
+            // 冻结中：交出事务写的就是冻结快照，同一玩家不再提交第二笔写
             return SaveRequest.IN_FLIGHT;
         }
         PlayerSave snapshot = player.toSave();
@@ -1128,19 +1620,29 @@ public final class SceneWorld {
             }
             case FENCED -> {
                 // 归属已被夺走（epoch 变了）或已释放：实例写回只会被拒，按续约发现失去归属处理。离场后才回来的不动。
+                // 冻结中的不踢：冻结前就在途的在线存盘晚于交出提交时当然被拒，交出结局会裁决去留（scene-handoff-spec §5.5）。
                 if (playersById.get(player.playerId()) == player) {
+                    if (player.frozen()) {
+                        log.info("冻结前在途的在线存盘被围栏拒绝，交给交出结局裁决 player={} epoch={}",
+                                Long.toUnsignedString(player.playerId()), player.ownerEpoch());
+                        return;
+                    }
                     removePlayer(player, false);
-                    kick(player, "在线存盘被归属围栏拒绝（已失去数据归属）");
+                    kick(player, KICKED_BY_ANOTHER, "在线存盘被归属围栏拒绝（已失去数据归属）");
                 }
             }
         }
     }
 
-    private void kick(ScenePlayer player, String reason) {
+    /**
+     * 通知 gate 踢掉这个实例的会话：gate 推 23 {@code TipInfoMessage{tipId}} 后断开（按会话当前绑定的 epoch 过滤）。
+     * 顶号 / 失去归属用 2017；交出结局无法确认用 3023（scene-handoff-spec §5.5）。
+     */
+    private void kick(ScenePlayer player, int tipId, String reason) {
         sink.playerKicked(player.session().linkId(), player.session().sessionId(), player.playerId(),
-                player.ownerEpoch(), KICKED_BY_ANOTHER);
-        log.warn("踢出玩家 player={} session={} epoch={} 原因={}", player.playerId(), player.session(),
-                player.ownerEpoch(), reason);
+                player.ownerEpoch(), tipId);
+        log.warn("踢出玩家 player={} session={} epoch={} tip={} 原因={}", player.playerId(), player.session(),
+                player.ownerEpoch(), tipId, reason);
     }
 
     /**
@@ -1148,8 +1650,14 @@ public final class SceneWorld {
      * 先停下（速度清零，StopMotionForExit）→ 离开场景（51）→ 写回此刻的位置（含 z）。
      * 外推与写回在同一线程上，停下之后到写回之间不会再被推；实例移出后不在任何场景的玩家列表里，此后不再外推，
      * 迟到的移动输入按会话找不到它、直接丢弃，写回的状态不会再变。
+     * 冻结中（交出在途）的实例被别的路径移出（同会话换角色、被更高 epoch 的进场接替）时，把那次换图标成「已移出」：
+     * 交出结局出来后只做收尾（见 {@link #onHandedOff}）。交出结局自己的收尾先摘掉换图状态再移除，不会走到这里的标记。
      */
     private void removePlayer(ScenePlayer player, boolean save) {
+        PlayerSwitch sw = player.switching();
+        if (sw != null && sw.phase() == SwitchPhase.FREEZING) {
+            sw.detach();
+        }
         player.stopMotion();
         List<ScenePlayer> watchers = player.scene().remove(player);
         playersById.remove(player.playerId(), player);
@@ -1179,6 +1687,10 @@ public final class SceneWorld {
     /**
      * 停服：拒绝新进场、取消加载中的进场（释放归属）、把在场玩家全部写回并释放、清空（不再给客户端发消息）。
      * 返回写回人数。之后 {@link #step()} 没有玩家可推，是空操作。
+     * 冻结中（交出在途）的玩家照常提交写回 E：与在途交出谁先提交都安全（写回先 → 交出被围栏拒；交出先 → 写回被拒，
+     * 结局回到逻辑线程时释放新 epoch，scene-handoff-spec §5.2、§5.5）。这笔释放在本方法返回之后才提交，所以停服流程在关存储线程池
+     * 之前要等在途交出 / 探测的结局处理完（{@code SceneShutdown} → {@code StoragePlayerRepository.awaitTransfersSettled}），
+     * 否则它撞上已关闭的池被拒、E+1 悬空到租约过期；逻辑线程先停的（投递被拒）由存储线程代为释放。
      */
     public int shutdown() {
         acceptingEnters = false;
@@ -1187,8 +1699,13 @@ public final class SceneWorld {
             releaseClaim(pending.playerId(), pending.ownerEpoch());
         }
         pendingEnters.clear();
+        transferTombstones.clear();
         List<ScenePlayer> all = List.copyOf(playersById.values());
         for (ScenePlayer player : all) {
+            PlayerSwitch sw = player.switching();
+            if (sw != null && sw.phase() == SwitchPhase.FREEZING) {
+                sw.detach();
+            }
             player.stopMotion();
             PlayerSave written = player.toSave();
             repository.save(written);
@@ -1208,6 +1725,11 @@ public final class SceneWorld {
 
     ScenePlayer playerBySession(SessionKey key) {
         return playersBySession.get(key);
+    }
+
+    /** 本世界的指标出口（包内给请求分发计冻结闸的拒绝 / 丢弃用）。 */
+    SceneMetrics metrics() {
+        return metrics;
     }
 
     /** 按 player_id 找本节点上的玩家（已进场的实例；加载中的不算）；没有为 null。 */
@@ -1266,6 +1788,7 @@ public final class SceneWorld {
         return id;
     }
 
-    private record PendingEnter(SessionKey session, long playerId, long sceneId, long ownerEpoch) {
+    /** @param transfer 跨节点换图的交出进场（{@code PlayerEnter.transfer}） */
+    private record PendingEnter(SessionKey session, long playerId, long sceneId, long ownerEpoch, boolean transfer) {
     }
 }

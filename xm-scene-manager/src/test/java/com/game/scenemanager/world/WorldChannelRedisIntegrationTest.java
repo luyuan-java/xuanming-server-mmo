@@ -6,6 +6,7 @@ import com.game.api.proto.AssignSceneRequest;
 import com.game.api.proto.ChannelState;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.WorldChannel;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.world.RedissonWorldChannelStore;
@@ -15,6 +16,7 @@ import com.game.discovery.world.WorldPlan;
 import com.game.scenemanager.ChannelSelector;
 import com.game.scenemanager.SceneAssigner;
 import com.game.scenemanager.SceneNodeSource;
+import com.game.scenemanager.SwitchTargetSelector;
 import com.game.scenemanager.WorldSceneConfigs;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.InvocationTargetException;
@@ -42,7 +44,7 @@ import org.redisson.config.Config;
 /**
  * 控制面连真 Redis（scene-channels-spec §9.5 WorldLeaderFailoverIT 与围栏写入）：两个协调者竞选、只有一个写、频道数不翻倍；
  * 领导者停止续期后跟随者在 TTL 内接管；锁被夺后旧领导者的写入被围栏（−1）并降级；版本冲突（−2）本拍作废、下拍重算；
- * 分配的软预占把并发进场摊开。
+ * 分配的软预占把并发进场摊开；换图选目标（5.2）与进场共用同一份预占。
  * 默认跳过；显式开启：{@code -Dxm.it.redis=redis://127.0.0.1:6379}。用 DB 9，每个用例一个随机 zone，结束时只删自己的键。
  */
 @EnabledIfSystemProperty(named = "xm.it.redis", matches = ".+")
@@ -335,5 +337,43 @@ class WorldChannelRedisIntegrationTest {
         assertThat(spread).hasSize(4).allSatisfy((scene, n) -> assertThat(n).isBetween(9, 11));
         List<Long> counts = store.countReservations(zone, new ArrayList<>(spread.keySet()));
         assertThat(counts.stream().mapToLong(Long::longValue).sum()).isEqualTo(players);
+    }
+
+    /** 批次 5.2（scene-handoff-spec §5.4）：换图选目标与进场共用同一份软预占；只带地图排除源场景，重试不重复计数，显式场景号也写预占。 */
+    @Test
+    void 换图选目标排除源场景并写真预占() {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        dir.host(20);
+        WorldChannelCoordinator seeded = coordinator(dir, "it-switch:" + zone, Duration.ofSeconds(30), new SimpleMeterRegistry());
+        seeded.tick();
+        dir.host(10);
+        dir.host(20);
+        seeded.releaseAll();
+        WorldPlan plan = store.readPlan(zone);
+        long fromScene = plan.channelsOn(10).stream().filter(c -> c.getSceneConfigId() == 1).findFirst().orElseThrow().getSceneId();
+        long otherScene = plan.channelsOn(20).stream().filter(c -> c.getSceneConfigId() == 1).findFirst().orElseThrow().getSceneId();
+        long explicitScene = plan.channelsOn(10).stream().filter(c -> c.getSceneConfigId() == 2).findFirst().orElseThrow().getSceneId();
+
+        WorldSceneConfigs world = new WorldSceneConfigs(1, new LinkedHashSet<>(CONFS));
+        SwitchTargetSelector selector = new SwitchTargetSelector(dir, world, new ChannelSelector(dir, store, Duration.ofSeconds(10)));
+        SelectSwitchTargetRequest byMap = SelectSwitchTargetRequest.newBuilder().setZoneId(zone).setPlayerId(8_000_001L)
+                .setFromSceneNodeId(10).setFromSceneId(fromScene).setWantSceneConfigId(1).build();
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            SwitchTargetSelector.Selection s = selector.select(byMap);
+            assertThat(s.result()).isEqualTo(SwitchTargetSelector.Result.OK);
+            assertThat(s.response().getSceneNodeId()).isEqualTo(20);
+            assertThat(s.response().getSceneId()).isEqualTo(otherScene);
+        }
+        assertThat(store.countReservations(zone, List.of(fromScene, otherScene))).containsExactly(0L, 1L);
+
+        SwitchTargetSelector.Selection explicit = selector.select(SelectSwitchTargetRequest.newBuilder().setZoneId(zone)
+                .setPlayerId(8_000_002L).setFromSceneNodeId(20).setFromSceneId(otherScene).setWantSceneId(explicitScene).build());
+        assertThat(explicit.result()).isEqualTo(SwitchTargetSelector.Result.OK);
+        assertThat(explicit.response().getSceneNodeId()).isEqualTo(10);
+        assertThat(explicit.response().getSceneConfigId()).isEqualTo(2);
+        assertThat(store.countReservations(zone, List.of(explicitScene))).containsExactly(1L);
     }
 }

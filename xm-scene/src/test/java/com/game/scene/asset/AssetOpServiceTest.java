@@ -45,6 +45,7 @@ import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
 import com.game.scene.world.Vec3;
 import com.game.scene.world.WorldTestAccess;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,7 +53,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
-/** 资产通道 scene 侧的统一流程，用例对应 mmorpg asset_op_system_test.cpp（Java 版没有的冻结 / 交接 / 战斗 / 退出在途除外）。 */
+/** 资产通道 scene 侧的统一流程，用例对应 mmorpg asset_op_system_test.cpp（Java 版没有的战斗 / 退出在途除外；冻结随批次 5.2 接入）。 */
 class AssetOpServiceTest {
 
     private static final long LINK = 1;
@@ -565,6 +566,73 @@ class AssetOpServiceTest {
         assertThat(call(AssetRpc.ABORT_DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_RETRY);
         assertThat(player.assetLedger().isPristine()).isTrue();
         assertThat(gold()).isEqualTo(100);
+    }
+
+    // ------------------------------------------------------------------ 冻结（批次 5.2，scene-handoff-spec §5.9）
+
+    @Test
+    void 冻结中未见seq的扣款发放中止都回RETRY_27003_不记账不改资产_计冻结拒绝() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        start();
+        service = new AssetOpService(world, currency, bags, new AssetOpAuth(c -> AssetOpAuthTest.SECRET), clock,
+                new SceneMetrics(meters));
+        currency.add(player, GOLD, 100, Reason.GM_GRANT);
+        audit.currencies.clear();
+        PlayerState before = WorldTestAccess.persistentState(player);
+        WorldTestAccess.startFreezing(player);
+
+        AssetOpResponse retry = response(AssetOutcome.ASSET_OUTCOME_RETRY, AssetOpService.FROZEN, false);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(retry);
+        assertThat(call(AssetRpc.CREDIT, credit(2, gold(5).addItems(
+                AssetItem.newBuilder().setConfigId(STACKABLE).setCount(1))))).isEqualTo(retry);
+        assertThat(call(AssetRpc.ABORT_DEBIT, debit(3, 30))).as("中止占位也是账本改动").isEqualTo(retry);
+
+        assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        assertThat(player.assetLedger().isPristine()).isTrue();
+        assertThat(audit.currencies).isEmpty();
+        assertThat(audit.items).isEmpty();
+        assertThat(repo.pendingProgress()).isZero();
+        assertThat(meters.get("xm.scene.frozen.rejections").tag("kind", "asset_op").counter().count()).isEqualTo(3);
+
+        // 原地解冻（交出没提交）后同一 seq 重投照常应用
+        WorldTestAccess.clearSwitch(player);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(gold()).isEqualTo(70);
+    }
+
+    @Test
+    void 选目标中不冻结_照常应用() {
+        start();
+        currency.add(player, GOLD, 100, Reason.GM_GRANT);
+        WorldTestAccess.startResolving(player);
+
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, false));
+        assertThat(call(AssetRpc.CREDIT, credit(2, gold(5))).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(gold()).isEqualTo(75);
+    }
+
+    @Test
+    void 冻结中已见seq照常只读答复_不补存_不重办() {
+        start();
+        currency.add(player, GOLD, 100, Reason.GM_GRANT);
+        call(AssetRpc.DEBIT, debit(1, 30));
+        call(AssetRpc.DEBIT, debit(2, 500));
+        repo.takeProgress().complete(ProgressResult.FAILED);
+        clock.advanceMillis(AssetOpService.RESAVE_MIN_INTERVAL_MS);
+        WorldTestAccess.startFreezing(player);
+
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, false));
+        assertThat(call(AssetRpc.DEBIT, debit(2, 500))).isEqualTo(
+                response(AssetOutcome.ASSET_OUTCOME_REJECTED, AssetOpService.CURRENCY_INSUFFICIENT, false));
+        assertThat(call(AssetRpc.ABORT_DEBIT, debit(1, 30)).getOutcome()).as("已应用的 seq 中止仍答应用")
+                .isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(repo.pendingProgress()).as("冻结中不补存：交出就是唯一的写").isZero();
+        assertThat(gold()).isEqualTo(70);
+
+        // 冻结中的重查不占补存限频：原地解冻后的第一次重查立即补存
+        WorldTestAccess.clearSwitch(player);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getDurable()).isFalse();
+        assertThat(repo.pendingProgress()).isEqualTo(1);
     }
 
     @Test

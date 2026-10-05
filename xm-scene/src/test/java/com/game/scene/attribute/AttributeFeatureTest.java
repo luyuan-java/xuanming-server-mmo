@@ -543,6 +543,50 @@ class AttributeFeatureTest {
         assertThat(panel().getPools(0).getRemaining()).as("没有当前方案按已用 0 算（同基线）").isEqualTo(5);
     }
 
+    // ------------------------------------------------------------------ 冻结（批次 5.2）
+
+    /**
+     * 跨节点换图冻结中（交出事务在途，scene-handoff-spec §0.5、§5.9）：加点 / 洗点 / 开方案 / 切方案 / 改名 / GM 设等级经写前置回 1005，
+     * 零写入、不扣金币、不推 170；173 自动加点不过写前置，冻结中由分发入口回 1005（D9）；面板照常读。解冻后照常。
+     */
+    @Test
+    void 冻结中写操作经写前置回1005_173在入口回1005_面板照常_零写入零流水() throws Exception {
+        start();
+        setLevel(30);
+        player().wallet().add(Wallet.GOLD, 10_000);
+        allocate(Map.of(103, 10));
+        audits.clear();
+        levelEvents.clear();
+        PlayerState before = WorldTestAccess.persistentState(player());
+        WorldTestAccess.startFreezing(player());
+
+        assertThat(allocateTip(1, Map.of(103, 20))).isEqualTo(1005);
+        assertThat(resetTip(1)).isEqualTo(1005);
+        assertThat(create("").getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(switchTip(1)).isEqualTo(1005);
+        assertThat(rename(1, "冻结方案").getErrorMessage().getId()).isEqualTo(1005);
+        GmSetPlayerLevelResponse level = GmSetPlayerLevelResponse.parseFrom(call("GmSetPlayerLevel",
+                GmSetPlayerLevelRequest.newBuilder().setLevel(40).build()).getSerializedMessage());
+        assertThat(level.getErrorMessage().getId()).as("不推 170、不触发等级连带").isEqualTo(1005);
+        AutoAllocateAttributePointsResponse auto = AutoAllocateAttributePointsResponse.parseFrom(call(
+                "AutoAllocateAttributePoints", AutoAllocateAttributePointsRequest.newBuilder().setPoolId(1).build())
+                .getSerializedMessage());
+        assertThat(auto.getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(auto.getSuggestedMap()).isEmpty();
+        assertThat(panel().getPools(0).getRemaining()).as("面板照常读冻结内存").isEqualTo(140);
+
+        assertThat(WorldTestAccess.persistentState(player())).isEqualTo(before);
+        assertThat(player().level()).isEqualTo(30);
+        assertThat(audits).isEmpty();
+        assertThat(levelEvents).isEmpty();
+
+        WorldTestAccess.clearSwitch(player());
+        assertThat(allocateTip(1, Map.of(103, 20))).isZero();
+        assertThat(AutoAllocateAttributePointsResponse.parseFrom(call("AutoAllocateAttributePoints",
+                AutoAllocateAttributePointsRequest.newBuilder().setPoolId(1).build()).getSerializedMessage())
+                .getErrorMessage().getId()).isZero();
+    }
+
     // ------------------------------------------------------------------ 工具
 
     private ScenePlayer player() {

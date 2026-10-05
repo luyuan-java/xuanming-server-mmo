@@ -219,7 +219,8 @@ public final class WorldChannelPlanner {
         }
         int count = active.size();
         if (props.coverage() == Coverage.PER_NODE) {
-            // 覆盖：每个活节点对这张图至少一个 ACTIVE（保住「63 按地图换场景永远在本节点完成」，直到 5.2，§4.6.4）
+            // 覆盖：每个活节点对这张图至少一个 ACTIVE（保住「63 按地图换场景永远在本节点完成」，§4.6.4；
+            // hash 覆盖下本节点没有该图时由 5.2 的跨节点换图兜住）
             for (int node : live) {
                 if (byNode.getOrDefault(node, 0) == 0) {
                     if (!add(draft, conf, node, slots, byNode, live)) {

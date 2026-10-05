@@ -5,6 +5,7 @@ import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.ChatScenario;
+import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.ExpectJump;
 import com.game.robot.scenario.FeaturesScenario;
@@ -71,7 +72,9 @@ public record RobotOptions(
         /** 子命令写作 {@code guild-economy}（连字符按下划线认）。 */
         GUILD_ECONOMY,
         /** 聚宝斋只读面（196 / 197 / 198 / 200 + 播种）。 */
-        TRADE
+        TRADE,
+        /** 跨节点换场景与归属交接（批次 5.2）；子命令写作 {@code cross-node}，需要两个 scene 节点。 */
+        CROSS_NODE
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -83,10 +86,11 @@ public record RobotOptions(
         RUN_TAG("run-tag", "XM_ROBOT_RUN_TAG", null, "smoke 以外各子命令的账号标签 [a-z0-9]{1,16}；缺省按当前时间生成（每次新号）"),
         CONNECT_TIMEOUT("connect-timeout-ms", "XM_ROBOT_CONNECT_TIMEOUT_MS", "5000", "HTTP 与 TCP 建连超时"),
         REQUEST_TIMEOUT("request-timeout-ms", "XM_ROBOT_REQUEST_TIMEOUT_MS", "15000",
-                "握手、登录、建角、进游戏、ListSkills 各自等应答的上限；movement 里也是 A 断开后等 51 的上限"),
+                "握手、登录、建角、进游戏、ListSkills 各自等应答的上限；movement 里也是 A 断开后等 51 的上限；"
+                        + "cross-node 里也是 63 受理后等 79 / 23 {3023} 的上限"),
         ENTER_SCENE_TIMEOUT("enter-scene-timeout-ms", "XM_ROBOT_ENTER_SCENE_TIMEOUT_MS", "15000", "发出进游戏后等 79 的上限"),
         OBSERVE_TIMEOUT("observe-timeout-ms", "XM_ROBOT_OBSERVE_TIMEOUT_MS", "2000",
-                "movement：每条移动输入后 B 收到 66、跳跃后 A 收到 137、等 21 / 47 的上限"),
+                "movement：每条移动输入后 B 收到 66、跳跃后 A 收到 137、等 21 / 47 的上限；cross-node：等 21 / 47 / 51 / 66 的上限"),
         EXPECT_JUMP("expect-jump", "XM_ROBOT_EXPECT_JUMP", "auto",
                 "movement 跳跃检查的期望：auto（纠偏或 fail-open 都接受）/ correct（必须回 137）/ accept（必须原样接受）"),
         EXPECT_GM("expect-gm", "XM_ROBOT_EXPECT_GM", "allow",
@@ -221,6 +225,7 @@ public record RobotOptions(
             case GUILD -> GuildScenario.accountName(prefix, runTag, "a");
             case GUILD_ECONOMY -> GuildEconomyScenario.accountName(prefix, runTag, "a");
             case TRADE -> TradeScenario.accountName(prefix, runTag, "a");
+            case CROSS_NODE -> CrossNodeScenario.accountName(prefix, runTag, "3");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -237,7 +242,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|cross-node|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -287,6 +292,10 @@ public record RobotOptions(
                 + "超末页钳到末页 → 拍卖 20003 → 详情（不存在 20000、卖家看已结束的、买家 20000）→ 收藏 / 只看收藏 / 取消 → 货架；"
                 + "另钉参数非法 1005、LIKE 通配按字面量、按编号搜索。需要 dev 运行模式与运维令牌；--trade-scope 须与 xm-trade 一致，"
                 + "跨区步骤单 zone 时跳过\n");
+        out.append("  cross-node 跨节点换图（三个新号；需要 XM_SCENE_NODES=2 起两个 scene 节点、per-node 覆盖、每图每节点一个频道）：落位到同图"
+                + "两个频道（同场景就登出等 6 s 重登，有上限）→ A 63 {scene_id = B 的场景} 应答 {0}、79 / 新实体号的 21 / 含 B 的 47、"
+                + "B 收 A 的 21、留在原场景的 C 收 A 旧实体的 51 → 目标节点上移动（B 收 66）与 77 → 断开重连回原实例原位 → 63 换回 → "
+                + "63 不存在的 scene_id 应答 {0} 后 23 {3023} → 连发 63 第二条 3014 → 顶号旧连接 23 {2017}\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -312,7 +321,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / cross-node）");
         }
     }
 

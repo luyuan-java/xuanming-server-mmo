@@ -79,6 +79,8 @@ public final class ScenePlayer {
     private PlayerSave lastPersisted;
     /** 一次在线存盘已提交、结果还没回来：期间不再提交新的（结果回来后下个周期再比）。 */
     private boolean progressSaveInFlight;
+    /** 在途的跨节点换图（null = 没有；不持久化，规则见 {@link SceneWorld} 的「跨节点换图」一节）。 */
+    private PlayerSwitch switching;
     /** 当前速度（已截断到信任上限）；(0,0,0) 为静止。 */
     private Vec3 velocity = Vec3.ORIGIN;
     private int syncDirty;
@@ -228,7 +230,8 @@ public final class ScenePlayer {
     }
 
     /**
-     * 停下（速度清零，不置脏位）：离场写回 / 被接管 / 停服前、换场景时调用（基线 StopMotionForExit）。
+     * 停下（速度清零，不置脏位）：离场写回 / 被接管 / 停服前、换场景时、跨节点换图冻结时调用（基线 StopMotionForExit；
+     * 冻结时由调用方另置速度脏位，让还看得见它的人收到「停了」的 66）。
      * 离场时实体随即被销毁（旁人收到 51），不需要再发「停了」的 66；换场景后新场景的人从 21 看到的本来就是静止的它。
      */
     void stopMotion() {
@@ -397,5 +400,26 @@ public final class ScenePlayer {
 
     void setProgressSaveInFlight(boolean inFlight) {
         this.progressSaveInFlight = inFlight;
+    }
+
+    /** 跨节点换图的阶段（scene-handoff-spec §5.5）：NONE / RESOLVING（等选目标，不冻结）/ FREEZING（交出在途）。 */
+    public SwitchPhase switchPhase() {
+        return switching == null ? SwitchPhase.NONE : switching.phase();
+    }
+
+    /**
+     * 是否处于冻结（交出事务在途，§5.9）：冻结中玩家的可变状态必须与冻结快照一致，各写入口按基线码拒绝
+     * （背包 / 宝宝 / 属性 / 任务 1005，货币与资产通道 27003）。RESOLVING 不算冻结。
+     */
+    public boolean frozen() {
+        return switching != null && switching.phase() == SwitchPhase.FREEZING;
+    }
+
+    PlayerSwitch switching() {
+        return switching;
+    }
+
+    void setSwitching(PlayerSwitch switching) {
+        this.switching = switching;
     }
 }

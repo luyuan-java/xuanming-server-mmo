@@ -4,6 +4,7 @@ import static com.game.scene.world.SceneMessageIds.tip;
 
 import com.game.proto.ReleaseSkillRequest;
 import com.game.proto.ReleaseSkillResponse;
+import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.SceneFeature;
 
 /**
@@ -23,9 +24,13 @@ public final class SkillFeature implements SceneFeature {
         this.skills = skills;
     }
 
+    /**
+     * 冻结策略（scene-handoff-spec §5.9）：84 ALLOW——基线请求层不拒、只在施法点对冻结施法者 no-op；Java 的施法运行态
+     * （施法阶段、冷却）不持久化，伤害 / buff 两版都未生效，冻结中照常处理不会改动冻结快照。
+     */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "ReleaseSkill", ReleaseSkillRequest.class, (call, request) -> call.reply(
+        r.on(SERVICE, "ReleaseSkill", ReleaseSkillRequest.class, FreezePolicy.ALLOW, (call, request) -> call.reply(
                 ReleaseSkillResponse.newBuilder()
                         .setErrorMessage(tip(skills.release(call.world(), call.player(), request)))
                         .build()));

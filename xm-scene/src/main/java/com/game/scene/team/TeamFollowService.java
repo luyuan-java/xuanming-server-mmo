@@ -7,6 +7,7 @@ import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.TeamFollowResult;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
+import com.game.scene.world.SwitchPhase;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -27,7 +28,7 @@ import org.slf4j.LoggerFactory;
  *       → 不跟随（player_team.cpp:290-318）；</li>
  *   <li>队长不是自己 → {@link #followLeader}：队长不在本节点（跨节点、跨 zone、离线）不跟随；已同场景什么都不做；
  *       队长所在频道在排空中不跟随（批次 5.1，scene-channels-spec §4.13）；否则 {@code world.switchScene(self, leader.scene())}。用内存里的队长场景、不读 {@code xm:location}（同节点时内存就是权威，D9），
- *       不经 scene-manager（Java 同节点换场景是同步的，没有在途槽，也没有 60 s 去重）；</li>
+ *       不经 scene-manager（Java 同节点换场景是同步的，没有 60 s 去重）；自己有在途的跨节点换图（选目标中或冻结中，批次 5.2）不跟随；</li>
  *   <li>队长是自己、且这次是自己进场 → 对 members 里在本节点上的其他成员各自再读一次<b>自己的</b>成员关系，按「只跟随、不扇出」处理
  *       （player_team.cpp:327-347，防循环）。</li>
  * </ol>
@@ -35,7 +36,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>与基线的差异（team-spec D7–D10）：不收 {@code PlayerTeamRefreshEvent}、不缓存 TeamId（入队 / 转让 / 踢人本来就不拉人，
  * 基线的 RefreshOnly 模式只为刷新组件）；不做队友 AOI 优先级；不读 {@code battle:lock}（6.3 前没有战斗，「冻结解除后补一次」届时再加）；
- * 归属交接在途 / 换图在途 / 会话不活这几道基线守卫在 Java 不存在（同步换图、断线即移出）。
+ * 基线的「归属交接在途 / 换图在途」守卫对应 Java 的跨节点换图在途（批次 5.2，{@code switchPhase ≠ NONE} 不跟随）；「会话不活」守卫
+ * 在 Java 不存在（断线即移出）。
  *
  * <p>指标：每次读回来恰好计一次 {@code xm.scene.team.follow{result}}（{@link TeamFollowResult}）。
  */
@@ -165,6 +167,14 @@ public final class TeamFollowService implements TeamFollow {
 
     /** 跟随队长到它所在的场景实例（逻辑线程）。 */
     private void followLeader(SceneWorld world, ScenePlayer player, long leaderId) {
+        if (player.switchPhase() != SwitchPhase.NONE) {
+            // 自己有在途的跨节点换图（选目标中或冻结中，scene-handoff-spec §5.5；基线 IsFollowBlocked 查冻结或交接意图，
+            // player_team.cpp:65-75）：换图的结局优先，不跟随
+            metrics.teamFollow(TeamFollowResult.SWITCHING);
+            log.debug("有在途的跨节点换图，不跟随 player={} 阶段={}", Long.toUnsignedString(player.playerId()),
+                    player.switchPhase());
+            return;
+        }
         ScenePlayer leader = world.playerById(leaderId);
         if (leader == null) {
             metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);

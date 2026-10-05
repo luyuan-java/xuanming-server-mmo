@@ -14,7 +14,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * 账号与玩家持久化的唯一入口。
@@ -39,9 +41,13 @@ import org.springframework.transaction.annotation.Transactional;
  *       写者必须立刻丢弃内存实例（它的写回只会被围栏拒绝）；</li>
  *   <li>持有期间写者可用 {@link #saveStateHeld} 在线存盘（不释放）；离开时用 {@link #saveStateAndRelease} 写回并释放；
  *       没进成场景（进场失败 / 取消 / 从未送达）用
- *       {@link #releaseOwnership} 只释放。都带 epoch 围栏，旧写者碰不到新 epoch。</li>
+ *       {@link #releaseOwnership} 只释放。都带 epoch 围栏，旧写者碰不到新 epoch；</li>
+ *   <li>跨节点换图时持有者用 {@link #handOffOwnership} <b>原子交出</b>：一笔事务里带围栏写回冻结快照、epoch 加一、保持未释放、
+ *       给新租约。提交即同时证明「最终状态已落库」与「从此只有新 epoch 的持有者能写」，释放与夺权之间没有可被第三方夺走的窗口。
+ *       任何时刻库里仍只有一个写者（交出之后、目标节点加载之前没有写者）。结局不明时用 {@link #probeOwnership} 加锁读探测。</li>
  * </ol>
- * 租约用各进程的墙钟（login 判过期、scene 续约）：两端时钟偏差必须远小于 {@link #OWNER_LEASE}（部署要求 NTP）。
+ * 租约用各进程的墙钟（login 判过期、scene 续约、交出的安全边际）：各进程时钟偏差必须远小于 {@link #OWNER_LEASE} 与交出安全边际
+ * （部署要求 NTP）。
  *
  * <p>所有方法都是阻塞 I/O，调用方不得在 Netty I/O 线程或场景逻辑线程上直接调用。
  */
@@ -60,10 +66,22 @@ public class PlayerStore {
 
     private final PlayerMapper mapper;
     private final LongSupplier clockMs;
+    /** 交出与探测用编程式事务（带超时）；null = 本实例不支持交出（只用于不连库的单测）。 */
+    private final PlatformTransactionManager transactions;
 
+    /** 不支持交出 / 探测（{@link #handOffOwnership}、{@link #probeOwnership} 抛 {@link IllegalStateException}）；只用于不连库的单测。 */
     public PlayerStore(PlayerMapper mapper, LongSupplier clockMs) {
+        this(mapper, clockMs, null);
+    }
+
+    /**
+     * @param transactions 与 {@code mapper} 同一数据源的事务管理器：交出与探测要给事务设超时（语句超时由 MyBatis 从事务剩余时间推出），
+     *                     注解式事务做不到按调用给时限
+     */
+    public PlayerStore(PlayerMapper mapper, LongSupplier clockMs, PlatformTransactionManager transactions) {
         this.mapper = mapper;
         this.clockMs = clockMs;
+        this.transactions = transactions;
     }
 
     /**
@@ -313,6 +331,108 @@ public class PlayerStore {
             }
         }
         return lost;
+    }
+
+    /** {@link #handOffOwnership} 的结果。 */
+    public sealed interface HandOffResult {
+
+        /** 已交出：库里 epoch = {@code newEpoch}（交出前 + 1）、未释放、租约 = 传入的 {@code leaseUntil}；冻结快照已落库。 */
+        record HandedOff(long newEpoch) implements HandOffResult {
+        }
+
+        /**
+         * 没提交、什么也没改：仍由交出方的 epoch 持有、未释放，但剩余租约不足安全边际（续约近期在失败，交出不安全）。
+         * {@code owner} 是同一事务里加锁读到的那一行。
+         */
+        record LeaseTooShort(OwnerState owner) implements HandOffResult {
+        }
+
+        /**
+         * 没提交、什么也没改：epoch 已不是交出方的，或已释放（{@code owner} 是同一事务里加锁读到的那一行），
+         * 或玩家不存在（{@code owner == null}）。注意：交出方自己更早一次已提交、只是应答丢了的交出，在这里也表现为
+         * Fenced(epoch + 1, 未释放, 那次写下的租约)，由调用方按租约值认领（见 {@link #handOffOwnership}）。
+         */
+        record Fenced(OwnerState owner) implements HandOffResult {
+        }
+    }
+
+    /**
+     * 原子交出归属（跨节点换图，归属协议第 6 步）：一笔事务里带围栏写回冻结快照（player 行 + {@code player_state}，
+     * {@code saved_epoch} 写交出方的 epoch E），并把 {@code owner_epoch} 加一到 E+1、保持未释放、租约置 {@code leaseUntil}。
+     * 只有仍由 E 持有、尚未释放、且剩余租约 {@code owner_lease_until >= requireLeaseAtLeast} 时才提交；否则同一事务里加锁读出那一行，
+     * 区分 {@link HandOffResult.LeaseTooShort} 与 {@link HandOffResult.Fenced}，什么也不改。
+     *
+     * <p><b>为什么要剩余租约下限与租约值</b>：调用方的瞬时故障重试会把「已提交、应答丢了」的交出再执行一遍，第二次读到 (E+1, 未释放)。
+     * 别人能拿到 E 的下一代只有一种可能——E 的租约过期后夺权。调用方每次尝试取 {@code now_i}，传
+     * {@code requireLeaseAtLeast = now_i + M}、{@code leaseUntil = L_i = now_i + 租约}：只要某次尝试提交了，那一刻 E 至少还有 M 的租约，
+     * 而且 (E+1, 未释放, 租约 ∈ {L_i}) 只可能是自己写下的（目标节点拿到交出通知之前不会续 E+1）。
+     *
+     * <p>{@code timeout} 是这笔事务（不含提交）的时限：每条语句的 JDBC 查询超时取事务剩余时间（MyBatis 从 Spring 事务推出），
+     * 行锁等待也受它约束；超时抛 {@link org.springframework.dao.QueryTimeoutException} 或
+     * {@link org.springframework.transaction.TransactionTimedOutException}，事务回滚。提交本身只受连接的 socketTimeout 约束，
+     * 提交中途断开就是「结局不明」，用 {@link #probeOwnership} 判定。
+     *
+     * @param frozen              冻结快照（{@code ownerEpoch} = 交出方持有的 E；{@code updatedAt} 由本方法填）
+     * @param leaseUntil          E+1 的租约到期时刻（Unix 毫秒），同时是这次尝试的标识
+     * @param requireLeaseAtLeast E 的剩余租约下限（Unix 毫秒）：{@code owner_lease_until} 小于它就不交出
+     * @param timeout             事务时限，向上取整到秒，至少 1 秒
+     * @throws IllegalStateException 提交后读到的 epoch 不是 E+1（不变量被破坏，事务回滚），或本实例没有事务管理器
+     */
+    public HandOffResult handOffOwnership(PlayerRow frozen, PlayerState state, long leaseUntil, long requireLeaseAtLeast,
+                                          Duration timeout) {
+        return transaction(timeout).execute(status -> {
+            long playerId = frozen.getPlayerId();
+            long epoch = frozen.getOwnerEpoch();
+            long now = clockMs.getAsLong();
+            frozen.setUpdatedAt(now);
+            if (mapper.updateStateAndHandOff(frozen, leaseUntil, requireLeaseAtLeast) == 1) {
+                mapper.upsertState(playerId, state.toByteArray(), epoch, now);
+                Long next = mapper.selectOwnerEpoch(playerId);
+                if (next == null || next != epoch + 1) {
+                    // 行锁保证同一事务里读到的是本次自增的值；读不到 / 对不上说明表被外部改坏，回滚、不当成交出
+                    throw new IllegalStateException("交出后 owner_epoch 不是 E+1 player_id=" + Long.toUnsignedString(playerId)
+                            + " E=" + epoch + " 读到=" + next);
+                }
+                return new HandOffResult.HandedOff(next);
+            }
+            OwnerState owner = mapper.selectOwnerForUpdate(playerId);
+            if (owner != null && owner.ownerEpoch() == epoch && !owner.released()) {
+                return new HandOffResult.LeaseTooShort(owner);
+            }
+            return new HandOffResult.Fenced(owner);
+        });
+    }
+
+    /**
+     * 交出结局不明之后的探测：加锁读归属三列。加锁读会等任何仍持有这一行行锁的在途交出事务结束，所以读到 (E, 未释放) 时
+     * 那笔事务一定已回滚、不会再提交；读到 (E+1, 未释放, 自己写过的租约值) 就是自己的提交。
+     *
+     * @param timeout 事务时限（含行锁等待），向上取整到秒，至少 1 秒；超时抛 {@link org.springframework.dao.QueryTimeoutException}
+     *                或 {@link org.springframework.transaction.TransactionTimedOutException}
+     * @return 玩家不存在为空
+     * @throws IllegalStateException 本实例没有事务管理器
+     */
+    public Optional<OwnerState> probeOwnership(long playerId, Duration timeout) {
+        return Optional.ofNullable(transaction(timeout).execute(status -> mapper.selectOwnerForUpdate(playerId)));
+    }
+
+    /** 带时限的编程式事务（缺省传播 / 隔离级别）。 */
+    private TransactionTemplate transaction(Duration timeout) {
+        if (transactions == null) {
+            throw new IllegalStateException("PlayerStore 没有事务管理器，不支持交出 / 探测");
+        }
+        TransactionTemplate template = new TransactionTemplate(transactions);
+        template.setTimeout(timeoutSeconds(timeout));
+        return template;
+    }
+
+    /** 事务时限向上取整到秒（JDBC 查询超时的粒度），至少 1 秒。 */
+    static int timeoutSeconds(Duration timeout) {
+        if (timeout == null || timeout.isNegative() || timeout.isZero()) {
+            throw new IllegalArgumentException("事务时限必须为正: " + timeout);
+        }
+        long seconds = timeout.plusMillis(999).toSeconds();
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1, seconds));
     }
 
     /**

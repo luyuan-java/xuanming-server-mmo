@@ -21,6 +21,7 @@ import com.game.proto.ResetAttributePointsRequest;
 import com.game.proto.ResetAttributePointsResponse;
 import com.game.proto.SwitchAttributeSchemeRequest;
 import com.game.proto.SwitchAttributeSchemeResponse;
+import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
 
@@ -53,12 +54,18 @@ public final class AttributeFeature implements SceneFeature {
         this.notifyPanelChanged = registry.requireId(SERVICE, "NotifyAttributePanelChanged");
     }
 
+    /**
+     * 冻结策略（scene-handoff-spec §5.9）：167 只读；写操作 GATED，由 {@link AttributeService} 的写前置在冻结中回 1005；
+     * 173 自动加点不过写前置（同基线），冻结中在入口回 1005（REJECT，D9）。
+     */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "GetAttributePanel", GetAttributePanelRequest.class, (call, req) -> call.reply(
-                GetAttributePanelResponse.newBuilder().setErrorMessage(tip(0)).setPanel(panel(call)).build()));
-        r.on(SERVICE, "AllocateAttributePoints", AllocateAttributePointsRequest.class, this::allocate);
-        r.on(SERVICE, "ResetAttributePoints", ResetAttributePointsRequest.class, (call, req) -> {
+        r.on(SERVICE, "GetAttributePanel", GetAttributePanelRequest.class, FreezePolicy.READ_ONLY,
+                (call, req) -> call.reply(
+                        GetAttributePanelResponse.newBuilder().setErrorMessage(tip(0)).setPanel(panel(call)).build()));
+        r.on(SERVICE, "AllocateAttributePoints", AllocateAttributePointsRequest.class, FreezePolicy.GATED,
+                this::allocate);
+        r.on(SERVICE, "ResetAttributePoints", ResetAttributePointsRequest.class, FreezePolicy.GATED, (call, req) -> {
             int tipId = service.reset(call.player(), req.getPoolId());
             ResetAttributePointsResponse.Builder response = ResetAttributePointsResponse.newBuilder()
                     .setErrorMessage(tip(tipId));
@@ -67,8 +74,9 @@ public final class AttributeFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "AutoAllocateAttributePoints", AutoAllocateAttributePointsRequest.class, this::autoAllocate);
-        r.on(SERVICE, "CreateAttributeScheme", CreateAttributeSchemeRequest.class, (call, req) -> {
+        r.on(SERVICE, "AutoAllocateAttributePoints", AutoAllocateAttributePointsRequest.class, FreezePolicy.REJECT,
+                this::autoAllocate);
+        r.on(SERVICE, "CreateAttributeScheme", CreateAttributeSchemeRequest.class, FreezePolicy.GATED, (call, req) -> {
             AttributeService.SchemeCreation created = service.createScheme(call.player(), req.getName());
             CreateAttributeSchemeResponse.Builder response = CreateAttributeSchemeResponse.newBuilder()
                     .setErrorMessage(tip(created.tipId()));
@@ -77,7 +85,7 @@ public final class AttributeFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "SwitchAttributeScheme", SwitchAttributeSchemeRequest.class, (call, req) -> {
+        r.on(SERVICE, "SwitchAttributeScheme", SwitchAttributeSchemeRequest.class, FreezePolicy.GATED, (call, req) -> {
             int tipId = service.switchScheme(call.player(), req.getSchemeId());
             SwitchAttributeSchemeResponse.Builder response = SwitchAttributeSchemeResponse.newBuilder()
                     .setErrorMessage(tip(tipId));
@@ -86,7 +94,7 @@ public final class AttributeFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "RenameAttributeScheme", RenameAttributeSchemeRequest.class, (call, req) -> {
+        r.on(SERVICE, "RenameAttributeScheme", RenameAttributeSchemeRequest.class, FreezePolicy.GATED, (call, req) -> {
             int tipId = service.renameScheme(call.player(), req.getSchemeId(), req.getName());
             RenameAttributeSchemeResponse.Builder response = RenameAttributeSchemeResponse.newBuilder()
                     .setErrorMessage(tip(tipId));
@@ -95,7 +103,7 @@ public final class AttributeFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "GmSetPlayerLevel", GmSetPlayerLevelRequest.class, this::gmSetLevel);
+        r.on(SERVICE, "GmSetPlayerLevel", GmSetPlayerLevelRequest.class, FreezePolicy.GATED, this::gmSetLevel);
     }
 
     /** 168：池号为 0 或目标为空 → 1005（先于写前置，同基线处理器）。 */

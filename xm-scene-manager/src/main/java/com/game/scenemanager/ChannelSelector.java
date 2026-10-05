@@ -13,7 +13,7 @@ import java.util.Optional;
 
 /**
  * 在一张世界地图的频道里选一个并软预占（scene-channels-spec §4.11 第 2、5 步，D7、D13、D20）。login 进游戏经 {@link SceneAssigner} 用它；
- * 5.2 的跨节点换场景也用它（{@code excludeSceneId} 排除当前频道）。
+ * 5.2 的在线换图选跨节点目标经 {@link SwitchTargetSelector} 也用它（{@code excludeSceneId} 排除源场景；显式场景号用 {@link #reserveInstance}）。
  *
  * <ul>
  *   <li><b>候选</b> = 可用节点目录里 {@code scene_config_id == conf}、{@code scene_id ≠ 0}、<b>没在排空</b>的场景条目。<b>不读计划</b>：
@@ -70,7 +70,7 @@ public final class ChannelSelector {
     /**
      * 读目录后选频道（§4.11 第 6 步的 {@code ChannelSelector.select(zone, conf, excludeSceneId, playerId)}）。
      *
-     * @param excludeSceneId 不选这个场景（5.2「换到同图别的频道」；5.1 传 0）
+     * @param excludeSceneId 不选这个场景（5.2 换图传源场景；进游戏传 0）
      * @return 没有候选为空
      */
     public Optional<Choice> select(int zoneId, int sceneConfigId, long excludeSceneId, long playerId) {
@@ -110,7 +110,8 @@ public final class ChannelSelector {
     }
 
     /**
-     * 给选中的原实例记一条预占（§4.11 第 3 步：原实例「还在就不看人数」直接用，但也写预占，让并发分配看得见）。预占关闭时什么也不做。
+     * 给选中的原实例记一条预占（§4.11 第 3 步：原实例「还在就不看人数」直接用，但也写预占，让并发分配看得见）。
+     * 5.2 换图的显式场景号同样用它。预占关闭时什么也不做。
      */
     void reserveInstance(int zoneId, long sceneId, long playerId) {
         if (reservationsEnabled() && playerId != 0) {

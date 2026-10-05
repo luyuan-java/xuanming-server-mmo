@@ -20,6 +20,7 @@ import com.game.proto.ResetPetPointsRequest;
 import com.game.proto.ResetPetPointsResponse;
 import com.game.proto.SummonPetRequest;
 import com.game.proto.SummonPetResponse;
+import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
 import java.util.Map;
@@ -42,11 +43,15 @@ public final class PetFeature implements SceneFeature {
         this.notifyPetListChanged = registry.requireId(SERVICE, "NotifyPetListChanged");
     }
 
+    /**
+     * 冻结策略（scene-handoff-spec §5.9）：181 只读；其余 GATED，由 {@link PetService} 的写前置在冻结中回 1005
+     * （188 自动加点只算不落、不过写前置，同基线）。
+     */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "GetPetList", GetPetListRequest.class, (call, request) -> call.reply(
+        r.on(SERVICE, "GetPetList", GetPetListRequest.class, FreezePolicy.READ_ONLY, (call, request) -> call.reply(
                 GetPetListResponse.newBuilder().setErrorMessage(tip(0)).setPets(pets.buildList(call.player())).build()));
-        r.on(SERVICE, "SummonPet", SummonPetRequest.class, (call, request) -> {
+        r.on(SERVICE, "SummonPet", SummonPetRequest.class, FreezePolicy.GATED, (call, request) -> {
             int result = pets.summon(call.player(), request.getPetId());
             SummonPetResponse.Builder response = SummonPetResponse.newBuilder().setErrorMessage(tip(result));
             if (result == 0) {
@@ -54,7 +59,7 @@ public final class PetFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "RecallPet", RecallPetRequest.class, (call, request) -> {
+        r.on(SERVICE, "RecallPet", RecallPetRequest.class, FreezePolicy.GATED, (call, request) -> {
             int result = pets.recall(call.player());
             RecallPetResponse.Builder response = RecallPetResponse.newBuilder().setErrorMessage(tip(result));
             if (result == 0) {
@@ -62,8 +67,8 @@ public final class PetFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "AllocatePetPoints", AllocatePetPointsRequest.class, this::allocate);
-        r.on(SERVICE, "ResetPetPoints", ResetPetPointsRequest.class, (call, request) -> {
+        r.on(SERVICE, "AllocatePetPoints", AllocatePetPointsRequest.class, FreezePolicy.GATED, this::allocate);
+        r.on(SERVICE, "ResetPetPoints", ResetPetPointsRequest.class, FreezePolicy.GATED, (call, request) -> {
             int result = pets.reset(call.player(), request.getPetId());
             ResetPetPointsResponse.Builder response = ResetPetPointsResponse.newBuilder().setErrorMessage(tip(result));
             if (result == 0) {
@@ -71,7 +76,7 @@ public final class PetFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "AutoAllocatePetPoints", AutoAllocatePetPointsRequest.class, (call, request) -> {
+        r.on(SERVICE, "AutoAllocatePetPoints", AutoAllocatePetPointsRequest.class, FreezePolicy.GATED, (call, request) -> {
             PetService.Suggestion suggestion = pets.autoAllocate(call.player(), request.getPetId());
             AutoAllocatePetPointsResponse.Builder response = AutoAllocatePetPointsResponse.newBuilder()
                     .setErrorMessage(tip(suggestion.tip()));
@@ -81,7 +86,7 @@ public final class PetFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "RenamePet", RenamePetRequest.class, (call, request) -> {
+        r.on(SERVICE, "RenamePet", RenamePetRequest.class, FreezePolicy.GATED, (call, request) -> {
             int result = pets.rename(call.player(), request.getPetId(), request.getName());
             RenamePetResponse.Builder response = RenamePetResponse.newBuilder().setErrorMessage(tip(result));
             if (result == 0) {
@@ -89,7 +94,7 @@ public final class PetFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "GmGrantPet", GmGrantPetRequest.class, (call, request) -> {
+        r.on(SERVICE, "GmGrantPet", GmGrantPetRequest.class, FreezePolicy.GATED, (call, request) -> {
             PetService.Grant grant = pets.grant(call.player(), request.getPetTableId());
             GmGrantPetResponse.Builder response = GmGrantPetResponse.newBuilder().setErrorMessage(tip(grant.tip()));
             if (grant.tip() == 0) {

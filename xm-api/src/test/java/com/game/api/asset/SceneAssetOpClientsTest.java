@@ -173,7 +173,8 @@ class SceneAssetOpClientsTest {
     @Test
     void 对端重启_断连期间快速失败_恢复后自动重连() throws Exception {
         Duration timeout = Duration.ofMillis(800);
-        assertThat(clients.call(endpoint(INSTANCE), AssetRpc.DEBIT, request(42, 2), timeout).get(10, TimeUnit.SECONDS)
+        // 第一次调用还要建连（新客户端引用 + 握手），满载机器上可能超过 800 ms：只给这一次宽预算，本用例考的是断连与重连
+        assertThat(clients.call(endpoint(INSTANCE), AssetRpc.DEBIT, request(42, 2), Duration.ofSeconds(5)).get(10, TimeUnit.SECONDS)
                 .getReason()).isEqualTo(1);
         server.close();
         long started = System.nanoTime();

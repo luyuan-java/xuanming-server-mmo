@@ -58,7 +58,7 @@ xm:
       # channel-count: 1                 # 每图种子频道数（只在首次播种时用；之后以 Redis xm:world:{z:<zone>}:desired 为准）
       # channel-count-by-config:         # 按 scene_config_id 覆盖种子（本机切片保持每图 1 个，Q4；基线开发配置是 "1": 16）
       #   "[1]": 16
-      # coverage: per-node               # per-node（5.2 之前）/ hash
+      # coverage: per-node               # per-node（缺省，5.2 后保持，Q4）/ hash（只带地图的 63 可能跨节点）
       # tick: 5s                         # 领导者一拍
       # dead-node-grace: 20s             # 节点缺席满这么久，删它名下的频道记录、在活节点上用新号重铺
       # leader-lock-ttl: 30s             # 分 zone 领导锁 TTL（续期 TTL/3、有效 2/3 TTL）

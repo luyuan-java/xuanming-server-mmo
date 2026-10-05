@@ -13,6 +13,7 @@ import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CheckReport;
+import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.DrainScenario;
 import com.game.robot.scenario.FeaturesScenario;
@@ -178,6 +179,12 @@ public final class RobotMain {
                             AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
                             options.gatewayUrl(), options.zoneId(), options.runTag(), options.requestTimeout());
                     title = "xm-robot zones：临时区 " + scenario.tempZone() + "，" + target + " data=" + options.dataUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.CROSS_NODE) {
+                    CrossNodeScenario scenario = new CrossNodeScenario(flow, ids, registry, options.accountPrefix(),
+                            options.runTag(), options.requestTimeout(), options.observeTimeout());
+                    title = "xm-robot cross-node：" + scenario.firstAccount() + " 等（需要两个 scene 节点），" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.RECONNECT) {

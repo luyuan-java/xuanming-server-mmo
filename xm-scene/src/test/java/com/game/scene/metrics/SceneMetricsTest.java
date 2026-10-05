@@ -152,6 +152,35 @@ class SceneMetricsTest {
         }
     }
 
+    /** 存储写只登记每种写可能出现的结局：交出 / 探测的结局启动即注册，恒为 0 的组合（写回 × 租约不足等）不建。 */
+    @Test
+    void 存储写指标_交出与探测的结局启动即注册_不可能的组合不建() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String result : new String[] {"handed_off", "lease_too_short", "fenced", "failed", "rejected"}) {
+                assertThat(before).contains("xm_scene_storage_writes_seconds_count{op=\"handoff\",result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"handed_off", "not_committed", "lost", "rejected"}) {
+                assertThat(before).contains("xm_scene_storage_writes_seconds_count{op=\"probe\",result=\"" + result + "\"} 0");
+            }
+            assertThat(before).doesNotContain("op=\"save\",result=\"lease_too_short\"", "op=\"probe\",result=\"fenced\"",
+                    "op=\"progress\",result=\"released\"", "op=\"handoff\",result=\"saved\"");
+
+            exported.storageWrite(StorageOp.HANDOFF, WriteResult.HANDED_OFF, TimeUnit.MILLISECONDS.toNanos(30));
+            exported.storageWrite(StorageOp.SAVE, WriteResult.LOST, 1);
+            String after = prometheus.scrape();
+            assertThat(after).contains("xm_scene_storage_writes_seconds_count{op=\"handoff\",result=\"handed_off\"} 1");
+            assertThat(after).as("不可能的组合不记、不抛").doesNotContain("op=\"save\",result=\"lost\"");
+            for (StorageOp op : StorageOp.values()) {
+                assertThat(op.results()).as(op.name()).contains(WriteResult.REJECTED);
+            }
+        } finally {
+            prometheus.close();
+        }
+    }
+
     /** 组队跟随的结局启动即注册（初值 0），导出名 {@code xm_scene_team_follow_total{result}}（team-spec §6.10 第 8 条）。 */
     @Test
     void 组队跟随指标_启动即注册_导出名() {
@@ -230,6 +259,81 @@ class SceneMetricsTest {
                     "xm_scene_channel_plan_poll_failures_total 1",
                     "xm_scene_channel_relocations_total{result=\"same_map\"} 1");
             assertThat(labelNames(after, "xm_scene_channel")).containsExactlyInAnyOrder("state", "result");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 跨节点换图（批次 5.2，scene-handoff-spec §7.2）：启动即注册（初值 0），导出名与标签；标签只有 result，不带 player / zone /
+     * 场景实例号 / 节点号。冻结时长与在途数一并导出。
+     */
+    @Test
+    void 跨节点换图指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String result : new String[] {"local", "remote", "same", "rejected", "error", "stale"}) {
+                assertThat(before).contains("xm_scene_switch_resolves_total{result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"handed_off", "lease_too_short", "fenced", "aborted_in_place",
+                    "lost_unknown", "left", "taken_over", "link_gone"}) {
+                assertThat(before).contains("xm_scene_transfers_total{result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"ok", "failed"}) {
+                assertThat(before).contains("xm_scene_transfer_enters_total{result=\"" + result + "\"} 0");
+            }
+            assertThat(before).contains("xm_scene_transfers_in_flight 0", "xm_scene_transfer_post_freeze_mutations_total 0",
+                    "xm_scene_transfer_freeze_seconds_count 0",
+                    "xm_scene_team_follow_total{result=\"switching\"} 0",
+                    "xm_scene_channel_relocations_total{result=\"switching\"} 0",
+                    "xm_scene_link_dropped_total{reason=\"write_failed\"} 0");
+
+            exported.switchResolve(SceneMetrics.SwitchResolve.REMOTE);
+            exported.transfersInFlight(1);
+            exported.transfer(SceneMetrics.TransferResult.HANDED_OFF, TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfersInFlight(0);
+            exported.transferEnter(SceneMetrics.TransferEnter.OK);
+            exported.postFreezeMutation();
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("xm_scene_switch_resolves_total{result=\"remote\"} 1",
+                    "xm_scene_transfers_total{result=\"handed_off\"} 1",
+                    "xm_scene_transfer_freeze_seconds_count 1",
+                    "xm_scene_transfer_freeze_seconds_bucket{le=\"0.05\"} 1",
+                    "xm_scene_transfers_in_flight 0",
+                    "xm_scene_transfer_enters_total{result=\"ok\"} 1",
+                    "xm_scene_transfer_post_freeze_mutations_total 1");
+            assertThat(labelNames(after, "xm_scene_transfer")).containsExactlyInAnyOrder("result", "le");
+            assertThat(labelNames(after, "xm_scene_switch")).containsExactly("result");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /** 冻结闸（scene-handoff-spec §5.9、§7.2）：入口拒绝按 kind 计，移动丢弃另在 moves{result=frozen} 里计，启动即注册。 */
+    @Test
+    void 冻结闸指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String kind : new String[] {"request", "asset_op", "move"}) {
+                assertThat(before).contains("xm_scene_frozen_rejections_total{kind=\"" + kind + "\"} 0");
+            }
+            assertThat(before).contains("xm_scene_moves_total{result=\"frozen\"} 0");
+
+            exported.frozenRejection(SceneMetrics.FrozenRejection.REQUEST);
+            exported.frozenRejection(SceneMetrics.FrozenRejection.MOVE);
+            exported.move(MoveResult.FROZEN);
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("xm_scene_frozen_rejections_total{kind=\"request\"} 1",
+                    "xm_scene_frozen_rejections_total{kind=\"move\"} 1",
+                    "xm_scene_frozen_rejections_total{kind=\"asset_op\"} 0",
+                    "xm_scene_moves_total{result=\"frozen\"} 1");
+            assertThat(labelNames(after, "xm_scene_frozen")).containsExactly("kind");
         } finally {
             prometheus.close();
         }

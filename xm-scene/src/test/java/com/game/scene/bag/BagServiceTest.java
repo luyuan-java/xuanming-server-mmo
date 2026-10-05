@@ -84,6 +84,28 @@ class BagServiceTest {
                 .as("币种 10 被封不影响物品 10").isTrue();
     }
 
+    /** 跨节点换图冻结中（交出事务在途，scene-handoff-spec §0.5）：入包与整理都回 1005（整理回 null），零写入、零流水；选目标中不冻结。 */
+    @Test
+    void 冻结中入包与整理都回1005_零写入零流水_选目标中照常() {
+        service.addItems(player, BagType.INVENTORY, Map.of(10, 5L), Reason.SYSTEM_GRANT, 0, "");
+        service.addItems(player, BagType.INVENTORY, Map.of(10, 5L), Reason.SYSTEM_GRANT, 0, "");
+        audit.items.clear();
+        com.game.player.store.state.PlayerState before = WorldTestAccess.persistentState(player);
+        WorldTestAccess.startFreezing(player);
+
+        assertThat(service.addItems(player, BagType.INVENTORY, Map.of(1, 1L), Reason.SYSTEM_GRANT, 0, "").tip())
+                .isEqualTo(BagService.REFUSED);
+        assertThat(service.sortByPlayer(player, BagType.INVENTORY)).isNull();
+        assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        assertThat(audit.items).isEmpty();
+        assertThat(counter("xm.scene.gain.blocked", "category", "item")).as("冻结不是封禁").isZero();
+
+        WorldTestAccess.clearSwitch(player);
+        WorldTestAccess.startResolving(player);
+        assertThat(service.addItems(player, BagType.INVENTORY, Map.of(1, 1L), Reason.SYSTEM_GRANT, 0, "").ok()).isTrue();
+        assertThat(service.sortByPlayer(player, BagType.INVENTORY)).isNotNull();
+    }
+
     @Test
     void 临时格淘汰的实例各记一条销毁流水_数量是真实堆叠数_不带关联号() {
         Bag temporary = player.bags().bag(BagType.TEMPORARY);

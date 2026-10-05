@@ -139,8 +139,9 @@ public final class SkillService {
     static Cast settle(Cast cast, long nowNanos) {
         while (cast != null && nowNanos - cast.phaseEndsAtNanos() >= 0) {
             cast = switch (cast.phase()) {
-                // （随 5.2）施法者被跨服冻结时前摇到点即结束、不进引导 / 后摇（基线 HandleGeneralSkillSpell /
-                // HandleChannelSkillSpell 对冻结的施法者早退，不武装后摇与引导）
+                // 基线对冻结的施法者在施法点早退（HandleGeneralSkillSpell / HandleChannelSkillSpell 不武装后摇与引导）；
+                // Java 不照做（scene-handoff-spec §5.9 的 84 ALLOW）：施法运行态不持久化、伤害 / buff 两版都未生效，冻结至多约 15 s，
+                // 之后实例随交出移除（目标节点上运行态清空）或原地解冻，照常结算不会与冻结快照分叉
                 case CASTING -> cast.channelNanos() >= 0
                         ? cast.next(Phase.CHANNELING, cast.channelNanos())
                         : cast.next(Phase.RECOVERY, cast.recoveryNanos());

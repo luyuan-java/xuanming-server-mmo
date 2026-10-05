@@ -48,7 +48,7 @@ class SceneLinkServiceTest {
     @BeforeEach
     void setUp() {
         repo = new FakePlayerRepository();
-        GateLinks links = new GateLinks(metrics);
+        GateLinks links = new GateLinks(metrics, Runnable::run);
         FakeSceneTables tables = new FakeSceneTables();
         AtomicLong ids = new AtomicLong(9000);
         world = new SceneWorld(tables, Contracts.IDS, links, repo, ids::incrementAndGet, new ManualClock(), metrics);

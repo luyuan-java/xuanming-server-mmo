@@ -3,6 +3,7 @@ package com.game.gate.session;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
+import com.game.api.proto.PlayerTransfer;
 import com.game.api.proto.ToClient;
 import com.game.gate.link.SceneLinkListener;
 import com.game.proto.MessageContent;
@@ -13,6 +14,10 @@ import org.slf4j.LoggerFactory;
 /**
  * 链路事件 → 会话：按会话号找到会话，投递到会话所属 EventLoop 上交给 {@link ClientDispatcher}。
  * 本类在链路 I/O 线程上运行，只读会话表，不碰会话状态。
+ *
+ * <p>找不到会话（会话已断开并从会话表释放——断线流程很快就 {@code registry.release}）时，普通下行整帧丢弃；
+ * 但带着一份「只有这帧知道」的归属的事件——改绑指令（{@code PlayerTransfer}）与没送到 scene 的进场帧——
+ * 不能丢：交给 {@link ClientDispatcher} 不经会话直接请 login 带围栏放弃（scene-handoff-spec §5.7、G10）。
  */
 public final class SceneEventRouter implements SceneLinkListener {
 
@@ -62,10 +67,20 @@ public final class SceneEventRouter implements SceneLinkListener {
     }
 
     @Override
+    public void onPlayerTransfer(int sceneNodeId, long linkGen, PlayerTransfer transfer) {
+        ClientSession session = registry.get(transfer.getSessionId());
+        if (session == null
+                || !session.execute(() -> dispatcher.onPlayerTransfer(session, sceneNodeId, linkGen, transfer))) {
+            dispatcher.onPlayerTransferWithoutSession(sceneNodeId, linkGen, transfer);
+        }
+    }
+
+    @Override
     public void onEnterUndeliverable(int sceneNodeId, long linkGen, PlayerEnter enter) {
         ClientSession session = registry.get(enter.getSessionId());
-        if (session != null) {
-            session.execute(() -> dispatcher.onEnterUndeliverable(session, sceneNodeId, linkGen, enter));
+        if (session == null
+                || !session.execute(() -> dispatcher.onEnterUndeliverable(session, sceneNodeId, linkGen, enter))) {
+            dispatcher.onEnterUndeliverableWithoutSession(sceneNodeId, linkGen, enter);
         }
     }
 

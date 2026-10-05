@@ -1,6 +1,8 @@
 package com.game.player.store;
 
 import java.util.List;
+import org.apache.ibatis.annotations.Arg;
+import org.apache.ibatis.annotations.ConstructorArgs;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
@@ -78,6 +80,35 @@ public interface PlayerMapper {
              WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
     int updateStateHeld(PlayerRow row);
+
+    /**
+     * 带围栏的交出（跨节点换图，归属协议第 6 步）：与 {@link #updateStateHeld} 同形地写回冻结快照，同时把 epoch 加一、保持未释放、
+     * 给新租约 {@code leaseUntil}。只有仍由 {@code row.ownerEpoch} 持有、尚未释放、且剩余租约不短于安全边际
+     * （{@code owner_lease_until >= requireLeaseAtLeast}）时才改，否则影响 0 行、什么也不改。
+     * 与随后的 {@link #selectOwnerEpoch} / {@link #selectOwnerForUpdate} 必须在同一事务里，见 {@link PlayerStore#handOffOwnership}。
+     */
+    @Update("""
+            UPDATE player
+               SET level = #{row.level}, scene_config_id = #{row.sceneConfigId},
+                   pos_x = #{row.posX}, pos_y = #{row.posY}, pos_z = #{row.posZ},
+                   owner_epoch = owner_epoch + 1, owner_released = 0, owner_lease_until = #{leaseUntil},
+                   updated_at = #{row.updatedAt}
+             WHERE player_id = #{row.playerId} AND owner_epoch = #{row.ownerEpoch} AND owner_released = 0
+               AND owner_lease_until >= #{requireLeaseAtLeast}
+            """)
+    int updateStateAndHandOff(@Param("row") PlayerRow row, @Param("leaseUntil") long leaseUntil,
+                              @Param("requireLeaseAtLeast") long requireLeaseAtLeast);
+
+    /**
+     * 加锁读归属三列（主键记录锁）：会等任何仍持有这一行行锁的在途事务结束，所以读到的结论确定——没提交的不会再提交。
+     * 时限由调用方的事务超时给出（{@link PlayerStore#probeOwnership}）。玩家不存在返回 null。
+     */
+    @Select("SELECT owner_epoch, owner_released, owner_lease_until FROM player WHERE player_id = #{playerId} FOR UPDATE")
+    @ConstructorArgs({
+            @Arg(column = "owner_epoch", javaType = long.class),
+            @Arg(column = "owner_released", javaType = boolean.class),
+            @Arg(column = "owner_lease_until", javaType = long.class)})
+    OwnerState selectOwnerForUpdate(@Param("playerId") long playerId);
 
     @Select("SELECT data FROM player_state WHERE player_id = #{playerId}")
     PlayerStateRow selectState(@Param("playerId") long playerId);

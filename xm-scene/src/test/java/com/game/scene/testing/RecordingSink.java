@@ -17,7 +17,39 @@ public final class RecordingSink implements ClientSink {
     public record Kicked(long linkId, int sessionId, long playerId, long ownerEpoch, int tipId) {
     }
 
+    /** 一次 PlayerTransfer（{@code onWriteFailed} 留着让测试模拟异步写失败）。 */
+    public record Transfer(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch, int targetNodeId,
+                           long targetSceneId, Runnable onWriteFailed) {
+    }
+
     private final List<Object> events = new ArrayList<>();
+    private boolean transferWritable = true;
+
+    @Override
+    public boolean playerTransfer(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch,
+                                  int targetNodeId, long targetSceneId, Runnable onWriteFailed) {
+        if (!transferWritable) {
+            return false;
+        }
+        events.add(new Transfer(linkId, sessionId, playerId, fromEpoch, toEpoch, targetNodeId, targetSceneId,
+                onWriteFailed));
+        return true;
+    }
+
+    /** 模拟链路已断 / 不可写（false = PlayerTransfer 确定写不出，返回 false 且不记录）。 */
+    public void setTransferWritable(boolean writable) {
+        this.transferWritable = writable;
+    }
+
+    public List<Transfer> transfers() {
+        List<Transfer> out = new ArrayList<>();
+        for (Object event : events) {
+            if (event instanceof Transfer transfer) {
+                out.add(transfer);
+            }
+        }
+        return out;
+    }
 
     @Override
     public void send(long linkId, List<Integer> sessionIds, MessageContent content) {

@@ -51,6 +51,40 @@ class OwnerLeaseRenewerTest {
     }
 
     @Test
+    void 立即续约_只续这一份_在存储线程池上执行_续不上的交回场景逻辑() {
+        List<Runnable> storage = new ArrayList<>();
+        OwnerLeaseRenewer renewer = new OwnerLeaseRenewer(() -> {
+            throw new AssertionError("立即续约不取全量快照");
+        }, store, storage::add, lostReports::add);
+        when(store.renewOwnerLeases(List.of(new OwnerLease(7, 10)))).thenReturn(List.of(new OwnerLease(7, 10)));
+
+        renewer.renewSoon(new OwnedPlayer(7, 10));
+
+        verify(store, never()).renewOwnerLeases(any());
+        assertThat(storage).as("不阻塞调用方（逻辑线程）").hasSize(1);
+        storage.forEach(Runnable::run);
+        verify(store).renewOwnerLeases(List.of(new OwnerLease(7, 10)));
+        assertThat(lostReports).containsExactly(List.of(new OwnedPlayer(7, 10)));
+    }
+
+    @Test
+    void 立即续约_停止后或存储池满时跳过_不抛() {
+        OwnerLeaseRenewer rejecting = new OwnerLeaseRenewer(List::of, store, task -> {
+            throw new RejectedExecutionException("满");
+        }, lostReports::add);
+        rejecting.renewSoon(new OwnedPlayer(7, 10));
+
+        List<Runnable> storage = new ArrayList<>();
+        OwnerLeaseRenewer stopped = new OwnerLeaseRenewer(List::of, store, storage::add, lostReports::add);
+        stopped.stop();
+        stopped.renewSoon(new OwnedPlayer(7, 10));
+
+        assertThat(storage).isEmpty();
+        verify(store, never()).renewOwnerLeases(any());
+        assertThat(lostReports).isEmpty();
+    }
+
+    @Test
     void 续约失败或快照失败或存储池满_本轮跳过不回报() {
         when(store.renewOwnerLeases(any())).thenThrow(new IllegalStateException("db down"));
         renewer(List.of(new OwnedPlayer(1, 3))).renewOnce();
