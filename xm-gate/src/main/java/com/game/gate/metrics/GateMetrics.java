@@ -183,15 +183,15 @@ public final class GateMetrics {
         DOWN
     }
 
-    /** 服务端推送的种类（{@code xm.gate.pushes{kind}}）。 */
+    /** 服务端推送的种类（{@code xm.gate.pushes{kind}}）。单条消息与按序的一批消息（{@code MessageBatch}）都计 MESSAGE。 */
     public enum PushKind {
         MESSAGE,
         KICK
     }
 
-    /** 服务端推送对每个目标会话的结局（{@code xm.gate.pushes{result}}），每个目标恰好计一次。 */
+    /** 服务端推送对每个目标会话的结局（{@code xm.gate.pushes{result}}），每个目标恰好计一次（一批消息也只计一次）。 */
     public enum PushResult {
-        /** 已写给客户端（踢下线：已推 tip 并开始关闭）。 */
+        /** 已写给客户端（一批消息：全部送出；踢下线：已推 tip 并开始关闭）。 */
         DELIVERED,
         /** 会话号在本 gate 上已不存在。 */
         NO_SESSION,
@@ -199,7 +199,7 @@ public final class GateMetrics {
         NOT_BOUND,
         /** 推送指向的 gate 实例不是本进程（节点号被复用前的旧条目）：整条丢弃，按目标数计。 */
         STALE_INSTANCE,
-        /** 消息格式不对（解析失败、没有动作、MessageContent 损坏）：整条丢弃，按目标数计（无目标计 1）。 */
+        /** 消息格式不对（解析失败、没有动作、MessageContent 损坏、MessageBatch 为空或有一条损坏）：整条丢弃，按目标数计（无目标计 1）。 */
         INVALID
     }
 

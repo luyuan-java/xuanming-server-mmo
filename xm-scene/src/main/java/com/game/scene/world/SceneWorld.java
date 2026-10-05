@@ -2,7 +2,7 @@ package com.game.scene.world;
 
 import static com.game.scene.world.SceneMessageIds.push;
 
-import com.game.api.proto.ChannelKind;
+import com.game.api.ChannelKinds;
 import com.game.api.proto.ChannelState;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
@@ -242,11 +242,30 @@ public final class SceneWorld {
     }
 
     private Scene addScene(SceneInfoComp info) {
-        Scene scene = new Scene(info);
+        return addScene(info, SceneKind.WORLD, 0);
+    }
+
+    /**
+     * 登记一个场景（低层入口，<b>不做业务校验</b>）：频道由 {@link #applyChannelPlan} / {@link #createScene} 经 {@link #addScene(SceneInfoComp)} 进来；
+     * 批次 5.3 的镜像 / 副本实例只能经建实例的入口（dungeon-mirror-spec §6.8 {@code createInstance(spec)}：号非 0、种类、源是本地未排空的主世界频道、
+     * 上限、停止接客等全部校验过）再调这里。scene_id 本地已存在是调用方的编程错误（号全服唯一），抛 {@link IllegalStateException}、不覆盖。
+     *
+     * @param sourceSceneId 镜像的源频道（{@link SceneKind#MIRROR} 必须非 0），其它种类为 0
+     */
+    Scene addScene(SceneInfoComp info, SceneKind kind, long sourceSceneId) {
+        if (scenes.containsKey(info.getSceneId())) {
+            throw new IllegalStateException("场景号本地已存在 scene_id=" + Long.toUnsignedString(info.getSceneId()));
+        }
+        Scene scene = new Scene(info, kind, sourceSceneId);
         scenes.put(scene.sceneId(), scene);
         publishPopulation(scene.configId());
         publishChannels();
-        log.info("创建场景 scene_id={} scene_config_id={}", Long.toUnsignedString(scene.sceneId()), scene.configId());
+        if (kind.isInstance()) {
+            log.info("创建实例 scene_id={} scene_config_id={} kind={} source={}", Long.toUnsignedString(scene.sceneId()),
+                    scene.configId(), kind, Long.toUnsignedString(sourceSceneId));
+        } else {
+            log.info("创建场景 scene_id={} scene_config_id={}", Long.toUnsignedString(scene.sceneId()), scene.configId());
+        }
         return scene;
     }
 
@@ -264,18 +283,30 @@ public final class SceneWorld {
         metrics.scenePlayers(configId, players);
     }
 
-    /** 承载中 / 排空中的频道数推给指标（建、销毁、状态变化之后）。 */
+    /**
+     * 承载中 / 排空中的<b>主世界频道</b>数推给指标（建、销毁、状态变化之后）。镜像 / 副本实例不是频道，不计入（批次 5.3 R4；实例另有指标）。
+     */
     private void publishChannels() {
+        int active = 0;
         int draining = 0;
         for (Scene scene : scenes.values()) {
+            if (!scene.isWorldChannel()) {
+                continue;
+            }
             if (scene.draining()) {
                 draining++;
+            } else {
+                active++;
             }
         }
-        metrics.channels(scenes.size() - draining, draining);
+        metrics.channels(active, draining);
     }
 
-    /** 节点目录快照（scene-manager 按它分配场景；排空中的带 {@code draining}，分配不再选它，D13）。 */
+    /**
+     * 节点目录快照（scene-manager 按它分配场景；排空中的带 {@code draining}，分配不再选它，D13）。批次 5.3 起每条带种类与镜像源
+     * （dungeon-mirror-spec §6.5）：scene-manager 按地图选频道只认 WORLD（R1），「谁是镜像源」从 MIRROR 条目的 {@code source_scene_id} 推导；
+     * 目录是实例的唯一登记（D1）。
+     */
     public List<SceneEntry> sceneEntries() {
         List<SceneEntry> entries = new ArrayList<>(scenes.size());
         for (Scene scene : scenes.values()) {
@@ -284,6 +315,8 @@ public final class SceneWorld {
                     .setSceneConfigId(scene.configId())
                     .setPlayerCount(scene.playerCount())
                     .setDraining(scene.draining())
+                    .setKind(scene.kind().channelKind())
+                    .setSourceSceneId(scene.sourceSceneId())
                     .build());
         }
         return entries;
@@ -308,7 +341,8 @@ public final class SceneWorld {
      *       B12；muduo 入口有，scene_handler.cpp:854-859）、conf 不是本节点 World 表里的图、种类不是主世界、本地同号异图；</li>
      *   <li>DRAINING 记录：本地有 → 标排空（孤儿图也照样排空，所以这里不查 World 表）；本地没有 → 什么也不做（不为排空记录建场景：
      *       节点重启后领导者看到 applied_plan_version 追上、场景缺席就删记录，§4.14）；</li>
-     *   <li>本地有、计划里没有 → 按排空处理（节点侧孤儿：记录已删、频道换了节点号，或计划外自建的场景）。</li>
+     *   <li>本地有、计划里没有 → 按排空处理（节点侧孤儿：记录已删、频道换了节点号，或计划外自建的场景）。<b>只对主世界频道</b>：
+     *       镜像 / 副本实例本来就不在计划里（批次 5.3 R2）；计划里出现与本地实例同号的记录一律拒绝、不动实例。</li>
      * </ul>
      * 频道从不跨节点「搬」：调用方只交来本节点号名下的记录，别的节点号名下的同号记录对本节点等于「计划里没有」（D4）。
      * 记下版本号，随即推进一次排空（{@link #drainStep}）。逻辑线程上调用。
@@ -364,7 +398,9 @@ public final class SceneWorld {
             }
         }
         for (Scene scene : scenes.values()) {
-            if (!planned.contains(scene.sceneId()) && !scene.draining()) {
+            // 「计划外即排空」只作用于主世界频道（批次 5.3 R2）：镜像 / 副本实例本来就不在计划里（节点自有，D1），
+            // 不能一建出来就被当孤儿排空；它们的回收、级联与显式销毁由节点本地处理（dungeon-mirror-spec §6.10、§6.11）
+            if (scene.isWorldChannel() && !planned.contains(scene.sceneId()) && !scene.draining()) {
                 scene.setDraining(true);
                 drained++;
                 log.info("计划里没有本地场景，转为排空 scene_id={} scene_config_id={} 在场={}",
@@ -385,6 +421,10 @@ public final class SceneWorld {
         if (record.getSceneId() == 0) {
             return "scene_id 为 0";
         }
+        if (local != null && !local.isWorldChannel()) {
+            // 实例号与频道号同一个全服发号器发（Q8），撞号只可能是发号器坏了：两种状态都不动本地实例（fail-closed，批次 5.3）
+            return "本地同号场景是实例（" + local.kind() + "，发号器撞号？）";
+        }
         if (record.getState() == ChannelState.CHANNEL_DRAINING) {
             return null;
         }
@@ -394,9 +434,9 @@ public final class SceneWorld {
         if (record.getSceneConfigId() == 0) {
             return "scene_config_id 为 0";
         }
-        // 5.1 只有主世界频道；UNSPECIFIED 按主世界收（proto3 缺省值），5.3 的副本 / 镜像等别的种类不当主世界建（fail-closed）
-        ChannelKind kind = record.getKind();
-        if (kind != ChannelKind.CHANNEL_KIND_WORLD && kind != ChannelKind.CHANNEL_KIND_UNSPECIFIED) {
+        // 计划里只有主世界频道；UNSPECIFIED 按主世界收（proto3 缺省值），5.3 的镜像 / 副本（只出现在节点目录）与不认识的种类
+        // 不当主世界建（fail-closed，dungeon-mirror-spec §6.5）
+        if (!ChannelKinds.isWorldChannel(record.getKind())) {
             return "不是主世界频道";
         }
         if (!worldMaps.contains(record.getSceneConfigId())) {
@@ -493,11 +533,14 @@ public final class SceneWorld {
         return defaultWorld == from.configId() ? null : leastLoadedActive(defaultWorld, null);
     }
 
-    /** 本节点某图承载中频道里人数最少的（并列取 scene_id 无符号小的，确定、不依赖插入序）；{@code exclude} 不参与。没有为 null。 */
+    /**
+     * 本节点某图承载中<b>主世界频道</b>里人数最少的（并列取 scene_id 无符号小的，确定、不依赖插入序）；{@code exclude} 不参与。没有为 null。
+     * 镜像 / 副本实例不当频道（批次 5.3 R3）：镜像与源同图，不过滤就会把排空改派、进场重定向、只带地图的 63 分进别人的私有镜像。
+     */
     private Scene leastLoadedActive(int configId, Scene exclude) {
         Scene best = null;
         for (Scene scene : scenes.values()) {
-            if (scene == exclude || scene.draining() || scene.configId() != configId) {
+            if (scene == exclude || !scene.isWorldChannel() || scene.draining() || scene.configId() != configId) {
                 continue;
             }
             if (best == null || scene.playerCount() < best.playerCount() || scene.playerCount() == best.playerCount()
@@ -545,8 +588,10 @@ public final class SceneWorld {
     /**
      * 客户端换场景（63）的去向（scene-channels-spec §4.12，scene-handoff-spec §5.5、D6）：
      * <ul>
-     *   <li>指定了 scene_id：本节点上的这个场景、且在承载中才放行；在排空中拒绝（D11，基线放行、B5）；不在本节点 → 远端（scene-manager 在全 zone
-     *       目录里找，不回落到按地图挑）；</li>
+     *   <li>指定了 scene_id：本节点上的这个场景、且在承载中才放行（不看种类：按号加入镜像 / 副本实例，同基线不查 creators）；在排空中拒绝
+     *       （D11，基线放行、B5）；不在本节点 → 远端（scene-manager 在全 zone 目录里找，不回落到按地图挑）；</li>
+     *   <li>按地图选只在<b>主世界频道</b>里选（批次 5.3 R3）；当前场景是镜像 / 副本实例时只带当前地图也必须离开实例：本节点该图有主世界频道就去
+     *       人数最少的，没有则按下面「只带别的地图」的规则；</li>
      *   <li>只带当前地图（基线 scene_manager 在全 zone 该图频道里预占最少者，enterscenelogic.go:1267-1286、world_init.go:437-513）：
      *       在本节点同图承载中频道里选人数最少的，当前场景的人数含自己；并列<b>优先留在原地</b>，再取 scene_id 小的（D17，基线并列取 SMEMBERS
      *       顺序第一个、B13）；当前场景在排空中就不算它，本节点再没有该图的承载中频道 → 远端。选回原场景 = 应答成功、不发 79
@@ -567,6 +612,15 @@ public final class SceneWorld {
         }
         if (configId == current.configId()) {
             Scene other = leastLoadedActive(configId, current);
+            if (!current.isWorldChannel()) {
+                // 身在镜像 / 副本里只带当前地图（批次 5.3 R3）：只在该图的主世界频道里选，不允许留在实例里（基线只在 world_channels 里选，
+                // 镜像不在其中）；本地没有时同「只带别的地图」：世界地图（镜像）→ 远端，否则（副本地图 17–19）→ 拒绝
+                if (other != null) {
+                    return new SwitchTarget.Local(other);
+                }
+                return tables.worldSceneConfigIds().contains(configId) ? remoteOrReject()
+                        : new SwitchTarget.Reject(ENTER_FAILED);
+            }
             if (current.draining()) {
                 return other == null ? remoteOrReject() : new SwitchTarget.Local(other);
             }

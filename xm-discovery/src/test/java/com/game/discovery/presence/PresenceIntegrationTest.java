@@ -1,6 +1,7 @@
 package com.game.discovery.presence;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes.Outcome;
@@ -48,7 +49,7 @@ class PresenceIntegrationTest {
 
     @AfterAll
     static void cleanup() {
-        for (long i = 0; i < 10; i++) {
+        for (long i = 0; i < 12; i++) {
             redis.getBucket(RedisKeys.presence(BASE + i)).delete();
         }
         redis.shutdown();
@@ -160,6 +161,45 @@ class PresenceIntegrationTest {
         } finally {
             topic.removeListener(listener);
         }
+    }
+
+    @Test
+    void 按序推送_一次查目录一次发布_订阅端按原顺序收到整批() throws Exception {
+        LinkedBlockingQueue<GatePush> gate3 = new LinkedBlockingQueue<>();
+        RTopic topic = redis.getTopic(RedisKeys.gatePushTopic(ZONE, 3), ByteArrayCodec.INSTANCE);
+        int listener = topic.addListener(byte[].class, (ch, msg) -> {
+            try {
+                gate3.add(GatePush.parseFrom(msg));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        try {
+            await(directory.putAsync(entry(BASE + 10, 3, "gate-c", 41)));
+            BytesValue assigned = BytesValue.of(ByteString.copyFromUtf8("177"));
+            BytesValue start = BytesValue.of(ByteString.copyFromUtf8("143"));
+
+            assertThat(await(pushes.pushAllToPlayer(BASE + 10, List.of(assigned, start)))).isEqualTo(Outcome.SENT);
+            GatePush push = gate3.poll(5, TimeUnit.SECONDS);
+            assertThat(push).isNotNull();
+            assertThat(push.getActionCase()).isEqualTo(GatePush.ActionCase.MESSAGE_BATCH);
+            assertThat(push.getGateInstanceId()).isEqualTo("gate-c");
+            assertThat(push.getMessageBatch().getMessageContentsList())
+                    .containsExactly(assigned.toByteString(), start.toByteString());
+            assertThat(push.getTargetsList()).singleElement()
+                    .satisfies(t -> assertThat(t.getSessionId() + ":" + t.getPlayerId()).isEqualTo("41:" + (BASE + 10)));
+            assertThat(gate3.poll(200, TimeUnit.MILLISECONDS)).as("整批只发布一次").isNull();
+
+            assertThat(await(pushes.pushAllToPlayer(BASE + 11, List.of(assigned)))).as("不在线").isEqualTo(Outcome.OFFLINE);
+            assertThat(gate3.poll(200, TimeUnit.MILLISECONDS)).isNull();
+        } finally {
+            topic.removeListener(listener);
+        }
+    }
+
+    @Test
+    void 按序推送空列表直接拒绝() {
+        assertThatThrownBy(() -> pushes.pushAllToPlayer(BASE + 10, List.of())).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

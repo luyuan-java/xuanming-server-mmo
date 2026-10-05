@@ -1,6 +1,7 @@
 package com.game.discovery.presence;
 
 import com.game.discovery.proto.GatePush;
+import com.game.discovery.proto.MessageBatch;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.discovery.proto.PushTarget;
 import com.game.discovery.RedisKeys;
@@ -58,6 +59,30 @@ public final class PlayerPushes {
         return directory.findStrictAsync(playerId).thenCompose(found -> found.isEmpty()
                 ? CompletableFuture.completedFuture(Outcome.OFFLINE)
                 : publish(found.get(), List.of(found.get()), GatePush.newBuilder().setMessageContent(content)));
+    }
+
+    /**
+     * 把多条消息<b>按序</b>推给一个玩家（battle 大厅公告 177 → 143，battle-node-spec §7.7 / Q3）：查一次在线目录取玩家<b>当前</b>会话，
+     * 发布<b>一条</b> {@code GatePush{message_batch}}；gate 在会话 EventLoop 的同一个任务里逐条过玩家栅栏后下发，所以客户端看到的顺序就是
+     * {@code messageContents} 的顺序。分两次调 {@link #pushToPlayer} 做不到这一点：两次「异步查目录 + 发布」之间没有顺序保证。
+     *
+     * <p>语义同 {@link #pushToPlayer}：至多一次；在线目录条目损坏或与键不符时 stage 异常完成。消息在调用线程上序列化。
+     *
+     * @param messageContents 客户端协议的 {@code MessageContent}（id 填 0），至少一条
+     * @throws IllegalArgumentException 列表为空
+     */
+    public CompletionStage<Outcome> pushAllToPlayer(long playerId, List<? extends MessageLite> messageContents) {
+        if (messageContents.isEmpty()) {
+            throw new IllegalArgumentException("按序推送至少要一条消息");
+        }
+        MessageBatch.Builder batch = MessageBatch.newBuilder();
+        for (MessageLite content : messageContents) {
+            batch.addMessageContents(content.toByteString());
+        }
+        MessageBatch built = batch.build();
+        return directory.findStrictAsync(playerId).thenCompose(found -> found.isEmpty()
+                ? CompletableFuture.completedFuture(Outcome.OFFLINE)
+                : publish(found.get(), List.of(found.get()), GatePush.newBuilder().setMessageBatch(built)));
     }
 
     /** 同一条消息推给多个玩家：按 gate 分组，每个 gate 发一条。返回每个玩家的结局。 */

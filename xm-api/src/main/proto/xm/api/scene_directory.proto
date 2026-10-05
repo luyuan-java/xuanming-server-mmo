@@ -6,6 +6,8 @@ package xm.api;
 option java_package = "com.game.api.proto";
 option java_multiple_files = true;
 
+import "xm/api/world_channel.proto";
+
 message AssignSceneRequest {
   uint32 zone_id = 1;
   uint64 player_id = 2;
@@ -46,4 +48,37 @@ message SelectSwitchTargetResponse {
   uint32 scene_node_id = 2;
   uint64 scene_id = 3;
   uint32 scene_config_id = 4;
+}
+
+// scene → scene-manager：为一个新的镜像 / 副本实例取全服 scene_id 并定放置（批次 5.3，docs/porting/dungeon-mirror-spec.md §6.5、§6.6；
+// 对应基线 SM CreateScene 的 createInstance 路径，go/scene_manager/internal/logic/createscenelogic.go:182-325，Java 只保留「发号 + 定放置」，D1、D3）。
+// scene-manager 对实例零状态：不写 Redis（发号租约的续期除外）、不写软预占、不调 scene、不复核配表与源（节点是权威，已在逻辑线程上校验过）；
+// 节点拿到号后在本地建实例，建好即在节点目录（SceneEntry.kind / source_scene_id）登记。号作废（应答迟到、玩家已离开）不留任何痕迹。
+// 不幂等（同基线：每次请求一个新实例），调用方 retries = 0。
+message CreateInstanceRequest {
+  uint32 zone_id = 1;
+  // 发起节点（5.3 放置恒为它，D2）。
+  uint32 requester_scene_node_id = 2;
+  // 发起玩家；dev 管理口建副本时为 0。MIRROR 必填。
+  uint64 player_id = 3;
+  // MIRROR / DUNGEON；别的取值是参数错。
+  ChannelKind kind = 4;
+  // MIRROR：源（发起玩家当前所在的主世界频道，必填）；DUNGEON：必须为 0。
+  uint64 source_scene_id = 5;
+  // 实例的地图（必填）：MIRROR = 源频道的配置号；DUNGEON = Dungeon 表该行的 scene_id。
+  uint32 scene_config_id = 6;
+  // MIRROR 必填（scene 已按 Mirror 表校验存在，D7）；DUNGEON 必须为 0。
+  uint32 mirror_config_id = 7;
+  // DUNGEON 必填；MIRROR 必须为 0（镜像的 dungeon_config_id 恒 0，同基线 scene_node_client.go:108-113）。
+  uint32 dungeon_config_id = 8;
+}
+
+message CreateInstanceResponse {
+  // 0 = 成功；非 0 是 scene-manager 的业务拒绝码（3005 参数错；3000 发起节点不接新实例，5.5 钩子），只进日志与指标，
+  // scene 对客户端推 23 {3023}（D5）。发号租约无效不是业务拒绝：future 以异常完成，scene 推 23 {1003}（Q12）。
+  uint32 tip_id = 1;
+  // 实例落在哪个节点（5.3 恒等于 requester_scene_node_id；不等时 scene 必须拒绝建、推 23 {3023}，R11）。
+  uint32 scene_node_id = 2;
+  // 全服雪花号（NodeTypes.SCENE_MANAGER 租约的 worker，与主世界频道同一个发号器），非 0。
+  uint64 scene_id = 3;
 }

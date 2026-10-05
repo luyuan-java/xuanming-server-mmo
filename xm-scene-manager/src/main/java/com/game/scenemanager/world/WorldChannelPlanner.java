@@ -20,10 +20,12 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Function;
 
 /**
  * 频道计划规划器：一拍的纯函数 {@code plan(快照, 目录, 缺席表, 配置, now) → 改动}（scene-channels-spec §4.6.2）。
- * 不碰 Redis，唯一的外部调用是发号（{@link SceneIdSource}）与镜像源查询（{@link MirrorSources}，5.1 恒「否」）。
+ * 不碰 Redis，唯一的外部调用是发号（{@link SceneIdSource}）与镜像源查询（{@link MirrorSources}：生产每拍从本拍的目录推导，
+ * {@link DirectoryMirrorSources#of}，批次 5.3）。
  *
  * <p>顺序（基线没有单一入口，Java 把散落的几条后台路径收成一拍）：
  * <ol>
@@ -47,24 +49,30 @@ public final class WorldChannelPlanner {
     private final WorldChannelProperties props;
     private final List<Integer> worldConfs;
     private final Set<Integer> worldConfSet;
-    private final MirrorSources mirrors;
+    private final Function<DirectoryView, MirrorSources> mirrorSources;
     private final SceneIdSource ids;
 
     /**
-     * @param worldConfIds World 表的世界地图（scene_config_id），按表序，非空
-     * @param mirrors      镜像源查询（5.1 用 {@link MirrorSources#NONE}）
-     * @param ids          新频道的 scene_id 来源（生产为发号租约上的 {@code LeaseGatedSnowflake::tryNext}）
+     * @param worldConfIds  World 表的世界地图（scene_config_id），按表序，非空
+     * @param mirrorSources 每拍按本拍目录给出镜像源查询（生产 {@code DirectoryMirrorSources::of}，批次 5.3；单测可注入固定结果）
+     * @param ids           新频道的 scene_id 来源（生产为发号租约上的 {@code LeaseGatedSnowflake::tryNext}）
      */
-    public WorldChannelPlanner(WorldChannelProperties props, List<Integer> worldConfIds, MirrorSources mirrors,
-                               SceneIdSource ids) {
+    public WorldChannelPlanner(WorldChannelProperties props, List<Integer> worldConfIds,
+                               Function<DirectoryView, MirrorSources> mirrorSources, SceneIdSource ids) {
         if (worldConfIds.isEmpty()) {
             throw new IllegalArgumentException("World 表没有任何世界地图");
         }
         this.props = props;
         this.worldConfs = List.copyOf(new LinkedHashSet<>(worldConfIds));
         this.worldConfSet = Set.copyOf(worldConfs);
-        this.mirrors = mirrors;
+        this.mirrorSources = Objects.requireNonNull(mirrorSources, "mirrorSources");
         this.ids = ids;
+    }
+
+    /** 生产装配：镜像源每拍从目录推导（{@link DirectoryMirrorSources#of}）。 */
+    public static WorldChannelPlanner fromDirectory(WorldChannelProperties props, List<Integer> worldConfIds,
+                                                    SceneIdSource ids) {
+        return new WorldChannelPlanner(props, worldConfIds, DirectoryMirrorSources::of, ids);
     }
 
     public List<Integer> worldConfIds() {
@@ -84,6 +92,7 @@ public final class WorldChannelPlanner {
         orphans(draft);
         deadNodes(draft);
         drains(draft);
+        MirrorSources mirrors = mirrorSources.apply(input.directory());
         if (input.autoscaleDue() && props.autoscale().enabled()) {
             WorldAutoscaler.run(draft, mirrors);
         }

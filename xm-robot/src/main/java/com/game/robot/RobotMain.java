@@ -2,6 +2,7 @@ package com.game.robot;
 
 import com.game.contract.MessageIdRegistry;
 import com.game.robot.client.AdminClient;
+import com.game.robot.client.BattleAdminClient;
 import com.game.robot.client.GatewayHttp;
 import com.game.robot.client.LoginHttpClient;
 import com.game.robot.client.MessageIds;
@@ -11,6 +12,8 @@ import com.game.robot.flow.PlayerFlow;
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
+import com.game.robot.scenario.BattleEdgeScenario;
+import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CrossNodeScenario;
@@ -187,6 +190,20 @@ public final class RobotMain {
                     title = "xm-robot cross-node：" + scenario.firstAccount() + " 等（需要两个 scene 节点），" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.BATTLE) {
+                    BattleScenario scenario = new BattleScenario(client, flow, registry, battleAdmin(options, env), options.accountPrefix(),
+                            options.runTag(), options.expectDevAllowed(), options.requestTimeout());
+                    title = "xm-robot battle：" + scenario.accountA() + " 等（期望 dev 接口 " + (options.expectDevAllowed() ? "开放" : "403")
+                            + "），" + target + " battle-admin=" + options.battleAdminUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.BATTLE_EDGE) {
+                    BattleEdgeScenario scenario = new BattleEdgeScenario(client, flow, registry, battleAdmin(options, env),
+                            options.accountPrefix(), options.runTag(), options.expectDevAllowed(), options.slow(), options.requestTimeout());
+                    title = "xm-robot battle-edge：" + scenario.accountA() + " 等（期望 dev 接口 " + (options.expectDevAllowed() ? "开放" : "403")
+                            + (options.slow() ? "，含慢用例" : "") + "），" + target + " battle-admin=" + options.battleAdminUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.RECONNECT) {
                     ReconnectScenario scenario = new ReconnectScenario(flow, ids, registry, Path.of(options.tableDir()),
                             options.accountPrefix(), options.runTag(), options.requestTimeout(), options.observeTimeout());
@@ -249,5 +266,10 @@ public final class RobotMain {
             e.printStackTrace(err);
             return EXIT_FAIL;
         }
+    }
+
+    /** xm-battle dev 接口客户端（运维令牌同 audit：XM_ADMIN_TOKEN 或 run/xm-admin-token）。 */
+    private static BattleAdminClient battleAdmin(RobotOptions options, Map<String, String> env) {
+        return new BattleAdminClient(options.battleAdminUrl(), AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout());
     }
 }

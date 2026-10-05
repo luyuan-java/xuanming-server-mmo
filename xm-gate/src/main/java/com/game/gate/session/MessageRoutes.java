@@ -31,6 +31,12 @@ public interface MessageRoutes {
      * 聚宝斋服务名是 {@code ClientPlayerJubaozhai}（{@code 196=ClientPlayerJubaozhaiBrowseListings}），4 个号（196 / 197 / 198 / 200）转给
      * xm-trade（trade-spec §5.2）；199 {@code TradeAdminSeedListing} 刻意没标客户端协议服务（trade_admin.proto:13-18），不进白名单，
      * 客户端发来按「不认识的号」丢弃、计非法包、不回包（同基线 C++ gate，trade_smoke_scenario.go:281-284）。
+     *
+     * <p><b>{@code BattleClientPlayer} 永远不许加进来</b>（inventory combat.md gate-battle-uplink-reject；battle-node-spec §3.1、§3.7）：
+     * 战斗上行（140 / 149 / 162 / 165）与战斗帧只走客户端到 xm-battle 的直连，大厅连接上发这个服务的任何号（含 Notify 号）都走
+     * {@link #BACKEND_UNSUPPORTED} → 推 23 {1003}、不计非法包、不断连（基线 {@code client_message_processor.cpp:937-949}）。
+     * 把它接到某个后端会让大厅连接成为绕过直连票据（身份只来自票据）的第二条战斗通路。{@code MessageRoutesTest} 与
+     * {@code BattleUplinkRejectedTest} 钉住这一点。
      */
     Map<String, String> SERVICE_BACKENDS = Map.of(
             "ClientPlayerLogin", DubboGroups.LOGIN,

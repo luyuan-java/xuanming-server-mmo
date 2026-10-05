@@ -32,6 +32,13 @@ public final class DubboGroups {
      */
     public static final String SCENE_ASSET = "scene-asset";
 
+    /**
+     * battle 节点控制面（{@link BattleNodeService}，基线 gRPC {@code BattleNode}），每个 battle 节点各自导出、{@code register = false}，
+     * 调用方（6.4 的 match）按 Redis 节点目录里的 {@code BattleNodeInfo.rpc_host / rpc_port} 直连。{@code battle} 留给将来
+     * {@code proto/battle/...} 的 {@link ClientMessageService}（battle-node-spec §10.5），所以服务对服务的接口另起名（先例 {@link #SCENE_ASSET}）。
+     */
+    public static final String BATTLE_NODE = "battle-node";
+
     private DubboGroups() {
     }
 }

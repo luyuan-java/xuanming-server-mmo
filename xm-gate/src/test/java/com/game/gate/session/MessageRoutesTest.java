@@ -154,6 +154,29 @@ class MessageRoutesTest {
     }
 
     @Test
+    void 战斗服务12个号全部路由到unsupported_永不进后端表() {
+        // combat.md gate-battle-uplink-reject；battle-node-spec §3.7 / §13.7：战斗上行只走 xm-battle 直连，
+        // 大厅连接上发 BattleClientPlayer 的任何号（含 Notify 号）都回 23 {1003}。接进任何后端都会让这里失败。
+        List<String> methods = List.of("NotifyTurnResult", "GetBattleState", "NotifyBattleStart", "NotifyBattleReconnect",
+                "SubmitBattleAction", "NotifyBattleEnd", "NotifySpectateTurnResult", "NotifySpectateState", "SetAutoBattle",
+                "StopWatchBattle", "NotifySpectateEnd", "NotifyBattleAssigned");
+        List<MessageMethod> battle = registry.all().stream()
+                .filter(m -> m.serviceName().equals("BattleClientPlayer")).toList();
+        assertThat(battle).as("契约里 BattleClientPlayer 的方法").extracting(MessageMethod::methodName)
+                .containsExactlyInAnyOrderElementsOf(methods);
+        for (MessageMethod method : battle) {
+            assertThat(method.clientService()).as(method.key()).isTrue();
+            assertThat(method.playerService()).as(method.key()).isFalse();
+            MessageRoute route = routes.clientRoute(method.messageId());
+            assertThat(route).as(method.key()).isNotNull();
+            assertThat(route.domain()).as(method.key()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
+            assertThat(route.method()).isEqualTo("BattleClientPlayer." + method.methodName());
+        }
+        assertThat(battle).extracting(MessageMethod::messageId).contains(140, 149, 162, 165);
+        assertThat(MessageRoutes.SERVICE_BACKENDS).doesNotContainKey("BattleClientPlayer");
+    }
+
+    @Test
     void 好友服务路由到friend域_推送方法也在白名单里由后端拒() {
         int addFriend = registry.requireId("ClientPlayerFriend", "AddFriend");
         assertThat(routes.clientRoute(addFriend)).isEqualTo(new MessageRoute(addFriend, DubboGroups.FRIEND, true,

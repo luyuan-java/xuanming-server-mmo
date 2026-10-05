@@ -105,7 +105,9 @@ xm:
     # 交出事务（不含提交）与探测加锁读的时限（≥ 1s 且小于 transfer-lease-margin）：行锁被占时尝试以超时失败、交给重试 / 探测
     transfer-probe-statement-timeout: 3s
     # 跨节点换图（63 的目标不在本节点）请 scene-manager 选目标的直连地址（Dubbo Triple，与 xm-login 的 xm.dubbo.scene-manager-url 同一个提供方）。
-    # 本批只支持直连；同机多 scene 实例共用这一个地址
+    # 本批只支持直连；同机多 scene 实例共用这一个地址。批次 5.3 起镜像 / 副本实例取号（createInstance）也走这个提供方。
+    # 滚动升级顺序（dungeon-mirror-spec R7）：先升级 scene-manager 再升级 scene——旧 scene-manager 选频道不看目录的 SceneEntry.kind，
+    # 会把登录分进本节点上的镜像；旧 scene-manager 没有 createInstance，建镜像调用失败推 23 {1003}（fail-closed）。
     scene-manager-url: ${XM_SCENE_MANAGER_URL:tri://127.0.0.1:20882}
     # 选目标的本地兜底超时（须大于 scene-manager 的 Dubbo 超时 3s）：到时推 23 {1003}；也是 63 在途槽（期间再发 63 回 3014）的寿命
     switch-resolve-timeout: 4s

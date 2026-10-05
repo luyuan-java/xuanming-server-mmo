@@ -92,7 +92,66 @@ class ClientPipelineTest {
         assertThat(meters.get("xm.gate.disconnects").tag("reason", "invalid_frame").counter().count()).isEqualTo(1);
     }
 
+    // ---------------------------------------------------------------- 逐帧分发（基线 codec.cpp:158-191）
+
+    @Test
+    void 同一次读里握手与请求后跟坏帧_先回握手应答与请求的回包_然后才断开() throws Exception {
+        EmbeddedChannel ch = channel();
+        ch.writeInbound(Unpooled.wrappedBuffer(
+                robotFrame(verifyRequest(GATE_NODE), ' '),
+                robotFrame(ClientRequest.newBuilder().setId(3).setMessageId(77).build(), ' '),
+                corruptFrame(),
+                robotFrame(ClientRequest.newBuilder().setId(4).setMessageId(77).build(), ' ')));
+
+        ClientTokenVerifyResponse verified = (ClientTokenVerifyResponse) decode(ch.readOutbound());
+        assertThat(verified.getSuccess()).as("先到的握手照常通过并回包").isTrue();
+        MessageContent tip = (MessageContent) decode(ch.readOutbound());
+        assertThat(tip.getMessageId()).as("先到的请求照常处理（未进场景 → 23）").isEqualTo(23);
+        assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage()).getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat((Object) ch.readOutbound()).as("坏帧之后的帧随缓冲一起丢弃").isNull();
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(meters.get("xm.gate.client.invalid.frames").tag("reason", "checksum").counter().count()).isEqualTo(1);
+        assertThat(meters.get("xm.gate.disconnects").tag("reason", "invalid_frame").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void 同一次读里被拒的握手后跟坏帧_只收到拒绝应答_坏帧不解析不计非法帧() throws Exception {
+        EmbeddedChannel ch = channel();
+        ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(verifyRequest(GATE_NODE + 1), ' '), corruptFrame()));
+
+        ClientTokenVerifyResponse rejected = (ClientTokenVerifyResponse) decode(ch.readOutbound());
+        assertThat(rejected.getSuccess()).isFalse();
+        assertThat(rejected.getError()).isEqualTo("token not for this gate");
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(meters.get("xm.gate.client.invalid.frames").tag("reason", "checksum").counter().count())
+                .as("会话已决定关闭，剩余字节不再解析").isZero();
+        assertThat(meters.get("xm.gate.disconnects").tag("reason", "handshake_rejected").counter().count()).isEqualTo(1);
+        assertThat(meters.get("xm.gate.disconnects").tag("reason", "invalid_frame").counter().count())
+                .as("每条连接只计一个断开原因").isZero();
+    }
+
+    @Test
+    void 同一次读里握手前的请求后跟坏帧_不回包断开_坏帧不计非法帧() {
+        EmbeddedChannel ch = channel();
+        ch.writeInbound(Unpooled.wrappedBuffer(
+                robotFrame(ClientRequest.newBuilder().setId(1).setMessageId(77).build(), ' '), corruptFrame()));
+
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(meters.get("xm.gate.disconnects").tag("reason", "no_handshake").counter().count()).isEqualTo(1);
+        assertThat(meters.get("xm.gate.disconnects").tag("reason", "invalid_frame").counter().count()).isZero();
+        assertThat(meters.get("xm.gate.client.invalid.frames").tag("reason", "checksum").counter().count()).isZero();
+    }
+
     // ---------------------------------------------------------------- 工具
+
+    /** 校验和错误的一帧（解码层判非法、立即断开）。 */
+    private static byte[] corruptFrame() {
+        byte[] frame = robotFrame(ClientRequest.newBuilder().setId(9).setMessageId(77).build(), ' ');
+        frame[frame.length - 1] ^= 0x5A;
+        return frame;
+    }
 
     private EmbeddedChannel channel() {
         return new EmbeddedChannel(new ChannelInitializer<Channel>() {

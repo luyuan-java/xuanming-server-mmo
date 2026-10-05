@@ -131,6 +131,42 @@ class RobotOptionsTest {
     }
 
     @Test
+    void battle_缺省管理端口18112_期望dev接口开放_不跑慢用例_账号带bt标签() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("battle", "--run-tag", "t1"), ENV, NOW);
+        assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.BATTLE);
+        assertThat(o.battleAdminUrl()).isEqualTo("http://127.0.0.1:18112");
+        assertThat(o.expectDevAllowed()).isTrue();
+        assertThat(o.slow()).isFalse();
+        assertThat(com.game.robot.scenario.BattleScenario.accountName(o.accountPrefix(), o.runTag(), "a")).isEqualTo("robot_java_btt1_a");
+        assertThat(com.game.robot.scenario.BattleEdgeScenario.accountName(o.accountPrefix(), o.runTag(), "a")).isEqualTo("robot_java_bet1_a");
+    }
+
+    @Test
+    void battle_edge_子命令带连字符_slow可以只写开关也可以带取值() throws Exception {
+        RobotOptions bare = RobotOptions.parse(List.of("--slow", "battle-edge"), ENV, NOW);
+        assertThat(bare.scenario()).as("开关后面的子命令不被吃掉").isEqualTo(RobotOptions.Scenario.BATTLE_EDGE);
+        assertThat(bare.slow()).isTrue();
+        assertThat(RobotOptions.parse(List.of("battle-edge", "--slow"), ENV, NOW).slow()).isTrue();
+        assertThat(RobotOptions.parse(List.of("battle-edge", "--slow", "false"), ENV, NOW).slow()).isFalse();
+        assertThat(RobotOptions.parse(List.of("battle-edge", "--slow=true"), ENV, NOW).slow()).isTrue();
+        assertThat(RobotOptions.parse(List.of("battle-edge"), Map.of(RobotOptions.PASSWORD_ENV, "p", "XM_ROBOT_SLOW", "true"), NOW).slow())
+                .isTrue();
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("battle-edge", "--slow=yes"), ENV, NOW)).hasMessageContaining("--slow");
+    }
+
+    @Test
+    void battle_expect_dev与管理端口地址() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("battle", "--expect-dev", "deny", "--battle-admin-url", "http://10.0.0.5:28112/"), ENV, NOW);
+        assertThat(o.expectDevAllowed()).isFalse();
+        assertThat(o.battleAdminUrl()).isEqualTo("http://10.0.0.5:28112");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("battle", "--expect-dev", "maybe"), ENV, NOW)).hasMessageContaining("--expect-dev");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("battle", "--battle-admin-url", "127.0.0.1:18112"), ENV, NOW))
+                .hasMessageContaining("--battle-admin-url");
+        assertThat(RobotOptions.usage()).contains("battle-edge", "XM_ROBOT_BATTLE_ADMIN_URL", "--slow");
+        assertThat(o.toString()).contains("battleAdminUrl=http://10.0.0.5:28112").doesNotContain("dev-secret");
+    }
+
+    @Test
     void 帮助() {
         assertThatThrownBy(() -> RobotOptions.parse(List.of("--help"), Map.of(), NOW))
                 .isInstanceOfSatisfying(UsageException.class, e -> assertThat(e.isHelp()).isTrue());

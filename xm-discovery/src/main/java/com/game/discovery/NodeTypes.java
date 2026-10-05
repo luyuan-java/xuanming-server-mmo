@@ -29,6 +29,11 @@ public final class NodeTypes {
      * 跨 zone 引用不撞号）。批次 5.1，scene-channels-spec §4.5、D18；常量见 {@code com.game.discovery.world.WorldChannels}。
      */
     public static final String SCENE_MANAGER = "scene-manager";
+    /**
+     * xm-battle：节点号租约（票据里的 {@code battle_node_id}）+ battle 目录（{@code xm.api.BattleNodeInfo}，6.4 的 match 按它挑节点），
+     * <b>作用域 0</b>：基线 battle 是全局池、不分 zone（{@code deploy.yaml:46}；{@code gather.go:212}）。批次 6.2，battle-node-spec §7.1、§7.10。
+     */
+    public static final String BATTLE = "battle";
 
     private NodeTypes() {
     }

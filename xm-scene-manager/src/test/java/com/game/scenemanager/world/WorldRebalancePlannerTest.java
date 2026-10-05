@@ -145,6 +145,18 @@ class WorldRebalancePlannerTest {
     }
 
     @Test
+    void 目录里有指向它的镜像时不迁_镜像没了照迁_D12() {
+        misplaced(0);
+        f.mirrorsFromDirectory = true;
+        f.addToNode(10, PlanFixture.mirrorScene(0x8000_0000_0000_0901L, CONF, 2, false, 555));
+
+        assertThat(f.plan().batch().isEmpty()).as("镜像源不迁（基线迁移并强制级联有人的镜像，Java D12）").isTrue();
+
+        f.node(10, 0, scene(555, CONF, 0));
+        assertThat(f.plan().batch().isEmpty()).as("镜像销毁、目录里没有它之后照常迁").isFalse();
+    }
+
+    @Test
     void 发号租约无效时不迁() {
         misplaced(0);
         f.leaseValid = false;

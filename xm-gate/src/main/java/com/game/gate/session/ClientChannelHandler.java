@@ -41,6 +41,16 @@ public final class ClientChannelHandler extends ChannelInboundHandlerAdapter {
         ctx.fireChannelActive();
     }
 
+    /**
+     * 解码器是否还解下一帧（{@link ClientPipeline} 接到 xm-net {@code ClientFrameDecoder} 的 keepDecoding）：会话存在、没决定关闭、
+     * 没断开。会话一旦决定关闭（握手被拒、握手前发请求、非法包达阈值、服务端指令关闭……），同一次读里剩下的帧不再解析——不分发、
+     * 不计非法帧、坏帧也不当场强关（不会截断已排队的拒绝应答 / tip），同基线 codec 的 {@code conn->connected()} 判据。
+     * 只在本连接的 EventLoop 上调用。
+     */
+    boolean acceptsFrames() {
+        return session != null && !session.closing && !session.closed;
+    }
+
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (session == null) {

@@ -1,11 +1,13 @@
 // Java 版内部契约：游戏节点在线目录（存 Redis，带 TTL，节点定期刷新）。
-// gateway 按它挑 gate；scene-manager 按它分配场景；gate 按它连 scene。
+// gateway 按它挑 gate；scene-manager 按它分配场景；gate 按它连 scene；match 按它挑 battle 节点。
 syntax = "proto3";
 
 package xm.api;
 
 option java_package = "com.game.api.proto";
 option java_multiple_files = true;
+
+import "xm/api/world_channel.proto";
 
 message GateNodeInfo {
   uint32 zone_id = 1;
@@ -46,5 +48,36 @@ message SceneEntry {
   uint32 scene_config_id = 2;
   uint32 player_count = 3;
   // 排空中（频道计划里是 CHANNEL_DRAINING，或节点上有计划外的场景）：分配不再选它，在场玩家被同节点改派，空了即销毁（5.1，D11、D13）。
+  // 对实例（kind = MIRROR / DUNGEON）的含义扩展为「回收宽限中 / 级联排空中 / 显式销毁中」（批次 5.3）：同样不再接新进入。
   bool draining = 4;
+  // 场景种类（批次 5.3，dungeon-mirror-spec §6.5）：WORLD = 频道计划建的主世界频道；MIRROR / DUNGEON = 承载节点自有的实例（不在计划里，随进程消亡，
+  // 目录就是唯一登记）。UNSPECIFIED（不认识这个字段的旧版本节点）按 WORLD 读；判法见 com.game.api.ChannelKinds#isWorldChannel。
+  // 读方约束：按地图选频道（login 进游戏、5.2 只带地图的换图、5.1 的软预占）只认 WORLD——镜像的 scene_config_id 就是源频道的世界地图，
+  // 不过滤就会把别人塞进私有镜像（R1）；按场景号找原实例 / 显式场景号不看种类（D14）。
+  // 滚动升级顺序（R7）：先升级 scene-manager（带种类过滤），再升级会建实例的 scene；旧 scene-manager 不看这个字段，会把登录分进新节点上的镜像。
+  ChannelKind kind = 5;
+  // MIRROR 的源（同节点上的主世界频道）；其余为 0。scene-manager 据此回答「这个频道是不是镜像源」（缩容 / 择机迁移跳过镜像源，DirectoryMirrorSources）。
+  uint64 source_scene_id = 6;
+}
+
+// battle 节点（xm-battle，批次 6.2）：节点类型 battle、作用域 0（全服一个池，不分 zone，同基线 gather.go:212）。
+// 目录键 xm:nodes:battle:0，每 5 s 写一次、TTL 15 s。match（6.4）只从 accepting = true 的条目里随机挑；目录最多滞后 5 s，
+// 所以「CreateBattleResult.admission = NOT_ALLOCATABLE 后换节点重试一次」仍要保留（battle-node-spec §7.10）。
+message BattleNodeInfo {
+  uint32 node_id = 1;
+  // 进程实例 UUID（每次启动新生成）：票据带它，节点号被新进程复用时旧票据不会被接受；6.4 补签时据此判「房间所在进程已不在」（Q14）。
+  string instance_id = 2;
+  // BattleNodeService（Dubbo Triple，register = false，group battle-node）的直连地址；导出成功之后才写。
+  string rpc_host = 3;
+  uint32 rpc_port = 4;
+  // 通告给客户端的直连地址（排障用；票据里的地址以 battle 自签的为准）。
+  string client_host = 5;
+  uint32 client_port = 6;
+  // 准入闸 OPEN 且节点号租约有效：false 时不得再往这个节点建房。
+  bool accepting = 7;
+  uint32 room_count = 8;
+  // 直连数（含未握手）。
+  uint32 connection_count = 9;
+  // 本节点的战斗配表指纹（TableBattleData.fingerprint()）：match 选节点时可据此与快照指纹比对。
+  string table_fingerprint = 10;
 }

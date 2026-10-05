@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import com.game.discovery.world.WorldChannelStore;
+import com.game.scenemanager.SceneIdAllocator;
 import com.game.scenemanager.SceneNodeSource;
 import com.game.scenemanager.WorldSceneConfigs;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -16,13 +17,18 @@ import org.redisson.api.RedissonClient;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
- * 装配（不起 Dubbo、不连 Redis）：{@code xm.scene-manager.world.*} 绑定、Q8 启动校验让上下文起不来、{@code leader-eligible=false} 不占租约不起线程、
- * 健康组件与指标 bean 在场。
+ * 装配（不起 Dubbo、不连 Redis）：{@code xm.scene-manager.world.*} 绑定、Q8 启动校验让上下文起不来、{@code leader-eligible=false} 不起线程、
+ * 健康组件与指标 bean 在场。发号租约不归控制面（批次 5.3 R5）：{@link SceneIdAllocator} 是 {@code SceneManagerConfiguration} 里的独立 bean，
+ * 这里用不占租约的测试版代替，{@code leader-eligible=false} 时控制面照样拿得到它的 worker；真 Redis 上「每个副本都申领」见
+ * {@code SceneIdAllocatorRedisIntegrationTest}。
  */
 class WorldChannelConfigurationTest {
 
+    private static final int WORKER = 17;
+
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(WorldChannelConfiguration.class)
+            .withBean(SceneIdAllocator.class, () -> SceneIdAllocator.forTesting(WORKER, () -> true))
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(SceneNodeSource.class, () -> zone -> List.of())
             .withBean(WorldSceneConfigs.class, () -> new WorldSceneConfigs(1, new LinkedHashSet<>(List.of(1, 2))))
@@ -36,6 +42,8 @@ class WorldChannelConfigurationTest {
                 .run(ctx -> {
                     assertThat(ctx).hasNotFailed();
                     assertThat(ctx.getBean(WorldChannelControlPlane.class).coordinator()).isNull();
+                    assertThat(ctx.getBean(WorldChannelControlPlane.class).idWorker())
+                            .as("不竞选的副本也有发号 worker（实例取号用，R5）").isEqualTo(WORKER);
                     assertThat(ctx).hasSingleBean(WorldChannelStore.class);
                     assertThat(ctx).hasSingleBean(WorldChannelMetrics.class);
                     assertThat(ctx).hasBean("worldChannelsHealthIndicator");

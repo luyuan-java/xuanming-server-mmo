@@ -18,11 +18,13 @@ import org.slf4j.LoggerFactory;
  *   <li>原实例：请求带了 {@code preferred_scene_id}（login 读到的玩家位置记录：在线顶号 / 断线重连租约内），该实例还在
  *       本 zone 可用节点的目录里、且<b>没在排空</b>就直接用它，不看人数（基线 scene_manager 注释里的设计意图；它实际只按 location 定 zone、
  *       落默认主世界，见 PARITY）；同时给它记一条软预占，让并发分配看得见（批次 5.1，scene-channels-spec §4.11 第 3 步，D20）。
- *       不在了 / 在排空中走下一条。</li>
+ *       不在了 / 在排空中走下一条。<b>不看种类</b>（批次 5.3，dungeon-mirror-spec D14）：原实例是还在、且没进回收宽限 / 级联排空的镜像或副本时
+ *       同样回到它；进了回收宽限（目录报 draining）就按记录里的地图选——镜像的地图是源频道的世界地图，落同图频道；副本的地图不是世界地图，回落默认。</li>
  *   <li>目标地图：请求带了 {@code preferred_scene_config_id}，它是世界地图、且本 zone 有<b>没在排空</b>的频道承载它 → 用它；
  *       否则用默认世界地图（{@link WorldSceneConfigs#defaultConfigId()}）。与 mmorpg「解析失败回落默认大世界」一致。</li>
  *   <li>在目标地图的频道里选并软预占（{@link ChannelSelector}）：负载 = 目录人数 + 未到期预占，取最小；并列时取节点号小的，
- *       再并列取场景号小的（结果确定，便于排查）。预占关闭（{@code reservation-ttl = 0}）时只看目录人数。</li>
+ *       再并列取场景号小的（结果确定，便于排查）。预占关闭（{@code reservation-ttl = 0}）时只看目录人数。只在主世界频道里选
+ *       （镜像 / 副本实例不当频道，5.3 R1）。</li>
  *   <li>一个都没有 → 应答带 {@link #TIP_NO_SCENE}，不抛异常。</li>
  * </ol>
  *

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.proto.AssignSceneRequest;
 import com.game.api.proto.AssignSceneResponse;
+import com.game.api.proto.ChannelKind;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.scenemanager.world.FakeWorldChannelStore;
@@ -136,6 +137,38 @@ class ChannelSelectorTest {
         assertThat(selector.select(ZONE, 2, 0, 42)).isEmpty();
     }
 
+    // ---------- 批次 5.3 R1：只认主世界频道（dungeon-mirror-spec §6.6、§12.3） ----------
+
+    @Test
+    void 同图的镜像与副本条目不入选_即使人数更少() {
+        nodes.add(node(1, scene(101, 1, 50), instance(901, 1, ChannelKind.CHANNEL_KIND_MIRROR, 101),
+                instance(902, 1, ChannelKind.CHANNEL_KIND_DUNGEON, 0)));
+        nodes.add(node(2, instance(903, 1, ChannelKind.CHANNEL_KIND_MIRROR, 101)));
+
+        for (long p = 1; p <= 5; p++) {
+            assertThat(assign(p).getSceneId()).isEqualTo(101);
+        }
+        assertThat(store.reservationCount(ZONE, 901) + store.reservationCount(ZONE, 902) + store.reservationCount(ZONE, 903))
+                .as("预占也不会落到实例上").isZero();
+    }
+
+    @Test
+    void 旧版本节点没有kind的条目当主世界频道_更新版本才有的种类不当() {
+        nodes.add(node(1, scene(101, 1, 9),
+                SceneEntry.newBuilder().setSceneId(104).setSceneConfigId(1).setPlayerCount(1).setKindValue(9).build()));
+        nodes.add(node(2, SceneEntry.newBuilder().setSceneId(201).setSceneConfigId(1).setPlayerCount(3).build()));
+
+        assertThat(assign(42).getSceneId()).isEqualTo(201);
+    }
+
+    @Test
+    void 某图只有镜像时没有候选() {
+        nodes.add(node(1, instance(901, 2, ChannelKind.CHANNEL_KIND_MIRROR, 101)));
+
+        assertThat(selector.select(ZONE, 2, 0, 42)).isEmpty();
+        assertThat(selector.select(ZONE, 2, 0, 0)).as("不预占的路径同样过滤").isEmpty();
+    }
+
     @Test
     void 开启预占却没给存储时拒绝构造() {
         assertThatThrownBy(() -> new ChannelSelector(source, null, TTL)).isInstanceOf(IllegalArgumentException.class);
@@ -150,5 +183,11 @@ class ChannelSelectorTest {
 
     private static SceneEntry scene(long sceneId, int configId, int playerCount) {
         return SceneEntry.newBuilder().setSceneId(sceneId).setSceneConfigId(configId).setPlayerCount(playerCount).build();
+    }
+
+    /** 节点自有的实例（人数 0，比任何频道都「闲」）。 */
+    private static SceneEntry instance(long sceneId, int configId, ChannelKind kind, long source) {
+        return SceneEntry.newBuilder().setSceneId(sceneId).setSceneConfigId(configId).setKind(kind).setSourceSceneId(source)
+                .build();
     }
 }

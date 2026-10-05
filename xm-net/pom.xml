@@ -12,7 +12,7 @@
 
     <artifactId>xm-net</artifactId>
     <name>xm-net</name>
-    <description>Netty 编解码：客户端帧（与 C++ ProtobufCodec 兼容）与节点间链路</description>
+    <description>Netty 编解码：客户端帧（与 C++ ProtobufCodec 兼容）与节点间链路；客户端按消息号限频（com.game.net.limit）</description>
 
     <dependencies>
         <dependency>
@@ -26,6 +26,11 @@
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <dependency>
+            <!-- com.game.net.limit：客户端按消息号限频读 MessageLimiter 表（gate 与 battle 直连面共用，battle-node-spec §7.2 / Q9） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-table</artifactId>
         </dependency>
         <dependency>
             <groupId>com.game</groupId>

@@ -318,7 +318,8 @@ public final class ClientDispatcher {
             }
             case DOMAIN_SCENE -> countRequest(p.route(), forwardToScene(s, p.request()));
             default -> {
-                // Java 版尚未实现的后端域（battle 等）：与 C++ 找不到目标节点时同形。
+                // Java 版尚未实现的后端域：与 C++ 找不到目标节点时同形。战斗服务 BattleClientPlayer 也永远落在这里
+                // （战斗上行只走 xm-battle 直连，不计非法包、不断连；见 MessageRoutes.SERVICE_BACKENDS 的注释）。
                 log.debug("消息域未接入 Java 版 session={} message_id={} domain={}", sid(s), p.route().messageId(), p.route().domain());
                 countRequest(p.route(), RequestResult.UNSUPPORTED);
                 sendTip(s, TIP_SERVICE_UNAVAILABLE);

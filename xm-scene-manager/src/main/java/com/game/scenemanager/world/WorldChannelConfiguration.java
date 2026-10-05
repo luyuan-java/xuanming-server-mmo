@@ -2,6 +2,7 @@ package com.game.scenemanager.world;
 
 import com.game.discovery.world.RedissonWorldChannelStore;
 import com.game.discovery.world.WorldChannelStore;
+import com.game.scenemanager.SceneIdAllocator;
 import com.game.scenemanager.SceneNodeSource;
 import com.game.scenemanager.WorldSceneConfigs;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -28,12 +29,15 @@ public class WorldChannelConfiguration {
         return new WorldChannelMetrics(meterRegistry, worldConfigs.orderedConfigIds());
     }
 
-    /** 停服时先停控制面线程、属主校验放锁，再还发号租约。 */
+    /**
+     * 停服时先停控制面线程、属主校验放锁；发号租约属于 {@link SceneIdAllocator} bean（每个副本都申领，批次 5.3 R5），
+     * 它被这里依赖，Spring 先销毁本 bean 再还租约。
+     */
     @Bean(destroyMethod = "close")
-    public WorldChannelControlPlane worldChannelControlPlane(RedissonClient redis, WorldChannelStore store,
-                                                             SceneNodeSource sceneNodeSource, WorldSceneConfigs worldConfigs,
-                                                             WorldChannelProperties props, WorldChannelMetrics metrics) {
-        return WorldChannelControlPlane.start(redis, store, sceneNodeSource, worldConfigs, props, metrics);
+    public WorldChannelControlPlane worldChannelControlPlane(WorldChannelStore store, SceneNodeSource sceneNodeSource,
+                                                             WorldSceneConfigs worldConfigs, WorldChannelProperties props,
+                                                             WorldChannelMetrics metrics, SceneIdAllocator sceneIdAllocator) {
+        return WorldChannelControlPlane.start(store, sceneNodeSource, worldConfigs, props, metrics, sceneIdAllocator);
     }
 
     /** 健康组件 {@code worldChannels}（bean 名去掉 HealthIndicator 后缀即组件名）。 */

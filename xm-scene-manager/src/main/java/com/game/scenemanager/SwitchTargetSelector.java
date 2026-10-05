@@ -22,9 +22,13 @@ import org.slf4j.LoggerFactory;
  *       指定了配置而与该场景不符 → {@link SceneAssigner#TIP_BAD_REQUEST}。<b>不回落</b>到「按地图挑」，与基线显式 scene_id 的解析一致
  *       （mmorpg enterscenelogic.go resolveScene 的 Case 1）。选中后给它记一条软预占，让并发分配看得见这位正在赶来的玩家
  *       （同 5.1 D20「原实例直接用且也写预占」；基线显式解析不预占）。</li>
- *   <li><b>只带地图</b>（{@code want_scene_id = 0}）：地图必须是世界地图（副本 / 镜像是私有实例，不能按人数塞人；否则 {@link SceneAssigner#TIP_NO_SCENE}），
- *       然后 {@link ChannelSelector}：排除 {@code from_scene_id}、按「目录人数 + 未到期预占」选最少者并写软预占（5.1 D7，拒绝出口不需要退还）。
- *       没有候选 → {@link SceneAssigner#TIP_NO_SCENE}。选中的频道可能就在源节点上（目录比源节点的本地视图新），由 scene 自己按本地换处理。</li>
+ *   <li><b>只带地图</b>（{@code want_scene_id = 0}）：地图必须是世界地图（否则 {@link SceneAssigner#TIP_NO_SCENE}；副本地图 17–19 不是世界地图，
+ *       在这里就挡住了），然后 {@link ChannelSelector}：排除 {@code from_scene_id}、按「目录人数 + 未到期预占」选最少者并写软预占（5.1 D7，拒绝出口不需要退还）。
+ *       <b>镜像的配置号就是源频道的世界地图</b>，上面那条挡不住镜像，靠 {@link ChannelSelector} 的种类过滤（只认主世界频道，批次 5.3 R1、勘误 E13）——
+ *       私有实例不能按人数塞人。没有候选 → {@link SceneAssigner#TIP_NO_SCENE}。选中的频道可能就在源节点上（目录比源节点的本地视图新），
+ *       由 scene 自己按本地换处理。</li>
+ *   <li>显式场景号命中镜像 / 副本实例照常返回并写预占（任何知道号的同 zone 玩家都能按号加入，同基线不查 creators；5.3 §6.12）；
+ *       实例在回收宽限 / 级联排空中目录报 draining → {@link Result#DRAINING}。</li>
  * </ol>
  *
  * <p>契约（同 {@link SceneAssigner}）：

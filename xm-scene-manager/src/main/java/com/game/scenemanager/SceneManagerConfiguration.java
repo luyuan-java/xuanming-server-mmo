@@ -2,6 +2,7 @@ package com.game.scenemanager;
 
 import com.game.common.token.DubboCallAuth;
 import com.game.discovery.world.WorldChannelStore;
+import com.game.scenemanager.world.NodeAvailability;
 import com.game.scenemanager.world.WorldChannelProperties;
 import com.game.table.ConfigTables;
 import java.nio.file.Path;
@@ -15,7 +16,8 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * 装配：配置表 → {@link WorldSceneConfigs}；Redis 节点目录 → {@link SceneNodeSource}；目录 + 软预占（{@code xm:world:*}）→
- * {@link ChannelSelector}；三者 → {@link SceneAssigner}（进游戏）与 {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）。
+ * {@link ChannelSelector}；三者 → {@link SceneAssigner}（进游戏）与 {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）；
+ * 全服 scene_id 发号租约 → {@link SceneIdAllocator}（每个副本都申领）→ {@link InstanceIdIssuer}（镜像 / 副本实例取号，批次 5.3）。
  * 主世界频道的控制面在 {@code com.game.scenemanager.world.WorldChannelConfiguration}。
  * {@link RedissonClient} 由 xm-discovery 的自动配置提供（{@code xm.redis.*}）。
  */
@@ -62,6 +64,25 @@ public class SceneManagerConfiguration {
     public SwitchTargetSelector switchTargetSelector(SceneNodeSource source, WorldSceneConfigs worldConfigs,
                                                      ChannelSelector channelSelector) {
         return new SwitchTargetSelector(source, worldConfigs, channelSelector);
+    }
+
+    /**
+     * 全服 scene_id 发号器（批次 5.3 R5）：<b>每个副本都申领</b>发号租约，不论 {@code leader-eligible}——主世界频道（控制面，只在领导者上用）
+     * 与镜像 / 副本实例取号（{@link InstanceIdIssuer}，任一副本都可能被调到）共用。启动时占不到号即启动失败；停服时最后还租约
+     * （控制面与提供方都依赖它，先于它销毁）。
+     */
+    @Bean(destroyMethod = "close")
+    public SceneIdAllocator sceneIdAllocator(RedissonClient redis) {
+        return SceneIdAllocator.acquire(redis);
+    }
+
+    /**
+     * 镜像 / 副本实例取号（批次 5.3，dungeon-mirror-spec §6.6）：无状态，放置恒为发起节点。节点可用性用 {@link NodeAvailability#ALL}
+     * （5.5 的节点级排空标记接在这里）。
+     */
+    @Bean
+    public InstanceIdIssuer instanceIdIssuer(SceneIdAllocator sceneIdAllocator) {
+        return new InstanceIdIssuer(sceneIdAllocator, NodeAvailability.ALL);
     }
 
     /**

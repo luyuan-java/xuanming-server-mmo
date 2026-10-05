@@ -278,6 +278,49 @@ class WorldAutoscalerTest {
                 new PlanEvent.Autoscale(AutoscaleAction.SCALE_IN, AutoscaleOutcome.NO_VICTIM, CONF));
     }
 
+    // ---------- 批次 5.3：镜像源按生产口径从目录推导（dungeon-mirror-spec §12.1 world_autoscale_mirror_test.go 用真实目录重跑）
+
+    @Test
+    void 目录里有指向最闲频道的镜像_缩容跳过它缩下一个() {
+        seedChannels(players(101, 10, 102, 20, 103, 900));
+        f.mirrorsFromDirectory = true;
+        f.addToNode(NODE, PlanFixture.mirrorScene(0x8000_0000_0000_0901L, CONF, 1, false, 101));
+
+        PlanResult r = f.plan();
+
+        assertThat(puts(r)).singleElement().satisfies(c -> {
+            assertThat(c.getSceneId()).isEqualTo(102);
+            assertThat(c.getState()).isEqualTo(ChannelState.CHANNEL_DRAINING);
+        });
+    }
+
+    @Test
+    void 回收宽限中的镜像也算源_够闲的都是镜像源时不缩() {
+        seedChannels(players(101, 10, 102, 20, 103, 900));
+        f.mirrorsFromDirectory = true;
+        f.addToNode(NODE, PlanFixture.mirrorScene(0x8000_0000_0000_0901L, CONF, 0, true, 101),
+                PlanFixture.mirrorScene(0x8000_0000_0000_0902L, CONF, 3, false, 102));
+
+        PlanResult r = f.plan();
+
+        assertThat(r.batch().isEmpty()).isTrue();
+        assertThat(r.events()).containsExactly(
+                new PlanEvent.Autoscale(AutoscaleAction.SCALE_IN, AutoscaleOutcome.NO_VICTIM, CONF));
+    }
+
+    @Test
+    void 镜像实例本身不当频道_不进负载也不被缩() {
+        // 镜像与源同图同节点、人数 0；若被当成频道就会成为最闲的牺牲者，或让「全部 ≥ 2000」的扩容判定失真
+        seedChannels(players(101, 2000, 102, 2100));
+        f.mirrorsFromDirectory = true;
+        f.addToNode(NODE, PlanFixture.mirrorScene(0x8000_0000_0000_0901L, CONF, 0, false, 101));
+
+        PlanResult r = f.plan();
+
+        assertThat(r.events()).containsExactly(new PlanEvent.Autoscale(AutoscaleAction.SCALE_OUT, AutoscaleOutcome.OK, CONF));
+        assertThat(puts(r)).noneSatisfy(c -> assertThat(c.getSceneId()).isEqualTo(0x8000_0000_0000_0901L));
+    }
+
     @Test
     void 镜像查询失败时按是处理_不缩() {
         seedChannels(players(101, 10, 103, 900));

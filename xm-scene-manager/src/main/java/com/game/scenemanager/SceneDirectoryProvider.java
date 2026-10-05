@@ -3,12 +3,17 @@ package com.game.scenemanager;
 import com.game.api.SceneDirectoryService;
 import com.game.api.proto.AssignSceneRequest;
 import com.game.api.proto.AssignSceneResponse;
+import com.game.api.proto.ChannelKind;
+import com.game.api.proto.CreateInstanceRequest;
+import com.game.api.proto.CreateInstanceResponse;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -17,16 +22,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * {@link SceneDirectoryService} 的 Dubbo 提供方（Triple，无 group / version）。只做协议适配，规则在 {@link SceneAssigner}（进游戏）
- * 与 {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）。
+ * {@link SceneDirectoryService} 的 Dubbo 提供方（Triple，无 group / version）。只做协议适配，规则在 {@link SceneAssigner}（进游戏）、
+ * {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）与 {@link InstanceIdIssuer}（镜像 / 副本实例取号，批次 5.3）。
  *
- * <p>两种调用都只读一次 Redis（外加至多一次软预占），直接在 Dubbo 业务线程上同步算完再返回已完成的 future（不占 Netty I/O 线程）。
- * 业务拒绝走 {@code tip_id}；场景目录读不到（Redis 故障等）时 future 以异常完成，表示「调用失败」而不是「没有场景」。
- * 异常只带概要，完整堆栈留在本进程日志：内部细节（Redis 地址等）不外发给调用方。
+ * <p>分配与选目标都只读一次 Redis（外加至多一次软预占），实例取号不碰 Redis；都直接在 Dubbo 业务线程上同步算完再返回已完成的 future
+ * （不占 Netty I/O 线程）。业务拒绝走 {@code tip_id}；场景目录读不到（Redis 故障等）或发号租约无效时 future 以异常完成，表示「调用失败」
+ * 而不是「没有场景」。异常只带概要，完整堆栈留在本进程日志：内部细节（Redis 地址等）不外发给调用方。
  *
  * <p>指标（architecture.md §11）：每次分配按结果计耗时 {@code xm.scene_manager.assign{result}}，结果只有 {@link AssignResult} 这几种；
  * 每次换图选目标按结果计耗时 {@code xm.scene_manager.switch{result}}（Prometheus 名 {@code xm_scene_manager_switch_seconds}，
- * scene-handoff-spec §7.2），结果 = {@link SwitchTargetSelector.Result} 加 {@code error}。都不带 zone / 玩家 / 节点 / 场景维度。
+ * scene-handoff-spec §7.2），结果 = {@link SwitchTargetSelector.Result} 加 {@code error}；每次实例取号按种类与结果计耗时
+ * {@code xm.scene_manager.instance{kind, result}}（{@code xm_scene_manager_instance_seconds}，dungeon-mirror-spec §8.2），
+ * {@code kind} = mirror / dungeon / other（请求里的种类不合法），{@code result} = {@link InstanceIdIssuer.Result} 加 {@code error}。
+ * 都不带 zone / 玩家 / 节点 / 场景维度。
  */
 @DubboService
 public class SceneDirectoryProvider implements SceneDirectoryService {
@@ -35,9 +43,14 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
 
     static final String ASSIGN_METRIC = "xm.scene_manager.assign";
     static final String SWITCH_METRIC = "xm.scene_manager.switch";
+    static final String INSTANCE_METRIC = "xm.scene_manager.instance";
 
     /** {@code xm.scene_manager.switch} 在调用失败（目录 / 预占存储不可用）时的结果标签。 */
     static final String SWITCH_ERROR = "error";
+    /** {@code xm.scene_manager.instance} 在取号抛出意外异常时的结果标签（发号租约无效另计 {@code no_lease}）。 */
+    static final String INSTANCE_ERROR = "error";
+    /** {@code xm.scene_manager.instance} 的种类标签：请求里的种类不是 MIRROR / DUNGEON（参数错）。 */
+    static final String KIND_OTHER = "other";
 
     /** 延迟直方图的桶边界：一次 Redis 读（加至多一次预占），固定 8 个，覆盖 1ms～1s（Dubbo 调用超时 3s）。 */
     private static final Duration[] LATENCY_BUCKETS = {
@@ -59,14 +72,19 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
 
     private final SceneAssigner assigner;
     private final SwitchTargetSelector switchSelector;
+    private final InstanceIdIssuer instanceIssuer;
     private final MeterRegistry meterRegistry;
     private final Map<AssignResult, Timer> timers = new EnumMap<>(AssignResult.class);
     private final Map<SwitchTargetSelector.Result, Timer> switchTimers = new EnumMap<>(SwitchTargetSelector.Result.class);
     private final Timer switchErrorTimer;
+    /** 种类标签 → 结果标签 → 计时器（3 × 5 个，启动时全部注册，序列稳定）。 */
+    private final Map<String, Map<String, Timer>> instanceTimers = new HashMap<>();
 
-    public SceneDirectoryProvider(SceneAssigner assigner, SwitchTargetSelector switchSelector, MeterRegistry meterRegistry) {
+    public SceneDirectoryProvider(SceneAssigner assigner, SwitchTargetSelector switchSelector,
+                                  InstanceIdIssuer instanceIssuer, MeterRegistry meterRegistry) {
         this.assigner = assigner;
         this.switchSelector = switchSelector;
+        this.instanceIssuer = instanceIssuer;
         this.meterRegistry = meterRegistry;
         for (AssignResult result : AssignResult.values()) {
             timers.put(result, Timer.builder(ASSIGN_METRIC)
@@ -79,6 +97,33 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
             switchTimers.put(result, switchTimer(result.name().toLowerCase(Locale.ROOT)));
         }
         switchErrorTimer = switchTimer(SWITCH_ERROR);
+        for (String kind : List.of(kindTag(ChannelKind.CHANNEL_KIND_MIRROR), kindTag(ChannelKind.CHANNEL_KIND_DUNGEON), KIND_OTHER)) {
+            Map<String, Timer> byResult = new HashMap<>();
+            for (InstanceIdIssuer.Result result : InstanceIdIssuer.Result.values()) {
+                String tag = result.name().toLowerCase(Locale.ROOT);
+                byResult.put(tag, instanceTimer(kind, tag));
+            }
+            byResult.put(INSTANCE_ERROR, instanceTimer(kind, INSTANCE_ERROR));
+            instanceTimers.put(kind, Map.copyOf(byResult));
+        }
+    }
+
+    private Timer instanceTimer(String kind, String result) {
+        return Timer.builder(INSTANCE_METRIC)
+                .description("镜像 / 副本实例取号的结果与耗时（无 Redis 读写，只发号）")
+                .tag("kind", kind)
+                .tag("result", result)
+                .serviceLevelObjectives(LATENCY_BUCKETS)
+                .register(meterRegistry);
+    }
+
+    /** 指标的种类标签：mirror / dungeon，其余（参数错）归 {@link #KIND_OTHER}。 */
+    static String kindTag(ChannelKind kind) {
+        return switch (kind) {
+            case CHANNEL_KIND_MIRROR -> "mirror";
+            case CHANNEL_KIND_DUNGEON -> "dungeon";
+            default -> KIND_OTHER;
+        };
     }
 
     private Timer switchTimer(String result) {
@@ -120,6 +165,29 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
             log.error("换图选目标失败：场景目录或预占存储不可用 zone={} player={}", request.getZoneId(), request.getPlayerId(), e);
             return CompletableFuture.failedFuture(
                     new IllegalStateException("场景目录暂不可用: " + e.getClass().getSimpleName()));
+        }
+    }
+
+    /**
+     * 镜像 / 副本实例取号（dungeon-mirror-spec §6.6）。参数错与发起节点不接新实例是正常应答（{@code tip_id}）；发号租约无效（Q12）
+     * 与意外异常以异常完成 future（scene 推 23 {1003}），异常只带概要。
+     */
+    @Override
+    public CompletableFuture<CreateInstanceResponse> createInstance(CreateInstanceRequest request) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        Map<String, Timer> byResult = instanceTimers.get(kindTag(request.getKind()));
+        try {
+            InstanceIdIssuer.Issue issue = instanceIssuer.issue(request);
+            sample.stop(byResult.get(issue.result().name().toLowerCase(Locale.ROOT)));
+            if (issue.result() == InstanceIdIssuer.Result.NO_LEASE) {
+                return CompletableFuture.failedFuture(new IllegalStateException("scene_id 发号租约暂不可用"));
+            }
+            return CompletableFuture.completedFuture(issue.response());
+        } catch (RuntimeException e) {
+            sample.stop(byResult.get(INSTANCE_ERROR));
+            log.error("实例取号失败 zone={} node={} player={} kind={}", request.getZoneId(), request.getRequesterSceneNodeId(),
+                    request.getPlayerId(), request.getKindValue(), e);
+            return CompletableFuture.failedFuture(new IllegalStateException("实例取号暂不可用: " + e.getClass().getSimpleName()));
         }
     }
 

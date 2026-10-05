@@ -3,18 +3,23 @@ package com.game.scenemanager.world;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.proto.AssignSceneRequest;
+import com.game.api.proto.ChannelKind;
 import com.game.api.proto.ChannelState;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.WorldChannel;
+import com.game.discovery.NodeDirectory;
+import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.world.RedissonWorldChannelStore;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.discovery.world.WorldChannels;
 import com.game.discovery.world.WorldPlan;
 import com.game.scenemanager.ChannelSelector;
+import com.game.scenemanager.RedisSceneNodeSource;
 import com.game.scenemanager.SceneAssigner;
+import com.game.scenemanager.SceneIdAllocator;
 import com.game.scenemanager.SceneNodeSource;
 import com.game.scenemanager.SwitchTargetSelector;
 import com.game.scenemanager.WorldSceneConfigs;
@@ -113,7 +118,7 @@ class WorldChannelRedisIntegrationTest {
     private static WorldChannelCoordinator coordinator(Directory directory, String token, Duration lockTtl,
                                                        SimpleMeterRegistry meters) {
         WorldChannelProperties props = PlanFixture.props(Map.of("leader-lock-ttl", lockTtl.toMillis() + "ms"));
-        WorldChannelPlanner planner = new WorldChannelPlanner(props, CONFS, MirrorSources.NONE,
+        WorldChannelPlanner planner = WorldChannelPlanner.fromDirectory(props, CONFS,
                 () -> OptionalLong.of(IDS.incrementAndGet()));
         return new WorldChannelCoordinator(scoped(directory.zone), directory, planner, props, new WorldChannelMetrics(meters, CONFS),
                 NodeAvailability.ALL, token, System::nanoTime);
@@ -271,11 +276,14 @@ class WorldChannelRedisIntegrationTest {
         Directory dir = new Directory(zone);
         dir.host(10);
         WorldChannelProperties props = PlanFixture.props(Map.of("tick", "200ms", "leader-lock-ttl", "3s"));
-        WorldChannelControlPlane plane = WorldChannelControlPlane.start(redis, scoped(zone), dir,
+        // 发号租约由独立的 SceneIdAllocator 占（批次 5.3 R5），控制面只借用；停服顺序同 Spring：先停控制面，再还租约
+        SceneIdAllocator ids = SceneIdAllocator.acquire(redis);
+        WorldChannelControlPlane plane = WorldChannelControlPlane.start(scoped(zone), dir,
                 new WorldSceneConfigs(1, new LinkedHashSet<>(CONFS)), props,
-                new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS));
+                new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS), ids);
         int worker = plane.idWorker();
         try {
+            assertThat(worker).isEqualTo(ids.worker());
             assertThat(worker).isBetween(1, 1023);
             long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
             while (store.readPlan(zone).channels().size() < 2 && System.nanoTime() < deadline) {
@@ -292,8 +300,81 @@ class WorldChannelRedisIntegrationTest {
             plane.close();
         }
         assertThat(redis.getBucket(RedisKeys.worldLeader(zone)).isExists()).isFalse();
+        assertThat(redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists())
+                .as("控制面停了，租约仍归发号器（实例取号还在用）").isTrue();
+        ids.close();
         assertThat(redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists()).isFalse();
         redis.getBucket(RedisKeys.nodeIdEpoch(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).delete();
+    }
+
+    @Test
+    void 节点经Redis目录上报镜像后_种类与源不丢_领导者一拍内缩容跳过镜像源_login不分进镜像() {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        // 种子：每张图在节点 10 上 2 个频道
+        WorldChannelProperties seedProps = PlanFixture.props(Map.of("channel-count", "2"));
+        WorldChannelCoordinator seeder = new WorldChannelCoordinator(scoped(zone), dir,
+                WorldChannelPlanner.fromDirectory(seedProps, CONFS, () -> OptionalLong.of(IDS.incrementAndGet())),
+                seedProps, new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS), NodeAvailability.ALL,
+                "it-seed:" + zone, System::nanoTime);
+        seeder.tick();
+        seeder.releaseAll();
+        WorldPlan plan = store.readPlan(zone);
+        List<Long> conf1 = plan.channelsOn(10).stream().filter(c -> c.getSceneConfigId() == 1)
+                .map(WorldChannel::getSceneId).sorted(Long::compareUnsigned).toList();
+        assertThat(conf1).hasSize(2);
+        long mirrorSource = conf1.get(0);   // 人数并列时缩容先选它（场景号小），挂上镜像后必须跳过
+        long other = conf1.get(1);
+        long mirrorId = IDS.incrementAndGet();
+
+        // scene 节点按 xm-scene 的方式经 Redis 节点目录上报：计划里的频道（WORLD）+ 一个指向 mirrorSource 的镜像（0 人，比任何频道都「闲」）
+        SceneNodeInfo.Builder info = SceneNodeInfo.newBuilder().setZoneId(zone).setNodeId(10).setInstanceId("it-10")
+                .setLinkHost("127.0.0.1").setLinkPort(21010).setAppliedPlanVersion(plan.version());
+        for (WorldChannel c : plan.channelsOn(10)) {
+            info.addScenes(SceneEntry.newBuilder().setSceneId(c.getSceneId()).setSceneConfigId(c.getSceneConfigId())
+                    .setPlayerCount(5).setKind(ChannelKind.CHANNEL_KIND_WORLD));
+        }
+        info.addScenes(SceneEntry.newBuilder().setSceneId(mirrorId).setSceneConfigId(1)
+                .setKind(ChannelKind.CHANNEL_KIND_MIRROR).setSourceSceneId(mirrorSource));
+        NodeDirectory<SceneNodeInfo> published = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        published.publish(zone, 10, info.build(), Duration.ofSeconds(15));
+        try {
+            RedisSceneNodeSource source = new RedisSceneNodeSource(redis);
+            DirectoryView view = DirectoryView.of(zone, source.list(zone));
+            DirectoryView.Scene mirror = view.node(10).scenes().get(mirrorId);
+            assertThat(mirror.kind()).isEqualTo(ChannelKind.CHANNEL_KIND_MIRROR);
+            assertThat(mirror.sourceSceneId()).isEqualTo(mirrorSource);
+            assertThat(DirectoryMirrorSources.of(view).isSource(mirrorSource)).isTrue();
+            assertThat(DirectoryMirrorSources.of(view).isSource(other)).isFalse();
+
+            // login 进游戏只认主世界频道（R1）：镜像 0 人也不会被选，预占也不落在它上面
+            SceneAssigner assigner = new SceneAssigner(source, new WorldSceneConfigs(1, new LinkedHashSet<>(CONFS)),
+                    new ChannelSelector(source, store, Duration.ofSeconds(10)));
+            for (long p = 1; p <= 4; p++) {
+                assertThat(assigner.assign(AssignSceneRequest.newBuilder().setZoneId(zone).setPlayerId(8_000_000L + p)
+                        .build()).getSceneId()).isIn(mirrorSource, other);
+            }
+            assertThat(store.countReservations(zone, List.of(mirrorId))).containsExactly(0L);
+
+            // 新领导者开着自动扩缩容（缩容线 100，人数都是 5）：一拍内缩掉的是 other，镜像源不动
+            WorldChannelProperties props = PlanFixture.props(Map.of("channel-count", "2", "autoscale.enabled", "true"));
+            WorldChannelCoordinator leader = new WorldChannelCoordinator(scoped(zone), source,
+                    WorldChannelPlanner.fromDirectory(props, CONFS, () -> OptionalLong.of(IDS.incrementAndGet())),
+                    props, new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS), NodeAvailability.ALL,
+                    "it-as:" + zone, System::nanoTime);
+            leader.tick();
+            leader.releaseAll();
+            Map<Long, WorldChannel> after = new HashMap<>();
+            for (WorldChannel c : store.readPlan(zone).channels()) {
+                after.put(c.getSceneId(), c);
+            }
+            assertThat(after.get(mirrorSource).getState()).isEqualTo(ChannelState.CHANNEL_ACTIVE);
+            assertThat(after.get(other).getState()).isEqualTo(ChannelState.CHANNEL_DRAINING);
+            assertThat(after).as("镜像不进计划").doesNotContainKey(mirrorId);
+        } finally {
+            published.remove(zone, 10);
+        }
     }
 
     @Test
@@ -305,7 +386,7 @@ class WorldChannelRedisIntegrationTest {
         // 种子 4：每张图在两个节点上各 2 个频道（per-node 覆盖 + 补足到 4）
         WorldChannelProperties props = PlanFixture.props(Map.of("channel-count", "4"));
         WorldChannelCoordinator seeded = new WorldChannelCoordinator(scoped(zone), dir,
-                new WorldChannelPlanner(props, CONFS, MirrorSources.NONE, () -> OptionalLong.of(IDS.incrementAndGet())),
+                WorldChannelPlanner.fromDirectory(props, CONFS, () -> OptionalLong.of(IDS.incrementAndGet())),
                 props, new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS), NodeAvailability.ALL, "it-a:" + zone,
                 System::nanoTime);
         seeded.tick();

@@ -58,6 +58,13 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
 
+        <!-- 只在测试里用：BattleAdminClient 按字段号解 xm.api.CreateBattleResult（探针不依赖 xm-api），用生成类钉住字段号与枚举值。
+             xm-api 的 Dubbo 依赖是 optional，不会被带进来 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-api</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

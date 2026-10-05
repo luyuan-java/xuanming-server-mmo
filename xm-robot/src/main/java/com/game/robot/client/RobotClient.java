@@ -60,6 +60,11 @@ public final class RobotClient implements AutoCloseable {
         }
     }
 
+    /** TCP 连上 battle 直连面（不握手；地址取分配包 177 / 补签里的 host / port）。 */
+    public BattleDirectConnection connectBattle(String host, int port) throws RobotException {
+        return BattleDirectConnection.open(group, host, port, connectTimeout);
+    }
+
     @Override
     public void close() {
         group.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);

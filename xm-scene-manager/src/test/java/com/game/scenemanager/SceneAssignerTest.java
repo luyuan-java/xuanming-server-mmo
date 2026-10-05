@@ -206,7 +206,44 @@ class SceneAssignerTest {
         assertThat(assign(0).getTipId()).isEqualTo(SceneAssigner.TIP_NO_SCENE);
     }
 
+    // ---------- 批次 5.3：镜像 / 副本实例（dungeon-mirror-spec §12.3 SceneAssignerTest，D14、R1） ----------
+
+    @Test
+    void 原实例是还在的镜像_重连回到它_D14() {
+        source.add(node(1, scene(101, 1, 0), mirror(901, 1, 101, false)));
+
+        assertSuccess(assign(1, 1, 901), 1, 901, 1);
+    }
+
+    @Test
+    void 原镜像在回收宽限中_按原地图选主世界频道_不进任何镜像() {
+        source.add(node(1, scene(101, 1, 40), mirror(901, 1, 101, true), mirror(902, 1, 101, false)));
+
+        assertSuccess(assign(1, 1, 901), 1, 101, 1);
+    }
+
+    @Test
+    void 原实例是已消失的副本_副本地图不是世界地图_回落默认主世界() {
+        source.add(node(1, scene(101, 1, 5)));
+
+        assertSuccess(assign(17, 1, 903), 1, 101, 1);
+    }
+
+    @Test
+    void 不带原实例时_同图镜像人数再少也不选() {
+        source.add(node(1, scene(101, 1, 70), mirror(901, 1, 101, false)));
+        source.add(node(2, mirror(902, 1, 101, false)));
+
+        assertSuccess(assign(1), 1, 101, 1);
+    }
+
     // ---------- helpers ----------
+
+    private static SceneEntry mirror(long sceneId, int configId, long source, boolean draining) {
+        return SceneEntry.newBuilder().setSceneId(sceneId).setSceneConfigId(configId)
+                .setKind(com.game.api.proto.ChannelKind.CHANNEL_KIND_MIRROR).setSourceSceneId(source).setDraining(draining)
+                .build();
+    }
 
     private static SceneEntry draining(long sceneId, int configId, int playerCount) {
         return scene(sceneId, configId, playerCount).toBuilder().setDraining(true).build();

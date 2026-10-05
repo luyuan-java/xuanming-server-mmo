@@ -41,7 +41,7 @@ class WorldChannelCoordinatorTest {
     }
 
     private WorldChannelCoordinator coordinator(String token, WorldChannelProperties props) {
-        WorldChannelPlanner planner = new WorldChannelPlanner(props, CONFS, MirrorSources.NONE,
+        WorldChannelPlanner planner = WorldChannelPlanner.fromDirectory(props, CONFS,
                 () -> leaseValid ? OptionalLong.of(nextId++) : OptionalLong.empty());
         return new WorldChannelCoordinator(store, source, planner, props, metrics, NodeAvailability.ALL, token, () -> nanos);
     }

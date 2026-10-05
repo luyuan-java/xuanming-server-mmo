@@ -1,0 +1,79 @@
+# xm-battle 本地配置（批次 6.2，docs/porting/battle-node-spec.md §8）。进程从仓库根目录启动（配置表默认读 config-data/tables）。
+#
+# 秘密只从环境变量注入，不写进本文件：
+#   XM_BATTLE_TOKEN_SECRET 直连票据签名密钥（必填，任何运行模式；去首尾空白后 ≥ 32 字节且不得与 XM_GATE_TOKEN_SECRET 相同，
+#                          否则 prod 拒启、dev / test 打 WARN；全部 battle 实例共享）
+#   XM_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填：BattleNodeService 提供方要验调用方 MAC；须与 match 等一致；缺失即拒启）
+#   XM_GATE_TOKEN_SECRET   可选：进程能看到时用于「battle 密钥不得与 gate 相同」检查（本机切片会导出）
+#   XM_ADMIN_TOKEN         可选：dev / test 管理接口 /admin/battle/dev/* 的 X-Xm-Admin-Token；不设则 /admin/** 一律 503
+#   DUBBO_IP_TO_BIND       控制面 Dubbo 端口绑定的网卡（Dubbo 不接受回环，缺省监听全部网卡；生产绑内网网卡并配防火墙）
+#
+# 不用 MySQL：房间是纯内存的（节点崩溃 = 在打的战斗全部作废，由 scene 的 reaper 按期限解冻）。Redis 只写节点号租约（battle，作用域 0）
+# 与节点目录 xm:nodes:battle:0，只读在线目录（大厅公告 177 / 143 经 gate 回落）；dev 接口另读位置记录与 scene 目录。
+spring:
+  application:
+    name: xm-battle
+  main:
+    # 只为管理端点与 dev 接口起一个 Servlet 容器（Tomcat）；直连面（Netty）与控制面（Dubbo）都不经过它。
+    web-application-type: servlet
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+# 管理端口：http://127.0.0.1:18112/actuator/health、/actuator/prometheus 与 dev / test 专用接口 POST /admin/battle/dev/*。
+# 默认只绑本机，不要暴露到公网（dev 接口在 prod 也注册、只回 403，令牌仍是第一道闸）。同机多实例用 SERVER_PORT 各配不同端口。
+server:
+  port: ${SERVER_PORT:18112}
+  address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
+  # 管理端口上没有需要排空的业务请求。
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+xm:
+  # 运行模式：只有 dev / test（含别名 development / local / testing）开放 dev 管理接口、允许 max-connections = 0、
+  # 允许票据密钥太短 / 与 gate 相同（只 WARN）；其余（含未设、写错）一律按 prod。本机切片由 tools/local/start-slice.sh 设 XM_RUN_MODE=dev。
+  run-mode: ${XM_RUN_MODE:prod}
+  # 控制面通告地址：Dubbo 导出与目录里的 rpc_host 用它；没配 xm.battle.client-advertise-host 时，票据里给客户端的直连主机与目录 client_host 也用它。
+  advertise-host: 127.0.0.1
+  table-dir: config-data/tables
+  # 按方法热关停（运维止血阀）：控制面 Dubbo 提供方过滤器经它判定；每秒全量读 Redis 哈希 xm:killswitch，失联超过 60 s 整体放行。
+  killswitch:
+    enabled: true
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  battle:
+    # 客户端直连面（Netty）。同机多实例各不相同。
+    client-port: ${XM_BATTLE_CLIENT_PORT:12000}
+    # 直连面对客户端开放（集群外客户端按票据里的通告地址连进来）。
+    client-bind-host: 0.0.0.0
+    # 票据里给客户端的端口；0 = client-port（端口映射时填映射后的值）。主机见下面的 client-advertise-host。
+    advertise-port: ${XM_BATTLE_ADVERTISE_PORT:0}
+    # 票据（177 / 补签）与目录 client_host 里给客户端的直连主机；空 = 取上面的 xm.advertise-host。端口映射 / NodePort 部署时
+    # 客户端要宿主可达的地址、rpc_host 要容器网络内的服务名，两者必然不同，分开配（deploy-ci-spec Q9）。
+    client-advertise-host: ${XM_BATTLE_CLIENT_ADVERTISE_HOST:}
+    # 控制面 BattleNodeService（Dubbo Triple，group battle-node，register = false，按节点目录直连）；导出成功后才写进目录。
+    rpc-port: ${XM_BATTLE_RPC_PORT:21200}
+    # 并发直连上限（含未握手）；0 = 硬上限 65535，只许 dev / test（prod 拒启）。
+    max-connections: ${XM_BATTLE_MAX_CONNECTIONS:4096}
+    # 握手期限：客户端可见，不建议改（只为测试可注入）；范围 (0, 60s]。
+    handshake-timeout: 10s
+    # 已验证连接上的非法包阈值（体积 / 限频 / 白名单 / 体解析失败各计一次），达到即断开；0 = 只计数不断开（同 gate）。
+    illegal-packet-threshold: 50
+    # 战斗配表指纹闸：off / warn / enforce；写错拒启。
+    table-fingerprint-mode: ${XM_BATTLE_TABLE_FINGERPRINT_MODE:warn}
+    # 控制面在途调用上限：超限时 createBattle 回 NOT_ALLOCATABLE(overloaded)，不排队进逻辑线程。
+    rpc-max-inflight: 256
+    # 停机时等正在优雅关闭的直连排空的上限（之后强关剩余连接）。
+    shutdown-flush-timeout: 1s

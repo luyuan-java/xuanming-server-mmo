@@ -37,6 +37,8 @@ final class PlanFixture {
     boolean autoscaleDue;
     boolean rebalanceDue;
     MirrorSources mirrors = MirrorSources.NONE;
+    /** true = 镜像源按生产口径每拍从目录推导（{@link DirectoryMirrorSources#of}，批次 5.3），{@link #mirrors} 不再生效。 */
+    boolean mirrorsFromDirectory;
     long nextId = 1000;
     boolean leaseValid = true;
 
@@ -113,6 +115,22 @@ final class PlanFixture {
         return new DirectoryView.Scene(sceneId, conf, players, true);
     }
 
+    /** 节点上报的镜像实例（批次 5.3）：与源频道同图、不在计划里。 */
+    static DirectoryView.Scene mirrorScene(long sceneId, int conf, long players, boolean draining, long sourceSceneId) {
+        return new DirectoryView.Scene(sceneId, conf, players, draining, ChannelKind.CHANNEL_KIND_MIRROR, sourceSceneId);
+    }
+
+    /** 给目录里已有的节点追加场景（不改已应用版本）。 */
+    PlanFixture addToNode(int nodeId, DirectoryView.Scene... scenes) {
+        DirectoryView.Node node = nodes.get(nodeId);
+        Map<Long, DirectoryView.Scene> map = new HashMap<>(node.scenes());
+        for (DirectoryView.Scene s : scenes) {
+            map.put(s.sceneId(), s);
+        }
+        nodes.put(nodeId, new DirectoryView.Node(nodeId, node.instanceId(), node.appliedPlanVersion(), map));
+        return this;
+    }
+
     static WorldChannel channel(long sceneId, int conf, int node, int slot, ChannelState state, DrainReason reason,
                                 long planVersion, long sinceMs) {
         return WorldChannel.newBuilder()
@@ -132,7 +150,11 @@ final class PlanFixture {
     // ---------------------------------------------------------------- 执行
 
     WorldChannelPlanner planner() {
-        return new WorldChannelPlanner(props, confs, mirrors, () -> leaseValid ? OptionalLong.of(nextId++) : OptionalLong.empty());
+        SceneIdSource ids = () -> leaseValid ? OptionalLong.of(nextId++) : OptionalLong.empty();
+        if (mirrorsFromDirectory) {
+            return WorldChannelPlanner.fromDirectory(props, confs, ids);
+        }
+        return new WorldChannelPlanner(props, confs, view -> mirrors, ids);
     }
 
     PlanInput input() {

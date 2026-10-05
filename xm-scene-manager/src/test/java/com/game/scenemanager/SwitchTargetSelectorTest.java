@@ -3,6 +3,7 @@ package com.game.scenemanager;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.api.proto.ChannelKind;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.api.proto.SelectSwitchTargetRequest;
@@ -276,7 +277,49 @@ class SwitchTargetSelectorTest {
         assertThat(zones).containsExactly(7);
     }
 
+    // ---------- 批次 5.3：镜像 / 副本实例（dungeon-mirror-spec §6.12、§12.3 SwitchTargetSelectorTest 的补充） ----------
+
+    @Test
+    void 显式场景号命中别的节点上的镜像_返回它并写预占() {
+        nodes.add(node(1, scene(101, 1, 0)));
+        nodes.add(node(2, scene(201, 1, 0), mirror(901, 1, 201, false)));
+
+        assertChosen(explicit(901, 1), 2, 901, 1);
+        assertThat(store.reservationCount(ZONE, 901)).isEqualTo(1);
+    }
+
+    @Test
+    void 显式场景号命中回收宽限中的镜像_拒绝DRAINING() {
+        nodes.add(node(2, scene(201, 1, 0), mirror(901, 1, 201, true)));
+
+        assertRejected(explicit(901, 0), Result.DRAINING, SceneAssigner.TIP_NO_SCENE);
+        assertThat(store.reservationCount(ZONE, 901)).isZero();
+    }
+
+    @Test
+    void 只带地图从镜像里离开_不选任何镜像_只选主世界频道() {
+        // 玩家在节点 1 的镜像 901 里发 63{conf = 1}；节点 2 上的镜像人数更少也不能选
+        nodes.add(node(1, scene(101, 1, 60), mirror(901, 1, 101, false)));
+        nodes.add(node(2, mirror(902, 1, 101, false), scene(201, 1, 40)));
+
+        assertChosen(byMap(1, 1, 901), 2, 201, 1);
+        assertThat(store.reservationCount(ZONE, 902)).isZero();
+    }
+
+    @Test
+    void 只带副本地图不按负载选_即使目录里有该图的副本() {
+        nodes.add(node(1, SceneEntry.newBuilder().setSceneId(903).setSceneConfigId(17)
+                .setKind(ChannelKind.CHANNEL_KIND_DUNGEON).build()));
+
+        assertRejected(byMap(17, 1, 101), Result.NOT_FOUND, SceneAssigner.TIP_NO_SCENE);
+    }
+
     // ---------- helpers ----------
+
+    private static SceneEntry mirror(long sceneId, int configId, long source, boolean draining) {
+        return SceneEntry.newBuilder().setSceneId(sceneId).setSceneConfigId(configId).setKind(ChannelKind.CHANNEL_KIND_MIRROR)
+                .setSourceSceneId(source).setDraining(draining).build();
+    }
 
     private Selection explicit(long wantSceneId, int wantConfigId) {
         return selector.select(request(wantSceneId, wantConfigId, 1, 101));

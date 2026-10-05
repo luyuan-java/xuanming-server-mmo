@@ -3,10 +3,13 @@
 #   export XM_MYSQL_PASSWORD=... XM_GATE_TOKEN_SECRET=... XM_LOGIN_DEV_PASSWORD=... XM_NODE_LINK_SECRET=... XM_DUBBO_SECRET=...
 #   tools/local/start-slice.sh
 # XM_NODE_LINK_SECRET 是 gate → scene 节点链路握手密钥，xm-gate 与 xm-scene 读同一个值（本脚本把同一环境传给两者）。
-# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-trade / xm-scene / xm-gate / xm-gateway
+# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-trade / xm-scene / xm-gate / xm-gateway / xm-battle
 # 读同一个值（xm-scene 自 4.5 起是资产通道 SceneAssetOpService 的 Dubbo 提供方，缺密钥即暴露失败）。
+# （xm-battle 是控制面 BattleNodeService 的 Dubbo 提供方，缺密钥即拒启。）
 # XM_ASSET_OP_SECRET_GUILD 是帮会资产指令的请求体签名密钥（xm-guild 签、xm-scene 验，去首尾空白后至少 32 字节）；
 # 没设时本脚本生成本机随机值写进 run/xm-asset-op-secret-guild，并把同一个值传给两者。
+# XM_BATTLE_TOKEN_SECRET 是战斗直连票据的签名密钥（只有 xm-battle 读；去首尾空白后至少 32 字节、不得与 XM_GATE_TOKEN_SECRET 相同）；
+# 没设时本脚本生成本机随机值写进 run/xm-battle-token-secret。xm-battle 的客户端直连面在 12000、控制面在 21200、管理端口 18112。
 # 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379、Kafka 127.0.0.1:9092（资产流水，xm-scene 生产、xm-data 消费）已就绪；已执行 ./mvnw -DskipTests install；
 # 存量库已按 docs/design/db-migrations.md 迁移到最新结构（M2 起 player 表多了 owner_released / owner_lease_until）。
 # 进程按依赖顺序启动，每个都等端口就绪再起下一个；日志在 run/logs/，PID 在 run/pids/。
@@ -64,6 +67,27 @@ fi
 unset asset_secret_trimmed
 export XM_ASSET_OP_SECRET_GUILD
 
+# 战斗直连票据签名密钥（xm-battle 签 177 / 补签里的票、直连握手时验签，battle-node-spec §7.5；全部 battle 实例共享，只有 xm-battle 读）：
+# 没设就生成 32 字节本机随机密钥（64 个十六进制字符）写进 run/xm-battle-token-secret（只有本用户可读）。xm-battle 任何运行模式都拒绝空密钥；
+# 太短或与 gate 令牌密钥相同时 dev 只告警、prod 拒启——本机切片两种模式都提前拦下（与 xm-battle 同口径：去首尾空白后比较、按字节数计）。
+if [[ -z "${XM_BATTLE_TOKEN_SECRET:-}" ]]; then
+  XM_BATTLE_TOKEN_SECRET=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  (umask 077; printf "%s" "$XM_BATTLE_TOKEN_SECRET" > run/xm-battle-token-secret)
+  chmod 600 run/xm-battle-token-secret
+fi
+battle_secret_trimmed=$(printf "%s" "$XM_BATTLE_TOKEN_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+gate_secret_trimmed=$(printf "%s" "$XM_GATE_TOKEN_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+if (( $(printf "%s" "$battle_secret_trimmed" | LC_ALL=C wc -c) < 32 )); then
+  echo "XM_BATTLE_TOKEN_SECRET 去首尾空白后不足 32 字节；取消这个环境变量让脚本生成，或换一个更长的值" >&2
+  exit 1
+fi
+if [[ "$battle_secret_trimmed" == "$gate_secret_trimmed" ]]; then
+  echo "XM_BATTLE_TOKEN_SECRET 不能与 XM_GATE_TOKEN_SECRET 相同（两把密钥分域：拿到大厅令牌密钥的人不能伪造战斗票据）；取消它让脚本生成" >&2
+  exit 1
+fi
+unset battle_secret_trimmed gate_secret_trimmed
+export XM_BATTLE_TOKEN_SECRET
+
 # 登录排队：进程缺省关闭（同基线 Queue.Enabled=false）；本机切片打开，robot 全程走快速通道，queue 场景压容量验证排队与放行
 export XM_GATEWAY_QUEUE_ENABLED="${XM_GATEWAY_QUEUE_ENABLED:-true}"
 # 开服限流：进程缺省关闭（同基线 gate.rate-limit.enabled=false）；本机切片打开（缺省阈值），ratelimit 场景验证 IP 桶与冷却
@@ -92,7 +116,13 @@ SERVICES=(
   "xm-scene"              # 场景节点：起 XM_SCENE_NODES 个实例，端口见下面的 SCENE_NODES
   "xm-gate 11000"
   "xm-gateway 18081"
+  "xm-battle"             # 战斗节点：先等控制面 21200、直连面 12000，再等准入闸打开（见 wait_battle_ready）
 )
+
+# xm-battle 的端口（与 xm-battle application.yaml 的缺省一致）：Dubbo 控制面、客户端直连面、管理端口（actuator 与 dev 接口 /admin/battle/dev/*）
+BATTLE_RPC_PORT=21200
+BATTLE_CLIENT_PORT=12000
+BATTLE_MGMT_PORT=18112
 
 # 场景节点实例：实例名（日志 / PID 文件名） 节点链路 link-port  资产通道 asset-rpc-port  管理端口 server.port
 # 资产通道是 Dubbo Triple（xm.scene.asset-rpc-port，同 XM_SCENE_ASSET_RPC_PORT；xm-guild 按节点目录直连）；管理端口同 SERVER_PORT（actuator 指标、GM 停机）。
@@ -167,10 +197,37 @@ start_scene_nodes() {
   done
 }
 
+# xm-battle 就绪（batch 6.2）：管理端口的 Tomcat 先于节点就绪（/actuator/health 报 UP 比节点就绪早约 2.5 s），不能看 health。
+# 节点按「导出 Dubbo（21200）→ 绑直连面（12000）→ 在逻辑线程上开准入闸 → 发布目录 → 打就绪日志」的顺序起来：两个端口都能连之后，
+# 再等管理端口上的 xm_battle_admission_phase = 1（open）——之前进来的 dev 建房会回 NOT_ALLOCATABLE(not_started)。
+wait_battle_ready() {
+  local name=xm-battle deadline=$((SECONDS + 60)) phase
+  wait_port "$BATTLE_RPC_PORT" "$name"
+  wait_port "$BATTLE_CLIENT_PORT" "$name"
+  until phase=$(curl -fsS "http://127.0.0.1:$BATTLE_MGMT_PORT/actuator/prometheus" 2>/dev/null \
+      | grep -E '^xm_battle_admission_phase(\{| )' | awk '{print int($NF)}' | head -1) && [[ "${phase:-0}" -eq 1 ]]; do
+    if ! kill -0 "$(cat "run/pids/$name.pid")" 2>/dev/null; then
+      echo "[$name] 进程已退出，看 run/logs/$name.log" >&2
+      return 1
+    fi
+    if (( SECONDS > deadline )); then
+      echo "[$name] 60s 内准入闸没有打开（xm_battle_admission_phase=${phase:-?}，看 run/logs/$name.log 的「节点已就绪」）" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 for entry in "${SERVICES[@]}"; do
   read -r name ports <<<"$entry"
   if [[ "$name" == "xm-scene" ]]; then
     start_scene_nodes
+    continue
+  fi
+  if [[ "$name" == "xm-battle" ]]; then
+    launch xm-battle xm-battle
+    wait_battle_ready
+    echo "  xm-battle 就绪（控制面 $BATTLE_RPC_PORT、直连面 $BATTLE_CLIENT_PORT、管理端口 $BATTLE_MGMT_PORT，准入闸已开）"
     continue
   fi
   launch "$name" "$name"

@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>xm-battle</artifactId>
+    <name>xm-battle</name>
+    <description>
+        回合制战斗节点（批次 6.2，docs/porting/battle-node-spec.md）：Spring Boot + Netty 客户端直连面（票据握手，缺省 12000）+
+        按节点直连的 Dubbo Triple 控制面 BattleNodeService（group battle-node，register = false，缺省 21200）+ 只挂 actuator 与 dev 接口的管理
+        Tomcat（缺省 18112）。一条 battle-logic 线程同时是直连面唯一的 Netty I/O EventLoop，独占全部房间、直连会话与房间计时器；
+        引擎用 xm-battle-engine。不用 MySQL；Redis 只写节点号租约（battle，作用域 0）与节点目录，只读在线目录（大厅公告）。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+
+        <dependency>
+            <!-- 6.1 引擎（纯库）；根 pom 的 dependencyManagement 没有登记它，这里写明版本 -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-battle-engine</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-proto</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-table</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 客户端帧编解码与按消息号限频（com.game.net.limit） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-net</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 票据签名 / 验签与密钥门禁（com.game.common.token.BattleTickets / BattleSecretPolicy）、运行模式 -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+        </dependency>
+        <dependency>
+            <!-- BattleNodeService、CreateBattleResult、BattleNodeInfo、Dubbo 调用方鉴权与热关停过滤器 -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-api</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 节点号租约、节点目录、在线目录与 PlayerPushes（大厅公告） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-discovery</artifactId>
+        </dependency>
+
+        <!-- 控制面：按节点导出的 Dubbo Triple 提供方（register = false，编程式导出，启停排进 BattleNode 的顺序；
+             不用 dubbo-spring-boot-starter，同 xm-scene 的资产通道 SceneAssetRpcServer） -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+
+        <!-- 可观测性与 dev 管理接口（architecture.md §11；battle-node-spec §7.12）：业务端口是 Netty 直连面与 Dubbo；
+             这里的 Tomcat 只挂 actuator（health / prometheus）与 /admin/battle/dev/*，缺省只绑本机 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <!-- 测试里也用它校验导出的 Prometheus 指标名（runtime 依赖在测试类路径上）。 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Dubbo 调用方鉴权过滤器只从环境变量读密钥，票据密钥也只从环境变量读：这里给仅测试用的假值
+                 （不是任何环境的真密钥；先例 xm-scene/pom.xml） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <XM_DUBBO_SECRET>xm-battle-unit-test-only</XM_DUBBO_SECRET>
+                        <XM_BATTLE_TOKEN_SECRET>xm-battle-unit-test-only-ticket-secret-0123456789</XM_BATTLE_TOKEN_SECRET>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.game.battle.BattleApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

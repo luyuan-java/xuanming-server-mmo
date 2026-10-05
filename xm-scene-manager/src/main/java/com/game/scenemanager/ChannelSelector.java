@@ -1,5 +1,6 @@
 package com.game.scenemanager;
 
+import com.game.api.ChannelKinds;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.discovery.world.ReservationCandidate;
@@ -16,8 +17,12 @@ import java.util.Optional;
  * 5.2 的在线换图选跨节点目标经 {@link SwitchTargetSelector} 也用它（{@code excludeSceneId} 排除源场景；显式场景号用 {@link #reserveInstance}）。
  *
  * <ul>
- *   <li><b>候选</b> = 可用节点目录里 {@code scene_config_id == conf}、{@code scene_id ≠ 0}、<b>没在排空</b>的场景条目。<b>不读计划</b>：
- *       节点拉到计划后 ≤1 s 内标排空并立即补发目录，这个窗口由节点的进场重定向兜住（§4.10.4，D13）。</li>
+ *   <li><b>候选</b> = 可用节点目录里 {@code scene_config_id == conf}、{@code scene_id ≠ 0}、<b>没在排空</b>、<b>是主世界频道</b>
+ *       （{@code kind} 为 WORLD 或 UNSPECIFIED，{@link ChannelKinds#isWorldChannel}）的场景条目。<b>不读计划</b>：
+ *       节点拉到计划后 ≤1 s 内标排空并立即补发目录，这个窗口由节点的进场重定向兜住（§4.10.4，D13）。
+ *       种类过滤是批次 5.3 的 R1（dungeon-mirror-spec §6.6）：镜像的 {@code scene_config_id} 就是源频道的世界地图，不过滤就会把 login 进游戏、
+ *       5.2 只带地图的换图、5.1 的软预占分进别人的私有镜像（基线只在 {@code world_channels} 集合里选，镜像不在集合里，enterscenelogic.go:1267-1286）。
+ *       <b>滚动升级</b>（R7）：必须先升级 scene-manager（有这条过滤）再升级会建实例的 scene。</li>
  *   <li><b>选择与预占</b>：候选按 (node_id, scene_id) 无符号升序排好，交给一段 Lua：负载 = 目录人数 + 未到期的别人的预占数，
  *       取严格最小（并列取排序靠前的：节点号小、再场景号小，D20），给它记一条 {@code player_id → now + ttl}。
  *       对应基线 {@code ReserveBestWorldChannelForEnter} 的 Lua 原子预占（mmorpg world_init.go:437-513、scene_atomic.go:46-101），
@@ -85,6 +90,7 @@ public final class ChannelSelector {
         for (SceneNodeInfo node : usableNodes) {
             for (SceneEntry scene : node.getScenesList()) {
                 if (scene.getSceneConfigId() != sceneConfigId || scene.getSceneId() == 0 || scene.getDraining()
+                        || !ChannelKinds.isWorldChannel(scene.getKind())
                         || (excludeSceneId != 0 && scene.getSceneId() == excludeSceneId)) {
                     continue;
                 }

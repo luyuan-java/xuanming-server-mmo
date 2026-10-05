@@ -4,6 +4,8 @@ import com.game.proto.trade.MarketScope;
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
+import com.game.robot.scenario.BattleEdgeScenario;
+import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CurrencyScenario;
@@ -39,6 +41,9 @@ import java.util.regex.Pattern;
  * @param expectGmAllowed 货币场景：服务端运行模式放行 GM 指令（allow）还是拒绝（deny）
  * @param tradeAdminUrl   trade 场景：xm-trade 管理端口（播种接口 {@code POST /admin/trade/seed-listing}）
  * @param tradeScope      trade 场景：期望的市场范围（须与 xm-trade 的 {@code xm.trade.market.scope} 一致；缺省 zone，trade-spec Q9）
+ * @param battleAdminUrl  battle / battle-edge 场景：xm-battle 管理端口（dev 接口 {@code POST /admin/battle/dev/*} 与指标）
+ * @param expectDevAllowed battle / battle-edge 场景：xm-battle 的 dev 接口开放（allow，dev / test 运行模式）还是回 403（deny，prod）
+ * @param slow            battle-edge 场景：也跑慢用例（连上不握手、等 10 s 握手期限）
  */
 public record RobotOptions(
         Scenario scenario,
@@ -58,6 +63,9 @@ public record RobotOptions(
         String tableDir,
         String tradeAdminUrl,
         MarketScope tradeScope,
+        String battleAdminUrl,
+        boolean expectDevAllowed,
+        boolean slow,
         String password) {
 
     public static final String PASSWORD_ENV = "XM_LOGIN_DEV_PASSWORD";
@@ -74,7 +82,11 @@ public record RobotOptions(
         /** 聚宝斋只读面（196 / 197 / 198 / 200 + 播种）。 */
         TRADE,
         /** 跨节点换场景与归属交接（批次 5.2）；子命令写作 {@code cross-node}，需要两个 scene 节点。 */
-        CROSS_NODE
+        CROSS_NODE,
+        /** battle 节点（批次 6.2）：经 xm-battle dev 接口建房 → 大厅 177 / 143 → 直连握手 → 提交 / 拉状态 / 挂机 / 收尾 / 观战。 */
+        BATTLE,
+        /** battle 直连面的负面用例（批次 6.2）；子命令写作 {@code battle-edge}。 */
+        BATTLE_EDGE
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -103,7 +115,18 @@ public record RobotOptions(
         TRADE_ADMIN_URL("trade-admin-url", "XM_ROBOT_TRADE_ADMIN_URL", "http://127.0.0.1:18111",
                 "trade：xm-trade 管理端口（播种接口 POST /admin/trade/seed-listing，运维令牌同 audit）"),
         TRADE_SCOPE("trade-scope", "XM_ROBOT_TRADE_SCOPE", "zone",
-                "trade：期望的市场范围 zone / global（须与 xm-trade 的 xm.trade.market.scope 一致，换范围要重启 xm-trade）");
+                "trade：期望的市场范围 zone / global（须与 xm-trade 的 xm.trade.market.scope 一致，换范围要重启 xm-trade）"),
+        BATTLE_ADMIN_URL("battle-admin-url", "XM_ROBOT_BATTLE_ADMIN_URL", "http://127.0.0.1:18112",
+                "battle / battle-edge：xm-battle 管理端口（dev 接口 POST /admin/battle/dev/*、指标；运维令牌同 audit）"),
+        EXPECT_DEV("expect-dev", "XM_ROBOT_EXPECT_DEV", "allow",
+                "battle / battle-edge：xm-battle dev 接口的期望：allow（dev / test 运行模式）/ deny（prod：403，只跑不需要建房的步骤）"),
+        SLOW("slow", "XM_ROBOT_SLOW", "false",
+                "battle-edge：也跑慢用例（连上不握手 10 ± 1 s 被关）；写 --slow 即 true，也接受 --slow true / false");
+
+        /** 布尔开关：命令行可以只写 {@code --名字}（下一个参数不是 true / false 时不吃掉它）。 */
+        boolean isFlag() {
+            return this == SLOW;
+        }
 
         final String arg;
         final String env;
@@ -140,6 +163,10 @@ public record RobotOptions(
                     name = name.substring(0, eq);
                 }
                 Opt opt = byArg(name);
+                if (value == null && opt.isFlag()) {
+                    boolean explicit = i + 1 < args.size() && (args.get(i + 1).equals("true") || args.get(i + 1).equals("false"));
+                    value = explicit ? args.get(++i) : "true";
+                }
                 if (value == null) {
                     if (i + 1 >= args.size()) {
                         throw new UsageException("选项 --" + name + " 缺少取值");
@@ -196,6 +223,18 @@ public record RobotOptions(
             case "global" -> MarketScope.MARKET_SCOPE_GLOBAL;
             default -> throw new UsageException("--trade-scope 只能是 zone / global：" + value(Opt.TRADE_SCOPE, given, env));
         };
+        String battleAdminUrl = stripSlash(value(Opt.BATTLE_ADMIN_URL, given, env));
+        if (!battleAdminUrl.startsWith("http://") && !battleAdminUrl.startsWith("https://")) {
+            throw new UsageException("--battle-admin-url 必须以 http:// 或 https:// 开头：" + battleAdminUrl);
+        }
+        String expectDev = value(Opt.EXPECT_DEV, given, env);
+        if (!expectDev.equals("allow") && !expectDev.equals("deny")) {
+            throw new UsageException("--expect-dev 只能是 allow / deny：" + expectDev);
+        }
+        String slow = value(Opt.SLOW, given, env);
+        if (!slow.equals("true") && !slow.equals("false")) {
+            throw new UsageException("--slow 只能是 true / false：" + slow);
+        }
         String password = env.get(PASSWORD_ENV);
         if (password == null || password.isEmpty()) {
             throw new UsageException("需要环境变量 " + PASSWORD_ENV + "（与 xm-login 相同的开发口令）");
@@ -226,6 +265,8 @@ public record RobotOptions(
             case GUILD_ECONOMY -> GuildEconomyScenario.accountName(prefix, runTag, "a");
             case TRADE -> TradeScenario.accountName(prefix, runTag, "a");
             case CROSS_NODE -> CrossNodeScenario.accountName(prefix, runTag, "3");
+            case BATTLE -> BattleScenario.accountName(prefix, runTag, "a");
+            case BATTLE_EDGE -> BattleEdgeScenario.accountName(prefix, runTag, "a");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -236,13 +277,13 @@ public record RobotOptions(
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
                 stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), value(Opt.TABLE_DIR, given, env), tradeAdminUrl,
-                tradeScope, password);
+                tradeScope, battleAdminUrl, expectDev.equals("allow"), slow.equals("true"), password);
     }
 
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|cross-node|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|cross-node|battle|battle-edge|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -296,6 +337,15 @@ public record RobotOptions(
                 + "两个频道（同场景就登出等 6 s 重登，有上限）→ A 63 {scene_id = B 的场景} 应答 {0}、79 / 新实体号的 21 / 含 B 的 47、"
                 + "B 收 A 的 21、留在原场景的 C 收 A 旧实体的 51 → 目标节点上移动（B 收 66）与 77 → 断开重连回原实例原位 → 63 换回 → "
                 + "63 不存在的 scene_id 应答 {0} 后 23 {3023} → 连发 63 第二条 3014 → 顶号旧连接 23 {2017}\n");
+        out.append("  battle    battle 节点（A / B / C 三个新号；需要切片带 xm-battle、dev 运行模式与运维令牌）：大厅发 149 回 23 {1003} 不断连 → "
+                + "dev 建 PVE 房 → 大厅先 177 后 143 → 凭票直连、握手应答是首帧、补拉 140 → 非法行动 1005 → 合法行动 139 先于应答 → "
+                + "同票重连顶替旧连接 → 挂机打到 150 后 FIN、大厅没有 150 → 终局后旧票被拒 → PVP 两人都交才结算、超时 6 s 结算、视角裁剪 → "
+                + "补签与开局票逐字节相同、非成员 1005 → 幂等建房不重推 → 销毁只见 FIN → 强制平局 150 DRAW → 观战 161 / 158 / 166、"
+                + "165 应答后 FIN 无 166、清退 166 REMOVED → 指标增长；--expect-dev deny 只核对 dev 接口 403 与大厅拒绝\n");
+        out.append("  battle-edge battle 直连面负面用例（A / B 两个新号，每条新建连接）：握手前发请求 / 发大厅握手类型 / 坏校验和 → 无回包被关；"
+                + "签名翻转 / 大写 / payload 被改 → invalid ticket signature；过期票 → ticket rejected: expired；已验证后 157 → 信封 1005、"
+                + "1025 B → 1010、1 秒 4 条 140 → 1008、50 个非法包断开、再握手回原 battle_id、合法请求后跟坏帧先应答再断开；"
+                + "--slow 另跑「连上不握手 10 s 被关」\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -314,14 +364,15 @@ public record RobotOptions(
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
                 + ", dataUrl=" + dataUrl + ", sceneMetricsUrl=" + sceneMetricsUrl + ", tableDir=" + tableDir
-                + ", tradeAdminUrl=" + tradeAdminUrl + ", tradeScope=" + tradeScope + ", password=***]";
+                + ", tradeAdminUrl=" + tradeAdminUrl + ", tradeScope=" + tradeScope + ", battleAdminUrl=" + battleAdminUrl
+                + ", expectDevAllowed=" + expectDevAllowed + ", slow=" + slow + ", password=***]";
     }
 
     private static Scenario parseScenario(String arg) throws UsageException {
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / cross-node）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / cross-node / battle / battle-edge）");
         }
     }
 

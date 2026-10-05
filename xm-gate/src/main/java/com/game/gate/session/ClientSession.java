@@ -1,6 +1,7 @@
 package com.game.gate.session;
 
 import com.game.api.proto.SessionContext;
+import com.game.net.limit.MessageRateLimiter;
 import com.game.proto.ClientRequest;
 import com.google.protobuf.Message;
 import io.netty.channel.Channel;
@@ -92,7 +93,7 @@ public final class ClientSession {
     int leaveGameRequests;
     /** 非法包计数（未知消息号、超长、超频、运行模式不放行的 GM 指令），达到阈值断开。 */
     int illegalPackets;
-    /** 按消息号的发送频率限制（C++ MessageLimiter 同义）。 */
+    /** 按消息号的发送频率限制（C++ MessageLimiter 同义；与 battle 直连面共用 xm-net 的实现）。 */
     final MessageRateLimiter rateLimiter = new MessageRateLimiter();
     private ScheduledFuture<?> handshakeTimeout;
 

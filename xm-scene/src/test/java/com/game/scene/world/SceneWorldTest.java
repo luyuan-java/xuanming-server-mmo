@@ -427,8 +427,10 @@ class SceneWorldTest {
         enter(LINK, 11, 1001, scene.sceneId(), 1);
 
         assertThat(world.sceneEntries()).containsExactly(
-                SceneEntry.newBuilder().setSceneId(scene.sceneId()).setSceneConfigId(1).setPlayerCount(1).build(),
-                SceneEntry.newBuilder().setSceneId(second.sceneId()).setSceneConfigId(2).setPlayerCount(0).build());
+                SceneEntry.newBuilder().setSceneId(scene.sceneId()).setSceneConfigId(1).setPlayerCount(1)
+                        .setKind(com.game.api.proto.ChannelKind.CHANNEL_KIND_WORLD).build(),
+                SceneEntry.newBuilder().setSceneId(second.sceneId()).setSceneConfigId(2).setPlayerCount(0)
+                        .setKind(com.game.api.proto.ChannelKind.CHANNEL_KIND_WORLD).build());
     }
 
     // ------------------------------------------------------------------ 归属：接管与失去

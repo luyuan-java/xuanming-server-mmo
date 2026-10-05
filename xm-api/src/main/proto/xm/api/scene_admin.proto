@@ -1,0 +1,38 @@
+// Java 版内部契约：scene 节点的 dev / test 实例管理口（批次 5.3，docs/porting/dungeon-mirror-spec.md §6.13、Q3）。
+// 只给 robot 与本机切片验证副本 / 显式销毁用，生产不可达：运行模式不是 dev / test 一律 403；没有任何客户端消息号。
+// 载体：scene 管理端口（缺省 18104）上的 HTTP POST，请求 / 应答体是本文件消息的 protobuf 二进制（Content-Type: application/x-protobuf）；
+// 鉴权同 xm-trade 播种：头 X-Xm-Admin-Token 与环境变量 XM_ADMIN_TOKEN 常数时间比对（不设则 503）、X-Xm-Operator 必填、每次写审计行。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// POST /admin/scene/instance/create：在本节点建一个副本实例。
+// 节点在 HTTP 线程上校验 Dungeon 行存在 → scene-manager createInstance(kind = DUNGEON, requester = 本节点, player = 0,
+// scene_config_id = Dungeon.scene_id, dungeon_config_id) → 逻辑线程上建实例（不阻塞逻辑线程）。
+message CreateDungeonInstanceRequest {
+  uint32 dungeon_config_id = 1;
+}
+
+message CreateDungeonInstanceResponse {
+  // 0 = 建好；3005 = Dungeon 表没有这一行（或为 0）；1003 = 取号调用失败 / 超时（含发号租约无效）；3023 = scene-manager 业务拒绝或本地拒建。
+  uint32 tip_id = 1;
+  // 新副本的全服 scene_id（成功时非 0）。
+  uint64 scene_id = 2;
+  // 副本地图 = Dungeon.scene_id（如 17）。
+  uint32 scene_config_id = 3;
+  // 实例所在节点（= 收到请求的节点）。
+  uint32 scene_node_id = 4;
+}
+
+// POST /admin/scene/instance/destroy：显式销毁本节点上的一个实例（「排空后销毁」：居民按改派规则移走，空了销毁，D17）。
+message DestroyInstanceRequest {
+  uint64 scene_id = 1;
+}
+
+message DestroyInstanceResponse {
+  // 0 = 已受理（含已在排空中的重复调用，幂等）；3000 = 本节点没有这个场景；3005 = 是主世界频道（只能由频道计划销毁）或 scene_id 为 0。
+  uint32 tip_id = 1;
+}

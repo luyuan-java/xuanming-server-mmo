@@ -1,0 +1,31 @@
+// Java 版内部契约：battle 节点控制面（com.game.api.BattleNodeService，Dubbo Triple 按节点直连、register = false，group battle-node）
+// 的 createBattle 返回值。对应基线 gRPC BattleNode.CreateBattle 的「gRPC 状态 + CreateBattleResponse」：基线用状态串
+// UNAVAILABLE "battle_not_allocatable" 表达节点级拒绝（cpp/nodes/battle/handler/grpc/battle_node.cpp:11-20），Java 改成类型化的
+// admission 枚举（battle-node-spec §7.8、§11 N1）。只在 Java 版内部使用，不在两版共享的客户端契约里。
+//
+// 本模块的 proto 不 import 依赖里的 proto（xm-api/pom.xml），所以契约应答 CreateBattleResponse 按字节嵌入（先例 GatePush.message_content）。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// 建房请求的节点级准入结论。
+enum BattleAdmission {
+  // 字段缺失（旧版本 / 损坏）：读方按传输失败处理（结局未知 → 发一次幂等的 destroyBattle 再补偿）。首值必须不是「已受理」，
+  // 这样缺字段不会被读成 ADMITTED。提供方从不产出这个值。
+  BATTLE_ADMISSION_UNSPECIFIED = 0;
+  // 已进入业务判定；response 是契约 CreateBattleResponse 的字节（error_message 非 0 = 没建房，且零副作用）。
+  BATTLE_ADMISSION_ADMITTED = 1;
+  // 节点级拒绝（准入闸未开 / 已关、在途超限），保证没建房、没推送、没发确认；调用方不发 destroyBattle，换一个没试过的节点重试一次。
+  BATTLE_ADMISSION_NOT_ALLOCATABLE = 2;
+}
+
+message CreateBattleResult {
+  BattleAdmission admission = 1;
+  // NOT_ALLOCATABLE 的原因（只进日志与指标）：not_started / closed / closed_in_loop / overloaded。ADMITTED 时为空。
+  string reason = 2;
+  // ADMITTED 时：契约 CreateBattleResponse（proto/battle/battle_node.proto）的序列化字节；其余情况为空。
+  bytes response = 3;
+}

@@ -45,7 +45,8 @@
             <groupId>com.game</groupId>
             <artifactId>xm-proto</artifactId>
         </dependency>
-        <!-- tip 码枚举（com.game.table.*ErrorTip）与 MessageLimiter 表的消息类型；gate 只读 messagelimiter.pb 这一张表 -->
+        <!-- tip 码枚举（com.game.table.*ErrorTip）；按消息号限频读的 MessageLimiter 表经 xm-net 的 com.game.net.limit 加载
+             （与 battle 直连面共用），gate 只读 messagelimiter.pb 这一张表 -->
         <dependency>
             <groupId>com.game</groupId>
             <artifactId>xm-table</artifactId>

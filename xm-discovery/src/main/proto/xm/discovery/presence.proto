@@ -33,7 +33,15 @@ message GatePush {
     bytes message_content = 3;
     // 推 23 {tip} 后断开连接（踢下线）。
     uint32 kick_tip_id = 4;
+    // 同一会话按序下发的多条 MessageContent（battle 大厅公告 177 → 143，battle-node-spec §7.7 / Q3）。gate 先全部解析，任一损坏整条丢弃；
+    // 再对每个目标在会话 EventLoop 的同一个任务里逐条过玩家栅栏后下发。一次查目录、一次发布：多次单条推送之间没有顺序保证。
+    MessageBatch message_batch = 5;
   }
+}
+
+// 按序下发的一批消息（每条是客户端协议 MessageContent 的序列化字节，推送的 id 为 0）。至少一条。
+message MessageBatch {
+  repeated bytes message_contents = 1;
 }
 
 message PushTarget {

@@ -215,8 +215,10 @@ class ChannelPlanApplyTest {
 
     // ------------------------------------------------------------------ 工具
 
+    /** 主世界频道的目录条目（批次 5.3 起带 {@code kind = WORLD}）。 */
     static SceneEntry entry(long sceneId, int configId, boolean draining) {
-        return SceneEntry.newBuilder().setSceneId(sceneId).setSceneConfigId(configId).setDraining(draining).build();
+        return SceneEntry.newBuilder().setSceneId(sceneId).setSceneConfigId(configId).setDraining(draining)
+                .setKind(ChannelKind.CHANNEL_KIND_WORLD).build();
     }
 
     private double counter(String name, String result) {

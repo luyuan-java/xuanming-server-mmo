@@ -1,6 +1,7 @@
 package com.game.gate.presence;
 
 import com.game.discovery.proto.GatePush;
+import com.game.discovery.proto.MessageBatch;
 import com.game.discovery.proto.PushTarget;
 import com.game.gate.metrics.GateMetrics;
 import com.game.gate.metrics.GateMetrics.PushKind;
@@ -9,7 +10,10 @@ import com.game.gate.session.ClientDispatcher;
 import com.game.gate.session.ClientSession;
 import com.game.gate.session.SessionRegistry;
 import com.game.proto.MessageContent;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
+import java.util.ArrayList;
+import java.util.List;
 import org.redisson.api.RTopic;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +23,10 @@ import org.slf4j.LoggerFactory;
  * 把每个目标投递到会话所属 EventLoop，由 {@link ClientDispatcher} 按玩家栅栏核对后下发。
  *
  * <p>回调在 Redisson 网络线程上：只解析与投递，不读写会话状态。gate 实例不符（节点号被复用前的旧条目）、格式不对的整条丢弃。
+ *
+ * <p>三种动作：单条消息、按序的一批消息（{@code MessageBatch}，battle 大厅公告 177 → 143，battle-node-spec §7.7）、踢下线。
+ * 一批消息对每个目标只投递<b>一个</b>会话任务，任务里逐条过栅栏后下发，所以批内顺序就是客户端看到的顺序；
+ * 指标按目标计（kind = message），与单条推送同口径。
  */
 public final class GatePushSubscriber {
 
@@ -90,6 +98,18 @@ public final class GatePushSubscriber {
                     dispatch(kind, target, s -> dispatcher.deliverPush(s, target.getPlayerId(), content));
                 }
             }
+            case MESSAGE_BATCH -> {
+                List<MessageContent> contents = parseBatch(push.getMessageBatch());
+                if (contents == null) {
+                    log.warn("推送的 MessageBatch 为空或有一条损坏，整条丢弃 条数={} 目标数={}",
+                            push.getMessageBatch().getMessageContentsCount(), push.getTargetsCount());
+                    metrics.push(kind, PushResult.INVALID, targets);
+                    return;
+                }
+                for (PushTarget target : push.getTargetsList()) {
+                    dispatch(kind, target, s -> deliverInOrder(s, target.getPlayerId(), contents));
+                }
+            }
             case KICK_TIP_ID -> {
                 int tipId = push.getKickTipId();
                 for (PushTarget target : push.getTargetsList()) {
@@ -101,6 +121,40 @@ public final class GatePushSubscriber {
                 metrics.push(kind, PushResult.INVALID, targets);
             }
         }
+    }
+
+    /**
+     * 先把整批解析完（Redisson 线程上）：任一条损坏或一条都没有返回 null，调用方整条丢弃——向客户端发损坏的 body 会让客户端读循环卡死，
+     * 只发一半又会破坏「177 先于 143」这类顺序约定（battle-node-spec §7.7）。
+     */
+    private static List<MessageContent> parseBatch(MessageBatch batch) {
+        if (batch.getMessageContentsCount() == 0) {
+            return null;
+        }
+        List<MessageContent> contents = new ArrayList<>(batch.getMessageContentsCount());
+        for (ByteString bytes : batch.getMessageContentsList()) {
+            try {
+                contents.add(MessageContent.parseFrom(bytes));
+            } catch (InvalidProtocolBufferException e) {
+                return null;
+            }
+        }
+        return List.copyOf(contents);
+    }
+
+    /**
+     * 会话线程上、同一个任务里按序逐条下发：每条都过 {@link ClientDispatcher#deliverPush} 的玩家栅栏（栅栏的状态只在本线程上变，
+     * 同一个任务里不会被别的事件改掉，所以客户端看到的顺序就是批里的顺序）。某一条没过栅栏就停下、后面的不再发：
+     * 客户端至多收到批的一个前缀，不会出现「漏了 177 却收到 143」。每个目标只计一次结局：全部送出计 DELIVERED，否则计停下那条的结局。
+     */
+    private PushResult deliverInOrder(ClientSession session, long playerId, List<MessageContent> contents) {
+        for (MessageContent content : contents) {
+            PushResult one = dispatcher.deliverPush(session, playerId, content);
+            if (one != PushResult.DELIVERED) {
+                return one;
+            }
+        }
+        return PushResult.DELIVERED;
     }
 
     private void dispatch(PushKind kind, PushTarget target, java.util.function.Function<ClientSession, PushResult> action) {

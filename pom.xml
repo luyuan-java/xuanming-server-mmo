@@ -32,6 +32,7 @@
         <module>xm-guild</module>
         <module>xm-trade</module>
         <module>xm-scene</module>
+        <module>xm-battle</module>
         <module>xm-gate</module>
         <module>xm-gateway</module>
         <module>xm-data</module>

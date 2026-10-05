@@ -18,7 +18,8 @@ import java.util.Map;
  *                          World 表之外的图归到 {@link #OTHER_CONFIG}
  * @param nodeGonePending   宽限期内缺席节点上的记录数（{@code rebalance_pending{reason=node_gone}}）
  * @param betterHomePending 落点不对、可择机迁移但本拍没迁的空频道数（{@code rebalance_pending{reason=better_home}}；per-node 模式恒 0）
- * @param removed           本拍删掉的记录（排空收尾、死节点）；5.3 的镜像级联销毁接在这里
+ * @param removed           本拍删掉的记录（排空收尾、死节点）。只用于日志与测试：5.3 的镜像级联<b>不</b>接在这里——实例由承载节点自有，
+ *                          源频道在节点上被销毁时由节点本地级联（dungeon-mirror-spec §6.11、D11），scene-manager 对实例零状态
  * @param anomalies         需要运维关注的情况（排空超时不回滚、slot 用尽、到达频道上限、坏记录…），协调者按 zone 去重后告警
  */
 public record PlanResult(WorldPlanBatch batch, Map<Long, WorldChannel> channels, boolean noLease, boolean noNodes,

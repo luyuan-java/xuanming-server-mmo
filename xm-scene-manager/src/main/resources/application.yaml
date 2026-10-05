@@ -2,6 +2,9 @@
 # 用 Nacos 做注册中心时加 --spring.profiles.active=nacos（见 application-nacos.yaml）。
 # 秘密只从环境变量注入：
 #   XM_DUBBO_SECRET  Dubbo 调用方鉴权密钥（必填，xm-login / xm-scene-manager / xm-gate 必须一致；缺失即拒绝启动）
+# 滚动升级顺序（批次 5.3，dungeon-mirror-spec R7）：先升级全部 scene-manager 副本，再升级 scene。旧 scene-manager 选频道不看节点目录的
+# SceneEntry.kind，会把登录 / 只带地图的换图分进新 scene 节点上别人的镜像；旧 scene + 新 scene-manager 则无影响（旧节点不建实例，kind 按 WORLD 读）。
+# scene_id 发号租约（NodeTypes.SCENE_MANAGER，worker 1..1023）每个副本启动时都申领，不论 leader-eligible（镜像 / 副本实例取号用，R5）。
 spring:
   application:
     name: xm-scene-manager

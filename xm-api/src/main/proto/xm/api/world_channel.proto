@@ -21,10 +21,18 @@ enum ChannelState {
   CHANNEL_DRAINING = 2;
 }
 
-// 频道种类。5.1 只有主世界；5.3 追加副本 / 镜像（基线 instances:zone:{z}:active 那一类，createscenelogic.go:19）。
+// 场景种类。5.1 只有主世界；5.3 追加镜像 / 副本（基线 instances:zone:{z}:active 那一类，createscenelogic.go:19）。
+// 读方一律把 UNSPECIFIED（proto3 缺省值：不认识 kind 字段的旧版本写的条目）当 WORLD；不认识的取值（UNRECOGNIZED）不当 WORLD（fail-closed），
+// 判法只有一处：com.game.api.ChannelKinds#isWorldChannel。
 enum ChannelKind {
   CHANNEL_KIND_UNSPECIFIED = 0;
   CHANNEL_KIND_WORLD = 1;
+  // 批次 5.3（docs/porting/dungeon-mirror-spec.md §6.5）：承载节点自有的实例——不在频道计划里、随进程消亡，节点目录（SceneEntry.kind）是唯一登记。
+  // 只出现在节点目录与 CreateInstanceRequest 里；频道计划里出现这两种一律拒绝（scene 的 SceneWorld.rejection，fail-closed）。
+  // 镜像：以玩家当前所在的主世界频道为模板开的私有实例，地图 = 源频道的地图（基线 player_scene.cpp:189），恒与源同节点（D2）。
+  CHANNEL_KIND_MIRROR = 2;
+  // 副本：地图 = Dungeon 表的 scene_id；5.3 只有 dev / test 管理口能建（Q3）。
+  CHANNEL_KIND_DUNGEON = 3;
 }
 
 // 进入排空的原因（决定排空超时后的处理，§4.6.2 P3：只有 SCALE_IN 回滚 ACTIVE，D10）。

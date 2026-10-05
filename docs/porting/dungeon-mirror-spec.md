@@ -1215,3 +1215,46 @@ Java robot 新增两个场景（`RobotOptions.Scenario` 加 `MIRROR`、`DUNGEON`
 
 改了 `xm-api` 的 proto 后按 `AGENTS.md` §4 全量 `./mvnw -B -DskipTests install`，再跑 `./mvnw -B -pl xm-scene,xm-scene-manager -am test`；真 Redis 集成测试加
 `-Dxm.it.redis=redis://127.0.0.1:6379`。没有运行证据时不得声称「编译通过」「测试通过」。
+
+---
+
+## 13 实现记录
+
+### 13.1 基础部分（契约、scene-manager、5.1 必改项 R1–R5、R7）
+
+开放问题 Q1–Q13 全部按 §11 的推荐答案落地，D1–D19 全部采纳。
+
+**契约（xm-api）**
+- `world_channel.proto`：`ChannelKind` 追加 `CHANNEL_KIND_MIRROR = 2`、`CHANNEL_KIND_DUNGEON = 3`。
+- `node_directory.proto` `SceneEntry`：追加 `ChannelKind kind = 5`、`uint64 source_scene_id = 6`（同一文件里的 `BattleNodeInfo` 属于批次 6.2）。
+- `scene_directory.proto`：`CreateInstanceRequest{zone_id 1, requester_scene_node_id 2, player_id 3, kind 4, source_scene_id 5, scene_config_id 6,
+  mirror_config_id 7, dungeon_config_id 8}` → `CreateInstanceResponse{tip_id 1, scene_node_id 2, scene_id 3}`；`SceneDirectoryService.createInstance`。
+- `scene_admin.proto`（新）：dev 管理口的 `CreateDungeonInstanceRequest / Response`、`DestroyInstanceRequest / Response`（§6.13）。
+- `com.game.api.ChannelKinds.isWorldChannel`：UNSPECIFIED 当 WORLD、MIRROR / DUNGEON 与不认识的取值都不当 WORLD，scene-manager 与 scene 只用这一处判法。
+- 测试 `SceneInstanceContractTest`：取值、字段号、新旧互读。
+
+**scene-manager**
+- `InstanceIdIssuer`（无状态）：参数错回 3005；`NodeAvailability` 判发起节点不接新实例时回 3000（5.5 钩子，5.3 装配 `ALL`）；放置恒为发起节点；
+  发号租约无效回 `NO_LEASE`，提供方以异常完成 future（Q12）。不读也不写 Redis。
+- `SceneIdAllocator`（R5）：发号租约挪成独立 bean，**每个副本都申领**，主世界频道控制面与实例取号共用；租约确认丢失时回调监听（控制面借此让出领导锁）。
+- `SceneDirectoryProvider.createInstance`：指标 `xm.scene_manager.instance{kind = mirror|dungeon|other, result = ok|bad_request|node_unavailable|no_lease|error}`
+  （Prometheus `xm_scene_manager_instance_seconds`），异常只带概要。
+- `ChannelSelector` 候选只认主世界频道（R1）；`DirectoryView.Scene` 带 `kind / sourceSceneId`；`WorldChannelPlanner` 每拍用 `DirectoryMirrorSources.of(目录)` 推导镜像源。
+- R7：滚动升级顺序写在 `SceneDirectoryService` 类注释、`node_directory.proto`、`ChannelSelector` 类注释、两个进程的 `application.yaml`。
+
+**xm-scene（只做与 5.1 逻辑的隔离，建实例本身见 13.2）**
+- `SceneKind{WORLD, MIRROR, DUNGEON}`（与 `ChannelKind` 互转）；`Scene` 带 `kind / sourceSceneId / isWorldChannel()`。
+- 低层登记 `SceneWorld.addScene(SceneInfoComp, SceneKind, long source)`（包内可见，不做业务校验；本地重号抛异常），供 §6.8 的 `createInstance(spec)` 校验后调用。
+- `sceneEntries` 带种类与源；`xm.scene.channels` 只计 WORLD（R4）；`applyChannelPlan` 只把计划外的 **WORLD** 转排空（R2），计划里与本地实例同号的记录一律拒绝；
+  `leastLoadedActive` 只看 WORLD（排空改派、进场重定向、只带地图的 63），身在实例里只带当前地图必去主世界频道、不留在实例（R3）。
+
+**测试证据**：`-pl xm-api,xm-discovery,xm-scene-manager,xm-scene install`，带 `-Dxm.it.redis` 与 `-Dxm.it.mysql` 全部通过（xm-scene 752 个用例、0 失败）。
+新增 / 补充：`InstanceIdIssuerTest`、`SceneIdAllocatorTest`、`SceneIdAllocatorRedisIntegrationTest`（两个副本、一个 `leader-eligible = false`，并发取号 8000 个不重号；
+租约被夺后转 `NO_LEASE`）、`DirectoryMirrorSourcesTest`、`SceneDirectoryProviderTest`、`ChannelSelectorTest`、`SceneAssignerTest`、`SwitchTargetSelectorTest`、
+`WorldAutoscalerTest`、`WorldRebalancePlannerTest`、`WorldChannelConfigurationTest`、`WorldChannelRedisIntegrationTest`（节点经 Redis 目录上报镜像 → 种类不丢、
+login 不分进镜像、领导者一拍内缩容跳过镜像源）、xm-scene `InstanceChannelIsolationTest`。双节点切片 `smoke` / `reconnect` / `cross-node` 通过，各进程 ERROR 行为 0。
+
+### 13.2 scene 节点部分（待做）
+
+§6.4 其余字段（`emptySinceNanos`、`DrainCause`、`drainingSinceNanos`）、§6.7 的 63 镜像分支与 `RESOLVING` 取号、§6.8 `createInstance(spec)`、§6.10 回收与复活、
+§6.11 级联与显式销毁、§6.13 dev 管理口、§6.14 重连、§8.2 的 scene 侧指标、§7.2 的 `xm.scene.instance.*` 配置、§12.6 的 robot 场景。

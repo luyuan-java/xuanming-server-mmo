@@ -9,7 +9,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 一个场景实例（主世界的一条频道）。只在场景逻辑线程上读写。
+ * 一个场景实例：主世界的一条频道，或批次 5.3 起节点自有的镜像 / 副本实例（{@link #kind()}，dungeon-mirror-spec §6.4）。只在场景逻辑线程上读写。
+ *
+ * <p><b>种类</b>：频道（{@link SceneKind#WORLD}）按频道计划建；实例（{@link SceneKind#MIRROR} / {@link SceneKind#DUNGEON}）不在计划里，
+ * 按地图选频道、计划外排空、频道指标都不碰它们（R1–R4），只能按 scene_id 进入。镜像的配置号就是源频道的世界地图，所以凡是「按配置号挑场景」
+ * 的地方都必须先看种类。
  *
  * <p>玩家按进场顺序保存（帧内外推与属性同步按这个顺序遍历，结果可复现）；视野由本场景的 {@link ViewIndex} 维护。
  * 玩家的进出与位置变化只能经本类（{@link #add} / {@link #remove} / {@link #relocate}），格子与兴趣列表才不会与位置脱节。
@@ -28,6 +32,9 @@ public final class Scene {
      * （同基线 HandleCreateScene 挂的 SceneInfoComp，scene_node_service.cpp:39-52），5.3 的副本 / 镜像从这里填。
      */
     private final SceneInfoComp info;
+    private final SceneKind kind;
+    /** 镜像的源（同节点上的主世界频道）；其它种类为 0。 */
+    private final long sourceSceneId;
     private final Map<Long, ScenePlayer> players = new LinkedHashMap<>();
     /** 只读视图建一次复用：帧内每帧要遍历两遍（外推、属性同步），不为每次遍历新建包装对象。 */
     private final Collection<ScenePlayer> playersView = Collections.unmodifiableCollection(players.values());
@@ -36,11 +43,26 @@ public final class Scene {
     /** 排空推进找不到改派目标时只告警一次（恢复改派或改回承载中时清掉）。 */
     private boolean relocationBlockedWarned;
 
-    /** @param info scene_id 与 scene_config_id 都非 0（调用方校验） */
+    /** 主世界频道。@param info scene_id 与 scene_config_id 都非 0（调用方校验） */
     Scene(SceneInfoComp info) {
+        this(info, SceneKind.WORLD, 0);
+    }
+
+    /**
+     * @param info          scene_id 与 scene_config_id 都非 0（调用方校验）
+     * @param kind          种类
+     * @param sourceSceneId 镜像必须非 0（源频道），其它种类必须为 0
+     */
+    Scene(SceneInfoComp info, SceneKind kind, long sourceSceneId) {
+        if ((kind == SceneKind.MIRROR) != (sourceSceneId != 0)) {
+            throw new IllegalArgumentException("镜像必须带源、其它种类不能带源 kind=" + kind + " source="
+                    + Long.toUnsignedString(sourceSceneId));
+        }
         this.sceneId = info.getSceneId();
         this.configId = info.getSceneConfigId();
         this.info = info;
+        this.kind = kind;
+        this.sourceSceneId = sourceSceneId;
     }
 
     public long sceneId() {
@@ -49,6 +71,20 @@ public final class Scene {
 
     public int configId() {
         return configId;
+    }
+
+    public SceneKind kind() {
+        return kind;
+    }
+
+    /** 是不是主世界频道（按地图选频道、计划外排空、频道指标只认它）。 */
+    public boolean isWorldChannel() {
+        return kind == SceneKind.WORLD;
+    }
+
+    /** 镜像的源频道 scene_id；其它种类为 0。 */
+    public long sourceSceneId() {
+        return sourceSceneId;
     }
 
     public SceneInfoComp info() {

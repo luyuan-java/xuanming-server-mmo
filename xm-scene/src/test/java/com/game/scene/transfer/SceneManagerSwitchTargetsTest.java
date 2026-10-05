@@ -48,6 +48,12 @@ class SceneManagerSwitchTargetsTest {
             requests.add(request);
             return nextReply;
         }
+
+        @Override
+        public CompletableFuture<com.game.api.proto.CreateInstanceResponse> createInstance(
+                com.game.api.proto.CreateInstanceRequest request) {
+            throw new UnsupportedOperationException("实例取号（批次 5.3）不经换图选目标的客户端");
+        }
     };
 
     private SceneManagerSwitchTargets newClient(Duration timeout) {
