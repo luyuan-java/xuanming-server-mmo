@@ -4,7 +4,6 @@ import static com.game.scene.world.SceneMessageIds.push;
 
 import com.game.api.ChannelKinds;
 import com.game.api.proto.ChannelState;
-import com.game.api.proto.CreateDungeonInstanceResponse;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
@@ -23,10 +22,6 @@ import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BroadcastKind;
 import com.game.scene.metrics.SceneMetrics.ChannelPlanApply;
 import com.game.scene.metrics.SceneMetrics.ChannelRelocation;
-import com.game.scene.metrics.SceneMetrics.InstanceEvent;
-import com.game.scene.metrics.SceneMetrics.InstanceKind;
-import com.game.scene.metrics.SceneMetrics.MirrorRequest;
-import com.game.scene.metrics.SceneMetrics.MirrorResolve;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.metrics.SceneMetrics.PeriodicSave;
 import com.game.scene.metrics.SceneMetrics.SwitchResolve;
@@ -42,10 +37,8 @@ import com.game.scene.world.RemoteSwitchTargets.Selection;
 import com.game.table.CommonErrorTip;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -53,10 +46,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -123,13 +114,6 @@ import org.slf4j.LoggerFactory;
  * 冻结中续约报失去 E、在线存盘被围栏拒都不踢人（交出提交后 E 当然写不进去），由交出结局裁决。新 epoch E+1 的释放方只有三个且互斥：
  * 源节点（只在 PlayerTransfer 确定没发出时）、gate 的 abandonEnter（只在 PlayerEnter{E+1} 确定没发出时）、目标节点的进场失败 / 离场。
  *
- * <p><b>镜像 / 副本实例</b>（批次 5.3，dungeon-mirror-spec §6.7–§6.11）：实例由本节点自有、随进程消亡，节点目录（{@link #sceneEntries}）是唯一登记（D1）。
- * 镜像恒与源频道同节点（D2）：63 {@code {mirror_config_id ≠ 0, scene_id = 0}} 同步校验后回 {@code {0}}、进 RESOLVING，向 scene-manager 取一个全服
- * scene_id（{@link InstanceIds}），结果回到逻辑线程复核后在同一个任务里建镜像（{@link #createInstance}）并 {@link #switchScene} 换入。副本只经
- * dev 管理口建（{@link #createDungeon}）。实例空置满超时进入回收宽限、宽限满且仍空才销毁（宽限内在途进场到达即复活）；源频道销毁时镜像级联排空、
- * 居民同图改派；管理口显式销毁同样「排空后销毁」（{@link #maintainScenes}、{@link #destroyInstance}）。人数、在途进场、销毁同在本线程，
- * 不需要基线那套 Redis Lua CAS。
- *
  * <p><b>指标</b>（{@link SceneMetrics}）：场景配置下的在线人数在每次人数变化后推送绝对值；移动裁决、视野变化通知、
  * 帧与帧内广播耗时（经 {@link SceneClock} 计时）、频道数与计划应用 / 改派、跨节点换图的选目标 / 交出 / 交出进场都在这里记，
  * 与规则写在同一处，不另设观察者。
@@ -139,10 +123,6 @@ public final class SceneWorld {
     private static final Logger log = LoggerFactory.getLogger(SceneWorld.class);
 
     private static final int ENTER_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
-    /** 63 参数错（镜像分支的一切同步拒绝也用它，dungeon-mirror-spec Q11）；管理口：Dungeon 表没有这一行 / 销毁的是主世界频道。 */
-    private static final int ENTER_PARAM_ERROR = SceneErrorTip.scene_error.kEnterSceneParamError_VALUE;
-    /** 管理口销毁：本节点没有这个场景。 */
-    private static final int SCENE_NOT_FOUND = SceneErrorTip.scene_error.kEnterSceneNotFound_VALUE;
     /** 选目标调用失败 / 超时时推的 tip（基线第一跳 gRPC 传输失败推 23 {1003}，player_lifecycle.cpp:3195-3216）。 */
     private static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 被别的会话接管 / 失去归属时推给旧会话的 tip（基线顶号同码，经 23 推送，本里程碑不发 34）。 */
@@ -171,7 +151,6 @@ public final class SceneWorld {
     private final PlayerLocations locations;
     private final TeamFollow teamFollow;
     private final CrossNodeSwitch crossNode;
-    private final SceneInstances instances;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -238,20 +217,7 @@ public final class SceneWorld {
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
                       TeamFollow teamFollow, CrossNodeSwitch crossNode) {
-        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots, locations,
-                teamFollow, crossNode, SceneInstances.DISABLED);
-    }
-
-    /**
-     * @param instances 镜像 / 副本实例的装配与参数（批次 5.3；{@link SceneInstances#DISABLED} = 不接取号：63 镜像分支受理后推 23 {1003}，
-     *                  节点本地的回收 / 级联照常）
-     */
-    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
-                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
-                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
-                      TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances) {
         this.crossNode = crossNode;
-        this.instances = instances;
         this.playerInitializer = playerInitializer;
         this.snapshots = snapshots;
         this.locations = locations;
@@ -492,37 +458,20 @@ public final class SceneWorld {
      * 每次应用计划后与每秒各调一次（逻辑线程）。跨节点换图冻结中（FREEZING）的玩家跳过、等下一次推进（计 {@code switching}，
      * scene-handoff-spec §5.5；选目标中的 RESOLVING 不冻结，照常改派）；6.3 起战斗冻结中的玩家同样要跳过。
      *
-     * <p>批次 5.3：回收宽限中（{@link DrainCause#IDLE}）的实例不改派（宽限中不会有人），宽限满且仍空、没有在途进场才销毁；主世界频道在这里被销毁时，
-     * 以它为源的镜像转级联排空（{@link #destroyScene}），并在<b>同一次推进</b>里接着改派、销毁（dungeon-mirror-spec §6.11）。
-     *
      * @return 本次销毁的场景数
      */
     public int drainStep() {
-        Deque<Scene> work = new ArrayDeque<>();
+        List<Scene> draining = new ArrayList<>();
         for (Scene scene : scenes.values()) {
             if (scene.draining()) {
-                work.add(scene);
+                draining.add(scene);
             }
         }
-        long now = clock.nanoTime();
-        long grace = instances.reclaimGrace().toNanos();
         int destroyed = 0;
-        while (!work.isEmpty()) {
-            Scene from = work.poll();
-            if (scenes.get(from.sceneId()) != from || !from.draining()) {
-                continue;
-            }
-            if (from.drainCause() == DrainCause.IDLE) {
-                if (from.playerCount() == 0 && !hasPendingEnter(from.sceneId())
-                        && now - from.drainingSinceNanos() >= grace) {
-                    destroyScene(from, work);
-                    destroyed++;
-                }
-                continue;
-            }
+        for (Scene from : draining) {
             relocateResidents(from);
             if (from.playerCount() == 0 && !hasPendingEnter(from.sceneId())) {
-                destroyScene(from, work);
+                destroyScene(from);
                 destroyed++;
             }
         }
@@ -611,508 +560,12 @@ public final class SceneWorld {
         return false;
     }
 
-    /**
-     * 销毁一个已空、没有在途进场的场景（调用方保证）。实例计 {@code destroyed_*}（按排空原因）；主世界频道被销毁时，本节点以它为源、
-     * 还没在级联 / 显式销毁中的镜像（含回收宽限中的：源已不在，不再给它复活的机会）转级联排空并放进 {@code cascaded}，由调用方接着推进
-     * （dungeon-mirror-spec §6.11；对应基线 instance_lifecycle.go:276-297 与 world_autoscale.go:437-457 的强制级联，Java 在节点本地做、
-     * 居民同图改派，D11）。销毁之后立即补发目录。
-     */
-    private void destroyScene(Scene scene, Collection<Scene> cascaded) {
+    private void destroyScene(Scene scene) {
         scenes.remove(scene.sceneId());
         scene.clear();
         publishPopulation(scene.configId());
         publishChannels();
-        if (scene.kind().isInstance()) {
-            InstanceEvent event = switch (scene.drainCause()) {
-                case IDLE -> InstanceEvent.DESTROYED_IDLE;
-                case CASCADE -> InstanceEvent.DESTROYED_CASCADE;
-                case ADMIN -> InstanceEvent.DESTROYED_ADMIN;
-                case NONE, PLAN -> null;
-            };
-            if (event == null) {
-                log.error("实例以意外的排空原因被销毁（实例不在频道计划里，不该是 {}） scene_id={}", scene.drainCause(),
-                        Long.toUnsignedString(scene.sceneId()));
-            } else {
-                metrics.instanceLifecycle(instanceKind(scene.kind()), event);
-            }
-            publishInstances();
-            log.info("销毁实例 scene_id={} scene_config_id={} kind={} 原因={}", Long.toUnsignedString(scene.sceneId()),
-                    scene.configId(), scene.kind(), scene.drainCause());
-        } else {
-            log.info("销毁场景 scene_id={} scene_config_id={}", Long.toUnsignedString(scene.sceneId()), scene.configId());
-            long now = clock.nanoTime();
-            boolean any = false;
-            for (Scene mirror : scenes.values()) {
-                if (mirror.kind() == SceneKind.MIRROR && mirror.sourceSceneId() == scene.sceneId() && !cascading(mirror)) {
-                    startCascade(mirror, now, "源频道已销毁");
-                    cascaded.add(mirror);
-                    any = true;
-                }
-            }
-            if (any) {
-                publishInstances();
-            }
-        }
-        instances.directoryChanged().run();
-    }
-
-    /** 已在级联或显式销毁中（这两种不复活、也不再改原因）。 */
-    private static boolean cascading(Scene scene) {
-        return scene.draining() && (scene.drainCause() == DrainCause.CASCADE || scene.drainCause() == DrainCause.ADMIN);
-    }
-
-    private void startCascade(Scene mirror, long now, String reason) {
-        DrainCause before = mirror.drainCause();
-        mirror.beginDrain(DrainCause.CASCADE, now);
-        metrics.instanceLifecycle(InstanceKind.MIRROR, InstanceEvent.CASCADE_STARTED);
-        log.info("镜像级联排空（{}） scene_id={} source={} 在场={} 原状态={}", reason, Long.toUnsignedString(mirror.sceneId()),
-                Long.toUnsignedString(mirror.sourceSceneId()), mirror.playerCount(), before);
-    }
-
-    // ------------------------------------------------------------------ 镜像 / 副本实例（批次 5.3，dungeon-mirror-spec §6.7–§6.11）
-
-    /**
-     * 每秒一次的场景维护（逻辑线程；替代单纯的排空推进，§6.10、§6.11）：对每个实例先做级联兜底（镜像的源不在本地或不是主世界频道 → 级联），
-     * 再做空闲回收判定（空置满超时 → 回收宽限；宽限中发现有人 → 复活，纵深防御），最后 {@link #drainStep} 推进排空并销毁。
-     * 实例的状态有变就立即补发目录。
-     *
-     * @return 本次销毁的场景数
-     */
-    public int maintainScenes() {
-        long now = clock.nanoTime();
-        Set<Long> pendingTargets = pendingEnterTargets();
-        boolean changed = false;
-        for (Scene scene : scenes.values()) {
-            if (scene.isWorldChannel()) {
-                continue;
-            }
-            if (cascadeIfSourceGone(scene, now)) {
-                changed = true;
-            } else if (checkIdle(scene, pendingTargets, now)) {
-                changed = true;
-            }
-        }
-        if (changed) {
-            publishInstances();
-            instances.directoryChanged().run();
-        }
-        return drainStep();
-    }
-
-    /** 级联兜底（§6.11「兜底」）：镜像的源已不在本地或不是主世界频道 → 转级联。已在级联 / 显式销毁中的不动。 */
-    private boolean cascadeIfSourceGone(Scene scene, long now) {
-        if (scene.kind() != SceneKind.MIRROR || cascading(scene)) {
-            return false;
-        }
-        Scene source = scenes.get(scene.sourceSceneId());
-        if (source != null && source.isWorldChannel()) {
-            return false;
-        }
-        startCascade(scene, now, "兜底检查：源频道不在本节点");
-        return true;
-    }
-
-    /**
-     * 空闲回收判定（§6.10 第 1–2 条）：有人或有指向它的在途进场 → 清空置起点；否则没有起点就记 now，满超时（按种类，0 = 不回收）就进入回收宽限。
-     * 回收宽限中发现有人（本地进入一律不放行、在途进场到达即复活，正常不会出现）→ 当复活处理。
-     *
-     * @return 状态是否变了
-     */
-    private boolean checkIdle(Scene scene, Set<Long> pendingTargets, long now) {
-        if (scene.draining()) {
-            if (scene.drainCause() == DrainCause.IDLE && scene.playerCount() > 0) {
-                log.error("回收宽限中的实例里有人（漏了「宽限中不接本地进入」的闸？），按复活处理 scene_id={} 在场={}",
-                        Long.toUnsignedString(scene.sceneId()), scene.playerCount());
-                revive(scene, "宽限中发现有人");
-                return true;
-            }
-            return false;
-        }
-        if (scene.playerCount() > 0 || pendingTargets.contains(scene.sceneId())) {
-            scene.markOccupied();
-            return false;
-        }
-        if (!scene.emptySinceKnown()) {
-            scene.markEmptySince(now);
-            return false;
-        }
-        long timeout = instances.idleTimeoutNanos(scene.kind());
-        if (timeout <= 0 || now - scene.emptySinceNanos() < timeout) {
-            return false;
-        }
-        scene.beginDrain(DrainCause.IDLE, now);
-        metrics.instanceLifecycle(instanceKind(scene.kind()), InstanceEvent.RECLAIM_STARTED);
-        log.info("实例空置满 {} 秒，进入回收宽限 scene_id={} kind={} 宽限={}", TimeUnit.NANOSECONDS.toSeconds(timeout),
-                Long.toUnsignedString(scene.sceneId()), scene.kind(), instances.reclaimGrace());
-        return true;
-    }
-
-    /** 回收宽限中复活（§6.10 第 3 条）：改回承载中、清空置起点；调用方负责补发目录与实例指标（在途进场到达时由 {@link #onPlayerLoaded} 一并做）。 */
-    private void revive(Scene scene, String why) {
-        scene.stopDraining();
-        scene.markOccupied();
-        metrics.instanceLifecycle(instanceKind(scene.kind()), InstanceEvent.REVIVED);
-        log.info("回收宽限中的实例复活（{}） scene_id={} kind={}", why, Long.toUnsignedString(scene.sceneId()), scene.kind());
-    }
-
-    /** 加载中的进场指向的场景号（每秒维护一次取一份，不在每个实例上扫一遍）。 */
-    private Set<Long> pendingEnterTargets() {
-        if (pendingEnters.isEmpty()) {
-            return Set.of();
-        }
-        Set<Long> targets = new HashSet<>();
-        for (PendingEnter pending : pendingEnters.values()) {
-            targets.add(pending.sceneId());
-        }
-        return targets;
-    }
-
-    /** 人数变化之后更新实例的空置起点（变空记 now、有人清掉；在途进场由每秒维护补判，精度 1 s 以内）。 */
-    private void noteOccupancy(Scene scene) {
-        if (scene.isWorldChannel()) {
-            return;
-        }
-        if (scene.playerCount() > 0) {
-            scene.markOccupied();
-        } else if (!scene.emptySinceKnown()) {
-            scene.markEmptySince(clock.nanoTime());
-        }
-    }
-
-    /**
-     * 建一个实例（§6.8；逻辑线程）——<b>建实例的唯一入口</b>：63 镜像分支拿到号之后、dev 管理口建副本都经这里。拒绝（不建，ERROR，计
-     * {@code lifecycle{rejected}}）：scene_id 或 conf 为 0、本地已有同号（号全服唯一，同号就是发号器坏了）、本节点停止接客、实例数达上限；
-     * 镜像：源不在本地 / 不是主世界频道 / 在排空、地图与源不同；副本：地图与 Dungeon 表不符。建好后空置起点 = now（创建者在同一个任务里换入后清掉），
-     * 计 {@code created}、更新实例指标、立即补发目录。
-     *
-     * @return 建好的实例；被拒为 null
-     */
-    public Scene createInstance(InstanceSpec spec) {
-        String problem = instanceRejection(spec);
-        InstanceKind kind = instanceKind(spec.kind());
-        if (problem != null) {
-            metrics.instanceLifecycle(kind, InstanceEvent.REJECTED);
-            log.error("拒绝建实例（{}） scene_id={} kind={} scene_config_id={} source={} mirror={} dungeon={}", problem,
-                    Long.toUnsignedString(spec.sceneId()), spec.kind(), spec.sceneConfigId(),
-                    Long.toUnsignedString(spec.sourceSceneId()), Integer.toUnsignedString(spec.mirrorConfigId()),
-                    Integer.toUnsignedString(spec.dungeonConfigId()));
-            return null;
-        }
-        Scene scene = addScene(spec.toInfo(), spec.kind(), spec.sourceSceneId());
-        scene.markEmptySince(clock.nanoTime());
-        metrics.instanceLifecycle(kind, InstanceEvent.CREATED);
-        publishInstances();
-        instances.directoryChanged().run();
-        return scene;
-    }
-
-    private String instanceRejection(InstanceSpec spec) {
-        if (spec.sceneId() == 0 || spec.sceneConfigId() == 0) {
-            return "scene_id 或 scene_config_id 为 0";
-        }
-        if (scenes.containsKey(spec.sceneId())) {
-            return "scene_id 本地已存在（发号器撞号？）";
-        }
-        if (!acceptingEnters) {
-            return "本节点已停止接客";
-        }
-        if (instanceCount() >= instances.maxPerNode()) {
-            return "本节点实例数已达上限 " + instances.maxPerNode();
-        }
-        if (spec.kind() == SceneKind.MIRROR) {
-            Scene source = scenes.get(spec.sourceSceneId());
-            if (source == null) {
-                return "源频道不在本节点";
-            }
-            if (!source.isWorldChannel()) {
-                return "源不是主世界频道（" + source.kind() + "）";
-            }
-            if (source.draining()) {
-                return "源频道在排空";
-            }
-            if (source.configId() != spec.sceneConfigId()) {
-                return "镜像的地图与源频道不同（源 " + source.configId() + "）";
-            }
-            return null;
-        }
-        OptionalInt map = tables.dungeonSceneConfigId(spec.dungeonConfigId());
-        if (map.isEmpty() || map.getAsInt() != spec.sceneConfigId()) {
-            return "副本地图与 Dungeon 表不符（表里 " + (map.isEmpty() ? "没有这一行" : map.getAsInt()) + "）";
-        }
-        return null;
-    }
-
-    /** 本节点的实例数（镜像 + 副本，含回收宽限 / 排空中的；每节点上限 D19 按它算）。 */
-    int instanceCount() {
-        int count = 0;
-        for (Scene scene : scenes.values()) {
-            if (scene.kind().isInstance()) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    /** 本节点上 {@code creators} 含这个玩家的实例数（每创建者上限 D19 按它算）。 */
-    int instancesCreatedBy(long playerId) {
-        int count = 0;
-        for (Scene scene : scenes.values()) {
-            if (scene.kind().isInstance() && scene.createdBy(playerId)) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    /** 各种实例按状态的数量推给指标（建、销毁、状态变化之后）。 */
-    private void publishInstances() {
-        int[][] counts = new int[InstanceKind.values().length][3];
-        for (Scene scene : scenes.values()) {
-            if (!scene.kind().isInstance()) {
-                continue;
-            }
-            int state = !scene.draining() ? 0 : scene.drainCause() == DrainCause.IDLE ? 1 : 2;
-            counts[instanceKind(scene.kind()).ordinal()][state]++;
-        }
-        for (InstanceKind kind : InstanceKind.values()) {
-            int[] c = counts[kind.ordinal()];
-            metrics.instances(kind, c[0], c[1], c[2]);
-        }
-    }
-
-    private static InstanceKind instanceKind(SceneKind kind) {
-        return kind == SceneKind.DUNGEON ? InstanceKind.DUNGEON : InstanceKind.MIRROR;
-    }
-
-    /**
-     * 63 镜像分支的同步校验（§6.7「镜像分支同步校验」；排在 3014、全 0 之后，3008 之前）：返回 0 = 受理（调用方回 {@code {0}} 后调
-     * {@link #beginMirrorCreate}），否则 3005——当前场景不是主世界频道（镜像的镜像、副本作源，Q7）、{@code mirror_config_id} 不在 Mirror 表（D7）、
-     * 当前频道在排空、本节点停止接客（D8）、本节点实例数或本人创建的实例数达上限（D19）。每条镜像请求恰好计一次 {@code mirror.requests}。
-     */
-    int checkMirrorRequest(ScenePlayer player, int mirrorConfigId) {
-        MirrorRequest result = mirrorRequestResult(player, mirrorConfigId);
-        metrics.mirrorRequest(result);
-        if (result == MirrorRequest.ACCEPTED) {
-            return 0;
-        }
-        log.info("拒绝建镜像（{}） player={} scene_id={} mirror_config_id={}", result,
-                Long.toUnsignedString(player.playerId()), Long.toUnsignedString(player.scene().sceneId()),
-                Integer.toUnsignedString(mirrorConfigId));
-        return ENTER_PARAM_ERROR;
-    }
-
-    private MirrorRequest mirrorRequestResult(ScenePlayer player, int mirrorConfigId) {
-        Scene current = player.scene();
-        if (!current.isWorldChannel()) {
-            return MirrorRequest.BAD_SOURCE;
-        }
-        if (!tables.mirrorExists(mirrorConfigId)) {
-            return MirrorRequest.BAD_MIRROR_CONFIG;
-        }
-        if (current.draining()) {
-            return MirrorRequest.SOURCE_DRAINING;
-        }
-        if (!acceptingEnters) {
-            return MirrorRequest.NOT_ACCEPTING;
-        }
-        if (instanceCount() >= instances.maxPerNode()) {
-            return MirrorRequest.NODE_CAP;
-        }
-        if (instancesCreatedBy(player.playerId()) >= instances.maxPerCreator()) {
-            return MirrorRequest.CREATOR_CAP;
-        }
-        return MirrorRequest.ACCEPTED;
-    }
-
-    /**
-     * 63 镜像分支已受理（应答 {@code {0}} 已回）：进 RESOLVING（{@link PlayerSwitch#mirrorCreate}，复用 5.2 的在途槽与本地兜底超时——
-     * 期间再发 63 回 3014，D4），向 scene-manager 取一个全服 scene_id。不冻结：离场 / 断链 / 接管 / 失去归属照现有逻辑处理，迟到的结果按引用比对丢弃
-     * （号作废，任何地方都不留幽灵镜像，D3）。没装配取号（{@link SceneInstances#DISABLED}）= 没有 scene-manager 可用：推 23 {1003}（D9）。
-     */
-    void beginMirrorCreate(ScenePlayer player, int mirrorConfigId) {
-        Scene source = player.scene();
-        long token = ++switchTokens;
-        PlayerSwitch sw = PlayerSwitch.mirrorCreate(token, source.sceneId(), mirrorConfigId,
-                clock.nanoTime() + instances.resolveTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
-        player.setSwitching(sw);
-        log.info("建镜像：请 scene-manager 发实例号 player={} token={} 源 scene_id={} scene_config_id={} mirror_config_id={}",
-                Long.toUnsignedString(player.playerId()), token, Long.toUnsignedString(source.sceneId()),
-                source.configId(), Integer.toUnsignedString(mirrorConfigId));
-        if (!instances.enabled()) {
-            onMirrorIssued(player, sw, new InstanceIds.Result.Failed("实例取号没装配"));
-            return;
-        }
-        instances.ids().create(new InstanceIds.Request(player.playerId(), SceneKind.MIRROR, source.sceneId(),
-                source.configId(), mirrorConfigId, 0), result -> onMirrorIssued(player, sw, result));
-    }
-
-    /** 镜像取号的结果（逻辑线程，§6.7「结果回到逻辑线程」）：先核对实例与在途槽，再按结果分派。 */
-    private void onMirrorIssued(ScenePlayer player, PlayerSwitch sw, InstanceIds.Result result) {
-        if (playersById.get(player.playerId()) != player || player.switching() != sw) {
-            metrics.mirrorResolve(MirrorResolve.STALE);
-            log.info("镜像取号结果回来时实例已离开 / 已重新进场 / 在途已作废，丢弃（号作废） player={} token={} 结果={}",
-                    Long.toUnsignedString(player.playerId()), sw.token(), result);
-            return;
-        }
-        player.setSwitching(null);
-        switch (result) {
-            case InstanceIds.Result.Failed failed -> {
-                metrics.mirrorResolve(MirrorResolve.ERROR);
-                log.warn("镜像取号调用失败，留在原地 player={} token={}: {}", Long.toUnsignedString(player.playerId()),
-                        sw.token(), failed.reason());
-                pushTip(player, SERVICE_UNAVAILABLE);
-            }
-            case InstanceIds.Result.Refused refused -> {
-                metrics.mirrorResolve(MirrorResolve.REJECTED);
-                log.info("scene-manager 拒绝发镜像号，留在原地 player={} token={} tip={}",
-                        Long.toUnsignedString(player.playerId()), sw.token(), refused.tipId());
-                pushTip(player, ENTER_FAILED);
-            }
-            case InstanceIds.Result.Issued issued -> onMirrorIdIssued(player, sw, issued);
-        }
-    }
-
-    private void onMirrorIdIssued(ScenePlayer player, PlayerSwitch sw, InstanceIds.Result.Issued issued) {
-        long sourceSceneId = sw.wantSceneId();
-        int mirrorConfigId = sw.wantConfigId();
-        if (issued.sceneNodeId() != instances.localNodeId()) {
-            // 5.3 放置恒为发起节点（D2）；跨节点放置（Q2）接上时这里改为 SceneTransfers.begin(Reason.MIRROR)，绝不当成本地实例（R11）
-            metrics.mirrorResolve(MirrorResolve.WRONG_NODE);
-            log.error("scene-manager 把镜像放到了别的节点（5.3 不支持跨节点放置），不建 player={} node={} scene_id={}",
-                    Long.toUnsignedString(player.playerId()), issued.sceneNodeId(), Long.toUnsignedString(issued.sceneId()));
-            pushTip(player, ENTER_FAILED);
-            return;
-        }
-        String moved = mirrorSourceMoved(player, sourceSceneId);
-        if (moved != null) {
-            metrics.mirrorResolve(MirrorResolve.SOURCE_MOVED);
-            log.info("镜像号回来时条件已不满足（{}），不建 player={} 源 scene_id={} 号={}", moved,
-                    Long.toUnsignedString(player.playerId()), Long.toUnsignedString(sourceSceneId),
-                    Long.toUnsignedString(issued.sceneId()));
-            pushTip(player, ENTER_FAILED);
-            return;
-        }
-        Scene source = player.scene();
-        Scene mirror = createInstance(InstanceSpec.mirror(issued.sceneId(), source.configId(), sourceSceneId,
-                mirrorConfigId, player.playerId()));
-        if (mirror == null) {
-            // 本地重号（发号器失效的迹象）等：createInstance 已记 ERROR
-            metrics.mirrorResolve(MirrorResolve.CREATE_REJECTED);
-            pushTip(player, ENTER_FAILED);
-            return;
-        }
-        metrics.mirrorResolve(MirrorResolve.CREATED);
-        log.info("建镜像成功，换入 player={} 源 scene_id={} 镜像 scene_id={}", Long.toUnsignedString(player.playerId()),
-                Long.toUnsignedString(sourceSceneId), Long.toUnsignedString(mirror.sceneId()));
-        switchScene(player, mirror);
-    }
-
-    /** 号回来时复核（D6）：玩家仍在源频道、源仍是承载中的主世界频道、节点仍接客、没到上限；不满足的原因，满足为 null。 */
-    private String mirrorSourceMoved(ScenePlayer player, long sourceSceneId) {
-        Scene current = player.scene();
-        if (current.sceneId() != sourceSceneId) {
-            return "玩家已不在源场景（被排空改派走了？）";
-        }
-        if (!current.isWorldChannel() || current.draining()) {
-            return "源频道在排空";
-        }
-        if (!acceptingEnters) {
-            return "本节点已停止接客";
-        }
-        if (instanceCount() >= instances.maxPerNode()) {
-            return "本节点实例数已达上限";
-        }
-        if (instancesCreatedBy(player.playerId()) >= instances.maxPerCreator()) {
-            return "本人创建的实例数已达上限";
-        }
-        return null;
-    }
-
-    /**
-     * dev 管理口建副本（§6.13；逻辑线程）：Dungeon 表没有这一行（或为 0）→ 3005；取号调用失败 / 超时 / 没装配 → 1003；scene-manager 拒绝、
-     * 号落在别的节点或本地拒建 → 3023；成功 → {@code {0, scene_id, scene_config_id = Dungeon.scene_id, scene_node_id = 本节点}}。
-     * 结果经 {@code onDone} 交回（在逻辑线程上、恰好一次；取号在途时不在本调用栈内）。
-     */
-    public void createDungeon(int dungeonConfigId, Consumer<CreateDungeonInstanceResponse> onDone) {
-        OptionalInt map = tables.dungeonSceneConfigId(dungeonConfigId);
-        if (map.isEmpty()) {
-            log.info("管理口建副本：Dungeon 表没有这一行 dungeon_config_id={}", Integer.toUnsignedString(dungeonConfigId));
-            onDone.accept(dungeonResult(ENTER_PARAM_ERROR));
-            return;
-        }
-        int sceneConfigId = map.getAsInt();
-        if (!instances.enabled()) {
-            onDone.accept(dungeonResult(SERVICE_UNAVAILABLE));
-            return;
-        }
-        instances.ids().create(new InstanceIds.Request(0, SceneKind.DUNGEON, 0, sceneConfigId, 0, dungeonConfigId),
-                result -> onDone.accept(onDungeonIssued(dungeonConfigId, sceneConfigId, result)));
-    }
-
-    private CreateDungeonInstanceResponse onDungeonIssued(int dungeonConfigId, int sceneConfigId,
-                                                          InstanceIds.Result result) {
-        switch (result) {
-            case InstanceIds.Result.Failed failed -> {
-                log.warn("管理口建副本：取号调用失败 dungeon_config_id={}: {}", dungeonConfigId, failed.reason());
-                return dungeonResult(SERVICE_UNAVAILABLE);
-            }
-            case InstanceIds.Result.Refused refused -> {
-                log.info("管理口建副本：scene-manager 拒绝发号 dungeon_config_id={} tip={}", dungeonConfigId, refused.tipId());
-                return dungeonResult(ENTER_FAILED);
-            }
-            case InstanceIds.Result.Issued issued -> {
-                if (issued.sceneNodeId() != instances.localNodeId()) {
-                    log.error("scene-manager 把副本放到了别的节点（5.3 不支持跨节点放置），不建 node={} scene_id={}",
-                            issued.sceneNodeId(), Long.toUnsignedString(issued.sceneId()));
-                    return dungeonResult(ENTER_FAILED);
-                }
-                Scene dungeon = createInstance(InstanceSpec.dungeon(issued.sceneId(), sceneConfigId, dungeonConfigId));
-                if (dungeon == null) {
-                    return dungeonResult(ENTER_FAILED);
-                }
-                log.info("管理口建副本 scene_id={} scene_config_id={} dungeon_config_id={}",
-                        Long.toUnsignedString(dungeon.sceneId()), sceneConfigId, dungeonConfigId);
-                return CreateDungeonInstanceResponse.newBuilder()
-                        .setSceneId(dungeon.sceneId())
-                        .setSceneConfigId(sceneConfigId)
-                        .setSceneNodeId(instances.localNodeId())
-                        .build();
-            }
-        }
-    }
-
-    private static CreateDungeonInstanceResponse dungeonResult(int tipId) {
-        return CreateDungeonInstanceResponse.newBuilder().setTipId(tipId).build();
-    }
-
-    /**
-     * dev 管理口显式销毁一个实例（§6.11、D17；逻辑线程）：scene_id 为 0 或是主世界频道（只能由频道计划销毁，修基线 B10）→ 3005；
-     * 不在本节点 → 3000；已在级联 / 显式销毁中 → 0（幂等）；否则（含回收宽限中的：不再给它复活的机会）转排空（ADMIN），当场推进一次——
-     * 居民按改派规则移走（镜像 → 同图主世界频道、坐标保留；副本 → 默认主世界出生点），空了即销毁、计 {@code destroyed_admin}。
-     *
-     * @return tip（0 = 已受理）
-     */
-    public int destroyInstance(long sceneId) {
-        if (sceneId == 0) {
-            return ENTER_PARAM_ERROR;
-        }
-        Scene scene = scenes.get(sceneId);
-        if (scene == null) {
-            return SCENE_NOT_FOUND;
-        }
-        if (scene.isWorldChannel()) {
-            return ENTER_PARAM_ERROR;
-        }
-        if (cascading(scene)) {
-            return 0;
-        }
-        scene.beginDrain(DrainCause.ADMIN, clock.nanoTime());
-        log.info("管理口显式销毁实例 scene_id={} kind={} 在场={}", Long.toUnsignedString(sceneId), scene.kind(),
-                scene.playerCount());
-        publishInstances();
-        instances.directoryChanged().run();
-        drainStep();
-        return 0;
+        log.info("销毁场景 scene_id={} scene_config_id={}", Long.toUnsignedString(scene.sceneId()), scene.configId());
     }
 
     public int playerCount() {
@@ -1266,16 +719,9 @@ public final class SceneWorld {
                     "场景不在本节点 scene_id=" + Long.toUnsignedString(pending.sceneId()));
             return;
         }
-        if (scene.draining() && scene.drainCause() == DrainCause.IDLE) {
-            // 回收宽限中的实例（批次 5.3 §6.10 第 3 条）：在途进场（登录重连回原实例、5.2 显式加入）在宽限内到达 → 复活，照常进入。
-            // 宽限的意义就是「scene-manager 分配时还在 → 到达时还在」；在途期间 hasPendingEnter 挡住了销毁
-            revive(scene, "在途进场到达 player=" + Long.toUnsignedString(playerId));
-            publishInstances();
-            instances.directoryChanged().run();
-        } else if (scene.draining()) {
+        if (scene.draining()) {
             // 分配时目录还没报排空（节点拉到计划后 ≤1 s 内才补发目录，D13）：改进兄弟频道（§4.10.4），顺序同排空改派；
             // 都没有就进排空中的这个、随后被改派。79 与位置记录给的都是实际进入的场景（gate 只按节点路由，不看场景号）。
-            // 级联 / 显式销毁中的实例同样改派：镜像 → 同图主世界频道，副本 → 默认大世界（批次 5.3 §6.11）
             Scene sibling = relocationTarget(scene);
             if (sibling != null) {
                 metrics.channelRelocation(ChannelRelocation.ENTER_REDIRECT);
@@ -1358,7 +804,7 @@ public final class SceneWorld {
             snapshots.capture(player.toSave(), PlayerSnapshots.Cause.LOGIN);
         }
         log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={} 交出进场={}", playerId, key,
-                Long.toUnsignedString(scene.sceneId()), player.entity(), player.ownerEpoch(), previous != null, transfer);
+                scene.sceneId(), player.entity(), player.ownerEpoch(), previous != null, transfer);
         // 进场（登录 / 重连 / 顶号 / 交出进场）之后查组队跟随：异步读，结果回到逻辑线程（team-spec §6.10）
         teamFollow.onEnteredScene(this, player);
     }
@@ -1389,7 +835,6 @@ public final class SceneWorld {
         player.setScene(scene);
         player.markActive(frame);
         ViewIndex.Entered entered = scene.add(player);
-        noteOccupancy(scene);
         publishPopulation(scene.configId());
         metrics.aoiEntered(entered.seen().size() + entered.seers().size());
         // 新观察者只从 21 / 47 拿到位置：朝向、速度由下一个同步帧的 66 补上（见 markFullStateForNewWatcher）。
@@ -1449,7 +894,6 @@ public final class SceneWorld {
             return;
         }
         List<ScenePlayer> oldWatchers = from.remove(player);
-        noteOccupancy(from);
         publishPopulation(from.configId());
         metrics.aoiLeft(oldWatchers.size());
         broadcast(oldWatchers, destroyMessage(player));
@@ -1467,7 +911,7 @@ public final class SceneWorld {
     // ------------------------------------------------------------------ 跨节点换图（批次 5.2，scene-handoff-spec §5.5）
 
     /**
-     * 63 的「在途」判定（回 3014，基线 IsSceneChangeBusy）：选目标中 / 镜像取号中（RESOLVING，批次 5.3 D4）或冻结中（FREEZING）为 true。
+     * 63 的「在途」判定（回 3014，基线 IsSceneChangeBusy）：选目标中（RESOLVING）或冻结中（FREEZING）为 true。
      * RESOLVING 槽过了期限（结果回调丢了，正常不会）就作废、不再挡，迟到的结果按过期丢弃。
      */
     boolean switchInFlight(ScenePlayer player) {
@@ -1476,8 +920,8 @@ public final class SceneWorld {
             return false;
         }
         if (sw.phase() == SwitchPhase.RESOLVING && clock.nanoTime() - sw.resolveDeadlineNanos() >= 0) {
-            log.warn("选目标 / 取号的结果过了期限还没回来，作废这次在途 player={} token={} 用途={}",
-                    Long.toUnsignedString(player.playerId()), sw.token(), sw.purpose());
+            log.warn("选目标的结果过了期限还没回来，作废这次换图 player={} token={}", Long.toUnsignedString(player.playerId()),
+                    sw.token());
             player.setSwitching(null);
             return false;
         }
@@ -2270,7 +1714,6 @@ public final class SceneWorld {
         }
         player.stopMotion();
         List<ScenePlayer> watchers = player.scene().remove(player);
-        noteOccupancy(player.scene());
         playersById.remove(player.playerId(), player);
         playersBySession.remove(player.session(), player);
         playersByEntity.remove(player.entity(), player);

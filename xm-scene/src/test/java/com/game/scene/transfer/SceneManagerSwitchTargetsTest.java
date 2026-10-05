@@ -5,11 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.SceneDirectoryService;
 import com.game.api.proto.AssignSceneRequest;
 import com.game.api.proto.AssignSceneResponse;
-import com.game.api.proto.ChannelKind;
-import com.game.api.proto.CreateInstanceRequest;
-import com.game.api.proto.CreateInstanceResponse;
-import com.game.scene.world.InstanceIds;
-import com.game.scene.world.SceneKind;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
 import com.game.scene.world.RemoteSwitchTargets.Selection;
@@ -55,13 +50,11 @@ class SceneManagerSwitchTargetsTest {
         }
 
         @Override
-        public CompletableFuture<CreateInstanceResponse> createInstance(CreateInstanceRequest request) {
-            instanceRequests.add(request);
-            return nextInstanceReply;
+        public CompletableFuture<com.game.api.proto.CreateInstanceResponse> createInstance(
+                com.game.api.proto.CreateInstanceRequest request) {
+            throw new UnsupportedOperationException("实例取号（批次 5.3）不经换图选目标的客户端");
         }
     };
-    private final List<CreateInstanceRequest> instanceRequests = new CopyOnWriteArrayList<>();
-    private volatile CompletableFuture<CreateInstanceResponse> nextInstanceReply = new CompletableFuture<>();
 
     private SceneManagerSwitchTargets newClient(Duration timeout) {
         return new SceneManagerSwitchTargets(7, 3, logic, timeout, new SceneManagerSwitchTargets.Connector() {
@@ -164,70 +157,6 @@ class SceneManagerSwitchTargetsTest {
         assertThat(closes.get()).isEqualTo(1);
         client.close();
         assertThat(closes.get()).as("幂等").isEqualTo(1);
-    }
-
-    // ------------------------------------------------------------------ 实例取号（批次 5.3，dungeon-mirror-spec §6.5、§6.7）
-
-    /** 取一次号，等结果投递进逻辑队列后在测试线程上执行，返回结果。 */
-    private InstanceIds.Result createAndAwait(InstanceIds.Request request) throws InterruptedException {
-        CompletableFuture<InstanceIds.Result> result = new CompletableFuture<>();
-        client.create(request, result::complete);
-        Runnable task = logicQueue.poll(5, TimeUnit.SECONDS);
-        assertThat(task).as("结果投递到了逻辑执行器").isNotNull();
-        assertThat(result).as("回调不在别的线程上直接跑").isNotDone();
-        task.run();
-        return result.getNow(null);
-    }
-
-    private static final InstanceIds.Request MIRROR = new InstanceIds.Request(1001, SceneKind.MIRROR, 50, 1, 2, 0);
-
-    @Test
-    void 取号请求带上zone_本节点号_种类与源_发了号映射成Issued() throws Exception {
-        client = newClient(Duration.ofSeconds(4));
-        nextInstanceReply = CompletableFuture.completedFuture(CreateInstanceResponse.newBuilder()
-                .setSceneNodeId(3).setSceneId(0x8000_0000_0000_0001L).build());
-
-        InstanceIds.Result result = createAndAwait(MIRROR);
-
-        assertThat(result).isEqualTo(new InstanceIds.Result.Issued(3, 0x8000_0000_0000_0001L));
-        assertThat(instanceRequests).singleElement().isEqualTo(CreateInstanceRequest.newBuilder()
-                .setZoneId(7).setRequesterSceneNodeId(3).setPlayerId(1001).setKind(ChannelKind.CHANNEL_KIND_MIRROR)
-                .setSourceSceneId(50).setSceneConfigId(1).setMirrorConfigId(2).build());
-        assertThat(requests).as("不经选目标").isEmpty();
-    }
-
-    @Test
-    void 副本取号_种类DUNGEON_玩家与源为0() throws Exception {
-        client = newClient(Duration.ofSeconds(4));
-        nextInstanceReply = CompletableFuture.completedFuture(CreateInstanceResponse.newBuilder()
-                .setSceneNodeId(3).setSceneId(77).build());
-
-        createAndAwait(new InstanceIds.Request(0, SceneKind.DUNGEON, 0, 17, 0, 1));
-
-        assertThat(instanceRequests).singleElement().isEqualTo(CreateInstanceRequest.newBuilder()
-                .setZoneId(7).setRequesterSceneNodeId(3).setKind(ChannelKind.CHANNEL_KIND_DUNGEON)
-                .setSceneConfigId(17).setDungeonConfigId(1).build());
-    }
-
-    @Test
-    void 取号tip非0映射成Refused_异常与超时与应答残缺映射成Failed() throws Exception {
-        client = newClient(Duration.ofSeconds(4));
-        nextInstanceReply = CompletableFuture.completedFuture(CreateInstanceResponse.newBuilder().setTipId(3005).build());
-        assertThat(createAndAwait(MIRROR)).isEqualTo(new InstanceIds.Result.Refused(3005));
-
-        nextInstanceReply = CompletableFuture.failedFuture(new IllegalStateException("发号租约无效"));
-        assertThat(createAndAwait(MIRROR)).isInstanceOf(InstanceIds.Result.Failed.class);
-
-        nextInstanceReply = CompletableFuture.completedFuture(CreateInstanceResponse.newBuilder().setSceneNodeId(3).build());
-        assertThat(createAndAwait(MIRROR)).as("号为 0").isInstanceOf(InstanceIds.Result.Failed.class);
-
-        nextInstanceReply = CompletableFuture.completedFuture(CreateInstanceResponse.newBuilder().setSceneId(9).build());
-        assertThat(createAndAwait(MIRROR)).as("节点号为 0").isInstanceOf(InstanceIds.Result.Failed.class);
-
-        client.close();
-        client = newClient(Duration.ofMillis(200));
-        nextInstanceReply = new CompletableFuture<>();
-        assertThat(createAndAwait(MIRROR)).isEqualTo(new InstanceIds.Result.Failed("取号超时"));
     }
 
     @Test
