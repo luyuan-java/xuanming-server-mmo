@@ -1,0 +1,163 @@
+// xm-data 的运维作业表（库 xm_java），经 xm-pbmysql 启动时建表 / 只扩不缩地补列补索引（data-ops-spec §7.3）。
+// 对应 mmorpg 由 proto2mysql 从 rollback_database_table.proto 建的 rollback_audit_log（rdt.proto:94-118）；形状是 Java 自有的，
+// 不 import 同步来的契约 proto（先例 xm-trade / xm-guild 的 *_tables.proto）。
+//
+// 改表纪律：字段只追加、字段号永不复用（删字段用 reserved 占住，pbmysql 按列注释 pb:N 识别字段）；
+// index 组只能追加到末尾，不得调序（idx_<表>_<序号> 按位置命名）。所有列 NOT NULL（pbmysql 不存 NULL），「没有」用 0 / 空串表示。
+//
+// 批次 7.2a 只用到 ops_job（手工快照的终态作业行、回收 dry-run 截断的审计行）、ops_job_event 与 audit_replay_line；
+// ops_active / ops_job_player / recall_source 先建出来（7.2b / 7.2c 的作业框架、回档明细、回收去重用），7.2a 不写。
+syntax = "proto3";
+
+package xm.data;
+
+import "proto2mysql/proto2mysql_option.proto";
+
+option java_package = "com.game.data.ops.pb";
+option java_multiple_files = true;
+option java_outer_classname = "OpsTablesProto";
+option (proto2mysql.db) = true;
+
+// 作业种类（ops_job.kind）。
+enum OpsJobKind {
+  OPS_JOB_KIND_UNSPECIFIED = 0;
+  // 手工快照（96 / 103 / 105）：同步执行，只写一条终态作业行
+  OPS_JOB_SNAPSHOT = 1;
+  // 整区维护前快照（7.2b）
+  OPS_JOB_ZONE_SNAPSHOT = 2;
+  // 回档（7.2b）
+  OPS_JOB_ROLLBACK = 3;
+  // 批量回收（dry-run 截断时也留一行审计，同基线 recall_logic.go:137-160；执行随 7.2c）
+  OPS_JOB_RECALL = 4;
+  // 欠款（7.2c）
+  OPS_JOB_DEBT = 5;
+  // 精确回收（7.2c）
+  OPS_JOB_CLAWBACK = 6;
+}
+
+// 作业状态（ops_job.status）：QUEUED → RUNNING → 其余终态。
+enum OpsJobStatus {
+  OPS_JOB_STATUS_UNSPECIFIED = 0;
+  OPS_JOB_QUEUED = 1;
+  OPS_JOB_RUNNING = 2;
+  OPS_JOB_SUCCEEDED = 3;
+  OPS_JOB_PARTIAL = 4;
+  OPS_JOB_REJECTED = 5;
+  OPS_JOB_FAILED = 6;
+  OPS_JOB_DIVERGED_AFTER_WRITE = 7;
+  OPS_JOB_CANCELLED = 8;
+  OPS_JOB_INTERRUPTED = 9;
+}
+
+// 作业事件类型（ops_job_event.type）；STARTED / ACCEPTED / RESULT 对应基线 rollback_audit_log 的同名行。
+enum OpsJobEventType {
+  OPS_JOB_EVENT_UNSPECIFIED = 0;
+  OPS_JOB_EVENT_STARTED = 1;
+  OPS_JOB_EVENT_PLANNED = 2;
+  OPS_JOB_EVENT_CLAIMED = 3;
+  OPS_JOB_EVENT_CHECK = 4;
+  OPS_JOB_EVENT_ACCEPTED = 5;
+  OPS_JOB_EVENT_WRITE = 6;
+  OPS_JOB_EVENT_RECHECK = 7;
+  OPS_JOB_EVENT_RESULT = 8;
+  OPS_JOB_EVENT_INTERRUPTED = 9;
+}
+
+// 一个运维作业。受理时插入，状态变化时更新。
+message OpsJobRow {
+  option (proto2mysql.table_name) = "ops_job";
+  option (proto2mysql.primary_key) = "job_id";
+  // 幂等键全服唯一：调用方的 Idempotency-Key（1–64 个可见 ASCII）；不带键的审计行用 "auto:<job_id>"
+  option (proto2mysql.unique_key) = "idem_key";
+  // idx_ops_job_0 = 按状态列作业；idx_ops_job_1 = 按种类列作业（GET /admin/ops-jobs，7.2b）
+  option (proto2mysql.index) = "status,created_ms;kind,created_ms";
+
+  uint64 job_id = 1;                    // 雪花号，取自 NodeTypes.SCENE_GUID 全服租约池（与 scene 发的流水号 / 快照号同一号域，不撞号）
+  string idem_key = 2 [(proto2mysql.max_length) = 64];
+  OpsJobKind kind = 3;
+  OpsJobStatus status = 4;
+  string request_json = 5;              // 规范化后的请求（不含令牌）
+  string request_hash = 6;              // SHA-256(方法 + 路径 + 规范化请求) 的十六进制；同键不同参数 → 409 idempotency_conflict
+  string operator = 7;                  // X-Xm-Operator
+  string reason = 8;
+  string result_code = 9;               // 结果码（data-ops-spec §7.7 的 code 字符串）；进行中为空
+  uint32 players_planned = 10;
+  uint32 players_affected = 11;
+  uint32 players_failed = 12;
+  uint32 divergence_rows = 13;
+  uint32 unprovable_players = 14;
+  bool accepted_divergence = 15;
+  bool accepted_recall_reversal = 16;
+  string runner = 17;                   // 执行它的 xm-data 实例
+  int64 created_ms = 18;
+  int64 started_ms = 19;
+  int64 finished_ms = 20;
+  string summary_json = 21;             // 结果摘要（幂等重放时原样回给调用方）
+}
+
+// 全集群单飞槽（7.2b）：受理时插入（重键 = 有作业在跑 → 409 ops_busy），终态时删除。
+message OpsActiveRow {
+  option (proto2mysql.table_name) = "ops_active";
+  option (proto2mysql.primary_key) = "slot";
+
+  uint32 slot = 1;                      // 恒 1
+  uint64 job_id = 2;
+  string runner = 3;
+  int64 heartbeat_ms = 4;
+}
+
+// 作业的逐玩家明细（7.2b）：计划时插 PLANNED，在写玩家数据的同一事务里改终态。
+message OpsJobPlayerRow {
+  option (proto2mysql.table_name) = "ops_job_player";
+  option (proto2mysql.primary_key) = "job_id,player_id";
+
+  uint64 job_id = 1;
+  uint64 player_id = 2;
+  uint64 planned_snapshot_id = 3;
+  int64 planned_snapshot_ms = 4;
+  uint64 claimed_epoch = 5;
+  uint64 pre_snapshot_id = 6;
+  string outcome = 7;
+  string detail_json = 8;
+  int64 written_ms = 9;
+}
+
+// 作业事件（只追加）。
+message OpsJobEventRow {
+  option (proto2mysql.table_name) = "ops_job_event";
+  option (proto2mysql.primary_key) = "job_id,seq";
+
+  uint64 job_id = 1;
+  uint32 seq = 2;
+  OpsJobEventType type = 3;
+  string payload_json = 4;              // ≤ 64 KB
+  int64 at_ms = 5;
+}
+
+// 已被回收的源流水（7.2c）：主键即源 tx_id，同一条源流水至多被回收一次（不变量 I6）。
+message RecallSourceRow {
+  option (proto2mysql.table_name) = "recall_source";
+  option (proto2mysql.primary_key) = "tx_id";
+  option (proto2mysql.index) = "job_id;player_id";
+
+  uint64 tx_id = 1;
+  uint64 job_id = 2;
+  uint64 player_id = 3;
+  uint32 kind = 4;                      // xm.audit.AssetKind
+  uint64 asset_id = 5;                  // 货币 = 币种；物品 = 配置号
+  uint64 matched_qty = 6;
+  uint64 recovered_qty = 7;
+  int64 at_ms = 8;
+}
+
+// 兜底日志回灌登记（AuditFallbackReplay）：同一文件的同一行至多回灌一次（tx_id = 0 的行回灌时发新号，不登记就会重复入库）。
+message AuditReplayLineRow {
+  option (proto2mysql.table_name) = "audit_replay_line";
+  option (proto2mysql.primary_key) = "file_sha256,line_no";
+
+  string file_sha256 = 1 [(proto2mysql.max_length) = 64];
+  uint32 line_no = 2;                   // 从 1 起
+  uint64 tx_id = 3;                     // 入库用的流水号（原号或新发的号）
+  int64 at_ms = 4;
+  string outcome = 5;                   // inserted（新入库）/ duplicate（库里已有这个号）
+}

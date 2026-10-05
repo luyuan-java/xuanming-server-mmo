@@ -23,6 +23,7 @@ public final class DataMetrics {
     static final String DB_INSERT = "xm.data.db.insert";
     static final String RETENTION_DELETED = "xm.data.retention.deleted";
     static final String ADMIN_REQUESTS = "xm.data.admin.requests";
+    static final String SNAPSHOT_ADMIN = "xm.data.snapshot.admin";
 
     /** 一条 Kafka 记录的结局（{@code xm.data.kafka.records{outcome}}），每条恰好计一次。 */
     public enum Outcome {
@@ -105,6 +106,15 @@ public final class DataMetrics {
 
     public void adminRequest(String op, String result) {
         Counter.builder(ADMIN_REQUESTS).description("运维接口请求").tag("op", op).tag("result", result)
+                .register(registry).increment();
+    }
+
+    /**
+     * 运维直写快照的结局（{@code xm_data_snapshot_admin_total}）。标签取值有界：cause 只有手工快照接受的原因名，
+     * result 是固定集合（ok / replayed / player_not_found / id_unavailable / idempotency_conflict / db_error）。
+     */
+    public void snapshotAdmin(String cause, String result) {
+        Counter.builder(SNAPSHOT_ADMIN).description("运维直写快照的结局").tag("cause", cause).tag("result", result)
                 .register(registry).increment();
     }
 }

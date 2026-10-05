@@ -22,6 +22,11 @@
             <artifactId>xm-discovery</artifactId>
         </dependency>
         <dependency>
+            <!-- 运维面发号：LeaseGatedSnowflake / Snowflake（租约在 NodeTypes.SCENE_GUID 全服池上，见 OpsIds） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+        </dependency>
+        <dependency>
             <!-- gate 排空运维接口读 gate 目录（xm.api.GateNodeInfo） -->
             <groupId>com.game</groupId>
             <artifactId>xm-api</artifactId>
@@ -30,6 +35,23 @@
             <!-- 区服目录 / 白名单 / 登录公告的运维接口（表由 xm-gateway 建，这里只读写） -->
             <groupId>com.game</groupId>
             <artifactId>xm-gateway-store</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 只读玩家数据：xm.storage.PlayerState（快照详情 / 差异 / 回收估算）与已落盘账本规则（账本差集）。
+                 批次 7.2a 不写玩家数据：PlayerStoreAutoConfiguration 在 DataApplication 里排除，写路径随 7.2b -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-player-store</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 运维作业表（ops_job / ops_job_event / ops_job_player / ops_active / recall_source / audit_replay_line）：
+                 形状由 proto 决定的表一律接 pbmysql（roadmap 阶段 4 起的约定） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-pbmysql</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 快照详情把 player_state 转成 JSON（JsonFormat）：protobuf 本身的一部分，版本由根 BOM 管理 -->
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java-util</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -82,6 +104,32 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <!-- 只编译本模块的运维作业表定义（import xm-pbmysql 的选项定义）；不扫描全部项目依赖：xm-player-store / xm-audit
+                         的 proto 已随各自的 jar 生成好类，这里不重复生成（同 xm-trade / xm-guild 的写法） -->
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                    <importDependencies>
+                        <importDependency>
+                            <groupId>com.google.protobuf</groupId>
+                            <artifactId>protobuf-java</artifactId>
+                            <version>${protobuf.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                        <importDependency>
+                            <groupId>com.game</groupId>
+                            <artifactId>xm-pbmysql</artifactId>
+                            <version>${project.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                    </importDependencies>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

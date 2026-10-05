@@ -1,0 +1,71 @@
+# 契约漂移报告（批次 7.1a，docs/porting/deploy-ci-spec.md §4.6）：每天把 mmorpg main 的 HEAD 与本仓库记录的契约来源比一次。
+# 只报告、不判红（job 始终绿）：Java 版有意在批次边界才同步契约，落后一段时间是常态；常红的门禁会被无视。
+# 有漂移时出一条 ::warning（匿名可读）并把差异写进 Step Summary；处理方法是运行 ContractSync 同步、两边同批提交（AGENTS §1）。
+# 共同约定（runner、权限、action 钉 SHA、失败转 annotation）见 ci.yml 文件头。
+name: Contract drift
+
+on:
+  schedule:
+    - cron: '30 19 * * *'   # 每天 UTC 19:30（北京时间 03:30）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: 契约漂移报告（只报告）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 不带 ref = mmorpg 默认分支（main）的 HEAD；稀疏目录同 ci.yml 的 contract job
+      - name: 稀疏检出 mmorpg（main HEAD）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: luyuan-cpp/xuanming-server-mmo
+          path: .mmorpg
+          fetch-depth: 1
+          filter: blob:none
+          persist-credentials: false
+          sparse-checkout: |
+            proto
+            data/schema
+            generated/code/proto
+            generated/tables
+            cpp/generated/table/code/constants
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          problem-matcher: false
+      - name: 对比 mmorpg main 与已记录的契约来源
+        run: |
+          recorded=$(sed -n 's/^mmorpg\.commit=//p' contract/SOURCE.properties)
+          latest=$(git -C .mmorpg rev-parse HEAD)
+          if [ "$latest" = "$recorded" ]; then
+            echo "mmorpg main 仍是 $latest，无漂移" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # 用 --commit 冒充已记录的提交：SOURCE.properties 里的 commit 行于是相同，剩下的差异全是契约内容本身的变化。
+          # mmorpg HEAD 的产物让同步本身抛错（例如出现没有 schema 的新表）时同样按漂移报告。
+          if java tools/ContractSync.java --mmorpg .mmorpg --commit "$recorded" --check > drift.out 2>&1; then
+            echo "mmorpg 已前进到 $latest（记录的是 $recorded），但契约派生物不变，无需同步" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            cat drift.out
+            echo "::warning title=契约漂移::mmorpg 已前进到 $latest（记录的是 $recorded），契约派生物有变化：运行 ContractSync 同步、两边同批提交（AGENTS §1）"
+            {
+              echo "### 契约漂移（mmorpg $latest，记录的是 $recorded）"
+              echo
+              echo '```'
+              head -n 200 drift.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0

@@ -1,0 +1,27 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "xm-maven-compile",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^\\[ERROR\\]\\s+(.+?\\.java):\\[(\\d+),(\\d+)\\]\\s+(.+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "message": 4
+        }
+      ]
+    },
+    {
+      "owner": "xm-maven-goal",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^\\[ERROR\\]\\s+(Failed to execute goal .+)$",
+          "message": 1
+        }
+      ]
+    }
+  ]
+}

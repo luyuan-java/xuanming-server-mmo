@@ -29,7 +29,10 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
     static final String AUDIT_LOGGER = "xm.audit.admin";
 
     private static final Logger audit = LoggerFactory.getLogger(AUDIT_LOGGER);
-    /** 指标的 op 标签只取已知接口（任意路径不得变成标签值，否则可被刷成高基数）。 */
+    /**
+     * 指标的 op 标签只取已知接口（任意路径不得变成标签值，否则可被刷成高基数）。精确路径在这里；带路径参数的接口（快照详情、
+     * 玩家 / 物品 / 回收……）在 {@link #opOf} 里按前缀归类。
+     */
     private static final Map<String, String> KNOWN_OPS = Map.of(
             AuditQueryController.TRANSACTION_LOG_PATH, "transaction_log",
             AuditQueryController.PLAYER_SNAPSHOTS_PATH, "player_snapshots",
@@ -73,11 +76,26 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
         }
     }
 
-    /** 指标的 op 标签：已知接口取固定值，全服产出封禁 / 区服目录 / 公告 / 白名单 / gate 排空的各子路径各归成一个，其余一律 other。 */
+    /**
+     * 指标的 op 标签：已知接口取固定值，全服产出封禁 / 区服目录 / 公告 / 白名单 / gate 排空 / 运维快照详情 / 玩家 / 物品 / 回收的
+     * 各子路径各归成一个，其余一律 other（任意路径不得变成标签值）。
+     */
     static String opOf(String path) {
         String known = KNOWN_OPS.get(path);
         if (known != null) {
             return known;
+        }
+        if (under(path, AuditQueryController.PLAYER_SNAPSHOTS_PATH)) {
+            return "player_snapshots";
+        }
+        if (under(path, PlayerOpsAdminController.PATH)) {
+            return "players";
+        }
+        if (under(path, ItemAdminController.PATH)) {
+            return "items";
+        }
+        if (under(path, RecallAdminController.PATH)) {
+            return "recalls";
         }
         if (under(path, GainBlockController.PATH)) {
             return "gain_blocks";

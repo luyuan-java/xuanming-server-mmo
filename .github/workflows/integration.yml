@@ -1,0 +1,151 @@
+# 集成测试门禁（批次 7.1a，docs/porting/deploy-ci-spec.md §4.4）：用 deploy/compose/infra.yaml 起真 MySQL / Redis / Kafka，
+# 跑 -Dxm.it.* 打开的全量 verify，再用 TestReport --require-it-executed 证明集成测试真的执行了（标志传错时不会「全部跳过还是绿」）。
+# 本机没有 Docker，compose 文件除了这里不会在任何地方执行：让集成测试用它起依赖，等于每天自测一遍这个文件；
+# 依赖版本、关闭自动建 topic、Kafka 双监听也只写在 infra.yaml 一处（不另写一份 services: 服务容器）。
+# 整栈冒烟（stack job：镜像构建、整栈 up、robot、停机断言）随批次 7.1b 加进来（§4.5）。
+# 共同约定（runner、权限、action 钉 SHA、失败转 annotation）见 ci.yml 文件头。
+name: Integration
+
+on:
+  push:
+    branches: [main]                       # 每次 push main 都跑（不加 paths 过滤），每个提交都有集成测试结论
+  schedule:
+    - cron: '0 19 * * *'                   # 每天 UTC 19:00（北京时间 03:00）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # 每次 push main 与每日定时都要跑完、互不取消：按事件 + 提交分组，不取消进行中的运行
+  group: integration-${{ github.event_name }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  INFRA: deploy/compose/infra.yaml
+
+jobs:
+  it:
+    name: 集成测试（真 MySQL / Redis / Kafka）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          problem-matcher: false
+      - name: 注册 Maven 问题匹配器
+        run: echo "::add-matcher::$GITHUB_WORKSPACE/.github/maven-problem-matcher.json"
+
+      - name: 环境自检
+        # 仿基线 release.yml 的环境自检：版本与容量写进日志，超时 / OOM 时先看这里
+        run: |
+          docker version
+          docker compose version
+          v=$(docker compose version --short); v=${v#v}
+          major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}
+          if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ ]] || (( major < 2 || (major == 2 && minor < 20) )); then
+            echo "::error title=环境自检::需要 docker compose ≥ 2.20（stack.yaml 用 include），runner 上是 $v"
+            exit 1
+          fi
+          nproc
+          free -m
+          df -h /
+
+      - name: 生成本次运行的秘密
+        # 每次运行随机生成并 mask，只在这一次运行里存在；不使用任何 GitHub secret
+        run: |
+          v=$(openssl rand -hex 32)
+          echo "::add-mask::$v"
+          echo "XM_MYSQL_PASSWORD=$v" >> "$GITHUB_ENV"
+
+      - name: compose 静态检查（含 :? 反例）
+        # 这里是唯一真正执行 compose 校验的地方（本机没有 compose，spec Q3）：compose 拒绝 infra.yaml 的原因只在 job 日志里，
+        # 匿名读不到，所以输出先落文件，失败时把最后 20 行编进 ::error（ci-logs/ 失败时随 artifact 上传）
+        run: |
+          mkdir -p ci-logs
+          if docker compose -f "$INFRA" config -q > ci-logs/compose-config.out 2>&1; then
+            cat ci-logs/compose-config.out
+          else
+            rc=$?
+            cat ci-logs/compose-config.out
+            msg="退出码 $rc，输出最后 20 行："$'\n'"$(tail -n 20 ci-logs/compose-config.out)"
+            msg=${msg//'%'/'%25'}; msg=${msg//$'\r'/'%0D'}; msg=${msg//$'\n'/'%0A'}
+            echo "::error file=$INFRA,title=compose config 失败::$msg"
+            exit 1
+          fi
+          # 反例：缺必填秘密时 compose 必须在启动前就失败，证明 ${VAR:?} 生效
+          if env -u XM_MYSQL_PASSWORD docker compose -f "$INFRA" config -q > /dev/null 2>&1; then
+            echo "::error file=$INFRA,title=compose 秘密守卫::不设 XM_MYSQL_PASSWORD 时 config 竟然成功，\${XM_MYSQL_PASSWORD:?} 没有生效"
+            exit 1
+          fi
+
+      - name: 起依赖（infra.yaml）
+        run: |
+          # up 的输出经 tee 同时进日志与 ci-logs/compose-up.out：拉镜像限流（toomanyrequests）、钉死的 digest 不存在、
+          # 端口被占时要么还没有容器、要么容器停在 created（logs 为空），真正的原因只在 up 自己的输出里。
+          # 默认 shell 是 bash -e，没有 pipefail：不打开的话 if 拿到的是 tee 的退出码，up 失败也会走成功分支
+          set -o pipefail
+          mkdir -p ci-logs
+          if docker compose -f "$INFRA" up -d --wait --wait-timeout 180 2>&1 | tee ci-logs/compose-up.out; then
+            docker compose -f "$INFRA" ps
+            exit 0
+          else
+            rc=$?
+          fi
+          # 失败：把 up 输出的最后 20 行、状态表和不健康服务日志的最后 30 行编进一条 ::error（日志匿名读不到）。
+          # 收集命令都带 || true：默认 shell 是 bash -e，赋值里的命令替换失败会让脚本在输出 ::error 之前就退出
+          report="--- up 退出码 $rc，输出最后 20 行"$'\n'"$(tail -n 20 ci-logs/compose-up.out 2>&1 || true)"
+          report+=$'\n'"--- 状态"$'\n'"$(docker compose -f "$INFRA" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Health}}\t{{.Status}}' 2>&1 || true)"
+          for s in $(docker compose -f "$INFRA" ps -a --format '{{.Service}} {{.State}} {{.Health}}' \
+                     | awk '$2 != "running" || ($3 != "" && $3 != "healthy") {print $1}'); do
+            report+=$'\n'"--- $s 最后 30 行"$'\n'"$(docker compose -f "$INFRA" logs --no-color --tail 30 "$s" 2>&1 || true)"
+          done
+          echo "$report"
+          report=${report//'%'/'%25'}; report=${report//$'\r'/'%0D'}; report=${report//$'\n'/'%0A'}
+          echo "::error file=$INFRA,title=依赖没有就绪::$report"
+          exit 1
+
+      - name: 构建与集成测试（mvnw verify -Dxm.it.*）
+        id: verify
+        # 不加 -T：各模块的集成测试共用 Redis 的 DB 与同一个 broker，必须串行。
+        # 测试从环境变量读 XM_MYSQL_PASSWORD（xm.it.mysql.user 缺省 root，各自建临时库）；测试用的其它密钥由各模块 surefire 配置注入。
+        run: >-
+          ./mvnw -B -ntp -fae verify
+          -Dxm.it.redis=redis://127.0.0.1:6379
+          -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306
+          -Dxm.it.kafka=127.0.0.1:9092
+
+      - name: 测试报告
+        if: ${{ !cancelled() }}
+        env:
+          # 只在 Maven 本身成功时才要求「集成测试全部执行」：Maven 中途失败时后面的模块本来就没跑，不再叠加噪声
+          REQUIRE_IT: ${{ steps.verify.outcome == 'success' && '--require-it-executed' || '' }}
+        run: java tools/TestReport.java --summary "$GITHUB_STEP_SUMMARY" --annotate $REQUIRE_IT
+
+      - name: 收集 compose 日志（失败时）
+        if: ${{ failure() }}
+        run: |
+          mkdir -p ci-logs
+          docker compose -f "$INFRA" ps -a > ci-logs/compose-ps.txt 2>&1 || true
+          docker compose -f "$INFRA" logs --no-color --timestamps > ci-logs/compose.log 2>&1 || true
+      - name: 上传日志与 surefire 报告（失败时）
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-logs
+          path: |
+            ci-logs/
+            **/target/surefire-reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: 停依赖并清卷
+        if: ${{ always() }}
+        # compose 对任何子命令都先做变量插值：秘密那一步没跑到时给个占位值，免得 down 本身因 :? 失败
+        run: XM_MYSQL_PASSWORD="${XM_MYSQL_PASSWORD:-unused}" docker compose -f "$INFRA" down -v

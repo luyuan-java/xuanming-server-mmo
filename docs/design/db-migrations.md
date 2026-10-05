@@ -200,3 +200,50 @@ SELECT zone_id, name, manual_status, recommended, sort_order FROM zone_config;
 ```
 
 **回滚**：回退代码即可；表可留着（旧代码不读不写它，区服回到读静态配置）。
+
+## M8：流水查询索引、快照操作人 / 备注列与运维作业表（2026-10-05，xm-data，批次 7.2a）
+
+**原因**：数据运维（data-ops-spec §7.3）。
+- `transaction_log` 加三条二级索引：全服按物品 / 按币种的查询与回收（`idx_txlog_item (kind, item_config_id, time_ms)`、
+  `idx_txlog_currency (kind, currency_type, time_ms)`）、物品追溯（`idx_txlog_uuid (item_uuid, time_ms)`）。不合成一条
+  `(kind, item_config_id, currency_type, time_ms)`：那要依赖「物品行币种恒 0、货币行配置号恒 0」，被打破时回收会静默漏行。
+- `player_snapshot` 加 `operator`、`note`：xm-data 直写的快照（手工 / 维护前，以后的回档前安全快照）记操作人与备注；
+  scene 经 Kafka 的行两列为空串（`DEFAULT ''`，Kafka 落库的 INSERT 不用改）。
+- 运维作业表 `ops_job`、`ops_job_event`、`ops_job_player`、`ops_active`、`recall_source`、`audit_replay_line`：由 xm-pbmysql 按
+  `xm-data/src/main/proto/xm/data/ops_tables.proto` 在 xm-data 启动时建表 / 只扩不缩地补列补索引（同 xm-trade / xm-guild），**不需要手工迁移**。
+
+**行为变化**：无客户端可见变化。热表 `transaction_log` 多三条二级索引会放大落库写入（可接受）。
+
+**新库**：无需操作（建表脚本 `xm-data/src/main/resources/db/xm-data-schema.sql` 已带索引与两列；运维表启动时自动建）。
+
+**存量库**（在 `xm_java` 上执行；只加索引与带缺省值的列，不必停服；大表加索引用 InnoDB 在线 DDL）：
+
+```sql
+ALTER TABLE transaction_log
+    ADD KEY idx_txlog_item (kind, item_config_id, time_ms),
+    ADD KEY idx_txlog_currency (kind, currency_type, time_ms),
+    ADD KEY idx_txlog_uuid (item_uuid, time_ms);
+ALTER TABLE player_snapshot
+    ADD COLUMN operator VARCHAR(64)  NOT NULL DEFAULT '' COMMENT 'xm-data 直写的操作人；scene 经 Kafka 的为空',
+    ADD COLUMN note     VARCHAR(256) NOT NULL DEFAULT '' COMMENT '直写的备注（原因 / 事件 / 作业号）';
+```
+
+**核对**：迁移后 `SHOW CREATE TABLE transaction_log` / `player_snapshot` 与新库逐字相同（`XmDataMysqlIntegrationTest` 用迁移前的建表脚本
+`xm-data/src/test/resources/db/xm-data-schema-before-m8.sql` + 上面的语句（`db/xm-data-migration-m8.sql`）对拍）。
+
+```sql
+SHOW CREATE TABLE transaction_log;   -- 有 idx_txlog_item / idx_txlog_currency / idx_txlog_uuid
+SHOW CREATE TABLE player_snapshot;   -- 有 operator / note
+SHOW TABLES LIKE 'ops\_%';           -- xm-data 启动后有 ops_active / ops_job / ops_job_event / ops_job_player
+SHOW TABLES LIKE 'recall_source';    -- 同上（pbmysql 建）
+SHOW TABLES LIKE 'audit_replay_line';
+```
+
+**回滚**：
+
+```sql
+ALTER TABLE transaction_log DROP INDEX idx_txlog_item, DROP INDEX idx_txlog_currency, DROP INDEX idx_txlog_uuid;
+ALTER TABLE player_snapshot DROP COLUMN operator, DROP COLUMN note;
+```
+
+回滚后必须同时回退代码：新代码的快照直写 / 列表查询引用这两列。运维作业表可留着（旧代码不读不写）；作业行是运维审计，有留存要求时不要删。

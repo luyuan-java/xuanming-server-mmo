@@ -3,6 +3,7 @@
 #   XM_KAFKA_BOOTSTRAP_SERVERS        Kafka 地址（缺省 127.0.0.1:9092）
 #   XM_AUDIT_TOPIC_GENERATION         审计 topic 代次（必须与 xm-scene 一致，缺省 1）
 #   XM_ADMIN_TOKEN                    运维接口令牌；不设则 /admin/** 一律 503
+#   XM_DATA_GM_SNAPSHOT_RETENTION     运维 / 安全快照保留期（缺省 0 = 永久）
 spring:
   application:
     name: xm-data
@@ -18,7 +19,8 @@ spring:
     druid:
       initial-size: 1
       min-idle: 1
-      max-active: 4
+      # 两条消费线程 + 保留期清理 + 运维查询 / 快照 / 差异 / 回收 dry-run 的事务（data-ops-spec §7.5）
+      max-active: 8
       max-wait: 3000
   sql:
     init:
@@ -45,7 +47,8 @@ xm:
   audit:
     bootstrap-servers: ${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
     topic-generation: ${XM_AUDIT_TOPIC_GENERATION:1}
-  # 全服产出封禁名单的读写（运维接口 /admin/gain-blocks），与 xm-scene 同一个库；客户端第一次用到时才连
+  # 全服产出封禁名单的读写（运维接口 /admin/gain-blocks）与运维面发号租约（NodeTypes.SCENE_GUID 全服池，与 xm-scene 同池），
+  # 与 xm-scene 同一个库；启动后由发号线程在后台连（连不上每 10 秒重试，不挡启动与审计消费）
   redis:
     address: redis://127.0.0.1:6379
     database: 12
@@ -54,8 +57,17 @@ xm:
     retention:
       # 资产流水保留期；0 = 永久保留（同 mmorpg）
       transaction-log: ${XM_DATA_TXLOG_RETENTION:0s}
-      # 玩家快照保留期；0 = 永久保留（同 mmorpg）
+      # 上下线 / 周期快照（LOGIN / LOGOUT / PERIODIC）保留期；0 = 永久保留（同 mmorpg）
       player-snapshot: ${XM_DATA_SNAPSHOT_RETENTION:0s}
+      # 运维 / 安全快照（GM_MANUAL / PRE_MAINTENANCE / PRE_ROLLBACK / PRE_GM_EDIT）保留期；0 = 永久保留（撤销依据，缺省永久）。
+      # 启动约束：流水保留期为 0，或不短于上下线快照保留期且后者非 0（data-ops-spec §3.7）；生产值随部署批次给出（Q11）
+      gm-snapshot: ${XM_DATA_GM_SNAPSHOT_RETENTION:0s}
+    ops:
+      # 不给玩家、只按原因 / 时间窗的全服流水查询，与全服回收的时间窗上限
+      max-window: 7d
+    recall:
+      # 一次回收（含 dry-run）至多匹配多少行源流水；超出 422 result_truncated、零变更
+      max-rows: 10000
 
 logging:
   level:

@@ -45,4 +45,15 @@ class PlayerSnapshotDecoderTest {
                 .isEqualTo(Outcome.INVALID);
         assertThat(decode(valid().setCauseValue(99).build().toByteArray()).row().cause()).isEqualTo(99);
     }
+
+    @Test
+    void 批次72a的新原因按数值原样落库() {
+        // T-P2：周期 / 维护前 / 手工 / 回档前 / 离线编辑前，以及本版本不认识的值
+        for (int cause : new int[] {3, 4, 5, 6, 1001, 1002, 4242}) {
+            assertThat(decode(valid().setCauseValue(cause).build().toByteArray()).row().cause()).as("cause=" + cause)
+                    .isEqualTo(cause);
+        }
+        assertThat(SnapshotCause.SNAPSHOT_PRE_ROLLBACK_VALUE).as("Java 独有的从 1001 起").isEqualTo(1001);
+        assertThat(SnapshotCause.SNAPSHOT_GM_MANUAL_VALUE).as("与 mmorpg SnapshotTrigger 同值").isEqualTo(6);
+    }
 }

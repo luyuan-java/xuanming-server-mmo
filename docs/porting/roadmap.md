@@ -88,8 +88,8 @@
 
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
-| 7.1 | 本地编排（docker compose）、镜像构建、CI（构建 + 单测 + 契约 `--check`） | deploy-local-compose、deploy-container-images、ci-workflows、container-image-build |
-| 7.2 | 流水 / 快照落库、GM 快照差异、回档、批量回收 | txlog-ingest、player-snapshot-ingest、gm-snapshot-diff、gm-rollback、gm-batch-recall |
+| 7.1 | 本地编排（docker compose）、镜像构建、CI（构建 + 单测 + 契约 `--check`） | deploy-local-compose、deploy-container-images、ci-workflows、container-image-build | 7.1a ✅（提交见 git log「批次 7.1a」；三个 workflow、`deploy/compose/infra.yaml`、`tools/TestReport.java`、mvnw 可执行位，另把 build-info 与 Dockerfile 提前做了；compose / 镜像只在 CI 上执行，结论以首轮 CI run 为准——规格 docs/porting/deploy-ci-spec.md §12，PARITY「本地编排」「服务镜像与构建信息」「CI 门禁」行）；7.1b 待做（整栈 `stack.yaml`、各进程地址占位符与探针 / info、CI stack job） |
+| 7.2 | 流水 / 快照落库、GM 快照差异、回档、批量回收 | txlog-ingest、player-snapshot-ingest、gm-snapshot-diff、gm-rollback、gm-batch-recall | 7.2a ✅（提交见 git log「批次 7.2a」；流水筛选查询与三条索引、物品追溯、快照新原因与读路径、手工快照 / 详情 / 结构化差异、回收 dry-run、保留期按原因分、兜底日志回灌、运维作业表（pbmysql）、102–117 回归测试——规格 docs/porting/data-ops-spec.md §13，PARITY「GM 快照与差异」等行）；7.2b 待做（作业框架、归属夺权栅栏、回档、帮会检查、整区维护前快照）；7.2c 待做（回收执行、欠款、精确回收） |
 | 7.3 | 合服（围栏、玩家数据、跨系统步骤、预检 / 审计 / 撤销、合服后提示） | merge-* |
 | 7.4 | 一致性巡检、存盘压测、玩家数据排障工具、压测机器人 AI | data-consistency-check、data-stress-verifier、player-data-debug-tools、robot-stress-ai |
 | 7.5 | 契约变更报告与兼容性闸；导航网格查询 | contract-change-report、navmesh-bake-and-query、navmesh-queries |

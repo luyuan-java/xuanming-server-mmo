@@ -11,20 +11,33 @@ package xm.audit;
 option java_package = "com.game.audit.proto";
 option java_multiple_files = true;
 
-// 触发原因（数值同 mmorpg SnapshotTrigger）。
+// 触发原因（与 mmorpg SnapshotTrigger 同义的沿用其数值；Java 独有的从 1001 起）。
+// 消费端不认识的值按数值原样落库；保留期按原因分两类清理（xm-data DataProperties.Retention），新增值要同时决定它归哪一类。
 enum SnapshotCause {
   SNAPSHOT_CAUSE_UNSPECIFIED = 0;
   // 进入场景（每次进场一份，含接管旧实例）
   SNAPSHOT_LOGIN = 1;
   // 离开场景（主动离开、断线、停服）
   SNAPSHOT_LOGOUT = 2;
+  // 周期快照（同 mmorpg SNAPSHOT_PERIODIC；预留，两版都还没有生产方）
+  SNAPSHOT_PERIODIC = 3;
+  // 交易前（同 mmorpg SNAPSHOT_PRE_TRADE；预留给交易写侧）
+  SNAPSHOT_PRE_TRADE = 4;
+  // 整区维护前（同 mmorpg SNAPSHOT_PRE_MAINTENANCE；xm-data 直写）
+  SNAPSHOT_PRE_MAINTENANCE = 5;
+  // 运维手工快照（同 mmorpg SNAPSHOT_GM_MANUAL；xm-data 直写）。基线 data_service 的「事件快照」并入这里，事件写进备注
+  SNAPSHOT_GM_MANUAL = 6;
+  // 回档前安全快照（Java 独有；基线放在另一枚举的 3，与 PERIODIC 撞值）。只能按快照号显式选用，不当「某时刻之前最近的状态」
+  SNAPSHOT_PRE_ROLLBACK = 1001;
+  // 离线编辑（回收 / 精确回收 / 欠款）前的安全快照（Java 独有）。选用规则同 PRE_ROLLBACK
+  SNAPSHOT_PRE_GM_EDIT = 1002;
 }
 
 message PlayerSnapshotRecord {
   // 全服唯一（雪花号，同流水号的号段租约）；0 = 无效
   uint64 snapshot_id = 1;
   uint64 player_id = 2;
-  // 拍快照的 Unix 毫秒
+  // 内容所代表时刻的 Unix 毫秒：scene 拍的（LOGIN / LOGOUT）= 拍摄时刻；xm-data 直写的 = 所读已落盘状态的写入时刻
   int64 time_ms = 3;
   SnapshotCause cause = 4;
   // 拍快照时玩家所在的 zone

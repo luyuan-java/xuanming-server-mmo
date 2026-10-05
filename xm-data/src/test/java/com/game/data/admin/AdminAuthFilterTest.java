@@ -105,6 +105,13 @@ class AdminAuthFilterTest {
         assertThat(AdminAuthFilter.opOf("/admin/gates/drain/1/3")).isEqualTo("gates");
         assertThat(AdminAuthFilter.opOf("/admin/gatesX")).isEqualTo("other");
         assertThat(AdminAuthFilter.opOf("/admin/killswitch")).isEqualTo("killswitch");
+        // 批次 7.2a：带路径参数的运维面接口按前缀归类，路径本身绝不变成标签值
+        assertThat(AdminAuthFilter.opOf("/admin/player-snapshots/18446744073709551615")).isEqualTo("player_snapshots");
+        assertThat(AdminAuthFilter.opOf("/admin/players/1001/snapshot-diff")).isEqualTo("players");
+        assertThat(AdminAuthFilter.opOf("/admin/items/42/trace")).isEqualTo("items");
+        assertThat(AdminAuthFilter.opOf("/admin/recalls")).isEqualTo("recalls");
+        assertThat(AdminAuthFilter.opOf("/admin/player-snapshotsX")).isEqualTo("other");
+        assertThat(AdminAuthFilter.opOf("/admin/playersX/1")).isEqualTo("other");
         assertThat(AdminAuthFilter.printable("/admin/whitelist/1/a\nforged")).isEqualTo("/admin/whitelist/1/a?forged");
         assertThat(AdminAuthFilter.printable(null)).isNull();
     }

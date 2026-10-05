@@ -12,6 +12,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param dbRetry        落库遇到可恢复故障（库不可达、锁超时……）时的退避：暂停消费、不提交位点、原批次一直重试（宁可积压不丢）
  * @param retention      库内保留期清理
  * @param adminToken     运维接口令牌（环境变量 {@code XM_ADMIN_TOKEN}）；为空时 /admin/** 一律 503
+ * @param ops            运维面（批次 7.2）的通用参数
+ * @param recall         批量回收
  */
 @ConfigurationProperties("xm.data")
 public record DataProperties(
@@ -19,7 +21,9 @@ public record DataProperties(
         @DefaultValue PlayerSnapshotConsumer playerSnapshot,
         @DefaultValue DbRetry dbRetry,
         @DefaultValue Retention retention,
-        @DefaultValue("") String adminToken) {
+        @DefaultValue("") String adminToken,
+        @DefaultValue Ops ops,
+        @DefaultValue Recall recall) {
 
     /** 一个消费者的参数（各 topic 缺省值不同，所以每个 topic 一个记录类型）。 */
     public interface ConsumerSettings {
@@ -72,21 +76,58 @@ public record DataProperties(
     }
 
     /**
+     * 保留期（data-ops-spec §3.7、Q11）。代码缺省全部 0 = 永久保留（同 mmorpg：基线没有任何清理）；生产值由部署给出。
+     *
+     * <p><b>启动约束</b>（不满足拒绝启动）：流水保留期为 0，或者「快照保留期非 0 且流水保留期 ≥ 快照保留期」——回档窗口内要能用流水解释差异
+     * （转移证据），回收窗口也受流水保留期限制。GM / 安全快照（{@code gmSnapshot}）不受这条约束：它们是撤销依据，建议永久保留。
+     *
      * @param interval       清理周期
-     * @param transactionLog 资产流水保留多久；0 = 永久保留（缺省，同 mmorpg：基线没有任何清理）
-     * @param playerSnapshot 玩家快照保留多久；0 = 永久保留（缺省，同 mmorpg）
+     * @param transactionLog 资产流水保留多久；0 = 永久保留
+     * @param playerSnapshot 上下线 / 周期快照（LOGIN / LOGOUT / PERIODIC）保留多久；0 = 永久保留
+     * @param gmSnapshot     运维与安全快照（GM_MANUAL / PRE_MAINTENANCE / PRE_ROLLBACK / PRE_GM_EDIT）保留多久；0 = 永久保留（缺省）。
+     *                       不在两类里的原因（PRE_TRADE、不认识的值）从不清理
      * @param batch          每条 DELETE 删多少行（分批，避免长事务与大锁）
      */
     public record Retention(
             @DefaultValue("1h") Duration interval,
             @DefaultValue("0s") Duration transactionLog,
             @DefaultValue("0s") Duration playerSnapshot,
+            @DefaultValue("0s") Duration gmSnapshot,
             @DefaultValue("5000") int batch) {
 
         public Retention {
             if (interval.isNegative() || interval.isZero() || transactionLog.isNegative() || playerSnapshot.isNegative()
-                    || batch < 1) {
+                    || gmSnapshot.isNegative() || batch < 1) {
                 throw new IllegalArgumentException("xm.data.retention 配置非法");
+            }
+            if (!transactionLog.isZero() && (playerSnapshot.isZero() || transactionLog.compareTo(playerSnapshot) < 0)) {
+                throw new IllegalArgumentException("xm.data.retention：资产流水保留期（" + transactionLog
+                        + "）必须为 0（永久），或不短于玩家快照保留期且快照保留期非 0（当前 " + playerSnapshot
+                        + "）——回档 / 回收窗口内要能用流水解释差异");
+            }
+        }
+    }
+
+    /**
+     * @param maxWindow 不给玩家、只按原因 / 时间窗的全服流水查询，与不指定玩家的全服回收的时间窗上限（走 idx_txlog_time，防扫全表）
+     */
+    public record Ops(@DefaultValue("7d") Duration maxWindow) {
+
+        public Ops {
+            if (maxWindow.isNegative() || maxWindow.isZero()) {
+                throw new IllegalArgumentException("xm.data.ops.max-window 配置非法");
+            }
+        }
+    }
+
+    /**
+     * @param maxRows 一次回收（含 dry-run）至多匹配多少行源流水；超出判截断，422 {@code result_truncated}、零变更（同基线 recall_logic.go:48）
+     */
+    public record Recall(@DefaultValue("10000") int maxRows) {
+
+        public Recall {
+            if (maxRows < 1) {
+                throw new IllegalArgumentException("xm.data.recall.max-rows 配置非法");
             }
         }
     }

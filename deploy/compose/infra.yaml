@@ -1,0 +1,101 @@
+# Java 版依赖：MySQL / Redis / Kafka（KRaft 单节点）。docs/porting/deploy-ci-spec.md §2.3–§2.4。
+#
+# - 端口只发布到宿主 127.0.0.1，缺省端口 = 各进程 application.yaml 的缺省：起好之后 tools/local/start-slice.sh 一行都不用改。
+#   开发机上已有本地进程或基线 mmorpg 的 compose 占着 3306 / 6379 / 9092 时，用 XM_MYSQL_HOST_PORT / XM_REDIS_HOST_PORT /
+#   XM_KAFKA_HOST_PORT 改开。
+# - 秘密只从环境变量读（shell 已导出的，或本目录下不入库的 .env，模板见 env.example）；必填写 ${VAR:?}，缺失时 compose
+#   在启动前就失败。
+# - 项目名固定为 xuanming-java、不写 container_name：两版不共享存储（architecture.md），只能靠项目名把卷与容器隔开。
+# - 镜像钉 tag + index digest（多架构清单的 digest，2026-10-05 由 registry-1.docker.io 的 Docker-Content-Digest 查得）。
+#   更新：docker buildx imagetools inspect <image:tag> 取 Digest 行替换 @sha256，推送后看 integration.yml 的 it job 是否绿。
+# - 只放依赖。基线的 etcd / Nacos / Redis Cluster / kafka-ui / topic-init 都不移植（spec §2.3）。
+# - 重置：MySQL 与 Redis 必须一起清（docker compose -f deploy/compose/infra.yaml down -v），禁止单独删 redis-data：
+#   Redis 里的 xm:node-id-epoch:* 回退会让 scene 重新接受旧 gate 的链路，组队等只在 Redis 的权威数据也会和 MySQL 对不上。
+#
+# 用法（有 Docker 的机器）：
+#   cp deploy/compose/env.example deploy/compose/.env    # 填值
+#   docker compose -f deploy/compose/infra.yaml up -d --wait
+#   tools/local/start-slice.sh                           # 照常在宿主上起 Java 进程
+#   docker compose -f deploy/compose/infra.yaml down     # 保留卷；down -v 连卷一起清
+name: xuanming-java
+
+services:
+  mysql:
+    image: mysql:8.4.11@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
+    # 服务器缺省字符集 / 排序规则 / 时区与开发机本地 MySQL 的配置相同（集成测试与本机切片都在这套配置上验证过）。
+    # 镜像缺省是 utf8mb4_0900_ai_ci（不区分大小写、NO PAD）。不带 COLLATE 建的库继承服务器缺省：xm_java（MYSQL_DATABASE、
+    # 各进程的 createDatabaseIfNotExist）与 xm-data / xm-player-store 集成测试的临时库都是这样建的，xm-data 的建表脚本也不写
+    # COLLATE（带 CHARACTER SET utf8mb4 建库的测试取字符集自己的缺省，不受影响）；db-migrations.md M1 的前提也是「库的排序规则
+    # 是 utf8mb4_bin」。以 - 开头的参数由镜像入口接到 mysqld 后面，初始化阶段的临时实例同样生效。
+    # lower_case_table_names 保持 Linux 缺省 0（表名区分大小写，与生产 Linux 一致；开发机 Windows 上是 1）
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin", "--default-time-zone=+00:00"]
+    environment:
+      # 各进程与集成测试用 root 连接：createDatabaseIfNotExist、schema init、pbmysql 建表、集成测试建临时库都要 CREATE 权限。
+      # 生产的最小权限账号由批次 7.6 定。
+      MYSQL_ROOT_PASSWORD: ${XM_MYSQL_PASSWORD:?需要环境变量 XM_MYSQL_PASSWORD（见 deploy/compose/env.example）}
+      # 预建库：xm-team 的 JDBC URL 不带 createDatabaseIfNotExist，冷库上先起它会因库不存在失败
+      MYSQL_DATABASE: xm_java
+    ports:
+      - "127.0.0.1:${XM_MYSQL_HOST_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # 走 TCP：初始化阶段的临时 mysqld 关着网络（skip-networking），走 socket 的 ping 会在初始化完成前就报健康
+      test: ["CMD-SHELL", "mysqladmin ping --protocol=tcp -h127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  redis:
+    image: redis:8.10.2@sha256:6f81e8915c60b065a524e6967e0ad1c639ba6efa84d669f823683ea04d9150ee
+    # 开 AOF：xm:node-id-epoch:* 不得回退（architecture.md 节点号租约）。不设口令：端口只发布到 127.0.0.1
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${XM_REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  kafka:
+    image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+    # 设了任一 KAFKA_* 就不再用镜像自带的缺省配置，单节点 KRaft 的必需项要给全（写法同基线 deploy/docker-compose.yml）。
+    # 双监听：宿主上的进程与集成测试连 127.0.0.1:9092（HOST），容器里的进程连 kafka:19092（INTERNAL）。
+    environment:
+      CLUSTER_ID: VVpFz2bYRu-3GVWaYAll1g          # kafka-storage random-uuid 生成一次后写死；不是秘密
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://:19092,HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://127.0.0.1:${XM_KAFKA_HOST_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1   # 同镜像自带单节点缺省（内部 topic 缺省 3 副本）
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # 关自动建 topic：审计 topic 由 xm-scene（CREATE_AND_VERIFY）与 xm-data（OWN）启动时按规格自建并核对分区数
+      # （xm-audit AuditTopicInitializer），不需要基线那种抢在生产者之前跑的 topic-init；__consumer_offsets 不受此开关影响
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx256m"
+    ports:
+      - "127.0.0.1:${XM_KAFKA_HOST_PORT:-9092}:9092"
+    # 不挂命名卷：镜像以非 root（appuser）运行，命名卷挂到镜像里不存在的目录时属主是 root（基线为此改成 root 运行）。
+    # down 之后在途的审计消息随之丢失，开发与 CI 可以接受（已落进 MySQL 的流水不受影响）；topic 由进程启动时重建。
+    healthcheck:
+      # 走 INTERNAL 监听：HOST 监听通告的是宿主端口，改了 XM_KAFKA_HOST_PORT 后在容器里连不上。
+      # 探活工具也是一个 JVM：单独给小堆，别继承 broker 的 KAFKA_HEAP_OPTS
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 15s
+      retries: 30
+
+volumes:
+  mysql-data: {}
+  redis-data: {}

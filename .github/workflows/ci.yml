@@ -1,0 +1,114 @@
+# CI 门禁（批次 7.1a，docs/porting/deploy-ci-spec.md §4.3）：构建 + 单测、契约一致性。
+#
+# 共同约定（§4.2，三个 workflow 一致）：
+# - runner 钉 ubuntu-24.04；权限只给 contents: read；不使用任何 repository secret；checkout 一律不留凭据。
+# - 只用 GitHub 官方 action，按 commit SHA 钉死、行尾注释写版本。升级：查
+#   https://api.github.com/repos/<owner>/<action>/git/ref/tags/<tag> 取 object.sha（type 为 tag 时再解一层）。
+# - 每一种失败都要变成 annotation：job 日志匿名读不到（403），结论只能匿名读 check-runs/<job_id>/annotations。
+#   GitHub 每个 step 最多显示 10 条 error annotation，所以 TestReport / 各脚本都先汇总再输出。
+# - 关掉 setup-java 自带的问题匹配器：它的 "Exception in thread" 规则会把测试里故意抛出的线程异常记成 error，
+#   挤占 10 条的名额；编译错误与 "Failed to execute goal" 由 .github/maven-problem-matcher.json 负责。
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']   # 测试只读 config-data/ 等，不读 docs/ 与 *.md：纯文档提交跳过
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # push 按提交分组、不取消：本仓库每完成一个功能就推 main，每个提交都要有自己的结论（AGENTS §4 / §5）。
+  # PR 按分支分组，新提交取消旧运行。
+  group: ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: 构建与单测
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          problem-matcher: false
+      - name: 注册 Maven 问题匹配器
+        run: echo "::add-matcher::$GITHUB_WORKSPACE/.github/maven-problem-matcher.json"
+      - name: 构建与单测（mvnw verify）
+        # 全新检出不需要 clean；verify 不把本仓库的 SNAPSHOT 装进 ~/.m2，maven 缓存不被污染。
+        # -fae：某个模块失败后继续构建不依赖它的模块，一次运行看到尽量多的失败。
+        run: ./mvnw -B -ntp -fae verify
+      - name: 测试报告
+        if: ${{ !cancelled() }}
+        run: java tools/TestReport.java --summary "$GITHUB_STEP_SUMMARY" --annotate
+      - name: 上传 surefire 报告（失败时）
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/'
+          retention-days: 14
+          if-no-files-found: ignore
+
+  contract:
+    name: 契约一致性（ContractSync --check）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 读契约来源提交
+        id: src
+        run: |
+          c=$(sed -n 's/^mmorpg\.commit=//p' contract/SOURCE.properties)
+          if [[ ! "$c" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error file=contract/SOURCE.properties,title=契约来源::mmorpg.commit 不是 40 位 sha：$c"
+            exit 1
+          fi
+          echo "commit=$c" >> "$GITHUB_OUTPUT"
+      # mmorpg 是公开仓库，不需要令牌。稀疏目录正好是 ContractSync 读的 5 个（tools/ContractSync.java 的 sync()）：
+      # 工具以后多读别的目录时，这一步之后的 --check 会因「目录不存在」直接报红，不会悄悄通过。
+      # .mmorpg 在工作区内（checkout 只能检出到工作区下），不在 --check 的受管路径里；本机照做时 .gitignore 已忽略它。
+      - name: 稀疏检出 mmorpg（SOURCE 记录的提交）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: luyuan-cpp/xuanming-server-mmo
+          ref: ${{ steps.src.outputs.commit }}
+          path: .mmorpg
+          fetch-depth: 1
+          filter: blob:none
+          persist-credentials: false
+          sparse-checkout: |
+            proto
+            data/schema
+            generated/code/proto
+            generated/tables
+            cpp/generated/table/code/constants
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          problem-matcher: false
+      - name: ContractSync --check
+        # mmorpg 的 .gitattributes 规定文本一律 LF：Linux 上检出的字节与 Windows 上同步的结果一致。首轮出现「不一致」先查这一点。
+        run: |
+          if java tools/ContractSync.java --mmorpg .mmorpg --check > contract.out 2>&1; then
+            cat contract.out
+            exit 0
+          fi
+          cat contract.out
+          msg=$(head -n 12 contract.out)
+          msg=${msg//'%'/'%25'}; msg=${msg//$'\r'/'%0D'}; msg=${msg//$'\n'/'%0A'}
+          echo "::error file=contract/SOURCE.properties,title=契约与 mmorpg 不一致::$msg"
+          exit 1

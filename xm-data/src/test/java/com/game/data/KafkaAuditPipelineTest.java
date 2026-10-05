@@ -180,6 +180,84 @@ class KafkaAuditPipelineTest {
         assertThat(stored.get(snapshotId)).isEqualTo(builder.getPlayerState().size());
     }
 
+    /**
+     * 批次 7.2a（§12.5）：新原因值（快照 3 / 5 / 6 / 1001 / 1002 与不认识的值、流水 16 / 17 / 19）经真 broker 往返、经生产的 Sink 落库
+     * （缺省 H2，{@code -Dxm.it.mysql} 时落真 MySQL），数值原样；同一快照号重复投递，库里只有一行。
+     */
+    @Test
+    void 新原因值经Kafka往返落库_重复快照号只落一行() throws Exception {
+        try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "xm-it-admin")) {
+            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+        }
+        long base = System.currentTimeMillis() * 1000;
+        long player = base % 1_000_000_000L + 1;
+        int[] causes = {3, 5, 6, 1001, 1002, 4242};
+        int[] reasons = {TransactionReason.TX_ROLLBACK_RESTORE_VALUE, TransactionReason.TX_CLAWBACK_VALUE,
+                TransactionReason.TX_BATCH_RECALL_VALUE};
+        Properties pp = new Properties();
+        pp.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP);
+        pp.put(ProducerConfig.ACKS_CONFIG, "all");
+        try (KafkaProducer<String, byte[]> producer =
+                     new KafkaProducer<>(pp, new StringSerializer(), new ByteArraySerializer())) {
+            for (int i = 0; i < causes.length; i++) {
+                PlayerSnapshotRecord r = PlayerSnapshotRecord.newBuilder().setSnapshotId(base + i).setPlayerId(player)
+                        .setTimeMs(1000 + i).setCauseValue(causes[i]).setZoneId(1).setOwnerEpoch(1).setLevel(1)
+                        .setPlayerState(ByteString.copyFrom(new byte[] {8, (byte) i})).build();
+                producer.send(new ProducerRecord<>(AuditTopics.playerSnapshot(GENERATION).name(), AuditKeys.playerKey(player),
+                        r.toByteArray())).get();
+                if (i == 0) {
+                    producer.send(new ProducerRecord<>(AuditTopics.playerSnapshot(GENERATION).name(),
+                            AuditKeys.playerKey(player), r.toByteArray())).get();
+                }
+            }
+            for (int i = 0; i < reasons.length; i++) {
+                TransactionLogRecord r = TransactionLogRecord.newBuilder().setTxId(base + 100 + i).setTimeMs(2000 + i)
+                        .setReasonValue(reasons[i]).setKind(AssetKind.ASSET_CURRENCY).setFromPlayer(player)
+                        .setCurrencyDelta(-1).setCorrelationId(base).setZoneId(1).build();
+                producer.send(new ProducerRecord<>(AuditTopics.transactionLog(GENERATION).name(),
+                        AuditKeys.transactionKey(player, 0), r.toByteArray())).get();
+            }
+        }
+        try (com.game.data.testing.DataSqlFixture db = com.game.data.testing.DataSqlFixture.create()) {
+            java.time.Clock clock = java.time.Clock.systemUTC();
+            SimpleMeterRegistry meters = new SimpleMeterRegistry();
+            DataMetrics metrics = new DataMetrics(meters);
+            metrics.registerConsumer("it-snap");
+            metrics.registerConsumer("it-tx");
+            ConsumerLoop<PlayerSnapshotRow> snapLoop = new ConsumerLoop<>("it-snap", consumer("xm-it-snap-" + base),
+                    AuditTopics.playerSnapshot(GENERATION).name(), new PlayerSnapshotDecoder(),
+                    new com.game.data.snapshot.PlayerSnapshotSink(db.snapshots, db.tx(), 10, clock), metrics,
+                    Duration.ofMillis(200), Duration.ofMillis(100), Duration.ofSeconds(1));
+            ConsumerLoop<TransactionLogRow> txLoop = new ConsumerLoop<>("it-tx", consumer("xm-it-tx-" + base),
+                    AuditTopics.transactionLog(GENERATION).name(), new TransactionLogDecoder(),
+                    new com.game.data.txlog.TransactionLogSink(db.txlog, db.tx(), 200, clock), metrics,
+                    Duration.ofMillis(200), Duration.ofMillis(100), Duration.ofSeconds(1));
+            Thread t1 = new Thread(snapLoop);
+            Thread t2 = new Thread(txLoop);
+            t1.start();
+            t2.start();
+            try {
+                await().atMost(Duration.ofSeconds(90)).until(() -> db.snapshots.listByPlayer(player, 0, Long.MAX_VALUE,
+                        null, false, 100).size() == causes.length
+                        && db.txlog.query(com.game.data.store.TransactionLogQuery.builder().fromPlayer(player).build())
+                        .size() == reasons.length);
+            } finally {
+                snapLoop.stop();
+                txLoop.stop();
+                t1.join(10_000);
+                t2.join(10_000);
+            }
+            assertThat(db.snapshots.listByPlayer(player, 0, Long.MAX_VALUE, null, false, 100))
+                    .extracting(com.game.data.store.PlayerSnapshotEntry::getCause)
+                    .containsExactly(3, 5, 6, 1001, 1002, 4242);
+            assertThat(db.txlog.query(com.game.data.store.TransactionLogQuery.builder().fromPlayer(player).build()))
+                    .extracting(com.game.data.store.TransactionLogEntry::getReason).containsExactly(16, 17, 19);
+            // 固定代次的 topic 上有历次运行的记录（消费组从头读），只数本次玩家的
+            assertThat(db.jdbc().queryForObject("SELECT COUNT(*) FROM player_snapshot WHERE player_id = ?", Integer.class,
+                    player)).as("重复投递的同一快照号只有一行").isEqualTo(causes.length);
+        }
+    }
+
     private static KafkaConsumer<String, byte[]> consumer(String group) {
         Properties p = new Properties();
         p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP);

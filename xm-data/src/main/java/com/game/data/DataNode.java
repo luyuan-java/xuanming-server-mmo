@@ -11,6 +11,7 @@ import com.game.data.consume.ConsumerLoop.Sink;
 import com.game.data.metrics.DataMetrics;
 import com.game.data.snapshot.PlayerSnapshotDecoder;
 import com.game.data.snapshot.PlayerSnapshotSink;
+import com.game.data.snapshot.SnapshotCauses;
 import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
 import com.game.data.txlog.TransactionLogDecoder;
@@ -46,6 +47,8 @@ public final class DataNode implements SmartLifecycle {
 
     static final String TRANSACTION_LOG = "transaction_log";
     static final String PLAYER_SNAPSHOT = "player_snapshot";
+    /** 运维 / 安全快照的保留期清理（指标 table 标签；同一张表按原因分两类清）。 */
+    static final String PLAYER_SNAPSHOT_GM = "player_snapshot_gm";
     private static final long INIT_RETRY_SECONDS = 30;
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     private static final long RESTART_DELAY_MILLIS = 5_000;
@@ -194,9 +197,12 @@ public final class DataNode implements SmartLifecycle {
             log.info("资产流水永久保留（xm.data.retention.transaction-log=0）");
         }
         if (r.playerSnapshot().isZero()) {
-            log.info("玩家快照永久保留（xm.data.retention.player-snapshot=0）");
+            log.info("上下线快照永久保留（xm.data.retention.player-snapshot=0）");
         }
-        if (r.transactionLog().isZero() && r.playerSnapshot().isZero()) {
+        if (r.gmSnapshot().isZero()) {
+            log.info("运维 / 安全快照永久保留（xm.data.retention.gm-snapshot=0）");
+        }
+        if (r.transactionLog().isZero() && r.playerSnapshot().isZero() && r.gmSnapshot().isZero()) {
             return;
         }
         retention = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -208,11 +214,17 @@ public final class DataNode implements SmartLifecycle {
                 TimeUnit.MILLISECONDS);
     }
 
-    /** 各表各自按保留期清理（保留期为 0 的表不动）。 */
+    /**
+     * 各表各自按保留期清理（保留期为 0 的不动）。快照按原因分两类（data-ops-spec §3.7）：上下线 / 周期快照按
+     * {@code player-snapshot}，运维 / 安全快照按 {@code gm-snapshot}；不在两类里的原因从不清理。
+     */
     void purgeExpired() {
         DataProperties.Retention r = props.retention();
         purge(TRANSACTION_LOG, r.transactionLog(), transactionLog::deleteOlderThan);
-        purge(PLAYER_SNAPSHOT, r.playerSnapshot(), playerSnapshot::deleteOlderThan);
+        purge(PLAYER_SNAPSHOT, r.playerSnapshot(),
+                (before, limit) -> playerSnapshot.deleteOlderThan(before, SnapshotCauses.ROUTINE_RETENTION, limit));
+        purge(PLAYER_SNAPSHOT_GM, r.gmSnapshot(),
+                (before, limit) -> playerSnapshot.deleteOlderThan(before, SnapshotCauses.GM_RETENTION, limit));
     }
 
     @FunctionalInterface

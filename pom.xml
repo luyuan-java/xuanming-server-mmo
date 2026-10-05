@@ -57,6 +57,10 @@
         <protobuf-maven-plugin.version>5.1.10</protobuf-maven-plugin.version>
         <!-- 默认按版本从 Maven 仓库取 protoc；网络受限的机器可用 -Dprotoc.spec=file:///.../protoc.exe 指向同版本的本地 protoc -->
         <protoc.spec>${protobuf.version}</protoc.spec>
+        <!-- 构建戳（见下面 spring-boot-maven-plugin 的 build-info）：CI / 镜像构建用 -Dxm.build.commit=<40 位 sha>
+             -Dxm.build.contract=<contract/SOURCE.properties 的 mmorpg.commit> 覆盖；本机构建取缺省（命令行 -D 优先于 pom 属性） -->
+        <xm.build.commit>unknown</xm.build.commit>
+        <xm.build.contract>unknown</xm.build.contract>
     </properties>
 
     <dependencyManagement>
@@ -197,6 +201,24 @@
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
                     <version>${spring-boot.version}</version>
+                    <executions>
+                        <!-- 构建信息（docs/porting/deploy-ci-spec.md §5.1）：写 META-INF/build-info.properties，经 /actuator/info 暴露。
+                             build.version = project.version（不覆盖：发布版本号方案归 7.6），另加 40 位的 commit 与契约来源 contract。
+                             声明了本插件的进程模块（含 xm-robot）都会把这个 execution 与自己的 repackage 合并，模块 pom 不用动；
+                             库模块没有声明本插件，不受影响。不用 git-commit-id 插件（star 不够），commit 由 CI / 镜像构建用 -D 传入。 -->
+                        <execution>
+                            <id>build-info</id>
+                            <goals>
+                                <goal>build-info</goal>
+                            </goals>
+                            <configuration>
+                                <additionalProperties>
+                                    <commit>${xm.build.commit}</commit>
+                                    <contract>${xm.build.contract}</contract>
+                                </additionalProperties>
+                            </configuration>
+                        </execution>
+                    </executions>
                 </plugin>
             </plugins>
         </pluginManagement>

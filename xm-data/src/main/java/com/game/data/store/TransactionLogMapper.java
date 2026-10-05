@@ -7,7 +7,6 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Result;
-import org.apache.ibatis.annotations.ResultMap;
 import org.apache.ibatis.annotations.Results;
 import org.apache.ibatis.annotations.Select;
 
@@ -44,12 +43,40 @@ public interface TransactionLogMapper {
             </script>""")
     int insertAll(@Param("rows") List<TransactionLogRow> rows, @Param("ingestedAt") long ingestedAt);
 
-    /** 某玩家作为扣减方的流水（走 idx_txlog_from），按时间、流水号升序。 */
+    /**
+     * 筛选查询（data-ops-spec §6.5 / §5.2 / §6.4）：给了的等值条件全部 AND；时间窗半开；游标之后；按（时间、流水号）升序取
+     * {@code fetch} 行（调用方取 limit+1 判截断，不做 COUNT(*)）。走哪条索引由等值条件决定：玩家 → idx_txlog_from / idx_txlog_to；
+     * uuid → idx_txlog_uuid；kind + 配置号 → idx_txlog_item；kind + 币种 → idx_txlog_currency；都没有 → idx_txlog_time。
+     * 游标条件写成 {@code time_ms >= t AND (time_ms > t OR tx_id > x)}：前半是可走索引的范围条件。
+     */
     @Select("""
+            <script>
             SELECT * FROM transaction_log
-             WHERE from_player = #{player,""" + U64 + """
-            } AND time_ms >= #{since} AND time_ms < #{until}
-             ORDER BY time_ms, tx_id LIMIT #{limit}""")
+            <where>
+              <if test="q.fromPlayer != null">AND from_player = #{q.fromPlayer,""" + U64 + """
+            }</if>
+              <if test="q.toPlayer != null">AND to_player = #{q.toPlayer,""" + U64 + """
+            }</if>
+              <if test="q.itemUuid != null">AND item_uuid = #{q.itemUuid,""" + U64 + """
+            }</if>
+              <if test="q.kind != null">AND kind = #{q.kind,""" + U32 + """
+            }</if>
+              <if test="q.itemConfigId != null">AND item_config_id = #{q.itemConfigId,""" + U32 + """
+            }</if>
+              <if test="q.currencyType != null">AND currency_type = #{q.currencyType,""" + U32 + """
+            }</if>
+              <if test="q.acquisitionsOnly">AND to_player &lt;&gt; 0 AND (kind &lt;&gt; 1 OR currency_delta &gt; 0)</if>
+              <if test="q.reasons != null and !q.reasons.isEmpty()">
+                AND reason IN <foreach collection="q.reasons" item="r" open="(" separator="," close=")">#{r}</foreach>
+              </if>
+              AND time_ms &gt;= #{q.since} AND time_ms &lt; #{q.until}
+              <if test="q.afterTimeMs != null">
+                AND time_ms &gt;= #{q.afterTimeMs} AND (time_ms &gt; #{q.afterTimeMs} OR tx_id &gt; #{q.afterTxId,""" + U64 + """
+            })
+              </if>
+            </where>
+            ORDER BY time_ms, tx_id LIMIT #{q.fetch}
+            </script>""")
     @Results(id = "transactionLog", value = {
             @Result(column = "tx_id", property = "txId", typeHandler = UnsignedLongTypeHandler.class),
             @Result(column = "reason", property = "reason", typeHandler = UnsignedIntTypeHandler.class),
@@ -64,18 +91,11 @@ public interface TransactionLogMapper {
             @Result(column = "item_quantity", property = "itemQuantity", typeHandler = UnsignedIntTypeHandler.class),
             @Result(column = "correlation_id", property = "correlationId", typeHandler = UnsignedLongTypeHandler.class),
             @Result(column = "zone_id", property = "zoneId", typeHandler = UnsignedIntTypeHandler.class)})
-    List<TransactionLogEntry> findByFromPlayer(@Param("player") long player, @Param("since") long since,
-                                               @Param("until") long until, @Param("limit") int limit);
+    List<TransactionLogEntry> query(@Param("q") TransactionLogQuery q);
 
-    /** 某玩家作为获得方的流水（走 idx_txlog_to）。 */
-    @Select("""
-            SELECT * FROM transaction_log
-             WHERE to_player = #{player,""" + U64 + """
-            } AND time_ms >= #{since} AND time_ms < #{until}
-             ORDER BY time_ms, tx_id LIMIT #{limit}""")
-    @ResultMap("transactionLog")
-    List<TransactionLogEntry> findByToPlayer(@Param("player") long player, @Param("since") long since,
-                                             @Param("until") long until, @Param("limit") int limit);
+    /** 某条流水是否已在库里（回灌工具判「库里已有这个号」）。 */
+    @Select("SELECT COUNT(*) FROM transaction_log WHERE tx_id = #{txId," + U64 + "}")
+    int countById(@Param("txId") long txId);
 
     /** 删一批早于 {@code before} 的流水（保留期清理）。 */
     @Delete("DELETE FROM transaction_log WHERE time_ms < #{before} LIMIT #{limit}")

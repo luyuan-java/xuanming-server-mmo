@@ -1,0 +1,6 @@
+# 白名单：镜像构建（deploy/docker/Dockerfile，上下文 = 仓库根）只需要宿主 Maven 打出的 Boot jar 与表数据。
+# 库模块的 jar 也会进上下文但不会被 COPY（合计几 MB）；.jar.original 不以 .jar 结尾，不会被带进去。
+# 写错时构建直接报 failed to compute cache key: "/<路径>": not found，不会悄悄漏掉文件。
+*
+!xm-*/target/xm-*.jar
+!config-data/tables

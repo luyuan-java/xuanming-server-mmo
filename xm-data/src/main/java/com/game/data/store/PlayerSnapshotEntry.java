@@ -1,6 +1,9 @@
 package com.game.data.store;
 
-/** 查询结果的一行快照元数据（不含玩法数据本体；MyBatis 按列名下划线转驼峰填充）。 */
+/**
+ * 查询结果的一行快照（MyBatis 按列名下划线转驼峰填充）。元数据查询不取玩法数据本体（{@link #getPlayerState()} 为 null，只给字节数）；
+ * 按号取本体时才带上。
+ */
 public class PlayerSnapshotEntry {
 
     private long snapshotId;
@@ -16,6 +19,9 @@ public class PlayerSnapshotEntry {
     private double posZ;
     private long stateBytes;
     private long ingestedAt;
+    private String operator = "";
+    private String note = "";
+    private byte[] playerState;
 
     public long getSnapshotId() {
         return snapshotId;
@@ -119,5 +125,31 @@ public class PlayerSnapshotEntry {
 
     public void setIngestedAt(long ingestedAt) {
         this.ingestedAt = ingestedAt;
+    }
+
+    /** xm-data 直写的操作人；scene 经 Kafka 的为空串。 */
+    public String getOperator() {
+        return operator;
+    }
+
+    public void setOperator(String operator) {
+        this.operator = operator == null ? "" : operator;
+    }
+
+    public String getNote() {
+        return note;
+    }
+
+    public void setNote(String note) {
+        this.note = note == null ? "" : note;
+    }
+
+    /** 玩法数据本体（{@code xm.storage.PlayerState} 字节）；元数据查询为 null。 */
+    public byte[] getPlayerState() {
+        return playerState;
+    }
+
+    public void setPlayerState(byte[] playerState) {
+        this.playerState = playerState;
     }
 }

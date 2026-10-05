@@ -52,7 +52,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景分配（玩家该进哪个场景节点的哪个频道，软预占）+ 每个 zone 的主世界频道计划（领导者维护，§4.19）+ 在线换图选跨节点目标（`selectSwitchTarget`，只选不铸 epoch，§8.1） |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送；跨节点换图时按 scene 的改绑指令把会话改绑到目标节点（§4.2） |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态）；跨节点换图的源端（选目标、冻结、交出归属）与目标端（交出进场，§8.1） |
-| `xm-data` | 进程（Spring Boot Web） | 审计与运维数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维接口：查询（§4.5）、全服产出封禁（§4.6）、区服目录 / 白名单 / 登录公告（§7） |
+| `xm-data` | 进程（Spring Boot Web） | 审计与运维数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维接口：流水查询、GM 快照 / 差异、物品追溯、批量回收 dry-run（§4.5，批次 7.2a），全服产出封禁（§4.6），区服目录 / 白名单 / 登录公告（§7）。运维作业表经 xm-pbmysql；玩家数据只读（依赖 xm-player-store 只为解码 `PlayerState` 与账本规则） |
 
 依赖方向单向：进程模块 → `xm-api` / `xm-net` / `xm-player-store` / `xm-gateway-store` / `xm-discovery` / `xm-battle-engine` → `xm-common` / `xm-proto` / `xm-table`。
 
@@ -169,7 +169,9 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   再过字段规模与负数校验（`RequestFieldCheck`，同基线 `ProtoFieldChecker`：任一 repeated / map 字段元素数 > 20、
   任一有符号整数为负，只递归进非 repeated 子消息）——不过的都静默丢弃、不回包；然后按消息号找处理器。处理器由**功能模块**注册（`SceneFeature`：货币 `CurrencyFeature`、属性 `AttributeFeature`、背包 `BagFeature`、任务 `MissionFeature`、活动 `ActivityFeature`、放技能 `SkillFeature`、宝宝 `PetFeature`，以后的玩法同样各成一个），
   场景核心（移动、技能列表 77、换场景、场景信息）由 `ClientRequestHandler` 自己注册。注册时校验：方法在契约里、属于标了
-  `OptionIsPlayerService` 的客户端服务、请求类型与契约一致、没有重复——任一不符启动即失败。
+  `OptionIsPlayerService` 的客户端服务、请求类型与契约一致、没有重复——任一不符启动即失败。所以 96–117 所在的 `SceneRollbackClientPlayer`
+  （是玩家服务，但不是客户端协议服务）注册不了，伪造的 `ClientForward` 带这些号直接丢弃；这组 GM 指令的语义在 xm-data 运维面实现（§4.5）。
+  回归测试 gate `GmRollbackMessagesUnroutableTest`、scene `GmRollbackRpcNotRegisteredTest`（批次 7.2a）。
 - **处理器契约**（`PlayerRequestHandler` + `PlayerCall`）：在场景逻辑线程上调用；经 `call.reply(...)` 回应答，`message_id` 同请求、
   `id` 回显请求号；每条请求至多回一次，应答类型必须与契约一致，`Empty` 应答的方法不能回。处理器没回、回错类型、抛异常
   （记 ERROR，逻辑线程继续）时由分发补回 `kFeatureUnavailable`(1006)，客户端不会卡在等应答上。没有处理器的方法同样回 1006
@@ -233,11 +235,44 @@ topic 与存储（不与 Go 混部）：
   不提交、不跳过——宁可积压不丢；数据错误（SQLState 22 / 23）逐行隔离，坏行写毒丸日志 `xm.audit.poison` 后跳过；解不出 / 字段非法的
   记录跳过并计数。重平衡收走了待落库批次的分区就整批作废（位点没提交，新主人会重新拿到）。可多实例（同组分摊分区）。
   快照落 `player_snapshot`（主键快照号、玩法数据 MEDIUMBLOB），单条可达约 1MB，所以拉取（50）与多行 INSERT 分块（10）都小。
-- **保留期**：`xm.data.retention.transaction-log` / `player-snapshot`，缺省 0 = 永久保留（同 mmorpg）；设了就每小时分批 DELETE。
-- **运维查询**（xm-data 管理端口 18106，缺省只绑本机）：`GET /admin/transaction-log?player=&since=&until=&limit=`，按（时间、流水号）升序；
-  `GET /admin/player-snapshots?player=&since=&until=&limit=` 给快照元数据与玩法数据字节数（不回本体）。uint64 字段输出为十进制字符串。鉴权（过滤器只按容器规范化后的路径 `/admin/*` 生效，`/admin;x/`、`/%61dmin/` 之类绕不过）：
+- **保留期**：`xm.data.retention.transaction-log` / `player-snapshot` / `gm-snapshot`，缺省 0 = 永久保留（同 mmorpg）；设了就每小时分批 DELETE。
+  快照按原因分两类清（批次 7.2a）：`player-snapshot` 只清 LOGIN / LOGOUT / PERIODIC；`gm-snapshot` 清 PRE_MAINTENANCE / GM_MANUAL /
+  PRE_ROLLBACK / PRE_GM_EDIT（运维与安全快照是撤销依据，缺省永久）；PRE_TRADE 和不认识的原因从不清。删行要求 `time_ms` 与 `ingested_at`
+  都早于截止时刻。启动校验：流水保留期为 0，或者「上下线快照保留期不为 0 且流水保留期不短于它」，否则拒绝启动（回档 / 回收窗口内要能用流水解释差异）。
+- **运维查询**（xm-data 管理端口 18106，缺省只绑本机）：`GET /admin/transaction-log` 的参数有 `player`（可选）、`kind`、`currencyType`（0 = 金币有效）、
+  `itemConfigId`、`itemUuid`、`reasons`（多值）、半开毫秒窗口 `since` / `until`、`limit ≤ 1000`、键集游标 `after=<timeMs>:<txId>`。下一页游标放在应答头
+  `X-Xm-Next-Cursor`，应答体仍是数组。结果按（时间、流水号）升序，不回总数。必须能走索引：不给玩家时要带 `itemUuid`、`kind + itemConfigId`
+  或 `kind + currencyType` 之一，否则窗口不超过 `xm.data.ops.max-window`（7 d）；玩家条件拆成 from / to 两条索引查询再归并。
+  `GET /admin/player-snapshots?player=&since=&until=&limit=&cause=&order=` 给快照元数据（含 operator / note / 原因名）与玩法数据字节数（不回本体）。
+  uint64 字段输出为十进制字符串。鉴权（过滤器只按容器规范化后的路径 `/admin/*` 生效，`/admin;x/`、`/%61dmin/` 之类绕不过）：
   共享令牌 `XM_ADMIN_TOKEN`（请求头 `X-Xm-Admin-Token`，常数时间比较，未配置一律 503）+ 必填
   操作人 `X-Xm-Operator`（UTF-8，1–64 字符、不含控制字符）；每次调用（含处理中抛异常的，按 500 记）都记运维审计日志 `xm.audit.admin`。本机切片脚本没设令牌时生成一个写进 `run/xm-admin-token`。
+- **GM 运维面**（批次 7.2a 只做了只读与不需要栅栏的部分，规格 `docs/porting/data-ops-spec.md`）：对应基线 data_service 的运维 RPC，以及 scene 侧
+  102–117 的空桩（Java 不在 scene 注册这组方法，§4.4，PARITY「scene 侧 GM 102–117」行）。都在 `/admin/**` 下、经同一个过滤器鉴权，
+  出错时回 `{code, message}`（`OpsErrorAdvice`；code 取基线常量名去掉前缀，不是客户端契约）：
+  - `POST /admin/player-snapshots`：手工快照（GM_MANUAL / PRE_MAINTENANCE），必须带 `Idempotency-Key` 与 reason。在一个事务里读 `player` 行与
+    `player_state` 原字节、插快照（带 operator / note）、写一条终态作业行；不夺权、不踢人。`time_ms` = 内容所代表的时刻（`player_state.updated_at`），
+    拍摄时刻记在 `ingested_at`，`owner_epoch` = `saved_epoch`。应答里的 `online` 表示仍有 scene 持有归属（未释放且租约未过期）；这时快照可能比内存落后最多一个存盘周期。
+  - `GET /admin/player-snapshots/{id}?includeState=true`：详情，`player_state` 经 protobuf-java-util `JsonFormat` 转成 JSON，不认识的字段给出路径与原始字节。
+  - `GET /admin/players/{player}/snapshot-diff?snapshot=<号>` 或 `?atMs=<毫秒>`：结构化差异。按时刻选源时只认 LOGIN / LOGOUT / PERIODIC / PRE_MAINTENANCE /
+    GM_MANUAL；安全快照记录的是「被覆盖之前」的状态，只能按号显式选。「当前」= 已落盘状态。输出分块：player 行；货币与欠款；物品（按配置聚合，加逐实例）；
+    宝宝；其余玩法段（protobuf 反射逐字段比较，至多 500 条）；转移证据（按 uuid 与转移类原因查快照之后的流水，`restorable` 只作提示）；
+    资产通道账本差集（`LedgerDiff`）。快照早于流水保留期的下界时 `evidenceComplete=false`：只认正面证据，其余记为未知（null / INCOMPLETE）。
+  - `GET /admin/items/{uuid}/trace`：物品追溯，按 `(item_uuid, time_ms)` 升序、游标翻页；最后一页给提示 HELD_BY / DESTROYED / MERGED（只是提示，不找当前持有者）。
+  - `POST /admin/recalls`：批量回收 dry-run（`dryRun=false` 回 501，执行随 7.2c）。只匹配获得方的行，金币也能作目标，tx_id 去重。匹配超过
+    `xm.data.recall.max-rows`（缺省 10000）就回 422 `result_truncated`，什么也不改，另写一条作业审计行。按已落盘状态估算可回收量与缺口；
+    落库完整性闸（`ingestComplete`）随 7.2c。
+  - **发号**（`OpsIds`）：快照号、作业号（以后还有回档 / 回收的流水号）必须与 scene 同取 `NodeTypes.SCENE_GUID` 全服租约池（§9）。租约在后台申领、不挡启动
+    （Redis 不可用时审计消费照常）；租约无效时写接口回 503 `id_unavailable`；Web 服务器停下之后才交还。
+  - **运维作业表**（库 `xm_java`，由 xm-pbmysql 按 `xm-data/src/main/proto/xm/data/ops_tables.proto` 在启动时建表，只扩不缩）：`ops_job`（主键 job_id，唯一键
+    idem_key）、`ops_job_event`、`ops_job_player`、`ops_active`（全集群单飞槽）、`recall_source`（回收去重）、`audit_replay_line`。7.2a 只写 `ops_job`、
+    `ops_job_event`（回收截断的审计）与 `audit_replay_line`；`recall_source` 只读；其余随 7.2b / 7.2c 启用。`transaction_log` 新加三条索引
+    （`idx_txlog_item` / `idx_txlog_currency` / `idx_txlog_uuid`），`player_snapshot` 新加 operator / note 两列（db-migrations M8）。
+  - **玩家数据只读**：xm-data 用自己的只读 Mapper（`PersistedPlayerMapper`），排除 `PlayerStoreAutoConfiguration`，所以还没有写玩家数据的路径
+    （写路径随 7.2b 的归属夺权）。Druid `max-active` 调到 8。
+  - **兜底日志回灌**：离线工具 `com.game.data.tools.AuditFallbackReplay`（用法见类注释）把 scene 写进 `xm.audit.fallback` 的流水行补进 `transaction_log`。
+    原号的行按主键 ODKU 幂等；`tx_id=0` 的行在 `SCENE_GUID` 池占一个 worker 发新号；每行登记到 `audit_replay_line`，同一文件重跑会跳过；
+    快照兜底行只有元数据，不回灌。
 
 ### 4.6 资产防护：全服产出封禁与获取异常检测
 
@@ -632,6 +667,41 @@ gate 把 `ClientPlayerJubaozhai` 的 4 个消息号（196 浏览、197 详情、
   默认 2000 / 2000 / 1 / 200）：单条命令最坏阻塞 = (重试 + 1) × 响应超时 + 重试 × 间隔 = 4.2s，
   低于客户端 HTTP 超时 5s（Redisson 自带默认值下可达二十多秒）。
 
+### 6.1 本地编排、镜像与 CI（批次 7.1）
+
+规格 `docs/porting/deploy-ci-spec.md`。本机没有 Docker：compose 文件与镜像只在 CI 上执行，结论以 CI 为准（读法见规格 §11.5）。
+
+- **依赖编排**（7.1a）：`deploy/compose/infra.yaml` 只起依赖：MySQL 8.4.11、Redis 8.10.2（AOF）、Kafka 4.3.1（KRaft 单节点），都钉 tag 加 index digest。
+  项目名 `xuanming-java`，不与基线 compose 混用；端口只发布到 127.0.0.1，缺省端口 = 各进程的缺省端口，所以起好之后照常用
+  `tools/local/start-slice.sh` 在宿主上起 Java 进程，端口冲突时用 `XM_*_HOST_PORT` 改开。Kafka 有两个监听：宿主连 `127.0.0.1:9092`，容器内连 `kafka:19092`。
+  关掉自动建 topic，审计 topic 由进程自建并核对（§4.5）。MySQL 预建 `xm_java`，服务器缺省排序规则 `utf8mb4_bin`、时区 `+00:00`（与开发机相同）。
+  秘密只从环境变量或不入库的 `deploy/compose/.env` 读（模板 `env.example`），必填项写成 `${VAR:?}`，缺了 compose 在启动前就失败。
+  重置时 MySQL 与 Redis 必须一起清（`down -v`）：单独清 Redis 会让 `xm:node-id-epoch:*` 回退（§6「防护代次」），也会让只存在 Redis 里的权威数据（组队等）与 MySQL 对不上。
+- **镜像**（7.1a 落了 Dockerfile，首次构建随 7.1b）：一个参数化的 `deploy/docker/Dockerfile` 服务全部进程模块（`--build-arg MODULE=<模块>`）。
+  jar 由宿主 Maven 一次打齐，镜像里只用 Spring Boot 的 `jarmode=tools` 分层解包。基础镜像 Temurin 21 JRE（Ubuntu noble）钉 digest；
+  以非 root 运行（uid / gid 10001），home 是可写的 `/home/xm`（Dubbo 往 `${user.home}/.dubbo` 写缓存）。表数据单独一层烤进镜像
+  （`xm.table-dir` 的缺省值相对 `/app`，运行时照样校验 manifest）。`JDK_JAVA_OPTIONS` 缺省按容器内存比例给堆，并用 G1、OOM 即退出。
+  不写 `HEALTHCHECK`，由编排层负责。tag 用 `<sha12>`，从不打 `latest`；推送 registry 归 7.6。
+- **构建信息**（7.1a）：根 pom 的 `build-info` 生成 `META-INF/build-info.properties`，内容是 `build.version` / `build.time`、40 位 `build.commit`
+  与契约来源 `build.contract`。后两项由 CI 与镜像构建用 `-Dxm.build.commit` / `-Dxm.build.contract` 传入，本机构建是 `unknown`。
+  镜像另有 OCI label 与 `/app/BUILD_INFO`。经 `/actuator/info` 暴露随 7.1b（§11）。
+- **CI**（7.1a，GitHub Actions，`.github/workflows/`）：
+  - `ci.yml`：构建 + 单测，加契约 `ContractSync --check`。
+  - `integration.yml`：用 `infra.yaml` 起依赖跑 `-Dxm.it.*` 全量 verify，再用 `tools/TestReport.java --require-it-executed` 证明集成测试真的执行了（防止标志传错、全部静默跳过还是绿）。
+  - `contract-drift.yml`：每天对比 mmorpg main，只报告，不判红。
+
+  共同约定：runner 钉 ubuntu-24.04；权限只读；不用任何 repository secret（MySQL 口令每次随机生成）；官方 action 按 SHA 钉死。
+  job 日志匿名读不到，所以每一种失败都转成 annotation（`::error`，`.github/maven-problem-matcher.json` 负责编译错误）。
+- **7.1b 待做**：
+  - `deploy/compose/stack.yaml`：include infra，加上全部 Java 进程，作为「容器」部署形态。
+  - 各进程 `application.yaml`：加地址占位符（JDBC 主机端口、`XM_REDIS_ADDRESS`、`XM_ADVERTISE_HOST`、`XM_SCENE_LINK_BIND_HOST`、Dubbo 直连 URL），
+    打开 readiness / liveness 探针，暴露 `info`。
+  - CI 的 stack job。
+  - 通告地址与 Dubbo 绑定规则：规格 §2.6 认为通告地址设成非回环主机名后 Dubbo 只绑那个 IP，要在本机验证。
+  - 停机宽限期（scene 45 s）。
+
+  后两项验证后写进本节。从 7.1b 起，新增进程模块的批次要同批登记 `stack.yaml`、`start-slice.sh` 与 `env.example`。
+
 ## 7. 存储
 
 - MySQL 库 `xm_java`（与 mmorpg 的库隔离）：`account`、`player`、`player_state`（各玩法的持久化数据，protobuf `xm.storage.PlayerState`，与 `player` 行同事务、同围栏写入）；建表脚本在 `xm-player-store/src/main/resources/db/xm-player-schema.sql`
@@ -644,7 +714,7 @@ gate 把 `ClientPlayerJubaozhai` 的 4 个消息号（196 浏览、197 详情、
   快照 15 s 过期变 UNKNOWN）。时刻一律整数（开放 / 公告时刻 Unix 秒，创建 / 更新 Unix 毫秒）。
 - 玩家名全服唯一且大小写 / 全半角不敏感：唯一索引 `uk_player_name_key` 建在 `name_key` 上，键只由 `PlayerStore.nameKey` 计算
   （NFKC → 去首尾空白 → `Locale.ROOT` 小写）。建角撞到主键（`player_id` 重号）是不变量被破坏，抛异常，不报「重名」。
-- **proto 声明的表（xm-pbmysql）**：行本身就是一条 protobuf message 的表（好友、邮件、帮会等社交服务；
+- **proto 声明的表（xm-pbmysql）**：行本身就是一条 protobuf message 的表（好友、邮件、帮会等社交服务，以及 xm-data 的运维作业表（§4.5）；
   mmorpg `proto/db`、`proto/friend/friend_table.proto`、`proto/guild/guild_db.proto` 里带 `OptionTableName` 的消息）
   不手写 DDL 与 Mapper，用 `com.game.pbmysql.PbMysql`（用户自有库 proto2mysql 的 Java 实现，对齐 Go v0.2.0）：
   1. **声明**：表名 / 主键 / 索引 / 唯一键 / 自增 / TiDB 选项写在 message option 上（本模块的 `proto2mysql/proto2mysql_option.proto`
@@ -869,6 +939,8 @@ client     gate G                       源 scene S                          sce
 - 物品 uuid、资产流水号 `tx_id`、玩家快照号 `snapshot_id`：雪花，共用一个租约门控的雪花（xm-common `LeaseGatedSnowflake`），worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0；不论审计开不开都占）——
   场景节点自己的租约按 zone 分，两个 zone 的第一台 scene 会拿到同一个 worker、发出相同的号，落库按主键去重就会静默吞掉一条。
   停服时先发完审计队列再交还这个租约（反过来别的实例可能拿到同一个 worker 发重号）。
+  xm-data 运维面直写的快照号、作业号（`OpsIds`），以及兜底日志回灌工具新发的流水号，也从同一个池占 worker（批次 7.2a，§4.5）。
+  雪花号不含节点类型位，另开租约类型会与 scene 的 worker 重叠，撞号的行被主键 ODKU 静默吞掉。`SCENE_GUID` 这个名字不改：改名等于换键空间，只能停服切换。
 - `team_id`、`guild_id`：雪花，worker 取各自服务的全服租约（`NodeTypes.TEAM` / `NodeTypes.GUILD`，作用域 0）。
 - **不移植号段服务**（基线 data_service `AllocateIdSegment` + 各节点的号段客户端，盘点 id-segment-allocator / guid-segment-alloc）：
   Java 的永久号一律「雪花 + 节点号租约」——发号前检查租约仍有效、时钟回拨拒发，worker 不重叠由租约保证；
@@ -880,7 +952,7 @@ client     gate G                       源 scene S                          sce
 
 ## 10. 首批不做（后续批次）
 
-跨 zone、战斗等玩法系统、Kafka 事件、GM 管理接口（除远程停机外），
+跨 zone、战斗等玩法系统、Kafka 事件、GM 管理接口（远程停机与 xm-data 运维面除外；GM 快照 / 差异 / 物品追溯 / 回收 dry-run 已于 2026-10-05 补上，见 §4.5，回档随 7.2b），
 服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，短线重连已于 2026-10-04 补上，见 §7；货币与 GM 客户端指令闸见 §4.4；登录排队与开服限流见 §8；
   gate 排空与 GM 签名停机见 §6；同 zone 跨节点换图与归属交接已于 2026-10-05 补上，见 §7 第 6 步与 §8.1——跨 zone 传送仍待做。）
 （低基数运行指标五个进程都已接入，见 §11。）
@@ -890,7 +962,7 @@ client     gate G                       源 scene S                          sce
 
 每个进程用 **Micrometer** 记指标，经 **Spring Boot Actuator** 以 Prometheus 文本格式导出（选型见 tech-stack.md）。
 指标名与标签只在每个进程的一个类里定义，业务代码只调语义方法：gate `GateMetrics`、login `LoginMetrics`、
-scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`、guild `GuildMetrics`、trade `TradeMetrics`。
+scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`、guild `GuildMetrics`、trade `TradeMetrics`、data `DataMetrics`。
 
 | 进程 | 抓取地址（默认） | 说明 |
 |---|---|---|
@@ -910,6 +982,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
   Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。
   默认只绑 `127.0.0.1`（与 mmorpg 开发环境的 Prometheus 端口同口径），跨机抓取用 `XM_MANAGEMENT_ADDRESS` 指定内网地址；
   端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。actuator 只暴露 `health` 与 `prometheus` 两个端点。
+  构建信息从批次 7.1a 起已经写进各进程 jar 的 `META-INF/build-info.properties`（§6.1）；`info` 端点与 readiness / liveness 探针要到 7.1b 才打开。
   gate / scene 的这个端口上另有 GM 签名停机的 `GET /gm/identity` 与 `POST /gm/graceful-shutdown`（§6）：它们只收本机来的请求，
   为跨机抓取放宽 `XM_MANAGEMENT_ADDRESS` 不会把它们一起暴露（确需远程调用时另设 `XM_GM_ALLOW_REMOTE=true`）。
 - **公共标签**：`application=<进程名>`。实例由 Prometheus 的抓取目标区分，不在进程里加实例标签。
@@ -980,6 +1053,12 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | trade | `xm_trade_home_zone_lookups_total` | Counter | `result`=ok / unmapped / error | 归属区查询（基线 `trade_home_zone_lookup_total`） |
 | trade | `xm_trade_seed_listings_total`、`xm_trade_admin_requests_total` | Counter | 前者 `result`=ok / rejected / error；后者 `op`=seed_listing / other、`status` | dev 播种（基线 `trade_seed_listing_total`）；管理口审计 |
 | trade | `xm_trade_favorite_retries_total` | Counter | 无 | 收藏写入撞 1213 / 1205 / 9007 后整条重跑的次数（Java 增项） |
+| data | `xm_data_kafka_records_total` | Counter | `consumer`=transaction_log / player_snapshot，`outcome`=inserted / duplicate / decode_error / invalid / rejected | 消费到的审计记录的结局，每条恰好计一次（§4.5；全部组合在登记消费者时注册） |
+| data | `xm_data_kafka_consumer_up`、`xm_data_kafka_consumer_lag` | Gauge | `consumer` | 消费者是否在跑（topic 核对通过、轮询线程活着）；本实例分到的分区上还没落库的记录数之和（不是整个消费组的） |
+| data | `xm_data_db_insert_seconds`、`xm_data_db_insert_errors_total` | Timer / Counter | `consumer` | 一次拉取的记录在一个事务里落库的耗时；落库失败的尝试（可恢复故障退避重试、不提交位点） |
+| data | `xm_data_retention_deleted_total` | Counter | `table`=transaction_log / player_snapshot / player_snapshot_gm | 保留期清理删掉的行；player_snapshot_gm = 运维与安全快照（PRE_MAINTENANCE / GM_MANUAL / PRE_ROLLBACK / PRE_GM_EDIT，批次 7.2a） |
+| data | `xm_data_admin_requests_total` | Counter | `op`=transaction_log / player_snapshots / players / items / recalls / killswitch / gain_blocks / zones / announcements / gates / whitelist / other，`result`=HTTP 状态码 | 运维接口请求，每次调用恰好计一次（含鉴权拒绝）；带路径参数的接口按前缀归类，任意路径不会变成标签值 |
+| data | `xm_data_snapshot_admin_total` | Counter | `cause`=gm_manual / pre_maintenance，`result`=ok / replayed / player_not_found / id_unavailable / idempotency_conflict / db_error | 运维直写快照的结局（批次 7.2a）；标签取值是固定集合，首次用到时才注册（不是启动时预建） |
 | scene | `xm_scene_asset_ops_total` | Counter | `rpc`=debit / abort_debit / credit，`outcome`=applied / rejected / retry / not_here / unknown / overloaded / error | 资产指令应答结局（全部组合启动即注册） |
 | scene | `xm_scene_asset_ops_inflight`、`executor_*{name="scene-asset-reply"}` | Gauge / 线程池 | — | 资产指令在途数与应答执行器 |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |

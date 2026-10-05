@@ -38,6 +38,11 @@ enum TransactionReason {
   TX_GUILD_DONATE = 24;
   TX_GUILD_SHOP = 25;
   TX_GUILD_ACTIVITY_REWARD = 26;
+  // 运维面（xm-data 直写，数值同 mmorpg TransactionType；基线有枚举值、没有写入方）：
+  // 回档恢复（余额 / 实例变化，correlation_id = 作业号）、精确回收、批量回收
+  TX_ROLLBACK_RESTORE = 16;
+  TX_CLAWBACK = 17;
+  TX_BATCH_RECALL = 19;
 }
 
 // 资产种类：货币类型 0 是金币，只看 currency_type 分不出「货币」还是「物品」，所以单列。
