@@ -102,6 +102,38 @@ class SceneNodePropertiesTest {
     }
 
     @Test
+    void 镜像副本实例_缺省镜像30秒副本300秒宽限30秒上限200与3_可覆盖_越界拒启() {
+        SceneNodeProperties.InstanceSettings s = bind(Map.of()).scene().instance();
+        assertThat(s.mirrorIdleTimeout()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(s.idleTimeout()).isEqualTo(Duration.ofSeconds(300));
+        assertThat(s.reclaimGrace()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(s.maxPerNode()).isEqualTo(200);
+        assertThat(s.maxPerCreator()).isEqualTo(3);
+
+        SceneNodeProperties.InstanceSettings custom = bind(Map.of("xm.scene.instance.mirror-idle-timeout", "5",
+                "xm.scene.instance.idle-timeout", "0", "xm.scene.instance.reclaim-grace", "10s",
+                "xm.scene.instance.max-per-node", "10000", "xm.scene.instance.max-per-creator", "100")).scene().instance();
+        assertThat(custom.mirrorIdleTimeout()).as("不带单位按秒").isEqualTo(Duration.ofSeconds(5));
+        assertThat(custom.idleTimeout()).as("0 = 不自动回收").isZero();
+        assertThat(custom.reclaimGrace()).isEqualTo(Duration.ofSeconds(10));
+        assertThat(custom.maxPerNode()).isEqualTo(10_000);
+        assertThat(custom.maxPerCreator()).isEqualTo(100);
+
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.instance.reclaim-grace", "9s")))
+                .as("宽限不短于 10s（软预占 TTL / login 归属等待）").isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.instance.mirror-idle-timeout", "-1s")))
+                .isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.instance.idle-timeout", "-1s"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.instance.max-per-node", "0"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.instance.max-per-node", "10001")))
+                .isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.instance.max-per-creator", "0")))
+                .isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.instance.max-per-creator", "101")))
+                .isInstanceOf(BindException.class);
+    }
+
+    @Test
     void 按币种覆盖_没写的项取内置缺省_非法值拒绝() {
         SceneNodeProperties.SceneSettings s = bind(Map.of(
                 "xm.scene.anomaly.max-count", "0",

@@ -70,7 +70,7 @@
 |---|---|---|---|
 | 5.1 | 场景实例登记、主世界多频道与自动扩缩容 | scene-instance-registry、world-channels-from-tables、sm-world-channel-* | ✅（提交见 git log「批次 5.1」；频道计划在 Redis、scene-manager 分 zone 领导者维护、scene 节点拉取收敛，缺省每节点每图一个频道、自动扩缩容缺省关；跨节点改派随 5.2 / 5.5——PARITY「场景实例与主世界频道」行）|
 | 5.2 | 跨节点换图 + 归属交接 | scene-switch-cross-node、ownership-handoff、sm-cross-node-scene-switch、sm-player-location | ✅（提交见 git log「批次 5.2」；一笔 MySQL 交出事务（写回冻结快照 + epoch 加一，剩余租约安全边际 + 加锁读探测）、scene-manager 只选目标、gate 经链路帧 PlayerTransfer 改绑、冻结闸集中在入口缺省拒绝；per-node 覆盖保持缺省，本机双 scene 切片 + robot cross-node——PARITY「跨节点换图与归属交接」行）|
-| 5.3 | 副本（Dungeon 表）与镜像场景、空闲回收 | dungeon-instance、mirror-scene、sm-mirror-instance、sm-instance-lifecycle |
+| 5.3 | 副本（Dungeon 表）与镜像场景、空闲回收 | dungeon-instance、mirror-scene、sm-mirror-instance、sm-instance-lifecycle | ✅（提交见 git log「批次 5.3」，契约与 scene-manager 部分随 `db585b4`；实例由承载节点自有、节点目录是唯一登记，scene-manager 只发全服 scene_id、镜像恒与源同节点；空闲回收按精确变空时刻 + 30 s 宽限（宽限内在途进场复活）、级联在节点本地同图改派；选频道 / 改派只认主世界频道；副本只有 dev / test 管理口入口；有意差异 D1–D19——规格 docs/porting/dungeon-mirror-spec.md §13，PARITY「副本 / 镜像场景与实例空闲回收」行）|
 | 5.4 | 跨 zone 传送（226）与重定向（124）、归属区路由；robot travel-smoke | zone-travel、cross-zone-redirect、sm-cross-zone-redirect、home-zone-mapping、sm-home-zone-routing |
 | 5.5 | 场景排空 / 节点疏散、死节点判定与接管 | scene-drain-relocate、sm-dead-node-recovery、scene-node-loss-handling |
 
@@ -79,10 +79,10 @@
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
 | 6.1 | 回合制战斗引擎（纯库：回合、技能、buff、道具、掉落） | turn-battle-engine-core、turn-battle-skills-buffs、turn-battle-items-drops-rewards、battle-table-fingerprint | ✅（提交见 git log「批次 6.1」；新纯库模块 xm-battle-engine，逐位照搬基线、有意差异 D1–D8；跨语言金样待 mmorpg——PARITY「回合制战斗确定性引擎」「战斗配表指纹」行）|
-| 6.2 | battle 节点：房间生命周期、客户端直连、票据、推送、准入 | battle-room-lifecycle、battle-direct-connect-edge、battle-ticket-assignment、battle-client-actions-push、battle-node-admission-ops |
+| 6.2 | battle 节点：房间生命周期、客户端直连、票据、推送、准入；观战的房间侧（规格 Q1 并入） | battle-room-lifecycle、battle-direct-connect-edge、battle-ticket-assignment、battle-client-actions-push、battle-node-admission-ops、battle-spectate（房间侧） | ✅ `db585b4`（评审修复 `3deff9b`；独立进程 xm-battle：单逻辑线程兼直连面 EventLoop、Dubbo 控制面按节点直连、大厅公告经 `PlayerPushes` 一条 `MessageBatch` 保序、dev / test 管理口建房；确认 / 结算 / 对局结果只定义出站端口、缺省只记日志，传输随 6.3 / 6.4；观战房间侧（AddObserver / RemoveObserver、161 / 158 / 166、165）已做，match 侧留给 6.5；限频器挪到 xm-net、解码改逐帧分发；有意差异 N1–N21——PARITY「battle 节点」行）|
 | 6.3 | scene 侧战斗冻结与结算应用、结算 outbox | scene-battle-freeze、scene-battle-settlement-apply、battle-settlement-outbox、in-battle-gates、pet-battle-integration |
 | 6.4 | 匹配：排队、凑单、开局、评分、切磋、帮会活动开战、整队开战；robot battle-smoke | match-*、team-match |
-| 6.5 | 观战；跨区 1V1 | battle-spectate、match-spectate；robot battle-smoke-cross-zone |
+| 6.5 | 观战的 match 侧（163 / 164、观战索引、开局前清退观众；房间侧已在 6.2）；跨区 1V1 | battle-spectate（match 侧）、match-spectate；robot battle-smoke-cross-zone |
 
 ## 阶段 7：运维、数据与工具
 

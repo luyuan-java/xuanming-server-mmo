@@ -145,9 +145,60 @@ class SceneMetricsTest {
                     "executor_queued_tasks{name=\"scene-storage\"}");
             assertThat(labelNames(text, "xm_scene_"))
                     .isSubsetOf("scene_config", "kind", "result", "change", "op", "direction", "type", "reason", "le",
-                            "rpc", "outcome", "state");
+                            "rpc", "outcome", "state", "event");
         } finally {
             executor.shutdownNow();
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 镜像 / 副本实例的指标（批次 5.3，dungeon-mirror-spec §8.2）启动即注册（初值 0），导出名与标签只有 kind / state / event / result
+     * （没有 scene_id、玩家号、节点号）；实例数是逻辑线程推的绝对值。
+     */
+    @Test
+    void 实例指标_启动即注册_导出名_标签有界() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String kind : new String[] {"mirror", "dungeon"}) {
+                for (String state : new String[] {"active", "reclaiming", "draining"}) {
+                    assertThat(before).contains("xm_scene_instances{kind=\"" + kind + "\",state=\"" + state + "\"} 0");
+                }
+                for (String event : new String[] {"created", "rejected", "reclaim_started", "revived", "cascade_started",
+                        "destroyed_idle", "destroyed_cascade", "destroyed_admin"}) {
+                    assertThat(before).contains(
+                            "xm_scene_instance_lifecycle_total{event=\"" + event + "\",kind=\"" + kind + "\"} 0");
+                }
+            }
+            for (String result : new String[] {"accepted", "bad_source", "bad_mirror_config", "source_draining",
+                    "not_accepting", "node_cap", "creator_cap"}) {
+                assertThat(before).contains("xm_scene_mirror_requests_total{result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"created", "rejected", "error", "stale", "wrong_node", "source_moved",
+                    "create_rejected"}) {
+                assertThat(before).contains("xm_scene_mirror_resolves_total{result=\"" + result + "\"} 0");
+            }
+
+            exported.instances(SceneMetrics.InstanceKind.MIRROR, 3, 1, 2);
+            exported.instanceLifecycle(SceneMetrics.InstanceKind.DUNGEON, SceneMetrics.InstanceEvent.DESTROYED_ADMIN);
+            exported.mirrorRequest(SceneMetrics.MirrorRequest.CREATOR_CAP);
+            exported.mirrorResolve(SceneMetrics.MirrorResolve.SOURCE_MOVED);
+            exported.adminRequest(SceneMetrics.ADMIN_OP_INSTANCE_CREATE, 403);
+            String after = prometheus.scrape();
+
+            assertThat(after).contains(
+                    "xm_scene_instances{kind=\"mirror\",state=\"active\"} 3",
+                    "xm_scene_instances{kind=\"mirror\",state=\"reclaiming\"} 1",
+                    "xm_scene_instances{kind=\"mirror\",state=\"draining\"} 2",
+                    "xm_scene_instance_lifecycle_total{event=\"destroyed_admin\",kind=\"dungeon\"} 1",
+                    "xm_scene_mirror_requests_total{result=\"creator_cap\"} 1",
+                    "xm_scene_mirror_resolves_total{result=\"source_moved\"} 1",
+                    "xm_scene_admin_requests_total{op=\"instance_create\",status=\"403\"} 1");
+            assertThat(labelNames(after, "xm_scene_instance")).containsOnly("kind", "state", "event");
+            assertThat(labelNames(after, "xm_scene_mirror_")).containsOnly("result");
+        } finally {
             prometheus.close();
         }
     }

@@ -3,11 +3,13 @@ package com.game.scene.world;
 import com.game.table.BaseSceneTable;
 import com.game.table.ClassTable;
 import com.game.table.ConfigTables;
+import com.game.table.DungeonTable;
 import com.game.table.SkillRows;
 import com.game.table.WorldTable;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 
 /**
@@ -77,5 +79,23 @@ public final class ConfigSceneTables implements SceneTables {
     @Override
     public boolean skillExists(int skillTableId) {
         return skillTableId != 0 && tables.skill().contains(skillTableId);
+    }
+
+    @Override
+    public boolean mirrorExists(int mirrorConfigId) {
+        // 主键是 uint32、按 int 位型存：直接按位型查即是无符号查找（≥ 2^31 的值为负，表里不可能有）
+        return mirrorConfigId != 0 && tables.mirror().contains(mirrorConfigId);
+    }
+
+    @Override
+    public OptionalInt dungeonSceneConfigId(int dungeonConfigId) {
+        if (dungeonConfigId == 0) {
+            return OptionalInt.empty();
+        }
+        Optional<DungeonTable> row = tables.dungeon().find(dungeonConfigId);
+        if (row.isEmpty() || row.get().getSceneId() == 0) {
+            return OptionalInt.empty();
+        }
+        return OptionalInt.of(row.get().getSceneId());
     }
 }

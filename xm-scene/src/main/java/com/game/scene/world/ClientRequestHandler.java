@@ -274,10 +274,15 @@ public final class ClientRequestHandler {
 
     /**
      * 63：按基线顺序校验（契约文档 §4.3；player_scene_handler.cpp:37-171），先回应答（无错 = 已受理、不代表已到达），再换场景：
-     * 战斗在途 3023（6.3 接入，现在没有战斗）→ 换图在途（选目标中 / 冻结中）<b>3014</b> → 三个号全 0 回 3005 → 镜像回 3023（5.3 接入）
-     * → scene_id 就是当前场景回 3008 → 去向（{@link SceneWorld#resolveSwitchTarget}，批次 5.1 scene-channels-spec §4.12）。
-     * Java 场景节点都是主世界节点、没有「缺会话快照」，所以 3004 与第二个 3005 不会出现。
+     * 战斗在途 3023（6.3 接入，现在没有战斗）→ 换图在途（选目标中 / 镜像取号中 / 冻结中）<b>3014</b> → 三个号全 0 回 3005
+     * → 镜像分支（{@code mirror_config_id ≠ 0 且 scene_id = 0}，批次 5.3）→ scene_id 就是当前场景回 3008
+     * → 去向（{@link SceneWorld#resolveSwitchTarget}，批次 5.1 scene-channels-spec §4.12）。
+     * Java 场景节点都是同构的主世界节点（dungeon-mirror-spec D15）、没有「缺会话快照」，所以 3004 与第二个 3005 不会出现。
      * <ul>
+     *   <li>镜像分支（dungeon-mirror-spec §6.7）：同步校验（当前场景不是主世界频道、M 不在 Mirror 表、当前频道在排空、停止接客、实例数上限）
+     *       任一不满足回 3005、不发 79；否则先回 {@code {0}}，再进 RESOLVING 向 scene-manager 取实例号（{@link SceneWorld#beginMirrorCreate}），
+     *       号回来后在本节点建镜像并换入：旁人 51 → 本人 79（镜像 info）/ 21 / 47，同图保留坐标。之后的失败以 23 推送：取号调用失败 {1003}、
+     *       scene-manager 拒绝 / 玩家已不在源场景等 {3023}（D5、D6）；在途期间再发 63 回 3014（D4）；</li>
      *   <li>本节点内：同步换场景。指定排空中的频道回 3023（D11）；只带当前地图时在本节点同图频道里挑最空的（含自己、并列留原地，D17），
      *       挑回原频道 = 受理、不发 79；</li>
      *   <li>远端（批次 5.2，scene-handoff-spec §5.5）：先回 {@code {0}}，再经 scene-manager 选目标、冻结、交出、由 gate 改绑到目标节点
@@ -292,13 +297,16 @@ public final class ClientRequestHandler {
         Scene current = player.scene();
         Scene target = null;
         boolean remote = false;
+        boolean mirror = false;
         int tipId;
         if (world.switchInFlight(player)) {
             tipId = ENTER_CHANGING_SCENE;
         } else if (want.getSceneConfigId() == 0 && want.getSceneId() == 0 && want.getMirrorConfigId() == 0) {
             tipId = ENTER_PARAM_ERROR;
         } else if (want.getMirrorConfigId() != 0 && want.getSceneId() == 0) {
-            tipId = ENTER_FAILED;
+            // 镜像分支（批次 5.3 §6.7；uint32 只能判 ≠ 0）：请求里的 scene_config_id / dungeon_config_id / creators 都忽略（同基线）
+            tipId = world.checkMirrorRequest(player, want.getMirrorConfigId());
+            mirror = tipId == 0;
         } else if (want.getSceneId() != 0 && want.getSceneId() == current.sceneId()) {
             tipId = ENTER_IN_CURRENT_SCENE;
         } else {
@@ -323,6 +331,8 @@ public final class ClientRequestHandler {
             world.switchScene(player, target);
         } else if (remote) {
             world.beginRemoteSwitch(player, want.getSceneId(), want.getSceneConfigId());
+        } else if (mirror) {
+            world.beginMirrorCreate(player, want.getMirrorConfigId());
         }
     }
 

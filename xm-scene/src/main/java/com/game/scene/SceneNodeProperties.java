@@ -3,6 +3,7 @@ package com.game.scene;
 import com.game.scene.audit.GainAnomalyDetector;
 import com.game.scene.storage.HandOffSettings;
 import com.game.scene.transfer.SceneManagerSwitchTargets;
+import com.game.scene.world.SceneInstances;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
@@ -73,6 +74,7 @@ public record SceneNodeProperties(
      * @param switchResolveTimeout  选目标的本地兜底超时（缺省 4s；须大于 scene-manager 的 Dubbo 提供方超时 3s、不超过 30s）：到时推 23 {1003}，
      *                              也决定 63 在途槽（RESOLVING，期间再发 63 回 3014）的寿命
      * @param transferTombstoneTtl  交出墓碑的存活时长（缺省 30s，1s～5min）：与 PlayerTransfer 在链路上交叉的 PlayerLeave 靠它按旧 epoch 补写位置
+     * @param instance              镜像 / 副本实例的回收与上限（批次 5.3，{@code xm.scene.instance.*}，dungeon-mirror-spec §7.2）
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -97,7 +99,8 @@ public record SceneNodeProperties(
             @DefaultValue("3s") Duration transferProbeStatementTimeout,
             @DefaultValue("tri://127.0.0.1:20882") String sceneManagerUrl,
             @DefaultValue("4s") Duration switchResolveTimeout,
-            @DefaultValue("30s") Duration transferTombstoneTtl) {
+            @DefaultValue("30s") Duration transferTombstoneTtl,
+            @DefaultValue InstanceSettings instance) {
 
         public SceneSettings {
             // 启动期校验（不满足即拒启）：续约周期 < M < 租约 − 续约周期，语句时限 < M
@@ -150,6 +153,27 @@ public record SceneNodeProperties(
         /** 交出归属在存储层的参数（已在构造时校验）。 */
         public HandOffSettings handOff() {
             return new HandOffSettings(transferLeaseMargin, transferProbeStatementTimeout);
+        }
+    }
+
+    /**
+     * 镜像 / 副本实例（{@code xm.scene.instance}，批次 5.3，dungeon-mirror-spec §6.10、§7.2）。不带单位的数字按秒；不满足校验拒启。
+     *
+     * @param mirrorIdleTimeout 镜像空置多久进入回收宽限（缺省 30s，≥ 0；0 = 用 {@code idle-timeout}，同基线 MirrorIdleTimeoutSeconds）
+     * @param idleTimeout       副本（及回落到它的镜像）空置多久进入回收宽限（缺省 300s，≥ 0；0 = 不自动回收，同基线 InstanceIdleTimeoutSeconds）
+     * @param reclaimGrace      回收宽限（缺省 30s，≥ 10s）：宽限内不接本地新进入、在途进场到达即复活；宽限满且仍空才销毁
+     * @param maxPerNode        本节点实例数上限（缺省 200，1..10000；超限 63 镜像回 3005）
+     * @param maxPerCreator     本节点上同一玩家创建的镜像数上限（缺省 3，1..100；超限 3005）
+     */
+    public record InstanceSettings(
+            @DefaultValue("30s") @DurationUnit(ChronoUnit.SECONDS) Duration mirrorIdleTimeout,
+            @DefaultValue("300s") @DurationUnit(ChronoUnit.SECONDS) Duration idleTimeout,
+            @DefaultValue("30s") @DurationUnit(ChronoUnit.SECONDS) Duration reclaimGrace,
+            @DefaultValue("200") int maxPerNode,
+            @DefaultValue("3") int maxPerCreator) {
+
+        public InstanceSettings {
+            SceneInstances.validate(mirrorIdleTimeout, idleTimeout, reclaimGrace, maxPerNode, maxPerCreator);
         }
     }
 

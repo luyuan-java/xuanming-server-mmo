@@ -1,5 +1,7 @@
 package com.game.scene;
 
+import com.game.api.proto.CreateDungeonInstanceResponse;
+import com.game.api.proto.DestroyInstanceResponse;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.audit.AuditProperties;
@@ -67,6 +69,7 @@ import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.CrossNodeSwitch;
 import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.SceneClock;
+import com.game.scene.world.SceneInstances;
 import com.game.scene.world.SceneMessageIds;
 import com.game.scene.world.SceneTables;
 import com.game.scene.world.SceneTicker;
@@ -80,6 +83,7 @@ import java.util.OptionalLong;
 import java.util.SplittableRandom;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -291,6 +295,12 @@ public class SceneNode implements SmartLifecycle {
                 renewer.renewSoon(owned);
             }
         }, settings.switchResolveTimeout(), settings.transferTombstoneTtl());
+        // 镜像 / 副本实例（批次 5.3，dungeon-mirror-spec §6）：取号复用同一个 scene-manager 客户端（同一个 Dubbo 引用，retries = 0）；
+        // 实例建立 / 回收 / 级联 / 销毁后立即补发目录（目录是实例的唯一登记，D1）
+        SceneNodeProperties.InstanceSettings instance = settings.instance();
+        SceneInstances instances = new SceneInstances(nodeId, switchTargets, instance.mirrorIdleTimeout(),
+                instance.idleTimeout(), instance.reclaimGrace(), instance.maxPerNode(), instance.maxPerCreator(),
+                settings.switchResolveTimeout(), this::requestDirectoryPublish);
         // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, player -> {
@@ -300,7 +310,7 @@ public class SceneNode implements SmartLifecycle {
                     missions.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
                 }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId), teamFollow,
-                crossNode);
+                crossNode, instances);
         links = gateLinks;
         world = sceneWorld;
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
@@ -336,12 +346,13 @@ public class SceneNode implements SmartLifecycle {
         channelFollower = follower;
         follower.syncOnce();
         follower.start(scheduler, settings.channelPlanPollInterval());
-        // 排空推进：每秒一次（应用计划后另会立即推进一次）。排空频道里的人同节点改派，空了即销毁（§4.10.3）。
+        // 场景维护：每秒一次（应用计划后另会立即推进一次排空）。排空频道里的人同节点改派，空了即销毁（§4.10.3）；
+        // 批次 5.3 起同一个任务里做实例的空闲回收、回收宽限、级联兜底（dungeon-mirror-spec §6.10、§6.11，1 s 粒度）
         drainTask = logicLoop.scheduleAtFixedRate(() -> {
             try {
-                sceneWorld.drainStep();
+                sceneWorld.maintainScenes();
             } catch (RuntimeException e) {
-                log.error("频道排空推进这一秒出错，下一秒照常", e);
+                log.error("场景维护（排空推进 / 实例回收）这一秒出错，下一秒照常", e);
             }
         }, 1, 1, TimeUnit.SECONDS);
         // 场景帧：固定周期触发，SceneTicker 按单调时钟补帧（每次最多 5 帧），帧内异常只记日志、不让定时任务停掉。
@@ -418,7 +429,11 @@ public class SceneNode implements SmartLifecycle {
                 follower.appliedVersion() < 0 ? "未拉到" : Long.toUnsignedString(follower.appliedVersion()));
     }
 
-    /** 应用了新的频道计划之后立即补发节点目录（拉取线程上调；目录发布者还没建出来或已停时什么也不做）。 */
+    /**
+     * 立即补发节点目录：应用了新的频道计划之后（拉取线程）、实例建立 / 回收 / 复活 / 级联 / 销毁之后（场景逻辑线程，批次 5.3）。
+     * 任意线程可调，不加锁、不等 Redis（{@link SceneDirectoryPublisher#requestPublishNow} 只标脏，连发合并成至多一个调度任务）；
+     * 目录发布者还没建出来或已停时什么也不做。
+     */
     private void requestDirectoryPublish() {
         SceneDirectoryPublisher p = publisher;
         if (p != null) {
@@ -476,6 +491,52 @@ public class SceneNode implements SmartLifecycle {
     /** 资产通道的进程内入口（任意线程可调）；节点没启动过为 null。 */
     public AssetOpEndpoint assetOps() {
         return assetOps;
+    }
+
+    /**
+     * dev 管理口建副本（批次 5.3 §6.13；任意线程可调，不阻塞）：业务在逻辑线程上（{@link SceneWorld#createDungeon}，取号经 scene-manager，
+     * 结果回到逻辑线程建实例）。节点没在运行、逻辑线程已停或处理出错时异常完成。调用方不再等结果时 {@code cancel} 返回的 future：
+     * 还没取号就不取、号回来时不建、刚建好交不回去就当场销毁（不留没人知道号的副本）。
+     */
+    public CompletableFuture<CreateDungeonInstanceResponse> createDungeonInstance(int dungeonConfigId) {
+        CompletableFuture<CreateDungeonInstanceResponse> result = new CompletableFuture<>();
+        SceneWorld w = world;
+        if (!running || w == null) {
+            result.completeExceptionally(new IllegalStateException("场景节点没在运行"));
+            return result;
+        }
+        // result 同时是放弃信号：管理口等超时会 cancel 它，SceneWorld 据此不取号 / 不建 / 建好交不回去就当场销毁
+        submitAdmin(result, () -> w.createDungeon(dungeonConfigId, result));
+        return result;
+    }
+
+    /** dev 管理口显式销毁实例（批次 5.3 §6.11；任意线程可调，不阻塞）：{@link SceneWorld#destroyInstance} 在逻辑线程上执行。 */
+    public CompletableFuture<DestroyInstanceResponse> destroyInstance(long sceneId) {
+        CompletableFuture<DestroyInstanceResponse> result = new CompletableFuture<>();
+        SceneWorld w = world;
+        if (!running || w == null) {
+            result.completeExceptionally(new IllegalStateException("场景节点没在运行"));
+            return result;
+        }
+        submitAdmin(result, () -> result.complete(
+                DestroyInstanceResponse.newBuilder().setTipId(w.destroyInstance(sceneId)).build()));
+        return result;
+    }
+
+    /** 管理口的逻辑任务：抛异常或逻辑线程已停时让等着的 HTTP 线程立刻拿到失败，而不是等到超时。 */
+    private void submitAdmin(CompletableFuture<?> result, Runnable task) {
+        try {
+            runOnLogic(() -> {
+                try {
+                    task.run();
+                } catch (RuntimeException e) {
+                    result.completeExceptionally(e);
+                    throw e;
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            result.completeExceptionally(e);
+        }
     }
 
     /**

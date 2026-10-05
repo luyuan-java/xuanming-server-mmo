@@ -1,6 +1,7 @@
 package com.game.scene.world;
 
 import java.util.List;
+import java.util.OptionalInt;
 
 /**
  * 场景逻辑用到的配置表数据。只读；实现必须在表加载完成后构造，之后可在任意线程读。
@@ -28,4 +29,16 @@ public interface SceneTables {
     List<Integer> initialSkills();
 
     boolean skillExists(int skillTableId);
+
+    /**
+     * Mirror 表里有没有这一行（批次 5.3 D7 / Q1：63 镜像分支的 {@code mirror_config_id} 必须在表里，否则 3005；只校验行存在，
+     * 不看 {@code scene_id} / {@code main_scene_id}——镜像的地图仍取源场景的）。按 uint32 的位型查：≥ 2^31 的取值在 Java int 里为负，
+     * 表里不可能有（R9）；0 恒为 false。
+     */
+    boolean mirrorExists(int mirrorConfigId);
+
+    /**
+     * 副本的地图：Dungeon 表这一行的 {@code scene_id}（BaseScene 17–19，批次 5.3 D16）。没有这一行、id 为 0 或这一行的 scene_id 为 0 时为空。
+     */
+    OptionalInt dungeonSceneConfigId(int dungeonConfigId);
 }

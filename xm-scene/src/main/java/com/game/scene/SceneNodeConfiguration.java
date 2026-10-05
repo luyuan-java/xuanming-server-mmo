@@ -1,6 +1,9 @@
 package com.game.scene;
 
+import com.game.api.proto.CreateDungeonInstanceResponse;
+import com.game.api.proto.DestroyInstanceResponse;
 import com.game.audit.AuditProperties;
+import com.game.common.RunMode;
 import com.game.common.token.DubboCallAuth;
 import com.game.common.token.GmRequestAuth;
 import com.game.common.token.GmShutdownHandler;
@@ -8,6 +11,8 @@ import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.player.store.PlayerStore;
 import com.game.scene.admin.GmShutdownController;
+import com.game.scene.admin.SceneAdminAuthFilter;
+import com.game.scene.admin.SceneAdminController;
 import com.game.scene.attribute.AttributeTables;
 import com.game.scene.bag.BagTables;
 import com.game.scene.mission.MissionTables;
@@ -20,6 +25,7 @@ import com.game.table.ConfigTables;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.LockSupport;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
@@ -27,6 +33,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -142,6 +149,41 @@ public class SceneNodeConfiguration {
         return new GmShutdownHandler(GmShutdownController.METHOD, gmRequestAuth,
                 () -> new GmShutdownHandler.Identity(sceneNode.zoneId(), sceneNode.nodeId(), sceneNode.instanceId()),
                 sceneNode::onlinePlayerCount, allowRemote);
+    }
+
+    /** dev 实例管理口（批次 5.3 §6.13）的业务入口：投到场景逻辑线程执行（{@link SceneNode#createDungeonInstance} / {@link SceneNode#destroyInstance}）。 */
+    @Bean
+    public SceneAdminController.InstanceAdmin sceneInstanceAdmin(SceneNode sceneNode) {
+        return new SceneAdminController.InstanceAdmin() {
+            @Override
+            public CompletableFuture<CreateDungeonInstanceResponse> createDungeon(int dungeonConfigId) {
+                return sceneNode.createDungeonInstance(dungeonConfigId);
+            }
+
+            @Override
+            public CompletableFuture<DestroyInstanceResponse> destroyInstance(long sceneId) {
+                return sceneNode.destroyInstance(sceneId);
+            }
+        };
+    }
+
+    /**
+     * 管理端口 {@code /admin/*} 的运维鉴权（容器按规范路径匹配；令牌只从环境变量 {@code XM_ADMIN_TOKEN} 读，没配一律 503）。
+     * 只覆盖 dev 实例管理口；actuator 与 GM 签名停机 {@code /gm/**} 不在这个前缀下。
+     */
+    @Bean
+    public FilterRegistrationBean<SceneAdminAuthFilter> sceneAdminAuthFilter(SceneMetrics sceneMetrics,
+                                                                             SceneNodeProperties props) {
+        SceneAdminAuthFilter filter = new SceneAdminAuthFilter(System.getenv(SceneAdminAuthFilter.TOKEN_ENV), sceneMetrics);
+        RunMode runMode = RunMode.parse(props.runMode());
+        if (!filter.tokenConfigured()) {
+            log.info("运维令牌 {} 未配置：管理端口 /admin/**（dev 实例管理口）一律 503", SceneAdminAuthFilter.TOKEN_ENV);
+        } else {
+            log.info("dev 实例管理口 {}（运行模式 {}）", runMode.allowsGmCommands() ? "开放" : "关闭（403）", runMode);
+        }
+        FilterRegistrationBean<SceneAdminAuthFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.addUrlPatterns("/admin/*");
+        return registration;
     }
 
     /** GM 停机受理后：等应答写出，再按正常流程关 Spring 上下文（触发 {@link SceneNode#stop()} 写回全部玩家）并退出进程。 */

@@ -1254,7 +1254,41 @@ Java robot 新增两个场景（`RobotOptions.Scenario` 加 `MIRROR`、`DUNGEON`
 `WorldAutoscalerTest`、`WorldRebalancePlannerTest`、`WorldChannelConfigurationTest`、`WorldChannelRedisIntegrationTest`（节点经 Redis 目录上报镜像 → 种类不丢、
 login 不分进镜像、领导者一拍内缩容跳过镜像源）、xm-scene `InstanceChannelIsolationTest`。双节点切片 `smoke` / `reconnect` / `cross-node` 通过，各进程 ERROR 行为 0。
 
-### 13.2 scene 节点部分（待做）
+### 13.2 scene 节点部分
 
-§6.4 其余字段（`emptySinceNanos`、`DrainCause`、`drainingSinceNanos`）、§6.7 的 63 镜像分支与 `RESOLVING` 取号、§6.8 `createInstance(spec)`、§6.10 回收与复活、
-§6.11 级联与显式销毁、§6.13 dev 管理口、§6.14 重连、§8.2 的 scene 侧指标、§7.2 的 `xm.scene.instance.*` 配置、§12.6 的 robot 场景。
+**xm-scene**（全部状态只在场景逻辑线程读写，没有新增 Redis / MySQL I/O）
+- `Scene`：`DrainCause{NONE, PLAN, IDLE, CASCADE, ADMIN}`、`drainingSinceNanos`、`emptySinceNanos`（哨兵 `Long.MIN_VALUE`，单调时钟可取任意值）；
+  5.1 的 `setDraining` 记 `PLAN`。`InstanceSpec`（`toInfo()` 即 79 / 31 的 `scene_info`，镜像 `putCreators(创建者, true)`）。
+- `SceneTables.mirrorExists`（按 uint32 位型查，`≥ 2^31` 恒无）/ `dungeonSceneConfigId`；`ConfigSceneTables` 读 Mirror / Dungeon 表。
+- 63 镜像分支（§6.7）：`ClientRequestHandler` 在全 0 之后、3008 之前进 `SceneWorld.checkMirrorRequest`（`bad_source → bad_mirror_config →
+  source_draining → not_accepting → node_cap → creator_cap`，一律 3005）；受理后回 `{0}`，`beginMirrorCreate` 用 `PlayerSwitch.mirrorCreate`
+  （`Purpose.MIRROR_CREATE`，复用 5.2 的 RESOLVING 槽，永不冻结；期间 63 回 3014、组队跟随跳过）经 `InstanceIds` 取号。`InstanceIds` 由
+  `SceneManagerSwitchTargets` 实现（同一个 Dubbo 引用、`retries = 0`、同一个本地兜底超时，结果投回逻辑线程）。结果按引用核对后：Failed → 23 {1003}、
+  Refused → 23 {3023}、节点不是本节点 → 23 {3023} + ERROR、复核不过（玩家不在源 / 源排空 / 停止接客 / 上限）→ 23 {3023}、本地拒建 → 23 {3023}；
+  成功 → `createInstance` → `switchScene`。没装配取号（`SceneInstances.DISABLED`）= 应答 `{0}` 后 23 {1003}（D9）。
+- `createInstance(spec)` 是建实例的唯一入口（§6.8），建好 / 回收 / 复活 / 级联 / 销毁都经 `SceneInstances.directoryChanged`（`SceneNode` 接
+  `requestDirectoryPublish`）立即补发目录。
+- 回收与级联（§6.10、§6.11）：每秒任务由 `drainStep` 改为 `maintainScenes()` = 级联兜底（源不在本地或不是 WORLD）→ 空闲判定（满超时进 IDLE 宽限，
+  宽限中发现有人按复活处理）→ `drainStep`（IDLE 只在宽限满、空、无在途进场时销毁；其余改派）。`onPlayerLoaded` 目标在 IDLE 宽限中 → 复活进入；
+  `destroyScene` 销毁 WORLD 时把以它为源、未在 CASCADE / ADMIN 中的镜像（含 IDLE 宽限中的）转 CASCADE 并在同一次推进里改派、销毁。
+  `destroyInstance` 只经 dev 管理口（WORLD / 0 → 3005，不在 → 3000，已在 CASCADE / ADMIN → 0）。
+- dev 管理口（§6.13）：`SceneAdminController`（`/admin/scene/instance/{create,destroy}`，protobuf 二进制；非 dev / test 403，先于解析请求体）+
+  `SceneAdminAuthFilter`（`XM_ADMIN_TOKEN` 常数时间比对、未配 503、错 401、缺 / 非法操作人 400、审计行、`xm.scene.admin.requests{op, status}`）；
+  建副本等结果超时时撤掉结果（逻辑线程据此不取号 / 不建 / 建好交不回去就当场销毁，不留没人知道号的副本）。
+- 配置 `xm.scene.instance.*`（`mirror-idle-timeout` 30s / `idle-timeout` 300s / `reclaim-grace` 30s ≥ 10s / `max-per-node` 200 / `max-per-creator` 3，
+  绑定时校验、不满足拒启；前三项可用 `XM_SCENE_MIRROR_IDLE_TIMEOUT` / `XM_SCENE_INSTANCE_IDLE_TIMEOUT` / `XM_SCENE_INSTANCE_RECLAIM_GRACE` 覆盖）。
+- 指标（§8.2）：`xm_scene_instances{kind, state}`、`xm_scene_instance_lifecycle_total{kind, event}`、`xm_scene_mirror_requests_total{result}`、
+  `xm_scene_mirror_resolves_total{result}` 启动即注册；`xm_scene_channels` 只计 WORLD，镜像居民计入源地图的 `xm_scene_players`。
+- `SceneDirectoryPublisher`：立即补发改为单飞（标脏 + 至多一个发布任务、不加锁不碰 Redis），逻辑线程上可调。
+
+**robot**：`mirror`、`dungeon` 子命令（`InstanceOptions`：`--mirror-config-id`、`--instance-wait-ms`、`--expect-mirror-validation`、`--scene-admin-url`、
+`--scene-manager-metrics-url`）；`cross-node` 末尾追加「跨节点按号加入镜像」。目录发布窗口（§6.16）内的跨节点按号加入回 23 {3023} 属预期，`cross-node`
+对这一结局最多重试 3 次（双节点切片实测：每一轮第一次按号加入都回 23 {3023}——镜像建好约 25 ms 以上之后才进目录，重试是每次通过的一部分，不是偶发兜底；第二次即成功）。`tools/local/start-slice.sh` 缺省把镜像空置超时调到 5s、
+回收宽限调到 10s（§7.3）。
+
+**测试证据**：`-pl xm-api,xm-scene-manager,xm-scene,xm-robot install`，带 `-Dxm.it.redis` 与 `-Dxm.it.mysql` 全部通过：xm-api 38、xm-scene-manager 232、
+xm-scene 834（1 个基准测试跳过）、xm-robot 201，0 失败。新增 / 补充：`MirrorSceneTest`（§12.2 第 1–6、13、14 条）、`InstanceLifecycleTest`（第 8–11 条，
+含 2000 轮随机交错）、`SceneAdminControllerTest` / `SceneAdminAuthFilterTest`（第 15 条）、`SceneNodePropertiesTest`（第 16 条）、`TeamFollowServiceTest`
+（第 12 条）、`SceneMetricsTest`、`SceneDirectoryPublisherTest`、`SceneManagerSwitchTargetsTest`、`ClientRequestHandlerTest`；robot `InstanceOptionsTest`、
+`InstanceChecksTest`、`InstanceMetricsTest`、`SendPacerTest`、`SceneAdminClientTest`（字段号用 xm-api 生成类钉住）。本机切片：单节点 `mirror`（47 项）、
+`dungeon`（31 项）通过；双节点 `cross-node`（41 项，含跨节点加入镜像）、`mirror`、`dungeon`、`smoke` 通过；各进程 ERROR 行为 0。

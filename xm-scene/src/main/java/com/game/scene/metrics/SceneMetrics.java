@@ -81,6 +81,15 @@ public final class SceneMetrics {
     static final String TRANSFER_ENTERS = "xm.scene.transfer.enters";
     static final String TRANSFER_POST_FREEZE_MUTATIONS = "xm.scene.transfer.post.freeze.mutations";
     static final String FROZEN_REJECTIONS = "xm.scene.frozen.rejections";
+    static final String INSTANCES = "xm.scene.instances";
+    static final String INSTANCE_LIFECYCLE = "xm.scene.instance.lifecycle";
+    static final String MIRROR_REQUESTS = "xm.scene.mirror.requests";
+    static final String MIRROR_RESOLVES = "xm.scene.mirror.resolves";
+    static final String ADMIN_REQUESTS = "xm.scene.admin.requests";
+    /** 管理口指标的 op 标签（只取已知接口，任意路径都不得变成标签值）。 */
+    public static final String ADMIN_OP_INSTANCE_CREATE = "instance_create";
+    public static final String ADMIN_OP_INSTANCE_DESTROY = "instance_destroy";
+    public static final String ADMIN_OP_OTHER = "other";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -370,6 +379,78 @@ public final class SceneMetrics {
         FAILED
     }
 
+    /** 实例的种类标签（批次 5.3，dungeon-mirror-spec §8.2；主世界频道另见 {@code xm.scene.channels}）。 */
+    public enum InstanceKind {
+        MIRROR,
+        DUNGEON
+    }
+
+    /** 实例的状态（{@code xm.scene.instances{state}}）。 */
+    public enum InstanceState {
+        /** 承载中（接受进入）。 */
+        ACTIVE,
+        /** 回收宽限中（空置满超时，宽限内在途进场到达即复活）。 */
+        RECLAIMING,
+        /** 级联排空 / 显式销毁中（居民改派，空了销毁）。 */
+        DRAINING
+    }
+
+    /**
+     * 实例生命周期事件（{@code xm.scene.instance.lifecycle{kind, event}}，§8.2）。勾稽：每个 {@code created} 最终恰好对应一个 {@code destroyed_*}
+     * （或停服）；{@code mirror.resolves{created}} = {@code lifecycle{kind=mirror, event=created}} − 管理口建的（管理口只建副本）。
+     */
+    public enum InstanceEvent {
+        /** 建好了。 */
+        CREATED,
+        /** 建实例被拒（号为 0 / 本地重号 / 源不合格 / 副本地图不符 / 达上限 / 停止接客）：不建，记 ERROR。 */
+        REJECTED,
+        /** 空置满超时，进入回收宽限。 */
+        RECLAIM_STARTED,
+        /** 回收宽限中有在途进场到达，复活。 */
+        REVIVED,
+        /** 源频道已销毁（或兜底检查发现源不在），镜像转级联排空。 */
+        CASCADE_STARTED,
+        DESTROYED_IDLE,
+        DESTROYED_CASCADE,
+        DESTROYED_ADMIN
+    }
+
+    /** 63 镜像分支的同步结局（{@code xm.scene.mirror.requests{result}}，§6.7），每条镜像请求恰好计一次（3014 / 全 0 在分支之前，不计）。 */
+    public enum MirrorRequest {
+        /** 受理（应答 {0}），进取号在途。 */
+        ACCEPTED,
+        /** 当前场景不是主世界频道（镜像的镜像、副本作源，Q7）：3005。 */
+        BAD_SOURCE,
+        /** {@code mirror_config_id} 不在 Mirror 表（D7）：3005。 */
+        BAD_MIRROR_CONFIG,
+        /** 当前频道在排空中（D8）：3005。 */
+        SOURCE_DRAINING,
+        /** 本节点停止接客（节点号租约丢失 / 停服，D8）：3005。 */
+        NOT_ACCEPTING,
+        /** 本节点实例数达上限（D19）：3005。 */
+        NODE_CAP,
+        /** 本节点上本人创建的镜像数达上限（D19）：3005。 */
+        CREATOR_CAP
+    }
+
+    /** 63 镜像分支取号结果回到逻辑线程后的结局（{@code xm.scene.mirror.resolves{result}}，§6.7），每次受理恰好计一次。 */
+    public enum MirrorResolve {
+        /** 建好并换入。 */
+        CREATED,
+        /** scene-manager 业务拒绝：推 23 {3023}（D5）。 */
+        REJECTED,
+        /** 调用失败 / 超时 / 租约无效 / 没装配：推 23 {1003}。 */
+        ERROR,
+        /** 结果回来时实例已离开 / 已重新进场 / 在途已作废：丢弃，号作废。 */
+        STALE,
+        /** 号落在别的节点（5.3 不该出现，R11）：推 23 {3023}。 */
+        WRONG_NODE,
+        /** 玩家已不在源场景、源已不在 / 在排空、停止接客、达上限：不建，推 23 {3023}（D6）。 */
+        SOURCE_MOVED,
+        /** 号本地已存在或建实例被拒（发号器失效的迹象）：推 23 {3023}。 */
+        CREATE_REJECTED
+    }
+
     /** 没发出去的 scene → gate 链路帧（{@code xm.scene.link.dropped{reason}}）。 */
     public enum LinkDrop {
         /** 链路已注销或已断开（其上会话随链路一起失效）。 */
@@ -412,6 +493,11 @@ public final class SceneMetrics {
     private final Map<TransferEnter, Counter> transferEnters;
     private final Counter postFreezeMutations;
     private final Map<FrozenRejection, Counter> frozenRejections;
+    /** 实例数（种类 × 状态；逻辑线程推绝对值，抓取线程读）。 */
+    private final Map<InstanceKind, Map<InstanceState, AtomicInteger>> instances;
+    private final Map<InstanceKind, Map<InstanceEvent, Counter>> instanceLifecycle;
+    private final Map<MirrorRequest, Counter> mirrorRequests;
+    private final Map<MirrorResolve, Counter> mirrorResolves;
     /** 冻结中（交出在途）的玩家数（逻辑线程推绝对值，抓取线程读）。 */
     private final AtomicInteger transfersInFlight = new AtomicInteger();
     /** 本节点承载中 / 排空中的频道数（逻辑线程推绝对值，抓取线程读）。 */
@@ -520,6 +606,35 @@ public final class SceneMetrics {
                 .register(registry);
         this.frozenRejections = counters(FrozenRejection.class, FROZEN_REJECTIONS, "kind",
                 "冻结闸（跨节点换图交出在途）在入口挡掉的操作：request = 回 1005，asset_op = 资产通道 RETRY 27003，move = 移动上行静默丢");
+        // 镜像 / 副本实例（批次 5.3，dungeon-mirror-spec §8.2）：全部预注册，不带 zone / scene_id / 节点号 / player
+        this.instances = new EnumMap<>(InstanceKind.class);
+        this.instanceLifecycle = new EnumMap<>(InstanceKind.class);
+        for (InstanceKind kind : InstanceKind.values()) {
+            EnumMap<InstanceState, AtomicInteger> byState = new EnumMap<>(InstanceState.class);
+            for (InstanceState state : InstanceState.values()) {
+                AtomicInteger holder = new AtomicInteger();
+                Gauge.builder(INSTANCES, holder, AtomicInteger::get)
+                        .description("本节点的镜像 / 副本实例数（active = 承载中，reclaiming = 回收宽限中，draining = 级联 / 显式销毁排空中）")
+                        .tag("kind", tagValue(kind))
+                        .tag("state", tagValue(state))
+                        .register(registry);
+                byState.put(state, holder);
+            }
+            instances.put(kind, byState);
+            EnumMap<InstanceEvent, Counter> byEvent = new EnumMap<>(InstanceEvent.class);
+            for (InstanceEvent event : InstanceEvent.values()) {
+                byEvent.put(event, Counter.builder(INSTANCE_LIFECYCLE)
+                        .description("镜像 / 副本实例的生命周期事件（建、拒建、进入回收宽限、复活、级联、各种销毁）")
+                        .tag("kind", tagValue(kind))
+                        .tag("event", tagValue(event))
+                        .register(registry));
+            }
+            instanceLifecycle.put(kind, byEvent);
+        }
+        this.mirrorRequests = counters(MirrorRequest.class, MIRROR_REQUESTS, "result",
+                "63 镜像分支的同步结局：accepted = 受理（应答 {0}），其余各回 3005");
+        this.mirrorResolves = counters(MirrorResolve.class, MIRROR_RESOLVES, "result",
+                "63 镜像分支取号结果的结局（每次受理恰好计一次）");
     }
 
     /** 不导出任何指标的实例（测试 / 不关心指标的装配用）：没有子注册表的 {@link CompositeMeterRegistry} 上计量器都是空操作。 */
@@ -670,6 +785,41 @@ public final class SceneMetrics {
     /** 冻结闸在入口挡掉一次操作（逻辑线程：请求分发、资产通道）。 */
     public void frozenRejection(FrozenRejection kind) {
         frozenRejections.get(kind).increment();
+    }
+
+    // ================================================================ 镜像 / 副本实例（批次 5.3）
+
+    /** 某种实例的各状态数量（{@code xm.scene.instances{kind, state}}）。逻辑线程在实例增删、状态变化后推绝对值。 */
+    public void instances(InstanceKind kind, int active, int reclaiming, int draining) {
+        Map<InstanceState, AtomicInteger> byState = instances.get(kind);
+        byState.get(InstanceState.ACTIVE).set(active);
+        byState.get(InstanceState.RECLAIMING).set(reclaiming);
+        byState.get(InstanceState.DRAINING).set(draining);
+    }
+
+    /** 一个实例生命周期事件（逻辑线程）。 */
+    public void instanceLifecycle(InstanceKind kind, InstanceEvent event) {
+        instanceLifecycle.get(kind).get(event).increment();
+    }
+
+    /** 一次 63 镜像请求的同步结局（逻辑线程）。 */
+    public void mirrorRequest(MirrorRequest result) {
+        mirrorRequests.get(result).increment();
+    }
+
+    /** 一次镜像取号结果的结局（逻辑线程）。 */
+    public void mirrorResolve(MirrorResolve result) {
+        mirrorResolves.get(result).increment();
+    }
+
+    /**
+     * dev 管理口的一次调用（{@code xm.scene.admin.requests{op, status}}；HTTP 线程）。op 只取 {@link #ADMIN_OP_INSTANCE_CREATE} /
+     * {@link #ADMIN_OP_INSTANCE_DESTROY} / {@link #ADMIN_OP_OTHER}，status 是 HTTP 状态码（有界）。
+     */
+    public void adminRequest(String op, int status) {
+        Counter.builder(ADMIN_REQUESTS).description("scene 管理端口 /admin/** 的调用（鉴权失败也计）")
+                .tag("op", op).tag("status", Integer.toString(status))
+                .register(registry).increment();
     }
 
     // ================================================================ 逻辑线程

@@ -22,6 +22,10 @@ import java.util.Set;
  * 排空中的场景不接受显式进入（63 指定它回 3023，D11）、不被组队跟随跟进（§4.13）、进场加载完成时改进兄弟频道（§4.10.4），
  * 在场玩家由 {@link SceneWorld#drainStep} 同节点改派，空了即销毁（对应基线 C++ DestroyScene 的「先排空再销毁」，
  * cpp/nodes/scene/handler/grpc/scene_node_service.cpp:68-125）。
+ *
+ * <p><b>实例的生命周期</b>（批次 5.3，dungeon-mirror-spec §6.10、§6.11）：排空的原因见 {@link DrainCause}——实例空置满超时进入回收宽限（IDLE，
+ * 宽限内有在途进场到达即复活）、源频道销毁后级联（CASCADE）、管理口显式销毁（ADMIN）；空置起点 {@link #emptySinceNanos()} 由
+ * {@link SceneWorld} 在人数变化与每秒维护时更新。
  */
 public final class Scene {
 
@@ -40,8 +44,19 @@ public final class Scene {
     private final Collection<ScenePlayer> playersView = Collections.unmodifiableCollection(players.values());
     private final ViewIndex view = new ViewIndex();
     private boolean draining;
+    /** 为什么在排空中（不在排空中为 {@link DrainCause#NONE}）。 */
+    private DrainCause drainCause = DrainCause.NONE;
+    /** 进入排空的单调时刻（纳秒；回收宽限据此计）。不在排空中无意义。 */
+    private long drainingSinceNanos;
+    /**
+     * 实例最近一次变空（或创建）的单调时刻（纳秒）；有人在场或有指向它的在途进场时为 {@link #NOT_EMPTY}。只对实例有意义（频道不回收）。
+     */
+    private long emptySinceNanos = NOT_EMPTY;
     /** 排空推进找不到改派目标时只告警一次（恢复改派或改回承载中时清掉）。 */
     private boolean relocationBlockedWarned;
+
+    /** {@link #emptySinceNanos()} 的「不空」取值（单调时钟可以取任意值，所以不用 0 作哨兵）。 */
+    static final long NOT_EMPTY = Long.MIN_VALUE;
 
     /** 主世界频道。@param info scene_id 与 scene_config_id 都非 0（调用方校验） */
     Scene(SceneInfoComp info) {
@@ -100,11 +115,67 @@ public final class Scene {
         return draining;
     }
 
+    /** 为什么在排空中；不在排空中为 {@link DrainCause#NONE}。 */
+    public DrainCause drainCause() {
+        return drainCause;
+    }
+
+    long drainingSinceNanos() {
+        return drainingSinceNanos;
+    }
+
+    /**
+     * 频道计划的排空 / 改回承载中（5.1 的入口，原因记 {@link DrainCause#PLAN}；已在排空中的不改原因与起点）。
+     * 单测也用它直接把场景置为排空中。
+     */
     void setDraining(boolean draining) {
-        this.draining = draining;
-        if (!draining) {
-            relocationBlockedWarned = false;
+        if (draining) {
+            if (!this.draining) {
+                beginDrain(DrainCause.PLAN, 0);
+            }
+        } else {
+            stopDraining();
         }
+    }
+
+    /** 进入排空（或改换排空原因，例如回收宽限中的镜像因源销毁转级联）：起点记为 {@code nowNanos}。 */
+    void beginDrain(DrainCause cause, long nowNanos) {
+        if (cause == DrainCause.NONE) {
+            throw new IllegalArgumentException("排空原因不能是 NONE");
+        }
+        this.draining = true;
+        this.drainCause = cause;
+        this.drainingSinceNanos = nowNanos;
+    }
+
+    /** 改回承载中（计划改回 / 回收宽限中复活）。 */
+    void stopDraining() {
+        this.draining = false;
+        this.drainCause = DrainCause.NONE;
+        this.drainingSinceNanos = 0;
+        relocationBlockedWarned = false;
+    }
+
+    /** 实例最近一次变空的单调时刻；不空为 {@link #NOT_EMPTY}。 */
+    long emptySinceNanos() {
+        return emptySinceNanos;
+    }
+
+    boolean emptySinceKnown() {
+        return emptySinceNanos != NOT_EMPTY;
+    }
+
+    void markEmptySince(long nowNanos) {
+        this.emptySinceNanos = nowNanos;
+    }
+
+    void markOccupied() {
+        this.emptySinceNanos = NOT_EMPTY;
+    }
+
+    /** 镜像的创建者（{@code creators} 里的键；79 / 31 原样带出，不做准入，同基线）。 */
+    boolean createdBy(long playerId) {
+        return info.getCreatorsMap().containsKey(playerId);
     }
 
     /** 第一次找不到改派目标时为 true（之后同一段阻塞期内为 false），用来只告警一次。 */

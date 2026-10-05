@@ -99,15 +99,16 @@ class ClientRequestHandlerTest {
     }
 
     @Test
-    void EnterScene_参数全0回3005_指定当前场景回3008_目标不在本节点回3023() throws Exception {
+    void EnterScene_参数全0回3005_指定当前场景回3008_目标不在本节点回3023_镜像号不在表里回3005() throws Exception {
         forward(11, 1001, IDS.enterScene(), enterSceneRequest(0, 0, 0), 1);
         forward(11, 1001, IDS.enterScene(), enterSceneRequest(1, scene1.sceneId(), 0), 2);
         forward(11, 1001, IDS.enterScene(), enterSceneRequest(9, 0, 0), 3);
+        // 镜像分支（批次 5.3 D7）：mirror_config_id 4 不在 Mirror 表 → 3005，不进取号
         forward(11, 1001, IDS.enterScene(), enterSceneRequest(0, 0, 4), 4);
 
         List<MessageContent> toA = sink.to(LINK, 11);
         assertThat(toA).extracting(MessageContent::getMessageId).containsExactly(63, 63, 63, 63);
-        assertThat(toA).extracting(m -> tipOf(m)).containsExactly(3005, 3008, 3023, 3023);
+        assertThat(toA).extracting(m -> tipOf(m)).containsExactly(3005, 3008, 3023, 3005);
         assertThat(entitySceneOf(11)).isSameAs(scene1);
     }
 

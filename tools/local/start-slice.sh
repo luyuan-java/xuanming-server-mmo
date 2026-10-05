@@ -33,6 +33,12 @@ cd "$(dirname "$0")/../.."
 export XM_RUN_MODE="${XM_RUN_MODE:-dev}"
 echo "运行模式 XM_RUN_MODE=$XM_RUN_MODE"
 
+# 镜像 / 副本实例的空闲回收（批次 5.3，dungeon-mirror-spec §7.3）：本机切片为 robot mirror 提速，缺省把镜像空置超时调到 5s、
+# 回收宽限调到下限 10s（xm-scene 进程缺省 30s / 30s，副本 300s 不动）；要按生产缺省验证就显式设这两个环境变量。
+export XM_SCENE_MIRROR_IDLE_TIMEOUT="${XM_SCENE_MIRROR_IDLE_TIMEOUT:-5s}"
+export XM_SCENE_INSTANCE_RECLAIM_GRACE="${XM_SCENE_INSTANCE_RECLAIM_GRACE:-10s}"
+echo "实例回收 镜像空置 $XM_SCENE_MIRROR_IDLE_TIMEOUT + 回收宽限 $XM_SCENE_INSTANCE_RECLAIM_GRACE"
+
 # 运维令牌（xm-data 运维接口与 xm-trade 播种接口 POST /admin/trade/seed-listing 共用，头 X-Xm-Admin-Token）：没设就生成一个本机随机令牌
 # 写进 run/xm-admin-token（run/ 不进仓库；robot audit / trade 等场景从这里读）
 mkdir -p run

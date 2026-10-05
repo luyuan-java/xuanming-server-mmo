@@ -50,6 +50,9 @@ import java.util.Optional;
  *   <li><b>连发</b>：先空出 gate 对 63 的限频窗口（缺省每秒 3 条），A 连发两条 63 {S_B}：第一条 {0}、第二条 3014（换场景在途），
  *       最终只换一次（恰好一条 79）。</li>
  *   <li><b>顶号</b>：A 在 S_B 上时从另一条连接进同一角色：旧连接收到 23 {2017}，新连接回到 S_B 原实例。</li>
+ *   <li><b>跨节点加入镜像</b>（批次 5.3，dungeon-mirror-spec §12.6「cross-node 补充」）：A 在 S_B 的节点上建镜像（79 逐字段），留在 S_A 的 C
+ *       发 63 {scene_id = A 的镜像}：应答 {0} → 79（镜像信息，creators 仍是 {A: true}）、自己的 21、含 A 的 47；A 收到 C 的 21。
+ *       没有观察者 C 时跳过。</li>
  * </ol>
  * 依据：scene-handoff-spec §3.2（各结局的客户端所见）、§5.5（63 的 Remote 分支）、§5.9（在途 3014）、§5.10（失败一览与断开后重连）、
  * §5.11（交接中顶号）、D10（同图保留坐标）；scene 契约 §4.3（63 无错 = 已受理，不代表已到达）；PARITY「跨节点换图与归属交接」行。
@@ -65,6 +68,12 @@ public final class CrossNodeScenario {
     private static final String REF_MISSING = "scene-handoff-spec §5.5（选目标拒绝推 23 {3023}）、§0.6";
     private static final String REF_IN_FLIGHT = "scene-handoff-spec §5.9、§5.11（两次 63 连发）；scene 契约 §4.3";
     private static final String REF_TAKEOVER = "scene-handoff-spec §10.8 第 8 步、§5.11；PARITY「短线重连与落点」行";
+    private static final String REF_MIRROR = "dungeon-mirror-spec §12.6「cross-node 补充」、§6.12（按号跨节点加入实例走 5.2 交出）、§5.2";
+
+    /** 跨节点加入镜像用的 Mirror 表 id：Mirror 第一行（同 mirror 场景的缺省 {@code --mirror-config-id}）。 */
+    static final int MIRROR_CONFIG_ID = 1;
+    /** 跨节点按号加入新镜像的尝试次数上限（目录发布窗口内的 23 {3023} 可重试，dungeon-mirror-spec §6.16）。 */
+    static final int MIRROR_JOIN_ATTEMPTS = 3;
 
     static final int ENTER_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
     static final int CHANGING_SCENE = SceneErrorTip.scene_error.kEnterSceneChangingScene_VALUE;
@@ -183,7 +192,9 @@ public final class CrossNodeScenario {
         // 7. 连发两条 63
         a = doubleSwitch(a, sceneB);
         // 8. 顶号
-        takeover(a);
+        a = takeover(a);
+        // 9. 跨节点加入镜像（批次 5.3）
+        mirrorAcrossNodes(a, c);
     }
 
     // ------------------------------------------------------------------ 1. 落位
@@ -433,7 +444,7 @@ public final class CrossNodeScenario {
      * A 在 S_B（跨节点进来的）上时从另一条连接进同一角色：login 夺权 → 目标节点写回释放并踢旧会话 → gate 按改绑后的归属代次认这条踢人，
      * 旧连接收到 23 {2017}（gate 若没把会话的代次换成交出后的那一代，这条踢人会被当成迟到帧丢掉）。
      */
-    private void takeover(Bot a) throws RobotException {
+    private Bot takeover(Bot a) throws RobotException {
         GameConnection old = a.connection();
         int mark = old.inbox().size();
         Bot fresh = login(a.account(), "A（新连接）");
@@ -443,6 +454,111 @@ public final class CrossNodeScenario {
                 kicked.isPresent() ? "收到" : requestTimeout.toMillis() + " ms 内没收到" + old.describeSince(mark), REF_TAKEOVER);
         report.check(sameScene(fresh.scene(), a.scene()), "顶号：新连接回到 S_B 原实例",
                 "79 " + describe(fresh.scene()) + "，期望 " + describe(a.scene()), REF_TAKEOVER);
+        return fresh.as("A");
+    }
+
+    // ------------------------------------------------------------------ 9. 跨节点加入镜像（批次 5.3）
+
+    /**
+     * A（顶号后的新连接，在 S_B 的节点上）建镜像；留在 S_A（另一个节点）的 C 按号加入：C 的节点上没有这个号，先回 {0} 再经 scene-manager 选目标
+     * （显式号命中别的节点上的镜像）走 5.2 交出。库里 owner_epoch 加一是 5.2 交出的既有行为（scene 侧测试覆盖），探针看不到库。
+     */
+    private void mirrorAcrossNodes(Bot a, Bot c) throws RobotException {
+        if (c == null) {
+            report.note("没有留在 S_A 的观察者 C，跳过「跨节点按号加入镜像」（批次 5.3）");
+            return;
+        }
+        GameConnection connectionA = a.connection();
+        SceneInfoComp source = a.scene();
+        int markA = connectionA.inbox().size();
+        long createId = connectionA.send(enterScene, InstanceChecks.mirrorRequest(MIRROR_CONFIG_ID));
+        Received created = awaitReply(connectionA, markA, createId)
+                .orElseThrow(() -> new RobotException("跨节点加入镜像：" + requestTimeout.toMillis() + " ms 内没收到 A 建镜像的 63 应答"
+                        + connectionA.describeSince(markA)));
+        int createTip = replyTip(created);
+        report.check(createTip == 0, "跨节点加入镜像：A 在 S_B 上发 63 {mirror_config_id = " + MIRROR_CONFIG_ID + ", scene_id = 0} 应答 {0}",
+                "error_message.id=" + createTip, REF_MIRROR);
+        if (createTip != 0) {
+            throw new RobotException("跨节点加入镜像：A 建镜像被拒 " + createTip + "（xm-scene 还没有 5.3 镜像分支？）");
+        }
+        Received entered = awaitEnterOrFailure(connectionA, markA)
+                .orElseThrow(() -> new RobotException("跨节点加入镜像：A 建镜像受理后 " + transferTimeout.toMillis() + " ms 内没收到 79"
+                        + connectionA.describeSince(markA)));
+        if (entered.messageId() != ids.notifyEnterScene()) {
+            throw new RobotException("跨节点加入镜像：A 建镜像受理后收到 23 {" + tipId(entered) + "}，没有进镜像");
+        }
+        SceneInfoComp mirror = entered.parse(EnterSceneS2C.parser()).getSceneInfo();
+        List<String> problems = InstanceChecks.mirrorInfoProblems(mirror, source.getSceneConfigId(), source.getSceneId(),
+                MIRROR_CONFIG_ID, a.playerId());
+        report.check(problems.isEmpty(), "跨节点加入镜像：A 建镜像，79 逐字段为 {源地图, 新号, M, 0, {A: true}}",
+                InstanceChecks.describe(mirror) + (problems.isEmpty() ? "" : "；不符：" + String.join("、", problems)), REF_MIRROR);
+        ActorCreateS2C selfA = awaitActor(connectionA, markA, a.playerId(), observeTimeout)
+                .orElseThrow(() -> new RobotException("跨节点加入镜像：A 进镜像后 " + observeTimeout.toMillis() + " ms 内没收到自己的 21"
+                        + connectionA.describeSince(markA)));
+
+        GameConnection connectionC = c.connection();
+        int markA2 = connectionA.inbox().size();
+        int markC = 0;
+        int joinTip = -1;
+        Optional<Received> joined = Optional.empty();
+        // 镜像建好后目录立即补发，但别的节点在这次发布落地之前按号加入会被 scene-manager 当成「不在目录里」→ 23 {3023}
+        // （dungeon-mirror-spec §6.16「目录发布延迟」：可重试）。只对这种结局重试，每次之间空出 gate 对 63 的限频窗口
+        for (int attempt = 1; attempt <= MIRROR_JOIN_ATTEMPTS; attempt++) {
+            markC = connectionC.inbox().size();
+            long joinId = connectionC.send(enterScene, InstanceChecks.joinRequest(mirror.getSceneId(), MIRROR_CONFIG_ID));
+            int sentAt = markC;
+            Received joinReply = awaitReply(connectionC, markC, joinId)
+                    .orElseThrow(() -> new RobotException("跨节点加入镜像：" + requestTimeout.toMillis() + " ms 内没收到 C 的 63 应答"
+                            + connectionC.describeSince(sentAt)));
+            joinTip = replyTip(joinReply);
+            if (joinTip != 0) {
+                break;
+            }
+            joined = awaitEnterOrFailure(connectionC, markC);
+            boolean lateRefusal = joined.isPresent() && joined.get().messageId() == ids.sendTip()
+                    && tipId(joined.get()) == ENTER_FAILED;
+            if (!lateRefusal || attempt == MIRROR_JOIN_ATTEMPTS) {
+                break;
+            }
+            report.note("跨节点加入镜像：第 " + attempt + " 次在目录发布窗口内，应答 {0} 后 23 {3023}（§6.16 可重试），"
+                    + GATE_RATE_WINDOW.toMillis() + " ms 后重试");
+            sleep(GATE_RATE_WINDOW);
+        }
+        report.check(joinTip == 0, "跨节点加入镜像：S_A 上的 C 发 63 {scene_id = A 的镜像} 应答 {0}（号不在本节点，先受理）",
+                "error_message.id=" + joinTip, REF_MIRROR);
+        if (joinTip != 0) {
+            return;
+        }
+        boolean ok = joined.isPresent() && joined.get().messageId() == ids.notifyEnterScene();
+        SceneInfoComp info = ok ? joined.get().parse(EnterSceneS2C.parser()).getSceneInfo() : null;
+        List<String> joinProblems = ok ? InstanceChecks.mirrorInfoProblems(info, source.getSceneConfigId(), source.getSceneId(),
+                MIRROR_CONFIG_ID, a.playerId()) : List.of();
+        boolean sameMirror = ok && info.getSceneId() == mirror.getSceneId();
+        report.check(sameMirror && joinProblems.isEmpty(), "跨节点加入镜像：C 收到这个镜像的 79（creators 仍是 {A: true}）",
+                !ok ? joined.map(r -> "收到 23 {" + tipId(r) + "}，没有 79").orElse(transferTimeout.toMillis() + " ms 内没收到 79"
+                        + connectionC.describeSince(markC))
+                        : InstanceChecks.describe(info) + (joinProblems.isEmpty() ? "" : "；不符：" + String.join("、", joinProblems)),
+                REF_MIRROR);
+        if (!ok) {
+            return;
+        }
+        Optional<ActorCreateS2C> selfC = awaitActor(connectionC, markC, c.playerId(), observeTimeout);
+        report.check(selfC.isPresent(), "跨节点加入镜像：C 收到自己的 21",
+                selfC.map(x -> "entity=" + x.getEntity()).orElse(observeTimeout.toMillis() + " ms 内没收到"), REF_MIRROR);
+        Optional<ActorCreateS2C> cSeesA = awaitActor(connectionC, markC, a.playerId(), observeTimeout);
+        report.check(cSeesA.isPresent() && cSeesA.get().getEntity() == selfA.getEntity(), "跨节点加入镜像：C 收到含 A 的 47",
+                cSeesA.map(x -> "entity=" + x.getEntity() + "（A 在镜像里是 " + selfA.getEntity() + "）")
+                        .orElse(observeTimeout.toMillis() + " ms 内没收到" + connectionC.describeSince(markC)), REF_MIRROR);
+        Optional<ActorCreateS2C> aSeesC = awaitActor(connectionA, markA2, c.playerId(), observeTimeout);
+        report.check(aSeesC.isPresent(), "跨节点加入镜像：镜像里的 A 收到 C 的 21",
+                aSeesC.map(x -> "entity=" + x.getEntity()).orElse(observeTimeout.toMillis() + " ms 内没收到"
+                        + connectionA.describeSince(markA2)), REF_MIRROR);
+    }
+
+    /** 等 79，或异步失败的 23 {3023 / 1003}（先到者）；超时为空。 */
+    private Optional<Received> awaitEnterOrFailure(GameConnection connection, int mark) throws RobotException {
+        return connection.await(mark, r -> r.messageId() == ids.notifyEnterScene() || (r.messageId() == ids.sendTip()
+                && (tipId(r) == ENTER_FAILED || tipId(r) == SceneMoves.SERVICE_UNAVAILABLE)), transferTimeout);
     }
 
     // ------------------------------------------------------------------ 连接与收发

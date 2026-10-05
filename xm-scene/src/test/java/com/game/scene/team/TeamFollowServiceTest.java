@@ -511,4 +511,27 @@ class TeamFollowServiceTest {
         assertThat(world.sceneEntries()).extracting(e -> e.getSceneId()).containsExactlyInAnyOrder(L1B, L1C);
         assertThat(count(TeamFollowResult.LEADER_SCENE_DRAINING)).isZero();
     }
+
+    @Test
+    void 队长进镜像_本节点队员跟进同一个镜像_取号或换图在途的队员跳过() {
+        // 批次 5.3（dungeon-mirror-spec §6.7、§12.2 第 12 条）：同基线，同节点队员按队长所在的场景实例跟进镜像（player_team.cpp:442-491）
+        team(LEADER, LEADER, M1, M2);
+        ScenePlayer leader = enter(LEADER, map1);
+        enter(M1, map1);
+        ScenePlayer m2 = enter(M2, map1);
+        settle();
+        WorldTestAccess.startResolving(m2);
+        Scene mirror = world.createInstance(com.game.scene.world.InstanceSpec.mirror(0x8000_0000_0000_5001L, 1,
+                map1.sceneId(), 1, LEADER));
+        assertThat(mirror).isNotNull();
+
+        world.switchScene(leader, mirror);
+        settle();
+
+        assertThat(sceneOf(LEADER)).isSameAs(mirror);
+        assertThat(sceneOf(M1)).as("精确到镜像实例，不是同图的频道").isSameAs(mirror);
+        assertThat(sceneOf(M2)).as("在途的不跟").isSameAs(map1);
+        assertThat(count(TeamFollowResult.SWITCHING)).isEqualTo(1);
+        assertThat(mirror.info().getCreatorsMap()).as("跟进的人不改 creators").containsOnlyKeys(LEADER);
+    }
 }

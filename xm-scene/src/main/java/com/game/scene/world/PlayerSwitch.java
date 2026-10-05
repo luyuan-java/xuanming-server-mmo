@@ -7,8 +7,19 @@ package com.game.scene.world;
  *
  * <p>阶段只往前走：{@link SwitchPhase#RESOLVING} → {@link SwitchPhase#FREEZING}（{@link #freeze}）。RESOLVING 的结果不是「去别的节点」时
  * 直接摘掉（回到 NONE），不经 FREEZING。
+ *
+ * <p>批次 5.3（dungeon-mirror-spec §6.7）：63 镜像分支取号期间复用同一个 RESOLVING 状态（{@link #mirrorCreate}，{@link Purpose#MIRROR_CREATE}）——
+ * 期间再发 63 回 3014（D4）、组队跟随跳过、选目标 / 取号的迟到结果按引用比对丢弃；镜像恒与源同节点，所以取号这一种<b>永不冻结</b>。
  */
 final class PlayerSwitch {
+
+    /** 这次在途是为了什么。 */
+    enum Purpose {
+        /** 63 的远端去向：请 scene-manager 选目标，结果在别的节点就冻结交出（批次 5.2）。 */
+        REMOTE_SWITCH,
+        /** 63 镜像分支：向 scene-manager 取实例号，拿到号后在本节点建镜像并换入（批次 5.3），不冻结。 */
+        MIRROR_CREATE
+    }
 
     /** 冻结中发生、要等交出结局出来才处理的离场（同一玩家只有一个写在途，所以不提交第二笔写）。 */
     enum PendingAbort {
@@ -21,7 +32,10 @@ final class PlayerSwitch {
 
     /** 本次换图的令牌（世界内单调递增，只用于日志对照；过期判定按对象引用）。 */
     private final long token;
+    private final Purpose purpose;
+    /** REMOTE_SWITCH：63 指定的场景号；MIRROR_CREATE：镜像的源频道。 */
     private final long wantSceneId;
+    /** REMOTE_SWITCH：63 带的地图；MIRROR_CREATE：63 带的 mirror_config_id。 */
     private final int wantConfigId;
     /** RESOLVING 槽的过期时刻（单调时钟纳秒）：选目标的结果迟迟不回（实现保证会回，这里只是兜底）时，之后的 63 不再被 3014 挡住。 */
     private final long resolveDeadlineNanos;
@@ -41,14 +55,28 @@ final class PlayerSwitch {
     private boolean detached;
 
     PlayerSwitch(long token, long wantSceneId, int wantConfigId, long resolveDeadlineNanos) {
+        this(token, Purpose.REMOTE_SWITCH, wantSceneId, wantConfigId, resolveDeadlineNanos);
+    }
+
+    private PlayerSwitch(long token, Purpose purpose, long wantSceneId, int wantConfigId, long resolveDeadlineNanos) {
         this.token = token;
+        this.purpose = purpose;
         this.wantSceneId = wantSceneId;
         this.wantConfigId = wantConfigId;
         this.resolveDeadlineNanos = resolveDeadlineNanos;
     }
 
+    /** 63 镜像分支的取号在途（RESOLVING，永不冻结）。 */
+    static PlayerSwitch mirrorCreate(long token, long sourceSceneId, int mirrorConfigId, long resolveDeadlineNanos) {
+        return new PlayerSwitch(token, Purpose.MIRROR_CREATE, sourceSceneId, mirrorConfigId, resolveDeadlineNanos);
+    }
+
     long token() {
         return token;
+    }
+
+    Purpose purpose() {
+        return purpose;
     }
 
     long wantSceneId() {
@@ -69,8 +97,8 @@ final class PlayerSwitch {
 
     /** RESOLVING → FREEZING：记下目标与冻结快照。 */
     void freeze(int nodeId, long sceneId, int configId, PlayerSave frozen, long nowNanos) {
-        if (phase != SwitchPhase.RESOLVING) {
-            throw new IllegalStateException("只有选目标中的换图才能冻结: " + phase);
+        if (phase != SwitchPhase.RESOLVING || purpose != Purpose.REMOTE_SWITCH) {
+            throw new IllegalStateException("只有选目标中的跨节点换图才能冻结: " + phase + " " + purpose);
         }
         this.phase = SwitchPhase.FREEZING;
         this.targetNodeId = nodeId;

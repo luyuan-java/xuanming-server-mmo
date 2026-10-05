@@ -2,8 +2,11 @@ package com.game.scene.transfer;
 
 import com.game.api.SceneDirectoryService;
 import com.game.api.asset.IsolatedDubboModule;
+import com.game.api.proto.CreateInstanceRequest;
+import com.game.api.proto.CreateInstanceResponse;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
+import com.game.scene.world.InstanceIds;
 import com.game.scene.world.RemoteSwitchTargets;
 import java.time.Duration;
 import java.util.Objects;
@@ -17,6 +20,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.apache.dubbo.config.ReferenceConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,8 +34,12 @@ import org.slf4j.LoggerFactory;
  * <p><b>线程</b>：{@link #select} 在场景逻辑线程上调，<b>不阻塞</b>——建引用（对端不可达时 Dubbo 会同步建连数秒）与发起调用都在本类自己的
  * 一条守护线程（{@code scene-switch-rpc}）上做；结果（含本地兜底超时 {@code xm.scene.switch-resolve-timeout}）经 {@code logic} 投递回逻辑线程，
  * 恰好一次、不在调用栈内。引用建失败时下一次调用重建。
+ *
+ * <p>批次 5.3（dungeon-mirror-spec §6.5、§6.6）：同一个引用也做镜像 / 副本实例取号（{@link SceneDirectoryService#createInstance}，
+ * {@link InstanceIds}）——不幂等，同样 {@code retries = 0}；结果投递与本地兜底超时同选目标。业务拒绝（tip ≠ 0）→ {@link InstanceIds.Result.Refused}；
+ * 调用失败 / 超时 / 发号租约无效（提供方以异常完成）/ 应答残缺（节点号或场景号为 0）→ {@link InstanceIds.Result.Failed}。
  */
-public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, AutoCloseable {
+public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, InstanceIds, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(SceneManagerSwitchTargets.class);
 
@@ -104,25 +112,65 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Aut
                 .setWantSceneId(wantSceneId)
                 .setWantSceneConfigId(wantSceneConfigId)
                 .build();
-        CompletableFuture<SelectSwitchTargetResponse> call;
-        try {
-            call = clientAsync().thenComposeAsync(service -> invoke(service, request), rpcThread);
-        } catch (RuntimeException e) {
-            call = CompletableFuture.failedFuture(e);
-        }
-        call.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        call(service -> service.selectSwitchTarget(request))
                 .whenComplete((response, failure) -> deliver(playerId, onDone, toSelection(response, failure)));
     }
 
-    private static CompletableFuture<SelectSwitchTargetResponse> invoke(SceneDirectoryService service,
-                                                                        SelectSwitchTargetRequest request) {
+    /** 实例取号（批次 5.3）：zone 与发起节点取本节点的；任意线程可调，结果经逻辑执行器投递、恰好一次。 */
+    @Override
+    public void create(InstanceIds.Request request, Consumer<InstanceIds.Result> onDone) {
+        CreateInstanceRequest wire = CreateInstanceRequest.newBuilder()
+                .setZoneId(zoneId)
+                .setRequesterSceneNodeId(nodeId)
+                .setPlayerId(request.playerId())
+                .setKind(request.kind().channelKind())
+                .setSourceSceneId(request.sourceSceneId())
+                .setSceneConfigId(request.sceneConfigId())
+                .setMirrorConfigId(request.mirrorConfigId())
+                .setDungeonConfigId(request.dungeonConfigId())
+                .build();
+        call(service -> service.createInstance(wire))
+                .whenComplete((response, failure) -> deliver(request.playerId(), onDone, toResult(response, failure)));
+    }
+
+    /** 在连接线程上取引用并发起调用，套上本地兜底超时。 */
+    private <R> CompletableFuture<R> call(Function<SceneDirectoryService, CompletableFuture<R>> invocation) {
+        CompletableFuture<R> call;
         try {
-            CompletableFuture<SelectSwitchTargetResponse> future = service.selectSwitchTarget(request);
+            call = clientAsync().thenComposeAsync(service -> invoke(service, invocation), rpcThread);
+        } catch (RuntimeException e) {
+            call = CompletableFuture.failedFuture(e);
+        }
+        return call.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private static <R> CompletableFuture<R> invoke(SceneDirectoryService service,
+                                                   Function<SceneDirectoryService, CompletableFuture<R>> invocation) {
+        try {
+            CompletableFuture<R> future = invocation.apply(service);
             return future == null ? CompletableFuture.failedFuture(new IllegalStateException("Dubbo 返回了空的 future"))
                     : future;
         } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);
         }
+    }
+
+    static InstanceIds.Result toResult(CreateInstanceResponse response, Throwable failure) {
+        if (failure != null) {
+            Throwable cause = unwrap(failure);
+            return new InstanceIds.Result.Failed(cause instanceof TimeoutException ? "取号超时" : cause.toString());
+        }
+        if (response == null) {
+            return new InstanceIds.Result.Failed("空应答");
+        }
+        if (response.getTipId() != 0) {
+            return new InstanceIds.Result.Refused(response.getTipId());
+        }
+        if (response.getSceneNodeId() == 0 || response.getSceneId() == 0) {
+            return new InstanceIds.Result.Failed("应答残缺 node=" + response.getSceneNodeId() + " scene_id="
+                    + Long.toUnsignedString(response.getSceneId()));
+        }
+        return new InstanceIds.Result.Issued(response.getSceneNodeId(), response.getSceneId());
     }
 
     /** 取（或开始建）引用；上次建失败的重新建。已关闭时异常完成。 */
@@ -175,11 +223,11 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Aut
         return cause;
     }
 
-    private void deliver(long playerId, Consumer<Selection> onDone, Selection selection) {
+    private <T> void deliver(long playerId, Consumer<T> onDone, T result) {
         try {
-            logic.execute(() -> onDone.accept(selection));
+            logic.execute(() -> onDone.accept(result));
         } catch (RejectedExecutionException e) {
-            log.debug("场景逻辑线程已停止，丢弃选目标结果 player={}", Long.toUnsignedString(playerId));
+            log.debug("场景逻辑线程已停止，丢弃选目标 / 取号结果 player={}", Long.toUnsignedString(playerId));
         }
     }
 
