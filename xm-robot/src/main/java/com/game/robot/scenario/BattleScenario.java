@@ -328,29 +328,8 @@ public final class BattleScenario {
         b.awaitStart(markB, battleId);
         checkAssigned("第 11 步 B 的 177", ticketB, battleId, b.id(), deadline, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT);
 
-        // ---- 第 14 步：补签 ----
-        IssueBattleTicketResponse reA = admin.issueTicket(battleId, a.id());
-        report.check(!reA.hasErrorMessage() && reA.getAssignment().getRole() == eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT
-                        && reA.getAssignment().toByteString().equals(ticketA.toByteString()),
-                "第 14 步 活着的房间给 A 补签：role = 1，与开局 177 逐字节相同（HMAC 确定）",
-                "tip=" + reA.getErrorMessage().getId() + " 相同=" + reA.getAssignment().toByteString().equals(ticketA.toByteString()),
-                "battle-node-spec §2.4");
-        IssueBattleTicketResponse reC = admin.issueTicket(battleId, c.id());
-        report.check(reC.getErrorMessage().getId() == TIP_INVALID_PARAMETER && !reC.hasAssignment(), "第 14 步 给非成员 C 补签 → 1005、无 assignment",
-                "tip=" + reC.getErrorMessage().getId() + " assignment=" + reC.hasAssignment(), "battle-node-spec §2.6");
-
-        // ---- 第 15 步：幂等建房不重推 ----
-        int againA = a.mark();
-        int againB = b.mark();
-        BattleAdminClient.CreateOutcome again = admin.create(request);
-        report.check(again.ok() && again.response().getBattleId() == battleId, "第 15 步 同一个 battle_id 再建：ADMITTED 且无错误",
-                again.describe(), "battle-node-spec §4.3.3");
-        Optional<Received> repushA = a.findWithin(againA, ids.battleAssigned(), battleId, NO_REPUSH_WINDOW);
-        boolean repush = repushA.isPresent()
-                || a.connection().inbox().snapshot(againA).stream().anyMatch(r -> a.isLobbyPush(r, ids.battleStart(), battleId))
-                || b.connection().inbox().snapshot(againB).stream().anyMatch(r -> b.isLobbyPush(r, ids.battleAssigned(), battleId)
-                        || b.isLobbyPush(r, ids.battleStart(), battleId));
-        report.check(!repush, "第 15 步 幂等命中零副作用：2 s 内 A / B 都没有再收到 177 / 143", repush ? "重推了" : "没有", "battle-node-spec §4.3.3");
+        // 第 14 / 15 步（补签、幂等建房）放到第 11 步的回合断言之后：第 1 回合的 6 s 计时从建房开始，
+        // 把它们（含 2 s 的不重推观察窗）塞在前面会让「A 先交、B 再交都落在第 1 回合」的断言在慢机器上偶发失败（评审意见）
 
         // ---- 第 11 步：两人都交才结算 ----
         Direct da = open("A", ticketA);
@@ -402,6 +381,30 @@ public final class BattleScenario {
                         && stateB.getSelfItemsList().equals(List.of(heal(3))),
                 "第 11 步 视角裁剪：A 的 140 里 B 的 skill_cooldown_rounds 为空，self_items 只有 A 的（B 的 140 只有 B 的）",
                 "A.self_items=" + stateA.getSelfItemsList().size() + " B.self_items=" + stateB.getSelfItemsList().size(), "battle-node-spec §5.6");
+
+        // ---- 第 14 步：补签（房间仍活着）----
+        IssueBattleTicketResponse reA = admin.issueTicket(battleId, a.id());
+        report.check(!reA.hasErrorMessage() && reA.getAssignment().getRole() == eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT
+                        && reA.getAssignment().toByteString().equals(ticketA.toByteString()),
+                "第 14 步 活着的房间给 A 补签：role = 1，与开局 177 逐字节相同（HMAC 确定）",
+                "tip=" + reA.getErrorMessage().getId() + " 相同=" + reA.getAssignment().toByteString().equals(ticketA.toByteString()),
+                "battle-node-spec §2.4");
+        IssueBattleTicketResponse reC = admin.issueTicket(battleId, c.id());
+        report.check(reC.getErrorMessage().getId() == TIP_INVALID_PARAMETER && !reC.hasAssignment(), "第 14 步 给非成员 C 补签 → 1005、无 assignment",
+                "tip=" + reC.getErrorMessage().getId() + " assignment=" + reC.hasAssignment(), "battle-node-spec §2.6");
+
+        // ---- 第 15 步：幂等建房不重推 ----
+        int againA = a.mark();
+        int againB = b.mark();
+        BattleAdminClient.CreateOutcome again = admin.create(request);
+        report.check(again.ok() && again.response().getBattleId() == battleId, "第 15 步 同一个 battle_id 再建：ADMITTED 且无错误",
+                again.describe(), "battle-node-spec §4.3.3");
+        Optional<Received> repushA = a.findWithin(againA, ids.battleAssigned(), battleId, NO_REPUSH_WINDOW);
+        boolean repush = repushA.isPresent()
+                || a.connection().inbox().snapshot(againA).stream().anyMatch(r -> a.isLobbyPush(r, ids.battleStart(), battleId))
+                || b.connection().inbox().snapshot(againB).stream().anyMatch(r -> b.isLobbyPush(r, ids.battleAssigned(), battleId)
+                        || b.isLobbyPush(r, ids.battleStart(), battleId));
+        report.check(!repush, "第 15 步 幂等命中零副作用：2 s 内 A / B 都没有再收到 177 / 143", repush ? "重推了" : "没有", "battle-node-spec §4.3.3");
 
         // ---- 第 13 步：销毁 ----
         int aDestroy = da.mark();

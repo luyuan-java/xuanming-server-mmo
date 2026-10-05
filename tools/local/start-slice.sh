@@ -199,13 +199,15 @@ start_scene_nodes() {
 
 # xm-battle 就绪（batch 6.2）：管理端口的 Tomcat 先于节点就绪（/actuator/health 报 UP 比节点就绪早约 2.5 s），不能看 health。
 # 节点按「导出 Dubbo（21200）→ 绑直连面（12000）→ 在逻辑线程上开准入闸 → 发布目录 → 打就绪日志」的顺序起来：两个端口都能连之后，
-# 再等管理端口上的 xm_battle_admission_phase = 1（open）——之前进来的 dev 建房会回 NOT_ALLOCATABLE(not_started)。
+# 再等管理端口上的 xm_battle_admission_phase = 1（open），并且日志里出现「节点已就绪」——准入闸打开之后节点还要同步发布一次目录才置
+# running，在那之前 dev 管理接口一律回 503（robot battle / battle-edge 靠它建房），只看准入闸会偶发早到（评审意见）。
 wait_battle_ready() {
   local name=xm-battle deadline=$((SECONDS + 60)) phase
   wait_port "$BATTLE_RPC_PORT" "$name"
   wait_port "$BATTLE_CLIENT_PORT" "$name"
   until phase=$(curl -fsS "http://127.0.0.1:$BATTLE_MGMT_PORT/actuator/prometheus" 2>/dev/null \
-      | grep -E '^xm_battle_admission_phase(\{| )' | awk '{print int($NF)}' | head -1) && [[ "${phase:-0}" -eq 1 ]]; do
+      | grep -E '^xm_battle_admission_phase(\{| )' | awk '{print int($NF)}' | head -1) && [[ "${phase:-0}" -eq 1 ]] \
+      && grep -q "节点已就绪" "run/logs/$name.log" 2>/dev/null; do
     if ! kill -0 "$(cat "run/pids/$name.pid")" 2>/dev/null; then
       echo "[$name] 进程已退出，看 run/logs/$name.log" >&2
       return 1

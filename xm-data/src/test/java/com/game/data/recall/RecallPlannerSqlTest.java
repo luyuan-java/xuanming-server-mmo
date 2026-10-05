@@ -2,6 +2,7 @@ package com.game.data.recall;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.data.ops.OpsException;
@@ -151,6 +152,8 @@ class RecallPlannerSqlTest {
 
     @Test
     void 币种是uint32_大于等于2的31次方时估算不越界() {
+        // H2 的 MySQL 模式接受 INT UNSIGNED 但按有符号 INT 存，3000000000 写不进去：这一条只在真 MySQL 上有意义（CI 的集成测试 job 会跑）
+        assumeTrue(DataSqlFixture.mysql(), "需要真 MySQL（-Dxm.it.mysql）：H2 的 INT UNSIGNED 是有符号的");
         int hugeType = (int) 3_000_000_000L;
         db.insertPlayer(7, 1, 1, 0, 1, true, 0, 1, 1);
         db.putState(7, PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(250)).build()
