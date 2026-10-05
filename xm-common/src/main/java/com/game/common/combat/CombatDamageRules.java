@@ -1,5 +1,7 @@
 package com.game.common.combat;
 
+import com.game.common.math.Unsigned;
+
 /**
  * 伤害公式（基线 {@code cpp/libs/services/battle/system/combat_damage_rules.h}，实时技能与回合制引擎共用）。纯函数，没有表 / 状态依赖。
  *
@@ -11,7 +13,7 @@ package com.game.common.combat;
  * </ul>
  * 暴击（×2）、PvP 缩放（×0.3）、防御姿态（×0.5）不在这里，由各自的结算方做（同基线）。
  *
- * <p>uint64 / uint32 入参用 Java 的 long / int 承载，一律按无符号解释（换 double 时按无符号换），运算顺序与基线逐项一致，
+ * <p>uint64 / uint32 入参用 Java 的 long / int 承载，一律按无符号解释（换 double 时按无符号换，见 {@link Unsigned}），运算顺序与基线逐项一致，
  * Java 的 IEEE double 与基线的 SSE2 结果逐位相同。
  */
 public final class CombatDamageRules {
@@ -60,8 +62,8 @@ public final class CombatDamageRules {
     /** 承受比例（护甲、防御、抗性百分数都按 uint64；护甲与防御先各自换 double 再相加，不会溢出）。 */
     public static double receivedRatio(long targetArmor, long targetDefense, long resistancePercent, int targetLevel) {
         double factor = levelFactor(targetLevel);
-        double combined = unsignedToDouble(targetArmor) + unsignedToDouble(targetDefense);
-        double resistance = clamp(unsignedToDouble(resistancePercent) / 100.0, 0.0, 1.0);
+        double combined = Unsigned.toDouble(targetArmor) + Unsigned.toDouble(targetDefense);
+        double resistance = clamp(Unsigned.toDouble(resistancePercent) / 100.0, 0.0, 1.0);
         double ratio = factor / (combined + factor) * (1.0 - resistance);
         return MIN_RECEIVED_RATIO < ratio ? ratio : MIN_RECEIVED_RATIO;
     }
@@ -73,8 +75,8 @@ public final class CombatDamageRules {
         if (!Double.isFinite(baseDamage) || baseDamage <= 0.0) {
             return 0.0;
         }
-        double raw = baseDamage * (1.0 + unsignedToDouble(strength) * 0.1)
-                + unsignedToDouble(attack) * attackMultiplier(multiplier);
+        double raw = baseDamage * (1.0 + Unsigned.toDouble(strength) * 0.1)
+                + Unsigned.toDouble(attack) * attackMultiplier(multiplier);
         if (!Double.isFinite(raw) || raw <= 0.0) {
             return 0.0;
         }
@@ -87,27 +89,10 @@ public final class CombatDamageRules {
             return 0;
         }
         double rounded = Math.ceil(rawDamage);
-        if (rounded >= unsignedToDouble(currentHealth)) {
+        if (rounded >= Unsigned.toDouble(currentHealth)) {
             return currentHealth;
         }
-        return unsignedFromDouble(rounded);
-    }
-
-    /** uint64 → double（按无符号；同 C++ 的 static_cast&lt;double&gt;(uint64_t)，就近舍入）。 */
-    static double unsignedToDouble(long value) {
-        if (value >= 0) {
-            return value;
-        }
-        return ((value >>> 1) | (value & 1)) * 2.0;
-    }
-
-    /** 非负有限 double → uint64（同 C++ 的 static_cast&lt;uint64_t&gt;，截断小数；调用方保证小于 2^64）。 */
-    static long unsignedFromDouble(double value) {
-        if (value < 0x1p63) {
-            return (long) value;
-        }
-        // ≥ 2^63 的 double 都是 2 的倍数：先除 2 再左移，精确
-        return ((long) (value / 2)) << 1;
+        return Unsigned.fromDouble(rounded);
     }
 
     private static double clamp(double value, double low, double high) {

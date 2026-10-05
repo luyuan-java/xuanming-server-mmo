@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>xm-battle-engine</artifactId>
+    <name>xm-battle-engine</name>
+    <description>
+        回合制战斗确定性引擎（纯库，批次 6.1）：开局、行动、回合、技能、buff、道具、掉落与结算，自写 mt19937_64，
+        表数据经 BattleData 注入，外加战斗配表指纹。没有网络、时钟、线程与日志；规格见 docs/porting/battle-engine-spec.md。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <!-- 战斗消息（CreateBattleRequest / TurnResultS2C / BattleActorState 等）与 BaseAttributesComp -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-proto</artifactId>
+        </dependency>
+        <dependency>
+            <!-- ConfigTables、七张战斗表的行类与 tip 码枚举 -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-table</artifactId>
+        </dependency>
+        <dependency>
+            <!-- CombatDamageRules（伤害公式，与实时战斗共用）与 Unsigned（uint64 换算） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+            <exclusions>
+                <!-- 纯库不打日志（规格 §0.2、§10.1）：xm-common 里只有 GM 停机受理用它，引擎用不到 -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

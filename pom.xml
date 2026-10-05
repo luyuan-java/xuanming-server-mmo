@@ -17,6 +17,7 @@
         <module>xm-table</module>
         <module>xm-net</module>
         <module>xm-common</module>
+        <module>xm-battle-engine</module>
         <module>xm-pbmysql</module>
         <module>xm-api</module>
         <module>xm-discovery</module>

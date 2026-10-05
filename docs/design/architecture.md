@@ -33,8 +33,9 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-proto` | 库（同步产物） | 客户端契约 proto；`MessageIdRegistry`（消息号 ↔ 服务 / 方法 / 请求应答类型） |
 | `xm-table` | 库 | 配置表：同步来的权威 schema（`cfg_*` option）与表数据；`com.game.table.ConfigTables` 与各表 `<Sheet>Rows` 编译期生成；手写运行时 `com.game.table.load`（manifest 校验、解析）。见 [config-tables.md](config-tables.md) |
 | `xm-table-codegen` | 库（编译期） | javac 注解处理器：读 protoc 描述符集，按 schema 生成类型安全的表访问代码；不进运行时 |
-| `xm-common` | 库 | 雪花 ID、节点号租约、gate 令牌签名、时间源等无框架公共件 |
+| `xm-common` | 库 | 雪花 ID、节点号租约、gate 令牌签名、时间源、无符号数换算（`Unsigned`）等无框架公共件 |
 | `xm-net` | 库 | Netty：客户端帧编解码（兼容 C++ `ProtobufCodec`）、节点链路编解码 |
+| `xm-battle-engine` | 库（纯 Java） | 回合制战斗确定性引擎（批次 6.1）：开局、行动校验、出手序、普攻 / 防御 / 逃跑、技能、buff 回合化、道具、掉落、结算、快照，随机数逐位照搬 mt19937_64；战斗配表指纹。不依赖 Spring / Netty / Redis / 日志，单线程对象（由 6.2 的房间串行驱动）；6.3 的 scene 只用 `BattleRules` 与指纹。规格 `docs/porting/battle-engine-spec.md` |
 | `xm-pbmysql` | 库（纯 JDBC） | proto → MySQL 表映射（用户自有 proto2mysql 的 Java 实现）：建表 DDL、只扩不缩的结构同步、按消息 CRUD（§7） |
 | `xm-api` | 库 | Dubbo 服务接口、调用方鉴权过滤器（§4.1）与内部 protobuf 消息（包 `xm.api`，只在 Java 版内部使用） |
 | `xm-discovery` | 库 | Redis（Redisson）上的节点号租约、游戏节点在线目录、玩家在线目录与服务端推送（§4.3） |
@@ -53,7 +54,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
 | `xm-data` | 进程（Spring Boot Web） | 审计与运维数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维接口：查询（§4.5）、全服产出封禁（§4.6）、区服目录 / 白名单 / 登录公告（§7） |
 
-依赖方向单向：进程模块 → `xm-api` / `xm-net` / `xm-player-store` / `xm-gateway-store` / `xm-discovery` → `xm-common` / `xm-proto` / `xm-table`。
+依赖方向单向：进程模块 → `xm-api` / `xm-net` / `xm-player-store` / `xm-gateway-store` / `xm-discovery` / `xm-battle-engine` → `xm-common` / `xm-proto` / `xm-table`。
 
 ## 3. 客户端协议（兼容面）
 

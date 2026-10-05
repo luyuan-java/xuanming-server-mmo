@@ -78,7 +78,7 @@
 
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
-| 6.1 | 回合制战斗引擎（纯库：回合、技能、buff、道具、掉落） | turn-battle-engine-core、turn-battle-skills-buffs、turn-battle-items-drops-rewards、battle-table-fingerprint |
+| 6.1 | 回合制战斗引擎（纯库：回合、技能、buff、道具、掉落） | turn-battle-engine-core、turn-battle-skills-buffs、turn-battle-items-drops-rewards、battle-table-fingerprint | ✅（提交见 git log「批次 6.1」；新纯库模块 xm-battle-engine，逐位照搬基线、有意差异 D1–D8；跨语言金样待 mmorpg——PARITY「回合制战斗确定性引擎」「战斗配表指纹」行）|
 | 6.2 | battle 节点：房间生命周期、客户端直连、票据、推送、准入 | battle-room-lifecycle、battle-direct-connect-edge、battle-ticket-assignment、battle-client-actions-push、battle-node-admission-ops |
 | 6.3 | scene 侧战斗冻结与结算应用、结算 outbox | scene-battle-freeze、scene-battle-settlement-apply、battle-settlement-outbox、in-battle-gates、pet-battle-integration |
 | 6.4 | 匹配：排队、凑单、开局、评分、切磋、帮会活动开战、整队开战；robot battle-smoke | match-*、team-match |
