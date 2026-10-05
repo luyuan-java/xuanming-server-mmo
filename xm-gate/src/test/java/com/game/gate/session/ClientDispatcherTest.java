@@ -3,6 +3,7 @@ package com.game.gate.session;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 
+import com.game.api.DubboGroups;
 import com.game.api.proto.AbandonedEnter;
 import com.game.api.proto.BindAccount;
 import com.game.api.proto.ClientCall;
@@ -20,6 +21,7 @@ import com.game.api.proto.ToClient;
 import com.game.api.proto.UnbindPlayer;
 import com.game.common.killswitch.KillSwitch;
 import com.game.common.token.GateTokens;
+import com.game.contract.MessageIdRegistry;
 import com.game.gate.metrics.GateMetrics;
 import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
@@ -56,6 +58,8 @@ class ClientDispatcherTest {
     /** 帮会推送占位 220（应答类型 Empty：tip 为 0 不回包，tip ≠ 0 回信封）。 */
     private static final int GUILD_NOTIFY_MSG = 220;
     private static final int FRIEND_MSG = 234;
+    /** 聚宝斋浏览 196（trade 域；rpcPath 用生产形状，热关停按 trade.ClientPlayerJubaozhai/* 匹配）。 */
+    private static final int TRADE_MSG = 196;
     private static final int SCENE_NODE = 7;
     private static final long PLAYER = 42L;
 
@@ -67,6 +71,8 @@ class ClientDispatcherTest {
         case BATTLE_MSG -> new MessageRoute(id, "battle");
         case GUILD_NOTIFY_MSG -> new MessageRoute(id, "guild", false, "GuildService.NotifyGuildChanged");
         case FRIEND_MSG -> new MessageRoute(id, "friend");
+        case TRADE_MSG -> new MessageRoute(id, "trade", true, "ClientPlayerJubaozhai.BrowseListings", false,
+                "/trade.ClientPlayerJubaozhai/BrowseListings");
         default -> null;
     };
 
@@ -76,6 +82,8 @@ class ClientDispatcherTest {
     private final FakeLogin friend = new FakeLogin();
     /** guild 后端（同上）。 */
     private final FakeLogin guild = new FakeLogin();
+    /** trade 后端（同上）。 */
+    private final FakeLogin trade = new FakeLogin();
     private final FakeLinks links = new FakeLinks();
     private final SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
@@ -83,7 +91,7 @@ class ClientDispatcherTest {
     private final RecordingPresence presence = new RecordingPresence();
     private final ClientDispatcher dispatcher = new ClientDispatcher(
             new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
-            ROUTES, TIP_MSG, login, Map.of("friend", friend, "guild", guild), links, registry,
+            ROUTES, TIP_MSG, login, Map.of("friend", friend, "guild", guild, "trade", trade), links, registry,
             new GateLimits(4, 3, Duration.ZERO), metrics, presence);
     private final SceneEventRouter router = new SceneEventRouter(registry, dispatcher);
 
@@ -590,6 +598,133 @@ class ClientDispatcherTest {
         guild.complete(ClientReply.newBuilder().setTipId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build());
         ch.runPendingTasks();
         assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(GUILD_NOTIFY_MSG);
+    }
+
+    // ================================================================ 聚宝斋（trade-spec §5.2、§9.4）
+
+    @Test
+    void 聚宝斋消息转给trade后端_同一会话串行_应答原样回_后端失败回带请求id的信封1003() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(3, TRADE_MSG, "browse-1"));
+        ch.writeInbound(request(4, TRADE_MSG, "browse-2"));
+        assertThat(trade.calls).as("上一个没完成不发下一个").hasSize(1);
+        assertThat(login.calls).isEmpty();
+        assertThat(friend.calls).isEmpty();
+        assertThat(guild.calls).isEmpty();
+        ClientCall call = trade.calls.get(0);
+        assertThat(call.getMessageId()).isEqualTo(TRADE_MSG);
+        assertThat(call.getRequestId()).isEqualTo(3);
+        assertThat(call.getBody().toStringUtf8()).isEqualTo("browse-1");
+        assertThat(call.getSession().getSessionId()).isNotZero();
+
+        trade.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("trade-resp")).build());
+        ch.runPendingTasks();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply.getMessageId()).isEqualTo(TRADE_MSG);
+        assertThat(reply.getId()).isEqualTo(3);
+        assertThat(reply.hasErrorMessage()).as("业务拒绝写在应答体里，信封不带错误").isFalse();
+        assertThat(reply.getSerializedMessage().toStringUtf8()).isEqualTo("trade-resp");
+
+        // T8：xm-trade 不在 / 超时 → 带请求 id 的信封 1003（客户端当场按信封错误处理，不等 15 s 超时、不隔离到重连）
+        assertThat(trade.calls).hasSize(2);
+        trade.fail(new IllegalStateException("No provider available for trade"));
+        ch.runPendingTasks();
+        MessageContent failed = ch.readOutbound();
+        assertThat(failed.getMessageId()).isEqualTo(TRADE_MSG);
+        assertThat(failed.getId()).isEqualTo(4);
+        assertThat(failed.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(failed.getSerializedMessage()).as("没有业务回包").isEmpty();
+        assertThat((Object) ch.readOutbound()).as("不另推 23").isNull();
+        assertThat(ch.isOpen()).isTrue();
+        ch.close();
+        assertThat(login.closed).as("只和 trade 打过交道的连接断开不通知 login").isEmpty();
+    }
+
+    @Test
+    void 聚宝斋调用在途不阻塞login_scene_好友与帮会() {
+        EmbeddedChannel ch = enteredScene();
+        int framesBefore = links.sent.size();
+        ch.writeInbound(request(2, TRADE_MSG, "slow"));
+        ch.writeInbound(request(3, SCENE_MSG, "s"));
+        ch.writeInbound(request(4, FRIEND_MSG, "f"));
+        ch.writeInbound(request(5, GUILD_NOTIFY_MSG, "g"));
+        ch.writeInbound(request(6, LOGIN_MSG, "l"));
+        assertThat(links.sent).as("trade 调用没回来，scene 照常转发").hasSize(framesBefore + 1);
+        assertThat(friend.calls).as("trade 调用没回来，friend 照常发").hasSize(1);
+        assertThat(guild.calls).as("trade 调用没回来，guild 照常发").hasSize(1);
+        assertThat(login.calls).as("trade 调用没回来，login 照常发（进场那次 + 这次）").hasSize(2);
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
+        guild.complete(ClientReply.newBuilder().setTipId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build());
+        login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
+        ch.runPendingTasks();
+        assertThat(List.of(((MessageContent) ch.readOutbound()).getMessageId(), ((MessageContent) ch.readOutbound()).getMessageId(),
+                ((MessageContent) ch.readOutbound()).getMessageId()))
+                .containsExactlyInAnyOrder(FRIEND_MSG, GUILD_NOTIFY_MSG, LOGIN_MSG);
+        assertThat(trade.calls).hasSize(1);
+        trade.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("trade-resp")).build());
+        ch.runPendingTasks();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply.getMessageId()).isEqualTo(TRADE_MSG);
+        assertThat(reply.getId()).isEqualTo(2);
+    }
+
+    @Test
+    void 聚宝斋热关停_服务通配规则回带请求id的信封1003_不转发_别的域不受影响() {
+        KillSwitch killSwitch = new KillSwitch(-1, System::nanoTime);
+        KillSwitch.installGlobal(killSwitch);
+        try {
+            EmbeddedChannel ch = verified();
+            // 规则键与基线 trade.yaml:39-44 同名（T9）：服务通配 trade.ClientPlayerJubaozhai/*
+            killSwitch.setRules(Map.of("trade.ClientPlayerJubaozhai/*", new KillSwitch.Rule(true, "止血", 0)));
+            ch.writeInbound(request(1, TRADE_MSG, "a"));
+            MessageContent reply = ch.readOutbound();
+            assertThat(reply.getMessageId()).isEqualTo(TRADE_MSG);
+            assertThat(reply.getId()).isEqualTo(1);
+            assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+            assertThat(trade.calls).isEmpty();
+
+            ch.writeInbound(request(2, FRIEND_MSG, "f"));
+            assertThat(friend.calls).as("只关聚宝斋").hasSize(1);
+
+            killSwitch.setRules(Map.of());
+            ch.writeInbound(request(3, TRADE_MSG, "b"));
+            assertThat(trade.calls).hasSize(1);
+            assertThat(ch.isOpen()).as("被关停不算非法包").isTrue();
+        } finally {
+            KillSwitch.installGlobal(null);
+        }
+    }
+
+    @Test
+    void 真实路由_客户端发199TradeAdminSeedListing_计非法包不回包不转发_同一连接照常可用() {
+        // trade-spec §0.8 / §4.9 第 2 步：199 是内部服务的号，gate 按「不认识的号」丢弃（同基线 C++ gate 白名单），客户端只能等到超时
+        MessageIdRegistry ids = MessageIdRegistry.loadFromClasspath();
+        int seed = ids.requireId("TradeAdmin", "SeedListing");
+        int browse = ids.requireId("ClientPlayerJubaozhai", "BrowseListings");
+        ClientDispatcher real = new ClientDispatcher(new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens,
+                InstantSource.fixed(Instant.ofEpochSecond(NOW)), MessageRoutes.of(ids), TIP_MSG, login,
+                Map.of(DubboGroups.TRADE, trade), links, registry, new GateLimits(4, 3, Duration.ZERO), metrics, presence);
+        EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, real));
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
+        assertThat(((ClientTokenVerifyResponse) ch.readOutbound()).getSuccess()).isTrue();
+
+        ch.writeInbound(request(1, seed, "seed"));
+        assertThat((Object) ch.readOutbound()).as("不回包（不回信封、不推 23）").isNull();
+        assertThat(trade.calls).as("不转发给 xm-trade").isEmpty();
+        assertThat(session().illegalPackets).as("计一次非法包").isEqualTo(1);
+        assertThat(ch.isOpen()).isTrue();
+
+        ch.writeInbound(request(2, browse, "browse"));
+        assertThat(trade.calls).singleElement().satisfies(c -> {
+            assertThat(c.getMessageId()).isEqualTo(browse);
+            assertThat(c.getRequestId()).isEqualTo(2);
+        });
+        trade.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("page")).build());
+        ch.runPendingTasks();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply.getMessageId()).isEqualTo(browse);
+        assertThat(reply.getId()).isEqualTo(2);
+        assertThat(reply.getSerializedMessage().toStringUtf8()).isEqualTo("page");
     }
 
     @Test

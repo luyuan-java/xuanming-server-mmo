@@ -5,6 +5,7 @@ import com.game.api.asset.SceneAssetOpClients;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
+import com.game.common.player.PlayerHomeZones;
 import com.game.common.player.PlayerProfiles;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
@@ -38,6 +39,7 @@ import com.game.guild.presence.PlayerNames;
 import com.game.guild.push.GuildPushes;
 import com.game.guild.rank.GuildRanks;
 import com.game.guild.rank.RedissonGuildRankRedis;
+import com.game.guild.rules.GuildLimits;
 import com.game.guild.rules.GuildTableRules;
 import com.game.guild.service.EconomyAssetEffects;
 import com.game.guild.service.EconomyTables;
@@ -60,7 +62,6 @@ import com.game.guild.store.GuildTx;
 import com.game.guild.store.JdbcEconomyStore;
 import com.game.guild.store.JdbcGuildStore;
 import com.game.guild.zone.MergeFence;
-import com.game.guild.zone.PlayerTableHomeZones;
 import com.game.pbmysql.PbMysql;
 import com.game.table.ConfigTables;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -426,10 +427,14 @@ public class GuildConfiguration {
         return GuildTableLookup.of(() -> guildConfigTables);
     }
 
-    /** 合服闸门：Java 首批不做合服（D4），恒放行；事务外与事务内的检查点照样保留。 */
+    /**
+     * 归属区读 player.zone_id（D3；xm-common 的 {@link PlayerHomeZones}，与组队、聚宝斋共用，单次上限 1500 ms）。
+     * 合服闸门：Java 首批不做合服（D4），恒放行；事务外与事务内的检查点照样保留。
+     */
     @Bean
     public GuildAccess guildAccess(GuildCache cache, PlayerProfiles profiles, GuildCacheInvalidator invalidator) {
-        return new GuildAccess(cache, new PlayerTableHomeZones(profiles::loadStrict), MergeFence.NONE, invalidator);
+        return new GuildAccess(cache, new PlayerHomeZones(profiles::loadStrict,
+                Duration.ofMillis(GuildLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS)), MergeFence.NONE, invalidator);
     }
 
     @Bean

@@ -6,6 +6,7 @@ import com.game.robot.client.GatewayHttp;
 import com.game.robot.client.LoginHttpClient;
 import com.game.robot.client.MessageIds;
 import com.game.robot.client.RobotClient;
+import com.game.robot.client.TradeAdminClient;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
@@ -29,6 +30,7 @@ import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TeamScenario;
 import com.game.robot.scenario.TokenScenario;
+import com.game.robot.scenario.TradeScenario;
 import com.game.robot.scenario.ZonesScenario;
 import java.io.PrintStream;
 import java.nio.file.Path;
@@ -140,6 +142,16 @@ public final class RobotMain {
                     GuildEconomyScenario scenario = new GuildEconomyScenario(flow, registry, options.accountPrefix(),
                             options.runTag(), options.requestTimeout());
                     title = "xm-robot guild-economy：" + scenario.accountA() + " 等，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.TRADE) {
+                    TradeScenario scenario = new TradeScenario(flow, registry, new TradeAdminClient(options.tradeAdminUrl(),
+                            AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout()),
+                            options.accountPrefix(), options.runTag(), options.zoneId(), options.tradeScope(),
+                            options.requestTimeout());
+                    title = "xm-robot trade：" + scenario.accountA() + " 等（期望范围 "
+                            + TradeScenario.scopeName(options.tradeScope().getNumber()) + "），" + target
+                            + " trade-admin=" + options.tradeAdminUrl();
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.FRIEND) {

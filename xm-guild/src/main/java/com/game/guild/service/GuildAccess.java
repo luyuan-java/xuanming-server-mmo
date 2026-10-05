@@ -1,6 +1,7 @@
 package com.game.guild.service;
 
 import com.game.common.deadline.Deadline;
+import com.game.common.player.HomeZones;
 import com.game.guild.cache.GuildCache;
 import com.game.guild.cache.GuildCacheInvalidator;
 import com.game.guild.cache.InvalidationOp;
@@ -10,7 +11,6 @@ import com.game.guild.rules.GuildTips;
 import com.game.guild.rules.RejectReply;
 import com.game.guild.store.GuildStore;
 import com.game.guild.store.Invalidation;
-import com.game.guild.zone.HomeZones;
 import com.game.guild.zone.MergeFence;
 import java.util.List;
 import java.util.Map;

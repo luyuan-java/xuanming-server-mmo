@@ -1,0 +1,74 @@
+// xm-trade 的两张只读面表（xm_java 库），经 xm-pbmysql 建表 / 补列 / 补索引（只扩展、从不删改）。trade-spec §1.2、§1.3、§1.5、§5.5。
+//
+// 形状与 mmorpg proto/trade/trade_table.proto 的 TradeListingRecord / TradeFavoriteRecord（trade_table.proto:28-70）逐字段相同
+// （表名、列、字段号、主键、二级索引、TiDB 选项），生成的 DDL 与 Go proto2mysql 逐字节相同（store 包的 TradeTablesTest 拿同步来的
+// com.game.proto.trade.*Record 对拍、并与 spec §1.5 原文逐字比对）。但这是 Java 版自己的一份：同步来的那份是契约产物、不许手改，
+// Java 的库表也不该随 mmorpg 漂移（先例 xm-friend/src/main/proto/xm/friend/friend_tables.proto、xm-guild/.../guild_tables.proto）。
+// 所以本文件不 import 同步来的 trade_table.proto / jubaozhai.proto。
+//
+// 枚举列 category / status 声明成 int32（不是契约枚举、也不是 uint32）：int32 与 enum 都生成 `int NOT NULL DEFAULT 0`，
+// uint32 会生成 `int unsigned`、DDL 与基线不同（TableSchema.java:64-65、:72；spec §1.5）。取值与契约枚举逐值相等：
+// category = jubaozhai.proto 的 ListingCategory（客户端契约）；status = trade_table.proto 的 ListingStatus，Java 侧常量见
+// com.game.trade.store.ListingStatuses（TradeTablesTest 对拍）。
+//
+// 改表纪律（trade_table.proto:15）：字段只追加、字段号永不复用（删字段用 reserved 占住，pbmysql 按列注释 pb:N 识别字段）；
+// index 组只能追加到末尾，不得调序（idx_<表>_<序号> 按位置命名）。追加区（spec §4.7）：
+//   - TradeListingRow 的 P3 新列从 20 起；TradeFavoriteRow 从 4 起；
+//   - P2 资产通道两张表（trade_player_op_seq、trade_asset_op）以后追加在本文件末尾，字段号照 trade_table.proto:85-147；4.7 不建（§1.10）。
+syntax = "proto3";
+
+package xm.trade;
+
+import "proto2mysql/proto2mysql_option.proto";
+
+option java_package = "com.game.trade.store.pb";
+option java_multiple_files = true;
+option java_outer_classname = "TradeTablesProto";
+option (proto2mysql.db) = true;
+
+// 商品行（trade_table.proto:28-57）。P1 唯一的写入是 dev 播种（admin_logic.go:95-118），没有下架 / 改状态的写路径（§4.1）。
+message TradeListingRow {
+  option (proto2mysql.table_name) = "trade_listing";
+  option (proto2mysql.primary_key) = "listing_id";
+  // idx_trade_listing_0 = 本区浏览；idx_trade_listing_1 = 全服浏览；idx_trade_listing_2 = 卖家货架（trade_table.proto:31-32）。
+  option (proto2mysql.index) = "market_zone,status,category,subcategory,price_fen;status,category,subcategory,price_fen;seller_player_id,listing_id";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 listing_id = 1;              // xm-trade 自己的全服雪花（NodeTypes.TRADE，作用域 0；T4）；基线是号段 biz_tag trade_listing（:38）
+  uint64 seller_player_id = 2;
+  string seller_account = 3;          // P3 判「同账号不能自买」用（:40）；P1 种子写空串（admin_logic.go:100）
+  uint32 market_zone = 4;             // 逻辑市场分区 = 上架时卖家 home_zone（Java：player.zone_id）；合服时改写（:41）
+  uint32 seller_zone_at_listing = 5;  // 上架时 home_zone 原值；合服不改，审计用（:42）
+  int32 category = 6;                 // = 契约 ListingCategory 的值（1..9）
+  uint32 subcategory = 7;             // 0 = 无子类（:44）；编码见 ListingRules.maxSubcategory
+  string title = 8;                   // 参与 LIKE 搜索（utf8mb4_unicode_ci：不区分大小写）
+  uint32 level = 9;
+  uint64 price_fen = 10;              // 单位：分
+  int32 status = 11;                  // = trade_table.proto 的 ListingStatus（ListingStatuses）；P1 只写 LISTED(2)
+  string summary = 12;                // 列表「信息」列
+  string description = 13;            // 详情描述；列表查询不取
+  string icon_key = 14;               // 客户端图标资源键
+  uint64 notice_end_ms = 15;          // 公示结束；等于上架时刻 = 无公示期（:52）
+  uint64 sale_end_ms = 16;            // 寄售结束；不变量 created_ms ≤ notice_end_ms < sale_end_ms（§1.2）
+  uint64 created_ms = 17;
+  uint64 updated_ms = 18;
+  uint64 version = 19;                // P3 起做状态迁移 CAS（:56）；P1 写 0（admin_logic.go:116）
+  // 追加区：从 20 起。
+}
+
+// 收藏行（trade_table.proto:59-70）。没有 zone 列，合服不动它（trade_step.go:20）。只由 SetFavorite 写（F4 / F5，§4.1）。
+message TradeFavoriteRow {
+  option (proto2mysql.table_name) = "trade_favorite";
+  option (proto2mysql.primary_key) = "player_id,listing_id";
+  option (proto2mysql.index) = "listing_id";  // idx_trade_favorite_0：P1 没有读者，留给按商品反查收藏者（§1.8）
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  uint64 listing_id = 2;
+  uint64 created_ms = 3;              // 首次收藏的时刻；重复收藏不刷新（ODKU 空更新，§1.9）
+  // 追加区：从 4 起。
+}

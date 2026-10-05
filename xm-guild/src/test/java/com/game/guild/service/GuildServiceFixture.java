@@ -1,6 +1,7 @@
 package com.game.guild.service;
 
 import com.game.common.deadline.Deadline;
+import com.game.common.player.HomeZones;
 import com.game.common.player.PlayerProfiles.Profile;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.discovery.proto.PlayerPresence;
@@ -13,7 +14,6 @@ import com.game.guild.push.GuildPushes;
 import com.game.guild.rank.GuildRanks;
 import com.game.guild.rules.GuildTableRules.ApplicationRules;
 import com.game.guild.rules.GuildTableRules.LevelDisplay;
-import com.game.guild.zone.HomeZones;
 import com.game.guild.zone.MergeFence;
 import com.game.proto.MessageContent;
 import com.game.proto.guild.GuildChangeKind;

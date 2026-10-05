@@ -1,0 +1,5 @@
+# nacos profile：Dubbo 注册到 Nacos（只做 Dubbo 注册中心，见 architecture.md §6）；gate 改走注册中心发现 trade（xm.dubbo.trade-url 留空）。
+# 播种接口（管理端口 HTTP）与 profile 无关。
+dubbo:
+  registry:
+    address: nacos://${XM_NACOS_ADDR:127.0.0.1:8848}

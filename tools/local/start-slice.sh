@@ -3,7 +3,7 @@
 #   export XM_MYSQL_PASSWORD=... XM_GATE_TOKEN_SECRET=... XM_LOGIN_DEV_PASSWORD=... XM_NODE_LINK_SECRET=... XM_DUBBO_SECRET=...
 #   tools/local/start-slice.sh
 # XM_NODE_LINK_SECRET 是 gate → scene 节点链路握手密钥，xm-gate 与 xm-scene 读同一个值（本脚本把同一环境传给两者）。
-# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-scene / xm-gate / xm-gateway
+# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-trade / xm-scene / xm-gate / xm-gateway
 # 读同一个值（xm-scene 自 4.5 起是资产通道 SceneAssetOpService 的 Dubbo 提供方，缺密钥即暴露失败）。
 # XM_ASSET_OP_SECRET_GUILD 是帮会资产指令的请求体签名密钥（xm-guild 签、xm-scene 验，去首尾空白后至少 32 字节）；
 # 没设时本脚本生成本机随机值写进 run/xm-asset-op-secret-guild，并把同一个值传给两者。
@@ -19,12 +19,13 @@ cd "$(dirname "$0")/../.."
 : "${XM_NODE_LINK_SECRET:?需要环境变量 XM_NODE_LINK_SECRET（gate → scene 链路密钥）}"
 : "${XM_DUBBO_SECRET:?需要环境变量 XM_DUBBO_SECRET（Dubbo 调用方鉴权密钥）}"
 
-# 运行模式：本机切片缺省 dev（放行 Gm* / Debug* / Test* 客户端指令，同基线 tools/scripts/start_game.ps1）；
+# 运行模式：本机切片缺省 dev（放行 Gm* / Debug* / Test* 客户端指令，同基线 tools/scripts/start_game.ps1；xm-trade 只在 dev / test 下开放播种）；
 # 进程自身缺省 prod，部署链不设它即拒绝。要在本机验证生产行为：XM_RUN_MODE=prod tools/local/start-slice.sh
 export XM_RUN_MODE="${XM_RUN_MODE:-dev}"
 echo "运行模式 XM_RUN_MODE=$XM_RUN_MODE"
 
-# xm-data 运维接口令牌：没设就生成一个本机随机令牌写进 run/xm-admin-token（run/ 不进仓库；robot audit 场景从这里读）
+# 运维令牌（xm-data 运维接口与 xm-trade 播种接口 POST /admin/trade/seed-listing 共用，头 X-Xm-Admin-Token）：没设就生成一个本机随机令牌
+# 写进 run/xm-admin-token（run/ 不进仓库；robot audit / trade 等场景从这里读）
 mkdir -p run
 if [[ -z "${XM_ADMIN_TOKEN:-}" ]]; then
   XM_ADMIN_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
@@ -72,6 +73,7 @@ SERVICES=(
   "xm-chat 20884"
   "xm-team 20885"
   "xm-guild 20886"
+  "xm-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
   "xm-data 18106"
   "xm-scene 21000 21100"   # 节点链路 link-port；资产通道 Dubbo Triple（xm.scene.asset-rpc-port，xm-guild 按节点目录直连）
   "xm-gate 11000"

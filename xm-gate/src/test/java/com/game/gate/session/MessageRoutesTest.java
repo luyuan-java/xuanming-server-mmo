@@ -124,6 +124,36 @@ class MessageRoutesTest {
     }
 
     @Test
+    void 聚宝斋4个号路由到trade域_都回包_热关停键与基线同名_199不在白名单() {
+        // trade-spec §0.2 / §5.2 / §9.4：ClientPlayerJubaozhai 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，
+        // 196 / 197 / 198 / 200 整体转给 xm-trade；应答都是带 error_message 的业务应答 → 一律回包
+        List<String> methods = List.of("BrowseListings", "GetListingDetail", "SetFavorite", "GetMyShelf");
+        List<MessageMethod> jubaozhai = registry.all().stream()
+                .filter(m -> m.serviceName().equals("ClientPlayerJubaozhai")).toList();
+        assertThat(jubaozhai).as("契约里 ClientPlayerJubaozhai 的方法").extracting(MessageMethod::methodName)
+                .containsExactlyInAnyOrderElementsOf(methods);
+        for (MessageMethod method : jubaozhai) {
+            MessageRoute route = routes.clientRoute(method.messageId());
+            assertThat(route).as(method.key()).isNotNull();
+            assertThat(route.domain()).as(method.key()).isEqualTo(DubboGroups.TRADE);
+            assertThat(route.hasResponse()).as(method.key()).isTrue();
+            assertThat(route.method()).isEqualTo("ClientPlayerJubaozhai." + method.methodName());
+            assertThat(route.gm()).as(method.key()).isFalse();
+            // 热关停规则按 rpcPath 匹配：与基线 trade.yaml:39-44 的键 trade.ClientPlayerJubaozhai/<Method> 同名（T9）
+            assertThat(route.rpcPath()).isEqualTo("/trade.ClientPlayerJubaozhai/" + method.methodName());
+            assertThat(KillSwitch.matchKeys(route.rpcPath()))
+                    .contains("trade.ClientPlayerJubaozhai/" + method.methodName(), "trade.ClientPlayerJubaozhai/*");
+        }
+        // 199 TradeAdmin.SeedListing 是内部服务（trade_admin.proto:13-18）：契约里有这个号，但客户端发不了（gate 按不认识的号丢弃）
+        MessageMethod seed = registry.all().stream()
+                .filter(m -> m.serviceName().equals("TradeAdmin") && m.methodName().equals("SeedListing"))
+                .findFirst().orElseThrow();
+        assertThat(seed.clientService()).isFalse();
+        assertThat(routes.clientRoute(seed.messageId())).as("199 不可路由").isNull();
+        assertThat(MessageRoutes.SERVICE_BACKENDS).doesNotContainKey("TradeAdmin");
+    }
+
+    @Test
     void 好友服务路由到friend域_推送方法也在白名单里由后端拒() {
         int addFriend = registry.requireId("ClientPlayerFriend", "AddFriend");
         assertThat(routes.clientRoute(addFriend)).isEqualTo(new MessageRoute(addFriend, DubboGroups.FRIEND, true,

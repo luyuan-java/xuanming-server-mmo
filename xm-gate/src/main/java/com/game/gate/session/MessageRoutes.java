@@ -28,13 +28,17 @@ public interface MessageRoutes {
      * 非玩家服务的客户端服务 → 后端。新接入一个后端就在这里加一行。
      * 帮会服务名是 {@code GuildService}（{@code message_id.txt} 的前缀，如 {@code 8=GuildServiceUpdateGuildScore}）：
      * 28 个号整体转给 xm-guild，含只对内部开放的 8 与推送占位 220，由后端按方法回信封 1003（guild-spec §7.2、§7.3）。
+     * 聚宝斋服务名是 {@code ClientPlayerJubaozhai}（{@code 196=ClientPlayerJubaozhaiBrowseListings}），4 个号（196 / 197 / 198 / 200）转给
+     * xm-trade（trade-spec §5.2）；199 {@code TradeAdminSeedListing} 刻意没标客户端协议服务（trade_admin.proto:13-18），不进白名单，
+     * 客户端发来按「不认识的号」丢弃、计非法包、不回包（同基线 C++ gate，trade_smoke_scenario.go:281-284）。
      */
     Map<String, String> SERVICE_BACKENDS = Map.of(
             "ClientPlayerLogin", DubboGroups.LOGIN,
             "ClientPlayerFriend", DubboGroups.FRIEND,
             "ClientPlayerChat", DubboGroups.CHAT,
             "ClientPlayerTeam", DubboGroups.TEAM,
-            "GuildService", DubboGroups.GUILD);
+            "GuildService", DubboGroups.GUILD,
+            "ClientPlayerJubaozhai", DubboGroups.TRADE);
 
     /** 客户端可发的消息号的路由；消息号不存在或不属于客户端协议服务时返回 null。 */
     MessageRoute clientRoute(int messageId);

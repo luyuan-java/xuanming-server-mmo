@@ -1,5 +1,6 @@
 package com.game.robot;
 
+import com.game.proto.trade.MarketScope;
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
@@ -20,6 +21,7 @@ import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TeamScenario;
 import com.game.robot.scenario.TokenScenario;
+import com.game.robot.scenario.TradeScenario;
 import java.time.Duration;
 import java.util.EnumMap;
 import java.util.List;
@@ -34,6 +36,8 @@ import java.util.regex.Pattern;
  * @param runTag          移动 / 货币 / 属性场景的账号标签：账号为 {@code 前缀 + mv + 标签 + _a / _b}、{@code 前缀 + cur / at + 标签}；
  *                        缺省按当前时间生成，每次都是新号
  * @param expectGmAllowed 货币场景：服务端运行模式放行 GM 指令（allow）还是拒绝（deny）
+ * @param tradeAdminUrl   trade 场景：xm-trade 管理端口（播种接口 {@code POST /admin/trade/seed-listing}）
+ * @param tradeScope      trade 场景：期望的市场范围（须与 xm-trade 的 {@code xm.trade.market.scope} 一致；缺省 zone，trade-spec Q9）
  */
 public record RobotOptions(
         Scenario scenario,
@@ -51,6 +55,8 @@ public record RobotOptions(
         String dataUrl,
         String sceneMetricsUrl,
         String tableDir,
+        String tradeAdminUrl,
+        MarketScope tradeScope,
         String password) {
 
     public static final String PASSWORD_ENV = "XM_LOGIN_DEV_PASSWORD";
@@ -63,7 +69,9 @@ public record RobotOptions(
     public enum Scenario {
         SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN, FRIEND, CHAT, KILLSWITCH, TEAM, GUILD,
         /** 子命令写作 {@code guild-economy}（连字符按下划线认）。 */
-        GUILD_ECONOMY
+        GUILD_ECONOMY,
+        /** 聚宝斋只读面（196 / 197 / 198 / 200 + 播种）。 */
+        TRADE
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -87,7 +95,11 @@ public record RobotOptions(
         SCENE_METRICS_URL("scene-metrics-url", "XM_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
                 "audit / guard：xm-scene 管理端口（抓指标）"),
         TABLE_DIR("table-dir", "XM_ROBOT_TABLE_DIR", "config-data/tables",
-                "reconnect / team：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点；team 选换图目标）");
+                "reconnect / team：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点；team 选换图目标）"),
+        TRADE_ADMIN_URL("trade-admin-url", "XM_ROBOT_TRADE_ADMIN_URL", "http://127.0.0.1:18111",
+                "trade：xm-trade 管理端口（播种接口 POST /admin/trade/seed-listing，运维令牌同 audit）"),
+        TRADE_SCOPE("trade-scope", "XM_ROBOT_TRADE_SCOPE", "zone",
+                "trade：期望的市场范围 zone / global（须与 xm-trade 的 xm.trade.market.scope 一致，换范围要重启 xm-trade）");
 
         final String arg;
         final String env;
@@ -171,6 +183,15 @@ public record RobotOptions(
         if (!expectGm.equals("allow") && !expectGm.equals("deny")) {
             throw new UsageException("--expect-gm 只能是 allow / deny：" + expectGm);
         }
+        String tradeAdminUrl = stripSlash(value(Opt.TRADE_ADMIN_URL, given, env));
+        if (!tradeAdminUrl.startsWith("http://") && !tradeAdminUrl.startsWith("https://")) {
+            throw new UsageException("--trade-admin-url 必须以 http:// 或 https:// 开头：" + tradeAdminUrl);
+        }
+        MarketScope tradeScope = switch (value(Opt.TRADE_SCOPE, given, env)) {
+            case "zone" -> MarketScope.MARKET_SCOPE_ZONE;
+            case "global" -> MarketScope.MARKET_SCOPE_GLOBAL;
+            default -> throw new UsageException("--trade-scope 只能是 zone / global：" + value(Opt.TRADE_SCOPE, given, env));
+        };
         String password = env.get(PASSWORD_ENV);
         if (password == null || password.isEmpty()) {
             throw new UsageException("需要环境变量 " + PASSWORD_ENV + "（与 xm-login 相同的开发口令）");
@@ -199,6 +220,7 @@ public record RobotOptions(
             case TEAM -> TeamScenario.accountName(prefix, runTag, "a");
             case GUILD -> GuildScenario.accountName(prefix, runTag, "a");
             case GUILD_ECONOMY -> GuildEconomyScenario.accountName(prefix, runTag, "a");
+            case TRADE -> TradeScenario.accountName(prefix, runTag, "a");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -208,13 +230,14 @@ public record RobotOptions(
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
-                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), value(Opt.TABLE_DIR, given, env), password);
+                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), value(Opt.TABLE_DIR, given, env), tradeAdminUrl,
+                tradeScope, password);
     }
 
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -259,6 +282,11 @@ public record RobotOptions(
                 + "B 余额不足 14025 + REJECTED → 升级（B 14016、A 升 Lv.2、B 收 LEVEL_UP、旧等级重升不扣钱）→ 商店解锁 → 兑换入包 → "
                 + "14029 / 14031 / 14030 → 限购 → 解散；结算中的单轮询到落定，后台终结的推 FUNDS_CHANGED / DELIVERY_DONE；"
                 + "需要 xm-guild 资产通道已开、两侧同一个 XM_ASSET_OP_SECRET_GUILD、dev 运行模式\n");
+        out.append("  trade     聚宝斋只读面（A / B / C 三个新号）：经 xm-trade 播种接口造种子（market_zone = 卖家归属区）→ 经 gate 发 199 无回包 → "
+                + "寄售 / 公示页签与本轮种子逐字段一致 → 单区范围断言（zone_filter 在 zone 下被忽略、global 下生效）→ 页长 50 回显 20、"
+                + "超末页钳到末页 → 拍卖 20003 → 详情（不存在 20000、卖家看已结束的、买家 20000）→ 收藏 / 只看收藏 / 取消 → 货架；"
+                + "另钉参数非法 1005、LIKE 通配按字面量、按编号搜索。需要 dev 运行模式与运维令牌；--trade-scope 须与 xm-trade 一致，"
+                + "跨区步骤单 zone 时跳过\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -277,14 +305,14 @@ public record RobotOptions(
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
                 + ", dataUrl=" + dataUrl + ", sceneMetricsUrl=" + sceneMetricsUrl + ", tableDir=" + tableDir
-                + ", password=***]";
+                + ", tradeAdminUrl=" + tradeAdminUrl + ", tradeScope=" + tradeScope + ", password=***]";
     }
 
     private static Scenario parseScenario(String arg) throws UsageException {
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade）");
         }
     }
 

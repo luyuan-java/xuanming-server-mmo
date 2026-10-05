@@ -2,6 +2,7 @@ package com.game.team.service;
 
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
+import com.game.common.player.HomeZones;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.team.ApplyJoinTeamRequest;
 import com.game.proto.team.CreateTeamRequest;
@@ -20,7 +21,6 @@ import com.game.proto.team.TeamMemberView;
 import com.game.proto.team.TeamResponse;
 import com.game.proto.team.TeamView;
 import com.game.proto.team.TransferLeaderRequest;
-import com.game.team.homezone.HomeZones;
 import com.game.team.match.TeamBattlePort;
 import com.game.team.metrics.TeamMetrics;
 import com.game.team.metrics.TeamMetrics.HealKind;
@@ -96,7 +96,7 @@ public final class TeamService {
     /**
      * @param sessions  规则用的会话四态与邀请目标的严格在线判定（{@code TeamSessions}）
      * @param display   视图展示缓存（{@code TeamDisplay}）
-     * @param homeZones home zone 查询（{@code PlayerTableHomeZones}）
+     * @param homeZones home zone 查询（xm-common 的 {@code PlayerHomeZones}：缺项或 0 → 4019，抛异常 → 4030）
      * @param teamIds   team_id 发号（{@code TeamIds::nextId}；抛异常或返回 0 → CreateTeam 回 4030 + 空视图）
      * @param battle    开战端口（4.3 为 {@code NoTeamBattle}）
      * @param cfg       规则配置（{@code xm.team.allow-cross-zone}）

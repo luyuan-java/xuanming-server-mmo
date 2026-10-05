@@ -61,7 +61,8 @@
 | 4.4 | 帮会核心（建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 申请审批 / 推送 220 / 排行）；robot guild-smoke | guild-* 核心段 | ✅（提交见 git log「批次 4.4」；独立进程 xm-guild、过载回 in-band 14021、经济 / 活动号暂回 1006——PARITY「帮会核心」行）|
 | 4.5 | 帮会经济（资产指令账本与投递、捐献、升级、商店）；robot guild-economy | guild-asset-*、guild-donate、guild-upgrade、guild-shop | ✅（提交见 git log「批次 4.5」；资产通道跨进程传输 scene Dubbo 提供方、离线读已落盘账本——PARITY「帮会经济」行；也补上了 2.9 留下的 asset-channel 传输与 asset-op-ledger-read）|
 | 4.6 | 帮会活动（公共底座、列表、灯会、团圆、同道历练 239–243） | guild-activity-*、guild-lantern、guild-reunion、guild-trial |
-| 4.7 | 聚宝斋只读面（浏览 / 详情 / 收藏 / 货架）；robot trade-smoke | trade-browse-listings、trade-listing-detail、trade-favorite、trade-my-shelf |
+| 4.7 | 聚宝斋只读面（浏览 / 详情 / 收藏 / 货架）；robot trade-smoke | trade-browse-listings、trade-listing-detail、trade-favorite、trade-my-shelf | ✅（提交见 git log「批次 4.7」；独立进程 xm-trade、dev 播种走管理口 HTTP、listing_id 用雪花——PARITY「聚宝斋只读面」行）|
+| 4.8 | 聚宝斋写侧（上架托管、下单、支付、交付、回退；trade 侧资产托管通道 P2 与 P3–P6 同批） | trade-asset-escrow-channel、trade-p3-orders-payment、trade-merge-zone-rewrite | 等 mmorpg 定下 P3 契约（消息号 / tip / proto）后两版同批做（trade-spec §4.6） |
 
 ## 阶段 5：场景拓扑
 

@@ -2,6 +2,7 @@ package com.game.team;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.common.id.Snowflake;
+import com.game.common.player.PlayerHomeZones;
 import com.game.common.player.PlayerProfiles;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
@@ -12,7 +13,6 @@ import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.team.dispatch.TeamDispatcher;
 import com.game.team.dispatch.TeamWorkerPool;
-import com.game.team.homezone.PlayerTableHomeZones;
 import com.game.team.id.TeamIds;
 import com.game.team.match.NoTeamBattle;
 import com.game.team.metrics.TeamMetrics;
@@ -151,7 +151,7 @@ public class TeamConfiguration {
     @Bean
     public TeamService teamService(TeamStore store, TeamSessions sessions, TeamDisplay display, PlayerProfiles profiles,
                                    TeamIds teamIds, TeamPushes pushes, TeamMetrics metrics, TeamProperties props) {
-        PlayerTableHomeZones homeZones = new PlayerTableHomeZones(profiles::loadStrict, props.homeZoneTimeout());
+        PlayerHomeZones homeZones = new PlayerHomeZones(profiles::loadStrict, props.homeZoneTimeout());
         return new TeamService(store, sessions, display, homeZones, teamIds::nextId, NoTeamBattle.INSTANCE, pushes, metrics,
                 new RuleConfig(props.allowCrossZone()));
     }

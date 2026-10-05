@@ -47,6 +47,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-chat` | 进程（Spring Boot + Dubbo） | 聊天 v1：世界频道与私聊的发言（校验、幂等、限速、落历史）与拉取历史（Dubbo group `chat`，端口 20884；数据只在 Redis，§4.14） |
 | `xm-team` | 进程（Spring Boot + Dubbo） | 组队：建队 / 申请 / 邀请 / 离队 / 踢人 / 转让 / 解散、队伍快照与邀请推送（Dubbo group `team`，端口 20885；权威数据只在 Redis，§4.16） |
 | `xm-guild` | 进程（Spring Boot + Dubbo） | 帮会核心：建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 转让 / 申请审批 / 推送 220 / 排行（Dubbo group `guild`，端口 20886；四张表经 xm-pbmysql，快照缓存与排行在 Redis，§4.17） |
+| `xm-trade` | 进程（Spring Boot + Dubbo） | 聚宝斋只读面：浏览 196 / 详情 197 / 收藏 198 / 货架 200 + dev 播种（Dubbo group `trade`，端口 20887，管理端口 18111；两张表经 xm-pbmysql，§4.20） |
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景分配（玩家该进哪个场景节点的哪个频道，软预占）+ 每个 zone 的主世界频道计划（领导者维护，§4.19） |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送 |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
@@ -513,6 +514,27 @@ BeginSceneDrain。规格与逐条出处见 `docs/porting/scene-channels-spec.md`
 - **63（场景内换场景）**：只带当前地图时挑本节点该地图人数最少的 ACTIVE 频道（打平留在原地）；目标是排空中的频道回 3023。
   组队跟随不把队员拉进排空中的频道。
 
+### 4.20 聚宝斋只读面（xm-trade，批次 4.7）
+
+mmorpg：`go/trade`（P1 浏览 / 详情 / 收藏 / 货架 + 内部播种）。Java 版是独立进程 xm-trade（Dubbo group `trade`，端口 20887，管理端口 18111），
+gate 把 `ClientPlayerJubaozhai` 的 4 个消息号（196 浏览、197 详情、198 收藏、200 货架）经按会话的后端队列转过来（`handle` 不重试）。
+规格与逐条出处见 `docs/porting/trade-spec.md`：
+
+- **存储**：`xm_java` 库两张表 `trade_listing` / `trade_favorite`，Java 自有 `xm/trade/trade_tables.proto` 经 xm-pbmysql 建（DDL 与 Go proto2mysql
+  逐字节相同）；业务 SQL 逐字照搬 `listing_repo.go`。连接会话级 RC、`innodb_lock_wait_timeout=2`、`useAffectedRows=true`；每次调用的上限
+  `min(2000 ms, 剩余预算)`，读语句带 `MAX_EXECUTION_TIME`，取连接有界。收藏写入用 `INSERT … ON DUPLICATE KEY UPDATE`（`INSERT IGNORE` 在 MySQL 8.4
+  会与并发删除死锁，测试复现过 1213），撞 1213 / 1205 / 9007 时整条重跑一次（共 2 次）。**4.7 不新增任何业务 Redis 键**（Redis 只用于发号租约与热关停）。
+- **规则同基线**：展示阶段（公示 / 寄售 / 已结束）与买家可见性（卖家豁免）、市场范围 zone / global（zone 下客户端的 `zone_filter` 被忽略）、
+  搜索规范化（标题 LIKE 转义、纯数字按编号查）、分页（页码 0 视为 1、页长 0 取缺省、超长钳到上限、超过末页钳到末页、OFFSET 封顶）、排序与并列次序、
+  收藏软上限 100（计数包括已看不见的收藏）、tip 码 20000 段且不带 parameters。归属区读 `player.zone_id`（xm-common `PlayerHomeZones`，帮会 / 组队共用）。
+- **准入与错误**（`TradeDispatcher`）：解析先于身份检查（同 grpc-go）；解析失败、会话没有玩家、上行 199 → 信封 1003；工作池（16 线程、队列 1024）满或排队
+  超预算 → in-band 1003；存储 / 归属区故障 → in-band 1003；整请求预算 3500 ms（基线 Timeout − 500）。gate 调 trade 失败或超时回带请求号的信封 1003（§4.1）。
+- **listing_id** 用全服雪花（`NodeTypes.TRADE`，作用域 0），租约在启动时申领、失败拒启。
+- **dev 播种**：管理端口 `POST /admin/trade/seed-listing`（请求 / 应答是 protobuf 二进制 `SeedListingRequest / SeedListingResponse`，头 `X-Xm-Admin-Token`
+  常数时间比对、`X-Xm-Operator` 必填、每次写审计行）；接口总注册，运行模式不是 dev / test 一律 403。gate 不收 199（经 gate 发来无回包）。
+  robot `trade` 用它造四条不同阶段的商品做端到端。
+- **写侧**（上架托管、下单、支付、交付、回退）不在本批：基线 P2 资产托管通道默认关闭且没有调用方，P3–P6 只有设计；随 mmorpg 定下 P3 契约后同批做（路线图 4.8）。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -724,7 +746,7 @@ BeginSceneDrain。规格与逐条出处见 `docs/porting/scene-channels-spec.md`
 
 每个进程用 **Micrometer** 记指标，经 **Spring Boot Actuator** 以 Prometheus 文本格式导出（选型见 tech-stack.md）。
 指标名与标签只在每个进程的一个类里定义，业务代码只调语义方法：gate `GateMetrics`、login `LoginMetrics`、
-scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`、guild `GuildMetrics`。
+scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`、guild `GuildMetrics`、trade `TradeMetrics`。
 
 | 进程 | 抓取地址（默认） | 说明 |
 |---|---|---|
@@ -734,12 +756,13 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | xm-chat | `http://127.0.0.1:18108/actuator/prometheus` | 管理专用端口 |
 | xm-team | `http://127.0.0.1:18109/actuator/prometheus` | 管理专用端口 |
 | xm-guild | `http://127.0.0.1:18110/actuator/prometheus` | 管理专用端口 |
+| xm-trade | `http://127.0.0.1:18111/actuator/prometheus` | 管理专用端口；同一端口上还有 dev / test 专用的播种接口 `POST /admin/trade/seed-listing`（运维令牌，其他运行模式 403） |
 | xm-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
 | xm-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
 | xm-scene | `http://127.0.0.1:18104/actuator/prometheus` | 管理专用端口；同机多个 scene 实例要各用 `SERVER_PORT` 错开（与链路端口一样） |
 | xm-data | `http://127.0.0.1:18106/actuator/prometheus` | Web 进程：同一端口上还有带令牌的运维接口 `/admin/**`（§4.5），默认只绑本机 |
 
-- **非 Web 进程的管理端口**：gate / login / friend / chat / team / guild / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
+- **非 Web 进程的管理端口**：gate / login / friend / chat / team / guild / trade / scene-manager / scene 的业务端口是 Netty / Dubbo，为管理端点另起一个只挂 actuator 的
   Tomcat（`web-application-type: servlet`，4 个线程，`shutdown: immediate`），这个端口上没有业务接口。
   默认只绑 `127.0.0.1`（与 mmorpg 开发环境的 Prometheus 端口同口径），跨机抓取用 `XM_MANAGEMENT_ADDRESS` 指定内网地址；
   端口用 `SERVER_PORT` 覆盖，Windows 上避开保留端口段 50060–50159。actuator 只暴露 `health` 与 `prometheus` 两个端点。
@@ -808,6 +831,10 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | guild | `xm_guild_economy_requests_seconds`、`xm_guild_asset_sync_skipped_total`、`xm_guild_asset_orphans_total`、`xm_guild_asset_cleanup_deleted_total` | Timer / Counter | 见 `GuildMetrics`（method / result / kind 等固定枚举） | 经济五个 RPC；同步投递因预算不足跳过；终结时对侧行缺失；清理删行 |
 | guild | `xm_guild_assetop_*`（rpc / rpc_duration / requery / outcome_flip / unknown / partial / claim / reschedule / reschedule_lost / finalize / ledger_read / manual_resolve / store_errors / pending_oldest_age_seconds）、`xm_guild_scene_resolve_total` | Counter / Timer / Gauge | `rpc`、`stream`、`outcome`、`origin`（sync / loop）等固定枚举，不含任何 id | 资产指令投递与重投循环（基线 assetop 指标）；定位 scene 的结局 |
 | guild | `xm_guild_internal_list_applied_total{result}`、`xm_guild_internal_list_applied_rows` | Counter / 分布 | `result` | 内部查询 |
+| trade | `xm_trade_requests_seconds` | Timer | `method`=BrowseListings / GetListingDetail / SetFavorite / GetMyShelf / unrouted，`result`=ok / business_error / internal_error / overloaded / bad_request / unauthenticated / forbidden / unsupported（启动时全部预建） | 每个客户端请求的耗时与结果（基线 grpcstats + serverbase 的 rpc_inband_*） |
+| trade | `xm_trade_home_zone_lookups_total` | Counter | `result`=ok / unmapped / error | 归属区查询（基线 `trade_home_zone_lookup_total`） |
+| trade | `xm_trade_seed_listings_total`、`xm_trade_admin_requests_total` | Counter | 前者 `result`=ok / rejected / error；后者 `op`=seed_listing / other、`status` | dev 播种（基线 `trade_seed_listing_total`）；管理口审计 |
+| trade | `xm_trade_favorite_retries_total` | Counter | 无 | 收藏写入撞 1213 / 1205 / 9007 后整条重跑的次数（Java 增项） |
 | scene | `xm_scene_asset_ops_total` | Counter | `rpc`=debit / abort_debit / credit，`outcome`=applied / rejected / retry / not_here / unknown / overloaded / error | 资产指令应答结局（全部组合启动即注册） |
 | scene | `xm_scene_asset_ops_inflight`、`executor_*{name="scene-asset-reply"}` | Gauge / 线程池 | — | 资产指令在途数与应答执行器 |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |

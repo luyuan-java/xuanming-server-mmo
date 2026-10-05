@@ -121,6 +121,18 @@ public class GateConfiguration {
         return new ReferenceBean<>();
     }
 
+    /**
+     * 聚宝斋后端（Dubbo group = proto 域 trade，xm-trade 提供；trade-spec §5.2）；直连 {@code xm.dubbo.trade-url}，nacos profile 置空走注册中心。
+     * 4.7 只有只读面与收藏，{@code handle} 照样不重试：读路径重试会在超时时把负载翻倍，Dubbo 内部重投还会打乱 xm-trade 的 3.5 s 请求预算；
+     * 收藏虽然幂等，也没有重投的必要。xm-trade 不在或调用失败时客户端收到带请求 id 的信封 1003（T8，聚宝斋按设计不隔离）。
+     */
+    @Bean
+    @DubboReference(group = DubboGroups.TRADE, check = false, url = "${xm.dubbo.trade-url:}",
+            methods = @Method(name = "handle", retries = 0))
+    public ReferenceBean<ClientMessageService> tradeClientMessageService() {
+        return new ReferenceBean<>();
+    }
+
     /** gate 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
     @Bean
     public GateMetrics gateMetrics(MeterRegistry meterRegistry) {
@@ -138,6 +150,7 @@ public class GateConfiguration {
                              @Qualifier("chatClientMessageService") ClientMessageService chatClientMessageService,
                              @Qualifier("teamClientMessageService") ClientMessageService teamClientMessageService,
                              @Qualifier("guildClientMessageService") ClientMessageService guildClientMessageService,
+                             @Qualifier("tradeClientMessageService") ClientMessageService tradeClientMessageService,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${xm.zone-id:1}") int zoneId,
                              @Value("${xm.advertise-host:127.0.0.1}") String advertiseHost,
                              @Value("${xm.table-dir:config-data/tables}") String tableDir,
@@ -150,7 +163,8 @@ public class GateConfiguration {
                 Map.of(DubboGroups.FRIEND, friendClientMessageService,
                         DubboGroups.CHAT, chatClientMessageService,
                         DubboGroups.TEAM, teamClientMessageService,
-                        DubboGroups.GUILD, guildClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
+                        DubboGroups.GUILD, guildClientMessageService,
+                        DubboGroups.TRADE, tradeClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
                 gateMetrics, RunMode.parse(runMode));
     }
 
