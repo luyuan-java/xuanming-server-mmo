@@ -23,6 +23,9 @@ public final class DubboGroups {
      */
     public static final String GUILD = "guild";
 
+    /** 聚宝斋 / 交易（{@code proto/trade/...}），由 xm-trade 提供。 */
+    public static final String TRADE = "trade";
+
     /**
      * 通用资产通道（{@link SceneAssetOpService}），每个 scene 节点各自导出、{@code register = false}，调用方按节点目录里的地址直连。
      * 只作分组标识（同一端口上不会有别的服务）。
