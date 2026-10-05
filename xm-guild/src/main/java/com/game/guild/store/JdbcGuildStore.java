@@ -84,7 +84,7 @@ public final class JdbcGuildStore implements GuildStore {
 
     // ---------------------------------------------------------------- M：guild_member
     /** M1：成员行唯一的锁定读（FORCE INDEX (PRIMARY)：WHERE 同时钉死了 uk_guild_member，不强制可能走 uk = 先二级后主键）。 */
-    static final String LOCK_MEMBER_ROLE =
+    public static final String LOCK_MEMBER_ROLE =
             "SELECT role FROM guild_member FORCE INDEX (PRIMARY) WHERE guild_id = ? AND player_id = ? FOR UPDATE";
     /** M2：持 guild 行锁时数成员（判满）。 */
     static final String COUNT_MEMBERS = "SELECT COUNT(*) FROM guild_member WHERE guild_id = ?";
@@ -876,8 +876,8 @@ public final class JdbcGuildStore implements GuildStore {
         return new GuildScore(GuildJdbc.u64(rs, 1), GuildJdbc.u32(rs, 2), rs.getLong(3));
     }
 
-    /** 事务内合服闸门：合服中或读不出来（fail-closed）都拒绝。 */
-    private static boolean fenceRejects(ZoneFence fence, int zoneId, long guildId) {
+    /** 事务内合服闸门：合服中或读不出来（fail-closed）都拒绝（checkFence，economy_repo.go:323-335；4.5 的经济事务共用）。 */
+    static boolean fenceRejects(ZoneFence fence, int zoneId, long guildId) {
         try {
             return fence.merging(zoneId);
         } catch (Exception e) {
@@ -988,7 +988,7 @@ public final class JdbcGuildStore implements GuildStore {
     // ================================================================ 小工具
 
     /** 按无符号升序去重。 */
-    static List<Long> sortedUnique(List<Long> ids) {
+    public static List<Long> sortedUnique(List<Long> ids) {
         List<Long> sorted = new ArrayList<>(ids);
         sorted.sort(Long::compareUnsigned);
         List<Long> out = new ArrayList<>(sorted.size());
@@ -1001,7 +1001,7 @@ public final class JdbcGuildStore implements GuildStore {
     }
 
     /** n 个 "?" 的逗号列表（n ≥ 1）。 */
-    static String placeholders(int n) {
+    public static String placeholders(int n) {
         return String.join(",", Collections.nCopies(n, "?"));
     }
 

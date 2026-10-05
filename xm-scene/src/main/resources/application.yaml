@@ -1,6 +1,11 @@
 # xm-scene 本地配置。进程从仓库根目录启动（配置表默认读 config-data/tables）。
 # 环境变量（秘密只从这里注入，不进仓库）：
 #   XM_NODE_LINK_SECRET gate → scene 节点链路握手密钥（必填，须与 xm-gate 一致；缺失即启动失败）
+#   XM_DUBBO_SECRET    Dubbo 调用方鉴权密钥（必填：资产通道的 Dubbo 提供方要验调用方 MAC；须与 xm-guild 等一致；缺失即启动失败）
+#   XM_ASSET_OP_SECRET_GUILD / XM_ASSET_OP_SECRET_TRADE
+#                      资产通道请求体签名的调用方密钥（去首尾空白后 ≥ 32 字节；须与 xm-guild / 交易注入同一个值；
+#                      没配的调用方的资产请求一律验签失败，启动时报一次 ERROR）
+#   DUBBO_IP_TO_BIND   资产通道 Dubbo 端口绑定的网卡（Dubbo 不接受回环，缺省监听全部网卡；生产绑内网网卡并配防火墙）
 #   XM_MYSQL_USER      MySQL 用户（默认 root）
 #   XM_MYSQL_PASSWORD  MySQL 密码（本机无密码的 root 可不设；与 xm-login 同口径）。
 #                      注意：Spring Boot 绑定属性时不会因占位符无法解析而失败，所以这里必须带空默认值，
@@ -83,6 +88,11 @@ xm:
     shutdown-save-timeout: 15s
     # 每条 gate 链路投递给逻辑线程还没执行完的帧数上限，到了就暂停读这条链路（背压），降到一半恢复
     link-max-pending-frames: 10000
+    # 通用资产通道（帮会 / 交易经 Dubbo Triple 按节点直连调进来，register = false）：端口导出成功后写进节点目录的 rpc_port；
+    # 同机起多个 scene 实例时必须各不相同（与 link-port 一样，可用 XM_SCENE_ASSET_RPC_PORT 覆盖）
+    asset-rpc-port: ${XM_SCENE_ASSET_RPC_PORT:21100}
+    # 资产通道在途调用上限：超出直接回过载（调用方按传输失败重投），不排队进逻辑线程；应 ≥ 调用方副本数 × Workers + 同步投递并发
+    asset-op-max-inflight: 256
     # 在线周期存盘：每人每周期至多写一次（没变化不写），0 = 只在离场时写回（基线 SCENE_PLAYER_SAVE_INTERVAL_SECONDS 缺省 300）
     save-interval: ${XM_SCENE_SAVE_INTERVAL:300s}
     # 全服产出封禁名单（Redis，xm-data 运维接口写）的兜底重读周期；变更通知走 pub/sub、秒级生效

@@ -17,8 +17,10 @@ import org.mockito.ArgumentCaptor;
 
 class SceneDirectoryPublisherTest {
 
+    /** 身份含资产通道的直连地址（rpc_host / rpc_port）：每轮发布原样带上，场景列表另填。 */
     private static final SceneNodeInfo IDENTITY = SceneNodeInfo.newBuilder()
-            .setZoneId(1).setNodeId(3).setInstanceId("inst").setLinkHost("127.0.0.1").setLinkPort(21000).build();
+            .setZoneId(1).setNodeId(3).setInstanceId("inst").setLinkHost("127.0.0.1").setLinkPort(21000)
+            .setRpcHost("127.0.0.1").setRpcPort(21100).build();
     private static final SceneEntry ENTRY = SceneEntry.newBuilder()
             .setSceneId(88).setSceneConfigId(1).setPlayerCount(2).build();
 

@@ -1,20 +1,12 @@
 package com.game.scene.asset;
 
-import com.game.api.proto.AssetBundle;
-import com.game.api.proto.AssetCurrency;
-import com.game.api.proto.AssetItem;
+import com.game.api.asset.AssetOpSignatures;
 import com.game.api.proto.AssetOpRequest;
 import com.game.api.proto.AssetStream;
-import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,21 +15,19 @@ import org.slf4j.LoggerFactory;
  * HMAC-SHA256，签名写在请求体的 {@code auth} 里；这边按同一规则重算并常数时间比对，不一致一律 UNKNOWN + 27008、不记账。
  * 不要 nonce：同一 (玩家, 流, 纪元, seq) 重放要么只读答复、要么就是那唯一一次应用；时间窗只限制截获包的寿命。
  *
+ * <p>规范串、HMAC、密钥规范化与时间窗的<b>唯一出处</b>是 xm-api 的 {@link AssetOpSignatures}（调用方签名用的同一份代码，guild-economy-spec E5）；
+ * 本类只管「哪个调用方可以碰哪条流」与判定顺序。
+ *
  * <p>判定顺序固定：流 ↔ 调用方白名单（不可信的 caller 不会被拿去查密钥）→ 密钥（去首尾空白后 ≥ 32 字节，否则视同未配置）→
  * 时间窗（|now − timestamp_ms| ≤ 300 s）→ 签名。除通过外的每种判决对外都是同一个 27008（不告诉对方猜对了哪一半），区别只进 WARN 日志。
  *
- * <p>密钥只从环境变量注入（{@code XM_ASSET_OP_SECRET_GUILD} / {@code XM_ASSET_OP_SECRET_TRADE}），密钥值不进仓库、日志与错误文本；
- * 资产路径不做开发放行，本地开发值由启动脚本显式注入。某调用方的密钥缺失只报一次 ERROR（启动期配置错误，不刷屏）。
+ * <p>密钥只从环境变量注入（{@link AssetOpSignatures#SECRET_ENV_GUILD} / {@link AssetOpSignatures#SECRET_ENV_TRADE}），密钥值不进仓库、
+ * 日志与错误文本；资产路径不做开发放行，本地开发值由启动脚本显式注入。某调用方的密钥缺失只报一次 ERROR（启动期配置错误，不刷屏）。
  * 线程：只在场景逻辑线程上调用；默认密钥来源按调用方缓存（并发安全的表，测试可换实现）。
  */
 public final class AssetOpAuth {
 
     private static final Logger log = LoggerFactory.getLogger(AssetOpAuth.class);
-
-    /** 规范串第一行，同时是协议版本（与基线同字面量：同一组输入的规范串逐字节相同，可直接对拍基线的 golden）。 */
-    public static final String CANONICAL_VERSION = "mmorpg-asset-op/v1";
-    public static final long MAX_CLOCK_SKEW_MS = 300_000;
-    public static final int MIN_SECRET_BYTES = 32;
 
     /** 验签判决（除 OK 外对外一律 27008）。 */
     public enum Verdict { OK, CALLER_NOT_ALLOWED, SECRET_MISSING, CLOCK_SKEW, SIGNATURE_MISMATCH }
@@ -47,9 +37,9 @@ public final class AssetOpAuth {
     }
 
     private static final List<CallerRule> CALLERS = List.of(
-            new CallerRule("guild", "XM_ASSET_OP_SECRET_GUILD",
+            new CallerRule(AssetOpSignatures.CALLER_GUILD, AssetOpSignatures.SECRET_ENV_GUILD,
                     List.of(AssetStream.ASSET_STREAM_GUILD_DEBIT, AssetStream.ASSET_STREAM_GUILD_CREDIT)),
-            new CallerRule("trade", "XM_ASSET_OP_SECRET_TRADE",
+            new CallerRule(AssetOpSignatures.CALLER_TRADE, AssetOpSignatures.SECRET_ENV_TRADE,
                     List.of(AssetStream.ASSET_STREAM_TRADE_DEBIT, AssetStream.ASSET_STREAM_TRADE_CREDIT)));
 
     private final Function<String, String> secretLookup;
@@ -78,81 +68,9 @@ public final class AssetOpAuth {
     }
 
     /**
-     * 待签名串：LF 分隔、末尾无换行、全部十进制（无符号字段按无符号写，流按有符号写——开放枚举可能带未知的负值）。
-     * <pre>
-     * mmorpg-asset-op/v1
-     * caller
-     * rpc            debit | abort_debit | credit（防止拿中止的签名去调发放）
-     * player_id
-     * stream
-     * stream_epoch
-     * seq
-     * correlation_id
-     * tx_type
-     * bundle         c=类型:数额,…;i=配置:数量,…;u=实例号,…;p=宝宝号（全空为 c=;i=;u=;p=0；按请求顺序，不排序）
-     * timestamp_ms
-     * </pre>
-     */
-    public static String canonical(String rpc, AssetOpRequest request) {
-        StringBuilder out = new StringBuilder(160)
-                .append(CANONICAL_VERSION).append('\n')
-                .append(request.getAuth().getCaller()).append('\n')
-                .append(rpc).append('\n')
-                .append(Long.toUnsignedString(request.getPlayerId())).append('\n')
-                .append(request.getStreamValue()).append('\n')
-                .append(Long.toUnsignedString(request.getStreamEpoch())).append('\n')
-                .append(Long.toUnsignedString(request.getSeq())).append('\n')
-                .append(Long.toUnsignedString(request.getCorrelationId())).append('\n')
-                .append(Integer.toUnsignedString(request.getTxType())).append('\n');
-        appendBundle(out, request.getBundle());
-        return out.append('\n').append(Long.toUnsignedString(request.getAuth().getTimestampMs())).toString();
-    }
-
-    private static void appendBundle(StringBuilder out, AssetBundle bundle) {
-        out.append("c=");
-        for (int i = 0; i < bundle.getCurrenciesCount(); i++) {
-            AssetCurrency currency = bundle.getCurrencies(i);
-            if (i > 0) {
-                out.append(',');
-            }
-            out.append(Integer.toUnsignedString(currency.getCurrencyType())).append(':')
-                    .append(Long.toUnsignedString(currency.getAmount()));
-        }
-        out.append(";i=");
-        for (int i = 0; i < bundle.getItemsCount(); i++) {
-            AssetItem item = bundle.getItems(i);
-            if (i > 0) {
-                out.append(',');
-            }
-            out.append(Integer.toUnsignedString(item.getConfigId())).append(':')
-                    .append(Integer.toUnsignedString(item.getCount()));
-        }
-        // 按实例扣发的两个字段也进串：不进的话截下一条合法签名、只换掉实例号就能扣走别的装备
-        out.append(";u=");
-        for (int i = 0; i < bundle.getItemUuidsCount(); i++) {
-            if (i > 0) {
-                out.append(',');
-            }
-            out.append(Long.toUnsignedString(bundle.getItemUuids(i)));
-        }
-        out.append(";p=").append(Long.toUnsignedString(bundle.getPetId()));
-    }
-
-    /** HMAC-SHA256 的小写十六进制（签名方与测试用）。 */
-    public static String sign(String secret, String canonical) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            return HexFormat.of().formatHex(mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("JDK 缺 HmacSHA256", e);
-        }
-    }
-
-    /**
      * 校验一次资产请求的签名。
      *
-     * @param rpc   debit / abort_debit / credit（与进规范串的是同一个值）
+     * @param rpc   debit / abort_debit / credit（与进规范串的是同一个值，{@code AssetRpc.wireName()}）
      * @param nowMs 当前 Unix 毫秒
      */
     public Verdict verify(String rpc, AssetOpRequest request, long nowMs) {
@@ -162,32 +80,22 @@ public final class AssetOpAuth {
         if (rule == null || !rule.caller().equals(caller)) {
             return Verdict.CALLER_NOT_ALLOWED;
         }
-        // 2. 密钥：去首尾空白后判长度（签名方拿去过空白的字节当 HMAC key）
-        String raw = secretLookup.apply(rule.caller());
-        String secret = raw == null ? "" : raw.trim();
-        if (secret.getBytes(StandardCharsets.UTF_8).length < MIN_SECRET_BYTES) {
+        // 2. 密钥：去首尾空白后判长度（签名方拿去过空白的字节当 HMAC key；两侧同一个规范化函数）
+        String secret = AssetOpSignatures.normalizeSecret(secretLookup.apply(rule.caller()));
+        if (!AssetOpSignatures.usableSecret(secret)) {
             if (missingReported.putIfAbsent(rule.caller(), Boolean.TRUE) == null) {
                 // 只写变量名与长度下限，不写密钥值、也不写实际长度
                 log.error("[AssetOpAuth] 调用方密钥未配置或去空白后不足 {} 字节，该调用方的资产请求将全部被拒 caller={} env={}",
-                        MIN_SECRET_BYTES, rule.caller(), rule.secretEnv());
+                        AssetOpSignatures.MIN_SECRET_BYTES, rule.caller(), rule.secretEnv());
             }
             return Verdict.SECRET_MISSING;
         }
         // 3. 时间窗：timestamp_ms 是不可信的 uint64，超出 long 正数范围（荒谬值）直接拒
-        if (!withinClockSkew(request.getAuth().getTimestampMs(), nowMs)) {
+        if (!AssetOpSignatures.withinClockSkew(request.getAuth().getTimestampMs(), nowMs)) {
             return Verdict.CLOCK_SKEW;
         }
         // 4. 签名：常数时间比对（长度不同直接不等）
-        byte[] expected = sign(secret, canonical(rpc, request)).getBytes(StandardCharsets.UTF_8);
-        byte[] actual = request.getAuth().getSignatureHex().getBytes(StandardCharsets.UTF_8);
-        return MessageDigest.isEqual(expected, actual) ? Verdict.OK : Verdict.SIGNATURE_MISMATCH;
-    }
-
-    static boolean withinClockSkew(long timestampMs, long nowMs) {
-        if (nowMs < 0 || timestampMs < 0) {
-            return false;
-        }
-        return Math.abs(nowMs - timestampMs) <= MAX_CLOCK_SKEW_MS;
+        return AssetOpSignatures.signatureMatches(rpc, request, secret) ? Verdict.OK : Verdict.SIGNATURE_MISMATCH;
     }
 
     /** 这条流唯一允许的调用方；null = 没有合法调用方（含 UNSPECIFIED、SYSTEM_CREDIT 与未知值）。 */

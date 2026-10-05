@@ -111,6 +111,113 @@ public final class GuildLimits {
 
     // 展示名的每批人数不在这里：D5 读 xm_java.player，用 PlayerProfiles.BATCH（64；基线 player_name_resolver.go:54 是 500）。
 
+    // ================================================================ 4.5 帮会经济与资产通道（guild-economy-spec §0.7、§7.6「代码常量」）
+    // 这些都不开放配置。可配的循环参数（间隔、批量、Workers、租约、OpBudget、退避封顶、毒行推迟、保留期……）归 xm.guild.asset-op.*。
+
+    // ---- 未决守卫（assetop/types.go:234-246）：scene 1024 位账本窗口正确性证明的一部分，不是可调业务数值 ----
+
+    /** 本纪元未决行数上限：未决行数 ≥ 它 → TOO_MANY_PENDING。也是待结算列表的条数上限（economy_logic.go:661-663）。 */
+    public static final int ASSET_OP_MAX_PENDING = 16;
+    /** 跨度上限：{@code next_seq − 最小未决 seq ≥ 它} → TOO_MANY_PENDING。 */
+    public static final long ASSET_OP_MAX_SPAN = 512L;
+
+    // ---- 商店 ----
+
+    /** 单次兑换份数上限 MaxShopBuyCount（constants.go:179）。cost_contribution ≤ 1e9 的配表上限以它为前提（× 20 不溢出）。 */
+    public static final int MAX_SHOP_BUY_COUNT = 20;
+
+    // ---- 同步投递（economy_logic.go:64-74；guild.go:64-68） ----
+
+    /** 同步投递预算上限（economySyncBudget）。实际取 {@code min(它, 请求剩余 − SYNC_TAIL_RESERVE_MS)}。 */
+    public static final long ASSET_SYNC_BUDGET_MS = 2_500L;
+    /** 同步投递之后要给请求留的尾巴（700 落库 + 300 回读与编码）。 */
+    public static final long ASSET_SYNC_TAIL_RESERVE_MS = 1_000L;
+    /** 同步投递预算的下限：低于它不做同步投递，行在租约到期后由循环领走。 */
+    public static final long ASSET_SYNC_MIN_BUDGET_MS = 300L;
+
+    // ---- 读页（economy_logic.go:76-80） ----
+
+    /** 最近结果的时间窗。 */
+    public static final long RECENT_RESULT_WINDOW_MS = 600_000L;
+    /** 最近结果扫描的行数（O8 的 LIMIT）。 */
+    public static final int RECENT_RESULT_SCAN = 20;
+    /** 最近结果返回条数上限。 */
+    public static final int RECENT_RESULT_KEEP = 5;
+
+    // ---- 仓储子预算（economy_repo.go:81；asset_store.go:98-112） ----
+
+    /** 经济读查询（C2 / C3 / M14 / O6 / O7 / O8）的子预算。 */
+    public static final long ECONOMY_READ_BUDGET_MS = 1_000L;
+    /** 后台 Store：ListDue、Reschedule、毒行、读的子预算（取它与调用方给的 settle 截止的较小者）。 */
+    public static final long ASSET_STORE_READ_BUDGET_MS = 1_000L;
+    /** 后台 Store：Claim 的子预算。 */
+    public static final long ASSET_STORE_CLAIM_BUDGET_MS = 1_000L;
+    /** 后台 Store：Finalize / ResolveManually（含事务外那一次不可变列读）的子预算；循环路径实际只有 settle 的 700 ms。 */
+    public static final long ASSET_STORE_FINALIZE_BUDGET_MS = 2_000L;
+
+    // ---- 后台写事务（asset_store.go:109-112；assetop/seq.go:252-260、:316-324） ----
+
+    /** 后台写（重排 / 毒行 / 终结 / 人工终结）的总尝试次数；1213 / 9007 / 1205 都重跑。清理每行 1 次。 */
+    public static final int BACKGROUND_TX_ATTEMPTS = 3;
+    /** 后台写重跑退避的基数（指数、±20% 抖动）。 */
+    public static final long BACKGROUND_TX_BASE_BACKOFF_MS = 10L;
+    /** 后台写重跑退避的封顶。 */
+    public static final long BACKGROUND_TX_MAX_BACKOFF_MS = 200L;
+
+    // ---- 清理（asset_store.go:114-142） ----
+
+    /** 每批候选行数；一批候选不足它即停。 */
+    public static final int CLEANUP_BATCH_SIZE = 500;
+    /** 批间停顿（给业务写事务让路）。 */
+    public static final long CLEANUP_BATCH_PAUSE_MS = 100L;
+    /** 每类每轮至多几批。 */
+    public static final int CLEANUP_MAX_BATCHES = 20;
+    /** 单行清理短事务（点锁 + 点删 + 提交）的上限。 */
+    public static final long CLEANUP_STMT_BUDGET_MS = 2_000L;
+    /** 计数行清理截止时刻离 now 的最小距离（死锁复核 C5 补遗）：保证上一周期在切周 / 切日后至少再留 24 h。 */
+    public static final long MIN_COUNTER_CLEANUP_AGE_MS = 8L * 24 * 3_600_000L;
+    /** 日键（8 位 YYYYMMDD）的下界。 */
+    public static final int DAY_KEY_FLOOR = 19_700_101;
+    /** 周键（6 位 YYYYWW）的下界；日键与周键数值域不相交，各走一段 BETWEEN。 */
+    public static final int WEEK_KEY_FLOOR = 100_000;
+
+    // ---- 资产通道调用方与重投循环（assetop/caller.go:23-32；reconcile.go:28-74、:278） ----
+
+    /** 单次资产 RPC 的超时上限（实际取它与剩余预算的较小者）。 */
+    public static final long ASSET_CALL_TIMEOUT_MS = 800L;
+    /** 未 durable 时用同一请求重查的间隔（每次重签）。 */
+    public static final List<Long> ASSET_REQUERY_DELAYS_MS = List.of(100L, 200L, 400L);
+    /** 落库预留（settle）：从 OpBudget 切出，不随请求取消。 */
+    public static final long ASSET_SETTLE_BUDGET_MS = 700L;
+    /** 租约相对单行预算必须留出的余量：{@code lease ≥ op-budget + 它}。 */
+    public static final long ASSET_LEASE_HEADROOM_MS = 2_000L;
+    /** Workers 的上限。 */
+    public static final int ASSET_MAX_WORKERS = 64;
+    /** 「结局有了但还没落盘」的短重排间隔（不进配置）。 */
+    public static final long ASSET_AWAIT_DURABLE_DELAY_MS = 500L;
+    /** ListDue 第一段「新行」的判据：{@code attempts < 它}。 */
+    public static final int ASSET_FRESH_ATTEMPT_LIMIT = 3;
+    /** 最老未决行年龄的刷新间隔。 */
+    public static final long ASSET_PENDING_AGE_INTERVAL_MS = 30_000L;
+    /** 离线读已落盘账本的单次上限（E8）。 */
+    public static final long ASSET_LEDGER_READ_TIMEOUT_MS = 300L;
+
+    // ---- 人工终结（asset_store.go:612-615；assetopfix/main.go:53-71） ----
+
+    /** resolved_by 的上限（按码点数）。 */
+    public static final int RESOLVED_BY_MAX_CHARS = 64;
+    /** resolve_reason 的上限（按码点数）。 */
+    public static final int RESOLVE_REASON_MAX_CHARS = 191;
+
+    // ---- 回档分歧检查的内部查询（asset_op_divergence_repo.go:34-39；guild_internal_server.go:38） ----
+
+    /** player_ids 的 IN 占位符上限。 */
+    public static final int APPLIED_OPS_MAX_PLAYER_IDS = 100;
+    /** 单页行数上限；请求 limit = 0 时也取它。 */
+    public static final int APPLIED_OPS_MAX_PAGE_LIMIT = 500;
+    /** 保留期判定的安全余量：{@code cutoff = now + 它 − TerminalRetention}。 */
+    public static final long APPLIED_OPS_RETENTION_SAFETY_MS = 3_600_000L;
+
     private GuildLimits() {
     }
 }

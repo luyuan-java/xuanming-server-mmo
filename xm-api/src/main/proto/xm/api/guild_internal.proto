@@ -1,0 +1,70 @@
+// Java 版内部契约：帮会的服务间内部查询（xm-guild 提供，Dubbo group "guild"；接口 com.game.api.GuildInternalService）。
+// 对应 mmorpg proto/guild/guild_internal.proto 的 GuildInternal.ListAppliedAssetOpsSince，但是 Java 自有格式（那份是服务端内部协议，
+// 不在两版共享的客户端契约里；先例：资产通道也没复用同步来的内部 proto，见 asset_op.proto 文件头）。
+// 消息形状与字段语义同基线；拒绝不走 RPC 异常，而是应答里的结果码（guild-economy-spec §7.11 / E11：Dubbo 异常类型不够细，
+// 基线靠解析 status message 前缀拿 cutoff_ms，是脆弱的跨服务契约）。不占消息号、不进客户端白名单。
+// 消费方是回档闸（路线图 7.2）；4.5 只交付提供方。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// 已终结为「已应用」的帮会资产指令摘要。只读，不含 payload。
+message GuildAssetOpBrief {
+  uint64 op_id = 1;
+  uint64 player_id = 2;
+  // 发起时绑定的帮会；该帮会可能已解散。
+  uint64 guild_id = 3;
+  // AssetStream 数值（1 帮会扣 / 2 帮会发）。
+  uint32 stream = 4;
+  // GuildAssetOpKind 数值（1 捐献 / 2 商店 / 3 活动发奖）。
+  uint32 kind = 5;
+  // GuildAssetOpStatus 数值；只会是 APPLIED(2) 或 APPLIED_PARTIAL(5)。
+  uint32 status = 6;
+  uint64 funds_delta = 7;
+  uint64 contribution_delta = 8;
+  // 终结时刻（终态行的 next_attempt_ms = updated_ms = 终结时刻）。
+  uint64 updated_ms = 9;
+}
+
+message ListAppliedAssetOpsSinceRequest {
+  // 0 = 不按 zone 收窄（基线 data_service 恒传 0）。
+  uint32 zone_id = 1;
+  // 必填，1..100 个，不得含 0、不得重复。
+  repeated uint64 player_ids = 2;
+  // 必填 > 0；只返回终结时刻严格晚于它的行。
+  uint64 since_ms = 3;
+  // 游标；首页传 0。
+  uint64 after_op_id = 4;
+  // 0 → 500；> 500 → INVALID_ARGUMENT。
+  uint32 limit = 5;
+}
+
+// 查询结果码。0 不是成功：缺省值（漏填、对端版本不认识）一律按失败处理（fail-closed）。
+enum ListAppliedResult {
+  LIST_APPLIED_RESULT_UNSPECIFIED = 0;
+  // 成功（ops 可能为空）。
+  LIST_APPLIED_RESULT_OK = 1;
+  // 入参非法（调用方编程错误；detail 是基线同款英文原因）。
+  LIST_APPLIED_RESULT_INVALID_ARGUMENT = 2;
+  // 资产 Store 未装配或终态保留期 ≤ 0。
+  LIST_APPLIED_RESULT_UNAVAILABLE = 3;
+  // since_ms 早于终态保留期下界：这段已无法证明。cutoff_ms = 本次可接受的最小 since_ms，调用方据它钳位重查。
+  LIST_APPLIED_RESULT_RETENTION_REJECTED = 4;
+  // 查询失败（含超时）；库错误原文不外发。
+  LIST_APPLIED_RESULT_ERROR = 5;
+}
+
+message ListAppliedAssetOpsSinceResponse {
+  // 按 op_id 升序；只有 OK 时有内容。
+  repeated GuildAssetOpBrief ops = 1;
+  // 0 = 已查尽；否则 = 本页最后一行的 op_id。只有 OK 时有意义。
+  uint64 next_after_op_id = 2;
+  ListAppliedResult result = 3;
+  // 只在 RETENTION_REJECTED 时非 0。
+  uint64 cutoff_ms = 4;
+  // 非 OK 时的英文原因（同基线 status message），只进日志，不要解析。
+  string detail = 5;
+}

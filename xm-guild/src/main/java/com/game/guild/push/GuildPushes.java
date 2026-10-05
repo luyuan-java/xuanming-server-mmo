@@ -1,6 +1,7 @@
 package com.game.guild.push;
 
 import com.game.discovery.presence.PlayerPushes;
+import com.game.guild.store.pb.GuildAssetOpKind;
 import com.game.proto.MessageContent;
 import com.game.proto.guild.GuildChangeKind;
 import com.game.proto.guild.GuildChangedS2C;
@@ -33,7 +34,7 @@ import org.slf4j.LoggerFactory;
  * 结局按<b>收件人</b>计（{@code xm_guild_pushes_total{kind, outcome}}）：SENT → ok，OFFLINE → offline，GATE_UNREACHABLE → error；
  * 整个 stage 异常（在线目录读失败）→ 全体 session_error；超出推送上限 → 全体 error（D7）。
  *
- * <p>4.5 的 FUNDS_CHANGED / DELIVERY_DONE 只推本人：用 {@link #notifyPlayer}。线程安全。
+ * <p>4.5 的 FUNDS_CHANGED 9 / DELIVERY_DONE 13 只推本人（{@link #assetFinalized}），LEVEL_UP 10 推全帮除操作者（{@link #levelUp}）。线程安全。
  */
 public final class GuildPushes {
 
@@ -139,6 +140,40 @@ public final class GuildPushes {
     /** 单收件人入口（4.5 的 FUNDS_CHANGED / DELIVERY_DONE 只推本人）。 */
     public void notifyPlayer(GuildChangeKind kind, long guildId, long actor, long target, long playerId) {
         notify(kind, guildId, actor, target, List.of(playerId));
+    }
+
+    /**
+     * 一条资产指令在<b>后台</b>被本次终结之后的变更提示（基线 OnAssetFinalized，economy_logic.go:667-691；guild-economy-spec §5）：
+     * <ul>
+     *   <li>只推本人（actor = 0 系统触发，target = 本人）：捐献不广播全帮，避免 100 人帮会的推送风暴，其他成员打开界面时自己拉（终结已失效缓存）；</li>
+     *   <li>DONATE → FUNDS_CHANGED 9（含拒绝 / 中止：客户端据此重拉捐献页，看到次数已退回）；SHOP / ACTIVITY_REWARD → DELIVERY_DONE 13；</li>
+     *   <li>未知 kind 记 ERROR、不推——推一个猜出来的类型，客户端会去拉错的页面。</li>
+     * </ul>
+     * 同步投递里终结的、人工终结的不推：由调用方按 {@code DeliveryOrigin} 判（E9）。立即返回；永不抛。
+     *
+     * @param guildId 发起时绑定的帮会（结算记给它，D2；推送里的 guild_id 也用它）
+     */
+    public void assetFinalized(GuildAssetOpKind kind, long guildId, long playerId) {
+        GuildChangeKind change;
+        switch (kind == null ? GuildAssetOpKind.UNRECOGNIZED : kind) {
+            case GUILD_ASSET_OP_KIND_DONATE -> change = GuildChangeKind.GUILD_CHANGE_KIND_FUNDS_CHANGED;
+            case GUILD_ASSET_OP_KIND_SHOP, GUILD_ASSET_OP_KIND_ACTIVITY_REWARD ->
+                    change = GuildChangeKind.GUILD_CHANGE_KIND_DELIVERY_DONE;
+            default -> {
+                log.error("[GuildEconomy] finalized op of unknown kind={} guild={} player={}, no push", kind,
+                        Long.toUnsignedString(guildId), Long.toUnsignedString(playerId));
+                return;
+            }
+        }
+        notifyPlayer(change, guildId, 0, playerId, playerId);
+    }
+
+    /**
+     * 升级成功（{@code Changed}）后的 LEVEL_UP 10（economy_logic.go:851-855）：actor = 操作者，target = 0，收件人 = 全体成员除操作者
+     * （操作者不推，他手上的回包就是最新状态）。expected_level 过期（没扣钱）的那次不推，由调用方判。
+     */
+    public void levelUp(long guildId, long actor, Collection<Long> recipients) {
+        notify(GuildChangeKind.GUILD_CHANGE_KIND_LEVEL_UP, guildId, actor, 0, recipients);
     }
 
     private void record(String label, long guildId, List<Long> ids, Map<Long, PlayerPushes.Outcome> outcomes,

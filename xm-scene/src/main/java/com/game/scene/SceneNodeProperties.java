@@ -56,6 +56,10 @@ public record SceneNodeProperties(
      *                              每人每周期至多写一次、没变化不写；0 = 关闭（只在离场时写回）。不带单位的数字按秒
      * @param gainBlockRefresh      全服产出封禁名单的兜底重读周期（变更通知走 Redis pub/sub，可能丢）
      * @param anomaly               获取异常检测的阈值
+     * @param assetRpcPort          通用资产通道 Dubbo Triple 提供方的端口（缺省 21100，link 21000 旁边；同机起多个 scene 实例时必须各不相同，
+     *                              与 link-port 一样）。导出成功后与 {@code xm.advertise-host} 一起写进节点目录的 rpc_host / rpc_port
+     * @param assetOpMaxInflight    资产通道在途调用上限（缺省 256）：超出直接回失败（过载，调用方按传输失败重投），不排队进逻辑线程；
+     *                              应 ≥ 调用方副本数 × 每副本 Workers + 同步投递并发（guild-economy-spec Q9）
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -72,9 +76,17 @@ public record SceneNodeProperties(
             @DefaultValue("5s") Duration auditFlushTimeout,
             @DefaultValue("1000000") int snapshotMaxBytes,
             @DefaultValue("10s") Duration gainBlockRefresh,
-            @DefaultValue AnomalySettings anomaly) {
+            @DefaultValue AnomalySettings anomaly,
+            @DefaultValue("21100") int assetRpcPort,
+            @DefaultValue("256") int assetOpMaxInflight) {
 
         public SceneSettings {
+            if (assetRpcPort < 1 || assetRpcPort > 65535) {
+                throw new IllegalArgumentException("xm.scene.asset-rpc-port 超出范围: " + assetRpcPort);
+            }
+            if (assetOpMaxInflight < 1) {
+                throw new IllegalArgumentException("xm.scene.asset-op-max-inflight 至少为 1: " + assetOpMaxInflight);
+            }
             if (gainBlockRefresh.compareTo(Duration.ofSeconds(1)) < 0) {
                 throw new IllegalArgumentException("xm.scene.gain-block-refresh 至少 1s: " + gainBlockRefresh);
             }

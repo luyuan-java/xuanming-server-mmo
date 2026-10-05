@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
  * 只在记录仍是这次进场这一序号的在线记录时延长 TTL；键丢了（Redis 抖动）就补回。
  *
  * <p>写方法全部异步（Redisson async，不阻塞调用线程，可在场景逻辑线程上调用）；{@link #find} 阻塞，调用方不得在 I/O / 逻辑线程上用；
- * {@link #statusesAsync}（组队的会话四态用）异步。
+ * {@link #statusesAsync}（组队的会话四态用）与 {@link #findHolderAsync}（资产通道定位的严格读法）异步。
  * 单条脚本调用而不用 RBatch：理由同 {@code PlayerPresenceDirectory}（批里的 EVALSHA 遇到 NOSCRIPT 不会重新加载）。
  */
 public final class PlayerLocationDirectory {
@@ -112,6 +112,11 @@ public final class PlayerLocationDirectory {
               return redis.call('hget', KEYS[1], 'v')
             end
             return false
+            """;
+
+    /** 一次原子地读状态与位置值（不存在的字段为 nil）。 */
+    private static final String READ_STATE_AND_VALUE = """
+            return redis.call('hmget', KEYS[1], 's', 'v')
             """;
 
     /** 状态字段名（值 {@code o} / {@code l} / {@code x}，与上面各段脚本里的字面量一致）。 */
@@ -243,6 +248,98 @@ public final class PlayerLocationDirectory {
             }
             return Collections.unmodifiableMap(statuses);
         });
+    }
+
+    /**
+     * 资产通道定位用的一次读（{@link #findHolderAsync}）。
+     *
+     * @param status   {@link LocationStatus#ONLINE} 才有持有者；RECONNECT_LEASE / LOGGED_OUT / MISSING 都是「此刻没有节点持有该玩家」；
+     *                 ERROR 是故障（读失败或记录损坏），不得当成「不在线」
+     * @param location 只在 ONLINE 时非 null（已核对 player_id 与键相符）
+     * @param detail   只在 ERROR 时非 null：可进日志的原因
+     */
+    public record HolderRead(LocationStatus status, PlayerLocation location, String detail) {
+
+        static HolderRead online(PlayerLocation location) {
+            return new HolderRead(LocationStatus.ONLINE, location, null);
+        }
+
+        static HolderRead noHolder(LocationStatus status) {
+            return new HolderRead(status, null, null);
+        }
+
+        static HolderRead error(String detail) {
+            return new HolderRead(LocationStatus.ERROR, null, detail);
+        }
+    }
+
+    /**
+     * 资产通道的严格读法（guild-economy-spec §4.7 / E2 / E14；基线 {@code scenenode/locator.go:144-215}）：一段只读脚本原子地取状态与位置值
+     * （HMGET，同一时刻的 {@code s} 与 {@code v}），异步、不阻塞调用线程。与 {@link #find} 的区别——那是 login 回原场景用的宽松读法，
+     * 把损坏 / 键不符吞成「没有」；资产通道必须把它们当<b>故障</b>（基线「反序列化失败刻意不折成不在线」{@code locator.go:145-146}：
+     * 位置键写坏是数据面事故，折成不在线会让资产操作静悄悄地永远不落地）：
+     * <ul>
+     *   <li>{@code s=o} 且值解析成功、player_id 与键相符 → ONLINE（只认这一种）；</li>
+     *   <li>{@code s=l}（重连租约）→ RECONNECT_LEASE：Java 断线即最终写回并释放归属，租约期间<b>没有任何节点持有</b>该玩家（E14）；</li>
+     *   <li>{@code s=x}（登出墓碑）→ LOGGED_OUT；键不存在 → MISSING；</li>
+     *   <li>读失败、状态值不认识、在线记录缺值 / 解析失败 / player_id 与键不符、有值无状态 → ERROR。</li>
+     * </ul>
+     * 返回的 future 从不异常完成。
+     */
+    public CompletableFuture<HolderRead> findHolderAsync(long playerId) {
+        CompletableFuture<List<Object>> read;
+        try {
+            read = redis.getScript(ByteArrayCodec.INSTANCE).<List<Object>>evalAsync(RScript.Mode.READ_ONLY,
+                    READ_STATE_AND_VALUE, RScript.ReturnType.MULTI, List.of(RedisKeys.playerLocation(playerId)))
+                    .toCompletableFuture();
+        } catch (RuntimeException e) {
+            read = CompletableFuture.failedFuture(e);
+        }
+        return read.handle((fields, error) -> {
+            if (error != null) {
+                return HolderRead.error("读位置记录失败: " + error);
+            }
+            return holderOf(playerId, fields);
+        });
+    }
+
+    static HolderRead holderOf(long playerId, List<Object> fields) {
+        if (fields == null || fields.size() != 2) {
+            return HolderRead.error("位置记录读回的字段数不对: " + (fields == null ? "null" : fields.size()));
+        }
+        byte[] state = fields.get(0) instanceof byte[] s ? s : null;
+        byte[] value = fields.get(1) instanceof byte[] v ? v : null;
+        if (state == null) {
+            return value == null ? HolderRead.noHolder(LocationStatus.MISSING) : HolderRead.error("位置记录有值无状态");
+        }
+        String s = new String(state, StandardCharsets.US_ASCII);
+        switch (s) {
+            case "l" -> {
+                return HolderRead.noHolder(LocationStatus.RECONNECT_LEASE);
+            }
+            case "x" -> {
+                return HolderRead.noHolder(LocationStatus.LOGGED_OUT);
+            }
+            case "o" -> {
+                // 往下解析值
+            }
+            default -> {
+                return HolderRead.error("位置记录状态值不认识 s=" + s);
+            }
+        }
+        if (value == null || value.length == 0) {
+            return HolderRead.error("在线位置记录缺位置值");
+        }
+        PlayerLocation location;
+        try {
+            location = PlayerLocation.parseFrom(value);
+        } catch (InvalidProtocolBufferException e) {
+            return HolderRead.error("在线位置记录解析失败");
+        }
+        if (location.getPlayerId() != playerId) {
+            return HolderRead.error("位置记录与键不符 value_player=" + Long.toUnsignedString(location.getPlayerId()));
+        }
+        return HolderRead.online(location);
     }
 
     private static LocationStatus statusOf(String state) {

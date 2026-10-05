@@ -19,6 +19,8 @@ import com.game.player.store.PlayerStore;
 import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpEndpoint;
 import com.game.scene.asset.AssetOpService;
+import com.game.scene.asset.SceneAssetOpProvider;
+import com.game.scene.asset.SceneAssetRpcServer;
 import com.game.scene.attribute.AttributeFeature;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.attribute.AttributeTables;
@@ -100,7 +102,9 @@ import org.springframework.context.SmartLifecycle;
  *       场景帧（20 FPS，{@link SceneTicker}）也以定时任务跑在它上面，与客户端消息串行，不需要锁；</li>
  *   <li>{@code scene-link-*}：Netty 链路 I/O，只做编解码与握手，事件投递到逻辑线程（每条链路有积压上限，见 NodeLinkHandler）；</li>
  *   <li>{@code scene-storage}：有界线程池，执行 MySQL 阻塞调用（加载、写回、释放、续约），结果投递回逻辑线程；</li>
- *   <li>{@code scene-sched}：节点号续租、节点目录发布、归属续约的调度（Redis I/O；MySQL 交给存储线程池）。</li>
+ *   <li>{@code scene-sched}：节点号续租、节点目录发布、归属续约的调度（Redis I/O；MySQL 交给存储线程池）；</li>
+ *   <li>资产通道（architecture.md §4.12）：Dubbo Triple 的 I/O 与业务线程只把请求投递到逻辑线程；逻辑线程上完成的结局由
+ *       {@code scene-asset-reply}（2 条，队列由在途上限 {@code xm.scene.asset-op-max-inflight} 兜住）切出来回写，Dubbo 的序列化不占逻辑线程。</li>
  * </ul>
  *
  * <p>节点号租约丢失时（号可能已被别的实例占用，雪花号与目录条目都会撞）：停止刷新目录、关闭监听、
@@ -123,6 +127,8 @@ public class SceneNode implements SmartLifecycle {
     static final long AUDIT_REVERIFY_SECONDS = 30;
     /** 其他线程同步等待逻辑线程执行一个任务的上限（目录快照、归属快照、启动建场景）。停服写回不用它，用整个停服预算。 */
     private static final long LOGIC_CALL_TIMEOUT_MS = 5_000;
+    /** 资产通道回写线程数（只做 future 完成与 Dubbo 回写，不做业务）。 */
+    static final int ASSET_REPLY_THREADS = 2;
 
     private final SceneNodeProperties props;
     private final RedissonClient redis;
@@ -150,8 +156,12 @@ public class SceneNode implements SmartLifecycle {
     private volatile ThreadPoolExecutor storageExecutor;
     private volatile GateLinks links;
     private volatile SceneWorld world;
-    /** 资产通道的进程内入口（跨进程传输随路线图 4.5 接入）。 */
+    /** 资产通道的进程内入口（跨进程传输 {@link #assetRpc} 接在它外面）。 */
     private volatile AssetOpEndpoint assetOps;
+    /** 资产通道的跨进程提供方（Dubbo Triple，按节点直连）与它的回写线程池。 */
+    private volatile SceneAssetOpProvider assetProvider;
+    private volatile ThreadPoolExecutor assetReplyExecutor;
+    private volatile SceneAssetRpcServer assetRpc;
     private volatile ScheduledFuture<?> frameTask;
     private volatile ScheduledFuture<?> saveTask;
     private volatile ScheduledFuture<?> locationTask;
@@ -266,6 +276,16 @@ public class SceneNode implements SmartLifecycle {
         world = sceneWorld;
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
                 AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM));
+        // 资产通道的跨进程提供方：先建好（导出在接受链路之后、发布目录之前）。回写池队列无界，但同时排队的至多是在途上限条
+        assetReplyExecutor = new ThreadPoolExecutor(ASSET_REPLY_THREADS, ASSET_REPLY_THREADS, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(), new DefaultThreadFactory("scene-asset-reply", true));
+        metrics.bindAssetReplyExecutor(assetReplyExecutor);
+        assetProvider = new SceneAssetOpProvider(() -> assetOps, settings.assetOpMaxInflight(), assetReplyExecutor,
+                metrics);
+        metrics.bindAssetOpsInFlight(() -> {
+            SceneAssetOpProvider p = assetProvider;
+            return p == null ? 0 : p.inFlight();
+        });
         RunMode runMode = RunMode.parse(props.runMode());
         if (!RunMode.isRecognized(props.runMode())) {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
@@ -329,12 +349,18 @@ public class SceneNode implements SmartLifecycle {
                 () -> new NodeLinkHandler(identity, linkAuth, InstantSource.system(), linkService, logic, linkIds,
                         handshakeTimeout, maxPendingFrames, metrics));
 
+        // 资产通道导出：成功之后才把 rpc 地址写进目录（调用方只从目录找它，guild-economy-spec §4.6 第 6 条）；端口被占 / 缺 XM_DUBBO_SECRET 拒绝启动
+        SceneAssetRpcServer rpc = SceneAssetRpcServer.export(assetProvider, props.advertiseHost(), settings.assetRpcPort());
+        assetRpc = rpc;
+
         SceneNodeInfo info = SceneNodeInfo.newBuilder()
                 .setZoneId(zoneId)
                 .setNodeId(nodeId)
                 .setInstanceId(instanceId)
                 .setLinkHost(props.advertiseHost())
                 .setLinkPort(linkPort)
+                .setRpcHost(props.advertiseHost())
+                .setRpcPort(rpc.port())
                 .build();
         publisher = new SceneDirectoryPublisher(new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser()), info,
                 () -> callOnLogic(() -> {
@@ -344,8 +370,9 @@ public class SceneNode implements SmartLifecycle {
                 }));
         publisher.start(scheduler);
 
-        log.info("场景节点已启动 zone={} node_id={} instance={} link={}:{} 场景数={}", zoneId, nodeId, instanceId,
-                props.advertiseHost(), linkPort, tables.worldSceneConfigIds().size());
+        log.info("场景节点已启动 zone={} node_id={} instance={} link={}:{} asset_rpc={}:{} 场景数={}", zoneId, nodeId,
+                instanceId, props.advertiseHost(), linkPort, props.advertiseHost(), rpc.port(),
+                tables.worldSceneConfigIds().size());
     }
 
     @Override
@@ -402,9 +429,9 @@ public class SceneNode implements SmartLifecycle {
 
     /**
      * 按启动的逆序释放，每一步都容忍前面没建出来（启动失败时也走这里）：
-     * 摘目录 → 停监听 → 停封禁名单同步、接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
+     * 摘目录（资产通道的调用方随之找不到本节点）→ 停监听 → 停封禁名单同步、接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
      * → 逻辑线程上写回全部玩家并关链路，写回提交之后才关存储线程池并等写回落库（{@link SceneShutdown}，共用一个停服预算）
-     * → 关线程 → 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
+     * → 资产通道反导出 → 关线程（逻辑线程停之后才关资产回写池）→ 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
      */
     private void release() {
         ScheduledFuture<?> locationRefresh = locationTask;
@@ -458,11 +485,31 @@ public class SceneNode implements SmartLifecycle {
         } else if (storage != null) {
             storage.shutdownNow();
         }
+        // 资产通道反导出：在摘目录（第一步）之后、逻辑线程停之前（guild-economy-spec §4.6 第 6 条）。到这里写回都已交出去，
+        // 期间到的请求只会是 NOT_HERE；反导出之后调用方连不上 = 传输失败、重投，此前已记账已落库的结局可经离线读已落盘账本终结。
+        SceneAssetRpcServer rpc = assetRpc;
+        if (rpc != null) {
+            rpc.close();
+            assetRpc = null;
+        }
         if (server != null) {
             server.shutdown();
         }
         if (loop != null) {
             loop.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
+        }
+        // 回写池在逻辑线程停之后才关：之后不会再有逻辑线程上完成的结局（关闭后迟到的完成由提供方退回到完成线程上直接回写）
+        ThreadPoolExecutor replies = assetReplyExecutor;
+        if (replies != null) {
+            replies.shutdown();
+            try {
+                if (!replies.awaitTermination(2, TimeUnit.SECONDS)) {
+                    replies.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                replies.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
         // 写回之后（逻辑线程已停、不再产生审计记录）才发完审计队列，最后交还发号租约：反过来别的实例可能拿到同一个 worker、发重号
         AuditPipeline pipeline = auditPipeline;

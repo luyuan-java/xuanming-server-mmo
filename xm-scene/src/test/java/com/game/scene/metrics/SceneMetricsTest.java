@@ -144,7 +144,8 @@ class SceneMetricsTest {
                     "xm_scene_link_backpressure_pauses_total 1",
                     "executor_queued_tasks{name=\"scene-storage\"}");
             assertThat(labelNames(text, "xm_scene_"))
-                    .isSubsetOf("scene_config", "kind", "result", "change", "op", "direction", "type", "reason", "le");
+                    .isSubsetOf("scene_config", "kind", "result", "change", "op", "direction", "type", "reason", "le",
+                            "rpc", "outcome");
         } finally {
             executor.shutdownNow();
             prometheus.close();
@@ -164,6 +165,36 @@ class SceneMetricsTest {
             }
             exported.teamFollow(SceneMetrics.TeamFollowResult.FOLLOWED);
             assertThat(prometheus.scrape()).contains("xm_scene_team_follow_total{result=\"followed\"} 1");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 资产通道（E13）：rpc × outcome 启动即注册（初值 0），导出名 {@code xm_scene_asset_ops_total{rpc, outcome}} 与
+     * {@code xm_scene_asset_ops_inflight}；标签只有这两个（不带 player_id / seq）。
+     */
+    @Test
+    void 资产通道指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            AtomicInteger inFlight = new AtomicInteger(3);
+            exported.bindAssetOpsInFlight(inFlight::get);
+            String before = prometheus.scrape();
+            for (String rpc : new String[] {"debit", "abort_debit", "credit"}) {
+                for (String outcome : new String[] {"applied", "rejected", "retry", "not_here", "unknown", "overloaded",
+                        "error"}) {
+                    assertThat(before).contains("xm_scene_asset_ops_total{outcome=\"" + outcome + "\",rpc=\"" + rpc + "\"} 0");
+                }
+            }
+            assertThat(labelNames(before, "xm_scene_asset_ops_total")).containsExactly("outcome", "rpc");
+            assertThat(before).contains("xm_scene_asset_ops_inflight 3");
+            exported.assetOp(com.game.api.asset.AssetRpc.ABORT_DEBIT, SceneMetrics.AssetOpResult.OVERLOADED);
+            inFlight.set(0);
+            String after = prometheus.scrape();
+            assertThat(after).contains("xm_scene_asset_ops_total{outcome=\"overloaded\",rpc=\"abort_debit\"} 1");
+            assertThat(after).contains("xm_scene_asset_ops_inflight 0");
         } finally {
             prometheus.close();
         }

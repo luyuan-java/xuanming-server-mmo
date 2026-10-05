@@ -12,7 +12,7 @@
 
     <artifactId>xm-guild</artifactId>
     <name>xm-guild</name>
-    <description>帮会服（Spring Boot + Dubbo 提供方，group guild）：建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 转让 / 申请审批 / 推送 220 / 排行；四张表经 xm-pbmysql 建表</description>
+    <description>帮会服（Spring Boot + Dubbo 提供方，group guild）：建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 转让 / 申请审批 / 推送 220 / 排行；经济（捐献 / 升级 / 商店）、资产指令账本与跨进程投递、重投循环、内部查询、人工终结 CLI；七张表经 xm-pbmysql 建表</description>
 
     <dependencies>
         <dependency>
@@ -52,6 +52,19 @@
             <groupId>com.game</groupId>
             <artifactId>xm-pbmysql</artifactId>
         </dependency>
+        <!-- 只用已落盘账本的只读件（com.game.player.store.asset：读 xm_java.player_state 并分类，与 scene 同一份判定代码；
+             guild-economy-spec §4.9 / Q3a）。不要它的 MyBatis：PlayerStoreAutoConfiguration 在 GuildApplication 里排除，
+             MyBatis starter 在这里排除（帮会不用 PlayerStore，带进来只会多一个没有 mapper 的 SqlSessionFactory） -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-player-store</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.mybatis.spring.boot</groupId>
+                    <artifactId>mybatis-spring-boot-starter</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>druid-spring-boot-3-starter</artifactId>
@@ -88,6 +101,18 @@
 
     <build>
         <plugins>
+            <!-- 资产通道的跨进程集成测试起真 Dubbo 提供方与调用方：调用方鉴权过滤器与资产请求签名器只从环境变量读密钥，这里给仅测试用的假值
+                 （不是任何环境的真密钥；先例 xm-gateway/pom.xml、xm-scene/pom.xml） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <XM_DUBBO_SECRET>xm-guild-unit-test-only</XM_DUBBO_SECRET>
+                        <XM_ASSET_OP_SECRET_GUILD>xm-guild-unit-test-only-asset-op-secret-0123456789</XM_ASSET_OP_SECRET_GUILD>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>io.github.ascopes</groupId>
                 <artifactId>protobuf-maven-plugin</artifactId>

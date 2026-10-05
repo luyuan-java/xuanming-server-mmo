@@ -2,10 +2,11 @@ package com.game.scene.asset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.asset.AssetOpSignatures;
+import com.game.api.asset.AssetRpc;
 import com.game.api.proto.AssetAuth;
 import com.game.api.proto.AssetBundle;
 import com.game.api.proto.AssetCurrency;
-import com.game.api.proto.AssetItem;
 import com.game.api.proto.AssetOpRequest;
 import com.game.api.proto.AssetStream;
 import com.game.scene.asset.AssetOpAuth.Verdict;
@@ -14,7 +15,10 @@ import java.util.List;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 
-/** 验签，用例对应 mmorpg asset_op_auth_test.cpp；规范串 golden 与基线逐字节相同（同一组输入）。 */
+/**
+ * 验签，用例对应 mmorpg asset_op_auth_test.cpp。规范串与 HMAC 的 golden 整表在 xm-api 的 {@code AssetOpSignaturesTest}（唯一出处，E5）；
+ * 这里用 scene 验签再钉一次同一条 golden 签名（两侧各钉一次），其余钉白名单 / 密钥 / 时间窗 / 篡改的判定顺序。
+ */
 class AssetOpAuthTest {
 
     /** 夹具密钥（33 字节，只在测试里存在）。 */
@@ -22,6 +26,8 @@ class AssetOpAuthTest {
     private static final String TOO_SHORT = "asset-op-test-secret-0123456789";
     private static final String OTHER_SECRET = "asset-op-other-secret-0123456789ab";
     private static final long NOW = 1_700_000_000_123L;
+    /** golden 请求（密钥 {@link #SECRET}、rpc debit）的签名：与 xm-api AssetOpSignaturesTest.GOLDEN_SIGNATURE 同值（openssl 独立算出）。 */
+    private static final String GOLDEN_SIGNATURE = "67eeb8b92b33c5a4cd7416c88614c0ded3cc50ec777a73e66c00f27d15bfdd29";
 
     private static AssetOpRequest.Builder golden() {
         return AssetOpRequest.newBuilder()
@@ -36,11 +42,11 @@ class AssetOpAuthTest {
                 .setAuth(AssetAuth.newBuilder().setCaller("guild").setTimestampMs(NOW));
     }
 
-    /** 按 rpc 签好（签名必须在所有参与规范串的字段都填好之后算）。 */
+    /** 按 rpc 签好（签名必须在所有参与规范串的字段都填好之后算；caller / 时间戳取 builder 里已有的）。 */
     static AssetOpRequest signed(String rpc, AssetOpRequest.Builder request, String secret) {
         AssetOpRequest unsigned = request.build();
         return request.setAuth(request.getAuth().toBuilder()
-                .setSignatureHex(AssetOpAuth.sign(secret, AssetOpAuth.canonical(rpc, unsigned)))).build();
+                .setSignatureHex(AssetOpSignatures.hmacHex(secret, AssetOpSignatures.canonical(rpc, unsigned)))).build();
     }
 
     private static Verdict verify(String rpc, AssetOpRequest request, Function<String, String> lookup) {
@@ -52,59 +58,15 @@ class AssetOpAuthTest {
     }
 
     @Test
-    void 规范串golden_与基线逐字节相同() {
-        assertThat(AssetOpAuth.canonical("debit", golden().build())).isEqualTo(
-                "mmorpg-asset-op/v1\nguild\ndebit\n42\n1\n1700000000000\n7\n99\n24\nc=1:30;i=;u=;p=0\n1700000000123");
-    }
-
-    @Test
-    void 空包的写法() {
-        AssetOpRequest request = AssetOpRequest.newBuilder().setPlayerId(7).setStream(AssetStream.ASSET_STREAM_GUILD_DEBIT)
-                .setSeq(1).setStreamEpoch(2).setAuth(AssetAuth.newBuilder().setCaller("guild").setTimestampMs(5)).build();
-        assertThat(AssetOpAuth.canonical("abort_debit", request))
-                .isEqualTo("mmorpg-asset-op/v1\nguild\nabort_debit\n7\n1\n2\n1\n0\n0\nc=;i=;u=;p=0\n5");
-    }
-
-    @Test
-    void 多条货币物品按请求顺序拼_不排序() {
-        AssetOpRequest request = AssetOpRequest.newBuilder().setPlayerId(1).setStream(AssetStream.ASSET_STREAM_TRADE_CREDIT)
-                .setSeq(2).setStreamEpoch(3)
-                .setBundle(AssetBundle.newBuilder()
-                        .addCurrencies(AssetCurrency.newBuilder().setCurrencyType(9).setAmount(5))
-                        .addCurrencies(AssetCurrency.newBuilder().setCurrencyType(2).setAmount(7))
-                        .addItems(AssetItem.newBuilder().setConfigId(300).setCount(2))
-                        .addItems(AssetItem.newBuilder().setConfigId(100).setCount(1)))
-                .setAuth(AssetAuth.newBuilder().setCaller("trade").setTimestampMs(11)).build();
-        assertThat(AssetOpAuth.canonical("credit", request))
-                .isEqualTo("mmorpg-asset-op/v1\ntrade\ncredit\n1\n4\n3\n2\n0\n0\nc=9:5,2:7;i=300:2,100:1;u=;p=0\n11");
-    }
-
-    @Test
-    void 实例号与宝宝号进规范串_无符号字段按无符号写() {
-        AssetOpRequest request = AssetOpRequest.newBuilder().setPlayerId(-1L).setStream(AssetStream.ASSET_STREAM_TRADE_DEBIT)
-                .setSeq(-1L).setStreamEpoch(-1L).setCorrelationId(-1L).setTxType(-1)
-                .setBundle(AssetBundle.newBuilder().addItemUuids(5).addItemUuids(-1L).setPetId(-1L)
-                        .addCurrencies(AssetCurrency.newBuilder().setCurrencyType(-1).setAmount(-1L))
-                        .addItems(AssetItem.newBuilder().setConfigId(-1).setCount(-1)))
-                .setAuth(AssetAuth.newBuilder().setCaller("trade").setTimestampMs(-1L)).build();
-        String max64 = "18446744073709551615";
-        String max32 = "4294967295";
-        assertThat(AssetOpAuth.canonical("debit", request)).isEqualTo("mmorpg-asset-op/v1\ntrade\ndebit\n" + max64 + "\n3\n"
-                + max64 + "\n" + max64 + "\n" + max64 + "\n" + max32 + "\nc=" + max32 + ":" + max64 + ";i=" + max32 + ":"
-                + max32 + ";u=5," + max64 + ";p=" + max64 + "\n" + max64);
-    }
-
-    @Test
-    void 未知流按有符号十进制写() {
-        AssetOpRequest request = golden().setStreamValue(-3).build();
-        assertThat(AssetOpAuth.canonical("debit", request)).contains("\n42\n-3\n");
-    }
-
-    @Test
-    void HMAC是标准的HmacSHA256小写十六进制() {
-        // RFC 4231 测试用例 2
-        assertThat(AssetOpAuth.sign("Jefe", "what do ya want for nothing?"))
-                .isEqualTo("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    void golden签名_scene验得过_与调用方签名器同一份代码() {
+        AssetOpRequest request = golden().setAuth(golden().getAuth().toBuilder().setSignatureHex(GOLDEN_SIGNATURE)).build();
+        assertThat(verify(request)).isEqualTo(Verdict.OK);
+        assertThat(signed("debit", golden(), SECRET).getAuth().getSignatureHex()).isEqualTo(GOLDEN_SIGNATURE);
+        AssetOpRequest bySigner = AssetOpSignatures.sign(AssetRpc.DEBIT, golden().clearAuth().build(),
+                AssetOpSignatures.CALLER_GUILD, SECRET, NOW);
+        assertThat(bySigner.getAuth().getSignatureHex()).isEqualTo(GOLDEN_SIGNATURE);
+        assertThat(verify(bySigner)).isEqualTo(Verdict.OK);
+        assertThat(verify("abort_debit", bySigner, c -> SECRET)).as("rpc 进串").isEqualTo(Verdict.SIGNATURE_MISMATCH);
     }
 
     @Test
@@ -194,7 +156,7 @@ class AssetOpAuthTest {
         assertThat(verify("debit", ok, c -> "")).isEqualTo(Verdict.SECRET_MISSING);
         assertThat(verify("debit", ok, c -> TOO_SHORT)).isEqualTo(Verdict.SECRET_MISSING);
         assertThat(verify("debit", ok, c -> " ".repeat(40))).isEqualTo(Verdict.SECRET_MISSING);
-        assertThat(TOO_SHORT.length()).isEqualTo(AssetOpAuth.MIN_SECRET_BYTES - 1);
+        assertThat(TOO_SHORT.length()).isEqualTo(AssetOpSignatures.MIN_SECRET_BYTES - 1);
     }
 
     @Test
@@ -218,6 +180,6 @@ class AssetOpAuthTest {
         AssetOpRequest.Builder absurd = golden();
         absurd.getAuthBuilder().setTimestampMs(-1L);
         assertThat(auth.verify("debit", signed("debit", absurd, SECRET), NOW)).as("2^64-1 毫秒").isEqualTo(Verdict.CLOCK_SKEW);
-        assertThat(AssetOpAuth.withinClockSkew(Long.MAX_VALUE, 0)).isFalse();
+        assertThat(AssetOpSignatures.withinClockSkew(Long.MAX_VALUE, 0)).isFalse();
     }
 }

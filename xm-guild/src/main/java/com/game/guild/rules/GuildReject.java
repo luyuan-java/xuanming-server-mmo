@@ -7,8 +7,8 @@ package com.game.guild.rules;
  * InnoDB 只回滚那一条语句后继续提交）。哪个拒绝回什么 tip、要不要顺手自愈映射，统一由 {@link GuildTips#forReject} 决定。
  *
  * <p>{@link #LEADER_MISMATCH} 与 {@link #LEVEL_CONFIG_MISSING} 不是玩家能修的：映射成故障（信封 1003，记 ERROR）。
- * 4.5 / 4.6 的经济、活动哨兵（ErrGuildLevelTooLow、ErrDonateLimit……）随各自批次追加；{@link GuildTips#forReject} 用穷举 switch，
- * 漏写映射编译不过。
+ * 4.5 的经济哨兵（{@link #LEVEL_TOO_LOW} … {@link #TOO_MANY_PENDING}）已追加；4.6 的活动哨兵随其批次追加。{@link GuildTips#forReject}
+ * 用穷举 switch，漏写映射编译不过。
  */
 public enum GuildReject {
 
@@ -47,7 +47,27 @@ public enum GuildReject {
     /** guild.leader_id 与 role=3 的成员行对不上（双存储已被破坏）：故障。 */
     LEADER_MISMATCH("guild leader_id disagrees with member roles"),
     /** GuildLevel 配表缺该等级行，长老上限无从判定：故障。 */
-    LEVEL_CONFIG_MISSING("guild level row missing in GuildLevel table");
+    LEVEL_CONFIG_MISSING("guild level row missing in GuildLevel table"),
+
+    // ---- 4.5 经济事务（guild_repo.go:71-83 的经济哨兵；guild-economy-spec §3.0、§7.9） ----
+
+    /** 帮会等级低于捐献选项的 min_guild_level / 商品的 required_guild_level（事务内读到的权威等级）。 */
+    LEVEL_TOO_LOW("guild level too low"),
+    /** 该捐献选项本游戏日次数已用完（计数行带上限的 upsert 判为达上限）。 */
+    DONATE_LIMIT("daily donate limit reached"),
+    /** 该商品本周期限购份数不够本次兑换（事务前纯判断 count &gt; limit_count，或 upsert 达上限）。 */
+    SHOP_LIMIT("guild shop purchase limit reached"),
+    /** 锁内读到的可用帮贡不够本次兑换的总价。 */
+    CONTRIBUTION_INSUFFICIENT("contribution balance insufficient"),
+    /** 当前等级行的 upgrade_cost_funds 为 0，即已是最高级。 */
+    MAX_LEVEL("guild already at max level"),
+    /** 锁内读到的帮会资金不够升到下一级。 */
+    FUNDS_INSUFFICIENT("guild funds insufficient"),
+    /**
+     * 未决守卫拒绝（assetop ErrTooManyPending，types.go:234-246）：本纪元未决行数 ≥ 16 或跨度 ≥ 512。是 scene 1024 位账本窗口正确性证明的
+     * 一部分，不是故障：回 14026、记 INFO（economy_logic.go:337-340）。
+     */
+    TOO_MANY_PENDING("assetop: too many pending ops for player stream");
 
     private final String sentinel;
 

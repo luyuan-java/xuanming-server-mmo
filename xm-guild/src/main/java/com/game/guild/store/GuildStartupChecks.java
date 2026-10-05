@@ -14,7 +14,8 @@ import org.slf4j.LoggerFactory;
  *
  * <ol>
  *   <li>{@link #checkServerVersion}：{@code SELECT VERSION()} 按 {@link ServerVersion} 判定（MySQL ≥ 8.0.29 或 TiDB）；</li>
- *   <li>{@link #ensureGlobalInsertGuard}：确保全局插入守卫哨兵行 guild_player_state(0) 存在。</li>
+ *   <li>{@link #ensureGlobalInsertGuard}：确保全局插入守卫哨兵行 guild_player_state(0) 存在；</li>
+ *   <li>{@link #checkAffectedRowsSemantics}（4.5）：连接池必须是「实际改动行数」语义（useAffectedRows=true）。</li>
  * </ol>
  * 预算照基线：版本检查 5 s、建哨兵行 10 s（guild.go:124-142；后者必须明显长于 GET_LOCK 的 5 s 等待）。
  * 建哨兵行那条专用连接上不设语句超时上限（GET_LOCK 要等满 5 s，超过 {@code xm.guild.query-timeout}）。阻塞 JDBC；只在启动线程上调用。
@@ -120,6 +121,47 @@ public final class GuildStartupChecks {
             throw new DependencyException("建全局插入守卫哨兵行失败", e);
         }
     }
+
+    /**
+     * 4.5：探测连接池是不是「实际改动行数」语义（{@code useAffectedRows=true}；guild-economy-spec §7.3、§9.2 第 6 条、§11.3 Java 增项）。
+     * 计数行带上限的 upsert（C1）靠「0 行 = 达上限」判定，写入自检与「加 0 跳过」也都依赖它；漏配时 C1 达上限会回 1（found rows）被当成
+     * 新插入，捐献次数与限购被突破、帮贡多发——语句本身看不出来，只能在启动期探测、拒启。
+     *
+     * <p>做法：一个 RC 事务里对一个永远不属于任何玩家的计数键（player_id = 0、counter_kind = UNSPECIFIED）连做两次
+     * 「改成原值」的 upsert，第二次在实际改动行数语义下必须是 0（found rows 语义下是 1），然后<b>回滚</b>（不留任何行）。
+     * 多实例同时启动只会在这个键上短暂排队。
+     *
+     * @throws IllegalStateException 语义不对（拒启）
+     * @throws DependencyException   SQL 故障
+     */
+    public void checkAffectedRowsSemantics(Deadline deadline) {
+        try (Connection c = tx.connections().get(Math.max(1, deadline.remainingMillis()))) {
+            boolean autoCommit = c.getAutoCommit();
+            c.setAutoCommit(false);
+            try {
+                GuildJdbc db = new GuildJdbc(c, deadline, 0);
+                db.update(AFFECTED_ROWS_PROBE, GLOBAL_PROBE_PLAYER_ID, UNSPECIFIED_COUNTER_KIND);
+                int second = db.update(AFFECTED_ROWS_PROBE, GLOBAL_PROBE_PLAYER_ID, UNSPECIFIED_COUNTER_KIND);
+                if (second != 0) {
+                    throw new IllegalStateException("帮会连接池不是「实际改动行数」语义（改成原值的 upsert 回了 " + second
+                            + " 行）：连接串必须带 useAffectedRows=true，否则计数行的上限判定失效");
+                }
+            } finally {
+                c.rollback();
+                c.setAutoCommit(autoCommit);
+            }
+        } catch (SQLException e) {
+            throw new DependencyException("探测连接池影响行数语义失败", e);
+        }
+    }
+
+    /** 探测用的计数键：player_id = 0 永远不是真实玩家（同全局插入守卫的约定）。 */
+    private static final long GLOBAL_PROBE_PLAYER_ID = 0L;
+    private static final int UNSPECIFIED_COUNTER_KIND =
+            com.game.guild.store.pb.GuildDailyCounterKind.GUILD_DAILY_COUNTER_KIND_UNSPECIFIED_VALUE;
+    static final String AFFECTED_ROWS_PROBE = "INSERT INTO guild_daily_counter"
+            + " (player_id, counter_kind, ref_id, period_key, used_count, updated_ms) VALUES (?, ?, 0, 0, 0, 0)"
+            + " ON DUPLICATE KEY UPDATE used_count = used_count";
 
     private void insertGuardUnderLock(GuildJdbc db, List<Long> guard, long nowMs, Deadline deadline) throws SQLException {
         if (JdbcGuildStore.missingPlayerStateRows(db, guard).isEmpty()) {

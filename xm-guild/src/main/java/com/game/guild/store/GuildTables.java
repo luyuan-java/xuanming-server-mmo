@@ -1,7 +1,10 @@
 package com.game.guild.store;
 
 import com.game.guild.store.pb.GuildApplicationRow;
+import com.game.guild.store.pb.GuildAssetOpRow;
+import com.game.guild.store.pb.GuildDailyCounterRow;
 import com.game.guild.store.pb.GuildMemberRow;
+import com.game.guild.store.pb.GuildPlayerOpSeqRow;
 import com.game.guild.store.pb.GuildPlayerStateRow;
 import com.game.guild.store.pb.GuildRow;
 import com.game.pbmysql.PbMysql;
@@ -13,7 +16,7 @@ import java.util.List;
 import javax.sql.DataSource;
 
 /**
- * 帮会四张核心表的登记与建表（guild-spec §1.2、§7.5、§7.11 第 2 步）。表定义是 Java 自有的 {@code xm/guild/guild_tables.proto}，
+ * 帮会四张核心表与 4.5 资产三表的登记与建表（guild-spec §1.2、§7.5、§7.11 第 2 步；guild-economy-spec §7.7 第 2 步）。表定义是 Java 自有的 {@code xm/guild/guild_tables.proto}，
  * 不依赖同步来的 guild_db.proto；DDL 与 Go proto2mysql 逐字节相同（GuildTablesTest 对拍）。
  *
  * <p>与基线的差异（D2 的一部分）：pbmysql 的同步只扩不缩、会<b>补建</b>缺失的普通索引，基线 schemamigrate 遇到缺索引拒启；
@@ -21,18 +24,30 @@ import javax.sql.DataSource;
  */
 public final class GuildTables {
 
-    /** 表名，顺序即全库表间锁序 G &lt; S &lt; M &lt; A（tables.go:15-21）。4.5 / 4.6 往后追加 Q、O、C、P。 */
-    public static final List<String> NAMES = List.of("guild", "guild_player_state", "guild_member", "guild_application");
+    /** guild_player_op_seq（Q，锁序位置 5；guild-economy-spec §1.1）。 */
+    public static final String PLAYER_OP_SEQ = "guild_player_op_seq";
+    /** guild_asset_op（O，锁序位置 6）。 */
+    public static final String ASSET_OP = "guild_asset_op";
+    /** guild_daily_counter（C，锁序位置 7）。 */
+    public static final String DAILY_COUNTER = "guild_daily_counter";
+
+    /**
+     * 表名，顺序即全库表间锁序 G &lt; S &lt; M &lt; A &lt; Q &lt; O &lt; C（tables.go:15-21）。4.6 往后追加 P。
+     * 手写 SQL 里的表名字面量必须与这里（= guild_tables.proto 的 table_name）一致，GuildTablesTest 钉住。
+     */
+    public static final List<String> NAMES = List.of("guild", "guild_player_state", "guild_member", "guild_application",
+            PLAYER_OP_SEQ, ASSET_OP, DAILY_COUNTER);
 
     /** 与 {@link #NAMES} 一一对应的表消息原型。 */
     public static final List<Message> PROTOTYPES = List.of(GuildRow.getDefaultInstance(),
             GuildPlayerStateRow.getDefaultInstance(), GuildMemberRow.getDefaultInstance(),
-            GuildApplicationRow.getDefaultInstance());
+            GuildApplicationRow.getDefaultInstance(), GuildPlayerOpSeqRow.getDefaultInstance(),
+            GuildAssetOpRow.getDefaultInstance(), GuildDailyCounterRow.getDefaultInstance());
 
     private GuildTables() {
     }
 
-    /** 登记了四张表的 pbmysql 实例（不碰库）。 */
+    /** 登记了全部七张表的 pbmysql 实例（不碰库）。 */
     public static PbMysql registry() {
         PbMysql db = new PbMysql();
         for (Message prototype : PROTOTYPES) {

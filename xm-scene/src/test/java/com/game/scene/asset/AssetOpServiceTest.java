@@ -2,6 +2,7 @@ package com.game.scene.asset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.asset.AssetRpc;
 import com.game.api.proto.AssetAuth;
 import com.game.api.proto.AssetBundle;
 import com.game.api.proto.AssetCurrency;
@@ -11,12 +12,12 @@ import com.game.api.proto.AssetOpResponse;
 import com.game.api.proto.AssetOutcome;
 import com.game.api.proto.AssetStream;
 import com.game.api.proto.PlayerEnter;
+import com.game.player.store.asset.AssetSeqState;
 import com.game.player.store.state.AssetOpLedgerState;
 import com.game.player.store.state.AssetOpStreamLedgerState;
 import com.game.player.store.state.CurrencyDebtState;
 import com.game.player.store.state.CurrencyState;
 import com.game.player.store.state.PlayerState;
-import com.game.scene.asset.AssetOpService.Rpc;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.audit.AssetAudit.Reason;
 import com.game.scene.audit.GainAnomalyDetector;
@@ -148,7 +149,7 @@ class AssetOpServiceTest {
         return AssetBundle.newBuilder().addCurrencies(AssetCurrency.newBuilder().setCurrencyType(GOLD).setAmount(amount));
     }
 
-    private AssetOpResponse call(Rpc rpc, AssetOpRequest.Builder request) {
+    private AssetOpResponse call(AssetRpc rpc, AssetOpRequest.Builder request) {
         request.getAuthBuilder().setTimestampMs(clock.epochMillis());
         return service.handle(rpc, AssetOpAuthTest.signed(rpc.wireName(), request, AssetOpAuthTest.SECRET));
     }
@@ -173,22 +174,22 @@ class AssetOpServiceTest {
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
         audit.currencies.clear();
 
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, false));
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, false));
         assertThat(gold()).isEqualTo(70);
         assertThat(audit.currencies).containsExactly(new Currency(PLAYER, GOLD, -30, 100, 70, Reason.GUILD_DONATE, 501));
         assertThat(repo.pendingProgress()).as("记账后立刻请求存盘").isEqualTo(1);
 
-        AssetOpResponse inFlight = call(Rpc.DEBIT, debit(1, 30));
+        AssetOpResponse inFlight = call(AssetRpc.DEBIT, debit(1, 30));
         assertThat(inFlight).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, false));
         saveCompletes();
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, true));
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, true));
         assertThat(gold()).isEqualTo(70);
         assertThat(audit.currencies).hasSize(1);
 
         // 已 durable 不再补存：过了限频间隔、内存又有了别的改动（补存会真的提交），重查仍不提交
         clock.advanceMillis(AssetOpService.RESAVE_MIN_INTERVAL_MS);
         currency.add(player, GOLD, 1, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, true));
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, true));
         assertThat(repo.pendingProgress()).as("已 durable 不再存盘").isZero();
         assertThat(gold()).isEqualTo(71);
     }
@@ -197,21 +198,21 @@ class AssetOpServiceTest {
     void 记账时已有存盘在途_那次存盘不算数_限频过后补存才durable() {
         start();
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getDurable()).isFalse();
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getDurable()).isFalse();
         assertThat(repo.pendingProgress()).isEqualTo(1);
         // seq 2 记账时 seq 1 的存盘还在途：requestSave 回 IN_FLIGHT，在途那份快照里没有 seq 2
-        assertThat(call(Rpc.DEBIT, debit(2, 10)).getDurable()).isFalse();
+        assertThat(call(AssetRpc.DEBIT, debit(2, 10)).getDurable()).isFalse();
         assertThat(repo.pendingProgress()).isEqualTo(1);
         saveCompletes();
 
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getDurable()).isTrue();
-        assertThat(call(Rpc.DEBIT, debit(2, 10)).getDurable()).as("落盘的快照里没有 seq 2").isFalse();
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getDurable()).isTrue();
+        assertThat(call(AssetRpc.DEBIT, debit(2, 10)).getDurable()).as("落盘的快照里没有 seq 2").isFalse();
         assertThat(repo.pendingProgress()).as("距上次请求不到 500ms").isZero();
         clock.advanceMillis(AssetOpService.RESAVE_MIN_INTERVAL_MS);
-        assertThat(call(Rpc.DEBIT, debit(2, 10)).getDurable()).isFalse();
+        assertThat(call(AssetRpc.DEBIT, debit(2, 10)).getDurable()).isFalse();
         assertThat(repo.pendingProgress()).as("补存").isEqualTo(1);
         saveCompletes();
-        assertThat(call(Rpc.DEBIT, debit(2, 10)).getDurable()).isTrue();
+        assertThat(call(AssetRpc.DEBIT, debit(2, 10)).getDurable()).isTrue();
         assertThat(gold()).isEqualTo(60);
     }
 
@@ -223,7 +224,7 @@ class AssetOpServiceTest {
         AssetBundle.Builder bundle = AssetBundle.newBuilder()
                 .addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(2))
                 .addCurrencies(AssetCurrency.newBuilder().setCurrencyType(DIAMOND).setAmount(5));
-        AssetOpResponse first = call(Rpc.CREDIT, credit(1, bundle.clone()));
+        AssetOpResponse first = call(AssetRpc.CREDIT, credit(1, bundle.clone()));
         assertThat(first).isEqualTo(AssetOpResponse.newBuilder().setOutcome(AssetOutcome.ASSET_OUTCOME_APPLIED)
                 .setReason(AssetOpService.PARTIAL_APPLIED).setPartial(true).build());
         assertThat(player.bags().bag(BagType.INVENTORY).total(STACKABLE)).isEqualTo(2);
@@ -231,7 +232,7 @@ class AssetOpServiceTest {
         assertThat(player.assetLedger().isPartial(AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 1)).isTrue();
 
         saveCompletes();
-        assertThat(call(Rpc.CREDIT, credit(1, bundle))).isEqualTo(AssetOpResponse.newBuilder()
+        assertThat(call(AssetRpc.CREDIT, credit(1, bundle))).isEqualTo(AssetOpResponse.newBuilder()
                 .setOutcome(AssetOutcome.ASSET_OUTCOME_APPLIED).setReason(AssetOpService.PARTIAL_APPLIED).setPartial(true)
                 .setDurable(true).build());
         assertThat(player.bags().bag(BagType.INVENTORY).total(STACKABLE)).as("重查不重发").isEqualTo(2);
@@ -241,11 +242,11 @@ class AssetOpServiceTest {
     void 余额不足_记REJECTED_结局固定() {
         start();
         currency.add(player, GOLD, 10, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_REJECTED, AssetOpService.CURRENCY_INSUFFICIENT, false));
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
         saveCompletes();
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_REJECTED, AssetOpService.CURRENCY_INSUFFICIENT, true));
         assertThat(gold()).isEqualTo(110);
     }
@@ -253,7 +254,7 @@ class AssetOpServiceTest {
     @Test
     void 玩家不在本节点_NOT_HERE_不记账() {
         start();
-        assertThat(call(Rpc.DEBIT, debit(1, 30).setPlayerId(PLAYER + 1))).isEqualTo(
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30).setPlayerId(PLAYER + 1))).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_NOT_HERE, AssetOpService.PLAYER_NOT_HERE, false));
         assertThat(player.assetLedger().isPristine()).isTrue();
     }
@@ -262,13 +263,13 @@ class AssetOpServiceTest {
     void 中止占位_此后同seq永远拒绝_已应用的seq中止仍答应用() {
         start();
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        assertThat(call(Rpc.ABORT_DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).extracting(AssetOpResponse::getOutcome, AssetOpResponse::getReason)
+        assertThat(call(AssetRpc.ABORT_DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).extracting(AssetOpResponse::getOutcome, AssetOpResponse::getReason)
                 .containsExactly(AssetOutcome.ASSET_OUTCOME_REJECTED, 0);
         assertThat(gold()).isEqualTo(100);
 
-        assertThat(call(Rpc.DEBIT, debit(2, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
-        assertThat(call(Rpc.ABORT_DEBIT, debit(2, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.DEBIT, debit(2, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.ABORT_DEBIT, debit(2, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         assertThat(gold()).isEqualTo(70);
     }
 
@@ -276,7 +277,7 @@ class AssetOpServiceTest {
     void 中止收全部流_不校验流水原因() {
         start();
         AssetOpRequest.Builder abort = request(AssetStream.ASSET_STREAM_GUILD_CREDIT, 0, 1);
-        assertThat(call(Rpc.ABORT_DEBIT, abort).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
+        assertThat(call(AssetRpc.ABORT_DEBIT, abort).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
     }
 
     @Test
@@ -285,7 +286,7 @@ class AssetOpServiceTest {
                 .setStream(1).setStreamEpoch(EPOCH)).build();
         start(1, PlayerState.newBuilder().setAssetLedger(corrupted).build());
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_RETRY, AssetOpService.BLOCKED, false));
         assertThat(gold()).isEqualTo(100);
         assertThat(WorldTestAccess.persistentState(player).getAssetLedger()).isEqualTo(corrupted);
@@ -297,14 +298,14 @@ class AssetOpServiceTest {
     void 信封非法_UNKNOWN_27004_不记账() {
         start();
         int bad = AssetOpService.INVALID_BUNDLE;
-        assertThat(call(Rpc.DEBIT, debit(1, 30).setPlayerId(0))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
-        assertThat(call(Rpc.DEBIT, debit(0, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
-        assertThat(call(Rpc.DEBIT, debit(1, 30).setStreamEpoch(0))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
-        assertThat(call(Rpc.DEBIT, debit(1, 30).setStreamValue(9))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
-        assertThat(call(Rpc.DEBIT, debit(1, 30).setStream(AssetStream.ASSET_STREAM_UNSPECIFIED)))
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30).setPlayerId(0))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
+        assertThat(call(AssetRpc.DEBIT, debit(0, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30).setStreamEpoch(0))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30).setStreamValue(9))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30).setStream(AssetStream.ASSET_STREAM_UNSPECIFIED)))
                 .isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
-        assertThat(call(Rpc.CREDIT, debit(1, 30))).as("扣款流上调发放").isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
-        assertThat(call(Rpc.DEBIT, debit(1, 30).setTxType(25))).as("流水原因不在白名单").isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
+        assertThat(call(AssetRpc.CREDIT, debit(1, 30))).as("扣款流上调发放").isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30).setTxType(25))).as("流水原因不在白名单").isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, bad, false));
         assertThat(player.assetLedger().isPristine()).isTrue();
     }
 
@@ -315,22 +316,22 @@ class AssetOpServiceTest {
         AssetOpRequest.Builder forged = debit(1, 30);
         forged.getAuthBuilder().setTimestampMs(clock.epochMillis());
         AssetOpRequest wrongKey = AssetOpAuthTest.signed("debit", forged, "another-secret-of-enough-length-xx");
-        assertThat(service.handle(Rpc.DEBIT, wrongKey)).isEqualTo(
+        assertThat(service.handle(AssetRpc.DEBIT, wrongKey)).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, AssetOpService.AUTH_FAILED, false));
         assertThat(player.assetLedger().isPristine()).isTrue();
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
     }
 
     @Test
     void 滑出窗口_跳号过远_旧纪元_都是UNKNOWN_0_不记账() {
         start();
         currency.add(player, GOLD, 10_000, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1024, 1)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
-        assertThat(call(Rpc.DEBIT, debit(2048, 1)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.DEBIT, debit(1024, 1)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.DEBIT, debit(2048, 1)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         AssetOpLedgerState before = player.assetLedger().toState();
-        assertThat(call(Rpc.DEBIT, debit(5, 1))).as("seq 5 已滑出窗口").isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, 0, false));
-        assertThat(call(Rpc.DEBIT, debit(2048 + 1025, 1))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, 0, false));
-        assertThat(call(Rpc.DEBIT, debit(2049, 1).setStreamEpoch(EPOCH - 1)))
+        assertThat(call(AssetRpc.DEBIT, debit(5, 1))).as("seq 5 已滑出窗口").isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, 0, false));
+        assertThat(call(AssetRpc.DEBIT, debit(2048 + 1025, 1))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, 0, false));
+        assertThat(call(AssetRpc.DEBIT, debit(2049, 1).setStreamEpoch(EPOCH - 1)))
                 .isEqualTo(response(AssetOutcome.ASSET_OUTCOME_UNKNOWN, 0, false));
         assertThat(player.assetLedger().toState()).isEqualTo(before);
         assertThat(gold()).isEqualTo(9_998);
@@ -340,8 +341,8 @@ class AssetOpServiceTest {
     void 新纪元是新流水簿_同seq重新应用() {
         start();
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
-        assertThat(call(Rpc.DEBIT, debit(1, 30).setStreamEpoch(EPOCH + 1)).getOutcome())
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30).setStreamEpoch(EPOCH + 1)).getOutcome())
                 .isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         assertThat(gold()).isEqualTo(40);
     }
@@ -350,12 +351,12 @@ class AssetOpServiceTest {
     void 暂时失败不重置纪元_旧纪元的结局还在() {
         start();
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         // 新纪元的发放碰上背包满：RETRY，不得因此把旧纪元的账本清掉
         AssetOpRequest.Builder full = credit(1, AssetBundle.newBuilder()
                 .addItems(AssetItem.newBuilder().setConfigId(SINGLE).setCount(101))).setStreamEpoch(EPOCH + 1);
-        assertThat(call(Rpc.CREDIT, full).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_RETRY);
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.CREDIT, full).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_RETRY);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         assertThat(gold()).isEqualTo(70);
     }
 
@@ -377,10 +378,10 @@ class AssetOpServiceTest {
                 gold(1).setPetId(7));
         long seq = 1;
         for (AssetBundle.Builder bundle : bundles) {
-            AssetOpResponse r = call(Rpc.DEBIT, debit(seq, 1).setBundle(bundle));
+            AssetOpResponse r = call(AssetRpc.DEBIT, debit(seq, 1).setBundle(bundle));
             assertThat(r.getOutcome()).as(bundle.toString()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
             assertThat(r.getReason()).isEqualTo(bad);
-            assertThat(player.assetLedger().classify(1, EPOCH, seq)).isEqualTo(AssetOpLedger.SeqState.REJECTED);
+            assertThat(player.assetLedger().classify(1, EPOCH, seq)).isEqualTo(AssetSeqState.REJECTED);
             seq++;
         }
         assertThat(gold()).isEqualTo(100);
@@ -400,7 +401,7 @@ class AssetOpServiceTest {
                 AssetBundle.newBuilder().addCurrencies(AssetCurrency.newBuilder().setCurrencyType(-1).setAmount(1)));
         long seq = 1;
         for (AssetBundle.Builder bundle : bundles) {
-            AssetOpResponse r = call(Rpc.CREDIT, credit(seq++, bundle));
+            AssetOpResponse r = call(AssetRpc.CREDIT, credit(seq++, bundle));
             assertThat(r.getOutcome()).as(bundle.toString()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
             assertThat(r.getReason()).isEqualTo(AssetOpService.INVALID_BUNDLE);
         }
@@ -408,7 +409,7 @@ class AssetOpServiceTest {
         for (int i = 0; i < 17; i++) {
             tooMany.addItems(AssetItem.newBuilder().setConfigId(1000 + i).setCount(1));
         }
-        assertThat(call(Rpc.CREDIT, credit(seq, tooMany)).getReason()).isEqualTo(AssetOpService.INVALID_BUNDLE);
+        assertThat(call(AssetRpc.CREDIT, credit(seq, tooMany)).getReason()).isEqualTo(AssetOpService.INVALID_BUNDLE);
         assertThat(gold()).isZero();
         assertThat(audit.items).isEmpty();
     }
@@ -418,7 +419,7 @@ class AssetOpServiceTest {
     @Test
     void 发放物品与货币_一笔关联号_入人物背包() {
         start();
-        AssetOpResponse r = call(Rpc.CREDIT, credit(1, gold(50)
+        AssetOpResponse r = call(AssetRpc.CREDIT, credit(1, gold(50)
                 .addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(5))));
         assertThat(r).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, false));
         assertThat(gold()).isEqualTo(50);
@@ -436,7 +437,7 @@ class AssetOpServiceTest {
                 .addBalances(10).addBalances(0).addBalances(0)
                 .addDebts(CurrencyDebtState.newBuilder().setCurrencyType(GOLD).setOwed(30))).build();
         start(1, withDebt);
-        assertThat(call(Rpc.CREDIT, credit(1, gold(50))).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(call(AssetRpc.CREDIT, credit(1, gold(50))).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         assertThat(gold()).isEqualTo(30);
         assertThat(player.wallet().debt(GOLD)).isNull();
         assertThat(audit.currencies).containsExactly(
@@ -449,11 +450,11 @@ class AssetOpServiceTest {
         start();
         currency.applyGlobalBlocks(new GlobalGainBlocks(Set.of(GOLD), Set.of()));
         AssetBundle.Builder bundle = gold(5).addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(1));
-        assertThat(call(Rpc.CREDIT, credit(1, bundle.clone()))).isEqualTo(
+        assertThat(call(AssetRpc.CREDIT, credit(1, bundle.clone()))).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_REJECTED, AssetOpService.BLOCKED, false));
         currency.applyGlobalBlocks(GlobalGainBlocks.NONE);
         player.wallet().block(GOLD);
-        assertThat(call(Rpc.CREDIT, credit(2, bundle)).getReason()).isEqualTo(AssetOpService.BLOCKED);
+        assertThat(call(AssetRpc.CREDIT, credit(2, bundle)).getReason()).isEqualTo(AssetOpService.BLOCKED);
         assertThat(audit.items).isEmpty();
         assertThat(player.bags().bag(BagType.INVENTORY).total(STACKABLE)).isZero();
     }
@@ -462,7 +463,7 @@ class AssetOpServiceTest {
     void 物品被全服禁发_记REJECTED_27005() {
         start();
         bags.applyGlobalBlocks(new GlobalGainBlocks(Set.of(), Set.of(STACKABLE)));
-        AssetOpResponse r = call(Rpc.CREDIT, credit(1, gold(5)
+        AssetOpResponse r = call(AssetRpc.CREDIT, credit(1, gold(5)
                 .addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(1))));
         assertThat(r.getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
         assertThat(r.getReason()).isEqualTo(AssetOpService.BLOCKED);
@@ -473,7 +474,7 @@ class AssetOpServiceTest {
     void 发放会让余额溢出_改动之前按坏包拒绝() {
         start();
         currency.add(player, GOLD, Long.MAX_VALUE - 1, Reason.GM_GRANT);
-        AssetOpResponse r = call(Rpc.CREDIT, credit(1, gold(2)
+        AssetOpResponse r = call(AssetRpc.CREDIT, credit(1, gold(2)
                 .addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(1))));
         assertThat(r.getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
         assertThat(r.getReason()).isEqualTo(AssetOpService.INVALID_BUNDLE);
@@ -484,7 +485,7 @@ class AssetOpServiceTest {
     @Test
     void 背包满_RETRY_27001_不记账_货币也不发() {
         start();
-        AssetOpResponse r = call(Rpc.CREDIT, credit(1, gold(5)
+        AssetOpResponse r = call(AssetRpc.CREDIT, credit(1, gold(5)
                 .addItems(AssetItem.newBuilder().setConfigId(SINGLE).setCount(101))));
         assertThat(r).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_RETRY, AssetOpService.BAG_FULL, false));
         assertThat(gold()).isZero();
@@ -496,12 +497,12 @@ class AssetOpServiceTest {
     void 物品guid发不出号_RETRY_0_不记账() {
         start();
         guidsExhausted.set(true);
-        AssetOpResponse r = call(Rpc.CREDIT, credit(1, AssetBundle.newBuilder()
+        AssetOpResponse r = call(AssetRpc.CREDIT, credit(1, AssetBundle.newBuilder()
                 .addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(1))));
         assertThat(r).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_RETRY, 0, false));
         assertThat(player.assetLedger().isPristine()).isTrue();
         guidsExhausted.set(false);
-        assertThat(call(Rpc.CREDIT, credit(1, AssetBundle.newBuilder()
+        assertThat(call(AssetRpc.CREDIT, credit(1, AssetBundle.newBuilder()
                 .addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(1)))).getOutcome())
                 .isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
     }
@@ -512,35 +513,35 @@ class AssetOpServiceTest {
     void 已见未durable的重查_每500ms至多补存一次() {
         start();
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        call(Rpc.DEBIT, debit(1, 30));
+        call(AssetRpc.DEBIT, debit(1, 30));
         repo.takeProgress().complete(ProgressResult.FAILED);
         assertThat(player.persistedState()).as("结局不明，快照作废").isNull();
 
         clock.advanceMillis(100);
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getDurable()).isFalse();
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getDurable()).isFalse();
         assertThat(repo.pendingProgress()).as("距上次请求不到 500ms").isZero();
         clock.advanceMillis(400);
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getDurable()).isFalse();
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getDurable()).isFalse();
         assertThat(repo.pendingProgress()).isEqualTo(1);
         saveCompletes();
-        assertThat(call(Rpc.DEBIT, debit(1, 30)).getDurable()).isTrue();
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getDurable()).isTrue();
         assertThat(gold()).isEqualTo(70);
     }
 
     @Test
     void 中止占位落盘后报durable() {
         start();
-        assertThat(call(Rpc.ABORT_DEBIT, debit(1, 30)).getDurable()).isFalse();
+        assertThat(call(AssetRpc.ABORT_DEBIT, debit(1, 30)).getDurable()).isFalse();
         saveCompletes();
-        assertThat(call(Rpc.ABORT_DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_REJECTED, 0, true));
+        assertThat(call(AssetRpc.ABORT_DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_REJECTED, 0, true));
     }
 
     @Test
     void 账本随存档往返_重新进场后已见结局照答且已durable() {
         start();
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        call(Rpc.DEBIT, debit(1, 30));
-        call(Rpc.DEBIT, debit(2, 500));
+        call(AssetRpc.DEBIT, debit(1, 30));
+        call(AssetRpc.DEBIT, debit(2, 500));
         saveCompletes();
         PlayerState saved = WorldTestAccess.persistentState(player);
         assertThat(saved.hasAssetLedger()).isTrue();
@@ -549,8 +550,8 @@ class AssetOpServiceTest {
         world.onPlayerLeave(LINK, com.game.api.proto.PlayerLeave.newBuilder().setSessionId(SESSION)
                 .setPlayerId(PLAYER).build());
         start(2, saved);
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, true));
-        assertThat(call(Rpc.DEBIT, debit(2, 500))).isEqualTo(
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(response(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, true));
+        assertThat(call(AssetRpc.DEBIT, debit(2, 500))).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_REJECTED, AssetOpService.CURRENCY_INSUFFICIENT, true));
         assertThat(gold()).isEqualTo(70);
     }
@@ -559,9 +560,9 @@ class AssetOpServiceTest {
     void 没有归属围栏_RETRY_27003_不记账() {
         start(0, PlayerState.getDefaultInstance());
         currency.add(player, GOLD, 100, Reason.GM_GRANT);
-        assertThat(call(Rpc.DEBIT, debit(1, 30))).isEqualTo(
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30))).isEqualTo(
                 response(AssetOutcome.ASSET_OUTCOME_RETRY, AssetOpService.FROZEN, false));
-        assertThat(call(Rpc.ABORT_DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_RETRY);
+        assertThat(call(AssetRpc.ABORT_DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_RETRY);
         assertThat(player.assetLedger().isPristine()).isTrue();
         assertThat(gold()).isEqualTo(100);
     }

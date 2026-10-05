@@ -9,6 +9,7 @@ import com.game.robot.scenario.ExpectJump;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.FriendScenario;
 import com.game.robot.scenario.GuardScenario;
+import com.game.robot.scenario.GuildEconomyScenario;
 import com.game.robot.scenario.GuildScenario;
 import com.game.robot.scenario.KillSwitchScenario;
 import com.game.robot.scenario.MovementScenario;
@@ -60,7 +61,9 @@ public record RobotOptions(
     private static final Pattern RUN_TAG = Pattern.compile("[a-z0-9]{1,16}");
 
     public enum Scenario {
-        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN, FRIEND, CHAT, KILLSWITCH, TEAM, GUILD
+        SMOKE, MOVEMENT, CURRENCY, ATTRIBUTE, AUDIT, GUARD, BAG, FEATURES, SKILL, PET, TOKEN, RECONNECT, ZONES, QUEUE, RATELIMIT, DRAIN, FRIEND, CHAT, KILLSWITCH, TEAM, GUILD,
+        /** 子命令写作 {@code guild-economy}（连字符按下划线认）。 */
+        GUILD_ECONOMY
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -195,6 +198,7 @@ public record RobotOptions(
             case KILLSWITCH -> KillSwitchScenario.accountName(prefix, runTag);
             case TEAM -> TeamScenario.accountName(prefix, runTag, "a");
             case GUILD -> GuildScenario.accountName(prefix, runTag, "a");
+            case GUILD_ECONOMY -> GuildEconomyScenario.accountName(prefix, runTag, "a");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -210,7 +214,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -250,7 +254,11 @@ public record RobotOptions(
         out.append("  guild     帮会核心（A / B / D / E / F 五个新号）：建帮落归属区 / 重复建帮 14000 / 本区榜 / 改公告 / 申请 → 审批 → "
                 + "各推送 / 伪造 player_id 退帮按会话受理 / 上行 8 与 220 信封 1003 / 任命长老 / 长老踢人边界 / 两次转让 / 退帮 / 解散后 "
                 + "14002 / 14007 且删申请；另钉 14009 / 14010 / 14006 / 14001 / 14018 / 14015 / 14014 / 14016 / 14004 / 14005、"
-                + "待审数只对管理者可见、榜单页长回显、DonateToGuild 1006（4.4 占位）；跨区步骤单 zone 时跳过\n");
+                + "待审数只对管理者可见、榜单页长回显、DonateToGuild(0) 14027；跨区步骤单 zone 时跳过\n");
+        out.append("  guild-economy 帮会经济（A / B 两个新号）：建帮 → GM 给 A 发银两 / 灵石 → 大捐两次（资金 / 帮贡）、第三次 14024 → 灵石捐 → "
+                + "B 余额不足 14025 + REJECTED → 升级（B 14016、A 升 Lv.2、B 收 LEVEL_UP、旧等级重升不扣钱）→ 商店解锁 → 兑换入包 → "
+                + "14029 / 14031 / 14030 → 限购 → 解散；结算中的单轮询到落定，后台终结的推 FUNDS_CHANGED / DELIVERY_DONE；"
+                + "需要 xm-guild 资产通道已开、两侧同一个 XM_ASSET_OP_SECRET_GUILD、dev 运行模式\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -274,9 +282,9 @@ public record RobotOptions(
 
     private static Scenario parseScenario(String arg) throws UsageException {
         try {
-            return Scenario.valueOf(arg.toUpperCase(Locale.ROOT));
+            return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy）");
         }
     }
 

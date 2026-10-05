@@ -3,7 +3,10 @@
 #   export XM_MYSQL_PASSWORD=... XM_GATE_TOKEN_SECRET=... XM_LOGIN_DEV_PASSWORD=... XM_NODE_LINK_SECRET=... XM_DUBBO_SECRET=...
 #   tools/local/start-slice.sh
 # XM_NODE_LINK_SECRET 是 gate → scene 节点链路握手密钥，xm-gate 与 xm-scene 读同一个值（本脚本把同一环境传给两者）。
-# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-gate / xm-gateway 读同一个值。
+# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-scene / xm-gate / xm-gateway
+# 读同一个值（xm-scene 自 4.5 起是资产通道 SceneAssetOpService 的 Dubbo 提供方，缺密钥即暴露失败）。
+# XM_ASSET_OP_SECRET_GUILD 是帮会资产指令的请求体签名密钥（xm-guild 签、xm-scene 验，去首尾空白后至少 32 字节）；
+# 没设时本脚本生成本机随机值写进 run/xm-asset-op-secret-guild，并把同一个值传给两者。
 # 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379、Kafka 127.0.0.1:9092（资产流水，xm-scene 生产、xm-data 消费）已就绪；已执行 ./mvnw -DskipTests install；
 # 存量库已按 docs/design/db-migrations.md 迁移到最新结构（M2 起 player 表多了 owner_released / owner_lease_until）。
 # 进程按依赖顺序启动，每个都等端口就绪再起下一个；日志在 run/logs/，PID 在 run/pids/。
@@ -38,6 +41,22 @@ if [[ -z "${XM_GM_ADMIN_SECRET:-}" ]]; then
 fi
 export XM_GM_ADMIN_SECRET
 
+# 帮会资产指令签名密钥（xm-guild → xm-scene 资产通道，guild-economy-spec §7.8）：没设就生成 32 字节本机随机密钥（64 个十六进制字符）
+# 写进 run/xm-asset-op-secret-guild（只有本用户可读）；导出后 xm-scene 与 xm-guild 继承同一个值。单独重启其中一个时从这个文件读回同一个值。
+if [[ -z "${XM_ASSET_OP_SECRET_GUILD:-}" ]]; then
+  XM_ASSET_OP_SECRET_GUILD=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  (umask 077; printf "%s" "$XM_ASSET_OP_SECRET_GUILD" > run/xm-asset-op-secret-guild)
+  chmod 600 run/xm-asset-op-secret-guild
+fi
+# 与两侧的校验同口径（去首尾空白后按字节数 ≥ 32）提前拦下过短的外部值：否则 xm-guild 开着资产通道时拒启、xm-scene 验签一律失败
+asset_secret_trimmed=$(printf "%s" "$XM_ASSET_OP_SECRET_GUILD" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+if (( $(printf "%s" "$asset_secret_trimmed" | LC_ALL=C wc -c) < 32 )); then
+  echo "XM_ASSET_OP_SECRET_GUILD 去首尾空白后不足 32 字节；取消这个环境变量让脚本生成，或换一个更长的值" >&2
+  exit 1
+fi
+unset asset_secret_trimmed
+export XM_ASSET_OP_SECRET_GUILD
+
 # 登录排队：进程缺省关闭（同基线 Queue.Enabled=false）；本机切片打开，robot 全程走快速通道，queue 场景压容量验证排队与放行
 export XM_GATEWAY_QUEUE_ENABLED="${XM_GATEWAY_QUEUE_ENABLED:-true}"
 # 开服限流：进程缺省关闭（同基线 gate.rate-limit.enabled=false）；本机切片打开（缺省阈值），ratelimit 场景验证 IP 桶与冷却
@@ -45,7 +64,7 @@ export XM_GATEWAY_RATE_LIMIT_ENABLED="${XM_GATEWAY_RATE_LIMIT_ENABLED:-true}"
 
 mkdir -p run/logs run/pids
 
-# 模块名 就绪端口
+# 模块名 就绪端口…（一个进程可以列多个端口，逐个等到可连再起下一个）
 SERVICES=(
   "xm-scene-manager 20882"
   "xm-login 20881"
@@ -54,7 +73,7 @@ SERVICES=(
   "xm-team 20885"
   "xm-guild 20886"
   "xm-data 18106"
-  "xm-scene 21000"
+  "xm-scene 21000 21100"   # 节点链路 link-port；资产通道 Dubbo Triple（xm.scene.asset-rpc-port，xm-guild 按节点目录直连）
   "xm-gate 11000"
   "xm-gateway 18081"
 )
@@ -75,7 +94,7 @@ wait_port() {
 }
 
 for entry in "${SERVICES[@]}"; do
-  read -r name port <<<"$entry"
+  read -r name ports <<<"$entry"
   jar=$(ls "$name"/target/"$name"-*.jar 2>/dev/null | grep -v -- '-plain' | head -1 || true)
   if [[ -z "$jar" ]]; then
     echo "找不到 $name 的可执行 jar，先 ./mvnw -DskipTests install" >&2
@@ -84,8 +103,10 @@ for entry in "${SERVICES[@]}"; do
   echo "启动 $name ($jar)"
   java -jar "$jar" > "run/logs/$name.log" 2>&1 &
   echo $! > "run/pids/$name.pid"
-  wait_port "$port" "$name"
-  echo "  $name 就绪（端口 $port）"
+  for port in $ports; do
+    wait_port "$port" "$name"
+  done
+  echo "  $name 就绪（端口 $ports）"
 done
 
 echo "全部就绪。停止：tools/local/stop-slice.sh"

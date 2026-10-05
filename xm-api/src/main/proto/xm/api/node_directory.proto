@@ -27,6 +27,11 @@ message SceneNodeInfo {
   string link_host = 4;
   uint32 link_port = 5;
   repeated SceneEntry scenes = 6;
+  // 通用资产通道（Dubbo Triple 提供方 SceneAssetOpService，register = false）的直连地址：帮会 / 交易按玩家位置记录里的节点号
+  // 找到这一条再直连。只在提供方导出成功之后才写进目录。rpc_port = 0（含不认识这两个字段的旧版本节点写的条目）=
+  // 这个节点不提供资产通道，调用方按「没人持有」处理（本地合成 NOT_HERE）。
+  string rpc_host = 7;
+  uint32 rpc_port = 8;
 }
 
 message SceneEntry {

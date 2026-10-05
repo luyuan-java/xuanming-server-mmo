@@ -1,7 +1,8 @@
-// xm-guild 的四张核心表（xm_java 库），经 xm-pbmysql 建表 / 补列 / 补索引（只扩展、从不删改）。guild-spec §1.2、§7.5。
+// xm-guild 的四张核心表 + 4.5 的资产三表（xm_java 库），经 xm-pbmysql 建表 / 补列 / 补索引（只扩展、从不删改）。guild-spec §1.2、§7.5；
+// guild-economy-spec §1.1、§7.2。
 //
 // 形状与 mmorpg proto/guild/guild_db.proto 的 GuildRecord / GuildPlayerStateRecord / GuildMemberRecord / GuildApplicationRecord
-// 逐字段相同（表名、列、字段号、主键、唯一键、二级索引、TiDB 选项），生成的 DDL 与 Go proto2mysql 逐字节相同
+// （及 4.5 的 GuildPlayerOpSeqRecord / GuildAssetOpRecord / GuildDailyCounterRecord）逐字段相同（表名、列、字段号、主键、唯一键、二级索引、TiDB 选项），生成的 DDL 与 Go proto2mysql 逐字节相同
 // （store 包的 GuildTablesTest 拿同步来的 com.game.proto.guild.*Record 对拍）。但这是 Java 版自己的一份：
 // 同步来的那份是契约产物、不许手改，Java 的库表也不该随 mmorpg 漂移（先例 xm-friend/src/main/proto/xm/friend/friend_tables.proto）。
 //
@@ -94,4 +95,114 @@ message GuildApplicationRow {
   uint64 apply_ms = 3;         // 最近一次申请（同帮重复申请会刷新）的时刻
   uint64 expire_ms = 4;        // apply_ms + GuildRule.application_expire_hours × 3 600 000
   // 追加区：从 5 起。
+}
+
+// ── 资产三表（4.5，guild_db.proto:88-197；guild-economy-spec §1.1、§7.2）────────────────────────────────────────
+// guild 经资产通道向 scene 发「扣货币 / 发物品」指令：Q guild_player_op_seq 发每个 (玩家, 流) 的序号，O guild_asset_op 是指令账本
+// （outbox），C guild_daily_counter 记每日 / 每周用量。声明顺序 = 锁序 Q(5) < O(6) < C(7)（tables.go:15-21）。
+// 业务 SQL 一律绑定下面三个枚举的生成常量，不写数字字面量（guild_db.proto:94；economy_repo.go:35）。
+
+// 指令状态（guild_db.proto:96-107）。1 基：0 留给「漏写状态列的行」，它不会被当成未决行领走。
+// 客户端镜像是 guild.proto 的 GuildAssetOrderStatus，数值逐项相同（转换仍写显式 switch，economy_logic.go:460-480）。
+enum GuildAssetOpStatus {
+  GUILD_ASSET_OP_STATUS_UNSPECIFIED = 0;
+  GUILD_ASSET_OP_STATUS_PENDING = 1;
+  GUILD_ASSET_OP_STATUS_APPLIED = 2;
+  GUILD_ASSET_OP_STATUS_REJECTED = 3;
+  GUILD_ASSET_OP_STATUS_ABORTED = 4;
+  GUILD_ASSET_OP_STATUS_APPLIED_PARTIAL = 5;  // 只终结：不做对侧账、不自动清理，转人工补偿
+}
+
+// 指令种类（guild_db.proto:109-115）。没有「捐献退款」：用户决策 D2——离帮 / 被踢 / 解散后已扣款的捐献照记给帮会、不退款，4 号空着。
+enum GuildAssetOpKind {
+  GUILD_ASSET_OP_KIND_UNSPECIFIED = 0;
+  GUILD_ASSET_OP_KIND_DONATE = 1;           // 捐献：GUILD_DEBIT 流扣货币
+  GUILD_ASSET_OP_KIND_SHOP = 2;             // 商店：GUILD_CREDIT 流发物品
+  GUILD_ASSET_OP_KIND_ACTIVITY_REWARD = 3;  // 活动发奖（4.6）：GUILD_CREDIT 流
+}
+
+// 计数种类（guild_db.proto:117-122）。
+enum GuildDailyCounterKind {
+  GUILD_DAILY_COUNTER_KIND_UNSPECIFIED = 0;
+  GUILD_DAILY_COUNTER_KIND_DONATE = 1;
+  GUILD_DAILY_COUNTER_KIND_SHOP = 2;
+  GUILD_DAILY_COUNTER_KIND_ACTIVITY = 3;    // 4.6
+}
+
+// Q：每个 (玩家, 流) 的序号行（锁序位置 5，guild_db.proto:124-136）。无二级索引；行建出后永不删除（economy_repo.go:145、:772）。
+message GuildPlayerOpSeqRow {
+  option (proto2mysql.table_name) = "guild_player_op_seq";
+  option (proto2mysql.primary_key) = "player_id,stream";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  uint32 stream = 2;           // AssetStream 数值（本文件不 import 资产通道协议：库表定义不依赖通道协议）
+  uint64 next_seq = 3;
+  uint64 updated_ms = 4;
+  uint64 epoch = 5;            // 建行毫秒，> 0；库恢复后由运维手册显式抬高
+  // 追加区：从 6 起。行在预留事务内、本人成员行 X 锁之下按需建（死锁复核 C2，economy_repo.go:756-794；
+  // 基线 guild_db.proto:135 那句「事务外 INSERT IGNORE」已陈旧，guild-economy-spec §9.1 第 16 条）。
+}
+
+// O：资产指令账本（锁序位置 6，guild_db.proto:138-180）。列序 = 字段序 = SQL 列清单序（AssetOpColumns，28 列）。
+message GuildAssetOpRow {
+  option (proto2mysql.table_name) = "guild_asset_op";
+  option (proto2mysql.primary_key) = "op_id";
+  option (proto2mysql.unique_key) = "player_id,stream,stream_epoch,seq";  // uk_guild_asset_op：同一序号至多一条指令
+  // idx_guild_asset_op_0 = 到期领取 / 终态清理 / 回档前检查；idx_guild_asset_op_1 = 按帮查；
+  // idx_guild_asset_op_2 = 未决行普通读、离帮提前截止候选、本人待结算列表。索引名从 0 起编号，组只能追加、不得调序。
+  option (proto2mysql.index) = "status,next_attempt_ms;guild_id,op_id;player_id,stream,stream_epoch,status,seq";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 op_id = 1;              // xm-guild 的全服雪花（与 guild_id 同一个发号器，E6）；同时作资产通道的 correlation_id
+  uint64 player_id = 2;
+  uint32 stream = 3;             // AssetStream 数值：1 GUILD_DEBIT、2 GUILD_CREDIT
+  uint64 seq = 4;                // 从 1 起
+  uint64 guild_id = 5;           // 发起时绑定的帮会；结算一律记给它，不看结算时玩家在哪个帮（D2）
+  GuildAssetOpKind kind = 6;
+  GuildAssetOpStatus status = 7;
+  uint32 durable = 8;            // 0/1：scene 是否已确认落盘（人工终结不置）
+  uint32 attempts = 9;
+  uint64 next_attempt_ms = 10;   // 未决：下次投递时刻；终态：终结时刻（清理与回档检查按它判龄，Finalize / ResolveManually 同写）
+  uint64 deadline_ms = 11;       // 只有 DONATE 非 0；到期改发中止。商店 / 活动发奖恒 0，永不中止
+  bytes payload = 12;            // AssetBundle 序列化字节
+  uint32 ref_id = 13;            // donate_id / goods_id / activity_id
+  uint32 ref_count = 14;         // 捐献恒 1；商店为份数
+  uint32 period_key = 15;        // 占用的计数行周期键（GameDay 日键 / 周键）；0 = 未占计数行，退回时跳过
+  uint64 contribution_delta = 16;  // 捐献：应得帮贡；商店：已扣帮贡（永久拒绝时退回）
+  uint64 funds_delta = 17;       // 捐献：应记帮会资金
+  uint32 reason_tip_id = 18;     // 终态原因，只在终结时写一次（只有 REJECTED 非 0）
+  uint64 created_ms = 19;
+  uint64 updated_ms = 20;
+  uint64 lease_until_ms = 21;    // 领取租约截止；0 = 未被领取
+  uint64 lease_token = 22;       // 领取令牌（随机 64 位、最低位置 1：约一半 ≥ 2^63，一律按无符号绑定）
+  uint32 tx_type = 23;           // TransactionType 数值（24 捐献 / 25 商店 / 26 活动发奖），重投时原样带上
+  uint32 last_outcome = 24;      // 最近一次 scene 答复的 AssetOutcome（诊断；E12：传输失败不覆盖）
+  uint32 last_reason = 25;       // 最近一次 scene 原因；PENDING 视图展示它；兼作部分发放粘性标记（27007）
+  uint64 stream_epoch = 26;      // = 分配 seq 时 guild_player_op_seq.epoch
+  string resolved_by = 27;       // 人工终结（assetopfix）写：操作人，≤ 64 字
+  string resolve_reason = 28;    // 人工终结依据，≤ 191 字
+  // 追加区：从 29 起。
+}
+
+// C：每日 / 每周计数（锁序位置 7，guild_db.proto:182-197）。
+message GuildDailyCounterRow {
+  option (proto2mysql.table_name) = "guild_daily_counter";
+  option (proto2mysql.primary_key) = "player_id,counter_kind,ref_id,period_key";
+  option (proto2mysql.index) = "period_key";  // idx_guild_daily_counter_0：过期清理按周期键范围取候选
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  GuildDailyCounterKind counter_kind = 2;
+  uint32 ref_id = 3;           // donate_id / goods_id / activity_id
+  uint32 period_key = 4;       // GameDay 日键（8 位）或周键（6 位）；两个数值域不相交
+  uint32 used_count = 5;       // 含结算中的占用；REJECTED / ABORTED 时退回
+  uint64 updated_ms = 6;
+  // 追加区：从 7 起。计数一律用带上限的 upsert 改写，不得「锁不存在的行再插入」（guild_db.proto:196）。
 }

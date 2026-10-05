@@ -2,11 +2,18 @@
 # 进程从仓库根目录启动（table-dir 是相对路径）。
 #
 # 秘密只从环境变量注入，不写进本文件：
-#   XM_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填，与 xm-gate 一致；缺失即拒绝启动）
-#   XM_MYSQL_PASSWORD      MySQL 密码（本机无密码的 root 可不设）
+#   XM_DUBBO_SECRET            Dubbo 调用方鉴权密钥（必填，与 xm-gate / xm-scene 一致；缺失即拒绝启动）
+#   XM_ASSET_OP_SECRET_GUILD   资产通道请求签名密钥（xm.guild.asset-op.enabled=true 时必填，与 xm-scene 同一个值；
+#                              去首尾空白后不足 32 字节即拒绝启动；本机由 tools/local/start-slice.sh 生成并注入）
+#   XM_MYSQL_PASSWORD          MySQL 密码（本机无密码的 root 可不设）
 #
-# 权威数据在 MySQL xm_java 的四张帮会表（guild / guild_player_state / guild_member / guild_application，经 xm-pbmysql 建表）；
-# 缓存、排行、申请推送冷却在 Redis；只读 xm_java.player（展示名与归属区，不归本服所有）。
+# 权威数据在 MySQL xm_java 的七张帮会表（guild / guild_player_state / guild_member / guild_application，4.5 的
+# guild_player_op_seq / guild_asset_op / guild_daily_counter，经 xm-pbmysql 建表）；缓存、排行、申请推送冷却在 Redis；
+# 只读 xm_java.player（展示名与归属区）与 xm_java.player_state（离线读已落盘的资产账本），这两张表不归本服所有。
+#
+# 人工终结 CLI（同一个 jar 的第二个主类，读同一份配置）：
+#   java -cp xm-guild.jar -Dloader.main=com.game.guild.asset.fix.AssetOpFixMain \
+#        org.springframework.boot.loader.launch.PropertiesLauncher list | resolve ...
 spring:
   application:
     name: xm-guild
@@ -75,6 +82,25 @@ xm:
     query-timeout: 3s
     worker-threads: 16
     worker-queue-capacity: 1024
+    # 资产通道（guild-economy-spec §0.6、§7.6；基线 guild.yaml:117-143）。整段缺省 = enabled false（fail-closed：捐献 / 兑换回 14026）；
+    # 本机切片开启。地址只来自 Redis 的 xm:location 与 scene 节点目录（rpc_host / rpc_port），按节点直连，不经注册中心。
+    # 区间只在对应开关打开时校验（保留期总是校验）；交叉校验：lease + reconcile-interval < GuildRule.asset_op_deadline_seconds，
+    # GuildRule.asset_op_retry_base_ms <= max-backoff。代码常量（同步预算 2500 ms、单次调用 800 ms、重查 100/200/400 ms、
+    # settle 700 ms、未决守卫 16 / 512……）不开放。
+    asset-op:
+      enabled: true
+      reconcile-interval: 2s           # [200ms, 60s]
+      reconcile-batch: 100             # [workers, 1000]
+      workers: 8                       # [1, 64]：每个副本同时在途的资产 RPC 上限
+      lease: 10s                       # [op-budget + 2s, 600s]：循环的行租约，也是插行租约
+      op-budget: 2500ms                # [1s, 10s]：单行预算，其中 700 ms 固定留给落库
+      max-backoff: 60s                 # [1s, 600s]：退避封顶，也是 ALERT 的重排间隔
+      poison-delay: 1h                 # [60s, 24h]
+      ledger-read-min-attempts: 3      # >= 1：本地 NOT_HERE 达到这么多次后离线读已落盘账本（E8）
+      cleanup-enabled: true            # 与 enabled 互相独立
+      cleanup-interval: 10m            # [1m, 1440m]
+      terminal-retention: 30d          # [7d, 365d]：也是内部查询（回档前检查）可证明窗口的下界
+      counter-retention: 30d           # [7d, 365d]：计数行清理按 max(它, 8d) 算
 
 dubbo:
   application:

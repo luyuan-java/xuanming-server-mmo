@@ -1,6 +1,7 @@
 package com.game.scene;
 
 import com.game.audit.AuditProperties;
+import com.game.common.token.DubboCallAuth;
 import com.game.common.token.GmRequestAuth;
 import com.game.common.token.GmShutdownHandler;
 import com.game.common.token.NodeLinkAuth;
@@ -92,6 +93,16 @@ public class SceneNodeConfiguration {
     @Bean
     public NodeLinkAuth nodeLinkAuth(Environment environment) {
         return NodeLinkAuth.requireFromEnvValue(environment.getProperty(NodeLinkAuth.SECRET_ENV));
+    }
+
+    /**
+     * 资产通道的 Dubbo 提供方（{@code SceneAssetOpService}）要求调用方鉴权：密钥只从环境变量 {@code XM_DUBBO_SECRET} 读，缺失即启动失败
+     * （xm-api 的提供方过滤器缺密钥时导出也会失败，这里在单例创建阶段就给出明确原因，不等到 SceneNode 启动一半）。
+     * 过滤器自己从环境变量读密钥，这个 bean 只作启动校验。
+     */
+    @Bean
+    public DubboCallAuth sceneDubboCallAuth(Environment environment) {
+        return DubboCallAuth.requireFromEnvValue(environment.getProperty(DubboCallAuth.SECRET_ENV));
     }
 
     /** scene 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */

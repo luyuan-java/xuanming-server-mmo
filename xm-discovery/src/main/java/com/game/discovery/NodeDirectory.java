@@ -6,6 +6,8 @@ import com.google.protobuf.Parser;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.redisson.api.RMapCache;
 import org.redisson.api.RedissonClient;
@@ -46,6 +48,29 @@ public final class NodeDirectory<T extends Message> {
 
     public void remove(int zoneId, int nodeId) {
         map(zoneId).fastRemove(Integer.toString(nodeId));
+    }
+
+    /**
+     * 按节点号读一条未过期的条目（异步，不阻塞调用线程）。没有（从未发布、已摘除或 TTL 已过）为空；
+     * 读失败或条目解析失败时 future 异常完成——单条读是给「必须分清没有与故障」的读者（资产通道定位）用的，不像 {@link #list} 那样跳过坏条目。
+     */
+    public CompletableFuture<Optional<T>> findAsync(int zoneId, int nodeId) {
+        CompletableFuture<byte[]> read;
+        try {
+            read = map(zoneId).getAsync(Integer.toString(nodeId)).toCompletableFuture();
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+        return read.thenApply(bytes -> {
+            if (bytes == null) {
+                return Optional.empty();
+            }
+            try {
+                return Optional.of(parser.parseFrom(bytes));
+            } catch (InvalidProtocolBufferException e) {
+                throw new IllegalStateException("节点目录条目解析失败 type=" + nodeType + " zone=" + zoneId + " node=" + nodeId, e);
+            }
+        });
     }
 
     /** 本 zone 下所有未过期的节点；单条解析失败只跳过并告警，不影响其他节点。 */

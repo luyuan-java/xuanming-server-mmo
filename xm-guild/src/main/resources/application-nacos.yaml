@@ -1,4 +1,7 @@
 # nacos profile：Dubbo 注册到 Nacos（只做 Dubbo 注册中心，见 architecture.md §6）；gate 改走注册中心发现 guild。
+# 资产通道（xm.guild.asset-op.*）与 profile 无关：scene 的资产提供方 register=false，地址只来自 Redis 的 xm:location 与 scene 节点目录，
+# 按节点直连（guild-economy-spec E1 / E2）；签名密钥照旧只从环境变量 XM_ASSET_OP_SECRET_GUILD 注入。部署侧若要先关通道，
+# 用 XM_GUILD_ASSETOP_ENABLED=false（Spring 的环境变量覆盖）而不是改这里。
 dubbo:
   registry:
     address: nacos://${XM_NACOS_ADDR:127.0.0.1:8848}

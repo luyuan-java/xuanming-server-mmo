@@ -33,6 +33,18 @@
             <groupId>com.game</groupId>
             <artifactId>xm-table</artifactId>
         </dependency>
+        <!-- 游戏日 / 游戏周切点（GameDay，与 xm-guild 同一份实现，不另写一份切点）：guild-economy 核对 next_*_reset_ms 与是否跨了切点。
+             排除 slf4j-api：探针只用 GameDay（不打日志），带上它而没有实现时 Netty 探测到 SLF4J 会往 stderr 打「No SLF4J providers」 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-handler</artifactId>

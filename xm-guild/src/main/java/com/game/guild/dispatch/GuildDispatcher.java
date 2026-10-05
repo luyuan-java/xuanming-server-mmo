@@ -10,15 +10,21 @@ import com.game.guild.metrics.GuildMetrics;
 import com.game.guild.metrics.GuildMetrics.RequestResult;
 import com.game.guild.rules.GuildTip;
 import com.game.guild.rules.GuildTips;
+import com.game.guild.service.GuildEconomyService;
 import com.game.guild.service.GuildManageService;
 import com.game.guild.service.GuildRankService;
 import com.game.guild.service.GuildService;
 import com.game.proto.Empty;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.guild.ApplyJoinGuildRequest;
+import com.game.proto.guild.BuyGuildShopGoodsRequest;
 import com.game.proto.guild.CancelGuildApplicationRequest;
 import com.game.proto.guild.CreateGuildRequest;
 import com.game.proto.guild.DisbandGuildRequest;
+import com.game.proto.guild.DonateToGuildRequest;
+import com.game.proto.guild.GetGuildDonateOptionsRequest;
+import com.game.proto.guild.GetGuildShopRequest;
+import com.game.proto.guild.UpgradeGuildRequest;
 import com.game.proto.guild.GetGuildRankByGuildRequest;
 import com.game.proto.guild.GetGuildRankRequest;
 import com.game.proto.guild.GetGuildRequest;
@@ -60,17 +66,18 @@ import org.slf4j.LoggerFactory;
  *   <li>会话没有绑定玩家（{@code player_id == 0}）→ 信封 1003，打 ERROR（基线 Unauthenticated；<b>与 team 不同</b>，同 friend）；</li>
  *   <li>上行 8 UpdateGuildScore / 220 NotifyGuildChanged → 信封 1003，计 forbidden（基线会话白名单 PermissionDenied；220 的应答是 Empty，
  *       但 tip ≠ 0 时 gate 照样回信封）；</li>
- *   <li>4.5 / 4.6 的 10 个号 → <b>in-band 1006</b>（写进各自应答的 error_message，D13）：客户端进捐献 / 商店页会自动拉 120 / 228，
- *       信封会让整个帮会模块进隔离；</li>
+ *   <li>4.6 的 5 个活动号 → <b>in-band 1006</b>（写进各自应答的 error_message，D13）；4.5 的 5 个经济号已换成真实处理器（D13 对它们撤销）；</li>
  *   <li>投递到 {@code guild-worker} 有界池。队列满、或排队已超预算 → <b>in-band 14021「guild service overloaded」</b>（已拍板，代替 D11 的信封：
  *       瞬时过载不该让客户端停用帮会模块）；处理器抛异常（依赖故障、配表缺行、双存储矛盾、存储内部错误）→ <b>信封 1003</b>、记 ERROR
  *       （基线 gRPC error → 路由服信封 1003；与 friend 的 in-band 1003 不同，客户端随之进隔离）。</li>
  * </ol>
+ * 捐献 / 兑换是<b>异步处理器</b>：前置与预留事务在 guild-worker 上同步做完，之后返回 future（同步投递不占工作线程，Q5），future 完成时才回包、
+ * 才计 {@code xm.guild.requests} 的耗时；future 异常完成（只可能是实现 bug）按处理器异常回信封 1003。经济号不在派发层查归属区（economy_logic.go:8-11）。
  * 信封一律不带 parameters（同路由服 rejected，forwardlogic.go:225-232）；in-band tip 带基线英文原因串。
  *
  * <p>每个请求以受理时刻 + 预算（缺省 3500 ms）为截止时刻（含排队）；Dubbo 线程只做解析、身份检查与投递，处理全在工作线程上执行
  * （AGENTS.md §3）。返回的 future 永不异常完成。启动时校验 28 个方法都在 {@code message_id.txt} 里、契约里的 GuildService 没有本类不认识的方法、
- * 16 个处理器的请求类型与契约一致、除 220 外每个应答都有 {@code error_message} 字段、220 的应答是 Empty；不符即启动失败。
+ * 21 个处理器的请求类型与契约一致、除 220 外每个应答都有 {@code error_message} 字段、220 的应答是 Empty；不符即启动失败。
  */
 public final class GuildDispatcher {
 
@@ -83,9 +90,15 @@ public final class GuildDispatcher {
         Message handle(long me, Q request, Deadline deadline);
     }
 
+    /** 异步处理器：同步部分在工作线程上跑（可以抛异常 = 故障），返回的 future 完成时才回包。 */
+    @FunctionalInterface
+    interface AsyncHandler<Q extends Message> {
+        CompletableFuture<? extends Message> handle(long me, Q request, Deadline deadline);
+    }
+
     /** 一个号的契约与处置。{@code handler} 只在 {@link Kind#CLIENT} 上非空。 */
     private record Route(String method, Kind kind, Message requestPrototype, Message responsePrototype,
-                         Handler<Message> handler) {
+                         AsyncHandler<Message> handler) {
 
         /** in-band 应答体：只设置 error_message（每个帮会应答的字段 1）。 */
         ClientReply inBand(TipInfoMessage tip) {
@@ -97,11 +110,11 @@ public final class GuildDispatcher {
     }
 
     private enum Kind {
-        /** 4.4 的 16 个 C2S：进工作线程池。 */
+        /** 4.4 的 16 个 C2S 与 4.5 的 5 个经济号：进工作线程池。 */
         CLIENT,
         /** 8 / 220：客户端不得上行，信封 1003。 */
         FORBIDDEN,
-        /** 4.5 / 4.6 的 10 个号：in-band 1006。 */
+        /** 4.6 的 5 个活动号：in-band 1006。 */
         PLACEHOLDER
     }
 
@@ -117,7 +130,8 @@ public final class GuildDispatcher {
      * @throws IllegalStateException 方法在 message_id.txt 里缺号、契约里多出不认识的方法、或类型与契约不符（同步产物与代码脱节）
      */
     public GuildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
-                           GuildRankService ranks, Executor executor, GuildMetrics metrics, long budgetMillis) {
+                           GuildRankService ranks, GuildEconomyService economy, Executor executor, GuildMetrics metrics,
+                           long budgetMillis) {
         this.registry = registry;
         this.executor = executor;
         this.metrics = metrics;
@@ -143,6 +157,12 @@ public final class GuildDispatcher {
                 manage::reviewGuildApplication);
         client(byId, GuildMethods.GET_GUILD_RANK, GetGuildRankRequest.class, ranks::getGuildRank);
         client(byId, GuildMethods.GET_GUILD_RANK_BY_GUILD, GetGuildRankByGuildRequest.class, ranks::getGuildRankByGuild);
+        client(byId, GuildMethods.GET_GUILD_DONATE_OPTIONS, GetGuildDonateOptionsRequest.class,
+                economy::getGuildDonateOptions);
+        clientAsync(byId, GuildMethods.DONATE_TO_GUILD, DonateToGuildRequest.class, economy::donateToGuild);
+        client(byId, GuildMethods.UPGRADE_GUILD, UpgradeGuildRequest.class, economy::upgradeGuild);
+        client(byId, GuildMethods.GET_GUILD_SHOP, GetGuildShopRequest.class, economy::getGuildShop);
+        clientAsync(byId, GuildMethods.BUY_GUILD_SHOP_GOODS, BuyGuildShopGoodsRequest.class, economy::buyGuildShopGoods);
         for (String method : GuildMethods.FORBIDDEN) {
             other(byId, method, Kind.FORBIDDEN);
         }
@@ -151,7 +171,8 @@ public final class GuildDispatcher {
         }
         Set<String> handled = new HashSet<>();
         byId.values().forEach(r -> handled.add(r.method()));
-        if (!handled.containsAll(GuildMethods.CLIENT_REQUESTS) || byId.size() != GuildMethods.all().size()) {
+        if (!handled.containsAll(GuildMethods.CLIENT_REQUESTS) || !handled.containsAll(GuildMethods.ECONOMY_REQUESTS)
+                || byId.size() != GuildMethods.all().size()) {
             throw new IllegalStateException("帮会方法没有全部登记: " + GuildMethods.all() + " 已登记 " + handled);
         }
         Set<String> unknown = new TreeSet<>();
@@ -168,13 +189,19 @@ public final class GuildDispatcher {
     }
 
     private <Q extends Message> void client(Map<Integer, Route> byId, String method, Class<Q> requestType, Handler<Q> handler) {
+        clientAsync(byId, method, requestType,
+                (me, request, deadline) -> CompletableFuture.completedFuture(handler.handle(me, request, deadline)));
+    }
+
+    private <Q extends Message> void clientAsync(Map<Integer, Route> byId, String method, Class<Q> requestType,
+                                                 AsyncHandler<Q> handler) {
         MessageMethod contract = contractOf(method);
         if (contract.requestPrototype().getClass() != requestType) {
             throw new IllegalStateException("处理器类型与契约不符: " + contract.key() + " 契约="
                     + contract.requestPrototype().getClass().getName() + " 处理器=" + requestType.getName());
         }
         requireErrorMessage(contract);
-        Handler<Message> erased = (me, request, deadline) -> handler.handle(me, requestType.cast(request), deadline);
+        AsyncHandler<Message> erased = (me, request, deadline) -> handler.handle(me, requestType.cast(request), deadline);
         byId.put(contract.messageId(), new Route(method, Kind.CLIENT, contract.requestPrototype(),
                 contract.responsePrototype(), erased));
     }
@@ -257,7 +284,7 @@ public final class GuildDispatcher {
         try {
             executor.execute(() -> {
                 try {
-                    reply.complete(handle(route, me, request, deadline, sample, call.getSession()));
+                    handle(route, me, request, deadline, sample, call.getSession(), reply);
                 } catch (Throwable t) { // handle 已兜住 RuntimeException；这里只防 Error 让 future 永不完成
                     reply.complete(envelope(GuildTips.SERVICE_UNAVAILABLE));
                     throw t;
@@ -271,23 +298,42 @@ public final class GuildDispatcher {
         return reply;
     }
 
-    private ClientReply handle(Route route, long me, Message request, Deadline deadline, Timer.Sample sample,
-                               SessionContext session) {
+    /** 工作线程上：跑处理器的同步部分；应答 future 完成时（同步处理器立即）写回包与指标。{@code reply} 一定会被完成。 */
+    private void handle(Route route, long me, Message request, Deadline deadline, Timer.Sample sample,
+                        SessionContext session, CompletableFuture<ClientReply> reply) {
         if (deadline.expired()) {
             log.warn("[guild] 请求在工作队列里等过了预算 method={} {}", route.method(), describe(session));
             metrics.requestCompleted(sample, route.method(), RequestResult.OVERLOADED);
-            return route.inBand(GuildTip.OVERLOADED.proto());
+            reply.complete(route.inBand(GuildTip.OVERLOADED.proto()));
+            return;
         }
-        Message response;
+        CompletableFuture<? extends Message> response;
         try {
             response = route.handler().handle(me, request, deadline);
+            if (response == null) {
+                throw new IllegalStateException("处理器返回了空的 future");
+            }
         } catch (RuntimeException e) {
             log.error("[guild] {} 处理失败（回信封 1003）{}", route.method(), describe(session), e);
             metrics.requestCompleted(sample, route.method(), RequestResult.INTERNAL_ERROR);
-            return envelope(GuildTips.SERVICE_UNAVAILABLE);
+            reply.complete(envelope(GuildTips.SERVICE_UNAVAILABLE));
+            return;
         }
-        metrics.requestCompleted(sample, route.method(), resultOf(response));
-        return ClientReply.newBuilder().setBody(response.toByteString()).build();
+        response.whenComplete((body, error) -> {
+            try {
+                if (error != null || body == null) {
+                    log.error("[guild] {} 异步处理失败（回信封 1003）{}", route.method(), describe(session), error);
+                    metrics.requestCompleted(sample, route.method(), RequestResult.INTERNAL_ERROR);
+                    reply.complete(envelope(GuildTips.SERVICE_UNAVAILABLE));
+                    return;
+                }
+                metrics.requestCompleted(sample, route.method(), resultOf(body));
+                reply.complete(ClientReply.newBuilder().setBody(body.toByteString()).build());
+            } catch (RuntimeException e) {
+                log.error("[guild] {} 回包出错（回信封 1003）{}", route.method(), describe(session), e);
+                reply.complete(envelope(GuildTips.SERVICE_UNAVAILABLE));
+            }
+        });
     }
 
     /** 应答体的结果分类：没有 error_message（或 id 为 0）→ ok；14008（帮会段唯一的 in-band 故障码）→ fault；其余 → business_error。 */

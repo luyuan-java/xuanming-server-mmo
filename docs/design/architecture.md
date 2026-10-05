@@ -93,7 +93,7 @@ Java 代码不得依赖这套目录，具体做法：
 - **调用方鉴权（必需）**：Dubbo 把 `127.*` 视为无效绑定地址，`dubbo.protocol.host=127.0.0.1` 实际监听 `0.0.0.0`
   （`DUBBO_IP_TO_BIND` 也不接受回环地址），login（20881）/ scene-manager（20882）的端口**无法只绑本机**，
   而 `ClientMessageService` 完全信任调用方填的 `SessionContext`。所以 Java 版进程间的每次 Dubbo 调用都要带鉴权附件：
-  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-friend / xm-chat / xm-team / xm-guild / xm-gate / xm-gateway 必填，缺失即拒绝启动），
+  共享密钥 `XM_DUBBO_SECRET`（xm-login / xm-scene-manager / xm-friend / xm-chat / xm-team / xm-guild / xm-scene / xm-gate / xm-gateway 必填，缺失即拒绝启动），
   调用方附 `xm-auth-ts`（Unix 秒）与 `xm-auth-mac = HMAC-SHA256(secret, "接口全名|方法名|ts")` 的 64 字节小写 hex，
   提供方常数时间比较 MAC、再验 ts 与本地时钟相差 ≤ 60s，不过即抛 `RpcException(AUTHORIZATION)`，不进入业务代码，
   对外原因只有一句「调用方鉴权失败」。算法唯一出处 `xm-common` 的 `DubboCallAuth`，过滤器在 `xm-api` 的
@@ -328,7 +328,7 @@ mmorpg：`player_pet.cpp`（PetSystem）+ `pet_rules.h` + `player_pet_handler.cp
 ### 4.12 通用资产通道（scene 侧）
 
 mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（scene），调用方 go guild / trade。用途：别的服务给**在线**
-玩家扣货币、发货币与物品，每条恰好生效一次。Java 版 scene 侧在 `com.game.scene.asset`，调用方随 4.5（帮会经济）/ 4.x（交易）接入：
+玩家扣货币、发货币与物品，每条恰好生效一次。Java 版 scene 侧在 `com.game.scene.asset`，调用方帮会经济（4.5，§4.18）已接入、交易随写侧批次：
 
 - **契约**（`xm-api` `xm.api.AssetOpRequest / AssetOpResponse`，Java 内部自有格式，字段语义与数值同基线）：请求带 (player_id, 流, 流纪元, seq)、
   关联号、流水原因、一包资产、调用方签名；应答是结局 APPLIED（partial）/ REJECTED / RETRY / NOT_HERE / UNKNOWN + 原因 tip + durable。
@@ -343,7 +343,13 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
   → 扣款（余额不足记 REJECTED 27000）/ 发放（货币预检 → 物品整批 → 货币）。闸只在这一层，不下沉到 `CurrencyService` / `BagService`。
 - **durable**：只看最近一次确认落库的快照（`ScenePlayer.persistedState()`）里有没有这条结局，不另建水位；记账后立刻
   `SceneWorld.requestSave`，不在调用里等落盘；已见未 durable 的重查 500 ms 内至多补存一次（限频时刻挂在账本实例上，不持久化）。
-- **入口** `AssetOpEndpoint`：任意线程调用，投递到逻辑线程、future 带回结局；`SceneNode.assetOps()` 暴露给以后的跨进程传输。
+- **入口** `AssetOpEndpoint`：任意线程调用，投递到逻辑线程、future 带回结局。
+- **跨进程传输**（批次 4.5）：scene 在 `xm.scene.asset-rpc-port`（缺省 21100）上以独立的 Dubbo 模块导出 `SceneAssetOpService`
+  （debit / abortDebit / credit，group `scene-asset`，Triple，不注册、调用方按节点直连，`retries=0`），请求交逻辑线程处理、应答在
+  `scene-asset-reply` 执行器上完成，在途上限 `xm.scene.asset-op-max-inflight`（缺省 256，超出即回过载）；导出先于目录条目带上
+  rpc_host / rpc_port，停服时先摘目录、写回玩家再撤导出。两层鉴权：请求体 HMAC（规范串的唯一出处是 xm-api `AssetOpSignatures`）+
+  Dubbo 调用方 MAC（`XM_DUBBO_SECRET`，xm-scene 从此必填）。调用方按 `xm:location` 定位（只认 `o`；`l` / `x` / 缺失 → 本地 NOT_HERE）
+  再查 scene 目录拿 rpc 地址（`SceneAssetLocator`）。已落盘账本的只读分类器在 xm-player-store（`PersistedAssetLedger`），调用方离线读用它。
 - **接管守卫**（`SceneWorld` 进场）：本节点接管失去归属的旧实例时，库里仍是旧实例最近一次落库的样子才沿用旧内存，否则以库为准——
   别的节点期间写过库（含已回报 durable 的资产结局）时，沿用旧内存会把它们盖掉。
 - **补缴欠款**（`Wallet.Debt`，休眠：没有挂欠款的入口，同基线）：加币时未冻结、未过期的欠款先抵 min(收入, 剩余)，还清即删；
@@ -466,9 +472,25 @@ mmorpg：`go/guild`。Java 版是独立进程 xm-guild（Dubbo group `guild`，�
 - **前置顺序同基线**：会话 → 归属区（`player.zone_id`）→ 合服闸门（4.4 恒放行）→ 业务前置 → 事务；请求体里的 player_id / zone_id 一律忽略。
 - **错误语义**：业务拒绝 in-band（帮会段 tip，parameters 是基线的英文原因串）；依赖故障 / 处理器异常回**信封 1003**（同基线：客户端随之隔离帮会模块）；
   过载（工作队列满、排队超预算）回 in-band 14021「帮会操作繁忙」（客户端遇到任何信封错误会停用帮会直到重登，暂时过载不能用信封）；
-  上行 8（UpdateGuildScore）/ 220 回信封 1003；4.5 / 4.6 的 10 个号暂回 in-band 1006。
+  上行 8（UpdateGuildScore）/ 220 回信封 1003；4.6 的 5 个活动号暂回 in-band 1006。
 - **推送 220**（`GuildChangedS2C{kind, guild_id, actor, target}`）经 `PlayerPushes`，失效缓存之后发，失败不影响回包；
   申请入帮通知帮主有 60 s 冷却（`SET NX`）。guild_id 由全服雪花租约（`NodeTypes.GUILD`）发，失败回 in-band 14008。
+
+### 4.18 帮会经济（捐献 / 升级 / 商店）与资产指令投递
+
+mmorpg：`go/guild` 的 economy_* / asset_store + `go/shared/assetop`。规格与逐条出处见 `docs/porting/guild-economy-spec.md`：
+
+- **资产指令账本在帮会库**（`xm_java` 追加三张表：`guild_player_op_seq` 每人每流的下一个 seq、`guild_asset_op` 指令行（发件箱 + 结局）、
+  `guild_daily_counter` 每日 / 每周用量，表定义同样在 `guild_tables.proto` 经 xm-pbmysql）。捐献 / 兑换在一个事务里预留（扣次数、
+  分配 seq、写 PENDING 行，周期键用 `GameDay` 且一个请求只取一次 now），提交后**同步投递**一次（预算 min(2500 ms, 剩余 − 1000 ms)，
+  不足 300 ms 不投、交给循环）：定位玩家所在 scene → 签名 → 调 `SceneAssetOpService` → 只在 APPLIED / REJECTED 且 durable 时终结
+  （帮会资金 / 帮贡 / 次数的对侧账在终结事务里一起记），RETRY / NOT_HERE 留给循环重投，UNKNOWN 粘性告警转人工。
+  同步投递不占 guild-worker：Dubbo 异步调用 → 定时重查 → 在有界的 `guild-asset-settle` 执行器上落库 → 回 worker 装配应答。
+- **重投循环** `AssetOpLoop`：每 2 s 认领到期行（租约令牌 + 10 s 租约），8 条 worker 并发投递，指数退避 ±20% 抖动、上限 60 s，
+  传输失败不覆盖上次的真实结局（E12），反复失败且玩家离线时直读 MySQL 里已落盘的账本判定结局（E8）；超过 1 h 的行转毒行等人工
+  （`AssetOpFixMain` CLI：list / resolve）。清理任务按保留期删终态行与旧计数。离帮 / 被踢 / 解散时把该玩家未决捐献的截止提前。
+- **升级**不经资产通道（只动帮会资金与等级）；**内部查询** `GuildInternalService.listAppliedAssetOpsSince` 给回档分歧检查用（7.2 接入），
+  错误用应答内结果码表达。推送：资金变化 9 / 升级 10 / 发放完成 13（只在循环终结时推，同步当场终结的以回包为准）。
 
 ## 5. 线程模型
 
@@ -759,6 +781,11 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | guild | `xm_guild_cache_total` | Counter | `cache`=snapshot / mapping，`result`=hit / miss / fill_skipped / fill_failed / error | 帮会快照与玩家→帮会映射缓存 |
 | guild | `xm_guild_profile_lookup_failures_total`、`xm_guild_online_lookups_total{outcome}`、`xm_guild_rank_ops_total{op,outcome}` | Counter | 见左 | 展示名读失败、在线批量读（ok / timeout / error）、排行写 / 删 / 重建（ok / lock_timeout / error） |
 | guild | `executor_*{name="guild-worker"}` | Micrometer 标准线程池指标 | — | 请求工作池 |
+| guild | `xm_guild_economy_requests_seconds`、`xm_guild_asset_sync_skipped_total`、`xm_guild_asset_orphans_total`、`xm_guild_asset_cleanup_deleted_total` | Timer / Counter | 见 `GuildMetrics`（method / result / kind 等固定枚举） | 经济五个 RPC；同步投递因预算不足跳过；终结时对侧行缺失；清理删行 |
+| guild | `xm_guild_assetop_*`（rpc / rpc_duration / requery / outcome_flip / unknown / partial / claim / reschedule / reschedule_lost / finalize / ledger_read / manual_resolve / store_errors / pending_oldest_age_seconds）、`xm_guild_scene_resolve_total` | Counter / Timer / Gauge | `rpc`、`stream`、`outcome`、`origin`（sync / loop）等固定枚举，不含任何 id | 资产指令投递与重投循环（基线 assetop 指标）；定位 scene 的结局 |
+| guild | `xm_guild_internal_list_applied_total{result}`、`xm_guild_internal_list_applied_rows` | Counter / 分布 | `result` | 内部查询 |
+| scene | `xm_scene_asset_ops_total` | Counter | `rpc`=debit / abort_debit / credit，`outcome`=applied / rejected / retry / not_here / unknown / overloaded / error | 资产指令应答结局（全部组合启动即注册） |
+| scene | `xm_scene_asset_ops_inflight`、`executor_*{name="scene-asset-reply"}` | Gauge / 线程池 | — | 资产指令在途数与应答执行器 |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
 | 开了热关停的进程 | `xm_killswitch_rules` | Gauge | — | 当前生效的规则条数（快照作废后为 0） |
 | 开了热关停的进程 | `xm_killswitch_sync_failures_total` | Counter | — | 从 Redis 读规则失败的次数（§4.15） |

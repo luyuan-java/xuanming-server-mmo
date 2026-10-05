@@ -1,7 +1,8 @@
 // Java 版内部契约：通用资产通道（其他服务给在线玩家扣货币 / 发货币与物品，幂等账本保证每条 seq 恰好处理一次）。
 // 对应 mmorpg proto/common/asset/asset_op.proto + scene_node_service 的 AssetDebit / AssetAbortDebit / AssetCredit，
 // 但是 Java 自有格式（mmorpg 那份是服务端内部协议，不在两版共享的客户端契约里）。字段语义与数值同基线，签名串格式也同基线。
-// 只在 Java 版内部使用；传输（Dubbo）随路线图 4.5 帮会经济接入，目前 scene 侧在进程内提供。
+// 只在 Java 版内部使用；传输是 xm-scene 按节点导出的 Dubbo Triple 提供方 com.game.api.SceneAssetOpService（register = false，
+// 调用方按节点目录 SceneNodeInfo.rpc_host / rpc_port 直连，见 architecture.md §4.12）。
 syntax = "proto3";
 
 package xm.api;
@@ -51,7 +52,7 @@ message AssetBundle {
   uint64 pet_id = 4;
 }
 
-// 调用方签名：HMAC-SHA256(调用方密钥, 规范串) 的小写十六进制；规范串见 scene 的 AssetOpAuth（同基线 mmorpg-asset-op/v1）。
+// 调用方签名：HMAC-SHA256(调用方密钥, 规范串) 的小写十六进制；规范串唯一出处 com.game.api.asset.AssetOpSignatures（同基线 mmorpg-asset-op/v1）。
 message AssetAuth {
   string caller = 1;
   uint64 timestamp_ms = 2;

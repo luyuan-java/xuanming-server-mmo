@@ -13,6 +13,7 @@ import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.presence.PlayerPushes;
+import com.game.guild.asset.GuildAssetRuntime;
 import com.game.guild.cache.ApplyPushCooldown;
 import com.game.guild.cache.GuildCache;
 import com.game.guild.cache.GuildCacheInvalidator;
@@ -26,11 +27,13 @@ import com.game.guild.rank.GuildRanks;
 import com.game.guild.rules.GuildTip;
 import com.game.guild.rules.GuildTips;
 import com.game.guild.service.GuildAccess;
+import com.game.guild.service.GuildEconomyService;
 import com.game.guild.service.GuildManageService;
 import com.game.guild.service.GuildRankService;
 import com.game.guild.service.GuildService;
 import com.game.guild.service.GuildTableLookup;
 import com.game.guild.service.GuildViews;
+import com.game.guild.store.EconomyStore;
 import com.game.guild.store.GuildStore;
 import com.game.guild.store.GuildTx;
 import com.game.pbmysql.PbMysql;
@@ -114,6 +117,8 @@ class GuildEndToEndIntegrationTest {
     private GuildWorkerPool pool;
     private GuildDispatcher dispatcher;
     private final List<Long> guildIds = new ArrayList<>();
+    /** 资产通道关闭的运行件（不起循环与清理）。 */
+    private static final GuildAssetRuntime CHANNEL_OFF = new GuildAssetRuntime(null, null, java.time.Duration.ZERO);
 
     @BeforeEach
     void setUp() throws Exception {
@@ -146,7 +151,7 @@ class GuildEndToEndIntegrationTest {
 
         // ---- 照 GuildConfiguration 的顺序装配 ----
         GuildConfiguration wiring = new GuildConfiguration();
-        GuildProperties props = new GuildProperties(null, null, null, null, null, 4, 64);
+        GuildProperties props = new GuildProperties(null, null, null, null, null, 4, 64, null);
         GuildMetrics metrics = wiring.guildMetrics(new SimpleMeterRegistry());
         ConfigTables tables = wiring.guildConfigTables(tableDir());
         PbMysql synced = wiring.guildTables(dataSource, tables);
@@ -161,7 +166,7 @@ class GuildEndToEndIntegrationTest {
         GuildCache.CacheRedis cacheRedis = wiring.guildCacheRedis(redis);
         GuildCacheInvalidator invalidator = wiring.guildCacheInvalidator(cacheRedis, props, background, metrics);
         GuildCache cache = wiring.guildCache(cacheRedis, props, store, invalidator, metrics);
-        GuildRanks ranks = wiring.guildRanks(redis, background, metrics, store, lease);
+        GuildRanks ranks = wiring.guildRanks(redis, background, metrics, store, lease, CHANNEL_OFF);
         ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis);
         PlayerPresenceDirectory presence = wiring.playerPresenceDirectory(redis);
         PlayerPushes playerPushes = wiring.playerPushes(redis, presence);
@@ -174,7 +179,11 @@ class GuildEndToEndIntegrationTest {
         GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup);
         GuildRankService rankService = wiring.guildRankService(ranks, cache, access, views);
         pool = wiring.guildWorkerPool(props, dataSource);
-        dispatcher = wiring.guildDispatcher(REGISTRY, guilds, manage, rankService, pool, metrics, props);
+        // 4.5：资产通道关闭（props 缺省），经济服务照常装配（升级与两个读页可用，捐献 / 兑换回 14026）
+        EconomyStore economyStore = wiring.economyStore(tx, ready);
+        GuildEconomyService economy = wiring.guildEconomyService(economyStore, cache, access, views,
+                wiring.economyTables(tables), pushes, metrics, ids, CHANNEL_OFF, props, pool);
+        dispatcher = wiring.guildDispatcher(REGISTRY, guilds, manage, rankService, economy, pool, metrics, props);
     }
 
     private static void insertPlayer(PreparedStatement ps, long id, String name, int zone) throws Exception {
@@ -330,10 +339,12 @@ class GuildEndToEndIntegrationTest {
         assertThat(call(a, GuildMethods.GET_PLAYER_GUILD, null, GetPlayerGuildResponse.parser()).getErrorMessage())
                 .isEqualTo(GuildTip.NOT_IN_ANY_GUILD.proto());
 
-        // 上行 8 → 信封 1003；4.5 的号 → in-band 1006
+        // 上行 8 → 信封 1003；4.5 的捐献在通道关闭时 → in-band 14026；4.6 的号 → in-band 1006
         assertThat(send(b, GuildMethods.UPDATE_GUILD_SCORE, null).getTipId()).isEqualTo(GuildTips.SERVICE_UNAVAILABLE);
         assertThat(call(b, GuildMethods.DONATE_TO_GUILD, null, DonateToGuildResponse.parser()).getErrorMessage())
-                .isEqualTo(GuildTip.FEATURE_UNAVAILABLE.proto());
+                .isEqualTo(GuildTip.ASSET_CHANNEL_DISABLED.proto());
+        assertThat(call(b, GuildMethods.GET_GUILD_ACTIVITIES, null, com.game.proto.guild.GetGuildActivitiesResponse.parser())
+                .getErrorMessage()).isEqualTo(GuildTip.FEATURE_UNAVAILABLE.proto());
 
         // 解散：清榜，之后查不到名次、也不在任何帮
         assertThat(call(b, GuildMethods.DISBAND_GUILD, null, DisbandGuildResponse.parser()).hasErrorMessage()).isFalse();
@@ -354,11 +365,11 @@ class GuildEndToEndIntegrationTest {
         // 榜键被清掉（模拟 Redis 丢数据），再按装配跑一次重建
         redis.getKeys().delete(RedisKeys.guildRankAll(), RedisKeys.guildRankZone(ZONE), RedisKeys.guildRankZones());
         GuildConfiguration wiring = new GuildConfiguration();
-        GuildProperties props = new GuildProperties(null, null, null, null, null, null, null);
+        GuildProperties props = new GuildProperties(null, null, null, null, null, null, null, null);
         GuildMetrics metrics = wiring.guildMetrics(new SimpleMeterRegistry());
         GuildTx tx = wiring.guildTx(dataSource, props, metrics);
         GuildStore store = wiring.guildStore(tx, new GuildConfiguration.SchemaReady("test"));
-        wiring.guildRanks(redis, background, metrics, store, lease);
+        wiring.guildRanks(redis, background, metrics, store, lease, CHANNEL_OFF);
         assertThat(redis.getScoredSortedSet(RedisKeys.guildRankZone(ZONE), org.redisson.client.codec.StringCodec.INSTANCE)
                 .contains(Long.toUnsignedString(g))).isTrue();
         GetGuildRankByGuildResponse byGuild = call(a, GuildMethods.GET_GUILD_RANK_BY_GUILD,

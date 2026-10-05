@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * 派发器的准入与错误映射（guild-spec §7.3、§6.5、§11.2；基线 session_test.go:59-147 的准入用例、guild_server.go:128-133）。
- * 已拍板的两处覆盖：过载 → in-band 14021「guild service overloaded」（不是信封）；4.5 / 4.6 的 10 个号 → in-band 1006。
+ * 已拍板的两处覆盖：过载 → in-band 14021「guild service overloaded」（不是信封）；4.6 的 5 个活动号 → in-band 1006（4.5 的经济号已换成真实处理器）。
  */
 class GuildDispatcherTest {
 
@@ -53,7 +53,8 @@ class GuildDispatcherTest {
     }
 
     private GuildDispatcher dispatcher(Executor executor, long budgetMillis) {
-        return new GuildDispatcher(REGISTRY, f.guilds, f.manage, f.rankService, executor, f.metrics, budgetMillis);
+        return new GuildDispatcher(REGISTRY, f.guilds, f.manage, f.rankService, f.economy, executor, f.metrics,
+                budgetMillis);
     }
 
     private GuildDispatcher dispatcher() {
@@ -84,9 +85,9 @@ class GuildDispatcherTest {
         GuildDispatcher d = dispatcher();
         assertThat(d.routedMessageIds()).isEqualTo(expected);
         assertThat(d.messageIdsOf(GuildMethods.CLIENT_REQUESTS)).hasSize(16);
+        assertThat(d.messageIdsOf(GuildMethods.ECONOMY_REQUESTS)).containsExactlyInAnyOrder(53, 76, 120, 228, 233);
         assertThat(d.messageIdsOf(GuildMethods.FORBIDDEN)).containsExactlyInAnyOrder(8, 220);
-        assertThat(d.messageIdsOf(GuildMethods.PLACEHOLDERS)).containsExactlyInAnyOrder(53, 76, 120, 228, 233, 239, 240, 241,
-                242, 243);
+        assertThat(d.messageIdsOf(GuildMethods.PLACEHOLDERS)).containsExactlyInAnyOrder(239, 240, 241, 242, 243);
         // 契约里的 GuildService 恰好就是这 28 个
         Set<String> contract = new HashSet<>();
         for (MessageMethod m : REGISTRY.all()) {
@@ -102,7 +103,8 @@ class GuildDispatcherTest {
         for (String method : List.of(GuildMethods.CREATE_GUILD, GuildMethods.NOTIFY_GUILD_CHANGED,
                 GuildMethods.DONATE_TO_GUILD, GuildMethods.UPDATE_GUILD_SCORE)) {
             MessageIdRegistry broken = GuildContractFixtures.registryWithout(GuildMethods.SERVICE + method);
-            assertThatThrownBy(() -> new GuildDispatcher(broken, f.guilds, f.manage, f.rankService, Runnable::run, f.metrics,
+            assertThatThrownBy(() -> new GuildDispatcher(broken, f.guilds, f.manage, f.rankService, f.economy, Runnable::run,
+                    f.metrics,
                     3500)).as(method).isInstanceOf(IllegalStateException.class).hasMessageContaining(method);
         }
     }
@@ -165,7 +167,7 @@ class GuildDispatcherTest {
     }
 
     @Test
-    void 经济与活动的10个号回in_band_1006_计unsupported() throws Exception {
+    void 活动的5个号仍回in_band_1006_计unsupported() throws Exception {
         GuildDispatcher d = dispatcher();
         for (String method : GuildMethods.PLACEHOLDERS) {
             ClientReply reply = d.dispatch(call(id(method), ME, ByteString.EMPTY)).join();
@@ -177,10 +179,44 @@ class GuildDispatcherTest {
             assertThat(tip.getId()).as(method).isEqualTo(GuildTips.FEATURE_UNAVAILABLE);
             assertThat(requests(method, "unsupported")).as(method).isEqualTo(1);
         }
+    }
+
+    @Test
+    void 经济5个号换成真实处理器_D13的1006占位撤销() throws Exception {
+        GuildDispatcher d = dispatcher();
+        f.zones.put(ME, GuildServiceFixture.ZONE);
+        // 不在帮：经济前置回 14002（不查归属区），不再是 1006
         DonateToGuildResponse donate = DonateToGuildResponse.parseFrom(
                 d.dispatch(call(id(GuildMethods.DONATE_TO_GUILD), ME, ByteString.EMPTY)).join().getBody());
-        assertThat(donate.getErrorMessage()).isEqualTo(GuildTip.FEATURE_UNAVAILABLE.proto());
-        assertThat(donate.hasGuild()).isFalse();
+        assertThat(donate.getErrorMessage()).isEqualTo(GuildTip.NOT_IN_ANY_GUILD.proto());
+        assertThat(requests(GuildMethods.DONATE_TO_GUILD, "business_error")).isEqualTo(1);
+        // 在帮、通道关闭（f.economy 没有同步投递）：14026
+        f.store.put(com.game.guild.service.ScriptedStore.guild(500, GuildServiceFixture.ZONE, ME));
+        donate = DonateToGuildResponse.parseFrom(
+                d.dispatch(call(id(GuildMethods.DONATE_TO_GUILD), ME, ByteString.EMPTY)).join().getBody());
+        assertThat(donate.getErrorMessage()).isEqualTo(GuildTip.ASSET_CHANNEL_DISABLED.proto());
+        for (String method : GuildMethods.ECONOMY_REQUESTS) {
+            assertThat(f.meters.find("xm.guild.requests").tag("method", method).tag("result", "unsupported").timer())
+                    .as(method + " 不再是占位").isNull();
+        }
+    }
+
+    @Test
+    void 经济处理器同步部分的依赖故障回信封1003() {
+        // 在帮、通道开启：预留事务抛依赖故障（同步部分）→ 信封 1003，与 4.4 的处理器一致
+        f.zones.put(ME, GuildServiceFixture.ZONE);
+        f.store.put(com.game.guild.service.ScriptedStore.guild(500, GuildServiceFixture.ZONE, ME));
+        com.game.guild.service.GuildEconomyService broken = f.economy((op, origin, budget) ->
+                java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("bug")), Runnable::run);
+        GuildDispatcher d = new GuildDispatcher(REGISTRY, f.guilds, f.manage, f.rankService, broken, Runnable::run, f.metrics,
+                3500);
+        f.economyStore.donate = in -> {
+            throw new DependencyException("mysql down");
+        };
+        assertThat(d.dispatch(call(id(GuildMethods.DONATE_TO_GUILD), ME,
+                com.game.proto.guild.DonateToGuildRequest.newBuilder().setDonateId(1).build().toByteString())).join())
+                .isEqualTo(ENVELOPE_1003);
+        assertThat(requests(GuildMethods.DONATE_TO_GUILD, "internal_error")).isEqualTo(1);
     }
 
     @Test
@@ -263,13 +299,17 @@ class GuildDispatcherTest {
 
     @Test
     void 可能出现的指标组合启动即预建() {
-        for (String method : GuildMethods.CLIENT_REQUESTS) {
-            for (String result : List.of("ok", "business_error", "internal_error", "overloaded", "bad_request",
-                    "unauthenticated")) {
-                assertThat(requests(method, result)).isZero();
+        for (List<String> methods : List.of(GuildMethods.CLIENT_REQUESTS, GuildMethods.ECONOMY_REQUESTS)) {
+            for (String method : methods) {
+                for (String result : List.of("ok", "business_error", "internal_error", "overloaded", "bad_request",
+                        "unauthenticated")) {
+                    assertThat(requests(method, result)).isZero();
+                }
             }
         }
         assertThat(requests(GuildMethods.CREATE_GUILD, "fault")).isZero();
+        assertThat(requests(GuildMethods.DONATE_TO_GUILD, "fault")).isZero();
+        assertThat(requests(GuildMethods.BUY_GUILD_SHOP_GOODS, "fault")).isZero();
         for (String method : GuildMethods.FORBIDDEN) {
             assertThat(requests(method, "forbidden")).isZero();
         }

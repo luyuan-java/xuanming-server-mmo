@@ -29,6 +29,22 @@ class SceneNodePropertiesTest {
     }
 
     @Test
+    void 资产通道_端口缺省21100_在途上限缺省256_可覆盖_非法值拒绝() {
+        SceneNodeProperties.SceneSettings s = bind(Map.of()).scene();
+        assertThat(s.assetRpcPort()).isEqualTo(21100);
+        assertThat(s.assetOpMaxInflight()).isEqualTo(256);
+
+        SceneNodeProperties.SceneSettings custom = bind(Map.of("xm.scene.asset-rpc-port", "21101",
+                "xm.scene.asset-op-max-inflight", "64")).scene();
+        assertThat(custom.assetRpcPort()).isEqualTo(21101);
+        assertThat(custom.assetOpMaxInflight()).isEqualTo(64);
+
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.asset-rpc-port", "0"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.asset-rpc-port", "65536"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.asset-op-max-inflight", "0"))).isInstanceOf(BindException.class);
+    }
+
+    @Test
     void 按币种覆盖_没写的项取内置缺省_非法值拒绝() {
         SceneNodeProperties.SceneSettings s = bind(Map.of(
                 "xm.scene.anomaly.max-count", "0",

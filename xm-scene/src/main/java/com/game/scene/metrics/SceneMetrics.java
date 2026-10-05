@@ -1,5 +1,6 @@
 package com.game.scene.metrics;
 
+import com.game.api.asset.AssetRpc;
 import com.game.api.proto.NodeLinkFrame;
 import io.micrometer.core.instrument.Clock;
 import io.micrometer.core.instrument.Counter;
@@ -61,6 +62,10 @@ public final class SceneMetrics {
     static final String SKILL_RELEASES = "xm.scene.skill.releases";
     static final String SKILL_INTERRUPTS = "xm.scene.skill.interrupts";
     static final String TEAM_FOLLOW = "xm.scene.team.follow";
+    static final String ASSET_OPS = "xm.scene.asset.ops";
+    static final String ASSET_OPS_INFLIGHT = "xm.scene.asset.ops.inflight";
+    /** 资产通道回写线程池（把 Dubbo 应答切出逻辑线程）的 {@code executor_*} 指标 {@code name} 标签。 */
+    static final String ASSET_REPLY_EXECUTOR_NAME = "scene-asset-reply";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -208,6 +213,23 @@ public final class SceneMetrics {
         SHUTDOWN_DROPPED
     }
 
+    /**
+     * 一次跨进程资产调用（帮会 / 交易经 Dubbo 调进来的 debit / abort_debit / credit）的结局（{@code xm.scene.asset.ops{rpc, outcome}}，
+     * guild-economy-spec E13；基线 scene 侧只有日志），每次调用恰好计一次。前五个是 scene 的答复（{@code AssetOutcome}），后两个是没进逻辑线程或
+     * 没拿到答复的传输失败（调用方一律按 Retry 重投）。player_id / seq 只进日志，不进标签。
+     */
+    public enum AssetOpResult {
+        APPLIED,
+        REJECTED,
+        RETRY,
+        NOT_HERE,
+        UNKNOWN,
+        /** 超过在途上限（{@code xm.scene.asset-op-max-inflight}），直接回失败（「过载」），没进逻辑线程。 */
+        OVERLOADED,
+        /** 资产通道未就绪、逻辑线程已停或处理中抛异常。 */
+        ERROR
+    }
+
     /** 没发出去的 scene → gate 链路帧（{@code xm.scene.link.dropped{reason}}）。 */
     public enum LinkDrop {
         /** 链路已注销或已断开（其上会话随链路一起失效）。 */
@@ -235,6 +257,7 @@ public final class SceneMetrics {
     private final Map<LinkDrop, Counter> linkDrops;
     private final Counter linkPauses;
     private final Map<AuditKind, Map<AuditResult, Counter>> auditRecords;
+    private final Map<AssetRpc, Map<AssetOpResult, Counter>> assetOps;
     /** 场景配置号 → 在线人数（逻辑线程写，抓取线程读）。首次出现时注册 Gauge。 */
     private final ConcurrentHashMap<Integer, AtomicInteger> scenePlayers = new ConcurrentHashMap<>();
 
@@ -290,6 +313,19 @@ public final class SceneMetrics {
                         .register(registry));
             }
             auditRecords.put(kind, byResult);
+        }
+        // 资产通道：rpc × outcome 全部预注册（3 × 7 条，有界），抓取时没有调用过的组合也是 0
+        this.assetOps = new EnumMap<>(AssetRpc.class);
+        for (AssetRpc rpc : AssetRpc.values()) {
+            EnumMap<AssetOpResult, Counter> byResult = new EnumMap<>(AssetOpResult.class);
+            for (AssetOpResult result : AssetOpResult.values()) {
+                byResult.put(result, Counter.builder(ASSET_OPS)
+                        .description("跨进程资产调用（debit / abort_debit / credit）的结局；overloaded / error 是没拿到 scene 答复的传输失败")
+                        .tag("rpc", rpc.wireName())
+                        .tag("outcome", tagValue(result))
+                        .register(registry));
+            }
+            assetOps.put(rpc, byResult);
         }
     }
 
@@ -483,6 +519,28 @@ public final class SceneMetrics {
     /** 一条审计记录的结局（任意线程，含 Kafka 生产者的回调线程）。 */
     public void auditRecord(AuditKind kind, AuditResult result) {
         auditRecords.get(kind).get(result).increment();
+    }
+
+    // ================================================================ 资产通道（跨进程）
+
+    /** 一次跨进程资产调用的结局（任意线程：回写线程或 Dubbo 业务线程）。 */
+    public void assetOp(AssetRpc rpc, AssetOpResult result) {
+        assetOps.get(rpc).get(result).increment();
+    }
+
+    /**
+     * 资产通道在途调用数（{@code xm.scene.asset.ops.inflight}；已占在途名额、还没回写的）。{@code inFlight} 在抓取线程上调用，
+     * 必须线程安全、不阻塞。
+     */
+    public void bindAssetOpsInFlight(IntSupplier inFlight) {
+        Gauge.builder(ASSET_OPS_INFLIGHT, () -> inFlight.getAsInt())
+                .description("资产通道在途调用数（上限 xm.scene.asset-op-max-inflight，超出直接回过载）")
+                .register(registry);
+    }
+
+    /** 资产通道回写线程池（{@code executor.*{name="scene-asset-reply"}}）。 */
+    public void bindAssetReplyExecutor(ExecutorService executor) {
+        new ExecutorServiceMetrics(executor, ASSET_REPLY_EXECUTOR_NAME, Tags.empty()).bindTo(registry);
     }
 
     /** 一条链路因逻辑线程积压而暂停读取（{@code xm.scene.link.backpressure.pauses}）。 */

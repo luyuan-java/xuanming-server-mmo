@@ -1,5 +1,6 @@
 package com.game.scene.asset;
 
+import com.game.api.asset.AssetRpc;
 import com.game.api.proto.AssetBundle;
 import com.game.api.proto.AssetCurrency;
 import com.game.api.proto.AssetItem;
@@ -7,9 +8,10 @@ import com.game.api.proto.AssetOpRequest;
 import com.game.api.proto.AssetOpResponse;
 import com.game.api.proto.AssetOutcome;
 import com.game.api.proto.AssetStream;
+import com.game.player.store.asset.AssetSeqState;
+import com.game.player.store.asset.PersistedAssetLedger;
 import com.game.player.store.state.PlayerState;
 import com.game.scene.asset.AssetOpLedger.RecordKind;
-import com.game.scene.asset.AssetOpLedger.SeqState;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.bag.BagService;
 import com.game.scene.currency.CurrencyService;
@@ -66,20 +68,7 @@ public final class AssetOpService {
     static final int MAX_CREDIT_CURRENCIES = 4;
     static final int MAX_CREDIT_ITEMS = 16;
 
-    /** 三个入口；名字同时是签名规范串第 3 行（改名就是改协议）。 */
-    public enum Rpc {
-        DEBIT("debit"), ABORT_DEBIT("abort_debit"), CREDIT("credit");
-
-        private final String wireName;
-
-        Rpc(String wireName) {
-            this.wireName = wireName;
-        }
-
-        public String wireName() {
-            return wireName;
-        }
-    }
+    // 三个入口是 xm-api 的 AssetRpc（wireName 同时是签名规范串第 3 行，调用方签名与这边验签共用那一个枚举）。
 
     private enum Direction { DEBIT, CREDIT }
 
@@ -126,7 +115,7 @@ public final class AssetOpService {
     }
 
     /** 处理一条请求（逻辑线程上调用）。每次结束打一行日志（日志可以带 player_id，指标不可以）。 */
-    public AssetOpResponse handle(Rpc rpc, AssetOpRequest request) {
+    public AssetOpResponse handle(AssetRpc rpc, AssetOpRequest request) {
         AssetOpResponse response = decide(rpc, request);
         log.info("[AssetOp] rpc={} player={} stream={} epoch={} seq={} corr={} outcome={} reason={} durable={} partial={}",
                 rpc.wireName(), Long.toUnsignedString(request.getPlayerId()), request.getStreamValue(),
@@ -138,8 +127,8 @@ public final class AssetOpService {
 
     // ------------------------------------------------------------------ 统一流程（顺序同基线 Decide）
 
-    private AssetOpResponse decide(Rpc rpc, AssetOpRequest request) {
-        boolean abort = rpc == Rpc.ABORT_DEBIT;
+    private AssetOpResponse decide(AssetRpc rpc, AssetOpRequest request) {
+        boolean abort = rpc == AssetRpc.ABORT_DEBIT;
         // 1. 信封（不记账）
         if (request.getPlayerId() == 0 || request.getSeq() == 0 || request.getStreamEpoch() == 0) {
             log.warn("[AssetOp] 信封非法 rpc={} player={} seq={} epoch={}", rpc.wireName(),
@@ -154,7 +143,7 @@ public final class AssetOpService {
         }
         // 中止收全部流（它只是给未见 seq 记一个拒绝占位），也不校验流水原因
         if (!abort) {
-            Direction wanted = rpc == Rpc.DEBIT ? Direction.DEBIT : Direction.CREDIT;
+            Direction wanted = rpc == AssetRpc.DEBIT ? Direction.DEBIT : Direction.CREDIT;
             if (rule.direction() != wanted || !rule.allowedTx().containsKey(request.getTxType())) {
                 log.warn("[AssetOp] 流方向或流水原因白名单不符 rpc={} stream={} tx_type={}", rpc.wireName(),
                         request.getStreamValue(), Integer.toUnsignedString(request.getTxType()));
@@ -183,7 +172,7 @@ public final class AssetOpService {
         }
         // 4. 分类
         int stream = request.getStreamValue();
-        SeqState state = ledger.classify(stream, request.getStreamEpoch(), request.getSeq());
+        AssetSeqState state = ledger.classify(stream, request.getStreamEpoch(), request.getSeq());
         switch (state) {
             case INVALID -> {
                 return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, INVALID_BUNDLE);
@@ -198,7 +187,7 @@ public final class AssetOpService {
                 return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, 0);
             }
             case APPLIED, REJECTED -> {
-                return answerSeen(player, request, state == SeqState.APPLIED, nowMs);
+                return answerSeen(player, request, state == AssetSeqState.APPLIED, nowMs);
             }
             case UNSEEN, AHEAD_OF_WINDOW -> {
                 // 继续走闸门
@@ -217,14 +206,14 @@ public final class AssetOpService {
         }
         // 7. 应用闸门：战斗中（27002）随 6.x 回合制战斗接入
         // 8. 包内容（确定性失败 → 记 REJECTED，免得调用方无限重投同一个坏包）
-        String why = rpc == Rpc.DEBIT ? validateDebit(request.getBundle()) : validateCredit(request.getBundle());
+        String why = rpc == AssetRpc.DEBIT ? validateDebit(request.getBundle()) : validateCredit(request.getBundle());
         if (why != null) {
             log.warn("[AssetOp] 包内容非法 rpc={} player={} seq={} why={}", rpc.wireName(),
                     Long.toUnsignedString(request.getPlayerId()), Long.toUnsignedString(request.getSeq()), why);
             return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);
         }
         AssetAudit.Reason reason = rule.allowedTx().get(request.getTxType());
-        return rpc == Rpc.DEBIT ? applyDebit(player, request, reason, nowMs)
+        return rpc == AssetRpc.DEBIT ? applyDebit(player, request, reason, nowMs)
                 : applyCredit(player, request, reason, nowMs);
     }
 
@@ -487,22 +476,25 @@ public final class AssetOpService {
         return durable;
     }
 
-    /** 结局已出现在最近一次确认落库的存档里（只看落库快照，不另建水位）。 */
+    /**
+     * 结局已出现在最近一次确认落库的存档里（只看落库快照，不另建水位）。快照用只读视图 {@link PersistedAssetLedger} 判——与帮会离线读
+     * 已落盘账本（guild-economy-spec §4.9）是同一份判定代码，「scene 说 durable」与「调用方离线读到结论」不会分叉。
+     */
     private static boolean durable(ScenePlayer player, AssetOpRequest request, boolean expectApplied) {
         PlayerState persisted = player.persistedState();
         if (persisted == null || !persisted.hasAssetLedger()) {
             return false;
         }
-        AssetOpLedger onDisk = AssetOpLedger.restore(persisted.getAssetLedger());
+        PersistedAssetLedger onDisk = PersistedAssetLedger.restore(persisted.getAssetLedger());
         int stream = request.getStreamValue();
         if (onDisk.invalidReason() != null || onDisk.epochOf(stream) != request.getStreamEpoch()) {
             return false;
         }
-        SeqState state = onDisk.classify(stream, request.getStreamEpoch(), request.getSeq());
-        if (state != SeqState.APPLIED && state != SeqState.REJECTED) {
+        AssetSeqState state = onDisk.classify(stream, request.getStreamEpoch(), request.getSeq());
+        if (state != AssetSeqState.APPLIED && state != AssetSeqState.REJECTED) {
             return false;
         }
-        if ((state == SeqState.APPLIED) != expectApplied) {
+        if ((state == AssetSeqState.APPLIED) != expectApplied) {
             // 盘上结局与内存结局不同：结局固定被破坏，只可能是 bug。不敢报 durable，让调用方继续重查并告警
             log.error("[AssetOp] 落库快照结局与内存结局不一致 player={} stream={} epoch={} seq={} on_disk={} expect_applied={}",
                     Long.toUnsignedString(request.getPlayerId()), stream, Long.toUnsignedString(request.getStreamEpoch()),

@@ -27,41 +27,41 @@ import java.util.concurrent.TimeUnit;
 /**
  * 真 MySQL 测试的公共夹具（缺省跳过：{@code -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306}，口令取环境变量 XM_MYSQL_PASSWORD）。
  *
- * <p>每个测试类建一个一次性库 {@code xm_guild_it_<随机>}（四张表经 {@link GuildTables#sync} 建，与生产同一条路径），结束时删掉；
+ * <p>每个测试类建一个一次性库 {@code xm_guild_it_<随机>}（全部表（含 4.5 资产三表）经 {@link GuildTables#sync} 建，与生产同一条路径），结束时删掉；
  * 绝不碰 xm_java。连接串与生产同口径：会话级 READ COMMITTED、{@code innodb_lock_wait_timeout=1}、{@code useAffectedRows=true}
- * （不这样开池就等于在验一个与线上不同的数据库会话，基线 guild_repo_zone_test.go:42-46 同理）。每个用例前清空四张表并按启动顺序
- * 重建哨兵行（{@link GuildStartupChecks#ensureGlobalInsertGuard}）。
+ * （不这样开池就等于在验一个与线上不同的数据库会话，基线 guild_repo_zone_test.go:42-46 同理）。每个用例前清空全部表并按启动顺序
+ * 重建哨兵行（{@link GuildStartupChecks#ensureGlobalInsertGuard}）。4.5 起是 public：asset 包的真库用例也用它（经济夹具见 {@link EconomyFixtures}）。
  *
  * <p>夹具行（seedXxx）直接用 SQL 造，刻意绕开被测方法：建帮 / 申请自带一整套前置（建状态行、清申请），用它们造夹具会让
  * 「被测的那一步失败」与「夹具没造出来」混在一起。时间一律用 {@link #NOW} 显式传入，过期与否由入参决定。
  */
-final class GuildMysqlFixture implements AutoCloseable {
+public final class GuildMysqlFixture implements AutoCloseable {
 
-    static final String BASE_URL = System.getProperty("xm.it.mysql");
-    static final String USER = System.getProperty("xm.it.mysql.user", "root");
-    static final String PASSWORD = System.getenv().getOrDefault("XM_MYSQL_PASSWORD", "");
-    static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&useAffectedRows=true"
+    public static final String BASE_URL = System.getProperty("xm.it.mysql");
+    public static final String USER = System.getProperty("xm.it.mysql.user", "root");
+    public static final String PASSWORD = System.getenv().getOrDefault("XM_MYSQL_PASSWORD", "");
+    public static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&useAffectedRows=true"
             + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1";
 
     /** 所有用例的「当前时刻」（基线 testNowMs）。 */
-    static final long NOW = 1_700_000_000_000L;
+    public static final long NOW = 1_700_000_000_000L;
     /** GuildRule.application_expire_hours = 72。 */
-    static final long TTL = 72L * 3_600_000L;
+    public static final long TTL = 72L * 3_600_000L;
     /** MaxPerGuild 压到 2：队列上限的用例只需要 3 个申请人（基线 testRules）。 */
-    static final ApplicationRules RULES = new ApplicationRules(TTL, 3, 2);
+    public static final ApplicationRules RULES = new ApplicationRules(TTL, 3, 2);
 
     /** 测试钩子用的闸门表：解散的「提前截止」位置点锁它的 1 号行，占锁事务持有它就能把解散停在那一步。 */
-    static final String GATE_TABLE = "guild_it_gate";
+    public static final String GATE_TABLE = "guild_it_gate";
 
-    final String database;
-    final DruidDataSource dataSource;
+    public final String database;
+    public final DruidDataSource dataSource;
 
     private GuildMysqlFixture(String database, DruidDataSource dataSource) {
         this.database = database;
         this.dataSource = dataSource;
     }
 
-    static GuildMysqlFixture create() throws SQLException {
+    public static GuildMysqlFixture create() throws SQLException {
         String database = "xm_guild_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
              Statement st = c.createStatement()) {
@@ -90,41 +90,41 @@ final class GuildMysqlFixture implements AutoCloseable {
         }
     }
 
-    /** 清空四张表、按启动顺序重建哨兵行（updated_ms = NOW）。 */
-    void reset() throws SQLException {
+    /** 清空全部表（GuildTables.NAMES）、按启动顺序重建哨兵行（updated_ms = NOW）。 */
+    public void reset() throws SQLException {
         for (String table : GuildTables.NAMES) {
             exec("TRUNCATE TABLE `" + table + "`");
         }
         startup(GuildTxListener.NONE).ensureGlobalInsertGuard(NOW, d());
     }
 
-    GuildTx tx(GuildTxListener listener) {
+    public GuildTx tx(GuildTxListener listener) {
         return new GuildTx(dataSource::getConnection, 10, listener);
     }
 
-    JdbcGuildStore store(GuildTxListener listener, GuildTxHooks hooks) {
+    public JdbcGuildStore store(GuildTxListener listener, GuildTxHooks hooks) {
         return new JdbcGuildStore(tx(listener), hooks);
     }
 
-    GuildStartupChecks startup(GuildTxListener listener) {
+    public GuildStartupChecks startup(GuildTxListener listener) {
         return new GuildStartupChecks(tx(listener));
     }
 
     /** 每次调用一个宽裕的请求预算（关心的是 SQL 行为，不是超时；子预算照样是 1500 / 2500）。 */
-    static Deadline d() {
+    public static Deadline d() {
         return Deadline.after(30_000);
     }
 
     // ================================================================ 夹具
 
-    void exec(String sql, Object... args) throws SQLException {
+    public void exec(String sql, Object... args) throws SQLException {
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, args);
             ps.executeUpdate();
         }
     }
 
-    long count(String sql, Object... args) throws SQLException {
+    public long count(String sql, Object... args) throws SQLException {
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, args);
             try (ResultSet rs = ps.executeQuery()) {
@@ -134,7 +134,7 @@ final class GuildMysqlFixture implements AutoCloseable {
         }
     }
 
-    Long queryU64(String sql, Object... args) throws SQLException {
+    public Long queryU64(String sql, Object... args) throws SQLException {
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, args);
             try (ResultSet rs = ps.executeQuery()) {
@@ -153,7 +153,7 @@ final class GuildMysqlFixture implements AutoCloseable {
      * 直接造一个帮会：帮主 + {@code roles} 里的成员（基线 seedManagedGuild）。名字 manage-guild-&lt;id&gt; 全小写 ASCII，
      * name_norm 与原串相同（与生产写入的值一致）。
      */
-    void seedGuild(long guildId, int zone, int level, int maxMembers, long leader, Map<Long, Integer> roles) throws SQLException {
+    public void seedGuild(long guildId, int zone, int level, int maxMembers, long leader, Map<Long, Integer> roles) throws SQLException {
         String name = "manage-guild-" + Long.toUnsignedString(guildId);
         exec("INSERT INTO guild (guild_id, name, name_norm, leader_id, level, announcement, create_time_ms, max_members,"
                 + " zone_id, score, funds) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, 0, 0)",
@@ -164,84 +164,84 @@ final class GuildMysqlFixture implements AutoCloseable {
         }
     }
 
-    void seedGuild(long guildId, int zone, int maxMembers, long leader) throws SQLException {
+    public void seedGuild(long guildId, int zone, int maxMembers, long leader) throws SQLException {
         seedGuild(guildId, zone, 1, maxMembers, leader, Map.of());
     }
 
     /** 只插一行帮会（不带成员），名字须已是规范形。 */
-    void seedNamedGuild(long guildId, long leader, String name, int zone) throws SQLException {
+    public void seedNamedGuild(long guildId, long leader, String name, int zone) throws SQLException {
         assertThat(com.game.guild.rules.GuildNames.nameNorm(name)).as("夹具名字必须已是规范形").isEqualTo(name);
         exec("INSERT INTO guild (guild_id, name, name_norm, leader_id, level, announcement, create_time_ms, max_members,"
                 + " zone_id, score, funds) VALUES (?, ?, ?, ?, 1, '', ?, 30, ?, 0, 0)", guildId, name, name, leader, NOW, zone);
     }
 
-    void seedMember(long guildId, long playerId, int role) throws SQLException {
+    public void seedMember(long guildId, long playerId, int role) throws SQLException {
         exec("INSERT INTO guild_member (guild_id, player_id, role, join_time_ms, last_active_ms, contribution_total,"
                 + " contribution_balance) VALUES (?, ?, ?, ?, ?, 0, 0)", guildId, playerId, role, NOW, NOW);
     }
 
-    void seedApplication(long guildId, long playerId, long applyMs, long expireMs) throws SQLException {
+    public void seedApplication(long guildId, long playerId, long applyMs, long expireMs) throws SQLException {
         exec("INSERT INTO guild_application (guild_id, player_id, apply_ms, expire_ms) VALUES (?, ?, ?, ?)",
                 guildId, playerId, applyMs, expireMs);
     }
 
-    void seedState(long... playerIds) throws SQLException {
+    public void seedState(long... playerIds) throws SQLException {
         for (long p : playerIds) {
             exec("INSERT INTO guild_player_state (player_id, updated_ms) VALUES (?, ?)", p, NOW);
         }
     }
 
-    long playerApplications(long playerId) throws SQLException {
+    public long playerApplications(long playerId) throws SQLException {
         return count("SELECT COUNT(*) FROM guild_application WHERE player_id = ?", playerId);
     }
 
-    long application(long guildId, long playerId) throws SQLException {
+    public long application(long guildId, long playerId) throws SQLException {
         return count("SELECT COUNT(*) FROM guild_application WHERE guild_id = ? AND player_id = ?", guildId, playerId);
     }
 
-    long liveApplications(long playerId, long now) throws SQLException {
+    public long liveApplications(long playerId, long now) throws SQLException {
         return count("SELECT COUNT(*) FROM guild_application WHERE player_id = ? AND expire_ms > ?", playerId, now);
     }
 
-    Long expireOf(long guildId, long playerId) throws SQLException {
+    public Long expireOf(long guildId, long playerId) throws SQLException {
         return queryU64("SELECT expire_ms FROM guild_application WHERE guild_id = ? AND player_id = ?", guildId, playerId);
     }
 
     /** 成员行的权威 role；没有成员行返回 null。 */
-    Integer roleOf(long guildId, long playerId) throws SQLException {
+    public Integer roleOf(long guildId, long playerId) throws SQLException {
         Long role = queryU64("SELECT role FROM guild_member WHERE guild_id = ? AND player_id = ?", guildId, playerId);
         return role == null ? null : role.intValue();
     }
 
-    long memberships(long playerId) throws SQLException {
+    public long memberships(long playerId) throws SQLException {
         return count("SELECT COUNT(*) FROM guild_member WHERE player_id = ?", playerId);
     }
 
-    long officers(long guildId) throws SQLException {
+    public long officers(long guildId) throws SQLException {
         return count("SELECT COUNT(*) FROM guild_member WHERE guild_id = ? AND role = ?", guildId, GuildRoles.OFFICER);
     }
 
-    Long leaderOf(long guildId) throws SQLException {
+    public Long leaderOf(long guildId) throws SQLException {
         return queryU64("SELECT leader_id FROM guild WHERE guild_id = ?", guildId);
     }
 
-    long guildRows(long guildId) throws SQLException {
+    public long guildRows(long guildId) throws SQLException {
         return count("SELECT COUNT(*) FROM guild WHERE guild_id = ?", guildId);
     }
 
-    long stateRows(long playerId) throws SQLException {
+    public long stateRows(long playerId) throws SQLException {
         return count("SELECT COUNT(*) FROM guild_player_state WHERE player_id = ?", playerId);
     }
 
     /** 开一个 RC 占锁事务（调用方提交 / 回滚并关闭连接）。 */
-    Connection begin() throws SQLException {
+    public Connection begin() throws SQLException {
         Connection c = dataSource.getConnection();
         c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         c.setAutoCommit(false);
         return c;
     }
 
-    static void execOn(Connection c, String sql, Object... args) throws SQLException {
+    public static void execOn(Connection c, String sql, Object... args) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, args);
             if (ps.execute()) {
@@ -254,7 +254,7 @@ final class GuildMysqlFixture implements AutoCloseable {
         }
     }
 
-    static void finish(Connection c, boolean commit) throws SQLException {
+    public static void finish(Connection c, boolean commit) throws SQLException {
         try (c) {
             if (commit) {
                 c.commit();
@@ -269,7 +269,7 @@ final class GuildMysqlFixture implements AutoCloseable {
      * 等到本库上至少 n 个事务处于锁等待（INNODB_TRX，需 PROCESS 权限），最多等 limit 毫秒（基线 lockOrderAwaitLockWaits）。
      * 只用来把「先让一方卡住、再放另一方」的交错摆出来，不影响判据；查询报错就退化成固定等待。
      */
-    void awaitLockWaits(int n, long limitMillis) {
+    public void awaitLockWaits(int n, long limitMillis) {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(limitMillis);
         String sql = "SELECT COUNT(*) FROM information_schema.INNODB_TRX t JOIN information_schema.PROCESSLIST p"
                 + " ON p.ID = t.trx_mysql_thread_id WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?";
@@ -286,7 +286,7 @@ final class GuildMysqlFixture implements AutoCloseable {
         }
     }
 
-    static void sleep(long millis) {
+    public static void sleep(long millis) {
         if (millis <= 0) {
             return;
         }
@@ -301,8 +301,8 @@ final class GuildMysqlFixture implements AutoCloseable {
     // ================================================================ 并发与结局
 
     /** 一路并发参与者的结局：拒绝原因（null = 成功）或异常。 */
-    record Result(GuildReject reject, Throwable error) {
-        boolean ok() {
+    public record Result(GuildReject reject, Throwable error) {
+        public boolean ok() {
             return reject == null && error == null;
         }
 
@@ -312,7 +312,7 @@ final class GuildMysqlFixture implements AutoCloseable {
         }
     }
 
-    static GuildReject rejectOf(TxOutcome<?> outcome) {
+    public static GuildReject rejectOf(TxOutcome<?> outcome) {
         return outcome.rejection();
     }
 
@@ -323,13 +323,13 @@ final class GuildMysqlFixture implements AutoCloseable {
     });
 
     /** 后台跑一路（结果从返回的 future 取）。 */
-    static CompletableFuture<Result> async(Callable<TxOutcome<?>> call) {
+    public static CompletableFuture<Result> async(Callable<TxOutcome<?>> call) {
         return CompletableFuture.supplyAsync(() -> run(call), POOL);
     }
 
     /** 同时放行若干路（统一闸门，尽量落在同一时刻），返回与入参一一对应的结局。 */
     @SafeVarargs
-    static List<Result> concurrently(Callable<TxOutcome<?>>... calls) {
+    public static List<Result> concurrently(Callable<TxOutcome<?>>... calls) {
         CountDownLatch start = new CountDownLatch(1);
         List<CompletableFuture<Result>> futures = new ArrayList<>();
         for (Callable<TxOutcome<?>> call : calls) {
@@ -358,12 +358,12 @@ final class GuildMysqlFixture implements AutoCloseable {
         }
     }
 
-    static long okCount(List<Result> results) {
+    public static long okCount(List<Result> results) {
         return results.stream().filter(Result::ok).count();
     }
 
     /** 失败的一路只能是给定的拒绝之一（异常一律不许）。 */
-    static void assertRejectIn(Result result, GuildReject... allowed) {
+    public static void assertRejectIn(Result result, GuildReject... allowed) {
         assertThat(result.error()).as("不许抛异常: %s", result).isNull();
         if (result.reject() != null) {
             assertThat(result.reject()).as("结局 %s", result).isIn((Object[]) allowed);
@@ -371,10 +371,10 @@ final class GuildMysqlFixture implements AutoCloseable {
     }
 
     /** 记录事务基座的三类指标：锁序回归断言「被重跑吸收掉的死锁」为零次。 */
-    static final class Recorder implements GuildTxListener {
-        final List<String> deadlocks = java.util.Collections.synchronizedList(new ArrayList<>());
-        final List<String> lockWaits = java.util.Collections.synchronizedList(new ArrayList<>());
-        final List<String> budgets = java.util.Collections.synchronizedList(new ArrayList<>());
+    public static final class Recorder implements GuildTxListener {
+        public final List<String> deadlocks = java.util.Collections.synchronizedList(new ArrayList<>());
+        public final List<String> lockWaits = java.util.Collections.synchronizedList(new ArrayList<>());
+        public final List<String> budgets = java.util.Collections.synchronizedList(new ArrayList<>());
 
         @Override
         public void deadlockObserved(GuildTxOp op) {
@@ -391,7 +391,7 @@ final class GuildMysqlFixture implements AutoCloseable {
             budgets.add(op.label());
         }
 
-        void assertNoDeadlocks(String what) {
+        public void assertNoDeadlocks(String what) {
             assertThat(deadlocks).as("%s：出现了被重跑吸收掉的死锁 / 写冲突（返回值看不出来），必须为 0 次", what).isEmpty();
         }
     }
@@ -400,10 +400,10 @@ final class GuildMysqlFixture implements AutoCloseable {
      * 测试钩子：{@link #blockOn} 设为某个帮会时，该帮的「提前截止」步骤（锁序位置 O）去点锁闸门表的 1 号行——占锁事务持有它，
      * 就能确定性地把解散 / 退帮 / 踢人停在「删成员与删申请之后、提交之前」。也可设 {@link #sleepMillis} 让它睡一会儿（耗尽子预算）。
      */
-    static final class GateHooks implements GuildTxHooks {
-        volatile long blockOn;
-        volatile long sleepMillis;
-        final List<String> calls = java.util.Collections.synchronizedList(new ArrayList<>());
+    public static final class GateHooks implements GuildTxHooks {
+        public volatile long blockOn;
+        public volatile long sleepMillis;
+        public final List<String> calls = java.util.Collections.synchronizedList(new ArrayList<>());
 
         @Override
         public void accelerateDonationDeadlines(GuildJdbc tx, long guildId, List<Long> playerIds, long nowMs)

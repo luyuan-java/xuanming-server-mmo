@@ -40,10 +40,11 @@
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>
         </dependency>
+        <!-- 资产通道定位（location/SceneAssetLocator）读 SceneNodeInfo、产出 SceneAssetEndpoint。xm-api 的 Dubbo 依赖是 optional，
+             不会经这里带进不用 Dubbo 的进程 -->
         <dependency>
             <groupId>com.game</groupId>
             <artifactId>xm-api</artifactId>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

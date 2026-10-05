@@ -107,6 +107,14 @@ public final class GuildServiceFixture implements AutoCloseable {
     public final GuildManageService manage;
     public final GuildRankService rankService;
 
+    // ---- 4.5 经济 ----
+    public final ScriptedEconomyStore economyStore;
+    public final FakeEconomyLookup economyTables = new FakeEconomyLookup();
+    final AtomicLong nextOpId = new AtomicLong(0x8000_0000_0000_5000L);
+    public volatile LongSupplier opIds = nextOpId::incrementAndGet;
+    /** 资产通道关闭（channel = null）的经济服务；派发测试用它。 */
+    public final GuildEconomyService economy;
+
     public GuildServiceFixture() {
         HomeZones homeZones = (ids, deadline) -> {
             zoneCalls.add(List.copyOf(ids));
@@ -172,6 +180,19 @@ public final class GuildServiceFixture implements AutoCloseable {
             return cooldownAllows;
         }, tables, () -> NOW);
         rankService = new GuildRankService(ranks, cache, access, views);
+        economyStore = new ScriptedEconomyStore(journal::add);
+        economy = economy(null, Runnable::run);
+    }
+
+    /**
+     * 一个经济服务（真实的前置 / 视图 / 推送；存储、配表、发号、同步投递是替身）。
+     *
+     * @param channel 同步投递（null = 资产通道关闭）
+     * @param workers 同步投递之后回读的工作池（测试一般用同步执行器）
+     */
+    public GuildEconomyService economy(com.game.guild.asset.AssetOpProcessor channel, java.util.concurrent.Executor workers) {
+        return new GuildEconomyService(economyStore, cache, access, views, economyTables, guildPushes, metrics,
+                () -> opIds.getAsLong(), new java.util.Random(1), channel, Duration.ofSeconds(10), workers, () -> NOW);
     }
 
     private CompletableFuture<Map<Long, PlayerPushes.Outcome>> push(Collection<Long> ids, MessageContent content) {

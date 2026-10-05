@@ -7,7 +7,7 @@ import com.game.player.store.state.AssetOpLedgerState;
 import com.game.player.store.state.AssetOpRejectionState;
 import com.game.player.store.state.AssetOpStreamLedgerState;
 import com.game.scene.asset.AssetOpLedger.RecordKind;
-import com.game.scene.asset.AssetOpLedger.SeqState;
+import com.game.player.store.asset.AssetSeqState;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,7 +40,7 @@ class AssetOpLedgerTest {
                 .isTrue();
     }
 
-    private SeqState classify(long seq) {
+    private AssetSeqState classify(long seq) {
         return ledger.classify(STREAM, EPOCH, seq);
     }
 
@@ -69,11 +69,11 @@ class AssetOpLedgerTest {
 
     @Test
     void 空账本分类() {
-        assertThat(classify(1)).isEqualTo(SeqState.UNSEEN);
-        assertThat(classify(BITS)).isEqualTo(SeqState.UNSEEN);
-        assertThat(classify(BITS + 1)).as("纪元 0 的空账本按纪元更大看：seq > 1024 即跳号").isEqualTo(SeqState.JUMP_TOO_FAR);
-        assertThat(classify(0)).isEqualTo(SeqState.INVALID);
-        assertThat(ledger.classify(STREAM, 0, 1)).isEqualTo(SeqState.INVALID);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.UNSEEN);
+        assertThat(classify(BITS)).isEqualTo(AssetSeqState.UNSEEN);
+        assertThat(classify(BITS + 1)).as("纪元 0 的空账本按纪元更大看：seq > 1024 即跳号").isEqualTo(AssetSeqState.JUMP_TOO_FAR);
+        assertThat(classify(0)).isEqualTo(AssetSeqState.INVALID);
+        assertThat(ledger.classify(STREAM, 0, 1)).isEqualTo(AssetSeqState.INVALID);
         assertThat(ledger.isPristine()).isTrue();
         assertThat(ledger.toState()).isEqualTo(AssetOpLedgerState.getDefaultInstance());
     }
@@ -82,9 +82,9 @@ class AssetOpLedgerTest {
     void 记应用与拒绝() {
         record(3, RecordKind.APPLIED);
         record(5, RecordKind.REJECTED);
-        assertThat(classify(3)).isEqualTo(SeqState.APPLIED);
-        assertThat(classify(5)).isEqualTo(SeqState.REJECTED);
-        assertThat(classify(4)).isEqualTo(SeqState.UNSEEN);
+        assertThat(classify(3)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(classify(5)).isEqualTo(AssetSeqState.REJECTED);
+        assertThat(classify(4)).isEqualTo(AssetSeqState.UNSEEN);
         assertThat(ledger.rejectionReason(STREAM, 5)).isEqualTo(REASON);
         assertThat(ledger.rejectionReason(STREAM, 3)).isZero();
         assertThat(stream().getMaxSeq()).isEqualTo(5);
@@ -114,10 +114,10 @@ class AssetOpLedgerTest {
         record(BITS, RecordKind.REJECTED);
         assertThat(stream().getSeenBits(15)).isEqualTo(1L << 63);
         assertThat(stream().getAppliedBits(15)).isZero();
-        assertThat(classify(1)).isEqualTo(SeqState.APPLIED);
-        assertThat(classify(BITS)).isEqualTo(SeqState.REJECTED);
-        assertThat(classify(2)).isEqualTo(SeqState.UNSEEN);
-        assertThat(classify(BITS - 1)).isEqualTo(SeqState.UNSEEN);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(classify(BITS)).isEqualTo(AssetSeqState.REJECTED);
+        assertThat(classify(2)).isEqualTo(AssetSeqState.UNSEEN);
+        assertThat(classify(BITS - 1)).isEqualTo(AssetSeqState.UNSEEN);
         for (int word = 1; word < 15; word++) {
             assertThat(stream().getSeenBits(word)).isZero();
         }
@@ -130,26 +130,26 @@ class AssetOpLedgerTest {
         for (long seq = 1; seq <= BITS; seq++) {
             record(seq, RecordKind.APPLIED);
         }
-        assertThat(classify(BITS + 1)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
+        assertThat(classify(BITS + 1)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
         record(BITS + 1, RecordKind.APPLIED);
         assertThat(stream().getWatermark()).isEqualTo(1);
         assertThat(stream().getMaxSeq()).isEqualTo(BITS + 1);
-        assertThat(classify(1)).isEqualTo(SeqState.BEHIND_WINDOW);
-        assertThat(classify(2)).isEqualTo(SeqState.APPLIED);
-        assertThat(classify(BITS)).isEqualTo(SeqState.APPLIED);
-        assertThat(classify(BITS + 1)).isEqualTo(SeqState.APPLIED);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.BEHIND_WINDOW);
+        assertThat(classify(2)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(classify(BITS)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(classify(BITS + 1)).isEqualTo(AssetSeqState.APPLIED);
         assertThat(AssetOpLedger.validate(ledger.toState())).isNull();
     }
 
     @Test
     void 正好滑1024位_旧位全丢() {
         record(BITS, RecordKind.APPLIED);
-        assertThat(classify(2L * BITS)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
+        assertThat(classify(2L * BITS)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
         record(2L * BITS, RecordKind.APPLIED);
         assertThat(stream().getWatermark()).isEqualTo(BITS);
-        assertThat(classify(1)).isEqualTo(SeqState.BEHIND_WINDOW);
-        assertThat(classify(BITS)).isEqualTo(SeqState.BEHIND_WINDOW);
-        assertThat(classify(2L * BITS)).isEqualTo(SeqState.APPLIED);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.BEHIND_WINDOW);
+        assertThat(classify(BITS)).isEqualTo(AssetSeqState.BEHIND_WINDOW);
+        assertThat(classify(2L * BITS)).isEqualTo(AssetSeqState.APPLIED);
         assertThat(stream().getSeenBits(15)).isEqualTo(1L << 63);
         for (int word = 0; word < 15; word++) {
             assertThat(stream().getSeenBits(word)).isZero();
@@ -160,12 +160,12 @@ class AssetOpLedgerTest {
     void 滑出整窗_全清() {
         // 真实流里跳号上限让 shift > 1024 不可达；手工抬高 max_seq 覆盖这条防御分支
         AssetOpLedger l = restore(raw(EPOCH, 0, 4000).setSeenBits(0, 1).setAppliedBits(0, 1));
-        assertThat(l.classify(STREAM, EPOCH, 5000)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
+        assertThat(l.classify(STREAM, EPOCH, 5000)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
         assertThat(l.record(STREAM, EPOCH, 5000, RecordKind.APPLIED, 0)).isTrue();
         AssetOpStreamLedgerState s = l.toState().getStreams(0);
         assertThat(s.getWatermark()).isEqualTo(5000 - BITS);
-        assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(SeqState.BEHIND_WINDOW);
-        assertThat(l.classify(STREAM, EPOCH, 5000)).isEqualTo(SeqState.APPLIED);
+        assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(AssetSeqState.BEHIND_WINDOW);
+        assertThat(l.classify(STREAM, EPOCH, 5000)).isEqualTo(AssetSeqState.APPLIED);
         assertThat(s.getSeenBits(15)).isEqualTo(1L << 63);
         for (int word = 0; word < 15; word++) {
             assertThat(s.getSeenBits(word)).isZero();
@@ -181,9 +181,9 @@ class AssetOpLedgerTest {
         assertThat(stream().getWatermark()).isEqualTo(6);
         assertThat(stream().getRejectionsCount()).isZero();
         assertThat(ledger.rejectionReason(STREAM, 2)).isZero();
-        assertThat(classify(2)).isEqualTo(SeqState.BEHIND_WINDOW);
-        assertThat(classify(BITS)).isEqualTo(SeqState.APPLIED);
-        assertThat(classify(BITS + 6)).isEqualTo(SeqState.APPLIED);
+        assertThat(classify(2)).isEqualTo(AssetSeqState.BEHIND_WINDOW);
+        assertThat(classify(BITS)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(classify(BITS + 6)).isEqualTo(AssetSeqState.APPLIED);
         assertThat(AssetOpLedger.validate(ledger.toState())).isNull();
     }
 
@@ -217,7 +217,7 @@ class AssetOpLedgerTest {
         assertThat(ring.get(0).getSeq()).isEqualTo(7);
         assertThat(ring.get(63).getSeq()).isEqualTo(70);
         assertThat(ledger.rejectionReason(STREAM, 1)).isZero();
-        assertThat(classify(1)).isEqualTo(SeqState.REJECTED);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.REJECTED);
         assertThat(ledger.rejectionReason(STREAM, 7)).isEqualTo(REASON + 7);
     }
 
@@ -226,7 +226,7 @@ class AssetOpLedgerTest {
         record(1, RecordKind.REJECTED, 0);
         record(2, RecordKind.REJECTED, REASON);
         assertThat(stream().getRejectionsList()).extracting(AssetOpRejectionState::getSeq).containsExactly(2L);
-        assertThat(classify(1)).as("占位照样是拒绝").isEqualTo(SeqState.REJECTED);
+        assertThat(classify(1)).as("占位照样是拒绝").isEqualTo(AssetSeqState.REJECTED);
         assertThat(ledger.rejectionReason(STREAM, 1)).isZero();
         for (long seq = 3; seq <= 128; seq++) {
             record(seq, RecordKind.REJECTED, seq % 2 == 1 ? 0 : REASON + (int) seq);
@@ -236,7 +236,7 @@ class AssetOpLedgerTest {
         assertThat(ring.get(0).getSeq()).as("63 个占位挤不掉任何业务拒绝").isEqualTo(2);
         assertThat(ring.get(63).getSeq()).isEqualTo(128);
         assertThat(ledger.rejectionReason(STREAM, 127)).isZero();
-        assertThat(classify(127)).isEqualTo(SeqState.REJECTED);
+        assertThat(classify(127)).isEqualTo(AssetSeqState.REJECTED);
         assertThat(AssetOpLedger.validate(ledger.toState())).isNull();
     }
 
@@ -245,7 +245,7 @@ class AssetOpLedgerTest {
         for (long seq = 1; seq <= 65; seq++) {
             record(seq, RecordKind.REJECTED, REASON + (int) seq);
         }
-        assertThat(classify(1)).isEqualTo(SeqState.REJECTED);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.REJECTED);
         assertThat(ledger.rejectionReason(STREAM, 1)).isZero();
         record(200, RecordKind.REJECTED, 0);
         assertThat(classify(200)).isEqualTo(classify(1));
@@ -268,8 +268,8 @@ class AssetOpLedgerTest {
     void 部分发放在位图上同应用_另进名单() {
         record(1, RecordKind.APPLIED_PARTIAL);
         record(2, RecordKind.APPLIED);
-        assertThat(classify(1)).isEqualTo(SeqState.APPLIED);
-        assertThat(classify(2)).isEqualTo(SeqState.APPLIED);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(classify(2)).isEqualTo(AssetSeqState.APPLIED);
         assertThat(ledger.isPartial(STREAM, 1)).isTrue();
         assertThat(ledger.isPartial(STREAM, 2)).isFalse();
         assertThat(stream().getPartialSeqsList()).containsExactly(1L);
@@ -305,7 +305,7 @@ class AssetOpLedgerTest {
         assertThat(ledger.record(STREAM, EPOCH, 5 + AssetOpLedger.MAX_SEQ_JUMP + 1, RecordKind.APPLIED, 0)).isFalse();
         assertThat(ledger.toState()).isEqualTo(before);
         record(BITS + 5, RecordKind.APPLIED);
-        assertThat(classify(3)).isEqualTo(SeqState.BEHIND_WINDOW);
+        assertThat(classify(3)).isEqualTo(AssetSeqState.BEHIND_WINDOW);
         assertThat(ledger.record(STREAM, EPOCH, 3, RecordKind.APPLIED, 0)).isFalse();
     }
 
@@ -320,8 +320,8 @@ class AssetOpLedgerTest {
     void watermark接近溢出_加载即判损坏_分类恒INVALID() {
         AssetOpLedger l = restore(raw(EPOCH, MAX - 1000, MAX - 1000));
         assertThat(l.invalidReason()).contains("watermark 接近溢出");
-        assertThat(l.classify(STREAM, EPOCH, MAX - 999)).isEqualTo(SeqState.INVALID);
-        assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(SeqState.INVALID);
+        assertThat(l.classify(STREAM, EPOCH, MAX - 999)).isEqualTo(AssetSeqState.INVALID);
+        assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(AssetSeqState.INVALID);
         assertThat(l.record(STREAM, EPOCH, MAX - 999, RecordKind.APPLIED, 0)).isFalse();
     }
 
@@ -329,12 +329,12 @@ class AssetOpLedgerTest {
     void max_seq接近uint64上限时跳号上限不可表示_不判跳号() {
         AssetOpLedger l = restore(raw(EPOCH, 0, MAX - 1));
         assertThat(l.invalidReason()).isNull();
-        assertThat(l.classify(STREAM, EPOCH, 2000)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
-        assertThat(l.classify(STREAM, EPOCH, MAX)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
-        assertThat(l.classify(STREAM, EPOCH, BITS)).isEqualTo(SeqState.UNSEEN);
+        assertThat(l.classify(STREAM, EPOCH, 2000)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
+        assertThat(l.classify(STREAM, EPOCH, MAX)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
+        assertThat(l.classify(STREAM, EPOCH, BITS)).isEqualTo(AssetSeqState.UNSEEN);
         AssetOpLedger edge = restore(raw(EPOCH, 0, MAX - AssetOpLedger.MAX_SEQ_JUMP));
-        assertThat(edge.classify(STREAM, EPOCH, MAX)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
-        assertThat(edge.classify(STREAM, EPOCH, 2000)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
+        assertThat(edge.classify(STREAM, EPOCH, MAX)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
+        assertThat(edge.classify(STREAM, EPOCH, 2000)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
     }
 
     @Test
@@ -342,13 +342,13 @@ class AssetOpLedgerTest {
         long jump = AssetOpLedger.MAX_SEQ_JUMP;
         AssetOpLedger first = restore(raw(EPOCH, 0, MAX - jump + 1));
         assertThat(first.invalidReason()).isNull();
-        assertThat(first.classify(STREAM, EPOCH, MAX)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
-        assertThat(first.classify(STREAM, EPOCH, MAX - jump)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
-        assertThat(first.classify(STREAM, EPOCH, BITS)).isEqualTo(SeqState.UNSEEN);
-        assertThat(restore(raw(EPOCH, 0, MAX - jump)).classify(STREAM, EPOCH, MAX)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
+        assertThat(first.classify(STREAM, EPOCH, MAX)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
+        assertThat(first.classify(STREAM, EPOCH, MAX - jump)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
+        assertThat(first.classify(STREAM, EPOCH, BITS)).isEqualTo(AssetSeqState.UNSEEN);
+        assertThat(restore(raw(EPOCH, 0, MAX - jump)).classify(STREAM, EPOCH, MAX)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
         AssetOpLedger third = restore(raw(EPOCH, 0, MAX - jump - 1));
-        assertThat(third.classify(STREAM, EPOCH, MAX)).isEqualTo(SeqState.JUMP_TOO_FAR);
-        assertThat(third.classify(STREAM, EPOCH, MAX - 1)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
+        assertThat(third.classify(STREAM, EPOCH, MAX)).isEqualTo(AssetSeqState.JUMP_TOO_FAR);
+        assertThat(third.classify(STREAM, EPOCH, MAX - 1)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
     }
 
     @Test
@@ -367,7 +367,7 @@ class AssetOpLedgerTest {
     @Test
     void 纪元为0非法() {
         record(1, RecordKind.APPLIED);
-        assertThat(ledger.classify(STREAM, 0, 1)).isEqualTo(SeqState.INVALID);
+        assertThat(ledger.classify(STREAM, 0, 1)).isEqualTo(AssetSeqState.INVALID);
     }
 
     @Test
@@ -375,31 +375,31 @@ class AssetOpLedgerTest {
         for (long seq = 1; seq <= 3; seq++) {
             record(seq, RecordKind.REJECTED);
         }
-        assertThat(ledger.classify(STREAM, 200, 1)).isEqualTo(SeqState.UNSEEN);
+        assertThat(ledger.classify(STREAM, 200, 1)).isEqualTo(AssetSeqState.UNSEEN);
         record(1, RecordKind.APPLIED, 0, 200);
         assertThat(stream().getWatermark()).isZero();
         assertThat(stream().getMaxSeq()).isEqualTo(1);
         assertThat(stream().getStreamEpoch()).isEqualTo(200);
         assertThat(stream().getRejectionsCount()).isZero();
-        assertThat(ledger.classify(STREAM, 200, 1)).isEqualTo(SeqState.APPLIED);
-        assertThat(ledger.classify(STREAM, 200, 2)).isEqualTo(SeqState.UNSEEN);
+        assertThat(ledger.classify(STREAM, 200, 1)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(ledger.classify(STREAM, 200, 2)).isEqualTo(AssetSeqState.UNSEEN);
     }
 
     @Test
     void 纪元更大但跳号过远_拒记且不先重置() {
         record(1, RecordKind.APPLIED);
         AssetOpLedgerState before = ledger.toState();
-        assertThat(ledger.classify(STREAM, 200, BITS + 1)).isEqualTo(SeqState.JUMP_TOO_FAR);
+        assertThat(ledger.classify(STREAM, 200, BITS + 1)).isEqualTo(AssetSeqState.JUMP_TOO_FAR);
         assertThat(ledger.record(STREAM, 200, BITS + 1, RecordKind.APPLIED, 0)).isFalse();
         assertThat(ledger.toState()).isEqualTo(before);
-        assertThat(classify(1)).isEqualTo(SeqState.APPLIED);
+        assertThat(classify(1)).isEqualTo(AssetSeqState.APPLIED);
     }
 
     @Test
     void 旧纪元() {
         record(1, RecordKind.APPLIED, 0, 200);
-        assertThat(ledger.classify(STREAM, EPOCH, 1)).isEqualTo(SeqState.STALE_EPOCH);
-        assertThat(ledger.classify(STREAM, EPOCH, 9)).isEqualTo(SeqState.STALE_EPOCH);
+        assertThat(ledger.classify(STREAM, EPOCH, 1)).isEqualTo(AssetSeqState.STALE_EPOCH);
+        assertThat(ledger.classify(STREAM, EPOCH, 9)).isEqualTo(AssetSeqState.STALE_EPOCH);
         assertThat(ledger.record(STREAM, EPOCH, 9, RecordKind.APPLIED, 0)).isFalse();
         assertThat(stream().getStreamEpoch()).isEqualTo(200);
     }
@@ -407,16 +407,16 @@ class AssetOpLedgerTest {
     @Test
     void 纪元按无符号比较() {
         record(1, RecordKind.APPLIED, 0, MAX);
-        assertThat(ledger.classify(STREAM, 1, 1)).as("2^64-1 是最大纪元").isEqualTo(SeqState.STALE_EPOCH);
-        assertThat(ledger.classify(STREAM, MAX, 1)).isEqualTo(SeqState.APPLIED);
+        assertThat(ledger.classify(STREAM, 1, 1)).as("2^64-1 是最大纪元").isEqualTo(AssetSeqState.STALE_EPOCH);
+        assertThat(ledger.classify(STREAM, MAX, 1)).isEqualTo(AssetSeqState.APPLIED);
     }
 
     @Test
     void 同纪元跳号上限() {
         record(10, RecordKind.APPLIED);
-        assertThat(classify(1024)).isEqualTo(SeqState.UNSEEN);
-        assertThat(classify(1034)).isEqualTo(SeqState.AHEAD_OF_WINDOW);
-        assertThat(classify(1035)).isEqualTo(SeqState.JUMP_TOO_FAR);
+        assertThat(classify(1024)).isEqualTo(AssetSeqState.UNSEEN);
+        assertThat(classify(1034)).isEqualTo(AssetSeqState.AHEAD_OF_WINDOW);
+        assertThat(classify(1035)).isEqualTo(AssetSeqState.JUMP_TOO_FAR);
         assertThat(ledger.record(STREAM, EPOCH, 1035, RecordKind.APPLIED, 0)).isFalse();
         assertThat(stream().getMaxSeq()).isEqualTo(10);
     }
@@ -437,9 +437,9 @@ class AssetOpLedgerTest {
         AssetOpLedger l = AssetOpLedger.restore(state);
         assertThat(l.invalidReason()).isNull();
         assertThat(l.toState()).isEqualTo(state);
-        assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(SeqState.APPLIED);
+        assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(AssetSeqState.APPLIED);
         assertThat(l.isPartial(STREAM, 1)).isTrue();
-        assertThat(l.classify(STREAM, EPOCH, 2)).isEqualTo(SeqState.REJECTED);
+        assertThat(l.classify(STREAM, EPOCH, 2)).isEqualTo(AssetSeqState.REJECTED);
         assertThat(l.rejectionReason(STREAM, 2)).isEqualTo(REASON);
         assertThat(AssetOpLedger.validate(AssetOpLedgerState.getDefaultInstance())).isNull();
     }
@@ -478,7 +478,7 @@ class AssetOpLedgerTest {
             assertThat(l.toState()).isEqualTo(state);
             assertThat(l.isPristine()).isFalse();
             assertThat(l.record(STREAM, EPOCH, 4, RecordKind.APPLIED, 0)).isFalse();
-            assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(SeqState.INVALID);
+            assertThat(l.classify(STREAM, EPOCH, 1)).isEqualTo(AssetSeqState.INVALID);
         }
         AssetOpLedgerState dup = AssetOpLedgerState.newBuilder().addStreams(valid()).addStreams(valid()).build();
         assertThat(AssetOpLedger.validate(dup)).contains("未严格升序");
@@ -534,7 +534,7 @@ class AssetOpLedgerTest {
         SplittableRandom rng = new SplittableRandom(20260917);
         long nextSeq = 1;
         TreeMap<Long, Boolean> pending = new TreeMap<>();
-        TreeMap<Long, SeqState> outcomes = new TreeMap<>();
+        TreeMap<Long, AssetSeqState> outcomes = new TreeMap<>();
         int allocated = 0;
         int recorded = 0;
         for (int step = 0; step < 10_000; step++) {
@@ -544,8 +544,8 @@ class AssetOpLedgerTest {
                     if (pending.size() >= maxPending || !spanOk) {
                         break;
                     }
-                    SeqState state = classify(nextSeq);
-                    assertThat(state).isNotIn(SeqState.JUMP_TOO_FAR, SeqState.BEHIND_WINDOW);
+                    AssetSeqState state = classify(nextSeq);
+                    assertThat(state).isNotIn(AssetSeqState.JUMP_TOO_FAR, AssetSeqState.BEHIND_WINDOW);
                     pending.put(nextSeq++, false);
                     allocated++;
                 }
@@ -556,10 +556,10 @@ class AssetOpLedgerTest {
                         break;
                     }
                     long seq = candidates.get(rng.nextInt(candidates.size()));
-                    assertThat(classify(seq)).isIn(SeqState.UNSEEN, SeqState.AHEAD_OF_WINDOW);
+                    assertThat(classify(seq)).isIn(AssetSeqState.UNSEEN, AssetSeqState.AHEAD_OF_WINDOW);
                     boolean applied = rng.nextBoolean();
                     record(seq, applied ? RecordKind.APPLIED : RecordKind.REJECTED);
-                    outcomes.put(seq, applied ? SeqState.APPLIED : SeqState.REJECTED);
+                    outcomes.put(seq, applied ? AssetSeqState.APPLIED : AssetSeqState.REJECTED);
                     pending.put(seq, true);
                     recorded++;
                 }
@@ -572,9 +572,9 @@ class AssetOpLedgerTest {
                 }
             }
             for (var e : pending.entrySet()) {
-                SeqState state = classify(e.getKey());
+                AssetSeqState state = classify(e.getKey());
                 assertThat(state).as("step=%d seq=%d", step, e.getKey())
-                        .isNotIn(SeqState.BEHIND_WINDOW, SeqState.JUMP_TOO_FAR);
+                        .isNotIn(AssetSeqState.BEHIND_WINDOW, AssetSeqState.JUMP_TOO_FAR);
                 if (e.getValue()) {
                     assertThat(state).isEqualTo(outcomes.get(e.getKey()));
                 }

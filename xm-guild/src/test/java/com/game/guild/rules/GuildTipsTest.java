@@ -120,7 +120,9 @@ class GuildTipsTest {
         assertThat(GuildTips.isFault(GuildTips.OK)).isFalse();
         assertThat(GuildTips.isFault(GuildTips.SERVICE_UNAVAILABLE)).as("信封 1003 另计 internal_error").isFalse();
         for (GuildTip tip : GuildTip.values()) {
-            assertThat(tip.fault()).as(tip.name()).isEqualTo(tip == GuildTip.ID_GENERATOR_UNAVAILABLE);
+            // 4.5：资产指令 op_id 发号失败同为 14008（economy_logic.go:386-401）
+            assertThat(tip.fault()).as(tip.name())
+                    .isEqualTo(tip == GuildTip.ID_GENERATOR_UNAVAILABLE || tip == GuildTip.ASSET_OP_ID_UNAVAILABLE);
         }
     }
 
@@ -202,6 +204,21 @@ class GuildTipsTest {
         want.put(GuildTip.APPLICATION_QUEUE_FULL, new Object[] {14020, "guild application queue is full"});
         want.put(GuildTip.WRITE_CONFLICT, new Object[] {14021, "guild write conflict"});
         want.put(GuildTip.OVERLOADED, new Object[] {14021, "guild service overloaded"});
+        // 4.5 经济段（guild-economy-spec §0.4）
+        want.put(GuildTip.ASSET_OP_ID_UNAVAILABLE, new Object[] {14008, "asset op id generator unavailable"});
+        want.put(GuildTip.FUNDS_INSUFFICIENT, new Object[] {14022, "guild funds insufficient"});
+        want.put(GuildTip.MAX_LEVEL, new Object[] {14023, "guild already at max level"});
+        want.put(GuildTip.DONATE_LIMIT, new Object[] {14024, "daily donate limit reached"});
+        want.put(GuildTip.CURRENCY_INSUFFICIENT, new Object[] {14025, "currency insufficient"});
+        want.put(GuildTip.ASSET_CHANNEL_DISABLED, new Object[] {14026, "guild asset channel disabled"});
+        want.put(GuildTip.TOO_MANY_PENDING, new Object[] {14026, "too many pending asset ops"});
+        want.put(GuildTip.DONATE_OPTION_NOT_FOUND, new Object[] {14027, "donate option not found"});
+        want.put(GuildTip.ASSET_REJECTED, new Object[] {14027, "asset op rejected"});
+        want.put(GuildTip.SHOP_GOODS_NOT_FOUND, new Object[] {14028, "shop goods not found"});
+        want.put(GuildTip.GUILD_LEVEL_TOO_LOW, new Object[] {14029, "guild level too low"});
+        want.put(GuildTip.COUNT_EXCEEDS_MAX_BUY, new Object[] {14030, "count exceeds max buy count"});
+        want.put(GuildTip.SHOP_LIMIT, new Object[] {14030, "shop purchase limit reached"});
+        want.put(GuildTip.CONTRIBUTION_INSUFFICIENT, new Object[] {14031, "contribution insufficient"});
         want.put(GuildTip.FEATURE_UNAVAILABLE, new Object[] {1006, "guild feature unavailable"});
 
         assertThat(want.keySet()).as("每个 GuildTip 都要登记").isEqualTo(EnumSet.allOf(GuildTip.class));
@@ -242,6 +259,14 @@ class GuildTipsTest {
         // 双存储互相矛盾 / 配表缺行：故障（信封 1003）
         want.put(GuildReject.LEADER_MISMATCH, new RejectReply.Fault("guild data or configuration is inconsistent"));
         want.put(GuildReject.LEVEL_CONFIG_MISSING, new RejectReply.Fault("guild data or configuration is inconsistent"));
+        // 4.5 经济哨兵（economyTip 整表，economy_logic.go:313-344；economy_logic_test.go:844）
+        want.put(GuildReject.LEVEL_TOO_LOW, tip(GuildTip.GUILD_LEVEL_TOO_LOW, MappingRepair.NONE));
+        want.put(GuildReject.DONATE_LIMIT, tip(GuildTip.DONATE_LIMIT, MappingRepair.NONE));
+        want.put(GuildReject.SHOP_LIMIT, tip(GuildTip.SHOP_LIMIT, MappingRepair.NONE));
+        want.put(GuildReject.CONTRIBUTION_INSUFFICIENT, tip(GuildTip.CONTRIBUTION_INSUFFICIENT, MappingRepair.NONE));
+        want.put(GuildReject.MAX_LEVEL, tip(GuildTip.MAX_LEVEL, MappingRepair.NONE));
+        want.put(GuildReject.FUNDS_INSUFFICIENT, tip(GuildTip.FUNDS_INSUFFICIENT, MappingRepair.NONE));
+        want.put(GuildReject.TOO_MANY_PENDING, tip(GuildTip.TOO_MANY_PENDING, MappingRepair.NONE));
 
         assertThat(want.keySet()).as("每个 GuildReject 都要登记").isEqualTo(EnumSet.allOf(GuildReject.class));
         want.forEach((reject, reply) ->
@@ -263,6 +288,19 @@ class GuildTipsTest {
         assertThat(code(GuildReject.WRITE_CONFLICT)).isEqualTo(GuildTips.BUSY_RETRY);
         assertThat(code(GuildReject.ZONE_MERGING)).isEqualTo(GuildTips.ZONE_MERGING);
         assertThat(GuildTips.INCONSISTENT_REASON).isEqualTo("guild data or configuration is inconsistent");
+        // 经济段码值（guild-economy-spec §3.0 的表）
+        assertThat(code(GuildReject.LEVEL_TOO_LOW)).isEqualTo(GuildTips.SHOP_LEVEL_TOO_LOW).isEqualTo(14029);
+        assertThat(code(GuildReject.DONATE_LIMIT)).isEqualTo(GuildTips.DONATE_LIMIT).isEqualTo(14024);
+        assertThat(code(GuildReject.SHOP_LIMIT)).isEqualTo(GuildTips.SHOP_LIMIT).isEqualTo(14030);
+        assertThat(code(GuildReject.CONTRIBUTION_INSUFFICIENT)).isEqualTo(GuildTips.CONTRIBUTION_INSUFFICIENT).isEqualTo(14031);
+        assertThat(code(GuildReject.MAX_LEVEL)).isEqualTo(GuildTips.MAX_LEVEL).isEqualTo(14023);
+        assertThat(code(GuildReject.FUNDS_INSUFFICIENT)).isEqualTo(GuildTips.FUNDS_INSUFFICIENT).isEqualTo(14022);
+        assertThat(code(GuildReject.TOO_MANY_PENDING)).isEqualTo(GuildTips.ASSET_PENDING).isEqualTo(14026);
+        // 经济哨兵的基线 errors.New 文本（guild_repo.go:71-83；assetop/types.go:252）
+        assertThat(GuildReject.LEVEL_TOO_LOW.sentinel()).isEqualTo("guild level too low");
+        assertThat(GuildReject.SHOP_LIMIT.sentinel()).isEqualTo("guild shop purchase limit reached");
+        assertThat(GuildReject.CONTRIBUTION_INSUFFICIENT.sentinel()).isEqualTo("contribution balance insufficient");
+        assertThat(GuildReject.TOO_MANY_PENDING.sentinel()).isEqualTo("assetop: too many pending ops for player stream");
     }
 
     /** 业务拒绝永不落到故障码上：in-band 回的码里没有 14008，也没有通用段的 1003。 */

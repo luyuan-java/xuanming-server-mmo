@@ -17,6 +17,7 @@ import com.game.robot.scenario.DrainScenario;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.FriendScenario;
 import com.game.robot.scenario.GuardScenario;
+import com.game.robot.scenario.GuildEconomyScenario;
 import com.game.robot.scenario.GuildScenario;
 import com.game.robot.scenario.KillSwitchScenario;
 import com.game.robot.scenario.MovementScenario;
@@ -133,6 +134,12 @@ public final class RobotMain {
                     GuildScenario scenario = new GuildScenario(flow, registry, options.accountPrefix(), options.runTag(),
                             options.zoneId(), options.requestTimeout());
                     title = "xm-robot guild：" + scenario.accountA() + " 等，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.GUILD_ECONOMY) {
+                    GuildEconomyScenario scenario = new GuildEconomyScenario(flow, registry, options.accountPrefix(),
+                            options.runTag(), options.requestTimeout());
+                    title = "xm-robot guild-economy：" + scenario.accountA() + " 等，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.FRIEND) {

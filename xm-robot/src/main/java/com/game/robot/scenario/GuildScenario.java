@@ -81,7 +81,8 @@ import java.util.Optional;
  * Java 增项（钉住契约细节，guild-spec §11.6）：帮名为空 / 25 个汉字 / 含控制字符 → 14009；全角大写的同名 → 14010；任免 role = 2 → 14006；
  * Apply(0) → 14001；Cancel(0) → 14018；Review 申请人 0 → 14018、审批自己 → 14015；Kick(0) → 14014；普通成员列待审 → 14016；
  * 帮主退帮 → 14004；长老解散 → 14005；有待审时帮主的 {@code pending_application_count > 0}、普通成员为 0；GetGuildRank 页长 60 回显 50、
- * 0 回显 20；上行 220 → 信封 1003；DonateToGuild → in-band 1006（4.4 期间，D13）。另按推送矩阵（§4.3）核对每条推送的 actor / target，
+ * 0 回显 20；上行 220 → 信封 1003；DonateToGuild(0) → 14027（4.5 接线后 D13 的 1006 占位撤销；经济本身见 {@link GuildEconomyScenario}）。
+ * 另按推送矩阵（§4.3）核对每条推送的 actor / target，
  * 并补两条基线没等的推送：申请 → 帮主收 APPLICATION_RECEIVED、改公告 → 成员收 ANNOUNCEMENT_CHANGED。
  *
  * <p>账号是 run-tag 新号（D18，基线是固定的 robot_9201–9213）。推送按 {@link com.game.robot.client.Inbox} 的到达序：
@@ -119,8 +120,8 @@ public final class GuildScenario {
      * GuildScenarioTest 核对它与同步来的配表一致。
      */
     static final int LEVEL1_MAX_OFFICERS = 2;
-    /** 4.4 期间 DonateToGuild 占位回 in-band 1006；捐献项 id 任取（4.5 才读 GuildDonate 表）。 */
-    private static final int DONATE_ID = 1;
+    /** GuildDonate 表里没有的捐献项（表校验要求 id ≠ 0，GuildEconomyScenarioTest 钉住）。 */
+    static final int UNKNOWN_DONATE_ID = 0;
 
     private static final int TIP_ALREADY_IN_GUILD = GuildErrorTip.guild_error.kGuildAlreadyInGuild_VALUE;
     private static final int TIP_NOT_FOUND = GuildErrorTip.guild_error.kGuildNotFound_VALUE;
@@ -137,6 +138,8 @@ public final class GuildScenario {
     private static final int TIP_CANNOT_TARGET_SELF = GuildErrorTip.guild_error.kGuildCannotTargetSelf_VALUE;
     private static final int TIP_RANK_TOO_LOW = GuildErrorTip.guild_error.kGuildRankTooLow_VALUE;
     private static final int TIP_APPLICATION_NOT_FOUND = GuildErrorTip.guild_error.kGuildApplicationNotFound_VALUE;
+    private static final int TIP_ASSET_PENDING = GuildErrorTip.guild_error.kGuildAssetPending_VALUE;
+    private static final int TIP_ASSET_REJECTED = GuildErrorTip.guild_error.kGuildAssetRejected_VALUE;
     private static final int TIP_SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     private static final int TIP_FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
 
@@ -495,9 +498,14 @@ public final class GuildScenario {
         expect(f, apply, ApplyJoinGuildRequest.newBuilder().setGuildId(gid).build(), ApplyJoinGuildResponse.parser(), 0,
                 "M10 F 重新申请");
 
-        // Java 增项：4.4 期间经济 / 活动号回 in-band 1006（D13；信封会让客户端停用整个帮会模块）
-        expect(a, donate, DonateToGuildRequest.newBuilder().setDonateId(DONATE_ID).build(), DonateToGuildResponse.parser(),
-                TIP_FEATURE_UNAVAILABLE, "DonateToGuild → in-band 1006（4.4 占位，D13）");
+        // Java 增项：经济号已由 4.5 接线（D13 的 in-band 1006 占位撤销，guild-economy-spec §7.9）。用配表里没有的捐献项 0：
+        // 判在发号与写行之前，不动任何资产——通道开着回 14027「donate option not found」，关着更早回 14026（economy_logic.go:718-726）
+        DonateToGuildResponse donated = a.call(donate, DonateToGuildRequest.newBuilder().setDonateId(UNKNOWN_DONATE_ID).build(),
+                DonateToGuildResponse.parser());
+        int donateTip = tipOf(donated);
+        report.check((donateTip == TIP_ASSET_REJECTED || donateTip == TIP_ASSET_PENDING) && !donated.hasDonation(),
+                "DonateToGuild(donate_id = 0) → 14027（通道关闭时 14026），不再是 4.4 占位的 1006、不带捐献视图",
+                describeTip(donated) + (donateTip == TIP_FEATURE_UNAVAILABLE ? "：xm-guild 还是 4.4 的占位派发" : ""), REF);
 
         // ---- 第 10 步：解散 ----
         expect(a, disband, DisbandGuildRequest.getDefaultInstance(), DisbandGuildResponse.parser(), 0, "第 10 步 A 解散");
@@ -853,8 +861,8 @@ public final class GuildScenario {
         }
     }
 
-    /** 一个已进场的机器人。只在场景线程上使用；每次发送先过 {@link Pacer}。 */
-    private static final class Bot {
+    /** 一个已进场的机器人。只在场景线程上使用；每次发送先过 {@link Pacer}（帮会经济场景复用同一份节拍）。 */
+    static final class Bot {
 
         final String name;
         final EnteredPlayer player;

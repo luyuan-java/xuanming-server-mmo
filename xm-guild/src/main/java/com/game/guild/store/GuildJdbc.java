@@ -19,7 +19,7 @@ import java.util.function.Consumer;
  *
  * <p><b>参数绑定约定</b>（帮会表的整数列全是无符号）：{@link Long} 一律按 uint64 绑定（≥ 2^63 的位模式转成 {@link BigInteger}，
  * BIGINT UNSIGNED 不收负数）、{@link Integer} 一律按 uint32 绑定（{@link Integer#toUnsignedLong}）、{@link String} 原样；
- * {@link BigInteger} / {@link Boolean} 透传。别的类型直接拒绝（多半是忘了拆箱的枚举）。要绑有符号 64 位值时传 {@link BigInteger}。
+ * {@link BigInteger} / {@link Boolean} / {@code byte[]}（4.5 的 payload 列）透传。别的类型直接拒绝（多半是忘了拆箱的枚举）。要绑有符号 64 位值时传 {@link BigInteger}。
  * 读回用 {@link #u64} / {@link #u32}。
  *
  * <p>不是线程安全的：一个实例只属于一次事务尝试（或一次事务外读），用完即弃。
@@ -178,10 +178,10 @@ public final class GuildJdbc {
         if (arg instanceof Integer i) {
             return Integer.toUnsignedLong(i);
         }
-        if (arg instanceof String || arg instanceof BigInteger || arg instanceof Boolean) {
+        if (arg instanceof String || arg instanceof BigInteger || arg instanceof Boolean || arg instanceof byte[]) {
             return arg;
         }
-        throw new IllegalArgumentException("帮会 SQL 参数只收 Long(uint64) / Integer(uint32) / String / BigInteger / Boolean，收到 "
+        throw new IllegalArgumentException("帮会 SQL 参数只收 Long(uint64) / Integer(uint32) / String / BigInteger / Boolean / byte[]，收到 "
                 + (arg == null ? "null" : arg.getClass().getName()));
     }
 
