@@ -6,6 +6,7 @@ import com.game.audit.AuditProperties;
 import com.game.audit.AuditTopics;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.common.RunMode;
+import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
@@ -15,6 +16,7 @@ import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.team.TeamMembershipReader;
+import com.game.discovery.world.RedissonWorldChannelStore;
 import com.game.player.store.PlayerStore;
 import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpEndpoint;
@@ -32,12 +34,12 @@ import com.game.scene.audit.AuditPipeline;
 import com.game.scene.audit.GainAnomalyDetector;
 import com.game.scene.audit.KafkaAssetAudit;
 import com.game.scene.audit.KafkaPlayerSnapshots;
+import com.game.scene.channel.ChannelPlanFollower;
 import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.currency.CurrencyService;
 import com.game.scene.discovery.SceneDirectoryPublisher;
 import com.game.scene.gainblock.GainBlockSync;
 import com.game.scene.gainblock.RedisGainBlockSource;
-import com.game.scene.id.SceneGuids;
 import com.game.scene.link.GateLinks;
 import com.game.scene.link.LinkIdentity;
 import com.game.scene.link.NodeLinkHandler;
@@ -102,7 +104,8 @@ import org.springframework.context.SmartLifecycle;
  *       场景帧（20 FPS，{@link SceneTicker}）也以定时任务跑在它上面，与客户端消息串行，不需要锁；</li>
  *   <li>{@code scene-link-*}：Netty 链路 I/O，只做编解码与握手，事件投递到逻辑线程（每条链路有积压上限，见 NodeLinkHandler）；</li>
  *   <li>{@code scene-storage}：有界线程池，执行 MySQL 阻塞调用（加载、写回、释放、续约），结果投递回逻辑线程；</li>
- *   <li>{@code scene-sched}：节点号续租、节点目录发布、归属续约的调度（Redis I/O；MySQL 交给存储线程池）；</li>
+ *   <li>{@code scene-sched}：节点号续租、节点目录发布、归属续约、主世界频道计划拉取（{@link ChannelPlanFollower}，批次 5.1）的调度
+ *       （Redis I/O；MySQL 交给存储线程池；拉到的计划投递逻辑线程应用）；</li>
  *   <li>资产通道（architecture.md §4.12）：Dubbo Triple 的 I/O 与业务线程只把请求投递到逻辑线程；逻辑线程上完成的结局由
  *       {@code scene-asset-reply}（2 条，队列由在途上限 {@code xm.scene.asset-op-max-inflight} 兜住）切出来回写，Dubbo 的序列化不占逻辑线程。</li>
  * </ul>
@@ -125,10 +128,12 @@ public class SceneNode implements SmartLifecycle {
     static final int GUID_LEASE_SCOPE = 0;
     /** Kafka 不可达时重试核对审计 topic 的间隔。 */
     static final long AUDIT_REVERIFY_SECONDS = 30;
-    /** 其他线程同步等待逻辑线程执行一个任务的上限（目录快照、归属快照、启动建场景）。停服写回不用它，用整个停服预算。 */
+    /** 其他线程同步等待逻辑线程执行一个任务的上限（目录快照、归属快照、应用频道计划）。停服写回不用它，用整个停服预算。 */
     private static final long LOGIC_CALL_TIMEOUT_MS = 5_000;
     /** 资产通道回写线程数（只做 future 完成与 Dubbo 回写，不做业务）。 */
     static final int ASSET_REPLY_THREADS = 2;
+    /** {@code scene-sched} 的线程数。 */
+    static final int SCHED_THREADS = 3;
 
     private final SceneNodeProperties props;
     private final RedissonClient redis;
@@ -165,6 +170,8 @@ public class SceneNode implements SmartLifecycle {
     private volatile ScheduledFuture<?> frameTask;
     private volatile ScheduledFuture<?> saveTask;
     private volatile ScheduledFuture<?> locationTask;
+    private volatile ScheduledFuture<?> drainTask;
+    private volatile ChannelPlanFollower channelFollower;
     private volatile NodeLinkServer linkServer;
     private volatile SceneDirectoryPublisher publisher;
     private volatile OwnerLeaseRenewer leaseRenewer;
@@ -224,7 +231,8 @@ public class SceneNode implements SmartLifecycle {
         int zoneId = props.zoneId();
         SceneMessageIds ids = SceneMessageIds.resolve(registry);
 
-        scheduler = Executors.newScheduledThreadPool(2, new DefaultThreadFactory("scene-sched", true));
+        // 3 条：频道计划拉取与目录发布都可能同步等逻辑线程（各至多 5 s），留一条给节点号续期，续期不被它们拖到有效期之外
+        scheduler = Executors.newScheduledThreadPool(SCHED_THREADS, new DefaultThreadFactory("scene-sched", true));
         lease = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE, zoneId, MIN_NODE_ID, MAX_NODE_ID, instanceId,
                 LEASE_TTL, this::onLeaseLost);
         int nodeId = lease.nodeId();
@@ -246,7 +254,7 @@ public class SceneNode implements SmartLifecycle {
         GateLinks gateLinks = new GateLinks(metrics);
         GainAnomalyDetector anomalies = new GainAnomalyDetector(settings.anomaly().defaults(),
                 settings.anomaly().currencyThresholds(), settings.anomaly().itemThresholds(), SceneClock.SYSTEM, metrics);
-        SceneGuids sceneGuids = acquireSceneGuids();
+        LeaseGatedSnowflake sceneGuids = acquireSceneGuids();
         AssetAudit assetAudit = startAudit(zoneId, nodeId, settings, sceneGuids);
         CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics, SceneClock.SYSTEM);
         BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
@@ -297,10 +305,24 @@ public class SceneNode implements SmartLifecycle {
                 }), new BagFeature(bags), new MissionFeature(missions), new ActivityFeature(missions),
                         new SkillFeature(skills), pets));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
-        callOnLogic(() -> {
-            tables.worldSceneConfigIds().forEach(sceneWorld::createScene);
-            return null;
-        });
+        // 主世界频道（批次 5.1，scene-channels-spec §4.10.5）：节点不再自己发号建场景（D18），按 scene-manager 写在 Redis 的频道计划建。
+        // 先登记 zone、同步拉一次计划并在逻辑线程上应用（启动时本地没有场景，只会建出 ACTIVE 记录），再起周期拉取。
+        // 拉不到只告警、不带频道启动：领导者下一拍按覆盖规则给本节点铺频道，拉取每周期重试。
+        NodeIdLease nodeLease = lease;
+        ChannelPlanFollower follower = new ChannelPlanFollower(new RedissonWorldChannelStore(redis), zoneId, nodeId,
+                nodeLease::isValid, (version, mine) -> callOnLogic(() -> sceneWorld.applyChannelPlan(version, mine)),
+                this::requestDirectoryPublish, metrics);
+        channelFollower = follower;
+        follower.syncOnce();
+        follower.start(scheduler, settings.channelPlanPollInterval());
+        // 排空推进：每秒一次（应用计划后另会立即推进一次）。排空频道里的人同节点改派，空了即销毁（§4.10.3）。
+        drainTask = logicLoop.scheduleAtFixedRate(() -> {
+            try {
+                sceneWorld.drainStep();
+            } catch (RuntimeException e) {
+                log.error("频道排空推进这一秒出错，下一秒照常", e);
+            }
+        }, 1, 1, TimeUnit.SECONDS);
         // 场景帧：固定周期触发，SceneTicker 按单调时钟补帧（每次最多 5 帧），帧内异常只记日志、不让定时任务停掉。
         SceneTicker ticker = new SceneTicker(sceneWorld::step, SceneClock.SYSTEM::nanoTime);
         long periodNanos = SceneTicker.STEP_NANOS;
@@ -366,13 +388,21 @@ public class SceneNode implements SmartLifecycle {
                 () -> callOnLogic(() -> {
                     List<SceneEntry> entries = sceneWorld.sceneEntries();
                     approxPlayers.set(entries.stream().mapToInt(SceneEntry::getPlayerCount).sum());
-                    return entries;
+                    return new SceneDirectoryPublisher.Snapshot(entries, sceneWorld.appliedPlanVersion());
                 }));
         publisher.start(scheduler);
 
-        log.info("场景节点已启动 zone={} node_id={} instance={} link={}:{} asset_rpc={}:{} 场景数={}", zoneId, nodeId,
+        log.info("场景节点已启动 zone={} node_id={} instance={} link={}:{} asset_rpc={}:{} 频道计划版本={}", zoneId, nodeId,
                 instanceId, props.advertiseHost(), linkPort, props.advertiseHost(), rpc.port(),
-                tables.worldSceneConfigIds().size());
+                follower.appliedVersion() < 0 ? "未拉到" : Long.toUnsignedString(follower.appliedVersion()));
+    }
+
+    /** 应用了新的频道计划之后立即补发节点目录（拉取线程上调；目录发布者还没建出来或已停时什么也不做）。 */
+    private void requestDirectoryPublish() {
+        SceneDirectoryPublisher p = publisher;
+        if (p != null) {
+            p.requestPublishNow();
+        }
     }
 
     @Override
@@ -429,11 +459,20 @@ public class SceneNode implements SmartLifecycle {
 
     /**
      * 按启动的逆序释放，每一步都容忍前面没建出来（启动失败时也走这里）：
-     * 摘目录（资产通道的调用方随之找不到本节点）→ 停监听 → 停封禁名单同步、接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
+     * 停频道计划拉取与排空推进 → 摘目录（资产通道的调用方随之找不到本节点）→ 停监听 → 停封禁名单同步、接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来，逻辑线程的积压只减不增）
      * → 逻辑线程上写回全部玩家并关链路，写回提交之后才关存储线程池并等写回落库（{@link SceneShutdown}，共用一个停服预算）
      * → 资产通道反导出 → 关线程（逻辑线程停之后才关资产回写池）→ 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
      */
     private void release() {
+        // 第一步停频道计划拉取（§4.10.5）：停服期间不再按计划建 / 排空场景；正在跑的一次最多再应用完这一版
+        ChannelPlanFollower follower = channelFollower;
+        if (follower != null) {
+            follower.stop();
+        }
+        ScheduledFuture<?> drains = drainTask;
+        if (drains != null) {
+            drains.cancel(false);
+        }
         ScheduledFuture<?> locationRefresh = locationTask;
         if (locationRefresh != null) {
             locationRefresh.cancel(false);
@@ -530,20 +569,20 @@ public class SceneNode implements SmartLifecycle {
     }
 
     /**
-     * 全服发号：占全服范围的号段租约（{@code NodeTypes.SCENE_GUID}），只建一个 {@link SceneGuids}，物品 uuid、资产流水号、快照号
+     * 全服发号：占全服范围的号段租约（{@code NodeTypes.SCENE_GUID}），只建一个 {@link LeaseGatedSnowflake}，物品 uuid、资产流水号、快照号
      * 共用（两个同 worker 的雪花实例会发出相同的号）。不论审计开不开都要：物品入包离不开它。
      */
-    private SceneGuids acquireSceneGuids() {
+    private LeaseGatedSnowflake acquireSceneGuids() {
         NodeIdLease guids = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
                 Snowflake.MAX_WORKER, instanceId, LEASE_TTL,
                 () -> log.error("全服发号租约丢失：物品入包发不出号（回 6004）、资产流水改写兜底日志，请尽快重启本节点"));
         guidLease = guids;
         log.info("全服发号就绪 worker={}", guids.nodeId());
-        return new SceneGuids(new Snowflake(guids.nodeId()), guids::isValid);
+        return new LeaseGatedSnowflake(new Snowflake(guids.nodeId()), guids::isValid);
     }
 
     /** 物品 guid：一次铸齐一批，任何一个发不出来就整批放弃（调用方零写入地回 6004）。 */
-    private static ItemGuids itemGuids(SceneGuids guids) {
+    private static ItemGuids itemGuids(LeaseGatedSnowflake guids) {
         return count -> {
             long[] out = new long[count];
             for (int i = 0; i < count; i++) {
@@ -561,7 +600,8 @@ public class SceneNode implements SmartLifecycle {
      * 资产审计：建审计管线并核对 topic（号用全服发号）。分区契约不符抛出（拒绝启动）；Kafka 不可达（含地址解析不了）
      * 时启动线程最多等 {@code xm.audit.init-timeout} 后告警并照常启动，后台每 30 秒重试，期间流水完整写兜底日志。关闭审计（{@code xm.audit.enabled=false}）时只写本地审计日志。
      */
-    private AssetAudit startAudit(int zoneId, int nodeId, SceneNodeProperties.SceneSettings settings, SceneGuids guids) {
+    private AssetAudit startAudit(int zoneId, int nodeId, SceneNodeProperties.SceneSettings settings,
+                                  LeaseGatedSnowflake guids) {
         if (!audit.enabled()) {
             log.warn("资产流水未接 Kafka（xm.audit.enabled=false），只写本地日志 {}", AssetAudit.LOGGER);
             return AssetAudit.log();
@@ -588,7 +628,12 @@ public class SceneNode implements SmartLifecycle {
 
     /** 租约丢失回调（调度线程上，只调一次）。 */
     private void onLeaseLost() {
-        log.error("场景节点号租约丢失：停止刷新节点目录、关闭链路监听、拒绝新进场；在场玩家继续服务至离开，请尽快重启本节点");
+        log.error("场景节点号租约丢失：停止刷新节点目录与拉取频道计划、关闭链路监听、拒绝新进场；在场玩家继续服务至离开，请尽快重启本节点");
+        // 号可能已归别的实例：不再按这个号名下的计划建 / 排空场景（已有场景照常服务）
+        ChannelPlanFollower follower = channelFollower;
+        if (follower != null) {
+            follower.stop();
+        }
         SceneDirectoryPublisher p = publisher;
         if (p != null) {
             p.stop(false);

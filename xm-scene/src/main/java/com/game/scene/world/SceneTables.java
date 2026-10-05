@@ -9,7 +9,10 @@ import java.util.List;
  */
 public interface SceneTables {
 
-    /** 启动时要创建的主世界场景配置 id：World 表各行的 {@code scene_id}，按表顺序去重。第一项是默认主世界。 */
+    /**
+     * 主世界场景配置 id：World 表各行的 {@code scene_id}，按表顺序去重。第一项是默认主世界（排空改派同图没有频道时的回落，
+     * scene-channels-spec §4.10.3）。频道计划只按这些图建场景，别的图的 ACTIVE 记录一律拒绝（§4.10.2）。
+     */
     List<Integer> worldSceneConfigIds();
 
     /**

@@ -174,7 +174,43 @@ class SceneAssignerTest {
                 .hasMessage("redis down");
     }
 
+    // ---------- 批次 5.1：排空中的频道（scene-channels-spec §4.11、D11、D13） ----------
+
+    @Test
+    void 排空中的频道不参与分配_即使人最少() {
+        source.add(node(1, draining(101, 1, 0), scene(102, 1, 50)));
+        source.add(node(2, draining(201, 1, 0)));
+
+        assertSuccess(assign(0), 1, 102, 1);
+    }
+
+    @Test
+    void 原实例在排空中_按原地图重选() {
+        source.add(node(1, draining(101, 2, 0), scene(102, 2, 9)));
+        source.add(node(2, scene(201, 2, 3)));
+
+        assertSuccess(assign(2, 1, 101), 2, 201, 2);
+    }
+
+    @Test
+    void 期望地图只有排空中的频道_回落默认地图() {
+        source.add(node(1, draining(102, 2, 0), scene(101, 1, 30)));
+
+        assertSuccess(assign(2), 1, 101, 1);
+    }
+
+    @Test
+    void 全部频道都在排空_返回无场景tip() {
+        source.add(node(1, draining(101, 1, 0)));
+
+        assertThat(assign(0).getTipId()).isEqualTo(SceneAssigner.TIP_NO_SCENE);
+    }
+
     // ---------- helpers ----------
+
+    private static SceneEntry draining(long sceneId, int configId, int playerCount) {
+        return scene(sceneId, configId, playerCount).toBuilder().setDraining(true).build();
+    }
 
     private AssignSceneResponse assign(int preferredConfigId) {
         return assigner.assign(AssignSceneRequest.newBuilder()

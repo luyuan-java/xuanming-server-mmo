@@ -12,6 +12,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -61,10 +62,20 @@ class SceneAssetOpProviderTest {
     void 结局经逻辑线程算出_回写在回写线程上_指标按结局计() throws Exception {
         SceneAssetOpProvider provider = new SceneAssetOpProvider(this::endpoint, 4, replyThread, metrics);
         AtomicReference<String> completedOn = new AtomicReference<>();
+        // 先堵住逻辑线程，保证下面挂后续时 future 还没完成——否则后续会在测试线程上同步执行（并发下偶发）
+        CountDownLatch gate = new CountDownLatch(1);
+        logicThread.execute(() -> {
+            try {
+                gate.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
         CompletableFuture<AssetOpResponse> reply = provider.debit(
                 fixture.signed(AssetRpc.DEBIT, AssetChannelFixture.debit(AssetChannelFixture.PLAYER, 1, 30)));
         // 挂在返回 future 上的后续（Dubbo 的序列化与回写就是这样挂的）跑在完成它的线程上
         CompletableFuture<Void> observed = reply.thenAccept(r -> completedOn.set(Thread.currentThread().getName()));
+        gate.countDown();
         AssetOpResponse response = reply.get(5, TimeUnit.SECONDS);
         observed.get(5, TimeUnit.SECONDS);
         assertThat(response.getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);

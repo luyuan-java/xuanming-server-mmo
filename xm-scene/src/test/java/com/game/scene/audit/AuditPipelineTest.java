@@ -12,9 +12,9 @@ import com.game.audit.TopicSpec;
 import com.game.audit.proto.AssetKind;
 import com.game.audit.proto.TransactionLogRecord;
 import com.game.audit.proto.TransactionReason;
+import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
 import com.game.scene.audit.AssetAudit.Reason;
-import com.game.scene.id.SceneGuids;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.testing.ManualClock;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -86,7 +86,7 @@ class AuditPipelineTest {
     }
 
     private AuditPipeline pipeline(int queueCapacity) {
-        SceneGuids guids = new SceneGuids(new Snowflake(7), () -> {
+        LeaseGatedSnowflake guids = new LeaseGatedSnowflake(new Snowflake(7), () -> {
             CountDownLatch gate = leaseGate;
             if (gate != null) {
                 try {

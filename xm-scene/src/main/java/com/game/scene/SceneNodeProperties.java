@@ -60,6 +60,8 @@ public record SceneNodeProperties(
      *                              与 link-port 一样）。导出成功后与 {@code xm.advertise-host} 一起写进节点目录的 rpc_host / rpc_port
      * @param assetOpMaxInflight    资产通道在途调用上限（缺省 256）：超出直接回失败（过载，调用方按传输失败重投），不排队进逻辑线程；
      *                              应 ≥ 调用方副本数 × 每副本 Workers + 同步投递并发（guild-economy-spec Q9）
+     * @param channelPlanPollInterval 主世界频道计划的拉取周期（缺省 1s，100ms～1min；scene-channels-spec §4.10.1、§5.3）：每周期读一次版本号，
+     *                              变了才整读计划；排空推进另挂在每秒任务上，与它无关
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -78,9 +80,15 @@ public record SceneNodeProperties(
             @DefaultValue("10s") Duration gainBlockRefresh,
             @DefaultValue AnomalySettings anomaly,
             @DefaultValue("21100") int assetRpcPort,
-            @DefaultValue("256") int assetOpMaxInflight) {
+            @DefaultValue("256") int assetOpMaxInflight,
+            @DefaultValue("1s") Duration channelPlanPollInterval) {
 
         public SceneSettings {
+            if (channelPlanPollInterval.compareTo(Duration.ofMillis(100)) < 0
+                    || channelPlanPollInterval.compareTo(Duration.ofMinutes(1)) > 0) {
+                throw new IllegalArgumentException("xm.scene.channel-plan-poll-interval 必须在 100ms～1min 之间: "
+                        + channelPlanPollInterval);
+            }
             if (assetRpcPort < 1 || assetRpcPort > 65535) {
                 throw new IllegalArgumentException("xm.scene.asset-rpc-port 超出范围: " + assetRpcPort);
             }

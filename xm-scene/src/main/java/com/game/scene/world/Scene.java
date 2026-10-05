@@ -13,25 +13,34 @@ import java.util.Set;
  *
  * <p>玩家按进场顺序保存（帧内外推与属性同步按这个顺序遍历，结果可复现）；视野由本场景的 {@link ViewIndex} 维护。
  * 玩家的进出与位置变化只能经本类（{@link #add} / {@link #remove} / {@link #relocate}），格子与兴趣列表才不会与位置脱节。
+ *
+ * <p><b>频道状态</b>（批次 5.1，scene-channels-spec §4.10.2）：承载中 / 排空中，由 {@link SceneWorld#applyChannelPlan} 按频道计划切换。
+ * 排空中的场景不接受显式进入（63 指定它回 3023，D11）、不被组队跟随跟进（§4.13）、进场加载完成时改进兄弟频道（§4.10.4），
+ * 在场玩家由 {@link SceneWorld#drainStep} 同节点改派，空了即销毁（对应基线 C++ DestroyScene 的「先排空再销毁」，
+ * cpp/nodes/scene/handler/grpc/scene_node_service.cpp:68-125）。
  */
 public final class Scene {
 
     private final long sceneId;
     private final int configId;
-    /** 进场时整体拷给客户端（79 的 scene_info）。主世界频道 mirror / dungeon 为 0、creators 为空。 */
+    /**
+     * 进场时整体拷给客户端（79 的 scene_info）。主世界频道 mirror / dungeon 为 0、creators 为空；构造收完整的 {@link SceneInfoComp}
+     * （同基线 HandleCreateScene 挂的 SceneInfoComp，scene_node_service.cpp:39-52），5.3 的副本 / 镜像从这里填。
+     */
     private final SceneInfoComp info;
     private final Map<Long, ScenePlayer> players = new LinkedHashMap<>();
     /** 只读视图建一次复用：帧内每帧要遍历两遍（外推、属性同步），不为每次遍历新建包装对象。 */
     private final Collection<ScenePlayer> playersView = Collections.unmodifiableCollection(players.values());
     private final ViewIndex view = new ViewIndex();
+    private boolean draining;
+    /** 排空推进找不到改派目标时只告警一次（恢复改派或改回承载中时清掉）。 */
+    private boolean relocationBlockedWarned;
 
-    Scene(long sceneId, int configId) {
-        this.sceneId = sceneId;
-        this.configId = configId;
-        this.info = SceneInfoComp.newBuilder()
-                .setSceneConfigId(configId)
-                .setSceneId(sceneId)
-                .build();
+    /** @param info scene_id 与 scene_config_id 都非 0（调用方校验） */
+    Scene(SceneInfoComp info) {
+        this.sceneId = info.getSceneId();
+        this.configId = info.getSceneConfigId();
+        this.info = info;
     }
 
     public long sceneId() {
@@ -48,6 +57,31 @@ public final class Scene {
 
     public int playerCount() {
         return players.size();
+    }
+
+    /** 是否在排空中（逻辑线程）。 */
+    public boolean draining() {
+        return draining;
+    }
+
+    void setDraining(boolean draining) {
+        this.draining = draining;
+        if (!draining) {
+            relocationBlockedWarned = false;
+        }
+    }
+
+    /** 第一次找不到改派目标时为 true（之后同一段阻塞期内为 false），用来只告警一次。 */
+    boolean firstRelocationBlocked() {
+        if (relocationBlockedWarned) {
+            return false;
+        }
+        relocationBlockedWarned = true;
+        return true;
+    }
+
+    void relocationUnblocked() {
+        relocationBlockedWarned = false;
     }
 
     /** 本场景的玩家（只读、按进场顺序）。遍历期间不得进出场景（外推与同步都不会）。 */

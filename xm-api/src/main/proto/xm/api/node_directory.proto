@@ -32,10 +32,19 @@ message SceneNodeInfo {
   // 这个节点不提供资产通道，调用方按「没人持有」处理（本地合成 NOT_HERE）。
   string rpc_host = 7;
   uint32 rpc_port = 8;
+  // 本节点已应用的主世界频道计划版本（xm:world:{z:<zone>}:ver 的值，world_channel.proto；0 = 还没应用过 / 不认识这个字段的旧版本节点）。
+  // scene-manager 的领导者据此判断节点已经看到某次改写：排空记录只有在 applied_plan_version ≥ 记录的 plan_version 且场景已从 scenes
+  // 里消失时才删除（批次 5.1，scene-channels-spec §4.6.2 P3）。
+  uint64 applied_plan_version = 9;
+  // 节点用途（5.3 预留，取值沿用基线 go/scene_manager/internal/constants/scene_type.go:9-19：0 主世界、1 副本、2 跨服主世界、3 跨服副本）。
+  // 5.1 恒 0，读方不按它分池（D15）。
+  uint32 scene_node_type = 10;
 }
 
 message SceneEntry {
   uint64 scene_id = 1;
   uint32 scene_config_id = 2;
   uint32 player_count = 3;
+  // 排空中（频道计划里是 CHANNEL_DRAINING，或节点上有计划外的场景）：分配不再选它，在场玩家被同节点改派，空了即销毁（5.1，D11、D13）。
+  bool draining = 4;
 }

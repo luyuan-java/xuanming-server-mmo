@@ -9,7 +9,7 @@ import com.game.audit.TopicSpec;
 import com.game.audit.proto.PlayerSnapshotRecord;
 import com.game.audit.proto.SnapshotCause;
 import com.game.audit.proto.TransactionLogRecord;
-import com.game.scene.id.SceneGuids;
+import com.game.common.id.LeaseGatedSnowflake;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.AuditKind;
 import com.game.scene.metrics.SceneMetrics.AuditResult;
@@ -66,7 +66,7 @@ public final class AuditPipeline {
     private final int snapshotMaxBytes;
     private final short replicationFactor;
     private final Duration verifyTimeout;
-    private final SceneGuids guids;
+    private final LeaseGatedSnowflake guids;
     private final SceneMetrics metrics;
     private final AuditFallbackLog fallback = new AuditFallbackLog();
     private final ThreadPoolExecutor executor;
@@ -83,7 +83,7 @@ public final class AuditPipeline {
     public AuditPipeline(Supplier<Producer<String, byte[]>> producerFactory, Supplier<TopicAdmin> adminFactory,
                          List<TopicSpec> topics,
                          String transactionTopic, String snapshotTopic, int snapshotMaxBytes, short replicationFactor,
-                         Duration verifyTimeout, SceneGuids guids, int queueCapacity, SceneMetrics metrics) {
+                         Duration verifyTimeout, LeaseGatedSnowflake guids, int queueCapacity, SceneMetrics metrics) {
         this.producerFactory = producerFactory;
         this.adminFactory = adminFactory;
         this.topics = List.copyOf(topics);

@@ -48,9 +48,35 @@ xm:
   redis:
     address: redis://127.0.0.1:6379
     database: 12
-  # scene-manager:
-  #   # 默认世界地图（scene_config_id）。不配 = World 表按表序第一行的 scene_id（当前为 1）。
-  #   default-world-config-id: 1
+  scene-manager:
+    # 默认世界地图（scene_config_id）。不配 = World 表按表序第一行的 scene_id（当前为 1）。
+    # default-world-config-id: 1
+    # 主世界频道（批次 5.1，docs/porting/scene-channels-spec.md §5.2）。下面是缺省值，不配即生效。
+    world:
+      # login 的归属夺取等待（xm.login.owner-claim-wait）的镜像：启动时校验 reservation-ttl ≥ 它（Q8）。两边配不同值时改这里。
+      login-owner-claim-wait: ${xm.login.owner-claim-wait:3s}
+      # channel-count: 1                 # 每图种子频道数（只在首次播种时用；之后以 Redis xm:world:{z:<zone>}:desired 为准）
+      # channel-count-by-config:         # 按 scene_config_id 覆盖种子（本机切片保持每图 1 个，Q4；基线开发配置是 "1": 16）
+      #   "[1]": 16
+      # coverage: per-node               # per-node（5.2 之前）/ hash
+      # tick: 5s                         # 领导者一拍
+      # dead-node-grace: 20s             # 节点缺席满这么久，删它名下的频道记录、在活节点上用新号重铺
+      # leader-lock-ttl: 30s             # 分 zone 领导锁 TTL（续期 TTL/3、有效 2/3 TTL）
+      # leader-eligible: true            # false = 本副本只做分配，不竞选
+      # cleanup-orphans: true            # World 表删掉的图：频道排空后删除
+      # reservation-ttl: 10s             # 进场软预占 TTL；0 = 关闭
+      # rebalance:                       # 择机迁移（只在 coverage=hash）
+      #   max-migrations-per-tick: 10
+      #   interval: 300s
+      # autoscale:                       # 自动扩缩容（缺省关；drain-timeout 不论开关都生效）
+      #   enabled: false
+      #   check-interval: 30s
+      #   scale-out-players: 2000
+      #   scale-in-players: 100
+      #   min-channels: 1
+      #   max-channels: 16
+      #   cooldown: 120s
+      #   drain-timeout: 300s
 
 dubbo:
   application:

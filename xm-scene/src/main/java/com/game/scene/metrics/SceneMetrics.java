@@ -25,8 +25,9 @@ import java.util.function.IntSupplier;
  * scene 的低基数指标（Micrometer，经 actuator 以 Prometheus 格式导出，见 architecture.md §11）。
  * 指标名与标签只在这里定义，业务代码只调语义方法。
  *
- * <p><b>标签基数约束</b>（AGENTS.md §5）：不以 player_id / session_id / 实体号 / 场景实例号 / gate 节点号 / 链路号作标签。
- * 场景维度只用场景配置号（{@code scene_config}）：场景只在启动时按配置表的主世界场景建出来，之后不再新增，所以它有界；
+ * <p><b>标签基数约束</b>（AGENTS.md §5）：不以 player_id / session_id / 实体号 / 场景实例号 / gate 节点号 / 链路号 / zone 作标签。
+ * 场景维度只用场景配置号（{@code scene_config}）：主世界频道按 scene-manager 的频道计划在运行期建 / 销毁（批次 5.1），
+ * 但只建 World 表里的图（节点拒绝计划里的非世界图），所以它仍受 World 表约束、有界；
  * 链路帧类型取 {@code NodeLinkFrame} 的 oneof（有界）；其余标签都是本类里的枚举。
  *
  * <p><b>线程</b>：全部计量器线程安全，可从任意线程调——场景逻辑线程（人数、移动、视野、帧与广播耗时、逻辑任务）、
@@ -66,6 +67,10 @@ public final class SceneMetrics {
     static final String ASSET_OPS_INFLIGHT = "xm.scene.asset.ops.inflight";
     /** 资产通道回写线程池（把 Dubbo 应答切出逻辑线程）的 {@code executor_*} 指标 {@code name} 标签。 */
     static final String ASSET_REPLY_EXECUTOR_NAME = "scene-asset-reply";
+    static final String CHANNELS = "xm.scene.channels";
+    static final String CHANNEL_PLAN_APPLIES = "xm.scene.channel.plan.applies";
+    static final String CHANNEL_PLAN_POLL_FAILURES = "xm.scene.channel.plan.poll.failures";
+    static final String CHANNEL_RELOCATIONS = "xm.scene.channel.relocations";
 
     /**
      * 逻辑线程内耗时（帧、广播、逻辑任务排队与执行）的桶边界：固定 12 个，覆盖 0.1ms～1s，50ms 是一帧的预算
@@ -147,6 +152,8 @@ public final class SceneMetrics {
         NOT_MEMBER,
         /** 队长不在本节点（跨节点、跨 zone、离线）。 */
         LEADER_NOT_ON_NODE,
+        /** 队长所在的频道在排空中（批次 5.1 §4.13）：不跟进去，等队长被改派后由它的进场扇出把队伍收拢。 */
+        LEADER_SCENE_DRAINING,
         /** 自己就是队长：自己进场时扇出给本节点的其他成员，被跟随 / 被扇出触发时什么都不做。 */
         IS_LEADER,
         /** 读回来时玩家已离开或已重新进场（不是发起读时的那个实例），丢弃。 */
@@ -230,6 +237,30 @@ public final class SceneMetrics {
         ERROR
     }
 
+    /**
+     * 频道计划的应用（{@code xm.scene.channel.plan.applies{result}}，§4.10）：每应用一个新版本计一次 {@code applied}；
+     * 其中每条被拒的记录（零号、非世界图、同号异图、未知状态 / 种类）另计一次 {@code rejected}；节点号租约无效而跳过的一次拉取计一次 {@code skipped_lease}。
+     */
+    public enum ChannelPlanApply {
+        APPLIED,
+        REJECTED,
+        SKIPPED_LEASE
+    }
+
+    /**
+     * 排空频道里的玩家改派 / 进场重定向（{@code xm.scene.channel.relocations{result}}，§4.10.3、§4.10.4），每人每次计一次。
+     */
+    public enum ChannelRelocation {
+        /** 改派到本节点同图的另一个 ACTIVE 频道（同图保留坐标）。 */
+        SAME_MAP,
+        /** 本节点没有同图 ACTIVE 频道，改派到本节点默认大世界（World 第一行，落出生点）。 */
+        DEFAULT_WORLD,
+        /** 本节点两者都没有：原地不动，下一次推进再试（per-node 覆盖模式下不会出现）。 */
+        BLOCKED,
+        /** 进场加载完成时目标频道已在排空，改进本节点的兄弟频道。 */
+        ENTER_REDIRECT
+    }
+
     /** 没发出去的 scene → gate 链路帧（{@code xm.scene.link.dropped{reason}}）。 */
     public enum LinkDrop {
         /** 链路已注销或已断开（其上会话随链路一起失效）。 */
@@ -258,6 +289,12 @@ public final class SceneMetrics {
     private final Counter linkPauses;
     private final Map<AuditKind, Map<AuditResult, Counter>> auditRecords;
     private final Map<AssetRpc, Map<AssetOpResult, Counter>> assetOps;
+    private final Map<ChannelPlanApply, Counter> channelPlanApplies;
+    private final Counter channelPlanPollFailures;
+    private final Map<ChannelRelocation, Counter> channelRelocations;
+    /** 本节点承载中 / 排空中的频道数（逻辑线程推绝对值，抓取线程读）。 */
+    private final AtomicInteger activeChannels = new AtomicInteger();
+    private final AtomicInteger drainingChannels = new AtomicInteger();
     /** 场景配置号 → 在线人数（逻辑线程写，抓取线程读）。首次出现时注册 Gauge。 */
     private final ConcurrentHashMap<Integer, AtomicInteger> scenePlayers = new ConcurrentHashMap<>();
 
@@ -327,6 +364,22 @@ public final class SceneMetrics {
             }
             assetOps.put(rpc, byResult);
         }
+        // 主世界频道（批次 5.1，scene-channels-spec §6.2）：全部预注册，不带 zone / scene_id / 节点号
+        Gauge.builder(CHANNELS, activeChannels, AtomicInteger::get)
+                .description("本节点的主世界频道数（active = 承载中，draining = 排空中）")
+                .tag("state", "active")
+                .register(registry);
+        Gauge.builder(CHANNELS, drainingChannels, AtomicInteger::get)
+                .description("本节点的主世界频道数（active = 承载中，draining = 排空中）")
+                .tag("state", "draining")
+                .register(registry);
+        this.channelPlanApplies = counters(ChannelPlanApply.class, CHANNEL_PLAN_APPLIES, "result",
+                "频道计划的应用：applied = 应用了一个新版本；rejected = 其中一条记录被拒；skipped_lease = 节点号租约无效跳过一次拉取");
+        this.channelPlanPollFailures = Counter.builder(CHANNEL_PLAN_POLL_FAILURES)
+                .description("频道计划拉取（读版本号 / 整读 / 投递逻辑线程应用）失败的次数；失败时什么也不应用，下一秒重试")
+                .register(registry);
+        this.channelRelocations = counters(ChannelRelocation.class, CHANNEL_RELOCATIONS, "result",
+                "排空频道里的玩家改派 / 进场重定向（每人每次计一次）");
     }
 
     /** 不导出任何指标的实例（测试 / 不关心指标的装配用）：没有子注册表的 {@link CompositeMeterRegistry} 上计量器都是空操作。 */
@@ -421,6 +474,29 @@ public final class SceneMetrics {
             });
         }
         value.set(players);
+    }
+
+    // ================================================================ 主世界频道（批次 5.1）
+
+    /** 本节点承载中 / 排空中的频道数（{@code xm.scene.channels{state}}）。逻辑线程在频道增删、状态变化后推绝对值。 */
+    public void channels(int active, int draining) {
+        activeChannels.set(active);
+        drainingChannels.set(draining);
+    }
+
+    /** 频道计划应用的一次结局（任意线程：逻辑线程记 applied / rejected，拉取线程记 skipped_lease）。 */
+    public void channelPlanApply(ChannelPlanApply result) {
+        channelPlanApplies.get(result).increment();
+    }
+
+    /** 一次频道计划拉取失败（拉取线程）。 */
+    public void channelPlanPollFailed() {
+        channelPlanPollFailures.increment();
+    }
+
+    /** 一次改派 / 进场重定向（逻辑线程）。 */
+    public void channelRelocation(ChannelRelocation result) {
+        channelRelocations.get(result).increment();
     }
 
     // ================================================================ 逻辑线程

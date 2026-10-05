@@ -136,6 +136,85 @@ class ClientRequestHandlerTest {
         assertThat(scene2.playerCount()).isEqualTo(1);
     }
 
+    // ------------------------------------------------------------------ 63 与主世界频道（批次 5.1，scene-channels-spec §4.12）
+
+    @Test
+    void EnterScene_只带当前地图_同图有更空的频道_跳过去发79_坐标保留() throws Exception {
+        Scene channel2 = world.createScene(1);
+        scene1.relocate(world.playerBySession(new SessionKey(LINK, 11)), new Vec3(120, 130, 0));
+
+        forward(11, 1001, IDS.enterScene(), enterSceneRequest(1, 0, 0), 6);
+
+        // 当前频道的人数含自己（1）> 兄弟（0）：同基线「全 zone 该图频道预占最少者」，只是限本节点（D17）
+        List<MessageContent> toA = sink.to(LINK, 11);
+        assertThat(toA).extracting(MessageContent::getMessageId).containsExactly(63, 79, 21);
+        assertThat(tipOf(toA.get(0))).isZero();
+        assertThat(EnterSceneS2C.parseFrom(toA.get(1).getSerializedMessage()).getSceneInfo().getSceneId())
+                .isEqualTo(channel2.sceneId());
+        assertLocation(ActorCreateS2C.parseFrom(toA.get(2).getSerializedMessage()), 120, 130, 0);
+        assertThat(entitySceneOf(11)).isSameAs(channel2);
+    }
+
+    @Test
+    void EnterScene_只带当前地图_并列留在原地_不发79() {
+        Scene channel2 = world.createScene(1);
+        enter(12, 1002, channel2);
+
+        forward(11, 1001, IDS.enterScene(), enterSceneRequest(1, 0, 0), 7);
+
+        assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(63);
+        assertThat(tipOf(sink.to(LINK, 11).get(0))).isZero();
+        assertThat(entitySceneOf(11)).isSameAs(scene1);
+    }
+
+    @Test
+    void EnterScene_只带当前地图_当前在排空_排除自己换到兄弟_没有兄弟回3023() {
+        Scene channel2 = world.createScene(1);
+        enter(12, 1002, channel2);
+        enter(13, 1003, channel2);
+        scene1.setDraining(true);
+
+        forward(11, 1001, IDS.enterScene(), enterSceneRequest(1, 0, 0), 8);
+        assertThat(sink.messageIdsTo(LINK, 11)).as("兄弟有 2 人也换：排空中的当前频道不参与").containsExactly(63, 79, 21, 47);
+        assertThat(entitySceneOf(11)).isSameAs(channel2);
+        sink.clear();
+
+        channel2.setDraining(true);
+        forward(11, 1001, IDS.enterScene(), enterSceneRequest(1, 0, 0), 9);
+        assertThat(tipOf(sink.to(LINK, 11).get(0))).isEqualTo(3023);
+        assertThat(entitySceneOf(11)).isSameAs(channel2);
+    }
+
+    @Test
+    void EnterScene_指定排空中的频道回3023_指定承载中的同图频道放行() {
+        Scene channel2 = world.createScene(1);
+        channel2.setDraining(true);
+
+        forward(11, 1001, IDS.enterScene(), enterSceneRequest(1, channel2.sceneId(), 0), 10);
+        assertThat(tipOf(sink.to(LINK, 11).get(0))).as("D11：基线放行（B5）").isEqualTo(3023);
+        assertThat(entitySceneOf(11)).isSameAs(scene1);
+        sink.clear();
+
+        channel2.setDraining(false);
+        forward(11, 1001, IDS.enterScene(), enterSceneRequest(0, channel2.sceneId(), 0), 11);
+        assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(63, 79, 21);
+        assertThat(entitySceneOf(11)).isSameAs(channel2);
+    }
+
+    @Test
+    void EnterScene_只带别的地图_取人数最少的_排空中的不选() throws Exception {
+        Scene map2b = world.createScene(2);
+        Scene map2c = world.createScene(2);
+        enter(12, 1002, scene2);
+        map2b.setDraining(true);
+
+        forward(11, 1001, IDS.enterScene(), enterSceneRequest(2, 0, 0), 12);
+
+        List<MessageContent> toA = sink.to(LINK, 11);
+        assertThat(EnterSceneS2C.parseFrom(toA.get(1).getSerializedMessage()).getSceneInfo().getSceneId())
+                .isEqualTo(map2c.sceneId());
+    }
+
     @Test
     void SceneInfoC2S_不回43_改推31() throws Exception {
         forward(11, 1001, IDS.sceneInfoC2S(), SceneInfoRequest.getDefaultInstance(), 3);

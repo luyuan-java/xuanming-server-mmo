@@ -67,7 +67,7 @@
 
 | 批次 | 内容 | 盘点 id | 状态 |
 |---|---|---|---|
-| 5.1 | 场景实例登记、主世界多频道与自动扩缩容 | scene-instance-registry、world-channels-from-tables、sm-world-channel-* |
+| 5.1 | 场景实例登记、主世界多频道与自动扩缩容 | scene-instance-registry、world-channels-from-tables、sm-world-channel-* | ✅（提交见 git log「批次 5.1」；频道计划在 Redis、scene-manager 分 zone 领导者维护、scene 节点拉取收敛，缺省每节点每图一个频道、自动扩缩容缺省关；跨节点改派随 5.2 / 5.5——PARITY「场景实例与主世界频道」行）|
 | 5.2 | 跨节点换图 + 归属交接 | scene-switch-cross-node、ownership-handoff、sm-cross-node-scene-switch、sm-player-location |
 | 5.3 | 副本（Dungeon 表）与镜像场景、空闲回收 | dungeon-instance、mirror-scene、sm-mirror-instance、sm-instance-lifecycle |
 | 5.4 | 跨 zone 传送（226）与重定向（124）、归属区路由；robot travel-smoke | zone-travel、cross-zone-redirect、sm-cross-zone-redirect、home-zone-mapping、sm-home-zone-routing |

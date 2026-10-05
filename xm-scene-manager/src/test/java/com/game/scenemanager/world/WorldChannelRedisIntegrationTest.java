@@ -1,0 +1,339 @@
+package com.game.scenemanager.world;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.game.api.proto.AssignSceneRequest;
+import com.game.api.proto.ChannelState;
+import com.game.api.proto.SceneEntry;
+import com.game.api.proto.SceneNodeInfo;
+import com.game.api.proto.WorldChannel;
+import com.game.discovery.RedisKeys;
+import com.game.discovery.world.RedissonWorldChannelStore;
+import com.game.discovery.world.WorldChannelStore;
+import com.game.discovery.world.WorldChannels;
+import com.game.discovery.world.WorldPlan;
+import com.game.scenemanager.ChannelSelector;
+import com.game.scenemanager.SceneAssigner;
+import com.game.scenemanager.SceneNodeSource;
+import com.game.scenemanager.WorldSceneConfigs;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalLong;
+import java.util.TreeMap;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.redisson.Redisson;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.StringCodec;
+import org.redisson.config.Config;
+
+/**
+ * 控制面连真 Redis（scene-channels-spec §9.5 WorldLeaderFailoverIT 与围栏写入）：两个协调者竞选、只有一个写、频道数不翻倍；
+ * 领导者停止续期后跟随者在 TTL 内接管；锁被夺后旧领导者的写入被围栏（−1）并降级；版本冲突（−2）本拍作废、下拍重算；
+ * 分配的软预占把并发进场摊开。
+ * 默认跳过；显式开启：{@code -Dxm.it.redis=redis://127.0.0.1:6379}。用 DB 9，每个用例一个随机 zone，结束时只删自己的键。
+ */
+@EnabledIfSystemProperty(named = "xm.it.redis", matches = ".+")
+class WorldChannelRedisIntegrationTest {
+
+    private static final List<Integer> CONFS = List.of(1, 2);
+
+    private static RedissonClient redis;
+    private static WorldChannelStore store;
+    private static final List<Integer> ZONES = new ArrayList<>();
+    private static final AtomicLong IDS = new AtomicLong(ThreadLocalRandom.current().nextLong(1L << 40, 1L << 50));
+
+    @BeforeAll
+    static void connect() {
+        Config config = new Config();
+        config.useSingleServer().setAddress(System.getProperty("xm.it.redis")).setDatabase(9);
+        redis = Redisson.create(config);
+        store = new RedissonWorldChannelStore(redis);
+    }
+
+    @AfterAll
+    static void cleanup() {
+        for (int zone : ZONES) {
+            redis.getKeys().deleteByPattern("xm:world:{z:" + Integer.toUnsignedString(zone) + "}:*");
+            redis.getSet(RedisKeys.worldZones(), StringCodec.INSTANCE).remove(Integer.toUnsignedString(zone));
+        }
+        redis.shutdown();
+    }
+
+    private static synchronized int newZone() {
+        int zone = ThreadLocalRandom.current().nextInt(100_000_000, 2_000_000_000);
+        ZONES.add(zone);
+        store.registerZone(zone);
+        return zone;
+    }
+
+    /** 一个 zone 的假目录：节点号 → 条目（承载计划里属于它的 ACTIVE 记录、已应用当前版本）。 */
+    private static final class Directory implements SceneNodeSource {
+        final int zone;
+        final Map<Integer, SceneNodeInfo> nodes = new TreeMap<>();
+        Runnable onList = () -> { };
+
+        Directory(int zone) {
+            this.zone = zone;
+        }
+
+        void host(int nodeId) {
+            WorldPlan plan = store.readPlan(zone);
+            SceneNodeInfo.Builder b = SceneNodeInfo.newBuilder().setZoneId(zone).setNodeId(nodeId).setInstanceId("it-" + nodeId)
+                    .setLinkHost("127.0.0.1").setLinkPort(21000 + nodeId).setAppliedPlanVersion(plan.version());
+            for (WorldChannel c : plan.channelsOn(nodeId)) {
+                if (c.getState() == ChannelState.CHANNEL_ACTIVE) {
+                    b.addScenes(SceneEntry.newBuilder().setSceneId(c.getSceneId()).setSceneConfigId(c.getSceneConfigId()));
+                }
+            }
+            nodes.put(nodeId, b.build());
+        }
+
+        @Override
+        public List<SceneNodeInfo> list(int zoneId) {
+            onList.run();
+            return zoneId == zone ? new ArrayList<>(nodes.values()) : List.of();
+        }
+    }
+
+    private static WorldChannelCoordinator coordinator(Directory directory, String token, Duration lockTtl,
+                                                       SimpleMeterRegistry meters) {
+        WorldChannelProperties props = PlanFixture.props(Map.of("leader-lock-ttl", lockTtl.toMillis() + "ms"));
+        WorldChannelPlanner planner = new WorldChannelPlanner(props, CONFS, MirrorSources.NONE,
+                () -> OptionalLong.of(IDS.incrementAndGet()));
+        return new WorldChannelCoordinator(scoped(directory.zone), directory, planner, props, new WorldChannelMetrics(meters, CONFS),
+                NodeAvailability.ALL, token, System::nanoTime);
+    }
+
+    /**
+     * 只看见本用例 zone 的存储：DB 9 的 {@code xm:world:zones} 是共享的（别的用例 / 别的模块的测试也往里登记），协调者竞选时只碰自己的 zone。
+     */
+    private static WorldChannelStore scoped(int zone) {
+        return (WorldChannelStore) Proxy.newProxyInstance(WorldChannelStore.class.getClassLoader(),
+                new Class<?>[] {WorldChannelStore.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("zones")) {
+                        return List.of(zone);
+                    }
+                    try {
+                        return method.invoke(store, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
+    private static double ticks(SimpleMeterRegistry meters, String result) {
+        return meters.get(WorldChannelMetrics.TICKS).tag("result", result).counter().count();
+    }
+
+    @Test
+    void 两个协调者竞选_只有一个写_轮流跑频道数不翻倍_ver单调() {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        dir.host(20);
+        SimpleMeterRegistry ma = new SimpleMeterRegistry();
+        SimpleMeterRegistry mb = new SimpleMeterRegistry();
+        WorldChannelCoordinator a = coordinator(dir, "it-a:" + zone, Duration.ofSeconds(30), ma);
+        WorldChannelCoordinator b = coordinator(dir, "it-b:" + zone, Duration.ofSeconds(30), mb);
+
+        long lastVersion = 0;
+        java.util.Set<Long> versions = new java.util.TreeSet<>();
+        for (int i = 0; i < 4; i++) {
+            a.tick();
+            b.tick();
+            dir.host(10);
+            dir.host(20);
+            long v = store.planVersion(zone);
+            assertThat(v).isGreaterThanOrEqualTo(lastVersion);
+            lastVersion = v;
+            versions.add(v);
+        }
+
+        assertThat(store.readPlan(zone).channels()).hasSize(4); // 2 节点 × 2 图（per-node 覆盖）
+        // 只写过一次：版本号从 0 跳到以 Redis TIME 托底的毫秒值后不再动
+        assertThat(versions).hasSize(1);
+        assertThat(lastVersion).isGreaterThan(1_000_000_000_000L);
+        assertThat(a.ledZones()).containsExactly(zone);
+        assertThat(b.ledZones()).isEmpty();
+        assertThat(ticks(mb, "not_leader")).isEqualTo(4);
+        a.releaseAll();
+        b.releaseAll();
+    }
+
+    @Test
+    void 领导者停止续期后_跟随者在TTL内接管_旧领导者续期即降级() throws Exception {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        SimpleMeterRegistry ma = new SimpleMeterRegistry();
+        SimpleMeterRegistry mb = new SimpleMeterRegistry();
+        Duration ttl = Duration.ofSeconds(3);
+        WorldChannelCoordinator a = coordinator(dir, "it-a:" + zone, ttl, ma);
+        WorldChannelCoordinator b = coordinator(dir, "it-b:" + zone, ttl, mb);
+        a.tick();
+        long versionByA = store.planVersion(zone);
+        assertThat(versionByA).isGreaterThan(1_000_000_000_000L);
+        dir.host(10);
+        b.tick();
+        assertThat(b.ledZones()).isEmpty();
+
+        // a 不再续期（进程卡死）：锁在 TTL 后过期，b 在下一拍接管
+        long deadline = System.nanoTime() + Duration.ofSeconds(8).toNanos();
+        while (b.ledZones().isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(100);
+            b.tick();
+        }
+        assertThat(b.ledZones()).containsExactly(zone);
+        assertThat(redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo("it-b:" + zone);
+        // 接管后计划不变（b 读到的就是 a 写的）
+        assertThat(store.readPlan(zone).channels()).hasSize(2);
+        assertThat(store.planVersion(zone)).isEqualTo(versionByA);
+
+        // a 醒来：本地有效期早过了，不写；续期发现锁已不是自己的，降级
+        a.tick();
+        assertThat(ticks(ma, "not_leader")).isEqualTo(1);
+        a.renewLeaders();
+        assertThat(a.ledZones()).isEmpty();
+        a.releaseAll();
+        assertThat(redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo("it-b:" + zone);
+        b.releaseAll();
+    }
+
+    @Test
+    void 锁被夺后旧领导者的写入被围栏并降级() {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        SimpleMeterRegistry ma = new SimpleMeterRegistry();
+        WorldChannelCoordinator a = coordinator(dir, "it-a:" + zone, Duration.ofSeconds(30), ma);
+        a.tick();
+        dir.host(10);
+        long version = store.planVersion(zone);
+
+        // 双领导窗口：锁值已是别人的，但 a 本地仍认为有效；新节点出现，a 要写
+        redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).set("it-x:" + zone, Duration.ofSeconds(30));
+        dir.host(20);
+        a.tick();
+
+        assertThat(ticks(ma, "fenced")).isEqualTo(1);
+        assertThat(a.ledZones()).isEmpty();
+        assertThat(store.planVersion(zone)).isEqualTo(version);
+        assertThat(store.readPlan(zone).channelsOn(20)).isEmpty();
+        redis.getBucket(RedisKeys.worldLeader(zone)).delete();
+    }
+
+    @Test
+    void 版本冲突_本拍作废_下拍重读重算() {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        SimpleMeterRegistry ma = new SimpleMeterRegistry();
+        WorldChannelCoordinator a = coordinator(dir, "it-a:" + zone, Duration.ofSeconds(30), ma);
+        // 快照之后、写入之前（目录读取发生在两者之间）有人改了版本号（运维手改 / 双领导）
+        AtomicBoolean bumped = new AtomicBoolean();
+        dir.onList = () -> {
+            if (bumped.compareAndSet(false, true)) {
+                redis.getAtomicLong(RedisKeys.worldPlanVersion(zone)).incrementAndGet();
+            }
+        };
+
+        a.tick();
+        assertThat(ticks(ma, "conflict")).isEqualTo(1);
+        assertThat(store.readPlan(zone).channels()).isEmpty();
+        assertThat(store.planVersion(zone)).isEqualTo(1);
+
+        a.tick();
+        assertThat(ticks(ma, "ok")).isEqualTo(1);
+        assertThat(store.readPlan(zone).channels()).hasSize(2);
+        // 重读到 1 后写入：新版本以 Redis TIME 托底
+        assertThat(store.planVersion(zone)).isGreaterThan(1_000_000_000_000L);
+        a.releaseAll();
+    }
+
+    @Test
+    void 控制面起停_占发号租约_线程自己跑拍铺好计划_停服放锁还租约() throws Exception {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        WorldChannelProperties props = PlanFixture.props(Map.of("tick", "200ms", "leader-lock-ttl", "3s"));
+        WorldChannelControlPlane plane = WorldChannelControlPlane.start(redis, scoped(zone), dir,
+                new WorldSceneConfigs(1, new LinkedHashSet<>(CONFS)), props,
+                new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS));
+        int worker = plane.idWorker();
+        try {
+            assertThat(worker).isBetween(1, 1023);
+            long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            while (store.readPlan(zone).channels().size() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertThat(store.readPlan(zone).channels()).hasSize(2).allSatisfy(c -> {
+                assertThat(c.getSceneId()).isPositive();
+                assertThat(c.getNodeId()).isEqualTo(10);
+            });
+            assertThat(redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).get())
+                    .isEqualTo(plane.coordinator().token());
+            assertThat(redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists()).isTrue();
+        } finally {
+            plane.close();
+        }
+        assertThat(redis.getBucket(RedisKeys.worldLeader(zone)).isExists()).isFalse();
+        assertThat(redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists()).isFalse();
+        redis.getBucket(RedisKeys.nodeIdEpoch(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).delete();
+    }
+
+    @Test
+    void 分配的软预占把并发进场摊开() throws Exception {
+        int zone = newZone();
+        Directory dir = new Directory(zone);
+        dir.host(10);
+        dir.host(20);
+        // 种子 4：每张图在两个节点上各 2 个频道（per-node 覆盖 + 补足到 4）
+        WorldChannelProperties props = PlanFixture.props(Map.of("channel-count", "4"));
+        WorldChannelCoordinator seeded = new WorldChannelCoordinator(scoped(zone), dir,
+                new WorldChannelPlanner(props, CONFS, MirrorSources.NONE, () -> OptionalLong.of(IDS.incrementAndGet())),
+                props, new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS), NodeAvailability.ALL, "it-a:" + zone,
+                System::nanoTime);
+        seeded.tick();
+        dir.host(10);
+        dir.host(20);
+        seeded.releaseAll();
+        assertThat(store.readPlan(zone).channels()).filteredOn(c -> c.getSceneConfigId() == 1).hasSize(4);
+
+        WorldSceneConfigs world = new WorldSceneConfigs(1, new LinkedHashSet<>(CONFS));
+        SceneAssigner assigner = new SceneAssigner(dir, world, new ChannelSelector(dir, store, Duration.ofSeconds(10)));
+        int players = 40;
+        List<Thread> threads = new ArrayList<>();
+        Map<Long, Integer> spread = new HashMap<>();
+        for (int i = 0; i < players; i++) {
+            long playerId = 7_000_000L + i;
+            Thread t = Thread.ofVirtual().start(() -> {
+                long scene = assigner.assign(AssignSceneRequest.newBuilder().setZoneId(zone).setPlayerId(playerId).build())
+                        .getSceneId();
+                synchronized (spread) {
+                    spread.merge(scene, 1, Integer::sum);
+                }
+            });
+            threads.add(t);
+        }
+        for (Thread t : threads) {
+            t.join();
+        }
+
+        assertThat(spread).hasSize(4).allSatisfy((scene, n) -> assertThat(n).isBetween(9, 11));
+        List<Long> counts = store.countReservations(zone, new ArrayList<>(spread.keySet()));
+        assertThat(counts.stream().mapToLong(Long::longValue).sum()).isEqualTo(players);
+    }
+}

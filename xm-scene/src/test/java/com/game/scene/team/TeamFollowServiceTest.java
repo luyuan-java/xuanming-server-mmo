@@ -2,8 +2,11 @@ package com.game.scene.team;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.proto.ChannelKind;
+import com.game.api.proto.ChannelState;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
+import com.game.api.proto.WorldChannel;
 import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamMembership;
 import com.game.scene.metrics.SceneMetrics;
@@ -419,5 +422,77 @@ class TeamFollowServiceTest {
 
         assertThat(logicQueue).isEmpty();
         assertThat(counts()).isEmpty();
+    }
+
+    // ------------------------------------------------------------------ 主世界频道的排空（批次 5.1，scene-channels-spec §4.13）
+
+    private static final long L1 = 0x8000_0000_0000_0B01L;
+    private static final long L1B = 0x8000_0000_0000_0B02L;
+    private static final long L1C = 0x8000_0000_0000_0B03L;
+    private static final long M2S = 0x8000_0000_0000_0B04L;
+
+    private static WorldChannel channel(long sceneId, int configId, ChannelState state) {
+        return WorldChannel.newBuilder().setSceneId(sceneId).setSceneConfigId(configId).setNodeId(1).setState(state)
+                .setKind(ChannelKind.CHANNEL_KIND_WORLD).build();
+    }
+
+    private ScenePlayer enterChannel(long playerId, long sceneId) {
+        int session = nextSession++;
+        repo.putNewPlayer(playerId, 1);
+        world.onPlayerEnter(LINK, PlayerEnter.newBuilder().setSessionId(session).setPlayerId(playerId)
+                .setSceneId(sceneId).setOwnerEpoch(1).build());
+        repo.completeAll();
+        return world.playerById(playerId);
+    }
+
+    @Test
+    void 队长所在频道在排空_不跟进去_队长被改派后扇出把队员收拢到新频道() {
+        // 计划接管场景：setUp 里本地自建的三个空场景不在计划里，转排空后立即销毁
+        world.applyChannelPlan(1, List.of(channel(L1, 1, ChannelState.CHANNEL_ACTIVE),
+                channel(M2S, 2, ChannelState.CHANNEL_ACTIVE)));
+        team(LEADER, LEADER, M1);
+        enterChannel(LEADER, L1);
+        settle();
+        // 本节点没有别的图 1 频道、默认大世界就是图 1：队长原地不动（blocked）
+        world.applyChannelPlan(2, List.of(channel(L1, 1, ChannelState.CHANNEL_DRAINING),
+                channel(M2S, 2, ChannelState.CHANNEL_ACTIVE)));
+        assertThat(sceneOf(LEADER).sceneId()).isEqualTo(L1);
+
+        enterChannel(M1, M2S);
+        settle();
+
+        assertThat(sceneOf(M1).sceneId()).as("不跟进排空中的频道（基线会跟进，B5）").isEqualTo(M2S);
+        assertThat(count(TeamFollowResult.LEADER_SCENE_DRAINING)).isEqualTo(1);
+
+        world.applyChannelPlan(3, List.of(channel(L1, 1, ChannelState.CHANNEL_DRAINING),
+                channel(L1B, 1, ChannelState.CHANNEL_ACTIVE), channel(M2S, 2, ChannelState.CHANNEL_ACTIVE)));
+        assertThat(sceneOf(LEADER).sceneId()).as("应用计划后立即改派").isEqualTo(L1B);
+        settle();
+
+        assertThat(sceneOf(M1).sceneId()).as("队长改派后以「自己进场」扇出，队员跟到新频道").isEqualTo(L1B);
+        assertThat(count(TeamFollowResult.FOLLOWED)).isEqualTo(1);
+        assertThat(count(TeamFollowResult.LEADER_SCENE_DRAINING)).isEqualTo(1);
+    }
+
+    @Test
+    void 同一排空频道里的队伍_被改派到不同兄弟后收拢到队长那里_不被拉回排空频道() {
+        world.applyChannelPlan(1, List.of(channel(L1, 1, ChannelState.CHANNEL_ACTIVE),
+                channel(L1B, 1, ChannelState.CHANNEL_ACTIVE), channel(L1C, 1, ChannelState.CHANNEL_ACTIVE)));
+        team(LEADER, LEADER, M1);
+        enterChannel(LEADER, L1);
+        enterChannel(M1, L1);
+        settle();
+
+        // 队长先进场先被改派：L1B、L1C 都空，并列取号小的 L1B；队员去更空的 L1C
+        world.applyChannelPlan(2, List.of(channel(L1, 1, ChannelState.CHANNEL_DRAINING),
+                channel(L1B, 1, ChannelState.CHANNEL_ACTIVE), channel(L1C, 1, ChannelState.CHANNEL_ACTIVE)));
+        assertThat(sceneOf(LEADER).sceneId()).isEqualTo(L1B);
+        assertThat(sceneOf(M1).sceneId()).isEqualTo(L1C);
+        settle();
+
+        assertThat(sceneOf(LEADER).sceneId()).isEqualTo(L1B);
+        assertThat(sceneOf(M1).sceneId()).isEqualTo(L1B);
+        assertThat(world.sceneEntries()).extracting(e -> e.getSceneId()).containsExactlyInAnyOrder(L1B, L1C);
+        assertThat(count(TeamFollowResult.LEADER_SCENE_DRAINING)).isZero();
     }
 }

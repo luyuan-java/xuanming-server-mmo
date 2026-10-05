@@ -203,7 +203,8 @@ public final class ClientRequestHandler {
     /**
      * 63：按基线顺序校验（契约文档 §4.3），先回应答（无错 = 已受理），再在本节点内换场景。
      * Java 场景节点都是主世界节点、没有战斗、换场景同步完成，所以 3004 / 3014 与「战斗在途」的 3023 不会出现；
-     * 镜像场景与跨节点换场景首批不做，回 3023。
+     * 镜像场景与跨节点换场景首批不做，回 3023。去向由 {@link SceneWorld#resolveSwitchTarget} 定（批次 5.1，scene-channels-spec §4.12）：
+     * 指定排空中的频道回 3023（D11）；只带当前地图时在本节点同图频道里挑最空的（含自己、并列留原地，D17），挑回原频道 = 受理、不发 79。
      */
     private void enterScene(PlayerCall call, EnterSceneC2SRequest request) {
         ScenePlayer player = call.player();
@@ -218,14 +219,16 @@ public final class ClientRequestHandler {
         } else if (want.getSceneId() != 0 && want.getSceneId() == current.sceneId()) {
             tipId = ENTER_IN_CURRENT_SCENE;
         } else {
-            target = world.resolveSwitchTarget(current, want.getSceneId(), want.getSceneConfigId());
-            if (target == null) {
-                tipId = ENTER_FAILED;
-            } else if (want.getSceneConfigId() != 0 && target.configId() != want.getSceneConfigId()) {
-                tipId = ENTER_PARAM_ERROR;
-                target = null;
-            } else {
-                tipId = 0;
+            switch (world.resolveSwitchTarget(current, want.getSceneId(), want.getSceneConfigId())) {
+                case SwitchTarget.Reject reject -> tipId = reject.tip();
+                case SwitchTarget.Local local -> {
+                    if (want.getSceneConfigId() != 0 && local.scene().configId() != want.getSceneConfigId()) {
+                        tipId = ENTER_PARAM_ERROR;
+                    } else {
+                        tipId = 0;
+                        target = local.scene();
+                    }
+                }
             }
         }
         call.reply(EnterSceneC2SResponse.newBuilder().setErrorMessage(tip(tipId)).build());

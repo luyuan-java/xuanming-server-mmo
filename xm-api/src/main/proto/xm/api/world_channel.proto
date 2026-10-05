@@ -1,0 +1,62 @@
+// Java 版内部契约：主世界频道计划（批次 5.1，docs/porting/scene-channels-spec.md §4.2、§4.3）。只在 Java 版内部使用，不是同步产物。
+// Redis xm:world:{z:<zone>}:ch 是 HASH：字段 = scene_id 无符号十进制，值 = 本文件的 WorldChannel。只由 xm-scene-manager 的分 zone 领导者
+// 经「令牌 + 版本号 CAS」的一段 Lua 写（xm-discovery 的 com.game.discovery.world.WorldChannelStore）；scene 节点按版本号拉取、
+// 只建 / 排空 / 销毁属于自己节点号的那些（§4.10）。
+// 对应基线 world_channels:zone:{z}:{conf}（SET）+ scene:{id}:node / scene:{id}:zone + 反向索引 + 计数键这一组多键非事务写
+// （mmorpg go/scene_manager/internal/logic/world_init.go:25、:216-239；createscenelogic.go:20-40），Java 合成一张 HASH（D1）。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// 频道状态。基线把排空中的频道从 world_channels 集合摘到 world_channels:draining 集合（world_autoscale.go:327、:353），
+// Java 用一个状态字段表达。
+enum ChannelState {
+  CHANNEL_STATE_UNSPECIFIED = 0;
+  // 承载中：可分配新玩家。
+  CHANNEL_ACTIVE = 1;
+  // 排空中：不再分配新玩家；节点把在场玩家同节点改派，空了即销毁，领导者看到节点已应用且场景已消失后删记录（§4.6.2 P3）。
+  CHANNEL_DRAINING = 2;
+}
+
+// 频道种类。5.1 只有主世界；5.3 追加副本 / 镜像（基线 instances:zone:{z}:active 那一类，createscenelogic.go:19）。
+enum ChannelKind {
+  CHANNEL_KIND_UNSPECIFIED = 0;
+  CHANNEL_KIND_WORLD = 1;
+}
+
+// 进入排空的原因（决定排空超时后的处理，§4.6.2 P3：只有 SCALE_IN 回滚 ACTIVE，D10）。
+enum DrainReason {
+  DRAIN_REASON_UNSPECIFIED = 0;
+  // 自动缩容（world_autoscale.go:276-366 beginDrainWorldChannel）。
+  DRAIN_SCALE_IN = 1;
+  // 择机迁移的旧记录（world_rebalance.go:207-297 migrateWorldChannel；Java 只在 coverage=hash 下出现）。
+  DRAIN_REBALANCE = 2;
+  // World 表里已没有这张图（orphan_cleanup.go:42-90）。
+  DRAIN_ORPHAN = 3;
+}
+
+// xm:world:{z:<zone>}:ch 的一个值。(scene_id, node_id) 终生不变：频道换节点 = 新建一条（新号）+ 旧的排空（D4）。
+message WorldChannel {
+  // scene-manager 全服雪花号（NodeTypes.SCENE_MANAGER 租约的 worker，D18），非 0；与 HASH 字段一致。
+  uint64 scene_id = 1;
+  // World 表的 scene_id 列（基线 scene_config_id），非 0。
+  uint32 scene_config_id = 2;
+  // 按 zone 的 scene 节点号：节点号的当前租约持有者承载它（与实例无关）。
+  uint32 node_id = 3;
+  // 频道位 0..998（同一 conf 的 ACTIVE 记录里取未用的最小值）；hash 模式的落点键 = scene_config_id * 1000 + slot（D5）。
+  uint32 slot = 4;
+  ChannelState state = 5;
+  // 建记录时的 Redis TIME（毫秒）。
+  int64 created_ms = 6;
+  // 进入当前状态的 Redis TIME（毫秒）；排空超时据此判断。
+  int64 state_since_ms = 7;
+  // 最后改写本条的那次写入完成后的计划版本号（= max(写入时期望的 ver + 1, 快照的 Redis TIME 毫秒)，由写入批次统一填；Redis 丢写后也不撞号）。
+  // 节点目录的 applied_plan_version ≥ 它，说明节点已经看到这次改写（排空收尾的前提，§4.6.2 P3）。
+  uint64 plan_version = 8;
+  ChannelKind kind = 9;
+  // 只在 state = CHANNEL_DRAINING 时有意义。
+  DrainReason drain_reason = 10;
+}

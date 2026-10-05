@@ -221,6 +221,70 @@ public final class RedisKeys {
     }
 
     /**
+     * 主世界频道计划 {@code xm:world:{z:<zone>}:ch}（HASH：字段 = scene_id 无符号十进制，值 = {@code xm.api.WorldChannel} protobuf；无 TTL）。
+     * 一个 zone 的频道键（ch / desired / cooldown / ver / leader / resv:*）共用 hash tag {@code {z:<zone>}}，多键 Lua 在 Cluster 下同槽
+     * （修基线 scene_atomic.go:51-68 自称 Cluster-safe 实则跨槽，scene-channels-spec §7.1 B17）。只经 {@code WorldChannelStore} 的围栏 Lua 写。
+     * 基线 {@code world_channels:zone:{z}:{conf}} + {@code scene:{id}:node} 等多键（world_init.go:25、:216-239；D1）。
+     */
+    public static String worldChannels(int zoneId) {
+        return worldZonePrefix(zoneId) + "ch";
+    }
+
+    /**
+     * 每图期望频道数 {@code xm:world:{z:<zone>}:desired}（HASH：conf 无符号十进制 → 期望数十进制；无 TTL；首次 HSETNX 播种，此后 Redis 为权威）。
+     * 基线 {@code world_channels:desired:zone:{z}}（world_autoscale.go:38、:73-117）。
+     */
+    public static String worldDesired(int zoneId) {
+        return worldZonePrefix(zoneId) + "desired";
+    }
+
+    /**
+     * 扩缩容冷却 {@code xm:world:{z:<zone>}:cooldown}（HASH：conf 无符号十进制 → 冷却到期毫秒，Redis TIME；过期字段由领导者顺手 HDEL）。
+     * 基线每图一个 SETEX 键 {@code world_channels:cooldown:zone:{z}:{conf}}（world_autoscale.go:44、:491-504）。
+     */
+    public static String worldCooldown(int zoneId) {
+        return worldZonePrefix(zoneId) + "cooldown";
+    }
+
+    /**
+     * 频道计划版本号 {@code xm:world:{z:<zone>}:ver}（STRING 整数，只增不减、不过期；不存在当 0）：围栏 Lua 每次写入把它置为批次定好的新值
+     * （max(旧值 + 1, Redis TIME 毫秒)，见 WorldPlanBatch——Redis 丢写后也不会让两次不同的写入撞号），
+     * 领导者据此做 CAS，scene 节点每秒 GET 一次、变了才整读计划。
+     */
+    public static String worldPlanVersion(int zoneId) {
+        return worldZonePrefix(zoneId) + "ver";
+    }
+
+    /**
+     * 频道计划的分 zone 领导锁 {@code xm:world:{z:<zone>}:leader}（STRING：持有者令牌 {@code <instanceId>:<uuid>}，PX = 锁 TTL，持有者续期）。
+     * 基线全局一把 {@code scene_manager:leader:lock}（scene_manager_service.go:94-101），Java 每 zone 一把（D2）。
+     */
+    public static String worldLeader(int zoneId) {
+        return worldZonePrefix(zoneId) + "leader";
+    }
+
+    /**
+     * 进场软预占 {@code xm:world:{z:<zone>}:resv:<scene_id>}（ZSET：成员 = player_id 无符号十进制，分数 = 到期毫秒（Redis TIME）；
+     * 键 PEXPIRE = 预占 TTL）。取代基线 {@code instance:{id}:player_count} 的 INCR / DECR 硬计数（scene_atomic.go:69-101；D7）。
+     */
+    public static String worldReservations(int zoneId, long sceneId) {
+        return worldZonePrefix(zoneId) + "resv:" + Long.toUnsignedString(sceneId);
+    }
+
+    /**
+     * 出现过 scene 节点的 zone 集合 {@code xm:world:zones}（SET：zone_id 无符号十进制；无 TTL、只增）：scene 启动时 SADD，
+     * scene-manager 据此决定竞选哪些 zone 的领导锁（基线「活跃 zone = etcd 里出现过的 zone」，load_reporter.go:579-595）。
+     * 退役 zone 要运维手工 SREM（scene-channels-spec §7.2 第 7 条）。
+     */
+    public static String worldZones() {
+        return PREFIX + "world:zones";
+    }
+
+    private static String worldZonePrefix(int zoneId) {
+        return PREFIX + "world:{z:" + Integer.toUnsignedString(zoneId) + "}:";
+    }
+
+    /**
      * 热关停规则 {@code xm:killswitch}（哈希：字段 = 规则键 {@code pkg.Service/Method}、{@code Service/*}、{@code *}，值 = 规则；
      * 各进程每秒全量读一次，见 {@code RedisKillSwitchSync}）。运维经 xm-data 的 {@code /admin/killswitch} 写。
      */

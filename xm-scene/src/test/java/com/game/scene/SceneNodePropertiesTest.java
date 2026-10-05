@@ -45,6 +45,18 @@ class SceneNodePropertiesTest {
     }
 
     @Test
+    void 频道计划拉取周期_缺省1秒_可覆盖_超出100ms到1分钟拒绝() {
+        assertThat(bind(Map.of()).scene().channelPlanPollInterval()).isEqualTo(Duration.ofSeconds(1));
+        assertThat(bind(Map.of("xm.scene.channel-plan-poll-interval", "500ms")).scene().channelPlanPollInterval())
+                .isEqualTo(Duration.ofMillis(500));
+
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.channel-plan-poll-interval", "50ms")))
+                .isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.channel-plan-poll-interval", "2m")))
+                .isInstanceOf(BindException.class);
+    }
+
+    @Test
     void 按币种覆盖_没写的项取内置缺省_非法值拒绝() {
         SceneNodeProperties.SceneSettings s = bind(Map.of(
                 "xm.scene.anomaly.max-count", "0",

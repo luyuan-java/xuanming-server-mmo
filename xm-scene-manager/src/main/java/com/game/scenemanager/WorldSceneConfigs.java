@@ -1,8 +1,9 @@
 package com.game.scenemanager;
 
 import com.game.table.WorldTable;
-import java.util.List;
+import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -23,7 +24,8 @@ import java.util.Set;
 public record WorldSceneConfigs(int defaultConfigId, Set<Integer> worldConfigIds) {
 
     public WorldSceneConfigs {
-        worldConfigIds = Set.copyOf(worldConfigIds);
+        // 保留表序（频道铺设按表序逐图进行，scene-channels-spec §4.6.2 P5）；不可修改、不含 null
+        worldConfigIds = Collections.unmodifiableSet(new LinkedHashSet<>(List.copyOf(worldConfigIds)));
         if (worldConfigIds.isEmpty()) {
             throw new IllegalArgumentException("World 表没有任何世界地图，无法确定默认落点");
         }
@@ -58,5 +60,10 @@ public record WorldSceneConfigs(int defaultConfigId, Set<Integer> worldConfigIds
 
     public boolean isWorld(int sceneConfigId) {
         return worldConfigIds.contains(sceneConfigId);
+    }
+
+    /** 全部世界地图，按 World 表序（{@link #fromWorldTable} 构建时；直接构造时按传入集合的迭代顺序）。 */
+    public List<Integer> orderedConfigIds() {
+        return List.copyOf(worldConfigIds);
     }
 }

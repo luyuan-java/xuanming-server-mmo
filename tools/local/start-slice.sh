@@ -93,6 +93,27 @@ wait_port() {
   done
 }
 
+# 主世界频道就绪（批次 5.1，scene-channels-spec §5.2）：scene 节点启动时只建计划里已有的本节点频道，计划还没有本节点（冷 Redis、
+# 重启时旧记录已被领导者按死节点删掉）就不带频道起来，等 scene-manager 领导者下一拍（≤ 5 s）铺上、节点下一次拉取（≤ 1 s）建出、
+# 立即补发目录后才分得到。端口就绪不代表能进游戏：等管理端口上的 xm_scene_channels{state="active"} ≥ 1 再起 gate / gateway。
+wait_world_channels() {
+  local name=$1 deadline=$((SECONDS + 60)) active
+  until active=$(curl -fsS "http://127.0.0.1:18104/actuator/prometheus" 2>/dev/null \
+      | grep -E '^xm_scene_channels\{.*state="active"' | awk '{print int($NF)}' | head -1) && [[ "${active:-0}" -ge 1 ]]; do
+    if ! kill -0 "$(cat "run/pids/$name.pid")" 2>/dev/null; then
+      echo "[$name] 进程已退出，看 run/logs/$name.log" >&2
+      return 1
+    fi
+    if (( SECONDS > deadline )); then
+      echo "[$name] 60s 内没有铺好主世界频道（看 run/logs/xm-scene-manager.log 的 world 领导者日志）" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  # 节点应用计划后立即补发目录；再给一拍余量让 scene-manager 读到
+  sleep 1
+}
+
 for entry in "${SERVICES[@]}"; do
   read -r name ports <<<"$entry"
   jar=$(ls "$name"/target/"$name"-*.jar 2>/dev/null | grep -v -- '-plain' | head -1 || true)
@@ -106,6 +127,9 @@ for entry in "${SERVICES[@]}"; do
   for port in $ports; do
     wait_port "$port" "$name"
   done
+  if [[ "$name" == "xm-scene" ]]; then
+    wait_world_channels "$name"
+  fi
   echo "  $name 就绪（端口 $ports）"
 done
 

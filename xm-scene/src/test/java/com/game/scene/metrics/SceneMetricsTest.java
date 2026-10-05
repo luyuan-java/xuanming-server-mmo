@@ -145,7 +145,7 @@ class SceneMetricsTest {
                     "executor_queued_tasks{name=\"scene-storage\"}");
             assertThat(labelNames(text, "xm_scene_"))
                     .isSubsetOf("scene_config", "kind", "result", "change", "op", "direction", "type", "reason", "le",
-                            "rpc", "outcome");
+                            "rpc", "outcome", "state");
         } finally {
             executor.shutdownNow();
             prometheus.close();
@@ -160,7 +160,7 @@ class SceneMetricsTest {
             SceneMetrics exported = new SceneMetrics(prometheus);
             String before = prometheus.scrape();
             for (String result : new String[] {"followed", "same_scene", "not_in_team", "projection_missing",
-                    "not_member", "leader_not_on_node", "is_leader", "stale", "read_error"}) {
+                    "not_member", "leader_not_on_node", "leader_scene_draining", "is_leader", "stale", "read_error"}) {
                 assertThat(before).contains("xm_scene_team_follow_total{result=\"" + result + "\"} 0");
             }
             exported.teamFollow(SceneMetrics.TeamFollowResult.FOLLOWED);
@@ -195,6 +195,41 @@ class SceneMetricsTest {
             String after = prometheus.scrape();
             assertThat(after).contains("xm_scene_asset_ops_total{outcome=\"overloaded\",rpc=\"abort_debit\"} 1");
             assertThat(after).contains("xm_scene_asset_ops_inflight 0");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 主世界频道（批次 5.1，scene-channels-spec §6.2）：启动即注册（初值 0），导出名与标签；标签只有 state / result，
+     * 不带 zone / scene_id / 节点号。
+     */
+    @Test
+    void 主世界频道指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            assertThat(before).contains("xm_scene_channels{state=\"active\"} 0", "xm_scene_channels{state=\"draining\"} 0",
+                    "xm_scene_channel_plan_poll_failures_total 0");
+            for (String result : new String[] {"applied", "rejected", "skipped_lease"}) {
+                assertThat(before).contains("xm_scene_channel_plan_applies_total{result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"same_map", "default_world", "blocked", "enter_redirect"}) {
+                assertThat(before).contains("xm_scene_channel_relocations_total{result=\"" + result + "\"} 0");
+            }
+
+            exported.channels(3, 1);
+            exported.channelPlanApply(SceneMetrics.ChannelPlanApply.APPLIED);
+            exported.channelPlanPollFailed();
+            exported.channelRelocation(SceneMetrics.ChannelRelocation.SAME_MAP);
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("xm_scene_channels{state=\"active\"} 3", "xm_scene_channels{state=\"draining\"} 1",
+                    "xm_scene_channel_plan_applies_total{result=\"applied\"} 1",
+                    "xm_scene_channel_plan_poll_failures_total 1",
+                    "xm_scene_channel_relocations_total{result=\"same_map\"} 1");
+            assertThat(labelNames(after, "xm_scene_channel")).containsExactlyInAnyOrder("state", "result");
         } finally {
             prometheus.close();
         }

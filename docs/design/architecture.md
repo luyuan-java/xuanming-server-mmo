@@ -47,7 +47,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-chat` | 进程（Spring Boot + Dubbo） | 聊天 v1：世界频道与私聊的发言（校验、幂等、限速、落历史）与拉取历史（Dubbo group `chat`，端口 20884；数据只在 Redis，§4.14） |
 | `xm-team` | 进程（Spring Boot + Dubbo） | 组队：建队 / 申请 / 邀请 / 离队 / 踢人 / 转让 / 解散、队伍快照与邀请推送（Dubbo group `team`，端口 20885；权威数据只在 Redis，§4.16） |
 | `xm-guild` | 进程（Spring Boot + Dubbo） | 帮会核心：建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 转让 / 申请审批 / 推送 220 / 排行（Dubbo group `guild`，端口 20886；四张表经 xm-pbmysql，快照缓存与排行在 Redis，§4.17） |
-| `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景目录：玩家该进哪个场景节点的哪个场景 |
+| `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景分配（玩家该进哪个场景节点的哪个频道，软预占）+ 每个 zone 的主世界频道计划（领导者维护，§4.19） |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送 |
 | `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态） |
 | `xm-data` | 进程（Spring Boot Web） | 审计与运维数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维接口：查询（§4.5）、全服产出封禁（§4.6）、区服目录 / 白名单 / 登录公告（§7） |
@@ -252,7 +252,7 @@ mmorpg：`cpp/libs/modules/bag/*`（实例层 / 布局层 / 准入 / 淘汰，�
 - **写入口只有 `BagService`**（`com.game.scene.bag`）：冻结闸（随 5.2，基线回 1005；目前放行）→ 全服物品禁发（1005）→
   `Bag.add` 整批原子（规划 → 一次铸齐号 → 淘汰 → 并堆 → 切新实例；任何失败零写入）→ 每个配置一条入包流水 + 物品获取异常检测，
   每个被淘汰的实例一条销毁流水。战斗中禁止扣减之类的闸放在各玩法入口（基线 D48：结算在战斗标记还挂着时应用）。
-  物品 guid 来自全服 `SceneGuids`（§9），一批要的号先一次铸齐，铸不出来回 6004。
+  物品 guid 来自全服号源（`LeaseGatedSnowflake`，§9），一批要的号先一次铸齐，铸不出来回 6004。
 - **整理**（192）：只允许人物背包与仓库；合并同配置零头、回收空实例（各记一条数量 0 的销毁流水）、按（配置升序、数量降序、入包先后）重铺到 0..n-1；
   已最优（按相邻格比较）时什么都不改、changed=false——狂点整理不刷流水、不触发存盘。
 - **持久化**：`player_state.bag`（`BagState` / `BagItemState`，Java 自有格式），按 (bag_type, 格子) 升序写出（周期存盘按值比对），
@@ -323,7 +323,7 @@ mmorpg：`player_pet.cpp`（PetSystem）+ `pet_rules.h` + `player_pet_handler.cp
   点数总量 / 目标已分配校验 / 自动加点 / 按比例保持气血复用角色的 `AttributeRules`；`PetFeature` 注册 181–189。
 - **主人等级连带**：`AttributeFeature` 的等级连带在推 170 之后先让 `PetFeature` 重算全部宝宝并推 184（没有宝宝也推空列表），
   再发任务等级事实，最后回 175 应答（同基线升级事件顺序）。
-- **号与随机**：宝宝号用与物品同一个全服号源（`SceneGuids`）；资质随机数只在逻辑线程上用。写闸（冻结 / 战斗中）随 5.2 / 6.3 接入。
+- **号与随机**：宝宝号用与物品同一个全服号源（§9）；资质随机数只在逻辑线程上用。写闸（冻结 / 战斗中）随 5.2 / 6.3 接入。
 
 ### 4.12 通用资产通道（scene 侧）
 
@@ -491,6 +491,27 @@ mmorpg：`go/guild` 的 economy_* / asset_store + `go/shared/assetop`。规格�
   （`AssetOpFixMain` CLI：list / resolve）。清理任务按保留期删终态行与旧计数。离帮 / 被踢 / 解散时把该玩家未决捐献的截止提前。
 - **升级**不经资产通道（只动帮会资金与等级）；**内部查询** `GuildInternalService.listAppliedAssetOpsSince` 给回档分歧检查用（7.2 接入），
   错误用应答内结果码表达。推送：资金变化 9 / 升级 10 / 发放完成 13（只在循环终结时推，同步当场终结的以回包为准）。
+
+### 4.19 场景实例与主世界频道（批次 5.1）
+
+mmorpg：`go/scene_manager` 的 world_init / world_autoscale / world_rebalance / orphan_cleanup + C++ scene 的 CreateScene / DestroyScene /
+BeginSceneDrain。规格与逐条出处见 `docs/porting/scene-channels-spec.md`：
+
+- **频道计划是唯一权威**：每个 zone 一份，存 Redis（`xm:world:{z:<zone>}:ch` 哈希，值是 `xm.api.WorldChannel`：scene_id、地图、节点号、
+  频道位、ACTIVE / DRAINING），配期望频道数、冷却与只增的版本号 `…:ver`。scene-manager 每个 zone 选一个领导者（`…:leader`，
+  `SET NX PX 30 s`、专用线程每 10 s 续期、距上次成功续期不足 2/3 TTL 才算领导者），每 5 s 一拍：只读 Lua 取快照 + 读 scene 目录 →
+  纯函数 `WorldChannelPlanner` 算出差量 → 一段「领导令牌 + 版本号 CAS」的 Lua 原子写入并推进版本号（新值 = max(旧值 + 1, 快照的 Redis TIME 毫秒)，Redis 丢了最后一次写入后重写也不会与丢失的那一版撞号；被围栏 / 冲突就放弃本拍）。
+- **铺设**：缺省「每个在线节点每张主世界地图至少一个频道」（5.2 跨节点换图之前的覆盖方式；按落点哈希的模式已实现、按配置启用）；
+  期望频道数缺省 1、可按地图覆盖；自动扩缩容缺省关；节点离开目录 20 s 后它的频道转移 / 删除；排空超时回到 ACTIVE。
+  scene_id 由领导者用 `NodeTypes.SCENE_MANAGER` 全服租约上的雪花发，租约无效时本拍不新建。
+- **scene 节点拉计划**（不需要 scene-manager → scene 的调用）：`ChannelPlanFollower` 在 `scene-sched` 上每秒读版本号，变了才读整份，
+  交逻辑线程 `applyChannelPlan`（建本节点该有的频道、标排空；同号重建保证节点重启后玩家位置里的 scene_id 仍有效），应用后立刻补发目录
+  （`SceneEntry.draining`、`applied_plan_version`）。排空：逐个玩家改派到本节点同地图人数最少的 ACTIVE 频道，没有就改到默认主世界，
+  再没有就留在原地；空了（且没有在途进场）才销毁。领导者看到节点已应用且目录里没了才删计划里的记录。
+- **分配**（`SceneAssigner` / `ChannelSelector`）：只在目录里的 ACTIVE 频道里挑人数（目录人数 + 软预占）最少者；软预占是按频道的 ZSET
+  （TTL 缺省 10 s，启动校验它不短于 login 的归属等待），进场成功或失败都释放；显式指定排空中的频道一律拒绝。
+- **63（场景内换场景）**：只带当前地图时挑本节点该地图人数最少的 ACTIVE 频道（打平留在原地）；目标是排空中的频道回 3023。
+  组队跟随不把队员拉进排空中的频道。
 
 ## 5. 线程模型
 
@@ -679,14 +700,17 @@ mmorpg：`go/guild` 的 economy_* / asset_store + `go/shared/assetop`。规格�
 
 - `player_id`：雪花（41 位毫秒 / 10 位 worker / 12 位序号），worker 为 `xm-login` 的节点号；只由 `xm-login` 产生。
 - `session_id`（uint32，仅服务端内部）：`[gate 节点号 15 位][序号 17 位]`，跳过 0 与在用号。
-- 物品 uuid、资产流水号 `tx_id`、玩家快照号 `snapshot_id`：雪花，共用一个 `SceneGuids`，worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0；不论审计开不开都占）——
+- 物品 uuid、资产流水号 `tx_id`、玩家快照号 `snapshot_id`：雪花，共用一个租约门控的雪花（xm-common `LeaseGatedSnowflake`），worker 取自场景节点占的**全服**号段租约（`NodeTypes.SCENE_GUID`，作用域 0；不论审计开不开都占）——
   场景节点自己的租约按 zone 分，两个 zone 的第一台 scene 会拿到同一个 worker、发出相同的号，落库按主键去重就会静默吞掉一条。
   停服时先发完审计队列再交还这个租约（反过来别的实例可能拿到同一个 worker 发重号）。
 - `team_id`、`guild_id`：雪花，worker 取各自服务的全服租约（`NodeTypes.TEAM` / `NodeTypes.GUILD`，作用域 0）。
 - **不移植号段服务**（基线 data_service `AllocateIdSegment` + 各节点的号段客户端，盘点 id-segment-allocator / guid-segment-alloc）：
   Java 的永久号一律「雪花 + 节点号租约」——发号前检查租约仍有效、时钟回拨拒发，worker 不重叠由租约保证；
   客户端只要求这些号非 0、唯一（uint64），不依赖号段的值域（基线号段值域 < 2^55，与存量雪花号不相交——Java 没有存量号段号，无此约束）。
-  场景内的临时 id（实体、场景实例）用场景节点自己的雪花（`SceneWorld.nextId`）。
+  场景内的临时 id（实体）用场景节点自己的雪花（`SceneWorld.nextId`）。
+- `scene_id`（主世界频道的身份，批次 5.1 起）：由 scene-manager 的 zone 领导者从全服租约（`NodeTypes.SCENE_MANAGER`，作用域 0）上的雪花发，
+  写进频道计划；频道终生绑定一个 (zone, 节点号)，换节点 = 新号。节点用同一个节点号重启会按计划把同号频道重新建出来，玩家位置里记的 scene_id
+  因此跨节点重启仍然有效。
 
 ## 10. 首批不做（后续批次）
 
@@ -787,6 +811,8 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_asset_ops_total` | Counter | `rpc`=debit / abort_debit / credit，`outcome`=applied / rejected / retry / not_here / unknown / overloaded / error | 资产指令应答结局（全部组合启动即注册） |
 | scene | `xm_scene_asset_ops_inflight`、`executor_*{name="scene-asset-reply"}` | Gauge / 线程池 | — | 资产指令在途数与应答执行器 |
 | scene-manager | `xm_scene_manager_assign_seconds` | Timer | `result`=ok / no_scene / bad_request / rejected / error | 场景分配结果与耗时（error = 场景目录不可读） |
+| scene-manager | `xm_scene_manager_world_leader_zones`、`xm_scene_manager_world_ticks_total{result}`、`xm_scene_manager_world_tick_seconds` | Gauge / Counter / Timer | `result`=ok / not_leader / fenced / conflict / no_lease / no_nodes / error | 本副本领导的 zone 数；频道计划每拍的结局与耗时（§4.19） |
+| scene-manager | `xm_scene_manager_world_channels{scene_config,state}`、`xm_scene_manager_world_autoscale_total{action,outcome}`、`xm_scene_manager_rebalance_pending{reason}`、`xm_scene_manager_rebalance_migrations_total{reason,outcome}` | Gauge / Counter | `scene_config`=World 表地图号 / other；`state`=active / draining / missing；其余固定枚举 | 频道计划的规模与变动（不带 zone / 节点 / 场景号标签） |
 | 开了热关停的进程 | `xm_killswitch_rules` | Gauge | — | 当前生效的规则条数（快照作废后为 0） |
 | 开了热关停的进程 | `xm_killswitch_sync_failures_total` | Counter | — | 从 Redis 读规则失败的次数（§4.15） |
 | 开了热关停的进程 | `xm_killswitch_blocked_total` | Counter | `method`=被拒的方法（gate：客户端 服务.方法；Dubbo：接口短名/方法） | 被热关停拒绝的调用 |
@@ -809,6 +835,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_gate_links` | Gauge | — | 接入本节点的 gate 链路连接数（含握手中） |
 | scene | `xm_scene_link_frames_total` | Counter | `direction`=in / out，`type`=链路帧类型 | gate ↔ scene 链路帧（in = 从链路收到，含握手帧；out = 已交给链路写出，含 hello_ack） |
 | scene | `xm_scene_team_follow_total` | Counter | `result`=followed / same_scene / not_in_team / projection_missing / not_member / leader_not_on_node / is_leader / stale / read_error | 进场 / 换场景后的组队跟随检查（§4.16；基线只有 team_follow_skipped 日志行） |
+| scene | `xm_scene_channels{state}`、`xm_scene_channel_plan_applies_total{result}`、`xm_scene_channel_plan_poll_failures_total`、`xm_scene_channel_relocations_total{result}` | Gauge / Counter | `state`=active / draining；`result`=applied / rejected / skipped_lease，或 same_map / default_world / blocked / enter_redirect | 本节点频道数、计划应用、拉计划失败、排空改派（§4.19） |
 | scene | `xm_scene_link_dropped_total` | Counter | `reason`=link_gone / write_buffer_full | 没发出去的 scene → gate 链路帧：链路已注销 / 已断开；出站缓冲越过高水位（随即断链） |
 | scene | `xm_scene_link_backpressure_pauses_total` | Counter | — | 逻辑线程积压到 `link-max-pending-frames`、暂停读取某条链路的次数（§4.2 背压） |
 | scene | `xm_scene_gain_block_entries` | Gauge | — | 本节点当前生效的全服产出封禁条目数（§4.6） |

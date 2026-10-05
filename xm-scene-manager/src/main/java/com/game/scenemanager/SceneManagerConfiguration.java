@@ -1,6 +1,8 @@
 package com.game.scenemanager;
 
 import com.game.common.token.DubboCallAuth;
+import com.game.discovery.world.WorldChannelStore;
+import com.game.scenemanager.world.WorldChannelProperties;
 import com.game.table.ConfigTables;
 import java.nio.file.Path;
 import org.redisson.api.RedissonClient;
@@ -12,7 +14,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 装配：配置表 → {@link WorldSceneConfigs}；Redis 节点目录 → {@link SceneNodeSource}；两者 → {@link SceneAssigner}。
+ * 装配：配置表 → {@link WorldSceneConfigs}；Redis 节点目录 → {@link SceneNodeSource}；目录 + 软预占（{@code xm:world:*}）→
+ * {@link ChannelSelector}；三者 → {@link SceneAssigner}。主世界频道的控制面在 {@code com.game.scenemanager.world.WorldChannelConfiguration}。
  * {@link RedissonClient} 由 xm-discovery 的自动配置提供（{@code xm.redis.*}）。
  */
 @Configuration(proxyBeanMethods = false)
@@ -38,9 +41,19 @@ public class SceneManagerConfiguration {
         return new RedisSceneNodeSource(redis);
     }
 
+    /**
+     * 选频道 + 软预占（批次 5.1，scene-channels-spec §4.11）。预占 TTL 已在 {@link WorldChannelProperties} 绑定时按 login 的归属夺取等待校验过（Q8）。
+     */
     @Bean
-    public SceneAssigner sceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs) {
-        return new SceneAssigner(source, worldConfigs);
+    public ChannelSelector channelSelector(SceneNodeSource source, WorldChannelStore worldChannelStore,
+                                           WorldChannelProperties worldProps) {
+        log.info("进场软预占 TTL={}（0 = 关闭）", worldProps.reservationTtl());
+        return new ChannelSelector(source, worldChannelStore, worldProps.reservationTtl());
+    }
+
+    @Bean
+    public SceneAssigner sceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector channelSelector) {
+        return new SceneAssigner(source, worldConfigs, channelSelector);
     }
 
     /**

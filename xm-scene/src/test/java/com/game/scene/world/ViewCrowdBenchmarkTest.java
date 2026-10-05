@@ -151,7 +151,7 @@ class ViewCrowdBenchmarkTest {
     // ------------------------------------------------------------------ B. 只测视野刷新
 
     private void indexLevel(int count) {
-        Scene scene = new Scene(1, 1);
+        Scene scene = new Scene(com.game.proto.SceneInfoComp.newBuilder().setSceneId(1).setSceneConfigId(1).build());
         Random random = new Random(42);
         List<ScenePlayer> players = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {

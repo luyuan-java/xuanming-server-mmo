@@ -24,6 +24,11 @@ public final class NodeTypes {
     public static final String GUILD = "guild";
     /** xm-trade：listing_id 雪花 worker 的租约，作用域 0（全服）。 */
     public static final String TRADE = "trade";
+    /**
+     * xm-scene-manager：主世界频道 scene_id 雪花 worker 的租约，作用域 0（全服；理由同 {@link #SCENE_GUID}——频道号要全服唯一，
+     * 跨 zone 引用不撞号）。批次 5.1，scene-channels-spec §4.5、D18；常量见 {@code com.game.discovery.world.WorldChannels}。
+     */
+    public static final String SCENE_MANAGER = "scene-manager";
 
     private NodeTypes() {
     }

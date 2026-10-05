@@ -26,7 +26,7 @@ import org.slf4j.LoggerFactory;
  *   <li>读失败或数据损坏、无队（tid = 0 或键缺失）、投影缺失或与索引对不上（team_id 不符、leader_id = 0）、自己不在 members 里
  *       → 不跟随（player_team.cpp:290-318）；</li>
  *   <li>队长不是自己 → {@link #followLeader}：队长不在本节点（跨节点、跨 zone、离线）不跟随；已同场景什么都不做；
- *       否则 {@code world.switchScene(self, leader.scene())}。用内存里的队长场景、不读 {@code xm:location}（同节点时内存就是权威，D9），
+ *       队长所在频道在排空中不跟随（批次 5.1，scene-channels-spec §4.13）；否则 {@code world.switchScene(self, leader.scene())}。用内存里的队长场景、不读 {@code xm:location}（同节点时内存就是权威，D9），
  *       不经 scene-manager（Java 同节点换场景是同步的，没有在途槽，也没有 60 s 去重）；</li>
  *   <li>队长是自己、且这次是自己进场 → 对 members 里在本节点上的其他成员各自再读一次<b>自己的</b>成员关系，按「只跟随、不扇出」处理
  *       （player_team.cpp:327-347，防循环）。</li>
@@ -174,6 +174,14 @@ public final class TeamFollowService implements TeamFollow {
         }
         if (leader.scene() == player.scene()) {
             metrics.teamFollow(TeamFollowResult.SAME_SCENE);
+            return;
+        }
+        if (leader.scene().draining()) {
+            // 批次 5.1 §4.13：不跟进排空中的频道（基线跟随可以进，B5；scene-channels-spec D11）。队长随后被改派时以「自己进场」
+            // 触发扇出，把本节点队员拉到它的新频道，队伍照样收拢，不会被反复拉回排空频道再改派。
+            metrics.teamFollow(TeamFollowResult.LEADER_SCENE_DRAINING);
+            log.debug("队长所在频道在排空，不跟随 player={} leader={} scene_id={}", Long.toUnsignedString(player.playerId()),
+                    Long.toUnsignedString(leaderId), Long.toUnsignedString(leader.scene().sceneId()));
             return;
         }
         long from = player.scene().sceneId();

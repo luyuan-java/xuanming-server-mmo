@@ -2,9 +2,12 @@ package com.game.scene.world;
 
 import static com.game.scene.world.SceneMessageIds.push;
 
+import com.game.api.proto.ChannelKind;
+import com.game.api.proto.ChannelState;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
+import com.game.api.proto.WorldChannel;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorCreateS2C;
@@ -14,8 +17,11 @@ import com.game.proto.ActorListDestroyS2C;
 import com.game.proto.EnterSceneS2C;
 import com.game.proto.MessageContent;
 import com.game.proto.MoveAckS2C;
+import com.game.proto.SceneInfoComp;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BroadcastKind;
+import com.game.scene.metrics.SceneMetrics.ChannelPlanApply;
+import com.game.scene.metrics.SceneMetrics.ChannelRelocation;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.metrics.SceneMetrics.PeriodicSave;
 import com.game.scene.player.PlayerLevels;
@@ -27,6 +33,7 @@ import com.game.table.SceneErrorTip;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -85,8 +92,14 @@ import org.slf4j.LoggerFactory;
  * <p><b>技能</b>：xm-player-store 目前没有技能列，每次进场都按配表发放初始技能（等同基线「新号」），
  * 老号存档里的技能要等存储补列后再接。
  *
+ * <p><b>主世界频道</b>（批次 5.1，scene-channels-spec §4.10、§4.12）：场景（频道）不再由节点自己发号自建，而是按 scene-manager 写在 Redis 的
+ * 频道计划建出来（{@link #applyChannelPlan}，scene_id 来自计划）；计划把频道转为排空、或本地有而计划里没有时，频道转为排空中：
+ * 在场玩家由 {@link #drainStep} 同节点改派（同图优先，否则本节点默认大世界），空了即销毁。排空中的频道不接受 63 显式进入、
+ * 进场加载完成时改进兄弟频道。对应基线 C++ CreateScene / DestroyScene（cpp/nodes/scene/handler/grpc/scene_node_service.cpp:19-125）
+ * 与 BeginSceneDrain（cpp/libs/services/scene/player/system/player_lifecycle.cpp:2140-2363），Java 不经 RPC、不跨进程（D3、D8）。
+ *
  * <p><b>指标</b>（{@link SceneMetrics}）：场景配置下的在线人数在每次人数变化后推送绝对值；移动裁决、视野变化通知、
- * 帧与帧内广播耗时（经 {@link SceneClock} 计时）都在这里记，与规则写在同一处，不另设观察者。
+ * 帧与帧内广播耗时（经 {@link SceneClock} 计时）、频道数与计划应用 / 改派都在这里记，与规则写在同一处，不另设观察者。
  */
 public final class SceneWorld {
 
@@ -102,7 +115,10 @@ public final class SceneWorld {
     private final SceneMessageIds ids;
     private final ClientSink sink;
     private final PlayerRepository repository;
-    /** 场景号与实体号的发号器（本节点的雪花），必须恒非 0。 */
+    /**
+     * 实体号的发号器（本节点的雪花），必须恒非 0。生产的场景号来自频道计划（scene-manager 全服租约发，D18），
+     * 只有测试 / 本地入口 {@link #createScene(int)} 还用它发场景号。
+     */
     private final LongSupplier idGenerator;
     private final SceneClock clock;
     private final SceneMetrics metrics;
@@ -121,6 +137,8 @@ public final class SceneWorld {
     /** 帧内视野变化的复用缓冲（只在 {@link #step()} 里用）。 */
     private final ViewChanges viewChanges = new ViewChanges();
     private boolean acceptingEnters = true;
+    /** 已应用的频道计划版本（节点目录的 applied_plan_version；0 = 还没应用过）。 */
+    private long appliedPlanVersion;
     /** 停服开始后不再做周期存盘（最终写回由 {@link #shutdown()} 统一做）。 */
     private boolean periodicSaveStopped;
     /** 周期存盘已走过的秒数（槽号 = 它对存盘周期取模）。 */
@@ -174,17 +192,26 @@ public final class SceneWorld {
 
     // ------------------------------------------------------------------ 场景
 
+    /**
+     * 用本节点的发号器建一个承载中的场景。<b>只给单测与本地装配用</b>：生产路径只走频道计划（{@link #applyChannelPlan}，
+     * scene_id 由 scene-manager 全服租约发，D18）——这里发的号与别的节点不保证不撞。
+     */
     public Scene createScene(int configId) {
-        Scene scene = new Scene(nextId(), configId);
+        return addScene(SceneInfoComp.newBuilder().setSceneConfigId(configId).setSceneId(nextId()).build());
+    }
+
+    private Scene addScene(SceneInfoComp info) {
+        Scene scene = new Scene(info);
         scenes.put(scene.sceneId(), scene);
-        publishPopulation(configId);
-        log.info("创建场景 scene_id={} scene_config_id={}", scene.sceneId(), configId);
+        publishPopulation(scene.configId());
+        publishChannels();
+        log.info("创建场景 scene_id={} scene_config_id={}", Long.toUnsignedString(scene.sceneId()), scene.configId());
         return scene;
     }
 
     /**
-     * 把某场景配置下的在线人数（各频道合计）推给指标。场景只在启动时建、数量很少，按配置现数一遍即可；
-     * 推的是绝对值，任何一次人数变化后推都能纠正之前的偏差。
+     * 把某场景配置下的在线人数（各频道合计）推给指标。频道数受 World 表与期望频道数约束（每节点至多几百个），按配置现数一遍即可；
+     * 推的是绝对值，任何一次人数变化后推都能纠正之前的偏差（频道销毁后剩下的同图频道照样合计）。
      */
     private void publishPopulation(int configId) {
         int players = 0;
@@ -196,7 +223,18 @@ public final class SceneWorld {
         metrics.scenePlayers(configId, players);
     }
 
-    /** 节点目录快照（scene-manager 按它分配场景）。 */
+    /** 承载中 / 排空中的频道数推给指标（建、销毁、状态变化之后）。 */
+    private void publishChannels() {
+        int draining = 0;
+        for (Scene scene : scenes.values()) {
+            if (scene.draining()) {
+                draining++;
+            }
+        }
+        metrics.channels(scenes.size() - draining, draining);
+    }
+
+    /** 节点目录快照（scene-manager 按它分配场景；排空中的带 {@code draining}，分配不再选它，D13）。 */
     public List<SceneEntry> sceneEntries() {
         List<SceneEntry> entries = new ArrayList<>(scenes.size());
         for (Scene scene : scenes.values()) {
@@ -204,9 +242,235 @@ public final class SceneWorld {
                     .setSceneId(scene.sceneId())
                     .setSceneConfigId(scene.configId())
                     .setPlayerCount(scene.playerCount())
+                    .setDraining(scene.draining())
                     .build());
         }
         return entries;
+    }
+
+    /** 已应用的频道计划版本（节点目录的 {@code applied_plan_version}，与 {@link #sceneEntries()} 在同一个逻辑任务里取）。 */
+    public long appliedPlanVersion() {
+        return appliedPlanVersion;
+    }
+
+    // ------------------------------------------------------------------ 主世界频道：按计划建 / 排空 / 销毁
+
+    /**
+     * 应用频道计划里属于本节点的记录（scene-channels-spec §4.10.2；对应基线 C++ HandleCreateScene / HandleDestroyScene，
+     * cpp/nodes/scene/handler/grpc/scene_node_service.cpp:19-125——基线由 scene_manager 发 RPC，Java 由节点按计划自己收敛，D3）：
+     * <ul>
+     *   <li>版本号与已应用的相同 → 什么也不做（拉取者重投同一版本；领导者每次写入的版本号以 Redis TIME 托底，丢写后重写也不会撞上
+     *       已应用的号，见 {@code WorldPlanBatch}）。版本号<b>回退</b>（Redis 被清空、主从切换丢了写、领导者还没重写）→ ERROR 后照样应用：
+     *       计划是唯一权威（§4.1），拒绝它会让节点停在旧计划上、与领导者永远对不齐（单个拉取者串行应用，不会乱序）；</li>
+     *   <li>ACTIVE 记录：本地没有 → 按计划的 scene_id 建（按 scene_id 幂等，同 scene_node_service.cpp:23-37）；本地有且在排空 → 改回承载中
+     *       （缩容排空超时回滚，D10）。拒绝（ERROR + {@code rejected}，不建、不动本地）：scene_id 或 conf 为 0（补上基线 gRPC 入口缺的零号检查，
+     *       B12；muduo 入口有，scene_handler.cpp:854-859）、conf 不是本节点 World 表里的图、种类不是主世界、本地同号异图；</li>
+     *   <li>DRAINING 记录：本地有 → 标排空（孤儿图也照样排空，所以这里不查 World 表）；本地没有 → 什么也不做（不为排空记录建场景：
+     *       节点重启后领导者看到 applied_plan_version 追上、场景缺席就删记录，§4.14）；</li>
+     *   <li>本地有、计划里没有 → 按排空处理（节点侧孤儿：记录已删、频道换了节点号，或计划外自建的场景）。</li>
+     * </ul>
+     * 频道从不跨节点「搬」：调用方只交来本节点号名下的记录，别的节点号名下的同号记录对本节点等于「计划里没有」（D4）。
+     * 记下版本号，随即推进一次排空（{@link #drainStep}）。逻辑线程上调用。
+     *
+     * @param records 本节点号名下的记录（调用方按节点号过滤，{@code WorldPlan.channelsOn}）
+     * @return 是否应用了（与已应用的版本相同时为 false）
+     */
+    public boolean applyChannelPlan(long version, List<WorldChannel> records) {
+        if (version == appliedPlanVersion) {
+            return false;
+        }
+        if (Long.compareUnsigned(version, appliedPlanVersion) < 0) {
+            log.error("频道计划版本号回退 {} -> {}（Redis 被清空或主从切换丢了写？），按当前计划应用",
+                    Long.toUnsignedString(appliedPlanVersion), Long.toUnsignedString(version));
+        }
+        Set<Integer> worldMaps = new HashSet<>(tables.worldSceneConfigIds());
+        Set<Long> planned = new HashSet<>();
+        int created = 0;
+        int drained = 0;
+        int reactivated = 0;
+        int rejected = 0;
+        for (WorldChannel record : records) {
+            long sceneId = record.getSceneId();
+            planned.add(sceneId);
+            Scene local = scenes.get(sceneId);
+            String problem = rejection(record, local, worldMaps);
+            if (problem != null) {
+                rejected++;
+                metrics.channelPlanApply(ChannelPlanApply.REJECTED);
+                log.error("拒绝频道计划记录（{}）version={} scene_id={} scene_config_id={} state={} kind={}", problem,
+                        Long.toUnsignedString(version), Long.toUnsignedString(sceneId),
+                        Integer.toUnsignedString(record.getSceneConfigId()), record.getState(), record.getKind());
+                continue;
+            }
+            if (record.getState() == ChannelState.CHANNEL_ACTIVE) {
+                if (local == null) {
+                    addScene(SceneInfoComp.newBuilder()
+                            .setSceneConfigId(record.getSceneConfigId())
+                            .setSceneId(sceneId)
+                            .build());
+                    created++;
+                } else if (local.draining()) {
+                    local.setDraining(false);
+                    reactivated++;
+                    log.info("频道改回承载中 scene_id={} scene_config_id={}", Long.toUnsignedString(sceneId),
+                            local.configId());
+                }
+            } else if (local != null && !local.draining()) {
+                local.setDraining(true);
+                drained++;
+                log.info("频道转为排空 scene_id={} scene_config_id={} 原因={} 在场={}", Long.toUnsignedString(sceneId),
+                        local.configId(), record.getDrainReason(), local.playerCount());
+            }
+        }
+        for (Scene scene : scenes.values()) {
+            if (!planned.contains(scene.sceneId()) && !scene.draining()) {
+                scene.setDraining(true);
+                drained++;
+                log.info("计划里没有本地场景，转为排空 scene_id={} scene_config_id={} 在场={}",
+                        Long.toUnsignedString(scene.sceneId()), scene.configId(), scene.playerCount());
+            }
+        }
+        appliedPlanVersion = version;
+        metrics.channelPlanApply(ChannelPlanApply.APPLIED);
+        publishChannels();
+        log.info("应用频道计划 version={} 本节点记录={} 新建={} 转排空={} 改回承载={} 拒绝={}", Long.toUnsignedString(version),
+                records.size(), created, drained, reactivated, rejected);
+        drainStep();
+        return true;
+    }
+
+    /** 一条计划记录为什么不能应用；能应用为 null。 */
+    private static String rejection(WorldChannel record, Scene local, Set<Integer> worldMaps) {
+        if (record.getSceneId() == 0) {
+            return "scene_id 为 0";
+        }
+        if (record.getState() == ChannelState.CHANNEL_DRAINING) {
+            return null;
+        }
+        if (record.getState() != ChannelState.CHANNEL_ACTIVE) {
+            return "未知状态";
+        }
+        if (record.getSceneConfigId() == 0) {
+            return "scene_config_id 为 0";
+        }
+        // 5.1 只有主世界频道；UNSPECIFIED 按主世界收（proto3 缺省值），5.3 的副本 / 镜像等别的种类不当主世界建（fail-closed）
+        ChannelKind kind = record.getKind();
+        if (kind != ChannelKind.CHANNEL_KIND_WORLD && kind != ChannelKind.CHANNEL_KIND_UNSPECIFIED) {
+            return "不是主世界频道";
+        }
+        if (!worldMaps.contains(record.getSceneConfigId())) {
+            return "不是本节点 World 表里的图（两边配表不一致？）";
+        }
+        if (local != null && local.configId() != record.getSceneConfigId()) {
+            return "本地同号场景的图不同（本地 " + local.configId() + "）";
+        }
+        return null;
+    }
+
+    /**
+     * 推进一次排空（scene-channels-spec §4.10.3）：排空中的场景里每个在场玩家按「本节点同图承载中频道里人数最少的（并列取 scene_id 无符号小的）
+     * → 本节点默认大世界（World 第一行）承载中频道里人数最少的 → 原地不动（计 blocked，下次再试）」改派，经 {@link #switchScene}：
+     * 旁人收到 51，本人收到 79（新 scene_id）/ 21 / 47，同图保留坐标、换图落出生点，写位置记录，触发组队跟随（跟随不会跟进排空频道，§4.13）。
+     * <b>不存盘、不动归属</b>：玩家留在同一进程、owner_epoch 不变，所以省掉基线的「存盘 → handoff 标记 → EnterScene(0,0)」
+     * （player_lifecycle.cpp:2140-2363）；基线落默认大世界（B1），Java 同图优先（D8）。
+     * 人数为 0 且没有指向它的在途进场 → 销毁（基线 DestroyScene「先排空再销毁」，scene_node_service.cpp:91-121）。
+     * 每次应用计划后与每秒各调一次（逻辑线程）。6.3 起战斗冻结中的玩家要跳过、等下一次推进。
+     *
+     * @return 本次销毁的场景数
+     */
+    public int drainStep() {
+        List<Scene> draining = new ArrayList<>();
+        for (Scene scene : scenes.values()) {
+            if (scene.draining()) {
+                draining.add(scene);
+            }
+        }
+        int destroyed = 0;
+        for (Scene from : draining) {
+            relocateResidents(from);
+            if (from.playerCount() == 0 && !hasPendingEnter(from.sceneId())) {
+                destroyScene(from);
+                destroyed++;
+            }
+        }
+        return destroyed;
+    }
+
+    private void relocateResidents(Scene from) {
+        if (from.playerCount() == 0) {
+            return;
+        }
+        for (ScenePlayer player : List.copyOf(from.players())) {
+            if (player.scene() != from) {
+                continue;
+            }
+            Scene to = relocationTarget(from);
+            if (to == null) {
+                // 去向只取决于本节点的频道，与玩家无关：一个找不到，剩下的也找不到
+                for (int i = 0; i < from.playerCount(); i++) {
+                    metrics.channelRelocation(ChannelRelocation.BLOCKED);
+                }
+                if (from.firstRelocationBlocked()) {
+                    log.warn("排空频道找不到改派目标（本节点没有同图与默认大世界的承载中频道），原地不动、每秒重试 scene_id={} "
+                            + "scene_config_id={} 在场={}", Long.toUnsignedString(from.sceneId()), from.configId(),
+                            from.playerCount());
+                }
+                return;
+            }
+            from.relocationUnblocked();
+            ChannelRelocation kind = to.configId() == from.configId() ? ChannelRelocation.SAME_MAP
+                    : ChannelRelocation.DEFAULT_WORLD;
+            metrics.channelRelocation(kind);
+            log.info("排空改派 player={} {} -> {}（{}）", Long.toUnsignedString(player.playerId()),
+                    Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(to.sceneId()), kind);
+            switchScene(player, to);
+        }
+    }
+
+    /** 排空改派 / 进场重定向的去向（§4.10.3 的顺序）：本节点同图承载中频道 → 本节点默认大世界承载中频道 → 没有（null）。 */
+    private Scene relocationTarget(Scene from) {
+        Scene sameMap = leastLoadedActive(from.configId(), from);
+        if (sameMap != null) {
+            return sameMap;
+        }
+        List<Integer> maps = tables.worldSceneConfigIds();
+        if (maps.isEmpty()) {
+            return null;
+        }
+        int defaultWorld = maps.get(0);
+        return defaultWorld == from.configId() ? null : leastLoadedActive(defaultWorld, null);
+    }
+
+    /** 本节点某图承载中频道里人数最少的（并列取 scene_id 无符号小的，确定、不依赖插入序）；{@code exclude} 不参与。没有为 null。 */
+    private Scene leastLoadedActive(int configId, Scene exclude) {
+        Scene best = null;
+        for (Scene scene : scenes.values()) {
+            if (scene == exclude || scene.draining() || scene.configId() != configId) {
+                continue;
+            }
+            if (best == null || scene.playerCount() < best.playerCount() || scene.playerCount() == best.playerCount()
+                    && Long.compareUnsigned(scene.sceneId(), best.sceneId()) < 0) {
+                best = scene;
+            }
+        }
+        return best;
+    }
+
+    private boolean hasPendingEnter(long sceneId) {
+        for (PendingEnter pending : pendingEnters.values()) {
+            if (pending.sceneId() == sceneId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void destroyScene(Scene scene) {
+        scenes.remove(scene.sceneId());
+        scene.clear();
+        publishPopulation(scene.configId());
+        publishChannels();
+        log.info("销毁场景 scene_id={} scene_config_id={}", Long.toUnsignedString(scene.sceneId()), scene.configId());
     }
 
     public int playerCount() {
@@ -227,24 +491,31 @@ public final class SceneWorld {
     }
 
     /**
-     * 客户端换场景（63）的目标：指定了 scene_id 就找本节点上的这个场景；只给配置时，
-     * 配置与当前相同视为留在原场景（基线 scene_manager 挑回原频道即幂等不动），否则取本节点该配置人数最少的场景。
-     * 目标不在本节点返回 null（跨节点换场景首批不做）。
+     * 客户端换场景（63）的去向（scene-channels-spec §4.12）：
+     * <ul>
+     *   <li>指定了 scene_id：本节点上的这个场景、且在承载中才放行；在排空中拒绝（D11，基线放行、B5）；不在本节点拒绝（跨节点随 5.2）；</li>
+     *   <li>只带当前地图（基线 scene_manager 在全 zone 该图频道里预占最少者，enterscenelogic.go:1267-1286、world_init.go:437-513）：
+     *       在本节点同图承载中频道里选人数最少的，当前场景的人数含自己；并列<b>优先留在原地</b>，再取 scene_id 小的（D17，基线并列取 SMEMBERS
+     *       顺序第一个、B13）；当前场景在排空中就不算它。选回原场景 = 应答成功、不发 79（基线挑回原频道走同落点重连，同样不发）；</li>
+     *   <li>只带别的地图：本节点该图承载中频道里人数最少的（并列取 scene_id 小的）。</li>
+     * </ul>
+     * 本节点选不到一律回 3023。
      */
-    Scene resolveSwitchTarget(Scene current, long sceneId, int configId) {
+    SwitchTarget resolveSwitchTarget(Scene current, long sceneId, int configId) {
         if (sceneId != 0) {
-            return scenes.get(sceneId);
+            Scene target = scenes.get(sceneId);
+            return target == null || target.draining() ? new SwitchTarget.Reject(ENTER_FAILED)
+                    : new SwitchTarget.Local(target);
         }
         if (configId == current.configId()) {
-            return current;
-        }
-        Scene best = null;
-        for (Scene scene : scenes.values()) {
-            if (scene.configId() == configId && (best == null || scene.playerCount() < best.playerCount())) {
-                best = scene;
+            Scene other = leastLoadedActive(configId, current);
+            if (current.draining()) {
+                return other == null ? new SwitchTarget.Reject(ENTER_FAILED) : new SwitchTarget.Local(other);
             }
+            return new SwitchTarget.Local(other != null && other.playerCount() < current.playerCount() ? other : current);
         }
-        return best;
+        Scene best = leastLoadedActive(configId, null);
+        return best == null ? new SwitchTarget.Reject(ENTER_FAILED) : new SwitchTarget.Local(best);
     }
 
     // ------------------------------------------------------------------ 进场
@@ -261,8 +532,9 @@ public final class SceneWorld {
             failEnter(key, playerId, epoch, "player_id 或 session_id 为 0");
             return;
         }
+        // 排空中的场景照样放行：在途进场挡住它的销毁，加载完成时改进兄弟频道（§4.10.4）
         if (!scenes.containsKey(enter.getSceneId())) {
-            failEnter(key, playerId, epoch, "场景不在本节点 scene_id=" + enter.getSceneId());
+            failEnter(key, playerId, epoch, "场景不在本节点 scene_id=" + Long.toUnsignedString(enter.getSceneId()));
             return;
         }
         PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch);
@@ -313,8 +585,19 @@ public final class SceneWorld {
         }
         Scene scene = scenes.get(pending.sceneId());
         if (scene == null) {
-            failEnter(key, playerId, epoch, "场景不在本节点 scene_id=" + pending.sceneId());
+            failEnter(key, playerId, epoch, "场景不在本节点 scene_id=" + Long.toUnsignedString(pending.sceneId()));
             return;
+        }
+        if (scene.draining()) {
+            // 分配时目录还没报排空（节点拉到计划后 ≤1 s 内才补发目录，D13）：改进兄弟频道（§4.10.4），顺序同排空改派；
+            // 都没有就进排空中的这个、随后被改派。79 与位置记录给的都是实际进入的场景（gate 只按节点路由，不看场景号）。
+            Scene sibling = relocationTarget(scene);
+            if (sibling != null) {
+                metrics.channelRelocation(ChannelRelocation.ENTER_REDIRECT);
+                log.info("进场目标频道在排空，改进兄弟频道 player={} {} -> {}", Long.toUnsignedString(playerId),
+                        Long.toUnsignedString(scene.sceneId()), Long.toUnsignedString(sibling.sceneId()));
+                scene = sibling;
+            }
         }
 
         // 同一会话上挂着另一个玩家（gate 复用会话换角色）：按正常离开处理，它自己的 epoch 仍有效，写回并释放。
@@ -471,7 +754,8 @@ public final class SceneWorld {
         player.moveGuard().reset(at, clock.nanoTime());
         enterScene(player, target);
         locations.entered(player);
-        log.info("玩家换场景 player={} {} -> {}", player.playerId(), from.sceneId(), target.sceneId());
+        log.info("玩家换场景 player={} {} -> {}", Long.toUnsignedString(player.playerId()),
+                Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(target.sceneId()));
         teamFollow.onEnteredScene(this, player);
     }
 

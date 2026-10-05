@@ -97,6 +97,8 @@ xm:
     save-interval: ${XM_SCENE_SAVE_INTERVAL:300s}
     # 全服产出封禁名单（Redis，xm-data 运维接口写）的兜底重读周期；变更通知走 pub/sub、秒级生效
     gain-block-refresh: 10s
+    # 主世界频道计划（scene-manager 写在 Redis xm:world:{z:<zone>}:*）的拉取周期：每周期读一次版本号，变了才整读并在逻辑线程上建 / 排空频道
+    channel-plan-poll-interval: 1s
     # 获取异常检测（只告警）：缺省同基线，600 秒内超过 50 次或累计超过 100000；某一维填 0 只关这一维。
     # 按币种 / 物品覆盖：currency.<币种>.* 、item.<物品配置号>.*（window / max-count / max-amount；没写的项取内置缺省）
     anomaly:

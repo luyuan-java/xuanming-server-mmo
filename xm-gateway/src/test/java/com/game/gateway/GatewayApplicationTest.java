@@ -67,6 +67,11 @@ class GatewayApplicationTest {
 
     @Test
     void 默认配置_一区开放且推荐() throws Exception {
+        // 区服目录带 1 s 缓存：启动期若有读者（健康探测等）先于播种器读过一次空表，要等缓存过期才看得到播种结果（负载高时偶发）
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (zones.find(1).isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(100);
+        }
         ZoneRow zone = zones.find(1).orElseThrow();
         assertThat(zone.status()).as("按配置播种").isEqualTo(ZoneManualStatus.OPEN);
         assertThat(zone.recommended()).isTrue();

@@ -12,7 +12,7 @@
 
     <artifactId>xm-scene-manager</artifactId>
     <name>xm-scene-manager</name>
-    <description>场景目录（Spring Boot + Dubbo 提供方）：玩家该进哪个 scene 节点的哪个场景。无状态，可多实例</description>
+    <description>场景目录（Spring Boot + Dubbo 提供方）：玩家该进哪个 scene 节点的哪个场景（带软预占）；主世界频道计划的分 zone 领导者（铺设 / 扩缩容 / 再平衡 / 孤儿清理）。可多实例</description>
 
     <dependencies>
         <dependency>
