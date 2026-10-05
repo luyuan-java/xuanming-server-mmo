@@ -21,6 +21,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.dubbo.common.constants.CommonConstants;
 import org.apache.dubbo.config.ReferenceConfig;
+import org.apache.dubbo.remoting.Constants;
 import org.apache.dubbo.rpc.RpcContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,8 +34,9 @@ import org.slf4j.LoggerFactory;
  * （对应 {@code ConnCache.Remove}，{@code conn.go:69-79}）；节点从目录消失时调用方用 {@link #retainOnly} / {@link #evict} 清掉。
  *
  * <p><b>不阻塞调用线程</b>：建引用时 Dubbo 会同步建连（对端不可达时可达数秒，Windows 上连接被拒也要约 2–3 s），所以建引用放在本类自己的
- * 两条守护线程（{@code scene-asset-connect}）上做，{@link #call} 只挂回调；建好之后连接断了 Dubbo 会在后台重连，期间的调用立即异常完成
- * （实测不阻塞）。Dubbo 模型在第一次建引用时才创建（见 {@link IsolatedDubboModule} 关于缺省框架模型的说明），{@link #close} 时整体销毁。
+ * 两条守护线程（{@code scene-asset-connect}）上做，{@link #call} 只挂回调；建好之后连接断了 Dubbo 会在后台按 {@link #RECONNECT_INTERVAL}
+ * 周期重连，期间的调用立即异常完成（实测不阻塞）。Dubbo 模型在第一次建引用时才创建（见 {@link IsolatedDubboModule} 关于缺省框架模型的说明），
+ * {@link #close} 时整体销毁。
  * 调用方鉴权（{@code XM_DUBBO_SECRET} 的调用方 MAC）由 xm-api 的 SPI 过滤器自动加上，缺密钥时引用建不起来（那次调用异常完成）。
  *
  * <p>线程安全；{@link #call} 可在任意线程上调（含 Netty I/O / 逻辑线程：不阻塞）。
@@ -48,6 +50,20 @@ public final class SceneAssetOpClients implements AutoCloseable {
     /** 本地兜底超时比这次调用的超时多给的余量：正常情况下 Dubbo 自己先超时；建引用卡住时由它兜底。 */
     private static final long LOCAL_TIMEOUT_GRACE_MS = 200;
     private static final int CONNECT_THREADS = 2;
+    /**
+     * 连接断了 / 没连上时，Dubbo 在后台重连的间隔，同时也是空闲连接的心跳（HTTP/2 PING）间隔。
+     *
+     * <p>Dubbo 3.3 的 Triple 客户端连接（{@code AbstractNettyConnectionClient}）只在断连（channelInactive / 收到 GOAWAY）<b>1 s 后重连一次</b>；
+     * 这一次（或建引用时的首次建连）没连上，下一次由 {@code ConnectionListener} 排在 {@code reconnectDuration} 之后，而它 =
+     * {@code max(dubbo.application.least-reconnect-duration（缺省 60 s）, heartbeat.timeout / 3（缺省 = heartbeat = 60 s））}。
+     * 引用上的 {@code reconnect} 参数只作用于 dubbo 协议的 {@code HeaderExchangeClient}，对 Triple 无效。于是对端停机超过约 1 s（scene 重启、
+     * 网络抖动总是如此）就要整整 60 s 后才连回，这期间该节点上的公会投递全部按传输失败重投。Linux 上连接被拒立即失败，那一刻对端还没重新监听
+     * 这一次就落空；Windows 上连接被拒要重试 SYN 约 2–3 s，常常拖到对端重新监听而碰巧连上——所以只在 Linux CI 上暴露。
+     *
+     * <p>两个参数都压到 1 s：重连间隔 = 1 s；心跳 1 s → 空闲 1 s 发一个 PING，{@code close.timeout}（缺省 3 × 心跳 = 3 s）内没回 ACK 就断开重连，
+     * 半开连接（对端主机掉线没发 FIN）约 4 s 内发现，而不是缺省的 60 s + 180 s。代价是每条空闲连接每秒一来一回两个 17 字节的帧。
+     */
+    static final Duration RECONNECT_INTERVAL = Duration.ofSeconds(1);
 
     private final String applicationName;
     private final Duration referenceTimeout;
@@ -188,6 +204,7 @@ public final class SceneAssetOpClients implements AutoCloseable {
             reference.setRetries(0);
             reference.setCheck(false);
             reference.setTimeout((int) referenceTimeout.toMillis());
+            reference.setParameters(reconnectParameters());
             // 建的过程中被换掉 / 清掉的条目：destroyWhenBuilt 已挂好，建完即销毁（等着它的调用随之按传输失败重投）；
             // 关闭时整个模型一起销毁
             entry.client().complete(new Client(reference, reference.get()));
@@ -199,6 +216,19 @@ public final class SceneAssetOpClients implements AutoCloseable {
             }
             entry.client().completeExceptionally(e);
         }
+    }
+
+    /**
+     * 进直连 URL 的重连 / 心跳参数（见 {@link #RECONNECT_INTERVAL}）。同一地址的连接由 Dubbo 按地址共享、参数取自第一个建它的引用，
+     * 本类所有引用都带同样的参数。{@code heartbeat.timeout} 与 {@code close.timeout} 不设：缺省都是 3 × 心跳，满足 Dubbo「≥ 2 × 心跳」的校验。
+     * 可变 Map：Dubbo 刷新配置时可能往里写。
+     */
+    static Map<String, String> reconnectParameters() {
+        String millis = Long.toString(RECONNECT_INTERVAL.toMillis());
+        Map<String, String> parameters = new HashMap<>();
+        parameters.put(Constants.HEARTBEAT_KEY, millis);
+        parameters.put(Constants.LEAST_RECONNECT_DURATION_KEY, millis);
+        return parameters;
     }
 
     private IsolatedDubboModule model() {
