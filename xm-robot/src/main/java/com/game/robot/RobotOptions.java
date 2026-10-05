@@ -9,6 +9,7 @@ import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CurrencyScenario;
+import com.game.robot.scenario.DungeonScenario;
 import com.game.robot.scenario.ExpectJump;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.FriendScenario;
@@ -16,6 +17,7 @@ import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.GuildEconomyScenario;
 import com.game.robot.scenario.GuildScenario;
 import com.game.robot.scenario.KillSwitchScenario;
+import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.RateLimitScenario;
@@ -83,6 +85,19 @@ public record RobotOptions(
         TRADE,
         /** 跨节点换场景与归属交接（批次 5.2）；子命令写作 {@code cross-node}，需要两个 scene 节点。 */
         CROSS_NODE,
+        /**
+         * 镜像场景（批次 5.3，dungeon-mirror-spec §12.6）：A、B、C 三个新号；A 在默认主世界发 63 镜像 → 79 / 43 逐字段、隔离、镜像里再建 3005、
+         * B 按号加入、A 断线重连回镜像、只带地图离开回频道、连发 3014、等空置回收后按号进入被拒、表外 M 3005、指标增长。
+         * 附加选项 {@code --mirror-config-id / --instance-wait-ms / --expect-mirror-validation / --scene-manager-metrics-url}，
+         * scene 指标取 {@code --scene-metrics-url}。
+         */
+        MIRROR,
+        /**
+         * 副本（批次 5.3，dungeon-mirror-spec §12.6）：经 xm-scene dev 实例管理口（{@code --scene-admin-url}，运维令牌同 audit）建副本 →
+         * A、B 按号进入（79 逐字段、出生点）→ 3008 / 只带副本地图被拒 → 管理口销毁后两人落默认主世界出生点 → 按号再进被拒 → 管理口拒绝码 → 指标；
+         * {@code --expect-dev deny} 只核对管理口 403（prod）。
+         */
+        DUNGEON,
         /** battle 节点（批次 6.2）：经 xm-battle dev 接口建房 → 大厅 177 / 143 → 直连握手 → 提交 / 拉状态 / 挂机 / 收尾 / 观战。 */
         BATTLE,
         /** battle 直连面的负面用例（批次 6.2）；子命令写作 {@code battle-edge}。 */
@@ -116,6 +131,16 @@ public record RobotOptions(
                 "trade：xm-trade 管理端口（播种接口 POST /admin/trade/seed-listing，运维令牌同 audit）"),
         TRADE_SCOPE("trade-scope", "XM_ROBOT_TRADE_SCOPE", "zone",
                 "trade：期望的市场范围 zone / global（须与 xm-trade 的 xm.trade.market.scope 一致，换范围要重启 xm-trade）"),
+        MIRROR_CONFIG_ID("mirror-config-id", "XM_ROBOT_MIRROR_CONFIG_ID", "1",
+                "mirror / dungeon 子命令（批次 5.3）。mirror：建镜像用的 Mirror 表 id（缺省 Mirror 第一行，main_scene_id = 默认主世界）"),
+        INSTANCE_WAIT("instance-wait-ms", "XM_ROBOT_INSTANCE_WAIT_MS", "90000",
+                "mirror：等空置镜像被回收（xm.scene.instance.mirror-idle-timeout + reclaim-grace，缺省 30 + 30 s）的上限；切片调短超时后可调小"),
+        EXPECT_MIRROR_VALIDATION("expect-mirror-validation", "XM_ROBOT_EXPECT_MIRROR_VALIDATION", "strict",
+                "mirror：表外 mirror_config_id 的期望：strict（同步 3005，Java 先查 Mirror 表）/ lenient（{0} + 79，不查表的实现）"),
+        SCENE_ADMIN_URL("scene-admin-url", "XM_ROBOT_SCENE_ADMIN_URL", "http://127.0.0.1:18104",
+                "dungeon：xm-scene 管理端口（dev 实例管理口 POST /admin/scene/instance/*，运维令牌同 audit；副本建在这个节点上，指标也抓这里）"),
+        SCENE_MANAGER_METRICS_URL("scene-manager-metrics-url", "XM_ROBOT_SCENE_MANAGER_METRICS_URL", "http://127.0.0.1:18102",
+                "mirror / dungeon：xm-scene-manager 管理端口（抓 xm_scene_manager_instance_seconds）"),
         BATTLE_ADMIN_URL("battle-admin-url", "XM_ROBOT_BATTLE_ADMIN_URL", "http://127.0.0.1:18112",
                 "battle / battle-edge：xm-battle 管理端口（dev 接口 POST /admin/battle/dev/*、指标；运维令牌同 audit）"),
         EXPECT_DEV("expect-dev", "XM_ROBOT_EXPECT_DEV", "allow",
@@ -265,6 +290,8 @@ public record RobotOptions(
             case GUILD_ECONOMY -> GuildEconomyScenario.accountName(prefix, runTag, "a");
             case TRADE -> TradeScenario.accountName(prefix, runTag, "a");
             case CROSS_NODE -> CrossNodeScenario.accountName(prefix, runTag, "3");
+            case MIRROR -> MirrorScenario.accountName(prefix, runTag, "c");
+            case DUNGEON -> DungeonScenario.accountName(prefix, runTag, "b");
             case BATTLE -> BattleScenario.accountName(prefix, runTag, "a");
             case BATTLE_EDGE -> BattleEdgeScenario.accountName(prefix, runTag, "a");
         };

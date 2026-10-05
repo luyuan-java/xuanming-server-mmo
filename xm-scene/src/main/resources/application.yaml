@@ -113,6 +113,19 @@ xm:
     switch-resolve-timeout: 4s
     # 交出墓碑存活时长：交出后与 PlayerTransfer 在链路上交叉到达的 PlayerLeave 靠它按旧 epoch 补写登出墓碑 / 重连租约
     transfer-tombstone-ttl: 30s
+    # 镜像 / 副本实例（批次 5.3，dungeon-mirror-spec §6.10、§7.2）：实例空置满超时进入回收宽限（不接本地新进入、目录报 draining，
+    # 宽限内有在途进场到达即复活），宽限满且仍空、没有在途进场才销毁；每秒判定一次。不满足校验拒启。
+    # 本机切片为 robot 提速可用环境变量把镜像超时调到 5s、宽限调到 10s（宽限下限）。
+    instance:
+      # 镜像空置多久进入回收宽限（≥ 0；0 = 用 idle-timeout，同基线 MirrorIdleTimeoutSeconds）
+      mirror-idle-timeout: ${XM_SCENE_MIRROR_IDLE_TIMEOUT:30s}
+      # 副本（及回落到它的镜像）空置多久进入回收宽限（≥ 0；0 = 不自动回收，同基线 InstanceIdleTimeoutSeconds）
+      idle-timeout: ${XM_SCENE_INSTANCE_IDLE_TIMEOUT:300s}
+      # 回收宽限（≥ 10s：不短于 scene-manager 软预占 TTL / login 归属等待），兜住「分配时还在 → 到达时还在」
+      reclaim-grace: ${XM_SCENE_INSTANCE_RECLAIM_GRACE:30s}
+      # 本节点实例数上限（1..10000）与同一玩家在本节点创建的镜像数上限（1..100）：超限 63 镜像回 3005（D19）
+      max-per-node: 200
+      max-per-creator: 3
     # 获取异常检测（只告警）：缺省同基线，600 秒内超过 50 次或累计超过 100000；某一维填 0 只关这一维。
     # 按币种 / 物品覆盖：currency.<币种>.* 、item.<物品配置号>.*（window / max-count / max-amount；没写的项取内置缺省）
     anomaly:

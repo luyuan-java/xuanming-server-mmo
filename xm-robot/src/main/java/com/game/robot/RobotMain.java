@@ -7,6 +7,7 @@ import com.game.robot.client.GatewayHttp;
 import com.game.robot.client.LoginHttpClient;
 import com.game.robot.client.MessageIds;
 import com.game.robot.client.RobotClient;
+import com.game.robot.client.SceneAdminClient;
 import com.game.robot.client.TradeAdminClient;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.scenario.AttributeScenario;
@@ -19,12 +20,14 @@ import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.DrainScenario;
+import com.game.robot.scenario.DungeonScenario;
 import com.game.robot.scenario.FeaturesScenario;
 import com.game.robot.scenario.FriendScenario;
 import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.GuildEconomyScenario;
 import com.game.robot.scenario.GuildScenario;
 import com.game.robot.scenario.KillSwitchScenario;
+import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.QueueScenario;
@@ -190,6 +193,35 @@ public final class RobotMain {
                     title = "xm-robot cross-node：" + scenario.firstAccount() + " 等（需要两个 scene 节点），" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.MIRROR || options.scenario() == RobotOptions.Scenario.DUNGEON) {
+                    InstanceOptions instance;
+                    try {
+                        instance = InstanceOptions.parse(args, env);
+                    } catch (UsageException e) {
+                        err.println("参数错误：" + e.getMessage());
+                        err.print(RobotOptions.usage());
+                        return EXIT_USAGE;
+                    }
+                    if (options.scenario() == RobotOptions.Scenario.MIRROR) {
+                        MirrorScenario scenario = new MirrorScenario(flow, ids, registry, Path.of(options.tableDir()),
+                                options.accountPrefix(), options.runTag(), instance.mirrorConfigId(), instance.strictMirrorValidation(),
+                                instance.instanceWait(), options.sceneMetricsUrl(), instance.sceneManagerMetricsUrl(),
+                                options.requestTimeout(), options.observeTimeout());
+                        title = "xm-robot mirror：" + scenario.accountA() + " 等（mirror_config_id=" + instance.mirrorConfigId()
+                                + "，表外号期望 " + (instance.strictMirrorValidation() ? "3005" : "受理") + "），" + target
+                                + " scene-metrics=" + options.sceneMetricsUrl();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                    } else {
+                        DungeonScenario scenario = new DungeonScenario(flow, ids, registry, Path.of(options.tableDir()),
+                                new SceneAdminClient(instance.sceneAdminUrl(), AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")),
+                                        options.requestTimeout()), instance.sceneManagerMetricsUrl(), options.accountPrefix(),
+                                options.runTag(), options.expectDevAllowed(), options.requestTimeout(), options.observeTimeout());
+                        title = "xm-robot dungeon：" + scenario.accountA() + " 等（期望管理口 " + (options.expectDevAllowed() ? "开放" : "403")
+                                + "），" + target + " scene-admin=" + instance.sceneAdminUrl();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                    }
                 } else if (options.scenario() == RobotOptions.Scenario.BATTLE) {
                     BattleScenario scenario = new BattleScenario(client, flow, registry, battleAdmin(options, env), options.accountPrefix(),
                             options.runTag(), options.expectDevAllowed(), options.requestTimeout());
