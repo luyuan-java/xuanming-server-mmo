@@ -195,6 +195,17 @@ public final class BattleEdgeServer implements DirectEdge {
             }
             ch.closeFuture().awaitUninterruptibly(TimeUnit.NANOSECONDS.toMillis(remaining) + 1);
         }
+        // closeFuture 在 channelInactive 之前就完成（Netty 先置关闭、再排队触发 inactive），名额是在 inactive 里由 unregister 归还的：
+        // 同一个截止时刻内再等会话真正摘掉，返回之后 connectionCount 才可信（慢机器上曾返回时还剩 2 条，GitHub Actions 偶发）。
+        // 本方法不在逻辑线程上（开头已拒），短睡不会挡住要执行的 inactive
+        while (!sessions.isEmpty() && closeDeadline - System.nanoTime() > 0) {
+            try {
+                Thread.sleep(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
         // ③ 释放 accept 线程
         if (boss != null) {
             boss.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly(CLOSE_WAIT.toMillis());
