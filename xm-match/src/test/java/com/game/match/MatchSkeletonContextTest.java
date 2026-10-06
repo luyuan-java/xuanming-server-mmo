@@ -19,25 +19,25 @@ import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
 import com.game.match.dispatch.MatchWorkerPool;
 import com.game.match.dispatch.MatchWorkers;
+import com.game.match.gather.BattleNodes;
 import com.game.match.gather.GatherHooks;
+import com.game.match.gather.GatherLauncher;
 import com.game.match.gather.GatherOutcome;
 import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
+import com.game.match.placement.PlacementDialer;
+import com.game.match.placement.PlacementStore;
 import com.game.match.port.NodeCalls;
 import com.game.match.port.PlayerPusher;
 import com.game.match.port.PlayerStatusReader;
 import com.game.match.port.RedisClock;
-import com.game.match.rating.BattleResultIngest;
-import com.game.match.rating.JdbcRatingReader;
-import com.game.match.rating.MatchRatingTables;
 import com.game.match.rating.RatingReader;
-import com.game.match.rating.RatingStore;
-import com.game.match.rating.RatingTestDatabase;
-import com.game.match.support.MatchModes;
+import com.game.match.testing.FixedRatingReader;
+import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.LeaseOnlyRedis;
-import com.game.proto.contracts.kafka.BattleResultEvent;
-import com.game.proto.contracts.kafka.BattleResultTeam;
-import com.game.proto.eBattleOutcome;
+import com.game.match.ticket.TicketStore;
+import com.game.proto.RequestBattleTicketRequest;
+import com.game.proto.RequestBattleTicketResponse;
 import com.game.proto.match.JoinQueueRequest;
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -47,15 +47,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
 import org.apache.dubbo.config.ReferenceConfig;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -69,8 +68,9 @@ import org.springframework.test.context.DynamicPropertySource;
 
 /**
  * 先行件的进程骨架起得来（批次 6.4 的并行开发起点）：整个 {@link MatchApplication} 的上下文——真的 Dubbo Triple 导出（随机空闲端口，
- * 带调用方鉴权过滤器）、真的管理 Tomcat（随机端口）——只把外部连接换掉：Redis 用只应答发号租约的替身，MySQL 换成 H2 内存库（评分两张表），不消费 Kafka。
- * 钉住的状态是「Dubbo 已导出、没有任何处理器」：从另一个 Dubbo 框架模型（等价于 gate 进程）经真 Triple 调进来，10 个号都得到信封 1003；
+ * 带调用方鉴权过滤器）、真的管理 Tomcat（随机端口）——只把外部连接换掉：Redis 用只应答发号租约的替身，不装数据源（骨架阶段没有任何 bean 用库）。
+ * 钉住的状态是「Dubbo 已导出、派发表恰好是已合入的处理器」：从另一个 Dubbo 框架模型（等价于 gate 进程）经真 Triple 调进来，没有处理器的号都得到
+ * 信封 1003（骨架阶段是全部 10 个号；工作包 M3 合入后 179 有了处理器，走到补签逻辑）；
  * 基础设施 bean 与各出站口齐全；指标按规格 §11 的名字经 Prometheus 端点导出。
  *
  * <p>{@code XM_DUBBO_SECRET} 由 surefire 注入（pom.xml，仅测试用的假值）。
@@ -82,11 +82,9 @@ import org.springframework.test.context.DynamicPropertySource;
                 "xm.run-mode=test",
                 "xm.table-dir=../config-data/tables",
                 "xm.killswitch.enabled=false",
-                // 不装 Druid 数据源，免得上下文去连 3306：评分包要的 DataSource 由下面的 ExternalDoubles 给一个 H2 内存库
+                // 骨架阶段没有 bean 用 MySQL：不装数据源，免得上下文去连 3306
                 "spring.autoconfigure.exclude=com.alibaba.druid.spring.boot3.autoconfigure.DruidDataSourceAutoConfigure,"
-                        + "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
-                // 不消费对局结果：本机若正好有 Kafka，测试进程不该以生产的消费组去读真的结果 topic
-                "xm.match.rating.enabled=false"})
+                        + "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration"})
 @AutoConfigureObservability(tracing = false)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class MatchSkeletonContextTest {
@@ -98,8 +96,10 @@ class MatchSkeletonContextTest {
     private static ClientMessageService client;
 
     /**
-     * 外部依赖的替身：Redis（xm-discovery 的自动配置见到已有 {@code RedissonClient} 就让位）；MySQL 换成 H2 内存库，评分两张表用同一份 DDL 直接建
-     * （H2 跑不了 pbmysql 的结构同步，评分的装配见到 {@code SchemaSync} bean 就用它）。
+     * 外部依赖的替身：Redis（xm-discovery 的自动配置见到已有 {@code RedissonClient} 就让位）。
+     *
+     * <p>另有两个「别的包还没合入时」的占位（批次 6.4 的工作包各自在自己的分支上开发）：gather 包的装配要票据存储与评分读取，
+     * 这两个 bean 由 ticket / rating 包提供。两者都是 {@code @ConditionalOnMissingBean}——真实现一合入，这里的占位自动让位，不用再改这个文件。
      */
     @TestConfiguration(proxyBeanMethods = false)
     static class ExternalDoubles {
@@ -110,13 +110,15 @@ class MatchSkeletonContextTest {
         }
 
         @Bean
-        DataSource dataSource() {
-            return RatingTestDatabase.h2DataSource("xm-match-skeleton");
+        @ConditionalOnMissingBean
+        TicketStore ticketStorePlaceholder() {
+            return new InMemoryTicketStore();
         }
 
         @Bean
-        MatchRatingTables.SchemaSync ratingSchemaSync() {
-            return RatingTestDatabase.H2_SCHEMA;
+        @ConditionalOnMissingBean
+        RatingReader ratingReaderPlaceholder() {
+            return new FixedRatingReader();
         }
     }
 
@@ -185,17 +187,31 @@ class MatchSkeletonContextTest {
                 .build();
     }
 
-    @Test
-    void 没有任何处理器_派发表是空的() {
-        assertThat(handlers.orderedStream()).isEmpty();
-        assertThat(dispatcher.handledMessageIds()).isEmpty();
+    /** 已合入的处理器 bean 登记的方法（骨架阶段为空；各工作包合入后逐个出现）。 */
+    private List<String> handledMethods() {
+        return handlers.orderedStream().map(MatchMethodHandler::method).toList();
     }
 
     @Test
-    void Dubbo已导出_经真Triple调进来_十个号都得到信封1003() throws Exception {
+    void 派发表恰好是上下文里的处理器bean_补签179已登记() {
         MessageIdRegistry registry = context.getBean(MessageIdRegistry.class);
+        List<String> handled = handledMethods();
+
+        assertThat(handled).doesNotHaveDuplicates().contains(MatchMethods.REQUEST_BATTLE_TICKET);
+        assertThat(dispatcher.handledMessageIds())
+                .containsExactlyInAnyOrderElementsOf(handled.stream().map(method -> registry.requireId(MatchMethods.SERVICE, method)).toList());
+    }
+
+    @Test
+    void Dubbo已导出_经真Triple调进来_没有处理器的号都得到信封1003() throws Exception {
+        MessageIdRegistry registry = context.getBean(MessageIdRegistry.class);
+        List<String> handled = handledMethods();
 
         for (String method : MatchMethods.ALL) {
+            if (handled.contains(method)) {
+                // 已有处理器的号由各自工作包的用例钉（179 见下一条）
+                continue;
+            }
             int messageId = registry.requireId(MatchMethods.SERVICE, method);
             ClientReply reply = client().handle(call(messageId)).get(15, TimeUnit.SECONDS);
 
@@ -204,6 +220,32 @@ class MatchSkeletonContextTest {
             assertThat(reply.getTipParametersList()).isEmpty();
             assertThat(reply.getDirectivesList()).as("match 不产生会话指令").isEmpty();
         }
+    }
+
+    @Test
+    void 补签179经真Triple走到处理器_落点读不出来回inband的16004_不是信封() throws Exception {
+        MessageIdRegistry registry = context.getBean(MessageIdRegistry.class);
+        int messageId = registry.requireId(MatchMethods.SERVICE, MatchMethods.REQUEST_BATTLE_TICKET);
+        ClientCall request = call(messageId).toBuilder().setBody(RequestBattleTicketRequest.newBuilder().setBattleId(42).build().toByteString())
+                .build();
+
+        ClientReply reply = client().handle(request).get(15, TimeUnit.SECONDS);
+
+        // 这个上下文里的 Redis 是只应答发号租约的替身：读落点记录失败 → §4.3 第 2 行
+        assertThat(reply.getTipId()).as("in-band 错误不走信封").isZero();
+        RequestBattleTicketResponse response = RequestBattleTicketResponse.parseFrom(reply.getBody());
+        assertThat(response.getErrorMessage().getId()).isEqualTo(16004);
+        assertThat(response.getErrorMessage().getParametersList()).containsExactly("服务器繁忙,请稍后再试");
+        assertThat(response.hasAssignment()).isFalse();
+        assertThat(reply.getDirectivesList()).isEmpty();
+    }
+
+    @Test
+    void 开局管线与落点的装配齐全_在途上限取配置的缺省值256() {
+        assertThat(context.getBean(GatherLauncher.class).availablePermits()).isEqualTo(256);
+        assertThat(context.getBean(BattleNodes.class)).isNotNull();
+        assertThat(context.getBean(PlacementStore.class)).isNotNull();
+        assertThat(context.getBean(PlacementDialer.class)).isNotNull();
     }
 
     @Test
@@ -293,45 +335,5 @@ class MatchSkeletonContextTest {
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).contains("\"status\":\"UP\"");
-    }
-
-    /**
-     * 评分包在整个应用的上下文里装上了（批次 6.4 的 M4）：别的包注入的 {@link RatingReader} 就是读库的那个实现；建表先于它；入账之后读口与
-     * dev 读评分口（管理端口上的真 HTTP）都看得到；{@code match-db} 线程池的标准指标已导出；本测试关了评分开关，所以结果消费没有启动。
-     * 管理口的令牌 / 操作人过滤器不在本包，这里直接访问（过滤器接上之后要带上它要的请求头）。
-     */
-    @Test
-    void 评分包已装上_读口是读库的实现_dev读评分口与matchdb线程池指标可见_结果消费按开关没有启动() throws Exception {
-        assertThat(context.getBeansOfType(RatingReader.class)).as("RatingReader 只有一个实现").hasSize(1);
-        RatingReader reader = context.getBean(RatingReader.class);
-        assertThat(reader).isInstanceOf(JdbcRatingReader.class);
-        assertThat(context.getBean(BattleResultIngest.class).isRunning()).as("xm.match.rating.enabled=false").isFalse();
-        assertThat(context.getBean(BattleResultIngest.class).topic()).as("代次缺省 1").isEqualTo("xm-battle-result-g1");
-
-        long winner = 880_001;
-        long loser = 880_002;
-        assertThat(reader.loadCentiOrDefault(winner)).as("表已建好、是空的：新号 1500").isEqualTo(150_000);
-        RatingStore.Result applied = context.getBean(RatingStore.class).apply(BattleResultEvent.newBuilder().setBattleId(770_001)
-                .setMatchMode(MatchModes.ONE_V_ONE).setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
-                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(winner))
-                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(loser)).setTotalRounds(3).build());
-
-        assertThat(applied.outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
-        assertThat(reader.loadAllCentiOrDefault(List.of(winner, loser))).containsExactly(Map.entry(winner, 151_600L), Map.entry(loser, 148_400L));
-
-        HttpClient http = HttpClient.newHttpClient();
-        HttpResponse<String> rating = http.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + managementPort + "/admin/match/dev/rating/" + winner))
-                        .timeout(Duration.ofSeconds(10)).build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertThat(rating.statusCode()).isEqualTo(200);
-        assertThat(rating.body()).isEqualTo("{\"player_id\":\"880001\",\"rating\":\"1516.00\",\"games\":1}");
-
-        String scrape = http.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + managementPort + "/actuator/prometheus")).timeout(Duration.ofSeconds(10)).build(),
-                HttpResponse.BodyHandlers.ofString()).body();
-        assertThat(scrape).as("读评分的线程池").containsPattern("executor_pool_core_threads\\{[^}]*name=\"match-db\"[^}]*} 8\\.0");
-        assertThat(scrape).containsPattern("xm_match_rating_updates_total\\{[^}]*mode=\"MATCH_MODE_1V1\"[^}]*outcome=\"applied\"[^}]*} 1\\.0");
-        assertThat(scrape).containsPattern("xm_match_rating_consumer_paused(\\{[^}]*})? 0\\.0");
     }
 }
