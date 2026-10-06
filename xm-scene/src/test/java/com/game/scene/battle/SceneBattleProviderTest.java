@@ -214,8 +214,10 @@ class SceneBattleProviderTest {
         f.locks.take(Op.PREPARE_LOCK).complete();
         f.locks.release(Op.PREPARE_LOCK);
         f.drain();
-        SceneBattleReply prepared = get(prepare);
+        // 先等观察者、再取应答：对还没完成的 future 调 get() 的线程被唤醒后会帮着跑它的后续（CompletableFuture 的 postComplete），
+        // 先 get(应答) 的话，观察者就可能跑在测试线程上而不是完成它的线程上（2026-10-06 在 CI 上偶发）
         prepareSeen.get(5, TimeUnit.SECONDS);
+        SceneBattleReply prepared = get(prepare);
         assertThat(prepared.getStatus()).isEqualTo(SceneBattleStatus.SCENE_BATTLE_HANDLED);
         PrepareBattleResponse response = PrepareBattleResponse.parseFrom(prepared.getBody());
         assertThat(response.hasErrorMessage()).isFalse();
@@ -228,16 +230,16 @@ class SceneBattleProviderTest {
         CompletableFuture<Void> confirmSeen = watch.apply(confirm);
         assertThat(player.battle().freeze().phase()).isEqualTo(Phase.PREPARING);
         f.drain();
-        assertThat(get(confirm)).isEqualTo(SceneBattleReply.newBuilder().setStatus(SceneBattleStatus.SCENE_BATTLE_HANDLED).build());
         confirmSeen.get(5, TimeUnit.SECONDS);
+        assertThat(get(confirm)).isEqualTo(SceneBattleReply.newBuilder().setStatus(SceneBattleStatus.SCENE_BATTLE_HANDLED).build());
         assertThat(player.battle().freeze().phase()).isEqualTo(Phase.FIGHTING);
 
         // 取消（已确认开战：被拒，仍回 HANDLED——取消不回结论）
         CompletableFuture<SceneBattleReply> cancel = provider.cancelBattlePrepare(call(BattleFixture.SCENE_INSTANCE, cancelBody()));
         CompletableFuture<Void> cancelSeen = watch.apply(cancel);
         f.drain();
-        assertThat(get(cancel).getStatus()).isEqualTo(SceneBattleStatus.SCENE_BATTLE_HANDLED);
         cancelSeen.get(5, TimeUnit.SECONDS);
+        assertThat(get(cancel).getStatus()).isEqualTo(SceneBattleStatus.SCENE_BATTLE_HANDLED);
         assertThat(player.battle().freeze().phase()).isEqualTo(Phase.FIGHTING);
         assertThat(f.cancels("rejected_fighting")).isEqualTo(1);
 
@@ -246,8 +248,8 @@ class SceneBattleProviderTest {
         CompletableFuture<Void> settlementSeen = watch.apply(settlement);
         assertThat(f.gold(player)).isZero();
         f.drain();
-        SceneBattleReply settled = get(settlement);
         settlementSeen.get(5, TimeUnit.SECONDS);
+        SceneBattleReply settled = get(settlement);
         assertThat(settled.getStatus()).isEqualTo(SceneBattleStatus.SCENE_BATTLE_HANDLED);
         assertThat(settled.getSettlement()).isEqualTo(SettlementDisposition.SETTLEMENT_APPLIED);
         assertThat(f.gold(player)).isEqualTo(GOLD);

@@ -76,8 +76,10 @@ class SceneAssetOpProviderTest {
         // 挂在返回 future 上的后续（Dubbo 的序列化与回写就是这样挂的）跑在完成它的线程上
         CompletableFuture<Void> observed = reply.thenAccept(r -> completedOn.set(Thread.currentThread().getName()));
         gate.countDown();
-        AssetOpResponse response = reply.get(5, TimeUnit.SECONDS);
+        // 先等观察者、再取应答：对还没完成的 future 调 get() 的线程被唤醒后会帮着跑它的后续（CompletableFuture 的 postComplete），
+        // 先 get(应答) 的话，观察者就可能跑在测试线程上而不是完成它的线程上（同 SceneBattleProviderTest，2026-10-06 在 CI 上偶发）
         observed.get(5, TimeUnit.SECONDS);
+        AssetOpResponse response = reply.get(5, TimeUnit.SECONDS);
         assertThat(response.getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         assertThat(completedOn.get()).as("不在场景逻辑线程上回写").isEqualTo("test-asset-reply");
         assertThat(count(AssetRpc.DEBIT, AssetOpResult.APPLIED)).isEqualTo(1);
