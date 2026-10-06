@@ -118,10 +118,13 @@ public record DataProperties(
      * @param maxWindow        不给玩家、只按原因 / 时间窗的全服流水查询，与不指定玩家的全服回收的时间窗上限（走 idx_txlog_time，防扫全表）
      * @param claimWait        夺权最长等待（kick 时含等 scene 写回释放）；必须长于归属租约 30 s（§4.2：覆盖交出提交后、目标节点进场前无人持有的最坏情况）
      * @param maxPlayersPerJob 一个作业涉及的玩家上限（整区超出回 422 {@code plan_too_large}，不自动拆批）
-     * @param jobTimeout       作业时限：写阶段之前超时全部释放、FAILED；写阶段超时写完当前玩家后停、PARTIAL
+     * @param jobTimeout       作业时限：写阶段之前超时全部释放、零写入、FAILED {@code job_timeout}；写阶段超时写完当前玩家后停、剩下的记
+     *                         {@code not_executed}——一个也没写成 FAILED {@code job_timeout}，写成了一部分 PARTIAL {@code job_timeout}
      * @param minTargetAge     回档目标时刻至少早于现在多久（快照经 Kafka 落库有延迟）
      * @param heartbeat        作业心跳（{@code ops_active.heartbeat_ms}）间隔
      * @param staleAfter       心跳超过它没更新的作业由清扫器改成 INTERRUPTED（每个副本都跑清扫器）
+     * @param battleLockWait   回档前查战斗锁（批次 6.3）一次检查全程最多等多久；到点没读完的玩家按在战处理、不写（fail-closed）。
+     *                         缺省 5 s：略长于 Redis 单条命令的最坏阻塞（xm.redis 缺省 4.2 s），Redis 故障时先拿到它自己的报错
      */
     public record Ops(
             @DefaultValue("false") boolean enabled,
@@ -131,7 +134,8 @@ public record DataProperties(
             @DefaultValue("30m") Duration jobTimeout,
             @DefaultValue("5m") Duration minTargetAge,
             @DefaultValue("5s") Duration heartbeat,
-            @DefaultValue("60s") Duration staleAfter) {
+            @DefaultValue("60s") Duration staleAfter,
+            @DefaultValue("5s") Duration battleLockWait) {
 
         public Ops {
             if (maxWindow.isNegative() || maxWindow.isZero()) {
@@ -139,9 +143,10 @@ public record DataProperties(
             }
             if (claimWait.isNegative() || claimWait.isZero() || maxPlayersPerJob < 1 || jobTimeout.isNegative()
                     || jobTimeout.isZero() || minTargetAge.isNegative() || heartbeat.isNegative() || heartbeat.isZero()
-                    || staleAfter.compareTo(heartbeat.multipliedBy(3)) < 0) {
-                throw new IllegalArgumentException("xm.data.ops 配置非法（claim-wait / job-timeout / heartbeat 须为正，"
-                        + "max-players-per-job ≥ 1，min-target-age ≥ 0，stale-after ≥ 3 × heartbeat）");
+                    || staleAfter.compareTo(heartbeat.multipliedBy(3)) < 0 || battleLockWait.isNegative()
+                    || battleLockWait.isZero()) {
+                throw new IllegalArgumentException("xm.data.ops 配置非法（claim-wait / job-timeout / heartbeat / "
+                        + "battle-lock-wait 须为正，max-players-per-job ≥ 1，min-target-age ≥ 0，stale-after ≥ 3 × heartbeat）");
             }
         }
     }

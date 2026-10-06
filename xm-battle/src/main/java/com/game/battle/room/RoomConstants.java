@@ -26,6 +26,8 @@ final class RoomConstants {
     /**
      * 补发窗口（基线 {@code kConfirmResendWindowMs = 180000}）= 周期 × (补发次数 + 1)。<b>联动</b>：必须 ≥ match 最长 matched TTL（96 s，
      * {@code queue.go:367-380}）+ scene 备战期锁余量（60 s，{@code kLockExtraTtlSec}），单测钉住；6.3 / 6.4 改公式或常量时回看这里。
+     * 窗口是<b>停表</b>的时刻；最后一条真正发出去的确认在 周期 × 补发次数 = 170 s，它同样要 ≥ 156 s（实际余量 14 s，不是标称的 24 s），
+     * {@code ConfirmWindowConstraintTest} 一并钉住。
      */
     static final long CONFIRM_RESEND_WINDOW_MS = CONFIRM_RESEND_INTERVAL_MS * (CONFIRM_RESENDS + 1);
 

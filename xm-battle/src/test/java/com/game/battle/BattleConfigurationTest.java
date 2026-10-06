@@ -1,20 +1,32 @@
 package com.game.battle;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
 
 import com.game.battle.admission.AdmissionGate;
 import com.game.battle.admission.AdmissionPhase;
 import com.game.battle.admin.BattleAdminAuthFilter;
 import com.game.battle.admin.DevBattleBackend;
+import com.game.battle.port.ActivityResultSink;
+import com.game.battle.port.BattleResultSink;
+import com.game.battle.port.LoggingBattleResultSink;
+import com.game.battle.port.SettlementSink;
 import com.game.battle.port.scene.DubboSceneBattleEvents;
 import com.game.battle.port.SceneBattleEvents;
+import com.game.battle.port.scene.SceneTransport;
 import com.game.battle.push.LobbyAnnouncer;
 import com.game.battle.push.PresenceLobbyAnnouncer;
 import com.game.common.RunMode;
 import com.game.common.token.BattleTickets;
+import com.game.discovery.RedisProperties;
+import com.game.proto.BattleRouting;
+import com.game.proto.BattleSettlementData;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.redisson.api.RedissonClient;
@@ -198,6 +210,114 @@ class BattleConfigurationTest {
     void 配表目录不对_拒启() {
         prod(SECRET).withPropertyValues("xm.table-dir=does-not-exist").run(ctx -> assertThat(ctx).hasFailed());
         assertThat(infra.events).isEmpty();
+    }
+
+    // ---------------------------------------------------------------- 6.3：battle → scene 的真实传输（scene-battle-spec §7.15–§7.17、§8）
+
+    private static final BattleRouting ROUTING = BattleRouting.newBuilder().setZoneId(1).setSceneNodeId(3).setSceneInstanceId("scene-a")
+            .build();
+
+    private static BattleSettlementData settlement(long battleId) {
+        return BattleSettlementData.newBuilder().setBattleId(battleId).setPlayerId(9001).setGoldGain(10).build();
+    }
+
+    private static Counter outboxEvent(MeterRegistry meters, String event) {
+        return meters.get("xm.battle.settlement.outbox").tag("event", event).counter();
+    }
+
+    @Test
+    void 三个出站端口都接到SceneTransport_结算端口背后是真的发件箱_结果发布端口仍是日志实现() {
+        prod(SECRET).run(ctx -> {
+            assertThat(ctx).hasNotFailed().hasSingleBean(SceneTransport.class);
+            SceneTransport transport = ctx.getBean(SceneTransport.class);
+            assertThat(ctx.getBean(SceneBattleEvents.class)).isSameAs(transport.sceneEvents());
+            assertThat(ctx.getBean(ActivityResultSink.class)).isSameAs(transport.activityResults());
+            assertThat(ctx.getBean(BattleResultSink.class)).isInstanceOf(LoggingBattleResultSink.class);
+            assertThat(infra.roomDeps.settlements()).as("房间拿到的就是这个 bean").isSameAs(ctx.getBean(SettlementSink.class));
+            assertThat(infra.roomDeps.activityResults()).isSameAs(transport.activityResults());
+            assertThat(infra.roomDeps.sceneEvents()).isSameAs(transport.sceneEvents());
+            MeterRegistry meters = ctx.getBean(MeterRegistry.class);
+
+            ctx.getBean(SettlementSink.class).dispatch(ROUTING, 9001, settlement(77001));
+
+            // Redisson 是 mock，落库必然失败：发件箱按 not_durable 处理、定位也失败——这些只有真的 SettlementOutbox 才会计
+            assertThat(meters.get("xm.battle.scene.events").tag("kind", "settlement").tag("result", "sent").counter().count()).isEqualTo(1);
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+                assertThat(outboxEvent(meters, "not_durable").count()).isEqualTo(1);
+                assertThat(outboxEvent(meters, "locate_error").count()).isEqualTo(1);
+                assertThat(transport.settlements().inFlight()).isZero();
+            });
+            assertThat(outboxEvent(meters, "stored").count()).isZero();
+            assertThat(outboxEvent(meters, "already_settled").count()).as("新取值随装配预建").isZero();
+            assertThat(outboxEvent(meters, "fields_overflow").count()).isZero();
+        });
+    }
+
+    @Test
+    void scene_rpc_timeout不大于Redis单条命令最坏耗时_拒启_消息带键名_发生在任何端口打开之前() {
+        prod(SECRET).withPropertyValues("xm.battle.scene-rpc-timeout=4s").run(ctx -> {
+            assertThat(ctx).hasFailed();
+            assertThat(ctx.getStartupFailure()).rootCause().isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("xm.battle.scene-rpc-timeout").hasMessageContaining("4200 ms");
+        });
+        prod(SECRET).withPropertyValues("xm.battle.scene-rpc-timeout=4200ms").run(ctx -> assertThat(ctx).as("相等也不行").hasFailed());
+        assertThat(infra.events).as("门禁在任何端口打开之前").isEmpty();
+
+        prod(SECRET).withPropertyValues("xm.battle.scene-rpc-timeout=4201ms").run(ctx -> assertThat(ctx).hasNotFailed());
+    }
+
+    @Test
+    void scene_rpc_timeout的门槛跟着Redis配置走() {
+        ApplicationContextRunner slowRedis = prod(SECRET).withBean(RedisProperties.class,
+                () -> new RedisProperties(null, null, null, null, 3000, 1, 200));
+
+        slowRedis.run(ctx -> {
+            assertThat(ctx).as("缺省 5 s 不大于 (1 + 1) × 3000 + 200").hasFailed();
+            assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("xm.battle.scene-rpc-timeout")
+                    .hasMessageContaining("6200 ms");
+        });
+        assertThat(infra.events).isEmpty();
+        slowRedis.withPropertyValues("xm.battle.scene-rpc-timeout=7s").run(ctx -> assertThat(ctx).hasNotFailed());
+    }
+
+    @Test
+    void scene_rpc_timeout或outbox_drain_timeout取值非法_拒启() {
+        prod(SECRET).withPropertyValues("xm.battle.scene-rpc-timeout=0s").run(ctx -> assertThat(ctx).hasFailed());
+        prod(SECRET).withPropertyValues("xm.battle.outbox-drain-timeout=-1s").run(ctx -> assertThat(ctx).hasFailed());
+        assertThat(infra.events).isEmpty();
+        prod(SECRET).withPropertyValues("xm.battle.outbox-drain-timeout=0s").run(ctx -> assertThat(ctx).as("0 = 停机不等").hasNotFailed());
+    }
+
+    /**
+     * 这里只钉<b>次序</b>：节点先停、传输后关，且上下文销毁时真的调了 {@code SceneTransport.close}。Redisson 是 mock，落库在发件箱线程上当场失败，
+     * 节点停机途中交出的那份结算早在传输关闭之前就走完了——所以本用例对「关之前<b>等</b>在途的落库」（有界排空）没有判别力，那一段接线
+     * （先 {@code drainAndClose(outbox-drain-timeout)}、后停 {@code battle-outbox}）由 {@code SceneTransportTest} 用悬着的落库钉住：
+     * {@code 关闭传输_先等在途的落库回来_…} 与 {@code 排空上限配成0_关闭不等在途的落库_…}。
+     */
+    @Test
+    void 上下文关闭_节点先停_传输后关_节点停机途中交出的结算仍进发件箱_传输关闭之后的只打日志(CapturedOutput output) {
+        AtomicReference<SceneTransport> closedTransport = new AtomicReference<>();
+        AtomicReference<Counter> notDurable = new AtomicReference<>();
+        prod(SECRET).run(ctx -> {
+            SceneTransport transport = ctx.getBean(SceneTransport.class);
+            SettlementSink sink = ctx.getBean(SettlementSink.class);
+            closedTransport.set(transport);
+            notDurable.set(outboxEvent(ctx.getBean(MeterRegistry.class), "not_durable"));
+            // 节点停机途中（反导出控制面那一步）房间交出最后一份结算
+            infra.onRpcClose = () -> sink.dispatch(ROUTING, 9001, settlement(77001));
+        });
+
+        assertThat(infra.events).endsWith("rpc.close", "lease.close");
+        assertThat(notDurable.get().count()).as("节点停机时发件箱还开着（传输若先关，这份结算只会打日志、不计数）").isEqualTo(1);
+        assertThat(closedTransport.get().settlements().inFlight()).isZero();
+        assertThat(output.getOut()).as("上下文销毁时调了 SceneTransport.close").contains("battle → scene 传输已关闭");
+        assertThat(output.getOut()).doesNotContain("结算发件箱已关闭");
+
+        closedTransport.get().settlementSink().dispatch(ROUTING, 9001, settlement(77002));
+        assertThat(output.getOut()).as("传输关闭时把结算发件箱置为已关闭：之后的结算在调用线程上当场拒掉（不是靠线程已停才进不去）")
+                .contains("结算发件箱已关闭").contains("battle_id=77002");
+        assertThat(notDurable.get().count()).as("传输关闭之后的结算只打日志，不再落库").isEqualTo(1);
+        assertThat(closedTransport.get().settlements().inFlight()).isZero();
     }
 
     @Test

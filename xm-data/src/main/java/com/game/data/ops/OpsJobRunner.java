@@ -99,6 +99,8 @@ public final class OpsJobRunner implements SmartLifecycle {
     private final Duration heartbeat;
     private final Duration staleAfter;
     private final Duration jobTimeout;
+    /** RESULT 写不进时最多重试多久；生产恒为 {@link #RESULT_RETRY_BUDGET}，只有测试经包内构造器调小。 */
+    private final Duration resultRetryBudget;
     private final ExecutorService executor;
     private final ScheduledExecutorService fence;
     private final ScheduledExecutorService sweeper;
@@ -112,6 +114,20 @@ public final class OpsJobRunner implements SmartLifecycle {
     public OpsJobRunner(OpsJobStore jobs, TransactionTemplate tx, ObjectMapper json, DataMetrics metrics, Clock clock,
                         String runner, Duration heartbeat, Duration staleAfter, Duration jobTimeout,
                         ScheduledExecutorService fence) {
+        this(jobs, tx, json, metrics, clock, runner, heartbeat, staleAfter, jobTimeout, fence, RESULT_RETRY_BUDGET);
+    }
+
+    /**
+     * 包内接缝（只给测试用）：{@code resultRetryBudget} 可调小，免得「RESULT 一直写不进」的用例等满 30 s。
+     * 生产装配只走上面的公开构造器，重试预算恒为 {@link #RESULT_RETRY_BUDGET}。
+     */
+    OpsJobRunner(OpsJobStore jobs, TransactionTemplate tx, ObjectMapper json, DataMetrics metrics, Clock clock,
+                 String runner, Duration heartbeat, Duration staleAfter, Duration jobTimeout,
+                 ScheduledExecutorService fence, Duration resultRetryBudget) {
+        if (resultRetryBudget == null || resultRetryBudget.isNegative()) {
+            throw new IllegalArgumentException("RESULT 重试预算不能为负：" + resultRetryBudget);
+        }
+        this.resultRetryBudget = resultRetryBudget;
         this.jobs = jobs;
         this.tx = tx;
         this.json = json;
@@ -165,7 +181,12 @@ public final class OpsJobRunner implements SmartLifecycle {
         return running;
     }
 
-    /** 比 Web 服务器先停（受理先停），比发号租约晚停。 */
+    /**
+     * 停机次序（Spring 按阶段<b>从大到小</b>停，{@code DefaultLifecycleProcessor.stopBeans}）：Web 服务器（优雅停机
+     * {@code DEFAULT_PHASE − 1024}、启停 {@code DEFAULT_PHASE − 2048}）&gt; 本执行器（{@code OpsIds.PHASE + 1}）&gt; 发号租约
+     * （{@link OpsIds#PHASE}）。即：Web 服务器先停（不再受理新作业）→ 本执行器停（停清扫、等在跑的作业至多 {@link #SHUTDOWN_WAIT}）
+     * → 最后交还发号租约（等待的这段时间里在跑的作业还能发号）。启动次序相反。{@code OpsLifecycleOrderTest} 钉住。
+     */
     @Override
     public int getPhase() {
         return OpsIds.PHASE + 1;
@@ -301,7 +322,7 @@ public final class OpsJobRunner implements SmartLifecycle {
             payload.put("aborted", true);
         }
         String payloadJson = boundedJson(payload);
-        long deadline = System.nanoTime() + RESULT_RETRY_BUDGET.toNanos();
+        long deadline = System.nanoTime() + resultRetryBudget.toNanos();
         long backoffMs = 200;
         for (int attempt = 1; ; attempt++) {
             try {

@@ -4,6 +4,7 @@ import static com.game.battle.room.RoomHarness.A;
 import static com.game.battle.room.RoomHarness.MONSTER;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.battle.port.BattleResultSink;
 import com.game.battle.room.RoomHarness.FakeLink;
 import com.game.battle.testing.FakeBattleData;
 import com.game.proto.BattleActivityContext;
@@ -34,6 +35,7 @@ class ResultRoutingTest {
         assertThat(h.outs(RoomHarness.Kind.RESULT)).hasSize(1);
         assertThat(h.outs(RoomHarness.Kind.ACTIVITY_RESULT)).isEmpty();
         assertThat(h.resultsOut().get(0).hasActivityContext()).isFalse();
+        assertThat(h.resultChannels).as("房间只走普通通道；活动通道的发布由活动结果发件箱负责").containsExactly(BattleResultSink.Channel.PLAIN);
     }
 
     @Test

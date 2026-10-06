@@ -17,6 +17,7 @@ import com.game.data.ops.fence.RedisTakeoverRequests;
 import com.game.data.ops.fence.StrictClock;
 import com.game.data.query.TransactionLogQueryService;
 import com.game.data.recall.RecallPlanner;
+import com.game.data.rollback.BattleLockGate;
 import com.game.data.rollback.DubboGuildInternalClient;
 import com.game.data.rollback.GuildDivergenceGate;
 import com.game.data.rollback.RollbackJob;
@@ -29,6 +30,7 @@ import com.game.data.snapshot.ZoneSnapshotService;
 import com.game.data.store.PersistedPlayerMapper;
 import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
+import com.game.discovery.battle.BattleLockReader;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.gateway.store.GatewayStore;
 import com.game.pbmysql.PbMysql;
@@ -92,7 +94,10 @@ public class DataConfiguration {
         return Clock.systemUTC();
     }
 
-    /** 全服产出封禁名单（Redis；客户端第一次用到时才创建，Redis 不可用不挡住启动与审计消费）。 */
+    /**
+     * 全服产出封禁名单（Redis）。客户端是懒加载 bean，经 {@code ObjectProvider} 在用到时取——装配期不连接，Redis 不可用不挡住启动与审计消费；
+     * 批次 7.2a 起它实际由发号器 {@link OpsIds} 在启动后的后台线程上先连上（见 {@link #opsIds}）。
+     */
     @Bean
     public GainBlockStore gainBlockStore(ObjectProvider<RedissonClient> redis, ObjectMapper json) {
         return new GainBlockStore(redis, json);
@@ -227,7 +232,9 @@ public class DataConfiguration {
     }
 
     /**
-     * 离线栅栏（归属夺权）。让出请求走 {@code xm:owner-takeover}，墓碑写 {@code xm:location}（Redis 第一次用到时才连）；
+     * 离线栅栏（归属夺权）。让出请求走 {@code xm:owner-takeover}，墓碑写 {@code xm:location}。Redis 客户端是懒加载 bean，这里只经
+     * {@code ObjectProvider} 在用到时取、装配期不连接；实际的连接时机是启动之后——发号器 {@link OpsIds} 在 {@code data-ops-ids}
+     * 线程上后台申领租约时就连上了（连不上每 10 s 重试，与写开关无关），并不是等到第一次夺权才连。
      * 续约在 {@code data-ops-fence} 线程上每 {@code OWNER_LEASE / 3}（10 s）一次，与 scene 续约同口径。
      */
     @Bean
@@ -257,17 +264,28 @@ public class DataConfiguration {
         return new GuildDivergenceGate(guildUrl.isBlank() ? null : client, props.rollback().guild().callTimeout());
     }
 
+    /**
+     * 回档前的战斗锁闸（批次 6.3，data-ops-spec §13.3）：夺权之后、账本差集之前批量读 {@code xm:battle:{pid}:lock}（xm-discovery 的
+     * {@link BattleLockReader#existsAll}，与 xm-scene 同一个 Redis 库）。Redis 客户端每次读锁时才经 {@code ObjectProvider} 取
+     * （同 {@link RedisTakeoverRequests} 的接法），装配期不连接；取不到 / 读失败 / 超时都折成 {@code battle_lock_unknown}（不写）。
+     */
+    @Bean
+    public BattleLockGate battleLockGate(ObjectProvider<RedissonClient> redis, DataProperties props) {
+        return new BattleLockGate(playerIds -> new BattleLockReader(redis.getObject()).existsAll(playerIds),
+                props.ops().battleLockWait());
+    }
+
     @Bean
     public RollbackJob.Deps rollbackDeps(PersistedPlayerMapper players, PlayerSnapshotMapper snapshots,
                                          TransactionLogMapper txlog, TransactionLogQueryService txlogQuery,
                                          PlayerStore playerStore, PlayerMapper playerMapper, OpsJobStore jobs, OpsIds opsIds,
-                                         AdminOwnership ownership, GuildDivergenceGate guild,
+                                         AdminOwnership ownership, GuildDivergenceGate guild, BattleLockGate battleLocks,
                                          PlatformTransactionManager transactionManager, ObjectMapper json, Clock clock,
                                          DataProperties props, DataMetrics metrics) {
         RollbackWriter writer = new RollbackWriter(playerStore, playerMapper, players, snapshots, txlog, jobs, opsIds,
                 new TransactionTemplate(transactionManager), json, clock);
-        return new RollbackJob.Deps(new RollbackPlanner(players, snapshots), writer, ownership, guild, players, snapshots,
-                txlogQuery, jobs, props, metrics, json);
+        return new RollbackJob.Deps(new RollbackPlanner(players, snapshots), writer, ownership, guild, battleLocks, players,
+                snapshots, txlogQuery, jobs, props, metrics, json);
     }
 
     @Bean

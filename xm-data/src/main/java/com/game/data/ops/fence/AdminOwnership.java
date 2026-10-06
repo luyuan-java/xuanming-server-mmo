@@ -6,6 +6,7 @@ import com.game.player.store.PlayerStore;
 import com.game.player.store.PlayerStore.ClaimResult;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,9 +24,11 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * <ul>
  *   <li><b>取得</b>：{@link PlayerStore#claimOwnership}（{@code owner_released = 1 OR owner_lease_until < now} 才 epoch 加一并持有）。
- *       夺权本身是原子判定，没有「先查在线、再动手」的 TOCTOU：在线、5.2 交出在途（E+1 被持有）、回合制战斗（必在线）都夺不到；
+ *       夺权本身是原子判定，没有「先查在线、再动手」的 TOCTOU：在线、5.2 交出在途（E+1 被持有）都夺不到；
  *       与 5.2 的 {@code handOffOwnership}（要求 E 持有、未释放、租约够长）天然互斥。在 xm-data 自己的事务模板里调用（夺权与读回 epoch
- *       同一事务，不依赖 {@code @Transactional} 代理）。</li>
+ *       同一事务，不依赖 {@code @Transactional} 代理）。<b>夺到不等于不在战斗</b>（批次 6.3）：Java 断线即写回并释放、回合制战斗在 xm-battle
+ *       继续，离线玩家的战斗锁可以还在；{@code kick} 走的顶号通路也不看是否在战斗。基线的战斗闸由回档作业在夺权之后另查战斗锁
+ *       （{@code com.game.data.rollback.BattleLockGate}，data-ops-spec §13.3），不在这里。</li>
  *   <li><b>在线玩家</b>：缺省拒绝（{@link Claim.Online}）；{@code kick} 时向 {@code xm:owner-takeover} 发让出请求（持有 E 的 scene 带围栏写回、
  *       释放、推 23 {2017} 后断开），退避重试夺权（50 ms 起翻倍、封顶 800 ms，每次重发让出请求），{@code wait} 内夺到就持有，否则
  *       {@link Claim.Busy}。期间玩家登录撞上 Held → login 发的让出请求没人处理（xm-data 不订阅）→ 3 s 后回 2005。</li>
@@ -238,14 +241,23 @@ public final class AdminOwnership {
      * 再逐个带围栏释放。墓碑失败只告警（TTL 60 s 兜底）。
      */
     public void releaseAll() {
+        releaseMany(List.copyOf(held.keySet()));
+        lost.clear();
+    }
+
+    /**
+     * 释放一批（写之前一起出局的玩家，例如回档前查到战斗锁仍在 / 读不到）：做法同 {@link #releaseAll}——墓碑并发发出、一起等至多
+     * {@link #TOMBSTONE_WAIT}，再逐个带围栏释放——只限给出的玩家，其余持有不动。没持有（或续约已判失去）的跳过。
+     * 逐个调 {@link #release} 在 Redis 不可用时是人数 × 超时，而读不到战斗锁恰恰多半是 Redis 不可用。
+     */
+    public void releaseMany(Collection<Long> playerIds) {
         Map<Long, Long> toRelease = new LinkedHashMap<>();
-        for (Long playerId : List.copyOf(held.keySet())) {
+        for (Long playerId : playerIds) {
             Long epoch = held.remove(playerId);
-            if (epoch != null && !lost.remove(playerId)) {
+            if (!lost.remove(playerId) && epoch != null) {
                 toRelease.put(playerId, epoch);
             }
         }
-        lost.clear();
         metrics.fenceHeld(held.size());
         if (toRelease.isEmpty()) {
             return;

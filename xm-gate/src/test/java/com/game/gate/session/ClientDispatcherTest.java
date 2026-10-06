@@ -39,6 +39,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -56,8 +57,16 @@ class ClientDispatcherTest {
     private static final int LEAVE_MSG = 17;
     private static final int SCENE_MSG = 77;
     private static final int GM_MSG = 37;
-    /** 未接入 Java 版的后端域（夹具里不配后端）。 */
-    private static final int BATTLE_MSG = 500;
+    /** 未接入 Java 版的后端域（夹具里不配后端），不是只走直连的号。 */
+    private static final int UNSUPPORTED_MSG = 500;
+    /** 战斗上行 149（只走直连：directOnly；域同生产路由，是 unsupported）。方法名 / 热关停键取缺省（消息号本身）。 */
+    private static final int BATTLE_MSG = 149;
+    /** 战斗 Notify 号 150（应答类型 Empty 的推送占位，客户端发上来同样当场拒）。 */
+    private static final int BATTLE_NOTIFY_MSG = 150;
+    /** 假想有人把战斗服务接到了某个后端（域 friend，夹具里配了后端）：直连闸排在后端分派之前，仍被拒。 */
+    private static final int BATTLE_VIA_BACKEND_MSG = 162;
+    /** 契约里不存在的组合（GM 名字的战斗号），只用来钉闸序：GM 闸在直连闸之前。 */
+    private static final int BATTLE_GM_MSG = 165;
     /** 帮会推送占位 220（应答类型 Empty：tip 为 0 不回包，tip ≠ 0 回信封）。 */
     private static final int GUILD_NOTIFY_MSG = 220;
     private static final int FRIEND_MSG = 234;
@@ -71,13 +80,22 @@ class ClientDispatcherTest {
         case LEAVE_MSG -> new MessageRoute(id, "login", false, "ClientPlayerLogin.LeaveGame");
         case SCENE_MSG -> new MessageRoute(id, "scene");
         case GM_MSG -> new MessageRoute(id, "scene", true, Integer.toString(id), true);
-        case BATTLE_MSG -> new MessageRoute(id, "battle");
+        case UNSUPPORTED_MSG -> new MessageRoute(id, MessageRoutes.BACKEND_UNSUPPORTED);
+        case BATTLE_MSG -> directOnly(id, MessageRoutes.BACKEND_UNSUPPORTED, true, false);
+        case BATTLE_NOTIFY_MSG -> directOnly(id, MessageRoutes.BACKEND_UNSUPPORTED, false, false);
+        case BATTLE_VIA_BACKEND_MSG -> directOnly(id, "friend", true, false);
+        case BATTLE_GM_MSG -> directOnly(id, MessageRoutes.BACKEND_UNSUPPORTED, true, true);
         case GUILD_NOTIFY_MSG -> new MessageRoute(id, "guild", false, "GuildService.NotifyGuildChanged");
         case FRIEND_MSG -> new MessageRoute(id, "friend");
         case TRADE_MSG -> new MessageRoute(id, "trade", true, "ClientPlayerJubaozhai.BrowseListings", false,
                 "/trade.ClientPlayerJubaozhai/BrowseListings");
         default -> null;
     };
+
+    /** 只走直连的路由；方法名与热关停键都取消息号本身（与别的手写路由同形，{@link #requests} 按它查指标）。 */
+    private static MessageRoute directOnly(int id, String domain, boolean hasResponse, boolean gm) {
+        return new MessageRoute(id, domain, hasResponse, Integer.toString(id), gm, "/" + id, true);
+    }
 
     private final GateTokens tokens = GateTokens.ofUtf8("test-secret");
     private final FakeLogin login = new FakeLogin();
@@ -466,10 +484,233 @@ class ClientDispatcherTest {
     @Test
     void 未接入Java版的域推23服务不可用() {
         EmbeddedChannel ch = verified();
-        ch.writeInbound(request(5, BATTLE_MSG, "x"));
+        ch.writeInbound(request(5, UNSUPPORTED_MSG, "x"));
         assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat(login.calls).isEmpty();
         assertThat(ch.isOpen()).isTrue();
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, UNSUPPORTED_MSG, "unsupported")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, UNSUPPORTED_MSG, "battle_rejected"))
+                .as("普通的未接入域不走直连闸").isZero();
+    }
+
+    @Test
+    void 未接入Java版的域_login在途时排队_完成后才回tip() {
+        // 对照组：普通的未接入域仍走待处理队列（同一会话严格按到达顺序）；只有战斗号（directOnly）当场回，见下一节
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, LOGIN_MSG, "slow"));
+        ch.writeInbound(request(2, UNSUPPORTED_MSG, "x"));
+        assertThat((Object) ch.readOutbound()).as("login 在途，排在它后面").isNull();
+        assertThat(session().pending).hasSize(1);
+
+        login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getId()).isEqualTo(1);
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+    }
+
+    // ================================================================ 战斗上行当场拒绝（scene-battle-spec §2.5、§7.19、§13.6，D12）
+
+    @Test
+    void 战斗上行_当场推23的1003_不计非法包不断连不转发_计battle_rejected() {
+        EmbeddedChannel ch = enteredScene();
+        int framesBefore = links.sent.size();
+        // 非法包阈值是 3：发 5 条，只要有一条计了非法包连接就会断
+        for (int i = 0; i < 4; i++) {
+            ch.writeInbound(request(10 + i, BATTLE_MSG, "action"));
+            MessageContent tip = ch.readOutbound();
+            assertThat(tip.getId()).as("推送形状：不带请求 id").isZero();
+            assertThat(tipOf(tip)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).isEqualTo(1003);
+            assertThat((Object) ch.readOutbound()).as("只有一帧").isNull();
+        }
+        // Notify 号（应答类型 Empty）发上来同样回 tip：不因为「无应答」被吞掉
+        ch.writeInbound(request(20, BATTLE_NOTIFY_MSG, "notify"));
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+
+        assertThat(session().illegalPackets).as("合法协议号，不计非法包").isZero();
+        assertThat(ch.isOpen()).as("不断连").isTrue();
+        assertThat(session().pending).as("不进待处理队列").isEmpty();
+        assertThat(session().backendQueues).as("不进任何后端队列").isEmpty();
+        assertThat(links.sent).as("已在场景里也不转给 scene").hasSize(framesBefore);
+        assertThat(login.calls).as("只有进场那一次").hasSize(1);
+        assertThat(friend.calls).isEmpty();
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(4);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_NOTIFY_MSG, "battle_rejected")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "unsupported"))
+                .as("不再走缺省分支（6.2 的口径是 unsupported）").isZero();
+        assertThat(disconnects("illegal_packets")).isZero();
+
+        ch.writeInbound(request(30, SCENE_MSG, "skills"));
+        assertThat(links.sent).as("同一连接上的正常请求照常转发").hasSize(framesBefore + 1);
+    }
+
+    @Test
+    void 战斗上行_login在途时当场回_不进待处理队列_不等login完成() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, LOGIN_MSG, "slow"));
+        ch.writeInbound(request(2, SCENE_MSG, "queued"));
+        assertThat(session().inFlight).isTrue();
+        assertThat(session().pending).as("对照：普通请求排在在途的 login 调用之后").hasSize(1);
+        assertThat((Object) ch.readOutbound()).isNull();
+
+        ch.writeInbound(request(3, BATTLE_MSG, "action"));
+
+        assertThat(tipOf(ch.readOutbound())).as("login 还没回来，战斗 tip 已经发出").isEqualTo(1003);
+        assertThat(session().pending).as("队列里仍只有那条 scene 请求").hasSize(1)
+                .allSatisfy(p -> assertThat(p.request().getMessageId()).isEqualTo(SCENE_MSG));
+        assertThat(session().inFlight).isTrue();
+        assertThat(login.calls).hasSize(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(1);
+
+        // login 完成：先回它自己的应答，再处理排队的 scene 请求（没进场景 → 23 {1003}）；战斗 tip 不会再发第二次
+        login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
+        ch.runPendingTasks();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply.getMessageId()).isEqualTo(LOGIN_MSG);
+        assertThat(reply.getId()).isEqualTo(1);
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(requests("scene", SCENE_MSG, "not_in_scene")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(1);
+    }
+
+    @Test
+    void 战斗上行_待处理队列已满时照常当场回_不断连_队列不变() {
+        EmbeddedChannel ch = verified();
+        for (int i = 1; i <= 5; i++) {
+            ch.writeInbound(request(i, LOGIN_MSG, "x"));
+        }
+        // 第 1 个在途，第 2~5 个排队：队列到上限 4
+        assertThat(session().pending).hasSize(4);
+
+        for (int i = 0; i < 10; i++) {
+            ch.writeInbound(request(100 + i, BATTLE_MSG, "action"));
+            assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+        }
+
+        assertThat(ch.isOpen()).as("战斗上行不占队列，队列满了也不因它断连").isTrue();
+        assertThat(session().pending).hasSize(4)
+                .allSatisfy(p -> assertThat(p.request().getMessageId()).isEqualTo(LOGIN_MSG));
+        assertThat(session().illegalPackets).isZero();
+        assertThat(disconnects("pending_overflow")).isZero();
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "overflow")).isZero();
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(10);
+
+        // 对照：队列确实是满的——再来一条普通请求就溢出断开
+        ch.writeInbound(request(6, LOGIN_MSG, "x"));
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(disconnects("pending_overflow")).isEqualTo(1);
+        assertThat(requests("login", LOGIN_MSG, "overflow")).isEqualTo(1);
+    }
+
+    @Test
+    void 战斗上行_热关停命中时仍推23的1003_不是信封1003_不计killed_不记短路() {
+        KillSwitch killSwitch = new KillSwitch(-1, System::nanoTime);
+        List<String> blocked = new ArrayList<>();
+        killSwitch.onBlocked(blocked::add);
+        KillSwitch.installGlobal(killSwitch);
+        try {
+            EmbeddedChannel ch = verified();
+            // 全局规则、精确规则（测试路由的热关停键是消息号本身）各来一遍
+            for (Map<String, KillSwitch.Rule> rules : List.of(
+                    Map.of("*", new KillSwitch.Rule(true, "止血", 0)),
+                    Map.of(Integer.toString(BATTLE_MSG), new KillSwitch.Rule(true, "止血", 0)))) {
+                killSwitch.setRules(rules);
+                assertThat(killSwitch.blocked("/" + BATTLE_MSG)).as("规则确实命中这个战斗方法").isPresent();
+
+                ch.writeInbound(request(7, BATTLE_MSG, "action"));
+
+                MessageContent tip = ch.readOutbound();
+                assertThat(tip.getMessageId()).as("23 推送，不是以请求号为 message_id 的信封").isEqualTo(TIP_MSG);
+                assertThat(tip.getId()).isZero();
+                assertThat(tip.hasErrorMessage()).as("不是信封错误").isFalse();
+                assertThat(tipOf(tip)).isEqualTo(1003);
+                assertThat((Object) ch.readOutbound()).isNull();
+            }
+            assertThat(blocked).as("没有记成热关停短路").isEmpty();
+            assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "killed")).isZero();
+            assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(2);
+
+            // 对照：同一份全局规则下普通请求回的是带请求 id 的信封 1003，并记一次短路
+            killSwitch.setRules(Map.of("*", new KillSwitch.Rule(true, "止血", 0)));
+            ch.writeInbound(request(8, FRIEND_MSG, "f"));
+            MessageContent envelope = ch.readOutbound();
+            assertThat(envelope.getMessageId()).isEqualTo(FRIEND_MSG);
+            assertThat(envelope.getId()).isEqualTo(8);
+            assertThat(envelope.getErrorMessage().getId()).isEqualTo(1003);
+            assertThat(blocked).containsExactly(Integer.toString(FRIEND_MSG));
+            assertThat(ch.isOpen()).isTrue();
+        } finally {
+            KillSwitch.installGlobal(null);
+        }
+    }
+
+    @Test
+    void 战斗上行_所在域即使配了后端也当场拒_不转给后端() {
+        // §7.19：以后别的服务接入 gate（6.4 的 MatchService）不影响这道闸；就算有人把战斗服务错接到某个后端，
+        // 直连闸排在后端分派之前，请求到不了后端（大厅连接不能成为绕过直连票据的第二条战斗通路）
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, BATTLE_VIA_BACKEND_MSG, "action"));
+
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+        assertThat(friend.calls).as("不转给 friend 后端").isEmpty();
+        assertThat(session().backendQueues).isEmpty();
+        assertThat(requests("friend", BATTLE_VIA_BACKEND_MSG, "battle_rejected")).isEqualTo(1);
+        assertThat(requests("friend", BATTLE_VIA_BACKEND_MSG, "forwarded")).isZero();
+
+        ch.writeInbound(request(2, FRIEND_MSG, "f"));
+        assertThat(friend.calls).as("对照：同一个域的普通号照常转发").hasSize(1);
+    }
+
+    @Test
+    void 战斗上行_闸序_体积与GM闸在前() {
+        // 基线闸序（client_message_processor.cpp）：白名单 → 体积与限频 → GM 闸 → 战斗拒绝。限频见 BattleUplinkRejectedTest
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(ClientRequest.newBuilder().setId(6).setMessageId(BATTLE_MSG)
+                .setBody(ByteString.copyFrom(new byte[ClientDispatcher.MAX_REQUEST_BYTES])).build());
+        MessageContent oversized = ch.readOutbound();
+        assertThat(oversized.getMessageId()).isEqualTo(BATTLE_MSG);
+        assertThat(oversized.getId()).isEqualTo(6);
+        assertThat(oversized.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_MESSAGE_SIZE_EXCEEDED).isEqualTo(1010);
+        assertThat(session().illegalPackets).as("超长照样计非法包").isEqualTo(1);
+
+        // 生产模式下 GM 名字的号先被 GM 闸拦：1006 + 非法包，轮不到直连闸
+        ch.writeInbound(request(7, BATTLE_GM_MSG, "gm"));
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(1006);
+        assertThat(session().illegalPackets).isEqualTo(2);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "oversized")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_GM_MSG, "gm_rejected")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isZero();
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_GM_MSG, "battle_rejected")).isZero();
+
+        // dev 模式放行 GM 闸之后，落到直连闸：1003，不计非法包
+        ClientDispatcher dev = new ClientDispatcher(new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens,
+                InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES, TIP_MSG, login, links, registry,
+                new GateLimits(4, 3, Duration.ZERO, MessageLimits.UNLIMITED, true), metrics, presence);
+        EmbeddedChannel devCh = new EmbeddedChannel(new ClientChannelHandler(registry, dev));
+        devCh.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
+        devCh.readOutbound();
+        devCh.writeInbound(request(1, BATTLE_GM_MSG, "gm"));
+        assertThat(tipOf(devCh.readOutbound())).isEqualTo(1003);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_GM_MSG, "battle_rejected")).isEqualTo(1);
+        assertThat(devCh.isOpen()).isTrue();
+    }
+
+    @Test
+    void 战斗上行_未握手直接断开不回包_会话关闭中不回包计dropped() {
+        // 基线：令牌校验排在最前（:858-863），没握手的连接发战斗号同样断开
+        EmbeddedChannel raw = connect();
+        raw.writeInbound(request(1, BATTLE_MSG, "action"));
+        assertThat((Object) raw.readOutbound()).isNull();
+        assertThat(raw.isOpen()).isFalse();
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isZero();
+
+        EmbeddedChannel ch = verified();
+        ClientSession closing = registry.all().stream().filter(s -> s.verified).findFirst().orElseThrow();
+        closing.closing = true;
+        dispatcher.onRequest(closing, request(2, BATTLE_MSG, "action"));
+        assertThat((Object) ch.readOutbound()).as("已决定关闭的会话不再回任何东西").isNull();
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "dropped")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isZero();
     }
 
     @Test
@@ -1713,7 +1954,8 @@ class ClientDispatcherTest {
     void 指标_请求按路由与方法计去向_login调用计耗时() {
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, 99_999, "x"));
-        ch.writeInbound(request(2, BATTLE_MSG, "x"));
+        ch.writeInbound(request(2, UNSUPPORTED_MSG, "x"));
+        ch.writeInbound(request(6, BATTLE_MSG, "x"));
         ch.writeInbound(request(3, SCENE_MSG, "x"));
         ch.writeInbound(request(4, LOGIN_MSG, "x"));
         login.complete(ClientReply.getDefaultInstance());
@@ -1724,7 +1966,12 @@ class ClientDispatcherTest {
 
         assertThat(meters.get("xm.gate.client.requests").tag("route", "unknown").tag("method", "unknown")
                 .tag("result", "unknown_message").counter().count()).isEqualTo(1);
-        assertThat(requests("battle", BATTLE_MSG, "unsupported")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, UNSUPPORTED_MSG, "unsupported")).isEqualTo(1);
+        // 战斗上行单独一个取值（§9：xm_gate_client_requests_total{result="battle_rejected"}），不混进 unsupported
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(1);
+        assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "unsupported")).isZero();
+        assertThat(meters.find("xm.gate.client.requests").tag("result", "battle_rejected").counters())
+                .as("每个请求恰好计一次去向").extracting(Counter::count).containsExactly(1.0);
         assertThat(requests("scene", SCENE_MSG, "not_in_scene")).isEqualTo(1);
         assertThat(requests("login", LOGIN_MSG, "forwarded")).isEqualTo(2);
         assertThat(loginCalls("handle", "ok")).isEqualTo(1);

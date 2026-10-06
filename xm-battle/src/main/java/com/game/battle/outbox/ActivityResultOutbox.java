@@ -22,6 +22,8 @@ import org.slf4j.LoggerFactory;
 /**
  * 活动结果持久通道的 battle 侧（基线 {@code battle_result_activity.h} + {@code room.cpp:1861-2031}；scene-battle-spec §3.6、§7.17）：
  * {@code SET xm:battle:activity-result:<id> EX 7d} 成功 → 经 {@link BattleResultSink} 发布并登记；失败 → 发布一次 + {@code not_durable}。
+ * 发布一律走 {@link BattleResultSink.Channel#ACTIVITY}（首发与重发都计 {@code xm_battle_results_total{channel=activity}}，普通局的
+ * {@code plain} 不受影响）；登记的是事件对象本身（不可变），重发时再序列化得到的字节与落库的那份相同。
  * 每 10 s 对每条 EXISTS：0 → 摘除（消费方已销账）；1 → 用尽（30 次重发）则 ERROR 摘除，否则重发；<b>出错一律跳过、不计次</b>（与 D15 统一）；
  * 登记超过 {@link BattleRedis#OUTBOX_MAX_AGE} 仍没有结论 → 按用尽摘除（记录仍在 Redis，留给 4.6 的巡检器）。
  *
@@ -111,9 +113,11 @@ public final class ActivityResultOutbox implements ActivityResultSink {
             stored = CompletableFuture.failedFuture(e);
         }
         onOutbox(stored, (ok, error) -> {
-            if (error != null) {
+            if (error != null || ok == null) {
+                // 没有结论（空结果）同样不算落库成功（与 D15 同一口径）
                 metrics.activity(ActivityEvent.NOT_DURABLE);
-                log.error("活动局结果落库失败，只发布一次、不登记 battle_id={}: {}", Long.toUnsignedString(battleId), error.toString());
+                log.error("活动局结果落库失败，只发布一次、不登记 battle_id={}: {}", Long.toUnsignedString(battleId),
+                        error != null ? error.toString() : "落库没有结论（空结果）");
                 publish(event);
                 return;
             }
@@ -126,9 +130,10 @@ public final class ActivityResultOutbox implements ActivityResultSink {
         });
     }
 
+    /** 经发布端口按活动通道发一次（首发与每次重发都走这里，计 {@code xm_battle_results_total{channel=activity}}，不混进普通局）。 */
     private void publish(BattleResultEvent event) {
         try {
-            publisher.publish(event);
+            publisher.publish(event, BattleResultSink.Channel.ACTIVITY);
         } catch (RuntimeException e) {
             log.error("活动局结果发布端口抛出异常（已吞掉） battle_id={}", Long.toUnsignedString(event.getBattleId()), e);
         }
@@ -199,7 +204,11 @@ public final class ActivityResultOutbox implements ActivityResultSink {
         return entries.size();
     }
 
+    /** 异步结局投递回发件箱线程（已停时丢弃）。端口返回空 future 按出错处理。 */
     private <T> void onOutbox(CompletableFuture<T> future, BiConsumer<T, Throwable> callback) {
+        if (future == null) {
+            future = CompletableFuture.failedFuture(new IllegalStateException("端口返回了空的 future"));
+        }
         future.whenComplete((value, error) -> {
             Throwable cause = error instanceof CompletionException && error.getCause() != null ? error.getCause() : error;
             try {

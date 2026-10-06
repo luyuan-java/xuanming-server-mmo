@@ -106,6 +106,27 @@ class TeamViewsTest {
     }
 
     @Test
+    void in_battle取自展示缓存_成员申请人被邀请人邀请人都带_缺项为false() {
+        // 6.3 起展示缓存的 inBattle 由战斗锁算出（scene-battle-spec §2.4）；视图只是照搬，每个 TeamMemberView 都带
+        Map<Long, MemberDisplay> dc = new LinkedHashMap<>();
+        dc.put(A, new MemberDisplay(true, false, 30, 2, "甲", "ap-a", 1));
+        dc.put(B, new MemberDisplay(false, true, 20, 3, "乙", "", 2));
+        dc.put(C, new MemberDisplay(true, true, 5, 1, "丙", "", 1));
+
+        TeamView v = TeamViews.teamViewFor(A, record(), 12, 34, NOW, dc);
+
+        assertThat(v.getMembersList()).extracting(TeamMemberView::getPlayerId).containsExactly(A, B);
+        assertThat(v.getMembersList()).extracting(TeamMemberView::getInBattle).containsExactly(false, true);
+        assertThat(v.getMembers(1).getIsOnline()).as("in_battle 与 is_online 互不影响：离线的成员也可以在战斗").isFalse();
+        assertThat(v.getApplicationsList()).extracting(x -> x.getPlayer().getPlayerId()).containsExactly(C, D);
+        assertThat(v.getApplicationsList()).extracting(x -> x.getPlayer().getInBattle()).as("D 不在展示缓存里").containsExactly(true, false);
+        assertThat(v.getPendingInvitesList()).extracting(x -> x.getInvitee().getPlayerId()).containsExactly(C, E);
+        assertThat(v.getPendingInvitesList()).extracting(x -> x.getInvitee().getInBattle()).containsExactly(true, false);
+        assertThat(TeamViews.incomingInviteView(record(), C, NOW, dc).getInviter().getInBattle()).as("邀请人 B").isTrue();
+        assertThat(TeamViews.memberView(B, 3, 2, A, null).getInBattle()).as("没有展示缓存").isFalse();
+    }
+
+    @Test
     void 非队长看不到申请与邀请_只看到计数() {
         TeamView v = TeamViews.teamViewFor(B, record(), 12, 35, NOW, display());
         assertThat(v.getApplicationsList()).isEmpty();

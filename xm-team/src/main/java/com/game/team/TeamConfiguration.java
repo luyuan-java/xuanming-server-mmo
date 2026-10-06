@@ -8,6 +8,7 @@ import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.battle.BattleLockReader;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.presence.PlayerPushes;
@@ -98,9 +99,19 @@ public class TeamConfiguration {
         return new TeamSessions(presence::findEachStrictAsync, locations::statusesAsync, presence::findStrictAsync);
     }
 
+    /**
+     * 回合制战斗锁的只读工具（scene-battle-spec §2.4）：xm-team 只读不写，现在只有队伍视图的 in_battle 用它
+     * （6.4 的整队开战预检也读这把锁，届时复用这个 bean）。
+     */
     @Bean
-    public TeamDisplay teamDisplay(PlayerProfiles profiles, PlayerPresenceDirectory presence) {
-        return new TeamDisplay(profiles::load, presence::findAllAsync);
+    public BattleLockReader battleLockReader(RedissonClient redis) {
+        return new BattleLockReader(redis);
+    }
+
+    /** in_battle 由战斗锁批量 EXISTS 算出（收掉 team-spec D10）；读失败按 false，不让 RPC 失败（见 {@link TeamDisplay}）。 */
+    @Bean
+    public TeamDisplay teamDisplay(PlayerProfiles profiles, PlayerPresenceDirectory presence, BattleLockReader battleLocks) {
+        return new TeamDisplay(profiles::load, presence::findAllAsync, battleLocks::existsAll);
     }
 
     @Bean(destroyMethod = "shutdownNow")

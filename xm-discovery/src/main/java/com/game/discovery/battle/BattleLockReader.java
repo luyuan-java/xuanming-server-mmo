@@ -28,7 +28,10 @@ public final class BattleLockReader {
         this.scripts = new BattleRedis(redis);
     }
 
-    /** 锁在不在（EXISTS）。 */
+    /**
+     * 锁在不在（EXISTS）。咨询性的读（挡排队 / 跟随 / 队伍视图）：走 Redisson 的普通读路由，主从部署下可能读到从库的旧值；
+     * 驱动丢弃 / 判废的读不在这里，在 {@link BattleRedis}（一律读主库）。
+     */
     public CompletableFuture<Boolean> exists(long playerId) {
         try {
             return redis.getKeys().countExistsAsync(RedisKeys.battleLock(playerId)).toCompletableFuture()
@@ -38,7 +41,7 @@ public final class BattleLockReader {
         }
     }
 
-    /** 锁指向的 battle_id；没有锁为 0。 */
+    /** 锁指向的 battle_id；没有锁（或 b 不是无符号十进制）为 0。经 {@link BattleRedis#readLockBattleId}，读主库。 */
     public CompletableFuture<Long> battleId(long playerId) {
         return scripts.readLockBattleId(playerId);
     }

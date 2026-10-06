@@ -1,5 +1,8 @@
 package com.game.scene.battle;
 
+import com.game.discovery.battle.BattleRedis;
+import java.util.Map;
+
 /**
  * 一名玩家身上的回合制战斗冻结（基线 {@code InBattleComp{battle_id, battle_node_id, deadline_ms, state, prepare_deadline_ms}}；
  * scene-battle-spec §7.4）。可变，<b>只在场景逻辑线程上改</b>；不持久化，随实例生灭（跨断线靠 Redis 锁重建）。
@@ -20,7 +23,10 @@ public final class BattleFreeze {
     private Phase phase;
     private long deadlineMs;
     private long prepareDeadlineMs;
-    /** 在本实例上 PrepareBattle 建的（顶替基线 BattlePrepareSessionComp，D7）：确认到达时不必推 144。 */
+    /**
+     * 「这一局的 144 不必再推」：在本实例上 PrepareBattle 建的为真（顶替基线 BattlePrepareSessionComp，D7：确认到达时不必推）；按锁重建 / 沿用旧实例的为假，
+     * 第一次推 144（确认升级、迟到确认、重建复核）之后置真——同一个冻结对象上 144 恰好一次（审计 FRZ-4 / RDS-8）。
+     */
     private boolean preparedHere;
     /** 备战写锁在途。 */
     private boolean lockPending;
@@ -39,6 +45,36 @@ public final class BattleFreeze {
         this.deadlineMs = deadlineMs;
         this.prepareDeadlineMs = prepareDeadlineMs;
         this.preparedHere = preparedHere;
+    }
+
+    /**
+     * 按锁的字段重建一个冻结（纯函数；基线 {@code pb.cpp:608-637}，scene-battle-spec §1.2 的四条取值规则，§7.8 第 3 步 / 审计 FRZ-10）：
+     * <ol>
+     *   <li>字段缺失或不是无符号十进制 → 按 0（{@code n} 缺失 = 节点号 0）；battle_id 以调用方给的为准（锁的 {@code b} 已由调用方核对过）；</li>
+     *   <li>{@code s} 只有等于 {@code P} 才是备战，缺失或不认识一律按 FIGHTING（保守：宁可多冻、不放过一场在打的局）；</li>
+     *   <li>{@code d} 为 0 → 按锁的剩余 TTL 反推：{@code now + max(ttl, 0) × 1000}（TTL 为 -1 / -2 时取 now）；</li>
+     *   <li>备战且 {@code p} 为 0 → 取 {@code d}；FIGHTING 的 {@code p} 原样（可以是 0）。</li>
+     * </ol>
+     * 结果 {@code preparedHere = false}（不是本实例备战的，确认 / 复核时还要推 144）、{@code lockExtended = (阶段 == FIGHTING)}
+     * （锁上已是 F = 之前的确认续过期）；其余运行态标记为假。
+     *
+     * @param lock   锁的字段（{@code ENTER_READ} 读到的那份；没有的字段就是没有键）
+     * @param ttlSec 锁的剩余 TTL（秒；-1 永不过期，-2 不存在）
+     */
+    static BattleFreeze fromLock(long battleId, Map<String, String> lock, long ttlSec, long nowMs) {
+        boolean fighting = !BattleRedis.STATE_PREPARING.equals(lock.get(BattleRedis.FIELD_STATE));
+        long deadline = BattleRedis.parseUnsigned(lock.get(BattleRedis.FIELD_DEADLINE));
+        if (deadline == 0) {
+            deadline = nowMs + Math.max(ttlSec, 0) * 1000;
+        }
+        long prepareDeadline = BattleRedis.parseUnsigned(lock.get(BattleRedis.FIELD_PREPARE_DEADLINE));
+        if (!fighting && prepareDeadline == 0) {
+            prepareDeadline = deadline;
+        }
+        BattleFreeze freeze = new BattleFreeze(battleId, (int) BattleRedis.parseUnsigned(lock.get(BattleRedis.FIELD_NODE)),
+                fighting ? Phase.FIGHTING : Phase.PREPARING, deadline, prepareDeadline, false);
+        freeze.lockExtended = fighting;
+        return freeze;
     }
 
     public long battleId() {

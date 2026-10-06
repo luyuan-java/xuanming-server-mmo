@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.discovery.RedisProperties;
+import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.bind.BindException;
@@ -38,6 +40,20 @@ class OpsWriteGateTest {
         assertThat(p.rollback().guild().recheckDelay().toSeconds()).isEqualTo(10);
         assertThat(p.rollback().guild().clockSkewMargin().toSeconds()).isEqualTo(300);
         assertThat(p.rollback().guild().checkBudget().toSeconds()).isEqualTo(120);
+    }
+
+    @Test
+    void 战斗锁读取等待_缺省5秒_长于Redis单条命令的最坏阻塞_非正拒启() {
+        DataProperties p = bind(Map.of());
+        assertThat(p.ops().battleLockWait()).isEqualTo(Duration.ofSeconds(5));
+        // 缺省的 xm.redis（超时 2 s、重试 1 次、间隔 200 ms）下单条命令最坏 4.2 s：Redis 故障时先拿到它自己的报错，而不是我们的超时
+        long redisWorstMs = new RedisProperties(null, null, null, null, null, null, null).worstCaseCommandMillis();
+        assertThat(redisWorstMs).isEqualTo(4200);
+        assertThat(p.ops().battleLockWait().toMillis()).isGreaterThan(redisWorstMs);
+
+        assertThat(bind(Map.of("xm.data.ops.battle-lock-wait", "800ms")).ops().battleLockWait()).isEqualTo(Duration.ofMillis(800));
+        assertThatThrownBy(() -> bind(Map.of("xm.data.ops.battle-lock-wait", "0s"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("xm.data.ops.battle-lock-wait", "-1s"))).isInstanceOf(BindException.class);
     }
 
     @Test

@@ -90,6 +90,17 @@
 
     <build>
         <plugins>
+            <!-- 装配测试（TeamConfigurationTest）要起整个 TeamConfiguration：dubboCallAuth 只从环境变量读密钥、缺了就拒绝启动，这里给仅测试用的假值
+                 （不是任何环境的真密钥；先例 xm-guild/pom.xml、xm-scene/pom.xml） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <XM_DUBBO_SECRET>xm-team-unit-test-only</XM_DUBBO_SECRET>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
             <plugin>
                 <!-- 权威记录的存储格式 xm.team.*（Java 自有，不依赖同步来的契约 proto，见 team-spec D18） -->
                 <groupId>io.github.ascopes</groupId>

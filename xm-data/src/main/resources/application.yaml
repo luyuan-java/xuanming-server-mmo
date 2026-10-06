@@ -74,13 +74,17 @@ xm:
       claim-wait: ${XM_DATA_OPS_CLAIM_WAIT:35s}
       # 一个作业涉及的玩家上限（整区超出 422 plan_too_large，不自动拆批）
       max-players-per-job: 10000
-      # 写阶段之前超时：全部释放、FAILED；写阶段超时：写完当前玩家后停、PARTIAL
+      # 写阶段之前超时：全部释放、零写入、FAILED job_timeout；写阶段超时：写完当前玩家后停、剩下的记 not_executed——
+      # 一个也没写成 FAILED job_timeout，写成了一部分 PARTIAL job_timeout
       job-timeout: 30m
       # 回档目标时刻至少早于现在多久（快照经 Kafka 落库有延迟）
       min-target-age: ${XM_DATA_OPS_MIN_TARGET_AGE:5m}
       # 作业心跳与清扫判定（心跳超过 stale-after 没更新的作业改 INTERRUPTED）
       heartbeat: 5s
       stale-after: 60s
+      # 回档前查战斗锁（夺权之后、账本差集之前；dry-run 也查）一次检查全程最多等多久。到点没读完 / 读失败的玩家按在战处理、不写
+      # （battle_lock_unknown，fail-closed）。略长于 Redis 单条命令的最坏阻塞（xm.redis 缺省 4.2 s）
+      battle-lock-wait: 5s
     recall:
       # 一次回收（含 dry-run）至多匹配多少行源流水；超出 422 result_truncated、零变更
       max-rows: 10000

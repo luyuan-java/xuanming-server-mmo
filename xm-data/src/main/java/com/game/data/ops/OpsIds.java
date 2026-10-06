@@ -18,7 +18,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
 
 /**
- * xm-data 发号（data-ops-spec §2.3 硬约束）：直写的快照号、作业号（以后的回档 / 回收流水号）<b>必须</b>取自与 scene 同一个全服租约池
+ * xm-data 发号（data-ops-spec §2.3 硬约束）：直写的快照号（手工 / 维护前 / 回档安全快照）、作业号、回档流水号（批次 7.2b 起在用；
+ * 回收流水号随 7.2c）<b>必须</b>取自与 scene 同一个全服租约池
  * {@link NodeTypes#SCENE_GUID}（作用域 0）。雪花号 {@code [符号 1][毫秒 41][worker 10][序号 12]} 不含节点类型位：另开租约类型时
  * worker 会与 scene 重叠、同一毫秒同一序号发出相同的号，{@code transaction_log} / {@code player_snapshot} 按主键幂等落库会把后到的一行
  * <b>静默吞掉</b>。同池占号则 worker 互斥，号域天然不重叠。

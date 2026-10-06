@@ -256,7 +256,7 @@ public final class SceneWorld {
     }
 
     /**
-     * @param battle 回合制战斗的钩子（批次 6.3：进场恢复、落盘后销账、原地解冻后补跑锁步骤；{@link BattleHooks#NONE} = 不接战斗）
+     * @param battle 回合制战斗的钩子（批次 6.3：进场恢复、落盘后销账、原地解冻后重跑进场恢复；{@link BattleHooks#NONE} = 不接战斗）
      */
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
@@ -1512,10 +1512,15 @@ public final class SceneWorld {
     // ------------------------------------------------------------------ 跨节点换图（批次 5.2，scene-handoff-spec §5.5）
 
     /**
-     * 63 的「在途」判定（回 3014，基线 IsSceneChangeBusy）：选目标中 / 镜像取号中（RESOLVING，批次 5.3 D4）或冻结中（FREEZING）为 true。
-     * RESOLVING 槽过了期限（结果回调丢了，正常不会）就作废、不再挡，迟到的结果按过期丢弃。
+     * 换图「在途」判定（基线 IsSceneChangeBusy）：选目标中 / 镜像取号中（RESOLVING，批次 5.3 D4）或冻结中（FREEZING）为 true。
+     * RESOLVING 槽过了期限（结果回调丢了，正常不会）就<b>当场作废</b>（有副作用：清掉这个槽）、不再挡，迟到的结果按过期丢弃
+     * （{@code player.switching() != sw} → STALE）。逻辑线程上调用。
+     *
+     * <p>两个调用方：63 的处理器（在途回 3014）；回合制战斗的备战闸（在途回 1006，scene-battle-spec §7.5 第 1.3 步 / D4）——
+     * 备战必须经这里而不是直接看 {@link ScenePlayer#switchPhase()}：后者不做过期判定，回调万一丢了，这名玩家的备战会一直被挡到他再发一次 63 或重登
+     * （审计 GAT-14；D4 只允许 ≤ 选目标兜底超时的竞态）。槽在这里清掉之后，迟到的选目标结果不会在战斗冻结挂上之后再进交出。
      */
-    boolean switchInFlight(ScenePlayer player) {
+    public boolean switchInFlight(ScenePlayer player) {
         PlayerSwitch sw = player.switching();
         if (sw == null) {
             return false;
@@ -1794,7 +1799,9 @@ public final class SceneWorld {
                 log.info("交出没提交，原地解冻 player={} token={} 结局={}", Long.toUnsignedString(player.playerId()),
                         sw.token(), result);
                 pushTip(player, ENTER_FAILED);
-                // 冻结期间到达的确认只续了锁、没挂冻结（scene-battle-spec §7.7）：原地解冻后补跑一次进场恢复的锁步骤（§10.5）
+                // 冻结期间到达的确认只续了锁、没挂冻结，到达的结算被延后，销账回来也没 forget 账本（scene-battle-spec §7.7、§7.10、§7.12）：
+                // 原地解冻后重跑一次完整的进场恢复（第 1 步起，规格 §10.5 要求的「锁步骤」的超集）。期间 recovery = PENDING：
+                // 备战 1006、结算 DEFERRED，读失败由 reaper 重试
                 battle.onUnfrozenInPlace(this, player);
             }
         }

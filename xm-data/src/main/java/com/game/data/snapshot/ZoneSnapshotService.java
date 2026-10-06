@@ -36,6 +36,30 @@ public final class ZoneSnapshotService {
 
     public static final String PATH = "/admin/zone-snapshots";
     static final int BATCH = 500;
+    /** {@code player_snapshot.note} 的列宽（VARCHAR(256)）；这里按 UTF-16 码元数卡，对 MySQL（按字符）与 H2 都不超。 */
+    static final int NOTE_MAX = 256;
+
+    /**
+     * 快照备注 = 运维给的备注 + 空格 + {@code job:<作业号>}（data-ops-spec §3.4：末尾带作业号——它是从一份维护前快照找回作业的唯一线索）。
+     * 合起来超过列宽时截的是<b>备注</b>，不是作业号（受理允许备注到 256 字符，原来整串截尾，备注一长作业号就被截掉了）；
+     * 不在代理对中间下刀。
+     */
+    static String noteWithJob(String note, String jobIdText) {
+        String tag = "job:" + jobIdText;
+        if (note == null || note.isEmpty()) {
+            return tag;
+        }
+        int room = NOTE_MAX - tag.length() - 1;
+        String head = note;
+        if (head.length() > room) {
+            int end = Math.max(0, room);
+            if (end > 0 && Character.isHighSurrogate(head.charAt(end - 1))) {
+                end--;
+            }
+            head = head.substring(0, end);
+        }
+        return head.isEmpty() ? tag : head + " " + tag;
+    }
 
     /** 请求体：{@code {"zones":[1,2] | "allZones":true, "note":"...", "reason":"..."}}。 */
     public record Body(List<Long> zones, Boolean allZones, String note, String reason) {
@@ -117,11 +141,7 @@ public final class ZoneSnapshotService {
         public JobResult run(JobContext ctx) {
             Map<String, Object> byZone = new LinkedHashMap<>();
             int total = 0;
-            String noteText = note.isEmpty() ? "job:" + ctx.jobIdText() : note + " job:" + ctx.jobIdText();
-            if (noteText.length() > 256) {
-                noteText = noteText.substring(0, 256);
-            }
-            String finalNote = noteText;
+            String finalNote = noteWithJob(note, ctx.jobIdText());
             for (int zone : zoneIds) {
                 int count = 0;
                 long after = 0;

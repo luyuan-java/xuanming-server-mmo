@@ -53,6 +53,8 @@ public final class RollbackService {
         this.zones = zones;
         this.props = props;
         this.clock = clock;
+        // 逐玩家结局的固定集合装配时全部预建为 0（含批次 6.3 的 in_battle / battle_lock_unknown）
+        deps.metrics().registerOpsPlayers(RollbackJob.KIND, RollbackJob.PLAYER_OUTCOMES);
     }
 
     /** dry-run 返回 200 的应答体；否则 202 的受理应答体（{@code accepted=true}）。 */
@@ -153,6 +155,10 @@ public final class RollbackService {
     /**
      * dry-run（同步、只读、不夺权）：逐人选中的快照（{@code timeMs} / {@code ingestedAt} / {@code cause}，由运维判断是不是想要的那份）、
      * 是否在线、按现档预演的恢复内容与账本差集。帮会检查要沉降，只在执行时做。
+     *
+     * <p>战斗锁（批次 6.3）：对有快照可回的全部目标查一次（请求线程上限时等，{@link BattleLockGate}），应答顶层 {@code battleLock} 给人数与
+     * 前 100 个在战玩家号，逐人 {@code inBattle} = true / false，读不到为 {@code null}。只是此刻的值：执行时在夺权之后重查，
+     * 锁在（{@code in_battle}）或读不到（{@code battle_lock_unknown}）都不写。读失败不让 dry-run 失败。
      */
     Map<String, Object> dryRun(RollbackRequest req) {
         if (req.scope() == RollbackRequest.Scope.PLAYERS) {
@@ -162,11 +168,15 @@ public final class RollbackService {
         }
         List<Target> targets = deps.planner().plan(req);
         long now = clock.millis();
+        List<Long> plannedIds = targets.stream().filter(Target::planned).map(Target::playerId).toList();
+        BattleLockGate.Result locks = plannedIds.isEmpty() ? BattleLockGate.Result.none()
+                : deps.battleLocks().check(plannedIds, () -> { });
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("dryRun", true);
         out.put("request", req.view());
         out.put("plan", RollbackPlanner.summary(targets));
         out.put("tooLarge", targets.size() > props.ops().maxPlayersPerJob());
+        out.put("battleLock", locks.view());
         if (req.scope() == RollbackRequest.Scope.ZONES) {
             List<Map<String, Object>> zoneViews = new ArrayList<>();
             for (ZoneRow row : zones.zones()) {
@@ -178,16 +188,16 @@ public final class RollbackService {
         }
         List<Map<String, Object>> players = new ArrayList<>();
         for (Target t : targets.subList(0, Math.min(DRY_RUN_LIST, targets.size()))) {
-            players.add(playerPreview(req, t, now));
+            players.add(playerPreview(req, t, now, locks));
         }
         out.put("players", players);
         out.put("playersTruncated", targets.size() > DRY_RUN_LIST);
         out.put("caveat", "dry-run 不夺权、以已落盘状态预演；执行时以夺权（kick 时 scene 已写回）之后的现档为准，"
-                + "帮会检查在沉降之后才做");
+                + "帮会检查在沉降之后才做；战斗锁是此刻的值，执行时在夺权之后重查，锁在或读不到的玩家都不写");
         return out;
     }
 
-    private Map<String, Object> playerPreview(RollbackRequest req, Target t, long now) {
+    private Map<String, Object> playerPreview(RollbackRequest req, Target t, long now, BattleLockGate.Result locks) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("playerId", Long.toUnsignedString(t.playerId()));
         m.put("zoneId", Integer.toUnsignedLong(t.zoneId()));
@@ -197,6 +207,8 @@ public final class RollbackService {
         }
         PlayerSnapshotEntry meta = t.snapshot();
         m.put("snapshot", AuditViews.snapshotMeta(meta));
+        // 在战 true / 不在战 false / 读不到 null
+        m.put("inBattle", locks.inBattleOrNull(t.playerId()));
         if (req.scope() == RollbackRequest.Scope.ZONES) {
             return m;
         }

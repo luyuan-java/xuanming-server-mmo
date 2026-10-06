@@ -22,19 +22,29 @@ public interface BattleLocks {
     /** {@code CANCEL_OFFLINE}：1 删了 / 2 FIGHTING 拒绝 / 0 不是本局。 */
     CompletableFuture<Long> cancelOffline(long playerId, long battleId);
 
-    /** {@code DELETE_IF_MATCH}：1 删了 / 0 不是本局。 */
+    /**
+     * 只删备战锁（b == X 且 s ≠ F 才删；与 {@code CANCEL_OFFLINE} 同一段脚本）：{@link BattleRedis#PREPARING_DELETE_DONE} 1 删了 /
+     * {@link BattleRedis#PREPARING_DELETE_FIGHTING} 2 是本局但已 F、没删 / {@link BattleRedis#PREPARING_DELETE_MISS} 0 不是本局或锁不在。
+     * 给在线取消、备战失败 / 过期后的尽力删锁这些「只该删 P 锁」的路径用（审计 FRZ-7）；reaper 判废仍用 {@link #deleteIfMatch}。
+     */
+    CompletableFuture<Long> deletePreparingIfMatch(long playerId, long battleId);
+
+    /** {@code DELETE_IF_MATCH}：1 删了 / 0 不是本局。不看 s（F 也删），只给 reaper 判废用。 */
     CompletableFuture<Long> deleteIfMatch(long playerId, long battleId);
 
-    /** {@code TOUCH}：1 命中 / 0 不是本局。 */
+    /**
+     * {@code TOUCH}：{@link BattleRedis#TOUCH_HIT} 1 命中并写入 / {@link BattleRedis#TOUCH_MISS} 0 不是本局 /
+     * {@link BattleRedis#TOUCH_KEPT_FIGHTING} 2 命中但锁上已是 F 而入参是 P——什么都没改（不降级、不缩 TTL），按命中处理。
+     */
     CompletableFuture<Long> touch(long playerId, long battleId, long ttlSec, String state, long deadlineMs, long prepareDeadlineMs);
 
     /** {@code HOLD}：1 命中 / 0 不是本局。 */
     CompletableFuture<Long> hold(long playerId, long battleId, long holdSec);
 
-    /** {@code ACK}：位 1 = 删了记录，位 2 = 放了锁。 */
+    /** {@code ACK}：位 1 = 删了记录，位 2 = 放了锁；每次都给这一局写已销账墓碑（之后这一局的落库被挡）。 */
     CompletableFuture<Long> ack(long playerId, long battleId);
 
-    /** {@code ENTER_READ}。 */
+    /** {@code ENTER_READ}。待结算字段的名字是原始字节（{@link BattleRedis.SettlementField}）。 */
     CompletableFuture<EnterRead> enterRead(long playerId);
 
     /** {@code READ_IF_OURS}：本局记录的字节，没有为 null。 */
@@ -43,8 +53,11 @@ public interface BattleLocks {
     /** 锁的 b；没有锁为 0。 */
     CompletableFuture<Long> readLockBattleId(long playerId);
 
-    /** 按原样字段名删一个待结算字段（坏字段）。 */
-    CompletableFuture<Long> deleteSettlementField(long playerId, String field);
+    /**
+     * 按字段名的<b>原始字节</b>删一个待结算字段（坏字段；传 {@link BattleRedis.SettlementField#rawName()}，不要经 String 往返——
+     * 非法 UTF-8 的名字解码再编码会变样、删不到）。回删到的个数。
+     */
+    CompletableFuture<Long> deleteSettlementField(long playerId, byte[] rawField);
 
     /** 生产实现：委托 {@link BattleRedis}。 */
     static BattleLocks redis(BattleRedis redis) {
@@ -64,6 +77,11 @@ public interface BattleLocks {
             @Override
             public CompletableFuture<Long> cancelOffline(long playerId, long battleId) {
                 return redis.cancelOffline(playerId, battleId);
+            }
+
+            @Override
+            public CompletableFuture<Long> deletePreparingIfMatch(long playerId, long battleId) {
+                return redis.deletePreparingIfMatch(playerId, battleId);
             }
 
             @Override
@@ -103,8 +121,8 @@ public interface BattleLocks {
             }
 
             @Override
-            public CompletableFuture<Long> deleteSettlementField(long playerId, String field) {
-                return redis.deleteSettlementField(playerId, field);
+            public CompletableFuture<Long> deleteSettlementField(long playerId, byte[] rawField) {
+                return redis.deleteSettlementField(playerId, rawField);
             }
         };
     }

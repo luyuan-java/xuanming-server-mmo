@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.player.store.PlayerStore.ClaimResult;
 import com.game.player.store.PlayerStore.HandOffResult;
+import com.game.player.store.state.BattleLedgerEntry;
+import com.game.player.store.state.BattleLedgerState;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
 import java.time.Duration;
@@ -555,6 +557,161 @@ class PlayerStoreSqlTest {
             release.countDown();
             holder.get(15, TimeUnit.SECONDS);
         }
+    }
+
+    // ================================================================ 回合制战斗结算账本（scene-battle-spec §13.3；player_state.battle_ledger）
+
+    /** 一局的应用时刻（账本条目的 applied_at_ms）：按 battle_id 定，方便核对。 */
+    private static long appliedAt(long battleId) {
+        return 1_700_000_000_000L + (battleId & 0xFFFF);
+    }
+
+    /** 只带战斗结算账本的玩法数据：按给定顺序各一条（scene 写出时已按 battle_id 无符号升序，这里原样存、原样取）。 */
+    private static PlayerState ledger(long... battleIds) {
+        BattleLedgerState.Builder ledger = BattleLedgerState.newBuilder();
+        for (long battleId : battleIds) {
+            ledger.addApplied(BattleLedgerEntry.newBuilder().setBattleId(battleId).setAppliedAtMs(appliedAt(battleId)));
+        }
+        return PlayerState.newBuilder().setBattleLedger(ledger).build();
+    }
+
+    private static List<Long> ledgerIds(PlayerState state) {
+        return state.getBattleLedger().getAppliedList().stream().map(BattleLedgerEntry::getBattleId).toList();
+    }
+
+    /**
+     * 账本是 {@code player_state} 的一部分：在线存盘、最终写回都整份带上，读回来逐字节等价——条目顺序不变、battle_id 超过 2^63 不走样、
+     * 应用时刻在、各层的未知字段（新版本 scene 写的、旧版本读到）原样保留。每次写是<b>整份覆盖</b>：scene 销账后摘掉的条目随下一次存盘从库里消失。
+     */
+    @Test
+    void 战斗账本随player_state往返_在线存盘与最终写回都带_条目顺序与未知字段原样_整份覆盖() {
+        long p = newPlayer(1401, "账本甲");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        long big = 0x8000_0000_0000_0001L;
+        com.google.protobuf.UnknownFieldSet extra = com.google.protobuf.UnknownFieldSet.newBuilder()
+                .addField(99, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(5).build()).build();
+        PlayerState state = PlayerState.newBuilder().setFacing(Facing.newBuilder().setX(0.5).setY(1).setZ(2))
+                .setBattleLedger(BattleLedgerState.newBuilder()
+                        .addApplied(BattleLedgerEntry.newBuilder().setBattleId(7).setAppliedAtMs(appliedAt(7)))
+                        .addApplied(BattleLedgerEntry.newBuilder().setBattleId(big).setAppliedAtMs(appliedAt(big)).setUnknownFields(extra))
+                        .setUnknownFields(extra))
+                .build();
+
+        assertThat(store.saveStateHeld(save(p, 1, 2, 10), state)).isTrue();
+
+        PlayerState loaded = store.loadState(p);
+        assertThat(loaded).as("整份玩法数据逐字段相等（含未知字段）").isEqualTo(state);
+        assertThat(loaded.toByteString()).isEqualTo(state.toByteString());
+        assertThat(ledgerIds(loaded)).as("顺序原样、超过 2^63 的 battle_id 不走样").containsExactly(7L, big);
+        assertThat(loaded.getBattleLedger().getApplied(1).getAppliedAtMs()).isEqualTo(appliedAt(big));
+        assertThat(loaded.getBattleLedger().getApplied(1).getUnknownFields()).isEqualTo(extra);
+        assertThat(loaded.getBattleLedger().getUnknownFields()).isEqualTo(extra);
+        assertThat(loaded.getFacing().getX()).as("账本与别的玩法数据在同一份里").isEqualTo(0.5);
+        assertThat(savedEpoch(p)).isEqualTo(1);
+
+        // 销账后摘掉 7：下一次在线存盘整份覆盖，库里不再有它
+        assertThat(store.saveStateHeld(save(p, 1, 2, 11), ledger(big))).isTrue();
+        assertThat(ledgerIds(store.loadState(p))).containsExactly(big);
+
+        // 最终写回并释放；下一个写者夺权后加载到的就是这份账本
+        assertThat(store.saveStateAndRelease(save(p, 1, 2, 20), ledger(big, 9))).isTrue();
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.loadState(p)).isEqualTo(ledger(big, 9));
+
+        // 账本清空也落得下去（空账本 ≠ 保留旧账本）
+        assertThat(store.saveStateHeld(save(p, 2, 2, 21), PlayerState.getDefaultInstance())).isTrue();
+        assertThat(store.loadState(p).hasBattleLedger()).isFalse();
+    }
+
+    /**
+     * 被围栏拒绝的写不落账本——scene 的销账以「条目已落库」为前提（{@code onProgressSaved(SAVED)} 之后才 ACK），
+     * 被拒的写要是留下了账本条目，就会出现「库里有条目、奖励却没落库」。旧 epoch 的在线存盘 / 最终写回、已释放之后的在线存盘都不行。
+     */
+    @Test
+    void 被围栏拒绝的写不落账本_旧epoch的在线存盘与最终写回_已释放后的在线存盘() {
+        long p = newPlayer(1402, "账本乙");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        assertThat(store.saveStateAndRelease(save(p, 1, 2, 20), ledger(7))).isTrue();
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        List<Object> before = everything(p);
+
+        // 旧写者（epoch 1）迟到的写：带着「又应用了一局 8」的账本
+        assertThat(store.saveStateHeld(save(p, 1, 2, 99), ledger(7, 8))).isFalse();
+        assertThat(store.saveStateAndRelease(save(p, 1, 2, 99), ledger(7, 8))).isFalse();
+
+        assertThat(store.loadState(p)).as("8 没有落库").isEqualTo(ledger(7));
+        assertThat(savedEpoch(p)).isEqualTo(1);
+        assertThat(everything(p)).as("被拒的写什么也没改").isEqualTo(before);
+
+        // 当前写者（epoch 2）最终写回并释放之后，它自己迟到的在线存盘同样被拒
+        assertThat(store.saveStateAndRelease(save(p, 2, 2, 30), ledger(7))).isTrue();
+        before = everything(p);
+        assertThat(store.saveStateHeld(save(p, 2, 2, 99), ledger(7, 9))).as("同 epoch，但已释放").isFalse();
+        assertThat(store.loadState(p)).isEqualTo(ledger(7));
+        assertThat(everything(p)).isEqualTo(before);
+
+        // 对照：持有者的写照常落账本
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(3));
+        assertThat(store.saveStateHeld(save(p, 3, 2, 31), ledger(7, 9))).isTrue();
+        assertThat(store.loadState(p)).isEqualTo(ledger(7, 9));
+        assertThat(savedEpoch(p)).isEqualTo(3);
+    }
+
+    /**
+     * 交出事务（跨节点换图，handoff-spec §5.2）把冻结快照里的账本一并带过去：提交后库里就是它（由交出方 E 写入），目标节点以 E+1 加载到，
+     * 进场即判 durable、即销账。没提交的交出（剩余租约不足、被围栏拒绝）不落账本。
+     */
+    @Test
+    void 交出事务把账本带过去_新epoch加载到冻结快照里的账本_没提交的交出不落账本() {
+        long p = newPlayer(1403, "账本丙");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        assertThat(store.saveStateHeld(save(p, 1, 2, 10), ledger(7))).isTrue();
+
+        // 没提交：剩余租约比安全边际少 1 ms
+        CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() - MARGIN_MS + 1);
+        List<Object> before = everything(p);
+        assertThat(handOff(p, 1, 5, 77.5, ledger(7, 8))).isInstanceOf(HandOffResult.LeaseTooShort.class);
+        assertThat(store.loadState(p)).as("没提交的交出不落账本").isEqualTo(ledger(7));
+        assertThat(everything(p)).isEqualTo(before);
+
+        CLOCK.decrementAndGet();
+        assertThat(handOff(p, 1, 5, 77.5, ledger(7, 8))).isEqualTo(new HandOffResult.HandedOff(2));
+
+        assertThat(store.loadState(p)).as("冻结快照里的账本随交出落库").isEqualTo(ledger(7, 8));
+        assertThat(savedEpoch(p)).as("由交出方 E 写入").isEqualTo(1);
+        assertThat(owner(p).ownerEpoch()).isEqualTo(2);
+        assertThat(owner(p).released()).isFalse();
+
+        // 交出方（旧 epoch）之后的任何写都碰不到这份账本
+        before = everything(p);
+        assertThat(handOff(p, 1, 5, 1, ledger(7, 8, 9))).isInstanceOf(HandOffResult.Fenced.class);
+        assertThat(store.saveStateHeld(save(p, 1, 9, 99), ledger(7, 8, 9))).isFalse();
+        assertThat(store.saveStateAndRelease(save(p, 1, 9, 99), PlayerState.getDefaultInstance())).isFalse();
+        assertThat(store.loadState(p)).isEqualTo(ledger(7, 8));
+        assertThat(everything(p)).isEqualTo(before);
+
+        // 目标节点（E+1）销账后摘掉 7，在线存盘
+        assertThat(store.saveStateHeld(save(p, 2, 6, 1), ledger(8))).isTrue();
+        assertThat(store.loadState(p)).isEqualTo(ledger(8));
+        assertThat(savedEpoch(p)).isEqualTo(2);
+    }
+
+    /** 角色名（战斗快照里的 {@code name} 取自它）随 player 行读出；在线存盘、交出、最终写回都不动它。 */
+    @Test
+    void 角色名随player行读出_写回与交出都不改名() {
+        long p = newPlayer(1404, "账本丁");
+        assertThat(store.findPlayer(p).orElseThrow().getName()).isEqualTo("账本丁");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+
+        assertThat(store.saveStateHeld(save(p, 1, 2, 10), ledger(7))).isTrue();
+        assertThat(store.findPlayer(p).orElseThrow().getName()).isEqualTo("账本丁");
+        assertThat(handOff(p, 1, 5, 77.5, ledger(7))).isEqualTo(new HandOffResult.HandedOff(2));
+        assertThat(store.findPlayer(p).orElseThrow().getName()).isEqualTo("账本丁");
+        assertThat(store.saveStateAndRelease(save(p, 2, 5, 80), ledger())).isTrue();
+
+        PlayerRow row = store.findPlayer(p).orElseThrow();
+        assertThat(row.getName()).isEqualTo("账本丁");
+        assertThat(row.getPosX()).as("（对照）这几次写确实落库了").isEqualTo(80);
     }
 
     // ================================================================ 建角上限

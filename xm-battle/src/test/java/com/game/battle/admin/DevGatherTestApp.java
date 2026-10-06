@@ -19,6 +19,7 @@ import org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguratio
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.core.env.Environment;
 
 /**
  * dev gather 接口端到端测试的最小 Spring 上下文（同 {@link DevBattleTestApp} 的做法）：真的内嵌 Tomcat + DispatcherServlet，只装
@@ -91,10 +92,14 @@ class DevGatherTestApp {
         return RunMode.parse(runMode);
     }
 
+    /**
+     * 运维令牌缺省是 {@link DevBattleTestApp#TOKEN}；属性 {@code test.admin-token} 设成空串 = 模拟生产上没配 {@code XM_ADMIN_TOKEN}（一律 503）。
+     * 直接读 {@link Environment}，不用 {@code @Value}：过滤器注册 bean 在内嵌容器启动时就创建，那时这个最小上下文里还没有占位符解析器。
+     */
     @Bean
-    FilterRegistrationBean<BattleAdminAuthFilter> battleAdminAuthFilter() {
-        FilterRegistrationBean<BattleAdminAuthFilter> registration = new FilterRegistrationBean<>(
-                new BattleAdminAuthFilter(DevBattleTestApp.TOKEN));
+    FilterRegistrationBean<BattleAdminAuthFilter> battleAdminAuthFilter(Environment environment) {
+        String token = environment.getProperty("test.admin-token", DevBattleTestApp.TOKEN);
+        FilterRegistrationBean<BattleAdminAuthFilter> registration = new FilterRegistrationBean<>(new BattleAdminAuthFilter(token));
         registration.addUrlPatterns("/admin/*");
         return registration;
     }

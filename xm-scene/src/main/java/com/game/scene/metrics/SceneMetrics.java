@@ -147,9 +147,12 @@ public final class SceneMetrics {
         UNINTERRUPTIBLE,
         /** 行为互斥表 / 战斗状态 / 技能许可表拒绝（表里的提示码）。 */
         STATE_REJECTED,
-        /** 施法者在回合制战斗中（7004，scene-battle-spec §7.13）。 */
+        /**
+         * 施法者在回合制战斗中（7004，scene-battle-spec §7.13）。规格 §9 写的是补一个取值 {@code in_battle}，实现按两个不同的回码拆成
+         * {@code caster_in_battle} / {@code target_in_battle} 两个取值（更细，没有 {@code in_battle} 这个取值；审计 OPS-14）。
+         */
         CASTER_IN_BATTLE,
-        /** 目标在回合制战斗中（7002）。 */
+        /** 目标在回合制战斗中（7002；与「不是玩家」的 7001 分开）。见 {@link #CASTER_IN_BATTLE} 的口径说明。 */
         TARGET_IN_BATTLE
     }
 

@@ -52,6 +52,11 @@ import com.game.proto.SummonPetResponse;
 import com.game.proto.Vector3;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.login.LeaveGameRequest;
+import com.game.proto.team.CreateTeamRequest;
+import com.game.proto.team.DisbandTeamRequest;
+import com.game.proto.team.GetMyTeamRequest;
+import com.game.proto.team.TeamResponse;
+import com.game.proto.team.TeamView;
 import com.game.robot.client.BattleAdminClient;
 import com.game.robot.client.BattleAdminClient.DevGather;
 import com.game.robot.client.BattleAdminClient.GatherOutcome;
@@ -69,6 +74,7 @@ import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.flow.Timings;
 import com.game.robot.scenario.BattleSettleChecks.BattleIdSequence;
+import com.game.robot.scenario.BattleSettleChecks.StepFailures;
 import com.game.robot.scenario.BattleSupport.Direct;
 import com.game.robot.scenario.BattleSupport.LobbyBot;
 import com.game.table.AttributeErrorTip;
@@ -77,12 +83,14 @@ import com.game.table.ConfigTables;
 import com.game.table.PetErrorTip;
 import com.game.table.SceneErrorTip;
 import com.game.table.SkillErrorTip;
+import com.game.table.TeamErrorTip;
 import com.game.table.WorldTable;
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -107,21 +115,35 @@ import java.util.Set;
  *   <li>第 8 步 重登不重发：金币、背包、任务原样，10 s 内没有第二条 150；</li>
  *   <li>第 9 步 离线结算：开局挂机后立即断开大厅与直连，等房间打完（{@code --slow} 再等过重投窗口 130 s）→ 登录收到 150、金币只增一次；</li>
  *   <li>第 10 步 确认后销毁（B1）：FIGHTING 拒绝取消、销毁后没有 150、63 一直 3023 直到期限 + 10 s 宽限后 reaper 判废；</li>
- *   <li>第 13 步 指标：scene 结算应用 / 销账放锁 / 闸拒绝、battle 发件箱 acked 有增长、exhausted 不变。</li>
+ *   <li>第 11 步 与 5.2 互斥（只在双 scene 切片上跑，排在第 5 步之后）：PREPARING 时 63 指向另一节点上的同图频道 → 应答里就是 3023（不是 3014）、
+ *       A 留在原地；取消后同一条 63 跨节点成功。目标取 B 登录时所在的频道（判据同 {@link CrossNodeScenario#onDifferentChannels}）；
+ *       {@code --scene-metrics-url} 给了两个地址（= 声明双 scene 切片）而 A、B 恰好同频道时，另用探针账号 C 落位（次数与间隔同 cross-node）。
+ *       找不到另一个节点上的频道：声明了双 scene 就判失败，否则跳过并写观察记录；</li>
+ *   <li>第 12 步 队伍视图（xm-team 的 {@code TeamMemberView.in_battle} 由战斗锁算出）：A 建单人队，备战前 false → 只备战后 true → 取消后 false；
+ *       第 6 步确认之后（FIGHTING）true、第 7 步销账放锁之后变回 false（这两次嵌在第 6–7 步里采样，失败记在第 12 步名下）；</li>
+ *   <li>第 13 步 指标：scene 结算应用 / 销账放锁有增长、在途闸 enter_scene / attribute / pet / bag_sort / skill / move <b>逐个</b>有增长，
+ *       battle 发件箱 acked 有增长、exhausted 不变。</li>
  * </ol>
- * 第 11 步（与 5.2 互斥）只在双 scene 切片上有意义、第 12 步（队伍视图）属 team 场景，本场景不跑。
  * {@code --expect-dev deny}（xm-battle 以 prod 运行）：gather 与取消接口必须回 403，场景只跑第 2 步。
- * 结尾在观察记录里写一行 {@code BATTLE_SETTLE_OK …} 或 {@code BATTLE_SETTLE_FAIL step=…}。
+ * 结尾在观察记录里写一行 {@code BATTLE_SETTLE_OK …} 或 {@code BATTLE_SETTLE_FAIL step=…}（带失败的步骤号，逗号分隔）。
+ * 故障变体（kill -9 的两个崩溃窗口）见 {@link BattleCrashScenario}，由 {@code tools/local/battle-crash-window.sh} 编排。
  *
- * <p>前置：本机切片带 xm-battle 与 xm-scene（{@code SceneBattleService}），dev 运行模式，运维令牌（{@code XM_ADMIN_TOKEN} 或 {@code run/xm-admin-token}）；
- * reaper 间隔建议调到 2 s（{@code xm.scene.battle.reaper-interval}），本场景按缺省 30 s 的上界等待，只把实际时延记进观察记录。
+ * <p>前置：本机切片带 xm-battle、xm-team 与 xm-scene（{@code SceneBattleService}），dev 运行模式，运维令牌（{@code XM_ADMIN_TOKEN} 或
+ * {@code run/xm-admin-token}）；reaper 间隔建议调到 2 s（{@code xm.scene.battle.reaper-interval}），本场景按缺省 30 s 的上界等待，只把实际时延记进观察记录。
+ * 双 scene 切片（{@code XM_SCENE_NODES=2}）要把两个节点的管理端口都传给 {@code --scene-metrics-url}（逗号分隔）：A 落在哪个节点不确定，
+ * 第 13 步按两个节点的指标之和判定。只给了一个地址而 A、B 登录时不同频道：第 11 步照跑（跑完 A 留在另一个节点），第 13 步的 scene 指标
+ * 只看得到一个节点、不达标时记一条写明原因的失败（重跑时把两个地址都给上），不逐条报「0.0 → 0.0」。
  */
 public final class BattleSettleScenario {
 
     static final String REF = "scene-battle-spec §13.8";
     private static final String REF_GATES = "scene-battle-spec §7.13、§6.1";
     private static final String REF_APPLY = "scene-battle-spec §7.10–§7.11";
+    private static final String REF_CROSS = "scene-battle-spec §13.8 第 11 步、§7.13；scene-handoff-spec §5.5";
+    private static final String REF_TEAM = "scene-battle-spec §13.8 第 12 步、§7.13 世界内部第 4 条；team-spec D10";
+    private static final String TEAM_SERVICE = "ClientPlayerTeam";
 
+    private static final int TIP_MEMBER_IN_TEAM = TeamErrorTip.team_error.kTeamMemberInTeam_VALUE;
     private static final int TIP_SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     private static final int TIP_INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     private static final int TIP_BUSY = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
@@ -160,10 +182,15 @@ public final class BattleSettleScenario {
     static final Duration MISSION_WAIT = Duration.ofSeconds(5);
     /** 销账放锁之后再备战成功的上限（§13.8 第 7 步）。 */
     static final Duration LOCK_RELEASE_WAIT = Duration.ofSeconds(2);
-    /** FIGHTING 判废宽限（D21）。 */
+    /**
+     * FIGHTING 判废宽限（D21）。服务端的真值是 xm-discovery 的 {@code BattleRedis.FIGHTING_EXPIRY_GRACE}；robot 不依赖 xm-discovery，
+     * 这里与下面几个随服务端常量走的取值（reaper 间隔上界、备战锁的额外 TTL、重投窗口）由 {@code UpstreamConstantsTest} 读源码钉住。
+     */
     static final Duration FIGHTING_GRACE = Duration.ofSeconds(10);
-    /** reaper 间隔的上界（缺省 30 s；切片调到 2 s 时实际远小于它）+ 2 s 余量。 */
+    /** reaper 间隔的上界（缺省 30 s = {@code BattleRedis.REAPER_INTERVAL}，只许调小；切片调到 2 s 时实际远小于它）+ 2 s 余量。 */
     static final Duration REAPER_SLACK = Duration.ofSeconds(32);
+    /** 备战锁在备战期限之后还留多久（{@code BattleRedis.LOCK_EXTRA_TTL_SEC}，§7.2）：第 5 步慢用例等它过期。 */
+    static final Duration PREPARE_LOCK_EXTRA_TTL = Duration.ofSeconds(60);
     /** 第 10 步的短期限。 */
     static final Duration SHORT_DEADLINE = Duration.ofSeconds(20);
     /** 离线结算：房间打完之后再等（快跑：落库 + 首投登记；--slow：12 次重投、第 13 轮用尽，§3.4）。 */
@@ -173,6 +200,12 @@ public final class BattleSettleScenario {
     static final Duration MOVE_SILENCE = Duration.ofSeconds(1);
     /** 同号请求的节拍（gate 缺省每秒 3 条；1.2 s 窗口留 200 ms 余量）。 */
     private static final Duration RATE_WINDOW = Duration.ofMillis(1200);
+    /**
+     * 第 12 步等队伍视图跟上锁的上限：备战 / 取消的写锁与删锁是异步脚本；结算后锁要等落盘才随销账放掉（§7.12），所以给到 5 s，
+     * 每 500 ms 拉一次 GetMyTeam（gate 对它每秒 5 条）。
+     */
+    static final Duration TEAM_VIEW_WAIT = Duration.ofSeconds(5);
+    private static final Duration TEAM_VIEW_POLL = Duration.ofMillis(500);
 
     private final RobotClient client;
     private final PlayerFlow flow;
@@ -180,9 +213,12 @@ public final class BattleSettleScenario {
     private final BattleIds battleIds;
     private final BattleAdminClient admin;
     private final ConfigTables tables;
-    private final String sceneMetricsUrl;
+    /** scene 管理端口（抓指标）；双 scene 切片给两个，按节点之和判定。 */
+    private final List<String> sceneMetricsUrls;
     private final String accountA;
     private final String accountB;
+    /** 第 11 步的探针账号：只在声明了双 scene 切片、而 A、B 登录时恰好同频道时才登录。 */
+    private final String accountC;
     private final boolean expectDevAllowed;
     private final boolean slow;
     private final Duration requestTimeout;
@@ -211,17 +247,29 @@ public final class BattleSettleScenario {
     private final int enterScene;
     private final int releaseSkill;
     private final int leaveGame;
+    private final int createTeam;
+    private final int getMyTeam;
+    private final int disbandTeam;
 
     private Bot a;
     private Bot b;
+    /** B 登录时落在的场景（第 1 步把 B 换到 A 的实例之前）：与 A 同图不同频道时就是第 11 步的跨节点目标。 */
+    private SceneInfoComp bOrigin;
+    /**
+     * 第 11 步找到的另一个 scene 节点上的频道（null = 没有见到第二个节点）。{@code --scene-metrics-url} 不足两个地址时，第 13 步据此把
+     * 「没抓的那个节点上的增量看不到」报成一条写明原因的失败（{@link BattleSettleChecks#partialScrapeProblem}），而不是八条「0.0 → 0.0」。
+     */
+    private SceneInfoComp secondNodeChannel;
     private long petId;
+    /** 第 12 步 A 的单人队（0 = 没建成，后面的队伍视图采样跳过）。 */
+    private long teamId;
     /** 汇总行用。 */
     private long fullBattleId;
     private long fullBattleGold = -1;
     private boolean missionOk;
     private boolean reloginOk;
     private boolean offlineOk;
-    private final List<String> failedSteps = new ArrayList<>();
+    private final StepFailures stepFailures = new StepFailures();
 
     public BattleSettleScenario(RobotClient client, PlayerFlow flow, MessageIds ids, MessageIdRegistry registry, BattleAdminClient admin,
                                 Path tableDir, String sceneMetricsUrl, String accountPrefix, String runTag, boolean expectDevAllowed,
@@ -232,9 +280,10 @@ public final class BattleSettleScenario {
         this.battleIds = BattleIds.resolve(registry);
         this.admin = admin;
         this.tables = ConfigTables.load(tableDir);
-        this.sceneMetricsUrl = sceneMetricsUrl;
+        this.sceneMetricsUrls = BattleSettleChecks.metricsUrls(sceneMetricsUrl);
         this.accountA = accountName(accountPrefix, runTag, "a");
         this.accountB = accountName(accountPrefix, runTag, "b");
+        this.accountC = accountName(accountPrefix, runTag, "c");
         this.expectDevAllowed = expectDevAllowed;
         this.slow = slow;
         this.requestTimeout = requestTimeout;
@@ -257,6 +306,9 @@ public final class BattleSettleScenario {
         this.enterScene = registry.requireId("SceneSceneClientPlayer", "EnterScene");
         this.releaseSkill = registry.requireId("SceneSkillClientPlayer", "ReleaseSkill");
         this.leaveGame = registry.requireId("ClientPlayerLogin", "LeaveGame");
+        this.createTeam = registry.requireId(TEAM_SERVICE, "CreateTeam");
+        this.getMyTeam = registry.requireId(TEAM_SERVICE, "GetMyTeam");
+        this.disbandTeam = registry.requireId(TEAM_SERVICE, "DisbandTeam");
     }
 
     public static String accountName(String prefix, String runTag, String suffix) {
@@ -271,9 +323,11 @@ public final class BattleSettleScenario {
         try {
             runChecks();
         } catch (RobotException | RuntimeException e) {
-            fail("流程", "流程中断", message(e));
+            report.fail("流程中断", message(e), REF);
+            stepFailures.add("流程");
         } finally {
             cleanup();
+            disbandTeamQuietly();
             for (AutoCloseable c : closeables) {
                 try {
                     c.close();
@@ -288,11 +342,8 @@ public final class BattleSettleScenario {
 
     /** 汇总行（§13.8 第 14 步）。 */
     String summaryLine() {
-        if (report.passed() && failedSteps.isEmpty()) {
-            return "BATTLE_SETTLE_OK battle_id=" + Long.toUnsignedString(fullBattleId) + " gold=" + fullBattleGold + " mission="
-                    + (missionOk ? MISSION_12 : 0) + " relogin=" + (reloginOk ? "ok" : "skip") + " offline=" + (offlineOk ? "ok" : "skip");
-        }
-        return "BATTLE_SETTLE_FAIL step=" + (failedSteps.isEmpty() ? "?" : String.join(",", failedSteps));
+        return BattleSettleChecks.summaryLine(report.passed(), stepFailures.steps(), fullBattleId, fullBattleGold, missionOk ? MISSION_12 : 0,
+                reloginOk, offlineOk);
     }
 
     private void runChecks() throws RobotException {
@@ -308,17 +359,13 @@ public final class BattleSettleScenario {
         step("2", this::lobbyRejectsBattleUplink);
 
         if (!expectDevAllowed) {
-            DevGather probe = DevGather.solo(BattleAdminClient.GATHER_PREPARE_ONLY, battleIdSequence.next(System.currentTimeMillis()),
-                    MATCH_MODE_PVE, DUNGEON_1, SEED, deadline(LONG_DEADLINE), deadline(PREPARE_DEADLINE), a.id());
-            BattleAdminClient.HttpResult gather = admin.gatherRaw(probe);
-            BattleAdminClient.HttpResult cancel = admin.cancelPrepare(a.id(), probe.battleId());
-            report.check(gather.status() == 403 && cancel.status() == 403, "dev gather / 取消接口在 prod 运行模式下回 403（--expect-dev deny）",
-                    "gather=" + gather.status() + " cancel=" + cancel.status(), "scene-battle-spec §7.18");
+            step("prod-403", this::devInterfacesDenied);
             return;
         }
 
         // ---- 第 1 步（后半）：B、宝宝、任务 ----
         b = enter("B", accountB);
+        bOrigin = b.sceneInfo();
         report.note("B=" + uid(b.id()));
         step("1", this::prepareFixtures);
         String sceneBefore = scrapeScene();
@@ -329,24 +376,49 @@ public final class BattleSettleScenario {
         if (slow) {
             step("5-slow", this::prepareExpiry);
         }
+        // 第 12、11 步排在这里：A 还在登录时的场景里、没有冻结也没有锁（第 3–5 步保持原来的次序，不受新步骤影响）。
+        // 第 12 步建的单人队留到场景结束（第 6–7 步里还要采样两次）；第 11 步在双 scene 切片上会把 A 换到另一个节点，后面的步骤就在那个节点上跑
+        step("12", this::teamViewPrepareCancel);
+        step("11", this::crossNodeExclusion);
         step("6-7", this::fullBattle);
         step("8", this::reloginNoResend);
         step("9", this::offlineSettlement);
         step("10", this::confirmedThenDestroyed);
+        step("13", () -> metrics(sceneBefore, battleBefore));
+    }
 
-        // ---- 第 13 步：指标 ----
+    /** {@code --expect-dev deny}：gather 与取消接口在 prod 运行模式下必须回 403（§7.18）。 */
+    private void devInterfacesDenied() throws RobotException {
+        DevGather probe = DevGather.solo(BattleAdminClient.GATHER_PREPARE_ONLY, battleIdSequence.next(System.currentTimeMillis()),
+                MATCH_MODE_PVE, DUNGEON_1, SEED, deadline(LONG_DEADLINE), deadline(PREPARE_DEADLINE), a.id());
+        BattleAdminClient.HttpResult gather = admin.gatherRaw(probe);
+        BattleAdminClient.HttpResult cancel = admin.cancelPrepare(a.id(), probe.battleId());
+        report.check(gather.status() == 403 && cancel.status() == 403, "dev gather / 取消接口在 prod 运行模式下回 403（--expect-dev deny）",
+                "gather=" + gather.status() + " cancel=" + cancel.status(), "scene-battle-spec §7.18");
+    }
+
+    // ================================================================ 第 13 步
+
+    /**
+     * 指标（§13.8 第 13 步）：scene 的结算应用、销账放锁有增长；在途闸<b>逐个</b>有增长（只看合计的话，某个服务闸漏了计数也照样通过）；
+     * battle 发件箱 acked 有增长、exhausted 不变。scene 指标抓不到时只记观察记录。
+     * 第 11 步见过第二个 scene 节点、{@code --scene-metrics-url} 却只有一个地址、增量又不达标时，记一条写明原因的失败代替逐条的「0.0 → 0.0」
+     * （A 先后在两个节点上跑步骤，只抓一个节点判不了；{@link BattleSettleChecks#partialScrapeProblem}）。
+     */
+    private void metrics(String sceneBefore, String battleBefore) throws RobotException {
         String sceneAfter = scrapeScene();
         String battleAfter = admin.scrapeMetrics();
         if (sceneBefore != null && sceneAfter != null) {
-            metricGrew(sceneBefore, sceneAfter, "xm_scene_battle_settlements_total", 2, "result=\"applied\"");
-            metricGrew(sceneBefore, sceneAfter, "xm_scene_battle_acks_total", 2, "result=\"released\"");
-            metricGrew(sceneBefore, sceneAfter, "xm_scene_battle_gate_rejects_total", 1);
+            BattleSettleChecks.judgeSceneMetrics(report, sceneBefore, sceneAfter, sceneMetricsUrls.size(),
+                    secondNodeChannel == null ? null : describe(secondNodeChannel));
+            report.note("第 13 步 本场景打不到的闸不断言（asset 要 xm-guild 的资产指令、default 是缺省 REJECT 的方法），增量："
+                    + BattleSettleChecks.gateRejectDeltas(sceneBefore, sceneAfter, BattleSettleChecks.UNEXERCISED_GATES));
+        } else {
+            report.note("第 13 步 scene 指标没有抓到（开头或结尾），scene 侧的三组指标不判");
         }
         metricGrew(battleBefore, battleAfter, "xm_battle_settlement_outbox_total", 1, "event=\"acked\"");
-        double exhaustedBefore = com.game.robot.client.AdminClient.sum(battleBefore, "xm_battle_settlement_outbox_total", "event=\"exhausted\"");
-        double exhaustedAfter = com.game.robot.client.AdminClient.sum(battleAfter, "xm_battle_settlement_outbox_total", "event=\"exhausted\"");
-        report.check(exhaustedAfter == exhaustedBefore, "第 13 步 battle 发件箱没有用尽（exhausted 不变）", exhaustedBefore + " → " + exhaustedAfter,
-                "scene-battle-spec §9");
+        double exhausted = BattleSettleChecks.delta(battleBefore, battleAfter, "xm_battle_settlement_outbox_total", "event=\"exhausted\"");
+        report.check(exhausted == 0, "第 13 步 battle 发件箱没有用尽（exhausted 不变）", "增量 " + exhausted, "scene-battle-spec §9");
     }
 
     // ================================================================ 第 1 步
@@ -532,7 +604,7 @@ public final class BattleSettleScenario {
         BattleAdminClient.HttpResult ignored = admin.cancelPrepare(a.id(), x3b);
         report.check(ignored.status() == 204, "第 5 步（--slow）在线无冻结时取消 X3b 被忽略（204，不删锁，B2）", "status=" + ignored.status(),
                 "scene-battle-spec §7.6");
-        long lockTtlEnd = prepareDeadline + Duration.ofSeconds(60).toMillis();
+        long lockTtlEnd = prepareDeadline + PREPARE_LOCK_EXTRA_TTL.toMillis();
         long retried = pollUntil(Duration.ofMillis(lockTtlEnd - System.currentTimeMillis()).plus(Duration.ofSeconds(15)), Duration.ofSeconds(5),
                 () -> {
                     long xr = battleIdSequence.next(System.currentTimeMillis());
@@ -575,6 +647,7 @@ public final class BattleSettleScenario {
         first.awaitReply(0, battleIds.getBattleState(), hs.stateRequestId(), requestTimeout);
         report.check(hs.success(), "第 6 步 凭票直连握手成功、补拉 140", BattleScenario.describe(hs.response()), REF);
         BattleSupport.sleep(CONFIRM_SETTLE);
+        teamViewSample(true, TEAM_VIEW_WAIT, "第 12 步 战斗中（确认之后，FIGHTING）in_battle = true");
 
         // ---- 重连提示 144：断开大厅、重新登录 ----
         a.connection().close();
@@ -655,6 +728,8 @@ public final class BattleSettleScenario {
         report.check(lockFreed >= 0, "第 7 步 销账放锁：2 s 内再备战 X5 成功（随后取消）", lockFreed >= 0 ? "成功" : "一直被拒（锁没放）",
                 "scene-battle-spec §7.12");
         BattleSupport.sleep(Duration.ofMillis(300));
+        // X4 的锁已随销账放掉、X5 的锁已随取消删掉：队伍视图回到「不在战斗」
+        teamViewSample(false, TEAM_VIEW_WAIT, "第 12 步 结算销账后 in_battle 变回 false");
     }
 
     /** 结算效果（§13.8 第 7 步）：金币、背包、气血、宝宝气血。 */
@@ -806,14 +881,219 @@ public final class BattleSettleScenario {
         report.check(ends == 0, "第 10 步 销毁的局 A 收不到 150", ends + " 条", "scene-battle-spec §7.9");
     }
 
+    // ================================================================ 第 11 步
+
+    /**
+     * 与 5.2 互斥（§13.8 第 11 步，只在双 scene 切片上跑）：PREPARING 时 63 指向另一节点上的场景 → 应答里就是 3023（战斗闸先于换图在途的 3014，
+     * 也不是「先受理 {0}、选目标后再推 23」），A 留在原地；取消后同一条 63 跨节点成功（79 是目标场景、自己的 21 是新实体号）。
+     * 调用时 A 没有冻结也没有锁，还在登录时的场景里。
+     */
+    private void crossNodeExclusion() throws RobotException {
+        boolean declared = sceneMetricsUrls.size() >= 2;
+        SceneInfoComp here = a.sceneInfo();
+        // B 登录时与 A 同图不同频道（第 1 步已把它换到 A 的实例）→ B 原来的频道就在另一个节点上
+        SceneInfoComp remote = BattleSettleChecks.remoteChannel(here, Arrays.asList(bOrigin, b == null ? null : b.sceneInfo()));
+        if (remote == null && declared) {
+            remote = placeProbe(here);
+        }
+        secondNodeChannel = remote;
+        if (remote != null && !declared) {
+            // 这一步照跑（多一份覆盖），但跑完 A 留在另一个节点：第 13 步只有一个节点的指标可看，判不成。现在就写明，第 13 步据此给出一条写明原因的失败
+            report.note("第 11 步 发现第二个 scene 节点（同图另一个频道 " + describe(remote) + "），但 --scene-metrics-url 只给了 "
+                    + sceneMetricsUrls.size() + " 个地址：这一步之后 A 换到另一个节点，第 13 步的 scene 指标要两个节点都抓到才判得了。"
+                    + "双 scene 切片把两个节点的管理端口都给上（逗号分隔，如 --scene-metrics-url http://127.0.0.1:18104,http://127.0.0.1:18114）");
+        }
+        if (remote == null) {
+            if (declared) {
+                report.fail("第 11 步 落位：找到另一个 scene 节点上的同图频道", "--scene-metrics-url 给了 " + sceneMetricsUrls.size()
+                        + " 个地址（声明双 scene 切片），但 B 与探针账号登录 " + CrossNodeScenario.MAX_PLACEMENT_ATTEMPTS
+                        + " 次都落在 A 的频道 " + describe(here) + "；需要 XM_SCENE_NODES=2、per-node 覆盖、每图每节点一个频道", REF_CROSS);
+            } else {
+                report.note("第 11 步（与 5.2 互斥）跳过：A、B 登录时在同一个频道 " + describe(here) + "，没有发现另一个 scene 节点"
+                        + "（单 scene 切片）。双 scene 切片（XM_SCENE_NODES=2 tools/local/start-slice.sh）上要强制跑这一步，把两个节点的管理端口"
+                        + "都传给 --scene-metrics-url（逗号分隔，如 http://127.0.0.1:18104,http://127.0.0.1:18114）");
+            }
+            return;
+        }
+        report.note("第 11 步 跨节点目标 " + describe(remote) + "（A 在 " + describe(here) + "）");
+
+        long x = battleIdSequence.next(System.currentTimeMillis());
+        GatherOutcome prepared = admin.gather(DevGather.solo(BattleAdminClient.GATHER_PREPARE_ONLY, x, MATCH_MODE_PVE, DUNGEON_1, SEED,
+                deadline(LONG_DEADLINE), deadline(PREPARE_DEADLINE), a.id()));
+        if (!prepared.ok()) {
+            throw new RobotException("第 11 步 只备战失败，互斥无从验证：" + prepared.describe());
+        }
+        preparedOnly.add(x);
+        int rejectMark = a.mark();
+        int frozenTip = switchScene(a, remote.getSceneConfigId(), remote.getSceneId());
+        BattleSupport.sleep(MOVE_SILENCE);
+        long enters = CrossNodeScenario.countOf(a.connection().inbox().snapshot(rejectMark), ids.notifyEnterScene());
+        report.check(frozenTip == TIP_ENTER_SCENE_FAILED && enters == 0 && CrossNodeScenario.sameScene(a.sceneInfo(), here),
+                "第 11 步 PREPARING 时 63 指向另一节点的场景 → 应答 3023（不是 3014、不是先受理），A 留在原地",
+                "tip=" + frozenTip + "，79 " + enters + " 条，A 在 " + describe(a.sceneInfo()), REF_CROSS);
+
+        BattleAdminClient.HttpResult cancelled = admin.cancelPrepare(a.id(), x);
+        report.check(cancelled.status() == 204, "第 11 步 取消备战（204）", "status=" + cancelled.status() + " " + cancelled.text(),
+                "scene-battle-spec §7.6");
+        if (cancelled.status() == 204) {
+            preparedOnly.remove(x);
+        }
+        if (frozenTip == 0) {
+            // 闸没挡住，A 已经换过去了：「取消后同一条 63 成功」无从区分，到此为止（上面已记失败）
+            return;
+        }
+        // 删锁是异步脚本；跨节点换图本身不看锁，这里只是让后面的步骤从干净的状态开始
+        BattleSupport.sleep(Duration.ofMillis(300));
+        long oldEntity = a.entity;
+        int crossMark = a.mark();
+        int crossTip = switchScene(a, remote.getSceneConfigId(), remote.getSceneId());
+        report.check(crossTip == 0 && CrossNodeScenario.sameScene(a.sceneInfo(), remote), "第 11 步 取消后同一条 63 跨节点成功：应答 {0}、79 是目标场景",
+                "tip=" + crossTip + "，A 在 " + describe(a.sceneInfo()) + "，目标 " + describe(remote), REF_CROSS);
+        if (crossTip != 0) {
+            return;
+        }
+        Optional<Received> selfActor = a.connection().await(crossMark, r -> CrossNodeScenario.findActor(ids, r, a.id()) != null, observeTimeout);
+        ActorCreateS2C self = selfActor.map(r -> CrossNodeScenario.findActor(ids, r, a.id())).orElse(null);
+        report.check(self != null && self.getEntity() != 0 && self.getEntity() != oldEntity, "第 11 步 跨节点后收到自己的 21（新实体号）",
+                self == null ? observeTimeout.toMillis() + " ms 内没有收到" + a.connection().describeSince(crossMark)
+                        : "entity " + oldEntity + " → " + self.getEntity(), REF_CROSS);
+        if (self != null) {
+            a.entity = self.getEntity();
+            a.at = Vec3.of(self.getTransform().getLocation());
+        }
+        report.note("第 11 步之后 A 留在另一个节点的场景 " + describe(a.sceneInfo()) + "，后面的步骤在那个节点上跑");
+    }
+
+    /**
+     * 声明了双 scene 切片、而 A、B 登录时恰好同频道：用探针账号 C 落位（做法同 {@link CrossNodeScenario} 的账号 2：没落到另一个频道就发 LeaveGame
+     * 断开、等节点目录刷新后重登，至多 {@link CrossNodeScenario#MAX_PLACEMENT_ATTEMPTS} 次）。返回 C 落到的另一个频道（C 已登出），没有为 null。
+     */
+    private SceneInfoComp placeProbe(SceneInfoComp here) throws RobotException {
+        for (int attempt = 1; attempt <= CrossNodeScenario.MAX_PLACEMENT_ATTEMPTS; attempt++) {
+            Bot probe = enter("C", accountC);
+            SceneInfoComp landed = probe.sceneInfo();
+            leave(probe);
+            if (CrossNodeScenario.onDifferentChannels(here, landed)) {
+                report.note("第 11 步 探针账号 C 第 " + attempt + " 次登录落在另一个频道 " + describe(landed));
+                return landed;
+            }
+            if (attempt < CrossNodeScenario.MAX_PLACEMENT_ATTEMPTS) {
+                BattleSupport.sleep(CrossNodeScenario.DIRECTORY_REFRESH_WAIT);
+            }
+        }
+        return null;
+    }
+
+    // ================================================================ 第 12 步
+
+    /**
+     * 队伍视图的前半（§13.8 第 12 步）：A 建单人队（视图里只有自己这一名成员；{@code in_battle} 是 xm-team 在组视图时按战斗锁算的，对谁都一样）→
+     * 备战前 false → 只备战后 true（锁从备战起就在）→ 取消后变回 false。队伍留到场景结束：第 6–7 步里还要在战斗中、销账后各采样一次。
+     */
+    private void teamViewPrepareCancel() throws RobotException {
+        TeamResponse created = a.call(createTeam, CreateTeamRequest.getDefaultInstance(), TeamResponse.parser());
+        int tip = created.getErrorMessage().getId();
+        teamId = created.getTeam().getTeamId();
+        // 4003 = 已在队伍里（带当前视图）：新号不会遇到，重跑同一个 run-tag 时会，照用
+        report.check((tip == 0 || tip == TIP_MEMBER_IN_TEAM) && teamId != 0 && BattleSettleChecks.inBattle(created.getTeam(), a.id()) != null,
+                "第 12 步 A 建单人队，视图里有自己这名成员", TeamScenario.describe(created), REF_TEAM);
+        if (teamId == 0) {
+            throw new RobotException("第 12 步 建队失败，队伍视图无从验证：" + TeamScenario.describe(created));
+        }
+        expectInBattle(false, Duration.ZERO, "第 12 步 备战前 TeamMemberView.in_battle = false");
+
+        long x = battleIdSequence.next(System.currentTimeMillis());
+        GatherOutcome prepared = admin.gather(DevGather.solo(BattleAdminClient.GATHER_PREPARE_ONLY, x, MATCH_MODE_PVE, DUNGEON_1, SEED,
+                deadline(LONG_DEADLINE), deadline(PREPARE_DEADLINE), a.id()));
+        if (!prepared.ok()) {
+            throw new RobotException("第 12 步 只备战失败，队伍视图无从验证：" + prepared.describe());
+        }
+        preparedOnly.add(x);
+        expectInBattle(true, TEAM_VIEW_WAIT, "第 12 步 成员备战后 TeamMemberView.in_battle = true（锁从备战起就在）");
+        BattleAdminClient.HttpResult cancelled = admin.cancelPrepare(a.id(), x);
+        report.check(cancelled.status() == 204, "第 12 步 取消备战（204）", "status=" + cancelled.status() + " " + cancelled.text(),
+                "scene-battle-spec §7.6");
+        if (cancelled.status() == 204) {
+            preparedOnly.remove(x);
+        }
+        expectInBattle(false, TEAM_VIEW_WAIT, "第 12 步 取消备战后 in_battle 变回 false（锁已删）");
+        // 删锁是异步脚本：给它一点时间先于下一次 PREPARE_LOCK 落地
+        BattleSupport.sleep(Duration.ofMillis(300));
+    }
+
+    /**
+     * 嵌在别的步骤里的队伍视图采样（第 6 步确认之后、第 7 步销账放锁之后）：失败记在第 12 步名下，不算到外层步骤头上；抛出的异常也只记一条失败，
+     * 不打断外层步骤。第 12 步前半没建成队时跳过（那里已经记过失败）。
+     */
+    private void teamViewSample(boolean expected, Duration budget, String name) {
+        if (teamId == 0) {
+            return;
+        }
+        long before = report.failures();
+        try {
+            expectInBattle(expected, budget, name);
+        } catch (RobotException | RuntimeException e) {
+            report.fail(name, message(e), REF_TEAM);
+        }
+        stepFailures.attribute("12", report.failures() - before);
+    }
+
+    /** 每 {@link #TEAM_VIEW_POLL} 拉一次 A 的队伍视图，直到自己这名成员的 in_battle 等于期望或超过 {@code budget}；记一条检查。 */
+    private void expectInBattle(boolean expected, Duration budget, String name) throws RobotException {
+        long start = System.nanoTime();
+        Boolean[] last = new Boolean[1];
+        long reachedAt = pollUntil(budget, TEAM_VIEW_POLL, () -> {
+            last[0] = BattleSettleChecks.inBattle(myTeamView(), a.id());
+            return last[0] != null && last[0] == expected;
+        });
+        long tookMs = (System.nanoTime() - start) / 1_000_000;
+        report.check(reachedAt >= 0, name, reachedAt >= 0 ? tookMs + " ms 内读到 in_battle=" + expected
+                : (last[0] == null ? "视图里没有 A 这名成员" : "in_battle 一直是 " + last[0]) + "（等了 " + tookMs + " ms）", REF_TEAM);
+    }
+
+    /**
+     * A 的队伍视图（207 GetMyTeam，不带 notify_online）。队伍不在了（A 重登期间被回收之类）就重建一个单人队再读：in_battle 是读视图时按锁现算的，
+     * 换一支队伍不影响结论。
+     */
+    private TeamView myTeamView() throws RobotException {
+        TeamResponse response = a.call(getMyTeam, GetMyTeamRequest.getDefaultInstance(), TeamResponse.parser());
+        if (response.getErrorMessage().getId() != 0 || !response.hasTeam()) {
+            throw new RobotException("GetMyTeam 期望受理且带视图，实得 " + TeamScenario.describe(response));
+        }
+        if (response.getTeam().getTeamId() != 0) {
+            return response.getTeam();
+        }
+        TeamResponse recreated = a.call(createTeam, CreateTeamRequest.getDefaultInstance(), TeamResponse.parser());
+        if (recreated.getTeam().getTeamId() == 0) {
+            throw new RobotException("A 已不在队伍里，重建单人队也失败：" + TeamScenario.describe(recreated));
+        }
+        report.note("第 12 步 A 原来的队伍 " + uid(teamId) + " 已不在，重建单人队 " + uid(recreated.getTeam().getTeamId()));
+        teamId = recreated.getTeam().getTeamId();
+        return recreated.getTeam();
+    }
+
+    /** 场景结束时解散第 12 步建的单人队（尽力而为：连接已断、队伍已不在都不影响结论）。 */
+    private void disbandTeamQuietly() {
+        if (teamId == 0 || a == null || !a.connection().isOpen()) {
+            return;
+        }
+        try {
+            a.call(disbandTeam, DisbandTeamRequest.newBuilder().setExpectedTeamId(teamId).build(), TeamResponse.parser());
+        } catch (RobotException | RuntimeException ignored) {
+            // 新号每次都换，留下一支单人队不影响下一轮
+        }
+        teamId = 0;
+    }
+
     // ================================================================ 工具
 
     /** 一个已进场的机器人（大厅连接 + 节拍）。只在场景线程上用。 */
     private final class Bot {
         final String name;
         final EnteredPlayer player;
-        final long entity;
-        final Vec3 at;
+        /** 自己当前的实体号与位置（进场时的 21；第 11 步跨节点换图后更新）。 */
+        long entity;
+        Vec3 at;
         private SceneInfoComp scene;
         private final GuildScenario.Pacer pacer = new GuildScenario.Pacer(Duration.ofMillis(60), RATE_WINDOW, 3);
 
@@ -887,19 +1167,19 @@ public final class BattleSettleScenario {
         boolean test() throws RobotException;
     }
 
+    /**
+     * 跑一步。这一步里新增的失败检查（{@code report.check(false, …)} / {@code expectTip} 不符）与抛出的异常都记到它名下，汇总行据此带出步骤号
+     * （§13.8 第 14 步；原来只在抛异常时登记，普通检查失败会输出 {@code step=?}）。
+     */
     private void step(String name, Step body) {
+        long baseline = stepFailures.enter(report.failures());
         try {
             body.run();
         } catch (RobotException | RuntimeException e) {
-            fail(name, "流程中断：第 " + name + " 步", message(e));
+            report.fail("流程中断：第 " + name + " 步", message(e), REF);
             cleanup();
-        }
-    }
-
-    private void fail(String step, String name, String detail) {
-        report.fail(name, detail, REF);
-        if (!failedSteps.contains(step)) {
-            failedSteps.add(step);
+        } finally {
+            stepFailures.leave(name, baseline, report.failures());
         }
     }
 
@@ -1047,13 +1327,25 @@ public final class BattleSettleScenario {
                 + (long) atLeast, b0 + " → " + a0, "scene-battle-spec §9");
     }
 
+    /**
+     * 抓全部 scene 节点的指标，文本拼在一起（{@code AdminClient.sum} 对同名序列求和，拼接即按节点求和）。任何一个地址抓不到就整体不判：
+     * 只拿到一部分节点的数会把「A 在另一个节点上」误判成没有增长。
+     */
     private String scrapeScene() {
-        try {
-            return SceneAdminClient.scrape(sceneMetricsUrl, requestTimeout);
-        } catch (RobotException e) {
-            report.note("抓 scene 指标失败（第 13 步的 scene 指标不判）：" + e.getMessage());
+        StringBuilder all = new StringBuilder();
+        for (String url : sceneMetricsUrls) {
+            try {
+                all.append(SceneAdminClient.scrape(url, requestTimeout)).append('\n');
+            } catch (RobotException e) {
+                report.note("抓 scene 指标失败（第 13 步的 scene 指标不判）：" + e.getMessage());
+                return null;
+            }
+        }
+        if (sceneMetricsUrls.isEmpty()) {
+            report.note("--scene-metrics-url 为空，第 13 步的 scene 指标不判");
             return null;
         }
+        return all.toString();
     }
 
     private static long deadline(Duration fromNow) {

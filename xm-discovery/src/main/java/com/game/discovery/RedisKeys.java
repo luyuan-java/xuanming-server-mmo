@@ -419,6 +419,17 @@ public final class RedisKeys {
     }
 
     /**
+     * 回合制战斗「已销账」墓碑（Java 独有，按 (玩家, 战斗) 一个键）：{@code xm:battle:{<player_id>}:settled:<battle_id>}，String {@code "1"}，
+     * TTL = {@code BattleRedis.SETTLED_TOMBSTONE_TTL_SEC}（10 min）。销账的两段 Lua（scene 的 {@code ACK}、battle 的 {@code ACK_IF_SUPERSEDED}
+     * 删记录分支）顺手写，battle 的落库 {@code STORE_SETTLEMENT} 见到它就不写——防迟到 / 被重放的落库落在销账之后把记录重新造出来、
+     * 下次进场重复发奖。与锁 {@link #battleLock}、待结算记录 {@link #battleSettlements} 共用 hash tag（三键同槽）；
+     * 只许经 {@code KEYS} 传进脚本，不许在 Lua 里用 ARGV 拼。两个号都按无符号十进制。
+     */
+    public static String battleSettled(long playerId, long battleId) {
+        return PREFIX + "battle:{" + Long.toUnsignedString(playerId) + "}:settled:" + Long.toUnsignedString(battleId);
+    }
+
+    /**
      * 活动局结果的持久副本（scene-battle-spec §7.17）：{@code xm:battle:activity-result:<battle_id>}，String = 契约 {@code BattleResultEvent} 字节，
      * TTL 7 天；battle 写，消费方（4.6 帮会）消费后删。
      */

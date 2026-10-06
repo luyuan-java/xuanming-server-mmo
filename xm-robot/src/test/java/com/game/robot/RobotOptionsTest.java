@@ -167,6 +167,52 @@ class RobotOptionsTest {
     }
 
     @Test
+    void battle_settle_scene指标地址可以是逗号分隔的两个节点_原样带给场景_帮助写明双scene切片的用法() throws Exception {
+        RobotOptions single = RobotOptions.parse(List.of("battle-settle", "--run-tag", "t1"), ENV, NOW);
+        assertThat(single.scenario()).isEqualTo(RobotOptions.Scenario.BATTLE_SETTLE);
+        assertThat(single.sceneMetricsUrl()).isEqualTo("http://127.0.0.1:18104");
+
+        RobotOptions two = RobotOptions.parse(List.of("battle-settle", "--scene-metrics-url", "http://127.0.0.1:18104,http://127.0.0.1:18114/"),
+                ENV, NOW);
+        assertThat(two.sceneMetricsUrl()).as("拆分在场景里做（BattleSettleChecks.metricsUrls），这里只去掉结尾斜杠")
+                .isEqualTo("http://127.0.0.1:18104,http://127.0.0.1:18114");
+        assertThat(RobotOptions.usage()).contains("XM_SCENE_NODES=2", "逗号分隔", "in_battle", "3023");
+    }
+
+    @Test
+    void 同一个选项给两次取最后一次_命令行盖过环境变量_编排脚本加的scene指标地址靠这两条让位给调用者() throws Exception {
+        // tools/local/battle-crash-window.sh 在第二个 scene 节点活着时自己加一个 --scene-metrics-url，排在调用者（「--」之后）的参数之前
+        RobotOptions twice = RobotOptions.parse(List.of("battle-settle", "--scene-metrics-url", "http://127.0.0.1:18104,http://127.0.0.1:18114",
+                "--run-tag", "t1", "--scene-metrics-url=http://10.0.0.9:18104"), ENV, NOW);
+        assertThat(twice.sceneMetricsUrl()).as("调用者后给的算数").isEqualTo("http://10.0.0.9:18104");
+
+        // 调用者用环境变量指定时，命令行上再给就会盖掉它——所以脚本在 XM_ROBOT_SCENE_METRICS_URL 已设时不加自己的
+        Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "XM_ROBOT_SCENE_METRICS_URL", "http://env:2");
+        assertThat(RobotOptions.parse(List.of("battle-settle"), env, NOW).sceneMetricsUrl()).isEqualTo("http://env:2");
+        assertThat(RobotOptions.parse(List.of("battle-settle", "--scene-metrics-url", "http://arg:1"), env, NOW).sceneMetricsUrl())
+                .isEqualTo("http://arg:1");
+    }
+
+    @Test
+    void 不带子命令的help也打印故障变体的判定版本标记_纯ASCII_编排脚本按它拒绝旧包() {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream sink = new java.io.PrintStream(out, true, java.nio.charset.StandardCharsets.UTF_8);
+
+        // 脚本的前置检查就是这样调的：java -jar xm-robot.jar --help（没有子命令、没有口令环境变量）
+        assertThat(RobotMain.run(List.of("--help"), Map.of(), sink, sink)).isEqualTo(RobotMain.EXIT_PASS);
+
+        String marker = com.game.robot.scenario.BattleCrashScenario.revisionMarker();
+        assertThat(marker).matches("\\[crash-window-rev=[1-9][0-9]*]");
+        assertThat(out.toString(java.nio.charset.StandardCharsets.UTF_8)).contains("--crash-window").containsOnlyOnce(marker);
+        // 标准输出不是 UTF-8 时（Windows 上不加 -Dstdout.encoding）中文会变样；最坏情形按 US-ASCII 输出，中文全成了「?」，这两个标记原样还在
+        java.io.ByteArrayOutputStream ascii = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream asciiSink = new java.io.PrintStream(ascii, true, java.nio.charset.StandardCharsets.US_ASCII);
+        RobotMain.run(List.of("--help"), Map.of(), asciiSink, asciiSink);
+        String garbled = ascii.toString(java.nio.charset.StandardCharsets.US_ASCII);
+        assertThat(garbled).doesNotContain("故障变体").contains("--crash-window", marker);
+    }
+
+    @Test
     void 帮助() {
         assertThatThrownBy(() -> RobotOptions.parse(List.of("--help"), Map.of(), NOW))
                 .isInstanceOfSatisfying(UsageException.class, e -> assertThat(e.isHelp()).isTrue());

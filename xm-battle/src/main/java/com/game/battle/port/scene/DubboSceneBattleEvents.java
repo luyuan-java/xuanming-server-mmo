@@ -13,9 +13,11 @@ import com.game.discovery.location.SceneAssetLocator.Found;
 import com.game.discovery.location.SceneAssetLocator.Resolution;
 import com.game.proto.BattleConfirmedEvent;
 import com.game.proto.BattleRouting;
+import com.google.protobuf.ByteString;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,9 +25,14 @@ import org.slf4j.LoggerFactory;
  * 确认事件的真实传输（scene-battle-spec §7.16；battle-node-spec §7.9 修订）：按快照路由的 {@code (zone_id, scene_node_id)} 查 scene 目录，
  * 目录里的实例等于 {@code routing.scene_instance_id} 就发往它（正常路径，等价基线 Kafka 的实例过滤）；<b>实例不符</b>（备战所在的 scene 进程已重启 / 下线）
  * → 回落到定位器（D28）：Found 就按它的地址与实例 id 发（{@code rerouted}），NoHolder / 出错 → 不发（{@code skipped}）。
+ * 目录里没有这个节点、目录读失败、条目不提供直连地址或 {@code rpc_port} 越界（损坏的条目），以及快照路由缺 zone / 节点 / 实例，都按实例不符回落。
  *
  * <p>{@code SceneBattleService.confirmBattle} 异步发出、不等结果，只计数；补发节奏仍是 6.2 房间的 17 次。回调不碰房间状态，可以在任意线程上完成。
  * dev 房间（{@code origin = DEV}）照常发确认：scene 侧按锁匹配，dev 房间的 battle_id 不会命中任何锁，零副作用（Q12）。线程安全、不阻塞、不抛异常。
+ *
+ * <p><b>每次确认必有一个计数结局</b>（{@code xm_battle_scene_events_total{kind=confirm}}）：发出计 {@code sent} / {@code rerouted}（应答是 NOT_HERE、
+ * 传输失败 / UNSPECIFIED 时另计 {@code not_here} / {@code error}），不发计 {@code skipped}；回调里的意外（程序缺陷、损坏的输入）计 {@code error}
+ * 并打 ERROR——三段回调都挂在无人持有的 future 上，不兜这一层异常就会被悄悄吞掉。
  */
 public final class DubboSceneBattleEvents implements SceneBattleEvents {
 
@@ -63,12 +70,12 @@ public final class DubboSceneBattleEvents implements SceneBattleEvents {
 
     @Override
     public void confirm(BattleRouting routing, long playerId, long battleId, long deadlineMs) {
-        byte[] body = BattleConfirmedEvent.newBuilder()
+        ByteString body = BattleConfirmedEvent.newBuilder()
                 .setBattleId(battleId)
                 .setPlayerId(playerId)
                 .setDeadlineMs(deadlineMs)
                 .build()
-                .toByteArray();
+                .toByteString();
         CompletableFuture<Optional<SceneNodeInfo>> entry;
         if (routing.getSceneNodeId() == 0 || routing.getZoneId() == 0 || routing.getSceneInstanceId().isEmpty()) {
             entry = CompletableFuture.completedFuture(Optional.empty());
@@ -79,27 +86,45 @@ public final class DubboSceneBattleEvents implements SceneBattleEvents {
                 entry = CompletableFuture.failedFuture(e);
             }
         }
-        entry.whenComplete((found, error) -> {
-            SceneNodeInfo info = error == null && found != null ? found.orElse(null) : null;
-            if (info != null && info.getInstanceId().equals(routing.getSceneInstanceId()) && info.getRpcPort() != 0
-                    && !info.getRpcHost().isBlank()) {
-                send(new SceneAssetEndpoint(info.getZoneId(), info.getNodeId(), info.getInstanceId(), info.getRpcHost(),
-                        info.getRpcPort()), playerId, battleId, body, SceneEventResult.SENT);
-                return;
+        whenDone(entry, playerId, battleId, (found, error) -> {
+            SceneAssetEndpoint endpoint = snapshotEndpoint(routing, error == null && found != null ? found.orElse(null) : null,
+                    playerId, battleId);
+            if (endpoint != null) {
+                send(endpoint, playerId, battleId, body, SceneEventResult.SENT);
+            } else {
+                reroute(playerId, battleId, body);
             }
-            reroute(playerId, battleId, body);
         });
     }
 
+    /**
+     * 快照路由指向的实例还在目录里、并且条目可用 → 它的直连地址；否则 null（调用方回落到定位器）。目录条目的 {@code rpc_port} 是 uint32：
+     * 越界（大于 65535，按 int 读可能为负）的条目按<b>实例不符</b>处理——不在这里构造地址（{@link SceneAssetEndpoint} 会抛异常），
+     * 交给定位器：玩家还在这个节点上时它对同一条目回故障，这次确认计 {@code skipped}（同 {@code SceneAssetLocator.fromEntry} 的防护）。
+     */
+    private static SceneAssetEndpoint snapshotEndpoint(BattleRouting routing, SceneNodeInfo info, long playerId, long battleId) {
+        if (info == null || !info.getInstanceId().equals(routing.getSceneInstanceId()) || info.getRpcPort() == 0
+                || info.getRpcHost().isBlank()) {
+            return null;
+        }
+        if (Integer.compareUnsigned(info.getRpcPort(), 65535) > 0) {
+            log.warn("scene 节点目录条目的 rpc_port 越界，按实例不符回落到定位器 zone={} node={} rpc_port={} battle_id={} player={}",
+                    Integer.toUnsignedString(info.getZoneId()), Integer.toUnsignedString(info.getNodeId()),
+                    Integer.toUnsignedString(info.getRpcPort()), Long.toUnsignedString(battleId), Long.toUnsignedString(playerId));
+            return null;
+        }
+        return new SceneAssetEndpoint(info.getZoneId(), info.getNodeId(), info.getInstanceId(), info.getRpcHost(), info.getRpcPort());
+    }
+
     /** D28：快照路由的实例已不在，问定位器（只认在线位置记录 + 目录）。 */
-    private void reroute(long playerId, long battleId, byte[] body) {
+    private void reroute(long playerId, long battleId, ByteString body) {
         CompletableFuture<Resolution> located;
         try {
             located = locator.locate(playerId);
         } catch (RuntimeException e) {
             located = CompletableFuture.failedFuture(e);
         }
-        located.whenComplete((resolution, error) -> {
+        whenDone(located, playerId, battleId, (resolution, error) -> {
             if (error == null && resolution instanceof Found found) {
                 send(found.endpoint(), playerId, battleId, body, SceneEventResult.REROUTED);
                 return;
@@ -112,11 +137,11 @@ public final class DubboSceneBattleEvents implements SceneBattleEvents {
         });
     }
 
-    private void send(SceneAssetEndpoint endpoint, long playerId, long battleId, byte[] body, SceneEventResult how) {
+    private void send(SceneAssetEndpoint endpoint, long playerId, long battleId, ByteString body, SceneEventResult how) {
         SceneBattleCall call = SceneBattleCall.newBuilder()
                 .setTargetInstanceId(endpoint.instanceId())
                 .setPlayerId(playerId)
-                .setBody(com.google.protobuf.ByteString.copyFrom(body))
+                .setBody(body)
                 .build();
         metrics.sceneEvent(SceneEventKind.CONFIRM, how);
         CompletableFuture<SceneBattleReply> sent;
@@ -125,7 +150,7 @@ public final class DubboSceneBattleEvents implements SceneBattleEvents {
         } catch (RuntimeException e) {
             sent = CompletableFuture.failedFuture(e);
         }
-        sent.whenComplete((reply, error) -> {
+        whenDone(sent, playerId, battleId, (reply, error) -> {
             if (error != null || reply == null || reply.getStatus() == SceneBattleStatus.SCENE_BATTLE_STATUS_UNSPECIFIED) {
                 metrics.sceneEvent(SceneEventKind.CONFIRM, SceneEventResult.ERROR);
                 if (log.isDebugEnabled()) {
@@ -134,6 +159,24 @@ public final class DubboSceneBattleEvents implements SceneBattleEvents {
                 }
             } else if (reply.getStatus() == SceneBattleStatus.SCENE_BATTLE_NOT_HERE) {
                 metrics.sceneEvent(SceneEventKind.CONFIRM, SceneEventResult.NOT_HERE);
+            }
+        });
+    }
+
+    /**
+     * 挂一段回调。端口返回空 future 按出错处理；回调体里抛出的异常<b>不吞</b>：计 {@code error} 并打 ERROR（确认由下一次补发覆盖），
+     * 否则它只会留在 {@code whenComplete} 返回的、无人持有的 future 里——这次确认既没发、也没计数、也没日志。
+     */
+    private <T> void whenDone(CompletableFuture<T> future, long playerId, long battleId, BiConsumer<T, Throwable> body) {
+        CompletableFuture<T> stage = future != null ? future
+                : CompletableFuture.failedFuture(new IllegalStateException("端口返回了空的 future"));
+        stage.whenComplete((value, error) -> {
+            try {
+                body.accept(value, error);
+            } catch (RuntimeException e) {
+                metrics.sceneEvent(SceneEventKind.CONFIRM, SceneEventResult.ERROR);
+                log.error("确认事件处理出错（已计 error，由下一次补发覆盖） battle_id={} player={}", Long.toUnsignedString(battleId),
+                        Long.toUnsignedString(playerId), e);
             }
         });
     }

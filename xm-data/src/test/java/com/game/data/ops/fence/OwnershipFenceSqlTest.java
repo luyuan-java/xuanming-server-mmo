@@ -8,6 +8,7 @@ import com.game.data.testing.DataSqlFixture;
 import com.game.player.store.OwnerState;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
+import com.game.player.store.PlayerStore.ClaimResult;
 import com.game.player.store.PlayerStore.HandOffResult;
 import com.game.player.store.state.PlayerState;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -57,6 +58,11 @@ class OwnershipFenceSqlTest {
     }
 
     private static void noPause(Duration d) {
+    }
+
+    /** login 进游戏时的夺权（它自己的 PlayerStore，同一张表、同一条 SQL）。 */
+    private ClaimResult loginClaim(PlayerStore login) {
+        return db.tx().execute(s -> login.claimOwnership(P));
     }
 
     @Test
@@ -174,6 +180,87 @@ class OwnershipFenceSqlTest {
             assertThat(o.released()).isTrue();
             assertThat(o.ownerEpoch()).isEqualTo(6);
         }
+    }
+
+    @Test
+    void 释放一批_只放给出的人_墓碑并发只等一次上限_其余继续持有_没持有的跳过() {
+        List<String> order = new CopyOnWriteArrayList<>();
+        AdminOwnership hanging = new AdminOwnership(store, db.tx(), (p, e) -> calls.add("takeover"), (p, e) -> {
+            order.add("tombstone:" + p + ":" + e + ":released="
+                    + db.tx().execute(s -> db.playerMapper.selectOwnerForUpdate(p)).released());
+            return new CompletableFuture<>(); // Redis 不应答
+        }, new DataMetrics(new SimpleMeterRegistry()));
+        long now = System.currentTimeMillis();
+        for (long p = 1; p <= 4; p++) {
+            db.insertPlayer(p, 1, 9, 1001, 5, true, 0, now - 1000, now - 1000);
+            assertThat(hanging.claim(p, false, Duration.ofSeconds(1), OwnershipFenceSqlTest::noPause))
+                    .isInstanceOf(Claim.Claimed.class);
+        }
+
+        long start = System.nanoTime();
+        hanging.releaseMany(List.of(1L, 3L, 4242L));
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        // 两个墓碑都不应答：一起只等一个上限（逐个 release 是 2 × 上限）
+        assertThat(elapsedMs).isLessThan(AdminOwnership.TOMBSTONE_WAIT.toMillis() + 1500);
+        // 墓碑先于释放，只给这两个人写；不认识的 4242 跳过
+        assertThat(order).containsExactly("tombstone:1:6:released=false", "tombstone:3:6:released=false");
+        for (long p = 1; p <= 4; p++) {
+            long player = p;
+            OwnerState o = db.tx().execute(s -> db.playerMapper.selectOwnerForUpdate(player));
+            assertThat(o.ownerEpoch()).isEqualTo(6);
+            assertThat(o.released()).as("玩家 %d", p).isEqualTo(p == 1 || p == 3);
+        }
+        assertThat(hanging.heldCount()).isEqualTo(2);
+        assertThat(hanging.epochOf(1)).isEmpty();
+        assertThat(hanging.epochOf(2)).hasValue(6);
+        assertThat(hanging.epochOf(4)).hasValue(6);
+        // 重复释放同一批：什么也不做（不再写墓碑）
+        hanging.releaseMany(List.of(1L, 3L));
+        assertThat(order).hasSize(2);
+        // 续约判失去的人：不写墓碑、不调释放
+        db.jdbc().update("UPDATE player SET owner_epoch = 9 WHERE player_id = ?", 2L);
+        hanging.renew();
+        hanging.releaseMany(List.of(2L));
+        assertThat(order).hasSize(2);
+        assertThat(db.tx().execute(s -> db.playerMapper.selectOwnerForUpdate(2L)).released()).isFalse();
+        assertThat(hanging.lost(2)).as("失去标记随释放清掉").isFalse();
+        hanging.releaseAll();
+        assertThat(hanging.heldCount()).isZero();
+        assertThat(db.tx().execute(s -> db.playerMapper.selectOwnerForUpdate(4L)).released()).isTrue();
+    }
+
+    /**
+     * T-F2（审计 OPS-13）：运维持有期间玩家登录——login 进游戏调 {@code claimOwnership}，撞上 Held(运维的 epoch)，它发的让出请求
+     * {@code OwnerTakeover{E'}} 没有任何 scene 持有（xm-data 不订阅频道），所以 3 s 后回 2005。这里用 login 自己的 PlayerStore 直接验判定。
+     */
+    @Test
+    void 运维持有期间_login的夺权得到Held带运维的epoch_归属原样_续约后依旧_释放后才夺到_反过来运维看到的是在线() {
+        player(5, true, 0);
+        assertThat(ownership.claim(P, false, Duration.ofSeconds(1), OwnershipFenceSqlTest::noPause))
+                .isEqualTo(new Claim.Claimed(6, false));
+        PlayerStore login = db.playerStore(System::currentTimeMillis);
+        long leaseBefore = owner().leaseUntil();
+
+        assertThat(loginClaim(login)).isEqualTo(new ClaimResult.Held(6));
+        // 没夺到就什么也没改：epoch、释放标记、租约都原样
+        assertThat(owner()).isEqualTo(new OwnerState(6, false, leaseBefore));
+
+        // 运维续约之后 login 再试，仍是 Held(6)；运维手里的 epoch 没丢
+        ownership.renew();
+        assertThat(ownership.epochOf(P)).hasValue(6);
+        assertThat(owner().leaseUntil()).isGreaterThanOrEqualTo(leaseBefore);
+        assertThat(loginClaim(login)).isEqualTo(new ClaimResult.Held(6));
+
+        // 运维收尾释放（墓碑先于释放）之后 login 才夺到下一个 epoch
+        ownership.release(P);
+        assertThat(calls).containsExactly("tombstone:1001:6:released=false");
+        assertThat(loginClaim(login)).isEqualTo(new ClaimResult.Claimed(7));
+        // 反过来：玩家已经进了游戏（epoch 7 被持有），运维缺省 reject 看到的是在线、不发让出请求
+        assertThat(ownership.claim(P, false, Duration.ofSeconds(1), OwnershipFenceSqlTest::noPause))
+                .isEqualTo(new Claim.Online(7));
+        assertThat(calls).hasSize(1);
+        assertThat(ownership.heldCount()).isZero();
     }
 
     @Test

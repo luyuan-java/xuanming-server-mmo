@@ -108,6 +108,37 @@ class StoragePlayerRepositoryTest {
                 found -> assertThat(found.data().state()).isEqualTo(state));
     }
 
+    /**
+     * 回合制战斗用到的两样东西随加载读出（scene-battle-spec §13.3）：角色名（战斗快照的 {@code name}，取自 player 行；缺了按空串）
+     * 与结算账本（{@code player_state.battle_ledger}，库里这份就是落库快照，进场即判 durable）。
+     */
+    @Test
+    void 加载带上角色名与战斗结算账本_没有名字按空串() {
+        PlayerRow row = new PlayerRow();
+        row.setPlayerId(1001);
+        row.setOwnerEpoch(6);
+        row.setName("回合制玩家");
+        when(store.findPlayer(1001)).thenReturn(Optional.of(row));
+        PlayerState state = PlayerState.newBuilder().setBattleLedger(com.game.player.store.state.BattleLedgerState.newBuilder()
+                .addApplied(com.game.player.store.state.BattleLedgerEntry.newBuilder().setBattleId(7).setAppliedAtMs(1_700_000_000_007L))
+                .addApplied(com.game.player.store.state.BattleLedgerEntry.newBuilder().setBattleId(0x8000_0000_0000_0001L)
+                        .setAppliedAtMs(1_700_000_000_008L))).build();
+        when(store.loadState(1001)).thenReturn(state);
+        StoragePlayerRepository repository =
+                new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+        List<LoadResult> results = new ArrayList<>();
+
+        repository.load(1001, results::add);
+        logicTasks.forEach(Runnable::run);
+
+        assertThat(results).singleElement().isInstanceOfSatisfying(LoadResult.Found.class, found -> {
+            assertThat(found.data().name()).isEqualTo("回合制玩家");
+            assertThat(found.data().state().getBattleLedger()).isEqualTo(state.getBattleLedger());
+        });
+        row.setName(null);
+        assertThat(StoragePlayerRepository.toData(row, null).name()).as("库里没有名字（旧数据）不让加载失败").isEmpty();
+    }
+
     @Test
     void 玩法数据损坏按加载失败处理() {
         PlayerRow row = new PlayerRow();

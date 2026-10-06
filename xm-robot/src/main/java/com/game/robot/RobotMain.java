@@ -13,6 +13,7 @@ import com.game.robot.flow.PlayerFlow;
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
+import com.game.robot.scenario.BattleCrashScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
@@ -66,8 +67,11 @@ public final class RobotMain {
 
     static int run(List<String> args, Map<String, String> env, PrintStream out, PrintStream err) {
         RobotOptions options;
+        // battle-settle 的故障变体选项：与主选项一起先解析，写错了在建任何连接之前就按参数错误退出
+        CrashWindowOptions crash;
         try {
             options = RobotOptions.parse(args, env, System.currentTimeMillis());
+            crash = options.scenario() == RobotOptions.Scenario.BATTLE_SETTLE ? CrashWindowOptions.parse(args, env) : null;
         } catch (UsageException e) {
             if (e.isHelp()) {
                 out.print(RobotOptions.usage());
@@ -246,14 +250,25 @@ public final class RobotMain {
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.BATTLE_SETTLE) {
-                    BattleSettleScenario scenario = new BattleSettleScenario(client, flow, ids, registry, battleAdmin(options, env),
-                            Path.of(options.tableDir()), options.sceneMetricsUrl(), options.accountPrefix(), options.runTag(),
-                            options.expectDevAllowed(), options.slow(), options.requestTimeout(), options.observeTimeout());
-                    title = "xm-robot battle-settle：" + scenario.accountA() + " 等（期望 dev 接口 " + (options.expectDevAllowed() ? "开放" : "403")
-                            + (options.slow() ? "，含慢用例" : "") + "），" + target + " battle-admin=" + options.battleAdminUrl()
-                            + " scene-metrics=" + options.sceneMetricsUrl();
-                    out.println("== " + title + " 开始 ==");
-                    report = scenario.run();
+                    if (crash != null && crash.enabled()) {
+                        // 故障变体（kill -9 的崩溃窗口）：robot 只做客户端的两段，杀进程与重启由 tools/local/battle-crash-window.sh 编排
+                        BattleCrashScenario scenario = new BattleCrashScenario(client, flow, registry, battleAdmin(options, env),
+                                options.sceneMetricsUrl(), options.accountPrefix(), options.runTag(), crash, options.requestTimeout());
+                        title = "xm-robot battle-settle 故障变体 " + crash.variant().wire() + "（" + crash.phase().wire() + "）："
+                                + (crash.phase() == CrashWindowOptions.Phase.ARM ? scenario.armAccount() : "账号取自状态文件") + "，" + target
+                                + " battle-admin=" + options.battleAdminUrl() + " state=" + crash.stateFile();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                    } else {
+                        BattleSettleScenario scenario = new BattleSettleScenario(client, flow, ids, registry, battleAdmin(options, env),
+                                Path.of(options.tableDir()), options.sceneMetricsUrl(), options.accountPrefix(), options.runTag(),
+                                options.expectDevAllowed(), options.slow(), options.requestTimeout(), options.observeTimeout());
+                        title = "xm-robot battle-settle：" + scenario.accountA() + " 等（期望 dev 接口 " + (options.expectDevAllowed() ? "开放" : "403")
+                                + (options.slow() ? "，含慢用例" : "") + "），" + target + " battle-admin=" + options.battleAdminUrl()
+                                + " scene-metrics=" + options.sceneMetricsUrl();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                    }
                 } else if (options.scenario() == RobotOptions.Scenario.RECONNECT) {
                     ReconnectScenario scenario = new ReconnectScenario(flow, ids, registry, Path.of(options.tableDir()),
                             options.accountPrefix(), options.runTag(), options.requestTimeout(), options.observeTimeout());

@@ -22,7 +22,9 @@ import com.game.discovery.location.SceneAssetLocator;
 import io.netty.channel.DefaultEventLoop;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,8 +34,12 @@ import org.slf4j.LoggerFactory;
  * 一个按节点直连的 {@link NodeRpcClients}{@code <SceneBattleService>}（确认与结算共用，{@code retries = 0}，超时 {@code xm.battle.scene-rpc-timeout}）、
  * 定位器（位置记录只认 {@code o} + scene 目录，D14）与 scene 目录（确认按快照路由直查，§7.16）。
  *
+ * <p><b>直连客户端缓存的清扫</b>（{@link SceneClientSweeper}）：每次发调用都登记目标节点；一条单独的后台守护线程 {@code battle-scene-sweep}
+ * 每 {@link SceneClientSweeper#SWEEP_INTERVAL} 按 zone 现读 scene 目录，把已经不在目录（下线 / 换地址 / 换实例）的节点的客户端逐个销毁。
+ * 目录读是阻塞的，所以不放在 {@code battle-outbox} 或逻辑线程上。
+ *
  * <p>停机（{@link #close}，Spring 销毁 bean 时调用——在 {@code BattleNode} 的「关闸 → 作废全部房间 → 停逻辑线程」之后）：结算发件箱有界等待在途的落库与首投
- * （{@code xm.battle.outbox-drain-timeout}），再停发件箱线程、销毁直连客户端。
+ * （{@code xm.battle.outbox-drain-timeout}），再停发件箱线程、停清扫线程、销毁直连客户端。
  */
 public final class SceneTransport implements AutoCloseable {
 
@@ -44,31 +50,45 @@ public final class SceneTransport implements AutoCloseable {
 
     private final DefaultEventLoop outboxLoop;
     private final NodeRpcClients<SceneBattleService> clients;
+    private final SceneClientSweeper sweeper;
     private final SettlementOutbox settlements;
     private final ActivityResultOutbox activityResults;
     private final DubboSceneBattleEvents sceneEvents;
     private final Duration drainTimeout;
+    private final Duration timeout;
     private final BattleMetrics metrics;
 
     public SceneTransport(RedissonClient redis, BattleMetrics metrics, OutboxMetrics outboxMetrics, SceneTransportProperties props,
                           BattleResultSink results) {
         this.drainTimeout = props.outboxDrainTimeout();
         this.metrics = metrics;
-        Duration timeout = props.sceneRpcTimeout();
+        this.timeout = props.sceneRpcTimeout();
         this.clients = new NodeRpcClients<>(APPLICATION, SceneBattleService.class, DubboGroups.SCENE_BATTLE, timeout,
                 "battle-scene-connect");
         NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        this.sweeper = new SceneClientSweeper(scenes::list, endpoint -> clients.evict(target(endpoint)));
         SceneAssetLocator locator = new SceneAssetLocator(new PlayerLocationDirectory(redis), scenes, null);
         BattleRedis scripts = new BattleRedis(redis);
         this.outboxLoop = new DefaultEventLoop(new DefaultThreadFactory("battle-outbox", true));
         EventLoopBattleScheduler outbox = new EventLoopBattleScheduler(outboxLoop);
         this.settlements = new SettlementOutbox(outbox, SettlementOutbox.Store.redis(scripts), locator::resolveAsync,
-                (endpoint, call) -> clients.call(target(endpoint), timeout, service -> service.applySettlement(call)), outboxMetrics,
+                (endpoint, call) -> call(endpoint, service -> service.applySettlement(call)), outboxMetrics,
                 () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
         this.activityResults = new ActivityResultOutbox(outbox, ActivityResultOutbox.Store.redis(scripts), results, outboxMetrics,
                 () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
         this.sceneEvents = new DubboSceneBattleEvents(scenes::findAsync, locator::resolveAsync,
-                (endpoint, call) -> clients.call(target(endpoint), timeout, service -> service.confirmBattle(call)), metrics);
+                (endpoint, call) -> call(endpoint, service -> service.confirmBattle(call)), metrics);
+        this.sweeper.start(SceneClientSweeper.SWEEP_INTERVAL);
+    }
+
+    /**
+     * 对一个 scene 节点发一次直连调用，并把它登记给清扫。先取（或开始建）客户端、后登记：清扫若恰好排在两步之间，这个节点只是晚一轮被看到，
+     * 不会出现「客户端建了却没登记、永远扫不到」。
+     */
+    private <R> CompletableFuture<R> call(SceneAssetEndpoint endpoint, Function<SceneBattleService, CompletableFuture<R>> invocation) {
+        CompletableFuture<R> sent = clients.call(target(endpoint), timeout, invocation);
+        sweeper.track(endpoint);
+        return sent;
     }
 
     public SettlementOutbox settlements() {
@@ -94,15 +114,26 @@ public final class SceneTransport implements AutoCloseable {
         return sceneEvents;
     }
 
+    /** 直连客户端缓存的清扫（测试 / 排障用）。 */
+    SceneClientSweeper sweeper() {
+        return sweeper;
+    }
+
+    /** 当前缓存的直连客户端数（含正在建的；测试 / 排障用）。 */
+    int cachedClients() {
+        return clients.size();
+    }
+
     static NodeRpcClients.Target target(SceneAssetEndpoint endpoint) {
         return new NodeRpcClients.Target(endpoint.host(), endpoint.port(), endpoint.instanceId());
     }
 
-    /** 有界排空结算发件箱 → 停发件箱线程 → 销毁直连客户端。幂等。 */
+    /** 有界排空结算发件箱 → 停发件箱线程 → 停清扫线程 → 销毁直连客户端。幂等。 */
     @Override
     public void close() {
         settlements.drainAndClose(drainTimeout);
         outboxLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly(3, TimeUnit.SECONDS);
+        sweeper.close();
         clients.close();
         log.info("battle → scene 传输已关闭");
     }

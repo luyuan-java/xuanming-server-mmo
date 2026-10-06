@@ -4,6 +4,7 @@ import com.game.proto.trade.MarketScope;
 import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
+import com.game.robot.scenario.BattleCrashScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
@@ -111,8 +112,10 @@ public record RobotOptions(
         BATTLE_EDGE,
         /**
          * scene 侧战斗冻结与结算应用（批次 6.3，scene-battle-spec §13.8）；子命令写作 {@code battle-settle}。经 xm-battle 的 dev gather 真实备战 / 建房，
-         * 核对在途闸、重连 144、结算落地（金币 / 背包 / 气血 / 宝宝 / 任务击杀）恰好一次、离线结算、确认后销毁的判废；{@code --slow} 另跑备战到期与
-         * 越过重投窗口的离线结算。
+         * 核对在途闸、重连 144、结算落地（金币 / 背包 / 气血 / 宝宝 / 任务击杀）恰好一次、离线结算、确认后销毁的判废、队伍视图的 in_battle、
+         * 双 scene 切片上与跨节点换图的互斥；{@code --slow} 另跑备战到期与越过重投窗口的离线结算。
+         * 附加选项 {@code --crash-window / --crash-phase / --crash-state}（{@link CrashWindowOptions}）跑故障变体：kill -9 的两个崩溃窗口，
+         * 杀进程与重启由 {@code tools/local/battle-crash-window.sh} 编排。
          */
         BATTLE_SETTLE
     }
@@ -137,7 +140,7 @@ public record RobotOptions(
                 "currency / attribute：服务端运行模式的期望：allow（dev / test，GM 指令生效）/ deny（prod，gate 推 23 {1006} 且不转发）"),
         DATA_URL("data-url", "XM_ROBOT_DATA_URL", "http://127.0.0.1:18106", "audit / guard / zones / queue / drain / killswitch：xm-data 管理端口（运维接口）"),
         SCENE_METRICS_URL("scene-metrics-url", "XM_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
-                "audit / guard：xm-scene 管理端口（抓指标）"),
+                "audit / guard：xm-scene 管理端口（抓指标）；battle-settle 可给逗号分隔的多个地址（双 scene 切片的两个节点，按节点之和判定）"),
         TABLE_DIR("table-dir", "XM_ROBOT_TABLE_DIR", "config-data/tables",
                 "reconnect / team：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点；team 选换图目标）"),
         TRADE_ADMIN_URL("trade-admin-url", "XM_ROBOT_TRADE_ADMIN_URL", "http://127.0.0.1:18111",
@@ -159,7 +162,14 @@ public record RobotOptions(
         EXPECT_DEV("expect-dev", "XM_ROBOT_EXPECT_DEV", "allow",
                 "battle / battle-edge：xm-battle dev 接口的期望：allow（dev / test 运行模式）/ deny（prod：403，只跑不需要建房的步骤）"),
         SLOW("slow", "XM_ROBOT_SLOW", "false",
-                "battle-edge：也跑慢用例（连上不握手 10 ± 1 s 被关）；写 --slow 即 true，也接受 --slow true / false");
+                "battle-edge：也跑慢用例（连上不握手 10 ± 1 s 被关）；写 --slow 即 true，也接受 --slow true / false"),
+        CRASH_WINDOW("crash-window", "XM_ROBOT_CRASH_WINDOW", "none",
+                "battle-settle 的故障变体（scene-battle-spec §13.8，由 tools/local/battle-crash-window.sh 编排 kill -9 与重启）：none（跑完整场景）/ "
+                        + "scene-after-150（大厅收到 150 后 kill scene）/ battle-after-store（结算落库后、大厅 150 之前 kill battle）"),
+        CRASH_PHASE("crash-phase", "XM_ROBOT_CRASH_PHASE", "arm",
+                "battle-settle 故障变体的阶段：arm（打到断点、写状态文件；battle-after-store 还要留在线上看 rescue 到账）/ verify（进程重启之后重登核对）"),
+        CRASH_STATE("crash-state", "XM_ROBOT_CRASH_STATE", "run/battle-crash-window.state",
+                "battle-settle 故障变体的状态文件：arm 在断点处原子地写出（脚本等它出现就 kill -9），verify 读它");
 
         /** 布尔开关：命令行可以只写 {@code --名字}（下一个参数不是 true / false 时不吃掉它）。 */
         boolean isFlag() {
@@ -403,13 +413,21 @@ public record RobotOptions(
                 + "134 静默丢、再备战 1006 → 取消解闸 → dev gather 建房、重登收 144、补签直连挂机打完 → 大厅 184 先于 150 且与直连逐字段相同 → "
                 + "金币 / 背包 / 气血 / 宝宝 / 任务 12 恰好落地一次、锁已放 → 重登不重发 → 离线结算登录后到账一次 → 确认后销毁按期限 + 10 s 判废 → 指标；"
                 + "--slow 另跑备战到期（约 70 s）、离线结算越过重投窗口（130 s）；--expect-dev deny 只核对 gather 403；"
-                + "读 --table-dir 的 World / Skill / Item 表，scene 指标取 --scene-metrics-url\n");
+                + "读 --table-dir 的 World / Skill / Item 表，scene 指标取 --scene-metrics-url。"
+                + "另有队伍视图（A 建单人队：备战后 in_battle = true，取消 / 结算销账后变回 false，需要 xm-team）；"
+                + "双 scene 切片（XM_SCENE_NODES=2）把两个节点的管理端口都传给 --scene-metrics-url（逗号分隔）：指标按节点之和判定，"
+                + "并跑「PREPARING 时 63 指向另一节点 → 3023，取消后跨节点成功」，单 scene 切片跳过这一步。"
+                + "故障变体 --crash-window scene-after-150 / battle-after-store 配 --crash-phase arm / verify、--crash-state，"
+                + "由 tools/local/battle-crash-window.sh 编排 kill -9 与重启（robot 自己不杀进程）\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
             out.append(String.format(Locale.ROOT, "  --%-24s %-32s %s%s%n", opt.arg + " <值>", opt.env, opt.help,
                     opt.defaultValue == null ? "" : "，缺省 " + opt.defaultValue));
         }
+        // 标记本身是纯 ASCII（编排脚本按子串匹配，不受标准输出编码影响）；改了故障变体的判定就递增，见 BattleCrashChecks.STATE_VERSION
+        out.append("battle-settle 故障变体的判定版本 ").append(BattleCrashScenario.revisionMarker())
+                .append("：tools/local/battle-crash-window.sh 按它拒绝判定过期的旧包\n");
         out.append("退出码：0 = 全部检查通过；1 = 有检查失败或流程中断；2 = 参数错误\n");
         return out.toString();
     }

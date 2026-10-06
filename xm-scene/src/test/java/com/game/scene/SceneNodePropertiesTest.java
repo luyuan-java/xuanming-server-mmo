@@ -3,9 +3,11 @@ package com.game.scene;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.discovery.battle.BattleRedis;
 import com.game.scene.audit.GainAnomalyDetector.Threshold;
 import com.game.scene.storage.HandOffSettings;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.bind.BindException;
@@ -43,6 +45,52 @@ class SceneNodePropertiesTest {
         assertThatThrownBy(() -> bind(Map.of("xm.scene.asset-rpc-port", "0"))).isInstanceOf(BindException.class);
         assertThatThrownBy(() -> bind(Map.of("xm.scene.asset-rpc-port", "65536"))).isInstanceOf(BindException.class);
         assertThatThrownBy(() -> bind(Map.of("xm.scene.asset-op-max-inflight", "0"))).isInstanceOf(BindException.class);
+    }
+
+    /**
+     * scene-battle-spec §8 / §7.2 常量表：reaper 间隔缺省 30 s = 跨进程常量 {@code REAPER_INTERVAL}，只许调小（0 &lt; 值 ≤ 30 s）——
+     * 调大就破坏「FIGHTING 判废宽限 + 间隔 &lt; 锁余量」（第一次 rescue 最晚在期限 + 40 s，此时锁一定还在）。本机切片设 2 s。
+     */
+    @Test
+    void 回合制战斗_reaper间隔缺省30秒_只许调小_0与负数与超过30秒拒启() {
+        assertThat(bind(Map.of()).scene().battle().reaperInterval()).isEqualTo(Duration.ofSeconds(30))
+                .isEqualTo(BattleRedis.REAPER_INTERVAL);
+        assertThat(BattleRedis.FIGHTING_EXPIRY_GRACE.plus(BattleRedis.REAPER_INTERVAL))
+                .as("校验要保住的不等式：宽限 + 间隔 < 锁余量").isLessThan(Duration.ofSeconds(BattleRedis.LOCK_EXTRA_TTL_SEC));
+
+        assertThat(reaperInterval("2s")).as("本机切片").isEqualTo(Duration.ofSeconds(2));
+        assertThat(reaperInterval("30s")).as("上界本身合法").isEqualTo(Duration.ofSeconds(30));
+        assertThat(reaperInterval("29999ms")).isEqualTo(Duration.ofMillis(29_999));
+        assertThat(reaperInterval("1ms")).as("下界是开区间，任何正数都行").isEqualTo(Duration.ofMillis(1));
+        assertThat(reaperInterval("5")).as("不带单位按秒").isEqualTo(Duration.ofSeconds(5));
+
+        for (String rejected : List.of("0", "0s", "0ms", "-1s", "-1", "30001ms", "31s", "31", "1m", "1h")) {
+            assertThatThrownBy(() -> reaperInterval(rejected)).as("reaper-interval = %s 应拒启", rejected)
+                    .isInstanceOf(BindException.class)
+                    .hasRootCauseInstanceOf(IllegalArgumentException.class)
+                    .rootCause().hasMessageContaining("xm.scene.battle.reaper-interval");
+        }
+    }
+
+    private static Duration reaperInterval(String value) {
+        return bind(Map.of("xm.scene.battle.reaper-interval", value)).scene().battle().reaperInterval();
+    }
+
+    @Test
+    void 回合制战斗入口_在途上限缺省256_与资产通道各自独立_可覆盖_小于1拒启() {
+        SceneNodeProperties.SceneSettings s = bind(Map.of()).scene();
+        assertThat(s.battleRpcMaxInflight()).isEqualTo(256);
+
+        SceneNodeProperties.SceneSettings custom = bind(Map.of("xm.scene.battle-rpc-max-inflight", "8")).scene();
+        assertThat(custom.battleRpcMaxInflight()).isEqualTo(8);
+        assertThat(custom.assetOpMaxInflight()).as("两个上限互不影响").isEqualTo(256);
+        assertThat(bind(Map.of("xm.scene.asset-op-max-inflight", "64")).scene().battleRpcMaxInflight()).isEqualTo(256);
+        assertThat(bind(Map.of("xm.scene.battle-rpc-max-inflight", "1")).scene().battleRpcMaxInflight()).isEqualTo(1);
+
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.battle-rpc-max-inflight", "0"))).isInstanceOf(BindException.class)
+                .hasRootCauseInstanceOf(IllegalArgumentException.class)
+                .rootCause().hasMessageContaining("xm.scene.battle-rpc-max-inflight");
+        assertThatThrownBy(() -> bind(Map.of("xm.scene.battle-rpc-max-inflight", "-1"))).isInstanceOf(BindException.class);
     }
 
     @Test

@@ -183,6 +183,18 @@
                     <version>3.13.0</version>
                 </plugin>
                 <plugin>
+                    <!-- 测试进程的总时限：某条用例无限等待（例如对永不完成的 future 调 join()）时，让构建在 30 分钟后失败，
+                         而不是把 surefire 进程永远挂在那里（2026-10-06 本机实例：一个挂死的 fork 占着模块 target 一个多小时）。
+                         最慢的模块（xm-scene / xm-data 带真依赖）本机约 3 分钟，CI 上按几倍估仍远小于此值。
+                         版本钉在此前由 Maven 缺省绑定解析出来的 3.2.5，行为不变；各模块自己的 configuration 与这里合并。 -->
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.2.5</version>
+                    <configuration>
+                        <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                    </configuration>
+                </plugin>
+                <plugin>
                     <groupId>io.github.ascopes</groupId>
                     <artifactId>protobuf-maven-plugin</artifactId>
                     <version>${protobuf-maven-plugin.version}</version>

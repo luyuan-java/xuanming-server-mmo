@@ -44,7 +44,18 @@ public final class SceneBattleMetrics {
         OFFLINE_ERROR
     }
 
-    /** 确认的结论（§7.7）。 */
+    /**
+     * 确认的结论（§7.7）。口径（审计 OPS-22）——<b>不是「每条确认恰好计一次」</b>：
+     * <ul>
+     *   <li>{@code error} 既计「确认脚本失败」（离线 / 交出冻结 / 迟到确认那一段 CONFIRM），也计「升级 / 再续之后的续锁脚本失败」——
+     *       后者与同一条确认已计的 {@code upgraded} / {@code reextended} <b>叠加</b>，所以 Σconfirms 可以大于收到的确认数；
+     *       迟到确认 {@code deadline_ms = 0} 时补发的那次续期失败同样计在这里；</li>
+     *   <li>{@code idempotent} 除了「已 FIGHTING 且续期已确认」的零 Redis 重复确认，也包含迟到确认回调时「实例已换 / 已在交出冻结 /
+     *       已有别的局或同局 FIGHTING 的冻结」这些没有可做之事的情形；</li>
+     *   <li>{@code upgraded} 也包含迟到确认回调时发现已有同局备战冻结、按正常确认升级的那一支（审计 FRZ-5）；</li>
+     *   <li>{@code ledger_hit} 也包含「本实例已为这一局发出过销账」（账本已 forget，迟到的确认回复是过期结果）。</li>
+     * </ul>
+     */
     public enum Confirm {
         UPGRADED, IDEMPOTENT, REEXTENDED, MISMATCH, REBUILT, FROZEN_EXTENDED, OFFLINE_EXTENDED, OFFLINE_MISS, LEDGER_HIT, INVALID, ERROR
     }
@@ -54,9 +65,19 @@ public final class SceneBattleMetrics {
         LOGIN, LATE_CONFIRM, CARRIED
     }
 
-    /** 冻结重建的结论。 */
+    /**
+     * 冻结重建的结论。{@code reason = login} 时「锁指向的局在本次恢复读到的待结算字段里」分三种计（审计 OPS-13）：
+     * <ul>
+     *   <li>{@code skipped_corrupt}：那个字段是坏的（同时计 {@code pending_corrupt}）——只有它表示坏记录；</li>
+     *   <li>{@code ledger_hit}：这一局本轮刚应用或账本命中（离线结算后在期限内登录的<b>常态</b>），也包含锁指向账本里已有的局、
+     *       以及本实例已为它发出过销账的局（过期快照）；</li>
+     *   <li>{@code skipped_pending}：这一局的记录被延后（金币被拒等），或排在延后的那一局之后还没轮到。</li>
+     * </ul>
+     * {@code rebuilt}：重建并复核命中（含复核返回「锁上已是 F、没改」）；{@code reverted}：复核没命中、撤销；{@code error}：复核脚本失败（冻结保守保留）；
+     * {@code miss}：进场恢复回来时已在交出冻结、迟到确认没有可重建的（锁不是本局 / 实例已换 / 已有冻结）。
+     */
     public enum RebuildResult {
-        REBUILT, REVERTED, LEDGER_HIT, SKIPPED_CORRUPT, MISS, ERROR
+        REBUILT, REVERTED, LEDGER_HIT, SKIPPED_CORRUPT, SKIPPED_PENDING, MISS, ERROR
     }
 
     /** 冻结作废时的阶段（§7.9）。 */
@@ -89,7 +110,11 @@ public final class SceneBattleMetrics {
         ONLINE, BY_LOCK, LOGIN, RESCUE
     }
 
-    /** 结算到达的结论。 */
+    /**
+     * 结算到达的结论。口径（审计 OPS-22）：{@code path = by_lock} 的 {@code deferred_recovering} 也包含「读锁回来时实例已换」
+     * （回调时玩家在交出冻结则计 {@code deferred_frozen}）；{@code already_applied} 也包含「本实例已为这一局发出过销账、过期的读又把它带回来」
+     * （账本可能已 forget，按已应用收尾、不再应用，审计 FRZ-1）。
+     */
     public enum SettlementResult {
         APPLIED, ALREADY_APPLIED, DISCARDED_INVALID, DISCARDED_MISMATCH, DISCARDED_VOID, DEFERRED_FROZEN, DEFERRED_CURRENCY,
         DEFERRED_RECOVERING, DEFERRED_LOCK_READ, DEFERRED_LEDGER, NOT_HERE
@@ -105,7 +130,11 @@ public final class SceneBattleMetrics {
         RELEASED, NOT_OURS, DEFERRED, ERROR
     }
 
-    /** 进场恢复的结局（§7.8）。 */
+    /**
+     * 进场恢复的结局（§7.8）。{@code retry}：恢复读失败（J18），或有延后的待结算记录（后者同时计
+     * {@code settlements{path=login,result=deferred_*}}，据此区分）；{@code error}：读回来了，但处理快照（第 2–4 步）时出了意外异常——
+     * 状态同样置 RETRY 由 reaper 重跑，只是单独计数（审计 FRZ-2 / OPS-11；正常恒为 0，非 0 就是代码缺陷）。更旧一代的恢复读被丢弃时不计数。
+     */
     public enum Recovery {
         READY, RETRY, ERROR
     }

@@ -10,6 +10,7 @@ import com.game.data.ops.pb.OpsJobStatus;
 import com.game.data.snapshot.SnapshotCauses;
 import com.game.gateway.store.ZoneManualStatus;
 import com.game.player.store.state.PlayerState;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
@@ -24,7 +25,11 @@ class ZoneRollbackSqlTest {
     @AfterEach
     void tearDown() throws Exception {
         if (h != null) {
-            h.close();
+            try {
+                h.assertPlayerOutcomeLabelsWithinFixedSet();
+            } finally {
+                h.close();
+            }
         }
     }
 
@@ -190,5 +195,122 @@ class ZoneRollbackSqlTest {
                     assertThat(e.status()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
                     assertThat(e.code()).isEqualTo("plan_too_large");
                 });
+    }
+
+    // ------------------------------------------------------------------ 审计 OPS-13：整区下的帮会检查（T-R3 的 D11 / D12）
+
+    /** 区 1 里 {@code count} 名离线玩家（号从 {@code first} 起连续），各有一份目标时刻之前的 LOGOUT 快照。一个事务里造完。 */
+    private List<Long> zonePlayers(long first, int count, long target) {
+        long now = System.currentTimeMillis();
+        List<Long> ids = new ArrayList<>();
+        h.db.tx().executeWithoutResult(status -> {
+            for (long p = first; p < first + count; p++) {
+                h.player(p, 1, RollbackJobSqlTest.currentState().toByteArray(), now - 1000, 2, false);
+                h.snapshot(100_000 + p, p, target - 10, SnapshotCauses.LOGOUT, 1, 5, 2002,
+                        RollbackJobSqlTest.snapshotState().toByteArray());
+                ids.add(p);
+            }
+        });
+        return ids;
+    }
+
+    private static RollbackRequest.Body zonesAccepting(long target) {
+        return new RollbackRequest.Body("zones", null, List.of(1L), false, null, target, null, null, true, false,
+                "合服前回滚（已核对帮会侧）", false);
+    }
+
+    /** 这些玩家都被夺到过（epoch 2 → 3）并已释放，什么也没被写。 */
+    private void assertZoneUntouchedAndReleased(List<Long> ids) throws Exception {
+        for (long p : ids) {
+            assertThat(persisted(p)).as("玩家 %d 的现档", p).isEqualTo(RollbackJobSqlTest.currentState());
+            var owner = h.db.tx().execute(s -> h.db.playerMapper.selectOwnerForUpdate(p));
+            assertThat(owner.ownerEpoch()).as("玩家 %d 被夺到过", p).isEqualTo(3);
+            assertThat(owner.released()).as("玩家 %d 已释放", p).isTrue();
+        }
+        assertThat(h.count("SELECT COUNT(*) FROM player_snapshot WHERE cause = ?", SnapshotCauses.PRE_ROLLBACK)).isZero();
+        assertThat(h.count("SELECT COUNT(*) FROM transaction_log WHERE reason = 16")).isZero();
+        assertThat(h.ownership.heldCount()).isZero();
+    }
+
+    @Test
+    void 整区_一人有帮会分歧_缺省REJECTED_全区谁也不写全部释放_带原因放行后全区写成() throws Exception {
+        h = new RollbackHarness(Map.of());
+        h.zone(1, ZoneManualStatus.MAINTENANCE.code());
+        long target = System.currentTimeMillis() - 60_000;
+        List<Long> ids = zonePlayers(11, 3, target);
+        long after = System.currentTimeMillis();
+        // 只有 12 在快照之后有一条已应用的帮会指令
+        h.guildAnswers.add(r -> RollbackHarness.ok(RollbackHarness.op(70, 12, after)));
+
+        OpsJobRow rejected = h.await(h.submit(zones(List.of(1L), false, target), "k1"));
+
+        assertThat(rejected.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_REJECTED);
+        assertThat(rejected.getResultCode()).isEqualTo("rollback_guild_divergence");
+        assertThat(rejected.getDivergenceRows()).isEqualTo(1);
+        assertThat(h.summary(rejected).at("/guild/sample/0/playerId").asText()).isEqualTo("12");
+        assertThat(h.summary(rejected).at("/guild/sample/0/opId").asText()).isEqualTo("70");
+        // 整区全有或全无：没有分歧的 11、13 也不写
+        assertThat(h.jobs.players(rejected.getJobId(), 0, 10)).extracting(OpsJobPlayerRow::getOutcome)
+                .containsExactly("rejected", "rejected", "rejected");
+        assertThat(h.eventTypes(rejected.getJobId())).doesNotContain("ACCEPTED", "WRITE");
+        assertThat(h.guildCalls).hasSize(1);
+        assertThat(h.guildCalls.get(0).getPlayerIdsList()).containsExactly(11L, 12L, 13L);
+        assertZoneUntouchedAndReleased(ids);
+
+        OpsJobRow accepted = h.await(h.submit(zonesAccepting(target), "k2"));
+
+        assertThat(accepted.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_SUCCEEDED);
+        assertThat(accepted.getAcceptedDivergence()).isTrue();
+        assertThat(accepted.getPlayersAffected()).isEqualTo(3);
+        assertThat(h.eventTypes(accepted.getJobId())).containsSubsequence("CHECK", "ACCEPTED", "WRITE");
+        for (long p : ids) {
+            assertThat(persisted(p).getCurrency().getBalances(0)).as("玩家 %d", p).isEqualTo(1000);
+        }
+    }
+
+    @Test
+    void 整区_帮会问不到_FAILED_check_failed_带了放行也无效_全区零写入全部释放() throws Exception {
+        h = new RollbackHarness(Map.of(), false); // 帮会检查没装配
+        h.zone(1, ZoneManualStatus.MAINTENANCE.code());
+        long target = System.currentTimeMillis() - 60_000;
+        List<Long> ids = zonePlayers(11, 3, target);
+
+        OpsJobRow job = h.await(h.submit(zonesAccepting(target), "k1"));
+
+        assertThat(job.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_FAILED);
+        assertThat(job.getResultCode()).isEqualTo("rollback_guild_check_failed");
+        assertThat(job.getAcceptedDivergence()).isFalse();
+        assertThat(h.summary(job).at("/guild/checkFailed").asBoolean()).isTrue();
+        assertThat(h.eventTypes(job.getJobId())).doesNotContain("ACCEPTED", "WRITE");
+        assertThat(h.jobs.players(job.getJobId(), 0, 10)).extracting(OpsJobPlayerRow::getOutcome)
+                .containsExactly("rejected", "rejected", "rejected");
+        assertZoneUntouchedAndReleased(ids);
+    }
+
+    @Test
+    void 整区超过一块_第二块帮会检查失败_第一块已通过的人也不写_谁也不写() throws Exception {
+        h = new RollbackHarness(Map.of());
+        h.zone(1, ZoneManualStatus.CLOSED.code());
+        long target = System.currentTimeMillis() - 60_000;
+        // 101 人：帮会检查每块 100 人，第 101 人落在第二块
+        List<Long> ids = zonePlayers(1000, GuildDivergenceGate.CHUNK + 1, target);
+        h.guildAnswers.add(r -> RollbackHarness.ok());
+        h.guildAnswers.add(r -> com.game.api.proto.ListAppliedAssetOpsSinceResponse.newBuilder()
+                .setResult(com.game.api.proto.ListAppliedResult.LIST_APPLIED_RESULT_ERROR).setDetail("查询超时").build());
+
+        OpsJobRow job = h.await(h.submit(zonesAccepting(target), "k1"));
+
+        assertThat(job.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_FAILED);
+        assertThat(job.getResultCode()).isEqualTo("rollback_guild_check_failed");
+        assertThat(job.getPlayersPlanned()).isEqualTo(101);
+        assertThat(job.getPlayersAffected()).isZero();
+        // 两块各问了一次：第一块 100 人通过、第二块 1 人失败
+        assertThat(h.guildCalls).hasSize(2);
+        assertThat(h.guildCalls.get(0).getPlayerIdsCount()).isEqualTo(100);
+        assertThat(h.guildCalls.get(1).getPlayerIdsList()).containsExactly(1100L);
+        assertThat(h.summary(job).at("/guild/failure").asText()).contains("LIST_APPLIED_RESULT_ERROR");
+        assertThat(h.jobs.players(job.getJobId(), 0, 200)).hasSize(101).extracting(OpsJobPlayerRow::getOutcome)
+                .containsOnly("rejected");
+        assertZoneUntouchedAndReleased(ids);
     }
 }

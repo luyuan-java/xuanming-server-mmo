@@ -175,8 +175,9 @@ public class BattleConfiguration {
 
     /**
      * battle → scene 的真实传输（批次 6.3，scene-battle-spec §7.15–§7.17）：{@code battle-outbox} 线程、按节点直连的 {@code SceneBattleService} 客户端、
-     * 定位器与 scene 目录。启动门禁：{@code xm.battle.scene-rpc-timeout} 必须大于 Redis 单条命令最坏耗时（§7.3、§10.4）。
-     * Spring 销毁它时（{@link BattleNode} 停机之后）有界排空结算发件箱。
+     * 定位器与 scene 目录，外加一条清扫直连客户端缓存的后台守护线程（{@code battle-scene-sweep}）。启动门禁：{@code xm.battle.scene-rpc-timeout}
+     * 必须大于 Redis 单条命令最坏耗时（§7.3、§10.4）。Spring 销毁它时（{@link BattleNode} 停机之后）有界排空结算发件箱、停清扫线程、销毁直连客户端。
+     * {@code results} 是对局结果的发布端口：活动结果通道经它按 {@code channel=activity} 发布，普通局由房间按 {@code plain} 发布。
      */
     @Bean(destroyMethod = "close")
     public SceneTransport battleSceneTransport(RedissonClient redis, BattleMetrics battleMetrics, OutboxMetrics battleOutboxMetrics,

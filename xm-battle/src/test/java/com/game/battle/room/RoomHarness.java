@@ -115,7 +115,12 @@ final class RoomHarness {
             log.add(new Out(Kind.CONFIRM, playerId, 0, deadlineMs));
     final SettlementSink settlements = (routing, playerId, settlement) -> log.add(new Out(Kind.SETTLEMENT, playerId, 0, settlement));
     final ActivityResultSink activityResults = event -> log.add(new Out(Kind.ACTIVITY_RESULT, 0, 0, event));
-    final BattleResultSink results = event -> log.add(new Out(Kind.RESULT, 0, 0, event));
+    /** 普通局结果端口收到的通道（房间只该用 PLAIN；活动通道由发件箱另行发布）。 */
+    final List<BattleResultSink.Channel> resultChannels = new ArrayList<>();
+    final BattleResultSink results = (event, channel) -> {
+        resultChannels.add(channel);
+        log.add(new Out(Kind.RESULT, 0, 0, event));
+    };
 
     /** 房间服务（第一次调用时按当前的 tickets / fingerprintMode 构造）。 */
     BattleRoomServiceImpl service() {

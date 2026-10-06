@@ -16,7 +16,12 @@ public interface BattleHooks {
     /** 一次在线存盘确认落库之后（{@code markPersisted} 之后，只在 SAVED 时调）：快路径销账（§7.12，D19）。 */
     void onPersisted(SceneWorld world, ScenePlayer player);
 
-    /** 交出没提交、原地解冻之后（实例仍在、会话仍在）：补跑进场恢复的锁步骤（§10.5）。 */
+    /**
+     * 交出没提交、原地解冻之后（实例仍在、会话仍在）：<b>重跑一次完整的进场恢复</b>（§7.8 第 1 步起）。规格 §10.5 的原文只要求补「锁步骤」
+     * （冻结期间到达的确认只续了锁、没挂冻结）；实现有意做成它的超集：锁步骤本身就要一次恢复读，读失败时落到 RETRY 才有人重试，
+     * 还能把冻结期间被延后的结算当场补上、把冻结期间没 forget 的账本条目销掉。代价是一次 Redis 往返内 {@code recovery = PENDING}
+     * （备战 1006、结算 DEFERRED），读失败转 RETRY、由 reaper 重读。与还在途的更早一次恢复读靠代际号区分，只认最新一代。
+     */
     void onUnfrozenInPlace(SceneWorld world, ScenePlayer player);
 
     /** 不接战斗（测试与不接 Redis 的装配）。 */

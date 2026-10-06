@@ -1,5 +1,6 @@
 package com.game.data.rollback;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -21,6 +22,7 @@ import com.game.data.ops.pb.OpsJobStatus;
 import com.game.data.query.TransactionLogQueryService;
 import com.game.data.snapshot.PlayerSnapshotRow;
 import com.game.data.snapshot.SnapshotCauses;
+import com.game.data.store.TransactionLogMapper;
 import com.game.data.testing.DataSqlFixture;
 import com.game.data.testing.TestIds;
 import com.game.gateway.store.GatewayStore;
@@ -31,14 +33,19 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 import org.springframework.transaction.support.TransactionOperations;
@@ -50,6 +57,8 @@ import org.springframework.transaction.support.TransactionOperations;
 final class RollbackHarness implements AutoCloseable {
 
     final DataSqlFixture db;
+    /** 号源的替身租约（作业号、安全快照号、回档流水号都从它发）：{@code valid.set(false)} / {@code lose()} 模拟号源失效。 */
+    final TestIds.FakeLease lease = new TestIds.FakeLease(31);
     final OpsIds ids;
     final DataMetrics metrics;
     final SimpleMeterRegistry meters = new SimpleMeterRegistry();
@@ -75,26 +84,48 @@ final class RollbackHarness implements AutoCloseable {
     final List<Function<ListAppliedAssetOpsSinceRequest, ListAppliedAssetOpsSinceResponse>> guildAnswers =
             new CopyOnWriteArrayList<>();
     final List<ListAppliedAssetOpsSinceRequest> guildCalls = new CopyOnWriteArrayList<>();
+    /** 战斗锁替身（{@link BattleLockGate.Reader}）：锁仍在的玩家；缺省谁也不在战斗。 */
+    final Set<Long> battleLocked = ConcurrentHashMap.newKeySet();
+    /** 每次批量读锁问了哪些人（按调用顺序）。 */
+    final List<List<Long>> battleLockCalls = new CopyOnWriteArrayList<>();
+    /** 非 null 时取代缺省应答（读失败 / 不应答 / 缺人；也可以先记下当时的现场再转给 {@link #battleLockAnswer}）。 */
+    volatile BattleLockGate.Reader battleLockReader;
 
     RollbackHarness(Map<String, String> overrides) throws Exception {
         this(overrides, true);
     }
 
     RollbackHarness(Map<String, String> overrides, boolean guildConfigured) throws Exception {
+        this(overrides, guildConfigured, new Seams());
+    }
+
+    /**
+     * 故障注入接缝（缺省全是原样）：装配时把协作者换成测试包了一层的替身（例如 Mockito 的 {@code delegatesTo}）——由测试决定哪一次调用
+     * 抛异常 / 拖时间，其余照转给真实对象。只换注入点：SQL、事务边界与作业框架仍是生产代码。
+     */
+    static final class Seams {
+        /** 全部组件共用的作业表访问（事件、明细、单飞槽、作业行）。 */
+        UnaryOperator<OpsJobStore> jobs = UnaryOperator.identity();
+        /** 只换写事务（{@link RollbackWriter}）用的流水 Mapper；回收逆转检查读流水走的仍是真实的。 */
+        UnaryOperator<TransactionLogMapper> writerTxlog = UnaryOperator.identity();
+    }
+
+    RollbackHarness(Map<String, String> overrides, boolean guildConfigured, Seams seams) throws Exception {
         db = DataSqlFixture.create();
-        ids = TestIds.ready(31);
+        ids = TestIds.ready(lease);
         metrics = new DataMetrics(meters);
         Map<String, String> settings = new HashMap<>();
         settings.put("xm.data.ops.enabled", "true");
         settings.put("xm.data.ops.claim-wait", "2s");
         settings.put("xm.data.ops.min-target-age", "0s");
+        settings.put("xm.data.ops.battle-lock-wait", "2s");
         settings.put("xm.data.rollback.guild.settle", "0s");
         settings.put("xm.data.rollback.guild.recheck-delay", "0s");
         settings.putAll(overrides);
         props = new Binder(new MapConfigurationPropertySource(settings)).bindOrCreate("xm.data", DataProperties.class);
         store = db.playerStore(System::currentTimeMillis);
-        jobs = db.jobs();
-        fence = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("test-ops-fence").daemon(true).factory());
+        jobs = seams.jobs.apply(db.jobs());
+        fence =Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("test-ops-fence").daemon(true).factory());
         runner = new OpsJobRunner(jobs, db.tx(), json, metrics, Clock.systemUTC(), "test-runner", props.ops().heartbeat(),
                 props.ops().staleAfter(), props.ops().jobTimeout(), fence);
         service = new OpsJobService(jobs, ids, runner, db.tx(), json, Clock.systemUTC());
@@ -103,13 +134,43 @@ final class RollbackHarness implements AutoCloseable {
             return CompletableFuture.completedFuture(true);
         }, metrics);
         GuildDivergenceGate guild = new GuildDivergenceGate(guildConfigured ? this::guild : null, Duration.ofSeconds(2));
-        RollbackWriter writer = new RollbackWriter(store, db.playerMapper, db.players, db.snapshots, db.txlog, jobs, ids,
-                db.tx(), json, Clock.systemUTC());
-        deps = new RollbackJob.Deps(new RollbackPlanner(db.players, db.snapshots), writer, ownership, guild, db.players,
-                db.snapshots, new TransactionLogQueryService(db.txlog, Duration.ofDays(7)), jobs, props, metrics, json);
+        RollbackWriter writer = new RollbackWriter(store, db.playerMapper, db.players, db.snapshots,
+                seams.writerTxlog.apply(db.txlog), jobs, ids, db.tx(), json, Clock.systemUTC());
+        BattleLockGate battleLocks = new BattleLockGate(this::readBattleLocks, props.ops().battleLockWait());
+        deps = new RollbackJob.Deps(new RollbackPlanner(db.players, db.snapshots), writer, ownership, guild, battleLocks,
+                db.players, db.snapshots, new TransactionLogQueryService(db.txlog, Duration.ofDays(7)), jobs, props, metrics,
+                json);
         zones = new GatewayStore(zoneMapper, TransactionOperations.withoutTransaction(), System::currentTimeMillis);
         when(zoneMapper.selectZones()).thenReturn(List.of());
         rollbacks = new RollbackService(deps, service, zones, props, Clock.systemUTC());
+    }
+
+    private CompletableFuture<Map<Long, Boolean>> readBattleLocks(Collection<Long> playerIds) {
+        battleLockCalls.add(List.copyOf(playerIds));
+        BattleLockGate.Reader override = battleLockReader;
+        return override != null ? override.existsAll(playerIds) : battleLockAnswer(playerIds);
+    }
+
+    /** 缺省应答：按 {@link #battleLocked} 逐人回答（与 {@code BattleLockReader.existsAll} 同形：每个入参都有结论）。 */
+    CompletableFuture<Map<Long, Boolean>> battleLockAnswer(Collection<Long> playerIds) {
+        Map<Long, Boolean> out = new LinkedHashMap<>();
+        for (Long playerId : playerIds) {
+            out.put(playerId, battleLocked.contains(playerId));
+        }
+        return CompletableFuture.completedFuture(out);
+    }
+
+    /** {@code xm_data_ops_players_total{kind=rollback, outcome}} 的当前值（装配时已全部预建，取不到就是没预建）。 */
+    double playersCounted(String outcome) {
+        return meters.get("xm.data.ops.players").tag("kind", "rollback").tag("outcome", outcome).counter().count();
+    }
+
+    /** 逐玩家结局指标的 outcome 标签都在固定集合 {@link RollbackJob#PLAYER_OUTCOMES} 里（没有哪条路径记了集合之外的值）。 */
+    void assertPlayerOutcomeLabelsWithinFixedSet() {
+        assertThat(meters.find("xm.data.ops.players").counters()).isNotEmpty().allSatisfy(c -> {
+            assertThat(c.getId().getTag("kind")).isEqualTo("rollback");
+            assertThat(RollbackJob.PLAYER_OUTCOMES).contains(c.getId().getTag("outcome"));
+        });
     }
 
     private void onTakeover(long playerId, long heldEpoch) {

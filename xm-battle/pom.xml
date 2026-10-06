@@ -16,7 +16,9 @@
         回合制战斗节点（批次 6.2，docs/porting/battle-node-spec.md）：Spring Boot + Netty 客户端直连面（票据握手，缺省 12000）+
         按节点直连的 Dubbo Triple 控制面 BattleNodeService（group battle-node，register = false，缺省 21200）+ 只挂 actuator 与 dev 接口的管理
         Tomcat（缺省 18112）。一条 battle-logic 线程同时是直连面唯一的 Netty I/O EventLoop，独占全部房间、直连会话与房间计时器；
-        引擎用 xm-battle-engine。不用 MySQL；Redis 只写节点号租约（battle，作用域 0）与节点目录，只读在线目录（大厅公告）。
+        引擎用 xm-battle-engine。不用 MySQL；Redis 写节点号租约（battle，作用域 0）与节点目录，只读在线目录（大厅公告）；
+        批次 6.3 起另写玩家的待结算记录与活动结果键（结算发件箱 / 活动结果通道，docs/porting/scene-battle-spec.md §7.15–§7.17）、
+        读玩家位置记录与 scene 节点目录（结算与确认的寻址）。
     </description>
 
     <dependencies>

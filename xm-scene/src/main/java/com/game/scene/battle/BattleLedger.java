@@ -21,6 +21,9 @@ import java.util.TreeMap;
  *
  * <p><b>加载校验</b>（D24）：battle_id 为 0、重复、条数超容量视为损坏——原样带回、不改写，该玩家的结算一律延后、备战一律 1006，绝不当空账本用。
  *
+ * <p><b>未知字段</b>：存档里本版本不认识的字段各层都原样带回——{@code BattleLedgerState} 这一层，以及每个 {@code BattleLedgerEntry} 自己的
+ * （按 battle_id 旁挂，条目被 {@link #forget} / 淘汰时一起丢；审计 STL-10，做法同 {@code AssetOpLedger}）。滚动升级 / 回滚期间旧版本节点不会把新字段抹掉。
+ *
  * <p>只在场景逻辑线程上读写。
  */
 public final class BattleLedger {
@@ -29,6 +32,8 @@ public final class BattleLedger {
 
     /** battle_id（无符号序）→ applied_at_ms。 */
     private final TreeMap<Long, Long> applied = new TreeMap<>(Long::compareUnsigned);
+    /** battle_id → 该条目里本版本不认识的字段（只存非空的；条目摘掉时一起摘）。 */
+    private final TreeMap<Long, UnknownFieldSet> entryUnknownFields = new TreeMap<>(Long::compareUnsigned);
     private final UnknownFieldSet unknownFields;
     /** 损坏时原样带回的那份；正常为 null。 */
     private final BattleLedgerState corrupt;
@@ -53,6 +58,9 @@ public final class BattleLedger {
         BattleLedger ledger = new BattleLedger(state.getUnknownFields(), null, null);
         for (BattleLedgerEntry entry : state.getAppliedList()) {
             ledger.applied.put(entry.getBattleId(), entry.getAppliedAtMs());
+            if (!entry.getUnknownFields().asMap().isEmpty()) {
+                ledger.entryUnknownFields.put(entry.getBattleId(), entry.getUnknownFields());
+            }
         }
         return ledger;
     }
@@ -84,7 +92,7 @@ public final class BattleLedger {
     }
 
     /**
-     * 登记已应用（已在账本里只刷新时间戳）；满时淘汰 {@code applied_at_ms} 最小的（按时间戳，不按下标，同 {@code ledger.h:44-74}）。
+     * 登记已应用（已在账本里只刷新时间戳，条目里不认识的字段留着）；满时淘汰 {@code applied_at_ms} 最小的（按时间戳，不按下标，同 {@code ledger.h:44-74}）。
      *
      * @return 被淘汰的 battle_id；没有淘汰为 0
      * @throws IllegalStateException 账本损坏（调用方先判 {@link #invalidReason()}）
@@ -108,6 +116,7 @@ public final class BattleLedger {
             }
             evicted = oldest.getKey();
             applied.remove(evicted);
+            entryUnknownFields.remove(evicted);
         }
         applied.put(battleId, nowMs);
         return evicted;
@@ -118,6 +127,7 @@ public final class BattleLedger {
         if (corrupt != null) {
             return false;
         }
+        entryUnknownFields.remove(battleId);
         return applied.remove(battleId) != null;
     }
 
@@ -135,13 +145,20 @@ public final class BattleLedger {
         return corrupt == null && applied.isEmpty() && unknownFields.asMap().isEmpty();
     }
 
-    /** 写出：按 battle_id 无符号升序（周期存盘按值比对）；损坏的原样写回。 */
+    /** 写出：按 battle_id 无符号升序（周期存盘按值比对）；各层不认识的字段原样带回；损坏的原样写回。 */
     public BattleLedgerState toState() {
         if (corrupt != null) {
             return corrupt;
         }
         BattleLedgerState.Builder state = BattleLedgerState.newBuilder().setUnknownFields(unknownFields);
-        applied.forEach((id, at) -> state.addApplied(BattleLedgerEntry.newBuilder().setBattleId(id).setAppliedAtMs(at)));
+        applied.forEach((id, at) -> {
+            BattleLedgerEntry.Builder entry = BattleLedgerEntry.newBuilder().setBattleId(id).setAppliedAtMs(at);
+            UnknownFieldSet unknown = entryUnknownFields.get(id);
+            if (unknown != null) {
+                entry.setUnknownFields(unknown);
+            }
+            state.addApplied(entry);
+        });
         return state.build();
     }
 

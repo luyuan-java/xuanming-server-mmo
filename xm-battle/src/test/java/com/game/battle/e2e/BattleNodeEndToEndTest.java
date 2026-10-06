@@ -38,10 +38,12 @@ import com.game.battle.BattleNode;
 import com.game.battle.admin.DevBattleController;
 import com.game.battle.e2e.DirectClient.Frame;
 import com.game.battle.e2e.GatePushInbox.Delivery;
+import com.game.battle.port.scene.SceneTransport;
 import com.game.battle.protocol.BattleMessageIds;
 import com.game.battle.protocol.BattleMessageIds.Notify;
 import com.game.battle.protocol.BattleMessageIds.Upstream;
 import com.game.common.token.BattleTickets;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.GatePush;
 import com.game.discovery.proto.PushTarget;
 import com.game.net.client.ClientFrames;
@@ -158,6 +160,12 @@ class BattleNodeEndToEndTest {
     @Autowired
     RedissonClient redis;
 
+    @Autowired
+    SceneTransport sceneTransport;
+
+    /** 本类用到的玩家下标上限（{@link #player(int)}；清理待结算记录时按它遍历）。 */
+    private static final int MAX_PLAYER_INDEX = 49;
+
     private GatePushInbox gate;
 
     @DynamicPropertySource
@@ -184,8 +192,18 @@ class BattleNodeEndToEndTest {
     }
 
     @AfterEach
-    void tearDown() {
+    void tearDown() throws InterruptedException {
         gate.close();
+        // 6.3 起结算走真发件箱：打完的局会往测试库写 xm:battle:{pid}:settlement（7 天 TTL）。等在途的落库回来，再只删本类玩家的键
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (sceneTransport.settlements().inFlight() > 0 && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        String[] settlementKeys = new String[MAX_PLAYER_INDEX];
+        for (int n = 1; n <= MAX_PLAYER_INDEX; n++) {
+            settlementKeys[n - 1] = RedisKeys.battleSettlements(player(n));
+        }
+        redis.getKeys().delete(settlementKeys);
     }
 
     @AfterAll

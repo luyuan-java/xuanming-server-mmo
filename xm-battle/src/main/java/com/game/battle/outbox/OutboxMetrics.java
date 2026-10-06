@@ -19,10 +19,22 @@ public final class OutboxMetrics {
     static final String SETTLEMENT_DELIVERY = "xm.battle.settlement.delivery";
     static final String ACTIVITY_OUTBOX = "xm.battle.activity.result.outbox";
 
-    /** 结算发件箱的事件。 */
+    /**
+     * 结算发件箱的事件（{@code xm_battle_settlement_outbox_total{event}}）。口径：
+     * <ul>
+     *   <li>{@link #DELIVERED} 是<b>发出次数</b>（首投 + 每次重投各计一次），不是首投数；一次重投同时计 {@link #RESEND} 与 {@code DELIVERED}，
+     *       首投数 = {@code delivered − resend}。投递的应答另见 {@code xm_battle_settlement_delivery_total}。</li>
+     *   <li>{@link #STORED} 只在落库脚本真的写入时计；落库时这一局已经销账（脚本回 -1、没有写）计 {@link #ALREADY_SETTLED}，两者互斥。</li>
+     *   <li>{@link #FIELDS_OVERFLOW} 在 {@code STORED} 之外另计：落库后该玩家的待结算字段数超过 {@code SETTLEMENT_FIELDS_WARN}（记录在堆积）。</li>
+     * </ul>
+     */
     public enum SettlementEvent {
         STORED, NOT_DURABLE, DELIVERED, RESEND, SKIP_NO_TARGET, SUPERSEDED, ACKED, EXHAUSTED, EXHAUSTED_OFFLINE, EXPIRED, PROBE_ERROR,
-        LOCATE_ERROR, SERIALIZE_FAILED
+        LOCATE_ERROR, SERIALIZE_FAILED,
+        /** 落库时这一局已销账（已销账墓碑还在，脚本没有写入）：不登记、不投递。 */
+        ALREADY_SETTLED,
+        /** 落库后玩家的待结算字段数超过告警阈值（正常为 1；同时打 ERROR）。 */
+        FIELDS_OVERFLOW
     }
 
     /** 一次结算投递的应答（只计数，不改发件箱状态，D16）。 */

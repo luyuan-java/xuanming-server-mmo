@@ -38,10 +38,19 @@ import org.slf4j.LoggerFactory;
  *   <li><b>线程</b>（D25）：独占一条 {@code battle-outbox}（{@link BattleScheduler}）。{@link #dispatch} 在 {@code battle-logic} 上只把任务交过来；
  *       名单、计时器、判定都在发件箱线程上，Redisson / Dubbo 的回调投递回它。</li>
  *   <li><b>落库</b>：{@code STORE_SETTLEMENT}（每局一个 Hash 字段，D13）成功 → 定位（位置记录 + 节点目录，D14）→ 投递 → 登记；定时器没开就开。
- *       首投解析不到（离线玩家的常态）→ 这次不投、照常登记。落库失败 → 计 {@code not_durable}（告警）、只投一次、不登记（Q16）。</li>
- *   <li><b>每 10 s 一轮</b>：探测在途的跳过；登记超过 {@link BattleRedis#OUTBOX_MAX_AGE} → 按用尽摘除（{@code expired}）；HEXISTS 出错 → 本轮跳过、不计次（D15）；
- *       不在 → 摘除（{@code acked}）；在 → 定位（出错同样跳过、不计次）→ {@link SettlementRetryRules#classify}：RESEND 按定位到的实例重投；
- *       SKIP_NO_TARGET 另跑 {@code ACK_IF_SUPERSEDED}（2 / 3 摘除，D17）；EXHAUSTED 摘除，记录留给 scene 的进场恢复 / rescue。</li>
+ *       首投解析不到（离线玩家的常态）→ 这次不投、照常登记。落库失败（含问不到结论：超时、空回复）→ 计 {@code not_durable}（告警）、只投一次、
+ *       不登记（Q16）。落库后字段数超过 {@link BattleRedis#SETTLEMENT_FIELDS_WARN} → ERROR + 计 {@code fields_overflow}。</li>
+ *   <li><b>已销账墓碑</b>（Java 独有，{@code xm:battle:{pid}:settled:<battle_id>}，TTL {@link BattleRedis#SETTLED_TOMBSTONE_TTL_SEC}）：scene 的 ACK
+ *       与本端的「已被取代」都会留下它，{@code STORE_SETTLEMENT} 见到它就<b>不写</b>、回 {@link BattleRedis#STORE_ALREADY_SETTLED}。发件箱把这个返回
+ *       当作已销账：计 {@code already_settled}，不登记、不投递。它堵的是「落库的结局不明」这个窗口——Redisson 的落库多半败在响应超时，命令其实已经
+ *       写出：按 Q16 投一次之后 scene 在线应用、落盘、销账（HDEL 是空操作）、账本 forget，那条 EVAL 这时才落地，就会留下 7 天的孤儿记录，
+ *       下次进场重复发奖（正是「先落库、后投递」要防的结局）。有了墓碑，销账之后才落地的 STORE（无论是超时那一次、Redisson 的原样重发，
+ *       还是本端重入的 dispatch）都写不进去，<b>不会再造出孤儿记录</b>；{@code not_durable} 的路径本身不变（仍只投一次、不登记）。
+ *       残余：墓碑过期（10 min）之后才落地的落库不受保护；scene 的 reaper 判废不写墓碑（判废之后晚到的结算照常落库，由进场恢复应用）。</li>
+ *   <li><b>每 10 s 一轮</b>，名单空了<b>当场</b>停表（每个摘除点之后都查一次，不等下一轮）：探测在途的跳过；登记超过
+ *       {@link BattleRedis#OUTBOX_MAX_AGE} → 按用尽摘除（{@code expired}）；HEXISTS 出错或<b>没有结论</b>（空结果）→ 本轮跳过、不计次（D15：
+ *       没问到结论不当已销账）；不在 → 摘除（{@code acked}）；在 → 定位（出错同样跳过、不计次）→ {@link SettlementRetryRules#classify}：
+ *       RESEND 按定位到的实例重投；SKIP_NO_TARGET 另跑 {@code ACK_IF_SUPERSEDED}（2 / 3 摘除，D17）；EXHAUSTED 摘除，记录留给 scene 的进场恢复 / rescue。</li>
  *   <li><b>投递应答只计数</b>，不改名单（D16）：scene 应用之后要等落盘才能销账，「已应用」不等于「可以停止重投」。</li>
  *   <li><b>停机</b>（{@link #drainAndClose}）：最多等 {@code xm.battle.outbox-drain-timeout} 让在途的落库与首投回来，然后丢弃内存名单（记录留在 Redis）。</li>
  * </ul>
@@ -53,13 +62,16 @@ public final class SettlementOutbox implements SettlementSink {
     /** 待结算记录的 Redis 操作（生产 = {@link BattleRedis}）。future 在任意线程上完成，出错以异常完成。 */
     public interface Store {
 
-        /** {@code STORE_SETTLEMENT}：回落库后的字段数。 */
+        /**
+         * {@code STORE_SETTLEMENT}：回落库后的字段数（≥ 1）；这一局已经销账（scene 的 ACK / 本端的「已取代」留下的墓碑还在）→ <b>没有写入</b>、
+         * 回 {@link BattleRedis#STORE_ALREADY_SETTLED}（-1）。
+         */
         CompletableFuture<Long> store(long playerId, long battleId, byte[] payload);
 
-        /** HEXISTS：记录还在吗。 */
+        /** HEXISTS：记录还在吗。问不到结论（出错、空回复）以异常完成，不回 false。 */
         CompletableFuture<Boolean> exists(long playerId, long battleId);
 
-        /** {@code ACK_IF_SUPERSEDED}：3 已销账 / 0 锁不在 / 1 仍是本局 / 2 已被取代。 */
+        /** {@code ACK_IF_SUPERSEDED}：3 已销账 / 0 锁不在 / 1 仍是本局 / 2 已被取代（删了记录并留下已销账墓碑）。 */
         CompletableFuture<Long> ackIfSuperseded(long playerId, long battleId);
 
         static Store redis(BattleRedis redis) {
@@ -147,6 +159,11 @@ public final class SettlementOutbox implements SettlementSink {
     /** {@link SettlementSink}：在 {@code battle-logic} 上调用，只把任务交给发件箱线程（不阻塞、不抛异常）。 */
     @Override
     public void dispatch(BattleRouting routing, long playerId, BattleSettlementData settlement) {
+        if (settlement == null) {
+            // 调用方缺陷。在这里挡住：否则空指针会抛在发件箱线程上，在途计数永不归还，停机排空要白等满时限
+            log.error("结算发件箱收到空的结算（调用方缺陷），不落库也不投递 player={}", Long.toUnsignedString(playerId));
+            return;
+        }
         if (closed) {
             log.error("结算发件箱已关闭，这份结算没有落库也没有投递（留给 scene 的 rescue / 进场恢复兜底不了：记录不在 Redis） battle_id={} player={}",
                     Long.toUnsignedString(settlement.getBattleId()), Long.toUnsignedString(playerId));
@@ -185,16 +202,26 @@ public final class SettlementOutbox implements SettlementSink {
     }
 
     private void onStored(BattleRouting routing, long playerId, long battleId, ByteString payload, Long fields, Throwable error) {
-        if (error != null) {
-            // Q16：只投一次 + 告警，不登记（基线 Redis 不可用时同一结局）
+        if (error != null || fields == null) {
+            // Q16：只投一次 + 告警，不登记（基线 Redis 不可用时同一结局）。没有结论（空结果）同样不算落库成功（D15 的口径）。
+            // 结局不明的那条 EVAL 即使之后才落地，也会被 scene 销账留下的墓碑挡住，不会造出孤儿记录（见类注释）
             metrics.settlement(SettlementEvent.NOT_DURABLE);
             log.error("结算落库失败，只投递一次、不登记重投（结算可能丢失） battle_id={} player={}: {}", Long.toUnsignedString(battleId),
-                    Long.toUnsignedString(playerId), error.toString());
+                    Long.toUnsignedString(playerId), error != null ? error.toString() : "落库没有结论（空结果）");
             locateAndDeliver(playerId, battleId, payload, 0, true);
             return;
         }
+        if (fields == BattleRedis.STORE_ALREADY_SETTLED) {
+            // 这一局已经销账（落库的重发 / 晚到落在 scene 的 ACK 之后，脚本没有写入）：按已销账处理，不登记、不投递
+            metrics.settlement(SettlementEvent.ALREADY_SETTLED);
+            log.info("结算落库时这一局已销账（重放 / 晚到的落库被墓碑挡下），不登记、不投递 battle_id={} player={}",
+                    Long.toUnsignedString(battleId), Long.toUnsignedString(playerId));
+            finishFirst(true);
+            return;
+        }
         metrics.settlement(SettlementEvent.STORED);
-        if (fields != null && fields > BattleRedis.SETTLEMENT_FIELDS_WARN) {
+        if (fields > BattleRedis.SETTLEMENT_FIELDS_WARN) {
+            metrics.settlement(SettlementEvent.FIELDS_OVERFLOW);
             log.error("玩家的待结算记录字段数异常（正常为 1） player={} fields={} battle_id={}", Long.toUnsignedString(playerId), fields,
                     Long.toUnsignedString(battleId));
         }
@@ -216,7 +243,7 @@ public final class SettlementOutbox implements SettlementSink {
             located = CompletableFuture.failedFuture(e);
         }
         onOutbox(located, (resolution, error) -> {
-            if (error != null || resolution instanceof Failure) {
+            if (error != null || resolution == null || resolution instanceof Failure) {
                 metrics.settlement(SettlementEvent.LOCATE_ERROR);
                 finishFirst(first);
                 return;
@@ -237,12 +264,16 @@ public final class SettlementOutbox implements SettlementSink {
                 .setBody(payload)
                 .setAttempt(attempt)
                 .build();
+        // delivered = 发出次数：首投与每次重投都计（重投另计 resend），首投数 = delivered − resend
         metrics.settlement(SettlementEvent.DELIVERED);
         CompletableFuture<SceneBattleReply> sent;
         try {
             sent = transport.applySettlement(endpoint, call);
         } catch (RuntimeException e) {
             sent = CompletableFuture.failedFuture(e);
+        }
+        if (sent == null) {
+            sent = CompletableFuture.failedFuture(new IllegalStateException("结算传输返回了空的 future"));
         }
         sent.whenComplete((reply, error) -> {
             // D16：应答只计数，不改名单（可以在任意线程上计）
@@ -318,14 +349,16 @@ public final class SettlementOutbox implements SettlementSink {
             return;
         }
         entry.probing = false;
-        if (error != null) {
-            // D15：出错不是「已销账」，本轮跳过、不计次
+        if (error != null || exists == null) {
+            // D15：出错不是「已销账」，本轮跳过、不计次；没有结论（空结果）同样不是——生产的 Store 已把空回复变成异常，这里再防一层
             metrics.settlement(SettlementEvent.PROBE_ERROR);
             return;
         }
-        if (exists == null || !exists) {
+        if (!exists) {
             remove(entry);
             metrics.settlement(SettlementEvent.ACKED);
+            // 最常见的收尾（scene 已销账）：名单空了当场停表，不多空转一轮（基线 room.cpp:1782-1783）
+            stopTimerIfIdle();
             return;
         }
         entry.probing = true;
@@ -348,6 +381,8 @@ public final class SettlementOutbox implements SettlementSink {
             return;
         }
         boolean hasTarget = resolution instanceof Found;
+        // stillOurs 恒为 true：探测那一跳已确认记录还在（同基线 room.cpp:1805），下面的 DONE 分支在这条路径上走不到，留着只为判定表完整。
+        // 「已销账排在用尽之前」在这里由 onProbe 的次序保证——先探测、不在就摘，次数已满也一样；不得改成先按次数判用尽
         SettlementRetryRules.Decision decision = SettlementRetryRules.classify(true, entry.attempts, hasTarget);
         entry.attempts++;
         switch (decision) {
@@ -471,8 +506,11 @@ public final class SettlementOutbox implements SettlementSink {
         }
     }
 
-    /** 异步结局投递回发件箱线程（已停时丢弃）。 */
+    /** 异步结局投递回发件箱线程（已停时丢弃）。端口返回空 future 按出错处理（不让空指针打断这一条的后续步骤）。 */
     private <T> void onOutbox(CompletableFuture<T> future, java.util.function.BiConsumer<T, Throwable> callback) {
+        if (future == null) {
+            future = CompletableFuture.failedFuture(new IllegalStateException("端口返回了空的 future"));
+        }
         future.whenComplete((value, error) -> {
             Throwable cause = error instanceof CompletionException && error.getCause() != null ? error.getCause() : error;
             try {

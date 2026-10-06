@@ -2,6 +2,10 @@ package com.game.data.ops;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.data.metrics.DataMetrics;
@@ -27,10 +31,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.HttpStatus;
 
 /** 作业框架（T-J1、T-A1）：受理一个事务（槽 + 作业 + STARTED）、号源失效零变更、心跳丢失自停、清扫器、RESULT 后才收尾。 */
@@ -398,5 +404,148 @@ class OpsJobFrameworkSqlTest {
         assertThat(db.jobs().heartbeat(62, 1000)).isTrue();
         assertThat(db.jobs().active().orElseThrow().getHeartbeatMs()).isGreaterThan(1000);
         assertThat(db.jobs().heartbeat(63, 5000)).isFalse();
+    }
+
+    // ------------------------------------------------------------------ 审计 OPS-12：RESULT 写失败（T-A1）
+
+    /** 作业表访问包一层：RESULT 事件的前 {@code failures} 次插入抛异常（{@code attempts} 记下试了几次）；其余事件与方法原样落库。 */
+    private OpsJobStore resultWritesFailing(int failures, AtomicInteger attempts) {
+        OpsJobStore real = db.jobs();
+        OpsJobStore wrapped = mock(OpsJobStore.class, delegatesTo(real));
+        doAnswer(inv -> {
+            OpsJobEventRow row = inv.getArgument(0);
+            if (row.getType() == OpsJobEventType.OPS_JOB_EVENT_RESULT && attempts.incrementAndGet() <= failures) {
+                throw new DataAccessResourceFailureException("注入：RESULT 写不进 #" + attempts.get());
+            }
+            real.insertEvent(row);
+            return null;
+        }).when(wrapped).insertEvent(any());
+        return wrapped;
+    }
+
+    /**
+     * 作业体：立刻成功；收尾（RESULT 之后）先等 150 ms（让写 RESULT 那一刻可能已经在途的一拍心跳落定），再停留 450 ms（4 拍多心跳），
+     * 记下这 450 ms 前后的心跳值。
+     */
+    private static final class LingeringCleanup implements JobBody {
+        final long[] heartbeats = new long[2];
+        final CountDownLatch cleaned = new CountDownLatch(1);
+        private final OpsJobStore jobs;
+
+        LingeringCleanup(OpsJobStore jobs) {
+            this.jobs = jobs;
+        }
+
+        @Override
+        public JobResult run(JobContext ctx) {
+            return JobResult.of(OpsJobStatus.OPS_JOB_SUCCEEDED, "ok", Map.of("x", 1));
+        }
+
+        @Override
+        public void afterResult(JobContext ctx) {
+            try {
+                Thread.sleep(150);
+                heartbeats[0] = jobs.active().orElseThrow().getHeartbeatMs();
+                Thread.sleep(450);
+                heartbeats[1] = jobs.active().orElseThrow().getHeartbeatMs();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                cleaned.countDown();
+            }
+        }
+    }
+
+    private static double jobsTotal(SimpleMeterRegistry registry, String outcome) {
+        Counter c = registry.find("xm.data.ops.jobs").tag("outcome", outcome).counter();
+        return c == null ? 0 : c.count();
+    }
+
+    @Test
+    void RESULT一直写不进_预算用完就放弃_不让槽_停心跳_作业行留在RUNNING_收尾照做_清扫器接手改INTERRUPTED_中断只计一次() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        OpsJobStore store = resultWritesFailing(Integer.MAX_VALUE, attempts);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        ScheduledExecutorService beats = Executors.newSingleThreadScheduledExecutor();
+        // 重试预算调到 300 ms（生产 30 s）：第 1 次立刻、第 2 次 200 ms 后、第 3 次再过 400 ms（已过预算）放弃
+        OpsJobRunner flaky = new OpsJobRunner(store, db.tx(), new ObjectMapper(), new DataMetrics(registry), Clock.systemUTC(),
+                "test-runner", Duration.ofMillis(100), Duration.ofSeconds(60), Duration.ofMinutes(1), beats,
+                Duration.ofMillis(300));
+        OpsJobService accepting = new OpsJobService(store, ids, flaky, db.tx(), new ObjectMapper(), Clock.systemUTC());
+        flaky.start();
+        try {
+            LingeringCleanup body = new LingeringCleanup(db.jobs());
+            long id = Long.parseUnsignedLong((String) accepting.submit(submission("k1", body)).get("jobId"));
+            assertThat(body.cleaned.await(10, TimeUnit.SECONDS)).as("RESULT 写不进也照样收尾（释放归属）").isTrue();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (flaky.currentJobId().isPresent() && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertThat(flaky.currentJobId()).isEmpty();
+
+            assertThat(attempts.get()).as("退避重试过，不是试一次就放弃").isBetween(2, 4);
+            // 停心跳：收尾的 450 ms 里心跳值没再动（对照见下一个用例：RESULT 写进了的作业收尾期间心跳照常）
+            assertThat(body.heartbeats[1]).isEqualTo(body.heartbeats[0]);
+            // 不让槽、作业行不动：别的作业进不来，等清扫器接手
+            assertThat(db.jobs().active()).map(OpsActiveRow::getJobId).contains(id);
+            OpsJobRow stuck = db.jobs().findJob(id).orElseThrow();
+            assertThat(stuck.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_RUNNING);
+            assertThat(stuck.getFinishedMs()).isZero();
+            assertThat(eventTypes(id)).containsExactly(OpsJobEventType.OPS_JOB_EVENT_STARTED);
+            assertThat(jobsTotal(registry, "succeeded")).as("作业行不是它改成终态的：不记结局").isZero();
+            assertThatThrownBy(() -> accepting.submit(submission("k2", ctx -> JobResult.of(OpsJobStatus.OPS_JOB_SUCCEEDED,
+                    "ok", Map.of())))).isInstanceOfSatisfying(OpsException.class, e -> {
+                        assertThat(e.code()).isEqualTo("ops_busy");
+                        assertThat(e.details().get("runningJobId")).isEqualTo(Long.toUnsignedString(id));
+                    });
+            assertThat(jobsTotal(registry, "interrupted")).isZero();
+
+            // 心跳停了：过了 stale-after 之后清扫器（这里把心跳值改旧来模拟时间流逝）收走槽、改 INTERRUPTED、追加事件
+            db.jdbc().update("UPDATE ops_active SET heartbeat_ms = ? WHERE slot = 1", System.currentTimeMillis() - 120_000);
+            OpsJobRow swept = await(id);
+            assertThat(swept.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_INTERRUPTED);
+            assertThat(swept.getResultCode()).isEqualTo("interrupted");
+            assertThat(db.jobs().active()).isEmpty();
+            assertThat(eventTypes(id)).containsExactly(OpsJobEventType.OPS_JOB_EVENT_STARTED,
+                    OpsJobEventType.OPS_JOB_EVENT_INTERRUPTED);
+            assertThat(jobsTotal(registry, "interrupted")).isEqualTo(1);
+            assertThat(jobsTotal(registry, "succeeded")).isZero();
+        } finally {
+            flaky.stop();
+            beats.shutdownNow();
+        }
+    }
+
+    @Test
+    void RESULT头两次写不进_退避重试第三次写进_照常终结让槽_只有一条RESULT_收尾期间心跳照常() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        OpsJobStore store = resultWritesFailing(2, attempts);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        ScheduledExecutorService beats = Executors.newSingleThreadScheduledExecutor();
+        // 公开构造器 = 生产的 30 s 重试预算
+        OpsJobRunner flaky = new OpsJobRunner(store, db.tx(), new ObjectMapper(), new DataMetrics(registry), Clock.systemUTC(),
+                "test-runner", Duration.ofMillis(100), Duration.ofSeconds(60), Duration.ofMinutes(1), beats);
+        OpsJobService accepting = new OpsJobService(store, ids, flaky, db.tx(), new ObjectMapper(), Clock.systemUTC());
+        flaky.start();
+        try {
+            LingeringCleanup body = new LingeringCleanup(db.jobs());
+            long id = Long.parseUnsignedLong((String) accepting.submit(submission("k1", body)).get("jobId"));
+
+            OpsJobRow job = await(id);
+
+            assertThat(attempts).hasValue(3);
+            assertThat(job.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_SUCCEEDED);
+            assertThat(job.getSummaryJson()).isEqualTo("{\"x\":1}");
+            assertThat(eventTypes(id)).containsExactly(OpsJobEventType.OPS_JOB_EVENT_STARTED,
+                    OpsJobEventType.OPS_JOB_EVENT_RESULT);
+            assertThat(db.jobs().active()).isEmpty();
+            assertThat(jobsTotal(registry, "succeeded")).isEqualTo(1);
+            // RESULT 之后、让槽之前（收尾释放归属的那段时间）心跳照常在走
+            assertThat(body.cleaned.getCount()).isZero();
+            assertThat(body.heartbeats[1]).isGreaterThan(body.heartbeats[0]);
+        } finally {
+            flaky.stop();
+            beats.shutdownNow();
+        }
     }
 }

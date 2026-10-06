@@ -7,7 +7,8 @@ package com.game.team.view;
  * <p>数值字段是 uint32 的位模式；字符串不为 null（缺失为空串）。读失败的字段一律零值（尽力而为，不让 RPC 失败，基线 presence.go:25-27）。
  *
  * @param online       在线（Java：{@code xm:presence} 宽松批量读，读失败按离线，team-spec §6.6）
- * @param inBattle     战斗中（咨询性；Java 在批次 6.3 之前没有战斗锁，恒为 false，D10）
+ * @param inBattle     战斗中（咨询性；Java：回合制战斗锁 {@code xm:battle:{pid}:lock} 存在即为 true——备战中、战斗中、已结算待销账都算；
+ *                     {@code BattleLockReader.existsAll} 批量读，读失败 / 超时按 false，scene-battle-spec §2.4、§7.13；批次 6.3 起，team-spec D10 已收口）
  * @param level        等级（Java：player 表，到存盘才更新，D4）
  * @param classId      职业
  * @param name         昵称

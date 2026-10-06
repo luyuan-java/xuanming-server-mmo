@@ -8,6 +8,8 @@ import com.game.data.rollback.RestoreBuilder.ItemChange;
 import com.game.data.rollback.RestoreBuilder.Restored;
 import com.game.data.store.PersistedPlayer;
 import com.game.data.store.PlayerSnapshotEntry;
+import com.game.player.store.state.BattleLedgerEntry;
+import com.game.player.store.state.BattleLedgerState;
 import com.game.player.store.state.CurrencyState;
 import com.game.player.store.state.PlayerState;
 import com.game.player.store.state.Vitals;
@@ -181,6 +183,56 @@ class RestoreBuilderTest {
         assertThat(RollbackSection.ASSET_FIELDS).doesNotContainAnyElementsOf(RollbackSection.NON_ASSET_FIELDS);
         assertThat(RollbackSection.ASSET_FIELDS.size() + RollbackSection.NON_ASSET_FIELDS.size())
                 .isEqualTo(PlayerState.getDescriptor().getFields().size());
+    }
+
+    private static BattleLedgerState battleLedger(long... battleIds) {
+        BattleLedgerState.Builder b = BattleLedgerState.newBuilder();
+        for (long id : battleIds) {
+            b.addApplied(BattleLedgerEntry.newBuilder().setBattleId(id).setAppliedAtMs(1_700_000_000_000L + id));
+        }
+        return b.build();
+    }
+
+    /**
+     * 审计 OPS-9 的回归：战斗结算账本（battle_ledger = 9）没有单独的分歧检查器（lead 裁决不建 AssetDivergenceChecker），靠的是它随资产组
+     * <b>整段</b>回退——未销账的局回档后由待结算记录重投、相对快照恰好一次；已销账的局奖励随回档消失（scene-battle-spec S-11）。
+     * 资产回到快照而账本留在现档（或反过来）就会重发 / 吞掉一局的奖励，所以两个方向、FULL 与 assets 都钉住。
+     */
+    @Test
+    void 战斗结算账本随资产组整段回退_现档有快照没有则清掉_反向则带回_FULL与assets同理() {
+        assertThat(RollbackSection.ASSET_FIELDS).contains(PlayerState.BATTLE_LEDGER_FIELD_NUMBER);
+        PlayerState without = RollbackJobSqlTest.snapshotState();
+        PlayerState with = RollbackJobSqlTest.currentState().toBuilder().setBattleLedger(battleLedger(71, 72)).build();
+
+        for (Set<RollbackSection> sections : List.of(EnumSet.noneOf(RollbackSection.class),
+                EnumSet.of(RollbackSection.ASSETS))) {
+            // 现档有「已应用未销账」的局、快照没有：回档后账本为空（资产也回到那两局之前），待结算记录会重投
+            Restored cleared = RestoreBuilder.build(snapshot(without), current(with.toByteArray()), sections);
+            assertThat(cleared.state().hasBattleLedger()).as("sections=%s", sections).isFalse();
+            assertThat(cleared.state().getCurrency().getBalancesList()).containsExactly(1000L, 0L);
+
+            // 反向：快照里有、现档已销账清空：账本随资产一起带回（那一局的奖励已在快照的资产里，不能再发一次）
+            PlayerState snapWith = without.toBuilder().setBattleLedger(battleLedger(71)).build();
+            Restored restoredBack = RestoreBuilder.build(snapshot(snapWith),
+                    current(RollbackJobSqlTest.currentState().toByteArray()), sections);
+            assertThat(restoredBack.state().getBattleLedger()).as("sections=%s", sections).isEqualTo(battleLedger(71));
+
+            // 两边都有、内容不同：整段取快照的，不合并
+            Restored replaced = RestoreBuilder.build(snapshot(snapWith), current(with.toByteArray()), sections);
+            assertThat(replaced.state().getBattleLedger()).as("sections=%s", sections).isEqualTo(battleLedger(71));
+        }
+    }
+
+    @Test
+    void 不动资产组的部分回档_战斗结算账本留现档() {
+        PlayerState snap = RollbackJobSqlTest.snapshotState().toBuilder().setBattleLedger(battleLedger(71)).build();
+        PlayerState cur = RollbackJobSqlTest.currentState().toBuilder().setBattleLedger(battleLedger(72, 73)).build();
+
+        Restored r = RestoreBuilder.build(snapshot(snap), current(cur.toByteArray()),
+                EnumSet.of(RollbackSection.LEVEL, RollbackSection.FACING));
+
+        assertThat(r.state().getBattleLedger()).isEqualTo(battleLedger(72, 73));
+        assertThat(r.state().getCurrency()).isEqualTo(cur.getCurrency());
     }
 
     @Test

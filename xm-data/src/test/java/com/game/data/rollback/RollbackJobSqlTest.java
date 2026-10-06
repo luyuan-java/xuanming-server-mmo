@@ -2,9 +2,16 @@ package com.game.data.rollback;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.game.data.ops.OpsException;
+import com.game.data.ops.OpsJobStore;
+import com.game.data.ops.pb.OpsJobEventRow;
+import com.game.data.ops.pb.OpsJobEventType;
 import com.game.data.ops.pb.OpsJobPlayerRow;
 import com.game.data.ops.pb.OpsJobRow;
 import com.game.data.ops.pb.OpsJobStatus;
@@ -30,8 +37,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.HttpStatus;
 
 /**
@@ -48,7 +57,12 @@ class RollbackJobSqlTest {
     @AfterEach
     void tearDown() throws Exception {
         if (h != null) {
-            h.close();
+            try {
+                // 每个场景收尾都核一遍：逐玩家结局指标没有记过固定集合之外的 outcome
+                h.assertPlayerOutcomeLabelsWithinFixedSet();
+            } finally {
+                h.close();
+            }
         }
     }
 
@@ -574,5 +588,96 @@ class RollbackJobSqlTest {
         assertThat(persisted(P).getCurrency().getBalancesList()).containsExactly(1500L, 20L);
         assertThat(persisted(P).getBag()).isEqualTo(currentState().getBag());
         assertThat(Collections.frequency(h.eventTypes(undo.getJobId()), "RESULT")).isEqualTo(1);
+    }
+
+    // ------------------------------------------------------------------ 审计 OPS-12：ACCEPTED 写失败（T-A1）、钉住的快照被删（T-R1）
+
+    @Test
+    void 放行事件ACCEPTED写不进_零写入_FAILED_snapshot_db_error_不立已放行_归属释放() throws Exception {
+        // 只让 ACCEPTED 这一条事件写不进（其余事件、作业行、明细照常落库）
+        RollbackHarness.Seams seams = new RollbackHarness.Seams();
+        seams.jobs = real -> {
+            OpsJobStore wrapped = mock(OpsJobStore.class, delegatesTo(real));
+            doAnswer(inv -> {
+                OpsJobEventRow row = inv.getArgument(0);
+                if (row.getType() == OpsJobEventType.OPS_JOB_EVENT_ACCEPTED) {
+                    throw new DataAccessResourceFailureException("注入：事件表写不进");
+                }
+                real.insertEvent(row);
+                return null;
+            }).when(wrapped).insertEvent(any());
+            return wrapped;
+        };
+        h = new RollbackHarness(Map.of(), true, seams);
+        offlinePlayer(currentState());
+        long after = System.currentTimeMillis();
+        h.guildAnswers.add(r -> RollbackHarness.ok(RollbackHarness.op(70, P, after)));
+
+        // 带了 acceptDivergence：本该「先写 ACCEPTED 再写玩家」
+        OpsJobRow job = h.await(h.submit(RollbackHarness.players(List.of("1001"), "5001", null, null, null, true), "k1"));
+
+        assertThat(job.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_FAILED);
+        assertThat(job.getResultCode()).isEqualTo("snapshot_db_error");
+        assertThat(h.summary(job).get("phase").asText()).isEqualTo("accepted");
+        // 放行没留下审计痕迹，就一个字节也不写：没有 ACCEPTED / WRITE 事件，作业行不立「已放行」
+        assertThat(h.eventTypes(job.getJobId())).containsExactly("STARTED", "PLANNED", "CLAIMED", "CHECK", "RESULT");
+        assertThat(job.getAcceptedDivergence()).isFalse();
+        assertThat(job.getDivergenceRows()).isEqualTo(1);
+        assertThat(job.getPlayersAffected()).isZero();
+        assertUntouched(currentState());
+        assertThat(h.jobs.players(job.getJobId(), 0, 10).get(0).getOutcome()).isEqualTo("rejected");
+        assertThat(owner(P).ownerEpoch()).isEqualTo(4L);
+        assertThat(owner(P).released()).isTrue();
+        assertThat(h.ownership.heldCount()).isZero();
+        assertThat(h.guildCalls).as("没人写成：不做写后复查").hasSize(1);
+    }
+
+    @Test
+    void 钉住的快照在计划之后被删_该玩家snapshot_gone不写_检查阶段发现的当场释放_写事务里发现的同样零残留_其余照写() throws Exception {
+        h = new RollbackHarness(Map.of());
+        long t = System.currentTimeMillis() - 120_000;
+        for (long p = 3001; p <= 3003; p++) {
+            h.player(p, 1, currentState().toByteArray(), System.currentTimeMillis() - 5000, 3, false);
+            h.snapshot(8000 + p, p, t, SnapshotCauses.LOGOUT, 1, 5, 2002, snapshotState().toByteArray());
+        }
+        // 夺权之后、账本差集之前（查战斗锁的时刻）：3001 钉住的那份被保留期清理删了
+        h.battleLockReader = ids -> {
+            h.db.jdbc().update("DELETE FROM player_snapshot WHERE snapshot_id = 11001");
+            return h.battleLockAnswer(ids);
+        };
+        // 帮会检查通过之后、写之前：3002 的也被删了（这时只有写事务里那次读才发现得了）
+        AtomicReference<OwnerState> ownerOf3001AtGuildCheck = new AtomicReference<>();
+        h.guildAnswers.add(r -> {
+            ownerOf3001AtGuildCheck.set(owner(3001));
+            h.db.jdbc().update("DELETE FROM player_snapshot WHERE snapshot_id = 11002");
+            return RollbackHarness.ok();
+        });
+        h.guildAnswers.add(r -> RollbackHarness.ok());
+
+        OpsJobRow job = h.await(h.submit(RollbackHarness.players(List.of("3001", "3002", "3003"), null, t + 1, null, null,
+                false), "k1"));
+
+        assertThat(job.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_PARTIAL);
+        assertThat(job.getPlayersAffected()).isEqualTo(1);
+        List<OpsJobPlayerRow> details = h.jobs.players(job.getJobId(), 0, 10);
+        assertThat(details).extracting(OpsJobPlayerRow::getOutcome).containsExactly("snapshot_gone", "snapshot_gone",
+                "RESTORED");
+        // 明细仍记着计划时钉住的号：执行时没有悄悄换一份更早的快照（比基线 R5 更强）
+        assertThat(details).extracting(OpsJobPlayerRow::getPlannedSnapshotId).containsExactly(11001L, 11002L, 11003L);
+        // 3001 在检查阶段就出局：帮会检查时已经释放、帮会只问还要写的两个人；写后复查只问写成的那一个
+        assertThat(ownerOf3001AtGuildCheck.get().released()).isTrue();
+        assertThat(h.guildCalls.get(0).getPlayerIdsList()).containsExactly(3002L, 3003L);
+        assertThat(h.guildCalls.get(1).getPlayerIdsList()).containsExactly(3003L);
+        assertThat(persisted(3001)).isEqualTo(currentState());
+        assertThat(persisted(3002)).isEqualTo(currentState());
+        assertThat(persisted(3003).getCurrency().getBalancesList()).containsExactly(1000L, 0L);
+        assertThat(preSnapshots()).as("只有写成的 3003 有安全快照").isEqualTo(1);
+        assertThat(rollbackRows(3001)).isEmpty();
+        assertThat(rollbackRows(3002)).isEmpty();
+        assertThat(rollbackRows(3003)).hasSize(4);
+        for (long p = 3001; p <= 3003; p++) {
+            assertThat(owner(p).released()).as("玩家 %d", p).isTrue();
+        }
+        assertThat(h.ownership.heldCount()).isZero();
     }
 }

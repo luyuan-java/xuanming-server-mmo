@@ -27,7 +27,9 @@ import java.util.TreeMap;
  * C 有、S 也有而 C 没有的流不产生分歧（当前什么都没应用）。分歧行至多 {@link #MAX_ROWS} 条。
  *
  * <p>它是帮会检查的<b>保守超集</b>：快照之后已应用、但调用方还没终结的指令其实可安全回退（会被重投、相对快照恰好一次），也会被列出。
- * 7.2a 只在快照差异里展示（§3.6 第 7 项）；7.2b 作为回档的第二道资产闸。批次 7.2b 起应挪到 xm-player-store 的 asset 包（§7.1）。
+ * 7.2a 只在快照差异里展示（§3.6 第 7 项）；7.2b 起同时是回档的账本差集闸（{@code RollbackJob} 与回档 dry-run 都调它）。
+ * 本类一直在 xm-data（规格初稿曾打算 7.2b 挪进 xm-player-store 的 asset 包，没有挪，§4.6.2 / §13.1 第 2 条）；判定规则本身复用
+ * xm-player-store 的 {@link PersistedAssetLedger} / {@link AssetLedgerRules}，与 scene 在线账本是同一份代码。
  */
 public final class LedgerDiff {
 

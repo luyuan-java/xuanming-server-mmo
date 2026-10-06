@@ -17,7 +17,9 @@ import org.springframework.beans.factory.ObjectProvider;
 /**
  * 全服产出封禁名单的读写（Redis Hash {@code xm:gain-block:{category}}，字段 = 被封的 id，值 = 元数据 JSON），
  * 每次改动后发变更通知（{@code xm:gain-block-changed}），全部 scene 节点收到就重读。本服务是名单的唯一写者。
- * Redis 客户端第一次用到时才创建（Redis 不可用不影响本服务启动与审计消费）；调用失败抛 Redisson 的运行时异常。
+ * Redis 客户端是懒加载 bean，这里每次调用才经 {@code ObjectProvider} 取——装配期不连接，Redis 不可用不影响本服务启动与审计消费。
+ * 实际建连时机是启动之后：批次 7.2a 起发号器 {@code OpsIds} 在后台线程上申领租约时就先连上了（连不上每 10 s 重试），
+ * 并不是等到第一次封禁读写。调用失败抛 Redisson 的运行时异常。
  */
 public final class GainBlockStore {
 

@@ -63,6 +63,8 @@ import org.slf4j.LoggerFactory;
  *       {@code MessageContent.error_message=1008}，计非法包，不转发；</li>
  *   <li>后端不可用、玩家不在场景、Java 版尚未实现的后端域：推 23 {@code TipInfoMessage{1003}}
  *       （不用「信封错误 + 空 body」：robot 不读信封错误，会把空 body 当成功，见 login 契约「Java 必须做到」第 4 条）；</li>
+ *   <li>战斗服务 {@code BattleClientPlayer} 的 12 个号（{@link MessageRoute#directOnly()}）：GM 闸之后当场推 23 {1003}，
+ *       不计非法包、不断连、不过热关停、不排在途请求之后（基线 {@code :937-950}；scene-battle-spec §2.5、§7.19，D12）；</li>
  *   <li>应答 {@code MessageContent.message_id} = 请求号、{@code id} = 请求 id；{@code error_message} 只在 tip≠0 时出现；</li>
  *   <li>进场景失败（scene 回 3023、建链失败、链路层已关）：推 23 {3023}，会话回到「已登录、未进游戏」（玩家绑定清零），
  *       客户端可在同一连接上重试 EnterGame 或回选角建角（login 契约 §6.3）；</li>
@@ -154,6 +156,13 @@ public final class ClientDispatcher {
         this.metrics = metrics;
         this.presence = presence;
         this.nanoClock = nanoClock;
+        // 战斗上行拒绝平时恒为 0：装配时把这几条时间序列先建出来（见 GateMetrics#registerRequest）。
+        // 手写的路由表（测试里的 lambda）不枚举，all() 为空，什么也不建。
+        for (MessageRoute route : routes.all()) {
+            if (route.directOnly()) {
+                metrics.registerRequest(route.domain(), route.method(), RequestResult.BATTLE_REJECTED);
+            }
+        }
     }
 
     /** 同一会话层的指标（{@link ClientChannelHandler} / {@link ClientPipeline} 的连接级事件也记在这里）。 */
@@ -251,6 +260,19 @@ public final class ClientDispatcher {
             registerIllegal(s, "gm_rejected", request.getMessageId());
             return;
         }
+        if (route.directOnly()) {
+            // 战斗上行只走客户端到 xm-battle 的直连，gate 永不中继（基线 client_message_processor.cpp:937-950；
+            // scene-battle-spec §2.5、§7.19，D12）。位置与基线相同：体积 / 限频 / GM 闸之后、按域分派之前——
+            // 所以排在热关停之前（热关停了某个战斗方法时客户端看到的仍是 23 {1003}，不是信封 1003），
+            // 也不进待处理队列（login 调用在途时当场回；队列满了不因它断连）。
+            // 合法协议号（旧客户端或误走大厅）：不计非法包、不断连——踢线会把大厅连接一起拆掉。逐条只打 DEBUG，
+            // 趋势看指标 xm_gate_client_requests_total{result="battle_rejected"}
+            log.debug("拒绝经 gate 的战斗消息（战斗只走客户端直连） session={} message_id={} method={}", sid(s),
+                    request.getMessageId(), route.method());
+            sendTip(s, TIP_SERVICE_UNAVAILABLE);
+            countRequest(route, RequestResult.BATTLE_REJECTED);
+            return;
+        }
         Optional<KillSwitch> killSwitch = KillSwitch.global();
         if (killSwitch.isPresent() && killSwitch.get().blocked(route.rpcPath()).isPresent()) {
             // 热关停（运维止血阀）：在限频之后、转发之前（同基线：gate 先按消息号限频，服务端拦截器再短路）；
@@ -318,8 +340,8 @@ public final class ClientDispatcher {
             }
             case DOMAIN_SCENE -> countRequest(p.route(), forwardToScene(s, p.request()));
             default -> {
-                // Java 版尚未实现的后端域：与 C++ 找不到目标节点时同形。战斗服务 BattleClientPlayer 也永远落在这里
-                // （战斗上行只走 xm-battle 直连，不计非法包、不断连；见 MessageRoutes.SERVICE_BACKENDS 的注释）。
+                // Java 版尚未实现的后端域：与 C++ 找不到目标节点时同形。战斗服务 BattleClientPlayer 到不了这里：
+                // 它在 onRequest 的直连闸（route.directOnly()）当场被拒，不进待处理队列。
                 log.debug("消息域未接入 Java 版 session={} message_id={} domain={}", sid(s), p.route().messageId(), p.route().domain());
                 countRequest(p.route(), RequestResult.UNSUPPORTED);
                 sendTip(s, TIP_SERVICE_UNAVAILABLE);

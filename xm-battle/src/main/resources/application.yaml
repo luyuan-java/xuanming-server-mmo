@@ -8,8 +8,11 @@
 #   XM_ADMIN_TOKEN         可选：dev / test 管理接口 /admin/battle/dev/* 的 X-Xm-Admin-Token；不设则 /admin/** 一律 503
 #   DUBBO_IP_TO_BIND       控制面 Dubbo 端口绑定的网卡（Dubbo 不接受回环，缺省监听全部网卡；生产绑内网网卡并配防火墙）
 #
-# 不用 MySQL：房间是纯内存的（节点崩溃 = 在打的战斗全部作废，由 scene 的 reaper 按期限解冻）。Redis 只写节点号租约（battle，作用域 0）
-# 与节点目录 xm:nodes:battle:0，只读在线目录（大厅公告 177 / 143 经 gate 回落）；dev 接口另读位置记录与 scene 目录。
+# 不用 MySQL：房间是纯内存的（节点崩溃 = 在打的战斗全部作废，由 scene 的 reaper 按期限解冻）。Redis 写：节点号租约（battle，作用域 0）、
+# 节点目录 xm:nodes:battle:0，以及 6.3 的两个发件箱——待结算记录 xm:battle:{pid}:settlement（每局一个字段，7 天）、「已被取代」时的
+# 已销账墓碑 xm:battle:{pid}:settled:<battle_id>（10 min）、活动结果持久副本 xm:battle:activity-result:<battle_id>（7 天）。
+# Redis 读：在线目录（大厅公告 177 / 143 经 gate 回落）、位置记录与 scene 节点目录（结算 / 确认的定位、直连客户端缓存的清扫、dev 接口）、
+# 战斗锁 xm:battle:{pid}:lock（只在「已被取代」的判定脚本里读）。
 spring:
   application:
     name: xm-battle
@@ -77,3 +80,8 @@ xm:
     rpc-max-inflight: 256
     # 停机时等正在优雅关闭的直连排空的上限（之后强关剩余连接）。
     shutdown-flush-timeout: 1s
+    # battle → scene 的 SceneBattleService 调用超时（确认 / 结算投递）。必须大于 scene 侧一条 Redis 脚本的最坏耗时
+    # （(retry-attempts + 1) × timeout-ms + retry-attempts × retry-delay-ms，缺省 4.2 s），否则拒启（scene-battle-spec §8、§10.4）。
+    scene-rpc-timeout: 5s
+    # 停机时等在途的结算落库与首投回来的上限（之后丢弃内存名单，记录留在 Redis 由 scene 兜底）；0 = 不等。
+    outbox-drain-timeout: 3s

@@ -20,22 +20,34 @@ import org.slf4j.LoggerFactory;
  *
  * <p>流程（全部在场景逻辑线程上，读 Redis 异步）：
  * <ol>
- *   <li>进场 / 换场景之后（{@link #onEnteredScene}）读这个玩家的成员关系（{@link TeamMembershipReader}，一次往返读出索引与投影）；
- *       结果投递回逻辑线程；</li>
+ *   <li>进场 / 换场景之后（{@link #onEnteredScene}），或回合制战斗冻结解除之后（{@link #onBattleFreezeCleared}）读这个玩家的成员关系
+ *       （{@link TeamMembershipReader}，一次往返读出索引与投影），<b>同时并行</b>读他的战斗锁在不在（{@link BattleLockProbe}，一条 EXISTS）；
+ *       两个结果都回来后一起投递回逻辑线程；</li>
  *   <li>回调先核对实例：{@code world.playerById(pid)} 已不是发起读时的那个实例（已离开、已重新进场）→ 丢弃
  *       （基线每一跳回调的 {@code IsSamePlayer}，player_team.cpp:55-59）；</li>
  *   <li>读失败或数据损坏、无队（tid = 0 或键缺失）、投影缺失或与索引对不上（team_id 不符、leader_id = 0）、自己不在 members 里
  *       → 不跟随（player_team.cpp:290-318）；</li>
- *   <li>队长不是自己 → {@link #followLeader}：队长不在本节点（跨节点、跨 zone、离线）不跟随；已同场景什么都不做；
- *       队长所在频道在排空中不跟随（批次 5.1，scene-channels-spec §4.13）；否则 {@code world.switchScene(self, leader.scene())}。用内存里的队长场景、不读 {@code xm:location}（同节点时内存就是权威，D9），
- *       不经 scene-manager（Java 同节点换场景是同步的，没有 60 s 去重）；自己有在途的跨节点换图（选目标中或冻结中，批次 5.2）不跟随；</li>
+ *   <li>队长不是自己 → {@link #followLeader}，守卫按这个次序：自己有在途的跨节点换图（选目标中或冻结中，批次 5.2）不跟随；
+ *       <b>自己有在途的回合制战斗</b>不跟随——内存冻结（{@code inBattle()}，计 {@code in_battle}）或战斗锁存在 / 读锁失败（计 {@code battle_lock}：
+ *       这一局还没完，已结算待落盘时锁也还在；读失败按在途，fail-closed，同基线 {@code team.cpp:378-402}）；队长不在本节点（跨节点、跨 zone、离线）
+ *       不跟随；已同场景什么都不做；队长所在频道在排空中不跟随（批次 5.1，scene-channels-spec §4.13）；否则
+ *       {@code world.switchScene(self, leader.scene())}。用内存里的队长场景、不读 {@code xm:location}（同节点时内存就是权威，D9），
+ *       不经 scene-manager（Java 同节点换场景是同步的，没有 60 s 去重）；</li>
  *   <li>队长是自己、且这次是自己进场 → 对 members 里在本节点上的其他成员各自再读一次<b>自己的</b>成员关系，按「只跟随、不扇出」处理
  *       （player_team.cpp:327-347，防循环）。</li>
  * </ol>
  * 被跟随换场景（以及被扇出后的跟随）也会触发进场钩子：那次按「只跟随、不扇出」处理；它已和队长同场景，所以什么都不做，不会循环。
  *
- * <p>与基线的差异（team-spec D7–D10）：不收 {@code PlayerTeamRefreshEvent}、不缓存 TeamId（入队 / 转让 / 踢人本来就不拉人，
- * 基线的 RefreshOnly 模式只为刷新组件）；不做队友 AOI 优先级；不读 {@code battle:lock}（6.3 前没有战斗，「冻结解除后补一次」届时再加）；
+ * <p><b>回合制战斗</b>（批次 6.3，scene-battle-spec §7.13 世界内部第 3 条）：战斗在途的队员不被拉走，解冻后补一次。
+ * {@link #onBattleFreezeCleared} 由 {@code PlayerBattleService} 在三处调，都按「只跟随、不扇出」处理：解冻且条件删锁<b>完成之后</b>（取消备战、reaper 判废）；
+ * 保留锁的解冻（备战到期、结算应用后）——这次检查会读到锁而放弃，等于空跑；销账脚本确实放掉了锁之后（位 2）——真正补上的是这一次。
+ * 与基线的一处写法差异：基线在 {@code CheckFollowLeader} 的第二跳（读队长位置与自己的锁）之前、回调之后各判一次内存冻结
+ * （{@code player_team.cpp:353}、{@code :402}）；Java 把锁读并进了成员关系那一次读，没有「第二跳之前」这个位置，<b>只在回调后统一判一次</b>，
+ * 不做读前预判（代价：战斗中的非队长多发一次 EXISTS，结果相同）。也不能把预判加在发起读之前：成员关系那一跳不受战斗闸约束，
+ * 队长在战斗中进场照样要扇出（基线 {@code player_team.cpp:327-345} 同）。
+ *
+ * <p>与基线的其余差异（team-spec D7–D10）：不收 {@code PlayerTeamRefreshEvent}、不缓存 TeamId（入队 / 转让 / 踢人本来就不拉人，
+ * 基线的 RefreshOnly 模式只为刷新组件）；不做队友 AOI 优先级；
  * 基线的「归属交接在途 / 换图在途」守卫对应 Java 的跨节点换图在途（批次 5.2，{@code switchPhase ≠ NONE} 不跟随）；「会话不活」守卫
  * 在 Java 不存在（断线即移出）。
  *

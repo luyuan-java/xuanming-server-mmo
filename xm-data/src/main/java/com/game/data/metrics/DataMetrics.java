@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import java.util.Collection;
 import java.util.EnumMap;
 import java.util.Locale;
 import java.util.Map;
@@ -166,10 +167,27 @@ public final class DataMetrics {
         }
     }
 
-    /** 一个玩家在作业里的结局（restored / online / busy / fence_lost / no_snapshot / ...，固定集合）。 */
+    /**
+     * 一个玩家在作业里的结局（{@code xm_data_ops_players_total}）。{@code outcome} 是固定集合：回档的全集是
+     * {@code RollbackJob.PLAYER_OUTCOMES}（restored / player_online / player_busy / in_battle / battle_lock_unknown / fence_lost / ...）。
+     */
     public void opsPlayer(String kind, String outcome) {
-        Counter.builder(OPS_PLAYERS).description("运维作业逐玩家的结局").tag("kind", kind).tag("outcome", outcome)
-                .register(registry).increment();
+        opsPlayerCounter(kind, outcome).increment();
+    }
+
+    /**
+     * 预建一种作业的逐玩家结局计数（值为 0，不计数；幂等，装配时调用一次）。不预建的话「从没发生」与「指标不存在」分不开——
+     * 回档前查战斗锁的两个结局（in_battle 是规则拒绝、battle_lock_unknown 是 Redis 故障）要能直接写 {@code rate(...) > 0} 的告警。
+     */
+    public void registerOpsPlayers(String kind, Collection<String> outcomes) {
+        for (String outcome : outcomes) {
+            opsPlayerCounter(kind, outcome);
+        }
+    }
+
+    private Counter opsPlayerCounter(String kind, String outcome) {
+        return Counter.builder(OPS_PLAYERS).description("运维作业逐玩家的结局").tag("kind", kind).tag("outcome", outcome)
+                .register(registry);
     }
 
     /** 一次夺权的结局：claimed / kicked / online / timeout / not_found / error。 */

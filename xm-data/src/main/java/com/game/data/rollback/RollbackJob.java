@@ -41,6 +41,9 @@ import org.slf4j.LoggerFactory;
  * 1 计划（只读）：逐人选快照并钉进 ops_job_player（PLANNED）；没有快照的分类；超上限 → REJECTED plan_too_large
  * 2 夺权：Claimed → 持有；Held + reject → player_online；Held + kick → 让出、等待；超时 → player_busy；NotFound → player_not_found
  *   （单人 / 多人：夺不到的只记结果，其余继续；整区：任何一人夺不到 → 全部释放、零写入，REJECTED zone_not_quiescent）
+ * 2b 战斗锁（批次 6.3，{@link BattleLockGate}）：两轮都夺完之后、账本差集之前，对全部已夺到的玩家批量查一次。锁在 → in_battle；
+ *   读不到 → battle_lock_unknown（fail-closed）；都不写（单人 / 多人：当场释放，其余继续；整区：有一人被挡 → 同样 zone_not_quiescent，
+ *   摘要里战斗中的人数单列）
  * 3 续约（data-ops-fence 每 10 s，AdminOwnership.renew）
  * 4 账本差集（立即）→ 沉降 → 帮会检查 → 回收逆转检查 → 裁决；放行时 ACCEPTED 事件（写不进零写入）+ 逐行 ERROR 日志
  * 5 逐人写事务（RollbackWriter），按 player_id 升序
@@ -49,6 +52,11 @@ import org.slf4j.LoggerFactory;
  * </pre>
  * 不变量：STARTED 先于一切（受理时已提交，I3）；三道检查没有得出「通过」之前不写任何玩家，写后复查在释放之前（I4）；释放前已尝试写墓碑（I5）。
  * 取消只在第一笔写之前有效（各阶段边界检查）。
+ *
+ * <p>三道资产分歧检查（账本差集 / 帮会 / 回收逆转）内联在 {@link #run}，不抽 {@code AssetDivergenceChecker} 接口（lead 2026-10-05 裁决：
+ * 三道的输入、时机与裁决各不相同）。战斗结算账本（{@code battle_ledger}）没有单独的分歧检查：它按描述符归资产组、随 assets / FULL
+ * 整段回退，未销账的局回档后由待结算记录重投、相对快照恰好一次（scene-battle-spec S-11；{@code RestoreBuilderTest} 钉住整段回退）。
+ * 战斗锁闸（2b）不是分歧检查，不走 {@code acceptDivergence}。
  */
 public final class RollbackJob implements JobBody {
 
@@ -83,14 +91,36 @@ public final class RollbackJob implements JobBody {
     // 逐玩家结局（ops_job_player.outcome）
     static final String PLAYER_ONLINE = "player_online";
     static final String PLAYER_BUSY = "player_busy";
+    /** 夺到之后战斗锁仍在（批次 6.3；对应基线回档对战斗中玩家回 1005）。全部目标都被它挡下时也是作业的结果码。 */
+    static final String IN_BATTLE = "in_battle";
+    /** 夺到之后读不到战斗锁（Redis 故障 / 超时）：fail-closed，按在战处理、不写；与 {@link #IN_BATTLE} 分开记（规则拒绝 vs 故障）。 */
+    static final String BATTLE_LOCK_UNKNOWN = "battle_lock_unknown";
     static final String FAILED = "failed";
     static final String NOT_EXECUTED = "not_executed";
     static final String REJECTED = "rejected";
+    /** 指标里 {@link RollbackWriter#RESTORED} 的写法（小写）。 */
+    static final String METRIC_RESTORED = "restored";
 
-    /** 依赖（装配一次，多个作业共用）。 */
+    /**
+     * {@code xm_data_ops_players_total{kind="rollback"}} 的 {@code outcome} 固定集合（= data-ops-spec §7.7 的逐玩家结局，RESTORED 记作小写）。
+     * 装配时全部预建为 0（{@link RollbackService} 构造时登记）：不预建的话「从没发生」与「指标不存在」分不开，
+     * {@code rate(...{outcome="battle_lock_unknown"}) > 0} 这类告警既不报警也不报错。新加结局必须加进这里（用例钉住）。
+     */
+    public static final List<String> PLAYER_OUTCOMES = List.of(METRIC_RESTORED,
+            RollbackPlanner.PLAYER_NOT_FOUND, RollbackPlanner.SNAPSHOT_NOT_FOUND, RollbackPlanner.NO_SNAPSHOT,
+            RollbackPlanner.CREATED_AFTER_TARGET, PLAYER_ONLINE, PLAYER_BUSY, IN_BATTLE, BATTLE_LOCK_UNKNOWN,
+            RollbackWriter.SNAPSHOT_GONE, RollbackWriter.STATE_INVALID, RollbackWriter.UNKNOWN_SECTIONS,
+            RollbackWriter.FENCE_LOST, RollbackWriter.ID_UNAVAILABLE, FAILED, NOT_EXECUTED, REJECTED, CANCELLED);
+
+    /**
+     * 依赖（装配一次，多个作业共用）。
+     *
+     * @param battleLocks 回档前的战斗锁闸（夺权之后、账本差集之前；dry-run 也用它标出在战玩家）
+     */
     public record Deps(RollbackPlanner planner, RollbackWriter writer, AdminOwnership ownership, GuildDivergenceGate guild,
-                       PersistedPlayerMapper players, PlayerSnapshotMapper snapshots, TransactionLogQueryService txlog,
-                       OpsJobStore jobs, DataProperties props, DataMetrics metrics, ObjectMapper json) {
+                       BattleLockGate battleLocks, PersistedPlayerMapper players, PlayerSnapshotMapper snapshots,
+                       TransactionLogQueryService txlog, OpsJobStore jobs, DataProperties props, DataMetrics metrics,
+                       ObjectMapper json) {
     }
 
     private final Deps d;
@@ -200,17 +230,62 @@ public final class RollbackJob implements JobBody {
                 }
             }
         }
-        if (!zoneUnclaimed.isEmpty()) {
-            return zoneNotQuiescent(ctx, unclaimed, planned.size());
+
+        // ---------------------------------------------------------------- 2b 战斗锁（批次 6.3，data-ops-spec §13.3）
+        // 两轮都夺完之后、账本差集之前，对全部已夺到的玩家批量查一次。这个位置同时覆盖 reject 夺到的离线玩家（断线即写回释放，战斗在 xm-battle 继续）
+        // 与 kick 踢下来的战斗中玩家（顶号通路不看是否在战斗）；夺到之后不会再开出新的一局（备战要有活实例，活实例要先拿到归属；
+        // 备战写锁途中被踢走的，scene 在写锁回调里发现人已离场会自己删锁、回 1004）。
+        // 整区即使已经有人夺不到也照查：与「两轮都夺完才裁决」同理，一次把挡路的人列全。
+        int claimedCount = claimed.size();
+        BattleLockGate.Result locks = claimed.isEmpty() ? BattleLockGate.Result.none()
+                : d.battleLocks().check(List.copyOf(claimed.keySet()), ctx::checkpoint);
+        Map<String, Object> lockView = locks.view();
+        if (!locks.unknown().isEmpty()) {
+            log.error("回档作业 job={} 读不到战斗锁：{} / {} 人按在战处理、不写（fail-closed）：{}", ctx.jobIdText(),
+                    locks.unknown().size(), locks.checked(), printable(locks.error()));
+        }
+        if (!locks.inBattle().isEmpty()) {
+            log.warn("回档作业 job={} 有 {} / {} 名已夺到的玩家战斗锁仍在：不写（前 20 个：{}）", ctx.jobIdText(),
+                    locks.inBattle().size(), locks.checked(),
+                    locks.inBattle().stream().limit(20).map(Long::toUnsignedString).toList());
+        }
+        if (req.scope() == RollbackRequest.Scope.ZONES) {
+            // 整区全有或全无：被挡的人只记明细（带夺到的 epoch），归属与其余人一起在 afterResult 里释放
+            for (Long playerId : List.copyOf(claimed.keySet())) {
+                String outcome = locks.outcome(playerId);
+                if (outcome != null) {
+                    setOutcome(ctx, playerId, outcome);
+                }
+            }
+            if (!zoneUnclaimed.isEmpty() || locks.blocked()) {
+                return zoneNotQuiescent(ctx, unclaimed, planned.size(), lockView);
+            }
+        } else if (locks.blocked()) {
+            // 单人 / 多人：被挡的人当场释放（一批并发写墓碑），不陪其余的人等沉降；其余继续
+            List<Long> dropped = new ArrayList<>();
+            for (Long playerId : List.copyOf(claimed.keySet())) {
+                String outcome = locks.outcome(playerId);
+                if (outcome != null) {
+                    setOutcome(ctx, playerId, outcome);
+                    claimed.remove(playerId);
+                    dropped.add(playerId);
+                }
+            }
+            d.ownership().releaseMany(dropped);
         }
         Map<String, Object> claimedEvent = new LinkedHashMap<>();
-        claimedEvent.put("claimed", claimed.size());
+        claimedEvent.put("claimed", claimedCount);
         claimedEvent.put("unclaimed", unclaimed);
         claimedEvent.put("kick", kick);
+        claimedEvent.put("battleLock", lockView);
         ctx.eventQuietly(OpsJobEventType.OPS_JOB_EVENT_CLAIMED, claimedEvent);
         if (claimed.isEmpty()) {
-            String code = unclaimed.keySet().iterator().next();
-            return finishRejected(ctx, code, Map.of("unclaimed", unclaimed));
+            // 一个可写的也没有：结果码取夺权阶段第一个没夺到的结局；都夺到了而全被战斗锁挡下 → in_battle / battle_lock_unknown
+            String code = unclaimed.isEmpty() ? locks.rejectCode() : unclaimed.keySet().iterator().next();
+            Map<String, Object> s = new LinkedHashMap<>();
+            s.put("unclaimed", unclaimed);
+            s.put("battleLock", lockView);
+            return finishRejected(ctx, code, s);
         }
         if (ctx.cancelRequested()) {
             return stopBeforeWrite(ctx, OpsJobStatus.OPS_JOB_CANCELLED, CANCELLED, Map.of("phase", "claimed"));
@@ -418,7 +493,7 @@ public final class RollbackJob implements JobBody {
                 consecutiveFailures = 0;
                 written.add(playerId);
                 outcomes.put(playerId, outcome);
-                d.metrics().opsPlayer(KIND, "restored");
+                d.metrics().opsPlayer(KIND, METRIC_RESTORED);
                 audit.info("[Rollback] WRITE job={} player={} snapshot={} epoch={}", ctx.jobIdText(),
                         Long.toUnsignedString(playerId), Long.toUnsignedString(t.snapshot().getSnapshotId()),
                         Long.toUnsignedString(claimed.get(playerId)));
@@ -443,6 +518,7 @@ public final class RollbackJob implements JobBody {
         // ---------------------------------------------------------------- 6 写后复查
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("plan", planSummary);
+        summary.put("battleLock", lockView);
         summary.put("check", check);
         summary.put("restored", restored);
         summary.put("outcomes", countOutcomes());
@@ -514,18 +590,26 @@ public final class RollbackJob implements JobBody {
             return null;
         }
         zoneUnclaimed.add(t.playerId());
-        return claim instanceof Claim.Failed ? zoneNotQuiescent(ctx, unclaimed, planned) : null;
+        return claim instanceof Claim.Failed ? zoneNotQuiescent(ctx, unclaimed, planned, null) : null;
     }
 
     /**
-     * 整区全有或全无（R4：部分玩家被排除在整区回档之外会让玩家之间的交互错位）：任何一人夺不到 → 全部释放（afterResult）、零写入，
-     * REJECTED {@code zone_not_quiescent}，带前 100 个玩家号与总数。
+     * 整区全有或全无（R4：部分玩家被排除在整区回档之外会让玩家之间的交互错位）：任何一人夺不到，或夺到之后战斗锁仍在 / 读不到
+     * → 全部释放（afterResult）、零写入，REJECTED {@code zone_not_quiescent}。摘要：夺不到的前 100 个玩家号 {@code unclaimedPlayers}、
+     * 总数 {@code unclaimedCount} 与按结局的计数；战斗中的人数<b>单列</b>在 {@code battleLock}（{@code inBattleCount} /
+     * {@code inBattlePlayers} / {@code unknownCount}，不并入 unclaimed）。
+     *
+     * @param lockView 战斗锁检查的视图；{@code null} = 没查到那一步（夺权访问库出错，立即停）
      */
-    private JobResult zoneNotQuiescent(JobContext ctx, Map<String, Integer> unclaimed, int planned) {
+    private JobResult zoneNotQuiescent(JobContext ctx, Map<String, Integer> unclaimed, int planned,
+                                       Map<String, Object> lockView) {
         Map<String, Object> s = new LinkedHashMap<>();
         s.put("unclaimedPlayers", zoneUnclaimed.stream().limit(100).map(Long::toUnsignedString).toList());
         s.put("unclaimedCount", zoneUnclaimed.size());
         s.put("unclaimedByOutcome", unclaimed);
+        if (lockView != null) {
+            s.put("battleLock", lockView);
+        }
         s.put("claimed", claimed.size());
         s.put("planned", planned);
         return stopBeforeWrite(ctx, OpsJobStatus.OPS_JOB_REJECTED, ZONE_NOT_QUIESCENT, s);

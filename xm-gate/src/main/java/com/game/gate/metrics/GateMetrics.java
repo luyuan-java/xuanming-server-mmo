@@ -24,7 +24,8 @@ import java.util.function.IntSupplier;
  * 公网流量造不出新的时间序列。其余标签都是本类里的枚举。
  *
  * <p><b>线程安全</b>：任意线程可调（Netty I/O 线程、Dubbo 回调线程、链路线程）。枚举维度的计数器在构造时建好放进只读表，
- * 热路径不拼标签；按消息方法的计数器首次出现时注册一次，之后查表。
+ * 热路径不拼标签；按消息方法的计数器首次出现时注册一次，之后查表（例外：战斗上行拒绝 {@code result=battle_rejected}
+ * 的那几条由会话层在装配时经 {@link #registerRequest} 预建）。
  */
 public final class GateMetrics {
 
@@ -98,6 +99,12 @@ public final class GateMetrics {
         RATE_LIMITED,
         /** GM 类指令而运行模式不是 dev / test：推 23 {1006}，计非法包，不转发。 */
         GM_REJECTED,
+        /**
+         * 只走客户端直连的号（战斗服务 {@code BattleClientPlayer} 的 12 个号）发到了大厅连接上：GM 闸之后当场推 23 {1003}，
+         * 不计非法包、不断连、不进待处理队列、不过热关停（scene-battle-spec §7.19，D12）。正常客户端不会发，持续增长说明有
+         * 旧客户端或误走大厅的战斗上行。这 12 个时间序列在装配时预建（{@link GateMetrics#registerRequest}）。
+         */
+        BATTLE_REJECTED,
         /** 命中热关停规则：回信封 1003（同基线经路由服看到的形状），不转发、不计非法包。 */
         KILLED,
         /** 会话排队请求超限：断开。 */
@@ -301,6 +308,20 @@ public final class GateMetrics {
      * @param method 客户端白名单里的方法名（{@code 服务.方法}）；消息号不认识时传 null
      */
     public void request(String route, String method, RequestResult result) {
+        requestCounter(route, method, result).increment();
+    }
+
+    /**
+     * 预建一个请求去向的计数器（值为 0，不计数；重复调用无副作用）。请求计数器缺省是首次出现时才注册，
+     * 平时恒为 0、一出现就要告警的去向（{@link RequestResult#BATTLE_REJECTED}）要在装配时先建好，否则第一次增长之前
+     * 这条时间序列不存在，{@code rate()} / {@code increase()} 看不到从 0 到 1 的那一跳。
+     * {@code route} / {@code method} 必须来自客户端白名单（基数有界），参数含义同 {@link #request}。
+     */
+    public void registerRequest(String route, String method, RequestResult result) {
+        requestCounter(route, method, result);
+    }
+
+    private Counter requestCounter(String route, String method, RequestResult result) {
         RequestKey key = new RequestKey(route == null ? UNKNOWN : route, method == null ? UNKNOWN : method, result);
         Counter counter = requests.get(key);
         if (counter == null) {
@@ -311,7 +332,7 @@ public final class GateMetrics {
                     .tag("result", tagValue(k.result()))
                     .register(registry));
         }
-        counter.increment();
+        return counter;
     }
 
     // ================================================================ login（Dubbo）

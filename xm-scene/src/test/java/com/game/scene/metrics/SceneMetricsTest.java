@@ -390,6 +390,66 @@ class SceneMetricsTest {
         }
     }
 
+    /**
+     * 回合制战斗在途闸（批次 6.3，scene-battle-spec §9）：{@code xm_scene_battle_gate_rejects_total{gate}} 八个闸启动即注册（初值 0）、标签只有 gate；
+     * 现有指标补的取值也预建：移动 / 组队跟随 / 选目标 / 排空改派的 {@code in_battle}、组队跟随的 {@code battle_lock}。放技能补的是
+     * {@code caster_in_battle} / {@code target_in_battle} 两个取值（按两个不同的回码拆开，没有 {@code in_battle}；审计 OPS-14）。
+     */
+    @Test
+    void 战斗在途闸指标_八个闸启动即注册_现有指标补的in_battle取值() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default"};
+            for (String gate : gates) {
+                assertThat(before).contains("xm_scene_battle_gate_rejects_total{gate=\"" + gate + "\"} 0");
+            }
+            assertThat(before.lines().filter(line -> line.startsWith("xm_scene_battle_gate_rejects_total{")).count())
+                    .as("恰好规格列的八个闸").isEqualTo(gates.length);
+            assertThat(SceneMetrics.BattleGate.values()).hasSize(gates.length);
+            assertThat(before).contains(
+                    "xm_scene_moves_total{result=\"in_battle\"} 0",
+                    "xm_scene_team_follow_total{result=\"in_battle\"} 0",
+                    "xm_scene_team_follow_total{result=\"battle_lock\"} 0",
+                    "xm_scene_switch_resolves_total{result=\"in_battle\"} 0",
+                    "xm_scene_channel_relocations_total{result=\"in_battle\"} 0",
+                    "xm_scene_skill_releases_total{result=\"caster_in_battle\"} 0",
+                    "xm_scene_skill_releases_total{result=\"target_in_battle\"} 0");
+            assertThat(before).doesNotContain("xm_scene_skill_releases_total{result=\"in_battle\"}");
+
+            for (SceneMetrics.BattleGate gate : SceneMetrics.BattleGate.values()) {
+                exported.battleGateReject(gate);
+            }
+            exported.battleGateReject(SceneMetrics.BattleGate.ASSET);
+            exported.move(MoveResult.IN_BATTLE);
+            exported.teamFollow(SceneMetrics.TeamFollowResult.IN_BATTLE);
+            exported.teamFollow(SceneMetrics.TeamFollowResult.BATTLE_LOCK);
+            exported.switchResolve(SceneMetrics.SwitchResolve.IN_BATTLE);
+            exported.channelRelocation(SceneMetrics.ChannelRelocation.IN_BATTLE);
+            exported.skillRelease(SceneMetrics.SkillResult.CASTER_IN_BATTLE);
+            exported.skillRelease(SceneMetrics.SkillResult.TARGET_IN_BATTLE);
+
+            String after = prometheus.scrape();
+            for (String gate : gates) {
+                assertThat(after).contains("xm_scene_battle_gate_rejects_total{gate=\"" + gate + "\"} " + (gate.equals("asset") ? "2" : "1"));
+            }
+            assertThat(after).contains(
+                    "xm_scene_moves_total{result=\"in_battle\"} 1",
+                    "xm_scene_team_follow_total{result=\"in_battle\"} 1",
+                    "xm_scene_team_follow_total{result=\"battle_lock\"} 1",
+                    "xm_scene_switch_resolves_total{result=\"in_battle\"} 1",
+                    "xm_scene_channel_relocations_total{result=\"in_battle\"} 1",
+                    "xm_scene_skill_releases_total{result=\"caster_in_battle\"} 1",
+                    "xm_scene_skill_releases_total{result=\"target_in_battle\"} 1");
+            assertThat(labelNames(after, "xm_scene_battle_gate")).as("不带 player_id / battle_id / 消息号").containsExactly("gate");
+            assertThat(after.lines().filter(line -> line.startsWith("xm_scene_battle_gate_rejects_total{")).count())
+                    .as("发射不新增时间序列").isEqualTo(gates.length);
+        } finally {
+            prometheus.close();
+        }
+    }
+
     private static Set<String> labelNames(String scrape, String prefix) {
         Set<String> names = new TreeSet<>();
         Pattern label = Pattern.compile("([a-z_]+)=\"");

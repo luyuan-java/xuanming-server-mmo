@@ -324,7 +324,7 @@ public class SceneNode implements SmartLifecycle {
                 instance.idleTimeout(), instance.reclaimGrace(), instance.maxPerNode(), instance.maxPerCreator(),
                 settings.switchResolveTimeout(), this::requestDirectoryPublish);
         // 回合制战斗（批次 6.3，scene-battle-spec §7）：冻结 / 确认 / 进场恢复 / reaper / 结算应用 / 销账都在逻辑线程上，Redis 脚本异步；
-        // 世界的战斗钩子就是它（进场恢复、落盘后销账、原地解冻后补跑锁步骤），世界建好后再绑定
+        // 世界的战斗钩子就是它（进场恢复、落盘后销账、原地解冻后重跑进场恢复），世界建好后再绑定
         BattleSettlementService settlements = new BattleSettlementService(currency, bags, petService, missions, battleTables,
                 battleMetrics, SceneClock.SYSTEM, registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"));
         PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis)), settlements, battleTables,
@@ -339,6 +339,8 @@ public class SceneNode implements SmartLifecycle {
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
+                    // 战斗结算账本损坏时大声报一次（结算一律延后、备战一律 1006，原样保留；scene-battle-spec §7.12，D24）
+                    PlayerBattleService.checkLedgerOnLoad(player);
                 }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId), teamFollow,
                 crossNode, instances, battle);
         battle.attach(sceneWorld);

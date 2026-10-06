@@ -6,7 +6,12 @@ import com.game.api.DubboGroups;
 import com.game.common.killswitch.KillSwitch;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
+import com.game.proto.common.base.eNodeType;
+import com.google.protobuf.Descriptors;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -55,15 +60,38 @@ class MessageRoutesTest {
     }
 
     @Test
-    void Java版未接入的客户端服务路由到unsupported() {
-        // 不钉具体服务名：哪个服务先接入由批次决定，这里取任意一个「既不是玩家服务、也不在后端表里」的客户端服务。
-        MessageMethod unsupported = registry.all().stream()
+    void Java版未接入的客户端服务路由到unsupported_且不是directOnly() {
+        // 不钉具体服务名：哪个服务先接入由批次决定，这里取全部「不是玩家服务、不在后端表里、也不是只走直连」的客户端方法。
+        // 只走直连的战斗号域同样是 unsupported，但它们在直连闸就被拒了、到不了 dispatcher 的缺省分支，不能拿来充数：
+        // D12 之后按号序排第一个的正是 139 BattleClientPlayer.NotifyTurnResult，不排除它这条用例就一直拿战斗号空转。
+        List<MessageMethod> unsupported = registry.all().stream()
                 .filter(m -> m.clientService() && !m.playerService()
-                        && !MessageRoutes.SERVICE_BACKENDS.containsKey(m.serviceName()))
-                .findFirst().orElseThrow();
-        MessageRoute route = routes.clientRoute(unsupported.messageId());
-        assertThat(route.domain()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
-        assertThat(route.method()).isEqualTo(unsupported.serviceName() + "." + unsupported.methodName());
+                        && !MessageRoutes.SERVICE_BACKENDS.containsKey(m.serviceName())
+                        && !MessageRoutes.DIRECT_ONLY_SERVICES.contains(m.serviceName()))
+                .toList();
+        assertThat(unsupported)
+                .as("契约里已经没有未接入的客户端服务，这条用例取不到样本：把它删掉（缺省分支由下一条用例钉住），不要放宽过滤条件让它空转")
+                .isNotEmpty();
+        for (MessageMethod method : unsupported) {
+            MessageRoute route = routes.clientRoute(method.messageId());
+            assertThat(route).as(method.key()).isNotNull();
+            assertThat(route.domain()).as(method.key()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
+            assertThat(route.directOnly()).as(method.key() + " 走缺省分支，不是直连闸").isFalse();
+            assertThat(route.method()).isEqualTo(method.serviceName() + "." + method.methodName());
+        }
+    }
+
+    @Test
+    void 后端表里没有的非玩家服务缺省落到unsupported_与契约里还剩哪个服务没接无关() {
+        // 上一条取的是契约里的真样本，全部服务接完之后会被删掉；缺省分支本身在这里用一个契约里不存在的服务名钉住。
+        MessageMethod login = method("ClientPlayerLogin", "Login");
+        MessageMethod notPorted = new MessageMethod(login.messageId(), "NotPortedYetService", "Foo", login.method(),
+                login.requestPrototype(), login.responsePrototype(), true, false);
+        assertThat(MessageRoutes.SERVICE_BACKENDS).doesNotContainKey(notPorted.serviceName());
+        assertThat(MessageRoutes.backendOf(notPorted)).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
+        assertThat(MessageRoutes.directOnly(notPorted)).isFalse();
+        // 对照：同一个方法挂在已接入的服务名下就不是 unsupported——上面的结果来自查表落空，不是别的条件
+        assertThat(MessageRoutes.backendOf(login)).isEqualTo(ClientDispatcher.DOMAIN_LOGIN);
     }
 
     @Test
@@ -154,9 +182,10 @@ class MessageRoutesTest {
     }
 
     @Test
-    void 战斗服务12个号全部路由到unsupported_永不进后端表() {
-        // combat.md gate-battle-uplink-reject；battle-node-spec §3.7 / §13.7：战斗上行只走 xm-battle 直连，
-        // 大厅连接上发 BattleClientPlayer 的任何号（含 Notify 号）都回 23 {1003}。接进任何后端都会让这里失败。
+    void 战斗服务12个号全部标directOnly_域仍是unsupported_永不进后端表() {
+        // combat.md gate-battle-uplink-reject；battle-node-spec §3.7 / §13.7；scene-battle-spec §2.5 / §7.19（D12）：战斗上行只走
+        // xm-battle 直连，大厅连接上发 BattleClientPlayer 的任何号（含 Notify 号）都由直连闸当场回 23 {1003}。
+        // 摘掉 directOnly 或把它接进任何后端都会让这里失败。
         List<String> methods = List.of("NotifyTurnResult", "GetBattleState", "NotifyBattleStart", "NotifyBattleReconnect",
                 "SubmitBattleAction", "NotifyBattleEnd", "NotifySpectateTurnResult", "NotifySpectateState", "SetAutoBattle",
                 "StopWatchBattle", "NotifySpectateEnd", "NotifyBattleAssigned");
@@ -169,11 +198,126 @@ class MessageRoutesTest {
             assertThat(method.playerService()).as(method.key()).isFalse();
             MessageRoute route = routes.clientRoute(method.messageId());
             assertThat(route).as(method.key()).isNotNull();
+            assertThat(route.directOnly()).as(method.key() + " 只走直连").isTrue();
             assertThat(route.domain()).as(method.key()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
             assertThat(route.method()).isEqualTo("BattleClientPlayer." + method.methodName());
+            assertThat(route.gm()).as(method.key() + " 不是 GM 指令（否则会先被 GM 闸按非法包拒）").isFalse();
+            // player_battle.proto 没有 proto package：热关停键是 BattleClientPlayer/<Method>（直连闸排在热关停之前，这些键对 gate 无效）
+            assertThat(route.rpcPath()).isEqualTo("/BattleClientPlayer/" + method.methodName());
         }
-        assertThat(battle).extracting(MessageMethod::messageId).contains(140, 149, 162, 165);
+        // 12 个号逐个钉住（scene-battle-spec §2.5；message_id.txt）：发号漂移或增删方法时这里先失败
+        assertThat(battle).extracting(MessageMethod::messageId)
+                .containsExactlyInAnyOrder(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177);
+        assertThat(MessageRoutes.DIRECT_ONLY_SERVICES).containsExactly("BattleClientPlayer");
         assertThat(MessageRoutes.SERVICE_BACKENDS).doesNotContainKey("BattleClientPlayer");
+        assertThat(MessageRoutes.SERVICE_BACKENDS.keySet()).as("只走直连的服务不能同时有后端")
+                .doesNotContainAnyElementsOf(MessageRoutes.DIRECT_ONLY_SERVICES);
+    }
+
+    @Test
+    void directOnly恰好是这12个号_其余客户端路由都不是_与基线节点类型回落的近似判据圈出同一组号() {
+        List<MessageMethod> clients = registry.all().stream().filter(MessageMethod::clientService).toList();
+        List<Integer> direct = clients.stream().map(m -> routes.clientRoute(m.messageId()))
+                .filter(MessageRoute::directOnly).map(MessageRoute::messageId).toList();
+        assertThat(direct).containsExactlyInAnyOrder(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177);
+        // 登录 / scene / 好友 / 聚宝斋 各取一个：没有被误标
+        for (String[] m : new String[][] {{"ClientPlayerLogin", "Login"}, {"SceneSkillClientPlayer", "ListSkills"},
+                {"ClientPlayerFriend", "AddFriend"}, {"ClientPlayerJubaozhai", "BrowseListings"}}) {
+            assertThat(routes.clientRoute(registry.requireId(m[0], m[1])).directOnly()).as(m[0] + "." + m[1]).isFalse();
+        }
+        // 基线 gate 的判据是 targetNodeType == BattleNodeService（client_message_processor.cpp:944）。targetNodeType 由 protogen 的
+        // NodeServiceForCpp 三级回落派生（mmorpg protogen/internal/model.go:167-183，cpp/service_register_info.go:319）：
+        //   ① 服务名 + NodeService 是 eNodeType 的枚举名 → ② proto package 驼峰化 + NodeService 是枚举名 → ③ proto 所在目录名。
+        // 它不是由文件的 OptionFileDefaultNode 派生的。Java 按服务裸名判，且不许依赖 proto 目录（AGENTS.md §1），所以这里
+        // ①② 照算，③ 拿文件的 OptionFileDefaultNode 当目录名的近似。先钉住 ①② 算得对（与基线生成物 rpc_event_registry.cpp 的
+        // targetNodeType 对过：聚宝斋 TradeNodeService、匹配 MatchNodeService 都来自 package；战斗与登录落到 ③）：
+        assertThat(baselineNodeByName(method("ClientPlayerJubaozhai", "BrowseListings"))).as("package trade").isEqualTo("Trade");
+        assertThat(baselineNodeByName(method("MatchService", "CancelQueue"))).as("package match").isEqualTo("Match");
+        assertThat(baselineNodeByName(method("BattleClientPlayer", "SubmitBattleAction"))).as("没有 package，基线靠目录 battle").isNull();
+        assertThat(baselineNodeByName(method("ClientPlayerLogin", "Login"))).as("loginpb 不是节点名，基线靠目录 login").isNull();
+        // ① 现行契约里没有客户端服务命中，用一个假想的服务名钉住：裸名就叫 Battle 的服务不管放在哪、写没写 option 都是战斗节点
+        MessageMethod login = method("ClientPlayerLogin", "Login");
+        MessageMethod namedBattle = new MessageMethod(login.messageId(), "Battle", "Foo", login.method(),
+                login.requestPrototype(), login.responsePrototype(), true, false);
+        assertThat(fileDefaultNode(namedBattle)).as("login.proto 没写 OptionFileDefaultNode").isNull();
+        assertThat(baselineBattleNode(namedBattle)).as("BattleNodeService 是 eNodeType 的枚举名，① 命中").isTrue();
+        // 两个判据必须圈出同一组号：mmorpg 以后新增一个服务名 / package 解析成 Battle、或者放在 NODE_BATTLE 文件里的客户端服务，
+        // 这里先失败，提醒把它加进 DIRECT_ONLY_SERVICES。
+        List<Integer> byBaseline = clients.stream().filter(MessageRoutesTest::baselineBattleNode)
+                .map(MessageMethod::messageId).toList();
+        assertThat(byBaseline).containsExactlyInAnyOrderElementsOf(direct);
+        // 近似看不见的情形之一：①② 都不命中、文件又没写 OptionFileDefaultNode——基线对它只看目录名，这里读不到。
+        // 把这类服务的清单钉死（现在是 login.proto / friend.proto / guild.proto 三个文件，基线分别判成 Login / Friend / Guild 节点）。
+        // 剩下测不出的只有「option 与目录自相矛盾」（写了别的节点却放在 proto/battle/ 下，或反过来），那是 mmorpg 自己的错配。
+        assertThat(clients.stream().filter(m -> baselineNodeByName(m) == null && fileDefaultNode(m) == null)
+                .map(MessageMethod::serviceName).distinct())
+                .as("基线对这些客户端服务的节点类型只能回落到 proto 目录名，Java 看不到目录。清单变了先去 mmorpg 确认新服务是不是放在 "
+                        + "proto/battle/ 下（生成物 rpc_event_registry.cpp 里它的 targetNodeType 是不是 BattleNodeService）："
+                        + "是就加进 MessageRoutes.DIRECT_ONLY_SERVICES，不是就补进这份清单")
+                .containsExactlyInAnyOrder("ClientPlayerLogin", "ClientPlayerFriend", "GuildService");
+    }
+
+    @Test
+    void all按消息号升序列出全部客户端路由_与逐号查到的一致_手写路由表缺省为空() {
+        List<MessageRoute> all = routes.all();
+        List<Integer> clientIds = registry.all().stream().filter(MessageMethod::clientService)
+                .map(MessageMethod::messageId).sorted().toList();
+        assertThat(all).extracting(MessageRoute::messageId).containsExactlyElementsOf(clientIds);
+        assertThat(all).allSatisfy(route -> assertThat(routes.clientRoute(route.messageId())).isSameAs(route));
+        assertThat(all.stream().filter(MessageRoute::directOnly)).hasSize(12);
+        MessageRoutes handwritten = id -> new MessageRoute(id, "scene");
+        assertThat(handwritten.all()).isEmpty();
+    }
+
+    @Test
+    void 手写路由的缺省构造都不是directOnly() {
+        assertThat(new MessageRoute(1, "scene").directOnly()).isFalse();
+        assertThat(new MessageRoute(1, "scene", true).directOnly()).isFalse();
+        assertThat(new MessageRoute(1, "scene", true, "S.M").directOnly()).isFalse();
+        assertThat(new MessageRoute(1, "scene", true, "S.M", true).directOnly()).isFalse();
+        assertThat(new MessageRoute(1, "scene", true, "S.M", false, "/p.S/M").directOnly()).isFalse();
+        assertThat(new MessageRoute(1, "scene", true, "S.M", false, "/p.S/M", true).directOnly()).isTrue();
+    }
+
+    private static MessageMethod method(String serviceName, String methodName) {
+        return registry.byId(registry.requireId(serviceName, methodName)).orElseThrow();
+    }
+
+    /** 方法所在 proto 文件的 {@code OptionFileDefaultNode}（按扩展字段名读，不引用定义它的生成类）；没写为 null。 */
+    private static String fileDefaultNode(MessageMethod method) {
+        for (Map.Entry<Descriptors.FieldDescriptor, Object> e
+                : method.method().getFile().getOptions().getAllFields().entrySet()) {
+            if (e.getKey().isExtension() && e.getKey().getName().equals("OptionFileDefaultNode")) {
+                return ((Descriptors.EnumValueDescriptor) e.getValue()).getName();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 基线 protogen {@code NodeServiceForCpp} 三级回落的前两级：{@code 服务裸名 + "NodeService"} 是 {@code eNodeType} 的枚举名就取服务裸名；
+     * 否则 proto package 驼峰化（按 {@code _ . -} 分词、各词首字母大写）后加 {@code "NodeService"} 命中就取它。
+     * 都不命中返回 null：基线此时回落到 proto 所在目录名，Java 不许看目录。
+     */
+    private static String baselineNodeByName(MessageMethod method) {
+        Set<String> nodeTypes = eNodeType.getDescriptor().getValues().stream()
+                .map(Descriptors.EnumValueDescriptor::getName).collect(Collectors.toSet());
+        if (nodeTypes.contains(method.serviceName() + "NodeService")) {
+            return method.serviceName();
+        }
+        StringBuilder camel = new StringBuilder();
+        for (String word : method.method().getFile().getPackage().split("[_.\\-]+")) {
+            if (!word.isEmpty()) {
+                camel.append(Character.toUpperCase(word.charAt(0))).append(word, 1, word.length());
+            }
+        }
+        return camel.length() > 0 && nodeTypes.contains(camel + "NodeService") ? camel.toString() : null;
+    }
+
+    /** 基线会不会把这个方法判成 {@code BattleNodeService}：前两级照算，第三级（目录名）以文件的 {@code OptionFileDefaultNode} 近似。 */
+    private static boolean baselineBattleNode(MessageMethod method) {
+        String byName = baselineNodeByName(method);
+        return byName != null ? byName.equals("Battle") : "NODE_BATTLE".equals(fileDefaultNode(method));
     }
 
     @Test
