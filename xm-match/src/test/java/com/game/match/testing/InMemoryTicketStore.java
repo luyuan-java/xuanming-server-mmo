@@ -4,6 +4,7 @@ import com.game.common.deadline.Deadline;
 import com.game.match.rating.RatingReader;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
+import com.game.match.ticket.TicketCodec;
 import com.game.match.ticket.TicketRef;
 import com.game.match.ticket.TicketState;
 import com.game.match.ticket.TicketStore;
@@ -23,8 +24,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * {@link TicketStore} 的内存实现：各包的组件测试拿它当票据存储，不必等 Redis 实现。语义逐条对着接口注释写（不变量 I1–I5、每个写方法的 CAS 条件与
- * 重放行为）；真实现与它跑同一套契约测试，保证替身不漂移。
+ * {@link TicketStore} 的内存实现：各包的组件测试拿它当票据存储，不必连 Redis。语义逐条对着接口注释写（不变量 I1–I5、每个写方法的 CAS 条件与
+ * 重放行为）；它与 Redis 实现（{@code RedissonTicketStore}）跑同一套契约测试 {@code TicketStoreContract}，保证替身不漂移——
+ * 改这里的任何语义之前先改契约测试，两边一起过。
  *
  * <p>时间与 TTL 用 {@link ManualRedisClock}：票据到期后读不到（队列里的残留项照旧留着，同 Redis 的行为）。
  *
@@ -193,6 +195,28 @@ public final class InMemoryTicketStore implements TicketStore {
         }
     }
 
+    /** 让一个弹组重放标记立即过期（等价于真 Redis 上 60 s 之后）。 */
+    public InMemoryTicketStore expirePopMarker(String popToken) {
+        lock.lock();
+        try {
+            popMarkers.remove(popToken);
+            return this;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** 让一把凑单锁立即过期（不看持有者）。 */
+    public InMemoryTicketStore expireLock(QueueRef queue) {
+        lock.lock();
+        try {
+            locks.remove(queue.lockKey());
+            return this;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     // ================================================================ TicketReader
 
     @Override
@@ -296,6 +320,9 @@ public final class InMemoryTicketStore implements TicketStore {
                 throw new IllegalArgumentException("整组建票的玩家号重复: " + id(member.playerId()));
             }
         }
+        if (members.isEmpty()) {
+            return OptionalLong.empty();
+        }
         return run("createGroup", "createGroup(" + ids(members.stream().map(GroupMember::playerId).toList()) + ")", true, () -> {
             for (GroupMember member : members) {
                 Held held = live(member.playerId());
@@ -352,7 +379,8 @@ public final class InMemoryTicketStore implements TicketStore {
     @Override
     public boolean drop(QueueRef queue, long playerId, DropReason reason, String seenTicketId, Deadline d) {
         Objects.requireNonNull(reason, "reason");
-        return run("drop", "drop(" + queue + "," + id(playerId) + "," + reason + ")", true, () -> {
+        requirePlayer(playerId);
+        return run("drop","drop(" + queue + "," + id(playerId) + "," + reason + ")", true, () -> {
             Held held = live(playerId);
             boolean validQueued = held != null && held.ticket.state() == TicketState.QUEUED && held.ticket.queueKey().equals(queue.queueKey());
             if (!validQueued) {
@@ -482,7 +510,13 @@ public final class InMemoryTicketStore implements TicketStore {
         if (notBeforeDelayMs < 0) {
             throw new IllegalArgumentException("退避时长不能为负: " + notBeforeDelayMs);
         }
-        return run("requeueFront", "requeueFront(" + queue + "," + ids(survivorsInOrder.stream().map(TicketRef::playerId).toList()) + ")", true, () -> {
+        Set<Long> distinct = new HashSet<>();
+        for (TicketRef survivor : survivorsInOrder) {
+            if (!distinct.add(survivor.playerId())) {
+                throw new IllegalArgumentException("回队首的玩家号重复: " + id(survivor.playerId()));
+            }
+        }
+        return run("requeueFront","requeueFront(" + queue + "," + ids(survivorsInOrder.stream().map(TicketRef::playerId).toList()) + ")", true, () -> {
             long now = clock.peekMs();
             String key = queue.queueKey();
             int requeued = 0;
@@ -535,8 +569,8 @@ public final class InMemoryTicketStore implements TicketStore {
     @Override
     public boolean tryLockQueue(QueueRef queue, String instanceId, long ttlMs, Deadline d) {
         requireTtl(ttlMs);
-        Objects.requireNonNull(instanceId, "instanceId");
-        return run("tryLockQueue", "tryLockQueue(" + queue + ")", true, () -> {
+        requireInstance(instanceId);
+        return run("tryLockQueue","tryLockQueue(" + queue + ")", true, () -> {
             long now = clock.peekMs();
             Held held = locks.get(queue.lockKey());
             if (held != null && held.expiresAtMs > now) {
@@ -552,7 +586,8 @@ public final class InMemoryTicketStore implements TicketStore {
 
     @Override
     public void unlockQueue(QueueRef queue, String instanceId, Deadline d) {
-        run("unlockQueue", "unlockQueue(" + queue + ")", true, () -> {
+        requireInstance(instanceId);
+        run("unlockQueue","unlockQueue(" + queue + ")", true, () -> {
             Held held = locks.get(queue.lockKey());
             if (held != null && held.holder.equals(instanceId)) {
                 locks.remove(queue.lockKey());
@@ -633,20 +668,20 @@ public final class InMemoryTicketStore implements TicketStore {
                 battleId, notBeforeMs);
     }
 
-    /** 队列成员 → 玩家号：只认不带前导零的非 0 无符号十进制，其余为 0（非法成员）。 */
+    /** 队列成员 → 玩家号：与真实现同一个解析（{@link TicketCodec#parseMember}）。 */
     static long parsePlayerId(String member) {
-        if (member == null || member.isEmpty() || member.length() > 20 || member.charAt(0) == '0') {
-            return 0;
+        return TicketCodec.parseMember(member);
+    }
+
+    private static void requirePlayer(long playerId) {
+        if (playerId == 0) {
+            throw new IllegalArgumentException("玩家号不能为 0");
         }
-        for (int i = 0; i < member.length(); i++) {
-            if (member.charAt(i) < '0' || member.charAt(i) > '9') {
-                return 0;
-            }
-        }
-        try {
-            return Long.parseUnsignedLong(member);
-        } catch (NumberFormatException e) {
-            return 0;
+    }
+
+    private static void requireInstance(String instanceId) {
+        if (instanceId == null || instanceId.isEmpty()) {
+            throw new IllegalArgumentException("实例标识不能为空");
         }
     }
 

@@ -20,6 +20,7 @@ import com.game.match.dispatch.MatchMethods;
 import com.game.match.dispatch.MatchWorkerPool;
 import com.game.match.dispatch.MatchWorkers;
 import com.game.match.gather.GatherHooks;
+import com.game.match.gather.GatherLauncher;
 import com.game.match.gather.GatherOutcome;
 import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
@@ -27,8 +28,14 @@ import com.game.match.port.NodeCalls;
 import com.game.match.port.PlayerPusher;
 import com.game.match.port.PlayerStatusReader;
 import com.game.match.port.RedisClock;
+import com.game.match.rating.RatingReader;
+import com.game.match.testing.FakeGatherLauncher;
+import com.game.match.testing.FixedRatingReader;
 import com.game.match.testing.LeaseOnlyRedis;
+import com.game.match.ticket.RedissonTicketStore;
+import com.game.match.ticket.TicketStore;
 import com.game.proto.match.JoinQueueRequest;
+import com.game.proto.match.JoinQueueResponse;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -36,6 +43,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.apache.dubbo.config.ReferenceConfig;
 import org.junit.jupiter.api.AfterAll;
@@ -43,6 +52,7 @@ import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -57,7 +67,8 @@ import org.springframework.test.context.DynamicPropertySource;
 /**
  * 先行件的进程骨架起得来（批次 6.4 的并行开发起点）：整个 {@link MatchApplication} 的上下文——真的 Dubbo Triple 导出（随机空闲端口，
  * 带调用方鉴权过滤器）、真的管理 Tomcat（随机端口）——只把外部连接换掉：Redis 用只应答发号租约的替身，不装数据源（骨架阶段没有任何 bean 用库）。
- * 钉住的状态是「Dubbo 已导出、没有任何处理器」：从另一个 Dubbo 框架模型（等价于 gate 进程）经真 Triple 调进来，10 个号都得到信封 1003；
+ * 钉住的状态是「Dubbo 已导出、派发表里只有已落地的处理器」：从另一个 Dubbo 框架模型（等价于 gate 进程）经真 Triple 调进来，
+ * 没有处理器的号都得到信封 1003；排队包落地后它的三个号（157 / 148 / 153）走到处理器，在这个没有 Redis 的上下文里按「依赖故障」一列回；
  * 基础设施 bean 与各出站口齐全；指标按规格 §11 的名字经 Prometheus 端点导出。
  *
  * <p>{@code XM_DUBBO_SECRET} 由 surefire 注入（pom.xml，仅测试用的假值）。
@@ -89,6 +100,22 @@ class MatchSkeletonContextTest {
         @Bean
         RedissonClient redissonClient() {
             return REDIS.client;
+        }
+
+        /**
+         * 排队入口（queue 包）要注入评分读取与开局入口，它们的真实现在 rating / gather 两个包里。那两个包合入之前用替身占位，
+         * 合入之后这两个 bean 自动让位（{@code @ConditionalOnMissingBean}：组件扫描到的配置类先于本类登记）。
+         */
+        @Bean
+        @ConditionalOnMissingBean
+        RatingReader ratingReaderPlaceholder() {
+            return new FixedRatingReader();
+        }
+
+        @Bean
+        @ConditionalOnMissingBean
+        GatherLauncher gatherLauncherPlaceholder() {
+            return new FakeGatherLauncher();
         }
     }
 
@@ -157,17 +184,24 @@ class MatchSkeletonContextTest {
                 .build();
     }
 
+    /** 已经有处理器的方法：目前只有排队包的三个号（别的包合入后在这里加上各自的方法）。 */
+    private static final Set<String> HANDLED = Set.of(MatchMethods.JOIN_QUEUE, MatchMethods.CANCEL_QUEUE, MatchMethods.GET_QUEUE_STATUS);
+
     @Test
-    void 没有任何处理器_派发表是空的() {
-        assertThat(handlers.orderedStream()).isEmpty();
-        assertThat(dispatcher.handledMessageIds()).isEmpty();
+    void 派发表里只有已落地的处理器_排队的三个号() {
+        assertThat(handlers.orderedStream().map(MatchMethodHandler::method)).containsExactlyInAnyOrderElementsOf(HANDLED);
+        assertThat(dispatcher.handledMessageIds()).containsExactly(148, 153, 157);
+        assertThat(context.getBean(TicketStore.class)).as("票据存储的生产实现").isInstanceOf(RedissonTicketStore.class);
     }
 
     @Test
-    void Dubbo已导出_经真Triple调进来_十个号都得到信封1003() throws Exception {
+    void Dubbo已导出_经真Triple调进来_没有处理器的号都得到信封1003() throws Exception {
         MessageIdRegistry registry = context.getBean(MessageIdRegistry.class);
 
         for (String method : MatchMethods.ALL) {
+            if (HANDLED.contains(method)) {
+                continue;
+            }
             int messageId = registry.requireId(MatchMethods.SERVICE, method);
             ClientReply reply = client().handle(call(messageId)).get(15, TimeUnit.SECONDS);
 
@@ -176,6 +210,30 @@ class MatchSkeletonContextTest {
             assertThat(reply.getTipParametersList()).isEmpty();
             assertThat(reply.getDirectivesList()).as("match 不产生会话指令").isEmpty();
         }
+    }
+
+    /**
+     * 排队三个号经真 Triple 走到处理器。这个上下文里的 Redis 替身只应答发号租约，其余读写一律失败——正好是 §8.1「依赖故障」一列：
+     * 157 回 in-band 16004，没有 in-band 错误字段的 148 / 153 回信封 1003。
+     */
+    @Test
+    void 排队三个号经真Triple走到处理器_依赖故障时157回inband16004_148与153回信封1003() throws Exception {
+        ClientReply join = client().handle(call(157)).get(15, TimeUnit.SECONDS);
+        ClientReply cancel = client().handle(call(148)).get(15, TimeUnit.SECONDS);
+        ClientReply status = client().handle(call(153)).get(15, TimeUnit.SECONDS);
+
+        assertThat(join.getTipId()).as("157 的失败在应答体里").isZero();
+        JoinQueueResponse response = JoinQueueResponse.parseFrom(join.getBody());
+        assertThat(response.getErrorCode()).isEqualTo(16004);
+        assertThat(response.getErrorMessage().getId()).isEqualTo(16004);
+        assertThat(response.getErrorMessage().getParametersList()).containsExactly("服务器繁忙,请稍后再试");
+        assertThat(response.getQueueTicket()).isEmpty();
+        for (ClientReply reply : List.of(cancel, status)) {
+            assertThat(reply.getTipId()).isEqualTo(1003);
+            assertThat(reply.getBody().isEmpty()).isTrue();
+            assertThat(reply.getTipParametersList()).isEmpty();
+        }
+        assertThat(join.getDirectivesList()).isEmpty();
     }
 
     @Test
