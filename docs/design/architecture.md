@@ -158,7 +158,10 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   不用 Redisson 批处理，它在运维 SCRIPT FLUSH 后遇到 NOSCRIPT 不会重载脚本）。同一玩家在同一 gate 上两次登录的确认可能乱序到达，
   gate 本地表以归属 epoch 更高者为准，旧登录的迟到确认不覆盖、旧会话被踢也不会撤掉新会话的条目；跨 gate 时旧登录迟到写入的条目
   会被它自己随后的撤销删掉，新会话的续期在 20s 内补回。gate 进程死掉后条目最多一个 TTL 消失，
-  不会像基线无 TTL 的会话键那样永远停在 ONLINE；代价是正常离线后续期批次与删除交错时，条目可能多留至多一个 TTL（推送有玩家栅栏兜底）。
+  不会像基线无 TTL 的会话键那样永远停在 ONLINE。发往 Redis 的写没有执行次序的保证，`GatePresence` 为此做两件事（2026-10-06）：
+  同一名玩家的写入与撤销排成一队、上一条有了结局才发下一条（进场后立刻断线时，撤销不会跑到写入前面变成空操作）；
+  续期在途时下线或换了会话的条目，续期回来后按值再撤销一次（续期脚本对「键不在」会补回，可能把刚删的条目补回来）。
+  此前这两种交错都会让已下线的玩家在目录里多留至多一个 TTL。仍可能多留的只剩 Redis 写失败（撤销没执行成）的情形，推送有玩家栅栏兜底。
   条目只表示「此刻在游戏里」，不承载断线租约 / 顶号（那些由归属协议负责，§7）。读者：任何服务（`find` / `findAll` 及异步版）。
 - **推送**（`PlayerPushes`）：查在线目录 → 把 `xm.discovery.GatePush{gate_instance_id, targets[(session_id, player_id)], message_content | kick_tip_id | message_batch}`
   发布到该 gate 的 pub/sub 频道 `xm:gate-push:{zone}:{gate 节点号}`；多人推送按 gate 分组、每个 gate 一条。
