@@ -39,10 +39,11 @@ import org.redisson.client.codec.ByteArrayCodec;
  *       不改字段与 TTL（确认只在备战应答之后才发，「备战 → 确认 → 备战重放」不可达；即使发生也只是拒绝、不把在打的局改回备战期）。
  *       与删锁交错（备战 → 取消删锁 → 重放 / 晚到）会把锁重新写出来，是 §10.5 登记的残余，按备战 TTL 过期。</li>
  *   <li>{@code CONFIRM}：幂等（s = F、同一个 d、同一个 TTL）。两次之间夹了销账 / 删锁 → 重放回 nil（按未命中处理）。</li>
- *   <li>{@code CANCEL_OFFLINE} / {@code deletePreparingIfMatch}（同一段脚本）：第一次回 1、重放回 0（锁已不在，计 {@code offline_absent}，无害）。
+ *   <li>{@code CANCEL_OFFLINE} / {@code deletePreparingIfMatch}（同一段脚本）：第一次回 1、重放回 0（锁已不在，计 {@code offline_absent}；丢的只是回 1 才补的那次组队跟随，见下一条）。
  *       删除被排到 {@code CONFIRM} 之后（Redisson 重排，或首发没执行、重发才执行）→ 回 2、锁不动。</li>
- *   <li>{@code DELETE_IF_MATCH}：状态幂等，第一次回 1、重放回 0（调用方不看返回值）。不看 s——只给 reaper 判废用；
- *       「只该删备战锁」的路径用 {@link #deletePreparingIfMatch}。</li>
+ *   <li>{@code DELETE_IF_MATCH}：状态幂等，第一次回 1、重放回 0。不看 s——只给 reaper 判废用；「只该删备战锁」的路径用
+ *       {@link #deletePreparingIfMatch}。返回值有人看：scene 的删锁回调在发起解冻的实例已换时，按「回 1 = 这一次把锁删掉了」决定是否给现任实例
+ *       补一次组队跟随（上一条的两个入口回 1 时同样据此补）；重放回 0 时这次补跟随会丢，由下一次跟随事件兜住（与 {@code ACK} 重放丢位 2 同一处残余）。</li>
  *   <li>{@code TOUCH}：幂等（同一组 s d p 与 TTL，回 1）。{@code TOUCH(P)} 落在 {@code CONFIRM} 之后（重放或 Redisson 重排）→ 回 2，
  *       不降级、不改 d / p、不动 TTL；{@code TOUCH(F)} 不受限。</li>
  *   <li>{@code HOLD}：只延不缩，重放最多把 TTL 再顶回 hold（多出重发间隔那几秒），回 1。</li>
@@ -63,8 +64,8 @@ import org.redisson.client.codec.ByteArrayCodec;
  * 不可能晚于同一局的销账：销账在结算之后，而一次备战调用最坏 4.2 s、此时房间还没建。销账只动本局的字段与 b == X 的锁，
  * 别的局（下一局）的锁、记录、墓碑都不受影响。
  *
- * <p>探测、删坏字段、读锁的 b、活动结果的 SET / EXISTS 本可以用普通命令（§7.2「不需要 Lua」），这里统一包成 Lua 是为了全部走 {@link ByteArrayCodec}
- * 与同一条 {@code eval} 路径（原样字节、统一的「回复为空 → 异常完成」）。
+ * <p>探测、删坏字段、读锁的 b、活动结果的 SET / EXISTS 本可以用普通命令，这里也包成了 Lua（同 §7.2）：为的是全部走 {@link ByteArrayCodec}
+ * 与同一条 {@code eval} 路径——值与字段名是原样字节，「回复为空 → 异常完成」只写一处。
  *
  * <p>全部方法异步、不阻塞、线程安全；返回的 future 在 Redisson 回调线程上完成（调用方自己投递回所属线程），出错以异常完成。
  * <b>回整数的脚本若得到空回复（协议异常）一律以 {@link IllegalStateException} 异常完成</b>——没问到结论不能当成任何一种结论（D15）。

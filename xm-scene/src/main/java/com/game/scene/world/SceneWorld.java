@@ -1516,8 +1516,9 @@ public final class SceneWorld {
      * RESOLVING 槽过了期限（结果回调丢了，正常不会）就<b>当场作废</b>（有副作用：清掉这个槽）、不再挡，迟到的结果按过期丢弃
      * （{@code player.switching() != sw} → STALE）。逻辑线程上调用。
      *
-     * <p>两个调用方：63 的处理器（在途回 3014）；回合制战斗的备战闸（在途回 1006，scene-battle-spec §7.5 第 1.3 步 / D4）——
-     * 备战必须经这里而不是直接看 {@link ScenePlayer#switchPhase()}：后者不做过期判定，回调万一丢了，这名玩家的备战会一直被挡到他再发一次 63 或重登
+     * <p>三个调用方：63 的处理器（在途回 3014）；回合制战斗的备战闸（在途回 1006，scene-battle-spec §7.5 第 1.3 步 / D4）；
+     * 组队跟随的守卫（在途不跟随，{@code TeamFollowService.followLeader}）。后两个必须经这里而不是直接看 {@link ScenePlayer#switchPhase()}：
+     * 后者不做过期判定，回调万一丢了，这名玩家的备战 / 跟随会一直被挡到他再发一次 63 或重登
      * （审计 GAT-14；D4 只允许 ≤ 选目标兜底超时的竞态）。槽在这里清掉之后，迟到的选目标结果不会在战斗冻结挂上之后再进交出。
      */
     public boolean switchInFlight(ScenePlayer player) {
@@ -1800,7 +1801,7 @@ public final class SceneWorld {
                         sw.token(), result);
                 pushTip(player, ENTER_FAILED);
                 // 冻结期间到达的确认只续了锁、没挂冻结，到达的结算被延后，销账回来也没 forget 账本（scene-battle-spec §7.7、§7.10、§7.12）：
-                // 原地解冻后重跑一次完整的进场恢复（第 1 步起，规格 §10.5 要求的「锁步骤」的超集）。期间 recovery = PENDING：
+                // 原地解冻后重跑一次完整的进场恢复（第 1 步起，不是只补「锁步骤」；同规格 §7.8 末段、§10.5，D34）。期间 recovery = PENDING：
                 // 备战 1006、结算 DEFERRED，读失败由 reaper 重试
                 battle.onUnfrozenInPlace(this, player);
             }
@@ -1997,11 +1998,18 @@ public final class SceneWorld {
      * 连续 {@link MovementRules#AFK_FRAMES} 帧没有任何客户端消息即停推（基线 AfkSystem）；停推时把速度清零并置脏位，
      * 让看得见它的人收到一条「停了」的 66——基线停推但不清速度，观察者的客户端按旧速度一直外推下去。
      * 没有导航网格，不做撞墙夹持（与基线无导航场景一致）。
+     *
+     * <p><b>回合制战斗在途（有战斗冻结，备战或战斗中）的玩家整个跳过</b>：不外推、不动速度、不置脏位（基线 {@code movement.cpp:49-52} 的
+     * {@code exclude<InBattleComp>}：进战时的残留速度会让玩家在战斗中一路飘走，战后位置与客户端画面对不上）。Java 挂冻结时已经停步
+     * （{@link #haltForBattle}）、在途的移动上行也不收速度，正常流程里在途玩家的速度恒为 0，这里是纵深防御；解冻后照常外推。
      */
     private void integrate(Scene scene) {
         for (ScenePlayer player : scene.players()) {
             Vec3 velocity = player.velocity();
             if (velocity.isOrigin()) {
+                continue;
+            }
+            if (player.inBattle()) {
                 continue;
             }
             if (frame - player.lastActiveFrame() >= MovementRules.AFK_FRAMES) {

@@ -37,7 +37,8 @@ import org.slf4j.LoggerFactory;
  *   <li>battle_id 不符忽略；已 FIGHTING 的重投：续期确认过就零 Redis，没确认过就再续一次；</li>
  *   <li>玩家不在本节点：一段 CONFIRM（事件不带期限就跳过）；交出冻结中：只续锁、不挂冻结；</li>
  *   <li>在线、没有冻结：账本命中 → 销账不重建；否则一段 CONFIRM，回来后核对实例 / 冻结 / 账本 / 交出冻结 → 重建 FIGHTING、推 144；</li>
- *   <li>144：本实例备战的冻结确认时不推；按锁重建 / 沿用旧实例的 PREPARING 在确认时推且只推一次；PREPARING 状态下任何路径都不推。</li>
+ *   <li>144：本实例备战的冻结确认时不推；按锁重建 / 换了会话沿用旧实例的 PREPARING 在确认时推且只推一次；同会话重复进场沿用时
+ *       {@code preparedHere} 照抄旧值（R2-b：本会话备战的不推，本来就还没推的照旧推一次）；PREPARING 状态下任何路径都不推。</li>
  * </ul>
  * 审计修掉的几处交错（重建复核在途时确认到达、恢复读在途时确认到达、迟到确认不带期限、取消后紧跟确认、已销账的局的过期确认）各在
  * {@link BattleRebuildRegressionTest}、{@link BattleLockDeletionRegressionTest}、{@link BattleStaleReadTest}，这里不重复。
@@ -907,27 +908,74 @@ class ConfirmBattleTest {
     }
 
     /**
-     * 同会话的重复进场（同 epoch、会话号没变）同样把冻结复制成 {@code preparedHere = false} 的新对象（§7.8 第 0 步不分会话），
-     * 所以确认升级时也推一次 144。基线按「备战时记下的会话号 ≠ 当前会话号」才推，同会话不推——这里多出的一条 144 对客户端只是多一次补签，无害。
+     * 第二轮修正 R2-b：同会话的重复进场（同 epoch、会话号没变）沿用冻结时 {@code preparedHere} <b>照抄旧值</b>——在这个会话上备战的，
+     * 客户端已经从 match 拿到开战通知，确认升级时不再推 144（同基线：按「备战时记下的会话号 ≠ 当前会话号」才推）。冻结照样复制成新对象。
      */
     @Test
-    void 同会话重复进场沿用的备战冻结_确认时同样推一次144() {
+    void 同会话重复进场沿用本会话备战的冻结_preparedHere沿用旧值_确认时不推144() {
         ScenePlayer old = f.enter(SESSION, PLAYER);
         f.prepared(PLAYER, X);
+        BattleFreeze original = old.battle().freeze();
+        assertThat(original.preparedHere()).isTrue();
         ScenePlayer fresh = f.reenter(SESSION, PLAYER, 1, f.scene1);
         f.drain();
         f.sink.clear();
         assertThat(fresh).isNotSameAs(old);
         assertThat(fresh.session()).isEqualTo(old.session());
-        assertThat(fresh.battle().freeze().preparedHere()).isFalse();
+        BattleFreeze carried = fresh.battle().freeze();
+        assertThat(carried).as("沿用的仍是新对象").isNotNull().isNotSameAs(original);
+        assertThat(carried.phase()).isEqualTo(Phase.PREPARING);
+        assertThat(carried.preparedHere()).as("会话没变：沿用旧值").isTrue();
+        assertThat(f.rebuilds("carried", "rebuilt")).isEqualTo(1);
         assertThat(hintsTotal()).isZero();
+        long deadline = f.deadline();
 
-        f.confirm(PLAYER, X, f.deadline());
+        f.confirm(PLAYER, X, deadline);
         f.drain();
 
-        assertThat(fresh.battle().freeze().phase()).isEqualTo(Phase.FIGHTING);
+        assertThat(carried.phase()).isEqualTo(Phase.FIGHTING);
+        assertThat(carried.lockExtended()).as("升级与续锁照常").isTrue();
+        assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
+        assertThat(f.confirms("upgraded")).isEqualTo(1);
+        assertThat(f.messageIds(fresh)).as("同会话：不多推一条 144").isEmpty();
+        assertThat(hintsTotal()).isZero();
+
+        f.confirm(PLAYER, X, deadline);
+        f.drain();
+        assertThat(f.messageIds(fresh)).as("补发确认同样不推").isEmpty();
+    }
+
+    /**
+     * R2-b 的另一半——照抄的是<b>旧值</b>，不是一律置真：旧实例上的冻结本来就不是这个会话备战的（进场时按锁重建的 PREPARING，144 还没推过），
+     * 同会话重复进场沿用过来仍是「还没推」，确认升级时照旧推一次、且只推一次。
+     */
+    @Test
+    void 同会话重复进场沿用按锁重建的备战冻结_preparedHere仍为假_确认时推一次144() {
+        f.locks.putLock(PLAYER, X, NODE, BattleRedis.STATE_PREPARING, f.deadline(), f.prepareDeadline(), PREPARE_TTL);
+        ScenePlayer old = f.enter(SESSION, PLAYER);
+        assertThat(old.battle().freeze().phase()).isEqualTo(Phase.PREPARING);
+        assertThat(old.battle().freeze().preparedHere()).isFalse();
+        ScenePlayer fresh = f.reenter(SESSION, PLAYER, 1, f.scene1);
+        f.drain();
+        f.sink.clear();
+        assertThat(fresh).isNotSameAs(old);
+        assertThat(fresh.session()).isEqualTo(old.session());
+        BattleFreeze carried = fresh.battle().freeze();
+        assertThat(carried.preparedHere()).as("沿用旧值：仍是还没推").isFalse();
+        assertThat(hintsTotal()).isZero();
+        long deadline = f.deadline();
+
+        f.confirm(PLAYER, X, deadline);
+        f.drain();
+
+        assertThat(carried.phase()).isEqualTo(Phase.FIGHTING);
         assertThat(f.messageIds(fresh)).containsExactly(f.reconnectHintId);
         assertThat(f.hints("confirm")).isEqualTo(1);
+
+        f.confirm(PLAYER, X, deadline);
+        f.drain();
+        assertThat(f.reconnectHints(fresh)).as("只推一次").containsExactly(X);
+        assertThat(hintsTotal()).isEqualTo(1);
     }
 
     /** PREPARING 永不推 144（B5：房间还没建，客户端拿它去补签会被判 BattleGone）——备战、按锁重建、沿用、不符的确认、取消，都不推。 */

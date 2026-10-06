@@ -73,7 +73,10 @@ public final class SceneBattleMetrics {
      *       以及本实例已为它发出过销账的局（过期快照）；</li>
      *   <li>{@code skipped_pending}：这一局的记录被延后（金币被拒等），或排在延后的那一局之后还没轮到。</li>
      * </ul>
-     * {@code rebuilt}：重建并复核命中（含复核返回「锁上已是 F、没改」）；{@code reverted}：复核没命中、撤销；{@code error}：复核脚本失败（冻结保守保留）；
+     * {@code rebuilt}：重建并复核命中（含复核返回「锁上已是 F、没改」）；{@code reverted}：复核没命中、撤销，<b>也包含</b>「按锁重建出备战冻结之后，
+     * 那把备战锁被本节点在途的删除删掉了（同 epoch 重进时旧实例的备战写锁 / 取消还没收尾），冻结一并摘掉」——后一种若发生在复核命中之后，
+     * 会与同一个冻结此前已计的 {@code rebuilt} 叠加（{@code PlayerBattleService#dropPreparingRebuiltFromLock}，reason 一律记 login）；
+     * {@code error}：复核脚本失败（冻结保守保留）；
      * {@code miss}：进场恢复回来时已在交出冻结、迟到确认没有可重建的（锁不是本局 / 实例已换 / 已有冻结）。
      */
     public enum RebuildResult {

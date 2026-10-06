@@ -88,6 +88,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
@@ -632,6 +633,44 @@ class InBattleGateMatrixTest {
         assertThat(player.position()).isEqualTo(before);
         assertThat(moves("in_battle")).as("照样计数").isEqualTo(4);
         assertThat(gateRejects("move")).isEqualTo(4);
+    }
+
+    /**
+     * 第二轮修正 R2-e：服务器的帧外推整个跳过战斗在途的玩家（基线 {@code movement.cpp:49-52} 的 {@code exclude<InBattleComp>}：进战时的残留速度
+     * 不能让玩家在战斗里一路飘走）。备战时已停步、在途的移动上行也不收速度，正常流程里在途玩家的速度恒为 0——这里硬摆一个残留速度，
+     * 才看得出外推这一层自己也挡着（纵深防御）：位置不动、速度原样、不置位置脏位；同场景不在战斗的对照玩家照常被外推；解冻后照常外推。
+     */
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Phase.class)
+    void 帧外推_战斗在途的玩家带残留速度也不动_速度与脏位原样_解冻后照常外推(Phase phase) {
+        ScenePlayer player = f.enter(SESSION, PLAYER);
+        ScenePlayer idle = f.enter(TWIN_SESSION, TWIN);
+        freeze(player, phase);
+        f.world.step();
+        f.world.step();
+        Vec3 residual = new Vec3(2, -4, 1);
+        WorldTestAccess.setVelocity(player, residual);
+        WorldTestAccess.setVelocity(idle, residual);
+        Vec3 before = player.position();
+        Vec3 idleExpected = idle.position();
+        assertThat(WorldTestAccess.transformDirty(player)).as("前提：位置脏位是干净的").isFalse();
+
+        for (int frame = 0; frame < 5; frame++) {
+            f.world.step();
+            // 固定步长 0.05 s（20 FPS）
+            idleExpected = idleExpected.plusScaled(residual, 0.05);
+        }
+
+        assertThat(player.position()).as("在途：一帧都没有外推").isEqualTo(before);
+        assertThat(player.velocity()).as("外推不碰在途玩家的速度").isEqualTo(residual);
+        assertThat(WorldTestAccess.transformDirty(player)).as("位置没动，不置位置脏位").isFalse();
+        assertThat(idle.position()).as("对照：不在战斗的玩家同样的速度照常被外推 5 帧").isEqualTo(idleExpected).isNotEqualTo(before);
+
+        unfreeze(player, phase);
+        assertThat(player.velocity()).as("解冻不动速度").isEqualTo(residual);
+        f.world.step();
+
+        assertThat(player.position()).as("解冻后照常外推").isEqualTo(before.plusScaled(residual, 0.05));
     }
 
     /**

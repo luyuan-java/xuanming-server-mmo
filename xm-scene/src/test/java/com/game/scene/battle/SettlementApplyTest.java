@@ -656,11 +656,14 @@ class SettlementApplyTest {
     }
 
     /**
-     * 销账回调的实例守卫（§7.12「实例仍是这个」才动账本、才补跟随）：销账在途时同 epoch 重进，旧实例的销账回来时它已不在世界里——
+     * 销账回调的实例守卫（§7.12「实例仍是这个」才动账本）：销账在途时同 epoch 重进，旧实例的销账回来时它已不在世界里——
      * 不得再改它的账本，也不得拿这个已被移除的实例去补组队跟随。新实例沿用过来的条目由它自己的落盘与销账收掉。
+     *
+     * <p>第二轮修正 R2-f：但锁确实是旧实例这次销账放掉的（位 2），「放锁后补一次组队跟随」不能跟着旧实例一起丢——新实例进场时那次跟随检查读到的
+     * 还是这把锁，它自己随后的销账只会回 0，再没有别的触发点。所以对<b>现任实例</b>（没有战斗冻结时）补一次。
      */
     @Test
-    void t308_销账在途时同epoch重进_旧实例的销账回来_不动旧实例不补跟随_新实例的条目由它自己销() {
+    void t308_销账在途时同epoch重进_旧实例的销账回来_不动旧实例_放了锁给新实例补一次跟随_新实例的条目由它自己销() {
         ScenePlayer old = f.enter(SESSION, PLAYER);
         f.fighting(PLAYER, X);
         BattleSettlementData settlement = base(X).build();
@@ -686,7 +689,8 @@ class SettlementApplyTest {
         assertThat(staleAck.lastReply()).as("脚本本身照常删了记录、放了锁").isEqualTo(3L);
         assertThat(f.acks("persisted", "released")).isEqualTo(1);
         assertThat(old.battleLedger().has(X)).as("已被移除的旧实例不再被改动").isTrue();
-        assertThat(f.follows.freezeCleared).as("不拿已被移除的实例去补跟随").isEmpty();
+        assertThat(fresh.inBattle()).isFalse();
+        assertThat(f.follows.freezeClearedPlayers).as("锁是这次放掉的：给现任实例补一次跟随，不拿已被移除的旧实例去补").containsExactly(fresh);
         assertThat(fresh.battleLedger().has(X)).as("新实例的条目等它自己的销账").isTrue();
 
         // 新实例那笔存盘落库 → 它自己销一次（记录与锁都已不在，返回 0）→ 摘条目；奖励始终只有一份
@@ -694,9 +698,102 @@ class SettlementApplyTest {
         assertThat(f.completeSaves(ProgressResult.SAVED)).isEqualTo(1);
 
         assertThat(f.locks.last(Op.ACK).lastReply()).isEqualTo(0L);
+        assertThat(f.follows.freezeClearedPlayers).as("新实例自己那次销账没放锁（回 0）：不再补第二次").containsExactly(fresh);
         assertThat(fresh.battleLedger().has(X)).isFalse();
         assertThat(f.gold(fresh)).isEqualTo(GOLD);
         assertThat(f.audit.currencies).as("金币流水只有旧实例应用时的那一条").hasSize(1);
+    }
+
+    /**
+     * R2-f 判的是<b>位 2</b>（这次销账放掉了锁）：旧实例的销账只删到了记录（返回 1，锁本来就不在）时，没有锁被放掉，不给新实例补跟随。
+     * 这里旧实例丢弃一份已作废的结算（没有冻结、锁不在、记录在）并销账，销账在途时同 epoch 重进。
+     */
+    @Test
+    void t308_销账在途时同epoch重进_旧实例的销账只删到记录没有放锁_不给新实例补跟随() {
+        ScenePlayer old = f.enter(SESSION, PLAYER);
+        BattleSettlementData settlement = base(X).build();
+        f.store(settlement);
+        f.locks.hold(Op.ACK);
+        assertThat(delivered(settlement).getSettlement()).isEqualTo(SettlementDisposition.SETTLEMENT_DISCARDED);
+        Call staleAck = f.locks.take(Op.ACK);
+
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        f.drain();
+        assertThat(fresh).isNotSameAs(old);
+        f.follows.clear();
+
+        staleAck.complete();
+        f.drain();
+
+        assertThat(staleAck.lastReply()).as("只有位 1：删了记录，没有锁可放").isEqualTo(1L);
+        assertThat(f.follows.freezeCleared).as("没放锁就不补").isEmpty();
+        assertThat(f.gold(fresh)).as("已决定丢弃的局不会被新实例再应用").isZero();
+    }
+
+    /**
+     * R2-f 的守卫：现任实例<b>有战斗冻结</b>时不补（解冻时自会再查）。旧实例的销账在途时同 epoch 重进，新实例随即备战了下一局；
+     * 旧实例那次销账回来、放掉了上一局的锁——新实例在途，不发起跟随。
+     */
+    @Test
+    void t308_销账在途时同epoch重进_新实例已在下一局里_旧实例的销账放了锁也不补跟随() {
+        long next = 702;
+        f.enter(SESSION, PLAYER);
+        f.fighting(PLAYER, X);
+        BattleSettlementData settlement = base(X).build();
+        f.store(settlement);
+        delivered(settlement);
+        f.locks.hold(Op.ACK);
+        f.repo.takeProgress().complete(ProgressResult.SAVED);
+        Call staleAck = f.locks.take(Op.ACK);
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        f.drain();
+        // 新实例挂上下一局的冻结（X 的锁还在，直接摆冻结；锁的事与这条守卫无关）
+        BattleFreeze nextFreeze = new BattleFreeze(next, NODE, Phase.FIGHTING, f.deadline(), f.prepareDeadline(), true);
+        BattleFixture.setFreeze(fresh, nextFreeze);
+        f.follows.clear();
+
+        staleAck.complete();
+        f.drain();
+
+        assertThat(staleAck.lastReply()).as("删了记录、放了 X 的锁").isEqualTo(3L);
+        assertThat(fresh.battle().freeze()).isSameAs(nextFreeze);
+        assertThat(f.follows.freezeCleared).as("现任实例战斗在途：不补，等它解冻时再查").isEmpty();
+    }
+
+    /** R2-f 的守卫：销账回来时玩家已经离场（没有现任实例）——没有人可补，也不得拿已被移除的旧实例去补。 */
+    @Test
+    void t308_销账在途时玩家离场_旧实例的销账放了锁_没有现任实例不补跟随() {
+        ScenePlayer old = f.enter(SESSION, PLAYER);
+        f.fighting(PLAYER, X);
+        BattleSettlementData settlement = base(X).build();
+        f.store(settlement);
+        delivered(settlement);
+        f.locks.hold(Op.ACK);
+        f.repo.takeProgress().complete(ProgressResult.SAVED);
+        Call staleAck = f.locks.take(Op.ACK);
+        f.world.onPlayerLeave(BattleFixture.LINK, com.game.api.proto.PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER)
+                .setVoluntary(true).build());
+        assertThat(f.world.playerById(PLAYER)).isNull();
+        f.follows.clear();
+        ch.qos.logback.classic.Logger serviceLog =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(PlayerBattleService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs = new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        serviceLog.addAppender(logs);
+        try {
+            staleAck.complete();
+            f.drain();
+        } finally {
+            serviceLog.detachAppender(logs);
+        }
+
+        assertThat(staleAck.lastReply()).isEqualTo(3L);
+        assertThat(f.locks.lock(PLAYER)).isNull();
+        assertThat(f.follows.freezeCleared).isEmpty();
+        assertThat(old.battleLedger().has(X)).as("已被移除的实例不再被改动").isTrue();
+        assertThat(f.acks("persisted", "released")).isEqualTo(1);
+        assertThat(logs.list).as("回调平静结束：没有现任实例不是错误（不能在空实例上判冻结）")
+                .noneMatch(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR);
     }
 
     /** 销账脚本失败：账本条目保留（它仍挡着重复发奖），reaper 下一轮重试，成功后才摘。 */

@@ -103,7 +103,7 @@ gate 改绑；目标节点的「交出进场」；scene → scene-manager 的选
 | 跨 zone 传送（同一个 `StartTravelHandoff`，targetZone ≠ 本 zone，`player_lifecycle.cpp:2745-2816`；SM 第 2 步 `enterscenelogic.go:366-431`、`:1006-1088`） | **5.4** | 交出事务相同（Java 单库 `xm_java`，`player.zone_id` 列已在，`schema.sql:14`）；`PlayerTransfer` 预留字段 7 承载 `redirect{gate 地址, 令牌}`，gate 推 124 而不是改绑；失败码 3027 / 13000 按跨 zone 分支（`player_lifecycle.cpp:2826-2829`、`:2856-2860`）；冻结闸共用 |
 | 疏散 / 排空改派（也写标记并发不带等待者的 `EnterScene(0,0)`，`player_lifecycle.cpp:2249-2363`）、死节点接管（`enterscenelogic.go:300-331`、`:840-940`）、再入屏障 | **5.5** | 疏散 = 服务器发起的批量 `begin(…, Reason.EVACUATE, playerRequested = false)`，失败不推 tip，并发受存储线程池约束（`StoragePlayerRepository.java:170-176`）。死节点无法交出，只能等租约过期（30 s）；5.5 若要提前释放必须先确认旧进程已不能写库 |
 | A1′ 断线释放标记（`exit_release_mark.h:16-19`；交接在途压制 A1′，`player_lifecycle.cpp:2064`、`:2129-2131`） | 基线横跨 reconnect 与 5.2 | Java 不需要：断线即写回并释放（`SceneWorld.java:637-667`），重连按新 epoch 从库重载（`architecture.md:637`） |
-| 回合制战斗在途闸（63 的 3023、资产通道 27002） | **6.3** | 交出与战斗冻结互斥：`begin` 拒绝战斗中的玩家，`PrepareBattle` 拒绝 `switchState ≠ NONE` 的玩家 |
+| 回合制战斗在途闸（63 的 3023、资产通道 27002） | **6.3** | 交出与战斗冻结互斥：`begin` 拒绝战斗中的玩家，`PrepareBattle` 拒绝 `switchState ≠ NONE` 的玩家（批次 6.3 已落地，两条都兑现，见 §11.7） |
 
 ### 0.5 与已有冻结闸桩的关系
 
@@ -826,7 +826,7 @@ SELECT owner_epoch, owner_released, owner_lease_until FROM player WHERE player_i
 
 **63**（替换 `ClientRequestHandler.java:208-235` 的 Remote 分支）：
 
-1. 校验顺序同基线（`player_scene_handler.cpp:37-171`）：战斗在途 → 3023（6.3 接入）；`switchState ≠ NONE` → **3014**；三个号全 0 → 3005；镜像 → 3023（5.3 接入）；`scene_id` 等于当前 → 3008。
+1. 校验顺序同基线（`player_scene_handler.cpp:37-171`）：战斗在途 → 3023（批次 6.3 已接入，先于 3014，§11.7）；`switchState ≠ NONE` → **3014**；三个号全 0 → 3005；镜像 → 3023（5.3 接入）；`scene_id` 等于当前 → 3008。
 2. `resolveSwitchTarget` 返回 `Local(scene)`：照旧同步 `switchScene`；`Reject(tip)`：回 tip。
 3. `Remote`（显式 scene_id 不在本节点；或只带地图而本节点没有该图的 ACTIVE 频道——5.1 切 hash 后才出现）：先回 `{0}`，置 `RESOLVING`，异步 `selectSwitchTarget`。
 4. 结果回到逻辑线程先校验 `playersById.get(id) == player && state == RESOLVING(token)`，不符丢弃、计 `stale`：
@@ -1443,3 +1443,44 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
   链路丢帧都是 0；最长冻结 243 ms。smoke / reconnect / team（碰巧同节点）/ guild-economy 在双节点切片上也过，movement 见 K39。
   唯一的 ERROR 在 xm-guild 停服时（scene 节点先停，Dubbo 重连资产端口失败），与 5.2 无关。
 - 单节点切片：smoke 3 / 3、movement 20 / 20、skill 15 / 15、team 38 / 38、reconnect 9 / 9、guild-economy 81 / 81。
+
+### 11.7 批次 6.3（回合制战斗冻结）接入后的变化（2026-10-06）
+
+批次 6.3 给 `ScenePlayer` 加了第二种冻结——回合制战斗冻结（`inBattle()`，备战或战斗中；规格 `docs/porting/scene-battle-spec.md`）。它与本稿的交出冻结（`frozen()`，FREEZING）**始终互斥**，
+互斥由下面几处共同保证。本节只写与 5.2 的状态机有关的部分；闸表、互斥一览表与战斗侧的细节见 scene-battle-spec §7.13、§7.7、§7.8、§7.10。
+
+**交出这一侧拒绝战斗中的玩家**（兑现 §0.4 那一行的契约）
+
+- **63**：处理器第一步判 `inBattle()` → 应答 3023，先于换图在途的 3014（§5.5 第 1 条的次序）。
+- **`SceneWorld.beginRemoteSwitch` 拒绝战斗中的玩家**：不进 RESOLVING，只记 ERROR 并计 `xm_scene_switch_resolves_total{result="in_battle"}`。63 已先回 3023，走到这里说明调用方漏了战斗闸；
+  把判断放在 `begin` 入口，以后新增的交出发起方（5.5 的疏散等）不必各自记得判战斗。
+- **`onSwitchTargetChosen` 的远端分支在冻结之前复查 `inBattle()`**：选目标期间进了战斗（迟到确认 / 进场恢复在 RESOLVING 时挂上了战斗冻结）→ 回 NONE、推 23 `{3023}`、计 `switch_resolves{in_battle}`
+  （基线起交接前复查，`player_lifecycle.cpp:2853-2860`，§2.11 R12）。本节点分支照旧同步 `switchScene`。
+- **5.1 排空改派**：`inBattle()` 的玩家跳过，计 `channel_relocations{in_battle}`，等结算解冻后下一次推进再看。
+
+**战斗这一侧拒绝换图在途的玩家**
+
+- **备战**：换图在途（RESOLVING 或 FREEZING）→ 1006。判定经 `SceneWorld.switchInFlight`（6.3 起由包内可见改为 public；有副作用）：**过期的 RESOLVING 槽当场作废并放行**
+  （K15 的兜底超时 + 1 s；结果回调丢了时不会一直把备战挡成 1006），迟到的选目标结果按 `player.switching() != sw` 丢弃，不会在战斗冻结挂上之后再进交出。
+  组队跟随判换图在途时也改经同一个入口（过期槽不再一直挡住跟随）；K20 的「`switchPhase ≠ NONE` 时跳过」相应读作「`switchInFlight` 为真时跳过」。
+- **FREEZING 期间战斗侧的事件都不改内存**（冻结中玩家的可变状态必须与冻结快照一致，§5.9）：到达的**确认**只在 Redis 上把战斗锁标成 FIGHTING 并续期，**不挂战斗冻结**；
+  进场恢复读回来时已在 FREEZING 也不挂；到达的**结算**回 DEFERRED、零副作用；**销账**的结局回来时不 `forget` 账本条目（条目随冻结快照交给下一个持有者）。
+  战斗账本 `player_state.battle_ledger = 9` 是冻结快照的一部分，随交出事务过去；交出提交后目标节点的进场恢复对 `transfer = true` 照样执行，按锁重建战斗冻结、按账本销账。
+- **资产通道**：FREEZING 的 27003 优先于战斗在途的 27002。
+
+**原地解冻之后重跑完整的进场恢复**（对 §5.5「回 NONE（原地解冻）」各行的补充）
+
+`SceneWorld.unfreezeInPlace` 在解冻、推 23 `{3023}` 之后（只在玩家留在原地的那一支：冻结期间没有待处理的离开 / 接管）调战斗钩子 `BattleHooks.onUnfrozenInPlace`，由它**从第 1 步起重跑一次完整的战斗进场恢复**
+（恢复读 → 应用待结算记录 → 按锁重建冻结 → 账本销账；scene-battle-spec §7.8）。**不是只补「按锁重建」那一步**——scene-battle-spec 的原稿与 §13.9 交付清单曾写「补跑进场恢复的锁步骤」，实现有意做成超集，规格已改：
+
+- 冻结期间到达的确认只续了锁、没挂冻结：交出没提交时，源节点上的玩家没有内存里的战斗冻结而锁已是 F，不重跑就只能等下一次确认补发（可能已过补发窗口）；
+- 锁步骤本身就需要恢复读的结果，那次读失败时若不落到 RETRY 就没有任何东西重试；
+- 重跑全流程还能把冻结期间被 DEFERRED 的结算当场补上、把冻结期间没 `forget` 的账本条目销掉。
+
+代价：一次 Redis 往返内战斗恢复状态回到 PENDING（这名玩家的备战回 1006、结算回 DEFERRED），读失败转 RETRY 由战斗 reaper 重读。与还在途的更早一次恢复读靠代际号区分，只认最新一代。
+`SceneWorld` 的构造器多一个 `BattleHooks` 参数（旧构造器传 `BattleHooks.NONE` = 不接战斗，行为不变）。
+
+**测试**：`com.game.scene.battle.HandOffBattleExclusionTest`（战斗中 63 远端 → 3023；`beginRemoteSwitch` 直接调用时拒绝；FREEZING / RESOLVING 时备战 → 1006；RESOLVING 期间迟到确认重建后选中远端 → 回 NONE、推 23 `{3023}`；
+FREEZING 时资产码为 27003；FREEZING 时销账回来不改账本、冻结快照与内存一致；交出提交后目标节点进场恢复为已应用的局销账；排空改派跳过战斗中的玩家）、
+`BattleUnfreezeRecoveryTest`（走真的 5.2 交出流程：原地解冻后重跑完整恢复、按锁重建并推 144）、`PrepareBattleTest` 的过期槽用例。运行证据见 scene-battle-spec 末尾的实现记录。
+robot `battle-settle` 第 11 步（PREPARING 时 63 指向另一节点 → 3023，取消后同一条 63 跨节点成功）已写进场景；写本节时还没有在双节点切片上跑过，切片上的结论见 scene-battle-spec 末尾的「最终验证」。

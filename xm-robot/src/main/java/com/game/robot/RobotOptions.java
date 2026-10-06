@@ -162,7 +162,8 @@ public record RobotOptions(
         EXPECT_DEV("expect-dev", "XM_ROBOT_EXPECT_DEV", "allow",
                 "battle / battle-edge：xm-battle dev 接口的期望：allow（dev / test 运行模式）/ deny（prod：403，只跑不需要建房的步骤）"),
         SLOW("slow", "XM_ROBOT_SLOW", "false",
-                "battle-edge：也跑慢用例（连上不握手 10 ± 1 s 被关）；写 --slow 即 true，也接受 --slow true / false"),
+                "也跑慢用例——battle-edge：连上不握手 10 ± 1 s 被关；battle-settle：备战到期、离线结算等满 130 s 重投窗口；"
+                        + "写 --slow 即 true，也接受 --slow true / false"),
         CRASH_WINDOW("crash-window", "XM_ROBOT_CRASH_WINDOW", "none",
                 "battle-settle 的故障变体（scene-battle-spec §13.8，由 tools/local/battle-crash-window.sh 编排 kill -9 与重启）：none（跑完整场景）/ "
                         + "scene-after-150（大厅收到 150 后 kill scene）/ battle-after-store（结算落库后、大厅 150 之前 kill battle）"),
@@ -229,7 +230,7 @@ public record RobotOptions(
             }
         }
         if (scenario == null) {
-            throw new UsageException("缺少子命令（smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet）");
+            throw new UsageException("缺少子命令（smoke / movement / battle-settle / …，完整清单见 --help）");
         }
 
         String gateway = value(Opt.GATEWAY, given, env);

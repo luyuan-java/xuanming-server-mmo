@@ -54,7 +54,9 @@ import org.slf4j.LoggerFactory;
  *   <li>成功：挂冻结即生效（客户端的 168 立刻 25011）、锁写完才回应答、锁字段与 TTL、停步（旁观者收到速度 0 的 66）；</li>
  *   <li>写锁结局的各分支：被占、脚本重放、Redis 失败、写锁期间离场 / 收到取消 / 同 epoch 重进 / 备战到期；</li>
  *   <li>6.3 审计修掉的几处（FRZ-6 / RDS-10 过期分支结局不明也删锁、FRZ-7 只删备战锁、GAT-14 过期的 RESOLVING 槽不再挡、
- *       FRZ-2 回调出错应答仍有结局、STL-11 账本损坏打带原因的日志）。</li>
+ *       FRZ-2 回调出错应答仍有结局、STL-11 账本损坏打带原因的日志）；</li>
+ *   <li>第二轮修正：R2-a 本节点删掉备战锁之后，现任实例上按这把锁重建出来的备战冻结一并摘掉（同 epoch 重进与写锁 / 删锁交错）；
+ *       R2-c 期限超过上限（7 天）按参数非法 1005 拒绝。</li>
  * </ul>
  */
 class PrepareBattleTest {
@@ -199,6 +201,60 @@ class PrepareBattleTest {
         assertThat(player.inBattle()).isFalse();
         assertThat(f.locks.calls()).isEmpty();
         assertThat(f.prepares("invalid")).isEqualTo(3);
+    }
+
+    /**
+     * 第二轮修正 R2-c：期限（{@code deadline_ms} / {@code prepare_deadline_ms}）距现在超过 {@link PlayerBattleService#MAX_DEADLINE_AHEAD_MS}
+     * （7 天）按参数非法拒绝——与「参数为 0」同码（1005）、同序（先于「玩家不在本节点」与一切玩家状态判断）、同样零冻结零 Redis 调用。
+     * 不拦的话 {@code PREPARE_LOCK} 的 HSET 之后 EXPIRE 因 TTL 越界报错，留下一把没有 TTL 的锁。期限按无符号比较：≥ 2^63 的值同样超界。
+     */
+    @Test
+    void 期限超过上限_回1005_与参数为0同码同序_零冻结零Redis调用_恰在上限上放行() {
+        ScenePlayer player = f.enter(SESSION, PLAYER);
+        long max = PlayerBattleService.MAX_DEADLINE_AHEAD_MS;
+        assertThat(max).as("上限 = 7 天 = 待结算记录的保留期").isEqualTo(7L * 24 * 3600 * 1000).isEqualTo(BattleRedis.SETTLEMENT_TTL_SEC * 1000);
+        long latest = f.clock.epochMillis() + max;
+
+        assertRejected(f.prepareRequest(PLAYER, BATTLE, latest + 1, f.prepareDeadline()), INVALID_PARAMETER, "invalid");
+        assertRejected(f.prepareRequest(PLAYER, BATTLE, f.deadline(), latest + 1), INVALID_PARAMETER, "invalid");
+        assertRejected(f.prepareRequest(PLAYER, BATTLE, latest + 1, 0), INVALID_PARAMETER, "invalid");
+        assertRejected(f.prepareRequest(PLAYER, BATTLE, Long.MAX_VALUE, f.prepareDeadline()), INVALID_PARAMETER, "invalid");
+        assertRejected(f.prepareRequest(PLAYER, BATTLE, Long.MIN_VALUE, f.prepareDeadline()), INVALID_PARAMETER, "invalid");
+        assertRejected(f.prepareRequest(PLAYER, BATTLE, -1L, f.prepareDeadline()), INVALID_PARAMETER, "invalid");
+        assertRejected(f.prepareRequest(PLAYER, BATTLE, f.deadline(), -1L), INVALID_PARAMETER, "invalid");
+        // 同序：排在「玩家不在本节点」（1004）之前
+        assertRejected(f.prepareRequest(2002, BATTLE, latest + 1, 0), INVALID_PARAMETER, "invalid");
+        assertRejected(f.prepareRequest(2002, BATTLE, f.deadline(), latest + 1), INVALID_PARAMETER, "invalid");
+        assertThat(player.inBattle()).isFalse();
+        assertThat(f.locks.calls()).as("一次 Redis 都没碰").isEmpty();
+        assertThat(logs.list).filteredOn(e -> e.getLevel() == Level.WARN && e.getFormattedMessage().contains("期限"))
+                .as("每次越界拒绝留一条带玩家与局号的 WARN").hasSize(9)
+                .allSatisfy(e -> assertThat(e.getFormattedMessage()).contains("battle_id=7"));
+
+        // 恰好在上限上（两个期限都是）：放行，锁的 TTL = 7 天 + 60 s，EXPIRE 不会报错
+        CompletableFuture<PrepareBattleResponse> reply = f.battle.prepare(f.prepareRequest(PLAYER, BATTLE, latest, latest));
+        f.drain();
+
+        assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isZero();
+        assertThat(f.locks.last(Op.PREPARE_LOCK).longArg("ttl")).isEqualTo(BattleRedis.SETTLEMENT_TTL_SEC + 60);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(604_860);
+        assertThat(player.battle().freeze().deadlineMs()).isEqualTo(latest);
+    }
+
+    /** R2-c 只设上界：已经过去的期限照旧放行（锁 TTL 取下限 60 s，冻结由下一轮 reaper 摘掉），不改原有行为。 */
+    @Test
+    void 期限已经过去_照旧放行_锁TTL取下限60秒() {
+        ScenePlayer player = f.enter(SESSION, PLAYER);
+        long past = f.clock.epochMillis() - 1;
+
+        CompletableFuture<PrepareBattleResponse> reply = f.battle.prepare(f.prepareRequest(PLAYER, BATTLE, past, past));
+        f.drain();
+
+        assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isZero();
+        assertThat(f.locks.last(Op.PREPARE_LOCK).longArg("ttl")).isEqualTo(60);
+        assertThat(player.inBattle()).isTrue();
+        f.reap();
+        assertThat(player.inBattle()).as("期限已过：下一轮 reaper 摘掉").isFalse();
     }
 
     @Test
@@ -379,9 +435,14 @@ class PrepareBattleTest {
         assertThat(f.prepares("lock_held")).isEqualTo(1);
     }
 
-    /** FRZ-7：备战失败后的尽力删锁只删备战锁（b == X 且 s ≠ F），不用不看 s 的 DELETE_IF_MATCH。 */
+    /**
+     * FRZ-7：备战失败后的尽力删锁只删备战锁（b == X 且 s ≠ F），不用不看 s 的 DELETE_IF_MATCH。
+     *
+     * <p>评审 R2-REV-1 的同一条规则：解冻（锁按保留处理）当场补的那次跟随读到的是这把残留的锁、会放弃；尽力删锁确实把它删掉了（返回 1）→ 再补一次，
+     * 否则删完之后没有触发点。脚本根本没执行、没有锁可删的那种情形不补第二次，见 {@code 写锁连不上Redis_…}。
+     */
     @Test
-    void 写锁出错_回1003_解冻_尽力只删备战锁() {
+    void 写锁出错_回1003_解冻_尽力只删备战锁_删到了再补一次跟随() {
         ScenePlayer player = f.enter(SESSION, PLAYER);
         f.locks.failNextAfterExecuting(Op.PREPARE_LOCK, new RuntimeException("Redis 超时"));
 
@@ -394,6 +455,8 @@ class PrepareBattleTest {
         assertThat(f.locks.ops()).containsExactly(Op.PREPARE_LOCK, Op.DELETE_PREPARING);
         assertThat(f.locks.last(Op.DELETE_PREPARING).battleId()).isEqualTo(BATTLE);
         assertThat(f.locks.lock(PLAYER)).as("残留的备战锁被删掉").isNull();
+        assertThat(f.locks.last(Op.DELETE_PREPARING).lastReply()).isEqualTo(BattleRedis.PREPARING_DELETE_DONE);
+        assertThat(f.follows.freezeClearedPlayers).as("解冻当场一次（读到残留的锁会放弃）+ 锁确实删掉后一次").containsExactly(player, player);
         assertThat(f.prepares("redis_error")).isEqualTo(1);
     }
 
@@ -433,6 +496,7 @@ class PrepareBattleTest {
         assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isEqualTo(ENTITY_NULL);
         assertThat(f.locks.ops()).containsExactly(Op.PREPARE_LOCK, Op.DELETE_PREPARING);
         assertThat(f.locks.lock(PLAYER)).isNull();
+        assertThat(f.follows.freezeCleared).as("锁删掉了，但玩家已不在本节点：没有人可补跟随").isEmpty();
         assertThat(f.prepares("stale")).isEqualTo(1);
     }
 
@@ -543,6 +607,10 @@ class PrepareBattleTest {
         PrepareBattleRequest request = f.prepareRequest(PLAYER, BATTLE);
 
         assertRejected(request.toBuilder().setDeadlineMs(0).build(), INVALID_PARAMETER, "invalid");
+        assertRejected(request.toBuilder().setDeadlineMs(f.clock.epochMillis() + PlayerBattleService.MAX_DEADLINE_AHEAD_MS + 1).build(),
+                INVALID_PARAMETER, "invalid");
+        assertRejected(request.toBuilder().setPrepareDeadlineMs(f.clock.epochMillis() + PlayerBattleService.MAX_DEADLINE_AHEAD_MS + 1)
+                .build(), INVALID_PARAMETER, "invalid");
         assertRejected(request, FEATURE_UNAVAILABLE, "switching");
         WorldTestAccess.clearSwitch(player);
         WorldTestAccess.startResolving(player);
@@ -861,7 +929,7 @@ class PrepareBattleTest {
         assertThat(f.locks.ops()).containsExactly(Op.PREPARE_LOCK, Op.DELETE_PREPARING);
         assertThat(f.locks.last(Op.PREPARE_LOCK).executions()).as("脚本没执行过").isZero();
         assertThat(f.locks.lock(PLAYER)).isNull();
-        assertThat(f.follows.freezeCleared).as("解冻（锁按保留处理）当场补一次跟随").containsExactly(PLAYER);
+        assertThat(f.follows.freezeCleared).as("解冻（锁按保留处理）当场补一次跟随；尽力删锁没有删到锁，不补第二次").containsExactly(PLAYER);
         assertThat(f.prepares("redis_error")).isEqualTo(1);
 
         assertThat(BattleFixture.tipOf(f.prepared(PLAYER, BATTLE))).as("Redis 恢复后同一局可以重新备战").isZero();
@@ -870,9 +938,12 @@ class PrepareBattleTest {
     /**
      * §7.8 第 0 步 + §7.5 第 4 步：写锁在途时同 epoch 重进（重连，换了会话）。新实例<b>不沿用</b>这个写锁还没回来的冻结
      * （沿用过来就是「没有锁、lockPending 永远为真」的孤儿）；旧实例的写锁回调核对实例失败，占到的锁删掉、回 1004。
+     *
+     * <p>评审 R2-REV-1 的同一条规则：新实例的恢复读排在写锁之前（读不到锁、不重建），但它进场那次组队跟随检查可能排在写锁之后、读到了这把刚写上的锁
+     * 而放弃；旧回调把锁删掉（返回 1）之后给<b>现任实例</b>补一次，否则再没有触发点。
      */
     @Test
-    void 写锁期间同epoch重进_新实例不带冻结_旧回调删锁回1004() {
+    void 写锁期间同epoch重进_新实例不带冻结_旧回调删锁回1004_删到了给新实例补一次跟随() {
         ScenePlayer old = f.enter(SESSION, PLAYER);
         f.locks.hold(Op.PREPARE_LOCK);
         CompletableFuture<PrepareBattleResponse> reply = f.prepare(PLAYER, BATTLE);
@@ -899,6 +970,8 @@ class PrepareBattleTest {
         });
         assertThat(f.locks.lock(PLAYER)).isNull();
         assertThat(fresh.inBattle()).isFalse();
+        assertThat(f.follows.freezeClearedPlayers).as("锁是这次删掉的：补给现任实例，不拿已被移除的旧实例去补").containsExactly(fresh);
+        assertThat(f.rebuilds("login", "reverted")).as("新实例上没有冻结可摘").isZero();
         assertThat(f.reconnectHints(fresh)).isEmpty();
         assertThat(f.prepares("stale")).isEqualTo(1);
         assertThat(f.prepares("ok")).isZero();
@@ -908,14 +981,15 @@ class PrepareBattleTest {
     }
 
     /**
-     * 上一条的坏交错（已知残余，同 §10.5「备战写锁晚到」一类，钉住它<b>有界</b>）：写锁在 Redis 上已经执行、回复还在路上时同 epoch 重进，
-     * 新实例的恢复读看到了这把刚写上的备战锁 → 按锁重建出 PREPARING 冻结（复核命中）；随后旧回调按「占到了就删」把锁删掉、回 1004。
-     * 新实例上留下一个没有锁的备战冻结——match 认为这人备战失败、不会发取消——它不会永远留着：备战期限一到 reaper 摘掉。
+     * 上一条的坏交错（第二轮修正 R2-a）：写锁在 Redis 上已经执行、回复还在路上时同 epoch 重进，新实例的恢复读看到了这把刚写上的备战锁 →
+     * 按锁重建出 PREPARING 冻结（复核命中）；随后旧回调按「占到了就删」把锁删掉、回 1004。match 认为这人备战失败、不会对他发取消，
+     * 所以删锁有了结局的那一刻，新实例上按这把锁重建的冻结要<b>一并摘掉</b>（与复核落空同一条撤销路径：{@code rebuilds{login, reverted}}、
+     * 当场给新实例补一次组队跟随），不能留一把没有锁的冻结到备战期限。
      */
     @Test
-    void 写锁期间同epoch重进_新实例的恢复读看到了刚写上的锁_重建的备战冻结到备战期限被reaper摘掉() {
+    void 写锁期间同epoch重进_新实例的恢复读看到了刚写上的锁_旧回调删锁后新实例按锁重建的冻结一并摘掉() {
         f.enter(SESSION, PLAYER);
-        f.locks.hold(Op.PREPARE_LOCK, Op.ENTER_READ);
+        f.locks.hold(Op.PREPARE_LOCK, Op.ENTER_READ, Op.DELETE_PREPARING);
         CompletableFuture<PrepareBattleResponse> reply = f.prepare(PLAYER, BATTLE);
         Call write = f.locks.take(Op.PREPARE_LOCK).execute();
         ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
@@ -924,27 +998,162 @@ class PrepareBattleTest {
         BattleFreeze rebuilt = fresh.battle().freeze();
         assertThat(rebuilt).as("恢复读看到了备战锁，按锁重建").isNotNull();
         assertThat(rebuilt.phase()).isEqualTo(Phase.PREPARING);
-        assertThat(rebuilt.lockPending()).as("重建出来的冻结不带「写锁在途」，所以到期能被摘").isFalse();
-        assertThat(f.rebuilds("login", "rebuilt")).isEqualTo(1);
+        assertThat(rebuilt.preparedHere()).as("不是新实例自己备战的").isFalse();
+        assertThat(rebuilt.lockPending()).isFalse();
+        assertThat(f.rebuilds("login", "rebuilt")).as("复核命中：此刻锁还在").isEqualTo(1);
+        f.follows.clear();
 
         write.reply();
         f.drain();
 
         assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isEqualTo(ENTITY_NULL);
+        assertThat(f.locks.pending(Op.DELETE_PREPARING)).as("旧回调发了删除，还没有结局").hasSize(1);
+        assertThat(fresh.battle().freeze()).as("删锁有结局之前不摘（锁此刻还在，冻结与锁仍然一致）").isSameAs(rebuilt);
+        assertThat(f.follows.freezeCleared).isEmpty();
+
+        Call delete = f.locks.take(Op.DELETE_PREPARING).complete();
+        f.drain();
+
+        assertThat(delete.lastReply()).isEqualTo(BattleRedis.PREPARING_DELETE_DONE);
         assertThat(f.locks.lock(PLAYER)).as("旧回调把占到的锁删了").isNull();
-        assertThat(fresh.battle().freeze()).as("残余：新实例上的备战冻结此刻没有锁").isSameAs(rebuilt);
+        assertThat(fresh.inBattle()).as("锁删掉的同时，新实例上按它重建的备战冻结一并摘掉").isFalse();
+        assertThat(f.attributes.createScheme(fresh, "解冻了").tipId()).as("在途闸当场放开").isNotEqualTo(ATTRIBUTE_IN_BATTLE);
+        assertThat(f.rebuilds("login", "reverted")).as("按撤销重建计数").isEqualTo(1);
+        assertThat(f.follows.freezeClearedPlayers).as("给现任实例补一次组队跟随（不是已被移除的旧实例）").containsExactly(fresh);
+        assertThat(f.count("xm.scene.battle.freeze.expired", "phase", "preparing")).as("不是等 reaper 按期限摘的").isZero();
+        assertThat(f.locks.ops()).as("摘冻结不再发第二条删除").containsExactly(Op.PREPARE_LOCK, Op.ENTER_READ, Op.TOUCH, Op.DELETE_PREPARING);
         assertThat(f.reconnectHints(fresh)).as("PREPARING 不推 144").isEmpty();
+        assertThat(f.prepares("stale")).isEqualTo(1);
 
-        f.advance(BattleFixture.PREPARE_MILLIS);
-        f.reap();
-        assertThat(fresh.inBattle()).as("期限那一刻还不算过期").isTrue();
-        f.advance(1);
-        f.reap();
-
-        assertThat(fresh.inBattle()).as("备战期限一过，reaper 摘掉这个冻结").isFalse();
-        assertThat(f.count("xm.scene.battle.freeze.expired", "phase", "preparing")).isEqualTo(1);
         f.locks.release();
-        assertThat(BattleFixture.tipOf(f.prepared(PLAYER, 8))).as("之后可以正常备战").isZero();
+        assertThat(BattleFixture.tipOf(f.prepared(PLAYER, 8))).as("不必等备战期限，立刻可以备战下一局").isZero();
+    }
+
+    /**
+     * R2-a 的「结局不明」一支：旧回调的那条删除以出错 / 超时完成（可能删了、可能没删）。这一局对 match 而言照样已经作废（备战回了 1004），
+     * 新实例上按锁重建的冻结照样摘掉；锁若真的还在，留给备战 TTL，补的那次跟随读到锁自己放弃。
+     */
+    @Test
+    void 写锁期间同epoch重进_旧回调的删锁结局不明_新实例按锁重建的冻结照样摘掉_锁留给TTL() {
+        f.enter(SESSION, PLAYER);
+        f.locks.hold(Op.PREPARE_LOCK, Op.ENTER_READ);
+        CompletableFuture<PrepareBattleResponse> reply = f.prepare(PLAYER, BATTLE);
+        Call write = f.locks.take(Op.PREPARE_LOCK).execute();
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        f.locks.take(Op.ENTER_READ).complete();
+        f.drain();
+        assertThat(fresh.battle().freeze()).isNotNull();
+        f.locks.failNext(Op.DELETE_PREPARING, new RuntimeException("Redis 超时"));
+        f.follows.clear();
+
+        write.reply();
+        f.drain();
+
+        assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isEqualTo(ENTITY_NULL);
+        assertThat(f.locks.last(Op.DELETE_PREPARING).executions()).as("这条删除没有执行").isZero();
+        assertThat(f.locks.lockBattleId(PLAYER)).as("锁还在，等备战 TTL").isEqualTo(BATTLE);
+        assertThat(fresh.inBattle()).as("结局不明也摘：这一局不会再有确认，也不会再有取消").isFalse();
+        assertThat(f.rebuilds("login", "reverted")).isEqualTo(1);
+        assertThat(f.follows.freezeClearedPlayers).containsExactly(fresh);
+        assertThat(f.locks.count(Op.DELETE_PREPARING)).as("不重试删除").isEqualTo(1);
+    }
+
+    /**
+     * R2-a 的守卫——<b>现任实例自己备战的冻结不摘</b>（{@code preparedHere}）：旧实例的写锁在途时重进，新实例自己又收到同一局的备战
+     * （它的写锁同样在途）。旧回调删掉的是它自己占到的那把锁；新实例的冻结对应的是新实例自己那次写锁，由它自己的回调收尾。
+     */
+    @Test
+    void 写锁期间同epoch重进_新实例自己又备战了同一局_旧回调的删锁不摘新实例自己备战的冻结() {
+        f.enter(SESSION, PLAYER);
+        f.locks.hold(Op.PREPARE_LOCK);
+        CompletableFuture<PrepareBattleResponse> first = f.prepare(PLAYER, BATTLE);
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        f.drain();
+        assertThat(fresh.battle().freeze()).as("恢复读时锁还没写上：没有重建").isNull();
+        CompletableFuture<PrepareBattleResponse> second = f.prepare(PLAYER, BATTLE);
+        BattleFreeze own = fresh.battle().freeze();
+        assertThat(own.preparedHere()).isTrue();
+        List<Call> writes = f.locks.pending(Op.PREPARE_LOCK);
+        assertThat(writes).hasSize(2);
+        f.follows.clear();
+
+        writes.get(0).complete();
+        f.drain();
+
+        assertThat(BattleFixture.tipOf(BattleFixture.done(first))).as("旧实例那次备战：实例已换").isEqualTo(ENTITY_NULL);
+        assertThat(f.locks.last(Op.DELETE_PREPARING).lastReply()).as("旧回调删掉了它占到的锁").isEqualTo(BattleRedis.PREPARING_DELETE_DONE);
+        assertThat(fresh.battle().freeze()).as("新实例自己备战的冻结不是按那把锁重建的：不摘").isSameAs(own);
+        assertThat(own.phase()).isEqualTo(Phase.PREPARING);
+        assertThat(own.lockPending()).isTrue();
+        assertThat(f.rebuilds("login", "reverted")).isZero();
+        assertThat(f.follows.freezeCleared).isEmpty();
+        assertThat(second).isNotDone();
+
+        writes.get(1).complete();
+        f.drain();
+
+        assertThat(BattleFixture.tipOf(BattleFixture.done(second))).as("新实例自己那次写锁照常成功").isZero();
+        assertThat(fresh.battle().freeze()).isSameAs(own);
+        assertThat(f.locks.lockBattleId(PLAYER)).isEqualTo(BATTLE);
+    }
+
+    /**
+     * R2-a 同一条规则用在「写锁出错后的尽力删锁」上：写锁其实执行了、只是回复丢了 → 回 1003、解冻、发尽力删锁；这条删除在途时同 epoch 重进，
+     * 新实例的恢复读看到了那把残留的备战锁、按它重建——删除有了结局后同样一并摘掉。
+     */
+    @Test
+    void 写锁出错后的尽力删锁在途时同epoch重进_新实例按残留锁重建的冻结在删锁后摘掉() {
+        f.enter(SESSION, PLAYER);
+        f.locks.hold(Op.DELETE_PREPARING);
+        f.locks.failNextAfterExecuting(Op.PREPARE_LOCK, new RuntimeException("Redis 超时"));
+        CompletableFuture<PrepareBattleResponse> reply = f.prepare(PLAYER, BATTLE);
+        f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isEqualTo(SERVICE_UNAVAILABLE);
+        assertThat(f.locks.lockBattleId(PLAYER)).as("脚本已执行，锁残留；尽力删锁还在途").isEqualTo(BATTLE);
+
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        f.drain();
+        BattleFreeze rebuilt = fresh.battle().freeze();
+        assertThat(rebuilt).as("新实例按残留的备战锁重建").isNotNull();
+        assertThat(rebuilt.phase()).isEqualTo(Phase.PREPARING);
+        f.follows.clear();
+
+        f.locks.take(Op.DELETE_PREPARING).complete();
+        f.drain();
+
+        assertThat(f.locks.lock(PLAYER)).isNull();
+        assertThat(fresh.inBattle()).isFalse();
+        assertThat(f.rebuilds("login", "reverted")).isEqualTo(1);
+        assertThat(f.follows.freezeClearedPlayers).containsExactly(fresh);
+    }
+
+    /**
+     * R2-a 同一条规则用在「备战回调抛异常后的收尾删锁」上（{@code abandonPrepare}）：过期分支里发删除那一步同步抛出 → 应答异常完成，
+     * 收尾再尽力删一次；这次删除删掉锁之后，新实例上按它重建的冻结同样摘掉。
+     */
+    @Test
+    void 写锁期间同epoch重进_旧回调发删除时抛异常_收尾的删锁同样摘掉新实例按锁重建的冻结() {
+        f.enter(SESSION, PLAYER);
+        f.locks.hold(Op.PREPARE_LOCK, Op.ENTER_READ);
+        CompletableFuture<PrepareBattleResponse> reply = f.prepare(PLAYER, BATTLE);
+        Call write = f.locks.take(Op.PREPARE_LOCK).execute();
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        f.locks.take(Op.ENTER_READ).complete();
+        f.drain();
+        assertThat(fresh.battle().freeze()).isNotNull();
+        RuntimeException boom = new IllegalStateException("Redisson 已关闭");
+        f.locks.throwNext(Op.DELETE_PREPARING, boom);
+        f.follows.clear();
+
+        write.reply();
+        f.drain();
+
+        assertThat(reply).isCompletedExceptionally();
+        assertThatThrownBy(() -> BattleFixture.done(reply)).isInstanceOf(CompletionException.class).hasCause(boom);
+        assertThat(f.locks.lock(PLAYER)).as("收尾补的那次删除把锁删了").isNull();
+        assertThat(fresh.inBattle()).isFalse();
+        assertThat(f.rebuilds("login", "reverted")).isEqualTo(1);
+        assertThat(f.follows.freezeClearedPlayers).containsExactly(fresh);
     }
 
     /**
@@ -972,6 +1181,7 @@ class PrepareBattleTest {
         assertThat(f.locks.ops()).containsExactly(Op.PREPARE_LOCK, Op.DELETE_PREPARING);
         assertThat(f.locks.lock(PLAYER)).isNull();
         assertThat(player.inBattle()).isFalse();
+        assertThat(f.follows.freezeClearedPlayers).as("备战到期解冻当场一次 + 占到的锁确实删掉后一次（评审 R2-REV-1）").containsExactly(player, player);
         assertThat(f.prepares("stale")).isEqualTo(1);
     }
 

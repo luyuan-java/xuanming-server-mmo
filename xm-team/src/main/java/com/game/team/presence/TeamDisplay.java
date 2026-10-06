@@ -24,7 +24,8 @@ import org.slf4j.LoggerFactory;
  *       某批失败记 ERROR、填零值，不让 RPC 失败）。与基线 PlayerAllData 的差别（D4）：name 恒非空、新角色 level 为 1、level 到存盘才更新；</li>
  *   <li>is_online：{@code xm:presence} 宽松批量读（读失败按离线处理，基线 loadSessions 失败 → Online=false）；</li>
  *   <li>in_battle：回合制战斗锁 {@code xm:battle:{pid}:lock} 在不在（scene-battle-spec §2.4、§7.13 世界内部第 4 条；批次 6.3 收掉 team-spec D10）。
- *       锁是 Hash、不能 MGET，批量读是逐键 EXISTS 并发发出（{@code BattleLockReader.existsAll}，任何一个读失败整体失败）。
+ *       锁是 Hash：{@code MGET} 对 Hash 键回 nil、不报错，照搬基线的 MGET 会让 in_battle 静默恒为 false，
+ *       所以批量读是逐键 EXISTS 并发发出（{@code BattleLockReader.existsAll}，任何一个读失败整体失败）。
  *       锁从备战起就在，到结算销账（或锁过期 / 判废）才没——所以备战中、战斗中、已结算待销账都显示为战斗中。
  *       咨询性：读失败、超时、结果里缺这个人，一律按「不在战斗」（基线 MGET 失败 → false），只记一行 WARN。</li>
  * </ul>

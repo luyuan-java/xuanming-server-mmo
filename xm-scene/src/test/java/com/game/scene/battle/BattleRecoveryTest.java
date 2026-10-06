@@ -46,7 +46,8 @@ import org.junit.jupiter.api.Test;
  *       已被结算摘掉 / 已换成下一局的、玩家已离场 / 已同 epoch 重进 → 丢弃，不推 144、不撤销别人的冻结、不计重建；</li>
  *   <li>第 2 步待结算记录：坏字段只删该字段（锁指向它时不重建）、按 battle_id <b>无符号</b>升序应用、遇延后即停；延后之后锁步骤照做；</li>
  *   <li>第 1 步读失败 → RETRY，reaper 重读后 READY；恢复就绪之前备战 1006、结算延后，在途闸不受影响；</li>
- *   <li>第 0 步同 epoch 沿用旧冻结（新对象、运行态复位、续期结论照抄；会话变了推 144、同会话不推）；没落盘的账本条目随旧实例内存沿用；
+ *   <li>第 0 步同 epoch 沿用旧冻结（新对象、运行态复位、续期结论照抄；会话变了推 144；同会话 {@code preparedHere} 照抄旧值——旧值为真不推，
+ *       旧值为假的 FIGHTING（按锁重建后复核还在途、144 还欠着）沿用时当场推一次，评审 R2-REV-2）；没落盘的账本条目随旧实例内存沿用；
  *       沿用的冻结是别的局时待结算记录照常应用、不摘它；</li>
  *   <li>恢复读回来时已在交出冻结 → 不挂冻结、待结算记录整笔延后；在选目标中 → 挂上，随后选中远端时中止换图；交出进场也跑。</li>
  * </ul>
@@ -850,6 +851,8 @@ class BattleRecoveryTest {
         BattleFreeze carried = fresh.battle().freeze();
         assertThat(carried).isNotNull().isNotSameAs(original);
         assertThat(carried.phase()).isEqualTo(Phase.FIGHTING);
+        assertThat(original.preparedHere()).isTrue();
+        assertThat(carried.preparedHere()).as("会话没变：「144 不必再推」照抄旧值（R2-b）").isTrue();
         assertThat(f.messageIds(fresh)).as("只有进场下行").containsExactly(ENTER_SCENE, ACTOR_CREATE);
         assertThat(f.hints("carried")).isZero();
         assertThat(f.rebuilds("carried", "rebuilt")).isEqualTo(1);
@@ -862,6 +865,63 @@ class BattleRecoveryTest {
         f.drain();
         assertThat(f.locks.calls()).isEmpty();
         assertThat(f.reconnectHints(fresh)).isEmpty();
+    }
+
+    /**
+     * 评审 R2-REV-2：同会话重复进场时推不推 144 只看沿用过来的 {@code preparedHere}，不再另判「会话变没变」。旧值为假的 FIGHTING 冻结只有一种来路——
+     * 按 F 锁重建之后、复核（TOUCH）回来之前，144 还欠着。这时同一个会话重复进场：旧实例那次复核的回调认的是旧实例，回来即被丢弃；
+     * 新实例已有冻结、恢复的锁步骤不再重建；补发的确认走续期已确认的幂等分支。沿用的那一刻不把欠着的这条推掉，这个会话就永远收不到这一局的 144
+     * （玩家冻结在 FIGHTING 里而客户端不知道要补签，直到结算或期限；基线重建时不等复核就推）。恰好一条：旧实例的复核随后回来不再推第二条。
+     */
+    @Test
+    void 同epoch同会话重复进场_按锁重建的FIGHTING冻结复核还在途_144还没推过_沿用时当场推一次_旧复核回来不再推() {
+        putFightingLock(PLAYER, X);
+        f.locks.hold(Op.TOUCH);
+        ScenePlayer old = load();
+        f.drain();
+        BattleFreeze rebuilt = old.battle().freeze();
+        assertThat(rebuilt).isNotNull();
+        assertThat(rebuilt.phase()).isEqualTo(Phase.FIGHTING);
+        assertThat(rebuilt.preparedHere()).as("复核在途：144 还没推过").isFalse();
+        assertThat(f.reconnectHints(old)).isEmpty();
+        f.sink.clear();
+
+        ScenePlayer fresh = f.reenter(SESSION, PLAYER, 1, f.scene1);
+
+        assertThat(fresh).isNotSameAs(old);
+        assertThat(fresh.session()).as("同一个会话").isEqualTo(old.session());
+        BattleFreeze carried = fresh.battle().freeze();
+        assertThat(carried).as("沿用的是新对象").isNotNull().isNotSameAs(rebuilt);
+        assertThat(carried.phase()).isEqualTo(Phase.FIGHTING);
+        assertThat(f.messageIds(fresh)).as("进场下行之后当场把欠着的 144 推掉，不等恢复读").containsExactly(ENTER_SCENE, ACTOR_CREATE, f.reconnectHintId);
+        assertThat(f.reconnectHints(fresh)).containsExactly(X);
+        assertThat(carried.preparedHere()).as("推过了，记下").isTrue();
+        assertThat(f.hints("carried")).isEqualTo(1);
+        assertThat(f.rebuilds("carried", "rebuilt")).isEqualTo(1);
+
+        f.drain();
+
+        assertThat(fresh.battle().recovery()).isEqualTo(Recovery.READY);
+        assertThat(fresh.battle().freeze()).isSameAs(carried);
+        assertThat(f.locks.pending(Op.TOUCH)).as("新实例已有冻结、不再复核：在途的只有旧实例那一次").hasSize(1);
+        assertThat(f.reconnectHints(fresh)).containsExactly(X);
+
+        // 旧实例的复核现在才回来（命中）：实例已换，丢弃——不推第二条、不计登录重建
+        Call touch = f.locks.take(Op.TOUCH).complete();
+        f.drain();
+
+        assertThat(touch.lastReply()).isEqualTo(BattleRedis.TOUCH_HIT);
+        assertThat(f.reconnectHints(fresh)).as("这个会话上这一局的 144 恰好一条").containsExactly(X);
+        assertThat(f.hints("login")).isZero();
+        assertThat(rebuildsTotal("login")).isZero();
+
+        // 之后的补发确认：锁上本来就是 F、续期已确认，零 Redis、不再推
+        f.locks.clearCalls();
+        f.confirm(PLAYER, X, f.deadline());
+        f.drain();
+        assertThat(f.locks.calls()).isEmpty();
+        assertThat(f.confirms("idempotent")).isEqualTo(1);
+        assertThat(f.reconnectHints(fresh)).containsExactly(X);
     }
 
     /**

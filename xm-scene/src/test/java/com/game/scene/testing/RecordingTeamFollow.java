@@ -16,6 +16,11 @@ public final class RecordingTeamFollow implements TeamFollow {
     public final List<Long> entered = new ArrayList<>();
     /** {@code onBattleFreezeCleared} 被触发的玩家（player_id，按顺序，可重复）。 */
     public final List<Long> freezeCleared = new ArrayList<>();
+    /**
+     * {@code onBattleFreezeCleared} 被触发时传进来的<b>玩家实例</b>（与 {@link #freezeCleared} 一一对应）。同一个 player_id 先后有两个实例
+     * （同 epoch 重进）时，断言「补的是现任实例、不是已被移除的旧实例」用它（按引用比较：{@code containsExactly(fresh)} 对 ScenePlayer 就是同一性）。
+     */
+    public final List<ScenePlayer> freezeClearedPlayers = new ArrayList<>();
 
     @Override
     public void onEnteredScene(SceneWorld world, ScenePlayer player) {
@@ -25,10 +30,12 @@ public final class RecordingTeamFollow implements TeamFollow {
     @Override
     public void onBattleFreezeCleared(SceneWorld world, ScenePlayer player) {
         freezeCleared.add(player.playerId());
+        freezeClearedPlayers.add(player);
     }
 
     public void clear() {
         entered.clear();
         freezeCleared.clear();
+        freezeClearedPlayers.clear();
     }
 }

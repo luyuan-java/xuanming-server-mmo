@@ -123,7 +123,8 @@ public record DataProperties(
      * @param minTargetAge     回档目标时刻至少早于现在多久（快照经 Kafka 落库有延迟）
      * @param heartbeat        作业心跳（{@code ops_active.heartbeat_ms}）间隔
      * @param staleAfter       心跳超过它没更新的作业由清扫器改成 INTERRUPTED（每个副本都跑清扫器）
-     * @param battleLockWait   回档前查战斗锁（批次 6.3）一次检查全程最多等多久；到点没读完的玩家按在战处理、不写（fail-closed）。
+     * @param battleLockWait   回档前查战斗锁（批次 6.3）一次检查全程最多等多久；到点没读完 / 读失败的玩家记单独的结局
+     *                         {@code battle_lock_unknown}（不是 {@code in_battle}），同样不写（fail-closed）、归属照常释放。
      *                         缺省 5 s：略长于 Redis 单条命令的最坏阻塞（xm.redis 缺省 4.2 s），Redis 故障时先拿到它自己的报错
      */
     public record Ops(

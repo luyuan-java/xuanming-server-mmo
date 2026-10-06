@@ -347,7 +347,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - hazards: 锁存不可撤销，这正是在线判定必须 fail-closed 的原因。
 
 ### guild-trial — 同道历练（邀请房间 → 开战 → 战后结算）
-- mmorpg: go/guild/internal/logic/activity_logic.go（StartGuildTrial / RespondGuildTrialInvite / trialNotOpenYet，**目前是桩**）；B6b 已有的周边：proto/match/match_internal.proto、proto/battle/battle_node.proto（活动上下文）、proto/contracts/kafka/match_event.proto（guild-trial 消费组）、cpp/libs/services/battle/system/battle_result_activity.h；go/guild/internal/data/trial_result_record.go 在头注释里被引用，但仓库里不存在
+- mmorpg: go/guild/internal/logic/activity_logic.go（StartGuildTrial / RespondGuildTrialInvite / trialNotOpenYet，**目前是桩**）；B6b 已有的周边：proto/match/match_internal.proto、proto/battle/battle_node.proto（活动上下文）、proto/contracts/kafka/match_event.proto（guild-trial 消费组）、cpp/libs/services/battle/system/battle_result_activity.h；go/guild/internal/data/trial_result_record.go 在头注释里被引用，但仓库里不存在。**勘误（scene-battle-spec §10.7 第 9 条，按基线 26ceb70ca 核对）**：go/ 下没有 battle:activity_result:{battle_id} 的读者，这条活动结果通道在基线只有写方（battle 节点，cpp/nodes/battle/logic/battle_room_manager.cpp），销账方与巡检器都没有实现；帮会也没有 battle:lock 的生产读者——go/guild/internal/activity/rules.go:391 只是 MyTrialBattleID 字段的注释，全仓只有单测给这个字段赋值；活动开局的读锁在 match（go/match/internal/logic/activitybattlelogic.go:220-228）
 - client messages: 242 StartGuildTrial、243 RespondGuildTrialInvite（C2S）
 - tables: GuildActivity（type=3：dungeon_id、team_size_min / max 在 2..5 之间、guild_threshold = 每日计资金胜场上限）、GuildRule.trial_invite_ttl_seconds / trial_invite_cooldown_seconds、Dungeon
 - depends on: guild-activity-core；B6b 还需要 match 内部服务、battle 活动对局、Kafka 战报

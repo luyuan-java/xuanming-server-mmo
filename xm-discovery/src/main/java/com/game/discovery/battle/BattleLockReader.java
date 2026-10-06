@@ -13,7 +13,8 @@ import org.redisson.api.RedissonClient;
 /**
  * 回合制战斗锁的只读工具（scene-battle-spec §2.4、§7.1）：给 match（JoinQueue / 切磋 / 活动开局 / 整队预检）、team（队伍视图）、
  * scene 的组队跟随与以后的 guild 用。锁存在 = 这名玩家有在途的战斗（备战或战斗中，或已结算待落盘）。
- * 锁是 Hash，不能 MGET（基线 Go 侧的 MGET 写法不移植），批量读逐键 EXISTS 并发发出。
+ * 锁是 Hash，基线 Go 侧的 MGET 写法不移植：对 Hash 键 {@code MGET} 回 nil、<b>不报错</b>（报 {@code WRONGTYPE} 的是 {@code GET}），
+ * 照搬基线「值非空即在战斗」会让 {@code in_battle} 静默恒为 false——所以批量读逐键 EXISTS 并发发出。
  *
  * <p>读失败时怎么处理由调用方各自定（口径不一：JoinQueue 回内部错误、切磋按「忙」、队伍视图按「不在战斗」，§2.4）——这里只把错误原样带回。
  * 全部方法异步、不阻塞、线程安全。

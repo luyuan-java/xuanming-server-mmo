@@ -280,6 +280,78 @@ class BattleReaperTest {
         assertThat(f.gold(player)).isZero();
     }
 
+    /**
+     * 评审 R2-REV-1：判废的那条条件删锁在途时玩家同 epoch 重进——旧实例的冻结已摘、没有可沿用的；新实例的恢复读排在删锁之后才执行，读不到锁、不重建。
+     * 但新实例进场那次组队跟随检查先于恢复读发出，读到的还是这把没删掉的锁、已经放弃。锁确实是这一次删掉的（返回 1）→「删完补一次」落到<b>现任实例</b>上，
+     * 不跟着旧实例一起丢（否则删完之后再没有触发点）。
+     */
+    @Test
+    void 判废删锁在途时同epoch重进_锁是这次删掉的_给新实例补一次跟随() {
+        ScenePlayer old = fightingPlayer();
+        f.advance(BATTLE + GRACE + 1);
+        f.locks.hold(Op.DELETE_IF_MATCH, Op.ENTER_READ);
+        f.reap();
+        assertThat(old.inBattle()).as("判废：冻结已摘，删锁在途").isFalse();
+        assertThat(f.locks.pending(Op.DELETE_IF_MATCH)).hasSize(1);
+
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        assertThat(fresh).isNotSameAs(old);
+        assertThat(fresh.battle().freeze()).as("没有可沿用的冻结").isNull();
+        assertThat(f.follows.entered).as("新实例进场那次跟随检查已经发出（此刻锁还在）").containsExactly(PLAYER);
+        f.follows.clear();
+
+        Call delete = f.locks.take(Op.DELETE_IF_MATCH).complete();
+        f.drain();
+
+        assertThat(delete.lastReply()).isEqualTo(1L);
+        assertThat(f.locks.lock(PLAYER)).isNull();
+        assertThat(f.follows.freezeClearedPlayers).as("补给现任实例，恰好一次；不拿已被移除的旧实例去补").containsExactly(fresh);
+
+        f.locks.take(Op.ENTER_READ).complete();
+        f.drain();
+        assertThat(fresh.inBattle()).as("恢复读看到的已是「没有锁」").isFalse();
+        assertThat(f.follows.freezeClearedPlayers).containsExactly(fresh);
+    }
+
+    /** 上一条的守卫：判废删锁回来时实例已换，但这次删除没有删到锁（锁在它执行之前已经过期，返回 0）——不给新实例补。 */
+    @Test
+    void 判废删锁在途时同epoch重进_这次没有删到锁_不给新实例补跟随() {
+        ScenePlayer old = fightingPlayer();
+        f.advance(BATTLE + GRACE + 1);
+        f.locks.hold(Op.DELETE_IF_MATCH, Op.ENTER_READ);
+        f.reap();
+        ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
+        assertThat(fresh).isNotSameAs(old);
+        f.locks.removeLock(PLAYER);
+        f.follows.clear();
+
+        Call missed = f.locks.take(Op.DELETE_IF_MATCH).complete();
+        f.drain();
+
+        assertThat(missed.lastReply()).isEqualTo(0L);
+        assertThat(f.follows.freezeCleared).as("没有锁是被这一次删掉的：不补").isEmpty();
+    }
+
+    /** 另一条守卫：判废删锁在途时玩家离场，删到了锁——没有现任实例可补，也不拿已被移除的旧实例去补。 */
+    @Test
+    void 判废删锁在途时玩家离场_删到了锁_没有现任实例不补跟随() {
+        fightingPlayer();
+        f.advance(BATTLE + GRACE + 1);
+        f.locks.hold(Op.DELETE_IF_MATCH);
+        f.reap();
+        f.world.onPlayerLeave(BattleFixture.LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER)
+                .setVoluntary(true).build());
+        assertThat(f.world.playerById(PLAYER)).isNull();
+        f.follows.clear();
+
+        Call deleted = f.locks.take(Op.DELETE_IF_MATCH).complete();
+        f.drain();
+
+        assertThat(deleted.lastReply()).isEqualTo(1L);
+        assertThat(f.locks.lock(PLAYER)).isNull();
+        assertThat(f.follows.freezeCleared).as("玩家已不在本节点：没有人可补").isEmpty();
+    }
+
     /** 读到的记录是坏的（解析不了、blob 里的 battle_id / player_id 对不上）：等同没有记录，判废；坏记录不在这里删（进场恢复按坏字段删）。 */
     @Test
     void 过了宽限_本局记录损坏或归属不符_按没有记录判废_记录留着() {

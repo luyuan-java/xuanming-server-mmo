@@ -82,8 +82,8 @@ xm:
       # 作业心跳与清扫判定（心跳超过 stale-after 没更新的作业改 INTERRUPTED）
       heartbeat: 5s
       stale-after: 60s
-      # 回档前查战斗锁（夺权之后、账本差集之前；dry-run 也查）一次检查全程最多等多久。到点没读完 / 读失败的玩家按在战处理、不写
-      # （battle_lock_unknown，fail-closed）。略长于 Redis 单条命令的最坏阻塞（xm.redis 缺省 4.2 s）
+      # 回档前查战斗锁（夺权之后、账本差集之前；dry-run 也查）一次检查全程最多等多久。到点没读完 / 读失败的玩家记单独的结局
+      # battle_lock_unknown（不是 in_battle），同样不写（fail-closed）、归属照常释放。略长于 Redis 单条命令的最坏阻塞（xm.redis 缺省 4.2 s）
       battle-lock-wait: 5s
     recall:
       # 一次回收（含 dry-run）至多匹配多少行源流水；超出 422 result_truncated、零变更

@@ -7,7 +7,6 @@ import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.TeamFollowResult;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
-import com.game.scene.world.SwitchPhase;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -39,8 +38,10 @@ import org.slf4j.LoggerFactory;
  * 被跟随换场景（以及被扇出后的跟随）也会触发进场钩子：那次按「只跟随、不扇出」处理；它已和队长同场景，所以什么都不做，不会循环。
  *
  * <p><b>回合制战斗</b>（批次 6.3，scene-battle-spec §7.13 世界内部第 3 条）：战斗在途的队员不被拉走，解冻后补一次。
- * {@link #onBattleFreezeCleared} 由 {@code PlayerBattleService} 在三处调，都按「只跟随、不扇出」处理：解冻且条件删锁<b>完成之后</b>（取消备战、reaper 判废）；
+ * {@link #onBattleFreezeCleared} 由 {@code PlayerBattleService} 在三类时机调，都按「只跟随、不扇出」处理：解冻且条件删锁<b>完成之后</b>（取消备战、reaper 判废）；
  * 保留锁的解冻（备战到期、结算应用后）——这次检查会读到锁而放弃，等于空跑；销账脚本确实放掉了锁之后（位 2）——真正补上的是这一次。
+ * 删锁 / 销账的结局回来时发起它的实例已经换掉（同 epoch 重进）的，或者那次删除本来就不跟着一次解冻的（备战失败 / 过期后的尽力删锁、离线取消），
+ * 只要锁确实是这一次删掉 / 放掉的，就补给<b>现任实例</b>（它没有战斗冻结时）——它进场那次检查读到的还是这把锁。
  * 与基线的一处写法差异：基线在 {@code CheckFollowLeader} 的第二跳（读队长位置与自己的锁）之前、回调之后各判一次内存冻结
  * （{@code player_team.cpp:353}、{@code :402}）；Java 把锁读并进了成员关系那一次读，没有「第二跳之前」这个位置，<b>只在回调后统一判一次</b>，
  * 不做读前预判（代价：战斗中的非队长多发一次 EXISTS，结果相同）。也不能把预判加在发起读之前：成员关系那一跳不受战斗闸约束，
@@ -48,8 +49,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>与基线的其余差异（team-spec D7–D10）：不收 {@code PlayerTeamRefreshEvent}、不缓存 TeamId（入队 / 转让 / 踢人本来就不拉人，
  * 基线的 RefreshOnly 模式只为刷新组件）；不做队友 AOI 优先级；
- * 基线的「归属交接在途 / 换图在途」守卫对应 Java 的跨节点换图在途（批次 5.2，{@code switchPhase ≠ NONE} 不跟随）；「会话不活」守卫
- * 在 Java 不存在（断线即移出）。
+ * 基线的「归属交接在途 / 换图在途」守卫对应 Java 的跨节点换图在途（批次 5.2，{@link SceneWorld#switchInFlight} 为真不跟随；
+ * 过了期限的 RESOLVING 槽在这次判定里就地作废、不再挡）；「会话不活」守卫在 Java 不存在（断线即移出）。
  *
  * <p>指标：每次读回来恰好计一次 {@code xm.scene.team.follow{result}}（{@link TeamFollowResult}）。
  */
@@ -215,9 +216,11 @@ public final class TeamFollowService implements TeamFollow {
 
     /** 跟随队长到它所在的场景实例（逻辑线程）。 */
     private void followLeader(SceneWorld world, ScenePlayer player, long leaderId, boolean battleLocked) {
-        if (player.switchPhase() != SwitchPhase.NONE) {
+        if (world.switchInFlight(player)) {
             // 自己有在途的跨节点换图（选目标中或冻结中，scene-handoff-spec §5.5；基线 IsFollowBlocked 查冻结或交接意图，
-            // player_team.cpp:65-75）：换图的结局优先，不跟随
+            // player_team.cpp:65-75）：换图的结局优先，不跟随。经世界的「在途」判定而不是直接看 switchPhase：过了期限的 RESOLVING 槽
+            // （结果回调丢了）在这里就地作废、不再挡——否则这名队员的跟随会一直被一个死槽挡住，直到他再发 63 或有人对他备战
+            // （与回合制战斗的备战闸同口径，审计 GAT-14 的做法延伸）
             metrics.teamFollow(TeamFollowResult.SWITCHING);
             log.debug("有在途的跨节点换图，不跟随 player={} 阶段={}", Long.toUnsignedString(player.playerId()),
                     player.switchPhase());

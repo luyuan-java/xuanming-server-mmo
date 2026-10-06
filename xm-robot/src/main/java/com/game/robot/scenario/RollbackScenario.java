@@ -44,8 +44,8 @@ import java.util.Optional;
  *       （login 的既有行为；{@link PlayerFlow} 会自动重试 2005，所以不看它的最终结果，而是翻这条连接的收包记录）。</li>
  * </ol>
  * 步骤 2 另核对「回档后差异接口无资产差异」。没有做的：帮会联动（快照之后捐献 → 回档被拒 / 带原因放行，前置步骤多）、整区回档与
- * {@code /admin/zone-snapshots}。<b>步骤 5–7 与步骤 2 的差异核对是 2026-10-06 追加的，追加时没有条件起本机切片，尚未经端到端验证</b>
- * （纯函数与请求编码有单测）。
+ * {@code /admin/zone-snapshots}。步骤 5–7 与步骤 2 的差异核对是 2026-10-06 追加的，当天在本机单 scene 与双 scene 切片上各跑过一遍
+ * （19 项全部通过，记录在 data-ops-spec §13.4 的「最终验证」）；纯函数与请求编码另有单测。
  *
  * <p>需要 dev / test（GM 加币）、xm-data 的 {@code XM_DATA_OPS_ENABLED=true}（本机切片脚本缺省打开，沉降 3 s、min-target-age 5 s）、
  * xm-guild 在跑（帮会检查）、Kafka 审计链路在跑（步骤 6 的 LOGOUT 快照）。步骤 7 要求作业持有归属的时间长于 login 等让出的 3 s

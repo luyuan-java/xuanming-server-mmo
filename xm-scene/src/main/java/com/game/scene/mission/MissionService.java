@@ -204,7 +204,7 @@ public final class MissionService {
         dispatch(player, MissionFact.of(MissionTables.CATEGORY_LEVEL, level, Integer.toUnsignedLong(level)));
     }
 
-    /** 击杀结算（回合制战斗接入前只有单测调用）：每只一条事实，同基线。 */
+    /** 击杀结算（回合制战斗结算应用时由 {@code BattleSettlementService} 调）：每只一条事实，同基线。 */
     public void onMonsterKilled(ScenePlayer player, int monsterConfigId, int count) {
         if (monsterConfigId == 0) {
             return;

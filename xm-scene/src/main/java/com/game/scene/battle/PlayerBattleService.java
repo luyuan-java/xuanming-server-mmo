@@ -86,14 +86,36 @@ public final class PlayerBattleService implements BattleHooks {
     static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
     static final int SESSION_NOT_FOUND = CommonErrorTip.common_error.kSessionNotFound_VALUE;
 
+    /**
+     * 备战请求里的期限（{@code deadline_ms} / {@code prepare_deadline_ms}）最多比现在晚这么久：7 天，取待结算记录的保留期
+     * （{@link BattleRedis#SETTLEMENT_TTL_SEC}）——一局的期限晚于它自己结算记录的保留期没有意义。超出即按参数非法拒绝（1005）。
+     *
+     * <p>为什么要有上界：{@code PREPARE_LOCK} 先 HSET 后 EXPIRE，期限是天文数字时算出的 TTL 超出 Redis 的上限，EXPIRE 报错、脚本中止，
+     * 已执行的 HSET 不回滚——留下一把<b>没有 TTL</b> 的锁（之后这名玩家每次备战都「被占」，直到人工删键）；内存里的冻结也会以一个永远到不了的期限挂着。
+     * 正常对局远小于它：战斗期限 = 集合起点 + 300 s，备战期限 = 集合起点 + 42 ~ 96 s（scene-battle-spec §1 的常量表）；
+     * 7 天对应的锁 TTL 是 604 860 s，EXPIRE 不会报错。期限按无符号比较（契约是 uint64）：≥ 2^63 的垃圾值同样超界。只设上界——
+     * 已经过去的期限照旧放行（锁 TTL 取下限 60 s，冻结由下一轮 reaper 摘掉）。
+     */
+    static final long MAX_DEADLINE_AHEAD_MS = BattleRedis.SETTLEMENT_TTL_SEC * 1000;
+
+    /**
+     * 三段删锁脚本（{@code deletePreparingIfMatch} / {@code CANCEL_OFFLINE} / {@code DELETE_IF_MATCH}）共同的「这一次把锁删掉了」的返回值
+     * （前两段即 {@link BattleRedis#PREPARING_DELETE_DONE}）。
+     */
+    private static final long LOCK_DELETED = BattleRedis.PREPARING_DELETE_DONE;
+
     /** 解冻时对锁的处置（§7.4）。 */
     enum LockAction {
         /**
          * 只删备战锁（{@code b == X 且 s ≠ F} 才删，{@link BattleLocks#deletePreparingIfMatch}）：取消备战、备战失败这些「只该删 P 锁」的路径。
-         * 删除被 Redisson 排到确认之后时锁已标 F、迟到确认可能已重建 FIGHTING 冻结——这把锁不能再删（审计 FRZ-7）。删完再补一次组队跟随。
+         * 删除被 Redisson 排到确认之后时锁已标 F、迟到确认可能已重建 FIGHTING 冻结——这把锁不能再删（审计 FRZ-7）。删完再补一次组队跟随
+         * （实例已换时见 {@link #DELETE_IF_MATCH}）；删除在途期间现任实例（多半是同 epoch 重进的新实例）按这把锁重建出来的备战冻结也在这时摘掉。
          */
         DELETE_PREPARING,
-        /** 条件删锁、不看 s（reaper 判废专用）：删完（回到逻辑线程、实例未换）再补一次组队跟随。 */
+        /**
+         * 条件删锁、不看 s（reaper 判废专用）：删完（回到逻辑线程）再补一次组队跟随。解冻的实例还在就补给它（不看删没删到）；
+         * 实例已换时，锁确实是这一次删掉的（返回 1）才补给现任实例。
+         */
         DELETE_IF_MATCH,
         /** 锁留着（reaper 备战到期、结算应用后由 ACK 放锁）；立即补跟随（跟随链读到锁会放弃）。 */
         KEEP_LOCK
@@ -158,6 +180,14 @@ public final class PlayerBattleService implements BattleHooks {
         if (playerId == 0 || battleId == 0 || deadline == 0) {
             return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
         }
+        long latest = clock.epochMillis() + MAX_DEADLINE_AHEAD_MS;
+        if (Long.compareUnsigned(deadline, latest) > 0 || Long.compareUnsigned(request.getPrepareDeadlineMs(), latest) > 0) {
+            // 与上面同码同序（参数非法，先于一切玩家状态判断；零冻结、零 Redis 调用）：期限离谱到 EXPIRE 会报错（见 MAX_DEADLINE_AHEAD_MS）
+            log.warn("备战被拒：期限比现在晚了超过 {} ms，按参数非法 player={} battle_id={} deadline={} prepare_deadline={}",
+                    MAX_DEADLINE_AHEAD_MS, Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                    Long.toUnsignedString(deadline), Long.toUnsignedString(request.getPrepareDeadlineMs()));
+            return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
+        }
         ScenePlayer player = world.playerById(playerId);
         if (player == null) {
             return prepareRejected(ENTITY_NULL, Prepare.NOT_HERE);
@@ -216,8 +246,7 @@ public final class PlayerBattleService implements BattleHooks {
                 freeze.setLockPending(false);
                 clearFreeze(player, LockAction.KEEP_LOCK);
             }
-            onLogic(locks.deletePreparingIfMatch(playerId, battleId),
-                    (r, e) -> logScriptError("备战回调出错后尽力删锁", playerId, battleId, e));
+            deletePreparingLock(playerId, battleId, "备战回调出错后尽力删锁");
         } catch (RuntimeException suppressed) {
             log.error("备战回调出错后的收尾也出错 player={} battle_id={}", Long.toUnsignedString(playerId),
                     Long.toUnsignedString(battleId), suppressed);
@@ -260,10 +289,10 @@ public final class PlayerBattleService implements BattleHooks {
         boolean current = world.playerById(playerId) == player && player.battle().freeze() == freeze;
         if (!current) {
             // 实例已换或冻结已不是这个：占到了、或结局不明（出错 / 超时：脚本可能已执行、只是回复丢了）都尽力删一次
-            // （match 认为这人没冻结成功，不会对他发取消；审计 FRZ-6 / RDS-10）。只删备战锁：这把锁若已被确认标成 F 就不是我们能删的
+            // （match 认为这人没冻结成功，不会对他发取消；审计 FRZ-6 / RDS-10）。只删备战锁：这把锁若已被确认标成 F 就不是我们能删的。
+            // 这把刚写上的锁可能已被现任实例（同 epoch 重进的新实例）的恢复读看到并据此重建了备战冻结：删锁有了结局后一并摘掉
             if (error != null || "0".equals(held)) {
-                onLogic(locks.deletePreparingIfMatch(playerId, battleId),
-                        (r, e) -> logScriptError("删过期备战锁", playerId, battleId, e));
+                deletePreparingLock(playerId, battleId, "删过期备战锁");
             }
             metrics.prepare(Prepare.STALE);
             log.info("备战写锁回来时实例已换 / 冻结已不是这个，回 1004 player={} battle_id={} 写锁结局={}", Long.toUnsignedString(playerId),
@@ -275,8 +304,7 @@ public final class PlayerBattleService implements BattleHooks {
         if (error != null) {
             // Redis 出错 / 超时：解冻，再尽力删一次（脚本可能已执行、只是回复丢了；只删备战锁，审计 FRZ-7）；残余见 §10.5
             clearFreeze(player, LockAction.KEEP_LOCK);
-            onLogic(locks.deletePreparingIfMatch(playerId, battleId),
-                    (r, e) -> logScriptError("备战失败后尽力删锁", playerId, battleId, e));
+            deletePreparingLock(playerId, battleId, "备战失败后尽力删锁");
             metrics.prepare(Prepare.REDIS_ERROR);
             log.warn("备战写锁失败，回 1003 player={} battle_id={}: {}", Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
                     error.toString());
@@ -347,6 +375,11 @@ public final class PlayerBattleService implements BattleHooks {
                                 Long.toUnsignedString(battleId));
                     } else {
                         metrics.cancel(Cancel.OFFLINE_ABSENT);
+                    }
+                    // 脚本在途期间这名玩家可能已经进场，并按这把还没删掉的备战锁重建了冻结：这一局已被取消，一并摘掉；
+                    // 没有重建（他的恢复读排在删除之后）而锁确实是这一次删掉的：他进场那次跟随检查可能正是被这把锁挡下的，补一次
+                    if (!dropPreparingRebuiltFromLock(playerId, battleId, result, error)) {
+                        followCurrentIfLockDeleted(playerId, result, error);
                     }
                 } finally {
                     done.complete(null);
@@ -554,14 +587,18 @@ public final class PlayerBattleService implements BattleHooks {
         if (carried != null) {
             BattleFreeze old = carried.battle().freeze();
             if (old != null && !old.lockPending()) {
-                // 第 0 步：同 epoch 沿用旧实例——复制成新对象（复位运行态标记）；写锁在途的不沿用（§7.8 第 0 步）
-                BattleFreeze copy = old.carriedCopy();
+                // 第 0 步：同 epoch 沿用旧实例——复制成新对象（复位运行态标记）；写锁在途的不沿用（§7.8 第 0 步）。
+                // 「144 不必再推」这份认识跟着会话走：会话没变照抄旧值（之后的确认升级不多推一条，同基线按会话号比较），会话变了才清掉
+                BattleFreeze copy = old.carriedCopy(carried.session().equals(player.session()));
                 player.battle().setFreeze(copy);
                 metrics.rebuild(RebuildReason.CARRIED, RebuildResult.REBUILT);
-                if (!carried.session().equals(player.session())) {
-                    // 会话换了（重连 / 顶号）才推；同会话的重复进场不推。PREPARING 永不推（B5）
-                    pushReconnectOnce(player, copy, HintTrigger.CARRIED);
-                }
+                // 推不推只看沿用过来的 preparedHere，不再另判会话（PREPARING 永不推，B5，等确认升级时推）：
+                //  - 会话换了（重连 / 顶号）：副本为假，FIGHTING 当场推；
+                //  - 会话没变、旧值为真（在这个会话上备战的，或已经推过）：不推；
+                //  - 会话没变、旧值为假的 FIGHTING：只有一种来路——旧实例按 F 锁重建后复核（TOUCH）还在途、144 还没推。那次复核的回调认的是旧实例，
+                //    回来即被丢弃；新实例已有冻结、恢复的锁步骤不再重建；补发的确认走续期已确认的幂等分支。这里不推，这个会话就永远收不到这一局的 144
+                //    （基线重建时不等复核就推，player_battle.cpp 的 RestoreBattleFreezeOnLogin）
+                pushReconnectOnce(player, copy, HintTrigger.CARRIED);
             }
             // 旧实例的内存整个被沿用（账本随 persistentState 过来）：它「已为哪些局发出过销账」这份认识也一并沿用
             player.battle().inheritWrittenOff(carried.battle());
@@ -570,8 +607,8 @@ public final class PlayerBattleService implements BattleHooks {
     }
 
     /**
-     * 交出没提交、原地解冻之后：<b>重跑一次完整的进场恢复</b>（第 1 步起）。规格原文只要求补「锁步骤」（§10.5：冻结期间到达的确认只续了锁、
-     * 没挂冻结），这里有意做成超集（审计 FRZ-9 / GAT-13）：锁步骤本身就需要 ENTER_READ 的结果，那次读失败时若不落到 RETRY 就没有任何东西重试；
+     * 交出没提交、原地解冻之后：<b>重跑一次完整的进场恢复</b>（第 1 步起；同规格 §7.8 末段、§10.5，有意差异 D34），不是只补「锁步骤」
+     * （冻结期间到达的确认只续了锁、没挂冻结；审计 FRZ-9 / GAT-13）：锁步骤本身就需要 ENTER_READ 的结果，那次读失败时若不落到 RETRY 就没有任何东西重试；
      * 重跑全流程还能把冻结期间被 DEFERRED 的结算当场补上、把冻结期间没 forget 的账本条目销掉。代价：一次往返内 {@code recovery = PENDING}
      * （备战 1006、结算 DEFERRED），读失败转 RETRY 由 reaper 重读。与还在途的更早一次恢复读靠代际号区分，只认最新一代。
      */
@@ -1063,7 +1100,14 @@ public final class PlayerBattleService implements BattleHooks {
             }
             long r = bits == null ? 0 : bits;
             metrics.ack(trigger, r == 0 ? AckResult.NOT_OURS : AckResult.RELEASED);
-            if (world.playerById(playerId) != player) {
+            ScenePlayer current = world.playerById(playerId);
+            if (current != player) {
+                // 发起这次销账的实例已经不在（离场，或同 epoch 重进换成了新实例）：不动旧实例的账本。但锁确实是这一次放掉的（位 2）时，
+                // 「放锁后补一次组队跟随」不能跟着旧实例一起丢——新实例进场时那次跟随检查读到的还是这把锁、已经放弃，它自己随后的销账只会回 0，
+                // 再没有别的触发点。对现任实例补一次（它有战斗冻结时不补：解冻时自会再查）
+                if ((r & 2) != 0 && current != null && !current.inBattle()) {
+                    teamFollow.onBattleFreezeCleared(world, current);
+                }
                 return;
             }
             if (!player.frozen()) {
@@ -1101,8 +1145,10 @@ public final class PlayerBattleService implements BattleHooks {
 
     /**
      * 解冻的唯一入口（基线 {@code RemoveInBattleComp} / {@code ClearBattleFreeze}）：摘掉冻结；{@code DELETE_PREPARING}（只删备战锁）/
-     * {@code DELETE_IF_MATCH}（reaper 判废，不看 s）→ 发条件删锁，<b>删完</b>（回到逻辑线程、实例未换、仍无冻结）补一次组队跟随；
+     * {@code DELETE_IF_MATCH}（reaper 判废，不看 s）→ 发条件删锁，<b>删完</b>（回到逻辑线程、仍无冻结）补一次组队跟随——解冻的这个实例还在就补给它；
+     * 实例已换（离场 / 同 epoch 重进）时，锁确实是这一次删掉的才补给现任实例（{@link #followCurrentIfLockDeleted}）；
      * {@code KEEP_LOCK} → 立即补（锁还在，跟随链读到锁会放弃，锁真正放掉时由销账回调补）。
+     * {@code DELETE_PREPARING} 的删除有了结局时，现任实例上按这把锁重建出来的备战冻结一并摘掉（{@link #dropPreparingRebuiltFromLock}）。
      *
      * @return 删锁完成（KEEP_LOCK / 本来就没有冻结时立即完成）。删锁回调出错、逻辑线程已停也照常完成——解冻在返回前已经生效（审计 STL-8）
      */
@@ -1124,19 +1170,111 @@ public final class PlayerBattleService implements BattleHooks {
         onLogic(deletion, (r, error) -> {
             try {
                 logScriptError("解冻删锁", playerId, battleId, error);
-                if (error == null && action == LockAction.DELETE_PREPARING && r != null && r == BattleRedis.PREPARING_DELETE_FIGHTING) {
-                    // 删除排到了确认之后：锁已标 F（迟到确认会据此重建 FIGHTING），留着
-                    log.info("解冻时锁已被确认标成 F，保留 player={} battle_id={}", Long.toUnsignedString(playerId),
-                            Long.toUnsignedString(battleId));
+                boolean dropped = false;
+                if (action == LockAction.DELETE_PREPARING) {
+                    if (error == null && r != null && r == BattleRedis.PREPARING_DELETE_FIGHTING) {
+                        // 删除排到了确认之后：锁已标 F（迟到确认会据此重建 FIGHTING），留着
+                        log.info("解冻时锁已被确认标成 F，保留 player={} battle_id={}", Long.toUnsignedString(playerId),
+                                Long.toUnsignedString(battleId));
+                    }
+                    // 删锁在途期间，现任实例（多半是同 epoch 重进的新实例）可能已按这把还没删掉的锁重建了备战冻结
+                    dropped = dropPreparingRebuiltFromLock(playerId, battleId, r, error);
                 }
-                if (world.playerById(playerId) == player && !player.inBattle()) {
-                    teamFollow.onBattleFreezeCleared(world, player);
+                if (dropped) {
+                    // 那次解冻已经给现任实例补过跟随，不重复补
+                    return;
+                }
+                if (world.playerById(playerId) == player) {
+                    // 解冻的这个实例还在：删锁有了结局就补（不看删没删到——这是它解冻之后的第一次检查，锁还留着的话跟随链读到锁自己放弃）
+                    if (!player.inBattle()) {
+                        teamFollow.onBattleFreezeCleared(world, player);
+                    }
+                } else {
+                    // 实例已换（离场，或同 epoch 重进换成了新实例）：「删完补一次」不能跟着旧实例一起丢，锁确实是这一次删掉的就落到现任实例上
+                    followCurrentIfLockDeleted(playerId, r, error);
                 }
             } finally {
                 done.complete(null);
             }
         }, aborted -> done.complete(null));
         return done;
+    }
+
+    /**
+     * 发一次「只删备战锁」，结局回来后顺带收拾按这把锁重建出来的备战冻结（{@link #dropPreparingRebuiltFromLock}）；没有冻结可摘而锁确实删掉了，
+     * 给现任实例补一次组队跟随（{@link #followCurrentIfLockDeleted}）。不挂应答的调用点用它。
+     */
+    private void deletePreparingLock(long playerId, long battleId, String what) {
+        onLogic(locks.deletePreparingIfMatch(playerId, battleId), (r, error) -> {
+            logScriptError(what, playerId, battleId, error);
+            if (!dropPreparingRebuiltFromLock(playerId, battleId, r, error)) {
+                followCurrentIfLockDeleted(playerId, r, error);
+            }
+        });
+    }
+
+    /**
+     * 本节点发出的一次删锁（只删备战锁 / reaper 判废 / 离线取消）有了结局（逻辑线程），而「删完补一次组队跟随」没有原主可落——发起它的实例已经换掉，
+     * 或者这次删除本来就不跟着一次解冻（备战失败 / 过期后的尽力删锁、离线取消）：锁<b>确实是这一次删掉的</b>（三段脚本都以返回 1 表示），
+     * 就对<b>现任实例</b>补一次；它有战斗冻结时不补（解冻时自会再查），已经不在本节点就没有人可补。
+     *
+     * <p>来由与销账回调里「位 2 而实例已换」那一支相同：这把锁被删掉之前，现任实例已经做过的跟随检查（进场那一次，或保留锁的解冻当场补的那一次）
+     * 读到的还是它、已经放弃；若它的恢复读又排在删除之后（读不到锁、不重建冻结，{@link #dropPreparingRebuiltFromLock} 无冻结可摘），
+     * 删完之后就再没有别的触发点，队员要等下一次跟随事件才归队。
+     *
+     * <p>只认返回 1：返回 0（锁不在 / 是别的局）、2（已确认开战、拒删）与出错都说明这一次没有删掉锁——此前的检查不是被这把锁挡下的，或者锁还留着，
+     * 补了也是空跑。删除被 Redisson 重放（首发已删、重发回 0）时这一次补跟随会丢，与销账重放丢位 2 同一处已知残余，由下一次跟随事件兜住。
+     */
+    private void followCurrentIfLockDeleted(long playerId, Long result, Throwable error) {
+        if (error != null || result == null || result != LOCK_DELETED) {
+            return;
+        }
+        ScenePlayer current = world.playerById(playerId);
+        if (current != null && !current.inBattle()) {
+            teamFollow.onBattleFreezeCleared(world, current);
+        }
+    }
+
+    /**
+     * 本节点发出的一次「只删备战锁」（{@code X} 这一局）有了结局之后（逻辑线程）：<b>现任实例</b>上若挂着同一局、不是它自己备战的 PREPARING 冻结，一并摘掉。
+     * 全部「只删备战锁」的调用点都经这里：备战写锁回调的过期分支 / 写锁出错后的尽力删锁 / 回调抛异常后的收尾（{@link #deletePreparingLock}），
+     * 取消与延后取消的解冻删锁（{@link #clearFreeze} 的 {@code DELETE_PREPARING}），离线取消的 {@code CANCEL_OFFLINE}。
+     *
+     * <p>来由：删锁与备战写锁都是异步的，这把锁从写上到删掉之间可能被一次进场恢复读到——最常见的是同 epoch 重进（重连）：旧实例的备战写锁 / 取消删锁
+     * 还在途，新实例的恢复读看到了这把备战锁，据此重建出 PREPARING 冻结（复核也命中），随后那条删除才执行。对 match 而言这一局对这名玩家已经作废
+     * （备战回了 1004 / 1003，或是它自己发的取消），不会再有确认、也不会再有取消，留下的就是一把<b>没有锁</b>的冻结，要等备战期限由 reaper 摘。
+     * 发起删除的旧回调认得的是旧实例（离线取消发出时根本没有实例），所以这里按 player_id 找现任实例（也可能就是原实例：它重跑进场恢复时读到了这把锁）。
+     *
+     * <p>只摘「按锁重建出来的备战冻结」，判据收得很紧：
+     * <ul>
+     *   <li>同一局（别的局的冻结与这把锁无关）；</li>
+     *   <li>仍是 PREPARING（已升级 FIGHTING = 确认到了，这一局在打，不是我们能撤的）；</li>
+     *   <li>{@code preparedHere == false}（现任实例自己备战出来的冻结对应的是它自己那次写锁，由它自己的回调收尾）；</li>
+     *   <li>删除的结局不是「锁已标 F、拒删」（返回 2：确认已到，冻结等下一次补发确认升级）。删到了（1）、结局不明（出错 / 超时）、
+     *       没有可删的（0：锁已不在或已是别的局，含「首发已删、Redisson 重发回 0」）都摘——三种情形下这个冻结都已经没有对应的备战锁可言。</li>
+     * </ul>
+     * 走与复核落空相同的撤销路径（{@code clearFreeze(KEEP_LOCK)} + {@code rebuilds{login, reverted}}）：不再发删除，当场给现任实例补一次组队跟随
+     * （锁若因出错还留着，跟随链读到锁自己放弃）。
+     *
+     * @return 摘掉了一个冻结（此时已给现任实例补过组队跟随）
+     */
+    private boolean dropPreparingRebuiltFromLock(long playerId, long battleId, Long result, Throwable error) {
+        if (error == null && result != null && result == BattleRedis.PREPARING_DELETE_FIGHTING) {
+            return false;
+        }
+        ScenePlayer current = world.playerById(playerId);
+        if (current == null) {
+            return false;
+        }
+        BattleFreeze freeze = current.battle().freeze();
+        if (freeze == null || freeze.battleId() != battleId || freeze.phase() != Phase.PREPARING || freeze.preparedHere()) {
+            return false;
+        }
+        clearFreeze(current, LockAction.KEEP_LOCK);
+        metrics.rebuild(RebuildReason.LOGIN, RebuildResult.REVERTED);
+        log.info("备战锁已由本节点删除（或结局不明），摘掉现任实例上按它重建的备战冻结 player={} battle_id={} 删锁结局={}",
+                Long.toUnsignedString(playerId), Long.toUnsignedString(battleId), error != null ? error.toString() : result);
+        return true;
     }
 
     /** 挂上一个冻结（迟到确认 / 进场恢复）：同时停步（移动上行此后被丢弃，旧速度不能继续外推）。 */

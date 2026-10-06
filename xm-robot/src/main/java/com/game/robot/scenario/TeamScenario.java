@@ -425,6 +425,20 @@ public final class TeamScenario {
             report.fail("S6 读 World 表选换图目标", tableDir + "：" + e, REF_FOLLOW);
             return;
         }
+        // 跟随只在同一个 scene 节点内生效（跨节点、跨 zone 不跟随，team-spec §6.10 X2，同基线）。两个 scene 节点的切片上 A、B 登录时
+        // 可能被分到不同节点的频道（同图不同 scene_id）：先让 B 用 63 换到 A 的实例（跨节点换图，批次 5.2），再验证跟随；
+        // 否则这一步测到的只是「B 不在队长的节点上」。单节点切片上两人本来就在同一实例，这段不执行。
+        if (b.scene.getSceneId() != a.scene.getSceneId()) {
+            String before = "A 在 scene_config_id=" + a.scene.getSceneConfigId() + " scene_id=" + uid(a.scene.getSceneId())
+                    + "，B 在 scene_config_id=" + b.scene.getSceneConfigId() + " scene_id=" + uid(b.scene.getSceneId());
+            try {
+                switchToInstance(b, a.scene);
+            } catch (RobotException e) {
+                report.fail("S6 前置：B 换到 A 所在的场景实例", before + "；" + e.getMessage(), REF_FOLLOW);
+                return;
+            }
+            report.note("S6 前置：A、B 不在同一个场景实例（" + before + "），B 已换到 A 的实例（跟随不跨节点）");
+        }
         int target = pickSceneConfig(worlds, a.scene.getSceneConfigId(), b.scene.getSceneConfigId());
         if (target == 0) {
             report.fail("S6 选换图目标", "World 表 " + worlds + " 里没有与 A（" + a.scene.getSceneConfigId() + "）、B（"
@@ -465,6 +479,24 @@ public final class TeamScenario {
         }
         bot.scene = entered.get().getSceneInfo();
         return bot.scene;
+    }
+
+    /** 63 指定场景实例（配置号 + scene_id）：应答无错、随后的 79 就是那个实例（可能在另一个 scene 节点上，即跨节点换图）。 */
+    private void switchToInstance(Bot bot, SceneInfoComp target) throws RobotException {
+        int mark = bot.mark();
+        EnterSceneC2SResponse response = bot.call(enterScene, EnterSceneC2SRequest.newBuilder()
+                .setSceneInfo(SceneInfoComp.newBuilder().setSceneConfigId(target.getSceneConfigId()).setSceneId(target.getSceneId()))
+                .build(), EnterSceneC2SResponse.parser());
+        if (response.hasErrorMessage() && response.getErrorMessage().getId() != 0) {
+            throw new RobotException(bot.name + " 换场景（63）到实例 " + uid(target.getSceneId()) + " 回 " + response.getErrorMessage().getId());
+        }
+        Optional<EnterSceneS2C> entered = awaitPush(bot, mark, notifyEnterScene, EnterSceneS2C.parser(),
+                s -> s.getSceneInfo().getSceneId() == target.getSceneId(), FOLLOW_TIMEOUT);
+        if (entered.isEmpty()) {
+            throw new RobotException(bot.name + " 换场景后 " + FOLLOW_TIMEOUT.toSeconds() + " s 内没收到目标实例的 79"
+                    + bot.describeSince(mark));
+        }
+        bot.scene = entered.get().getSceneInfo();
     }
 
     /**

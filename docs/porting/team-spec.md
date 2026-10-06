@@ -1445,7 +1445,8 @@ Java 现状：
 - 预检顺序：会话 → 战斗锁（读失败按「在战斗中」处理）→ 位置（Java 用 `xm:location`）→ 票据。
 - 钉版本加锁，以及「提交结果未知」时按 token 确认清锁（Redisson 也会重发 EVAL，见 `architecture.md:474-476`）。
 - EndMatch 的 110 s 单调截止与退避；`finishMatch` / `pushMatchView` / `releaseLockInBackground` / `settleUnconfirmedLock`。
-- 预检里的 `in_battle`，以及跟随时的战斗守卫（6.3）。
+- 预检里的 `in_battle`（6.4：整队开战预检的 4025 现在仍恒回 4027；`TeamConfiguration` 里已有 `BattleLockReader` bean，届时直接用），以及跟随时的战斗守卫
+  （**批次 6.3 已做**：视图的 `in_battle` 与 scene 组队跟随的战斗守卫都已落地，见 §6.7、§6.10 第 5 条与 D10）。
 
 ---
 
@@ -1590,7 +1591,22 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
 - 建议把 `PlayerProfiles` 迁到 xm-player-store（它拥有 player 表），由 friend 和 team 共用。
 - 一次视图构建只读一份，覆盖 `rosterIds`：最多 5 名成员 + 10 名申请人 + 10 名被邀请人 + 邀请人。
 
-**in_battle**：Java 在 6.3 之前没有战斗锁，**恒为 false**（D10）。
+**in_battle**：Java 在 6.3 之前没有战斗锁，**恒为 false**（D10）。**批次 6.3 已接上**（2026-10-06，D10 收口）：
+
+- **口径**：回合制战斗锁 `xm:battle:{<pid>}:lock`（`RedisKeys.battleLock`，scene 写；键与脚本见 scene-battle-spec §7.2）**存在即为 true**，只看锁在不在，不看锁里的阶段也不看 battle_id。
+  锁从备战起就在，到结算销账（或锁过期 / reaper 判废）才没——备战中、战斗中、已结算待销账（含结算后续锁的 180 s）都显示为在战斗；只有待结算记录或已销账墓碑、没有锁时为 false。
+- **读法**：`TeamDisplay` 多一个依赖 `battleLocks`（生产 = `BattleLockReader::existsAll`，`TeamConfiguration` 里的 bean）。一次视图构建只读一次，范围同展示资料——全体 `rosterIds`
+  （成员、申请人、被邀请人、邀请人，最多 26 人；基线 `loadDisplay` 的 InBattle MGET 也是对全体 id 做的，每个 `TeamMemberView` 都带 `in_battle`）；空名单不读。
+  **批量读是每人一条 `EXISTS` 并发发出，不是 MGET**：锁是 Hash；对 Hash 键 `MGET` 回 nil、**不报错**（报 `WRONGTYPE` 的是 `GET`），照搬基线 `presence.go:92-97`「MGET 的值非空即在战斗」的写法
+  会让 `in_battle` 静默地恒为 false——比报错更隐蔽。`TeamDisplayRedisIntegrationTest` 有一条真 Redis 用例把这个前提钉住。
+- **次序与预算**：在线读与战斗锁读都在阻塞的资料读之前发出，最后在调用线程（工作线程或推送线程）上依次限时等；没有单独的超时键，与在线读共用调用方传入的 `Deadline`
+  （请求预算 3500 ms，推送批预算 3 s）。预算被前一路用尽时，已完成的那一路仍取得到结果。
+- **失败语义**：咨询性字段。任何一条 `EXISTS` 失败，`existsAll` 整体异常完成，**本次视图全体按 false**（不是只把失败的那个人按 false；同基线「MGET 失败 → 全 false」，§4.3）。
+  同步抛出、返回 null、异常完成、被取消、超时、被中断、以 null 完成、结果里缺这个人或值为 null，全部只记一行 WARN（`[team] 读战斗锁失败，N 人的 in_battle 按 false 显示`，带原始原因）、视图照常，`load()` 不抛出。
+  被中断时立刻返回（不把剩余预算等完）并保留中断标志。没有新增指标或配置键。
+- **读路由**：`BattleLockReader.exists` 走 Redisson 的普通读，主从部署下可能读到从库的旧值；`in_battle` 只用于显示，可接受（权威在 scene；部署约束见 scene-battle-spec §10.5）。
+- **测试**：`TeamDisplayTest`、`TeamDisplayRedisIntegrationTest`（真 Redis、用 `BattleRedis` 的真脚本写锁放锁：备战 → 确认 → 落库加续锁 → 销账全程的 `in_battle`）、`TeamConfigurationTest`、`TeamViewsTest`；
+  运行证据见 scene-battle-spec 末尾的实现记录。robot 的端到端验证放在 `battle-settle` 第 12 步（不在 `team` 场景：它没有 battle 管理口客户端）；写本段时还没有切片证据，切片上的结论见 scene-battle-spec 末尾的「最终验证」。
 
 **home zone**
 - 取 `player.zone_id`，即建角时 login 所在的 zone（`xm-player-store/src/main/resources/db/xm-player-schema.sql:14`；`xm-login/.../CreatePlayerHandler.java:262`）。
@@ -1647,9 +1663,15 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
    - 否则 `world.switchScene(p, leader.scene())`：精确到场景实例，与基线一致。
    - 用内存里的队长场景，不读 `xm:location`，因为同节点时内存就是权威。
 5. **基线守卫在 Java 的对应**：
-   - 战斗中 / 战斗锁：6.3 补，届时加上「冻结解除后补一次」。
+   - 战斗中 / 战斗锁：6.3 补，届时加上「冻结解除后补一次」。**批次 6.3 已做**（scene-battle-spec §7.13 世界内部第 3 条）：读成员关系的同时并行发一条战斗锁的 `EXISTS`；
+     回调里自己有内存里的战斗冻结 → 不跟随（`team_follow{in_battle}`），锁存在或读锁失败 → 不跟随（`battle_lock`，fail-closed，同基线 `player_team.cpp:378-402`）；
+     `TeamFollow.onBattleFreezeCleared` 在解冻且删锁完成之后、以及销账脚本确实放掉锁之后各补一次跟随（只跟随、不扇出）。删锁 / 销账的结局回来时发起它的实例已经换掉
+     （同 epoch 重进），或者那次删除本来就不跟着一次解冻（备战失败 / 过期后的尽力删锁、离线取消）的，只要锁确实是这一次删掉 / 放掉的，就补给**现任实例**（它没有战斗冻结时）——
+     它进场那次检查读到的还是这把锁、已经放弃，删完之后没有别的触发点（scene-battle-spec §7.4「删锁结局回来之后补给谁」、§7.12）。与基线写法的一处出入：基线在第二跳
+     （读队长位置与自己的锁）之前、回调之后各判一次内存冻结；Java 把锁读并进了成员关系那一跳，只在回调后判一次。
    - 归属交接在途：5.2 前不存在。
-   - 换图在途：同步换图，不存在。
+   - 换图在途：同步换图，不存在。（批次 5.2 起这两条对应 Java 的跨节点换图在途：`SceneWorld.switchInFlight` 为真不跟随，计 `team_follow{switching}`，见 scene-handoff-spec §5.5；
+     6.3 起判定经这个入口而不是直接看 `switchPhase`，过了期限的 RESOLVING 槽在这次判定里就地作废、不再挡。）
    - 会话不活：断线即移出，不存在。
 6. **不做的部分**：
    - 不发、不收 `PlayerTeamRefreshEvent`（事件号 48 在 Java 不用）。
@@ -1836,7 +1858,7 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 | D7 | 不发 `PlayerTeamRefreshEvent`，scene 不缓存 TeamId，进场时现读；不移植 `team_scene_refresh_total` | Java scene 里 TeamId 的消费方只有跟随；少一个 Kafka 依赖 | 否 | 否 |
 | D8 | 不做队友 AOI 优先级（kTeammate） | Java 的 `ViewIndex` 表满时不挤人，优先级没有可见效果；以后引入挤出时再加 | 否（眼下） | 否 |
 | D9 | 跟随用内存里同节点队长的场景，同步 `switchScene`；不读 location，不经 scene-manager | 基线也只做同节点跟随；Java 同节点换图是同步的，没有在途槽，也没有 60 s 去重 | 否（行为等价） | 否 |
-| D10 | `in_battle` 恒为 false；跟随与开战预检没有战斗锁（6.3 前） | Java 还没有战斗 | 轻微 | 否 |
+| D10 | `in_battle` 恒为 false；跟随与开战预检没有战斗锁（6.3 前）。**已收口（批次 6.3，2026-10-06）**：`in_battle` 由 `BattleLockReader.existsAll` 批量 EXISTS 算出（全体 rosterIds，任何失败整批按 false，§6.7）；scene 组队跟随读锁并有内存冻结守卫（§6.10 第 5 条）。只剩整队开战预检的 4025 随 6.4（现在恒回 4027，D11） | Java 还没有战斗（6.3 起有了） | 收口后与基线相同 | 否 |
 | D11 | 4.3 的 StartTeamMatch 走规则路径回 4027（端口恒为 0） | 基线未接线时回 4030（fault）；4027 文案真实、不触发告警，6.4 换真端口零改动 | 是：4027 而非真实开战 | 否，按批次登记 |
 | D12 | 过载（队列满 / 排队超预算 / 处理器异常）回 in-band 4030，不带视图和参数 | 基线没有对应；用 team 自己的故障码，客户端按「读失败」重拉 | 是（只在过载时） | 否 |
 | D13 | 上行 213 / 215 / 203 时 gate 不回包 | 基线服务端回 Empty，路由服回一个空应答体；客户端不发这三个号 | 否 | 否 |

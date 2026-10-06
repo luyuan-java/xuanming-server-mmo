@@ -148,8 +148,8 @@ public final class SceneMetrics {
         /** 行为互斥表 / 战斗状态 / 技能许可表拒绝（表里的提示码）。 */
         STATE_REJECTED,
         /**
-         * 施法者在回合制战斗中（7004，scene-battle-spec §7.13）。规格 §9 写的是补一个取值 {@code in_battle}，实现按两个不同的回码拆成
-         * {@code caster_in_battle} / {@code target_in_battle} 两个取值（更细，没有 {@code in_battle} 这个取值；审计 OPS-14）。
+         * 施法者在回合制战斗中（7004，scene-battle-spec §7.13）。按两个不同的回码拆成 {@code caster_in_battle} / {@code target_in_battle}
+         * 两个取值（同规格 §9；没有 {@code in_battle} 这个取值，审计 OPS-14）。
          */
         CASTER_IN_BATTLE,
         /** 目标在回合制战斗中（7002；与「不是玩家」的 7001 分开）。见 {@link #CASTER_IN_BATTLE} 的口径说明。 */
@@ -203,7 +203,7 @@ public final class SceneMetrics {
         STALE,
         /** 读失败（Redis 故障 / 超时）、索引 / 投影损坏，或检查本身出错：不跟随。 */
         READ_ERROR,
-        /** 自己有在途的回合制战斗（内存冻结，读之前与回调后各判一次，scene-battle-spec §7.13）：不跟随。 */
+        /** 自己有在途的回合制战斗（内存冻结；只在读回来后的回调里判一次、不做读前预判，scene-battle-spec §7.13）：不跟随。 */
         IN_BATTLE,
         /** 自己的战斗锁存在（或读锁失败，按在途）：不跟随（基线 team.cpp:378-402）。 */
         BATTLE_LOCK

@@ -8,7 +8,7 @@ import java.util.Map;
  * scene-battle-spec §7.4）。可变，<b>只在场景逻辑线程上改</b>；不持久化，随实例生灭（跨断线靠 Redis 锁重建）。
  *
  * <p>异步回调按「实例 + 冻结对象」双重核对：回调回来时 {@code player.battle().freeze() != 这个对象} 就丢弃，所以同一局在新实例上沿用时
- * 复制成一个新对象（{@link #carriedCopy()}），不搬同一个。
+ * 复制成一个新对象（{@link #carriedCopy}），不搬同一个。
  */
 public final class BattleFreeze {
 
@@ -24,8 +24,9 @@ public final class BattleFreeze {
     private long deadlineMs;
     private long prepareDeadlineMs;
     /**
-     * 「这一局的 144 不必再推」：在本实例上 PrepareBattle 建的为真（顶替基线 BattlePrepareSessionComp，D7：确认到达时不必推）；按锁重建 / 沿用旧实例的为假，
-     * 第一次推 144（确认升级、迟到确认、重建复核）之后置真——同一个冻结对象上 144 恰好一次（审计 FRZ-4 / RDS-8）。
+     * 「这一局的 144 不必再推」：在本实例上 PrepareBattle 建的为真（顶替基线 BattlePrepareSessionComp，D7：确认到达时不必推）；按锁重建、
+     * 换了会话沿用旧实例的为假，第一次推 144（确认升级、迟到确认、重建复核、沿用时当场推）之后置真——同一个冻结对象上 144 恰好一次（审计 FRZ-4 / RDS-8）。
+     * 同会话的重复进场沿用时照抄旧值（{@link #carriedCopy}）。
      */
     private boolean preparedHere;
     /** 备战写锁在途。 */
@@ -153,11 +154,19 @@ public final class BattleFreeze {
     }
 
     /**
-     * 同 epoch 沿用旧实例时复制给新实例（§7.8 第 0 步）：{@code preparedHere = false}，运行态标记复位（{@code rescuing} / {@code cancelRequested}
-     * / {@code lockPending}），{@code lockExtended} 照抄。
+     * 同 epoch 沿用旧实例时复制给新实例（§7.8 第 0 步）：运行态标记复位（{@code rescuing} / {@code cancelRequested} / {@code lockPending}），
+     * {@code lockExtended} 照抄。{@code preparedHere}（「这一局的 144 不必再推」）看会话：
+     * <ul>
+     *   <li><b>会话没变</b>（同会话的重复进场）→ 照抄旧值：这个会话的客户端知道什么、不知道什么都没变——在这个会话上备战的、已经推过 144 的不必再推，
+     *       之后的确认升级不会多推一条（同基线：按「备战时记下的会话号 ≠ 当前会话号」才推）；旧值为假的照旧还欠着一条——PREPARING 的等确认升级时推，
+     *       FIGHTING 的（按 F 锁重建后复核还在途、还没来得及推）由沿用方当场推；</li>
+     *   <li><b>会话变了</b>（重连 / 顶号）→ 假：新会话的客户端要凭 144 补签（FIGHTING 的沿用时当场推，PREPARING 的等确认升级时推）。</li>
+     * </ul>
+     *
+     * @param sameSession 新实例的会话与旧实例相同
      */
-    BattleFreeze carriedCopy() {
-        BattleFreeze copy = new BattleFreeze(battleId, battleNodeId, phase, deadlineMs, prepareDeadlineMs, false);
+    BattleFreeze carriedCopy(boolean sameSession) {
+        BattleFreeze copy = new BattleFreeze(battleId, battleNodeId, phase, deadlineMs, prepareDeadlineMs, sameSession && preparedHere);
         copy.lockExtended = lockExtended;
         return copy;
     }

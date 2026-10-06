@@ -25,7 +25,7 @@ import org.redisson.api.RedissonClient;
 
 /**
  * dev 管理接口的快照路由补全（battle-node-spec §7.12）：robot 建房时快照里不填路由（{@code routing.gate_instance_id} 为空），由这里按玩家此刻的
- * 在线状态补全，补不全就不建房（422）。6.3 之前没有 scene 出快照，这是 dev 建房能端到端跑通的前提。
+ * 在线状态补全，补不全就不建房（422）。dev 建房的快照是调用方给的、不经 scene 出（6.3 起由 scene 出快照的是 dev gather），这是它能端到端跑通的前提。
  *
  * <ul>
  *   <li><b>gate 部分</b>（{@code session_id / gate_node_id / gate_instance_id / zone_id}）：在线目录 {@code xm:presence:{pid}}（严格读：条目损坏是故障，

@@ -242,7 +242,7 @@ public final class BattleMetrics {
         REROUTED,
         /** 确认：scene 回 NOT_HERE（实例不符 / 已换实例）。 */
         NOT_HERE,
-        /** 不发（例：目录里的实例与快照路由不符 stale_instance；dev 房间不结算）。 */
+        /** 不发。确认：快照路由的实例已不在，回落到定位器也没找到持有者（NoHolder）或定位出错；结算：dev 房间不结算。 */
         SKIPPED,
         ERROR
     }

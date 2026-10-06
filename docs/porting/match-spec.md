@@ -70,7 +70,7 @@
 | 批次 | 6.4 依赖它的 | 6.4 提供给它的 |
 |---|---|---|
 | **6.2 battle**（实现中） | `BattleNodeService` 与 `CreateBattleResult.admission`（`xm-api/src/main/java/com/game/api/BattleNodeService.java`、`xm-api/src/main/proto/xm/api/battle_control.proto:18-22`）；目录 `BattleNodeInfo{accepting, instance_id, rpc_host, rpc_port}`（`node_directory.proto:55-72`，键 `xm:nodes:battle:0`）；出站端口 `BattleResultSink`（`xm-battle/src/main/java/com/game/battle/port/BattleResultSink.java`） | `KafkaBattleResultSink`（§5.4）；`MatchBudgets.MAX_MATCHED_TTL_SECONDS = 96`，供 6.2 的确认补发窗口单测直接引用（`bn-spec` §10.4） |
-| **6.3 scene**（规格稿 `docs/porting/scene-battle-spec.md` 并行撰写中） | `SceneBattleService.prepareBattle / cancelBattlePrepare`（`SceneBattleReply.status` 的映射见 §9.7.2）；scene 写战斗锁 `RedisKeys.battleLock(pid)`（6.3 定为一个 Hash），match 只经 `BattleLockReader` 做 EXISTS；快照填好 `BattleRouting`；PREPARING 按 `prepare_deadline_ms` 由 reaper 解冻；确认之后拒绝取消（§3.5 的 R1–R6、§9.7.2） | `PrepareBattleRequest` 的 `deadline_ms` / `prepare_deadline_ms` 口径（§3.2） |
+| **6.3 scene**（规格 `docs/porting/scene-battle-spec.md`；2026-10-06 已落地，接口与键以那份的正文和实现记录为准） | `SceneBattleService.prepareBattle / cancelBattlePrepare`（`SceneBattleReply.status` 的映射见 §9.7.2）；scene 写战斗锁 `RedisKeys.battleLock(pid)`（6.3 定为一个 Hash），match 只经 `BattleLockReader` 做 EXISTS（咨询性读，权威在 scene，§9.7.2 第 4 条）；快照填好 `BattleRouting`；PREPARING 按 `prepare_deadline_ms` 由 reaper 解冻；确认之后拒绝取消（§3.5 的 R1–R6、§9.7.2） | `PrepareBattleRequest` 的 `deadline_ms` / `prepare_deadline_ms` 口径（§3.2） |
 | **6.5 观战** | — | 落点记录 `xm:{match}:battle:<id>`（同时充当观战记录）；`GatherHooks.beforePrepare / onStarted`；163 / 164 的路由已接好，6.5 只替换处理器；`MatchBudgets.GATHER_CREATE_STAGE_WORST_MS`（22.2 s，WatchBattle 的「记录已写、房间可能还在建」窗口判定要用，`queue.go:340-342`）；`TicketStore` 的只读口（16014「匹配中无法观战」要读票据）。基线每轮凑单顺手清观战索引（`matcher.go:201-204`），Java 不挂在 matcher 上，由 6.5 自带定时任务 |
 | **5.2 交接**（实现中，设计以 `ho-spec` §5 为准） | PrepareBattle 拒绝 `switchState ≠ NONE` 的玩家；交出流程拒绝战斗中的玩家（`ho-spec:106`）。match 不读 5.2 的任何新结构 | — |
 | **5.1 频道** | scene 目录条目（`SceneNodeInfo` 的 rpc 地址）与位置记录的稳定字段 | — |
@@ -818,7 +818,7 @@ public interface MatchTeamService {
   4. 回 STARTING 视图（加锁那次提交构建的）；
   5. 拿到 `runTeamGather` 的 future 后挂回调，在有界执行器 `team-match-end` 上记 `xm_team_matches_total{success | gather_failed | gather_unknown}` 并执行 `finishMatch(ok, tip = nil)`。
 - EndMatch 的 110 s 单调截止与退避、`pushMatchView`、`releaseLockInBackground`、`settleUnconfirmedLock` 按基线移植（`tsvc.go:501-600`、`tstore.go:452-561`）。
-- 视图里的 `in_battle`（`team-spec` D10）由 6.3 改为 `BattleLockReader` 批量 EXISTS（scene-battle-spec 的改动表已列），不在本批。
+- 视图里的 `in_battle`（`team-spec` D10）由 6.3 改为 `BattleLockReader` 批量 EXISTS（scene-battle-spec 的改动表已列），不在本批。（6.3 已做，`team-spec` D10 已收口；xm-team 的 `TeamConfiguration` 里已有 `BattleLockReader` bean，整队开战预检若要在 xm-team 一侧读锁可以直接用。）
 
 ---
 
@@ -915,7 +915,7 @@ public interface MatchTeamService {
 | 新进程 | **xm-match**：Spring Boot 非 Web 应用 + Dubbo Triple 提供方 + 管理 Tomcat（同 xm-team / xm-trade，`arch` §11） |
 | 端口 | Dubbo **20888**（`XM_MATCH_RPC_PORT`；20881–20887 已占用，`tools/local/start-slice.sh:84-90`）；管理 **18113**（`SERVER_PORT`；18101–18112 已占用，18114 是 xm-scene-2，`start-slice.sh:15`） |
 | Dubbo group | `DubboGroups.MATCH = "match"`：`ClientMessageService` 的 group 等于 proto 一级目录（`xm-api/src/main/java/com/game/api/DubboGroups.java:3-6`）；`MatchTeamService`、`MatchInternalService` 同 group（先例 `GUILD` 下的 `GuildInternalService`） |
-| 发号 | `NodeTypes.MATCH = "match"`，作用域 0，作雪花 worker：battle_id 与 challenge_id 同源（基线还包括 team_id，Java 的 team_id 归 xm-team 的 `NodeTypes.TEAM`；M23）。ticket id 用 `UUID.randomUUID().toString()`，格式同基线 |
+| 发号 | `NodeTypes.MATCH = "match"`，作用域 0，作雪花 worker：battle_id 与 challenge_id 同源（基线还包括 team_id，Java 的 team_id 归 xm-team 的 `NodeTypes.TEAM`；M23）。**battle_id 必须用时间在高位的雪花号（随时间递增）**：scene 的待结算记录每局一个字段、进场恢复按 battle_id 无符号升序应用并以此当作时间顺序（气血是终值，顺序就是语义；scene-battle-spec D13、§10.4），基线同样是 match 节点的 snowflake（`gather.go:83`、`:202-209`）。换成随机号或把时间放低位都会破坏这条局序。ticket id 用 `UUID.randomUUID().toString()`，格式同基线 |
 | 依赖 | xm-api、xm-discovery、xm-common、xm-proto、xm-table、xm-pbmysql、xm-audit（TopicSpec）、kafka-clients、Redisson、Dubbo。**没有新的第三方依赖**，`tech-stack.md` 不改 |
 | 共享常量 | `com.game.api.match.MatchBudgets`（xm-api，纯函数）：各跳超时、`GATHER_CREATE_STAGE_WORST_MS = 22 200`、`matchedTicketTtlSeconds(n)`、`compensationTtlSeconds(n)`、`teamMatchLockSeconds(n)`、`MAX_MATCHED_TTL_SECONDS = 96`、`BATTLE_MAX_DURATION_SECONDS = 300`、`PLACEMENT_TTL_SECONDS = 360`。xm-match、xm-team、xm-battle（以及 6.5）的单测都引用它 |
 
@@ -1060,6 +1060,12 @@ record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 - **Redis 单条命令的最坏耗时**：Java 缺省配置是 4.2 s（`arch:607-609`），基线按 3 s 算。落点记录写入在外层 6.1 s 截止之内，公式里的 `spectateRecordWriteWorst = 6.1 s` 不变。
   其余 Redis 小操作（读位置、推进 ready）仍算在公式的 10 s 余量里，同 `queue.go:351-354` 的口径：超支的后果只是 matched 票先于 gather 过期，玩家可以重排，不会串局。
 - **启动断言**：`RedisProperties.worstCaseCommandMillis() ≤ 6100`，各跳 Dubbo 超时 ≤ 3 / 5 / 3 / 3 s，否则拒绝启动。这样 42 / 48 / 66 / 96 与基线逐字相同，单测钉住这组数。
+- **备战 / 取消调用的超时保持 3 s（裁决，2026-10-06，与 6.3 对齐时定）**：scene 侧一次备战要等一条写锁脚本的结局，Java 缺省配置下最坏 4.2 s，大于这里的 3 s——
+  scene-battle-spec 的评审稿曾据此要求「match 的备战调用同样 ≥ 5 s」，审计也按那句话报过本稿「只对齐了一半」。裁决是**本稿不改**：数值表、matched TTL 公式与 §10.3 的跨进程不等式整表不动；
+  ≥ 5 s 的要求只针对 battle → scene 的确认 / 结算与 dev gather（scene-battle-spec §7.3、§10.4 已改写）。match 这边超时后的处理就是第 3 步与 fail 一行已有的：
+  **超时按结局不明**，该玩家记进「结局不明」集合，补偿时对他补发 Cancel（F-g1 / M14）。scene 保证这样是安全的：写锁在途时收到的取消被延后到写锁完成之后再删锁
+  （删的是「只删备战锁」——`b == X` 且还没确认才删）；超时之后 scene 才给出的那份成功应答没人收，冻结与锁由这条取消、scene 的 reaper（备战期限）与锁 TTL 收尾。
+  `SceneBattleService` 接口注释里「调用方超时必须大于它」那一句随 6.4 改。
 
 ### 9.7 出站
 
@@ -1074,8 +1080,9 @@ record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 #### 9.7.2 scene：对 6.3 `SceneBattleService` 的最低要求
 
 推荐形状（`bn-spec` Q13）：scene 在资产 RPC 端口（`xm.scene.asset-rpc-port`，21100）上另导出 `SceneBattleService`，group `scene-battle`，`register = false`，按目录直连，`retries = 0`。
-6.3 规格稿（`docs/porting/scene-battle-spec.md`，与本稿并行撰写）§7.3–§7.6 已按这个形状定义接口：`SceneBattleCall{target_instance_id, player_id, body}` →
-`SceneBattleReply{status, body}`，`status ∈ {HANDLED, NOT_HERE, DEFERRED, OVERLOADED}`（首值 UNSPECIFIED）。以那份为准；下面是 match 依赖的语义与 match 侧的映射。
+6.3 规格（`docs/porting/scene-battle-spec.md`，2026-10-06 已落地）§7.3–§7.6 按这个形状定义并实现了接口：`SceneBattleCall{target_instance_id, player_id, body}` →
+`SceneBattleReply{status, body}`，`status ∈ {HANDLED, NOT_HERE, DEFERRED, OVERLOADED}`（首值 UNSPECIFIED）。**接口、判定次序、键与脚本一律以那份的 §7.3（接口与提供方）、§7.4（状态模型）、
+§7.5（备战）、§7.6（取消）为准**；下面只列 match 依赖的最低语义与 match 侧的映射，两处不一致时以 scene-battle-spec 为准。调用方用 xm-api 现成的 `com.game.api.rpc.NodeRpcClients<SceneBattleService>`（6.3 已建，battle 与 dev gather 在用）。
 
 1. 调用带目标 scene 实例（调用方从目录读到的 `instance_id`）。match 对 prepare 的映射：
    - `HANDLED` 且 body 的 tip = 0、快照非空 → 成功；`HANDLED` 且 tip ≠ 0（含玩家不在本节点的 1004、写锁出错的 1003）→ `prepare_failed`，该玩家是肇事者，**不发 Cancel**（6.3 保证 tip ≠ 0 零冻结痕迹）；
@@ -1085,10 +1092,19 @@ record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 3. prepare 在 `switchState ≠ NONE` 时拒绝（`ho-spec:106`），已有战斗 / 0 血 / 冻结时回 1006（R1）。
 4. 战斗锁的键与值形状归 6.3：`RedisKeys.battleLock(pid)`，一个 Hash（锁与 ctx 合一，取代 `bn-spec` §7.13 的两键预留，scene-battle-spec D2）；TTL = prepare 剩余 + 60 s，所有删除和续期都按 battle_id 条件执行。
    match 不碰这个键的值，只经 6.3 提供的 `BattleLockReader`（xm-discovery `com.game.discovery.battle`）做 EXISTS——JoinQueue 第 3–4 步、切磋、凑单校验、`MemberPrecheck` 都用它，语义同基线的 `EXISTS battle:lock`。
+   - **这是咨询性的读，权威在 scene**：`BattleLockReader.exists / existsAll` 走 Redisson 的普通读路由（主从部署下可能读到从库的旧值），只用来早拒；真正保证「一个人不会同时在两局里」的是 scene 的备战写锁——
+     锁独占（被别的局占着就回 1006）、写成功才回 0（scene-battle-spec D3）。所以 match 的预检读到「没有锁」而实际有锁时，后果只是这名玩家在 gather 的 Prepare 一步被判 `prepare_failed`，不会串局。
+     读失败怎么处理仍按本稿各入口自己的口径（JoinQueue 回内部错误、切磋按「忙」、`MemberPrecheck` 回 `LOCK_READ_FAILED`）。上主从 / 集群前的部署约束见 scene-battle-spec §10.5。
+   - 锁存在的时段比「在打」长：从备战起，到结算在 scene 落盘并销账（或锁过期 / 判废）为止；结算应用后锁至少再保持 180 s 或到销账。这期间 JoinQueue 回 16000 是预期行为（同基线「锁留到落盘」）。
+   - `existsAll`：按入参顺序去重，任何一个读失败整体异常完成；`battleId(pid)` 读锁指向的 battle_id（经脚本、读主库），6.5 的观战等需要时用。
 5. cancel 只在 battle_id 一致且状态是 PREPARING 时生效；FIGHTING 拒绝（R5）；玩家不在本节点时按锁值条件清锁（R4，Java 的常态）。cancel 的 `NOT_HERE` / `OVERLOADED` / 传输失败都只记日志，靠 R6 与锁 TTL 收尾。
+   取消的应答等删锁脚本的结局才回（最坏约 4.2 s），3 s 超时只记日志即可——取消的效果在 scene 侧已生效或由 reaper / 锁 TTL 兜底；写锁在途时到达的取消被延后到写锁完成再删。
 6. 处理在 scene 逻辑线程上完成，结果经回复执行器回给 Dubbo（同资产通道的 `scene-asset-reply`）。
+7. **调用超时保持 3 s**（§9.6 末条的裁决）：prepare 超时 = 结局不明，按第 1 条最后一支处理并补发 Cancel。
+8. **备战请求的期限有上界**：`deadline_ms` / `prepare_deadline_ms` 比 scene 的当前时间晚超过 7 天会被拒（1005，scene-battle-spec D36）；本稿的期限是 TIME + 300 s / + matched TTL，远在界内。
+9. **battle_id 必须随时间递增**（时间在高位的雪花号，§9.1 发号一行）：scene 按 battle_id 升序当作局序。
 
-6.3 不交付时，6.4 只能用替身做组件测试，端到端无法验收（§14 Q21）。
+6.3 不交付时，6.4 只能用替身做组件测试，端到端无法验收（§14 Q21）。（6.3 已于 2026-10-06 落地；在 6.4 之前 6.3 自己用 xm-battle 的 dev gather 管理口验收，scene-battle-spec §7.18。）
 
 ### 9.8 启动、停机、租约丢失
 
@@ -1178,6 +1194,12 @@ Java 沿用 `LeaseGatedSnowflake` 的约定（`xm-common/src/main/java/com/game/
 | `runTeamGather` 调用方超时 ≥ gather + 补偿最坏 | 101 ≥ 91 | §7.5 |
 | 落点记录 TTL ≥ 战斗最长时限 | 360 ≥ 300 | `spectate.go:53-59` |
 | 票据寿命 = 房间期限 = 确认事件的 `deadline_ms` = scene 冻结的正式期限 | 同值 | `bn-spec` §10.4 |
+
+与 6.3 落地后的两点对照（表本身不改）：
+
+- 第一行的 180 s 是 battle 确认补发**停表**的时刻，最后一次实际补发在 170 s；相对锁最晚过期时刻（96 + 60 = 156 s）的实际余量是 14 s，不是 24 s（`bn-spec` §4.8、§10.4；xm-battle 的
+  `ConfirmWindowConstraintTest` 两条都钉，其中 match 的 96 s 现在是字面值，6.4 落地时换成 `MatchBudgets` 的常量）。改 matched TTL 公式或放大组上限时按 14 s 核。
+- 「调用 scene 的超时 > scene 侧一条 Redis 脚本最坏 4.2 s」**不在**本表里，对 match 也不成立——备战 / 取消保持 3 s，超时按结局不明（§9.6 末条的裁决）。
 
 ### 10.4 基线常量全表（对照用）
 
@@ -1547,3 +1569,11 @@ Java 沿用 `LeaseGatedSnowflake` 的约定（`xm-common/src/main/java/com/game/
 - **与并行的 6.3 规格稿对齐**（`docs/porting/scene-battle-spec.md`，评审时已存在）：战斗锁改为 `RedisKeys.battleLock(pid)`（一个 Hash，锁与 ctx 合一，取代 `bn-spec` §7.13 的两键预留），
   match 只经 `BattleLockReader` 做 EXISTS（§0.3、§3.5 R2、§7.4、§7.6、§9.2、§9.4、§9.7.2）；§9.7.2 补 `SceneBattleReply.status` 的映射：`NOT_HERE` / `OVERLOADED` / tip ≠ 0 判肇事者、不发 Cancel，
   `UNSPECIFIED` / 异常 / 超时按结局不明发 Cancel；原稿「在途超限时 future 异常完成」与 6.3 的类型化 `OVERLOADED` 不符，已改。`NodeRpcClients<S>` 由先合入的一批做。
+
+**与落地后的 6.3 对齐（2026-10-06，批次 6.3 的文档交付时改）**
+- §0.3、§9.7.2：6.3 已落地，`SceneBattleService` 的最低要求改为明确指向 scene-battle-spec §7.3–§7.6；`NodeRpcClients<S>` 已由 6.3 建在 xm-api。
+- §9.7.2 第 4 条：写明 `BattleLockReader` 是咨询性读、权威在 scene 的备战写锁；锁存在的时段覆盖到结算销账。
+- §9.6 末条、§9.7.2 第 7 条、§10.3：**备战 / 取消调用超时保持 3 s 的裁决**。scene-battle-spec 评审稿里「6.4 的 match 备战调用同样 ≥ 5 s」作废，那份的 §7.3 / §10.4 / §13.9 已改写；本稿的数值表与不等式整表不动。
+- §9.1 发号、§9.7.2 第 9 条：battle_id 用时间在高位的雪花号（scene 的 D13 局序依赖它）。
+- §9.7.2 第 8 条：scene 对备战期限加了 7 天的上界（scene-battle-spec D36），对本稿的期限没有影响。
+- §10.3：补确认补发实际余量 14 s 的说明。

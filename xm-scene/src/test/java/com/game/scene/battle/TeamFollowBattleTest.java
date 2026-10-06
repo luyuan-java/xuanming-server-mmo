@@ -11,10 +11,13 @@ import com.game.player.store.state.PlayerState;
 import com.game.proto.BattleSettlementData;
 import com.game.scene.battle.BattleFreeze.Phase;
 import com.game.scene.team.TeamFollowService;
+import com.game.scene.testing.FakeBattleLocks.Call;
 import com.game.scene.testing.FakeBattleLocks.Op;
+import com.game.scene.testing.FakeSwitchTargets;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.scene.world.Scene;
 import com.game.scene.world.ScenePlayer;
+import com.game.scene.world.SwitchPhase;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -34,7 +37,9 @@ import org.junit.jupiter.params.provider.MethodSource;
  *   <li>战斗在途（内存冻结）的队员不被拉走，计 {@code in_battle}；没有冻结但战斗锁还在（或读锁失败）同样不跟，计 {@code battle_lock}；</li>
  *   <li>解冻后的补跟随：要删锁的解冻（取消备战、reaper 判废）等<b>删锁完成</b>才发起检查；保留锁的解冻（备战到期、结算应用后）当场发起、
  *       读到锁而放弃；销账脚本真的放掉了锁（位 2）才补上，没放掉不补（返回 0，或只删到记录的返回 1）；</li>
- *   <li>补跟随只跟随、不扇出；读回来时实例已换按过期丢弃。</li>
+ *   <li>补跟随只跟随、不扇出；读回来时实例已换按过期丢弃；</li>
+ *   <li>第二轮修正：R2-f 销账放了锁而发起它的实例已换 → 给现任实例补（评审 R2-REV-1：解冻删锁删掉了锁而实例已换，同样补给现任实例）；
+ *       R2-d 换图在途经 {@code SceneWorld.switchInFlight} 判，过期的 RESOLVING 槽不再挡跟随。</li>
  * </ul>
  * 成员关系的读是假的（测试里的一张表，立即完成）；战斗锁的读（生产 = {@code BattleLockReader.exists}）直接看假 Redis <b>发起那一刻</b>有没有锁——
  * 两个读的结果只投递进手动逻辑队列，{@code drain()} 才处理。
@@ -397,6 +402,124 @@ class TeamFollowBattleTest {
         assertThat(follow("stale")).isEqualTo(1);
         assertThat(fresh.scene()).isSameAs(f.scene1);
         assertThat(follow("followed")).isZero();
+    }
+
+    // ================================================================== 第二轮修正：R2-f 放锁时实例已换；R2-d 换图在途的判定
+
+    /**
+     * R2-f：结算已应用、存盘落库后的那次销账在途时队员重连（同 epoch 重进）。新实例进场触发的跟随检查读到锁还在而放弃；
+     * 旧实例的销账随后放掉了锁（位 2），它的回调认得的是旧实例——这次「放锁后补跟随」要落到<b>现任实例</b>上，否则新实例自己的销账只会回 0，
+     * 队员要等下一次跟随事件才归队。
+     */
+    @Test
+    void 销账在途时队员重连_旧实例的销账放了锁_给新实例补上跟随() {
+        memberInBattleWithLeaderElsewhere(Phase.FIGHTING);
+        BattleSettlementData settlement = BattleFixture.settlement(MEMBER, X, 100).build();
+        f.store(settlement);
+        CompletableFuture<SceneBattleReply> reply = f.deliver(settlement);
+        f.drain();
+        assertThat(BattleFixture.done(reply).getSettlement()).isEqualTo(SettlementDisposition.SETTLEMENT_APPLIED);
+        f.locks.hold(Op.ACK);
+        f.repo.takeProgress().complete(ProgressResult.SAVED);
+        Call staleAck = f.locks.take(Op.ACK);
+        checks.clear();
+
+        ScenePlayer fresh = f.reenter(MEMBER_SESSION + 100, MEMBER, 1, f.scene1);
+        f.drain();
+
+        assertThat(fresh.inBattle()).isFalse();
+        assertThat(checks).as("新实例进场查了一次").containsExactly(MEMBER);
+        assertThat(fresh.scene()).as("那时锁还在：放弃").isSameAs(f.scene1);
+        assertThat(follow("followed")).isZero();
+        double lockedBefore = follow("battle_lock");
+        checks.clear();
+
+        staleAck.complete();
+        f.drain();
+
+        assertThat(staleAck.lastReply()).as("旧实例的销账删了记录、放了锁").isEqualTo(3L);
+        assertThat(f.locks.lock(MEMBER)).isNull();
+        assertThat(checks).as("给现任实例补一次（被拉过去后进场钩子再查一次，已同场景）").containsExactly(MEMBER, MEMBER);
+        assertThat(fresh.scene()).as("新实例跟到了队长的场景").isSameAs(f.scene2);
+        assertThat(follow("followed")).isEqualTo(1);
+        assertThat(follow("battle_lock")).as("这次读到的是「没有锁」").isEqualTo(lockedBefore);
+        assertThat(follow("stale")).as("补的是现任实例，不是已被移除的旧实例（那样会按过期丢弃）").isZero();
+    }
+
+    /**
+     * 评审 R2-REV-1（与 R2-f 同一种丢失，发生在解冻删锁上）：取消备战的那条删锁在途时队员重连（同 epoch 重进）。新实例进场触发的跟随检查读到锁还在
+     * 而放弃；它的恢复读排在删锁之后，读不到锁、不重建冻结，所以也没有「摘重建冻结时顺带补」的那一次。旧实例的删锁随后把锁删掉了（返回 1），
+     * 它的回调认得的是旧实例——「删完补跟随」要落到<b>现任实例</b>上，否则队员要等下一次跟随事件才归队。
+     */
+    @Test
+    void 取消的删锁在途时队员重连_旧实例的删锁删掉了锁_给新实例补上跟随() {
+        memberInBattleWithLeaderElsewhere(Phase.PREPARING);
+        f.locks.hold(Op.DELETE_PREPARING, Op.ENTER_READ);
+        CompletableFuture<Void> cancelled = f.cancel(MEMBER, X);
+        f.drain();
+        assertThat(checks).as("删锁还没完成：旧实例上不发起检查").isEmpty();
+
+        ScenePlayer fresh = f.reenter(MEMBER_SESSION + 100, MEMBER, 1, f.scene1);
+        f.drain();
+
+        assertThat(fresh.inBattle()).as("已取消的冻结不沿用；恢复读还没执行、没有重建").isFalse();
+        assertThat(checks).as("新实例进场查了一次").containsExactly(MEMBER);
+        assertThat(fresh.scene()).as("那时锁还在：放弃").isSameAs(f.scene1);
+        assertThat(follow("battle_lock")).isEqualTo(1);
+        assertThat(follow("followed")).isZero();
+        checks.clear();
+
+        Call delete = f.locks.take(Op.DELETE_PREPARING).complete();
+        f.drain();
+
+        assertThat(delete.lastReply()).isEqualTo(BattleRedis.PREPARING_DELETE_DONE);
+        assertThat(cancelled).isCompleted();
+        assertThat(f.locks.lock(MEMBER)).isNull();
+        assertThat(checks).as("给现任实例补一次（被拉过去后进场钩子再查一次，已同场景）").containsExactly(MEMBER, MEMBER);
+        assertThat(fresh.scene()).as("新实例跟到了队长的场景").isSameAs(f.scene2);
+        assertThat(follow("followed")).isEqualTo(1);
+        assertThat(follow("battle_lock")).as("这次读到的是「没有锁」").isEqualTo(1);
+        assertThat(follow("stale")).as("补的是现任实例，不是已被移除的旧实例（那样会按过期丢弃）").isZero();
+
+        f.locks.take(Op.ENTER_READ).complete();
+        f.drain();
+        assertThat(fresh.inBattle()).as("恢复读看到的已是「没有锁」：不重建").isFalse();
+        assertThat(fresh.scene()).isSameAs(f.scene2);
+    }
+
+    /**
+     * R2-d：自己有在途换图时不跟随——但「在途」经 {@code SceneWorld.switchInFlight} 判，与备战闸同口径：选目标的结果回调丢了、
+     * RESOLVING 槽过了期限（兜底超时 4 s + 1 s）之后，这个死槽不再挡跟随（就地清掉）；之后迟到的选目标结果按过期丢弃。
+     * 改前直接看 {@code switchPhase}，槽会一直挡到这名队员再发一次 63。
+     */
+    @Test
+    void 自己的选目标槽已过期_跟随不再被挡_槽被清掉_迟到的选目标结果被丢弃() {
+        ScenePlayer member = f.enter(MEMBER_SESSION, MEMBER);
+        FakeSwitchTargets.PendingSelect lost = f.resolveRemote(member);
+        team(LEADER, LEADER, MEMBER);
+        f.advance(4_999);
+
+        enterLeader(f.scene2);
+
+        assertThat(member.scene()).as("差 1 ms 没过期：换图在途，仍不跟").isSameAs(f.scene1);
+        assertThat(member.switchPhase()).as("没过期的槽不动").isEqualTo(SwitchPhase.RESOLVING);
+        assertThat(follow("switching")).isEqualTo(1);
+        assertThat(follow("followed")).isZero();
+
+        f.advance(1);
+        f.reenter(LEADER_SESSION, LEADER, 1, f.scene2);
+        f.drain();
+
+        assertThat(member.switchPhase()).as("过期的槽就地作废").isEqualTo(SwitchPhase.NONE);
+        assertThat(member.scene()).as("不再被死槽挡住：跟到队长的场景").isSameAs(f.scene2);
+        assertThat(follow("switching")).as("这一次没有按在途计").isEqualTo(1);
+        assertThat(follow("followed")).isEqualTo(1);
+
+        lost.chosen(BattleFixture.TARGET_NODE, BattleFixture.REMOTE_SCENE, 2);
+
+        assertThat(member.frozen()).as("迟到的选目标结果按过期丢弃，不起交出").isFalse();
+        assertThat(f.repo.pendingHandOffs()).isZero();
+        assertThat(member.scene()).isSameAs(f.scene2);
     }
 
     // ================================================================== 工具

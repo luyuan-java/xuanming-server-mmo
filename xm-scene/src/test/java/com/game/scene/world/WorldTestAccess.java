@@ -44,6 +44,11 @@ public final class WorldTestAccess {
         return (player.syncDirty() & ScenePlayer.DIRTY_VELOCITY) != 0;
     }
 
+    /** 位置脏位是否已置（帧外推或移动上行改了位置，下一个同步帧的 66 会带 transform）。 */
+    public static boolean transformDirty(ScenePlayer player) {
+        return (player.syncDirty() & ScenePlayer.DIRTY_TRANSFORM) != 0;
+    }
+
     /**
      * 直接调 5.2 的交出发起入口（绕过 63 的处理器；生产里只有 63 的远端分支调它）。用来钉住入口自己的闸：
      * 「{@code begin} 拒绝战斗中的玩家」（scene-handoff-spec :106，scene-battle-spec §7.13 世界内部第 1 条）。

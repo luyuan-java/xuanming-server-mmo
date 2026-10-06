@@ -282,3 +282,23 @@ ALTER TABLE player DROP INDEX idx_player_zone;
 ```
 
 回滚后整区回档 / 维护前快照仍能执行（查询照样对），只是退化成全表扫；`ops_job.cancel_requested` 可留着（旧代码不读不写）。
+
+## M10：`player_state` 载体新字段 `battle_ledger = 9`（2026-10-06，批次 6.3；只登记字段号，无需迁移）
+
+**变更**：`player_state.data`（MEDIUMBLOB = `xm.storage.PlayerState`，M3）里新增一段回合制战斗结算幂等账本
+`BattleLedgerState battle_ledger = 9`（`BattleLedgerState{repeated BattleLedgerEntry applied = 1}`，`BattleLedgerEntry{battle_id = 1, applied_at_ms = 2}`；
+按 battle_id 无符号升序写出，稳态 0～1 条、上限 64）。它与货币 / 背包 / 宝宝 / 任务在同一份记录里、随同一次带 `owner_epoch` 围栏的写落库
+（architecture.md §4.23、§7；规格 docs/porting/scene-battle-spec.md §7.12）。**表结构没有变化**，blob 里多一个 protobuf 字段而已。
+
+`PlayerState` 顶层字段号现状（字段号永不复用，删字段写 `reserved`）：1 facing、2 currency、3 attribute、4 bag、5 mission、6 vitals、7 pets、8 asset_ledger、9 battle_ledger；下一个空闲号是 10。
+
+同批另有两处只增不改、同样不动表的枚举值：`xm.audit.TransactionReason` 追加 `TX_ITEM_AWARD = 20`（战斗掉落入包，数值同 mmorpg）与 `TX_BATTLE_REWARD = 1005`
+（战斗结算的金币，Java 独有）——`transaction_log.reason` 是数值列，xm-data 按数值原样落库。
+
+**新库 / 存量库**：都无需手工操作。存量玩家没有这一段，读到的是「没有待销账的局」（空账本），第一次结算应用之后的存盘才写出。
+
+**核对**：无 DDL 可核对；改了 proto 之后按 AGENTS.md §4 `clean install`。
+
+**回滚**：回退代码即可，不必清数据。旧版本的 scene 不认识字段 9，按未知字段原样带回、不会抹掉（不认识的玩法数据原样带回，PARITY「玩家持久化数据模型」行）。
+回退期间没有人应用结算，Redis 里的待结算记录（`xm:battle:{pid}:settlement`，TTL 7 天）留着，升回新版本后由进场恢复照常应用、按账本去重。
+GM 回档（7.2b）把这一段归在资产组里随 `assets` / FULL 整段回退（data-ops-spec §4.5）。

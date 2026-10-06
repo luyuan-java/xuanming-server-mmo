@@ -10,7 +10,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * {@link SceneBattleEvents} 的 6.2 缺省实现：只打 DEBUG 日志、计 {@code xm_battle_scene_events_total{kind=confirm, result=logged}}。
- * 补发节奏（首发 + 17 次）仍由房间照常驱动，6.3 换上真实传输后行为不变。不阻塞、不抛异常，线程安全。
+ * 补发节奏（首发 + 17 次）由房间驱动，与 6.3 起生产装配的真实传输（{@code DubboSceneBattleEvents}）相同；这个实现留给不接传输的测试装配。
+ * 不阻塞、不抛异常，线程安全。
  */
 public final class LoggingSceneBattleEvents implements SceneBattleEvents {
 

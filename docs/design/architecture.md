@@ -37,8 +37,8 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-net` | 库 | Netty：客户端帧编解码（兼容 C++ `ProtobufCodec`，逐帧分发，§3）、节点链路编解码；按消息号限频（`com.game.net.limit`，读 MessageLimiter 表，gate 与 battle 直连面共用） |
 | `xm-battle-engine` | 库（纯 Java） | 回合制战斗确定性引擎（批次 6.1）：开局、行动校验、出手序、普攻 / 防御 / 逃跑、技能、buff 回合化、道具、掉落、结算、快照，随机数逐位照搬 mt19937_64；战斗配表指纹。不依赖 Spring / Netty / Redis / 日志，单线程对象（由 6.2 的房间串行驱动）；6.3 的 scene 只用 `BattleRules` 与指纹。规格 `docs/porting/battle-engine-spec.md` |
 | `xm-pbmysql` | 库（纯 JDBC） | proto → MySQL 表映射（用户自有 proto2mysql 的 Java 实现）：建表 DDL、只扩不缩的结构同步、按消息 CRUD（§7） |
-| `xm-api` | 库 | Dubbo 服务接口、调用方鉴权过滤器（§4.1）与内部 protobuf 消息（包 `xm.api`，只在 Java 版内部使用） |
-| `xm-discovery` | 库 | Redis（Redisson）上的节点号租约、游戏节点在线目录、玩家在线目录与服务端推送（含同一会话按序的批量推送 `MessageBatch`，§4.3） |
+| `xm-api` | 库 | Dubbo 服务接口、调用方鉴权过滤器（§4.1）与内部 protobuf 消息（包 `xm.api`，只在 Java 版内部使用）；按节点直连的通用 Dubbo 客户端 `com.game.api.rpc.NodeRpcClients<S>`（批次 6.3 的 battle → scene 先用到，§4.23） |
+| `xm-discovery` | 库 | Redis（Redisson）上的节点号租约、游戏节点在线目录、玩家在线目录与服务端推送（含同一会话按序的批量推送 `MessageBatch`，§4.3）；回合制战斗的 Redis 键、全部 Lua 与跨进程常量（`com.game.discovery.battle`：`BattleRedis`、`BattleLockReader`，scene 与 battle 共用，§4.23） |
 | `xm-player-store` | 库 | 账号 / 玩家持久化（MyBatis）与玩家归属围栏（含跨节点换图的原子交出与探测，§7 第 6 步） |
 | `xm-gateway-store` | 库 | 区服目录 / 白名单 / 登录公告的库表与读写（MyBatis）：xm-gateway 建表并读，xm-data 运维接口写 |
 | `xm-audit` | 库 | 资产审计管线的共享件：Java 自有的流水消息格式（包 `xm.audit`）、Kafka topic 规格（带代次后缀）与启动期核对（§4.5） |
@@ -51,8 +51,8 @@ Java 代码不得依赖这套目录，具体做法：
 | `xm-trade` | 进程（Spring Boot + Dubbo） | 聚宝斋只读面：浏览 196 / 详情 197 / 收藏 198 / 货架 200 + dev 播种（Dubbo group `trade`，端口 20887，管理端口 18111；两张表经 xm-pbmysql，§4.20） |
 | `xm-scene-manager` | 进程（Spring Boot + Dubbo） | 场景分配（玩家该进哪个场景节点的哪个**主世界频道**，软预占；断线重连可回原实例）+ 每个 zone 的主世界频道计划（领导者维护，§4.19）+ 在线换图选跨节点目标（`selectSwitchTarget`，只选不铸 epoch，§8.1）+ 镜像 / 副本实例取号（`createInstance`，只发全服 scene_id、放置恒为发起节点，无状态，§4.21） |
 | `xm-gate` | 进程（Spring Boot + Netty） | 客户端接入、会话、按消息号路由、下行推送（含按序批量推送，§4.3）；跨节点换图时按 scene 的改绑指令把会话改绑到目标节点（§4.2）。不承载任何战斗上行（战斗走 battle 直连，§4.22） |
-| `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态）；跨节点换图的源端（选目标、冻结、交出归属）与目标端（交出进场，§8.1）；镜像 / 副本实例（节点自有：63 建镜像、空闲回收与级联、dev / test 管理口建 / 毁副本，§4.21） |
-| `xm-battle` | 进程（Spring Boot + Netty + Dubbo 提供方） | battle 节点（批次 6.2）：回合制战斗房间的生命周期（驱动 `xm-battle-engine`）、客户端直连面（端口 12000）、票据签发与补签、推送出口（直连 / 经 gate 回落）、准入与停机、观战的房间侧；控制面 `BattleNodeService`（Dubbo group `battle-node`，端口 21200，按节点直连），管理端口 18112（含 dev / test 建房接口）；不用 MySQL（§4.22） |
+| `xm-scene` | 进程（Spring Boot + Netty） | 场景与玩家逻辑（单线程拥有场景状态）；跨节点换图的源端（选目标、冻结、交出归属）与目标端（交出进场，§8.1）；镜像 / 副本实例（节点自有：63 建镜像、空闲回收与级联、dev / test 管理口建 / 毁副本，§4.21）；回合制战斗的 scene 侧（批次 6.3：备战冻结与在途闸、结算应用与账本、进场恢复，Dubbo 提供方 `SceneBattleService`，§4.23） |
+| `xm-battle` | 进程（Spring Boot + Netty + Dubbo 提供方） | battle 节点（批次 6.2）：回合制战斗房间的生命周期（驱动 `xm-battle-engine`）、客户端直连面（端口 12000）、票据签发与补签、推送出口（直连 / 经 gate 回落）、准入与停机、观战的房间侧；控制面 `BattleNodeService`（Dubbo group `battle-node`，端口 21200，按节点直连），管理端口 18112（含 dev / test 建房接口）；不用 MySQL（§4.22）。批次 6.3 起是 scene `SceneBattleService` 的 Dubbo 调用方：确认的传输、结算发件箱、活动结果通道（§4.23） |
 | `xm-data` | 进程（Spring Boot Web + Dubbo 调用方） | 审计与运维数据服务：消费审计 topic、幂等落 MySQL；带令牌的运维接口：流水查询、GM 快照 / 差异、物品追溯、批量回收 dry-run（§4.5，批次 7.2a），运维作业框架、GM 回档与整区维护前快照（§4.5.1，批次 7.2b），全服产出封禁（§4.6），区服目录 / 白名单 / 登录公告（§7）。运维作业表经 xm-pbmysql。玩家数据：平时只读（自有只读 Mapper）；回档时以运维身份夺取归属、带 `owner_epoch` 围栏写（复用 xm-player-store 的 `PlayerStore` / `PlayerMapper`，§7 第 7 步）。回档的帮会资产检查是 `GuildInternalService` 的 Dubbo 调用方（编程式引用、只直连，写开关关闭时不起 Dubbo） |
 
 依赖方向单向：进程模块 → `xm-api` / `xm-net` / `xm-player-store` / `xm-gateway-store` / `xm-discovery` / `xm-battle-engine` → `xm-common` / `xm-proto` / `xm-table`。
@@ -184,10 +184,12 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   `id` 回显请求号；每条请求至多回一次，应答类型必须与契约一致，`Empty` 应答的方法不能回。处理器没回、回错类型、抛异常
   （记 ERROR，逻辑线程继续）时由分发补回 `kFeatureUnavailable`(1006)，客户端不会卡在等应答上。没有处理器的方法同样回 1006
   （`Empty` 应答的方法静默忽略）。
-- **冻结策略**（批次 5.2，§8.1）：每个方法注册时声明 `FreezePolicy`（`SceneFeature.Registrar.on` 的五参数形式；四参数形式缺省 REJECT，
+- **冻结策略**（批次 5.2，§8.1）：每个方法注册时声明 `FreezePolicy`（`SceneFeature.Registrar.on` 的六参数形式，与下一条的战斗策略一并声明；四参数形式两者都缺省 REJECT，
   以后新加而没声明的方法冻结中一律拒绝）。玩家处于跨节点换图的冻结中（FREEZING）时，分发入口在 GM 闸与找处理器之后、调用处理器之前裁决：
   ALLOW / READ_ONLY / GATED 照常进处理器（GATED 由服务闸回基线码），REJECT 回应答内 `error_message{1005}`（`Empty` 应答的静默丢），
   DROP 静默丢。DROP 只有场景核心的移动上行能声明：功能模块声明 DROP、有应答的方法声明 DROP 都启动即失败。选目标中（RESOLVING）不冻结、全部放行。
+- **战斗策略**（批次 6.3，§4.23）：每个方法同时声明 `BattlePolicy`（ALLOW / GATED / DROP / STOP_ONLY / REJECT，缺省 REJECT）。不在交出冻结中而处于回合制战斗在途
+  （`ScenePlayer.inBattle()`：备战或战斗中）时按它裁决：GATED 进处理器由服务闸回基线码，DROP / STOP_ONLY 只给移动上行，REJECT 回应答内 1005。两种冻结互斥，先判哪个不影响结果。
 - **运行模式**（`xm-common` 的 `RunMode`，环境变量 `XM_RUN_MODE`，每个进程各读自己的）：`dev` / `test` 放行 GM 类客户端指令，
   其余（含未设、写错）一律按 `prod` 拒绝；取值大小写不敏感、去首尾空白，别名同基线（development / local / testing /
   production / release / live），写错的值启动时打 WARN。进程缺省 prod（部署链不设即拒绝）；`tools/local/start-slice.sh`
@@ -340,7 +342,11 @@ mmorpg：data_service 的 `RollbackPlayer / Zone / All` 同步执行，先持跨
   `max-players-per-job` 10000、`job-timeout` 30 min、`heartbeat` 5 s、`stale-after` 60 s；`xm.data.rollback.guild.settle` 30 s（`XM_DATA_ROLLBACK_SETTLE`）、
   `recheck-delay` 10 s（`XM_DATA_ROLLBACK_RECHECK_DELAY`）、`check-budget` / `recheck-budget` 120 s、`clock-skew-margin` 300 s、`call-timeout` 10 s；
   `xm.dubbo.guild-url`（`XM_DUBBO_GUILD_URL`，缺省 `tri://127.0.0.1:20886`）。本机切片脚本打开写开关并调小沉降与复查等待。
-- **批次 6.3 追加**：夺权之后、账本差集之前批量查战斗锁，锁在或读失败的玩家不写（对应基线回档对战斗中玩家回 1005）；代码随 6.3 提交，见 data-ops-spec §13.3。
+- **回档前查战斗锁**（批次 6.3 落地，`com.game.data.rollback.BattleLockGate`；data-ops-spec §13.3）：夺权挡不住战斗中的玩家——Java 断线即写回并释放，战斗在 xm-battle 继续，
+  `reject` 也能夺到战斗锁仍在的离线玩家，`kick` 的顶号通路不看是否在战斗。所以两轮夺权之后、账本差集之前，对全部已夺到的玩家批量读一次 `xm:battle:{pid}:lock`
+  （xm-discovery `BattleLockReader.existsAll`，每块 500 人、全程共用一个截止时刻 `xm.data.ops.battle-lock-wait` 5 s）：锁在 → 逐玩家结局 `in_battle`（对应基线回档对战斗中玩家回 1005）；
+  读不到 → `battle_lock_unknown`（fail-closed）。两种都不写、无条件（不走 `acceptDivergence`）；单人 / 多人里被挡的人当场释放、其余继续，整区有一人被挡即 `zone_not_quiescent`。
+  dry-run 在请求线程上同样读一次并逐人标出。Redis 客户端每次读锁时才取，装配期不连接。它读的是咨询性的读路由，部署约束见 §6。
 
 ### 4.6 资产防护：全服产出封禁与获取异常检测
 
@@ -377,7 +383,9 @@ mmorpg：`cpp/libs/modules/bag/*`（实例层 / 布局层 / 准入 / 淘汰，�
   每个被淘汰的实例一条销毁流水。战斗中禁止扣减之类的闸放在各玩法入口（基线 D48：结算在战斗标记还挂着时应用）。
   物品 guid 来自全服号源（`LeaseGatedSnowflake`，§9），一批要的号先一次铸齐，铸不出来回 6004。
 - **整理**（192）：只允许人物背包与仓库；合并同配置零头、回收空实例（各记一条数量 0 的销毁流水）、按（配置升序、数量降序、入包先后）重铺到 0..n-1；
-  已最优（按相邻格比较）时什么都不改、changed=false——狂点整理不刷流水、不触发存盘。
+  已最优（按相邻格比较）时什么都不改、changed=false——狂点整理不刷流水、不触发存盘。回合制战斗在途时 192 回 1005（批次 6.3，闸在 `BagFeature.sortBag`、类型合法之后；`BagService` 本身不判战斗在途）。
+- **战斗结算用的两个入口**（批次 6.3，§4.23）：`BagService.removeClamped`（每个配置按实际持有夹紧、扣不满不报错，按格子号升序抽取，每个被抽的实例记一条销毁流水）与
+  `mergeOnly`（只合并不重排，同基线 `MergeAndCompact(kMergeOnly)`）。两者都不判战斗在途——结算要在战斗冻结还没摘时写背包。
 - **持久化**：`player_state.bag`（`BagState` / `BagItemState`，Java 自有格式），按 (bag_type, 格子) 升序写出（周期存盘按值比对），
   容量只在不是缺省值时才存，各层不认识的字段原样带回。加载分两步：构造玩家实例时只原样收下（构造不能抛），进场景前
   `BagService.initializeOnLoad` 按配表规整——结构性损坏（guid 为 0 / 全 1 或重复、物品数超过容量）抛异常按进场失败处理（fail-closed，
@@ -394,7 +402,7 @@ mmorpg：`cpp/libs/modules/{mission,condition}/**` + `PlayerMissionSystem`（接
   留给服务，错误码先后同基线。表是同步来的契约，加载只对用不上的数据告警、不拒绝启动。
 - **事实与推进**：事实是 `MissionFact(类别, 参数, 量, 只推进某任务)`（不复用同步来的 proto 类型）。来源：GM 175 成功后的等级事实
   （`AttributeFeature` 的等级连带，推 170 之后、回应答之前，等级没变也发）、接取回填、完成任务事实；击杀事实的入口
-  `MissionService.onMonsterKilled` 等回合制战斗结算（6.3）接入。纯规则在 `ConditionRules`（比较符、参数匹配、累计封顶 / 持有覆盖）。
+  `MissionService.onMonsterKilled` 由回合制战斗结算调用（批次 6.3，§4.23：结算里每只被击败的怪一条事实）。纯规则在 `ConditionRules`（比较符、参数匹配、累计封顶 / 持有覆盖）。
   玩家身上的派生索引（类别 → 关注它的进行中任务、被占用的类型）不持久化，加载时重建、接取 / 完成时维护。
 - **完成后的连锁同步执行**：一次操作（接取 / 一条事实）开一个有界工作队列，在本次操作结束前排空：同一条事实按任务号升序扇出，
   本条事实完成的任务按任务号升序处理（腾出类型 → 记完成 → 有奖励置待领、自动领奖的立即领，失败保留待领 →「完成任务 X」事实与后续任务排队）；
@@ -423,6 +431,8 @@ mmorpg：`combat/skill/system/skill.cpp`（ReleaseSkill → CheckSkillPrerequisi
   给施法者的顺序 33 → 70 → 84 应答。目标按场景实体号在本节点上找人（`SceneWorld.playerByEntity`，任意场景，同基线）。
 - **伤害**：纯公式 `com.game.common.combat.CombatDamageRules`（xm-common，实时与回合制共用）已移植；实时技能命中（伤害、效果 buff、
   死亡）两版都不生效，等气血同步、死亡复活一起设计。
+- **回合制战斗在途**（批次 6.3，§4.23）：施法者在途回 7004（排在技能存在且已拥有的 1001 之后）；指定目标的技能，目标是本节点玩家但在途回 7002
+  （范围 / 无目标技能不看目标是否在途，同基线）。
 
 ### 4.10 当前气血 / 法力与基础复活
 
@@ -431,7 +441,8 @@ mmorpg：`combat/skill/system/skill.cpp`（ReleaseSkill → CheckSkillPrerequisi
   二级属性（上限）仍每次加载重算，不落库；成长属性不存：护甲 / 速度同基线每次重算（速度取二级属性），力量 / 抗性 / 暴击用到时由职业表即时算出。
 - **加载**（`AttributeService.initializeOnLoad`）：存档值按新上限往下夹（旧上限视为 0，同基线 RescaleCurrent：活着的只夹不补），
   再套纯规则 `PlayerRevive.reviveIfDead`：气血 0（阵亡或没有记录）→ 按上限回满；活着（含残血）不动。
-- **写入点**：今天只有属性重算会改当前值（升级补增量、其余按比例）；回合制战斗结算的回写与结算复活随 6.3，同用 `PlayerRevive`。
+- **写入点**：属性重算（升级补增量、其余按比例），以及回合制战斗结算（批次 6.3，§4.23）：气血、法力取结算终值，各自在派生上限 > 0 时夹到上限，
+  再套同一个 `PlayerRevive.reviveIfDead`（只在气血为 0 时回满）；不推 170 / 66（同基线）。备战时气血为 0 的玩家被拒（1006）。
   实时伤害两版都不可达，没有实时死亡状态。
 
 ### 4.11 宝宝
@@ -446,7 +457,10 @@ mmorpg：`player_pet.cpp`（PetSystem）+ `pet_rules.h` + `player_pet_handler.cp
   点数总量 / 目标已分配校验 / 自动加点 / 按比例保持气血复用角色的 `AttributeRules`；`PetFeature` 注册 181–189。
 - **主人等级连带**：`AttributeFeature` 的等级连带在推 170 之后先让 `PetFeature` 重算全部宝宝并推 184（没有宝宝也推空列表），
   再发任务等级事实，最后回 175 应答（同基线升级事件顺序）。
-- **号与随机**：宝宝号用与物品同一个全服号源（§9）；资质随机数只在逻辑线程上用。写闸：跨节点换图冻结中回 1005（批次 5.2，§8.1），战斗中随 6.3 接入。
+- **号与随机**：宝宝号用与物品同一个全服号源（§9）；资质随机数只在逻辑线程上用。写闸（`PetService.checkWritable`）：跨节点换图冻结中回 1005（批次 5.2，§8.1），
+  回合制战斗在途回 26008（批次 6.3，六个写方法；自动加点 188 只给建议、不过闸）。
+- **参战**（批次 6.3，§4.23）：`PetService.buildBattleSnapshot` 给出战宝宝拍快照（没有出战 / 气血 0 / 缺表行的不带；技能先种类后已学、不做可施放过滤，同基线）；
+  `applyBattleSettlement` 回写气血法力（按现算上限夹，阵亡回满），有宝宝条目时推一次 184、先于 150。这两条不经写闸——应用结算时战斗冻结还没摘。
 
 ### 4.12 通用资产通道（scene 侧）
 
@@ -463,7 +477,8 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
   `XM_ASSET_OP_SECRET_GUILD / _TRADE` 注入；规范串格式与基线逐字节相同。
 - **流程** `AssetOpService.handle`（逻辑线程）：信封 / 流方向 / 流水原因白名单 → 验签 → 找人 → 账本损坏 → 分类（已见只读答复；滑出窗口 /
   跳号 / 旧纪元回 UNKNOWN 0 不猜结局；已见的 seq 在跨节点换图冻结中照常只读答复，但不触发补存）→ 归属围栏（owner_epoch 为 0，
-  或玩家处于跨节点换图的冻结中，回 RETRY 27003，什么都不记——含中止占位；选目标中照常处理，§8.1）→ 中止占位 → 包内容（确定性失败记 REJECTED 27004）
+  或玩家处于跨节点换图的冻结中，回 RETRY 27003，什么都不记——含中止占位；选目标中照常处理，§8.1）→ 中止占位 → 回合制战斗在途（批次 6.3，§4.23：扣款 / 发放回 RETRY 27002、不记账，
+  调用方稍后重投；27003 优先，中止占位照常放行）→ 包内容（确定性失败记 REJECTED 27004）
   → 扣款（余额不足记 REJECTED 27000）/ 发放（货币预检 → 物品整批 → 货币）。闸只在这一层，不下沉到 `CurrencyService` / `BagService`。
 - **durable**：只看最近一次确认落库的快照（`ScenePlayer.persistedState()`）里有没有这条结局，不另建水位；记账后立刻
   `SceneWorld.requestSave`，不在调用里等落盘；已见未 durable 的重查 500 ms 内至多补存一次（限频时刻挂在账本实例上，不持久化）。
@@ -474,6 +489,11 @@ mmorpg：`asset_op_system.cpp` + `asset_op_ledger.cpp` + `asset_op_auth.cpp`（s
   rpc_host / rpc_port，停服时先摘目录、写回玩家再撤导出。两层鉴权：请求体 HMAC（规范串的唯一出处是 xm-api `AssetOpSignatures`）+
   Dubbo 调用方 MAC（`XM_DUBBO_SECRET`，xm-scene 从此必填）。调用方按 `xm:location` 定位（只认 `o`；`l` / `x` / 缺失 → 本地 NOT_HERE）
   再查 scene 目录拿 rpc 地址（`SceneAssetLocator`）。已落盘账本的只读分类器在 xm-player-store（`PersistedAssetLedger`），调用方离线读用它。
+- **同一端口上的第二个服务**（批次 6.3，§4.23）：导出类改名 `com.game.scene.rpc.SceneRpcServer`——一个 `IsolatedDubboModule`、一个 `ProtocolConfig`、两个 `ServiceConfig`：
+  资产通道 `SceneAssetOpService`（group `scene-asset`）与回合制战斗入口 `SceneBattleService`（group `scene-battle`，备战 / 取消 / 确认 / 结算四个方法），
+  都是 `register = false`、调用方按节点目录直连、`retries = 0`。两个服务各有自己的在途上限（`asset-op-max-inflight` / `battle-rpc-max-inflight`，缺省都是 256），
+  共用回写执行器 `scene-asset-reply`；任一个导出失败就把已导出的撤掉、整体失败。启停顺序不变（导出成功后才写目录；停服先摘目录、写回玩家、再撤导出）。
+  配置键、Dubbo 应用名与回写执行器名都没改，运维配置与指标序列不变。
 - **接管守卫**（`SceneWorld` 进场）：本节点接管失去归属的旧实例时，库里仍是旧实例最近一次落库的样子才沿用旧内存，否则以库为准——
   别的节点期间写过库（含已回报 durable 的资产结局）时，沿用旧内存会把它们盖掉。
 - **补缴欠款**（`Wallet.Debt`，休眠：没有挂欠款的入口，同基线）：加币时未冻结、未过期的欠款先抵 min(收入, 剩余)，还清即删；
@@ -578,7 +598,14 @@ mmorpg：`go/match/internal/team`（与匹配同进程）+ C++ scene `player_tea
   （没有副本开放组队，6.4 接匹配后换真实端口）。
 - **场景跟随**（xm-scene `TeamFollowService`）：玩家进场 / 换场景之后，在逻辑线程外读一次成员关系（一段只读 Lua：索引 + 投影），
   回到逻辑线程处理——不是队长且队长在本节点另一个场景实例 → 同步 `switchScene` 到队长所在实例；队长自己进场 → 对本节点其他成员各检查一次
-  （只跟随、不再扇出）。跨节点 / 跨 zone 不跟随（同基线）；自己有在途的跨节点换图（选目标中或冻结中）时不跟随（`switching`，§8.1）。不发、不收 scene 刷新事件（scene 不缓存 TeamId，进场时现读）。
+  （只跟随、不再扇出）。跨节点 / 跨 zone 不跟随（同基线）；自己有在途的跨节点换图（选目标中或冻结中）时不跟随（`switching`，§8.1；经 `SceneWorld.switchInFlight` 判，
+  过期的选目标槽当场作废、不再挡）。不发、不收 scene 刷新事件（scene 不缓存 TeamId，进场时现读）。
+  **战斗守卫**（批次 6.3，§4.23）：读成员关系的同时并行发一条战斗锁的 EXISTS，两个结果一起回到逻辑线程；自己有战斗冻结（`in_battle`）、锁存在或读锁失败
+  （`battle_lock`，fail-closed）都不跟随。冻结解除后由 `onBattleFreezeCleared` 补一次检查（只跟随、不扇出）：取消备战 / reaper 判废删掉锁之后，以及销账放掉锁之后；
+  删锁 / 销账的结局回来时发起它的实例已经换掉（同 epoch 重进）的，只要锁确实是这一次删掉 / 放掉的，就补给现任实例（它没有战斗冻结时）。
+- **队伍视图的 `in_battle`**（批次 6.3，收掉 team-spec D10）：`TeamDisplay` 对一次视图构建的全体成员、申请人、被邀请人、邀请人批量读战斗锁（`BattleLockReader.existsAll`，
+  每人一条 EXISTS 并发发出，与在线读共用请求预算）。锁存在即为 true——备战中、战斗中、已结算待销账都算；任何一条读失败、超时、被中断，整批按 false，只记一行 WARN，
+  不让 RPC 失败（同基线「MGET 失败 → 全 false」）。锁是 Hash：对它 `MGET` 回 nil 而不报错，照搬基线的 MGET 写法会让 `in_battle` 静默恒为 false，所以读者一律经 `BattleLockReader`。
 
 ### 4.17 帮会核心（xm-guild）
 
@@ -717,11 +744,13 @@ Java 版是独立进程 xm-battle，规格与逐条出处见 `docs/porting/battl
 客户端可见的部分（帧、握手、闸门顺序、拒绝串、tip、时限、推送与线上顺序）与基线逐字节相同：
 
 - **两条连接**：大厅连接（gate）承载登录、scene、match（含补签 179），只接收大厅公告 177 / 143 的回落，**不承载任何战斗上行**——gate 对 `BattleClientPlayer`
-  的 12 个号一律推 23 {1003}、不计非法包、不断连（`MessageRoutes.SERVICE_BACKENDS` 永不加入它）。battle 直连每局一条，参战与观战共用一个槽，承载握手、
+  的 12 个号一律推 23 {1003}、不计非法包、不断连（`MessageRoutes.SERVICE_BACKENDS` 永不加入它；批次 6.3 起由 `MessageRoute.directOnly` 在 GM 闸之后、
+  热关停与待处理队列之前当场拒绝，回到基线的位置，§4.23）。battle 直连每局一条，参战与观战共用一个槽，承载握手、
   四条战斗 RPC（149 提交行动 / 140 拉状态 / 162 自动战斗 / 165 退出观战）与全部战斗帧（139 / 150 / 158 / 161 / 166）；没有活直连的战斗帧直接丢弃、不回落 gate。
 - **线程**：一条 `battle-logic` 线程（单线程 `NioEventLoopGroup`）既是直连面唯一的 Netty I/O EventLoop，又独占全部房间、直连会话状态（是否已验证、限频器、
   非法包计数、握手定时器）与房间计时器——同基线单 loop，帧顺序与「应答之后才关」不需要跨线程排队。boss 线程 1 条只 accept；Dubbo 提供方线程只读准入闸（原子量）、
   占在途位后投递，future 在 `battle-rpc-reply` 上完成；管理 Tomcat（4 线程）上的 dev 接口做完 Redis 查询后走同一条投递路径。逻辑线程上不做阻塞 I/O，出站端口一律异步。
+  批次 6.3 起另有一条 `battle-outbox` 线程独占两个发件箱（逻辑线程只把结算交给它），一条守护线程 `battle-scene-sweep` 清扫到 scene 的直连客户端缓存（§4.23、§5）。
 - **直连面**（`com.game.battle.edge`，端口 `xm.battle.client-port` 12000，对客户端开放）：`EdgeInboundGuard` → xm-net `ClientFrameDecoder`（只收 `BattleTokenVerifyRequest` /
   `ClientRequest`，逐帧分发，§3）→ 编码器 → `BattleEdgeHandler`（每连接一个 `DirectSession`：PENDING → VERIFIED → CLOSING）。
   - 握手前：连接数达 `max-connections`（缺省 4096，0 = 硬上限 65535，只许 dev / test）即关；10 s 内没握手、握手前发 `ClientRequest`、首帧是别的合法类型都直接关，不回包。
@@ -750,8 +779,10 @@ Java 版是独立进程 xm-battle，规格与逐条出处见 `docs/porting/battl
   closed / overloaded 在 Dubbo 线程判，closed_in_loop 在逻辑线程复核）保证没建房、没推送、没发确认，调用方不发 destroy、换节点重试一次；`UNSPECIFIED` 读方按传输失败处理。
   在途上限 `rpc-max-inflight`（256）。其余四个方法的业务错误都在应答体里。调用方 MAC（`XM_DUBBO_SECRET`，必填）与热关停过滤器照常生效（§4.1、§4.15）。
 - **出站端口**（`com.game.battle.port`，逻辑线程只调接口，实现必须异步）：`SceneBattleEvents.confirm`（建房首发 + 补发）、`SettlementSink`（收尾时逐人排在本人 150 之后）、
-  `ActivityResultSink` / `BattleResultSink`（只在真打完的局发）。6.2 的缺省实现只记日志与计数（`@ConditionalOnMissingBean`，6.3 / 6.4 加 bean 替换成真实传输）；
-  dev 房间（`RoomOrigin.DEV`）永不投递结算与结果事件。
+  `ActivityResultSink` / `BattleResultSink`（只在真打完的局发）。6.2 的缺省实现只记日志与计数；**批次 6.3 起**前三个由 `SceneTransport` 给出真实实现
+  （确认经 Dubbo 发往 scene、结算进发件箱、活动结果进持久通道，§4.23），`BattleResultSink` 仍是日志实现（6.4 接 match），测试提供同类型的 bean 时让位（`@ConditionalOnMissingBean`）。
+  发布端口带通道：`BattleResultSink.publish(event, Channel{PLAIN, ACTIVITY})`，普通局由逻辑线程发 PLAIN，活动局由 `battle-outbox` 首发并重发 ACTIVITY——
+  6.4 的真实实现必须线程安全、容忍同一 battle_id 多次调用。dev 房间（`RoomOrigin.DEV`）永不投递结算与结果事件；`DEV_GATHER` 房间（快照来自 scene 的真实备战）照常确认、照常结算，只是不发结果事件。
 - **节点身份、目录与准入**：节点号租约 `NodeTypes.BATTLE`、作用域 0（基线 battle 是全局池，不分 zone），实例 id 是每次启动生成的 UUID；目录与租约丢失见 §6。
   准入闸 `NOT_STARTED → OPEN → CLOSED`（`AdmissionGate`，CLOSED 是终态）。
   - **启动**：门禁（票据密钥策略、`XM_DUBBO_SECRET`、prod 下 `max-connections = 0`、指纹模式与握手期限取值）→ 加载七张战斗表与 `TableBattleData`、解析 4 个上行号与
@@ -760,14 +791,99 @@ Java 版是独立进程 xm-battle，规格与逐条出处见 `docs/porting/battl
   - **停机**（只由 Spring 驱动：`BattleApplication` 设 `dubbo.shutdownHook.listenIgnore=true`，否则 Dubbo 自己的 JVM 钩子会在 SIGTERM 时抢先销毁控制面）：
     摘目录 → 在逻辑线程的**同一个任务**里关闸并作废全部房间（观众收 166 ABORTED，参战者不收帧）→ 停监听、有界等待优雅关闭的直连排空（`shutdown-flush-timeout` 1 s，
     修基线观众的 166 被强关吞掉）、强关剩余连接 → 撤 Dubbo 导出（期间进来的 createBattle 回 NOT_ALLOCATABLE）→ 停线程 → 交还租约。
+    节点停完之后 Spring 才销毁 `SceneTransport`（批次 6.3）：结算发件箱有界等待在途的落库与首投（`outbox-drain-timeout`，缺省 3 s）→ 停 `battle-outbox` → 停清扫线程 →
+    销毁到 scene 的直连客户端；内存里的重投名单丢弃，记录留在 Redis，由 scene 的 rescue / 进场恢复兜底。
 - **dev / test 管理口**（管理端口 18112，`POST /admin/battle/dev/{create,destroy,issue-ticket,add-observer,remove-observer}`，请求 / 应答是契约 protobuf 二进制）：6.4 之前用它端到端验收。
   鉴权同 xm-trade 播种（`BattleAdminAuthFilter`）；运行模式不是 dev / test 回 403（先于解析请求体），请求体坏 400，快照路由补不全 422（gate 字段取在线目录，scene 字段取
   位置记录（只认 `o`）+ scene 目录的实例 id），节点没在运行 / Redis 读失败 503，等结果超过 5 s 回 504。经它建的房间标 `DEV`。
-- **存储**：不用 MySQL，房间是纯内存的（节点崩溃 = 在打的战斗全部作废，由 6.3 scene 的 reaper 按期限解冻）；Redis 只写租约与目录，只读在线目录（大厅回落），
-  dev 接口另读位置记录与 scene 目录。
+  批次 6.3 加 `POST /admin/battle/dev/gather`（按 player_id 升序逐人经 `SceneBattleService` 真实备战、取 scene 出的快照；`CREATE` 模式再进程内建房，标 `DEV_GATHER`；
+  任一人失败就对已备战和结局不明的人补发取消、回 422）与 `dev/cancel-prepare`，6.4 之前用它验收 scene 侧的冻结与结算（§4.23）。
+- **存储**：不用 MySQL，房间是纯内存的（节点崩溃 = 在打的战斗全部作废，由 scene 的 reaper 按期限解冻，已落库的结算由 scene 的 rescue / 进场恢复应用，§4.23）。
+  Redis 写：租约与目录；批次 6.3 起另写待结算记录、「已被取代」时的已销账墓碑与活动结果的持久副本。Redis 读：在线目录（大厅回落）、位置记录与 scene 目录
+  （结算 / 确认的定位、直连客户端缓存的清扫、dev 接口）、战斗锁（只在「已被取代」的判定脚本里读）。
 - **配置**（`xm.battle.*`）：`client-port` 12000、`client-bind-host` 0.0.0.0、`advertise-port` 0、`client-advertise-host` 空、`rpc-port` 21200、`max-connections` 4096、
   `handshake-timeout` 10 s（客户端可见、不建议改，范围 (0, 60 s]）、`illegal-packet-threshold` 50、`table-fingerprint-mode` warn（off / warn / enforce，写错拒启）、
-  `rpc-max-inflight` 256、`shutdown-flush-timeout` 1 s；Redis 库 12。
+  `rpc-max-inflight` 256、`shutdown-flush-timeout` 1 s；批次 6.3 加 `scene-rpc-timeout` 5 s（确认 / 结算调用超时，必须大于 Redis 单条命令最坏耗时 4.2 s，否则拒启）与
+  `outbox-drain-timeout` 3 s（停机时等在途落库与首投，0 = 不等），绑定在单独的 `SceneTransportProperties`；Redis 库 12。
+
+### 4.23 回合制战斗的 scene 侧：冻结、在途闸、结算与发件箱（批次 6.3）
+
+mmorpg：scene 的 `battle/system/player_battle.{h,cpp}`（PrepareBattle / CancelBattlePrepare / ConfirmBattle / ApplySettlement、登录钩子、reaper）与结算账本，battle 的
+`settlement_outbox.h`、`battle_room_manager.cpp` 的落库与重投、活动结果通道；battle ↔ scene 走 Kafka scene-cmd 与 gRPC `SceneNodeGrpc`。Java 版规格与逐条出处见
+`docs/porting/scene-battle-spec.md`（有意差异 D1–D36、照搬的基线怪癖 B1–B17 见 PARITY「scene 侧战斗冻结与在途闸」「回合制战斗结算链路」「战斗活动结果持久通道」三行）。
+客户端可见的部分——144 / 150 / 184 / 23 的消息与推送时机、各在途闸的码与判定次序、快照经 battle 进入 `BattleActorState` 的内容、结算落地后的面板数值——与基线相同。
+
+- **根本前提与传输**：Java 断线即写回、释放、移除实例，重连从库新建实例（§7），内存里的冻结活不过任何一次断线。所以**战斗锁是承重的**，不只是咨询性的：
+  备战时先把锁写成功再回 match，写失败就拒绝；锁独占，被别的局占着就拒绝。传输是 scene 在资产 RPC 端口上再导出的 `SceneBattleService`（§4.12；`prepareBattle` /
+  `cancelBattlePrepare` / `confirmBattle` / `applySettlement`，信封 `SceneBattleCall{target_instance_id, player_id, body = 契约消息字节}`，应答状态 HANDLED / NOT_HERE / DEFERRED / OVERLOADED，
+  结算另带 APPLIED / ALREADY_APPLIED / DISCARDED）。提供方 `SceneBattleProvider` 在 Dubbo 线程上占在途名额、核对实例、解析后投递逻辑线程，应答在 `scene-asset-reply` 上完成；
+  要等异步 Redis 的分支最坏约 4.2 s（一条脚本的最坏耗时，§6），所以 battle 侧的调用超时缺省 5 s 并在启动时校验（6.4 的 match 备战调用按裁决保持 3 s，超时按结局不明补发取消）。
+- **状态模型**（`com.game.scene.battle`，只在逻辑线程读写，不持久化）：`PlayerBattle` 挂在 `ScenePlayer` 上——冻结 `BattleFreeze`（battle_id、battle 节点号、阶段 PREPARING / FIGHTING、
+  两个期限、`preparedHere`「这一局的 144 不必再推」、写锁在途、延后的取消、续锁是否已确认、rescue 在途）、进场恢复状态（PENDING / READY / RETRY）、恢复代际、本实例已销账集合。
+  唯一谓词 `ScenePlayer.inBattle()` = 有冻结；`frozen()` 仍只表示 5.2 的交出冻结。改冻结的唯一入口是 `PlayerBattleService.clearFreeze(player, LockAction)`
+  （只删备战锁 / 不看阶段地删（reaper 判废专用）/ 保留锁）。所有异步回调先核对「实例仍是这个、冻结对象没换」再动状态。
+- **备战 / 取消 / 确认**：备战按基线次序判定（参数为 0 或期限超出 7 天 1005 → 不在本节点 1004 → 换图在途 / 已有冻结 / 恢复未就绪或账本有未落盘条目 / 气血 0 都是 1006），
+  拒绝即零痕迹；通过后组快照（`BattleSnapshots`，含出战宝宝与战斗配表指纹）、挂 PREPARING 冻结并停步（旁观者收到速度为 0 的 66）、写锁，**锁写成功才回快照**；
+  被占回 1006，Redis 出错 / 超时回 1003 并尽力只删备战锁。取消：离线一段 Lua；在线 PREPARING 当场解冻、只删备战锁；已 FIGHTING 的拒绝（同基线）；写锁在途时延后到写锁完成。
+  删锁与写锁都是异步的：这把备战锁从写上到删掉之间可能被一次进场恢复读到（同 epoch 重进最常见），所以本节点发出的「只删备战锁」有了结局时，现任实例上按这把锁重建出来的
+  PREPARING 冻结一并摘掉（`dropPreparingRebuiltFromLock`），不留一把没有锁的冻结到备战期限。
+  确认：PREPARING → FIGHTING 并把锁续到正式期限；在线而没有冻结的「迟到确认」用一段 Lua 核对锁并标 F，据锁重建 FIGHTING。144 只在需要时推（重连 / 顶号 / 按锁重建），
+  全部经 `pushReconnectOnce`，同一个冻结对象上恰好一次，PREPARING 永不推。
+- **在途闸**：客户端入口按方法声明的 `BattlePolicy`（§4.4）裁决，码与次序照基线：63 → 3023（先于换图在途的 3014）；84 → 施法者 7004 / 目标 7002；属性六个写方法 25011；
+  宝宝六个写方法 26008；192 → 1005；134 / 132 静默丢、131 只把速度清零；资产通道 RETRY 27002；没声明的新方法缺省 1005。只读查询、自动加点建议、GM 货币、任务照常（基线不闸，Java 也不加）。
+  闸**不下沉**到 `CurrencyService` / `BagService` / `MissionService`：结算应用时冻结还没摘，下沉会把结算自己拦住。`InBattleGateMatrixTest` 遍历注册表钉住这张表，新方法不进表即失败。
+- **与交出冻结、组队跟随的互斥**（两种冻结始终互斥）：备战拒绝换图在途的玩家（选目标中 / 冻结中；过了期限的选目标槽当场作废）；`SceneWorld.beginRemoteSwitch` 拒绝在途玩家，
+  选目标结果回来时再复查（回 NONE、推 23 {3023}）；交出冻结期间到达的结算回 DEFERRED、零副作用，确认只标锁不挂冻结，销账结果不改账本；交出没提交、原地解冻之后**重跑完整的进场恢复**。
+  排空 / 级联改派与帧外推都跳过在途玩家。组队跟随读锁与补跟随见 §4.16。
+- **Redis 键**（全部经 `RedisKeys`；前三个共用 hash tag `{<pid>}`，销账、取代、落库三段 Lua 跨键同槽）：
+
+  | 键 | 形态 | 写者 | TTL |
+  |---|---|---|---|
+  | `xm:battle:{<pid>}:lock` | Hash：`b` battle_id、`n` battle 节点号、`s` 阶段 `P` / `F`、`d` 战斗期限、`p` 备战期限（锁与上下文合一，同生共死） | 只有 scene | 期限剩余 + 60 s；结算应用后至少 180 s |
+  | `xm:battle:{<pid>}:settlement` | Hash：每局一个字段（字段名 = battle_id 的无符号十进制），值 = 契约 `BattleSettlementEvent` 字节 | battle 落库；scene 只删字段 | 7 天，每次写刷新 |
+  | `xm:battle:{<pid>}:settled:<battle_id>` | String：这一局「已销账」的墓碑（Java 独有） | 销账的两段 Lua | 600 s |
+  | `xm:battle:activity-result:<battle_id>` | String：契约 `BattleResultEvent` 字节 | battle | 7 天（消费方 4.6 消费后删） |
+
+- **脚本**（xm-discovery `BattleRedis`：16 段 Lua、返回码与跨进程常量的唯一出处，scene 与 battle 共用，`ByteArrayCodec`）：scene 用 `PREPARE_LOCK`、`CONFIRM`、`CANCEL_OFFLINE`
+  （兼「只删备战锁」）、`DELETE_IF_MATCH`（只给 reaper 判废）、`TOUCH`（重建复核）、`HOLD`（只延不缩）、`ACK`（销账与放锁同一段，并写墓碑）、`ENTER_READ`（锁与待结算记录同一时刻的快照）、
+  `READ_IF_OURS`、`READ_LOCK_BATTLE`、`DELETE_SETTLEMENT_FIELD`；battle 用 `STORE_SETTLEMENT`、`PROBE_SETTLEMENT`、`ACK_IF_SUPERSEDED`、`STORE_ACTIVITY_RESULT`、`PROBE_ACTIVITY_RESULT`。
+  纪律：每一次删锁 / 续锁 / 删记录都按 battle_id 条件执行；脚本只碰经 `KEYS` 传入的键。Redisson 配的是 `retryAttempts = 1`，超时的 EVAL 会被原样重发，而且两条各自发出的脚本
+  谁先执行、回调谁先回来都没有保证，所以每段脚本都按「可被重放、可被重排」设计：同局且仍是 `P` 的 `PREPARE_LOCK` 按成功；`TOUCH` 单调（锁已是 `F` 时不降回 `P`、不缩 TTL，回 2）；
+  取消与备战失败只删备战锁（已标 `F` 的不删）；销账之后才落地的落库被墓碑挡下（回 -1），不会把记录重新造出来。回整数的脚本得到空回复按异常处理——没问到结论不当成任何结论。
+  **全部脚本以 `READ_WRITE` 执行（读主库）**：读到「没有锁」「没有记录」会直接驱动丢弃与判废。`BattleLockReader.exists / existsAll` 是另一类：咨询性的读，走普通读路由，
+  给队伍视图、组队跟随、xm-data 的回档闸与 6.4 的 match 预检用（部署约束见 §6）。
+- **账本与 durable 判据**：`BattleLedger` 存 `player_state.battle_ledger`（字段 9，§7），只登记「已应用、销账未确认」的局，与货币 / 背包 / 宝宝 / 任务同一次带围栏的写。
+  两条判据分开：「这一局应用过没有」看内存账本；「可以销账」看最近一次确认落库的快照里有没有这一条（`ScenePlayer.persistedState()`，与资产通道同一条判据，§4.12）。
+  销账的唯一入口 `PlayerBattleService.writeOff`：账本没有（判废或重复投递）→ 立即 `ACK`；有且已落盘 → `ACK`；有但没落盘 → `requestSave`，落盘回调再判。
+  `ACK` 成功回来才从账本摘掉。加载校验失败（0 号、重复、超过 64 条）原样带回、fail-closed：该玩家的结算一律延后、备战回 1006，绝不当空账本用。
+- **结算到达与应用**：实例不符或玩家不在 → NOT_HERE（battle 下一轮重新定位）；进场恢复未完成或在交出冻结中 → DEFERRED；冻结是别的局 → 丢弃并销账；没有冻结 → 读锁，
+  锁是本局才应用，否则丢弃并销账。应用（`BattleSettlementService`，逻辑线程一个任务内同步完成，顺序同基线）：账本命中即返回 → **金币先行**（失败整笔延后，此前零副作用）→
+  气血法力回写与复活（§4.10）→ 宝宝（§4.11）→ 消耗（按持有夹紧、格子号升序）→ 掉落（主包放不下进临时格，仍放不下丢失并 ERROR，不让整笔失败）→ 击杀事实（§4.8）→ 登记账本
+  （金币一旦入账就一定登记）→ `requestSave`。四条应用路径（在线、按锁、进场、rescue）只有一个收口 `applyAndFinish`：把锁至少保持 180 s → 摘冻结、保留锁 → `writeOff` → 本次新应用才推 150。
+- **进场恢复闸与代际**（登录 / 重连 / 顶号 / 交出进场都跑，挂在 `SceneWorld.onPlayerLoaded` 末尾）：新实例的恢复状态初值 PENDING，开新一代、发 `ENTER_READ`；
+  待结算记录按 battle_id 无符号升序逐条应用（遇到延后的就停，坏字段只删该字段）；锁指向一场没有结算记录的在途局就按锁重建冻结并 `TOUCH` 复核（重建出 FIGHTING 的推 144，
+  一定在 79 / 21 / 47 之后）；账本里其余条目进场即销账；然后 READY。READY 之前结算回 DEFERRED、备战回 1006（在途闸不受影响，只看冻结）。读失败或有延后的记录 → RETRY，由 reaper 重跑。
+  过期读的两道防线：恢复读带**代际号**，回调只认最新一代；发出 `ACK` 的局记进**本实例已销账集合**（容量 64、先进先出），之后任何一份更早的读把它带回来都不再应用、不按锁重建——
+  否则「快照早于销账、回调晚于账本摘除」会把已销账的局再发一次奖。同 epoch 沿用旧实例时冻结复制成新对象一并沿用（写锁在途的不沿用），旧实例的已销账集合也跟过来；
+  `preparedHere` 在会话没变时照抄、会话变了才清掉，沿用时推不推 144 只看副本的这一位与阶段：已推过或本会话备战的不再推（同会话重复进场不多推一条，同基线），
+  会话变了或还欠着一条的 FIGHTING 当场推，PREPARING 一律等确认升级。
+- **reaper**（逻辑线程上的定时任务，缺省每 30 s，`xm.scene.battle.reaper-interval` 只许调小）：PREPARING 过了备战期限只摘冻结、锁留到 TTL；FIGHTING 过了期限再加 10 s 宽限先 rescue——
+  读本局的待结算记录，有就应用（battle 落库后崩溃、超时平局与期限赛跑都能到账），没有才判废删锁；读出错不判废，过了期限 + 60 s 才放弃。账本排空只对 READY 的玩家做，RETRY 的只重跑恢复。
+- **battle 侧发件箱与重投**（xm-battle `com.game.battle.outbox.SettlementOutbox`，独占 `battle-outbox` 线程）：**先落库、后投递**；落库失败或没有结论只投一次、不登记（`not_durable`，告警）；
+  落库回 -1（墓碑在）按已销账处理。首投与重投都按位置记录 + scene 目录定位（`SceneAssetLocator`，只认 `o`），带实例 id 围栏。每 10 s 一轮：探测记录还在不在（不在 = scene 已销账，摘除）→
+  还在就重投，12 次重投、第 13 轮用尽；本轮没有目标（玩家离线）时另判「已被取代」（`ACK_IF_SUPERSEDED`）；探测 / 定位出错不计次，登记超过 10 min 仍没结论按用尽摘除。
+  投递应答只计数、不改名单：scene 应用之后要等落盘才能销账，「已应用」不等于「可以停止重投」。停机有界排空（§4.22）；节点崩溃名单丢失，由 scene 的 rescue（在线）与进场恢复（离线）兜底。
+  到 scene 的直连客户端（`NodeRpcClients<SceneBattleService>`）按节点缓存，`SceneClientSweeper` 每 60 s 对照 scene 目录销毁已下线 / 换实例的节点的客户端。
+- **确认的传输**（`DubboSceneBattleEvents`）：按快照路由查 scene 目录，实例相符就发往它；不符（备战节点已重启 / 下线）回落到定位器、发往玩家现在的实例，定位不到就不发。补发节奏仍是 6.2 的 17 次。
+- **活动结果通道**（`ActivityResultOutbox`，同一条 `battle-outbox` 线程）：活动局的结果先 SET 持久副本、再经 `BattleResultSink` 以 ACTIVITY 通道发布，之后每 10 s 探测副本还在不在，
+  没被消费就重发、30 次用尽。销账方是 4.6 的帮会活动消费方与巡检器，两版现在都不存在；6.4 接上真实的发布传输之前端口只记日志——整条通道两版都不可达，只对齐了 battle 侧。
+- **gate 拒绝战斗上行**（xm-gate）：`MessageRoute.directOnly`（按服务裸名 `BattleClientPlayer` 置位，12 个号）在 `ClientDispatcher` 里排在 GM 闸之后、热关停之前：当场推 23 {1003}，
+  不进待处理队列与后端队列、不计非法包、不断连，计 `result=battle_rejected`。闸序与基线逐段相同；被拒的战斗号照样占限频额度。
+- **配置**：`xm.scene.battle-rpc-max-inflight` 256、`xm.scene.battle.reaper-interval` 30 s（0 < 值 ≤ 30 s，本机切片调到 2 s）；`xm.battle.scene-rpc-timeout` 5 s、`xm.battle.outbox-drain-timeout` 3 s（§4.22）。
+  跨进程数值（锁余量 60 s、应用后保持 180 s、重投 10 s × 12、宽限 10 s、墓碑 600 s、发件箱条目上限 10 min、账本容量 64）都是 `BattleRedis` 的代码常量，不开放配置，约束关系由单测钉住。
+- **已知残余**（规格 §10.5）：账本满 64 被淘汰的局若再被投递会重复发奖（只在 Redis 长期不可用时）；金币入账失败（封禁 / 溢出）让整笔延后，在线时多半最后被判废（同基线）；
+  Redis 丢数据会丢在途结算与锁（部署要求开 AOF）；咨询性读的主从约束见 §6。冻结侧另有几处有界的窄窗口（备战写锁晚到会把锁留到备战 TTL；确认事件的期限没有上界；
+  同 epoch 沿用一个复核还在途的重建冻结时新实例不再复核），都由期限与 reaper 兜底。
 
 ## 5. 线程模型
 
@@ -806,6 +922,14 @@ Java 版是独立进程 xm-battle，规格与逐条出处见 `docs/porting/battl
   目录补发只标脏、投到 `scene-sched`（单飞，至多占一条调度线程），逻辑线程不等 Redis。dev 管理口的 HTTP 线程只做鉴权与编解码，业务经 scene-manager future 与逻辑线程。
 - **battle**（批次 6.2，§4.22）：一条 `battle-logic` 线程既是直连面唯一的 Netty I/O EventLoop，又独占全部房间、直连会话与房间计时器（同基线单 muduo loop）；
   boss 线程只 accept；Dubbo 提供方线程只读准入闸、投递，future 在 `battle-rpc-reply` 上完成；大厅公告经 Redisson 异步发布，结局只计数。逻辑线程上没有阻塞调用。
+- **回合制战斗的 scene 侧与发件箱**（批次 6.3，§4.23）：
+  - scene：`PlayerBattle` 与结算账本的全部读写、备战 / 取消 / 确认 / 结算应用 / 进场恢复都在逻辑线程；reaper 是逻辑线程上的定时任务（与场景帧串行）。Redis 脚本一律异步，
+    Redisson 回调线程只把结果投递回逻辑线程，回来先核对实例与冻结对象；`SceneBattleService` 的 Dubbo 提供方线程只做在途名额、实例核对、解析与投递，
+    应答在 `scene-asset-reply`（与资产通道共用）上完成。逻辑线程回调里的意外异常不许把状态卡住：进场恢复落到 RETRY，挂着应答的调用以异常完成。
+  - battle：`battle-logic` 调出站端口只交任务、不阻塞；`battle-outbox`（单线程 `DefaultEventLoop`，守护线程）独占两个发件箱的名单与计时器，Redisson / Dubbo 的回调投递回它，
+    活动局的结果也由它发布；`battle-scene-sweep`（守护线程，每 60 s）阻塞读 scene 节点目录、销毁已不在目录的节点的直连客户端——目录读是阻塞的，所以不放在发件箱或逻辑线程上；
+    到 scene 的 Dubbo 引用在 `battle-scene-connect-*`（`NodeRpcClients` 自己的两条守护线程，建引用会同步建连、不能占调用线程）上建；dev gather 在管理 Tomcat 线程上做 Redis 查询与 Dubbo 调用，整体等待上限 10 s，不碰房间。
+  - 读战斗锁的其它进程：xm-team 的工作线程 / 推送线程在请求预算内限时等批量读；xm-data 的回档前查锁由调用线程限时等（作业在 `data-ops`，dry-run 在 Tomcat 请求线程，§4.5.1）。
 - **xm-data**（§4.5、§4.5.1）：没有 Netty 线程也没有逻辑线程，阻塞 JDBC / Redis 都在自己的专用线程上。每个审计 topic 一条消费线程；Tomcat 请求线程做鉴权、受理、
   同步只读查询与 dry-run；运维作业在单线程 `data-ops` 上执行（与全集群单飞一致，夺权、沉降等待、帮会 Dubbo 调用、逐人写事务都在这条线程上）；
   `data-ops-fence` 跑作业心跳与归属续约；`data-ops-sweeper` 清扫心跳过期的作业；`data-ops-ids` 申领与续期发号租约。四条 `data-ops*` 线程都是单线程、守护线程。
@@ -857,7 +981,19 @@ Java 版是独立进程 xm-battle，规格与逐条出处见 `docs/porting/battl
   `java tools/GmShutdown.java --url --operator [--reason] [--expect-node]`（先取身份再签）。
 - Redis 客户端超时（`xm.redis.connect-timeout-ms` / `timeout-ms` / `retry-attempts` / `retry-delay-ms`，
   默认 2000 / 2000 / 1 / 200）：单条命令最坏阻塞 = (重试 + 1) × 响应超时 + 重试 × 间隔 = 4.2s，
-  低于客户端 HTTP 超时 5s（Redisson 自带默认值下可达二十多秒）。
+  低于客户端 HTTP 超时 5s（Redisson 自带默认值下可达二十多秒）。超时的命令会被原样重发一次（第一次可能已经执行），
+  所以可变的 Lua 都要按「可被重放」设计（回合制战斗的脚本逐段写明了重放语义，§4.23）；等一条 Redis 脚本结局的 RPC，调用方超时要大于 4.2 s
+  （`xm.battle.scene-rpc-timeout` 缺省 5 s，启动时与 `RedisProperties.worstCaseCommandMillis()` 比较）。
+- **Redis 的部署约束**（回合制战斗落地后新增，批次 6.3）：
+  - **现在是单机 Redis；上主从 / 集群之前有一件事必须先做**。驱动丢弃与判废的读（`BattleRedis` 的全部脚本）一律读主库；但 `BattleLockReader.exists / existsAll`
+    是咨询性的读，走 Redisson 的普通读路由，主从部署下可能读到从库的旧值。队伍视图、组队跟随、6.4 的 match 预检读到旧值只是显示或排队判断晚一拍；
+    **xm-data 的回档闸（§4.5.1）是安全门**，读到从库的「没有锁」会放行一次本该拒绝的回档。二选一：把 Redisson 的 `readMode` 设成 `MASTER`，或给回档闸一个读主库的批量入口。
+    同类的还有 battle 发件箱定位用的位置读（`PlayerLocationDirectory.findHolderAsync`，只读脚本）：读到过期位置最坏是多一轮 NOT_HERE 或无目标，下一轮纠正；
+    全仓其余以只读方式执行的读届时一并审查。
+  - 战斗锁、待结算记录、已销账墓碑三个键带同一个 `{<pid>}` hash tag，销账 / 取代 / 落库的跨键脚本在 Cluster 下同槽，不用改。
+  - xm-scene、xm-battle、xm-team、xm-data 必须指向**同一个 Redis 实例与库**（缺省都是 DB 12）：队伍视图与回档闸读的是各自进程的客户端，配成不同的库时读到的是空键空间，
+    会把所有人当成不在战，没有自检。
+  - Redis 要开 AOF（everysec；本地编排的 `infra.yaml` 已带 `--appendonly yes`）：实例丢数据会丢掉在途的结算记录与战斗锁，生产值随 7.6 的部署文档。
 
 ### 6.1 本地编排、镜像与 CI（批次 7.1）
 
@@ -927,7 +1063,14 @@ Java 版是独立进程 xm-battle，规格与逐条出处见 `docs/porting/battl
      （`findAllByKvIn` 知道列类型，自动换）。proto3 `optional` 的 presence 不落库（读回的 0 带 presence，与 Go 版相同）。
      阻塞 I/O：只能在存储线程池里调，不得在 Netty I/O 线程或场景逻辑线程上调（AGENTS.md §3 线程所有权）。
   `player` / `player_state`（归属围栏、按玩法拼装的状态载体）仍走 MyBatis + 手写脚本，不迁到 xm-pbmysql。
-- Redis：全部键带前缀 `xm:`，默认 DB 12（与 mmorpg 的开发数据隔离）。
+- **`player_state` 的分段**（`xm.storage.PlayerState`，每个玩法一个字段，字段号永不复用）：1 朝向、2 货币、3 属性加点、4 背包、5 任务、6 当前气血法力、7 宝宝、
+  8 资产通道账本 `asset_ledger`（§4.12）、9 回合制战斗结算账本 `battle_ledger`（批次 6.3，§4.23：`BattleLedgerState{applied[]}`，每条 `{battle_id, applied_at_ms}`，
+  按 battle_id 无符号升序写出；只登记「已应用、销账未确认」的局，稳态 0～1 条，上限 64）。两本账本都与资产在同一份记录里、随同一次带 `owner_epoch` 围栏的写落库——
+  「这条指令 / 这一局已应用」与资产同生共死；各层不认识的字段原样带回，滚动升级或回滚期间旧版本不会把新段抹掉。加一段只登记字段号、不改表结构（db-migrations M10）。
+  GM 回档把两本账本与货币 / 背包 / 宝宝一起算作不可拆的资产组（§4.5.1）。
+- Redis：全部键带前缀 `xm:`，默认 DB 12（与 mmorpg 的开发数据隔离），键名只经 `com.game.discovery.RedisKeys` 生成；各类键在用到它的小节里说明。
+  回合制战斗的四类键——战斗锁 `xm:battle:{<pid>}:lock`、待结算记录 `xm:battle:{<pid>}:settlement`、已销账墓碑 `xm:battle:{<pid>}:settled:<battle_id>`、
+  活动结果副本 `xm:battle:activity-result:<battle_id>`——见 §4.23 的键表，部署约束见 §6。
 - **每账号角色上限**（默认 5）由数据库保证：`PlayerStore.createPlayerWithinCap` 在一个事务里先 `SELECT ... FOR UPDATE`
   锁账号行（主键记录锁，无间隙锁）、再数角色、再逐个候选名插入。锁住之后才建立一致性读快照，所以一定看得到上一个持锁者
   已提交的插入；多个 login 实例并发建角也突破不了上限。每个事务只锁自己账号的一行，没有跨账号锁序，不引入死锁。
@@ -1102,6 +1245,8 @@ client     gate G                       源 scene S                          sce
   - 世界内部：在线周期存盘与 `requestSave` 按在途跳过；续约失去、在线存盘被围栏拒不踢人（§7 第 6 步）；组队跟随与排空改派跳过（`switching`）；
     冻结中的玩家不会被本地 `switchScene`（兜底记 ERROR）。
   - 事后检测：交出提交后比对 `toSave()` 与冻结快照，不同计 `xm_scene_transfer_post_freeze_mutations_total`（应恒为 0，非 0 说明有入口漏了闸）。
+- **与回合制战斗互斥**（批次 6.3，§4.23）：63 的准入先判战斗在途（3023）、再判换图在途（3014）；发起交出的入口拒绝在途玩家，选目标结果回来、进入冻结之前再复查一次；
+  冻结期间到达的战斗确认只标锁、不挂战斗冻结，结算回 DEFERRED、零副作用，资产通道 27003 优先于 27002；交出没提交、原地解冻之后重跑一次完整的战斗进场恢复。
 - **冻结中到达的事件**：`PlayerLeave`（断线 / LeaveGame）与所在链路断开只记下「离开」（先报主动离开、后报链路断开时保持主动），
   被请求让出 E 只记下「被顶号」，都不提交第二笔写；实例与旁人视野保持到结局回来。被请求让出 E+1 源节点不持有、忽略。
 - **结局**（每次冻结恰好终结一次，计 `xm_scene_transfers_total{result}`）：
@@ -1160,10 +1305,12 @@ client     gate G                       源 scene S                          sce
   每个 scene-manager 副本都申领（worker 号段 1..1023 全服共享）；实例不进计划，节点重启后不重建，位置里记的实例号找不到就按原地图落点。
   scene 节点不自己给实例发号（`SCENE_GUID` 与 `SCENE_MANAGER` 的 worker 号段各自申领，同毫秒同 worker 会撞号）。
 - battle 节点的实例 id 是每次进程启动生成的 UUID（进票据与目录，同号的新进程不接受旧票）；battle_id 由 match 发（6.4），dev 管理口由调用方给。
+  battle_id **必须随时间递增**（时间在高位的雪花号）：scene 进场恢复按 battle_id 无符号升序应用同一玩家的多条待结算记录，气血是终值，顺序就是语义（§4.23）；
+  robot 用 dev 管理口时按「毫秒时间戳 × 1000 + 序号」取号。
 
 ## 10. 首批不做（后续批次）
 
-跨 zone、战斗的匹配与 scene 侧冻结 / 结算（随 6.4 / 6.3；battle 节点已于 2026-10-05 补上，见 §4.22）、Kafka 事件、GM 管理接口（远程停机与 xm-data 运维面除外；GM 快照 / 差异 / 物品追溯 / 回收 dry-run 已于 2026-10-05 补上，见 §4.5；运维作业框架、回档与整区维护前快照已于 2026-10-05 补上，见 §4.5.1；回收执行、欠款、精确回收随 7.2c），
+跨 zone、战斗的匹配（随 6.4；battle 节点已于 2026-10-05 补上，见 §4.22；scene 侧冻结 / 结算与结算发件箱已于 2026-10-06 补上，见 §4.23）、Kafka 事件、GM 管理接口（远程停机与 xm-data 运维面除外；GM 快照 / 差异 / 物品追溯 / 回收 dry-run 已于 2026-10-05 补上，见 §4.5；运维作业框架、回档与整区维护前快照已于 2026-10-05 补上，见 §4.5.1；回收执行、欠款、精确回收随 7.2c），
 服务级限流 / 熔断（Sentinel）、合服与 TiDB 数据层。（周期存盘已于 2026-10-02 补上，短线重连已于 2026-10-04 补上，见 §7；货币与 GM 客户端指令闸见 §4.4；登录排队与开服限流见 §8；
   gate 排空与 GM 签名停机见 §6；同 zone 跨节点换图与归属交接已于 2026-10-05 补上，见 §7 第 6 步与 §8.1——跨 zone 传送仍待做；
   镜像 / 副本实例与空闲回收已于 2026-10-05 补上，见 §4.21。）
@@ -1174,7 +1321,7 @@ client     gate G                       源 scene S                          sce
 
 每个进程用 **Micrometer** 记指标，经 **Spring Boot Actuator** 以 Prometheus 文本格式导出（选型见 tech-stack.md）。
 指标名与标签只在每个进程的一个类里定义，业务代码只调语义方法：gate `GateMetrics`、login `LoginMetrics`、
-scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`、guild `GuildMetrics`、trade `TradeMetrics`、data `DataMetrics`、battle `BattleMetrics`。
+scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `SceneMetrics`（回合制战斗的计数单列在 `SceneBattleMetrics`）、friend `FriendMetrics`、chat `ChatMetrics`、team `TeamMetrics`、guild `GuildMetrics`、trade `TradeMetrics`、data `DataMetrics`、battle `BattleMetrics`（两个发件箱在 `OutboxMetrics`）。
 
 | 进程 | 抓取地址（默认） | 说明 |
 |---|---|---|
@@ -1219,7 +1366,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | gate | `xm_gate_sessions_active` | Gauge | — | 当前会话数（含未握手、正在收尾的） |
 | gate | `xm_gate_scene_links` | Gauge | — | 到各 scene 节点的链路数（建链中 + 就绪） |
 | gate | `xm_gate_handshakes_total` | Counter | `result`=ok / bad_signature / bad_payload / wrong_gate / wrong_zone / expired / timeout / missing | 令牌握手结果（missing = 没握手就发业务包） |
-| gate | `xm_gate_client_requests_total` | Counter | `route`=login / scene / unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / gm_rejected / killed / overflow / dropped | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。C++ 的「非法包」= unknown_message + oversized + rate_limited + gm_rejected；限频拒绝 = rate_limited |
+| gate | `xm_gate_client_requests_total` | Counter | `route`=login / scene / unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / gm_rejected / battle_rejected / killed / overflow / dropped | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。C++ 的「非法包」= unknown_message + oversized + rate_limited + gm_rejected；限频拒绝 = rate_limited。battle_rejected（批次 6.3）= 战斗服务 `BattleClientPlayer` 的 12 个号发到了大厅连接上，GM 闸之后当场推 23 {1003}（`route`=unsupported、`method`=BattleClientPlayer.<方法名>；不计非法包、不断连，战斗上行不再计 unsupported）。这 12 条序列在装配时预建为 0，是请求计数器里唯一预建的一组；持续增长说明有旧客户端或误走大厅的战斗上行，要告警 |
 | gate | `xm_gate_client_invalid_frames_total` | Counter | `reason`=invalid_length / checksum / invalid_name_len / unknown_type / parse | 解码层非法帧（随即断开） |
 | gate | `xm_gate_disconnects_total` | Counter | `reason`=handshake_timeout / handshake_rejected / no_handshake / illegal_packets / pending_overflow / write_buffer_full / invalid_frame / session_id_exhausted / server_directive / kicked / scene_link_down / server_kick / transfer_failed | gate 主动断开的连接（客户端自己断开、停服 / 丢租约的批量关闭不计）；transfer_failed = 跨节点换图改绑之后没能落到目标节点，或改绑指令内容非法（§8.1；源节点探测判失去时经 `PlayerKicked` 断开，计 kicked） |
 | gate | `xm_gate_pushes_total` | Counter | `kind`=message / kick，`result`=delivered / no_session / not_bound / stale_instance / invalid | 服务端推送（§4.3）对每个目标会话的结局：已下发 / 会话号已不存在 / 会话不在游戏里或玩家对不上（栅栏）/ 指向别的 gate 实例 / 格式不对。按序批量推送（`MessageBatch`，批次 6.2）计 kind=message、每个目标只计一次：全部送出才算 delivered，空批或任一条损坏算 invalid |
@@ -1277,7 +1424,7 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | data | `xm_data_snapshot_admin_total` | Counter | `cause`=gm_manual / pre_maintenance，`result`=ok / replayed / player_not_found / id_unavailable / idempotency_conflict / db_error | 运维直写快照的结局（批次 7.2a）；标签取值是固定集合，首次用到时才注册（不是启动时预建） |
 | data | `xm_data_ops_jobs_total`、`xm_data_ops_job_seconds` | Counter / Timer | `kind`=rollback / zone_snapshot（清扫时读不到作业行记 unknown）；Counter 另有 `outcome`=succeeded / partial / rejected / failed / diverged_after_write / cancelled / interrupted | 运维作业的结局与从开始执行到结局的耗时（批次 7.2b，§4.5.1）。谁把作业行改成终态谁记，同一作业只计一次（清扫器改的由清扫器记 interrupted）。首次用到时才注册。interrupted / diverged_after_write 增长要告警 |
 | data | `xm_data_ops_jobs_running`、`xm_data_ops_fence_held` | Gauge | — | 本实例正在执行的作业数；此刻以运维身份持有归属的玩家数。装配时预注册，空闲应为 0。`fence_held` 持续不为 0 且超过 `job-timeout` = 作业卡住、玩家进不了游戏（要告警） |
-| data | `xm_data_ops_players_total` | Counter | `kind`=rollback，`outcome`=restored / player_online / player_busy / player_not_found / snapshot_not_found / no_snapshot / created_after_target / snapshot_gone / state_invalid / unknown_sections / fence_lost / id_unavailable / failed / not_executed / rejected / cancelled | 回档作业逐玩家的结局（即 `ops_job_player.outcome`，RESTORED 记作 restored）；取值是代码里的固定集合，首次用到时才注册。批次 6.3 追加 in_battle（data-ops-spec §13.3） |
+| data | `xm_data_ops_players_total` | Counter | `kind`=rollback，`outcome`=restored / player_online / player_busy / in_battle / battle_lock_unknown / player_not_found / snapshot_not_found / no_snapshot / created_after_target / snapshot_gone / state_invalid / unknown_sections / fence_lost / id_unavailable / failed / not_executed / rejected / cancelled（共 18 个） | 回档作业逐玩家的结局（即 `ops_job_player.outcome`，RESTORED 记作 restored）；取值是代码里的固定集合 `RollbackJob.PLAYER_OUTCOMES`，批次 6.3 起**装配时全部预建为 0**（xm-data 其余计数仍是首次用到才注册）。in_battle / battle_lock_unknown 是回档前查战斗锁的两个结局（§4.5.1）：前者是规则拒绝，后者是读不到锁（Redis 故障，fail-closed），增长要告警 |
 | data | `xm_data_ops_claims_total`、`xm_data_ops_fence_lost_total` | Counter | 前者 `outcome`=claimed / kicked（这一次夺权调用里重发过让出请求之后才夺到）/ online（在线、没有踢）/ timeout / not_found / error；后者无标签 | 运维夺取归属的结局；持有期间续约失败的人数（之后不再对他写）。`timeout` 突增 = 有活着的写者不让出 |
 | data | `xm_data_rollback_divergence_check_total` | Counter | `source`=guild / ledger / recall；`result`：guild = clean / divergence / unprovable / check_failed / post_write_clean / post_write_diverged / post_write_failed，ledger = clean / divergence / unprovable，recall = clean / divergence | 回档的三道资产分歧检查，每个作业每道至多一次（写后复查另计一次）。`check_failed` 与 `post_write_*` 里的 diverged / failed 算故障，要告警；divergence / unprovable 是规则拒绝 |
 | data | `xm_data_rollback_divergence_rows_total`、`xm_data_rollback_guild_check_seconds` | Counter / Timer | 前者 `source`=guild / ledger、`accepted`=true（只在带原因放行时累加）；后者无标签 | 被放行的分歧行数；一次帮会检查（含翻页）的耗时 |
@@ -1301,8 +1448,8 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_logic_task_run_seconds` | Timer | — | 逻辑任务的执行耗时（抛异常的也计） |
 | scene | `xm_scene_tick_seconds` | Timer | — | 一帧的耗时（外推 + 视野刷新 + 广播），20 FPS、每帧一次；超过 50ms 桶即超预算 |
 | scene | `xm_scene_broadcast_seconds` | Timer | `kind`=view_changes / attribute_sync | 帧内广播阶段（组包、序列化、交给链路）：view_changes = 47 / 64，每帧一次；attribute_sync = 66，偶数帧一次（均为全部场景合计） |
-| scene | `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid / frozen | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值或坐标超出世界范围（±1e7 m）丢弃 / 跨节点换图冻结中静默丢（§8.1） |
-| scene | `xm_scene_skill_releases_total` | Counter | `result`=ok / unknown_skill / invalid_target / cooldown / uninterruptible / state_rejected | 放技能（84）的裁决，每条恰好计一次（§4.9）；不带技能号（客户端可控）与玩家号 |
+| scene | `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid / frozen / in_battle | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值或坐标超出世界范围（±1e7 m）丢弃 / 跨节点换图冻结中静默丢（§8.1）/ 回合制战斗在途（134 / 132 静默丢，131 只清速度，§4.23） |
+| scene | `xm_scene_skill_releases_total` | Counter | `result`=ok / unknown_skill / invalid_target / cooldown / uninterruptible / state_rejected / caster_in_battle / target_in_battle | 放技能（84）的裁决，每条恰好计一次（§4.9）；不带技能号（客户端可控）与玩家号。后两个取值（批次 6.3）按回码拆开：施法者在回合制战斗中 7004 / 指定的目标在战斗中 7002 |
 | scene | `xm_scene_skill_interrupts_total` | Counter | — | 放技能打断了进行中的施法（推了 33）的次数 |
 | scene | `xm_scene_aoi_changes_total` | Counter | `change`=enter / leave | 视野变化通知，一对（观察者, 目标）计一次：enter = 进场的 47 条目与给旁人的 21、帧内 47 条目；leave = 离场 / 换场景的 51、帧内 64 条目。离场者自己的列表静默清空，不计 |
 | scene | `xm_scene_storage_writes_seconds` | Timer | `op`=save / release / progress / handoff / probe，`result`=released / saved / fenced / failed / rejected / handed_off / lease_too_short / not_committed / lost | 玩家数据写（写回并释放 / 只释放 / 在线存盘 / 交出 / 交出探测，§7 第 6 步）的结局与耗时（含瞬时故障重试），每个写任务恰好计一次：已落库并释放 / 已落库未释放（在线存盘）/ 围栏拒绝（不是故障）/ 重试用尽或非瞬时故障 / 存储线程池拒绝（耗时记 0）/ 已交出（含探测认出自己的提交）/ 剩余租约不足没提交 / 探测确认没提交 / 探测判定不了或读到已失去。只注册各 op 可能出现的组合：save / release = released / fenced / failed / rejected，progress = saved / fenced / failed / rejected，handoff = handed_off / lease_too_short / fenced / failed / rejected（failed / rejected 是结局不明、交给探测，不算写丢失），probe = handed_off / not_committed / lost / rejected。停服时 `shutdownNow` 丢弃的写只进 ERROR 日志 |
@@ -1310,14 +1457,14 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `executor_*{name="scene-storage"}` | Micrometer 标准线程池指标 | — | 存储线程池排队（`executor_queued_tasks`）/ 剩余容量 / 活跃 / 完成数 |
 | scene | `xm_scene_gate_links` | Gauge | — | 接入本节点的 gate 链路连接数（含握手中） |
 | scene | `xm_scene_link_frames_total` | Counter | `direction`=in / out，`type`=链路帧类型 | gate ↔ scene 链路帧（in = 从链路收到，含握手帧；out = 已交给链路写出，含 hello_ack） |
-| scene | `xm_scene_team_follow_total` | Counter | `result`=followed / same_scene / not_in_team / projection_missing / not_member / leader_not_on_node / leader_scene_draining / switching / is_leader / stale / read_error | 进场 / 换场景后的组队跟随检查（§4.16；基线只有 team_follow_skipped 日志行） |
-| scene | `xm_scene_channels{state}`、`xm_scene_channel_plan_applies_total{result}`、`xm_scene_channel_plan_poll_failures_total`、`xm_scene_channel_relocations_total{result}` | Gauge / Counter | `state`=active / draining；`result`=applied / rejected / skipped_lease，或 same_map / default_world / blocked / enter_redirect / switching | 本节点频道数（批次 5.3 起只计主世界频道，实例另见 `xm_scene_instances`）、计划应用、拉计划失败、排空改派（§4.19；switching = 玩家在跨节点换图的冻结中，这次不改派） |
+| scene | `xm_scene_team_follow_total` | Counter | `result`=followed / same_scene / not_in_team / projection_missing / not_member / leader_not_on_node / leader_scene_draining / switching / is_leader / stale / read_error / in_battle / battle_lock | 进场 / 换场景后的组队跟随检查（§4.16；基线只有 team_follow_skipped 日志行）。批次 6.3：in_battle = 自己有战斗冻结；battle_lock = 自己的战斗锁存在或读锁失败（fail-closed），都不跟随 |
+| scene | `xm_scene_channels{state}`、`xm_scene_channel_plan_applies_total{result}`、`xm_scene_channel_plan_poll_failures_total`、`xm_scene_channel_relocations_total{result}` | Gauge / Counter | `state`=active / draining；`result`=applied / rejected / skipped_lease，或 same_map / default_world / blocked / enter_redirect / switching / in_battle | 本节点频道数（批次 5.3 起只计主世界频道，实例另见 `xm_scene_instances`）、计划应用、拉计划失败、排空改派（§4.19；switching = 玩家在跨节点换图的冻结中，这次不改派；in_battle = 玩家在回合制战斗中，这次不改派、下次推进再看，§4.23） |
 | scene | `xm_scene_instances` | Gauge | `kind`=mirror / dungeon，`state`=active / reclaiming / draining | 本节点的镜像 / 副本实例数（§4.21）：承载中 / 回收宽限中 / 级联或显式销毁排空中；逻辑线程在变化后推绝对值，6 个组合启动即注册 |
 | scene | `xm_scene_instance_lifecycle_total` | Counter | `kind`=mirror / dungeon，`event`=created / rejected / reclaim_started / revived / cascade_started / destroyed_idle / destroyed_cascade / destroyed_admin | 实例生命周期事件：建好 / 建实例被拒（不建、记 ERROR）/ 空置满超时进入回收宽限 / 宽限中复活 / 源已销毁转级联 / 三种销毁。勾稽：每个 created 最终恰好对应一个 destroyed_*（或停服）；`mirror_resolves{created}` = `instance_lifecycle{kind="mirror",event="created"}` |
 | scene | `xm_scene_mirror_requests_total` | Counter | `result`=accepted / bad_source / bad_mirror_config / source_draining / not_accepting / node_cap / creator_cap | 63 镜像分支的同步结局，每条镜像请求恰好计一次（3014 / 全 0 在分支之前，不计）：受理回 `{0}`，其余各回 3005 |
 | scene | `xm_scene_mirror_resolves_total` | Counter | `result`=created / rejected / error / stale / wrong_node / source_moved / create_rejected | 镜像取号结果回到逻辑线程后的结局，每次受理恰好计一次：建好换入 / scene-manager 拒绝（23 {3023}）/ 调用失败、超时、租约无效、没装配（23 {1003}）/ 玩家已离开或在途已作废（丢弃，号作废）/ 号落在别的节点（23 {3023}，不该出现）/ 玩家已不在源、源已不在或在排空、停止接客、达上限（23 {3023}）/ 本地重号或建实例被拒（23 {3023}）。勾稽：`mirror_requests{accepted}` = Σ`mirror_resolves` + 在途数 |
 | scene | `xm_scene_admin_requests_total` | Counter | `op`=instance_create / instance_destroy / other，`status`=HTTP 状态码 | scene 管理端口 `/admin/**`（dev / test 建 / 毁副本，§4.21）的调用，鉴权失败也计；首次用到时才注册 |
-| scene | `xm_scene_switch_resolves_total` | Counter | `result`=local / remote / same / rejected / error / stale | 63 远端去向经 scene-manager 选目标的结果（§8.1），每次恰好计一次（本节点直接解析掉的 63 不计）：落在本节点本地换 / 别的节点（冻结、交出）/ 就是当前场景 / 拒绝或指向本节点却不在、在排空（23 {3023}）/ 调用失败、兜底超时、应答残缺（23 {1003}）/ 回来时实例已离开或令牌不符（丢弃） |
+| scene | `xm_scene_switch_resolves_total` | Counter | `result`=local / remote / same / rejected / error / stale / in_battle | 63 远端去向经 scene-manager 选目标的结果（§8.1），每次恰好计一次（本节点直接解析掉的 63 不计）：落在本节点本地换 / 别的节点（冻结、交出）/ 就是当前场景 / 拒绝或指向本节点却不在、在排空（23 {3023}）/ 调用失败、兜底超时、应答残缺（23 {1003}）/ 回来时实例已离开或令牌不符（丢弃）/ 玩家在回合制战斗中（批次 6.3，§4.23）：选目标期间进了战斗（例如迟到的确认按锁重建了冻结），结果回来时中止换图、推 23 {3023}；发起交出的入口 `beginRemoteSwitch` 遇到在途玩家也计在这里（63 已先回 3023，那一支只是纵深防御） |
 | scene | `xm_scene_transfers_total` | Counter | `result`=handed_off / lease_too_short / fenced / aborted_in_place / lost_unknown / left / taken_over / link_gone | 跨节点换图交出的结局（§8.1 结局表），每次冻结恰好终结一次。勾稽：`switch_resolves{remote}` ≈ Σ`transfers` + `transfers_in_flight`；handed_off 在 `PlayerTransfer` 交给链路时就计，之后异步写失败另计 `link_dropped{write_failed}` |
 | scene | `xm_scene_transfer_freeze_seconds` | Timer | — | 从冻结到交出结局处理完的时长（与 `transfers` 同时记）；桶 5ms～20s |
 | scene | `xm_scene_transfers_in_flight` | Gauge | — | 冻结中（交出在途）的玩家数，逻辑线程在变化后推绝对值 |
@@ -1331,6 +1478,19 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | scene | `xm_scene_gain_block_sync_failures_total` | Counter | — | 封禁名单同步失败次数（沿用上次的名单） |
 | scene | `xm_scene_gain_blocked_total` | Counter | `category`=currency | 被全服产出封禁拒绝的获取 |
 | scene | `xm_scene_gain_anomalies_total` | Counter | `category`=currency，`currency_type`=币种号 | 获取异常告警：滑动窗口内次数或累计量越线，每次越线计一次（玩家号只进日志 `xm.audit.anomaly`） |
+| scene | `xm_scene_battle_prepares_total` | Counter | `result`=ok / invalid / not_here / switching / in_battle / not_ready / dead / lock_held / redis_error / stale / cancelled | 回合制战斗备战的结论（批次 6.3，§4.23；本行起到 `gate_rejects` 的 scene 战斗计数都在构造时预建全部组合）：invalid 含期限超界；not_here 含组快照取不到路由；四种 1006 分开计（换图在途 / 已有冻结 / 恢复未就绪·账本未落盘·账本损坏 / 气血 0）；lock_held = 锁被占；redis_error = 写锁出错或超时（1003）；stale = 写锁回来时实例已换；cancelled = 写锁在途时收到取消 |
+| scene | `xm_scene_battle_cancels_total` | Counter | `result`=cleared / idempotent / mismatch / rejected_fighting / deferred / offline_deleted / offline_rejected_fighting / offline_absent / offline_error | 取消备战的结论：在线解冻 / 在线没有冻结 / battle_id 不符或参数为 0 / 已 FIGHTING 拒绝 / 写锁在途延后；后四个是玩家不在本节点时那段 Lua 的结局 |
+| scene | `xm_scene_battle_confirms_total` | Counter | `result`=upgraded / idempotent / reextended / mismatch / rebuilt / frozen_extended / offline_extended / offline_miss / ledger_hit / invalid / error | 开局确认的结论。**不是每条确认恰好计一次**：error 既计确认脚本失败，也计升级 / 再续之后的续锁失败，后者与同一条确认已计的 upgraded / reextended 叠加。rebuilt = 迟到确认按锁重建；frozen_extended = 交出冻结中只标锁 |
+| scene | `xm_scene_battle_rebuilds_total` | Counter | `reason`=login / late_confirm / carried，`result`=rebuilt / reverted / ledger_hit / skipped_corrupt / skipped_pending / miss / error | 按锁重建冻结（进场恢复 / 迟到确认 / 同 epoch 沿用旧实例）。login 时锁指向的局已在待结算记录里就不重建，分三种：skipped_corrupt（坏字段）/ ledger_hit（本轮刚应用或账本命中——离线结算后登录的常态）/ skipped_pending（记录被延后或还没轮到）；reverted = 复核没命中而撤销，也计「按锁重建出备战冻结之后，那把备战锁被本节点在途的删除删掉、冻结一并摘掉」（一律记在 login 下，可与同一个冻结此前已计的 rebuilt 叠加）；error = 复核脚本失败（冻结保守保留） |
+| scene | `xm_scene_battle_reconnect_hints_total` | Counter | `trigger`=confirm / late_confirm / login / carried | 推 144（重连提示）的来由；同一个冻结对象上恰好一次。carried = 同 epoch 沿用旧冻结时当场推的：换了会话，或会话没变而这一局的 144 还没推过（按锁重建后复核还在途） |
+| scene | `xm_scene_battle_frozen` | Gauge | `state`=preparing / fighting | 当前战斗冻结中的玩家数（reaper 每轮数一遍）。fighting 长时间不降要告警 |
+| scene | `xm_scene_battle_freeze_expired_total`、`xm_scene_battle_rescues_total` | Counter | 前者 `phase`=preparing / fighting；后者 `result`=applied / already_applied / deferred / miss / error / gave_up | reaper 按期限摘掉的冻结；FIGHTING 判废前读本局待结算记录（rescue）的结局：error = 读出错、下一轮再读，gave_up = 期限 + 60 s 仍读不到、直接判废 |
+| scene | `xm_scene_battle_recovery_total` | Counter | `result`=ready / retry / error | 进场恢复的结局：retry = 恢复读失败或有延后的待结算记录（由 reaper 重跑）；error = 读回来了、处理快照时出了意外异常（正常恒为 0，非 0 是代码缺陷，要告警） |
+| scene | `xm_scene_battle_rpc_total` | Counter | `method`=prepare / cancel / confirm / settlement，`result`=handled / not_here / deferred / overloaded / error | `SceneBattleService` 提供方的结局（要等 Redis 的分支在结局出来时才计）；overloaded = 在途超限，保证没进逻辑线程 |
+| scene | `xm_scene_battle_settlements_total` | Counter | `path`=online / by_lock / login / rescue，`result`=applied / already_applied / discarded_invalid / discarded_mismatch / discarded_void / deferred_frozen / deferred_currency / deferred_recovering / deferred_lock_read / deferred_ledger / not_here | 结算到达的结论，按四条应用路径分：在线冻结匹配 / 没有冻结按锁 / 进场恢复 / rescue。already_applied 含「本实例已销账的局被过期读带回来」。deferred_currency 持续出现 = 该玩家金币入账一直被拒、开不了下一局，要 GM 处置 |
+| scene | `xm_scene_battle_acks_total` | Counter | `trigger`=apply / persisted / reaper / login / discard，`result`=released / not_ours / deferred / error | 销账（`ACK` 脚本）：released = 删到了记录或锁；not_ours = 都不是本局；deferred = 还没落盘（压一次存盘）；error = 脚本失败（账本条目保留，之后重试） |
+| scene | `xm_scene_battle_items_total`、`xm_scene_battle_ledger_evictions_total`、`xm_scene_battle_pending_corrupt_total`、`xm_scene_battle_exp_ignored_total` | Counter | 第一个 `kind`=consume_clamped / consume_rejected / drop_overflow / drop_lost；其余无标签 | 结算道具的异常路径（消耗按持有夹紧 / 非战斗道具拒扣 / 掉落改投临时格 / 两处都放不下丢失）；账本满 64 淘汰最旧项；待结算记录里的坏字段；结算里的经验（两版都没有经验系统，只记日志）。drop_lost、ledger_evictions、pending_corrupt 非 0 要告警 |
+| scene | `xm_scene_battle_gate_rejects_total` | Counter | `gate`=enter_scene / skill / attribute / pet / bag_sort / asset / move / default | 回合制战斗在途闸挡掉的操作（§4.23），每条被拒的请求恰好计一次、只计在自己的闸上：63 / 84（施法者与目标）/ 属性六写 / 宝宝六写 / 192 / 资产通道 debit·credit / 移动上行 / 缺省 REJECT。定义在 `SceneMetrics`（各服务闸共用） |
 | battle | `xm_battle_rooms` | Gauge | — | 本节点的房间数（房间表 hooks 维护的原子量） |
 | battle | `xm_battle_room_creates_total` | Counter | `result`=ok / idempotent / invalid / fingerprint_reject / engine_reject / ticket_failed / not_allocatable | 建房结局，每次 createBattle 恰好计一次：新建 / 幂等命中 / 1005 / enforce 指纹不符 1006 / 引擎拒绝 1002 / 预签失败 1003 / 节点级拒绝（准入闸、在途超限，由控制面计） |
 | battle | `xm_battle_room_ends_total` | Counter | `reason`=finished / deadline / destroyed / aborted | 房间结局，每间房移除时恰好计一次：分出胜负 / 整场期限强制平局 / DestroyBattle / 停机作废 |
@@ -1345,8 +1505,13 @@ scene-manager `SceneDirectoryProvider`、gateway `AssignGateMetrics`、scene `Sc
 | battle | `xm_battle_pushes_total` | Counter | `category`=lobby / battle_frame，`route`=direct / via_gate / dropped，`message`=NotifyBattleAssigned / NotifyBattleStart / NotifyTurnResult / NotifyBattleEnd / NotifySpectateState / NotifySpectateTurnResult / NotifySpectateEnd | 房间推送的出口，每个收件人每条消息恰好计一次：大厅公告走直连或经 gate 回落，战斗帧走直连或丢弃（基线 battle_frame_dropped_no_direct） |
 | battle | `xm_battle_lobby_push_outcomes_total` | Counter | `outcome`=sent / offline / gate_unreachable / error | 大厅公告经 gate 回落（`PlayerPushes.pushAllToPlayer`）的结局；error = Redis 故障、在线目录条目损坏等 |
 | battle | `xm_battle_tickets_total` | Counter | `path`=create / observer / reissue，`result`=ok / failed | 签票：建房预签 / 观众（含幂等重签）/ 补签 |
-| battle | `xm_battle_scene_events_total` | Counter | `kind`=confirm / settlement，`result`=logged / sent / skipped / error | battle → scene 的确认事件与结算；6.2 的缺省端口只记日志（logged），dev 房间的结算计 skipped；sent / error 随 6.3 的真实传输 |
-| battle | `xm_battle_results_total` | Counter | `channel`=plain / activity，`result`=logged / sent / error | 对局结果事件（只在真打完的局发）；6.2 只有 logged，sent / error 随 6.3 / 6.4 |
+| battle | `xm_battle_scene_events_total` | Counter | `kind`=confirm / settlement，`result`=logged / sent / rerouted / not_here / skipped / error | battle → scene 的确认事件与结算。批次 6.3 接上真实传输之后：确认每次必有一个计数结局——发往快照路由的实例计 sent，实例不符回落到定位器、发往玩家现在的实例计 rerouted，定位不到不发计 skipped；应答是 NOT_HERE 另计 not_here，传输失败 / 回调里的意外另计 error。结算 `result=sent` 表示房间把这份结算交给了发件箱（落库、投递、重投的结局看下面三行），dev 房间的结算计 skipped。logged 只在换回日志端口（测试）时出现 |
+| battle | `xm_battle_results_total` | Counter | `channel`=plain / activity，`result`=logged / sent / error | 对局结果事件（只在真打完的局发）。发布端口仍是日志实现（6.4 接 match），所以现在只有 logged；批次 6.3 起活动局的首发与每次重发计 `channel=activity`，plain 只统计普通局 |
+| battle | `xm_battle_settlement_outbox_total` | Counter | `event`=stored / not_durable / delivered / resend / skip_no_target / superseded / acked / exhausted / exhausted_offline / expired / probe_error / locate_error / serialize_failed / already_settled / fields_overflow（15 个，全部预建） | 结算发件箱（批次 6.3，§4.23）：stored 只在落库脚本真的写入时计；落库时这一局已销账（墓碑在）计 already_settled，两者互斥；delivered 是发出次数（首投 + 每次重投），首投数 = delivered − resend；acked = 探测到记录已不在（scene 已销账）；superseded = 玩家离线且锁已属于别的局；exhausted（有目标仍重投用尽）对 exhausted_offline（玩家离线的常态）；expired = 条目一直探测 / 定位出错、超过 10 min 摘除；fields_overflow = 落库后该玩家的待结算字段数超过 16（记录在堆积）。not_durable、exhausted、expired、fields_overflow 非 0 要告警 |
+| battle | `xm_battle_settlement_outbox_entries` | Gauge | — | 结算发件箱里登记的条目数（发件箱线程推绝对值） |
+| battle | `xm_battle_settlement_delivery_total` | Counter | `result`=applied / already_applied / discarded / deferred / not_here / overloaded / transport_error | 一次结算投递的应答；只计数、不改发件箱状态（销账以 scene 落盘为准） |
+| battle | `xm_battle_activity_result_outbox_total` | Counter | `event`=stored / not_durable / resend / acked / exhausted / expired / probe_error / serialize_failed | 活动结果持久通道（§4.23）；消费方两版都还没有，线上不可达 |
+| battle | `xm_battle_dev_gather_total` | Counter | `mode`=prepare_only / create / unknown，`result`=ok / prepare_failed / create_failed / forbidden / rejected | dev / test 管理接口 `dev/gather` 的结局（§4.22）：unknown = 解析请求体之前就被拒；forbidden = 运行模式不是 dev / test；rejected = 请求体非法或节点没在运行 |
 | battle | `xm_battle_rpc_seconds` | Timer | `method`=createBattle / destroyBattle / issueBattleTicket / addObserver / removeObserver，`result`=ok / business_error / not_allocatable / error | 控制面提供方从收到到 future 完成的耗时（含逻辑线程排队，桶 1ms～1s）；error = 投递被拒、在途超限、处理中抛异常（future 异常完成） |
 | battle | `xm_battle_logic_pending_tasks` | Gauge | — | 逻辑线程（兼直连 I/O）的任务队列长度 |
 | battle | `xm_battle_admission_phase` | Gauge | — | 建房准入闸阶段：0 not_started / 1 open / 2 closed（本机切片据它等就绪） |
