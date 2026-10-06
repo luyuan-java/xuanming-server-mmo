@@ -21,6 +21,9 @@ import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,27 +39,45 @@ import org.slf4j.LoggerFactory;
  * </ol>
  * 处理器的登记规则：方法名经 {@code MessageIdRegistry} 换成消息号；同一个方法两个处理器、或方法名不在契约的 {@code MatchService} 里，构造即失败。
  * 返回的 future 永不异常完成；不产生会话指令。线程安全。
+ *
+ * <p><b>发号租约真正丢失期间</b>（lead 裁决 2）：157 排队与 152 发起切磋不再交给各自的处理器，在调用线程上当场按「内部错误」口径回
+ * （{@link LostLeaseRefusals}）；其余八个号照常。判定排在「有没有处理器」之后：没有处理器的号仍是信封 1003。
  */
 public final class MatchDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(MatchDispatcher.class);
 
+    /** 租约丢失期间拒收日志的最小间隔：拒收的次数由玩家的请求量决定，逐条打会刷屏；丢失本身已有 ERROR 与健康检查。 */
+    private static final long REFUSAL_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(10);
+
     private final Map<Integer, MatchMethodHandler> handlers;
     private final Executor workers;
     private final MatchMetrics metrics;
     private final long budgetMillis;
+    private final BooleanSupplier leaseLost;
+    private final LostLeaseRefusals refusals;
+    private final AtomicLong lastRefusalLogNanos = new AtomicLong(System.nanoTime() - REFUSAL_LOG_INTERVAL_NANOS);
+
+    /** 不看租约的派发器（组件测试用；生产一律用带 {@code leaseLost} 的构造器）。 */
+    public MatchDispatcher(MessageIdRegistry registry, Collection<? extends MatchMethodHandler> handlers, Executor workers, MatchMetrics metrics,
+                           long budgetMillis) {
+        this(registry, handlers, workers, metrics, budgetMillis, () -> false);
+    }
 
     /**
      * @param handlers     全部处理器 bean（可以为空：这时每个号都回信封 1003）
      * @param workers      {@code match-worker} 工作池（测试可传同步执行器）
      * @param budgetMillis 整请求预算（{@code xm.match.request-budget}）
+     * @param leaseLost    发号租约是否已真正丢失（生产为 {@code MatchIds::leaseLost}）；每次派发读一次，不得阻塞
      * @throws IllegalStateException 处理器的方法名不在契约的 {@code MatchService} 里，或同一个方法有两个处理器
      */
     public MatchDispatcher(MessageIdRegistry registry, Collection<? extends MatchMethodHandler> handlers, Executor workers, MatchMetrics metrics,
-                           long budgetMillis) {
+                           long budgetMillis, BooleanSupplier leaseLost) {
         this.workers = Objects.requireNonNull(workers, "workers");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.budgetMillis = budgetMillis;
+        this.leaseLost = Objects.requireNonNull(leaseLost, "leaseLost");
+        this.refusals = new LostLeaseRefusals(metrics);
         Map<Integer, MatchMethodHandler> byId = new HashMap<>();
         for (MatchMethodHandler handler : handlers) {
             String method = handler.method();
@@ -77,6 +98,13 @@ public final class MatchDispatcher {
         return Collections.unmodifiableSet(new TreeSet<>(handlers.keySet()));
     }
 
+    /** 契约的 {@code MatchService} 里还没有处理器的方法名（升序）：这些号一律回信封 1003。全部接齐时为空。 */
+    public Set<String> unhandledMethods() {
+        Set<String> missing = new TreeSet<>(MatchMethods.ALL);
+        handlers.values().forEach(handler -> missing.remove(handler.method()));
+        return Collections.unmodifiableSet(missing);
+    }
+
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
         Timer.Sample sample = metrics.startTimer();
         MatchMethodHandler handler = handlers.get(call.getMessageId());
@@ -86,6 +114,13 @@ public final class MatchDispatcher {
             return CompletableFuture.completedFuture(envelope(MatchTips.SERVICE_UNAVAILABLE));
         }
         Deadline deadline = Deadline.after(budgetMillis); // 受理时刻起算，含排队
+        if (leaseLost.getAsBoolean()) {
+            MatchMethodHandler refusal = refusals.refusalFor(handler.method()).orElse(null);
+            if (refusal != null) {
+                logRefusal(handler, call);
+                return CompletableFuture.completedFuture(run(refusal, call, deadline, sample));
+            }
+        }
         if (handler.inline()) {
             return CompletableFuture.completedFuture(run(handler, call, deadline, sample));
         }
@@ -134,6 +169,18 @@ public final class MatchDispatcher {
         } catch (RuntimeException e) {
             log.error("[match] {} 的过载应答出错（回信封 1003）", handler.method(), e);
             return envelope(MatchTips.SERVICE_UNAVAILABLE);
+        }
+    }
+
+    /** 租约丢失期间的拒收：每 10 s 至多一条 WARN，其余 DEBUG。 */
+    private void logRefusal(MatchMethodHandler handler, ClientCall call) {
+        long now = System.nanoTime();
+        long last = lastRefusalLogNanos.get();
+        if (now - last >= REFUSAL_LOG_INTERVAL_NANOS && lastRefusalLogNanos.compareAndSet(last, now)) {
+            log.warn("[match] 发号租约已丢失：拒收 {}（回 in-band 16004；每 10 s 至多一条本日志）{}——需要重启本进程", handler.method(),
+                    describe(call.getSession()));
+        } else {
+            log.debug("[match] 发号租约已丢失：拒收 {} {}", handler.method(), describe(call.getSession()));
         }
     }
 

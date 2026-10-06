@@ -36,6 +36,7 @@ public final class LeaseOnlyRedis {
     public final RedissonClient client = mock(RedissonClient.class);
     private final AtomicInteger acquisitions = new AtomicInteger();
     private final AtomicInteger scriptEvals = new AtomicInteger();
+    private final AtomicInteger releases = new AtomicInteger();
     private final AtomicBoolean lost = new AtomicBoolean();
 
     @SuppressWarnings("unchecked")
@@ -54,6 +55,11 @@ public final class LeaseOnlyRedis {
         RScript script = mock(RScript.class, invocation -> {
             if (invocation.getMethod().getName().equals("eval")) {
                 scriptEvals.incrementAndGet();
+                // 释放脚本是「值还是我的就 DEL」，续期脚本是 PEXPIRE：按脚本文本分开数
+                Object lua = invocation.getArguments().length > 1 ? invocation.getArgument(1) : null;
+                if (lua instanceof String text && text.contains("'del'")) {
+                    releases.incrementAndGet();
+                }
                 return lost.get() ? 0L : 1L;
             }
             return null;
@@ -69,6 +75,11 @@ public final class LeaseOnlyRedis {
     /** 续期 / 释放脚本执行的次数。 */
     public int scriptEvals() {
         return scriptEvals.get();
+    }
+
+    /** 其中<b>释放</b>脚本执行的次数（交还租约；不含周期性的续期）：断言「停机到哪一步才还租约」用它，不受上下文活了多久影响。 */
+    public int leaseReleases() {
+        return releases.get();
     }
 
     /** 之后的续期都回「号已不属于本实例」：下一次续期（TTL 的 1/3 之后）租约被判丢失。 */

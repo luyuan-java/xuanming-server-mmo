@@ -14,13 +14,22 @@ import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisProperties;
 import com.game.discovery.battle.BattleLockReader;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.location.SceneAssetLocator;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.presence.PlayerPushes;
+import com.game.match.admin.MatchAdminAuthFilter;
+import com.game.match.dispatch.MatchWorkerPool;
 import com.game.match.gather.GatherHooks;
+import com.game.match.gather.GatherLauncher;
 import com.game.match.id.MatchIds;
+import com.game.match.lifecycle.MatchLeaseHealthIndicator;
+import com.game.match.lifecycle.MatchLifecycle;
+import com.game.match.lifecycle.MatchStartupChecks;
+import com.game.match.lifecycle.MatcherControl;
+import com.game.match.lifecycle.ResultConsumerControl;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
 import com.game.match.port.NodeCalls;
@@ -39,11 +48,14 @@ import java.util.concurrent.ScheduledExecutorService;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 
 /**
  * xm-match 的<b>基础设施</b>装配（match-spec §9.1、§9.7、§9.8）：启动门禁（密钥、配置表）、发号租约、指标、对别的进程的只读目录与出站口。
@@ -63,11 +75,29 @@ import org.springframework.context.annotation.Configuration;
  *   <tr><td>{@code dispatch.MatchWorkers}</td><td>dispatch 包（{@code match-worker} 工作池）</td><td>派发器、整队 / 活动两个内部接口的提供方</td></tr>
  *   <tr><td>{@code port.PlayerStatusReader} / {@code RedisClock} / {@code NodeCalls} / {@code PlayerPusher}</td><td>本类（包 xm-discovery / xm-api）</td>
  *       <td>各包按需注入</td></tr>
+ *   <tr><td>{@code lifecycle.MatcherControl} / {@code ResultConsumerControl}</td><td>凑单包、评分包各提供一个 bean（把自己的调度器 / 消费者包一层；
+ *       不得自带启停）</td><td>{@link MatchLifecycle}（启动第 8、9 步与停机）</td></tr>
+ *   <tr><td>{@code admin.MatchAdminAuthFilter}</td><td>本类登记在 {@code /admin/*}</td><td>dev 管理口的控制器（令牌、操作人、运行模式都已在过滤器里判过）</td></tr>
  * </table>
  *
- * <p><b>启动顺序</b>（bean 依赖链钉住；任一步失败拒启）：{@code xm.match.*} 绑定与校验（{@link MatchProperties}）→ {@code XM_DUBBO_SECRET}
- * （{@link #dubboCallAuth}）→ 配置表（{@link #matchConfigTables}）→ 发号租约（{@link #matchIdLease}）→ 其余单例 → 上下文刷新完成后 Dubbo 才导出。
+ * <p><b>启动门禁</b>（match-spec §9.8 的九步；前六步由 bean 的参数依赖钉住次序，任一步失败即拒绝启动）：
+ * <ol>
+ *   <li>运行模式（{@link #matchRunMode}；不认识的值按 prod 并告警，不拒启）；{@code xm.match.*} 的绑定与自身校验（{@link MatchProperties}，
+ *       含指纹模式的枚举绑定）；</li>
+ *   <li>{@code XM_DUBBO_SECRET}（{@link #dubboCallAuth}）。{@code XM_MYSQL_PASSWORD} 允许为空，与其它模块一致，不单独拒启；</li>
+ *   <li>配置表（{@link #matchConfigTables}）；PVE 组队人数表的副本 id 都在 Dungeon 表里；</li>
+ *   <li>预算断言：Redis 单条命令最坏耗时 ≤ 6100 ms、各跳超时不超上限、matched TTL 表仍是基线值（第 3、4 步在 {@link #matchStartupChecks}）；</li>
+ *   <li>发号租约（{@link #matchIdLease}）；</li>
+ *   <li>评分两张表的建表（评分包的 bean）；其余单例；</li>
+ *   <li>Dubbo 导出（上下文刷新完成时）；</li>
+ *   <li>起凑单；</li>
+ *   <li>起评分消费（Kafka 不可达只告警）。第 8、9 步与停机次序见 {@link MatchLifecycle}。</li>
+ * </ol>
  * 销毁时 Spring 按依赖逆序：先停用到租约与直连客户端的业务 bean，再还租约、关直连客户端。
+ *
+ * <p><b>别的包还没接入时</b>：本类对别的包的 bean 一律经 {@link ObjectProvider} 取（凑单 / 评分消费的启停口、开局管线），取不到就按「尚未接入」
+ * 启动并告警。不用 {@code @ConditionalOnMissingBean} 给缺省 bean——组件扫描到的配置类之间，它的判定取决于类的扫描次序（随平台而变），不可靠
+ * （{@link #gatherHooks} 是先行件留下的唯一一处：6.5 提供自己的钩子时把那个 bean 方法删掉，不要指望它自动让位）。
  */
 @Configuration(proxyBeanMethods = false)
 public class MatchConfiguration {
@@ -85,10 +115,13 @@ public class MatchConfiguration {
         return MessageIdRegistry.loadFromClasspath();
     }
 
-    /** Dubbo 调用鉴权密钥的启动检查（fail-fast）；签名 / 校验在 xm-api 的 Dubbo 过滤器里。 */
+    /**
+     * 第 2 步：Dubbo 调用鉴权密钥的启动检查（fail-fast）。签名 / 校验在 xm-api 的 Dubbo 过滤器里（过滤器自己读环境变量，缺密钥时导出也会失败）；
+     * 这个 bean 只为在建 bean 阶段就给出明确的原因。
+     */
     @Bean
-    public DubboCallAuth dubboCallAuth() {
-        return DubboCallAuth.requireFromEnvValue(System.getenv(DubboCallAuth.SECRET_ENV));
+    public DubboCallAuth dubboCallAuth(Environment environment) {
+        return DubboCallAuth.requireFromEnvValue(environment.getProperty(DubboCallAuth.SECRET_ENV));
     }
 
     /** 运行模式（{@code xm.run-mode}）：只有 dev / test 开放 dev 管理口；不认识的值按 prod 并告警。 */
@@ -107,6 +140,20 @@ public class MatchConfiguration {
         ConfigTables tables = ConfigTables.load(dir);
         log.info("配置表已加载 dir={} dungeon={}", dir.toAbsolutePath().normalize(), tables.dungeon().size());
         return tables;
+    }
+
+    /**
+     * 第 3、4 步：PVE 组队人数表的副本 id 都在 Dungeon 表里；预算断言（Redis 单条命令最坏耗时、各跳超时、matched TTL 表）。不过即拒启。
+     * 返回的凭据给后面的步骤当参数，钉住「先查完再申领租约」。
+     */
+    @Bean
+    public MatchStartupChecks.Passed matchStartupChecks(MatchProperties props, ConfigTables matchConfigTables, RedisProperties redisProperties) {
+        MatchStartupChecks.Passed passed = MatchStartupChecks.verify(props.pveTeamSizeByConfigId(), matchConfigTables.dungeon()::contains,
+                redisProperties.worstCaseCommandMillis());
+        log.info("启动门禁通过：PVE 组队人数表 {}（副本 id 都在 Dungeon 表里） Redis 单条命令最坏≈{} ms（≤ {} ms） 指纹模式={}",
+                props.pveTeamSizeByConfigId(), passed.redisWorstCaseMillis(), MatchBudgets.PLACEMENT_WRITE_WORST_MS,
+                props.tableFingerprintMode());
+        return passed;
     }
 
     @Bean
@@ -132,13 +179,14 @@ public class MatchConfiguration {
     }
 
     /**
-     * 雪花 worker 租约（{@code NodeTypes.MATCH}，作用域 0）。申领失败（号段全被占、Redis 不可达）抛异常 → 拒启。
-     * 续期滞后（超过 2/3 TTL）期间停止发号、恢复后自动恢复；<b>真正丢失不会自愈</b>：回调里记 ERROR、置 {@code xm_match_lease_lost = 1}，
-     * 各入口经 {@link MatchIds#leaseLost()} 拒收，健康检查据此 DOWN（lead 裁决 2）。
+     * 第 5 步：雪花 worker 租约（{@code NodeTypes.MATCH}，作用域 0）。申领失败（号段全被占、Redis 不可达）抛异常 → 拒启。
+     * 续期滞后（超过 2/3 TTL）期间停止发号、恢复后自动恢复；<b>真正丢失不会自愈</b>（lead 裁决 2）：回调里记 ERROR、置 {@code xm_match_lease_lost = 1}；
+     * 之后派发器拒收 157 / 152（{@code MatchDispatcher}），整队 / 活动 / PVE_SOLO 这些要发号的入口本来就按 {@link MatchIds#leaseValid()} 拒，
+     * 凑单暂停，健康检查 DOWN（{@link #matchLeaseHealthIndicator}）。{@code matchStartupChecks} 参数只为钉住次序：门禁没过不去占号。
      */
     @Bean(destroyMethod = "close")
     public NodeIdLease matchIdLease(RedissonClient redis, @Qualifier("matchLeaseScheduler") ScheduledExecutorService matchLeaseScheduler,
-                                    MatchInstance matchInstance, MatchMetrics matchMetrics, ConfigTables matchConfigTables) {
+                                    MatchInstance matchInstance, MatchMetrics matchMetrics, MatchStartupChecks.Passed matchStartupChecks) {
         return NodeIdLease.acquire(redis, matchLeaseScheduler, NodeTypes.MATCH, ID_LEASE_SCOPE, 0, Snowflake.MAX_WORKER,
                 matchInstance.id(), LEASE_TTL, () -> {
                     matchMetrics.leaseLost(true);
@@ -151,6 +199,51 @@ public class MatchConfiguration {
     public MatchIds matchIds(NodeIdLease matchIdLease) {
         log.info("match 雪花 worker={}（battle_id / challenge_id）", matchIdLease.nodeId());
         return new MatchIds(new Snowflake(matchIdLease.nodeId()), matchIdLease::isValid, matchIdLease::isLost);
+    }
+
+    /** 健康组件 {@code matchLease}：租约真正丢失时 DOWN（{@code /actuator/health} 回 503，等编排层重启）；续期滞后仍 UP。 */
+    @Bean
+    public MatchLeaseHealthIndicator matchLeaseHealthIndicator(MatchIds matchIds) {
+        return new MatchLeaseHealthIndicator(matchIds);
+    }
+
+    // ================================================================ 启停次序（第 8、9 步与停机）
+
+    /**
+     * 凑单 / 评分消费的启动与整个停机序列（{@link MatchLifecycle}）。三样东西都来自别的包，经 {@link ObjectProvider} 取：还没接入的那一样按
+     * 「尚未接入」处理（启动时告警，不拒启）；同一个接口出现两个 bean 则直接失败。
+     */
+    @Bean
+    public MatchLifecycle matchLifecycle(ObjectProvider<MatcherControl> matcherControl, ObjectProvider<ResultConsumerControl> resultConsumerControl,
+                                         ObjectProvider<GatherLauncher> gatherLauncher, MatchWorkerPool matchWorkerPool) {
+        MatcherControl matcher = matcherControl.getIfAvailable();
+        ResultConsumerControl consumer = resultConsumerControl.getIfAvailable();
+        GatherLauncher gathers = gatherLauncher.getIfAvailable();
+        if (gathers == null) {
+            log.warn("开局管线尚未接入（上下文里没有 GatherLauncher）：停机时不等在途 gather");
+        }
+        return new MatchLifecycle(matcher != null ? matcher : MatchLifecycle.matcherNotReady(),
+                consumer != null ? consumer : MatchLifecycle.consumerNotReady(), gathers, matchWorkerPool::close,
+                MatchLifecycle.GATHER_DRAIN_TIMEOUT);
+    }
+
+    // ================================================================ 管理端口：dev / test 管理口的鉴权
+
+    /**
+     * 只注册在 {@code /admin/*}（容器按规范路径匹配）；令牌只从环境变量 {@code XM_ADMIN_TOKEN} 读。运行模式不是 dev / test 时
+     * {@code /admin/match/dev/*} 一律 403（在令牌与操作人都过了之后）。
+     */
+    @Bean
+    public FilterRegistrationBean<MatchAdminAuthFilter> matchAdminAuthFilter(Environment environment, RunMode matchRunMode, MatchMetrics matchMetrics) {
+        MatchAdminAuthFilter filter = new MatchAdminAuthFilter(environment.getProperty(MatchAdminAuthFilter.TOKEN_ENV), matchRunMode, matchMetrics);
+        if (!filter.tokenConfigured()) {
+            log.warn("运维令牌 {} 未配置：管理端口 /admin/** 一律 503", MatchAdminAuthFilter.TOKEN_ENV);
+        } else if (!filter.devEndpointsOpen()) {
+            log.info("运行模式 {}：dev 管理口 {}* 一律 403", matchRunMode, MatchAdminAuthFilter.DEV_PREFIX);
+        }
+        FilterRegistrationBean<MatchAdminAuthFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.addUrlPatterns("/admin/*");
+        return registration;
     }
 
     // ================================================================ 只读目录（都是别的进程写的键）

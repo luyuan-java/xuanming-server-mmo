@@ -17,6 +17,7 @@ spring:
     web-application-type: servlet
     keep-alive: true
   lifecycle:
+    # 停机次序（MatchLifecycle）：停凑单 → Dubbo 撤导出 → 排空 match-worker → 等在途 gather（至多 10 s）→ 停评分消费 → 还发号租约。
     timeout-per-shutdown-phase: 20s
   datasource:
     # 会话级 READ COMMITTED；STRICT_TRANS_TABLES；innodb_lock_wait_timeout=1（评分入账一局一笔事务，撞锁等待超时或死锁就整笔重跑，
@@ -38,6 +39,9 @@ spring:
 
 # 管理端口：http://127.0.0.1:18113/actuator/health、/actuator/prometheus 与 dev / test 专用的 /admin/match/dev/*。
 # 默认只绑本机，不要暴露到公网（dev 口在 prod 也注册、只回 403，令牌仍是第一道闸）。
+# /actuator/health 回 503（DOWN）的一种情况是发号租约真正丢失（健康组件 matchLease；同时 xm_match_lease_lost = 1、日志里有一条 ERROR）：
+# 这时排队 157 与发起切磋 152 回 16004、凑单暂停、一切要发号的开局入口都拒，取消 / 查状态 / 补签照常——不会自愈，必须重启本进程
+# （有编排层的环境靠健康检查自动重启；本机切片要手工重启）。Redis 抖动造成的续期滞后不算 DOWN，恢复后自动恢复。
 server:
   port: ${SERVER_PORT:18113}
   address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
