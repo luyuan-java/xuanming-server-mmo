@@ -1,0 +1,38 @@
+// Java 版内部（xm-match 拥有）：一场战斗的落点记录的 Redis 值（match-spec §4.3）。只在 Java 版内部使用，不在两版共享的客户端契约里；
+// 不 import 同步来的 proto（基线对应物是 match_service.proto 的 SpectateBattleRecord{summary, battle_node_id}）。
+//
+// Redis 键 RedisKeys.matchBattlePlacement(battle_id) = xm:{match}:battle:<battle_id>，HASH 两个字段：a = attempt（十进制），pb = 本消息字节；TTL 360 s。
+// 生命周期与 gather 绑定：建房之前写入 → 换节点重试时改写（attempt = 2）→ 成功后同值补写 → 确认房间没建成时在补偿之后删除 →
+// 只有「建房结局不明且回滚也失败」时保留。写入是单调的：只收 attempt ≥ 已存值的写，迟到落盘的旧写盖不掉新写。
+//
+// 读者：179 补签（按记录里的地址直拨 battle）；6.5 观战（同一条记录兼作观战记录，摘要字段从这里映射成 BattleWatchSummary）。
+// 字段只追加、字段号永不复用。
+syntax = "proto3";
+
+package xm.match;
+
+option java_package = "com.game.match.proto";
+option java_multiple_files = true;
+option java_outer_classname = "BattlePlacementProto";
+
+message BattlePlacement {
+  uint64 battle_id = 1;
+  // 建房那一刻选中的 battle 节点（目录 xm:nodes:battle:0 的条目）。
+  uint32 battle_node_id = 2;
+  // BattleNodeInfo.instance_id：进程实例。节点号会被新进程复用，补签判「房间所在进程已被别的进程接手」靠它。
+  string battle_instance_id = 3;
+  // BattleNodeService 的直连地址（建房那一刻）。补签与观众 RPC 先直拨它，不按目录找：battle 丢了租约仍活着时不在目录里，但直拨能到。
+  string rpc_host = 4;
+  uint32 rpc_port = 5;
+  // 1 = 首选节点；2 = 首选节点回「不可分配」后改写到的另一个节点。
+  uint32 attempt = 6;
+  // MatchMode 的数值（不认识的值也原样保留）。
+  uint32 mode = 7;
+  uint32 battle_config_id = 8;
+  // 各成员备战快照里的角色名（不是账号），按 gather 的成员顺序（= 站位顺序）。
+  repeated string player_names = 9;
+  // 全员备战之后、写落点之前取的 Redis TIME（Unix 毫秒）；与 deadline_ms 同源，不用本机时钟。
+  uint64 created_at_ms = 10;
+  // 整场期限（Unix 毫秒）= gather 起点的 Redis TIME + 300 s，即 177 的 expire_at_ms。
+  uint64 deadline_ms = 11;
+}

@@ -34,6 +34,12 @@ public final class NodeTypes {
      * <b>作用域 0</b>：基线 battle 是全局池、不分 zone（{@code deploy.yaml:46}；{@code gather.go:212}）。批次 6.2，battle-node-spec §7.1、§7.10。
      */
     public static final String BATTLE = "battle";
+    /**
+     * xm-match：battle_id 与 challenge_id 雪花 worker 的租约，作用域 0（全服；理由同 {@link #SCENE_GUID}），不发布目录。批次 6.4，match-spec §9.1。
+     * battle_id 必须是时间在高位的雪花号：scene 按 battle_id 无符号升序当作局序应用待结算记录（scene-battle-spec D13）。
+     * 基线的 team_id 也出自同一个发号器，Java 的 team_id 归 {@link #TEAM}（M23）。
+     */
+    public static final String MATCH = "match";
 
     private NodeTypes() {
     }

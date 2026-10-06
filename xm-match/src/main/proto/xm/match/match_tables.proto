@@ -1,0 +1,45 @@
+// xm-match 的两张评分表（xm_java 库），经 xm-pbmysql 建表 / 补列 / 补索引（只扩展、从不删改）。match-spec §5.2；db-migrations 的登记型条目。
+//
+// Java 自有：基线的评分存在 Redis（match:rating:<pid> HASH 与 match:rating:applied:<battle_id> 标记，两层幂等 Lua，无 TTL 的键遇淘汰策略会回落 1500），
+// Java 改成 MySQL 一个事务（M18）。本文件不 import 同步来的 proto（先例 xm-trade/src/main/proto/xm/trade/trade_tables.proto）。
+//
+// 改表纪律：字段只追加、字段号永不复用（删字段用 reserved 占住，pbmysql 按列注释 pb:N 识别字段）；index 组只能追加到末尾，不得调序
+// （idx_<表>_<序号> 按位置命名）。追加区：MatchRatingRow 从 5 起、MatchRatingAppliedRow 从 5 起。
+//
+// 锁序（一局一笔事务，RatingStore.apply）：先插 match_rating_applied（撞主键 = 这一局已入账），再按无符号 player_id 升序锁 match_rating 的行；
+// 任何事务都不得在持有 match_rating 的行锁之后回头去写 match_rating_applied。
+syntax = "proto3";
+
+package xm.match;
+
+import "proto2mysql/proto2mysql_option.proto";
+
+option java_package = "com.game.match.rating.pb";
+option java_multiple_files = true;
+option java_outer_classname = "MatchTablesProto";
+option (proto2mysql.db) = true;
+
+// 玩家评分：每个打过计分模式（1V1 / 5V5）的玩家一行；没有行 = 新号，按 1500.00 读。
+message MatchRatingRow {
+  option (proto2mysql.table_name) = "match_rating";
+  option (proto2mysql.primary_key) = "player_id";
+
+  uint64 player_id = 1;
+  int64 rating_centi = 2;     // 评分 × 100（1500.00 = 150000）；下限 0。定点整数：评分保留两位小数，不存浮点
+  uint32 games = 3;           // 已入账的计分局数
+  uint64 updated_at_ms = 4;   // 最近一次入账的时刻（服务进程时钟，Unix 毫秒；只作排障）
+  // 追加区：从 5 起。
+}
+
+// 入账标记：每一局计分对局一行，主键冲突 = 重复投递（恰好一次的依据）。与结果 topic 的保留期一致，7 天后由 xm-match 分批清理。
+message MatchRatingAppliedRow {
+  option (proto2mysql.table_name) = "match_rating_applied";
+  option (proto2mysql.primary_key) = "battle_id";
+  option (proto2mysql.index) = "applied_at_ms";   // idx_match_rating_applied_0：按时间分批清理
+
+  uint64 battle_id = 1;
+  int32 match_mode = 2;       // MatchMode 的数值（只有 1V1 = 3 与 5V5 = 1 会写）
+  int64 delta_a_centi = 3;    // A 队每人的评分增量 × 100（B 队取相反数）；审计用，入账不读它
+  uint64 applied_at_ms = 4;   // 入账时刻（服务进程时钟，Unix 毫秒）
+  // 追加区：从 5 起。
+}

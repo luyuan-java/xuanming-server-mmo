@@ -1,0 +1,5 @@
+# nacos profile：Dubbo 注册到 Nacos（只做 Dubbo 注册中心，见 architecture.md §6）；gate 与 xm-team 改走注册中心发现 match（各自的 xm.dubbo.match-url 留空）。
+# match 出站调 scene / battle 仍按 Redis 节点目录直连（register = false 的提供方不进注册中心），与 profile 无关；管理端口（HTTP）也与 profile 无关。
+dubbo:
+  registry:
+    address: nacos://${XM_NACOS_ADDR:127.0.0.1:8848}

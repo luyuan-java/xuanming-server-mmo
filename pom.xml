@@ -31,6 +31,7 @@
         <module>xm-team</module>
         <module>xm-guild</module>
         <module>xm-trade</module>
+        <module>xm-match</module>
         <module>xm-scene</module>
         <module>xm-battle</module>
         <module>xm-gate</module>

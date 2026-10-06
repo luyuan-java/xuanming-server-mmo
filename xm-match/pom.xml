@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>xm-match</artifactId>
+    <name>xm-match</name>
+    <description>匹配服（Spring Boot + Dubbo 提供方，group match）：排队 157 / 148 / 153、凑单、开局 gather、票据补签 179、评分（MySQL，两张表经 xm-pbmysql 建表）、切磋 152 / 151 / 156 / 154、帮会活动开战与整队开战的内部接口（批次 6.4，docs/porting/match-spec.md）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-spring-boot-starter</artifactId>
+        </dependency>
+        <!-- 只在 nacos profile 下生效（dubbo.registry.address=nacos://...）；默认配置注册中心为 N/A、走直连 URL -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-nacos-spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-proto</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-table</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-pbmysql</artifactId>
+        </dependency>
+        <!-- 对局结果 topic 的规格与核对（BattleResultTopics / TopicSpec / AuditTopicInitializer）；kafka-clients 经它传递（已有依赖，不是新第三方库） -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-audit</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- 可观测性（architecture.md §11）与 dev 管理口（match-spec §9.10）：业务入口是 Dubbo；这里的 Tomcat 只挂 actuator 与 /admin/match/dev/*，缺省只绑本机 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 评分存储的缺省单测跑在内存库上（真 MySQL 用 -Dxm.it.mysql 打开；先例 xm-player-store） -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Dubbo 调用方鉴权过滤器只从环境变量读密钥，这里给仅测试用的假值（不是任何环境的真密钥；先例 xm-trade/pom.xml） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <XM_DUBBO_SECRET>xm-match-unit-test-only</XM_DUBBO_SECRET>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <!-- 只编译本模块的 proto（落点记录、评分两张表；后者 import xm-pbmysql 的选项定义）；不扫描全部项目依赖：xm-proto 里 mmorpg 的
+                         proto_option.proto 与 pbmysql 的选项在 MessageOptions 上同号，同一次编译会撞扩展号（同 xm-trade / xm-guild） -->
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                    <importDependencies>
+                        <importDependency>
+                            <groupId>com.google.protobuf</groupId>
+                            <artifactId>protobuf-java</artifactId>
+                            <version>${protobuf.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                        <importDependency>
+                            <groupId>com.game</groupId>
+                            <artifactId>xm-pbmysql</artifactId>
+                            <version>${project.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                    </importDependencies>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.game.match.MatchApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

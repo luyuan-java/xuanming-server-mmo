@@ -1,0 +1,135 @@
+# xm-match 默认（local）配置：Dubbo 直连、不需要 Nacos 服务端。用 Nacos 做注册中心时加 --spring.profiles.active=nacos。
+# 进程从仓库根目录启动（配置表默认读 config-data/tables）。批次 6.4，docs/porting/match-spec.md §9、§10。
+#
+# 秘密只从环境变量注入，不写进本文件：
+#   XM_DUBBO_SECRET    Dubbo 调用方鉴权密钥（必填，与 xm-gate / xm-team / xm-battle / xm-scene 一致；缺失即拒绝启动）
+#   XM_ADMIN_TOKEN     运维令牌（dev / test 管理口 /admin/match/dev/* 的 X-Xm-Admin-Token）；不设则 /admin/** 一律 503
+#   XM_MYSQL_PASSWORD  MySQL 密码（本机无密码的 root 可不设）
+#
+# 数据：排队与票据、切磋记录、战斗落点记录在 Redis（全部 xm:{match}:* 一个 hash tag）；评分在 MySQL xm_java 的两张表
+# （match_rating / match_rating_applied，经 xm-pbmysql 建表）；对局结果从 Kafka topic xm-battle-result-g<代次> 消费（xm-battle 生产）。
+# 只读别人的键：在线目录 xm:presence:*、位置记录 xm:location:*、节点目录 xm:nodes:battle:0 与 xm:nodes:scene:<zone>、战斗锁（经 BattleLockReader）。
+spring:
+  application:
+    name: xm-match
+  main:
+    # 只为管理端点与 dev 管理口起一个 Servlet 容器；Dubbo 端口不经过它。
+    web-application-type: servlet
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    # 会话级 READ COMMITTED；STRICT_TRANS_TABLES；innodb_lock_wait_timeout=1（评分入账一局一笔事务，撞锁等待超时或死锁就整笔重跑，
+    # 等更久只会拖住消费线程，match-spec §5.2；同帮会的取值）；useAffectedRows 与其他服务一致；socketTimeout 4 s。
+    url: "jdbc:mysql://127.0.0.1:3306/xm_java?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
+    username: ${XM_MYSQL_USER:root}
+    password: ${XM_MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    druid:
+      initial-size: 2
+      min-idle: 2
+      max-active: 16
+      max-wait: 3000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+      # 2 = READ COMMITTED（连接池按它设置每条连接；URL 里的会话变量是第二道保证）
+      default-transaction-isolation: 2
+
+# 管理端口：http://127.0.0.1:18113/actuator/health、/actuator/prometheus 与 dev / test 专用的 /admin/match/dev/*。
+# 默认只绑本机，不要暴露到公网（dev 口在 prod 也注册、只回 403，令牌仍是第一道闸）。
+server:
+  port: ${SERVER_PORT:18113}
+  address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+xm:
+  # 运行模式：只有 dev / test（含别名 development / local / testing）开放 dev 管理口，其余（含未设、写错）一律 403。进程缺省 prod；
+  # 本机切片由 tools/local/start-slice.sh 设 XM_RUN_MODE=dev。
+  run-mode: ${XM_RUN_MODE:prod}
+  # 按方法热关停（运维止血阀）：每秒全量读 Redis 哈希 xm:killswitch；失联超过 60 s 整体放行（fail-open）。
+  # 客户端方法（match.MatchService/*）已在 gate 检查，这里的提供方过滤器管的是 MatchTeamService / MatchInternalService。
+  killswitch:
+    enabled: true
+  advertise-host: 127.0.0.1
+  # 配置表目录：PVE 组队人数的副本 id 校验、指标的 config 标签净化要读 Dungeon 表。
+  table-dir: config-data/tables
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  match:
+    # 工作池：客户端请求、MatchTeamService 的前三个方法、MatchInternalService 都在它上面阻塞等 Redis / MySQL；满了按各方法的「过载」应答回。
+    worker:
+      threads: 16
+      queue: 1024
+    # 整请求预算：受理时刻起算（含排队）。须在 [500ms, 4500ms] 内（gate 调 match 的 Dubbo 超时是 5 s）。
+    request-budget: 4500ms
+    matcher:
+      interval: 500ms          # 两轮凑单之间的间隔
+      lock-ttl: 10s            # 每条队列的凑单锁
+    ticket-ttl: 6h             # queued 票据（客户端可见：QUEUED 最长保持）
+    ready-ticket-ttl: 60s      # ready 票据（客户端可见：READY 窗口）
+    challenge-ttl: 60s         # 切磋邀请（客户端可见：156 的 expires_at_ms）
+    rating:
+      # 是否消费对局结果更新评分；关掉后评分停在已有值，凑单退化为纯等待序。
+      enabled: true
+      # 评分容差曲线：tol = min(max, base + floor(已等秒数 / step-seconds) × step-delta)；已等 ≥ max-wait-seconds 时不限。0 或漏配按缺省值。
+      tolerance:
+        base: 100
+        step-seconds: 5
+        step-delta: 100
+        max: 1000
+        max-wait-seconds: 90
+      # 「回合打满按平局」的阈值（0 = 关闭）；可按副本覆盖：draw-round-cap-by-config-id: {1: 300}。缺省不覆盖（照搬基线，match-spec §5.5）。
+      draw-round-cap: 30
+      consumer-group: xm-match-rating
+    # PVE 组队各副本（DungeonTable id）的凑满人数：键必须在 Dungeon 表里、值 ≥ 1，用时按 5 收口；没列出的副本 = 未开放组队。
+    # 不能改成查表（表里 id 2 / 3 也有人数，会把它们从「未开放」变成可排队，客户端可见）。
+    pve-team-size-by-config-id:
+      1: 5
+    # 战斗配表指纹闸：off / warn / enforce；写错拒启。
+    table-fingerprint-mode: warn
+    # 同时在途的 gather 上限：超限的开局回 overloaded、无副作用。
+    gather-max-inflight: 256
+    # 无肇事者的 gather 失败后，回队首的票多久之内不参与凑单（0 = 关闭）。
+    requeue-backoff: 2s
+    # 对局结果 topic（xm-battle 生产）：代次必须与 xm-battle 一致；Kafka 不可达时照常启动，每 30 s 后台重试。
+    kafka:
+      bootstrap-servers: ${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+      topic-generation: ${XM_BATTLE_RESULT_TOPIC_GENERATION:1}
+      replication-factor: 1
+      init-timeout: 10s
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    qos-enable: false
+  protocol:
+    name: tri
+    port: ${XM_MATCH_RPC_PORT:20888}
+    host: ${xm.advertise-host}
+  registry:
+    address: N/A
+  provider:
+    # 引用级的缺省超时；长挂的 runTeamGather 由调用方按次设置调用级超时（= 开战锁时长），不受它约束。
+    timeout: 10000
+  consumer:
+    check: false
+
+logging:
+  level:
+    org.apache.kafka: WARN

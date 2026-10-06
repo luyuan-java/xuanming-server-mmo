@@ -27,6 +27,13 @@ public final class DubboGroups {
     public static final String TRADE = "trade";
 
     /**
+     * 匹配（{@code proto/match/...}，服务 {@code match.MatchService}），由 xm-match 提供（批次 6.4，match-spec §9.1）。同一个 group 下有三个接口：
+     * gate 调的 {@link ClientMessageService}、xm-team 调的 {@link MatchTeamService}（整队开战）、xm-guild 调的 {@link MatchInternalService}
+     * （帮会活动开战）；后两个是服务对服务的类型化接口，不占消息号、gate 够不到（先例 {@link #GUILD} 下的 {@link GuildInternalService}）。
+     */
+    public static final String MATCH = "match";
+
+    /**
      * 通用资产通道（{@link SceneAssetOpService}），每个 scene 节点各自导出、{@code register = false}，调用方按节点目录里的地址直连。
      * 同一端口上还导出 {@link SceneBattleService}（group {@link #SCENE_BATTLE}），两者靠 group 区分。
      */

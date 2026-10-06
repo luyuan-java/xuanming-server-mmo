@@ -1,0 +1,113 @@
+// Java 版内部契约：整队开战的跨进程端口（com.game.api.MatchTeamService，Dubbo Triple，group match；xm-match 提供、xm-team 调用；
+// match-spec §7.5、§7.6）。对应基线同进程的 team → match 端口（go/match/internal/team/service.go:40-60 的 TeamSizeFor / MatchLockTTLSeconds /
+// TicketBlocked / CreateMatchedTickets / RunGather）。只在 Java 版内部使用，不在两版共享的客户端契约里。
+//
+// 本模块的 proto 不 import 依赖里的 proto（xm-api/pom.xml）。帮会活动开战（com.game.api.MatchInternalService）直接用同步来的契约类
+// com.game.proto.match.StartActivityBattleRequest / Response，不在本文件里。
+//
+// 形状纪律（同 battle_control.proto / scene_battle.proto）：应答枚举的首值一律是 UNSPECIFIED——全默认值（字段缺失、旧版本、损坏）不得被读成
+// 「成功 / OK」；xm-team 把 UNSPECIFIED 按传输失败处理。字段只追加、字段号永不复用。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// ---- checkTeamMatch：副本人数检查 + 逐成员预检（match-spec §7.3 第 3、5 步，§7.4）----
+
+// 预检结论（中性枚举；team 段的 tip 码只归 xm-team，由它映射）。
+enum TeamMatchCheckResult {
+  // 字段缺失：xm-team 按传输失败处理（4030 + 同源视图），不得读成 OK。提供方从不产出这个值。
+  TEAM_MATCH_CHECK_UNSPECIFIED = 0;
+  // 全员通过：zones 与 lock_ttl_seconds 有效。
+  TEAM_MATCH_CHECK_OK = 1;
+  // 该副本未配置组队人数（xm.match.pve-team-size-by-config-id 里没有）→ 4027。
+  TEAM_MATCH_CHECK_DUNGEON_NOT_OPEN = 2;
+  // 名单人数超过该副本的组队上限（配置值按 5 收口）→ 4028。
+  TEAM_MATCH_CHECK_SIZE_EXCEEDED = 3;
+  // offender 不在线 → 4024[offender]。
+  TEAM_MATCH_CHECK_MEMBER_OFFLINE = 4;
+  // offender 持有战斗锁，或读他的战斗锁出错（整队入口按「已锁」处理，同基线 tsvc.go:429-435）→ 4025[offender]。
+  TEAM_MATCH_CHECK_MEMBER_IN_BATTLE = 5;
+  // offender 没有可用位置（位置状态不是在线，或节点号为 0），或持有自愈后仍在途的排队票据 → 4026[offender]。
+  TEAM_MATCH_CHECK_MEMBER_NOT_READY = 6;
+  // match 内部故障：读在线目录 / 位置 / 票据出错、发号租约无效、请求预算已过期、参数非法 → 4030。offender = 0。
+  TEAM_MATCH_CHECK_INTERNAL = 7;
+}
+
+message TeamMatchCheckRequest {
+  // DungeonTable id（客户端 211 请求里的副本号）。
+  uint32 battle_config_id = 1;
+  // 参战名单：队长在前，其余按 join_seq；预检按这个顺序逐人做，第一个不满足的人即为结论。
+  repeated uint64 roster = 2;
+}
+
+message TeamMatchCheckReply {
+  TeamMatchCheckResult result = 1;
+  // MEMBER_OFFLINE / MEMBER_IN_BATTLE / MEMBER_NOT_READY 时非 0；其余为 0。
+  uint64 offender = 2;
+  // OK 时：player_id → 位置记录里的 zone（建票时原样带回 createTeamTickets）。
+  map<uint64, uint32> zones = 3;
+  // OK 时：开战锁时长（秒）= MatchBudgets.teamMatchLockSeconds(名单人数)。跨进程再传一次是为了滚动升级时两边版本不一也用同一个值。
+  uint32 lock_ttl_seconds = 4;
+}
+
+// ---- createTeamTickets：按调用方给的每人 ticket id 原子建 matched 票（§7.3 第 7 步）----
+
+enum TeamTicketsStatus {
+  // 字段缺失：xm-team 按结果不明处理（后台 releaseTeamTickets + finishMatch(false)，回 4030）。提供方从不产出这个值。
+  TEAM_TICKETS_UNSPECIFIED = 0;
+  // 全员建成（或同一批 id 的重放）。
+  TEAM_TICKETS_CREATED = 1;
+  // 没建成，且没有留下任何本次的票：failed_player_id 有效——名单序第一个已有别的票据的人；match 自己的 Redis 出错（结果不明，
+  // 已用独立预算按本次 id 逐个删票）时是 roster[0]。xm-team 回 4026[failed_player_id]（与基线可见结果相同，Q27）。
+  TEAM_TICKETS_FAILED = 2;
+  // 请求到达时 xm-budget-ms 已过期：什么都没写。xm-team 按传输失败处理（4030）。failed_player_id = 0。
+  TEAM_TICKETS_EXPIRED = 3;
+}
+
+message TeamTicketsRequest {
+  uint32 battle_config_id = 1;
+  uint64 team_id = 2;
+  // 开战锁内的名单（顺序同 checkTeamMatch）。
+  repeated uint64 roster = 3;
+  // player_id → zone（checkTeamMatch 回的那一份；缺的人按 0 写）。
+  map<uint64, uint32> zones = 4;
+  // player_id → ticket id（xm-team 每人生成一个 UUIDv4 小写带连字符；必须覆盖 roster 的每个人）。
+  map<uint64, string> ticket_ids = 5;
+}
+
+message TeamTicketsReply {
+  TeamTicketsStatus status = 1;
+  // 只在 status = FAILED 时非 0。
+  uint64 failed_player_id = 2;
+}
+
+// ---- releaseTeamTickets：建票回包丢失时的补偿（幂等）----
+
+message TeamTicketsRelease {
+  // player_id → ticket id：逐个「id 一致才删」。
+  map<uint64, string> ticket_ids = 1;
+}
+
+// ---- runTeamGather：整队 gather（长时间挂起的异步 RPC，§7.5）----
+
+message TeamGatherRequest {
+  uint32 battle_config_id = 1;
+  uint64 team_id = 2;
+  // 站位顺序 = 名单顺序（队长在前）。
+  repeated uint64 roster = 3;
+  // player_id → ticket id（createTeamTickets 建的那一批）。
+  map<uint64, string> ticket_ids = 4;
+}
+
+// 全默认值 = 失败（ok = false），所以不需要 UNSPECIFIED。
+message TeamGatherReply {
+  // true = 已建房（全员票据已置 ready，177 / 143 由 battle 推）；false = gather 失败（全员票据已删，除非 outcome = create_failed_room_alive）。
+  bool ok = 1;
+  // gather 结局的指标标签（success / internal / overloaded / no_battle_node / …，见 xm-match 的 GatherOutcome）；只进日志与指标，不要按它分支。
+  string outcome = 2;
+  // ok 时非 0。
+  uint64 battle_id = 3;
+}

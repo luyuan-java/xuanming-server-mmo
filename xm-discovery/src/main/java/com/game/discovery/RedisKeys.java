@@ -1,5 +1,7 @@
 package com.game.discovery;
 
+import java.util.Optional;
+
 /** Java 版 Redis 键的唯一出处。全部带 {@code xm:} 前缀，与 mmorpg 的键空间隔离。 */
 public final class RedisKeys {
 
@@ -435,5 +437,133 @@ public final class RedisKeys {
      */
     public static String battleActivityResult(long battleId) {
         return PREFIX + "battle:activity-result:" + Long.toUnsignedString(battleId);
+    }
+
+    // ------------------------------------------------------------------ 匹配（xm-match，批次 6.4，match-spec §9.4）
+    //
+    // 全部 match 键共用一个 hash tag {match}：票据、队列、弹组标记、切磋记录、落点记录同槽，入队 / 取消 / 弹组 / 回队首 / 切磋的发起与消费
+    // 都能各用一段 Lua 原子完成（先例 {team}，team-spec D2）；基线票据不带 tag、与队列跨 slot，才需要三条自愈路径。只有 xm-match 写这些键。
+
+    /** match 键的公共前缀 {@code xm:{match}:}。 */
+    private static final String MATCH_PREFIX = PREFIX + "{match}:";
+    private static final String MATCH_QUEUE_PREFIX = MATCH_PREFIX + "queue:";
+
+    /**
+     * 一条排队队列的身份（{@link #matchQueue} 的两段）。
+     *
+     * @param mode   {@code MatchMode} 的数值（≥ 0）
+     * @param config {@code battle_config_id}（uint32 的位模式；键里按无符号十进制）
+     */
+    public record MatchQueueId(int mode, int config) {
+
+        public MatchQueueId {
+            if (mode < 0) {
+                throw new IllegalArgumentException("匹配模式不能为负: " + mode);
+            }
+        }
+    }
+
+    /** 活跃队列注册集 {@code xm:{match}:index}（SET：成员 = 队列键全文；代替 SCAN。非空队列一定在里面，由入队 / 回队首的同一段 Lua 保证）。 */
+    public static String matchQueueIndex() {
+        return MATCH_PREFIX + "index";
+    }
+
+    /**
+     * 排队队列 {@code xm:{match}:queue:<mode>:<config>}（LIST：成员 = player_id 无符号十进制；队尾入队、队首等得最久、回队首用 LPUSH）。
+     * mode 是 {@code MatchMode} 的数值，config 是 {@code battle_config_id} 的无符号十进制——config 不校验，每个不同的值一条队列（照搬基线）。
+     */
+    public static String matchQueue(int mode, int config) {
+        return MATCH_QUEUE_PREFIX + queueSuffix(mode, config);
+    }
+
+    /** 队列的评分镜像 {@code xm:{match}:rank:<mode>:<config>}（ZSET：成员 = player_id，分数 = 入队时的评分 × 100；成员集合恒等于队列的成员集合）。 */
+    public static String matchRank(int mode, int config) {
+        return MATCH_PREFIX + "rank:" + queueSuffix(mode, config);
+    }
+
+    /** 凑单锁 {@code xm:{match}:lock:<mode>:<config>}（STRING：值 = 实例 id，PX 10 s，按持有者释放；只是效率手段，正确性靠弹组脚本）。 */
+    public static String matchQueueLock(int mode, int config) {
+        return MATCH_PREFIX + "lock:" + queueSuffix(mode, config);
+    }
+
+    /**
+     * 解析注册集里的一个队列键（{@link #matchQueue} 的逆）。只认规范形：mode 是不带符号与前导零的十进制 int，config 是不带前导零的 uint32 十进制；
+     * 其它一律为空（凑单把它当坏成员告警并跳过）。{@code parseMatchQueue(matchQueue(m, c))} 恒还原出 (m, c)。
+     */
+    public static Optional<MatchQueueId> parseMatchQueue(String key) {
+        if (key == null || !key.startsWith(MATCH_QUEUE_PREFIX)) {
+            return Optional.empty();
+        }
+        String rest = key.substring(MATCH_QUEUE_PREFIX.length());
+        int colon = rest.indexOf(':');
+        if (colon <= 0 || colon != rest.lastIndexOf(':')) {
+            return Optional.empty();
+        }
+        long mode = canonicalDecimal(rest.substring(0, colon), Integer.MAX_VALUE);
+        long config = canonicalDecimal(rest.substring(colon + 1), 0xFFFF_FFFFL);
+        if (mode < 0 || config < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(new MatchQueueId((int) mode, (int) config));
+    }
+
+    /**
+     * 排队票据 {@code xm:{match}:ticket:<player_id>}（HASH：{@code ticket} / {@code mode} / {@code config} / {@code state} / {@code enqueued_at_ms} /
+     * {@code zone_id} / {@code queue_key} / {@code rating_centi} / {@code team_id} / {@code battle_id} / {@code not_before_ms}；TTL：queued 6 h、
+     * matched 按人数公式、ready 60 s）。每个玩家至多一张；所有写都带 ticket id 做 CAS。
+     */
+    public static String matchTicket(long playerId) {
+        return MATCH_PREFIX + "ticket:" + Long.toUnsignedString(playerId);
+    }
+
+    /** 弹组重放标记 {@code xm:{match}:pop:<token>}（STRING，PX 60 s；Java 独有：弹组脚本被 Redisson 重发时凭它认出「已经弹过了」）。 */
+    public static String matchPopMarker(String token) {
+        return MATCH_PREFIX + "pop:" + token;
+    }
+
+    /** 切磋记录 {@code xm:{match}:challenge:<challenge_id>}（HASH：发起者、目标、配置、过期时刻；TTL 60 s）。 */
+    public static String matchChallenge(long challengeId) {
+        return MATCH_PREFIX + "challenge:" + Long.toUnsignedString(challengeId);
+    }
+
+    /** 目标的待应答占坑 {@code xm:{match}:challenge-target:<player_id>}（STRING：值 = challenge_id；TTL 60 s；一个人同时只能有一条待应答的邀请）。 */
+    public static String matchChallengeTarget(long playerId) {
+        return MATCH_PREFIX + "challenge-target:" + Long.toUnsignedString(playerId);
+    }
+
+    /** 切磋消费墓碑 {@code xm:{match}:challenge-done:<challenge_id>}（HASH：被消费记录的字段 + 请求 nonce，PX 60 s；Java 独有：消费脚本重发时原样返回）。 */
+    public static String matchChallengeDone(long challengeId) {
+        return MATCH_PREFIX + "challenge-done:" + Long.toUnsignedString(challengeId);
+    }
+
+    /**
+     * 战斗落点记录 {@code xm:{match}:battle:<battle_id>}（HASH：{@code a} = attempt 十进制、{@code pb} = xm-match 的 {@code BattlePlacement} 字节；
+     * TTL 360 s）。gather 在建房<b>之前</b>写（只收 attempt ≥ 已存值的写）；179 补签按它直拨 battle；6.5 观战复用同一条记录。
+     */
+    public static String matchBattlePlacement(long battleId) {
+        return MATCH_PREFIX + "battle:" + Long.toUnsignedString(battleId);
+    }
+
+    private static String queueSuffix(int mode, int config) {
+        if (mode < 0) {
+            throw new IllegalArgumentException("匹配模式不能为负: " + mode);
+        }
+        return mode + ":" + Integer.toUnsignedString(config);
+    }
+
+    /** 规范十进制（无符号、无前导零、不超过 {@code max}）的值；不是规范形返回 -1。 */
+    private static long canonicalDecimal(String s, long max) {
+        if (s.isEmpty() || s.length() > 10 || (s.length() > 1 && s.charAt(0) == '0')) {
+            return -1;
+        }
+        long value = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') {
+                return -1;
+            }
+            value = value * 10 + (c - '0');
+        }
+        return value <= max ? value : -1;
     }
 }
