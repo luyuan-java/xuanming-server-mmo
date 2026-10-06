@@ -100,6 +100,8 @@ public final class KafkaAssetAudit implements AssetAudit {
             case QUEST_REWARD -> TransactionReason.TX_QUEST_REWARD;
             case SYSTEM_GRANT -> TransactionReason.TX_SYSTEM_GRANT;
             case ITEM_DESTROY -> TransactionReason.TX_ITEM_DESTROY;
+            case BATTLE_REWARD -> TransactionReason.TX_BATTLE_REWARD;
+            case ITEM_AWARD -> TransactionReason.TX_ITEM_AWARD;
         };
     }
 }

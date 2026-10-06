@@ -8,6 +8,7 @@ import com.game.player.store.state.PlayerState;
  * @param sceneConfigId 上次所在场景配置；0 表示从未进过场景
  * @param position      上次坐标（只在 {@code sceneConfigId} 与目标场景配置相同时沿用）
  * @param state         各玩法的持久化数据；从未写过为默认实例
+ * @param name          角色名（player.name；战斗快照的 player_name，scene-battle-spec §7.11）；缺省空串
  */
 public record PlayerData(
         long playerId,
@@ -18,18 +19,26 @@ public record PlayerData(
         int level,
         int sceneConfigId,
         Vec3 position,
-        PlayerState state) {
+        PlayerState state,
+        String name) {
 
     public PlayerData {
         appearanceId = appearanceId == null ? "" : appearanceId;
         position = position == null ? Vec3.ORIGIN : position;
         state = state == null ? PlayerState.getDefaultInstance() : state;
+        name = name == null ? "" : name;
+    }
+
+    /** 不带角色名（测试与旧调用方）。 */
+    public PlayerData(long playerId, long ownerEpoch, int classId, int gender, String appearanceId, int level,
+                      int sceneConfigId, Vec3 position, PlayerState state) {
+        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, state, "");
     }
 
     /** 没有玩法数据（新号 / 测试）。 */
     public PlayerData(long playerId, long ownerEpoch, int classId, int gender, String appearanceId, int level,
                       int sceneConfigId, Vec3 position) {
-        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, null);
+        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, null, "");
     }
 
     /** 库里此刻的样子（周期存盘的脏比对基准）。 */

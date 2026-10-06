@@ -14,6 +14,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param adminToken     运维接口令牌（环境变量 {@code XM_ADMIN_TOKEN}）；为空时 /admin/** 一律 503
  * @param ops            运维面（批次 7.2）的通用参数
  * @param recall         批量回收
+ * @param rollback       回档（批次 7.2b）
  */
 @ConfigurationProperties("xm.data")
 public record DataProperties(
@@ -23,7 +24,8 @@ public record DataProperties(
         @DefaultValue Retention retention,
         @DefaultValue("") String adminToken,
         @DefaultValue Ops ops,
-        @DefaultValue Recall recall) {
+        @DefaultValue Recall recall,
+        @DefaultValue Rollback rollback) {
 
     /** 一个消费者的参数（各 topic 缺省值不同，所以每个 topic 一个记录类型）。 */
     public interface ConsumerSettings {
@@ -109,13 +111,74 @@ public record DataProperties(
     }
 
     /**
-     * @param maxWindow 不给玩家、只按原因 / 时间窗的全服流水查询，与不指定玩家的全服回收的时间窗上限（走 idx_txlog_time，防扫全表）
+     * 运维面（data-ops-spec §7.2）。
+     *
+     * @param enabled          改玩家数据的写操作总开关（回档执行、取消作业……）；关闭时这些接口回 503 {@code ops_disabled}，只读接口与 dry-run 照常。
+     *                         开启时 {@code XM_DUBBO_SECRET} 必填（帮会检查是 Dubbo 调用方），缺了拒绝启动
+     * @param maxWindow        不给玩家、只按原因 / 时间窗的全服流水查询，与不指定玩家的全服回收的时间窗上限（走 idx_txlog_time，防扫全表）
+     * @param claimWait        夺权最长等待（kick 时含等 scene 写回释放）；必须长于归属租约 30 s（§4.2：覆盖交出提交后、目标节点进场前无人持有的最坏情况）
+     * @param maxPlayersPerJob 一个作业涉及的玩家上限（整区超出回 422 {@code plan_too_large}，不自动拆批）
+     * @param jobTimeout       作业时限：写阶段之前超时全部释放、FAILED；写阶段超时写完当前玩家后停、PARTIAL
+     * @param minTargetAge     回档目标时刻至少早于现在多久（快照经 Kafka 落库有延迟）
+     * @param heartbeat        作业心跳（{@code ops_active.heartbeat_ms}）间隔
+     * @param staleAfter       心跳超过它没更新的作业由清扫器改成 INTERRUPTED（每个副本都跑清扫器）
      */
-    public record Ops(@DefaultValue("7d") Duration maxWindow) {
+    public record Ops(
+            @DefaultValue("false") boolean enabled,
+            @DefaultValue("7d") Duration maxWindow,
+            @DefaultValue("35s") Duration claimWait,
+            @DefaultValue("10000") int maxPlayersPerJob,
+            @DefaultValue("30m") Duration jobTimeout,
+            @DefaultValue("5m") Duration minTargetAge,
+            @DefaultValue("5s") Duration heartbeat,
+            @DefaultValue("60s") Duration staleAfter) {
 
         public Ops {
             if (maxWindow.isNegative() || maxWindow.isZero()) {
                 throw new IllegalArgumentException("xm.data.ops.max-window 配置非法");
+            }
+            if (claimWait.isNegative() || claimWait.isZero() || maxPlayersPerJob < 1 || jobTimeout.isNegative()
+                    || jobTimeout.isZero() || minTargetAge.isNegative() || heartbeat.isNegative() || heartbeat.isZero()
+                    || staleAfter.compareTo(heartbeat.multipliedBy(3)) < 0) {
+                throw new IllegalArgumentException("xm.data.ops 配置非法（claim-wait / job-timeout / heartbeat 须为正，"
+                        + "max-players-per-job ≥ 1，min-target-age ≥ 0，stale-after ≥ 3 × heartbeat）");
+            }
+        }
+    }
+
+    /** 回档（data-ops-spec §4、§7.2）。 */
+    public record Rollback(@DefaultValue Guild guild) {
+    }
+
+    /**
+     * 帮会资产闸（§4.6.1，逐条对齐基线 {@code config.go:97-129}）。
+     *
+     * @param settle          帮会检查前的沉降等待（基线常量 30 s，Q6：缺省与基线一致、做成配置）
+     * @param recheckDelay    写后复查前的等待
+     * @param recheckBudget   写后复查的预算
+     * @param clockSkewMargin 检查起点 = 快照内容时刻 − 余量（钳到 ≥ 1）；合法区间 [5 s, 1 h]
+     * @param checkBudget     一次检查的预算（缺省 120 s，上限 1 h）
+     * @param callTimeout     单次 Dubbo 调用的上限（再受剩余预算约束）
+     */
+    public record Guild(
+            @DefaultValue("30s") Duration settle,
+            @DefaultValue("10s") Duration recheckDelay,
+            @DefaultValue("120s") Duration recheckBudget,
+            @DefaultValue("300s") Duration clockSkewMargin,
+            @DefaultValue("120s") Duration checkBudget,
+            @DefaultValue("10s") Duration callTimeout) {
+
+        public static final Duration MIN_MARGIN = Duration.ofSeconds(5);
+        public static final Duration MAX_MARGIN = Duration.ofHours(1);
+        public static final Duration MAX_BUDGET = Duration.ofHours(1);
+
+        public Guild {
+            if (settle.isNegative() || recheckDelay.isNegative() || recheckBudget.isNegative() || recheckBudget.isZero()
+                    || clockSkewMargin.compareTo(MIN_MARGIN) < 0 || clockSkewMargin.compareTo(MAX_MARGIN) > 0
+                    || checkBudget.isNegative() || checkBudget.isZero() || checkBudget.compareTo(MAX_BUDGET) > 0
+                    || recheckBudget.compareTo(MAX_BUDGET) > 0 || callTimeout.isNegative() || callTimeout.isZero()) {
+                throw new IllegalArgumentException("xm.data.rollback.guild 配置非法（clock-skew-margin ∈ [5s, 1h]，"
+                        + "check-budget / recheck-budget ∈ (0, 1h]，settle / recheck-delay ≥ 0，call-timeout > 0）");
             }
         }
     }

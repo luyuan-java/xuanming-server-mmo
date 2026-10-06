@@ -5,7 +5,8 @@
 # XM_NODE_LINK_SECRET 是 gate → scene 节点链路握手密钥，xm-gate 与 xm-scene 读同一个值（本脚本把同一环境传给两者）。
 # XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-trade / xm-scene / xm-gate / xm-gateway / xm-battle
 # 读同一个值（xm-scene 自 4.5 起是资产通道 SceneAssetOpService 的 Dubbo 提供方，缺密钥即暴露失败）。
-# （xm-battle 是控制面 BattleNodeService 的 Dubbo 提供方，缺密钥即拒启。）
+# （xm-battle 是控制面 BattleNodeService 的 Dubbo 提供方，缺密钥即拒启。xm-data 在 XM_DATA_OPS_ENABLED=true 时是 GuildInternalService
+# 的调用方——回档的帮会检查——同样读这个值，缺了拒启。）
 # XM_ASSET_OP_SECRET_GUILD 是帮会资产指令的请求体签名密钥（xm-guild 签、xm-scene 验，去首尾空白后至少 32 字节）；
 # 没设时本脚本生成本机随机值写进 run/xm-asset-op-secret-guild，并把同一个值传给两者。
 # XM_BATTLE_TOKEN_SECRET 是战斗直连票据的签名密钥（只有 xm-battle 读；去首尾空白后至少 32 字节、不得与 XM_GATE_TOKEN_SECRET 相同）；
@@ -38,6 +39,11 @@ echo "运行模式 XM_RUN_MODE=$XM_RUN_MODE"
 export XM_SCENE_MIRROR_IDLE_TIMEOUT="${XM_SCENE_MIRROR_IDLE_TIMEOUT:-5s}"
 export XM_SCENE_INSTANCE_RECLAIM_GRACE="${XM_SCENE_INSTANCE_RECLAIM_GRACE:-10s}"
 echo "实例回收 镜像空置 $XM_SCENE_MIRROR_IDLE_TIMEOUT + 回收宽限 $XM_SCENE_INSTANCE_RECLAIM_GRACE"
+
+# 回合制战斗 reaper（批次 6.3，scene-battle-spec §8）：xm-scene 进程缺省 30s（同基线）；本机切片调到 2s，robot battle-settle 的备战到期 /
+# FIGHTING 判废（期限 + 10s 宽限）在秒级内可见。只许调小（≤ 30s）
+export XM_SCENE_BATTLE_REAPER_INTERVAL="${XM_SCENE_BATTLE_REAPER_INTERVAL:-2s}"
+echo "回合制战斗 reaper 间隔 $XM_SCENE_BATTLE_REAPER_INTERVAL"
 
 # 运维令牌（xm-data 运维接口与 xm-trade 播种接口 POST /admin/trade/seed-listing 共用，头 X-Xm-Admin-Token）：没设就生成一个本机随机令牌
 # 写进 run/xm-admin-token（run/ 不进仓库；robot audit / trade 等场景从这里读）
@@ -93,6 +99,15 @@ if [[ "$battle_secret_trimmed" == "$gate_secret_trimmed" ]]; then
 fi
 unset battle_secret_trimmed gate_secret_trimmed
 export XM_BATTLE_TOKEN_SECRET
+
+# 运维写操作（批次 7.2b 回档，data-ops-spec §7.8）：xm-data 进程缺省关闭（回档执行回 503 ops_disabled）；本机切片打开，
+# 并把回档目标时刻下限与帮会检查的沉降 / 复查等待调小（仅本机，生产按缺省 5min / 30s / 10s）。帮会检查直连 xm-guild 的 20886，
+# 调用方鉴权用上面同一个 XM_DUBBO_SECRET。robot rollback 场景依赖这几个值
+export XM_DATA_OPS_ENABLED="${XM_DATA_OPS_ENABLED:-true}"
+export XM_DATA_OPS_MIN_TARGET_AGE="${XM_DATA_OPS_MIN_TARGET_AGE:-5s}"
+export XM_DATA_ROLLBACK_SETTLE="${XM_DATA_ROLLBACK_SETTLE:-3s}"
+export XM_DATA_ROLLBACK_RECHECK_DELAY="${XM_DATA_ROLLBACK_RECHECK_DELAY:-2s}"
+echo "运维写操作 XM_DATA_OPS_ENABLED=$XM_DATA_OPS_ENABLED（沉降 $XM_DATA_ROLLBACK_SETTLE、复查等待 $XM_DATA_ROLLBACK_RECHECK_DELAY）"
 
 # 登录排队：进程缺省关闭（同基线 Queue.Enabled=false）；本机切片打开，robot 全程走快速通道，queue 场景压容量验证排队与放行
 export XM_GATEWAY_QUEUE_ENABLED="${XM_GATEWAY_QUEUE_ENABLED:-true}"

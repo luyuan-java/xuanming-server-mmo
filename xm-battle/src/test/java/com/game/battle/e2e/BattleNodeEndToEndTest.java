@@ -221,7 +221,7 @@ class BattleNodeEndToEndTest {
         gate.online(a, 101);
         long battleId = nextBattleId();
         long deadline = System.currentTimeMillis() + 300_000;
-        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged");
+        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent");
         double resultsBefore = count(meters, "xm.battle.results", "channel", "plain", "result", "logged");
         double lobbySentBefore = count(meters, "xm.battle.lobby.push.outcomes", "outcome", "sent");
         double replacedBefore = count(meters, "xm.battle.disconnects", "reason", "replaced");
@@ -369,8 +369,8 @@ class BattleNodeEndToEndTest {
         // 补签 1005（客户端据此判 BattleGone）
         assertThat(issueTip(battleId, a)).isEqualTo(TIP_INVALID_PARAMETER);
 
-        // match 房间照常走结算端口与普通结果端口（6.2 只记日志）；大厅公告经 gate 送达；顶替计数
-        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged") - settlementsBefore).isEqualTo(1);
+        // match 房间照常走结算端口（6.3 起交给结算发件箱，计 sent）与普通结果端口（只记日志）；大厅公告经 gate 送达；顶替计数
+        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent") - settlementsBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.results", "channel", "plain", "result", "logged") - resultsBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.lobby.push.outcomes", "outcome", "sent")).isGreaterThan(lobbySentBefore);
         assertThat(count(meters, "xm.battle.disconnects", "reason", "replaced") - replacedBefore).isEqualTo(1);
@@ -387,7 +387,7 @@ class BattleNodeEndToEndTest {
         gate.online(b, 202);
         long battleId = nextBattleId();
         long deadline = System.currentTimeMillis() + 300_000;
-        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged");
+        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent");
         double destroyedBefore = count(meters, "xm.battle.room.ends", "reason", "destroyed");
 
         createAdmitted(battle, pvp(battleId, deadline, tank(a, 0, routing(gate, 201)), tank(b, 1, routing(gate, 202))));
@@ -447,7 +447,7 @@ class BattleNodeEndToEndTest {
             assertThat(cb.expectClosed(Duration.ofSeconds(3))).isEqualTo("fin");
         }
         // Destroy 不结算、不发结果事件；之后补签 1005；重复 Destroy 幂等
-        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged")).isEqualTo(settlementsBefore);
+        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent")).isEqualTo(settlementsBefore);
         assertThat(count(meters, "xm.battle.room.ends", "reason", "destroyed") - destroyedBefore).isEqualTo(1);
         assertThat(issueTip(battleId, a)).isEqualTo(TIP_INVALID_PARAMETER);
         battle.destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(battleId).setReason("again").build()).get(10, TimeUnit.SECONDS);
@@ -460,7 +460,7 @@ class BattleNodeEndToEndTest {
         gate.online(a, 301);
         gate.online(watcher, 303);
         double skippedBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "skipped");
-        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged");
+        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent");
         double resultsBefore = count(meters, "xm.battle.results", "result", "logged");
 
         // dev 建房（DEV 房间：照常推送，永不投递结算与结果事件）
@@ -537,7 +537,7 @@ class BattleNodeEndToEndTest {
         assertThat(finished.getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
         // DEV 房间：结算端口跳过（计 skipped），不发结果事件
         assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "skipped") - skippedBefore).isEqualTo(1);
-        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged")).isEqualTo(settlementsBefore);
+        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent")).isEqualTo(settlementsBefore);
         assertThat(count(meters, "xm.battle.results", "result", "logged")).isEqualTo(resultsBefore);
 
         // 第二间房：165 → 应答 → FIN，没有 166（O8）；之后不在观众名单，补签 1005
@@ -581,7 +581,7 @@ class BattleNodeEndToEndTest {
         long b = player(32);
         long watcher = player(33);
         long battleId = nextBattleId();
-        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged");
+        double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent");
         double resultsBefore = count(meters, "xm.battle.results", "channel", "plain", "result", "logged");
         double deadlineEndsBefore = count(meters, "xm.battle.room.ends", "reason", "deadline");
         double timerRoundsBefore = count(meters, "xm.battle.rounds", "trigger", "timer");
@@ -641,7 +641,7 @@ class BattleNodeEndToEndTest {
             assertThat(spectateEnd.getOutcome()).as("B6：期限路径给观众的是 DRAW，不是 ONGOING").isEqualTo(eBattleOutcome.BATTLE_OUTCOME_DRAW);
         }
         // 照常发结算（逐人）与结果事件（DRAW）
-        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "logged") - settlementsBefore).isEqualTo(2);
+        assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent") - settlementsBefore).isEqualTo(2);
         assertThat(count(meters, "xm.battle.results", "channel", "plain", "result", "logged") - resultsBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.room.ends", "reason", "deadline") - deadlineEndsBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.rounds", "trigger", "timer") - timerRoundsBefore).isEqualTo(1);

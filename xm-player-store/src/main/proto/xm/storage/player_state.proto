@@ -32,6 +32,20 @@ message PlayerState {
   // 通用资产通道的幂等账本（mmorpg PlayerAssetOpLedgerComp 的 Java 自有对应），与资产同一份记录、同一次围栏写：
   // 扣款 / 发放与「这条 seq 已经处理过」原子落盘。没有这段 = 从没收到过资产通道请求。
   AssetOpLedgerState asset_ledger = 8;
+  // 回合制战斗结算幂等账本（mmorpg BattleSettlementLedgerComp 的 Java 自有对应，scene-battle-spec §7.12）：只登记「已应用、销账未确认」的局，
+  // 稳态 0~1 条，上限 64 是异常兜底。与资产同一份记录、同一次围栏写——「这一局已应用」与资产同生共死。没有这段 = 没有待销账的局。
+  BattleLedgerState battle_ledger = 9;
+}
+
+// 回合制战斗结算账本：按 battle_id 无符号升序写出（周期存盘按值比对，顺序必须确定）。
+message BattleLedgerState {
+  repeated BattleLedgerEntry applied = 1;
+}
+
+message BattleLedgerEntry {
+  uint64 battle_id = 1;
+  // 应用时刻（UTC 毫秒）：只用于满员淘汰与排障。
+  uint64 applied_at_ms = 2;
 }
 
 // 资产通道账本：每条流一本，按流号升序。

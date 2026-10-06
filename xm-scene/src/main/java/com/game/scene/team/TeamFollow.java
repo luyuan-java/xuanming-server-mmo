@@ -20,6 +20,13 @@ public interface TeamFollow {
      */
     void onEnteredScene(SceneWorld world, ScenePlayer player);
 
+    /**
+     * {@code player} 的回合制战斗冻结刚解除（解冻且删锁完成、或销账放了锁；基线 {@code OnBattleFreezeCleared → RefreshAndFollow}，
+     * {@code team.cpp:139-142}）：补一次「只跟随、不扇出」的检查。缺省什么都不做。
+     */
+    default void onBattleFreezeCleared(SceneWorld world, ScenePlayer player) {
+    }
+
     /** 不跟随（测试与不接 Redis 的装配）。 */
     TeamFollow NONE = (world, player) -> {
     };

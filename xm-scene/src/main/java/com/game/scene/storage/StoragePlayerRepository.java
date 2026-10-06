@@ -733,7 +733,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
         int level = (int) Math.min(row.getLevel(), Integer.MAX_VALUE);
         return new PlayerData(row.getPlayerId(), row.getOwnerEpoch(), row.getClassId(), row.getGender(),
                 row.getAppearanceId(), level, row.getSceneConfigId(),
-                new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()), state);
+                new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()), state, row.getName());
     }
 
     /**

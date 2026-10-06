@@ -57,6 +57,17 @@ class BattleMetricsTest {
     }
 
     @Test
+    void dev_gather指标预建且按模式与结局计数() {
+        assertThat(registry.scrape()).contains("xm_battle_dev_gather_total{mode=\"prepare_only\",result=\"ok\"} 0.0",
+                "xm_battle_dev_gather_total{mode=\"create\",result=\"create_failed\"} 0.0",
+                "xm_battle_dev_gather_total{mode=\"unknown\",result=\"forbidden\"} 0.0");
+
+        metrics.devGather(BattleMetrics.DevGatherMode.CREATE, BattleMetrics.DevGatherResult.PREPARE_FAILED);
+
+        assertThat(registry.scrape()).contains("xm_battle_dev_gather_total{mode=\"create\",result=\"prepare_failed\"} 1.0");
+    }
+
+    @Test
     void 计数与Gauge绑定() {
         metrics.roomCreate(CreateResult.OK);
         metrics.handshake(HandshakeResult.of(BattleTickets.Verdict.EXPIRED));

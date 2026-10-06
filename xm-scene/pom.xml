@@ -53,6 +53,12 @@
             <groupId>com.game</groupId>
             <artifactId>xm-audit</artifactId>
         </dependency>
+        <!-- 回合制战斗（6.3）：快照的技能可施放过滤与战斗配表指纹与引擎共用一份实现（engine-spec D7、§10.1） -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-battle-engine</artifactId>
+            <version>${project.version}</version>
+        </dependency>
 
         <!-- 通用资产通道的跨进程入口：按节点导出的 Dubbo Triple 提供方（SceneAssetOpService，register = false，编程式导出，
              启停排进 SceneNode 的顺序；不用 dubbo-spring-boot-starter，见 asset/SceneAssetRpcServer）。 -->

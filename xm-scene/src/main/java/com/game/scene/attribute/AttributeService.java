@@ -10,6 +10,8 @@ import com.game.scene.attribute.AttributeRules.PoolRule;
 import com.game.scene.attribute.AttributeRules.Validation;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.BattleGate;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerAttributes.Derived;
 import com.game.scene.player.PlayerAttributes.Scheme;
@@ -52,6 +54,8 @@ public final class AttributeService {
     private static final Logger log = LoggerFactory.getLogger(AttributeService.class);
 
     static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    /** 回合制战斗在途（基线 kAttributeInBattle）。 */
+    static final int IN_BATTLE = AttributeErrorTip.attribute_error.kAttributeInBattle_VALUE;
     static final int POOL_NOT_FOUND = AttributeErrorTip.attribute_error.kAttributePoolNotFound_VALUE;
     static final int POOL_LOCKED = AttributeErrorTip.attribute_error.kAttributePoolLocked_VALUE;
     static final int DIMENSION_NOT_FOUND = AttributeErrorTip.attribute_error.kAttributeDimensionNotFound_VALUE;
@@ -91,11 +95,18 @@ public final class AttributeService {
     private final AttributeTables tables;
     private final SceneClock clock;
     private final CurrencyService currency;
+    private final SceneMetrics metrics;
 
     public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency) {
+        this(tables, clock, currency, SceneMetrics.noop());
+    }
+
+    /** @param metrics 战斗在途闸的拒绝计数（{@code xm.scene.battle.gate.rejects{gate=attribute}}） */
+    public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency, SceneMetrics metrics) {
         this.tables = tables;
         this.clock = clock;
         this.currency = currency;
+        this.metrics = metrics;
     }
 
     // ------------------------------------------------------------------ 加载
@@ -527,10 +538,19 @@ public final class AttributeService {
      * 写操作统一前置（基线 CheckWritable，加点 / 洗点 / 开方案 / 切方案 / 改名 / GM 设等级都过这里，自动加点不过）。
      * 基线在这里拒绝两种情形：跨 zone / 跨节点交接冻结中（1005）与回合制战斗在途（25011 kAttributeInBattle）。
      * 冻结已接入：跨节点换图的交出事务在途（{@link ScenePlayer#frozen()}）回 1005（客户端入口另按冻结策略收拢，scene-handoff-spec §5.9，
-     * 这里是纵深防御；选目标中不冻结）。173 自动加点只算不落、不过这道闸，冻结中由分发入口回 1005（D9）。回合制战斗随 6.3 接入。
+     * 这里是纵深防御；选目标中不冻结）。173 自动加点只算不落、不过这道闸，冻结中由分发入口回 1005（D9）。
+     * 回合制战斗在途（{@link ScenePlayer#inBattle()}，备战或战斗中）回 25011（scene-battle-spec §7.13）。战斗结算的气血回写不经过这里
+     * （结算应用时战斗冻结还没摘，§7.11 e 步）。
      */
     private int checkWritable(ScenePlayer player) {
-        return player.frozen() ? INVALID_PARAMETER : 0;
+        if (player.frozen()) {
+            return INVALID_PARAMETER;
+        }
+        if (player.inBattle()) {
+            metrics.battleGateReject(BattleGate.ATTRIBUTE);
+            return IN_BATTLE;
+        }
+        return 0;
     }
 
     /** 扣金币（cost 为 uint64）：0 不扣；余额不足回 25012（基线 CanAfford）；扣成功记一条流水。 */

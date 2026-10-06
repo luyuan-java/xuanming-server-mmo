@@ -117,4 +117,99 @@ public final class DataMetrics {
         Counter.builder(SNAPSHOT_ADMIN).description("运维直写快照的结局").tag("cause", cause).tag("result", result)
                 .register(registry).increment();
     }
+
+    // ================================================================ 运维作业与栅栏（批次 7.2b，data-ops-spec §8.2）
+    // 标签只取固定集合（kind / outcome / source / result 都是代码里的常量），绝不带玩家号 / 作业号 / 区号。
+
+    static final String OPS_JOBS = "xm.data.ops.jobs";
+    static final String OPS_JOB_SECONDS = "xm.data.ops.job.seconds";
+    static final String OPS_JOBS_RUNNING = "xm.data.ops.jobs.running";
+    static final String OPS_PLAYERS = "xm.data.ops.players";
+    static final String OPS_CLAIMS = "xm.data.ops.claims";
+    static final String OPS_FENCE_HELD = "xm.data.ops.fence.held";
+    static final String OPS_FENCE_LOST = "xm.data.ops.fence.lost";
+    static final String DIVERGENCE_CHECK = "xm.data.rollback.divergence.check";
+    static final String DIVERGENCE_ROWS = "xm.data.rollback.divergence.rows";
+    static final String GUILD_CHECK_SECONDS = "xm.data.rollback.guild.check.seconds";
+    static final String LOCATION_TOMBSTONES = "xm.data.location.tombstones";
+
+    private final AtomicInteger jobsRunning = new AtomicInteger();
+    private final AtomicInteger fenceHeld = new AtomicInteger();
+    private volatile boolean opsGaugesRegistered;
+
+    /** 登记两个运维面 gauge（幂等；装配时调用一次，空闲时报 0）。 */
+    public void registerOps() {
+        if (opsGaugesRegistered) {
+            return;
+        }
+        opsGaugesRegistered = true;
+        Gauge.builder(OPS_JOBS_RUNNING, jobsRunning, AtomicInteger::get).description("本实例正在执行的运维作业数")
+                .register(registry);
+        Gauge.builder(OPS_FENCE_HELD, fenceHeld, AtomicInteger::get)
+                .description("本实例此刻以运维身份持有归属的玩家数（空闲时应为 0；持续不为 0 说明作业卡住、玩家进不了游戏）")
+                .register(registry);
+    }
+
+    /** 作业结局（{@code kind} = 作业种类名，{@code outcome} = 终态名，都是固定集合）。 */
+    public void opsJob(String kind, String outcome, long nanos) {
+        Counter.builder(OPS_JOBS).description("运维作业的结局").tag("kind", kind).tag("outcome", outcome)
+                .register(registry).increment();
+        Timer.builder(OPS_JOB_SECONDS).description("运维作业从开始执行到结局的耗时").tag("kind", kind)
+                .register(registry).record(nanos, TimeUnit.NANOSECONDS);
+    }
+
+    public void opsJobRunning(boolean running) {
+        if (running) {
+            jobsRunning.incrementAndGet();
+        } else {
+            jobsRunning.decrementAndGet();
+        }
+    }
+
+    /** 一个玩家在作业里的结局（restored / online / busy / fence_lost / no_snapshot / ...，固定集合）。 */
+    public void opsPlayer(String kind, String outcome) {
+        Counter.builder(OPS_PLAYERS).description("运维作业逐玩家的结局").tag("kind", kind).tag("outcome", outcome)
+                .register(registry).increment();
+    }
+
+    /** 一次夺权的结局：claimed / kicked / online / timeout / not_found / error。 */
+    public void opsClaim(String outcome) {
+        Counter.builder(OPS_CLAIMS).description("运维夺取玩家数据归属的结局").tag("outcome", outcome).register(registry)
+                .increment();
+    }
+
+    public void fenceHeld(int held) {
+        fenceHeld.set(held);
+    }
+
+    public void fenceLost(long count) {
+        if (count > 0) {
+            Counter.builder(OPS_FENCE_LOST).description("运维持有期间续约失败（之后不再对该玩家写）").register(registry)
+                    .increment(count);
+        }
+    }
+
+    /** 资产分歧检查：source = guild / ledger / recall；result 见 data-ops-spec §8.2。 */
+    public void divergenceCheck(String source, String result) {
+        Counter.builder(DIVERGENCE_CHECK).description("回档的资产分歧检查").tag("source", source).tag("result", result)
+                .register(registry).increment();
+    }
+
+    public void divergenceRows(String source, boolean accepted, long rows) {
+        if (rows > 0) {
+            Counter.builder(DIVERGENCE_ROWS).description("回档资产分歧检查列出的分歧行").tag("source", source)
+                    .tag("accepted", Boolean.toString(accepted)).register(registry).increment(rows);
+        }
+    }
+
+    public void guildCheckTime(long nanos) {
+        Timer.builder(GUILD_CHECK_SECONDS).description("一次帮会资产检查（含翻页）的耗时").register(registry)
+                .record(nanos, TimeUnit.NANOSECONDS);
+    }
+
+    /** 释放归属前写位置墓碑的结局：ok / stale（已有更新的写）/ error。 */
+    public void locationTombstone(String result) {
+        Counter.builder(LOCATION_TOMBSTONES).description("运维释放归属前写的位置墓碑").tag("result", result)
+                .register(registry).increment();
+    }
 }

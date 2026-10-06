@@ -15,6 +15,7 @@ import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
+import com.game.robot.scenario.BattleSettleScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CrossNodeScenario;
@@ -33,6 +34,7 @@ import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.QueueScenario;
 import com.game.robot.scenario.RateLimitScenario;
 import com.game.robot.scenario.ReconnectScenario;
+import com.game.robot.scenario.RollbackScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TeamScenario;
@@ -95,6 +97,13 @@ public final class RobotMain {
                             options.requestTimeout(), options.dataUrl(), options.sceneMetricsUrl(),
                             AuditScenario.resolveAdminToken(env.get("XM_ADMIN_TOKEN")));
                     title = "xm-robot audit：" + scenario.account() + "，" + target + " data=" + options.dataUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.ROLLBACK) {
+                    RollbackScenario scenario = new RollbackScenario(flow, registry, ids.sendTip(), options.accountPrefix(),
+                            options.runTag(), options.requestTimeout(), options.dataUrl(),
+                            AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")));
+                    title = "xm-robot rollback：" + scenario.account() + "，" + target + " data=" + options.dataUrl();
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.GUARD) {
@@ -234,6 +243,15 @@ public final class RobotMain {
                             options.accountPrefix(), options.runTag(), options.expectDevAllowed(), options.slow(), options.requestTimeout());
                     title = "xm-robot battle-edge：" + scenario.accountA() + " 等（期望 dev 接口 " + (options.expectDevAllowed() ? "开放" : "403")
                             + (options.slow() ? "，含慢用例" : "") + "），" + target + " battle-admin=" + options.battleAdminUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                } else if (options.scenario() == RobotOptions.Scenario.BATTLE_SETTLE) {
+                    BattleSettleScenario scenario = new BattleSettleScenario(client, flow, ids, registry, battleAdmin(options, env),
+                            Path.of(options.tableDir()), options.sceneMetricsUrl(), options.accountPrefix(), options.runTag(),
+                            options.expectDevAllowed(), options.slow(), options.requestTimeout(), options.observeTimeout());
+                    title = "xm-robot battle-settle：" + scenario.accountA() + " 等（期望 dev 接口 " + (options.expectDevAllowed() ? "开放" : "403")
+                            + (options.slow() ? "，含慢用例" : "") + "），" + target + " battle-admin=" + options.battleAdminUrl()
+                            + " scene-metrics=" + options.sceneMetricsUrl();
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.RECONNECT) {

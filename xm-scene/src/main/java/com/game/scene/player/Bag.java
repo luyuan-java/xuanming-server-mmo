@@ -280,6 +280,42 @@ public final class Bag {
         return firstFreeCell();
     }
 
+    // ================================================================ 按持有夹紧扣除
+
+    /** 一个实例被抽走的部分（{@code count} 是这次抽走的数量；实例被抽空时当场回收）。 */
+    public record Drawn(long guid, int configId, long count) {
+    }
+
+    /**
+     * 按持有夹紧扣除某配置（回合制战斗结算的消耗；基线 {@code RemoveItemsClamped}）：按<b>格子号升序</b>逐个实例抽取（scene-battle-spec D22，
+     * 基线是 entt 视图序、没有规定），直到抽满 {@code count} 或没有了；抽空的实例当场回收。扣不满不报错。
+     *
+     * @return 被抽到的实例（按抽取顺序）；没有持有为空表
+     */
+    public List<Drawn> drainClamped(int configId, long count) {
+        if (count <= 0) {
+            return List.of();
+        }
+        List<Drawn> drawn = new ArrayList<>();
+        long remaining = count;
+        for (BagItem item : items()) {
+            if (remaining == 0) {
+                break;
+            }
+            if (item.configId() != configId || item.size() == 0) {
+                continue;
+            }
+            long take = Math.min(item.size(), remaining);
+            item.size(item.size() - take);
+            remaining -= take;
+            drawn.add(new Drawn(item.guid(), configId, take));
+            if (item.size() == 0) {
+                remove(item);
+            }
+        }
+        return List.copyOf(drawn);
+    }
+
     // ================================================================ 整理
 
     /**

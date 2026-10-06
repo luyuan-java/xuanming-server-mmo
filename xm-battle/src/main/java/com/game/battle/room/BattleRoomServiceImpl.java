@@ -811,8 +811,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     private void dispatchSettlement(BattleRoom room, long playerId, BattleRouting routing, BattleSettlementData settlement) {
-        if (room.origin == RoomOrigin.DEV) {
-            // dev 房间永不结算（§7.9、§7.12）：dev 接口不能变成发奖口子
+        if (!room.origin.settles()) {
+            // dev 房间永不结算（§7.9、§7.12）：dev 接口不能变成发奖口子；dev gather 的房间快照来自 scene，照常结算（scene-battle-spec §7.18）
             metrics.sceneEvent(SceneEventKind.SETTLEMENT, SceneEventResult.SKIPPED);
             log.info("dev 房间不投递结算 battle_id={} player_id={} outcome={}", Long.toUnsignedString(room.battleId),
                     Long.toUnsignedString(playerId), settlement.getOutcome());
@@ -827,8 +827,10 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     private void dispatchResult(BattleRoom room, BattleResultEvent event) {
-        if (room.origin == RoomOrigin.DEV) {
-            log.info("dev 房间不投递对局结果 battle_id={} outcome={}", Long.toUnsignedString(room.battleId), event.getOutcome());
+        if (!room.origin.publishesResult()) {
+            // dev / dev gather 的房间没有 match，不投递对局结果（scene-battle-spec §7.18）
+            log.info("dev 房间不投递对局结果 battle_id={} outcome={} origin={}", Long.toUnsignedString(room.battleId), event.getOutcome(),
+                    room.origin);
             return;
         }
         try {

@@ -37,10 +37,16 @@
             <artifactId>xm-gateway-store</artifactId>
         </dependency>
         <dependency>
-            <!-- 只读玩家数据：xm.storage.PlayerState（快照详情 / 差异 / 回收估算）与已落盘账本规则（账本差集）。
-                 批次 7.2a 不写玩家数据：PlayerStoreAutoConfiguration 在 DataApplication 里排除，写路径随 7.2b -->
+            <!-- 玩家数据：xm.storage.PlayerState（快照详情 / 差异 / 回收估算 / 回档）、已落盘账本规则（账本差集）与归属协议
+                 （批次 7.2b：夺权 / 续约 / 释放 / 带围栏写，PlayerStore 由 DataConfiguration 自己定义，自动装配在 DataApplication 里排除） -->
             <groupId>com.game</groupId>
             <artifactId>xm-player-store</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 回档的帮会资产闸：GuildInternalService 的 Dubbo 调用方（编程式引用 + xm-api 的 IsolatedDubboModule，同 xm-scene；
+                 不引入 dubbo-spring-boot-starter，只读与 dry-run 的进程不起 Dubbo）。xm-api 对 dubbo 是 optional，这里显式依赖 -->
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo</artifactId>
         </dependency>
         <dependency>
             <!-- 运维作业表（ops_job / ops_job_event / ops_job_player / ops_active / recall_source / audit_replay_line）：

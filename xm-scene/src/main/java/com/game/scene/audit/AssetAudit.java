@@ -51,7 +51,11 @@ public interface AssetAudit {
         /** 玩家间交易发放（交易二期）。 */
         TRADE,
         /** 邮件附件（预留）。 */
-        MAIL_ATTACHMENT
+        MAIL_ATTACHMENT,
+        /** 回合制战斗结算的金币（Java 独有 TX_BATTLE_REWARD 1005，关联号 = battle_id；scene-battle-spec D23）。 */
+        BATTLE_REWARD,
+        /** 战斗掉落入包（同基线 TX_ITEM_AWARD，关联号 = battle_id）。 */
+        ITEM_AWARD
     }
 
     /**

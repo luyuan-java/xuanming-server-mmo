@@ -145,7 +145,7 @@ class SceneMetricsTest {
                     "executor_queued_tasks{name=\"scene-storage\"}");
             assertThat(labelNames(text, "xm_scene_"))
                     .isSubsetOf("scene_config", "kind", "result", "change", "op", "direction", "type", "reason", "le",
-                            "rpc", "outcome", "state", "event");
+                            "rpc", "outcome", "state", "event", "gate");
         } finally {
             executor.shutdownNow();
             prometheus.close();

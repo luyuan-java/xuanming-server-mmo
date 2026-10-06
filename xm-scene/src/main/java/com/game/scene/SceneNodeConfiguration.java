@@ -18,6 +18,8 @@ import com.game.scene.bag.BagTables;
 import com.game.scene.mission.MissionTables;
 import com.game.scene.pet.PetTables;
 import com.game.scene.skill.SkillTables;
+import com.game.scene.battle.SceneBattleTables;
+import com.game.scene.metrics.SceneBattleMetrics;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.ConfigSceneTables;
 import com.game.scene.world.SceneTables;
@@ -118,14 +120,29 @@ public class SceneNodeConfiguration {
         return new SceneMetrics(meterRegistry);
     }
 
+    /** 回合制战斗的指标（scene-battle-spec §9）。 */
+    @Bean
+    public SceneBattleMetrics sceneBattleMetrics(MeterRegistry meterRegistry) {
+        return new SceneBattleMetrics(meterRegistry);
+    }
+
+    /** 回合制战斗的配表视图（指纹在启动时算一次，scene 没有表热更）。 */
+    @Bean
+    public SceneBattleTables sceneBattleTables(ConfigTables tables) {
+        SceneBattleTables battleTables = SceneBattleTables.from(tables);
+        log.info("战斗配表指纹 table_fingerprint={}", battleTables.fingerprint());
+        return battleTables;
+    }
+
     @Bean
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
                                BagTables bagTables, MissionTables missionTables, SkillTables skillTables,
                                PetTables petTables, NodeLinkAuth nodeLinkAuth,
-                               SceneMetrics sceneMetrics, AuditProperties audit) {
+                               SceneMetrics sceneMetrics, AuditProperties audit, SceneBattleTables sceneBattleTables,
+                               SceneBattleMetrics sceneBattleMetrics) {
         return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, bagTables, missionTables,
-                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit);
+                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, sceneBattleTables, sceneBattleMetrics);
     }
 
     /** GM 签名停机的校验（密钥只从环境变量 XM_GM_ADMIN_SECRET 读，没配一律拒）。 */

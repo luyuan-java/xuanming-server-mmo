@@ -81,6 +81,7 @@ public final class SceneMetrics {
     static final String TRANSFER_ENTERS = "xm.scene.transfer.enters";
     static final String TRANSFER_POST_FREEZE_MUTATIONS = "xm.scene.transfer.post.freeze.mutations";
     static final String FROZEN_REJECTIONS = "xm.scene.frozen.rejections";
+    static final String BATTLE_GATE_REJECTS = "xm.scene.battle.gate.rejects";
     static final String INSTANCES = "xm.scene.instances";
     static final String INSTANCE_LIFECYCLE = "xm.scene.instance.lifecycle";
     static final String MIRROR_REQUESTS = "xm.scene.mirror.requests";
@@ -127,7 +128,9 @@ public final class SceneMetrics {
         /** 位置 / 朝向 / 速度含非有限值，或位置超出世界范围（±1e7 m），整条丢弃。 */
         INVALID,
         /** 玩家在冻结中（跨节点换图交出在途，scene-handoff-spec §5.9 DROP），整条静默丢弃。 */
-        FROZEN
+        FROZEN,
+        /** 玩家有在途的回合制战斗（134 / 132 静默丢、131 只清速度，scene-battle-spec §7.13）。 */
+        IN_BATTLE
     }
 
     /** 一次放技能（84）的裁决（{@code xm.scene.skill.releases{result}}），每条恰好计一次。 */
@@ -143,7 +146,11 @@ public final class SceneMetrics {
         /** 施法 / 引导 / 后摇中且新技能不能打断（7000）。 */
         UNINTERRUPTIBLE,
         /** 行为互斥表 / 战斗状态 / 技能许可表拒绝（表里的提示码）。 */
-        STATE_REJECTED
+        STATE_REJECTED,
+        /** 施法者在回合制战斗中（7004，scene-battle-spec §7.13）。 */
+        CASTER_IN_BATTLE,
+        /** 目标在回合制战斗中（7002）。 */
+        TARGET_IN_BATTLE
     }
 
     /** 周期存盘对一个到期玩家的处理（{@code xm.scene.periodic.saves{result}}），每人每次到期恰好计一次。 */
@@ -192,7 +199,11 @@ public final class SceneMetrics {
         /** 读回来时玩家已离开或已重新进场（不是发起读时的那个实例），丢弃。 */
         STALE,
         /** 读失败（Redis 故障 / 超时）、索引 / 投影损坏，或检查本身出错：不跟随。 */
-        READ_ERROR
+        READ_ERROR,
+        /** 自己有在途的回合制战斗（内存冻结，读之前与回调后各判一次，scene-battle-spec §7.13）：不跟随。 */
+        IN_BATTLE,
+        /** 自己的战斗锁存在（或读锁失败，按在途）：不跟随（基线 team.cpp:378-402）。 */
+        BATTLE_LOCK
     }
 
     /** 存储写的种类（{@code xm.scene.storage.writes{op}}）。每种只登记它可能出现的结局（不建恒为 0 的组合）。 */
@@ -317,7 +328,9 @@ public final class SceneMetrics {
         /** 进场加载完成时目标频道已在排空，改进本节点的兄弟频道。 */
         ENTER_REDIRECT,
         /** 玩家在跨节点换图的冻结中（交出事务在途，scene-handoff-spec §5.5）：这次不改派，交出结局出来后实例即离开或解冻再改派。 */
-        SWITCHING
+        SWITCHING,
+        /** 玩家有在途的回合制战斗：这次不改派，等结算解冻后下一次推进再看（D26）。 */
+        IN_BATTLE
     }
 
     /**
@@ -336,7 +349,9 @@ public final class SceneMetrics {
         /** 调用失败、本地兜底超时或应答残缺：推 23 {1003}。 */
         ERROR,
         /** 结果回来时实例已离开 / 已重新进场 / 换图已作废：丢弃。 */
-        STALE
+        STALE,
+        /** 结果在别的节点，但玩家此刻有在途的回合制战斗（纵深防御，应恒为 0）：回 NONE、推 23 {3023}。 */
+        IN_BATTLE
     }
 
     /** 一次交出的结局（{@code xm.scene.transfers{result}}，scene-handoff-spec §7.2），每次冻结恰好终结一次。 */
@@ -370,6 +385,14 @@ public final class SceneMetrics {
         ASSET_OP,
         /** 移动上行（134 / 132 / 131）静默丢弃（DROP）。 */
         MOVE
+    }
+
+    /**
+     * 回合制战斗在途闸（scene-battle-spec §7.13，§9）挡掉的一次操作（{@code xm.scene.battle.gate.rejects{gate}}）：入口集中闸（default = 缺省 REJECT、
+     * move = 移动上行）与各服务闸（63 / 84 / 属性 / 宝宝 / 192 / 资产通道）各计一次。
+     */
+    public enum BattleGate {
+        ENTER_SCENE, SKILL, ATTRIBUTE, PET, BAG_SORT, ASSET, MOVE, DEFAULT
     }
 
     /** 目标节点上交出进场（{@code PlayerEnter.transfer = true}）的结果（{@code xm.scene.transfer.enters{result}}）。 */
@@ -493,6 +516,7 @@ public final class SceneMetrics {
     private final Map<TransferEnter, Counter> transferEnters;
     private final Counter postFreezeMutations;
     private final Map<FrozenRejection, Counter> frozenRejections;
+    private final Map<BattleGate, Counter> battleGateRejects;
     /** 实例数（种类 × 状态；逻辑线程推绝对值，抓取线程读）。 */
     private final Map<InstanceKind, Map<InstanceState, AtomicInteger>> instances;
     private final Map<InstanceKind, Map<InstanceEvent, Counter>> instanceLifecycle;
@@ -606,6 +630,8 @@ public final class SceneMetrics {
                 .register(registry);
         this.frozenRejections = counters(FrozenRejection.class, FROZEN_REJECTIONS, "kind",
                 "冻结闸（跨节点换图交出在途）在入口挡掉的操作：request = 回 1005，asset_op = 资产通道 RETRY 27003，move = 移动上行静默丢");
+        this.battleGateRejects = counters(BattleGate.class, BATTLE_GATE_REJECTS, "gate",
+                "回合制战斗在途闸挡掉的操作（scene-battle-spec §7.13）");
         // 镜像 / 副本实例（批次 5.3，dungeon-mirror-spec §8.2）：全部预注册，不带 zone / scene_id / 节点号 / player
         this.instances = new EnumMap<>(InstanceKind.class);
         this.instanceLifecycle = new EnumMap<>(InstanceKind.class);
@@ -785,6 +811,11 @@ public final class SceneMetrics {
     /** 冻结闸在入口挡掉一次操作（逻辑线程：请求分发、资产通道）。 */
     public void frozenRejection(FrozenRejection kind) {
         frozenRejections.get(kind).increment();
+    }
+
+    /** 回合制战斗在途闸挡掉一次操作（任意线程）。 */
+    public void battleGateReject(BattleGate gate) {
+        battleGateRejects.get(gate).increment();
     }
 
     // ================================================================ 镜像 / 副本实例（批次 5.3）

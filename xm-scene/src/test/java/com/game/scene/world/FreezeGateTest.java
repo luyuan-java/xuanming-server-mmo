@@ -265,7 +265,7 @@ class FreezeGateTest {
     @Test
     void 玩法功能声明DROP_启动即失败() {
         SceneFeature dropper = r -> r.on("SceneCurrencyClientPlayer", "GetCurrencyList", GetCurrencyListRequest.class,
-                FreezePolicy.DROP, (call, req) -> { });
+                FreezePolicy.DROP, BattlePolicy.ALLOW, (call, req) -> { });
 
         assertThatThrownBy(() -> new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
                 List.of(dropper))).isInstanceOf(IllegalStateException.class).hasMessageContaining("DROP");

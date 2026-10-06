@@ -72,4 +72,30 @@ class ResultRoutingTest {
         assertThat(h.outs(RoomHarness.Kind.ACTIVITY_RESULT)).isEmpty();
         assertThat(h.counter("xm.battle.scene.events", "kind", "settlement", "result", "skipped")).isEqualTo(1);
     }
+
+    @Test
+    void dev_gather房间照常确认照常结算_但不投递结果事件() {
+        assertThat(h.service().createBattle(h.pve(12005, A).build(), RoomOrigin.DEV_GATHER).hasErrorMessage()).isFalse();
+        h.connect(12005, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT);
+        h.scheduler.advance(10_000);
+        assertThat(h.outs(RoomHarness.Kind.CONFIRM)).as("dev gather 房间照常补发确认").hasSize(2);
+
+        h.service().submit(A, SubmitBattleActionRequest.newBuilder().setBattleId(12005)
+                .setAction(RoomHarness.skill(FakeBattleData.SKILL_NUKE, MONSTER)).build());
+
+        assertThat(h.settlementsOut()).as("快照来自 scene，照常结算（scene-battle-spec §7.18）").hasSize(1);
+        assertThat(h.settlementsOut().get(0).getPlayerId()).isEqualTo(A);
+        assertThat(h.outs(RoomHarness.Kind.RESULT)).as("没有 match，不投递对局结果").isEmpty();
+        assertThat(h.outs(RoomHarness.Kind.ACTIVITY_RESULT)).isEmpty();
+    }
+
+    @Test
+    void 来源的投递判定() {
+        assertThat(RoomOrigin.MATCH.settles()).isTrue();
+        assertThat(RoomOrigin.MATCH.publishesResult()).isTrue();
+        assertThat(RoomOrigin.DEV.settles()).isFalse();
+        assertThat(RoomOrigin.DEV.publishesResult()).isFalse();
+        assertThat(RoomOrigin.DEV_GATHER.settles()).isTrue();
+        assertThat(RoomOrigin.DEV_GATHER.publishesResult()).isFalse();
+    }
 }

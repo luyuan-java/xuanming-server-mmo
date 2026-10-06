@@ -1,5 +1,8 @@
 package com.game.scene.pet;
 
+import com.game.proto.BaseAttributesComp;
+import com.game.proto.BattlePetSettlementData;
+import com.game.proto.BattlePetSnapshot;
 import com.game.proto.PetDerivedInfo;
 import com.game.proto.PetDimensionInfo;
 import com.game.proto.PetInfo;
@@ -10,6 +13,8 @@ import com.game.scene.attribute.AttributeRules.PoolRule;
 import com.game.scene.attribute.AttributeRules.Validation;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.BattleGate;
 import com.game.scene.pet.PetRules.BaseValues;
 import com.game.scene.pet.PetRules.Coefficients;
 import com.game.scene.pet.PetRules.Derived;
@@ -41,7 +46,7 @@ import org.slf4j.LoggerFactory;
  * 二级属性不落库、不缓存，需要时由资质 + 已分配 + 等级现算。
  *
  * <p>返回值 0 = 成功，否则是提示码（pet_error 26000–26016 等）。写操作的前置闸（基线 CheckWritable）：跨节点换图冻结中 1005
- * （已接入，scene-handoff-spec §5.9）；回合制战斗中 26008 随 6.3 接入。
+ * （已接入，scene-handoff-spec §5.9）；回合制战斗在途 26008（scene-battle-spec §7.13）。
  */
 public final class PetService {
 
@@ -65,6 +70,8 @@ public final class PetService {
     static final int NO_AUTO_PLAN = PetErrorTip.pet_error.kPetNoAutoPlan_VALUE;
     static final int NOTHING_TO_CHANGE = PetErrorTip.pet_error.kPetNothingToChange_VALUE;
     static final int ID_GENERATE_FAILED = PetErrorTip.pet_error.kPetIdGenerateFailed_VALUE;
+    /** 回合制战斗在途（基线 kPetInBattle）。 */
+    static final int IN_BATTLE = PetErrorTip.pet_error.kPetInBattle_VALUE;
 
     /** 重算的原因（同角色）：升级按绝对增量补当前值、降级只夹；其余按比例保持。 */
     enum RecalcReason {
@@ -84,6 +91,7 @@ public final class PetService {
     private final ItemGuids guids;
     private final SceneClock clock;
     private final RandomGenerator random;
+    private final SceneMetrics metrics;
 
     /**
      * @param guids  宝宝号源（与物品同一个全服号源，同基线 item 号段）
@@ -91,11 +99,18 @@ public final class PetService {
      */
     public PetService(PetTables tables, CurrencyService currency, ItemGuids guids, SceneClock clock,
                       RandomGenerator random) {
+        this(tables, currency, guids, clock, random, SceneMetrics.noop());
+    }
+
+    /** @param metrics 战斗在途闸的拒绝计数（{@code xm.scene.battle.gate.rejects{gate=pet}}） */
+    public PetService(PetTables tables, CurrencyService currency, ItemGuids guids, SceneClock clock,
+                      RandomGenerator random, SceneMetrics metrics) {
         this.tables = tables;
         this.currency = currency;
         this.guids = guids;
         this.clock = clock;
         this.random = random;
+        this.metrics = metrics;
     }
 
     // ------------------------------------------------------------------ 加载与重算
@@ -487,15 +502,99 @@ public final class PetService {
         return low == high ? low : random.nextLong(low, high + 1);
     }
 
+    // ------------------------------------------------------------------ 回合制战斗（scene-battle-spec §5、§7.14）
+
+    /**
+     * 出战宝宝的战斗快照（基线 {@code PetSystem::BuildBattleSnapshot}，{@code pet.cpp:867-912}）：没有出战宝宝、宝宝找不到、缺表行或缺池（WARN）、
+     * 宝宝气血为 0（死宝宝不参战）→ 空表；否则恰好一只。属性按现算的二级属性：{@code base_attributes} 只填气血（夹到上限）、法力（上限 &gt; 0 才夹）、
+     * 速度；技能 = 种类自带 ∪ 已学（<b>不做可施放过滤</b>，B4，引擎只让宝宝普攻）。
+     */
+    public List<BattlePetSnapshot> buildBattleSnapshot(ScenePlayer player) {
+        PlayerPets pets = player.pets();
+        long activeId = pets.activePetId();
+        if (activeId == 0) {
+            return List.of();
+        }
+        Pet pet = pets.find(activeId);
+        if (pet == null) {
+            return List.of();
+        }
+        PetTable row = tables.pet(pet.petTableId());
+        if (row == null || tables.pool() == null) {
+            log.warn("出战宝宝缺种类行或宝宝池，不带进战斗 player={} pet_id={} pet_table_id={}", Long.toUnsignedString(player.playerId()),
+                    Long.toUnsignedString(pet.petId()), Integer.toUnsignedString(pet.petTableId()));
+            return List.of();
+        }
+        if (pet.health() == 0) {
+            return List.of();
+        }
+        Derived derived = derived(pet, row);
+        long health = Math.min(pet.health(), derived.maxHealth());
+        long mana = derived.maxMana() > 0 ? Math.min(pet.mana(), derived.maxMana()) : pet.mana();
+        return List.of(BattlePetSnapshot.newBuilder()
+                .setPetId(pet.petId())
+                .setOwnerPlayerId(player.playerId())
+                .setPetName(!pet.name().isEmpty() ? pet.name() : row.getName())
+                .setPetTableId(pet.petTableId())
+                .setLevel((int) pet.level())
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(health).setMana(mana).setSpeed(derived.speed()))
+                .setMaxHealth(derived.maxHealth())
+                .setMaxMana(derived.maxMana())
+                .setPhysicalAttack(derived.physicalAttack())
+                .setMagicAttack(derived.magicAttack())
+                .setDefense(derived.defense())
+                .addAllSkillTableIds(skills(pet, row))
+                .build());
+    }
+
+    /**
+     * 战斗结算回写宝宝（基线 {@code PetSystem::ApplyBattleSettlement}，{@code pet.cpp:914-941}）：找不到 pet_id → WARN 忽略；缺表行 / 缺池 → 静默跳过；
+     * 气血按现算上限夹，法力上限 &gt; 0 才夹；{@code is_dead} 或夹后气血为 0 → 回满（气血、法力回到上限）。
+     * <b>不经过 {@link #checkWritable}</b>（结算应用时战斗冻结还没摘，§7.11 f 步）。推 184 由调用方做（有条目时一次）。
+     */
+    public void applyBattleSettlement(ScenePlayer player, List<BattlePetSettlementData> entries) {
+        PlayerPets pets = player.pets();
+        for (BattlePetSettlementData entry : entries) {
+            Pet pet = pets.find(entry.getPetId());
+            if (pet == null) {
+                log.warn("战斗结算里的宝宝不在玩家名下，忽略 player={} pet_id={}", Long.toUnsignedString(player.playerId()),
+                        Long.toUnsignedString(entry.getPetId()));
+                continue;
+            }
+            PetTable row = tables.pet(pet.petTableId());
+            if (row == null || tables.pool() == null) {
+                continue;
+            }
+            Derived derived = derived(pet, row);
+            long settled = entry.getHealth() < 0 ? Long.MAX_VALUE : entry.getHealth();
+            long settledMana = entry.getMana() < 0 ? Long.MAX_VALUE : entry.getMana();
+            long health = Math.min(settled, derived.maxHealth());
+            long mana = derived.maxMana() > 0 ? Math.min(settledMana, derived.maxMana()) : settledMana;
+            if (entry.getIsDead() || health == 0) {
+                health = derived.maxHealth();
+                mana = derived.maxMana();
+            }
+            pet.setHealth(health);
+            pet.setMana(mana);
+        }
+    }
+
     // ------------------------------------------------------------------ 内部
 
     /**
      * 写操作统一前置（基线 CheckWritable）：跨节点换图的交出事务在途（{@link ScenePlayer#frozen()}）回 1005——客户端入口已按冻结策略
-     * 收拢（scene-handoff-spec §5.9），这里是纵深防御；选目标中（RESOLVING）不冻结。回合制战斗中 26008 随 6.3 接入。
-     * 自动加点只算不落，不过这道闸（同基线）。
+     * 收拢（scene-handoff-spec §5.9），这里是纵深防御；选目标中（RESOLVING）不冻结。回合制战斗在途回 26008（scene-battle-spec §7.13）。
+     * 自动加点只算不落，不过这道闸（同基线）。战斗结算的宝宝回写（{@link #applyBattleSettlement}）不经过这里：应用时战斗冻结还没摘。
      */
-    private static int checkWritable(ScenePlayer player) {
-        return player.frozen() ? INVALID_PARAMETER : OK;
+    private int checkWritable(ScenePlayer player) {
+        if (player.frozen()) {
+            return INVALID_PARAMETER;
+        }
+        if (player.inBattle()) {
+            metrics.battleGateReject(BattleGate.PET);
+            return IN_BATTLE;
+        }
+        return OK;
     }
 
     /** 扣金币（uint64）：0 不扣；余额不足回 26013；扣成功记一条流水（货币服务内部还有封禁等校验）。 */

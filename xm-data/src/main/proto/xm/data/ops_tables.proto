@@ -5,8 +5,8 @@
 // 改表纪律：字段只追加、字段号永不复用（删字段用 reserved 占住，pbmysql 按列注释 pb:N 识别字段）；
 // index 组只能追加到末尾，不得调序（idx_<表>_<序号> 按位置命名）。所有列 NOT NULL（pbmysql 不存 NULL），「没有」用 0 / 空串表示。
 //
-// 批次 7.2a 只用到 ops_job（手工快照的终态作业行、回收 dry-run 截断的审计行）、ops_job_event 与 audit_replay_line；
-// ops_active / ops_job_player / recall_source 先建出来（7.2b / 7.2c 的作业框架、回档明细、回收去重用），7.2a 不写。
+// 批次 7.2a 用到 ops_job（手工快照的终态作业行、回收 dry-run 截断的审计行）、ops_job_event 与 audit_replay_line；
+// 批次 7.2b 起作业框架用 ops_active（全集群单飞）、ops_job_player（回档明细，与改写玩家数据同事务）；recall_source 随 7.2c。
 syntax = "proto3";
 
 package xm.data;
@@ -93,6 +93,9 @@ message OpsJobRow {
   int64 started_ms = 19;
   int64 finished_ms = 20;
   string summary_json = 21;             // 结果摘要（幂等重放时原样回给调用方）
+  // 运维请求取消（POST /admin/ops-jobs/{id}/cancel，批次 7.2b）：执行线程在各阶段边界查它，只在第一笔写之前生效。
+  // 放在库里而不是进程内：多副本时取消请求可能落在没在跑这个作业的副本上。
+  bool cancel_requested = 22;
 }
 
 // 全集群单飞槽（7.2b）：受理时插入（重键 = 有作业在跑 → 409 ops_busy），终态时删除。

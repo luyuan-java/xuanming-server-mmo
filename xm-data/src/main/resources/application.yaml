@@ -4,6 +4,8 @@
 #   XM_AUDIT_TOPIC_GENERATION         审计 topic 代次（必须与 xm-scene 一致，缺省 1）
 #   XM_ADMIN_TOKEN                    运维接口令牌；不设则 /admin/** 一律 503
 #   XM_DATA_GM_SNAPSHOT_RETENTION     运维 / 安全快照保留期（缺省 0 = 永久）
+#   XM_DATA_OPS_ENABLED               改玩家数据的运维写操作（回档执行）开关，缺省 false
+#   XM_DUBBO_SECRET                   Dubbo 调用方鉴权密钥（XM_DATA_OPS_ENABLED=true 时必填：回档的帮会检查调 xm-guild）
 spring:
   application:
     name: xm-data
@@ -63,11 +65,38 @@ xm:
       # 启动约束：流水保留期为 0，或不短于上下线快照保留期且后者非 0（data-ops-spec §3.7）；生产值随部署批次给出（Q11）
       gm-snapshot: ${XM_DATA_GM_SNAPSHOT_RETENTION:0s}
     ops:
+      # 改玩家数据的运维写操作总开关（回档执行、取消作业；批次 7.2b）。关闭时这些接口回 503 ops_disabled，只读与 dry-run 照常。
+      # 开启时 XM_DUBBO_SECRET 必填（帮会检查是 Dubbo 调用方），缺了拒绝启动。本机切片脚本设 true
+      enabled: ${XM_DATA_OPS_ENABLED:false}
       # 不给玩家、只按原因 / 时间窗的全服流水查询，与全服回收的时间窗上限
       max-window: 7d
+      # 夺权最长等待（kick 时含等 scene 写回释放）；> 归属租约 30 s，覆盖交出提交后、目标节点进场前无人持有的最坏情况
+      claim-wait: ${XM_DATA_OPS_CLAIM_WAIT:35s}
+      # 一个作业涉及的玩家上限（整区超出 422 plan_too_large，不自动拆批）
+      max-players-per-job: 10000
+      # 写阶段之前超时：全部释放、FAILED；写阶段超时：写完当前玩家后停、PARTIAL
+      job-timeout: 30m
+      # 回档目标时刻至少早于现在多久（快照经 Kafka 落库有延迟）
+      min-target-age: ${XM_DATA_OPS_MIN_TARGET_AGE:5m}
+      # 作业心跳与清扫判定（心跳超过 stale-after 没更新的作业改 INTERRUPTED）
+      heartbeat: 5s
+      stale-after: 60s
     recall:
       # 一次回收（含 dry-run）至多匹配多少行源流水；超出 422 result_truncated、零变更
       max-rows: 10000
+    rollback:
+      guild:
+        # 帮会检查前的沉降等待与写后复查前的等待（同基线 30 s / 10 s，Q6）；本机切片脚本调小
+        settle: ${XM_DATA_ROLLBACK_SETTLE:30s}
+        recheck-delay: ${XM_DATA_ROLLBACK_RECHECK_DELAY:10s}
+        recheck-budget: 120s
+        # 检查起点 = 快照内容时刻 − 余量（[5s, 1h]）；检查预算（≤ 1h）；单次 Dubbo 调用上限
+        clock-skew-margin: 300s
+        check-budget: 120s
+        call-timeout: 10s
+  # 回档帮会检查直连的 xm-guild（GuildInternalService，Dubbo group guild）；为空 = 没有装配，回档一律 check_failed
+  dubbo:
+    guild-url: ${XM_DUBBO_GUILD_URL:tri://127.0.0.1:20886}
 
 logging:
   level:

@@ -45,7 +45,8 @@ import java.util.function.Supplier;
  *   <li>直连面（{@code com.game.battle.edge}）：{@link #handshake}、{@link #clientRequest}、{@link #invalidFrame}、{@link #disconnect}
  *       （含房间经 {@code DirectLink.closeGracefully / closeNow} 传入的原因，由直连面在真正关闭时计一次）；</li>
  *   <li>出站端口实现：{@link #sceneEvent}、{@link #result}；</li>
- *   <li>控制面（{@code rpc} / {@code BattleNode}）：{@link #rpc}、{@code roomCreate(NOT_ALLOCATABLE)}、{@link #leaseLost}。</li>
+ *   <li>控制面（{@code rpc} / {@code BattleNode}）：{@link #rpc}、{@code roomCreate(NOT_ALLOCATABLE)}、{@link #leaseLost}；</li>
+ *   <li>dev 管理接口（{@code admin.DevGatherController}）：{@link #devGather}。</li>
  * </ul>
  * Gauge 由装配方绑定：{@code bindRooms(rooms::roomCount)}、{@code bindDirectConnections(edge::connectionCount)}、
  * {@code bindLogicPendingTasks(scheduler::pendingTasks)}、{@code bindAdmissionPhase(admission::phase)}。
@@ -72,6 +73,7 @@ public final class BattleMetrics {
     static final String LOGIC_PENDING = "xm.battle.logic.pending.tasks";
     static final String ADMISSION_PHASE = "xm.battle.admission.phase";
     static final String LEASE_LOST = "xm.battle.lease.lost";
+    static final String DEV_GATHER = "xm.battle.dev.gather";
 
     /** 白名单外的上行号（{@code xm_battle_client_requests_total{method}}）。 */
     public static final String METHOD_OTHER = "other";
@@ -236,6 +238,10 @@ public final class BattleMetrics {
     public enum SceneEventResult {
         LOGGED,
         SENT,
+        /** 确认：快照路由的实例已不在（备战节点重启 / 下线），回落到定位器、发往玩家现在的实例（D28）。 */
+        REROUTED,
+        /** 确认：scene 回 NOT_HERE（实例不符 / 已换实例）。 */
+        NOT_HERE,
         /** 不发（例：目录里的实例与快照路由不符 stale_instance；dev 房间不结算）。 */
         SKIPPED,
         ERROR
@@ -285,6 +291,29 @@ public final class BattleMetrics {
         ERROR
     }
 
+    /**
+     * dev gather 的模式（{@code xm_battle_dev_gather_total{mode}}，scene-battle-spec §9）。{@link #UNKNOWN} = 解析请求体之前就拒绝的
+     * （运行模式 403、请求体非法），那时还不知道模式。
+     */
+    public enum DevGatherMode {
+        PREPARE_ONLY,
+        CREATE,
+        UNKNOWN
+    }
+
+    /** dev gather 的结局（{@code xm_battle_dev_gather_total{result}}）。 */
+    public enum DevGatherResult {
+        OK,
+        /** 有人定位 / 备战失败（含指纹不一致），没走到建房。 */
+        PREPARE_FAILED,
+        /** 全员备战成功，建房不可分配 / 业务错误 / 结局不明。 */
+        CREATE_FAILED,
+        /** 运行模式不是 dev / test（403）。 */
+        FORBIDDEN,
+        /** 请求体非法（400）或节点没在运行（503）。 */
+        REJECTED
+    }
+
     // ---------------------------------------------------------------- 计量器
 
     private final MeterRegistry registry;
@@ -304,6 +333,7 @@ public final class BattleMetrics {
     private final Map<ResultChannel, Map<ResultOutcome, Counter>> results;
     private final Map<RpcMethod, Map<RpcResult, Timer>> rpcs;
     private final Counter leaseLost;
+    private final Map<DevGatherMode, Map<DevGatherResult, Counter>> devGathers;
 
     private volatile IntSupplier roomCount = () -> 0;
     private volatile IntSupplier directConnectionCount = () -> 0;
@@ -387,6 +417,16 @@ public final class BattleMetrics {
         Gauge.builder(ADMISSION_PHASE, () -> admissionPhase.get().gaugeValue())
                 .description("建房准入闸阶段：0 not_started / 1 open / 2 closed").register(registry);
         this.leaseLost = Counter.builder(LEASE_LOST).description("节点号租约丢失（关闸、停发布、不作废房间）").register(registry);
+        Map<DevGatherMode, Map<DevGatherResult, Counter>> gathers = new EnumMap<>(DevGatherMode.class);
+        for (DevGatherMode mode : DevGatherMode.values()) {
+            Map<DevGatherResult, Counter> byResult = new EnumMap<>(DevGatherResult.class);
+            for (DevGatherResult result : DevGatherResult.values()) {
+                byResult.put(result, Counter.builder(DEV_GATHER).description("dev / test 管理接口 gather 的结局（scene-battle-spec §7.18）")
+                        .tag("mode", lower(mode)).tag("result", lower(result)).register(registry));
+            }
+            gathers.put(mode, byResult);
+        }
+        this.devGathers = gathers;
     }
 
     // ---------------------------------------------------------------- Gauge 绑定（回调必须线程安全、不阻塞）
@@ -491,6 +531,11 @@ public final class BattleMetrics {
 
     public void leaseLost() {
         leaseLost.increment();
+    }
+
+    /** dev gather 的一次调用（管理 Tomcat 线程）。 */
+    public void devGather(DevGatherMode mode, DevGatherResult result) {
+        devGathers.get(mode).get(result).increment();
     }
 
     // ---------------------------------------------------------------- 内部

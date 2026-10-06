@@ -9,12 +9,14 @@ import com.game.battle.engine.TableBattleData;
 import com.game.battle.metrics.BattleMetrics;
 import com.game.battle.port.ActivityResultSink;
 import com.game.battle.port.BattleResultSink;
-import com.game.battle.port.LoggingActivityResultSink;
 import com.game.battle.port.LoggingBattleResultSink;
-import com.game.battle.port.LoggingSceneBattleEvents;
-import com.game.battle.port.LoggingSettlementSink;
 import com.game.battle.port.SceneBattleEvents;
 import com.game.battle.port.SettlementSink;
+import com.game.battle.port.scene.SceneTransport;
+import com.game.battle.port.scene.SceneTransportProperties;
+import com.game.battle.outbox.OutboxMetrics;
+import com.game.discovery.RedisProperties;
+import org.springframework.beans.factory.ObjectProvider;
 import com.game.battle.protocol.BattleMessageIds;
 import com.game.battle.push.LobbyAnnouncer;
 import com.game.battle.push.PresenceLobbyAnnouncer;
@@ -60,11 +62,11 @@ import org.springframework.core.env.Environment;
  * </ul>
  * 运行模式读 {@code xm.run-mode}（{@code XM_RUN_MODE}），不认识的值按 prod 处理并 WARN（§11 N8）。
  *
- * <p>出站端口（{@link SceneBattleEvents} / {@link SettlementSink} / {@link ActivityResultSink} / {@link BattleResultSink}）6.2 只有日志缺省实现；
- * 6.3 / 6.4 提供真实传输的 bean 后这里的缺省实现让位（{@link ConditionalOnMissingBean}）。
+ * <p>出站端口：{@link SceneBattleEvents} / {@link SettlementSink} / {@link ActivityResultSink} 自 6.3 起是真实传输（{@link SceneTransport}）；
+ * {@link BattleResultSink} 仍是日志缺省实现（6.4 接 match）。测试提供同类型的 bean 时这里的缺省实现让位（{@link ConditionalOnMissingBean}）。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(BattleProperties.class)
+@EnableConfigurationProperties({BattleProperties.class, SceneTransportProperties.class})
 public class BattleConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(BattleConfiguration.class);
@@ -165,25 +167,45 @@ public class BattleConfiguration {
         return new PresenceLobbyAnnouncer(new PlayerPushes(redis, new PlayerPresenceDirectory(redis)), battleMetrics);
     }
 
-    /** 确认事件 → scene：6.2 只记日志（真实传输 6.3，Q13）。 */
+    /** battle 侧发件箱与结算投递的指标（scene-battle-spec §9）。 */
+    @Bean
+    public OutboxMetrics battleOutboxMetrics(MeterRegistry meterRegistry) {
+        return new OutboxMetrics(meterRegistry);
+    }
+
+    /**
+     * battle → scene 的真实传输（批次 6.3，scene-battle-spec §7.15–§7.17）：{@code battle-outbox} 线程、按节点直连的 {@code SceneBattleService} 客户端、
+     * 定位器与 scene 目录。启动门禁：{@code xm.battle.scene-rpc-timeout} 必须大于 Redis 单条命令最坏耗时（§7.3、§10.4）。
+     * Spring 销毁它时（{@link BattleNode} 停机之后）有界排空结算发件箱。
+     */
+    @Bean(destroyMethod = "close")
+    public SceneTransport battleSceneTransport(RedissonClient redis, BattleMetrics battleMetrics, OutboxMetrics battleOutboxMetrics,
+                                               SceneTransportProperties transportProps, ObjectProvider<RedisProperties> redisProps,
+                                               BattleResultSink results) {
+        RedisProperties redisSettings = redisProps.getIfAvailable(() -> new RedisProperties(null, null, null, null, null, null, null));
+        transportProps.requireAbove(redisSettings.worstCaseCommandMillis());
+        return new SceneTransport(redis, battleMetrics, battleOutboxMetrics, transportProps, results);
+    }
+
+    /** 确认事件 → scene：Dubbo {@code SceneBattleService.confirmBattle}（6.3，Q13；实例不符时回落定位器，D28）。 */
     @Bean
     @ConditionalOnMissingBean(SceneBattleEvents.class)
-    public SceneBattleEvents battleSceneEvents(BattleMetrics battleMetrics) {
-        return new LoggingSceneBattleEvents(battleMetrics);
+    public SceneBattleEvents battleSceneEvents(SceneTransport battleSceneTransport) {
+        return battleSceneTransport.sceneEvents();
     }
 
-    /** 结算 → scene：6.2 只记日志（6.3）。 */
+    /** 结算 → scene：先落 Redis、后投递、未销账就有界重投（6.3 的结算发件箱）。 */
     @Bean
     @ConditionalOnMissingBean(SettlementSink.class)
-    public SettlementSink battleSettlementSink(BattleMetrics battleMetrics) {
-        return new LoggingSettlementSink(battleMetrics);
+    public SettlementSink battleSettlementSink(SceneTransport battleSceneTransport) {
+        return battleSceneTransport.settlementSink();
     }
 
-    /** 活动局结果：6.2 只记日志（6.3 / 4.6）。 */
+    /** 活动局结果：持久副本 + 发布 + 重发（6.3 的 battle 侧，Q11；消费方随 4.6）。 */
     @Bean
     @ConditionalOnMissingBean(ActivityResultSink.class)
-    public ActivityResultSink battleActivityResultSink(BattleMetrics battleMetrics) {
-        return new LoggingActivityResultSink(battleMetrics);
+    public ActivityResultSink battleActivityResultSink(SceneTransport battleSceneTransport) {
+        return battleSceneTransport.activityResults();
     }
 
     /** 普通局结果 → match：6.2 只记日志（6.4，Q12）。 */

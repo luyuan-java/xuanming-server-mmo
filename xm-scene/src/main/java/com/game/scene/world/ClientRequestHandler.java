@@ -22,6 +22,7 @@ import com.game.proto.SceneInfoComp;
 import com.game.proto.SceneInfoS2C;
 import com.game.proto.TipInfoMessage;
 import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.BattleGate;
 import com.game.scene.metrics.SceneMetrics.FrozenRejection;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.table.CommonErrorTip;
@@ -71,7 +72,7 @@ public final class ClientRequestHandler {
     private static final int ENTER_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
     private static final int ENTER_CHANGING_SCENE = SceneErrorTip.scene_error.kEnterSceneChangingScene_VALUE;
 
-    private record Registered(Class<? extends Message> requestType, FreezePolicy freeze,
+    private record Registered(Class<? extends Message> requestType, FreezePolicy freeze, BattlePolicy battle,
                               PlayerRequestHandler<Message> handler) {
     }
 
@@ -102,12 +103,15 @@ public final class ClientRequestHandler {
         SceneFeature.Registrar registrar = new SceneFeature.Registrar() {
             @Override
             public <Q extends Message> void on(String service, String method, Class<Q> requestType,
-                                               FreezePolicy freeze, PlayerRequestHandler<Q> handler) {
+                                               FreezePolicy freeze, BattlePolicy battle, PlayerRequestHandler<Q> handler) {
                 if (freeze == FreezePolicy.DROP) {
                     // DROP 在分发处按「移动」计数，只给场景核心的移动上行；玩法功能要么拒（REJECT）要么经服务闸（GATED）
                     throw new IllegalStateException(service + "." + method + " 声明了 DROP：冻结中静默丢只给移动上行");
                 }
-                register(registry.requireId(service, method), requestType, freeze, handler);
+                if (battle == BattlePolicy.DROP || battle == BattlePolicy.STOP_ONLY) {
+                    throw new IllegalStateException(service + "." + method + " 声明了战斗策略 " + battle + "：只给场景核心的移动上行");
+                }
+                register(registry.requireId(service, method), requestType, freeze, battle, handler);
             }
         };
         for (SceneFeature feature : features) {
@@ -117,22 +121,23 @@ public final class ClientRequestHandler {
 
     private void registerCore() {
         // 移动上行冻结中静默丢（基线 player_movement_handler 同样静默丢冻结实体的上报）：冻结前已 stopMotion，位置停在快照上
-        register(ids.moveSync(), MoveSyncC2S.class, FreezePolicy.DROP,
+        register(ids.moveSync(), MoveSyncC2S.class, FreezePolicy.DROP, BattlePolicy.DROP,
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
-        register(ids.moveStart(), MoveStartC2S.class, FreezePolicy.DROP,
+        register(ids.moveStart(), MoveStartC2S.class, FreezePolicy.DROP, BattlePolicy.DROP,
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
-        register(ids.moveStop(), MoveStopC2S.class, FreezePolicy.DROP,
+        register(ids.moveStop(), MoveStopC2S.class, FreezePolicy.DROP, BattlePolicy.STOP_ONLY,
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
-        register(ids.listSkills(), Message.class, FreezePolicy.READ_ONLY, (call, req) -> listSkills(call));
+        register(ids.listSkills(), Message.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, req) -> listSkills(call));
         // 63 自己判在途（选目标中 / 冻结中都回 3014），冻结闸对它放行
-        register(ids.enterScene(), EnterSceneC2SRequest.class, FreezePolicy.ALLOW, this::enterScene);
+        // 63 自己判战斗在途（3023，先于换图在途 3014，scene-battle-spec §7.13）
+        register(ids.enterScene(), EnterSceneC2SRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, this::enterScene);
         // 应答是 Empty 不回包，改推 31（基线 player_scene_handler.cpp SceneInfoC2S）。
-        register(ids.sceneInfoC2S(), Message.class, FreezePolicy.READ_ONLY, (call, req) -> world.sendTo(call.player(),
+        register(ids.sceneInfoC2S(), Message.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, req) -> world.sendTo(call.player(),
                 push(ids.notifySceneInfo(), SceneInfoS2C.newBuilder().addSceneInfo(call.player().scene().info()).build())));
     }
 
     @SuppressWarnings("unchecked")
-    private <Q extends Message> void register(int messageId, Class<Q> requestType, FreezePolicy freeze,
+    private <Q extends Message> void register(int messageId, Class<Q> requestType, FreezePolicy freeze, BattlePolicy battle,
                                               PlayerRequestHandler<Q> handler) {
         MessageMethod method = registry.byId(messageId)
                 .orElseThrow(() -> new IllegalStateException("契约里没有消息号 " + messageId));
@@ -150,8 +155,14 @@ public final class ClientRequestHandler {
             // 静默丢一个带应答的请求会让客户端一直等
             throw new IllegalStateException(method.key() + " 有应答，冻结策略不能是 DROP");
         }
+        if (battle == null) {
+            throw new IllegalStateException(method.key() + " 没有战斗策略");
+        }
+        if ((battle == BattlePolicy.DROP || battle == BattlePolicy.STOP_ONLY) && !(method.responsePrototype() instanceof Empty)) {
+            throw new IllegalStateException(method.key() + " 有应答，战斗策略不能是 " + battle);
+        }
         if (handlers.putIfAbsent(messageId,
-                new Registered(requestType, freeze, (PlayerRequestHandler<Message>) handler)) != null) {
+                new Registered(requestType, freeze, battle, (PlayerRequestHandler<Message>) handler)) != null) {
             throw new IllegalStateException(method.key() + " 注册了两次");
         }
     }
@@ -162,6 +173,12 @@ public final class ClientRequestHandler {
     public FreezePolicy freezePolicy(int messageId) {
         Registered registered = handlers.get(messageId);
         return registered == null ? null : registered.freeze();
+    }
+
+    /** 某消息号注册时声明的战斗策略；没有处理器为 null（测试与排查用：核对 scene-battle-spec §7.13 的逐方法策略表）。 */
+    public BattlePolicy battlePolicy(int messageId) {
+        Registered registered = handlers.get(messageId);
+        return registered == null ? null : registered.battle();
     }
 
     public void onClientForward(long linkId, ClientForward forward) {
@@ -215,7 +232,12 @@ public final class ClientRequestHandler {
             }
             return;
         }
-        if (player.frozen() && !admitWhileFrozen(player, method, registered.freeze(), requestId, hasResponse)) {
+        if (player.frozen()) {
+            if (!admitWhileFrozen(player, method, registered.freeze(), requestId, hasResponse)) {
+                return;
+            }
+        } else if (player.inBattle() && !admitInBattle(player, method, registered.battle(), requestId, hasResponse)) {
+            // 两种冻结互斥（scene-battle-spec §7.13）：交出冻结按 FreezePolicy，否则战斗在途按 BattlePolicy
             return;
         }
         PlayerCall call = new PlayerCall(world, player, method, requestId);
@@ -262,6 +284,44 @@ public final class ClientRequestHandler {
     }
 
     /**
+     * 战斗在途闸（scene-battle-spec §7.13，D11）：回合制战斗在途的玩家发来已注册的方法，按声明的战斗策略决定进不进处理器。
+     * 返回 false = 已处理完（丢弃、只清速度或已回拒绝），不调处理器。
+     */
+    private boolean admitInBattle(ScenePlayer player, MessageMethod method, BattlePolicy battle, long requestId,
+                                  boolean hasResponse) {
+        switch (battle) {
+            case ALLOW, GATED -> {
+                return true;
+            }
+            case DROP -> {
+                // 134 / 132 静默丢（基线 mvh.cpp:170-173、:205-208）：每条移动上行在 moves{result} 里恰好计一次
+                metrics.move(MoveResult.IN_BATTLE);
+                metrics.battleGateReject(BattleGate.MOVE);
+                log.debug("回合制战斗在途，丢弃移动上行 {} player={}", method.key(), player.playerId());
+                return false;
+            }
+            case STOP_ONLY -> {
+                // 131 只把速度清零、不收位置（基线 mvh.cpp:188-192）；备战时已停步，这里通常是空操作
+                metrics.move(MoveResult.IN_BATTLE);
+                metrics.battleGateReject(BattleGate.MOVE);
+                if (!player.velocity().isOrigin()) {
+                    world.haltForBattle(player);
+                }
+                return false;
+            }
+            case REJECT -> {
+                metrics.battleGateReject(BattleGate.DEFAULT);
+                log.info("回合制战斗在途，拒绝 {} player={}", method.key(), Long.toUnsignedString(player.playerId()));
+                if (hasResponse) {
+                    replyError(player, method, requestId, FROZEN_REJECTED);
+                }
+                return false;
+            }
+        }
+        throw new IllegalStateException("未知战斗策略 " + battle);
+    }
+
+    /**
      * 77：{@code skill_list} 必须存在（没有技能也要是空列表，robot 靠它发就绪信号）；{@code error_message} 存在且 id=0。
      */
     private void listSkills(PlayerCall call) {
@@ -274,7 +334,7 @@ public final class ClientRequestHandler {
 
     /**
      * 63：按基线顺序校验（契约文档 §4.3；player_scene_handler.cpp:37-171），先回应答（无错 = 已受理、不代表已到达），再换场景：
-     * 战斗在途 3023（6.3 接入，现在没有战斗）→ 换图在途（选目标中 / 镜像取号中 / 冻结中）<b>3014</b> → 三个号全 0 回 3005
+     * 战斗在途 3023（scene-battle-spec §7.13）→ 换图在途（选目标中 / 镜像取号中 / 冻结中）<b>3014</b> → 三个号全 0 回 3005
      * → 镜像分支（{@code mirror_config_id ≠ 0 且 scene_id = 0}，批次 5.3）→ scene_id 就是当前场景回 3008
      * → 去向（{@link SceneWorld#resolveSwitchTarget}，批次 5.1 scene-channels-spec §4.12）。
      * Java 场景节点都是同构的主世界节点（dungeon-mirror-spec D15）、没有「缺会话快照」，所以 3004 与第二个 3005 不会出现。
@@ -299,7 +359,11 @@ public final class ClientRequestHandler {
         boolean remote = false;
         boolean mirror = false;
         int tipId;
-        if (world.switchInFlight(player)) {
+        if (player.inBattle()) {
+            // 回合制战斗在途（备战或战斗中）→ 3023，先于换图在途的 3014（基线 psh.cpp:54-61；scene-battle-spec §7.13）
+            tipId = ENTER_FAILED;
+            metrics.battleGateReject(BattleGate.ENTER_SCENE);
+        } else if (world.switchInFlight(player)) {
             tipId = ENTER_CHANGING_SCENE;
         } else if (want.getSceneConfigId() == 0 && want.getSceneId() == 0 && want.getMirrorConfigId() == 0) {
             tipId = ENTER_PARAM_ERROR;

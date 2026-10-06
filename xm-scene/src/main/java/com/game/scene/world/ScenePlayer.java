@@ -8,6 +8,8 @@ import com.game.proto.ActorType;
 import com.game.proto.Rotation;
 import com.game.proto.Transform;
 import com.game.scene.asset.AssetOpLedger;
+import com.game.scene.battle.BattleLedger;
+import com.game.scene.battle.PlayerBattle;
 import com.game.scene.player.GainWindows;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
@@ -73,6 +75,12 @@ public final class ScenePlayer {
     private final PlayerPets pets;
     /** 资产通道幂等账本（与资产同一份记录、同一次围栏写；加载时校验，损坏则原样带回并关闭该玩家的资产通道）。 */
     private final AssetOpLedger assetLedger;
+    /** 回合制战斗结算账本（与资产同一份记录、同一次围栏写；加载时校验，损坏则原样带回，结算一律延后、备战一律 1006，scene-battle-spec §7.12）。 */
+    private final BattleLedger battleLedger;
+    /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
+    private final PlayerBattle battle = new PlayerBattle();
+    /** 角色名（存档列 player.name；战斗快照的 player_name）。 */
+    private String name = "";
     /** 获取滑动窗口（获取异常检测；不持久化，随实例清空）。 */
     private final GainWindows gainWindows = new GainWindows();
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
@@ -122,6 +130,7 @@ public final class ScenePlayer {
         this.missions = state.hasMission() ? PlayerMissions.restore(state.getMission()) : PlayerMissions.empty();
         this.pets = state.hasPets() ? PlayerPets.restore(state.getPets()) : PlayerPets.empty();
         this.assetLedger = state.hasAssetLedger() ? AssetOpLedger.restore(state.getAssetLedger()) : AssetOpLedger.empty();
+        this.battleLedger = state.hasBattleLedger() ? BattleLedger.restore(state.getBattleLedger()) : BattleLedger.empty();
     }
 
     public long playerId() {
@@ -336,6 +345,9 @@ public final class ScenePlayer {
         if (!assetLedger.isPristine()) {
             state.setAssetLedger(assetLedger.toState());
         }
+        if (!battleLedger.isPristine()) {
+            state.setBattleLedger(battleLedger.toState());
+        }
         return state.build();
     }
 
@@ -372,6 +384,33 @@ public final class ScenePlayer {
     /** 玩家的资产通道账本（逻辑线程上读写；写入只经资产通道）。 */
     public AssetOpLedger assetLedger() {
         return assetLedger;
+    }
+
+    /** 回合制战斗结算账本（逻辑线程上读写；写入只经战斗结算服务）。 */
+    public BattleLedger battleLedger() {
+        return battleLedger;
+    }
+
+    /** 回合制战斗运行态（逻辑线程上读写；改冻结只经 {@code PlayerBattleService}）。 */
+    public PlayerBattle battle() {
+        return battle;
+    }
+
+    /**
+     * 有在途的回合制战斗（备战或战斗中，基线 {@code IsInBattle}）：各在途闸的唯一谓词（scene-battle-spec §7.4、§7.13）。
+     * 与 {@link #frozen()}（跨节点换图的交出冻结）始终互斥。
+     */
+    public boolean inBattle() {
+        return battle.inBattle();
+    }
+
+    /** 角色名（存档列 player.name；新号 / 测试为空串）。 */
+    public String name() {
+        return name;
+    }
+
+    void setName(String name) {
+        this.name = name == null ? "" : name;
     }
 
     /**

@@ -75,6 +75,9 @@ public record SceneNodeProperties(
      *                              也决定 63 在途槽（RESOLVING，期间再发 63 回 3014）的寿命
      * @param transferTombstoneTtl  交出墓碑的存活时长（缺省 30s，1s～5min）：与 PlayerTransfer 在链路上交叉的 PlayerLeave 靠它按旧 epoch 补写位置
      * @param instance              镜像 / 副本实例的回收与上限（批次 5.3，{@code xm.scene.instance.*}，dungeon-mirror-spec §7.2）
+     * @param battleRpcMaxInflight  回合制战斗入口 {@code SceneBattleService} 的在途上限（缺省 256，与资产通道各自独立；scene-battle-spec §8）：
+     *                              超出回 OVERLOADED（零副作用），不排队进逻辑线程
+     * @param battle                回合制战斗（{@code xm.scene.battle.*}，scene-battle-spec §8）
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -100,7 +103,9 @@ public record SceneNodeProperties(
             @DefaultValue("tri://127.0.0.1:20882") String sceneManagerUrl,
             @DefaultValue("4s") Duration switchResolveTimeout,
             @DefaultValue("30s") Duration transferTombstoneTtl,
-            @DefaultValue InstanceSettings instance) {
+            @DefaultValue InstanceSettings instance,
+            @DefaultValue("256") int battleRpcMaxInflight,
+            @DefaultValue BattleSettings battle) {
 
         public SceneSettings {
             // 启动期校验（不满足即拒启）：续约周期 < M < 租约 − 续约周期，语句时限 < M
@@ -129,6 +134,9 @@ public record SceneNodeProperties(
             if (assetOpMaxInflight < 1) {
                 throw new IllegalArgumentException("xm.scene.asset-op-max-inflight 至少为 1: " + assetOpMaxInflight);
             }
+            if (battleRpcMaxInflight < 1) {
+                throw new IllegalArgumentException("xm.scene.battle-rpc-max-inflight 至少为 1: " + battleRpcMaxInflight);
+            }
             if (gainBlockRefresh.compareTo(Duration.ofSeconds(1)) < 0) {
                 throw new IllegalArgumentException("xm.scene.gain-block-refresh 至少 1s: " + gainBlockRefresh);
             }
@@ -153,6 +161,23 @@ public record SceneNodeProperties(
         /** 交出归属在存储层的参数（已在构造时校验）。 */
         public HandOffSettings handOff() {
             return new HandOffSettings(transferLeaseMargin, transferProbeStatementTimeout);
+        }
+    }
+
+    /**
+     * 回合制战斗（{@code xm.scene.battle}，scene-battle-spec §8）。
+     *
+     * @param reaperInterval reaper 间隔（缺省 30 s = 基线；只许调小：0 &lt; 值 ≤ 30 s，保住 GRACE + 间隔 &lt; LOCK_EXTRA_TTL_SEC，§7.2）。
+     *                       本机切片设 2 s 供 robot 用；生产不改。不带单位的数字按秒
+     */
+    public record BattleSettings(
+            @DefaultValue("30s") @DurationUnit(ChronoUnit.SECONDS) Duration reaperInterval) {
+
+        public BattleSettings {
+            if (reaperInterval.isNegative() || reaperInterval.isZero()
+                    || reaperInterval.compareTo(com.game.discovery.battle.BattleRedis.REAPER_INTERVAL) > 0) {
+                throw new IllegalArgumentException("xm.scene.battle.reaper-interval 必须在 (0, 30s] 内（只许调小）: " + reaperInterval);
+            }
         }
     }
 

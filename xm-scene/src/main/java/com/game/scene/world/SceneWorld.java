@@ -172,6 +172,7 @@ public final class SceneWorld {
     private final TeamFollow teamFollow;
     private final CrossNodeSwitch crossNode;
     private final SceneInstances instances;
+    private final BattleHooks battle;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -250,6 +251,18 @@ public final class SceneWorld {
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
                       TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots, locations,
+                teamFollow, crossNode, instances, BattleHooks.NONE);
+    }
+
+    /**
+     * @param battle 回合制战斗的钩子（批次 6.3：进场恢复、落盘后销账、原地解冻后补跑锁步骤；{@link BattleHooks#NONE} = 不接战斗）
+     */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
+                      TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances, BattleHooks battle) {
+        this.battle = battle;
         this.crossNode = crossNode;
         this.instances = instances;
         this.playerInitializer = playerInitializer;
@@ -490,7 +503,7 @@ public final class SceneWorld {
      * （player_lifecycle.cpp:2140-2363）；基线落默认大世界（B1），Java 同图优先（D8）。
      * 人数为 0 且没有指向它的在途进场 → 销毁（基线 DestroyScene「先排空再销毁」，scene_node_service.cpp:91-121）。
      * 每次应用计划后与每秒各调一次（逻辑线程）。跨节点换图冻结中（FREEZING）的玩家跳过、等下一次推进（计 {@code switching}，
-     * scene-handoff-spec §5.5；选目标中的 RESOLVING 不冻结，照常改派）；6.3 起战斗冻结中的玩家同样要跳过。
+     * scene-handoff-spec §5.5；选目标中的 RESOLVING 不冻结，照常改派）；回合制战斗在途的玩家同样跳过（计 {@code in_battle}，scene-battle-spec D26）。
      *
      * <p>批次 5.3：回收宽限中（{@link DrainCause#IDLE}）的实例不改派（宽限中不会有人），宽限满且仍空、没有在途进场才销毁；主世界频道在这里被销毁时，
      * 以它为源的镜像转级联排空（{@link #destroyScene}），并在<b>同一次推进</b>里接着改派、销毁（dungeon-mirror-spec §6.11）。
@@ -538,6 +551,9 @@ public final class SceneWorld {
             if (player.frozen()) {
                 // 跨节点换图冻结中（scene-handoff-spec §5.5）：冻结快照与内存必须一致，这次不改派；交出结局出来后实例离开或解冻，下一次推进再看
                 metrics.channelRelocation(ChannelRelocation.SWITCHING);
+            } else if (player.inBattle()) {
+                // 回合制战斗在途（scene-battle-spec §7.13 世界内部第 2 条，D26）：留在原频道直到结算解冻，下一次推进再看
+                metrics.channelRelocation(ChannelRelocation.IN_BATTLE);
             } else {
                 movable.add(player);
             }
@@ -1351,6 +1367,7 @@ public final class SceneWorld {
         ScenePlayer player = new ScenePlayer(playerId, nextId(), key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime());
+        player.setName(data.name());
         if (previous != null && previous.ownerEpoch() == epoch) {
             player.continueLocationSeq(previous.locationSeq());
         }
@@ -1387,6 +1404,8 @@ public final class SceneWorld {
                 Long.toUnsignedString(scene.sceneId()), player.entity(), player.ownerEpoch(), previous != null, transfer);
         // 进场（登录 / 重连 / 顶号 / 交出进场）之后查组队跟随：异步读，结果回到逻辑线程（team-spec §6.10）
         teamFollow.onEnteredScene(this, player);
+        // 进场恢复（scene-battle-spec §7.8）：组队跟随之后（同基线组队 3.5 步在战斗 6 步之前）；同 epoch 接替旧实例时沿用它的冻结
+        battle.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
     }
 
     /** 两份写回内容相同（不比 owner_epoch：库里的 epoch 已被这次进场夺权改掉）。 */
@@ -1518,6 +1537,13 @@ public final class SceneWorld {
         if (!crossNode.enabled()) {
             throw new IllegalStateException("跨节点换图没装配，不该解析出远端去向");
         }
+        if (player.inBattle()) {
+            // handoff-spec :106「begin 拒绝战斗中的玩家」（scene-battle-spec §7.13）：63 已先回 3023，走到这里是调用方漏了战斗闸
+            metrics.switchResolve(SwitchResolve.IN_BATTLE);
+            log.error("回合制战斗中的玩家不能发起跨节点换图（调用方漏了战斗闸），忽略 player={} battle={}",
+                    Long.toUnsignedString(player.playerId()), player.battle().freeze());
+            return;
+        }
         long token = ++switchTokens;
         PlayerSwitch sw = new PlayerSwitch(token, wantSceneId, wantConfigId,
                 clock.nanoTime() + crossNode.resolveTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
@@ -1591,6 +1617,16 @@ public final class SceneWorld {
             metrics.switchResolve(SwitchResolve.REJECTED);
             log.warn("选目标指向本节点上已不存在的场景，留在原地 player={} scene_id={}",
                     Long.toUnsignedString(player.playerId()), Long.toUnsignedString(chosen.sceneId()));
+            pushTip(player, ENTER_FAILED);
+            return;
+        }
+        if (player.inBattle()) {
+            // 两种冻结互斥（scene-battle-spec §7.13 世界内部第 1 条；基线起交接前复查 lc.cpp:2853-2860）：选目标期间进了战斗
+            // （迟到确认 / 进场恢复在 RESOLVING 时挂上了冻结）→ 中止换图、推 23 {3023}。按 D4 应恒为 0，是纵深防御
+            player.setSwitching(null);
+            metrics.switchResolve(SwitchResolve.IN_BATTLE);
+            log.info("选目标回来时玩家已在回合制战斗中，中止跨节点换图 player={} battle={}", Long.toUnsignedString(player.playerId()),
+                    player.battle().freeze());
             pushTip(player, ENTER_FAILED);
             return;
         }
@@ -1758,6 +1794,8 @@ public final class SceneWorld {
                 log.info("交出没提交，原地解冻 player={} token={} 结局={}", Long.toUnsignedString(player.playerId()),
                         sw.token(), result);
                 pushTip(player, ENTER_FAILED);
+                // 冻结期间到达的确认只续了锁、没挂冻结（scene-battle-spec §7.7）：原地解冻后补跑一次进场恢复的锁步骤（§10.5）
+                battle.onUnfrozenInPlace(this, player);
             }
         }
     }
@@ -2248,7 +2286,13 @@ public final class SceneWorld {
     private void onProgressSaved(ScenePlayer player, PlayerSave snapshot, ProgressResult result) {
         player.setProgressSaveInFlight(false);
         switch (result) {
-            case SAVED -> player.markPersisted(snapshot);
+            case SAVED -> {
+                player.markPersisted(snapshot);
+                if (playersById.get(player.playerId()) == player) {
+                    // 快路径销账（scene-battle-spec §7.12，D19）：账本条目此刻已在落库快照里的逐条销账
+                    battle.onPersisted(this, player);
+                }
+            }
             case FAILED -> {
                 // 失败不等于没写进去（提交阶段断连时结局未知）：库里是什么不再确定，作废比对基准，下个周期无条件重写。
                 player.markPersisted(null);
@@ -2379,8 +2423,23 @@ public final class SceneWorld {
         return playersByEntity.get(entity);
     }
 
-    void sendTo(ScenePlayer player, MessageContent content) {
+    /** 给本人下发一条消息（经它所在 gate 链路的会话）。逻辑线程上调用。 */
+    public void sendTo(ScenePlayer player, MessageContent content) {
         sink.send(player.session().linkId(), List.of(player.session().sessionId()), content);
+    }
+
+    /**
+     * 回合制战斗备战即停步（scene-battle-spec §7.5 第 3 步，D5）：速度清零并置速度脏位，看得见它的人在下一个同步帧收到速度 0 的 66。
+     * 与跨节点换图冻结的停步同一做法（{@link #freeze}）。逻辑线程上调用。
+     */
+    public void haltForBattle(ScenePlayer player) {
+        player.stopMotion();
+        player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+    }
+
+    /** 本节点在场玩家的快照（逻辑线程上调用；遍历时可以改集合）。 */
+    public List<ScenePlayer> playersSnapshot() {
+        return new ArrayList<>(playersById.values());
     }
 
     /**

@@ -7,7 +7,7 @@ import com.game.battle.admission.AdmissionGate;
 import com.game.battle.admission.AdmissionPhase;
 import com.game.battle.admin.BattleAdminAuthFilter;
 import com.game.battle.admin.DevBattleBackend;
-import com.game.battle.port.LoggingSceneBattleEvents;
+import com.game.battle.port.scene.DubboSceneBattleEvents;
 import com.game.battle.port.SceneBattleEvents;
 import com.game.battle.push.LobbyAnnouncer;
 import com.game.battle.push.PresenceLobbyAnnouncer;
@@ -66,7 +66,7 @@ class BattleConfigurationTest {
                     .hasSingleBean(FilterRegistrationBean.class);
             assertThat(ctx.getBean(RunMode.class)).isEqualTo(RunMode.PROD);
             assertThat(ctx.getBean(LobbyAnnouncer.class)).isInstanceOf(PresenceLobbyAnnouncer.class);
-            assertThat(ctx.getBean(SceneBattleEvents.class)).isInstanceOf(LoggingSceneBattleEvents.class);
+            assertThat(ctx.getBean(SceneBattleEvents.class)).isInstanceOf(DubboSceneBattleEvents.class);
             BattleNode node = ctx.getBean(BattleNode.class);
             assertThat(node.isRunning()).isTrue();
             assertThat(ctx.getBean(AdmissionGate.class).phase()).isEqualTo(AdmissionPhase.OPEN);

@@ -44,6 +44,28 @@ public interface TransactionLogMapper {
     int insertAll(@Param("rows") List<TransactionLogRow> rows, @Param("ingestedAt") long ingestedAt);
 
     /**
+     * xm-data 直写自己的流水（回档 TX_ROLLBACK_RESTORE 等，批次 7.2b）：号是刚从全服租约池发的，用普通 INSERT——撞主键说明号源出了问题，
+     * 必须报错让整个写档事务回滚，不能像 Kafka 落库那样按幂等吞掉。
+     *
+     * @return 受影响行数（= 行数）
+     */
+    @Insert("""
+            <script>
+            INSERT INTO transaction_log (tx_id, time_ms, reason, kind, from_player, to_player, currency_type, currency_delta,
+                balance_before, balance_after, item_uuid, item_config_id, item_quantity, correlation_id, extra, zone_id,
+                ingested_at)
+            VALUES
+            <foreach collection="rows" item="r" separator=",">
+                (#{r.txId,""" + U64 + "}, #{r.timeMs}, #{r.reason," + U32 + "}, #{r.kind," + U32 + "}, #{r.fromPlayer," + U64
+            + "}, #{r.toPlayer," + U64 + "}, #{r.currencyType," + U32 + "}, #{r.currencyDelta}, #{r.balanceBefore," + U64
+            + "}, #{r.balanceAfter," + U64 + "}, #{r.itemUuid," + U64 + "}, #{r.itemConfigId," + U32 + "}, #{r.itemQuantity,"
+            + U32 + "}, #{r.correlationId," + U64 + "}, #{r.extra}, #{r.zoneId," + U32 + """
+            }, #{ingestedAt})
+            </foreach>
+            </script>""")
+    int insertDirectAll(@Param("rows") List<TransactionLogRow> rows, @Param("ingestedAt") long ingestedAt);
+
+    /**
      * 筛选查询（data-ops-spec §6.5 / §5.2 / §6.4）：给了的等值条件全部 AND；时间窗半开；游标之后；按（时间、流水号）升序取
      * {@code fetch} 行（调用方取 limit+1 判截断，不做 COUNT(*)）。走哪条索引由等值条件决定：玩家 → idx_txlog_from / idx_txlog_to；
      * uuid → idx_txlog_uuid；kind + 配置号 → idx_txlog_item；kind + 币种 → idx_txlog_currency；都没有 → idx_txlog_time。

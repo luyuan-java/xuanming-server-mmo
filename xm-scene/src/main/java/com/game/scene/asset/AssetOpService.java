@@ -62,6 +62,8 @@ public final class AssetOpService {
     static final int CURRENCY_INSUFFICIENT = AssetErrorTip.asset_error.kAssetCurrencyInsufficient_VALUE;
     static final int BAG_FULL = AssetErrorTip.asset_error.kAssetBagFull_VALUE;
     static final int FROZEN = AssetErrorTip.asset_error.kAssetFrozen_VALUE;
+    /** 回合制战斗在途（基线 kAssetInBattle，asset.cpp:750-796；RETRY 类，不记账）。 */
+    static final int IN_BATTLE = AssetErrorTip.asset_error.kAssetInBattle_VALUE;
     static final int INVALID_BUNDLE = AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE;
     static final int BLOCKED = AssetErrorTip.asset_error.kAssetBlocked_VALUE;
     static final int PLAYER_NOT_HERE = AssetErrorTip.asset_error.kAssetPlayerNotHere_VALUE;
@@ -227,7 +229,13 @@ public final class AssetOpService {
         if (abort) {
             return rejectAndRecord(player, request, 0, nowMs);
         }
-        // 7. 应用闸门：战斗中（27002）随 6.x 回合制战斗接入
+        // 7. 应用闸门：回合制战斗在途（备战或战斗中）→ RETRY 27002，不记账（scene-battle-spec §7.13）；冻结 27003（第 5 步）优先、中止占位（第 6 步）照常
+        if (player.inBattle()) {
+            metrics.battleGateReject(SceneMetrics.BattleGate.ASSET);
+            log.info("[AssetOp] blocked: player in turn battle rpc={} player={} stream={} seq={}", rpc.wireName(),
+                    Long.toUnsignedString(request.getPlayerId()), stream, Long.toUnsignedString(request.getSeq()));
+            return answer(AssetOutcome.ASSET_OUTCOME_RETRY, IN_BATTLE);
+        }
         // 8. 包内容（确定性失败 → 记 REJECTED，免得调用方无限重投同一个坏包）
         String why = rpc == AssetRpc.DEBIT ? validateDebit(request.getBundle()) : validateCredit(request.getBundle());
         if (why != null) {

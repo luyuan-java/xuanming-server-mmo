@@ -6,6 +6,7 @@ import com.game.proto.GetActivityListRequest;
 import com.game.proto.GetActivityListResponse;
 import com.game.proto.PlayerActivityInfo;
 import com.game.scene.mission.MissionTables.MissionDef;
+import com.game.scene.world.BattlePolicy;
 import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
@@ -35,7 +36,7 @@ public final class ActivityFeature implements SceneFeature {
     /** 冻结策略（scene-handoff-spec §5.9）：190 只读（接取闸只读算可参与）。 */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "GetActivityList", GetActivityListRequest.class, FreezePolicy.READ_ONLY,
+        r.on(SERVICE, "GetActivityList", GetActivityListRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
                 (call, request) -> call.reply(list(call.player(), missions.nowMillis())));
     }
 

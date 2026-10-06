@@ -28,9 +28,15 @@ public final class DubboGroups {
 
     /**
      * 通用资产通道（{@link SceneAssetOpService}），每个 scene 节点各自导出、{@code register = false}，调用方按节点目录里的地址直连。
-     * 只作分组标识（同一端口上不会有别的服务）。
+     * 同一端口上还导出 {@link SceneBattleService}（group {@link #SCENE_BATTLE}），两者靠 group 区分。
      */
     public static final String SCENE_ASSET = "scene-asset";
+
+    /**
+     * scene 节点的回合制战斗入口（{@link SceneBattleService}，scene-battle-spec §7.3）：与 {@link #SCENE_ASSET} 同一个端口、各自一个 group，
+     * {@code register = false}，调用方（battle、dev gather，6.4 起还有 match）按节点目录直连。
+     */
+    public static final String SCENE_BATTLE = "scene-battle";
 
     /**
      * battle 节点控制面（{@link BattleNodeService}，基线 gRPC {@code BattleNode}），每个 battle 节点各自导出、{@code register = false}，

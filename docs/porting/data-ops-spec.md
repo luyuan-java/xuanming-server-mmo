@@ -1215,3 +1215,129 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
 - [ ] robot 本子批场景与 §12.6 回归全过。
 - [ ] §7.9 的文档与 PARITY 更新完成；有意差异按 §10 编号登记。
 - [ ] 7.2b：`guild-economy-spec.md:1155` 的前置要求注明已兑现。
+
+---
+
+## 13 实现记录
+
+### 13.1 批次 7.2b（2026-10-05）：作业框架、离线栅栏、回档、整区维护前快照、`idx_player_zone`
+
+开放问题按 §11 的推荐答案落地：Q4（缺省拒绝在线玩家，显式 `ifOnline=kick` 走现成顶号通路 → 23 {2017}）、Q5（沿用 2017）、Q6（沉降 30 s / 复查 10 s，
+做成配置）、Q7（整区要求区服非 OPEN）、Q9（`idx_player_zone` 随本批迁移）、Q13、Q14（不做逐 uuid 补偿式恢复）、Q15（帮会走 Dubbo）、Q17（不做「请 scene 立即存盘」）。
+7.2c（回收执行、欠款、精确回收）不在本批。
+
+**xm-data（新增 / 修改）**
+- 作业框架 `com.game.data.ops`：`OpsJobService`（受理：参数校验 → 写开关 → 幂等键 → 发号 → **一个事务**插 `ops_active` + `ops_job`（QUEUED）+ STARTED，
+  任一失败 503 零变更；重键 → 409 `ops_busy` 带在跑的作业号；同键同指纹回原作业、异参 409）、`OpsJobRunner`（`data-ops` 单线程执行；`data-ops-fence`
+  每 5 s 心跳，槽被收走即 `JobContext.aborted()`、下一个检查点抛 `JobAbortedException` 自停；`data-ops-sweeper` 每个副本都跑，心跳超过 60 s 的作业按心跳值
+  CAS 删槽、改 INTERRUPTED、追加 INTERRUPTED 事件；RESULT 与终态作业行同事务、失败重试 30 s，写不进就不让槽、停心跳交给清扫器；RESULT 之后才
+  `afterResult` 释放归属）、`JobContext`（事件、检查点、可中断等待、超时、读库的取消标志）。`OpsJobStore` 补单飞槽 / 心跳 / 清扫 / 明细条件更新
+  （`PLANNED → 终态` 必须恰好 1 行）/ 作业列表 / 取消。
+- 离线栅栏 `com.game.data.ops.fence.AdminOwnership`：`PlayerStore.claimOwnership` 在 xm-data 自己的事务模板里调（不依赖 `@Transactional` 代理）；
+  在线 + reject → `Online`；kick → 每次重试都重发让出请求（50 ms 起翻倍、封顶 800 ms）、`claim-wait`（35 s）内夺不到 → `Busy`；栅栏线程每 10 s
+  `renewOwnerLeases`，续不上记 `lost`、之后不写也不写墓碑；释放 = 位置墓碑（`PlayerLocationDirectory.removeAsync(p, E', 1)`）→ `releaseOwnership`。
+  作业收尾 `releaseAll` 并发发出全部墓碑、一起等至多 2 s 再逐个释放（Redis 不可用时不至于人数 × 超时）。让出请求发布方 `RedisTakeoverRequests`
+  （同 xm-login 的频道与 `xm.api.OwnerTakeover` 消息）；`StrictClock`（严格递增毫秒，§7.5 的 `useAffectedRows` 坑）。
+- 回档 `com.game.data.rollback`：`RollbackRequest`（§4.3 校验与规范化，指纹不含展开后的区号）、`RollbackSection`（段名规则，D5）、`RollbackPlanner`
+  （§4.4 / §4.9；按号或按时刻白名单选源，没有快照的按 `created_at` 分两类、快照所在区与归属区不同的单列）、`RestoreBuilder`（§4.5；FULL 整份替换、
+  `blocked_types` 保留现档，现档损坏 FULL 允许、SECTIONS → `state_invalid`）、`RollbackWriter`（§4.8 一个事务：加锁读归属 → 读现档与钉住的快照 →
+  PRE_ROLLBACK 安全快照 → `saveStateHeld` → TX_ROLLBACK_RESTORE(16) 流水 → 明细 RESTORED）、`GuildDivergenceGate`（§4.6.1：只认 OK、保留期钳位重查一次、
+  游标 / 块外玩家 / 10000 行上限 / 预算都算 `check_failed`；每块用块内最早起点问、按每人自己的起点过滤）、`DubboGuildInternalClient`、`RollbackJob`
+  （§4.7 流程）、`RollbackService`（受理与 dry-run）。
+- 整区维护前快照 `snapshot.ZoneSnapshotService`（作业 kind ZONE_SNAPSHOT，每批 500 人一个事务，PRE_MAINTENANCE，不需要写开关）。
+- 接口：`POST /admin/rollbacks`（202 / dry-run 200）、`POST /admin/zone-snapshots`（202）、`GET /admin/ops-jobs[?status=&kind=&limit=]`、
+  `GET /admin/ops-jobs/{id}`（含事件）、`GET /admin/ops-jobs/{id}/players?after=&limit=`、`POST /admin/ops-jobs/{id}/cancel`（要写开关）。
+  `AdminAuthFilter.opOf` 补 `rollbacks` / `zone_snapshots` / `ops_jobs`。
+- 装配：`PlayerStore` 由 `DataConfiguration` 定义（自动装配仍排除）、`@MapperScan` 补 `PlayerMapper`；`xm.data.ops.enabled=true` 时缺 `XM_DUBBO_SECRET` 拒启。
+  配置项见 §7.2（环境变量 `XM_DATA_OPS_ENABLED`、`XM_DATA_OPS_MIN_TARGET_AGE`、`XM_DATA_OPS_CLAIM_WAIT`、`XM_DATA_ROLLBACK_SETTLE`、
+  `XM_DATA_ROLLBACK_RECHECK_DELAY`、`XM_DUBBO_GUILD_URL`）。指标见 §8.2（`xm_data_ops_*`、`xm_data_rollback_*`、`xm_data_location_tombstones_total`）。
+- 表：`ops_job` 加 `cancel_requested`（pbmysql 启动补列）；`PersistedPlayerMapper` 加 `findBrief` / `listInZone` / `countInZones`；
+  `TransactionLogMapper.insertDirectAll`（普通 INSERT，撞主键回滚）。
+
+**xm-player-store**：只改建表脚本，`player` 加 `KEY idx_player_zone (zone_id)`（`db-migrations.md` M9）；没有改任何 Java 代码与 scene / login 用到的行为。
+
+**本机脚本与 robot**：`tools/local/start-slice.sh` 设 `XM_DATA_OPS_ENABLED=true`、`XM_DATA_OPS_MIN_TARGET_AGE=5s`、`XM_DATA_ROLLBACK_SETTLE=3s`、
+`XM_DATA_ROLLBACK_RECHECK_DELAY=2s`；xm-robot 新场景 `rollback`（`RollbackScenario`）。
+
+**与本稿的出入（实现时的取舍，待 lead 裁决是否回写正文）**
+1. §7.1「把 `RedisOwnerTakeovers` 的发布部分挪成 xm-discovery 共用件」没做：本批期间 xm-discovery 由别的批次在改；xm-data 内实现
+   `RedisTakeoverRequests`，频道与消息都取自共用定义，以后挪动只是搬家。
+2. §7.1 `LedgerDiff` 仍在 xm-data（`com.game.data.snapshot.LedgerDiff`，7.2a 起就在这里），没挪到 xm-player-store 的 asset 包。
+3. 帮会 Dubbo 调用方用编程式引用（xm-api 的 `IsolatedDubboModule`，同 xm-scene / xm-guild 的资产通道客户端），不引入 dubbo-spring-boot-starter：
+   只读与 dry-run 的进程不起 Dubbo，引用在第一次检查时才建。只支持直连 `xm.dubbo.guild-url`，为空 = 没有装配（一律 `check_failed`）；
+   nacos 注册中心发现没接（部署批次再定）。
+4. `sections` 不给 = FULL；给了空列表 → 400（§4.3 与 D5 两处说法不一，取「显式空列表拒绝」防误回全量）。
+5. dry-run 不做帮会检查（要沉降），只给计划、按现档预演的恢复内容与账本差集；整区 dry-run 不校验维护态，只列出各区状态。
+6. 写后复查问不到帮会时作业状态照写入结果定（SUCCEEDED / PARTIAL），结果码记 `post_write_unverified` 并 ERROR 日志（§7.7 没有给这种情形）。
+7. 写阶段：连续 3 人写失败或号源失效就停，剩下的记 `not_executed`；作业超时在写之前 → FAILED `job_timeout`、写阶段 → 停在当前玩家之后。
+8. kick 分两轮：第一轮全部不踢地夺（离线的直接夺到），在线的一起发让出请求，第二轮再逐个带等待夺——总等待约为一次写回而不是人数 × 写回；
+   整区两轮都夺完才裁决，`zone_not_quiescent` 带前 100 个玩家号与总数。
+9. 取消标志放在 `ops_job.cancel_requested`（多副本时取消请求可能落在别的副本上）；取消接口不带请求体、不要求 reason（操作人进审计日志）。
+10. 回收逆转检查（§4.6.3）已接好（查快照之后 17 / 19 的扣减流水），7.2c 之前恒为干净。
+11. SECTIONS 的 `assets` 组按描述符计算：`PlayerState` 里除 facing / attribute / mission / vitals 以外的全部字段（含以后新加的段，如 6.3 正在加的
+    `battle_ledger = 9`），新段缺省归资产组（账本类字段必须与资产同写）；FULL 本来就整份替换。战斗结算账本的分歧检查按 Q13 是 6.3 自己的验收项。
+
+**测试证据**（缺省 H2；`-Dxm.it.mysql` 时同一套 SQL 用例连真 MySQL）
+- 新增 `RollbackRequestTest`、`RestoreBuilderTest`（T-R2）、`GuildDivergenceGateTest`（T-R4 / T-R5）、`OwnershipFenceSqlTest`（T-F1 / T-F2 / T-F3：
+  在线零变化、已释放 / 租约过期夺到且旧写者被拒、kick 每次重发、与 5.2 交出互斥、续约丢失后不写不墓碑、收尾墓碑并发）、`OpsJobFrameworkSqlTest`
+  （T-J1 / T-A1：受理一个事务、号源失效零变更、槽被占不留作业行、心跳丢失自停且不覆盖 INTERRUPTED、清扫器 CAS、作业体异常照样收尾）、
+  `RollbackJobSqlTest`（离线 FULL 一个事务写齐 + 封禁保留 + 墓碑先于释放 + 事件顺序、在线 reject 零写入、kick 成功、kick 等不到 player_busy、
+  帮会没装配 / 非 OK → check_failed 放行无效、帮会分歧缺省拒绝与放行先写 ACCEPTED、写后复查 DIVERGED_AFTER_WRITE、账本差集拒绝、SECTIONS、
+  按时刻选源排除安全快照且同毫秒取号大的、快照属于别人 404、多人 PARTIAL、幂等 / 写开关 / dry-run、ops_busy、沉降期间取消、按 preSnapshotId 撤销）、
+  `ZoneRollbackSqlTest`（T-Z1：开放区 409、一律 kick 与没有快照的两类、一人夺不到全部释放零写入、空区、规模 422）、`RollbackAdminControllerTest`、
+  `OpsWriteGateTest`（写开关打开缺 `XM_DUBBO_SECRET` 拒启、缺省值、越界拒启）；
+  `XmDataMysqlIntegrationTest` 加 M9 迁移等价与 `idx_player_zone` 的 EXPLAIN；`AdminAuthFilterTest` 补新路径。
+- `-pl xm-player-store,xm-scene,xm-login,xm-data install -Dxm.it.mysql=... -Dxm.it.redis=... -Dxm.it.kafka=...`：BUILD SUCCESS（xm-player-store 55、
+  xm-login 170、xm-scene 835（跳过 1）、xm-data 172，0 失败）；资产组改为按描述符计算之后 xm-data 单模块带同样的 IT 开关重跑 173 个用例、0 失败。
+- 本机单节点切片（slice-run.sh）：`smoke` `reconnect` `currency` `bag` `pet` `guild-economy` `audit` `rollback` 全部通过；xm-data 0 条 ERROR。
+  `rollback` 10 项：下线手工快照、离线回档 SUCCEEDED + RESTORED、同键重提回同一作业、重登 1000、在线 reject → REJECTED player_online 余额与连接不变、
+  在线 kick → 23 {2017} 后 SUCCEEDED、重登 1000、PRE_ROLLBACK 快照里 1300、回档流水 1300 → 1000（关联号 = 作业号）。
+  本机库此前没有执行 M8（7.2a 的迁移），第一轮手工快照因此 503；按 `db-migrations.md` 执行 M8 / M9 后通过。
+- 没有在 robot 里显式核对「GM 持有期间登录回 2005」（login 的既有行为，PlayerFlow 会自动重试 2005）。
+
+### 13.2 批次 7.2b 评审修复（2026-10-05）
+
+评审确认的 6 条（作业框架 3 条、回档 3 条），只改 xm-data，表结构不变（不需要新迁移）。
+
+**作业框架（`OpsJobRunner` / `OpsJobStore` / `OpsJobService` / `JobContext`）**
+1. 清扫改成**一个事务**：按心跳值 CAS 删槽 → 未终结的作业行改 INTERRUPTED → 改到了才追加 INTERRUPTED 事件；任一步失败整体回滚（槽还在，下一拍重来），
+   不再出现「槽已删、作业行永远停在 RUNNING、没有中断事件也没有指标」。作业已终结、只是槽没让出（让槽失败、或 `afterResult` 释放期间停机）的，
+   只收回槽、WARN 一行，不追加事件、不记 `jobs_total{outcome=interrupted}`（原来会对成功的作业误报中断）。清扫的事件序号与仍活着的执行线程撞号
+   （`DuplicateKeyException`）时整个事务重来（至多 3 次）；执行线程写事件撞号时按库里的最大序号重排再写。
+2. 开始执行先核对：一个事务里刷新心跳（槽必须仍属于它）并 `QUEUED → RUNNING`（带状态条件），任一不成立就回滚、作业体一步也不执行——
+   排队超过 `stale-after` 已被清扫器中断的作业不会再被改回 RUNNING、在别的作业占着槽时夺权 / 踢人。心跳刷新之后清扫器至少 `stale-after` 内不会收走它。
+3. 作业行不再整行覆盖：`markRunning`（`QUEUED → RUNNING`）与 `finishJob`（只写结局列）都按列、带 `status IN (QUEUED, RUNNING)` 条件更新，
+   不抹掉受理线程（可能在别的副本上）写的 `cancel_requested`，也不把清扫器写的 INTERRUPTED 改回去；`failUnsubmitted` 同样。心跳丢失时作业行
+   还没终结（清扫器没改到，例如槽被人工删掉）由执行线程兜底改成 INTERRUPTED。**谁把作业行改成终态谁记 `jobs_total`**（原来心跳丢失时清扫器与
+   执行线程各记一次）。审计 `[OpsJob] RESULT` 行加 `row=finalized / event_only / not_written`。
+4. 心跳写 `GREATEST(heartbeat_ms + 1, now)`：§7.5 的 `useAffectedRows=true` 下，同一毫秒的第二次心跳（受理与开始执行落在同一毫秒）原来数出 0 行、
+   被误判为槽已被收走。
+5. 取消幂等：标志本来就是 1 时 UPDATE 数出 0 行（`useAffectedRows=true`），原来第二次取消会回「作业已终结，取消无效」；改为 0 行时回读，
+   未终结且标志已置上仍回 `cancelRequested=true`。取消写一行 `xm.audit.ops`（`[OpsJob] CANCEL`；操作人仍由 `xm.audit.admin` 记）。
+
+**回档（`RollbackJob` / `RollbackService` / `RestoreBuilder`）**
+6. kick 第二轮**共用一个截止时刻**（让出请求发出时起算一个 `claim-wait`）：每人仍有完整的 claim-wait 等 scene 写回，截止之后每人只再试一次
+   （照样重发让出请求）。原来每人各等一个 claim-wait，持有者不响应让出（发布失败、订阅断了、逻辑线程卡住而续约照常）时总等待 = 在线人数 × 35 s，
+   第一轮已夺到的离线玩家被扣着（登录回 2005），整区还可能拖到 `job-timeout` 变成 FAILED 而不是 `zone_not_quiescent`。两轮夺权循环里每 1 s 读一次
+   取消标志（原来夺权期间取消要等两轮都夺完才生效）。13.1 第 8 条「总等待约为一次写回」现在在退化情形下也成立。
+7. 作业时限：沉降之后、放行（ACCEPTED）之前各查一次，超时即全部释放、零写入、FAILED `job_timeout`（不问帮会、不写 ACCEPTED）；写阶段超时一个也没写成
+   → FAILED `job_timeout`、写成了一部分 → PARTIAL `job_timeout`（写后复查问不到帮会时仍是 `post_write_unverified`，摘要带 `timedOut`）。
+   原来沉降 / 帮会检查期间超时会在写循环里把人全记 `not_executed`，作业报成 REJECTED + 第一个明细结局（如 `player_online`），看起来像规则拒绝。
+8. 整区 dry-run 先数人（与执行同一个 `countInZones`），超过 `max-players-per-job` 回 422 `plan_too_large`；原来在 Tomcat 线程上对整个范围逐人查快照、
+   建全量计划之后才报 `tooLarge`（`tooLarge` 字段保留，作并发增长的兜底）。
+9. SECTIONS 选了 `assets`，而快照与现档在 `PlayerState` 顶层有本版本不认识、且两边不同的字段（滚动升级时较新的 scene 写下的新段，可能是新账本）
+   → 这名玩家不写，明细 `unknown_sections`（新的逐玩家结局，`xm_data_ops_players_total` 的 outcome 固定集合加一个值），dry-run 同样标出并列出字段号。
+   资产组按本版本的描述符计算（13.1 第 11 条），不认识的段既判断不了是否账本、也不会随资产一起恢复——资产回到快照而账本留在之后会重复记账或扣款消失，
+   所以 fail-closed：先升级 xm-data，或改用 FULL（整份替换，未知字段随快照）。两边相同、或不动资产组的 SECTIONS，照旧保留现档的未知字段。
+   **与 §4.5 正文的出入**：「SECTIONS 保留当前状态里不认识的字段」只对不动资产组、或两边未知字段相同的情形成立，待 lead 裁决是否回写 §4.5 / §11 Q11 附近的说明。
+
+**测试证据**
+- `OpsJobFrameworkSqlTest` 新增 7 例：清扫中途失败整体回滚、槽还在、下一拍重来；已终结作业只收回槽、不追加事件、不记中断；排队期间被中断的作业
+  开始执行时不跑作业体、只追加 RESULT、中断只计一次；槽不属于它而作业行仍是 QUEUED 时兜底改 INTERRUPTED；取消标志不被执行线程覆盖、排队时的
+  取消保留、重复取消仍报已请求；作业行被清扫器终结后执行线程只追加 RESULT、不覆盖、不重复计数；同一毫秒连续心跳仍判定槽属于它。
+- `RollbackJobSqlTest` 新增 3 例（5 名在线 kick 持有者都不放：每人 `player_busy`、耗时 < 3 s 而不是 5 × 1 s；沉降之后已超时 FAILED `job_timeout`、
+  零写入、不问帮会、不写 ACCEPTED；SECTIONS + assets 两边未知字段不同 → `unknown_sections`、零写入、dry-run 标出、FULL 不受影响），
+  沉降期间取消的用例补「重复取消仍报已请求、终态行保留取消标志」；`ZoneRollbackSqlTest` 新增 2 例（整区 4 名在线都夺不到 → `zone_not_quiescent`、
+  耗时 < 3 s；整区 dry-run 超上限 422）；`RestoreBuilderTest` 按新规则拆成三例（两边相同照留 / 不同拒绝并列出字段号 / 不动资产组保留现档）。
+- `-pl xm-data test -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dxm.it.redis=redis://127.0.0.1:6379 -Dxm.it.kafka=127.0.0.1:9092`：187 个用例、0 失败
+  （SQL 用例连真 MySQL、`useAffectedRows=true` 的连接串）；改动涉及的 4 个测试类另在缺省 H2 下跑过，0 失败。没有重跑本机切片。

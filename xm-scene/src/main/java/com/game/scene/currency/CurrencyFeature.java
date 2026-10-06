@@ -14,6 +14,7 @@ import com.game.proto.GmUnblockCurrencyRequest;
 import com.game.proto.GmUnblockCurrencyResponse;
 import com.game.scene.audit.AssetAudit.Reason;
 import com.game.scene.player.Wallet;
+import com.game.scene.world.BattlePolicy;
 import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
@@ -39,14 +40,14 @@ public final class CurrencyFeature implements SceneFeature {
      */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "GetCurrencyList", GetCurrencyListRequest.class, FreezePolicy.READ_ONLY, (call, req) -> call.reply(
+        r.on(SERVICE, "GetCurrencyList", GetCurrencyListRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, req) -> call.reply(
                 GetCurrencyListResponse.newBuilder().setErrorMessage(tip(0)).setCurrency(call.player().wallet().toClient()).build()));
-        r.on(SERVICE, "GmAddCurrency", GmAddCurrencyRequest.class, FreezePolicy.GATED, this::gmAdd);
-        r.on(SERVICE, "GmDeductCurrency", GmDeductCurrencyRequest.class, FreezePolicy.GATED, this::gmDeduct);
-        r.on(SERVICE, "GmBlockCurrency", GmBlockCurrencyRequest.class, FreezePolicy.REJECT, (call, req) -> call.reply(
+        r.on(SERVICE, "GmAddCurrency", GmAddCurrencyRequest.class, FreezePolicy.GATED, BattlePolicy.ALLOW, this::gmAdd);
+        r.on(SERVICE, "GmDeductCurrency", GmDeductCurrencyRequest.class, FreezePolicy.GATED, BattlePolicy.ALLOW, this::gmDeduct);
+        r.on(SERVICE, "GmBlockCurrency", GmBlockCurrencyRequest.class, FreezePolicy.REJECT, BattlePolicy.ALLOW, (call, req) -> call.reply(
                 GmBlockCurrencyResponse.newBuilder()
                         .setErrorMessage(tip(currency.block(call.player(), req.getCurrencyType()))).build()));
-        r.on(SERVICE, "GmUnblockCurrency", GmUnblockCurrencyRequest.class, FreezePolicy.REJECT, (call, req) -> call.reply(
+        r.on(SERVICE, "GmUnblockCurrency", GmUnblockCurrencyRequest.class, FreezePolicy.REJECT, BattlePolicy.ALLOW, (call, req) -> call.reply(
                 GmUnblockCurrencyResponse.newBuilder()
                         .setErrorMessage(tip(currency.unblock(call.player(), req.getCurrencyType()))).build()));
     }

@@ -111,6 +111,55 @@ public final class BagService {
         return result;
     }
 
+    /** 192 在回合制战斗中被挡（{@code xm.scene.battle.gate.rejects{gate=bag_sort}}；闸在入口 BagFeature，这里只计数）。 */
+    public void battleGateRejected() {
+        metrics.battleGateReject(SceneMetrics.BattleGate.BAG_SORT);
+    }
+
+    /**
+     * 按持有夹紧的批量扣除（回合制战斗结算的消耗，scene-battle-spec §7.11 h 步；基线 {@code RemoveItemsClamped}）：每个配置（无符号升序）
+     * 按<b>格子号升序</b>抽取（D22），扣不满不报错；每个被抽到的实例记一条销毁流水（{@code reason}、关联号、附加信息由调用方给）。
+     * 闸：冻结中什么都不扣（返回空表；调用方已排除冻结）。<b>不判战斗在途</b>（D48）。
+     *
+     * @param counts 配置号 → 请求扣除的数量（每项 1 .. 2^32−1）
+     * @return 配置号 → 实扣数量（扣到 0 的配置不出现）
+     */
+    public Map<Integer, Long> removeClamped(ScenePlayer player, BagType type, Map<Integer, Long> counts,
+                                            AssetAudit.Reason reason, long correlationId, String extra) {
+        if (!writable(player)) {
+            return Map.of();
+        }
+        TreeMap<Integer, Long> ordered = new TreeMap<>(Integer::compareUnsigned);
+        ordered.putAll(counts);
+        Map<Integer, Long> removed = new TreeMap<>(Integer::compareUnsigned);
+        Bag bag = player.bags().bag(type);
+        for (Map.Entry<Integer, Long> e : ordered.entrySet()) {
+            long total = 0;
+            for (Bag.Drawn drawn : bag.drainClamped(e.getKey(), e.getValue())) {
+                audit.itemDestroyed(player.playerId(), drawn.guid(), drawn.configId(), drawn.count(), reason, correlationId,
+                        extra);
+                total += drawn.count();
+            }
+            if (total > 0) {
+                removed.put(e.getKey(), total);
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * 只合并、不重排（基线 {@code MergeAndCompact(kMergeOnly)}，结算扣药之后用）。合并掉的空实例各记一条数量 0 的销毁流水。
+     */
+    public void mergeOnly(ScenePlayer player, BagType type) {
+        if (!writable(player)) {
+            return;
+        }
+        Bag.SortResult result = player.bags().bag(type).mergeAndCompact(false, tables);
+        for (Bag.Removed retired : result.retired()) {
+            audit.itemDestroyed(player.playerId(), retired.guid(), retired.configId(), 0, AssetAudit.Reason.ITEM_DESTROY, 0, "");
+        }
+    }
+
     /**
      * 冻结闸：跨节点换图的交出事务在途（{@link ScenePlayer#frozen()}）时拒绝写（基线回 1005）——冻结快照已在写库，之后的改动会随实例移除而丢。
      * 选目标中（RESOLVING）不冻结，照常写。跨 zone 交接（5.4）共用同一个冻结状态。

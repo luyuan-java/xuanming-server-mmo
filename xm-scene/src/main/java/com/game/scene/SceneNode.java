@@ -4,6 +4,7 @@ import com.game.api.proto.CreateDungeonInstanceResponse;
 import com.game.api.proto.DestroyInstanceResponse;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.proto.BattleRouting;
 import com.game.audit.AuditProperties;
 import com.game.audit.AuditTopics;
 import com.game.audit.KafkaTopicAdmin;
@@ -16,6 +17,8 @@ import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
+import com.game.discovery.battle.BattleLockReader;
+import com.game.discovery.battle.BattleRedis;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.team.TeamMembershipReader;
 import com.game.discovery.world.RedissonWorldChannelStore;
@@ -24,7 +27,6 @@ import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpEndpoint;
 import com.game.scene.asset.AssetOpService;
 import com.game.scene.asset.SceneAssetOpProvider;
-import com.game.scene.asset.SceneAssetRpcServer;
 import com.game.scene.attribute.AttributeFeature;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.attribute.AttributeTables;
@@ -36,6 +38,11 @@ import com.game.scene.audit.AuditPipeline;
 import com.game.scene.audit.GainAnomalyDetector;
 import com.game.scene.audit.KafkaAssetAudit;
 import com.game.scene.audit.KafkaPlayerSnapshots;
+import com.game.scene.battle.BattleLocks;
+import com.game.scene.battle.BattleSettlementService;
+import com.game.scene.battle.PlayerBattleService;
+import com.game.scene.battle.SceneBattleProvider;
+import com.game.scene.battle.SceneBattleTables;
 import com.game.scene.channel.ChannelPlanFollower;
 import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.currency.CurrencyService;
@@ -48,6 +55,7 @@ import com.game.scene.link.NodeLinkHandler;
 import com.game.scene.link.NodeLinkServer;
 import com.game.scene.link.SceneLinkService;
 import com.game.scene.location.RedisPlayerLocations;
+import com.game.scene.metrics.SceneBattleMetrics;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.mission.ActivityFeature;
 import com.game.scene.mission.MissionFeature;
@@ -62,6 +70,7 @@ import com.game.scene.skill.SkillTables;
 import com.game.scene.ownership.OwnerLeaseRenewer;
 import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.player.ItemGuids;
+import com.game.scene.rpc.SceneRpcServer;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.team.TeamFollowService;
 import com.game.scene.transfer.SceneManagerSwitchTargets;
@@ -156,6 +165,8 @@ public class SceneNode implements SmartLifecycle {
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final AuditProperties audit;
+    private final SceneBattleTables battleTables;
+    private final SceneBattleMetrics battleMetrics;
     private final String instanceId = UUID.randomUUID().toString();
     /** 最近一次目录快照里的在线人数（停服写回没能执行时报告用，任意线程可读）。 */
     private final AtomicInteger approxPlayers = new AtomicInteger();
@@ -176,7 +187,11 @@ public class SceneNode implements SmartLifecycle {
     /** 资产通道的跨进程提供方（Dubbo Triple，按节点直连）与它的回写线程池。 */
     private volatile SceneAssetOpProvider assetProvider;
     private volatile ThreadPoolExecutor assetReplyExecutor;
-    private volatile SceneAssetRpcServer assetRpc;
+    private volatile SceneRpcServer assetRpc;
+    /** 回合制战斗（批次 6.3）：逻辑线程上的业务与它的 Dubbo 提供方（与资产通道同一个端口、同一个回写池）。 */
+    private volatile PlayerBattleService battleService;
+    private volatile SceneBattleProvider battleProvider;
+    private volatile ScheduledFuture<?> battleReaperTask;
     private volatile ScheduledFuture<?> frameTask;
     private volatile ScheduledFuture<?> saveTask;
     private volatile ScheduledFuture<?> locationTask;
@@ -201,11 +216,14 @@ public class SceneNode implements SmartLifecycle {
      * @param audit    资产审计管线配置（Kafka）
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code XM_NODE_LINK_SECRET}，须与 gate 一致）
      * @param metrics  scene 指标（各组件共用一份）
+     * @param battleTables  回合制战斗的配表视图（指纹、技能可施放、道具 battle_usable、职业初值）
+     * @param battleMetrics 回合制战斗的指标
      */
     public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
                      MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables, BagTables bagTables,
                      MissionTables missionTables, SkillTables skillTables, PetTables petTables, NodeLinkAuth linkAuth,
-                     SceneMetrics metrics, AuditProperties audit) {
+                     SceneMetrics metrics, AuditProperties audit, SceneBattleTables battleTables,
+                     SceneBattleMetrics battleMetrics) {
         this.props = props;
         this.redis = redis;
         this.playerStore = playerStore;
@@ -219,6 +237,8 @@ public class SceneNode implements SmartLifecycle {
         this.linkAuth = linkAuth;
         this.metrics = metrics;
         this.audit = audit;
+        this.battleTables = battleTables;
+        this.battleMetrics = battleMetrics;
     }
 
     @Override
@@ -273,18 +293,20 @@ public class SceneNode implements SmartLifecycle {
         CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics, SceneClock.SYSTEM);
         BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
         startGainBlockSync(currency, bags, settings);
-        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency);
+        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics);
         MissionService missions = new MissionService(missionTables, bags, SceneClock.SYSTEM);
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
         PetService petService = new PetService(petTables, currency, itemGuids(sceneGuids), SceneClock.SYSTEM,
-                new SplittableRandom());
+                new SplittableRandom(), metrics);
         PetFeature pets = new PetFeature(petService, registry);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
         // 组队跟随：进场 / 换场景后异步读成员关系（Redis I/O 不在逻辑线程上等），结果投递回逻辑线程（team-spec §6.10）
         TeamMembershipReader teamMemberships = new TeamMembershipReader(redis);
-        TeamFollowService teamFollow = new TeamFollowService(teamMemberships::readAsync, logic, metrics);
+        // 6.3：与成员关系那次读并行发战斗锁 EXISTS（存在或读失败都按在途、不跟随，scene-battle-spec §7.13）
+        BattleLockReader battleLocks = new BattleLockReader(redis);
+        TeamFollowService teamFollow = new TeamFollowService(teamMemberships::readAsync, battleLocks::exists, logic, metrics);
         // 跨节点换图（批次 5.2，scene-handoff-spec §5.4–§5.8）：选目标经 Dubbo 直连 scene-manager（引用在第一次调用时才建，不阻塞启动）；
         // 交出进场成功后的立即续约经 leaseRenewer（它在下面才建，所以经 volatile 字段转一手，还没建出来 / 已停时跳过，周期续约兜底）
         switchTargets = SceneManagerSwitchTargets.dubbo(settings.sceneManagerUrl(), zoneId, nodeId, logic,
@@ -301,6 +323,14 @@ public class SceneNode implements SmartLifecycle {
         SceneInstances instances = new SceneInstances(nodeId, switchTargets, instance.mirrorIdleTimeout(),
                 instance.idleTimeout(), instance.reclaimGrace(), instance.maxPerNode(), instance.maxPerCreator(),
                 settings.switchResolveTimeout(), this::requestDirectoryPublish);
+        // 回合制战斗（批次 6.3，scene-battle-spec §7）：冻结 / 确认 / 进场恢复 / reaper / 结算应用 / 销账都在逻辑线程上，Redis 脚本异步；
+        // 世界的战斗钩子就是它（进场恢复、落盘后销账、原地解冻后补跑锁步骤），世界建好后再绑定
+        BattleSettlementService settlements = new BattleSettlementService(currency, bags, petService, missions, battleTables,
+                battleMetrics, SceneClock.SYSTEM, registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"));
+        PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis)), settlements, battleTables,
+                petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics, SceneClock.SYSTEM,
+                logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
+                registry.requireId("BattleClientPlayer", "NotifyBattleEnd"));
         // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, player -> {
@@ -310,7 +340,9 @@ public class SceneNode implements SmartLifecycle {
                     missions.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
                 }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId), teamFollow,
-                crossNode, instances);
+                crossNode, instances, battle);
+        battle.attach(sceneWorld);
+        battleService = battle;
         links = gateLinks;
         world = sceneWorld;
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
@@ -325,6 +357,9 @@ public class SceneNode implements SmartLifecycle {
             SceneAssetOpProvider p = assetProvider;
             return p == null ? 0 : p.inFlight();
         });
+        // 回合制战斗入口的跨进程提供方：同一端口、同一个回写池，在途上限各自独立（scene-battle-spec §7.3）
+        battleProvider = new SceneBattleProvider(() -> battleService, instanceId, logic, settings.battleRpcMaxInflight(),
+                assetReplyExecutor, battleMetrics);
         RunMode runMode = RunMode.parse(props.runMode());
         if (!RunMode.isRecognized(props.runMode())) {
             log.warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
@@ -355,6 +390,15 @@ public class SceneNode implements SmartLifecycle {
                 log.error("场景维护（排空推进 / 实例回收）这一秒出错，下一秒照常", e);
             }
         }, 1, 1, TimeUnit.SECONDS);
+        // 回合制战斗 reaper（scene-battle-spec §7.9）：与帧同一个执行器，启动注册、停服注销；缺省 30 s（本机切片调小）
+        long reaperMillis = settings.battle().reaperInterval().toMillis();
+        battleReaperTask = logicLoop.scheduleAtFixedRate(() -> {
+            try {
+                battle.reap();
+            } catch (RuntimeException e) {
+                log.error("回合制战斗 reaper 这一轮出错，下一轮照常", e);
+            }
+        }, reaperMillis, reaperMillis, TimeUnit.MILLISECONDS);
         // 场景帧：固定周期触发，SceneTicker 按单调时钟补帧（每次最多 5 帧），帧内异常只记日志、不让定时任务停掉。
         SceneTicker ticker = new SceneTicker(sceneWorld::step, SceneClock.SYSTEM::nanoTime);
         long periodNanos = SceneTicker.STEP_NANOS;
@@ -404,7 +448,7 @@ public class SceneNode implements SmartLifecycle {
                         handshakeTimeout, maxPendingFrames, metrics));
 
         // 资产通道导出：成功之后才把 rpc 地址写进目录（调用方只从目录找它，guild-economy-spec §4.6 第 6 条）；端口被占 / 缺 XM_DUBBO_SECRET 拒绝启动
-        SceneAssetRpcServer rpc = SceneAssetRpcServer.export(assetProvider, props.advertiseHost(), settings.assetRpcPort());
+        SceneRpcServer rpc = SceneRpcServer.export(assetProvider, battleProvider, props.advertiseHost(), settings.assetRpcPort());
         assetRpc = rpc;
 
         SceneNodeInfo info = SceneNodeInfo.newBuilder()
@@ -556,6 +600,10 @@ public class SceneNode implements SmartLifecycle {
         if (drains != null) {
             drains.cancel(false);
         }
+        ScheduledFuture<?> reaper = battleReaperTask;
+        if (reaper != null) {
+            reaper.cancel(false);
+        }
         ScheduledFuture<?> locationRefresh = locationTask;
         if (locationRefresh != null) {
             locationRefresh.cancel(false);
@@ -613,7 +661,7 @@ public class SceneNode implements SmartLifecycle {
         }
         // 资产通道反导出：在摘目录（第一步）之后、逻辑线程停之前（guild-economy-spec §4.6 第 6 条）。到这里写回都已交出去，
         // 期间到的请求只会是 NOT_HERE；反导出之后调用方连不上 = 传输失败、重投，此前已记账已落库的结局可经离线读已落盘账本终结。
-        SceneAssetRpcServer rpc = assetRpc;
+        SceneRpcServer rpc = assetRpc;
         if (rpc != null) {
             rpc.close();
             assetRpc = null;
@@ -672,6 +720,25 @@ public class SceneNode implements SmartLifecycle {
         guidLease = guids;
         log.info("全服发号就绪 worker={}", guids.nodeId());
         return new LeaseGatedSnowflake(new Snowflake(guids.nodeId()), guids::isValid);
+    }
+
+    /**
+     * 回合制战斗快照的路由（scene-battle-spec §7.11 快照表）：会话号；gate 节点号与实例 id 取链路登记表（恒有值）；scene 节点号 / 实例 / zone 取本节点。
+     * 会话所在链路不在登记表里（不该发生）为 null。逻辑线程上调用。
+     */
+    private BattleRouting battleRouting(GateLinks gateLinks, com.game.scene.world.ScenePlayer player, int zoneId, int nodeId) {
+        GateLinks.Link link = gateLinks.link(player.session().linkId());
+        if (link == null) {
+            return null;
+        }
+        return BattleRouting.newBuilder()
+                .setSessionId(player.session().sessionId())
+                .setGateNodeId(link.gateNodeId())
+                .setGateInstanceId(link.gateInstanceId())
+                .setSceneNodeId(nodeId)
+                .setSceneInstanceId(instanceId)
+                .setZoneId(zoneId)
+                .build();
     }
 
     /** 物品 guid：一次铸齐一批，任何一个发不出来就整批放弃（调用方零写入地回 6004）。 */

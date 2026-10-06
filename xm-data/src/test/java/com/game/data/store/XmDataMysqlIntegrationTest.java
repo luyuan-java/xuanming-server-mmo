@@ -71,6 +71,38 @@ class XmDataMysqlIntegrationTest {
         }
     }
 
+    @Test
+    void 迁移M9之后player表与新建库逐字相同_按区列玩家走idx_player_zone() throws Exception {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        String migrated = "xm_player_mig_old_" + suffix;
+        String fresh = "xm_player_mig_new_" + suffix;
+        try {
+            DriverManagerDataSource old = database(migrated);
+            new ResourceDatabasePopulator(new ClassPathResource("db/xm-player-schema-before-m9.sql")).execute(old);
+            new ResourceDatabasePopulator(new ClassPathResource("db/xm-player-migration-m9.sql")).execute(old);
+            DriverManagerDataSource now = database(fresh);
+            new ResourceDatabasePopulator(new ClassPathResource("db/xm-player-schema.sql")).execute(now);
+            for (String table : List.of("account", "player", "player_state")) {
+                assertThat(showCreate(old, table)).as(table).isEqualTo(showCreate(now, table));
+            }
+            assertThat(showCreate(now, "player")).contains("KEY `idx_player_zone` (`zone_id`)");
+
+            JdbcTemplate jdbc = new JdbcTemplate(now);
+            List<Object[]> rows = new ArrayList<>();
+            for (int i = 1; i <= 3000; i++) {
+                rows.add(new Object[] {i, "acc" + i, 1 + i % 20, "n" + i, "n" + i});
+            }
+            jdbc.batchUpdate("INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, created_at, "
+                    + "updated_at) VALUES (?, ?, ?, ?, ?, 1, 1, 1, 1)", rows);
+            jdbc.execute("ANALYZE TABLE player");
+            assertThat(key(jdbc, "SELECT player_id, zone_id, created_at FROM player WHERE zone_id = 3 AND player_id > 0 "
+                    + "ORDER BY player_id LIMIT 500")).isEqualTo("idx_player_zone");
+        } finally {
+            drop(migrated);
+            drop(fresh);
+        }
+    }
+
     private static String showCreate(DriverManagerDataSource ds, String table) {
         Map<String, Object> row = new JdbcTemplate(ds).queryForMap("SHOW CREATE TABLE " + table);
         return (String) row.get("Create Table");

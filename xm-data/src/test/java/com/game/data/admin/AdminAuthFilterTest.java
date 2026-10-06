@@ -112,6 +112,13 @@ class AdminAuthFilterTest {
         assertThat(AdminAuthFilter.opOf("/admin/recalls")).isEqualTo("recalls");
         assertThat(AdminAuthFilter.opOf("/admin/player-snapshotsX")).isEqualTo("other");
         assertThat(AdminAuthFilter.opOf("/admin/playersX/1")).isEqualTo("other");
+        // 批次 7.2b：回档、整区维护前快照、作业查询 / 取消
+        assertThat(AdminAuthFilter.opOf("/admin/rollbacks")).isEqualTo("rollbacks");
+        assertThat(AdminAuthFilter.opOf("/admin/zone-snapshots")).isEqualTo("zone_snapshots");
+        assertThat(AdminAuthFilter.opOf("/admin/ops-jobs")).isEqualTo("ops_jobs");
+        assertThat(AdminAuthFilter.opOf("/admin/ops-jobs/123/players")).isEqualTo("ops_jobs");
+        assertThat(AdminAuthFilter.opOf("/admin/ops-jobs/123/cancel")).isEqualTo("ops_jobs");
+        assertThat(AdminAuthFilter.opOf("/admin/rollbacksX")).isEqualTo("other");
         assertThat(AdminAuthFilter.printable("/admin/whitelist/1/a\nforged")).isEqualTo("/admin/whitelist/1/a?forged");
         assertThat(AdminAuthFilter.printable(null)).isNull();
     }

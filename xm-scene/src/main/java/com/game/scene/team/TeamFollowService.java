@@ -59,7 +59,17 @@ public final class TeamFollowService implements TeamFollow {
         FOLLOW_ONLY
     }
 
+    /** 读一个玩家的战斗锁在不在（生产 = {@code BattleLockReader#exists}）。不得阻塞；失败以异常完成（按在途处理）。 */
+    @FunctionalInterface
+    public interface BattleLockProbe {
+        CompletionStage<Boolean> lockedAsync(long playerId);
+
+        /** 不读锁（测试与不接战斗的装配）：恒为「不在战斗」。 */
+        BattleLockProbe NONE = playerId -> java.util.concurrent.CompletableFuture.completedFuture(false);
+    }
+
     private final MembershipReads reads;
+    private final BattleLockProbe battleLocks;
     private final Executor logic;
     private final SceneMetrics metrics;
     /**
@@ -74,7 +84,15 @@ public final class TeamFollowService implements TeamFollow {
      * @param metrics scene 指标
      */
     public TeamFollowService(MembershipReads reads, Executor logic, SceneMetrics metrics) {
+        this(reads, BattleLockProbe.NONE, logic, metrics);
+    }
+
+    /**
+     * @param battleLocks 与成员关系那次读并行发的战斗锁 EXISTS（scene-battle-spec §7.13 世界内部第 3 条；存在或读失败都按在途、不跟随）
+     */
+    public TeamFollowService(MembershipReads reads, BattleLockProbe battleLocks, Executor logic, SceneMetrics metrics) {
         this.reads = reads;
+        this.battleLocks = battleLocks;
         this.logic = logic;
         this.metrics = metrics;
     }
@@ -84,16 +102,32 @@ public final class TeamFollowService implements TeamFollow {
         check(world, player, following ? Mode.FOLLOW_ONLY : Mode.FOLLOW_AND_FANOUT);
     }
 
+    /** 战斗冻结解除后补一次跟随（基线 {@code OnBattleFreezeCleared → RefreshAndFollow}）：只跟随、不扇出。 */
+    @Override
+    public void onBattleFreezeCleared(SceneWorld world, ScenePlayer player) {
+        check(world, player, Mode.FOLLOW_ONLY);
+    }
+
     /** 发起一次读（逻辑线程）；结果投递回逻辑线程再处理。 */
     private void check(SceneWorld world, ScenePlayer player, Mode mode) {
         long playerId = player.playerId();
         try {
             CompletionStage<TeamMembership> read = reads.readAsync(playerId);
-            read.whenComplete((membership, failure) -> post(playerId,
-                    () -> onRead(world, player, mode, membership, failure)));
+            java.util.concurrent.CompletableFuture<Boolean> locked = lockRead(playerId);
+            read.whenComplete((membership, failure) -> locked.whenComplete((isLocked, ignored) -> post(playerId,
+                    () -> onRead(world, player, mode, membership, failure, isLocked == null || isLocked))));
         } catch (RuntimeException e) {
             // 读没发出去（客户端已关闭等）：不跟随，进场 / 换场景照常
             readFailed(playerId, e);
+        }
+    }
+
+    /** 战斗锁读（从不异常完成：读失败按「在途」，同基线 team.cpp:378-402 的 fail-closed）。 */
+    private java.util.concurrent.CompletableFuture<Boolean> lockRead(long playerId) {
+        try {
+            return battleLocks.lockedAsync(playerId).toCompletableFuture().handle((locked, error) -> error != null || locked == null || locked);
+        } catch (RuntimeException e) {
+            return java.util.concurrent.CompletableFuture.completedFuture(true);
         }
     }
 
@@ -106,9 +140,10 @@ public final class TeamFollowService implements TeamFollow {
     }
 
     /** 读回来了（逻辑线程）。 */
-    private void onRead(SceneWorld world, ScenePlayer player, Mode mode, TeamMembership membership, Throwable failure) {
+    private void onRead(SceneWorld world, ScenePlayer player, Mode mode, TeamMembership membership, Throwable failure,
+                        boolean battleLocked) {
         try {
-            decide(world, player, mode, membership, failure);
+            decide(world, player, mode, membership, failure, battleLocked);
         } catch (RuntimeException e) {
             // 钩子不得让逻辑任务带着异常结束（换场景已开始的那部分由 SceneWorld 自己保证一致）
             metrics.teamFollow(TeamFollowResult.READ_ERROR);
@@ -116,7 +151,8 @@ public final class TeamFollowService implements TeamFollow {
         }
     }
 
-    private void decide(SceneWorld world, ScenePlayer player, Mode mode, TeamMembership membership, Throwable failure) {
+    private void decide(SceneWorld world, ScenePlayer player, Mode mode, TeamMembership membership, Throwable failure,
+                        boolean battleLocked) {
         long playerId = player.playerId();
         if (world.playerById(playerId) != player) {
             metrics.teamFollow(TeamFollowResult.STALE);
@@ -146,7 +182,7 @@ public final class TeamFollowService implements TeamFollow {
         }
         long leaderId = info.getLeaderId();
         if (leaderId != playerId) {
-            followLeader(world, player, leaderId);
+            followLeader(world, player, leaderId, battleLocked);
             return;
         }
         metrics.teamFollow(TeamFollowResult.IS_LEADER);
@@ -166,13 +202,23 @@ public final class TeamFollowService implements TeamFollow {
     }
 
     /** 跟随队长到它所在的场景实例（逻辑线程）。 */
-    private void followLeader(SceneWorld world, ScenePlayer player, long leaderId) {
+    private void followLeader(SceneWorld world, ScenePlayer player, long leaderId, boolean battleLocked) {
         if (player.switchPhase() != SwitchPhase.NONE) {
             // 自己有在途的跨节点换图（选目标中或冻结中，scene-handoff-spec §5.5；基线 IsFollowBlocked 查冻结或交接意图，
             // player_team.cpp:65-75）：换图的结局优先，不跟随
             metrics.teamFollow(TeamFollowResult.SWITCHING);
             log.debug("有在途的跨节点换图，不跟随 player={} 阶段={}", Long.toUnsignedString(player.playerId()),
                     player.switchPhase());
+            return;
+        }
+        if (player.inBattle()) {
+            // 回合制战斗在途（内存冻结，scene-battle-spec §7.13）：不跟随，解冻后由 onBattleFreezeCleared 补一次
+            metrics.teamFollow(TeamFollowResult.IN_BATTLE);
+            return;
+        }
+        if (battleLocked) {
+            // 锁存在（或读锁失败）：这一局还没完（已结算待落盘时锁也还在），不跟随；锁真正放掉时由销账回调补一次
+            metrics.teamFollow(TeamFollowResult.BATTLE_LOCK);
             return;
         }
         ScenePlayer leader = world.playerById(leaderId);

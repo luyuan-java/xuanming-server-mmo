@@ -10,6 +10,7 @@ import com.game.api.proto.AssetOpRequest;
 import com.game.api.proto.AssetOpResponse;
 import com.game.api.proto.AssetOutcome;
 import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.rpc.SceneRpcServer;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.time.Duration;
@@ -25,7 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * 资产通道跨进程传输的 scene 侧（真 Dubbo Triple：提供方与调用方各在自己的 Dubbo 框架模型里，等价于两个进程；调用方鉴权过滤器照常生效，
+ * 资产通道跨进程传输的 scene 侧（导出由 {@link SceneRpcServer} 做，6.3 起同一端口另导出战斗入口，这里只导出资产通道）（真 Dubbo Triple：提供方与调用方各在自己的 Dubbo 框架模型里，等价于两个进程；调用方鉴权过滤器照常生效，
  * 测试密钥由 surefire 注入 {@code XM_DUBBO_SECRET}）：导出参数（register = false、group、tri）、签名请求经 Dubbo 到逻辑线程扣款、
  * 验签失败的答复照常回传、过载是传输失败、端口被占导出失败、关闭后连不上。基线 {@code assetop/scene_smoke_test.go} 的 Java 对应
  * （帮会侧的调用方循环随 xm-guild 另测）。
@@ -37,7 +38,7 @@ class SceneAssetRpcServerTest {
     private final ExecutorService logicThread = Executors.newSingleThreadExecutor(r -> new Thread(r, "test-scene-logic"));
     private final ExecutorService replyThread = Executors.newFixedThreadPool(2, r -> new Thread(r, "test-asset-reply"));
     private final AssetChannelFixture fixture = new AssetChannelFixture();
-    private SceneAssetRpcServer server;
+    private SceneRpcServer server;
     private SceneAssetOpClients clients;
     private int port;
 
@@ -78,7 +79,7 @@ class SceneAssetRpcServerTest {
 
     @Test
     void 导出参数_不进注册中心_按group直连() {
-        server = SceneAssetRpcServer.export(provider(8), "127.0.0.1", port);
+        server = SceneRpcServer.export(provider(8), null, "127.0.0.1", port);
         assertThat(server.port()).isEqualTo(port);
         assertThat(server.exportedUrls()).anySatisfy(url -> assertThat(url)
                 .startsWith("tri://")
@@ -89,7 +90,7 @@ class SceneAssetRpcServerTest {
 
     @Test
     void 签名请求经Dubbo到逻辑线程扣款_同seq重放只读答复() throws Exception {
-        server = SceneAssetRpcServer.export(provider(8), "127.0.0.1", port);
+        server = SceneRpcServer.export(provider(8), null, "127.0.0.1", port);
         AssetOpRequest request = AssetChannelFixture.debit(AssetChannelFixture.PLAYER, 1, 30);
         AssetOpResponse first = clients.call(endpoint(), AssetRpc.DEBIT, fixture.signed(AssetRpc.DEBIT, request), TIMEOUT)
                 .get(10, TimeUnit.SECONDS);
@@ -112,7 +113,7 @@ class SceneAssetRpcServerTest {
 
     @Test
     void 验签失败经Dubbo照常答复UNKNOWN_27008_不记账() throws Exception {
-        server = SceneAssetRpcServer.export(provider(8), "127.0.0.1", port);
+        server = SceneRpcServer.export(provider(8), null, "127.0.0.1", port);
         AssetOpRequest signed = fixture.signed(AssetRpc.DEBIT, AssetChannelFixture.debit(AssetChannelFixture.PLAYER, 1, 30));
         AssetOpRequest tampered = signed.toBuilder().setBundle(AssetChannelFixture.debit(0, 0, 31).getBundle()).build();
         AssetOpResponse response = clients.call(endpoint(), AssetRpc.DEBIT, tampered, TIMEOUT).get(10, TimeUnit.SECONDS);
@@ -131,8 +132,8 @@ class SceneAssetRpcServerTest {
                 parked.add(task);
             }
         }, fixture.service);
-        server = SceneAssetRpcServer.export(new SceneAssetOpProvider(() -> parkedEndpoint, 1, replyThread,
-                SceneMetrics.noop()), "127.0.0.1", port);
+        server = SceneRpcServer.export(new SceneAssetOpProvider(() -> parkedEndpoint, 1, replyThread,
+                SceneMetrics.noop()), null, "127.0.0.1", port);
         CompletableFuture<AssetOpResponse> holding = clients.call(endpoint(), AssetRpc.DEBIT,
                 AssetChannelFixture.debit(0, 1, 1), TIMEOUT);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -159,16 +160,16 @@ class SceneAssetRpcServerTest {
     void 端口被占_导出失败() throws IOException {
         try (ServerSocket busy = new ServerSocket(0)) {
             int taken = busy.getLocalPort();
-            assertThatThrownBy(() -> SceneAssetRpcServer.export(provider(8), "127.0.0.1", taken))
+            assertThatThrownBy(() -> SceneRpcServer.export(provider(8), null, "127.0.0.1", taken))
                     .isInstanceOf(IllegalStateException.class).hasMessageContaining(Integer.toString(taken));
         }
-        assertThatThrownBy(() -> SceneAssetRpcServer.export(provider(8), "127.0.0.1", 0))
+        assertThatThrownBy(() -> SceneRpcServer.export(provider(8), null, "127.0.0.1", 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void 关闭后调用方连不上_是传输失败() throws Exception {
-        server = SceneAssetRpcServer.export(provider(8), "127.0.0.1", port);
+        server = SceneRpcServer.export(provider(8), null, "127.0.0.1", port);
         assertThat(clients.call(endpoint(), AssetRpc.DEBIT, AssetChannelFixture.debit(0, 1, 1), TIMEOUT)
                 .get(10, TimeUnit.SECONDS).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
         server.close();

@@ -8,6 +8,8 @@ syntax = "proto3";
 
 package xm.api;
 
+import "xm/api/scene_battle.proto";
+
 option java_package = "com.game.api.proto";
 option java_multiple_files = true;
 
@@ -28,4 +30,60 @@ message CreateBattleResult {
   string reason = 2;
   // ADMITTED 时：契约 CreateBattleResponse（proto/battle/battle_node.proto）的序列化字节；其余情况为空。
   bytes response = 3;
+}
+
+// ---- dev / test 管理接口 POST /admin/battle/dev/gather（scene-battle-spec §7.18、D27；Java 独有，prod 一律 403）----
+// 6.4 的 match 落地之前，经它真实备战（SceneBattleService.prepareBattle，快照由 scene 出）再建房（origin = DEV_GATHER，照常确认、照常结算）。
+// 请求体与应答都是 protobuf 二进制（application/x-protobuf）。
+
+// gather 的模式。
+enum DevGatherMode {
+  // 缺失：接口回 400。
+  DEV_GATHER_MODE_UNSPECIFIED = 0;
+  // 只备战（冻结并回快照），不建房；调用方之后用 dev/cancel-prepare 或备战期限解冻。
+  DEV_GATHER_PREPARE_ONLY = 1;
+  // 备战全员成功后建房（CreateBattleRequest 由快照组装，team_index 按请求改写）。
+  DEV_GATHER_CREATE = 2;
+}
+
+message DevGatherMember {
+  uint64 player_id = 1;
+  // 0 = A 方，1 = B 方；写进快照的 team_index。
+  uint32 team_index = 2;
+}
+
+message DevGatherRequest {
+  DevGatherMode mode = 1;
+  uint64 battle_id = 2;              // 非 0；调用方保证随时间递增（D13 的局序，§10.4）
+  uint32 match_mode = 3;             // MatchMode 数值（PVE / PVP）
+  uint32 battle_config_id = 4;       // Dungeon 表 id（PVP 为 0）
+  uint64 seed = 5;
+  uint64 deadline_ms = 6;            // 非 0：备战与建房共用的整场期限（Unix 毫秒）
+  uint64 prepare_deadline_ms = 7;    // 备战期限；0 = 沿用 deadline_ms
+  repeated DevGatherMember members = 8;  // 非空、player_id 非 0 且不重复；按 player_id 无符号升序逐人备战
+}
+
+// 一个成员的备战结局。
+message DevGatherPrepareResult {
+  uint64 player_id = 1;
+  // scene 的应答状态；UNSPECIFIED = 没有发出（定位失败）或传输失败（结局未知，已按「可能已冻结」补发取消）。
+  SceneBattleStatus status = 2;
+  // status = HANDLED 时：契约 PrepareBattleResponse 的字节（error_message 非 0 = 备战被拒）。
+  bytes response = 3;
+  // 定位 / 传输失败的原因（只给人看）。
+  string error = 4;
+  // 备战发往的 scene 节点（定位到时）。
+  uint32 scene_node_id = 5;
+  string scene_instance_id = 6;
+}
+
+message DevGatherResponse {
+  // 按 player_id 升序；第一个失败的人之后的成员不再备战、不出现在这里。
+  repeated DevGatherPrepareResult prepare_results = 1;
+  // CREATE 且全员备战成功时：进程内 createBattle(origin = DEV_GATHER) 的结果。
+  CreateBattleResult create_result = 2;
+  // 非空 = gather 失败（HTTP 422），写明原因；已备战的人按升序补发了取消。
+  string failure = 3;
+  // 失败后补发了 cancelBattlePrepare 的成员（升序）。
+  repeated uint64 cancelled_player_ids = 4;
 }

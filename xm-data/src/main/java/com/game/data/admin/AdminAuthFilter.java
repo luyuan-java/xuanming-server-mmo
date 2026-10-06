@@ -97,6 +97,15 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
         if (under(path, RecallAdminController.PATH)) {
             return "recalls";
         }
+        if (under(path, RollbackAdminController.PATH)) {
+            return "rollbacks";
+        }
+        if (under(path, RollbackAdminController.ZONE_SNAPSHOTS_PATH)) {
+            return "zone_snapshots";
+        }
+        if (under(path, OpsJobAdminController.PATH)) {
+            return "ops_jobs";
+        }
         if (under(path, GainBlockController.PATH)) {
             return "gain_blocks";
         }

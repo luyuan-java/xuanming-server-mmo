@@ -247,3 +247,38 @@ ALTER TABLE player_snapshot DROP COLUMN operator, DROP COLUMN note;
 ```
 
 回滚后必须同时回退代码：新代码的快照直写 / 列表查询引用这两列。运维作业表可留着（旧代码不读不写）；作业行是运维审计，有留存要求时不要删。
+
+## M9：`player` 按归属区的索引 `idx_player_zone`；运维作业表加列 `ops_job.cancel_requested`（2026-10-05，批次 7.2b）
+
+**原因**：GM 回档（data-ops-spec §4.9、Q9）。整区 / 多区回档与整区维护前快照的目标 = `player.zone_id ∈ zones` 的玩家（归属区，权威列），
+xm-data 按 `zone_id = ? AND player_id > ? ORDER BY player_id LIMIT 500` 分页读；没有索引就是全表扫。二级索引自带主键，按玩家号续翻不用排序。
+建表脚本仍只由 xm-login 执行（`xm-player-store/src/main/resources/db/xm-player-schema.sql`）。
+
+另：`ops_job` 新增 `cancel_requested`（`POST /admin/ops-jobs/{id}/cancel`，执行线程在阶段边界查它）——由 xm-pbmysql 在 xm-data 启动时
+只扩不缩地补列，**不需要手工迁移**。
+
+**行为变化**：无客户端可见变化。`player` 多一条二级索引，玩家写入（建角、换 zone）多维护一棵索引树，可忽略。
+
+**新库**：无需操作（建表脚本已带索引）。
+
+**存量库**（在 `xm_java` 上执行；只加索引，不必停服；大表用 InnoDB 在线 DDL）：
+
+```sql
+ALTER TABLE player ADD KEY idx_player_zone (zone_id);
+```
+
+**核对**：迁移后 `SHOW CREATE TABLE player` 与新库逐字相同（`XmDataMysqlIntegrationTest` 用迁移前的建表脚本
+`xm-data/src/test/resources/db/xm-player-schema-before-m9.sql` + 上面的语句（`db/xm-player-migration-m9.sql`）对拍，并 EXPLAIN 按区分页走 `idx_player_zone`）。
+
+```sql
+SHOW CREATE TABLE player;            -- 有 KEY `idx_player_zone` (`zone_id`)
+SHOW COLUMNS FROM ops_job LIKE 'cancel_requested';   -- xm-data 启动后有
+```
+
+**回滚**：
+
+```sql
+ALTER TABLE player DROP INDEX idx_player_zone;
+```
+
+回滚后整区回档 / 维护前快照仍能执行（查询照样对），只是退化成全表扫；`ops_job.cancel_requested` 可留着（旧代码不读不写）。

@@ -3,20 +3,37 @@ package com.game.data;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.audit.AuditProperties;
 import com.game.audit.KafkaTopicAdmin;
+import com.game.common.token.DubboCallAuth;
 import com.game.data.admin.AdminAuthFilter;
 import com.game.data.gainblock.GainBlockStore;
 import com.game.data.metrics.DataMetrics;
 import com.game.data.ops.OpsIds;
+import com.game.data.ops.OpsJobRunner;
+import com.game.data.ops.OpsJobService;
 import com.game.data.ops.OpsJobStore;
 import com.game.data.ops.OpsTables;
+import com.game.data.ops.fence.AdminOwnership;
+import com.game.data.ops.fence.RedisTakeoverRequests;
+import com.game.data.ops.fence.StrictClock;
 import com.game.data.query.TransactionLogQueryService;
 import com.game.data.recall.RecallPlanner;
+import com.game.data.rollback.DubboGuildInternalClient;
+import com.game.data.rollback.GuildDivergenceGate;
+import com.game.data.rollback.RollbackJob;
+import com.game.data.rollback.RollbackPlanner;
+import com.game.data.rollback.RollbackService;
+import com.game.data.rollback.RollbackWriter;
 import com.game.data.snapshot.SnapshotAdminService;
 import com.game.data.snapshot.SnapshotDiffService;
+import com.game.data.snapshot.ZoneSnapshotService;
 import com.game.data.store.PersistedPlayerMapper;
 import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
+import com.game.discovery.location.PlayerLocationDirectory;
+import com.game.gateway.store.GatewayStore;
 import com.game.pbmysql.PbMysql;
+import com.game.player.store.PlayerMapper;
+import com.game.player.store.PlayerStore;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.lang.management.ManagementFactory;
 import java.sql.SQLException;
@@ -25,6 +42,7 @@ import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.mybatis.spring.annotation.MapperScan;
 import org.mybatis.spring.boot.autoconfigure.ConfigurationCustomizer;
@@ -33,6 +51,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -40,10 +59,16 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** xm-data 的装配。所有依赖显式经构造参数传入。 */
+/**
+ * xm-data 的装配。所有依赖显式经构造参数传入。
+ *
+ * <p>MyBatis：本服务的 Mapper（{@code com.game.data.store}）与 xm-player-store 的 {@link PlayerMapper}（批次 7.2b 起：夺权 / 续约 / 释放 /
+ * 带围栏写 / 加锁读）共用同一个 {@code SqlSessionFactory} 与数据源（同事务的前提，data-ops-spec §7.5）。xm-player-store 的自动装配仍被
+ * {@link DataApplication} 排除：{@link PlayerStore} 由这里定义（严格递增时钟，见 {@link StrictClock}）。
+ */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties({DataProperties.class, AuditProperties.class})
-@MapperScan("com.game.data.store")
+@MapperScan(basePackages = "com.game.data.store", basePackageClasses = PlayerMapper.class)
 public class DataConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(DataConfiguration.class);
@@ -154,5 +179,108 @@ public class DataConfiguration {
                                        Clock clock, DataProperties props) {
         return new RecallPlanner(txlog, players, jobs, opsIds, new TransactionTemplate(transactionManager), json, clock,
                 props.recall().maxRows(), runnerId());
+    }
+
+    // ================================================================ 作业框架、栅栏与回档（批次 7.2b）
+
+    /**
+     * 写操作开关打开时 {@code XM_DUBBO_SECRET} 必填（帮会检查是 Dubbo 调用方；缺了拒绝启动，data-ops-spec §4.6.1）。关闭时不要求：
+     * 只读与 dry-run 不调 Dubbo。
+     */
+    static void checkOpsWriteGate(DataProperties props, String dubboSecret) {
+        if (props.ops().enabled()) {
+            DubboCallAuth.requireFromEnvValue(dubboSecret);
+            log.info("运维写操作已开启（xm.data.ops.enabled=true）：回档 / 取消作业可用");
+        } else {
+            log.info("运维写操作未开启（xm.data.ops.enabled=false）：回档执行回 503 ops_disabled，只读与 dry-run 照常");
+        }
+    }
+
+    /**
+     * xm-data 自己的 {@link PlayerStore}（xm-player-store 的自动装配被排除）：时钟严格递增（{@link StrictClock}，
+     * 防 {@code useAffectedRows=true} 下同毫秒无变化写被误判为失去围栏）；与本服务同一数据源、同一事务管理器。
+     */
+    @Bean
+    public PlayerStore playerStore(PlayerMapper mapper, PlatformTransactionManager transactionManager) {
+        return new PlayerStore(mapper, new StrictClock(System::currentTimeMillis), transactionManager);
+    }
+
+    /** 作业心跳与栅栏续约线程（{@code data-ops-fence}；阻塞 JDBC，不是 I/O 线程）。 */
+    @Bean(destroyMethod = "shutdownNow")
+    public ScheduledExecutorService opsFenceScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("data-ops-fence").daemon(true).factory());
+    }
+
+    @Bean
+    public OpsJobRunner opsJobRunner(OpsJobStore jobs, PlatformTransactionManager transactionManager, ObjectMapper json,
+                                     DataMetrics metrics, Clock clock, DataProperties props,
+                                     @Qualifier("opsFenceScheduler") ScheduledExecutorService fence) {
+        checkOpsWriteGate(props, System.getenv(DubboCallAuth.SECRET_ENV));
+        return new OpsJobRunner(jobs, new TransactionTemplate(transactionManager), json, metrics, clock, runnerId(),
+                props.ops().heartbeat(), props.ops().staleAfter(), props.ops().jobTimeout(), fence);
+    }
+
+    @Bean
+    public OpsJobService opsJobService(OpsJobStore jobs, OpsIds opsIds, OpsJobRunner runner,
+                                       PlatformTransactionManager transactionManager, ObjectMapper json, Clock clock) {
+        return new OpsJobService(jobs, opsIds, runner, new TransactionTemplate(transactionManager), json, clock);
+    }
+
+    /**
+     * 离线栅栏（归属夺权）。让出请求走 {@code xm:owner-takeover}，墓碑写 {@code xm:location}（Redis 第一次用到时才连）；
+     * 续约在 {@code data-ops-fence} 线程上每 {@code OWNER_LEASE / 3}（10 s）一次，与 scene 续约同口径。
+     */
+    @Bean
+    public AdminOwnership adminOwnership(PlayerStore playerStore, PlatformTransactionManager transactionManager,
+                                         ObjectProvider<RedissonClient> redis, DataMetrics metrics,
+                                         @Qualifier("opsFenceScheduler") ScheduledExecutorService fence) {
+        AdminOwnership ownership = new AdminOwnership(playerStore, new TransactionTemplate(transactionManager),
+                new RedisTakeoverRequests(redis::getObject),
+                (playerId, epoch) -> new PlayerLocationDirectory(redis.getObject()).removeAsync(playerId, epoch,
+                        AdminOwnership.TOMBSTONE_SEQ),
+                metrics);
+        long renewMs = PlayerStore.OWNER_LEASE.toMillis() / 3;
+        fence.scheduleWithFixedDelay(ownership::renew, renewMs, renewMs, TimeUnit.MILLISECONDS);
+        return ownership;
+    }
+
+    /** 帮会内部查询的 Dubbo 调用方：{@code xm.dubbo.guild-url} 为空 = 没有装配（帮会检查一律 check_failed）。 */
+    @Bean(destroyMethod = "close")
+    public DubboGuildInternalClient guildInternalClient(@Value("${xm.dubbo.guild-url:}") String guildUrl,
+                                                        DataProperties props) {
+        return new DubboGuildInternalClient(guildUrl, props.rollback().guild().callTimeout());
+    }
+
+    @Bean
+    public GuildDivergenceGate guildDivergenceGate(DubboGuildInternalClient client,
+                                                   @Value("${xm.dubbo.guild-url:}") String guildUrl, DataProperties props) {
+        return new GuildDivergenceGate(guildUrl.isBlank() ? null : client, props.rollback().guild().callTimeout());
+    }
+
+    @Bean
+    public RollbackJob.Deps rollbackDeps(PersistedPlayerMapper players, PlayerSnapshotMapper snapshots,
+                                         TransactionLogMapper txlog, TransactionLogQueryService txlogQuery,
+                                         PlayerStore playerStore, PlayerMapper playerMapper, OpsJobStore jobs, OpsIds opsIds,
+                                         AdminOwnership ownership, GuildDivergenceGate guild,
+                                         PlatformTransactionManager transactionManager, ObjectMapper json, Clock clock,
+                                         DataProperties props, DataMetrics metrics) {
+        RollbackWriter writer = new RollbackWriter(playerStore, playerMapper, players, snapshots, txlog, jobs, opsIds,
+                new TransactionTemplate(transactionManager), json, clock);
+        return new RollbackJob.Deps(new RollbackPlanner(players, snapshots), writer, ownership, guild, players, snapshots,
+                txlogQuery, jobs, props, metrics, json);
+    }
+
+    @Bean
+    public RollbackService rollbackService(RollbackJob.Deps deps, OpsJobService jobs, GatewayStore gatewayStore,
+                                           DataProperties props, Clock clock) {
+        return new RollbackService(deps, jobs, gatewayStore, props, clock);
+    }
+
+    @Bean
+    public ZoneSnapshotService zoneSnapshotService(PersistedPlayerMapper players, PlayerSnapshotMapper snapshots,
+                                                   OpsIds opsIds, OpsJobService jobs, GatewayStore gatewayStore,
+                                                   PlatformTransactionManager transactionManager, Clock clock) {
+        return new ZoneSnapshotService(players, snapshots, opsIds, jobs, gatewayStore,
+                new TransactionTemplate(transactionManager), clock);
     }
 }

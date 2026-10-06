@@ -29,6 +29,10 @@ enum TransactionReason {
   // 宝宝洗点 / 改名的金币（mmorpg 记通用消费 TX_CURRENCY_DEDUCT）
   TX_PET_RESET = 1003;
   TX_PET_RENAME = 1004;
+  // 回合制战斗结算的金币（mmorpg 记通用 TX_CURRENCY_ADD、关联号 0；Java 单列原因，关联号 = battle_id，scene-battle-spec D23）
+  TX_BATTLE_REWARD = 1005;
+  // 战斗掉落入包（同 mmorpg TX_ITEM_AWARD；关联号 = battle_id）
+  TX_ITEM_AWARD = 20;
   // 资产通道与补缴用到的原因（数值同 mmorpg TransactionType）
   TX_TRADE = 1;
   TX_MAIL_ATTACHMENT = 2;

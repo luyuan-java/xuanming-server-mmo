@@ -1420,3 +1420,66 @@ switch_resolve 补 `in_battle`、`xm_scene_channel_relocations_total{result=in_b
 19. §13.9：交付清单补 5.2 规格（`beginRemoteSwitch` 闸、`unfreezeInPlace` 补跑锁步骤）、node-spec §7.9 回落、match-spec 的超时与 battle_id 约束；PARITY 改附 D1–D28。
 
 未改动、已核对属实的：§1–§5 其余基线描述与出处；客户端可见帧（144 / 150 / 184 / 23 / 66）及其时机；各在途闸的码与次序；gate 拒绝的位置与 12 个号；宝宝快照与回写口径。
+
+---
+
+## 实现记录（robot 与 dev gather，2026-10-05）
+
+范围：§7.18 dev gather、§13.8 robot `battle-settle`，以及这两项依赖、契约那一步没有落地的最小共享件。scene 侧（`SceneBattleProvider`、冻结 / 闸 / 应用）与 battle 侧发件箱不在这一部分。
+
+**共享件**（形状按 §7.3 与 match-spec 的 `NodeRpcClients<S>` 条目；后到的批次只引用、不重建）
+
+- xm-api：`SceneBattleService`；`xm/api/scene_battle.proto`（同 §7.3）；`DubboGroups.SCENE_BATTLE`，`SCENE_ASSET` 的注释已同步；
+  `battle_control.proto` 追加 `DevGatherMode / DevGatherMember / DevGatherRequest / DevGatherPrepareResult / DevGatherResponse`，并 import `scene_battle.proto` 以引用 `SceneBattleStatus`。
+- xm-api：`com.game.api.rpc.NodeRpcClients<S>`（Q20）。按 (host, port) 缓存编程式引用，实例变了就重建；`retries = 0`；引用在自己的守护线程上建；重连间隔与心跳都是 1 s（同资产通道）。
+  `SceneAssetOpClients` 还**没有**改成它的薄包装，留到与 guild 资产通道同批合入时再改，这次不动 guild 的调用面。测试：`NodeRpcClientsTest`（5 条，真 Triple 回环）。
+- xm-battle：`RoomOrigin.DEV_GATHER`，加 `settles()` / `publishesResult()`。`BattleRoomServiceImpl` 的结算与结果出站改按这两个方法判断：
+  DEV 仍不结算；DEV_GATHER 照常结算、不发结果事件；MATCH 不变。`ResultRoutingTest` 补 2 条。
+- xm-battle 指标：`xm_battle_dev_gather_total{mode, result}`。与 §9 相比多两个取值：`mode=unknown` 用于解析请求体之前就被拒的请求（403、坏请求体）；
+  `result=rejected` 用于 400 和节点没在运行的 503。
+
+**dev gather**（`com.game.battle.admin`：`DevGather` 负责编排，`DevGatherController` 是 HTTP 入口，`DevGatherConfiguration` 是独立装配）
+
+装配：定位用 `SceneAssetLocator`（位置记录只认 `o`，再查 scene 目录），调 scene 用这套装配自己的 `NodeRpcClients<SceneBattleService>`。Dubbo 模型惰性创建，prod 下请求在 403 处就停了，不会建连接。
+
+对 §7.18 表格的细化：
+
+1. **422 的应答体**：422 也带 protobuf `DevGatherResponse`。`failure` 写原因；`prepare_results` 给出每人的 scene 状态和 `PrepareBattleResponse` 字节；`cancelled_player_ids` 列出补发了取消的人。
+   robot 靠它读出 1006 这类业务码。400 / 403 / 503 仍回 text/plain，与 dev/create 相同。
+2. **哪些人要补发取消**：备战成功的人，加上结局不明的人。结局不明指传输失败、`UNSPECIFIED`、应答体解析失败、`HANDLED` 但没有快照或 player_id 不符。
+   以下三种零副作用，不取消：`HANDLED` 带业务拒绝码、`NOT_HERE`、`OVERLOADED`。取消按 player_id 无符号升序，发往当时备战的那个节点。
+3. **建房失败的处理**：结局不明时（超时、异常、admission `UNSPECIFIED`、应答体坏）先发一次幂等的 destroy，再逐人取消。`NOT_ALLOCATABLE` 和业务错误零副作用，直接取消。
+4. **指纹**：全员指纹不一致时不建房，全部取消（同 match）。`CreateBattleRequest.table_fingerprint` 取全员一致的那个值，`created_at_ms` 取 battle 本机时钟，快照按 player_id 升序排。
+5. **时限**：主路径（定位 + 备战 + 建房）整体不超过 10 s；单次 scene 调用 5 s，大于 scene 侧最坏的 4.2 s；建房结果最多等 5 s。
+   补偿取消另有 6 s 预算，免得主路径超时后冻结一直留到备战期限。
+6. **请求形状校验（400）**：mode 合法；battle_id ≠ 0；deadline_ms ≠ 0；成员 1–10 人；player_id 非 0 且不重复；team_index 只能是 0 或 1。
+   `PrepareBattleRequest.battle_node_id` 取本节点的租约号；节点没在运行时回 503。
+7. **cancel-prepare**：定位到持有者就发取消，scene `HANDLED` 回 204。玩家此刻没有持有者节点时回 422：Java 断线即写回，离线玩家没有可以代跑 `CANCEL_OFFLINE` 的节点，dev 接口不代办。
+   定位故障、传输失败、非 `HANDLED` 都回 503。
+
+测试：`DevGatherTest`（18 条，纯编排）、`DevGatherControllerTest`（6 条，真 Tomcat + 真控制面 + 桩房间 + 指标）、`DevGatherControllerProdTest`（1 条）、`BattleMetricsTest` 补 1 条。
+
+**robot `battle-settle`**（xm-robot）
+
+新增 `BattleSettleScenario`；纯函数放在 `BattleSettleChecks`，由 `BattleSettleChecksTest` 覆盖（9 条）。`BattleAdminClient` 加了 `gather / gatherRaw / cancelPrepare`，
+请求与应答都按字段号编解码，`BattleAdminGatherTest`（6 条）用 xm-api 的生成类逐字节钉住字段号。子命令是 `battle-settle`，`--slow` 加跑慢用例，`--expect-dev deny` 只核对 403。
+
+与 §13.8 的出入：
+
+- **没做的步骤**：第 11 步（与 5.2 互斥，要双 scene 切片）和第 12 步（队伍视图，属 team 场景）不在本场景里。
+- **第 4 步 173**：只断言不回 25011。1 级角色没有剩余点，会回 25014，这同样算「照常」。
+- **A、B 不在同一频道**：B 先发 63 换到 A 的 scene_id。
+- **63 会真的换图**：第 7 步「闸已解除」就是一次真换图；第 10 步的判废时刻取 63 第一次成功的时刻。
+- **reaper 等待**：按缺省 30 s 间隔取上界（再加 2 s）等待，实际时延写进检查细节；切片把 `xm.scene.battle.reaper-interval` 调到 2 s 时，实际值远小于上界。
+- **第 9 步的等待**：不用固定的 15 s，而是轮询 dev/issue-ticket，直到房间消失（回 1005），再等 3 s（`--slow` 等 130 s）才登录。
+- **任务 12**：只在 `settlement.defeated_monsters` 里有怪物 1 时才检查；没有就记一条失败并写明 outcome。胜负按基线判 SIDE_A_WIN。
+- **第 13 步指标**：指标名照 §9 写死；scene 指标抓不到时只记观察记录，不判失败。
+- **结尾汇总**：在观察记录里写一行 `BATTLE_SETTLE_OK …` 或 `BATTLE_SETTLE_FAIL step=…`。
+
+**运行证据**（本机单 scene 切片，2026-10-05 13:05，scene 侧这时还没有导出 `SceneBattleService`）
+
+- `battle-settle`：第 1、2 步通过。从第 3 步起 gather 一律 422，原因是 `UNIMPLEMENTED : Invoker for gRPC not found`。
+  这说明 dev gather 已经在真进程里装配起来，链路走通了：经位置记录与目录定位 → `NodeRpcClients` 带调用方 MAC 连到 scene 的 21100 → 按结局不明补发取消 → 422 的 protobuf 体被 robot 解出。
+  第 3–10 步要等 scene 侧落地后再跑。
+- 6.2 的 `battle` 场景 60 / 60 通过，`RoomOrigin` / 出站判定的改动没有回归。
+- xm-battle.log 里有 8 行 ERROR，都是 Dubbo 调用方的 `RpcExceptionFilter` 在记上面那个 UNIMPLEMENTED，scene 导出 `SceneBattleService` 之后就会消失。

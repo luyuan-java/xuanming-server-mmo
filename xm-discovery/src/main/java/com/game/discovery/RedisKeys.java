@@ -399,4 +399,30 @@ public final class RedisKeys {
     public static String loginDeviceSession(String sessionKey) {
         return PREFIX + "login:device-session:" + sessionKey;
     }
+
+    /**
+     * 回合制战斗锁（scene-battle-spec §7.2，D2）：{@code xm:battle:{<player_id>}:lock}，Hash——{@code b} battle_id（无符号十进制）、
+     * {@code n} battle 节点号、{@code s} 阶段 {@code P} / {@code F}、{@code d} 战斗期限毫秒、{@code p} 备战期限毫秒；带 TTL。
+     * 锁与上下文合成一个键，「同生共死」由结构保证。scene 是唯一写者；match / team / guild 经 {@code BattleLockReader} 只读。
+     * 与待结算记录 {@link #battleSettlements} 共用 hash tag，销账 / 取代两段 Lua 在 Cluster 下同槽。
+     */
+    public static String battleLock(long playerId) {
+        return PREFIX + "battle:{" + Long.toUnsignedString(playerId) + "}:lock";
+    }
+
+    /**
+     * 回合制战斗待结算记录（scene-battle-spec §7.2，D13）：{@code xm:battle:{<player_id>}:settlement}，Hash——字段名 = battle_id（无符号十进制），
+     * 值 = 契约 {@code BattleSettlementEvent} 字节；整键 TTL 7 天，每次写刷新。battle 落库，scene 销账时只删字段。
+     */
+    public static String battleSettlements(long playerId) {
+        return PREFIX + "battle:{" + Long.toUnsignedString(playerId) + "}:settlement";
+    }
+
+    /**
+     * 活动局结果的持久副本（scene-battle-spec §7.17）：{@code xm:battle:activity-result:<battle_id>}，String = 契约 {@code BattleResultEvent} 字节，
+     * TTL 7 天；battle 写，消费方（4.6 帮会）消费后删。
+     */
+    public static String battleActivityResult(long battleId) {
+        return PREFIX + "battle:activity-result:" + Long.toUnsignedString(battleId);
+    }
 }

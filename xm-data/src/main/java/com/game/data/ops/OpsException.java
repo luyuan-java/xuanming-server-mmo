@@ -19,6 +19,13 @@ public final class OpsException extends RuntimeException {
     public static final String RESULT_TRUNCATED = "result_truncated";
     public static final String SNAPSHOT_DB_ERROR = "snapshot_db_error";
     public static final String NOT_IMPLEMENTED = "not_implemented";
+    // 批次 7.2b（作业框架、栅栏与回档，§7.7）
+    public static final String OPS_DISABLED = "ops_disabled";
+    public static final String OPS_BUSY = "ops_busy";
+    public static final String JOB_NOT_FOUND = "job_not_found";
+    public static final String ZONE_OPEN = "zone_open";
+    public static final String ZONE_NOT_FOUND = "zone_not_found";
+    public static final String PLAN_TOO_LARGE = "plan_too_large";
 
     private final HttpStatus status;
     private final String code;

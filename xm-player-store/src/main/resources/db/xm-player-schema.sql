@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS account (
     PRIMARY KEY (account)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 
+-- idx_player_zone：整区回档 / 维护前快照按归属区列玩家（xm-data，批次 7.2b；存量库见 db-migrations.md M9）。
 CREATE TABLE IF NOT EXISTS player (
     player_id        BIGINT UNSIGNED NOT NULL,
     account          VARCHAR(64)     NOT NULL,
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS player (
     updated_at       BIGINT          NOT NULL COMMENT 'Unix 毫秒',
     PRIMARY KEY (player_id),
     UNIQUE KEY uk_player_name_key (name_key),
-    KEY idx_player_account (account)
+    KEY idx_player_account (account),
+    KEY idx_player_zone (zone_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 
 -- 玩家在线状态（各玩法的数据），protobuf xm.storage.PlayerState。与 player 行在同一事务里、同一 owner_epoch 围栏下写入：

@@ -1,0 +1,55 @@
+// Java 版内部契约：scene 节点的回合制战斗入口（com.game.api.SceneBattleService，scene-battle-spec §7.3、D1）。
+// 每个 scene 节点在资产 RPC 端口（xm.scene.asset-rpc-port）上与 SceneAssetOpService 一并导出，group scene-battle，register = false；
+// 调用方（battle 的确认 / 结算投递、dev gather，6.4 起还有 match 的备战 / 取消）按 Redis 节点目录直连，引用 retries = 0。
+// 对应基线 Kafka scene-cmd（确认 / 结算）+ gRPC SceneNodeGrpc（备战 / 取消）。只在 Java 版内部使用，不在两版共享的客户端契约里。
+//
+// 本模块的 proto 不 import 依赖里的 proto（xm-api/pom.xml），所以契约消息（PrepareBattleRequest / Response、CancelBattlePrepareRequest、
+// BattleConfirmedEvent、BattleSettlementEvent）按字节嵌入（先例 GatePush.message_content、CreateBattleResult.response）。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+message SceneBattleCall {
+  // 必填：调用方从节点目录读到的 scene 实例；与本进程不符 → NOT_HERE（等价基线 Kafka target_instance_id 过滤）。
+  string target_instance_id = 1;
+  // 冗余，Dubbo 线程上只用于日志。
+  uint64 player_id = 2;
+  // 契约消息字节（按方法：PrepareBattleRequest / CancelBattlePrepareRequest / BattleConfirmedEvent / BattleSettlementEvent）。
+  bytes body = 3;
+  // 结算：0 = 首投；只进日志。
+  uint32 attempt = 4;
+}
+
+enum SceneBattleStatus {
+  // 字段缺失（旧版本 / 损坏）：读方按传输失败处理（字段缺失不能被读成「已处理」）。提供方从不产出这个值。
+  SCENE_BATTLE_STATUS_UNSPECIFIED = 0;
+  // 已在逻辑线程处理；备战的业务结论在 body（PrepareBattleResponse）的 error_message 里。
+  SCENE_BATTLE_HANDLED = 1;
+  // 实例不符，或（结算）玩家不在本节点：调用方下一轮重新解析。
+  SCENE_BATTLE_NOT_HERE = 2;
+  // （结算）玩家在本节点但此刻不可应用（交出冻结、恢复中、金币被拒、读锁失败、账本损坏），零副作用。
+  SCENE_BATTLE_DEFERRED = 3;
+  // 在途超限：保证没进逻辑线程、零副作用。
+  SCENE_BATTLE_OVERLOADED = 4;
+}
+
+enum SettlementDisposition {
+  SETTLEMENT_DISPOSITION_UNSPECIFIED = 0;
+  // 本次应用（未必已落盘）。
+  SETTLEMENT_APPLIED = 1;
+  // 账本命中。
+  SETTLEMENT_ALREADY_APPLIED = 2;
+  // 非法 / 不匹配 / 已作废（已按规则销账或不销账）。
+  SETTLEMENT_DISCARDED = 3;
+}
+
+message SceneBattleReply {
+  SceneBattleStatus status = 1;
+  // 备战：契约 PrepareBattleResponse 的字节；其余方法为空。
+  bytes body = 2;
+  // 结算：处置结论（只计数，销账仍以落盘为准，D16）；其余方法为 UNSPECIFIED。
+  SettlementDisposition settlement = 3;
+}

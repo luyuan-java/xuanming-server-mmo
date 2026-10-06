@@ -14,6 +14,7 @@ import com.game.scene.player.Bag;
 import com.game.scene.player.BagItem;
 import com.game.scene.player.BagType;
 import com.game.scene.player.ItemCatalog.ItemSpec;
+import com.game.scene.world.BattlePolicy;
 import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
@@ -47,8 +48,8 @@ public final class BagFeature implements SceneFeature {
     /** 冻结策略（scene-handoff-spec §5.9）：191 只读；192 GATED，由 {@link BagService} 的冻结闸回 1005。 */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "GetBag", GetBagRequest.class, FreezePolicy.READ_ONLY, this::getBag);
-        r.on(SERVICE, "SortBag", SortBagRequest.class, FreezePolicy.GATED, this::sortBag);
+        r.on(SERVICE, "GetBag", GetBagRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, this::getBag);
+        r.on(SERVICE, "SortBag", SortBagRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, this::sortBag);
     }
 
     private void getBag(PlayerCall call, GetBagRequest request) {
@@ -62,8 +63,13 @@ public final class BagFeature implements SceneFeature {
 
     private void sortBag(PlayerCall call, SortBagRequest request) {
         BagType type = BagType.ofCode(request.getBagType());
-        // 战斗中禁止整理（基线 InBattleComp → 1005）随回合制战斗（6.3）接入；冻结中由 BagService 的闸回 null（1005）
-        Bag.SortResult result = type == null || !type.sortable() ? null : bags.sortByPlayer(call.player(), type);
+        // 战斗中禁止整理（基线 InBattleComp → 1005，snap.cpp:160-172）：类型合法之后、整理之前判（scene-battle-spec §7.13）；
+        // BagService 保持不闸（D48：结算自己扣药会被自己拦住）。冻结中由 BagService 的闸回 null（1005）
+        boolean inBattle = type != null && type.sortable() && call.player().inBattle();
+        if (inBattle) {
+            bags.battleGateRejected();
+        }
+        Bag.SortResult result = type == null || !type.sortable() || inBattle ? null : bags.sortByPlayer(call.player(), type);
         if (result == null) {
             call.reply(SortBagResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build());
             return;

@@ -6,6 +6,7 @@ import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
+import com.game.robot.scenario.BattleSettleScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CurrencyScenario;
@@ -22,6 +23,7 @@ import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.RateLimitScenario;
 import com.game.robot.scenario.ReconnectScenario;
+import com.game.robot.scenario.RollbackScenario;
 import com.game.robot.scenario.SkillScenario;
 import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TeamScenario;
@@ -83,6 +85,11 @@ public record RobotOptions(
         GUILD_ECONOMY,
         /** 聚宝斋只读面（196 / 197 / 198 / 200 + 播种）。 */
         TRADE,
+        /**
+         * GM 回档（批次 7.2b，data-ops-spec §12.6）：经 xm-data 运维接口（{@code --data-url}，运维令牌同 audit）离线回档到手工快照、
+         * 同幂等键重提、在线 reject 被拒、在线 kick 收到 23 {2017} 后回档成功、安全快照与回档流水。需要 xm-data 打开写开关（本机切片缺省打开）。
+         */
+        ROLLBACK,
         /** 跨节点换场景与归属交接（批次 5.2）；子命令写作 {@code cross-node}，需要两个 scene 节点。 */
         CROSS_NODE,
         /**
@@ -101,7 +108,13 @@ public record RobotOptions(
         /** battle 节点（批次 6.2）：经 xm-battle dev 接口建房 → 大厅 177 / 143 → 直连握手 → 提交 / 拉状态 / 挂机 / 收尾 / 观战。 */
         BATTLE,
         /** battle 直连面的负面用例（批次 6.2）；子命令写作 {@code battle-edge}。 */
-        BATTLE_EDGE
+        BATTLE_EDGE,
+        /**
+         * scene 侧战斗冻结与结算应用（批次 6.3，scene-battle-spec §13.8）；子命令写作 {@code battle-settle}。经 xm-battle 的 dev gather 真实备战 / 建房，
+         * 核对在途闸、重连 144、结算落地（金币 / 背包 / 气血 / 宝宝 / 任务击杀）恰好一次、离线结算、确认后销毁的判废；{@code --slow} 另跑备战到期与
+         * 越过重投窗口的离线结算。
+         */
+        BATTLE_SETTLE
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -289,11 +302,13 @@ public record RobotOptions(
             case GUILD -> GuildScenario.accountName(prefix, runTag, "a");
             case GUILD_ECONOMY -> GuildEconomyScenario.accountName(prefix, runTag, "a");
             case TRADE -> TradeScenario.accountName(prefix, runTag, "a");
+            case ROLLBACK -> RollbackScenario.accountName(prefix, runTag);
             case CROSS_NODE -> CrossNodeScenario.accountName(prefix, runTag, "3");
             case MIRROR -> MirrorScenario.accountName(prefix, runTag, "c");
             case DUNGEON -> DungeonScenario.accountName(prefix, runTag, "b");
             case BATTLE -> BattleScenario.accountName(prefix, runTag, "a");
             case BATTLE_EDGE -> BattleEdgeScenario.accountName(prefix, runTag, "a");
+            case BATTLE_SETTLE -> BattleSettleScenario.accountName(prefix, runTag, "a");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -310,7 +325,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|cross-node|mirror|dungeon|battle|battle-edge|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -319,6 +334,8 @@ public record RobotOptions(
                 + "跨 60 秒冷却切方案 → 重登原样 → 洗点扣金币（约 70 秒）；--expect-gm deny 只核对 GM 设等级被拒\n");
         out.append("  audit     资产流水：GM 加 / 扣（含被拒的）→ 经 xm-data 运维查询核对恰好成功的几笔落库、顺序与字段；"
                 + "需要 Kafka、xm-data 与运维令牌（XM_ADMIN_TOKEN 或 run/xm-admin-token）\n");
+        out.append("  rollback  GM 回档（7.2b）：加钻 → 下线拍手工快照 → 再加 → 离线回档到快照、同幂等键重提 → 在线 reject 被拒 / kick 收 23 {2017} 后回档 → "
+                + "重登核对余额、安全快照与回档流水；需要 xm-data 写开关（本机切片缺省打开）、xm-guild 与运维令牌\n");
         out.append("  guard     资产防护：经 xm-data 运维接口全服封禁绑钻 → GM 加绑钻被拒 27005 → 解封恢复；"
                 + "一次加钻石 100001 → scene 获取异常告警恰好 +1；需要 Redis、xm-data 与运维令牌\n");
         out.append("  bag       背包（191/192）：四个包的空包布局、非法 bag_type 回 1005、不可整理的包回 1005、整理幂等、"
@@ -381,6 +398,12 @@ public record RobotOptions(
                 + "签名翻转 / 大写 / payload 被改 → invalid ticket signature；过期票 → ticket rejected: expired；已验证后 157 → 信封 1005、"
                 + "1025 B → 1010、1 秒 4 条 140 → 1008、50 个非法包断开、再握手回原 battle_id、合法请求后跟坏帧先应答再断开；"
                 + "--slow 另跑「连上不握手 10 s 被关」\n");
+        out.append("  battle-settle scene 侧战斗冻结与结算（A / B 两个新号；需要切片带 xm-battle 与 scene 的 SceneBattleService、dev 运行模式与运维令牌）："
+                + "大厅发战斗上行回 23 {1003} → dev gather 只备战核对快照、B 收 A 速度 0 的 66 → 在途闸 3023 / 25011 / 26008 / 1005 / 7004 / 7002、"
+                + "134 静默丢、再备战 1006 → 取消解闸 → dev gather 建房、重登收 144、补签直连挂机打完 → 大厅 184 先于 150 且与直连逐字段相同 → "
+                + "金币 / 背包 / 气血 / 宝宝 / 任务 12 恰好落地一次、锁已放 → 重登不重发 → 离线结算登录后到账一次 → 确认后销毁按期限 + 10 s 判废 → 指标；"
+                + "--slow 另跑备战到期（约 70 s）、离线结算越过重投窗口（130 s）；--expect-dev deny 只核对 gather 403；"
+                + "读 --table-dir 的 World / Skill / Item 表，scene 指标取 --scene-metrics-url\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -407,7 +430,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / cross-node / mirror / dungeon / battle / battle-edge）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle）");
         }
     }
 

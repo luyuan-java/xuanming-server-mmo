@@ -6,6 +6,7 @@ import com.game.proto.ReleaseSkillRequest;
 import com.game.proto.SkillInterruptedS2C;
 import com.game.proto.SkillUsedS2C;
 import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.BattleGate;
 import com.game.scene.metrics.SceneMetrics.SkillResult;
 import com.game.scene.player.PlayerSkillState;
 import com.game.scene.player.PlayerSkillState.Cast;
@@ -71,8 +72,20 @@ public final class SkillService {
             log.debug("放技能被拒：技能不存在或未拥有 player={} skill_table_id={}", caster.playerId(), skillTableId);
             return reject(SkillResult.UNKNOWN_SKILL, SkillRules.INVALID_TABLE_ID);
         }
-        // 施法者在回合制战斗中 → 7004（随 6.3 接入）
-        int target = SkillRules.checkTarget(def, request.getTargetId(), entity -> world.playerByEntity(entity) != null);
+        if (caster.inBattle()) {
+            // 施法者在回合制战斗中 → 7004（查表之后、目标之前，基线 skill.cpp:219-229；scene-battle-spec §7.13）
+            metrics.battleGateReject(BattleGate.SKILL);
+            return reject(SkillResult.CASTER_IN_BATTLE, SkillRules.CASTER_IN_BATTLE);
+        }
+        int target = SkillRules.checkTarget(def, request.getTargetId(), entity -> world.playerByEntity(entity) != null,
+                entity -> {
+                    ScenePlayer targetPlayer = world.playerByEntity(entity);
+                    return targetPlayer != null && targetPlayer.inBattle();
+                });
+        if (target == SkillRules.TARGET_IN_BATTLE) {
+            metrics.battleGateReject(BattleGate.SKILL);
+            return reject(SkillResult.TARGET_IN_BATTLE, target);
+        }
         if (target != OK) {
             return reject(SkillResult.INVALID_TARGET, target);
         }

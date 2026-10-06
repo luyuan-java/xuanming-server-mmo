@@ -2,6 +2,10 @@ package com.game.data.testing;
 
 import com.game.data.ops.OpsJobStore;
 import com.game.data.ops.OpsTables;
+import com.game.data.ops.fence.StrictClock;
+import com.game.player.store.PlayerMapper;
+import com.game.player.store.PlayerStore;
+import java.util.function.LongSupplier;
 import com.game.data.store.PersistedPlayerMapper;
 import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
@@ -46,6 +50,8 @@ public final class DataSqlFixture implements AutoCloseable {
     public final TransactionLogMapper txlog;
     public final PlayerSnapshotMapper snapshots;
     public final PersistedPlayerMapper players;
+    /** xm-player-store 的生产 Mapper（夺权 / 续约 / 释放 / 带围栏写 / 加锁读；批次 7.2b）。 */
+    public final PlayerMapper playerMapper;
     public final PbMysql ops;
 
     private DataSqlFixture(String database, DataSource dataSource, PlatformTransactionManager transactionManager,
@@ -56,7 +62,16 @@ public final class DataSqlFixture implements AutoCloseable {
         this.txlog = session.getMapper(TransactionLogMapper.class);
         this.snapshots = session.getMapper(PlayerSnapshotMapper.class);
         this.players = session.getMapper(PersistedPlayerMapper.class);
+        this.playerMapper = session.getMapper(PlayerMapper.class);
         this.ops = ops;
+    }
+
+    /**
+     * 与生产同口径的 {@link PlayerStore}（严格递增时钟、同一事务管理器）。不经 Spring 代理：xm-data 的调用方一律在自己的事务模板里调它
+     * （夺权、写档），{@code @Transactional} 不生效也不影响原子性。
+     */
+    public PlayerStore playerStore(LongSupplier clockMs) {
+        return new PlayerStore(playerMapper, new StrictClock(clockMs), transactionManager);
     }
 
     public static boolean mysql() {
@@ -95,6 +110,7 @@ public final class DataSqlFixture implements AutoCloseable {
         configuration.addMapper(TransactionLogMapper.class);
         configuration.addMapper(PlayerSnapshotMapper.class);
         configuration.addMapper(PersistedPlayerMapper.class);
+        configuration.addMapper(PlayerMapper.class);
         factory.setConfiguration(configuration);
         SqlSessionFactory sessions = factory.getObject();
         return new DataSqlFixture(database, ds, new DataSourceTransactionManager(ds), new SqlSessionTemplate(sessions), ops);

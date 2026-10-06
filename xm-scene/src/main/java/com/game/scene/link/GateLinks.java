@@ -94,6 +94,11 @@ public final class GateLinks implements ClientSink {
         return byLinkId.containsKey(linkId);
     }
 
+    /** 已登记的链路（回合制战斗快照的路由取它的 gate 节点号与实例 id，scene-battle-spec §7.11）；不在登记表为 null。逻辑线程上调用。 */
+    public Link link(long linkId) {
+        return byLinkId.get(linkId);
+    }
+
     public int size() {
         return byLinkId.size();
     }

@@ -18,7 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 资产通道的跨进程提供方（Dubbo Triple，{@link SceneAssetRpcServer} 按节点导出，{@code register = false}；guild-economy-spec §4.6 / E1）：
+ * 资产通道的跨进程提供方（Dubbo Triple，{@link com.game.scene.rpc.SceneRpcServer} 按节点导出，{@code register = false}；guild-economy-spec §4.6 / E1）：
  * 把调用转给进程内入口 {@link AssetOpEndpoint}（投递到场景逻辑线程），结局经异步 future 带回。基线 C++ 的 gRPC sync 线程把请求
  * {@code runInLoop} 后 {@code future.get()} 同步等、每条在途请求占一条 poller（{@code scene_node_service.cpp:344-396}），
  * 进程默认 8 条 poller 隐式给了在途上限；Java 是异步提供方，没有这层天然闸，所以：

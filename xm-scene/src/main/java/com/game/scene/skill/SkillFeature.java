@@ -4,6 +4,7 @@ import static com.game.scene.world.SceneMessageIds.tip;
 
 import com.game.proto.ReleaseSkillRequest;
 import com.game.proto.ReleaseSkillResponse;
+import com.game.scene.world.BattlePolicy;
 import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.SceneFeature;
 
@@ -30,7 +31,7 @@ public final class SkillFeature implements SceneFeature {
      */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "ReleaseSkill", ReleaseSkillRequest.class, FreezePolicy.ALLOW, (call, request) -> call.reply(
+        r.on(SERVICE, "ReleaseSkill", ReleaseSkillRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, (call, request) -> call.reply(
                 ReleaseSkillResponse.newBuilder()
                         .setErrorMessage(tip(skills.release(call.world(), call.player(), request)))
                         .build()));
