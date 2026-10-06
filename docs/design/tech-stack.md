@@ -10,12 +10,12 @@ star 数为 2026-09-29 GitHub API 实测（CI、本地编排、依赖镜像、�
 |---|---|---|---|---|
 | 应用框架 / 装配 | Spring Boot 3.5.16 | 81.5K | — | Dubbo 3.3.6 只支持 Boot 3.x，因此不上 Boot 4 |
 | 网络（gate / scene / 节点链路） | Netty（Boot 管理的 4.1.x） | 35.1K | Vert.x (14.7K) | gate 客户端面与节点间长连接都在 Netty 上 |
-| 服务间 RPC | Apache Dubbo 3.3.6（Triple 协议） | 41.6K | grpc-java (12.1K) | 接口参数与返回值都用 protobuf 消息，Triple 直接走 protobuf 序列化 |
+| 服务间 RPC | Apache Dubbo 3.3.6（Triple 协议） | 41.6K | grpc-java (12.1K) | 接口参数与返回值都用 protobuf 消息，Triple 直接走 protobuf 序列化。xm-data 自批次 7.2b 起是 `GuildInternalService`（group guild）的调用方（回档的帮会资产检查）：编程式引用（xm-api 的 `IsolatedDubboModule`，同 xm-scene / xm-guild 的资产通道客户端），只依赖 dubbo 核心包、不引入 dubbo-spring-boot-starter，只读与 dry-run 的进程不起 Dubbo；只支持直连 `xm.dubbo.guild-url`，nacos 发现未接。不新增第三方库 |
 | 注册中心 / 配置中心 | Nacos | 33.4K | ZooKeeper (12.8K)、jetcd (1.2K) | 只做 Dubbo 注册中心；`local` profile 用 Dubbo 直连，不需要 Nacos 服务端（见 architecture.md §6） |
 | 消息队列 | Apache Kafka，官方客户端 `kafka-clients`（版本由 Spring Boot BOM 管理，当前 3.9.2；本机 broker 4.3.1 KRaft） | 33.9K | RocketMQ (22.6K) | 资产审计管线（architecture.md §4.5）。不用 spring-kafka 的监听容器 / KafkaTemplate：线程归属与「落库成功才提交位点」要显式掌握 |
 | Redis 客户端 | Redisson 3.50.0（核心包） | 24.4K | Jedis (12.4K)、Lettuce (5.8K) | 不用 redisson-spring-boot-starter：它会带进 Lettuce |
 | SQL 映射 | MyBatis（mybatis-spring-boot-starter 3.0.5） | 20.4K | MyBatis-Plus (17.5K)、Hibernate | |
-| proto → MySQL 表映射 | xm-pbmysql（用户自有 proto2mysql 的 Java 实现，对齐 Go v0.2.0） | — | MyBatis 手写 DDL / Mapper | 用户自有库，不受 star 门槛约束；行就是 protobuf message 的表（好友 / 邮件 / 帮会等社交服务，表选项写在 proto 上，与 mmorpg `proto/db` 的表消息同一套写法）由它生成建表 DDL（与 Go 版逐字节相同）、只扩不缩地同步结构、按消息做 CRUD。纯 JDBC、不依赖 Spring，事务由调用方传入的 `Connection` 掌握；`player` / `player_state` 仍走 MyBatis。xm-data 的运维作业表（`ops_job` 等，批次 7.2a）也用它；已有的 `transaction_log` / `player_snapshot` 仍是 MyBatis 手写表。用法与边界见 architecture.md §7 |
+| proto → MySQL 表映射 | xm-pbmysql（用户自有 proto2mysql 的 Java 实现，对齐 Go v0.2.0） | — | MyBatis 手写 DDL / Mapper | 用户自有库，不受 star 门槛约束；行就是 protobuf message 的表（好友 / 邮件 / 帮会等社交服务，表选项写在 proto 上，与 mmorpg `proto/db` 的表消息同一套写法）由它生成建表 DDL（与 Go 版逐字节相同）、只扩不缩地同步结构、按消息做 CRUD。纯 JDBC、不依赖 Spring，事务由调用方传入的 `Connection` 掌握；`player` / `player_state` 仍走 MyBatis。xm-data 的运维作业表（`ops_job` 等，批次 7.2a）也用它；批次 7.2b 起 `ops_active`（全集群单飞槽）/ `ops_job_player`（逐玩家明细）启用、`ops_job` 加 `cancel_requested`（启动时只扩不缩地补列），与 MyBatis 的 Mapper（玩家归属 / 快照 / 流水）共用同一条事务连接；已有的 `transaction_log` / `player_snapshot` 仍是 MyBatis 手写表。用法与边界见 architecture.md §7 |
 | 连接池 | Druid（druid-spring-boot-3-starter 1.2.28） | 28.2K | HikariCP (21.2K) | 同类取 star 最高 |
 | 限流 / 熔断 | Sentinel | 23.1K | resilience4j (10.8K) | 进程内限流 / 熔断，后续批次（gateway 的开服限流见下一行） |
 | 开服限流（gateway 多副本共享的令牌桶） | Redis Lua 令牌桶（经 Redisson `RScript`，不加依赖） | — | Bucket4j（2.6K，基线用它 + Redis）、Sentinel 集群流控 | Bucket4j 不到 2 万 star；Sentinel 的集群流控要另起 token server，按 IP 的热点参数限流是进程内统计，多副本下不是一个桶。一段 Lua 原子地「按流逝时间补充、取一个」就是分布式令牌桶（与 Bucket4j 的贪心补充同算法），冷却用 `SET NX PX`。见 PARITY「开服限流」行 |

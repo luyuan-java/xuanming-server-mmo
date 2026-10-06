@@ -111,7 +111,7 @@
 |---|---|---|
 | **7.4a** 一致性巡检 | 框架（运行器、单飞、报告、SchemaGuard、zone 集合）、a 组 11 项检查、接口、`tools/ConsistencyCheck.java`、定时、指标 | 无（只读）。可以先于 7.2b |
 | **7.4b** 导出与存盘压测 | b 组 16 项检查；xm-scene 新增计数 `xm_scene_owner_leases_lost_total`（§2.8 C2 的判据）；`/admin/consistency/players`；导出包与按区列玩家；`tools/PlayerData.java export / zone`；存储层 soak / IT；scene 存储故障注入；`xm-robot data-stress`；本机混沌脚本；CI 混沌 job | 7.4a。交出变体依赖 5.2；按区列玩家最好有 7.2b 的 `idx_player_zone`，没有就按主键全扫，并只在 dev 使用 |
-| **7.4c** 导入 | `POST /admin/player-imports`、`insertImportedPlayer`、GM_IMPORT 快照、`TX_GM_IMPORT`、`RestoreComposer`（与回档共用）、robot `player-data` | 7.2b（`AdminOwnership`、作业框架、`RollbackExecutor`）；`TX_GM_IMPORT` 的取值排在 6.3 的 `TX_BATTLE_REWARD = 1005` 之后（§3.7） |
+| **7.4c** 导入 | `POST /admin/player-imports`、`insertImportedPlayer`、GM_IMPORT 快照、`TX_GM_IMPORT`、`RestoreComposer`（与回档共用）、robot `player-data` | 7.2b（`AdminOwnership`、作业框架、`RollbackJob` / `RollbackWriter` / `RestoreBuilder`——7.2b 实际交付的类名，data-ops-spec §7.1、§13.1 第 12 条；没有 `RollbackExecutor` 这个类）；`TX_GM_IMPORT` 的取值排在 6.3 的 `TX_BATTLE_REWARD = 1005` 之后（§3.7） |
 | **7.4d** 压测机器人 | `xm-robot stress`：档位、动作、`StreamingInbox`、统计行、闸门 | 无，可以最先做 |
 | **7.4e** LLM 策略（可选） | `LlmPolicy implements ActionPolicy` | 7.4d |
 
@@ -561,10 +561,10 @@ currency-crash-window（`inventory/tools.md:470-480`，基线 `tools/scripts/cur
 4. **资产分歧检查**：
    - 目标原先已存在：data-ops-spec §4.6 的三道检查照跑，`since = 快照 time_ms − 余量`，有分歧时缺省 REJECTED，`acceptDivergence` + reason 才放行。
    - 本作业新建的目标：跳过，在 ACCEPTED 事件里记 `created_by_import`。
-5. **单玩家写事务**（与 data-ops-spec §4.8 同形，共用 `RollbackExecutor` 的写路径）：
+5. **单玩家写事务**（与 data-ops-spec §4.8 同形，写路径照 7.2b 的 `RollbackWriter`——安全快照原因、流水原因与明细结局不同，共用到什么粒度由 7.4c 实现时定）：
    1. `selectOwnerForUpdate`，确认持有 (E', 未释放)。
    2. 安全快照：cause `SNAPSHOT_PRE_GM_EDIT = 1002`，note `job:<id> import`。
-   3. 按 `RestoreComposer` 拼出新状态：FULL 或 SECTIONS，规则同 data-ops-spec §4.5——`assets` 不可拆，`mission` 必须与 `assets` 同选，`currency.blocked_types` 保留当前值。`RestoreComposer` 是从 `RollbackExecutor` 拆出的纯函数，回档与导入只此一份。
+   3. 按 `RestoreComposer` 拼出新状态：FULL 或 SECTIONS，规则同 data-ops-spec §4.5——`assets` 不可拆，`mission` 必须与 `assets` 同选，`currency.blocked_types` 保留当前值。`RestoreComposer` 指的就是 7.2b 已交付的纯函数 `com.game.data.rollback.RestoreBuilder`（不碰库；7.2b 把本稿设想的 `RollbackExecutor` 拆成了 `RollbackJob` + `RollbackWriter` + `RestoreBuilder`），回档与导入只此一份。注意 7.2b 评审后多了一条规则：SECTIONS 选了 `assets` 而两边顶层未知字段不同 → `unknown_sections`、不写（data-ops-spec §4.5）。
    4. 带围栏覆盖写 `saveStateHeld`：`player` 行只恢复 level / `scene_config_id` / 坐标。包里的 `owner_*`、`account`、`name`、`name_key`、`zone_id` 一律忽略。
    5. 流水，原因用新增的 `TX_GM_IMPORT = 1006`。Java 独有段（1001 起）在 `transaction_log.proto:26-31` 用到 1004，**1005 已由 6.3 规格占给 `TX_BATTLE_REWARD`**（`scene-battle-spec.md:531`、D23），所以取 1006；哪个批次先落地都不改对方的值，落地时再核对一次空号。按 data-ops-spec §4.10 的行形状，每个变化的币种、每个变化的物品实例各一行。
    6. 明细 `UPDATE ops_job_player SET outcome='IMPORTED' …`，必须恰好 1 行。
@@ -705,7 +705,7 @@ currency-crash-window（`inventory/tools.md:470-480`，基线 `tools/scripts/cur
 | 模块 | 新增 | 说明 |
 |---|---|---|
 | xm-data | `com.game.data.consistency`：`ConsistencyCheck`（接口：`id()`、`subBatch()`、`deep()`、`run(CheckContext) → CheckResult`）、`CheckContext`（zone 集合、dbNow、预算、复核器、样本器）、`ConsistencyRunner`、`ConsistencyScheduler`、`ConsistencyLock`、`ConsistencyReportStore`、`LiveZones`、`SchemaGuard`、`DbClock`、`ReportMarkdown`；`checks/` 下每项一个类 | 依赖已有的 xm-gateway-store（`zone_config`）、xm-player-store（`nameKey`、`PersistedAssetLedger`、`PlayerState`）、xm-discovery（`RedisKeys`、presence），**不依赖** xm-friend / xm-guild / xm-trade（胖 jar）；`assetop.seq_watermark` 读 `guild_player_op_seq` 同样走按列名的只读 SQL |
-| xm-data | `com.game.data.player`：`PlayerExportService`、`ExportBundle`、`RelatedTables`、`PlayerListService`、`PlayerImportService`（受理 / 校验 / 计划）；`com.game.data.rollback.RestoreComposer`（从 `RollbackExecutor` 拆出，回档与导入共用） | `PersistedPlayerMapper` 增加 `findFull`、`listByZone`；新增只读 `ConsistencyMapper` |
+| xm-data | `com.game.data.player`：`PlayerExportService`、`ExportBundle`、`RelatedTables`、`PlayerListService`、`PlayerImportService`（受理 / 校验 / 计划）；`com.game.data.rollback.RestoreComposer`（即 7.2b 已有的纯函数 `RestoreBuilder`，回档与导入共用；7.2b 没有 `RollbackExecutor`，写事务在 `RollbackWriter`） | `PersistedPlayerMapper` 增加 `findFull`、`listByZone`；新增只读 `ConsistencyMapper` |
 | xm-data | proto `xm.data.PlayerExportPayload`；`ops_tables.proto` 增加 `OPS_JOB_IMPORT = 7` | 只增不改 |
 | xm-data admin | `ConsistencyAdminController`、`PlayerExportController`（挂在 `/admin/players` 前缀下）、`PlayerImportController`；`AdminAuthFilter.opOf`（`AdminAuthFilter.java:83`）增加前缀 `consistency`、`player_imports` | 路径里的 id 不进标签 |
 | xm-audit | `SnapshotCause += SNAPSHOT_GM_IMPORT = 1003`；`TransactionReason += TX_GM_IMPORT = 1006`（1005 归 6.3 的 `TX_BATTLE_REWARD`） | 只增不改；改完 `clean install`（AGENTS §4） |

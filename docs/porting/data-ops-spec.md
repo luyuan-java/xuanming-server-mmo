@@ -317,8 +317,12 @@ ALTER TABLE player_snapshot
   - 应答带 `snapshotId`、`timeMs`（= 内容时刻）、`ingestedAt`、`savedEpoch`、`ownerReleased`、`online`（查在线目录）。
     `online=true` 时明示「可能落后内存至多一个存盘周期」；需要此刻精确状态的，先 kick 让 scene 写回（§4.2）或等玩家下线。
   - 玩家不存在 404；号源无效 503；插入失败 503，什么也没写。
-- **`POST /admin/zone-snapshots`** `{zones | allZones, note}`（7.2b，作业）：按 `player.zone_id` 分批（每批 500）读、批量插入 PRE_MAINTENANCE 快照，不需要栅栏。
+- **`POST /admin/zone-snapshots`** `{zones | allZones, note, reason}`（7.2b，作业）：按 `player.zone_id` 分批（每批 500）读、批量插入 PRE_MAINTENANCE 快照，不需要栅栏。
   不挂在 `/admin/zones/...` 下，免得与区服目录的路由（`ZoneAdminController.java:42`、`:79-114`）和指标归类混在一起。
+  实现（`ZoneSnapshotService`，作业 kind `ZONE_SNAPSHOT`）：必带 `Idempotency-Key` 与 reason，`zones` 非空与 `allZones=true` 二选一，**不需要写开关**（不改玩家数据），回 202；
+  它是作业只为统一审计与单飞（与回档共用 `ops_active`，不并发）。每批一个事务；快照语义同手工快照（`time_ms` = 内容时刻、`owner_epoch` = `saved_epoch`、操作人、
+  `note` 末尾带 `job:<id>`）；在线玩家照拍已落盘状态，不夺权、不踢人。号源中途失效 → 当批回滚、之前的批保留，作业 FAILED `id_unavailable`；批与批之间查取消与时限；
+  一个人也没有 → SUCCEEDED `zone_empty`。摘要给逐区计数 `byZone` 与 `total`。
 
 ### 3.5 详情与列表（对应 97 / 115）
 
@@ -392,13 +396,13 @@ ALTER TABLE player_snapshot
 
 | 步骤 | 做法 | 为什么成立 |
 |---|---|---|
-| 取得 | `PlayerStore.claimOwnership(p)`；SQL 条件 `owner_released = 1 OR owner_lease_until < now`（5.2 工作区 `PlayerMapper.java:53-58`） | 夺权本身是原子判定，没有「先查在线、再动手」的 TOCTOU。在线、交出在途（5.2 持有 E+1）、回合制战斗（必在线）都夺不到，基线的冻结闸 / 战斗闸（`player_rollback_handler.cpp:57-82`）自动满足 |
-| 在线玩家 | `ifOnline=reject`（缺省）：`Held` → 结果 `player_online`。`ifOnline=kick`：向 `xm:owner-takeover` 发 `OwnerTakeover{p, E}`，持有 E 的 scene 带围栏写回、释放、推 23 `{2017}` 后断开（`SceneWorld.onTakeoverRequested`，5.2 工作区 `:1460`）；xm-data 退避重试夺权（50 ms 起翻倍、封顶 800 ms，每次重发让出请求），`claim-wait`（缺省 35 s）内夺到就持有，否则记 `player_busy` | 走现成顶号通路，不新增 scene 接口、不改链路协议。35 s > 租约 30 s：覆盖 5.2 交出提交后、目标节点进场前 E+1 无人持有、让出请求落空的最坏情况（`scene-handoff-spec.md:956-957`）。超过仍夺不到，说明有活着的写者在续约 |
+| 取得 | `PlayerStore.claimOwnership(p)`，在 xm-data 自己的事务模板里调（夺权与读回 epoch 同一事务，不依赖 `@Transactional` 代理）；SQL 条件 `owner_released = 1 OR owner_lease_until < now`（5.2 工作区 `PlayerMapper.java:53-58`） | 夺权本身是原子判定，没有「先查在线、再动手」的 TOCTOU。在线、交出在途（5.2 持有 E+1）都夺不到，基线的冻结闸（`player_rollback_handler.cpp:57-67`）自动满足。**基线的战斗闸（`:68-80`）不由夺权覆盖**：本稿初版以「回合制战斗必在线、所以夺不到」为前提，批次 6.3 落地后不成立——Java 断线即写回并释放、战斗在 xm-battle 继续，`ifOnline=reject` 也能夺到「战斗锁仍在」的离线玩家；`kick` 走的顶号通路不看是否在战斗，在线战斗中的玩家同样会被踢下线。裁决（2026-10-05，批次 6.3）：夺权成功之后另查战斗锁，命中的玩家不写、明细 `in_battle`（§13.3） |
+| 在线玩家 | `ifOnline=reject`（缺省）：`Held` → 结果 `player_online`。`ifOnline=kick`：向 `xm:owner-takeover` 发 `OwnerTakeover{p, E}`，持有 E 的 scene 带围栏写回、释放、推 23 `{2017}` 后断开（`SceneWorld.onTakeoverRequested`，5.2 工作区 `:1460`）；xm-data 退避重试夺权（50 ms 起翻倍、封顶 800 ms，每次重发让出请求），`claim-wait`（缺省 35 s）内夺到就持有，否则记 `player_busy`。**分两轮**（`RollbackJob`）：第一轮对全部目标不踢地夺一次（离线的直接夺到），把在线的一起发让出请求；第二轮逐个带等待夺，**全轮共用一个截止时刻**（让出请求发出时起算一个 `claim-wait`），截止之后每人只再试一次（照样重发让出请求）。两轮循环里逐人之间查作业时限与取消标志（取消标志在库里，节流为至多每 1 s 读一次） | 走现成顶号通路，不新增 scene 接口、不改链路协议。35 s > 租约 30 s：覆盖 5.2 交出提交后、目标节点进场前 E+1 无人持有、让出请求落空的最坏情况（`scene-handoff-spec.md:956-957`）。超过仍夺不到，说明有活着的写者在续约。两轮 + 共用截止：scene 并行写回释放，总等待约为一次写回而不是人数 × 写回；持有者不响应让出时也不会变成「在线人数 × claim-wait」，第一轮已夺到的离线玩家不被长时间扣着（期间登录回 2005） |
 | 期间的登录 | login 撞上 Held → 发让出请求（xm-data 不订阅这个频道）→ 3 s 后回 **2005**（`EnterGameHandler.java:275`、`:309-318`） | 唯一的客户端可见面（白名单账号同样） |
-| 持有 | 单线程 `data-ops-fence` 每 10 s 批量 `renewOwnerLeases`；续不上的玩家记 `fence_lost`，之后不再对他写 | 与 scene 续约同口径（`architecture.md:658-660`）；写入带围栏，迟到的一笔只会被拒 |
+| 持有 | 单线程 `data-ops-fence` 每 10 s 批量 `renewOwnerLeases`；续不上的玩家记 `fence_lost`，之后不再对他写，释放时也不写墓碑、不调释放（归属已不在我们手里） | 与 scene 续约同口径（`architecture.md:658-660`）；写入带围栏，迟到的一笔只会被拒 |
 | 写入 | 每人一个事务（§4.8），开头 `selectOwnerForUpdate` 确认 (E', 未释放)，再 `saveStateHeld` | 旧写者碰不到 E'；我们也盖不过别人 |
 | 位置记录 | 释放前写登出墓碑 `PlayerLocationDirectory.removeAsync(p, E', 1)`（`PlayerLocationDirectory.java:150`）；失败只告警，TTL 60 s 兜底 | 被接管的 scene 不改位置记录（`architecture.md:674-677`），会留下指向旧实例的 `o`。位置记录按 (epoch, 序号) 只收更新的写，E' 更大，一定生效。等于把「持有归属的 scene 是唯一写者」推广为「归属持有者是唯一写者」，要写进 `architecture.md` §7 |
-| 释放 | 写后复查与 RESULT 之后：墓碑 → `releaseOwnership(p, E')`。释放失败就等租约过期（≤ 30 s） | 同基线「栅栏持到 RESULT 之后」（`rollback_logic.go:137-139`） |
+| 释放 | 写后复查与 RESULT 之后：墓碑 → `releaseOwnership(p, E')`。释放失败就等租约过期（≤ 30 s）。作业收尾 `releaseAll` 先并发发出全部墓碑、一起等至多 2 s，再逐个释放（Redis 不可用时不至于人数 × 超时）；写之前就出局的玩家（快照没了、现档损坏、`unknown_sections`）当场单独释放 | 同基线「栅栏持到 RESULT 之后」（`rollback_logic.go:137-139`） |
 | 崩溃 | 租约 30 s 后自然失效；每人的写是单事务（不会半写）；清扫器把作业标 INTERRUPTED（§7.4） | 基线没有这个兜底 |
 
 **竞态**：scene 释放与 xm-data 夺权之间，玩家可能抢先重登夺走下一个 epoch。xm-data 再撞 Held → 再踢一次 → 重试，整体受 `claim-wait` 约束。
@@ -428,13 +432,17 @@ ALTER TABLE player_snapshot
   "reason": "...", "dryRun": false }
 ```
 
-- `scope=players`：`players` 1–100 个、去重；`snapshotId` 与 `targetTimeMs` **二选一**，`snapshotId` 只允许单个玩家。
-- `scope=zones`：`zones` 非空或 `allZones=true`（取区服目录全部行、升序）；每个 zone 的 `zone_config.manual_status` 必须是 MAINTENANCE 或 CLOSED
-  （`xm-gateway-schema.sql:8`），否则 409 `zone_open`；`ifOnline` 强制为 kick（Q7）。
+- `scope=players`：`players` 1–100 个、去重、不含 0；`snapshotId` 与 `targetTimeMs` **二选一**，`snapshotId` 只允许单个玩家，且快照必须属于该玩家（否则 404 `snapshot_not_found`）。
+- `scope=zones`：`zones` 非空与 `allZones=true` 二选一（后者取区服目录全部行、升序，目录为空 → 404 `zone_not_found`；执行时点名的区不在目录里同样 404）；只能按 `targetTimeMs`；
+  每个 zone 的 `zone_config.manual_status` 必须是 MAINTENANCE 或 CLOSED（`xm-gateway-schema.sql:8`），否则 409 `zone_open`；`ifOnline` 强制为 kick
+  （Q7；显式传 `reject` 回 400）；玩家总数超过 `max-players-per-job` 回 422 `plan_too_large`（§4.9）。
 - `targetTimeMs` ≤ 现在 − `min-target-age`（缺省 5 min）：快照经 Kafka 落库有延迟。
-- `sections` 为空 = FULL；非空时按 §4.5 的组合规则校验，不合法回 400（修 H4）。
+- **不给 `sections` = FULL；给了空列表 → 400**（防误回全量；与 D5、T-R2 同一口径）。非空时按 §4.5 的组合规则校验，不合法回 400（修 H4）。
 - `reason` 一律必填（基线只在放行时要求，`rollback_logic.go:189-194`）；操作人一律取 `X-Xm-Operator`，不在请求体里自报。
-- 必带 `Idempotency-Key`；`xm.data.ops.enabled=false` 回 503 `ops_disabled`。
+- 必带 `Idempotency-Key`；`xm.data.ops.enabled=false` 回 503 `ops_disabled`。幂等指纹取规范化后的请求（玩家号 / 区号去重升序，`allZones` 记作 `all`、不含展开后的区号）。
+- **dry-run 的范围**（同步、只读、不夺权，不要幂等键与写开关）：逐人给出选中的快照元数据；`scope=players` 另给是否在线、按**已落盘**现档预演的恢复内容
+  与账本差集视图（`clean` / `rows` / `unprovable[{stream, reason}]`）。**不做帮会检查**（要沉降，只在执行时做）。`scope=zones` 的 dry-run 不校验维护态，只列出各区当前状态；
+  先数人，超过 `max-players-per-job` 回 422；逐人只列快照元数据（至多 200 人），不预演恢复内容、不算账本差集。执行以夺权之后的现档为准（§9.2 第 11 条）。
 
 ### 4.4 快照选取：计划时钉住，执行时不重选
 
@@ -452,17 +460,22 @@ ALTER TABLE player_snapshot
 - `player_state` **整份换成快照内容**，包括新版本写下、本版本不认识的字段。快照之后新增的段被清掉（修 H5：整份替换，不是逐字段 SET）。
 - **例外**：`currency.blocked_types`（GM 封禁获取的币种）保留当前值。它是处罚状态，不是资产，回档不应解除处罚（D6）。
 
-**SECTIONS**（以当前状态为底，只把选中的段换成快照里的；当前状态里不认识的字段保留）：
+**SECTIONS**（以当前状态为底，只把选中的段换成快照里的，快照没有这段就清掉；当前状态里不认识的字段保留——但选了 `assets` 时见表后的 `unknown_sections` 规则）：
 
 | 段名 | 内容 | 组合规则 |
 |---|---|---|
 | `level` | player.level | 自由；属性点按新等级在进场时收敛（`PARITY.md:64`） |
 | `position` | player.scene_config_id + 坐标 | 自由（常用于卡位救援） |
 | `facing` / `attribute` / `vitals` | 对应段 | 自由 |
-| `assets` | currency（不含 blocked_types，含 debts）+ bag + pets + asset_ledger | **不可拆分**：资产通道账本记录的是货币与物品的结局，必须与资产同记录、同一次写（`player_state.proto:32-34`）。只恢复货币、保留当前账本，已应用 seq 对应的扣款会消失；只恢复账本，帮会会重投、重复记账。所以不开放 `currency` / `bag` / `pets` 单独的段名，写了回 400 并提示用 `assets` |
+| `assets` | **按描述符计算**：`PlayerState` 里除 facing / attribute / mission / vitals 以外的全部字段（`RollbackSection.ASSET_FIELDS`）。现在是 currency（不含 blocked_types，含 debts）+ bag + pets + asset_ledger + battle_ledger（= 9，批次 6.3 的战斗结算账本）；以后新加的段缺省归资产组，非资产的新段要显式排除并给自己的段名 | **不可拆分**：资产通道账本记录的是货币与物品的结局，必须与资产同记录、同一次写（`player_state.proto:32-34`）。只恢复货币、保留当前账本，已应用 seq 对应的扣款会消失；只恢复账本，帮会会重投、重复记账。所以不开放 `currency` / `bag` / `pets` 单独的段名，写了回 400 并提示用 `assets` |
 | `mission` | mission 段 | **必须与 `assets` 同选**：单独恢复任务会让快照之后已领过的奖励（在资产里）可以再领一次，即复制资产；反过来「只回资产」最多让玩家少拿奖励，可补偿 |
 
 欠款随 `assets` 恢复：已抵扣额与余额是一体的，只回其一会对不上账。
+
+**`unknown_sections`**（13.2 第 9 条，已回写）：SECTIONS 选了 `assets`，而快照与现档在 `PlayerState` 顶层有本版本不认识、且两边不同的字段
+（滚动升级时较新的 scene 写下的新段，可能是新账本）→ 这名玩家不写，明细 `unknown_sections`，dry-run 同样标出并列出字段号。资产组按本版本的描述符计算，
+不认识的段既判断不了是否账本、也不会随资产一起恢复——资产回到快照而账本留在之后会重复记账或扣款消失，所以 fail-closed：先升级 xm-data，或改用 FULL
+（整份替换，未知字段随快照）。两边未知字段相同、或不动资产组的 SECTIONS，照旧保留现档的未知字段。
 
 ### 4.6 资产分歧检查（三道，都要过）
 
@@ -470,14 +483,15 @@ ALTER TABLE player_snapshot
 
 | 项 | 基线 | Java |
 |---|---|---|
-| 接缝 | `GuildDivergenceChecker`，nil = 一律拒（`servicecontext.go:94-99`） | Dubbo `GuildInternalService`（group `guild`，`@DubboReference(check=false, url=${xm.dubbo.guild-url})`，调用方 MAC `XM_DUBBO_SECRET`）；没装配 = 拒，`ops.enabled=true` 而缺 `XM_DUBBO_SECRET` 拒绝启动 |
-| since | 快照秒×1000 − 余量，钳到 ≥ 1 | 快照 `time_ms`（§3.2 的内容时刻）− 余量，钳到 ≥ 1，不再取整到秒（D9） |
-| 余量 / 预算 | 300 s，[5 s, 1 h]；检查 120 s、上限 1 h | 相同，做成配置项 |
+| 接缝 | `GuildDivergenceChecker`，nil = 一律拒（`servicecontext.go:94-99`） | Dubbo `GuildInternalService`（group `guild`）。**编程式引用**（`DubboGuildInternalClient`，xm-api 的 `IsolatedDubboModule`，同 xm-scene / xm-guild 的资产通道客户端；`retries = 0`、`check = false`），不引入 dubbo-spring-boot-starter：只读与 dry-run 的进程不起 Dubbo，引用在第一次检查时才建（在作业线程上）。**只支持直连** `xm.dubbo.guild-url`，为空 = 没装配 = 一律 `check_failed`；nacos 注册中心发现未接（部署批次再定）。调用方 MAC `XM_DUBBO_SECRET` 由 xm-api 的 SPI 过滤器加上；`ops.enabled=true` 而缺 `XM_DUBBO_SECRET` 拒绝启动 |
+| since | 快照秒×1000 − 余量，钳到 ≥ 1 | 快照 `time_ms`（§3.2 的内容时刻）− 余量，钳到 ≥ 1，不再取整到秒（D9）。每人各自的起点；一块（≤ 100 人）用块内最早的起点问，再按每人自己的起点过滤（`updated_ms > since_p`） |
+| 余量 / 预算 | 300 s，[5 s, 1 h]；检查 120 s、上限 1 h | 相同，做成配置项；另有单次 Dubbo 调用上限 `call-timeout`（缺省 10 s，再受剩余预算约束） |
 | 分块 / 分页 / 上限 / 样本 | 100 人 / 500 行 / 10000 行 / 20 条 | 相同（`guild_internal.proto(xm):32-43`） |
 | 结果处理 | gRPC status + 解析 message 前缀拿 cutoff | 只认 `OK`；其它结果码、future 异常完成、超预算都算 `check_failed`，放行无效；`RETENTION_REJECTED` 用 `cutoff_ms` 钳位重查一次，钳不到的玩家记不可证明（`GuildInternalService.java:12-14`）；游标不前进或返回块外玩家算 `check_failed`（`guild-economy-spec.md:770`） |
-| 沉降 / 复查 | 30 s 常量 / 10 s | 配置项，缺省 30 s / 10 s（Q6）；复查用同一组 since，持有归属期间做 |
-
-**4.6.2 账本差集**（Java 独有，D8；`LedgerDiff`，放 xm-player-store `asset` 包，与 `PersistedAssetLedger` / `AssetLedgerRules` 共用规则）：
+| 沉降 / 复查 | 30 s 常量 / 10 s | 配置项，缺省 30 s / 10 s（Q6）；复查用同一组 since，持有归属期间做。复查问不到帮会时不改变作业状态（按写入结果定 SUCCEEDED / PARTIAL），结果码记 `post_write_unverified` 并打 ERROR、转人工核对（§7.7） |
+**4.6.2 账本差集**（Java 独有，D8；`com.game.data.snapshot.LedgerDiff`——**在 xm-data**，7.2a 起就在这里，没有挪进 xm-player-store 的 `asset` 包；
+判定规则全部复用 xm-player-store 的 `PersistedAssetLedger` / `AssetLedgerRules`，与 scene 在线账本、帮会离线读结局是同一份判定代码）。只在回档会动资产组时算
+（FULL，或 SECTIONS 选了 `assets`）；只比 `asset_ledger`（资产通道账本），不比 `battle_ledger`（理由见 §4.12）：
 
 对每个目标玩家比较「快照里的 `asset_ledger`」S 与「夺权之后已落盘的 `asset_ledger`」C（kick 时 scene 已写回最新状态）：
 - 同一条流、同一纪元：C 窗口内「已应用」而 S 里「未应用」的 seq → **分歧行** `(stream, seq)`。
@@ -485,32 +499,51 @@ ALTER TABLE player_snapshot
 - 立即可得，不用等沉降；对交易流（3 / 4）同样有效，4.8 交易写侧落地后自动覆盖（基线没有交易闸，H13）。
 - 它是帮会检查的**保守超集**：快照之后已应用、但帮会还没终结的指令其实是安全的（账本随资产回退后会被重投、相对快照恰好一次），也会被列出；带原因放行即可。
   反过来，帮会检查兜住 seq 已滑出窗口的部分与帮会侧的事实（对齐基线语义），所以两者都要过。
-- 不可证明的玩家同时意味着回档后该流的下一个 seq 可能超出 1024 位窗口，scene 会回 UNKNOWN、帮会侧转人工（`architecture.md:337`）；计划应答逐流列出水位回退量。
+- 不可证明的玩家同时意味着回档后该流的下一个 seq 可能超出 1024 位窗口，scene 会回 UNKNOWN、帮会侧转人工（`architecture.md:337`）。dry-run 应答的 `ledger` 视图给 `clean`、分歧行数 `rows` 与逐流的不可证明原因
+  `unprovable[{stream, reason}]`（原因文本里带水位差，例如「当前水位越过快照窗口上沿（差 N）」）；**结构化的逐流水位回退量字段没有做**，整区 dry-run 也不算账本差集
+  （§4.3）——留给 7.2c。执行时的 CHECK 事件与作业摘要给分歧行数、不可证明人数与样本（至多 20 条 `(player, stream, epoch, seq)`）。
 
 **4.6.3 回收逆转检查**（Java 独有，D8；7.2c 起生效）：目标玩家在快照时刻之后有 TX_BATCH_RECALL(19) / TX_CLAWBACK(17) 扣减流水（`idx_txlog_from` + 原因过滤），
 说明回档会把已回收的资产还回去 → 缺省拒绝，记 `recall_reversal`；`acceptRecallReversal=true` 时放行，每一条写进 ACCEPTED 事件。
+**7.2b 已接线**（`RollbackJob`：逐人查快照 `time_ms` 之后原因 17 / 19、扣减方是他的流水），但这两个原因的写入方随 7.2c，所以 7.2c 之前恒为干净。
+
+**三道检查内联在 `RollbackJob.run` 里，不抽 `AssetDivergenceChecker` 接口**（lead 2026-10-05 裁决，§13.1 第 11 条）：三道的输入、时机与裁决各不相同
+（账本差集立即、帮会要沉降与写后复查、回收逆转查流水），抽成同一个接口没有第二个使用方。4.8 交易托管落地时若需要新的检查，再按那时的形状决定。
 
 **裁决**：帮会检查 `check_failed` → 作业 FAILED，放行无效；有帮会分歧 / 账本分歧 / 不可证明 → 缺省 REJECTED，`acceptDivergence=true`（reason 必填）放行；
-有回收逆转 → 缺省 REJECTED，`acceptRecallReversal=true` 放行。放行先提交 ACCEPTED 事件（写不进零写入），再逐行写 ERROR 日志，两者都在第一笔写之前。
+有回收逆转 → 缺省 REJECTED，`acceptRecallReversal=true` 放行。放行先提交 ACCEPTED 事件（写不进零写入，作业 FAILED `snapshot_db_error`），再逐行写 ERROR 日志，两者都在第一笔写之前。
+被拒时的结果码：帮会有分歧行或不可证明 → `rollback_guild_divergence`，否则（只有账本差集的分歧 / 不可证明）→ `ledger_divergence`。
 
 ### 4.7 流程（单人 / 多人）
 
 ```
 运维 ─POST /admin/rollbacks─▶ 受理（Tomcat 线程）：校验 → 幂等键 → 占单飞槽 + 插 ops_job + STARTED 事件（一个事务；失败 503，零变更）→ 202 {jobId}
-OpsJobRunner（data-ops 线程）：
+OpsJobRunner（data-ops 线程；开始执行先在一个事务里刷新心跳并 QUEUED → RUNNING，不成立就一步也不执行，§7.4）→ RollbackJob：
  1 计划（只读）：逐人选快照并钉进 ops_job_player（PLANNED）；没有快照的分类（§4.9）；超 max-players-per-job → REJECTED plan_too_large
- 2 夺权（§4.2）：Claimed → 持有；Held + reject → player_online；Held + kick → 让出、等待；超时 → player_busy；NotFound → player_not_found
-   （单人 / 多人：夺不到的玩家只记结果，其余继续；整区：见 §4.9）
- 3 续约开始（data-ops-fence 每 10 s）
- 4 账本差集（立即）→ 沉降 settle（缺省 30 s）→ 帮会检查 → 回收逆转检查 → 裁决；需要时 ACCEPTED 事件 + ERROR 日志
- 5 逐人写事务（§4.8），按 player_id 升序
+ 2 夺权（§4.2，两轮）：Claimed → 持有；Held + reject → player_online；Held + kick → 让出、等待；超时 → player_busy；NotFound → player_not_found；访问库出错 → failed
+   （单人 / 多人：夺不到的玩家只记结果，其余继续，一个也没夺到 → REJECTED；整区：见 §4.9）
+ 2b 查战斗锁（批次 6.3 追加，§13.3）：对已夺到的玩家批量查战斗锁，命中 → in_battle、不写；读失败 fail-closed
+ 3 续约（data-ops-fence 每 10 s，夺到即纳入）
+ 4 账本差集（立即；同时把钉住的快照已被删的记 snapshot_gone、快照损坏或 SECTIONS 时现档损坏的记 state_invalid、未知字段不同的记 unknown_sections，
+     这些玩家当场释放）→ 沉降 settle（缺省 30 s）→ 帮会检查 → 回收逆转检查 → 裁决；需要时 ACCEPTED 事件 + ERROR 日志
+ 5 逐人写事务（§4.8），按 player_id 升序；连续 3 人写失败或号源失效即停，剩下的记 not_executed
  6 等 recheck-delay（10 s）→ 写后复查（只在至少一人写成功时做，同基线 writeAttempted；持有归属期间）
-     发现新 op_id → 作业 DIVERGED_AFTER_WRITE（紧急告警，不自动撤销）
- 7 RESULT 事件（独立事务，30 s 上限，失败重试，不随任何请求取消）
- 8 逐人：位置墓碑 → releaseOwnership；释放单飞槽
+     发现新 op_id → 作业 DIVERGED_AFTER_WRITE（紧急告警，不自动撤销）；问不到帮会 → 结果码 post_write_unverified（作业状态按写入结果定）
+ 7 RESULT 事件 + 终态作业行（执行线程自己的一个事务，失败重试至多 30 s，不随任何请求取消；写不进就不让槽、停心跳，交给清扫器）
+ 8 逐人：位置墓碑 → releaseOwnership（RESULT 之后）；让出单飞槽
 ```
 
-取消：`POST /admin/ops-jobs/{id}/cancel` 只在步骤 5 之前有效（每个阶段边界检查标志），已夺权的全部释放，作业 CANCELLED。
+过程事件：PLANNED（计划摘要 + 前 100 个目标）→ CLAIMED → CHECK → [ACCEPTED] → WRITE → [RECHECK] → RESULT；除 ACCEPTED 与 RESULT 外都是尽力而为（写不进只告警）。
+
+**取消**：`POST /admin/ops-jobs/{id}/cancel` 只在步骤 5 之前有效：计划之后、夺权循环里（逐人之间，至多每 1 s 读一次库）、夺权之后、沉降之后、裁决之后各查一次标志，
+已夺权的全部释放、零写入，作业 CANCELLED。已进入写阶段的作业照常做完。
+
+**作业时限**（`job-timeout`）：夺权循环里、沉降之后、放行（ACCEPTED）之前各查一次，超时即全部释放、零写入、FAILED `job_timeout`
+（沉降之后已超时就不再问帮会；检查做完才超时的不写 ACCEPTED）；
+写阶段超时写完当前玩家后停，剩下的记 `not_executed`：一个也没写成 → FAILED `job_timeout`，写成了一部分 → PARTIAL `job_timeout`（摘要带 `timedOut`）。
+
+**作业终态**（按写入结果定）：全部写成 SUCCEEDED；写成一部分 PARTIAL；一个没写而有人写失败 → FAILED `snapshot_db_error`；一个没写、也不是失败或超时 → REJECTED，
+结果码取第一个没写成的明细结局（如 `player_online`）。整区里没有快照的玩家只报告、不算失败。
 
 ### 4.8 一个玩家的写事务
 
@@ -537,8 +570,13 @@ COMMIT;
 - **xm-data 是 `transaction_log` 唯一的写者**（`xm-data-schema.sql:1-2`），直写自己的行与 Kafka 消费路径的 ODKU 幂等互不影响；号不同源就不会撞。
 - **事务边界**：由 xm-data 的服务方法开启；`PlayerStore` 的 `@Transactional` 方法按 REQUIRED 加入；pbmysql 表（`ops_job_player`）用
   `DataSourceUtils.getConnection(dataSource)` 取 Spring 事务绑定的同一个连接（§7.5）。
-- **现档损坏**（`player_state` 解析失败）：FULL 回档正是修复手段，所以允许，但账本差集记「不可证明」（要 `acceptDivergence`），`blocked_types` 无法保留时取快照值并写进明细。
-  SECTIONS 需要以现档为底，现档损坏时该玩家 `state_invalid`、不写。
+- **现档损坏**（`player_state` 解析失败）：FULL 回档正是修复手段，所以允许，但账本差集记「不可证明」（要 `acceptDivergence`），`blocked_types` 无法保留时取快照值并写进明细
+  （`currentStateInvalid`）；前后余额无从得知，这名玩家**不写回档流水**（明细 `txlogSkipped`）。SECTIONS 需要以现档为底，现档损坏时该玩家 `state_invalid`、不写。
+  快照本身解析失败同样 `state_invalid`。
+- **实现**（`RollbackWriter.write`，一个 `TransactionTemplate` 事务）：恢复内容由纯函数 `RestoreBuilder.build(快照, 现档, sections)` 算出；安全快照经
+  `PlayerSnapshotMapper.insertDirect`、流水经 `TransactionLogMapper.insertDirectAll`（普通 INSERT，撞主键即回滚，不是消费路径的 ODKU）；安全快照号与流水号在事务里从
+  `OpsIds` 取，号源失效 → 回滚，`id_unavailable`。返回 RESTORED 之外的结局（`fence_lost` / `snapshot_gone` / `state_invalid` / `unknown_sections` / `id_unavailable`）
+  都没有写任何东西；`saveStateHeld` 影响 0 行、安全快照或明细不是恰好 1 行、流水行数不符都抛异常整体回滚。
 
 ### 4.9 整区与多区（对应 100 / 101）
 
@@ -547,12 +585,17 @@ COMMIT;
 - **没有快照的玩家只报告、从不删除**（R-D，`zone_data_rollback.md:74-90`），按 Java 有权威的 `player.created_at`（`xm-player-schema.sql:28`）分两类：
   `created_after_target`（建于 T 之后）与 `no_snapshot`（建于 T 之前却没有快照）。基线拿不到创建时间，只能笼统报候选（`rollback_logic.go:1039-1041`）。
   目标与孤儿都为空 → `zone_empty`。
-- **夺权全有或全无**：先给全部目标夺权（强制 kick）；任何一人在 `claim-wait` 内夺不到 → 全部释放、零写入，作业 REJECTED `zone_not_quiescent`（带前 100 个 id 与总数）。
+- **夺权全有或全无**：先给全部目标夺权（强制 kick，两轮，§4.2）；两轮都夺完才裁决，任何一人夺不到 → 全部释放、零写入，作业 REJECTED `zone_not_quiescent`
+  （摘要带前 100 个玩家号 `unclaimedPlayers`、总数 `unclaimedCount` 与按结局的计数）。夺权时访问库出错则立即按 `zone_not_quiescent` 停下。
   对应基线「整份计划做完才写第一个玩家」（R4）；部分玩家被排除在整区回档之外会让玩家之间的交互（交易、帮会）错位。
-- **一次合并的资产检查**：帮会检查合并做一次（同一玩家出现在多个 zone 时取最早快照时刻，`rollback_logic.go:1205-1222`）；账本差集逐人算；任一项拒绝即谁也不写。
-- **执行**：按 player_id 升序；单人失败计入名单继续；库级故障（取不到连接、连续失败）就停，剩下的记 `not_executed`。
-- **规模上限** `max-players-per-job`（缺省 10000）：超出回 422 `plan_too_large`，不自动拆批（拆批会破坏 R4）。
-- RESULT 一个事件、payload 带逐 zone 计数（基线逐 zone 写 RESULT 行，是它审计表的形状所致）。
+- **一次合并的资产检查**：帮会检查合并做一次（Java 的目标按 `player.zone_id` 取，一名玩家只属于一个区，不会重复出现；基线同一玩家出现在多个 zone 时取最早快照时刻，
+  `rollback_logic.go:1205-1222`）；账本差集逐人算；任一项拒绝即谁也不写。
+- **执行**：按 player_id 升序；单人失败计入名单继续；**连续 3 人写失败或号源失效**就停，剩下的记 `not_executed`。
+- **规模上限** `max-players-per-job`（缺省 10000）：超出回 422 `plan_too_large`，不自动拆批（拆批会破坏 R4）。受理时先数人（`countInZones`，走 `idx_player_zone`），
+  dry-run 同样先数人再计划；作业体里计划之后再核一次（并发增长的兜底，超了作业 REJECTED `plan_too_large`）。
+- **dry-run**：不校验维护态，只列出各区当前状态与逐人选中的快照（§4.3）。
+- RESULT 一个事件。摘要的 `plan` 给总目标数、已计划数、按结局的未计划计数（`no_snapshot` / `created_after_target` 等）与快照所在区和归属区不同的玩家；`outcomes` 给逐结局计数。
+  **逐 zone 计数没有做**（基线逐 zone 写 RESULT 行，是它审计表的形状所致）——留给 7.2c。
 
 ### 4.10 回档流水（D11）
 
@@ -571,8 +614,15 @@ COMMIT;
   已终结的由帮会检查拦下。
 - **帮会离线读账本（E8，`guild-economy-spec.md:545-555`）**：栅栏期间帮会循环可能读到还没回档的旧账本、据此终结一条指令，这正是写后复查要抓的「检查之后才终结的行」；
   读到已回档的账本则 seq 未见，按 I7「读到未见绝不判中止」不会误终结。
-- **6.3 战斗结算 / 4.8 交易托管**：落地前回档只有帮会一道跨服务资产闸 + 账本差集；两者落地时必须各自实现一个 `AssetDivergenceChecker`
-  并作为它们自己的验收项（Q13）。基线的「战斗中拒绝」由夺权天然覆盖（战斗中玩家在线）。
+- **6.3 战斗结算**（lead 2026-10-05 裁决，取代本稿初版「6.3 落地时必须实现一个 `AssetDivergenceChecker`」的要求；Q13）：
+  - **不需要单独的分歧检查器，也不建 `AssetDivergenceChecker` 接口**。战斗结算账本 `battle_ledger = 9` 按描述符自动归入资产组（§4.5），随 `assets` / FULL 整段回退。
+    依据 `scene-battle-spec.md` §4.6 的 S-11：账本退回旧值、待结算记录（pending，在 Redis，不参与回档）还在，未销账的局回档后由待结算记录重投、
+    在回退后的状态上再应用一次，相对快照恰好一次；已销账的局，奖励随回档一起消失，这正是回档的语义。列出「现档有而快照没有的 battle_id」只会命中前一种安全情形，
+    缺省拒绝只增加噪音、不增加保护。
+  - **基线的「战斗中拒绝」不由夺权覆盖**（本稿初版的前提「战斗中玩家必在线」已不成立，§4.2）：改为夺权成功之后、账本差集之前，对已夺到的玩家批量查战斗锁
+    （xm-discovery `BattleLockReader.existsAll`），锁在或读失败（fail-closed）的玩家不写，明细 `in_battle`——对应基线回档对战斗中玩家回 1005
+    （`player_rollback_handler.cpp:68-80`；`scene-battle-spec.md` §7.13 第 5 条的「7.2 钩子」）。设计见 §13.3，代码随批次 6.3 提交。
+- **4.8 交易托管**：账本差集对交易流（3 / 4）同样有效，交易写侧落地后自动覆盖（§4.6.2）；是否还要额外的检查由 4.8 的规格另定，本稿不预留接口。
 - **在线周期存盘 / 接管守卫**：被踢的实例已移除，迟到的在线存盘带旧 epoch 被拒（`PlayerMapper.java:76-82`）；scene 分区后残留的旧实例下次接管时发现库已变，以库为准
   （`architecture.md:355-356`），不会盖掉回档结果。
 - **缓存**：Java 没有 Redis 玩家数据缓存层，不需要失效任何东西；在线状态由 gate 维护，踢线时已删除。
@@ -755,43 +805,61 @@ COMMIT;
 
 **xm-data 新包**（领域对象 + XxxService，不用 ECS 命名）：
 - `com.game.data.query`：流水查询、物品追溯（`TransactionLogQueryService`）。
-- `com.game.data.snapshot`：保留现有消费代码；新增 `SnapshotAdminService`、`StateDiff`（结构化差异）、`SnapshotWriter`（直写）。
-- `com.game.data.ops`：`OpsJobStore`（pbmysql）、`OpsJobRunner`、`OpsJobSweeper`、`IdempotencyKeys`、`OpsIds`（`SCENE_GUID` 租约 + 雪花）。
-- `com.game.data.ops.fence`：`AdminOwnership`（夺权 / 让出 / 续约 / 墓碑 / 释放），只调 `PlayerStore`、`PlayerLocationDirectory` 与让出发布器。
-- `com.game.data.rollback`：`RollbackPlanner`、`RollbackExecutor`、`GuildDivergenceGate`；接口 `AssetDivergenceChecker`（帮会、账本差集、回收逆转是三个实现；6.3 / 4.8 各加一个）。
+- `com.game.data.snapshot`：保留现有消费代码；新增 `SnapshotAdminService`（手工快照直写、详情）、`SnapshotDiffService` + `StateDiff`（结构化差异）、`StateJson`、
+  `SnapshotCauses`、`LedgerDiff`（账本差集，§4.6.2）、`ZoneSnapshotService`（整区维护前快照，7.2b）。初稿设想的独立 `SnapshotWriter` 没有单列，直写在两个服务里。
+- `com.game.data.ops`（类名按 7.2b 的实际实现；初稿列的 `OpsJobSweeper` / `IdempotencyKeys` 没有单列成类）：`OpsJobStore`（pbmysql）、`OpsJobService`
+  （受理、幂等重放 `replay`、查询、取消）、`OpsJobRunner`（`data-ops` 执行、心跳 `beat`、清扫 `sweep`、RESULT；嵌套 `JobBody` / `JobResult` / `JobAbortedException`）、
+  `JobContext`（事件、检查点、可中断等待、时限、取消标志）、`OpsRequests`（幂等键、reason、无符号号码、请求指纹）、`OpsException`、`OpsTables`、
+  `OpsIds`（`SCENE_GUID` 租约 + 雪花）。
+- `com.game.data.ops.fence`：`AdminOwnership`（夺权 / 让出 / 续约 / 墓碑 / 释放），只调 `PlayerStore`、位置墓碑与让出发布器两个函数式接缝；
+  `RedisTakeoverRequests`（让出请求发布方）；`StrictClock`（严格递增毫秒，§7.5）。
+- `com.game.data.rollback`（初稿列的 `RollbackExecutor` 实际拆成 `RollbackJob` + `RollbackWriter`）：`RollbackRequest`（§4.3 校验与规范化）、`RollbackSection`（段名规则）、
+  `RollbackService`（受理与 dry-run）、`RollbackPlanner`（选源与分类）、`RollbackJob`（§4.7 作业体，三道资产分歧检查内联在这里）、`RestoreBuilder`（§4.5 恢复内容，纯函数）、
+  `RollbackWriter`（§4.8 单人写事务）、`GuildDivergenceGate`（帮会检查，接缝是其嵌套接口 `Client`）、`DubboGuildInternalClient`。**没有 `AssetDivergenceChecker` 接口**
+  （lead 2026-10-05 裁决不建，§4.6.3、§4.12）。
 - `com.game.data.recall`：`RecallPlanner`、`RecallExecutor`、`IngestCompleteness`。
 - `com.game.data.admin`：新控制器 `RollbackAdminController`、`RecallAdminController`、`OpsJobAdminController`、`PlayerOpsAdminController`（差异 / 欠款）、`ItemAdminController`。
 - `com.game.data.tools.AuditFallbackReplay`：兜底日志回灌 CLI（§2.4）。
 
 **xm-player-store**：
-- `com.game.player.store.edit.PersistedStateEditor`（只删不增：扣货币、删实例 / 减堆叠）与 `DebtRules`；`com.game.player.store.asset.LedgerDiff`（§4.6.2）。
-- **不新增写 SQL**：夺权、带围栏写、释放、续约、加锁读全用现成方法（`selectOwnerForUpdate` 随 5.2）。只加一个只读的「player 行 + player_state 原字节 + updated_at」读取方法。
+- `com.game.player.store.edit.PersistedStateEditor`（只删不增：扣货币、删实例 / 减堆叠）与 `DebtRules`（7.2c）。`LedgerDiff` **没有**放进这里的 `asset` 包，
+  仍在 xm-data 的 `com.game.data.snapshot`（7.2a 起；只复用本模块的 `AssetLedgerRules` / `PersistedAssetLedger`）。
+- **不新增写 SQL**：夺权、带围栏写、释放、续约、加锁读全用现成方法（`selectOwnerForUpdate` 随 5.2）。只读的「player 行 + player_state 原字节 + updated_at」读取放在 xm-data
+  自己的 `PersistedPlayerMapper`（`find` / `findBrief` / `listInZone` / `countInZones`），不动 xm-player-store 的 Mapper。7.2b 对本模块只改了建表脚本（`idx_player_zone`）。
 
-**xm-discovery**：把 xm-login 的 `RedisOwnerTakeovers`（`xm-login/.../ownership/RedisOwnerTakeovers.java`）的发布部分挪成共用件，login 与 xm-data 都用它（频道 `RedisKeys.java:34-38`）。
+**xm-discovery**：初稿打算把 xm-login 的 `RedisOwnerTakeovers`（`xm-login/.../ownership/RedisOwnerTakeovers.java`）的发布部分挪成共用件。**7.2b 没有挪**：xm-data 内实现
+`com.game.data.ops.fence.RedisTakeoverRequests`，频道（`RedisKeys.ownerTakeoverTopic()`）与消息（`xm.api.OwnerTakeover`）都取自共用定义，发布尽力而为、不阻塞、不抛异常；
+挪进 xm-discovery 另行安排（只是搬家）。
 
-**xm-data 新依赖**：xm-player-store、xm-pbmysql、dubbo-spring-boot-starter（只作消费端）、protobuf-java-util。都是仓库内模块或 tech-stack 已登记的选型（Dubbo 41.6K、
-protobuf；`tech-stack.md:13`、`:18`），**不新增第三方库**；tech-stack 只需登记「xm-data 引入 Dubbo 消费端」与 pbmysql 的新用途。Redis 在启用写操作时立即连接
-（让出请求、位置墓碑、号段租约）；现在是「第一次用到时才连」（`application.yaml:48-51`）。
+**xm-data 新依赖**：xm-player-store、xm-pbmysql、`org.apache.dubbo:dubbo`（核心包，编程式引用，**不是** dubbo-spring-boot-starter；§4.6.1）、protobuf-java-util。都是仓库内模块或
+tech-stack 已登记的选型（Dubbo 41.6K、protobuf；`tech-stack.md:13`、`:18`），**不新增第三方库**；tech-stack 只需登记「xm-data 是 `GuildInternalService` 的 Dubbo 调用方」与 pbmysql 的新用途。
+**Redis 的连接时机**（按实现，取代初稿「启用写操作时立即连接」）：`RedissonClient` 是懒加载 bean，由发号器 `OpsIds`（`SmartLifecycle`）在启动后的 `data-ops-ids` 线程上后台申领
+`SCENE_GUID` 租约时连上，连不上每 10 s 重试——与 `ops.enabled` 无关，不同步等待、不 fail-fast（Redis 不可用不挡启动与审计消费）。让出请求与位置墓碑经
+`ObjectProvider::getObject` 取同一个客户端；Redis 不可用时发号无效 → 写接口回 503 `id_unavailable`，让出请求发不出 → 夺不到记 `player_busy`，墓碑失败只告警。
 
 ### 7.2 配置项
 
 | 键 | 缺省 | 说明 |
 |---|---|---|
 | `xm.data.ops.enabled` | false | 改玩家数据的写操作总开关；开启时 `XM_DUBBO_SECRET` 必填，缺了拒绝启动。本机切片脚本设 true |
-| `xm.data.ops.claim-wait` | 35 s | 夺权最长等待（> 租约 30 s，§4.2） |
+| `xm.data.ops.claim-wait` | 35 s | 夺权最长等待（> 租约 30 s，§4.2）；kick 第二轮全轮共用一个 |
 | `xm.data.ops.max-players-per-job` | 10000 | 一个作业涉及的玩家上限 |
-| `xm.data.ops.job-timeout` | 30 min | 写阶段之前超时：全部释放、FAILED；写阶段超时：写完当前玩家后停、PARTIAL |
+| `xm.data.ops.job-timeout` | 30 min | 从开始执行算起。写阶段之前超时（夺权循环里、沉降之后、放行之前各查一次）：全部释放、零写入、FAILED `job_timeout`；写阶段超时：写完当前玩家后停，剩下的 `not_executed`，一个没写成 FAILED、写成一部分 PARTIAL，结果码都是 `job_timeout`（§4.7） |
 | `xm.data.ops.min-target-age` | 5 min | 回档目标时刻至少早于现在多久 |
 | `xm.data.ops.max-window` | 7 d | 全服查询 / 全服回收的时间窗上限 |
-| `xm.data.ops.heartbeat` / `stale-after` | 5 s / 60 s | 作业心跳与清扫判定 |
+| `xm.data.ops.heartbeat` / `stale-after` | 5 s / 60 s | 作业心跳与清扫判定（清扫器同样每个 `heartbeat` 跑一拍；启动校验 `stale-after ≥ 3 × heartbeat`） |
 | `xm.data.rollback.guild.settle` | 30 s | 沉降等待（Q6） |
 | `xm.data.rollback.guild.recheck-delay` / `recheck-budget` | 10 s / 120 s | 写后复查 |
 | `xm.data.rollback.guild.clock-skew-margin` | 300 s，[5 s, 1 h] | 同基线 `config.go:104`、`:117-119` |
 | `xm.data.rollback.guild.check-budget` | 120 s，≤ 1 h | 同基线 `config.go:110`、`:129` |
+| `xm.data.rollback.guild.call-timeout` | 10 s | 单次 Dubbo 调用的上限（再受剩余预算约束） |
 | `xm.data.recall.max-rows` | 10000 | 同基线 `recall_logic.go:48` |
 | `xm.data.recall.ingest-slack` | 60 s | §5.3 |
 | `xm.data.retention.gm-snapshot` | 0 | GM / 安全快照保留期（§3.7） |
-| `xm.dubbo.guild-url` | 本机 `tri://127.0.0.1:20886`，nacos profile 为空 | 同 gate 的写法（`xm-gate/src/main/resources/application.yaml:57-58`） |
+| `xm.dubbo.guild-url` | `tri://127.0.0.1:20886`（环境变量 `XM_DUBBO_GUILD_URL`） | 帮会检查直连的 xm-guild。为空 = 没有装配 = 帮会检查一律 `check_failed`（回档执行不了）；只支持直连，nacos 发现未接。xm-data 只有一份 `application.yaml`，没有 nacos profile |
+
+环境变量（`application.yaml`）：`XM_DATA_OPS_ENABLED`、`XM_DATA_OPS_CLAIM_WAIT`、`XM_DATA_OPS_MIN_TARGET_AGE`、`XM_DATA_ROLLBACK_SETTLE`、`XM_DATA_ROLLBACK_RECHECK_DELAY`、
+`XM_DUBBO_GUILD_URL`、`XM_DATA_GM_SNAPSHOT_RETENTION`；其余键没有对应的环境变量，用 Spring 的常规方式覆盖。
 
 ### 7.3 表与迁移
 
@@ -819,7 +887,7 @@ ALTER TABLE player_snapshot
 
 | 表 | 主键 / 唯一键 | 主要列 | 何时写 |
 |---|---|---|---|
-| `ops_job` | `job_id`；唯一 `idem_key` | `kind`（SNAPSHOT / ZONE_SNAPSHOT / ROLLBACK / RECALL / DEBT / CLAWBACK）、`status`、`request_json`、`request_hash`、`operator`、`reason`、`result_code`、`players_planned / affected / failed`、`divergence_rows`、`unprovable_players`、`accepted_divergence`、`accepted_recall_reversal`、`runner`、`created_ms / started_ms / finished_ms`、`summary_json` | 受理时插入，状态变化时更新 |
+| `ops_job` | `job_id`；唯一 `idem_key` | `kind`（SNAPSHOT / ZONE_SNAPSHOT / ROLLBACK / RECALL / DEBT / CLAWBACK）、`status`、`request_json`、`request_hash`、`operator`、`reason`、`result_code`、`players_planned / affected / failed`、`divergence_rows`、`unprovable_players`、`accepted_divergence`、`accepted_recall_reversal`、`runner`、`created_ms / started_ms / finished_ms`、`summary_json`、`cancel_requested`（7.2b 加，字段号 22，pbmysql 启动补列，db-migrations M9） | 受理时插入；之后一律**按列、带状态条件**更新（`QUEUED → RUNNING`、写结局列、置取消标志），不整行覆盖（§7.4） |
 | `ops_active` | `slot`（恒 1） | `job_id`、`runner`、`heartbeat_ms` | 受理时插入（重键 = 有作业在跑 → 409 `ops_busy`）；终态时删除 |
 | `ops_job_player` | (`job_id`, `player_id`) | `planned_snapshot_id`、`planned_snapshot_ms`、`claimed_epoch`、`pre_snapshot_id`、`outcome`、`detail_json`、`written_ms` | 计划时插 PLANNED；**在写玩家数据的同一事务里**改终态 |
 | `ops_job_event` | (`job_id`, `seq`) | `type`（STARTED / PLANNED / CLAIMED / CHECK / ACCEPTED / WRITE / RECHECK / RESULT / INTERRUPTED）、`payload_json`（≤ 64 KB）、`at_ms` | 只追加；STARTED / ACCEPTED / RESULT 对应基线 `rollback_audit_log` 的同名行 |
@@ -833,12 +901,29 @@ ALTER TABLE player_snapshot
 
 ### 7.4 作业框架
 
-- **受理**（Tomcat 线程，同步）：参数校验 → `Idempotency-Key`（1–64 个可见 ASCII，必填）：同键同 `request_hash`（路径 + 规范化请求体）回原作业；同键不同参数 409
-  `idempotency_conflict`；缺失 400 → 一个事务插 `ops_active` + `ops_job`（QUEUED）+ STARTED 事件；任一失败 503，零变更（R-A，对应 `rollback_logic.go:538-550`）→ 202 `{jobId}`。
-- **执行**：`data-ops` 单线程执行器（与单飞一致）；作业不绑定 HTTP 请求，调用方断开不影响执行（对应基线的脱钩 ctx）。
-- **状态**：QUEUED → RUNNING → {SUCCEEDED, PARTIAL, REJECTED, FAILED, DIVERGED_AFTER_WRITE, CANCELLED, INTERRUPTED}。
-- **心跳与清扫**：执行线程每 5 s 更新 `ops_active.heartbeat_ms`；每个副本都跑清扫器，心跳超过 60 s 的作业按心跳值 CAS 改成 INTERRUPTED、删 `ops_active`；
-  被改掉的执行线程下一次心跳失败即自停，之后不再写任何玩家。没来得及复查的已写玩家标 `post_write_unverified`，转人工。
+- **受理**（Tomcat 线程，同步；`OpsJobService.submit`）：参数校验 → 写开关（回档执行）→ `Idempotency-Key`（1–64 个可见 ASCII，必填）：同键、同种类、同 `request_hash`
+  （SHA-256(方法 + 路径 + 规范化请求)）回原作业（`replayed=true`）；同键不同参数 409 `idempotency_conflict`；缺失 400 → 发作业号（号源无效 503 `id_unavailable`）→
+  **一个事务**插 `ops_active`（重键 = 有作业在跑 → 409 `ops_busy`，带在跑的作业号）+ `ops_job`（QUEUED）+ STARTED 事件；任一失败 503，零变更
+  （R-A，对应 `rollback_logic.go:538-550`）→ 202 `{jobId}`。交给执行器时它已关（停服中）→ 作业改 FAILED `not_submitted`、让出槽、回 503。
+- **执行**（`OpsJobRunner`）：`data-ops` 单线程执行器（与单飞一致）；作业不绑定 HTTP 请求，调用方断开不影响执行（对应基线的脱钩 ctx）。
+  **开始执行先核对**：一个事务里刷新心跳（槽必须仍属于它）并 `QUEUED → RUNNING`（带状态条件），任一不成立就回滚、作业体一步也不执行——排队期间已被清扫器中断的作业
+  不会在别的作业占着槽时夺权 / 踢人。作业体抛异常按 FAILED `snapshot_db_error`，照样写 RESULT、调 `afterResult` 收尾。
+- **状态**：QUEUED → RUNNING → {SUCCEEDED, PARTIAL, REJECTED, FAILED, DIVERGED_AFTER_WRITE, CANCELLED, INTERRUPTED}。作业行的状态迁移一律按列、带
+  `status IN (QUEUED, RUNNING)` 条件更新：不抹掉受理线程（可能在别的副本上）写的 `cancel_requested`，也不把清扫器写的 INTERRUPTED 改回去。
+  **谁把作业行改成终态谁记 `jobs_total`**，同一作业不重复计数。
+- **心跳**：`data-ops-fence` 线程（同一线程还跑归属续约）每 `heartbeat`（5 s）更新 `ops_active.heartbeat_ms`，新值取 `GREATEST(heartbeat_ms + 1, now)`
+  （`useAffectedRows=true` 下同一毫秒的第二次心跳否则数出 0 行、被误判为槽已被收走）。更新不到行 = 槽已不属于它 → `JobContext.aborted()` 为真，
+  作业体在下一个检查点（各阶段边界、每次等待每 200 ms）抛 `JobAbortedException` 自停，之后不再写任何玩家；这时只追加一条 RESULT 事件留痕，
+  作业行还没终结才由执行线程兜底改成 INTERRUPTED。
+- **清扫**：每个副本都跑 `data-ops-sweeper`（每 `heartbeat` 一拍）。心跳超过 `stale-after`（60 s）的槽，在**一个事务**里：按心跳值 CAS 删槽 → 未终结的作业行改
+  INTERRUPTED → 改到了才追加 INTERRUPTED 事件；任一步失败整体回滚（槽还在，下一拍重来）。作业已终结、只是槽没让出的，只收回槽、WARN 一行，不追加事件、不记中断。
+  事件序号与仍活着的执行线程撞号时整个事务重来（至多 3 次）。已提交的玩家完整（每人一个事务）；没来得及写后复查的已写玩家转人工（INTERRUPTED 事件里注明）。
+- **RESULT**：与终态作业行同一个事务，在执行线程上写，失败重试至多 30 s；仍写不进 → ERROR 日志、停心跳、**不让出单飞槽**，由清扫器改 INTERRUPTED。
+  RESULT 之后才调作业体的 `afterResult`（释放归属），最后让出单飞槽。
+- **取消**（`POST /admin/ops-jobs/{id}/cancel`）：标志落在 `ops_job.cancel_requested`（多副本时请求可能落在别的副本上，执行线程读库）；幂等——标志已置上、作业未终结时
+  重复取消仍回 `cancelRequested=true`；只在第一笔写之前生效（§4.7）。写一行 `xm.audit.ops`（`[OpsJob] CANCEL`），操作人由 `xm.audit.admin` 记。
+- **停服**（生命周期阶段：Web 服务器 > `OpsJobRunner` > `OpsIds`，大的先停）：Web 服务器先停（不再受理）→ 执行器停清扫、等在跑的作业至多 5 s，不打断执行线程
+  （打断会让一笔写档事务半途失败）→ 最后交还发号租约。没做完的作业在进程退出、心跳停止后由清扫器（别的副本，或本实例重启后）改成 INTERRUPTED。
 - **不自动续跑**：重提会把已回档的玩家再写一遍同一份快照（结果相同，但会抹掉两次之间的新进度），所以必须由人看明细决定、用新键重提。
 - **玩家粒度幂等**：明细 PLANNED → 终态是条件更新、与写档同事务、必须恰好 1 行；夺权 / 释放 / 墓碑都带 epoch，重复执行无害。
 - **单人短操作**（欠款、精确回收）也是作业（统一审计、统一单飞），通常几秒完成；手工快照不夺权，同步执行，只写一条终态作业行。
@@ -847,7 +932,7 @@ ALTER TABLE player_snapshot
 ### 7.5 线程、事务与连接
 
 - **线程**：Tomcat 请求线程（受理、同步只读查询、dry-run）；`data-ops`（作业，阻塞 JDBC / Redis 可以，它不是 Netty I/O 或场景逻辑线程，AGENTS.md §3）；
-  `data-ops-fence`（续约 + 心跳）；`data-ops-sweeper`。
+  `data-ops-fence`（续约 + 心跳）；`data-ops-sweeper`（清扫）；`data-ops-ids`（发号租约的申领、重试与续期，7.2a 起）。都是单线程、守护线程。
 - **事务混用**：一个写事务里同时有 MyBatis（`PlayerStore`、快照 / 流水 Mapper）和 pbmysql（`ops_job_player`、`recall_source`）。pbmysql 的方法都接收调用方的 `Connection`
   （`architecture.md:635-637`），用 `DataSourceUtils.getConnection(dataSource)` 取 Spring 事务绑定的同一个连接，MyBatis-Spring 走的也是它。
 - **`useAffectedRows=true`**：xm-data 连接串带它（`application.yaml:14-15`），ODKU 才能数出新插入行；而 `PlayerMapper.renewOwnerLeases` 的注释按「匹配行数」写
@@ -855,8 +940,9 @@ ALTER TABLE player_snapshot
   **唯一的坑**是 `updateStateHeld` / `updateStateAndRelease` 在「所有列都没变、`updated_at` 与上次同一毫秒」时影响 0 行，会被误判为失去围栏。处理：xm-data 自己定义
   `PlayerStore` bean（`PlayerStoreAutoConfiguration` 的 `@ConditionalOnMissingBean` 允许，`:25-29`），时钟用严格递增的毫秒（`max(now, last+1)`）；写事务开头的
   `selectOwnerForUpdate` 已确认持有，所以这个防护只是兜底。不能为此另开数据源，否则做不成同事务（§12.3 用生产连接串回归）。
-- **自动装配**：引入 xm-player-store 会带进 `PlayerStoreAutoConfiguration` 的 `@MapperScan`（`guild-economy-spec.md:1156`）；xm-data 已有 MyBatis，核对两套 MapperScan 共用同一个
-  `SqlSessionFactory`、`mapUnderscoreToCamelCase` 不影响 xm-data 现有 Mapper 的显式结果映射。`xm-player-schema.sql` 仍只由 xm-login 执行。
+- **自动装配**（按实现）：`PlayerStoreAutoConfiguration` **仍被 `DataApplication` 排除**（`guild-economy-spec.md:1156` 的坑）；`DataConfiguration` 的 `@MapperScan` 除本服务的
+  `com.game.data.store` 外补上 `PlayerMapper`，两者共用同一个 `SqlSessionFactory` 与数据源（同事务的前提），并自己定义 `PlayerStore` bean（`StrictClock`）。
+  `mapUnderscoreToCamelCase` 打开（与 xm-player-store 同口径）。`xm-player-schema.sql` 仍只由 xm-login 执行。
 - **连接池**：Druid `max-active` 现为 4（`application.yaml:19-22`），两条消费线程 + 保留期清理 + 运维查询 + 作业事务会挤，调到 8。
 
 ### 7.6 HTTP 接口总表（全部在 `/admin/**` 下，过滤器统一鉴权）
@@ -877,7 +963,8 @@ ALTER TABLE player_snapshot
 | POST | `/admin/items/{uuid}/clawback` | 作业 | 是 | 7.2c |
 
 `AdminAuthFilter.opOf`（`:77-95`）按前缀补固定值：`rollbacks`、`recalls`、`ops_jobs`、`players`、`items`、`zone_snapshots`；`/admin/player-snapshots/{id}` 归 `player_snapshots`。
-任意路径不能变成标签值。所有写接口 `reason` 必填（≤ 256 字符，不含控制字符）。
+任意路径不能变成标签值。所有写接口 `reason` 必填（≤ 256 字符，不含控制字符）；**例外**：`POST /admin/ops-jobs/{id}/cancel` 不带请求体、不要 `reason` 与幂等键
+（操作人进 `xm.audit.admin`，取消本身进 `xm.audit.ops`），回 202。`/admin/zone-snapshots` 要 `reason` 与幂等键，但不要写开关。回档 `dryRun=true` 不要幂等键与写开关（`reason` 仍必填）。
 
 ### 7.7 结果码
 
@@ -899,8 +986,33 @@ HTTP 状态 + 应答体 `code` 字符串（取基线常量名去掉前缀，便�
 | `rollback_guild_divergence` / `ledger_divergence` / `recall_reversal` | 27 / — / — | 作业 REJECTED，附样本 |
 | `rollback_guild_check_failed` | 28 | 作业 FAILED（放行无效） |
 | `rollback_guild_diverged_after_write` | 29 | 作业 DIVERGED_AFTER_WRITE |
-| `snapshot_db_error` | 11 | 503 / 作业 FAILED |
-| `not_implemented` | 16 | 不使用（Java 真正执行） |
+| `post_write_unverified` | — | 写后复查问不到帮会：作业状态按写入结果定（SUCCEEDED / PARTIAL），数据不撤销，ERROR 日志、转人工核对 |
+| `snapshot_db_error` | 11 | 503 / 作业 FAILED（受理写不进、作业体异常、ACCEPTED 写不进、有人写失败而一个也没写成） |
+| `job_timeout` | — | 作业 FAILED（写之前超时，或写阶段超时一个没写成）/ PARTIAL（写阶段超时写成了一部分） |
+| `cancelled` | — | 作业 CANCELLED |
+| `interrupted` | — | 作业 INTERRUPTED（心跳丢失，执行线程自停时写进 RESULT） |
+| `not_submitted` | — | 作业 FAILED（受理后交给执行器时正在停服，没有执行） |
+| `ok` / `partial` | — | 作业 SUCCEEDED / PARTIAL 的缺省结果码 |
+| `zone_not_found` / `job_not_found` | — | 404 |
+| `not_implemented` | 16 | 回档不使用（Java 真正执行）；批量回收执行在 7.2c 之前回 501 |
+
+**逐玩家结局**（`ops_job_player.outcome`，也是 `xm_data_ops_players_total` 的 `outcome` 标签；指标里 `RESTORED` 记作小写 `restored`）：
+
+| 结局 | 何时 |
+|---|---|
+| `PLANNED` → `RESTORED` | 计划时钉住快照；写事务提交 |
+| `player_not_found` / `snapshot_not_found` | 计划时玩家不存在 / 按号选的快照不属于他；夺权时玩家不存在 |
+| `no_snapshot` / `created_after_target` | 目标时刻之前没有可用快照：建于目标时刻之前 / 之后（整区只报告，不算失败） |
+| `player_online` / `player_busy` | 在线且 reject / 踢了但等不到释放 |
+| `in_battle` | 夺到之后战斗锁仍在，或读锁失败（批次 6.3 追加，§13.3） |
+| `snapshot_gone` | 钉住的快照在检查或写之前被删 |
+| `state_invalid` | 快照解析失败；或 SECTIONS 而现档解析失败 |
+| `unknown_sections` | SECTIONS 选了 `assets`，两边顶层未知字段不同（§4.5） |
+| `fence_lost` | 续约发现归属已不在我们手里，或写事务开头加锁核对不是 (E', 未释放) |
+| `id_unavailable` | 写事务里号源失效（之后的人不再写） |
+| `failed` | 夺权或写事务访问库出错（事务已回滚） |
+| `not_executed` | 写阶段停下之后没轮到的人（连续 3 人写失败、号源失效、作业超时） |
+| `rejected` / `cancelled` | 作业在第一笔写之前被拒 / 被取消时，还没定结局的人 |
 
 告警口径同基线（`go/data_service/data_service.go:184-199`）：`check_failed` 与 `diverged_after_write` 算故障；`divergence`、`player_online` 是规则拒绝，不算故障。
 
@@ -928,26 +1040,29 @@ HTTP 状态 + 应答体 `code` 字符串（取基线常量名去掉前缀，便�
 2. **作业事件层**：`ops_job_event` 只追加。
    - STARTED 提交失败 → 503，零动作（同基线 `:538-550`）；顺序与基线不同：Java 先 STARTED 后夺权，所以连「因在线被拒」的尝试也留痕（D3）。
    - ACCEPTED 一定先于第一笔写；写不进就零写入（同基线 `:363-381`）。
-   - RESULT 在作业线程自己的事务里写，HTTP 请求早已返回，不受请求取消影响；写失败重试（30 s 上限）仍失败 → ERROR 日志 + 计数，作业留 RUNNING 由清扫器改 INTERRUPTED 并告警
-     （基线是把审计失败升级成 11，`:567-584`）。
+   - RESULT 在作业线程自己的事务里写（与终态作业行同事务），HTTP 请求早已返回，不受请求取消影响；写失败重试（30 s 上限）仍失败 → ERROR 日志、停心跳、不让出单飞槽，
+     作业留 RUNNING 由清扫器改 INTERRUPTED 并由它记 `jobs_total{outcome=interrupted}`（基线是把审计失败升级成 11，`:567-584`）。
    - 结果码、计数是独立列（基线只编码在 reason 字符串里，`rollback_logic.go:115-126`）。
 3. **数据层**：每个被写的玩家都有一份 PRE_ROLLBACK / PRE_GM_EDIT 快照（可直接作撤销源）；回档 / 回收流水 `correlation_id = job_id`；明细在 `ops_job_player`。
 
-### 8.2 指标（全部在 `DataMetrics` 一个类里定义；不以 player / job / zone 的 id 作标签，AGENTS.md §5；标签取值启动时预注册）
+### 8.2 指标（全部在 `DataMetrics` 一个类里定义；不以 player / job / zone 的 id 作标签，AGENTS.md §5）
+
+标签取值都是代码里的固定集合。**注册时机按实现**：只有两个 Gauge（`jobs_running`、`fence_held`）在装配时预注册（空闲报 0），其余 Counter / Timer 是某个标签组合
+**首次用到时才注册**（不是初稿写的「启动时预注册」），所以没发生过的结局在抓取结果里不存在，告警表达式要按「缺失 = 0」写。下表的取值按 7.2b 的代码列出。
 
 | 指标 | 类型 | 标签 | 基线对应（`metrics.go`） |
 |---|---|---|---|
-| `xm_data_ops_jobs_total` | Counter | `kind`、`outcome`=succeeded / partial / rejected / failed / diverged_after_write / cancelled / interrupted | `data_service_rollback_total{scope,outcome}`（`:71-76`） |
+| `xm_data_ops_jobs_total` | Counter | `kind`=作业种类名小写（7.2b：rollback / zone_snapshot；清扫时读不到作业行记 unknown）、`outcome`=succeeded / partial / rejected / failed / diverged_after_write / cancelled / interrupted | `data_service_rollback_total{scope,outcome}`（`:71-76`） |
 | `xm_data_ops_job_seconds` | Timer | `kind` | — |
 | `xm_data_ops_jobs_running` | Gauge | — | — |
-| `xm_data_ops_players_total` | Counter | `kind`、`outcome`=restored / recalled / edited / online / busy / fence_lost / no_snapshot / created_after / snapshot_gone / state_invalid / failed / not_executed | `rollback_players_affected_total`（`:79-84`） |
-| `xm_data_ops_claims_total` | Counter | `outcome`=claimed / kicked / timeout / not_found / error | — |
+| `xm_data_ops_players_total` | Counter | `kind`=rollback（整区维护前快照不逐人记）、`outcome` = §7.7 的逐玩家结局：restored / player_online / player_busy / player_not_found / snapshot_not_found / no_snapshot / created_after_target / snapshot_gone / state_invalid / unknown_sections / fence_lost / id_unavailable / failed / not_executed / rejected / cancelled（6.3 追加 in_battle，§13.3；recalled / edited 随 7.2c）。初稿写的 online / busy / created_after 实际带前后缀，如左 | `rollback_players_affected_total`（`:79-84`） |
+| `xm_data_ops_claims_total` | Counter | `outcome`=claimed / kicked / online（在线、没有踢）/ timeout / not_found / error | — |
 | `xm_data_ops_fence_held` | Gauge | — | 空闲时应为 0 |
 | `xm_data_ops_fence_lost_total` | Counter | — | — |
-| `xm_data_rollback_divergence_check_total` | Counter | `source`=guild / ledger / recall，`result`=clean / divergence / unprovable / check_failed / truncated / retention / post_write_clean / post_write_diverged / post_write_failed | `rollback_guild_check_total`（`:163-170`、`:191-256`） |
-| `xm_data_rollback_divergence_rows_total` | Counter | `source`、`accepted` | `rollback_guild_divergence_rows`（`:172-178`） |
+| `xm_data_rollback_divergence_check_total` | Counter | `source`=guild / ledger / recall。`result`：guild = clean / divergence / unprovable / check_failed / post_write_clean / post_write_diverged / post_write_failed；ledger = clean / divergence / unprovable；recall = clean / divergence。初稿的 truncated / retention 没有单独取值（超 10000 行并入 check_failed，保留期钳位后的玩家记 unprovable） | `rollback_guild_check_total`（`:163-170`、`:191-256`） |
+| `xm_data_rollback_divergence_rows_total` | Counter | `source`=guild / ledger，`accepted`（7.2b 只在放行时累加，所以只有 `accepted="true"`） | `rollback_guild_divergence_rows`（`:172-178`） |
 | `xm_data_rollback_guild_check_seconds` | Timer | — | `rollback_guild_check_seconds`（`:180-186`） |
-| `xm_data_recall_rows_total` | Counter | `kind`=currency / item，`outcome`=recovered / partial / shortfall / already_recalled | — |
+| `xm_data_recall_rows_total` | Counter（7.2c，尚未定义） | `kind`=currency / item，`outcome`=recovered / partial / shortfall / already_recalled | — |
 | `xm_data_snapshot_admin_total` | Counter | `cause`（固定集合）、`result` | — |
 | `xm_data_location_tombstones_total` | Counter | `result`=ok / stale / error | — |
 | `xm_data_retention_deleted_total` | Counter（已有） | `table` 增加 `player_snapshot_gm` | — |
@@ -1018,6 +1133,10 @@ mmorpg 待做候选：**M1**（H1–H3、H15）回档改以 scene 权威数据�
 | 已有作业在跑 | 409 `ops_busy`（带在跑的 job_id） |
 | 目标在线、reject | 明细 `player_online`，不写 |
 | 目标在线、kick | 23 `{2017}` 断开；35 s 内夺到就继续，否则 `player_busy` |
+| 夺到之后战斗锁仍在（离线结算在途，或 kick 踢下来的战斗中玩家） | 明细 `in_battle`，不写；读锁失败同样（fail-closed）。批次 6.3 追加，§13.3 |
+| SECTIONS 选了 `assets`，两边未知字段不同 | 明细 `unknown_sections`，不写；改用 FULL 或先升级 xm-data |
+| 写后复查问不到帮会 | 结果码 `post_write_unverified`，作业状态按写入结果定，数据不撤销，转人工 |
+| 作业超时 | 写之前：全部释放、FAILED `job_timeout`；写阶段：停在当前玩家之后，FAILED / PARTIAL `job_timeout` |
 | GM 持有期间玩家登录 | 2005，客户端重试 |
 | 帮会服务不可达 / 超时 / 未装配 | 作业 FAILED `check_failed`，放行无效，零写入 |
 | 帮会保留期拒绝 | 钳位重查；钳不到的玩家「不可证明」，可放行 |
@@ -1104,7 +1223,7 @@ mmorpg 待做候选：**M1**（H1–H3、H15）回档改以 scene 权威数据�
 | Q10 | 物品回收的扣减顺序、是否扣装备栏 | 先扣流水记的 uuid，再 **3 临时格 → 0 人物背包 → 1 仓库 → 2 装备栏**，包内新到旧；**允许扣装备栏**（非法所得不因穿上身而豁免） |
 | Q11 | 生产环境保留期缺省值 | **代码缺省保持 0（同基线）**；部署批次（7.6）给生产值，建议流水 180 天、LOGIN / LOGOUT 快照 90 天、GM / 安全快照永久，并受 §3.7 的启动约束 |
 | Q12 | `SCENE_GUID` 被 xm-data 共用后名字不准 | **不改名**（改名 = 换键空间、只能停服切换），只改注释 |
-| Q13 | 6.3 战斗 / 4.8 交易落地前，回档要不要额外查「在途战斗 / 托管」 | **不需要**：夺权天然排除在线战斗；4.8 / 6.3 落地时各自实现 `AssetDivergenceChecker`，作为它们自己的验收项 |
+| Q13 | 6.3 战斗 / 4.8 交易落地前，回档要不要额外查「在途战斗 / 托管」 | 初版答「不需要：夺权天然排除在线战斗；4.8 / 6.3 落地时各自实现 `AssetDivergenceChecker`」，**已被 lead 2026-10-05 的裁决取代**（批次 6.3 落地后「战斗中必在线」不成立）：① **在途战斗要查**——夺权成功之后、账本差集之前批量查战斗锁（`BattleLockReader.existsAll`，读失败 fail-closed），命中的玩家明细 `in_battle`，对应基线回档对战斗中玩家回 1005；代码随批次 6.3 提交（§13.3）。② **不建 `AssetDivergenceChecker` 接口**，三道检查内联在 `RollbackJob`；战斗结算不需要单独的分歧检查器——`battle_ledger` 随资产组整段回退，未销账的局回档后由待结算记录重投、相对快照恰好一次（`scene-battle-spec.md` S-11；§4.12）。③ 4.8 交易托管由账本差集自动覆盖，额外检查由 4.8 的规格另定 |
 | Q14 | 112 的逐 uuid / 逐币种「补偿式恢复」（只补 `restorable` 的缺失项）是否 7.2 做 | **不做**；7.2 交付整段恢复 + 差异里的转移证据；补偿式等交易写侧（有了转移记录才有意义） |
 | Q15 | 帮会数据走 Dubbo 还是直读 `guild_asset_op`（同在 `xm_java`） | **走 Dubbo**（4.5 为此交付的契约，归属清晰；直读越过服务边界） |
 | Q16 | 兜底日志回灌工具放不放 7.2 | **放 7.2a**（`PARITY.md:67` 的 Java 待做，txlog-ingest 的收尾） |
@@ -1137,7 +1256,7 @@ GitHub Actions 可用（`luyuan-java/xuanming-server-mmo`，公开），但仓�
 | T-A1 | STARTED 写失败 → 零变更、不夺权；ACCEPTED 写失败 → 零写入；RESULT 写失败 → 上报、清扫器接手 | `:283`、`:308`、`TestRollbackGuildGate_D10_AcceptedAuditFailureBlocksWrites`（`:756`） |
 | T-A2 | 单人事务任一步失败（含 `saveStateHeld` 0 行、明细条件更新不是 1 行），安全快照 / 流水 / 明细一起回滚 | `TestRollbackPlayer_SafetySnapshotFailureStopsBeforeOverwrite`（`:253`） |
 | T-R1 | 选源：按 id 属于别人 → 404；按时刻含等号、同毫秒取号大的、白名单排除安全快照；钉住的快照被删 → `snapshot_gone` | `TestRollbackGuildGate_D13_OlderExecutionSnapshotIsNotWritten`（`:866`，Java 以钉住替代） |
-| T-R2 | FULL 整份替换（快照后新增段被清）、blocked_types 保留；SECTIONS 空 → 400、写 `currency` → 400、`mission` 不带 `assets` → 400；`assets` 四段同时恢复；不认识字段保留 | H4 / H5 |
+| T-R2 | FULL 整份替换（快照后新增段被清）、blocked_types 保留；`sections` 不给 = FULL、给空列表 → 400、写 `currency` → 400、`mission` 不带 `assets` → 400；`assets` 资产组同时恢复（按描述符计算；`battle_ledger` 随资产组回退的正反两向用例还没有写，另行安排）；不认识字段：两边相同照留、不动资产组保留现档、选了 `assets` 而两边不同 → `unknown_sections` 并列出字段号（`RestoreBuilderTest` 三例） | H4 / H5 |
 | T-R3 | 帮会检查逐条移植：没装配就拒（D2）、有分歧拒且零写入（D7）、部分回档也过闸、放行要 reason（D8）、ACCEPTED 先于第一笔写（D9）、整区第二块失败谁也不写（D11）、全服被拒一个 zone 都不写（D12）、写后复查（D14）、不可证明（D17）、两段等待用可注入的 sleeper / 时钟断言「检查在沉降之后」（D18）、超上限 / 沉降取消（`:1066`） | `rollback_recall_test.go:599-1086` |
 | T-R4 | since：钳到 1、余量边界 [5 s, 1 h]、溢出 | `TestGuildSinceMs`（`:1087`） |
 | T-R5 | `GuildInternalService` 应答：0 / ERROR / UNAVAILABLE / future 异常 → `check_failed`；RETENTION_REJECTED 钳位重查；游标不前进、块外玩家 → `check_failed` | guildcheck 14 个用例 |
@@ -1216,6 +1335,29 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
 - [ ] §7.9 的文档与 PARITY 更新完成；有意差异按 §10 编号登记。
 - [ ] 7.2b：`guild-economy-spec.md:1155` 的前置要求注明已兑现。
 
+上面五条是每个子批通用的模板，不在模板上打勾；各子批的核对结果单列。
+
+**7.2b 的核对结果（2026-10-05 收尾登记；逐项回到 §13 的运行记录与仓库现状核实，没有记录的不勾）**
+
+- [x] 构建与相关模块单测：§13.1 的 `-pl xm-player-store,xm-scene,xm-login,xm-data install`（带三个 IT 开关）BUILD SUCCESS、0 失败；§13.2 评审修复之后
+      `-pl xm-data test`（带三个 IT 开关）187 个用例、0 失败。
+- [x] 已有的 IT 跑过并留记录：上面两次运行都带 `-Dxm.it.mysql` / `-Dxm.it.redis` / `-Dxm.it.kafka`（SQL 用例连真 MySQL、`useAffectedRows=true` 的连接串；
+      `XmDataMysqlIntegrationTest` 含 M9 迁移等价与 `idx_player_zone` 的 EXPLAIN）。
+- [ ] §12.3–§12.5 里点名给 7.2b 的几条 IT **还没有用例**：§12.3 的「§4.8 整个事务」失败注入与 `CONNECTION_ID()` 相同、login 与 xm-data 两线程抢同一玩家；
+      §12.4 的让出请求发布 / 位置墓碑真 Redis 语义；§12.5 的「LOGOUT 快照经 Kafka 落库后被回档选中」往返。另行安排。
+- [x] robot `rollback` 场景 10 项与回归场景（`smoke` `reconnect` `currency` `bag` `pet` `guild-economy` `audit`）在本机单节点切片上全过（§13.1）。
+- [ ] robot 相对 §12.6 的缺口：没有走「LOGOUT 快照经 Kafka 落库后按 `targetTimeMs` 选中」（用的是手工快照 + 按号）、没有核对持有期间登录回 2005、
+      没有「回档后差异接口无差异」、没有第 5 步按 `preSnapshotId` 撤销、没有帮会联动；整区回档与 `/admin/zone-snapshots` 不在场景里。§13.2 的评审修复之后**没有重跑本机切片**。
+- [ ] 单测缺口（实现记录声明了行为、还没有用例钉住）：`ZoneSnapshotService` 的受理校验与作业体；I2「安全快照 + 覆盖写 + 流水 + 明细同生共死」的失败注入（T-A2）；
+      T-A1 的 ACCEPTED / RESULT 写失败；T-R1 的 `snapshot_gone`；`post_write_unverified`、连续 3 人失败即停、写阶段超时、回收逆转与 `acceptRecallReversal`、
+      写阶段 `fence_lost`、FULL + 现档损坏、整区场景下的帮会分歧 / `check_failed`。另行安排。
+- [x] 文档与 PARITY（§7.9）：`PARITY.md` 新增「GM 回档」行并更新 55 / 67 / 68 / 106 / 117 / 120 行，有意差异按 §10 编号登记；`docs/porting/roadmap.md` 7.2 行；
+      `docs/design/architecture.md` §2 / §4.5 / §5 / §7 / §9 / §10 / §11；`docs/design/db-migrations.md` M9（随代码已写）；本稿正文按 §13.1「与本稿的出入」逐条回写。
+- [ ] `docs/design/tech-stack.md` 还没有登记「xm-data 自批次 7.2b 起是 `GuildInternalService` 的 Dubbo 调用方（编程式引用、只直连）」与 pbmysql 的新用途
+      （`ops_active` / `ops_job_player` 启用、`ops_job.cancel_requested`）——不在本次收尾允许改动的文件里，待补。
+- [x] `guild-economy-spec.md` §9.2 第 9 条已注明前置要求由 7.2b 兑现。
+- [ ] 批次 6.3 追加的「回档前查战斗锁」（§13.3）：代码与用例随 6.3 提交，以那次提交的记录为准。
+
 ---
 
 ## 13 实现记录
@@ -1223,8 +1365,9 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
 ### 13.1 批次 7.2b（2026-10-05）：作业框架、离线栅栏、回档、整区维护前快照、`idx_player_zone`
 
 开放问题按 §11 的推荐答案落地：Q4（缺省拒绝在线玩家，显式 `ifOnline=kick` 走现成顶号通路 → 23 {2017}）、Q5（沿用 2017）、Q6（沉降 30 s / 复查 10 s，
-做成配置）、Q7（整区要求区服非 OPEN）、Q9（`idx_player_zone` 随本批迁移）、Q13、Q14（不做逐 uuid 补偿式恢复）、Q15（帮会走 Dubbo）、Q17（不做「请 scene 立即存盘」）。
-7.2c（回收执行、欠款、精确回收）不在本批。
+做成配置）、Q7（整区要求区服非 OPEN）、Q9（`idx_player_zone` 随本批迁移）、Q13（按初版答案「不额外查在途战斗」落地；这个答案随后被 lead 的裁决取代，
+见 §11 Q13 与 §13.3）、Q14（不做逐 uuid 补偿式恢复）、Q15（帮会走 Dubbo）、Q17（不做「请 scene 立即存盘」）。
+7.2c（回收执行、欠款、精确回收）不在本批。代码与测试随提交 `7dff75c` 入库（与批次 6.3 的主代码同一提交）。
 
 **xm-data（新增 / 修改）**
 - 作业框架 `com.game.data.ops`：`OpsJobService`（受理：参数校验 → 写开关 → 幂等键 → 发号 → **一个事务**插 `ops_active` + `ops_job`（QUEUED）+ STARTED，
@@ -1259,23 +1402,42 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
 **本机脚本与 robot**：`tools/local/start-slice.sh` 设 `XM_DATA_OPS_ENABLED=true`、`XM_DATA_OPS_MIN_TARGET_AGE=5s`、`XM_DATA_ROLLBACK_SETTLE=3s`、
 `XM_DATA_ROLLBACK_RECHECK_DELAY=2s`；xm-robot 新场景 `rollback`（`RollbackScenario`）。
 
-**与本稿的出入（实现时的取舍，待 lead 裁决是否回写正文）**
+**与本稿的出入（实现时的取舍）**
+
+lead 2026-10-05 裁决：**一律以实现为准，回写正文**（规格是 7.2c / 7.3 / 7.4 的依据，正文不能与代码相反）。下面每条末尾注明回写到了哪里；第 12–17 条是收尾核对时补记的
+（实现时没有声明），第 11 条按裁决改写。
+
 1. §7.1「把 `RedisOwnerTakeovers` 的发布部分挪成 xm-discovery 共用件」没做：本批期间 xm-discovery 由别的批次在改；xm-data 内实现
-   `RedisTakeoverRequests`，频道与消息都取自共用定义，以后挪动只是搬家。
-2. §7.1 `LedgerDiff` 仍在 xm-data（`com.game.data.snapshot.LedgerDiff`，7.2a 起就在这里），没挪到 xm-player-store 的 asset 包。
+   `RedisTakeoverRequests`，频道与消息都取自共用定义，以后挪动只是搬家。——已回写 §7.1。
+2. §7.1 `LedgerDiff` 仍在 xm-data（`com.game.data.snapshot.LedgerDiff`，7.2a 起就在这里），没挪到 xm-player-store 的 asset 包。——已回写 §4.6.2、§7.1。
 3. 帮会 Dubbo 调用方用编程式引用（xm-api 的 `IsolatedDubboModule`，同 xm-scene / xm-guild 的资产通道客户端），不引入 dubbo-spring-boot-starter：
    只读与 dry-run 的进程不起 Dubbo，引用在第一次检查时才建。只支持直连 `xm.dubbo.guild-url`，为空 = 没有装配（一律 `check_failed`）；
-   nacos 注册中心发现没接（部署批次再定）。
-4. `sections` 不给 = FULL；给了空列表 → 400（§4.3 与 D5 两处说法不一，取「显式空列表拒绝」防误回全量）。
-5. dry-run 不做帮会检查（要沉降），只给计划、按现档预演的恢复内容与账本差集；整区 dry-run 不校验维护态，只列出各区状态。
-6. 写后复查问不到帮会时作业状态照写入结果定（SUCCEEDED / PARTIAL），结果码记 `post_write_unverified` 并 ERROR 日志（§7.7 没有给这种情形）。
-7. 写阶段：连续 3 人写失败或号源失效就停，剩下的记 `not_executed`；作业超时在写之前 → FAILED `job_timeout`、写阶段 → 停在当前玩家之后。
+   nacos 注册中心发现没接（部署批次再定）。——已回写 §4.6.1、§7.1、§7.2。
+4. `sections` 不给 = FULL；给了空列表 → 400（§4.3 与 D5 两处说法不一，取「显式空列表拒绝」防误回全量）。——已回写 §4.3、T-R2。
+5. dry-run 不做帮会检查（要沉降），只给计划、按现档预演的恢复内容与账本差集；整区 dry-run 不校验维护态，只列出各区状态。——已回写 §4.3、§4.9。
+6. 写后复查问不到帮会时作业状态照写入结果定（SUCCEEDED / PARTIAL），结果码记 `post_write_unverified` 并 ERROR 日志（§7.7 没有给这种情形）。——已回写 §4.6.1、§4.7、§7.7。
+7. 写阶段：连续 3 人写失败或号源失效就停，剩下的记 `not_executed`；作业超时在写之前 → FAILED `job_timeout`、写阶段 → 停在当前玩家之后。——已回写 §4.7、§4.9、§7.2、§7.7。
 8. kick 分两轮：第一轮全部不踢地夺（离线的直接夺到），在线的一起发让出请求，第二轮再逐个带等待夺——总等待约为一次写回而不是人数 × 写回；
-   整区两轮都夺完才裁决，`zone_not_quiescent` 带前 100 个玩家号与总数。
-9. 取消标志放在 `ops_job.cancel_requested`（多副本时取消请求可能落在别的副本上）；取消接口不带请求体、不要求 reason（操作人进审计日志）。
-10. 回收逆转检查（§4.6.3）已接好（查快照之后 17 / 19 的扣减流水），7.2c 之前恒为干净。
-11. SECTIONS 的 `assets` 组按描述符计算：`PlayerState` 里除 facing / attribute / mission / vitals 以外的全部字段（含以后新加的段，如 6.3 正在加的
-    `battle_ledger = 9`），新段缺省归资产组（账本类字段必须与资产同写）；FULL 本来就整份替换。战斗结算账本的分歧检查按 Q13 是 6.3 自己的验收项。
+   整区两轮都夺完才裁决，`zone_not_quiescent` 带前 100 个玩家号与总数。——已回写 §4.2、§4.7、§4.9（含 13.2 第 6 条的共用截止时刻）。
+9. 取消标志放在 `ops_job.cancel_requested`（多副本时取消请求可能落在别的副本上）；取消接口不带请求体、不要求 reason（操作人进审计日志）。——已回写 §7.3、§7.4、§7.6。
+10. 回收逆转检查（§4.6.3）已接好（查快照之后 17 / 19 的扣减流水），7.2c 之前恒为干净。——已回写 §4.6.3。
+11. SECTIONS 的 `assets` 组按描述符计算：`PlayerState` 里除 facing / attribute / mission / vitals 以外的全部字段（含以后新加的段；`battle_ledger = 9` 已随 6.3 落地），
+    新段缺省归资产组（账本类字段必须与资产同写）；FULL 本来就整份替换。——已回写 §4.5。
+    **`AssetDivergenceChecker` 接口没有建**（初稿 §7.1 把它列为 `com.game.data.rollback` 的接口，§4.12 / Q13 要求 6.3 落地时实现一个战斗结算的 checker）：
+    三道检查内联在 `RollbackJob`。lead 裁决**不建接口**，战斗结算也不需要单独的分歧检查器——账本随资产组整段回退，未销账的局回档后由待结算记录重投、
+    相对快照恰好一次（`scene-battle-spec.md` S-11）。本条初版末句「战斗结算账本的分歧检查按 Q13 是 6.3 自己的验收项」作废。——已回写 §4.6.3、§4.12、§7.1、Q13。
+12. §7.1 列的三个类没有按原名出现：`OpsJobSweeper` → `OpsJobRunner.sweep`（`data-ops-sweeper` 线程）；`IdempotencyKeys` → `OpsRequests`（键与指纹的校验）+
+    `OpsJobService.replay`（同键重放 / 冲突）；`RollbackExecutor` → `RollbackJob`（流程）+ `RollbackWriter`（单人写事务），恢复内容另由纯函数 `RestoreBuilder` 计算。
+    ——已回写 §7.1；`data-tools-spec.md` 里对 `RollbackExecutor` 的四处引用同步改了。
+13. Redis 没有「在启用写操作时立即连接」：`RedissonClient` 是懒加载 bean，由 `OpsIds` 在启动后的后台线程上申领发号租约时连上（连不上每 10 s 重试），不区分写开关、
+    不同步等待、不 fail-fast。——已回写 §7.1。（`DataConfiguration` 里 `adminOwnership` 的注释还写着「Redis 第一次用到时才连」，与此不符，代码侧另行订正。）
+14. 指标不是「标签取值启动时预注册」：只有 `jobs_running`、`fence_held` 两个 Gauge 预注册，其余首次用到才注册。——已回写 §8.2。
+15. 指标 `outcome` 的取值与初稿不同：逐玩家结局原样作标签，是 `player_online` / `player_busy` / `created_after_target`（不是 online / busy / created_after），并多出
+    `player_not_found` / `snapshot_not_found` / `unknown_sections` / `id_unavailable` / `rejected` / `cancelled`；`claims_total` 多一个 `online`；
+    `divergence_check_total` 没有 truncated / retention；`divergence_rows_total` 只在放行时累加。——已回写 §7.7、§8.2。
+16. 整区回档的 RESULT / 摘要**没有逐 zone 计数**（`plan` 只有总数、已计划数、按结局的未计划计数与区不一致名单，`outcomes` 是逐结局计数）。——§4.9 改为「未做，留给 7.2c」。
+17. dry-run 的 `ledger` 视图**没有结构化的逐流水位回退量**（只有 `clean` / `rows` / `unprovable[{stream, reason}]`，部分原因文本里带水位差）；整区 dry-run 不算账本差集。
+    ——§4.6.2 改为「未做，留给 7.2c」，§4.3 按实现描述。
 
 **测试证据**（缺省 H2；`-Dxm.it.mysql` 时同一套 SQL 用例连真 MySQL）
 - 新增 `RollbackRequestTest`、`RestoreBuilderTest`（T-R2）、`GuildDivergenceGateTest`（T-R4 / T-R5）、`OwnershipFenceSqlTest`（T-F1 / T-F2 / T-F3：
@@ -1329,7 +1491,8 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
    → 这名玩家不写，明细 `unknown_sections`（新的逐玩家结局，`xm_data_ops_players_total` 的 outcome 固定集合加一个值），dry-run 同样标出并列出字段号。
    资产组按本版本的描述符计算（13.1 第 11 条），不认识的段既判断不了是否账本、也不会随资产一起恢复——资产回到快照而账本留在之后会重复记账或扣款消失，
    所以 fail-closed：先升级 xm-data，或改用 FULL（整份替换，未知字段随快照）。两边相同、或不动资产组的 SECTIONS，照旧保留现档的未知字段。
-   **与 §4.5 正文的出入**：「SECTIONS 保留当前状态里不认识的字段」只对不动资产组、或两边未知字段相同的情形成立，待 lead 裁决是否回写 §4.5 / §11 Q11 附近的说明。
+   **与 §4.5 正文的出入**：「SECTIONS 保留当前状态里不认识的字段」只对不动资产组、或两边未知字段相同的情形成立。lead 2026-10-05 裁决回写——已回写 §4.5
+   （`unknown_sections` 一段）、§7.7（逐玩家结局表）、§9.3、T-R2。
 
 **测试证据**
 - `OpsJobFrameworkSqlTest` 新增 7 例：清扫中途失败整体回滚、槽还在、下一拍重来；已终结作业只收回槽、不追加事件、不记中断；排队期间被中断的作业
@@ -1341,3 +1504,37 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
   耗时 < 3 s；整区 dry-run 超上限 422）；`RestoreBuilderTest` 按新规则拆成三例（两边相同照留 / 不同拒绝并列出字段号 / 不动资产组保留现档）。
 - `-pl xm-data test -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dxm.it.redis=redis://127.0.0.1:6379 -Dxm.it.kafka=127.0.0.1:9092`：187 个用例、0 失败
   （SQL 用例连真 MySQL、`useAffectedRows=true` 的连接串）；改动涉及的 4 个测试类另在缺省 H2 下跑过，0 失败。没有重跑本机切片。
+
+### 13.3 批次 6.3 追加：回档前查战斗锁（代码随 6.3 提交）
+
+本节只记裁决与设计。**代码、用例与运行记录随批次 6.3 的提交入库，细节与本节不一致时以那次提交为准**；7.2b 的提交（`7dff75c`）里没有这段逻辑。
+
+**为什么要补**。本稿初版（§4.2、§4.12、Q13）以「回合制战斗中的玩家必在线，所以夺权夺不到，基线的战斗闸自动满足」为前提。批次 6.3 落地后这个前提不成立：
+
+- Java 断线即写回、释放、移除实例，战斗在 xm-battle 继续，结算可以在玩家离线时到达（`scene-battle-spec.md` §0.1、§7.15）。所以 `ifOnline=reject` 的回档
+  也能夺到「战斗锁仍在」的离线玩家。
+- `ifOnline=kick` 走的顶号通路（`SceneWorld.onTakeoverRequested`）不看是否在战斗，在线战斗中的玩家同样被写回、释放、踢下线，随后被夺到；整区回档一律 kick。
+- 6.3 的规格本来就把这件事留给 7.2：`scene-battle-spec.md` §0.3（6.3 给 7.2 只提供 `BattleLockReader`，对方负责「GM 回档 1005」）、§7.13 第 5 条
+  （「7.2 钩子：GM 回档 / 回收判 → 1005」）。7.2b 落地时没有接。
+
+**裁决**（lead，2026-10-05）：接钩子。
+
+**设计**
+
+1. **位置**：`RollbackJob` 两轮夺权都做完之后、账本差集之前，对**全部已夺到的玩家**批量查一次战斗锁——xm-discovery 的 `BattleLockReader.existsAll`
+   （键 `RedisKeys.battleLock(pid)`，锁是 Hash，逐键 EXISTS 并发发出）。放在这里一次覆盖两种情形：reject 夺到的离线玩家，以及 kick 踢下来的战斗中玩家。
+2. **命中**：锁在的玩家不写，明细结局 `in_battle`，对应基线回档对战斗中玩家回 1005（`player_rollback_handler.cpp:68-80`：战斗快照已经发出去，这时改背包与属性，
+   结算按账本扣药会「不足按 0」，属性会被结算的 HP / MP 终值整体覆盖）。
+3. **读失败 fail-closed**：`existsAll` 任何一个键读失败都整体以异常完成；读不出就判定不了谁在战斗，一律按不能写处理，不把读失败当成「不在战斗」
+   （AGENTS.md §3：玩家资产与归属路径默认 fail-closed）。
+4. **仍然先 STARTED、后夺权、再查锁**：查锁在 I3（STARTED 之前不踢人不夺权）与 I4（检查通过之前不写）之间，不改变任何既有不变量；被 kick 的玩家即使随后因
+   `in_battle` 没被回档，也已经被踢下线——这是 kick 的既有语义，运维应当先 dry-run、在维护窗口里做整区回档。
+5. **与 S-11 的关系**：不查锁也推不出重复发奖——`battle_ledger` 随资产组整段回退，未销账的局由待结算记录重投、相对快照恰好一次（§4.12）。查锁是为了与基线的安全门一致、
+   不在一局战斗的中途换掉它开局时拍下的状态。它不是资产分歧检查，不走 `acceptDivergence`（基线对战斗中的玩家同样是无条件拒绝）。
+
+**随 6.3 提交一并核对的事项**（以那次提交为准）
+
+- 逐玩家结局 `in_battle` 进 §7.7 的结局表与 `xm_data_ops_players_total` 的 `outcome`（本稿已预先列出）；命中的玩家何时释放、整区回档里有人在战斗时的作业结果码与摘要字段。
+- xm-data 的 `RedissonClient` 是懒加载 bean，读锁的客户端要像 `RedisTakeoverRequests` 那样惰性取；读锁在 `data-ops` 线程上限时等待，不上 Tomcat 线程。
+- `AdminOwnership` 类注释里「回合制战斗（必在线）都夺不到」一句要改。
+- 用例：锁在 → 零写入；读失败 → 同样不写；reject 夺到的离线玩家与 kick 踢下来的在线玩家各一例。

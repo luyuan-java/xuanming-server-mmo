@@ -1153,6 +1153,10 @@ public interface SceneAssetOpService {
 7. **把同步投递放进 guild-worker 阻塞**：16 线程 × 2.5 s，scene 一慢整个帮会服务排队（§7.4；Q5）。
 8. **settle 用请求 Deadline**：请求预算跑满后终局写不回、下一轮重投；settle 必须自带 700 ms 且不随取消。
 9. **回档（7.2）会让已 durable 的结局从 `player_state` 里消失**：在回档闸接入 `ListAppliedAssetOpsSince` 之前，Java 不得提供回档入口（I4 与 fail-closed）；离线读账本（E8）也依赖这一点。
+   **已兑现（2026-10-05，批次 7.2b，提交 `7dff75c`）**：回档入口 `POST /admin/rollbacks`（xm-data）与帮会检查同批上线。`GuildDivergenceGate` 经 Dubbo 调 `listAppliedAssetOpsSince`，
+   只认 `LIST_APPLIED_RESULT_OK`；没装配（`xm.dubbo.guild-url` 为空）、非 OK、调用失败或超时、超预算、游标不前进、返回块外玩家、过滤后超过 10000 行一律 `check_failed`，放行无效、零写入；
+   保留期拒绝用 `cutoff_ms` 钳位重查一次，钳不到的玩家记不可证明。检查在沉降之后、第一笔写之前；写后复查在释放归属之前，发现新终结的指令 → 作业 `DIVERGED_AFTER_WRITE`。
+   见 `data-ops-spec.md` §4.6.1 / §13.1，PARITY「GM 回档」行。
 10. **xm-guild 依赖 xm-player-store 会带进 `PlayerStoreAutoConfiguration`（MyBatis）**（`xm-player-store/.../PlayerStoreAutoConfiguration.java`）：要么排除自动配置，要么把只读类放在不触发它的位置（Q3）。
 11. **4.4 若在派发层统一检查归属区**：经济五个号要豁免（§0.2）。
 12. **Spring 缺省值与 Go「整段缺失 = 零值」不同**：`asset-op.enabled` 必须显式缺省 false；保留期等缺省值在关闭时也有值（§7.11，无客户端可见影响）。
