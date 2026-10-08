@@ -3,6 +3,7 @@ package com.game.team.push;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.proto.MessageContent;
+import com.game.proto.TipInfoMessage;
 import com.game.proto.team.TeamChangeReason;
 import com.game.proto.team.TeamEventS2C;
 import com.game.proto.team.TeamEventType;
@@ -188,6 +189,37 @@ public final class TeamPushes {
         }
     }
 
+    /**
+     * 异步推一次不经提交的开战结果（基线 service.go:568-595）：按 S_READ_MEMBERS 给记录里索引 tid == 本队的<b>当前</b>成员（含发起人，
+     * 不看是否在线——离线由推送结局 offline 表达）推当前视图，{@code match_state} 按锁此刻是否有效算，{@code actor_id = 0}。
+     * 记录已不在或成员表持续变化时放弃，交给客户端拉取自愈。
+     *
+     * @param knownMembers 锁内名单（S_READ_MEMBERS 按它读；不等时用记录里的成员重读）
+     * @param reason       MATCH_ENDED / MATCH_FAILED
+     * @param tip          结果原因（可为 null）
+     */
+    public void publishMatchView(long teamId, Collection<Long> knownMembers, TeamChangeReason reason, TipInfoMessage tip) {
+        List<Long> known = knownMembers == null ? List.of() : List.copyOf(knownMembers);
+        Deadline deadline = Deadline.after(batchBudgetMillis);
+        try {
+            executor.execute(() -> {
+                if (deadline.expired()) {
+                    metrics.push(PushKind.SNAPSHOT, PushOutcome.ERROR);
+                    log.warn("[team] 开战结果推送在推送执行器里排队超过预算，放弃 team={}", Long.toUnsignedString(teamId));
+                    return;
+                }
+                try {
+                    pushMatchView(deadline, teamId, known, reason, tip);
+                } catch (RuntimeException e) {
+                    log.error("[team] 开战结果推送出错 team={}", Long.toUnsignedString(teamId), e);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            metrics.push(PushKind.SNAPSHOT, PushOutcome.ERROR);
+            log.warn("[team] 推送执行器已满，放弃开战结果推送 team={}", Long.toUnsignedString(teamId));
+        }
+    }
+
     // ================================================================ 提交推送
 
     /** 按 Decision 给各接收者推送（基线 notify.go:104-148 pushCommit）。 */
@@ -203,7 +235,8 @@ public final class TeamPushes {
     /**
      * 一次提交要推哪些（纯函数）：
      * <ol>
-     *   <li>213 快照：{@link #snapshotRecipients} 排除 caller、且能同源构建视图的人（{@code TeamSnapshotS2C{view, reason, actor}}）；</li>
+     *   <li>213 快照：{@link #snapshotRecipients} 排除 caller、且能同源构建视图的人（{@code TeamSnapshotS2C{view, reason, actor}}，
+     *       提交带 {@link CommitResult#pushTip()} 时每份都附上它——整队开战建票失败的 MATCH_FAILED）；</li>
      *   <li>215 邀请：{@code invitedPlayer ≠ 0} 且记录里有给他的未过期邀请（{@code TeamInviteS2C{invite, server_time_ms = 本轮 S_READ nowMs}}）；</li>
      *   <li>203 APPLICATION_REJECTED：被拒申请人（≠ caller），actor = 记录里的队长；</li>
      *   <li>203 INVITE_REVOKED：解散时未过期邀请的被邀请人（排除 caller），actor = 本次 actor。</li>
@@ -221,7 +254,7 @@ public final class TeamPushes {
             }
             pushes.add(new Planned(pid, PushKind.SNAPSHOT, dc -> {
                 TeamView view = TeamViews.viewFromCommit(c, pid, dc).orElseThrow();
-                return TeamSnapshotS2C.newBuilder().setTeam(view).setReason(d.reason()).setActorId(d.actor()).build();
+                return snapshot(view, d.reason(), d.actor(), c.pushTip());
             }));
         }
         long invited = d.invitedPlayer();
@@ -280,18 +313,8 @@ public final class TeamPushes {
 
     /** 用 S_READ_MEMBERS 给 tid == 本队的其他在线队员推当前视图（基线 notify.go:175-206）。 */
     void pushOnlineRefresh(Deadline deadline, long caller, long teamId, List<Long> knownMembers) {
-        MembersSnapshot snap;
-        try {
-            snap = store.readMembers(teamId, knownMembers, deadline);
-        } catch (MembersChangedException e) {
-            metrics.push(PushKind.MEMBERS_CHANGED, PushOutcome.SKIPPED);
-            return;
-        } catch (RuntimeException e) {
-            log.error("[team] 在线态刷新读成员失败 team={}: {}", Long.toUnsignedString(teamId), e.toString());
-            metrics.push(PushKind.SNAPSHOT, PushOutcome.ERROR);
-            return;
-        }
-        if (snap.record() == null) {
+        MembersSnapshot snap = readMembers(deadline, teamId, knownMembers, "在线态刷新");
+        if (snap == null) {
             return;
         }
         Map<Long, MemberDisplay> dc = display.load(TeamViews.rosterIds(snap.record()), deadline);
@@ -304,9 +327,58 @@ public final class TeamPushes {
             if (view.isEmpty()) {
                 continue; // 索引 tid ≠ 本队（已离队 / 索引缺失）：不推，交给他自己的拉取自愈
             }
-            send(deadline, pid, PushKind.SNAPSHOT, TeamSnapshotS2C.newBuilder().setTeam(view.get())
-                    .setReason(TeamChangeReason.TEAM_CHANGE_REASON_MEMBER_ONLINE).setActorId(caller).build());
+            send(deadline, pid, PushKind.SNAPSHOT,
+                    snapshot(view.get(), TeamChangeReason.TEAM_CHANGE_REASON_MEMBER_ONLINE, caller, null));
         }
+    }
+
+    // ================================================================ 不经提交的开战结果
+
+    /**
+     * 不经提交的开战结果推送（基线 service.go:568-595 pushMatchView）。EndMatch 没有清锁提交（锁已被清 / 重新加锁 / 自然过期 / 截止）时，
+     * 仍尽力给队员推一次当前视图与结果原因，保证客户端不停在 STARTING。
+     */
+    void pushMatchView(Deadline deadline, long teamId, List<Long> knownMembers, TeamChangeReason reason, TipInfoMessage tip) {
+        MembersSnapshot snap = readMembers(deadline, teamId, knownMembers, "开战结果推送");
+        if (snap == null) {
+            return;
+        }
+        Map<Long, MemberDisplay> dc = display.load(TeamViews.rosterIds(snap.record()), deadline);
+        for (long pid : TeamRules.memberIds(snap.record())) {
+            Optional<TeamView> view = TeamViews.viewFromMembers(snap, pid, dc);
+            if (view.isEmpty()) {
+                continue; // 索引 tid ≠ 本队（已离队 / 索引缺失）：不推，交给他自己的拉取自愈
+            }
+            send(deadline, pid, PushKind.SNAPSHOT, snapshot(view.get(), reason, 0, tip));
+        }
+    }
+
+    /**
+     * S_READ_MEMBERS 加上推送路径的失败处理：成员表持续变化 → 记 {@code members_changed / skipped}；读失败 → 记 {@code snapshot / error}；
+     * 记录已不存在 → 静默。这三种都返回 null（放弃这次推送，交给客户端拉取自愈）。
+     */
+    private MembersSnapshot readMembers(Deadline deadline, long teamId, List<Long> knownMembers, String what) {
+        MembersSnapshot snap;
+        try {
+            snap = store.readMembers(teamId, knownMembers, deadline);
+        } catch (MembersChangedException e) {
+            metrics.push(PushKind.MEMBERS_CHANGED, PushOutcome.SKIPPED);
+            return null;
+        } catch (RuntimeException e) {
+            log.error("[team] {}读成员失败 team={}: {}", what, Long.toUnsignedString(teamId), e.toString());
+            metrics.push(PushKind.SNAPSHOT, PushOutcome.ERROR);
+            return null;
+        }
+        return snap.record() == null ? null : snap;
+    }
+
+    /** 组一条 213：{@code tip} 为 null 时不设 {@code tip} 字段。 */
+    private static TeamSnapshotS2C snapshot(TeamView view, TeamChangeReason reason, long actor, TipInfoMessage tip) {
+        TeamSnapshotS2C.Builder b = TeamSnapshotS2C.newBuilder().setTeam(view).setReason(reason).setActorId(actor);
+        if (tip != null) {
+            b.setTip(tip);
+        }
+        return b.build();
     }
 
     // ================================================================ 单条推送

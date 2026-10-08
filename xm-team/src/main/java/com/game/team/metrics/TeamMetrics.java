@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>{@code xm_team_commit_retries_total{op}} ← {@code team_commit_retry_total}；</li>
  *   <li>{@code xm_team_heals_total{kind}} ← {@code team_heal_total}；</li>
  *   <li>{@code xm_team_pushes_total{kind, outcome}} ← {@code team_push_total}；</li>
- *   <li>{@code xm_team_matches_total{outcome}} ← {@code team_match_total}（批次 4.3 只会出现 rejected / internal）；</li>
+ *   <li>{@code xm_team_matches_total{outcome}} ← {@code team_match_total}（多一个 {@code gather_unknown}：跨进程才有的故障面）；</li>
  *   <li>{@code xm_team_cross_zone_allowed} ← {@code team_cross_zone_allowed}（启动即上报本实例生效的开关）。</li>
  * </ul>
  * {@code team_scene_refresh_total} 不移植：Java 不发 scene 刷新信号（D7）。
@@ -103,20 +103,28 @@ public final class TeamMetrics {
         SKIPPED
     }
 
-    /** 整队开战的终态（基线 service.go:70-74、team-spec §5.2）。 */
+    /**
+     * 整队开战的终态（基线 service.go:70-74、team-spec §5.2；match-spec §11 末行）。一次 211 恰好计一次：同步拒绝计前三个之一；
+     * 建票失败计 {@link #TICKET_FAILED}；已受理（回了 STARTING）的在 gather 收尾时计后三个之一。
+     */
     public enum MatchOutcome {
-        /** 同步拒绝：业务码（含 4027 / 4018 / 4013 / 4029）。 */
+        /** 同步拒绝：业务码（4013 / 4018 / 4023–4029）。 */
         REJECTED,
-        /** 同步拒绝：故障码 4030。 */
+        /** 同步拒绝：故障码 4030（含 xm-match 调不通、应答缺字段、建票结果不明）。 */
         INTERNAL,
         /** 同步拒绝：码不在 team 段内（码表漂移）。 */
         UNKNOWN_CODE,
-        /** 开局成功（6.4）。 */
+        /** 开局成功：gather 回 ok。 */
         SUCCESS,
-        /** gather 失败（6.4）。 */
+        /** gather 明确失败（xm-match 已全员删票）。 */
         GATHER_FAILED,
-        /** 建票失败（6.4）。 */
-        TICKET_FAILED
+        /** 建票失败：成员已有别的票据，或 xm-match 自己的 Redis 出错（都回 4026[pid]）。 */
+        TICKET_FAILED,
+        /**
+         * gather 结果不明：{@code runTeamGather} 传输失败（xm-match 中途退出、网络分区、调用超时）。Java 独有（基线 match 与 team 同进程，
+         * 没有这个故障面，match-spec M20）；照样推 MATCH_FAILED，但 match 可能仍在跑这局。
+         */
+        GATHER_UNKNOWN
     }
 
     private final MeterRegistry registry;
@@ -167,7 +175,8 @@ public final class TeamMetrics {
         }
         for (MatchOutcome outcome : MatchOutcome.values()) {
             matches.put(outcome, Counter.builder(MATCHES)
-                    .description("StartTeamMatch 的终态（批次 4.3 没有开放组队的副本，只会出现 rejected / internal）")
+                    .description("StartTeamMatch 的终态：rejected / internal / unknown_code = 同步拒绝，ticket_failed = 建票失败，"
+                            + "success / gather_failed = gather 的结论，gather_unknown = 调 xm-match 的 gather 传输失败（结果不明）")
                     .tag("outcome", tagValue(outcome)).register(registry));
         }
         crossZoneAllowed.set(allowCrossZone ? 1 : 0);

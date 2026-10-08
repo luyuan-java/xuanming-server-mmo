@@ -1,5 +1,6 @@
 package com.game.team.store;
 
+import com.game.api.match.MatchBudgets;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.discovery.RedisKeys;
@@ -24,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,7 +49,9 @@ import org.slf4j.LoggerFactory;
  *   <li>自由读不稳定 → {@link FreeRead.Status#UNSTABLE}（服务层回 4029）；S_READ_MEMBERS 重试耗尽 → {@link MembersChangedException}。</li>
  * </ul>
  *
- * <p>批次 4.3 不含开战锁的钉版本提交与 EndMatch（基线 store.go:449-689，批次 6.4 补）；{@link #commit} 已按通用形状实现，6.4 直接复用。
+ * <p><b>整队开战</b>（基线 store.go:449-689，team-spec §1.7.6）：开战锁用 {@link #commitMatchLock} 钉版本提交（不走 {@link #mutate} 的
+ * 「重读重算」）；清锁用 {@link #endMatch}（后台、自带 110 s 单调截止与退避，不受任何请求预算约束）或单轮的 {@link #releaseMatchLockOnce}。
+ * 钉版本提交「报错」或「没有提交」都可能已经落盘（Redisson 会重发 EVAL），调用方必须按 token 确认（match-spec §12.1 第 9 条）。
  */
 public final class TeamStore {
 
@@ -66,6 +71,19 @@ public final class TeamStore {
     public static final int REPAIR_CAP = TeamLimits.CAPACITY;
     /** 被邀请人反查 ZSET 的 TTL（秒）：每次 IA 写入后 EXPIRE（scripts.go:122，脚本里是字面量 "3600"）。 */
     public static final long INVITE_INDEX_TTL_SECONDS = 3_600;
+
+    /** EndMatch 每一轮（S_READ + 会话读 + S_COMMIT）的独立预算，不继承任何请求预算（store.go:453）。 */
+    public static final long END_MATCH_ROUND_TIMEOUT_MS = 2_000;
+    /**
+     * EndMatch 的进程内单调截止（store.go:454-461）：必须 ≥ 最长的开战锁（5 人 101 s，{@code MatchBudgets.teamMatchLockSeconds}），否则 Redis
+     * 持续故障时循环先于锁截止放弃，全队停在 STARTING 直到锁自然过期。EndMatch 在锁提交之后才启动，剩余锁时长不超过 101 s；110 s 另留出
+     * 一轮 {@link #END_MATCH_ROUND_TIMEOUT_MS} 加最大退避的余量（{@code TeamBudgetConstraintTest} 钉住这条不等式）。
+     */
+    public static final long END_MATCH_MAX_DURATION_MS = MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS * 1000L;
+    /** EndMatch 冲突 / 故障的退避：50 ms 起翻倍、上限 1 s、±20% 均匀抖动（store.go:462-465）。 */
+    public static final long END_MATCH_BACKOFF_INITIAL_MS = 50;
+    public static final long END_MATCH_BACKOFF_MAX_MS = 1_000;
+    public static final double END_MATCH_BACKOFF_JITTER = 0.2;
 
     /** 建队专用的 expectedVer 哨兵：记录必须不存在（scripts.go:51-52）。 */
     static final String NEW_TEAM_VERSION = "new";
@@ -91,6 +109,23 @@ public final class TeamStore {
          * 脚本已执行但回复丢失；执行后正常返回 = 同一段 EVAL 被重发了一次。
          */
         default void beforeCommitEval(Decision decision, List<Object> keys, List<byte[]> args) {
+        }
+
+        /**
+         * 清开战锁的每一轮（{@link #endMatch} / {@link #releaseMatchLockOnce}）S_READ 之后、判定之前调用（基线 afterMatchReadHook）：
+         * 用来确定性地制造「锁期间别人提交」的版本冲突。
+         */
+        default void afterMatchRead(long teamId) {
+        }
+
+        /** {@link #endMatch} 的退避等待（基线 endMatchSleepFn；测试换成记录器不真睡）。 */
+        default void endMatchSleep(long millis) throws InterruptedException {
+            Thread.sleep(millis);
+        }
+
+        /** {@link #endMatch} 截止用的单调时钟（纳秒；测试用来拨快 110 s 的截止）。 */
+        default long nanoTime() {
+            return System.nanoTime();
         }
     }
 
@@ -252,6 +287,167 @@ public final class TeamStore {
         hooks.beforeCommitEval(d, call.keys(), call.args());
         Object raw = eval(TeamScript.COMMIT, call.keys(), call.args(), deadline, "S_COMMIT team=" + Long.toUnsignedString(teamId));
         return TeamReplies.parseCommit(raw, teamId, d, nowMs);
+    }
+
+    // ================================================================ 整队开战：钉版本提交与 EndMatch（store.go:449-648）
+
+    /**
+     * 开战锁提交入口（store.go:490-508，team-spec §1.7.6）：在 {@code snap}（本轮 S_READ）的记录上加锁，expectedVer 钉死为
+     * {@code snap.version}，<b>不</b>走 {@link #mutate} 的「重读并重算规则」循环——那种循环会在新名单上加锁、却按旧名单建票，破坏整队不可拆分。
+     *
+     * <ul>
+     *   <li>规则（{@link TeamRules#lockMatch}）拒绝 → {@code code}（4013 / 4018 / 4023 / 4030 / 4029），不写；</li>
+     *   <li>预算已过期 → 4029，不提交；</li>
+     *   <li>已提交 → {@code commit}；</li>
+     *   <li>{@code {0}} / {@code {-2}} → {@code retry}（{@code {-2}} 时顺手把索引错位的成员修复移出，记入 {@code repairs}）：调用方必须
+     *       <b>整轮重来</b>，并先按 token 确认这次的锁确实没落盘（{@link #releaseMatchLockOnce}）。</li>
+     * </ul>
+     *
+     * @param snap       本轮 S_READ 的快照（记录必须存在）
+     * @param roster     参战名单（必须与记录成员集合相等，否则 4029）
+     * @param expireAtMs 锁截止（Redis 时钟毫秒）= {@code snap.nowMs + 锁时长}
+     * @param sessions   {@code {-2}} 修复时读成员会话用（null 视为 {@link SessionLoader#NONE}）
+     * @throws DependencyException 快照缺记录（程序缺陷）、Redis / 数据故障、意外的脚本返回——<b>结果未知</b>：EVAL 可能已在 Redis 执行，
+     *                             调用方必须按 token 后台清锁
+     */
+    public PinnedResult commitMatchLock(Snapshot snap, long caller, String token, List<Long> roster, long expireAtMs,
+                                        SessionLoader sessions, Deadline deadline) {
+        if (snap == null || snap.record() == null || snap.version() == 0) {
+            throw new DependencyException("开战锁提交缺少记录快照");
+        }
+        Decision d = TeamRules.lockMatch(snap.record(), caller, token, roster, expireAtMs, snap.nowMs());
+        if (d.code() != TeamTips.OK) {
+            return PinnedResult.rejected(d.code(), d.param());
+        }
+        if (deadline.expired()) {
+            return PinnedResult.rejected(TeamTips.STATE_CHANGED, 0);
+        }
+        return commitPinned(snap, d, sessions, deadline);
+    }
+
+    /**
+     * 清开战锁的专用循环（store.go:537-585，team-spec §1.7.6）。不复用 {@link #mutate} 的 3 次冲突上限：锁期间队外玩家的申请 / 被邀请
+     * 持续让 ver+1，数量不受本队控制，3 次就放弃会让全员停在 STARTING 直到锁过期。
+     *
+     * <ol>
+     *   <li>S_READ 本队记录（nowMs 取 Redis TIME）；</li>
+     *   <li>记录不存在 / token 不符 / nowMs ≥ 锁截止 → 停止，不写；</li>
+     *   <li>否则按 expectedVer = ver 提交清锁；{@code {0}} → 退避后回第 1 步；{@code {-2}} → 修复后<b>立即</b>回第 1 步；
+     *       本轮报错 → 记 {@code lastError}、退避后重试。</li>
+     * </ol>
+     * 截止：锁自己的截止时间（每轮用 nowMs 判）+ 进程内单调时钟 {@link #END_MATCH_MAX_DURATION_MS} 兜底；每轮一个独立的
+     * {@link #END_MATCH_ROUND_TIMEOUT_MS} 预算。
+     *
+     * <p>同步阻塞直到结局（最坏 110 s），调用方放在后台执行器（{@code team-match-end}）上，<b>不得</b>在请求工作线程上调；
+     * 不推送、不打指标（服务层按结果处理）。退避被中断（停机）→ {@link EndMatchStop#INTERRUPTED}，线程的中断标志保持置位。从不抛依赖故障。
+     *
+     * @param ok       开局是否成功（清锁提交的 Reason：MATCH_ENDED / MATCH_FAILED）
+     * @param sessions 清锁决策的惰性转让与 {@code {-2}} 修复用（null 视为 {@link SessionLoader#NONE}）
+     */
+    public EndMatchResult endMatch(long teamId, String token, boolean ok, SessionLoader sessions) {
+        List<CommitResult> repairs = new ArrayList<>();
+        int conflicts = 0;
+        DependencyException lastError = null;
+        long maxNanos = TimeUnit.MILLISECONDS.toNanos(END_MATCH_MAX_DURATION_MS);
+        long start = hooks.nanoTime();
+        long backoff = END_MATCH_BACKOFF_INITIAL_MS;
+        while (true) {
+            if (hooks.nanoTime() - start >= maxNanos) {
+                return new EndMatchResult(EndMatchStop.DEADLINE, null, repairs, conflicts, lastError);
+            }
+            LockRelease round = null;
+            try {
+                round = releaseRound(teamId, token, ok, sessions, Deadline.after(END_MATCH_ROUND_TIMEOUT_MS));
+            } catch (DependencyException e) {
+                lastError = e;
+            }
+            if (round != null) {
+                if (round.stop() != null) {
+                    return new EndMatchResult(round.stop(), null, repairs, conflicts, lastError);
+                }
+                PinnedResult pinned = round.pinned();
+                repairs.addAll(pinned.repairs());
+                if (pinned.commit() != null) {
+                    return new EndMatchResult(EndMatchStop.RELEASED, pinned.commit(), repairs, conflicts, lastError);
+                }
+                if (!pinned.repairs().isEmpty()) {
+                    continue; // 修复已落盘、ver 已变：立即重读
+                }
+                conflicts++;
+            }
+            try {
+                hooks.endMatchSleep(jittered(backoff));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return new EndMatchResult(EndMatchStop.INTERRUPTED, null, repairs, conflicts, lastError);
+            }
+            backoff = Math.min(backoff * 2, END_MATCH_BACKOFF_MAX_MS);
+        }
+    }
+
+    /**
+     * 按 token 清开战锁（ok = false）的<b>单轮</b>版本（store.go:587-592）：读 → 判定 → 钉版本提交，不退避、不重试，受调用方预算约束。
+     * StartTeamMatch 在开战锁提交没拿到「已提交」时用它确认本 token 的锁不在。
+     *
+     * @return {@code stop != null}：记录不存在 / token 不符 / 锁已过期，均不写；否则 {@code pinned.commit != null} 表示已清，
+     *         为 null 表示没清（冲突或刚做过修复）
+     * @throws DependencyException Redis / 数据故障（调用方转后台清锁）
+     */
+    public LockRelease releaseMatchLockOnce(long teamId, String token, SessionLoader sessions, Deadline deadline) {
+        return releaseRound(teamId, token, false, sessions, deadline);
+    }
+
+    /** 清锁的一轮（store.go:594-618）：只关心记录，S_READ 的玩家位传 0（{@code xm:{team}:player:0} 恒不存在，脚本只读不写）。 */
+    private LockRelease releaseRound(long teamId, String token, boolean ok, SessionLoader sessions, Deadline deadline) {
+        Snapshot snap = read(0, teamId, deadline);
+        hooks.afterMatchRead(teamId);
+        TeamRecord rec = snap.record();
+        if (rec == null) {
+            return LockRelease.stopped(EndMatchStop.RECORD_MISSING);
+        }
+        if (token == null || !rec.getMatchLockToken().equals(token)) {
+            return LockRelease.stopped(EndMatchStop.TOKEN_MISMATCH);
+        }
+        if (!TeamRules.matchLockActive(rec, snap.nowMs())) {
+            return LockRelease.stopped(EndMatchStop.LOCK_EXPIRED);
+        }
+        Decision d = TeamRules.releaseMatchLock(rec, token, ok, snap.nowMs(), loadSessions(sessions, rec, deadline));
+        if (!d.changed()) {
+            return LockRelease.stopped(EndMatchStop.TOKEN_MISMATCH); // 防御：上面已判过；规则层再拒即视为锁已不属于本次
+        }
+        return LockRelease.attempted(commitPinned(snap, d, sessions, deadline));
+    }
+
+    /**
+     * 按 {@code snap.version} 钉死提交 d（不重读、不重算规则；store.go:620-648）。{@code {-2,i}}：把索引已指向别队的保留成员移出
+     * （{@link #repairIndexMismatch}，修复提交同样钉在 {@code snap.version}，与 {@link #mutate} 同口径），原决策本次不提交、返回 retry。
+     * d 不含 joined / invitesAdded，{@code {-1}} / {@code {-3}} 不可能出现，出现即程序缺陷。
+     */
+    private PinnedResult commitPinned(Snapshot snap, Decision d, SessionLoader sessions, Deadline deadline) {
+        String expectedVer = Long.toUnsignedString(snap.version());
+        CommitOutcome out = commit(snap.teamId(), expectedVer, d, snap.nowMs(), snap.record(), deadline);
+        switch (out.status()) {
+            case OK -> {
+                return PinnedResult.committed(out.result());
+            }
+            case CONFLICT -> {
+                return PinnedResult.retry(List.of());
+            }
+            case INDEX_MISMATCH -> {
+                CommitOutcome fixed = repairIndexMismatch(snap, expectedVer, d, out.index(),
+                        loadSessions(sessions, snap.record(), deadline), deadline);
+                return PinnedResult.retry(fixed != null && fixed.status() == CommitStatus.OK
+                        ? List.of(fixed.result()) : List.of());
+            }
+            default -> throw new DependencyException("钉版本提交出现意外返回 status=" + out.status() + " index=" + out.index()
+                    + " team=" + Long.toUnsignedString(snap.teamId()));
+        }
+    }
+
+    /** 给退避加 ±{@link #END_MATCH_BACKOFF_JITTER} 的均匀抖动（store.go:686-689；选时不要求确定性）。 */
+    private static long jittered(long millis) {
+        double factor = 1 + END_MATCH_BACKOFF_JITTER * (2 * ThreadLocalRandom.current().nextDouble() - 1);
+        return Math.max(1, Math.round(millis * factor));
     }
 
     // ================================================================ 读
