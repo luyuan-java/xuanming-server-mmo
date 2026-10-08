@@ -44,7 +44,8 @@ import java.util.function.Supplier;
  *       {@code PresenceLobbyAnnouncer} 计 {@link #lobbyPushOutcome}；</li>
  *   <li>直连面（{@code com.game.battle.edge}）：{@link #handshake}、{@link #clientRequest}、{@link #invalidFrame}、{@link #disconnect}
  *       （含房间经 {@code DirectLink.closeGracefully / closeNow} 传入的原因，由直连面在真正关闭时计一次）；</li>
- *   <li>出站端口实现：{@link #sceneEvent}、{@link #result}；</li>
+ *   <li>出站端口实现：{@link #sceneEvent}、{@link #result}；对局结果的 Kafka 传输（{@code port.kafka.KafkaBattleResultSink}）另计
+ *       {@link #resultEvent}；</li>
  *   <li>控制面（{@code rpc} / {@code BattleNode}）：{@link #rpc}、{@code roomCreate(NOT_ALLOCATABLE)}、{@link #leaseLost}；</li>
  *   <li>dev 管理接口（{@code admin.DevGatherController}）：{@link #devGather}。</li>
  * </ul>
@@ -69,6 +70,7 @@ public final class BattleMetrics {
     static final String TICKETS = "xm.battle.tickets";
     static final String SCENE_EVENTS = "xm.battle.scene.events";
     static final String RESULTS = "xm.battle.results";
+    static final String RESULT_EVENTS = "xm.battle.result.events";
     static final String RPC = "xm.battle.rpc";
     static final String LOGIC_PENDING = "xm.battle.logic.pending.tasks";
     static final String ADMISSION_PHASE = "xm.battle.admission.phase";
@@ -253,11 +255,29 @@ public final class BattleMetrics {
         ACTIVITY
     }
 
-    /** 对局结果事件一次发送的结局（{@code xm_battle_results_total{result}}）。6.2 只有 {@link #LOGGED}。 */
+    /**
+     * 对局结果事件一次发布的结局（{@code xm_battle_results_total{result}}），每次 {@code publish} 恰好计一次。只记日志的实现
+     * （{@code LoggingBattleResultSink}）只有 {@link #LOGGED}；Kafka 实现（6.4）在结局确定时计 {@link #SENT} 或 {@link #ERROR}。
+     */
     public enum ResultOutcome {
         LOGGED,
+        /** Kafka 已确认。 */
         SENT,
+        /** 没能由 Kafka 确认（已完整写进兜底日志 {@code xm.battle.result.fallback}；细分见 {@link ResultEvent}）。 */
         ERROR
+    }
+
+    /**
+     * 对局结果事件在 Kafka 传输上的结局（{@code xm_battle_result_events_total{result}}；match-spec §5.4、§11），每次 {@code publish} 恰好计一次，
+     * 不分通道（分通道的计数见 {@link ResultOutcome}：{@code sent} 相等，{@code error} = {@code fallback} + {@code not_verified}）。
+     */
+    public enum ResultEvent {
+        /** Kafka 已确认。 */
+        SENT,
+        /** 队列满 / 发送失败 / 投递失败 / 停服没发完：完整字节写进兜底日志。 */
+        FALLBACK,
+        /** topic 还没核对通过（Kafka 不可达、分区契约不符、生产者待重建）：同样写兜底日志，单列出来便于告警区分「一直没接上」。 */
+        NOT_VERIFIED
     }
 
     /** 控制面方法（{@code xm_battle_rpc_seconds{method}}）。 */
@@ -331,6 +351,7 @@ public final class BattleMetrics {
     private final Map<TicketPath, Map<Boolean, Counter>> tickets;
     private final Map<SceneEventKind, Map<SceneEventResult, Counter>> sceneEvents;
     private final Map<ResultChannel, Map<ResultOutcome, Counter>> results;
+    private final Map<ResultEvent, Counter> resultEvents;
     private final Map<RpcMethod, Map<RpcResult, Timer>> rpcs;
     private final Counter leaseLost;
     private final Map<DevGatherMode, Map<DevGatherResult, Counter>> devGathers;
@@ -402,6 +423,8 @@ public final class BattleMetrics {
             resultCounters.put(channel, byResult);
         }
         this.results = resultCounters;
+        this.resultEvents = counters(ResultEvent.class, RESULT_EVENTS, "对局结果事件在 Kafka 传输上的结局（每次发布恰好计一次）", "result",
+                BattleMetrics::lower);
         Map<RpcMethod, Map<RpcResult, Timer>> rpcTimers = new EnumMap<>(RpcMethod.class);
         for (RpcMethod method : RpcMethod.values()) {
             Map<RpcResult, Timer> byResult = new EnumMap<>(RpcResult.class);
@@ -520,6 +543,11 @@ public final class BattleMetrics {
 
     public void result(ResultChannel channel, ResultOutcome result) {
         results.get(channel).get(result).increment();
+    }
+
+    /** 对局结果事件在 Kafka 传输上的结局（Kafka 实现在结局确定时调：发布线程、{@code battle-result-out} 或 Kafka 的发送线程）。 */
+    public void resultEvent(ResultEvent result) {
+        resultEvents.get(result).increment();
     }
 
     // ---------------------------------------------------------------- 控制面与节点

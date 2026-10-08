@@ -7,12 +7,17 @@
 #   XM_GATE_TOKEN_SECRET   可选：进程能看到时用于「battle 密钥不得与 gate 相同」检查（本机切片会导出）
 #   XM_ADMIN_TOKEN         可选：dev / test 管理接口 /admin/battle/dev/* 的 X-Xm-Admin-Token；不设则 /admin/** 一律 503
 #   DUBBO_IP_TO_BIND       控制面 Dubbo 端口绑定的网卡（Dubbo 不接受回环，缺省监听全部网卡；生产绑内网网卡并配防火墙）
+# 不是秘密、但同样只走环境变量的两项（批次 6.4，对局结果的 Kafka 生产）：
+#   XM_KAFKA_BOOTSTRAP_SERVERS         Kafka 地址（缺省 127.0.0.1:9092；与 xm-scene / xm-data / xm-match 共用同一个变量）
+#   XM_BATTLE_RESULT_TOPIC_GENERATION  对局结果 topic 的代次（缺省 1；必须与 xm-match 一致，本机切片由 start-slice.sh 导出）
 #
 # 不用 MySQL：房间是纯内存的（节点崩溃 = 在打的战斗全部作废，由 scene 的 reaper 按期限解冻）。Redis 写：节点号租约（battle，作用域 0）、
 # 节点目录 xm:nodes:battle:0，以及 6.3 的两个发件箱——待结算记录 xm:battle:{pid}:settlement（每局一个字段，7 天）、「已被取代」时的
 # 已销账墓碑 xm:battle:{pid}:settled:<battle_id>（10 min）、活动结果持久副本 xm:battle:activity-result:<battle_id>（7 天）。
 # Redis 读：在线目录（大厅公告 177 / 143 经 gate 回落）、位置记录与 scene 节点目录（结算 / 确认的定位、直连客户端缓存的清扫、dev 接口）、
 # 战斗锁 xm:battle:{pid}:lock（只在「已被取代」的判定脚本里读）。
+# Kafka 只生产（批次 6.4，match-spec §5.4）：真正打完的局把 BattleResultEvent 发到 xm-battle-result-g<代次>（3 分区、key = battle_id，
+# 消费方是 xm-match 的评分）；dev 管理接口建的房间永不发。Kafka 不可达不影响启动与战斗：结果事件完整写进兜底日志 xm.battle.result.fallback。
 spring:
   application:
     name: xm-battle
@@ -85,3 +90,12 @@ xm:
     scene-rpc-timeout: 5s
     # 停机时等在途的结算落库与首投回来的上限（之后丢弃内存名单，记录留在 Redis 由 scene 兜底）；0 = 不等。
     outbox-drain-timeout: 3s
+    # 对局结果 → Kafka（批次 6.4，match-spec §5.4）。topic 名是 xm-battle-result-g<topic-generation>，分区数（3）是与 xm-match 共同的契约：
+    # 启动时核对，不符即拒启（改分区数只能升代次，两个进程一起改）；Kafka 不可达不拒启——启动线程最多等 init-timeout，之后结果事件
+    # 写兜底日志 xm.battle.result.fallback（一行一条、带完整字节，可回灌），有事件要发时每 30 s 再核对一次。
+    result:
+      bootstrap-servers: ${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+      topic-generation: ${XM_BATTLE_RESULT_TOPIC_GENERATION:1}
+      # 新建 topic 的副本数（只在本进程先于 xm-match 启动、topic 还不存在时用到；保留期由 xm-match 校正）。
+      replication-factor: 1
+      init-timeout: 10s

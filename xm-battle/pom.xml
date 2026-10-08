@@ -18,7 +18,8 @@
         Tomcat（缺省 18112）。一条 battle-logic 线程同时是直连面唯一的 Netty I/O EventLoop，独占全部房间、直连会话与房间计时器；
         引擎用 xm-battle-engine。不用 MySQL；Redis 写节点号租约（battle，作用域 0）与节点目录，只读在线目录（大厅公告）；
         批次 6.3 起另写玩家的待结算记录与活动结果键（结算发件箱 / 活动结果通道，docs/porting/scene-battle-spec.md §7.15–§7.17）、
-        读玩家位置记录与 scene 节点目录（结算与确认的寻址）。
+        读玩家位置记录与 scene 节点目录（结算与确认的寻址）。批次 6.4 起是对局结果 topic（xm-battle-result-g&lt;代次&gt;）的 Kafka 生产方
+        （docs/porting/match-spec.md §5.4；消费方 xm-match）。
     </description>
 
     <dependencies>
@@ -60,6 +61,12 @@
             <!-- 节点号租约、节点目录、在线目录与 PlayerPushes（大厅公告） -->
             <groupId>com.game</groupId>
             <artifactId>xm-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 对局结果 topic 的规格与启动期核对（BattleResultTopics / TopicAdmin）；kafka-clients 经它传递进来
+                 （match-spec §5.4：battle 是生产方，只核对分区数；不是新的第三方依赖） -->
+            <groupId>com.game</groupId>
+            <artifactId>xm-audit</artifactId>
         </dependency>
 
         <!-- 控制面：按节点导出的 Dubbo Triple 提供方（register = false，编程式导出，启停排进 BattleNode 的顺序；

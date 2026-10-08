@@ -7,11 +7,13 @@ import com.game.battle.admin.DevRoutingResolver;
 import com.game.battle.admission.AdmissionGate;
 import com.game.battle.engine.TableBattleData;
 import com.game.battle.metrics.BattleMetrics;
+import com.game.audit.AuditTopicContractException;
 import com.game.battle.port.ActivityResultSink;
 import com.game.battle.port.BattleResultSink;
-import com.game.battle.port.LoggingBattleResultSink;
 import com.game.battle.port.SceneBattleEvents;
 import com.game.battle.port.SettlementSink;
+import com.game.battle.port.kafka.BattleResultProperties;
+import com.game.battle.port.kafka.KafkaBattleResultSink;
 import com.game.battle.port.scene.SceneTransport;
 import com.game.battle.port.scene.SceneTransportProperties;
 import com.game.battle.outbox.OutboxMetrics;
@@ -63,10 +65,14 @@ import org.springframework.core.env.Environment;
  * 运行模式读 {@code xm.run-mode}（{@code XM_RUN_MODE}），不认识的值按 prod 处理并 WARN（§11 N8）。
  *
  * <p>出站端口：{@link SceneBattleEvents} / {@link SettlementSink} / {@link ActivityResultSink} 自 6.3 起是真实传输（{@link SceneTransport}）；
- * {@link BattleResultSink} 仍是日志缺省实现（6.4 接 match）。测试提供同类型的 bean 时这里的缺省实现让位（{@link ConditionalOnMissingBean}）。
+ * {@link BattleResultSink} 自 6.4 起是 Kafka 生产方（{@link KafkaBattleResultSink}，match-spec §5.4）。测试提供同类型的 bean 时这里的缺省实现让位
+ * （{@link ConditionalOnMissingBean}）。
+ *
+ * <p>对局结果 topic 的启动门禁：分区数与契约不符即拒启（同样在任何端口打开之前）；Kafka 不可达<b>不</b>拒启——启动线程最多等
+ * {@code xm.battle.result.init-timeout}，之后结果事件写兜底日志，有事件要发时每 30 s 再核对一次。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({BattleProperties.class, SceneTransportProperties.class})
+@EnableConfigurationProperties({BattleProperties.class, SceneTransportProperties.class, BattleResultProperties.class})
 public class BattleConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(BattleConfiguration.class);
@@ -209,11 +215,36 @@ public class BattleConfiguration {
         return battleSceneTransport.activityResults();
     }
 
-    /** 普通局结果 → match：6.2 只记日志（6.4，Q12）。 */
-    @Bean
+    /**
+     * 对局结果 → Kafka（批次 6.4，match-spec §5.4；落实 battle-node-spec Q12）：普通局由房间在 {@code battle-logic} 上交来，活动局由活动结果通道在
+     * {@code battle-outbox} 上交来（首发 + 重发）；发送在专用的 {@code battle-result-out} 线程上。topic {@code xm-battle-result-g<代次>}，
+     * 代次 {@code xm.battle.result.topic-generation}（{@code XM_BATTLE_RESULT_TOPIC_GENERATION}）必须与 xm-match 一致。
+     *
+     * <p>第一次核对 topic 在这里（建 bean 的启动线程上）同步做：分区数与契约不符 → 拒启；Kafka 不可达 → 最多等
+     * {@code xm.battle.result.init-timeout}，告警后照常启动（结果事件写兜底日志，之后有事件要发时每 30 s 再核对一次）。Spring 销毁它时
+     * （battle 节点停机、{@link SceneTransport} 关闭之后——后者依赖本 bean，先销毁）有界地发完队列、关生产者，没发完的写兜底日志。
+     *
+     * <p>{@code clients} 是测试的替换口（{@code MockProducer} + 假的 topic 管理）；生产不提供这个 bean，用真 Kafka 客户端。
+     * 客户端 id 带控制面通告地址与端口，便于在 broker 日志里认出是哪个 battle 实例。
+     */
+    @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean(BattleResultSink.class)
-    public BattleResultSink battleResultSink(BattleMetrics battleMetrics) {
-        return new LoggingBattleResultSink(battleMetrics);
+    public KafkaBattleResultSink battleResultSink(BattleResultProperties resultProps, BattleProperties props,
+                                                  @Value("${xm.advertise-host}") String advertiseHost, BattleMetrics battleMetrics,
+                                                  ObjectProvider<KafkaBattleResultSink.Clients> clients) {
+        String clientId = "xm-battle-result-" + advertiseHost + "-" + props.rpcPort();
+        KafkaBattleResultSink sink = new KafkaBattleResultSink(
+                clients.getIfAvailable(() -> KafkaBattleResultSink.Clients.kafka(resultProps.bootstrapServers(), clientId)),
+                resultProps.topicGeneration(), resultProps.replicationFactor(), resultProps.initTimeout(), battleMetrics);
+        try {
+            sink.start();
+        } catch (AuditTopicContractException e) {
+            sink.close();
+            throw new IllegalStateException("拒绝启动：" + e.getMessage(), e);
+        }
+        log.info("对局结果经 Kafka 发布 kafka={} topic={} client_id={} 已核对={}", resultProps.bootstrapServers(), sink.topic(), clientId,
+                sink.verified());
+        return sink;
     }
 
     /** 要 Redis / 端口 / 节点身份的部件的工厂（测试换成假实现）。 */
