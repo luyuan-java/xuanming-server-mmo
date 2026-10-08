@@ -83,6 +83,12 @@ public final class MatchTeamBattle implements TeamBattlePort {
                             Integer.toUnsignedString(ttl));
                     yield Check.rejected(TeamTips.INTERNAL, 0);
                 }
+                if (!reply.getZonesMap().keySet().containsAll(roster)) {
+                    // 通过的应答必须带齐每个人的 zone（建票时原样带回）：缺了就是不可信的应答，不拿 0 顶替
+                    log.error("[team] xm-match 的预检通过应答没有带齐每名成员的 zone（按 4030）: roster={} zones={}", roster.size(),
+                            reply.getZonesCount());
+                    yield Check.rejected(TeamTips.INTERNAL, 0);
+                }
                 yield Check.passed(reply.getZonesMap(), ttl);
             }
             case TEAM_MATCH_CHECK_DUNGEON_NOT_OPEN -> Check.rejected(TeamTips.DUNGEON_NOT_OPEN, 0);

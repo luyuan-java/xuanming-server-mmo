@@ -20,8 +20,8 @@ import com.game.proto.team.TeamInviteS2C;
 import com.game.proto.team.TeamResponse;
 import com.game.proto.team.TeamSnapshotS2C;
 import com.game.team.dispatch.TeamDispatcher;
-import com.game.team.match.NoTeamBattle;
-import com.game.team.match.TeamBattlePort;
+import com.game.team.match.FakeMatchTeamService;
+import com.game.team.match.MatchTeamBattle;
 import com.game.team.metrics.TeamMetrics;
 import com.game.team.presence.SessionReads;
 import com.game.team.proto.TeamRecord;
@@ -140,7 +140,8 @@ final class TeamServiceFixture {
     /** team_id 发号；{@link #idError} 非 null 时发号失败。 */
     private final AtomicLong nextTid;
     volatile RuntimeException idError;
-    volatile TeamBattlePort battle = NoTeamBattle.INSTANCE;
+    /** xm-match 的替身：缺省没有任何副本开放组队（预检回 DUNGEON_NOT_OPEN → 4027）；整队开战的完整用例在 {@code TeamMatchScenarios}。 */
+    final FakeMatchTeamService match = new FakeMatchTeamService();
 
     private final List<Pushed> pushes = Collections.synchronizedList(new ArrayList<>());
     private final long pidBase;
@@ -228,12 +229,8 @@ final class TeamServiceFixture {
             long tid = nextTid.incrementAndGet();
             tids.add(tid);
             return tid;
-        }, playerBattle(), teamPushes, metrics, RuleConfig.DEFAULT);
+        }, new MatchTeamBattle(match), Runnable::run, teamPushes, metrics, RuleConfig.DEFAULT);
         this.dispatcher = new TeamDispatcher(REGISTRY, service, Runnable::run, metrics, 3500);
-    }
-
-    private TeamBattlePort playerBattle() {
-        return configId -> battle.teamSizeFor(configId);
     }
 
     /** 展示缓存：在线 = 会话 ONLINE；资料是固定的假值。 */

@@ -14,14 +14,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * team 的阻塞线程池（照 xm-friend 的 FriendWorkerPool，team-spec §6.4）。两个实例：
+ * team 的阻塞线程池（照 xm-friend 的 FriendWorkerPool，team-spec §6.4）。三个实例：
  * <ul>
  *   <li>{@value #WORKER}：处理客户端请求（等 Redis 结果、读 MySQL 都在这里，不占 Dubbo 线程，AGENTS.md §3）；</li>
- *   <li>{@value #PUSH}：提交后的推送批（展示资料要读 MySQL，所以允许阻塞），不与请求争线程。</li>
+ *   <li>{@value #PUSH}：提交后的推送批（展示资料要读 MySQL，所以允许阻塞），不与请求争线程；</li>
+ *   <li>{@value #MATCH_END}：整队开战加锁之后的收尾（清开战锁、退票；match-spec §7.6）。一次收尾最坏阻塞 110 s（Redis 持续故障时的
+ *       EndMatch 循环），所以既不能占请求工作线程，也不能在 Dubbo 的回调线程上做。</li>
  * </ul>
  *
- * <p>固定线程数 + 有界队列；队列满时 {@link #execute} 抛 {@link RejectedExecutionException}（请求回 in-band 4030，推送批整批放弃），
- * 过载时快速失败而不是把延迟拖过 gate 的 5 s Dubbo 超时。关闭时先停止接新任务，最多等 {@code drainTimeout} 再中断剩余任务。
+ * <p>固定线程数 + 有界队列；队列满时 {@link #execute} 抛 {@link RejectedExecutionException}（请求回 in-band 4030，推送批整批放弃，
+ * 开战收尾放弃、锁靠自然过期），过载时快速失败而不是把延迟拖过 gate 的 5 s Dubbo 超时。关闭时先停止接新任务，最多等
+ * {@code drainTimeout} 再中断剩余任务（EndMatch 的退避被中断即停止，锁靠自然过期，同基线「进程退出不等 EndMatch」）。
  * 线程池标准指标（{@code executor_*}）的 {@code name} 标签是池名。
  */
 public final class TeamWorkerPool implements Executor, AutoCloseable, MeterBinder {
@@ -32,6 +35,8 @@ public final class TeamWorkerPool implements Executor, AutoCloseable, MeterBinde
     public static final String WORKER = "team-worker";
     /** 推送池的名字。 */
     public static final String PUSH = "team-push";
+    /** 整队开战收尾池的名字。 */
+    public static final String MATCH_END = "team-match-end";
 
     private final String name;
     private final ThreadPoolExecutor pool;

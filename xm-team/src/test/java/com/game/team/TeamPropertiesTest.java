@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 class TeamPropertiesTest {
 
     private static TeamProperties props(Duration requestBudget) {
-        return new TeamProperties(null, requestBudget, null, null, null, null, null, null);
+        return new TeamProperties(null, requestBudget, null, null, null, null, null, null, null, null);
     }
 
     @Test
@@ -23,6 +23,8 @@ class TeamPropertiesTest {
         assertThat(p.workerQueueCapacity()).isEqualTo(1024);
         assertThat(p.pushThreads()).isEqualTo(4);
         assertThat(p.pushQueueCapacity()).isEqualTo(1024);
+        assertThat(p.matchEndThreads()).as("整队开战收尾池").isEqualTo(4);
+        assertThat(p.matchEndQueueCapacity()).isEqualTo(1024);
         assertThat(p.queryTimeoutCapSeconds()).isEqualTo(4);
     }
 
@@ -39,19 +41,26 @@ class TeamPropertiesTest {
 
     @Test
     void 其余项必须为正() {
-        assertThatThrownBy(() -> new TeamProperties(null, null, Duration.ZERO, null, null, null, null, null))
+        assertThatThrownBy(() -> new TeamProperties(null, null, Duration.ZERO, null, null, null, null, null, null, null))
                 .hasMessageContaining("push-batch-budget");
-        assertThatThrownBy(() -> new TeamProperties(null, null, null, Duration.ofMillis(-1), null, null, null, null))
+        assertThatThrownBy(() -> new TeamProperties(null, null, null, Duration.ofMillis(-1), null, null, null, null, null, null))
                 .hasMessageContaining("home-zone-timeout");
-        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, 0, null, null, null))
+        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, 0, null, null, null, null, null))
                 .hasMessageContaining("worker-threads");
-        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, 0, null, null))
+        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, 0, null, null, null, null))
                 .hasMessageContaining("worker-queue-capacity");
-        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, null, -1, null))
+        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, null, -1, null, null, null))
                 .hasMessageContaining("push-threads");
-        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, null, null, 0))
+        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, null, null, 0, null, null))
                 .hasMessageContaining("push-queue-capacity");
-        assertThat(new TeamProperties(true, null, null, null, null, null, null, null).allowCrossZone()).isTrue();
+        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, null, null, null, 0, null))
+                .hasMessageContaining("match-end-threads");
+        assertThatThrownBy(() -> new TeamProperties(null, null, null, null, null, null, null, null, null, -5))
+                .hasMessageContaining("match-end-queue-capacity");
+        TeamProperties tuned = new TeamProperties(null, null, null, null, null, null, null, null, 2, 16);
+        assertThat(tuned.matchEndThreads()).isEqualTo(2);
+        assertThat(tuned.matchEndQueueCapacity()).isEqualTo(16);
+        assertThat(new TeamProperties(true, null, null, null, null, null, null, null, null, null).allowCrossZone()).isTrue();
     }
 
     @Test

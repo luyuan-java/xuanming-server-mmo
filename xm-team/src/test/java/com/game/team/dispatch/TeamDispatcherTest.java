@@ -15,7 +15,8 @@ import com.game.proto.team.ListMyInvitesResponse;
 import com.game.proto.team.TeamResponse;
 import com.game.proto.team.TeamSnapshotS2C;
 import com.game.proto.team.TeamView;
-import com.game.team.match.NoTeamBattle;
+import com.game.team.match.FakeMatchTeamService;
+import com.game.team.match.MatchTeamBattle;
 import com.game.team.metrics.TeamMetrics;
 import com.game.team.presence.SessionReads;
 import com.game.team.push.TeamPushes;
@@ -126,7 +127,7 @@ class TeamDispatcherTest {
             return CompletableFuture.completedFuture(PlayerPushes.Outcome.SENT);
         }, Runnable::run, metrics, Duration.ofSeconds(3), new TeamPushes.MessageIds(213, 215, 203));
         return new TeamService(store, NO_SESSIONS, (ids, d) -> Map.of(), (ids, d) -> Map.of(), () -> 1L,
-                NoTeamBattle.INSTANCE, pushes, metrics, RuleConfig.DEFAULT);
+                new MatchTeamBattle(new FakeMatchTeamService()), Runnable::run, pushes, metrics, RuleConfig.DEFAULT);
     }
 
     private TeamDispatcher dispatcher(Mode mode, Executor executor, long budgetMillis) {

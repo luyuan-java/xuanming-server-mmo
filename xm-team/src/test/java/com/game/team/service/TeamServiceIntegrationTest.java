@@ -61,7 +61,8 @@ import org.redisson.api.RedissonClient;
 
 /**
  * 组队服务层在真 Redis 上的行为，逐个对应基线 go/match/internal/team/service_test.go（设计稿 §I.3 #12-#15、#23-#27），
- * 外加批次 4.3 的 StartTeamMatch（team-spec §5.4）与各 RPC 的检查顺序 / 回包视图来源（§3）。
+ * 外加 StartTeamMatch 加锁之前的三步（team-spec §5.1；整队开战的完整流程见 {@code TeamMatchScenarios}）与各 RPC 的检查顺序 /
+ * 回包视图来源（§3）。
  *
  * <p>与基线的差别：Java 不发 scene 刷新信号（D7），所以基线断言 scene 收件人的地方只断言推送；真 Redis 拨不动 TIME，
  * 「整队空闲 24 h 过期」用删键模拟、时间断言按 Redis TIME 取值。
@@ -673,7 +674,9 @@ class TeamServiceIntegrationTest {
         assertThat(failed.getServerTimeMs()).isZero();
     }
 
-    // ================================================================ 批次 4.3 的 StartTeamMatch（team-spec §5.4）
+    // ================================================================ StartTeamMatch 加锁之前的三步（team-spec §5.1 第 1–3 步）
+    // 夹具里的 xm-match 替身没有开放任何副本（预检回 DUNGEON_NOT_OPEN → 4027）。加锁、建票、gather 与补偿的完整用例在
+    // TeamMatchScenarios（TeamServiceTest 用内存后端、TeamMatchRedisIntegrationTest 用真 Redis）。
 
     @Test
     void 开战_未绑定4013带视图_非队长4018_队长4027带IDLE视图_不加锁不推送() {

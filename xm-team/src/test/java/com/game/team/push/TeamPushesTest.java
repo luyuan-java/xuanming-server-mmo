@@ -4,10 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.discovery.presence.PlayerPushes;
 import com.game.proto.MessageContent;
+import com.game.proto.TipInfoMessage;
 import com.game.proto.team.TeamChangeReason;
 import com.game.proto.team.TeamEventS2C;
 import com.game.proto.team.TeamEventType;
 import com.game.proto.team.TeamInviteS2C;
+import com.game.proto.team.TeamMatchState;
 import com.game.proto.team.TeamSnapshotS2C;
 import com.game.team.metrics.TeamMetrics;
 import com.game.team.proto.TeamApplicationRecord;
@@ -463,6 +465,119 @@ class TeamPushesTest {
         pushes(recording(PlayerPushes.Outcome.SENT), Runnable::run, Duration.ofSeconds(3), new FailingRedis())
                 .publishOnline(A, TID, List.of(A, B));
         assertThat(pushCount("snapshot", "error")).isEqualTo(1);
+        assertThat(sent).isEmpty();
+    }
+
+    // ================================================================ 整队开战的结果推送（match-spec §7.6；基线 service.go:497-595）
+
+    private static TipInfoMessage tip(int id, long param) {
+        return TipInfoMessage.newBuilder().setId(id).addParameters(Long.toUnsignedString(param)).build();
+    }
+
+    @Test
+    void 开战结果的提交推送_带pushTip时每份快照都附上它_不带时不设tip字段_调用者为0即全员() {
+        TeamRecord rec = record(A, A, B, C);
+        CommitResult failed = commit(decision(rec, List.of(), List.of(A, B, C), List.of(),
+                TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED, 0, false, List.of(), 0, 0));
+        assertThat(failed.pushTip()).as("存储层产出的提交不带推送原因").isNull();
+
+        pushes().publish(0, List.of(failed.withPushTip(tip(4026, C))));
+
+        assertThat(sent).extracting(Sent::playerId).as("结果推全员（含发起人）").containsExactly(A, B, C);
+        for (Sent s : sent) {
+            assertThat(s.snapshot().getReason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED);
+            assertThat(s.snapshot().getActorId()).isZero();
+            assertThat(s.snapshot().getTip().getId()).isEqualTo(4026);
+            assertThat(s.snapshot().getTip().getParametersList()).containsExactly(Long.toUnsignedString(C));
+        }
+        assertThat(failed.withPushTip(tip(4026, C)).version()).as("换的是副本：提交本身的字段不变").isEqualTo(failed.version());
+        assertThat(failed.withPushTip(tip(4026, C)).withPushTip(null).pushTip()).isNull();
+
+        sent.clear();
+        pushes().publish(0, List.of(failed));
+        assertThat(sent).hasSize(3);
+        assertThat(sent).allSatisfy(s -> assertThat(s.snapshot().hasTip()).as("gather 失败拿不到原因：不设 tip").isFalse());
+
+        // 加锁那次提交：发起人看回包，其余队员收 MATCH_STARTED
+        sent.clear();
+        CommitResult started = commit(decision(rec, List.of(), List.of(A, B, C), List.of(),
+                TeamChangeReason.TEAM_CHANGE_REASON_MATCH_STARTED, A, false, List.of(), 0, 0));
+        pushes().publish(A, List.of(started));
+        assertThat(sent).extracting(Sent::playerId).containsExactly(B, C);
+        assertThat(sent.get(0).snapshot().getActorId()).isEqualTo(A);
+    }
+
+    @Test
+    void 不经提交的开战结果_给索引仍在本队的当前成员推当前视图_不看在线_带原因与tip_actor为0() {
+        // 锁内名单是 [A, B, C]；此刻记录里是 A、B、D（C 已离队、D 新加入），其中 B 的索引已指向别队
+        TeamRecord rec = record(A, A, B, D);
+        MembersRedis redis = new MembersRedis(asked -> membersReply(rec, asked, Map.of(B, TID + 1)));
+
+        pushes(recording(PlayerPushes.Outcome.SENT), Runnable::run, Duration.ofSeconds(3), redis)
+                .publishMatchView(TID, List.of(A, B, C), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED, tip(4026, B));
+
+        assertThat(redis.asked).as("锁内名单与当前成员不等：按记录里的成员重读一次").containsExactly(List.of(A, B, C), List.of(A, B, D));
+        assertThat(sent).extracting(Sent::playerId).as("D 不在线也推（离线由推送结局表达）；B 的索引不在本队不推；C 已不在记录里")
+                .containsExactly(A, D);
+        for (Sent s : sent) {
+            TeamSnapshotS2C snap = s.snapshot();
+            assertThat(snap.getReason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED);
+            assertThat(snap.getActorId()).isZero();
+            assertThat(snap.getTip()).isEqualTo(tip(4026, B));
+            assertThat(snap.getTeam().getTeamId()).isEqualTo(TID);
+            assertThat(snap.getTeam().getVersion()).as("不经提交：版本不变").isEqualTo(9);
+            assertThat(snap.getTeam().getServerTimeMs()).isEqualTo(NOW);
+        }
+        assertThat(sent.get(0).snapshot().getTeam().getMembershipEpoch()).as("epoch 取自同一次 S_READ_MEMBERS").isEqualTo(300);
+        assertThat(sent.get(1).snapshot().getTeam().getMembershipEpoch()).isEqualTo(303);
+        assertThat(pushCount("snapshot", "ok")).isEqualTo(2);
+
+        // tip 为 null（gather 的结果）：不设 tip 字段；match_state 按锁此刻是否有效算
+        sent.clear();
+        TeamRecord locked = record(A, A, B).toBuilder().setMatchLockToken("tok").setMatchLockExpireAtMs(NOW + 1)
+                .addAllMatchLockRoster(List.of(A, B)).build();
+        pushes(recording(PlayerPushes.Outcome.SENT), Runnable::run, Duration.ofSeconds(3),
+                new MembersRedis(asked -> membersReply(locked, asked, Map.of())))
+                .publishMatchView(TID, List.of(A, B), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_ENDED, null);
+        assertThat(sent).extracting(Sent::playerId).containsExactly(A, B);
+        assertThat(sent).allSatisfy(s -> {
+            assertThat(s.snapshot().hasTip()).isFalse();
+            assertThat(s.snapshot().getReason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_ENDED);
+            assertThat(s.snapshot().getTeam().getMatchState()).as("锁还有效（清锁没成）：仍是 STARTING")
+                    .isEqualTo(TeamMatchState.TEAM_MATCH_STATE_STARTING);
+        });
+    }
+
+    @Test
+    void 不经提交的开战结果_记录不在静默_成员表持续变化记skipped_读失败或执行器已满记error() {
+        MembersRedis missing = new MembersRedis(asked -> {
+            List<Object> out = new ArrayList<>(List.of(ascii(""), ascii(""), ascii(NOW)));
+            for (int i = 0; i < asked.size(); i++) {
+                out.add(ascii(""));
+                out.add(ascii(0));
+            }
+            return out;
+        });
+        pushes(recording(PlayerPushes.Outcome.SENT), Runnable::run, Duration.ofSeconds(3), missing)
+                .publishMatchView(TID, List.of(A, B), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED, null);
+        assertThat(pushCount("snapshot", "error")).as("队伍已解散：没什么可推，也不算错").isZero();
+
+        long[] next = {Long.MIN_VALUE + 100};
+        MembersRedis changing = new MembersRedis(asked -> membersReply(record(A, A, next[0]++), asked, Map.of()));
+        pushes(recording(PlayerPushes.Outcome.SENT), Runnable::run, Duration.ofSeconds(3), changing)
+                .publishMatchView(TID, List.of(A, B), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED, null);
+        assertThat(pushCount("members_changed", "skipped")).isEqualTo(1);
+
+        pushes(recording(PlayerPushes.Outcome.SENT), Runnable::run, Duration.ofSeconds(3), new FailingRedis())
+                .publishMatchView(TID, List.of(A, B), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED, null);
+        assertThat(pushCount("snapshot", "error")).isEqualTo(1);
+
+        Executor full = task -> {
+            throw new RejectedExecutionException("full");
+        };
+        pushes(recording(PlayerPushes.Outcome.SENT), full, Duration.ofSeconds(3), new FailingRedis())
+                .publishMatchView(TID, List.of(A, B), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED, null);
+        assertThat(pushCount("snapshot", "error")).as("推送执行器已满：放弃并计一次 error，不抛给清锁线程").isEqualTo(2);
         assertThat(sent).isEmpty();
     }
 

@@ -5,6 +5,7 @@
 #   XM_MYSQL_PASSWORD      MySQL 密码（本机无密码的 root 可不设）
 #
 # 权威数据全部在 Redis（xm:{team}:rec / info / player / invite），只读 xm_java.player（展示资料与 home zone，不归本服所有）。
+# 整队开战（211）的预检、建票与 gather 调 xm-match（xm.dubbo.match-url）；xm-match 不在时本进程照常启动，211 回 in-band 4030。
 spring:
   application:
     name: xm-team
@@ -57,6 +58,9 @@ xm:
   redis:
     address: redis://127.0.0.1:6379
     database: 12
+  dubbo:
+    # 整队开战调 xm-match（Dubbo group match：预检 / 建票 / 退票 / gather）。nacos profile 置空走注册中心。
+    match-url: tri://127.0.0.1:20888
   team:
     # 缺省值同 mmorpg go/match（team-spec §6.11）；启动时校验 request-budget ∈ [500ms, 3500ms]。
     allow-cross-zone: false
@@ -67,6 +71,9 @@ xm:
     worker-queue-capacity: 1024
     push-threads: 4
     push-queue-capacity: 1024
+    # 整队开战加锁之后的收尾池（清开战锁、退票；一次收尾最坏阻塞 110 s，不占请求工作线程）
+    match-end-threads: 4
+    match-end-queue-capacity: 1024
 
 dubbo:
   application:

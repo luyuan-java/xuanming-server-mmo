@@ -15,7 +15,7 @@ import com.game.discovery.presence.PlayerPushes;
 import com.game.team.dispatch.TeamDispatcher;
 import com.game.team.dispatch.TeamWorkerPool;
 import com.game.team.id.TeamIds;
-import com.game.team.match.NoTeamBattle;
+import com.game.team.match.TeamBattlePort;
 import com.game.team.metrics.TeamMetrics;
 import com.game.team.presence.TeamDisplay;
 import com.game.team.presence.TeamSessions;
@@ -40,7 +40,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.DependsOn;
 
 /**
- * xm-team 的装配。所有依赖显式经构造参数传入业务类；这里是唯一读配置、碰外部系统的地方。
+ * xm-team 的装配。所有依赖显式经构造参数传入业务类；这里是唯一读配置、碰外部系统的地方（调 xm-match 的 Dubbo 引用单独放在
+ * {@link TeamDubboConfiguration}，只装配业务的测试可以换上 {@link TeamBattlePort} 的替身、不起 Dubbo）。
  */
 @Configuration(proxyBeanMethods = false)
 public class TeamConfiguration {
@@ -100,8 +101,9 @@ public class TeamConfiguration {
     }
 
     /**
-     * 回合制战斗锁的只读工具（scene-battle-spec §2.4）：xm-team 只读不写，现在只有队伍视图的 in_battle 用它
-     * （6.4 的整队开战预检也读这把锁，届时复用这个 bean）。
+     * 回合制战斗锁的只读工具（scene-battle-spec §2.4）：xm-team 只读不写，只有队伍视图的 in_battle 用它。整队开战预检的 4025
+     * （成员在战斗）<b>不在</b> xm-team 读这把锁：预检整个在 xm-match 做（它用同一个 {@code BattleLockReader}、与在线 / 位置 / 票据
+     * 按名单逐人交错检查，拆开做会改变「谁先被报出来」，match-spec §7.5）。
      */
     @Bean
     public BattleLockReader battleLockReader(RedissonClient redis) {
@@ -136,11 +138,25 @@ public class TeamConfiguration {
         return new TeamIds(new Snowflake(teamIdLease.nodeId()), teamIdLease::isValid);
     }
 
-    /** 依赖推送池：Spring 按依赖逆序销毁，请求池先排空（排空中的请求还会往推送池投推送），推送池后关。 */
+    /**
+     * 依赖收尾池与推送池：Spring 按依赖逆序销毁，请求池先排空（排空中的请求还会往收尾池投清锁、往推送池投推送），
+     * 然后收尾池，推送池最后关。
+     */
     @Bean(destroyMethod = "close")
-    @DependsOn("teamPushPool")
+    @DependsOn({"teamMatchEndPool", "teamPushPool"})
     public TeamWorkerPool teamWorkerPool(TeamProperties props) {
         return new TeamWorkerPool(TeamWorkerPool.WORKER, props.workerThreads(), props.workerQueueCapacity(), DRAIN_TIMEOUT);
+    }
+
+    /**
+     * 整队开战加锁之后的收尾池（{@code team-match-end}：清开战锁、退票，再往推送池投结果推送，所以先于推送池关）。
+     * 关闭时等不完的清锁被中断即停止，锁靠自然过期（同基线「进程退出不等 EndMatch」，team-spec §5.2）；关闭之后才到的
+     * gather 结果投不进来，同样靠锁自然过期。
+     */
+    @Bean(destroyMethod = "close")
+    @DependsOn("teamPushPool")
+    public TeamWorkerPool teamMatchEndPool(TeamProperties props) {
+        return new TeamWorkerPool(TeamWorkerPool.MATCH_END, props.matchEndThreads(), props.matchEndQueueCapacity(), DRAIN_TIMEOUT);
     }
 
     @Bean(destroyMethod = "close")
@@ -159,11 +175,16 @@ public class TeamConfiguration {
                         registry.requireId(TeamMethods.SERVICE, TeamMethods.NOTIFY_TEAM_EVENT)));
     }
 
+    /**
+     * @param battle 整队开战的票据域端口（生产为 {@link TeamDubboConfiguration} 里的 {@code MatchTeamBattle}：调 xm-match）
+     */
     @Bean
     public TeamService teamService(TeamStore store, TeamSessions sessions, TeamDisplay display, PlayerProfiles profiles,
-                                   TeamIds teamIds, TeamPushes pushes, TeamMetrics metrics, TeamProperties props) {
+                                   TeamIds teamIds, TeamBattlePort battle,
+                                   @Qualifier("teamMatchEndPool") TeamWorkerPool teamMatchEndPool, TeamPushes pushes,
+                                   TeamMetrics metrics, TeamProperties props) {
         PlayerHomeZones homeZones = new PlayerHomeZones(profiles::loadStrict, props.homeZoneTimeout());
-        return new TeamService(store, sessions, display, homeZones, teamIds::nextId, NoTeamBattle.INSTANCE, pushes, metrics,
+        return new TeamService(store, sessions, display, homeZones, teamIds::nextId, battle, teamMatchEndPool, pushes, metrics,
                 new RuleConfig(props.allowCrossZone()));
     }
 

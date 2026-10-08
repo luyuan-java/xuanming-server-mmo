@@ -22,6 +22,7 @@ import com.game.team.rules.TeamTips;
 import com.game.team.store.TeamReplies.CommitOutcome;
 import com.game.team.store.TeamReplies.CommitStatus;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -29,8 +30,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.LongConsumer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -41,7 +44,8 @@ import org.redisson.api.RedissonClient;
 
 /**
  * 组队存储层在真 Redis 上的行为，逐个对应基线 go/match/internal/team/store_test.go（设计稿 team-system.md §I.3 #6-#11、#19-#22；
- * team-spec §10.2）。开战锁钉版本提交与 EndMatch 的用例（TestSelfHealing 第 4 个子用例）随批次 6.4 补。
+ * team-spec §10.2）。末尾一组是批次 6.4 的开战锁钉版本提交与 EndMatch（team-spec §1.7.6；含 TestSelfHealing 第 4 个子用例）：
+ * 真脚本上的落盘内容、ver 钉死、EVAL 重发后的按 token 确认、锁期间版本被推进时的清锁循环。
  *
  * <p>默认跳过；显式开启：{@code -Dxm.it.redis=redis://127.0.0.1:6379}（DB 12，随机 ≥ 2^63 的 id，只删自己的键）。
  * 基线用 miniredis 钉死 TIME，这里改成「调用前后各读一次 Redis TIME」夹住断言；需要时钟前进的地方改写截止或删键来模拟，逐条注明。
@@ -55,7 +59,20 @@ class TeamStoreIntegrationTest {
     private static RedissonClient redis;
     private final AtomicReference<Consumer<Bind>> afterRead = new AtomicReference<>(b -> {
     });
+    /** S_COMMIT 发出之前（用来模拟「同一段 EVAL 被重发」）。 */
+    private final AtomicReference<BeforeCommit> beforeCommit = new AtomicReference<>((d, k, a) -> {
+    });
+    /** 清开战锁每一轮 S_READ 之后（用来制造「锁期间别人提交」）。 */
+    private final AtomicReference<LongConsumer> afterMatchRead = new AtomicReference<>(tid -> {
+    });
+    /** EndMatch 的退避（毫秒）；不真睡。 */
+    private final List<Long> sleeps = Collections.synchronizedList(new ArrayList<>());
     private TeamRedisFixture fx;
+
+    @FunctionalInterface
+    private interface BeforeCommit {
+        void accept(Decision decision, List<Object> keys, List<byte[]> args);
+    }
 
     @BeforeAll
     static void connect() {
@@ -73,6 +90,21 @@ class TeamStoreIntegrationTest {
             @Override
             public void afterRead(Bind bind) {
                 afterRead.get().accept(bind);
+            }
+
+            @Override
+            public void beforeCommitEval(Decision decision, List<Object> keys, List<byte[]> args) {
+                beforeCommit.get().accept(decision, keys, args);
+            }
+
+            @Override
+            public void afterMatchRead(long teamId) {
+                afterMatchRead.get().accept(teamId);
+            }
+
+            @Override
+            public void endMatchSleep(long millis) {
+                sleeps.add(millis);
             }
         });
     }
@@ -723,5 +755,228 @@ class TeamStoreIntegrationTest {
         InviteList fresh = fx.store.listInvites(p4, fx.deadline());
         assertThat(fx.store.pruneInvite(p4, tid, fresh.entries().get(0).score(), fx.deadline())).isTrue();
         assertThat(fx.zscore(inv(p4), u(tid))).isNull();
+    }
+
+    // ================================================================ 批次 6.4：开战锁钉版本提交与 EndMatch（team-spec §1.7.6）
+
+    private static final long LOCK_MS = 60_000;
+
+    private PinnedResult lock(Snapshot snap, long caller, String token) {
+        return fx.store.commitMatchLock(snap, caller, token, TeamRules.matchRoster(snap.record()), snap.nowMs() + LOCK_MS,
+                fx.sessions, fx.deadline());
+    }
+
+    @Test
+    void 开战锁钉版本提交_落盘令牌截止与名单_版本加一索引不动_锁内不可再锁_旧快照被ver挡住不写() {
+        long tid = fx.tid(9301);
+        long p1 = fx.pid(1), p3 = fx.pid(3), p4 = fx.pid(4);
+        fx.mustCreate(p1, tid);
+        fx.mustJoin(p1, tid, p3);
+        fx.mustJoin(p1, tid, p4);
+        Snapshot snap = fx.store.read(p1, tid, fx.deadline());
+        long ver0 = snap.version();
+        String epoch3 = fx.hget(idx(p3), TeamRedisFields.EPOCH);
+
+        PinnedResult locked = lock(snap, p1, "tok-1");
+
+        assertThat(locked.code()).isZero();
+        assertThat(locked.retry()).isFalse();
+        assertThat(locked.commit().version()).isEqualTo(ver0 + 1);
+        assertThat(locked.commit().decision().reason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_STARTED);
+        assertThat(fx.ver(tid)).isEqualTo(Long.toString(ver0 + 1));
+        TeamRecord rec = fx.loadRecord(tid);
+        assertThat(rec.getMatchLockToken()).isEqualTo("tok-1");
+        assertThat(rec.getMatchLockExpireAtMs()).as("截止 = 调用方给的值（本轮 S_READ 的 Redis TIME + 时长）").isEqualTo(snap.nowMs() + LOCK_MS);
+        assertThat(rec.getMatchLockRosterList()).as("队长在前，其余按 join_seq").containsExactly(p1, p3, p4);
+        assertThat(TeamRules.memberIds(rec)).containsExactly(p1, p3, p4);
+        for (long p : List.of(p1, p3, p4)) {
+            assertThat(locked.commit().indexes().get(p).teamId()).as("全员是保留成员").isEqualTo(tid);
+        }
+        assertThat(fx.hget(idx(p3), TeamRedisFields.EPOCH)).as("开战不改 tid，epoch 不动").isEqualTo(epoch3);
+        assertIdleTtl(fx.ttlSeconds(rec(tid)), rec(tid));
+        assertThat(fx.exists(info(tid))).isTrue();
+
+        // 锁有效期间不能再锁：规则拒绝，不写
+        Snapshot during = fx.store.read(p1, tid, fx.deadline());
+        TeamRedisFixture.KeyState before = fx.state();
+        PinnedResult again = lock(during, p1, "tok-2");
+        assertThat(again.code()).isEqualTo(TeamTips.IN_MATCH);
+        assertThat(again.commit()).isNull();
+        fx.assertUnchanged(before);
+
+        // 清锁：三个字段清空，版本再加一
+        EndMatchResult end = fx.store.endMatch(tid, "tok-1", true, fx.sessions);
+        assertThat(end.stop()).isEqualTo(EndMatchStop.RELEASED);
+        assertThat(end.commit().version()).isEqualTo(ver0 + 2);
+        assertThat(end.commit().decision().reason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_ENDED);
+        assertThat(end.commit().decision().actor()).isZero();
+        TeamRecord cleared = fx.loadRecord(tid);
+        assertThat(cleared.getMatchLockToken()).isEmpty();
+        assertThat(cleared.getMatchLockExpireAtMs()).isZero();
+        assertThat(cleared.getMatchLockRosterList()).isEmpty();
+
+        // 拿加锁之前的旧快照再加锁：ver 钉死在旧值上，脚本回 {0}，什么都不写
+        before = fx.state();
+        PinnedResult stale = lock(snap, p1, "tok-3");
+        assertThat(stale.retry()).isTrue();
+        assertThat(stale.commit()).isNull();
+        assertThat(stale.repairs()).isEmpty();
+        fx.assertUnchanged(before);
+        assertThat(sleeps).isEmpty();
+    }
+
+    @Test
+    void 开战锁的EVAL被重发_调用方看到冲突但锁已落盘_按token单轮确认清掉_再确认只读不写() {
+        long tid = fx.tid(9302);
+        long p1 = fx.pid(1), p3 = fx.pid(3);
+        fx.mustCreate(p1, tid);
+        fx.mustJoin(p1, tid, p3);
+        Snapshot snap = fx.store.read(p1, tid, fx.deadline());
+        long ver0 = snap.version();
+        AtomicBoolean fired = new AtomicBoolean();
+        // 第一次投递已在 Redis 执行（回复丢失），Redisson 随后重发同一段 EVAL
+        beforeCommit.set((decision, keys, args) -> {
+            if (decision.reason() == TeamChangeReason.TEAM_CHANGE_REASON_MATCH_STARTED && fired.compareAndSet(false, true)) {
+                try {
+                    fx.teamRedis.eval(TeamScript.COMMIT, keys, args).toCompletableFuture().get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new AssertionError(e);
+                }
+            }
+        });
+
+        PinnedResult resent = lock(snap, p1, "tok");
+
+        assertThat(resent.retry()).as("重发的那一次撞上自己写的新版本：回 {0}").isTrue();
+        assertThat(resent.commit()).isNull();
+        assertThat(fx.loadRecord(tid).getMatchLockToken()).as("「没有提交」不等于没写入：锁已经落盘").isEqualTo("tok");
+        assertThat(fx.ver(tid)).isEqualTo(Long.toString(ver0 + 1));
+
+        LockRelease confirmed = fx.store.releaseMatchLockOnce(tid, "tok", fx.sessions, fx.deadline());
+
+        assertThat(confirmed.stop()).isNull();
+        assertThat(confirmed.pinned().commit().version()).isEqualTo(ver0 + 2);
+        assertThat(confirmed.pinned().commit().decision().reason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED);
+        assertThat(fx.loadRecord(tid).getMatchLockToken()).isEmpty();
+
+        TeamRedisFixture.KeyState before = fx.state();
+        LockRelease again = fx.store.releaseMatchLockOnce(tid, "tok", fx.sessions, fx.deadline());
+        assertThat(again.stop()).as("锁已不在：只读不写").isEqualTo(EndMatchStop.TOKEN_MISMATCH);
+        assertThat(again.pinned()).isNull();
+        fx.assertUnchanged(before);
+        assertThat(fx.store.releaseMatchLockOnce(fx.tid(9399), "tok", fx.sessions, fx.deadline()).stop())
+                .isEqualTo(EndMatchStop.RECORD_MISSING);
+    }
+
+    /** 基线 store_test.go:357-401（TestSelfHealing 第 4 个子用例）。 */
+    @Test
+    void 两名成员索引错位_开战锁钉版本提交与EndMatch都能推进_修复后立即重读不退避() {
+        long lockTid = fx.tid(4007), o1 = fx.tid(555), o2 = fx.tid(556), o3 = fx.tid(557), o4 = fx.tid(558);
+        long p1 = fx.pid(1), p3 = fx.pid(3), p4 = fx.pid(4);
+        fx.mustCreate(p1, lockTid);
+        fx.mustJoin(p1, lockTid, p3);
+        fx.mustJoin(p1, lockTid, p4);
+        Snapshot snap = fx.store.readFree(p1, fx.deadline()).snapshot();
+        fx.hset(idx(p3), TeamRedisFields.TID, u(o1));
+        fx.hset(idx(p4), TeamRedisFields.TID, u(o2));
+
+        PinnedResult first = lock(snap, p1, "tok");
+
+        assertThat(first.commit()).isNull();
+        assertThat(first.retry()).isTrue();
+        assertThat(first.repairs()).hasSize(1);
+        assertThat(first.repairs().get(0).decision().reason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_HEALED);
+        assertThat(first.repairs().get(0).decision().left()).containsExactly(p3, p4);
+        assertThat(fx.loadRecord(lockTid).getMatchLockToken()).as("修复落盘了，锁没有").isEmpty();
+        snap = fx.store.readFree(p1, fx.deadline()).snapshot();
+        PinnedResult second = lock(snap, p1, "tok");
+        assertThat(second.commit()).as("整轮重来后在修复过的记录上加锁成功").isNotNull();
+        assertThat(fx.loadRecord(lockTid).getMatchLockRosterList()).containsExactly(p1);
+
+        long endTid = fx.tid(4008);
+        long p11 = fx.pid(11), p13 = fx.pid(13), p14 = fx.pid(14);
+        fx.mustCreate(p11, endTid);
+        fx.mustJoin(p11, endTid, p13);
+        fx.mustJoin(p11, endTid, p14);
+        snap = fx.store.readFree(p11, fx.deadline()).snapshot();
+        assertThat(lock(snap, p11, "tok-end").commit()).isNotNull();
+        fx.hset(idx(p13), TeamRedisFields.TID, u(o3));
+        fx.hset(idx(p14), TeamRedisFields.TID, u(o4));
+
+        EndMatchResult end = fx.store.endMatch(endTid, "tok-end", false, fx.sessions);
+
+        assertThat(end.stop()).isEqualTo(EndMatchStop.RELEASED);
+        assertThat(end.repairs()).hasSize(1);
+        assertThat(end.repairs().get(0).decision().left()).containsExactly(p13, p14);
+        assertThat(end.commit().decision().reason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED);
+        TeamRecord rec = fx.loadRecord(endTid);
+        assertThat(rec.getMatchLockToken()).isEmpty();
+        assertThat(TeamRules.memberIds(rec)).containsExactly(p11);
+        assertThat(sleeps).as("修复后应立即重读，不应退避").isEmpty();
+        assertThat(end.conflicts()).isZero();
+    }
+
+    @Test
+    void EndMatch_锁期间版本被队外申请推进_每次冲突退避后按新版本重读_最终清锁_申请都保留() {
+        long tid = fx.tid(9304);
+        long p1 = fx.pid(1), p3 = fx.pid(3);
+        List<Long> outsiders = List.of(fx.pid(21), fx.pid(22), fx.pid(23), fx.pid(24));
+        fx.mustCreate(p1, tid);
+        fx.mustJoin(p1, tid, p3);
+        PinnedResult locked = lock(fx.store.read(p1, tid, fx.deadline()), p1, "tok");
+        AtomicInteger injected = new AtomicInteger();
+        afterMatchRead.set(teamId -> {
+            int i = injected.getAndIncrement();
+            if (i < outsiders.size()) {
+                fx.mustCommit(Bind.target(outsiders.get(i), tid), Op.apply(outsiders.get(i), ZONE));
+            }
+        });
+
+        EndMatchResult end = fx.store.endMatch(tid, "tok", true, fx.sessions);
+
+        assertThat(end.stop()).isEqualTo(EndMatchStop.RELEASED);
+        assertThat(end.conflicts()).as("超过 mutate 的 3 次上限也不放弃").isEqualTo(outsiders.size());
+        assertThat(end.commit().version()).isEqualTo(locked.commit().version() + outsiders.size() + 1);
+        assertThat(end.lastError()).isNull();
+        assertThat(sleeps).hasSize(outsiders.size());
+        for (int i = 0; i < sleeps.size(); i++) {
+            long base = Math.min(TeamStore.END_MATCH_BACKOFF_INITIAL_MS << i, TeamStore.END_MATCH_BACKOFF_MAX_MS);
+            assertThat((double) sleeps.get(i)).as("第 %d 次退避", i).isBetween(Math.floor(base * 0.8), Math.ceil(base * 1.2));
+        }
+        TeamRecord rec = fx.loadRecord(tid);
+        assertThat(rec.getMatchLockToken()).isEmpty();
+        assertThat(rec.getApplicationsList()).extracting(TeamApplicationRecord::getPlayerId)
+                .as("锁期间的申请都保留").containsExactlyInAnyOrderElementsOf(outsiders);
+    }
+
+    @Test
+    void EndMatch_令牌不符_锁按Redis时钟已过期_记录缺失_都停止且不写_过期的残留锁不挡下一次开战() {
+        long tid = fx.tid(9305);
+        long p1 = fx.pid(1), p3 = fx.pid(3);
+        fx.mustCreate(p1, tid);
+        fx.mustJoin(p1, tid, p3);
+        assertThat(lock(fx.store.read(p1, tid, fx.deadline()), p1, "tok-A").commit()).isNotNull();
+
+        TeamRedisFixture.KeyState before = fx.state();
+        EndMatchResult mismatch = fx.store.endMatch(tid, "tok-B", true, fx.sessions);
+        assertThat(mismatch.stop()).isEqualTo(EndMatchStop.TOKEN_MISMATCH);
+        assertThat(mismatch.commit()).isNull();
+        fx.assertUnchanged(before);
+
+        // 真 Redis 拨不动时钟：把记录里的锁截止改写成「此刻」（ver 不变），之后任何一次 S_READ 的 TIME 都 ≥ 它，即已过期
+        fx.writeRecord(tid, fx.loadRecord(tid).toBuilder().setMatchLockExpireAtMs(fx.nowMs()).build());
+        before = fx.state();
+        EndMatchResult expired = fx.store.endMatch(tid, "tok-A", false, fx.sessions);
+        assertThat(expired.stop()).isEqualTo(EndMatchStop.LOCK_EXPIRED);
+        assertThat(expired.commit()).isNull();
+        fx.assertUnchanged(before);
+        assertThat(fx.loadRecord(tid).getMatchLockToken()).as("过期的锁不写：token 残留，按时钟无效").isEqualTo("tok-A");
+
+        assertThat(fx.store.endMatch(fx.tid(9499), "tok-A", true, fx.sessions).stop()).isEqualTo(EndMatchStop.RECORD_MISSING);
+        assertThat(sleeps).as("停止分支不退避").isEmpty();
+
+        PinnedResult relocked = lock(fx.store.read(p1, tid, fx.deadline()), p1, "tok-C");
+        assertThat(relocked.commit()).as("残留的过期锁被下一次加锁覆盖").isNotNull();
+        assertThat(fx.loadRecord(tid).getMatchLockToken()).isEqualTo("tok-C");
     }
 }

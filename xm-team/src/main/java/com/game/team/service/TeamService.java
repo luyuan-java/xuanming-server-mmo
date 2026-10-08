@@ -16,6 +16,7 @@ import com.game.proto.team.ListMyInvitesRequest;
 import com.game.proto.team.ListMyInvitesResponse;
 import com.game.proto.team.RespondInviteRequest;
 import com.game.proto.team.StartTeamMatchRequest;
+import com.game.proto.team.TeamChangeReason;
 import com.game.proto.team.TeamIncomingInviteView;
 import com.game.proto.team.TeamMemberView;
 import com.game.proto.team.TeamResponse;
@@ -24,6 +25,7 @@ import com.game.proto.team.TransferLeaderRequest;
 import com.game.team.match.TeamBattlePort;
 import com.game.team.metrics.TeamMetrics;
 import com.game.team.metrics.TeamMetrics.HealKind;
+import com.game.team.metrics.TeamMetrics.MatchOutcome;
 import com.game.team.presence.DisplayLoader;
 import com.game.team.presence.SessionReads;
 import com.game.team.proto.TeamInviteRecord;
@@ -35,20 +37,30 @@ import com.game.team.rules.TeamRules;
 import com.game.team.rules.TeamTips;
 import com.game.team.store.Bind;
 import com.game.team.store.CommitResult;
+import com.game.team.store.EndMatchResult;
+import com.game.team.store.EndMatchStop;
 import com.game.team.store.FreeRead;
 import com.game.team.store.InviteIndexEntry;
 import com.game.team.store.InviteList;
+import com.game.team.store.LockRelease;
 import com.game.team.store.MutateResult;
 import com.game.team.store.Outcome;
+import com.game.team.store.PinnedResult;
 import com.game.team.store.Snapshot;
 import com.game.team.store.TeamStore;
 import com.game.team.view.MemberDisplay;
 import com.game.team.view.TeamViews;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,7 +79,9 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code deadline} 是请求预算（缺省 3500 ms），本次请求的全部 Redis / MySQL 等待都受它约束；推送用独立预算；</li>
  *   <li>回包视图与推送视图一律同源构建（{@link TeamViews}），失败回包的视图取调用者自己的一次自由读；
  *       只有服务端自己读失败时才不带视图（客户端靠「有没有视图」区分「服务端读失败」与「你不在队」）；</li>
- *   <li>线程：所有方法都阻塞（Redis 等待、MySQL），只在 {@code team-worker} 工作线程上调用（AGENTS.md §3）；本类无可变状态，线程安全。</li>
+ *   <li>线程：所有 RPC 方法都阻塞（Redis 等待、MySQL、调 xm-match 的前三个方法），只在 {@code team-worker} 工作线程上调用（AGENTS.md §3）；
+ *       整队开战加锁之后的收尾（清锁、退票，最坏阻塞 110 s）一律投到有界执行器 {@code team-match-end}，不占工作线程、不受请求预算约束；
+ *       本类无可变状态，线程安全。</li>
  * </ul>
  */
 public final class TeamService {
@@ -76,6 +90,12 @@ public final class TeamService {
 
     /** StartTeamMatch 整轮重来的上限（service.go:68），同时受请求预算约束。 */
     static final int MATCH_START_ROUNDS = 3;
+
+    /**
+     * 建票结果不明时后台退票（{@code releaseTeamTickets}）的独立预算（毫秒）：不继承已经用完的请求预算，一跳、不重试；
+     * 没调通只记日志，票据按 matched TTL 过期。
+     */
+    static final long RELEASE_TICKETS_BUDGET_MS = 3_000;
 
     /** ListMyInvites 的排序：expire_at_ms 升序、同值按 team_id 升序（service.go:293-298，无符号）。 */
     private static final Comparator<TeamIncomingInviteView> INVITE_ORDER = (a, b) -> {
@@ -89,6 +109,7 @@ public final class TeamService {
     private final HomeZones homeZones;
     private final LongSupplier teamIds;
     private final TeamBattlePort battle;
+    private final Executor matchEnd;
     private final TeamPushes pushes;
     private final TeamMetrics metrics;
     private final RuleConfig cfg;
@@ -98,17 +119,21 @@ public final class TeamService {
      * @param display   视图展示缓存（{@code TeamDisplay}）
      * @param homeZones home zone 查询（xm-common 的 {@code PlayerHomeZones}：缺项或 0 → 4019，抛异常 → 4030）
      * @param teamIds   team_id 发号（{@code TeamIds::nextId}；抛异常或返回 0 → CreateTeam 回 4030 + 空视图）
-     * @param battle    开战端口（4.3 为 {@code NoTeamBattle}）
+     * @param battle    整队开战的票据域端口（生产为 {@code MatchTeamBattle}：调 xm-match）
+     * @param matchEnd  整队开战加锁之后的收尾执行器（{@code team-match-end}，有界；任务会阻塞，最坏 110 s；拒收时抛
+     *                  {@link RejectedExecutionException}，本类记 ERROR 后放弃这次收尾，开战锁靠自然过期）
      * @param cfg       规则配置（{@code xm.team.allow-cross-zone}）
      */
     public TeamService(TeamStore store, SessionReads sessions, DisplayLoader display, HomeZones homeZones,
-                       LongSupplier teamIds, TeamBattlePort battle, TeamPushes pushes, TeamMetrics metrics, RuleConfig cfg) {
+                       LongSupplier teamIds, TeamBattlePort battle, Executor matchEnd, TeamPushes pushes, TeamMetrics metrics,
+                       RuleConfig cfg) {
         this.store = store;
         this.sessions = sessions;
         this.display = display;
         this.homeZones = homeZones;
         this.teamIds = teamIds;
         this.battle = battle;
+        this.matchEnd = matchEnd;
         this.pushes = pushes;
         this.metrics = metrics;
         this.cfg = cfg == null ? RuleConfig.DEFAULT : cfg;
@@ -473,8 +498,9 @@ public final class TeamService {
         } catch (RuntimeException e) {
             gather = CompletableFuture.failedFuture(e);
         }
-        // 回调在 Dubbo 的线程上触发：只做投递，清锁（阻塞、最坏 110 s）在 team-match-end 上
-        gather.whenComplete((result, error) -> inBackground("gather 收尾", teamId, () -> {
+        // 回调在 Dubbo 的线程上触发（stage 已完成时就在本线程上）：只定性、计数与投递，清锁（阻塞、最坏 110 s）在 team-match-end 上。
+        // 计数放在投递之前：执行器已满放弃收尾时，这次 211 仍然恰好计一次
+        gather.whenComplete((result, error) -> {
             boolean ok = error == null && result != null && result.ok();
             if (error != null || result == null) {
                 // xm-match 中途退出、网络分区或调用超时：结果不明。不退票——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈
@@ -488,8 +514,8 @@ public final class TeamService {
                 log.info("[team] 整队 gather 失败 team={} outcome={}", u(teamId), result.outcome());
             }
             // gather 失败拿不到要告诉玩家的具体原因：tip 留空
-            finishMatch(teamId, token, ok, roster, null);
-        }));
+            inBackground("gather 收尾", teamId, () -> finishMatch(teamId, token, ok, roster, null));
+        });
         return resp;
     }
 
@@ -844,5 +870,9 @@ public final class TeamService {
 
     private static String u(long id) {
         return Long.toUnsignedString(id);
+    }
+
+    private static List<String> us(List<Long> ids) {
+        return ids.stream().map(Long::toUnsignedString).toList();
     }
 }
