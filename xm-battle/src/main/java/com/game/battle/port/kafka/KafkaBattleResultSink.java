@@ -78,6 +78,8 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
     static final Duration MAX_BLOCK = Duration.ofSeconds(2);
     /** 停机时等「队列发完 + 在途确认回来」的上限；超出的写兜底日志。 */
     static final Duration CLOSE_BUDGET = Duration.ofSeconds(3);
+    /** 停机预算用完、打断发送线程之后，再等它把手上那一条写进兜底日志的上限。 */
+    static final Duration CLOSE_GRACE = Duration.ofSeconds(1);
 
     /** 建 Kafka 客户端的口（测试换成 {@code MockProducer} 与假的 {@link TopicAdmin}）。两个方法都可能被调多次，每次返回新的客户端。 */
     public interface Clients {
@@ -116,6 +118,11 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
     private final BattleResultFallbackLog fallback = new BattleResultFallbackLog();
     private final ThreadPoolExecutor executor;
     private final AtomicBoolean closed = new AtomicBoolean();
+    /**
+     * 护住「建生产者」与「停机时取走生产者」这两步（都很短，不含任何 Kafka I/O）：停机置位之后不会再建出新的生产者，停机之前建好的一定被停机关掉——
+     * 否则停机恰好撞上一次迟迟才通过的核对时，会留下一个没人关的生产者，交给它的那条事件既等不到确认、也没有兜底行。
+     */
+    private final Object producerLock = new Object();
 
     /**
      * 生产者：第一次核对通过时才建（地址解析不了时构造器就会抛，不能让它挡住启动）；进入致命错误状态后丢弃，下一次核对重建。
@@ -163,6 +170,11 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
      * 配置同 scene 的审计生产者。
      */
     static Producer<String, byte[]> kafkaProducer(String bootstrapServers, String clientId, Duration maxBlock) {
+        return new KafkaProducer<>(producerConfig(bootstrapServers, clientId, maxBlock), new StringSerializer(), new ByteArraySerializer());
+    }
+
+    /** 生产者的配置（单列出来便于单测钉住幂等 / acks / 阻塞上限这几项）。 */
+    static Properties producerConfig(String bootstrapServers, String clientId, Duration maxBlock) {
         Properties props = new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
@@ -172,19 +184,21 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
         props.put(ProducerConfig.LINGER_MS_CONFIG, "5");
         props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, Long.toString(maxBlock.toMillis()));
         props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "120000");
-        return new KafkaProducer<>(props, new StringSerializer(), new ByteArraySerializer());
+        return props;
     }
 
     // ------------------------------------------------------------------ topic 核对
 
     /**
      * 启动期核对：在把本对象交给任何调用方<b>之前</b>、启动线程上调一次。Kafka 不可达时最多阻塞 {@code verifyTimeout}，告警后返回
-     * （之后由发送线程按 {@link #REVERIFY_INTERVAL} 再试，期间的结果事件写兜底日志）。
+     * （之后由发送线程按 {@link #REVERIFY_INTERVAL} 再试，期间的结果事件写兜底日志）。核对有了结论之后顺带把发送线程建好，
+     * 免得第一条结果事件到来时在逻辑线程上建线程。
      *
      * @throws AuditTopicContractException 分区数与契约不符：调用方应拒绝启动（升 {@value BattleResultTopics#GENERATION_ENV} 换新 topic）
      */
     public void start() {
         boolean ok = verifyNow();
+        executor.prestartCoreThread();
         log.info("对局结果发送就绪 topic={} 已核对={}{}", topic, ok,
                 ok ? "" : "（Kafka 不可达：结果事件先写兜底日志 " + BattleResultFallbackLog.LOGGER + "，有事件要发时每 "
                         + REVERIFY_INTERVAL.toSeconds() + " s 再核对一次）");
@@ -192,15 +206,22 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
 
     /**
      * 核对 topic（缺就建），通过后才开始真正发送。连不上 broker、地址解析不了、生产者建不出来：记 WARN 返回 false（可恢复）；
-     * 分区契约不符抛 {@link AuditTopicContractException}。加锁只为防「启动线程与发送线程同时核对」时建出两个生产者（正常次序下不会争用）。
+     * 分区契约不符抛 {@link AuditTopicContractException}。只在一条线程上调（启动线程先；本对象交出去之后只有发送线程），所以核对本身不加锁——
+     * 它最长阻塞 {@code verifyTimeout}，停机不能等它；只有「建生产者」那一步与停机互斥（见 {@link #producerLock}）。停机已开始时即使核对通过也不再建
+     * 生产者，返回 false（那条事件写兜底日志）。
      */
-    private synchronized boolean verifyNow() {
+    private boolean verifyNow() {
         try (TopicAdmin admin = clients.admin()) {
             BattleResultTopics.ensure(admin, generation, AuditTopicInitializer.Mode.CREATE_AND_VERIFY, replicationFactor, verifyTimeout);
-            if (producer == null) {
-                producer = clients.producer();
+            synchronized (producerLock) {
+                if (closed.get()) {
+                    return false;
+                }
+                if (producer == null) {
+                    producer = clients.producer();
+                }
+                verified = true;
             }
-            verified = true;
             return true;
         } catch (AuditBrokerUnavailableException | KafkaException e) {
             log.warn("对局结果 topic {} 暂时核对不了（Kafka 不可达），在此之前的结果事件只写兜底日志：{}", topic, e.getMessage());
@@ -301,8 +322,9 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
     }
 
     /**
-     * send 同步抛 KafkaException（不是中断）说明生产者已不可用（幂等生产者进入致命状态、元数据一直取不到、已被关闭……），之后每条都会失败：
-     * 丢弃它并清掉核对标记，下一次核对重建（核对自带 {@link #REVERIFY_INTERVAL} 的冷却，不会每条都重建）。只在发送线程上调用。
+     * send 同步抛 KafkaException（不是中断）说明生产者已不可用（幂等生产者进入致命状态……），之后每条都会失败：丢弃它并清掉核对标记，
+     * 下一次核对重建（核对自带 {@link #REVERIFY_INTERVAL} 的冷却，不会每条都重建）。等元数据 / 缓冲超时不在此列——真生产者把那类错误交给回调，
+     * 生产者本身还能用。只在发送线程上调用。
      */
     private void discardProducer(Producer<String, byte[]> broken, RuntimeException cause) {
         if (producer != broken) {
@@ -343,7 +365,8 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
 
     /**
      * 有界地发完：不再接新事件（之后交来的直接写兜底）→ 等发送线程把队列里的发出去 → 关生产者（等在途的确认；预算用完仍未确认的由回调按投递失败
-     * 写兜底）→ 预算用完还排着的逐条写兜底日志。幂等。
+     * 写兜底）→ 预算用完还排着的逐条写兜底日志；发送线程手上正在发的那一条不在队列里，它被中断或撞上已关闭的生产者后自己写兜底行，
+     * 最后再等它 {@link #CLOSE_GRACE}（发送线程是守护线程，进程随后就退出）。幂等。
      */
     void close(Duration budget) {
         if (!closed.compareAndSet(false, true)) {
@@ -351,12 +374,12 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
         }
         long deadline = System.nanoTime() + budget.toNanos();
         executor.shutdown();
-        try {
-            executor.awaitTermination(remainingNanos(deadline), TimeUnit.NANOSECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        awaitSendThread(remainingNanos(deadline));
+        Producer<String, byte[]> current;
+        synchronized (producerLock) {
+            // 置位在前、取走在后：这之后核对再通过也不会建新的生产者（verifyNow 在同一把锁里看 closed）
+            current = producer;
         }
-        Producer<String, byte[]> current = producer;
         if (current != null) {
             try {
                 current.close(Duration.ofNanos(remainingNanos(deadline)));
@@ -373,9 +396,20 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
                     dropped++;
                 }
             }
-            log.error("对局结果发送线程在停机预算 {} 内没发完，{} 条结果事件写进兜底日志", budget, dropped);
+            boolean stopped = awaitSendThread(CLOSE_GRACE.toNanos());
+            log.error("对局结果发送线程在停机预算 {} 内没发完，排着的 {} 条结果事件写进兜底日志，发送线程已停={}", budget, dropped, stopped);
         }
         log.info("对局结果发送已关闭 topic={} 停机时丢进兜底日志={}", topic, dropped);
+    }
+
+    /** 等发送线程退出，最多 {@code nanos}；返回它是否已退出。等待被中断时保留中断标记并立即返回。 */
+    private boolean awaitSendThread(long nanos) {
+        try {
+            return executor.awaitTermination(nanos, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return executor.isTerminated();
+        }
     }
 
     private static long remainingNanos(long deadline) {

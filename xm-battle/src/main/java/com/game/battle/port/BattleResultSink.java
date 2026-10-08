@@ -4,8 +4,9 @@ import com.game.proto.contracts.kafka.BattleResultEvent;
 
 /**
  * 对局结果事件的发布端口（基线 Kafka topic {@code match-results}，key battle_id，payload 就是 {@code BattleResultEvent}，
- * {@code room.cpp:283-304}；battle-node-spec §4.9、§7.9；scene-battle-spec §7.17）。缺省实现 {@link LoggingBattleResultSink} 只记日志；
- * 真实传输由 6.4 接入（推荐见 Q12）。
+ * {@code room.cpp:283-304}；battle-node-spec §4.9、§7.9；scene-battle-spec §7.17）。生产装配自 6.4 起是 Kafka 生产方
+ * {@code port.kafka.KafkaBattleResultSink}（topic {@code xm-battle-result-g<代次>}，match-spec §5.4，落实 Q12）；
+ * {@link LoggingBattleResultSink} 只记日志，留给不接 Kafka 的测试装配。
  *
  * <p>自 6.3 起它有<b>两个调用方、两条线程</b>，实现必须线程安全，并且<b>异步、不阻塞、不抛异常</b>：
  * <ul>

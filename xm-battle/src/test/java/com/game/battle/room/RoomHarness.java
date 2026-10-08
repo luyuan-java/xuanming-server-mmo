@@ -117,7 +117,8 @@ final class RoomHarness {
     final ActivityResultSink activityResults = event -> log.add(new Out(Kind.ACTIVITY_RESULT, 0, 0, event));
     /** 普通局结果端口收到的通道（房间只该用 PLAIN；活动通道由发件箱另行发布）。 */
     final List<BattleResultSink.Channel> resultChannels = new ArrayList<>();
-    final BattleResultSink results = (event, channel) -> {
+    /** 普通局结果端口：缺省是记录型的；第一次调 {@link #service()} 之前可以换成别的实现（如接着假 Kafka 的真传输）。 */
+    BattleResultSink results = (event, channel) -> {
         resultChannels.add(channel);
         log.add(new Out(Kind.RESULT, 0, 0, event));
     };

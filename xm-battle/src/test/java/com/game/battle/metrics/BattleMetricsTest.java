@@ -57,6 +57,28 @@ class BattleMetricsTest {
     }
 
     @Test
+    void 对局结果的Kafka传输指标预建_三个取值同规格_每种结局各计各的() {
+        // match-spec §11：xm_battle_result_events_total{result = sent / fallback / not_verified}；通道计数另有 sent / error
+        assertThat(registry.scrape()).contains(
+                "xm_battle_result_events_total{result=\"sent\"} 0.0",
+                "xm_battle_result_events_total{result=\"fallback\"} 0.0",
+                "xm_battle_result_events_total{result=\"not_verified\"} 0.0",
+                "xm_battle_results_total{channel=\"plain\",result=\"sent\"} 0.0",
+                "xm_battle_results_total{channel=\"activity\",result=\"error\"} 0.0");
+        assertThat(BattleMetrics.ResultEvent.values()).as("规格只有这三个取值").hasSize(3);
+
+        metrics.resultEvent(BattleMetrics.ResultEvent.SENT);
+        metrics.resultEvent(BattleMetrics.ResultEvent.SENT);
+        metrics.resultEvent(BattleMetrics.ResultEvent.FALLBACK);
+        metrics.resultEvent(BattleMetrics.ResultEvent.NOT_VERIFIED);
+
+        assertThat(registry.scrape()).contains(
+                "xm_battle_result_events_total{result=\"sent\"} 2.0",
+                "xm_battle_result_events_total{result=\"fallback\"} 1.0",
+                "xm_battle_result_events_total{result=\"not_verified\"} 1.0");
+    }
+
+    @Test
     void dev_gather指标预建且按模式与结局计数() {
         assertThat(registry.scrape()).contains("xm_battle_dev_gather_total{mode=\"prepare_only\",result=\"ok\"} 0.0",
                 "xm_battle_dev_gather_total{mode=\"create\",result=\"create_failed\"} 0.0",

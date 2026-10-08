@@ -28,9 +28,12 @@ final class BattleResultFallbackLog {
         QUEUE_FULL,
         /** topic 还没核对通过（Kafka 不可达、分区契约不符、生产者进入致命状态后尚未重建）。 */
         NOT_VERIFIED,
-        /** {@code producer.send} 同步抛出（元数据 / 缓冲超过 {@code max.block.ms}、生产者已不可用……）。 */
+        /** {@code producer.send} 同步抛出（生产者进入致命状态 / 已被关闭、发送线程被打断……），或发送任务本身出了没预料到的异常。 */
         SEND_ERROR,
-        /** 已交给生产者，但投递失败（重试用尽、超过 {@code delivery.timeout.ms}、生产者被关闭时仍未确认）。 */
+        /**
+         * 生产者经回调报告的失败：等元数据 / 缓冲超过 {@code max.block.ms}（真生产者把这类错误交给回调而不是抛出）、重试用尽、
+         * 超过 {@code delivery.timeout.ms}、生产者被关闭时仍未确认。
+         */
         DELIVERY_FAILED,
         /** 停服：预算内没发完的，以及关闭之后才交进来的。 */
         SHUTDOWN_DROPPED;

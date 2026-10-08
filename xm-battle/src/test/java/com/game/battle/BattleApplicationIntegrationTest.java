@@ -12,6 +12,8 @@ import com.game.battle.admin.BattleAdminAuthFilter;
 import com.game.battle.admin.DevBattleController;
 import com.game.battle.admission.AdmissionGate;
 import com.game.battle.admission.AdmissionPhase;
+import com.game.battle.port.kafka.KafkaBattleResultSink;
+import com.game.battle.testing.FakeResultKafka;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
 import com.game.proto.BaseAttributesComp;
@@ -50,10 +52,11 @@ import org.springframework.test.context.DynamicPropertySource;
 /**
  * 整个 xm-battle 进程的装配与启停（连真 Redis，缺省跳过：{@code -Dxm.it.redis=redis://127.0.0.1:6379}，DB 14；battle-node-spec §7.11、§7.12、
  * §13.5、§13.6）：真租约、真目录、真 Dubbo Triple 导出、真直连端口、真房间服务、真管理 Tomcat。核对开闸后进目录、dev 接口建房 → 经 Triple 补签
- * → 票据地址是通告地址与直连端口、Prometheus 导出 battle 指标、dev 销毁后补签回 1005。
+ * → 票据地址是通告地址与直连端口、Prometheus 导出 battle 指标、dev 销毁后补签回 1005。对局结果的 Kafka 客户端换成 {@link FakeResultKafka}
+ * （这个类只开 Redis 的开关，不该依赖、更不该写本机的真 Kafka）：核对启动时按契约建出了结果 topic，dev 房间自始至终没有结果消息。
  */
 @EnabledIfSystemProperty(named = "xm.it.redis", matches = ".+")
-@SpringBootTest(classes = BattleApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+@SpringBootTest(classes = {BattleApplication.class, FakeResultKafka.Beans.class}, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "server.address=127.0.0.1",
                 "xm.run-mode=dev",
@@ -88,6 +91,12 @@ class BattleApplicationIntegrationTest {
 
     @Autowired
     RedissonClient redis;
+
+    @Autowired
+    FakeResultKafka resultKafka;
+
+    @Autowired
+    KafkaBattleResultSink resultSink;
 
     static int freePort() {
         try (ServerSocket socket = new ServerSocket(0)) {
@@ -166,6 +175,11 @@ class BattleApplicationIntegrationTest {
             socket.connect(new InetSocketAddress("127.0.0.1", CLIENT_PORT), 2000);
             assertThat(socket.isConnected()).isTrue();
         }
+        // 对局结果的 Kafka 生产方（6.4）：进程装配出的是 Kafka 实现，启动时按契约核对 / 建出了结果 topic（缺省代次 1、3 分区）
+        assertThat(resultSink.topic()).isEqualTo("xm-battle-result-g1");
+        assertThat(resultSink.verified()).isTrue();
+        assertThat(resultKafka.partitionsOf("xm-battle-result-g1")).isEqualTo(3);
+        assertThat(resultKafka.producersMade()).isEqualTo(1);
 
         // dev 建房（PVP 1V1，路由显式给全）
         long battleId = System.currentTimeMillis();
@@ -201,7 +215,8 @@ class BattleApplicationIntegrationTest {
                 HttpResponse.BodyHandlers.ofString());
         assertThat(scrape.statusCode()).isEqualTo(200);
         assertThat(scrape.body()).contains("xm_battle_room_creates_total").contains("xm_battle_admission_phase")
-                .contains("xm_battle_rpc_seconds").contains("xm_battle_rooms");
+                .contains("xm_battle_rpc_seconds").contains("xm_battle_rooms")
+                .contains("xm_battle_result_events_total").contains("result=\"not_verified\"");
 
         // dev 销毁 → 补签 1005（这局确实没了）
         assertThat(admin(DevBattleController.DESTROY, DestroyBattleRequest.newBuilder().setBattleId(battleId)
@@ -210,5 +225,6 @@ class BattleApplicationIntegrationTest {
                 .setBattleId(battleId).setPlayerId(PLAYER_A).build()).get(10, TimeUnit.SECONDS);
         assertThat(gone.getErrorMessage().getId()).isEqualTo(1005);
         assertThat(gone.hasAssignment()).isFalse();
+        assertThat(resultKafka.sent()).as("dev 房间、又是销毁作废：没有任何对局结果消息").isEmpty();
     }
 }

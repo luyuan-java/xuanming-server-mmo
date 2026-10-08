@@ -9,7 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * {@link BattleResultSink} 的缺省实现（6.4 接真实传输之前）：打 INFO、按通道计 {@code xm_battle_results_total{channel, result=logged}}——
+ * {@link BattleResultSink} 只记日志的实现（6.4 之前是缺省装配；6.4 起生产装配是 {@code port.kafka.KafkaBattleResultSink}，这个类留给
+ * 不接 Kafka 的测试装配）：打 INFO、按通道计 {@code xm_battle_results_total{channel, result=logged}}——
  * 普通局计 {@code channel=plain}；活动结果通道的首发与每次重发计 {@code channel=activity}（不混进 plain）。不阻塞、不抛异常，线程安全。
  */
 public final class LoggingBattleResultSink implements BattleResultSink {

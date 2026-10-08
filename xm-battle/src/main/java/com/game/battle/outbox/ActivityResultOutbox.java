@@ -27,8 +27,9 @@ import org.slf4j.LoggerFactory;
  * 每 10 s 对每条 EXISTS：0 → 摘除（消费方已销账）；1 → 用尽（30 次重发）则 ERROR 摘除，否则重发；<b>出错一律跳过、不计次</b>（与 D15 统一）；
  * 登记超过 {@link BattleRedis#OUTBOX_MAX_AGE} 仍没有结论 → 按用尽摘除（记录仍在 Redis，留给 4.6 的巡检器）。
  *
- * <p>销账方是 4.6 的帮会同道历练消费方与巡检器，两版现在都不存在；6.4 接上 {@link BattleResultSink} 的真实传输之前发布端口只记日志——整条通道两版都不可达（Q11）。
- * 线程：与结算发件箱共用 {@code battle-outbox}。
+ * <p>销账方是 4.6 的帮会同道历练消费方与巡检器，两版现在都不存在（Q11）。6.4 起发布端口是真的 Kafka 生产方（{@code port.kafka.KafkaBattleResultSink}，
+ * 发到对局结果 topic）：在 4.6 的消费方出现之前没有人销账，一局活动结果会按原字节重发到上限（首发 + 30 次），xm-match 的评分对这些事件按
+ * 「不计分」忽略（match-spec §5.4、§7.2）。线程：与结算发件箱共用 {@code battle-outbox}。
  */
 public final class ActivityResultOutbox implements ActivityResultSink {
 

@@ -28,6 +28,7 @@ import static com.game.battle.e2e.E2eSupport.reissue;
 import static com.game.battle.e2e.E2eSupport.routing;
 import static com.game.battle.e2e.E2eSupport.tank;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.game.api.BattleNodeService;
 import com.game.api.asset.IsolatedDubboModule;
@@ -40,6 +41,7 @@ import com.game.battle.e2e.DirectClient.Frame;
 import com.game.battle.e2e.GatePushInbox.Delivery;
 import com.game.battle.port.scene.SceneTransport;
 import com.game.battle.protocol.BattleMessageIds;
+import com.game.battle.testing.FakeResultKafka;
 import com.game.battle.protocol.BattleMessageIds.Notify;
 import com.game.battle.protocol.BattleMessageIds.Upstream;
 import com.game.common.token.BattleTickets;
@@ -76,6 +78,7 @@ import com.game.proto.StopWatchBattleResponse;
 import com.game.proto.SubmitBattleActionRequest;
 import com.game.proto.SubmitBattleActionResponse;
 import com.game.proto.TurnResultS2C;
+import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eBattleActionType;
 import com.game.proto.eBattleActorType;
 import com.game.proto.eBattleOutcome;
@@ -119,9 +122,13 @@ import org.springframework.test.context.DynamicPropertySource;
  * <p>逐条核对 battle-node-spec 的线上顺序 O1–O8、R1–R3：开局大厅先 177 后 143（一条 {@code GatePush{message_batch}}）、握手应答是第一帧、
  * 观众应答之后才 161、上行触发的结算 139 →（150）→ 应答 → FIN、定时结算、整场期限 DRAW（没有终局 139，观众 166 ABORTED + DRAW）、
  * Destroy 参战者只看到 FIN、重连顶替旧连接不发帧、165 应答 → FIN 且没有 166；以及直连面的闸门（握手前、握手拒绝串、信封错误、限频、非法包阈值）。
+ *
+ * <p>对局结果（6.4）：进程装配出的是 Kafka 生产方，但 Kafka 客户端换成 {@link FakeResultKafka}——这个类只开 Redis 的开关，不该依赖本机的真 Kafka，
+ * 更不能把测试对局的结果写进本机切片在用的结果 topic（xm-match 会拿它算评分）。真打完的 match 房间在假生产者上恰好留下一条
+ * key = battle_id 的 {@code BattleResultEvent}；dev 房间一条都没有。连真 Kafka 的核对在 {@code KafkaBattleResultSinkIntegrationTest}。
  */
 @EnabledIfSystemProperty(named = "xm.it.redis", matches = ".+")
-@SpringBootTest(classes = BattleApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+@SpringBootTest(classes = {BattleApplication.class, FakeResultKafka.Beans.class}, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "server.address=127.0.0.1",
                 "xm.run-mode=dev",
@@ -163,8 +170,21 @@ class BattleNodeEndToEndTest {
     @Autowired
     SceneTransport sceneTransport;
 
+    @Autowired
+    FakeResultKafka resultKafka;
+
     /** 本类用到的玩家下标上限（{@link #player(int)}；清理待结算记录时按它遍历）。 */
     private static final int MAX_PLAYER_INDEX = 49;
+
+    /** 假 Kafka 生产者收到的、key 是这一局 battle_id 的结果事件（发送在 {@code battle-result-out} 线程上，所以要等）；应当恰好一条。 */
+    private BattleResultEvent publishedResult(long battleId) {
+        String key = Long.toUnsignedString(battleId);
+        await().atMost(Duration.ofSeconds(5)).until(() -> resultKafka.sent().stream().anyMatch(message -> message.key().equals(key)));
+        List<FakeResultKafka.Sent> matching = resultKafka.sent().stream().filter(message -> message.key().equals(key)).toList();
+        assertThat(matching).as("一局恰好一条结果消息").hasSize(1);
+        assertThat(matching.get(0).topic()).isEqualTo("xm-battle-result-g1");
+        return matching.get(0).event();
+    }
 
     private GatePushInbox gate;
 
@@ -240,7 +260,7 @@ class BattleNodeEndToEndTest {
         long battleId = nextBattleId();
         long deadline = System.currentTimeMillis() + 300_000;
         double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent");
-        double resultsBefore = count(meters, "xm.battle.results", "channel", "plain", "result", "logged");
+        double resultsBefore = count(meters, "xm.battle.results", "channel", "plain", "result", "sent");
         double lobbySentBefore = count(meters, "xm.battle.lobby.push.outcomes", "outcome", "sent");
         double replacedBefore = count(meters, "xm.battle.disconnects", "reason", "replaced");
 
@@ -387,9 +407,19 @@ class BattleNodeEndToEndTest {
         // 补签 1005（客户端据此判 BattleGone）
         assertThat(issueTip(battleId, a)).isEqualTo(TIP_INVALID_PARAMETER);
 
-        // match 房间照常走结算端口（6.3 起交给结算发件箱，计 sent）与普通结果端口（只记日志）；大厅公告经 gate 送达；顶替计数
+        // match 房间照常走结算端口（6.3 起交给结算发件箱，计 sent）与普通结果端口（6.4 起是 Kafka 生产方：key = battle_id、value 是结果事件）；
+        // 大厅公告经 gate 送达；顶替计数
         assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent") - settlementsBefore).isEqualTo(1);
-        assertThat(count(meters, "xm.battle.results", "channel", "plain", "result", "logged") - resultsBefore).isEqualTo(1);
+        BattleResultEvent published = publishedResult(battleId);
+        assertThat(published.getBattleId()).isEqualTo(battleId);
+        assertThat(published.getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
+        assertThat(published.getWinnerTeamIndex()).isZero();
+        assertThat(published.getTotalRounds()).isEqualTo(end.getSettlement().getTotalRounds());
+        assertThat(published.getTeamsList()).singleElement().satisfies(team -> assertThat(team.getPlayerIdsList()).containsExactly(a));
+        assertThat(published.hasActivityContext()).isFalse();
+        assertThat(count(meters, "xm.battle.results", "channel", "plain", "result", "sent") - resultsBefore).isEqualTo(1);
+        assertThat(count(meters, "xm.battle.results", "result", "logged")).as("不再是只记日志").isZero();
+        assertThat(count(meters, "xm.battle.results", "result", "error")).isZero();
         assertThat(count(meters, "xm.battle.lobby.push.outcomes", "outcome", "sent")).isGreaterThan(lobbySentBefore);
         assertThat(count(meters, "xm.battle.disconnects", "reason", "replaced") - replacedBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.rounds", "trigger", "all_ready")).isPositive();
@@ -479,7 +509,9 @@ class BattleNodeEndToEndTest {
         gate.online(watcher, 303);
         double skippedBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "skipped");
         double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent");
-        double resultsBefore = count(meters, "xm.battle.results", "result", "logged");
+        // 不带标签 = 全部通道、全部结局之和：dev 房间不该让其中任何一个动
+        double resultsBefore = count(meters, "xm.battle.results");
+        double resultEventsBefore = count(meters, "xm.battle.result.events");
 
         // dev 建房（DEV 房间：照常推送，永不投递结算与结果事件）
         long battleId = nextBattleId();
@@ -556,7 +588,10 @@ class BattleNodeEndToEndTest {
         // DEV 房间：结算端口跳过（计 skipped），不发结果事件
         assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "skipped") - skippedBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent")).isEqualTo(settlementsBefore);
-        assertThat(count(meters, "xm.battle.results", "result", "logged")).isEqualTo(resultsBefore);
+        assertThat(count(meters, "xm.battle.results")).isEqualTo(resultsBefore);
+        assertThat(count(meters, "xm.battle.result.events")).isEqualTo(resultEventsBefore);
+        assertThat(resultKafka.sent()).as("dev 房间的结果永不进 Kafka（否则 dev 接口就是刷分口子）")
+                .noneMatch(message -> message.key().equals(Long.toUnsignedString(battleId)));
 
         // 第二间房：165 → 应答 → FIN，没有 166（O8）；之后不在观众名单，补签 1005
         long second = nextBattleId();
@@ -600,7 +635,7 @@ class BattleNodeEndToEndTest {
         long watcher = player(33);
         long battleId = nextBattleId();
         double settlementsBefore = count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent");
-        double resultsBefore = count(meters, "xm.battle.results", "channel", "plain", "result", "logged");
+        double resultsBefore = count(meters, "xm.battle.results", "channel", "plain", "result", "sent");
         double deadlineEndsBefore = count(meters, "xm.battle.room.ends", "reason", "deadline");
         double timerRoundsBefore = count(meters, "xm.battle.rounds", "trigger", "timer");
 
@@ -658,9 +693,13 @@ class BattleNodeEndToEndTest {
             assertThat(spectateEnd.getReason()).isEqualTo(eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED);
             assertThat(spectateEnd.getOutcome()).as("B6：期限路径给观众的是 DRAW，不是 ONGOING").isEqualTo(eBattleOutcome.BATTLE_OUTCOME_DRAW);
         }
-        // 照常发结算（逐人）与结果事件（DRAW）
+        // 照常发结算（逐人）与结果事件（DRAW：整场期限打满也算「真正打完」，照发；两队各一人）
         assertThat(count(meters, "xm.battle.scene.events", "kind", "settlement", "result", "sent") - settlementsBefore).isEqualTo(2);
-        assertThat(count(meters, "xm.battle.results", "channel", "plain", "result", "logged") - resultsBefore).isEqualTo(1);
+        BattleResultEvent published = publishedResult(battleId);
+        assertThat(published.getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_DRAW);
+        assertThat(published.getTotalRounds()).isEqualTo(1);
+        assertThat(published.getTeamsList()).extracting(team -> team.getPlayerIdsList().get(0)).containsExactly(a, b);
+        assertThat(count(meters, "xm.battle.results", "channel", "plain", "result", "sent") - resultsBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.room.ends", "reason", "deadline") - deadlineEndsBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.rounds", "trigger", "timer") - timerRoundsBefore).isEqualTo(1);
         assertThat(issueTip(battleId, a)).isEqualTo(TIP_INVALID_PARAMETER);

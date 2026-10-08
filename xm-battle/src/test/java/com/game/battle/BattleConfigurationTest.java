@@ -12,22 +12,39 @@ import com.game.battle.port.ActivityResultSink;
 import com.game.battle.port.BattleResultSink;
 import com.game.battle.port.LoggingBattleResultSink;
 import com.game.battle.port.SettlementSink;
+import com.game.battle.port.kafka.BattleResultProperties;
+import com.game.battle.port.kafka.KafkaBattleResultSink;
 import com.game.battle.port.scene.DubboSceneBattleEvents;
 import com.game.battle.port.SceneBattleEvents;
 import com.game.battle.port.scene.SceneTransport;
 import com.game.battle.push.LobbyAnnouncer;
 import com.game.battle.push.PresenceLobbyAnnouncer;
+import com.game.battle.testing.FakeResultKafka;
+import com.game.battle.testing.FakeResultKafka.Sent;
+import com.game.battle.testing.ResultFallbackCapture;
 import com.game.common.RunMode;
 import com.game.common.token.BattleTickets;
 import com.game.discovery.RedisProperties;
+import com.game.proto.BattleActivityContext;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
+import com.game.proto.contracts.kafka.BattleResultEvent;
+import com.game.proto.eBattleActivityKind;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.redisson.api.RedissonClient;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -37,7 +54,8 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 
 /**
  * 启动门禁与装配（battle-node-spec §6.3、§7.11 第 1–3 步、§13.5；{@code ApplicationContextRunner}，不连 Redis、不开端口：基础设施用
- * {@link FakeBattleInfrastructure}）。秘密都经属性显式给出，盖住开发机上可能已设置的同名环境变量。
+ * {@link FakeBattleInfrastructure}）。秘密都经属性显式给出，盖住开发机上可能已设置的同名环境变量。对局结果的 Kafka 客户端换成
+ * {@link FakeResultKafka}（不连 Kafka；装配本身——{@code KafkaBattleResultSink} 的建立、启动期核对、关闭次序——是真的）。
  */
 @ExtendWith(OutputCaptureExtension.class)
 class BattleConfigurationTest {
@@ -46,12 +64,29 @@ class BattleConfigurationTest {
     static final String GATE_SECRET = "gate-token-secret-for-context-tests-0123456789";
 
     private final FakeBattleInfrastructure infra = new FakeBattleInfrastructure();
+    private final FakeResultKafka kafka = new FakeResultKafka();
+
+    /** 同生产的装配：<b>不</b>提供 Kafka 客户端的替换口（{@code BattleConfiguration} 自己建真 Kafka 客户端）。只有末尾两条用例用它。 */
+    private final ApplicationContextRunner realKafkaClients = new ApplicationContextRunner()
+            .withUserConfiguration(BattleConfiguration.class)
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+            .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
+            .withBean(BattleInfrastructure.class, () -> infra)
+            .withPropertyValues(
+                    "xm.advertise-host=127.0.0.1",
+                    "xm.table-dir=../config-data/tables",
+                    "XM_DUBBO_SECRET=dubbo-secret-for-context-tests",
+                    "XM_ADMIN_TOKEN=",
+                    "xm.run-mode=prod",
+                    BattleConfiguration.TICKET_SECRET_ENV + "=" + SECRET,
+                    BattleConfiguration.GATE_SECRET_ENV + "=" + GATE_SECRET);
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(BattleConfiguration.class)
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(BattleInfrastructure.class, () -> infra)
+            .withBean(KafkaBattleResultSink.Clients.class, () -> kafka)
             .withPropertyValues(
                     "xm.advertise-host=127.0.0.1",
                     "xm.table-dir=../config-data/tables",
@@ -226,13 +261,14 @@ class BattleConfigurationTest {
     }
 
     @Test
-    void 三个出站端口都接到SceneTransport_结算端口背后是真的发件箱_结果发布端口仍是日志实现() {
+    void 三个出站端口都接到SceneTransport_结算端口背后是真的发件箱_结果发布端口是Kafka生产方() {
         prod(SECRET).run(ctx -> {
             assertThat(ctx).hasNotFailed().hasSingleBean(SceneTransport.class);
             SceneTransport transport = ctx.getBean(SceneTransport.class);
             assertThat(ctx.getBean(SceneBattleEvents.class)).isSameAs(transport.sceneEvents());
             assertThat(ctx.getBean(ActivityResultSink.class)).isSameAs(transport.activityResults());
-            assertThat(ctx.getBean(BattleResultSink.class)).isInstanceOf(LoggingBattleResultSink.class);
+            assertThat(ctx.getBean(BattleResultSink.class)).isInstanceOf(KafkaBattleResultSink.class);
+            assertThat(infra.roomDeps.results()).as("房间拿到的普通结果端口就是这个 bean").isSameAs(ctx.getBean(BattleResultSink.class));
             assertThat(infra.roomDeps.settlements()).as("房间拿到的就是这个 bean").isSameAs(ctx.getBean(SettlementSink.class));
             assertThat(infra.roomDeps.activityResults()).isSameAs(transport.activityResults());
             assertThat(infra.roomDeps.sceneEvents()).isSameAs(transport.sceneEvents());
@@ -328,5 +364,237 @@ class BattleConfigurationTest {
             assertThat(registration.getFilter().tokenConfigured()).isFalse();
             assertThat(registration.getUrlPatterns()).containsExactly("/admin/*");
         });
+    }
+
+    // ---------------------------------------------------------------- 6.4：对局结果的 Kafka 生产（match-spec §5.4）
+
+    private static final String RESULT_TOPIC = "xm-battle-result-g1";
+
+    private static BattleResultEvent result(long battleId) {
+        return BattleResultEvent.newBuilder().setBattleId(battleId).setMatchMode(1).setTotalRounds(7).setFinishedAtMs(1_800_000_000_000L)
+                .build();
+    }
+
+    private static BattleResultEvent activityResult(long battleId) {
+        return result(battleId).toBuilder().setMatchMode(5).setActivityContext(BattleActivityContext.newBuilder()
+                .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_TRIAL).setGuildId(66).setActivityId(3)).build();
+    }
+
+    private static double results(MeterRegistry meters, String channel, String result) {
+        return meters.get("xm.battle.results").tag("channel", channel).tag("result", result).counter().count();
+    }
+
+    private static double resultEvents(MeterRegistry meters, String result) {
+        return meters.get("xm.battle.result.events").tag("result", result).counter().count();
+    }
+
+    @Test
+    void 对局结果_启动时核对出三分区的topic_缺省代次1_房间与活动结果通道共用同一个Kafka生产方_按通道计数_上下文关闭时关生产者() {
+        prod(SECRET).run(ctx -> {
+            assertThat(ctx).hasNotFailed().hasSingleBean(BattleResultSink.class).hasSingleBean(KafkaBattleResultSink.class);
+            KafkaBattleResultSink sink = ctx.getBean(KafkaBattleResultSink.class);
+            assertThat(sink.topic()).isEqualTo(RESULT_TOPIC);
+            assertThat(sink.verified()).isTrue();
+            assertThat(ctx.getBean(BattleResultProperties.class)).isEqualTo(BattleResultProperties.defaults());
+            assertThat(kafka.created()).singleElement().satisfies(created -> {
+                assertThat(created.topic()).isEqualTo(RESULT_TOPIC);
+                assertThat(created.partitions()).isEqualTo(3);
+                assertThat(created.replicationFactor()).isEqualTo((short) 1);
+            });
+            MeterRegistry meters = ctx.getBean(MeterRegistry.class);
+
+            infra.roomDeps.results().publish(result(77101));
+            // 活动局：Redisson 是 mock，持久副本落不了库 → 活动结果通道只发布一次；走的是同一个生产方，按 activity 计
+            infra.roomDeps.activityResults().dispatch(activityResult(77102));
+
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+                assertThat(kafka.sent()).extracting(Sent::key).containsExactlyInAnyOrder("77101", "77102");
+                assertThat(results(meters, "plain", "sent")).isEqualTo(1);
+                assertThat(results(meters, "activity", "sent")).isEqualTo(1);
+                assertThat(resultEvents(meters, "sent")).isEqualTo(2);
+            });
+            assertThat(kafka.sent()).allSatisfy(message -> assertThat(message.topic()).isEqualTo(RESULT_TOPIC));
+            assertThat(kafka.sent().stream().filter(message -> message.key().equals("77102")).findFirst().orElseThrow().event())
+                    .isEqualTo(activityResult(77102));
+            assertThat(kafka.sendThreads()).containsOnly("battle-result-out");
+            assertThat(results(meters, "plain", "logged") + results(meters, "activity", "logged")).as("不再是只记日志").isZero();
+            assertThat(kafka.producer(0).closed()).isFalse();
+        });
+        assertThat(kafka.producer(0).closed()).as("上下文销毁时关生产者").isTrue();
+    }
+
+    @Test
+    void 对局结果的topic代次与副本数取配置() {
+        prod(SECRET).withPropertyValues("xm.battle.result.topic-generation=5", "xm.battle.result.replication-factor=3").run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            assertThat(ctx.getBean(KafkaBattleResultSink.class).topic()).isEqualTo("xm-battle-result-g5");
+            assertThat(kafka.created()).singleElement().satisfies(created -> {
+                assertThat(created.topic()).isEqualTo("xm-battle-result-g5");
+                assertThat(created.replicationFactor()).isEqualTo((short) 3);
+            });
+            assertThat(kafka.partitionsOf(RESULT_TOPIC)).as("缺省代次的 topic 没有被碰").isNull();
+        });
+    }
+
+    @Test
+    void 对局结果topic的分区数与契约不符_拒启_报错指向它自己的代次变量_发生在任何端口打开之前_升代次后能启动() {
+        kafka.topic(RESULT_TOPIC, 1);
+
+        prod(SECRET).run(ctx -> {
+            assertThat(ctx).hasFailed();
+            assertThat(ctx.getStartupFailure()).hasStackTraceContaining("拒绝启动").rootCause()
+                    .hasMessageContaining(RESULT_TOPIC).hasMessageContaining("分区数是 1").hasMessageContaining("契约是 3")
+                    .hasMessageContaining("XM_BATTLE_RESULT_TOPIC_GENERATION");
+        });
+        assertThat(infra.events).as("门禁在任何端口打开之前").isEmpty();
+        assertThat(kafka.producersMade()).isZero();
+
+        prod(SECRET).withPropertyValues("xm.battle.result.topic-generation=2").run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            assertThat(ctx.getBean(KafkaBattleResultSink.class).topic()).isEqualTo("xm-battle-result-g2");
+        });
+        assertThat(kafka.partitionsOf(RESULT_TOPIC)).as("旧代次原样留着，不去改它的分区数").isEqualTo(1);
+    }
+
+    @Test
+    void Kafka不可达_不拒启_节点照常开闸_结果事件完整写进兜底日志(CapturedOutput output) {
+        kafka.unreachable = true;
+        try (ResultFallbackCapture fallback = ResultFallbackCapture.start()) {
+            prod(SECRET).run(ctx -> {
+                assertThat(ctx).hasNotFailed();
+                assertThat(ctx.getBean(BattleNode.class).isRunning()).isTrue();
+                assertThat(ctx.getBean(AdmissionGate.class).phase()).isEqualTo(AdmissionPhase.OPEN);
+                assertThat(ctx.getBean(KafkaBattleResultSink.class).verified()).isFalse();
+                MeterRegistry meters = ctx.getBean(MeterRegistry.class);
+
+                infra.roomDeps.results().publish(result(77201));
+
+                await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(resultEvents(meters, "not_verified")).isEqualTo(1));
+                assertThat(fallback.lines()).singleElement().satisfies(line -> {
+                    assertThat(line.reason()).isEqualTo("not_verified");
+                    assertThat(line.topic()).isEqualTo(RESULT_TOPIC);
+                    assertThat(line.key()).isEqualTo("77201");
+                    assertThat(line.event()).isEqualTo(result(77201));
+                });
+                assertThat(results(meters, "plain", "error")).isEqualTo(1);
+                assertThat(kafka.producersMade()).isZero();
+            });
+        }
+        assertThat(output.getOut()).contains("对局结果经 Kafka 发布").contains("已核对=false");
+    }
+
+    @Test
+    void xm_battle_result配置非法_拒启_消息带键名_还没碰Kafka() {
+        prod(SECRET).withPropertyValues("xm.battle.result.topic-generation=0").run(ctx -> {
+            assertThat(ctx).hasFailed();
+            assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("xm.battle.result.topic-generation");
+        });
+        prod(SECRET).withPropertyValues("xm.battle.result.bootstrap-servers=  ").run(ctx -> {
+            assertThat(ctx).hasFailed();
+            assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("xm.battle.result.bootstrap-servers");
+        });
+        prod(SECRET).withPropertyValues("xm.battle.result.replication-factor=0").run(ctx -> {
+            assertThat(ctx).hasFailed();
+            assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("xm.battle.result.replication-factor");
+        });
+        prod(SECRET).withPropertyValues("xm.battle.result.init-timeout=0s").run(ctx -> {
+            assertThat(ctx).hasFailed();
+            assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("xm.battle.result.init-timeout");
+        });
+        assertThat(infra.events).as("门禁在任何端口打开之前").isEmpty();
+        assertThat(kafka.adminsOpened()).isZero();
+    }
+
+    @Test
+    void 测试自己提供结果发布端口时_缺省的Kafka实现让位_不碰Kafka() {
+        BattleResultSink own = new LoggingBattleResultSink(new com.game.battle.metrics.BattleMetrics(new SimpleMeterRegistry()));
+
+        prod(SECRET).withBean(BattleResultSink.class, () -> own).run(ctx -> {
+            assertThat(ctx).hasNotFailed().doesNotHaveBean(KafkaBattleResultSink.class);
+            assertThat(ctx.getBean(BattleResultSink.class)).isSameAs(own);
+            assertThat(infra.roomDeps.results()).isSameAs(own);
+        });
+
+        assertThat(kafka.adminsOpened()).isZero();
+        assertThat(kafka.producersMade()).isZero();
+    }
+
+    @Test
+    void 上下文关闭_节点先停_传输再关_对局结果发送最后关_节点停机途中交出的结果仍发得出去(CapturedOutput output) {
+        prod(SECRET).run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            // 节点停机途中（反导出控制面那一步）房间交出最后一份结果
+            infra.onRpcClose = () -> infra.roomDeps.results().publish(result(77301));
+        });
+
+        assertThat(infra.events).endsWith("rpc.close", "lease.close");
+        assertThat(kafka.sent()).as("节点停机时结果发送还开着；关闭时先把队列发完").extracting(Sent::key).containsExactly("77301");
+        assertThat(kafka.producer(0).closed()).isTrue();
+        String out = output.getOut();
+        assertThat(out).contains("battle → scene 传输已关闭").contains("对局结果发送已关闭 topic=" + RESULT_TOPIC);
+        assertThat(out.indexOf("battle → scene 传输已关闭")).as("活动结果通道所在的 battle-outbox 线程先停，之后才关生产者")
+                .isLessThan(out.indexOf("对局结果发送已关闭 topic=" + RESULT_TOPIC));
+    }
+
+    @Test
+    void 不提供替换口时用真Kafka客户端_地址写错按不可达处理_照常启动_客户端id带通告地址与控制面端口(CapturedOutput output) {
+        // 没有端口的地址在解析阶段就被真客户端拒掉：不做 DNS、不连网络，也不等 init-timeout
+        realKafkaClients.withPropertyValues("xm.battle.result.bootstrap-servers=没有端口的地址").run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            assertThat(ctx.getBean(BattleNode.class).isRunning()).isTrue();
+            KafkaBattleResultSink sink = ctx.getBean(KafkaBattleResultSink.class);
+            assertThat(sink.verified()).isFalse();
+            assertThat(sink.topic()).isEqualTo(RESULT_TOPIC);
+        });
+
+        assertThat(kafka.adminsOpened()).as("这条用例没有走假 Kafka").isZero();
+        assertThat(output.getOut()).contains("对局结果经 Kafka 发布 kafka=没有端口的地址 topic=" + RESULT_TOPIC
+                + " client_id=xm-battle-result-127.0.0.1-21200 已核对=false");
+    }
+
+    /**
+     * 生产装配连真 Kafka（{@code -Dxm.it.kafka=127.0.0.1:9092}，缺省跳过）：{@code BattleConfiguration} 自己建的幂等生产者与 topic 管理，
+     * 房间交来的结果真的落到 topic 上。用 xm-battle 测试专用的代次（同 {@code KafkaBattleResultSinkIntegrationTest}），唯一的 battle_id 与消费组。
+     */
+    @Test
+    @EnabledIfSystemProperty(named = "xm.it.kafka", matches = ".+")
+    void 真Kafka_生产装配核对通过_房间交来的结果落到带代次的topic上_key是battle_id_字节原样() {
+        String bootstrap = System.getProperty("xm.it.kafka");
+        long battleId = System.currentTimeMillis() * 1000 + 777;
+        BattleResultEvent event = result(battleId);
+
+        realKafkaClients.withPropertyValues("xm.battle.result.bootstrap-servers=" + bootstrap, "xm.battle.result.topic-generation=9671",
+                "xm.battle.result.init-timeout=20s").run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            KafkaBattleResultSink sink = ctx.getBean(KafkaBattleResultSink.class);
+            assertThat(sink.topic()).isEqualTo("xm-battle-result-g9671");
+            assertThat(sink.verified()).isTrue();
+            MeterRegistry meters = ctx.getBean(MeterRegistry.class);
+
+            infra.roomDeps.results().publish(event);
+
+            await().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(resultEvents(meters, "sent")).isEqualTo(1));
+            assertThat(results(meters, "plain", "sent")).isEqualTo(1);
+        });
+        assertThat(kafka.adminsOpened()).as("这条用例没有走假 Kafka").isZero();
+
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "xm-it-battle-config-" + battleId);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        List<ConsumerRecord<String, byte[]>> own = new ArrayList<>();
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props, new StringDeserializer(), new ByteArrayDeserializer())) {
+            consumer.subscribe(List.of("xm-battle-result-g9671"));
+            while (own.isEmpty() && System.nanoTime() < deadline) {
+                for (ConsumerRecord<String, byte[]> record : consumer.poll(Duration.ofMillis(500))) {
+                    if (Long.toUnsignedString(battleId).equals(record.key())) {
+                        own.add(record);
+                    }
+                }
+            }
+        }
+        assertThat(own).singleElement().satisfies(record -> assertThat(record.value()).isEqualTo(event.toByteArray()));
     }
 }

@@ -1,5 +1,6 @@
 package com.game.battle;
 
+import com.game.audit.AuditTopicContractException;
 import com.game.battle.BattleTables.RowReport;
 import com.game.battle.admin.BattleAdminAuthFilter;
 import com.game.battle.admin.DevBattleBackend;
@@ -7,7 +8,6 @@ import com.game.battle.admin.DevRoutingResolver;
 import com.game.battle.admission.AdmissionGate;
 import com.game.battle.engine.TableBattleData;
 import com.game.battle.metrics.BattleMetrics;
-import com.game.audit.AuditTopicContractException;
 import com.game.battle.port.ActivityResultSink;
 import com.game.battle.port.BattleResultSink;
 import com.game.battle.port.SceneBattleEvents;

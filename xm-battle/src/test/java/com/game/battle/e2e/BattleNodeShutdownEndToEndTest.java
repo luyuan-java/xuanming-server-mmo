@@ -21,6 +21,7 @@ import com.game.battle.BattleApplication;
 import com.game.battle.BattleNode;
 import com.game.battle.admission.AdmissionPhase;
 import com.game.battle.rpc.BattleNodeServiceImpl;
+import com.game.battle.testing.FakeResultKafka;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
 import com.game.proto.AddObserverRequest;
@@ -49,10 +50,11 @@ import org.springframework.test.context.DynamicPropertySource;
  * 停机的端到端（真 Spring 进程 + 真 Redis，缺省跳过：{@code -Dxm.it.redis}，DB 14；battle-node-spec §6.6、§7.11、§11 N16）：停机时
  * 「关闸 + 作废全部房间」在同一个逻辑任务里，观众先收完 166{ABORTED, ONGOING} 再 FIN（修基线 F1：观众的 166 不会被强关吞掉），参战者
  * 什么帧都收不到、只见 FIN，未握手的空闲连接被关；之后目录条目删除、不再接受直连、建房回 NOT_ALLOCATABLE。另核对握手期限（注入 2 s）。
- * 停机会拆掉本类的整个进程，所以单独一个类、单独一个 Spring 上下文。
+ * 停机会拆掉本类的整个进程，所以单独一个类、单独一个 Spring 上下文。对局结果的 Kafka 客户端换成 {@link FakeResultKafka}（只开 Redis 的开关，
+ * 不依赖也不写本机的真 Kafka）：停机作废的房间不发结果事件（评分只按真正打完的局更新）。
  */
 @EnabledIfSystemProperty(named = "xm.it.redis", matches = ".+")
-@SpringBootTest(classes = BattleApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+@SpringBootTest(classes = {BattleApplication.class, FakeResultKafka.Beans.class}, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "server.address=127.0.0.1",
                 "xm.run-mode=dev",
@@ -80,6 +82,9 @@ class BattleNodeShutdownEndToEndTest {
 
     @Autowired
     RedissonClient redis;
+
+    @Autowired
+    FakeResultKafka resultKafka;
 
     @DynamicPropertySource
     static void ports(DynamicPropertyRegistry registry) {
@@ -153,6 +158,11 @@ class BattleNodeShutdownEndToEndTest {
         assertThat(node.admission().phase()).isEqualTo(AdmissionPhase.CLOSED);
         assertThat(count(meters, "xm.battle.room.ends", "reason", "aborted") - abortedBefore).isEqualTo(1);
         assertThat(count(meters, "xm.battle.disconnects", "reason", "shutdown") - shutdownBefore).isGreaterThanOrEqualTo(2);
+        // 停机作废的房间不发对局结果：三个结局的计数都没动，生产者上一条消息也没有（节点停了，结果发送要等 Spring 销毁 bean 才关）
+        assertThat(count(meters, "xm.battle.result.events")).isZero();
+        assertThat(count(meters, "xm.battle.results")).isZero();
+        assertThat(resultKafka.sent()).isEmpty();
+        assertThat(resultKafka.producer(0).closed()).isFalse();
         // 停机第 1 步删了目录条目；直连端口不再接受连接
         assertThat(directory.list(0)).noneSatisfy(info -> assertThat(info.getInstanceId()).isEqualTo(node.instanceId()));
         assertThatThrownBy(() -> {
