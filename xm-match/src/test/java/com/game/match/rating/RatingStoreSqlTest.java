@@ -38,7 +38,12 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 @EnabledIfSystemProperty(named = "xm.it.mysql", matches = ".+")
 class RatingStoreSqlTest extends RatingStoreCases {
 
-    /** 会话的锁等待上限放宽到 10 s（生产是 1 s）：下面的用例要看到的是「等到锁」与「死锁」，不是锁等待超时。 */
+    /**
+     * 会话的锁等待上限放宽到 10 s（生产是 1 s）：下面的用例要看到的是「等到锁」与「死锁」，不是锁等待超时。
+     * 注意入账事务里每条语句另有 {@link RatingStore#APPLY_STATEMENT_TIMEOUT_SECONDS} 秒的查询超时（生产里它大于锁等待上限，轮不到它）：在这个放宽了
+     * 锁等待的库上，卡在行锁上的入账若 3 s 内等不到锁，会以「Statement cancelled due to timeout」结束（不是 1205，不重跑）。所以用例里持锁的一方
+     * 都是一看到对方进入 LOCK WAIT（{@link #awaitLockWaiter}，20 ms 轮询一次）就立刻放锁 / 成环，不让等待拖到 3 s。
+     */
     private static final int LOCK_WAIT_SECONDS = 10;
     private static final String LOCK_WAITERS = "SELECT COUNT(*) FROM information_schema.innodb_trx t JOIN information_schema.processlist p"
             + " ON p.id = t.trx_mysql_thread_id WHERE t.trx_state = 'LOCK WAIT' AND p.db = DATABASE()";
@@ -81,15 +86,11 @@ class RatingStoreSqlTest extends RatingStoreCases {
      */
     private void awaitLockWaiter(Future<Result> expectedWaiter) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
-        long t0 = System.nanoTime();
         while (System.nanoTime() < deadline) {
             long waiters = db.query(LOCK_WAITERS, rs -> {
                 rs.next();
                 return rs.getLong(1);
             });
-            System.out.println("DIAG2 t=" + (System.nanoTime() - t0) / 1_000_000 + " waiters=" + waiters + " calls=" + ds.calls.size()
-                    + " trx=" + dump("SELECT trx_state, trx_mysql_thread_id, trx_query FROM information_schema.innodb_trx")
-                    + " procs=" + dump("SELECT id, command, time, state, LEFT(IFNULL(info, ''), 60) FROM information_schema.processlist WHERE db = DATABASE()"));
             if (waiters > 0) {
                 return;
             }

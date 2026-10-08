@@ -18,7 +18,6 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.SmartLifecycle;
 
 /**
  * 评分回流的运行时（match-spec §5.3、§5.4、§9.8 启动第 9 步；基线 {@code msvc.go:101-134}）：核对对局结果 topic，然后起一条
@@ -34,10 +33,17 @@ import org.springframework.context.SmartLifecycle;
  *   <li>消费循环意外退出（不是停止）：5 s 后换一个新的 KafkaConsumer 重来，没提交的记录会被重新消费。</li>
  *   <li>{@code xm.match.rating.enabled = false}：什么都不做（不核对 topic、不消费），评分停在已有值。</li>
  * </ul>
- * 停止发生在数据源销毁之前（{@link SmartLifecycle}）：唤醒轮询、等消费线程退出（至多 10 s），没提交的记录留给下次启动重放。
- * 它与 matcher / gather / Dubbo 没有先后依赖（只碰 Kafka 与 MySQL），所以用缺省相位即可。
+ *
+ * <p><b>启停口</b>：只有 {@link #start()} / {@link #stop()} 两个方法，本类<b>不带任何 Spring 生命周期接口、不自己启停</b>——什么时候启、什么时候停由
+ * 进程的生命周期编排决定（规格的次序：Dubbo 导出、凑单启动之后才启；在途 gather 等完之后、数据源销毁之前才停）。
+ * <ul>
+ *   <li>{@link #start()}：在启动线程上调。<b>有界阻塞</b>——第一次核对至多等 {@code init-timeout}（缺省 10 s，Kafka 可达时是毫秒级）；
+ *       只在 topic 与契约不符时抛（= 拒绝启动），Kafka 不可达不抛。幂等。</li>
+ *   <li>{@link #stop()}：唤醒轮询、等手上这一条入账结束、等消费线程退出（至多 10 s），没提交的记录留给下次启动重放（入账按 battle_id 幂等）。
+ *       幂等；没启动过也能调；不抛异常。必须在数据源销毁之前调。</li>
+ * </ul>
  */
-public final class BattleResultIngest implements SmartLifecycle {
+public final class BattleResultIngest {
 
     private static final Logger log = LoggerFactory.getLogger(BattleResultIngest.class);
 
@@ -135,9 +141,10 @@ public final class BattleResultIngest implements SmartLifecycle {
     }
 
     /**
-     * @throws AuditTopicContractException topic 的分区数与契约不符（进程拒绝启动）
+     * 核对 topic 并开始消费（幂等；开关关闭时什么都不做）。第一次核对在调用线程上同步做，至多等 {@code init-timeout}。
+     *
+     * @throws AuditTopicContractException topic 的分区数与契约不符、或保留期校正不过来（进程拒绝启动）
      */
-    @Override
     public synchronized void start() {
         if (running) {
             return;
@@ -157,9 +164,10 @@ public final class BattleResultIngest implements SmartLifecycle {
             running = false;
             throw e;
         }
+        // 后台线程只看「本次运行的停止信号」，不看 running：停了再启动之后，上一次运行留下的线程不会把新的 running = true 当成自己的
         initThread = new Thread(() -> {
             boolean ok = verified;
-            while (running && !ok) {
+            while (!stopped(signal) && !ok) {
                 try {
                     if (signal.await(initRetry.toMillis(), TimeUnit.MILLISECONDS)) {
                         return;
@@ -172,12 +180,15 @@ public final class BattleResultIngest implements SmartLifecycle {
                     return;
                 }
             }
-            if (running) {
-                startConsumer(signal);
-            }
+            startConsumer(signal);
         }, INIT_THREAD_NAME);
         initThread.setDaemon(true);
         initThread.start();
+    }
+
+    /** 这次运行（由它的停止信号标识）是否已被 {@link #stop()}。 */
+    private static boolean stopped(CountDownLatch signal) {
+        return signal.getCount() == 0;
     }
 
     /** @return true = 核对通过；false = Kafka 暂时不可达（稍后重试）。分区数不符抛 {@link AuditTopicContractException}。 */
@@ -196,12 +207,12 @@ public final class BattleResultIngest implements SmartLifecycle {
     }
 
     private synchronized void startConsumer(CountDownLatch signal) {
-        if (!running) {
+        if (stopped(signal)) {
             return;
         }
         Thread thread = new Thread(() -> {
             // 监督：消费循环意外退出（非停止）时换一个新的 KafkaConsumer 重来；未提交的记录会被重新消费
-            while (running) {
+            while (!stopped(signal)) {
                 BattleResultConsumer current;
                 try {
                     current = new BattleResultConsumer(consumerFactory.get(), topic, handler, metrics, pollTimeout, RETRY_INITIAL, RETRY_MAX);
@@ -213,7 +224,7 @@ public final class BattleResultIngest implements SmartLifecycle {
                     continue;
                 }
                 loop = current;
-                if (!running) {
+                if (stopped(signal)) {
                     // stop() 可能在发布这个循环之前读的 loop：自己收尾（run 会订阅后立即退出并关闭消费者）
                     current.stop();
                 }
@@ -233,7 +244,7 @@ public final class BattleResultIngest implements SmartLifecycle {
         log.info("[rating] 对局结果消费者已启动 topic={}", topic);
     }
 
-    @Override
+    /** 停止消费（幂等；没启动过也能调；不抛异常）。至多等消费线程 10 s。 */
     public void stop() {
         Thread init;
         synchronized (this) {
@@ -242,8 +253,9 @@ public final class BattleResultIngest implements SmartLifecycle {
             }
             running = false;
             init = initThread;
+            // 在锁里放信号：startConsumer（同一把锁）要么在这之前已经把消费线程建好，要么看得到信号、不再建
+            stopSignal.countDown();
         }
-        stopSignal.countDown();
         if (init != null) {
             // 可能正卡在一次核对里（至多 init-timeout）：打断它
             init.interrupt();
@@ -260,7 +272,7 @@ public final class BattleResultIngest implements SmartLifecycle {
         log.info("[rating] 对局结果消费者已停止");
     }
 
-    @Override
+    /** 已 {@link #start()} 且尚未 {@link #stop()}（开关关闭、或启动时因契约不符抛出的，恒为 false）。 */
     public boolean isRunning() {
         return running;
     }

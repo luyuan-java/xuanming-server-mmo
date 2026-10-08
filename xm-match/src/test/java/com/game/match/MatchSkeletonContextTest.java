@@ -27,9 +27,17 @@ import com.game.match.port.NodeCalls;
 import com.game.match.port.PlayerPusher;
 import com.game.match.port.PlayerStatusReader;
 import com.game.match.port.RedisClock;
+import com.game.match.rating.BattleResultIngest;
+import com.game.match.rating.JdbcRatingReader;
 import com.game.match.rating.MatchRatingTables;
+import com.game.match.rating.RatingReader;
+import com.game.match.rating.RatingStore;
 import com.game.match.rating.RatingTestDatabase;
+import com.game.match.support.MatchModes;
 import com.game.match.testing.LeaseOnlyRedis;
+import com.game.proto.contracts.kafka.BattleResultEvent;
+import com.game.proto.contracts.kafka.BattleResultTeam;
+import com.game.proto.eBattleOutcome;
 import com.game.proto.match.JoinQueueRequest;
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -38,6 +46,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.apache.dubbo.config.ReferenceConfig;
@@ -283,5 +293,45 @@ class MatchSkeletonContextTest {
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).contains("\"status\":\"UP\"");
+    }
+
+    /**
+     * 评分包在整个应用的上下文里装上了（批次 6.4 的 M4）：别的包注入的 {@link RatingReader} 就是读库的那个实现；建表先于它；入账之后读口与
+     * dev 读评分口（管理端口上的真 HTTP）都看得到；{@code match-db} 线程池的标准指标已导出；本测试关了评分开关，所以结果消费没有启动。
+     * 管理口的令牌 / 操作人过滤器不在本包，这里直接访问（过滤器接上之后要带上它要的请求头）。
+     */
+    @Test
+    void 评分包已装上_读口是读库的实现_dev读评分口与matchdb线程池指标可见_结果消费按开关没有启动() throws Exception {
+        assertThat(context.getBeansOfType(RatingReader.class)).as("RatingReader 只有一个实现").hasSize(1);
+        RatingReader reader = context.getBean(RatingReader.class);
+        assertThat(reader).isInstanceOf(JdbcRatingReader.class);
+        assertThat(context.getBean(BattleResultIngest.class).isRunning()).as("xm.match.rating.enabled=false").isFalse();
+        assertThat(context.getBean(BattleResultIngest.class).topic()).as("代次缺省 1").isEqualTo("xm-battle-result-g1");
+
+        long winner = 880_001;
+        long loser = 880_002;
+        assertThat(reader.loadCentiOrDefault(winner)).as("表已建好、是空的：新号 1500").isEqualTo(150_000);
+        RatingStore.Result applied = context.getBean(RatingStore.class).apply(BattleResultEvent.newBuilder().setBattleId(770_001)
+                .setMatchMode(MatchModes.ONE_V_ONE).setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(winner))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(loser)).setTotalRounds(3).build());
+
+        assertThat(applied.outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+        assertThat(reader.loadAllCentiOrDefault(List.of(winner, loser))).containsExactly(Map.entry(winner, 151_600L), Map.entry(loser, 148_400L));
+
+        HttpClient http = HttpClient.newHttpClient();
+        HttpResponse<String> rating = http.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + managementPort + "/admin/match/dev/rating/" + winner))
+                        .timeout(Duration.ofSeconds(10)).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(rating.statusCode()).isEqualTo(200);
+        assertThat(rating.body()).isEqualTo("{\"player_id\":\"880001\",\"rating\":\"1516.00\",\"games\":1}");
+
+        String scrape = http.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + managementPort + "/actuator/prometheus")).timeout(Duration.ofSeconds(10)).build(),
+                HttpResponse.BodyHandlers.ofString()).body();
+        assertThat(scrape).as("读评分的线程池").containsPattern("executor_pool_core_threads\\{[^}]*name=\"match-db\"[^}]*} 8\\.0");
+        assertThat(scrape).containsPattern("xm_match_rating_updates_total\\{[^}]*mode=\"MATCH_MODE_1V1\"[^}]*outcome=\"applied\"[^}]*} 1\\.0");
+        assertThat(scrape).containsPattern("xm_match_rating_consumer_paused(\\{[^}]*})? 0\\.0");
     }
 }

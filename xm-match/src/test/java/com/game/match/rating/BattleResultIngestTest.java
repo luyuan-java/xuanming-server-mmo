@@ -32,11 +32,12 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 /**
  * 评分回流的运行时（match-spec §5.3、§5.4、§9.8 第 9 步）：topic 由 match 以主人身份核对；分区数不符拒启；Kafka 不可达照常启动、后台重试；
- * 消费循环意外退出后换新的消费者重来；开关关闭时什么都不做。Kafka 用假的管理口与 {@code MockConsumer}，真 broker 的用例在
- * {@code BattleResultTopicIntegrationTest}。
+ * 消费循环意外退出后换新的消费者重来；开关关闭时什么都不做；它自己不带生命周期，经启停挂点接到 Spring 上。Kafka 用假的管理口与
+ * {@code MockConsumer}，真 broker 的用例在 {@code BattleResultTopicIntegrationTest}。
  */
 class BattleResultIngestTest {
 
@@ -341,5 +342,85 @@ class BattleResultIngestTest {
         assertThat(admin.sessions.get()).isEqualTo(1);
         assertThat(consumers).hasSize(1);
         assertThat(consumers.get(0).closed()).isTrue();
+    }
+
+    @Test
+    void 没启动过就stop_什么都不做_不抛() {
+        BattleResultIngest never = ingest(true, consumerFactory());
+
+        never.stop();
+
+        assertThat(never.isRunning()).isFalse();
+        assertThat(admin.sessions.get()).isZero();
+        assertThat(consumers).isEmpty();
+    }
+
+    @Test
+    void 停止之后可以再启动_换新的消费者() {
+        BattleResultIngest restarted = ingest(true, consumerFactory());
+        restarted.start();
+        await().atMost(WAIT).until(() -> consumers.size() == 1 && consumers.get(0).subscription().contains(TOPIC));
+        restarted.stop();
+
+        restarted.start();
+
+        await().atMost(WAIT).until(() -> consumers.size() == 2 && consumers.get(1).subscription().contains(TOPIC));
+        assertThat(consumers.get(0).closed()).isTrue();
+        assertThat(consumers.get(1).closed()).isFalse();
+        assertThat(restarted.consuming()).isTrue();
+        assertThat(admin.sessions.get()).as("每次启动各核对一次").isEqualTo(2);
+    }
+
+    // ================================================================ 启停挂点（RatingConfiguration.IngestLifecycle）
+
+    @Test
+    void 挂在Spring生命周期上_上下文刷新时启动_关闭时停止并关掉消费者() {
+        BattleResultIngest managed = ingest(true, consumerFactory());
+
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(RatingConfiguration.IngestLifecycle.class, () -> new RatingConfiguration.IngestLifecycle(managed));
+            assertThat(managed.isRunning()).as("建 bean 不等于启动").isFalse();
+
+            context.refresh();
+
+            assertThat(managed.isRunning()).isTrue();
+            assertThat(admin.created).containsExactly(TOPIC + "/3/rf2");
+            await().atMost(WAIT).until(() -> consumers.size() == 1 && consumers.get(0).subscription().contains(TOPIC));
+        }
+
+        assertThat(managed.isRunning()).isFalse();
+        assertThat(managed.consuming()).isFalse();
+        assertThat(consumers.get(0).closed()).isTrue();
+    }
+
+    @Test
+    void 挂在Spring生命周期上_分区数不符让上下文刷新失败_进程拒绝启动() {
+        admin.partitions.put(TOPIC, 2);
+        BattleResultIngest mismatched = ingest(true, consumerFactory());
+
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(RatingConfiguration.IngestLifecycle.class, () -> new RatingConfiguration.IngestLifecycle(mismatched));
+
+            assertThatThrownBy(context::refresh).hasRootCauseInstanceOf(AuditTopicContractException.class)
+                    .hasStackTraceContaining("XM_BATTLE_RESULT_TOPIC_GENERATION");
+        }
+
+        assertThat(mismatched.isRunning()).isFalse();
+        assertThat(consumers).isEmpty();
+    }
+
+    @Test
+    void 挂在Spring生命周期上_开关关闭时启动是空操作_关闭上下文也不出错() {
+        BattleResultIngest disabled = ingest(false, consumerFactory());
+
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(RatingConfiguration.IngestLifecycle.class, () -> new RatingConfiguration.IngestLifecycle(disabled));
+            context.refresh();
+
+            assertThat(context.getBean(RatingConfiguration.IngestLifecycle.class).isRunning()).isFalse();
+        }
+
+        assertThat(admin.sessions.get()).isZero();
+        assertThat(consumers).isEmpty();
     }
 }

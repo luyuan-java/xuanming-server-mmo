@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -61,7 +62,10 @@ class RatingConfigurationTest {
             assertThat(context).hasNotFailed();
             assertThat(synced.get()).as("启动时建表一次").isEqualTo(1);
             assertThat(context).hasSingleBean(RatingConfiguration.SchemaReady.class).hasSingleBean(RatingStore.class)
-                    .hasSingleBean(RatingCleanup.class).hasSingleBean(BattleResultIngest.class);
+                    .hasSingleBean(RatingCleanup.class).hasSingleBean(BattleResultIngest.class)
+                    .hasSingleBean(RatingConfiguration.IngestLifecycle.class);
+            assertThat(context.getBean(BattleResultIngest.class)).as("消费对象自己不带 Spring 生命周期，启停只经挂点")
+                    .isNotInstanceOf(org.springframework.context.Lifecycle.class);
             assertThat(context.getBeansOfType(RatingReader.class)).as("别的包注入的就是这一个").hasSize(1);
             RatingReader reader = context.getBean(RatingReader.class);
             assertThat(reader).isInstanceOf(JdbcRatingReader.class);
@@ -110,18 +114,23 @@ class RatingConfigurationTest {
     }
 
     @Test
-    void Kafka不可达_上下文照常启动_结果消费在后台等重试() {
+    void Kafka不可达_上下文照常启动_结果消费在后台等重试_关闭上下文时停掉() {
         long started = System.nanoTime();
+        AtomicReference<BattleResultIngest> captured = new AtomicReference<>();
 
         runner(true).withBean(MatchRatingTables.SchemaSync.class, () -> RatingTestDatabase.H2_SCHEMA).run(context -> {
             long startupMs = Duration.ofNanos(System.nanoTime() - started).toMillis();
             assertThat(context).hasNotFailed();
             BattleResultIngest ingest = context.getBean(BattleResultIngest.class);
+            captured.set(ingest);
 
-            assertThat(ingest.isRunning()).as("已启动，在后台每 30 s 重试核对 topic").isTrue();
+            assertThat(ingest.isRunning()).as("挂点已在上下文刷新时启动它，在后台每 30 s 重试核对 topic").isTrue();
+            assertThat(context.getBean(RatingConfiguration.IngestLifecycle.class).isRunning()).isTrue();
             assertThat(ingest.consuming()).as("没核对通过之前不消费").isFalse();
             assertThat(startupMs).as("第一次核对至多等 init-timeout（这里 1 s），不拖住启动").isLessThan(20_000);
             assertThat(context.getBean(RatingReader.class).loadCentiOrDefault(1)).as("评分读口不受 Kafka 影响").isEqualTo(150_000);
         });
+
+        assertThat(captured.get().isRunning()).as("上下文关闭：挂点把它停了（不等满 30 s 的重试间隔）").isFalse();
     }
 }
