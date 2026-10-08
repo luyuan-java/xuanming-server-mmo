@@ -8,9 +8,13 @@ import com.game.audit.AuditBrokerUnavailableException;
 import com.game.audit.AuditTopicContractException;
 import com.game.audit.TopicAdmin;
 import com.game.audit.TopicSpec;
+import com.game.match.lifecycle.MatchLifecycle;
+import com.game.match.lifecycle.MatcherControl;
+import com.game.match.lifecycle.ResultConsumerControl;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
 import com.game.match.support.MatchModes;
+import com.game.match.testing.FakeGatherLauncher;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
@@ -32,11 +36,12 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.Lifecycle;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 /**
  * 评分回流的运行时（match-spec §5.3、§5.4、§9.8 第 9 步）：topic 由 match 以主人身份核对；分区数不符拒启；Kafka 不可达照常启动、后台重试；
- * 消费循环意外退出后换新的消费者重来；开关关闭时什么都不做；它自己不带生命周期，经启停挂点接到 Spring 上。Kafka 用假的管理口与
+ * 消费循环意外退出后换新的消费者重来；开关关闭时什么都不做；它自己不带生命周期，是进程的评分消费启停口，由 {@code MatchLifecycle} 启停。Kafka 用假的管理口与
  * {@code MockConsumer}，真 broker 的用例在 {@code BattleResultTopicIntegrationTest}。
  */
 class BattleResultIngestTest {
@@ -371,55 +376,101 @@ class BattleResultIngestTest {
         assertThat(admin.sessions.get()).as("每次启动各核对一次").isEqualTo(2);
     }
 
-    // ================================================================ 启停挂点（RatingConfiguration.IngestLifecycle）
+    // ================================================================ 启停口：进程的 ResultConsumerControl，由 MatchLifecycle 启停
+
+    /** 只记次序的凑单启停口。 */
+    private static MatcherControl recordingMatcher(List<String> events) {
+        return new MatcherControl() {
+            @Override
+            public void start() {
+                events.add("matcher.start");
+            }
+
+            @Override
+            public void stop() {
+                events.add("matcher.stop");
+            }
+        };
+    }
 
     @Test
-    void 挂在Spring生命周期上_上下文刷新时启动_关闭时停止并关掉消费者() {
+    void 它是进程的评分消费启停口_自己不带生命周期_放进容器既不被启动也不被停止() {
         BattleResultIngest managed = ingest(true, consumerFactory());
+        assertThat(managed).isInstanceOf(ResultConsumerControl.class);
+        assertThat(managed).as("容器不会自己启停它：启动第 9 步与停机都归 MatchLifecycle")
+                .isNotInstanceOf(Lifecycle.class).isNotInstanceOf(AutoCloseable.class);
 
         try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            context.registerBean(RatingConfiguration.IngestLifecycle.class, () -> new RatingConfiguration.IngestLifecycle(managed));
-            assertThat(managed.isRunning()).as("建 bean 不等于启动").isFalse();
-
+            context.registerBean(BattleResultIngest.class, () -> managed);
             context.refresh();
 
-            assertThat(managed.isRunning()).isTrue();
-            assertThat(admin.created).containsExactly(TOPIC + "/3/rf2");
+            assertThat(context.getBean(ResultConsumerControl.class)).isSameAs(managed);
+            assertThat(managed.isRunning()).as("上下文刷新完：没人调启动第 9 步").isFalse();
+            assertThat(admin.sessions.get()).as("没有碰 Kafka").isZero();
+
+            managed.start();
             await().atMost(WAIT).until(() -> consumers.size() == 1 && consumers.get(0).subscription().contains(TOPIC));
         }
 
+        assertThat(managed.isRunning()).as("上下文关闭不停它（没有销毁方法）：留给 @AfterEach 停").isTrue();
+        assertThat(consumers.get(0).closed()).isFalse();
+    }
+
+    @Test
+    void 经MatchLifecycle启停_应用已启动时在凑单之后核对topic并消费_停机时在等完gather之后停掉并关消费者() {
+        BattleResultIngest managed = ingest(true, consumerFactory());
+        List<String> events = new CopyOnWriteArrayList<>();
+        FakeGatherLauncher gathers = new FakeGatherLauncher();
+        MatchLifecycle lifecycle = new MatchLifecycle(recordingMatcher(events), managed, gathers, () -> events.add("workers.drain"),
+                Duration.ofSeconds(1));
+
+        lifecycle.start();
+        assertThat(managed.isRunning()).as("SmartLifecycle.start 只登记，后台件等应用已启动").isFalse();
+
+        lifecycle.startBackground();
+
+        assertThat(events).containsExactly("matcher.start");
+        assertThat(managed.isRunning()).isTrue();
+        assertThat(admin.created).as("第一次核对在启动线程上同步做完").containsExactly(TOPIC + "/3/rf2");
+        await().atMost(WAIT).until(() -> consumers.size() == 1 && consumers.get(0).subscription().contains(TOPIC));
+
+        lifecycle.stop();
+
+        assertThat(events).containsExactly("matcher.start", "matcher.stop", "workers.drain");
         assertThat(managed.isRunning()).isFalse();
         assertThat(managed.consuming()).isFalse();
         assertThat(consumers.get(0).closed()).isTrue();
     }
 
     @Test
-    void 挂在Spring生命周期上_分区数不符让上下文刷新失败_进程拒绝启动() {
+    void 经MatchLifecycle启动时分区数不符_启动步骤抛出等于拒绝启动_随后的停机把已起的凑单停掉() {
         admin.partitions.put(TOPIC, 2);
         BattleResultIngest mismatched = ingest(true, consumerFactory());
+        List<String> events = new CopyOnWriteArrayList<>();
+        MatchLifecycle lifecycle = new MatchLifecycle(recordingMatcher(events), mismatched, new FakeGatherLauncher(), () -> { },
+                Duration.ofSeconds(1));
+        lifecycle.start();
 
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            context.registerBean(RatingConfiguration.IngestLifecycle.class, () -> new RatingConfiguration.IngestLifecycle(mismatched));
+        assertThatThrownBy(lifecycle::startBackground).isInstanceOf(AuditTopicContractException.class)
+                .hasMessageContaining("XM_BATTLE_RESULT_TOPIC_GENERATION");
+        lifecycle.stop(); // Spring Boot 在启动步骤抛出后关闭上下文
 
-            assertThatThrownBy(context::refresh).hasRootCauseInstanceOf(AuditTopicContractException.class)
-                    .hasStackTraceContaining("XM_BATTLE_RESULT_TOPIC_GENERATION");
-        }
-
+        assertThat(events).containsExactly("matcher.start", "matcher.stop");
         assertThat(mismatched.isRunning()).isFalse();
         assertThat(consumers).isEmpty();
     }
 
     @Test
-    void 挂在Spring生命周期上_开关关闭时启动是空操作_关闭上下文也不出错() {
+    void 经MatchLifecycle启停_开关关闭时启动是空操作_停机也不出错() {
         BattleResultIngest disabled = ingest(false, consumerFactory());
+        MatchLifecycle lifecycle = new MatchLifecycle(recordingMatcher(new CopyOnWriteArrayList<>()), disabled, new FakeGatherLauncher(),
+                () -> { }, Duration.ofSeconds(1));
+        lifecycle.start();
 
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            context.registerBean(RatingConfiguration.IngestLifecycle.class, () -> new RatingConfiguration.IngestLifecycle(disabled));
-            context.refresh();
+        lifecycle.startBackground();
+        lifecycle.stop();
 
-            assertThat(context.getBean(RatingConfiguration.IngestLifecycle.class).isRunning()).isFalse();
-        }
-
+        assertThat(disabled.isRunning()).isFalse();
         assertThat(admin.sessions.get()).isZero();
         assertThat(consumers).isEmpty();
     }

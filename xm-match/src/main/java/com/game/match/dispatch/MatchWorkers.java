@@ -11,7 +11,8 @@ import java.util.concurrent.RejectedExecutionException;
  * <p><b>契约</b>：
  * <ul>
  *   <li>{@link #execute} <b>不阻塞</b>调用线程；队列已满或工作池已停时抛 {@link RejectedExecutionException}——调用方必须接住并按自己的「过载」口径应答
- *       （客户端请求见 {@code MatchMethodHandler.onOverload}；整队的三个方法回 INTERNAL / FAILED；活动开战回 INTERNAL），不得让调用悬着。</li>
+ *       （客户端请求见 {@code MatchMethodHandler.onOverload}；整队的 {@code checkTeamMatch} 回 INTERNAL、{@code createTeamTickets} 回
+ *       EXPIRED（没有执行、什么都没写）、{@code releaseTeamTickets} 让 future 异常完成；活动开战回 INTERNAL），不得让调用悬着。</li>
  *   <li>任务在队列里可能等很久：<b>调用方在投递之前就定好截止</b>（受理时刻 + 预算），任务开始执行时先看截止，过了就按过载应答、不再做事。</li>
  *   <li>任务里抛出的异常不会回到投递方：任务自己负责完成它的 future。</li>
  *   <li>不要把长时间挂起的事放上来（gather 跑在自己的虚拟线程上；{@code runTeamGather} 只登记 future 就返回）。</li>

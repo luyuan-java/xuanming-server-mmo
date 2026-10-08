@@ -48,10 +48,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -70,13 +68,16 @@ import org.springframework.core.env.Environment;
  *   <tr><td>{@code gather.BattleNodes}</td><td>gather 包</td><td>gather、凑单（暂停判定）、落点直拨（判死）</td></tr>
  *   <tr><td>{@code gather.GatherHooks}</td><td>本类给空实现；6.5 换成观战的</td><td>gather</td></tr>
  *   <tr><td>{@code placement.PlacementStore} / {@code PlacementDialer}</td><td>placement 包</td><td>gather、补签 179、6.5</td></tr>
- *   <tr><td>{@code precheck.MemberPrecheck}</td><td>precheck 包</td><td>整队、活动</td></tr>
+ *   <tr><td>{@code precheck.MemberPrecheck}</td><td>precheck 包（{@code PrecheckConfiguration}）</td><td>整队、活动</td></tr>
+ *   <tr><td>{@code challenge.ChallengeStore} / {@code MatchPushExecutor}（{@code match-push}）</td><td>challenge 包</td><td>切磋</td></tr>
+ *   <tr><td>{@code activity.ActivityBattleService}</td><td>activity 包（{@code ActivityConfiguration}）</td>
+ *       <td>活动开战的 Dubbo 提供方与 dev 管理口共用</td></tr>
  *   <tr><td>{@code dispatch.MatchMethodHandler}</td><td>排队、切磋、补签各包提供处理器 bean</td><td>派发器</td></tr>
  *   <tr><td>{@code dispatch.MatchWorkers}</td><td>dispatch 包（{@code match-worker} 工作池）</td><td>派发器、整队 / 活动两个内部接口的提供方</td></tr>
  *   <tr><td>{@code port.PlayerStatusReader} / {@code RedisClock} / {@code NodeCalls} / {@code PlayerPusher}</td><td>本类（包 xm-discovery / xm-api）</td>
  *       <td>各包按需注入</td></tr>
- *   <tr><td>{@code lifecycle.MatcherControl} / {@code ResultConsumerControl}</td><td>凑单包、评分包各提供一个 bean（把自己的调度器 / 消费者包一层；
- *       不得自带启停）</td><td>{@link MatchLifecycle}（启动第 8、9 步与停机）</td></tr>
+ *   <tr><td>{@code lifecycle.MatcherControl} / {@code ResultConsumerControl}</td><td>凑单包的 {@code matcher.MatcherRunner}、评分包的
+ *       {@code rating.BattleResultIngest}（都不得自带启停）</td><td>{@link MatchLifecycle}（启动第 8、9 步与停机）</td></tr>
  *   <tr><td>{@code admin.MatchAdminAuthFilter}</td><td>本类登记在 {@code /admin/*}</td><td>dev 管理口的控制器（令牌、操作人、运行模式都已在过滤器里判过）</td></tr>
  * </table>
  *
@@ -91,13 +92,14 @@ import org.springframework.core.env.Environment;
  *   <li>评分两张表的建表（评分包的 bean）；其余单例；</li>
  *   <li>Dubbo 导出（上下文刷新完成时）；</li>
  *   <li>起凑单；</li>
- *   <li>起评分消费（Kafka 不可达只告警）。第 8、9 步与停机次序见 {@link MatchLifecycle}。</li>
+ *   <li>起评分消费（对局结果 topic 首次核对同步做、至多等 init-timeout：与契约不符拒启，Kafka 不可达只告警）。第 8、9 步与停机次序见
+ *       {@link MatchLifecycle}。</li>
  * </ol>
  * 销毁时 Spring 按依赖逆序：先停用到租约与直连客户端的业务 bean，再还租约、关直连客户端。
  *
- * <p><b>别的包还没接入时</b>：本类对别的包的 bean 一律经 {@link ObjectProvider} 取（凑单 / 评分消费的启停口、开局管线），取不到就按「尚未接入」
- * 启动并告警。不用 {@code @ConditionalOnMissingBean} 给缺省 bean——组件扫描到的配置类之间，它的判定取决于类的扫描次序（随平台而变），不可靠
- * （{@link #gatherHooks} 是先行件留下的唯一一处：6.5 提供自己的钩子时把那个 bean 方法删掉，不要指望它自动让位）。
+ * <p><b>别的包的 bean 都是硬依赖</b>：凑单 / 评分消费的启停口、开局管线、十个号的处理器，缺任何一个都拒绝启动（{@link #matchLifecycle} 直接注入；
+ * 处理器不全由 {@code MatchDispatchConfiguration} 拒）——少一包的进程会照收请求而永不成局 / 不入账，不如不起。包与包之间不用
+ * {@code @ConditionalOnMissingBean} 给缺省 bean：组件扫描到的配置类之间，它的判定取决于类的扫描次序（随平台而变），不可靠。
  */
 @Configuration(proxyBeanMethods = false)
 public class MatchConfiguration {
@@ -210,20 +212,14 @@ public class MatchConfiguration {
     // ================================================================ 启停次序（第 8、9 步与停机）
 
     /**
-     * 凑单 / 评分消费的启动与整个停机序列（{@link MatchLifecycle}）。三样东西都来自别的包，经 {@link ObjectProvider} 取：还没接入的那一样按
-     * 「尚未接入」处理（启动时告警，不拒启）；同一个接口出现两个 bean 则直接失败。
+     * 凑单 / 评分消费的启动与整个停机序列（{@link MatchLifecycle}）。三样东西都来自别的包（凑单包的 {@code MatcherRunner}、评分包的
+     * {@code BattleResultIngest}、gather 包的 {@code VirtualThreadGatherLauncher}），都是硬依赖：缺任何一个、或同一个接口出现两个 bean，
+     * 上下文起不来（测试里要换掉其中一个时把替身标 {@code @Primary}）。
      */
     @Bean
-    public MatchLifecycle matchLifecycle(ObjectProvider<MatcherControl> matcherControl, ObjectProvider<ResultConsumerControl> resultConsumerControl,
-                                         ObjectProvider<GatherLauncher> gatherLauncher, MatchWorkerPool matchWorkerPool) {
-        MatcherControl matcher = matcherControl.getIfAvailable();
-        ResultConsumerControl consumer = resultConsumerControl.getIfAvailable();
-        GatherLauncher gathers = gatherLauncher.getIfAvailable();
-        if (gathers == null) {
-            log.warn("开局管线尚未接入（上下文里没有 GatherLauncher）：停机时不等在途 gather");
-        }
-        return new MatchLifecycle(matcher != null ? matcher : MatchLifecycle.matcherNotReady(),
-                consumer != null ? consumer : MatchLifecycle.consumerNotReady(), gathers, matchWorkerPool::close,
+    public MatchLifecycle matchLifecycle(MatcherControl matcherControl, ResultConsumerControl resultConsumerControl,
+                                         GatherLauncher gatherLauncher, MatchWorkerPool matchWorkerPool) {
+        return new MatchLifecycle(matcherControl, resultConsumerControl, gatherLauncher, matchWorkerPool::close,
                 MatchLifecycle.GATHER_DRAIN_TIMEOUT);
     }
 
@@ -331,9 +327,11 @@ public class MatchConfiguration {
         return pushes::pushToPlayer;
     }
 
-    /** 开局管线留给观战的接缝：6.4 是空实现；6.5 提供自己的 {@link GatherHooks} bean 时这里让位。 */
+    /**
+     * 开局管线留给观战的接缝：6.4 是空实现。<b>不带条件装配</b>（{@code @ConditionalOnMissingBean} 在组件扫描到的配置类之间不可靠，见类注释）：
+     * 6.5 提供自己的 {@link GatherHooks} bean 时把这个 bean 方法删掉；测试里要换钩子就把替身标 {@code @Primary}。
+     */
     @Bean
-    @ConditionalOnMissingBean
     public GatherHooks gatherHooks() {
         return GatherHooks.NOOP;
     }

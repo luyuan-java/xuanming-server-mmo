@@ -3,6 +3,7 @@ package com.game.match.matcher;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.match.lifecycle.MatcherControl;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MatchMetrics.MatcherRound;
 import com.game.match.metrics.MetricLabels;
@@ -18,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.SmartLifecycle;
+import org.springframework.context.Lifecycle;
 
 /**
  * 凑单循环的调度（match-spec §2.5、§9.3、§9.8、§12.1 坑 14）：单线程、轮与轮不重叠、上一轮结束后再等一个间隔；<b>单轮抛任何异常下一轮照常</b>
@@ -207,27 +208,14 @@ class MatcherRunnerTest {
     }
 
     @Test
-    void 没接上线的占位实例_启动不起线程_说得清缺什么() {
-        runner = MatcherRunner.notWired(List.of("TicketStore", "GatherLauncher"));
-
-        runner.start();
-
-        assertThat(runner.wired()).isFalse();
-        assertThat(runner.missing()).containsExactly("TicketStore", "GatherLauncher");
-        assertThat(runner.isRunning()).isFalse();
-        runner.stop();
-        assertThat(runner.isRunning()).isFalse();
-        assertThatThrownBy(() -> MatcherRunner.notWired(List.of())).isInstanceOf(IllegalArgumentException.class);
-    }
-
-    @Test
-    void 随上下文启停_最后启动最先停止_间隔与等待上限必须为正() {
+    void 它是进程的凑单启停口_自己不带生命周期_间隔与等待上限必须为正_一轮不能缺() {
         runner = new MatcherRunner(stop -> MatcherRound.OK, INTERVAL, STOP_TIMEOUT, metrics);
 
-        assertThat(runner.wired()).isTrue();
-        assertThat(runner.missing()).isEmpty();
-        assertThat(runner.isAutoStartup()).isTrue();
-        assertThat(runner.getPhase()).isEqualTo(SmartLifecycle.DEFAULT_PHASE).isEqualTo(Integer.MAX_VALUE);
+        assertThat(runner).as("MatchLifecycle 经这个接口启停它").isInstanceOf(MatcherControl.class);
+        assertThat(runner).as("不实现 Spring 的生命周期接口：容器不会自己启停它（启动第 8 步 / 停机第 1 步归 MatchLifecycle）")
+                .isNotInstanceOf(Lifecycle.class).isNotInstanceOf(AutoCloseable.class);
+        assertThat(runner.isRunning()).as("建出来不自己启动").isFalse();
+        assertThatThrownBy(() -> new MatcherRunner(null, INTERVAL, STOP_TIMEOUT, metrics)).isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new MatcherRunner(stop -> MatcherRound.OK, Duration.ZERO, STOP_TIMEOUT, metrics))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new MatcherRunner(stop -> MatcherRound.OK, INTERVAL, Duration.ZERO, metrics))

@@ -287,15 +287,18 @@ class MatchLifecycleTest {
     }
 
     @Test
-    void 开局管线没接入_停机不等gather_其余照做() {
-        MatchLifecycle lifecycle = new MatchLifecycle(matcher, consumer, null, drainWorkers, Duration.ofSeconds(10));
-        lifecycle.start();
-        lifecycle.startBackground();
-        events.clear();
+    void 凑单_评分消费_开局管线_排空工作池四样缺一不可_构造即拒() {
+        Duration timeout = Duration.ofSeconds(10);
 
-        lifecycle.stop();
-
-        assertThat(events).containsExactly("matcher.stop", "workers.drain", "consumer.stop");
+        assertThatThrownBy(() -> new MatchLifecycle(null, consumer, gathers, drainWorkers, timeout))
+                .isInstanceOf(NullPointerException.class).hasMessage("matcher");
+        assertThatThrownBy(() -> new MatchLifecycle(matcher, null, gathers, drainWorkers, timeout))
+                .isInstanceOf(NullPointerException.class).hasMessage("consumer");
+        assertThatThrownBy(() -> new MatchLifecycle(matcher, consumer, null, drainWorkers, timeout))
+                .as("没有开局管线的进程不许起：停机时也就没有「不等 gather」这条路").isInstanceOf(NullPointerException.class).hasMessage("gathers");
+        assertThatThrownBy(() -> new MatchLifecycle(matcher, consumer, gathers, null, timeout))
+                .isInstanceOf(NullPointerException.class).hasMessage("drainWorkers");
+        assertThat(events).isEmpty();
     }
 
     @Test
@@ -319,21 +322,5 @@ class MatchLifecycleTest {
         assertThat(lifecycle.getOrder()).isEqualTo(MatchLifecycle.LISTENER_ORDER);
         assertThat(lifecycle.getPhase()).isEqualTo(SmartLifecycle.DEFAULT_PHASE).isEqualTo(Integer.MAX_VALUE);
         assertThat(lifecycle.isAutoStartup()).isTrue();
-    }
-
-    // ================================================================ 未接入时的替身
-
-    @Test
-    void 未接入的替身_启动时各告警一次_停止什么都不做(CapturedOutput output) {
-        MatchLifecycle lifecycle = new MatchLifecycle(MatchLifecycle.matcherNotReady(), MatchLifecycle.consumerNotReady(), null, drainWorkers,
-                Duration.ofSeconds(10));
-        lifecycle.start();
-
-        lifecycle.startBackground();
-        lifecycle.stopMatcher();
-        lifecycle.stop();
-
-        assertThat(output.getOut()).contains("凑单尚未接入").contains("评分消费尚未接入");
-        assertThat(events).containsExactly("workers.drain");
     }
 }

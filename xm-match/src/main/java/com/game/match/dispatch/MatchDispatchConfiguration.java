@@ -14,8 +14,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 客户端入口派发的装配：{@code match-worker} 工作池，以及收集上下文里全部 {@link MatchMethodHandler} bean 建成的派发表
- * （一个处理器都没有也能启动——那时每个号都回信封 1003）。
+ * 客户端入口派发的装配：{@code match-worker} 工作池，以及收集上下文里全部 {@link MatchMethodHandler} bean 建成的派发表。
+ * <b>契约 {@code MatchService} 的十个方法必须各有一个处理器</b>（排队三个、补签一个、切磋两个、当场回的四个），少任何一个拒绝启动：
+ * 没有处理器的号只会回信封 1003，那是某个包没装上，不该带病服务。同一个方法两个处理器同样拒启（派发器的构造器判）。
  */
 @Configuration(proxyBeanMethods = false)
 public class MatchDispatchConfiguration {
@@ -45,7 +46,7 @@ public class MatchDispatchConfiguration {
                 MatchMethods.SERVICE, MatchMethods.ALL.size(), props.worker().threads(), props.worker().queue(), props.requestBudget());
         Set<String> unhandled = dispatcher.unhandledMethods();
         if (!unhandled.isEmpty()) {
-            log.warn("match 还有方法没有处理器，这些号一律回信封 1003: {}", unhandled);
+            throw new IllegalStateException("拒绝启动：契约 " + MatchMethods.SERVICE + " 的这些方法没有处理器（对应的包没有装上）: " + unhandled);
         }
         return dispatcher;
     }

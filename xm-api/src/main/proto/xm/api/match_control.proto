@@ -32,7 +32,8 @@ enum TeamMatchCheckResult {
   TEAM_MATCH_CHECK_MEMBER_IN_BATTLE = 5;
   // offender 没有可用位置（位置状态不是在线，或节点号为 0），或持有自愈后仍在途的排队票据 → 4026[offender]。
   TEAM_MATCH_CHECK_MEMBER_NOT_READY = 6;
-  // match 内部故障：读在线目录 / 位置 / 票据出错、发号租约无效、请求预算已过期、参数非法 → 4030。offender = 0。
+  // match 内部故障：读在线目录 / 位置 / 票据出错、发号租约无效、请求预算已过期、工作池过载、参数非法 → 4030。offender = 0。
+  // 发号租约判在人数与成员预检之后：只拦「本来会放行」的请求，上面五种拒绝的可见结果不因租约而变。
   TEAM_MATCH_CHECK_INTERNAL = 7;
 }
 
@@ -43,6 +44,9 @@ message TeamMatchCheckRequest {
   repeated uint64 roster = 2;
 }
 
+// 调用方（xm-team）对 OK 的应答再做两条校验，不满足按传输失败处理（4030），不拿缺省值顶替：
+// zones 必须覆盖 roster 的每个人；lock_ttl_seconds 必须在 [1, MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS = 110]
+// （防两边版本不一时开战锁比 EndMatch 的截止还长）。
 message TeamMatchCheckReply {
   TeamMatchCheckResult result = 1;
   // MEMBER_OFFLINE / MEMBER_IN_BATTLE / MEMBER_NOT_READY 时非 0；其余为 0。
@@ -63,7 +67,9 @@ enum TeamTicketsStatus {
   // 没建成，且没有留下任何本次的票：failed_player_id 有效——名单序第一个已有别的票据的人；match 自己的 Redis 出错（结果不明，
   // 已用独立预算按本次 id 逐个删票）时是 roster[0]。xm-team 回 4026[failed_player_id]（与基线可见结果相同，Q27）。
   TEAM_TICKETS_FAILED = 2;
-  // 请求到达时 xm-budget-ms 已过期：什么都没写。xm-team 按传输失败处理（4030）。failed_player_id = 0。
+  // 这次建票没有执行、什么都没写：请求到达时 xm-budget-ms 已过期、工作池过载 / 排队超预算、发号租约无效、
+  // 参数不合法（名单空 / 超 5 人 / 含 0 / 重复 / 有人缺票号）。这几种都不是哪名成员的问题，所以不回 FAILED
+  // （那会让客户端看到 4026[队长]）。xm-team 按结果不明处理（先 releaseTeamTickets，回 4030）。failed_player_id = 0。
   TEAM_TICKETS_EXPIRED = 3;
 }
 
@@ -86,8 +92,9 @@ message TeamTicketsReply {
 
 // ---- releaseTeamTickets：建票回包丢失时的补偿（幂等）----
 
+// 应答是 Empty：没删成（存储出错 / 工作池过载）时提供方让 future 异常完成，调用方只记日志（票据按 matched TTL 过期）。
 message TeamTicketsRelease {
-  // player_id → ticket id：逐个「id 一致才删」。
+  // player_id → ticket id：逐个「id 一致才删」。player_id 为 0 或 ticket id 为空的项被跳过；一次至多 10 项。
   map<uint64, string> ticket_ids = 1;
 }
 

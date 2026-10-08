@@ -6,12 +6,10 @@ import com.game.match.MatchProperties;
 import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
 import java.sql.SQLException;
-import java.util.Objects;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -23,9 +21,11 @@ import org.springframework.context.annotation.Configuration;
  *   <li>建表（启动第 6 步，{@link #matchRatingSchema}）：排在发号租约之后（以 {@link MatchIds} 为参数）、Dubbo 导出之前（上下文刷新完成后才导出）；</li>
  *   <li>存储、读口（{@code match-db} 线程池）、保留期清理线程；</li>
  *   <li>结果消费（启动第 9 步，{@link BattleResultIngest}）：topic 分区数与契约不符拒启；Kafka 不可达照常启动、后台重试。
- *       {@link BattleResultIngest} 自己不带生命周期，由 {@link #battleResultIngestLifecycle} 这个挂点启停。</li>
+ *       {@link BattleResultIngest} 自己不带生命周期：它以进程的评分消费启停口 {@code lifecycle.ResultConsumerControl} 的身份交给
+ *       {@code MatchLifecycle}，在 Dubbo 导出、凑单启动之后才被启动。</li>
  * </ol>
- * <b>停机</b>：结果消费先停（{@code SmartLifecycle} 先于一切 bean 销毁），然后 Spring 按依赖逆序销毁清理线程、读口线程池，最后才关数据源。
+ * <b>停机</b>：结果消费由 {@code MatchLifecycle} 在等完在途 gather 之后停（{@code SmartLifecycle} 先于一切 bean 销毁），然后 Spring 按依赖逆序
+ * 销毁清理线程、读口线程池，最后才关数据源。
  */
 @Configuration(proxyBeanMethods = false)
 public class RatingConfiguration {
@@ -68,7 +68,8 @@ public class RatingConfiguration {
 
     /**
      * 对局结果的消费（{@code xm.match.rating.enabled = false} 时照样提供这个 bean，{@code start()} 是空操作）。
-     * 只建对象、不启动：启停经 {@link #battleResultIngestLifecycle}（或进程自己的生命周期编排）调它的 {@code start()} / {@code stop()}。
+     * 只建对象、不启动：它实现 {@code lifecycle.ResultConsumerControl}，启停由 {@code MatchLifecycle} 调它的 {@code start()} / {@code stop()}
+     * （启动第 9 步；停机时在等完在途 gather 之后）。上下文里不许有第二个 {@code ResultConsumerControl}。
      */
     @Bean
     public BattleResultIngest battleResultIngest(MatchProperties props, RatingStore ratingStore, MatchMetrics metrics, MatchInstance instance) {
@@ -83,43 +84,5 @@ public class RatingConfiguration {
         log.info("评分回流 enabled={} topic={} group={} 回合打满按平局阈值={} 覆盖={}", rating.enabled(), ingest.topic(), rating.consumerGroup(),
                 rating.drawRoundCap(), rating.drawRoundCapByConfigId());
         return ingest;
-    }
-
-    /**
-     * 结果消费的启停挂点：缺省相位的 {@code SmartLifecycle}——上下文刷新的最后一步启动（单例都已就绪），关闭时先于一切 bean 销毁停止
-     * （所以一定早于清理线程、读口线程池与数据源）。启动时 topic 与契约不符抛出的异常会让上下文刷新失败 = 进程拒绝启动。
-     *
-     * <p><b>这是评分包自带的临时挂点</b>：规格 §9.8 的次序（Dubbo 导出、凑单启动之后才起消费；在途 gather 等完之后才停）归进程级的生命周期编排
-     * 掌握。编排接手之后删掉这个 bean、改由它直接调 {@link BattleResultIngest#start()} / {@link BattleResultIngest#stop()}（两者幂等，
-     * 过渡期两处都调也无害）；消费与凑单、gather、Dubbo 没有数据上的先后依赖（只碰 Kafka 与 MySQL），所以这里早启、早停不影响正确性。
-     */
-    @Bean
-    public IngestLifecycle battleResultIngestLifecycle(BattleResultIngest battleResultIngest) {
-        return new IngestLifecycle(battleResultIngest);
-    }
-
-    /** 把 {@link BattleResultIngest} 的启停挂到 Spring 的生命周期上（见 {@link #battleResultIngestLifecycle}）。 */
-    public static final class IngestLifecycle implements SmartLifecycle {
-
-        private final BattleResultIngest ingest;
-
-        IngestLifecycle(BattleResultIngest ingest) {
-            this.ingest = Objects.requireNonNull(ingest, "ingest");
-        }
-
-        @Override
-        public void start() {
-            ingest.start();
-        }
-
-        @Override
-        public void stop() {
-            ingest.stop();
-        }
-
-        @Override
-        public boolean isRunning() {
-            return ingest.isRunning();
-        }
     }
 }

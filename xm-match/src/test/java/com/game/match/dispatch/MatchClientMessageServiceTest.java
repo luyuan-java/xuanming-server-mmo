@@ -1,6 +1,8 @@
 package com.game.match.dispatch;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.game.api.proto.AbandonedEnter;
 import com.game.api.proto.Ack;
@@ -9,20 +11,43 @@ import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
+import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
+import com.game.match.MatchProperties;
+import com.game.match.challenge.ChallengeHandlers;
+import com.game.match.challenge.ChallengeService;
+import com.game.match.challenge.ChallengeStore;
 import com.game.match.dispatch.MatchMethodHandler.Reply;
+import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
+import com.game.match.queue.QueueHandlers;
+import com.game.match.queue.QueueService;
+import com.game.match.reissue.BattleTicketReissue;
+import com.game.match.reissue.ReissueHandler;
 import com.game.match.support.MatchTip;
 import com.game.match.support.MatchTips;
+import com.game.match.testing.FakeBattleNode;
+import com.game.match.testing.FakeGatherLauncher;
+import com.game.match.testing.FakePlacementDialer;
+import com.game.match.testing.FakePlayerStatus;
+import com.game.match.testing.FixedRatingReader;
+import com.game.match.testing.InMemoryPlacementStore;
+import com.game.match.testing.InMemoryTicketStore;
+import com.game.match.testing.RecordingPushes;
+import com.game.match.ticket.DefaultTicketHealing;
+import com.game.match.ticket.TicketState;
+import com.game.proto.RequestBattleTicketRequest;
 import com.game.proto.RequestBattleTicketResponse;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.match.ChallengePlayerRequest;
 import com.game.proto.match.ChallengePlayerResponse;
 import com.game.proto.match.GetQueueStatusResponse;
 import com.game.proto.match.JoinQueueRequest;
 import com.game.proto.match.JoinQueueResponse;
 import com.game.proto.match.ListWatchableBattlesResponse;
 import com.game.proto.match.QueueState;
+import com.game.proto.match.RespondChallengeRequest;
 import com.game.proto.match.RespondChallengeResponse;
 import com.game.proto.match.WatchBattleResponse;
 import com.google.protobuf.ByteString;
@@ -46,10 +71,15 @@ import org.junit.jupiter.api.Test;
  * 客户端入口（match-spec §9.9、§8.1）：从 Dubbo 提供方 {@link MatchClientMessageService} 进，经真的派发器与真的 {@code match-worker} 工作池，
  * 到 10 个号各自的处理器。
  *
- * <p>当场回的四个号（156 / 154 / 163 / 164）用的是真处理器（{@link InlineHandlers}），§8.1 的那四行在这里逐格钉住。其余六个号的处理器归排队、切磋、
- * 补签各包，这里先用<b>按 §8.1 写的替身</b>（{@link #businessHandlers()}）——钉住的是派发层对它们做的事：按号选处理器、投到工作池、截止与会话原样交到、
- * 应答体 / 信封的翻译、未知号与解析失败回信封 1003、过载时不调 {@code handle} 而按该方法的过载应答回（M29）。各包合入后把
- * {@link #businessHandlers()} 换成真处理器（依赖用 {@code testing} 包的替身），「过载」「信封」两组断言即直接核对真实现。
+ * <p>分两层：
+ * <ul>
+ *   <li><b>派发层的机制</b>用带探针的替身处理器钉（{@link #businessHandlers()}，按 §8.1 写）：按号选处理器、投到工作池、截止与会话原样交到、
+ *       应答体 / 信封的翻译、未知号与解析失败回信封 1003、过载时不调 {@code handle} 而按该方法的过载应答回（M29）。当场回的四个号
+ *       （156 / 154 / 163 / 164）用的是真处理器（{@link InlineHandlers}），§8.1 的那四行逐格钉住。</li>
+ *   <li><b>§8.1 整张表对着真处理器再钉一遍</b>（最后一节「真处理器」）：进程里实际登记的十个处理器——排队三个、补签一个、切磋两个、当场回的四个，
+ *       依赖用 {@code testing} 包的替身——经同一个派发器与工作池：恰好覆盖契约的十个方法；过载时 157 / 152 / 151 / 179 回 in-band 16004、
+ *       148 / 153 回信封 1003 且一条依赖都没碰；依赖故障时 148 / 153 回信封 1003、157 / 179 回 in-band 16004；正常路径走得通。</li>
+ * </ul>
  */
 class MatchClientMessageServiceTest {
 
@@ -444,6 +474,222 @@ class MatchClientMessageServiceTest {
         assertThat(requests("JoinQueue", "overloaded")).isEqualTo(1);
         assertThat(requests("CancelQueue", "overloaded")).isEqualTo(1);
         assertThat(await(running).getTipId()).isZero();
+    }
+
+    // ================================================================ 真处理器（进程里实际登记的十个；依赖用 testing 包的替身）
+
+    private final InMemoryTicketStore realTickets = new InMemoryTicketStore();
+    private final FakePlayerStatus realPlayers = new FakePlayerStatus();
+    private final FakeGatherLauncher realGather = new FakeGatherLauncher();
+    private final InMemoryPlacementStore realPlacements = new InMemoryPlacementStore();
+    private final ChallengeStore realChallenges = mock(ChallengeStore.class);
+
+    /** 与各包的装配类（QueueConfiguration / ReissueConfiguration / ChallengeConfiguration / InlineHandlers）登记的是同一批处理器类。 */
+    private List<MatchMethodHandler> realHandlers() {
+        MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+        MatchIds ids = new MatchIds(new Snowflake(3), () -> true, () -> false);
+        QueueService queue = new QueueService(props, realPlayers, realTickets, new DefaultTicketHealing(realTickets), new FixedRatingReader(),
+                realGather, ids, metrics);
+        ChallengeService challenge = new ChallengeService(realPlayers, realChallenges, ids, new RecordingPushes(), realGather, metrics,
+                Runnable::run, 60_000, IDS.get(MatchMethods.NOTIFY_CHALLENGE_INVITE), IDS.get(MatchMethods.NOTIFY_CHALLENGE_RESULT));
+        BattleTicketReissue reissue = new BattleTicketReissue(realPlacements, new FakePlacementDialer(new FakeBattleNode()), metrics);
+        InlineHandlers inline = new InlineHandlers();
+        return List.of(new QueueHandlers.Join(queue, metrics), new QueueHandlers.Cancel(queue), new QueueHandlers.Status(queue),
+                new ReissueHandler(reissue), ChallengeHandlers.challengePlayer(challenge, metrics),
+                ChallengeHandlers.respondChallenge(challenge, metrics), inline.notifyChallengeInviteUplinkHandler(),
+                inline.notifyChallengeResultUplinkHandler(), inline.watchBattlePlaceholderHandler(),
+                inline.listWatchableBattlesPlaceholderHandler());
+    }
+
+    private MatchDispatcher realDispatcher(int threads, int queue, long budgetMillis) {
+        pool = new MatchWorkerPool(threads, queue, Duration.ofSeconds(2));
+        return new MatchDispatcher(REGISTRY, realHandlers(), pool, metrics, budgetMillis);
+    }
+
+    private static ClientCall joinCall(int mode, int configId) {
+        return call(157, JoinQueueRequest.newBuilder().setModeValue(mode).setBattleConfigId(configId).build().toByteString(), 1001);
+    }
+
+    /** 六个业务号各发一条（请求体对各自的请求类型都合法）。 */
+    private static Map<String, ClientCall> businessCalls() {
+        Map<String, ClientCall> calls = new LinkedHashMap<>();
+        calls.put(MatchMethods.JOIN_QUEUE, joinCall(3, 0));
+        calls.put(MatchMethods.CHALLENGE_PLAYER, call(152, ChallengePlayerRequest.newBuilder().setTargetPlayerId(1002).build().toByteString(), 1001));
+        calls.put(MatchMethods.RESPOND_CHALLENGE,
+                call(151, RespondChallengeRequest.newBuilder().setChallengeId(7001).setAccept(true).build().toByteString(), 1001));
+        calls.put(MatchMethods.REQUEST_BATTLE_TICKET,
+                call(179, RequestBattleTicketRequest.newBuilder().setBattleId(42).build().toByteString(), 1001));
+        calls.put(MatchMethods.CANCEL_QUEUE, call(148, ByteString.EMPTY, 1001));
+        calls.put(MatchMethods.GET_QUEUE_STATUS, call(153, ByteString.EMPTY, 1001));
+        return calls;
+    }
+
+    private void assertNoDependencyTouched() {
+        assertThat(realTickets.calls).as("票据存储").isEmpty();
+        assertThat(realPlayers.reads).as("玩家状态读口").isEmpty();
+        assertThat(realGather.plans).as("开局管线").isEmpty();
+        verifyNoInteractions(realChallenges);
+    }
+
+    /** §8.1「过载」一列逐格：有 in-band 错误字段的四个号回 in-band 16004，只能用信封的两个号回信封 1003。 */
+    private static void assertOverloadReplies(Map<String, ClientReply> replies) throws Exception {
+        JoinQueueResponse joined = JoinQueueResponse.parseFrom(replies.get(MatchMethods.JOIN_QUEUE).getBody());
+        assertThat(replies.get(MatchMethods.JOIN_QUEUE).getTipId()).as("in-band：信封不带 tip").isZero();
+        assertThat(joined.getErrorCode()).isEqualTo(16004);
+        assertInBandBusy(joined.getErrorMessage());
+        assertThat(joined.getQueueTicket()).isEmpty();
+        ClientReply challenge = replies.get(MatchMethods.CHALLENGE_PLAYER);
+        assertThat(challenge.getTipId()).isZero();
+        assertInBandBusy(ChallengePlayerResponse.parseFrom(challenge.getBody()).getErrorMessage());
+        assertThat(ChallengePlayerResponse.parseFrom(challenge.getBody()).getChallengeId()).isZero();
+        ClientReply respond = replies.get(MatchMethods.RESPOND_CHALLENGE);
+        assertThat(respond.getTipId()).isZero();
+        assertInBandBusy(RespondChallengeResponse.parseFrom(respond.getBody()).getErrorMessage());
+        ClientReply reissue = replies.get(MatchMethods.REQUEST_BATTLE_TICKET);
+        assertThat(reissue.getTipId()).isZero();
+        RequestBattleTicketResponse reissued = RequestBattleTicketResponse.parseFrom(reissue.getBody());
+        assertInBandBusy(reissued.getErrorMessage());
+        assertThat(reissued.hasAssignment()).isFalse();
+        for (String method : List.of(MatchMethods.CANCEL_QUEUE, MatchMethods.GET_QUEUE_STATUS)) {
+            assertThat(replies.get(method).getTipId()).as(method).isEqualTo(1003);
+            assertThat(replies.get(method).getBody().isEmpty()).as(method).isTrue();
+            assertThat(replies.get(method).getTipParametersList()).as("信封不带 parameters").isEmpty();
+        }
+    }
+
+    @Test
+    void 真处理器_进程登记的十个处理器恰好覆盖契约的十个方法_四个当场回_六个进工作池() {
+        List<MatchMethodHandler> handlers = realHandlers();
+        MatchDispatcher dispatcher = realDispatcher(2, 8, 4500);
+
+        assertThat(handlers.stream().map(MatchMethodHandler::method)).containsExactlyInAnyOrderElementsOf(MatchMethods.ALL);
+        assertThat(dispatcher.handledMessageIds()).containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+        assertThat(dispatcher.unhandledMethods()).isEmpty();
+        assertThat(handlers.stream().filter(MatchMethodHandler::inline).map(MatchMethodHandler::method))
+                .as("不涉及 I/O、当场回的只有这四个").containsExactlyInAnyOrderElementsOf(INLINE);
+    }
+
+    @Test
+    void 真处理器_工作池满_四个有in_band字段的号回in_band的16004_取消与查状态回信封1003_一条依赖都没碰() throws Exception {
+        MatchClientMessageService service = new MatchClientMessageService(realDispatcher(1, 1, 4500));
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch occupied = new CountDownLatch(1);
+        pool.execute(() -> {
+            occupied.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(occupied.await(5, TimeUnit.SECONDS)).as("唯一的工作线程已被占住").isTrue();
+        pool.execute(() -> { }); // 再占满容量为 1 的队列
+
+        Map<String, ClientReply> replies = new LinkedHashMap<>();
+        for (Map.Entry<String, ClientCall> call : businessCalls().entrySet()) {
+            CompletableFuture<ClientReply> future = service.handle(call.getValue());
+            assertThat(future).as("%s：拒收当场应答，不等工作线程", call.getKey()).isDone();
+            replies.put(call.getKey(), future.get());
+        }
+        release.countDown();
+
+        assertOverloadReplies(replies);
+        assertNoDependencyTouched();
+        for (String method : replies.keySet()) {
+            assertThat(requests(method, "overloaded")).as(method).isEqualTo(1);
+        }
+        assertThat(meters.get("xm.match.join.queue").tag("mode", "unknown").tag("outcome", "overloaded").counter().count())
+                .as("过载时请求体没解析过：模式记 unknown").isEqualTo(1);
+    }
+
+    @Test
+    void 真处理器_排队超预算_轮到执行时不再做事_按各自的过载应答回() throws Exception {
+        MatchClientMessageService service = new MatchClientMessageService(realDispatcher(1, 16, 150));
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch occupied = new CountDownLatch(1);
+        pool.execute(() -> {
+            occupied.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(occupied.await(5, TimeUnit.SECONDS)).isTrue();
+
+        Map<String, CompletableFuture<ClientReply>> futures = new LinkedHashMap<>();
+        businessCalls().forEach((method, call) -> futures.put(method, service.handle(call)));
+        assertThat(futures.values()).as("都进了队列，还没轮到").allSatisfy(future -> assertThat(future).isNotDone());
+        TimeUnit.MILLISECONDS.sleep(300); // 在队列里等过了 150 ms 的预算
+        release.countDown();
+
+        Map<String, ClientReply> replies = new LinkedHashMap<>();
+        for (Map.Entry<String, CompletableFuture<ClientReply>> future : futures.entrySet()) {
+            replies.put(future.getKey(), await(future.getValue()));
+        }
+        assertOverloadReplies(replies);
+        assertNoDependencyTouched();
+    }
+
+    @Test
+    void 真处理器_依赖故障_取消与查状态回信封1003_排队与补签回in_band的16004() throws Exception {
+        MatchClientMessageService service = new MatchClientMessageService(realDispatcher(2, 8, 4500));
+        realTickets.faults.failAlways("read").failAlways("status");
+        realPlayers.failLock(1001);
+        realPlacements.readFailed = true;
+
+        ClientReply cancel = await(service.handle(call(148, ByteString.EMPTY, 1001)));
+        ClientReply status = await(service.handle(call(153, ByteString.EMPTY, 1001)));
+        ClientReply join = await(service.handle(joinCall(3, 0)));
+        ClientReply reissue = await(service.handle(call(179, RequestBattleTicketRequest.newBuilder().setBattleId(42).build().toByteString(), 1001)));
+
+        for (ClientReply envelope : List.of(cancel, status)) {
+            assertThat(envelope.getTipId()).isEqualTo(1003);
+            assertThat(envelope.getBody().isEmpty()).isTrue();
+            assertThat(envelope.getTipParametersList()).isEmpty();
+        }
+        assertThat(requests("CancelQueue", "failed")).isEqualTo(1);
+        assertThat(requests("GetQueueStatus", "failed")).isEqualTo(1);
+        assertThat(join.getTipId()).as("157 的失败在应答体里").isZero();
+        JoinQueueResponse joined = JoinQueueResponse.parseFrom(join.getBody());
+        assertThat(joined.getErrorCode()).isEqualTo(16004);
+        assertInBandBusy(joined.getErrorMessage());
+        assertThat(reissue.getTipId()).isZero();
+        assertInBandBusy(RequestBattleTicketResponse.parseFrom(reissue.getBody()).getErrorMessage());
+        assertThat(realTickets.ticketCount()).as("什么票都没建").isZero();
+    }
+
+    @Test
+    void 真处理器_正常路径_排队受理_查到QUEUED_取消成功不带应答体_补签不存在的战斗回1005() throws Exception {
+        MatchClientMessageService service = new MatchClientMessageService(realDispatcher(2, 8, 4500));
+        realPlayers.online(1001, 1, 7);
+
+        ClientReply join = await(service.handle(joinCall(3, 0)));
+        JoinQueueResponse joined = JoinQueueResponse.parseFrom(join.getBody());
+        assertThat(join.getTipId()).isZero();
+        assertThat(joined.getErrorCode()).isZero();
+        assertThat(joined.hasErrorMessage()).isFalse();
+        assertThat(joined.getQueueTicket()).as("受理：回票号").isNotEmpty();
+        assertThat(realTickets.ticketOf(1001).orElseThrow().ticketId()).isEqualTo(joined.getQueueTicket());
+        assertThat(realTickets.ticketOf(1001).orElseThrow().state()).isEqualTo(TicketState.QUEUED);
+
+        GetQueueStatusResponse queued = GetQueueStatusResponse.parseFrom(await(service.handle(call(153, ByteString.EMPTY, 1001))).getBody());
+        assertThat(queued.getState()).isEqualTo(QueueState.QUEUE_STATE_QUEUED);
+        assertThat(queued.getEstimatedWaitSeconds()).as("恒为 0").isZero();
+
+        ClientReply cancel = await(service.handle(call(148, ByteString.EMPTY, 1001)));
+        assertThat(cancel.getTipId()).as("148 成功：tip 0 + 空应答体，gate 据此不回包").isZero();
+        assertThat(cancel.getBody().isEmpty()).isTrue();
+        assertThat(realTickets.ticketOf(1001)).isEmpty();
+        GetQueueStatusResponse gone = GetQueueStatusResponse.parseFrom(await(service.handle(call(153, ByteString.EMPTY, 1001))).getBody());
+        assertThat(gone.getState()).isEqualTo(QueueState.QUEUE_STATE_NOT_QUEUED);
+
+        ClientReply reissue = await(service.handle(call(179, RequestBattleTicketRequest.newBuilder().setBattleId(42).build().toByteString(), 1001)));
+        RequestBattleTicketResponse reissued = RequestBattleTicketResponse.parseFrom(reissue.getBody());
+        assertThat(reissue.getTipId()).isZero();
+        assertThat(reissued.getErrorMessage().getId()).as("没有落点记录：这局不存在").isEqualTo(1005);
+        assertThat(reissued.getErrorMessage().getParametersList()).containsExactly("该战斗不存在或已结束");
+        assertThat(requests("JoinQueue", "ok")).isEqualTo(1);
     }
 
     // ================================================================ 会话事件

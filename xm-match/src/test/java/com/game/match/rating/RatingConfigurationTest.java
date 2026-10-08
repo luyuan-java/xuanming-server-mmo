@@ -6,6 +6,7 @@ import com.game.common.id.Snowflake;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
 import com.game.match.id.MatchIds;
+import com.game.match.lifecycle.ResultConsumerControl;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
 import com.game.match.support.MatchModes;
@@ -17,14 +18,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
  * 评分包的装配（{@code ApplicationContextRunner}：不起 Dubbo、不开端口、不连 MySQL）：{@link RatingConfiguration} 起得来，对外的
- * {@link RatingReader} 接到了真的存储上；建表是启动的一步（失败拒启）；结果消费的开关与「Kafka 不可达照常启动」。
+ * {@link RatingReader} 接到了真的存储上；建表是启动的一步（失败拒启）；结果消费是进程的启停口（上下文不自己启动它）、它的开关与「Kafka 不可达照常启动」。
  */
 class RatingConfigurationTest {
 
@@ -63,9 +63,12 @@ class RatingConfigurationTest {
             assertThat(synced.get()).as("启动时建表一次").isEqualTo(1);
             assertThat(context).hasSingleBean(RatingConfiguration.SchemaReady.class).hasSingleBean(RatingStore.class)
                     .hasSingleBean(RatingCleanup.class).hasSingleBean(BattleResultIngest.class)
-                    .hasSingleBean(RatingConfiguration.IngestLifecycle.class);
-            assertThat(context.getBean(BattleResultIngest.class)).as("消费对象自己不带 Spring 生命周期，启停只经挂点")
+                    .hasSingleBean(ResultConsumerControl.class);
+            assertThat(context.getBean(ResultConsumerControl.class)).as("进程的评分消费启停口就是这个消费对象")
+                    .isSameAs(context.getBean(BattleResultIngest.class));
+            assertThat(context.getBean(BattleResultIngest.class)).as("消费对象自己不带 Spring 生命周期，启停只经 MatchLifecycle")
                     .isNotInstanceOf(org.springframework.context.Lifecycle.class);
+            assertThat(context.getBean(BattleResultIngest.class).isRunning()).as("上下文刷新完：没有人启动它").isFalse();
             assertThat(context.getBeansOfType(RatingReader.class)).as("别的包注入的就是这一个").hasSize(1);
             RatingReader reader = context.getBean(RatingReader.class);
             assertThat(reader).isInstanceOf(JdbcRatingReader.class);
@@ -114,23 +117,27 @@ class RatingConfigurationTest {
     }
 
     @Test
-    void Kafka不可达_上下文照常启动_结果消费在后台等重试_关闭上下文时停掉() {
-        long started = System.nanoTime();
-        AtomicReference<BattleResultIngest> captured = new AtomicReference<>();
-
+    void Kafka不可达_启动第9步不抛_至多等一个init_timeout_结果消费在后台等重试_停的时候不等满重试间隔() {
         runner(true).withBean(MatchRatingTables.SchemaSync.class, () -> RatingTestDatabase.H2_SCHEMA).run(context -> {
-            long startupMs = Duration.ofNanos(System.nanoTime() - started).toMillis();
             assertThat(context).hasNotFailed();
+            ResultConsumerControl control = context.getBean(ResultConsumerControl.class);
             BattleResultIngest ingest = context.getBean(BattleResultIngest.class);
-            captured.set(ingest);
+            assertThat(ingest.isRunning()).as("上下文刷新不启动它").isFalse();
 
-            assertThat(ingest.isRunning()).as("挂点已在上下文刷新时启动它，在后台每 30 s 重试核对 topic").isTrue();
-            assertThat(context.getBean(RatingConfiguration.IngestLifecycle.class).isRunning()).isTrue();
-            assertThat(ingest.consuming()).as("没核对通过之前不消费").isFalse();
-            assertThat(startupMs).as("第一次核对至多等 init-timeout（这里 1 s），不拖住启动").isLessThan(20_000);
-            assertThat(context.getBean(RatingReader.class).loadCentiOrDefault(1)).as("评分读口不受 Kafka 影响").isEqualTo(150_000);
+            long started = System.nanoTime();
+            control.start(); // 生产里由 MatchLifecycle 在应用已启动事件上调
+            long startMs = Duration.ofNanos(System.nanoTime() - started).toMillis();
+            try {
+                assertThat(ingest.isRunning()).as("在后台每 30 s 重试核对 topic").isTrue();
+                assertThat(ingest.consuming()).as("没核对通过之前不消费").isFalse();
+                assertThat(startMs).as("第一次核对至多等 init-timeout（这里 1 s），不拖住启动").isLessThan(20_000);
+                assertThat(context.getBean(RatingReader.class).loadCentiOrDefault(1)).as("评分读口不受 Kafka 影响").isEqualTo(150_000);
+            } finally {
+                long stopStarted = System.nanoTime();
+                control.stop();
+                assertThat(Duration.ofNanos(System.nanoTime() - stopStarted).toMillis()).as("不等满 30 s 的重试间隔").isLessThan(15_000);
+            }
+            assertThat(ingest.isRunning()).isFalse();
         });
-
-        assertThat(captured.get().isRunning()).as("上下文关闭：挂点把它停了（不等满 30 s 的重试间隔）").isFalse();
     }
 }

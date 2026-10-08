@@ -9,26 +9,58 @@ import static org.mockito.Mockito.when;
 
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
+import com.game.api.match.MatchBudgets;
 import com.game.api.proto.SessionContext;
+import com.game.api.proto.TeamMatchCheckReply;
+import com.game.api.proto.TeamMatchCheckRequest;
+import com.game.api.proto.TeamMatchCheckResult;
+import com.game.api.proto.TeamTicketsReply;
+import com.game.api.proto.TeamTicketsRequest;
+import com.game.api.proto.TeamTicketsStatus;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
 import com.game.match.MatchConfiguration;
 import com.game.match.MatchInstance;
+import com.game.match.MatchProperties;
+import com.game.match.activity.ActivityBattleService;
 import com.game.match.dispatch.MatchDispatcher;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
 import com.game.match.id.MatchIds;
+import com.game.match.matcher.QueueMatcher;
 import com.game.match.metrics.MatchMetrics;
+import com.game.match.metrics.MatchMetrics.MatcherRound;
 import com.game.match.metrics.MetricLabels;
+import com.game.match.precheck.DefaultMemberPrecheck;
+import com.game.match.queue.QueueHandlers;
+import com.game.match.queue.QueueService;
+import com.game.match.support.MatchModes;
 import com.game.match.support.MatchTip;
 import com.game.match.support.MatchTips;
+import com.game.match.team.MatchTeamServiceImpl;
+import com.game.match.testing.FakeBattleNodes;
+import com.game.match.testing.FakeGatherLauncher;
+import com.game.match.testing.FakePlayerStatus;
+import com.game.match.testing.FixedRatingReader;
+import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.LeaseOnlyRedis;
+import com.game.match.ticket.DefaultTicketHealing;
+import com.game.match.ticket.QueueRef;
+import com.game.match.ticket.TicketState;
+import com.game.proto.BattleActivityContext;
+import com.game.proto.eBattleActivityKind;
+import com.game.proto.match.ActivityBattleReject;
+import com.game.proto.match.CancelQueueRequest;
 import com.game.proto.match.ChallengePlayerRequest;
 import com.game.proto.match.ChallengePlayerResponse;
+import com.game.proto.match.GetQueueStatusResponse;
 import com.game.proto.match.JoinQueueRequest;
 import com.game.proto.match.JoinQueueResponse;
+import com.game.proto.match.QueueState;
+import com.game.proto.match.StartActivityBattleRequest;
+import com.game.proto.match.StartActivityBattleResponse;
 import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.LinkedHashMap;
@@ -64,9 +96,11 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  * 健康检查 DOWN（{@code /actuator/health} 503）、ERROR 日志 + {@code xm_match_lease_lost = 1}、拒收新的排队 157 与发起切磋 152
  * （in-band 16004「服务器繁忙,请稍后再试」，不让票据入队后永不成局）；取消排队、查状态、补签、应答切磋与当场回的四个号不受影响。
  *
- * <p>这里钉的是 M0 自己的部分：派发层的拒收、健康组件、租约丢失回调的真实接线（{@code MatchConfiguration} 的 bean 方法 + 真的 {@link NodeIdLease}）。
- * 规格同一条里的另外几项——PVE_SOLO 在租约无效时不建票、{@code checkTeamMatch} 回 INTERNAL、活动开战回 INTERNAL、凑单暂停——在排队、整队、活动、
- * 凑单各自的包里，按 {@code MatchIds.leaseValid()} 判（丢失时它恒为假）；各包合入后在这个类里把它们串进来。
+ * <p>前半钉派发层的拒收、健康组件、租约丢失回调的真实接线（{@code MatchConfiguration} 的 bean 方法 + 真的 {@link NodeIdLease}）。
+ * 后半（「各包的真实现」一节）把规格同一条里落在别的包的几项串进来，用的是各包的<b>真实现</b>（依赖换成 {@code testing} 包的替身）、同一个
+ * {@link MatchIds}：PVE_SOLO 在租约无效时回 16004 且不建票、{@code checkTeamMatch} 回 INTERNAL、{@code createTeamTickets} 不建票、
+ * 活动开战回 INTERNAL、凑单暂停且队列不动——它们都按 {@code MatchIds.leaseValid()} 判（丢失时它恒为假，续期滞后时也为假）；
+ * 取消排队、查状态照常；租约恢复后各入口照常放行。
  */
 @ExtendWith(OutputCaptureExtension.class)
 class LeaseLostTest {
@@ -382,5 +416,184 @@ class LeaseLostTest {
         assertThat(realIds.leaseLost()).isTrue();
         lease.close();
         assertThat(redis.leaseReleases()).as("已丢失：不执行释放脚本").isZero();
+    }
+
+    // ================================================================ 各包的真实现（排队、整队、活动、凑单）在租约无效时的行为
+
+    private static final QueueRef Q1V1 = new QueueRef(MatchModes.ONE_V_ONE, 0);
+
+    private final InMemoryTicketStore tickets = new InMemoryTicketStore();
+    private final FakePlayerStatus players = new FakePlayerStatus();
+    private final FakeGatherLauncher gather = new FakeGatherLauncher();
+    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+    private final DefaultTicketHealing healing = new DefaultTicketHealing(tickets);
+
+    private QueueService queueService() {
+        return new QueueService(props, players, tickets, healing, new FixedRatingReader(), gather, ids, metrics);
+    }
+
+    private MatchTeamServiceImpl teamService() {
+        return new MatchTeamServiceImpl(Runnable::run, props, new DefaultMemberPrecheck(players, healing), tickets, gather, ids, metrics);
+    }
+
+    private static JoinQueueRequest joinRequest(int mode, int configId) {
+        return JoinQueueRequest.newBuilder().setModeValue(mode).setBattleConfigId(configId).build();
+    }
+
+    @Test
+    void 租约无效_PVE_SOLO回16004且不建票不开局_恢复后照常开局_期间1V1照常入队() {
+        players.online(1001, 1, 7).online(1002, 1, 7);
+        QueueService queue = queueService();
+
+        valid.set(false); // 续期滞后：还没丢
+        JoinQueueResponse refused = queue.join(1001, joinRequest(MatchModes.PVE_SOLO, 1), Deadline.after(4500));
+        JoinQueueResponse queued = queue.join(1002, joinRequest(MatchModes.ONE_V_ONE, 0), Deadline.after(4500));
+
+        assertThat(refused.getErrorCode()).isEqualTo(16004);
+        assertThat(refused.getErrorMessage().getId()).isEqualTo(16004);
+        assertThat(refused.getErrorMessage().getParametersList()).containsExactly(BUSY_TEXT);
+        assertThat(refused.getQueueTicket()).isEmpty();
+        assertThat(tickets.ticketOf(1001)).as("必败的开局不先建票").isEmpty();
+        assertThat(gather.plans).as("没有开局").isEmpty();
+        assertThat(joinInternal("MATCH_MODE_PVE_SOLO")).isEqualTo(1);
+        assertThat(queued.getErrorCode()).as("1V1 不用发号就能入队：滞后期间照收，恢复后照常成局").isZero();
+        assertThat(tickets.ticketOf(1002).orElseThrow().state()).isEqualTo(TicketState.QUEUED);
+
+        valid.set(true);
+        JoinQueueResponse accepted = queue.join(1001, joinRequest(MatchModes.PVE_SOLO, 1), Deadline.after(4500));
+
+        assertThat(accepted.getErrorCode()).isZero();
+        assertThat(accepted.getQueueTicket()).isNotEmpty();
+        assertThat(tickets.ticketOf(1001).orElseThrow().state()).isEqualTo(TicketState.MATCHED);
+        assertThat(gather.plans).singleElement().satisfies(plan -> assertThat(plan.members()).containsExactly(1001L));
+    }
+
+    @Test
+    void 租约已丢失_排队的真处理器经派发器_任何模式都不建票_取消与查状态照常走到真处理器() throws Exception {
+        players.online(1001, 1, 7);
+        QueueService queue = queueService();
+        queue.join(1001, joinRequest(MatchModes.ONE_V_ONE, 0), Deadline.after(4500)); // 丢失之前排上的票
+        String ticketId = tickets.ticketOf(1001).orElseThrow().ticketId();
+        MatchDispatcher dispatcher = new MatchDispatcher(REGISTRY,
+                List.of(new QueueHandlers.Join(queue, metrics), new QueueHandlers.Cancel(queue), new QueueHandlers.Status(queue)),
+                Runnable::run, metrics, 4500, ids::leaseLost);
+        lost.set(true);
+        valid.set(false);
+        int storeCallsBefore = tickets.calls.size();
+
+        for (int mode : new int[] {MatchModes.ONE_V_ONE, MatchModes.FIVE_V_FIVE, MatchModes.PVE_SOLO, MatchModes.PVE_TEAM}) {
+            ClientReply reply = reply(dispatcher.dispatch(call(MatchMethods.JOIN_QUEUE, joinRequest(mode, 1).toByteString(), 1002)));
+            JoinQueueResponse response = JoinQueueResponse.parseFrom(reply.getBody());
+            assertThat(response.getErrorCode()).as("mode=%d", mode).isEqualTo(16004);
+            assertThat(response.getErrorMessage().getParametersList()).containsExactly(BUSY_TEXT);
+        }
+        assertThat(tickets.calls).as("拒收在派发层：真的排队逻辑一步都没走，没读没写").hasSize(storeCallsBefore);
+        assertThat(tickets.ticketOf(1002)).isEmpty();
+
+        GetQueueStatusResponse status = GetQueueStatusResponse.parseFrom(
+                reply(dispatcher.dispatch(call(MatchMethods.GET_QUEUE_STATUS, ByteString.EMPTY, 1001))).getBody());
+        assertThat(status.getState()).as("查状态照常：丢失之前排上的票还在").isEqualTo(QueueState.QUEUE_STATE_QUEUED);
+        ClientReply cancelled = reply(dispatcher.dispatch(call(MatchMethods.CANCEL_QUEUE,
+                CancelQueueRequest.newBuilder().setQueueTicket(ticketId).build().toByteString(), 1001)));
+        assertThat(cancelled.getTipId()).as("取消排队照常").isZero();
+        assertThat(tickets.ticketOf(1001)).as("票真的被取消了").isEmpty();
+        assertThat(tickets.queueMembers(Q1V1)).isEmpty();
+    }
+
+    @Test
+    void 租约无效_checkTeamMatch回INTERNAL_createTeamTickets不建票_恢复后同样的请求放行() throws Exception {
+        players.online(1001, 1, 7).online(1002, 2, 8);
+        MatchTeamServiceImpl team = teamService();
+        TeamMatchCheckRequest check = TeamMatchCheckRequest.newBuilder().setBattleConfigId(1).addRoster(1001).addRoster(1002).build();
+        TeamTicketsRequest create = TeamTicketsRequest.newBuilder().setBattleConfigId(1).setTeamId(77).addRoster(1001).addRoster(1002)
+                .putZones(1001, 1).putZones(1002, 2).putTicketIds(1001, "t-1001").putTicketIds(1002, "t-1002").build();
+
+        valid.set(false);
+        TeamMatchCheckReply refused = team.checkTeamMatch(check).get(5, TimeUnit.SECONDS);
+        TeamTicketsReply notCreated = team.createTeamTickets(create).get(5, TimeUnit.SECONDS);
+        TeamMatchCheckReply offlineFirst = team.checkTeamMatch(check.toBuilder().addRoster(4040).build()).get(5, TimeUnit.SECONDS);
+
+        assertThat(refused.getResult()).as("成员都没问题、本来会放行：租约无效 → INTERNAL（xm-team 回 4030 + 同源视图，不加锁）")
+                .isEqualTo(TeamMatchCheckResult.TEAM_MATCH_CHECK_INTERNAL);
+        assertThat(refused.getOffender()).isZero();
+        assertThat(refused.getLockTtlSeconds()).isZero();
+        assertThat(notCreated.getStatus()).as("没有执行、什么都没写").isEqualTo(TeamTicketsStatus.TEAM_TICKETS_EXPIRED);
+        assertThat(tickets.ticketCount()).isZero();
+        assertThat(offlineFirst.getResult()).as("成员问题照常先报：租约只拦本来会放行的请求")
+                .isEqualTo(TeamMatchCheckResult.TEAM_MATCH_CHECK_MEMBER_OFFLINE);
+        assertThat(offlineFirst.getOffender()).isEqualTo(4040);
+
+        valid.set(true);
+        TeamMatchCheckReply passed = team.checkTeamMatch(check).get(5, TimeUnit.SECONDS);
+        TeamTicketsReply created = team.createTeamTickets(create).get(5, TimeUnit.SECONDS);
+
+        assertThat(passed.getResult()).isEqualTo(TeamMatchCheckResult.TEAM_MATCH_CHECK_OK);
+        assertThat(passed.getLockTtlSeconds()).isEqualTo(MatchBudgets.teamMatchLockSeconds(2));
+        assertThat(created.getStatus()).isEqualTo(TeamTicketsStatus.TEAM_TICKETS_CREATED);
+        assertThat(tickets.ticketOf(1001).orElseThrow().ticketId()).isEqualTo("t-1001");
+    }
+
+    @Test
+    void 租约无效_活动开战回INTERNAL_不建票不开局_恢复后回battle_id并开局() {
+        players.online(1001, 1, 7).online(1002, 1, 7);
+        ActivityBattleService activity = new ActivityBattleService(new DefaultMemberPrecheck(players, healing), tickets, gather, ids, metrics);
+        StartActivityBattleRequest request = StartActivityBattleRequest.newBuilder().setBattleConfigId(1).addMemberPlayerIds(1001)
+                .addMemberPlayerIds(1002)
+                .setActivityContext(BattleActivityContext.newBuilder().setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_TRIAL)
+                        .setGuildId(9_000_000_001L).setActivityId(3).setPeriodKey(20261008).setGuildPeriodKey(20261008)
+                        .setInitiatorPlayerId(1001))
+                .build();
+
+        valid.set(false);
+        StartActivityBattleResponse refused = activity.start(request, Deadline.after(4500));
+
+        assertThat(refused.getReject()).isEqualTo(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL);
+        assertThat(refused.getBattleId()).as("没有发出 battle_id：调用方不会登记一场不存在的战斗").isZero();
+        assertThat(refused.getOffenderPlayerId()).isZero();
+        assertThat(tickets.ticketCount()).isZero();
+        assertThat(gather.plans).isEmpty();
+
+        valid.set(true);
+        StartActivityBattleResponse started = activity.start(request, Deadline.after(4500));
+
+        assertThat(started.getReject()).isEqualTo(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_NONE);
+        assertThat(started.getBattleId()).isNotZero();
+        assertThat(gather.plans).singleElement().satisfies(plan -> {
+            assertThat(plan.presetBattleId()).isEqualTo(started.getBattleId());
+            assertThat(plan.members()).containsExactly(1001L, 1002L);
+        });
+    }
+
+    @Test
+    void 租约无效_凑单暂停_队列与票据原样不动_恢复后同一批人成局() {
+        players.online(1001, 1, 7).online(1002, 1, 7);
+        tickets.enqueue(1001, "t-1001", Q1V1, 1, 150_000, 21_600_000, Deadline.after(1000));
+        tickets.enqueue(1002, "t-1002", Q1V1, 1, 150_000, 21_600_000, Deadline.after(1000));
+        FakeBattleNodes nodes = new FakeBattleNodes().add(FakeBattleNodes.node(1, "battle-inst-1", 21200));
+        QueueMatcher matcher = new QueueMatcher(tickets, players, gather, nodes, ids, metrics, new MetricLabels(id -> false), props,
+                new MatchInstance("instance-lease-lost-test"));
+        List<String> queueBefore = tickets.queueMembers(Q1V1);
+        int storeCallsBefore = tickets.calls.size();
+
+        valid.set(false);
+        MatcherRound lagging = matcher.runRound(() -> false);
+        lost.set(true);
+        MatcherRound afterLost = matcher.runRound(() -> false);
+
+        assertThat(lagging).isEqualTo(MatcherRound.PAUSED_NO_LEASE);
+        assertThat(afterLost).isEqualTo(MatcherRound.PAUSED_NO_LEASE);
+        assertThat(tickets.calls).as("暂停的轮次不读注册集、不抢锁、不弹组").hasSize(storeCallsBefore);
+        assertThat(tickets.queueMembers(Q1V1)).as("队列原样").isEqualTo(queueBefore).hasSize(2);
+        assertThat(tickets.ticketOf(1001).orElseThrow().state()).isEqualTo(TicketState.QUEUED);
+        assertThat(tickets.ticketOf(1002).orElseThrow().state()).isEqualTo(TicketState.QUEUED);
+        assertThat(gather.plans).isEmpty();
+
+        lost.set(false); // 只为对照「续期恢复」：真的丢失不会自愈（见上面真实接线那一条）
+        valid.set(true);
+        MatcherRound resumed = matcher.runRound(() -> false);
+
+        assertThat(resumed).isEqualTo(MatcherRound.OK);
+        assertThat(gather.plans).singleElement().satisfies(plan -> assertThat(plan.members()).containsExactly(1001L, 1002L));
+        assertThat(tickets.ticketOf(1001).orElseThrow().state()).isEqualTo(TicketState.MATCHED);
     }
 }

@@ -42,11 +42,17 @@ class RatingStoreSqlTest extends RatingStoreCases {
      * 会话的锁等待上限放宽到 10 s（生产是 1 s）：下面的用例要看到的是「等到锁」与「死锁」，不是锁等待超时。
      * 注意入账事务里每条语句另有 {@link RatingStore#APPLY_STATEMENT_TIMEOUT_SECONDS} 秒的查询超时（生产里它大于锁等待上限，轮不到它）：在这个放宽了
      * 锁等待的库上，卡在行锁上的入账若 3 s 内等不到锁，会以「Statement cancelled due to timeout」结束（不是 1205，不重跑）。所以用例里持锁的一方
-     * 都是一看到对方进入 LOCK WAIT（{@link #awaitLockWaiter}，20 ms 轮询一次）就立刻放锁 / 成环，不让等待拖到 3 s。
+     * 都是一看到对方进入 LOCK WAIT（{@link #awaitLockWaiter}，每 {@value #LOCK_WAIT_POLL_MS} ms 轮询一次）就立刻放锁 / 成环，不让等待拖到 3 s。
      */
     private static final int LOCK_WAIT_SECONDS = 10;
     private static final String LOCK_WAITERS = "SELECT COUNT(*) FROM information_schema.innodb_trx t JOIN information_schema.processlist p"
             + " ON p.id = t.trx_mysql_thread_id WHERE t.trx_state = 'LOCK WAIT' AND p.db = DATABASE()";
+    /**
+     * 轮询 {@code INNODB_TRX} 的间隔，<b>必须大于 100 ms</b>：InnoDB 给这张表的是一份缓存快照，只有「距上一次被读已超过 0.1 s」才会刷新
+     * （{@code trx0i_s.cc} 的 {@code CACHE_MIN_IDLE_TIME}，而每次读都会把「上一次被读」推后）。轮询得比它密，缓存永远刷新不了，读到的一直是
+     * 第一次轮询时的旧快照——等锁的事务明明在，却永远看不见（原先 20 ms 一次就是这样：持锁的一方白等，对方 3 s 后以语句超时结束）。
+     */
+    private static final long LOCK_WAIT_POLL_MS = 150;
 
     private static RatingTestDatabase shared;
 
@@ -103,7 +109,7 @@ class RatingStoreSqlTest extends RatingStoreCases {
                 }
                 fail("预期会等行锁的入账没有等锁就结束了: " + ending);
             }
-            Thread.sleep(20);
+            Thread.sleep(LOCK_WAIT_POLL_MS);
         }
         fail("8 s 内没有看到等行锁的事务；innodb_trx=" + dump("SELECT trx_state, trx_mysql_thread_id, trx_query FROM information_schema.innodb_trx")
                 + " processlist=" + dump("SELECT id, db, command, state, info FROM information_schema.processlist"));

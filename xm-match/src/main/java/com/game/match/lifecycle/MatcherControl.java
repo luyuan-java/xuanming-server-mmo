@@ -1,8 +1,8 @@
 package com.game.match.lifecycle;
 
 /**
- * 凑单循环（{@code match-matcher}）的启停口：{@link MatchLifecycle} 只经它启停凑单，不认识具体的凑单类。凑单包把自己的调度器包成这个接口的 bean
- * （一个进程恰好一个）；上下文里没有这个 bean 时 {@link MatchLifecycle} 按「凑单尚未接入」启动并告警。
+ * 凑单循环（{@code match-matcher}）的启停口：{@link MatchLifecycle} 只经它启停凑单，不认识具体的凑单类。凑单包把自己的调度器做成这个接口的 bean
+ * （一个进程恰好一个，生产实现是 {@code matcher.MatcherRunner}）；上下文里没有这个 bean 时进程拒绝启动。
  *
  * <p><b>契约</b>（match-spec §9.8）：
  * <ul>

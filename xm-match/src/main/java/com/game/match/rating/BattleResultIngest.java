@@ -4,6 +4,7 @@ import com.game.audit.AuditTopicContractException;
 import com.game.audit.AuditTopicInitializer;
 import com.game.audit.BattleResultTopics;
 import com.game.audit.TopicAdmin;
+import com.game.match.lifecycle.ResultConsumerControl;
 import com.game.match.metrics.MatchMetrics;
 import java.time.Duration;
 import java.util.Objects;
@@ -34,8 +35,9 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code xm.match.rating.enabled = false}：什么都不做（不核对 topic、不消费），评分停在已有值。</li>
  * </ul>
  *
- * <p><b>启停口</b>：只有 {@link #start()} / {@link #stop()} 两个方法，本类<b>不带任何 Spring 生命周期接口、不自己启停</b>——什么时候启、什么时候停由
- * 进程的生命周期编排决定（规格的次序：Dubbo 导出、凑单启动之后才启；在途 gather 等完之后、数据源销毁之前才停）。
+ * <p><b>启停口</b>：它就是进程的 {@link ResultConsumerControl}，只有 {@link #start()} / {@link #stop()} 两个方法，本类<b>不带任何 Spring 生命周期接口、
+ * 不自己启停</b>——什么时候启、什么时候停由 {@code MatchLifecycle} 决定（规格的次序：Dubbo 导出、凑单启动之后才启；在途 gather 等完之后、
+ * 数据源销毁之前才停）。
  * <ul>
  *   <li>{@link #start()}：在启动线程上调。<b>有界阻塞</b>——第一次核对至多等 {@code init-timeout}（缺省 10 s，Kafka 可达时是毫秒级）；
  *       只在 topic 与契约不符时抛（= 拒绝启动），Kafka 不可达不抛。幂等。</li>
@@ -43,7 +45,7 @@ import org.slf4j.LoggerFactory;
  *       幂等；没启动过也能调；不抛异常。必须在数据源销毁之前调。</li>
  * </ul>
  */
-public final class BattleResultIngest {
+public final class BattleResultIngest implements ResultConsumerControl {
 
     private static final Logger log = LoggerFactory.getLogger(BattleResultIngest.class);
 
@@ -145,6 +147,7 @@ public final class BattleResultIngest {
      *
      * @throws AuditTopicContractException topic 的分区数与契约不符、或保留期校正不过来（进程拒绝启动）
      */
+    @Override
     public synchronized void start() {
         if (running) {
             return;
@@ -245,6 +248,7 @@ public final class BattleResultIngest {
     }
 
     /** 停止消费（幂等；没启动过也能调；不抛异常）。至多等消费线程 10 s。 */
+    @Override
     public void stop() {
         Thread init;
         synchronized (this) {

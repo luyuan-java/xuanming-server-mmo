@@ -1,9 +1,9 @@
 package com.game.match.matcher;
 
+import com.game.match.lifecycle.MatcherControl;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MatchMetrics.MatcherRound;
 import java.time.Duration;
-import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -11,7 +11,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.SmartLifecycle;
 
 /**
  * 凑单循环的调度（match-spec §2.5、§9.3 的 {@code match-matcher} 线程、§9.8 的启停）：单线程 {@code scheduleWithFixedDelay}，上一轮结束后等一个间隔
@@ -20,13 +19,12 @@ import org.springframework.context.SmartLifecycle;
  * <p><b>每一轮都包在 {@code try/catch Throwable} 里</b>：JDK 的调度器遇到一次未捕获的异常就永久停掉后续执行（基线的 safego 是隔离单轮 panic 后继续），
  * 凑单停了排队就永不成局。出错的一轮计 {@code xm_match_matcher_rounds_total{result="error"}}，下一轮照常。
  *
- * <p><b>生命周期</b>（{@link SmartLifecycle}，phase = {@link #DEFAULT_PHASE}：全部单例建好之后最后启动、关闭时最先停止，先于任何 bean 的销毁）：
- * {@link #start} 起线程；{@link #stop} 置停机信号、等当前这一轮结束（至多等 {@code stopTimeout}，超时则中断）。两者都幂等，停了可以再起。
- * 停机只停「产生新的 gather」，已经交给开局管线的不受影响。启停顺序要由别处统一掌握时，直接调这两个方法即可。
- *
- * <p>{@link #notWired} 给出一个「没接上线」的实例：凑单依赖的协作件不在上下文里时用它占位，{@link #start} 只打 ERROR、什么线程都不起。
+ * <p><b>启停</b>：它就是进程的 {@link MatcherControl}，<b>自己不带任何生命周期</b>（不实现 {@code Lifecycle}、没有 init / destroy 方法）——
+ * 凑单必须在 Dubbo 导出之后才开始、在撤导出之前就停下，这个次序只有 {@code MatchLifecycle} 排得出来（启动第 8 步、停机第 1 步）。
+ * {@link #start} 起线程；{@link #stop} 置停机信号、等当前这一轮结束（至多等 {@code stopTimeout}，超时则中断）。两者都幂等，停了可以再起，
+ * 没起过也能停。停机只停「产生新的 gather」，已经交给开局管线的不受影响。
  */
-public final class MatcherRunner implements SmartLifecycle {
+public final class MatcherRunner implements MatcherControl {
 
     private static final Logger log = LoggerFactory.getLogger(MatcherRunner.class);
 
@@ -42,7 +40,6 @@ public final class MatcherRunner implements SmartLifecycle {
     private final long intervalMs;
     private final long stopTimeoutMs;
     private final MatchMetrics metrics;
-    private final List<String> missing;
     private final Object lifecycle = new Object();
     private ScheduledExecutorService executor;
     private volatile boolean stopRequested;
@@ -53,48 +50,18 @@ public final class MatcherRunner implements SmartLifecycle {
      * @param stopTimeout 停机时等当前这一轮结束的上限（一轮里单条队列的操作以凑单锁的 TTL 为界，取比它稍长的值）
      */
     public MatcherRunner(Round round, Duration interval, Duration stopTimeout, MatchMetrics metrics) {
-        this(Objects.requireNonNull(round, "round"), interval, stopTimeout, Objects.requireNonNull(metrics, "metrics"), List.of());
-    }
-
-    private MatcherRunner(Round round, Duration interval, Duration stopTimeout, MatchMetrics metrics, List<String> missing) {
-        this.round = round;
+        this.round = Objects.requireNonNull(round, "round");
         this.intervalMs = interval.toMillis();
         this.stopTimeoutMs = stopTimeout.toMillis();
-        this.metrics = metrics;
-        this.missing = List.copyOf(missing);
-        if (round != null && (intervalMs < 1 || stopTimeoutMs < 1)) {
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
+        if (intervalMs < 1 || stopTimeoutMs < 1) {
             throw new IllegalArgumentException("凑单间隔与停机等待都必须 ≥ 1 ms: interval=" + interval + " stopTimeout=" + stopTimeout);
         }
-    }
-
-    /**
-     * 没接上线的占位实例：上下文里缺凑单要用的协作件（{@code missing} 是缺的那些的名字）。它永远不会运行。
-     * 只应出现在并行开发的骨架阶段——整模块装配完成后仍然见到它，说明排队照收、永不成局。
-     */
-    public static MatcherRunner notWired(List<String> missing) {
-        if (missing.isEmpty()) {
-            throw new IllegalArgumentException("没接上线的凑单必须说明缺什么");
-        }
-        return new MatcherRunner(null, Duration.ZERO, Duration.ZERO, null, missing);
-    }
-
-    /** 凑单的协作件是否齐全（为假时 {@link #start} 不起线程）。 */
-    public boolean wired() {
-        return round != null;
-    }
-
-    /** 缺的协作件；齐全时为空。 */
-    public List<String> missing() {
-        return missing;
     }
 
     @Override
     public void start() {
         synchronized (lifecycle) {
-            if (!wired()) {
-                log.error("凑单循环没有启动：上下文里缺 {}。排队照常入队，但永不成局", missing);
-                return;
-            }
             if (executor != null) {
                 return;
             }
@@ -129,16 +96,11 @@ public final class MatcherRunner implements SmartLifecycle {
         }
     }
 
-    @Override
+    /** 调度线程此刻是否起着（{@link #start} 之后、{@link #stop} 之前）。 */
     public boolean isRunning() {
         synchronized (lifecycle) {
             return executor != null;
         }
-    }
-
-    @Override
-    public int getPhase() {
-        return DEFAULT_PHASE;
     }
 
     /** 一轮：任何异常都不许逃出去（逃出去调度器就永久停转）。 */

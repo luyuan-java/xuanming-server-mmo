@@ -2,7 +2,7 @@
 # 秘密只从环境变量注入（缺失即启动失败）：
 #   XM_GATE_TOKEN_SECRET  gate 令牌密钥，须与 xm-gateway 一致
 #   XM_NODE_LINK_SECRET   gate → scene 节点链路握手密钥，须与 xm-scene 一致
-#   XM_DUBBO_SECRET       Dubbo 调用方鉴权密钥，须与 xm-login / xm-scene-manager 一致
+#   XM_DUBBO_SECRET       Dubbo 调用方鉴权密钥，须与 gate 调用的全部 Dubbo 后端一致（login / friend / chat / team / guild / trade / match）
 spring:
   application:
     name: xm-gate

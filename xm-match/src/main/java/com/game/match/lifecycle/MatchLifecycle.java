@@ -25,7 +25,8 @@ import org.springframework.core.Ordered;
  *   <tr><td>7</td><td>导出 Dubbo</td><td>Dubbo 自己的 {@code ContextRefreshedEvent} 监听器（全部单例与 {@code SmartLifecycle} 就绪之后；同步等导出完成）</td></tr>
  *   <tr><td>8</td><td>起凑单</td><td rowspan="2">{@link ApplicationStartedEvent}：Spring Boot 在上下文刷新<b>全部</b>完成（含第 7 步）之后才发。
  *       不放在 {@link #start()} 里——那时 Dubbo 还没导出，而且导出失败的话进程马上就退，不该先弹出一组人</td></tr>
- *   <tr><td>9</td><td>起评分消费（Kafka 不可达只告警）</td></tr>
+ *   <tr><td>9</td><td>起评分消费：对局结果 topic 的首次核对在这一步同步做（至多等 {@code xm.match.kafka.init-timeout}）——与契约不符抛出 = 拒绝启动；
+ *       Kafka 不可达只告警、后台每 30 s 重试</td></tr>
  * </table>
  *
  * <table>
@@ -74,9 +75,9 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
     private volatile ApplicationContext context;
 
     /**
-     * @param matcher            凑单的启停口（未接入时传 {@link #matcherNotReady()}）
-     * @param consumer           评分消费的启停口（未接入时传 {@link #consumerNotReady()}）
-     * @param gathers            开局管线（停机时等它空闲）；null = 开局管线未接入，不等
+     * @param matcher            凑单的启停口
+     * @param consumer           评分消费的启停口
+     * @param gathers            开局管线（停机时等它空闲）
      * @param drainWorkers       排空 {@code match-worker}（生产为 {@code MatchWorkerPool::close}；必须幂等）
      * @param gatherDrainTimeout 等在途 gather 的上限（生产为 {@link #GATHER_DRAIN_TIMEOUT}）
      */
@@ -84,37 +85,9 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
                           Duration gatherDrainTimeout) {
         this.matcher = Objects.requireNonNull(matcher, "matcher");
         this.consumer = Objects.requireNonNull(consumer, "consumer");
-        this.gathers = gathers;
+        this.gathers = Objects.requireNonNull(gathers, "gathers");
         this.drainWorkers = Objects.requireNonNull(drainWorkers, "drainWorkers");
         this.gatherDrainTimeout = Objects.requireNonNull(gatherDrainTimeout, "gatherDrainTimeout");
-    }
-
-    /** 凑单尚未接入时的替身：启动时告警一次，其余什么都不做。 */
-    public static MatcherControl matcherNotReady() {
-        return new MatcherControl() {
-            @Override
-            public void start() {
-                log.warn("凑单尚未接入（上下文里没有 MatcherControl）：排进队列的票不会被弹出成局");
-            }
-
-            @Override
-            public void stop() {
-            }
-        };
-    }
-
-    /** 评分消费尚未接入时的替身：启动时告警一次，其余什么都不做。 */
-    public static ResultConsumerControl consumerNotReady() {
-        return new ResultConsumerControl() {
-            @Override
-            public void start() {
-                log.warn("评分消费尚未接入（上下文里没有 ResultConsumerControl）：对局结果不会入账，评分停在已有值");
-            }
-
-            @Override
-            public void stop() {
-            }
-        };
     }
 
     @Override
@@ -213,9 +186,6 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
     }
 
     private void awaitGathers() {
-        if (gathers == null) {
-            return;
-        }
         long startedNanos = System.nanoTime();
         try {
             if (gathers.awaitIdle(gatherDrainTimeout)) {

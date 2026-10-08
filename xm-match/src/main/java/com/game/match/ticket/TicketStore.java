@@ -23,7 +23,9 @@ import java.util.Set;
  *   <li><b>阻塞</b>：在调用线程上等 Redis，至多等到 {@code d}。可以在工作线程、凑单线程与 gather 的虚拟线程上调（实现不得在 {@code synchronized}
  *       块里阻塞）；不得在 Dubbo / Netty I/O 线程上调。线程安全，多实例并发安全。</li>
  *   <li><b>失败</b>：Redis 出错或超出 {@code d} 抛 {@link Deadline.DependencyException}。对写方法这表示<b>结局不明</b>（脚本可能已经执行）：
- *       调用方不得假定「没写」。各入口怎么收尾见各自的规格条目（例：整队建票结局不明 → 用独立预算按本次的票号逐个 {@link #delete}）。</li>
+ *       调用方不得假定「没写」。各入口怎么收尾见各自的规格条目（例：整队建票结局不明 → 用独立预算按本次的票号逐个 {@link #delete}）。
+ *       <b>{@code d} 在发出之前就已经过期时，实现不发命令、直接抛</b>（这一种确定什么都没写）：所以补偿路径上「必须尽量做成」的调用
+ *       （放凑单锁、续期、回队首、删票）要给新的截止，不要沿用可能已经用完的那个。</li>
  *   <li><b>可重放</b>：每个写方法对「同样的入参再执行一次」是安全的（Redis 客户端在响应超时后会重发同一段脚本）——第二次执行不得产生第二份效果，
  *       也不得把自己第一次的效果误判成别人的（不出现假的「已在队列中」）。返回值在重放时可能与第一次不同，方法注释写明了调用方该怎么读。</li>
  *   <li><b>时间</b>：{@code enqueued_at_ms}、{@code not_before_ms} 与一切「是否到点」的判定都用 Redis {@code TIME}，不用本机时钟。
@@ -248,9 +250,11 @@ public interface TicketStore extends TicketReader {
      * 幸存者回队首（S_REQUEUE）：在<b>同一个</b>原子操作里，从名单末尾往前逐个处理「票号一致、仍是 matched、票的队列键就是 {@code queue}」的人——
      * 票回 queued、TTL 恢复成 {@code queuedTtlMs}、推到队首、按票里的评分写回镜像；最后登记注册集。处理完之后这些人在队列里的相对顺序
      * 与 {@code survivorsInOrder} 相同，且排在原有成员之前。{@code enqueued_at_ms} 不变。不满足条件的人跳过（票已过期 / 已换 / 已是 queued 的重放），
-     * 不会留下「在队列里却没有 queued 票」或反过来的孤儿。
+     * 不会留下「在队列里却没有 queued 票」或反过来的孤儿。某个人推进队列这一步失败时（只可能是队列键被人为占成别的类型），他的票被<b>删掉</b>
+     * （让玩家可以立即重排，同基线），不计入返回值。
      *
-     * @param survivorsInOrder 原弹出顺序里的幸存者；可以为空（什么都不做）
+     * @param survivorsInOrder 原弹出顺序里的幸存者；可以为空（什么都不做）；<b>玩家号不得重复</b>（重复是调用方的 bug，抛
+     *                         {@link IllegalArgumentException}）
      * @param notBeforeDelayMs &gt; 0：这些票的 {@code not_before_ms} 置为 Redis 时间 + 它（无肇事者的失败，M11）；0：清掉 {@code not_before_ms}
      * @return 本次放回队首的人数（只用于指标；重放时是 0）
      */

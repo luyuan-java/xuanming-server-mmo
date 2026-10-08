@@ -110,7 +110,8 @@ xm:
     gather-max-inflight: 256
     # 无肇事者的 gather 失败后，回队首的票多久之内不参与凑单（0 = 关闭）。
     requeue-backoff: 2s
-    # 对局结果 topic（xm-battle 生产）：代次必须与 xm-battle 一致；Kafka 不可达时照常启动，每 30 s 后台重试。
+    # 对局结果 topic（xm-battle 生产）：代次必须与 xm-battle 一致。启动第 9 步（Dubbo 已导出之后）同步核对一次，至多等 init-timeout：
+    # 分区数与契约不符拒绝启动（要升代次）；Kafka 不可达照常启动，之后每 30 s 后台重试。
     kafka:
       bootstrap-servers: ${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
       topic-generation: ${XM_BATTLE_RESULT_TOPIC_GENERATION:1}
