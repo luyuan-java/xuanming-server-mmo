@@ -8,6 +8,7 @@ import com.game.robot.scenario.BattleCrashScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
+import com.game.robot.scenario.BattleSmokeScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CurrencyScenario;
@@ -19,6 +20,8 @@ import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.GuildEconomyScenario;
 import com.game.robot.scenario.GuildScenario;
 import com.game.robot.scenario.KillSwitchScenario;
+import com.game.robot.scenario.Match5v5Scenario;
+import com.game.robot.scenario.MatchActivityScenario;
 import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
@@ -47,6 +50,7 @@ import java.util.regex.Pattern;
  * @param tradeAdminUrl   trade 场景：xm-trade 管理端口（播种接口 {@code POST /admin/trade/seed-listing}）
  * @param tradeScope      trade 场景：期望的市场范围（须与 xm-trade 的 {@code xm.trade.market.scope} 一致；缺省 zone，trade-spec Q9）
  * @param battleAdminUrl  battle / battle-edge 场景：xm-battle 管理端口（dev 接口 {@code POST /admin/battle/dev/*} 与指标）
+ * @param matchAdminUrl   battle-smoke / match-activity / match-5v5 场景：xm-match 管理端口（dev 接口 {@code /admin/match/dev/*} 与指标）
  * @param expectDevAllowed battle / battle-edge 场景：xm-battle 的 dev 接口开放（allow，dev / test 运行模式）还是回 403（deny，prod）
  * @param slow            battle-edge 场景：也跑慢用例（连上不握手、等 10 s 握手期限）
  */
@@ -69,6 +73,7 @@ public record RobotOptions(
         String tradeAdminUrl,
         MarketScope tradeScope,
         String battleAdminUrl,
+        String matchAdminUrl,
         boolean expectDevAllowed,
         boolean slow,
         String password) {
@@ -117,7 +122,17 @@ public record RobotOptions(
          * 附加选项 {@code --crash-window / --crash-phase / --crash-state}（{@link CrashWindowOptions}）跑故障变体：kill -9 的两个崩溃窗口，
          * 杀进程与重启由 {@code tools/local/battle-crash-window.sh} 编排。
          */
-        BATTLE_SETTLE
+        BATTLE_SETTLE,
+        /**
+         * 匹配端到端（批次 6.4，match-spec §15.5「battle-smoke」）；子命令写作 {@code battle-smoke}。A / B / C 三个新号经 gate → xm-match：
+         * 排队语义与拒绝码、PVE_SOLO 开战、179 补签、直连挂机打完、再排、1V1 与评分（经 {@code --match-admin-url} 的 dev 评分接口核对）、
+         * 切磋全套、163 / 164 的 6.4 临时应答、xm-match 指标。
+         */
+        BATTLE_SMOKE,
+        /** 帮会活动开战的 dev 入口（批次 6.4，match-spec §15.5「match-activity」）；子命令写作 {@code match-activity}，只在 dev / test 运行模式下跑。 */
+        MATCH_ACTIVITY,
+        /** 5V5 排队成局与蛇形分队（批次 6.4，match-spec §15.5「match-5v5」，可选，10 个新号）；子命令写作 {@code match-5v5}。 */
+        MATCH_5V5
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -159,6 +174,9 @@ public record RobotOptions(
                 "mirror / dungeon：xm-scene-manager 管理端口（抓 xm_scene_manager_instance_seconds）"),
         BATTLE_ADMIN_URL("battle-admin-url", "XM_ROBOT_BATTLE_ADMIN_URL", "http://127.0.0.1:18112",
                 "battle / battle-edge：xm-battle 管理端口（dev 接口 POST /admin/battle/dev/*、指标；运维令牌同 audit）"),
+        MATCH_ADMIN_URL("match-admin-url", "XM_ROBOT_MATCH_ADMIN_URL", "http://127.0.0.1:18113",
+                "battle-smoke / match-activity / match-5v5：xm-match 管理端口（dev 接口 GET /admin/match/dev/rating/{pid}、"
+                        + "POST /admin/match/dev/activity-battle 与指标；运维令牌同 audit）"),
         EXPECT_DEV("expect-dev", "XM_ROBOT_EXPECT_DEV", "allow",
                 "battle / battle-edge：xm-battle dev 接口的期望：allow（dev / test 运行模式）/ deny（prod：403，只跑不需要建房的步骤）"),
         SLOW("slow", "XM_ROBOT_SLOW", "false",
@@ -230,7 +248,7 @@ public record RobotOptions(
             }
         }
         if (scenario == null) {
-            throw new UsageException("缺少子命令（smoke / movement / battle-settle / …，完整清单见 --help）");
+            throw new UsageException("缺少子命令（smoke / movement / battle-settle / battle-smoke / match-activity / …，完整清单见 --help）");
         }
 
         String gateway = value(Opt.GATEWAY, given, env);
@@ -276,6 +294,10 @@ public record RobotOptions(
         if (!battleAdminUrl.startsWith("http://") && !battleAdminUrl.startsWith("https://")) {
             throw new UsageException("--battle-admin-url 必须以 http:// 或 https:// 开头：" + battleAdminUrl);
         }
+        String matchAdminUrl = stripSlash(value(Opt.MATCH_ADMIN_URL, given, env));
+        if (!matchAdminUrl.startsWith("http://") && !matchAdminUrl.startsWith("https://")) {
+            throw new UsageException("--match-admin-url 必须以 http:// 或 https:// 开头：" + matchAdminUrl);
+        }
         String expectDev = value(Opt.EXPECT_DEV, given, env);
         if (!expectDev.equals("allow") && !expectDev.equals("deny")) {
             throw new UsageException("--expect-dev 只能是 allow / deny：" + expectDev);
@@ -320,6 +342,9 @@ public record RobotOptions(
             case BATTLE -> BattleScenario.accountName(prefix, runTag, "a");
             case BATTLE_EDGE -> BattleEdgeScenario.accountName(prefix, runTag, "a");
             case BATTLE_SETTLE -> BattleSettleScenario.accountName(prefix, runTag, "a");
+            case BATTLE_SMOKE -> BattleSmokeScenario.accountName(prefix, runTag, "a");
+            case MATCH_ACTIVITY -> MatchActivityScenario.accountName(prefix, runTag, "a");
+            case MATCH_5V5 -> Match5v5Scenario.accountName(prefix, runTag, Match5v5Scenario.PLAYERS - 1);
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -330,13 +355,13 @@ public record RobotOptions(
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
                 stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), value(Opt.TABLE_DIR, given, env), tradeAdminUrl,
-                tradeScope, battleAdminUrl, expectDev.equals("allow"), slow.equals("true"), password);
+                tradeScope, battleAdminUrl, matchAdminUrl, expectDev.equals("allow"), slow.equals("true"), password);
     }
 
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|match-activity|match-5v5|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -373,8 +398,11 @@ public record RobotOptions(
         out.append("  killswitch 按方法热关停：经 xm-data 写规则 → 信封 1003、精确豁免、全局 * 豁免、Dubbo 层关停场景分配 → 删规则恢复；"
                 + "需要运维令牌。<只在隔离的本机切片上跑>：规则全服共享，演练期间几秒内会关掉整个区的客户端请求与进游戏\n");
         out.append("  team      组队（A / B / D 三个新号 + 一个已登出的 E）：建队 / 申请 / 同意 / 重放 / 邀请 / 拒绝 / 接受 / 踢人 / 转让 / "
-                + "拒绝申请与各推送 → A 换图 B 跟随（读 --table-dir 的 World 表）→ 开战 4027（4.3 不开战）→ 解散；"
-                + "另钉 4003 / 4005 / 4006 / 4007 / 4013 / 4017、MEMBER_ONLINE、上行 213 不回包；跨区步骤单 zone 时跳过\n");
+                + "拒绝申请与各推送 → A 换图 B 跟随（读 --table-dir 的 World 表）→ 开战拒绝码（非队长 4018、未配置的副本 4027 且视图 IDLE、"
+                + "B 持 1V1 排队票 4026[B] 后取消）→ S7 整队开战（211 回 STARTING、B 收 MATCH_STARTED、两人同一 battle_id 的 177 / 143、"
+                + "直连挂机打到 150、两人收 MATCH_ENDED）→ S8 B 单人 PVE 战斗中 A 开战 4025[B] → 解散；"
+                + "另钉 4003 / 4005 / 4006 / 4007 / 4013 / 4017、MEMBER_ONLINE、上行 213 不回包；跨区步骤单 zone 时跳过。"
+                + "整队开战（批次 6.4）需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService；结尾写 TEAM_SMOKE_OK … 或 TEAM_SMOKE_FAIL step=…\n");
         out.append("  guild     帮会核心（A / B / D / E / F 五个新号）：建帮落归属区 / 重复建帮 14000 / 本区榜 / 改公告 / 申请 → 审批 → "
                 + "各推送 / 伪造 player_id 退帮按会话受理 / 上行 8 与 220 信封 1003 / 任命长老 / 长老踢人边界 / 两次转让 / 退帮 / 解散后 "
                 + "14002 / 14007 且删申请；另钉 14009 / 14010 / 14006 / 14001 / 14018 / 14015 / 14014 / 14016 / 14004 / 14005、"
@@ -420,6 +448,22 @@ public record RobotOptions(
                 + "并跑「PREPARING 时 63 指向另一节点 → 3023，取消后跨节点成功」，单 scene 切片跳过这一步。"
                 + "故障变体 --crash-window scene-after-150 / battle-after-store 配 --crash-phase arm / verify、--crash-state，"
                 + "由 tools/local/battle-crash-window.sh 编排 kill -9 与重启（robot 自己不杀进程）\n");
+        out.append("  battle-smoke 匹配端到端（A / B / C 三个新号，批次 6.4；需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService、Kafka、"
+                + "dev 运行模式与运维令牌）：153 NOT_QUEUED → 157 拒绝码 16002 / 16003（parameters 逐字节）→ 1V1 排队、再排 16001 带原票、"
+                + "148 不回包（错票不动、原票取消）→ PVE_SOLO 受理后大厅先 177 后 143、expire_at_ms ≈ 发起时刻 + 300 s → 179 补签与 177 逐字节相同、"
+                + "非成员与不存在的局 1005 → 凭补签的票直连、战斗中再排 16000、挂机打到 150 后 FIN → 立即再排（16000 按过渡态重试、不得 16001）"
+                + "打第二局、旧局补签 1005 → 1V1（A 先受理是锚点：A 在 0 队、B 在 1 队）打完后经 --match-admin-url 查评分（games 各 + 1；"
+                + "胜负且不满 30 回合 |Δ| = 16，平局或打满 Δ = 0）→ 切磋 16007 / 156 / 16011 / 16013 / 拒绝只推发起者 / 16012 / 接受后 154 与"
+                + "同一局的 177、143 / 16009 / 16008 → 163 回 1006、164 空列表 → xm-match 指标；"
+                + "结尾写 BATTLE_SMOKE_OK … 或 BATTLE_SMOKE_FAIL step=… reason=…\n");
+        out.append("  match-activity 帮会活动开战的 dev 入口（A / B 两个新号 + 已登出的 C；需要切片带 xm-match、xm-battle、dev 运行模式与运维令牌）："
+                + "经 --match-admin-url 的 POST /admin/match/dev/activity-battle → 发起人不在首位 INVALID_ARGUMENT → 名单里有已登出的账号 "
+                + "MEMBER_OFFLINE（offender = 该账号）→ 名单 [A, B] 受理、battle_id ≠ 0、两人收到同一局的 177 / 143 → 战斗中再发 "
+                + "MEMBER_IN_BATTLE → 两人直连挂机打完；guild_id / activity_id 用不存在的值；"
+                + "结尾写 MATCH_ACTIVITY_OK … 或 MATCH_ACTIVITY_FAIL step=… reason=…\n");
+        out.append("  match-5v5 5V5 排队（10 个新号，可选；前置同 battle-smoke）：按次序逐个 157 {mode = 1} 受理 → 十人收到同一个 battle_id 的 "
+                + "177 / 143 → 评分相同按入队次序蛇形分队 0,1,1,0,0,1,1,0,0,1 → 全员直连挂机打到 150 → 评分查询每人 games + 1；"
+                + "结尾写 MATCH_5V5_OK … 或 MATCH_5V5_FAIL step=… reason=…\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -442,14 +486,14 @@ public record RobotOptions(
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
                 + ", dataUrl=" + dataUrl + ", sceneMetricsUrl=" + sceneMetricsUrl + ", tableDir=" + tableDir
                 + ", tradeAdminUrl=" + tradeAdminUrl + ", tradeScope=" + tradeScope + ", battleAdminUrl=" + battleAdminUrl
-                + ", expectDevAllowed=" + expectDevAllowed + ", slow=" + slow + ", password=***]";
+                + ", matchAdminUrl=" + matchAdminUrl + ", expectDevAllowed=" + expectDevAllowed + ", slow=" + slow + ", password=***]";
     }
 
     private static Scenario parseScenario(String arg) throws UsageException {
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / match-activity / match-5v5）");
         }
     }
 
