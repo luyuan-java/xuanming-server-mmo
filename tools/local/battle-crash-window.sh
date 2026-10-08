@@ -22,6 +22,11 @@
 #   4. scene-after-150 只支持单 scene 切片（XM_SCENE_NODES=1）：两个节点时不知道玩家落在哪一个，杀错了节点结论是假的，所以直接拒绝。
 #      battle-after-store 两种切片都行：第二个 scene 节点在跑时，本脚本把两个节点的管理端口都传给 robot 的 --scene-metrics-url
 #      （rescues{applied} 按节点之和判定；「--」之后显式给了 --scene-metrics-url 或设了 XM_ROBOT_SCENE_METRICS_URL 的以它为准）。
+#   5. 双 zone 切片（XM_ZONES=2 tools/local/start-slice.sh，批次 6.5）上两个变体照常能做，但只在区 1 上做：robot 必须登录区 1（它的缺省）；
+#      「--」之后给了 --zone、或设了 XM_ROBOT_ZONE 而取值不是 1 的，在动手之前拒绝。scene-after-150 杀的是区 1 的 xm-scene，玩家在区 2 时
+#      落在 xm-scene-z2 上，杀错了节点结论是假的；battle-after-store 的 rescues{applied} 也只读区 1 的节点。区 2 的两个实例（xm-scene-z2、
+#      xm-gate-z2）本脚本不杀、不重启、不检查：login 按会话的 zone 选场景节点，区 1 的玩家不会落到 xm-scene-z2 上，它在不在跑都不影响
+#      前置 4 的「单 scene」。重启出来的 xm-scene / xm-battle 的命令行里没有 zone 参数（区 1 是配置文件的缺省），与 start-slice.sh 相同。
 #
 # 做的事（两个变体相同的骨架）：
 #   a. 后台跑 robot 的 arm 阶段（battle-settle --crash-window <变体> --crash-phase arm），等它在断点处原子地写出状态文件
@@ -431,6 +436,19 @@ for name in "$SCENE_INSTANCE" xm-battle xm-gate xm-gateway; do
 done
 if [[ "$VARIANT" == "scene-after-150" ]] && alive "$SECOND_SCENE_INSTANCE"; then
   echo "[$SECOND_SCENE_INSTANCE] 在运行：scene-after-150 只支持单 scene 切片（两个节点时不知道玩家落在哪一个）。用 XM_SCENE_NODES=1 重起切片" >&2
+  problems=1
+fi
+# robot 这一轮登录哪个区（文件头前置 5）：「--」之后最后一次给的 --zone（--zone N 与 --zone=N 两种写法；robot 对同一个选项取最后一次），
+# 没给就看 XM_ROBOT_ZONE，都没有是 robot 的缺省 1。不是 1 就拒绝：本脚本杀的、读指标的都是区 1 的场景节点（双 zone 切片上区 2 另有 xm-scene-z2）。
+ROBOT_ZONE="${XM_ROBOT_ZONE:-1}"
+for ((i = 0; i < ${#ROBOT_ARGS[@]}; i++)); do
+  case "${ROBOT_ARGS[$i]}" in
+    --zone=*) ROBOT_ZONE="${ROBOT_ARGS[$i]#--zone=}" ;;
+    --zone) ROBOT_ZONE="${ROBOT_ARGS[$((i + 1))]:-}" ;;
+  esac
+done
+if [[ "$ROBOT_ZONE" != "1" ]]; then
+  echo "robot 要登录的区是「$ROBOT_ZONE」（「--」之后的 --zone，或环境变量 XM_ROBOT_ZONE）：故障变体只在区 1 上做（被杀的、被读指标的都是区 1 的场景节点）。去掉这个选项 / 环境变量" >&2
   problems=1
 fi
 if (( problems != 0 )); then

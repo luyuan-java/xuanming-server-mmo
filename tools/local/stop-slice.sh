@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 停止本地竖切进程，给每个进程 20s 优雅退出。次序：先停 xm-match、xm-battle（理由见下），其余按启动的逆序（gateway / gate …… 最后 scene-manager）。
 # 场景节点按实例名停：xm-scene-2（XM_SCENE_NODES=2 时才有）先于 xm-scene；没有 PID 文件的实例跳过。
+# 区 2 的两个实例（XM_ZONES=2 时才有，批次 6.5）紧挨着区 1 的同类先停：xm-gate-z2 在 xm-gate 之前，xm-scene-z2 在 xm-scene-2 之前
+# ——仍是启动的逆序（启动时它们各排在区 1 的同类之后）。本脚本不读 XM_ZONES / XM_SCENE_NODES：只看 PID 文件，哪种切片都用同一条命令停。
 #
 # xm-match 最先停（批次 6.4）：它是 xm-battle（建房 / 销毁 / 补签）与 xm-scene（备战 / 取消）的调用方，先停它，后面的进程停下时就不会有
 # 开到一半的局——它停机时先停凑单、撤 Dubbo，再有界等在途的 gather（至多 10 s）跑完，这段时间 xm-battle 与 xm-scene 都还在。
@@ -12,9 +14,12 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
-for name in xm-match xm-battle xm-gateway xm-gate xm-scene-2 xm-scene xm-data xm-trade xm-guild xm-team xm-chat xm-friend xm-login xm-scene-manager; do
+
+# 停一个实例（$1 实例名 = PID 文件名）：没有 PID 文件的跳过；发 SIGTERM 后给 20s，到点强制结束
+stop_one() {
+  local name=$1 pidfile pid
   pidfile="run/pids/$name.pid"
-  [[ -f "$pidfile" ]] || continue
+  [[ -f "$pidfile" ]] || return 0
   pid=$(cat "$pidfile")
   if kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null
@@ -26,4 +31,13 @@ for name in xm-match xm-battle xm-gateway xm-gate xm-scene-2 xm-scene xm-data xm
   fi
   rm -f "$pidfile"
   echo "已停止 $name"
+}
+
+# 下面这一行的名单与次序由 xm-gate 的 LocalSliceOrderTest 逐项钉着（= start-slice.sh 的 SERVICES），区 2 的实例不写进去，在循环体里带上
+for name in xm-match xm-battle xm-gateway xm-gate xm-scene-2 xm-scene xm-data xm-trade xm-guild xm-team xm-chat xm-friend xm-login xm-scene-manager; do
+  case "$name" in
+    xm-gate) stop_one xm-gate-z2 ;;
+    xm-scene-2) stop_one xm-scene-z2 ;;
+  esac
+  stop_one "$name"
 done

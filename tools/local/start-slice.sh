@@ -32,6 +32,21 @@
 # scene-manager 保持 per-node 覆盖，两个节点各有每张世界图一个频道：robot cross-node 场景据此判断「同图不同 scene_id = 不同节点」。
 #   XM_SCENE_NODES=2 tools/local/start-slice.sh
 # XM_SCENE_MANAGER_URL：scene → scene-manager 选跨节点目标的直连地址（xm.scene.scene-manager-url，local profile），缺省 tri://127.0.0.1:20882。
+#
+# 区数 XM_ZONES（批次 6.5 跨区 1V1，spectate-spec §10.6 / §10.8；脚本这一块按 zone-travel-spec §5.13 提前落地，不依赖 5.4 的任何生产代码）：
+# 缺省 1（进程与端口同以前）；=2 时多起区 2 的一个场景节点与一个 gate，其余进程两个区共用（都不分 zone，或按会话 / 位置记录取 zone）：
+#   xm-scene-z2  --xm.zone-id=2，链路 21010、资产通道 21110、管理端口 18115；排在区 1 的场景节点之后，同样等主世界频道铺好
+#   xm-gate-z2   --xm.zone-id=2，客户端 11010、管理端口 18123；排在 xm-gate 之后（全部 Dubbo 后端都已先起，上面那条硬约束对它同样成立），
+#                Dubbo 后端地址用缺省：与区 1 的 gate 指向同一组服务（同一个 xm-match、xm-team……）
+# 节点号按 zone 租约，区 2 的 scene / gate 也是 1 号——与区 1 同号是有意的：只按节点号寻址的代码在这个形态下会把区 2 玩家的消息
+# 送到区 1 的同号节点（spectate-spec §2.8），robot battle-cross-zone 靠它暴露这类问题。可与 XM_SCENE_NODES=2 同时用（xm-scene-2 仍是区 1 的第二个节点）。
+#   XM_ZONES=2 tools/local/start-slice.sh
+#   java -jar xm-robot/target/xm-robot-*.jar smoke --zone 2                                   # 区 2 能登录、进场
+#   java -jar xm-robot/target/xm-robot-*.jar battle-cross-zone --zone 1 --visit-zone 2        # 跨区 1V1（spectate-spec §10.8；要 dev 运行模式）
+# 区 2 在区服目录（MySQL zone_config）里的那一行由本脚本经 xm-data 的运维接口管，状态跟随 XM_ZONES（见 sync_zone2_status）：全部进程就绪之后
+# =2 时把它置 OPEN（库里还没有就建出来），=1 时置维护（库里没有就什么都不做）——区 2 建过一次就留在库里，不这样做的话单 zone 切片上会留下
+# 一个没有 gate 的 OPEN 区。等 GET /api/server-list 反映出来才报「全部就绪」。xm-gateway 的命令行两种形态下都不变（它自己只播种配置文件里的一区）。
+# Windows 上新占的五个端口不在保留端口段里（netsh int ipv4 show excludedportrange tcp 可查）。
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -141,6 +156,13 @@ fi
 XM_SCENE_MANAGER_URL="${XM_SCENE_MANAGER_URL:-tri://127.0.0.1:20882}"
 echo "场景节点数 XM_SCENE_NODES=$XM_SCENE_NODES"
 
+XM_ZONES="${XM_ZONES:-1}"
+if [[ "$XM_ZONES" != "1" && "$XM_ZONES" != "2" ]]; then
+  echo "XM_ZONES 只能是 1 或 2：$XM_ZONES" >&2
+  exit 1
+fi
+echo "区数 XM_ZONES=$XM_ZONES"
+
 mkdir -p run/logs run/pids
 
 # 模块名 就绪端口…（一个进程可以列多个端口，逐个等到可连再起下一个）
@@ -155,8 +177,8 @@ SERVICES=(
   "xm-guild 20886"
   "xm-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
   "xm-data 18106"
-  "xm-scene"              # 场景节点：起 XM_SCENE_NODES 个实例，端口见下面的 SCENE_NODES
-  "xm-gate 11000"
+  "xm-scene"              # 场景节点：起 XM_SCENE_NODES 个实例，端口见下面的 SCENE_NODES；XM_ZONES=2 时随后再起区 2 的 xm-scene-z2
+  "xm-gate 11000"         # XM_ZONES=2 时随后再起区 2 的 xm-gate-z2（实例与端口见下面的 ZONE2_GATE）
   "xm-gateway 18081"
   "xm-battle"             # 战斗节点：先等控制面 21200、直连面 12000，再等准入闸打开（见 wait_battle_ready）
 )
@@ -178,6 +200,27 @@ SCENE_NODES=(
   "xm-scene   21000 21100 18104"
   "xm-scene-2 21001 21101 18114"
 )
+
+# 区 2 的实例（XM_ZONES=2 才起；端口按 zone-travel-spec §5.13：避开 xm-scene-2 的 21001 / 21101 / 18114 与批次 5.1 规划的 21002 / 18124）。
+# 没有并进上面的 SCENE_NODES / SERVICES：SCENE_NODES 是区 1 的节点表，battle-crash-window.sh 与它逐字相同、按「第 1 / 2 行 = 区 1 的两个节点」
+# 取用；SERVICES 的十三项与次序由 xm-gate 的 LocalSliceOrderTest 钉着。区 2 的两个实例在主循环里紧跟区 1 的同类起。
+# 场景节点：实例名 节点链路 link-port 资产通道 asset-rpc-port 管理端口 server.port；gate：实例名 客户端端口 client-port 管理端口 server.port
+ZONE2_ID=2
+ZONE2_SCENE_NODE="xm-scene-z2 21010 21110 18115"
+ZONE2_GATE="xm-gate-z2 11010 18123"
+
+# 区服目录用到的两个 HTTP 口：xm-gateway 的客户端接口（GET /api/server-list；与 SERVICES 里等它就绪的端口是同一个）、
+# xm-data 的管理端口（运维接口 /admin/zones；与 SERVICES 里等它就绪的端口是同一个）
+GATEWAY_HTTP_PORT=18081
+DATA_MGMT_PORT=18106
+
+# 区 2 在区服目录里的那一行（sync_zone2_status 用）。建区的请求体：业务列与 xm-gateway 播种一个区同口径（OPEN、容量缺省 5000、不推荐），
+# 排在一区之后。置维护的文案会原样显示在客户端的区服列表里。
+# 没有照 zone-travel-spec §5.13 的草案在 xm-gateway 的命令行上给 seed-zones[0] / [1]：JDK 的启动器在 Windows 上按系统 ANSI 代码页取命令行，
+# 代码页不是中文的机器上（本机实测 native.encoding = Cp1252）「一区」「二区」到达进程时已经是「??」，而播种只在库里没有这个区时写、写了就不再改。
+# HTTP 请求体不经命令行（见 zone_admin_post），中文原样到达；xm-gateway 的命令行因此两种形态下都不用动。
+ZONE2_CREATE_BODY="{\"zone_id\":$ZONE2_ID,\"name\":\"二区\",\"manual_status\":0,\"sort_order\":2}"
+ZONE2_MAINTENANCE_BODY='{"maintenance_msg":"本机切片 XM_ZONES=1：没有起区 2 的 gate 与 scene（要进区 2 用 XM_ZONES=2 重起切片）"}'
 
 # 起一个进程：$1 实例名（日志 run/logs/<实例名>.log、PID run/pids/<实例名>.pid），$2 模块名（找可执行 jar），其余原样作为进程的命令行参数
 launch() {
@@ -244,6 +287,100 @@ start_scene_nodes() {
   done
 }
 
+# 起区 2 的场景节点（XM_ZONES=2）：命令行比区 1 的多一个 --xm.zone-id，就绪判断相同（链路 / 资产通道端口，再等主世界频道）。
+# 区 2 第一次出现时 scene-manager 要先为它竞选频道计划的领导者：节点启动时把 zone 登记进 xm:world:zones，领导者下一拍（≤ 5 s）看到、
+# 当选的那一拍就铺频道，仍在 wait_world_channels 的 60 s 之内。
+start_zone2_scene() {
+  local instance link rpc mgmt
+  read -r instance link rpc mgmt <<<"$ZONE2_SCENE_NODE"
+  launch "$instance" xm-scene --xm.zone-id="$ZONE2_ID" --server.port="$mgmt" --xm.scene.link-port="$link" \
+      --xm.scene.asset-rpc-port="$rpc" --xm.scene.scene-manager-url="$XM_SCENE_MANAGER_URL"
+  wait_port "$link" "$instance"
+  wait_port "$rpc" "$instance"
+  wait_world_channels "$instance" "$mgmt"
+  echo "  $instance 就绪（区 $ZONE2_ID：链路 $link、资产通道 $rpc、管理端口 $mgmt）"
+}
+
+# 起区 2 的 gate（XM_ZONES=2）：只换 zone 与两个端口，其余（Dubbo 后端地址、密钥）与区 1 的 gate 相同。它只连本 zone 的场景节点，
+# 所以排在 xm-scene-z2 之后；就绪判断同 xm-gate（等客户端端口）。
+start_zone2_gate() {
+  local instance client mgmt
+  read -r instance client mgmt <<<"$ZONE2_GATE"
+  launch "$instance" xm-gate --xm.zone-id="$ZONE2_ID" --xm.gate.client-port="$client" --server.port="$mgmt"
+  wait_port "$client" "$instance"
+  echo "  $instance 就绪（区 $ZONE2_ID：客户端 $client、管理端口 $mgmt）"
+}
+
+# 调 xm-data 的区服运维接口：POST $1（路径），请求体 $2（JSON）；输出 HTTP 状态码（连不上 / 没有应答时是 000）。
+# 令牌、操作人与请求体写在标准输入上的 curl 配置里，不上命令行（进程列表里看不到令牌，请求体里的中文也不经命令行的代码页转换）。
+# 操作人头是必填的（xm-data 的 AdminAuthFilter），会进它的运维审计日志。
+zone_admin_post() {
+  local path=$1 body=$2 token
+  # curl 配置里双引号串的转义只有反斜杠与双引号两样
+  token=${XM_ADMIN_TOKEN//\\/\\\\}
+  token=${token//\"/\\\"}
+  body=${body//\\/\\\\}
+  body=${body//\"/\\\"}
+  curl -sS -o /dev/null -w '%{http_code}' -K - 2>/dev/null <<EOF || true
+url = "http://127.0.0.1:$DATA_MGMT_PORT$path"
+header = "X-Xm-Admin-Token: $token"
+header = "X-Xm-Operator: start-slice"
+header = "Content-Type: application/json"
+data-binary = "$body"
+EOF
+}
+
+# 区服列表里某个区的那一项（$1 区号）：GET /api/server-list 应答里这个区的 JSON 片段。列表里没有这个区、gateway 没有应答都输出空串并返回非 0。
+# 应答是一行紧凑 JSON、每个区一个不嵌套的对象：按「{」拆行后取含这个 zone_id 的那一行。
+zone_list_entry() {
+  curl -fsS "http://127.0.0.1:$GATEWAY_HTTP_PORT/api/server-list" 2>/dev/null \
+      | tr '{' '\n' | grep -E "\"zone_id\":$1[,}]" | head -1
+}
+
+# 区 2 在区服目录里的那一行跟随 XM_ZONES（批次 6.5 的裁决），全部进程就绪之后调一次，经 xm-data 的运维接口改：
+#   =2 → POST /admin/zones/2/open；回 404（库里还没有区 2：第一次起双 zone 切片）就 POST /admin/zones 把它建出来。
+#        再等区服列表里区 2 显示 OPEN 并且带负载档 load_level：负载档只在 xm-gateway 的健康探测（每 5 s 一轮）看到这个区有 gate 之后才下发，
+#        所以它同时说明 xm-gate-z2 已经进了节点目录（手工 OPEN 而探测不到 gate 时列表显示的是 MAINTENANCE）。
+#        robot battle-cross-zone 的第一步就要求区 1、2 都是 OPEN。
+#   =1 → POST /admin/zones/2/maintenance；回 404（没起过双 zone 切片）就什么都不做。再等区服列表里区 2 显示 MAINTENANCE（区服目录缓存 1 s）。
+# 失败返回 1（脚本随之以非 0 退出、不报「全部就绪」）：这时进程都已经起来，只是区 2 的状态与 XM_ZONES 不一致。
+sync_zone2_status() {
+  local want action code entry deadline note=""
+  if [[ "$XM_ZONES" == "2" ]]; then
+    want=OPEN
+    action="/admin/zones/$ZONE2_ID/open"
+    code=$(zone_admin_post "$action" '{}')
+    if [[ "$code" == "404" ]]; then
+      action="/admin/zones"
+      code=$(zone_admin_post "$action" "$ZONE2_CREATE_BODY")
+      note="；库里原来没有这个区，已建"
+    fi
+  else
+    want=MAINTENANCE
+    action="/admin/zones/$ZONE2_ID/maintenance"
+    code=$(zone_admin_post "$action" "$ZONE2_MAINTENANCE_BODY")
+    if [[ "$code" == "404" ]]; then
+      return 0
+    fi
+  fi
+  if [[ "$code" != "200" ]]; then
+    echo "[区服目录] xm-data 的运维接口 POST $action 返回 $code（000 = 连不上，401 = 令牌不符，503 = xm-data 没拿到 XM_ADMIN_TOKEN；看 run/logs/xm-data.log）。进程都已起来，停止：tools/local/stop-slice.sh" >&2
+    return 1
+  fi
+  deadline=$((SECONDS + 30))
+  until entry=$(zone_list_entry "$ZONE2_ID") && [[ "$entry" == *"\"status\":\"$want\""* ]] \
+      && [[ "$want" != "OPEN" || "$entry" == *'"load_level":'* ]]; do
+    if (( SECONDS > deadline )); then
+      # 只留这个区自己的那一段（去掉对象结尾之后的部分）
+      entry=${entry%%\}*}
+      echo "[区服目录] 区 $ZONE2_ID 已置 $want，但 30s 内 GET /api/server-list 里它一直是「${entry:-没有这一项}」（=2 时要 status 是 OPEN 并且带 load_level：多半是 xm-gateway 的健康探测没有看到区 $ZONE2_ID 的 gate，看 run/logs/xm-gate-z2.log 与 run/logs/xm-gateway.log）。进程都已起来，停止：tools/local/stop-slice.sh" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo "  区服目录：区 $ZONE2_ID 置 $want（XM_ZONES=$XM_ZONES$note），区服列表已反映"
+}
+
 # xm-battle 就绪（batch 6.2）：管理端口的 Tomcat 先于节点就绪（/actuator/health 报 UP 比节点就绪早约 2.5 s），不能看 health。
 # 节点按「导出 Dubbo（21200）→ 绑直连面（12000）→ 在逻辑线程上开准入闸 → 发布目录 → 打就绪日志」的顺序起来：两个端口都能连之后，
 # 再等管理端口上的 xm_battle_admission_phase = 1（open），并且日志里出现「节点已就绪」——准入闸打开之后节点还要同步发布一次目录才置
@@ -293,6 +430,9 @@ for entry in "${SERVICES[@]}"; do
   read -r name ports <<<"$entry"
   if [[ "$name" == "xm-scene" ]]; then
     start_scene_nodes
+    if [[ "$XM_ZONES" == "2" ]]; then
+      start_zone2_scene
+    fi
     continue
   fi
   if [[ "$name" == "xm-battle" ]]; then
@@ -312,6 +452,11 @@ for entry in "${SERVICES[@]}"; do
     wait_port "$port" "$name"
   done
   echo "  $name 就绪（端口 $ports）"
+  if [[ "$name" == "xm-gate" && "$XM_ZONES" == "2" ]]; then
+    start_zone2_gate
+  fi
 done
 
-echo "全部就绪（场景节点 $XM_SCENE_NODES 个）。停止：tools/local/stop-slice.sh"
+sync_zone2_status
+
+echo "全部就绪（场景节点 $XM_SCENE_NODES 个、区 $XM_ZONES 个）。停止：tools/local/stop-slice.sh"
