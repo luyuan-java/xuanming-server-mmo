@@ -50,4 +50,17 @@ class GateTokensTest {
         ByteString garbage = ByteString.copyFrom(new byte[] {(byte) 0xFF, (byte) 0xFF});
         assertThat(TOKENS.verify(garbage, TOKENS.sign(garbage), 3, 1, NOW).failure()).isEqualTo(GateTokens.Failure.BAD_PAYLOAD);
     }
+
+    /**
+     * 同号节点跨 zone（spectate-spec §2.8）：gate 节点号按 zone 租约，zone 1 与 zone 2 各有一台 1 号 gate。网关给 zone 1 的 1 号 gate 签的令牌
+     * 拿到 zone 2 的 1 号 gate——节点号对得上，靠 {@code target_zone_id} 拦下；否则玩家会带着 zone 1 的令牌进到 zone 2。
+     */
+    @Test
+    void zone1的1号gate的令牌_拿到zone2的1号gate_节点号对得上也按WRONG_ZONE拒() {
+        ByteString forZone1Gate1 = payload(1, 1, NOW + 600);
+        ByteString signature = TOKENS.sign(forZone1Gate1);
+
+        assertThat(TOKENS.verify(forZone1Gate1, signature, 1, 1, NOW).ok()).as("本来的那台 gate 认").isTrue();
+        assertThat(TOKENS.verify(forZone1Gate1, signature, 1, 2, NOW).failure()).isEqualTo(GateTokens.Failure.WRONG_ZONE);
+    }
 }

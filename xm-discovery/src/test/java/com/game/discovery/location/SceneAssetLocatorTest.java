@@ -155,6 +155,50 @@ class SceneAssetLocatorTest {
         assertThat(resolve()).as("rpc_port 越界").isInstanceOf(Failure.class);
     }
 
+    // ---- 同号节点跨 zone（spectate-spec §2.7 的 Z3 / Z7、§2.8）：scene 节点号按 zone 租约，两个 zone 的第一台都是 1 号
+
+    @Test
+    void 两个zone都有同号节点_按位置记录的zone取条目_玩家换了zone就换成那边的那台() throws Exception {
+        List<String> asked = new ArrayList<>();
+        SceneAssetLocator recording = new SceneAssetLocator(holders::get, (zone, node) -> {
+            asked.add(zone + "/" + node);
+            return nodes.getOrDefault(zone * 10_000 + node, CompletableFuture.completedFuture(Optional.empty()));
+        }, null);
+        entry(info("inst-here", "10.0.3.7", 21100).build());
+        entry(info("inst-there", "10.0.4.7", 21110).setZoneId(ZONE + 1).build());
+
+        online(ZONE + 1, NODE);
+        Resolution there = recording.resolveAsync(PLAYER).get(5, TimeUnit.SECONDS);
+        online(ZONE, NODE);
+        Resolution here = recording.resolveAsync(PLAYER).get(5, TimeUnit.SECONDS);
+
+        assertThat(((Found) there).endpoint()).isEqualTo(new SceneAssetEndpoint(ZONE + 1, NODE, "inst-there", "10.0.4.7", 21110));
+        assertThat(((Found) here).endpoint()).isEqualTo(new SceneAssetEndpoint(ZONE, NODE, "inst-here", "10.0.3.7", 21100));
+        assertThat(asked).as("目录的键是 (zone, 节点号)，zone 取位置记录的").containsExactly((ZONE + 1) + "/" + NODE, ZONE + "/" + NODE);
+    }
+
+    @Test
+    void 玩家所在的zone没有这个节点号_别的zone有同号节点_不借用_按不知道发给谁() throws Exception {
+        entry(info("inst-here", "10.0.3.7", 21100).build());
+        online(ZONE + 1, NODE);
+
+        assertThat(resolve()).isEqualTo(new NoHolder(ResolveResult.NODE_UNKNOWN));
+        assertThat(directoryReads).hasValue(1);
+    }
+
+    @Test
+    void 目录对别的zone的查询回了同号条目_条目的zone与位置记录不符是故障_不当成找到() throws Exception {
+        online(ZONE + 1, NODE);
+        // 读口出了岔子：问的是 (ZONE + 1, NODE)，回来的条目写着 ZONE
+        nodes.put((ZONE + 1) * 10_000 + NODE, CompletableFuture.completedFuture(Optional.of(info("inst-here", "10.0.3.7", 21100).build())));
+
+        Resolution resolution = resolve();
+
+        assertThat(resolution).isInstanceOf(Failure.class);
+        assertThat(((Failure) resolution).reason()).contains("与键不符").contains("entry_zone=" + ZONE);
+        assertThat(observed).containsExactly(ResolveResult.ERROR);
+    }
+
     @Test
     void 位置记录的严格读_各分支() {
         long player = 77;

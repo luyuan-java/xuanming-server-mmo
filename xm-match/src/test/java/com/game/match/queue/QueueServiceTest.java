@@ -4,10 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.match.MatchBudgets;
+import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
+import com.game.discovery.proto.PlayerPresence;
 import com.game.match.MatchProperties;
+import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.gather.FailPolicy;
 import com.game.match.gather.GatherLauncher;
 import com.game.match.gather.GatherOutcome;
@@ -457,6 +460,64 @@ class QueueServiceTest {
         assertThat(store.ticketOf(A).orElseThrow().zoneId()).as("zone 取位置记录，不取请求").isEqualTo(2);
         assertThat(store.ticketOf(B)).as("不能替别人排队").isEmpty();
         assertThat(store.queueMembers(Q_1V1)).as("预组队成员不入队").containsExactly("1001");
+    }
+
+    // ================================================================ 157：跨区（spectate-spec §2.7 的 Z1、Z2；基线 crosszone_test.go:108、:121）
+
+    /**
+     * 三种 zone 不要混用（spectate-spec §2.8 第 3 条）：会话的 zone（{@code SessionContext.zone_id}，gate 所在的 zone）与在线目录的 zone 都是 1，
+     * 请求体自称 9，位置记录（玩家所在的 scene）在 zone 2——跨 zone 传送途中就是这个样子。票据只认位置记录。
+     */
+    @Test
+    void 会话与在线目录在zone1_位置记录在zone2_票据记zone2_全程不读在线目录() throws Exception {
+        players.presence(A, PlayerPresence.newBuilder().setPlayerId(A).setZoneId(1).setGateNodeId(1).setGateInstanceId("gate-z1-inst")
+                .setSessionId((1 << 17) | 1).setOwnerEpoch(1).build());
+        players.location(A, 2, 1);
+        SessionContext session = SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-z1-inst").setSessionId((1 << 17) | 1)
+                .setZoneId(1).setAccount("acc-a").setPlayerId(A).build();
+        JoinQueueRequest request = JoinQueueRequest.newBuilder().setModeValue(MODE_1V1).setBattleConfigId(1).setZoneId(9).build();
+
+        MatchMethodHandler.Reply reply = new QueueHandlers.Join(service, metrics).handle(session, request.toByteString(), d());
+
+        JoinQueueResponse response = JoinQueueResponse.parseFrom(((MatchMethodHandler.Reply.Body) reply).bytes());
+        assertBytes(response, JoinQueueResponse.newBuilder().setQueueTicket("ticket-1").build());
+        assertThat(store.ticketOf(A).orElseThrow().zoneId()).as("zone 取位置记录：不是会话的 1，也不是请求体的 9").isEqualTo(2);
+        assertThat(players.reads).as("157 只读战斗锁与位置记录，不读在线目录").containsExactly("lock:1001", "location:1001");
+    }
+
+    @Test
+    void 两个zone的玩家排同一个模式与副本_进同一条队列_队列键与注册集里都没有zone() {
+        // 两个 zone 各自的 1 号 scene：节点号相同不妨碍任何事，票据里也不记节点号
+        players.online(A, 1, 1);
+        players.online(B, 2, 1);
+        QueueRef queue = new QueueRef(MODE_1V1, 1);
+
+        assertThat(join(A, MODE_1V1, 1).getErrorCode()).isZero();
+        assertThat(join(B, MODE_1V1, 1).getErrorCode()).isZero();
+
+        assertThat(store.queueMembers(queue)).as("全服一条队列，先到的在队首").containsExactly("1001", "1002");
+        assertThat(store.queueIndex(d())).containsExactly("xm:{match}:queue:3:1");
+        assertThat(store.rankOf(queue)).containsOnlyKeys("1001", "1002");
+        Ticket a = store.ticketOf(A).orElseThrow();
+        Ticket b = store.ticketOf(B).orElseThrow();
+        assertThat(a.zoneId()).isEqualTo(1);
+        assertThat(b.zoneId()).as("zone 只作观测字段留在票据里").isEqualTo(2);
+        assertThat(a.queueKey()).isEqualTo("xm:{match}:queue:3:1").isEqualTo(b.queueKey());
+        assertThat(joined("MATCH_MODE_1V1", "ok")).isEqualTo(2);
+    }
+
+    @Test
+    void PVE_SOLO的matched票同样记位置记录的zone_不取在线目录的() {
+        players.presence(A, PlayerPresence.newBuilder().setPlayerId(A).setZoneId(1).setGateNodeId(1).setGateInstanceId("gate-z1-inst")
+                .setSessionId((1 << 17) | 1).setOwnerEpoch(1).build());
+        players.location(A, 2, 1);
+        gather.hold();
+
+        assertThat(join(A, MODE_PVE_SOLO, 1).getErrorCode()).isZero();
+
+        assertThat(store.ticketOf(A).orElseThrow().zoneId()).isEqualTo(2);
+        assertThat(store.ticketOf(A).orElseThrow().state()).isEqualTo(TicketState.MATCHED);
+        assertThat(players.reads).doesNotContain("presence:1001");
     }
 
     @Test

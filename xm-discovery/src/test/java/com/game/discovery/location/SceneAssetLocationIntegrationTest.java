@@ -41,6 +41,8 @@ class SceneAssetLocationIntegrationTest {
     private static final long BASE = Long.MIN_VALUE + (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 40);
     /** 随机 zone：节点目录键 xm:nodes:scene:{zone} 只属于本测试。 */
     private static final int ZONE = 900_000 + ThreadLocalRandom.current().nextInt(90_000);
+    /** 第二个 zone（同号节点跨 zone 的用例）：落在 {@link #ZONE} 的取值范围之外，目录键同样只属于本测试。 */
+    private static final int OTHER_ZONE = ZONE + 100_000;
     private static final String TYPE = "scene";
 
     private static RedissonClient redis;
@@ -62,6 +64,7 @@ class SceneAssetLocationIntegrationTest {
             redis.getKeys().delete(RedisKeys.playerLocation(BASE + i));
         }
         redis.getKeys().delete(RedisKeys.nodeDirectory(TYPE, ZONE));
+        redis.getKeys().delete(RedisKeys.nodeDirectory(TYPE, OTHER_ZONE));
         redis.shutdown();
     }
 
@@ -173,5 +176,41 @@ class SceneAssetLocationIntegrationTest {
         scenes.remove(ZONE, 21);
         assertThat(locator.resolveAsync(player).get(5, TimeUnit.SECONDS)).as("摘目录之后调用方找不到它")
                 .isEqualTo(new NoHolder(ResolveResult.NODE_UNKNOWN));
+    }
+
+    /**
+     * 同号节点跨 zone 碰撞（spectate-spec §2.7 的 Z3 / Z7、§2.8、§10.4 末条）：scene 节点号按 zone 租约，两个 zone 的第一台都是 1 号。
+     * 两个 zone 的目录是<b>两把键</b>（{@code xm:nodes:scene:<zone>}）、字段名都是 {@code "1"}；定位必须按位置记录里的 zone 读对那一把。
+     */
+    @Test
+    void 两个zone各发布一台1号scene_定位按位置记录的zone取各自的条目_一边摘掉后不借用另一边的同号节点() throws Exception {
+        SceneAssetLocator locator = new SceneAssetLocator(locations, scenes, null);
+        long here = BASE + 12;
+        long there = BASE + 13;
+        scenes.publish(ZONE, 1, node(1, "inst-here", 21100), Duration.ofSeconds(30));
+        scenes.publish(OTHER_ZONE, 1, SceneNodeInfo.newBuilder().setZoneId(OTHER_ZONE).setNodeId(1).setInstanceId("inst-there")
+                .setLinkHost("127.0.0.1").setLinkPort(21010).setRpcHost("127.0.0.1").setRpcPort(21110).build(), Duration.ofSeconds(30));
+        locations.putAsync(at(here, 1, 5), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        PlayerLocation thereAt = at(there, 1, 5).toBuilder().setZoneId(OTHER_ZONE).build();
+        locations.putAsync(thereAt, 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertThat(RedisKeys.nodeDirectory(TYPE, ZONE)).isNotEqualTo(RedisKeys.nodeDirectory(TYPE, OTHER_ZONE));
+        assertThat(locator.resolveAsync(here).get(5, TimeUnit.SECONDS)).isEqualTo(new Found(at(here, 1, 5),
+                new SceneAssetEndpoint(ZONE, 1, "inst-here", "127.0.0.1", 21100)));
+        assertThat(locator.resolveAsync(there).get(5, TimeUnit.SECONDS)).isEqualTo(new Found(thereAt,
+                new SceneAssetEndpoint(OTHER_ZONE, 1, "inst-there", "127.0.0.1", 21110)));
+
+        // 玩家换到另一个 zone 的同号节点（同一次进场里写序号更大）：定位跟着换
+        PlayerLocation moved = at(here, 1, 5).toBuilder().setZoneId(OTHER_ZONE).build();
+        assertThat(locations.putAsync(moved, 2).toCompletableFuture().get(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(locator.resolveAsync(here).get(5, TimeUnit.SECONDS)).isEqualTo(new Found(moved,
+                new SceneAssetEndpoint(OTHER_ZONE, 1, "inst-there", "127.0.0.1", 21110)));
+
+        // 那个 zone 的 1 号下线：本 zone 的 1 号还在目录里，但不是他们的持有者
+        scenes.remove(OTHER_ZONE, 1);
+        assertThat(locator.resolveAsync(there).get(5, TimeUnit.SECONDS)).isEqualTo(new NoHolder(ResolveResult.NODE_UNKNOWN));
+        assertThat(locator.resolveAsync(here).get(5, TimeUnit.SECONDS)).isEqualTo(new NoHolder(ResolveResult.NODE_UNKNOWN));
+        assertThat(scenes.findAsync(ZONE, 1).get(5, TimeUnit.SECONDS)).as("本 zone 的 1 号不受影响").isPresent();
+        scenes.remove(ZONE, 1);
     }
 }

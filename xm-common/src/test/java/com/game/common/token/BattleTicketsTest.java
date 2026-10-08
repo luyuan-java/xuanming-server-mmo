@@ -8,6 +8,7 @@ import com.game.proto.BattleTicketPayload;
 import com.game.proto.eBattleTicketRole;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
+import com.google.protobuf.Descriptors.FieldDescriptor;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
@@ -197,5 +198,39 @@ class BattleTicketsTest {
         assertThat(Verdict.ROLE_INVALID.wireName()).isEqualTo("role_invalid");
         assertThat(Verdict.EXPIRED.clientError()).isEqualTo("ticket rejected: expired");
         assertThatThrownBy(Verdict.OK::clientError).isInstanceOf(IllegalStateException.class);
+    }
+
+    // ---- 跨区（spectate-spec §2.2「战斗票不含 zone，只绑节点与实例」、§2.7 的 Z4）----
+
+    /**
+     * 契约里的战斗票只有这六个字段，<b>没有 zone</b>：battle 是全服一份（节点号租约的作用域是 0，全服唯一），票只认「哪个节点的哪个进程」。
+     * 这个用例钉的是同步来的契约的形状——mmorpg 给票加字段（尤其是 zone）时这里会红，提醒回来核对 {@link BattleTickets#classify} 要不要跟着判。
+     */
+    @Test
+    void 票据载荷只有六个字段_没有zone() {
+        assertThat(BattleTicketPayload.getDescriptor().getFields()).extracting(FieldDescriptor::getName)
+                .containsExactly("battle_id", "player_id", "battle_node_id", "battle_instance_id", "expire_at_ms", "role");
+    }
+
+    @Test
+    void 两个zone的参战者各持一张票_除player_id外逐字段相同_在同一个battle进程上都判OK_签名各管各的() {
+        BattleTicketPayload fromZone1 = validTicket().setPlayerId(9001).build();
+        BattleTicketPayload fromZone2 = validTicket().setPlayerId(9002).build();
+
+        assertThat(fromZone1.toBuilder().clearPlayerId().build()).as("票里没有任何一项因持票人所在的 zone 而不同")
+                .isEqualTo(fromZone2.toBuilder().clearPlayerId().build());
+        assertThat(BattleTickets.classify(fromZone1, SELF_NODE, SELF_INSTANCE, NOW)).isEqualTo(Verdict.OK);
+        assertThat(BattleTickets.classify(fromZone2, SELF_NODE, SELF_INSTANCE, NOW)).isEqualTo(Verdict.OK);
+        ByteString signedForZone1 = tickets.sign(fromZone1.toByteString());
+        assertThat(tickets.signatureMatches(fromZone1.toByteString(), signedForZone1)).isTrue();
+        assertThat(tickets.signatureMatches(fromZone2.toByteString(), signedForZone1)).as("一个人的签名不能拿去配另一个人的票").isFalse();
+    }
+
+    @Test
+    void 票拿到另一个battle进程_节点号对得上也拒_与持票人在哪个zone无关() {
+        BattleTicketPayload ticket = validTicket().setPlayerId(9002).build();
+
+        assertThat(BattleTickets.classify(ticket, SELF_NODE, "battle-uuid-of-another-process", NOW)).isEqualTo(Verdict.INSTANCE_MISMATCH);
+        assertThat(BattleTickets.classify(ticket, SELF_NODE + 1, SELF_INSTANCE, NOW)).isEqualTo(Verdict.NODE_MISMATCH);
     }
 }

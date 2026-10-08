@@ -176,6 +176,53 @@ class ScenePreparerTest {
         assertThat(sceneB.frozen()).containsOnlyKeys(B);
     }
 
+    /**
+     * 同号节点跨 zone 碰撞下的取消（spectate-spec §2.8、Z3）：备战之后两人的位置记录对调，各自指向「另一个 zone 的同号节点」。
+     * 取消若按位置重新解析，会发到对方那台（实例号对得上、玩家却不在那里）——所以必须发回备战时记下的端点，端点里带着 zone。
+     */
+    @Test
+    void 跨zone同节点号_取消各发回备战时的端点_位置已指向另一个zone的同号节点也不串() {
+        FakeSceneBattle sceneB = new FakeSceneBattle("scene-inst-b");
+        sceneNodes.add(2, 7, "scene-inst-b", 21101);
+        calls.register(sceneNodes.targetOf(2, 7), sceneB);
+        players.online(B, 2, 7);
+        Prepare.Ok first = (Prepare.Ok) preparer.prepare(request(A));
+        Prepare.Ok second = (Prepare.Ok) preparer.prepare(request(B));
+        players.location(A, 2, 7);
+        players.location(B, 1, 7);
+        int readsBefore = players.reads.size();
+        int lookupsBefore = sceneNodes.lookups.size();
+
+        assertThat(preparer.cancel(A, BATTLE, first.endpoint())).isTrue();
+        assertThat(preparer.cancel(B, BATTLE, second.endpoint())).isTrue();
+
+        assertThat(sceneA.calls).extracting(FakeSceneBattle.Call::describe).containsExactly("prepare:1001", "cancel:1001");
+        assertThat(sceneB.calls).extracting(FakeSceneBattle.Call::describe).containsExactly("prepare:1002", "cancel:1002");
+        assertThat(sceneA.frozen()).as("A 在 zone 1 的 7 号上解冻").isEmpty();
+        assertThat(sceneB.frozen()).as("B 在 zone 2 的 7 号上解冻").isEmpty();
+        assertThat(calls.remembered).extracting(c -> c.target().address()).containsExactly("127.0.0.1:21100", "127.0.0.1:21101");
+        assertThat(players.reads).as("取消不读位置记录").hasSize(readsBefore);
+        assertThat(sceneNodes.lookups).as("取消不查 scene 目录").hasSize(lookupsBefore);
+        assertThat(first.endpoint()).as("节点号相同、zone 不同的两个端点不是同一个").isNotEqualTo(second.endpoint());
+        assertThat(second.endpoint().toString()).as("日志里的端点带 zone：同号节点靠它分辨").isEqualTo("z2/n7@127.0.0.1:21101#scene-inst-b");
+    }
+
+    /** 目录读口出了岔子、对 zone 2 的查询回了 zone 1 的同号条目：定位器按「条目与键不符」判故障，请求不发出，不会把 B 冻结在别的 zone 的节点上。 */
+    @Test
+    void 目录对zone2的查询回了zone1的同号条目_按定位故障_no_location_不发调用() {
+        SceneAssetLocator.SceneNodeLookup crossed = (zoneId, nodeId) -> sceneNodes.findAsync(1, nodeId);
+        ScenePreparer confused = new ScenePreparer(new SceneAssetLocator(players::holderAsync, crossed, null), calls);
+        players.online(B, 2, 7);
+
+        Prepare.Failed result = failed(confused.prepare(request(B)));
+
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.NO_LOCATION);
+        assertThat(result.detail()).contains("与键不符");
+        assertThat(result.cancelNeeded()).isFalse();
+        assertThat(calls.calls).isEmpty();
+        assertThat(sceneA.frozen()).as("zone 1 的 7 号没有冻结 zone 2 的玩家").isEmpty();
+    }
+
     // ================================================================ 应答的映射
 
     @Test

@@ -278,6 +278,40 @@ class DubboSceneBattleEventsTest {
         assertThat(confirms()).containsOnly(entry("rerouted", 1));
     }
 
+    /**
+     * 本机双 zone 切片的形状（spectate-spec §2.8、Z6）：两个 zone <b>都有</b> 1 号 scene，实例与地址不同。跨区 1V1 的两名参战者的快照路由
+     * 只差 zone 与实例号——各自的确认必须按 {@code (zone_id, scene_node_id)} 查到自己那台，走正常路径（{@code sent}），不问定位器。
+     */
+    @Test
+    void 两个zone都有1号节点_两名参战者的确认各发往自己zone的那台_实例相符不问定位器() {
+        directory.put(node(1, 1, "scene-z1n1", "10.0.1.1", 21100));
+        directory.put(node(2, 1, "scene-z2n1", "10.0.2.1", 21110));
+
+        events.confirm(routing(1, 1, "scene-z1n1"), P, B, DEADLINE);
+        events.confirm(routing(2, 1, "scene-z2n1"), P + 1, B, DEADLINE);
+
+        assertThat(journal.entries()).containsExactly("find:1/1", "confirm:" + P + "/" + B + "@scene-z1n1", "find:2/1",
+                "confirm:" + (P + 1) + "/" + B + "@scene-z2n1");
+        assertThat(transport.sent).extracting(Sent::endpoint).containsExactly(new SceneAssetEndpoint(1, 1, "scene-z1n1", "10.0.1.1", 21100),
+                new SceneAssetEndpoint(2, 1, "scene-z2n1", "10.0.2.1", 21110));
+        assertThat(transport.sent).extracting(s -> s.call().getPlayerId()).containsExactly(P, P + 1);
+        assertThat(confirms()).as("都是正常路径：没有一条因为查错 zone 而回落").containsOnly(entry("sent", 2));
+    }
+
+    @Test
+    void zone2的1号重启换了实例_zone1的1号还是老样子_zone2参战者的确认改投给定位到的新实例_不发给zone1的同号节点() {
+        directory.put(node(1, 1, "scene-z1n1", "10.0.1.1", 21100));
+        directory.put(node(2, 1, "scene-z2n1-restarted", "10.0.2.1", 21110));
+        SceneAssetEndpoint now = locator.online(P, 2, 1, "scene-z2n1-restarted");
+
+        events.confirm(routing(2, 1, "scene-z2n1"), P, B, DEADLINE);
+
+        assertThat(journal.entries()).containsExactly("find:2/1", "locate:" + P, "confirm:" + P + "/" + B + "@scene-z2n1-restarted");
+        assertThat(transport.last().endpoint()).isEqualTo(now);
+        assertThat(transport.last().endpoint().zoneId()).isEqualTo(2);
+        assertThat(confirms()).containsOnly(entry("rerouted", 1));
+    }
+
     // ================================================================== 目录条目损坏（OBX-13）
 
     @Test

@@ -99,6 +99,35 @@ class SceneClientSweeperTest {
         assertThat(sweeper.trackedCount()).isEqualTo(1);
     }
 
+    /**
+     * 同号节点跨 zone（spectate-spec §2.8）：两个 zone 各有一台 1 号 scene，节点号相同、地址与实例不同。清扫按登记节点<b>自己的 zone</b> 读目录、
+     * 按「地址 + 实例」比对——拿 zone 1 的目录去判 zone 2 的节点（或只比节点号），要么误毁还在用的客户端，要么留着已下线节点的客户端不放。
+     */
+    @Test
+    void 两个zone的同号节点_zone2的那台下线_只销毁它的客户端_zone1的同号节点留着() {
+        SceneAssetEndpoint zone1Node1 = new SceneAssetEndpoint(1, 1, "z1-inst", "10.0.1.1", 21100);
+        SceneAssetEndpoint zone2Node1 = new SceneAssetEndpoint(2, 1, "z2-inst", "10.0.2.1", 21110);
+        sweeper.track(zone1Node1);
+        sweeper.track(zone2Node1);
+        directory.put(1, List.of(SceneNodeInfo.newBuilder().setZoneId(1).setNodeId(1).setInstanceId("z1-inst").setRpcHost("10.0.1.1")
+                .setRpcPort(21100).build()));
+        directory.put(2, List.of());
+
+        assertThat(sweeper.sweep()).isEqualTo(1);
+
+        assertThat(evicted).containsExactly(zone2Node1);
+        assertThat(sweeper.trackedCount()).as("zone 1 的 1 号还在它自己的目录里").isEqualTo(1);
+        assertThat(zonesRead).as("两个 zone 的目录各读一次").containsExactlyInAnyOrder(1, 2);
+
+        // 反过来：zone 1 的 1 号也下线了，zone 2 的目录里这时即使有一台 1 号，也救不了它
+        directory.put(1, List.of());
+        directory.put(2, List.of(SceneNodeInfo.newBuilder().setZoneId(2).setNodeId(1).setInstanceId("z1-inst").setRpcHost("10.0.1.1")
+                .setRpcPort(21100).build()));
+        assertThat(sweeper.sweep()).isEqualTo(1);
+        assertThat(evicted).containsExactly(zone2Node1, zone1Node1);
+        assertThat(sweeper.trackedCount()).isZero();
+    }
+
     @Test
     void 只登记发过调用的节点_没登记的不读目录不销毁_同地址换实例以新的为准() {
         directory.put(1, List.of(info(1, 1, "a2", 21100)));

@@ -119,6 +119,29 @@ class ObserverTest {
         assertThat(h.service().room(9005).routingByObserver.get(C)).isEqualTo(moved);
     }
 
+    /**
+     * 同号 gate 跨 zone（spectate-spec §2.8、§7.2）：观众从 zone 1 的 1 号 gate 换到 zone 2 的 1 号 gate。两台 gate 的节点号都是 1，
+     * 发出的会话号也可以完全相同（{@code 节点号 << 17 | 序号}）——分得开新旧会话的只有 gate 实例号。必须按「会话变了」处理
+     * （关旧直连、刷新路由、177 经新会话重推），不能当成同会话重试把 161 写进旧直连。
+     */
+    @Test
+    void 观众换到另一个zone的同号gate_会话号与gate节点号都没变_只有实例与zone变了_按会话变了处理() {
+        h.create(h.pvp(9010, A, B));
+        BattleRouting inZone1 = RoomHarness.observerRouting(C, (1 << 17) | 1);
+        add(9010, C, inZone1);
+        FakeLink old = h.connect(9010, C, eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
+        h.clearLog();
+        BattleRouting inZone2 = inZone1.toBuilder().setZoneId(2).setGateInstanceId("gate-instance-z2").build();
+        assertThat(inZone2.getSessionId()).isEqualTo(inZone1.getSessionId());
+        assertThat(inZone2.getGateNodeId()).isEqualTo(inZone1.getGateNodeId());
+
+        assertThat(add(9010, C, inZone2).hasErrorMessage()).isFalse();
+
+        assertThat(h.trace()).as("不是同会话重试（那样会是 frame:5003:177 + frame:5003:161）").containsExactly("close:5003:battle_closed", "lobby:5003:177");
+        assertThat(old.closedWith).isEqualTo(Disconnect.BATTLE_CLOSED);
+        assertThat(h.service().room(9010).routingByObserver.get(C)).as("路由刷新成 zone 2 的那台 gate").isEqualTo(inZone2);
+    }
+
     @Test
     void 幂等路径签票失败_摘除观众并关直连_回1003() {
         BattleTickets real = BattleTickets.ofUtf8(RoomHarness.SECRET);

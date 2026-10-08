@@ -11,6 +11,7 @@ import com.game.api.asset.SceneAssetEndpoint;
 import com.game.api.proto.SceneBattleCall;
 import com.game.api.proto.SceneBattleReply;
 import com.game.api.proto.SceneBattleStatus;
+import com.game.api.proto.SceneNodeInfo;
 import com.game.api.proto.SettlementDisposition;
 import com.game.battle.outbox.OutboxMetrics.Delivery;
 import com.game.battle.outbox.OutboxMetrics.SettlementEvent;
@@ -23,7 +24,11 @@ import com.game.battle.testing.RecordingSceneTransport;
 import com.game.battle.testing.RecordingSceneTransport.Sent;
 import com.game.battle.testing.Scripted;
 import com.game.discovery.battle.BattleRedis;
+import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
+import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
+import com.game.discovery.location.SceneAssetLocator;
 import com.game.discovery.location.SceneAssetLocator.ResolveResult;
+import com.game.discovery.proto.PlayerLocation;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleSettlementEvent;
@@ -31,10 +36,13 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.DefaultEventLoop;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -938,6 +946,111 @@ class SettlementOutboxTest {
         round();
         assertThat(outbox.describe()).containsExactly(key(P + 1, B) + "#1", key(P + 2, B) + "#1");
         assertThat(journal.starting("deliver:")).endsWith("deliver:" + key(P + 1, B) + "@scene-4#1");
+    }
+
+    // ================================================================== 同号节点跨 zone（spectate-spec §2.7 的 Z7、§2.8）
+
+    /**
+     * 两个 zone 各有一台 1 号 scene 的台子：假定位器换成<b>真的</b> {@link SceneAssetLocator}（位置记录与 scene 目录用内存表，记下每次查目录的
+     * {@code zone/节点号}），发件箱其余部分照旧。钉的是「结算的投递目标 = 按位置记录的 (zone, 节点号) 查出来的那台」：快照路由里的节点号不参与寻址；
+     * 只按节点号找会投到另一个 zone 的同号节点，实例过滤让它<b>丢而不是错</b>，症状是那名玩家的战斗锁停到 TTL。
+     */
+    private final class TwoZones {
+        final Map<Long, HolderRead> holders = new HashMap<>();
+        final Map<String, SceneNodeInfo> nodes = new HashMap<>();
+        final List<String> lookups = new ArrayList<>();
+        final SettlementOutbox outbox;
+
+        TwoZones() {
+            nodes.put("1/1", node(1, "scene-z1", "10.0.1.1", 21100));
+            nodes.put("2/1", node(2, "scene-z2", "10.0.2.1", 21110));
+            SceneAssetLocator real = new SceneAssetLocator(
+                    id -> CompletableFuture.completedFuture(holders.getOrDefault(id, new HolderRead(LocationStatus.MISSING, null, null))),
+                    (zoneId, nodeId) -> {
+                        lookups.add(zoneId + "/" + nodeId);
+                        return CompletableFuture.completedFuture(Optional.ofNullable(nodes.get(zoneId + "/" + nodeId)));
+                    }, null);
+            outbox = new SettlementOutbox(scheduler, store, real::resolveAsync, transport::applySettlement, metrics, scheduler::nowMs);
+        }
+
+        /** 位置记录：在线，在某个 zone 的 1 号 scene 上。 */
+        void online(long playerId, int zoneId) {
+            holders.put(playerId, new HolderRead(LocationStatus.ONLINE, PlayerLocation.newBuilder().setPlayerId(playerId).setZoneId(zoneId)
+                    .setSceneNodeId(1).setSceneId(1001).setOwnerEpoch(5).build(), null));
+        }
+
+        /** 房间调一次结算端口：快照路由一律写「zone 1 的 1 号」（开局时的位置；之后玩家在哪由位置记录说了算）。 */
+        void dispatch(long playerId) {
+            outbox.dispatch(BattleRouting.newBuilder().setZoneId(1).setSceneNodeId(1).setSceneInstanceId("scene-z1").setGateNodeId(1)
+                    .setGateInstanceId("gate-z1").setSessionId((1 << 17) | 1).build(), playerId, settlement(playerId, B));
+            scheduler.runPending();
+        }
+
+        private static SceneNodeInfo node(int zoneId, String instance, String host, int port) {
+            return SceneNodeInfo.newBuilder().setZoneId(zoneId).setNodeId(1).setInstanceId(instance).setRpcHost(host).setRpcPort(port).build();
+        }
+    }
+
+    private static final SceneAssetEndpoint Z1_NODE_1 = new SceneAssetEndpoint(1, 1, "scene-z1", "10.0.1.1", 21100);
+    private static final SceneAssetEndpoint Z2_NODE_1 = new SceneAssetEndpoint(2, 1, "scene-z2", "10.0.2.1", 21110);
+
+    @Test
+    void 两个zone各有1号scene_首投发往位置记录所在zone的那台_快照路由里的节点号不参与寻址() {
+        TwoZones zones = new TwoZones();
+        zones.online(P, 1);
+        zones.online(P + 1, 2);
+
+        zones.dispatch(P);
+        zones.dispatch(P + 1);
+
+        assertThat(zones.lookups).as("各按自己位置记录的 zone 查目录").containsExactly("1/1", "2/1");
+        assertThat(transport.sent).extracting(Sent::endpoint).containsExactly(Z1_NODE_1, Z2_NODE_1);
+        assertThat(transport.sent).extracting(s -> s.call().getTargetInstanceId()).containsExactly("scene-z1", "scene-z2");
+        assertThat(transport.sent).extracting(s -> s.call().getPlayerId()).containsExactly(P, P + 1);
+        assertThat(journal.starting("deliver:")).containsExactly("deliver:" + key(P, B) + "@scene-z1#0", "deliver:" + key(P + 1, B) + "@scene-z2#0");
+    }
+
+    @Test
+    void 重投时玩家已换到另一个zone的同号节点_按新的位置记录投过去_没动的那位照旧() {
+        TwoZones zones = new TwoZones();
+        zones.online(P, 1);
+        zones.online(P + 1, 2);
+        zones.dispatch(P);
+        zones.dispatch(P + 1);
+        // 节点号没变（都是 1），zone 变了：P + 1 从 zone 2 的 1 号换到了 zone 1 的 1 号
+        zones.online(P + 1, 1);
+        zones.lookups.clear();
+        int before = transport.sent.size();
+
+        round();
+
+        assertThat(zones.lookups).containsExactly("1/1", "1/1");
+        List<Sent> resent = transport.sent.subList(before, transport.sent.size());
+        assertThat(resent).extracting(Sent::endpoint).containsExactly(Z1_NODE_1, Z1_NODE_1);
+        assertThat(resent).extracting(s -> s.call().getPlayerId()).containsExactly(P, P + 1);
+        assertThat(resent).extracting(s -> s.call().getTargetInstanceId()).as("目标实例跟着定位结果走，不是上一次的 scene-z2")
+                .containsExactly("scene-z1", "scene-z1");
+        assertThat(resent).extracting(s -> s.call().getAttempt()).containsExactly(1, 1);
+    }
+
+    @Test
+    void zone2的1号从目录消失_zone1的1号还在_zone2玩家这一轮无目标_不投给zone1的同号节点() {
+        TwoZones zones = new TwoZones();
+        zones.online(P, 2);
+        zones.nodes.remove("2/1");
+
+        zones.dispatch(P);
+
+        assertThat(zones.lookups).containsExactly("2/1");
+        assertThat(transport.sent).as("首投解析不到：这次不投，照常登记").isEmpty();
+        assertThat(zones.outbox.describe()).containsExactly(key(P, B) + "#0");
+
+        round();
+
+        assertThat(zones.lookups).as("重投那一轮查的仍是 zone 2").containsExactly("2/1", "2/1");
+        assertThat(transport.sent).as("zone 1 的 1 号不是他的持有者").isEmpty();
+        assertThat(journal.starting("superseded?:")).as("无目标的轮另跑已取代判定").containsExactly("superseded?:" + key(P, B));
+        assertThat(zones.outbox.describe()).containsExactly(key(P, B) + "#1");
     }
 
     @Test
