@@ -129,7 +129,7 @@ class MatchMetricsTest {
                 assertThat(count("xm.match.activity.battles", "kind", kind, "result", result)).isZero();
             }
         }
-        for (String outcome : List.of("applied", "duplicate", "ignored", "error", "decode_error")) {
+        for (String outcome : List.of("applied", "duplicate", "ignored", "error", "decode_error", "rejected")) {
             assertThat(count("xm.match.rating.updates", "mode", "MATCH_MODE_1V1", "outcome", outcome)).isZero();
             assertThat(count("xm.match.rating.updates", "mode", "MATCH_MODE_5V5", "outcome", outcome)).isZero();
         }
@@ -259,6 +259,7 @@ class MatchMetricsTest {
         metrics.ratingUpdate(3, RatingOutcome.APPLIED);
         metrics.ratingUpdate(5, RatingOutcome.IGNORED);
         metrics.ratingUpdate(-1, RatingOutcome.DECODE_ERROR);
+        metrics.ratingUpdate(1, RatingOutcome.REJECTED);
         metrics.ratingRoundCapDraw(1);
         metrics.ratingConsumerPaused(true);
         metrics.leaseLost(true);
@@ -278,6 +279,7 @@ class MatchMetricsTest {
         assertThat(count("xm.match.rating.updates", "mode", "MATCH_MODE_1V1", "outcome", "applied")).isEqualTo(1);
         assertThat(count("xm.match.rating.updates", "mode", "MATCH_MODE_PVE_TEAM", "outcome", "ignored")).isEqualTo(1);
         assertThat(count("xm.match.rating.updates", "mode", "unknown", "outcome", "decode_error")).isEqualTo(1);
+        assertThat(count("xm.match.rating.updates", "mode", "MATCH_MODE_5V5", "outcome", "rejected")).as("被数据库拒绝而永久跳过的局").isEqualTo(1);
         assertThat(count("xm.match.rating.round.cap.draws", "mode", "MATCH_MODE_5V5")).isEqualTo(1);
         assertThat(meters.get("xm.match.rating.consumer.paused").gauge().value()).isEqualTo(1);
         assertThat(meters.get("xm.match.lease.lost").gauge().value()).isEqualTo(1);

@@ -37,6 +37,8 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -67,12 +69,19 @@ class ChallengeServiceTest {
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
     /** 推送与开局的先后（「先推 154 再 gather」靠它断言）。 */
     private final List<String> events = new CopyOnWriteArrayList<>();
+    /** 每条推送是在哪条线程上发起的：{@code "<玩家号>@<线程名>"}，按发起顺序。 */
+    private final List<String> pushThreads = new CopyOnWriteArrayList<>();
     private final AtomicInteger nonceSeq = new AtomicInteger();
     private final ChallengeService service = service(store);
 
     private ChallengeService service(ChallengeStore backing) {
+        return service(backing, Runnable::run);
+    }
+
+    private ChallengeService service(ChallengeStore backing, Executor pushExecutor) {
         PlayerPusher pusher = (playerId, content) -> {
             events.add("push:" + playerId);
+            pushThreads.add(playerId + "@" + Thread.currentThread().getName());
             return pushes.push(playerId, content);
         };
         GatherLauncher launcher = new GatherLauncher() {
@@ -92,7 +101,7 @@ class ChallengeServiceTest {
                 return gather.awaitIdle(timeout);
             }
         };
-        return new ChallengeService(players, backing, ids, pusher, launcher, metrics, Runnable::run, TTL_MS, INVITE_ID, RESULT_ID,
+        return new ChallengeService(players, backing, ids, pusher, launcher, metrics, pushExecutor, TTL_MS, INVITE_ID, RESULT_ID,
                 () -> "nonce-" + nonceSeq.incrementAndGet());
     }
 
@@ -578,6 +587,135 @@ class ChallengeServiceTest {
         assertThat(result(pushes.sent.get(1)).getAccepted()).isTrue();
         assertThat(result(pushes.sent.get(2)).getAccepted()).isFalse();
         assertThat(result(pushes.sent.get(3)).getAccepted()).isFalse();
+    }
+
+    // ---------------------------------------------------------------- 154 true 与 154 false 的先后（gather 不经 I/O 就失败的那几条路）
+
+    @Test
+    void 应答_开局当场失败_两条154true都有结局之前不发false_放行后才发_发起者在前() throws Exception {
+        long id = invited(0);
+        pushes.hold();
+        gather.permits(0); // 拿不到在途许可：gather 不做任何 I/O 就失败（发号租约无效时同理）
+
+        assertThat(respond(B, id, true).hasErrorMessage()).isFalse();
+
+        assertThat(gather.futures.get(0)).as("gather 已经失败了").isCompleted();
+        assertThat(pushes.sent).as("两条 154 true 还在路上：false 不许抢到前面（否则客户端最后看到的是 true，却等不到 177）").hasSize(2);
+        assertThat(events).containsExactly("push:1001", "push:1002", "launch");
+
+        pushes.complete(0, PlayerPushes.Outcome.SENT);
+        assertThat(pushes.sent).as("只有发起者那条有了结局：继续等应答者那条").hasSize(2);
+
+        pushes.complete(1, PlayerPushes.Outcome.SENT);
+        assertThat(pushes.sent).extracting(RecordingPushes.Pushed::playerId).containsExactly(A, B, A, B);
+        assertThat(result(pushes.sent.get(0)).getAccepted()).isTrue();
+        assertThat(result(pushes.sent.get(1)).getAccepted()).isTrue();
+        assertThat(result(pushes.sent.get(2))).isEqualTo(ChallengeResultS2C.newBuilder().setChallengeId(id).setAccepted(false).setResponderId(B).build());
+        assertThat(result(pushes.sent.get(3))).isEqualTo(ChallengeResultS2C.newBuilder().setChallengeId(id).setAccepted(false).setResponderId(B).build());
+        assertThat(events).containsExactly("push:1001", "push:1002", "launch", "push:1001", "push:1002");
+    }
+
+    @Test
+    void 应答_名单不合法的当场失败_同样等两条154true有了结局才发false() throws Exception {
+        store.putRecord(8001, new ChallengeRecord(B, B, 0, clock.peekMs() + TTL_MS), 30_000);
+        pushes.hold();
+
+        assertThat(respond(B, 8001, true).hasErrorMessage()).isFalse();
+
+        assertThat(gather.plans).as("名单 [B, B] 不合法：没有交给开局管线").isEmpty();
+        assertThat(pushes.sent).as("失败是在调用线程上当场发现的，false 也不许抢先").hasSize(2);
+
+        pushes.complete(1, PlayerPushes.Outcome.SENT);
+        assertThat(pushes.sent).hasSize(2);
+        pushes.complete(0, PlayerPushes.Outcome.SENT);
+
+        assertThat(pushes.sent).hasSize(4);
+        assertThat(result(pushes.sent.get(2)).getAccepted()).isFalse();
+        assertThat(result(pushes.sent.get(3)).getAccepted()).isFalse();
+    }
+
+    @Test
+    void 应答_154true推送异常完成或没人收_也算有了结局_开局失败后false照发() throws Exception {
+        long id = invited(0);
+        pushes.hold();
+        gather.nextResult(GatherResult.failed(GatherOutcome.INTERNAL, 0));
+
+        assertThat(respond(B, id, true).hasErrorMessage()).isFalse();
+        assertThat(pushes.sent).hasSize(2);
+
+        pushes.futures.get(0).completeExceptionally(new IllegalStateException("注入的故障: Redis 命令超时"));
+        pushes.complete(1, PlayerPushes.Outcome.GATE_UNREACHABLE);
+
+        assertThat(pushes.sent).as("true 没推到不能把 false 也吃掉").extracting(RecordingPushes.Pushed::playerId).containsExactly(A, B, A, B);
+        assertThat(result(pushes.sent.get(2)).getAccepted()).isFalse();
+        assertThat(result(pushes.sent.get(3)).getAccepted()).isFalse();
+        assertThat(pushed("154", "error")).isEqualTo(1);
+        assertThat(pushed("154", "gate_unreachable")).isEqualTo(1);
+    }
+
+    @Test
+    void 应答_开局成功_两条154true迟迟没有结局也不会补推false() {
+        long id = invited(0);
+        pushes.hold();
+
+        assertThat(respond(B, id, true).hasErrorMessage()).isFalse();
+        pushes.complete(0, PlayerPushes.Outcome.SENT).complete(1, PlayerPushes.Outcome.SENT);
+
+        assertThat(gather.plans).hasSize(1);
+        assertThat(pushes.sent).as("开局成功：只有两条 true").hasSize(2);
+    }
+
+    /**
+     * 真的 {@code match-push}（只有 2 条线程）：等 154 true 必须是在 future 上接续，不能占着线程等——true 的结局本身要经这个执行器计数之后才算数，
+     * 占着线程等的话，同时失败的切磋一多于线程数就全部卡死，false 永远发不出去。
+     */
+    @Test
+    void 应答_多局同时开局失败_等154true不占match_push的线程_全部false都能发出_各自排在自己的true之后() throws Exception {
+        long p4 = 1004;
+        long p5 = 1005;
+        long p6 = 1006;
+        players.online(p4, 1, 7).online(p5, 1, 7).online(p6, 1, 7);
+        try (MatchPushExecutor pushExecutor = new MatchPushExecutor()) {
+            ChallengeService concurrent = service(store, pushExecutor);
+            long[][] pairs = {{A, B}, {C, p4}, {p5, p6}};
+            long[] challengeIds = new long[pairs.length];
+            for (int i = 0; i < pairs.length; i++) {
+                challengeIds[i] = concurrent.challenge(session(pairs[i][0]),
+                        ChallengePlayerRequest.newBuilder().setTargetPlayerId(pairs[i][1]).build(), d()).getChallengeId();
+                assertThat(challengeIds[i]).isNotZero();
+            }
+            pushes.sent.clear();
+            pushes.futures.clear();
+            pushThreads.clear();
+            pushes.hold();
+            gather.permits(0);
+
+            for (int i = 0; i < pairs.length; i++) {
+                RespondChallengeRequest accept = RespondChallengeRequest.newBuilder().setChallengeId(challengeIds[i]).setAccept(true).build();
+                assertThat(concurrent.respond(session(pairs[i][1]), accept, d()).hasErrorMessage()).isFalse();
+            }
+            assertThat(pushes.sent).as("三局都已失败，六条 true 都还没有结局").hasSize(6);
+            for (int i = 0; i < 6; i++) {
+                pushes.complete(i, PlayerPushes.Outcome.SENT);
+            }
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (pushes.sent.size() < 12 && System.nanoTime() < deadline) {
+                TimeUnit.MILLISECONDS.sleep(10);
+            }
+            assertThat(pushes.sent).as("六条 false 全部发出（match-push 没有被等待占死）").hasSize(12);
+            for (long[] pair : pairs) {
+                for (long playerId : pair) {
+                    List<RecordingPushes.Pushed> toPlayer = pushes.sentTo(playerId);
+                    assertThat(toPlayer).hasSize(2);
+                    assertThat(result(toPlayer.get(0)).getAccepted()).as("player %d 先收到 true", playerId).isTrue();
+                    assertThat(result(toPlayer.get(1)).getAccepted()).as("player %d 后收到 false", playerId).isFalse();
+                    List<String> threads = pushThreads.stream().filter(t -> t.startsWith(playerId + "@")).toList();
+                    assertThat(threads.get(0)).as("true 在请求的调用线程上发起").isEqualTo(playerId + "@" + Thread.currentThread().getName());
+                    assertThat(threads.get(1)).as("false 在 match-push 上发起").startsWith(playerId + "@" + MatchPushExecutor.NAME + "-");
+                }
+            }
+        }
     }
 
     @Test

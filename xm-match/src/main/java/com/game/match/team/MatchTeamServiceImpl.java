@@ -51,7 +51,7 @@ import org.slf4j.LoggerFactory;
  *       判定先后不变：人数先于成员、成员按名单顺序；租约放在最后，只拦「本来会放行」的请求（不让必败的开战先加锁，§9.8），不改变其它拒绝的可见结果。</li>
  *   <li>{@link #createTeamTickets}：按调用方给的票号原子建全员的 matched 票。冲突 → {@code FAILED} + 第一个冲突者；建票调用出错（结局不明）→
  *       独立预算回滚后 {@code FAILED} + {@code roster[0]}（与基线 Redis 故障时最常见的可见结果逐字节相同，Q27）。</li>
- *   <li>{@link #releaseTeamTickets}：按票号删，幂等。</li>
+ *   <li>{@link #releaseTeamTickets}：按票号删，幂等；用自己的 3 s 预算，不看调用方的（它来退票时预算往往已经见底）。</li>
  *   <li>{@link #runTeamGather}：名单原序、失败全员删票；future 在 gather 结束时完成，不占工作线程。</li>
  * </ul>
  *
@@ -60,8 +60,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>读战斗锁出错</b>在这里映射成 {@code MEMBER_IN_BATTLE}（同基线 {@code tsvc.go:429-435}「按战斗中处理」）；活动入口映射成 INTERNAL，别抄混。
  *
- * <p><b>线程</b>：前三个方法在 Dubbo 线程上只取截止（{@code xm-budget-ms} 附件必须在这条线程上同步读）并投到 {@code match-worker}；
- * 工作池拒收或轮到执行时预算已用完，按各方法的过载口径回，不让调用悬着。{@code runTeamGather} 在 Dubbo 线程上直接交给开局管线（不阻塞）。
+ * <p><b>线程</b>：前两个方法在 Dubbo 线程上取截止（{@code xm-budget-ms} 附件必须在这条线程上同步读）并投到 {@code match-worker}；
+ * 工作池拒收或轮到执行时预算已用完，按各方法的过载口径回，不让调用悬着。{@code releaseTeamTickets} 同样投到工作池，但不看调用方的预算
+ * （排了多久都照删，只有工作池拒收才不删）。{@code runTeamGather} 在 Dubbo 线程上直接交给开局管线（不阻塞）。
  * 业务结论全部在应答消息里；只有 {@code releaseTeamTickets}（应答是 Empty）用 future 异常完成表示没删成。线程安全，无可变状态。
  */
 @DubboService(group = DubboGroups.MATCH)
@@ -132,14 +133,19 @@ public class MatchTeamServiceImpl implements MatchTeamService {
                 });
     }
 
+    /**
+     * 退票用<b>独立的</b> {@value MatchBudgets#TICKET_ROLLBACK_BUDGET_MS} ms 预算，从出队执行的那一刻起算，<b>不沿用调用方的预算</b>
+     * （不读 {@code xm-budget-ms}）：调用方是在建票结果不明之后来退票的，它那一跳的预算（至多 3 s）可能正好在本进程的工作队列里耗尽——
+     * 沿用的话存储会当场拒发，票要留到 matched TTL（42–66 s）才自灭，其间全员再排一律 16001。删票带票号做 CAS、幂等，
+     * 调用方已经放弃之后才删成也只有好处；代价是工作线程为一个已放弃的调用方至多多阻塞 3 s。与 {@link GroupTickets#rollback} 同一个口径。
+     */
     @Override
     public CompletableFuture<Empty> releaseTeamTickets(TeamTicketsRelease request) {
-        Deadline d = MatchRpcAttachments.deadlineFromCall(budgetMs);
         CompletableFuture<Empty> reply = new CompletableFuture<>();
         try {
             workers.execute(() -> {
                 try {
-                    release(request, d);
+                    release(request, Deadline.after(MatchBudgets.TICKET_ROLLBACK_BUDGET_MS));
                     metrics.teamCall(TeamMethod.RELEASE_TEAM_TICKETS, TeamCallResult.OK);
                     reply.complete(Empty.getDefaultInstance());
                 } catch (RuntimeException e) {

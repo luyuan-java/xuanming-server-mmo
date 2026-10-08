@@ -60,7 +60,7 @@ public class RatingConfiguration {
         return new JdbcRatingReader(ratingStore);
     }
 
-    /** 入账标记的保留期清理（每小时一轮，7 天）。 */
+    /** 入账标记的保留期清理（每小时一轮，保留 {@link RatingCleanup#RETENTION}）。{@code xm.match.rating.enabled = false} 时也照常清。 */
     @Bean(initMethod = "start", destroyMethod = "close")
     public RatingCleanup ratingCleanup(RatingStore ratingStore) {
         return new RatingCleanup(ratingStore, System::currentTimeMillis);

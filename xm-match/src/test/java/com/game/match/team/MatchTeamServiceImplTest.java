@@ -16,6 +16,7 @@ import com.game.api.proto.TeamTicketsStatus;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.match.MatchProperties;
+import com.game.match.dispatch.MatchWorkerPool;
 import com.game.match.dispatch.MatchWorkers;
 import com.game.match.gather.FailPolicy;
 import com.game.match.gather.GatherOutcome;
@@ -34,7 +35,9 @@ import com.game.match.testing.FakePlayerStatus;
 import com.game.match.testing.FakeTicketHealing;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
+import com.game.match.ticket.ForwardingTicketStore;
 import com.game.match.ticket.Ticket;
+import com.game.match.ticket.TicketRef;
 import com.game.match.ticket.TicketState;
 import com.game.match.ticket.TicketStore;
 import com.game.proto.Empty;
@@ -42,6 +45,7 @@ import com.game.proto.match.MatchMode;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
@@ -49,6 +53,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -408,6 +413,50 @@ class MatchTeamServiceImplTest {
         assertThat(count("createTeamTickets", "overloaded")).isEqualTo(2);
     }
 
+    /**
+     * xm-team 带来的预算是「这一跳的超时」（生产是 min(3 s, 剩余请求预算)），比本进程自己的整请求预算（4.5 s）短：截止必须按附件定、
+     * 从受理时刻起算、把排队时间算进去——否则 xm-team 那边已经超时放弃（并且退完了票），这边才出队把票建出来，全员的 matched 票留到 TTL。
+     * 走真的工作池（单线程、被占住），同时排着两条：预算不够的那条出队后不执行，预算够的那条照常建成（证明差别只在预算，不是排队本身）。
+     */
+    @Test
+    void 建票_在真的工作池里排队超过了附件给的预算_EXPIRED_什么都没写_同样排着但预算够的那条照常建成() throws Exception {
+        try (MatchWorkerPool pool = new MatchWorkerPool(1, 8, Duration.ofSeconds(2))) {
+            MatchTeamServiceImpl pooled = service(pool, precheck, tickets);
+            CountDownLatch release = new CountDownLatch(1);
+            CountDownLatch occupied = new CountDownLatch(1);
+            pool.execute(() -> {
+                occupied.countDown();
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertThat(occupied.await(5, TimeUnit.SECONDS)).as("唯一的工作线程已被占住").isTrue();
+
+            RpcContext.getServerAttachment().setAttachment(MatchRpcAttachments.BUDGET_MS, "200");
+            CompletableFuture<TeamTicketsReply> starved = pooled.createTeamTickets(ticketsRequest(A, B).build());
+            RpcContext.getServerAttachment().setAttachment(MatchRpcAttachments.BUDGET_MS, "4000");
+            CompletableFuture<TeamTicketsReply> patient = pooled.createTeamTickets(ticketsRequest(C).setTeamId(TEAM + 1).build());
+            assertThat(starved).as("进了队列，还没轮到").isNotDone();
+            assertThat(patient).isNotDone();
+            TimeUnit.MILLISECONDS.sleep(400); // 两条都排了 400 ms：超过第一条的 200 ms，远没到第二条的 4 s
+            release.countDown();
+
+            TeamTicketsReply expired = get(starved);
+            assertThat(expired.getStatus()).as("不回 FAILED：那会让客户端看到 4026[队长]").isEqualTo(TeamTicketsStatus.TEAM_TICKETS_EXPIRED);
+            assertThat(expired.getFailedPlayerId()).isZero();
+            assertThat(get(patient).getStatus()).isEqualTo(TeamTicketsStatus.TEAM_TICKETS_CREATED);
+            assertThat(tickets.ticketOf(A)).as("超预算的那条什么都没写").isEmpty();
+            assertThat(tickets.ticketOf(B)).isEmpty();
+            assertThat(tickets.ticketOf(C)).isPresent();
+            assertThat(tickets.calls).as("超预算的那条没有碰过存储").containsExactly("createGroup([1003])");
+            assertThat(count("createTeamTickets", "overloaded")).isEqualTo(1);
+            assertThat(count("createTeamTickets", "created")).isEqualTo(1);
+            assertThat(count("createTeamTickets", "expired")).as("「到达时已过期」是另一个出口，这里没走到").isZero();
+        }
+    }
+
     @Test
     void 建票_发号租约无效_不建票_按没有执行回() {
         leaseValid.set(false);
@@ -478,6 +527,61 @@ class MatchTeamServiceImplTest {
                 .hasCauseInstanceOf(RejectedExecutionException.class);
         assertThat(count("releaseTeamTickets", "error")).isEqualTo(1);
         assertThat(count("releaseTeamTickets", "overloaded")).isEqualTo(1);
+    }
+
+    /**
+     * 退票是 xm-team 在建票结果不明之后发来的补偿，它那一跳的预算（至多 3 s）可能正好在本进程的工作队列里耗尽。沿用那份预算的话，
+     * 真的存储会当场拒发（{@code RedissonTicketStore}：截止已过不发命令），票要留到 matched TTL 才自灭。这里的存储替身照真存储那样拒收过期的截止。
+     */
+    @Test
+    void 释放_在工作队列里等过了调用方给的预算_出队后照样删_用的是独立的3秒预算() throws Exception {
+        service.create(ticketsRequest(A, B).build(), d());
+        tickets.calls.clear();
+        List<Long> remainingAtDelete = new CopyOnWriteArrayList<>();
+        Deque<Runnable> queued = new ArrayDeque<>();
+        MatchTeamServiceImpl slow = service(queued::add, precheck, refusingExpiredDeletes(remainingAtDelete));
+        RpcContext.getServerAttachment().setAttachment(MatchRpcAttachments.BUDGET_MS, "60");
+
+        CompletableFuture<Empty> waiting = slow.releaseTeamTickets(
+                TeamTicketsRelease.newBuilder().putTicketIds(A, "t-1001").putTicketIds(B, "t-1002").build());
+        assertThat(waiting).as("还在队列里").isNotDone();
+        TimeUnit.MILLISECONDS.sleep(120); // 调用方给的 60 ms 在队列里耗尽了
+        queued.remove().run();
+
+        assertThat(get(waiting)).isEqualTo(Empty.getDefaultInstance());
+        assertThat(tickets.ticketCount()).as("两张票都删掉了，不用等 matched TTL").isZero();
+        assertThat(tickets.calls).containsExactly("deleteGroup([1001, 1002])");
+        assertThat(remainingAtDelete).singleElement().satisfies(remaining ->
+                assertThat(remaining).as("独立的 3 s 预算，从出队那一刻起算（不是调用方那份已经耗尽的 60 ms）").isBetween(2_000L, 3_000L));
+        assertThat(count("releaseTeamTickets", "ok")).isEqualTo(1);
+        assertThat(count("releaseTeamTickets", "error")).isZero();
+    }
+
+    @Test
+    void 释放_调用方带来的预算是0也照删_不看附件() throws Exception {
+        service.create(ticketsRequest(A).build(), d());
+        List<Long> remainingAtDelete = new CopyOnWriteArrayList<>();
+        MatchTeamServiceImpl strict = service(inline, precheck, refusingExpiredDeletes(remainingAtDelete));
+        RpcContext.getServerAttachment().setAttachment(MatchRpcAttachments.BUDGET_MS, "0");
+
+        assertThat(get(strict.releaseTeamTickets(TeamTicketsRelease.newBuilder().putTicketIds(A, "t-1001").build()))).isEqualTo(Empty.getDefaultInstance());
+
+        assertThat(tickets.ticketOf(A)).isEmpty();
+        assertThat(remainingAtDelete).singleElement().satisfies(remaining -> assertThat(remaining).isBetween(2_000L, 3_000L));
+    }
+
+    /** 像真的存储那样对待截止的票据存储：删一组票时截止已过就不发、直接抛依赖异常；顺带记下每次删票那一刻截止还剩多少毫秒。 */
+    private TicketStore refusingExpiredDeletes(List<Long> remainingAtDelete) {
+        return new ForwardingTicketStore(tickets) {
+            @Override
+            public int deleteGroup(List<TicketRef> refs, Deadline deadline) {
+                remainingAtDelete.add(deadline.remainingMillis());
+                if (deadline.expired()) {
+                    throw new Deadline.DependencyException("删票 之前请求预算已用完（没有发出）");
+                }
+                return super.deleteGroup(refs, deadline);
+            }
+        };
     }
 
     // ================================================================ runTeamGather

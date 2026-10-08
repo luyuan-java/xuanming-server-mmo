@@ -5,9 +5,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.proto.BattleNodeInfo;
+import com.game.common.deadline.Deadline;
+import com.game.match.metrics.MatchMetrics;
+import com.game.match.metrics.MetricLabels;
 import com.game.match.proto.BattlePlacement;
+import com.game.match.ticket.ForwardingTicketStore;
 import com.game.match.ticket.QueueRef;
+import com.game.match.ticket.TicketRef;
 import com.game.match.ticket.TicketState;
+import io.micrometer.core.instrument.Meter;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -183,6 +194,109 @@ class VirtualThreadGatherLauncherTest {
         assertThat(result.outcome()).isEqualTo(GatherOutcome.INTERNAL);
         assertThat(launcher.availablePermits()).isEqualTo(2);
         assertThat(f.count("xm.match.gathers", "mode", "MATCH_MODE_PVE_SOLO", "outcome", "internal")).isEqualTo(1.0);
+    }
+
+    // ---------------------------------------------------------------- Error（NoClassDefFoundError、StackOverflowError、断言失败……）也得收场
+
+    /** 目录读口：{@code broken} 为真时选节点抛 Error，其余照常委托给夹具的目录。 */
+    private BattleNodes directoryThrowingError(AtomicBoolean broken) {
+        return new BattleNodes() {
+            @Override
+            public Optional<BattleNodeInfo> pickRandom(Set<String> excludeKeys) {
+                if (broken.get()) {
+                    throw new AssertionError("注入的故障: 管线里抛出 Error");
+                }
+                return f.battleNodes.pickRandom(excludeKeys);
+            }
+
+            @Override
+            public Census census() {
+                return f.battleNodes.census();
+            }
+
+            @Override
+            public Lookup lookup(int nodeId, String instanceId) {
+                return f.battleNodes.lookup(nodeId, instanceId);
+            }
+        };
+    }
+
+    @Test
+    void 管线抛出Error_许可照还_future以internal完成_在途计数归零_唯一的许可没有漏掉() throws Exception {
+        AtomicBoolean broken = new AtomicBoolean(true);
+        f.battleNodesPort = directoryThrowingError(broken);
+        VirtualThreadGatherLauncher launcher = new VirtualThreadGatherLauncher(f.pipeline(), f.metrics, 1);
+
+        CompletableFuture<GatherResult> future = launcher.launch(f.solo(A));
+        GatherResult result = get(future);
+
+        assertThat(future).as("契约：永不异常完成、一定会完成").isCompleted().isNotCompletedExceptionally();
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.INTERNAL);
+        assertThat(result.battleId()).isZero();
+        assertThat(launcher.availablePermits()).as("许可在 future 完成之前就还了").isEqualTo(1);
+        assertThat(launcher.awaitIdle(Duration.ofSeconds(5))).as("在途计数已减：停机不会白等满 10 s").isTrue();
+        assertThat(launcher.inflight()).isZero();
+        assertThat(f.count("xm.match.gathers", "mode", "MATCH_MODE_PVE_SOLO", "outcome", "internal")).isEqualTo(1.0);
+
+        broken.set(false);
+        assertThat(get(launcher.launch(f.solo(B))).ok()).as("上限只有 1：许可要是漏了，这一局就是 overloaded").isTrue();
+        assertThat(launcher.availablePermits()).isEqualTo(1);
+    }
+
+    @Test
+    void 过载收尾里抛出Error_future以overloaded完成_不多还许可_在途的那一局不受影响() throws Exception {
+        Gate gate = new Gate();
+        f.hooksPort = gate;
+        f.ticketPort = new ForwardingTicketStore(f.tickets) {
+            @Override
+            public int deleteGroup(List<TicketRef> tickets, Deadline d) {
+                if (tickets.stream().anyMatch(ticket -> ticket.playerId() == 3001)) {
+                    throw new AssertionError("注入的故障: 过载收尾里抛出 Error");
+                }
+                return super.deleteGroup(tickets, d);
+            }
+        };
+        VirtualThreadGatherLauncher launcher = new VirtualThreadGatherLauncher(f.pipeline(), f.metrics, 1);
+        CompletableFuture<GatherResult> held = launcher.launch(f.solo(A));
+        assertThat(gate.entered.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(launcher.availablePermits()).isZero();
+
+        CompletableFuture<GatherResult> overloaded = launcher.launch(f.solo(3001));
+        GatherResult result = get(overloaded);
+
+        assertThat(overloaded).isCompleted().isNotCompletedExceptionally();
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.OVERLOADED);
+        assertThat(launcher.availablePermits()).as("没拿到许可的那一局不许多还一个").isZero();
+        assertThat(launcher.inflight()).isEqualTo(1);
+        assertThat(f.count("xm.match.gathers", "mode", "MATCH_MODE_PVE_SOLO", "outcome", "overloaded")).isEqualTo(1.0);
+
+        gate.release.countDown();
+        assertThat(get(held).ok()).isTrue();
+        assertThat(launcher.awaitIdle(Duration.ofSeconds(5))).as("两条线程的在途计数都减了").isTrue();
+        assertThat(launcher.availablePermits()).isEqualTo(1);
+    }
+
+    @Test
+    void 记指标抛出Error_future照样完成_在途计数照样减() throws Exception {
+        // 「gather 耗时」这个 Timer 第一次使用时才注册：让注册抛 Error
+        SimpleMeterRegistry broken = new SimpleMeterRegistry() {
+            @Override
+            protected Timer newTimer(Meter.Id id, DistributionStatisticConfig config, PauseDetector pauseDetector) {
+                if (id.getName().equals("xm.match.gather")) {
+                    throw new AssertionError("注入的故障: 记指标抛出 Error");
+                }
+                return super.newTimer(id, config, pauseDetector);
+            }
+        };
+        VirtualThreadGatherLauncher launcher = new VirtualThreadGatherLauncher(f.pipeline(), new MatchMetrics(broken, new MetricLabels(id -> id == 1)), 1);
+
+        CompletableFuture<GatherResult> future = launcher.launch(f.solo(A));
+        GatherResult result = get(future);
+
+        assertThat(result.ok()).as("这一局本身是成功的，结果照实给").isTrue();
+        assertThat(f.ticket(A).state()).isEqualTo(TicketState.READY);
+        assertThat(launcher.awaitIdle(Duration.ofSeconds(5))).isTrue();
+        assertThat(launcher.availablePermits()).isEqualTo(1);
     }
 
     @Test

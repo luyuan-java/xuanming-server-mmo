@@ -135,12 +135,20 @@ class JdbcRatingReaderTest {
             ran.addAll(ids);
             await(release);
             return Map.of();
-        }, 1, 4, 100);
+        }, 1, 4, 1_000);
 
-        // 第一个读占住唯一的线程；第二个读排在队列里，等到超时后被取消
+        // 第一个读占住唯一的线程；第二个读排在队列里，等到超时后被取消。等待上限给 1 s 而不是一两百毫秒：线程池的线程是用到才建的，
+        // 第一个读得在这个上限之内被接手，否则被取消的是它、随后跑起来的反而是第二个
         assertThat(reader.loadCentiOrDefault(1)).isEqualTo(150_000);
         assertThat(reader.loadCentiOrDefault(2)).isEqualTo(150_000);
+        assertThat(reader.queued()).as("第二个读还在队列里（已取消，但要等线程来取才会被丢掉）").isEqualTo(1);
         release.countDown();
+        // 等线程把队列里那一项取走，再留一点时间：它要是没被取消，这时已经查过库了
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (reader.queued() > 0 && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertThat(reader.queued()).isZero();
         Thread.sleep(200);
 
         assertThat(ran).as("排队中被取消的那次读没有真的去查库").containsExactly(1L);

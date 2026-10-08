@@ -252,10 +252,12 @@ public final class ChallengeService {
             return respondRejected(ChallengeResult.RESPONDER_BUSY, MatchTip.CHALLENGE_RESPONDER_BUSY);
         }
 
-        // 先给发起者、再给应答者推成局通知，然后才进开局管线（客户端可见的先后：154 先于 177）
-        pushResult(challengerId, challengeId, true, responderId);
-        pushResult(responderId, challengeId, true, responderId);
-        launchGather(challengeId, record.configId(), challengerId, responderId);
+        // 先给发起者、再给应答者推成局通知，然后才进开局管线（客户端可见的先后：154 先于 177）。只发起、不等它们完成；
+        // 两条的 future 留给开局失败时用：补推的 154 false 必须排在它们之后
+        CompletableFuture<PlayerPushes.Outcome> acceptedToChallenger = pushResult(challengerId, challengeId, true, responderId);
+        CompletableFuture<PlayerPushes.Outcome> acceptedToResponder = pushResult(responderId, challengeId, true, responderId);
+        launchGather(challengeId, record.configId(), challengerId, responderId,
+                CompletableFuture.allOf(acceptedToChallenger, acceptedToResponder));
 
         log.info("[challenge] 已应战，进入开局管线 challenge={} challenger={} responder={} config={}", id(challengeId), id(challengerId),
                 id(responderId), Integer.toUnsignedString(record.configId()));
@@ -265,8 +267,18 @@ public final class ChallengeService {
 
     // ================================================================ 内部
 
-    /** 异步开局（名单 [发起者, 应战者]，不带票据）；失败时已冻结的人已由管线解冻，这里只能事后给双方各再推一次 154 false。 */
-    private void launchGather(long challengeId, int configId, long challengerId, long responderId) {
+    /**
+     * 异步开局（名单 [发起者, 应战者]，不带票据）；失败时已冻结的人已由管线解冻，这里只能事后给双方各再推一次 154 false。
+     *
+     * <p><b>154 false 排在两条 154 true 之后</b>（§8.3「gather 失败再各推一次 false」；基线的推送是同步的，天然有序）：每条推送都是一条独立的
+     * 「异步查在线目录 + 异步发布」链，彼此没有先后保证；而 gather 可以不经任何 I/O 就失败（发号租约无效、在途许可用完、名单不合法），
+     * 那时 false 只比 true 晚几百微秒发起，true 的命令只要有一条被 Redis 客户端重发，false 就先到 gate——客户端最后看到的是 accepted = true，
+     * 却永远等不到 177。所以失败回调先等 {@code acceptedPushes} 结束（成功、不在线、异常完成都算结束；它在 Redis 应答之后才结束），
+     * 再在 {@code match-push} 上推 false。只是在 future 上接续，不阻塞任何线程；等待以 Redis 客户端的命令超时为界。
+     *
+     * @param acceptedPushes 两条 154 true 都有了结局（可能是异常完成）
+     */
+    private void launchGather(long challengeId, int configId, long challengerId, long responderId, CompletableFuture<Void> acceptedPushes) {
         CompletableFuture<GatherResult> launched;
         try {
             launched = gather.launch(GatherPlan.challenge(configId, challengerId, responderId));
@@ -274,21 +286,29 @@ public final class ChallengeService {
             // 记录损坏（发起者为 0 / 与应战者相同）才会到这里：名单不合法，当作开局失败
             launched = CompletableFuture.failedFuture(e);
         }
-        launched.whenCompleteAsync((result, error) -> {
+        // 这个回调在 gather 的线程（或已完成时的调用线程）上，只做接续；日志与推送都切到 match-push
+        launched.whenComplete((result, error) -> {
             if (error == null && result != null && result.ok()) {
                 return;
             }
-            log.error("[challenge] 应战后开局失败 challenge={} challenger={} responder={} outcome={}", id(challengeId), id(challengerId),
-                    id(responderId), result == null ? "error" : result.outcome().label(), error);
-            pushResult(challengerId, challengeId, false, responderId);
-            pushResult(responderId, challengeId, false, responderId);
-        }, pushExecutor);
+            // whenCompleteAsync：154 true 推送异常完成时回调照样执行（不能用 thenRun，那样推送一出错 false 就发不出去了）
+            acceptedPushes.whenCompleteAsync((ignored, pushError) -> {
+                log.error("[challenge] 应战后开局失败 challenge={} challenger={} responder={} outcome={}", id(challengeId), id(challengerId),
+                        id(responderId), result == null ? "error" : result.outcome().label(), error);
+                pushResult(challengerId, challengeId, false, responderId);
+                pushResult(responderId, challengeId, false, responderId);
+            }, pushExecutor);
+        });
     }
 
-    /** 推一条 154（尽力而为：结果只计数，不影响应答）。 */
-    private void pushResult(long toPlayerId, long challengeId, boolean accepted, long responderId) {
+    /**
+     * 推一条 154（尽力而为：结果只计数，不影响应答）。
+     *
+     * @return 这条推送有了结局之后完成（计数已做；推送异常时异常完成）。只有「接受」的两条有人用它排序，其余调用点直接丢弃
+     */
+    private CompletableFuture<PlayerPushes.Outcome> pushResult(long toPlayerId, long challengeId, boolean accepted, long responderId) {
         ChallengeResultS2C result = ChallengeResultS2C.newBuilder().setChallengeId(challengeId).setAccepted(accepted).setResponderId(responderId).build();
-        push(PushKind.RESULT, toPlayerId, resultMessageId, result, challengeId);
+        return push(PushKind.RESULT, toPlayerId, resultMessageId, result, challengeId);
     }
 
     /**

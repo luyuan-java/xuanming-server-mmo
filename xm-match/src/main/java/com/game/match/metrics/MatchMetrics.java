@@ -216,8 +216,15 @@ public final class MatchMetrics {
             TeamMethod.RELEASE_TEAM_TICKETS, List.of(TeamCallResult.OK, TeamCallResult.OVERLOADED, TeamCallResult.ERROR),
             TeamMethod.RUN_TEAM_GATHER, List.of(TeamCallResult.GATHER_OK, TeamCallResult.GATHER_FAILED));
 
-    /** 一条对局结果的入账结局（没有基线的 {@code partial}：Java 一局一笔事务）。 */
-    public enum RatingOutcome { APPLIED, DUPLICATE, IGNORED, ERROR, DECODE_ERROR }
+    /**
+     * 一条对局结果的入账结局（没有基线的 {@code partial}：Java 一局一笔事务）。
+     * <ul>
+     *   <li>{@code ERROR}：一次入账尝试失败。可恢复故障每重试一次就记一次，库抖动时会成百上千地涨，本身不代表丢了数据；</li>
+     *   <li>{@code REJECTED}：这一局被数据库判为数据错误（SQLState 22 / 23），<b>已跳过、位点已提交、永不入账</b>（完整字节在毒丸日志里）。
+     *       它与 {@code DECODE_ERROR} 是仅有的两种「一条结果被永久丢弃」，任何增量都该报警；那一次失败同时也记了一次 {@code ERROR}。</li>
+     * </ul>
+     */
+    public enum RatingOutcome { APPLIED, DUPLICATE, IGNORED, ERROR, DECODE_ERROR, REJECTED }
 
     /** dev 管理口的接口（其余路径一律 {@code other}）。 */
     public enum AdminOp { RATING, ACTIVITY_BATTLE, OTHER }

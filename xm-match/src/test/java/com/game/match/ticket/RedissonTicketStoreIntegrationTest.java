@@ -321,10 +321,11 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
     @Test
     void 票的TTL到了真的会自己消失() throws Exception {
         long a = p(1);
-        store().createMatched(a, tid(a), 4, 1, 1, 150_000, 150, d());
-        assertThat(store().read(a, d())).isPresent();
+        // 「建成之后读得到」不在这里断言：票只活 1 s，建票返回到读之间卡一下（慢机器、一次 GC）就读不到了；那条性质由契约用例钉。
+        // 这里只看建票的返回值（不依赖时间），再睡过整个 TTL 之后断言它没了——只有「至少等够」这一个方向
+        assertThat(store().createMatched(a, tid(a), 4, 1, 1, 150_000, 1_000, d())).isInstanceOf(JoinResult.Created.class);
 
-        TimeUnit.MILLISECONDS.sleep(400);
+        TimeUnit.MILLISECONDS.sleep(1_500);
 
         assertThat(store().read(a, d())).isEmpty();
         assertThat(store().createMatched(a, "t-again", 4, 1, 1, 150_000, 42_000, d())).as("过期之后可以再建").isInstanceOf(JoinResult.Created.class);

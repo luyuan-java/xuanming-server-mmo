@@ -24,6 +24,7 @@ import com.game.match.testing.InMemoryPlacementStore;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
 import com.game.match.testing.RecordingGatherHooks;
+import com.game.match.ticket.ForwardingTicketStore;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
 import com.game.match.ticket.TicketRef;
@@ -42,7 +43,9 @@ import java.util.function.LongSupplier;
 /**
  * 开局管线组件测试的台子：把 C0 的全部替身接成一条完整的管线——一个 scene 节点（zone 1 的 7 号，{@code scene-inst-a}）、battle 节点 A
  * （1 号，{@code inst-a}，已登记进目录；B 是 2 号，要用时 {@link #addBattleB()}）、内存票据与落点、手拨的 Redis 时间。
- * {@code events} 是 scene / battle / 落点 / 钩子共用的一条事件序列，断言跨组件的先后顺序用它；票据的调用序列在 {@code tickets.calls}。
+ * {@code events} 是 scene / battle / 落点 / 钩子共用的一条事件序列；票据的调用序列在 {@code tickets.calls}。这两条各管各的，
+ * <b>票据写与 scene / battle / 落点之间的先后</b>（补偿的「续期 → 取消 → 票据处置 → 删记录」、成功路径的「建房 → 置 ready → 补写落点」）
+ * 要看 {@code timeline}：它是 {@code events} 的每一条加上管线发出的每个票据写（{@code tickets.<方法>[:玩家号]}），按真实发生的先后。
  *
  * <p>公开字段里以 {@code Port} 结尾的是「交给管线的那一个」，缺省就是对应的替身；测试要注入「第 N 次调用失败」这类替身表达不了的行为时换掉它，
  * 然后再调 {@link #pipeline()}。
@@ -62,7 +65,19 @@ final class GatherFixture {
     static final NodeRpcClients.Target TARGET_A = new NodeRpcClients.Target("127.0.0.1", 21200, "inst-a");
     static final NodeRpcClients.Target TARGET_B = new NodeRpcClients.Target("127.0.0.1", 21201, "inst-b");
 
-    final List<String> events = new CopyOnWriteArrayList<>();
+    /**
+     * 完整的时间线：{@link #events} 的每一条，加上管线对票据的每个写（在调用发出的那一刻记，失败的也记）：
+     * {@code tickets.extendMatched} / {@code tickets.delete:<pid>} / {@code tickets.requeueFront} / {@code tickets.deleteGroup} /
+     * {@code tickets.markReady:<pid>}。
+     */
+    final List<String> timeline = new CopyOnWriteArrayList<>();
+    final List<String> events = new CopyOnWriteArrayList<>() {
+        @Override
+        public boolean add(String event) {
+            timeline.add(event);
+            return super.add(event);
+        }
+    };
     final ManualRedisClock clock = new ManualRedisClock();
     final InMemoryTicketStore tickets = new InMemoryTicketStore(clock);
     final FakePlayerStatus players = new FakePlayerStatus();
@@ -78,6 +93,8 @@ final class GatherFixture {
     final FixedRatingReader ratings = new FixedRatingReader();
     final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> id == 1));
+    /** 发号器整个夹具共用一个（进程里也只有一个）：每条管线各建一个的话，同一毫秒内建的两条管线会发出同一个 battle_id（2026-10-08 在 CI 上暴露）。 */
+    final Snowflake snowflake = new Snowflake(7);
 
     // ---- 可调：改完再调 pipeline()
     volatile boolean leaseValid = true;
@@ -110,13 +127,56 @@ final class GatherFixture {
         return new ScenePreparer(new SceneAssetLocator(players::holderAsync, sceneNodes, null), sceneCalls, sceneTimeout, sceneTimeout);
     }
 
-    /** 按当前的可调项组一条管线。 */
+    /** 按当前的可调项组一条管线。交给管线与补偿的票据存储外面包了一层只记账的壳（往 {@link #timeline} 里记每个写），行为不变。 */
     GatherPipeline pipeline() {
         ScenePreparer scenes = scenePreparer();
-        Compensation compensation = new Compensation(ticketPort, scenes, placementPort, metrics, QUEUED_TTL_MS, requeueBackoffMs);
-        MatchIds ids = new MatchIds(new Snowflake(7), () -> leaseValid, () -> false);
+        TicketStore recorded = new TimelineTickets(ticketPort, timeline);
+        Compensation compensation = new Compensation(recorded, scenes, placementPort, metrics, QUEUED_TTL_MS, requeueBackoffMs);
+        MatchIds ids = new MatchIds(snowflake, () -> leaseValid, () -> false);
         return new GatherPipeline(new GatherPipeline.Parts(ids, battleNodesPort, clockPort, hooksPort, ratings, scenes, battleCalls, placementPort,
-                ticketPort, compensation, metrics), fingerprintMode, READY_TTL_MS, seeds, timeouts);
+                recorded, compensation, metrics), fingerprintMode, READY_TTL_MS, seeds, timeouts);
+    }
+
+    /** 把管线会发的五种票据写记进时间线（调用发出的那一刻记，之后原样委托；委托抛异常也已经记下了）。 */
+    private static final class TimelineTickets extends ForwardingTicketStore {
+
+        private final List<String> timeline;
+
+        TimelineTickets(TicketStore delegate, List<String> timeline) {
+            super(delegate);
+            this.timeline = timeline;
+        }
+
+        @Override
+        public boolean markReady(TicketRef ticket, long battleId, long readyTtlMs, Deadline d) {
+            timeline.add("tickets.markReady:" + Long.toUnsignedString(ticket.playerId()));
+            return super.markReady(ticket, battleId, readyTtlMs, d);
+        }
+
+        @Override
+        public int extendMatched(List<TicketRef> tickets, long ttlMs, Deadline d) {
+            timeline.add("tickets.extendMatched");
+            return super.extendMatched(tickets, ttlMs, d);
+        }
+
+        @Override
+        public boolean delete(TicketRef ticket, Deadline d) {
+            timeline.add("tickets.delete:" + Long.toUnsignedString(ticket.playerId()));
+            return super.delete(ticket, d);
+        }
+
+        @Override
+        public int deleteGroup(List<TicketRef> tickets, Deadline d) {
+            timeline.add("tickets.deleteGroup");
+            return super.deleteGroup(tickets, d);
+        }
+
+        @Override
+        public int requeueFront(QueueRef queue, String requeueToken, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs,
+                                Deadline d) {
+            timeline.add("tickets.requeueFront");
+            return super.requeueFront(queue, requeueToken, survivorsInOrder, queuedTtlMs, notBeforeDelayMs, d);
+        }
     }
 
     static Deadline d() {

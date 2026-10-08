@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.MockConsumer;
@@ -22,11 +23,18 @@ import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 /**
  * 对局结果消费循环（{@code MockConsumer}；match-spec §5.3、§15.2）：坏消息跳过并提交；入账成功才提交；可恢复故障暂停、重试原记录、不跳过、不提交；
  * 数据错误写毒丸后跳过；重平衡收走分区时丢弃没提交的记录；key 不一致只打日志。
+ *
+ * <p>用例都在测试线程上直接调 {@code loop.run()}，能否返回全靠循环自己走到脚本里排的 {@code loop::stop}。循环的重试 / 暂停逻辑一旦回归
+ * （例如暂停期间不再 poll，排好的 stop 永远轮不到），就不是失败而是空转到整个 fork 超时（30 分钟），CI 上看不出是哪一条。所以类上加<b>抢占式</b>超时：
+ * 缺省的同线程模式只是到点中断测试线程，而空转的循环（{@code MockConsumer.poll(Duration.ZERO)}、处理器抛异常、记日志）不响应中断，照样挂着；
+ * {@code SEPARATE_THREAD} 把用例体放到另一条线程上跑，到点直接判这条用例失败。
  */
+@Timeout(value = 30, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class BattleResultConsumerTest {
 
     private static final String TOPIC = "xm-battle-result-g1";
@@ -111,6 +119,11 @@ class BattleResultConsumerTest {
 
     private double decodeErrors() {
         return meters.get("xm.match.rating.updates").tag("mode", "unknown").tag("outcome", "decode_error").counter().count();
+    }
+
+    /** {@code outcome="rejected"}：被数据库判为数据错误而永久跳过的局数。 */
+    private double rejected(String mode) {
+        return meters.get("xm.match.rating.updates").tag("mode", mode).tag("outcome", "rejected").counter().count();
     }
 
     private double pausedGauge() {
@@ -302,6 +315,29 @@ class BattleResultConsumerTest {
         assertThat(delays).isEmpty();
         assertThat(consumer.commits).containsExactly(committed(TP0, 1), committed(TP0, 2), committed(TP0, 3));
         assertThat(pausedGauge()).isZero();
+        assertThat(rejected("MATCH_MODE_1V1")).as("被永久丢弃的这一局有自己的计数（告警用），模式取事件里的").isEqualTo(1);
+        assertThat(rejected("MATCH_MODE_5V5")).isZero();
+        assertThat(decodeErrors()).isZero();
+    }
+
+    @Test
+    void 可恢复故障重试多少次都不计rejected_解不出的消息也不计() {
+        AtomicInteger attempts = new AtomicInteger();
+        BattleResultConsumer loop = loop(event -> {
+            if (attempts.incrementAndGet() <= 3) {
+                throw unreachable();
+            }
+        });
+        assign(List.of(TP0), record(0, 9001), record(0, 1, "bad", new byte[] {(byte) 0xFF}));
+        idlePolls(3);
+        consumer.schedulePollTask(loop::stop);
+
+        loop.run();
+
+        assertThat(attempts.get()).as("9001 失败三次后入账").isEqualTo(4);
+        assertThat(consumer.commits).containsExactly(committed(TP0, 1), committed(TP0, 2));
+        assertThat(decodeErrors()).isEqualTo(1);
+        assertThat(rejected("MATCH_MODE_1V1")).as("库抖动不是丢数据；解不出的另有 decode_error").isZero();
     }
 
     // ================================================================ 重平衡与停止

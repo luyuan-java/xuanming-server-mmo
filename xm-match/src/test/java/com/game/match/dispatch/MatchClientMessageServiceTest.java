@@ -454,16 +454,25 @@ class MatchClientMessageServiceTest {
     @Test
     void 排队超预算_轮到执行时不再调处理_按过载应答回() throws Exception {
         MatchClientMessageService service = service(1, 8, 150);
-        Business status = business.get(MatchMethods.GET_QUEUE_STATUS);
-        status.block = new CountDownLatch(1);
-        CompletableFuture<ClientReply> running = service.handle(call(MatchMethods.GET_QUEUE_STATUS));
-        assertThat(status.entered.await(5, TimeUnit.SECONDS)).isTrue();
+        // 占住唯一的工作线程用的是不带预算的裸任务：用一条带 150 ms 预算的请求去占的话，工作线程是用到才建的，
+        // 它得在 150 ms 之内被接手，慢机器上会先被判成排队超预算（本用例只留「至少等够」这一个方向的时间依赖）
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch occupied = new CountDownLatch(1);
+        pool.execute(() -> {
+            occupied.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(occupied.await(5, TimeUnit.SECONDS)).as("唯一的工作线程已被占住").isTrue();
 
         CompletableFuture<ClientReply> join = service.handle(call(MatchMethods.JOIN_QUEUE));
         CompletableFuture<ClientReply> cancel = service.handle(call(MatchMethods.CANCEL_QUEUE));
         assertThat(join).as("进了队列，还没轮到").isNotDone();
         TimeUnit.MILLISECONDS.sleep(300); // 两条都在队列里等过了 150 ms 的预算
-        status.unblock();
+        release.countDown();
 
         JoinQueueResponse joined = JoinQueueResponse.parseFrom(await(join).getBody());
         assertThat(joined.getErrorCode()).isEqualTo(16004);
@@ -473,7 +482,6 @@ class MatchClientMessageServiceTest {
         assertThat(business.get(MatchMethods.CANCEL_QUEUE).handled).hasValue(0);
         assertThat(requests("JoinQueue", "overloaded")).isEqualTo(1);
         assertThat(requests("CancelQueue", "overloaded")).isEqualTo(1);
-        assertThat(await(running).getTipId()).isZero();
     }
 
     // ================================================================ 真处理器（进程里实际登记的十个；依赖用 testing 包的替身）

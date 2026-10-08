@@ -74,6 +74,11 @@ public final class VirtualThreadGatherLauncher implements GatherLauncher {
         return future;
     }
 
+    /**
+     * 一次 gather 的线程体。<b>任何出口都恰好调一次 {@link #finish}</b>（含管线抛 {@link Error}）：不调的话这次的在途许可永不归还
+     * （累计到上限后凑单永久 {@code paused_saturated}、PVE_SOLO 恒回 16004）、future 永不完成（整队调用方挂满开战锁时长、切磋不会补推 154 false）、
+     * 在途计数不减（之后每次停机都等满上限）。
+     */
     private void runOne(GatherPlan plan, boolean admitted, long startedNanos, CompletableFuture<GatherResult> future) {
         GatherResult result;
         try {
@@ -82,11 +87,19 @@ public final class VirtualThreadGatherLauncher implements GatherLauncher {
             // 管线约定不抛；到这里说明约定被破坏：不知道冻结了谁，交给 scene 的备战期限与票据 TTL 收尾
             log.error("[gather] 管线抛出了异常（按内部错误收场，不做补偿） mode={} members={}", plan.mode(), Compensation.ids(plan.members()), e);
             result = GatherResult.failed(admitted ? GatherOutcome.INTERNAL : GatherOutcome.OVERLOADED, 0);
+        } catch (Error e) {
+            // NoClassDefFoundError / StackOverflowError / 断言失败等：同样先收场（还许可、给结果、减计数）再原样抛出，不做补偿
+            log.error("[gather] 管线抛出了 Error（按内部错误收场，不做补偿） mode={} members={}", plan.mode(), Compensation.ids(plan.members()), e);
+            finish(plan, admitted, startedNanos, future, GatherResult.failed(admitted ? GatherOutcome.INTERNAL : GatherOutcome.OVERLOADED, 0));
+            throw e;
         }
         finish(plan, admitted, startedNanos, future, result);
     }
 
-    /** 归还许可 → 记指标 → 完成 future → 更新在途计数。顺序固定：调用方的回调看到结果时，许可已经还了。 */
+    /**
+     * 归还许可 → 记指标 → 完成 future → 更新在途计数。顺序固定：调用方的回调看到结果时，许可已经还了。
+     * 后三步用 finally 串起来：记指标或回调抛出 {@link Error} 时，future 照样完成、在途计数照样减（之后 Error 继续上抛）。
+     */
     private void finish(GatherPlan plan, boolean admitted, long startedNanos, CompletableFuture<GatherResult> future, GatherResult result) {
         if (admitted) {
             permits.release();
@@ -95,14 +108,15 @@ public final class VirtualThreadGatherLauncher implements GatherLauncher {
             metrics.gatherCompleted(plan.mode().getNumber(), result.outcome(), Duration.ofNanos(System.nanoTime() - startedNanos));
         } catch (RuntimeException e) {
             log.warn("[gather] 记指标出错（忽略）", e);
-        }
-        try {
-            future.complete(result);
-        } catch (RuntimeException e) {
-            // 挂在 future 上的回调抛了异常：与本次 gather 的结局无关
-            log.warn("[gather] gather 结果的回调抛出异常（忽略）", e);
         } finally {
-            finished();
+            try {
+                future.complete(result);
+            } catch (RuntimeException e) {
+                // 挂在 future 上的回调抛了异常：与本次 gather 的结局无关
+                log.warn("[gather] gather 结果的回调抛出异常（忽略）", e);
+            } finally {
+                finished();
+            }
         }
     }
 

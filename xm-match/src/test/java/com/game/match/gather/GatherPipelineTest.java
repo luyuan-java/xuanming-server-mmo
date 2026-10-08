@@ -157,6 +157,10 @@ class GatherPipelineTest {
         assertThat(f.events).containsExactly("hooks.beforePrepare", "scene.prepare:1001", "scene.prepare:1002",
                 "placement.write:" + id(battleId) + "#1", "battle[a].create:" + id(battleId), "placement.write:" + id(battleId) + "#1",
                 "hooks.onStarted");
+        assertThat(f.timeline).as("含票据写的完整先后：建房成功 → 逐人置 ready → 补写落点 → 钩子；建房之前不碰票据").containsExactly(
+                "hooks.beforePrepare", "scene.prepare:1001", "scene.prepare:1002", "placement.write:" + id(battleId) + "#1",
+                "battle[a].create:" + id(battleId), "tickets.markReady:1001", "tickets.markReady:1002",
+                "placement.write:" + id(battleId) + "#1", "hooks.onStarted");
         assertThat(f.scene.frozen()).as("开局成功，不解冻").containsOnlyKeys(A, B);
         assertThat(f.ratings.loads).as("1V1 不重读评分").isEmpty();
         assertThat(f.count("xm.match.gather.zone.mix", "mode", "MATCH_MODE_1V1", "mix", "single")).isEqualTo(1.0);
@@ -425,6 +429,10 @@ class GatherPipelineTest {
         assertThat(f.ticket(A).notBeforeMs()).as("有肇事者：幸存者不带退避").isZero();
         assertThat(f.tickets.calls).as("续期 → （取消）→ 删肇事者 → 回队首").containsExactly("extendMatched([1001, 1002])", "delete(1002)",
                 "requeueFront(3:0,[1001])");
+        // 补偿的固定顺序（§3.3）跨着票据与 scene 两个组件：先续期再取消（否则串行取消期间票先过期、回队首全落空），
+        // 取消完才回队首（否则幸存者还冻结着就可能被下一轮凑单弹出，scene 回 1006，他反被当成肇事者删票）
+        assertThat(f.timeline).containsExactly("hooks.beforePrepare", "scene.prepare:1001", "tickets.extendMatched", "scene.cancel:1001",
+                "tickets.delete:1002", "tickets.requeueFront");
         assertNoBattleSideEffects();
         assertThat(f.count("xm.match.requeued", "reason", "gather_offender")).isEqualTo(1.0);
         assertThat(f.count("xm.match.requeued", "reason", "gather_no_offender")).isZero();
@@ -487,6 +495,9 @@ class GatherPipelineTest {
         assertThat(result.outcome()).isEqualTo(GatherOutcome.PREPARE_FAILED);
         assertThat(f.events).containsExactly("hooks.beforePrepare", "scene.prepare:1001", "scene.prepare:1002", "scene.cancel:1001",
                 "scene.cancel:1002");
+        assertThat(f.timeline).as("续期在第一条取消之前；删肇事者、回队首（这里注入了失败）在最后一条取消之后").containsExactly("hooks.beforePrepare",
+                "scene.prepare:1001", "scene.prepare:1002", "tickets.extendMatched", "scene.cancel:1001", "scene.cancel:1002", "tickets.delete:1002",
+                "tickets.requeueFront");
         assertThat(f.scene.frozen()).as("结局不明的人也被解冻").isEmpty();
         assertThat(f.tickets.ticketOf(B)).as("他仍是肇事者").isEmpty();
         assertThat(f.ticket(A).state()).as("回队首失败：票留在 matched").isEqualTo(TicketState.MATCHED);
@@ -570,6 +581,9 @@ class GatherPipelineTest {
         // 已冻结 3 人（2001–2003），2004 是明确拒绝、不算：3 × 3 + 10 = 19 s
         assertThat(f.tickets.ttlMs(2001)).isEqualTo(19_000);
         assertThat(f.tickets.ttlMs(2010)).as("还没轮到备战的人的票同样续期").isEqualTo(19_000);
+        // 「补偿前」：续期必须排在逐人取消之前（每人最长 3 s，10 人组不先续期会在回队首之前全部过期），票据处置排在全部取消之后
+        assertThat(f.timeline.subList(f.timeline.indexOf("scene.prepare:2004") + 1, f.timeline.size())).containsExactly("tickets.extendMatched",
+                "scene.cancel:2001", "scene.cancel:2002", "scene.cancel:2003", "tickets.delete:2004", "tickets.requeueFront");
     }
 
     // ================================================================ 指纹
@@ -684,6 +698,9 @@ class GatherPipelineTest {
         assertThat(f.battleA.destroys).isEmpty();
         assertThat(f.events).containsExactly("hooks.beforePrepare", "scene.prepare:1001", "scene.prepare:1002",
                 "placement.write-failed:" + id(battleId) + "#1", "scene.cancel:1001", "scene.cancel:1002", "placement.delete:" + id(battleId));
+        assertThat(f.timeline).as("补偿四步的先后：续期 → 逐人取消 → 回队首 → 最后才删落点记录（不占票据的关键路径）").containsExactly(
+                "hooks.beforePrepare", "scene.prepare:1001", "scene.prepare:1002", "placement.write-failed:" + id(battleId) + "#1",
+                "tickets.extendMatched", "scene.cancel:1001", "scene.cancel:1002", "tickets.requeueFront", "placement.delete:" + id(battleId));
         assertRequeuedInOrder(QUEUE_1V1, A, B);
         assertThat(f.ticket(A).notBeforeMs()).as("无肇事者").isEqualTo(T0 + 2_000);
         assertThat(f.hooks.started).isEmpty();
@@ -988,6 +1005,8 @@ class GatherPipelineTest {
         assertThat(f.placements.stored(battleId)).isEmpty();
         assertThat(f.events).as("先写落点 → 解冻 → 删落点").containsSubsequence("placement.write:" + id(battleId) + "#1", "scene.cancel:1001",
                 "scene.cancel:1002", "placement.delete:" + id(battleId));
+        assertThat(f.timeline).as("写落点之后的补偿：续期 → 取消 → 回队首 → 删落点").endsWith("placement.write:" + id(battleId) + "#1",
+                "tickets.extendMatched", "scene.cancel:1001", "scene.cancel:1002", "tickets.requeueFront", "placement.delete:" + id(battleId));
         assertThat(f.hooks.started).isEmpty();
     }
 
@@ -1200,6 +1219,8 @@ class GatherPipelineTest {
         assertThat(f.tickets.ticketCount()).as("没出错的人也删票：整队不可拆分").isZero();
         assertThat(f.tickets.queueMembers(new QueueRef(PVE_TEAM, 1))).isEmpty();
         assertThat(f.scene.calls).extracting(FakeSceneBattle.Call::describe).containsExactly("prepare:1001", "prepare:1002", "cancel:1001");
+        assertThat(f.timeline).as("先解冻、后删票：票一删成员就能再排，那时他不该还冻结着").containsExactly("hooks.beforePrepare", "scene.prepare:1001",
+                "scene.prepare:1002", "scene.cancel:1001", "tickets.deleteGroup");
     }
 
     @Test
@@ -1216,6 +1237,8 @@ class GatherPipelineTest {
         assertThat(f.tickets.ticketCount()).isZero();
         assertThat(f.tickets.calls).containsExactly("deleteGroup([1001, 1002])");
         assertThat(f.placements.deletes).containsExactly(8_888_888L);
+        assertThat(f.timeline).as("建房被拒之后：逐人取消 → 删票 → 删落点记录").endsWith("battle[a].create:8888888", "scene.cancel:1001",
+                "scene.cancel:1002", "tickets.deleteGroup", "placement.delete:8888888");
     }
 
     @Test

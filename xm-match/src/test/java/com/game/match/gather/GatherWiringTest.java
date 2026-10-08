@@ -28,15 +28,20 @@ import com.game.match.reissue.BattleTicketReissue;
 import com.game.match.reissue.ReissueConfiguration;
 import com.game.match.reissue.ReissueHandler;
 import com.game.match.testing.LeaseOnlyRedis;
+import com.game.match.ticket.QueueRef;
+import com.game.match.ticket.TicketState;
 import com.game.match.ticket.TicketStore;
 import com.game.proto.RequestBattleTicketRequest;
 import com.game.proto.RequestBattleTicketResponse;
+import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 
 /**
  * gather / placement / reissue 三个包的 Spring 装配：给齐它们向别的包要的接口（票据存储、评分读取、发号、时钟、两个出站口、定位、目录、Redis）之后，
@@ -161,6 +166,153 @@ class GatherWiringTest {
             RequestBattleTicketResponse response = RequestBattleTicketResponse.parseFrom(((MatchMethodHandler.Reply.Body) reply).bytes());
             assertThat(response.getErrorMessage().getId()).isEqualTo(16004);
             assertThat(response.getErrorMessage().getParameters(0)).isEqualTo("服务器繁忙,请稍后再试");
+        });
+    }
+
+    // ================================================================ 装配把配置值传对了地方（客户端可见的时限，§8.4）
+
+    /**
+     * 同 {@link Collaborators}，三处不同：每个用例一份自己的夹具（{@code withBean} 注入）；battle 目录与落点换成夹具里的替身，gather 走得到
+     * 回队首与成功这些出口；<b>配置全取非缺省且互不相同的值</b>——{@code GatherConfiguration} 把它们拆成相邻的同类型参数往下传
+     * （回队首 TTL 与退避是两个相邻的 long），传错位编译照过，只有经装配跑一次才看得出来。
+     */
+    @TestConfiguration(proxyBeanMethods = false)
+    static class LiveCollaborators {
+
+        static final Duration TICKET_TTL = Duration.ofHours(1);
+        static final Duration READY_TICKET_TTL = Duration.ofSeconds(30);
+        static final Duration REQUEUE_BACKOFF = Duration.ofSeconds(7);
+
+        @Bean
+        MatchProperties matchProperties() {
+            return new MatchProperties(null, null, null, TICKET_TTL, READY_TICKET_TTL, null, null, null, FingerprintMode.ENFORCE, 3,
+                    REQUEUE_BACKOFF, null);
+        }
+
+        @Bean
+        MatchMetrics matchMetrics(GatherFixture f) {
+            return f.metrics;
+        }
+
+        @Bean
+        MatchIds matchIds() {
+            return new MatchIds(new Snowflake(9), () -> true, () -> false);
+        }
+
+        @Bean
+        RedisClock redisClock(GatherFixture f) {
+            return f.clock;
+        }
+
+        @Bean
+        GatherHooks gatherHooks(GatherFixture f) {
+            return f.hooks;
+        }
+
+        @Bean
+        RatingReader ratingReader(GatherFixture f) {
+            return f.ratings;
+        }
+
+        @Bean
+        TicketStore ticketStore(GatherFixture f) {
+            return f.tickets;
+        }
+
+        @Bean
+        PlacementStore placementStore(GatherFixture f) {
+            return f.placements;
+        }
+
+        @Bean
+        NodeCalls<SceneBattleService> sceneBattleCalls(GatherFixture f) {
+            return f.sceneCalls;
+        }
+
+        @Bean
+        NodeCalls<BattleNodeService> battleNodeCalls(GatherFixture f) {
+            return f.battleCalls;
+        }
+
+        @Bean
+        SceneAssetLocator sceneLocator(GatherFixture f) {
+            return new SceneAssetLocator(f.players::holderAsync, f.sceneNodes, null);
+        }
+
+        /** 只为满足 {@code GatherConfiguration.battleNodes} 的入参；管线实际用的是下面那个 {@code @Primary}。 */
+        @Bean
+        NodeDirectory<BattleNodeInfo> battleNodeDirectory() {
+            return new NodeDirectory<>(Collaborators.REDIS.client, NodeTypes.BATTLE, BattleNodeInfo.parser());
+        }
+
+        @Bean
+        @Primary
+        BattleNodes fixtureBattleNodes(GatherFixture f) {
+            return f.battleNodes;
+        }
+    }
+
+    private final ApplicationContextRunner live = new ApplicationContextRunner().withBean(GatherFixture.class, GatherFixture::new)
+            .withUserConfiguration(LiveCollaborators.class, GatherConfiguration.class);
+
+    private static GatherResult launch(AssertableApplicationContext context, GatherPlan plan) throws Exception {
+        return context.getBean(GatherLauncher.class).launch(plan).get(10, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void 回队首的票恢复成ticket_ttl_退避取requeue_backoff_两个值没有传错位() {
+        live.run(context -> {
+            assertThat(context).hasNotFailed();
+            GatherFixture f = context.getBean(GatherFixture.class);
+            GatherPlan plan = f.popped(GatherFixture.ONE_V_ONE, 0, 7001, 7002);
+            f.battleNodes.readFailed = true; // 没有可分配的节点：无肇事者的失败，全员回队首并带退避
+
+            GatherResult result = launch(context, plan);
+
+            assertThat(result.outcome()).isEqualTo(GatherOutcome.NO_BATTLE_NODE);
+            for (long playerId : new long[] {7001, 7002}) {
+                assertThat(f.ticket(playerId).state()).isEqualTo(TicketState.QUEUED);
+                assertThat(f.tickets.ttlMs(playerId)).as("xm.match.ticket-ttl = 1 h（不是 ready 窗口的 30 s，也不是退避的 7 s）").isEqualTo(3_600_000);
+                assertThat(f.ticket(playerId).notBeforeMs()).as("xm.match.requeue-backoff = 7 s（不是 1 h）").isEqualTo(f.clock.peekMs() + 7_000);
+            }
+            assertThat(f.tickets.queueMembers(new QueueRef(GatherFixture.ONE_V_ONE, 0))).containsExactly("7001", "7002");
+        });
+    }
+
+    @Test
+    void 开局成功的票置ready_TTL取ready_ticket_ttl() {
+        live.run(context -> {
+            GatherFixture f = context.getBean(GatherFixture.class);
+            GatherPlan plan = f.popped(GatherFixture.ONE_V_ONE, 0, 7001, 7002);
+
+            GatherResult result = launch(context, plan);
+
+            assertThat(result.ok()).isTrue();
+            assertThat(f.battleA.creates).hasSize(1);
+            for (long playerId : new long[] {7001, 7002}) {
+                assertThat(f.ticket(playerId).state()).isEqualTo(TicketState.READY);
+                assertThat(f.ticket(playerId).battleId()).isEqualTo(result.battleId());
+                assertThat(f.tickets.ttlMs(playerId)).as("xm.match.ready-ticket-ttl = 30 s（不是 1 h）").isEqualTo(30_000);
+            }
+        });
+    }
+
+    @Test
+    void 指纹闸的模式取自配置_enforce下两人指纹不同就不开局_幸存者按ticket_ttl回队首() {
+        live.run(context -> {
+            GatherFixture f = context.getBean(GatherFixture.class);
+            GatherPlan plan = f.popped(GatherFixture.ONE_V_ONE, 0, 7001, 7002);
+            f.scene.fingerprint(7001, "fp-A").fingerprint(7002, "fp-B");
+
+            GatherResult result = launch(context, plan);
+
+            assertThat(result.outcome()).as("xm.match.table-fingerprint-mode = enforce（缺省的 warn 会照常开局）").isEqualTo(GatherOutcome.FINGERPRINT_MISMATCH);
+            assertThat(f.battleA.creates).isEmpty();
+            assertThat(f.scene.frozen()).isEmpty();
+            assertThat(f.tickets.ticketOf(7002)).as("少数派是肇事者：删票").isEmpty();
+            assertThat(f.ticket(7001).state()).isEqualTo(TicketState.QUEUED);
+            assertThat(f.tickets.ttlMs(7001)).isEqualTo(3_600_000);
+            assertThat(f.ticket(7001).notBeforeMs()).as("有肇事者：幸存者不带退避").isZero();
         });
     }
 

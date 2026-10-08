@@ -13,14 +13,14 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
-/** 入账标记的保留期清理（match-spec §5.2「清理」）：7 天之前的分批删，删到不足一批为止；失败留给下个周期。 */
+/** 入账标记的保留期清理（match-spec §5.2「清理」）：30 天之前的分批删，删到不足一批为止；失败留给下个周期。 */
 class RatingCleanupTest {
 
     private static final long NOW = 1_800_000_000_000L;
-    private static final long SEVEN_DAYS_MS = Duration.ofDays(7).toMillis();
+    private static final long THIRTY_DAYS_MS = Duration.ofDays(30).toMillis();
 
     @Test
-    void 一轮清理_截止时刻是七天前_分批删到不足一批为止() {
+    void 一轮清理_截止时刻是三十天前_分批删到不足一批为止() {
         List<long[]> asked = new ArrayList<>();
         int[] batches = {3, 3, 1};
         AtomicInteger round = new AtomicInteger();
@@ -33,7 +33,7 @@ class RatingCleanupTest {
 
             assertThat(deleted).isEqualTo(7);
             assertThat(asked).hasSize(3);
-            assertThat(asked).allSatisfy(call -> assertThat(call).containsExactly(NOW - SEVEN_DAYS_MS, 3));
+            assertThat(asked).allSatisfy(call -> assertThat(call).containsExactly(NOW - THIRTY_DAYS_MS, 3));
         }
     }
 
@@ -81,14 +81,14 @@ class RatingCleanupTest {
     }
 
     @Test
-    void 接真的存储_七天前的标记被删_七天内的与评分行留着() {
+    void 接真的存储_三十天前的标记被删_三十天内的与评分行留着() {
         try (RatingTestDatabase db = RatingTestDatabase.h2()) {
             MatchMetrics metrics = new MatchMetrics(new SimpleMeterRegistry(), new MetricLabels(id -> false));
             RatingStore store = new RatingStore(RatingStore.connections(db.dataSource), configId -> 30, metrics, () -> NOW);
             for (long battle = 1; battle <= 1_203; battle++) {
-                db.putApplied(battle, NOW - SEVEN_DAYS_MS - battle);
+                db.putApplied(battle, NOW - THIRTY_DAYS_MS - battle);
             }
-            db.putApplied(5_001, NOW - SEVEN_DAYS_MS);
+            db.putApplied(5_001, NOW - THIRTY_DAYS_MS);
             db.putApplied(5_002, NOW - 1);
             db.putRating(1, 151_600, 1);
 
@@ -97,7 +97,7 @@ class RatingCleanupTest {
 
                 assertThat(deleted).as("三批：500 + 500 + 203").isEqualTo(1_203);
                 assertThat(db.count("match_rating_applied")).isEqualTo(2);
-                assertThat(db.appliedRow(5_001)).as("正好七天整的不删（早于才删）").isPresent();
+                assertThat(db.appliedRow(5_001)).as("正好三十天整的不删（早于才删）").isPresent();
                 assertThat(db.appliedRow(5_002)).isPresent();
                 assertThat(db.count("match_rating")).as("评分行永不清理").isEqualTo(1);
                 assertThat(cleanup.purgeOnce()).isZero();
@@ -107,7 +107,7 @@ class RatingCleanupTest {
 
     @Test
     void 间隔与批量() {
-        assertThat(RatingCleanup.RETENTION).isEqualTo(Duration.ofDays(7));
+        assertThat(RatingCleanup.RETENTION).isEqualTo(Duration.ofDays(30));
         assertThat(RatingCleanup.INTERVAL).isEqualTo(Duration.ofHours(1));
         assertThat(RatingCleanup.BATCH).isEqualTo(500);
     }

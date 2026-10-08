@@ -646,6 +646,35 @@ abstract class RatingStoreCases {
     }
 
     @Test
+    void 结果消息还可能留在topic里的那段时间_清理不碰它的标记_重放一律判重复_过了三十天才清() {
+        apply(event(9001, MatchModes.ONE_V_ONE, A_WIN, List.of(12001L), List.of(12002L)));
+        long hourMs = 3_600_000;
+        long dayMs = 24 * hourMs;
+
+        try (RatingCleanup cleanup = new RatingCleanup(store, clock::get)) {
+            // topic 保留 7 天，但 Kafka 按段删除、缺省 7 天滚一次段：一条消息最长留约 14 天。这期间从最早位点重放（消费组的位点过期、
+            // 换消费组、人工重置位点）都得被标记挡住——标记只留 7 天的话，第 7 天之后的重放会把这一局再入账一次
+            for (int day : new int[] {7, 8, 14, 15}) {
+                clock.set(NOW + day * dayMs + hourMs);
+                assertThat(cleanup.purgeOnce()).as("第 %d 天的清理", day).isZero();
+                assertThat(apply(event(9001, MatchModes.ONE_V_ONE, A_WIN, List.of(12001L), List.of(12002L))).outcome())
+                        .as("第 %d 天重放", day).isEqualTo(Outcome.DUPLICATE);
+            }
+            assertThat(db.ratingRow(12001)).as("只入账了一次").hasValueSatisfying(row -> assertThat(row).containsExactly(151_600, 1, NOW));
+            assertThat(db.ratingRow(12002)).hasValueSatisfying(row -> assertThat(row).containsExactly(148_400, 1, NOW));
+            assertThat(updates("MATCH_MODE_1V1", "applied")).isEqualTo(1);
+            assertThat(updates("MATCH_MODE_1V1", "duplicate")).isEqualTo(4);
+
+            clock.set(NOW + 30 * dayMs);
+            assertThat(cleanup.purgeOnce()).as("正好 30 天整：还不删").isZero();
+            clock.set(NOW + 30 * dayMs + 1);
+            assertThat(cleanup.purgeOnce()).as("过了 30 天才清（此后同一局再投会重新入账：回灌旧结果必须在保留期之内）").isEqualTo(1);
+            assertThat(db.appliedRow(9001)).isEmpty();
+            assertThat(db.count("match_rating")).as("评分行永不清理").isEqualTo(2);
+        }
+    }
+
+    @Test
     void 清理失败_抛错() {
         ds.failBefore("DELETE FROM match_rating_applied", RatingStoreCases::connectionLost);
 

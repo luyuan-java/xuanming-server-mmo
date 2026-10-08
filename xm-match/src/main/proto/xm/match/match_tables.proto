@@ -31,7 +31,8 @@ message MatchRatingRow {
   // 追加区：从 5 起。
 }
 
-// 入账标记：每一局计分对局一行，主键冲突 = 重复投递（恰好一次的依据）。与结果 topic 的保留期一致，7 天后由 xm-match 分批清理。
+// 入账标记：每一局计分对局一行，主键冲突 = 重复投递（恰好一次的依据）。保留 30 天（长于结果消息在 topic 里的最长寿命，
+// 见 RatingCleanup.RETENTION），之后由 xm-match 分批清理。
 message MatchRatingAppliedRow {
   option (proto2mysql.table_name) = "match_rating_applied";
   option (proto2mysql.primary_key) = "battle_id";

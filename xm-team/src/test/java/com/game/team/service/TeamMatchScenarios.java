@@ -189,7 +189,8 @@ abstract class TeamMatchScenarios {
         fx.match.checkReply = r -> new CompletableFuture<>(); // xm-match 一直不应答
         State before = fx.state(t[0], t[1], t[2]);
         fx.resetCounters();
-        Deadline budget = Deadline.after(250);
+        // 预算给 1.5 s：等的是「到截止才放弃」，太短的话慢机器上预检之前的几步就可能把它用完（评审 T5）
+        Deadline budget = Deadline.after(1500);
 
         TeamResponse resp = fx.start(t[1], t[0], budget);
 
@@ -199,7 +200,7 @@ abstract class TeamMatchScenarios {
         assertThat(resp.getTeam().getVersion()).isEqualTo(before.version());
         assertThat(fx.hgets).hasValue(0);
         Call<?> call = fx.match.checks.get(0);
-        assertThat(call.budget()).as("这一跳的超时随调用带给 xm-match 作预算").isBetween(1L, 250L);
+        assertThat(call.budget()).as("这一跳的超时随调用带给 xm-match 作预算").isBetween(1L, 1500L);
         assertThat(call.timeoutMs()).as("每跳超时 = min(3 s, 剩余预算)").isEqualTo(call.budget());
         assertThat(fx.state(t[0], t[1], t[2])).isEqualTo(before);
         assertThat(fx.matches("internal")).isEqualTo(1);
@@ -299,13 +300,13 @@ abstract class TeamMatchScenarios {
         fx.match.ticketsReply = r -> new CompletableFuture<>(); // 建票一直不应答
         fx.match.releaseReply = r -> broken("xm-match 不在");
 
-        TeamResponse resp = fx.start(t[1], tid, Deadline.after(300));
+        TeamResponse resp = fx.start(t[1], tid, Deadline.after(1500));
 
         requireTip(resp, TeamTips.INTERNAL, 0);
         assertThat(fx.match.tickets.get(0).timeoutMs()).as("建票这一跳的超时也收口到剩余预算")
-                .isEqualTo(fx.match.tickets.get(0).budget()).isBetween(1L, 300L);
+                .isEqualTo(fx.match.tickets.get(0).budget()).isBetween(1L, 1500L);
         assertThat(fx.match.releases).hasSize(1);
-        assertThat(fx.match.releases.get(0).budget()).as("退票不继承已经用完的请求预算").isGreaterThan(300L);
+        assertThat(fx.match.releases.get(0).budget()).as("退票不继承已经用完的请求预算").isGreaterThan(1500L);
         assertThat(fx.record(tid).getMatchLockToken()).as("退票失败只记日志，锁照常清").isEmpty();
         assertThat(byReason(fx.takePushes(), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED).keySet())
                 .containsExactlyInAnyOrder(t[1], t[2]);

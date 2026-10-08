@@ -936,6 +936,12 @@ public abstract class TicketStoreContract {
     }
 
     // ================================================================ 重放：每个写方法连调两次（Redis 客户端超时后重发同一段脚本），第二次什么都不改
+    //
+    // 「不续期」怎么钉：重发时入参不变，同一个 TTL 值续没续期从读数上看不出来（续了也还是那个数；指纹又不含 TTL）。所以每条都再重放一次、
+    // 这次**换一个 TTL**（存储认重放靠的是票号 / token，不看 TTL），票的 TTL 必须仍是首次写入的那个值——重放分支里只要有一句 PEXPIRE 就会变。
+
+    /** 重放时故意传的「另一个 TTL」：比任何一种票的 TTL 减去余量都小，被拿去续期的话一眼看得出来。 */
+    private static final long OTHER_TTL = 5_000;
 
     @Test
     public void 重放_入队_同一票号再执行一次_不会入两次队_也不报已在队列中() {
@@ -951,10 +957,14 @@ public abstract class TicketStoreContract {
         assertThat(queueMembers(q)).containsExactly(u(a));
         assertThat(fingerprint()).isEqualTo(once);
         assertThat(ttlMs(a)).as("不续期").isLessThanOrEqualTo(ttl);
+
+        assertThat(store().enqueue(a, tid(a), q, 1, 150_000, OTHER_TTL, d())).isInstanceOf(JoinResult.Replayed.class);
+        assertTtl(a, QUEUED_TTL);
+        assertThat(fingerprint()).isEqualTo(once);
     }
 
     @Test
-    public void 重放_入队之后已被弹走_重放仍按成功_不会把人塞回队列() {
+    public void 重放_入队之后已被弹走_重放仍按成功_不会把人塞回队列_也不把matched票续成排队的寿命() {
         QueueRef q = q(1);
         long a = p(1);
         enqueue(a, q, 150_000);
@@ -965,6 +975,8 @@ public abstract class TicketStoreContract {
 
         assertThat(fingerprint()).isEqualTo(popped);
         assertThat(queueMembers(q)).isEmpty();
+        // 重发的入队带的是 6 h：重放分支若顺手续期，这张 matched 票就从 48 s 变成 6 h——gather 所在实例此时崩溃的话，它要挡这名玩家 6 小时
+        assertTtl(a, MATCHED_TTL);
     }
 
     @Test
@@ -978,6 +990,10 @@ public abstract class TicketStoreContract {
 
         assertThat(fingerprint()).isEqualTo(once);
         assertThat(ttlMs(a)).isLessThanOrEqualTo(ttl);
+
+        assertThat(store().createMatched(a, tid(a), 4, 1, 2, 150_000, OTHER_TTL, d())).isInstanceOf(JoinResult.Replayed.class);
+        assertTtl(a, 42_000);
+        assertThat(fingerprint()).isEqualTo(once);
     }
 
     @Test
@@ -993,6 +1009,11 @@ public abstract class TicketStoreContract {
 
         assertThat(fingerprint()).isEqualTo(once);
         assertThat(ttlMs(a)).as("没有续期").isLessThanOrEqualTo(ttl);
+
+        assertThat(store().createGroup(members, 5, 1, 900, OTHER_TTL, d())).isEmpty();
+        assertTtl(a, 48_000);
+        assertTtl(b, 48_000);
+        assertThat(fingerprint()).isEqualTo(once);
     }
 
     @Test
@@ -1003,10 +1024,13 @@ public abstract class TicketStoreContract {
         store().createGroup(members, 5, 1, 900, 48_000, d());
         expireTicket(b);
 
-        assertThat(store().createGroup(members, 5, 1, 900, 48_000, d())).isEmpty();
+        // 这一次换一个 TTL（30 s）：补建的那张用它，还在的那张不许被碰
+        assertThat(store().createGroup(members, 5, 1, 900, 30_000, d())).isEmpty();
 
         assertThat(ticket(b).ticketId()).isEqualTo("g-b");
         assertThat(ticket(a).ticketId()).isEqualTo("g-a");
+        assertTtl(a, 48_000);
+        assertThat(ttlMs(b)).as("补建的票按这一次的 TTL").isBetween(30_000 - TTL_SLACK, 30_000L);
     }
 
     @Test
@@ -1110,6 +1134,11 @@ public abstract class TicketStoreContract {
         assertThat(fingerprint()).isEqualTo(once);
         assertThat(ttlMs(a)).isLessThanOrEqualTo(ttl);
         assertThat(queueMembers(q)).containsExactly(u(c));
+
+        assertThat(store().pop(q, tok("pop-1"), List.of(ref(a), ref(b)), OTHER_TTL, d())).isInstanceOf(PopResult.Replayed.class);
+        assertTtl(a, MATCHED_TTL);
+        assertTtl(b, MATCHED_TTL);
+        assertThat(fingerprint()).isEqualTo(once);
     }
 
     @Test
@@ -1125,6 +1154,7 @@ public abstract class TicketStoreContract {
 
         assertThat(fingerprint()).isEqualTo(back);
         assertThat(stateOf(a)).isEqualTo(TicketState.QUEUED);
+        assertTtl(a, QUEUED_TTL);
     }
 
     @Test
@@ -1141,6 +1171,10 @@ public abstract class TicketStoreContract {
 
         assertThat(fingerprint()).isEqualTo(once);
         assertThat(ttlMs(a)).isLessThanOrEqualTo(ttl);
+
+        assertThat(store().markReady(ref(a), 77, OTHER_TTL, d())).isTrue();
+        assertTtl(a, READY_TTL);
+        assertThat(fingerprint()).isEqualTo(once);
     }
 
     @Test

@@ -10,6 +10,9 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.SpringApplication;
@@ -251,6 +254,156 @@ class MatchLifecycleTest {
 
         assertThat(events).isEmpty();
         assertThat(lifecycle.backgroundStarted()).isFalse();
+    }
+
+    // ================================================================ 启动线程与关停线程同时在场（刚启动完就收到 SIGTERM）
+
+    private static void awaitRelease(CountDownLatch release) {
+        try {
+            if (!release.await(30, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("测试没有放行");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static Thread daemon(String name, Runnable body) {
+        return Thread.ofPlatform().name(name).daemon(true).start(body);
+    }
+
+    /** 等线程走到「不再前进」的地方：卡在锁上 / 等待中，或者已经跑完。 */
+    private static boolean awaitParkedOrDone(Thread thread) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            Thread.State state = thread.getState();
+            if (state == Thread.State.BLOCKED || state == Thread.State.WAITING || state == Thread.State.TERMINATED) {
+                return true;
+            }
+            TimeUnit.MILLISECONDS.sleep(5);
+        }
+        return false;
+    }
+
+    @Test
+    void 启动线程正在起凑单时停机到达_停凑单排在它起完之后_停机结束时凑单是停着的() throws Exception {
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        AtomicBoolean matcherRunning = new AtomicBoolean();
+        MatcherControl slowStart = new MatcherControl() {
+            @Override
+            public void start() {
+                events.add("matcher.start:enter");
+                startEntered.countDown();
+                awaitRelease(releaseStart);
+                matcherRunning.set(true);
+                events.add("matcher.start:exit");
+            }
+
+            @Override
+            public void stop() {
+                matcherRunning.set(false);
+                events.add("matcher.stop");
+            }
+        };
+        MatchLifecycle lifecycle = new MatchLifecycle(slowStart, consumer, gathers, drainWorkers, MatchLifecycle.GATHER_DRAIN_TIMEOUT);
+        lifecycle.start();
+
+        ContextClosedEvent closed = new ContextClosedEvent(new GenericApplicationContext());
+        Thread startup = daemon("test-startup", lifecycle::startBackground);
+        assertThat(startEntered.await(10, TimeUnit.SECONDS)).isTrue();
+        Thread shutdown = daemon("test-shutdown", () -> {
+            lifecycle.onApplicationEvent(closed);
+            lifecycle.stop();
+        });
+        // 关停线程此刻要么排在启动线程后面等着，要么（没有串行化的写法）已经把「还没起完」的凑单停了个空
+        assertThat(awaitParkedOrDone(shutdown)).as("关停线程已经走到停凑单这一步").isTrue();
+        releaseStart.countDown();
+        startup.join(10_000);
+        shutdown.join(10_000);
+
+        assertThat(startup.isAlive()).isFalse();
+        assertThat(shutdown.isAlive()).isFalse();
+        assertThat(matcherRunning).as("停机结束后凑单必须是停着的：否则它会在 Dubbo 撤导出、工作池排空期间继续弹组").isFalse();
+        assertThat(events).as("停在起完之后").containsSubsequence("matcher.start:enter", "matcher.start:exit", "matcher.stop");
+        assertThat(events).filteredOn("matcher.stop"::equals).hasSize(1);
+        if (events.contains("consumer.start")) {
+            assertThat(events).as("评分消费若抢在停机前起来了，也得被停掉").containsSubsequence("consumer.start", "consumer.stop");
+        }
+        assertThat(events).contains("workers.drain", "gathers.awaitIdle(10s)");
+    }
+
+    @Test
+    void 评分消费的启动卡在核对topic时停机到达_停机各步不等它_它起完之后被补停() throws Exception {
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        AtomicBoolean consumerRunning = new AtomicBoolean();
+        ResultConsumerControl slowStart = new ResultConsumerControl() {
+            @Override
+            public void start() {
+                events.add("consumer.start:enter");
+                startEntered.countDown();
+                awaitRelease(releaseStart);
+                consumerRunning.set(true);
+                events.add("consumer.start:exit");
+            }
+
+            @Override
+            public void stop() {
+                consumerRunning.set(false);
+                events.add("consumer.stop");
+            }
+        };
+        MatchLifecycle lifecycle = new MatchLifecycle(matcher, slowStart, gathers, drainWorkers, MatchLifecycle.GATHER_DRAIN_TIMEOUT);
+        lifecycle.start();
+
+        ContextClosedEvent closed = new ContextClosedEvent(new GenericApplicationContext());
+        Thread startup = daemon("test-startup", lifecycle::startBackground);
+        assertThat(startEntered.await(10, TimeUnit.SECONDS)).isTrue();
+        Thread shutdown = daemon("test-shutdown", () -> {
+            lifecycle.onApplicationEvent(closed);
+            lifecycle.stop();
+        });
+        shutdown.join(10_000);
+
+        assertThat(shutdown.isAlive()).as("评分消费的启动最长要同步等一个 init-timeout：停凑单、撤导出、排空都不许被它挡住").isFalse();
+        assertThat(events).containsSubsequence("matcher.start", "consumer.start:enter", "matcher.stop", "workers.drain", "gathers.awaitIdle(10s)");
+        assertThat(lifecycle.isRunning()).isFalse();
+
+        releaseStart.countDown();
+        startup.join(10_000);
+
+        assertThat(startup.isAlive()).isFalse();
+        assertThat(consumerRunning).as("停机的第 5 步在它起来之前就走过了（停了个空）：启动线程起完后自己补停").isFalse();
+        assertThat(events.get(events.size() - 1)).isEqualTo("consumer.stop");
+        assertThat(events).containsSubsequence("consumer.start:exit", "consumer.stop");
+    }
+
+    @Test
+    void 评分消费起的途中整个停机序列已经跑完_起完后补停一次_不打就绪日志(CapturedOutput output) {
+        MatchLifecycle[] holder = new MatchLifecycle[1];
+        ResultConsumerControl closingWhileStarting = new ResultConsumerControl() {
+            @Override
+            public void start() {
+                events.add("consumer.start");
+                // 评分消费正在起的时候整个停机序列跑完了（同一条线程上模拟：停机的第 5 步停了个空）
+                holder[0].stopMatcher();
+                holder[0].stop();
+            }
+
+            @Override
+            public void stop() {
+                events.add("consumer.stop");
+            }
+        };
+        holder[0] = new MatchLifecycle(matcher, closingWhileStarting, gathers, drainWorkers, MatchLifecycle.GATHER_DRAIN_TIMEOUT);
+        holder[0].start();
+
+        holder[0].startBackground();
+
+        assertThat(events).containsExactly("matcher.start", "consumer.start", "matcher.stop", "workers.drain", "gathers.awaitIdle(10s)",
+                "consumer.stop", "consumer.stop");
+        assertThat(output.getOut()).as("进程正在停：不打就绪日志（切片脚本拿它当就绪判据）").doesNotContain("match 已就绪");
     }
 
     @Test

@@ -30,7 +30,8 @@ import org.slf4j.LoggerFactory;
  *   <li>解不出的消息写毒丸日志 {@value #POISON_LOGGER} 后跳过并提交（留在 topic 里只会每次重启都撞一遍）；</li>
  *   <li>key 与 payload 里的 battle_id 不一致只打日志，以 payload 为准；</li>
  *   <li>入账<b>成功才</b> {@code commitSync}（已入账、重复、不计分都算成功）——崩在两者之间只会重放，入账按 battle_id 幂等；</li>
- *   <li>数据错误（SQLState 22 / 23：这一条写不进去，重试无益）写毒丸日志后跳过；</li>
+ *   <li>数据错误（SQLState 22 / 23：这一条写不进去，重试无益）写毒丸日志后跳过，计
+ *       {@code xm_match_rating_updates_total{outcome="rejected"}}（这一局永不入账，要告警）；</li>
  *   <li><b>其余故障一律可恢复、不跳过</b>（有意差异 M19；基线重试 3 次后跳过）：暂停全部分区（继续 poll 保住组成员身份）、退避
  *       1 s → 30 s 后重试<b>原记录</b>，不提交位点；期间 {@code xm_match_rating_consumer_paused = 1}（评分整体停更，排队照常）；</li>
  *   <li>重试期间这条记录所在的分区被重平衡收走：放弃它与本批里同分区的后续记录（位点没提交，新主人会重新拿到）。</li>
@@ -196,6 +197,8 @@ public final class BattleResultConsumer implements Runnable {
                     if (RatingSqlErrors.isDataError(e)) {
                         poison.error("对局结果被数据库拒绝，跳过 topic={} partition={} offset={} battle={} bytes={} 错误={}", record.topic(),
                                 record.partition(), record.offset(), battle, encoded(record.value()), String.valueOf(rootMessage(e)));
+                        // 永久丢弃要有自己的计数：入账那一步记的 error 与可恢复故障每次重试记的是同一个标签，库抖动时分不出来
+                        metrics.ratingUpdate(event.getMatchMode(), RatingOutcome.REJECTED);
                         return true;
                     }
                     log.warn("[rating] 对局结果入账失败，{} 后重试（不提交位点、不跳过） battle={} partition={} offset={}: {}", delay, battle,

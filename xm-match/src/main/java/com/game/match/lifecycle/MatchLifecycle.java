@@ -49,7 +49,16 @@ import org.springframework.core.Ordered;
  * gather 本身不受影响、在第 4 步的窗口里跑完并自己收尾票据。
  *
  * <p>各步都幂等、互不抛异常（停机路径上任何一步出错只记日志，继续后面的步骤）；启动的第 8 / 9 步抛异常 = 拒绝启动（Spring Boot 随即关闭上下文，
- * 走上面的停机序列）。回调都在启动线程 / 关停线程上，线程安全。
+ * 走上面的停机序列）。
+ *
+ * <p><b>线程</b>：启动的第 8 / 9 步在启动线程上（{@link ApplicationStartedEvent} 在上下文刷新返回之后才发），停机各步在关停线程上
+ * （SIGTERM 时是 JVM 的关停钩子线程）——「刚启动完就收到 SIGTERM」时两条线程会<b>同时</b>在这个类里。约定：
+ * <ul>
+ *   <li>「判停机 → 起凑单」与「置停机 → 停凑单」经同一把锁（{@code gate}）串行：要么停机先到、凑单不再起；要么凑单先起完、停机接着把它停掉。
+ *       不许出现「停机认为没起过而跳过，随后凑单照样起来」——那样凑单会在 Dubbo 撤导出、工作池排空期间继续弹组。</li>
+ *   <li>评分消费的 {@code start()} 会同步核对 topic（至多 {@code init-timeout}），<b>不放在锁里</b>（否则关停线程的第 1 步要等它，其间凑单还在跑、
+ *       Dubbo 也撤不了导出）：锁里只定「起不起」，起完再看一眼停机是否已经走过第 5 步，走过了就自己补停。启停口自身保证 start / stop 互斥。</li>
+ * </ul>
  */
 public final class MatchLifecycle implements SmartLifecycle, SmartApplicationListener, ApplicationContextAware {
 
@@ -66,11 +75,18 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
     private final Runnable drainWorkers;
     private final Duration gatherDrainTimeout;
 
+    /**
+     * 串行化启动线程与关停线程对「起不起 / 停不停」的判定（见类注释「线程」）。锁里只有凑单的启停（start 不阻塞；stop 有界地等当前一轮结束）
+     * 与两个「起过没有」标志的读写；评分消费的启停都在锁外。
+     */
+    private final Object gate = new Object();
     private final AtomicBoolean backgroundStarted = new AtomicBoolean();
     private final AtomicBoolean matcherStopped = new AtomicBoolean();
     private final AtomicBoolean stopped = new AtomicBoolean();
-    private volatile boolean matcherStartAttempted;
-    private volatile boolean consumerStartAttempted;
+    /** 只在持有 {@link #gate} 时读写。 */
+    private boolean matcherStartAttempted;
+    /** 只在持有 {@link #gate} 时读写。 */
+    private boolean consumerStartAttempted;
     private volatile boolean running;
     private volatile ApplicationContext context;
 
@@ -128,27 +144,45 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
      * @throws RuntimeException 任何一步启动失败（原样抛出 = 拒绝启动）
      */
     public void startBackground() {
-        if (matcherStopped.get() || stopped.get() || !backgroundStarted.compareAndSet(false, true)) {
+        synchronized (gate) {
+            // 判定与启动在同一把锁里：停机的第 1 步要么已经做过（这里不再起），要么排在 matcher.start() 返回之后（它会把凑单停掉）
+            if (matcherStopped.get() || stopped.get() || !backgroundStarted.compareAndSet(false, true)) {
+                return;
+            }
+            matcherStartAttempted = true;
+            matcher.start(); // 不阻塞（只是排上定时任务）
+        }
+        synchronized (gate) {
+            if (matcherStopped.get() || stopped.get()) {
+                // 凑单刚起来停机就开始了：评分消费不必再起
+                return;
+            }
+            consumerStartAttempted = true;
+        }
+        // 有界阻塞（同步核对 topic），不能占着锁：关停线程的第 1 步不该等它
+        consumer.start();
+        if (stopped.get()) {
+            // 停机的第 5 步可能在 consumer.start() 之前就走过了（那时还没起，停了个空）：自己补停。停两次无妨（幂等）
+            stopConsumerQuietly("启动途中进入停机，补停评分消费");
             return;
         }
-        matcherStartAttempted = true;
-        matcher.start();
-        consumerStartAttempted = true;
-        consumer.start();
         log.info("match 已就绪：Dubbo 已导出，凑单与评分消费已启动");
     }
 
     /** 停机第 1 步：停凑单并等当前一轮结束。幂等；凑单没启动过就什么都不做。 */
     public void stopMatcher() {
-        if (!matcherStopped.compareAndSet(false, true) || !matcherStartAttempted) {
-            return;
-        }
-        long startedNanos = System.nanoTime();
-        try {
-            matcher.stop();
-            log.info("停机 1/5：凑单已停（{} ms）", elapsedMillis(startedNanos));
-        } catch (Throwable t) {
-            log.error("停机 1/5：停凑单出错（继续停机；已弹出的组由各自的 gather 或 matched TTL 收尾）", t);
+        synchronized (gate) {
+            // 置位与停止在同一把锁里：启动线程若正卡在 matcher.start() 里，这里等它起完再停；若还没进来，它之后看到置位就不再起
+            if (!matcherStopped.compareAndSet(false, true) || !matcherStartAttempted) {
+                return;
+            }
+            long startedNanos = System.nanoTime();
+            try {
+                matcher.stop();
+                log.info("停机 1/5：凑单已停（{} ms）", elapsedMillis(startedNanos));
+            } catch (Throwable t) {
+                log.error("停机 1/5：停凑单出错（继续停机；已弹出的组由各自的 gather 或 matched TTL 收尾）", t);
+            }
         }
     }
 
@@ -199,15 +233,22 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
     }
 
     private void stopConsumer() {
-        if (!consumerStartAttempted) {
-            return;
+        synchronized (gate) {
+            if (!consumerStartAttempted) {
+                return;
+            }
         }
+        // 启动线程可能还没走到 consumer.start()（或正卡在它里面）：这里停个空、或等它返回后停掉；停了个空的那种由启动线程自己补停
+        stopConsumerQuietly("停机 5/5");
+    }
+
+    private void stopConsumerQuietly(String step) {
         long startedNanos = System.nanoTime();
         try {
             consumer.stop();
-            log.info("停机 5/5：评分消费已停（{} ms）", elapsedMillis(startedNanos));
+            log.info("{}：评分消费已停（{} ms）", step, elapsedMillis(startedNanos));
         } catch (Throwable t) {
-            log.error("停机 5/5：停评分消费出错（未提交的位点下次启动重放）", t);
+            log.error("{}：停评分消费出错（未提交的位点下次启动重放）", step, t);
         }
     }
 

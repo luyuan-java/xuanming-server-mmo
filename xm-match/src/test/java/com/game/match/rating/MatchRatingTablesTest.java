@@ -12,8 +12,10 @@ import com.google.protobuf.Descriptors.FieldDescriptor;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -84,10 +86,25 @@ class MatchRatingTablesTest {
         assertThat(RatingStore.SQL_DELETE_APPLIED).isEqualTo("DELETE FROM " + MatchRatingTables.APPLIED + " WHERE applied_at_ms < ? LIMIT ?");
     }
 
+    /**
+     * 标记是恰好一次的唯一依据：它必须比结果消息活得久，否则「标记已删、消息还在」的那段时间里一次从最早位点的重放就是重复入账。
+     * 消息的最长寿命 = topic 的保留期 + 滚段周期（Kafka 按段删除，段里最新一条过了保留期整段才删）。topic 的规格在 xm-audit，
+     * 那边改保留期或声明 segment.ms 时这条用例会红，提醒把 {@link RatingCleanup#RETENTION} 一起重算。
+     */
     @Test
-    void 入账标记的保留期等于对局结果topic的保留期() {
-        assertThat(BattleResultTopics.spec(1).configs()).containsEntry("retention.ms", Long.toString(RatingCleanup.RETENTION.toMillis()));
-        assertThat(RatingCleanup.RETENTION.toDays()).isEqualTo(7);
+    void 入账标记的保留期长于结果消息在topic里的最长寿命_保留期加滚段周期再加一周余量() {
+        Map<String, String> topic = BattleResultTopics.spec(1).configs();
+        long retentionMs = Long.parseLong(topic.get("retention.ms"));
+        // 没有声明 segment.ms 时取 broker 的缺省滚段周期（log.roll.hours = 168）
+        long segmentRollMs = topic.containsKey("segment.ms") ? Long.parseLong(topic.get("segment.ms")) : Duration.ofDays(7).toMillis();
+        long weekMs = Duration.ofDays(7).toMillis();
+
+        assertThat(retentionMs).as("topic 保留 7 天").isEqualTo(604_800_000L);
+        assertThat(RatingCleanup.TOPIC_RETENTION.toMillis()).as("RatingCleanup 里抄的那份与 topic 规格一致").isEqualTo(retentionMs);
+        assertThat(RatingCleanup.TOPIC_SEGMENT_ROLL.toMillis()).isEqualTo(segmentRollMs);
+        assertThat(RatingCleanup.RETENTION_MARGIN.toMillis()).isGreaterThanOrEqualTo(weekMs);
+        assertThat(RatingCleanup.RETENTION.toMillis()).as("标记保留期 ≥ 消息最长寿命 + 余量").isGreaterThanOrEqualTo(retentionMs + segmentRollMs + weekMs);
+        assertThat(RatingCleanup.RETENTION.toDays()).isEqualTo(30);
     }
 
     @Test
