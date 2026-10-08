@@ -30,7 +30,8 @@ import org.junit.jupiter.api.Test;
  * <p>用例不依赖「拨时钟」（真 Redis 的 {@code TIME} 拨不动）：「过期的成员」靠写入一个旧分数（{@code nowMs() − 360 s − 余量}）摆出来；
  * 时刻断言夹在调用前后各读一次存储时间之间；TTL 断言留 {@link #TTL_SLACK} 的余量。玩家号、战斗号经钩子分配（{@link #pid} / {@link #battle}）：
  * Redis 版每个用例用随机的一段，用完只删自己的键。<b>可观战索引是全局的一把键</b>：这些用例假定每个用例开始时索引是空的、期间没有别人写它
- * （内存版每个用例一个新存储；Redis 版在自己的 DB 里清掉这把键）。
+ * （内存版每个用例一个新存储；Redis 版每个用例给存储一把自己的索引键——同槽、以生产键为前缀——不去清、也不受别人影响那把全局的键）。
+ * 恰好卡在「存储时间」上的边界（分数恰在过期分界、TTL 恰好 360 s、重放不刷新 TTL）：内存版用手拨时钟钉，Redis 版用钉住时钟的脚本副本与改短 TTL 钉。
  */
 public abstract class SpectateStoreContract {
 
@@ -68,7 +69,10 @@ public abstract class SpectateStoreContract {
     /** 写一条好的落点记录（attempt 字段与消息一致，同 {@code PlacementStore.write}）。 */
     protected abstract void givenPlacement(BattlePlacement placement);
 
-    /** 摆一条「键在、但不是好记录」的落点（缺字段 / 解析不了）。 */
+    /**
+     * 摆一条「键在、但不是好记录」的落点，而且<b>没有可比对的 attempt</b>（Redis 版：HASH 里没有 {@code a} 字段、{@code pb} 是解析不了的字节）。
+     * 别的损坏形状（{@code a} 在而 {@code pb} 坏、键被占成别的类型……）由 Redis 版自己的用例覆盖。
+     */
     protected abstract void givenCorruptPlacement(long battleId);
 
     /** 落点键此刻在不在（好的坏的都算在）。 */
@@ -213,6 +217,38 @@ public abstract class SpectateStoreContract {
     }
 
     @Test
+    void 空串的脏标记_读得到_挡着别人抢_按原串删得掉() {
+        givenMark(pid(1), "");
+
+        Entry entry = store().entry(pid(1), d());
+        assertThat(entry.mark()).as("空串也是「有标记」：不能和没有标记混为一谈，否则它会让这名玩家一直抢不到").contains("");
+        assertThat(store().marksOf(List.of(pid(1)), d())).containsOnly(Map.entry(pid(1), ""));
+        assertThat(store().acquire(pid(1), mark(battle(1)), d())).isEqualTo(Acquire.BUSY);
+
+        assertThat(store().release(pid(1), "", d())).isTrue();
+
+        assertThat(markOf(pid(1))).isEmpty();
+        assertThat(store().entry(pid(1), d()).mark()).isEmpty();
+        assertThatThrownBy(() -> store().release(pid(1), null, d())).as("null 才是调用方的错").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store().acquire(pid(1), "", d())).as("抢标记的值必须是编出来的整串").isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void acquire_没写的两种结果再来一遍还是没写_QUEUED与BUSY都不动存储() {
+        String held = mark(battle(1));
+        givenMark(pid(1), held);
+        givenTicket(pid(2));
+
+        for (int round = 0; round < 2; round++) {
+            assertThat(store().acquire(pid(1), mark(battle(2)), d())).as("第 %d 遍", round + 1).isEqualTo(Acquire.BUSY);
+            assertThat(store().acquire(pid(2), mark(battle(2)), d())).as("第 %d 遍", round + 1).isEqualTo(Acquire.QUEUED);
+        }
+
+        assertThat(markOf(pid(1))).contains(held);
+        assertThat(markOf(pid(2))).isEmpty();
+    }
+
+    @Test
     void releaseAsync_发出即返回_最终按值删掉_值不等的不动() {
         String mine = mark(battle(1));
         String kept = mark(battle(2));
@@ -240,6 +276,18 @@ public abstract class SpectateStoreContract {
         assertThat(marks).containsOnly(Map.entry(pid(1), first), Map.entry(pid(3), "脏值"));
         assertThat(store().marksOf(List.of(pid(2)), d())).isEmpty();
         assertThat(store().marksOf(List.of(), d())).isEmpty();
+    }
+
+    @Test
+    void marksOf_重复的玩家号只算一次_结果按名单的次序() {
+        String third = mark(battle(3));
+        String first = mark(battle(1));
+        givenMark(pid(3), third);
+        givenMark(pid(1), first);
+
+        Map<Long, String> marks = store().marksOf(List.of(pid(3), pid(2), pid(1), pid(3)), d());
+
+        assertThat(marks).containsExactly(Map.entry(pid(3), third), Map.entry(pid(1), first));
     }
 
     // ================================================================ S_W_READ
@@ -317,9 +365,26 @@ public abstract class SpectateStoreContract {
         assertThat(((Pick.Member) middle).member()).as("⌊0.5 × 3⌋ = 1").isEqualTo(member(battle(3)));
         assertThat(((Pick.Member) last).member()).as("⌊0.999999 × 3⌋ = 2：分数最大的").isEqualTo(member(battle(4)));
         assertThat(((Pick.Member) last).score()).isEqualTo(index().get(member(battle(4))));
+        assertThat(((Pick.Member) store().pickRandom(Math.nextDown(1.0), d())).member()).as("r 取 1 之前最大的 double：仍是最后一个，不越界")
+                .isEqualTo(member(battle(4)));
+        assertThat(((Pick.Member) store().pickRandom(Double.MIN_VALUE, d())).member()).as("r 取最小的正数（写成科学计数法）：第一个")
+                .isEqualTo(member(battle(2)));
         for (double r : new double[] {0.0, 0.2, 0.34, 0.5, 0.67, 0.9, 0.999_999}) {
             assertThat(((Pick.Member) store().pickRandom(r, d())).member()).as("r=%s", r).isNotEqualTo(member(battle(1)));
         }
+    }
+
+    @Test
+    void pickRandom_同分的成员按成员字符串升序排_次序是确定的() {
+        long score = freshScore(5_000);
+        givenMember("200", score);
+        givenMember("100", score);
+        givenMember("300", score);
+
+        assertThat(((Pick.Member) store().pickRandom(0.0, d())).member()).isEqualTo("100");
+        assertThat(((Pick.Member) store().pickRandom(0.34, d())).member()).as("⌊0.34 × 3⌋ = 1").isEqualTo("200");
+        assertThat(((Pick.Member) store().pickRandom(0.99, d())).member()).isEqualTo("300");
+        assertThat(((Pick.Member) store().pickRandom(0.99, d())).score()).isEqualTo(score);
     }
 
     @Test
@@ -408,6 +473,65 @@ public abstract class SpectateStoreContract {
         assertThat(placementExists(battle(1))).isFalse();
         assertThat(placementOf(battle(2))).contains(alive);
         assertThat(placementOf(battle(3))).contains(unpublished);
+    }
+
+    @Test
+    void evict_缺记录与过期_原样再来一遍是false_什么都不再改() {
+        long cutoff = SpectateRules.staleCutoff(nowMs());
+        givenMember(member(battle(1)), freshScore(1_000));
+        givenMember(member(battle(2)), cutoff - 1);
+        givenPlacement(placement(battle(2), 1, cutoff - 1));
+        givenMember(member(battle(3)), freshScore(1_000));
+
+        assertThat(store().evict(new Eviction.Missing(battle(1)), d())).isTrue();
+        assertThat(store().evict(new Eviction.Missing(battle(1)), d())).as("重放：成员已不在").isFalse();
+        assertThat(store().evict(new Eviction.Stale(battle(2), cutoff), d())).isTrue();
+        assertThat(store().evict(new Eviction.Stale(battle(2), cutoff), d())).as("重放：成员已不在").isFalse();
+
+        assertThat(index()).as("不相干的成员不受影响").containsOnlyKeys(member(battle(3)));
+        assertThat(placementExists(battle(2))).isFalse();
+    }
+
+    @Test
+    void 重放的剔除不误伤两次之间重新预写的落点_缺记录与房间已死都不动新记录() {
+        // 第一遍：1 号场的落点不在、2 号场 attempt = 1 的房间已死，都摘掉了；随后同一个 battle_id 又有了新的落点（活动开局的号先于 gather 发出）
+        givenMember(member(battle(1)), freshScore(40_000));
+        assertThat(store().evict(new Eviction.Missing(battle(1)), d())).isTrue();
+        givenPlacement(placement(battle(2), 1, freshScore(40_000)));
+        assertThat(store().evict(new Eviction.Dead(battle(2), 1), d())).isTrue();
+        BattlePlacement rewrittenFirst = placement(battle(1), 1, freshScore(500));
+        BattlePlacement rewrittenSecond = placement(battle(2), 2, freshScore(500));
+        givenPlacement(rewrittenFirst);
+        givenPlacement(rewrittenSecond);
+
+        assertThat(store().evict(new Eviction.Missing(battle(1)), d())).as("迟到的重发：落点又在了").isFalse();
+        assertThat(store().evict(new Eviction.Dead(battle(2), 1), d())).as("迟到的重发：attempt 已经是 2").isFalse();
+
+        assertThat(placementOf(battle(1))).contains(rewrittenFirst);
+        assertThat(placementOf(battle(2))).contains(rewrittenSecond);
+    }
+
+    @Test
+    void 损坏的落点_读成Corrupt_缺记录与房间已死的剔除都不动它_公开不登记_过期照删() {
+        long cutoff = SpectateRules.staleCutoff(nowMs());
+        givenCorruptPlacement(battle(1));
+        givenMember(member(battle(1)), freshScore(1_000));
+        givenCorruptPlacement(battle(2));
+        givenMember(member(battle(2)), cutoff - 1);
+        givenCorruptPlacement(battle(3));
+
+        assertThat(store().read(battle(1), d()).record()).isInstanceOf(Record.Corrupt.class);
+        assertThat(store().evict(new Eviction.Missing(battle(1)), d())).as("键在：不是缺记录").isFalse();
+        assertThat(store().evict(new Eviction.Dead(battle(1), 1), d())).as("没有可比对的 attempt：不动").isFalse();
+        assertThat(store().publish(placement(battle(3), 1, freshScore(1_000)), d())).as("损坏的落点不公开").isFalse();
+        assertThat(placementExists(battle(1))).isTrue();
+        assertThat(placementExists(battle(3))).isTrue();
+        assertThat(index()).containsOnlyKeys(member(battle(1)), member(battle(2)));
+
+        assertThat(store().evict(new Eviction.Stale(battle(2), cutoff), d())).as("过期只看分数，不看记录好坏").isTrue();
+
+        assertThat(placementExists(battle(2))).isFalse();
+        assertThat(index()).containsOnlyKeys(member(battle(1)));
     }
 
     @Test

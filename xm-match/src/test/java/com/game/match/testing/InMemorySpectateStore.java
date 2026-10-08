@@ -46,7 +46,18 @@ import java.util.function.LongConsumer;
  * </pre>
  * 故障注入的操作名 = 接口方法名；可变方法另有 {@code ":after"}（见 {@link Faults}）。截止已过时不执行、直接抛（同真实现）。
  * 两个 {@code *Async} 方法在调用线程上<b>当场生效</b>（确定性），除非被 {@link #hang} 挂起或注入了同名故障（那一次静默丢弃，记进 {@link #droppedAsync}）。
- * 线程安全（一把锁，临界区里不阻塞）。不模拟的：落点记录的 TTL、损坏记录的 attempt 字段（{@code Dead} 剔除遇到损坏记录一律不动）。
+ * 线程安全（一把锁，临界区里不阻塞）。
+ *
+ * <p><b>与 Redis 实现的已知差别</b>（都只在脏数据或真并发下可见，163 / 164 / 钩子的正常路径走不到；Redis 一侧由
+ * {@code RedissonSpectateStoreIntegrationTest} 钉住）：
+ * <ul>
+ *   <li>不模拟落点记录的 TTL（360 s 的到期由落点存储的集成测试钉）。</li>
+ *   <li>损坏的落点在这里没有「attempt 字段」可言：{@code Dead} 剔除与 {@link #publish} 遇到 {@code corrupt(id)} 标过的记录一律不动 / 不登记。
+ *       Redis 上这两段脚本只比 HASH 的 {@code a} 字段——{@code a} 缺失时与这里相同；{@code a} 还对得上、只是 {@code pb} 坏了的记录，
+ *       Redis 上照删 / 照登记。</li>
+ *   <li>索引成员、标记值在这里就是 Java 字符串；Redis 实现对成员按字节一一对应、对标记按 UTF-8（见 {@code RedissonSpectateStore} 的类注释）。</li>
+ *   <li>「没有票 ∧ 写标记」在这里跨两个内存存储各一把锁，不是真正的原子（单线程用例 + {@link #beforeAcquire} 足够）。</li>
+ * </ul>
  */
 public final class InMemorySpectateStore implements SpectateStore {
 
@@ -293,7 +304,7 @@ public final class InMemorySpectateStore implements SpectateStore {
 
     @Override
     public boolean release(long playerId, String markValue, Deadline d) {
-        requireMarkValue(markValue);
+        requireMark(markValue);
         calls.add("release(" + Long.toUnsignedString(playerId) + "," + markValue + ")");
         enter("release", d);
         boolean removed = releaseNow(playerId, markValue);
@@ -303,7 +314,7 @@ public final class InMemorySpectateStore implements SpectateStore {
 
     @Override
     public void releaseAsync(long playerId, String markValue) {
-        requireMarkValue(markValue);
+        requireMark(markValue);
         String call = "releaseAsync(" + Long.toUnsignedString(playerId) + "," + markValue + ")";
         calls.add(call);
         async("releaseAsync", call, () -> releaseNow(playerId, markValue));
@@ -587,9 +598,17 @@ public final class InMemorySpectateStore implements SpectateStore {
         effect.run();
     }
 
+    /** 抢标记的值：必须是编出来的整串，空串是调用方的错。 */
     private static void requireMarkValue(String markValue) {
         if (markValue == null || markValue.isEmpty()) {
             throw new IllegalArgumentException("标记值不能为空");
+        }
+    }
+
+    /** 删标记的值：读到什么就传什么——脏标记可以是空串，所以只拒 null（同真实现）。 */
+    private static void requireMark(String markValue) {
+        if (markValue == null) {
+            throw new IllegalArgumentException("标记值不能为 null");
         }
     }
 
