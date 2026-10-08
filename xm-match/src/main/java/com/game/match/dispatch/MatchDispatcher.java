@@ -33,8 +33,9 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li>没有处理器的号（含契约里没有的号）→ 信封 1003；</li>
  *   <li>截止 = 受理时刻 + 请求预算（含之后的排队时间）；</li>
- *   <li>{@link MatchMethodHandler#inline()} 的处理器在调用线程（Dubbo 线程）上当场执行；其余投到 {@link MatchWorkers}；</li>
- *   <li>工作池拒收、或轮到执行时预算已用完 → 不调 {@code handle}，按 {@link MatchMethodHandler#onOverload()} 回（M29）；</li>
+ *   <li>{@link MatchMethodHandler#inline()} 的处理器在调用线程（Dubbo 线程）上当场执行；其余投到一个执行器上——处理器经
+ *       {@link MatchMethodHandler#executor()} 给了自己的就用它（163 观战：虚拟线程 + 在途上限），没给（null）就是 {@link MatchWorkers}；</li>
+ *   <li>执行器拒收（工作池满 / 163 的在途已满）、或轮到执行时预算已用完 → 不调 {@code handle}，按 {@link MatchMethodHandler#onOverload()} 回（M29）；</li>
  *   <li>{@code handle} 抛 {@link InvalidProtocolBufferException}（请求体解析失败）或未分类的 RuntimeException → 信封 1003。</li>
  * </ol>
  * 处理器的登记规则：方法名经 {@code MessageIdRegistry} 换成消息号；同一个方法两个处理器、或方法名不在契约的 {@code MatchService} 里，构造即失败。
@@ -66,7 +67,7 @@ public final class MatchDispatcher {
 
     /**
      * @param handlers     全部处理器 bean（可以为空：这时每个号都回信封 1003）
-     * @param workers      {@code match-worker} 工作池（测试可传同步执行器）
+     * @param workers      {@code match-worker} 工作池（测试可传同步执行器）：没有自带执行器的处理器都投到它上面
      * @param budgetMillis 整请求预算（{@code xm.match.request-budget}）
      * @param leaseLost    发号租约是否已真正丢失（生产为 {@code MatchIds::leaseLost}）；每次派发读一次，不得阻塞
      * @throws IllegalStateException 处理器的方法名不在契约的 {@code MatchService} 里，或同一个方法有两个处理器
@@ -124,12 +125,22 @@ public final class MatchDispatcher {
         if (handler.inline()) {
             return CompletableFuture.completedFuture(run(handler, call, deadline, sample));
         }
+        Executor own;
+        try {
+            own = handler.executor();
+        } catch (RuntimeException e) { // 违反约定：executor() 不该抛。按处理器异常收场，不让它漏成 Dubbo 层的错误
+            log.error("[match] {} 的 executor() 抛了异常（回信封 1003）{}", handler.method(), describe(call.getSession()), e);
+            metrics.requestCompleted(sample, handler.method(), RequestResult.ERROR);
+            return CompletableFuture.completedFuture(envelope(MatchTips.SERVICE_UNAVAILABLE));
+        }
+        boolean shared = own == null;
+        Executor executor = shared ? workers : own;
         CompletableFuture<ClientReply> reply = new CompletableFuture<>();
         try {
-            workers.execute(() -> {
+            executor.execute(() -> {
                 try {
                     reply.complete(deadline.expired()
-                            ? overloaded(handler, call, sample, "请求在工作队列里等过了预算")
+                            ? overloaded(handler, call, sample, shared ? "请求在工作队列里等过了预算" : "请求在处理器自己的执行器里等过了预算")
                             : run(handler, call, deadline, sample));
                 } catch (Error e) { // run / overloaded 已兜住 RuntimeException；这里只防 Error 让 future 永不完成
                     reply.complete(envelope(MatchTips.SERVICE_UNAVAILABLE));
@@ -137,7 +148,7 @@ public final class MatchDispatcher {
                 }
             });
         } catch (RejectedExecutionException e) {
-            reply.complete(overloaded(handler, call, sample, "工作队列已满"));
+            reply.complete(overloaded(handler, call, sample, shared ? "工作队列已满" : "处理器自己的执行器拒收（在途已满或已关闭）"));
         }
         return reply;
     }

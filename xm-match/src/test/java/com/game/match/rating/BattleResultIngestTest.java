@@ -9,6 +9,7 @@ import com.game.audit.AuditTopicContractException;
 import com.game.audit.TopicAdmin;
 import com.game.audit.TopicSpec;
 import com.game.match.lifecycle.MatchLifecycle;
+import com.game.match.lifecycle.SweeperControl;
 import com.game.match.lifecycle.MatcherControl;
 import com.game.match.lifecycle.ResultConsumerControl;
 import com.game.match.metrics.MatchMetrics;
@@ -422,7 +423,7 @@ class BattleResultIngestTest {
         List<String> events = new CopyOnWriteArrayList<>();
         FakeGatherLauncher gathers = new FakeGatherLauncher();
         MatchLifecycle lifecycle = new MatchLifecycle(recordingMatcher(events), managed, gathers, () -> events.add("workers.drain"),
-                Duration.ofSeconds(1));
+                Duration.ofSeconds(1), timeout -> true, Duration.ofSeconds(5), SweeperControl.NOOP);
 
         lifecycle.start();
         assertThat(managed.isRunning()).as("SmartLifecycle.start 只登记，后台件等应用已启动").isFalse();
@@ -448,7 +449,7 @@ class BattleResultIngestTest {
         BattleResultIngest mismatched = ingest(true, consumerFactory());
         List<String> events = new CopyOnWriteArrayList<>();
         MatchLifecycle lifecycle = new MatchLifecycle(recordingMatcher(events), mismatched, new FakeGatherLauncher(), () -> { },
-                Duration.ofSeconds(1));
+                Duration.ofSeconds(1), timeout -> true, Duration.ofSeconds(5), SweeperControl.NOOP);
         lifecycle.start();
 
         assertThatThrownBy(lifecycle::startBackground).isInstanceOf(AuditTopicContractException.class)
@@ -464,7 +465,7 @@ class BattleResultIngestTest {
     void 经MatchLifecycle启停_开关关闭时启动是空操作_停机也不出错() {
         BattleResultIngest disabled = ingest(false, consumerFactory());
         MatchLifecycle lifecycle = new MatchLifecycle(recordingMatcher(new CopyOnWriteArrayList<>()), disabled, new FakeGatherLauncher(),
-                () -> { }, Duration.ofSeconds(1));
+                () -> { }, Duration.ofSeconds(1), timeout -> true, Duration.ofSeconds(5), SweeperControl.NOOP);
         lifecycle.start();
 
         lifecycle.startBackground();

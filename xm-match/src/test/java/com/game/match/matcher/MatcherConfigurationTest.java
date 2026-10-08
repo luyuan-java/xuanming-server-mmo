@@ -54,7 +54,7 @@ class MatcherConfigurationTest {
         return new ApplicationContextRunner()
                 .withUserConfiguration(MatcherConfiguration.class)
                 .withBean(MatchProperties.class, () -> new MatchProperties(null, null, new MatchProperties.Matcher(Duration.ofMillis(10), null), null,
-                        null, null, null, null, null, null, null, null))
+                        null, null, null, null, null, null, null, null, null))
                 .withBean(MatchInstance.class, () -> new MatchInstance("inst-ctx"))
                 .withBean(MatchIds.class, () -> new MatchIds(new Snowflake(9), () -> true, () -> false))
                 .withBean(MetricLabels.class, () -> labels)

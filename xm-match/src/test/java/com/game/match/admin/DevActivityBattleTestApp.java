@@ -77,7 +77,7 @@ class DevActivityBattleTestApp {
 
     @Bean
     MatchProperties testMatchProperties() {
-        return new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+        return new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /** 发一次原始 HTTP 请求；{@code operator} 为 null 时不带操作人头。 */

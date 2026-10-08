@@ -1373,6 +1373,11 @@ class GatherPipelineTest {
             public Lookup lookup(int nodeId, String instanceId) {
                 return Lookup.ERROR;
             }
+
+            @Override
+            public Lookup lookup(int nodeId, String instanceId, com.game.common.deadline.Deadline d) {
+                return Lookup.ERROR;
+            }
         };
         GatherPlan plan = f.solo(A);
 

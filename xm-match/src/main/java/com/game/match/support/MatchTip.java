@@ -1,23 +1,25 @@
 package com.game.match.support;
 
 import com.game.proto.TipInfoMessage;
+import java.util.Objects;
 
 /**
  * xm-match 回给客户端的每一种 in-band tip：码 + {@code parameters[0]} 的中文串（match-spec §2.2、§4.1、§6.1、§8.2）。
  *
  * <p><b>客户端契约，逐字节照搬基线</b>（{@code tipErr}，{@code join.go:18-21}：{@code TipInfoMessage{id, parameters = [文案]}}）：客户端按 id 查表内文案，
  * {@code parameters[0]} 另带服务端写死的中文说明。<b>文案里的逗号是半角</b>（基线源码如此），不要「顺手」改成全角；{@code MatchTipsTest} 逐字节钉住。
- * 同一个码在不同发生点文案不同（16004 有三种、16010 有两种、16012 有两种），所以按「发生点」列常量，不按码列。
+ * 同一个码在不同发生点文案不同（16004 有三种、16010 有两种、16012 有两种、16018 有两种），所以按「发生点」列常量，不按码列。
  *
- * <p>码一律取自 {@link MatchTips}（其值来自导表生成的枚举），不手写数字。永不发出的码（16005 / 16006）与 6.5 的观战码（16014–16019）不在这里。
+ * <p>码一律取自 {@link MatchTips}（其值来自导表生成的枚举），不手写数字。永不发出的码（16005 / 16006）不在这里。
+ * 163 观战的六个码（16014–16019）与它的 9 条文案（其中两条 16004 与别的号共用）见文件末尾一段（spectate-spec §3.2）。
  */
 public enum MatchTip {
 
     // ---- 16004 kMatchInternal：身份缺失、依赖故障、过载、邀请发送失败 ----
 
-    /** 会话没有绑定玩家（{@code SessionContext.player_id = 0}）：157 / 152 / 151 / 179 的第 1 行。 */
+    /** 会话没有绑定玩家（{@code SessionContext.player_id = 0}）：157 / 152 / 151 / 179 / 163 的第 1 行。 */
     NO_IDENTITY(MatchTips.INTERNAL, "缺少玩家身份"),
-    /** 依赖故障（读战斗锁 / 票据 / 位置 / 在线目录 / 落点出错、发号失败、建票出错）与工作池过载：157 / 152 / 151 / 179 共用。 */
+    /** 依赖故障（读战斗锁 / 票据 / 位置 / 在线目录 / 落点 / 观战标记与索引出错、发号失败、建票出错）、过载（工作池满、163 的在途已满）与 163 的预算不足：157 / 152 / 151 / 179 / 163 共用。 */
     BUSY(MatchTips.INTERNAL, "服务器繁忙,请稍后再试"),
     /** 152 第 10 行：156 没推到（目标刚好下线、gate 不可达、推送异常）；记录与占坑已清理。 */
     CHALLENGE_INVITE_PUSH_FAILED(MatchTips.INTERNAL, "邀请发送失败,请稍后再试"),
@@ -66,10 +68,23 @@ public enum MatchTip {
     /** 其余传输失败（超时、连上后断开、同实例、目录缺席或读失败）：客户端退避后再补签。 */
     REISSUE_BATTLE_UNAVAILABLE(MatchTips.SERVICE_UNAVAILABLE, "战斗服务暂不可用"),
 
-    // ---- 163 WatchBattle（6.4 临时应答，M22；6.5 换成真语义） ----
+    // ---- 163 WatchBattle（批次 6.5；spectate-spec §3.1 的判定顺序、§3.2 的 9 条文案。身份缺失 / 依赖故障 / 过载两条 16004 复用上面的
+    //      NO_IDENTITY 与 BUSY） ----
 
-    /** 「该功能当前不可用」：只有 id、<b>不带 parameters</b>（Java 对未做的号的统一形状）。 */
-    FEATURE_UNAVAILABLE(MatchTips.FEATURE_UNAVAILABLE, null);
+    /** 第 3、14 行与抢标记回「有票」：持票（任意状态，含开局后 60 s 的 ready 残留，BW1）；登记成功后的复查命中票据或战斗锁（含读锁出错，BW2）也回它。 */
+    WATCH_QUEUED(MatchTips.SPECTATE_WHILE_QUEUED, "匹配中无法观战"),
+    /** 第 5 行：入口检查时战斗锁存在。 */
+    WATCH_IN_BATTLE(MatchTips.SPECTATE_WHILE_IN_BATTLE, "战斗尚未结束,无法观战"),
+    /** 第 13 行：抢观战标记时标记已被同一玩家的另一条并发 163 占着。<b>只有这一个出口</b>——已有标记本身不拒绝（换场 / 重看，第 7 行）。 */
+    WATCH_ALREADY(MatchTips.ALREADY_WATCHING, "已在观战另一场战斗"),
+    /** 第 18 行：随机观战两轮都没成（索引为空、或挑到的都已收尾）。 */
+    WATCH_NO_BATTLE(MatchTips.NO_WATCHABLE_BATTLE, "当前没有可观战的战斗"),
+    /** 第 12、16 行：落点记录不存在；battle 回「房间不存在」（1004）或节点已判死。码与 {@link #WATCH_NOT_WATCHABLE} 相同（16018），文案不同。 */
+    WATCH_NOT_FOUND(MatchTips.BATTLE_NOT_WATCHABLE, "该战斗不存在或已结束"),
+    /** 第 17 行：battle 的其它拒绝（观众已满、是参战者、签不出票）与传输失败；随机模式也不换场（BW6）。 */
+    WATCH_NOT_WATCHABLE(MatchTips.BATTLE_NOT_WATCHABLE, "该战斗当前无法观战"),
+    /** 第 9 行：在线目录里没有这名玩家的条目（没进游戏、断线、离场）。 */
+    WATCH_OFFLINE(MatchTips.SPECTATE_OFFLINE, "会话不在线,无法观战");
 
     private final int code;
     private final String text;
@@ -77,12 +92,8 @@ public enum MatchTip {
 
     MatchTip(int code, String text) {
         this.code = code;
-        this.text = text;
-        TipInfoMessage.Builder tip = TipInfoMessage.newBuilder().setId(code);
-        if (text != null) {
-            tip.addParameters(text);
-        }
-        this.proto = tip.build();
+        this.text = Objects.requireNonNull(text, "text");
+        this.proto = TipInfoMessage.newBuilder().setId(code).addParameters(text).build();
     }
 
     /** tip 码（{@code TipInfoMessage.id}；157 的 {@code error_code} 与它同值）。 */
@@ -90,7 +101,7 @@ public enum MatchTip {
         return code;
     }
 
-    /** {@code parameters[0]} 的中文串；{@link #FEATURE_UNAVAILABLE} 为 null（不带 parameters）。 */
+    /** {@code parameters[0]} 的中文串（非 null：xm-match 的每一条 in-band tip 都带这一条服务端说明）。 */
     public String text() {
         return text;
     }

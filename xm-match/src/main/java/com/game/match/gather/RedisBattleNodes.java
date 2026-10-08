@@ -1,6 +1,7 @@
 package com.game.match.gather;
 
 import com.game.api.proto.BattleNodeInfo;
+import com.game.common.deadline.Deadline;
 import com.game.discovery.NodeDirectory;
 import com.game.match.metrics.MatchMetrics;
 import java.util.ArrayList;
@@ -24,7 +25,7 @@ import org.slf4j.LoggerFactory;
  * <p><b>可分配</b> = {@code accepting = true} 且直连地址可用（{@code rpc_host} 非空、{@code rpc_port} 在 1..65535）。{@link #pickRandom} 在
  * 「可分配且不在排除集合里」的条目中<b>等概率</b>选一个（基线 v1 同样是纯随机，不看负载）；排除按 (节点号, 实例) 一对——节点号会被新进程复用。
  *
- * <p>三个方法都不抛异常：目录读失败时 {@link #pickRandom} 为空、{@link #census} 带 {@code readFailed}、{@link #lookup} 是
+ * <p>每个方法都不抛异常：目录读失败时 {@link #pickRandom} 为空、{@link #census} 带 {@code readFailed}、两个 {@code lookup} 是
  * {@link Lookup#ERROR}。只在 future / Redis 客户端的同步等待上阻塞（不持锁），可以在虚拟线程上调。线程安全。
  */
 public final class RedisBattleNodes implements BattleNodes {
@@ -33,7 +34,7 @@ public final class RedisBattleNodes implements BattleNodes {
 
     /** battle 池的目录作用域：全服一个池，不分 zone。 */
     static final int BATTLE_SCOPE = 0;
-    /** 判死时读单条目录条目的等待上限：读不出来就按「不能证明任何事」，不让补签为它耗掉整个请求预算。 */
+    /** 判死时读单条目录条目的等待上限：读不出来就按「不能证明任何事」，不让补签为它耗掉整个请求预算。带截止的重载再按截止的剩余收短。 */
     static final long LOOKUP_WAIT_MS = 1_000;
 
     /** 目录的两种读（生产是 {@link NodeDirectory}；单测用内存实现）。 */
@@ -123,6 +124,22 @@ public final class RedisBattleNodes implements BattleNodes {
 
     @Override
     public Lookup lookup(int nodeId, String instanceId) {
+        return lookupWithin(nodeId, instanceId, TimeUnit.MILLISECONDS.toNanos(LOOKUP_WAIT_MS));
+    }
+
+    @Override
+    public Lookup lookup(int nodeId, String instanceId, Deadline d) {
+        Objects.requireNonNull(d, "d");
+        long remainingNanos = d.remainingNanos();
+        if (remainingNanos <= 0) {
+            // 截止已过：不读目录。调用方（带硬截止的直拨）把它当「不能证明任何事」，不判死
+            return Lookup.ERROR;
+        }
+        return lookupWithin(nodeId, instanceId, Math.min(TimeUnit.MILLISECONDS.toNanos(LOOKUP_WAIT_MS), remainingNanos));
+    }
+
+    /** @param waitNanos 等这一次读的上限（&gt; 0） */
+    private Lookup lookupWithin(int nodeId, String instanceId, long waitNanos) {
         String wanted = instanceId == null ? "" : instanceId;
         Optional<BattleNodeInfo> found;
         try {
@@ -130,7 +147,7 @@ public final class RedisBattleNodes implements BattleNodes {
             if (read == null) {
                 return Lookup.ERROR;
             }
-            found = read.get(LOOKUP_WAIT_MS, TimeUnit.MILLISECONDS);
+            found = read.get(waitNanos, TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return Lookup.ERROR;

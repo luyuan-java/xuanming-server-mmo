@@ -40,14 +40,33 @@ public final class MatchTips {
     public static final int CHALLENGE_NOT_TARGET = MatchErrorTip.match_error.kMatchChallengeNotTarget_VALUE;
     public static final int NOT_IN_SCENE = MatchErrorTip.match_error.kMatchNotInScene_VALUE;
 
+    // ---- match 段的观战码（163；spectate-spec §3.1、§3.2。每个码的发生点与文案见 MatchTip 的 WATCH_* 常量） ----
+
+    /** 16014：持票（任意状态）、抢标记时发现有票、登记成功后的复查命中票据或战斗锁。 */
+    public static final int SPECTATE_WHILE_QUEUED = MatchErrorTip.match_error.kMatchSpectateWhileQueued_VALUE;
+    /** 16015：入口检查时有战斗锁。 */
+    public static final int SPECTATE_WHILE_IN_BATTLE = MatchErrorTip.match_error.kMatchSpectateWhileInBattle_VALUE;
+    /** 16016：抢观战标记时被同一玩家的另一条并发 163 占着（唯一出口）。 */
+    public static final int ALREADY_WATCHING = MatchErrorTip.match_error.kMatchAlreadyWatching_VALUE;
+    /** 16017：随机观战没有可看的场。 */
+    public static final int NO_WATCHABLE_BATTLE = MatchErrorTip.match_error.kMatchNoWatchableBattle_VALUE;
+    /** 16018：「该战斗不存在或已结束」与「该战斗当前无法观战」两种文案共用这个码。 */
+    public static final int BATTLE_NOT_WATCHABLE = MatchErrorTip.match_error.kMatchBattleNotWatchable_VALUE;
+    /** 16019：在线目录里没有条目。 */
+    public static final int SPECTATE_OFFLINE = MatchErrorTip.match_error.kMatchSpectateOffline_VALUE;
+
     // ---- 通用段 ----
 
     /** 信封的故障码；也是 179「战斗服务暂不可用」的码。 */
     public static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 179「该战斗不存在或已结束」的码（battle 的同义裁决也原样透传它）。 */
     public static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
-    /** 163 在 6.4 期间的临时应答。 */
-    public static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
+    /**
+     * battle 在 {@code addObserver} 里回的「房间不存在」（1004）：163 判「这一场已收尾 / 还没建好」的<b>唯一</b>信号
+     * （spectate-spec §7.1 第 1 条）；battle 的其它拒绝码（1005 是参战者 / 参数、1008 观众已满、1003 签不出票）一律按「当前无法观战」。
+     * 只用来<b>解读 battle 的应答</b>，xm-match 自己不把它发给客户端。
+     */
+    public static final int BATTLE_ROOM_NOT_FOUND = CommonErrorTip.common_error.kEntityIsNull_VALUE;
 
     private MatchTips() {
     }
@@ -106,10 +125,21 @@ public final class MatchTips {
         return RequestBattleTicketResponse.newBuilder().setErrorMessage(tip.proto()).build();
     }
 
-    // ---------------------------------------------------------------- 163（6.4 临时）
+    // ---------------------------------------------------------------- 163 观战
 
-    /** 163 在 6.4 期间的应答：in-band {@code error_message{1006}}，不带 parameters（M22）。 */
-    public static WatchBattleResponse watchUnavailable() {
-        return WatchBattleResponse.newBuilder().setErrorMessage(MatchTip.FEATURE_UNAVAILABLE.proto()).build();
+    /**
+     * 163 被拒（业务拒绝、依赖故障、过载、预算不足都走它）：只有 {@code error_message}，{@code battle_id} 为 0
+     * （基线 {@code tipErr}；spectate-spec §3.1 表头）。{@code tip} 取 {@code MatchTip.WATCH_*}，或 16004 的 {@link MatchTip#NO_IDENTITY} / {@link MatchTip#BUSY}。
+     */
+    public static WatchBattleResponse watchRejected(MatchTip tip) {
+        return WatchBattleResponse.newBuilder().setErrorMessage(tip.proto()).build();
+    }
+
+    /** 163 成功：只有 {@code battle_id}（随机模式回填实际挑中的那一场），<b>不带</b> {@code error_message}。 */
+    public static WatchBattleResponse watchAccepted(long battleId) {
+        if (battleId == 0) {
+            throw new IllegalArgumentException("观战成功的应答必须带 battle_id");
+        }
+        return WatchBattleResponse.newBuilder().setBattleId(battleId).build();
     }
 }

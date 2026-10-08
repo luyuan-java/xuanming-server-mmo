@@ -46,7 +46,14 @@ class MatchTipsTest {
         EXPECTED.put(MatchTip.CHALLENGE_RESPONDER_BUSY, new Object[] {16010, "战斗尚未结束,无法应战"});
         EXPECTED.put(MatchTip.REISSUE_BATTLE_GONE, new Object[] {1005, "该战斗不存在或已结束"});
         EXPECTED.put(MatchTip.REISSUE_BATTLE_UNAVAILABLE, new Object[] {1003, "战斗服务暂不可用"});
-        EXPECTED.put(MatchTip.FEATURE_UNAVAILABLE, new Object[] {1006, null});
+        // 163 观战（spectate-spec §3.2：9 条 parameters[0]，其中两条 16004 就是上面的 NO_IDENTITY 与 BUSY）
+        EXPECTED.put(MatchTip.WATCH_QUEUED, new Object[] {16014, "匹配中无法观战"});
+        EXPECTED.put(MatchTip.WATCH_IN_BATTLE, new Object[] {16015, "战斗尚未结束,无法观战"});
+        EXPECTED.put(MatchTip.WATCH_ALREADY, new Object[] {16016, "已在观战另一场战斗"});
+        EXPECTED.put(MatchTip.WATCH_NO_BATTLE, new Object[] {16017, "当前没有可观战的战斗"});
+        EXPECTED.put(MatchTip.WATCH_NOT_FOUND, new Object[] {16018, "该战斗不存在或已结束"});
+        EXPECTED.put(MatchTip.WATCH_NOT_WATCHABLE, new Object[] {16018, "该战斗当前无法观战"});
+        EXPECTED.put(MatchTip.WATCH_OFFLINE, new Object[] {16019, "会话不在线,无法观战"});
     }
 
     @Test
@@ -99,7 +106,7 @@ class MatchTipsTest {
                 assertThat(text.chars().filter(c -> c == ',').count()).as(tip + "：恰好一个逗号").isEqualTo(1);
             }
         }
-        assertThat(withComma).as("带逗号的文案共 5 条").isEqualTo(5);
+        assertThat(withComma).as("带逗号的文案共 7 条（6.4 的 5 条 + 观战的「战斗尚未结束,无法观战」「会话不在线,无法观战」）").isEqualTo(7);
     }
 
     @Test
@@ -130,14 +137,61 @@ class MatchTipsTest {
         assertThat(MatchTips.NOT_IN_SCENE).isEqualTo(16020);
         assertThat(MatchTips.SERVICE_UNAVAILABLE).isEqualTo(1003);
         assertThat(MatchTips.INVALID_PARAMETER).isEqualTo(1005);
-        assertThat(MatchTips.FEATURE_UNAVAILABLE).isEqualTo(1006);
+        assertThat(MatchTips.SPECTATE_WHILE_QUEUED).isEqualTo(16014);
+        assertThat(MatchTips.SPECTATE_WHILE_IN_BATTLE).isEqualTo(16015);
+        assertThat(MatchTips.ALREADY_WATCHING).isEqualTo(16016);
+        assertThat(MatchTips.NO_WATCHABLE_BATTLE).isEqualTo(16017);
+        assertThat(MatchTips.BATTLE_NOT_WATCHABLE).isEqualTo(16018);
+        assertThat(MatchTips.SPECTATE_OFFLINE).isEqualTo(16019);
+        assertThat(MatchTips.BATTLE_ROOM_NOT_FOUND).as("battle 回的「房间不存在」：只用来解读 addObserver 的应答").isEqualTo(1004);
     }
 
     @Test
-    void 永不发出的两个码与观战的码不在发生点里() {
+    void 永不发出的两个码不在发生点里_1004与1006也不会由match发给客户端() {
         for (MatchTip tip : MatchTip.values()) {
-            assertThat(tip.code()).as(tip.name()).isNotIn(16005, 16006, 16014, 16015, 16016, 16017, 16018, 16019);
+            assertThat(tip.code()).as(tip.name()).isNotIn(16005, 16006, 1004, 1006);
+            assertThat(tip.text()).as("%s：每条 in-band tip 都带 parameters[0]", tip.name()).isNotEmpty();
+            assertThat(tip.proto().getParametersCount()).as(tip.name()).isEqualTo(1);
         }
+    }
+
+    // ---------------------------------------------------------------- 163 观战（spectate-spec §3.1、§3.2）
+
+    /** 规格 §3.2 的全表，按那一段的原文顺序另抄一份：9 条 parameters[0]，逗号都是半角。 */
+    private static final String[] WATCH_TEXTS = {
+            "缺少玩家身份", "服务器繁忙,请稍后再试", "匹配中无法观战", "战斗尚未结束,无法观战", "会话不在线,无法观战",
+            "已在观战另一场战斗", "当前没有可观战的战斗", "该战斗不存在或已结束", "该战斗当前无法观战"};
+
+    @Test
+    void 观战的9条文案_与规格全表逐字节相同_六个码与两条16004一条不少() {
+        Map<String, Integer> watchTips = new LinkedHashMap<>();
+        for (MatchTip tip : new MatchTip[] {MatchTip.NO_IDENTITY, MatchTip.BUSY, MatchTip.WATCH_QUEUED, MatchTip.WATCH_IN_BATTLE,
+                MatchTip.WATCH_OFFLINE, MatchTip.WATCH_ALREADY, MatchTip.WATCH_NO_BATTLE, MatchTip.WATCH_NOT_FOUND, MatchTip.WATCH_NOT_WATCHABLE}) {
+            watchTips.put(tip.text(), tip.code());
+        }
+
+        assertThat(watchTips.keySet()).as("163 会发出的全部 parameters[0]，按规格的顺序").containsExactly(WATCH_TEXTS);
+        assertThat(watchTips.values()).containsExactly(16004, 16004, 16014, 16015, 16019, 16016, 16017, 16018, 16018);
+        for (String text : WATCH_TEXTS) {
+            assertThat(text).doesNotContain("，");
+        }
+        // 两条带逗号的观战文案：逗号是 0x2C，前后各是完整的汉字
+        assertThat(hex(MatchTip.WATCH_IN_BATTLE.text())).as("「战斗尚未结束,无法观战」")
+                .isEqualTo("e68898e69697e5b09ae69caae7bb93e69d9f" + "2c" + "e697a0e6b395e8a782e68898");
+        assertThat(hex(MatchTip.WATCH_OFFLINE.text())).as("「会话不在线,无法观战」")
+                .isEqualTo("e4bc9ae8af9de4b88de59ca8e7babf" + "2c" + "e697a0e6b395e8a782e68898");
+        assertThat(hex(MatchTip.WATCH_QUEUED.text())).as("「匹配中无法观战」").isEqualTo("e58cb9e9858de4b8ade697a0e6b395e8a782e68898");
+    }
+
+    @Test
+    void 观战的16018有两种文案_码相同_与179的1005文案相同但码不同() {
+        assertThat(MatchTip.WATCH_NOT_FOUND.code()).isEqualTo(MatchTip.WATCH_NOT_WATCHABLE.code()).isEqualTo(16018);
+        assertThat(MatchTip.WATCH_NOT_FOUND.text()).isNotEqualTo(MatchTip.WATCH_NOT_WATCHABLE.text());
+        assertThat(MatchTip.WATCH_NOT_FOUND.text()).as("同一句话：179 用 1005（客户端永久放弃本局），163 用 16018")
+                .isEqualTo(MatchTip.REISSUE_BATTLE_GONE.text());
+        assertThat(MatchTip.WATCH_NOT_FOUND.code()).isNotEqualTo(MatchTip.REISSUE_BATTLE_GONE.code());
+        assertThat(MatchTip.WATCH_IN_BATTLE.text()).as("与排队 / 切磋的「战斗尚未结束」各是各的后半句")
+                .isNotEqualTo(MatchTip.JOIN_IN_BATTLE.text()).isNotEqualTo(MatchTip.CHALLENGE_SELF_BUSY.text());
     }
 
     @Test
@@ -201,13 +255,44 @@ class MatchTipsTest {
     }
 
     @Test
-    void 观战的临时应答_in_band_1006_不带parameters() {
-        WatchBattleResponse response = MatchTips.watchUnavailable();
+    void 观战被拒_只有error_message_battle_id为0() throws Exception {
+        WatchBattleResponse queued = MatchTips.watchRejected(MatchTip.WATCH_QUEUED);
+        WatchBattleResponse busy = MatchTips.watchRejected(MatchTip.BUSY);
 
-        assertThat(response.getErrorMessage().getId()).isEqualTo(1006);
-        assertThat(response.getErrorMessage().getParametersList()).isEmpty();
-        assertThat(response.getBattleId()).isZero();
-        assertThat(response.toByteArray()).as("字段 2 = TipInfoMessage{id = 1006}").isEqualTo(new byte[] {0x12, 0x03, 0x08, (byte) 0xEE, 0x07});
+        assertThat(queued.getErrorMessage()).isEqualTo(tip(16014, "匹配中无法观战"));
+        assertThat(queued.getBattleId()).isZero();
+        assertThat(busy.getErrorMessage()).isEqualTo(tip(16004, "服务器繁忙,请稍后再试"));
+        // 线上的字节：字段 2（长度前缀）= TipInfoMessage{id = 16014, parameters = ["匹配中无法观战"]}，没有字段 1
+        ByteArrayOutputStream inner = new ByteArrayOutputStream();
+        inner.write(0x08);
+        writeVarint(inner, 16014);
+        byte[] utf8 = "匹配中无法观战".getBytes(StandardCharsets.UTF_8);
+        inner.write(0x12);
+        writeVarint(inner, utf8.length);
+        inner.write(utf8);
+        ByteArrayOutputStream wire = new ByteArrayOutputStream();
+        wire.write(0x12);
+        writeVarint(wire, inner.size());
+        wire.write(inner.toByteArray());
+        assertThat(queued.toByteArray()).isEqualTo(wire.toByteArray());
+        for (MatchTip tip : new MatchTip[] {MatchTip.WATCH_IN_BATTLE, MatchTip.WATCH_ALREADY, MatchTip.WATCH_NO_BATTLE, MatchTip.WATCH_NOT_FOUND,
+                MatchTip.WATCH_NOT_WATCHABLE, MatchTip.WATCH_OFFLINE, MatchTip.NO_IDENTITY}) {
+            WatchBattleResponse rejected = MatchTips.watchRejected(tip);
+            assertThat(rejected.getErrorMessage()).as(tip.name()).isEqualTo(tip.proto());
+            assertThat(rejected.getBattleId()).as(tip.name()).isZero();
+        }
+    }
+
+    @Test
+    void 观战成功_只有battle_id_不带error_message_无符号大号原样() {
+        WatchBattleResponse accepted = MatchTips.watchAccepted(77);
+        WatchBattleResponse big = MatchTips.watchAccepted(Long.MIN_VALUE + 5);
+
+        assertThat(accepted.getBattleId()).isEqualTo(77);
+        assertThat(accepted.hasErrorMessage()).as("成功应答里绝不能有 error_message").isFalse();
+        assertThat(accepted.toByteArray()).as("字段 1（varint）= 77").isEqualTo(new byte[] {0x08, 77});
+        assertThat(Long.toUnsignedString(big.getBattleId())).isEqualTo("9223372036854775813");
+        assertThatThrownBy(() -> MatchTips.watchAccepted(0)).isInstanceOf(IllegalArgumentException.class);
     }
 
     private static TipInfoMessage tip(int id, String text) {

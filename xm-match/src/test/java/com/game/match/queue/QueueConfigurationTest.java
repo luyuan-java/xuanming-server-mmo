@@ -38,7 +38,7 @@ class QueueConfigurationTest {
     private ApplicationContextRunner runner(boolean withRating, boolean withGather) {
         ApplicationContextRunner runner = new ApplicationContextRunner().withUserConfiguration(QueueConfiguration.class)
                 .withBean(RedissonClient.class, () -> redis)
-                .withBean(MatchProperties.class, () -> new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null))
+                .withBean(MatchProperties.class, () -> new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null))
                 .withBean(PlayerStatusReader.class, FakePlayerStatus::new)
                 .withBean(MatchIds.class, () -> new MatchIds(new Snowflake(7), () -> true, () -> false))
                 .withBean(MatchMetrics.class, () -> new MatchMetrics(new SimpleMeterRegistry(), new MetricLabels(id -> false)));

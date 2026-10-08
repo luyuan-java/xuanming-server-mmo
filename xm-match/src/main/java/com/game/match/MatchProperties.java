@@ -32,6 +32,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param gatherMaxInflight     同时在途的 gather 上限（缺省 256，同 battle 单节点的 {@code rpc-max-inflight}）：超限的开局回 {@code overloaded}、无副作用
  * @param requeueBackoff        无肇事者的 gather 失败后，回队首的票多久之内不参与凑单（缺省 2 s；0 = 关闭，M11）
  * @param kafka                 对局结果 topic 的连接（{@link Kafka}）
+ * @param spectate              观战（{@link Spectate}；批次 6.5）
  */
 @ConfigurationProperties("xm.match")
 public record MatchProperties(
@@ -46,7 +47,8 @@ public record MatchProperties(
         FingerprintMode tableFingerprintMode,
         Integer gatherMaxInflight,
         Duration requeueBackoff,
-        Kafka kafka) {
+        Kafka kafka,
+        Spectate spectate) {
 
     /** 整请求预算的区间。上限就是缺省值：gate 调 match 的 Dubbo 超时是 5 s。 */
     public static final Duration MIN_REQUEST_BUDGET = Duration.ofMillis(500);
@@ -84,6 +86,7 @@ public record MatchProperties(
             throw new IllegalArgumentException("xm.match.requeue-backoff 必须在 [0, " + MAX_REQUEUE_BACKOFF + "] 内（0 = 关闭）: " + requeueBackoff);
         }
         kafka = kafka == null ? new Kafka(null, null, null, null) : kafka;
+        spectate = spectate == null ? new Spectate(null, null) : spectate;
     }
 
     /**
@@ -241,6 +244,24 @@ public record MatchProperties(
                 throw new IllegalArgumentException("xm.match.kafka.replication-factor 必须 ≥ 1: " + replicationFactor);
             }
             initTimeout = positiveOr(initTimeout, Duration.ofSeconds(10), "kafka.init-timeout");
+        }
+    }
+
+    /**
+     * 观战（{@code xm.match.spectate.*}；spectate-spec §5.2）。163 的预算沿用 {@code xm.match.request-budget}；Add / Remove 的超时、标记与索引的时限、
+     * 列表条数、随机选场的轮数都是代码常量（{@link MatchBudgets}，理由同类注释：出现在跨进程不等式里，或客户端可见）。
+     *
+     * @param sweepInterval 清扫可观战索引的间隔（缺省 10 s；必须 &gt; 0 且不小于 1 ms）：每轮摘掉分数早于「Redis 时间 − 360 s」的成员并采样索引大小。
+     *                      读路径（随机选场、列表）自己按分数过滤，所以它只是兜底，不必更勤（W9）
+     * @param maxInflight   同时在途的 163 上限（缺省 128；必须 ≥ 1）：163 每个请求一条虚拟线程、要同步等 battle 的 RPC，超限的请求当场回
+     *                      in-band 16004「服务器繁忙,请稍后再试」（W10）
+     */
+    public record Spectate(Duration sweepInterval, Integer maxInflight) {
+
+        public Spectate {
+            sweepInterval = positiveOr(sweepInterval, Duration.ofSeconds(10), "spectate.sweep-interval");
+            requireWholeMillis(sweepInterval, "spectate.sweep-interval");
+            maxInflight = positiveOr(maxInflight, 128, "spectate.max-inflight");
         }
     }
 

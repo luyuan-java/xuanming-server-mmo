@@ -1,6 +1,7 @@
 package com.game.match.testing;
 
 import com.game.api.proto.BattleNodeInfo;
+import com.game.common.deadline.Deadline;
 import com.game.match.gather.BattleNodes;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +19,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * nodes.add(FakeBattleNodes.node(2, "inst-b", 21201));
  * nodes.set(FakeBattleNodes.node(1, "inst-a", 21200).toBuilder().setAccepting(false).build());   // 同号覆盖：关闸
  * nodes.readFailed = true;                                    // 目录读失败：pickRandom 为空、census.readFailed、lookup = ERROR
+ * assertThat(nodes.deadlineLookups).hasSize(1);                 // 带截止的 lookup(node, instance, deadline) 被调了一次（值 = 当时的剩余毫秒）
  * assertThat(nodes.picks).containsExactly(Set.of(), Set.of("1#inst-a"));   // 每次 pickRandom 的排除集合
  * </pre>
  * 线程安全。
@@ -26,8 +28,10 @@ public final class FakeBattleNodes implements BattleNodes {
 
     /** 每次 {@code pickRandom} 收到的排除集合，按调用顺序。 */
     public final List<Set<String>> picks = new CopyOnWriteArrayList<>();
-    /** 每次 {@code lookup} 的入参（{@link BattleNodes#key} 形式），按调用顺序。 */
+    /** 每次 {@code lookup} 的入参（{@link BattleNodes#key} 形式），按调用顺序（两个重载都记在这里）。 */
     public final List<String> lookups = new CopyOnWriteArrayList<>();
+    /** 其中经<b>带截止</b>的重载来的那些：调用那一刻截止还剩多少毫秒，按调用顺序（断言「观众 RPC 的目录读带着硬截止」用）。 */
+    public final List<Long> deadlineLookups = new CopyOnWriteArrayList<>();
     /** 目录读失败。 */
     public volatile boolean readFailed;
     private final List<BattleNodeInfo> entries = new ArrayList<>();
@@ -93,6 +97,17 @@ public final class FakeBattleNodes implements BattleNodes {
             }
         }
         return new Census(accepting, entries.size() - accepting, false);
+    }
+
+    /** 带截止的重载：记进 {@link #lookups} 与 {@link #deadlineLookups}；截止已过回 {@code ERROR}（同真实现：不读目录），其余同不带截止的。 */
+    @Override
+    public synchronized Lookup lookup(int nodeId, String instanceId, Deadline d) {
+        deadlineLookups.add(d.remainingMillis());
+        if (d.expired()) {
+            lookups.add(BattleNodes.key(nodeId, instanceId));
+            return Lookup.ERROR;
+        }
+        return lookup(nodeId, instanceId);
     }
 
     @Override

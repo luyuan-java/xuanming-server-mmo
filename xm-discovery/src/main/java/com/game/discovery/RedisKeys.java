@@ -552,6 +552,24 @@ public final class RedisKeys {
         return MATCH_PREFIX + "battle:" + Long.toUnsignedString(battleId);
     }
 
+    /**
+     * 观战标记 {@code xm:{match}:watching:<player_id>}（批次 6.5，spectate-spec §4.2；STRING：值 = {@code "<battle_id 无符号十进制>:<nonce>"}，
+     * nonce 是每次 163 随机生成的 16 位十六进制；PX 360 s）。一个玩家至多一条：「他可能正在看哪一场」。与票据 {@link #matchTicket} 同槽，
+     * 所以「没有票据 ∧ SET NX」能在一段 Lua 里原子完成；删除一律按值（带 nonce 的整串）比较，不无条件 DEL。
+     */
+    public static String matchWatching(long playerId) {
+        return MATCH_PREFIX + "watching:" + Long.toUnsignedString(playerId);
+    }
+
+    /**
+     * 可观战索引 {@code xm:{match}:watchable}（批次 6.5，spectate-spec §4.2；ZSET，无 TTL：成员 = battle_id 无符号十进制，
+     * 分数 = 落点记录的 {@code created_at_ms}——Unix 毫秒 &lt; 2^53，double 精确）。gather 开局成功、落点按同一个 attempt 补写之后才 ZADD；
+     * 与落点记录 {@link #matchBattlePlacement} 同槽，「读落点 + 查是否已公开」「按 attempt 守护的剔除」都各是一段 Lua。
+     */
+    public static String matchWatchable() {
+        return MATCH_PREFIX + "watchable";
+    }
+
     private static String queueSuffix(int mode, int config) {
         if (mode < 0) {
             throw new IllegalArgumentException("匹配模式不能为负: " + mode);

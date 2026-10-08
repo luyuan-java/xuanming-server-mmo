@@ -3,6 +3,7 @@ package com.game.battle.admin;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.battle.BattleRoutings;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
 import com.game.discovery.presence.PlayerPresenceDirectory;
@@ -28,7 +29,8 @@ import org.redisson.api.RedissonClient;
  * 在线状态补全，补不全就不建房（422）。dev 建房的快照是调用方给的、不经 scene 出（6.3 起由 scene 出快照的是 dev gather），这是它能端到端跑通的前提。
  *
  * <ul>
- *   <li><b>gate 部分</b>（{@code session_id / gate_node_id / gate_instance_id / zone_id}）：在线目录 {@code xm:presence:{pid}}（严格读：条目损坏是故障，
+ *   <li><b>gate 部分</b>（{@code session_id / gate_node_id / gate_instance_id / zone_id}，换算见 xm-discovery 的 {@link BattleRoutings#gatePart}——
+ *       与 xm-match 的 163 观战共用）：在线目录 {@code xm:presence:{pid}}（严格读：条目损坏是故障，
  *       不当成离线）；</li>
  *   <li><b>scene 部分</b>（{@code scene_node_id / scene_instance_id}，只有参战者要）：位置记录 {@code xm:location:{pid}} 只认在线状态 {@code o}
  *       （同 {@code SceneAssetLocator}；重连租约 / 登出墓碑 / 没有记录都算补不全）+ scene 目录（zone = 位置记录的 zone）里该节点的 {@code instance_id}。</li>
@@ -140,7 +142,7 @@ public final class DevRoutingResolver {
         if (gateProblem != null) {
             return new Resolution<>(request, List.of(gateProblem));
         }
-        return new Resolution<>(request.toBuilder().setRouting(gateRouting(online.get())).build(), List.of());
+        return new Resolution<>(request.toBuilder().setRouting(BattleRoutings.gatePart(online.get())).build(), List.of());
     }
 
     // ---------------------------------------------------------------- 内部
@@ -189,7 +191,7 @@ public final class DevRoutingResolver {
             return new Fill(null, "scene 目录里没有 player_id=" + Long.toUnsignedString(playerId) + " 所在的节点 zone="
                     + Integer.toUnsignedString(location.getZoneId()) + " node=" + Integer.toUnsignedString(location.getSceneNodeId()));
         }
-        BattleRouting routing = gateRouting(online.get()).toBuilder()
+        BattleRouting routing = BattleRoutings.gatePart(online.get()).toBuilder()
                 .setSceneNodeId(location.getSceneNodeId())
                 .setSceneInstanceId(scene.get().getInstanceId())
                 .build();
@@ -215,15 +217,6 @@ public final class DevRoutingResolver {
             return "player_id=" + Long.toUnsignedString(playerId) + " 的在线目录条目没有 gate 实例";
         }
         return null;
-    }
-
-    private static BattleRouting gateRouting(PlayerPresence presence) {
-        return BattleRouting.newBuilder()
-                .setSessionId(presence.getSessionId())
-                .setGateNodeId(presence.getGateNodeId())
-                .setGateInstanceId(presence.getGateInstanceId())
-                .setZoneId(presence.getZoneId())
-                .build();
     }
 
     private static <T> T await(Future<T> future) throws Exception {

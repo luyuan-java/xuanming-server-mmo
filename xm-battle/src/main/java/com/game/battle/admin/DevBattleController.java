@@ -140,6 +140,12 @@ public class DevBattleController {
         return protobuf(outcome.value().toByteArray());
     }
 
+    /**
+     * 登记观众（dev / test 专用）。<b>不写 match 的观战标记</b>（{@code xm:{match}:watching:<pid>}，xm-match 的 163 才写）：经这个接口登记的观众，
+     * match 不知道他在观战——他随后排队 / 被挑战 / 整队开战时，开局前的清退（spectate-spec §4.6）摘不到他，名单里的这一项要等该场结束或调
+     * {@value #REMOVE_OBSERVER} 才清；可观战列表与随机观战也与它无关。只在 dev / test 出现，可以接受（spectate-spec Q14、§7.1 第 14 条）；
+     * 要验「观战中开局被清退」请走真的 163。
+     */
     @PostMapping(ADD_OBSERVER)
     public ResponseEntity<byte[]> addObserver(HttpServletRequest http) throws IOException {
         Parsed<AddObserverRequest> parsed = admitAndParse(http, AddObserverRequest.parser(), "AddObserverRequest");

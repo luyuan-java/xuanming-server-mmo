@@ -45,7 +45,6 @@ import com.game.proto.match.ActivityBattleReject;
 import com.game.proto.match.MatchMode;
 import com.game.proto.match.StartActivityBattleRequest;
 import com.game.proto.match.StartActivityBattleResponse;
-import com.game.proto.match.WatchBattleResponse;
 import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -310,8 +309,9 @@ class MatchRpcLoopbackTest {
         return reference.get();
     }
 
-    private static ClientCall watchCall() {
-        return ClientCall.newBuilder().setMessageId(163).setRequestId(1).setBody(ByteString.EMPTY)
+    /** 客户端入口的探针：156 上行（空操作，恒回 Empty、tip 0）。不用观战的号——它们的应答随观战包的实现走，这里只验入口这一跳。 */
+    private static ClientCall uplinkCall() {
+        return ClientCall.newBuilder().setMessageId(156).setRequestId(1).setBody(ByteString.EMPTY)
                 .setSession(SessionContext.newBuilder().setGateNodeId(1).setSessionId(2).setPlayerId(1001).setAccount("acc")).build();
     }
 
@@ -360,8 +360,8 @@ class MatchRpcLoopbackTest {
                 .isInstanceOf(ExecutionException.class);
         assertThatThrownBy(() -> internal.startActivityBattle(StartActivityBattleRequest.newBuilder().setBattleConfigId(1).build())
                 .get(10, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class);
-        assertThatThrownBy(() -> client.handle(watchCall()).get(10, TimeUnit.SECONDS))
-                .as("客户端入口同样要 MAC：不是回 163 的应答").isInstanceOf(ExecutionException.class);
+        assertThatThrownBy(() -> client.handle(uplinkCall()).get(10, TimeUnit.SECONDS))
+                .as("客户端入口同样要 MAC：不是回 156 的空应答").isInstanceOf(ExecutionException.class);
 
         assertThat(PLAYERS.reads).as("预检一项都没读").hasSize(readsBefore);
         assertThat(TICKETS.calls).as("票据存储没被碰过").hasSize(storeCallsBefore);
@@ -407,14 +407,15 @@ class MatchRpcLoopbackTest {
 
         Empty released = team.releaseTeamTickets(TeamTicketsRelease.newBuilder().putAllTicketIds(ticketIds).build()).get(10, TimeUnit.SECONDS);
         StartActivityBattleResponse started = internal.startActivityBattle(StartActivityBattleRequest.getDefaultInstance()).get(10, TimeUnit.SECONDS);
-        ClientReply watch = client.handle(watchCall()).get(10, TimeUnit.SECONDS);
+        ClientReply uplink = client.handle(uplinkCall()).get(10, TimeUnit.SECONDS);
 
         assertThat(released).isEqualTo(Empty.getDefaultInstance());
         assertThat(TICKETS.ticketOf(1001)).as("按票号退掉了").isEmpty();
         assertThat(TICKETS.ticketOf(1002)).isEmpty();
         assertThat(started.getReject()).as("空请求过不了活动开战的参数校验").isEqualTo(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT);
         assertThat(started.getBattleId()).isZero();
-        assertThat(WatchBattleResponse.parseFrom(watch.getBody()).getErrorMessage().getId()).isEqualTo(1006);
+        assertThat(uplink.getTipId()).as("带着 MAC：走到了处理器（没有处理器或被拒会是信封 1003 / 异常）").isZero();
+        assertThat(uplink.getBody().isEmpty()).as("156 上行：Empty").isTrue();
     }
 
     // ================================================================ xm-budget-ms 过线

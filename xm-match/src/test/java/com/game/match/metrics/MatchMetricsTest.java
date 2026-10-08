@@ -10,8 +10,14 @@ import com.game.match.metrics.MatchMetrics.ActivityResult;
 import com.game.match.metrics.MatchMetrics.AdminOp;
 import com.game.match.metrics.MatchMetrics.ChallengeResult;
 import com.game.match.metrics.MatchMetrics.ChallengeStage;
+import com.game.match.metrics.MatchMetrics.EvictReason;
+import com.game.match.metrics.MatchMetrics.EvictResult;
+import com.game.match.metrics.MatchMetrics.IndexEviction;
 import com.game.match.metrics.MatchMetrics.JoinOutcome;
+import com.game.match.metrics.MatchMetrics.ListResult;
 import com.game.match.metrics.MatchMetrics.MatcherRound;
+import com.game.match.metrics.MatchMetrics.ObserverMethod;
+import com.game.match.metrics.MatchMetrics.ObserverResult;
 import com.game.match.metrics.MatchMetrics.PushKind;
 import com.game.match.metrics.MatchMetrics.QueueAnomaly;
 import com.game.match.metrics.MatchMetrics.RatingOutcome;
@@ -20,7 +26,10 @@ import com.game.match.metrics.MatchMetrics.RequestResult;
 import com.game.match.metrics.MatchMetrics.RequeueReason;
 import com.game.match.metrics.MatchMetrics.TeamCallResult;
 import com.game.match.metrics.MatchMetrics.TeamMethod;
+import com.game.match.metrics.MatchMetrics.WatchAnomaly;
+import com.game.match.metrics.MatchMetrics.WatchOutcome;
 import com.game.match.metrics.MatchMetrics.ZoneMix;
+import com.game.match.spectate.SpectateRules;
 import com.game.match.ticket.TicketStore.DropReason;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -83,7 +92,16 @@ class MatchMetricsTest {
                 "xm.match.rating.consumer.paused",
                 "xm.match.battle.nodes",
                 "xm.match.lease.lost",
-                "xm.match.admin.requests");
+                "xm.match.admin.requests",
+                // 批次 6.5 观战（spectate-spec §6）
+                "xm.match.watch.battle",
+                "xm.match.list.watchable",
+                "xm.match.spectate.evictions",
+                "xm.match.watchable.index.evictions",
+                "xm.match.watchable.anomalies",
+                "xm.match.watchable.battles",
+                "xm.match.observer.rpc",
+                "xm.match.spectate.inflight");
         assertThat(meters.get("xm.match.starved.anchor.wait").gauge().getId().getBaseUnit()).as("导出成 …_wait_seconds").isEqualTo("seconds");
         assertThat(meters.get("xm.match.wait").summary().getId().getBaseUnit()).isEqualTo("seconds");
     }
@@ -288,6 +306,148 @@ class MatchMetricsTest {
 
         metrics.ratingConsumerPaused(false);
         assertThat(meters.get("xm.match.rating.consumer.paused").gauge().value()).isZero();
+    }
+
+    // ================================================================ 观战（批次 6.5，spectate-spec §6 的 8 个指标）
+
+    @Test
+    void 观战_各计数的标签取值与规格表逐个相同_启动即预建为0() {
+        List<String> outcomes = List.of("ok", "internal", "queued", "in_battle", "already_watching", "offline", "no_battle", "not_found", "rejected",
+                "overloaded");
+        for (String outcome : outcomes) {
+            assertThat(count("xm.match.watch.battle", "outcome", outcome)).as(outcome).isZero();
+        }
+        assertThat(meters.find("xm.match.watch.battle").counters()).as("163 的出口恰好十种").hasSize(outcomes.size());
+
+        for (String result : List.of("ok", "error", "overloaded")) {
+            assertThat(count("xm.match.list.watchable", "result", result)).as(result).isZero();
+        }
+        assertThat(meters.find("xm.match.list.watchable").counters()).hasSize(3);
+
+        List<String> evictReasons = List.of("enter_gather", "rewatch", "concurrent_queue");
+        List<String> evictResults = List.of("removed", "no_record", "invalid_mark", "read_failed", "rpc_failed");
+        for (String reason : evictReasons) {
+            for (String result : evictResults) {
+                assertThat(count("xm.match.spectate.evictions", "reason", reason, "result", result)).as(reason + "/" + result).isZero();
+            }
+        }
+        assertThat(meters.find("xm.match.spectate.evictions").counters()).hasSize(15);
+
+        List<String> indexReasons = List.of("room_missing", "dead_node", "stale", "missing_record", "invalid_member", "sweep");
+        for (String reason : indexReasons) {
+            assertThat(count("xm.match.watchable.index.evictions", "reason", reason)).as(reason).isZero();
+        }
+        assertThat(meters.find("xm.match.watchable.index.evictions").counters()).hasSize(indexReasons.size());
+
+        List<String> anomalies = List.of("corrupt_record", "record_read_failed", "publish_failed", "mark_read_failed");
+        for (String reason : anomalies) {
+            assertThat(count("xm.match.watchable.anomalies", "reason", reason)).as(reason).isZero();
+        }
+        assertThat(meters.find("xm.match.watchable.anomalies").counters()).hasSize(anomalies.size());
+
+        for (String method : List.of("add", "remove")) {
+            for (String result : List.of("replied", "dead", "not_delivered", "unknown")) {
+                assertThat(count("xm.match.observer.rpc", "method", method, "result", result)).as(method + "/" + result).isZero();
+            }
+        }
+        assertThat(meters.find("xm.match.observer.rpc").counters()).hasSize(8);
+
+        assertThat(meters.get("xm.match.watchable.battles").gauge().value()).isZero();
+        assertThat(meters.get("xm.match.spectate.inflight").gauge().value()).isZero();
+        assertThat(meters.get("xm.match.watchable.battles").gauge().getId().getTags()).as("两个 gauge 都不带标签").isEmpty();
+        assertThat(meters.get("xm.match.spectate.inflight").gauge().getId().getTags()).isEmpty();
+    }
+
+    @Test
+    void 观战_163与164的出口各记各的_already_watching只在调用方记16016时才涨() {
+        metrics.watchBattle(WatchOutcome.OK);
+        metrics.watchBattle(WatchOutcome.OK);
+        metrics.watchBattle(WatchOutcome.ALREADY_WATCHING);
+        metrics.watchBattle(WatchOutcome.OVERLOADED);
+        metrics.listWatchable(ListResult.OK);
+        metrics.listWatchable(ListResult.ERROR);
+        // 入口处对旧标记的懒清退不算 already_watching（W14）：它记的是清退
+        metrics.spectateEviction(EvictReason.REWATCH, EvictResult.REMOVED);
+
+        assertThat(count("xm.match.watch.battle", "outcome", "ok")).isEqualTo(2);
+        assertThat(count("xm.match.watch.battle", "outcome", "already_watching")).isEqualTo(1);
+        assertThat(count("xm.match.watch.battle", "outcome", "overloaded")).isEqualTo(1);
+        assertThat(count("xm.match.watch.battle", "outcome", "internal")).isZero();
+        assertThat(count("xm.match.list.watchable", "result", "ok")).isEqualTo(1);
+        assertThat(count("xm.match.list.watchable", "result", "error")).isEqualTo(1);
+        assertThat(count("xm.match.list.watchable", "result", "overloaded")).isZero();
+        assertThat(count("xm.match.spectate.evictions", "reason", "rewatch", "result", "removed")).isEqualTo(1);
+    }
+
+    @Test
+    void 观战_清退按起因与结局_索引剔除按摘掉的成员数_异常与观众RPC() {
+        metrics.spectateEviction(EvictReason.ENTER_GATHER, EvictResult.REMOVED);
+        metrics.spectateEviction(EvictReason.ENTER_GATHER, EvictResult.RPC_FAILED);
+        metrics.spectateEviction(EvictReason.CONCURRENT_QUEUE, EvictResult.NO_RECORD);
+        metrics.spectateEviction(EvictReason.REWATCH, EvictResult.INVALID_MARK);
+        metrics.spectateEviction(EvictReason.REWATCH, EvictResult.READ_FAILED);
+        metrics.watchableIndexEvicted(IndexEviction.SWEEP, 7);
+        metrics.watchableIndexEvicted(IndexEviction.SWEEP, 0);
+        metrics.watchableIndexEvicted(IndexEviction.SWEEP, -3);
+        metrics.watchableIndexEvicted(IndexEviction.ROOM_MISSING, 1);
+        metrics.watchableIndexEvicted(IndexEviction.DEAD_NODE, 1);
+        metrics.watchableIndexEvicted(IndexEviction.STALE, 2);
+        metrics.watchableIndexEvicted(IndexEviction.MISSING_RECORD, 1);
+        metrics.watchableIndexEvicted(IndexEviction.INVALID_MEMBER, 1);
+        metrics.watchableAnomaly(WatchAnomaly.CORRUPT_RECORD);
+        metrics.watchableAnomaly(WatchAnomaly.RECORD_READ_FAILED);
+        metrics.watchableAnomaly(WatchAnomaly.PUBLISH_FAILED);
+        metrics.watchableAnomaly(WatchAnomaly.MARK_READ_FAILED);
+        metrics.watchableAnomaly(WatchAnomaly.MARK_READ_FAILED);
+        metrics.observerRpc(ObserverMethod.ADD, ObserverResult.REPLIED);
+        metrics.observerRpc(ObserverMethod.ADD, ObserverResult.UNKNOWN);
+        metrics.observerRpc(ObserverMethod.REMOVE, ObserverResult.DEAD);
+        metrics.observerRpc(ObserverMethod.REMOVE, ObserverResult.NOT_DELIVERED);
+
+        assertThat(count("xm.match.spectate.evictions", "reason", "enter_gather", "result", "removed")).isEqualTo(1);
+        assertThat(count("xm.match.spectate.evictions", "reason", "enter_gather", "result", "rpc_failed")).isEqualTo(1);
+        assertThat(count("xm.match.spectate.evictions", "reason", "concurrent_queue", "result", "no_record")).isEqualTo(1);
+        assertThat(count("xm.match.spectate.evictions", "reason", "rewatch", "result", "invalid_mark")).isEqualTo(1);
+        assertThat(count("xm.match.spectate.evictions", "reason", "rewatch", "result", "read_failed")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.index.evictions", "reason", "sweep")).as("清扫一轮摘掉几条就加几；0 与负数不计").isEqualTo(7);
+        assertThat(count("xm.match.watchable.index.evictions", "reason", "room_missing")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.index.evictions", "reason", "dead_node")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.index.evictions", "reason", "stale")).isEqualTo(2);
+        assertThat(count("xm.match.watchable.index.evictions", "reason", "missing_record")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.index.evictions", "reason", "invalid_member")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.anomalies", "reason", "corrupt_record")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.anomalies", "reason", "record_read_failed")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.anomalies", "reason", "publish_failed")).isEqualTo(1);
+        assertThat(count("xm.match.watchable.anomalies", "reason", "mark_read_failed")).isEqualTo(2);
+        assertThat(count("xm.match.observer.rpc", "method", "add", "result", "replied")).isEqualTo(1);
+        assertThat(count("xm.match.observer.rpc", "method", "add", "result", "unknown")).isEqualTo(1);
+        assertThat(count("xm.match.observer.rpc", "method", "remove", "result", "dead")).isEqualTo(1);
+        assertThat(count("xm.match.observer.rpc", "method", "remove", "result", "not_delivered")).isEqualTo(1);
+        assertThat(count("xm.match.observer.rpc", "method", "remove", "result", "replied")).isZero();
+    }
+
+    @Test
+    void 观战_索引大小是采样值_在途数接到163的执行器上() {
+        metrics.watchableBattles(12);
+        assertThat(meters.get("xm.match.watchable.battles").gauge().value()).isEqualTo(12);
+        metrics.watchableBattles(3);
+        assertThat(meters.get("xm.match.watchable.battles").gauge().value()).as("后一次采样覆盖前一次，不累加").isEqualTo(3);
+        metrics.watchableBattles(-1);
+        assertThat(meters.get("xm.match.watchable.battles").gauge().value()).as("负数夹到 0").isZero();
+
+        int[] inflight = {5};
+        metrics.bindSpectateInflight(() -> inflight[0]);
+        assertThat(meters.get("xm.match.spectate.inflight").gauge().value()).isEqualTo(5);
+        inflight[0] = 0;
+        assertThat(meters.get("xm.match.spectate.inflight").gauge().value()).as("每次导出现读").isZero();
+        assertThat(meters.get("xm.match.gathers.inflight").gauge().value()).as("与 gather 的在途数是两个互不相干的来源").isZero();
+    }
+
+    @Test
+    void 观战_清退原因的标签值与发给battle的reason逐字相同() {
+        assertThat(MatchMetrics.tag(EvictReason.REWATCH)).isEqualTo(SpectateRules.REASON_REWATCH).isEqualTo("rewatch");
+        assertThat(MatchMetrics.tag(EvictReason.ENTER_GATHER)).isEqualTo(SpectateRules.REASON_ENTER_GATHER).isEqualTo("enter_gather");
+        assertThat(MatchMetrics.tag(EvictReason.CONCURRENT_QUEUE)).isEqualTo(SpectateRules.REASON_CONCURRENT_QUEUE).isEqualTo("concurrent_queue");
     }
 
     @Test

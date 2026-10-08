@@ -4,7 +4,6 @@ import com.game.api.match.MatchBudgets;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.proto.BattlePlacement;
-import com.google.protobuf.InvalidProtocolBufferException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
@@ -20,7 +19,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * {@link PlacementStore} 的生产实现（match-spec §4.3、§9.4 的 S_PLACE）：Redis HASH {@code xm:{match}:battle:<battle_id>}，两个字段
- * {@code a}（attempt 十进制）与 {@code pb}（{@link BattlePlacement} 字节），TTL {@value MatchBudgets#PLACEMENT_TTL_SECONDS} s。
+ * {@code a}（attempt 十进制）与 {@code pb}（{@link BattlePlacement} 字节；字段名与损坏判据见 {@link PlacementRecords}，6.5 的观战存储共用），TTL {@value MatchBudgets#PLACEMENT_TTL_SECONDS} s。
  *
  * <ul>
  *   <li><b>写</b>：一段 Lua、一次 Redis 调用，外层以 {@value MatchBudgets#PLACEMENT_WRITE_WORST_MS} ms 为截止（Redis 客户端自带一次重发，
@@ -83,7 +82,7 @@ public final class RedissonPlacementStore implements PlacementStore {
         String battle = Long.toUnsignedString(placement.getBattleId());
         try {
             Long written = this.<Long>eval(PLACE_LUA, RScript.ReturnType.INTEGER, placement.getBattleId(),
-                    ascii(Integer.toUnsignedString(placement.getAttempt())), placement.toByteArray(), ascii(Long.toString(TTL_MS)))
+                    ascii(PlacementRecords.attemptField(placement.getAttempt())), placement.toByteArray(), ascii(Long.toString(TTL_MS)))
                     .get(writeBudgetMs, TimeUnit.MILLISECONDS);
             if (written == null) {
                 log.error("写落点记录的回复为空（按写失败处理） battle_id={} attempt={}", battle, placement.getAttempt());
@@ -138,19 +137,11 @@ public final class RedissonPlacementStore implements PlacementStore {
         if (reply.size() != 2 || !(reply.get(1) instanceof byte[] bytes)) {
             return new Read.Failed("落点记录的回复形状不对 battle_id=" + battle + " size=" + reply.size());
         }
-        if (bytes.length == 0) {
-            return new Read.Failed("落点记录缺 pb 字段 battle_id=" + battle);
-        }
-        BattlePlacement placement;
-        try {
-            placement = BattlePlacement.parseFrom(bytes);
-        } catch (InvalidProtocolBufferException e) {
-            return new Read.Failed("落点记录解析失败 battle_id=" + battle + ": " + e.getMessage());
-        }
-        if (placement.getBattleId() != battleId) {
-            return new Read.Failed("落点记录与键不符 battle_id=" + battle + " recorded=" + Long.toUnsignedString(placement.getBattleId()));
-        }
-        return new Read.Found(placement);
+        // 只看 pb（缺字段 / 解析失败 / battle_id 与键不符算损坏）：179 不用 attempt，不核对 a 字段。判据与观战存储共用 PlacementRecords
+        return switch (PlacementRecords.parse(battleId, bytes)) {
+            case PlacementRecords.Parsed.Ok ok -> new Read.Found(ok.placement());
+            case PlacementRecords.Parsed.Corrupt corrupt -> new Read.Failed(corrupt.why() + " battle_id=" + battle);
+        };
     }
 
     /** 一律按读写模式发出（写要写主库；读也读主库，见类注释）。同步抛出的异常（客户端已关闭等）变成失败的 future。 */

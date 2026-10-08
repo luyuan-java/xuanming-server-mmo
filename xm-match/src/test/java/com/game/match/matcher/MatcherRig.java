@@ -57,7 +57,7 @@ final class MatcherRig {
     /** @param pveTeamSizes null = 缺省 {@code {1: 5}}；{@code tolerance} null = 缺省曲线 */
     static MatchProperties props(Map<Integer, Integer> pveTeamSizes, MatchProperties.Tolerance tolerance) {
         MatchProperties.Rating rating = tolerance == null ? null : new MatchProperties.Rating(null, tolerance, null, null, null);
-        return new MatchProperties(null, null, null, null, null, null, rating, pveTeamSizes, null, null, null, null);
+        return new MatchProperties(null, null, null, null, null, null, rating, pveTeamSizes, null, null, null, null, null);
     }
 
     QueueMatcher matcher(TicketStore store, MatchProperties props) {

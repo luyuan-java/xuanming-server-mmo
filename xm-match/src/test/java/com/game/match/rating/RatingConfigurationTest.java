@@ -36,7 +36,7 @@ class RatingConfigurationTest {
     private static MatchProperties props(boolean ratingEnabled) {
         return new MatchProperties(null, null, null, null, null, null,
                 new MatchProperties.Rating(ratingEnabled, null, null, Map.of(7, 300), null), null, null, null, null,
-                new MatchProperties.Kafka(DEAD_KAFKA, 9644, null, Duration.ofSeconds(1)));
+                new MatchProperties.Kafka(DEAD_KAFKA, 9644, null, Duration.ofSeconds(1)), null);
     }
 
     private ApplicationContextRunner runner(boolean ratingEnabled) {

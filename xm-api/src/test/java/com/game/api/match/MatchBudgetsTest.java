@@ -25,6 +25,7 @@ class MatchBudgetsTest {
         assertThat(MatchBudgets.DESTROY_BATTLE_TIMEOUT_MS).isEqualTo(3_000);
         assertThat(MatchBudgets.ISSUE_TICKET_TIMEOUT_MS).isEqualTo(3_000);
         assertThat(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS).isEqualTo(3_000);
+        assertThat(MatchBudgets.ADD_OBSERVER_TIMEOUT_MS).isEqualTo(3_000);
         assertThat(MatchBudgets.TICKET_ROLLBACK_BUDGET_MS).isEqualTo(3_000);
         assertThat(MatchBudgets.PLACEMENT_WRITE_WORST_MS).isEqualTo(6_100);
         assertThat(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS).isEqualTo(4_500);
@@ -116,6 +117,78 @@ class MatchBudgetsTest {
         assertThat(MatchBudgets.BATTLE_MAX_DURATION_SECONDS).isEqualTo(300);
         assertThat(MatchBudgets.PLACEMENT_TTL_SECONDS).as("落点记录 TTL ≥ 战斗最长时限（360 ≥ 300）").isEqualTo(360)
                 .isGreaterThanOrEqualTo(MatchBudgets.BATTLE_MAX_DURATION_SECONDS);
+    }
+
+    // ---------------------------------------------------------------- 观战（spectate-spec §5.1 的常量、§5.3 的六条不等式）
+
+    /** gate 调 match 的 Dubbo 超时（match-spec §9.2）：163 必须先于它给出 in-band 应答。 */
+    private static final long GATE_TO_MATCH_TIMEOUT_MS = 5_000;
+    /** 停机时排空 match-worker 的上限（xm-match 的 {@code MatchDispatchConfiguration.DRAIN_TIMEOUT}；xm-api 够不到，按规格值钉）。 */
+    private static final long WORKER_DRAIN_TIMEOUT_MS = 10_000;
+
+    @Test
+    void 观战常量_数值与基线相同() {
+        assertThat(MatchBudgets.WATCHING_TTL_SECONDS).isEqualTo(360);
+        assertThat(MatchBudgets.SPECTATE_STALE_MS).isEqualTo(360_000);
+        assertThat(MatchBudgets.WATCHABLE_LIST_DEFAULT).isEqualTo(20);
+        assertThat(MatchBudgets.WATCHABLE_LIST_MAX).isEqualTo(50);
+        assertThat(MatchBudgets.RANDOM_WATCH_ROUNDS).isEqualTo(2);
+        assertThat(MatchBudgets.RANDOM_PICK_TRIES).isEqualTo(3);
+        assertThat(MatchBudgets.WATCH_REWATCH_RESERVE_MS).isEqualTo(1_200);
+        assertThat(MatchBudgets.WATCH_ADD_RESERVE_MS).isEqualTo(200);
+        assertThat(MatchBudgets.WATCH_ADD_MIN_BUDGET_MS).isEqualTo(1_000);
+        assertThat(MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS).isEqualTo(5_000);
+    }
+
+    @Test
+    void 观战不等式一_标记TTL不短于战斗最长时限_标记到期时那一场必已收尾() {
+        assertThat(MatchBudgets.WATCHING_TTL_SECONDS).isEqualTo(MatchBudgets.PLACEMENT_TTL_SECONDS)
+                .isGreaterThanOrEqualTo(MatchBudgets.BATTLE_MAX_DURATION_SECONDS);
+    }
+
+    @Test
+    void 观战不等式二_过期分界就是落点TTL_读路径与清扫同一口径() {
+        assertThat(MatchBudgets.SPECTATE_STALE_MS).isEqualTo(MatchBudgets.PLACEMENT_TTL_SECONDS * 1000L);
+    }
+
+    @Test
+    void 观战不等式三_开局清退每人的上限就是matched票据TTL公式里的那一项_加了登记观众的常量之后时限表不变() {
+        // 公式里每人的一项是「清退 3 s + 备战 3 s」：清退每人的最坏耗时不得超过 3 s，所以这个常量不能改大
+        assertThat(MatchBudgets.matchedTicketTtlSeconds(2) - MatchBudgets.matchedTicketTtlSeconds(1))
+                .isEqualTo((int) ((MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS + MatchBudgets.PREPARE_BATTLE_TIMEOUT_MS) / 1000));
+        assertThat(MatchBudgets.ADD_OBSERVER_TIMEOUT_MS).as("Add 与 Remove 同一个上限（基线都是 3 s）").isEqualTo(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS);
+        assertThat(MatchBudgets.matchedTicketTtlSeconds(1)).isEqualTo(42);
+        assertThat(MatchBudgets.matchedTicketTtlSeconds(2)).isEqualTo(48);
+        assertThat(MatchBudgets.matchedTicketTtlSeconds(5)).isEqualTo(66);
+        assertThat(MatchBudgets.matchedTicketTtlSeconds(10)).isEqualTo(96);
+    }
+
+    @Test
+    void 观战不等式四_163的预算小于gate调match的超时_match先回in_band() {
+        assertThat(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS).isLessThan(GATE_TO_MATCH_TIMEOUT_MS);
+    }
+
+    @Test
+    void 观战不等式五_换场预留加登记观众的最低预算不超过整请求预算_各预留之间自洽() {
+        assertThat(MatchBudgets.WATCH_REWATCH_RESERVE_MS + MatchBudgets.WATCH_ADD_MIN_BUDGET_MS)
+                .as("换场前的门槛（2.2 s）").isEqualTo(2_200).isLessThanOrEqualTo(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS);
+        assertThat(MatchBudgets.WATCH_REWATCH_RESERVE_MS)
+                .as("换场的 Remove 用到硬截止才返回，剩下的预算仍够发 AddObserver").isGreaterThanOrEqualTo(MatchBudgets.WATCH_ADD_MIN_BUDGET_MS);
+        assertThat(MatchBudgets.WATCH_ADD_RESERVE_MS)
+                .as("过了 Add 的门槛，Add 自己至少有 0.8 s").isLessThan(MatchBudgets.WATCH_ADD_MIN_BUDGET_MS);
+        assertThat(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS - MatchBudgets.WATCH_REWATCH_RESERVE_MS)
+                .as("预算充裕时换场的 Remove 能用满它自己的 3 s").isGreaterThanOrEqualTo(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS);
+    }
+
+    @Test
+    void 观战不等式六_建房窗口就是gather从写落点到最后一次建房的最坏耗时() {
+        assertThat(MatchBudgets.GATHER_CREATE_STAGE_WORST_MS).isEqualTo(22_200);
+    }
+
+    @Test
+    void 停机时等在途163的上限_盖得住一次163的预算_又不超过排空工作池的上限_两者并行不加长停机() {
+        assertThat(MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS).isEqualTo(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS + 500)
+                .isGreaterThan(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS).isLessThanOrEqualTo(WORKER_DRAIN_TIMEOUT_MS);
     }
 
     @Test

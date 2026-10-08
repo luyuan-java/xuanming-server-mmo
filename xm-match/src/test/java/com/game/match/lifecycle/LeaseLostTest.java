@@ -250,7 +250,7 @@ class LeaseLostTest {
     }
 
     @Test
-    void 租约丢失_取消排队_查状态_补签_应答切磋与当场回的四个号照常交给处理器() throws Exception {
+    void 租约丢失_取消排队_查状态_补签_应答切磋_上行的两个号与观战的两个号照常交给处理器() throws Exception {
         lost.set(true);
         MatchDispatcher dispatcher = dispatcher(ids);
         List<String> unaffected = List.of(MatchMethods.CANCEL_QUEUE, MatchMethods.GET_QUEUE_STATUS, MatchMethods.REQUEST_BATTLE_TICKET,
@@ -263,6 +263,54 @@ class LeaseLostTest {
             assertThat(handlers.get(method).handled).as(method).hasValue(1);
         }
         assertThat(unaffected).hasSize(MatchMethods.ALL.size() - 2);
+    }
+
+    /** 163 / 164 不发号（spectate-spec §7.2）：租约丢失期间照常服务。163 自带执行器时，任务仍投到它自己的执行器上。 */
+    @Test
+    void 租约丢失_观战163带着自己的执行器也照常_任务仍投到它的执行器上_同一个派发器上排队仍被拒() throws Exception {
+        lost.set(true);
+        List<Runnable> spectateExecutor = new java.util.concurrent.CopyOnWriteArrayList<>();
+        AtomicInteger watched = new AtomicInteger();
+        MatchMethodHandler watch = new MatchMethodHandler() {
+            @Override
+            public String method() {
+                return MatchMethods.WATCH_BATTLE;
+            }
+
+            @Override
+            public java.util.concurrent.Executor executor() {
+                return spectateExecutor::add;
+            }
+
+            @Override
+            public Reply handle(SessionContext session, ByteString body, Deadline deadline) {
+                watched.incrementAndGet();
+                return new Reply.Body(ByteString.copyFromUtf8("watch-on-own-executor"));
+            }
+
+            @Override
+            public Reply onOverload() {
+                return Reply.envelope(1003);
+            }
+        };
+        Map<String, MatchMethodHandler> all = new LinkedHashMap<>(handlers);
+        all.put(MatchMethods.WATCH_BATTLE, watch);
+        MatchDispatcher dispatcher = new MatchDispatcher(REGISTRY, all.values(), Runnable::run, metrics, 4500, ids::leaseLost);
+
+        CompletableFuture<ClientReply> watching = dispatcher.dispatch(call(MatchMethods.WATCH_BATTLE, ByteString.EMPTY, 1001));
+        ClientReply listed = reply(dispatcher.dispatch(call(MatchMethods.LIST_WATCHABLE_BATTLES, ByteString.EMPTY, 0)));
+        ClientReply joined = reply(dispatcher.dispatch(call(MatchMethods.JOIN_QUEUE, ByteString.EMPTY, 1001)));
+
+        assertThat(watching).as("没有被当场拒收：在它自己的执行器里等着").isNotDone();
+        assertThat(spectateExecutor).hasSize(1);
+        assertThat(watched).hasValue(0);
+        spectateExecutor.get(0).run();
+        assertThat(reply(watching).getBody().toStringUtf8()).isEqualTo("watch-on-own-executor");
+        assertThat(reply(watching).getTipId()).isZero();
+        assertThat(watched).hasValue(1);
+        assertThat(listed.getBody().toStringUtf8()).as("164 照常（不看身份）").isEqualTo(MatchMethods.LIST_WATCHABLE_BATTLES);
+        assertThat(handlers.get(MatchMethods.JOIN_QUEUE).handled).as("157 仍被拒收：没有交给处理器").hasValue(0);
+        assertThat(com.game.proto.match.JoinQueueResponse.parseFrom(joined.getBody()).getErrorCode()).isEqualTo(16004);
     }
 
     @Test
@@ -425,7 +473,7 @@ class LeaseLostTest {
     private final InMemoryTicketStore tickets = new InMemoryTicketStore();
     private final FakePlayerStatus players = new FakePlayerStatus();
     private final FakeGatherLauncher gather = new FakeGatherLauncher();
-    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
     private final DefaultTicketHealing healing = new DefaultTicketHealing(tickets);
 
     private QueueService queueService() {

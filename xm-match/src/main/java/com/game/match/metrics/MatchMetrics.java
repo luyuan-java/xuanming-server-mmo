@@ -45,6 +45,14 @@ import java.util.function.IntSupplier;
  *       {@code xm_match_rating_consumer_paused}</td><td>Counter / Counter / Gauge</td><td>评分回流</td></tr>
  *   <tr><td>{@code xm_match_battle_nodes{state}} / {@code xm_match_lease_lost}</td><td>Gauge</td><td>battle 目录概况 / 发号租约是否已丢失（1 = 需要重启）</td></tr>
  *   <tr><td>{@code xm_match_admin_requests_total{op, status}}</td><td>Counter</td><td>dev 管理口的 HTTP 审计</td></tr>
+ *   <tr><td>{@code xm_match_watch_battle_total{outcome}} / {@code xm_match_list_watchable_total{result}}</td><td>Counter</td>
+ *       <td>163 / 164 的出口（批次 6.5，spectate-spec §6）</td></tr>
+ *   <tr><td>{@code xm_match_spectate_evictions_total{reason, result}}</td><td>Counter</td><td>把一名观众从他正在看的那一场清退（开局前 / 换场 / 复查命中）</td></tr>
+ *   <tr><td>{@code xm_match_watchable_index_evictions_total{reason}} / {@code xm_match_watchable_anomalies_total{reason}} /
+ *       {@code xm_match_watchable_battles}</td><td>Counter / Counter / Gauge</td>
+ *       <td>可观战索引：摘掉的成员数 / 数据异常 / 索引大小（每个实例各自采样同一个全局 ZSET，看板取 max、不能 sum）</td></tr>
+ *   <tr><td>{@code xm_match_observer_rpc_total{method, result}} / {@code xm_match_spectate_inflight}</td><td>Counter / Gauge</td>
+ *       <td>发给 battle 的观众 RPC 的结局 / 在途的 163 数（上限 {@code xm.match.spectate.max-inflight}；每实例的真实值，求和才有意义）</td></tr>
  * </table>
  *
  * <p><b>标签</b>：取值全部来自本类的枚举或 {@link MetricLabels} 的净化结果，没有任何客户端能直接控制的值；不以玩家 / 战斗 / 切磋 / 队伍的号或 zone 作标签
@@ -79,6 +87,14 @@ public final class MatchMetrics {
     static final String BATTLE_NODES = "xm.match.battle.nodes";
     static final String LEASE_LOST = "xm.match.lease.lost";
     static final String ADMIN_REQUESTS = "xm.match.admin.requests";
+    static final String WATCH_BATTLE = "xm.match.watch.battle";
+    static final String LIST_WATCHABLE = "xm.match.list.watchable";
+    static final String SPECTATE_EVICTIONS = "xm.match.spectate.evictions";
+    static final String WATCHABLE_INDEX_EVICTIONS = "xm.match.watchable.index.evictions";
+    static final String WATCHABLE_ANOMALIES = "xm.match.watchable.anomalies";
+    static final String WATCHABLE_BATTLES = "xm.match.watchable.battles";
+    static final String OBSERVER_RPC = "xm.match.observer.rpc";
+    static final String SPECTATE_INFLIGHT = "xm.match.spectate.inflight";
 
     /** 请求耗时：与 gate / login / trade 同一套 SLO 桶（5 ms～10 s）。 */
     static final Duration[] REQUEST_BUCKETS = {
@@ -229,6 +245,74 @@ public final class MatchMetrics {
     /** dev 管理口的接口（其余路径一律 {@code other}）。 */
     public enum AdminOp { RATING, ACTIVITY_BATTLE, OTHER }
 
+    // ---------------------------------------------------------------- 观战（批次 6.5，spectate-spec §6）
+
+    /**
+     * 163 的出口（{@code xm_match_watch_battle_total{outcome}}；每个请求恰好记一个，对应 spectate-spec §3.1 各行的「指标 outcome」一列）。
+     * <ul>
+     *   <li>{@code INTERNAL}：16004——身份缺失、依赖故障、<b>剩余预算不够发下一跳</b>；处理器内的未预期异常（信封 1003）也记它；</li>
+     *   <li>{@code QUEUED}：16014（入口持票、抢标记时有票、复查命中票据或锁）；{@code IN_BATTLE}：16015；{@code OFFLINE}：16019；</li>
+     *   <li>{@code ALREADY_WATCHING}：<b>只计 16016</b>（并发抢占）。入口处对旧标记的懒清退不计它，另计
+     *       {@code spectate_evictions{reason="rewatch"}}（W14；基线把两者混在一起）；</li>
+     *   <li>{@code NO_BATTLE}：16017；{@code NOT_FOUND}：16018「不存在或已结束」；{@code REJECTED}：16018「当前无法观战」；</li>
+     *   <li>{@code OVERLOADED}：在途已满（在处理器的 {@code onOverload()} 里记；这时没有进过处理流程）。Java 新增。</li>
+     * </ul>
+     */
+    public enum WatchOutcome { OK, INTERNAL, QUEUED, IN_BATTLE, ALREADY_WATCHING, OFFLINE, NO_BATTLE, NOT_FOUND, REJECTED, OVERLOADED }
+
+    /**
+     * 164 的出口（{@code xm_match_list_watchable_total{result}}）：{@code OK} = 回了列表（含空列表、含批读落点整批失败后变短的列表）；
+     * {@code ERROR} = 读索引失败（信封 1003）；{@code OVERLOADED} = 工作池满 / 排队超预算（信封 1003）。
+     */
+    public enum ListResult { OK, ERROR, OVERLOADED }
+
+    /**
+     * 清退的起因（{@code xm_match_spectate_evictions_total{reason}}）；标签值与发给 battle 的 {@code RemoveObserverRequest.reason} 逐字相同
+     * （{@code spectate.SpectateRules.REASON_*}）：{@code ENTER_GATHER} = 开局前清退参战者；{@code REWATCH} = 163 入口处清掉旧标记（换场 / 随机）；
+     * {@code CONCURRENT_QUEUE} = 163 登记成功后的复查命中票据或战斗锁，自我清退。
+     */
+    public enum EvictReason { ENTER_GATHER, REWATCH, CONCURRENT_QUEUE }
+
+    /**
+     * 一次清退的结局（{@code xm_match_spectate_evictions_total{result}}；每处理一条旧标记记一个）：
+     * <ul>
+     *   <li>{@code REMOVED}：RemoveObserver 调通了（battle 应答了；房间里没有这名观众时 battle 幂等、同样算）；</li>
+     *   <li>{@code NO_RECORD}：那一场已经不在了——没有落点记录，或直拨判定所在进程已被别的进程接手（{@code Dead}）：只删标记；</li>
+     *   <li>{@code INVALID_MARK}：标记值解析不了：只删标记；</li>
+     *   <li>{@code READ_FAILED}：读落点失败或记录损坏：不发 RPC（标记照删；开局清退读全员标记失败是另一回事，记
+     *       {@code watchable_anomalies{reason="mark_read_failed"}}）；</li>
+     *   <li>{@code RPC_FAILED}：RemoveObserver 没调通（没送达 / 超时 / 断开）：只记日志，名单里的残留随那一场结束清理。</li>
+     * </ul>
+     * 163「显式重看同一场」只删标记、不发 Remove，不算清退，不计。
+     */
+    public enum EvictResult { REMOVED, NO_RECORD, INVALID_MARK, READ_FAILED, RPC_FAILED }
+
+    /**
+     * 可观战索引里摘掉成员的原因（{@code xm_match_watchable_index_evictions_total{reason}}；计的是<b>摘掉的成员数</b>）：
+     * {@code ROOM_MISSING} = 163 登记时 battle 回「房间不存在」且已出建房窗口；{@code DEAD_NODE} = 同上但依据是直拨判死；
+     * {@code MISSING_RECORD} = 落点记录已不在（163 / 164 读到）；{@code STALE} = 164 读到分数已过期的成员；
+     * {@code INVALID_MEMBER} = 成员不是合法的 battle_id；{@code SWEEP} = 定时清扫摘掉的过期成员。
+     * 同步的剔除只在存储回报「真的摘了」时计；164 的异步剔除等不到结果，按<b>发出</b>计。
+     */
+    public enum IndexEviction { ROOM_MISSING, DEAD_NODE, STALE, MISSING_RECORD, INVALID_MEMBER, SWEEP }
+
+    /**
+     * 观战数据的异常（{@code xm_match_watchable_anomalies_total{reason}}；长期非 0 需要排查）：{@code CORRUPT_RECORD} = 落点记录在但损坏
+     * （163 回 16004、列表跳过，都不剔除，BW9 / W15）；{@code RECORD_READ_FAILED} = 164 批读落点整批失败（回变短的列表）；
+     * {@code PUBLISH_FAILED} = 开局成功后登记进索引失败（这一场不进列表）；{@code MARK_READ_FAILED} = 开局清退读全员标记失败（全部跳过）。
+     */
+    public enum WatchAnomaly { CORRUPT_RECORD, RECORD_READ_FAILED, PUBLISH_FAILED, MARK_READ_FAILED }
+
+    /** 观众 RPC 的方法（{@code xm_match_observer_rpc_total{method}}）。 */
+    public enum ObserverMethod { ADD, REMOVE }
+
+    /**
+     * 一次观众 RPC 的结局（{@code xm_match_observer_rpc_total{result}}；与 {@code spectate.ObserverDialer.Outcome} 的四种一一对应，由直拨器的实现记，
+     * 调用方不重复记）：{@code REPLIED} = 调通了（battle 的业务拒绝也算）；{@code DEAD} = 请求没送达、同号节点已换实例、原地址明确连不上；
+     * {@code NOT_DELIVERED} = 请求确定没送达但判不了死；{@code UNKNOWN} = 超时或连上之后失败（结局不明）。
+     */
+    public enum ObserverResult { REPLIED, DEAD, NOT_DELIVERED, UNKNOWN }
+
     // ================================================================ 状态
 
     private final MeterRegistry registry;
@@ -242,6 +326,8 @@ public final class MatchMetrics {
     private final AtomicInteger nodesAccepting = new AtomicInteger();
     private final AtomicInteger nodesNotAccepting = new AtomicInteger();
     private volatile IntSupplier inflightGathers = () -> 0;
+    private final AtomicLong watchableBattles = new AtomicLong();
+    private volatile IntSupplier inflightWatches = () -> 0;
 
     /**
      * @param labels 标签净化（{@code config} 标签要查 Dungeon 表）
@@ -260,6 +346,10 @@ public final class MatchMetrics {
                 .description("battle 节点目录概况（凑单每轮刷新）：accepting = 可分配，not_accepting = 在册但关闸中").register(registry);
         Gauge.builder(GATHERS_INFLIGHT, this, m -> m.inflightGathers.getAsInt())
                 .description("在途的 gather 数（上限 xm.match.gather-max-inflight）").register(registry);
+        Gauge.builder(WATCHABLE_BATTLES, watchableBattles, AtomicLong::get)
+                .description("可观战索引的大小（清扫时采样 ZCARD；每个实例各自采样同一个全局 ZSET：多实例时看板取 max，不能 sum）").register(registry);
+        Gauge.builder(SPECTATE_INFLIGHT, this, m -> m.inflightWatches.getAsInt())
+                .description("在途的 163 观战请求数（上限 xm.match.spectate.max-inflight；每实例的真实值）").register(registry);
     }
 
     private void preregister() {
@@ -324,6 +414,28 @@ public final class MatchMetrics {
         for (AdminOp op : AdminOp.values()) {
             for (String status : ADMIN_STATUSES) {
                 adminCounter(op, status);
+            }
+        }
+        for (WatchOutcome outcome : WatchOutcome.values()) {
+            watchCounter(outcome);
+        }
+        for (ListResult result : ListResult.values()) {
+            listCounter(result);
+        }
+        for (EvictReason reason : EvictReason.values()) {
+            for (EvictResult result : EvictResult.values()) {
+                evictionCounter(reason, result);
+            }
+        }
+        for (IndexEviction reason : IndexEviction.values()) {
+            indexEvictionCounter(reason);
+        }
+        for (WatchAnomaly reason : WatchAnomaly.values()) {
+            anomalyCounter(reason);
+        }
+        for (ObserverMethod method : ObserverMethod.values()) {
+            for (ObserverResult result : ObserverResult.values()) {
+                observerCounter(method, result);
             }
         }
     }
@@ -482,6 +594,50 @@ public final class MatchMetrics {
         adminCounter(op, Integer.toString(status)).increment();
     }
 
+    // ================================================================ 观战（批次 6.5）
+
+    /** 163 的一个出口（每个请求恰好一次；取值口径见 {@link WatchOutcome}）。 */
+    public void watchBattle(WatchOutcome outcome) {
+        watchCounter(outcome).increment();
+    }
+
+    /** 164 的一个出口（每个请求恰好一次）。 */
+    public void listWatchable(ListResult result) {
+        listCounter(result).increment();
+    }
+
+    /** 处理了一条旧的观战标记（开局前清退 / 163 换场 / 163 复查命中）：起因与结局，口径见 {@link EvictResult}。 */
+    public void spectateEviction(EvictReason reason, EvictResult result) {
+        evictionCounter(reason, result).increment();
+    }
+
+    /** 从可观战索引里摘掉了 {@code members} 个成员（≤ 0 不计；口径见 {@link IndexEviction}）。清扫一轮摘掉多少就传多少。 */
+    public void watchableIndexEvicted(IndexEviction reason, long members) {
+        if (members > 0) {
+            indexEvictionCounter(reason).increment(members);
+        }
+    }
+
+    /** 一次观战数据异常。 */
+    public void watchableAnomaly(WatchAnomaly reason) {
+        anomalyCounter(reason).increment();
+    }
+
+    /** 可观战索引此刻的大小（清扫器每轮采样一次 ZCARD；读失败时不调，gauge 停在上一次的读数）。 */
+    public void watchableBattles(long count) {
+        watchableBattles.set(Math.max(0, count));
+    }
+
+    /** 一次观众 RPC 的结局（直拨器的实现记；同步的与异步发出的都记）。 */
+    public void observerRpc(ObserverMethod method, ObserverResult result) {
+        observerCounter(method, result).increment();
+    }
+
+    /** 接上在途 163 数的来源（163 的执行器启动时调一次；没接之前读数恒为 0）。 */
+    public void bindSpectateInflight(IntSupplier inflight) {
+        this.inflightWatches = Objects.requireNonNull(inflight, "inflight");
+    }
+
     // ================================================================ 内部
 
     private Timer requestTimer(String method, RequestResult result) {
@@ -528,6 +684,32 @@ public final class MatchMetrics {
 
     private Counter adminCounter(AdminOp op, String status) {
         return counter(ADMIN_REQUESTS, "管理端口 /admin/** 的调用（含鉴权失败），按 HTTP 状态计", "op", tag(op), "status", status);
+    }
+
+    private Counter watchCounter(WatchOutcome outcome) {
+        return counter(WATCH_BATTLE, "观战 163 的出口", "outcome", tag(outcome));
+    }
+
+    private Counter listCounter(ListResult result) {
+        return counter(LIST_WATCHABLE, "可观战列表 164 的出口", "result", tag(result));
+    }
+
+    private Counter evictionCounter(EvictReason reason, EvictResult result) {
+        return counter(SPECTATE_EVICTIONS, "清退观众（开局前 / 换场 / 复查命中）的结局；removed = RemoveObserver 调通了", "reason", tag(reason),
+                "result", tag(result));
+    }
+
+    private Counter indexEvictionCounter(IndexEviction reason) {
+        return counter(WATCHABLE_INDEX_EVICTIONS, "从可观战索引里摘掉的成员数", "reason", tag(reason));
+    }
+
+    private Counter anomalyCounter(WatchAnomaly reason) {
+        return counter(WATCHABLE_ANOMALIES, "观战数据异常（落点损坏 / 批读失败 / 登记索引失败 / 读标记失败；长期非 0 需要排查）", "reason", tag(reason));
+    }
+
+    private Counter observerCounter(ObserverMethod method, ObserverResult result) {
+        return counter(OBSERVER_RPC, "发给 battle 的观众 RPC（addObserver / removeObserver）的结局；replied 含 battle 的业务拒绝", "method", tag(method),
+                "result", tag(result));
     }
 
     /** 取（或第一次时建）一个计数器。{@code tags} 是「键, 值, 键, 值…」。 */

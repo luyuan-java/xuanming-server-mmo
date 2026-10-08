@@ -26,9 +26,9 @@ public final class MatchMethods {
     public static final String NOTIFY_CHALLENGE_INVITE = "NotifyChallengeInvite";
     /** 154：切磋结果推送的号；作为上行是空操作（回 Empty）。 */
     public static final String NOTIFY_CHALLENGE_RESULT = "NotifyChallengeResult";
-    /** 163：观战（6.4 临时回 in-band 1006，6.5 接真语义）。 */
+    /** 163：观战（批次 6.5，spectate-spec §3.1；处理器在 spectate 包，跑在它自己的执行器上）。 */
     public static final String WATCH_BATTLE = "WatchBattle";
-    /** 164：可观战列表（6.4 临时回空列表）。 */
+    /** 164：可观战列表（批次 6.5，spectate-spec §3.3；处理器在 spectate 包，跑在 match-worker 上）。 */
     public static final String LIST_WATCHABLE_BATTLES = "ListWatchableBattles";
     /** 179：战斗票据补签（请求 / 应答消息在 battle 包）。 */
     public static final String REQUEST_BATTLE_TICKET = "RequestBattleTicket";

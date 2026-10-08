@@ -30,7 +30,8 @@ public final class InMemoryPlacementStore implements PlacementStore {
     public final List<BattlePlacement> writes = new CopyOnWriteArrayList<>();
     /** 每次 delete 的 battle_id，按调用顺序。 */
     public final List<Long> deletes = new CopyOnWriteArrayList<>();
-    /** 事件序列：{@code "placement.write:<battle_id>#<attempt>"}（失败的写是 {@code "placement.write-failed:…"}）/ {@code "placement.delete:<battle_id>"}。 */
+    /** 事件序列：{@code "placement.write:<battle_id>#<attempt>"}（失败的写是 {@code "placement.write-failed:…"}）/ {@code "placement.delete:<battle_id>"} /
+     * {@code "placement.evict:<battle_id>"}（观战的有条件剔除删掉的）。 */
     public final List<String> events;
     /** 接下来这么多次 write 返回 false（每次减一）。 */
     public volatile int failWrites;
@@ -64,6 +65,26 @@ public final class InMemoryPlacementStore implements PlacementStore {
     /** 此刻存着的记录。 */
     public Optional<BattlePlacement> stored(long battleId) {
         return Optional.ofNullable(records.get(battleId));
+    }
+
+    /** 这条记录是否被 {@link #corrupt} 标成了损坏（{@link InMemorySpectateStore} 读它时回 {@code Corrupt}）。 */
+    public boolean corrupted(long battleId) {
+        return corrupted.containsKey(battleId);
+    }
+
+    /**
+     * 观战的有条件剔除（S_W_EVICT 的 dead / stale 模式）删掉一条记录：{@link InMemorySpectateStore} 用。<b>不</b>记进 {@link #deletes}
+     * （那是 gather 调 {@link #delete} 的记录），事件是 {@code "placement.evict:<battle_id>"}。
+     *
+     * @return 这一次真的删掉了一条记录
+     */
+    public synchronized boolean evict(long battleId) {
+        boolean removed = records.remove(battleId) != null;
+        corrupted.remove(battleId);
+        if (removed) {
+            events.add("placement.evict:" + Long.toUnsignedString(battleId));
+        }
+        return removed;
     }
 
     @Override

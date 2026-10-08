@@ -33,6 +33,8 @@ class RedisKeysMatchTest {
         assertThat(RedisKeys.matchChallengeTarget(1001)).isEqualTo("xm:{match}:challenge-target:1001");
         assertThat(RedisKeys.matchChallengeDone(88)).isEqualTo("xm:{match}:challenge-done:88");
         assertThat(RedisKeys.matchBattlePlacement(99)).isEqualTo("xm:{match}:battle:99");
+        assertThat(RedisKeys.matchWatching(1001)).isEqualTo("xm:{match}:watching:1001");
+        assertThat(RedisKeys.matchWatchable()).isEqualTo("xm:{match}:watchable");
     }
 
     @Test
@@ -42,6 +44,8 @@ class RedisKeysMatchTest {
         assertThat(RedisKeys.matchChallengeTarget(BIG)).isEqualTo("xm:{match}:challenge-target:" + BIG_TEXT);
         assertThat(RedisKeys.matchChallengeDone(BIG)).isEqualTo("xm:{match}:challenge-done:" + BIG_TEXT);
         assertThat(RedisKeys.matchBattlePlacement(BIG)).isEqualTo("xm:{match}:battle:" + BIG_TEXT);
+        assertThat(RedisKeys.matchWatching(BIG)).isEqualTo("xm:{match}:watching:" + BIG_TEXT);
+        assertThat(RedisKeys.matchWatching(-1L)).isEqualTo("xm:{match}:watching:18446744073709551615");
         assertThat(RedisKeys.matchTicket(-1L)).isEqualTo("xm:{match}:ticket:18446744073709551615");
         assertThat(RedisKeys.matchQueue(3, -1)).as("battle_config_id 是 uint32：0xFFFFFFFF").isEqualTo("xm:{match}:queue:3:4294967295");
         assertThat(RedisKeys.matchRank(3, Integer.MIN_VALUE)).isEqualTo("xm:{match}:rank:3:2147483648");
@@ -102,7 +106,9 @@ class RedisKeysMatchTest {
                 RedisKeys.matchChallenge(1), RedisKeys.matchChallenge(BIG),
                 RedisKeys.matchChallengeTarget(2), RedisKeys.matchChallengeTarget(BIG),
                 RedisKeys.matchChallengeDone(3), RedisKeys.matchChallengeDone(BIG),
-                RedisKeys.matchBattlePlacement(4), RedisKeys.matchBattlePlacement(BIG));
+                RedisKeys.matchBattlePlacement(4), RedisKeys.matchBattlePlacement(BIG),
+                RedisKeys.matchWatching(5), RedisKeys.matchWatching(BIG), RedisKeys.matchWatching(-1L),
+                RedisKeys.matchWatchable());
         int expected = slotOf("{match}");
         assertThat(expected).as("tag 内容就是 match").isEqualTo(CRC16.crc16("match".getBytes(StandardCharsets.UTF_8)) % 16384);
         for (String key : keys) {
@@ -116,6 +122,26 @@ class RedisKeysMatchTest {
         // 战斗锁按玩家分 tag（6.3 拥有）、组队是 {team}：它们与 match 键不同槽，所以 match 的脚本里不读锁（锁检查在 Java 侧、靠复查兜底）。
         assertThat(slotOf(RedisKeys.battleLock(1))).isNotEqualTo(slotOf(RedisKeys.matchTicket(1)));
         assertThat(slotOf(RedisKeys.teamPlayer(1))).isNotEqualTo(slotOf(RedisKeys.matchTicket(1)));
+    }
+
+    /**
+     * 观战的两类键（spectate-spec §4.2）必须与票据、落点记录同槽：「没有票据 ∧ 抢标记」「读落点 + 查是否已公开」「按 attempt 守护的剔除」
+     * 都各是一段 Lua，键跨了槽脚本就发不出去。战斗锁不在这个槽里，所以锁检查不进脚本。
+     */
+    @Test
+    void 观战标记与可观战索引_和票据_落点记录同一个hash_tag() {
+        long player = BIG;
+        long battle = Long.MIN_VALUE + 77;
+        int ticketSlot = slotOf(RedisKeys.matchTicket(player));
+
+        assertThat(slotOf(RedisKeys.matchWatching(player))).as("观战标记与同一玩家的票据").isEqualTo(ticketSlot);
+        assertThat(slotOf(RedisKeys.matchWatchable())).as("可观战索引与票据").isEqualTo(ticketSlot);
+        assertThat(slotOf(RedisKeys.matchWatchable())).as("可观战索引与落点记录").isEqualTo(slotOf(RedisKeys.matchBattlePlacement(battle)));
+        assertThat(slotOf(RedisKeys.matchWatching(1))).as("不同玩家的标记也同槽（开局清退用一条 MGET 读全员）")
+                .isEqualTo(slotOf(RedisKeys.matchWatching(2)));
+        assertThat(slotOf(RedisKeys.matchWatching(player))).as("战斗锁不在 match 的槽里").isNotEqualTo(slotOf(RedisKeys.battleLock(player)));
+        assertThat(RedisKeys.matchWatching(player)).isNotEqualTo(RedisKeys.matchTicket(player));
+        assertThat(RedisKeys.matchWatchable()).as("索引是一把固定的键，不带任何 id").isEqualTo("xm:{match}:watchable");
     }
 
     /** Redis Cluster 的键槽：有 {@code {…}} 且花括号里非空时只对花括号里的内容算 CRC16，否则对整个键算。 */

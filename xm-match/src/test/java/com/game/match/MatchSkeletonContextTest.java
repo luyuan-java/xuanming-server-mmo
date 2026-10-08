@@ -78,7 +78,6 @@ import com.game.proto.match.JoinQueueRequest;
 import com.game.proto.match.JoinQueueResponse;
 import com.game.proto.match.StartActivityBattleRequest;
 import com.game.proto.match.StartActivityBattleResponse;
-import com.game.proto.match.WatchBattleResponse;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -117,7 +116,7 @@ import org.springframework.test.context.DynamicPropertySource;
  *
  * <p>从另一个 Dubbo 框架模型（等价于 gate / xm-team / xm-guild 进程）经真 Triple 调进来，钉住：
  * <ul>
- *   <li>契约 {@code MatchService} 的十个号都有处理器，而且经 Triple 真的走到各包的处理器：当场回的四个号按规格应答；排队三个号、补签、切磋在这个
+ *   <li>契约 {@code MatchService} 的十个号都有处理器，而且经 Triple 真的走到各包的处理器：当场回的两个号按规格应答；排队三个号、补签、切磋在这个
  *       「Redis 读不出来」的上下文里按 §8.1「依赖故障」一列回（157 / 179 in-band 16004，148 / 153 信封 1003），没绑定玩家的 152 回「缺少玩家身份」；</li>
  *   <li>整队 / 活动两个内部接口与客户端入口同组导出；</li>
  *   <li>装起来的是各包的生产实现；启动完成后凑单循环在跑；评分读口读的是库，dev 读评分口与活动开战口挂在管理端口上、过了鉴权过滤器才进得去；</li>
@@ -263,9 +262,11 @@ class MatchSkeletonContextTest {
         return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
-    /** 当场回的四个号（入口派发这一包自己提供）；其余六个号的处理器在排队、补签、切磋各包。 */
-    private static final Set<String> INLINE_METHODS = Set.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT,
-            MatchMethods.WATCH_BATTLE, MatchMethods.LIST_WATCHABLE_BATTLES);
+    /**
+     * 当场回的两个号（入口派发这一包自己提供）；其余八个号的处理器在排队、补签、切磋、观战各包。163 / 164 自批次 6.5 起归观战包、不再当场回：
+     * 它们经真 Triple 的应答由观战包自己的测试钉（这个上下文的 Redis 替身只应答发号租约），这里只在下一条用例里钉「十个号都有处理器」。
+     */
+    private static final Set<String> INLINE_METHODS = Set.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
 
     // ================================================================ 十个号
 
@@ -278,7 +279,7 @@ class MatchSkeletonContextTest {
     }
 
     @Test
-    void Dubbo已导出_经真Triple调进来_当场回的四个号按规格应答() throws Exception {
+    void Dubbo已导出_经真Triple调进来_当场回的两个号按规格应答() throws Exception {
         for (String method : INLINE_METHODS) {
             int messageId = messageId(method);
             ClientReply reply = client().handle(call(messageId)).get(15, TimeUnit.SECONDS);
@@ -286,13 +287,7 @@ class MatchSkeletonContextTest {
             assertThat(reply.getTipParametersList()).isEmpty();
             assertThat(reply.getDirectivesList()).as("match 不产生会话指令").isEmpty();
             assertThat(reply.getTipId()).as("%s（%d）", method, messageId).isZero();
-            if (MatchMethods.WATCH_BATTLE.equals(method)) {
-                WatchBattleResponse watch = WatchBattleResponse.parseFrom(reply.getBody());
-                assertThat(watch.getErrorMessage().getId()).as("163：6.4 期间 in-band 1006").isEqualTo(1006);
-                assertThat(watch.getErrorMessage().getParametersList()).isEmpty();
-            } else {
-                assertThat(reply.getBody().isEmpty()).as("%s：Empty / 空列表", method).isTrue();
-            }
+            assertThat(reply.getBody().isEmpty()).as("%s：Empty", method).isTrue();
         }
     }
 
@@ -400,7 +395,7 @@ class MatchSkeletonContextTest {
         assertThat(Long.compareUnsigned(second, first)).as("同源、递增").isPositive();
 
         assertThat(context.getBean(MatchWorkers.class)).as("match-worker 工作池").isInstanceOf(MatchWorkerPool.class);
-        assertThat(context.getBean(GatherHooks.class)).isSameAs(GatherHooks.NOOP);
+        assertThat(context.getBean(GatherHooks.class)).as("开局钩子由观战包提供（恰好一个）").isNotNull();
         assertThat(context.getBean(RunMode.class)).isEqualTo(RunMode.TEST);
         assertThat(context.getBean(MatchInstance.class).id()).hasSize(36);
         assertThat(context.getBean(PlayerStatusReader.class)).isNotNull();

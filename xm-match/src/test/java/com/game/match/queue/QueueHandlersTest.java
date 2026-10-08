@@ -56,7 +56,7 @@ class QueueHandlersTest {
     private final FakePlayerStatus players = new FakePlayerStatus();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
-    private final QueueService service = new QueueService(new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null),
+    private final QueueService service = new QueueService(new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null),
             players, store, new DefaultTicketHealing(store), new FixedRatingReader(), new FakeGatherLauncher(),
             new MatchIds(new Snowflake(7), () -> true, () -> false), metrics, () -> "ticket-1");
     private final List<MatchMethodHandler> handlers = List.of(new QueueHandlers.Join(service, metrics), new QueueHandlers.Cancel(service),

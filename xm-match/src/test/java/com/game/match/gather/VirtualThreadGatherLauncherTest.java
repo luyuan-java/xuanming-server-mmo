@@ -184,6 +184,11 @@ class VirtualThreadGatherLauncherTest {
             public Lookup lookup(int nodeId, String instanceId) {
                 return Lookup.ERROR;
             }
+
+            @Override
+            public Lookup lookup(int nodeId, String instanceId, com.game.common.deadline.Deadline d) {
+                return Lookup.ERROR;
+            }
         };
         VirtualThreadGatherLauncher launcher = new VirtualThreadGatherLauncher(f.pipeline(), f.metrics, 2);
 
@@ -217,6 +222,11 @@ class VirtualThreadGatherLauncherTest {
             @Override
             public Lookup lookup(int nodeId, String instanceId) {
                 return f.battleNodes.lookup(nodeId, instanceId);
+            }
+
+            @Override
+            public Lookup lookup(int nodeId, String instanceId, com.game.common.deadline.Deadline d) {
+                return f.battleNodes.lookup(nodeId, instanceId, d);
             }
         };
     }

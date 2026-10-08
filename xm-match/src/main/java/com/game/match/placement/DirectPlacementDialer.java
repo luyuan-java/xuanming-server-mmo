@@ -2,6 +2,7 @@ package com.game.match.placement;
 
 import com.game.api.BattleNodeService;
 import com.game.api.rpc.NodeRpcClients;
+import com.game.common.deadline.Deadline;
 import com.game.match.gather.BattleNodes;
 import com.game.match.port.NodeCalls;
 import com.game.match.proto.BattlePlacement;
@@ -40,6 +41,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p>线程：阻塞等这一次调用（至多 {@code timeout} 加一点本地余量；建连失败之后另有一次目录读与一次不超出 {@code timeout} 余下部分的探测），
  * 只在 future 与套接字上等、不持锁，可以在工作线程与虚拟线程上调。无状态、线程安全。
+ *
+ * <p><b>带硬截止的重载</b>（6.5 的观众 RPC；lead 裁决 3）走同一套判定，只是每一步都夹在硬截止之内：进来时已过点不发调用；
+ * 交给出站口的超时与本地等待都不超过它的剩余（不再另加本地余量）；到点之后不读目录、不探测。到点的结局一律是「暂不可用」——
+ * 时间不够永远不会被当成「这一局没了」。不带硬截止的重载（179）行为不变：本地余量 {@value #LOCAL_WAIT_GRACE_MS} ms、目录读固定等 1 s。
  */
 public final class DirectPlacementDialer implements PlacementDialer {
 
@@ -76,6 +81,21 @@ public final class DirectPlacementDialer implements PlacementDialer {
 
     @Override
     public <R> Dial<R> dial(BattlePlacement placement, Duration timeout, Function<BattleNodeService, CompletableFuture<R>> call) {
+        return dial0(placement, timeout, null, call);
+    }
+
+    @Override
+    public <R> Dial<R> dial(BattlePlacement placement, Duration timeout, Deadline hardStop, Function<BattleNodeService, CompletableFuture<R>> call) {
+        return dial0(placement, timeout, Objects.requireNonNull(hardStop, "hardStop"), call);
+    }
+
+    /**
+     * 两个重载共用的实现。
+     *
+     * @param hardStop 整次直拨的硬截止；null = 没有（179 的旧行为：本地另等 {@value #LOCAL_WAIT_GRACE_MS} ms 余量、目录读固定等 1 s）
+     */
+    private <R> Dial<R> dial0(BattlePlacement placement, Duration timeout, Deadline hardStop,
+                              Function<BattleNodeService, CompletableFuture<R>> call) {
         Objects.requireNonNull(placement, "placement");
         Objects.requireNonNull(call, "call");
         String battle = Long.toUnsignedString(placement.getBattleId());
@@ -90,6 +110,20 @@ public final class DirectPlacementDialer implements PlacementDialer {
             return new Dial.Unavailable<>(Kind.OTHER, "落点记录里的地址不合法: " + e.getMessage());
         }
         long timeoutMs = timeout == null ? 0 : Math.max(0, timeout.toMillis());
+        long localWaitNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMs + LOCAL_WAIT_GRACE_MS);
+        if (hardStop != null) {
+            long remainingNanos = hardStop.remainingNanos();
+            if (remainingNanos <= 0) {
+                // 没有时间了：不发调用。请求确定没有发出，所以是「没送达」而不是「超时」
+                return new Dial.Unavailable<>(Kind.NOT_DELIVERED, "硬截止已到，没有发出调用");
+            }
+            if (timeoutMs > 0) {
+                // 交给出站口的超时不超过硬截止的剩余（不足 1 ms 按 1 ms：0 在出站口的含义是「不发包」）
+                timeoutMs = Math.min(timeoutMs, Math.max(1, TimeUnit.NANOSECONDS.toMillis(remainingNanos)));
+            }
+            // 本地等待不再另加余量越过硬截止
+            localWaitNanos = Math.min(localWaitNanos, remainingNanos);
+        }
         long startedNanos = System.nanoTime();
         Throwable failure;
         try {
@@ -97,13 +131,13 @@ public final class DirectPlacementDialer implements PlacementDialer {
             if (future == null) {
                 return new Dial.Unavailable<>(Kind.OTHER, "出站口没有返回 future");
             }
-            R reply = future.get(timeoutMs + LOCAL_WAIT_GRACE_MS, TimeUnit.MILLISECONDS);
+            R reply = future.get(Math.max(1, localWaitNanos), TimeUnit.NANOSECONDS);
             if (reply == null) {
                 return new Dial.Unavailable<>(Kind.OTHER, "battle 的应答为空");
             }
             return new Dial.Replied<>(reply);
         } catch (TimeoutException e) {
-            return new Dial.Unavailable<>(Kind.TIMEOUT, "本地等待超时 " + timeoutMs + " ms");
+            return new Dial.Unavailable<>(Kind.TIMEOUT, "本地等待超时 " + timeoutMs + " ms" + (hardStop == null ? "" : "（受硬截止约束）"));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return new Dial.Unavailable<>(Kind.OTHER, "等待应答时被中断");
@@ -116,7 +150,7 @@ public final class DirectPlacementDialer implements PlacementDialer {
             case TIMEOUT -> new Dial.Unavailable<>(Kind.TIMEOUT, String.valueOf(failure));
             case OTHER -> new Dial.Unavailable<>(Kind.OTHER, String.valueOf(failure));
             case NOT_SENT -> afterConnectFailure(placement, target, failure,
-                    timeoutMs - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
+                    timeoutMs - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos), hardStop);
         };
     }
 
@@ -124,21 +158,40 @@ public final class DirectPlacementDialer implements PlacementDialer {
      * 直拨的请求没有送达：读一次目录，同号节点已换实例时再探测一次原地址，明确连不上才判这一局没了。
      *
      * @param remainingMs 这次直拨的预算还剩多少（探测不得超出它）
+     * @param hardStop    整次直拨的硬截止（null = 没有）：到点就不再读目录、不再探测，按「没送达、不判死」收场
      */
-    private <R> Dial<R> afterConnectFailure(BattlePlacement placement, NodeRpcClients.Target target, Throwable failure, long remainingMs) {
+    private <R> Dial<R> afterConnectFailure(BattlePlacement placement, NodeRpcClients.Target target, Throwable failure, long remainingMs,
+                                            Deadline hardStop) {
         String battle = Long.toUnsignedString(placement.getBattleId());
         String node = Integer.toUnsignedString(placement.getBattleNodeId());
         if (placement.getBattleInstanceId().isEmpty()) {
             log.warn("直拨 battle 建连失败，但落点记录没有实例号，无从比对目录，不判死 battle_id={} node={} address={}", battle, node, target.address());
             return new Dial.Unavailable<>(Kind.NOT_DELIVERED, "建连失败；落点记录没有实例号: " + failure);
         }
-        BattleNodes.Lookup lookup = nodes.lookup(placement.getBattleNodeId(), placement.getBattleInstanceId());
+        BattleNodes.Lookup lookup;
+        if (hardStop == null) {
+            lookup = nodes.lookup(placement.getBattleNodeId(), placement.getBattleInstanceId());
+        } else if (hardStop.expired()) {
+            return new Dial.Unavailable<>(Kind.NOT_DELIVERED, "建连失败；硬截止已到，没有读目录: " + failure);
+        } else {
+            lookup = nodes.lookup(placement.getBattleNodeId(), placement.getBattleInstanceId(), hardStop);
+        }
         if (lookup != BattleNodes.Lookup.OTHER_INSTANCE) {
             return new Dial.Unavailable<>(Kind.NOT_DELIVERED, "建连失败；目录=" + lookup + ": " + failure);
         }
+        long probeBudgetMs = Math.min(probeTimeoutMs, remainingMs);
+        if (hardStop != null) {
+            probeBudgetMs = Math.min(probeBudgetMs, hardStop.remainingMillis());
+            if (probeBudgetMs <= 0) {
+                // 第三条证据来不及取：时间不够永远不当成「这一局没了」
+                log.info("直拨 battle 的请求没有送达、同号节点已换实例，但硬截止已到、来不及探测原地址，不判死 battle_id={} node={} address={} "
+                        + "recorded_instance={}", battle, node, target.address(), placement.getBattleInstanceId());
+                return new Dial.Unavailable<>(Kind.NOT_DELIVERED, "请求没有送达；同号节点已换实例，但硬截止已到、没有探测: " + failure);
+            }
+        }
         ConnectProbe.Result probed;
         try {
-            probed = probe.probe(target.host(), target.port(), Math.min(probeTimeoutMs, remainingMs));
+            probed = probe.probe(target.host(), target.port(), probeBudgetMs);
         } catch (RuntimeException e) {
             log.warn("探测 battle 原地址时出错（按没有结论处理） battle_id={} address={}: {}", battle, target.address(), e.toString());
             probed = ConnectProbe.Result.INCONCLUSIVE;

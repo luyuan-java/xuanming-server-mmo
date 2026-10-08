@@ -76,7 +76,7 @@ class QueueServiceTest {
     private final MatchIds ids = new MatchIds(new Snowflake(7), leaseValid::get, leaseLost::get);
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> id >= 1 && id <= 3));
-    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
     private final AtomicInteger ticketSeq = new AtomicInteger();
     private final QueueService service = serviceOn(store);
 

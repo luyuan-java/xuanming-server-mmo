@@ -40,15 +40,18 @@ import com.game.match.ticket.TicketState;
 import com.game.proto.RequestBattleTicketRequest;
 import com.game.proto.RequestBattleTicketResponse;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.match.BattleWatchSummary;
 import com.game.proto.match.ChallengePlayerRequest;
 import com.game.proto.match.ChallengePlayerResponse;
 import com.game.proto.match.GetQueueStatusResponse;
 import com.game.proto.match.JoinQueueRequest;
 import com.game.proto.match.JoinQueueResponse;
+import com.game.proto.match.ListWatchableBattlesRequest;
 import com.game.proto.match.ListWatchableBattlesResponse;
 import com.game.proto.match.QueueState;
 import com.game.proto.match.RespondChallengeRequest;
 import com.game.proto.match.RespondChallengeResponse;
+import com.game.proto.match.WatchBattleRequest;
 import com.game.proto.match.WatchBattleResponse;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -74,11 +77,13 @@ import org.junit.jupiter.api.Test;
  * <p>分两层：
  * <ul>
  *   <li><b>派发层的机制</b>用带探针的替身处理器钉（{@link #businessHandlers()}，按 §8.1 写）：按号选处理器、投到工作池、截止与会话原样交到、
- *       应答体 / 信封的翻译、未知号与解析失败回信封 1003、过载时不调 {@code handle} 而按该方法的过载应答回（M29）。当场回的四个号
- *       （156 / 154 / 163 / 164）用的是真处理器（{@link InlineHandlers}），§8.1 的那四行逐格钉住。</li>
- *   <li><b>§8.1 整张表对着真处理器再钉一遍</b>（最后一节「真处理器」）：进程里实际登记的十个处理器——排队三个、补签一个、切磋两个、当场回的四个，
- *       依赖用 {@code testing} 包的替身——经同一个派发器与工作池：恰好覆盖契约的十个方法；过载时 157 / 152 / 151 / 179 回 in-band 16004、
- *       148 / 153 回信封 1003 且一条依赖都没碰；依赖故障时 148 / 153 回信封 1003、157 / 179 回 in-band 16004；正常路径走得通。</li>
+ *       应答体 / 信封的翻译、未知号与解析失败回信封 1003、过载时不调 {@code handle} 而按该方法的过载应答回（M29）。当场回的两个号
+ *       （156 / 154）用的是真处理器（{@link InlineHandlers}），§8.1 的那两行逐格钉住。163 / 164 在这一层同样是替身：
+ *       它们的过载口径（163 in-band 16004、164 信封 1003，spectate-spec §4.11）在这里钉，真语义由观战包自己的测试钉。</li>
+ *   <li><b>§8.1 整张表对着真处理器再钉一遍</b>（最后一节「真处理器」）：进程里实际登记的处理器里不属于观战包的八个——排队三个、补签一个、切磋两个、
+ *       当场回的两个，依赖用 {@code testing} 包的替身——经同一个派发器与工作池：过载时 157 / 152 / 151 / 179 回 in-band 16004、
+ *       148 / 153 回信封 1003 且一条依赖都没碰；依赖故障时 148 / 153 回信封 1003、157 / 179 回 in-band 16004；正常路径走得通。
+ *       163 / 164 的真处理器在观战包（批次 6.5）；「十个号都有处理器」由 {@code MatchApplicationContextTest} 对着真实装配钉。</li>
  * </ul>
  */
 class MatchClientMessageServiceTest {
@@ -93,8 +98,7 @@ class MatchClientMessageServiceTest {
             MatchMethods.CHALLENGE_PLAYER, 152, MatchMethods.RESPOND_CHALLENGE, 151, MatchMethods.REQUEST_BATTLE_TICKET, 179,
             MatchMethods.NOTIFY_CHALLENGE_INVITE, 156, MatchMethods.NOTIFY_CHALLENGE_RESULT, 154,
             MatchMethods.WATCH_BATTLE, 163, MatchMethods.LIST_WATCHABLE_BATTLES, 164);
-    private static final List<String> INLINE = List.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT,
-            MatchMethods.WATCH_BATTLE, MatchMethods.LIST_WATCHABLE_BATTLES);
+    private static final List<String> INLINE = List.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
@@ -109,7 +113,7 @@ class MatchClientMessageServiceTest {
         }
     }
 
-    // ================================================================ 六个业务号的替身（各包合入后换成真处理器）
+    // ================================================================ 八个业务号的替身（真处理器在各自的包里测）
 
     /**
      * 一个业务号的替身：按契约的请求类型解析请求体；正常应答与过载应答各一份；记下被调的次数、线程、会话、请求体与截止；可以卡住（占住工作线程）。
@@ -179,8 +183,8 @@ class MatchClientMessageServiceTest {
     }
 
     /**
-     * 六个业务号：正常应答各不相同（好认出是谁回的）；过载应答按 §8.1「工作池满 / 排队超预算」一列——有 in-band 错误字段的 157 / 152 / 151 / 179
-     * 回 in-band 16004，只能用信封的 148 / 153 回信封 1003。
+     * 八个业务号：正常应答各不相同（好认出是谁回的）；过载应答按 §8.1「工作池满 / 排队超预算」一列——有 in-band 错误字段的 157 / 152 / 151 / 179 / 163
+     * 回 in-band 16004，只能用信封的 148 / 153 / 164 回信封 1003。
      */
     private static Map<String, Business> businessHandlers() {
         Map<String, Business> handlers = new LinkedHashMap<>();
@@ -196,6 +200,11 @@ class MatchClientMessageServiceTest {
                 Reply.body(MatchTips.respondRejected(MatchTip.BUSY))));
         add(handlers, new Business(MatchMethods.REQUEST_BATTLE_TICKET, Reply.body(MatchTips.reissueRejected(MatchTip.REISSUE_BATTLE_GONE)),
                 Reply.body(MatchTips.reissueRejected(MatchTip.BUSY))));
+        add(handlers, new Business(MatchMethods.WATCH_BATTLE, Reply.body(MatchTips.watchAccepted(163_000)),
+                Reply.body(MatchTips.watchRejected(MatchTip.BUSY))));
+        add(handlers, new Business(MatchMethods.LIST_WATCHABLE_BATTLES,
+                Reply.body(ListWatchableBattlesResponse.newBuilder().addBattles(BattleWatchSummary.newBuilder().setBattleId(164_000)).build()),
+                Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
         return handlers;
     }
 
@@ -212,8 +221,6 @@ class MatchClientMessageServiceTest {
         List<MatchMethodHandler> all = new ArrayList<>(business.values());
         all.add(inline.notifyChallengeInviteUplinkHandler());
         all.add(inline.notifyChallengeResultUplinkHandler());
-        all.add(inline.watchBattlePlaceholderHandler());
-        all.add(inline.listWatchableBattlesPlaceholderHandler());
         return new MatchClientMessageService(new MatchDispatcher(REGISTRY, all, pool, metrics, budgetMillis));
     }
 
@@ -259,12 +266,12 @@ class MatchClientMessageServiceTest {
     }
 
     @Test
-    void 六个业务号各自派到自己的处理器_在match_worker线程上_会话请求体截止原样交到() throws Exception {
+    void 八个业务号各自派到自己的处理器_在match_worker线程上_会话请求体截止原样交到() throws Exception {
         MatchClientMessageService service = service();
         ByteString body = JoinQueueRequest.newBuilder().setModeValue(3).setBattleConfigId(7).build().toByteString();
 
         for (Business target : business.values()) {
-            // 同一份字节对六个请求类型都是合法消息：字段号对不上或线型不符的字段按未知字段处理，不报错
+            // 同一份字节对八个请求类型都是合法消息：字段号对不上或线型不符的字段按未知字段处理，不报错
             ClientReply reply = await(service.handle(call(IDS.get(target.method), body, 1001)));
 
             assertThat(target.handled).as(target.method).hasValue(1);
@@ -294,7 +301,7 @@ class MatchClientMessageServiceTest {
     }
 
     @Test
-    void 当场回的四个号_在调用线程上完成_不进工作池_不看会话有没有玩家() throws Exception {
+    void 当场回的两个号_在调用线程上完成_不进工作池_不看会话有没有玩家() throws Exception {
         MatchClientMessageService service = service();
 
         for (long playerId : new long[] {1001, 0}) {
@@ -306,22 +313,34 @@ class MatchClientMessageServiceTest {
             }
             ClientReply invite = await(service.handle(call(156, ByteString.EMPTY, playerId)));
             ClientReply result = await(service.handle(call(154, ByteString.EMPTY, playerId)));
-            ClientReply watch = await(service.handle(call(163, ByteString.EMPTY, playerId)));
-            ClientReply list = await(service.handle(call(164, ByteString.EMPTY, playerId)));
 
             assertThat(invite.getBody().isEmpty()).as("156 上行：Empty").isTrue();
             assertThat(result.getBody().isEmpty()).as("154 上行：Empty").isTrue();
-            WatchBattleResponse watched = WatchBattleResponse.parseFrom(watch.getBody());
-            assertThat(watched.getErrorMessage().getId()).as("163：in-band 1006").isEqualTo(1006);
-            assertThat(watched.getErrorMessage().getParametersList()).isEmpty();
-            assertThat(watch.getBody()).isEqualTo(MatchTips.watchUnavailable().toByteString());
-            assertThat(list.getBody().isEmpty()).as("164：空列表").isTrue();
-            assertThat(ListWatchableBattlesResponse.parseFrom(list.getBody()).getBattlesCount()).isZero();
         }
         assertThat(business.values()).allSatisfy(h -> assertThat(h.handled).hasValue(0));
         assertThat(meters.get("executor.completed").tag("name", "match-worker").functionCounter().count()).as("工作池一个任务都没跑过").isZero();
         assertThat(meters.get("executor.queued").tag("name", "match-worker").gauge().value()).isZero();
-        assertThat(requests("WatchBattle", "ok")).isEqualTo(4);
+        assertThat(requests("NotifyChallengeInvite", "ok")).isEqualTo(4);
+        assertThat(requests("NotifyChallengeResult", "ok")).isEqualTo(4);
+    }
+
+    @Test
+    void 观战163与可观战列表164不再当场回_与别的业务号一样交给处理器_应答原样带回() throws Exception {
+        MatchClientMessageService service = service();
+
+        ClientReply watch = await(service.handle(call(163, WatchBattleRequest.newBuilder().setBattleId(77).build().toByteString(), 1001)));
+        ClientReply list = await(service.handle(call(164, ListWatchableBattlesRequest.newBuilder().setLimit(6).build().toByteString(), 0)));
+
+        assertThat(watch.getTipId()).isZero();
+        assertThat(WatchBattleResponse.parseFrom(watch.getBody()).getBattleId()).isEqualTo(163_000);
+        assertThat(WatchBattleResponse.parseFrom(watch.getBody()).hasErrorMessage()).as("成功应答不带 error_message").isFalse();
+        assertThat(list.getTipId()).isZero();
+        assertThat(ListWatchableBattlesResponse.parseFrom(list.getBody()).getBattlesList()).extracting(BattleWatchSummary::getBattleId)
+                .containsExactly(164_000L);
+        assertThat(business.get(MatchMethods.WATCH_BATTLE).handled).hasValue(1);
+        assertThat(business.get(MatchMethods.WATCH_BATTLE).thread.get()).as("没有自带执行器的处理器跑在 match-worker 上").startsWith("match-worker-");
+        assertThat(business.get(MatchMethods.LIST_WATCHABLE_BATTLES).handled).hasValue(1);
+        assertThat(business.get(MatchMethods.LIST_WATCHABLE_BATTLES).session.get().getPlayerId()).as("164 不看身份：会话原样交到").isZero();
     }
 
     // ================================================================ 信封 1003：未知号、解析失败、处理器回信封、处理器异常
@@ -392,7 +411,7 @@ class MatchClientMessageServiceTest {
     }
 
     @Test
-    void 工作池满_不调处理_有in_band错误字段的四个号回in_band的16004_只能用信封的两个号回信封1003() throws Exception {
+    void 工作池满_不调处理_有in_band错误字段的五个号回in_band的16004_只能用信封的三个号回信封1003() throws Exception {
         MatchClientMessageService service = service(1, 1, 4500);
         List<CompletableFuture<ClientReply>> occupying = saturate(service);
         Map<String, Integer> handledBefore = new LinkedHashMap<>();
@@ -404,8 +423,15 @@ class MatchClientMessageServiceTest {
         CompletableFuture<ClientReply> reissue = service.handle(call(MatchMethods.REQUEST_BATTLE_TICKET));
         CompletableFuture<ClientReply> cancel = service.handle(call(MatchMethods.CANCEL_QUEUE));
         CompletableFuture<ClientReply> status = service.handle(call(MatchMethods.GET_QUEUE_STATUS));
+        CompletableFuture<ClientReply> watch = service.handle(call(MatchMethods.WATCH_BATTLE));
+        CompletableFuture<ClientReply> list = service.handle(call(MatchMethods.LIST_WATCHABLE_BATTLES));
 
-        assertThat(List.of(join, challenge, respond, reissue, cancel, status)).as("拒收当场应答，不等工作线程").allSatisfy(f -> assertThat(f).isDone());
+        assertThat(List.of(join, challenge, respond, reissue, cancel, status, watch, list)).as("拒收当场应答，不等工作线程")
+                .allSatisfy(f -> assertThat(f).isDone());
+        assertThat(watch.get().getTipId()).as("163 有 in-band 错误字段").isZero();
+        WatchBattleResponse watched = WatchBattleResponse.parseFrom(watch.get().getBody());
+        assertInBandBusy(watched.getErrorMessage());
+        assertThat(watched.getBattleId()).isZero();
         JoinQueueResponse joined = JoinQueueResponse.parseFrom(join.get().getBody());
         assertThat(join.get().getTipId()).as("in-band：信封不带 tip").isZero();
         assertThat(joined.getErrorCode()).isEqualTo(16004);
@@ -419,8 +445,8 @@ class MatchClientMessageServiceTest {
         RequestBattleTicketResponse reissued = RequestBattleTicketResponse.parseFrom(reissue.get().getBody());
         assertInBandBusy(reissued.getErrorMessage());
         assertThat(reissued.hasAssignment()).isFalse();
-        for (CompletableFuture<ClientReply> envelope : List.of(cancel, status)) {
-            assertThat(envelope.get().getTipId()).isEqualTo(1003);
+        for (CompletableFuture<ClientReply> envelope : List.of(cancel, status, list)) {
+            assertThat(envelope.get().getTipId()).as("148 / 153 / 164 没有 in-band 错误字段：信封").isEqualTo(1003);
             assertThat(envelope.get().getBody().isEmpty()).isTrue();
             assertThat(envelope.get().getTipParametersList()).isEmpty();
         }
@@ -438,7 +464,7 @@ class MatchClientMessageServiceTest {
     }
 
     @Test
-    void 工作池满时_当场回的四个号不受影响() throws Exception {
+    void 工作池满时_当场回的两个号不受影响() throws Exception {
         MatchClientMessageService service = service(1, 1, 4500);
         saturate(service);
 
@@ -446,9 +472,8 @@ class MatchClientMessageServiceTest {
             CompletableFuture<ClientReply> future = service.handle(call(method));
             assertThat(future).as(method).isDone();
             assertThat(future.get().getTipId()).as(method).isZero();
+            assertThat(future.get().getBody().isEmpty()).as(method).isTrue();
         }
-        assertThat(WatchBattleResponse.parseFrom(await(service.handle(call(MatchMethods.WATCH_BATTLE))).getBody()).getErrorMessage().getId())
-                .isEqualTo(1006);
     }
 
     @Test
@@ -484,7 +509,7 @@ class MatchClientMessageServiceTest {
         assertThat(requests("CancelQueue", "overloaded")).isEqualTo(1);
     }
 
-    // ================================================================ 真处理器（进程里实际登记的十个；依赖用 testing 包的替身）
+    // ================================================================ 真处理器（进程里实际登记的、不属于观战包的八个；依赖用 testing 包的替身）
 
     private final InMemoryTicketStore realTickets = new InMemoryTicketStore();
     private final FakePlayerStatus realPlayers = new FakePlayerStatus();
@@ -494,7 +519,7 @@ class MatchClientMessageServiceTest {
 
     /** 与各包的装配类（QueueConfiguration / ReissueConfiguration / ChallengeConfiguration / InlineHandlers）登记的是同一批处理器类。 */
     private List<MatchMethodHandler> realHandlers() {
-        MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+        MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
         MatchIds ids = new MatchIds(new Snowflake(3), () -> true, () -> false);
         QueueService queue = new QueueService(props, realPlayers, realTickets, new DefaultTicketHealing(realTickets), new FixedRatingReader(),
                 realGather, ids, metrics);
@@ -505,8 +530,7 @@ class MatchClientMessageServiceTest {
         return List.of(new QueueHandlers.Join(queue, metrics), new QueueHandlers.Cancel(queue), new QueueHandlers.Status(queue),
                 new ReissueHandler(reissue), ChallengeHandlers.challengePlayer(challenge, metrics),
                 ChallengeHandlers.respondChallenge(challenge, metrics), inline.notifyChallengeInviteUplinkHandler(),
-                inline.notifyChallengeResultUplinkHandler(), inline.watchBattlePlaceholderHandler(),
-                inline.listWatchableBattlesPlaceholderHandler());
+                inline.notifyChallengeResultUplinkHandler());
     }
 
     private MatchDispatcher realDispatcher(int threads, int queue, long budgetMillis) {
@@ -566,15 +590,18 @@ class MatchClientMessageServiceTest {
     }
 
     @Test
-    void 真处理器_进程登记的十个处理器恰好覆盖契约的十个方法_四个当场回_六个进工作池() {
+    void 真处理器_观战之外的八个处理器恰好覆盖契约里观战之外的八个方法_两个当场回_六个进工作池() {
         List<MatchMethodHandler> handlers = realHandlers();
         MatchDispatcher dispatcher = realDispatcher(2, 8, 4500);
 
-        assertThat(handlers.stream().map(MatchMethodHandler::method)).containsExactlyInAnyOrderElementsOf(MatchMethods.ALL);
-        assertThat(dispatcher.handledMessageIds()).containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
-        assertThat(dispatcher.unhandledMethods()).isEmpty();
+        List<String> spectate = List.of(MatchMethods.WATCH_BATTLE, MatchMethods.LIST_WATCHABLE_BATTLES);
+        assertThat(handlers.stream().map(MatchMethodHandler::method))
+                .containsExactlyInAnyOrderElementsOf(MatchMethods.ALL.stream().filter(method -> !spectate.contains(method)).toList());
+        assertThat(dispatcher.handledMessageIds()).containsExactly(148, 151, 152, 153, 154, 156, 157, 179);
+        assertThat(dispatcher.unhandledMethods()).as("163 / 164 的处理器由观战包提供（这里没装）").containsExactly("ListWatchableBattles", "WatchBattle");
         assertThat(handlers.stream().filter(MatchMethodHandler::inline).map(MatchMethodHandler::method))
-                .as("不涉及 I/O、当场回的只有这四个").containsExactlyInAnyOrderElementsOf(INLINE);
+                .as("不涉及 I/O、当场回的只有这两个").containsExactlyInAnyOrderElementsOf(INLINE);
+        assertThat(handlers).as("这八个都跑在共用的 match-worker 上，不带自己的执行器").allSatisfy(handler -> assertThat(handler.executor()).isNull());
     }
 
     @Test

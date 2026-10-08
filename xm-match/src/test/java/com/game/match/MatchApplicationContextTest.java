@@ -32,11 +32,13 @@ import com.game.match.gather.GatherResult;
 import com.game.match.gather.RedisBattleNodes;
 import com.game.match.gather.VirtualThreadGatherLauncher;
 import com.game.match.id.MatchIds;
+import com.game.match.lifecycle.InflightWatches;
 import com.game.match.lifecycle.MatchLeaseHealthIndicator;
 import com.game.match.lifecycle.MatchLifecycle;
 import com.game.match.lifecycle.MatchStartupChecks;
 import com.game.match.lifecycle.MatcherControl;
 import com.game.match.lifecycle.ResultConsumerControl;
+import com.game.match.lifecycle.SweeperControl;
 import com.game.match.matcher.MatcherConfiguration;
 import com.game.match.matcher.MatcherRunner;
 import com.game.match.placement.DirectPlacementDialer;
@@ -55,6 +57,11 @@ import com.game.match.rating.RatingConfiguration;
 import com.game.match.rating.RatingReader;
 import com.game.match.rating.RatingTestDatabase;
 import com.game.match.reissue.ReissueConfiguration;
+import com.game.match.spectate.ObserverDialer;
+import com.game.match.spectate.SpectateStore;
+import com.game.match.spectate.SpectateStoreConfiguration;
+import com.game.match.spectate.WatchBattleConfiguration;
+import com.game.match.spectate.WatchableConfiguration;
 import com.game.match.team.MatchTeamServiceImpl;
 import com.game.match.testing.LeaseOnlyRedis;
 import com.game.match.ticket.DefaultTicketHealing;
@@ -101,7 +108,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * 启动门禁与<b>真实装配</b>（match-spec §9.8、§15.2「启动」）：用 {@code ApplicationContextRunner} 起 xm-match 进程的全部装配类（{@link #PROCESS}：
- * 基础设施、派发层与十个号的处理器、票据 / 排队、凑单、开局管线、落点、补签、评分、切磋、预检、整队与活动两个提供方、两个 dev 管理口），
+ * 基础设施、派发层与十个号的处理器、票据 / 排队、凑单、开局管线、落点、补签、评分、切磋、预检、观战、整队与活动两个提供方、两个 dev 管理口），
  * 只把外部连接换掉——Redis 是只应答发号租约的替身、MySQL 是 H2 内存库、不开端口、不起 Dubbo。钉住：
  * <ul>
  *   <li>装起来的都是各包的真实现，十个号都有处理器，凑单与评分消费的启停口是真的调度器与真的消费者；</li>
@@ -109,7 +116,7 @@ import org.springframework.stereotype.Component;
  *       而且门禁没过就不去占号；</li>
  *   <li><b>少装任何一包都拒绝启动</b>（凑单、评分、开局管线、任何一个号的处理器）；同一个启停口出现两个 bean 也拒；</li>
  *   <li>Kafka 不可达照常启动（启动第 9 步至多多等一个 init-timeout）；分区数与契约不符由 {@code BattleResultIngestTest} 钉；</li>
- *   <li>整个上下文里的启停次序（凑单 → 评分消费；停凑单 → 排空工作池 → 等 gather → 停评分消费 → 还租约）。</li>
+ *   <li>整个上下文里的启停次序（凑单 → 观战清扫 → 评分消费；停凑单 → 排空工作池并等在途 163 → 停观战清扫 → 等 gather → 停评分消费 → 还租约）。</li>
  * </ul>
  *
  * <p>秘密都经属性显式给出，盖住开发机上可能已设置的同名环境变量。除「Kafka 不可达」那一条外都关着评分开关：本机若正好有 Kafka，测试进程不该以生产的
@@ -137,7 +144,9 @@ class MatchApplicationContextTest {
             QueueConfiguration.class, MatcherConfiguration.class, GatherConfiguration.class, PlacementConfiguration.class,
             ReissueConfiguration.class, RatingConfiguration.class, ChallengeConfiguration.class, PrecheckConfiguration.class,
             ActivityConfiguration.class, MatchTeamServiceImpl.class, MatchInternalServiceImpl.class,
-            DevRatingController.class, DevActivityBattleController.class);
+            DevRatingController.class, DevActivityBattleController.class,
+            // 批次 6.5 观战：存储、163 + 观众 RPC + 在途口、164 + 开局钩子 + 清扫
+            SpectateStoreConfiguration.class, WatchBattleConfiguration.class, WatchableConfiguration.class);
 
     private final LeaseOnlyRedis redis = new LeaseOnlyRedis();
     private final List<String> events = new CopyOnWriteArrayList<>();
@@ -229,7 +238,9 @@ class MatchApplicationContextTest {
                     .hasSingleBean(PlacementStore.class).hasSingleBean(PlacementDialer.class).hasSingleBean(MemberPrecheck.class)
                     .hasSingleBean(ChallengeStore.class).hasSingleBean(MatcherControl.class).hasSingleBean(ResultConsumerControl.class)
                     .hasSingleBean(ActivityBattleService.class).hasSingleBean(MatchTeamServiceImpl.class)
-                    .hasSingleBean(MatchInternalServiceImpl.class).hasSingleBean(MatchClientMessageService.class);
+                    .hasSingleBean(MatchInternalServiceImpl.class).hasSingleBean(MatchClientMessageService.class)
+                    .hasSingleBean(SpectateStore.class).hasSingleBean(ObserverDialer.class).hasSingleBean(InflightWatches.class)
+                    .hasSingleBean(SweeperControl.class);
             assertThat(context.getBean(TicketStore.class)).isInstanceOf(RedissonTicketStore.class);
             assertThat(context.getBean(TicketReader.class)).as("只读口与存储是同一个对象").isSameAs(context.getBean(TicketStore.class));
             assertThat(context.getBean(TicketHealing.class)).isInstanceOf(DefaultTicketHealing.class);
@@ -237,7 +248,6 @@ class MatchApplicationContextTest {
             assertThat(context.getBean(GatherLauncher.class)).isInstanceOf(VirtualThreadGatherLauncher.class);
             assertThat(context.getBean(GatherLauncher.class).availablePermits()).as("在途上限的缺省值").isEqualTo(256);
             assertThat(context.getBean(BattleNodes.class)).isInstanceOf(RedisBattleNodes.class);
-            assertThat(context.getBean(GatherHooks.class)).as("6.4 的观战钩子是空实现").isSameAs(GatherHooks.NOOP);
             assertThat(context.getBean(PlacementStore.class)).isInstanceOf(RedissonPlacementStore.class);
             assertThat(context.getBean(PlacementDialer.class)).isInstanceOf(DirectPlacementDialer.class);
             assertThat(context.getBean(MemberPrecheck.class)).isInstanceOf(DefaultMemberPrecheck.class);
@@ -279,11 +289,12 @@ class MatchApplicationContextTest {
             assertThat(output.getOut().indexOf("凑单循环已启动")).isLessThan(output.getOut().indexOf("match 已就绪"));
         });
         assertThat(matcher[0].isRunning()).as("上下文关闭：MatchLifecycle 把凑单停了").isFalse();
-        assertThat(output.getOut()).contains("停机 1/5：凑单已停").contains("停机 3/5：match-worker 已排空").contains("停机 4/5：在途 gather 已全部结束")
-                .contains("停机 5/5：评分消费已停");
-        assertThat(output.getOut().indexOf("停机 1/5")).isLessThan(output.getOut().indexOf("停机 3/5"));
-        assertThat(output.getOut().indexOf("停机 3/5")).isLessThan(output.getOut().indexOf("停机 4/5"));
-        assertThat(output.getOut().indexOf("停机 4/5")).isLessThan(output.getOut().indexOf("停机 5/5"));
+        assertThat(output.getOut()).contains("停机 1/6：凑单已停").contains("停机 3/6：match-worker 已排空").contains("停机 3/6：在途的 163 观战已全部结束")
+                .contains("停机 4/6：观战清扫已停").contains("停机 5/6：在途 gather 已全部结束").contains("停机 6/6：评分消费已停");
+        assertThat(output.getOut().indexOf("停机 1/6")).isLessThan(output.getOut().indexOf("停机 3/6"));
+        assertThat(output.getOut().lastIndexOf("停机 3/6")).as("排空工作池与等在途 163 都结束之后才停清扫").isLessThan(output.getOut().indexOf("停机 4/6"));
+        assertThat(output.getOut().indexOf("停机 4/6")).isLessThan(output.getOut().indexOf("停机 5/6"));
+        assertThat(output.getOut().indexOf("停机 5/6")).isLessThan(output.getOut().indexOf("停机 6/6"));
         assertThat(redis.leaseReleases()).isEqualTo(1);
     }
 
@@ -456,6 +467,25 @@ class MatchApplicationContextTest {
     }
 
     @Test
+    void 少装观战的任何一包_拒启_163与164的处理器_开局钩子_在途口_清扫口都是硬依赖() {
+        // 缺的 bean 不止一个，谁先被建出来谁先报（建 bean 的次序不是契约）：断言「因为缺这一包里的某一样而起不来」
+        without(WatchBattleConfiguration.class).run(context -> {
+            assertThat(context).as("163 的处理器、观众 RPC、停机时等在途 163 的口都在这一包").hasFailed();
+            assertThat(rootCause(context.getStartupFailure()).getMessage())
+                    .containsAnyOf("没有处理器（对应的包没有装上）: [WatchBattle]", InflightWatches.class.getName(), ObserverDialer.class.getName());
+        });
+        without(WatchableConfiguration.class).run(context -> {
+            assertThat(context).as("164 的处理器、开局钩子、清扫口都在这一包").hasFailed();
+            assertThat(rootCause(context.getStartupFailure()).getMessage())
+                    .containsAnyOf("没有处理器（对应的包没有装上）: [ListWatchableBattles]", GatherHooks.class.getName(), SweeperControl.class.getName());
+        });
+        // 两包都不装：两个号都没有处理器，报错把它们一起列出来（前提是别的硬依赖没有先报）
+        List<Class<?>> noSpectate = new ArrayList<>(PROCESS);
+        noSpectate.removeAll(List.of(WatchBattleConfiguration.class, WatchableConfiguration.class));
+        runner(redis.client, noSpectate).run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
     void 少装任何一个号的处理器_拒启_报错列出没有处理器的方法() {
         without(ReissueConfiguration.class).run(context -> {
             assertThat(context).hasFailed();
@@ -465,7 +495,7 @@ class MatchApplicationContextTest {
         without(InlineHandlers.class).run(context -> {
             assertThat(context).hasFailed();
             assertThat(rootCause(context.getStartupFailure())).isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("[ListWatchableBattles, NotifyChallengeInvite, NotifyChallengeResult, WatchBattle]");
+                    .hasMessageContaining("[NotifyChallengeInvite, NotifyChallengeResult]");
         });
         without(ChallengeConfiguration.class).run(context -> {
             assertThat(context).hasFailed();

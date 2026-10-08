@@ -59,7 +59,7 @@ class GatherWiringTest {
 
         @Bean
         MatchProperties matchProperties() {
-            return new MatchProperties(null, null, null, null, null, null, null, null, FingerprintMode.ENFORCE, 3, null, null);
+            return new MatchProperties(null, null, null, null, null, null, null, null, FingerprintMode.ENFORCE, 3, null, null, null);
         }
 
         @Bean
@@ -186,7 +186,7 @@ class GatherWiringTest {
         @Bean
         MatchProperties matchProperties() {
             return new MatchProperties(null, null, null, TICKET_TTL, READY_TICKET_TTL, null, null, null, FingerprintMode.ENFORCE, 3,
-                    REQUEUE_BACKOFF, null);
+                    REQUEUE_BACKOFF, null, null);
         }
 
         @Bean

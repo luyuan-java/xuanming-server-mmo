@@ -6,7 +6,7 @@
 #   XM_ADMIN_TOKEN     运维令牌（dev / test 管理口 /admin/match/dev/* 的 X-Xm-Admin-Token）；不设则 /admin/** 一律 503
 #   XM_MYSQL_PASSWORD  MySQL 密码（本机无密码的 root 可不设）
 #
-# 数据：排队与票据、切磋记录、战斗落点记录在 Redis（全部 xm:{match}:* 一个 hash tag）；评分在 MySQL xm_java 的两张表
+# 数据：排队与票据、切磋记录、战斗落点记录、观战标记与可观战索引在 Redis（全部 xm:{match}:* 一个 hash tag）；评分在 MySQL xm_java 的两张表
 # （match_rating / match_rating_applied，经 xm-pbmysql 建表）；对局结果从 Kafka topic xm-battle-result-g<代次> 消费（xm-battle 生产）。
 # 只读别人的键：在线目录 xm:presence:*、位置记录 xm:location:*、节点目录 xm:nodes:battle:0 与 xm:nodes:scene:<zone>、战斗锁（经 BattleLockReader）。
 spring:
@@ -17,7 +17,8 @@ spring:
     web-application-type: servlet
     keep-alive: true
   lifecycle:
-    # 停机次序（MatchLifecycle）：停凑单 → Dubbo 撤导出 → 排空 match-worker → 等在途 gather（至多 10 s）→ 停评分消费 → 还发号租约。
+    # 停机次序（MatchLifecycle）：停凑单 → Dubbo 撤导出 → 排空 match-worker（至多 10 s）同时等在途的 163 观战（至多 5 s，两者并行）
+    # → 停观战清扫 → 等在途 gather（至多 10 s）→ 停评分消费 → 还发号租约。
     timeout-per-shutdown-phase: 20s
   datasource:
     # 会话级 READ COMMITTED；STRICT_TRANS_TABLES；innodb_lock_wait_timeout=1（评分入账一局一笔事务，撞锁等待超时或死锁就整笔重跑，
@@ -110,6 +111,12 @@ xm:
     gather-max-inflight: 256
     # 无肇事者的 gather 失败后，回队首的票多久之内不参与凑单（0 = 关闭）。
     requeue-backoff: 2s
+    # 观战（批次 6.5，docs/porting/spectate-spec.md §5.2）。163 的预算沿用上面的 request-budget；其余时限是代码常量（MatchBudgets）。
+    spectate:
+      # 清扫可观战索引 xm:{match}:watchable 的间隔（> 0，否则拒启）：摘掉分数早于「Redis 时间 − 360 s」的成员，并采样 xm_match_watchable_battles。
+      sweep-interval: 10s
+      # 同时在途的 163 上限（≥ 1，否则拒启）：163 每个请求一条虚拟线程、同步等 battle 的 RPC；超限当场回 in-band 16004。
+      max-inflight: 128
     # 对局结果 topic（xm-battle 生产）：代次必须与 xm-battle 一致。启动第 9 步（Dubbo 已导出之后）同步核对一次，至多等 init-timeout：
     # 分区数与契约不符拒绝启动（要升代次）；Kafka 不可达照常启动，之后每 30 s 后台重试。
     kafka:

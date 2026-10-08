@@ -24,7 +24,7 @@ import org.springframework.core.io.ClassPathResource;
 class MatchPropertiesTest {
 
     private static MatchProperties defaults() {
-        return new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+        return new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private static MatchProperties bind(Map<String, String> properties) {
@@ -53,6 +53,8 @@ class MatchPropertiesTest {
         assertThat(p.gatherMaxInflight()).isEqualTo(256);
         assertThat(p.requeueBackoff()).isEqualTo(Duration.ofSeconds(2));
         assertThat(p.kafka()).isEqualTo(new MatchProperties.Kafka("127.0.0.1:9092", 1, (short) 1, Duration.ofSeconds(10)));
+        assertThat(p.spectate()).as("观战：清扫 10 s 一轮、163 在途上限 128（spectate-spec §5.2）")
+                .isEqualTo(new MatchProperties.Spectate(Duration.ofSeconds(10), 128));
     }
 
     @Test
@@ -79,6 +81,9 @@ class MatchPropertiesTest {
         assertThat(fromYaml.requeueBackoff()).isEqualTo(d.requeueBackoff());
         assertThat(fromYaml.kafka().replicationFactor()).isEqualTo(d.kafka().replicationFactor());
         assertThat(fromYaml.kafka().initTimeout()).isEqualTo(d.kafka().initTimeout());
+        assertThat(fromYaml.spectate()).isEqualTo(d.spectate());
+        assertThat(environment.getProperty("xm.match.spectate.sweep-interval")).as("yaml 里显式写着这两个键，不是靠代码缺省").isEqualTo("10s");
+        assertThat(environment.getProperty("xm.match.spectate.max-inflight")).isEqualTo("128");
         assertThat(environment.getProperty("dubbo.protocol.port")).isEqualTo(System.getenv().getOrDefault("XM_MATCH_RPC_PORT", "20888"));
         assertThat(environment.getProperty("server.port")).isEqualTo(System.getenv().getOrDefault("SERVER_PORT", "18113"));
     }
@@ -110,6 +115,8 @@ class MatchPropertiesTest {
         properties.put("xm.match.kafka.topic-generation", "3");
         properties.put("xm.match.kafka.replication-factor", "2");
         properties.put("xm.match.kafka.init-timeout", "4s");
+        properties.put("xm.match.spectate.sweep-interval", "2500ms");
+        properties.put("xm.match.spectate.max-inflight", "16");
 
         MatchProperties p = bind(properties);
 
@@ -129,6 +136,7 @@ class MatchPropertiesTest {
         assertThat(p.gatherMaxInflight()).isEqualTo(8);
         assertThat(p.requeueBackoff()).as("0 = 关闭退避").isEqualTo(Duration.ZERO);
         assertThat(p.kafka()).isEqualTo(new MatchProperties.Kafka("kafka:19092", 3, (short) 2, Duration.ofSeconds(4)));
+        assertThat(p.spectate()).isEqualTo(new MatchProperties.Spectate(Duration.ofMillis(2500), 16));
     }
 
     @Test
@@ -153,14 +161,14 @@ class MatchPropertiesTest {
     }
 
     private static MatchProperties budget(Duration budget) {
-        return new MatchProperties(null, budget, null, null, null, null, null, null, null, null, null, null);
+        return new MatchProperties(null, budget, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     @Test
     void 工作池与在途上限必须为正() {
         assertThatThrownBy(() -> new MatchProperties.Worker(0, null)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("worker.threads");
         assertThatThrownBy(() -> new MatchProperties.Worker(null, -1)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("worker.queue");
-        assertThatThrownBy(() -> new MatchProperties(null, null, null, null, null, null, null, null, null, 0, null, null))
+        assertThatThrownBy(() -> new MatchProperties(null, null, null, null, null, null, null, null, null, 0, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("gather-max-inflight");
     }
 
@@ -175,13 +183,13 @@ class MatchPropertiesTest {
 
     @Test
     void 排队票据的TTL必须比最长的matched_TTL长() {
-        assertThatThrownBy(() -> new MatchProperties(null, null, null, Duration.ofSeconds(96), null, null, null, null, null, null, null, null))
+        assertThatThrownBy(() -> new MatchProperties(null, null, null, Duration.ofSeconds(96), null, null, null, null, null, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ticket-ttl");
-        assertThat(new MatchProperties(null, null, null, Duration.ofSeconds(97), null, null, null, null, null, null, null, null).ticketTtl())
+        assertThat(new MatchProperties(null, null, null, Duration.ofSeconds(97), null, null, null, null, null, null, null, null, null).ticketTtl())
                 .isEqualTo(Duration.ofSeconds(97));
-        assertThatThrownBy(() -> new MatchProperties(null, null, null, null, Duration.ZERO, null, null, null, null, null, null, null))
+        assertThatThrownBy(() -> new MatchProperties(null, null, null, null, Duration.ZERO, null, null, null, null, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ready-ticket-ttl");
-        assertThatThrownBy(() -> new MatchProperties(null, null, null, null, null, Duration.ofNanos(1), null, null, null, null, null, null))
+        assertThatThrownBy(() -> new MatchProperties(null, null, null, null, null, Duration.ofNanos(1), null, null, null, null, null, null, null))
                 .as("不足 1 ms 的 TTL 下发给 Redis 会变成 0").isInstanceOf(IllegalArgumentException.class).hasMessageContaining("challenge-ttl");
     }
 
@@ -194,12 +202,12 @@ class MatchPropertiesTest {
     }
 
     private static MatchProperties backoff(Duration backoff) {
-        return new MatchProperties(null, null, null, null, null, null, null, null, null, null, backoff, null);
+        return new MatchProperties(null, null, null, null, null, null, null, null, null, null, backoff, null, null);
     }
 
     @Test
     void PVE组队人数_按5收口_没配置为0_值必须大于等于1() {
-        MatchProperties p = new MatchProperties(null, null, null, null, null, null, null, Map.of(1, 5, 2, 3, 3, 10), null, null, null, null);
+        MatchProperties p = new MatchProperties(null, null, null, null, null, null, null, Map.of(1, 5, 2, 3, 3, 10), null, null, null, null, null);
 
         assertThat(p.pveTeamSizeFor(1)).isEqualTo(5);
         assertThat(p.pveTeamSizeFor(2)).isEqualTo(3);
@@ -215,7 +223,7 @@ class MatchPropertiesTest {
     }
 
     private static MatchProperties sizes(Map<Integer, Integer> sizes) {
-        return new MatchProperties(null, null, null, null, null, null, null, sizes, null, null, null, null);
+        return new MatchProperties(null, null, null, null, null, null, null, sizes, null, null, null, null, null);
     }
 
     @Test
@@ -282,6 +290,39 @@ class MatchPropertiesTest {
                 .hasMessageContaining("replication-factor");
         assertThatThrownBy(() -> new MatchProperties.Kafka(null, null, null, Duration.ZERO)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("init-timeout");
+    }
+
+    @Test
+    void 观战_清扫间隔必须为正且不小于1毫秒_在途上限至少为1_不合法即拒启() {
+        assertThat(new MatchProperties.Spectate(null, null)).isEqualTo(new MatchProperties.Spectate(Duration.ofSeconds(10), 128));
+        assertThat(new MatchProperties.Spectate(Duration.ofMillis(1), 1)).as("下界都合法")
+                .satisfies(s -> assertThat(s.sweepInterval()).isEqualTo(Duration.ofMillis(1)))
+                .satisfies(s -> assertThat(s.maxInflight()).isEqualTo(1));
+
+        assertThatThrownBy(() -> new MatchProperties.Spectate(Duration.ZERO, null)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("xm.match.spectate.sweep-interval");
+        assertThatThrownBy(() -> new MatchProperties.Spectate(Duration.ofSeconds(-10), null)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("spectate.sweep-interval");
+        assertThatThrownBy(() -> new MatchProperties.Spectate(Duration.ofNanos(999_999), null)).as("不足 1 ms：定时器的间隔会变成 0")
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("spectate.sweep-interval");
+        assertThatThrownBy(() -> new MatchProperties.Spectate(null, 0)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("xm.match.spectate.max-inflight");
+        assertThatThrownBy(() -> new MatchProperties.Spectate(null, -1)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("spectate.max-inflight");
+    }
+
+    @Test
+    void 观战的校验经绑定同样生效_只配一项时另一项取缺省() {
+        assertThatThrownBy(() -> bind(Map.of("xm.match.spectate.sweep-interval", "0s"))).isInstanceOf(BindException.class)
+                .rootCause().hasMessageContaining("spectate.sweep-interval");
+        assertThatThrownBy(() -> bind(Map.of("xm.match.spectate.max-inflight", "0"))).isInstanceOf(BindException.class)
+                .rootCause().hasMessageContaining("spectate.max-inflight");
+        assertThat(bind(Map.of("xm.match.spectate.max-inflight", "4")).spectate())
+                .isEqualTo(new MatchProperties.Spectate(Duration.ofSeconds(10), 4));
+        assertThat(bind(Map.of("xm.match.spectate.sweep-interval", "30s")).spectate())
+                .isEqualTo(new MatchProperties.Spectate(Duration.ofSeconds(30), 128));
+        assertThat(bind(Map.of("xm.match.gather-max-inflight", "8")).spectate()).as("整段都没配：缺省")
+                .isEqualTo(new MatchProperties.Spectate(Duration.ofSeconds(10), 128));
     }
 
     @Test

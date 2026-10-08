@@ -24,9 +24,13 @@ import com.game.match.placement.PlacementDialer;
 import com.game.match.placement.PlacementStore;
 import com.game.match.precheck.MemberPrecheck;
 import com.game.match.proto.BattlePlacement;
+import com.game.match.spectate.ObserverDialer;
+import com.game.match.spectate.SpectateRules;
 import com.game.match.rating.RatingReader;
 import com.game.match.ticket.TicketHealing;
+import com.game.proto.AddObserverRequest;
 import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.BattleRouting;
 import com.game.proto.CancelBattlePrepareRequest;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.CreateBattleResponse;
@@ -50,7 +54,7 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 
 /**
- * 其余测试替身各自的行为（票据存储见 {@link InMemoryTicketStoreTest}）：每个替身的缺省行为、脚本化、故障注入与调用记录各钉一例——
+ * 其余测试替身各自的行为（票据存储见 {@link InMemoryTicketStoreTest}，观战存储见 {@link InMemorySpectateStoreTest}）：每个替身的缺省行为、脚本化、故障注入与调用记录各钉一例——
  * 别的包的组件测试建在它们上面，替身自己错了，上面的用例就都白测。
  */
 class TestDoublesTest {
@@ -265,6 +269,21 @@ class TestDoublesTest {
     }
 
     @Test
+    void 假battle目录_带截止的查询_截止已过回ERROR_其余同不带截止的_两种都记下() {
+        FakeBattleNodes nodes = new FakeBattleNodes().add(FakeBattleNodes.node(1, "inst-new", 21200));
+
+        assertThat(nodes.lookup(1, "inst-a", Deadline.after(5_000))).isEqualTo(BattleNodes.Lookup.OTHER_INSTANCE);
+        assertThat(nodes.lookup(1, "inst-new", Deadline.after(5_000))).isEqualTo(BattleNodes.Lookup.SAME_INSTANCE);
+        assertThat(nodes.lookup(1, "inst-a", Deadline.after(0))).as("截止已过：不能证明任何事").isEqualTo(BattleNodes.Lookup.ERROR);
+        nodes.lookup(1, "inst-a");
+
+        assertThat(nodes.lookups).containsExactly("1#inst-a", "1#inst-new", "1#inst-a", "1#inst-a");
+        assertThat(nodes.deadlineLookups).as("只有带截止的三次；记的是当时的剩余毫秒").hasSize(3);
+        assertThat(nodes.deadlineLookups.get(0)).isBetween(4_000L, 5_000L);
+        assertThat(nodes.deadlineLookups.get(2)).isZero();
+    }
+
+    @Test
     void 钩子替身_记参数与事件_可以抛异常() {
         List<String> events = new CopyOnWriteArrayList<>();
         RecordingGatherHooks hooks = new RecordingGatherHooks(events);
@@ -352,6 +371,165 @@ class TestDoublesTest {
         battle.nextIssueFails(() -> new IllegalStateException("对端回错"));
         assertThat(dialer.reachable().dial(placement(77, 1, "a"), Duration.ofSeconds(3), n -> n.issueBattleTicket(request)))
                 .isInstanceOfSatisfying(PlacementDialer.Dial.Unavailable.class, u -> assertThat(u.kind()).isEqualTo(PlacementDialer.Kind.OTHER));
+    }
+
+    @Test
+    void 假直拨_带硬截止的重载_记下截止_已过就不调假节点回没送达_不带截止的记null() {
+        FakeBattleNode battle = new FakeBattleNode();
+        battle.room(CreateBattleRequest.newBuilder().setBattleId(77).addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(1001)).build());
+        FakePlacementDialer dialer = new FakePlacementDialer(battle);
+        IssueBattleTicketRequest request = IssueBattleTicketRequest.newBuilder().setBattleId(77).setPlayerId(1001).build();
+        Deadline hardStop = Deadline.after(5_000);
+
+        PlacementDialer.Dial<IssueBattleTicketResponse> replied = dialer.dial(placement(77, 1, "a"), Duration.ofSeconds(3), hardStop,
+                n -> n.issueBattleTicket(request));
+        PlacementDialer.Dial<IssueBattleTicketResponse> late = dialer.dial(placement(77, 1, "a"), Duration.ofSeconds(3), Deadline.after(0),
+                n -> n.issueBattleTicket(request));
+        dialer.dial(placement(77, 1, "a"), Duration.ofSeconds(3), n -> n.issueBattleTicket(request));
+        PlacementDialer.Dial<IssueBattleTicketResponse> gone = dialer.roomGone().dial(placement(77, 1, "a"), Duration.ofSeconds(3), hardStop,
+                n -> n.issueBattleTicket(request));
+
+        assertThat(replied).isInstanceOf(PlacementDialer.Dial.Replied.class);
+        assertThat(((PlacementDialer.Dial.Unavailable<IssueBattleTicketResponse>) late).kind()).isEqualTo(PlacementDialer.Kind.NOT_DELIVERED);
+        assertThat(gone).isInstanceOf(PlacementDialer.Dial.RoomGone.class);
+        assertThat(battle.issues).as("截止已过的那次与判死的那次都没有调到假节点").hasSize(2);
+        assertThat(dialer.dials).hasSize(4);
+        assertThat(dialer.dials.get(0).hardStop()).isSameAs(hardStop);
+        assertThat(dialer.dials.get(1).hardStop().expired()).isTrue();
+        assertThat(dialer.dials.get(2).hardStop()).as("不带硬截止的重载（179）").isNull();
+    }
+
+    // ================================================================ 观众 RPC 的替身（批次 6.5）
+
+    private static AddObserverRequest addRequest(long battleId, long observerId) {
+        return AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerId)
+                .setRouting(BattleRouting.newBuilder().setZoneId(2).setGateNodeId(1).setGateInstanceId("gate-z2").setSessionId(9)).setObserverName("acc")
+                .build();
+    }
+
+    @Test
+    void 假观众RPC_缺省都调通_记下次序_落点_超时_硬截止_reason与完整的登记请求() throws Exception {
+        List<String> events = new CopyOnWriteArrayList<>();
+        FakeObserverDialer dialer = new FakeObserverDialer(events);
+        BattlePlacement old = placement(76, 1, "a");
+        BattlePlacement target = placement(77, 2, "b");
+
+        ObserverDialer.Outcome removed = dialer.remove(old, 1001, SpectateRules.REASON_REWATCH, Duration.ofMillis(1_800), Deadline.after(1_800));
+        ObserverDialer.Outcome added = dialer.add(target, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(4_000));
+        ObserverDialer.Outcome async = dialer.removeAsync(target, 1001, SpectateRules.REASON_CONCURRENT_QUEUE).get(1, TimeUnit.SECONDS);
+
+        assertThat(List.of(removed, added, async)).containsOnly(new ObserverDialer.Outcome.Replied(0));
+        assertThat(dialer.calls).extracting(FakeObserverDialer.Call::kind)
+                .containsExactly(FakeObserverDialer.Kind.REMOVE, FakeObserverDialer.Kind.ADD, FakeObserverDialer.Kind.REMOVE_ASYNC);
+        assertThat(events).containsExactly("observer.remove:76:1001:rewatch", "observer.add:77:1001", "observer.removeAsync:77:1001:concurrent_queue");
+        FakeObserverDialer.Call remove = dialer.removes().get(0);
+        assertThat(remove.placement()).isSameAs(old);
+        assertThat(remove.battleId()).isEqualTo(76);
+        assertThat(remove.observerId()).isEqualTo(1001);
+        assertThat(remove.reason()).isEqualTo("rewatch");
+        assertThat(remove.timeout()).isEqualTo(Duration.ofMillis(1_800));
+        assertThat(remove.hardStopRemainingMs()).isBetween(1_000L, 1_800L);
+        FakeObserverDialer.Call add = dialer.adds().get(0);
+        assertThat(add.request().getRouting().getZoneId()).isEqualTo(2);
+        assertThat(add.request().getObserverName()).isEqualTo("acc");
+        assertThat(add.reason()).isNull();
+        assertThat(add.observerId()).isEqualTo(1001);
+        assertThat(dialer.removes()).extracting(FakeObserverDialer.Call::kind)
+                .containsExactly(FakeObserverDialer.Kind.REMOVE, FakeObserverDialer.Kind.REMOVE_ASYNC);
+        assertThat(dialer.removes().get(1).hardStopRemainingMs()).as("异步的不带硬截止").isEqualTo(-1);
+    }
+
+    @Test
+    void 假观众RPC_结局可以排队也可以按战斗固定_固定的优先_清退的同步与异步共用一个队列() throws Exception {
+        FakeObserverDialer dialer = new FakeObserverDialer();
+        BattlePlacement p77 = placement(77, 1, "a");
+        BattlePlacement p78 = placement(78, 1, "a");
+        dialer.nextAdd(new ObserverDialer.Outcome.Replied(1004), new ObserverDialer.Outcome.Unknown("超时"));
+        dialer.onAdd(78, new ObserverDialer.Outcome.Dead());
+        dialer.nextRemove(new ObserverDialer.Outcome.NotDelivered("连不上"), new ObserverDialer.Outcome.Unknown("断开"));
+
+        assertThat(dialer.add(p78, addRequest(78, 1001), Duration.ofSeconds(3), Deadline.after(3_000))).as("按战斗固定的优先，不消耗队列")
+                .isInstanceOf(ObserverDialer.Outcome.Dead.class);
+        assertThat(dialer.add(p77, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(3_000))).isEqualTo(new ObserverDialer.Outcome.Replied(1004));
+        assertThat(dialer.add(p77, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(3_000))).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
+        assertThat(dialer.add(p77, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(3_000))).as("队列用完回到缺省")
+                .isEqualTo(new ObserverDialer.Outcome.Replied(0));
+        assertThat(dialer.clearAdd(78).add(p78, addRequest(78, 1001), Duration.ofSeconds(3), Deadline.after(3_000)))
+                .isEqualTo(new ObserverDialer.Outcome.Replied(0));
+
+        assertThat(dialer.remove(p77, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(3_000))).isInstanceOf(ObserverDialer.Outcome.NotDelivered.class);
+        assertThat(dialer.removeAsync(p77, 1001, "concurrent_queue").get(1, TimeUnit.SECONDS)).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
+        dialer.onRemove(77, new ObserverDialer.Outcome.Dead());
+        assertThat(dialer.remove(p77, 1001, "enter_gather", Duration.ofSeconds(3), Deadline.after(3_000))).isInstanceOf(ObserverDialer.Outcome.Dead.class);
+        assertThat(dialer.clearRemove(77).remove(p77, 1001, "enter_gather", Duration.ofSeconds(3), Deadline.after(3_000)))
+                .isEqualTo(new ObserverDialer.Outcome.Replied(0));
+    }
+
+    @Test
+    void 假观众RPC_硬截止已过_记下调用但不算发出_回没送达_不消耗脚本也不走测试缝() {
+        FakeObserverDialer dialer = new FakeObserverDialer();
+        dialer.nextAdd(new ObserverDialer.Outcome.Replied(1008));
+        List<String> hooked = new CopyOnWriteArrayList<>();
+        dialer.beforeAdd = call -> hooked.add("add");
+        dialer.beforeRemove = call -> hooked.add("remove");
+        BattlePlacement placement = placement(77, 1, "a");
+
+        ObserverDialer.Outcome add = dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(0));
+        ObserverDialer.Outcome remove = dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(0));
+
+        assertThat(add).isInstanceOf(ObserverDialer.Outcome.NotDelivered.class);
+        assertThat(remove).isInstanceOf(ObserverDialer.Outcome.NotDelivered.class);
+        assertThat(dialer.calls).hasSize(2).allSatisfy(call -> assertThat(call.hardStopRemainingMs()).isZero());
+        assertThat(hooked).isEmpty();
+        assertThat(dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(3_000))).as("脚本还在")
+                .isEqualTo(new ObserverDialer.Outcome.Replied(1008));
+        assertThat(hooked).containsExactly("add");
+    }
+
+    @Test
+    void 假观众RPC_测试缝在记下调用之后给出结局之前_挂起的调用等到超时与硬截止里先到的那个回结局不明() throws Exception {
+        List<String> events = new CopyOnWriteArrayList<>();
+        FakeObserverDialer dialer = new FakeObserverDialer(events);
+        BattlePlacement placement = placement(77, 1, "a");
+        dialer.beforeAdd = call -> events.add("世界变了:" + call.battleId());
+        dialer.beforeRemove = call -> events.add("清退途中:" + call.reason());
+
+        dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(3_000));
+        dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(3_000));
+        assertThat(events).containsExactly("observer.add:77:1001", "世界变了:77", "observer.remove:77:1001:rewatch", "清退途中:rewatch");
+
+        dialer.hangAdd().hangRemove();
+        long started = System.nanoTime();
+        ObserverDialer.Outcome byTimeout = dialer.add(placement, addRequest(77, 1001), Duration.ofMillis(120), Deadline.after(10_000));
+        ObserverDialer.Outcome byHardStop = dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(30), Deadline.after(120));
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        assertThat(byTimeout).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
+        assertThat(byHardStop).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
+        assertThat(elapsedMs).as("各等约 120 ms，不是 30 s").isBetween(200L, 8_000L);
+
+        CompletableFuture<ObserverDialer.Outcome> blocked = CompletableFuture.supplyAsync(
+                () -> dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(20), Deadline.after(20_000)));
+        dialer.releaseAdd().releaseRemove();
+        assertThat(blocked.get(5, TimeUnit.SECONDS)).as("放行之后给出脚本里的结局").isEqualTo(new ObserverDialer.Outcome.Replied(0));
+        assertThat(dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(3_000))).isEqualTo(new ObserverDialer.Outcome.Replied(0));
+    }
+
+    @Test
+    void 假观众RPC_异步清退可以挂着不完成_调用照样立刻返回_放行后按发起时定好的结局完成() throws Exception {
+        FakeObserverDialer dialer = new FakeObserverDialer();
+        BattlePlacement placement = placement(77, 1, "a");
+        dialer.hangRemoveAsync().nextRemove(new ObserverDialer.Outcome.Unknown("慢"));
+
+        CompletableFuture<ObserverDialer.Outcome> first = dialer.removeAsync(placement, 1001, "concurrent_queue");
+        CompletableFuture<ObserverDialer.Outcome> second = dialer.removeAsync(placement, 1002, "concurrent_queue");
+
+        assertThat(first).isNotDone();
+        assertThat(second).isNotDone();
+        assertThat(dialer.calls).as("发出即返回：调用已经记下").hasSize(2);
+        dialer.releaseRemoveAsync();
+        assertThat(first.get(1, TimeUnit.SECONDS)).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
+        assertThat(second.get(1, TimeUnit.SECONDS)).isEqualTo(new ObserverDialer.Outcome.Replied(0));
+        assertThat(dialer.removeAsync(placement, 1003, "concurrent_queue")).as("放行之后恢复成立即完成").isDone().isNotCompletedExceptionally();
     }
 
     // ================================================================ 推送

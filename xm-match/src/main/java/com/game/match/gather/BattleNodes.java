@@ -1,15 +1,16 @@
 package com.game.match.gather;
 
 import com.game.api.proto.BattleNodeInfo;
+import com.game.common.deadline.Deadline;
 import java.util.Optional;
 import java.util.Set;
 
 /**
  * battle 节点目录的读口（Redis {@code xm:nodes:battle:0}，由各 battle 节点每 5 s 写一次、TTL 15 s；match-spec §9.5、§9.6 第 2 步、§4.3）。
- * battle 是全服一个池、不分 zone。三个使用者：gather 选节点、凑单判断「池子空不空」、179 补签判死。
+ * battle 是全服一个池、不分 zone。使用者：gather 选节点、凑单判断「池子空不空」、179 补签与 6.5 观众 RPC 的直拨判死。
  *
- * <p><b>契约</b>：三个方法都<b>阻塞</b>（一次 Redis 读，受 Redis 客户端自己的超时约束，缺省最坏约 4.2 s）、<b>永不抛异常</b>——读失败各有各的
- * 返回形态（见方法注释），因为三个调用方对「读不到」的处理都是保守的那一支。在凑单线程、工作线程、gather 的虚拟线程上调；线程安全。
+ * <p><b>契约</b>：每个方法都<b>阻塞</b>（一次 Redis 读，受 Redis 客户端自己的超时约束，缺省最坏约 4.2 s；两个 {@code lookup} 另有更短的上限）、<b>永不抛异常</b>——读失败各有各的
+ * 返回形态（见方法注释），因为各调用方对「读不到」的处理都是保守的那一支。在凑单线程、工作线程、gather 与 163 的虚拟线程上调；线程安全。
  * 目录最多滞后 5 s：选中的节点可能刚关闸，所以建房被节点级拒绝后「换一个节点重试一次」仍然必须保留。
  */
 public interface BattleNodes {
@@ -65,8 +66,18 @@ public interface BattleNodes {
     }
 
     /**
-     * 按节点号查一条目录条目并与 {@code instanceId} 比对。179 补签与 6.5 的观众 RPC 只在<b>直拨建连失败</b>之后才调它：
+     * 按节点号查一条目录条目并与 {@code instanceId} 比对。179 补签只在<b>直拨建连失败</b>之后才调它：
      * 只有 {@link Lookup#OTHER_INSTANCE} 才能据以判「这局确实没了」，其余三种一律按「暂不可用」。
+     * 等待上限是实现里的固定值（生产 1 s）；要按调用方的预算收短用带截止的重载。
      */
     Lookup lookup(int nodeId, String instanceId);
+
+    /**
+     * 同上，但<b>至多等到 {@code d}</b>（并且仍不超过不带截止那个重载的固定上限）：6.5 的观众 RPC（163、开局清退）经带硬截止的直拨走到这里
+     * （lead 裁决 3）。{@code d} 已过时不读目录，直接 {@link Lookup#ERROR}；等到 {@code d} 还没读出来同样是 {@link Lookup#ERROR}——
+     * 「不能证明任何事」，调用方据此不判死。其余结果与不带截止的重载相同。永不抛异常。
+     *
+     * @param d 这次读的截止（非 null）
+     */
+    Lookup lookup(int nodeId, String instanceId, Deadline d);
 }

@@ -56,7 +56,7 @@ class ChallengeConfigurationTest {
 
         @Bean
         MatchProperties matchProperties() {
-            return new MatchProperties(null, null, null, null, null, CHALLENGE_TTL, null, null, null, null, null, null);
+            return new MatchProperties(null, null, null, null, null, CHALLENGE_TTL, null, null, null, null, null, null, null);
         }
 
         @Bean

@@ -125,8 +125,9 @@ class MatchUpstreamTest {
         robot.put("CHALLENGE_NOT_TARGET", BattleSmokeChecks.TEXT_CHALLENGE_NOT_TARGET);
         robot.put("REISSUE_BATTLE_GONE", BattleSmokeChecks.TEXT_BATTLE_GONE);
         assertThat(upstream).containsAllEntriesOf(robot);
-        // 163 的临时应答不带 parameters：场景只断言 id
-        assertThat(upstream).containsEntry("FEATURE_UNAVAILABLE", "");
+        // 163 的临时应答（1006，不带 parameters）自批次 6.5 的先行件起不再是 MatchTip 的常量（过渡期由观战包的占位处理器自己拼，场景第 10 步照旧
+        // 只断言 id）；MatchTip 里换成了观战真语义的文案，等场景的观战段落地时在上面的表里逐条对照
+        assertThat(upstream).doesNotContainKey("FEATURE_UNAVAILABLE").containsKeys("WATCH_QUEUED", "WATCH_NOT_FOUND", "WATCH_NOT_WATCHABLE");
     }
 
     @Test

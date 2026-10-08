@@ -22,14 +22,15 @@ import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.match.admin.MatchAdminAuthFilter;
 import com.game.match.dispatch.MatchWorkerPool;
-import com.game.match.gather.GatherHooks;
 import com.game.match.gather.GatherLauncher;
 import com.game.match.id.MatchIds;
+import com.game.match.lifecycle.InflightWatches;
 import com.game.match.lifecycle.MatchLeaseHealthIndicator;
 import com.game.match.lifecycle.MatchLifecycle;
 import com.game.match.lifecycle.MatchStartupChecks;
 import com.game.match.lifecycle.MatcherControl;
 import com.game.match.lifecycle.ResultConsumerControl;
+import com.game.match.lifecycle.SweeperControl;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
 import com.game.match.port.IdleSweep;
@@ -70,13 +71,18 @@ import org.springframework.core.env.Environment;
  *   <tr><td>{@code rating.RatingReader}</td><td>rating 包</td><td>排队（入队读分）、gather（5V5 分队）</td></tr>
  *   <tr><td>{@code gather.GatherLauncher}</td><td>gather 包</td><td>凑单、PVE_SOLO、切磋、整队、活动</td></tr>
  *   <tr><td>{@code gather.BattleNodes}</td><td>gather 包</td><td>gather、凑单（暂停判定）、落点直拨（判死）</td></tr>
- *   <tr><td>{@code gather.GatherHooks}</td><td>本类给空实现；6.5 换成观战的</td><td>gather</td></tr>
- *   <tr><td>{@code placement.PlacementStore} / {@code PlacementDialer}</td><td>placement 包</td><td>gather、补签 179、6.5</td></tr>
+ *   <tr><td>{@code gather.GatherHooks}</td><td>spectate 包（{@code WatchableConfiguration}：开局前清退观众、开局后登记可观战索引）</td><td>gather</td></tr>
+ *   <tr><td>{@code placement.PlacementStore} / {@code PlacementDialer} / {@code PlacementRecords}</td><td>placement 包</td>
+ *       <td>gather、补签 179、观战（观众 RPC 的直拨用带硬截止的重载；落点 HASH 的字段名与损坏判据共用）</td></tr>
+ *   <tr><td>{@code spectate.SpectateStore}（观战标记、可观战索引、落点的原子读）</td><td>spectate 包（{@code SpectateStoreConfiguration}）</td>
+ *       <td>163、164、开局钩子、观战清扫</td></tr>
+ *   <tr><td>{@code spectate.ObserverDialer}（观众 RPC）</td><td>spectate 包（{@code WatchBattleConfiguration}）</td><td>163、开局钩子</td></tr>
  *   <tr><td>{@code precheck.MemberPrecheck}</td><td>precheck 包（{@code PrecheckConfiguration}）</td><td>整队、活动</td></tr>
  *   <tr><td>{@code challenge.ChallengeStore} / {@code MatchPushExecutor}（{@code match-push}）</td><td>challenge 包</td><td>切磋</td></tr>
  *   <tr><td>{@code activity.ActivityBattleService}</td><td>activity 包（{@code ActivityConfiguration}）</td>
  *       <td>活动开战的 Dubbo 提供方与 dev 管理口共用</td></tr>
- *   <tr><td>{@code dispatch.MatchMethodHandler}</td><td>排队、切磋、补签各包提供处理器 bean</td><td>派发器</td></tr>
+ *   <tr><td>{@code dispatch.MatchMethodHandler}</td><td>排队、切磋、补签、观战各包提供处理器 bean（163 另带自己的执行器，见
+ *       {@code MatchMethodHandler.executor()}）</td><td>派发器</td></tr>
  *   <tr><td>{@code dispatch.MatchWorkers}</td><td>dispatch 包（{@code match-worker} 工作池）</td><td>派发器、整队 / 活动两个内部接口的提供方</td></tr>
  *   <tr><td>{@code port.PlayerStatusReader} / {@code RedisClock} / {@code NodeCalls} / {@code PlayerPusher}</td><td>本类（包 xm-discovery / xm-api）</td>
  *       <td>各包按需注入</td></tr>
@@ -84,6 +90,8 @@ import org.springframework.core.env.Environment;
  *       <td>本类的 {@code NodeClientSweeper}（定时清空闲的引用）</td></tr>
  *   <tr><td>{@code lifecycle.MatcherControl} / {@code ResultConsumerControl}</td><td>凑单包的 {@code matcher.MatcherRunner}、评分包的
  *       {@code rating.BattleResultIngest}（都不得自带启停）</td><td>{@link MatchLifecycle}（启动第 8、9 步与停机）</td></tr>
+ *   <tr><td>{@code lifecycle.InflightWatches} / {@code SweeperControl}</td><td>spectate 包：163 的在途执行器（{@code WatchBattleConfiguration}）、
+ *       观战清扫器（{@code WatchableConfiguration}；不得自带启停）</td><td>{@link MatchLifecycle}（停机时等在途 163；清扫的启停）</td></tr>
  *   <tr><td>{@code admin.MatchAdminAuthFilter}</td><td>本类登记在 {@code /admin/*}</td><td>dev 管理口的控制器（令牌、操作人、运行模式都已在过滤器里判过）</td></tr>
  * </table>
  *
@@ -97,13 +105,13 @@ import org.springframework.core.env.Environment;
  *   <li>发号租约（{@link #matchIdLease}）；</li>
  *   <li>评分两张表的建表（评分包的 bean）；其余单例；</li>
  *   <li>Dubbo 导出（上下文刷新完成时）；</li>
- *   <li>起凑单；</li>
+ *   <li>起凑单、起观战清扫；</li>
  *   <li>起评分消费（对局结果 topic 首次核对同步做、至多等 init-timeout：与契约不符拒启，Kafka 不可达只告警）。第 8、9 步与停机次序见
  *       {@link MatchLifecycle}。</li>
  * </ol>
  * 销毁时 Spring 按依赖逆序：先停用到租约与直连客户端的业务 bean，再还租约、关直连客户端。
  *
- * <p><b>别的包的 bean 都是硬依赖</b>：凑单 / 评分消费的启停口、开局管线、十个号的处理器，缺任何一个都拒绝启动（{@link #matchLifecycle} 直接注入；
+ * <p><b>别的包的 bean 都是硬依赖</b>：凑单 / 评分消费 / 观战清扫的启停口、163 的在途口、开局管线与它的钩子、十个号的处理器，缺任何一个都拒绝启动（{@link #matchLifecycle} 直接注入；
  * 处理器不全由 {@code MatchDispatchConfiguration} 拒）——少一包的进程会照收请求而永不成局 / 不入账，不如不起。包与包之间不用
  * {@code @ConditionalOnMissingBean} 给缺省 bean：组件扫描到的配置类之间，它的判定取决于类的扫描次序（随平台而变），不可靠。
  */
@@ -218,15 +226,17 @@ public class MatchConfiguration {
     // ================================================================ 启停次序（第 8、9 步与停机）
 
     /**
-     * 凑单 / 评分消费的启动与整个停机序列（{@link MatchLifecycle}）。三样东西都来自别的包（凑单包的 {@code MatcherRunner}、评分包的
-     * {@code BattleResultIngest}、gather 包的 {@code VirtualThreadGatherLauncher}），都是硬依赖：缺任何一个、或同一个接口出现两个 bean，
-     * 上下文起不来（测试里要换掉其中一个时把替身标 {@code @Primary}）。
+     * 凑单 / 观战清扫 / 评分消费的启动与整个停机序列（{@link MatchLifecycle}）。五样东西都来自别的包（凑单包的 {@code MatcherRunner}、评分包的
+     * {@code BattleResultIngest}、gather 包的 {@code VirtualThreadGatherLauncher}、观战包的 163 在途口与清扫器），都是硬依赖：缺任何一个、
+     * 或同一个接口出现两个 bean，上下文起不来（测试里要换掉其中一个时把替身标 {@code @Primary}）。
+     * 等在途 163 的上限取 {@link MatchBudgets#SPECTATE_DRAIN_TIMEOUT_MS}（一次 163 的预算 + 500 ms），与排空工作池并行。
      */
     @Bean
     public MatchLifecycle matchLifecycle(MatcherControl matcherControl, ResultConsumerControl resultConsumerControl,
-                                         GatherLauncher gatherLauncher, MatchWorkerPool matchWorkerPool) {
+                                         GatherLauncher gatherLauncher, MatchWorkerPool matchWorkerPool,
+                                         InflightWatches inflightWatches, SweeperControl sweeperControl) {
         return new MatchLifecycle(matcherControl, resultConsumerControl, gatherLauncher, matchWorkerPool::close,
-                MatchLifecycle.GATHER_DRAIN_TIMEOUT);
+                MatchLifecycle.GATHER_DRAIN_TIMEOUT, inflightWatches, Duration.ofMillis(MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS), sweeperControl);
     }
 
     // ================================================================ 管理端口：dev / test 管理口的鉴权
@@ -355,14 +365,5 @@ public class MatchConfiguration {
     @Bean
     public PlayerPusher playerPusher(PlayerPushes pushes) {
         return pushes::pushToPlayer;
-    }
-
-    /**
-     * 开局管线留给观战的接缝：6.4 是空实现。<b>不带条件装配</b>（{@code @ConditionalOnMissingBean} 在组件扫描到的配置类之间不可靠，见类注释）：
-     * 6.5 提供自己的 {@link GatherHooks} bean 时把这个 bean 方法删掉；测试里要换钩子就把替身标 {@code @Primary}。
-     */
-    @Bean
-    public GatherHooks gatherHooks() {
-        return GatherHooks.NOOP;
     }
 }

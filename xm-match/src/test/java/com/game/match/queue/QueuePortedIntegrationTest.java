@@ -70,7 +70,7 @@ class QueuePortedIntegrationTest {
     private final FakePlayerStatus players = new FakePlayerStatus();
     private final FixedRatingReader ratings = new FixedRatingReader();
     private final FakeGatherLauncher gather = new FakeGatherLauncher();
-    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
     private final MatchMetrics metrics = new MatchMetrics(new SimpleMeterRegistry(), new MetricLabels(id -> false));
     private final MatchIds ids = new MatchIds(new Snowflake(7), () -> true, () -> false);
     private QueueService service;

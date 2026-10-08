@@ -3,6 +3,7 @@ package com.game.match.gather;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.proto.BattleNodeInfo;
+import com.game.common.deadline.Deadline;
 import com.game.match.gather.BattleNodes.Census;
 import com.game.match.gather.BattleNodes.Lookup;
 import com.game.match.metrics.MatchMetrics;
@@ -227,5 +228,68 @@ class RedisBattleNodesTest {
 
         assertThat(lookup).isEqualTo(Lookup.ERROR);
         assertThat(elapsedMs).isBetween(900L, 3_000L);
+    }
+
+    // ================================================================ 带截止的 lookup（6.5 的观众 RPC；lead 裁决 3）
+
+    @Test
+    void 带截止的lookup_截止充裕时结果与不带截止的相同() {
+        directory.entries.add(node(1, "inst-a", 21200));
+
+        assertThat(nodes().lookup(1, "inst-a", Deadline.after(5_000))).isEqualTo(Lookup.SAME_INSTANCE);
+        assertThat(nodes().lookup(1, "inst-old", Deadline.after(5_000))).isEqualTo(Lookup.OTHER_INSTANCE);
+        assertThat(nodes().lookup(9, "inst-a", Deadline.after(5_000))).isEqualTo(Lookup.ABSENT);
+        directory.scriptedFinds.put(2, CompletableFuture.failedFuture(new IllegalStateException("节点目录条目解析失败")));
+        assertThat(nodes().lookup(2, "inst-a", Deadline.after(5_000))).isEqualTo(Lookup.ERROR);
+        directory.findThrows = true;
+        assertThat(nodes().lookup(1, "inst-a", Deadline.after(5_000))).as("同步抛出也不漏出来").isEqualTo(Lookup.ERROR);
+    }
+
+    @Test
+    void 带截止的lookup_截止已过_不读目录_直接ERROR() {
+        directory.entries.add(node(1, "inst-successor", 21200));
+        int[] finds = {0};
+        RedisBattleNodes nodes = new RedisBattleNodes(new RedisBattleNodes.Directory() {
+            @Override
+            public List<BattleNodeInfo> list() {
+                return directory.list();
+            }
+
+            @Override
+            public CompletableFuture<Optional<BattleNodeInfo>> find(int nodeId) {
+                finds[0]++;
+                return directory.find(nodeId);
+            }
+        }, metrics, bound -> 0);
+
+        assertThat(nodes.lookup(1, "inst-a", Deadline.after(0))).as("本来读得到「已换实例」，但没有时间了：不能证明任何事").isEqualTo(Lookup.ERROR);
+        assertThat(finds[0]).as("截止已过就不发读").isZero();
+        assertThat(nodes.lookup(1, "inst-a", Deadline.after(5_000))).isEqualTo(Lookup.OTHER_INSTANCE);
+        assertThat(finds[0]).isEqualTo(1);
+    }
+
+    @Test
+    void 带截止的lookup_读条目迟迟不回_等到截止就按ERROR_不等满固定的一秒() {
+        directory.scriptedFinds.put(1, new CompletableFuture<>());
+
+        long started = System.nanoTime();
+        Lookup lookup = nodes().lookup(1, "inst-a", Deadline.after(150));
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        assertThat(lookup).isEqualTo(Lookup.ERROR);
+        assertThat(elapsedMs).as("截止 150 ms：到点就回，不是固定的 1 s").isBetween(100L, 899L);
+    }
+
+    @Test
+    void 带截止的lookup_截止比固定上限长时_仍只等一秒() {
+        directory.scriptedFinds.put(1, new CompletableFuture<>());
+
+        long started = System.nanoTime();
+        Lookup lookup = nodes().lookup(1, "inst-a", Deadline.after(30_000));
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        assertThat(lookup).isEqualTo(Lookup.ERROR);
+        assertThat(elapsedMs).as("min(固定上限 1 s, 截止的剩余)").isBetween(900L, 10_000L);
+        assertThat(RedisBattleNodes.LOOKUP_WAIT_MS).isEqualTo(1_000);
     }
 }

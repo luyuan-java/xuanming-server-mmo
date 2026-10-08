@@ -45,7 +45,7 @@ class MatchInternalServiceImplTest {
     private final FakeGatherLauncher gather = new FakeGatherLauncher();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
-    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+    private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
     private final ActivityBattleService service = service(precheck);
 
     private ActivityBattleService service(MemberPrecheck check) {

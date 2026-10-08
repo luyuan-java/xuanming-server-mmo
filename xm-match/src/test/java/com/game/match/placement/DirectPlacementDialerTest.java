@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.BattleNodeService;
 import com.game.api.rpc.NodeRpcClients;
+import com.game.common.deadline.Deadline;
 import com.game.match.gather.BattleNodes;
 import com.game.match.placement.PlacementDialer.Dial;
 import com.game.match.placement.PlacementDialer.Kind;
@@ -28,6 +29,7 @@ import org.junit.jupiter.api.Test;
 /**
  * 按落点记录直拨并分类（match-spec §4.3 第 4–6 行）：按<b>记录里的</b>地址拨、不按目录找；只有「请求没送达 + 同号节点已换实例 + 原地址明确连不上」
  * 才判这一局没了；超时永不判死；分不清的都只是暂不可用。真 Dubbo 的异常形态见 {@code RpcFailuresLoopbackTest}，这里用内存出站口测判定本身。
+ * 带硬截止的重载（6.5 的观众 RPC 用）同一套判定，另加「到点一律不判死」；不带截止的重载（179）行为不变。
  */
 class DirectPlacementDialerTest {
 
@@ -284,6 +286,179 @@ class DirectPlacementDialerTest {
 
         assertThat(unavailable(nullReply).kind()).isEqualTo(Kind.OTHER);
         assertThat(unavailable(thrown).kind()).isEqualTo(Kind.OTHER);
+    }
+
+    // ================================================================ 带硬截止的重载（6.5 的观众 RPC；lead 裁决 3）
+
+    private Dial<IssueBattleTicketResponse> dial(BattlePlacement placement, Duration timeout, Deadline hardStop) {
+        return dialer.dial(placement, timeout, hardStop,
+                node -> node.issueBattleTicket(IssueBattleTicketRequest.newBuilder().setBattleId(BATTLE).setPlayerId(PLAYER).build()));
+    }
+
+    @Test
+    void 硬截止充裕_与不带截止的重载同一套判定_调通_判死_同实例_超时() {
+        Dial<IssueBattleTicketResponse> replied = dial(placement(), Duration.ofSeconds(3), Deadline.after(10_000));
+        assertThat(replied).isInstanceOf(Dial.Replied.class);
+        assertThat(calls.calls).singleElement().satisfies(call -> {
+            assertThat(call.target()).isEqualTo(new NodeRpcClients.Target("10.1.1.1", 21200, ""));
+            assertThat(call.timeout()).as("截止的剩余比超时长：超时原样").isEqualTo(Duration.ofSeconds(3));
+        });
+        assertThat(directory.lookups).isEmpty();
+
+        calls.unreachable(RECORDED);
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+        assertThat(dial(placement(), Duration.ofSeconds(3), Deadline.after(10_000))).as("三条证据都在截止之前拿齐").isInstanceOf(Dial.RoomGone.class);
+        assertThat(directory.deadlineLookups).as("目录读走带截止的重载").hasSize(1);
+        assertThat(probe.timeouts).containsExactly(DirectPlacementDialer.PROBE_TIMEOUT_MS);
+
+        directory.set(FakeBattleNodes.node(1, "inst-a", 21200));
+        assertThat(unavailable(dial(placement(), Duration.ofSeconds(3), Deadline.after(10_000))).kind()).isEqualTo(Kind.NOT_DELIVERED);
+
+        calls.timeout(RECORDED);
+        directory.set(FakeBattleNodes.node(1, "inst-successor", 21200));
+        assertThat(unavailable(dial(placement(), Duration.ofSeconds(3), Deadline.after(10_000))).kind()).as("超时永不判死").isEqualTo(Kind.TIMEOUT);
+        assertThat(directory.lookups).as("超时不读目录：只有前两次建连失败各读了一次").hasSize(2);
+    }
+
+    @Test
+    void 硬截止进来时已过_不发调用_不读目录_不探测_按没送达返回() {
+        calls.unreachable(RECORDED);
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+
+        Dial.Unavailable<?> result = unavailable(dial(placement(), Duration.ofSeconds(3), Deadline.after(0)));
+
+        assertThat(result.kind()).as("请求确定没有发出：是没送达，不是超时").isEqualTo(Kind.NOT_DELIVERED);
+        assertThat(calls.calls).as("没有时间了就不发").isEmpty();
+        assertThat(battle.issues).isEmpty();
+        assertThat(directory.lookups).isEmpty();
+        assertThat(probe.probes).isEmpty();
+    }
+
+    @Test
+    void 交给出站口的超时不超过硬截止的剩余() {
+        dial(placement(), Duration.ofSeconds(3), Deadline.after(400));
+
+        assertThat(calls.calls).singleElement().satisfies(call -> assertThat(call.timeout().toMillis()).as("min(3 s, 截止的剩余)").isBetween(1L, 400L));
+    }
+
+    @Test
+    void battle永不应答_等到硬截止就返回_不等满超时也不另加本地余量_按超时不判死() {
+        calls.register(RECORDED, new HangingIssue(battle));
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+
+        long started = System.nanoTime();
+        Dial<IssueBattleTicketResponse> dial = dial(placement(), Duration.ofSeconds(3), Deadline.after(150));
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        assertThat(unavailable(dial).kind()).as("请求可能已经送达：结局不明").isEqualTo(Kind.TIMEOUT);
+        assertThat(elapsedMs).as("超时给的是 3 s（不带截止的重载会等 3.25 s），硬截止 150 ms 到点就回").isBetween(100L, 2_800L);
+        assertThat(directory.lookups).isEmpty();
+        assertThat(probe.probes).isEmpty();
+    }
+
+    /**
+     * 「到点不判死」：建连失败、目录里同号已换实例、探测也会回「明确连不上」——三条证据本来都能成立，但目录读把硬截止耗尽了，
+     * 第三条来不及取，就只能回暂不可用。时间不够永远不会被当成「这一局没了」。
+     */
+    @Test
+    void 请求没送达_目录读把硬截止耗尽_来不及探测_不判死() {
+        calls.unreachable(RECORDED);
+        List<Long> remainingAtLookup = new ArrayList<>();
+        BattleNodes slowDirectory = new BattleNodes() {
+            @Override
+            public java.util.Optional<com.game.api.proto.BattleNodeInfo> pickRandom(java.util.Set<String> excludeKeys) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public Census census() {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public Lookup lookup(int nodeId, String instanceId) {
+                throw new AssertionError("带硬截止的直拨不该走不带截止的目录读");
+            }
+
+            @Override
+            public Lookup lookup(int nodeId, String instanceId, Deadline d) {
+                remainingAtLookup.add(d.remainingMillis());
+                while (!d.expired()) {
+                    java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+                }
+                return Lookup.OTHER_INSTANCE; // 压着截止才读出来
+            }
+        };
+        dialer = new DirectPlacementDialer(calls, slowDirectory, probe);
+        probe.result = ConnectProbe.Result.REFUSED;
+
+        Dial.Unavailable<?> result = unavailable(dial(placement(), Duration.ofSeconds(3), Deadline.after(400)));
+
+        assertThat(result.kind()).isEqualTo(Kind.NOT_DELIVERED);
+        // 机器极忙时硬截止可能在读目录之前就到了（那就连目录都不读，同样不判死）：所以是「至多一次」
+        assertThat(remainingAtLookup).as("目录读拿到的就是整次直拨的硬截止").hasSizeLessThanOrEqualTo(1)
+                .allSatisfy(ms -> assertThat(ms).isBetween(1L, 400L));
+        assertThat(probe.probes).as("没有预算了就不探测——哪怕探测会回「明确连不上」").isEmpty();
+    }
+
+    @Test
+    void 请求没送达时硬截止已到_连目录都不读_不判死() {
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+        Deadline hardStop = Deadline.after(80);
+        // 出站口压着截止才报「连不上」（真实情形：建连超时恰好与硬截止同时到）
+        com.game.match.port.NodeCalls<BattleNodeService> lateRefusal = new com.game.match.port.NodeCalls<>() {
+            @Override
+            public <R> CompletableFuture<R> call(NodeRpcClients.Target target, Duration timeout,
+                                                 java.util.function.Function<BattleNodeService, CompletableFuture<R>> invocation) {
+                while (!hardStop.expired()) {
+                    java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+                }
+                return CompletableFuture.failedFuture(new java.net.ConnectException("注入的故障: 连接被拒绝"));
+            }
+        };
+        dialer = new DirectPlacementDialer(lateRefusal, directory, probe);
+
+        Dial.Unavailable<?> result = unavailable(dial(placement(), Duration.ofSeconds(3), hardStop));
+
+        assertThat(result.kind()).isEqualTo(Kind.NOT_DELIVERED);
+        assertThat(directory.lookups).as("截止已到：不读目录").isEmpty();
+        assertThat(probe.probes).isEmpty();
+    }
+
+    @Test
+    void 探测的上限被硬截止的剩余夹住() {
+        calls.unreachable(RECORDED);
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+
+        // 探测自己的上限放到 60 s、这次调用的超时 30 s：三者里最小的是硬截止的剩余（5 s），留足余量不靠窄时间窗
+        dialer = new DirectPlacementDialer(calls, directory, probe, 60_000);
+
+        Dial<IssueBattleTicketResponse> dial = dial(placement(), Duration.ofSeconds(30), Deadline.after(5_000));
+
+        assertThat(dial).as("截止之内三条证据拿齐：照样判死").isInstanceOf(Dial.RoomGone.class);
+        assertThat(probe.timeouts).singleElement().satisfies(timeoutMs -> assertThat(timeoutMs)
+                .as("min(探测上限 60 s, 这次直拨余下的预算 ≈ 30 s, 硬截止的剩余 ≤ 5 s)").isBetween(1L, 5_000L));
+    }
+
+    @Test
+    void 不带硬截止的重载行为不变_179的目录读仍走不带截止的那个_探测上限仍是300毫秒() {
+        calls.unreachable(RECORDED);
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+
+        Dial<IssueBattleTicketResponse> dial = dial(placement());
+
+        assertThat(dial).isInstanceOf(Dial.RoomGone.class);
+        assertThat(directory.lookups).containsExactly(BattleNodes.key(1, "inst-a"));
+        assertThat(directory.deadlineLookups).as("179 不给截止：目录读固定等 1 s 的那个重载").isEmpty();
+        assertThat(probe.timeouts).containsExactly(DirectPlacementDialer.PROBE_TIMEOUT_MS);
+        assertThat(DirectPlacementDialer.LOCAL_WAIT_GRACE_MS).as("179 的本地余量没有动").isEqualTo(250);
+    }
+
+    @Test
+    void 硬截止为null是调用方的错() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> dial(placement(), Duration.ofSeconds(3), null))
+                .isInstanceOf(NullPointerException.class).hasMessage("hardStop");
+        assertThat(calls.calls).isEmpty();
     }
 
     /** 补签永不应答的 battle（其余方法转给真的假节点）。 */

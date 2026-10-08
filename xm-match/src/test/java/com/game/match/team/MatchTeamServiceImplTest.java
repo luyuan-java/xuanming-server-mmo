@@ -86,7 +86,7 @@ class MatchTeamServiceImplTest {
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
     /** 副本 1 配 5 人、副本 2 配 9 人（按 5 收口）、副本 3 配 2 人；其余未开放。 */
     private final MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, Map.of(1, 5, 2, 9, 3, 2), null, null, null,
-            null);
+            null, null);
     private final AtomicInteger submitted = new AtomicInteger();
     private final MatchWorkers inline = task -> {
         submitted.incrementAndGet();

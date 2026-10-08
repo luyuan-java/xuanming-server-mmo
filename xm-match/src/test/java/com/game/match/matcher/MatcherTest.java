@@ -771,7 +771,7 @@ class MatcherTest {
     /** 凑单锁 TTL = 1 s 的配置（合法的最小值）：队列的共用截止 1 s，「不再开始挑下一组」的阈值是它的十分之一。 */
     private static MatchProperties shortLock() {
         return new MatchProperties(null, null, new MatchProperties.Matcher(null, Duration.ofSeconds(1)), null, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     private static void burn(long millis) {
