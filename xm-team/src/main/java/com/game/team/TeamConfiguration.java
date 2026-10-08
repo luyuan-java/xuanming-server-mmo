@@ -151,7 +151,8 @@ public class TeamConfiguration {
     /**
      * 整队开战加锁之后的收尾池（{@code team-match-end}：清开战锁、退票，再往推送池投结果推送，所以先于推送池关）。
      * 关闭时等不完的清锁被中断即停止，锁靠自然过期（同基线「进程退出不等 EndMatch」，team-spec §5.2）；关闭之后才到的
-     * gather 结果投不进来，同样靠锁自然过期。
+     * gather 结果投不进来，同样靠锁自然过期。停机开始（{@link TeamShutdown}）到本池关闭之间<b>异常完成</b>的 gather 也不往这里投：
+     * 那多半是本进程自己的 Dubbo 引用被销毁造成的，xm-match 的 gather 照常在跑（match-spec §7.5）。
      */
     @Bean(destroyMethod = "close")
     @DependsOn("teamPushPool")
@@ -176,16 +177,25 @@ public class TeamConfiguration {
     }
 
     /**
-     * @param battle 整队开战的票据域端口（生产为 {@link TeamDubboConfiguration} 里的 {@code MatchTeamBattle}：调 xm-match）
+     * 停机标志：上下文关闭事件一到就置位，排在 Dubbo 销毁引用之前（{@link TeamShutdown#LISTENER_ORDER}）。
+     */
+    @Bean
+    public TeamShutdown teamShutdown() {
+        return new TeamShutdown();
+    }
+
+    /**
+     * @param battle   整队开战的票据域端口（生产为 {@link TeamDubboConfiguration} 里的 {@code MatchTeamBattle}：调 xm-match）
+     * @param shutdown 停机标志：置位后异常完成的 gather 不再清锁、不推送
      */
     @Bean
     public TeamService teamService(TeamStore store, TeamSessions sessions, TeamDisplay display, PlayerProfiles profiles,
                                    TeamIds teamIds, TeamBattlePort battle,
                                    @Qualifier("teamMatchEndPool") TeamWorkerPool teamMatchEndPool, TeamPushes pushes,
-                                   TeamMetrics metrics, TeamProperties props) {
+                                   TeamMetrics metrics, TeamProperties props, TeamShutdown shutdown) {
         PlayerHomeZones homeZones = new PlayerHomeZones(profiles::loadStrict, props.homeZoneTimeout());
         return new TeamService(store, sessions, display, homeZones, teamIds::nextId, battle, teamMatchEndPool, pushes, metrics,
-                new RuleConfig(props.allowCrossZone()));
+                new RuleConfig(props.allowCrossZone()), shutdown::stopping);
     }
 
     @Bean

@@ -4,12 +4,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.common.deadline.Deadline;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
+import com.game.match.MatchInstance;
+import com.game.match.MatchProperties;
 import com.game.match.gather.FailPolicy;
+import com.game.match.gather.GatherLauncher;
 import com.game.match.gather.GatherPlan;
+import com.game.match.gather.GatherResult;
+import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MatchMetrics.MatcherRound;
 import com.game.match.testing.FakeBattleNodes;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
+import com.game.match.ticket.ForwardingTicketStore;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
 import com.game.match.ticket.TicketRef;
@@ -17,9 +23,15 @@ import com.game.match.ticket.TicketState;
 import com.game.match.ticket.TicketStore;
 import com.game.match.ticket.TicketStore.PopResult;
 import com.game.proto.match.MatchMode;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Meter;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -421,7 +433,7 @@ class MatcherTest {
         // 模拟一次无肇事者的 gather 失败：弹出后带 2 s 退避回队首
         List<TicketRef> refs = List.of(new TicketRef(1, "t-1"), new TicketRef(2, "t-2"));
         assertThat(memory.pop(Q1V1, "tok", refs, 48_000, d())).isInstanceOf(PopResult.Popped.class);
-        assertThat(memory.requeueFront(Q1V1, refs, TTL, 2_000, d())).isEqualTo(2);
+        assertThat(memory.requeueFront(Q1V1, "rq-1", refs, TTL, 2_000, d())).isEqualTo(2);
         memory.calls.clear();
 
         assertThat(round()).isEqualTo(MatcherRound.OK);
@@ -752,6 +764,268 @@ class MatcherTest {
         clock.advanceSeconds(48);
         assertThat(memory.ticketOf(1)).as("TTL 到期后玩家可以重排").isEmpty();
         assertThat(memory.ticketOf(2)).isEmpty();
+    }
+
+    // ================================================================ 队列的共用截止与弹组的独立预算
+
+    /** 凑单锁 TTL = 1 s 的配置（合法的最小值）：队列的共用截止 1 s，「不再开始挑下一组」的阈值是它的十分之一。 */
+    private static MatchProperties shortLock() {
+        return new MatchProperties(null, null, new MatchProperties.Matcher(null, Duration.ofSeconds(1)), null, null, null, null, null, null, null,
+                null, null);
+    }
+
+    private static void burn(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("被中断", e);
+        }
+    }
+
+    @Test
+    void 队列的共用截止耗尽在弹组这一步_弹组仍用独立预算_应答丢了照样用同一个标记重发并开局() {
+        QueueMatcher quick = rig.matcher(store, shortLock());
+        join(1, Q1V1);
+        join(2, Q1V1);
+        AtomicInteger attempts = new AtomicInteger();
+        store.beforePop = members -> {
+            if (attempts.incrementAndGet() == 1) {
+                // 把队列的共用截止（1 s）耗在弹组这一步里；这一次其实弹成了，只是应答丢了
+                burn(1_150);
+                memory.faults.failNext("pop:after");
+            }
+        };
+
+        assertThat(quick.runRound(() -> false)).as("没有任何故障，只是队列的预算用完了").isEqualTo(MatcherRound.OK);
+
+        assertThat(store.popCalls).hasSize(2);
+        assertThat(store.popCalls.get(1).token()).as("重发用同一个标记").isEqualTo(store.popCalls.get(0).token());
+        assertThat(store.popCalls).as("两次尝试各有一个新的独立预算，不沿用队列那个已经用完的截止")
+                .allSatisfy(call -> assertThat(call.remainingMs()).isBetween(QueueMatcher.POP_BUDGET_MS - 1_000, QueueMatcher.POP_BUDGET_MS));
+        assertThat(onlyPlan().members()).as("弹出的这一组必须有人开局").containsExactly(1L, 2L);
+        assertThat(stateOf(1)).isEqualTo(TicketState.MATCHED);
+        assertThat(memory.queueMembers(Q1V1)).isEmpty();
+        assertThat(memory.lockHolder(Q1V1)).as("队列的截止用完了，锁照样用独立预算放掉").isEmpty();
+    }
+
+    @Test
+    void 队列的预算快用完时不再开始挑下一组_正常收手算成功_剩下的人原位不动() {
+        QueueMatcher quick = rig.matcher(store, shortLock());
+        for (long playerId = 1; playerId <= 4; playerId++) {
+            join(playerId, Q1V1);
+        }
+        // 第一组弹出之后，1 s 的预算只剩不到十分之一
+        store.afterPop = result -> burn(950);
+        memory.calls.clear();
+
+        assertThat(quick.runRound(() -> false)).as("预算用完不是依赖故障").isEqualTo(MatcherRound.OK);
+
+        assertThat(rig.gather.plans).extracting(GatherPlan::members).containsExactly(List.of(1L, 2L));
+        assertThat(calls("snapshot(")).as("没有为第二组读快照").isEqualTo(1);
+        assertThat(calls("pop(")).as("没有为第二组发弹组").isEqualTo(1);
+        assertThat(memory.queueMembers(Q1V1)).containsExactly("3", "4");
+        assertThat(stateOf(3)).isEqualTo(TicketState.QUEUED);
+        assertThat(stateOf(4)).isEqualTo(TicketState.QUEUED);
+        assertThat(memory.lockHolder(Q1V1)).isEmpty();
+
+        store.afterPop = null;
+        assertThat(quick.runRound(() -> false)).isEqualTo(MatcherRound.OK);
+        assertThat(rig.gather.plans).extracting(GatherPlan::members).as("下一轮接着凑").containsExactly(List.of(1L, 2L), List.of(3L, 4L));
+    }
+
+    @Test
+    void 还没开始挑组预算就已所剩无几_本轮跳过这条队列_不发弹组_告警(CapturedOutput output) {
+        TicketStore slow = new ForwardingTicketStore(store) {
+            @Override
+            public long queueLength(QueueRef queue, Deadline d) {
+                long depth = super.queueLength(queue, d);
+                burn(950);
+                return depth;
+            }
+        };
+        QueueMatcher quick = rig.matcher(slow, shortLock());
+        join(1, Q1V1);
+        join(2, Q1V1);
+        memory.calls.clear();
+
+        assertThat(quick.runRound(() -> false)).isEqualTo(MatcherRound.OK);
+
+        assertThat(rig.gather.plans).isEmpty();
+        assertThat(calls("snapshot(")).isZero();
+        assertThat(calls("pop(")).isZero();
+        assertThat(memory.queueMembers(Q1V1)).containsExactly("1", "2");
+        assertThat(rig.depth(Q1V1)).as("深度照报").isEqualTo(2.0);
+        assertThat(memory.lockHolder(Q1V1)).isEmpty();
+        assertThat(output.getOut()).contains("还没开始挑组");
+    }
+
+    // ================================================================ 弹出之后先交给开局管线
+
+    /** 把每次 launch 那一刻「成组等待」指标已有的样本数记下来，再转给台架的开局管线替身。 */
+    private final class OrderProbe implements GatherLauncher {
+
+        final List<Long> waitSamplesAtLaunch = new ArrayList<>();
+
+        @Override
+        public CompletableFuture<GatherResult> launch(GatherPlan plan) {
+            waitSamplesAtLaunch.add(rig.waitSamples(plan.queue()));
+            return rig.gather.launch(plan);
+        }
+
+        @Override
+        public int availablePermits() {
+            return rig.gather.availablePermits();
+        }
+
+        @Override
+        public boolean awaitIdle(Duration timeout) {
+            return rig.gather.awaitIdle(timeout);
+        }
+    }
+
+    private QueueMatcher matcherWith(GatherLauncher launcher, MatchMetrics metrics) {
+        return new QueueMatcher(store, rig.players, launcher, rig.nodes, rig.ids, metrics, rig.labels, MatcherRig.defaults(),
+                new MatchInstance(MatcherRig.INSTANCE), rig.nanos::get);
+    }
+
+    @Test
+    void 弹出之后第一件事是交给开局管线_指标排在它后面() {
+        OrderProbe probe = new OrderProbe();
+        QueueMatcher ordered = matcherWith(probe, rig.metrics);
+        for (long playerId = 1; playerId <= 4; playerId++) {
+            join(playerId, Q1V1);
+        }
+
+        assertThat(ordered.runRound(() -> false)).isEqualTo(MatcherRound.OK);
+
+        assertThat(probe.waitSamplesAtLaunch).as("每一组在交出去的那一刻，它自己的指标都还没记").containsExactly(0L, 1L);
+        assertThat(rig.waitSamples(Q1V1)).isEqualTo(2);
+    }
+
+    @Test
+    void 成组之后记指标抛异常_这一组照样已交给开局管线_后面的组照常(CapturedOutput output) {
+        // 「成组等待」这个分布指标在第一次使用时才注册：让注册抛异常（例如同名指标已被别的类型占用）
+        SimpleMeterRegistry broken = new SimpleMeterRegistry() {
+            @Override
+            protected DistributionSummary newDistributionSummary(Meter.Id id, DistributionStatisticConfig config, double scale) {
+                if (id.getName().equals("xm.match.wait")) {
+                    throw new IllegalStateException("注入的故障: 指标注册冲突");
+                }
+                return super.newDistributionSummary(id, config, scale);
+            }
+        };
+        QueueMatcher fragile = matcherWith(rig.gather, new MatchMetrics(broken, rig.labels));
+        for (long playerId = 1; playerId <= 4; playerId++) {
+            join(playerId, Q1V1);
+        }
+
+        assertThat(fragile.runRound(() -> false)).as("记指标出错不是这条队列的故障").isEqualTo(MatcherRound.OK);
+
+        assertThat(rig.gather.plans).extracting(GatherPlan::members).as("两组都交给了开局管线，没有弹出后被丢掉的")
+                .containsExactly(List.of(1L, 2L), List.of(3L, 4L));
+        assertThat(memory.queueMembers(Q1V1)).isEmpty();
+        assertThat(output.getOut()).contains("成组之后记指标 / 日志出错");
+    }
+
+    // ================================================================ 凑不满的队列里的残项
+
+    private static final QueueRef UNUSED = new QueueRef(3, 424_242);
+
+    @Test
+    void 凑不满的队列里票据已过期的残项_满一个间隔后被清掉_清空的队列当场剔除注册集() {
+        // 一个号排进没人用的副本号、不取消：6 h 后票据过期，队列项留着
+        join(9001, UNUSED);
+        clock.advanceSeconds(6 * 3600 + 1);
+        assertThat(memory.ticketOf(9001)).isEmpty();
+        assertThat(memory.queueMembers(UNUSED)).containsExactly("9001");
+        memory.calls.clear();
+
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+        assertThat(calls("snapshot(")).as("第一次见到这条凑不满的队列：只开始计时").isZero();
+        rig.nanos.addAndGet(QueueMatcher.STALE_SWEEP_INTERVAL_NANOS - 1);
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+        assertThat(calls("snapshot(")).as("间隔没到").isZero();
+        assertThat(memory.indexed(UNUSED)).isTrue();
+        memory.calls.clear();
+
+        rig.nanos.addAndGet(1);
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+
+        assertThat(memory.calls).containsExactly("queueIndex()", "tryLockQueue(3:424242)", "queueLength(3:424242)", "snapshot(3:424242)",
+                "readAll([9001])", "drop(3:424242,9001,INVALID)", "pruneIfEmpty(3:424242)", "unlockQueue(3:424242)");
+        assertThat(memory.queueMembers(UNUSED)).isEmpty();
+        assertThat(memory.indexed(UNUSED)).as("这条死队列不再留在注册集里").isFalse();
+        assertThat(rig.count("xm.match.queue.dropped", "reason", "invalid")).isEqualTo(1.0);
+        assertThat(rig.players.reads).as("只看票据：不读战斗锁与位置").isEmpty();
+
+        memory.calls.clear();
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+        assertThat(memory.calls).as("之后的每一轮都不再为它抢锁").containsExactly("queueIndex()");
+    }
+
+    @Test
+    void 凑不满的队列的清理只摘没有有效票据的项_有效的与退避中的原位不动_不删任何票() {
+        QueueRef other = new QueueRef(3, 9);
+        // 5V5 要 10 人：下面一共 5 项，凑不满
+        join(1, Q5V5);
+        join(2, Q5V5);
+        memory.putQueueMember(Q5V5, "999", 150_000L);                 // 没有票
+        memory.putQueueMember(Q5V5, "abc", null);                     // 非法成员串
+        rig.players.online(5, 1, 7);
+        memory.enqueue(5, "t-5", other, 1, 150_000, TTL, d());        // 票属于别的队列
+        memory.putQueueMember(Q5V5, "5", 150_000L);
+        // 2 号在退避里（无肇事者的 gather 失败刚回队首）
+        Ticket second = memory.ticketOf(2).orElseThrow();
+        memory.putTicket(2, new Ticket(second.ticketId(), second.mode(), second.configId(), second.state(), second.enqueuedAtMs(), second.zoneId(),
+                second.queueKey(), second.ratingCenti(), second.teamId(), 0, clock.peekMs() + 600_000), TTL);
+        rig.players.reads.clear();
+
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+        rig.nanos.addAndGet(QueueMatcher.STALE_SWEEP_INTERVAL_NANOS);
+        memory.calls.clear();
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+
+        assertThat(memory.calls).contains("drop(1:0,999,INVALID)", "dropMalformed(1:0,abc)", "drop(1:0,5,INVALID)")
+                .doesNotContain("drop(1:0,1,INVALID)", "drop(1:0,2,INVALID)", "pruneIfEmpty(1:0)");
+        assertThat(memory.queueMembers(Q5V5)).containsExactly("1", "2");
+        assertThat(stateOf(1)).isEqualTo(TicketState.QUEUED);
+        assertThat(stateOf(2)).as("退避没到点的人不动").isEqualTo(TicketState.QUEUED);
+        assertThat(memory.ticketOf(5)).map(Ticket::state).as("他在自己队列里的票不动").contains(TicketState.QUEUED);
+        assertThat(memory.queueMembers(other)).containsExactly("5");
+        assertThat(memory.indexed(Q5V5)).isTrue();
+        assertThat(rig.count("xm.match.queue.dropped", "reason", "invalid")).isEqualTo(3.0);
+        assertThat(rig.players.reads).isEmpty();
+        assertThat(rig.depth(Q5V5)).as("深度是清理之前读到的").isEqualTo(5.0);
+
+        // 一个间隔之内不再重复清
+        memory.calls.clear();
+        rig.nanos.addAndGet(QueueMatcher.STALE_SWEEP_INTERVAL_NANOS - 1);
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+        assertThat(calls("snapshot(")).isZero();
+    }
+
+    @Test
+    void 凑不满的队列多到限频表放不下时_放不下的那些不等间隔_当轮就清() {
+        // 先把限频表占满：每条队列各一个有效的排队者（凑不满），第一次见到只计时
+        for (int i = 0; i < QueueMatcher.STALE_SWEEP_KEYS; i++) {
+            long playerId = 100_000 + i;
+            rig.players.online(playerId, 1, 7);
+            memory.enqueue(playerId, "t-" + playerId, new QueueRef(3, 1_000_000 + i), 1, 150_000, 7 * 3600_000L, d());
+        }
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+        assertThat(calls("snapshot(")).isZero();
+        // 再来一条只有残项的死队列：表里放不下它
+        join(9001, UNUSED);
+        clock.advanceSeconds(6 * 3600 + 1);
+        assertThat(memory.ticketOf(9001)).isEmpty();
+        memory.calls.clear();
+
+        assertThat(round()).isEqualTo(MatcherRound.OK);
+
+        assertThat(memory.calls).contains("snapshot(3:424242)", "drop(3:424242,9001,INVALID)", "pruneIfEmpty(3:424242)");
+        assertThat(memory.indexed(UNUSED)).isFalse();
+        assertThat(memory.ticketCount()).as("别的队列里有效的票一张没动").isEqualTo(QueueMatcher.STALE_SWEEP_KEYS);
     }
 
     // ================================================================ 依赖故障与边角

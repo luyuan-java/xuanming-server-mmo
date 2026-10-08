@@ -36,7 +36,8 @@ import org.slf4j.LoggerFactory;
  *       判定顺序即 {@link SceneAssetLocator}），再调 {@code SceneBattleService.prepareBattle}。按 (zone, 节点号) 找而不是只按节点号：
  *       节点号按 zone 租约，两个 zone 可以有同号节点。</li>
  *   <li><b>取消</b>：发往<b>备战时用的那个端点</b>（{@link Endpoint}），不按位置记录重新解析——Java 断线即移除实体、位置随之变成重连租约，
- *       重新解析会找不到持有者而漏发取消；scene 的取消对「玩家已不在本节点」有专门的分支（按锁值条件清锁）。</li>
+ *       重新解析会找不到持有者而漏发取消；scene 的取消对「玩家已不在本节点」有专门的分支（按锁值条件清锁）。
+ *       端点是记下来的，实例号可能已经过时（scene 原地重启）：经 {@link NodeCalls#callRemembered} 发，不顶掉别的 gather 正在用的客户端。</li>
  * </ol>
  *
  * <p><b>备战应答的映射</b>（{@link Prepare}；谁需要补发取消是这张表的要点，M14）：
@@ -143,7 +144,7 @@ public final class ScenePreparer {
         }
         SceneBattleCall call = SceneBattleCall.newBuilder().setTargetInstanceId(endpoint.target().instanceId()).setPlayerId(playerId)
                 .setBody(request.toByteString()).build();
-        Reply reply = invoke(endpoint, prepareTimeout, scene -> scene.prepareBattle(call));
+        Reply reply = invoke(endpoint, prepareTimeout, scene -> scene.prepareBattle(call), false);
         if (reply.error() != null) {
             return new Prepare.Failed(GatherOutcome.PREPARE_FAILED, endpoint, true, "备战调用失败（结局不明）: " + reply.error());
         }
@@ -184,7 +185,7 @@ public final class ScenePreparer {
         CancelBattlePrepareRequest body = CancelBattlePrepareRequest.newBuilder().setPlayerId(playerId).setBattleId(battleId).build();
         SceneBattleCall call = SceneBattleCall.newBuilder().setTargetInstanceId(endpoint.target().instanceId()).setPlayerId(playerId)
                 .setBody(body.toByteString()).build();
-        Reply reply = invoke(endpoint, cancelTimeout, scene -> scene.cancelBattlePrepare(call));
+        Reply reply = invoke(endpoint, cancelTimeout, scene -> scene.cancelBattlePrepare(call), true);
         if (reply.error() != null) {
             log.error("取消备战失败（scene 的 reaper 会按备战期限解冻） battle_id={} player={} scene={}: {}", battle, player, endpoint, reply.error());
             return false;
@@ -216,11 +217,16 @@ public final class ScenePreparer {
     private record Reply(SceneBattleReply reply, String error) {
     }
 
-    /** 发一次调用并在超时内等结果；出站口同步抛出的异常也收成失败。 */
-    private Reply invoke(Endpoint endpoint, Duration timeout, Function<SceneBattleService, CompletableFuture<SceneBattleReply>> invocation) {
+    /**
+     * 发一次调用并在超时内等结果；出站口同步抛出的异常也收成失败。
+     *
+     * @param remembered true = 端点是先前记下来的（取消发回备战时的端点）：不因它的实例号过时而顶掉这个地址上现有的客户端
+     */
+    private Reply invoke(Endpoint endpoint, Duration timeout, Function<SceneBattleService, CompletableFuture<SceneBattleReply>> invocation,
+                         boolean remembered) {
         CompletableFuture<SceneBattleReply> future;
         try {
-            future = calls.call(endpoint.target(), timeout, invocation);
+            future = remembered ? calls.callRemembered(endpoint.target(), timeout, invocation) : calls.call(endpoint.target(), timeout, invocation);
         } catch (RuntimeException e) {
             return new Reply(null, String.valueOf(e));
         }

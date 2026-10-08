@@ -139,7 +139,7 @@ class TeamDubboConfigurationTest {
             assertThat(check.ok()).as("code=%d（group 不对 / 鉴权不过 / 地址没解析都会落到 4030）", check.code()).isTrue();
             assertThat(check.zones()).isEqualTo(Map.of(A, 2, B, 2));
             assertThat(check.lockTtlSeconds()).isEqualTo(74);
-            assertThat(PROVIDER.budget).as("剩余预算随调用过了线").isNotNull();
+            assertThat(PROVIDER.budget).as("预算附件（= 这一跳的超时）随调用过了线").isNotNull();
             assertThat(Long.parseLong(PROVIDER.budget)).isBetween(1L, 2500L);
         });
     }

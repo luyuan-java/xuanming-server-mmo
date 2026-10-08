@@ -9,6 +9,7 @@ import com.game.common.deadline.Deadline;
 import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.placement.PlacementStore;
+import com.game.match.placement.RpcFailures;
 import com.game.match.port.NodeCalls;
 import com.game.match.port.RedisClock;
 import com.game.match.proto.BattlePlacement;
@@ -55,8 +56,9 @@ import org.slf4j.LoggerFactory;
  * 4    种子（SecureRandom）；再读一次 Redis 时间作 created_at_ms；组建房请求
  * 4.1  <b>先写落点记录</b>（attempt = 1），写不进去就不建房 → index_failed
  * 4.2  createBattle（5 s）；节点级拒绝 → 排除它再选一个节点、把记录改写到新节点（attempt = 2）、<b>只重试一次</b>
- * 4.3  最后一次的结局：仍是节点级拒绝 → not_allocatable；已受理但明确拒绝 → create_rejected（都不发 destroy）；
- *      结局不明（超时 / 传输失败 / 准入字段缺失）→ 对最后尝试的节点发 destroy（3 s）：成功 → create_failed；
+ * 4.3  最后一次的结局：仍是节点级拒绝 → not_allocatable；已受理但明确拒绝 → create_rejected；建房请求<b>确定没有送达</b>
+ *      （发包之前连接就不在 / 建连失败）→ create_not_sent（这三种都不发 destroy，直接补偿）；
+ *      结局不明（超时 / 别的传输失败 / 准入字段缺失）→ 对最后尝试的节点发 destroy（3 s）：成功 → create_failed；
  *      失败 → create_failed_room_alive：<b>不解冻、不动票据、保留记录</b>
  * 5    成功：逐人票据置 ready → 同值补写落点记录 → 钩子 onStarted
  * </pre>
@@ -66,6 +68,11 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li><b>建房超时 ≠ 建房失败</b>：结局不明时必须先 destroy 成功才能解冻；destroy 也失败就一律不解冻、不回队——房间可能活着且已向 scene 发了确认，
  *       此时再取消会出现「房间活着、玩家已解冻」。</li>
+ *   <li><b>唯一不经 destroy 就解冻的传输失败是「建房请求确定没有送达」</b>（lead 裁决 2026-10-08；有意差异，基线与原规格没有这个区分）：
+ *       请求没有离开本进程，这个节点上不可能有房，安全性与节点级拒绝同级。否则 battle 进程死后、目录条目过期前的十几秒里，每个选中它的 gather
+ *       都是「建房连不上 → destroy 同样连不上 → 全员冻结到备战期限、票据卡到 matched TTL」。<b>只认建房这一次调用自己的失败</b>
+ *       （{@link RpcFailures#classify(Throwable, String)} 判 {@code NOT_SENT}，且核对地址）：建房结局不明之后 destroy 才连不上的，
+ *       仍然是 create_failed_room_alive；判定依赖 Dubbo 的异常形态，认不出来时退回上一条的保守路径。<b>不换节点重试</b>（那是节点级拒绝才有的一步）。</li>
  *   <li><b>落点记录先于建房</b>：battle 在建房应答之前就向 scene 发确认并推 177，客户端收到 177 之后马上补签也要定位得到房间；
  *       建房之后才发现写不进去，解冻基本无效。</li>
  *   <li><b>判断「不可分配」只看准入枚举</b>；字段缺失按「可能已建房」。</li>
@@ -199,8 +206,8 @@ public final class GatherPipeline {
         }
     }
 
-    /** 一次建房调用的结局。 */
-    private enum Created { BUILT, NOT_ALLOCATABLE, REJECTED, UNKNOWN }
+    /** 一次建房调用的结局。{@code NOT_SENT} = 请求确定没有送达（没建房）；{@code UNKNOWN} = 分不清，可能已建房。 */
+    private enum Created { BUILT, NOT_ALLOCATABLE, REJECTED, NOT_SENT, UNKNOWN }
 
     /** 一名已冻结的成员。 */
     private record Prepared(long playerId, BattlePlayerSnapshot snapshot, String fingerprint) {
@@ -369,6 +376,11 @@ public final class GatherPipeline {
                     room = Room.ABSENT;
                     return fail(GatherOutcome.CREATE_REJECTED, 0);
                 }
+                case NOT_SENT -> {
+                    // 请求没有离开本进程：这个节点上没有这间房；换过节点的话，前一个节点是节点级拒绝，同样保证没建。不发 destroy，直接补偿
+                    room = Room.ABSENT;
+                    return fail(GatherOutcome.CREATE_NOT_SENT, 0);
+                }
                 case UNKNOWN -> {
                     if (!destroy(node)) {
                         log.error("[gather] 建房结局不明且销毁也失败：房间可能活着，不解冻、不动票据、保留落点记录，交给 scene / battle 的期限收尾 "
@@ -490,14 +502,24 @@ public final class GatherPipeline {
                     .setRpcHost(node.info().getRpcHost()).setRpcPort(node.info().getRpcPort()).setAttempt(attempt).build();
         }
 
-        /** 发一次建房并归类结局。只看准入枚举判断「不可分配」；分不清的一律是 {@link Created#UNKNOWN}（可能已建房）。 */
+        /**
+         * 发一次建房并归类结局。只看准入枚举判断「不可分配」；传输失败里只有「请求确定没有送达」是 {@link Created#NOT_SENT}（没建房），
+         * 其余分不清的一律是 {@link Created#UNKNOWN}（可能已建房）。
+         */
         private Created create(Node node, CreateBattleRequest request) {
             String battle = Long.toUnsignedString(battleId);
             CreateBattleResult result;
             try {
                 result = await(parts.battleCalls().call(node.target(), timeouts.create(), service -> service.createBattle(request)), timeouts.create());
             } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                log.error("[gather] 建房调用失败（结局不明） battle_id={} node={}: {}", battle, node.describe(), String.valueOf(cause(e)));
+                Throwable failure = cause(e);
+                // 本地等待超时与被中断是 TimeoutException：归不进 NOT_SENT，照旧按结局不明
+                if (RpcFailures.classify(failure, node.target().address()) == RpcFailures.Kind.NOT_SENT) {
+                    log.error("[gather] 建房请求确定没有送达（这个节点上没有这间房，不发 destroy） battle_id={} node={}: {}", battle, node.describe(),
+                            String.valueOf(failure));
+                    return Created.NOT_SENT;
+                }
+                log.error("[gather] 建房调用失败（结局不明） battle_id={} node={}: {}", battle, node.describe(), String.valueOf(failure));
                 return Created.UNKNOWN;
             }
             if (result == null) {
@@ -533,11 +555,15 @@ public final class GatherPipeline {
             }
         }
 
-        /** 回滚：销毁可能已建成的房间。true = battle 确认已销毁（或本来就不存在）。 */
+        /**
+         * 回滚：销毁可能已建成的房间。true = battle 确认已销毁（或本来就不存在）。节点是建房时选下的（记下来的目标）：
+         * 经 {@link NodeCalls#callRemembered} 发，这几秒里它原地重启过的话，不顶掉别的 gather 正在用的客户端。
+         */
         private boolean destroy(Node node) {
             DestroyBattleRequest request = DestroyBattleRequest.newBuilder().setBattleId(battleId).setReason(ROLLBACK_REASON).build();
             try {
-                await(parts.battleCalls().call(node.target(), timeouts.destroy(), service -> service.destroyBattle(request)), timeouts.destroy());
+                await(parts.battleCalls().callRemembered(node.target(), timeouts.destroy(), service -> service.destroyBattle(request)),
+                        timeouts.destroy());
                 return true;
             } catch (ExecutionException | TimeoutException | RuntimeException e) {
                 log.error("[gather] 回滚销毁失败 battle_id={} node={}: {}", Long.toUnsignedString(battleId), node.describe(), String.valueOf(cause(e)));

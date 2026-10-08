@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.proto.BattleActorState;
+import com.game.proto.BattleEndS2C;
+import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.eBattleOutcome;
@@ -309,6 +311,38 @@ class BattleSmokeChecksTest {
         assertThat(BattleSmokeChecks.sidesProblem(state(new long[] {7}, new int[] {0}), order, List.of(0, 1))).contains("[0, 缺席]");
         assertThatThrownBy(() -> BattleSmokeChecks.sidesProblem(state(new long[] {7}, new int[] {0}), order, List.of(0)))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ---------------------------------------------------------------- 终局（评审 ROBOT-2）
+
+    private static BattleEndS2C pveEnd(long battleId, long settlementBattle, long settlementPlayer, eBattleOutcome outer, eBattleOutcome inner,
+                                       int rounds) {
+        return BattleEndS2C.newBuilder().setBattleId(battleId).setOutcome(outer).setSettlement(BattleSettlementData.newBuilder()
+                .setBattleId(settlementBattle).setPlayerId(settlementPlayer).setOutcome(inner).setTotalRounds(rounds)).build();
+    }
+
+    @Test
+    void 单人PVE的终局_外层与settlement都要指向本局本人且都是0队胜_至少打过一回合() {
+        eBattleOutcome win = eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
+        long battle = BIG + 40;
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle, BIG, win, win, 2), battle, BIG, 1)).isNull();
+
+        // 基线 features_battle_smoke.go:83-90 的每一项各错一处
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle + 1, BIG, win, win, 2), battle, BIG, 1))
+                .as("settlement 是别的局的").contains("battle_id 对不上本局", Long.toUnsignedString(battle + 1));
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, 0, BIG, win, win, 2), battle, BIG, 1))
+                .as("settlement 没填 battle_id").contains("settlement 0");
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle, 7, win, win, 2), battle, BIG, 1))
+                .contains("settlement.player_id = 7", "期望本人 " + Long.toUnsignedString(BIG));
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle, BIG, win, eBattleOutcome.BATTLE_OUTCOME_DRAW, 2), battle, BIG, 1))
+                .as("外层赢了、settlement 却是平局").contains("终局不是 SIDE_A_WIN", "settlement BATTLE_OUTCOME_DRAW");
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle, BIG, eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN, win, 2), battle, BIG, 1))
+                .contains("外层 BATTLE_OUTCOME_SIDE_B_WIN");
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle, BIG, win, win, 0), battle, BIG, 1)).contains("total_rounds = 0");
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle, BIG, win, win, 2), battle, BIG, 0)).contains("139 × 0");
+        // 几处同时不对：都写出来
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle + 1, 7, win, win, 2), battle, BIG, 1))
+                .contains("battle_id 对不上本局", "settlement.player_id = 7");
     }
 
     @Test

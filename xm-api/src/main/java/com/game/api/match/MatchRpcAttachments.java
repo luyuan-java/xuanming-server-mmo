@@ -8,7 +8,8 @@ import org.apache.dubbo.rpc.RpcContext;
 
 /**
  * match 内部接口（{@code MatchTeamService}、{@code MatchInternalService}）的调用附件：把调用方的<b>剩余预算</b>带给提供方（match-spec §7.2「截止」）。
- * 调用方与提供方共用这一个类，免得两边各写一份字符串。
+ * 调用方与提供方共用这一个类，免得两边各写一份字符串。这里的「剩余预算」指调用方<b>在这一次调用上</b>还肯等多久：一跳的 Dubbo 超时
+ * 比整请求的剩余预算短时（xm-team：每跳封顶 3 s、请求预算 3.5 s）带的是前者——带大了，提供方会在调用方已经放弃之后继续写。
  *
  * <p>为什么传相对预算而不是绝对的 Unix 毫秒：跨主机比墙钟会把时钟偏差算进截止（提前判过期，或在调用方已放弃之后仍然建票开局）。提供方以
  * 「收到时刻 + 预算」作本地截止（单调时钟）；传输耗时让它略晚于调用方的真实截止，这个窄窗口由调用方的补偿兜住
@@ -47,7 +48,7 @@ public final class MatchRpcAttachments {
 
     /**
      * 同 {@link #callWithBudget(long, Supplier)}，另把这一次调用的 Dubbo 超时设成 {@code timeoutMs}（调用级 {@code timeout} 附件，比引用上的缺省值优先，
-     * 调完即清；先例 {@code NodeRpcClients}）。xm-team 的前三个方法用 {@code timeoutMs = min(3 s, 剩余预算)}。
+     * 调完即清；先例 {@code NodeRpcClients}）。xm-team 的前三个方法用 {@code remainingMs = timeoutMs = min(3 s, 剩余请求预算)}。
      *
      * @param timeoutMs 这一次调用的 Dubbo 超时（毫秒），必须 ≥ 1
      */

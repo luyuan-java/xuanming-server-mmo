@@ -806,7 +806,7 @@ class QueueServiceTest {
         clock.advanceSeconds(30);
         store.pop(Q_1V1, "pop-1", List.of(new TicketRef(A, ticket)), 48_000, d());
         clock.advanceSeconds(10);
-        store.requeueFront(Q_1V1, List.of(new TicketRef(A, ticket)), SIX_HOURS, 2000, d());
+        store.requeueFront(Q_1V1, "rq-1", List.of(new TicketRef(A, ticket)), SIX_HOURS, 2000, d());
 
         GetQueueStatusResponse status = service.status(A, d());
 

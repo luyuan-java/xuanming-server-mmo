@@ -137,9 +137,9 @@ class KafkaBattleResultSinkIntegrationTest {
         sink.publish(activity, Channel.ACTIVITY);
         sink.publish(activity, Channel.ACTIVITY);
 
-        await().atMost(WAIT).until(() -> events("sent") == 8);
-        assertThat(results("plain", "sent")).isEqualTo(5);
-        assertThat(results("activity", "sent")).isEqualTo(3);
+        // 生产者回调里先计 xm_battle_result_events、再计 xm_battle_results：等后写的那个，先写的才一定已经到位
+        await().atMost(WAIT).until(() -> results("plain", "sent") == 5 && results("activity", "sent") == 3);
+        assertThat(events("sent")).isEqualTo(8);
         assertThat(events("fallback") + events("not_verified")).isZero();
         assertThat(fallback.size()).isZero();
 
@@ -212,9 +212,10 @@ class KafkaBattleResultSinkIntegrationTest {
         assertThat(unreachable.verified()).isFalse();
 
         unreachable.publish(event(21));
-        await().atMost(WAIT).until(() -> events("not_verified") == 1);
+        // 发送线程依次写：兜底行 → xm_battle_result_events → xm_battle_results；等最后写的那个
+        await().atMost(WAIT).until(() -> results("plain", "error") == 1);
+        assertThat(events("not_verified")).isEqualTo(1);
         assertThat(fallback.lines()).singleElement().satisfies(line -> assertThat(line.event()).isEqualTo(event(21)));
-        assertThat(results("plain", "error")).isEqualTo(1);
 
         long closingAt = System.nanoTime();
         unreachable.close();

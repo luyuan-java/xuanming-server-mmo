@@ -174,12 +174,14 @@ class KafkaBattleResultSinkTest {
         assertThat(kafka.producersMade()).as("没核对通过就不建生产者（地址解析不了时构造器会抛）").isZero();
 
         sink.publish(event(101));
-        await().atMost(WAIT).until(() -> events("not_verified") == 1);
+        // 发送线程依次写：兜底行 → xm_battle_result_events → xm_battle_results。等最后写的那个计数，前两样才一定已经写完
+        // （等 events 再立刻断言 results，轮询恰好落在两次自增之间时会偶发失败）
+        await().atMost(WAIT).until(() -> results("plain", "error") == 1);
+        assertThat(events("not_verified")).isEqualTo(1);
         Line line = fallback.lines().get(0);
         assertThat(line.reason()).isEqualTo("not_verified");
         assertThat(line.key()).isEqualTo("101");
         assertThat(line.event()).isEqualTo(event(101));
-        assertThat(results("plain", "error")).isEqualTo(1);
         assertThat(kafka.adminsOpened()).as("刚核对过，冷却中").isEqualTo(1);
 
         kafka.unreachable = false;

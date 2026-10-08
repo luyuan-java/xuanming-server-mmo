@@ -25,7 +25,11 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class MatcherConfiguration {
 
-    /** 停机时在凑单锁 TTL 之外多等的余量：一条队列的操作以锁 TTL 为界，再留出放锁与收尾的时间。 */
+    /**
+     * 停机时在凑单锁 TTL 之外多等的余量。一条队列的读以锁 TTL 为界，之后最多还有一次弹组（两次尝试，各
+     * {@code QueueMatcher.POP_BUDGET_MS}）——<b>余量不得小于这两次尝试之和</b>：等不到就中断凑单线程，中断落在弹组的等待里会留下
+     * 「弹出了却没人开局」的票。放锁排在最后，被中断也无妨（此时锁的 TTL 早已过期）。
+     */
     static final Duration STOP_MARGIN = Duration.ofSeconds(5);
 
     @Bean

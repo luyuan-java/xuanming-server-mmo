@@ -9,6 +9,7 @@ import com.game.match.ticket.TicketStore;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -136,8 +137,11 @@ public final class Compensation {
             return;
         }
         boolean noOffender = offender == 0;
+        // 每次补偿一个新标记：Redis 客户端重发这一段脚本时入参不变，存储凭它认出重放——回了队首的人可能在重发到达之前又被弹成 matched，
+        // 没有标记的话重发会把正在下一次 gather 里的人再推回队首
+        String requeueToken = UUID.randomUUID().toString();
         try {
-            int requeued = tickets.requeueFront(plan.queue(), survivors, queuedTtlMs, noOffender ? requeueBackoffMs : 0,
+            int requeued = tickets.requeueFront(plan.queue(), requeueToken, survivors, queuedTtlMs, noOffender ? requeueBackoffMs : 0,
                     Deadline.after(TICKET_OP_BUDGET_MS));
             metrics.requeued(noOffender ? MatchMetrics.RequeueReason.GATHER_NO_OFFENDER : MatchMetrics.RequeueReason.GATHER_OFFENDER, requeued);
             if (requeued != survivors.size()) {

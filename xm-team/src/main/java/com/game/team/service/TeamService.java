@@ -55,12 +55,14 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,6 +115,7 @@ public final class TeamService {
     private final TeamPushes pushes;
     private final TeamMetrics metrics;
     private final RuleConfig cfg;
+    private final BooleanSupplier stopping;
 
     /**
      * @param sessions  规则用的会话四态与邀请目标的严格在线判定（{@code TeamSessions}）
@@ -123,10 +126,11 @@ public final class TeamService {
      * @param matchEnd  整队开战加锁之后的收尾执行器（{@code team-match-end}，有界；任务会阻塞，最坏 110 s；拒收时抛
      *                  {@link RejectedExecutionException}，本类记 ERROR 后放弃这次收尾，开战锁靠自然过期）
      * @param cfg       规则配置（{@code xm.team.allow-cross-zone}）
+     * @param stopping  本进程是否已经开始停机（生产为 {@code TeamShutdown::stopping}）：之后异常完成的 gather 不再清锁、不推送
      */
     public TeamService(TeamStore store, SessionReads sessions, DisplayLoader display, HomeZones homeZones,
                        LongSupplier teamIds, TeamBattlePort battle, Executor matchEnd, TeamPushes pushes, TeamMetrics metrics,
-                       RuleConfig cfg) {
+                       RuleConfig cfg, BooleanSupplier stopping) {
         this.store = store;
         this.sessions = sessions;
         this.display = display;
@@ -137,6 +141,7 @@ public final class TeamService {
         this.pushes = pushes;
         this.metrics = metrics;
         this.cfg = cfg == null ? RuleConfig.DEFAULT : cfg;
+        this.stopping = Objects.requireNonNull(stopping, "stopping");
     }
 
     // ================================================================ RPC
@@ -383,7 +388,8 @@ public final class TeamService {
      *       （不带 tip：gather 失败拿不到具体原因）。传输失败（结果不明）同样推 MATCH_FAILED，但<b>不退票</b>——gather 可能仍在跑。</li>
      * </ol>
      * 每次 211 记一次 {@code xm_team_matches_total}（同步拒绝按 tip 定性；已受理的在 gather 收尾时记）。本进程在第 6 步之后退出时
-     * 锁靠自然过期（同基线：进程退出不等 EndMatch）。
+     * 锁靠自然过期（同基线：进程退出不等 EndMatch）——<b>优雅停机也一样</b>：停机开始之后才异常完成的 gather（多半是自己的 Dubbo 引用
+     * 被销毁造成的）只计 {@code gather_unknown}，不清锁、不推 MATCH_FAILED，见 {@code TeamShutdown}。
      */
     public TeamResponse startTeamMatch(long caller, StartTeamMatchRequest request, Deadline deadline) {
         int configId = request.getBattleConfigId();
@@ -505,6 +511,14 @@ public final class TeamService {
             if (error != null || result == null) {
                 // xm-match 中途退出、网络分区或调用超时：结果不明。不退票——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈
                 metrics.match(MatchOutcome.GATHER_UNKNOWN);
+                if (stopping.getAsBoolean()) {
+                    // 本进程正在停机：这次「结果不明」多半是自己的 Dubbo 引用被销毁造成的，xm-match 那边的 gather 照常在跑。
+                    // 此刻清锁并推 MATCH_FAILED，成员会先收到「开战失败」、随后又被 177 / 143 拉进战斗；所以什么都不做，
+                    // 锁靠自然过期——与进程崩溃时一致（match-spec §7.5）。正常到达的结果（下面两个分支）在停机中照常收尾
+                    log.warn("[team] 停机中整队 gather 结果不明：不清锁、不推送（锁靠自然过期，xm-match 照样把 gather 跑完）team={}: {}",
+                            u(teamId), String.valueOf(error));
+                    return;
+                }
                 log.error("[team] 整队 gather 结果不明（按失败收尾，不退票）team={}: {}", u(teamId), String.valueOf(error));
             } else if (ok) {
                 metrics.match(MatchOutcome.SUCCESS);

@@ -16,6 +16,7 @@ import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.flow.Timings;
 import com.game.robot.scenario.BattleSupport.Direct;
+import com.game.robot.scenario.MatchSupport.AutoRequest;
 import com.game.robot.scenario.MatchSupport.Bot;
 import com.game.robot.scenario.MatchSupport.Finished;
 import com.game.robot.scenario.MatchSupport.Started;
@@ -27,7 +28,8 @@ import java.util.List;
 /**
  * 帮会活动开战的 dev 入口（批次 6.4，match-spec §15.5「场景 match-activity」、§7.1–§7.2）。真正的调用方 xm-guild 随批次 4.6 接入；
  * 6.4 由 robot 经 xm-match 的 dev 管理口 {@code POST /admin/match/dev/activity-battle}（{@link MatchAdminClient}）调同一个实现。
- * 只在 dev / test 运行模式下跑（prod 的 403 由 xm-match 自己的单测覆盖，robot 不切运行模式）。A / B 两个新号在线，C 进场后立即登出：
+ * 只在 dev / test 运行模式下跑（prod 的 403 由 xm-match 自己的单测覆盖，robot 不切运行模式）。C <b>最先</b>进场并立即登出（它的下线要先于下面
+ * 第 2 条在 Redis 里生效，A、B 随后的两次进场是留给它的时间），然后 A / B 两个新号进场并保持在线：
  * <ol>
  *   <li>发起人不在名单首位（名单 [A, B]、上下文的发起人 = B）→ {@code INVALID_ARGUMENT}，offender = 0、不发 battle_id；</li>
  *   <li>名单 [A, C]（C 已登出）→ {@code MEMBER_OFFLINE}，offender = C；</li>
@@ -123,12 +125,14 @@ public final class MatchActivityScenario {
             throw new RobotException("没有运维令牌：设环境变量 XM_ADMIN_TOKEN（与 xm-match 相同），或先用 tools/local/start-slice.sh 生成 "
                     + "run/xm-admin-token（从仓库根目录运行 robot）");
         }
-        Bot a = enter("A", accountA);
-        Bot b = enter("B", accountB);
-        // C 只充当「已登出的账号」：进场拿到角色号后按契约收尾（LeaveGame 后断开），gate 断线即删在线目录
+        // C 只充当「已登出的账号」：进场拿到角色号后按契约收尾（LeaveGame 后断开）。排在 A、B 进场之前：gate 撤在线目录是异步写
+        // Redis（scene 写回位置更晚），robot 看不到它何时落地；第 3 步若抢在撤销之前，预检会把 C 当在线放行、真的发号建票开出一局
+        // （所以第 3 步也不能「不是 OFFLINE 就重试」）。A、B 的两次完整进场是留给撤销的余量——是余量，不是同步点
         Bot c = enter("C", accountC);
         c.connection().send(leaveGame, LeaveGameRequest.getDefaultInstance());
         c.connection().close();
+        Bot a = enter("A", accountA);
+        Bot b = enter("B", accountB);
         playerA = a.id();
         playerB = b.id();
         report.note("A=" + uid(a.id()) + " B=" + uid(b.id()) + " C（已登出）=" + uid(c.id()) + " match-admin=" + admin.baseUrl());
@@ -178,14 +182,14 @@ public final class MatchActivityScenario {
 
         // ---- 第 6 步：打完 ----
         steps.step("6-fight", report);
-        MatchSupport.enableAuto(directA, battleId, battleIds);
-        MatchSupport.enableAuto(directB, battleId, battleIds);
-        Finished endA = MatchSupport.awaitEnd(directA, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
-        Finished endB = MatchSupport.awaitEnd(directB, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
-        report.check(endA.end().getOutcome() == endB.end().getOutcome() && endA.fin() && endB.fin(),
-                "第 6 步 两人直连挂机打到 150（同一个终局）后 FIN",
+        AutoRequest autoA = MatchSupport.enableAuto(directA, battleId, battleIds);
+        AutoRequest autoB = MatchSupport.enableAuto(directB, battleId, battleIds);
+        Finished endA = MatchSupport.awaitEnd(directA, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoA);
+        Finished endB = MatchSupport.awaitEnd(directB, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoB);
+        report.check(endA.end().getOutcome() == endB.end().getOutcome() && endA.fin() && endB.fin() && endA.autoAccepted() && endB.autoAccepted(),
+                "第 6 步 两人直连挂机（162 被受理）打到 150（同一个终局）后 FIN",
                 "A outcome=" + endA.end().getOutcome() + " rounds=" + endA.end().getSettlement().getTotalRounds() + " 关闭=" + endA.closed()
-                        + "；B outcome=" + endB.end().getOutcome() + " 关闭=" + endB.closed(), REF);
+                        + endA.autoNote() + "；B outcome=" + endB.end().getOutcome() + " 关闭=" + endB.closed() + endB.autoNote(), REF);
     }
 
     /**

@@ -27,7 +27,7 @@ import org.apache.dubbo.rpc.RpcContext;
 /**
  * xm-match 的 {@link MatchTeamService} 替身（对应基线测试的 fakeBattlePort，{@code team_battle_test.go:46-104}）：按配置给预检结论、
  * 建票结论与 gather 结果，并记下每次调用——<b>连同发起那一刻调用线程上的 Dubbo 附件</b>（预算 {@code xm-budget-ms} 与调用级超时），
- * 这样「每跳超时 = min(3 s, 剩余预算) 并把预算带给 xm-match」能在不起 Dubbo 的单测里断言。
+ * 这样「每跳超时 = min(3 s, 剩余预算)，并把这同一个值当预算带给 xm-match」能在不起 Dubbo 的单测里断言。
  *
  * <p>预检是提供方逻辑的简化模型：副本人数（{@link #sizes}，没配 = 未开放）→ 按名单顺序找第一个 {@link #offline} / {@link #inBattle} /
  * {@link #notReady} 的人。四个方法的应答都可以整体顶替（{@code xxxReply}），用来制造传输失败（异常完成的 future）、永不完成、缺字段的应答。

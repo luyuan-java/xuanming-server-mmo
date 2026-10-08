@@ -5,6 +5,7 @@ import com.game.proto.BattleAssignedS2C;
 import com.game.proto.BattleEndS2C;
 import com.game.proto.BattleStartS2C;
 import com.game.proto.SetAutoBattleRequest;
+import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.eBattleTicketRole;
 import com.game.proto.match.CancelQueueRequest;
 import com.game.proto.match.GetQueueStatusRequest;
@@ -398,28 +399,88 @@ final class MatchSupport {
     }
 
     /**
-     * 直连上开挂机（162，只发不等：应答与随后的回合都进收件箱）。多人局里别人先开挂机时这一局可能已经打完、连接已被服务端 FIN——
-     * 那不算失败（终局由 {@link #awaitEnd} 判）；其余发送失败照常抛出。
+     * 一次开挂机请求（162）。
+     *
+     * @param requestId 请求 id；0 = 没有发出（发送时连接已被服务端 FIN、这一局已经打完）
+     * @param sentAt    发出那一刻这条直连收件箱的长度（此前到达的帧下标都小于它）
      */
-    static void enableAuto(Direct direct, long battleId, BattleIds ids) throws RobotException {
+    record AutoRequest(long requestId, int sentAt) {
+
+        /** 没有发出：这一局在本人开挂机之前就打完了。 */
+        static final AutoRequest NOT_SENT = new AutoRequest(0, 0);
+    }
+
+    /**
+     * 直连上开挂机（162，只发不等：应答与随后的回合都进收件箱，应答由 {@link #awaitEnd} 凭返回值核对）。多人局里别人先开挂机时这一局可能
+     * 已经打完、连接已被服务端 FIN——那不算失败（终局由 {@link #awaitEnd} 判），返回 {@link AutoRequest#NOT_SENT}；其余发送失败照常抛出。
+     */
+    static AutoRequest enableAuto(Direct direct, long battleId, BattleIds ids) throws RobotException {
+        int sentAt = direct.mark();
         try {
-            direct.request(ids.setAutoBattle(), SetAutoBattleRequest.newBuilder().setBattleId(battleId).setEnabled(true).build());
+            return new AutoRequest(direct.request(ids.setAutoBattle(),
+                    SetAutoBattleRequest.newBuilder().setBattleId(battleId).setEnabled(true).build()), sentAt);
         } catch (RobotException e) {
             if (endOf(direct.since(0), ids, battleId) == null) {
                 throw e;
             }
+            return AutoRequest.NOT_SENT;
         }
+    }
+
+    /**
+     * 这次 162（开挂机）有没有被受理。服务端对每条 162 都回应答（成功是不带 {@code error_message} 的 {@code SetAutoBattleResponse}），
+     * 处理器里推出的帧先写、应答随后、FIN 最后（battle-node-spec §3.6 R2 / R3），所以连接关闭时应答一定已经在收件箱里。
+     * 被拒（信封错误，或应答带 {@code error_message}）而这一局照样打到了 150，说明它是靠回合超时的默认行动打完的——
+     * 「挂机打到 150」名不副实（基线 {@code robot/features_battle_smoke.go:126-129}：162 的应答带 tip 即失败）。
+     *
+     * <p>豁免——都是多人局里别人先把这一局打完、本人的 162 没赶上：没有发出（{@link AutoRequest#NOT_SENT}）；发出时这一局的 150 已经在
+     * 收件箱里而应答没有来（服务端已经关了这条连接）；应答是拒绝但排在这一局的 150 之后（服务端在房间没了之后才读到这条 162——
+     * 本人这条 162 促成终局时，应答虽然也排在 150 之后，却一定是成功）。
+     *
+     * @param frames 这条直连上的全部帧（按到达顺序）
+     * @return null = 没问题
+     */
+    static String autoProblem(List<BattleFrame> frames, BattleIds ids, long battleId, AutoRequest auto) {
+        if (auto.requestId() == 0) {
+            return null;
+        }
+        int endIndex = -1;
+        BattleFrame reply = null;
+        for (BattleFrame frame : frames) {
+            if (endIndex < 0 && frame.isPush(ids.battleEnd()) && endOf(List.of(frame), ids, battleId) != null) {
+                endIndex = frame.index();
+            }
+            if (reply == null && frame.content() != null && frame.messageId() == ids.setAutoBattle() && frame.requestId() == auto.requestId()) {
+                reply = frame;
+            }
+        }
+        if (reply == null) {
+            return endIndex >= 0 && endIndex < auto.sentAt() ? null : "没有收到 162 的应答（id=" + auto.requestId() + "）";
+        }
+        String rejected;
+        if (reply.isEnvelopeError()) {
+            rejected = "162 的应答是信封错误 tip=" + reply.envelopeTipId();
+        } else {
+            SetAutoBattleResponse body = reply.parseOrNull(SetAutoBattleResponse.parser());
+            rejected = body == null ? "162 的应答解析不了" : body.getErrorMessage().getId() == 0 ? null
+                    : "162 的应答带 error_message " + body.getErrorMessage().getId() + body.getErrorMessage().getParametersList();
+        }
+        if (rejected == null || (endIndex >= 0 && endIndex < reply.index())) {
+            return null;
+        }
+        return rejected + "：挂机没有开成，这一局是靠回合超时的默认行动打完的";
     }
 
     /**
      * 一局在直连上的收尾。
      *
-     * @param end    150
-     * @param turns  这条直连上收到的 139 条数
-     * @param closed 150 之后连接的关闭方式（{@value BattleFrame#FIN} 才是契约；{@link #FIN_TIMEOUT} 内没关则为 null）
-     * @param labels 这条直连上按到达顺序的全部帧标签（报告用）
+     * @param end         150
+     * @param turns       这条直连上收到的 139 条数
+     * @param closed      150 之后连接的关闭方式（{@value BattleFrame#FIN} 才是契约；{@link #FIN_TIMEOUT} 内没关则为 null）
+     * @param labels      这条直连上按到达顺序的全部帧标签（报告用）
+     * @param autoProblem 本人那条 162 的问题（{@link #autoProblem}）；null = 挂机被受理了，或属于豁免的情形
      */
-    record Finished(BattleEndS2C end, int turns, String closed, List<String> labels) {
+    record Finished(BattleEndS2C end, int turns, String closed, List<String> labels, String autoProblem) {
 
         Finished {
             labels = List.copyOf(labels);
@@ -428,6 +489,16 @@ final class MatchSupport {
         /** 终局包之后服务端正常关闭（FIN，不是 RST、不是超时）。 */
         boolean fin() {
             return BattleFrame.FIN.equals(closed);
+        }
+
+        /** 本人的 162 被受理了（或属于豁免的情形）：这一局不是靠回合超时的默认行动打完的。 */
+        boolean autoAccepted() {
+            return autoProblem == null;
+        }
+
+        /** 拼在检查细节末尾的一段：挂机没开成时是「；」加原因，否则为空串。 */
+        String autoNote() {
+            return autoProblem == null ? "" : "；" + autoProblem;
         }
     }
 
@@ -452,8 +523,11 @@ final class MatchSupport {
     /**
      * 等这一局在直连上的 150（上限 {@code timeout}），再等服务端关闭连接（上限 {@link #FIN_TIMEOUT}，没等到不抛、由调用方按
      * {@link Finished#fin} 记一条检查）。150 之前连接就被关、或超时都抛出。
+     *
+     * @param auto 本人在这条直连上开挂机的那次请求（{@link #enableAuto} 的返回值）：它的应答在连接关闭之后核对，结论进
+     *             {@link Finished#autoProblem}，由调用方并进「挂机打到 150」的那条检查
      */
-    static Finished awaitEnd(Direct direct, long battleId, BattleIds ids, Duration timeout) throws RobotException {
+    static Finished awaitEnd(Direct direct, long battleId, BattleIds ids, Duration timeout, AutoRequest auto) throws RobotException {
         Optional<BattleFrame> end = direct.await(0, f -> f.isPush(ids.battleEnd()) && endOf(List.of(f), ids, battleId) != null, timeout);
         if (end.isEmpty()) {
             boolean closed = direct.since(0).stream().anyMatch(BattleFrame::isClosed);
@@ -462,7 +536,8 @@ final class MatchSupport {
         }
         Optional<BattleFrame> closed = direct.await(end.get().index() + 1, BattleFrame::isClosed, FIN_TIMEOUT);
         List<BattleFrame> all = direct.since(0);
-        return new Finished(endOf(all, ids, battleId), turnCount(all, ids), closed.map(BattleFrame::closedBy).orElse(null), BattleSupport.labels(all));
+        return new Finished(endOf(all, ids, battleId), turnCount(all, ids), closed.map(BattleFrame::closedBy).orElse(null), BattleSupport.labels(all),
+                autoProblem(all, ids, battleId, auto));
     }
 
     // ---------------------------------------------------------------- 评分

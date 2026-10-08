@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -112,6 +114,26 @@ class MatchActivityScenarioTest {
         }
         assertThat(scenario.resultLine()).matches("MATCH_ACTIVITY_OK battle_id=\\d+ player_a=\\d+ player_b=\\d+").doesNotContain("=0 ");
         assertThat(world.eventually(() -> world.lockedPlayers() == 0)).as("两人把这一局打完，结算随后落地").isTrue();
+    }
+
+    /**
+     * 评审 ROBOT-1：gate 撤在线目录是异步的，C 的登出要排在 A、B 两次进场之前，给它留出落地的时间——紧挨着第 3 步登出的话，
+     * 预检可能把 C 当在线放行并真的开出一局。假服务端按建角的先后发号，所以「C 的号最小」就是「C 最先进场」。
+     */
+    @Test
+    void 充当已登出账号的C最先进场并登出_然后才是A与B() {
+        MatchActivityScenario scenario = scenario("ord", world.admin());
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report)).as(report.render("match-activity")).isEmpty();
+        Matcher ids = Pattern.compile("A=(\\d+) B=(\\d+) C（已登出）=(\\d+) ").matcher(String.join("\n", report.notes()));
+        assertThat(ids.find()).as("报告的备注里有三个玩家号：%s", report.notes()).isTrue();
+        long a = Long.parseUnsignedLong(ids.group(1));
+        long b = Long.parseUnsignedLong(ids.group(2));
+        long c = Long.parseUnsignedLong(ids.group(3));
+        assertThat(Long.compareUnsigned(c, a)).as("C（%s）先于 A（%s）建角进场", ids.group(3), ids.group(1)).isNegative();
+        assertThat(Long.compareUnsigned(a, b)).as("A 先于 B").isNegative();
     }
 
     @Test

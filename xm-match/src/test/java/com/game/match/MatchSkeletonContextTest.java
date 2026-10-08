@@ -41,10 +41,14 @@ import com.game.match.lifecycle.ResultConsumerControl;
 import com.game.match.matcher.MatcherRunner;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.placement.DirectPlacementDialer;
+import com.game.match.placement.PlacementClients;
 import com.game.match.placement.PlacementDialer;
 import com.game.match.placement.PlacementStore;
 import com.game.match.placement.RedissonPlacementStore;
+import com.game.match.port.IdleSweep;
 import com.game.match.port.NodeCalls;
+import com.game.match.port.NodeClientCache;
+import com.game.match.port.NodeClientSweeper;
 import com.game.match.port.PlayerPusher;
 import com.game.match.port.PlayerStatusReader;
 import com.game.match.port.RedisClock;
@@ -405,7 +409,13 @@ class MatchSkeletonContextTest {
         assertThat(context.getBeanNamesForType(ResolvableType.forClassWithGenerics(NodeCalls.class, SceneBattleService.class)))
                 .containsExactly("sceneBattleCalls");
         assertThat(context.getBeanNamesForType(ResolvableType.forClassWithGenerics(NodeCalls.class, BattleNodeService.class)))
-                .containsExactly("battleNodeCalls");
+                .as("补签直拨另有一份客户端缓存，但它不以 NodeCalls 的身份出现在容器里，不会被按类型注入给 gather").containsExactly("battleNodeCalls");
+        // 三份直连客户端缓存（gather → scene、gather → battle、补签直拨 → battle）都在清扫名单里，清扫线程已起
+        assertThat(context.getBeansOfType(IdleSweep.class).values()).extracting(IdleSweep::name)
+                .containsExactlyInAnyOrder("scene-battle", "battle-node", "battle-placement");
+        assertThat(context.getBeansOfType(NodeClientCache.class)).as("gather 用的两份").hasSize(2);
+        assertThat(context.getBeansOfType(PlacementClients.class)).hasSize(1);
+        assertThat(context.getBean(NodeClientSweeper.class).isRunning()).isTrue();
         assertThat(properties.requestBudget()).isEqualTo(Duration.ofMillis(4500));
         assertThat(properties.pveTeamSizeFor(1)).isEqualTo(5);
 

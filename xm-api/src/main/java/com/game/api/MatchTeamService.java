@@ -21,9 +21,11 @@ import java.util.concurrent.CompletableFuture;
  *   <li><b>不重试</b>：调用方引用必须 {@code retries = 0}（Dubbo 缺省 failover 会重发建票与 gather）。</li>
  *   <li><b>future 异常完成 = 传输失败</b>（超时、断连、鉴权失败、提供方过载或已停机），结局未知；业务结论全部在应答消息里，Dubbo 层恒成功。
  *       应答枚举的 {@code UNSPECIFIED}（字段缺失）一律按传输失败处理，不得读成成功。</li>
- *   <li><b>预算</b>：前三个方法由调用方把「剩余预算（毫秒，发出时刻计）」经附件 {@code xm-budget-ms} 带上
+ *   <li><b>预算</b>：前三个方法由调用方把「这一跳肯等多久（毫秒，发出时刻计）」经附件 {@code xm-budget-ms} 带上
  *       （{@link com.game.api.match.MatchRpcAttachments}），提供方以收到时刻 + 预算作本地截止（单调时钟，不跨主机比墙钟）；
- *       缺附件按 {@link com.game.api.match.MatchBudgets#DEFAULT_REQUEST_BUDGET_MS}。调用方每跳的 Dubbo 超时取 min(3 s, 剩余预算)。</li>
+ *       缺附件按 {@link com.game.api.match.MatchBudgets#DEFAULT_REQUEST_BUDGET_MS}。调用方每跳的 Dubbo 超时取 min(3 s, 剩余请求预算)，
+ *       <b>附件带的就是这个每跳超时</b>，不是整请求的剩余预算：过了每跳超时应答没人收，提供方的截止再晚，迟到的建票就会在调用方
+ *       已经判「结果不明」并回滚之后照常写票。</li>
  *   <li><b>{@link #runTeamGather} 是长时间挂起的调用</b>：调用级超时 = {@code TeamMatchCheckReply.lock_ttl_seconds}（5 人 101 s，
  *       大于 gather 加补偿的最坏 91 s），用 Dubbo 的调用级 {@code timeout} 附件设置，引用上的缺省超时不适用于它。</li>
  * </ul>

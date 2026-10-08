@@ -10,23 +10,29 @@ import java.util.function.Function;
  * 按落点记录直拨 battle 节点，并把结局分类（match-spec §4.3 第 4–6 行；spectate-spec §4.8）。179 补签与 6.5 的观众 RPC 共用这一条规则，
  * 所以从补签里抽成接口：
  * <ol>
- *   <li>按<b>记录里的</b>地址与实例号（{@code rpc_host} / {@code rpc_port} / {@code battle_instance_id}）取直连客户端发起调用——不按目录找：
- *       battle 丢了租约仍活着时不在目录里，但直拨能到；节点重启后占了同一个地址时，调用落到新进程，由新进程回「房间不存在」。</li>
+ *   <li>按<b>记录里的</b>地址（{@code rpc_host} / {@code rpc_port}）取直连客户端发起调用——不按目录找：
+ *       battle 丢了租约仍活着时不在目录里，但直拨能到；节点重启后占了同一个地址时，调用落到新进程，由新进程回「房间不存在」。
+ *       记录里的实例号（{@code battle_instance_id}）只用于下面与目录比对，不参与取客户端（battle 的请求不带实例号）。</li>
  *   <li>调通了 → {@link Dial.Replied}，应答原样交给调用方（battle 的裁决由调用方透传 / 解读）。</li>
- *   <li><b>建连失败</b>（对端拒绝连接 / 地址不可达，请求确定没有送达）→ 再读一次 battle 目录：同号节点存在且实例不同 → {@link Dial.RoomGone}
- *       （正面证据：原进程的号已被别的进程接手，且原地址连不上）；否则 → {@link Dial.Unavailable}({@link Kind#NOT_DELIVERED})。</li>
+ *   <li><b>请求确定没有送达</b> → 再读一次 battle 目录：同号节点存在且实例不同，<b>并且</b>对原地址再探测一次、明确连不上（对端拒绝连接 /
+ *       地址不可达）→ {@link Dial.RoomGone}（正面证据：原进程的号已被别的进程接手，且原地址连不上）；
+ *       否则 → {@link Dial.Unavailable}({@link Kind#NOT_DELIVERED})。「没送达」本身不等于「连不上」——连接刚断、还没重连上时也是没送达，
+ *       所以要多探测这一次。</li>
  *   <li>其余传输失败 → {@link Dial.Unavailable}：超时是 {@link Kind#TIMEOUT}；连上之后断开、对端回错、分不清的一律 {@link Kind#OTHER}。
  *       <b>超时永远不判死</b>——丢了租约的 battle 恰好是「可能很慢」的进程，而「这局没了」会让客户端永久放弃本局。分不清就归到不判死的那一边。</li>
  * </ol>
  *
- * <p><b>契约</b>：阻塞，至多约 {@code timeout}（外加建连失败后一次目录读）；在工作线程 / 虚拟线程上调。<b>永不抛异常</b>（{@code call} 抛出的异常按
+ * <p><b>契约</b>：阻塞，至多约 {@code timeout}（外加请求没送达之后的一次目录读；探测算在 {@code timeout} 之内）；在工作线程 / 虚拟线程上调。<b>永不抛异常</b>（{@code call} 抛出的异常按
  * {@link Kind#OTHER} 处理）。不重试。线程安全。
  */
 public interface PlacementDialer {
 
     /** 没调通的类别。 */
     enum Kind {
-        /** 建连失败（请求确定没有送达），但没有「号已被别的进程接手」的证据：目录里没有这个号、还是同一个实例、或目录读失败。 */
+        /**
+         * 请求确定没有送达，但判不了「这局没了」：目录里没有这个号、还是同一个实例、目录读失败，或者号虽已被别的实例接手、
+         * 原地址却连得上 / 探测没有结论。
+         */
         NOT_DELIVERED,
         /** 调用超时：请求可能已经送达并生效。 */
         TIMEOUT,
@@ -41,7 +47,7 @@ public interface PlacementDialer {
         record Replied<R>(R reply) implements Dial<R> {
         }
 
-        /** 这一局确实没了：直拨建连失败，且目录里同号节点已换实例。179 据此回 1005；观众 RPC 视同「房间不存在」。 */
+        /** 这一局确实没了：直拨的请求没有送达、目录里同号节点已换实例、原地址明确连不上。179 据此回 1005；观众 RPC 视同「房间不存在」。 */
         record RoomGone<R>() implements Dial<R> {
         }
 

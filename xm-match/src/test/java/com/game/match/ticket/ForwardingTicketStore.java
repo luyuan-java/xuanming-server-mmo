@@ -102,8 +102,9 @@ public class ForwardingTicketStore implements TicketStore {
     }
 
     @Override
-    public int requeueFront(QueueRef queue, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs, Deadline d) {
-        return delegate.requeueFront(queue, survivorsInOrder, queuedTtlMs, notBeforeDelayMs, d);
+    public int requeueFront(QueueRef queue, String requeueToken, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs,
+                            Deadline d) {
+        return delegate.requeueFront(queue, requeueToken, survivorsInOrder, queuedTtlMs, notBeforeDelayMs, d);
     }
 
     @Override

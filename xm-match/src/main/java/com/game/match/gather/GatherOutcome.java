@@ -4,7 +4,7 @@ import java.util.Locale;
 
 /**
  * 一次 gather 的结局（match-spec §3.3 补偿矩阵、§9.6、§11 的 {@code xm_match_gathers_total{outcome}}）。标签取值就是枚举名的小写（{@link #label()}），
- * 与基线 {@code match_gather_total} 的 outcome 同名；{@link #OVERLOADED} 与 {@link #CREATE_REJECTED} 是 Java 新增。
+ * 与基线 {@code match_gather_total} 的 outcome 同名；{@link #OVERLOADED}、{@link #CREATE_REJECTED} 与 {@link #CREATE_NOT_SENT} 是 Java 新增。
  *
  * <p>入口（切磋、整队、活动、PVE_SOLO）拿到的只是成功与否加这个标签：<b>不要按具体的失败原因分支</b>，客户端可见的失败处理只看 {@link GatherResult#ok()}
  * （§8.5）。唯一需要知道的区别已经由管线处理掉了（见各值的注释）。
@@ -31,6 +31,13 @@ public enum GatherOutcome {
     NOT_ALLOCATABLE(false),
     /** battle 已受理但明确拒绝建房（应答带错误码，保证零副作用）：不发 destroy，直接补偿（修基线 F-g2）。无肇事者。 */
     CREATE_REJECTED(false),
+    /**
+     * 建房请求<b>确定没有送达</b>（发包之前连接就不在 / 建连失败：battle 进程刚死、目录条目还没过期时最常见）：这个节点上不可能有这间房，
+     * 不发 destroy，直接补偿（lead 裁决 2026-10-08，规格与基线之外的有意差异——基线与原规格在这里走「destroy 也连不上 →
+     * create_failed_room_alive」，全员冻结到备战期限、票据卡到 matched TTL）。只认建房这一次调用自己的失败，判定见
+     * {@code placement.RpcFailures}；分不清是否送达的仍是 {@link #CREATE_FAILED} / {@link #CREATE_FAILED_ROOM_ALIVE}。无肇事者。
+     */
+    CREATE_NOT_SENT(false),
     /** 建房结局不明（超时 / 传输失败 / 准入字段缺失），回滚的 destroy 成功：房间确定不在，照常补偿。无肇事者。 */
     CREATE_FAILED(false),
     /**

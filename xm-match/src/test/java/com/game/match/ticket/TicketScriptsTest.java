@@ -115,7 +115,8 @@ class TicketScriptsTest {
         assertThat(commandsOf(TicketScripts.EXTEND)).containsExactly("HGET", "PEXPIRE");
         assertThat(commandsOf(TicketScripts.DEL)).containsExactly("DEL", "HGET");
         assertThat(commandsOf(TicketScripts.DEL_GROUP)).containsExactly("DEL", "HGET");
-        assertThat(commandsOf(TicketScripts.REQUEUE)).containsExactly("DEL", "HDEL", "HMGET", "HSET", "LPUSH", "PEXPIRE", "SADD", "TIME", "ZADD");
+        assertThat(commandsOf(TicketScripts.REQUEUE)).containsExactly("DEL", "GET", "HDEL", "HMGET", "HSET", "LPUSH", "PEXPIRE", "SADD", "SET", "TIME",
+                "ZADD");
         assertThat(commandsOf(TicketScripts.PRUNE)).containsExactly("DEL", "LLEN", "SREM", "ZCARD");
         assertThat(commandsOf(TicketScripts.LOCK_RELEASE)).containsExactly("DEL", "GET");
     }
@@ -132,7 +133,7 @@ class TicketScriptsTest {
     }
 
     @Test
-    void 玩家号票号从不tonumber_只有TTL_退避_前缀长度与票里的退避时刻会转成数字() {
+    void 玩家号票号从不tonumber_只有TTL_退避_前缀长度_票里的退避时刻与回队首标记里的人数会转成数字() {
         Pattern toNumber = Pattern.compile("tonumber\\(([^)]*)\\)");
         Set<String> converted = new TreeSet<>();
         ALL.forEach((name, lua) -> {
@@ -142,6 +143,6 @@ class TicketScriptsTest {
             }
         });
 
-        assertThat(converted).containsExactlyInAnyOrder("S_SNAPSHOT:ARGV[1]", "S_POP:f[4]", "S_REQUEUE:ARGV[2]");
+        assertThat(converted).containsExactlyInAnyOrder("S_SNAPSHOT:ARGV[1]", "S_POP:f[4]", "S_REQUEUE:ARGV[2]", "S_REQUEUE:marked");
     }
 }

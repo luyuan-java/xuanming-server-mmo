@@ -46,6 +46,8 @@ public final class InMemoryTicketStore implements TicketStore {
 
     /** 弹组重放标记的寿命（同真实现的 60 s）。 */
     public static final long POP_MARKER_TTL_MS = 60_000;
+    /** 回队首重放标记的寿命（同真实现的 60 s）。 */
+    public static final long REQUEUE_MARKER_TTL_MS = 60_000;
 
     /** 故障注入。 */
     public final Faults faults = new Faults();
@@ -59,6 +61,8 @@ public final class InMemoryTicketStore implements TicketStore {
     private final Map<String, Map<String, Long>> ranks = new HashMap<>();
     private final Set<String> index = new LinkedHashSet<>();
     private final Map<String, Long> popMarkers = new HashMap<>();
+    /** 回队首的重放标记：token → {那一次放回去的人数, 到期时刻}。 */
+    private final Map<String, long[]> requeueMarkers = new HashMap<>();
     private final Map<String, Held> locks = new HashMap<>();
 
     /** 一条带到期时刻的值（票据，或凑单锁的持有者）。 */
@@ -200,6 +204,17 @@ public final class InMemoryTicketStore implements TicketStore {
         lock.lock();
         try {
             popMarkers.remove(popToken);
+            return this;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** 让一个回队首重放标记立即过期（等价于真 Redis 上 60 s 之后）。 */
+    public InMemoryTicketStore expireRequeueMarker(String requeueToken) {
+        lock.lock();
+        try {
+            requeueMarkers.remove(requeueToken);
             return this;
         } finally {
             lock.unlock();
@@ -505,8 +520,12 @@ public final class InMemoryTicketStore implements TicketStore {
     }
 
     @Override
-    public int requeueFront(QueueRef queue, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs, Deadline d) {
+    public int requeueFront(QueueRef queue, String requeueToken, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs,
+                            Deadline d) {
         requireTtl(queuedTtlMs);
+        if (requeueToken == null || requeueToken.isEmpty()) {
+            throw new IllegalArgumentException("回队首必须带 token");
+        }
         if (notBeforeDelayMs < 0) {
             throw new IllegalArgumentException("退避时长不能为负: " + notBeforeDelayMs);
         }
@@ -518,6 +537,14 @@ public final class InMemoryTicketStore implements TicketStore {
         }
         return run("requeueFront","requeueFront(" + queue + "," + ids(survivorsInOrder.stream().map(TicketRef::playerId).toList()) + ")", true, () -> {
             long now = clock.peekMs();
+            if (survivorsInOrder.isEmpty()) {
+                // 同真实现：空名单什么都不做，也不写标记
+                return 0;
+            }
+            long[] marker = requeueMarkers.get(requeueToken);
+            if (marker != null && marker[1] > now) {
+                return (int) marker[0];
+            }
             String key = queue.queueKey();
             int requeued = 0;
             for (int i = survivorsInOrder.size() - 1; i >= 0; i--) {
@@ -536,6 +563,7 @@ public final class InMemoryTicketStore implements TicketStore {
             if (requeued > 0) {
                 index.add(key);
             }
+            requeueMarkers.put(requeueToken, new long[] {requeued, now + REQUEUE_MARKER_TTL_MS});
             return requeued;
         });
     }

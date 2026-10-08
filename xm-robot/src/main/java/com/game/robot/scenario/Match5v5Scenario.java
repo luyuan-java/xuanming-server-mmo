@@ -13,6 +13,7 @@ import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.flow.Timings;
 import com.game.robot.scenario.BattleSupport.Direct;
+import com.game.robot.scenario.MatchSupport.AutoRequest;
 import com.game.robot.scenario.MatchSupport.Bot;
 import com.game.robot.scenario.MatchSupport.Finished;
 import com.game.robot.scenario.MatchSupport.Started;
@@ -172,24 +173,26 @@ public final class Match5v5Scenario {
             closeables.add(direct);
             directs.add(direct);
         }
+        List<AutoRequest> autos = new ArrayList<>();
         for (Direct direct : directs) {
-            MatchSupport.enableAuto(direct, battleId, battleIds);
+            autos.add(MatchSupport.enableAuto(direct, battleId, battleIds));
         }
         List<String> endProblems = new ArrayList<>();
         Finished firstEnd = null;
-        for (Direct direct : directs) {
-            Finished end = MatchSupport.awaitEnd(direct, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
+        for (int i = 0; i < directs.size(); i++) {
+            Direct direct = directs.get(i);
+            Finished end = MatchSupport.awaitEnd(direct, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autos.get(i));
             direct.close();
             if (firstEnd == null) {
                 firstEnd = end;
             }
-            if (end.end().getOutcome() != firstEnd.end().getOutcome() || !end.fin()) {
-                endProblems.add(direct.name + " outcome=" + end.end().getOutcome() + " 关闭=" + end.closed());
+            if (end.end().getOutcome() != firstEnd.end().getOutcome() || !end.fin() || !end.autoAccepted()) {
+                endProblems.add(direct.name + " outcome=" + end.end().getOutcome() + " 关闭=" + end.closed() + end.autoNote());
             }
         }
         outcome = firstEnd.end().getOutcome();
         rounds = firstEnd.end().getSettlement().getTotalRounds();
-        report.check(endProblems.isEmpty(), "第 4 步 全员开自动 → 十人都收到 150（同一个终局）后 FIN",
+        report.check(endProblems.isEmpty(), "第 4 步 全员开自动（162 被受理）→ 十人都收到 150（同一个终局）后 FIN",
                 "outcome=" + outcome + " rounds=" + rounds + (endProblems.isEmpty() ? "" : "；不一致的：" + endProblems), REF);
 
         // ---- 第 5 步：评分 ----

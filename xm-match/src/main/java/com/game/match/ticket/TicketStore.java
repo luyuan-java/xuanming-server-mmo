@@ -249,16 +249,21 @@ public interface TicketStore extends TicketReader {
     /**
      * 幸存者回队首（S_REQUEUE）：在<b>同一个</b>原子操作里，从名单末尾往前逐个处理「票号一致、仍是 matched、票的队列键就是 {@code queue}」的人——
      * 票回 queued、TTL 恢复成 {@code queuedTtlMs}、推到队首、按票里的评分写回镜像；最后登记注册集。处理完之后这些人在队列里的相对顺序
-     * 与 {@code survivorsInOrder} 相同，且排在原有成员之前。{@code enqueued_at_ms} 不变。不满足条件的人跳过（票已过期 / 已换 / 已是 queued 的重放），
+     * 与 {@code survivorsInOrder} 相同，且排在原有成员之前。{@code enqueued_at_ms} 不变。不满足条件的人跳过（票已过期 / 已换 / 已是 queued），
      * 不会留下「在队列里却没有 queued 票」或反过来的孤儿。某个人推进队列这一步失败时（只可能是队列键被人为占成别的类型），他的票被<b>删掉</b>
      * （让玩家可以立即重排，同基线），不计入返回值。
      *
+     * <p><b>重放按 {@code requeueToken} 识别</b>（标记 60 s，同弹组）：同一个 token 再调一次不写任何东西、原样返回第一次的人数。
+     * 不能只靠「票已经不是 matched」来认重放——回了队首的人可以在重发到达之前又被凑单弹成 matched（票号与队列都没变），那时旧的入参会重新满足条件，
+     * 把正在下一次 gather 里的人再推回队首。标记在每个出口都写（含一个人都没放回去的 0）；名单为空时什么都不做、也不写标记。
+     *
+     * @param requeueToken     这一次回队首的唯一标识（调用方每次补偿生成一个随机串，重发时不变）；不得为空
      * @param survivorsInOrder 原弹出顺序里的幸存者；可以为空（什么都不做）；<b>玩家号不得重复</b>（重复是调用方的 bug，抛
      *                         {@link IllegalArgumentException}）
      * @param notBeforeDelayMs &gt; 0：这些票的 {@code not_before_ms} 置为 Redis 时间 + 它（无肇事者的失败，M11）；0：清掉 {@code not_before_ms}
-     * @return 本次放回队首的人数（只用于指标；重放时是 0）
+     * @return 这一次回队首放回去的人数（只用于指标与日志；同一个 token 的重放返回第一次的那个数）
      */
-    int requeueFront(QueueRef queue, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs, Deadline d);
+    int requeueFront(QueueRef queue, String requeueToken, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs, Deadline d);
 
     // ================================================================ 注册集、深度、凑单锁
 

@@ -105,7 +105,7 @@ class MatchMetricsTest {
             assertThat(count("xm.match.matcher.rounds", "result", result)).isZero();
         }
         for (String outcome : List.of("success", "internal", "overloaded", "no_battle_node", "no_location", "prepare_failed", "fingerprint_mismatch",
-                "index_failed", "not_allocatable", "create_rejected", "create_failed", "create_failed_room_alive")) {
+                "index_failed", "not_allocatable", "create_rejected", "create_not_sent", "create_failed", "create_failed_room_alive")) {
             for (String mode : List.of("MATCH_MODE_5V5", "MATCH_MODE_1V1", "MATCH_MODE_PVE_SOLO", "MATCH_MODE_PVE_TEAM", "MATCH_MODE_PVP_CHALLENGE")) {
                 assertThat(count("xm.match.gathers", "mode", mode, "outcome", outcome)).as(mode + "/" + outcome).isZero();
             }

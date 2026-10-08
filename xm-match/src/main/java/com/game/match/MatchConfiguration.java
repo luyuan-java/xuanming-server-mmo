@@ -32,7 +32,10 @@ import com.game.match.lifecycle.MatcherControl;
 import com.game.match.lifecycle.ResultConsumerControl;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
+import com.game.match.port.IdleSweep;
 import com.game.match.port.NodeCalls;
+import com.game.match.port.NodeClientCache;
+import com.game.match.port.NodeClientSweeper;
 import com.game.match.port.PlayerPusher;
 import com.game.match.port.PlayerStatusReader;
 import com.game.match.port.RedisClock;
@@ -42,6 +45,7 @@ import com.game.table.ConfigTables;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -76,6 +80,8 @@ import org.springframework.core.env.Environment;
  *   <tr><td>{@code dispatch.MatchWorkers}</td><td>dispatch 包（{@code match-worker} 工作池）</td><td>派发器、整队 / 活动两个内部接口的提供方</td></tr>
  *   <tr><td>{@code port.PlayerStatusReader} / {@code RedisClock} / {@code NodeCalls} / {@code PlayerPusher}</td><td>本类（包 xm-discovery / xm-api）</td>
  *       <td>各包按需注入</td></tr>
+ *   <tr><td>{@code port.IdleSweep}</td><td>本类的两份直连客户端缓存、placement 包的 {@code PlacementClients}</td>
+ *       <td>本类的 {@code NodeClientSweeper}（定时清空闲的引用）</td></tr>
  *   <tr><td>{@code lifecycle.MatcherControl} / {@code ResultConsumerControl}</td><td>凑单包的 {@code matcher.MatcherRunner}、评分包的
  *       {@code rating.BattleResultIngest}（都不得自带启停）</td><td>{@link MatchLifecycle}（启动第 8、9 步与停机）</td></tr>
  *   <tr><td>{@code admin.MatchAdminAuthFilter}</td><td>本类登记在 {@code /admin/*}</td><td>dev 管理口的控制器（令牌、操作人、运行模式都已在过滤器里判过）</td></tr>
@@ -288,28 +294,52 @@ public class MatchConfiguration {
 
     // ================================================================ 出站口
 
-    /** scene 的回合制战斗入口（备战 / 取消）的直连客户端缓存；引用上的缺省超时是备战的 3 s，每次调用再按次给。 */
+    /**
+     * gather 用的两个直连客户端缓存空闲多久清掉一个地址：一条落点记录的寿命（360 s）。远大于任何一跳的超时（最长是建房的 5 s），
+     * 空闲的地址上不会有在途调用；误清的代价只是下次多建一次引用。
+     */
+    static final Duration NODE_CLIENT_IDLE = Duration.ofSeconds(MatchBudgets.PLACEMENT_TTL_SECONDS);
+    /** 清扫直连客户端缓存的间隔。 */
+    static final Duration NODE_CLIENT_SWEEP_INTERVAL = Duration.ofSeconds(60);
+
+    /**
+     * scene 的回合制战斗入口（备战 / 取消）的直连客户端缓存；引用上的缺省超时是备战的 3 s，每次调用再按次给。
+     * 外面包一层 {@link NodeClientCache}：清掉空闲的引用（scene 节点下线 / 换地址之后不再留着反复重连），
+     * 并让补偿的取消不顶掉别的 gather 正在用的引用（见那个类的注释）。
+     */
     @Bean(destroyMethod = "close")
-    public NodeRpcClients<SceneBattleService> sceneBattleClients() {
-        return new NodeRpcClients<>("xm-match-scene-battle", SceneBattleService.class, DubboGroups.SCENE_BATTLE,
-                Duration.ofMillis(MatchBudgets.PREPARE_BATTLE_TIMEOUT_MS), "match-scene-connect");
+    public NodeClientCache<SceneBattleService> sceneBattleClients() {
+        return new NodeClientCache<>("scene-battle", new NodeRpcClients<>("xm-match-scene-battle", SceneBattleService.class,
+                DubboGroups.SCENE_BATTLE, Duration.ofMillis(MatchBudgets.PREPARE_BATTLE_TIMEOUT_MS), "match-scene-connect"), NODE_CLIENT_IDLE);
     }
 
-    /** battle 节点控制面（建房 / 销毁 / 补签）的直连客户端缓存。 */
+    /**
+     * battle 节点控制面的直连客户端缓存，<b>只给 gather 的建房 / 销毁用</b>；补签与观众 RPC 按落点记录直拨用另一份
+     * （{@code placement.PlacementClients}，两者共用会在 battle 原地重启后互相销毁对方的引用）。
+     */
     @Bean(destroyMethod = "close")
-    public NodeRpcClients<BattleNodeService> battleNodeClients() {
-        return new NodeRpcClients<>("xm-match-battle-node", BattleNodeService.class, DubboGroups.BATTLE_NODE,
-                Duration.ofMillis(MatchBudgets.CREATE_BATTLE_TIMEOUT_MS), "match-battle-connect");
+    public NodeClientCache<BattleNodeService> battleNodeClients() {
+        return new NodeClientCache<>("battle-node", new NodeRpcClients<>("xm-match-battle-node", BattleNodeService.class,
+                DubboGroups.BATTLE_NODE, Duration.ofMillis(MatchBudgets.CREATE_BATTLE_TIMEOUT_MS), "match-battle-connect"), NODE_CLIENT_IDLE);
     }
 
     @Bean
-    public NodeCalls<SceneBattleService> sceneBattleCalls(NodeRpcClients<SceneBattleService> sceneBattleClients) {
-        return sceneBattleClients::call;
+    public NodeCalls<SceneBattleService> sceneBattleCalls(NodeClientCache<SceneBattleService> sceneBattleClients) {
+        return sceneBattleClients.calls();
     }
 
     @Bean
-    public NodeCalls<BattleNodeService> battleNodeCalls(NodeRpcClients<BattleNodeService> battleNodeClients) {
-        return battleNodeClients::call;
+    public NodeCalls<BattleNodeService> battleNodeCalls(NodeClientCache<BattleNodeService> battleNodeClients) {
+        return battleNodeClients.calls();
+    }
+
+    /**
+     * 直连客户端缓存的定时清扫（守护线程 {@code match-rpc-sweep}，60 s 一轮）：收集容器里全部 {@link IdleSweep}——上面两份，
+     * 加补签直拨的那一份——各清一次空闲超过阈值的地址。它依赖这些缓存，所以销毁时先于它们停下。
+     */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public NodeClientSweeper nodeClientSweeper(List<IdleSweep> caches) {
+        return new NodeClientSweeper(caches, NODE_CLIENT_SWEEP_INTERVAL);
     }
 
     @Bean

@@ -36,6 +36,8 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.dubbo.rpc.RpcException;
+import org.apache.dubbo.rpc.TriRpcStatus;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -947,6 +949,241 @@ class GatherPipelineTest {
         assertThat(f.ticket(A).state()).isEqualTo(TicketState.MATCHED);
         assertThat(f.scene.frozen()).containsOnlyKeys(A, B);
         assertThat(f.placements.stored(result.battleId())).isPresent();
+    }
+
+    // ================================================================ 建房请求确定没有送达（lead 裁决 2026-10-08：有意差异）
+
+    /**
+     * battle 进程死后目录条目还要留最多 15 s。这段时间里选中它的 gather：建房请求在发包之前就失败了（连接不在），这个节点上不可能有这间房——
+     * 直接按「没建房」补偿。基线与原规格在这里是「destroy 同样连不上 → create_failed_room_alive」：全员冻结到备战期限、票据卡到 matched TTL。
+     */
+    @Test
+    void 建房请求确定没送达_不发destroy_直接按没建房补偿_全员解冻回队首带退避_删落点记录() {
+        GatherPlan plan = f.popped(ONE_V_ONE, 0, A, B);
+        f.battleCalls.unreachable(TARGET_A);
+
+        GatherResult result = f.pipeline().run(plan);
+
+        assertThat(result.ok()).isFalse();
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.CREATE_NOT_SENT);
+        assertThat(result.outcome().label()).isEqualTo("create_not_sent");
+        long battleId = result.battleId();
+        assertThat(battleId).isNotZero();
+        assertThat(f.battleCalls.calls).as("只有那一次建房：没有 destroy，也不换节点").singleElement()
+                .satisfies(call -> assertThat(call.target()).isEqualTo(TARGET_A));
+        assertThat(f.battleCalls.remembered).as("没有发销毁").isEmpty();
+        assertThat(f.battleA.creates).as("请求没有到 battle").isEmpty();
+        assertThat(f.battleA.destroys).isEmpty();
+        // 全员解冻
+        assertThat(f.scene.calls).extracting(FakeSceneBattle.Call::describe).containsExactly("prepare:1001", "prepare:1002", "cancel:1001",
+                "cancel:1002");
+        assertThat(f.scene.frozen()).isEmpty();
+        // 凑单入口：没有肇事者，全员按原序回队首并带 2 s 退避
+        assertThat(f.tickets.calls).containsExactly("extendMatched([1001, 1002])", "requeueFront(3:0,[1001, 1002])");
+        assertRequeuedInOrder(QUEUE_1V1, A, B);
+        assertThat(f.ticket(A).notBeforeMs()).isEqualTo(f.clock.peekMs() + 2_000);
+        assertThat(f.count("xm.match.requeued", "reason", "gather_no_offender")).isEqualTo(2.0);
+        // 落点记录：建房之前写过，补偿之后删掉（没有这间房，补签不该再被引到那个节点上）
+        assertThat(f.placements.deletes).containsExactly(battleId);
+        assertThat(f.placements.stored(battleId)).isEmpty();
+        assertThat(f.events).as("先写落点 → 解冻 → 删落点").containsSubsequence("placement.write:" + id(battleId) + "#1", "scene.cancel:1001",
+                "scene.cancel:1002", "placement.delete:" + id(battleId));
+        assertThat(f.hooks.started).isEmpty();
+    }
+
+    @Test
+    void 建房请求确定没送达的三种形态_发包前连接不在_集群层没有可用提供方_建连失败_都按没建房() {
+        List<java.util.function.Supplier<Throwable>> notSent = List.of(
+                () -> TriRpcStatus.UNAVAILABLE.withDescription("upstream " + TARGET_A.address() + " is unavailable").asException(),
+                () -> new RpcException(RpcException.NO_INVOKER_AVAILABLE_AFTER_FILTER, "No provider available for the service"),
+                () -> new java.net.ConnectException("Connection refused"));
+        long playerId = 2001;
+        for (java.util.function.Supplier<Throwable> failure : notSent) {
+            GatherFixture each = new GatherFixture();
+            each.battleCalls.failWith(TARGET_A, failure);
+            GatherPlan plan = each.solo(playerId++);
+
+            GatherResult result = each.pipeline().run(plan);
+
+            assertThat(result.outcome()).as("%s", failure.get()).isEqualTo(GatherOutcome.CREATE_NOT_SENT);
+            assertThat(each.battleCalls.calls).as("没有 destroy").hasSize(1);
+            assertThat(each.scene.frozen()).isEmpty();
+            assertThat(each.tickets.ticketCount()).as("PVE_SOLO：删票").isZero();
+            assertThat(each.placements.deletes).containsExactly(result.battleId());
+        }
+    }
+
+    /** 分不清是否送达的仍走原路径：超时、连上之后断开、对端回错、句中地址不是这一次目标的「upstream 不可用」。 */
+    @Test
+    void 分不清是否送达的建房失败_照旧先destroy_destroy也失败就是房间可能活着() {
+        List<java.util.function.Supplier<Throwable>> unknown = List.of(
+                () -> new TimeoutException("DEADLINE_EXCEEDED"),
+                () -> TriRpcStatus.CANCELLED.asException(),
+                () -> TriRpcStatus.UNAVAILABLE.withDescription("UNAVAILABLE : upstream " + TARGET_A.address() + " is unavailable").asException(),
+                () -> TriRpcStatus.UNAVAILABLE.withDescription("upstream 10.9.9.9:1 is unavailable").asException(),
+                () -> new RpcException(RpcException.NETWORK_EXCEPTION, "连接被对端重置"),
+                () -> new IllegalStateException("客户端缓存已关闭"));
+        long playerId = 3001;
+        for (java.util.function.Supplier<Throwable> failure : unknown) {
+            GatherFixture each = new GatherFixture();
+            each.battleA.nextCreateFails(failure, true);
+            each.battleA.nextDestroyFails(() -> new IllegalStateException("断连"));
+            GatherPlan plan = each.solo(playerId);
+
+            GatherResult result = each.pipeline().run(plan);
+
+            assertThat(result.outcome()).as("%s", failure.get()).isEqualTo(GatherOutcome.CREATE_FAILED_ROOM_ALIVE);
+            assertThat(each.battleA.destroys).hasSize(1);
+            assertThat(each.scene.frozen()).as("不解冻").containsOnlyKeys(playerId);
+            assertThat(each.tickets.calls).as("不动票据").isEmpty();
+            assertThat(each.placements.stored(result.battleId())).as("保留落点记录").isPresent();
+            playerId++;
+        }
+    }
+
+    /** 只认建房这一次调用自己的失败：建房是结局不明（可能已建成），之后 destroy 才连不上的，房间可能活着。 */
+    @Test
+    void 建房超时之后destroy才连不上_不算没送达_仍是房间可能活着() {
+        GatherPlan plan = f.popped(ONE_V_ONE, 0, A, B);
+        AtomicInteger calls = new AtomicInteger();
+        f.battleCalls.failWith(TARGET_A, () -> calls.incrementAndGet() == 1 ? new TimeoutException("DEADLINE_EXCEEDED")
+                : new java.net.ConnectException("Connection refused"));
+
+        GatherResult result = f.pipeline().run(plan);
+
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.CREATE_FAILED_ROOM_ALIVE);
+        assertThat(f.battleCalls.calls).as("建房 + 销毁").hasSize(2);
+        assertThat(f.scene.frozen()).containsOnlyKeys(A, B);
+        assertThat(f.tickets.calls).isEmpty();
+        assertThat(f.placements.deletes).isEmpty();
+    }
+
+    @Test
+    void 首选节点不可分配_换到的节点连不上_同样按没建房补偿_零destroy() {
+        f.addBattleB();
+        GatherPlan plan = f.popped(ONE_V_ONE, 0, A, B);
+        f.battleA.nextCreate(FakeBattleNode.notAllocatable("closed"));
+        f.battleCalls.unreachable(TARGET_B);
+
+        GatherResult result = f.pipeline().run(plan);
+
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.CREATE_NOT_SENT);
+        assertThat(f.battleCalls.calls).extracting(c -> c.target()).as("A 节点级拒绝 → 换 B → B 没送达；到此为止").containsExactly(TARGET_A, TARGET_B);
+        assertThat(f.battleA.destroys).isEmpty();
+        assertThat(f.battleB.creates).isEmpty();
+        assertThat(f.battleB.destroys).isEmpty();
+        assertThat(f.placements.writes).extracting(BattlePlacement::getAttempt).as("换节点前照常把落点改写到 B").containsExactly(1, 2);
+        assertThat(f.placements.deletes).containsExactly(result.battleId());
+        assertThat(f.scene.frozen()).isEmpty();
+        assertRequeuedInOrder(QUEUE_1V1, A, B);
+    }
+
+    /** 没送达不换节点重试：换节点是节点级拒绝才有的一步（裁决只说「按没建房补偿」）。 */
+    @Test
+    void 建房请求没送达时不换节点重试_哪怕还有别的可分配节点() {
+        f.addBattleB();
+        GatherPlan plan = f.team(A, B);
+        f.battleCalls.unreachable(TARGET_A);
+
+        GatherResult result = f.pipeline().run(plan);
+
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.CREATE_NOT_SENT);
+        assertThat(f.battleNodes.picks).as("只选了一次节点").containsExactly(Set.of());
+        assertThat(f.battleCalls.calls).extracting(c -> c.target()).containsExactly(TARGET_A);
+        assertThat(f.battleB.creates).isEmpty();
+        assertThat(f.tickets.calls).as("整队入口：全员按票号删票").containsExactly("deleteGroup([1001, 1002])");
+        assertThat(f.tickets.ticketCount()).isZero();
+        assertThat(f.scene.frozen()).isEmpty();
+    }
+
+    @Test
+    void 切磋的建房请求没送达_双方解冻_不碰票据() {
+        GatherPlan plan = f.challenge(A, B);
+        f.battleCalls.unreachable(TARGET_A);
+
+        GatherResult result = f.pipeline().run(plan);
+
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.CREATE_NOT_SENT);
+        assertThat(f.scene.frozen()).isEmpty();
+        assertThat(f.tickets.calls).isEmpty();
+        assertThat(f.placements.deletes).containsExactly(result.battleId());
+    }
+
+    // ================================================================ 记下来的目标：销毁与取消不顶掉别人正在用的客户端
+
+    @Test
+    void 回滚的销毁经记下来的目标发_建房经目录给的目标发() {
+        GatherPlan plan = f.popped(ONE_V_ONE, 0, A, B);
+        f.battleA.nextCreate(FakeBattleNode.unspecified());
+
+        GatherResult result = f.pipeline().run(plan);
+
+        assertThat(result.outcome()).isEqualTo(GatherOutcome.CREATE_FAILED);
+        assertThat(f.battleCalls.calls).hasSize(2);
+        assertThat(f.battleCalls.remembered).as("只有销毁是「记下来的目标」：节点在这几秒里原地重启过的话，不顶掉别的 gather 正在用的客户端")
+                .singleElement().satisfies(call -> {
+                    assertThat(call.target()).isEqualTo(TARGET_A);
+                    assertThat(call.timeout()).isEqualTo(Duration.ofSeconds(3));
+                });
+        assertThat(f.sceneCalls.remembered).as("补偿的取消同样是记下来的目标").hasSize(2);
+        assertThat(f.sceneCalls.calls).as("两次备战 + 两次取消").hasSize(4);
+    }
+
+    // ================================================================ 回队首的重放标记
+
+    /** 记下每次回队首带的 token。 */
+    private static final class TokenProbe extends com.game.match.ticket.ForwardingTicketStore {
+        final List<String> tokens = new ArrayList<>();
+
+        TokenProbe(com.game.match.ticket.TicketStore delegate) {
+            super(delegate);
+        }
+
+        @Override
+        public int requeueFront(QueueRef queue, String requeueToken, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs,
+                                Deadline d) {
+            tokens.add(requeueToken);
+            return super.requeueFront(queue, requeueToken, survivorsInOrder, queuedTtlMs, notBeforeDelayMs, d);
+        }
+    }
+
+    /**
+     * Redis 客户端在响应超时后会把同一段回队首脚本原样重发；回了队首的人可能在重发到达之前又被凑单弹成 matched。
+     * 每次补偿带一个新的 token，存储凭它认出重放：重发不得把正在下一次 gather 里的人再推回队首。
+     */
+    @Test
+    void 每次补偿的回队首带一个新token_它的重发不会把又被弹出的人推回队首() {
+        TokenProbe probe = new TokenProbe(f.tickets);
+        f.ticketPort = probe;
+        GatherPlan first = f.popped(ONE_V_ONE, 0, A, B);
+        f.scene.prepareTip(B, 1006);
+
+        assertThat(f.pipeline().run(first).outcome()).as("B 是肇事者，A 回队首").isEqualTo(GatherOutcome.PREPARE_FAILED);
+
+        assertThat(probe.tokens).singleElement().satisfies(token -> assertThat(token).matches("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}"));
+        String token = probe.tokens.get(0);
+        assertThat(f.tickets.queueMembers(QUEUE_1V1)).containsExactly("1001");
+        // 凑单把 A 与新来的 C 再弹成组（第二次 gather 在途）
+        long c = 1003;
+        f.online(c);
+        f.tickets.enqueue(c, GatherFixture.ticketId(c), QUEUE_1V1, 1, 150_000, QUEUED_TTL_MS, GatherFixture.d());
+        f.tickets.pop(QUEUE_1V1, "pop-second", List.of(new TicketRef(A, GatherFixture.ticketId(A)), new TicketRef(c, GatherFixture.ticketId(c))),
+                48_000, GatherFixture.d());
+
+        // 迟到的重发：与第一次完全相同的入参
+        int replay = f.tickets.requeueFront(QUEUE_1V1, token, List.of(new TicketRef(A, GatherFixture.ticketId(A))), QUEUED_TTL_MS, 0,
+                GatherFixture.d());
+
+        assertThat(replay).as("返回第一次的人数").isEqualTo(1);
+        assertThat(f.ticket(A).state()).as("A 仍在第二次 gather 里").isEqualTo(TicketState.MATCHED);
+        assertThat(f.tickets.queueMembers(QUEUE_1V1)).isEmpty();
+
+        // 另一次补偿用另一个 token
+        f.scene.prepareTip(c, 1006);
+        GatherPlan second = GatherPlan.popped(QUEUE_1V1, List.of(A, c), java.util.Map.of(A, GatherFixture.ticketId(A), c, GatherFixture.ticketId(c)));
+        assertThat(f.pipeline().run(second).outcome()).isEqualTo(GatherOutcome.PREPARE_FAILED);
+        assertThat(probe.tokens).hasSize(2).doesNotHaveDuplicates();
+        assertThat(f.tickets.queueMembers(QUEUE_1V1)).as("这一次是真的回队首").containsExactly("1001");
     }
 
     // ================================================================ 各入口的票据策略

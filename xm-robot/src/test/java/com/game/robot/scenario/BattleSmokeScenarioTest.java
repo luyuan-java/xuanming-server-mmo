@@ -214,6 +214,62 @@ class BattleSmokeScenarioTest {
         assertThat(scenario.resultLine()).doesNotContain("\n");
     }
 
+    // ---------------------------------------------------------------- 评审 ROBOT-2 / ROBOT-3
+
+    @Test
+    void 开挂机的162被拒而这一局照样打到150_第6步单独一条检查失败_写明是靠超时打完的() {
+        world.faults.add(Fault.FIRST_AUTO_REJECTED);
+        BattleSmokeScenario scenario = scenario("f10", world.admin());
+
+        CheckReport report = scenario.run();
+
+        // 150 本身没有任何毛病（SIDE_A_WIN、有回合、FIN）：只看终局包发现不了挂机没开成
+        assertThat(failed(report)).singleElement().asString().startsWith("第 6 步 162 开挂机被受理")
+                .contains("162 的应答带 error_message 1005", "挂机没有开成", "回合超时的默认行动");
+        assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 6 步 挂机打到 150"));
+        assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 6 步 150 之后服务端 FIN"));
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=6-direct-fight reason=第 6 步 162 开挂机被受理");
+        // 只有第一条 162 被拒：后面几局的挂机照常被受理
+        assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 7 步 第二局同样挂机（162 被受理）"));
+        assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 8 步 都开自动（162 被受理）"));
+        assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 9 步 都开自动（162 被受理）"));
+    }
+
+    @Test
+    void 终局包里的settlement是别的局的_第6步的终局判据失败() {
+        world.faults.add(Fault.SETTLEMENT_OF_OTHER_BATTLE);
+        BattleSmokeScenario scenario = scenario("f11", world.admin());
+
+        CheckReport report = scenario.run();
+
+        // 外层的 outcome、settlement.player_id、回合数都对：基线多看的 settlement.battle_id 才咬得住
+        assertThat(failed(report)).singleElement().asString().startsWith("第 6 步 挂机打到 150").contains("battle_id 对不上本局", "settlement ");
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=6-direct-fight ");
+    }
+
+    @Test
+    void 切磋只走到挑战自己被拒_发起应答接受都没发生_第11步按出口断言的切磋指标不放过() {
+        world.faults.add(Fault.CHALLENGE_TARGET_ALWAYS_OFFLINE);
+        BattleSmokeScenario scenario = scenario("f12", world.admin());
+
+        CheckReport report = scenario.run();
+
+        List<String> failures = failed(report);
+        assertThat(failures.get(0)).startsWith("第 9 步 A 挑战 B → 受理").contains("16008");
+        assertThat(report.items()).as("「挑战自己 → 16007」照常通过：服务端为它记了一次 invite").anyMatch(i -> i.passed() && i.name().startsWith("第 9 步 A 挑战自己"));
+        // 不带标签求和时这一次 16007 就够「有增长」了；按 (stage, result) 看，三条都对不上
+        assertThat(failures).anyMatch(f -> f.startsWith("第 11 步 指标 xm_match_challenges_total{stage=\"invite\",result=\"ok\"} 本轮至少 + 2") && f.contains("0.0 → 0.0"));
+        assertThat(failures).anyMatch(f -> f.startsWith("第 11 步 指标 xm_match_challenges_total{stage=\"respond\",result=\"declined\"}"));
+        assertThat(failures).anyMatch(f -> f.startsWith("第 11 步 指标 xm_match_challenges_total{stage=\"respond\",result=\"accepted\"}"));
+        // 开局按模式拆开：少的是切磋那一局，PVE 与 1V1 各自照常通过
+        assertThat(failures).anyMatch(f -> f.startsWith("第 11 步 指标 xm_match_gathers_total{mode=\"MATCH_MODE_PVP_CHALLENGE\",outcome=\"success\"}"));
+        assertThat(report.items()).anyMatch(i -> i.passed()
+                && i.name().startsWith("第 11 步 指标 xm_match_gathers_total{mode=\"MATCH_MODE_PVE_SOLO\",outcome=\"success\"} 本轮至少 + 2"));
+        assertThat(report.items()).anyMatch(i -> i.passed()
+                && i.name().startsWith("第 11 步 指标 xm_match_gathers_total{mode=\"MATCH_MODE_1V1\",outcome=\"success\"}"));
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=9-challenge ");
+    }
+
     @Test
     void 没有运维令牌_登录之前就中止_不向服务端发任何请求() {
         BattleSmokeScenario scenario = scenario("f8", new MatchAdminClient(world.baseUrl(), null, FakeMatchWorld.TIMEOUT));
@@ -233,6 +289,7 @@ class BattleSmokeScenarioTest {
         assertThat(BattleSmokeScenario.accountName(options.accountPrefix(), options.runTag(), "a")).isEqualTo("robot_java_bmx1_a");
         assertThat(BattleSmokeScenario.accountName("p_", "t", "c")).hasSameSizeAs(BattleSmokeScenario.accountName("p_", "t", "a"));
         assertThat(BattleSmokeScenario.accountName("p_", "t", "a")).isNotEqualTo(BattleSettleScenario.accountName("p_", "t", "a"));
-        assertThat(BattleSmokeScenario.EXPECTED_GATHERS).as("PVE 两局 + 1V1 + 切磋").isEqualTo(4);
+        assertThat(BattleSmokeScenario.EXPECTED_SOLO_GATHERS).as("PVE 两局（第 4、7 步）").isEqualTo(2);
+        assertThat(BattleSmokeScenario.EXPECTED_INVITES).as("被受理的切磋邀请：一条被拒绝、一条被接受").isEqualTo(2);
     }
 }

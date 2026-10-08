@@ -71,6 +71,10 @@ class MatchTeamBattleLoopbackTest {
         volatile long checkRemainingMs;
         volatile String gatherBudget;
         volatile boolean failCheck;
+        /** 非 0：建票照 xm-match 的纪律走——入口按预算附件定本地截止，在「工作队列」里等这么久，出队时截止已过就不写、回 EXPIRED。 */
+        volatile long ticketsQueueMs;
+        /** 建票出队时的结论（true = 截止没过、写了票）；出队之前未完成。 */
+        volatile CompletableFuture<Boolean> ticketsWritten = new CompletableFuture<>();
 
         void reset() {
             delayMs = 0;
@@ -78,6 +82,8 @@ class MatchTeamBattleLoopbackTest {
             checkRemainingMs = -1;
             gatherBudget = "unset";
             failCheck = false;
+            ticketsQueueMs = 0;
+            ticketsWritten = new CompletableFuture<>();
         }
 
         private <T> CompletableFuture<T> later(T reply) {
@@ -101,6 +107,18 @@ class MatchTeamBattleLoopbackTest {
 
         @Override
         public CompletableFuture<TeamTicketsReply> createTeamTickets(TeamTicketsRequest request) {
+            long queueMs = ticketsQueueMs;
+            if (queueMs > 0) {
+                // 同 MatchTeamServiceImpl：截止在入口（Dubbo 线程）按附件定，出队时过期就什么都不写
+                Deadline d = MatchRpcAttachments.deadlineFromCall(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS);
+                CompletableFuture<Boolean> written = ticketsWritten;
+                return CompletableFuture.supplyAsync(() -> {
+                    boolean write = !d.expired();
+                    written.complete(write);
+                    return TeamTicketsReply.newBuilder().setStatus(write ? TeamTicketsStatus.TEAM_TICKETS_CREATED
+                            : TeamTicketsStatus.TEAM_TICKETS_EXPIRED).build();
+                }, CompletableFuture.delayedExecutor(queueMs, TimeUnit.MILLISECONDS));
+            }
             return later(TeamTicketsReply.newBuilder().setStatus(TeamTicketsStatus.TEAM_TICKETS_FAILED)
                     .setFailedPlayerId(request.getRoster(0)).build());
         }
@@ -179,8 +197,36 @@ class MatchTeamBattleLoopbackTest {
         assertThat(check.lockTtlSeconds()).isEqualTo(MatchBudgets.teamMatchLockSeconds(2)).isEqualTo(74);
         assertThat(PROVIDER.checkBudget).as("xm-budget-ms 附件过了线").isNotNull();
         assertThat(Long.parseLong(PROVIDER.checkBudget)).isBetween(1L, 1500L);
-        assertThat(PROVIDER.checkRemainingMs).as("提供方的本地截止 = 收到时刻 + 调用方的剩余预算，而不是它自己的 4500 ms")
+        assertThat(PROVIDER.checkRemainingMs).as("提供方的本地截止 = 收到时刻 + 调用方带来的预算，而不是它自己的 4500 ms")
                 .isBetween(1L, 1500L);
+    }
+
+    @Test
+    void 预算充足时带给提供方的是这一跳的超时_不是整请求的剩余预算() {
+        Check check = battle.checkTeamMatch(1, ROSTER, Deadline.after(3500));
+
+        assertThat(check.ok()).as("code=%d", check.code()).isTrue();
+        assertThat(PROVIDER.checkBudget).as("每跳超时封顶 3 s：过线的预算附件也是它").isEqualTo("3000");
+        assertThat(PROVIDER.checkRemainingMs).as("提供方的本地截止不晚于调用方这一跳放弃的时刻（收到时刻 + 3 s），而不是 + 3.5 s")
+                .isBetween(1L, MatchTeamBattle.HOP_TIMEOUT_MS);
+    }
+
+    /**
+     * 评审 T1-01：建票在 xm-match 的工作队列里等的时间落在 (每跳超时 3 s, 整请求剩余预算 ≈ 3.5 s] 时，本端在 3 s 已经判「结果不明」并回滚，
+     * 对端出队时<b>不得</b>再写票。预算附件若带的是整请求的剩余预算（改之前），对端的截止还没到、照常建出全员的 matched 票而没人收。
+     */
+    @Test
+    void 建票在对端排队超过每跳超时_本端判结果不明_对端出队时预算已过期什么都不写() throws Exception {
+        PROVIDER.ticketsQueueMs = MatchTeamBattle.HOP_TIMEOUT_MS + 200; // 3.2 s：晚于每跳超时，早于整请求预算（3.5 s）
+        CompletableFuture<Boolean> written = PROVIDER.ticketsWritten;
+        long started = System.nanoTime();
+
+        Tickets tickets = battle.createTeamTickets(1, 77, ROSTER, Map.of(A, 3, B, 3), TICKETS, Deadline.after(3500));
+
+        long waited = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        assertThat(tickets).as("本端拿不到可信的应答：结果不明").isInstanceOf(Tickets.Unknown.class);
+        assertThat(waited).as("等满了这一跳（不是连不上之类的立即失败）").isGreaterThanOrEqualTo(2900L);
+        assertThat(written.get(5, TimeUnit.SECONDS)).as("对端出队时（到达后 3.2 s）预算附件给的截止（到达后 3 s）已过：不写票、回 EXPIRED").isFalse();
     }
 
     @Test

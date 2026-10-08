@@ -17,6 +17,7 @@ import com.game.robot.client.Received;
 import com.game.robot.client.RobotClient;
 import com.game.robot.client.RobotException;
 import com.game.robot.scenario.BattleSupport.Direct;
+import com.game.robot.scenario.MatchSupport.AutoRequest;
 import com.game.robot.scenario.MatchSupport.Caller;
 import com.game.robot.scenario.MatchSupport.Finished;
 import com.game.robot.scenario.MatchSupport.JoinAttempts;
@@ -187,16 +188,17 @@ final class TeamMatchSteps implements AutoCloseable {
 
         Direct directA = connect(a.name(), startA.assigned());
         Direct directB = connect(b.name(), startB.assigned());
-        MatchSupport.enableAuto(directA, teamBattleId, battleIds);
-        MatchSupport.enableAuto(directB, teamBattleId, battleIds);
-        Finished endA = MatchSupport.awaitEnd(directA, teamBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
-        Finished endB = MatchSupport.awaitEnd(directB, teamBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
+        AutoRequest autoA = MatchSupport.enableAuto(directA, teamBattleId, battleIds);
+        AutoRequest autoB = MatchSupport.enableAuto(directB, teamBattleId, battleIds);
+        Finished endA = MatchSupport.awaitEnd(directA, teamBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoA);
+        Finished endB = MatchSupport.awaitEnd(directB, teamBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoB);
         directA.close();
         directB.close();
-        report.check(endA.end().getOutcome() == endB.end().getOutcome() && endA.turns() >= 1 && endB.turns() >= 1,
-                "S7 都开自动 → 两人都收到 150（同一个终局），直连上各至少一条 139",
-                "A outcome=" + endA.end().getOutcome() + " 139 × " + endA.turns() + "；B outcome=" + endB.end().getOutcome() + " 139 × "
-                        + endB.turns(), REF);
+        report.check(endA.end().getOutcome() == endB.end().getOutcome() && endA.turns() >= 1 && endB.turns() >= 1 && endA.autoAccepted()
+                        && endB.autoAccepted(),
+                "S7 都开自动（162 被受理）→ 两人都收到 150（同一个终局），直连上各至少一条 139",
+                "A outcome=" + endA.end().getOutcome() + " 139 × " + endA.turns() + endA.autoNote() + "；B outcome=" + endB.end().getOutcome()
+                        + " 139 × " + endB.turns() + endB.autoNote(), REF);
 
         // MATCH_ENDED：开局成功、开战锁释放后即推，通常早于战斗结束——从发起之前的 mark 起找
         for (Caller bot : List.of(a, b)) {
@@ -225,10 +227,12 @@ final class TeamMatchSteps implements AutoCloseable {
         report.check(memberInBattleVerdict(tipOf(rejected), rejected.getErrorMessage().getParametersList(), b.id()) == StartVerdict.MATCHED
                         && idleViewOf(rejected, tid),
                 "S8 B 在战斗中（已直连、未开自动）A 发 211 → 4025，parameters[0] = B，带视图且仍是 IDLE", TeamScenario.describe(rejected), REF);
-        MatchSupport.enableAuto(bDirect, bSolo.battleId(), battleIds);
-        Finished end = MatchSupport.awaitEnd(bDirect, bSolo.battleId(), battleIds, MatchSupport.BATTLE_END_TIMEOUT);
+        // 上面的重试可能耗掉好几个回合（超时结算的默认行动）：这一局甚至可能已经打完，那时 162 没发出 / 没应答都属豁免（MatchSupport.autoProblem）
+        AutoRequest auto = MatchSupport.enableAuto(bDirect, bSolo.battleId(), battleIds);
+        Finished end = MatchSupport.awaitEnd(bDirect, bSolo.battleId(), battleIds, MatchSupport.BATTLE_END_TIMEOUT, auto);
         bDirect.close();
-        report.check(end.turns() >= 1, "S8 B 开自动把这一局打到 150", "outcome=" + end.end().getOutcome() + " 139 × " + end.turns(), REF);
+        report.check(end.turns() >= 1 && end.autoAccepted(), "S8 B 开自动把这一局打到 150（162 没有被拒）",
+                "outcome=" + end.end().getOutcome() + " 139 × " + end.turns() + end.autoNote(), REF);
     }
 
     // ---------------------------------------------------------------- 211

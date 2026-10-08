@@ -127,7 +127,7 @@ class TeamDispatcherTest {
             return CompletableFuture.completedFuture(PlayerPushes.Outcome.SENT);
         }, Runnable::run, metrics, Duration.ofSeconds(3), new TeamPushes.MessageIds(213, 215, 203));
         return new TeamService(store, NO_SESSIONS, (ids, d) -> Map.of(), (ids, d) -> Map.of(), () -> 1L,
-                new MatchTeamBattle(new FakeMatchTeamService()), Runnable::run, pushes, metrics, RuleConfig.DEFAULT);
+                new MatchTeamBattle(new FakeMatchTeamService()), Runnable::run, pushes, metrics, RuleConfig.DEFAULT, () -> false);
     }
 
     private TeamDispatcher dispatcher(Mode mode, Executor executor, long budgetMillis) {

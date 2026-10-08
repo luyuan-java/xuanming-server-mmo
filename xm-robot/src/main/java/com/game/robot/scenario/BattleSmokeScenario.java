@@ -34,6 +34,7 @@ import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.flow.Timings;
 import com.game.robot.scenario.BattleSupport.Direct;
+import com.game.robot.scenario.MatchSupport.AutoRequest;
 import com.game.robot.scenario.MatchSupport.Bot;
 import com.game.robot.scenario.MatchSupport.Finished;
 import com.game.robot.scenario.MatchSupport.JoinAttempts;
@@ -58,7 +59,8 @@ import java.util.SplittableRandom;
  *       153 → NOT_QUEUED；</li>
  *   <li>第 4 步 PVE_SOLO：受理 → 大厅先 177 后 143、同一 battle_id、票据形状、{@code expire_at_ms} ≈ 发起时刻 + 300 s → 153 是 MATCHED 或 READY；</li>
  *   <li>第 5 步 补签 179：A 的票与 177 逐字节相同；非成员 C → 1005 无票；不存在的局 → 1005「该战斗不存在或已结束」；</li>
- *   <li>第 6 步 凭补签的票直连 → 战斗中再排 → 16000 → 挂机打到 150（SIDE_A_WIN、回合数 ≥ 1）→ FIN；</li>
+ *   <li>第 6 步 凭补签的票直连 → 战斗中再排 → 16000 → 开挂机（162 的应答无错误）打到 150（SIDE_A_WIN，settlement 指向本局本人且
+ *       终局一致、回合数 ≥ 1；判据同基线 {@code robot/features_battle_smoke.go:82-95}）→ FIN；</li>
  *   <li>第 7 步 立即再排：结算落地之前的 16000 按过渡态重试，<b>不得</b>出现 16001（ready 残留必须已自愈）→ 第二局同样打完；
  *       旧局的 179 → 1005；</li>
  *   <li>第 8 步 1V1 与评分：A 受理之后 B 再排（A 是锚点）→ 同一 battle_id、A 在 0 队 B 在 1 队 → 都挂机打到 150 → 10 s 内评分落账：
@@ -66,7 +68,8 @@ import java.util.SplittableRandom;
  *   <li>第 9 步 切磋：16007 → 156 邀请逐字段 → 16011 → 16013（不消费）→ 拒绝只推发起者 → 16012 → 再发起、接受 → 双方 154 true 与
  *       同一局的 177 / 143 → 开自动之前 C 挑 A → 16009 → 打完 → C 下线后 A 挑 C：越过过渡态 16010 直到 16008；</li>
  *   <li>第 10 步 163 → in-band 1006，164 → 空列表（6.4 的临时应答，观战归 6.5）；</li>
- *   <li>第 11 步 xm-match 指标：开局成功、补签成功、切磋、评分入账各有增长；</li>
+ *   <li>第 11 步 xm-match 指标（本轮的增量）：成功开局按模式 PVE_SOLO ≥ 2、1V1 ≥ 1、切磋 ≥ 1；补签成功 ≥ 1；切磋按出口
+ *       {@code invite/ok} ≥ 2、{@code respond/declined} ≥ 1、{@code respond/accepted} ≥ 1；评分入账 ≥ 1；</li>
  *   <li>第 12 步 结果行 {@code BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… challenge_battle_id=…}，
  *       失败是 {@code BATTLE_SMOKE_FAIL step=… reason=…}（{@link #resultLine}）。</li>
  * </ol>
@@ -86,8 +89,10 @@ public final class BattleSmokeScenario {
     static final int PVP_CONFIG = 0;
     /** 没配组队人数的副本（缺省配置只有 {@code {1: 5}}）：PVE_TEAM 排它回 16003。 */
     static final int TEAM_CONFIG_NOT_OPEN = 2;
-    /** 本场景成功的开局数：PVE 两局 + 1V1 + 切磋。 */
-    static final int EXPECTED_GATHERS = 4;
+    /** 本场景成功的 PVE_SOLO 开局数（第 4 步与第 7 步）；另有 1V1 与切磋各一局。 */
+    static final int EXPECTED_SOLO_GATHERS = 2;
+    /** 本场景被受理的切磋邀请数（第 9 步：一条被拒绝、一条被接受）。 */
+    static final int EXPECTED_INVITES = 2;
 
     private final RobotClient client;
     private final PlayerFlow flow;
@@ -284,16 +289,20 @@ public final class BattleSmokeScenario {
         checkNull(BattleSmokeChecks.joinRejectProblem(inBattle, BattleSmokeChecks.TIP_IN_BATTLE, BattleSmokeChecks.TEXT_IN_BATTLE, ""),
                 "第 6 步 战斗中（开自动之前）再排 PVE_SOLO → 16000「战斗尚未结束,无法排队」", BattleSmokeChecks.describe(inBattle),
                 "match-spec §2.2 第 4 行");
-        MatchSupport.enableAuto(direct, battleId, battleIds);
-        Finished first = MatchSupport.awaitEnd(direct, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
+        AutoRequest auto = MatchSupport.enableAuto(direct, battleId, battleIds);
+        Finished first = MatchSupport.awaitEnd(direct, battleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, auto);
         direct.close();
         aTurns = first.turns();
         BattleEndS2C end = first.end();
-        report.check(end.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && end.getSettlement().getPlayerId() == a.id()
-                        && end.getSettlement().getTotalRounds() >= 1 && first.turns() >= 1,
-                "第 6 步 挂机打到 150：SIDE_A_WIN、settlement.player_id = A、total_rounds ≥ 1，直连上至少一条 139",
-                "outcome=" + end.getOutcome() + " settlement.player=" + uid(end.getSettlement().getPlayerId()) + " rounds="
-                        + end.getSettlement().getTotalRounds() + " 139 × " + first.turns(), "robot/features_battle_smoke.go:82-95");
+        report.check(first.autoAccepted(), "第 6 步 162 开挂机被受理：应答不是信封错误、不带 error_message（否则这一局是靠回合超时的默认行动打完的）",
+                first.autoAccepted() ? "帧=" + first.labels() : first.autoProblem() + "；帧=" + first.labels(),
+                "robot/features_battle_smoke.go:126-129");
+        String endProblem = BattleSmokeChecks.pveVictoryProblem(end, battleId, a.id(), first.turns());
+        report.check(endProblem == null,
+                "第 6 步 挂机打到 150：SIDE_A_WIN（外层与 settlement 一致）、settlement 指向本局与 A、total_rounds ≥ 1，直连上至少一条 139",
+                orDescribe(endProblem, "outcome=" + end.getOutcome() + " settlement.battle=" + uid(end.getSettlement().getBattleId())
+                        + " settlement.player=" + uid(end.getSettlement().getPlayerId()) + " rounds=" + end.getSettlement().getTotalRounds()
+                        + " 139 × " + first.turns()), "robot/features_battle_smoke.go:82-95");
         report.check(first.fin(), "第 6 步 150 之后服务端 FIN（不是 RST / 超时）", "关闭方式=" + first.closed() + " 帧=" + first.labels(),
                 "battle-node-spec §3.6");
 
@@ -313,12 +322,12 @@ public final class BattleSmokeScenario {
         report.check(old.getErrorMessage().getId() == BattleSmokeChecks.TIP_INVALID_PARAMETER && !old.hasAssignment(),
                 "第 7 步 第一局结束后补签它 → 1005（落点记录还在，battle 回「房间不存在」原样透传；只断言 id）",
                 BattleSmokeChecks.describe(old.getErrorMessage()) + " assignment=" + old.hasAssignment(), "match-spec §4.3、坑 11");
-        MatchSupport.enableAuto(secondDirect, second.battleId(), battleIds);
-        Finished secondEnd = MatchSupport.awaitEnd(secondDirect, second.battleId(), battleIds, MatchSupport.BATTLE_END_TIMEOUT);
+        AutoRequest secondAuto = MatchSupport.enableAuto(secondDirect, second.battleId(), battleIds);
+        Finished secondEnd = MatchSupport.awaitEnd(secondDirect, second.battleId(), battleIds, MatchSupport.BATTLE_END_TIMEOUT, secondAuto);
         secondDirect.close();
-        report.check(secondEnd.end().getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && secondEnd.fin(),
-                "第 7 步 第二局同样挂机打到 150（SIDE_A_WIN）后 FIN——否则 A 带着战斗锁进第 8 步会一直 16000",
-                "outcome=" + secondEnd.end().getOutcome() + " 关闭方式=" + secondEnd.closed(), REF);
+        report.check(secondEnd.end().getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && secondEnd.fin() && secondEnd.autoAccepted(),
+                "第 7 步 第二局同样挂机（162 被受理）打到 150（SIDE_A_WIN）后 FIN——否则 A 带着战斗锁进第 8 步会一直 16000",
+                "outcome=" + secondEnd.end().getOutcome() + " 关闭方式=" + secondEnd.closed() + secondEnd.autoNote(), REF);
     }
 
     private RequestBattleTicketResponse reissue(Bot bot, long battle) throws RobotException {
@@ -356,17 +365,18 @@ public final class BattleSmokeScenario {
 
         Direct directA = connect(a.name, startA.assigned());
         Direct directB = connect(b.name, startB.assigned());
-        MatchSupport.enableAuto(directA, pvpBattleId, battleIds);
-        MatchSupport.enableAuto(directB, pvpBattleId, battleIds);
-        Finished endA = MatchSupport.awaitEnd(directA, pvpBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
-        Finished endB = MatchSupport.awaitEnd(directB, pvpBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
+        AutoRequest autoA = MatchSupport.enableAuto(directA, pvpBattleId, battleIds);
+        AutoRequest autoB = MatchSupport.enableAuto(directB, pvpBattleId, battleIds);
+        Finished endA = MatchSupport.awaitEnd(directA, pvpBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoA);
+        Finished endB = MatchSupport.awaitEnd(directB, pvpBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoB);
         directA.close();
         directB.close();
         eBattleOutcome outcome = endA.end().getOutcome();
         int rounds = endA.end().getSettlement().getTotalRounds();
-        report.check(endB.end().getOutcome() == outcome && endA.fin() && endB.fin(), "第 8 步 都开自动 → 两人都收到 150（同一个终局）后 FIN",
-                "A outcome=" + outcome + " rounds=" + rounds + " 关闭=" + endA.closed() + "；B outcome=" + endB.end().getOutcome() + " 关闭="
-                        + endB.closed(), REF);
+        report.check(endB.end().getOutcome() == outcome && endA.fin() && endB.fin() && endA.autoAccepted() && endB.autoAccepted(),
+                "第 8 步 都开自动（162 被受理）→ 两人都收到 150（同一个终局）后 FIN",
+                "A outcome=" + outcome + " rounds=" + rounds + " 关闭=" + endA.closed() + endA.autoNote() + "；B outcome=" + endB.end().getOutcome()
+                        + " 关闭=" + endB.closed() + endB.autoNote(), REF);
 
         // 评分经 battle → Kafka → xm-match 入账：收到 150 后最多等 10 s
         List<Rating> before = List.of(beforeA, beforeB);
@@ -471,15 +481,16 @@ public final class BattleSmokeScenario {
         c.connection().send(leaveGame, LeaveGameRequest.getDefaultInstance());
         c.connection().close();
 
-        MatchSupport.enableAuto(directA, challengeBattleId, battleIds);
-        MatchSupport.enableAuto(directB, challengeBattleId, battleIds);
-        Finished endA = MatchSupport.awaitEnd(directA, challengeBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
-        Finished endB = MatchSupport.awaitEnd(directB, challengeBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT);
+        AutoRequest autoA = MatchSupport.enableAuto(directA, challengeBattleId, battleIds);
+        AutoRequest autoB = MatchSupport.enableAuto(directB, challengeBattleId, battleIds);
+        Finished endA = MatchSupport.awaitEnd(directA, challengeBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoA);
+        Finished endB = MatchSupport.awaitEnd(directB, challengeBattleId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoB);
         directA.close();
         directB.close();
-        report.check(endA.end().getOutcome() == endB.end().getOutcome() && endA.fin() && endB.fin(), "第 9 步 都开自动 → 两人都收到 150 后 FIN",
-                "A outcome=" + endA.end().getOutcome() + " 关闭=" + endA.closed() + "；B outcome=" + endB.end().getOutcome() + " 关闭="
-                        + endB.closed(), REF);
+        report.check(endA.end().getOutcome() == endB.end().getOutcome() && endA.fin() && endB.fin() && endA.autoAccepted() && endB.autoAccepted(),
+                "第 9 步 都开自动（162 被受理）→ 两人都收到 150 后 FIN",
+                "A outcome=" + endA.end().getOutcome() + " 关闭=" + endA.closed() + endA.autoNote() + "；B outcome=" + endB.end().getOutcome()
+                        + " 关闭=" + endB.closed() + endB.autoNote(), REF);
 
         // C 已下线：A 的锁在结算落地前仍在，先命中第 3 行 16010（过渡态），放掉之后才走到第 6 行 16008
         ChallengePlayerResponse offline = challengeRetrying(a, c.id(), Set.of(BattleSmokeChecks.TIP_CHALLENGE_SELF_BUSY));
@@ -572,10 +583,21 @@ public final class BattleSmokeScenario {
     private void metrics(String before) throws RobotException {
         steps.step("11-metrics", report);
         String after = admin.scrapeMetrics();
-        metricGrew(before, after, EXPECTED_GATHERS, "xm_match_gathers_total", "outcome=\"success\"");
+        // 开局按 mode 拆开（标签值是 MatchMode 的枚举名）：合在一起只看「成功 ≥ 4」的话，同一切片上别的机器人的成功开局可以顶数
+        metricGrew(before, after, EXPECTED_SOLO_GATHERS, "xm_match_gathers_total", mode(MatchMode.MATCH_MODE_PVE_SOLO), "outcome=\"success\"");
+        metricGrew(before, after, 1, "xm_match_gathers_total", mode(MatchMode.MATCH_MODE_1V1), "outcome=\"success\"");
+        metricGrew(before, after, 1, "xm_match_gathers_total", mode(MatchMode.MATCH_MODE_PVP_CHALLENGE), "outcome=\"success\"");
         metricGrew(before, after, 1, "xm_match_battle_ticket_reissues_total", "result=\"ok\"");
-        metricGrew(before, after, 1, "xm_match_challenges_total");
+        // 切磋按 (stage, result) 看：服务端每个出口都计数，不带标签求和的话第 9 步头一个动作「挑战自己 → 16007」就让它 + 1，
+        // 之后发起、应答、接受全失败也照样「有增长」
+        metricGrew(before, after, EXPECTED_INVITES, "xm_match_challenges_total", "stage=\"invite\"", "result=\"ok\"");
+        metricGrew(before, after, 1, "xm_match_challenges_total", "stage=\"respond\"", "result=\"declined\"");
+        metricGrew(before, after, 1, "xm_match_challenges_total", "stage=\"respond\"", "result=\"accepted\"");
         metricGrew(before, after, 1, "xm_match_rating_updates_total", "outcome=\"applied\"");
+    }
+
+    private static String mode(MatchMode mode) {
+        return "mode=\"" + mode.name() + "\"";
     }
 
     private void metricGrew(String before, String after, int atLeast, String metric, String... labels) {

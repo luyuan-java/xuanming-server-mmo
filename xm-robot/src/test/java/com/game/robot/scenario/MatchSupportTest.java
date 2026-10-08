@@ -8,6 +8,7 @@ import com.game.proto.BattleEndS2C;
 import com.game.proto.BattleStartS2C;
 import com.game.proto.BattleTokenVerifyResponse;
 import com.game.proto.MessageContent;
+import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.eBattleOutcome;
@@ -203,8 +204,88 @@ class MatchSupportTest {
     @Test
     void 收尾的关闭方式_只有FIN才算契约() {
         BattleEndS2C end = BattleEndS2C.newBuilder().setBattleId(1).build();
-        assertThat(new MatchSupport.Finished(end, 3, BattleFrame.FIN, List.of()).fin()).isTrue();
-        assertThat(new MatchSupport.Finished(end, 3, BattleFrame.RESET, List.of()).fin()).isFalse();
-        assertThat(new MatchSupport.Finished(end, 3, null, List.of()).fin()).as("超时没关").isFalse();
+        assertThat(new MatchSupport.Finished(end, 3, BattleFrame.FIN, List.of(), null).fin()).isTrue();
+        assertThat(new MatchSupport.Finished(end, 3, BattleFrame.RESET, List.of(), null).fin()).isFalse();
+        assertThat(new MatchSupport.Finished(end, 3, null, List.of(), null).fin()).as("超时没关").isFalse();
+        MatchSupport.Finished refused = new MatchSupport.Finished(end, 3, BattleFrame.FIN, List.of(), "162 的应答带 error_message 1005[]");
+        assertThat(refused.autoAccepted()).isFalse();
+        assertThat(refused.autoNote()).isEqualTo("；162 的应答带 error_message 1005[]");
+        assertThat(new MatchSupport.Finished(end, 3, BattleFrame.FIN, List.of(), null).autoAccepted()).isTrue();
+        assertThat(new MatchSupport.Finished(end, 3, BattleFrame.FIN, List.of(), null).autoNote()).isEmpty();
+    }
+
+    // ---------------------------------------------------------------- 162 的应答（评审 ROBOT-2）
+
+    private MessageContent autoReply(long requestId, int tip) {
+        SetAutoBattleResponse.Builder body = SetAutoBattleResponse.newBuilder();
+        if (tip != 0) {
+            body.setErrorMessage(TipInfoMessage.newBuilder().setId(tip).addParameters("战斗不存在"));
+        }
+        return MessageContent.newBuilder().setMessageId(battleIds.setAutoBattle()).setId(requestId).setSerializedMessage(body.build().toByteString())
+                .build();
+    }
+
+    private MessageContent end(long battleId) {
+        return push(battleIds.battleEnd(), BattleEndS2C.newBuilder().setBattleId(battleId).build());
+    }
+
+    private MessageContent turn(long battleId) {
+        return push(battleIds.turnResult(), TurnResultS2C.newBuilder().setBattleId(battleId).build());
+    }
+
+    private static List<BattleFrame> frames(MessageContent... contents) {
+        BattleInbox inbox = new BattleInbox();
+        for (MessageContent content : contents) {
+            inbox.addContent(content, 1);
+        }
+        inbox.markClosed(BattleFrame.FIN, 2);
+        return inbox.snapshot(0);
+    }
+
+    @Test
+    void 开挂机被受理_应答在150之前或之后都算_自己促成终局时应答排在150后面() {
+        MatchSupport.AutoRequest auto = new MatchSupport.AutoRequest(9, 0);
+        // 多人局里先开挂机的人：应答立刻回来，之后才打完
+        assertThat(MatchSupport.autoProblem(frames(autoReply(9, 0), turn(BIG), end(BIG)), battleIds, BIG, auto)).isNull();
+        // 最后一个开挂机的人（单人 PVE 必然是他）：处理器里先推 139 / 150，应答随后，FIN 最后
+        assertThat(MatchSupport.autoProblem(frames(turn(BIG), end(BIG), autoReply(9, 0)), battleIds, BIG, auto)).isNull();
+    }
+
+    @Test
+    void 开挂机被拒而这一局照样打到150_是问题_业务错误与信封错误都认_并写明这一局是靠超时打完的() {
+        MatchSupport.AutoRequest auto = new MatchSupport.AutoRequest(9, 0);
+
+        String business = MatchSupport.autoProblem(frames(autoReply(9, 1005), turn(BIG), end(BIG)), battleIds, BIG, auto);
+        assertThat(business).contains("162 的应答带 error_message 1005", "战斗不存在", "挂机没有开成", "回合超时的默认行动");
+
+        MessageContent envelope = MessageContent.newBuilder().setMessageId(battleIds.setAutoBattle()).setId(9)
+                .setErrorMessage(TipInfoMessage.newBuilder().setId(1008)).build();
+        assertThat(MatchSupport.autoProblem(frames(envelope, turn(BIG), end(BIG)), battleIds, BIG, auto)).contains("信封错误 tip=1008", "挂机没有开成");
+
+        MessageContent garbage = MessageContent.newBuilder().setMessageId(battleIds.setAutoBattle()).setId(9)
+                .setSerializedMessage(ByteString.copyFrom(new byte[] {(byte) 0xff, (byte) 0xff, (byte) 0xff})).build();
+        assertThat(MatchSupport.autoProblem(frames(garbage, end(BIG)), battleIds, BIG, auto)).contains("解析不了");
+
+        // 别人的请求号、别的消息号的应答都不算数：本人这条 162 没有应答
+        assertThat(MatchSupport.autoProblem(frames(autoReply(8, 0), turn(BIG), end(BIG)), battleIds, BIG, auto)).contains("没有收到 162 的应答", "id=9");
+        MessageContent otherMessage = MessageContent.newBuilder().setMessageId(battleIds.getBattleState()).setId(9).build();
+        assertThat(MatchSupport.autoProblem(frames(otherMessage, turn(BIG), end(BIG)), battleIds, BIG, auto)).contains("没有收到 162 的应答");
+    }
+
+    @Test
+    void 别人先把这一局打完_本人的162没赶上_三种情形都豁免() {
+        // 没有发出（发送时连接已被服务端 FIN）
+        assertThat(MatchSupport.autoProblem(frames(turn(BIG), end(BIG)), battleIds, BIG, MatchSupport.AutoRequest.NOT_SENT)).isNull();
+        // 发出时 150 已经在收件箱里（下标 1 < 发出时的长度 2），服务端已经关了这条连接：没有应答
+        assertThat(MatchSupport.autoProblem(frames(turn(BIG), end(BIG)), battleIds, BIG, new MatchSupport.AutoRequest(9, 2))).isNull();
+        // 服务端在房间没了之后才读到这条 162：拒绝排在 150 之后
+        assertThat(MatchSupport.autoProblem(frames(turn(BIG), end(BIG), autoReply(9, 1005)), battleIds, BIG, new MatchSupport.AutoRequest(9, 0))).isNull();
+
+        // 对照：发出时 150 还没到（下标 1 ≥ 发出时的长度 1）却始终没有应答——不豁免
+        assertThat(MatchSupport.autoProblem(frames(turn(BIG), end(BIG)), battleIds, BIG, new MatchSupport.AutoRequest(9, 1)))
+                .contains("没有收到 162 的应答");
+        // 对照：别的局的 150 不能拿来豁免本局的拒绝
+        assertThat(MatchSupport.autoProblem(frames(end(BIG + 1), autoReply(9, 1005), end(BIG)), battleIds, BIG, new MatchSupport.AutoRequest(9, 0)))
+                .contains("error_message 1005");
     }
 }

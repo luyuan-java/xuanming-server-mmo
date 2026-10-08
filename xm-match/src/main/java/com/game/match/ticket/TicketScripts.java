@@ -16,7 +16,8 @@ package com.game.match.ticket;
  *       都不能和主库上写下的时刻放在一起比较；查状态也要读得到自己刚写的票（同 {@code BattleRedis} 的做法）。</li>
  *   <li><b>票据的写一律带票号 CAS</b>（I4）：{@code HGET ticket} 不等于传入的票号就什么都不写。</li>
  *   <li><b>可重放</b>（M6）：Redisson 在响应超时后会把同一段 {@code EVAL} 原样重发（{@code xm.redis.retry-attempts = 1}），第一次可能已经执行。
- *       每段可变脚本的第二次执行都不产生第二份效果：建票按票号识别「这就是我上次写的」、弹组按 token 标记、其余靠 CAS 条件在第一次之后不再成立。
+ *       每段可变脚本的第二次执行都不产生第二份效果：建票按票号识别「这就是我上次写的」、弹组与回队首按 token 标记（这两段的 CAS 条件
+ *       在第一次之后还能重新成立：弹出的人会回队首、回了队首的人会再被弹出）、其余靠 CAS 条件在第一次之后不再成立。
  *       返回值在重放时可能与第一次不同（例如删票第一次回 1、重放回 0），调用方该怎么读写在 {@code TicketStore} 各方法的注释里。</li>
  *   <li><b>中途出错不留孤儿票</b>：Redis 的脚本不是事务，中途命令报错（只可能是键被人为占成别的类型）时已执行的写不回滚。
  *       所以一律「先判定（只读）、后写」，并且入队类脚本<b>先写队列、后写票</b>——出错时最多留下一个没有票的队列项（凑单的校验会剔掉），
@@ -351,10 +352,10 @@ final class TicketScripts {
      * S_REQUEUE：幸存者回队首，<b>同一段脚本</b>里完成「票回 queued + 恢复长 TTL + 推到队首 + 按票里的评分写回镜像 + 登记注册集」。
      * 基线是「先 CAS 回 queued、再 LPUSH」两步（{@code queue.go:563-622}），两步之间能被别的实例看到，才需要孤儿自愈；这里没有那个窗口。
      * <pre>
-     * KEYS[1] = 注册集   KEYS[2] = 队列   KEYS[3] = 评分镜像   KEYS[3 + i] = 第 i 名幸存者的票（按原弹出顺序）
-     * ARGV[1] = queued TTL 毫秒   ARGV[2] = 退避毫秒（0 = 不退避）   ARGV[3] = 票里没有评分时用的 rating_centi
-     * ARGV[2 + 2i] = 第 i 名幸存者的成员串   ARGV[3 + 2i] = 第 i 名幸存者的票号
-     * 返回本次放回队首的人数
+     * KEYS[1] = 注册集   KEYS[2] = 队列   KEYS[3] = 评分镜像   KEYS[4] = 本次回队首的重放标记   KEYS[4 + i] = 第 i 名幸存者的票（按原弹出顺序）
+     * ARGV[1] = queued TTL 毫秒   ARGV[2] = 退避毫秒（0 = 不退避）   ARGV[3] = 票里没有评分时用的 rating_centi   ARGV[4] = 标记的 TTL 毫秒
+     * ARGV[3 + 2i] = 第 i 名幸存者的成员串   ARGV[4 + 2i] = 第 i 名幸存者的票号
+     * 返回这一次回队首放回去的人数（标记已存在时是标记里记下的那个数，什么都不写）
      * </pre>
      * 逐人条件：票号一致、state = matched、queue_key = KEYS[2]；不满足的跳过（票已过期 / 已换 / 不属于这条队列 / 已是 queued）。
      * 先整轮判定，有人满足才 SADD 注册集（I1），再<b>从末尾往前</b>逐个 LPUSH——处理完之后这些人在队列里的相对顺序与入参相同、排在原有成员之前。
@@ -364,27 +365,35 @@ final class TicketScripts {
      * <p>{@code LPUSH} 失败（队列键被占成别的类型）：删掉这张票让玩家可以立即重排，不留 queued 孤儿（同基线 {@code queue.go:613-617}）；不计入返回值。
      * {@code ZADD} 失败只丢镜像分（凑单按「镜像缺分」用票里的评分）。
      *
-     * <p>重放：第二次这些票已是 queued → 全部跳过，回 0，队列里不会被推两次。
+     * <p>重放：<b>只靠「票还是不是 matched」认不出重放</b>——回了队首的人可以在重发到达之前又被凑单弹成 matched（票号、queue_key 都没变），
+     * 那时条件对旧的入参重新成立，重发会把正在第二次 gather 里的人再推回队首。所以与弹组一样按 token 写标记：<b>每个出口都写</b>
+     * （含一个人都没放回去的 0），值 = 这一次放回去的人数；标记存在就原样返回那个数、不碰任何键。标记过期（60 s）之后才到的重发按现状核对。
      */
-    static final String REQUEUE = NOW + """
+    static final String REQUEUE = """
+            local marked = redis.call('GET', KEYS[4])
+            if marked then return tonumber(marked) end
+            """ + NOW + """
             local delay = tonumber(ARGV[2])
-            local n = #KEYS - 3
+            local n = #KEYS - 4
             local ratings = {}
             local any = false
             for i = 1, n do
-              local f = redis.call('HMGET', KEYS[3 + i], 'ticket', 'state', 'queue_key', 'rating_centi')
-              if f[1] == ARGV[3 + 2 * i] and f[2] == 'matched' and f[3] == KEYS[2] then
+              local f = redis.call('HMGET', KEYS[4 + i], 'ticket', 'state', 'queue_key', 'rating_centi')
+              if f[1] == ARGV[4 + 2 * i] and f[2] == 'matched' and f[3] == KEYS[2] then
                 ratings[i] = f[4] or ARGV[3]
                 any = true
               end
             end
-            if not any then return 0 end
+            if not any then
+              redis.call('SET', KEYS[4], '0', 'PX', ARGV[4])
+              return 0
+            end
             redis.call('SADD', KEYS[1], KEYS[2])
             local count = 0
             for i = n, 1, -1 do
               if ratings[i] then
-                local key = KEYS[3 + i]
-                local member = ARGV[2 + 2 * i]
+                local key = KEYS[4 + i]
+                local member = ARGV[3 + 2 * i]
                 local pushed = redis.pcall('LPUSH', KEYS[2], member)
                 if type(pushed) == 'table' and pushed.err then
                   redis.call('DEL', key)
@@ -402,6 +411,7 @@ final class TicketScripts {
                 end
               end
             end
+            redis.call('SET', KEYS[4], string.format('%d', count), 'PX', ARGV[4])
             return count
             """;
 

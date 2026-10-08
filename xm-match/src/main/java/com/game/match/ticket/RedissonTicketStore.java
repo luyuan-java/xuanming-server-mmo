@@ -40,6 +40,8 @@ public final class RedissonTicketStore implements TicketStore {
 
     /** 弹组重放标记的寿命：远大于 Redisson 一次重发的窗口（最坏 4.2 s），又不至于让标记堆积。 */
     public static final long POP_MARKER_TTL_MS = 60_000;
+    /** 回队首重放标记的寿命（理由同上）。 */
+    public static final long REQUEUE_MARKER_TTL_MS = POP_MARKER_TTL_MS;
 
     private static final String REASON_INVALID = "invalid";
     private static final String REASON_IN_BATTLE = "in_battle";
@@ -317,9 +319,13 @@ public final class RedissonTicketStore implements TicketStore {
     }
 
     @Override
-    public int requeueFront(QueueRef queue, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs, Deadline d) {
+    public int requeueFront(QueueRef queue, String requeueToken, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs,
+                            Deadline d) {
         Objects.requireNonNull(queue, "queue");
         requireTtl(queuedTtlMs);
+        if (requeueToken == null || requeueToken.isEmpty()) {
+            throw new IllegalArgumentException("回队首必须带 token");
+        }
         if (notBeforeDelayMs < 0) {
             throw new IllegalArgumentException("退避时长不能为负: " + notBeforeDelayMs);
         }
@@ -327,14 +333,16 @@ public final class RedissonTicketStore implements TicketStore {
         if (survivorsInOrder.isEmpty()) {
             return 0;
         }
-        List<Object> keys = new ArrayList<>(3 + survivorsInOrder.size());
+        List<Object> keys = new ArrayList<>(4 + survivorsInOrder.size());
         keys.add(RedisKeys.matchQueueIndex());
         keys.add(queue.queueKey());
         keys.add(queue.rankKey());
-        List<Object> args = new ArrayList<>(3 + 2 * survivorsInOrder.size());
+        keys.add(RedisKeys.matchRequeueMarker(requeueToken));
+        List<Object> args = new ArrayList<>(4 + 2 * survivorsInOrder.size());
         args.add(Long.toString(queuedTtlMs));
         args.add(Long.toString(notBeforeDelayMs));
         args.add(Long.toString(RatingReader.DEFAULT_CENTI));
+        args.add(Long.toString(REQUEUE_MARKER_TTL_MS));
         for (TicketRef survivor : survivorsInOrder) {
             keys.add(ticketKey(survivor.playerId()));
             args.add(TicketCodec.member(survivor.playerId()));

@@ -1,6 +1,8 @@
 package com.game.robot.scenario;
 
 import com.game.proto.BattleActorState;
+import com.game.proto.BattleEndS2C;
+import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.eBattleOutcome;
@@ -210,6 +212,36 @@ final class BattleSmokeChecks {
             same &= team.isPresent() && team.getAsInt() == expected.get(i);
         }
         return same ? null : "按次序的队号是 " + actual + "，期望 " + expected;
+    }
+
+    // ---------------------------------------------------------------- 终局
+
+    /**
+     * 单人 PVE 的终局包（150）是不是「这一局、这个人、打赢了、真打过」——判据同基线 {@code robot/features_battle_smoke.go:82-95}
+     * （{@code validateFeatureBattleVictory}）：外层与 settlement 的 battle_id 都是本局、settlement.player_id 是本人；外层与 settlement 的
+     * outcome 都是 SIDE_A_WIN；直连上至少一条 139、settlement.total_rounds ≥ 1。settlement 是「收信玩家本人视角」的结算，
+     * 它指向别的局 / 别的人、或与外层的终局不一致，都说明服务端把结算拼错了——只看外层 outcome 发现不了。
+     *
+     * @param turns 这条直连上收到的 139 条数
+     * @return null = 没问题
+     */
+    static String pveVictoryProblem(BattleEndS2C end, long battleId, long playerId, int turns) {
+        BattleSettlementData settlement = end.getSettlement();
+        List<String> problems = new ArrayList<>();
+        if (end.getBattleId() != battleId || settlement.getBattleId() != battleId) {
+            problems.add("battle_id 对不上本局 " + Long.toUnsignedString(battleId) + "：外层 " + Long.toUnsignedString(end.getBattleId())
+                    + "、settlement " + Long.toUnsignedString(settlement.getBattleId()));
+        }
+        if (settlement.getPlayerId() != playerId) {
+            problems.add("settlement.player_id = " + Long.toUnsignedString(settlement.getPlayerId()) + "，期望本人 " + Long.toUnsignedString(playerId));
+        }
+        if (end.getOutcome() != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN || settlement.getOutcome() != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN) {
+            problems.add("终局不是 SIDE_A_WIN：外层 " + end.getOutcome() + "、settlement " + settlement.getOutcome());
+        }
+        if (turns < 1 || settlement.getTotalRounds() < 1) {
+            problems.add("没有真的打过回合：139 × " + turns + "、total_rounds = " + settlement.getTotalRounds());
+        }
+        return problems.isEmpty() ? null : String.join("；", problems);
     }
 
     // ---------------------------------------------------------------- 评分

@@ -199,7 +199,7 @@ abstract class TeamMatchScenarios {
         assertThat(resp.getTeam().getVersion()).isEqualTo(before.version());
         assertThat(fx.hgets).hasValue(0);
         Call<?> call = fx.match.checks.get(0);
-        assertThat(call.budget()).as("剩余预算随调用带给 xm-match").isBetween(1L, 250L);
+        assertThat(call.budget()).as("这一跳的超时随调用带给 xm-match 作预算").isBetween(1L, 250L);
         assertThat(call.timeoutMs()).as("每跳超时 = min(3 s, 剩余预算)").isEqualTo(call.budget());
         assertThat(fx.state(t[0], t[1], t[2])).isEqualTo(before);
         assertThat(fx.matches("internal")).isEqualTo(1);
@@ -276,7 +276,7 @@ abstract class TeamMatchScenarios {
             assertThat(release.request().getTicketIdsMap()).as("按本次建票的票号退")
                     .isEqualTo(fx.match.tickets.get(0).request().getTicketIdsMap()).hasSize(3);
             assertThat(release.budget()).as("退票用独立的 3 s 预算，不继承请求预算").isBetween(1L, TeamService.RELEASE_TICKETS_BUDGET_MS);
-            assertThat(release.timeoutMs()).isEqualTo(Math.min(MatchTeamBattle.HOP_TIMEOUT_MS, release.budget()));
+            assertThat(release.timeoutMs()).as("预算附件 = 每跳超时").isEqualTo(release.budget());
             assertThat(lockAtRelease.get()).as("%s：先退票、后清锁", c.getKey()).isNotEmpty();
             assertThat(fx.match.gathers).as("gather 没有发出").isEmpty();
             assertThat(fx.record(tid).getMatchLockToken()).as("锁已释放").isEmpty();
@@ -344,9 +344,9 @@ abstract class TeamMatchScenarios {
             Call<com.game.api.proto.TeamMatchCheckRequest> check = fx.match.checks.get(0);
             assertThat(check.request().getRosterList()).as("队长在前再按 join_seq").isEqualTo(roster);
             assertThat(check.request().getBattleConfigId()).isEqualTo(CONFIG);
-            assertThat(check.budget()).as("剩余请求预算随调用带给 xm-match").isBetween(1L, 3500L);
-            assertThat(check.timeoutMs()).as("每跳超时 = min(3 s, 剩余预算)")
-                    .isEqualTo(Math.min(MatchTeamBattle.HOP_TIMEOUT_MS, check.budget()));
+            assertThat(check.budget()).as("带给 xm-match 的预算 = 这一跳的超时，不是整请求的剩余预算（3500 ms）")
+                    .isBetween(1L, MatchTeamBattle.HOP_TIMEOUT_MS);
+            assertThat(check.timeoutMs()).as("每跳超时 = min(3 s, 剩余预算)，与预算附件是同一个值").isEqualTo(check.budget());
 
             assertThat(fx.match.tickets).hasSize(1);
             Call<TeamTicketsRequest> tickets = fx.match.tickets.get(0);
@@ -360,7 +360,7 @@ abstract class TeamMatchScenarios {
             assertThat(ticketIds.values()).as("每人一个 UUID，互不相同").doesNotHaveDuplicates()
                     .allMatch(id -> id.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
             assertThat(tickets.budget()).isBetween(1L, check.budget());
-            assertThat(tickets.timeoutMs()).isEqualTo(Math.min(MatchTeamBattle.HOP_TIMEOUT_MS, tickets.budget()));
+            assertThat(tickets.timeoutMs()).as("建票：xm-match 的截止不晚于本端这一跳放弃的时刻").isEqualTo(tickets.budget());
 
             assertThat(fx.match.gathers).hasSize(1);
             Call<com.game.api.proto.TeamGatherRequest> gather = fx.match.gathers.get(0);
@@ -458,6 +458,60 @@ abstract class TeamMatchScenarios {
         assertThat(failed.values()).allMatch(s -> !s.hasTip());
         assertThat(fx.matches("gather_unknown")).isEqualTo(1);
         assertThat(matchesTotal()).isEqualTo(1);
+    }
+
+    /**
+     * 评审 T1-02（match-spec §7.5「xm-team 进程退出：match 照样把 gather 跑完，锁自然过期」）：本进程优雅停机时自己的 Dubbo 引用被销毁，
+     * 挂着的 gather 若因此异常完成，不能照「结果不明」清锁并推 MATCH_FAILED——xm-match 那边的 gather 还在跑，成员随后会被拉进战斗。
+     */
+    @Test
+    void 本进程停机之后才异常完成的gather_只计gather_unknown_不清锁不推送不退票() {
+        long[] t = fx.team(3);
+        long tid = t[0];
+        CompletableFuture<TeamGatherReply> pending = new CompletableFuture<>();
+        fx.match.gatherReply = r -> pending;
+        long ver0 = fx.versionOf(tid);
+        requireOk(fx.start(t[1], tid));
+        fx.takePushes();
+        String token = fx.record(tid).getMatchLockToken();
+        fx.resetCounters();
+
+        fx.stopping = true; // 上下文关闭事件已到；Dubbo 随后销毁引用
+        pending.completeExceptionally(new IllegalStateException("CANCELLED"));
+
+        // 先看调用计数（下面的观察读也走同一个计数的存储）
+        assertThat(fx.evals.values().stream().mapToInt(AtomicInteger::get).sum()).as("没有碰存储：连 EndMatch 的读都不做").isZero();
+        assertThat(fx.hgets).hasValue(0);
+        assertThat(fx.record(tid).getMatchLockToken()).as("锁原样留着，靠自然过期（同进程崩溃）").isEqualTo(token).isNotEmpty();
+        assertThat(fx.versionOf(tid)).as("没有任何提交").isEqualTo(ver0 + 1);
+        assertThat(fx.takePushes()).as("不推 MATCH_FAILED：对端的 gather 并没有失败").isEmpty();
+        assertThat(fx.match.releases).as("gather 已经发出：绝不退票").isEmpty();
+        assertThat(fx.matches("gather_unknown")).as("这次 211 仍然恰好计一次").isEqualTo(1);
+        assertThat(matchesTotal()).isEqualTo(1);
+    }
+
+    @Test
+    void 停机之后正常到达的gather结果照常收尾_成功与失败都是() {
+        for (boolean gatherOk : new boolean[] {true, false}) {
+            fresh();
+            long[] t = fx.team(2);
+            long tid = t[0];
+            CompletableFuture<TeamGatherReply> pending = new CompletableFuture<>();
+            fx.match.gatherReply = r -> pending;
+            long ver0 = fx.versionOf(tid);
+            requireOk(fx.start(t[1], tid));
+            fx.takePushes();
+
+            fx.stopping = true;
+            pending.complete(gathered(gatherOk, 7006));
+
+            assertThat(fx.record(tid).getMatchLockToken()).as("结果是可信的：照常清锁 ok=%s", gatherOk).isEmpty();
+            assertThat(fx.versionOf(tid)).isEqualTo(ver0 + 2);
+            assertThat(byReason(fx.takePushes(), gatherOk ? TeamChangeReason.TEAM_CHANGE_REASON_MATCH_ENDED
+                    : TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED).keySet()).containsExactlyInAnyOrder(t[1], t[2]);
+            assertThat(fx.matches(gatherOk ? "success" : "gather_failed")).isEqualTo(1);
+            assertThat(matchesTotal()).isEqualTo(1);
+        }
     }
 
     @Test

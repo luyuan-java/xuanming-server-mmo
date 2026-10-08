@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * {@link MatchTeamBattle}：xm-match 的应答怎么翻译成 team 自己的词汇，以及调用纪律（match-spec §7.5、§7.6，plan §7 问题 10）——
- * 每跳超时 = min(3 s, 剩余预算)、剩余预算经 {@code xm-budget-ms} 下传、附件调完即清、预算用完就不发；{@code runTeamGather} 用开战锁时长作
+ * 每跳超时 = min(3 s, 剩余预算)、同一个值经 {@code xm-budget-ms} 下传（不是整请求的剩余预算）、附件调完即清、预算用完就不发；{@code runTeamGather} 用开战锁时长作
  * 调用级超时、不带预算；传输失败与应答枚举的 UNSPECIFIED / 不认识的值一律不读成「通过 / 建成」。不起 Dubbo：替身记下调用线程上的附件。
  */
 class MatchTeamBattleTest {
@@ -149,16 +149,22 @@ class MatchTeamBattleTest {
     // ================================================================ 每跳超时与预算附件
 
     @Test
-    void 前三个方法每跳超时取3秒与剩余预算的较小者_剩余预算随调用下传_调完即清() {
-        // 预算充足（3500 ms）：超时封顶 3 s，带下去的预算是真实剩余值
+    void 前三个方法每跳超时取3秒与剩余预算的较小者_带给对端的预算就是这一跳的超时_调完即清() {
+        // 预算充足（3500 ms）：超时封顶 3 s。带下去的预算也是 3 s 而不是整请求的剩余值（3.4 s 以上）——本端过了 3 s 就不收应答了，
+        // 对端的截止再晚，迟到的建票就会在本端已经判「结果不明」并回滚之后照常写票
         battle.checkTeamMatch(1, ROSTER, Deadline.after(3500));
         Call<TeamMatchCheckRequest> wide = match.checks.get(0);
-        assertThat(wide.budget()).isBetween(3001L, 3500L);
         assertThat(wide.timeoutMs()).isEqualTo(3000L).isEqualTo(MatchTeamBattle.HOP_TIMEOUT_MS);
+        assertThat(wide.budget()).as("预算附件 = 每跳超时，不超过 3 s").isEqualTo(wide.timeoutMs());
 
-        // 预算只剩 800 ms：超时 = 剩余预算
+        battle.createTeamTickets(1, 77, ROSTER, Map.of(A, 1, B, 1, C, 1), ticketIds(), Deadline.after(3500));
+        Call<TeamTicketsRequest> wideTickets = match.tickets.get(0);
+        assertThat(wideTickets.timeoutMs()).isEqualTo(MatchTeamBattle.HOP_TIMEOUT_MS);
+        assertThat(wideTickets.budget()).as("建票是「迟到了就不该再写」的那一跳：对端的截止不得晚于本端放弃的时刻").isEqualTo(3000L);
+
+        // 预算只剩 800 ms：超时 = 预算附件 = 剩余预算
         battle.createTeamTickets(1, 77, ROSTER, Map.of(A, 1, B, 1, C, 1), ticketIds(), Deadline.after(800));
-        Call<TeamTicketsRequest> narrow = match.tickets.get(0);
+        Call<TeamTicketsRequest> narrow = match.tickets.get(1);
         assertThat(narrow.budget()).isBetween(1L, 800L);
         assertThat(narrow.timeoutMs()).isEqualTo(narrow.budget());
 
@@ -166,6 +172,11 @@ class MatchTeamBattleTest {
         Call<TeamTicketsRelease> release = match.releases.get(0);
         assertThat(release.budget()).isBetween(801L, 1200L);
         assertThat(release.timeoutMs()).isEqualTo(release.budget());
+
+        battle.releaseTeamTickets(ticketIds(), Deadline.after(60_000));
+        Call<TeamTicketsRelease> wideRelease = match.releases.get(1);
+        assertThat(wideRelease.timeoutMs()).isEqualTo(MatchTeamBattle.HOP_TIMEOUT_MS);
+        assertThat(wideRelease.budget()).isEqualTo(3000L);
 
         assertThat(RpcContext.getClientAttachment().getAttachment(MatchRpcAttachments.BUDGET_MS)).as("附件不漏到这条线程上之后的调用里").isNull();
         assertThat(RpcContext.getClientAttachment().getObjectAttachment(CommonConstants.TIMEOUT_KEY)).isNull();

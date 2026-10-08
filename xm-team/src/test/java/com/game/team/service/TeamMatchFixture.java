@@ -177,6 +177,8 @@ final class TeamMatchFixture {
     volatile LongSupplier nanoTime = System::nanoTime;
     /** true = {@code team-match-end} 执行器拒收（已满）。 */
     volatile boolean rejectBackground;
+    /** true = 本进程已经开始停机（生产里由 {@code TeamShutdown} 在上下文关闭事件里置位）。 */
+    volatile boolean stopping;
 
     final AtomicInteger hgets = new AtomicInteger();
     final Map<TeamScript, AtomicInteger> evals = new EnumMap<>(TeamScript.class);
@@ -267,7 +269,7 @@ final class TeamMatchFixture {
             long tid = nextTid.incrementAndGet();
             tids.add(tid);
             return tid;
-        }, new MatchTeamBattle(match), this::runBackground, teamPushes, metrics, RuleConfig.DEFAULT);
+        }, new MatchTeamBattle(match), this::runBackground, teamPushes, metrics, RuleConfig.DEFAULT, () -> stopping);
         match.lockTtlSeconds = LOCK_SECONDS;
         match.zone = ZONE;
     }

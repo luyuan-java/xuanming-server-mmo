@@ -10,6 +10,7 @@ import com.game.match.ticket.TicketHealing.Free;
 import com.game.match.ticket.TicketHealing.InFlight;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -87,17 +88,66 @@ class DefaultTicketHealingTest {
     }
 
     @Test
-    void 读到ready之后票被换成了新的_条件删没删成_按在途() {
+    void 读到ready之后票被换成了新的_条件删没删成_按在途_带的是现在这张票的票号() {
         store.putTicket(1001, new Ticket("stale-ready", 3, 0, TicketState.READY, 1, 1, "", 150_000, 0, 77, 0), 60_000);
         TicketStore racing = new RacingStore(store, () -> {
             // 读与条件删之间：旧票过期，玩家从另一处重排了一张新票
             store.putTicket(1001, new Ticket("stale-ready", 3, 0, TicketState.READY, 1, 1, "", 150_000, 0, 77, 0), 0);
             store.enqueue(1001, "t-new", Q, 1, 150_000, QUEUED_TTL, d());
         });
+        store.calls.clear();
 
-        assertThat(new DefaultTicketHealing(racing).healOrBlock(1001, d())).isEqualTo(new InFlight("stale-ready"));
+        assertThat(new DefaultTicketHealing(racing).healOrBlock(1001, d())).as("16001 里要带客户端能拿去取消的票号：旧票已经不存在了")
+                .isEqualTo(new InFlight("t-new"));
 
         assertThat(store.ticketOf(1001).orElseThrow().ticketId()).as("新票没有被误删").isEqualTo("t-new");
+        assertThat(store.calls).as("只在这个竞态下多读一次").containsExactly("read(1001)", "enqueue(1001)", "heal(1001,READY)", "read(1001)");
+    }
+
+    @Test
+    void 读到ready之后票被换成新的_重读时新票又没了_放行() {
+        store.putTicket(1001, new Ticket("stale-ready", 3, 0, TicketState.READY, 1, 1, "", 150_000, 0, 77, 0), 60_000);
+        AtomicInteger reads = new AtomicInteger();
+        TicketStore racing = new RacingStore(store, () -> store.putTicket(1001,
+                new Ticket("t-new", 4, 1, TicketState.MATCHED, 1, 1, "", 150_000, 0, 0, 0), 42_000)) {
+            @Override
+            public Optional<Ticket> read(long playerId, Deadline d) {
+                if (reads.incrementAndGet() == 2) {
+                    // 重读之前新票也没了（PVE_SOLO 的 gather 失败删票）
+                    store.putTicket(1001, new Ticket("t-new", 4, 1, TicketState.MATCHED, 1, 1, "", 150_000, 0, 0, 0), 0);
+                }
+                return super.read(playerId, d);
+            }
+        };
+
+        assertThat(new DefaultTicketHealing(racing).healOrBlock(1001, d())).isEqualTo(new Free());
+
+        assertThat(reads.get()).isEqualTo(2);
+        assertThat(store.ticketOf(1001)).isEmpty();
+    }
+
+    @Test
+    void 在队列里的queued票_常态路径不多读一次() {
+        store.enqueue(1001, "t-1001", Q, 1, 150_000, QUEUED_TTL, d());
+        store.calls.clear();
+
+        assertThat(healing.healOrBlock(1001, d())).isEqualTo(new InFlight("t-1001"));
+
+        assertThat(store.calls).containsExactly("read(1001)", "heal(1001,ORPHAN)");
+    }
+
+    @Test
+    void ready票没删成之后的重读失败_原样抛依赖异常() {
+        store.putTicket(1001, new Ticket("stale-ready", 3, 0, TicketState.READY, 1, 1, "", 150_000, 0, 77, 0), 60_000);
+        TicketStore racing = new RacingStore(store, () -> {
+            store.putTicket(1001, new Ticket("stale-ready", 3, 0, TicketState.READY, 1, 1, "", 150_000, 0, 77, 0), 0);
+            store.enqueue(1001, "t-new", Q, 1, 150_000, QUEUED_TTL, d());
+            store.faults.failNext("read");
+        });
+
+        assertThatThrownBy(() -> new DefaultTicketHealing(racing).healOrBlock(1001, d())).isInstanceOf(Deadline.DependencyException.class);
+
+        assertThat(store.ticketOf(1001).orElseThrow().ticketId()).isEqualTo("t-new");
     }
 
     @Test
@@ -140,7 +190,7 @@ class DefaultTicketHealingTest {
     }
 
     /** 在第一次 {@code heal} 之前插入一段并发动作的存储。 */
-    private static final class RacingStore extends ForwardingTicketStore {
+    private static class RacingStore extends ForwardingTicketStore {
         private Runnable beforeHeal;
 
         RacingStore(TicketStore delegate, Runnable beforeHeal) {

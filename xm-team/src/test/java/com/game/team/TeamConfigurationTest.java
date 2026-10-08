@@ -37,6 +37,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import javax.sql.DataSource;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.h2.jdbcx.JdbcDataSource;
@@ -51,6 +52,11 @@ import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.Codec;
 import org.redisson.misc.CompletableFutureWrapper;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.event.ContextClosedEvent;
+import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * 装配（{@code ApplicationContextRunner}，不连 Redis / MySQL、不开端口）：{@link TeamConfiguration} 起得来，并且队伍视图的 in_battle 真的接到了
@@ -132,6 +138,51 @@ class TeamConfigurationTest {
             assertThat(ran.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(thread.get()).startsWith("team-match-end-");
         });
+    }
+
+    /** 站在 Dubbo 的 {@code DubboDeployApplicationListener} 的位置上（最低优先级：它在那里销毁引用），记下轮到它时停机标志的值。 */
+    static final class LastInLine implements ApplicationListener<ContextClosedEvent>, Ordered {
+
+        static final AtomicReference<Boolean> SEEN = new AtomicReference<>();
+
+        @Override
+        public void onApplicationEvent(ContextClosedEvent event) {
+            SEEN.set(event.getApplicationContext().getBean(TeamShutdown.class).stopping());
+        }
+
+        @Override
+        public int getOrder() {
+            return Ordered.LOWEST_PRECEDENCE;
+        }
+    }
+
+    /**
+     * 评审 T1-02：停机标志必须在 Dubbo 销毁引用<b>之前</b>置位（之后挂着的 gather 才可能异常完成），而且 {@link TeamService} 读的就是这一个标志。
+     */
+    @Test
+    void 停机标志在上下文关闭事件里先于最低优先级的监听器置位_TeamService读的就是它_别的上下文关闭不算() {
+        LastInLine.SEEN.set(null);
+        AtomicReference<TeamShutdown> flag = new AtomicReference<>();
+        AtomicReference<BooleanSupplier> wired = new AtomicReference<>();
+
+        runner.withBean(LastInLine.class, LastInLine::new).run(ctx -> {
+            assertThat(ctx).hasNotFailed().hasSingleBean(TeamShutdown.class);
+            TeamShutdown shutdown = ctx.getBean(TeamShutdown.class);
+            flag.set(shutdown);
+            wired.set((BooleanSupplier) ReflectionTestUtils.getField(ctx.getBean(TeamService.class), "stopping"));
+            assertThat(shutdown.stopping()).as("运行中").isFalse();
+            assertThat(wired.get().getAsBoolean()).isFalse();
+            try (GenericApplicationContext other = new GenericApplicationContext()) {
+                other.refresh();
+                shutdown.onApplicationEvent(new ContextClosedEvent(other));
+            }
+            assertThat(shutdown.stopping()).as("别的上下文（如子上下文）关闭的事件传过来：不算本进程停机").isFalse();
+        });
+
+        assertThat(TeamShutdown.LISTENER_ORDER).as("比 Dubbo 的监听器（LOWEST_PRECEDENCE）靠前").isLessThan(Ordered.LOWEST_PRECEDENCE);
+        assertThat(LastInLine.SEEN.get()).as("轮到最低优先级的监听器时标志已经置位").isTrue();
+        assertThat(flag.get().stopping()).as("置位后不复位").isTrue();
+        assertThat(wired.get().getAsBoolean()).as("TeamService 拿到的就是这个标志").isTrue();
     }
 
     @Test

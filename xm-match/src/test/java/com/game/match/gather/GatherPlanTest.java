@@ -155,7 +155,7 @@ class GatherPlanTest {
     void 结局标签与规格的outcome逐个同名() {
         assertThat(Arrays.stream(GatherOutcome.values()).map(GatherOutcome::label)).containsExactly(
                 "success", "internal", "overloaded", "no_battle_node", "no_location", "prepare_failed", "fingerprint_mismatch",
-                "index_failed", "not_allocatable", "create_rejected", "create_failed", "create_failed_room_alive");
+                "index_failed", "not_allocatable", "create_rejected", "create_not_sent", "create_failed", "create_failed_room_alive");
     }
 
     @Test

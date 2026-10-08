@@ -128,6 +128,16 @@ class MatcherConfigurationTest {
         });
     }
 
+    /**
+     * 停机时等「凑单锁 TTL + 余量」，等不到就中断凑单线程。一条队列在锁 TTL 之外最多还有一次弹组（结局不明时同标记重发一次）：
+     * 余量装不下这两次尝试的话，中断会落在弹组的等待里，留下「弹出了却没人开局」的票。改任何一个常量都要过这条。
+     */
+    @Test
+    void 停机余量装得下弹组的两次尝试() {
+        assertThat(MatcherConfiguration.STOP_MARGIN.toMillis()).isGreaterThanOrEqualTo(2 * QueueMatcher.POP_BUDGET_MS);
+        assertThat(QueueMatcher.POP_BUDGET_MS).as("一次尝试至少覆盖 Redis 客户端的一次响应超时（缺省 2 s）").isGreaterThanOrEqualTo(2_000);
+    }
+
     @Test
     void 缺票据存储_拒绝启动() {
         base().withBean(GatherLauncher.class, () -> gather).withBean(BattleNodes.class, () -> nodes).run(context -> {

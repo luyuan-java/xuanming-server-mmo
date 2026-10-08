@@ -18,6 +18,7 @@ import com.game.match.support.MatchModes;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
 import com.game.match.ticket.TicketRef;
+import com.game.match.ticket.TicketState;
 import com.game.match.ticket.TicketStore;
 import com.game.match.ticket.TicketStore.DropReason;
 import com.game.match.ticket.TicketStore.PopResult;
@@ -50,7 +51,8 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li>凑满人数为 0（配置被摘掉后残留的队列）→ 告警跳过，不动数据。</li>
  *   <li>抢凑单锁；抢不到 → 跳过，本实例对这条队列的两个 gauge 记 0（看板按实例求和，只有持锁实例报实值）。</li>
- *   <li>报深度；不够人数 → 饥饿 gauge 归零，深度为 0 时把空队列从注册集剔除。</li>
+ *   <li>报深度；不够人数 → 饥饿 gauge 归零，深度为 0 时把空队列从注册集剔除；深度不为 0 时每 {@value #STALE_SWEEP_INTERVAL_SECONDS} s
+ *       做一次<b>只看票据</b>的清理（{@link #sweepStale}）：票据已不在（过期、被删）的残项不清掉，队列永远非空、永远留在注册集里。</li>
  *   <li>持锁期间循环：取队列前 {@value #SCAN_LIMIT} 人的快照与各人票据 → {@link GroupPicker} 挑一组 → {@link TicketStore#pop} 原子弹组 →
  *       {@link GatherLauncher#launch}（不等结果、不占锁）；挑不出组就结束。</li>
  * </ol>
@@ -61,11 +63,14 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>弹组被拒</b>（校验与弹组之间有人取消 / 票被换掉）：存储什么都没写，其余人原位不动；对被拒的每个人按无效成员摘一次，然后在本轮内重挑，
  * 同一队列至多重挑 {@value #MAX_REPICKS} 次（只是退避没到点的人摘不掉，不设上限会空转）。弹组的应答丢了（结局不明）时用同一个弹组标记重发一次——
- * 存储按标记识别重放；仍然不明就放弃这条队列的本轮，已弹出的票据按 matched TTL 自愈。
+ * 存储按标记识别重放；仍然不明就放弃这条队列的本轮，已弹出的票据按 matched TTL 自愈。<b>弹组不用队列的共用截止</b>：每次尝试各有
+ * {@value #POP_BUDGET_MS} ms 的独立预算——共用截止恰好在弹组的等待里到期时，脚本多半随后照常执行，而调用方既不能重发也不开局，
+ * 这一组人就被摘出队列却没有 gather。弹出之后的第一件事就是交给开局管线，指标与日志都排在它后面。
  *
  * <p><b>依赖故障</b>：任何一步读写失败都只结束这条队列的本轮（不做出局判定），锁照常释放，下一轮重来；处理某一条队列时冒出的意料之外的
  * 异常同样只结束它自己的本轮，排在后面的队列照常处理。队列锁只是效率手段——
- * 一条队列的全部操作共用一个等于锁 TTL 的截止，锁过期之后不再继续；即便两个实例同时处理同一条队列，弹组脚本也保证不双弹。
+ * 一条队列的读与剔除共用一个等于锁 TTL 的截止，剩余不到十分之一时不再开始挑下一组（正常收手，不算故障）；弹组与放锁另有独立预算，
+ * 可以越过锁 TTL——即便两个实例同时处理同一条队列，弹组脚本也保证不双弹。
  *
  * <p><b>线程</b>：不是线程安全的，只在凑单线程上调（测试里单线程驱动）。除了经接口做的 I/O 之外没有别的阻塞。
  */
@@ -81,6 +86,19 @@ public final class QueueMatcher {
     static final long WARN_INTERVAL_NANOS = 10_000_000_000L;
     /** 释放凑单锁的独立预算：队列的截止用完了也要试着放锁（放不掉由 TTL 兜底）。 */
     static final long UNLOCK_BUDGET_MS = 3_000;
+    /**
+     * 弹组每次尝试的独立预算（结局不明时用同一个标记再试一次，所以一组最多占 2 倍）。不沿用队列的共用截止：那个截止用完时弹组既不能重发
+     * 也不能开局。<b>2 倍不得超过停机时在锁 TTL 之外多等的余量</b>（{@code MatcherConfiguration.STOP_MARGIN}）：停机超时会中断凑单线程，
+     * 中断落在弹组的等待里同样留下「弹出了却没人开局」的票（{@code MatcherConfigurationTest} 钉住这条不等式）。
+     */
+    static final long POP_BUDGET_MS = 2_500;
+    /** 开始挑下一组至少要剩的预算占锁 TTL 的几分之一（缺省 10 s 的十分之一 = 1 s；一次挑组约 7 次 Redis 往返）。 */
+    static final int MIN_PICK_BUDGET_DIVISOR = 10;
+    /** 凑不满的队列隔多久做一次只看票据的清理。 */
+    static final int STALE_SWEEP_INTERVAL_SECONDS = 30;
+    static final long STALE_SWEEP_INTERVAL_NANOS = STALE_SWEEP_INTERVAL_SECONDS * 1_000_000_000L;
+    /** 清理限频表的容量（按最近使用淘汰）。凑不满的队列比它还多时，表里放不下的队列每次碰到都清——那正是要清理的情形。 */
+    static final int STALE_SWEEP_KEYS = 1024;
     /** 限频表的容量：队列键由客户端可控的副本号构成，不能让它无限长。 */
     private static final int WARN_KEYS = 256;
 
@@ -95,6 +113,8 @@ public final class QueueMatcher {
     private final String instanceId;
     private final Tolerance tolerance;
     private final long lockTtlMs;
+    /** 队列的共用截止剩余不到这么多就不再开始挑下一组。 */
+    private final long minPickBudgetMs;
     private final LongSupplier nanoClock;
 
     /** 告警限频：键 → 上次告警的单调时刻；按最近使用淘汰。 */
@@ -102,6 +122,13 @@ public final class QueueMatcher {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
             return size() > WARN_KEYS;
+        }
+    };
+    /** 凑不满的队列上一次做（或第一次见到、开始计时）票据清理的单调时刻；按最近使用淘汰。 */
+    private final Map<String, Long> lastStaleSweepNanos = new LinkedHashMap<>(64, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+            return size() > STALE_SWEEP_KEYS;
         }
     };
     /** 本实例上报过 gauge 的标签组合（标签键 → 代表队列）：整轮结束时，这一轮没再碰到的归零（队列被别的实例弹空剔除后不再出现在注册集里）。 */
@@ -112,7 +139,7 @@ public final class QueueMatcher {
         this(store, players, gather, battleNodes, ids, metrics, labels, props, instance, System::nanoTime);
     }
 
-    /** @param nanoClock 单调时钟（只用于告警限频；测试注入） */
+    /** @param nanoClock 单调时钟（只用于告警与清理的限频；测试注入） */
     QueueMatcher(TicketStore store, PlayerStatusReader players, GatherLauncher gather, BattleNodes battleNodes, MatchIds ids,
                  MatchMetrics metrics, MetricLabels labels, MatchProperties props, MatchInstance instance, LongSupplier nanoClock) {
         this.store = Objects.requireNonNull(store, "store");
@@ -126,6 +153,7 @@ public final class QueueMatcher {
         this.instanceId = Objects.requireNonNull(instance, "instance").id();
         this.tolerance = Tolerance.of(props.rating().tolerance());
         this.lockTtlMs = props.matcher().lockTtl().toMillis();
+        this.minPickBudgetMs = Math.max(1, lockTtlMs / MIN_PICK_BUDGET_DIVISOR);
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
     }
 
@@ -204,7 +232,7 @@ public final class QueueMatcher {
             warnLimited("no-size:" + queue, () -> log.error("队列 {} 没有凑满人数的配置（模式不走队列，或该副本的组队人数被摘掉了），跳过、不动数据", queue));
             return true;
         }
-        // 这条队列的全部读写共用一个截止：锁过期之后不再继续
+        // 这条队列的读与剔除共用一个截止：锁过期之后不再开始新的一组（弹组与放锁各有独立预算，见 pop 与 UNLOCK_BUDGET_MS）
         Deadline d = Deadline.after(lockTtlMs);
         boolean locked;
         // 这里兜的是 RuntimeException 而不只是依赖异常：某一条队列的数据触发了意料之外的错误时，不能让它每一轮都把排在它后面的队列一起拖死
@@ -242,18 +270,35 @@ public final class QueueMatcher {
         if (depth < required) {
             // 人数不够谈不上「锚点凑不到候选」：饥饿归零，深度看 queue_depth
             gauges.starved(queue, 0);
-            if (depth == 0 && store.pruneIfEmpty(queue, d)) {
-                log.info("空队列已从注册集剔除 queue={}", queue);
+            if (depth == 0) {
+                if (store.pruneIfEmpty(queue, d)) {
+                    lastStaleSweepNanos.remove(queue.queueKey());
+                    log.info("空队列已从注册集剔除 queue={}", queue);
+                }
+            } else if (staleSweepDue(queue)) {
+                sweepStale(queue, d);
             }
             return;
         }
         long matchedTtlMs = MatchBudgets.matchedTicketTtlSeconds(required) * 1000L;
         boolean rated = MatchModes.rated(queue.mode());
         int repicks = 0;
+        int launched = 0;
         // 持锁期间可以连续凑多组
         while (!stopRequested.getAsBoolean()) {
             if (!ids.leaseValid() || gather.availablePermits() <= 0) {
                 log.info("发号租约无效或开局管线的在途许可已满，这条队列本轮不再弹组 queue={}", queue);
+                return;
+            }
+            // 共用截止快用完时正常收手，不等它在下一次读里到期再按「依赖故障」收场：积压很深的队列每一轮都会走到这里，那不是故障
+            if (d.remainingMillis() < minPickBudgetMs) {
+                int groups = launched;
+                if (groups > 0) {
+                    log.info("这条队列本轮的预算（凑单锁 TTL）已用完，剩下的人下一轮继续 queue={} 本轮已成组={}", queue, groups);
+                } else {
+                    warnLimited("slow:" + queue, () -> log.warn("这条队列还没开始挑组，预算（凑单锁 TTL {} ms）就已所剩无几（Redis 很慢？），本轮跳过 queue={}",
+                            lockTtlMs, queue));
+                }
                 return;
             }
             GroupPicker.Pick pick = pick(queue, required, rated, d);
@@ -269,7 +314,7 @@ public final class QueueMatcher {
             GroupPicker.Group group = (GroupPicker.Group) pick;
             // 先把计划建好（构造器校验名单与票号）再弹组：弹出之后就只剩「交给开局管线」这一步，不会留下没人管的 matched 票
             GatherPlan plan = GatherPlan.popped(queue, group.members(), group.tickets());
-            PopResult result = pop(queue, plan.ticketRefs(), matchedTtlMs, d);
+            PopResult result = pop(queue, plan.ticketRefs(), matchedTtlMs);
             if (result instanceof PopResult.Invalid invalid) {
                 log.info("弹组被拒：{} 的票据在校验之后变了（取消 / 重排 / 被别的实例弹走），其余人原位不动 queue={} members={}",
                         unsigned(invalid.players()), queue, unsigned(group.members()));
@@ -285,15 +330,78 @@ public final class QueueMatcher {
                 }
                 continue;
             }
-            metrics.matchWait(queue.mode(), group.anchorWaitSeconds());
-            if (rated) {
-                metrics.groupRatingSpread(queue.mode(), group.spreadCenti());
-            }
-            log.info("成组 queue={} wait={}s tol={} spread={} members={} ratings={} matched_ttl={}s", queue, group.anchorWaitSeconds(),
-                    points(group.toleranceCenti()), points(group.spreadCenti()), unsigned(group.members()), group.ratingsCenti(),
-                    matchedTtlMs / 1000);
+            // 弹出之后的第一句就是交给开局管线，中间不夹任何别的调用：在它之前抛出的任何异常都会留下「已 matched、没人开局」的票。
             // gather 是多跳 RPC，跑在它自己的虚拟线程上，不占凑单锁；结果（置 ready / 回队首 / 删票、指标）都由管线自己收尾
             gather.launch(plan);
+            launched++;
+            try {
+                metrics.matchWait(queue.mode(), group.anchorWaitSeconds());
+                if (rated) {
+                    metrics.groupRatingSpread(queue.mode(), group.spreadCenti());
+                }
+                log.info("成组 queue={} wait={}s tol={} spread={} members={} ratings={} matched_ttl={}s", queue, group.anchorWaitSeconds(),
+                        points(group.toleranceCenti()), points(group.spreadCenti()), unsigned(group.members()), group.ratingsCenti(),
+                        matchedTtlMs / 1000);
+            } catch (RuntimeException e) {
+                log.warn("成组之后记指标 / 日志出错（忽略；这一组已交给开局管线） queue={} members={}", queue, unsigned(group.members()), e);
+            }
+        }
+    }
+
+    /** 这条凑不满的队列现在该不该做一次票据清理（见 {@link #sweepStale}）。 */
+    private boolean staleSweepDue(QueueRef queue) {
+        long now = nanoClock.getAsLong();
+        String key = queue.queueKey();
+        Long last = lastStaleSweepNanos.get(key);
+        if (last == null) {
+            // 第一次见到：只开始计时，满一个间隔还凑不满再清——刚有人排进来的队列不必为它多读两次。
+            // 限频表已满时不等（凑不满的队列比表还多，被淘汰的队列每次都像第一次见到，等下去永远轮不到）
+            boolean tableFull = lastStaleSweepNanos.size() >= STALE_SWEEP_KEYS;
+            lastStaleSweepNanos.put(key, now);
+            return tableFull;
+        }
+        if (now - last < STALE_SWEEP_INTERVAL_NANOS) {
+            return false;
+        }
+        lastStaleSweepNanos.put(key, now);
+        return true;
+    }
+
+    /**
+     * 凑不满的队列的轻量清理：只看票据——票据缺失 / 不是 queued / 不属于这条队列的成员（与非法成员串）摘出队列，摘空了当场剔除注册集。
+     * 不读战斗锁与位置（那是成组时才做的校验），退避没到点的人也不动。
+     *
+     * <p>为什么需要：成员校验只发生在挑组里，而凑不满的队列从不挑组。{@code battle_config_id} 不校验、任何值都自成一条队列，
+     * 一个号排进没人用的副本号、不取消，6 h 后票据过期，留下的队列项没人清——队列永远非空、永远不出注册集，凑单每一轮都要为它
+     * 抢锁、读长度、放锁，这样的队列只增不减（基线同样如此，{@code matcher.go:277-284}）。
+     */
+    private void sweepStale(QueueRef queue, Deadline d) {
+        QueueSnapshot snapshot = store.snapshot(queue, SCAN_LIMIT, d);
+        Set<Long> playerIds = new LinkedHashSet<>();
+        for (SnapshotEntry entry : snapshot.entries()) {
+            if (entry.playerId() != 0) {
+                playerIds.add(entry.playerId());
+            }
+        }
+        Map<Long, Ticket> tickets = playerIds.isEmpty() ? Map.of() : store.readAll(playerIds, d);
+        QueueGate gate = new QueueGate(queue, d);
+        Set<String> evicted = new LinkedHashSet<>();
+        int kept = 0;
+        for (SnapshotEntry entry : snapshot.entries()) {
+            Ticket ticket = entry.playerId() == 0 ? null : tickets.get(entry.playerId());
+            boolean stale = ticket == null || ticket.state() != TicketState.QUEUED || !queue.queueKey().equals(ticket.queueKey());
+            if (!stale) {
+                kept++;
+            } else if (evicted.add(entry.member())) {
+                gate.evict(entry);
+            }
+        }
+        if (!evicted.isEmpty()) {
+            log.info("凑不满的队列清掉了 {} 个没有有效票据的残项 queue={} 剩余={}", evicted.size(), queue, kept);
+        }
+        if (kept == 0 && !evicted.isEmpty() && store.pruneIfEmpty(queue, d)) {
+            lastStaleSweepNanos.remove(queue.queueKey());
+            log.info("清理之后队列已空，从注册集剔除 queue={}", queue);
         }
     }
 
@@ -311,19 +419,19 @@ public final class QueueMatcher {
     }
 
     /**
-     * 原子弹组。应答丢了（结局不明）时用同一个标记重发一次：第一次其实已生效的话，存储按标记回「重放」。
+     * 原子弹组。应答丢了（结局不明）时<b>无条件</b>用同一个标记重发一次：第一次其实已生效的话，存储按标记回「重放」。
      * 第二次仍失败就把异常抛给上层——这条队列的本轮到此为止，可能已弹出的票据按 matched TTL 自愈（同「实例在 gather 中崩溃」）。
+     *
+     * <p>两次尝试各用一个新的 {@link #POP_BUDGET_MS} 截止，不用队列的共用截止：共用截止在弹组的等待里到期时命令已经在路上、多半随后执行，
+     * 而「截止已过就不重发」会让这一组人被摘出队列却没人开局。弹组越过锁 TTL 没有正确性风险（锁只是效率手段，脚本自己核对每个人）。
      */
-    private PopResult pop(QueueRef queue, List<TicketRef> members, long matchedTtlMs, Deadline d) {
+    private PopResult pop(QueueRef queue, List<TicketRef> members, long matchedTtlMs) {
         String popToken = UUID.randomUUID().toString();
         try {
-            return store.pop(queue, popToken, members, matchedTtlMs, d);
+            return store.pop(queue, popToken, members, matchedTtlMs, Deadline.after(POP_BUDGET_MS));
         } catch (Deadline.DependencyException e) {
-            if (d.expired()) {
-                throw e;
-            }
             log.warn("弹组结局不明，用同一个标记重发一次 queue={} members={}", queue, members.stream().map(TicketRef::playerId).toList(), e);
-            return store.pop(queue, popToken, members, matchedTtlMs, d);
+            return store.pop(queue, popToken, members, matchedTtlMs, Deadline.after(POP_BUDGET_MS));
         }
     }
 

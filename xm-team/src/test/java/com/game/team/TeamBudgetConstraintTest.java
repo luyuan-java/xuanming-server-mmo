@@ -51,7 +51,8 @@ class TeamBudgetConstraintTest {
     void 每跳超时上限3秒_整请求预算上限3点5秒_都先于gate调team的5秒() {
         assertThat(MatchTeamBattle.HOP_TIMEOUT_MS).isEqualTo(3_000);
         assertThat(TeamProperties.MAX_REQUEST_BUDGET.toMillis()).isEqualTo(3_500).isLessThan(5_000);
-        // xm-team 带给 xm-match 的剩余预算不会超过 xm-match 自己的整请求预算（4500 ms）：提供方按附件收口，不会比调用方等得更久
-        assertThat(TeamProperties.MAX_REQUEST_BUDGET.toMillis()).isLessThanOrEqualTo(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS);
+        // xm-team 带给 xm-match 的预算（= 每跳超时，≤ 3 s）不会超过 xm-match 自己的整请求预算（4500 ms）：提供方按附件收口，不会比调用方等得更久
+        assertThat(MatchTeamBattle.HOP_TIMEOUT_MS).isLessThanOrEqualTo(TeamProperties.MAX_REQUEST_BUDGET.toMillis())
+                .isLessThanOrEqualTo(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS);
     }
 }

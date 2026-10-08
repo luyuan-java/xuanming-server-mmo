@@ -42,6 +42,7 @@ import com.game.proto.match.GetQueueStatusResponse;
 import com.game.proto.match.JoinQueueRequest;
 import com.game.proto.match.JoinQueueResponse;
 import com.game.proto.match.ListWatchableBattlesResponse;
+import com.game.proto.match.MatchMode;
 import com.game.proto.match.QueueState;
 import com.game.proto.match.RespondChallengeRequest;
 import com.game.proto.match.RespondChallengeResponse;
@@ -92,6 +93,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -144,7 +146,13 @@ final class FakeMatchWorld implements AutoCloseable {
         /** 整队开战受理之后 gather 失败：不开局，全员收 MATCH_FAILED（不带 tip）。 */
         TEAM_GATHER_FAILS,
         /** 切磋接受之后 gather 失败：不开局，双方在 154 true 之后各再收一次 154 false。 */
-        CHALLENGE_GATHER_FAILS
+        CHALLENGE_GATHER_FAILS,
+        /** 挑战别人一律回 16008（对方不在线）：切磋只走得到「挑战自己 → 16007」这一步，发起、应答、接受都没有发生。 */
+        CHALLENGE_TARGET_ALWAYS_OFFLINE,
+        /** 收到的第一条 162（开挂机）被拒（应答带 1005），这一局随后照样打到 150——模拟「挂机没开成，靠回合超时的默认行动打完」。 */
+        FIRST_AUTO_REJECTED,
+        /** 150 里的 settlement 是别的局的（battle_id 对不上外层）。 */
+        SETTLEMENT_OF_OTHER_BATTLE
     }
 
     static final String TOKEN = "fake-admin-token";
@@ -279,10 +287,13 @@ final class FakeMatchWorld implements AutoCloseable {
     private long nextPlayerId = 0x8000_0000_0000_0001L;
     private long nextBattleId = 0x9000_0000_0000_0001L;
     private long nextChallengeId = 0xA000_0000_0000_0001L;
-    private int gathersSuccess;
+    /** 成功的开局数，按模式（指标 {@code xm_match_gathers_total{mode, outcome="success"}}）。 */
+    private final Map<Integer, Integer> gathersSuccess = new TreeMap<>();
     private int reissuesOk;
-    private int challengeCalls;
+    /** 切磋各出口的次数，键是 {@code stage|result}（指标 {@code xm_match_challenges_total{stage, result}}，取值同 xm-match 的小写枚举名）。 */
+    private final Map<String, Integer> challengeExits = new TreeMap<>();
     private int ratingsApplied;
+    private boolean autoRejectedOnce;
 
     FakeMatchWorld() throws IOException {
         this.registry = MessageIdRegistry.loadFromClasspath();
@@ -564,21 +575,31 @@ final class FakeMatchWorld implements AutoCloseable {
     }
 
     private void challenge(Channel ch, ClientRequest request, Player player, ChallengePlayerRequest challenge) {
-        challengeCalls++;
         long targetId = challenge.getTargetPlayerId();
         Player target = byId.get(targetId);
         TipInfoMessage reject = null;
+        String exit = "ok";
         if (targetId == 0 || targetId == player.id) {
             reject = tip(BattleSmokeChecks.TIP_CHALLENGE_SELF, BattleSmokeChecks.TEXT_CHALLENGE_SELF);
+            exit = "self";
+        } else if (faults.contains(Fault.CHALLENGE_TARGET_ALWAYS_OFFLINE)) {
+            reject = tip(BattleSmokeChecks.TIP_CHALLENGE_TARGET_OFFLINE, BattleSmokeChecks.TEXT_CHALLENGE_TARGET_OFFLINE);
+            exit = "target_offline";
         } else if (player.lock != 0) {
             reject = tip(BattleSmokeChecks.TIP_CHALLENGE_SELF_BUSY, BattleSmokeChecks.TEXT_CHALLENGE_SELF_BUSY);
+            exit = "self_busy";
         } else if (target != null && target.lock != 0) {
             reject = tip(BattleSmokeChecks.TIP_CHALLENGE_TARGET_BUSY, BattleSmokeChecks.TEXT_CHALLENGE_TARGET_BUSY);
+            exit = "target_busy";
         } else if (target == null || !target.online) {
             reject = tip(BattleSmokeChecks.TIP_CHALLENGE_TARGET_OFFLINE, BattleSmokeChecks.TEXT_CHALLENGE_TARGET_OFFLINE);
+            exit = "target_offline";
         } else if (target.pendingChallenge != 0) {
             reject = tip(BattleSmokeChecks.TIP_CHALLENGE_PENDING, BattleSmokeChecks.TEXT_CHALLENGE_PENDING);
+            exit = "pending";
         }
+        // 同真服务端：每个出口都计数（挑战自己被拒也算一次 invite）
+        challengeExits.merge("invite|" + exit, 1, Integer::sum);
         if (reject != null) {
             reply(ch, request, ChallengePlayerResponse.newBuilder().setErrorMessage(reject).build());
             return;
@@ -596,11 +617,13 @@ final class FakeMatchWorld implements AutoCloseable {
     private void respond(Channel ch, ClientRequest request, Player player, RespondChallengeRequest respond) {
         Challenge pending = challenges.get(respond.getChallengeId());
         if (pending == null) {
+            challengeExits.merge("respond|expired", 1, Integer::sum);
             reply(ch, request, RespondChallengeResponse.newBuilder()
                     .setErrorMessage(tip(BattleSmokeChecks.TIP_CHALLENGE_EXPIRED, BattleSmokeChecks.TEXT_CHALLENGE_EXPIRED)).build());
             return;
         }
         if (pending.target() != player.id) {
+            challengeExits.merge("respond|not_target", 1, Integer::sum);
             reply(ch, request, RespondChallengeResponse.newBuilder()
                     .setErrorMessage(tip(BattleSmokeChecks.TIP_CHALLENGE_NOT_TARGET, BattleSmokeChecks.TEXT_CHALLENGE_NOT_TARGET)).build());
             return;
@@ -609,6 +632,7 @@ final class FakeMatchWorld implements AutoCloseable {
         player.pendingChallenge = 0;
         Player challenger = byId.get(pending.challenger());
         ChallengeResultS2C.Builder result = ChallengeResultS2C.newBuilder().setChallengeId(pending.id()).setResponderId(player.id);
+        challengeExits.merge(respond.getAccept() ? "respond|accepted" : "respond|declined", 1, Integer::sum);
         if (!respond.getAccept()) {
             pushIfOnline(challenger, matchIds.challengeResult(), result.setAccepted(false).build());
             if (faults.contains(Fault.DECLINE_PUSH_TO_RESPONDER)) {
@@ -757,7 +781,7 @@ final class FakeMatchWorld implements AutoCloseable {
                 pushIfOnline(player, battleIds.battleStart(), start);
             }
         }
-        gathersSuccess++;
+        gathersSuccess.merge(mode, 1, Integer::sum);
         return battle;
     }
 
@@ -787,6 +811,17 @@ final class FakeMatchWorld implements AutoCloseable {
         if (request.getMessageId() == battleIds.getBattleState()) {
             reply(ch, request, stateOf(battle));
         } else if (request.getMessageId() == battleIds.setAutoBattle()) {
+            if (faults.contains(Fault.FIRST_AUTO_REJECTED) && !autoRejectedOnce) {
+                // 拒绝在前；这一局随后照样「打完」（当作回合超时的默认行动），没有人再收到 162 的应答
+                autoRejectedOnce = true;
+                reply(ch, request, SetAutoBattleResponse.newBuilder()
+                        .setErrorMessage(tip(BattleSmokeChecks.TIP_INVALID_PARAMETER, "战斗不存在")).build());
+                battle.autos.add(session.playerId());
+                if (!battle.finished && battle.autos.containsAll(battle.members)) {
+                    finish(battle, null, null);
+                }
+                return;
+            }
             battle.autos.add(session.playerId());
             if (!battle.finished && battle.autos.containsAll(battle.members)) {
                 finish(battle, ch, request);
@@ -812,7 +847,9 @@ final class FakeMatchWorld implements AutoCloseable {
         battle.directs.forEach((member, direct) -> {
             push(direct, battleIds.turnResult(), TurnResultS2C.newBuilder().setBattleId(battle.id).setRoundIndex(rounds).build());
             push(direct, battleIds.battleEnd(), BattleEndS2C.newBuilder().setBattleId(battle.id).setOutcome(outcome)
-                    .setSettlement(BattleSettlementData.newBuilder().setBattleId(battle.id).setPlayerId(member).setOutcome(outcome)
+                    .setSettlement(BattleSettlementData.newBuilder()
+                            .setBattleId(faults.contains(Fault.SETTLEMENT_OF_OTHER_BATTLE) ? battle.id + 1 : battle.id).setPlayerId(member)
+                            .setOutcome(outcome)
                             .setPlayerTeamIndex(battle.teams.get(member)).setTotalRounds(rounds)).build());
             if (direct == last) {
                 reply(direct, lastRequest, SetAutoBattleResponse.getDefaultInstance());
@@ -927,15 +964,28 @@ final class FakeMatchWorld implements AutoCloseable {
         return StartActivityBattleResponse.newBuilder().setBattleId(startBattle(MODE_PVE_TEAM, members).id).build();
     }
 
+    /**
+     * 指标文本，形状照真服务端的 Prometheus 输出：每条序列都带公共标签 {@code application}，标签按名字排序；标签取值同 xm-match
+     * （{@code mode} 是 {@code MatchMode} 的枚举名，切磋的 {@code stage} / {@code result} 是小写枚举名）。
+     */
     private synchronized String metrics() {
-        return "# HELP xm_match_gathers_total fake\n# TYPE xm_match_gathers_total counter\n"
-                + "xm_match_gathers_total{mode=\"MATCH_MODE_1V1\",outcome=\"success\"} " + (double) gathersSuccess + "\n"
-                + "xm_match_gathers_total{mode=\"MATCH_MODE_1V1\",outcome=\"internal\"} 0.0\n"
-                + "xm_match_battle_ticket_reissues_total{result=\"ok\"} " + (double) reissuesOk + "\n"
-                + "xm_match_battle_ticket_reissues_total{result=\"not_found\"} 7.0\n"
-                + "xm_match_challenges_total{result=\"ok\",stage=\"invite\"} " + (double) challengeCalls + "\n"
-                + "xm_match_rating_updates_total{mode=\"MATCH_MODE_1V1\",outcome=\"applied\"} " + (double) ratingsApplied + "\n"
-                + "xm_match_rating_updates_total{mode=\"MATCH_MODE_PVE_SOLO\",outcome=\"ignored\"} 9.0\n";
+        String app = "application=\"xm-match\",";
+        StringBuilder text = new StringBuilder("# HELP xm_match_gathers_total fake\n# TYPE xm_match_gathers_total counter\n");
+        gathersSuccess.forEach((mode, count) -> text.append("xm_match_gathers_total{").append(app).append("mode=\"")
+                .append(MatchMode.forNumber(mode).name()).append("\",outcome=\"success\"} ").append((double) count).append('\n'));
+        // 不该被算进去的序列：别的 outcome、别的 result
+        text.append("xm_match_gathers_total{").append(app).append("mode=\"MATCH_MODE_PVE_SOLO\",outcome=\"prepare_failed\"} 5.0\n");
+        text.append("xm_match_battle_ticket_reissues_total{").append(app).append("result=\"ok\"} ").append((double) reissuesOk).append('\n');
+        text.append("xm_match_battle_ticket_reissues_total{").append(app).append("result=\"not_found\"} 7.0\n");
+        challengeExits.forEach((exit, count) -> {
+            String[] parts = exit.split("\\|");
+            text.append("xm_match_challenges_total{").append(app).append("result=\"").append(parts[1]).append("\",stage=\"").append(parts[0])
+                    .append("\"} ").append((double) count).append('\n');
+        });
+        text.append("xm_match_rating_updates_total{").append(app).append("mode=\"MATCH_MODE_1V1\",outcome=\"applied\"} ")
+                .append((double) ratingsApplied).append('\n');
+        text.append("xm_match_rating_updates_total{").append(app).append("mode=\"MATCH_MODE_PVE_SOLO\",outcome=\"ignored\"} 9.0\n");
+        return text.toString();
     }
 
     // ---------------------------------------------------------------- 小件

@@ -29,8 +29,9 @@ import org.slf4j.LoggerFactory;
  * <p>调用纪律（{@code MatchTeamService} 的契约在调用方这一侧的落实）：
  * <ul>
  *   <li><b>不重试</b>：引用必须 {@code retries = 0}（装配见 {@code TeamDubboConfiguration}）。</li>
- *   <li><b>前三个方法</b>：每跳的 Dubbo 超时 = {@code min(3 s, 剩余请求预算)}（调用级 {@code timeout} 附件），剩余预算（毫秒，发出时刻计）经附件
- *       {@code xm-budget-ms} 带给 xm-match；预算已用完就不发。本地最多等到请求截止。</li>
+ *   <li><b>前三个方法</b>：每跳的 Dubbo 超时 = {@code min(3 s, 剩余请求预算)}（调用级 {@code timeout} 附件），<b>同一个值</b>（毫秒，发出时刻计）经附件
+ *       {@code xm-budget-ms} 带给 xm-match——带下去的是这一跳本端真正肯等的时间，不是整请求的剩余预算（理由见 {@code call}）；
+ *       预算已用完就不发。本地最多等到请求截止。</li>
  *   <li><b>{@link #runTeamGather}</b>：长挂调用，调用级超时 = 开战锁时长（5 人 101 s），不带预算附件；另加一个比它晚
  *       {@value #GATHER_GUARD_MS} ms 的本地兜底，保证返回的 stage 一定会完成。</li>
  *   <li><b>传输失败</b>（future 异常完成、超时、空应答）与<b>应答枚举的 UNSPECIFIED / 不认识的值</b>同样处理：预检 → 4030；建票 → 结果不明；
@@ -162,7 +163,11 @@ public final class MatchTeamBattle implements TeamBattlePort {
     }
 
     /**
-     * 带着剩余预算发一次调用并等到应答：每跳超时 = min({@link #HOP_TIMEOUT_MS}, 剩余预算)。
+     * 发一次调用并等到应答：每跳超时 = min({@link #HOP_TIMEOUT_MS}, 剩余请求预算)，带给 xm-match 的预算附件<b>就是这个每跳超时</b>。
+     *
+     * <p>为什么不把整请求的剩余预算带下去：本端在这一跳最多只等「每跳超时」，过了这个点应答没人收（建票会被判结果不明并回滚）。
+     * 附件比它大（请求预算缺省 3500 ms、每跳封顶 3 s，差出最多约 500 ms），xm-match 的本地截止就晚于本端真正放弃的时刻，
+     * 在工作队列里等过了 3 s 的建票仍会照常写票——正是预算附件要堵的「迟到的建票」窗口。
      *
      * @throws DependencyException 预算已用完（没有发出）、传输失败、超出请求预算、空应答——一律是「没有可信的应答」
      */
@@ -171,8 +176,8 @@ public final class MatchTeamBattle implements TeamBattlePort {
         if (remaining <= 0) {
             throw new DependencyException(what + "：请求预算已用完，没有发出");
         }
-        CompletableFuture<R> future = MatchRpcAttachments.callWithBudget(remaining, Math.min(HOP_TIMEOUT_MS, remaining),
-                invocation);
+        long hop = Math.min(HOP_TIMEOUT_MS, remaining);
+        CompletableFuture<R> future = MatchRpcAttachments.callWithBudget(hop, hop, invocation);
         R reply;
         try {
             reply = deadline.await(future, what);

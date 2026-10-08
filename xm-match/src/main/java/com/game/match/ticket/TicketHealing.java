@@ -9,7 +9,8 @@ import com.game.common.deadline.Deadline;
  *   <li>没有票 → {@link Free}；</li>
  *   <li>ready 票 → 按票号条件删（要求删时仍是 ready）；删掉了（或已经不在）→ {@link Free}；</li>
  *   <li>queued 票，但它的队列里找不到这个人（孤儿）→ 按票号条件删（要求删时仍是 queued）；删掉了 → {@link Free}；</li>
- *   <li>其余（在队列里的 queued 票、matched 票、状态不认识的票、条件删没删成的票）→ {@link InFlight}，带读到的票号。</li>
+ *   <li>其余（在队列里的 queued 票、matched 票、状态不认识的票、条件删没删成的票）→ {@link InFlight}，带读到的票号；
+ *       唯一的例外是 ready 票没删成（读与删之间票已被换成新的）：带<b>重新读到的</b>那张票的票号，那一刻又没有票了则是 {@link Free}。</li>
  * </ol>
  *
  * <p><b>前提</b>：调用方已经确认这名玩家<b>没有战斗锁</b>——第 2 条的 ready 票只有在「战斗已结束」时才是残留。所以顺序固定为「先查战斗锁、再调本接口」，
@@ -28,7 +29,7 @@ public interface TicketHealing {
     record Free() implements Verdict {
     }
 
-    /** 有一张在途的票（{@code ticketId} 是读到的票号）：157 回 16001 并带上它；预检回 {@code TICKET_IN_FLIGHT}。 */
+    /** 有一张在途的票（{@code ticketId} 是玩家此刻那张票的票号）：157 回 16001 并带上它；预检回 {@code TICKET_IN_FLIGHT}。 */
     record InFlight(String ticketId) implements Verdict {
     }
 

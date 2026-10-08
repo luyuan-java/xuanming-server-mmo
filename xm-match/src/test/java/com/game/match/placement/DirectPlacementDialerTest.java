@@ -16,6 +16,8 @@ import com.game.proto.CreateBattleRequest;
 import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.apache.dubbo.rpc.RpcException;
@@ -24,8 +26,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * 按落点记录直拨并分类（match-spec §4.3 第 4–6 行）：按<b>记录里的</b>地址与实例拨、不按目录找；只有「建连失败 + 同号节点已换实例」才判这一局没了；
- * 超时永不判死；分不清的都只是暂不可用。真 Dubbo 的异常形态见 {@code RpcFailuresLoopbackTest}，这里用内存出站口测判定本身。
+ * 按落点记录直拨并分类（match-spec §4.3 第 4–6 行）：按<b>记录里的</b>地址拨、不按目录找；只有「请求没送达 + 同号节点已换实例 + 原地址明确连不上」
+ * 才判这一局没了；超时永不判死；分不清的都只是暂不可用。真 Dubbo 的异常形态见 {@code RpcFailuresLoopbackTest}，这里用内存出站口测判定本身。
  */
 class DirectPlacementDialerTest {
 
@@ -33,9 +35,28 @@ class DirectPlacementDialerTest {
     private static final long PLAYER = 1001;
     private static final NodeRpcClients.Target RECORDED = new NodeRpcClients.Target("10.1.1.1", 21200, "inst-a");
 
+    /** 探测原地址的替身：记下每次探测，结论可换（缺省 = 明确连不上）。 */
+    private static final class ScriptedProbe implements ConnectProbe {
+        final List<String> probes = new ArrayList<>();
+        final List<Long> timeouts = new ArrayList<>();
+        Result result = Result.REFUSED;
+        RuntimeException error;
+
+        @Override
+        public Result probe(String host, int port, long timeoutMs) {
+            probes.add(host + ":" + port);
+            timeouts.add(timeoutMs);
+            if (error != null) {
+                throw error;
+            }
+            return result;
+        }
+    }
+
     private final FakeNodeCalls<BattleNodeService> calls = new FakeNodeCalls<>();
     private final FakeBattleNodes directory = new FakeBattleNodes();
     private final FakeBattleNode battle = new FakeBattleNode();
+    private final ScriptedProbe probe = new ScriptedProbe();
     private DirectPlacementDialer dialer;
 
     @BeforeEach
@@ -43,7 +64,7 @@ class DirectPlacementDialerTest {
         calls.register(RECORDED, battle);
         battle.room(CreateBattleRequest.newBuilder().setBattleId(BATTLE).setDeadlineMs(123_456)
                 .addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(PLAYER)).build());
-        dialer = new DirectPlacementDialer(calls, directory);
+        dialer = new DirectPlacementDialer(calls, directory, probe);
     }
 
     private static BattlePlacement placement() {
@@ -62,7 +83,7 @@ class DirectPlacementDialerTest {
     }
 
     @Test
-    void 调通_按记录里的地址与实例拨_应答原样带回_不读目录() {
+    void 调通_按记录里的地址拨_直连目标的实例段恒为空串_应答原样带回_不读目录() {
         // 目录里的 1 号已经是别的实例、别的地址：直拨不看它
         directory.add(FakeBattleNodes.node(1, "inst-successor", 21999));
 
@@ -73,10 +94,22 @@ class DirectPlacementDialerTest {
         assertThat(reply.getAssignment().getBattleId()).isEqualTo(BATTLE);
         assertThat(reply.getAssignment().getExpireAtMs()).isEqualTo(123_456);
         assertThat(calls.calls).singleElement().satisfies(call -> {
-            assertThat(call.target()).isEqualTo(RECORDED);
+            assertThat(call.target()).as("battle 的请求不带实例号，实例段只是客户端缓存的键：固定成空串，同一地址永远是同一个客户端")
+                    .isEqualTo(new NodeRpcClients.Target("10.1.1.1", 21200, ""));
             assertThat(call.timeout()).isEqualTo(Duration.ofSeconds(3));
         });
         assertThat(directory.lookups).isEmpty();
+        assertThat(probe.probes).as("调通了不探测").isEmpty();
+    }
+
+    @Test
+    void 两条记录同一地址不同实例号_用的是同一个直连目标_不会来回重建客户端() {
+        dial(placement());
+        dial(placement().toBuilder().setBattleInstanceId("inst-b").build());
+        dial(placement());
+
+        assertThat(calls.calls).extracting(FakeNodeCalls.Call::target).as("客户端缓存按目标的实例段判断要不要销毁重建")
+                .containsOnly(new NodeRpcClients.Target("10.1.1.1", 21200, ""));
     }
 
     @Test
@@ -89,7 +122,7 @@ class DirectPlacementDialerTest {
     }
 
     @Test
-    void 建连失败且目录里同号节点已换实例_这一局确实没了() {
+    void 建连失败_目录里同号节点已换实例_原地址明确连不上_这一局确实没了() {
         calls.unreachable(RECORDED);
         directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
 
@@ -97,7 +130,50 @@ class DirectPlacementDialerTest {
 
         assertThat(dial).isInstanceOf(Dial.RoomGone.class);
         assertThat(directory.lookups).as("按记录的节点号与实例号比对").containsExactly(BattleNodes.key(1, "inst-a"));
+        assertThat(probe.probes).as("探测的是记录里的地址").containsExactly("10.1.1.1:21200");
+        assertThat(probe.timeouts).as("探测上限 300 ms").containsExactly(DirectPlacementDialer.PROBE_TIMEOUT_MS);
         assertThat(battle.issues).isEmpty();
+    }
+
+    /**
+     * 「请求没送达」比「原地址连不上」宽：连接刚断、还没重连上时也是没送达，而原进程可能还活着（丢了租约、号被别的进程接手的那种）。
+     * 原地址连得上就不能判死：客户端永久放弃的可能是一场还在的战斗。
+     */
+    @Test
+    void 请求没送达且同号节点已换实例_但原地址连得上_不判死_只是暂不可用() {
+        calls.failWith(RECORDED, () -> TriRpcStatus.UNAVAILABLE.withDescription("upstream 10.1.1.1:21200 is unavailable").asException());
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21999));
+        probe.result = ConnectProbe.Result.CONNECTED;
+
+        Dial.Unavailable<?> result = unavailable(dial(placement()));
+
+        assertThat(result.kind()).isEqualTo(Kind.NOT_DELIVERED);
+        assertThat(probe.probes).hasSize(1);
+    }
+
+    @Test
+    void 探测没有结论或探测自己抛异常_同样不判死() {
+        calls.unreachable(RECORDED);
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+
+        probe.result = ConnectProbe.Result.INCONCLUSIVE;
+        assertThat(unavailable(dial(placement())).kind()).as("探测超时：丢包与主机被隔离也是超时").isEqualTo(Kind.NOT_DELIVERED);
+
+        probe.error = new IllegalStateException("注入的故障: 探测出错");
+        assertThat(unavailable(dial(placement())).kind()).isEqualTo(Kind.NOT_DELIVERED);
+        assertThat(probe.probes).hasSize(2);
+    }
+
+    @Test
+    void 探测不超出这次直拨余下的预算() {
+        calls.unreachable(RECORDED);
+        directory.add(FakeBattleNodes.node(1, "inst-successor", 21200));
+
+        dialer.dial(placement(), Duration.ofMillis(120),
+                node -> node.issueBattleTicket(IssueBattleTicketRequest.newBuilder().setBattleId(BATTLE).setPlayerId(PLAYER).build()));
+
+        assertThat(probe.timeouts).singleElement().satisfies(timeoutMs -> assertThat(timeoutMs).as("直拨预算 120 ms，探测只能用余下的")
+                .isLessThanOrEqualTo(120L));
     }
 
     @Test
@@ -114,6 +190,7 @@ class DirectPlacementDialerTest {
         directory.readFailed = true;
         assertThat(unavailable(dial(placement())).kind()).as("目录读失败：不能证明任何事").isEqualTo(Kind.NOT_DELIVERED);
         assertThat(directory.lookups).hasSize(3);
+        assertThat(probe.probes).as("目录这一条证据不成立就不必探测").isEmpty();
     }
 
     @Test
@@ -125,6 +202,7 @@ class DirectPlacementDialerTest {
 
         assertThat(result.kind()).isEqualTo(Kind.TIMEOUT);
         assertThat(directory.lookups).as("超时永不判死").isEmpty();
+        assertThat(probe.probes).isEmpty();
     }
 
     @Test
@@ -154,7 +232,11 @@ class DirectPlacementDialerTest {
         calls.failWith(RECORDED, () -> TriRpcStatus.UNAVAILABLE.withDescription("UNAVAILABLE : upstream 10.9.9.9:1 is unavailable").asException());
         assertThat(unavailable(dial(placement())).kind()).as("对端回的 UNAVAILABLE 不是建连失败").isEqualTo(Kind.OTHER);
 
+        calls.failWith(RECORDED, () -> TriRpcStatus.UNAVAILABLE.withDescription("upstream 10.9.9.9:1 is unavailable").asException());
+        assertThat(unavailable(dial(placement())).kind()).as("整句文案相同，但句中的地址不是这一次拨的地址：是对端在转述它自己的上游").isEqualTo(Kind.OTHER);
+
         assertThat(directory.lookups).isEmpty();
+        assertThat(probe.probes).isEmpty();
     }
 
     @Test

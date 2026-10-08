@@ -94,7 +94,7 @@ public interface TeamBattlePort {
      *
      * @param battleConfigId DungeonTable id（uint32 位模式）
      * @param roster         参战名单：队长在前，其余按 join_seq
-     * @param deadline       请求预算（每跳超时取 min(3 s, 剩余预算)，剩余预算随调用带给 xm-match）
+     * @param deadline       请求预算（每跳超时取 min(3 s, 剩余预算)，这一跳的超时随调用带给 xm-match 作它的预算）
      */
     Check checkTeamMatch(int battleConfigId, List<Long> roster, Deadline deadline);
 

@@ -28,6 +28,7 @@ class RedisKeysMatchTest {
         assertThat(RedisKeys.matchQueueLock(1, 7)).isEqualTo("xm:{match}:lock:1:7");
         assertThat(RedisKeys.matchTicket(1001)).isEqualTo("xm:{match}:ticket:1001");
         assertThat(RedisKeys.matchPopMarker("6f1c2d3e-aaaa")).isEqualTo("xm:{match}:pop:6f1c2d3e-aaaa");
+        assertThat(RedisKeys.matchRequeueMarker("6f1c2d3e-bbbb")).isEqualTo("xm:{match}:requeue:6f1c2d3e-bbbb");
         assertThat(RedisKeys.matchChallenge(88)).isEqualTo("xm:{match}:challenge:88");
         assertThat(RedisKeys.matchChallengeTarget(1001)).isEqualTo("xm:{match}:challenge-target:1001");
         assertThat(RedisKeys.matchChallengeDone(88)).isEqualTo("xm:{match}:challenge-done:88");
@@ -97,6 +98,7 @@ class RedisKeysMatchTest {
                 RedisKeys.matchQueueLock(3, 0), RedisKeys.matchQueueLock(1, 2),
                 RedisKeys.matchTicket(1), RedisKeys.matchTicket(BIG), RedisKeys.matchTicket(-1L),
                 RedisKeys.matchPopMarker("a"), RedisKeys.matchPopMarker("6f1c2d3e-0000-4000-8000-000000000001"),
+                RedisKeys.matchRequeueMarker("a"), RedisKeys.matchRequeueMarker("6f1c2d3e-0000-4000-8000-000000000002"),
                 RedisKeys.matchChallenge(1), RedisKeys.matchChallenge(BIG),
                 RedisKeys.matchChallengeTarget(2), RedisKeys.matchChallengeTarget(BIG),
                 RedisKeys.matchChallengeDone(3), RedisKeys.matchChallengeDone(BIG),

@@ -108,6 +108,11 @@ class InMemoryTicketStoreTest extends TicketStoreContract {
     }
 
     @Override
+    protected void expireRequeueMarker(String requeueToken) {
+        store.expireRequeueMarker(requeueToken);
+    }
+
+    @Override
     protected void expireLock(QueueRef queue) {
         store.expireLock(queue);
     }
@@ -170,7 +175,7 @@ class InMemoryTicketStoreTest extends TicketStoreContract {
     void 退避到点由手拨时钟决定() {
         store.enqueue(1001, "t-1001", Q, 1, 150_000, QUEUED_TTL, d());
         store.pop(Q, "pop-1", List.of(new TicketRef(1001, "t-1001")), MATCHED_TTL, d());
-        store.requeueFront(Q, List.of(new TicketRef(1001, "t-1001")), QUEUED_TTL, 2000, d());
+        store.requeueFront(Q, rq(), List.of(new TicketRef(1001, "t-1001")), QUEUED_TTL, 2000, d());
 
         assertThat(store.ticketOf(1001).orElseThrow().notBeforeMs()).isEqualTo(clock.peekMs() + 2000);
         clock.advanceMs(1999);

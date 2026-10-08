@@ -5,6 +5,7 @@ import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
 import com.game.match.ticket.TicketRef;
 import com.game.match.ticket.TicketStore;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,17 @@ final class HookedTicketStore implements TicketStore {
     Function<List<TicketRef>, PopResult> popOverride;
     /** 弹组返回之后调一次（入参是结局）。 */
     Consumer<PopResult> afterPop;
+    /** 每次弹组调用（含被 {@link #popOverride} 接走的），按到达顺序。 */
+    final List<PopCall> popCalls = new ArrayList<>();
+
+    /**
+     * 一次弹组调用。
+     *
+     * @param token       弹组标记
+     * @param remainingMs 调用那一刻传进来的截止还剩多少毫秒（已过期为 0）
+     */
+    record PopCall(String token, long remainingMs) {
+    }
 
     HookedTicketStore(TicketStore delegate) {
         this.delegate = delegate;
@@ -39,6 +51,7 @@ final class HookedTicketStore implements TicketStore {
 
     @Override
     public PopResult pop(QueueRef queue, String popToken, List<TicketRef> members, long matchedTtlMs, Deadline d) {
+        popCalls.add(new PopCall(popToken, d.remainingMillis()));
         if (beforePop != null) {
             beforePop.accept(members);
         }
@@ -125,8 +138,9 @@ final class HookedTicketStore implements TicketStore {
     }
 
     @Override
-    public int requeueFront(QueueRef queue, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs, Deadline d) {
-        return delegate.requeueFront(queue, survivorsInOrder, queuedTtlMs, notBeforeDelayMs, d);
+    public int requeueFront(QueueRef queue, String requeueToken, List<TicketRef> survivorsInOrder, long queuedTtlMs, long notBeforeDelayMs,
+                            Deadline d) {
+        return delegate.requeueFront(queue, requeueToken, survivorsInOrder, queuedTtlMs, notBeforeDelayMs, d);
     }
 
     @Override

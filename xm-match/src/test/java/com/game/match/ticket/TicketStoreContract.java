@@ -40,6 +40,7 @@ public abstract class TicketStoreContract {
 
     private final Set<Long> pids = new LinkedHashSet<>();
     private final Set<QueueRef> queues = new LinkedHashSet<>();
+    private int requeueSeq;
 
     // ================================================================ 钩子（两种实现各自提供）
 
@@ -81,6 +82,8 @@ public abstract class TicketStoreContract {
 
     protected abstract void expirePopMarker(String popToken);
 
+    protected abstract void expireRequeueMarker(String requeueToken);
+
     protected abstract void expireLock(QueueRef queue);
 
     /**
@@ -116,6 +119,16 @@ public abstract class TicketStoreContract {
 
     protected final String tok(String name) {
         return token(name);
+    }
+
+    /** 本用例的一个回队首 token（同名同值）。缺省与弹组 token 同一个分配口；Redis 版另行登记（只清它的重放标记）。 */
+    protected String requeueToken(String name) {
+        return token(name);
+    }
+
+    /** 一个新的回队首 token（每次调用都不同）：不测重放的用例每次回队首用一个新的；测重放的用例先存进变量再用两次。 */
+    protected final String rq() {
+        return requeueToken("rq-" + (++requeueSeq));
     }
 
     protected static Deadline d() {
@@ -623,7 +636,7 @@ public abstract class TicketStoreContract {
         enqueue(late, q, 150_000);
         store().pop(q, tok("pop-1"), List.of(ref(a), ref(b), ref(c)), MATCHED_TTL, d());
 
-        int requeued = store().requeueFront(q, List.of(ref(a), ref(c)), QUEUED_TTL, 0, d());
+        int requeued = store().requeueFront(q, rq(), List.of(ref(a), ref(c)), QUEUED_TTL, 0, d());
 
         assertThat(requeued).isEqualTo(2);
         assertThat(queueMembers(q)).containsExactly(u(a), u(c), u(late));
@@ -647,7 +660,7 @@ public abstract class TicketStoreContract {
         assertThat(store().pruneIfEmpty(q, d())).as("弹空之后被别的实例懒剔除").isTrue();
         assertThat(indexed(q)).isFalse();
 
-        assertThat(store().requeueFront(q, List.of(ref(a)), QUEUED_TTL, 0, d())).isEqualTo(1);
+        assertThat(store().requeueFront(q, rq(), List.of(ref(a)), QUEUED_TTL, 0, d())).isEqualTo(1);
 
         assertThat(indexed(q)).as("I1：回队首必须重新登记注册集").isTrue();
         assertThat(queueMembers(q)).containsExactly(u(a));
@@ -669,7 +682,7 @@ public abstract class TicketStoreContract {
         store().pop(other, tok("pop-2"), List.of(ref(elsewhere)), MATCHED_TTL, d());
         store().delete(ref(gone), d());
 
-        int requeued = store().requeueFront(q, List.of(ref(a), ref(gone), new TicketRef(replaced, "t-stale"), ref(elsewhere)), QUEUED_TTL, 0, d());
+        int requeued = store().requeueFront(q, rq(), List.of(ref(a), ref(gone), new TicketRef(replaced, "t-stale"), ref(elsewhere)), QUEUED_TTL, 0, d());
 
         assertThat(requeued).isEqualTo(1);
         assertThat(queueMembers(q)).containsExactly(u(a));
@@ -677,7 +690,7 @@ public abstract class TicketStoreContract {
         assertThat(stateOf(replaced)).isEqualTo(TicketState.MATCHED);
         assertThat(stateOf(elsewhere)).as("票的队列键不是这条队列：不动").isEqualTo(TicketState.MATCHED);
         assertThat(queueMembers(other)).isEmpty();
-        assertThat(store().requeueFront(q, List.of(), QUEUED_TTL, 0, d())).as("空名单什么都不做").isZero();
+        assertThat(store().requeueFront(q, rq(), List.of(), QUEUED_TTL, 0, d())).as("空名单什么都不做").isZero();
     }
 
     @Test
@@ -688,7 +701,7 @@ public abstract class TicketStoreContract {
         store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d());
 
         long before = nowMs();
-        assertThat(store().requeueFront(q, List.of(ref(a)), QUEUED_TTL, 600_000, d())).isEqualTo(1);
+        assertThat(store().requeueFront(q, rq(), List.of(ref(a)), QUEUED_TTL, 600_000, d())).isEqualTo(1);
         long after = nowMs();
 
         Ticket backing = ticket(a);
@@ -704,7 +717,7 @@ public abstract class TicketStoreContract {
         assertThat(store().pop(q, tok("pop-3"), List.of(ref(a)), MATCHED_TTL, d())).isInstanceOf(PopResult.Popped.class);
 
         // 再回一次、不带退避：清掉 not_before_ms
-        assertThat(store().requeueFront(q, List.of(ref(a)), QUEUED_TTL, 0, d())).isEqualTo(1);
+        assertThat(store().requeueFront(q, rq(), List.of(ref(a)), QUEUED_TTL, 0, d())).isEqualTo(1);
         assertThat(ticket(a).notBeforeMs()).isZero();
         assertThat(store().pop(q, tok("pop-4"), List.of(ref(a)), MATCHED_TTL, d())).isInstanceOf(PopResult.Popped.class);
     }
@@ -716,7 +729,7 @@ public abstract class TicketStoreContract {
         store().createMatched(a, tid(a), 4, 1, 1, 150_000, 42_000, d());
         Object before = fingerprint();
 
-        assertThat(store().requeueFront(q, List.of(ref(a)), QUEUED_TTL, 0, d())).isZero();
+        assertThat(store().requeueFront(q, rq(), List.of(ref(a)), QUEUED_TTL, 0, d())).isZero();
 
         assertThat(fingerprint()).isEqualTo(before);
         assertThat(indexed(q)).as("没有人回去就不登记注册集").isFalse();
@@ -730,7 +743,7 @@ public abstract class TicketStoreContract {
         enqueue(a, q, 150_000);
         enqueue(b, q, 150_000);
         store().pop(q, tok("pop-1"), List.of(ref(a), ref(b)), MATCHED_TTL, d());
-        store().requeueFront(q, List.of(ref(a), ref(b)), QUEUED_TTL, 0, d());
+        store().requeueFront(q, rq(), List.of(ref(a), ref(b)), QUEUED_TTL, 0, d());
 
         for (long playerId : List.of(a, b)) {
             assertThat(stateOf(playerId)).isEqualTo(TicketState.QUEUED);
@@ -1105,7 +1118,7 @@ public abstract class TicketStoreContract {
         long a = p(1);
         enqueue(a, q, 150_000);
         store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d());
-        store().requeueFront(q, List.of(ref(a)), QUEUED_TTL, 0, d());
+        store().requeueFront(q, rq(), List.of(ref(a)), QUEUED_TTL, 0, d());
         Object back = fingerprint();
 
         assertThat(store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d())).isInstanceOf(PopResult.Replayed.class);
@@ -1177,21 +1190,123 @@ public abstract class TicketStoreContract {
     }
 
     @Test
-    public void 重放_回队首_已是queued的跳过_不会被推两次_返回0() {
+    public void 重放_回队首_同一个token再调一次_不会被推两次_返回第一次的人数() {
         QueueRef q = q(1);
         long a = p(1);
         long b = p(2);
         enqueue(a, q, 150_000);
         enqueue(b, q, 150_000);
         store().pop(q, tok("pop-1"), List.of(ref(a), ref(b)), MATCHED_TTL, d());
-        assertThat(store().requeueFront(q, List.of(ref(a), ref(b)), QUEUED_TTL, 2000, d())).isEqualTo(2);
+        String token = rq();
+        assertThat(store().requeueFront(q, token, List.of(ref(a), ref(b)), QUEUED_TTL, 2000, d())).isEqualTo(2);
         Object once = fingerprint();
 
-        int replay = store().requeueFront(q, List.of(ref(a), ref(b)), QUEUED_TTL, 2000, d());
+        int replay = store().requeueFront(q, token, List.of(ref(a), ref(b)), QUEUED_TTL, 2000, d());
 
-        assertThat(replay).isZero();
+        assertThat(replay).as("重放返回第一次的人数（指标与「回去的人数少于幸存者」的告警不被重放带偏）").isEqualTo(2);
         assertThat(queueMembers(q)).as("没有被推两次").containsExactly(u(a), u(b));
         assertThat(fingerprint()).as("退避到点时刻也没有被往后推").isEqualTo(once);
+    }
+
+    @Test
+    public void 回队首_换一个token对已经回了队的人再调_按现状核对_已是queued的跳过_返回0() {
+        QueueRef q = q(1);
+        long a = p(1);
+        long b = p(2);
+        enqueue(a, q, 150_000);
+        enqueue(b, q, 150_000);
+        store().pop(q, tok("pop-1"), List.of(ref(a), ref(b)), MATCHED_TTL, d());
+        assertThat(store().requeueFront(q, rq(), List.of(ref(a), ref(b)), QUEUED_TTL, 2000, d())).isEqualTo(2);
+        Object once = fingerprint();
+
+        assertThat(store().requeueFront(q, rq(), List.of(ref(a), ref(b)), QUEUED_TTL, 2000, d())).as("另一次回队首：票已是 queued，CAS 不成立").isZero();
+
+        assertThat(queueMembers(q)).containsExactly(u(a), u(b));
+        assertThat(fingerprint()).isEqualTo(once);
+    }
+
+    /**
+     * 回队首的 CAS 条件在第一次执行之后<b>还能重新成立</b>：回了队首的人被凑单用新的弹组 token 再弹一次，票又是 matched（票号、队列都没变）。
+     * 这时迟到的重发（同一个回队首 token）不得把正在第二次 gather 里的人再推回队首。
+     */
+    @Test
+    public void 重放_回队首之后有人又被弹成matched_同一个token的重放不把他再推回队首() {
+        QueueRef q = q(1);
+        long a = p(1);
+        long b = p(2);
+        long c = p(3);
+        enqueue(a, q, 150_000);
+        enqueue(b, q, 150_000);
+        enqueue(c, q, 150_000);
+        store().pop(q, tok("pop-1"), List.of(ref(a), ref(b)), MATCHED_TTL, d());
+        String token = rq();
+        assertThat(store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d())).as("gather#1 失败，b 是肇事者，a 回队首").isEqualTo(1);
+        assertThat(store().pop(q, tok("pop-2"), List.of(ref(a), ref(c)), MATCHED_TTL, d())).as("凑单把 a 与 c 再弹成组").isInstanceOf(PopResult.Popped.class);
+        Object secondGather = fingerprint();
+        long ttl = ttlMs(a);
+
+        int replay = store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d());
+
+        assertThat(replay).as("返回第一次的人数").isEqualTo(1);
+        assertThat(stateOf(a)).as("a 仍在第二次 gather 里").isEqualTo(TicketState.MATCHED);
+        assertThat(queueMembers(q)).as("队列里没有他").isEmpty();
+        assertThat(rankOf(q)).isEmpty();
+        assertThat(fingerprint()).isEqualTo(secondGather);
+        assertThat(ttlMs(a)).as("matched 的寿命没有被改成 queued 的 6 h").isLessThanOrEqualTo(ttl);
+        assertThat(store().markReady(ref(a), 4242, READY_TTL, d())).as("第二次 gather 成功时照常置 ready").isTrue();
+    }
+
+    @Test
+    public void 重放_回队首第一次一个人都没放回去_标记照写_之后条件成立了重放也不放() {
+        QueueRef q = q(1);
+        long a = p(1);
+        enqueue(a, q, 150_000);
+        String token = rq();
+        assertThat(store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d())).as("他还在队列里（queued）：不满足").isZero();
+        assertThat(queueMembers(q)).containsExactly(u(a));
+        store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d());
+        Object popped = fingerprint();
+
+        assertThat(store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d())).as("同一个 token：第一次回 0 也记了标记").isZero();
+
+        assertThat(fingerprint()).isEqualTo(popped);
+        assertThat(stateOf(a)).isEqualTo(TicketState.MATCHED);
+        assertThat(queueMembers(q)).isEmpty();
+    }
+
+    @Test
+    public void 回队首的标记过期之后_同一个token按现状重新核对() {
+        QueueRef q = q(1);
+        long a = p(1);
+        enqueue(a, q, 150_000);
+        store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d());
+        String token = rq();
+        assertThat(store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d())).isEqualTo(1);
+        expireRequeueMarker(token);
+        Object once = fingerprint();
+
+        assertThat(store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d())).as("标记没了：按现状核对，他已是 queued").isZero();
+        assertThat(fingerprint()).isEqualTo(once);
+
+        store().pop(q, tok("pop-2"), List.of(ref(a)), MATCHED_TTL, d());
+        expireRequeueMarker(token);
+        assertThat(store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d())).as("标记过期后是一次新的回队首").isEqualTo(1);
+        assertThat(queueMembers(q)).containsExactly(u(a));
+        assertThat(stateOf(a)).isEqualTo(TicketState.QUEUED);
+    }
+
+    @Test
+    public void 回队首的空名单不写标记_同一个token随后照常回队首() {
+        QueueRef q = q(1);
+        long a = p(1);
+        enqueue(a, q, 150_000);
+        store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d());
+        String token = rq();
+
+        assertThat(store().requeueFront(q, token, List.of(), QUEUED_TTL, 0, d())).isZero();
+
+        assertThat(store().requeueFront(q, token, List.of(ref(a)), QUEUED_TTL, 0, d())).isEqualTo(1);
+        assertThat(queueMembers(q)).containsExactly(u(a));
     }
 
     @Test
@@ -1240,7 +1355,7 @@ public abstract class TicketStoreContract {
 
         assertThat(store().markReady(stale, 987_654_321L, READY_TTL, d())).isFalse();
         assertThat(store().extendMatched(List.of(stale), 16_000, d())).isZero();
-        assertThat(store().requeueFront(q, List.of(stale), QUEUED_TTL, 0, d())).isZero();
+        assertThat(store().requeueFront(q, rq(), List.of(stale), QUEUED_TTL, 0, d())).isZero();
         assertThat(store().delete(stale, d())).isFalse();
         assertThat(store().deleteGroup(List.of(stale), d())).isZero();
         assertThat(store().pop(q, lateToken, List.of(stale), MATCHED_TTL, d())).isEqualTo(new PopResult.Invalid(List.of(a)));
@@ -1276,8 +1391,10 @@ public abstract class TicketStoreContract {
         assertThatThrownBy(() -> store().markReady(ref(a), 0, READY_TTL, d())).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> store().markReady(ref(a), 77, 0, d())).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> store().extendMatched(List.of(ref(a)), 0, d())).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> store().requeueFront(q, none, QUEUED_TTL, -1, d())).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> store().requeueFront(q, List.of(ref(a), ref(a)), QUEUED_TTL, 0, d())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store().requeueFront(q, rq(), none, QUEUED_TTL, -1, d())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store().requeueFront(q, "", List.of(ref(a)), QUEUED_TTL, 0, d())).as("回队首必须带 token").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store().requeueFront(q, null, List.of(ref(a)), QUEUED_TTL, 0, d())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store().requeueFront(q, rq(), List.of(ref(a), ref(a)), QUEUED_TTL, 0, d())).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> store().tryLockQueue(q, "", 10_000, d())).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> store().tryLockQueue(q, "inst", 0, d())).isInstanceOf(IllegalArgumentException.class);
 

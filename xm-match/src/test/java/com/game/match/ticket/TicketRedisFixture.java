@@ -43,6 +43,9 @@ public final class TicketRedisFixture {
     private final Set<Long> pids = new LinkedHashSet<>();
     private final Set<QueueRef> queues = new LinkedHashSet<>();
     private final Set<String> tokens = new LinkedHashSet<>();
+    /** 回队首的 token：只登记清理它们的重放标记，不进 {@link #allKeys()}（见 {@link #cleanup()}）。 */
+    private final Set<String> requeueTokens = new LinkedHashSet<>();
+    private int freshTokens;
 
     public static RedissonClient connect() {
         Config config = new Config();
@@ -94,6 +97,18 @@ public final class TicketRedisFixture {
         return token;
     }
 
+    /** 本夹具的一个回队首 token（同名同值）。 */
+    public String requeueToken(String name) {
+        String token = name + "-" + run;
+        requeueTokens.add(token);
+        return token;
+    }
+
+    /** 一个新的回队首 token（每次调用都不同）：不测重放的用例每次回队首用一个新的。 */
+    public String freshToken() {
+        return requeueToken("fresh-" + (++freshTokens));
+    }
+
     public static String ticketKey(long playerId) {
         return RedisKeys.matchTicket(playerId);
     }
@@ -116,6 +131,10 @@ public final class TicketRedisFixture {
 
     public void cleanup() {
         List<String> keys = allKeys();
+        // 回队首的重放标记只在这里清，不进 allKeys()：它不属于「票据 / 队列的状态」，逐字节比「什么都没改」的快照不看它（各用例单独断言）
+        for (String token : requeueTokens) {
+            keys.add(RedisKeys.matchRequeueMarker(token));
+        }
         for (int i = 0; i < keys.size(); i += 256) {
             redis.getKeys().delete(keys.subList(i, Math.min(keys.size(), i + 256)).toArray(String[]::new));
         }
@@ -243,6 +262,11 @@ public final class TicketRedisFixture {
 
     public Optional<String> lockHolder(QueueRef queue) {
         return Optional.ofNullable(redis.<String>getBucket(queue.lockKey(), StringCodec.INSTANCE).get());
+    }
+
+    /** 一把 STRING 键的值；不存在为 null。 */
+    public String string(String key) {
+        return redis.<String>getBucket(key, StringCodec.INSTANCE).get();
     }
 
     public boolean exists(String key) {

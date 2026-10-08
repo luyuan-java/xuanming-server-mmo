@@ -37,8 +37,10 @@ public final class FakeNodeCalls<S> implements NodeCalls<S> {
     public record Call(NodeRpcClients.Target target, Duration timeout) {
     }
 
-    /** 每次调用，按发起顺序。 */
+    /** 每次调用，按发起顺序（{@link #call} 与 {@link #callRemembered} 都记在这里）。 */
     public final List<Call> calls = new CopyOnWriteArrayList<>();
+    /** 其中经 {@link #callRemembered} 发起的那些（「记下来的目标」：补偿的取消、回滚的销毁），按发起顺序。 */
+    public final List<Call> remembered = new CopyOnWriteArrayList<>();
     private final Map<String, S> services = new ConcurrentHashMap<>();
     private final Map<String, Supplier<? extends Throwable>> failures = new ConcurrentHashMap<>();
 
@@ -69,6 +71,13 @@ public final class FakeNodeCalls<S> implements NodeCalls<S> {
     public FakeNodeCalls<S> heal(NodeRpcClients.Target target) {
         failures.remove(target.address());
         return this;
+    }
+
+    /** 路由与 {@link #call} 完全相同（替身没有客户端缓存，无所谓重建），只多记一笔。 */
+    @Override
+    public <R> CompletableFuture<R> callRemembered(NodeRpcClients.Target target, Duration timeout, Function<S, CompletableFuture<R>> invocation) {
+        remembered.add(new Call(target, timeout));
+        return call(target, timeout, invocation);
     }
 
     @Override

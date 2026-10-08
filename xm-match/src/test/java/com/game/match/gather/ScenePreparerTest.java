@@ -304,6 +304,24 @@ class ScenePreparerTest {
         assertThat(sceneNodes.lookups).as("取消不查 scene 目录").hasSize(lookupsBefore);
     }
 
+    /**
+     * 备战的目标刚从目录读出来（实例号是现在的），取消的端点是先前记下的（scene 原地重启之后实例号就过时了）。客户端缓存按实例号重建引用：
+     * 取消拿过时的实例号去重建，会把别的 gather 正在用的新引用顶掉。所以取消走「记下来的目标」那个口，备战走普通的口。
+     */
+    @Test
+    void 备战经目录给的目标发_取消经记下来的目标发_不因过时的实例号顶掉现有的客户端() {
+        Prepare.Ok ok = (Prepare.Ok) preparer.prepare(request(A));
+        assertThat(calls.remembered).as("备战不是记下来的目标").isEmpty();
+
+        preparer.cancel(A, BATTLE, ok.endpoint());
+
+        assertThat(calls.remembered).singleElement().satisfies(call -> {
+            assertThat(call.target()).isEqualTo(ok.endpoint().target());
+            assertThat(call.timeout()).isEqualTo(Duration.ofSeconds(3));
+        });
+        assertThat(calls.calls).hasSize(2);
+    }
+
     @Test
     void 取消的传输失败_NOT_HERE_连不上_都只回false_不抛() {
         Prepare.Ok ok = (Prepare.Ok) preparer.prepare(request(A));

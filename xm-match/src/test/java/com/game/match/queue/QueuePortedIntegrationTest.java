@@ -158,7 +158,7 @@ class QueuePortedIntegrationTest {
         assertThat(fx.ticketOf(a)).isPresent();
 
         // 回到 queued 之后才删得掉
-        assertThat(store.requeueFront(queue, List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d())).isEqualTo(1);
+        assertThat(store.requeueFront(queue, fx.freshToken(), List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d())).isEqualTo(1);
         assertThat(store.cancel(a, ticketId, queue, d())).isTrue();
         assertThat(fx.ticketOf(a)).isEmpty();
         assertThat(fx.queueMembers(queue)).isEmpty();
@@ -296,7 +296,7 @@ class QueuePortedIntegrationTest {
         pop("pop-1", MatchBudgets.matchedTicketTtlSeconds(2) * 1000L, ref);
         assertThat(fx.exists(queue.queueKey())).as("弹出后队列是空的").isFalse();
 
-        assertThat(store.requeueFront(queue, List.of(ref), SIX_HOURS, 0, d())).isEqualTo(1);
+        assertThat(store.requeueFront(queue, fx.freshToken(), List.of(ref), SIX_HOURS, 0, d())).isEqualTo(1);
 
         assertThat(ticket(a).state()).isEqualTo(TicketState.QUEUED);
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(a))).as("恢复长 TTL").isGreaterThan(MatchBudgets.MAX_MATCHED_TTL_SECONDS * 1000L);
@@ -314,7 +314,7 @@ class QueuePortedIntegrationTest {
         pop("pop-1", 48_000, new TicketRef(a, ticketId));
         fx.setString(queue.queueKey(), "not-a-list");
 
-        store.requeueFront(queue, List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d());
+        store.requeueFront(queue, fx.freshToken(), List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d());
 
         assertThat(fx.exists(TicketRedisFixture.ticketKey(a))).as("入队失败必须删票，不留 queued 孤儿").isFalse();
         // 玩家可以立即重排（队列键恢复为 list 之后）
@@ -348,7 +348,7 @@ class QueuePortedIntegrationTest {
 
         // 续期后的补偿收尾：35 s 过去，未续期的票此刻已过期；回队首仍能把幸存者送回去
         fx.del(TicketRedisFixture.ticketKey(b));
-        store.requeueFront(queue, List.of(new TicketRef(a, ticketA), new TicketRef(b, ticketB)), SIX_HOURS, 0, d());
+        store.requeueFront(queue, fx.freshToken(), List.of(new TicketRef(a, ticketA), new TicketRef(b, ticketB)), SIX_HOURS, 0, d());
         assertThat(fx.queueMembers(queue)).containsExactly(u(a));
         assertThat(fx.rawTicket(a)).containsEntry("state", "queued");
         assertThat(fx.exists(TicketRedisFixture.ticketKey(b))).as("过期的票不会被回队首重新造出来").isFalse();
@@ -452,8 +452,8 @@ class QueuePortedIntegrationTest {
         assertThat(fx.indexed(queue)).isFalse();
         QueueRef wrong = fx.track(new QueueRef(MODE_1V1, fx.configId(55)));
 
-        assertThat(store.requeueFront(wrong, List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d())).as("票不属于那条队列：不回").isZero();
-        assertThat(store.requeueFront(queue, List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d())).isEqualTo(1);
+        assertThat(store.requeueFront(wrong, fx.freshToken(), List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d())).as("票不属于那条队列：不回").isZero();
+        assertThat(store.requeueFront(queue, fx.freshToken(), List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d())).isEqualTo(1);
 
         assertThat(ticket(a).state()).isEqualTo(TicketState.QUEUED);
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(a))).isGreaterThan(MatchBudgets.MAX_MATCHED_TTL_SECONDS * 1000L);
@@ -505,7 +505,7 @@ class QueuePortedIntegrationTest {
         assertThat(store.markReady(stale, 987_654_321L, READY_TTL, d())).isFalse();
         // 旧 gather 失败收尾：续期、回队首 → 不入队不改票
         assertThat(store.extendMatched(List.of(stale), 40_000, d())).isZero();
-        assertThat(store.requeueFront(queue, List.of(stale), SIX_HOURS, 2000, d())).isZero();
+        assertThat(store.requeueFront(queue, fx.freshToken(), List.of(stale), SIX_HOURS, 2000, d())).isZero();
         // 旧 gather 判定他是肇事者删票 → 拒
         assertThat(store.delete(stale, d())).isFalse();
         assertThat(store.deleteGroup(List.of(stale), d())).isZero();
@@ -537,10 +537,10 @@ class QueuePortedIntegrationTest {
         assertThat(ticket(a).state()).isEqualTo(TicketState.READY);
         assertThat(fx.rawTicket(a)).containsEntry("battle_id", "424242");
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(a))).isGreaterThan(0).isLessThanOrEqualTo(READY_TTL);
-        assertThat(store.requeueFront(queue, List.of(refA), SIX_HOURS, 0, d())).as("ready 的票不回队首").isZero();
+        assertThat(store.requeueFront(queue, fx.freshToken(), List.of(refA), SIX_HOURS, 0, d())).as("ready 的票不回队首").isZero();
         assertThat(ticket(a).state()).isEqualTo(TicketState.READY);
 
-        assertThat(store.requeueFront(queue, List.of(refB), SIX_HOURS, 0, d())).isEqualTo(1);
+        assertThat(store.requeueFront(queue, fx.freshToken(), List.of(refB), SIX_HOURS, 0, d())).isEqualTo(1);
         assertThat(ticket(b).state()).isEqualTo(TicketState.QUEUED);
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(b))).isGreaterThan(READY_TTL);
         assertThat(fx.queueMembers(queue)).containsExactly(u(b));

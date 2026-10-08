@@ -521,6 +521,14 @@ public final class RedisKeys {
         return MATCH_PREFIX + "pop:" + token;
     }
 
+    /**
+     * 回队首重放标记 {@code xm:{match}:requeue:<token>}（STRING：值 = 那一次放回队首的人数，PX 60 s；Java 独有：回队首脚本被 Redisson 重发时
+     * 凭它认出「这一次已经回过了」——只看票据状态认不出来，回了队首的人可能已被再弹成 matched）。
+     */
+    public static String matchRequeueMarker(String token) {
+        return MATCH_PREFIX + "requeue:" + token;
+    }
+
     /** 切磋记录 {@code xm:{match}:challenge:<challenge_id>}（HASH：发起者、目标、配置、过期时刻；TTL 60 s）。 */
     public static String matchChallenge(long challengeId) {
         return MATCH_PREFIX + "challenge:" + Long.toUnsignedString(challengeId);

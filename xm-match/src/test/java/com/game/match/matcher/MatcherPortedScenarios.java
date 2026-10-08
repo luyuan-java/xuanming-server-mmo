@@ -273,7 +273,7 @@ abstract class MatcherPortedScenarios {
         assertMirrorConsistent(queue);
 
         // 回队首：镜像写回票里的评分
-        assertThat(store().requeueFront(queue, plans().get(0).ticketRefs(), TTL, 0, d())).isEqualTo(2);
+        assertThat(store().requeueFront(queue, "rq-" + UUID.randomUUID(), plans().get(0).ticketRefs(), TTL, 0, d())).isEqualTo(2);
         assertThat(queueMembers(queue)).containsExactly(str(p[0]), str(p[2]));
         assertThat(rankScores(queue)).as("回队首写回原评分").containsEntry(str(p[0]), 200_000L);
         assertMirrorConsistent(queue);
@@ -502,5 +502,47 @@ abstract class MatcherPortedScenarios {
 
         assertThat(indexed(queue)).as("空队列必须被剔除").isFalse();
         assertThat(rig.depth(queue)).as("剔除后 gauge 是 0").isEqualTo(0.0);
+    }
+
+    // ================================================================ Java 新增：凑不满的队列里的残项（基线没有，matcher.go:277-284 只剔空队列）
+
+    /**
+     * 票据没了（过期 / 被按票号删掉）而队列项还在：这条队列凑不满，从不走挑组里的成员校验，残项留着它就永远非空、永远不出注册集。
+     * 凑单对凑不满的队列隔一段时间做一次只看票据的清理。
+     */
+    @Test
+    void 凑不满的队列里没有票的残项_满一个间隔后被清掉_有效的排队者不动_清空的队列出注册集() {
+        QueueRef mixed = newQueue(MODE_5V5);
+        QueueRef dead = newQueue(MODE_1V1);
+        long[] p = newPlayers(3);
+        String gone = join(p[0], mixed, 150_000);
+        join(p[1], mixed, 160_000);
+        String expired = join(p[2], dead, 150_000);
+        // 按票号删票不摘队列项（同票据到期）
+        assertThat(store().delete(new TicketRef(p[0], gone), d())).isTrue();
+        assertThat(store().delete(new TicketRef(p[2], expired), d())).isTrue();
+        assertThat(queueMembers(mixed)).containsExactly(str(p[0]), str(p[1]));
+        assertThat(queueMembers(dead)).containsExactly(str(p[2]));
+        QueueMatcher matcher = matcher();
+
+        assertThat(matcher.matchQueueOnce(mixed)).isTrue();
+        assertThat(matcher.matchQueueOnce(dead)).isTrue();
+        assertThat(queueMembers(mixed)).as("第一次见到只计时").hasSize(2);
+        assertThat(queueMembers(dead)).hasSize(1);
+
+        rig.nanos.addAndGet(QueueMatcher.STALE_SWEEP_INTERVAL_NANOS);
+        assertThat(matcher.matchQueueOnce(mixed)).isTrue();
+        assertThat(matcher.matchQueueOnce(dead)).isTrue();
+
+        assertThat(queueMembers(mixed)).as("只摘没有票的那一项").containsExactly(str(p[1]));
+        assertMirrorConsistent(mixed);
+        assertThat(ticket(p[1]).state()).isEqualTo(TicketState.QUEUED);
+        assertThat(indexed(mixed)).isTrue();
+        assertThat(queueMembers(dead)).isEmpty();
+        assertMirrorConsistent(dead);
+        assertThat(indexed(dead)).as("死队列清空后当场出注册集").isFalse();
+        assertThat(lockHolder(mixed)).isEmpty();
+        assertThat(lockHolder(dead)).isEmpty();
+        assertThat(plans()).isEmpty();
     }
 }
