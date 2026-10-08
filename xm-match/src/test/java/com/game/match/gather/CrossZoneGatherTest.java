@@ -10,15 +10,17 @@ import com.game.api.match.MatchBudgets;
 import com.game.api.proto.SceneBattleCall;
 import com.game.api.proto.SceneBattleReply;
 import com.game.api.proto.SceneBattleStatus;
+import com.game.api.proto.SessionContext;
 import com.game.api.rpc.NodeRpcClients;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.battle.BattleRoutings;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.match.proto.BattlePlacement;
-import com.game.match.spectate.ObserverDialer;
+import com.game.match.spectate.SpectateGatherHooks;
 import com.game.match.spectate.SpectateRules;
 import com.game.match.spectate.SpectateStore;
+import com.game.match.spectate.WatchBattleService;
 import com.game.match.testing.FakeBattleNode;
 import com.game.match.testing.FakeNodeCalls;
 import com.game.match.testing.FakeObserverDialer;
@@ -26,7 +28,6 @@ import com.game.match.testing.InMemorySpectateStore;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.TicketRef;
 import com.game.match.ticket.TicketState;
-import com.game.proto.AddObserverRequest;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattleRouting;
 import com.game.proto.CancelBattlePrepareRequest;
@@ -35,10 +36,10 @@ import com.game.proto.PrepareBattleRequest;
 import com.game.proto.PrepareBattleResponse;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.match.BattleWatchSummary;
+import com.game.proto.match.WatchBattleResponse;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.micrometer.core.instrument.Tag;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -503,31 +504,35 @@ class CrossZoneGatherTest {
     // ================================================================ Z12：观战不分 zone
 
     /**
-     * 这一条只走到 match 侧 163 的<b>输入</b>为止：开局管线写出的落点与公开的索引成员里没有 zone，另一个 zone 的观众读到的是同一条；
-     * 观众的路由由在线目录换算（{@link BattleRoutings#gatePart}），发往落点记录的地址。163 的判定流程本身（{@code WatchBattleService}）
-     * 由观战包自己的用例覆盖。
+     * 开局钩子与 163 都是<b>真的</b>（观战包的 {@link SpectateGatherHooks} 与 {@link WatchBattleService}，接在这条管线的同一组内存替身上）：
+     * 开局管线写出的落点与公开的索引成员里没有 zone，另一个 zone 的观众读到的是同一条；163 给 battle 的观众路由由在线目录换算
+     * （{@link BattleRoutings#gatePart}），发往落点记录的地址。163 判定表的其余各行由观战包自己的用例覆盖。
      */
     @Test
     void 参战者都在zone1_观众挂在zone2的1号gate_落点与索引不分zone_观众路由的zone取在线目录是2_发往落点地址() {
         Rig rig = new Rig();
         InMemorySpectateStore spectate = new InMemorySpectateStore(rig.f.clock, rig.f.tickets, rig.f.placements, rig.f.events);
-        // 开局成功的钩子把这一场公开（真实现 = 观战包的开局钩子；这里只要「公开」这一个动作）
+        FakeObserverDialer dialer = new FakeObserverDialer(rig.f.events);
+        // 开局成功后由真的开局钩子把这一场公开；夹具自带的记录钩子照常记事件（下面按事件断言先后）
+        SpectateGatherHooks spectateHooks = new SpectateGatherHooks(spectate, dialer, rig.f.metrics);
         rig.f.hooksPort = new GatherHooks() {
             @Override
             public void beforePrepare(List<Long> members) {
                 rig.f.hooks.beforePrepare(members);
+                spectateHooks.beforePrepare(members);
             }
 
             @Override
             public void onStarted(BattlePlacement placement) {
                 rig.f.hooks.onStarted(placement);
-                spectate.publish(placement, Deadline.after(1_000));
+                spectateHooks.onStarted(placement);
             }
         };
         Map<Long, Integer> bothInZone1 = new LinkedHashMap<>();
         bothInZone1.put(A, 1);
         bothInZone1.put(B, 1);
         long battleId = rig.f.pipeline().run(rig.popped(bothInZone1)).battleId();
+        assertThat(dialer.calls).as("两名参战者都没有在观战：开局前的清退不找 battle").isEmpty();
         // 观众 C：在线目录挂在 zone 2 的 1 号 gate（会话号、gate 节点号与两名参战者全部相同）；位置记录却还指着 zone 1（传送途中两者可以不等）
         rig.f.players.presence(C, presence(C, 2));
         rig.f.players.location(C, 1, 1);
@@ -542,26 +547,36 @@ class CrossZoneGatherTest {
                 .isEqualTo(new SpectateStore.Pick.Member(SpectateRules.member(battleId), placement.getCreatedAtMs(), rig.f.clock.peekMs()));
         assertThat(SpectateRules.summaryOf(placement).getPlayerNamesList()).containsExactly("角色1001@z1", "角色1002@z1");
 
-        // 观众路由：四个 gate 字段取在线目录，zone 是 gate 所在的 2，不是位置记录的 1，也不是参战者的 1
-        BattleRouting routing = BattleRoutings.gatePart(rig.f.players.presence(C, Deadline.after(1_000)).orElseThrow());
-        FakeObserverDialer dialer = new FakeObserverDialer(rig.f.events);
-        ObserverDialer.Outcome outcome = dialer.add(placement, AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(C)
-                .setRouting(routing).setObserverName("account-c").build(), Duration.ofMillis(MatchBudgets.ADD_OBSERVER_TIMEOUT_MS),
-                Deadline.after(4_000));
+        // 163 的真流程：C 从 zone 2 的 1 号 gate 发来（会话上下文由那台 gate 填），指定观战这一场
+        WatchBattleService watches = new WatchBattleService(spectate, rig.f.placements, rig.f.players, rig.f.tickets, dialer, rig.f.metrics);
+        SessionContext fromZone2 = SessionContext.newBuilder().setPlayerId(C).setAccount("account-c").setZoneId(2).setGateNodeId(1)
+                .setGateInstanceId("gate-z2-inst").setSessionId(SAME_SESSION).build();
 
-        assertThat(outcome).isEqualTo(new ObserverDialer.Outcome.Replied(0));
+        WatchBattleResponse response = watches.watch(fromZone2, battleId, Deadline.after(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS));
+
+        assertThat(response.hasErrorMessage()).as("另一个 zone 的观众照常看得了: %s", response).isFalse();
+        assertThat(response.getBattleId()).isEqualTo(battleId);
+        assertThat(spectate.markOf(C).flatMap(SpectateRules::decodeMark).map(SpectateRules.Mark::battleId)).as("观战标记按玩家记，不分 zone").contains(battleId);
+        // 观众路由：四个 gate 字段取在线目录，zone 是 gate 所在的 2，不是位置记录的 1，也不是参战者的 1
+        assertThat(dialer.calls).singleElement().satisfies(call -> assertThat(call.kind()).isEqualTo(FakeObserverDialer.Kind.ADD));
         FakeObserverDialer.Call add = dialer.adds().get(0);
+        assertThat(add.placement()).as("登记发往开局管线写下的那条落点").isEqualTo(placement);
         assertThat(add.placement().getRpcHost() + ":" + add.placement().getRpcPort()).as("直拨落点记录的地址：就是参战者建房的那台 battle")
                 .isEqualTo(TARGET_A.address());
         assertThat(add.placement().getBattleInstanceId()).isEqualTo(TARGET_A.instanceId());
+        assertThat(add.request().getBattleId()).isEqualTo(battleId);
+        assertThat(add.request().getObserverPlayerId()).isEqualTo(C);
+        assertThat(add.request().getObserverName()).isEqualTo("account-c");
         assertThat(add.request().getRouting()).isEqualTo(BattleRouting.newBuilder().setSessionId(SAME_SESSION).setGateNodeId(1)
                 .setGateInstanceId("gate-z2-inst").setZoneId(2).build());
+        assertThat(add.request().getRouting()).as("就是在线目录换算出来的 gate 部分")
+                .isEqualTo(BattleRoutings.gatePart(rig.f.players.presence(C, Deadline.after(1_000)).orElseThrow()));
         BattleRouting participant = rig.f.battleA.creates.get(0).getPlayers(0).getRouting();
         assertThat(add.request().getRouting().getSessionId()).as("与参战者 A 的会话号、gate 节点号都相同").isEqualTo(participant.getSessionId());
         assertThat(add.request().getRouting().getGateNodeId()).isEqualTo(participant.getGateNodeId());
         assertThat(add.request().getRouting().getGateInstanceId()).as("分得开两人的只有 zone 与 gate 实例").isNotEqualTo(participant.getGateInstanceId());
         assertThat(add.request().getRouting().getZoneId()).isNotEqualTo(participant.getZoneId());
-        assertThat(rig.f.events).as("先公开、后才能被观战").containsSubsequence("hooks.onStarted", "spectate.publish:" + id(battleId),
-                "spectate.read:" + id(battleId), "observer.add:" + id(battleId) + ":1003");
+        assertThat(rig.f.events).as("先公开、后才能被观战；163 先写标记、后登记观众").containsSubsequence("hooks.onStarted", "spectate.publish:" + id(battleId),
+                "spectate.entry:1003", "spectate.read:" + id(battleId), "spectate.acquire:1003", "observer.add:" + id(battleId) + ":1003");
     }
 }

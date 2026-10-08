@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -33,7 +34,7 @@ import org.springframework.context.Lifecycle;
 /**
  * 观战清扫（spectate-spec §4.7、§10.3 的 {@code SpectateSweeperTest} 一段）：一轮只摘过期成员、不动落点（对照基线
  * {@code spectate_test.go:192} CleanupExpiredSpectateIndexKeepsFresh）；摘掉的条数与索引大小进指标；某一轮抛异常（连同 {@code Error}）下一轮照常；
- * 启停幂等、构造时不起线程、停机等当前一轮结束且有界。
+ * 启停幂等、构造时不起线程、停机当场中断当前一轮（不等它做完，lead 裁决 4）且有界。
  *
  * <p>「一轮做了什么」的用例直接调 {@code runRoundSafely()}（确定性）；调度与启停的用例用真线程，所有等待都有上限。
  */
@@ -320,53 +321,23 @@ class SpectateSweeperTest {
     }
 
     @Test
-    void 停机等当前这一轮结束_这一轮在两条命令之间看到停机信号就收手() throws Exception {
-        CountDownLatch inSweep = new CountDownLatch(1);
-        AtomicReference<Thread> stopperRef = new AtomicReference<>();
-        List<String> seen = new CopyOnWriteArrayList<>();
-        sweeper = new SpectateSweeper(intercepted(method -> {
-            seen.add(method);
-            if (method.equals("sweep")) {
-                inSweep.countDown();
-                // 卡在第一条命令上，直到停机线程已经在 stop() 里限时等这一轮结束（那时停机信号一定已经置上）——看线程状态，不靠睡一会儿
-                long giveUp = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                while (System.nanoTime() < giveUp) {
-                    Thread stopper = stopperRef.get();
-                    if (stopper != null && stopper.getState() == Thread.State.TIMED_WAITING) {
-                        break;
-                    }
-                    sleep(2);
-                }
-            }
-        }), metrics, INTERVAL, STOP_TIMEOUT);
-        register(880080, T0 - STALE_MS - 1);
-
-        sweeper.start();
-        await(inSweep);
-        Thread stopper = Thread.ofPlatform().unstarted(() -> sweeper.stop());
-        stopperRef.set(stopper);
-        stopper.start();
-        stopper.join(10_000);
-
-        assertThat(stopper.isAlive()).as("stop 在上限之内返回").isFalse();
-        assertThat(sweeper.isRunning()).isFalse();
-        assertThat(store.watchable()).as("stop 返回时手上这一轮的第一条命令已经做完").isEmpty();
-        assertThat(seen).as("看到停机信号：不再发第二条命令，也没有下一轮").containsExactly("sweep");
-    }
-
-    @Test
-    void 当前这一轮迟迟不结束_等到上限就中断它_stop照常返回() throws Exception {
+    void 停机当场中断手上这一轮_不等它自己做完_这一轮收到中断后不再发第二条命令() throws Exception {
         CountDownLatch inSweep = new CountDownLatch(1);
         CountDownLatch interrupted = new CountDownLatch(1);
+        List<String> seen = new CopyOnWriteArrayList<>();
+        // 等线程退出的上限故意给得很长（30 s）：stop 若是「先等这一轮自己做完、到点才中断」（裁决 4 之前的写法），下面的用时断言过不了
         sweeper = new SpectateSweeper(intercepted(method -> {
+            seen.add(method);
             inSweep.countDown();
             try {
+                // 像一条卡在 Redis 上的命令：只有中断能叫醒它
                 new CountDownLatch(1).await(60, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 interrupted.countDown();
                 throw new Deadline.DependencyException("sweep 被中断", e);
             }
-        }), metrics, INTERVAL, Duration.ofMillis(80));
+        }), metrics, INTERVAL, Duration.ofSeconds(30));
+        register(880080, T0 - STALE_MS - 1);
 
         sweeper.start();
         await(inSweep);
@@ -374,9 +345,55 @@ class SpectateSweeperTest {
         assertThatCode(() -> sweeper.stop()).doesNotThrowAnyException();
         long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin);
 
-        assertThat(tookMs).as("至少等满上限（80 ms），但不会等那一轮自己结束（60 s）").isBetween(70L, 10_000L);
-        await(interrupted);
+        assertThat(interrupted.getCount()).as("stop 返回时这一轮已经被中断、清扫线程已经退出").isZero();
+        assertThat(tookMs).as("不等这一轮自己做完（60 s），也没有等满线程退出的上限（30 s）：这一步不给停机加时间").isLessThan(10_000L);
         assertThat(sweeper.isRunning()).isFalse();
+        assertThat(seen).as("看到停机信号：不再发第二条命令（采样），也没有下一轮").containsExactly("sweep");
+        assertThat(store.watchable()).as("被打断的这一轮没摘成：成员留给下一次清扫（幂等的只删操作，没做完无害）").containsExactly("880080");
+        assertThat(swept()).isZero();
+    }
+
+    @Test
+    void 当前这一轮不理会中断_stop只等到上限就放弃_照常返回_这一轮醒来后看到停机信号不再碰存储() throws Exception {
+        CountDownLatch inSweep = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean sawInterrupt = new AtomicBoolean();
+        AtomicReference<Thread> worker = new AtomicReference<>();
+        List<String> seen = new CopyOnWriteArrayList<>();
+        sweeper = new SpectateSweeper(intercepted(method -> {
+            seen.add(method);
+            worker.set(Thread.currentThread());
+            inSweep.countDown();
+            // 违约的一轮：被中断了也不收手，一直等到测试放行（上限 30 s，免得测试出错时把线程永久挂住）
+            long giveUp = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (release.getCount() != 0 && System.nanoTime() < giveUp) {
+                try {
+                    release.await(Math.max(1, giveUp - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } catch (InterruptedException e) {
+                    sawInterrupt.set(true);
+                }
+            }
+            if (Thread.interrupted()) {
+                sawInterrupt.set(true);
+            }
+        }), metrics, INTERVAL, Duration.ofMillis(80));
+        register(880081, T0 - STALE_MS - 1);
+
+        sweeper.start();
+        await(inSweep);
+        long begin = System.nanoTime();
+        assertThatCode(() -> sweeper.stop()).doesNotThrowAnyException();
+        long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin);
+
+        assertThat(tookMs).as("至少等满线程退出的上限（80 ms），但不会等那一轮自己结束").isBetween(70L, 10_000L);
+        assertThat(sweeper.isRunning()).as("放弃等待之后照样算停了").isFalse();
+
+        release.countDown();
+        worker.get().join(10_000);
+        assertThat(worker.get().isAlive()).as("放行之后清扫线程退出（调度器已关，没有下一轮）").isFalse();
+        assertThat(sawInterrupt).as("stop 当场就中断了这一轮，只是它没理会").isTrue();
+        assertThat(seen).as("迟到的第一条命令照样做完（幂等，无害）；醒来看到停机信号，不再发第二条").containsExactly("sweep");
+        assertThat(store.watchable()).isEmpty();
     }
 
     // ================================================================ 形状

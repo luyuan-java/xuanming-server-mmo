@@ -22,6 +22,8 @@ import com.game.match.dispatch.InlineHandlers;
 import com.game.match.dispatch.MatchClientMessageService;
 import com.game.match.dispatch.MatchDispatchConfiguration;
 import com.game.match.dispatch.MatchDispatcher;
+import com.game.match.dispatch.MatchMethodHandler;
+import com.game.match.dispatch.MatchMethods;
 import com.game.match.dispatch.MatchWorkers;
 import com.game.match.gather.BattleNodes;
 import com.game.match.gather.GatherConfiguration;
@@ -57,11 +59,20 @@ import com.game.match.rating.RatingConfiguration;
 import com.game.match.rating.RatingReader;
 import com.game.match.rating.RatingTestDatabase;
 import com.game.match.reissue.ReissueConfiguration;
+import com.game.match.spectate.DefaultObserverDialer;
+import com.game.match.spectate.ListWatchableHandler;
 import com.game.match.spectate.ObserverDialer;
+import com.game.match.spectate.RedissonSpectateStore;
+import com.game.match.spectate.SpectateExecutor;
+import com.game.match.spectate.SpectateGatherHooks;
 import com.game.match.spectate.SpectateStore;
 import com.game.match.spectate.SpectateStoreConfiguration;
+import com.game.match.spectate.SpectateSweeper;
 import com.game.match.spectate.WatchBattleConfiguration;
+import com.game.match.spectate.WatchBattleHandler;
+import com.game.match.spectate.WatchBattleService;
 import com.game.match.spectate.WatchableConfiguration;
+import com.game.match.spectate.WatchableListService;
 import com.game.match.team.MatchTeamServiceImpl;
 import com.game.match.testing.LeaseOnlyRedis;
 import com.game.match.ticket.DefaultTicketHealing;
@@ -255,15 +266,45 @@ class MatchApplicationContextTest {
             assertThat(context.getBean(MatcherControl.class)).as("凑单的启停口就是调度器").isInstanceOf(MatcherRunner.class);
             assertThat(context.getBean(ResultConsumerControl.class)).as("评分消费的启停口就是消费者").isInstanceOf(BattleResultIngest.class);
 
+            // 批次 6.5 观战：三个装配类里没有任何占位了——存储、观众 RPC、163 的在途口、开局钩子、清扫口都是真实现，而且彼此是同一批对象
+            assertThat(context.getBean(SpectateStore.class)).as("观战存储连的是 Redis").isInstanceOf(RedissonSpectateStore.class);
+            assertThat(context.getBean(ObserverDialer.class)).as("观众 RPC 走落点直拨").isInstanceOf(DefaultObserverDialer.class);
+            assertThat(context.getBean(InflightWatches.class)).as("停机时等在途 163 的口就是 163 的执行器").isInstanceOf(SpectateExecutor.class);
+            assertThat(context.getBean(SpectateExecutor.class).maxInflight()).as("在途上限的缺省值（xm.match.spectate.max-inflight）").isEqualTo(128);
+            assertThat(context.getBean(SpectateExecutor.class).inflight()).isZero();
+            assertThat(context.getBean(GatherHooks.class)).as("开局钩子：开局前清退观众、开局后公开").isInstanceOf(SpectateGatherHooks.class)
+                    .isNotSameAs(GatherHooks.NOOP);
+            assertThat(context.getBean(SweeperControl.class)).as("观战清扫的启停口就是清扫器").isInstanceOf(SpectateSweeper.class)
+                    .isNotSameAs(SweeperControl.NOOP);
+            assertThat(context).hasSingleBean(WatchBattleService.class).hasSingleBean(WatchableListService.class);
+
             MatchDispatcher dispatcher = context.getBean(MatchDispatcher.class);
             assertThat(dispatcher.handledMessageIds()).as("契约 MatchService 的十个号").containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
             assertThat(dispatcher.unhandledMethods()).isEmpty();
+
+            // 163 / 164 的处理器是观战包的真处理器（6.4 的两个临时 inline 处理器已经没有了）：163 不 inline、跑在它自己的执行器上；
+            // 164 不 inline、不带执行器（= match-worker）
+            List<MatchMethodHandler> handlers = List.copyOf(context.getBeansOfType(MatchMethodHandler.class).values());
+            assertThat(handlers).extracting(MatchMethodHandler::method).as("十个号各恰好一个处理器").doesNotHaveDuplicates().hasSize(10);
+            assertThat(handlers).filteredOn(handler -> handler.method().equals(MatchMethods.WATCH_BATTLE)).singleElement().satisfies(watch -> {
+                assertThat(watch).isInstanceOf(WatchBattleHandler.class);
+                assertThat(watch.inline()).as("163 要读 Redis、调 battle：不在 Dubbo 线程上当场回").isFalse();
+                assertThat(watch.executor()).as("163 的执行器 = 停机时被等的那一个").isSameAs(context.getBean(InflightWatches.class));
+            });
+            assertThat(handlers).filteredOn(handler -> handler.method().equals(MatchMethods.LIST_WATCHABLE_BATTLES)).singleElement().satisfies(list -> {
+                assertThat(list).isInstanceOf(ListWatchableHandler.class);
+                assertThat(list.inline()).as("164 要读 Redis：不在 Dubbo 线程上当场回").isFalse();
+                assertThat(list.executor()).as("164 没有自己的执行器：跑在 match-worker 上").isNull();
+            });
+            assertThat(handlers).filteredOn(MatchMethodHandler::inline).extracting(MatchMethodHandler::method)
+                    .as("当场回的只剩 156 / 154 两个上行空操作").containsExactlyInAnyOrder(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
 
             MatchLifecycle lifecycle = context.getBean(MatchLifecycle.class);
             assertThat(lifecycle.isRunning()).as("容器已把它当生命周期 bean 启动").isTrue();
             assertThat(lifecycle.backgroundStarted()).as("应用已启动事件还没来：凑单与评分消费不起").isFalse();
             assertThat(context.getBean(MatcherRunner.class).isRunning()).as("凑单自己不带生命周期").isFalse();
             assertThat(context.getBean(BattleResultIngest.class).isRunning()).isFalse();
+            assertThat(context.getBean(SpectateSweeper.class).isRunning()).as("观战清扫自己不带生命周期：应用已启动事件之前不起线程、不碰 Redis").isFalse();
         });
         assertThat(output.getOut()).contains("启动门禁通过").contains("Redis 单条命令最坏≈4200 ms").contains("评分表已同步")
                 .doesNotContain("没有处理器");
@@ -276,19 +317,26 @@ class MatchApplicationContextTest {
     @Test
     void 应用已启动_真的凑单调度器起来了_就绪日志是切片脚本等的那一行_关闭上下文时凑单先停_租约最后还(CapturedOutput output) {
         MatcherRunner[] matcher = new MatcherRunner[1];
+        SpectateSweeper[] sweeper = new SpectateSweeper[1];
         runner.run(context -> {
             matcher[0] = context.getBean(MatcherRunner.class);
+            sweeper[0] = context.getBean(SpectateSweeper.class);
+            assertThat(sweeper[0].isRunning()).as("应用已启动事件之前：清扫没起").isFalse();
 
             publishStarted(context);
 
             assertThat(context.getBean(MatchLifecycle.class).backgroundStarted()).isTrue();
             assertThat(matcher[0].isRunning()).as("启动第 8 步：凑单循环在跑").isTrue();
+            assertThat(sweeper[0].isRunning()).as("启动第 8 步：真的观战清扫器也起来了（由 MatchLifecycle 起，不是它自己）").isTrue();
+            assertThat(output.getOut().indexOf("凑单循环已启动")).as("凑单先于观战清扫").isLessThan(output.getOut().indexOf("观战清扫已启动"));
+            assertThat(output.getOut().indexOf("观战清扫已启动")).isLessThan(output.getOut().indexOf("match 已就绪"));
             assertThat(context.getBean(BattleResultIngest.class).isRunning()).as("评分开关关着：启动第 9 步是空操作").isFalse();
             // tools/local/start-slice.sh 的 wait_match_ready 按这个子串判 xm-match 就绪（xm-gate 的 LocalSliceOrderTest 钉脚本一侧）
             assertThat(output.getOut()).contains("match 已就绪");
             assertThat(output.getOut().indexOf("凑单循环已启动")).isLessThan(output.getOut().indexOf("match 已就绪"));
         });
         assertThat(matcher[0].isRunning()).as("上下文关闭：MatchLifecycle 把凑单停了").isFalse();
+        assertThat(sweeper[0].isRunning()).as("上下文关闭：MatchLifecycle 把观战清扫停了").isFalse();
         assertThat(output.getOut()).contains("停机 1/6：凑单已停").contains("停机 3/6：match-worker 已排空").contains("停机 3/6：在途的 163 观战已全部结束")
                 .contains("停机 4/6：观战清扫已停").contains("停机 5/6：在途 gather 已全部结束").contains("停机 6/6：评分消费已停");
         assertThat(output.getOut().indexOf("停机 1/6")).isLessThan(output.getOut().indexOf("停机 3/6"));
