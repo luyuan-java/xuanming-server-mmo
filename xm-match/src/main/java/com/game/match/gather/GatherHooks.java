@@ -5,7 +5,8 @@ import java.util.List;
 
 /**
  * 开局管线留给观战（批次 6.5）的两个接缝（match-spec §0.3、§9.6 第 2.5 步与第 5 步；spectate-spec §4.6）。bean 由观战包提供
- * （{@code spectate.WatchableConfiguration}）：开局前清退正在观战的参战者、开局后把这一场登记进可观战索引；6.4 期间是 {@link #NOOP}。
+ * （{@code spectate.WatchableConfiguration} 的 {@code SpectateGatherHooks}）：开局前清退正在观战的参战者、开局后把这一场登记进可观战索引。
+ * {@link #NOOP} 只给不关心观战的测试用（生产装配里没有它）。
  *
  * <p><b>契约</b>：两个方法都在 gather 的<b>虚拟线程</b>上被同步调用，可以阻塞（{@link #beforePrepare} 每名成员至多 3 s，这一项已经算在
  * matched TTL 的公式里），但不得在 {@code synchronized} 块里阻塞。实现<b>不得抛异常</b>——管线仍会把抛出的异常吞掉并记日志，
@@ -13,7 +14,7 @@ import java.util.List;
  */
 public interface GatherHooks {
 
-    /** 什么都不做（6.4：还没有观众）。 */
+    /** 什么都不做（测试里不关心观战时用）。 */
     GatherHooks NOOP = new GatherHooks() {
         @Override
         public void beforePrepare(List<Long> members) {

@@ -40,7 +40,7 @@ import org.springframework.core.Ordered;
  *   <tr><td>3</td><td><b>并行</b>做两件事，两件都结束才往下走：排空 {@code match-worker}（已受理的请求做完，之后不会再有人交 gather；至多 10 s）；
  *       有界等在途的 163 观战（它不在工作池上；至多 {@code watchDrainTimeout}，生产 5 s）。并行，所以这一步的上限仍是排空工作池的 10 s</td>
  *       <td rowspan="4">{@link #stop()}（{@code SmartLifecycle}，相位最高 = 最先停，早于管理 Tomcat）</td></tr>
- *   <tr><td>4</td><td>停观战清扫</td></tr>
+ *   <tr><td>4</td><td>停观战清扫（当场中断手上那一轮，不等它做完：这一步不给停机加时间）</td></tr>
  *   <tr><td>5</td><td>有界等在途 gather（{@link #GATHER_DRAIN_TIMEOUT}），超时直接放弃：票据按 matched TTL 自愈，scene 按备战期限解冻</td></tr>
  *   <tr><td>6</td><td>停评分消费</td></tr>
  *   <tr><td>7</td><td>交还发号租约、关直连客户端、关 Redis / 连接池</td><td>单例销毁（bean 依赖逆序，在全部 {@code SmartLifecycle} 停完之后）</td></tr>
@@ -55,6 +55,8 @@ import org.springframework.core.Ordered;
  * 并行之后这一步不比原来长。等 163 在一条辅助线程（{@code match-stop-watches}）上做，停机线程自己排空工作池、再回头收辅助线程的结果；
  * 辅助线程到了「{@code watchDrainTimeout} + {@link #WATCH_DRAIN_GRACE}」还不返回（实现违反约定）就放弃它，停机不被拖住。
  * 清扫器排在 163 之后停：在途的 163 还可能读写索引，清扫本身是幂等的只删操作，早停晚停都无害，放在这里只为「不再有请求时才停后台件」。
+ * 它是串在第 3 步与第 5 步之间的一步，所以<b>不等手上那一轮清扫自己做完</b>（{@link SweeperControl#stop} 的契约：当场中断、只等线程退出），
+ * 第 3–5 步的最坏时长仍是 10 + 10 = 20 s，与加观战之前相同。
  *
  * <p>停机时长挂的 {@code runTeamGather} 会被第 2 步切断：xm-team 按传输失败处理（推 MATCH_FAILED、计 {@code gather_unknown}，<b>不删票</b>），
  * gather 本身不受影响、在第 5 步的窗口里跑完并自己收尾票据。

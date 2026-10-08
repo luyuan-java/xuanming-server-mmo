@@ -22,7 +22,7 @@ import org.springframework.context.annotation.Configuration;
 /**
  * 开局管线的装配（match-spec §9.6）：battle 目录的读口、scene 备战 / 取消、补偿、管线本体与它的入口 {@link GatherLauncher}。
  * 依赖别的包经接口注入：票据存储（{@link TicketStore}）、评分读取（{@link RatingReader}）、落点记录（{@link PlacementStore}）、
- * 观战钩子（{@link GatherHooks}，6.4 是空实现）。
+ * 观战钩子（{@link GatherHooks}：观战包 {@code spectate.WatchableConfiguration} 的 {@code SpectateGatherHooks}——开局前清退观众、开局后登记可观战索引）。
  *
  * <p>销毁顺序由依赖链钉住：{@link GatherLauncher} 依赖发号（进而依赖发号租约）与两个直连出站口，Spring 按依赖逆序销毁——
  * 先停用到它的入口（凑单、各提供方），之后才还租约、关直连客户端。在途 gather 的有界等待（{@link GatherLauncher#awaitIdle}）由进程的停机流程调。

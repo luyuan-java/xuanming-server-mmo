@@ -18,7 +18,7 @@ spring:
     keep-alive: true
   lifecycle:
     # 停机次序（MatchLifecycle）：停凑单 → Dubbo 撤导出 → 排空 match-worker（至多 10 s）同时等在途的 163 观战（至多 5 s，两者并行）
-    # → 停观战清扫 → 等在途 gather（至多 10 s）→ 停评分消费 → 还发号租约。
+    # → 停观战清扫（当场中断手上那一轮，不等）→ 等在途 gather（至多 10 s）→ 停评分消费 → 还发号租约。
     timeout-per-shutdown-phase: 20s
   datasource:
     # 会话级 READ COMMITTED；STRICT_TRANS_TABLES；innodb_lock_wait_timeout=1（评分入账一局一笔事务，撞锁等待超时或死锁就整笔重跑，

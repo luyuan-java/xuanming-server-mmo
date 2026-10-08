@@ -11,7 +11,8 @@ import java.util.Optional;
  * 观战的存储口（spectate-spec §4.2、§4.3）：<b>观战标记</b>（{@code RedisKeys.matchWatching(player)}，STRING，PX 360 s：这名玩家可能正在看哪一场）、
  * <b>可观战索引</b>（{@code RedisKeys.matchWatchable()}，ZSET：成员 = battle_id 无符号十进制，分数 = {@code created_at_ms}），以及对 6.4 的
  * <b>落点记录</b>（{@code RedisKeys.matchBattlePlacement(battle)}，HASH）的原子读与两种有条件的删除。三类键与票据同在 {@code {match}} 槽，
- * 每个方法对应规格的一段 Lua（S_W_*）或一条普通命令。使用者：163（{@code WatchBattleService}）、164（{@code WatchableListService}）、
+ * 每个方法对应一段 Lua（规格 §4.3 的九段 S_W_*，外加两段只读的批读 S_W_MARKS / S_W_RECORDS），只有 {@link #watchableCount} 是一条普通命令；
+ * 脚本一律按读写模式发出（只读的也读主库）。使用者：163（{@code WatchBattleService}）、164（{@code WatchableListService}）、
  * 开局钩子（{@code SpectateGatherHooks}）、清扫器（{@code SpectateSweeper}）。生产实现 {@code RedissonSpectateStore}；
  * 测试替身 {@code testing.InMemorySpectateStore}（与内存版票据 / 落点存储共享状态），两者跑同一套契约测试 {@code SpectateStoreContract}。
  *
@@ -83,19 +84,24 @@ public interface SpectateStore {
      * S_W_RELEASE：标记的值<b>等于</b> {@code markValue} 才删（W3：两条并发 163 不会删掉对方刚抢到的标记）。回滚、复查后的自我清退、
      * 入口处删旧标记、开局清退都用它；删旧标记时传 {@link Entry#mark()} / {@link #marksOf} 读到的原值（脏值也按原样传）。
      *
+     * @param markValue 要删的那个值，<b>只拒 null</b>：空串合法（读到空串的脏标记 = 有标记，要能按原串删掉）。必须是读到的原串，
+     *                  不要 trim、不要重新编码
      * @return true = 这一次删掉了；false = 标记不在或已是别的值（没动）。幂等；被重发时可能把一次成功的删除报成 false，
      *         所以返回值只用于日志与测试断言，不要拿它做业务判定
      */
     boolean release(long playerId, String markValue, Deadline d);
 
-    /** {@link #release} 的尽力版：发出即返回，不占调用线程，失败只记日志。给「应答已经定了、不值得再等一次 Redis」的地方用。 */
+    /**
+     * {@link #release} 的尽力版：发出即返回，不占调用线程，失败只记日志。给「应答已经定了、不值得再等一次 Redis」的地方用。
+     * {@code markValue} 同样只拒 null（空串合法）。
+     */
     void releaseAsync(long playerId, String markValue);
 
     /**
-     * 一次读出一组玩家的观战标记（一条 {@code MGET}，同槽）：开局清退在第一次备战之前调一次。
+     * 一次读出一组玩家的观战标记（一段只读脚本 S_W_MARKS，一次往返，同槽）：开局清退在第一次备战之前调一次。
      *
      * @param playerIds 参战名单（可以为空：返回空表、不发命令）
-     * @return 只含<b>有标记</b>的玩家；键是入参里的玩家号，值是标记的原值（可能是脏值）。任何失败整体抛异常，不返回半份结果
+     * @return 只含<b>有标记</b>的玩家；键是入参里的玩家号，值是标记的原值（可能是脏值，含空串）。任何失败整体抛异常，不返回半份结果
      */
     Map<Long, String> marksOf(List<Long> playerIds, Deadline d);
 
@@ -120,8 +126,8 @@ public interface SpectateStore {
         }
 
         /**
-         * 键在，但不是一条好记录（{@code PlacementRecords.parse(battleId, a, pb)} 判的：缺字段、解析失败、battle_id 与键不符、
-         * attempt 字段与消息不一致）。正常写者不会产生。调用方：163 回 16004、列表跳过，<b>都不剔除</b>（BW9 / W15），
+         * 键在，但不是一条好记录：键被占成了别的类型（不是 HASH），或 {@code PlacementRecords.parse(battleId, a, pb)} 判为损坏
+         * （缺字段、解析失败、battle_id 与键不符、attempt 字段与消息不一致）。正常写者不会产生。调用方：163 回 16004、列表跳过，<b>都不剔除</b>（BW9 / W15），
          * 计 {@code watchable_anomalies{corrupt_record}}。{@code why} 只进日志。
          */
         record Corrupt(String why) implements Record {
@@ -292,7 +298,8 @@ public interface SpectateStore {
     Listed list(int limit, Deadline d);
 
     /**
-     * 批量读落点记录（一次往返；只读，不要求彼此是同一时刻）。164 用它取这一页成员的记录。
+     * 批量读落点记录（一段只读脚本 S_W_RECORDS，一次往返；不要求彼此是同一时刻）。164 用它取这一页成员的记录。
+     * 某一把键被占成别的类型只坏它自己（那一条是 {@link Record.Corrupt}），不让整页读不出来。
      *
      * @param battleIds 要读的战斗号（可以为空：返回空表、不发命令）；重复的只读一次
      * @return 入参里<b>每个</b>不同的战斗号各一条（{@link Record.Found} / {@link Record.Absent} / {@link Record.Corrupt}）。

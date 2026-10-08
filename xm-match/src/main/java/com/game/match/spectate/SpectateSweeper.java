@@ -29,8 +29,14 @@ import org.slf4j.LoggerFactory;
  * <p><b>启停</b>：它就是进程的 {@link SweeperControl}，<b>自己不带任何生命周期</b>（构造时不起线程、不碰 Redis，不实现 {@code Lifecycle}）——
  * 由 {@code MatchLifecycle} 在 Dubbo 导出之后起、停机时在「等在途 163」之后停。{@link #start} 只是排上定时任务（单线程
  * {@code scheduleWithFixedDelay}：上一轮结束后等一个间隔再跑下一轮，轮与轮不重叠；第一轮在一个间隔之后）；{@link #stop} 不再排新的一轮，
- * 等手上这一轮结束，至多等 {@code stopTimeout}，到点就中断它（等 Redis 的那一下随即以依赖异常收场），之后不再碰 Redis。
+ * 并<b>当场中断</b>手上这一轮（等 Redis 的那一下随即以依赖异常收场，这一轮看到停机信号不再发下一条命令），之后不再碰 Redis。
  * 两者都幂等、不抛异常；没起过也能停；停了可以再起。
+ *
+ * <p><b>为什么停机不等手上这一轮自己做完</b>（lead 裁决 4：加了观战之后总停机时长不得超过原有的阶段上限）：停清扫排在「排空工作池 ∥ 等在途 163」
+ * （至多 10 s）与「等在途 gather」（至多 10 s）之间，是串在中间的一步——它等多久，最坏停机时长就多多久，而容器给一个阶段的只有 20 s。
+ * 一轮通常是毫秒级，但 Redis 卡住时一条命令会等满 {@link #OP_BUDGET_MS}。清扫是幂等的只删操作、多实例各跑各的，做一半被打断无害
+ * （命令已经发出的话 Redis 照样执行；没摘完的下一个实例、下一次启动再摘），所以直接中断。中断之后只等线程退出，那是微秒级的事；
+ * {@code stopTimeout} 只防「这一轮不理会中断」的违约情形，到点放弃（线程是守护线程，不妨碍进程退出）。
  */
 public final class SpectateSweeper implements SweeperControl {
 
@@ -39,7 +45,10 @@ public final class SpectateSweeper implements SweeperControl {
     static final String THREAD_NAME = "match-spectate-sweeper";
     /** 一轮里每条 Redis 命令的等待上限。到点只是不等了：两条命令都幂等，迟到执行也无害。 */
     static final long OP_BUDGET_MS = 3_000;
-    /** 停机时等当前一轮结束的上限（生产值）：一轮通常是毫秒级；Redis 卡住时不让它拖住停机，到点中断。 */
+    /**
+     * 停机时中断了当前一轮之后，等清扫线程退出的上限（生产值）。守约的一轮被中断后立刻收手，用不到这段时间；
+     * 它只防「这一轮不理会中断」把停机拖住（同 {@code MatchLifecycle.WATCH_DRAIN_GRACE} 的用意），不计入停机的最坏时长。
+     */
     static final Duration STOP_TIMEOUT = Duration.ofSeconds(1);
 
     private final SpectateStore store;
@@ -58,7 +67,7 @@ public final class SpectateSweeper implements SweeperControl {
     }
 
     /**
-     * @param stopTimeout 停机时等当前这一轮结束的上限（≥ 1 ms；生产为 {@link #STOP_TIMEOUT}）
+     * @param stopTimeout 停机时中断当前这一轮之后，等清扫线程退出的上限（≥ 1 ms；生产为 {@link #STOP_TIMEOUT}）
      */
     SpectateSweeper(SpectateStore store, MatchMetrics metrics, Duration interval, Duration stopTimeout) {
         this.store = Objects.requireNonNull(store, "store");
@@ -90,23 +99,23 @@ public final class SpectateSweeper implements SweeperControl {
                 return;
             }
             stopRequested = true;
-            // shutdown 之后不再排新的一轮；正在跑的那一轮在两条命令之间看到停机信号就收手
-            executor.shutdown();
-            boolean drained = false;
+            // 不再排新的一轮，并当场中断正在跑的那一轮（见类注释「为什么停机不等手上这一轮自己做完」）：它等 Redis 的那一下随即以依赖异常收场，
+            // 看到停机信号就不再发下一条命令
             try {
-                drained = executor.awaitTermination(stopTimeoutMs, TimeUnit.MILLISECONDS);
+                executor.shutdownNow();
+            } catch (RuntimeException e) { // 不该发生；停机路径上不往外抛
+                log.error("中断观战清扫的当前一轮时出错（线程是守护线程，不妨碍退出）", e);
+            }
+            boolean ended = false;
+            try {
+                ended = executor.awaitTermination(stopTimeoutMs, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (RuntimeException e) { // 不该发生；停机路径上不往外抛
-                log.error("等观战清扫的当前一轮结束时出错（按没停下处理）", e);
+                log.error("等观战清扫线程退出时出错（按没退出处理）", e);
             }
-            if (!drained) {
-                log.warn("观战清扫在 {} ms 内没有停下，中断当前这一轮（清扫是幂等的只删操作，没做完也无害）", stopTimeoutMs);
-                try {
-                    executor.shutdownNow();
-                } catch (RuntimeException e) {
-                    log.error("中断观战清扫的当前一轮时出错（线程是守护线程，不妨碍退出）", e);
-                }
+            if (!ended) {
+                log.warn("观战清扫线程被中断后 {} ms 内没有退出，不再等它（清扫是幂等的只删操作；线程是守护线程，不妨碍进程退出）", stopTimeoutMs);
             }
             executor = null;
             log.info("观战清扫已停止");
@@ -140,6 +149,10 @@ public final class SpectateSweeper implements SweeperControl {
                 log.info("[spectate] 清扫可观战索引：摘掉 {} 个过期成员", removed);
             }
         } catch (Deadline.DependencyException e) {
+            if (stopRequested) {
+                log.info("[spectate] 停机中断了这一轮清扫（幂等的只删操作，没做完无害）: {}", e.toString());
+                return;
+            }
             log.warn("[spectate] 清扫可观战索引失败（下一轮再试；读路径自己按分数过滤，不受影响）: {}", e.toString());
         }
         if (stopRequested) {
@@ -148,6 +161,10 @@ public final class SpectateSweeper implements SweeperControl {
         try {
             metrics.watchableBattles(store.watchableCount(Deadline.after(OP_BUDGET_MS)));
         } catch (Deadline.DependencyException e) {
+            if (stopRequested) {
+                log.info("[spectate] 停机中断了这一轮的索引大小采样（gauge 停在上一次的读数）: {}", e.toString());
+                return;
+            }
             log.warn("[spectate] 采样可观战索引的大小失败（gauge 停在上一次的读数）: {}", e.toString());
         }
     }

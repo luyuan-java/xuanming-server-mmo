@@ -32,6 +32,7 @@ class SliceScriptsTest {
 
     private static String startSlice;
     private static String crashWindow;
+    private static String stopSlice;
 
     @BeforeAll
     static void 读两份脚本() throws IOException {
@@ -39,6 +40,7 @@ class SliceScriptsTest {
         Assumptions.assumeTrue(Files.isRegularFile(dir.resolve("start-slice.sh")), "找不到 tools/local（单独构建 xm-robot）");
         startSlice = Files.readString(dir.resolve("start-slice.sh"), StandardCharsets.UTF_8);
         crashWindow = Files.readString(dir.resolve("battle-crash-window.sh"), StandardCharsets.UTF_8);
+        stopSlice = Files.readString(dir.resolve("stop-slice.sh"), StandardCharsets.UTF_8);
     }
 
     /** 顶格定义的 shell 函数体（{@code 名字() {} 到下一行顶格的 {@code }}）；没有这个函数为 null。 */
@@ -313,5 +315,168 @@ class SliceScriptsTest {
         // 赋值在前置检查通过之后、第一次跑 robot 之前
         int assigned = crashWindow.indexOf("\nSCENE_METRICS_ARGS=()\n");
         assertThat(assigned).isGreaterThan(crashWindow.indexOf("if (( problems != 0 )); then\n  exit 2\nfi")).isLessThan(crashWindow.indexOf("\nrobot_cmd arm\n"));
+    }
+
+    // ------------------------------------------------------------------ 双 zone 切片（批次 6.5，XM_ZONES=2）
+
+    /** {@code 名字=( … )} 数组块的内容（到下一行顶格的右括号）；没有为 null。 */
+    private static String block(String script, String name) {
+        Matcher m = Pattern.compile("(?ms)^" + Pattern.quote(name) + "=\\(\\n(.*?)^\\)\\n").matcher(script);
+        return m.find() ? m.group(1) : null;
+    }
+
+    @Test
+    void 区2的实例表_端口与别的实例都不相同_不并进区1的节点表与启动清单() {
+        assertThat(startSlice).contains("\nZONE2_ID=2\nZONE2_SCENE_NODE=\"xm-scene-z2 21010 21110 18115\"\nZONE2_GATE=\"xm-gate-z2 11010 18123\"\n");
+
+        // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；启动清单仍是十三项，没有区 2 的实例
+        String nodes = block(startSlice, "SCENE_NODES");
+        String services = block(startSlice, "SERVICES");
+        assertThat(nodes).isNotNull().doesNotContain("z2");
+        assertThat(nodes.lines().count()).isEqualTo(2);
+        assertThat(services).isNotNull();
+        assertThat(matches(services, "^\\s*\"(xm-[a-z0-9-]+)")).hasSize(13).doesNotContain("xm-scene-z2", "xm-gate-z2");
+
+        // 同机多实例：区 2 新占的五个端口互不相同，也不与脚本里别的端口相撞（区 1 的节点表、清单里的就绪端口、battle / match 的端口）
+        Set<String> taken = new LinkedHashSet<>(matches(nodes, "\\b(\\d{5})\\b"));
+        taken.addAll(matches(services, "^\\s*\"xm-[a-z-]+ (\\d+)\""));
+        taken.addAll(matches(startSlice, "^(?:BATTLE|MATCH)_[A-Z]+_PORT=(\\d+)$"));
+        assertThat(taken).contains("21000", "21101", "18114", "11000", "18081", "18106", "21200", "18113");
+        List<String> zone2 = List.of("21010", "21110", "18115", "11010", "18123");
+        assertThat(zone2).doesNotHaveDuplicates().doesNotContainAnyElementsOf(taken);
+        // 区服目录的两个 HTTP 口就是清单里等 gateway / data 就绪的那两个端口
+        assertThat(startSlice).contains("\nGATEWAY_HTTP_PORT=18081\nDATA_MGMT_PORT=18106\n");
+        assertThat(services).contains("\"xm-gateway 18081\"").contains("\"xm-data 18106\"");
+    }
+
+    @Test
+    void 区2的scene与gate_命令行只比区1多zone与端口_就绪判断相同() {
+        // scene：与区 1 的那几行逐字相同，只多一个 --xm.zone-id（少一层 for 循环，缩进少两格）
+        assertThat(function(startSlice, "start_zone2_scene")).isEqualTo("  local instance link rpc mgmt\n"
+                + "  read -r instance link rpc mgmt <<<\"$ZONE2_SCENE_NODE\"\n"
+                + "  launch \"$instance\" xm-scene --xm.zone-id=\"$ZONE2_ID\" --server.port=\"$mgmt\" --xm.scene.link-port=\"$link\" \\\n"
+                + "      --xm.scene.asset-rpc-port=\"$rpc\" --xm.scene.scene-manager-url=\"$XM_SCENE_MANAGER_URL\"\n"
+                + "  wait_port \"$link\" \"$instance\"\n"
+                + "  wait_port \"$rpc\" \"$instance\"\n"
+                + "  wait_world_channels \"$instance\" \"$mgmt\"\n"
+                + "  echo \"  $instance 就绪（区 $ZONE2_ID：链路 $link、资产通道 $rpc、管理端口 $mgmt）\"\n");
+        // gate：只换 zone 与两个端口，Dubbo 后端地址不给（用缺省 = 与区 1 的 gate 指向同一组服务，同一个 xm-match）
+        String gate = function(startSlice, "start_zone2_gate");
+        assertThat(gate).isEqualTo("  local instance client mgmt\n"
+                + "  read -r instance client mgmt <<<\"$ZONE2_GATE\"\n"
+                + "  launch \"$instance\" xm-gate --xm.zone-id=\"$ZONE2_ID\" --xm.gate.client-port=\"$client\" --server.port=\"$mgmt\"\n"
+                + "  wait_port \"$client\" \"$instance\"\n"
+                + "  echo \"  $instance 就绪（区 $ZONE2_ID：客户端 $client、管理端口 $mgmt）\"\n");
+        assertThat(gate).doesNotContain("xm.dubbo");
+    }
+
+    @Test
+    void XM_ZONES缺省1_只认1和2_区2的实例只在等于2时起_紧跟区1的同类() {
+        String validate = "\nXM_ZONES=\"${XM_ZONES:-1}\"\nif [[ \"$XM_ZONES\" != \"1\" && \"$XM_ZONES\" != \"2\" ]]; then\n"
+                + "  echo \"XM_ZONES 只能是 1 或 2：$XM_ZONES\" >&2\n  exit 1\nfi\n";
+        int loop = startSlice.indexOf("for entry in \"${SERVICES[@]}\"; do");
+        assertThat(startSlice.indexOf(validate)).as("取值检查在起任何进程之前").isPositive().isLessThan(loop);
+        // 不导出：它只决定脚本起哪些进程，不是进程的配置（导出的话故障变体脚本就得带同一行）
+        assertThat(matches(startSlice, "^(export XM_ZONES)")).isEmpty();
+
+        // 区 1 的场景节点（XM_SCENE_NODES 个）之后起区 2 的；xm-gate 就绪之后起区 2 的 gate——全部 Dubbo 后端此时都已起来
+        assertThat(startSlice).contains("    start_scene_nodes\n    if [[ \"$XM_ZONES\" == \"2\" ]]; then\n      start_zone2_scene\n    fi\n    continue\n");
+        assertThat(startSlice).contains("  echo \"  $name 就绪（端口 $ports）\"\n  if [[ \"$name\" == \"xm-gate\" && \"$XM_ZONES\" == \"2\" ]]; then\n"
+                + "    start_zone2_gate\n  fi\ndone\n");
+        assertThat(matches(startSlice, "^\\s*(start_zone2_(?:scene|gate))$")).as("各只调一次").containsExactly("start_zone2_scene", "start_zone2_gate");
+        // xm-gateway 的命令行两种形态下都不带区服播种参数（中文名经命令行会被代码页弄坏；区 2 由运维接口建）
+        assertThat(matches(startSlice, "^[^#\\n]*(seed-zones)")).isEmpty();
+        assertThat(matches(startSlice, "^(\\s*launch \"\\$name\" \"\\$name\")$")).hasSize(1);
+    }
+
+    @Test
+    void 区2在区服目录里的状态跟随XM_ZONES_经运维接口改_等区服列表反映了才报全部就绪() {
+        String sync = function(startSlice, "sync_zone2_status");
+        assertThat(sync).as("start-slice.sh 里有 sync_zone2_status()").isNotNull();
+        // =2：open，404 则建区；=1：maintenance，404 则什么都不做；其余非 200 一律失败；再等区服列表（=2 时还要带负载档：探测看到了区 2 的 gate）
+        assertThat(sync).containsSubsequence(
+                "if [[ \"$XM_ZONES\" == \"2\" ]]; then\n",
+                "want=OPEN\n",
+                "action=\"/admin/zones/$ZONE2_ID/open\"\n",
+                "if [[ \"$code\" == \"404\" ]]; then\n",
+                "action=\"/admin/zones\"\n",
+                "code=$(zone_admin_post \"$action\" \"$ZONE2_CREATE_BODY\")\n",
+                "else\n",
+                "want=MAINTENANCE\n",
+                "action=\"/admin/zones/$ZONE2_ID/maintenance\"\n",
+                "code=$(zone_admin_post \"$action\" \"$ZONE2_MAINTENANCE_BODY\")\n",
+                "if [[ \"$code\" == \"404\" ]]; then\n      return 0\n",
+                "if [[ \"$code\" != \"200\" ]]; then\n",
+                "return 1\n",
+                "until entry=$(zone_list_entry \"$ZONE2_ID\") && [[ \"$entry\" == *\"\\\"status\\\":\\\"$want\\\"\"* ]] \\\n",
+                "&& [[ \"$want\" != \"OPEN\" || \"$entry\" == *'\"load_level\":'* ]]; do\n",
+                "if (( SECONDS > deadline )); then\n",
+                "return 1\n");
+        // 建区的请求体与 robot zones 场景经同一个接口发的是同一种形状（zone_id / name / manual_status / sort_order）
+        assertThat(startSlice).contains("\nZONE2_CREATE_BODY=\"{\\\"zone_id\\\":$ZONE2_ID,\\\"name\\\":\\\"二区\\\",\\\"manual_status\\\":0,\\\"sort_order\\\":2}\"\n");
+        assertThat(matches(startSlice, "^(ZONE2_MAINTENANCE_BODY='\\{\"maintenance_msg\":\"[^\"']+\"}')$")).hasSize(1);
+
+        // 主循环之后、「全部就绪」之前调一次；失败（返回 1）时 set -e 让脚本以非 0 退出，不会报全部就绪
+        int call = startSlice.indexOf("\ndone\n\nsync_zone2_status\n\necho \"全部就绪（");
+        assertThat(call).isGreaterThan(startSlice.indexOf("for entry in \"${SERVICES[@]}\"; do"));
+        assertThat(startSlice).contains("\nset -euo pipefail\n");
+        assertThat(startSlice).endsWith("echo \"全部就绪（场景节点 $XM_SCENE_NODES 个、区 $XM_ZONES 个）。停止：tools/local/stop-slice.sh\"\n");
+
+        // 运维调用：令牌与操作人两个头同 robot 的 AdminClient；令牌走标准输入上的 curl 配置，不上命令行、不打印
+        String post = function(startSlice, "zone_admin_post");
+        assertThat(post).contains("curl -sS -o /dev/null -w '%{http_code}' -K - 2>/dev/null <<EOF || true\n")
+                .contains("url = \"http://127.0.0.1:$DATA_MGMT_PORT$path\"\n")
+                .contains("header = \"X-Xm-Admin-Token: $token\"\n")
+                .contains("header = \"X-Xm-Operator: start-slice\"\n")
+                .contains("header = \"Content-Type: application/json\"\n")
+                .contains("data-binary = \"$body\"\n")
+                .doesNotContain(" -H ");
+        assertThat(matches(startSlice, "^\\s*echo [^\\n]*\\$\\{?XM_(ADMIN_TOKEN|GM_ADMIN_SECRET|ASSET_OP_SECRET_GUILD|BATTLE_TOKEN_SECRET|DUBBO_SECRET"
+                + "|NODE_LINK_SECRET|GATE_TOKEN_SECRET|MYSQL_PASSWORD|LOGIN_DEV_PASSWORD)")).isEmpty();
+        // 区服列表按区号取那一项：GET /api/server-list，zone_id 后面必须是逗号或右括号（2 不会被 20 蒙混）
+        assertThat(function(startSlice, "zone_list_entry")).contains("\"http://127.0.0.1:$GATEWAY_HTTP_PORT/api/server-list\"")
+                .contains("grep -E \"\\\"zone_id\\\":$1[,}]\"");
+    }
+
+    @Test
+    void 停止脚本_区2的实例紧挨着区1的同类先停_清单那一行不动() {
+        // xm-gate 的 LocalSliceOrderTest 逐项钉着清单那一行（= 启动清单的逆序）；区 2 的两个实例在循环体里带上
+        assertThat(stopSlice).contains("\nfor name in xm-match xm-battle xm-gateway xm-gate xm-scene-2 xm-scene xm-data xm-trade xm-guild xm-team xm-chat "
+                + "xm-friend xm-login xm-scene-manager; do\n"
+                + "  case \"$name\" in\n"
+                + "    xm-gate) stop_one xm-gate-z2 ;;\n"
+                + "    xm-scene-2) stop_one xm-scene-z2 ;;\n"
+                + "  esac\n"
+                + "  stop_one \"$name\"\n"
+                + "done\n");
+        // 实例名与 start-slice.sh 的区 2 实例表一致（PID 文件名 = 实例名）
+        assertThat(startSlice).contains("ZONE2_SCENE_NODE=\"xm-scene-z2 ").contains("ZONE2_GATE=\"xm-gate-z2 ");
+        // 没有 PID 文件的实例跳过（单 zone 切片上区 2 的两个就是这样）；只对 PID 文件里的进程发信号
+        String stopOne = function(stopSlice, "stop_one");
+        assertThat(stopOne).isNotNull().containsSubsequence("pidfile=\"run/pids/$name.pid\"\n", "[[ -f \"$pidfile\" ]] || return 0\n", "pid=$(cat \"$pidfile\")\n",
+                "kill \"$pid\" 2>/dev/null\n", "kill -9 \"$pid\" 2>/dev/null; }\n", "rm -f \"$pidfile\"\n");
+        assertThat(stopSlice).doesNotContain("pkill").doesNotContain("killall").doesNotContain("rm -rf");
+    }
+
+    @Test
+    void 故障变体只在区1上做_robot要登录别的区的_在动手之前拒绝() {
+        // 双 zone 切片上区 2 另有 xm-scene-z2：玩家在区 2 时杀区 1 的 xm-scene 得出的是假结论
+        String guard = "ROBOT_ZONE=\"${XM_ROBOT_ZONE:-1}\"\n"
+                + "for ((i = 0; i < ${#ROBOT_ARGS[@]}; i++)); do\n"
+                + "  case \"${ROBOT_ARGS[$i]}\" in\n"
+                + "    --zone=*) ROBOT_ZONE=\"${ROBOT_ARGS[$i]#--zone=}\" ;;\n"
+                + "    --zone) ROBOT_ZONE=\"${ROBOT_ARGS[$((i + 1))]:-}\" ;;\n"
+                + "  esac\n"
+                + "done\n"
+                + "if [[ \"$ROBOT_ZONE\" != \"1\" ]]; then\n";
+        int at = crashWindow.indexOf(guard);
+        int preflightExit = crashWindow.indexOf("if (( problems != 0 )); then\n  exit 2\nfi");
+        assertThat(at).as("区号检查在前置检查里：只置 problems，与别的问题一起报").isPositive().isLessThan(preflightExit);
+        assertThat(crashWindow.substring(at, preflightExit)).contains("  problems=1\nfi\n").doesNotContain("exit ");
+        // 选项名、环境变量名、缺省值与 robot 的一致；robot 认 --zone N 与 --zone=N 两种写法，同一个选项取最后一次
+        assertThat(RobotOptions.usage()).contains("--zone <值>").contains("XM_ROBOT_ZONE");
+        // 重启用的命令行里没有 zone 参数：重启的是区 1 的节点（配置文件的缺省）
+        assertThat(function(crashWindow, "restart_scene_node")).doesNotContain("zone-id");
+        assertThat(crashWindow).doesNotContain("ZONE2_").doesNotContain("XM_ZONES=\"");
     }
 }
