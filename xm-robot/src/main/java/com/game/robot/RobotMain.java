@@ -5,6 +5,7 @@ import com.game.robot.client.AdminClient;
 import com.game.robot.client.BattleAdminClient;
 import com.game.robot.client.GatewayHttp;
 import com.game.robot.client.LoginHttpClient;
+import com.game.robot.client.MatchAdminClient;
 import com.game.robot.client.MessageIds;
 import com.game.robot.client.RobotClient;
 import com.game.robot.client.SceneAdminClient;
@@ -17,6 +18,7 @@ import com.game.robot.scenario.BattleCrashScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
+import com.game.robot.scenario.BattleSmokeScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CrossNodeScenario;
@@ -29,6 +31,8 @@ import com.game.robot.scenario.GuardScenario;
 import com.game.robot.scenario.GuildEconomyScenario;
 import com.game.robot.scenario.GuildScenario;
 import com.game.robot.scenario.KillSwitchScenario;
+import com.game.robot.scenario.Match5v5Scenario;
+import com.game.robot.scenario.MatchActivityScenario;
 import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.PetScenario;
@@ -92,6 +96,8 @@ public final class RobotMain {
                 String target = "gateway=" + options.gatewayUrl() + " zone=" + options.zoneId();
                 CheckReport report;
                 String title;
+                // 给外层脚本按子串消费的一行结论（XXX_OK … / XXX_FAIL step=… reason=…）：只有批次 6.4 的匹配类场景与 team 有
+                String resultLine = null;
                 if (options.scenario() == RobotOptions.Scenario.SMOKE) {
                     title = "xm-robot smoke：" + options.count() + " 个账号（前缀 " + options.accountPrefix() + "），" + target;
                     out.println("== " + title + " 开始 ==");
@@ -147,11 +153,34 @@ public final class RobotMain {
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.TEAM) {
-                    TeamScenario scenario = new TeamScenario(flow, registry, Path.of(options.tableDir()),
+                    TeamScenario scenario = new TeamScenario(client, flow, registry, Path.of(options.tableDir()),
                             options.accountPrefix(), options.runTag(), options.zoneId(), options.requestTimeout());
                     title = "xm-robot team：" + scenario.accountA() + " 等，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
+                    resultLine = scenario.resultLine();
+                } else if (options.scenario() == RobotOptions.Scenario.BATTLE_SMOKE) {
+                    BattleSmokeScenario scenario = new BattleSmokeScenario(client, flow, registry, matchAdmin(options, env),
+                            options.accountPrefix(), options.runTag(), options.requestTimeout());
+                    title = "xm-robot battle-smoke：" + scenario.accountA() + " 等，" + target + " match-admin=" + options.matchAdminUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                    resultLine = scenario.resultLine();
+                } else if (options.scenario() == RobotOptions.Scenario.MATCH_ACTIVITY) {
+                    MatchActivityScenario scenario = new MatchActivityScenario(client, flow, registry, matchAdmin(options, env),
+                            options.accountPrefix(), options.runTag(), options.requestTimeout());
+                    title = "xm-robot match-activity：" + scenario.accountA() + " 等，" + target + " match-admin=" + options.matchAdminUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                    resultLine = scenario.resultLine();
+                } else if (options.scenario() == RobotOptions.Scenario.MATCH_5V5) {
+                    Match5v5Scenario scenario = new Match5v5Scenario(client, flow, registry, matchAdmin(options, env),
+                            options.accountPrefix(), options.runTag(), options.requestTimeout());
+                    title = "xm-robot match-5v5：" + scenario.firstAccount() + " 等 " + Match5v5Scenario.PLAYERS + " 个账号，" + target
+                            + " match-admin=" + options.matchAdminUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                    resultLine = scenario.resultLine();
                 } else if (options.scenario() == RobotOptions.Scenario.GUILD) {
                     GuildScenario scenario = new GuildScenario(flow, registry, options.accountPrefix(), options.runTag(),
                             options.zoneId(), options.requestTimeout());
@@ -323,6 +352,9 @@ public final class RobotMain {
                     report = scenario.run();
                 }
                 out.print(report.render(title));
+                if (resultLine != null) {
+                    out.println(resultLine);
+                }
                 out.flush();
                 return report.passed() ? EXIT_PASS : EXIT_FAIL;
             }
@@ -336,5 +368,10 @@ public final class RobotMain {
     /** xm-battle dev 接口客户端（运维令牌同 audit：XM_ADMIN_TOKEN 或 run/xm-admin-token）。 */
     private static BattleAdminClient battleAdmin(RobotOptions options, Map<String, String> env) {
         return new BattleAdminClient(options.battleAdminUrl(), AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout());
+    }
+
+    /** xm-match dev 管理口客户端（读评分、活动开战、指标；运维令牌同上）。 */
+    private static MatchAdminClient matchAdmin(RobotOptions options, Map<String, String> env) {
+        return new MatchAdminClient(options.matchAdminUrl(), AdminClient.resolveToken(env.get("XM_ADMIN_TOKEN")), options.requestTimeout());
     }
 }

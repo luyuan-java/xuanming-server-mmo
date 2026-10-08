@@ -18,12 +18,10 @@ import com.game.proto.team.LeaveTeamRequest;
 import com.game.proto.team.ListMyInvitesRequest;
 import com.game.proto.team.ListMyInvitesResponse;
 import com.game.proto.team.RespondInviteRequest;
-import com.game.proto.team.StartTeamMatchRequest;
 import com.game.proto.team.TeamChangeReason;
 import com.game.proto.team.TeamEventS2C;
 import com.game.proto.team.TeamEventType;
 import com.game.proto.team.TeamInviteS2C;
-import com.game.proto.team.TeamMatchState;
 import com.game.proto.team.TeamMemberView;
 import com.game.proto.team.TeamResponse;
 import com.game.proto.team.TeamSnapshotS2C;
@@ -31,6 +29,7 @@ import com.game.proto.team.TeamView;
 import com.game.proto.team.TransferLeaderRequest;
 import com.game.robot.client.GameConnection;
 import com.game.robot.client.Received;
+import com.game.robot.client.RobotClient;
 import com.game.robot.client.RobotException;
 import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
@@ -62,13 +61,24 @@ import java.util.function.Predicate;
  *   <li>S5 D 申请、A 拒绝 → D 收 203 APPLICATION_REJECTED（actor = 队长 A）（Go :400-419）；</li>
  *   <li>S6 A 换图（World 表候选，同 {@link ReconnectScenario}）→ B 10 s 内收到 79，scene_id 等于 A 的新场景（Go :421-439；
  *       跟随由 xm-scene 实现，team-spec §6.10）；</li>
- *   <li>S7 / S8 整队开战 6.4 再跑：4.3 改为 A StartTeamMatch(1) → 4027 带 IDLE 视图、B → 4018（team-spec §5.4、D11）；</li>
+ *   <li>开战拒绝码（批次 6.4，match-spec §15.5；这一条与下面两条在 {@link TeamMatchSteps}）：非队长 B 发 211 → 4018；A 发 211(2)
+ *       （没配组队人数的副本）→ 4027 且视图 IDLE；B 持有 1V1 排队票时 A 发 211(1) → 4026，{@code parameters[0] = B}，随后 B 发 148 取消并用
+ *       153 确认 NOT_QUEUED；</li>
+ *   <li>S7 整队开战（Go :441-446、:1055-1100）：A 发 211(1) → 回包 STARTING；B 收 213 MATCH_STARTED（发起人 A 不收，以回包为准）；
+ *       两人收到同一个 battle_id 的 177 / 143 → 都直连、开自动 → 都收到 150；两人都收到 213 MATCH_ENDED（开局成功、开战锁释放后即推，
+ *       通常早于战斗结束，按 mark 扫描不会漏）。遇到 4025 / 4026 的过渡态在 20 s 内重试；</li>
+ *   <li>S8 战斗中拒绝（Go :448-470）：B 单人 PVE 开战、已直连但尚未开自动（持战斗锁）时 A 发 211 → 4025，{@code parameters[0] = B}；
+ *       先撞到别的队员（上一场结算尚未落地）时在 20 s 内重试；随后 B 把这一局打完；</li>
  *   <li>X1 / X2 跨区：本机切片单 zone，跳过并记观察（D16）；</li>
  *   <li>S9 A 解散：其余成员收 DISBANDED，team_id = 0（Go :534-567）。</li>
  * </ol>
  * Java 增项（钉住契约细节，team-spec §10.5）：重复建队 4003 带 leader = A 的视图；用不符的 expected 离队 → 成功带当前视图；
  * 踢自己 4005、转让给自己 4007、非队长踢人 4006；邀请已登出的账号 4017；notify_online → A 收 MEMBER_ONLINE 且 version 不变；
  * 上行 213 收不到任何回包（D13）；拒绝不存在的邀请幂等成功；RespondInvite(team_id = 0) → 4013。
+ *
+ * <p>开战拒绝码、S7、S8 三段（批次 6.4，需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService）各自独立：某一段中断时记失败并继续，
+ * S9 照常跑——切片里没有 xm-match 时只有这三段失败，其余步骤不受影响。结果行（{@link #resultLine}，供外层脚本按子串消费）：
+ * {@code TEAM_SMOKE_OK team_id=… zone=… player_a=… player_b=… player_d=… battle_id=…} / {@code TEAM_SMOKE_FAIL step=… reason=…}。
  *
  * <p>账号是 run-tag 新号（D16，基线是固定的 robot_9301–9304），第四个账号 E 只用来充当「已登出的玩家」：进场后立即 LeaveGame 断开。
  * 推送按 {@link com.game.robot.client.Inbox} 的到达序：触发动作之前记 mark、之后从 mark 起找（先到的推送不会漏，上一步的不会被误认）。
@@ -85,8 +95,8 @@ public final class TeamScenario {
     private static final Duration PUSH_TIMEOUT = Duration.ofSeconds(10);
     /** S6 跟随判定窗口，也是换图自身等 79 的上限（Go teamSmokeFollowTimeout）。 */
     private static final Duration FOLLOW_TIMEOUT = Duration.ofSeconds(10);
-    /** 4.3 的开战一律 4027（没有副本开放组队）；6.4 起换成真副本号再断言开战。 */
-    private static final int BATTLE_CONFIG_ID = 1;
+    /** 结果行的标记：{@code TEAM_SMOKE_OK …} / {@code TEAM_SMOKE_FAIL step=… reason=…}（同基线 Go robot）。 */
+    static final String MARKER = "TEAM_SMOKE";
 
     private static final int TIP_MEMBER_IN_TEAM = TeamErrorTip.team_error.kTeamMemberInTeam_VALUE;
     private static final int TIP_KICK_SELF = TeamErrorTip.team_error.kTeamKickSelf_VALUE;
@@ -94,9 +104,7 @@ public final class TeamScenario {
     private static final int TIP_APPOINT_SELF = TeamErrorTip.team_error.kTeamAppointSelf_VALUE;
     private static final int TIP_NO_TEAM = TeamErrorTip.team_error.kTeamHasNotTeamId_VALUE;
     private static final int TIP_PLAYER_NOT_FOUND = TeamErrorTip.team_error.kTeamPlayerNotFound_VALUE;
-    private static final int TIP_NOT_LEADER = TeamErrorTip.team_error.kTeamNotLeader_VALUE;
     private static final int TIP_HOME_ZONE_UNKNOWN = TeamErrorTip.team_error.kTeamHomeZoneUnknown_VALUE;
-    private static final int TIP_DUNGEON_NOT_OPEN = TeamErrorTip.team_error.kTeamDungeonNotOpen_VALUE;
     private static final int TIP_IN_MATCH = TeamErrorTip.team_error.kTeamInMatch_VALUE;
 
     private final PlayerFlow flow;
@@ -118,7 +126,6 @@ public final class TeamScenario {
     private final int kick;
     private final int transfer;
     private final int disband;
-    private final int startMatch;
     private final int notifySnapshot;
     private final int notifyInvite;
     private final int notifyEvent;
@@ -127,15 +134,26 @@ public final class TeamScenario {
     private final int leaveGame;
     private final int sendTip;
     private final CheckReport report = new CheckReport();
+    private final StepTrack steps = new StepTrack(MARKER);
     private final List<GameConnection> connections = new ArrayList<>();
+    /** 开战段（批次 6.4）：开战拒绝码、S7、S8；它建的战斗直连由它自己收尾。 */
+    private final TeamMatchSteps matchSteps;
+
+    /** 结果行的字段（没跑到的保持 0）。 */
+    private long teamId;
+    private long playerA;
+    private long playerB;
+    private long playerD;
 
     /**
+     * @param client   建战斗直连用（S7 / S8）
      * @param tableDir 配置表目录（S6 从 World 表选换图目标）
      * @param zoneId   本区（S1 断言队伍 zone_id == 建队者的 home zone == 新号建角所在区）
      */
-    public TeamScenario(PlayerFlow flow, MessageIdRegistry registry, Path tableDir, String accountPrefix, String runTag,
+    public TeamScenario(RobotClient client, PlayerFlow flow, MessageIdRegistry registry, Path tableDir, String accountPrefix, String runTag,
                         int zoneId, Duration requestTimeout) {
         this.flow = flow;
+        this.matchSteps = new TeamMatchSteps(client, registry, report, steps, requestTimeout, MatchSupport.Tempo.STANDARD);
         this.tableDir = tableDir;
         this.accountA = accountName(accountPrefix, runTag, "a");
         this.accountB = accountName(accountPrefix, runTag, "b");
@@ -154,7 +172,6 @@ public final class TeamScenario {
         this.kick = registry.requireId(SERVICE, "KickMember");
         this.transfer = registry.requireId(SERVICE, "TransferLeader");
         this.disband = registry.requireId(SERVICE, "DisbandTeam");
-        this.startMatch = registry.requireId(SERVICE, "StartTeamMatch");
         this.notifySnapshot = registry.requireId(SERVICE, "NotifyTeamSnapshot");
         this.notifyInvite = registry.requireId(SERVICE, "NotifyTeamInvite");
         this.notifyEvent = registry.requireId(SERVICE, "NotifyTeamEvent");
@@ -178,12 +195,20 @@ public final class TeamScenario {
         } catch (RobotException | RuntimeException e) {
             report.fail("流程中断", e.getMessage() == null ? e.toString() : e.getMessage(), REF);
         } finally {
+            matchSteps.close();
             connections.forEach(GameConnection::close);
         }
         return report;
     }
 
+    /** 结果行（跑完 {@link #run} 之后取）：{@code TEAM_SMOKE_OK …} 或 {@code TEAM_SMOKE_FAIL step=… reason=…}。 */
+    public String resultLine() {
+        return steps.line(report, "team_id=" + uid(teamId) + " zone=" + zoneId + " player_a=" + uid(playerA) + " player_b=" + uid(playerB)
+                + " player_d=" + uid(playerD) + " battle_id=" + uid(matchSteps.teamBattleId()));
+    }
+
     private void runChecks() throws RobotException {
+        steps.step("login", report);
         Bot a = enter("A", accountA);
         Bot b = enter("B", accountB);
         Bot d = enter("D", accountD);
@@ -191,9 +216,13 @@ public final class TeamScenario {
         Bot e = enter("E", accountE);
         e.connection().send(leaveGame, LeaveGameRequest.getDefaultInstance());
         e.connection().close();
+        playerA = a.id();
+        playerB = b.id();
+        playerD = d.id();
         report.note("A=" + uid(a.id()) + " B=" + uid(b.id()) + " D=" + uid(d.id()) + " E（已登出）=" + uid(e.id()));
 
         // ---- S0：回到「不在任何队伍」 ----
+        steps.step("s0-cleanup", report);
         List<String> leftovers = new ArrayList<>();
         for (Bot bot : List.of(a, b, d)) {
             String left = leaveAnyTeam(bot);
@@ -204,11 +233,13 @@ public final class TeamScenario {
         must(leftovers.isEmpty(), "S0 预清理：A / B / D 都不在任何队伍", leftovers.isEmpty() ? "" : String.join("；", leftovers));
 
         // ---- S1：A 建队 → B 申请 → A 同意 ----
+        steps.step("s1-create-apply-approve", report);
         TeamResponse createResp = a.call(createTeam, CreateTeamRequest.getDefaultInstance(), TeamResponse.parser());
         TeamView created = createResp.getTeam();
         long tid = created.getTeamId();
         must(tipOf(createResp) == 0 && tid != 0 && created.getLeaderId() == a.id() && created.getMembersCount() == 1,
                 "S1 A 建队：受理，A 是唯一成员且为队长", describe(createResp));
+        teamId = tid;
         report.check(created.getZoneId() == zoneId, "S1 队伍 zone_id == A 的 home zone（本区）",
                 "zone_id=" + created.getZoneId() + "，期望 " + zoneId, REF);
         TeamResponse dupCreate = a.call(createTeam, CreateTeamRequest.getDefaultInstance(), TeamResponse.parser());
@@ -239,6 +270,7 @@ public final class TeamScenario {
                 joined.map(s -> describe(s.getTeam())).orElse(PUSH_TIMEOUT.toSeconds() + " s 内没收到" + b.describeSince(bMark)), REF);
 
         // ---- S2：重放「同意」，状态只变化一次 ----
+        steps.step("s2-replay", report);
         TeamResponse replay = a.call(handleApplication, approveReq, TeamResponse.parser());
         TeamMemberView replayB = onlyMember(replay.getTeam(), b.id());
         report.check(tipOf(replay) == 0 && replay.getTeam().getMembersCount() == 2 && replayB != null
@@ -254,6 +286,7 @@ public final class TeamScenario {
                 "B 用不符的 expected 离队 → 成功且仍在队（回当前视图）", describe(staleLeave), REF);
 
         // ---- S3：邀请 D（D 收 215）→ D 拒绝 → 再邀请 → D 接受 ----
+        steps.step("s3-invite", report);
         InviteToTeamRequest inviteD = InviteToTeamRequest.newBuilder().setTargetPlayerId(d.id()).setExpectedTeamId(tid).build();
         int dMark = d.mark();
         TeamResponse invited = a.call(invite, inviteD, TeamResponse.parser());
@@ -291,6 +324,7 @@ public final class TeamScenario {
         long dEpochInTeam = accepted.getMembershipEpoch();
 
         // ---- S4：踢 D（D 收空视图、epoch 变大）；A → B → A 转让 ----
+        steps.step("s4-kick-transfer", report);
         dMark = d.mark();
         TeamResponse kicked = a.call(kick, KickMemberRequest.newBuilder().setTargetPlayerId(d.id()).setExpectedTeamId(tid).build(),
                 TeamResponse.parser());
@@ -357,6 +391,7 @@ public final class TeamScenario {
                 describe(zeroTeam), REF);
 
         // ---- S5：D 申请，A 拒绝 → D 收 203 APPLICATION_REJECTED ----
+        steps.step("s5-reject-application", report);
         expectTip(d, applyJoin, ApplyJoinTeamRequest.newBuilder().setTargetPlayerId(a.id()).build(), 0, "S5 D 申请加入");
         dMark = d.mark();
         TeamResponse rejected = a.call(handleApplication, HandleApplicationRequest.newBuilder().setApplicantId(d.id())
@@ -371,21 +406,15 @@ public final class TeamScenario {
                         .orElse(PUSH_TIMEOUT.toSeconds() + " s 内没收到" + d.describeSince(dMark)), REF);
 
         // ---- S6：A 换图，B 跟随 ----
+        steps.step("s6-follow", report);
         follow(a, b);
 
-        // ---- S7 / S8：整队开战 6.4 再跑；4.3 没有副本开放组队 ----
-        expectTipWithView(b, startMatch, StartTeamMatchRequest.newBuilder().setBattleConfigId(BATTLE_CONFIG_ID)
-                .setExpectedTeamId(tid).build(), TIP_NOT_LEADER, tid, "非队长 B 开战 → 4018");
-        TeamResponse match = a.call(startMatch, StartTeamMatchRequest.newBuilder().setBattleConfigId(BATTLE_CONFIG_ID)
-                .setExpectedTeamId(tid).build(), TeamResponse.parser());
-        report.check(tipOf(match) == TIP_DUNGEON_NOT_OPEN && match.hasTeam() && match.getTeam().getTeamId() == tid
-                        && match.getTeam().getMatchState() == TeamMatchState.TEAM_MATCH_STATE_IDLE,
-                "A StartTeamMatch(" + BATTLE_CONFIG_ID + ") → 4027，带视图且 match_state = IDLE（4.3 不开战，D11）",
-                describe(match), REF);
-        report.note("S7 / S8 整队开战、战斗中拒绝：批次 6.4 接入开战后再跑（team-spec §10.5）");
+        // ---- 开战拒绝码、S7、S8（批次 6.4，TeamMatchSteps）：各自独立，中断时记失败并继续，S9 照常跑 ----
+        matchSteps.run(a, b, tid);
         report.note("X1 / X2 跨区：本机切片只有一个 zone，跳过；4020 由 xm-team 单测用不同 zone_id 的预置玩家覆盖（team-spec §10.5、D16）");
 
         // ---- S9：解散 ----
+        steps.step("s9-disband", report);
         TeamView before = myTeam(a);
         List<Bot> waiters = new ArrayList<>();
         List<Integer> marks = new ArrayList<>();
@@ -663,7 +692,7 @@ public final class TeamScenario {
      * 一个已进场的机器人。只在场景线程上使用：相邻两次请求至少隔 {@link #REQUEST_SPACING}（按本机器人计，同 Go pace），
      * 远离 gate 每个消息号每秒 3 条的限频。
      */
-    private static final class Bot {
+    private static final class Bot implements MatchSupport.Caller {
 
         final String name;
         final EnteredPlayer player;
@@ -681,15 +710,23 @@ public final class TeamScenario {
             this.scene = player.sceneInfo();
         }
 
-        long id() {
+        @Override
+        public String name() {
+            return name;
+        }
+
+        @Override
+        public long id() {
             return player.playerId();
         }
 
-        GameConnection connection() {
+        @Override
+        public GameConnection connection() {
             return player.connection();
         }
 
-        int mark() {
+        @Override
+        public int mark() {
             return connection().inbox().size();
         }
 
@@ -697,8 +734,9 @@ public final class TeamScenario {
             return connection().describeSince(mark);
         }
 
-        /** 发请求等应答；信封错误（限频 1008、热关停 1003 ……）与超时抛出：它们说明请求没到 team 业务逻辑。 */
-        <T extends Message> T call(int messageId, Message body, Parser<T> parser) throws RobotException {
+        /** 发请求等应答；信封错误（限频 1008、热关停 1003 ……）与超时抛出：它们说明请求没到 team / match 的业务逻辑。 */
+        @Override
+        public <T extends Message> T call(int messageId, Message body, Parser<T> parser) throws RobotException {
             pace();
             try {
                 return connection().call(messageId, body, parser, requestTimeout);
@@ -708,7 +746,8 @@ public final class TeamScenario {
         }
 
         /** 只发不等。 */
-        long send(int messageId, Message body) throws RobotException {
+        @Override
+        public long send(int messageId, Message body) throws RobotException {
             pace();
             return connection().send(messageId, body);
         }

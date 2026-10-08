@@ -92,6 +92,12 @@ class TeamScenarioTest {
     }
 
     @Test
+    void 结果行的标记同基线_帮助里写明开战段与结果行() {
+        assertThat(TeamScenario.MARKER).isEqualTo("TEAM_SMOKE");
+        assertThat(RobotOptions.usage()).contains("TEAM_SMOKE_OK", "TEAM_SMOKE_FAIL step=", "4026[B]", "4025[B]", "MATCH_ENDED");
+    }
+
+    @Test
     void 相邻请求间隔让每个消息号每秒不超过3条() {
         // gate 缺省限频每秒 3 条（GetMyTeam / ListMyInvites 5 条）；同一机器人任意 1 秒内最多 ceil(1000 / 间隔) 条
         long perSecond = (1000 + TeamScenario.REQUEST_SPACING.toMillis() - 1) / TeamScenario.REQUEST_SPACING.toMillis();

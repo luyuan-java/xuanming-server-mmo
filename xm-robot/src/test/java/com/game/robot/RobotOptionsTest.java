@@ -213,6 +213,87 @@ class RobotOptionsTest {
     }
 
     @Test
+    void 匹配类三个子命令_缺省的match管理端口18113_命令行盖过环境变量_地址要带协议() throws Exception {
+        RobotOptions smoke = RobotOptions.parse(List.of("battle-smoke", "--run-tag", "t1"), ENV, NOW);
+        assertThat(smoke.scenario()).isEqualTo(RobotOptions.Scenario.BATTLE_SMOKE);
+        assertThat(smoke.matchAdminUrl()).isEqualTo("http://127.0.0.1:18113");
+        assertThat(smoke.battleAdminUrl()).as("xm-battle 的管理端口是另一个").isEqualTo("http://127.0.0.1:18112");
+        assertThat(RobotOptions.parse(List.of("match-activity"), ENV, NOW).scenario()).isEqualTo(RobotOptions.Scenario.MATCH_ACTIVITY);
+        assertThat(RobotOptions.parse(List.of("match-5v5"), ENV, NOW).scenario()).isEqualTo(RobotOptions.Scenario.MATCH_5V5);
+
+        assertThat(RobotOptions.parse(List.of("match-activity", "--match-admin-url", "http://10.0.0.5:28113/"), ENV, NOW).matchAdminUrl())
+                .as("去掉结尾斜杠").isEqualTo("http://10.0.0.5:28113");
+        Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "XM_ROBOT_MATCH_ADMIN_URL", "http://env:1");
+        assertThat(RobotOptions.parse(List.of("battle-smoke"), env, NOW).matchAdminUrl()).isEqualTo("http://env:1");
+        assertThat(RobotOptions.parse(List.of("battle-smoke", "--match-admin-url=http://arg:2"), env, NOW).matchAdminUrl()).isEqualTo("http://arg:2");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("match-5v5", "--match-admin-url", "127.0.0.1:18113"), ENV, NOW))
+                .isInstanceOf(UsageException.class).hasMessageContaining("--match-admin-url");
+        assertThat(smoke.toString()).contains("matchAdminUrl=http://127.0.0.1:18113").doesNotContain("dev-secret");
+
+        assertThat(RobotOptions.usage()).contains("--match-admin-url <值>", "XM_ROBOT_MATCH_ADMIN_URL", "http://127.0.0.1:18113",
+                "  battle-smoke ", "  match-activity ", "  match-5v5 ", "BATTLE_SMOKE_OK", "BATTLE_SMOKE_FAIL step=", "MATCH_ACTIVITY_OK", "MATCH_5V5_OK");
+    }
+
+    @Test
+    void 匹配类子命令的账号都放得进64个字符_十个5V5账号按最长的那个算() {
+        // 前缀 + 标签（bm / ma / m5）+ 16 位 run-tag + _ + 一位后缀
+        String prefix = "p".repeat(64 - 2 - 16 - 2);
+        String tag = "t".repeat(16);
+        for (String sub : List.of("battle-smoke", "match-activity", "match-5v5")) {
+            assertThat(catchUsage(List.of(sub, "--prefix", prefix, "--run-tag", tag))).as(sub + " 恰好 64 个字符").isNull();
+            assertThat(catchUsage(List.of(sub, "--prefix", prefix + "p", "--run-tag", tag))).as(sub + " 65 个字符").contains("超过 64");
+        }
+    }
+
+    private static String catchUsage(List<String> args) {
+        try {
+            RobotOptions.parse(args, ENV, NOW);
+            return null;
+        } catch (UsageException e) {
+            return e.getMessage();
+        }
+    }
+
+    @Test
+    void 每个子命令都在帮助的用法行与说明行里_未知子命令的提示列全_缺少子命令的提示点到匹配类() {
+        java.util.Set<String> all = new java.util.TreeSet<>();
+        for (RobotOptions.Scenario scenario : RobotOptions.Scenario.values()) {
+            all.add(scenario.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'));
+        }
+        String usage = RobotOptions.usage();
+
+        // 用法行：<a|b|c>
+        String first = usage.lines().findFirst().orElseThrow();
+        assertThat(first).startsWith("用法：").contains("<").contains(">");
+        List<String> inUsageLine = List.of(first.substring(first.indexOf('<') + 1, first.indexOf('>')).split("\\|"));
+        assertThat(inUsageLine).doesNotHaveDuplicates().containsExactlyInAnyOrderElementsOf(all);
+
+        // 说明行：「  名字 说明」，friend / chat 两个共用一行
+        java.util.regex.Pattern head = java.util.regex.Pattern.compile("^  ([a-z][a-z0-9-]*(?: / [a-z][a-z0-9-]*)*)\\s");
+        List<String> described = new java.util.ArrayList<>();
+        usage.lines().forEach(line -> {
+            java.util.regex.Matcher m = head.matcher(line);
+            if (m.find()) {
+                described.addAll(List.of(m.group(1).split(" / ")));
+            }
+        });
+        assertThat(described).doesNotHaveDuplicates().containsExactlyInAnyOrderElementsOf(all);
+
+        // 未知子命令的提示把全部子命令列出来
+        String unknown = catchUsage(List.of("fly"));
+        assertThat(unknown).startsWith("未知子命令：fly（只有 ").endsWith("）");
+        List<String> listed = List.of(unknown.substring(unknown.indexOf("（只有 ") + 4, unknown.length() - 1).split(" / "));
+        assertThat(listed).doesNotHaveDuplicates().containsExactlyInAnyOrderElementsOf(all);
+
+        // 缺少子命令的提示只举几个例子（含批次 6.4 新加的），其余指向 --help
+        String missing = catchUsage(List.of());
+        assertThat(missing).startsWith("缺少子命令").contains("battle-smoke", "match-activity", "--help");
+        for (String example : missing.substring(missing.indexOf('（') + 1, missing.indexOf(" / …")).split(" / ")) {
+            assertThat(all).as("「缺少子命令」里举的例子 %s 是真有的子命令", example).contains(example);
+        }
+    }
+
+    @Test
     void 帮助() {
         assertThatThrownBy(() -> RobotOptions.parse(List.of("--help"), Map.of(), NOW))
                 .isInstanceOfSatisfying(UsageException.class, e -> assertThat(e.isHelp()).isTrue());
