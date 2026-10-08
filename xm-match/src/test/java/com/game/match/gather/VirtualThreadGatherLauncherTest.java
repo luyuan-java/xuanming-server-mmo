@@ -313,9 +313,11 @@ class VirtualThreadGatherLauncherTest {
         });
 
         gate.release.countDown();
+        // 先等回调、再取结果：对还没完成的 future 调 get() 的线程被唤醒后会帮着跑它的后续（CompletableFuture 的 postComplete），
+        // 先 get(future) 的话回调就可能跑在测试线程上（2026-10-08 在 CI 的 Integration 上偶发；同 6.3 的 SceneBattleProviderTest）
+        assertThatThrownBy(() -> dependent.get(5, TimeUnit.SECONDS)).hasRootCauseInstanceOf(IllegalStateException.class);
         assertThat(get(future).ok()).isTrue();
 
-        assertThatThrownBy(() -> dependent.get(5, TimeUnit.SECONDS)).hasRootCauseInstanceOf(IllegalStateException.class);
         assertThat(callbackThread.get()).as("回调在 gather 的线程上跑：所以不得阻塞").startsWith("match-gather-");
         assertThat(launcher.awaitIdle(Duration.ofSeconds(5))).isTrue();
         assertThat(launcher.availablePermits()).isEqualTo(1);
