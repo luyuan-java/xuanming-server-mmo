@@ -875,9 +875,13 @@ public final class BattleSmokeScenario {
         AutoRequest secondAuto = MatchSupport.enableAuto(secondDirect, second.battleId(), battleIds);
         Finished secondEnd = MatchSupport.awaitEnd(secondDirect, second.battleId(), battleIds, MatchSupport.BATTLE_END_TIMEOUT, secondAuto);
         secondDirect.close();
-        report.check(secondEnd.end().getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && secondEnd.fin() && secondEnd.autoAccepted(),
-                "第 7 步 第二局同样挂机（162 被受理）打到 150（SIDE_A_WIN）后 FIN——否则 A 带着战斗锁进第 8 步会一直 16000",
-                "outcome=" + secondEnd.end().getOutcome() + " 关闭方式=" + secondEnd.closed() + secondEnd.autoNote(), REF);
+        // 不断言胜负：血量随第一局的结算带进第二局、种子每局随机，第二局阵亡是合法结果（阵亡后 scene 结算时原地复活，不影响后面的步骤）
+        String secondProblem = BattleSmokeChecks.pveFinishedProblem(secondEnd.end(), second.battleId(), a.id(), secondEnd.turns());
+        report.check(secondProblem == null && secondEnd.fin() && secondEnd.autoAccepted(),
+                "第 7 步 第二局同样挂机（162 被受理）打到 150（胜 / 负 / 平都算打完；外层与 settlement 一致、指向本局与 A）后 FIN——否则 A 带着战斗锁进第 8 步会一直 16000",
+                orDescribe(secondProblem, "outcome=" + secondEnd.end().getOutcome() + " rounds=" + secondEnd.end().getSettlement().getTotalRounds())
+                        + " 关闭方式=" + secondEnd.closed() + secondEnd.autoNote(), REF);
+
     }
 
     private RequestBattleTicketResponse reissue(Bot bot, long battle) throws RobotException {

@@ -238,7 +238,25 @@ final class BattleSmokeChecks {
      * @return null = 没问题
      */
     static String pveVictoryProblem(BattleEndS2C end, long battleId, long playerId, int turns) {
+        return pveEndProblem(end, battleId, playerId, turns, true);
+    }
+
+    /**
+     * 单人 PVE 的终局包是不是「这一局、这个人、打出了结果、真打过」——比 {@link #pveVictoryProblem} 只少「必须打赢」一条：
+     * 外层与 settlement 的 outcome 必须一致，而且是胜 / 负 / 平之一（{@link #rated}）。给同一个号的<b>第二局</b>用：血量随上一局的结算
+     * 带进下一局（基线同此，scene 把 settlement.health 写回属性），种子又是每局随机，第二局阵亡是合法结果；那一步要证明的是「打完、放锁」，
+     * 不是胜负（2026-10-08 切片实测：第一局剩 261 血，第二局第 9 回合阵亡）。
+     *
+     * @param turns 这条直连上收到的 139 条数
+     * @return null = 没问题
+     */
+    static String pveFinishedProblem(BattleEndS2C end, long battleId, long playerId, int turns) {
+        return pveEndProblem(end, battleId, playerId, turns, false);
+    }
+
+    private static String pveEndProblem(BattleEndS2C end, long battleId, long playerId, int turns, boolean mustWin) {
         BattleSettlementData settlement = end.getSettlement();
+
         List<String> problems = new ArrayList<>();
         if (end.getBattleId() != battleId || settlement.getBattleId() != battleId) {
             problems.add("battle_id 对不上本局 " + Long.toUnsignedString(battleId) + "：外层 " + Long.toUnsignedString(end.getBattleId())
@@ -247,9 +265,14 @@ final class BattleSmokeChecks {
         if (settlement.getPlayerId() != playerId) {
             problems.add("settlement.player_id = " + Long.toUnsignedString(settlement.getPlayerId()) + "，期望本人 " + Long.toUnsignedString(playerId));
         }
-        if (end.getOutcome() != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN || settlement.getOutcome() != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN) {
-            problems.add("终局不是 SIDE_A_WIN：外层 " + end.getOutcome() + "、settlement " + settlement.getOutcome());
+        if (mustWin) {
+            if (end.getOutcome() != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN || settlement.getOutcome() != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN) {
+                problems.add("终局不是 SIDE_A_WIN：外层 " + end.getOutcome() + "、settlement " + settlement.getOutcome());
+            }
+        } else if (end.getOutcome() != settlement.getOutcome() || !rated(end.getOutcome())) {
+            problems.add("终局不是外层与 settlement 一致的胜 / 负 / 平：外层 " + end.getOutcome() + "、settlement " + settlement.getOutcome());
         }
+
         if (turns < 1 || settlement.getTotalRounds() < 1) {
             problems.add("没有真的打过回合：139 × " + turns + "、total_rounds = " + settlement.getTotalRounds());
         }

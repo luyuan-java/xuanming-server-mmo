@@ -314,6 +314,32 @@ class BattleSmokeChecksTest {
 
     // ---------------------------------------------------------------- 终局（评审 ROBOT-2）
 
+    @Test
+    void 同一个号的第二局_只要求打出结果且与settlement一致_不要求打赢() {
+        eBattleOutcome win = eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
+        eBattleOutcome lose = eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+        eBattleOutcome draw = eBattleOutcome.BATTLE_OUTCOME_DRAW;
+        long battle = BIG + 41;
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, BIG, win, win, 9), battle, BIG, 9)).isNull();
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, BIG, lose, lose, 9), battle, BIG, 9))
+                .as("带着上一局的残血阵亡：合法结果").isNull();
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, BIG, draw, draw, 30), battle, BIG, 30)).isNull();
+        // 打赢才算的那个判据对同一个包仍然判不过
+        assertThat(BattleSmokeChecks.pveVictoryProblem(pveEnd(battle, battle, BIG, lose, lose, 9), battle, BIG, 9)).contains("终局不是 SIDE_A_WIN");
+
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, BIG, lose, win, 9), battle, BIG, 9))
+                .as("外层输了、settlement 却是赢").contains("终局不是外层与 settlement 一致的胜 / 负 / 平", "外层 BATTLE_OUTCOME_SIDE_B_WIN", "settlement BATTLE_OUTCOME_SIDE_A_WIN");
+        eBattleOutcome ongoing = eBattleOutcome.BATTLE_OUTCOME_ONGOING;
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, BIG, ongoing, ongoing, 9), battle, BIG, 9))
+                .as("两边一致但不是终局").contains("终局不是外层与 settlement 一致的胜 / 负 / 平");
+        // 其余几项与打赢的判据同一套
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle + 1, BIG, lose, lose, 9), battle, BIG, 9))
+                .contains("battle_id 对不上本局", Long.toUnsignedString(battle + 1));
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, 7, lose, lose, 9), battle, BIG, 9)).contains("settlement.player_id = 7");
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, BIG, lose, lose, 0), battle, BIG, 9)).contains("total_rounds = 0");
+        assertThat(BattleSmokeChecks.pveFinishedProblem(pveEnd(battle, battle, BIG, lose, lose, 9), battle, BIG, 0)).contains("139 × 0");
+    }
+
     private static BattleEndS2C pveEnd(long battleId, long settlementBattle, long settlementPlayer, eBattleOutcome outer, eBattleOutcome inner,
                                        int rounds) {
         return BattleEndS2C.newBuilder().setBattleId(battleId).setOutcome(outer).setSettlement(BattleSettlementData.newBuilder()
