@@ -60,7 +60,7 @@ class MatchSupportTest {
                 .isEqualTo(MatchSupport.SAME_ID_WINDOW).isGreaterThan(Duration.ofSeconds(1));
         assertThat(standard.retryInterval()).as("过渡态每 1 s 重试").isEqualTo(Duration.ofSeconds(1));
         assertThat(standard.settleTimeout()).as("过渡态上限 20 s").isEqualTo(Duration.ofSeconds(20)).isEqualTo(MatchSupport.SETTLE_TIMEOUT);
-        assertThat(MatchSupport.BATTLE_START_TIMEOUT).as("等开战 30 s").isEqualTo(Duration.ofSeconds(30));
+        assertThat(standard.battleStartTimeout()).as("等开战 30 s").isEqualTo(Duration.ofSeconds(30)).isEqualTo(MatchSupport.BATTLE_START_TIMEOUT);
         assertThat(MatchSupport.BATTLE_END_TIMEOUT).as("等终局 120 s").isEqualTo(Duration.ofSeconds(120));
         assertThat(standard.silence()).as("148 发出后 1 s 内无回包").isEqualTo(Duration.ofSeconds(1));
         assertThat(MatchSupport.RATING_WAIT).as("收到 150 后最多等 10 s 查评分").isEqualTo(Duration.ofSeconds(10));

@@ -142,7 +142,7 @@ public final class Match5v5Scenario {
         List<Started> starts = new ArrayList<>();
         for (int i = 0; i < PLAYERS; i++) {
             starts.add(MatchSupport.awaitBattle(bots.get(i).name, bots.get(i).connection(), marks.get(i), 0, battleIds,
-                    MatchSupport.BATTLE_START_TIMEOUT));
+                    tempo.battleStartTimeout()));
         }
         battleId = starts.get(0).battleId();
         List<String> others = new ArrayList<>();

@@ -76,18 +76,20 @@ final class MatchSupport {
     }
 
     /**
-     * 场景的节奏。对真服务端一律用 {@link #STANDARD}（规格 §15.5 的取值）；单测对着本机假服务端（不限频、结算几乎瞬时落地）时调快，
-     * 免得一条用例睡上几十秒。其余的「上限」（等开战 30 s、等终局 120 s、评分 10 s、等推送 10 s）不在这里：它们只在出错时才耗满。
+     * 场景的节奏。对真服务端一律用 {@link #STANDARD}（规格 §15.5 的取值）；单测对着本机假服务端（不限频、开局与结算几乎瞬时）时调快，
+     * 免得一条用例睡上几十秒。其余的「上限」（等终局 120 s、评分 10 s、等推送 10 s）不在这里：它们只在出错时才耗满，单测不去耗它们。
      *
-     * @param requestSpacing 同一会话相邻请求的最小间隔
-     * @param retryInterval  过渡态的重试间隔
-     * @param settleTimeout  过渡态的等待上限（到了仍是过渡态就按失败报）
-     * @param silence        「不该有回包 / 推送」的静默窗口
-     * @param ratingPoll     等评分落账的轮询间隔
+     * @param requestSpacing     同一会话相邻请求的最小间隔
+     * @param retryInterval      过渡态的重试间隔
+     * @param settleTimeout      过渡态的等待上限（到了仍是过渡态就按失败报）
+     * @param silence            「不该有回包 / 推送」的静默窗口
+     * @param ratingPoll         等评分落账的轮询间隔
+     * @param battleStartTimeout 等开战（大厅 177 / 143）的上限
      */
-    record Tempo(Duration requestSpacing, Duration retryInterval, Duration settleTimeout, Duration silence, Duration ratingPoll) {
+    record Tempo(Duration requestSpacing, Duration retryInterval, Duration settleTimeout, Duration silence, Duration ratingPoll,
+                 Duration battleStartTimeout) {
 
-        static final Tempo STANDARD = new Tempo(REQUEST_SPACING, SETTLE_RETRY_INTERVAL, SETTLE_TIMEOUT, SILENCE, RATING_POLL);
+        static final Tempo STANDARD = new Tempo(REQUEST_SPACING, SETTLE_RETRY_INTERVAL, SETTLE_TIMEOUT, SILENCE, RATING_POLL, BATTLE_START_TIMEOUT);
     }
 
     /**

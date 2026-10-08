@@ -172,8 +172,8 @@ final class TeamMatchSteps implements AutoCloseable {
         Started startA;
         Started startB;
         try {
-            startA = MatchSupport.awaitBattle(a.name(), a.connection(), aMark, 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
-            startB = MatchSupport.awaitBattle(b.name(), b.connection(), bMark, 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
+            startA = MatchSupport.awaitBattle(a.name(), a.connection(), aMark, 0, battleIds, tempo.battleStartTimeout());
+            startB = MatchSupport.awaitBattle(b.name(), b.connection(), bMark, 0, battleIds, tempo.battleStartTimeout());
         } catch (RobotException e) {
             throw new RobotException(e.getMessage() + matchFailedHint(a, aMark, tid), e);
         }
@@ -217,7 +217,7 @@ final class TeamMatchSteps implements AutoCloseable {
         JoinAttempts solo = MatchSupport.joinRetrying(b, matchIds, MatchMode.MATCH_MODE_PVE_SOLO, BATTLE_CONFIG_ID,
                 Set.of(BattleSmokeChecks.TIP_IN_BATTLE), tempo);
         must(solo.accepted(), "S8 B 单人 PVE 排队受理（上一场结算落地前的 16000 按过渡态重试）", solo.describe());
-        Started bSolo = MatchSupport.awaitBattle(b.name(), b.connection(), solo.mark(), 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
+        Started bSolo = MatchSupport.awaitBattle(b.name(), b.connection(), solo.mark(), 0, battleIds, tempo.battleStartTimeout());
         // 开战即直连：下面的拒绝断言在过渡态下会重试十几秒，远超一回合 6 s；晚连的话超时结算的回合全被丢弃，单人 PVE 甚至可能先打完。
         // 不开自动：B 一直持有战斗锁（scene 备战时就落了锁，先于建房）
         Direct bDirect = connect(b.name(), bSolo.assigned());

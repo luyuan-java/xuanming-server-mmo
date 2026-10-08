@@ -200,6 +200,21 @@ class BattleSmokeScenarioTest {
     }
 
     @Test
+    void 切磋接受后开局失败_第9步中断_失败原因里写明又收到了154false() {
+        world.faults.add(Fault.CHALLENGE_GATHER_FAILS);
+        BattleSmokeScenario scenario = scenario("f9", world.admin());
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report).get(0)).startsWith("流程中断：切磋（第 9 步）").contains("没有收到参战票 177", "又收到了 154 false", "gather 失败");
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=9-challenge reason=流程中断：切磋");
+        // 接受之前的那些检查照常通过；少了一局，指标那一步也对不上
+        assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 9 步 接受后 A、B 都收到 154"));
+        assertThat(report.items()).anyMatch(i -> !i.passed() && i.name().contains("xm_match_gathers_total"));
+        assertThat(scenario.resultLine()).doesNotContain("\n");
+    }
+
+    @Test
     void 没有运维令牌_登录之前就中止_不向服务端发任何请求() {
         BattleSmokeScenario scenario = scenario("f8", new MatchAdminClient(world.baseUrl(), null, FakeMatchWorld.TIMEOUT));
 

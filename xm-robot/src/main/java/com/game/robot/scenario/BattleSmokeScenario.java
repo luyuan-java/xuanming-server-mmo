@@ -243,7 +243,7 @@ public final class BattleSmokeScenario {
         JoinQueueResponse solo = MatchSupport.join(a, ids, MatchMode.MATCH_MODE_PVE_SOLO, PVE_CONFIG);
         must(BattleSmokeChecks.joinAcceptedProblem(solo) == null, "第 4 步 157 {mode = 4, config = " + PVE_CONFIG + "} 受理：error_code = 0、票号非空",
                 orDescribe(BattleSmokeChecks.joinAcceptedProblem(solo), BattleSmokeChecks.describe(solo)));
-        Started started = MatchSupport.awaitBattle(a.name, a.connection(), lobbyMark, 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
+        Started started = MatchSupport.awaitBattle(a.name, a.connection(), lobbyMark, 0, battleIds, tempo.battleStartTimeout());
         battleId = started.battleId();
         report.note("PVE battle_id=" + uid(battleId));
         report.check(started.assignedFirst(), "第 4 步 大厅上先 177 后 143，battle_id 一致",
@@ -305,7 +305,7 @@ public final class BattleSmokeScenario {
                 "第 7 步 打完立即再排：不得出现 16001（上一局的 ready 票在战斗锁放掉之后必须被自愈清掉）", requeue.describe(), "match-spec §2.2「自愈」");
         must(requeue.accepted(), "第 7 步 再排在 " + tempo.settleTimeout().toSeconds() + " s 内受理（结算落地之前的 16000 按过渡态重试）",
                 requeue.describe());
-        Started second = MatchSupport.awaitBattle(a.name, a.connection(), requeue.mark(), 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
+        Started second = MatchSupport.awaitBattle(a.name, a.connection(), requeue.mark(), 0, battleIds, tempo.battleStartTimeout());
         report.check(second.battleId() != battleId, "第 7 步 第二局是新的 battle_id", uid(battleId) + " → " + uid(second.battleId()), REF);
         // 开战即直连（回合结算只走直连），再做旧局的补签
         Direct secondDirect = connect(a.name, second.assigned());
@@ -342,8 +342,8 @@ public final class BattleSmokeScenario {
         JoinQueueResponse queueB = MatchSupport.join(b, ids, MatchMode.MATCH_MODE_1V1, PVP_CONFIG);
         must(BattleSmokeChecks.joinAcceptedProblem(queueB) == null, "第 8 步 A 受理之后 B 排同一条队列，受理",
                 orDescribe(BattleSmokeChecks.joinAcceptedProblem(queueB), BattleSmokeChecks.describe(queueB)));
-        Started startA = MatchSupport.awaitBattle(a.name, a.connection(), queueA.mark(), 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
-        Started startB = MatchSupport.awaitBattle(b.name, b.connection(), markB, 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
+        Started startA = MatchSupport.awaitBattle(a.name, a.connection(), queueA.mark(), 0, battleIds, tempo.battleStartTimeout());
+        Started startB = MatchSupport.awaitBattle(b.name, b.connection(), markB, 0, battleIds, tempo.battleStartTimeout());
         must(startA.battleId() == startB.battleId(), "第 8 步 两人收到同一个 battle_id 的 177 / 143",
                 "A " + uid(startA.battleId()) + "，B " + uid(startB.battleId()));
         pvpBattleId = startA.battleId();
@@ -439,8 +439,19 @@ public final class BattleSmokeScenario {
                 "第 9 步 接受后 A、B 都收到 154 {accepted = true, responder_id = B}",
                 "A " + acceptedA.map(p -> "accepted=" + p.getAccepted()).orElse("没收到" + a.describeSince(markA)) + "；B "
                         + acceptedB.map(p -> "accepted=" + p.getAccepted()).orElse("没收到" + b.describeSince(markB)), "match-spec §6.1 第 10 行");
-        Started startA = MatchSupport.awaitBattle(a.name, a.connection(), markA, 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
-        Started startB = MatchSupport.awaitBattle(b.name, b.connection(), markB, 0, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
+        Started startA;
+        Started startB;
+        try {
+            startA = MatchSupport.awaitBattle(a.name, a.connection(), markA, 0, battleIds, tempo.battleStartTimeout());
+            startB = MatchSupport.awaitBattle(b.name, b.connection(), markB, 0, battleIds, tempo.battleStartTimeout());
+        } catch (RobotException e) {
+            // 开局失败时 match 会给双方各再推一次 154 false：把它写进失败原因，省得去翻服务端日志
+            int failMark = markA;
+            boolean gatherFailed = MatchSupport.awaitPush(a.connection(), failMark, ids.challengeResult(), ChallengeResultS2C.parser(),
+                    p -> p.getChallengeId() == second.challengeId() && !p.getAccepted(), Duration.ZERO).isPresent();
+            throw new RobotException(e.getMessage() + (gatherFailed ? "；A 在 154 true 之后又收到了 154 false：这一局的 gather 失败了"
+                    + "（看 xm-match 的 xm_match_gathers_total{outcome}）" : ""), e);
+        }
         must(startA.battleId() == startB.battleId(), "第 9 步 两人收到同一个 battle_id 的 177 / 143（切磋，mode 6）",
                 "A " + uid(startA.battleId()) + "，B " + uid(startB.battleId()));
         challengeBattleId = startA.battleId();

@@ -183,6 +183,22 @@ class TeamMatchStepsTest {
     }
 
     @Test
+    void 整队开战受理后gather失败_S7中断并写明收到了MATCH_FAILED_S8照常跑() throws Exception {
+        world.faults.add(Fault.TEAM_GATHER_FAILS);
+        try (Squad squad = new Squad("f4")) {
+            squad.steps.run(squad.a, squad.b, squad.tid);
+
+            assertThat(squad.failed()).singleElement().asString().startsWith("流程中断：S7 整队开战")
+                    .contains("没有收到参战票 177", "A 收到了 213 MATCH_FAILED", "不带 tip：gather 失败");
+            assertThat(squad.track.line(squad.report, "")).startsWith("TEAM_SMOKE_FAIL step=s7-team-battle reason=流程中断：S7 整队开战");
+            assertThat(squad.steps.teamBattleId()).as("没开成局").isZero();
+            // 回包与 MATCH_STARTED 那两条在等开局之前，照常通过；S8 不受 S7 拖累
+            assertThat(squad.report.items()).anyMatch(i -> i.passed() && i.name().startsWith("S7 B 收到 213 MATCH_STARTED"));
+            assertThat(squad.report.items()).anyMatch(i -> i.passed() && i.name().startsWith("S8 B 在战斗中"));
+        }
+    }
+
+    @Test
     void 队伍不存在时三段各自记失败_互不拖累_不抛出() throws Exception {
         try (Squad squad = new Squad("f3")) {
             // 用一个假服务端不认识的队伍号：211 仍按「调用者所在的队伍」处理，视图里的 team_id 与期望的不符

@@ -140,13 +140,20 @@ final class FakeMatchWorld implements AutoCloseable {
         /** 整队开战时发起人也收到了 MATCH_STARTED（契约：他以 211 的回包为准，不收推送）。 */
         TEAM_STARTED_TO_LEADER,
         /** 211 的肇事者参数写成了有符号十进制（uint64 上半区的玩家号变成负数）。 */
-        TEAM_SIGNED_OFFENDER
+        TEAM_SIGNED_OFFENDER,
+        /** 整队开战受理之后 gather 失败：不开局，全员收 MATCH_FAILED（不带 tip）。 */
+        TEAM_GATHER_FAILS,
+        /** 切磋接受之后 gather 失败：不开局，双方在 154 true 之后各再收一次 154 false。 */
+        CHALLENGE_GATHER_FAILS
     }
 
     static final String TOKEN = "fake-admin-token";
-    /** 单测用的快节奏：假服务端不限频，「结算落地」只延后 {@link #SETTLE_DELAY_MS}；过渡态的上限 5 s（只有故意做错的用例会耗满）。 */
+    /**
+     * 单测用的快节奏：假服务端不限频，「结算落地」只延后 {@link #SETTLE_DELAY_MS}；过渡态的上限 5 s、等开战的上限 3 s
+     * （这两个上限只有故意做错的用例会耗满）。
+     */
     static final Tempo FAST = new Tempo(Duration.ofMillis(2), Duration.ofMillis(40), Duration.ofSeconds(5), Duration.ofMillis(150),
-            Duration.ofMillis(40));
+            Duration.ofMillis(40), Duration.ofSeconds(3));
     static final Duration TIMEOUT = Duration.ofSeconds(5);
     /** 战斗结束到放战斗锁的延迟（模拟结算经 battle → scene 落地的那一小段）。 */
     static final long SETTLE_DELAY_MS = 120;
@@ -614,6 +621,11 @@ final class FakeMatchWorld implements AutoCloseable {
         pushIfOnline(challenger, matchIds.challengeResult(), result.setAccepted(true).build());
         push(ch, matchIds.challengeResult(), result.setAccepted(true).build());
         reply(ch, request, RespondChallengeResponse.getDefaultInstance());
+        if (faults.contains(Fault.CHALLENGE_GATHER_FAILS)) {
+            pushIfOnline(challenger, matchIds.challengeResult(), result.setAccepted(false).build());
+            push(ch, matchIds.challengeResult(), result.setAccepted(false).build());
+            return;
+        }
         startBattle(MODE_CHALLENGE, List.of(challenger.id, player.id));
     }
 
@@ -664,6 +676,15 @@ final class FakeMatchWorld implements AutoCloseable {
             if (member != team.leader || faults.contains(Fault.TEAM_STARTED_TO_LEADER)) {
                 pushIfOnline(byId.get(member), notifyTeamSnapshot, startedPush);
             }
+        }
+        if (faults.contains(Fault.TEAM_GATHER_FAILS)) {
+            team.starting = false;
+            TeamSnapshotS2C failedPush = TeamSnapshotS2C.newBuilder().setTeam(view(team))
+                    .setReason(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED).build();
+            team.members.forEach(member -> pushIfOnline(byId.get(member), notifyTeamSnapshot, failedPush));
+            return;
+        }
+        for (long member : team.members) {
             byId.get(member).ticket = new Ticket(MODE_PVE_TEAM, start.getBattleConfigId(), QueueState.QUEUE_STATE_MATCHED);
         }
         startBattle(MODE_PVE_TEAM, team.members);

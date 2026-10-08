@@ -159,8 +159,8 @@ public final class MatchActivityScenario {
             throw new RobotException("活动开战没有受理，后面的步骤依赖它：" + describe(started));
         }
         battleId = started.getBattleId();
-        Started startA = MatchSupport.awaitBattle(a.name, a.connection(), markA, battleId, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
-        Started startB = MatchSupport.awaitBattle(b.name, b.connection(), markB, battleId, battleIds, MatchSupport.BATTLE_START_TIMEOUT);
+        Started startA = MatchSupport.awaitBattle(a.name, a.connection(), markA, battleId, battleIds, tempo.battleStartTimeout());
+        Started startB = MatchSupport.awaitBattle(b.name, b.connection(), markB, battleId, battleIds, tempo.battleStartTimeout());
         String sides = BattleSmokeChecks.sidesProblem(startA.start().getState(), List.of(a.id(), b.id()), List.of(0, 0));
         report.check(startA.assignedFirst() && startB.assignedFirst() && sides == null,
                 "第 4 步 A、B 在大厅收到这一局（应答里的 battle_id）的 177 → 143，两人都在 0 队（PVE）",
