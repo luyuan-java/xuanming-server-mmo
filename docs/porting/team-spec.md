@@ -58,12 +58,12 @@
 **Java 侧的对应**
 - **入口**：gate 经 Dubbo 调 `ClientMessageService.handle(ClientCall) → CompletableFuture<ClientReply>`。group 等于 proto 一级目录 `team`（`xm-api/src/main/java/com/game/api/DubboGroups.java:3-19` 的现有写法；`docs/design/architecture.md:75-90`）。
 - **进程**：新模块 **xm-team**（Spring Boot + Dubbo Triple），结构照 xm-friend（`architecture.md:350-391`；路线图规定「每个服务一个进程」，`docs/porting/roadmap.md:48`）。
-  - 不并进 match：Java 还没有 match（批次 6.4，`roadmap.md:83`），见 D1。
+  - 不并进 match：定稿时 Java 还没有 match（批次 6.4，`roadmap.md:84`），见 D1。6.4 落地后 xm-match 也是独立进程，两者经 `MatchTeamService` 往来（§5.5）。
 - **存储**：Redis（Redisson）。键经 `com.game.discovery.RedisKeys` 生成，带 `xm:` 前缀（`AGENTS.md` §3；`architecture.md:511`）。
 - **在线态与推送**：在线态取 `xm:presence` + `xm:location`，推送走 `PlayerPushes`（`architecture.md:128-147`、`:541-548`）。
 - **批次归属**：
   - 4.3 做名册、申请邀请、推送、场景投影与跟随（`roadmap.md:60`）。
-  - 整队开战在 6.4（`roadmap.md:83`）；4.3 期间怎么处理见 §5.4。
+  - 整队开战在 6.4（`roadmap.md:84`）；4.3 期间怎么处理见 §5.4。**6.4 已接（2026-10-08）**，现状见 §5.5。
 
 ### 0.2 消息号、请求 / 应答形状、gate 限频
 
@@ -1414,8 +1414,11 @@ MGET 失败或返回长度不符时只记日志，按「全部缺失」处理，
 Java 现状：
 - 首批不做战斗（`architecture.md:597-603`），整队开战排在 6.4（`roadmap.md:83`）。
 - Java 有位置记录 `xm:location`（`PlayerLocationDirectory`；`scene_node_id` 是 uint32，没有「空串」语义，见 `xm-discovery/src/main/proto/xm/discovery/location.proto:14-23`），但没有 battle lock，也没有票据。
+- **以上是 4.3 定稿时的现状**。之后：战斗锁随 6.3 落地（`RedisKeys.battleLock`，经 `BattleLockReader` 读），票据、gather 与整队开战端口随 6.4 落地（xm-match），见 §5.5。
 
 ### 5.4 Java 4.3 批次的处理（D11）
+
+> 本节是 4.3 到 6.4 之间的占位处理，留作记录。批次 6.4（2026-10-08）已把占位端口 `NoTeamBattle` 换成真端口，211 不再恒回 4027，现状见 §5.5。
 
 **推荐**：保留 §5.1 第 1–3 步的真实逻辑，注入一个「没有任何副本开放组队」的端口，`teamSizeFor(any) → 0`。
 
@@ -1439,14 +1442,61 @@ Java 现状：
 
 开战锁三字段在 Java 记录里照常保留，名单规则里的 `locked()` 判断照写。6.4 只需补端口、`CommitMatchLock`、EndMatch 和补偿。
 
-### 5.5 6.4 要补齐的清单
+### 5.5 6.4 要补齐的清单（已补齐，2026-10-08）
 
-- `BattleStarter` 的五个方法：跨进程时做成 xm-match 提供的 Dubbo 接口。
-- 预检顺序：会话 → 战斗锁（读失败按「在战斗中」处理）→ 位置（Java 用 `xm:location`）→ 票据。
-- 钉版本加锁，以及「提交结果未知」时按 token 确认清锁（Redisson 也会重发 EVAL，见 `architecture.md:474-476`）。
-- EndMatch 的 110 s 单调截止与退避；`finishMatch` / `pushMatchView` / `releaseLockInBackground` / `settleUnconfirmedLock`。
-- 预检里的 `in_battle`（6.4：整队开战预检的 4025 现在仍恒回 4027；`TeamConfiguration` 里已有 `BattleLockReader` bean，届时直接用），以及跟随时的战斗守卫
-  （**批次 6.3 已做**：视图的 `in_battle` 与 scene 组队跟随的战斗守卫都已落地，见 §6.7、§6.10 第 5 条与 D10）。
+原清单五条都已落地；设计与跨进程契约的正文在 `docs/porting/match-spec.md` §7.3–§7.6，这里只记 xm-team 一侧的现状（以代码为准）。
+
+**1. 开战端口：`BattleStarter` 的五个方法 → xm-match 的四方法 Dubbo 接口**
+
+- 跨进程接口 `com.game.api.MatchTeamService`（xm-api，group `match`，xm-match 提供），消息在 `xm/api/match_control.proto`。基线的 `TeamSizeFor` + `MatchLockTTLSeconds` + `TicketBlocked` 合成一次 `checkTeamMatch`
+  （人数检查 + 逐成员预检 + 回开战锁时长），`CreateMatchedTickets` → `createTeamTickets`，`RunGather` → `runTeamGather`，另加一个基线没有的 `releaseTeamTickets`（跨进程后建票的回包可能丢失，要能按票号回滚）。
+- xm-team 一侧的端口 `match.TeamBattlePort`（四个方法，与上面一一对应）：
+  - `checkTeamMatch(configId, roster, deadline) → Check(code, param, zones, lockTtlSeconds)`：`code` 已翻译成 team 段 tip（0 / 4027 / 4028 / 4024 / 4025 / 4026 / 4030）；
+  - `createTeamTickets(configId, teamId, roster, zones, ticketIds, deadline) → Created | Failed(playerId) | Unknown(why)`：票号由 xm-team 每人生成一个 UUID；
+  - `releaseTeamTickets(ticketIds, deadline) → boolean`：只用于建票结果不明、且还没发出 gather 的情形；
+  - `runTeamGather(configId, teamId, roster, ticketIds, lockTtlSeconds) → CompletionStage<Gather(ok, outcome, battleId)>`：长挂调用，不阻塞 worker。
+  前三个阻塞且从不抛（调不通、超出预算、应答缺字段都折成返回值里的「故障 / 结果不明」）。
+- 生产实现 `match.MatchTeamBattle`（Dubbo 客户端）；占位实现 `NoTeamBattle` 已删。引用的装配在 `TeamDubboConfiguration`：`group = match`、`retries = 0`（Dubbo 缺省的 failover 会重发建票与 gather）、`check = false`
+  （xm-match 不在时本进程照常启动，211 回 4030）、直连 `xm.dubbo.match-url`（缺省 `tri://127.0.0.1:20888`，nacos profile 置空走注册中心）。
+- **调用纪律**：前三个方法每跳的调用级超时 = min(3000 ms, 剩余请求预算)，**同一个值**经附件 `xm-budget-ms` 带给 xm-match 作它的本地截止（带整请求的剩余预算时，迟到的建票会在本端已判「结果不明」并回滚之后照常写票）；
+  剩余预算 ≤ 0 时不发。`runTeamGather` 的调用级超时 = `lock_ttl_seconds × 1000`，不带预算附件，另加晚 2 s 的本地兜底。应答枚举的 `UNSPECIFIED`、不认识的值、空应答、future 异常完成一律按传输失败；
+  `checkTeamMatch` 回 OK 时还要校验 zones 覆盖名单、锁时长在 [1, 110] 秒。
+
+**2. 预检顺序与分工**
+
+- 顺序不变：按名单顺序逐人「在线 → 战斗锁（读失败按在战斗中）→ 位置（`xm:location`，状态 `o` 且节点号 ≠ 0）→ 票据（先按排队的规则自愈）」，第一个不满足的人即为结论。
+- **预检整个在 xm-match 做**（`MemberPrecheck`），xm-team 只映射结论、不另读战斗锁：拆开做会改变「谁先被报出来」这个客户端可见结果（例：成员 1 有在途票、成员 2 离线，基线回 4026[成员 1]）。
+  所以 4025 由 xm-match 读战斗锁（`BattleLockReader`，咨询性读，权威在 scene 的备战写锁）给出；`TeamConfiguration` 里的 `BattleLockReader` bean 仍只给视图的 `in_battle` 用。
+- 映射：`DUNGEON_NOT_OPEN → 4027`、`SIZE_EXCEEDED → 4028`、`MEMBER_OFFLINE → 4024[pid]`、`MEMBER_IN_BATTLE → 4025[pid]`、`MEMBER_NOT_READY → 4026[pid]`；`INTERNAL`、调不通、超出请求预算、应答不可信 → 4030。
+  一律带本轮 S_READ 的同源视图。组队人数的配置（`pve-team-size-by-config-id`）在 xm-match，xm-team 不配。
+
+**3. 开战锁：钉版本提交与「提交结果未知」的补偿**
+
+- `TeamStore.commitMatchLock`（钉本轮 S_READ 的版本，`expire = snap.nowMs + lock_ttl_seconds × 1000`）。提交报错 → 后台按 token 清锁（`releaseLockInBackground`）、回 4030；
+  未提交 → 重来之前按 token 同步确认一轮（`settleUnconfirmedLock`，Redisson 会重发同一段 EVAL，「未提交」也可能已经落锁）再整轮重来；最多 3 轮（`MATCH_START_ROUNDS`），耗尽回 4029 + 自由读。
+- 建票（加锁之后）：`Failed(pid)` → 回 4026[pid]（自由读），后台清锁，全员 MATCH_FAILED 带同一 tip（计 `ticket_failed`）；`Unknown` → 回 4030，后台先退票（独立 3 s 预算）再清锁，全员 MATCH_FAILED 不带 tip（计 `internal`）。
+- 加锁之前的拒绝用本轮 S_READ 的同源视图；加锁之后的失败用自由读，请求预算已用完时不带视图。
+
+**4. EndMatch 与收尾**
+
+- `TeamStore.endMatch`：110 s 单调截止（`MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS`）、每轮 2 s 的独立预算、50 ms 起翻倍到 1 s 的退避加 ±20% 抖动；终止原因 `EndMatchStop`（`RELEASED / RECORD_MISSING / TOKEN_MISMATCH / LOCK_EXPIRED / DEADLINE`，
+  另有 Java 独有的 `INTERRUPTED`：停机时等不完的清锁被中断即停，锁靠自然过期）。
+- `TeamService.finishMatch`：清锁提交成功 → 按提交推全员（含发起人）MATCH_ENDED / MATCH_FAILED；没有提交（锁已被清 / 重新加锁 / 自然过期 / 截止）→ 仍尽力给当前队员推一次当前视图与结果原因（`TeamPushes.publishMatchView` → `pushMatchView`），保证客户端不停在 STARTING。
+- 收尾都在新增的有界线程池 `team-match-end` 上跑（`xm.team.match-end-threads = 4`、`xm.team.match-end-queue-capacity = 1024`，启动校验必须为正）；一次收尾最坏阻塞 110 s；队列满时放弃这次收尾并记 ERROR，锁靠自然过期。
+  关闭次序：请求池 → 收尾池 → 推送池，各等 10 s。gather 的回调在 Dubbo 的线程上只做定性、计数与投递。
+- **gather 结果不明**（xm-match 中途退出、网络分区、调用超时）：计 `gather_unknown`，按失败收尾（推 MATCH_FAILED），**不退票**——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈。
+- **本进程优雅停机时**（`TeamShutdown`：`ContextClosedEvent` 监听器，次序排在 Dubbo 的监听器之前，置一个停机标志）：之后才异常完成的 gather 结果只计 `gather_unknown`、记 WARN，不清锁、不推 MATCH_FAILED，
+  锁靠自然过期（最长 101 s）——与进程崩溃一致（§5.2）。正常到达的结果在停机中照常收尾。
+
+**5. `in_battle` 与跟随的战斗守卫**：批次 6.3 已做（视图的 `in_battle` 与 scene 组队跟随的战斗守卫，见 §6.7、§6.10 第 5 条与 D10）；整队开战预检的 4025 随 6.4 由 xm-match 给出（上面第 2 点）。
+
+**客户端可见的推送**（§2.5 的 Reason / Actor 与 §4.4 的收件人表不变）：除发起人外的成员收 MATCH_STARTED；gather 成功后全员（含发起人）收 MATCH_ENDED；失败收 MATCH_FAILED——建票失败带 tip 4026[pid]，gather 失败与结果不明不带 tip。
+
+**指标**：`xm_team_matches_total{outcome}` 在原有的 rejected / internal / unknown_code 之外新增 `success / gather_failed / ticket_failed / gather_unknown`，一次 211 恰好计一次；线程池标准指标 `executor_*` 新增 `name=team-match-end`。
+
+**测试与 robot**：`TeamServiceTest`（用例在 `TeamMatchScenarios`，内存后端）与 `TeamMatchRedisIntegrationTest`（同一批用例跑真 Redis）、`MatchTeamBattleTest`、`MatchTeamBattleLoopbackTest`（真 Triple 回环）、`TeamDubboConfigurationTest`、
+`TeamBudgetConstraintTest`、`TeamConfigurationTest`、`TeamStoreTest` / `TeamStoreIntegrationTest` 里开战锁与 EndMatch 的用例。robot `team` 场景的开战段（拒绝码 4018 / 4027 / 4026[B]、S7、S8）见 match-spec §15.5。
+残余风险与遗留登记在 match-spec 文末的实现记录里（xm-team 一段）。
 
 ---
 
@@ -1469,7 +1519,7 @@ Java 现状：
 | 推送 | `push/TeamPushes`：包一层 `PlayerPushes`，按批串行 | `xm-discovery/.../presence/PlayerPushes.java:56-108` |
 | 发号 | `id/TeamIds`：`Snowflake` + `NodeIdLease`，新增 `NodeTypes.TEAM="team"`，作用域 0（全服） | `NodeTypes.java:8-24`；`PlayerIdGenerator.java:14-32`；`SceneNode.java:480-491` |
 | 指标 | `metrics/TeamMetrics`（§7） | `FriendMetrics` |
-| 开战端口 | `match/TeamBattlePort`；4.3 实现为 `NoTeamBattle`，`teamSizeFor → 0` | §5.4 |
+| 开战端口 | `match/TeamBattlePort`；4.3 实现为 `NoTeamBattle`，`teamSizeFor → 0`。**6.4 起**是四个方法的端口，生产实现 `match/MatchTeamBattle`（调 xm-match 的 `MatchTeamService`），装配在 `TeamDubboConfiguration`；另有停机标志 `TeamShutdown` 与收尾池 `team-match-end` | §5.4、§5.5 |
 | scene 侧 | xm-discovery 新增 `team/TeamMembershipReader`（只读）；xm-scene 新增 `team/TeamFollow` | §6.10 |
 
 ### 6.2 gate 接入（照 friend / chat）
@@ -1690,7 +1740,9 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
 | `home-zone-timeout` | 1500 ms | `homezone.go:31-33` |
 | `worker-threads` / `worker-queue-capacity` | 16 / 1024 | 同 friend |
 | `push-threads` / `push-queue-capacity` | 4 / 1024 | Java 自有，§6.4 |
-| （6.4 再加）`pve-team-size-by-config-id` | — | 4.3 不开放，§5.4 |
+| （6.4 再加）`pve-team-size-by-config-id` | — | 4.3 不开放，§5.4。**6.4 落地**：这项配置放在 xm-match（`xm.match.pve-team-size-by-config-id`，缺省 `{1: 5}`），xm-team 不配，经 `checkTeamMatch` 取结论 |
+| `match-end-threads` / `match-end-queue-capacity` | 4 / 1024 | 6.4 新增：整队开战收尾池 `team-match-end`；必须为正（§5.5） |
+| `xm.dubbo.match-url`（不在 `xm.team.*` 下） | `tri://127.0.0.1:20888` | 6.4 新增：调 xm-match 的直连地址；nacos profile 置空走注册中心 |
 
 规则常量**不做成配置**（§0.4）。
 
@@ -1801,7 +1853,7 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 | 其他写操作 `expected=0` | 4013 + 当前视图 |
 | 队伍空闲 24 h | 记录、投影、索引都过期；读路径回 epoch=nowMs 的空视图 |
 | 邀请人已离队后看到的邀请 | inviter 的 zone / join_seq 为 0 |
-| StartTeamMatch 在 Java 4.3 | 非队长 4018；其余 4027 + IDLE 视图 |
+| StartTeamMatch 在 Java 4.3 | 非队长 4018；其余 4027 + IDLE 视图（6.4 起走真实开战，只有未配置组队人数的副本仍是 4027 + IDLE，§5.5） |
 
 ### 8.4 设计稿与注释同代码不一致的地方（以代码为准）
 
@@ -1849,7 +1901,7 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 
 | 编号 | 差异 | 理由 | 客户端可见？ | 两版同改？ |
 |---|---|---|---|---|
-| D1 | 独立进程 xm-team（Dubbo group `team`，端口 20885，管理端口 18109），不与 match 同进程 | Java 还没有 match；路线图要求每个服务一个进程。整队开战在 6.4 经 Dubbo 接入 | 否 | 否 |
+| D1 | 独立进程 xm-team（Dubbo group `team`，端口 20885，管理端口 18109），不与 match 同进程 | Java 还没有 match；路线图要求每个服务一个进程。整队开战在 6.4 经 Dubbo 接入（已接：`MatchTeamService`，match-spec M1 / M20） | 否 | 否 |
 | D2 | 键空间 `xm:{team}:rec / info / player / invite:<id>`，统一 hash tag `{team}`；投影键改名为 info | `AGENTS.md` §3 要求经 `RedisKeys` 生成、带 `xm:` 前缀；多玩家 Lua 将来在 Cluster 下仍同槽 | 否 | 否 |
 | D3 | 会话四态由 `xm:presence` 加 `xm:location.s` 组合得出，代替 `player:session` | Java 没有 player_locator；用 location 的 l / o 保住「断线宽限内不惰性转让」 | 轻微：崩溃后的残留窗口 ≤ 60 s（§6.6） | 否 |
 | D4 | 展示资料读 `xm_java.player`，代替 PlayerAllData 缓存 | Java 没有这份缓存；同 friend D4 | 是：name 恒非空；level 到存盘才更新；新角色 level 为 1 | 否，登记即可 |
@@ -1858,13 +1910,13 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 | D7 | 不发 `PlayerTeamRefreshEvent`，scene 不缓存 TeamId，进场时现读；不移植 `team_scene_refresh_total` | Java scene 里 TeamId 的消费方只有跟随；少一个 Kafka 依赖 | 否 | 否 |
 | D8 | 不做队友 AOI 优先级（kTeammate） | Java 的 `ViewIndex` 表满时不挤人，优先级没有可见效果；以后引入挤出时再加 | 否（眼下） | 否 |
 | D9 | 跟随用内存里同节点队长的场景，同步 `switchScene`；不读 location，不经 scene-manager | 基线也只做同节点跟随；Java 同节点换图是同步的，没有在途槽，也没有 60 s 去重 | 否（行为等价） | 否 |
-| D10 | `in_battle` 恒为 false；跟随与开战预检没有战斗锁（6.3 前）。**已收口（批次 6.3，2026-10-06）**：`in_battle` 由 `BattleLockReader.existsAll` 批量 EXISTS 算出（全体 rosterIds，任何失败整批按 false，§6.7）；scene 组队跟随读锁并有内存冻结守卫（§6.10 第 5 条）。只剩整队开战预检的 4025 随 6.4（现在恒回 4027，D11） | Java 还没有战斗（6.3 起有了） | 收口后与基线相同 | 否 |
-| D11 | 4.3 的 StartTeamMatch 走规则路径回 4027（端口恒为 0） | 基线未接线时回 4030（fault）；4027 文案真实、不触发告警，6.4 换真端口零改动 | 是：4027 而非真实开战 | 否，按批次登记 |
+| D10 | `in_battle` 恒为 false；跟随与开战预检没有战斗锁（6.3 前）。**已收口（批次 6.3，2026-10-06）**：`in_battle` 由 `BattleLockReader.existsAll` 批量 EXISTS 算出（全体 rosterIds，任何失败整批按 false，§6.7）；scene 组队跟随读锁并有内存冻结守卫（§6.10 第 5 条）。只剩整队开战预检的 4025 随 6.4（现在恒回 4027，D11）。**6.4 已接（2026-10-08）**：4025 由 xm-match 的成员预检读战斗锁给出（§5.5 第 2 点） | Java 还没有战斗（6.3 起有了） | 收口后与基线相同 | 否 |
+| D11 | 4.3 的 StartTeamMatch 走规则路径回 4027（端口恒为 0）。**已关闭（批次 6.4，2026-10-08）**：端口换成 `MatchTeamBattle`，211 走真实的预检 → 加锁 → 建票 → gather → EndMatch（§5.5）；4027 只在该副本未配置组队人数时出现。跨进程带来的新故障面（xm-match 调不通 / 过载 / 租约无效时回 4030）登记在 match-spec M20 | 基线未接线时回 4030（fault）；4027 文案真实、不触发告警，6.4 换真端口零改动 | 关闭后与基线相同（只在 xm-match 故障时多 4030 与一条 MATCH_FAILED） | 否，按批次登记 |
 | D12 | 过载（队列满 / 排队超预算 / 处理器异常）回 in-band 4030，不带视图和参数 | 基线没有对应；用 team 自己的故障码，客户端按「读失败」重拉 | 是（只在过载时） | 否 |
 | D13 | 上行 213 / 215 / 203 时 gate 不回包 | 基线服务端回 Empty，路由服回一个空应答体；客户端不发这三个号 | 否 | 否 |
 | D14 | team 后端调用失败或超时时，gate 推 23{1003}（已有差异） | 与 login / friend / chat 同形；基线是信封 1003 → 客户端 Suspended。Java 下客户端要等 15 s 超时 → RequiresReconnect，结果也是本连接停用组队 | 是（只在故障时） | 否 |
 | D15 | team_id 来自 xm-team 自己的全服雪花租约，不与 battle_id / challenge_id 共用 | 客户端契约只要求非 0、唯一 | 否 | 否 |
-| D16 | robot 用 run-tag 新账号，不用固定的 9301–9304；跨区步骤只在配了第二个 zone 时跑；开战步骤 6.4 再跑 | Java robot 惯例（`xm-robot/.../RobotOptions.java:70`）；本机切片只有单 zone | 否 | 否 |
+| D16 | robot 用 run-tag 新账号，不用固定的 9301–9304；跨区步骤只在配了第二个 zone 时跑；开战步骤 6.4 再跑（6.4 已加：拒绝码 4018 / 4027 / 4026[B]、S7、S8，match-spec §15.5） | Java robot 惯例（`xm-robot/.../RobotOptions.java:70`）；本机切片只有单 zone | 否 | 否 |
 | D17 | gate 热关停对 team 消息号生效（依赖工作区里未提交的热关停功能） | Java 在 gate 统一做按方法关停；基线 match 没有接 killswitch | 是（只在运维关停时：客户端看到信封 1003，停用组队） | 否 |
 | D18 | 记录与投影用 Java 自有 proto（形状同 `TeamRecord` / `TeamInfo`），不依赖同步来的契约 proto | friend 的先例（`PARITY.md:97` 的 ⑧）：存储格式不该随契约同步漂移 | 否 | 否 |
 
@@ -1883,10 +1935,10 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 
 ### 9.3 待用户拍板 / 开放问题
 
-1. **xm-team 与将来 xm-match 的边界**（inventory 开放问题 9，`scene-manager-match.md:392`）。本稿按独立进程写。到 6.4 要定：`BattleStarter` 做成 xm-match 的 Dubbo 接口，还是把 team 并入 xm-match。
+1. **xm-team 与将来 xm-match 的边界**（inventory 开放问题 9，`scene-manager-match.md:392`）。本稿按独立进程写。到 6.4 要定：`BattleStarter` 做成 xm-match 的 Dubbo 接口，还是把 team 并入 xm-match。**已定（6.4）**：做成 xm-match 提供的 Dubbo 接口 `MatchTeamService`，两个进程分开（§5.5）。
 2. **`{team}` 单槽的代价**：将来上 Cluster 且组队写量大时，要改按队伍打 tag，同时放弃多玩家索引同槽，并拆分 Lua。另一个选择是在 `architecture.md` 登记「组队要求 Redis 单实例」。推荐先用 `{team}`。
 3. **location 为 `o`、presence 缺失时按 Present 处理是否合适**。这是偏保守的选择（不转让）。代价是 scene 崩溃后最多推迟 60 s 转让。
-4. **PvE 组队人数的来源**：yaml `PveTeamSizeByConfigId`，还是 `DungeonTable.max_team_size`（表里有 10 的历史行，`scene-manager-match.md:389`；Java 已同步 `config-data/tables/dungeon.pb`）。6.4 时两版必须同源同值。
+4. **PvE 组队人数的来源**：yaml `PveTeamSizeByConfigId`，还是 `DungeonTable.max_team_size`（表里有 10 的历史行，`scene-manager-match.md:389`；Java 已同步 `config-data/tables/dungeon.pb`）。6.4 时两版必须同源同值。**已定（6.4）**：照基线用配置（xm-match 的 `pve-team-size-by-config-id`，缺省 `{1: 5}`），不查表——查表会额外开放 id 2 和 3，客户端可见，须先改 mmorpg（match-spec Q11）。
 5. **共用件抽取**：`Deadline` 抽到 xm-common，`PlayerProfiles` 迁到 xm-player-store。推荐在 xm-team 落地时一并做。
 6. **D19 / D20 是否推动 mmorpg 先改**：如果要改，Java 首批就可以直接按修正后的语义实现。
 
@@ -1948,6 +2000,9 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
   - 队长 → 4027 + IDLE 视图；
   - Refresh 有提交时整轮重来，最多 3 轮；
   - 不加锁、不推 MATCH_*。
+- **StartTeamMatch（6.4，取代上一条里「队长 → 4027」「不加锁」两项）**：用例在 `TeamMatchScenarios`，由 `TeamServiceTest`（内存后端）与 `TeamMatchRedisIntegrationTest`（真 Redis）共跑——加锁之前就拒绝（带同源视图）、
+  建票失败释放锁并带 tip 4026[pid]、roster 顺序、锁过期后可重开、并发只锁一次、整轮重来、提交结果未知时的补偿、EndMatch 冲突、xm-match 调不通 / 应答不可信 → 4030、建票结果不明 → 退票 + MATCH_FAILED（无 tip）+ 4030、
+  gather 传输失败 → MATCH_FAILED 且不退票、停机中的 gather 结果不明不清锁（清单见 §5.5 末）。
 - **TeamDispatcher**：
   - 12 个 C2S 都有路由；203 / 213 / 215 回 `tip=0`、空 body；
   - `player_id=0` → 两种应答类型都回 in-band 4001，不带视图；
@@ -1992,7 +2047,7 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 | S4 | 踢 D：D 收空视图且 epoch 变大；A → B → A 转让（:362-396） | 跑 |
 | S5 | D 申请、A 拒绝 → D 收 203 APPLICATION_REJECTED（:401-418） | 跑 |
 | S6 | A 换图 → B 在 10 s 内收到 79，且 scene_id 等于 A 的新 scene_id（:421-437） | 跑（单 scene 节点天然满足同节点前提） |
-| S7 / S8 / X2 开战部分 | 整队开战、战斗中拒绝 | **6.4 再跑**。4.3 改为断言：A StartTeamMatch(1) → **4027**，带视图，`match_state=IDLE` |
+| S7 / S8 / X2 开战部分 | 整队开战、战斗中拒绝 | **6.4 再跑**。4.3 改为断言：A StartTeamMatch(1) → **4027**，带视图，`match_state=IDLE`。**6.4 已打开**：S7（STARTING、发起人不收 MATCH_STARTED、同一局的 177 / 143、150、两人 MATCH_ENDED）与 S8（4025[B]），外加拒绝码 4018 / 211(2) → 4027 / 4026[B]；原「211(1) 回 4027」的断言已删。X2 的跨区部分仍只在配了第二个 zone 时跑 |
 | X1 / X2 跨区 | 需要第二个 zone 的 gateway；只在配置了第二个 zone 时跑 | 本机单 zone 时跳过并在报告里注明；4020 由 §10.3 用不同 zone_id 的预置玩家覆盖 |
 | S9 | 解散，其余成员收 DISBANDED 且 team_id==0（:534-567） | 跑 |
 

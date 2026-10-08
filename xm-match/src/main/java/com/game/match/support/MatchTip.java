@@ -61,7 +61,7 @@ public enum MatchTip {
 
     // ---- 179 RequestBattleTicket ----
 
-    /** 落点记录不存在；或直拨建连失败且目录里同号节点已换实例。<b>1005 只用于「这局确实没了」</b>：客户端据此永久放弃本局。 */
+    /** 落点记录不存在；或请求确定没送达、目录里同号节点已换实例、且对原地址的 TCP 建连探测明确连不上（三条都成立）。<b>1005 只用于「这局确实没了」</b>：客户端据此永久放弃本局。 */
     REISSUE_BATTLE_GONE(MatchTips.INVALID_PARAMETER, "该战斗不存在或已结束"),
     /** 其余传输失败（超时、连上后断开、同实例、目录缺席或读失败）：客户端退避后再补签。 */
     REISSUE_BATTLE_UNAVAILABLE(MatchTips.SERVICE_UNAVAILABLE, "战斗服务暂不可用"),

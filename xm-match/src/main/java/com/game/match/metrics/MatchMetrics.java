@@ -134,7 +134,7 @@ public final class MatchMetrics {
 
     /**
      * 179 的出口：{@code rejected} = battle 核对名单后拒签（含它回的「房间不存在」）；{@code not_found} = 没有落点记录；
-     * {@code instance_changed} = 直拨建连失败且同号节点已换实例（回 1005）；{@code rpc_timeout} / {@code rpc_error} = 其余没调通（回 1003）。
+     * {@code instance_changed} = 请求确定没送达、同号节点已换实例、且对原地址的 TCP 建连探测明确连不上，三条都成立（回 1005）；{@code rpc_timeout} / {@code rpc_error} = 其余没调通（回 1003）。
      */
     public enum ReissueResult { OK, REJECTED, NOT_FOUND, NO_SESSION, INTERNAL, RPC_ERROR, RPC_TIMEOUT, INSTANCE_CHANGED }
 

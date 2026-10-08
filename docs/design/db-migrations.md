@@ -302,3 +302,34 @@ ALTER TABLE player DROP INDEX idx_player_zone;
 **回滚**：回退代码即可，不必清数据。旧版本的 scene 不认识字段 9，按未知字段原样带回、不会抹掉（不认识的玩法数据原样带回，PARITY「玩家持久化数据模型」行）。
 回退期间没有人应用结算，Redis 里的待结算记录（`xm:battle:{pid}:settlement`，TTL 7 天）留着，升回新版本后由进场恢复照常应用、按账本去重。
 GM 回档（7.2b）把这一段归在资产组里随 `assets` / FULL 整段回退（data-ops-spec §4.5）。
+
+## M11：评分表 `match_rating`、`match_rating_applied`（2026-10-08，xm-match 建，批次 6.4；pbmysql 启动时自建，无需手工迁移）
+
+**原因**：匹配评分（architecture.md §4.24；规格 docs/porting/match-spec.md §5.2）。基线把评分放在 Redis（每人一个 HASH + 每局一个入账标记，两层幂等 Lua）；Java 改成 MySQL 一局一笔事务，
+所以多两张表。它们由 xm-pbmysql 按 `xm-match/src/main/proto/xm/match/match_tables.proto` 在 xm-match 启动时建表 / 只扩不缩地补列补索引（`MatchRatingTables` → `PbMysql.syncAll`，
+同 xm-trade / xm-guild / xm-data 的运维作业表），**没有手写的建表脚本，也不需要手工迁移**；本条只作登记。
+
+| 表 | 主键 | 其余列 | 索引 | 说明 |
+|---|---|---|---|---|
+| `match_rating`（`MatchRatingRow`） | `player_id` | `rating_centi`（评分 × 100，1500.00 = 150000，下限 0）、`games`（已入账的计分局数）、`updated_at_ms` | — | 每个打过计分模式（1V1 / 5V5）的玩家一行；没有行 = 新号，按 1500.00 读。永不清理 |
+| `match_rating_applied`（`MatchRatingAppliedRow`） | `battle_id` | `match_mode`、`delta_a_centi`（A 队每人的增量 × 100，只作审计）、`applied_at_ms` | `idx_match_rating_applied_0 (applied_at_ms)` | 入账标记：每一局计分对局一行，主键冲突 = 重复投递（恰好一次的依据）。保留 30 天，由 xm-match 每小时分批清理（`RatingCleanup`） |
+
+改表纪律同其它 pbmysql 表：字段只追加、字段号永不复用（删字段用 `reserved` 占住），索引只能追加到末尾（索引名按位置编号）；两张表的追加区都从字段号 5 起。结构漂移（线上列比 proto 窄、同名索引定义不同等）时
+xm-match 拒绝启动，由人工对齐。
+
+**行为变化**：无客户端可见变化（评分不下发）。xm-match 因此依赖 MySQL：建表失败拒绝启动；连接串是会话级 READ COMMITTED、`innodb_lock_wait_timeout = 1`（入账撞锁就整笔重跑）。
+入账标记的保留期（30 天）必须长于对局结果消息在 Kafka topic 里的最长寿命（保留 7 天 + 滚段周期约 7 天），改 topic 的保留期时要一起重算（`MatchRatingTablesTest` 钉住这条不等式）。
+
+**新库 / 存量库**：都无需手工操作，xm-match 第一次启动时建表。库用户需要建表与建索引的权限（同其它 pbmysql 表）。排队、票据、切磋与战斗落点记录都只在 Redis，本批没有别的库表变化；
+`player_state` 的字段号不变（下一个空闲号仍是 10）。
+
+**核对**：
+
+```sql
+SHOW TABLES LIKE 'match\_rating%';          -- xm-match 启动后有 match_rating / match_rating_applied
+SHOW CREATE TABLE match_rating;             -- 主键 player_id；列注释带 pb:N（pbmysql 按它识别字段）
+SHOW CREATE TABLE match_rating_applied;     -- 主键 battle_id；有 KEY idx_match_rating_applied_0 (applied_at_ms)
+```
+
+**回滚**：回退代码即可（不再起 xm-match），两张表可留着，别的进程不读不写它们。要清空评分重来时删表或删行即可，xm-match 下次启动重建；
+入账标记是「同一局只入账一次」的唯一依据：清掉 `match_rating_applied` 之后不要再从更早的位点重放结果 topic（换消费组名、人工重置位点），否则 topic 里还留着的局会再入账一次。

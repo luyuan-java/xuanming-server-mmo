@@ -11,7 +11,7 @@ import org.slf4j.LoggerFactory;
 /**
  * 对局结果的兜底日志 {@value #LOGGER}（match-spec §5.4）：没能由 Kafka 确认的每条结果事件在这里留下完整一行——键值对，
  * {@code payload} 是 {@code BattleResultEvent} <b>完整字节</b>的 Base64（标准字母表、不换行）。回灌 = 解出 {@code payload}，
- * 以 {@code key} 为消息 key 发到 {@code topic}；消费方按 battle_id 幂等，重复回灌无害。任意线程可调，不抛异常。
+ * 以 {@code key} 为消息 key 发到 {@code topic}；消费方按 battle_id 幂等，重复回灌无害——前提是在 xm-match 入账标记的保留期（30 天，RatingCleanup）之内回灌，超过后标记已清，会重复入账。任意线程可调，不抛异常。
  *
  * <p>一行的字段：{@code reason}（为什么没发出去，见 {@link Reason}）、{@code channel}（plain / activity）、{@code topic}、{@code key}
  * （= battle_id 的无符号十进制）、几项便于人工筛查的摘要（模式、配置、胜负、回合数、结束时刻）、{@code bytes} 与 {@code payload}。

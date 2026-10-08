@@ -62,12 +62,13 @@
   - Java 改用 `PlayerPushes`：按在线目录找当前会话，经 gate 玩家栅栏下发。
   - 两条放进同一条 `GatePush` 保序（§7.7）。
 - **battle → scene（确认、结算）与 battle → match（对局结果）**：6.2 只定义出站端口，缺省实现只记日志、计数。
-  - 传输由 6.3 / 6.4 接入，推荐方案见 §12 Q12 / Q13。
+  - 传输由 6.3 / 6.4 接入，推荐方案见 §12 Q12 / Q13。**都已接入**：确认与结算随 6.3（`SceneTransport`，Dubbo 直连 scene）；对局结果随 6.4（`KafkaBattleResultSink`，Kafka topic `xm-battle-result-g<代次>`，§7.9）。
 - **准入**：保留 `NOT_STARTED → OPEN → CLOSED`，以及「同一逻辑任务里先关闸、再作废全部房间」。Agones 不移植。
 - **存储**：不用 MySQL。
   - Redis 只写节点号租约（`battle`，作用域 0）和节点目录。
   - 只读在线目录（大厅公告），dev 接口另读位置记录。
 - **验收**：6.4 之前用 dev / test 专用的管理口建房（§7.12）；robot 新增 `battle`、`battle-edge` 两个场景（§13.8）。
+  6.4 落地后生产入口是 xm-match（排队 / 切磋 / 整队 / 活动 → gather → `createBattle`），端到端由 robot `battle-smoke` 等场景验收（match-spec §15.5）；dev 管理口仍保留给 `battle` / `battle-edge` / `battle-settle` 与故障变体用。
 
 ### 0.2 覆盖的盘点条目
 
@@ -90,7 +91,7 @@
 | **6.1 引擎** | 只调 `TurnBattleEngine` 的公开 API（`xm-battle-engine/src/main/java/com/game/battle/engine/TurnBattleEngine.java:104`、`:390`、`:409`、`:425`、`:444`、`:473`、`:862`、`:867`、`:881`、`:940`、`:966`）。`start` 返回 `Rejected` → 1002；`setActorAuto` 成功返回 **1000**（engine-spec D2）；指纹取 `TableBattleData.fingerprint()`（engine-spec D3） | — |
 | **5.2 交接** | 不依赖。battle 不读位置记录（dev 接口除外，§7.12） | 战斗冻结与交出互斥（`handoff-spec:106`），由 6.3 接入 |
 | **6.3 scene** | 端口 `SceneBattleEvents.confirm`（补发节奏在 6.2 实现并测试）；`SettlementSink` / `ActivityResultSink` 的调用点与顺序；CreateBattle 对路由字段的校验 | scene 出快照时填 `BattleRouting`；在 scene 上提供确认与结算的处理方（推荐见 Q13）；结算发件箱；144；结算后经大厅再推 150 |
-| **6.4 match** | `BattleNodeService` 接口；`CreateBattleResult.admission`；目录字段 `accepting`；`BattleResultSink` 端口 | 选节点、「不可分配」时换节点重试一次、建房失败时 destroy 补偿、建房**之前**写落点记录；179 补签；gate 把 `MatchService` 路由到 xm-match；battle_id 用雪花号；`deadline_ms = gather 起点 + 300 s`；结果事件的传输与消费 |
+| **6.4 match**（已落地，2026-10-08；`docs/porting/match-spec.md`） | `BattleNodeService` 接口；`CreateBattleResult.admission`；目录字段 `accepting`；`BattleResultSink` 端口 | 选节点、「不可分配」时换节点重试一次、建房失败时 destroy 补偿、建房**之前**写落点记录；179 补签；gate 把 `MatchService` 路由到 xm-match；battle_id 用雪花号；`deadline_ms = gather 起点 + 300 s`；结果事件的传输与消费。落地时多出的一条：建房请求**确定没有送达**时 match 不发 destroy、直接按没建房补偿（match-spec M30） |
 | **6.5 观战** | 见 Q1：推荐 6.2 做完房间侧（观众名单、AddObserver / RemoveObserver、161 / 158 / 166、165、单槽互斥） | match 侧 163 / 164、观战索引、开局前清退观众（`gather.go:228-234`）、跨区 1V1 |
 
 ### 0.4 兼容面
@@ -236,6 +237,9 @@
   - 所以 1005 只能用来表示「这局确实没了」，Java 不得在别的失败上回 1005。
 - **已知缺口**：节点「不在」不判 BattleGone，房间节点崩溃后要等索引 TTL 过期才回 1005。
   - 代码里已经写明了正面证据的做法：比较实例 UUID，但还没做（`rbt.go:98-104`）。Java 6.4 是否采用见 Q14。
+- **Java 6.4 的落地**（match-spec §4.3）：match 先按落点记录里的地址**直拨** battle（所以 battle 丢了租约、不在目录里时仍签得出票）；调通了原样透传 battle 的裁决；
+  回 1005 需要三条证据同时成立——直拨的请求确定没有送达、目录里同号节点已换实例、对原地址的 TCP 建连探测明确被拒绝 / 不可达；其余（超时、连上之后断开、目录里没有该号、同实例、探测没有结论）一律 1003。
+  表里「battle 节点没注册或身份歧义」那一行在 Java 不出现（不按目录找节点）。
 
 ### 2.8 落点（match 侧，6.4；这里只列与 battle 的约定）
 
@@ -1140,7 +1144,7 @@ message CreateBattleResult {
 | `SceneBattleEvents.confirm(routing, playerId, battleId, deadlineMs)` | 建房首发 + 补发（§4.8） | `LoggingSceneBattleEvents`：DEBUG 日志 + `scene_events{kind=confirm, result=logged}` | 6.3（Q13），**已落地**：`DubboSceneBattleEvents`（scene-battle-spec §7.16） |
 | `SettlementSink.dispatch(routing, playerId, settlement)` | `FinishBattle` 逐人，排在本人 150 之后（R6） | 打 INFO + `scene_events{kind=settlement, result=logged}` | 6.3，**已落地**：结算发件箱 `SettlementOutbox`——先落 Redis、后投递、未销账就重投（scene-battle-spec §7.15；`combat.md:269-279`） |
 | `ActivityResultSink.dispatch(event)` | 活动局的结果事件 | 打 INFO + 计数 | 6.3（battle 侧**已落地**：`ActivityResultOutbox`，先落 `xm:battle:activity-result:<battle_id>` 再经 `BattleResultSink` 按 `channel=activity` 发，scene-battle-spec §7.17）/ 4.6（消费与销账） |
-| `BattleResultSink.publish(event, channel)` | 普通局的结果事件（`PLAIN`，房间调 `publish(event)`）；6.3 起活动结果通道也经它发（`ACTIVITY`） | 打 INFO + 计数（`LoggingBattleResultSink` 按通道计） | 6.4（Q12） |
+| `BattleResultSink.publish(event, channel)` | 普通局的结果事件（`PLAIN`，房间调 `publish(event)`）；6.3 起活动结果通道也经它发（`ACTIVITY`） | 打 INFO + 计数（`LoggingBattleResultSink` 按通道计；6.4 之后只剩测试替身在用） | 6.4（Q12），**已落地**：`com.game.battle.port.kafka.KafkaBattleResultSink`——Kafka topic `xm-battle-result-g<代次>`（3 分区、保留 7 天），key = battle_id 的无符号十进制，value = `BattleResultEvent` 完整字节；逻辑线程只把事件投进有界队列（1024），专用线程 `battle-result-out` 上发送；发不出去的带完整字节进兜底日志 `xm.battle.result.fallback`（match-spec §5.4） |
 
 真实传输由 `com.game.battle.port.scene.SceneTransport` 装配（一条 `battle-outbox` 线程、按节点直连的 `NodeRpcClients<SceneBattleService>`、定位器与 scene 目录），键、脚本、常量、寻址与重放语义**以 scene-battle-spec 为准**（§7.2、§7.15–§7.17）；下面只留与房间有关的契约。
 
@@ -1157,9 +1161,16 @@ message CreateBattleResult {
   - **`BattleResultSink` 自 6.3 起有两个调用方、两条线程**：普通局由房间在 `battle-logic` 上调一次（`Channel.PLAIN`）；活动局由 `ActivityResultOutbox` 在 `battle-outbox` 上调（`Channel.ACTIVITY`）——
     持久副本落库之后首发一次，未销账每 10 s 重发同一个事件对象，一局最多 1 + 30 = 31 次，落库失败只发一次。实现必须**线程安全**、**容忍同一 battle_id 被多次调用**（消费方按 battle_id 幂等）、按 `channel` 分开计数
     （`xm_battle_results_total{channel}`：`plain` 只统计普通局）。抽象方法是 `publish(event, Channel)`，`publish(event)` 是 default = PLAIN；6.4 接真实传输时按这个形状实现。
+    **6.4 的实现**（`KafkaBattleResultSink`）守住了这三条：`publish` 只做入队，线程安全、不阻塞、不抛；同一 battle_id 的重发原样再发一条（同 key 同字节，落在同一分区、保序）；
+    `xm_battle_results_total{channel, result}` 生产上取 sent / error，另有 `xm_battle_result_events_total{result = sent / fallback / not_verified}`（每次 `publish` 恰好计一次）。
+    配置键 `xm.battle.result.{bootstrap-servers, topic-generation, replication-factor, init-timeout}`（环境变量 `XM_KAFKA_BOOTSTRAP_SERVERS`、`XM_BATTLE_RESULT_TOPIC_GENERATION`，代次必须与 xm-match 一致）；
+    启动时同步核对 topic，分区数与契约不符拒启，Kafka 不可达不拒启（结果事件写兜底日志，之后惰性再核对）。停机次序 `BattleNode.stop → SceneTransport.close → KafkaBattleResultSink.close`。
+    4.6 的消费方销账之前，一局活动结果最多 31 条相同消息进 topic；xm-match 的评分消费对它们一律 `ignored`（PVE_TEAM 不计分）。
   - `SceneBattleEvents.confirm` 的失败只计数、打日志，由下一次补发覆盖；每次确认必有一个计数结局（`sent` / `rerouted` / `skipped`，应答 NOT_HERE 另计 `not_here`，传输失败与回调里的意外计 `error`）。
 - **dev 房间**：`origin = DEV` 时 `SettlementSink`、`ActivityResultSink`、`BattleResultSink` 一律跳过，只记日志——6.3 / 6.4 落地之后 dev 接口也不会变成发奖口子（§7.12）。
   `origin = DEV_GATHER`（6.3 的 dev gather）照调 `SettlementSink`、不调两个结果端口。判定经 `RoomOrigin.settles()` / `publishesResult()`。
+  6.4 接上真的 Kafka 生产方之后这一条由 `ResultRoutingTest` 钉住：dev / dev gather / 销毁 / 停机作废的房间，生产者一条也收不到（也不进兜底日志）；`MATCH` 房间恰好一条。
+  注意 xm-match 的 dev 活动开战口（`/admin/match/dev/activity-battle`）建的是 **`MATCH` 房间**，照常结算、照常发活动结果事件（match-spec §7.2）。
 
 ### 7.10 节点身份、目录与租约丢失
 
@@ -1252,6 +1263,9 @@ message BattleNodeInfo {
 - **dev 房间**（`origin = DEV`，`dev/create` 建的）：照常推 177 / 143 / 139 / 150、照常补发确认（6.2 只记日志；6.3 起真的发往 scene——scene 按锁匹配，dev 房间的 battle_id 不会命中任何锁，零副作用）；**永不**投递结算与结果事件（§7.9）。
 - **`DEV_GATHER` 房间**（`dev/gather` 的 `CREATE` 建的，批次 6.3）：快照来自 scene（不是调用方伪造），照常确认、**照常结算**（`SettlementSink` 照调）；对局结果事件仍跳过（没有 match）；不接受 `activity_context`。只在 dev / test 下能建出来，prod 403。
   它是 6.4 之前验收 6.3 结算链路的入口，不是新的发奖口子（dev 本来就有 GM 加币）。
+  **6.4 之后的地位**（以代码为准）：dev gather 的代码（`com.game.battle.admin.DevGather*`）与管理口原样保留，仍只在 dev / test 开放；它不再是端到端的唯一入口——真排队 → 凑单 → gather → 建房 → 结算由 xm-match 走通、
+  robot `battle-smoke` 覆盖。robot 的 `battle-settle` 与两个故障变体（`BattleCrashScenario`）仍用 dev gather 建房（它们要精确控制 battle_id、期限与建房时机），没有改成走排队；
+  `DEV_GATHER` 房间仍不发对局结果事件，所以这两个场景不会产生评分。
 
 ### 7.13 存储
 
@@ -1262,7 +1276,8 @@ message BattleNodeInfo {
 | Redis：在线目录 `xm:presence:{pid}`、推送频道 `xm:gate-push:{zone}:{gate}` | 读 / 发布（大厅公告） | — |
 | Redis：位置 `xm:location:{pid}`、scene 目录 | 只有 dev 接口读 | 6.3 起：结算首投 / 重投与确认回落的定位、直连客户端缓存的清扫、dev gather |
 | 6.3 的键（**已落地**，全部经 `RedisKeys`；键名、字段、TTL 与全部 Lua 以 scene-battle-spec §7.2 为准） | — | battle 写：待结算记录 `xm:battle:{<pid>}:settlement`（Hash，字段名 = battle_id，值 = `BattleSettlementEvent` 字节，整键 TTL 7 天）、「已被取代」时的已销账墓碑 `xm:battle:{<pid>}:settled:<battle_id>`（String，10 min）、活动结果持久副本 `xm:battle:activity-result:<battle_id>`（String，7 天）。battle 读：scene 拥有的战斗锁 `xm:battle:{<pid>}:lock`（Hash，`b n s d p`；只在「已被取代」的判定脚本里读）。**取代**原稿预留的 `xm:battle:settlement:pending:{pid}` / `…:pending-id:{pid}` / `xm:battle:lock:{pid}` / `xm:battle:ctx:{pid}`（没有 hash tag、销账脚本无法同槽；单槽改成每局一个字段；锁与 ctx 合成一个 Hash）——6.2 从未写过这些键，改名只影响文档 |
-| 6.4 预留（经 `RedisKeys`，`xm:` 前缀） | — | match 拥有的落点 / 观战索引 `xm:spectate:battle:{battle_id}`（要带 `battle_instance_id`，Q14） |
+| 6.4 预留（经 `RedisKeys`，`xm:` 前缀） | — | match 拥有的落点 / 观战索引 `xm:spectate:battle:{battle_id}`（要带 `battle_instance_id`，Q14）。**6.4 落地的键是 `xm:{match}:battle:<battle_id>`**（`RedisKeys.matchBattlePlacement`；HASH：`a` = attempt、`pb` = xm-match 的 `BattlePlacement`，带 `battle_instance_id` 与 rpc 地址，TTL 360 s），随 match 的单 tag `{match}`，6.5 的观战复用它；battle 不读不写这个键 |
+| Kafka（6.4） | — | 只生产：对局结果 topic `xm-battle-result-g<代次>`（§7.9）。Kafka 不可达不影响启动与战斗 |
 
 ### 7.14 与并行批次的钩子
 
@@ -1277,12 +1292,12 @@ message BattleNodeInfo {
   - 实现 `SceneBattleEvents` / `SettlementSink` / `ActivityResultSink` 的真实传输（`SceneTransport`，§7.9）；
   - 在接口文档里写清「DestroyBattle 发生在确认之后 → 冻结要等到期限」的取舍（Q5；scene-battle-spec B1。Java 的 scene 在期限 + 10 s 宽限后先读本局待结算记录再判废，D21）；
   - `RoomOrigin.DEV_GATHER` 与 dev gather 管理口（§7.12）；gate 的战斗上行改为当场拒绝（§3.7）。
-- **6.4**：
-  - 调用 `BattleNodeService`；按 `admission` 处理；
-  - 建房**之前**写落点记录（至少 `battle_node_id` 与 `battle_instance_id`）；
-  - 179 的处置同 §2.7；
-  - 实现 `BattleResultSink` 的传输与消费（按 battle_id 幂等）；
-  - 改 matched TTL 公式时回看 §10.4。
+- **6.4**（已落地，见 match-spec 及其实现记录）：
+  - 调用 `BattleNodeService`；按 `admission` 处理（`NOT_ALLOCATABLE` 换节点重试一次；`ADMITTED` 且 tip ≠ 0 不发 destroy；字段缺失按可能已建房）；
+  - 建房**之前**写落点记录（`battle_node_id`、`battle_instance_id`、rpc 地址、attempt）；
+  - 179 的处置同 §2.7（判死另加两条证据，见那一节末尾）；
+  - 实现 `BattleResultSink` 的传输（xm-battle 的 `KafkaBattleResultSink`）与消费（xm-match 的评分消费，MySQL 一局一笔事务、按 battle_id 幂等）；
+  - 改 matched TTL 公式时回看 §10.4（`ConfirmWindowConstraintTest` 已直接引用 `MatchBudgets`）。
 - **6.5**：见 Q1。直连面已放行 165，观众首帧钩子 `onDirectVerified` 已留好。
 
 ---
@@ -1380,7 +1395,8 @@ message BattleNodeInfo {
 | `xm_battle_lobby_push_outcomes_total` | Counter | `outcome` = sent / offline / gate_unreachable / error | `PlayerPushes` 的结局 |
 | `xm_battle_tickets_total` | Counter | `path` = create / observer / reissue；`result` = ok / failed | 签票 |
 | `xm_battle_scene_events_total` | Counter | `kind` = confirm / settlement；`result` = logged / sent / rerouted / not_here / skipped / error | 6.2 只有 logged。6.3 起：confirm 计 sent / rerouted / skipped，应答 NOT_HERE 另计 not_here，失败计 error；settlement 的 sent = 房间把这份结算交给了发件箱 |
-| `xm_battle_results_total` | Counter | `channel` = plain / activity；`result` = logged / sent / error | 6.2 只有 logged。6.3 起活动局经活动结果通道发布，首发与每次重发都计 `activity`，`plain` 只统计普通局 |
+| `xm_battle_results_total` | Counter | `channel` = plain / activity；`result` = logged / sent / error | 6.2 只有 logged。6.3 起活动局经活动结果通道发布，首发与每次重发都计 `activity`，`plain` 只统计普通局。**6.4 起**生产上是 Kafka 生产方：取 sent（broker 已确认）/ error（进了兜底日志），`logged` 只剩测试替身 `LoggingBattleResultSink` 会计 |
+| `xm_battle_result_events_total` | Counter | `result` = sent / fallback / not_verified | 6.4 新增：对局结果事件在 Kafka 传输上的结局，每次 `publish` 恰好计一次（`not_verified` = topic 还没核对通过就到来的事件，同样进兜底日志） |
 | `xm_battle_rpc_seconds` | Timer（1 ms–1 s） | `method`（5 个）；`result` = ok / business_error / not_allocatable / error | 提供方耗时，含逻辑线程排队 |
 | `xm_battle_logic_pending_tasks` | Gauge | — | 逻辑线程队列长度（同 scene，`arch` §11） |
 | `xm_battle_admission_phase` | Gauge | — | 0 / 1 / 2 |
@@ -1441,6 +1457,8 @@ message BattleNodeInfo {
   - 6.2 写一条单测钉住这条不等式；6.3 / 6.4 落地后改成直接引用对方的常量。
   - **6.3 已改**：`ConfirmWindowConstraintTest` 的锁余量直接引用 `BattleRedis.LOCK_EXTRA_TTL_SEC`（xm-discovery，scene 写锁时用的就是这个常量；并断言它 = 60），
     改常量时这条不等式跟着失败。match 的 96 s 仍是字面值，等 6.4 有了 match 的常量再换。
+  - **6.4 已改**：96 s 直接引用 `com.game.api.match.MatchBudgets.MAX_MATCHED_TTL_SECONDS`（xm-api，match 下发给 scene 的备战期限就按它的公式算），并新增一条钉「常量 = 公式对最大组（10 人）的取值」、
+    1–10 人各组的 matched TTL 都不超过它。改 match 的任何一跳超时，这条测试跟着失败。
   - 该测试现在钉**两条**不等式：标称的「窗口 180 s ≥ 96 + 60」，以及更严的「最后一次**实际**补发的时刻 `CONFIRM_RESENDS × CONFIRM_RESEND_INTERVAL_MS` = 170 s ≥ 156 s」。
     计次实现（N19）下 +180 s 那次只停表、不发，标称窗口比最后一条真正发出去的确认晚一个周期；只比标称窗口时，锁余量调到 75–84 s 第一条照过，而最后一次补发已早于锁过期。实际余量 14 s（§4.8）。
 - **scene 侧的其余数值依赖**（锁在结算应用后至少再保持 180 s ≥ 重投窗口 10 s × 12 + 60 s；FIGHTING 判废宽限 10 s + reaper 间隔 ≤ 30 s < 锁余量 60 s；
@@ -1453,7 +1471,7 @@ message BattleNodeInfo {
 | 分歧 | 分区稿说法 | 裁决与依据 |
 |---|---|---|
 | inventory 行号 | ② ③ 引 `combat.md:45`、`:57`、`:69`、`:81`、`:93`、`:117`、`:170` | 现行文件中这些条目在 `:209`–`:339`（§0.2），本稿全部改用实际行号 |
-| 线程模型 | ① ③：独立 `DefaultEventLoop` 当逻辑线程，I/O 另起，① 还加了 `battle-out` 出站线程；② ：逻辑线程 = 直连面唯一 worker | 采纳 ②（§7.3）。出站端口一律异步，6.2 没有阻塞出站；6.4 的 Kafka 生产者自带发送线程，不需要 `battle-out` |
+| 线程模型 | ① ③：独立 `DefaultEventLoop` 当逻辑线程，I/O 另起，① 还加了 `battle-out` 出站线程；② ：逻辑线程 = 直连面唯一 worker | 采纳 ②（§7.3）。出站端口一律异步，6.2 没有阻塞出站；6.4 的 Kafka 生产者自带发送线程，不需要 `battle-out`。**这半句已由 match-spec §0.5 更正并按更正落地**：`producer.send` 会因元数据或缓冲阻塞到 `max.block.ms`，所以 6.4 的 `KafkaBattleResultSink` 有自己的发送线程 `battle-result-out`，逻辑线程（与 `battle-outbox`）只把事件投进有界队列 |
 | Dubbo 端口 | ① ② 20888；③ 21200 | **21200**：20881–20887 是注册中心里按服务寻址的端口；按节点直连、`register=false` 的先例是 scene 的 21100 |
 | Dubbo group | ② ③ `battle` | **`battle-node`**：`DubboGroups` 约定 `ClientMessageService` 的 group 等于 proto 一级目录（`xm-api/src/main/java/com/game/api/DubboGroups.java:3-6`），`battle` 留给这一层；服务对服务的接口另起名（先例 `scene-asset`） |
 | 「不可分配」的表达 | ② `BattleCreateReply{admission, battle_id, tip_id, tip_parameters}`；③ `CreateBattleResult{bool not_allocatable, reason, bytes response}` | 取 ③ 的嵌入式结构，把 bool 换成首值 UNSPECIFIED 的枚举（缺字段不会被读成「已受理」，§7.8） |
@@ -1505,7 +1523,7 @@ message BattleNodeInfo {
 |---|---|---|---|---|---|
 | N1 | 控制面传输与「不可分配」 | gRPC；`UNAVAILABLE "battle_not_allocatable"`，字符串精确匹配 | Dubbo Triple 按节点直连；`CreateBattleResult.admission` 枚举 | 否 | 否 |
 | N2 | 大厅公告寻址 | Kafka gate-cmd，按开局快照的会话 | `PlayerPushes`：在线目录里的当前会话 + gate 玩家栅栏；177 → 143 放进一条 `GatePush` | 备战期间换会话时也能收到（修 F2） | 可选（mmorpg 也可按 player_locator 寻址） |
-| N3 | battle → scene / match 的出站传输 | Kafka scene-cmd / match-results | 端口；6.2 只记日志；6.3 / 6.4 定传输（Q12、Q13） | 否 | 否 |
+| N3 | battle → scene / match 的出站传输 | Kafka scene-cmd / match-results | 端口；6.2 只记日志；6.3 / 6.4 定传输（Q12、Q13）。已定并落地：到 scene 走 Dubbo 直连（6.3）；到 match 走 Java 自有的 Kafka topic `xm-battle-result-g<代次>`（6.4，match-spec M19） | 否 | 否 |
 | N4 | Agones | 生命周期、分配许可、loop 心跳、排空标签、单元计数 | 不移植；准入闸保留；先开闸后进目录 | 否 | 否 |
 | N5 | 空密钥 | dev / test 空密钥跳过验签，`token_signature` 为空 | 密钥任何模式必填，`token_signature` 恒为 64 字节 hex（同 Java gate） | 字段内容不同，形状相同；客户端原样回传 | 否 |
 | N6 | 客户端可达地址开关 | `CLIENT_ENDPOINT_REQUIRED` | 不需要：通告地址总有值（PARITY 第 50 行） | 否 | 否 |
@@ -1559,6 +1577,8 @@ message BattleNodeInfo {
 - **Q12 对局结果的传输（6.4 定）？**
   推荐 Java 自有的 Kafka topic `xm-battle-result-g<代次>`：键 battle_id，规格照 `xm-audit` 的 TopicSpec 写，启动时核对（`arch` §4.5）。
   理由：有两个独立的消费方（6.4 的评分、4.6 的帮会活动），需要持久与重放。
+  **落地（6.4）**：采纳。topic 规格在 xm-audit 的 `BattleResultTopics`（3 分区、保留 7 天、代次取 `XM_BATTLE_RESULT_TOPIC_GENERATION`）；xm-battle 生产（`KafkaBattleResultSink`，启动核对、分区数不符拒启），
+  xm-match 消费（组 `xm-match-rating`，topic 的主人，负责校正保留期）。4.6 的帮会活动消费方还不存在。
 - **Q13 确认与结算的传输（6.3 定）？**
   推荐在 scene 现有的资产 RPC 端口（`xm.scene.asset-rpc-port`，21100）上再导出一个 `SceneBattleService`：group `scene-battle`，`register = false`，按目录直连，`retries = 0`。
   - 请求带目标实例，不符回 NOT_HERE；
@@ -1566,6 +1586,8 @@ message BattleNodeInfo {
   - 备选：Redis pub/sub `xm:scene-battle:{zone}:{node}`（同样至多一次）。
 - **Q14 6.4 补签时，「目录里同号节点的实例 id ≠ 落点记录里的实例 id」是否判房间已死、回 1005？**
   推荐**采纳**：这是 `rbt.go:98-104` 写明的正面证据，客户端能更早拿到 BattleGone。需在 PARITY 登记，可选在 mmorpg 同做。
+  **落地（6.4）：改写后采纳**（match-spec §4.3、M16）。单看「目录实例号 ≠ 记录实例号」会把「丢了租约但仍活着、号被别的进程接手」的房间判死（本稿 §7.10：丢租约不作废房间），所以 match 先按落点记录里的地址直拨，
+  只有直拨的请求确定没有送达、同号节点已换实例、且对原地址的建连探测明确连不上，三条都成立才回 1005；超时与探测没有结论一律 1003。
 - **Q15 要不要提供与 Agones 排空标签对等的运维排空（关闸但不作废，打完再下线）？**
   推荐**不做**：用停机（作废）或 GM 签名停机代替；有需要时在 7.6 加。
 - **Q16 逻辑线程数？**
@@ -1589,7 +1611,8 @@ message BattleNodeInfo {
 | `BattleViewsTest` | `room.cpp:1250-1281` | 本人与本人宝宝保留冷却；他人、他人宝宝、怪物清空；buff 原样保留；观众全清；`self_items` 先清空再只给本人；输入快照不被改动 |
 | `FingerprintGuardTest` | `room.cpp:408-451` | off 不比；空值不比；request 不符；仅某个快照不符；warn 放行并计数；enforce 拒绝且 `parameters[0]` 逐字相同（含 `request=` 为空串的情形） |
 | `BattleResultAssemblerTest` | `room.cpp:1181-1201`；`activity.h:62-81` | 队伍升序、队内升序（无符号）；`winner_team_index` 只在 B 胜时为 1；fled / dead 升序去重；kind = NONE 不回显；kind = 1 回显；**不认识的 kind（如 7）也回显**并走活动通道；`total_rounds`、`finished_at_ms` 取注入的时钟 |
-| `ConfirmWindowConstraintTest` | `room.cpp:257-268` | 窗口 ≥ 96 + 60；6.3 / 6.4 落地后改成引用对方常量。6.3 已把锁余量改为引用 `BattleRedis.LOCK_EXTRA_TTL_SEC`，并加「最后一次实际补发 170 s ≥ 156 s」（§10.4）；96 s 等 6.4 |
+| `ConfirmWindowConstraintTest` | `room.cpp:257-268` | 窗口 ≥ 96 + 60；6.3 / 6.4 落地后改成引用对方常量。6.3 已把锁余量改为引用 `BattleRedis.LOCK_EXTRA_TTL_SEC`，并加「最后一次实际补发 170 s ≥ 156 s」（§10.4）；96 s 等 6.4。**6.4 已改**：96 s 引用 `MatchBudgets.MAX_MATCHED_TTL_SECONDS`，另钉「常量 = 公式对 10 人组的取值」 |
+| `KafkaBattleResultSinkTest` / `KafkaBattleResultSinkIntegrationTest` / `BattleResultPropertiesTest`（6.4） | — | 对局结果的 Kafka 生产：topic / key / value、`send` 只在 `battle-result-out` 上、`publish` 不阻塞、两线程并发不丢不乱、核对与 30 s 冷却、五个兜底出口、队列 1024、停机时序；真 Kafka（`-Dxm.it.kafka`）建 3 分区 topic、逐字节读回、同 key 保序、分区数不符拒启 |
 
 ### 13.2 房间服务（逻辑线程上的组件测试）
 
@@ -1727,6 +1750,8 @@ message BattleNodeInfo {
 
 **后续批次的升级**：
 - 6.4 按 `bss.go:307-389` 移植 battle-smoke 的 A 侧：排队 PVE_SOLO → 177 / 143 → 直连 → 补拉 → SetAutoBattle → 150。另移植 features-smoke 的战斗段与 179 补签。
+  **已做**：xm-robot 的 `battle-smoke`（另含排队语义与拒绝码、179 补签、1V1 与评分、切磋）、`match-activity`、`match-5v5`，`team` 场景加开战段（match-spec §15.5）。
+  features-smoke 的战斗段没有单独移植进 Java 的 `features` 场景，它的终局判据并进了 `battle-smoke` 第 6 步。
 - 6.3 补「打赢 → 任务进度 → 领奖 → 重登」以及大厅上的 150 / 144。
 - 6.5 移植 B 侧观战与 `battle_smoke_cross_zone`。
 - 输出行沿用 `BATTLE_SMOKE_OK battle_id=… a_turns=… …`。

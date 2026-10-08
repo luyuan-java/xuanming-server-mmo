@@ -92,7 +92,7 @@
 |---|---|---|
 | **6.1 引擎**（已提交） | scene 只用 `BattleRules.isTurnBattleCastableSkill`（engine-spec D7，`:1543`）与 `BattleTableFingerprint.compute`（engine-spec §10.1，`:1297`）；xm-scene 新增对 xm-battle-engine 的依赖 | 引擎内的宝宝单位、actor_id、只普攻、结算里带宝宝终值（engine-spec `:250`、`:313-319`、`:617`、`:939`） |
 | **6.2 battle 节点**（实现中） | 实现 6.2 留下的三个出站端口 `SceneBattleEvents` / `SettlementSink` / `ActivityResultSink` 的真实传输；`RoomOrigin` 增加 `DEV_GATHER`；管理口增加 dev gather；修订 node-spec §7.13 的预留键名 | 收尾顺序（逐人「推 150 → 调 `SettlementSink`」，node-spec §4.6）、确认补发节奏（17 次，§4.8）、dev 房间不结算 |
-| **6.4 match** | 提供 `SceneBattleService.prepareBattle / cancelBattlePrepare`、`BattleLockReader`（EXISTS / 读 battle_id / 批量）、`BattleResultSink` 只留日志实现 | 调备战 / 取消、读锁（JoinQueue 16000、切磋 16009 / 16010 / 16012、整队开战预检 4025）、对局结果的传输与消费、179 补签；对备战失败 / 超时的成员也发取消（Q21）。match-spec 已改用 `RedisKeys.battleLock`（Hash，EXISTS 语义不变）并经 `BattleLockReader` 读；match 的备战 / 取消调用超时保持 3 s、超时按结局不明处理并补发取消（§7.3、§10.4 的裁决） |
+| **6.4 match** | 提供 `SceneBattleService.prepareBattle / cancelBattlePrepare`、`BattleLockReader`（EXISTS / 读 battle_id / 批量）、`BattleResultSink` 只留日志实现 | 调备战 / 取消、读锁（JoinQueue 16000、切磋 16009 / 16010 / 16012、整队开战预检 4025）、对局结果的传输与消费、179 补签；对备战失败 / 超时的成员也发取消（Q21）。match-spec 已改用 `RedisKeys.battleLock`（Hash，EXISTS 语义不变）并经 `BattleLockReader` 读；match 的备战 / 取消调用超时保持 3 s、超时按结局不明处理并补发取消（§7.3、§10.4 的裁决）。**6.4 已落地（2026-10-08，match-spec 及其实现记录）**：备战 / 取消由 xm-match 的 `gather.ScenePreparer` 经 `SceneBattleService` 调（3 s，`MatchBudgets.PREPARE_BATTLE_TIMEOUT_MS` / `CANCEL_PREPARE_TIMEOUT_MS`；超时、传输失败、`UNSPECIFIED` 都按结局不明并补发取消，取消发回备战时记下的端点）；读锁都经 `BattleLockReader`；对局结果由 xm-battle 的 `KafkaBattleResultSink` 发到 Kafka、xm-match 消费入账；179 在 xm-match。6.4 没有改 xm-scene 的代码 |
 | **5.2 跨节点换图**（实现中） | 战斗冻结与交出互斥（`handoff-spec:106`）；`BattlePolicy` 与 `FreezePolicy` 并存；交出进场也跑进场恢复 | `FreezePolicy`、`SwitchPhase`、交出事务、`requestSave` 在 FREEZING 回 IN_FLIGHT |
 | **2.8 宝宝**（已完成） | `PetService.buildBattleSnapshot` / `applyBattleSettlement` 新增；写闸 26008 接入 `PetService.checkWritable` | — |
 | **2.5 任务**（已完成） | 结算的击杀事实调用现成的 `MissionService.onMonsterKilled`（`MissionService.java:208-215`），打通「任务 12 可领」端到端 | — |
@@ -313,12 +313,12 @@ Redisson 不保证这一点（`PARITY.md:91` 记过 NOSCRIPT 重发时命令被�
 
 | 读者 | 判定 | 客户端看到 | 出处 | Java 批次 |
 |---|---|---|---|---|
-| JoinQueue | 锁存在 → 16000；**读失败回 `kMatchInternal`**（不是 16000，`IsBattleLocked` 虽返回 `true` 但调用方先判 err） | `16000 kMatchInBattle` / 内部错误 | `joinqueuelogic.go:95-111`；`pc.go:112-121` | 6.4 |
-| 切磋发起 / 应战复查 | 自己有锁 / 目标有锁；读失败一律按「忙」 | 16010 / 16009；16012 / 16010 | `challengelogic.go:69-87`、`:245-265` | 6.4 |
+| JoinQueue | 锁存在 → 16000；**读失败回 `kMatchInternal`**（不是 16000，`IsBattleLocked` 虽返回 `true` 但调用方先判 err） | `16000 kMatchInBattle` / 内部错误 | `joinqueuelogic.go:95-111`；`pc.go:112-121` | 6.4，**已做**（xm-match `QueueService`） |
+| 切磋发起 / 应战复查 | 自己有锁 / 目标有锁；读失败一律按「忙」 | 16010 / 16009；16012 / 16010 | `challengelogic.go:69-87`、`:245-265` | 6.4，**已做**（xm-match `ChallengeService`） |
 | 观战 | 锁存在；读失败回内部错误 | 16015 | `watchbattlelogic.go:80-89` | 6.5 |
-| 整队开战预检 | 锁存在（读失败按在途） | `4025`，参数为 pid | `go/match/internal/team/service.go:429-435` | 6.4（Java 现在恒回 4027） |
+| 整队开战预检 | 锁存在（读失败按在途） | `4025`，参数为 pid | `go/match/internal/team/service.go:429-435` | 6.4，**已做**：xm-match 的成员预检读锁、xm-team 映射成 4025[pid]（读失败按在途；team-spec §5.5） |
 | 队伍视图 | 读时由锁算出（MGET 失败为 false） | `TeamMemberView.in_battle` | `team-spec:1221` | **6.3，已做**（收掉 team-spec D10：`TeamDisplay` 经 `BattleLockReader.existsAll` 批量读，任何失败整批按 false，§7.13 世界内部第 4 条） |
-| 帮会活动开局（match 的预检） | 锁存在；读失败回 `ACTIVITY_BATTLE_REJECT_INTERNAL` | `ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE` | `go/match/internal/logic/activitybattlelogic.go:220-228` | 6.4（match 侧）/ 4.6（消费） |
+| 帮会活动开局（match 的预检） | 锁存在；读失败回 `ACTIVITY_BATTLE_REJECT_INTERNAL` | `ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE` | `go/match/internal/logic/activitybattlelogic.go:220-228` | 6.4（match 侧，**已做**：xm-match `ActivityBattleService`）/ 4.6（调用方与结果消费，未做） |
 
 ### 2.5 gate 拒绝战斗上行（`gate_cmp.cpp:937-950`）
 
@@ -690,6 +690,8 @@ message SceneBattleReply { SceneBattleStatus status = 1; bytes body = 2; Settlem
   **match 的备战 / 取消调用不在此列（裁决，2026-10-06）**：match 的超时保持 3 s（match-spec 的数值表与跨进程不等式整表不动，42 / 48 / 66 / 96 与基线逐字相同），
   超时按结局不明处理并补发取消；scene 在写锁在途时收到取消会延后到写锁完成再删锁（§7.6，`PrepareBattleTest` 钉住），兜底还有 reaper 与锁 TTL。
   `SceneBattleService` 接口注释里「调用方超时必须大于它」那一句随 6.4 改，不在本批。
+  **6.4 已改并按裁决落地**：接口注释现在分两种口径写（battle → scene 的确认 / 结算与 dev gather 必须大于 scene 的最坏耗时；match 的备战 / 取消是 3 s、超时按结局不明并补发取消）；
+  xm-match 的备战 / 取消超时就是 `MatchBudgets` 里的 3000 ms，启动门禁断言它们不超过 3 s（改大会让 matched TTL 表偏离基线的 42 / 48 / 54 / 60 / 66 / 96）。
   - **应答的时机**：取消等删锁脚本的结局、按锁结算等读锁回来才完成，期间在途名额占着，`rpc{method,result}` 在结局出来时才计。
   - **应答 future 的结局**：备战与结算按锁分支，在逻辑线程回调抛出意外异常、或逻辑线程拒绝投递（停服）时**异常完成**（= 结局未知，调用方按传输失败处理；
     不异常完成的话提供方的在途名额永不归还）。备战回调抛异常时还会摘掉仍挂着的这个冻结，并尽力发一次只删备战锁（`abandonPrepare`）。
@@ -1180,13 +1182,18 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 - 出口 `ActivityResultSink.dispatch(event)` 只在 `kind ≠ NONE` 时被调（判定在 6.2 的 `BattleResultAssembler`，不认识的 kind 也算）。
 - 序列化失败计 `serialize_failed`、不发；`SET xm:battle:activity-result:<id> EX 7d`：成功 → 经 `BattleResultSink` 发布**同一份字节**并登记；失败或没有结论（null）→ 发布一次 + `not_durable`。
   登记的是事件对象（不可变），重发时再序列化，结果与落库的字节相同（真 Redis 用例断言了持久副本与发布事件逐字节相同）；是否改存 `byte[]` 等 6.4 定真实传输的签名。
+  （6.4 的真实传输 `KafkaBattleResultSink` 沿用 `publish(event, Channel)` 的签名、在自己的发送线程上序列化，登记的仍是事件对象，没有改存 `byte[]`。）
 - **发布端口带通道**：`BattleResultSink.publish(event, Channel)`，`Channel{PLAIN, ACTIVITY}`；`publish(event)` 是 default = PLAIN（房间的调用点不变）。
   活动通道的首发与每次重发都传 ACTIVITY，`xm_battle_results_total{channel=activity}` 统计活动局的首发与重发，`plain` 只统计普通局。
   自 6.3 起这个端口有**两个调用方、两条线程**：普通局在 `battle-logic` 上一局调一次；活动局由本通道在 `battle-outbox` 上调，首发 1 次，未销账每 10 s 重发同一个事件对象，
   一局最多 1 + 30 = 31 次，落库失败只发 1 次。6.4 的真实实现必须线程安全、容忍同一 battle_id 多次调用、按 channel 分开计数。
+  （6.4 已按这三条实现：xm-battle 的 `KafkaBattleResultSink`，每次调用原样再发一条同 key 同字节的消息；match-spec §5.4。）
 - 每 10 s 对每条 `EXISTS`：0 → 摘除（acked）；1 → 用尽（30）则 ERROR 并摘除，否则 `++attempts` 后重发原字节（只在重发时计次，同 `room.cpp:2014`）；
   **出错或没有结论一律跳过、不计次**（计 `probe_error`；与 D15 统一，基线空回复跳过、出错当仍在）；登记超过 `OUTBOX_MAX_AGE` 仍没有结论 → 按用尽摘除（记录仍在 Redis，留给 4.6 的巡检器）。
 - 销账方是 4.6 的帮会同道历练消费方与巡检器，两版现在都不存在；6.4 接上 `BattleResultSink` 的真实传输之前发布端口只记日志——整条通道两版都不可达（Q11）。
+  **6.4 之后的现状**：发布的真实传输已做（活动局的结果真的进了 Kafka topic `xm-battle-result-g<代次>`，首发 + 每 10 s 重发、一局最多 31 条同 key 同字节的消息），xm-match 还提供了帮会活动开战的入口
+  `MatchInternalService.startActivityBattle` 与 dev 管理口；但消费方与销账方仍不存在——持久副本要等 7 天 TTL，重发用尽后 battle 记一条 ERROR 摘除。xm-match 的评分消费对这些消息一律 `ignored`。
+  4.6 的消费方必须按 battle_id 幂等，并把不认识的 (guild, activity)（dev 活动开战口建出来的）当终态销账（match-spec §7.2）。
 
 ### 7.18 dev / test 管理接口（Java 独有，xm-battle 管理端口 18112）
 
@@ -1424,7 +1431,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 ### 10.4 跨批次的数值依赖
 
 - 确认补发窗口 180 s ≥ match 最长 matched TTL 96 s + `LOCK_EXTRA_TTL_SEC` 60 s（node-spec §10.4）：6.2 的单测 `ConfirmWindowConstraintTest` 已改为引用 `BattleRedis.LOCK_EXTRA_TTL_SEC`
-  （match 的 96 s 仍是字面值，等 6.4 有了 match 的常量再换）。实现时另钉一条更严的：计次实现下 +180 s 那次只停表、不发，**最后一次实际补发在 170 s**，它同样要 ≥ 156 s——
+  （match 的 96 s 仍是字面值，等 6.4 有了 match 的常量再换——6.4 已换：xm-battle 的 `ConfirmWindowConstraintTest` 直接引用 `MatchBudgets.MAX_MATCHED_TTL_SECONDS`；xm-discovery 的 `BattleRedisConstantsTest` 里的 96 仍是字面值）。实现时另钉一条更严的：计次实现下 +180 s 那次只停表、不发，**最后一次实际补发在 170 s**，它同样要 ≥ 156 s——
   实际余量是 14 s，不是标称的 24 s（基线同样如此，`room.cpp:1115`）；`LOCK_EXTRA_TTL_SEC` 或 match 最长 matched TTL 合计再涨超过 14 s 时这条用例会失败。
 - `LOCK_HOLD_AFTER_APPLY_SEC`（180）≥ `SETTLEMENT_RETRY_INTERVAL × MAX + 60`（单测钉住）。
 - `FIGHTING_EXPIRY_GRACE`（10 s）+ reaper 间隔（≤ 30 s）< `LOCK_EXTRA_TTL_SEC`（60 s）：第一次 rescue 最晚发生在期限 + 40 s，锁一定还在（单测钉住；reaper 间隔配置启动校验 ≤ 30 s）。
@@ -1434,6 +1441,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 - `MAX_DEADLINE_AHEAD_MS`（7 天）= 待结算记录的保留期：对应的锁 TTL 是 604 860 s，EXPIRE 不会报错；正常对局的期限（集合起点 + 300 s）远小于它。
 - **D13 的「按 battle_id 升序 = 时间顺序」依赖 battle_id 生成器按时间递增**：基线是 match 节点的 snowflake（`gather.go:83`、`:202-209`；切磋 `challengelogic.go:105` 同源）。
   6.4 的 Java match 必须用时间在高位的雪花号；dev gather 由调用方给 battle_id，robot 必须按时间递增取号（§13.8 的 X1 < X2 < …）。
+  （6.4 已满足：xm-match 的 battle_id 由 `MatchIds` 发——`Snowflake` + `NodeTypes.MATCH` 的 worker 租约，时间在高位；活动开战预发的号同源。）
 - 房间期限 = 确认里的 `deadline_ms` = scene 冻结的正式期限 = 票据寿命（node-spec §10.4）。
 - `SETTLEMENT_TTL_SEC` 两端同值（同一常量）。
 
@@ -1476,7 +1484,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 - **写锁在途（`lockPending`）时确认到达**：match 要等全员备战成功才建房，正常不可达。代码上此时会升级为 FIGHTING，若随后写锁以出错完成，这个 FIGHTING 冻结会被按写锁失败摘掉（只是读代码的结论，没有用例）。
 - **已销账集合满 64**：先进先出淘汰最早的；被淘汰的那一局的销账早已落地，过期读不会迟到这么久。稳态 0~1 个。
 - **`lockTtlSec` 用有符号相减**，基线是无符号比较：期限 ≥ 2^63 的垃圾值两版结果不同；Java 的备战入口已按无符号把这类值拒在 1005（D36），正常的毫秒时间戳完全一致。
-- **活动结果通道停机不排空**：`SceneTransport.close` 只有界排空结算发件箱；停机瞬间打完的活动局可能既没落库也没发布。整条通道两版现在都不可达（Q11），6.4 / 4.6 接上真实消费方后再裁决。
+- **活动结果通道停机不排空**：`SceneTransport.close` 只有界排空结算发件箱；停机瞬间打完的活动局可能既没落库也没发布。整条通道两版现在都不可达（Q11），6.4 / 4.6 接上真实消费方后再裁决。（6.4 接上了发布的真实传输与开战入口，消费方仍没有；这条取舍留到 4.6。）
 - **永久性的结算延后**：`gold_gain > Long.MAX_VALUE`（只可能是坏数据）、钱包溢出、长期 GM 封禁会让这条记录一直 DEFERRED。按 Q18，进场恢复停在它上面、该玩家备战一律 1006，
   直到记录 7 天过期（每次新写会刷新整键 TTL，但备战被拒就不会有新写）。告警 `deferred_currency` + `recovery{retry}`，处置入口随 7.4 的 GM 工具（删掉该字段或解封）。基线同样会无限重投这类记录，只是不拦下一局。
 
@@ -1553,7 +1561,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 | D24 | 账本格式与校验 | 无序、不校验 | battle_id 升序写出；加载校验，损坏时该玩家 fail-closed | 脏比对；同资产通道账本 | 仅损坏时 | 否 |
 | D25 | battle 发件箱线程与停机 | 与房间同 loop；停机立即退出 | 独立单线程；停机有界等待在途落库与首投（≤ 3 s） | 缩小 B-2 | 否 | 否 |
 | D26 | 排空 / 级联 / 疏散改派遇到战斗中的玩家 | SceneDrain / 疏散照常退出并改派 | 跳过，下次推进再看（5.1 / 5.3 规格已写定；5.5 到期写回，Q17） | 交出与战斗互斥的不变量保持简单；写回后由下一个持有者按锁重建 | **是**：战斗中的玩家留在排空频道直到结算 | 否 |
-| D27 | dev gather 管理口 | 无 | dev / test 专用；`DEV_GATHER` 房间照常结算 | 6.4 之前验收 6.3 | prod 不可用 | 否 |
+| D27 | dev gather 管理口 | 无 | dev / test 专用；`DEV_GATHER` 房间照常结算。6.4 之后保留：真排队的端到端由 xm-match + robot `battle-smoke` 覆盖，`battle-settle` 与故障变体仍用它建房 | 6.4 之前验收 6.3；6.4 之后给需要精确控制 battle_id 与期限的场景用 | prod 不可用 | 否 |
 | D28 | 确认的投递目标 | 只发快照路由的 `(node, instance)`，实例不符就被丢弃 | 实例相符照旧；不符（备战节点已重启 / 下线）回落到定位器，Found 才发（§7.16） | 修 B17 的崩溃变体：否则锁按备战 TTL 过期，玩家会在这局还在打时被再次匹配、这局结算被丢弃 | **是**（仅故障路径）：备战节点崩溃后已重进的玩家能收到 144、回到这一局 | 可选 |
 | D29 | 已销账墓碑 | 没有：销账只删 pending 两键与锁。靠「先落库、后投递」的次序防孤儿记录；Redis 不可用时只投一次、不落库 | 销账（scene 的 `ACK`，以及 battle 的 `ACK_IF_SUPERSEDED` 删记录的分支）在同一段 Lua 里写 `xm:battle:{pid}:settled:<battle_id>`（TTL 600 s ≥ 发件箱条目最长寿命）；落库脚本见到它就不写、回 -1，发件箱按已销账处理（不登记、不投递，计 `already_settled`） | Java 的落库多半败在响应超时、命令其实已写出，且 Redisson 会原样重发：迟到 / 被重放的落库若落在销账之后，会把记录重新造出来，而账本此时已 forget → 下次进场恢复重复发奖（审计 RDS-6 / OBX-7）。基线不重发 EVAL，只剩「回复丢了而命令已执行」那一种来路，窗口更窄 | 否 | 可选 |
 | D30 | 重建复核（TOUCH）单调 | `ConfirmRebuiltFreeze` 只比锁值：匹配就覆写 ctx（连同阶段）并按入参续 TTL，不看 ctx 里已有的阶段（`pb.cpp:540-579`、`:179-182`）；同一连接上靠 FIFO 保序 | 锁上已是 F 而入参是 P → 什么都不改、返回 2；scene 按命中保留冻结（停在 PREPARING，等下一次补发确认升级） | Redisson 的重发 / 重排（以及别的节点的离线确认）会让登录重建的 `TOUCH(P)` 落到 `CONFIRM` 之后，把在打的局降回备战、把 TTL 缩回备战期（审计 RDS-7 / FRZ-5） | 否 | 可选（基线跨节点同样可能把 ctx 写回 PREPARING） |
@@ -1569,7 +1577,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 ## 12 开放问题（每条附推荐答案）
 
 > **落地结论（2026-10-06）**：属于 6.3 范围的各条都按推荐答案落地（Q9 的 gate 位置已做，Q12 的 dev gather 已做，Q22 只做了回落）；推荐「不做」的（Q10、Q13、Q24）没有做。
-> 归别的批次的没有动：Q17 由 5.5 定，Q21 随 6.4，Q18 / Q23 的 GM 处置入口随 7.4。涉及改 mmorpg 的「可选待做」都只登记、未动 mmorpg，需用户同意。
+> 归别的批次的没有动：Q17 由 5.5 定，Q21 随 6.4（**6.4 已采纳并落地**，2026-10-08：match 对备战结局不明的成员也发取消，match-spec M14），Q18 / Q23 的 GM 处置入口随 7.4。涉及改 mmorpg 的「可选待做」都只登记、未动 mmorpg，需用户同意。
 
 - **Q1 传输采纳 node-spec Q13？** 推荐**采纳**（D1）。备选 Redis pub/sub 同样至多一次，没有类型化应答。
 - **Q2 锁与 ctx 合成 Hash、键带 `{pid}`，并修订 node-spec §7.13 的预留键名？** 推荐**采纳**；6.2 规格同步改。
@@ -1595,6 +1603,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 - **Q19 已 FIGHTING 的补发确认是否零 Redis？** 推荐**只在续期未成功时再发**（D9）。
 - **Q20 `NodeRpcClients<S>` 泛化放哪批？** 推荐 **6.3**：battle 调 scene 先用到，6.4 的 match 直接复用。
 - **Q21 match 对备战 RPC 失败 / 超时的成员也发取消？** 推荐 **6.4 采纳**（取消幂等，battle_id 不符会忽略）；登记 mmorpg 待做（可选）。
+  **6.4 落地**：采纳。xm-match 把备战的传输失败、超时、`UNSPECIFIED` 等不该出现的状态、应答解析失败、错误码为 0 却没有快照，都按结局不明并补发取消；`HANDLED` 且 tip ≠ 0、`NOT_HERE`、`OVERLOADED` 不发（scene 保证零冻结痕迹）。
 - **Q22 确认改按位置记录解析，修 B17？** 推荐**只做回落**（D28，评审修订）：快照路由的实例相符时照旧（离线玩家靠它续锁），只在实例不符时改问定位器——只多一次 Redis 读，
   只在故障路径上发生，修掉 B17 里危险的那一支（备战节点崩溃 → 锁按备战 TTL 过期 → 同时进两局、丢结算）。全面改按位置解析仍不做：会失去离线确认对锁的续期。
   B17 里「原节点还在」那一支（新节点上的 PREPARING 到期被摘、不推 144、在途闸敞开到结算）照搬；要修可在 reaper 摘掉 `preparedHere = false` 的 PREPARING 时重读一次锁、看到 `F` 就升级，留作备选。
@@ -1744,6 +1753,8 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
   大厅 150 之前、SET 之后 kill battle → 期限 + 10 s 时 rescue 到账（D21）。
 - **prod 模式**：`gather` 回 403，场景只跑第 2 步。
 - **留给 6.4**：第 3–10 步的建房换成真排队（基线 `battle_smoke_scenario.go` / `features_battle_smoke.go`），dev gather 退出主流程。
+  **6.4 的做法（2026-10-08）**：真排队的端到端另起场景 `battle-smoke`（排队 → 凑单 → gather → 直连打完 → 结算 → 再排，match-spec §15.5），`battle-settle` 本身没有改——它与两个故障变体仍用 dev gather 建房
+  （要按时间递增自取 battle_id、控制备战期限）。所以 dev gather 退出的是「端到端唯一入口」这个角色，不是退出 `battle-settle`。
 - **基线对照**：基线 robot 对 144 是空处理（§1.6），Java 第 6 步是新增覆盖，建议同步给 mmorpg robot（PARITY「mmorpg 待做（可选）」）。
 
 **落地后的现状**（与上面步骤的出入；哪些步骤有切片证据见实现记录）：
@@ -2123,7 +2134,7 @@ xm-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`R
 
 **xm-discovery / xm-battle**
 
-- `BattleRedisConstantsTest` 里的 180 s / 96 s / 5000 ms 是字面值（不能反向依赖 xm-battle / 6.4）；`ConfirmWindowConstraintTest` 里 match 的 96 s 也是字面值，等 6.4 有了常量再换。
+- `BattleRedisConstantsTest` 里的 180 s / 96 s / 5000 ms 是字面值（不能反向依赖 xm-battle / 6.4）；`ConfirmWindowConstraintTest` 里 match 的 96 s 也是字面值，等 6.4 有了常量再换。（6.4 已换成 `MatchBudgets.MAX_MATCHED_TTL_SECONDS`。）
 - `DevGatherConfiguration` 自己那份 `NodeRpcClients<SceneBattleService>` 没有接清扫（只在 dev / test 下建连接）。
 - `SceneTransport.close` 不排空活动结果通道（§10.5）；`drainAndClose` 之后才回来的落库成功仍会首投一次、不登记。
 - `OutboxRedisIntegrationTest` 没有覆盖 `ACK_IF_SUPERSEDED` 回 0 / 1 的「保留」分支（真线程上难以确定地等到往返结束），这两格由假 Store 的用例和脚本真值表覆盖；
@@ -2136,7 +2147,8 @@ xm-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`R
 
 - `MessageRoutesTest` 里的 package 驼峰化是简化版（按 `_ . -` 分词、各词首字母大写），不是 `strcase.ToCamel` 的逐字节复刻；对现行契约的 package 名结果相同。
   6.4 把 `MatchService` 接进 `SERVICE_BACKENDS` 后，用例「Java版未接入的客户端服务路由到unsupported_且不是directOnly」会带说明失败，届时直接删掉它（缺省分支由另一条用例继续钉住）。
-- 整队开战预检的 4025 仍恒回 4027，属 6.4。
+  （6.4 已接入：那条用例按它自己的说明删掉，换成「现行契约里的客户端服务都有去向」；以后同步契约新增了 Java 还没接的客户端服务，这条用例会失败并提示怎么处理。`BattleClientPlayer` 的 12 个直连号仍被当场拒。）
+- 整队开战预检的 4025 仍恒回 4027，属 6.4。（6.4 已接：4025 由 xm-match 的成员预检给出，team-spec §5.5。）
 - `TeamDisplay` 原有的在线读 WARN 不带原始 cause；资料读或在线读若返回 null 会 NPE（生产实现都不会给 null，潜在问题，没有顺手改）。`TeamConfigurationTest` 的 Redis 是 Mockito 替身。
 - `TeamDisplayRedisIntegrationTest` 用 DB 12（生产缺省库），与其它新测试的 DB 15 / 14 不一致，是否对齐未定（§8）。
 

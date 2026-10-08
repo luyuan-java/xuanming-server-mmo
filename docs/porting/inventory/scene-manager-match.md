@@ -206,7 +206,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: sm-player-location（not_in_scene 判定）、battle:lock（C++ scene 写）、match-gather、会话身份（gate 注入 session metadata）
 - behavior: 身份取 session metadata（请求体 player_id 只给内部调用）；模式：PVE_SOLO 需 1 人且**不入队**直接建 matched 票并异步 gather；PVE_TEAM 人数 = PveTeamSizeByConfigId[config]（0 → kMatchTeamSizeNotConfigured，>5 截到 5）；1V1=2；5V5=10；其余 / 切磋 → kMatchModeNotOpen；battle:lock 存在 → kMatchInBattle（Redis 错误 fail-closed 回 kMatchInternal）；已有票 → kMatchAlreadyQueued 并回原 ticket（ready 残留票与「queued 但不在队列」的孤儿票先自愈）；无 location → kMatchNotInScene；party_member_ids 已废弃、忽略。Cancel：无票 / 票号不符 / 已 matched 以后一律静默成功（太迟不可撤）；queued 态先 CAS 删票再出队。Status 五态：无票 NOT_QUEUED、queued QUEUED、matched MATCHED、ready READY（ENTERING 保留不用），estimated_wait_seconds 估算。
 - internal: MatchRedis（集群，hash tag `{mq}`）：`match:{mq}:queue:{mode}:{config}` LIST + `match:{mq}:rank:…` ZSET（评分镜像）+ `match:{mq}:index` SET；票据 `match:ticket:{player}`（state/mode/config/queue_key/rating/zone/enqueued_at，queued TTL 6h，matched TTL = max(30s, 人数×6s+22.2s+3s+10s)，ready 60s）；所有状态迁移都是带 ticket id 的 Lua CAS；旧格式无 tag 的队列 key 迁移兜底。Java 需要：新后端（建议 xm-match 进程，Dubbo 路由组）+ gate `SERVICE_BACKENDS` 加 MatchService。
-- java: missing — `xm-gate` `MessageRoutes.SERVICE_BACKENDS` 只有 ClientPlayerLogin，157/148/153 落到 `BACKEND_UNSUPPORTED`，回 `MessageContent.error_message{kServiceUnavailable}`；无 match 模块。
+- java: done（2026-10-08，批次 6.4，规格 `docs/porting/match-spec.md` §2.1–§2.4、§8.1、§9.4）— 新进程 xm-match（Dubbo 20888、管理 18113、group `match`），gate 的 `MessageRoutes.SERVICE_BACKENDS` 把 `MatchService` 的 10 个号转给它。`com.game.match.queue.{QueueService,QueueHandlers}` + `com.game.match.ticket.{TicketStore,RedissonTicketStore,TicketScripts,DefaultTicketHealing}`：157 的 10 行判定顺序与 `parameters[0]` 逐字节照搬（自愈先于读位置）；148 六种结局一律静默成功、不回包；153 五态映射、`estimated_wait_seconds` 恒为 0。有意差异：身份只取会话（M3）；全部键一个 hash tag `{match}`、票据与队列的每次迁移一段 Lua 且可重放（M5 / M6）；时间取 Redis TIME（M7）；148 成功不回包（M4）；工作池过载回 in-band 16004 / 信封 1003（M29）；发号租约丢失时 157 回 16004（M28）。**勘误**（规格 §12.4 第 1、2、10 条）：`estimated_wait_seconds` 不是「估算」而是恒为 0；Cancel / Status 在 Redis 故障时客户端看到信封 1003；match 的 10 个号都不在 MessageLimiter 表里，按缺省每秒 3 条。robot `battle-smoke` 第 1–3 步。
 - size: L
 - robot: battle_smoke（JoinQueue PVE_SOLO）、robot AI / DevAutoPilot；Java robot 无
 - hazards: 历史上 match 错误码从 1 手写，与 common / login 段撞号（2026-09-02 修为 Tip 表 match_error 段），Java 必须直接引用同步来的 tip 枚举；PVE_TEAM 人数读 yaml 而非 DungeonTable.max_team_size（表里有 10 的历史行），两版取值须一致；Cancel 在 matched 之后返回空成功，客户端只能靠 GetQueueStatus 轮询（客户端每 3s 一次）/ NotifyBattleStart 收敛。
@@ -218,7 +218,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: match-queue、match-gather、match-rating（评分读取）
 - behavior: 每 500ms 遍历 `match:{mq}:index` 里的每个 (mode, config) 队列，抢到该队列的 SETNX 锁（10s，按持有者释放）才处理；从队列前 256 人里以锚点（队首起，最多尝试若干个）凑满 required 人：PVP（1V1 / 5V5）按评分容差 = 100 起、每 5s +100、上限 1000，锚点等满 90s 后容差 ∞；PVE 组队不看评分（FIFO）；弹出者逐个校验票据仍为本队列 queued 并 CAS 推进 matched，校验不过的残留项丢弃；成组后异步 RunGather（失败时幸存者按原序回队首、肇事者删票）。5V5 分队：评分排序后蛇形分 0/1；1V1 0/1；PVE 全员 0 队。空队列懒剔除；锚点饥饿限频告警。每轮顺带清理过期观战索引。
 - internal: 弹组是 Lua（快照 + 原子移除 list 与 rank 镜像成员）；queue_depth / wait_seconds / starved_anchor_wait_seconds 指标只由持锁实例上报；battle 节点池为空时暂停凑单并限频告警。Java 需要：定时任务 + Redisson 锁 + Lua（或单 leader）实现同语义。
-- java: missing — 无 match 模块。
+- java: done（2026-10-08，批次 6.4，规格 `docs/porting/match-spec.md` §2.5–§2.9、§9.5）— `com.game.match.matcher.{MatcherRunner,QueueMatcher,GroupPicker,Tolerance}`：单线程 `match-matcher` 每 500 ms 一轮、按队列加锁、256 前缀、32 个有效锚点、候选扫描全部成员（不是「锚点之后」，规格 §12.4 第 8 条）、容差曲线与成员顺序照搬；分队在 `com.game.match.gather.TeamAssignment`（5V5 重读评分后蛇形）。有意差异：弹组 `S_POP` 原子、全有全无（M5）；暂停条件另加「发号租约无效」「gather 许可已满」（M10）；无肇事者失败后 2 s 退避（M11）；凑单校验多一项位置检查，重连租约跳过、登出删票（M12）；凑不满的队列每 30 s 清一次没有有效票据的残项（M31，基线只剔空队列）；抢不到锁的实例把自己的 gauge 置 0（M8）。不移植旧格式队列搬迁与缺分补写（M9）。
 - size: L
 - robot: battle_smoke（PVE_SOLO 不经凑单）、battle_smoke_cross_zone（1V1 跨区凑单）
 - hazards: 锚点等待时间按各自入队时刻算，队首凑不到时不阻塞后面的人；5V5 required=10 时 matched 票 TTL 96s，公式与 gather 各跳超时同源，单独改任一超时都要重算；rating 读失败按默认 1500 继续（不阻塞凑单）。
@@ -230,7 +230,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: battle 节点发 BattleResultEvent（Kafka `match-results`，key=battle_id）、match-matcher
 - behavior: 只对 PVP 队列模式（1V1 / 5V5）计分：Elo K=32，队伍取平均分，平局 0.5，回合打满（RatingDrawRoundCap=30）按平局；PVE、切磋不计分；新号默认 1500，评分下限 0、保留两位小数。
 - internal: 消费组 match-rating；两层幂等：每局 `match:rating:applied:{battle_id}`（applying|ΔA → done，TTL 7d）+ 每人 hash `match:rating:{player}` 的 recent_battles（最近 8 局）——逐人**增量** Lua，写到一半失败由重投续写不重复；handler 失败有限次重试后跳过；Kafka 不可达时降级为 30s 后台重试，不阻塞排队。Java 需要：battle 结果事件来源（Java 尚无 battle）+ 消费方。
-- java: missing — 无 Kafka、无 battle、无评分存储。
+- java: done（2026-10-08，批次 6.4，规格 `docs/porting/match-spec.md` §5）— 规则照搬（只计 1V1 / 5V5、K = 32、队伍平均、平局 0.5、回合打满按平局、下限 0、两位小数、新号 1500）：`com.game.match.rating.{EloRules,RatingStore,RatingSqlErrors,JdbcRatingReader,RatingCleanup,BattleResultConsumer,BattleResultIngest}`。有意差异：存储从 Redis 两层幂等 Lua 改成 MySQL 两张表（`match_rating` / `match_rating_applied`，pbmysql 自建）、一局一笔事务，没有「部分入账」状态（M18）；结果走 Java 自有的 Kafka topic `xm-battle-result-g<代次>`（xm-battle 的 `KafkaBattleResultSink` 生产、xm-match 消费，组 `xm-match-rating`），可恢复的库故障暂停重试、不跳过（M19）；事件里重复的 player_id 去重入账。回合打满的阈值照搬基线的 30 + 覆盖表（缺省空），「按引擎回合上限推导」登记为 mmorpg 待做。dev 读评分口 `GET /admin/match/dev/rating/{pid}`（M32）。robot `battle-smoke` 第 8 步、`match-5v5`。
 - size: M
 - robot: none（基线有 rating_* 单测）
 - hazards: 评分写「读旧值 + 写绝对值」会在同一玩家两局被不同实例并发入账时丢一局，必须增量；平局 / 打满回合的判定要与 battle 侧 outcome 枚举一致。
@@ -242,7 +242,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: sm-player-location（定位每人所在 scene 节点）、C++ scene PrepareBattle（冻结 + 快照 + battle:lock）、battle 节点（C++）、match-spectate（观战记录先写）
 - behavior: battle_id = snowflake（与 challenge_id / team_id 同源）；随机挑一个 battle 节点；逐人先清退其观战，再读 location → 该 scene 节点 PrepareBattle(deadline=现在+300s, prepare_deadline=matched 票 TTL)；全员快照的配表指纹比对（warn / reject 模式）；crypto 随机种子；**先写观战记录**（有界重试写不进即不建房）再 CreateBattle；节点级准入拒绝（Unavailable + battle_not_allocatable）→ 不发 DestroyBattle，换一个没试过的节点重试一次；其它失败 → DestroyBattle（失败则放弃解冻、交期限收尾）→ 逐人 CancelBattlePrepare → 队列场景幸存者回队首 / 其它删票；成功 → 票据置 ready、发布到观战活跃索引。
 - internal: scene / battle 节点经 etcd list-watch 镜像（只认 grpcEndpoint，身份歧义拒用），gRPC 连接按 endpoint 缓存；各跳超时：PrepareBattle / RemoveObserver / CreateBattle 5s 级、记录写 ~6.1s；battle 建房成功后自己经 Kafka 推 177/143。Java 需要：scene 侧 PrepareBattle / CancelBattlePrepare（冻结、快照、战斗锁）、battle 进程、节点发现。
-- java: missing — Java scene 无战斗冻结 / 快照接口，无 battle 节点；141/142/145/155（PrepareBattle / CancelBattlePrepare 消息号）在 Java 无实现。
+- java: done（2026-10-08，批次 6.4，规格 `docs/porting/match-spec.md` §3、§9.6、§9.7；scene 侧的备战 / 取消随 6.3、battle 节点随 6.2）— `com.game.match.gather.{GatherPipeline,Compensation,VirtualThreadGatherLauncher,ScenePreparer,RedisBattleNodes,FingerprintCheck,TeamAssignment}`：五个入口汇入一条管线，步骤、补偿矩阵、各跳超时（3 / 5 / 3 / 3 s，落点写入 6.1 s）与 matched TTL（42 / 48 / 54 / 60 / 66 / 96 s，`MatchBudgets`）与基线逐值相同；建房之前先写落点记录；「不可分配」只看类型化的准入枚举、换节点只重试一次。有意差异：每次 gather 一个虚拟线程 + 在途上限 256（M13）；备战结局不明的人也发取消（M14）；battle 明确拒绝建房时不发 destroy（M15）；建房请求确定没有送达时按没建房补偿（M30）；选节点读 Redis 目录、只选 `accepting = true`（M26）；备战 / 取消经 Dubbo `SceneBattleService`、不占 141 / 142 / 145 / 155 这些消息号（M2）。开局前的观战清退是空钩子（`GatherHooks`，随 6.5）。**勘误**（规格 §12.4 第 3、4、9 条）：各跳超时是 3 / 3 / 5 s 不是「5 s 级」；基线对明确拒绝也发 Destroy、Destroy 失败就不解冻；指纹模式是 off / warn / enforce。robot `battle-smoke`、`match-5v5`、`team` 的 S7。
 - size: L
 - robot: battle_smoke、team_smoke S7/S8、battle_smoke_cross_zone
 - hazards: 补偿矩阵复杂：CreateBattle 超时 ≠ 失败（房间可能已建），所以必须先 DestroyBattle 成功才解冻；scene 侧 PREPARING 作废期限在 PrepareBattle 时就下发、事后改不了，预算必须一次算够（含 D82 换节点重试）；v1 battle 节点是随机挑选，无负载感知。
@@ -254,7 +254,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: sm-gate-command-channel（推弹窗）、match-gather（mode=PVP_CHALLENGE，不带票据）、会话目录（目标在线判定）
 - behavior: 发起：挑战自己 → kMatchChallengeSelf；双方 battle:lock 咨询性检查（发起者在战 → SelfBusy，目标在战 → TargetBusy）；目标不 ONLINE → TargetOffline；同一目标同时只挂一个待应答挑战（`challenge:target:{pid}` SETNX）→ Pending；challenge_id = snowflake，记录 TTL 60s；推 156{challenge_id, challenger_id, challenger_name, battle_config_id, expires_at_ms} 给目标。应答：记录不存在 / 过期 → Expired；应答者不是目标 → NotTarget；记录一次性消费；拒绝 → 推 154{accepted=false} 给发起者；接受 → 双方 battle:lock 权威复查（发起者已在战 → Expired「发起者已进入其它战斗」，应答者在战 → SelfBusy）→ 推双方 154{accepted=true} → 异步 gather；gather 失败再推一次 accepted=false 兜底。
 - internal: MatchRedis `challenge:{id}` hash + `challenge:target:{pid}`（分两条单 key DEL，集群不同 slot）；切磋不入队不计分。
-- java: missing — 152/151 在 Java gate 回 kServiceUnavailable。
+- java: done（2026-10-08，批次 6.4，规格 `docs/porting/match-spec.md` §6）— `com.game.match.challenge.{ChallengeService,ChallengeHandlers,RedissonChallengeStore,ChallengeScripts,MatchPushExecutor}`：152 的 11 行与 151 的 10 行判定顺序、tip 码与 `parameters[0]` 逐字照搬；156 / 154 经 `PlayerPushes` 推（M24），`challenger_name` 取会话里的账号名（同基线）；接受后以 `mode = PVP_CHALLENGE`、不带票据进开局管线，gather 失败再给双方各推一次 154 false。有意差异：记录 / 占坑 / 消费墓碑在一个 hash tag 下，发起与消费各一段原子 Lua，并发两条接受只有一条开局（M17，修基线「双击接受开两次 gather」）；过期时刻与过期判定取 Redis TIME（M7）；发号租约丢失时 152 回 16004（M28）。156 / 154 作为上行是空操作、gate 不回包。robot `battle-smoke` 第 9 步（基线没有切磋的 robot 覆盖）。
 - size: M
 - robot: none（基线 robot 未覆盖切磋）
 - hazards: 发起时只做咨询性检查、不冻结任何人；记录与目标占坑删除非原子，残留只影响 60s 内对同一目标再次发起；156/154 是「借 service 声明拿消息号」的占位 RPC，客户端若真发上来服务端是空操作。
@@ -266,7 +266,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: match-gather（开局时写观战记录）、battle 节点、sm-gate-command-channel、会话目录
 - behavior: 排队 / 战斗中 / 观战三态互斥：持票 → SpectateWhileQueued，battle:lock → SpectateWhileInBattle；已在观战不拒绝，服务端先清退旧场再接新场；观众不在线 → SpectateOffline；battle_id=0 从活跃索引随机挑，房间不存在时懒剔除并换一场重试一次，挑不到 → NoWatchableBattle；指定场不存在 / 已结束 / battle 拒绝（观众满、观众是参战者、签不出票）→ BattleNotWatchable；成功回实际 battle_id，落点与首帧由 battle 推。列表按 created_at 取最近若干场摘要{battle_id, mode, battle_config_id, player_names, created_at_ms}。进入 gather 的玩家会被自动清退观战（SpectateEnd reason=REMOVED）。
 - internal: `spectate:battle:{id}`（SpectateBattleRecord pb，TTL=战斗最长期限+60s）、`spectate:battles:active` ZSET、`spectate:watching:{pid}`（SETNX 抢占后才 AddObserver，失败回滚；成功后 double-check 票据 / 战斗锁防 TOCTOU）；记录在建房前预写，建房窗口内「未公开」只回不存在、不剔除。
-- java: missing。
+- java: missing（批次 6.5，规格 `docs/porting/spectate-spec.md`）— 房间侧的观战随 6.2 已有（见 combat.md 的 battle-spectate）。批次 6.4（2026-10-08）只备好了 6.5 要用的东西：163 / 164 已路由到 xm-match，暂回 in-band 1006 / 空列表（`com.game.match.dispatch.InlineHandlers`，match-spec M22）；落点记录 `xm:{match}:battle:<id>`（`BattlePlacement`，带实例号、rpc 地址、角色名、Redis 时间的 `created_at_ms`）同时充当观战记录；开局管线的钩子 `GatherHooks.beforePrepare / onStarted`（现为空实现）；按落点直拨并判死的 `placement.PlacementDialer`；票据只读口 `ticket.TicketReader`。观战标记、可观战索引、163 / 164 的真语义、开局前清退观众都没有做。
 - size: L
 - robot: battle_smoke（B 随机观战并断言回合数 ≥ 1）
 - hazards: 战斗收尾时 battle 不回写 Redis，观战标记只能靠 TTL / 懒清退，一律拒绝「已在观战」会把玩家卡死整个 TTL；重看同一场不能发 RemoveObserver（会给仍活着的旧会话推假 SpectateEnd）；ZSET 成员无 TTL，靠三条路清理。
@@ -278,7 +278,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: match-spectate（`spectate:battle:{id}` 是定位 battle 节点的唯一来源）、battle 节点 IssueBattleTicket
 - behavior: 客户端丢票（冷启动 / 换设备 / 重连）时凭 battle_id 补签：记录不存在 → kInvalidParameter；battle 节点不可定位 / RPC 失败 → kServiceUnavailable；battle 本地核对名单（参战者或观众）后自签返回 assignment{host, port, token_payload, token_signature, expire_at_ms, role}。
 - internal: 票据 = hex(HMAC-SHA256(battle_token_secret, BattleTicketPayload))，与 gate 令牌密钥分域，寿命 = 房间作废期限。
-- java: missing。
+- java: done（2026-10-08，批次 6.4，规格 `docs/porting/match-spec.md` §4；battle 侧的签发随 6.2）— `com.game.match.reissue.{BattleTicketReissue,ReissueHandler}` + `com.game.match.placement.{PlacementStore,RedissonPlacementStore,PlacementDialer,DirectPlacementDialer,PlacementClients,RpcFailures,ConnectProbe}`：179 的判定顺序与 `parameters[0]` 逐字照搬，只认会话身份，battle 的裁决原样透传。有意差异（M16，客户端可见）：落点记录是 Java 自有的 `BattlePlacement`（多存 battle 的实例号与 rpc 地址，单调写），补签按记录里的地址**直拨**（battle 丢了租约仍活着时签得出票，基线回 1003）；直拨的请求确定没有送达 + 目录里同号节点已换实例 + 原地址的建连探测明确连不上，三条都成立才回 1005，超时一律 1003。**勘误**（规格 §12.4 第 5 条）：基线 robot 只注册了 179 的应答 handler，没有任何场景发送 179，「battle_smoke（直连重建路径）」不成立；Java robot `battle-smoke` 第 5–7 步覆盖（补签的票与 177 逐字节相同、非成员 1005、不存在的局 1005、旧局 1005）。
 - size: S
 - robot: battle_smoke（直连重建路径）
 - hazards: 观战记录写失败时 gather 拒绝建房，正是为了保证补签总能定位到房间。
@@ -290,7 +290,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: match-gather、帮会同道历练（guild 区域）
 - behavior: 校验：battle_config_id≠0、1..5 人、非 0 不重复、activity_context 字段齐全且 initiator == members[0]，否则 INVALID_ARGUMENT；逐人只读预检：无在线会话 → MEMBER_OFFLINE、battle:lock → MEMBER_IN_BATTLE、无 location / 在途票据未自愈 / 建票失败 → MEMBER_NOT_READY（offender_player_id 为第一个不满足者）；Redis / 发号故障 → INTERNAL。成功同步发 battle_id、为全员建 matched 票后异步 gather（activity_context 深拷贝进 CreateBattleRequest）；gather 失败全员删票、不回队列，该 battle_id 不产生结果事件，由 guild 巡检判 EXPIRED。
 - internal: 业务拒绝走响应 reject 枚举，gRPC 错误只用于 PermissionDenied 与传输故障；隔离靠「不标客户端协议 + 拦截器拒绝带会话 metadata + 网络策略」。
-- java: missing — 无 guild、无 match。
+- java: partial（2026-10-08，批次 6.4 做了 match 侧，规格 `docs/porting/match-spec.md` §7.1–§7.2）— 提供方 `com.game.api.MatchInternalService`（xm-api，group `match`）由 xm-match 的 `com.game.match.activity.{MatchInternalServiceImpl,ActivityBattleService,ActivityRequestValidator}` 实现：参数校验、逐成员预检、预发 battle_id、原子建全员 matched 票（`team.GroupTickets`）、截止检查、异步 gather、同步回 `battle_id`，业务拒绝都在 `reject` 里。有意差异：内部接口类型化、gate 够不到，靠 Dubbo 调用方 MAC 隔离，不需要 PermissionDenied 分支（M2）；调用方截止经附件 `xm-budget-ms` 传相对预算；建票一段 Lua 原子完成（M25）；「有位置」要求位置在线且节点号 ≠ 0（M27）。另有 dev / test 专用的管理口 `POST /admin/match/dev/activity-battle`（M32，robot `match-activity` 用，建的是正常房间）。**仍未做**：真正的调用方 xm-guild 与结果消费 / 销账随 4.6（被 GuildActivity 表卡住）——所以现在活动局的结果事件发进 Kafka 之后没有人销账，battle 重发到上限后摘除。4.6 的两条义务：消费后必须销账（含不认识的 (guild, activity)）；`startActivityBattle` 传输失败时「战斗可能已开始」的补登记。
 - size: M
 - robot: guild_smoke（基线，帮会试炼部分）
 - hazards: battle_id 在 gather 之前就交给 guild 登记，gather 失败时没有任何结果事件，guild 必须有过期兜底；内部接口靠部署层隔离，v1 未做调用方签名（契约偏差 13）。
@@ -338,7 +338,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: team-roster、match-gather、match-queue（票据域）、sm-player-location
 - behavior: 只有队长可发；副本未配组队人数 → DungeonNotOpen；人数超上限 → SizeExceeded；roster = 队长在前 + join_seq 序；逐成员预检：会话不在线 → MemberOffline、battle:lock → MemberInBattle、无 location / 有在途票据 → MemberNotReady；通过后提交开战锁（token + 过期时刻 + 名单，版本钉死；冲突整轮重来，有轮数与预算上限），锁期间名单冻结；逐人建 matched 票（带 team_id，失败全部回滚并推 MATCH_FAILED）；后台 gather，结束后释放锁并推 MATCH_ENDED（成功，通常早于战斗结束）或 MATCH_FAILED（带 tip）。v1 不补位、不排队，即时开战。
 - internal: 锁时长覆盖 matched 票 TTL + 补偿窗口（5 人约 101s）；锁提交「报错 / 未提交」都可能已落锁（回复丢失、go-redis 重发），后台按 token 清锁 / 同步确认。
-- java: missing。
+- java: done（2026-10-08，批次 6.4，规格 `docs/porting/match-spec.md` §7.3–§7.6、`docs/porting/team-spec.md` §5.5）— xm-team 继续持有开战锁与编排（`com.game.team.service.TeamService.startTeamMatch` / `finishMatch`、`TeamStore.commitMatchLock` / `endMatch`），票据域经 xm-match 的类型化接口 `com.game.api.MatchTeamService`（四个方法：`checkTeamMatch` / `createTeamTickets` / `releaseTeamTickets` / `runTeamGather`；xm-match 侧 `com.game.match.team.MatchTeamServiceImpl` + `precheck.DefaultMemberPrecheck`，xm-team 侧 `com.game.team.match.{TeamBattlePort,MatchTeamBattle}`）。判定顺序、tip（4018 / 4023–4030）与 `parameters[0]`、MATCH_STARTED / MATCH_ENDED / MATCH_FAILED 的收件人与内容照搬。有意差异（M1 / M20）：match 与 team 分进程；预检合成一次调用且整个在 xm-match 做（顺序不变）；票号由 xm-team 每人生成；gather 结果靠长挂的异步 RPC 回来；只在 xm-match 崩溃 / 分区 / 调不通 / 过载 / 发号租约无效时，211 回 4030（基线没有这个故障面），可能多一条 MATCH_FAILED。**勘误**（规格 §12.4 第 6、7 条）：MATCH_FAILED 带 tip 只对建票失败成立，gather 失败不带；预检里「位置节点号为空 → 4026」与「建票时 Redis 出错也回 4026[该成员]」inventory 漏写。robot `team` 场景的开战段（拒绝码、S7、S8；X2 的跨区部分只在配了第二个 zone 时跑）。
 - size: M
 - robot: team_smoke（S7、S8、X2）
 - hazards: 进程退出时不等异步 EndMatch，开战锁靠自然过期；发起人不收 MATCH_STARTED 推送（以回包为准）。

@@ -22,7 +22,7 @@ public final class BattleResultTopics {
     public static final int PARTITIONS = 3;
     /** 代次的环境变量名（缺省 1）：xm-battle 与 xm-match 读同一个，本机切片由 start-slice.sh 导出。 */
     public static final String GENERATION_ENV = "XM_BATTLE_RESULT_TOPIC_GENERATION";
-    /** 保留 7 天（逐 topic 显式声明，不继承 broker 默认；与评分入账标记的保留期一致）。 */
+    /** 保留 7 天（逐 topic 显式声明，不继承 broker 默认）。评分入账标记要比它长：xm-match 的 RatingCleanup 保留 30 天（保留期 + 滚段周期 + 余量），改这里的保留期或声明 segment.ms 时要重算那边。 */
     static final Map<String, String> RETENTION = Map.of(
             "retention.ms", "604800000",
             "retention.bytes", "-1",

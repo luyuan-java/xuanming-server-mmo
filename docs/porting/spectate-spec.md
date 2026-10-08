@@ -7,6 +7,8 @@
 > **`tools/` 不在**（双播放器验收脚本 `tools/run_crosszone_pair.ps1` 不可读，只读了 `DevAutoPilot.cs`）。
 > **Java**：HEAD `9fde7d8`（5.2 `6b28e9d`、7.1a / 7.2a `37dd8dc` 已提交；本稿随 `9fde7d8` 入库）加工作区，行号按当前工作区。6.2 的 xm-battle 在工作区（未提交），**房间侧观战已实现**（`BRS.java:320-424`，`bn-spec` Q1 已采纳）；
 > 6.3 / 6.4 / 5.4 只有规格，本稿以规格为准；xm-match 还没有代码。
+> **2026-10-08 补记**：6.3 与 6.4 已落地（xm-match 已有代码）。本稿对 6.4 的三条要求——落点的 `created_at_ms` 取 Redis `TIME`、`player_names` 用快照里的角色名按成员顺序、抽出 `placement.PlacementDialer`——
+> 以及票据的只读口，6.4 都已按要求做了；现状逐条写在 §4.11「6.4 xm-match」一行之后。实现时与本稿设想不同的几处（判死多一条证据、直拨的客户端缓存、类的落点）也记在那里，6.5 动工时以 match-spec 的正文与代码为准。
 > 本稿由三份分区稿合并（match 侧观战盘点、跨区 1V1 盘点、Java 落地映射），分歧都回到代码核对后在 §0.4 裁决。只读编写，只改本文件。
 
 **路径缩写（基线）**
@@ -589,8 +591,30 @@ S_W_LIST → `RBatch` 取这批落点的 `pb` → 逐条按 §3.3 判定（剔�
 | xm-discovery | `RedisKeys.matchWatching(pid)`、`matchWatchable()`；`BattleRoutings` |
 | 5.4 切片 | `zt-spec` §5.13 :834 的「共用」行加 xm-match（battle 已在该行）；`start-slice.sh` / `stop-slice.sh` 同步 |
 | xm-robot | `battle-smoke` 观战段（§10.7）；新场景 `battle-cross-zone`（§10.8）；`--visit-zone` 帮助文本 |
-| `arch` | §4.21「匹配」加「观战」小节（键、脚本、钩子、线程）；§5 线程模型加「163 虚拟线程 + 在途上限」；§11 加 §6 的指标 |
+| `arch` | §4.24「匹配」（6.4 落地时的实际节号；本稿原写 §4.21）加「观战」小节（键、脚本、钩子、线程）；§5 线程模型加「163 虚拟线程 + 在途上限」；§11 加 §6 的指标 |
 | `PARITY.md` / `roadmap.md` / 盘点 | 见 §10.11 |
+
+**「6.4 xm-match」一行里 6.4 已做的三条要求——现状（2026-10-08，逐条回到 xm-match 的代码核对过）**
+
+| 要求 | 6.4 的落地 | 6.5 接手时注意 |
+|---|---|---|
+| **`created_at_ms` 取 Redis `TIME`** | 已做。`gather.GatherPipeline` 在全员备战之后、写落点之前**再读一次** Redis 时间（`RedisClock.nowMs`）作 `created_at_ms`，同时填进 `CreateBattleRequest` 与落点记录；`deadline_ms` 用的是备战之前那一次读数。这一次读失败与种子生成失败同口径 → `internal`，全员取消 | 取值时刻同 `gather.go:286`，W13 的窗口判定可以直接用 |
+| **`player_names` = 各成员快照里的角色名，按成员顺序** | 已做。落点记录的 `player_names` 逐个取 `BattlePlayerSnapshot.player_name`，顺序 = gather 的成员顺序（凑单：锚点在前 + 选中顺序；切磋：[发起者, 应战者]；整队：队长在前） | `summaryOf(BattlePlacement)` 原样映射即可 |
+| **抽出 `placement.PlacementDialer`** | 已做，而且从一开始就在 `placement` 包（179 的类是 `reissue.BattleTicketReissue`，不在本稿写的 `ticket` 包）。接口 `PlacementDialer.dial(placement, timeout, call)`，结局三选一：`Replied(reply)` / `RoomGone` / `Unavailable(kind, detail)`，`kind ∈ {NOT_DELIVERED, TIMEOUT, OTHER}`；生产实现 `DirectPlacementDialer`，永不抛、不重试 | 本稿 §4.8 的 `ObserverDialer` 四种结局可以这样对：`Dead` = `RoomGone`、`NotDelivered` = `Unavailable(NOT_DELIVERED)`、`Unknown` = `Unavailable(TIMEOUT / OTHER)` |
+
+与本稿设想不同、6.5 要按实现来的几处（正文在 match-spec §4.3、§9.7.1）：
+
+- **判死比本稿写的多一条证据**：本稿多处写「建连失败 + 同号换实例才判死」。实现里「建连失败」是「请求确定没有送达」（`RpcFailures` 按 Dubbo 客户端侧的异常特征判），它比「原地址连不上」宽，
+  所以判 `RoomGone` 前对原地址再做一次 TCP 建连探测（`ConnectProbe`，上限 300 ms 且不超出这次直拨余下的预算），明确被拒绝 / 不可达才算；探测超时、连得上、没有实例号可比，都是 `Unavailable(NOT_DELIVERED)`。
+- **直拨用单独的客户端缓存**：`placement.PlacementClients`（按地址缓存、实例段恒为空串、空闲 360 s 清扫），不是本稿 §0.1 写的与 gather 共用的 `NodeRpcClients<BattleNodeService>`。观众 RPC 经 `PlacementDialer` 发就自动用它，不要自己从容器里取 `NodeCalls<BattleNodeService>`（那一份只给 gather 的建房 / 销毁）。
+- **`BattleNodes.lookup`**（判死时读目录条目）没有截止参数，实现里固定等 1 s；观众 RPC 若要按请求预算收短，再给接口加参数。
+- **票据的只读口**是 `ticket.TicketReader`（`read` / `readAll` / `status`；读失败或 HASH 损坏一律抛依赖异常，不折成「没有票」），16014 的判定用它。
+- **钩子**：`gather.GatherHooks`（`beforePrepare(members)` / `onStarted(placement)`）现在由 `MatchConfiguration.gatherHooks()` 给空实现，**不带条件装配**——6.5 提供 `SpectateGatherHooks` bean 时把那个 bean 方法删掉。
+  调用位置与本稿一致：`beforePrepare` 在选好节点、定好期限之后、分队与任何备战之前；`onStarted` 在全员票据置 ready、同值补写落点之后。钩子抛异常只记日志、不影响开局；失败路径不调 `onStarted`。
+- **163 / 164 的临时处理器**在 `dispatch.InlineHandlers`（inline：在 Dubbo 线程上当场回）。换成真处理器时删掉那两个 bean；非 inline 的处理器经 `MatchMethodHandler` 的 `handle / onOverload` 接进派发器，
+  163 要走虚拟线程的话需要扩这个接口或另配执行器。派发器在十个方法里有任何一个没有处理器时拒启。
+- **停机序列**实际是：停凑单 → 撤 Dubbo 导出 → 排空 `match-worker` → 等在途 gather（至多 10 s）→ 停评分消费 → 还租约。本稿要加的「有界等待在途 163 → 停清扫器」接在「排空 `match-worker`」之后。
+- **发号租约**：本稿 §7.2 写的「163 / 164 不发号，照常服务」成立——租约丢失时派发层只拒 157 与 152。
 
 **`m-spec` §8.1 的 163 / 164 两行（:837-838）改为**（列与该表相同；表下那条「156 / 154 / 163 / 164 不涉及 I/O，直接在 Dubbo 线程上回」（:841）改为只剩 156 / 154）：
 
