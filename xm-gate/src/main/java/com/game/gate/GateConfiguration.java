@@ -11,9 +11,12 @@ import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.gate.admin.GmShutdownController;
 import com.game.gate.metrics.GateMetrics;
+import com.game.gate.session.MessageRoutes;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.time.Duration;
 import java.util.concurrent.locks.LockSupport;
 import org.apache.dubbo.config.annotation.DubboReference;
@@ -133,6 +136,53 @@ public class GateConfiguration {
         return new ReferenceBean<>();
     }
 
+    /**
+     * 匹配后端（Dubbo group = proto 域 match，xm-match 提供；match-spec §9.2）；直连 {@code xm.dubbo.match-url}，nacos profile 置空走注册中心。
+     * {@code MatchService} 的 10 个号（排队 157 / 148 / 153、切磋 152 / 151 与推送占位 156 / 154、观战 163 / 164、补签 179）都走它。
+     * 排队与切磋是写路径，{@code handle} 必须不重试：超时后重投的 157 会撞上第一次已经建好的票、回 16001 而不是受理；Dubbo 内部重投还会打乱
+     * xm-match 的 4.5 s 请求预算（它排在 gate 的 5 s 调用超时之内，{@code dubbo.consumer.timeout}）。xm-match 不在或调用失败时客户端收到带
+     * 请求 id 的信封 1003（§8.1）。
+     *
+     * <p><b>后端要先于 gate 启动</b>（本类全部引用同理；{@code BackendReconnectTest} 用真 Triple 钉住）：引用是 {@code check = false} 的直连，
+     * gate 启动时后端不在只记日志、照常起来，之后的调用立刻失败（信封 1003）；但 Dubbo 3.3.6 的 Triple 客户端首次建连没连上时，下一次重连
+     * 排在 60 s 之后（断线后 1 s 重连一次，那一次落空也是再等 60 s；机制见 xm-api {@code SceneAssetOpClients#RECONNECT_INTERVAL}），晚起来的
+     * 后端要等到那一刻才通。所以 {@code tools/local/start-slice.sh} 把 xm-match 排在 xm-team 与 gate 之前（没有照规格草案放在 xm-battle 之后）。
+     * 运行中重启某个后端不用重启 gate——同一个引用到点自己连上，只是后端回来之后最长还要等约一个重连周期。这里的引用没有像
+     * {@code NodeRpcClients} 那样把重连间隔压到 1 s：那是全部后端一起的运维取舍，不随接入 xm-match 单独改。
+     */
+    @Bean
+    @DubboReference(group = DubboGroups.MATCH, check = false, url = "${xm.dubbo.match-url:}",
+            methods = @Method(name = "handle", retries = 0))
+    public ReferenceBean<ClientMessageService> matchClientMessageService() {
+        return new ReferenceBean<>();
+    }
+
+    /**
+     * login 以外的客户端消息后端表（消息域 → Dubbo 引用），交给 {@link GateNode}。它必须与 {@link MessageRoutes#SERVICE_BACKENDS} 对得上：
+     * 路由表把某个服务指到一个域、这里却没有那个域的引用时，dispatcher 会把它当成「未接入」推 23 {1003}——接入新后端时两处漏改一处
+     * 就是这个结果，而且进程照常起来、只有发那个服务的号才看得出。所以装配时当场核对，对不上拒绝启动。
+     *
+     * @throws IllegalStateException 路由表里有后端域没有引用，或这里多出了路由表不认识的域
+     */
+    static Map<String, ClientMessageService> backends(ClientMessageService friend, ClientMessageService chat,
+                                                      ClientMessageService team, ClientMessageService guild,
+                                                      ClientMessageService trade, ClientMessageService match) {
+        Map<String, ClientMessageService> backends = Map.of(
+                DubboGroups.FRIEND, friend,
+                DubboGroups.CHAT, chat,
+                DubboGroups.TEAM, team,
+                DubboGroups.GUILD, guild,
+                DubboGroups.TRADE, trade,
+                DubboGroups.MATCH, match);
+        Set<String> routed = new TreeSet<>(MessageRoutes.SERVICE_BACKENDS.values());
+        routed.remove(DubboGroups.LOGIN); // login 单独传给 GateNode：它的调用占会话唯一的在途位、还带会话指令
+        if (!routed.equals(backends.keySet())) {
+            throw new IllegalStateException("客户端消息后端表与路由表对不上：MessageRoutes.SERVICE_BACKENDS 指向的域（login 除外）= " + routed
+                    + "，GateConfiguration 装配的后端 = " + new TreeSet<>(backends.keySet()) + "；接入新后端要两处一起改");
+        }
+        return backends;
+    }
+
     /** gate 指标，注册到 actuator 提供的注册表（Prometheus 导出，见 architecture.md §11）。 */
     @Bean
     public GateMetrics gateMetrics(MeterRegistry meterRegistry) {
@@ -151,6 +201,7 @@ public class GateConfiguration {
                              @Qualifier("teamClientMessageService") ClientMessageService teamClientMessageService,
                              @Qualifier("guildClientMessageService") ClientMessageService guildClientMessageService,
                              @Qualifier("tradeClientMessageService") ClientMessageService tradeClientMessageService,
+                             @Qualifier("matchClientMessageService") ClientMessageService matchClientMessageService,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${xm.zone-id:1}") int zoneId,
                              @Value("${xm.advertise-host:127.0.0.1}") String advertiseHost,
                              @Value("${xm.table-dir:config-data/tables}") String tableDir,
@@ -160,12 +211,9 @@ public class GateConfiguration {
                     .warn("xm.run-mode（XM_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", runMode);
         }
         return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
-                Map.of(DubboGroups.FRIEND, friendClientMessageService,
-                        DubboGroups.CHAT, chatClientMessageService,
-                        DubboGroups.TEAM, teamClientMessageService,
-                        DubboGroups.GUILD, guildClientMessageService,
-                        DubboGroups.TRADE, tradeClientMessageService), properties, zoneId, advertiseHost, Path.of(tableDir),
-                gateMetrics, RunMode.parse(runMode));
+                backends(friendClientMessageService, chatClientMessageService, teamClientMessageService,
+                        guildClientMessageService, tradeClientMessageService, matchClientMessageService),
+                properties, zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode));
     }
 
     /** GM 签名停机的校验（密钥只从环境变量 XM_GM_ADMIN_SECRET 读，没配一律拒）。 */

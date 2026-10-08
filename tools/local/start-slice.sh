@@ -3,17 +3,29 @@
 #   export XM_MYSQL_PASSWORD=... XM_GATE_TOKEN_SECRET=... XM_LOGIN_DEV_PASSWORD=... XM_NODE_LINK_SECRET=... XM_DUBBO_SECRET=...
 #   tools/local/start-slice.sh
 # XM_NODE_LINK_SECRET 是 gate → scene 节点链路握手密钥，xm-gate 与 xm-scene 读同一个值（本脚本把同一环境传给两者）。
-# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-team / xm-guild / xm-trade / xm-scene / xm-gate / xm-gateway / xm-battle
+# XM_DUBBO_SECRET 是 Dubbo 调用方鉴权密钥，xm-scene-manager / xm-login / xm-friend / xm-chat / xm-match / xm-team / xm-guild / xm-trade / xm-scene / xm-gate / xm-gateway / xm-battle
 # 读同一个值（xm-scene 自 4.5 起是资产通道 SceneAssetOpService 的 Dubbo 提供方，缺密钥即暴露失败）。
 # （xm-battle 是控制面 BattleNodeService 的 Dubbo 提供方，缺密钥即拒启。xm-data 在 XM_DATA_OPS_ENABLED=true 时是 GuildInternalService
-# 的调用方——回档的帮会检查——同样读这个值，缺了拒启。）
+# 的调用方——回档的帮会检查——同样读这个值，缺了拒启。xm-match（批次 6.4）既是提供方——客户端消息 MatchService、整队开战 MatchTeamService、
+# 帮会活动开战 MatchInternalService——又是 xm-scene 战斗通道与 xm-battle 控制面的调用方，缺密钥即拒启。）
 # XM_ASSET_OP_SECRET_GUILD 是帮会资产指令的请求体签名密钥（xm-guild 签、xm-scene 验，去首尾空白后至少 32 字节）；
 # 没设时本脚本生成本机随机值写进 run/xm-asset-op-secret-guild，并把同一个值传给两者。
 # XM_BATTLE_TOKEN_SECRET 是战斗直连票据的签名密钥（只有 xm-battle 读；去首尾空白后至少 32 字节、不得与 XM_GATE_TOKEN_SECRET 相同）；
 # 没设时本脚本生成本机随机值写进 run/xm-battle-token-secret。xm-battle 的客户端直连面在 12000、控制面在 21200、管理端口 18112。
-# 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379、Kafka 127.0.0.1:9092（资产流水，xm-scene 生产、xm-data 消费）已就绪；已执行 ./mvnw -DskipTests install；
+# xm-match（批次 6.4：排队、凑单、开局、评分、切磋、补签）的 Dubbo 在 20888（XM_MATCH_RPC_PORT）、管理端口 18113（actuator 与 dev 管理口
+# /admin/match/dev/*，令牌同 XM_ADMIN_TOKEN）。它的评分表在 MySQL xm_java（启动时自建），所以也读 XM_MYSQL_PASSWORD。
+# XM_BATTLE_RESULT_TOPIC_GENERATION 是对局结果 topic xm-battle-result-g<代次> 的代次（xm-battle 生产、xm-match 消费，两边必须一致），缺省 1；
+# 本脚本导出后两个进程继承同一个值。topic 的分区数与预期不符时（进程会明说）换一个代次重起切片。
+# 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379、Kafka 127.0.0.1:9092（资产流水：xm-scene 生产、xm-data 消费；对局结果：xm-battle 生产、
+# xm-match 消费——按 match-spec §5.4 / §9.8，Kafka 不可达不拦这两个进程启动，只是评分不更新）已就绪；已执行 ./mvnw -DskipTests install；
 # 存量库已按 docs/design/db-migrations.md 迁移到最新结构（M2 起 player 表多了 owner_released / owner_lease_until）。
 # 进程按依赖顺序启动，每个都等端口就绪再起下一个；日志在 run/logs/，PID 在 run/pids/。
+#
+# 启动次序的一条硬约束：local profile 下静态直连（各进程 application.yaml 的 xm.dubbo.*-url）的 Dubbo 提供方必须先于它的调用方启动。
+# Dubbo 3.3.6 的 Triple 客户端建引用时没连上，下一次重连排在 60 s 之后（xm-gate 的 BackendReconnectTest 钉住）：调用方先起的话，
+# 提供方就绪后的头一分钟里调用一律失败（客户端看到信封 1003）。所以 xm-match 排在 xm-team（整队开战调它）与 xm-gate（MatchService 的
+# 10 个号转给它）之前，没有照 match-spec §15.4 的草案放在 xm-battle 之后。它自己调 xm-scene / xm-battle 走节点目录、用到时才建引用，
+# 不要求它们先起：xm-battle 就绪之前凑单暂停、队列原样保留。停止次序见 stop-slice.sh（xm-match 最先停）。
 #
 # 场景节点数 XM_SCENE_NODES（批次 5.2 跨节点换图，scene-handoff-spec §10.7）：缺省 1（与以前相同）；=2 时再起第二个 xm-scene 实例
 # （日志 / PID 名 xm-scene-2，链路 21001、资产通道 21101、管理端口 18114；节点号由 Redis 租约自动分到不同的号）。
@@ -29,7 +41,8 @@ cd "$(dirname "$0")/../.."
 : "${XM_NODE_LINK_SECRET:?需要环境变量 XM_NODE_LINK_SECRET（gate → scene 链路密钥）}"
 : "${XM_DUBBO_SECRET:?需要环境变量 XM_DUBBO_SECRET（Dubbo 调用方鉴权密钥）}"
 
-# 运行模式：本机切片缺省 dev（放行 Gm* / Debug* / Test* 客户端指令，同基线 tools/scripts/start_game.ps1；xm-trade 只在 dev / test 下开放播种）；
+# 运行模式：本机切片缺省 dev（放行 Gm* / Debug* / Test* 客户端指令，同基线 tools/scripts/start_game.ps1；xm-trade 只在 dev / test 下开放播种，
+# xm-match 的 dev 管理口——读评分、活动开战——同样只在 dev / test 下开放，其余一律 403）；
 # 进程自身缺省 prod，部署链不设它即拒绝。要在本机验证生产行为：XM_RUN_MODE=prod tools/local/start-slice.sh
 export XM_RUN_MODE="${XM_RUN_MODE:-dev}"
 echo "运行模式 XM_RUN_MODE=$XM_RUN_MODE"
@@ -45,8 +58,9 @@ echo "实例回收 镜像空置 $XM_SCENE_MIRROR_IDLE_TIMEOUT + 回收宽限 $XM
 export XM_SCENE_BATTLE_REAPER_INTERVAL="${XM_SCENE_BATTLE_REAPER_INTERVAL:-2s}"
 echo "回合制战斗 reaper 间隔 $XM_SCENE_BATTLE_REAPER_INTERVAL"
 
-# 运维令牌（xm-data 运维接口与 xm-trade 播种接口 POST /admin/trade/seed-listing 共用，头 X-Xm-Admin-Token）：没设就生成一个本机随机令牌
-# 写进 run/xm-admin-token（run/ 不进仓库；robot audit / trade 等场景从这里读）
+# 运维令牌（xm-data 运维接口、xm-trade 播种接口 POST /admin/trade/seed-listing、xm-battle 的 dev 接口 /admin/battle/dev/* 与 xm-match 的
+# dev 管理口 /admin/match/dev/* 共用，头 X-Xm-Admin-Token）：没设就生成一个本机随机令牌
+# 写进 run/xm-admin-token（run/ 不进仓库；robot audit / trade / battle / battle-smoke / match-activity 等场景从这里读）
 mkdir -p run
 if [[ -z "${XM_ADMIN_TOKEN:-}" ]]; then
   XM_ADMIN_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
@@ -100,6 +114,11 @@ fi
 unset battle_secret_trimmed gate_secret_trimmed
 export XM_BATTLE_TOKEN_SECRET
 
+# 对局结果 topic 的代次（批次 6.4，match-spec §5.4）：xm-battle 往 xm-battle-result-g<代次> 生产、xm-match 从同一个 topic 消费后更新评分，
+# 两边各自读这个变量、缺省都是 1；这里显式导出，免得只给其中一个进程设了别的值（两边不一致 = 结果发进一个没人消费的 topic，评分静默不更新）。
+export XM_BATTLE_RESULT_TOPIC_GENERATION="${XM_BATTLE_RESULT_TOPIC_GENERATION:-1}"
+echo "对局结果 topic 代次 XM_BATTLE_RESULT_TOPIC_GENERATION=$XM_BATTLE_RESULT_TOPIC_GENERATION"
+
 # 运维写操作（批次 7.2b 回档，data-ops-spec §7.8）：xm-data 进程缺省关闭（回档执行回 503 ops_disabled）；本机切片打开，
 # 并把回档目标时刻下限与帮会检查的沉降 / 复查等待调小（仅本机，生产按缺省 5min / 30s / 10s）。帮会检查直连 xm-guild 的 20886，
 # 调用方鉴权用上面同一个 XM_DUBBO_SECRET。robot rollback 场景依赖这几个值
@@ -130,6 +149,8 @@ SERVICES=(
   "xm-login 20881"
   "xm-friend 20883"
   "xm-chat 20884"
+  "xm-match"              # 匹配：先等 Dubbo 20888，再等凑单与评分消费起来（见 wait_match_ready）。它是 xm-team 与 xm-gate 的
+                          # Dubbo 提供方，必须排在两者之前（文件头「启动次序的一条硬约束」）
   "xm-team 20885"
   "xm-guild 20886"
   "xm-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
@@ -144,6 +165,11 @@ SERVICES=(
 BATTLE_RPC_PORT=21200
 BATTLE_CLIENT_PORT=12000
 BATTLE_MGMT_PORT=18112
+
+# xm-match 的端口（与 xm-match application.yaml 的缺省一致）：Dubbo（XM_MATCH_RPC_PORT）、管理端口（actuator 与 dev 管理口 /admin/match/dev/*）。
+# xm-gate（MatchService 的 10 个号）与 xm-team（整队开战）按这个 Dubbo 端口直连，robot 的 --match-admin-url 缺省指着这个管理端口。
+MATCH_RPC_PORT=20888
+MATCH_MGMT_PORT=18113
 
 # 场景节点实例：实例名（日志 / PID 文件名） 节点链路 link-port  资产通道 asset-rpc-port  管理端口 server.port
 # 资产通道是 Dubbo Triple（xm.scene.asset-rpc-port，同 XM_SCENE_ASSET_RPC_PORT；xm-guild 按节点目录直连）；管理端口同 SERVER_PORT（actuator 指标、GM 停机）。
@@ -241,6 +267,28 @@ wait_battle_ready() {
   done
 }
 
+# xm-match 就绪（批次 6.4，match-spec §9.8）：进程按「密钥 / 配置表 / 预算检查 → 占发号租约 → 建评分表 → 导出 Dubbo（20888）→ 起凑单 →
+# 起评分消费 → 打就绪日志」的顺序起来，任何一步失败即退出。只等端口不够：端口在导出 Dubbo 那一步就开了，而凑单或评分消费起不来时
+# 进程随即关闭上下文退出——只看端口会把一个正在退出的进程报成就绪。所以端口能连之后再等日志里出现「match 已就绪」
+# （xm-match 的 MatchLifecycle 在凑单与评分消费都起来之后打这一行；改那行日志的措辞要同步这里）。
+# 不等的两样：Kafka（不可达时评分消费后台每 30 s 重试，不拦启动）；xm-battle（它排在后面，就绪之前凑单暂停、队列原样保留）。
+wait_match_ready() {
+  local name=xm-match deadline
+  wait_port "$MATCH_RPC_PORT" "$name"
+  deadline=$((SECONDS + 60))
+  until grep -q "match 已就绪" "run/logs/$name.log" 2>/dev/null; do
+    if ! kill -0 "$(cat "run/pids/$name.pid")" 2>/dev/null; then
+      echo "[$name] 进程已退出，看 run/logs/$name.log" >&2
+      return 1
+    fi
+    if (( SECONDS > deadline )); then
+      echo "[$name] 端口 $MATCH_RPC_PORT 已开，但 60s 内日志里没有出现「match 已就绪」（凑单 / 评分消费没起来？看 run/logs/$name.log）" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 for entry in "${SERVICES[@]}"; do
   read -r name ports <<<"$entry"
   if [[ "$name" == "xm-scene" ]]; then
@@ -251,6 +299,12 @@ for entry in "${SERVICES[@]}"; do
     launch xm-battle xm-battle
     wait_battle_ready
     echo "  xm-battle 就绪（控制面 $BATTLE_RPC_PORT、直连面 $BATTLE_CLIENT_PORT、管理端口 $BATTLE_MGMT_PORT，准入闸已开）"
+    continue
+  fi
+  if [[ "$name" == "xm-match" ]]; then
+    launch xm-match xm-match
+    wait_match_ready
+    echo "  xm-match 就绪（Dubbo $MATCH_RPC_PORT、管理端口 $MATCH_MGMT_PORT，凑单与评分消费已启动）"
     continue
   fi
   launch "$name" "$name"

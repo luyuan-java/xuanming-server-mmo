@@ -18,7 +18,9 @@ import java.util.Set;
  *       dispatcher 在 GM 闸之后当场推 23 {1003}，先于下面各条的分派（域照常按下面的规则算，只用作指标标签）；</li>
  *   <li>标了 {@code OptionIsPlayerService} 的服务由玩家所在的 scene 处理；</li>
  *   <li>其余客户端服务查 {@link #SERVICE_BACKENDS}（服务裸名 → 后端 Dubbo group）；</li>
- *   <li>表里没有的是 Java 版尚未实现的服务，路由到 {@link #BACKEND_UNSUPPORTED}，由 dispatcher 回「服务不可用」。</li>
+ *   <li>表里没有的是 Java 版尚未实现的服务，路由到 {@link #BACKEND_UNSUPPORTED}，由 dispatcher 回「服务不可用」。
+ *       批次 6.4 接入 {@code MatchService} 之后现行契约里已经没有这样的服务（{@code MessageRoutesTest} 钉住），
+ *       这个缺省分支留给 mmorpg 以后新增、Java 还没接的客户端服务。</li>
  * </ul>
  *
  * <p>单独成接口是为了让路由测试不依赖某个具体消息号的发号结果（消息号由 mmorpg 生成器发，会漂移）。
@@ -54,6 +56,10 @@ public interface MessageRoutes {
      * 聚宝斋服务名是 {@code ClientPlayerJubaozhai}（{@code 196=ClientPlayerJubaozhaiBrowseListings}），4 个号（196 / 197 / 198 / 200）转给
      * xm-trade（trade-spec §5.2）；199 {@code TradeAdminSeedListing} 刻意没标客户端协议服务（trade_admin.proto:13-18），不进白名单，
      * 客户端发来按「不认识的号」丢弃、计非法包、不回包（同基线 C++ gate，trade_smoke_scenario.go:281-284）。
+     * 匹配服务名是 {@code MatchService}（{@code 157=MatchServiceJoinQueue}）：10 个号（148 / 151 / 152 / 153 / 154 / 156 / 157 / 163 / 164 / 179）
+     * 整体转给 xm-match（match-spec §1.4、§9.2），含两个推送占位 154 / 156（应答 {@code Empty}，后端回空体、gate 不回包）与 6.4 期间只有临时
+     * 行为的 163 / 164（后端回 in-band 1006 / 空列表，§8.6）；{@code MatchInternal}（帮会活动开战，match_internal.proto）是内部服务、没标客户端
+     * 协议服务，不进白名单。10 个号都不在 MessageLimiter 表里，按缺省每秒 3 条限频。
      *
      * <p><b>{@code BattleClientPlayer} 永远不许加进来</b>（inventory combat.md gate-battle-uplink-reject；battle-node-spec §3.1、§3.7）：
      * 战斗上行（140 / 149 / 162 / 165）与战斗帧只走客户端到 xm-battle 的直连，大厅连接上发这个服务的任何号（含 Notify 号）都由
@@ -67,7 +73,8 @@ public interface MessageRoutes {
             "ClientPlayerChat", DubboGroups.CHAT,
             "ClientPlayerTeam", DubboGroups.TEAM,
             "GuildService", DubboGroups.GUILD,
-            "ClientPlayerJubaozhai", DubboGroups.TRADE);
+            "ClientPlayerJubaozhai", DubboGroups.TRADE,
+            "MatchService", DubboGroups.MATCH);
 
     /** 客户端可发的消息号的路由；消息号不存在或不属于客户端协议服务时返回 null。 */
     MessageRoute clientRoute(int messageId);

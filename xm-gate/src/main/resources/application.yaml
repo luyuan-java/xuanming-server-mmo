@@ -58,6 +58,8 @@ xm:
     guild-url: tri://127.0.0.1:20886
     # 聚宝斋后端 xm-trade（Dubbo group trade）
     trade-url: tri://127.0.0.1:20887
+    # 匹配后端 xm-match（Dubbo group match）：MatchService 的 10 个号（排队 / 切磋 / 观战 / 补签）
+    match-url: tri://127.0.0.1:20888
   gate:
     client-port: 11000
     # 对外通告的客户端端口（经 NodePort / 端口映射对外时与 client-port 不同）；0 或不配 = client-port

@@ -6,8 +6,15 @@ import com.game.api.DubboGroups;
 import com.game.common.killswitch.KillSwitch;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
+import com.game.net.limit.MessageLimit;
+import com.game.net.limit.MessageLimits;
+import com.game.net.limit.TableMessageLimits;
 import com.game.proto.common.base.eNodeType;
+import com.game.proto.match.MatchMatchInternalOuterClass;
+import com.game.proto.match.MatchMatchServiceOuterClass;
 import com.google.protobuf.Descriptors;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -60,30 +67,44 @@ class MessageRoutesTest {
     }
 
     @Test
-    void Java版未接入的客户端服务路由到unsupported_且不是directOnly() {
-        // 不钉具体服务名：哪个服务先接入由批次决定，这里取全部「不是玩家服务、不在后端表里、也不是只走直连」的客户端方法。
-        // 只走直连的战斗号域同样是 unsupported，但它们在直连闸就被拒了、到不了 dispatcher 的缺省分支，不能拿来充数：
-        // D12 之后按号序排第一个的正是 139 BattleClientPlayer.NotifyTurnResult，不排除它这条用例就一直拿战斗号空转。
-        List<MessageMethod> unsupported = registry.all().stream()
+    void 现行契约里的客户端服务都有去向_没有落到缺省分支的_后端表里的服务名契约里都有() {
+        // 6.4 把 MatchService 接进来之后契约里已经没有「未接入」的客户端服务了：原来这里有一条取真样本的用例
+        // （「Java版未接入的客户端服务路由到unsupported」），按它自己的说明删掉，缺省分支由下一条用例用假想的服务名钉住。
+        // 这里钉住现状。「未接入」= 不是玩家服务、不在后端表里、也不是只走直连（战斗号的域同样是 unsupported，但它们在直连闸
+        // 就被拒了、到不了 dispatcher 的缺省分支，不算）。
+        List<String> notPorted = registry.all().stream()
                 .filter(m -> m.clientService() && !m.playerService()
                         && !MessageRoutes.SERVICE_BACKENDS.containsKey(m.serviceName())
                         && !MessageRoutes.DIRECT_ONLY_SERVICES.contains(m.serviceName()))
-                .toList();
-        assertThat(unsupported)
-                .as("契约里已经没有未接入的客户端服务，这条用例取不到样本：把它删掉（缺省分支由下一条用例钉住），不要放宽过滤条件让它空转")
-                .isNotEmpty();
-        for (MessageMethod method : unsupported) {
-            MessageRoute route = routes.clientRoute(method.messageId());
-            assertThat(route).as(method.key()).isNotNull();
-            assertThat(route.domain()).as(method.key()).isEqualTo(MessageRoutes.BACKEND_UNSUPPORTED);
-            assertThat(route.directOnly()).as(method.key() + " 走缺省分支，不是直连闸").isFalse();
-            assertThat(route.method()).isEqualTo(method.serviceName() + "." + method.methodName());
+                .map(MessageMethod::serviceName).distinct().toList();
+        assertThat(notPorted)
+                .as("契约里出现了 Java 版还没接入的客户端服务：它的号会走 dispatcher 的缺省分支（推 23 {1003}）。"
+                        + "这一批就要接的，照 MatchService 的做法加进 SERVICE_BACKENDS 与 GateConfiguration；留到以后的，把这条断言改成"
+                        + "钉住那份清单（containsExactlyInAnyOrder），并在 PARITY.md 登记")
+                .isEmpty();
+        // 落到 unsupported 域的客户端路由只剩只走直连的那 12 个战斗号
+        assertThat(routes.all().stream().filter(r -> r.domain().equals(MessageRoutes.BACKEND_UNSUPPORTED)))
+                .hasSize(12).allSatisfy(r -> assertThat(r.directOnly()).as(r.method()).isTrue());
+        // 反过来：后端表里的每个服务名契约里都真有、是客户端协议服务且不是玩家服务（拼错的、契约里已删掉的服务名不会悄悄留在表里）
+        for (Map.Entry<String, String> backend : MessageRoutes.SERVICE_BACKENDS.entrySet()) {
+            List<MessageMethod> methods = registry.all().stream()
+                    .filter(m -> m.serviceName().equals(backend.getKey())).toList();
+            assertThat(methods).as("契约里 %s 的方法", backend.getKey()).isNotEmpty()
+                    .allSatisfy(m -> {
+                        assertThat(m.clientService()).as(m.key() + " 是客户端协议服务").isTrue();
+                        assertThat(m.playerService()).as(m.key() + " 不是玩家服务（否则走 scene，后端表这一行是死的）").isFalse();
+                        assertThat(routes.clientRoute(m.messageId()).domain()).as(m.key()).isEqualTo(backend.getValue());
+                    });
         }
+        assertThat(MessageRoutes.SERVICE_BACKENDS.values()).as("一个服务一个后端域，没有两个服务挤在同一个域里")
+                .doesNotHaveDuplicates()
+                .containsExactlyInAnyOrder(DubboGroups.LOGIN, DubboGroups.FRIEND, DubboGroups.CHAT, DubboGroups.TEAM,
+                        DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH);
     }
 
     @Test
     void 后端表里没有的非玩家服务缺省落到unsupported_与契约里还剩哪个服务没接无关() {
-        // 上一条取的是契约里的真样本，全部服务接完之后会被删掉；缺省分支本身在这里用一个契约里不存在的服务名钉住。
+        // 契约里的客户端服务已经全部接完（上一条），缺省分支本身在这里用一个契约里不存在的服务名钉住。
         MessageMethod login = method("ClientPlayerLogin", "Login");
         MessageMethod notPorted = new MessageMethod(login.messageId(), "NotPortedYetService", "Foo", login.method(),
                 login.requestPrototype(), login.responsePrototype(), true, false);
@@ -182,6 +203,80 @@ class MessageRoutesTest {
     }
 
     @Test
+    void 匹配服务10个号都路由到match域_148与两个推送占位不回包_热关停键与基线同名_内部服务不在白名单() {
+        // match-spec §1.4 / §9.2 / §15.3：MatchService 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，10 个号整体转给
+        // xm-match（Dubbo group match）。148 CancelQueue 与两个推送占位 154 / 156 的应答类型是 Empty → tip 为 0 时 gate 不回包（§8.1、M4；
+        // tip ≠ 0 照样回信封）；其余 7 个都带 in-band 的 error_message / error_code → 一律回包（全默认值的应答是 0 字节也要回）。
+        List<String> noReply = List.of("CancelQueue", "NotifyChallengeInvite", "NotifyChallengeResult");
+        List<String> replied = List.of("JoinQueue", "GetQueueStatus", "ChallengePlayer", "RespondChallenge", "WatchBattle",
+                "ListWatchableBattles", "RequestBattleTicket");
+        List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
+        assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
+                .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
+        // 10 个号逐个钉住（message_id.txt；match-spec §1.4 的表）：发号漂移或增删方法时这里先失败
+        assertThat(match).extracting(MessageMethod::messageId)
+                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+        assertThat(Map.of("CancelQueue", 148, "RespondChallenge", 151, "ChallengePlayer", 152, "GetQueueStatus", 153,
+                "NotifyChallengeResult", 154, "NotifyChallengeInvite", 156, "JoinQueue", 157, "WatchBattle", 163,
+                "ListWatchableBattles", 164, "RequestBattleTicket", 179))
+                .allSatisfy((name, id) -> assertThat(registry.requireId("MatchService", name)).as(name).isEqualTo(id));
+        for (MessageMethod method : match) {
+            assertThat(method.clientService()).as(method.key()).isTrue();
+            assertThat(method.playerService()).as(method.key() + " 不是玩家服务：走后端表，不走 scene").isFalse();
+            MessageRoute route = routes.clientRoute(method.messageId());
+            assertThat(route).as(method.key()).isNotNull();
+            assertThat(route.domain()).as(method.key()).isEqualTo(DubboGroups.MATCH).isEqualTo("match");
+            assertThat(route.hasResponse()).as(method.key()).isEqualTo(replied.contains(method.methodName()));
+            assertThat(route.directOnly()).as(method.key() + " 经 gate 中继，不是只走直连").isFalse();
+            assertThat(route.method()).isEqualTo("MatchService." + method.methodName());
+            assertThat(route.gm()).as(method.key()).isFalse();
+            // 热关停规则按 rpcPath 匹配：/match.MatchService/<Method>（proto package match），与基线路由表里这些号的 gRPC 全名
+            // 逐字相同（mmorpg go/client_rpc_router/generated/pb/game/route_table.go 的 FullMethod）
+            assertThat(route.rpcPath()).isEqualTo("/match.MatchService/" + method.methodName());
+            assertThat(KillSwitch.matchKeys(route.rpcPath()))
+                    .contains("match.MatchService/" + method.methodName(), "match.MatchService/*");
+        }
+        assertThat(routes.clientRoute(148).hasResponse()).as("148 CancelQueue 应答是 Empty").isFalse();
+        assertThat(routes.clientRoute(157).hasResponse()).as("157 JoinQueue 应答是 JoinQueueResponse").isTrue();
+        assertThat(routes.clientRoute(179).hasResponse()).as("179 应答消息定义在 battle 包，照样回包").isTrue();
+        // match 域里只有这 10 个号：别的服务（尤其是战斗服务）没有被带进来
+        assertThat(routes.all().stream().filter(r -> r.domain().equals(DubboGroups.MATCH)).map(MessageRoute::messageId))
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+        assertThat(MessageRoutes.SERVICE_BACKENDS).containsEntry("MatchService", DubboGroups.MATCH);
+
+        // MatchInternal（帮会活动开战，match_internal.proto）是内部服务：刻意没标客户端协议服务，也不在后端表里。
+        // 现行契约没有给它发消息号（message_id.txt 里没有 MatchInternal*）；以后发了号，它也必须不可路由（同 199 TradeAdmin.SeedListing）
+        Descriptors.ServiceDescriptor internal = MatchMatchInternalOuterClass.getDescriptor().findServiceByName("MatchInternal");
+        assertThat(internal).as("match_internal.proto 里的 MatchInternal 服务").isNotNull();
+        assertThat(internal.getMethods()).extracting(Descriptors.MethodDescriptor::getName).contains("StartActivityBattle");
+        assertThat(internal.getOptions().getAllFields().keySet()).as("MatchInternal 没有任何服务级 option（客户端协议 / 玩家服务都没标）")
+                .extracting(Descriptors.FieldDescriptor::getName).doesNotContain("OptionIsClientProtocolService", "OptionIsPlayerService");
+        Descriptors.ServiceDescriptor client = MatchMatchServiceOuterClass.getDescriptor().findServiceByName("MatchService");
+        assertThat(client.getOptions().getAllFields().keySet()).as("对照：MatchService 标了客户端协议服务（上面那条断言读得到这个 option）")
+                .extracting(Descriptors.FieldDescriptor::getName).contains("OptionIsClientProtocolService");
+        assertThat(registry.all().stream().filter(m -> m.serviceName().equals("MatchInternal")))
+                .allSatisfy(m -> {
+                    assertThat(m.clientService()).as(m.key()).isFalse();
+                    assertThat(routes.clientRoute(m.messageId())).as(m.key() + " 不可路由").isNull();
+                });
+        assertThat(MessageRoutes.SERVICE_BACKENDS).doesNotContainKey("MatchInternal");
+    }
+
+    @Test
+    void 匹配服务10个号都不在限频表里_按缺省每秒3条() {
+        // match-spec §1.4：MessageLimiter 表里没有任何一个 match 消息号，gate 按缺省每会话每号每秒 3 条、超频回 1008 并计非法包。
+        // 客户端可见：179 的退避重试、robot 连发同号请求（间隔 ≥ 350 ms，§15.5）都按这个节奏。表是同步来的契约，这里读真表。
+        MessageLimits limits = TableMessageLimits.load(Path.of("..", "config-data", "tables"));
+        for (int id : new int[] {148, 151, 152, 153, 154, 156, 157, 163, 164, 179}) {
+            assertThat(limits.limitOf(id)).as("消息号 %d", id).isEqualTo(MessageLimit.DEFAULT)
+                    .isEqualTo(new MessageLimit(3, Duration.ofSeconds(1)));
+        }
+        // 对照：表不是空的（否则上面的断言对任何号都成立）
+        assertThat(registry.all().stream().filter(MessageMethod::clientService).map(m -> limits.limitOf(m.messageId())))
+                .as("限频表里至少有一个客户端号不是缺省值").anyMatch(limit -> !limit.equals(MessageLimit.DEFAULT));
+    }
+
+    @Test
     void 战斗服务12个号全部标directOnly_域仍是unsupported_永不进后端表() {
         // combat.md gate-battle-uplink-reject；battle-node-spec §3.7 / §13.7；scene-battle-spec §2.5 / §7.19（D12）：战斗上行只走
         // xm-battle 直连，大厅连接上发 BattleClientPlayer 的任何号（含 Notify 号）都由直连闸当场回 23 {1003}。
@@ -220,9 +315,10 @@ class MessageRoutesTest {
         List<Integer> direct = clients.stream().map(m -> routes.clientRoute(m.messageId()))
                 .filter(MessageRoute::directOnly).map(MessageRoute::messageId).toList();
         assertThat(direct).containsExactlyInAnyOrder(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177);
-        // 登录 / scene / 好友 / 聚宝斋 各取一个：没有被误标
+        // 登录 / scene / 好友 / 聚宝斋 / 匹配 各取一个：没有被误标（179 补签的请求 / 应答消息定义在 battle 包，照样经 gate 中继）
         for (String[] m : new String[][] {{"ClientPlayerLogin", "Login"}, {"SceneSkillClientPlayer", "ListSkills"},
-                {"ClientPlayerFriend", "AddFriend"}, {"ClientPlayerJubaozhai", "BrowseListings"}}) {
+                {"ClientPlayerFriend", "AddFriend"}, {"ClientPlayerJubaozhai", "BrowseListings"},
+                {"MatchService", "JoinQueue"}, {"MatchService", "RequestBattleTicket"}}) {
             assertThat(routes.clientRoute(registry.requireId(m[0], m[1])).directOnly()).as(m[0] + "." + m[1]).isFalse();
         }
         // 基线 gate 的判据是 targetNodeType == BattleNodeService（client_message_processor.cpp:944）。targetNodeType 由 protogen 的
