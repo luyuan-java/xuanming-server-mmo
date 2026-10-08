@@ -426,11 +426,15 @@ class WatchBattleHandlerTest {
         open(X);
         List<Long> hardStops = new CopyOnWriteArrayList<>();
         observers.beforeAdd = call -> hardStops.add(call.hardStopRemainingMs());
-        MatchDispatcher dispatcher = dispatcher(2, 4_500);
+        // 派发器的预算故意给一个与缺省 4500 ms 差得远的值（20 s）：处理器若不用派发器给的截止、自己按缺省预算另起一个，
+        // AddObserver 的硬截止剩余至多 4300 ms，落不进下面的区间
+        MatchDispatcher dispatcher = dispatcher(2, 20_000);
 
-        reply(dispatcher.dispatch(watch(1001, X)));
+        ClientReply reply = reply(dispatcher.dispatch(watch(1001, X)));
 
+        assertThat(WatchBattleResponse.parseFrom(reply.getBody()).getBattleId()).as("这一次是成功的 163").isEqualTo(X);
         assertThat(hardStops).singleElement().satisfies(remaining -> assertThat(remaining)
-                .as("AddObserver 的硬截止 = 受理时刻 + 4500 − 200：不会比它晚").isBetween(1L, 4_300L));
+                .as("AddObserver 的硬截止 = 受理时刻 + 派发器的预算 20000 − 200：不会比它晚；下界留 10 s 的余量，不靠窄时间窗")
+                .isBetween(10_000L, 19_800L));
     }
 }

@@ -65,7 +65,14 @@ class BattleSmokeScenarioTest {
     private static Timing timing(Duration liveBudget, Duration readyResidue) {
         Timing fast = FakeMatchWorld.FAST_SPECTATE;
         return new Timing(fast.ticketTimeout(), fast.firstFrameTimeout(), fast.endTimeout(), fast.stopTimeout(), fast.publishRetry(),
-                fast.randomRetry(), fast.evictTimeout(), liveBudget, readyResidue, fast.precleanRounds());
+                fast.randomRetry(), fast.evictTimeout(), liveBudget, readyResidue, fast.settleWait(), fast.precleanRounds());
+    }
+
+    /** {@link FakeMatchWorld#FAST_SPECTATE}，只换随机观战的重试上限、等结算落地的上限与预清理的轮数。 */
+    private static Timing timing(Duration randomRetry, Duration settleWait, int precleanRounds) {
+        Timing fast = FakeMatchWorld.FAST_SPECTATE;
+        return new Timing(fast.ticketTimeout(), fast.firstFrameTimeout(), fast.endTimeout(), fast.stopTimeout(), fast.publishRetry(),
+                randomRetry, fast.evictTimeout(), fast.liveBudget(), fast.readyResidue(), settleWait, precleanRounds);
     }
 
     @Test
@@ -92,9 +99,15 @@ class BattleSmokeScenarioTest {
         assertThat(names.subList(0, firstMatchStep)).allMatch(n -> n.matches("S(\\d|1[01]) .*") || n.startsWith("S1 收到 177 到 S8"))
                 .anyMatch(n -> n.startsWith("S11 "));
         assertThat(names.get(names.size() - 1)).startsWith("S13 指标 xm_match_spectate_evictions_total");
-        int s12 = names.indexOf(names.stream().filter(n -> n.startsWith("S12 ")).findFirst().orElseThrow());
+        // S12 分两半：等 ready 残留在切磋开局之前（第一条邀请收完尾、第二条邀请发起之前），163 在切磋局里、开自动之前
+        assertThat(names.stream().filter(n -> n.startsWith("S12 "))).hasSize(2);
+        int residue = names.indexOf(names.stream().filter(n -> n.startsWith("S12 切磋开局之前 A 发 153 → NOT_QUEUED")).findFirst().orElseThrow());
+        assertThat(names.get(residue - 1)).startsWith("第 9 步 B 再应答同一条邀请 → 16012");
+        assertThat(names.get(residue + 1)).startsWith("第 9 步 A 再次挑战 B → 受理");
+        int s12 = names.indexOf(names.stream().filter(n -> n.startsWith("S12 切磋局里（开自动之前）A 发 163(0)")).findFirst().orElseThrow());
         assertThat(names.get(s12 - 1)).startsWith("第 9 步 A 在战斗中（开自动之前）C 挑战 A");
         assertThat(names.get(s12 + 1)).startsWith("第 9 步 都开自动");
+        assertThat(report.items().get(residue).detail()).as("假服务端的 ready 残留缺省让 153 先回一次 READY").endsWith("（此前 1 次 READY：ready 残留）");
 
         Matcher line = OK_LINE.matcher(scenario.resultLine());
         assertThat(line.matches()).as(scenario.resultLine()).isTrue();
@@ -108,12 +121,14 @@ class BattleSmokeScenarioTest {
         assertThat(line.group(2)).as("PVE 第一局在直连上收到的 139 条数").isEqualTo("1").isEqualTo(line.group(3));
         assertThat(line.group(7)).as("SB 在直连上收到的 158 条数（两个字段同值：观战帧只走直连）").isEqualTo("1").isEqualTo(line.group(8));
         assertThat(line.group(9)).as("开局清退成立").isEqualTo("1");
-        assertThat(line.group(10)).as("假服务端的 ready 残留缺省挡一次 163").isEqualTo("1");
+        assertThat(line.group(10)).as("假服务端的 ready 残留缺省让切磋开局之前的 153 先回一次 READY").isEqualTo("1");
         assertThat(scenario.resultLine()).doesNotContain("-");
 
         // 请求确实发了、没有多发
         MatchSupport.Ids ids = MatchSupport.Ids.resolve(world.registry());
-        assertThat(world.receivedCount(ids.watchBattle())).as("163：S1、S3、S4、S6、S7、S8、S10、S11 各一条 + S12 两条（先 16014 后 16015）").isEqualTo(10);
+        assertThat(world.receivedCount(ids.watchBattle())).as("163：S1、S3、S4、S6、S7、S8、S10、S11、S12 各一条（S12 在切磋局里只发一次，不重试）")
+                .isEqualTo(9);
+        assertThat(world.receivedCount(ids.queueStatus())).as("153：第 1 步、S6、第 3 步三条、第 4 步，S12 前半两条（先 READY 后 NOT_QUEUED）").isEqualTo(8);
         assertThat(world.receivedCount(ids.listWatchable())).as("164：S0、预清理（列表为空，一轮即停）、S2 两条、S10").isEqualTo(5);
         // 收尾的两条 148 发出后连接随即关闭，服务端稍后才处理到；另三条是第 3 步两条与 S6 一条
         assertThat(world.eventually(() -> world.receivedCount(ids.cancelQueue()) == 5)).as("148 共 " + world.receivedCount(ids.cancelQueue()) + " 条")
@@ -123,6 +138,41 @@ class BattleSmokeScenarioTest {
         assertThat(world.queuedTickets()).isZero();
         assertThat(world.observerCount()).as("观众都摘干净了：收尾、165、开局清退").isZero();
         assertThat(report.notes()).anyMatch(n -> n.equals("预清理：可观战列表已空（清了 0 轮）"));
+        // 观战段的 SD、SB 刚打完 Z、W 就该下线了：先等到各自的大厅 150（结算落地）再发 LeaveGame，不带着战斗锁离场
+        assertThat(world.leftWhileLocked()).as("发 LeaveGame 时还持着战斗锁（结算没落地）的次数").isZero();
+        assertThat(report.notes()).noneMatch(n -> n.startsWith("观战段下线之前"));
+    }
+
+    // ---------------------------------------------------------------- 评审 R-1：同一个号的第二局 PVE 不断言胜负
+
+    @Test
+    void 同一个号的第二局PVE阵亡_第7步只要求打完_整条照样通过() {
+        // 单人 PVE 打完的先后：观战段的 X、Z、W，然后是 A 的第一局、第二局
+        world.soloPveLostAt = 5;
+        BattleSmokeScenario scenario = scenario("r1a", world.admin());
+
+        CheckReport report = scenario.run();
+
+        // 真服务端上血量随第一局的结算带进第二局、种子每局随机，第二局阵亡是合法结果（2026-10-08 切片：第一局剩 261 血，第二局第 9 回合阵亡）
+        assertThat(failed(report)).as(report.render("battle-smoke")).isEmpty();
+        assertThat(report.items()).anySatisfy(item -> {
+            assertThat(item.name()).startsWith("第 7 步 第二局同样挂机（162 被受理）打到 150（胜 / 负 / 平都算打完");
+            assertThat(item.detail()).startsWith("outcome=BATTLE_OUTCOME_SIDE_B_WIN rounds=" + FakeMatchWorld.PVE_ROUNDS);
+        });
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_OK ");
+    }
+
+    @Test
+    void 新号的第一局PVE阵亡_第6步仍然要求打赢_失败() {
+        world.soloPveLostAt = 4;
+        BattleSmokeScenario scenario = scenario("r1b", world.admin());
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report)).singleElement().asString().startsWith("第 6 步 挂机打到 150：SIDE_A_WIN").contains("终局不是 SIDE_A_WIN",
+                "外层 BATTLE_OUTCOME_SIDE_B_WIN");
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=6-direct-fight ");
+        assertThat(report.items()).as("第二局照常打赢").anyMatch(i -> i.passed() && i.name().startsWith("第 7 步 第二局同样挂机"));
     }
 
     @Test
@@ -247,10 +297,13 @@ class BattleSmokeScenarioTest {
 
         assertThat(failed(report).get(0)).startsWith("流程中断：切磋（第 9 步，含 S12）").contains("没有收到参战票 177", "又收到了 154 false", "gather 失败");
         assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=9-challenge reason=流程中断：切磋");
-        // 接受之前的那些检查照常通过；少了一局，指标那一步也对不上；S12 没有机会跑，S13 的 in_battle 随之对不上
+        // 接受之前的那些检查照常通过（含 S12 的前半：等 ready 残留在发起之前）；少了一局，指标那一步也对不上；
+        // S12 的后半（切磋局里的 163）没有机会跑，S13 的 in_battle 随之对不上
         assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 9 步 接受后 A、B 都收到 154"));
         assertThat(report.items()).anyMatch(i -> !i.passed() && i.name().contains("xm_match_gathers_total"));
-        assertThat(names(report)).noneMatch(n -> n.startsWith("S12 "));
+        assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("S12 切磋开局之前 A 发 153 → NOT_QUEUED"));
+        assertThat(names(report)).noneMatch(n -> n.startsWith("S12 切磋局里"));
+        assertThat(world.receivedCount(MatchSupport.Ids.resolve(world.registry()).watchBattle())).as("切磋局没开出来：S12 的 163 没有发").isEqualTo(8);
         assertThat(failed(report)).anyMatch(f -> f.startsWith("S13 指标 xm_match_watch_battle_total{outcome=\"in_battle\"} 本轮至少 + 1：0.0 → 0.0"));
         assertThat(scenario.resultLine()).doesNotContain("\n");
     }
@@ -280,14 +333,18 @@ class BattleSmokeScenarioTest {
     }
 
     @Test
-    void 终局包里的settlement是别的局的_第6步的终局判据失败() {
+    void 终局包里的settlement是别的局的_第6步与第7步的终局判据都咬住() {
         world.faults.add(Fault.SETTLEMENT_OF_OTHER_BATTLE);
         BattleSmokeScenario scenario = scenario("f11", world.admin());
 
         CheckReport report = scenario.run();
 
         // 外层的 outcome、settlement.player_id、回合数都对：基线多看的 settlement.battle_id 才咬得住
-        assertThat(failed(report)).singleElement().asString().startsWith("第 6 步 挂机打到 150").contains("battle_id 对不上本局", "settlement ");
+        assertThat(failed(report)).hasSize(2);
+        assertThat(failed(report).get(0)).startsWith("第 6 步 挂机打到 150").contains("battle_id 对不上本局", "settlement ");
+        // 第 7 步不断言胜负之后（评审 R-1），其余几项与第 6 步是同一套判据：同一个号的第二局也看 settlement 指向哪一局
+        assertThat(failed(report).get(1)).startsWith("第 7 步 第二局同样挂机（162 被受理）打到 150（胜 / 负 / 平都算打完")
+                .contains("battle_id 对不上本局", "settlement ").doesNotContain("终局不是");
         assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=6-direct-fight ");
     }
 
@@ -375,7 +432,7 @@ class BattleSmokeScenarioTest {
         assertThat(names(report)).as("没有残留干扰：S8 挑中的是 X，观众数连 SB 在内是 2")
                 .anyMatch(n -> n.equals("S8 SC 直连后握手应答紧跟 161 {observer_count = 2}（SB 与 SC）"));
         MatchSupport.Ids ids = MatchSupport.Ids.resolve(world.registry());
-        assertThat(world.receivedCount(ids.watchBattle())).as("比干净的世界多三条预清理的 163(0)").isEqualTo(13);
+        assertThat(world.receivedCount(ids.watchBattle())).as("比干净的世界多三条预清理的 163(0)").isEqualTo(12);
         assertThat(world.receivedCount(ids.listWatchable())).as("预清理四条（5、3、1、0）").isEqualTo(8);
     }
 
@@ -383,8 +440,7 @@ class BattleSmokeScenarioTest {
     void 残留太多清不完_预清理到轮数上限就停_只记观察不判失败() {
         world.seedFinishedBattles(5);
         Timing fast = FakeMatchWorld.FAST_SPECTATE;
-        Timing oneRound = new Timing(fast.ticketTimeout(), fast.firstFrameTimeout(), fast.endTimeout(), fast.stopTimeout(), fast.publishRetry(),
-                fast.randomRetry(), fast.evictTimeout(), fast.liveBudget(), fast.readyResidue(), 1);
+        Timing oneRound = timing(fast.randomRetry(), fast.settleWait(), 1);
         BattleSmokeScenario scenario = scenario("s2", world.admin(), oneRound);
 
         CheckReport report = scenario.run();
@@ -404,8 +460,7 @@ class BattleSmokeScenarioTest {
         world.seedFinishedBattles(2);
         world.faults.add(Fault.ENDED_BATTLE_STAYS_LISTED);
         Timing fast = FakeMatchWorld.FAST_SPECTATE;
-        Timing shortRetry = new Timing(fast.ticketTimeout(), fast.firstFrameTimeout(), fast.endTimeout(), fast.stopTimeout(), fast.publishRetry(),
-                Duration.ofMillis(300), fast.evictTimeout(), fast.liveBudget(), fast.readyResidue(), fast.precleanRounds());
+        Timing shortRetry = timing(Duration.ofMillis(300), fast.settleWait(), fast.precleanRounds());
         BattleSmokeScenario scenario = scenario("s20", world.admin(), shortRetry);
 
         CheckReport report = scenario.run();
@@ -617,45 +672,79 @@ class BattleSmokeScenarioTest {
     }
 
     @Test
-    void 上一局的ready票一次都没挡住163_s12_ready_residue是0() {
-        world.readyResidueRejects = 0;
+    void 上一局的ready票在切磋之前就过期了_153头一次就是NOT_QUEUED_s12_ready_residue是0() {
+        world.readyResiduePolls = 0;
         BattleSmokeScenario scenario = scenario("s16", world.admin());
 
         CheckReport report = scenario.run();
 
         assertThat(failed(report)).as(report.render("battle-smoke")).isEmpty();
         assertThat(scenario.resultLine()).endsWith(" removed_ok=1 s12_ready_residue=0");
-        assertThat(world.receivedCount(MatchSupport.Ids.resolve(world.registry()).watchBattle())).as("S12 只发了一条").isEqualTo(9);
+        MatchSupport.Ids ids = MatchSupport.Ids.resolve(world.registry());
+        assertThat(world.receivedCount(ids.queueStatus())).as("S12 前半只问了一次").isEqualTo(7);
+        assertThat(world.receivedCount(ids.watchBattle())).as("S12 后半只发了一条").isEqualTo(9);
     }
 
     @Test
-    void ready残留过了窗口还在挡_S12失败_写明此前是16014() {
-        world.readyResidueRejects = Integer.MAX_VALUE;
-        // 窗口极短：第 8 步收到 177 之后 1 ms 就「必然过期」，此后再见到 16014 即判错
+    void ready残留过了窗口还在_S12前半失败_切磋局里的163只发一次_回16014再记一条() {
+        world.readyResiduePolls = Integer.MAX_VALUE;
+        // 窗口极短：第 8 步收到 177 之后 1 ms 就「必然过期」，此后 153 再回 READY 即判错
         BattleSmokeScenario scenario = scenario("s17", world.admin(), timing(FakeMatchWorld.FAST_SPECTATE.liveBudget(), Duration.ofMillis(1)));
 
         CheckReport report = scenario.run();
 
-        assertThat(failed(report).get(0)).startsWith("S12 切磋局里（开自动之前）A 发 163(0) → {16015, 战斗尚未结束,无法观战}")
-                .contains("tip=16014", "匹配中无法观战");
-        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=s12-in-battle ");
+        assertThat(failed(report).get(0)).startsWith("S12 切磋开局之前 A 发 153 → NOT_QUEUED")
+                .contains("A 的票还是 READY", "早该过期了", "实得 state=QUEUE_STATE_READY", "（此前 1 次 READY：ready 残留）");
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=s12-ready-residue ").doesNotContain(" s12_ready_residue=");
+        // 票还在：切磋局里那一条 163 回 16014。不再按过渡态重试——只发一次，直接判失败
+        assertThat(failed(report).get(1)).startsWith("S12 切磋局里（开自动之前）A 发 163(0) → {16015, 战斗尚未结束,无法观战}")
+                .contains("tip=16014", "匹配中无法观战", "回的是 16014：A 还持着票");
+        assertThat(world.receivedCount(MatchSupport.Ids.resolve(world.registry()).watchBattle())).as("S12 的 163 没有重试").isEqualTo(9);
         assertThat(report.items()).as("S12 不通过也不拖垮切磋：两人照常开自动打完").anyMatch(i -> i.passed() && i.name().startsWith("第 9 步 都开自动"));
         assertThat(failed(report)).anyMatch(f -> f.startsWith("S13 指标 xm_match_watch_battle_total{outcome=\"in_battle\"}"));
     }
 
     @Test
-    void 等ready残留过期时切磋局先打完了_结果行是s12_battle_ended_收尾照常() {
-        world.readyResidueRejects = Integer.MAX_VALUE;
-        world.faults.add(Fault.CHALLENGE_ENDS_DURING_RESIDUE);
+    void ready残留还在而切磋局只有一个回合_残留在开局之前就等掉了_整条照样通过() {
+        // 真服务端上的情形（评审 R-2）：切磋双方带着上一局 1V1 的结算血量进场，不开自动的切磋局可以 6 s 就结束——
+        // 在切磋局里按 16014 重试等 ready 票据过期（最长几十秒）是等不起的
+        world.readyResiduePolls = 3;
+        world.faults.add(Fault.CHALLENGE_ENDS_AFTER_FIRST_WATCH);
         BattleSmokeScenario scenario = scenario("s18", world.admin());
 
         CheckReport report = scenario.run();
 
-        assertThat(failed(report).get(0)).startsWith("S12 等上一局的 ready 票据过期时切磋局先打完了").contains("次 16014");
-        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_FAIL step=s12-battle-ended ");
-        // 这一局已经打完：开自动的 162 没赶上不算失败，150 与 FIN 照常核对
+        assertThat(failed(report)).as(report.render("battle-smoke")).isEmpty();
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_OK ").endsWith(" removed_ok=1 s12_ready_residue=1");
+        assertThat(report.items()).anySatisfy(item -> {
+            assertThat(item.name()).startsWith("S12 切磋开局之前 A 发 153 → NOT_QUEUED");
+            assertThat(item.detail()).isEqualTo("state=QUEUE_STATE_NOT_QUEUED estimated_wait_seconds=0 queued_seconds=0（此前 3 次 READY：ready 残留）");
+        });
+        MatchSupport.Ids ids = MatchSupport.Ids.resolve(world.registry());
+        assertThat(world.receivedCount(ids.queueStatus())).as("比缺省的世界多问了两次 153").isEqualTo(10);
+        assertThat(world.receivedCount(ids.watchBattle())).as("切磋局里只来得及发一条 163，它就是 16015").isEqualTo(9);
+        // 这一局是自己打完的：开自动的 162 回的是拒绝，但排在 150 之后——不算挂机没开成；150 与 FIN 照常核对
         assertThat(report.items()).anyMatch(i -> i.passed() && i.name().startsWith("第 9 步 都开自动"));
         assertThat(world.eventually(() -> world.lockedPlayers() == 0)).isTrue();
+    }
+
+    // ---------------------------------------------------------------- 观战段下线之前等结算落地（评审 R-4）
+
+    @Test
+    void S11两局的结算一直没落到大厅_观战段等到上限后照常下线_只记观察不判失败() {
+        world.faults.add(Fault.NO_LOBBY_END);
+        Timing fast = FakeMatchWorld.FAST_SPECTATE;
+        BattleSmokeScenario scenario = scenario("s23", world.admin(), timing(fast.randomRetry(), Duration.ofMillis(300), fast.precleanRounds()));
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report)).as(report.render("battle-smoke")).isEmpty();
+        assertThat(scenario.resultLine()).startsWith("BATTLE_SMOKE_OK ");
+        // 等的是 S11 里真正打完的两局：SD 的 Z、SB 的 W（X 在 S9 就结束了，不等）
+        assertThat(report.notes().stream().filter(n -> n.startsWith("观战段下线之前没有等到 "))).hasSize(2)
+                .anyMatch(n -> n.startsWith("观战段下线之前没有等到 SD 的 battle_id="))
+                .anyMatch(n -> n.startsWith("观战段下线之前没有等到 SB 的 battle_id="))
+                .allMatch(n -> n.contains("的大厅 150") && n.contains("照常下线"));
     }
 
     @Test

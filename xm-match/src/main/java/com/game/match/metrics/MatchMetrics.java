@@ -269,7 +269,8 @@ public final class MatchMetrics {
     /**
      * 清退的起因（{@code xm_match_spectate_evictions_total{reason}}）；标签值与发给 battle 的 {@code RemoveObserverRequest.reason} 逐字相同
      * （{@code spectate.SpectateRules.REASON_*}）：{@code ENTER_GATHER} = 开局前清退参战者；{@code REWATCH} = 163 入口处清掉旧标记（换场 / 随机）；
-     * {@code CONCURRENT_QUEUE} = 163 登记成功后的复查命中票据或战斗锁，自我清退。
+     * {@code CONCURRENT_QUEUE} = 163 的自我清退：登记成功后的复查命中票据或战斗锁；或「重看同一场」删掉旧标记之后、抢新标记时发现已有票据
+     * （那时观众登记还在、标记已无）。
      */
     public enum EvictReason { ENTER_GATHER, REWATCH, CONCURRENT_QUEUE }
 
@@ -283,7 +284,7 @@ public final class MatchMetrics {
      *       {@code watchable_anomalies{reason="mark_read_failed"}}）；</li>
      *   <li>{@code RPC_FAILED}：RemoveObserver 没调通（没送达 / 超时 / 断开）：只记日志，名单里的残留随那一场结束清理。</li>
      * </ul>
-     * 163「显式重看同一场」只删标记、不发 Remove，不算清退，不计。
+     * 163「显式重看同一场」只删标记、不发 Remove，不算清退，不计（随后抢标记发现有票而补发的自我清退按 {@code CONCURRENT_QUEUE} 计）。
      */
     public enum EvictResult { REMOVED, NO_RECORD, INVALID_MARK, READ_FAILED, RPC_FAILED }
 

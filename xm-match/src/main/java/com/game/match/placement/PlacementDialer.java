@@ -73,8 +73,8 @@ public interface PlacementDialer {
     <R> Dial<R> dial(BattlePlacement placement, Duration timeout, Function<BattleNodeService, CompletableFuture<R>> call);
 
     /**
-     * 同上，但<b>整次直拨不越过 {@code hardStop}</b>（lead 裁决 3；spectate-spec §4.8）——发调用、本地等待、请求没送达之后的目录读、
-     * 判死前的探测，每一步都夹在它之内。判定规则与不带截止的重载完全相同，只多这几条：
+     * 同上，但<b>整次直拨不越过 {@code hardStop}</b>（lead 裁决 3；spectate-spec §4.8）——交给出站口的超时、本地等待、请求没送达之后的
+     * 目录读、判死前的探测，都夹在它之内。判定规则与不带截止的重载完全相同，只多这几条：
      * <ul>
      *   <li>进来时 {@code hardStop} 已过：<b>不发调用</b>，直接 {@link Dial.Unavailable}({@link Kind#NOT_DELIVERED})（请求确定没有发出）。</li>
      *   <li>交给出站口的超时是 {@code min(timeout, hardStop 的剩余)}；本地至多等到 {@code hardStop}（不再另加本地余量越过它）。
@@ -83,7 +83,11 @@ public interface PlacementDialer {
      *       → {@link Dial.Unavailable}({@link Kind#NOT_DELIVERED})。</li>
      * </ul>
      * 即<b>到点一律按「没调通、不判死」返回</b>：{@link Dial.RoomGone} 只在三条证据都在 {@code hardStop} 之前拿齐时才给出，
-     * 时间不够永远不会被当成「这局没了」。返回时刻不晚于 {@code hardStop} 加上调度抖动（毫秒级）。
+     * 时间不够永远不会被当成「这局没了」。返回时刻不晚于 {@code hardStop} 加上调度抖动（毫秒级）——<b>前提是出站口守约</b>：
+     * 「发调用」这一步（{@code NodeCalls.call}）自己没有截止，硬截止管不到它，靠的是它「不阻塞」的契约。生产的出站口
+     * （{@code port.NodeClientCache}）取一把进程内的锁之后才发起调用，同一把锁在清扫销毁空闲引用（空闲 ≥ 360 s 的地址，60 s 一轮）时被短暂占着：
+     * 销毁不等 I/O，按读 Dubbo 3.3.6 的实现是毫秒级，与上面的抖动同量级（已知遗留：没有实测，也没有把销毁挪到锁外）。
+     * 到点不判死不受它影响（判死仍要三条证据）。
      *
      * @param placement 落点记录（地址与实例取自它）
      * @param timeout   这一次调用的上限（{@code MatchBudgets.ADD_OBSERVER_TIMEOUT_MS} / {@code REMOVE_OBSERVER_TIMEOUT_MS}）；≤ 0 时不发包、按超时收场（同不带截止的重载）

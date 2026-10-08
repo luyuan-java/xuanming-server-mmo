@@ -3,6 +3,7 @@ package com.game.match.spectate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.api.match.MatchBudgets;
 import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.match.MatchProperties;
@@ -37,7 +38,10 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 /**
  * 163、观众 RPC 与在途执行器的<b>真装配</b>（批次 6.5 工作包 W2；占位已换掉，M22 的 163 一半关闭）。钉住：四个 bean 的类型与彼此的接线
@@ -45,6 +49,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
  * 上下文关闭之后执行器不再受理；并经装配出来的处理器走通一次 163——观众 RPC 真的经直拨器发到了落点记录指向的 battle。
  * 判定表、直拨的四种结局、执行器的许可分别见 {@code WatchBattleServiceTest} / {@code DefaultObserverDialerTest} / {@code SpectateExecutorTest}。
  */
+@ExtendWith(OutputCaptureExtension.class)
 class WatchBattleConfigurationTest {
 
     private static final long PLAYER = 1001;
@@ -64,10 +69,15 @@ class WatchBattleConfigurationTest {
 
     /** 只装这一个装配类；它依赖的别的包的 bean 用替身（不加 @Configuration 类：本包的测试类会被起整个进程的测试扫描到）。 */
     private ApplicationContextRunner runner(MatchProperties.Spectate spectateProps) {
+        return runner(null, spectateProps);
+    }
+
+    /** @param requestBudget {@code xm.match.request-budget}（null = 缺省 4500 ms） */
+    private ApplicationContextRunner runner(Duration requestBudget, MatchProperties.Spectate spectateProps) {
         return new ApplicationContextRunner()
                 .withUserConfiguration(WatchBattleConfiguration.class)
                 .withBean(MatchProperties.class,
-                        () -> new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, spectateProps))
+                        () -> new MatchProperties(null, requestBudget, null, null, null, null, null, null, null, null, null, null, spectateProps))
                 .withBean(MatchMetrics.class, () -> metrics)
                 .withBean(SpectateStore.class, () -> spectate)
                 .withBean(PlacementStore.class, () -> placements)
@@ -195,6 +205,43 @@ class WatchBattleConfigurationTest {
             assertThat(meters.get("xm.match.observer.rpc").tag("method", "add").tag("result", "replied").counter().count()).isEqualTo(1.0);
             assertThat(context.getBean(SpectateExecutor.class).awaitIdle(Duration.ofSeconds(20))).isTrue();
         });
+    }
+
+    // ================================================================ 整请求预算够不够 163 用（配置的合法区间是 [500 ms, 4500 ms]，163 的门槛是代码常量）
+
+    @Test
+    void 预算核对_缺省4500与恰好2300都够用_不告警() {
+        assertThat(WatchBattleConfiguration.REWATCH_BUDGET_FLOOR_MS).as("换场预留 1200 + AddObserver 最低预算 1000 + 入口读的余量 100").isEqualTo(2_300);
+        assertThat(WatchBattleConfiguration.ADD_BUDGET_FLOOR_MS).as("AddObserver 最低预算 1000 + 余量 100").isEqualTo(1_100);
+
+        assertThat(WatchBattleConfiguration.budgetWarning(Duration.ofMillis(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS))).isEmpty();
+        assertThat(WatchBattleConfiguration.budgetWarning(Duration.ofMillis(2_300))).isEmpty();
+    }
+
+    @Test
+    void 预算核对_低于2300_告警带旧标记的换场恒回16004_还够登记时不说观战整体不可用() {
+        assertThat(WatchBattleConfiguration.budgetWarning(Duration.ofMillis(2_299))).hasValueSatisfying(text -> assertThat(text)
+                .contains("xm.match.request-budget=2299ms", "低于 2300 ms", "换场", "16004", "360 s").doesNotContain("观战整体不可用"));
+        assertThat(WatchBattleConfiguration.budgetWarning(Duration.ofMillis(1_100))).hasValueSatisfying(text -> assertThat(text)
+                .contains("xm.match.request-budget=1100ms", "换场").doesNotContain("观战整体不可用"));
+    }
+
+    @Test
+    void 预算核对_低于1100_另告警凡是走到登记的163都回16004_合法区间的下限500也在其中() {
+        assertThat(WatchBattleConfiguration.budgetWarning(Duration.ofMillis(1_099))).hasValueSatisfying(text -> assertThat(text)
+                .contains("xm.match.request-budget=1099ms", "换场", "低于 1100 ms", "观战整体不可用"));
+        assertThat(WatchBattleConfiguration.budgetWarning(MatchProperties.MIN_REQUEST_BUDGET)).hasValueSatisfying(text -> assertThat(text)
+                .contains("xm.match.request-budget=500ms", "观战整体不可用"));
+    }
+
+    @Test
+    void 装配时预算不够163用_只打一条WARN不拒启_缺省预算不打(CapturedOutput output) {
+        runner(null).run(context -> assertThat(context).hasNotFailed().hasSingleBean(WatchBattleService.class));
+        assertThat(output.getAll()).as("缺省 4500 ms").doesNotContain("不够 163 观战用");
+
+        // 2 s 在合法区间 [500 ms, 4500 ms] 之内：别的号够用，所以不拒启；163 的换场不够
+        runner(Duration.ofSeconds(2), null).run(context -> assertThat(context).hasNotFailed().hasSingleBean(WatchBattleService.class));
+        assertThat(output.getAll()).contains("WARN").contains("xm.match.request-budget=2000ms 不够 163 观战用");
     }
 
     @Test

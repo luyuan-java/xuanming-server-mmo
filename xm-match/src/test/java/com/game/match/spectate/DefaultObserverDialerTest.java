@@ -312,16 +312,17 @@ class DefaultObserverDialerTest {
         CompletableFuture<AddObserverResponse> hanging = battle.nextAddHangs();
         directory.add(FakeBattleNodes.node(1, "inst-successor", 21999));
 
-        // 超时故意给得很长（10 s），与硬截止（300 ms）拉开距离：断言不依赖窄的时间窗
+        // 超时故意给得很长（30 s），与硬截止（1 s）拉开距离：断言不依赖窄的时间窗。硬截止给 1 s 而不是几百毫秒：
+        // 从创建截止到发调用之间即使卡住一下，也不会被判成「硬截止已到，没有发出调用」（NotDelivered）那一支
         long startedNanos = System.nanoTime();
-        Outcome outcome = dialer.add(PLACEMENT, ADD, Duration.ofSeconds(10), in(300));
+        Outcome outcome = dialer.add(PLACEMENT, ADD, Duration.ofSeconds(30), in(1_000));
         long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
 
         assertThat(outcome).as("到点一律不判死：请求已经发出，结局不明").isInstanceOf(Outcome.Unknown.class);
-        assertThat(elapsedMillis).as("等到硬截止（300 ms）为止，不是调用方给的 10 s 超时，也不再另加本地余量").isBetween(250L, 6_000L);
+        assertThat(elapsedMillis).as("等到硬截止（1 s）为止，不是调用方给的 30 s 超时，也不再另加本地余量").isBetween(990L, 20_000L);
         assertThat(battle.adds).as("请求确实发出去了").hasSize(1);
         assertThat(calls.calls).singleElement().satisfies(call -> assertThat(call.timeout().toMillis())
-                .as("交给出站口的超时已按硬截止的剩余收短").isBetween(1L, 300L));
+                .as("交给出站口的超时已按硬截止的剩余收短").isBetween(1L, 1_000L));
         assertThat(directory.lookups).isEmpty();
         assertThat(count("add", "unknown")).isEqualTo(1.0);
         hanging.complete(AddObserverResponse.getDefaultInstance());

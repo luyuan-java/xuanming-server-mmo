@@ -23,7 +23,10 @@ public final class SpectateRules {
     public static final String REASON_REWATCH = "rewatch";
     /** 开局前清退正在观战的参战者。与 {@code EvictReason.ENTER_GATHER} 的标签值逐字相同。 */
     public static final String REASON_ENTER_GATHER = "enter_gather";
-    /** 163 登记成功后的复查命中票据或战斗锁，自我清退。与 {@code EvictReason.CONCURRENT_QUEUE} 的标签值逐字相同。 */
+    /**
+     * 163 的自我清退：登记成功后的复查命中票据或战斗锁；或重看同一场时抢标记发现已有票据（旧标记已删、观众登记还在）。
+     * 与 {@code EvictReason.CONCURRENT_QUEUE} 的标签值逐字相同。
+     */
     public static final String REASON_CONCURRENT_QUEUE = "concurrent_queue";
 
     /** 标记值里 nonce 的长度：16 位小写十六进制（64 位随机数）。 */

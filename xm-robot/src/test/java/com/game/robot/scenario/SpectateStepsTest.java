@@ -80,7 +80,7 @@ class SpectateStepsTest {
     }
 
     @Test
-    void 标准时限_等观众票与首帧各15秒_等收尾120秒_屏障期60秒_残留窗口62秒_预清理30轮() {
+    void 标准时限_等观众票与首帧各15秒_等收尾120秒_屏障期30秒_残留窗口62秒_等结算落地25秒_预清理30轮() {
         SpectateSteps.Timing standard = SpectateSteps.Timing.STANDARD;
         assertThat(standard.ticketTimeout()).isEqualTo(Duration.ofSeconds(15));
         assertThat(standard.firstFrameTimeout()).isEqualTo(Duration.ofSeconds(15));
@@ -88,10 +88,27 @@ class SpectateStepsTest {
         assertThat(standard.publishRetry()).isEqualTo(Duration.ofSeconds(5));
         assertThat(standard.randomRetry()).isEqualTo(Duration.ofSeconds(10));
         assertThat(standard.evictTimeout()).isEqualTo(Duration.ofSeconds(10));
-        assertThat(standard.liveBudget()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(standard.liveBudget()).isEqualTo(Duration.ofSeconds(30));
         assertThat(standard.readyResidue()).isEqualTo(Duration.ofSeconds(62));
+        assertThat(standard.settleWait()).as("等大厅 150 的上限与跨区场景的 Z7 同值").isEqualTo(Duration.ofSeconds(25))
+                .isEqualTo(BattleCrossZoneScenario.LOBBY_END_TIMEOUT);
         assertThat(standard.precleanRounds()).isEqualTo(30);
         assertThat(standard.stopTimeout()).as("165 的应答与 FIN：battle 1.5 s 内 FIN，留足余量").isGreaterThanOrEqualTo(Duration.ofSeconds(3));
+    }
+
+    @Test
+    void 屏障期的预算有判别力_比战斗X的最短寿命短一个回合以上_又放得下各步正常的等待() {
+        // 评审 R-3：预算 60 s 时，新号单人 PVE 实测 7–10 回合、不开自动只活 42–60 s——脚本真慢的时候先触发的总是「X 提前结束」，
+        // 预算那条检查永远报不出来
+        long budgetMs = SpectateSteps.Timing.STANDARD.liveBudget().toMillis();
+        long shortestLifeMs = SpectateSteps.SOLO_PVE_MIN_ROUNDS * SpectateSteps.ROUND_TIMEOUT_MS;
+        assertThat(shortestLifeMs).as("新号单人 PVE 最少 7 回合 × 6 s").isEqualTo(42_000);
+        assertThat(budgetMs + SpectateSteps.ROUND_TIMEOUT_MS).as("预算用完时 X 至少还剩一个回合：超预算先于 X 结束报出来")
+                .isLessThanOrEqualTo(shortestLifeMs);
+        // 另一头：S2 的公开重试（5 s）与 S8 的随机观战重试（10 s）都耗满，加上两个 1 s 的静默窗口，仍在预算内——预算不该因为这些合法的慢而报
+        SpectateSteps.Timing standard = SpectateSteps.Timing.STANDARD;
+        assertThat(budgetMs).isGreaterThan(standard.publishRetry().plus(standard.randomRetry()).plus(MatchSupport.SILENCE.multipliedBy(2)).toMillis()
+                + 6_000);
     }
 
     // ---------------------------------------------------------------- 163 的应答

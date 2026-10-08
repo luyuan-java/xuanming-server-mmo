@@ -35,6 +35,7 @@ import com.game.match.gather.GatherOutcome;
 import com.game.match.gather.RedisBattleNodes;
 import com.game.match.gather.VirtualThreadGatherLauncher;
 import com.game.match.id.MatchIds;
+import com.game.match.lifecycle.InflightWatches;
 import com.game.match.lifecycle.MatchLifecycle;
 import com.game.match.lifecycle.MatcherControl;
 import com.game.match.lifecycle.ResultConsumerControl;
@@ -76,8 +77,11 @@ import com.game.proto.match.ChallengePlayerRequest;
 import com.game.proto.match.ChallengePlayerResponse;
 import com.game.proto.match.JoinQueueRequest;
 import com.game.proto.match.JoinQueueResponse;
+import com.game.proto.match.ListWatchableBattlesRequest;
 import com.game.proto.match.StartActivityBattleRequest;
 import com.game.proto.match.StartActivityBattleResponse;
+import com.game.proto.match.WatchBattleRequest;
+import com.game.proto.match.WatchBattleResponse;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -264,7 +268,8 @@ class MatchSkeletonContextTest {
 
     /**
      * 当场回的两个号（入口派发这一包自己提供）；其余八个号的处理器在排队、补签、切磋、观战各包。163 / 164 自批次 6.5 起归观战包、不再当场回：
-     * 它们经真 Triple 的应答由观战包自己的测试钉（这个上下文的 Redis 替身只应答发号租约），这里只在下一条用例里钉「十个号都有处理器」。
+     * 判定表由观战包自己的测试钉，这里钉它们经真 Triple 走到处理器这一跳（这个上下文的 Redis 替身只应答发号租约，所以走的是「依赖故障」一列，
+     * 见「观战两个号经真Triple走到处理器…」）。
      */
     private static final Set<String> INLINE_METHODS = Set.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
 
@@ -329,6 +334,52 @@ class MatchSkeletonContextTest {
         assertThat(response.getErrorMessage().getParametersList()).containsExactly(BUSY_TEXT);
         assertThat(response.hasAssignment()).isFalse();
         assertThat(reply.getDirectivesList()).isEmpty();
+    }
+
+    /**
+     * 观战两个号（批次 6.5）经真 Triple 走到观战包的处理器：Dubbo 提供方 → {@code MatchClientMessageService} → 派发器 → 163 在它自己的执行器
+     * （每个请求一条虚拟线程）上完成应答 future、164 在 {@code match-worker} 上——应答都经真的 Dubbo 提供方回得出去。
+     * Redis 替身读不出任何东西，正好是「依赖故障」一列（spectate-spec §4.11 给 match-spec §8.1 补的两行）：163 回 in-band 16004，
+     * 没有 in-band 错误字段的 164 回信封 1003；163 的身份只认会话，没绑定玩家当场回「缺少玩家身份」（不读任何依赖）。
+     */
+    @Test
+    void 观战两个号经真Triple走到处理器_依赖故障时163回inband16004_164回信封1003_163没绑定玩家回缺少玩家身份() throws Exception {
+        int watch = messageId(MatchMethods.WATCH_BATTLE);
+        int list = messageId(MatchMethods.LIST_WATCHABLE_BATTLES);
+        assertThat(List.of(watch, list)).containsExactly(163, 164);
+        ClientCall watchCall = call(watch).toBuilder().setBody(WatchBattleRequest.newBuilder().setBattleId(42).build().toByteString()).build();
+        ClientCall unbound = watchCall.toBuilder().setSession(watchCall.getSession().toBuilder().setPlayerId(0)).build();
+        ClientCall listCall = call(list).toBuilder().setBody(ListWatchableBattlesRequest.getDefaultInstance().toByteString()).build();
+
+        ClientReply watched = client().handle(watchCall).get(15, TimeUnit.SECONDS);
+        ClientReply anonymous = client().handle(unbound).get(15, TimeUnit.SECONDS);
+        ClientReply listed = client().handle(listCall).get(15, TimeUnit.SECONDS);
+
+        assertThat(watched.getTipId()).as("163 的失败在应答体里，不走信封").isZero();
+        WatchBattleResponse busy = WatchBattleResponse.parseFrom(watched.getBody());
+        assertThat(busy.getBattleId()).isZero();
+        assertThat(busy.getErrorMessage().getId()).as("读票据与观战标记失败 → §3.1 第 2 行").isEqualTo(16004);
+        assertThat(busy.getErrorMessage().getParametersList()).containsExactly(BUSY_TEXT);
+
+        assertThat(anonymous.getTipId()).isZero();
+        WatchBattleResponse noIdentity = WatchBattleResponse.parseFrom(anonymous.getBody());
+        assertThat(noIdentity.getBattleId()).isZero();
+        assertThat(noIdentity.getErrorMessage().getId()).isEqualTo(16004);
+        assertThat(noIdentity.getErrorMessage().getParametersList()).as("§3.1 第 1 行").containsExactly("缺少玩家身份");
+
+        assertThat(listed.getTipId()).as("164 没有 in-band 错误字段：读索引失败回信封").isEqualTo(1003);
+        assertThat(listed.getBody().isEmpty()).isTrue();
+        for (ClientReply reply : List.of(watched, anonymous, listed)) {
+            assertThat(reply.getTipParametersList()).isEmpty();
+            assertThat(reply.getDirectivesList()).as("match 不产生会话指令").isEmpty();
+        }
+        // 两条 163 都做完了：在途许可已归还（163 不占 match-worker，许可由它自己的执行器管）
+        assertThat(context.getBean(InflightWatches.class).awaitIdle(Duration.ofSeconds(15))).isTrue();
+        // 出口指标（本类只有这一条用例发 163 / 164，计数是确定的）
+        String scrape = get("/actuator/prometheus", false).body();
+        assertThat(scrape).as("两条 163 各记一个 internal 出口")
+                .containsPattern("xm_match_watch_battle_total\\{[^}]*outcome=\"internal\"[^}]*} 2\\.0");
+        assertThat(scrape).as("164 读索引失败").containsPattern("xm_match_list_watchable_total\\{[^}]*result=\"error\"[^}]*} 1\\.0");
     }
 
     @Test

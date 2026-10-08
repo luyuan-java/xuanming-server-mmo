@@ -34,7 +34,7 @@ import com.game.robot.client.RobotException;
 import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.flow.Timings;
-import com.game.robot.scenario.BattleSmokeChecks.InBattleWatch;
+import com.game.robot.scenario.BattleSmokeChecks.ReadyResidue;
 import com.game.robot.scenario.BattleSupport.Direct;
 import com.game.robot.scenario.MatchSupport.AutoRequest;
 import com.game.robot.scenario.MatchSupport.Bot;
@@ -76,12 +76,15 @@ import java.util.concurrent.TimeUnit;
  *   <li>S9 放行屏障，SA 开自动打到 150；SB 的直连上 ≥ 1 条 158 → 166 {FINISHED, 同一个 outcome} → FIN；SB 的大厅上没有任何战斗帧；</li>
  *   <li>S10 SB 再发 163(X) → 16018；SC 的 164 里没有 X；</li>
  *   <li>S11 开局清退：SD 开战斗 Z，SB 观战 Z 后去排 PVE_SOLO → Z 的直连上 166 {ONGOING, REMOVED} → FIN，大厅收到新战斗 W 的 177 / 143；
- *       之后两人都开自动打完；</li>
- *   <li>S12（插在第 9 步的切磋局里，A、B 开自动之前）A 发 163(0) → 16015；上一局 1V1 的 ready 票还在时先回 16014，按过渡态重试到
- *       「第 8 步收到 177 + 62 s」；</li>
+ *       之后两人都开自动打完，并等这两局的结算落到 scene（大厅 150，等不到只记观察）再下线——否则 battle 的结算发件箱要对着离线玩家
+ *       重投约两分钟才放弃；</li>
+ *   <li>S12（插在第 9 步里）分两半：<b>切磋开局之前</b>用 153 把 A 上一局 1V1 的 ready 票据等掉（它在时 163 一律回 16014；每 1 s 问一次，
+ *       到「第 8 步收到 177 + 62 s」还是 READY 即失败）；<b>切磋局里</b>（A、B 开自动之前）A 发一次 163(0)，必须是 16015。
+ *       不在切磋局里等：切磋双方带着上一局的结算血量进场，不开自动的切磋局可以只有 1 回合（6 s）；</li>
  *   <li>S13（场景末尾）xm-match 的观战指标增量。</li>
  * </ul>
- * S1 收到 177 到 S8 结束合计预算 60 s，超出记 {@code step=s<n>-budget}；S9 之前 X 就结束记 {@code step=s<n>-x-ended-early}。
+ * S1 收到 177 到 S8 结束合计预算 30 s（正常约 6 s；新号单人 PVE 最少 7 回合，不开自动的 X 至少活 42 s），超出记 {@code step=s<n>-budget}；
+ * S9 之前 X 就结束记 {@code step=s<n>-x-ended-early}。
  *
  * <p><b>匹配段</b>（三个新号 A / B / C，步骤号沿 6.4；原第 10 步——6.4 的 163 / 164 临时应答——随 M22 关闭删除）：
  * <ol>
@@ -98,8 +101,9 @@ import java.util.concurrent.TimeUnit;
  *       旧局的 179 → 1005；</li>
  *   <li>第 8 步 1V1 与评分：A 受理之后 B 再排（A 是锚点）→ 同一 battle_id、A 在 0 队 B 在 1 队 → 都挂机打到 150 → 10 s 内评分落账：
  *       games 各 + 1；胜负且不满 30 回合 |Δ| = 16，平局或打满 Δ = 0；</li>
- *   <li>第 9 步 切磋：16007 → 156 邀请逐字段 → 16011 → 16013（不消费）→ 拒绝只推发起者 → 16012 → 再发起、接受 → 双方 154 true 与
- *       同一局的 177 / 143 → 开自动之前 C 挑 A → 16009、A 发 163(0)（S12）→ 打完 → C 下线后 A 挑 C：越过过渡态 16010 直到 16008；</li>
+ *   <li>第 9 步 切磋：16007 → 156 邀请逐字段 → 16011 → 16013（不消费）→ 拒绝只推发起者 → 16012 →（S12 前半：等 A 的 ready 票据过期）→
+ *       再发起、接受 → 双方 154 true 与同一局的 177 / 143 → 开自动之前 C 挑 A → 16009、A 发 163(0)（S12 后半）→ 打完 → C 下线后 A 挑 C：
+ *       越过过渡态 16010 直到 16008；</li>
  *   <li>第 11 步 xm-match 指标（本轮的增量）：成功开局按模式 PVE_SOLO ≥ 2、1V1 ≥ 1、切磋 ≥ 1；补签成功 ≥ 1；切磋按出口
  *       {@code invite/ok} ≥ 2、{@code respond/declined} ≥ 1、{@code respond/accepted} ≥ 1；评分入账 ≥ 1；</li>
  *   <li>第 12 步 结果行 {@code BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… challenge_battle_id=…
@@ -110,7 +114,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>节奏：同一会话相邻请求隔 {@link MatchSupport#REQUEST_SPACING}（gate 对 match 的号每秒 3 条）；过渡态每 1 s 重试、上限 20 s；
  * 等开战 30 s、等终局 120 s；等观众票与 161 各 15 s、等 166 120 s。各阶段独立：前一阶段中断时记失败并继续后面的阶段（它们各自从排队开始）。
- * 收尾时给 A / B 各发一条 148("")（取消当前票，尽力而为），免得中断的那一步把 6 小时的排队票留在队列里；观战段的四个号在该段结束时就下线。
+ * 收尾时给 A / B 各发一条 148("")（取消当前票，尽力而为），免得中断的那一步把 6 小时的排队票留在队列里；观战段的四个号在该段结束时就下线
+ * （S11 里刚打完的局先等结算落到 scene，上限是直连 150 之后 25 s）。
  *
  * <p>结果行里的步骤号是小写（{@code s3-watch}、{@code s5-budget}……）：{@link StepTrack} 只认小写字母、数字与连字符（同 6.4 的
  * {@code 4-pve-solo}、team 的 {@code s7-team-battle}）。
@@ -168,12 +173,24 @@ public final class BattleSmokeScenario {
     private long spectateBattleId;
     private int spectateTurns;
     private boolean removedOk;
+    /** S12 前半（切磋开局之前）的 153 见到过 READY：A 上一局 1V1 的 ready 票据那时还没过期。 */
     private boolean readyResidue;
 
     /** 第 8 步 A 收到 1V1 那一局 177 的时刻（{@link System#nanoTime()}）；没跑到为 0。S12 据此算那一局的 ready 票据最晚何时过期。 */
     private long pvpAssignedNanos;
     /** 观战段 S6 里 SB 还没取消的排队票；没有为 null。观战段中途中断时据此补一条 148。 */
     private String spectatorQueueTicket;
+
+    /**
+     * 观战段里刚打完、结算可能还没落到 scene 的一局（S11 的 Z 与 W）。
+     *
+     * @param bot        参战者
+     * @param endedNanos 他的直连上这一局 150 到达的时刻（等大厅 150 的上限从它起算）
+     */
+    private record Settling(Bot bot, long battleId, long endedNanos) {
+    }
+
+    private final List<Settling> settling = new ArrayList<>();
 
     public BattleSmokeScenario(RobotClient client, PlayerFlow flow, MessageIdRegistry registry, MatchAdminClient admin, String accountPrefix,
                                String runTag, Duration requestTimeout) {
@@ -288,14 +305,45 @@ public final class BattleSmokeScenario {
         try {
             spectateSteps(sa, sb, sc, sd);
         } finally {
-            // 四个号的戏份到此为止：SB 的排队票没来得及取消就补一条 148，然后按契约收尾（LeaveGame 后断开）
+            // 四个号的戏份到此为止：SB 的排队票没来得及取消就补一条 148；S11 刚打完的局等结算落地；然后按契约收尾（LeaveGame 后断开）
             if (spectatorQueueTicket != null) {
                 cancelQuietly(sb);
             }
+            awaitSettled();
             for (Bot bot : List.of(sa, sb, sc, sd)) {
                 leave(bot);
             }
         }
+    }
+
+    /**
+     * 观战段的号下线之前，等 S11 里刚打完的局（SD 的 Z、SB 的 W）结算落到 scene：scene 应用结算之后才经大厅推这一局的 150
+     * （同 battle-cross-zone 的 Z7）。不等的话，参战者在结算应用之前就离场，battle 的结算发件箱要对着离线玩家重投约两分钟才放弃，
+     * 每遍留下 1–2 条「结算重投用尽（玩家离线）」的告警与 {@code exhausted_offline} 计数，这几个号带着战斗冻结与没应用的结算下线。
+     * X 不用等：它在 S9 就结束了，到这里隔着 S10、S11。
+     *
+     * <p>各局共用一个截止时刻（最后一条直连 150 到达 + {@code settleWait}），等不到只记观察、不判失败；本方法不抛异常（在 finally 里）。
+     */
+    private void awaitSettled() {
+        if (settling.isEmpty()) {
+            return;
+        }
+        long deadline = settling.stream().mapToLong(Settling::endedNanos).max().getAsLong() + timing.settleWait().toNanos();
+        for (Settling s : settling) {
+            String who = s.bot().name + " 的 battle_id=" + uid(s.battleId());
+            try {
+                Duration remaining = Duration.ofNanos(Math.max(0, deadline - System.nanoTime()));
+                Optional<Received> end = s.bot().connection().await(0, r -> BattleCrossZoneChecks.lobbyEnd(r, battleIds, s.battleId()) != null,
+                        remaining);
+                if (end.isEmpty()) {
+                    report.note("观战段下线之前没有等到 " + who + " 的大厅 150（直连 150 之后 " + timing.settleWait().toSeconds()
+                            + " s 内结算没有落到 scene）：照常下线，xm-battle 稍后会记一条「结算重投用尽（玩家离线）」" + s.bot().describeSince(0));
+                }
+            } catch (RobotException | RuntimeException e) {
+                report.note("观战段下线之前等 " + who + " 的大厅 150 时中断：" + message(e));
+            }
+        }
+        settling.clear();
     }
 
     private void spectateSteps(Bot sa, Bot sb, Bot sc, Bot sd) throws RobotException {
@@ -616,11 +664,14 @@ public final class BattleSmokeScenario {
             AutoRequest autoZ = MatchSupport.enableAuto(sdDirect, zId, battleIds);
             AutoRequest autoW = sbFight == null ? null : MatchSupport.enableAuto(sbFight, wId, battleIds);
             Finished zEnd = MatchSupport.awaitEnd(sdDirect, zId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoZ);
+            // 直连 150 到了的局记下来：观战段下线之前等它的结算落到 scene（awaitSettled）
+            settling.add(new Settling(sd, zId, endNanos(sdDirect, zId)));
             sdDirect.close();
             boolean finished = zEnd.fin() && zEnd.autoAccepted();
             String detail = "Z 关闭=" + zEnd.closed() + zEnd.autoNote();
             if (sbFight != null) {
                 Finished wEnd = MatchSupport.awaitEnd(sbFight, wId, battleIds, MatchSupport.BATTLE_END_TIMEOUT, autoW);
+                settling.add(new Settling(sb, wId, endNanos(sbFight, wId)));
                 sbFight.close();
                 finished &= wEnd.fin() && wEnd.autoAccepted();
                 detail += "；W 关闭=" + wEnd.closed() + wEnd.autoNote();
@@ -628,6 +679,16 @@ public final class BattleSmokeScenario {
             report.check(finished && sbFight != null, "S11 之后 SD、SB 都开自动（162 被受理）打完各自的局（否则带着战斗锁）",
                     sbFight == null ? detail + "；SB 的 W 没有开出来" : detail, SPECTATE_REF + " S11");
         }
+    }
+
+    /** 这条直连上这一局 150 到达的时刻（{@link System#nanoTime()}）；找不到按现在算。 */
+    private long endNanos(Direct direct, long battle) {
+        for (BattleFrame frame : direct.since(0)) {
+            if (frame.isPush(battleIds.battleEnd()) && MatchSupport.endOf(List.of(frame), battleIds, battle) != null) {
+                return frame.atNanos();
+            }
+        }
+        return System.nanoTime();
     }
 
     /** 凭观众票直连到 161，并登记到收尾时关闭的名单里。 */
@@ -688,8 +749,11 @@ public final class BattleSmokeScenario {
             steps.step("s" + n + "-x-ended-early", report);
             report.fail("S" + n + " 之前战斗 X 就结束了（屏障期间 SA 的直连上出现了" + (ended ? " 150" : "关闭") + "）",
                     "X 打了 " + MatchSupport.turnCount(frames, battleIds) + " 回合，距 S1 收到 177 " + barrierElapsedMs()
-                            + " ms。X 不开自动时每 6 s 按回合超时结算一次：回合数远少于十几回合说明表数值变了，否则是脚本太慢；帧="
-                            + BattleSupport.labels(frames), SPECTATE_REF + "「战斗 X 的寿命」");
+                            + " ms。X 不开自动时每 " + SpectateSteps.ROUND_TIMEOUT_MS / 1000 + " s 按回合超时结算一次，新号单人 PVE 实测 "
+                            + SpectateSteps.SOLO_PVE_MIN_ROUNDS + "–10 回合（约 42–60 s）：回合数明显少于 " + SpectateSteps.SOLO_PVE_MIN_ROUNDS
+                            + " 说明表数值变了（同步 SpectateSteps.SOLO_PVE_MIN_ROUNDS 与屏障期预算）；否则是脚本太慢——那样的话 "
+                            + timing.liveBudget().toSeconds() + " s 的预算应当已经先报了 budget；帧=" + BattleSupport.labels(frames),
+                    SPECTATE_REF + "「战斗 X 的寿命」");
             throw new RobotException("战斗 X 在 S9 放行之前就结束了，观战段后面的步骤依赖它");
         }
         steps.step(step, report);
@@ -991,6 +1055,9 @@ public final class BattleSmokeScenario {
                 "第 9 步 B 再应答同一条邀请 → 16012「切磋邀请已过期」（记录是一次性的）", BattleSmokeChecks.describe(consumed.getErrorMessage()),
                 "match-spec §6.1");
 
+        // S12 的前半：切磋开局之前把 A 上一局 1V1 的 ready 票据等掉（发起之前等——邀请只有 60 s 的有效期，不能挂着它等）
+        awaitReadyResidue(a);
+
         // 再发起、接受：先推双方 154 true，再开局
         Invite second = inviteRetrying(a, b, "第 9 步 A 再次挑战 B");
         markA = a.mark();
@@ -1037,7 +1104,7 @@ public final class BattleSmokeScenario {
         c.connection().send(leaveGame, LeaveGameRequest.getDefaultInstance());
         c.connection().close();
 
-        // S12（观战段的一步，借这一局）：切磋不建票，A 只有战斗锁
+        // S12 的后半（观战段的一步，借这一局）：切磋不建票，A 只有战斗锁。紧跟着开局发——不开自动的切磋局可以只有一个回合（6 s）
         inBattleWatch(a, directA, directB);
 
         AutoRequest autoA = MatchSupport.enableAuto(directA, challengeBattleId, battleIds);
@@ -1125,44 +1192,74 @@ public final class BattleSmokeScenario {
                 p -> p.getChallengeId() == challengeId, MatchSupport.PUSH_TIMEOUT);
     }
 
-    // ---------------------------------------------------------------- S12（在第 9 步的切磋局里）
+    // ---------------------------------------------------------------- S12（在第 9 步里：前半在切磋开局之前，后半在切磋局里）
 
     /**
-     * S12：A 在切磋局里（开自动之前）发 163(0)，期望 16015。A 在第 8 步刚打完 1V1，那一局的 ready 票据（60 s）可能还在，而 163 先查票据后查锁、
-     * 对票据不自愈（BW1），这时回 16014：每 1 s 重试，直到「第 8 步收到 177 的时刻 + 62 s」，之后必须是 16015。切磋局不开自动时按 6 s 的
-     * 回合超时推进，新号 1V1 最短也要打约 48 s，等得过来；等待期间它要是打完了就记 {@code s12-battle-ended}。
+     * S12 的前半：切磋开局之前，用 153 把 A 上一局 1V1 的 ready 票据等掉。A 在第 8 步刚打完 1V1，那一局的 ready 票据（60 s）可能还在，
+     * 而 163 先查票据后查锁、对票据不自愈（BW1），带着它进切磋局发 163 会回 16014 而不是 16015。153 是纯读、与 163 读的是同一张票：
+     * 每 1 s 问一次，直到 NOT_QUEUED；到「第 8 步收到 177 的时刻 + 62 s」还是 READY 就记一条失败，照常往下跑。
+     *
+     * <p><b>不在切磋局里等</b>（规格最初的写法）：切磋双方带着上一局 1V1 的结算血量进场——胜者残血、败者复活回满——不开自动的切磋局
+     * 可以只有 1 回合（6 s），而等待最长要几十秒（2026-10-08 切片实测：1V1 打 29 回合时紧接着的切磋局只有 1 回合，那一遍是靠
+     * 「1V1 恰好打了 57 s，票刚过期」才过的）。在开局之前等完，S12 的后半就只需要切磋局的第一个回合窗口。
+     *
+     * <p>不抛异常：这一步出什么事，切磋照常往下跑。
+     */
+    private void awaitReadyResidue(Bot a) {
+        steps.step("s12-ready-residue", report);
+        // 不知道上一局什么时候开的（第 8 步没走到开局）：按「刚刚」算，最多等满一个 ready 窗口——A 身上还可能有第 7 步那一局 PVE 的 ready 票
+        long deadline = (pvpAssignedNanos != 0 ? pvpAssignedNanos : System.nanoTime()) + timing.readyResidue().toNanos();
+        int residuePolls = 0;
+        try {
+            while (true) {
+                GetQueueStatusResponse status = MatchSupport.status(a, ids);
+                ReadyResidue verdict = BattleSmokeChecks.readyResidue(status.getState(), System.nanoTime() - deadline < 0);
+                if (verdict == ReadyResidue.WAIT || verdict == ReadyResidue.OVERDUE) {
+                    residuePolls++;
+                    readyResidue = true;
+                }
+                if (verdict == ReadyResidue.WAIT) {
+                    BattleSupport.sleep(tempo.retryInterval());
+                    continue;
+                }
+                String problem = switch (verdict) {
+                    case OVERDUE -> "过了「" + (pvpAssignedNanos != 0 ? "第 8 步收到 177" : "本步开始") + " + " + timing.readyResidue().toSeconds()
+                            + " s」A 的票还是 READY：ready 票据（" + BattleSmokeChecks.READY_TICKET_TTL_MS / 1000 + " s）早该过期了";
+                    case NOT_RESIDUE -> "A 持着一张不是 ready 的票（前面的步骤中断时留下的排队票），等不掉：切磋局里的 163 会回 16014";
+                    default -> null;
+                };
+                report.check(problem == null, "S12 切磋开局之前 A 发 153 → NOT_QUEUED（上一局 1V1 的 ready 票据还在时是 READY，每 1 s 再问，"
+                                + "至多到「第 8 步收到 177 + " + timing.readyResidue().toSeconds() + " s」；它在时 163 一律回 16014，BW1）",
+                        orDescribe(problem, "") + (problem == null ? "" : "；实得 ") + BattleSmokeChecks.describe(status)
+                                + (residuePolls == 0 ? "" : "（此前 " + residuePolls + " 次 READY：ready 残留）"),
+                        SPECTATE_REF + " S12；§3.1 第 3 行");
+                return;
+            }
+        } catch (RobotException | RuntimeException e) {
+            report.fail("S12 等上一局的 ready 票据过期时流程中断", message(e), SPECTATE_REF + " S12");
+        } finally {
+            steps.step("9-challenge", report);
+        }
+    }
+
+    /**
+     * S12 的后半：A 在切磋局里（开自动之前）发<b>一次</b> 163(0)，必须是 16015——ready 残留已经在开局之前等掉了（{@link #awaitReadyResidue}），
+     * 这里再见到 16014 就是失败，不重试。切磋局不开自动时第一回合的窗口恒为 6 s，这一条紧跟着开局发出。
      *
      * <p>不抛异常：这一步出什么事，后面「都开自动打完」都要照常跑，否则 A、B 带着战斗锁。
      */
     private void inBattleWatch(Bot a, Direct directA, Direct directB) {
         steps.step("s12-in-battle", report);
-        // 不知道上一局什么时候开的（第 8 步没走到开局）：按「刚刚」算，最多等满一个 ready 窗口
-        long residueDeadline = (pvpAssignedNanos != 0 ? pvpAssignedNanos : System.nanoTime()) + timing.readyResidue().toNanos();
-        int residueHits = 0;
         try {
-            while (true) {
-                WatchBattleResponse response = SpectateSteps.watch(a, ids, 0);
-                InBattleWatch verdict = BattleSmokeChecks.inBattleWatch(response, System.nanoTime() - residueDeadline < 0);
-                if (verdict == InBattleWatch.READY_RESIDUE) {
-                    residueHits++;
-                    readyResidue = true;
-                    if (challengeOver(directA) || challengeOver(directB)) {
-                        steps.step("s12-battle-ended", report);
-                        report.fail("S12 等上一局的 ready 票据过期时切磋局先打完了", "已经 " + residueHits
-                                        + " 次 16014；切磋局不开自动时每 6 s 一回合，新号 1V1 至少打 8 回合——打得这么快说明表数值变了，或前面的步骤太慢",
-                                SPECTATE_REF + " S12");
-                        return;
-                    }
-                    BattleSupport.sleep(tempo.retryInterval());
-                    continue;
-                }
-                report.check(verdict == InBattleWatch.IN_BATTLE, "S12 切磋局里（开自动之前）A 发 163(0) → {16015, 战斗尚未结束,无法观战}"
-                                + "（上一局 1V1 的 ready 票据还在时先回 16014，每 1 s 重试到「第 8 步收到 177 + "
-                                + timing.readyResidue().toSeconds() + " s」，之后必须是 16015）",
-                        SpectateSteps.describe(response) + (residueHits == 0 ? "" : "（此前 " + residueHits + " 次 16014：ready 残留，BW1）"),
-                        SPECTATE_REF + " S12；§3.1 第 3、5 行");
-                return;
-            }
+            WatchBattleResponse response = SpectateSteps.watch(a, ids, 0);
+            String problem = BattleSmokeChecks.inBattleWatchProblem(response);
+            // 这一步慢了、切磋局已经打完并放了锁的话，163(0) 会真的去随机观战：把这个事实写进细节，省得去猜
+            String over = problem != null && (challengeOver(directA) || challengeOver(directB))
+                    ? "（此刻切磋局已经结束：这一条要在第一回合的 " + SpectateSteps.ROUND_TIMEOUT_MS / 1000 + " s 窗口内发出）" : "";
+            report.check(problem == null, "S12 切磋局里（开自动之前）A 发 163(0) → {16015, 战斗尚未结束,无法观战}"
+                            + "（只发一次：ready 残留已在开局之前等掉，再见到 16014 即失败）",
+                    problem == null ? SpectateSteps.describe(response) : problem + "；实得 " + SpectateSteps.describe(response) + over,
+                    SPECTATE_REF + " S12；§3.1 第 3、5 行");
         } catch (RobotException | RuntimeException e) {
             report.fail("S12 流程中断", message(e), SPECTATE_REF + " S12");
         } finally {

@@ -501,11 +501,12 @@ class TestDoublesTest {
         dialer.hangAdd().hangRemove();
         long started = System.nanoTime();
         ObserverDialer.Outcome byTimeout = dialer.add(placement, addRequest(77, 1001), Duration.ofMillis(120), Deadline.after(10_000));
-        ObserverDialer.Outcome byHardStop = dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(30), Deadline.after(120));
+        // 硬截止给 1 s：从创建截止到进替身之间即使卡住几百毫秒，也不会被判成「硬截止已到，没有发出调用」（NotDelivered）那一支
+        ObserverDialer.Outcome byHardStop = dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(30), Deadline.after(1_000));
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
         assertThat(byTimeout).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
         assertThat(byHardStop).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
-        assertThat(elapsedMs).as("各等约 120 ms，不是 30 s").isBetween(200L, 8_000L);
+        assertThat(elapsedMs).as("先等 120 ms 的超时，再等 1 s 的硬截止，不是 30 s").isBetween(1_100L, 20_000L);
 
         CompletableFuture<ObserverDialer.Outcome> blocked = CompletableFuture.supplyAsync(
                 () -> dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(20), Deadline.after(20_000)));

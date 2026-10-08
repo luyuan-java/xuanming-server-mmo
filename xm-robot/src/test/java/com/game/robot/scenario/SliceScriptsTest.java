@@ -9,6 +9,7 @@ import com.game.robot.scenario.BattleCrashChecks.Stage;
 import com.game.robot.scenario.BattleCrashChecks.State;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -16,6 +17,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Assumptions;
@@ -326,7 +328,7 @@ class SliceScriptsTest {
     }
 
     @Test
-    void 区2的实例表_端口与别的实例都不相同_不并进区1的节点表与启动清单() {
+    void 区2的实例表_端口与别的实例都不相同_不并进区1的节点表与启动清单() throws IOException {
         assertThat(startSlice).contains("\nZONE2_ID=2\nZONE2_SCENE_NODE=\"xm-scene-z2 21010 21110 18115\"\nZONE2_GATE=\"xm-gate-z2 11010 18123\"\n");
 
         // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；启动清单仍是十三项，没有区 2 的实例
@@ -337,16 +339,102 @@ class SliceScriptsTest {
         assertThat(services).isNotNull();
         assertThat(matches(services, "^\\s*\"(xm-[a-z0-9-]+)")).hasSize(13).doesNotContain("xm-scene-z2", "xm-gate-z2");
 
-        // 同机多实例：区 2 新占的五个端口互不相同，也不与脚本里别的端口相撞（区 1 的节点表、清单里的就绪端口、battle / match 的端口）
+        // 同机多实例：区 2 新占的五个端口互不相同，也不与别的实例相撞。别的实例的端口有两个来源：
+        // ① 脚本里写着的（区 1 的节点表、清单里的就绪端口、battle / match 的端口）；
+        // ② 只写在各模块 application*.yaml 里、脚本没提的缺省端口（各服务的管理端口 181xx、Dubbo 端口 208xx……）。
+        // ② 才是容易撞上的那一种：管理端口是顺着编号分配的，下一个新模块顺手取的号可能正好是区 2 实例占着的；
+        // 那样的冲突只在 XM_ZONES=2 时才暴露，单 zone 切片与全量构建都是绿的
         Set<String> taken = new LinkedHashSet<>(matches(nodes, "\\b(\\d{5})\\b"));
         taken.addAll(matches(services, "^\\s*\"xm-[a-z-]+ (\\d+)\""));
         taken.addAll(matches(startSlice, "^(?:BATTLE|MATCH)_[A-Z]+_PORT=(\\d+)$"));
         assertThat(taken).contains("21000", "21101", "18114", "11000", "18081", "18106", "21200", "18113");
-        List<String> zone2 = List.of("21010", "21110", "18115", "11010", "18123");
+        Map<String, List<String>> byFile = modulePorts();
+        // 扫描真的扫到了东西（路径或写法变了不能悄悄变成「什么都不比」）：每个起进程的模块都有一份，脚本没提的那些端口都在
+        assertThat(byFile.keySet().stream().map(file -> file.substring(0, file.indexOf('/'))).distinct())
+                .as("有 application.yaml 的模块").contains("xm-login", "xm-scene-manager", "xm-gate", "xm-scene", "xm-gateway", "xm-data", "xm-friend",
+                        "xm-chat", "xm-team", "xm-guild", "xm-trade", "xm-battle", "xm-match");
+        Set<String> configured = new LinkedHashSet<>();
+        byFile.values().forEach(configured::addAll);
+        // 几个锚点：脚本没提、只在 yaml 里的管理端口（字面量），以及 ${环境变量:缺省} 与带前缀的键两种写法
+        assertThat(configured).as("各模块 application*.yaml 里的缺省端口").contains("18101", "18103", "18105", "18107", "18111", "20881", "12000", "21100")
+                .doesNotContain("0");
+
+        // 区 2 的五个端口取自脚本里的实例表（不在这里另抄一份）：scene 的链路 / 资产通道 / 管理，gate 的客户端 / 管理
+        Matcher scene = Pattern.compile("(?m)^ZONE2_SCENE_NODE=\"xm-scene-z2 (\\d+) (\\d+) (\\d+)\"$").matcher(startSlice);
+        Matcher gate = Pattern.compile("(?m)^ZONE2_GATE=\"xm-gate-z2 (\\d+) (\\d+)\"$").matcher(startSlice);
+        assertThat(scene.find() && gate.find()).as("ZONE2_SCENE_NODE / ZONE2_GATE 两行的写法").isTrue();
+        List<String> zone2 = List.of(scene.group(1), scene.group(2), scene.group(3), gate.group(1), gate.group(2));
         assertThat(zone2).doesNotHaveDuplicates().doesNotContainAnyElementsOf(taken);
+        for (Map.Entry<String, List<String>> entry : byFile.entrySet()) {
+            assertThat(entry.getValue()).as("%s 里的缺省端口不与区 2 的实例（%s）相撞；撞了就给新端口另取一个号，或改 start-slice.sh 的 ZONE2_* 实例表",
+                    entry.getKey(), zone2).doesNotContainAnyElementsOf(zone2);
+        }
         // 区服目录的两个 HTTP 口就是清单里等 gateway / data 就绪的那两个端口
         assertThat(startSlice).contains("\nGATEWAY_HTTP_PORT=18081\nDATA_MGMT_PORT=18106\n");
         assertThat(services).contains("\"xm-gateway 18081\"").contains("\"xm-data 18106\"");
+    }
+
+    /**
+     * yaml 文本里配置的端口：键是 {@code port} 或以 {@code -port} 结尾（{@code client-port}、{@code link-port}、{@code asset-rpc-port}……）的行，
+     * 值是字面量或 {@code ${环境变量:缺省}} 的缺省值；0（「不配 = 跟随另一个端口」）与注释行不算。
+     */
+    static List<String> yamlPorts(String yaml) {
+        List<String> ports = new ArrayList<>();
+        Matcher m = Pattern.compile("(?m)^\\s*(?:[a-z][a-z-]*-)?port:\\s*(?:\\$\\{[A-Z_]+:)?(\\d+)}?\\s*(?:#.*)?$").matcher(yaml);
+        while (m.find()) {
+            if (!m.group(1).equals("0")) {
+                ports.add(m.group(1));
+            }
+        }
+        return ports;
+    }
+
+    /** 仓库里每个模块的 {@code src/main/resources/application*.yaml} → 其中配置的端口（键是「模块/文件名」）；没有端口的文件不列。 */
+    private static Map<String, List<String>> modulePorts() throws IOException {
+        Path root = Files.isDirectory(Path.of("../tools/local")) ? Path.of("..") : Path.of(".");
+        Map<String, List<String>> ports = new TreeMap<>();
+        try (DirectoryStream<Path> modules = Files.newDirectoryStream(root, Files::isDirectory)) {
+            for (Path module : modules) {
+                Path resources = module.resolve("src/main/resources");
+                if (!Files.isDirectory(resources)) {
+                    continue;
+                }
+                try (DirectoryStream<Path> files = Files.newDirectoryStream(resources, "application*.{yaml,yml}")) {
+                    for (Path file : files) {
+                        List<String> found = yamlPorts(Files.readString(file, StandardCharsets.UTF_8));
+                        if (!found.isEmpty()) {
+                            ports.put(module.getFileName() + "/" + file.getFileName(), found);
+                        }
+                    }
+                }
+            }
+        }
+        return ports;
+    }
+
+    @Test
+    void 读yaml端口的办法本身_字面量与环境变量的缺省值都认_0与注释行不算() {
+        String yaml = """
+                # 端口可用 SERVER_PORT 覆盖（同机多实例必须各不相同）
+                server:
+                  port: ${SERVER_PORT:18115}
+                management:
+                  server:
+                    port: 18105
+                xm:
+                  gate:
+                    client-port: 11000
+                    advertise-port: ${XM_GATE_ADVERTISE_PORT:0}
+                  scene:
+                    link-port: 21000   # 行尾注释
+                    asset-rpc-port: ${XM_SCENE_ASSET_RPC_PORT:21100}
+                    # link-port: 29999
+                    report: 12345
+                    mode: report_only
+                """;
+        assertThat(yamlPorts(yaml)).containsExactly("18115", "18105", "11000", "21000", "21100");
+        // 新模块顺着编号取了区 2 的 scene 管理端口：这正是用例要拦的那种冲突
+        assertThat(yamlPorts("server:\n  port: 18115\n")).containsExactly("18115");
     }
 
     @Test

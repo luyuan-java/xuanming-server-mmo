@@ -454,26 +454,47 @@ class BattleSmokeChecksTest {
     }
 
     @Test
-    void S12的应答判读_16015才是结局_16014只在ready残留的窗口内算过渡态_文案不对或别的应答都判错() {
-        com.game.proto.match.WatchBattleResponse inBattle = watchTip(16015, "战斗尚未结束,无法观战");
-        com.game.proto.match.WatchBattleResponse queued = watchTip(16014, "匹配中无法观战");
-        assertThat(BattleSmokeChecks.inBattleWatch(inBattle, true)).isEqualTo(BattleSmokeChecks.InBattleWatch.IN_BATTLE);
-        assertThat(BattleSmokeChecks.inBattleWatch(inBattle, false)).isEqualTo(BattleSmokeChecks.InBattleWatch.IN_BATTLE);
-        assertThat(BattleSmokeChecks.inBattleWatch(queued, true)).isEqualTo(BattleSmokeChecks.InBattleWatch.READY_RESIDUE);
-        assertThat(BattleSmokeChecks.inBattleWatch(queued, false)).as("过了窗口还回 16014：ready 票早该过期了")
-                .isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
-        // 全角逗号、缺文案、别的码、居然成功了
-        assertThat(BattleSmokeChecks.inBattleWatch(watchTip(16015, "战斗尚未结束，无法观战"), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
-        assertThat(BattleSmokeChecks.inBattleWatch(com.game.proto.match.WatchBattleResponse.newBuilder()
-                .setErrorMessage(TipInfoMessage.newBuilder().setId(16014)).build(), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
-        assertThat(BattleSmokeChecks.inBattleWatch(watchTip(16004, "服务器繁忙,请稍后再试"), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
-        assertThat(BattleSmokeChecks.inBattleWatch(com.game.proto.match.WatchBattleResponse.newBuilder().setBattleId(BIG).build(), true))
-                .isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
-        // 带着 battle_id 的拒绝也不算
-        assertThat(BattleSmokeChecks.inBattleWatch(inBattle.toBuilder().setBattleId(1).build(), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
+    void S12前半的153判读_NOT_QUEUED才放行_READY只在残留窗口内算过渡态_别的状态等不掉() {
+        // 票没了：不管窗口开没开都放行
+        assertThat(BattleSmokeChecks.readyResidue(QueueState.QUEUE_STATE_NOT_QUEUED, true)).isEqualTo(BattleSmokeChecks.ReadyResidue.GONE);
+        assertThat(BattleSmokeChecks.readyResidue(QueueState.QUEUE_STATE_NOT_QUEUED, false)).isEqualTo(BattleSmokeChecks.ReadyResidue.GONE);
+        // 上一局的 ready 票据：窗口内稍后再问，过了窗口还在就是不对
+        assertThat(BattleSmokeChecks.readyResidue(QueueState.QUEUE_STATE_READY, true)).isEqualTo(BattleSmokeChecks.ReadyResidue.WAIT);
+        assertThat(BattleSmokeChecks.readyResidue(QueueState.QUEUE_STATE_READY, false)).as("过了窗口还是 READY：ready 票早该过期了")
+                .isEqualTo(BattleSmokeChecks.ReadyResidue.OVERDUE);
+        // 排队中 / 已凑成的票不是残留（6 小时的排队票等不掉），不许当成过渡态一直等到窗口关上
+        for (QueueState state : List.of(QueueState.QUEUE_STATE_QUEUED, QueueState.QUEUE_STATE_MATCHED, QueueState.QUEUE_STATE_ENTERING,
+                QueueState.QUEUE_STATE_UNSPECIFIED)) {
+            assertThat(BattleSmokeChecks.readyResidue(state, true)).as("%s", state).isEqualTo(BattleSmokeChecks.ReadyResidue.NOT_RESIDUE);
+            assertThat(BattleSmokeChecks.readyResidue(state, false)).as("%s", state).isEqualTo(BattleSmokeChecks.ReadyResidue.NOT_RESIDUE);
+        }
         assertThat(BattleSmokeChecks.READY_TICKET_TTL_MS).isEqualTo(60_000);
         assertThat(SpectateSteps.Timing.STANDARD.readyResidue().toMillis()).as("等的窗口 = ready TTL + 2 s 余量")
                 .isEqualTo(BattleSmokeChecks.READY_TICKET_TTL_MS + 2_000);
+    }
+
+    @Test
+    void S12后半的163判读_只有16015算过_16014不再是过渡态_文案不对或别的应答都判错() {
+        com.game.proto.match.WatchBattleResponse inBattle = watchTip(16015, "战斗尚未结束,无法观战");
+        assertThat(BattleSmokeChecks.inBattleWatchProblem(inBattle)).isNull();
+        // ready 残留已经在切磋开局之前等掉了：局里再见到 16014 就是失败，并写明为什么不该见到它
+        assertThat(BattleSmokeChecks.inBattleWatchProblem(watchTip(16014, "匹配中无法观战")))
+                .contains("tip=16014（期望 16015）", "回的是 16014：A 还持着票", "切磋不建票");
+        // 全角逗号、缺文案、别的码、居然成功了：都判错，但不是「还持着票」那一种
+        for (com.game.proto.match.WatchBattleResponse wrong : List.of(
+                watchTip(16015, "战斗尚未结束，无法观战"),
+                com.game.proto.match.WatchBattleResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder().setId(16015)).build(),
+                watchTip(16004, "服务器繁忙,请稍后再试"),
+                watchTip(16017, "当前没有可观战的战斗"),
+                com.game.proto.match.WatchBattleResponse.newBuilder().setBattleId(BIG).build())) {
+            assertThat(BattleSmokeChecks.inBattleWatchProblem(wrong)).as("%s", wrong).isNotNull().doesNotContain("还持着票");
+        }
+        assertThat(BattleSmokeChecks.inBattleWatchProblem(watchTip(16015, "战斗尚未结束，无法观战"))).contains("逐字节");
+        // 带着 battle_id 的拒绝也不算
+        assertThat(BattleSmokeChecks.inBattleWatchProblem(inBattle.toBuilder().setBattleId(1).build())).contains("battle_id 应为 0");
+        // 16014 的文案不对：按普通的错码报，不附「还持着票」的说明（那句话只对逐字节相同的 16014 说）
+        assertThat(BattleSmokeChecks.inBattleWatchProblem(com.game.proto.match.WatchBattleResponse.newBuilder()
+                .setErrorMessage(TipInfoMessage.newBuilder().setId(16014)).build())).contains("tip=16014").doesNotContain("还持着票");
     }
 
     private static com.game.proto.match.WatchBattleResponse watchTip(int code, String text) {

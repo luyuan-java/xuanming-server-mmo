@@ -74,7 +74,11 @@ public interface SpectateStore {
      * 判定顺序：票据存在 → {@link Acquire#QUEUED}；标记等于 {@code markValue} → {@link Acquire#OK}（不刷新 TTL）；标记存在 → {@link Acquire#BUSY}；否则写入 → OK。
      *
      * <p>可重放：值里带每次请求随机生成的 nonce，重发命中自己首轮写下的值回 OK，不会误报 BUSY。
-     * <b>抛异常（含等到 {@code d}）时结局不明</b>：标记可能已经写下——调用方尽力 {@link #releaseAsync}(本次的值) 再回 16004。
+     * <b>抛异常（含等到 {@code d}）时结局不明</b>：标记可能已经写下——调用方尽力 {@link #releaseAsync}(本次的值) 再回 16004，
+     * <b>这个 {@code markValue} 从此作废</b>（不要拿同一个值再抢）。等到 {@code d} 而命令还在路上的那一种，调用方当场发的释放可能先于客户端
+     * 重发的那一遍到达 Redis（次序成了「首发、释放、重发」，重发又把标记写回）：Redis 实现会在在途的命令有了结局之后<b>再按值释放一次</b>。
+     * 这仍是尽力而为——最后一遍在客户端判它超时之后才被 Redis 执行的话，标记留到 TTL；它只是提示，下一次 163 的第 7 行或开局清退会清掉
+     * （多一次空操作的 RemoveObserver）。
      *
      * @param markValue {@link SpectateRules#encodeMark} 编出来的整串（非空）
      */

@@ -240,7 +240,10 @@ class SpectateRulesTest {
         long afterRemoveMs = MatchBudgets.DEFAULT_REQUEST_BUDGET_MS - remove.toMillis();
         long addWindowMs = afterRemoveMs - MatchBudgets.WATCH_ADD_RESERVE_MS;
 
-        assertThat(remove).as("满预算时换场的 Remove 用得满 3 s").isEqualTo(Duration.ofMillis(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS));
+        // 上界是硬保证；下界留 1 s 的余量，不靠窄时间窗（4500 − 1200 只比 3000 多 300 ms：恰好等于 3 s 要求这几行在 300 ms 内跑完）。
+        // 「满预算时用得满 3 s」的算术由 xm-api 的 MatchBudgetsTest「观战不等式五」纯函数地钉住
+        assertThat(remove.toMillis()).as("满预算时换场的 Remove 用得满（或接近）3 s，不会更长")
+                .isBetween(2_000L, MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS);
         assertThat(afterRemoveMs).as("Remove 之后仍过得了 Add 的门槛").isGreaterThanOrEqualTo(MatchBudgets.WATCH_ADD_MIN_BUDGET_MS);
         assertThat(addWindowMs).as("Add 至少有这么久").isGreaterThanOrEqualTo(MatchBudgets.WATCH_ADD_MIN_BUDGET_MS - MatchBudgets.WATCH_ADD_RESERVE_MS);
         assertThat(remove.toMillis() + addWindowMs + MatchBudgets.WATCH_ADD_RESERVE_MS).as("两跳都带硬截止：加起来不超过请求预算")

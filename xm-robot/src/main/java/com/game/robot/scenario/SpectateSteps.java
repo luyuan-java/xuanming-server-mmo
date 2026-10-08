@@ -78,6 +78,17 @@ final class SpectateSteps {
     static final long STALE_MS = 360_000;
     /** robot 墙钟与 Redis 时间的差：列表的时间窗两头各留这么多（spectate-spec §10.7 S0、评审 F4）。 */
     static final long LIST_CLOCK_SLACK_MS = 5_000;
+    /**
+     * 没有全员就绪时一回合的时长（battle 的回合超时，{@code BattleConstants.ROUND_DURATION_MS}；{@code MatchUpstreamTest} 对着源码钉住）：
+     * 屏障期的战斗 X 不开自动，就是按它一回合一回合往前走的。
+     */
+    static final long ROUND_TIMEOUT_MS = 6_000;
+    /**
+     * 单人 PVE（Dungeon 1）最少打几回合——Java 本机切片 2026-10-08 实测 21 场是 7–10 回合（规格引用的基线记录 13–21 回合与它对不上）。
+     * 开不开自动出手内容相同（都走默认行动），所以不开自动的战斗 X 至少活 {@code 7 × 6 s = 42 s}；屏障期的预算
+     * （{@link Timing#liveBudget}）必须比它短一个回合以上，否则脚本真慢的时候先报出来的是「X 提前结束」而不是「超预算」。
+     */
+    static final int SOLO_PVE_MIN_ROUNDS = 7;
 
     private SpectateSteps() {
     }
@@ -92,15 +103,20 @@ final class SpectateSteps {
      * @param publishRetry      battle-smoke S2：开局公告（177 / 143）先于「登记进可观战索引」，列表里还没有这一场时重试的上限（5 s）
      * @param randomRetry       battle-smoke S8：随机观战遇 16017 的重试上限（10 s；每次失败都会懒剔除已结束的残留场）
      * @param evictTimeout      battle-smoke S11：观众去排队后等 166 REMOVED 的上限（10 s）
-     * @param liveBudget        battle-smoke：S1 收到 177 到 S8 结束的合计预算（60 s；战斗 X 靠 6 s 回合超时活着，脚本慢了它会先打完）
+     * @param liveBudget        battle-smoke：S1 收到 177 到 S8 结束的合计预算（30 s；战斗 X 靠 6 s 回合超时活着，最少 7 回合 = 42 s
+     *                          （{@link SpectateSteps#SOLO_PVE_MIN_ROUNDS}），预算比它短一个回合以上才报得出「脚本太慢」；正常用时约 6 s）
      * @param readyResidue      battle-smoke S12：从上一局收到 177 起、ready 票据（60 s）必然过期的时长（62 s）
+     * @param settleWait        battle-smoke：观战段的号下线之前，等 S11 刚打完的局结算落到 scene（大厅 150）的上限，从直连 150 到达起算
+     *                          （25 s，同 battle-cross-zone 的 Z7；等不到只记观察）
      * @param precleanRounds    battle-smoke：S1 之前清残留场次的轮数上限
      */
     record Timing(Duration ticketTimeout, Duration firstFrameTimeout, Duration endTimeout, Duration stopTimeout, Duration publishRetry,
-                  Duration randomRetry, Duration evictTimeout, Duration liveBudget, Duration readyResidue, int precleanRounds) {
+                  Duration randomRetry, Duration evictTimeout, Duration liveBudget, Duration readyResidue, Duration settleWait,
+                  int precleanRounds) {
 
         static final Timing STANDARD = new Timing(Duration.ofSeconds(15), Duration.ofSeconds(15), Duration.ofSeconds(120), Duration.ofSeconds(5),
-                Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofSeconds(10), Duration.ofSeconds(60), Duration.ofSeconds(62), 30);
+                Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofSeconds(10), Duration.ofSeconds(30), Duration.ofSeconds(62),
+                Duration.ofSeconds(25), 30);
     }
 
     // ---------------------------------------------------------------- 163 / 164 的请求

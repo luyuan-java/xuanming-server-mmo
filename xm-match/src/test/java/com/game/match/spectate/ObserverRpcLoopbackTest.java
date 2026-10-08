@@ -38,6 +38,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.IntSupplier;
 import org.apache.dubbo.config.ProtocolConfig;
 import org.apache.dubbo.config.ReferenceConfig;
 import org.apache.dubbo.config.RegistryConfig;
@@ -176,6 +177,11 @@ class ObserverRpcLoopbackTest {
         // 首次对连不上的地址建连要等到拒绝连接返回（Windows 上约 2 s），不该算进各用例自己的预算
         clients.call(new NodeRpcClients.Target("127.0.0.1", port, ""), Duration.ofSeconds(15),
                 node -> node.removeObserver(RemoveObserverRequest.newBuilder().setBattleId(LIVE_BATTLE).setObserverPlayerId(1).build()))
+                .get(30, TimeUnit.SECONDS);
+        // addObserver 也预热一次：方法级的编解码 / 调用器在消费方与提供方都是第一次用时才初始化，不该算进哪条用例的超时里
+        // （方法次序不固定，对挂起提供方的那一条可能就是全类第一次真正的 addObserver）。发生在各用例取基线之前，不影响它们的计数
+        clients.call(new NodeRpcClients.Target("127.0.0.1", port, ""), Duration.ofSeconds(15),
+                node -> node.addObserver(AddObserverRequest.newBuilder().setBattleId(LIVE_BATTLE).setObserverPlayerId(1).build()))
                 .get(30, TimeUnit.SECONDS);
         try {
             clients.call(new NodeRpcClients.Target("127.0.0.1", deadPort, ""), Duration.ofSeconds(15),
@@ -373,12 +379,14 @@ class ObserverRpcLoopbackTest {
         DefaultObserverDialer dialer = dialer();
         BattlePlacement placement = placement(HANGING_BATTLE, port, "inst-a");
 
+        // 这一跳的超时给 3 s（硬截止 10 s 更晚）：「请求到达对端」只需要发生在这 3 s 之内，不靠几百毫秒的窄窗
         long startedNanos = System.nanoTime();
-        Outcome add = onVirtualThread(() -> dialer.add(placement, add(HANGING_BATTLE), Duration.ofMillis(500), Deadline.after(4_300)));
+        Outcome add = onVirtualThread(() -> dialer.add(placement, add(HANGING_BATTLE), Duration.ofSeconds(3), Deadline.after(10_000)));
         long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
 
         assertThat(add).as("%s", add).isInstanceOf(Outcome.Unknown.class);
-        assertThat(elapsedMillis).as("等满这一跳的超时（500 ms）才放弃；上界只防无限等").isBetween(400L, 10_000L);
+        assertThat(elapsedMillis).as("等满这一跳的超时（3 s）才放弃；上界只防无限等").isBetween(2_800L, 20_000L);
+        awaitArrived(() -> added().size());
         assertThat(added()).as("对端确实收到了这次调用：超时不能当作没送达（163 据此保留标记）").hasSize(1);
         assertThat(directory.lookups).as("超时不读目录、不参与判死").isEmpty();
         assertThat(count("add", "unknown")).isEqualTo(1.0);
@@ -390,15 +398,27 @@ class ObserverRpcLoopbackTest {
         DefaultObserverDialer dialer = dialer();
         BattlePlacement placement = placement(HANGING_BATTLE, port, "inst-a");
 
-        // 超时故意给得很长（10 s），与硬截止（600 ms）拉开距离：断言不依赖窄的时间窗
+        // 超时故意给得很长（30 s），与硬截止（2 s）拉开距离：断言不依赖窄的时间窗；2 s 也足够请求到达对端
         long startedNanos = System.nanoTime();
         Outcome remove = onVirtualThread(
-                () -> dialer.remove(placement, OBSERVER, SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(10), Deadline.after(600)));
+                () -> dialer.remove(placement, OBSERVER, SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(30), Deadline.after(2_000)));
         long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
 
         assertThat(remove).as("%s", remove).isInstanceOf(Outcome.Unknown.class);
-        assertThat(elapsedMillis).as("夹在硬截止（600 ms）附近，不是调用方给的 10 s；下界：不早于硬截止就放弃").isBetween(500L, 6_000L);
+        assertThat(elapsedMillis).as("夹在硬截止（2 s）附近，不是调用方给的 30 s；下界：不早于硬截止就放弃").isBetween(1_900L, 20_000L);
+        awaitArrived(() -> removed().size());
         assertThat(removed()).hasSize(1);
         assertThat(count("remove", "unknown")).isEqualTo(1.0);
+    }
+
+    /**
+     * 等对端把这次调用记下来（至多 10 s）。直拨按本地时钟返回，与提供方线程记下请求之间没有同步，不能在直拨返回的那一刻立即取数；
+     * 等不到也不在这里失败，由紧随其后的断言给出具体的差异。
+     */
+    private static void awaitArrived(IntSupplier arrived) throws InterruptedException {
+        long giveUpNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (arrived.getAsInt() < 1 && System.nanoTime() < giveUpNanos) {
+            Thread.sleep(10);
+        }
     }
 }

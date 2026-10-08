@@ -42,9 +42,11 @@ import org.slf4j.LoggerFactory;
  * <p>线程：阻塞等这一次调用（至多 {@code timeout} 加一点本地余量；建连失败之后另有一次目录读与一次不超出 {@code timeout} 余下部分的探测），
  * 只在 future 与套接字上等、不持锁，可以在工作线程与虚拟线程上调。无状态、线程安全。
  *
- * <p><b>带硬截止的重载</b>（6.5 的观众 RPC；lead 裁决 3）走同一套判定，只是每一步都夹在硬截止之内：进来时已过点不发调用；
+ * <p><b>带硬截止的重载</b>（6.5 的观众 RPC；lead 裁决 3）走同一套判定，只是各处等待都夹在硬截止之内：进来时已过点不发调用；
  * 交给出站口的超时与本地等待都不超过它的剩余（不再另加本地余量）；到点之后不读目录、不探测。到点的结局一律是「暂不可用」——
- * 时间不够永远不会被当成「这一局没了」。不带硬截止的重载（179）行为不变：本地余量 {@value #LOCAL_WAIT_GRACE_MS} ms、目录读固定等 1 s。
+ * 时间不够永远不会被当成「这一局没了」。<b>夹不住的只有「发调用」这一步本身</b>：{@code calls.call(...)} 在调用线程上同步执行、没有截止，
+ * 依赖 {@link NodeCalls} 的不阻塞契约（生产的出站口在清扫销毁空闲引用时短暂占着它的锁，毫秒级；见 {@link PlacementDialer} 带截止重载的注释）。
+ * 不带硬截止的重载（179）行为不变：本地余量 {@value #LOCAL_WAIT_GRACE_MS} ms、目录读固定等 1 s。
  */
 public final class DirectPlacementDialer implements PlacementDialer {
 

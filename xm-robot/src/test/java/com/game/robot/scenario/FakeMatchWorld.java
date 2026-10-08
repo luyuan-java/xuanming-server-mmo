@@ -202,8 +202,11 @@ final class FakeMatchWorld implements AutoCloseable {
          * 提前结束」；150 排在场景等的那条应答之前，所以场景往下走时一定已经看得到它，用例是确定的）。
          */
         BARRIER_BATTLE_ENDS_EARLY,
-        /** 切磋局的参战者发 163 撞上 ready 残留（回 16014）时，这一局随即自己打完（模拟「等残留过期时切磋局先结束」）。 */
-        CHALLENGE_ENDS_DURING_RESIDUE,
+        /**
+         * 切磋局只有一个回合：参战者在局里发第一条 163 之后，这一局随即自己打完（模拟真服务端上「切磋双方带着上一局的残血进场，
+         * 不开自动的切磋局 6 s 就结束」——S12 在局里只来得及发一条 163，等不了 ready 残留）。
+         */
+        CHALLENGE_ENDS_AFTER_FIRST_WATCH,
         /** 163 成功的应答带了一个 id = 0 的空 error_message。 */
         WATCH_OK_WITH_EMPTY_TIP,
         /** 1V1 把两名玩家的直连票签到了不同的节点实例上。 */
@@ -223,11 +226,11 @@ final class FakeMatchWorld implements AutoCloseable {
             Duration.ofMillis(40), Duration.ofSeconds(3));
     /**
      * 观战段的快节奏：各种上限只有故意做错的用例会耗满；屏障期的预算与 ready 残留的窗口留得很宽（假服务端的战斗不会自己打完、
-     * ready 残留按「被 163 撞到的次数」过期，都不看墙钟）。
+     * ready 残留按「被 153 查到的次数」过期，都不看墙钟）；等结算落地的上限 3 s（假服务端 {@link #SETTLE_DELAY_MS} 之后就推大厅 150）。
      */
     static final SpectateSteps.Timing FAST_SPECTATE = new SpectateSteps.Timing(Duration.ofSeconds(3), Duration.ofSeconds(3), Duration.ofSeconds(5),
             Duration.ofSeconds(3), Duration.ofSeconds(3), Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofSeconds(60), Duration.ofSeconds(30),
-            30);
+            Duration.ofSeconds(3), 30);
     static final Duration TIMEOUT = Duration.ofSeconds(5);
     /** 战斗结束到放战斗锁的延迟（模拟结算经 battle → scene 落地的那一小段）。 */
     static final long SETTLE_DELAY_MS = 120;
@@ -274,8 +277,8 @@ final class FakeMatchWorld implements AutoCloseable {
         QueueState state;
         /** 这张票开出来的那一局；0 = 还没开局。 */
         long battleId;
-        /** 那一局打完之后，这张 ready 票还要让多少条 163 撞上 16014 才算过期（模拟 60 s 的 ready 窗口，不看墙钟）。 */
-        int residueRejectsLeft;
+        /** 那一局打完之后，这张 ready 票还要被 153 查到多少次（每次回 READY）才算过期（模拟 60 s 的 ready 窗口，不看墙钟）。 */
+        int residuePollsLeft;
 
         Ticket(int mode, int config, QueueState state) {
             this.mode = mode;
@@ -299,6 +302,11 @@ final class FakeMatchWorld implements AutoCloseable {
         long createdAtMs;
         long deadlineMs;
         boolean finished;
+        /**
+         * 这一局是自己打完的（不是最后一条 162 促成的）：打完时参战者的直连先不 FIN，之后到的 162 回拒绝、再 FIN
+         * （同真服务端：房间没了之后才读到的 162，应答排在这一局的 150 之后）。
+         */
+        boolean lingering;
 
         Battle(long id, int mode, int config, List<Long> members) {
             this.id = id;
@@ -337,10 +345,13 @@ final class FakeMatchWorld implements AutoCloseable {
     volatile long slowSettlePlayer;
     volatile long slowSettleExtraMs;
     /**
-     * 一局打完之后，它留下的 ready 票据还要让多少条 163 撞上 16014 才过期（真服务端是 60 s 的 ready 窗口；这里按次数，不看墙钟，
-     * 用例因此是确定的）。缺省 1：场景的 S12 先见到一次 16014 再见到 16015。
+     * 一局打完之后，它留下的 ready 票据还要被 153 查到多少次才过期（真服务端是 60 s 的 ready 窗口；这里按次数，不看墙钟，
+     * 用例因此是确定的）。票据在的时候 153 回 READY、163 一律回 16014（163 不让它过期，同真服务端的 BW1：163 对票据不自愈）。
+     * 缺省 1：场景的 S12 在切磋开局之前先见到一次 READY 再见到 NOT_QUEUED。
      */
-    volatile int readyResidueRejects = 1;
+    volatile int readyResiduePolls = 1;
+    /** 第几场打完的单人 PVE 以阵亡收场（SIDE_B_WIN；从 1 数起，按假服务端里打完的先后）；0 = 都打赢。 */
+    volatile int soloPveLostAt;
     /**
      * 开局之后还要再收到多少条 164，这一局才登记进可观战索引（真服务端里开局公告先于公开，紧跟着发的 164 可能还看不到它）。按条数而不按墙钟，
      * 用例因此是确定的；0 = 开局即公开。
@@ -407,6 +418,10 @@ final class FakeMatchWorld implements AutoCloseable {
     private int ratingsApplied;
     /** 至今收到的 162 条数（{@link Fault#FIRST_AUTO_REJECTED} 按它数到第几条）。 */
     private int autoRequests;
+    /** 至今打完的单人 PVE 场数（{@link #soloPveLostAt} 按它数到第几场）。 */
+    private int soloPveFinished;
+    /** 发 LeaveGame 时还持着战斗锁（结算还没落地）的次数：场景该等到结算落地（大厅 150）再下线。 */
+    private int leftWhileLocked;
 
     FakeMatchWorld() throws IOException {
         this.registry = MessageIdRegistry.loadFromClasspath();
@@ -535,6 +550,14 @@ final class FakeMatchWorld implements AutoCloseable {
         return byId.values().stream().filter(p -> p.lock != 0).count();
     }
 
+    /**
+     * 至今有多少次 LeaveGame 是在玩家还持着战斗锁（他那一局的结算还没落地）时发的。真服务端上这样离场的玩家，battle 的结算发件箱要对着
+     * 离线玩家重投约两分钟才放弃。
+     */
+    synchronized int leftWhileLocked() {
+        return leftWhileLocked;
+    }
+
     /** 此刻还在队列里的排队票数（场景跑完应当为 0）。 */
     synchronized long queuedTickets() {
         return byId.values().stream().filter(p -> p.ticket != null && p.ticket.state == QueueState.QUEUE_STATE_QUEUED).count();
@@ -642,6 +665,9 @@ final class FakeMatchWorld implements AutoCloseable {
                     .setSceneInfo(SceneInfoComp.newBuilder().setSceneConfigId(1).setSceneId(1001)).build());
         } else if (messageId == leaveGame) {
             if (player != null) {
+                if (player.lock != 0) {
+                    leftWhileLocked++;
+                }
                 player.online = false;
                 sessions.remove(ch);
             }
@@ -650,8 +676,7 @@ final class FakeMatchWorld implements AutoCloseable {
         } else if (messageId == matchIds.cancelQueue()) {
             cancelQueue(ch, request, player, CancelQueueRequest.parseFrom(body));
         } else if (messageId == matchIds.queueStatus()) {
-            reply(ch, request, GetQueueStatusResponse.newBuilder()
-                    .setState(player == null || player.ticket == null ? QueueState.QUEUE_STATE_NOT_QUEUED : player.ticket.state).build());
+            reply(ch, request, GetQueueStatusResponse.newBuilder().setState(queueState(player)).build());
         } else if (messageId == matchIds.requestTicket()) {
             reissue(ch, request, player, RequestBattleTicketRequest.parseFrom(body).getBattleId());
         } else if (messageId == matchIds.challenge()) {
@@ -669,6 +694,30 @@ final class FakeMatchWorld implements AutoCloseable {
             ch.writeAndFlush(MessageContent.newBuilder().setMessageId(messageId).setId(request.getId())
                     .setErrorMessage(TipInfoMessage.newBuilder().setId(1003)).build());
         }
+    }
+
+    /**
+     * 153 的可见行为：没票 NOT_QUEUED，否则是票的状态。ready 残留（票是 ready、它那一局已经打完）按「被 153 查到的次数」过期：
+     * 还剩次数时回 READY 并减一，次数用完即过期、回 NOT_QUEUED（模拟真服务端 60 s 的 ready 窗口，不看墙钟）。
+     */
+    private QueueState queueState(Player player) {
+        if (player == null || player.ticket == null) {
+            return QueueState.QUEUE_STATE_NOT_QUEUED;
+        }
+        if (readyResidue(player.ticket)) {
+            if (player.ticket.residuePollsLeft <= 0) {
+                player.ticket = null;
+                return QueueState.QUEUE_STATE_NOT_QUEUED;
+            }
+            player.ticket.residuePollsLeft--;
+        }
+        return player.ticket.state;
+    }
+
+    /** 这张票是不是 ready 残留：状态是 ready，而它开出来的那一局已经打完。 */
+    private boolean readyResidue(Ticket ticket) {
+        Battle of = battles.get(ticket.battleId);
+        return ticket.state == QueueState.QUEUE_STATE_READY && of != null && of.finished;
     }
 
     private void joinQueue(Channel ch, ClientRequest request, Player player, JoinQueueRequest join) {
@@ -845,25 +894,14 @@ final class FakeMatchWorld implements AutoCloseable {
             return;
         }
         if (player.ticket != null) {
-            Battle of = battles.get(player.ticket.battleId);
-            boolean residue = player.ticket.state == QueueState.QUEUE_STATE_READY && of != null && of.finished;
-            if (residue && player.ticket.residueRejectsLeft <= 0) {
-                // ready 窗口到了：票据过期，往下判
-                player.ticket = null;
-            } else {
-                if (residue) {
-                    player.ticket.residueRejectsLeft--;
-                }
-                watchRejected(ch, request, "queued", SpectateSteps.TIP_QUEUED, SpectateSteps.TEXT_QUEUED);
-                Battle own = battles.get(player.lock);
-                if (residue && faults.contains(Fault.CHALLENGE_ENDS_DURING_RESIDUE) && own != null && !own.finished && own.mode == MODE_CHALLENGE) {
-                    finish(own, null, null);
-                }
-                return;
-            }
+            // 任意状态的票都挡：ready 残留也一样，163 不让它过期（BW1；它只按 153 被查到的次数过期，见 queueState）
+            watchRejected(ch, request, "queued", SpectateSteps.TIP_QUEUED, SpectateSteps.TEXT_QUEUED);
+            endChallengeAfterFirstWatch(player);
+            return;
         }
         if (player.lock != 0) {
             watchRejected(ch, request, "in_battle", SpectateSteps.TIP_IN_BATTLE, SpectateSteps.TEXT_IN_BATTLE);
+            endChallengeAfterFirstWatch(player);
             return;
         }
         if (player.watching != 0) {
@@ -923,6 +961,18 @@ final class FakeMatchWorld implements AutoCloseable {
     private void watchRejected(Channel ch, ClientRequest request, String outcome, int code, String text) {
         watchOutcomes.merge(outcome, 1, Integer::sum);
         reply(ch, request, WatchBattleResponse.newBuilder().setErrorMessage(tip(code, text)).build());
+    }
+
+    /**
+     * {@link Fault#CHALLENGE_ENDS_AFTER_FIRST_WATCH}：这名玩家正在一局还没打完的切磋里，他这条 163 答完之后这一局就自己打完——
+     * 各直连收 139 → 150，但<b>先不 FIN</b>（同真服务端：房间没了之后连接还留一小会儿），之后到的 162 回拒绝再 FIN（见 onDirect）。
+     */
+    private void endChallengeAfterFirstWatch(Player player) {
+        Battle own = battles.get(player.lock);
+        if (faults.contains(Fault.CHALLENGE_ENDS_AFTER_FIRST_WATCH) && own != null && !own.finished && own.mode == MODE_CHALLENGE) {
+            own.lingering = true;
+            finish(own, null, null);
+        }
     }
 
     /**
@@ -1143,7 +1193,7 @@ final class FakeMatchWorld implements AutoCloseable {
             if (player.ticket != null && player.ticket.state != QueueState.QUEUE_STATE_READY) {
                 player.ticket.state = QueueState.QUEUE_STATE_READY;
                 player.ticket.battleId = battle.id;
-                player.ticket.residueRejectsLeft = readyResidueRejects;
+                player.ticket.residuePollsLeft = readyResiduePolls;
             }
             String instance = faults.contains(Fault.DUEL_TICKETS_DIFFERENT_INSTANCE) && mode == MODE_1V1 && member != members.get(0)
                     ? "fake-battle-other" : "fake-battle";
@@ -1235,6 +1285,13 @@ final class FakeMatchWorld implements AutoCloseable {
             reply(ch, request, stateOf(battle));
         } else if (request.getMessageId() == battleIds.setAutoBattle()) {
             autoRequests++;
+            if (battle.finished && battle.lingering) {
+                // 这一局已经自己打完：房间没了之后才读到的 162 回拒绝（排在这条直连的 150 之后），然后 FIN
+                reply(ch, request, SetAutoBattleResponse.newBuilder()
+                        .setErrorMessage(tip(BattleSmokeChecks.TIP_INVALID_PARAMETER, "战斗不存在")).build());
+                fin(ch);
+                return;
+            }
             if (faults.contains(Fault.FIRST_AUTO_REJECTED) && autoRequests == rejectAutoAt) {
                 // 拒绝在前；这一局随后照样「打完」（当作回合超时的默认行动），没有人再收到 162 的应答
                 reply(ch, request, SetAutoBattleResponse.newBuilder()
@@ -1268,13 +1325,14 @@ final class FakeMatchWorld implements AutoCloseable {
     }
 
     /**
-     * 全员挂机：每条直连 139 → 150，最后开挂机的那位随后收到 162 的应答，然后服务端 FIN；观众的直连 158 → 166 {FINISHED} → FIN；
-     * 锁与评分各延后一小段落地。
+     * 全员挂机：每条直连 139 → 150，最后开挂机的那位随后收到 162 的应答，然后服务端 FIN（{@link Battle#lingering} 的局先不 FIN，等各自的
+     * 162）；观众的直连 158 → 166 {FINISHED} → FIN；锁与评分各延后一小段落地。
      */
     private void finish(Battle battle, Channel last, ClientRequest lastRequest) {
         battle.finished = true;
         boolean pve = battle.mode == MODE_PVE_SOLO || battle.mode == MODE_PVE_TEAM;
-        eBattleOutcome outcome = pve ? eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN : pvpOutcome;
+        boolean lost = battle.mode == MODE_PVE_SOLO && ++soloPveFinished == soloPveLostAt;
+        eBattleOutcome outcome = lost ? eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN : pve ? eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN : pvpOutcome;
         int rounds = pve ? PVE_ROUNDS : PVP_ROUNDS;
         TurnResultS2C spectateTurn = TurnResultS2C.newBuilder().setBattleId(battle.id).setRoundIndex(rounds).setState(observerView(battle)).build();
         for (long observerId : battle.observers) {
@@ -1301,7 +1359,9 @@ final class FakeMatchWorld implements AutoCloseable {
             if (direct == last) {
                 reply(direct, lastRequest, SetAutoBattleResponse.getDefaultInstance());
             }
-            fin(direct);
+            if (!battle.lingering) {
+                fin(direct);
+            }
         });
         for (long member : battle.members) {
             long delay = SETTLE_DELAY_MS + (member == slowSettlePlayer ? slowSettleExtraMs : 0);

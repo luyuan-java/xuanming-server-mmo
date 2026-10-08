@@ -16,8 +16,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -268,28 +270,43 @@ class RedisBattleNodesTest {
         assertThat(finds[0]).isEqualTo(1);
     }
 
-    @Test
-    void 带截止的lookup_读条目迟迟不回_等到截止就按ERROR_不等满固定的一秒() {
-        directory.scriptedFinds.put(1, new CompletableFuture<>());
+    /**
+     * 一次迟迟不回的读：记下调用方肯等它多久（纳秒），随即按超时收场。不真的等，「等多久」就不必靠墙钟的上下界去量——
+     * 被测代码正是在 {@code Directory.find} 返回的这个对象上调带超时的 {@code get}。
+     */
+    private static final class NeverAnswering extends CompletableFuture<Optional<BattleNodeInfo>> {
+        final List<Long> waitsNanos = new CopyOnWriteArrayList<>();
 
-        long started = System.nanoTime();
-        Lookup lookup = nodes().lookup(1, "inst-a", Deadline.after(150));
-        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        @Override
+        public Optional<BattleNodeInfo> get(long timeout, TimeUnit unit) throws TimeoutException {
+            waitsNanos.add(unit.toNanos(timeout));
+            throw new TimeoutException("测试：读条目迟迟不回");
+        }
+    }
+
+    @Test
+    void 带截止的lookup_读条目迟迟不回_只等到截止_按ERROR_不等满固定的一秒() {
+        NeverAnswering read = new NeverAnswering();
+        directory.scriptedFinds.put(1, read);
+
+        // 截止 800 ms 早于固定上限 1 s
+        Lookup lookup = nodes().lookup(1, "inst-a", Deadline.after(800));
 
         assertThat(lookup).isEqualTo(Lookup.ERROR);
-        assertThat(elapsedMs).as("截止 150 ms：到点就回，不是固定的 1 s").isBetween(100L, 899L);
+        assertThat(read.waitsNanos).as("等这次读的上限 = min(固定上限 1 s, 截止的剩余)：取的是截止的剩余，不是固定的 1 s").singleElement()
+                .satisfies(waitNanos -> assertThat(waitNanos).isBetween(1L, TimeUnit.MILLISECONDS.toNanos(800)));
     }
 
     @Test
     void 带截止的lookup_截止比固定上限长时_仍只等一秒() {
-        directory.scriptedFinds.put(1, new CompletableFuture<>());
+        NeverAnswering read = new NeverAnswering();
+        directory.scriptedFinds.put(1, read);
 
-        long started = System.nanoTime();
         Lookup lookup = nodes().lookup(1, "inst-a", Deadline.after(30_000));
-        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 
         assertThat(lookup).isEqualTo(Lookup.ERROR);
-        assertThat(elapsedMs).as("min(固定上限 1 s, 截止的剩余)").isBetween(900L, 10_000L);
         assertThat(RedisBattleNodes.LOOKUP_WAIT_MS).isEqualTo(1_000);
+        assertThat(read.waitsNanos).as("min(固定上限 1 s, 截止的剩余)：恰好是固定上限")
+                .containsExactly(TimeUnit.MILLISECONDS.toNanos(RedisBattleNodes.LOOKUP_WAIT_MS));
     }
 }

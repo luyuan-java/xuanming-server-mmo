@@ -435,12 +435,68 @@ class RedissonSpectateStoreTest {
         replies.add(() -> new CompletableFutureWrapper<>(never));
 
         long started = System.nanoTime();
-        assertThatThrownBy(() -> store.acquire(PLAYER, MARK, Deadline.after(150))).isInstanceOf(Deadline.DependencyException.class)
+        // 截止给 1 s：从创建截止到发出命令之间即使卡住几百毫秒，也不会被判成「之前预算已用完（没有发出）」那一支
+        assertThatThrownBy(() -> store.acquire(PLAYER, MARK, Deadline.after(1_000))).isInstanceOf(Deadline.DependencyException.class)
                 .hasMessageContaining("超过请求预算");
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 
-        assertThat(elapsedMs).isBetween(140L, 10_000L);
+        assertThat(elapsedMs).as("不早于截止；上界只防无限等").isBetween(990L, 20_000L);
         assertThat(never).as("不取消在途的命令：它可能已经执行，结局不明由调用方收场").isNotCancelled();
+        assertThat(evals).as("放弃等待的那一刻存储自己不发别的命令（当场的那次释放是调用方的事）").hasSize(1);
+
+        // 在途的命令随后有了结局——Redisson 重发的那一遍成功了，标记被写回，而调用方的释放早已发过：存储按值再释放一次
+        reply(1L);
+        never.complete(SpectateScripts.ACQUIRE_OK);
+
+        assertThat(evals).as("迟到的重发写回的标记不留给 TTL").hasSize(2);
+        assertThat(evals.get(1))
+                .isEqualTo(new Eval(RScript.Mode.READ_WRITE, SpectateScripts.RELEASE, RScript.ReturnType.INTEGER, List.of(MARK_KEY), List.of(MARK), false));
+        assertThat(replies).isEmpty();
+    }
+
+    @Test
+    void 抢标记的等待被中断_同样算放弃_在途的命令以失败收场之后也按值释放一次() {
+        CompletableFuture<Object> inflight = new CompletableFuture<>();
+        replies.add(() -> new CompletableFutureWrapper<>(inflight));
+
+        // 预先置上中断标志：等待当场以「被中断」收场，命令仍在路上（不必真的等到截止）
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> store.acquire(PLAYER, MARK, Deadline.after(30_000))).isInstanceOf(Deadline.DependencyException.class)
+                    .hasMessageContaining("被中断");
+        } finally {
+            Thread.interrupted(); // 清掉中断标志，别带给后面的断言与别的用例
+        }
+        assertThat(evals).hasSize(1);
+
+        // 客户端最终判这条命令失败（例如重发的那一遍也响应超时）——它仍可能已经在 Redis 上执行过：照样按值释放一次（按值删，多删无害）
+        reply(0L);
+        inflight.completeExceptionally(new IllegalStateException("Redis 响应超时"));
+
+        assertThat(evals).hasSize(2);
+        assertThat(evals.get(1))
+                .isEqualTo(new Eval(RScript.Mode.READ_WRITE, SpectateScripts.RELEASE, RScript.ReturnType.INTEGER, List.of(MARK_KEY), List.of(MARK), false));
+    }
+
+    @Test
+    void 放弃之后的补释放只属于抢标记_而且只在命令还在路上时_别的失败与别的方法都不补发() {
+        // 抢标记当场失败（Redis 报错）：没有在途的命令，调用方的那次释放已经排在它后面——存储不补发
+        fail(new IllegalStateException("ERR 脚本报错"));
+        assertThatThrownBy(() -> store.acquire(PLAYER, MARK, d())).isInstanceOf(Deadline.DependencyException.class);
+        assertThat(evals).hasSize(1);
+
+        // 删标记的等待被放弃：按值删本来就挡得住迟到的副本，不需要收尾
+        CompletableFuture<Object> inflight = new CompletableFuture<>();
+        replies.add(() -> new CompletableFutureWrapper<>(inflight));
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> store.release(PLAYER, MARK, Deadline.after(30_000))).isInstanceOf(Deadline.DependencyException.class);
+        } finally {
+            Thread.interrupted();
+        }
+        inflight.complete(1L);
+
+        assertThat(evals).as("一条抢标记、一条删标记，没有第三条").hasSize(2);
     }
 
     @Test

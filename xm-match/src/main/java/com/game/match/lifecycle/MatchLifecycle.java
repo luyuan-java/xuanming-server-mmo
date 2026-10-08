@@ -50,9 +50,14 @@ import org.springframework.core.Ordered;
  * （启动在导出之前、停止在撤导出之后），夹不进去；所以启动的第 8 / 9 步与停机的第 1 步各借一个事件，其余在 {@link #stop()} 里。
  * 停机第 3 步的排空是规格之外补的一步：排空之前被受理的 PVE_SOLO / 切磋应答还可能交出新的 gather，先排空，第 5 步等的才是全集。
  *
- * <p><b>为什么等 163 与排空工作池并行</b>（lead 裁决 4）：两者都在撤 Dubbo 导出之后才开始、互不依赖；串行的话最坏停机时长是
- * 10 + 5 + 10 = 25 s，超过容器给一个阶段的 20 s（{@code spring.lifecycle.timeout-per-shutdown-phase}）。163 的上界（5 s）小于排空的上界（10 s），
- * 并行之后这一步不比原来长。等 163 在一条辅助线程（{@code match-stop-watches}）上做，停机线程自己排空工作池、再回头收辅助线程的结果；
+ * <p><b>为什么等 163 与排空工作池并行</b>（lead 裁决 4：加了观战之后，{@link #stop()} 里第 3–5 步的最坏时长不得比 6.4 长）：两者都在撤 Dubbo
+ * 导出之后才开始、互不依赖；6.4 是 10 + 10 = 20 s，串行会变成 10 + 5 + 10 = 25 s。163 的上界（5 s）小于排空的上界（10 s），并行之后这一步不比原来长。
+ * 这 20 s 是<b>设计预算</b>，取值与 {@code spring.lifecycle.timeout-per-shutdown-phase} 相同，但 <b>Spring 不会拿它截断这个同步的 {@code stop()}</b>：
+ * 本类没有覆盖 {@code stop(Runnable)}，缺省实现先同步跑完 {@code stop()} 再回调，而 {@code DefaultLifecycleProcessor} 的每阶段等待在全部成员的
+ * stop 调用返回之后才开始（spring-context 6.2.19；同 scene-drain-spec 的 G16）。真正的硬期限在进程外、从 SIGTERM 起算、还包含第 1、2 步：
+ * 本机切片是 {@code tools/local/stop-slice.sh} 的 20 s（match-spec §9.8 已登记可能超出而被强杀，后果自愈）；容器部署是按这个值推出来的宽限期
+ * （ops-release-spec §0.6 #30：preStop 5 + 20 + 10 = 35 s）——第 3–5 步守住 20 s，那条公式才继续成立。
+ * 等 163 在一条辅助线程（{@code match-stop-watches}）上做，停机线程自己排空工作池、再回头收辅助线程的结果；
  * 辅助线程到了「{@code watchDrainTimeout} + {@link #WATCH_DRAIN_GRACE}」还不返回（实现违反约定）就放弃它，停机不被拖住。
  * 清扫器排在 163 之后停：在途的 163 还可能读写索引，清扫本身是幂等的只删操作，早停晚停都无害，放在这里只为「不再有请求时才停后台件」。
  * 它是串在第 3 步与第 5 步之间的一步，所以<b>不等手上那一轮清扫自己做完</b>（{@link SweeperControl#stop} 的契约：当场中断、只等线程退出），

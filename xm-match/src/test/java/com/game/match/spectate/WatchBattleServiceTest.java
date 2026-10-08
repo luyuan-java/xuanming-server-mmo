@@ -23,6 +23,7 @@ import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
+import com.game.match.ticket.TicketReader;
 import com.game.match.ticket.TicketState;
 import com.game.proto.BattleRouting;
 import com.game.proto.match.WatchBattleResponse;
@@ -31,6 +32,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
@@ -526,7 +528,25 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void 第7行_删旧标记失败_16004_不带着没删掉的旧标记往下走_另尽力异步再删一次() {
+    void 第7行_换场时删旧标记失败_16004_不带着没删掉的旧标记往下走_另尽力异步再删一次() {
+        online();
+        open(X);
+        open(Y);
+        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        spectate.putMark(PLAYER, oldMark);
+        spectate.faults.failNext("release");
+
+        WatchBattleResponse response = watch(Y);
+
+        assertRejected(response, 16004, BUSY);
+        assertThat(callKinds()).as("旧场已同步清退；往下走的话抢占会被自己没删掉的旧标记挡成一条误导的 16016").containsExactly(Kind.REMOVE);
+        assertThat(spectate.calls).as("旧场的名单里已经没有他：标记只是残留，再尽力删一次").contains("releaseAsync(1001," + oldMark + ")");
+        assertThat(spectate.calls).noneMatch(call -> call.startsWith("acquire"));
+        assertThat(outcomes()).isEqualTo(Map.of("internal", 1.0));
+    }
+
+    @Test
+    void 第7行_重看同一场时删旧标记失败_16004_旧标记原样留着_不补发异步删除() {
         online();
         open(X);
         String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
@@ -536,8 +556,10 @@ class WatchBattleServiceTest {
         WatchBattleResponse response = watch(X);
 
         assertRejected(response, 16004, BUSY);
-        assertThat(observers.calls).as("往下走的话抢占会被自己没删掉的旧标记挡成一条误导的 16016").isEmpty();
-        assertThat(spectate.calls).contains("releaseAsync(1001," + oldMark + ")");
+        assertThat(observers.calls).as("重看同一场不发 Remove，也没有走到 Add").isEmpty();
+        assertThat(spectate.calls).as("他仍登记在 X：标记删掉的话开局清退就摘不到他了（基线在同样的故障下标记也还在）")
+                .noneMatch(call -> call.startsWith("releaseAsync"));
+        assertThat(spectate.markOf(PLAYER)).contains(oldMark);
         assertThat(spectate.calls).noneMatch(call -> call.startsWith("acquire"));
         assertThat(outcomes()).isEqualTo(Map.of("internal", 1.0));
     }
@@ -961,6 +983,72 @@ class WatchBattleServiceTest {
     }
 
     @Test
+    void 第13行_重看同一场_删掉旧标记之后才建出票据_抢标记回有票_补一条自我清退_否则开局清退摘不到仍登记着的他() {
+        online();
+        BattlePlacement placement = open(X);
+        // 玩家正登记在 X 的观众名单里，旧标记指着它
+        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        spectate.putMark(PLAYER, oldMark);
+        // 入口读到「无票、有旧标记」→ 同场分支只删标记、不发 Remove → 这之后 157 才建出票据
+        spectate.beforeAcquire = this::enqueue;
+
+        WatchBattleResponse response = watch(X);
+
+        assertRejected(response, 16014, QUEUED);
+        assertThat(callKinds()).as("不调 AddObserver；但旧标记已删、观众登记还在，开局清退只认标记——补一条自我清退（基线在同一交错下靠复查摘掉他）")
+                .containsExactly(Kind.REMOVE_ASYNC);
+        Call evict = observers.calls.get(0);
+        assertThat(evict.placement()).as("发往这一场的落点").isEqualTo(placement);
+        assertThat(evict.observerId()).isEqualTo(PLAYER);
+        assertThat(evict.reason()).isEqualTo("concurrent_queue");
+        assertThat(spectate.markOf(PLAYER)).as("新旧标记都不留").isEmpty();
+        assertThat(spectate.calls).as("旧标记按值删；本次的值也按值释放一次（命令被重发时首轮可能已写入）")
+                .contains("release(1001," + oldMark + ")", "release(1001," + markValue(X, 1) + ")");
+        assertThat(events).as("入口先删旧标记，抢占回有票之后才自我清退")
+                .containsSubsequence("spectate.release:1001", "observer.removeAsync:" + X + ":1001:concurrent_queue");
+        assertThat(evictions("concurrent_queue", "removed")).isEqualTo(1.0);
+        assertThat(evictionsTotal()).as("重看同一场本身不算清退；只有这一条自我清退").isEqualTo(1.0);
+        assertThat(outcomes()).isEqualTo(Map.of("queued", 1.0));
+    }
+
+    @Test
+    void 第13行_重看同一场时补发的自我清退没调通_只记指标_应答与标记不变() {
+        online();
+        open(X);
+        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.beforeAcquire = this::enqueue;
+        observers.nextRemove(new Outcome.Unknown("超时"));
+
+        WatchBattleResponse response = watch(X);
+
+        assertRejected(response, 16014, QUEUED);
+        assertThat(callKinds()).containsExactly(Kind.REMOVE_ASYNC);
+        assertThat(evictions("concurrent_queue", "rpc_failed")).isEqualTo(1.0);
+        assertThat(spectate.markOf(PLAYER)).isEmpty();
+        assertThat(outcomes()).isEqualTo(Map.of("queued", 1.0));
+    }
+
+    @Test
+    void 第13行_换场时抢标记回有票_旧场已在入口同步清退_不再补发自我清退() {
+        online();
+        BattlePlacement old = open(X);
+        open(Y);
+        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.beforeAcquire = this::enqueue;
+
+        WatchBattleResponse response = watch(Y);
+
+        assertRejected(response, 16014, QUEUED);
+        assertThat(callKinds()).as("旧场 X 在入口已同步 Remove；新场 Y 从没登记过，没有什么可清退的").containsExactly(Kind.REMOVE);
+        assertThat(observers.calls.get(0).placement()).isEqualTo(old);
+        assertThat(observers.calls.get(0).reason()).isEqualTo("rewatch");
+        assertThat(spectate.markOf(PLAYER)).isEmpty();
+        assertThat(evictions("rewatch", "removed")).isEqualTo(1.0);
+        assertThat(evictionsTotal()).isEqualTo(1.0);
+        assertThat(outcomes()).isEqualTo(Map.of("queued", 1.0));
+    }
+
+    @Test
     void 抢标记被重放_命中自己首轮写下的值_回ok_照常登记_不误报16016() {
         online();
         open(X);
@@ -1184,6 +1272,85 @@ class WatchBattleServiceTest {
         assertRejected(hit, 16014, QUEUED);
         assertThat(spectate.markOf(PLAYER)).isEmpty();
         assertThat(outcomes()).isEqualTo(Map.of("ok", 1.0, "queued", 1.0));
+    }
+
+    /**
+     * 规格 §4.4 / A.1 的 F9：复查<b>并行</b>再读票据与锁（Add 之后可能只剩约 0.2 s 预算，串行读会把读锁挤到超时而误清退）。
+     * 两道闸互相等对方：读票要看到「复查的读锁已经发出」才返回，读锁要看到「读票已经发出」才返回——先读完一个再读另一个的写法
+     * （不论哪个在前、在不在调用线程上）必有一道闸等不到。闸至多等 5 s、请求预算 30 s，不靠窄时间窗。
+     */
+    @Test
+    void 复查的两次读是并行发出的_一次读还没回来另一次已经在读_串行的写法过不了这两道闸() {
+        online();
+        open(X);
+        CountDownLatch ticketStarted = new CountDownLatch(1);
+        CountDownLatch lockStarted = new CountDownLatch(1);
+        AtomicReference<Boolean> ticketReadSawLockRead = new AtomicReference<>();
+        AtomicReference<Boolean> lockReadSawTicketRead = new AtomicReference<>();
+        AtomicInteger ticketReadCount = new AtomicInteger();
+        AtomicInteger lockReadCount = new AtomicInteger();
+        TicketReader gatedTickets = new TicketReader() {
+            @Override
+            public Optional<Ticket> read(long playerId, Deadline d) {
+                ticketReadCount.incrementAndGet();
+                ticketStarted.countDown();
+                ticketReadSawLockRead.set(awaitGate(lockStarted));
+                return tickets.read(playerId, d);
+            }
+
+            @Override
+            public Map<Long, Ticket> readAll(Collection<Long> playerIds, Deadline d) {
+                return tickets.readAll(playerIds, d);
+            }
+
+            @Override
+            public Status status(long playerId, Deadline d) {
+                return tickets.status(playerId, d);
+            }
+        };
+        PlayerStatusReader gatedPlayers = new PlayerStatusReader() {
+            @Override
+            public boolean inBattle(long playerId, Deadline d) {
+                if (lockReadCount.incrementAndGet() == 2) { // 第 1 次是入口检查，第 2 次才是复查
+                    lockStarted.countDown();
+                    lockReadSawTicketRead.set(awaitGate(ticketStarted));
+                }
+                return players.inBattle(playerId, d);
+            }
+
+            @Override
+            public Optional<PlayerPresence> presence(long playerId, Deadline d) {
+                return players.presence(playerId, d);
+            }
+
+            @Override
+            public HolderRead location(long playerId, Deadline d) {
+                return players.location(playerId, d);
+            }
+        };
+        WatchBattleService parallel = new WatchBattleService(spectate, placements, gatedPlayers, gatedTickets, observers, metrics, () -> 0.0,
+                () -> nonce(nonceSeq.incrementAndGet()), Executors.newVirtualThreadPerTaskExecutor());
+
+        WatchBattleResponse response = parallel.watch(session(PLAYER), X, Deadline.after(30_000));
+
+        assertAccepted(response, X);
+        assertThat(ticketReadSawLockRead.get()).as("读票还没返回时，复查的读锁已经发出").isTrue();
+        assertThat(lockReadSawTicketRead.get()).as("读锁还没返回时，读票已经发出").isTrue();
+        assertThat(ticketReadCount).as("复查读一次票据").hasValue(1);
+        assertThat(lockReadCount).as("入口一次、复查一次").hasValue(2);
+        assertThat(callKinds()).as("两样都没命中：不自我清退").containsExactly(Kind.ADD);
+        assertThat(spectate.markOf(PLAYER)).contains(markValue(X, 1));
+        assertThat(outcomes()).isEqualTo(Map.of("ok", 1.0));
+    }
+
+    /** 等一把闸，至多 5 s；被中断按没等到。 */
+    private static boolean awaitGate(CountDownLatch gate) {
+        try {
+            return gate.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     // ================================================================ 第 16 行：房间不存在
@@ -1632,6 +1799,26 @@ class WatchBattleServiceTest {
         assertThat(events).as("标记抢到了，随即按值回滚").containsSubsequence("spectate.acquire:1001", "spectate.release:1001");
         assertThat(spectate.markOf(PLAYER)).isEmpty();
         assertThat(outcomes()).as("预算不足计 internal").isEqualTo(Map.of("internal", 1.0));
+    }
+
+    @Test
+    void J行_重看同一场_Add之前剩余预算不足1秒_16004_保留刚抢到的标记_仍登记着的他才摘得到() {
+        online();
+        open(X);
+        // 玩家正登记在 X 的观众名单里；同场分支在入口只删旧标记、不发 Remove
+        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        spectate.putMark(PLAYER, oldMark);
+
+        // 900 ms < 1 s：必定走 J 行；又留足时间让入口的几步内存操作在截止之前做完
+        WatchBattleResponse response = watch(X, 900);
+
+        assertRejected(response, 16004, BUSY);
+        assertThat(observers.calls).as("不发 AddObserver，也不发 Remove（那会给仍活着的旧会话推一条假的 166）").isEmpty();
+        assertThat(spectate.markOf(PLAYER)).as("回滚的话就成了「在名单、无标记」，开局清退摘不到他：标记留着（W4 的口径）").contains(markValue(X, 1));
+        assertThat(spectate.calls).filteredOn(call -> call.startsWith("release")).as("只按值删了旧标记，本次的值没有释放")
+                .containsExactly("release(1001," + oldMark + ")");
+        assertThat(evictionsTotal()).isZero();
+        assertThat(outcomes()).isEqualTo(Map.of("internal", 1.0));
     }
 
     @Test

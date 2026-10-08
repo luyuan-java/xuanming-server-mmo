@@ -96,8 +96,15 @@ class SpectateExecutorTest {
     @Test
     void 四条出口都归还许可_正常返回_跑到预算到点才返回_抛运行时异常_抛Error() throws Exception {
         List<Throwable> uncaught = new CopyOnWriteArrayList<>();
-        ThreadFactory threads = Thread.ofVirtual().name("match-spectate-test-", 0).uncaughtExceptionHandler((thread, error) -> uncaught.add(error))
+        List<Thread> started = new CopyOnWriteArrayList<>();
+        ThreadFactory virtual = Thread.ofVirtual().name("match-spectate-test-", 0).uncaughtExceptionHandler((thread, error) -> uncaught.add(error))
                 .factory();
+        // 记下执行器起的每一条线程：末尾要等它们真的结束（见那里的注释）
+        ThreadFactory threads = task -> {
+            Thread thread = virtual.newThread(task);
+            started.add(thread);
+            return thread;
+        };
         SpectateExecutor executor = new SpectateExecutor(1, threads);
 
         // 1 正常返回
@@ -142,6 +149,12 @@ class SpectateExecutorTest {
         await(after, "四条出口之后仍能受理");
         awaitInflight(executor, 0);
         assertThat(executor.awaitIdle(Duration.ofSeconds(WAIT_SECONDS))).isTrue();
+        // 「在途归零」只说明许可还了：执行器先还许可，Error 才离开线程体，线程的未捕获处理器更在其后——等五条任务线程都结束了，
+        // 该进处理器的才都进过了（也才能断言 RuntimeException 那一条没有进）
+        assertThat(started).as("五个任务各一条线程").hasSize(5);
+        for (Thread thread : started) {
+            assertThat(thread.join(Duration.ofSeconds(WAIT_SECONDS))).as("任务线程 %s 结束", thread.getName()).isTrue();
+        }
         assertThat(uncaught).as("只有 Error 原样上抛给线程的未捕获处理器；RuntimeException 在执行器里收住").singleElement()
                 .isInstanceOf(StackOverflowError.class);
     }

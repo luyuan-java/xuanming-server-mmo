@@ -34,6 +34,8 @@ import org.slf4j.LoggerFactory;
  *       可以在 163 / gather 的虚拟线程上调。</li>
  *   <li><b>失败一律 {@link Deadline.DependencyException}</b>：Redis 报错、等过了截止、回复形状不对。截止在发出之前就已经用完时<b>不发</b>
  *       （什么都没读、什么都没写）；等超时的那一种，命令还在路上、可能随后执行——对可变方法这就是「结局不明」。
+ *       其余可变脚本靠「按值 / 按条件 / 比 attempt」挡得住迟到的副本，只有 {@link #acquire} 挡不住（见该方法）：它在放弃等待之后，
+ *       等在途的命令有了结局再按值释放一次。
  *       损坏的落点记录不是失败，是 {@link Record.Corrupt}（163 回 16004、列表跳过，都不剔除）。</li>
  *   <li><b>全部脚本以 {@link RScript.Mode#READ_WRITE} 执行</b>（读主库，理由见 {@link SpectateScripts}）；只有清扫器采样用的 {@code ZCARD}
  *       是一条普通的读命令（主从部署下读到从库的旧值无妨：它只喂一个 gauge）。</li>
@@ -92,8 +94,12 @@ public final class RedissonSpectateStore implements SpectateStore {
     @Override
     public Acquire acquire(long playerId, String markValue, Deadline d) {
         requireNonEmptyMark(markValue);
-        long code = evalInteger("抢观战标记", SpectateScripts.ACQUIRE, List.of(RedisKeys.matchTicket(playerId), RedisKeys.matchWatching(playerId)), d,
-                markBytes(markValue), ascii(Long.toString(MARK_TTL_MS)));
+        List<Object> keys = List.of(RedisKeys.matchTicket(playerId), RedisKeys.matchWatching(playerId));
+        byte[][] args = {markBytes(markValue), ascii(Long.toString(MARK_TTL_MS))};
+        // 九段可变脚本里只有这一段挡不住「迟到的重发」（标记一旦被调用方回滚，就没有东西可比）：等到截止而命令还在路上时，
+        // 调用方当场发的那次释放可能先于 Redisson 重发的那一遍到达 Redis——等在途的命令有了结局，再按值释放一次
+        long code = await("抢观战标记", d, () -> redis.getScript(ByteArrayCodec.INSTANCE).<Long>evalAsync(RScript.Mode.READ_WRITE, SpectateScripts.ACQUIRE,
+                RScript.ReturnType.INTEGER, keys, (Object[]) args), () -> releaseAsync(playerId, markValue));
         if (code == SpectateScripts.ACQUIRE_OK) {
             return Acquire.OK;
         }
@@ -318,6 +324,17 @@ public final class RedissonSpectateStore implements SpectateStore {
      * 发出一次异步调用并在截止内等结果。截止已过不发；同步抛出的异常（客户端已关闭等）、异常完成、等超时、空回复，一律 {@link Deadline.DependencyException}。
      */
     private static <T> T await(String what, Deadline d, Supplier<? extends CompletionStage<T>> call) {
+        return await(what, d, call, null);
+    }
+
+    /**
+     * 同上，另带一个「放弃之后」的收尾动作。
+     *
+     * @param afterAbandoned 可为 null。只在<b>放弃等待时命令还在路上</b>（等到截止、或等待被中断）这一种失败上用到：等在途的调用有了结局
+     *                       （成功或失败；Redisson 的重试到那时已经做完）之后调一次，在完成它的线程上（Redisson 的 I/O 线程）——必须不阻塞、不抛。
+     *                       截止已过没有发出、发不出去、异常完成、空回复都不调：那几种失败发生时已经没有在途的命令
+     */
+    private static <T> T await(String what, Deadline d, Supplier<? extends CompletionStage<T>> call, Runnable afterAbandoned) {
         Objects.requireNonNull(d, "deadline");
         if (d.expired()) {
             throw new Deadline.DependencyException(what + " 之前预算已用完（没有发出）");
@@ -331,7 +348,16 @@ public final class RedissonSpectateStore implements SpectateStore {
         if (stage == null) {
             throw new Deadline.DependencyException(what + " 没有返回 future");
         }
-        T reply = d.await(stage, what);
+        T reply;
+        try {
+            reply = d.await(stage, what);
+        } catch (Deadline.DependencyException e) {
+            if (afterAbandoned != null && !stage.toCompletableFuture().isDone()) {
+                // 不取消在途的命令（它可能已经执行）；只在它有了结局之后收尾。此刻恰好完成的话回调当场执行，多做一次也无害
+                stage.whenComplete((ignored, error) -> afterAbandoned.run());
+            }
+            throw e;
+        }
         if (reply == null) {
             throw new Deadline.DependencyException(what + " 得到空回复");
         }

@@ -10,6 +10,7 @@ import com.game.proto.match.ChallengeInviteS2C;
 import com.game.proto.match.ChallengeResultS2C;
 import com.game.proto.match.GetQueueStatusResponse;
 import com.game.proto.match.JoinQueueResponse;
+import com.game.proto.match.QueueState;
 import com.game.proto.match.WatchBattleResponse;
 import com.game.robot.client.MatchAdminClient.Rating;
 import com.game.table.CommonErrorTip;
@@ -76,7 +77,7 @@ final class BattleSmokeChecks {
     static final List<Integer> SNAKE_5V5 = List.of(0, 1, 1, 0, 0, 1, 1, 0, 0, 1);
     /**
      * ready 票据的 TTL（xm-match 的 {@code xm.match.ready-ticket-ttl}）：开局成功后票还留这么久，163 在此期间一律回 16014
-     * （对票据不自愈，spectate-spec BW1）。
+     * （对票据不自愈，spectate-spec BW1）；S12 在切磋开局之前用 153 等它过期（{@link #readyResidue}）。
      */
     static final long READY_TICKET_TTL_MS = 60_000;
     /**
@@ -450,31 +451,51 @@ final class BattleSmokeChecks {
                 + "先看是哪一步等得久）";
     }
 
-    /** S12 里一条 163 应答的判读。 */
-    enum InBattleWatch {
-        /** {@code {16015, 战斗尚未结束,无法观战}}：期望的结局。 */
-        IN_BATTLE,
-        /** {@code {16014, 匹配中无法观战}}，且上一局的 ready 票据还可能没过期：过渡态，稍后重试。 */
-        READY_RESIDUE,
-        /** 其余：不对。 */
-        WRONG
+    /** S12 前半（切磋开局之前轮询 A 的 153）里一条应答的判读。 */
+    enum ReadyResidue {
+        /** NOT_QUEUED：票没了（过期了，或本来就没有）——可以去开切磋局了。 */
+        GONE,
+        /** READY，且上一局的 ready 票据还可能没过期：稍后再问。 */
+        WAIT,
+        /** READY，但已经过了「上一局收到 177 + ready TTL + 余量」：票早该过期了。 */
+        OVERDUE,
+        /** QUEUED / MATCHED / 其余：不是 ready 残留（前面的步骤中断时留下的排队票），等不掉。 */
+        NOT_RESIDUE
     }
 
     /**
-     * S12（切磋局里、开自动之前，A 发 163(0)）的应答怎么算（spectate-spec §10.7 S12、评审 F1）。切磋不建票，A 只有战斗锁，本该回 16015；
-     * 但 A 在上一步刚打完 1V1，那一局的 ready 票据（{@value #READY_TICKET_TTL_MS} ms）可能还在，而 163 先查票据后查锁、对票据不自愈（BW1），
-     * 这时回 16014。所以 16014 只在 ready 票据还可能活着的窗口内算过渡态，过了窗口必须是 16015。
+     * S12 的前半（spectate-spec §10.7 S12、评审 F1）：A 在第 8 步刚打完 1V1，那一局的 ready 票据（{@value #READY_TICKET_TTL_MS} ms）可能还在，
+     * 而 163 先查票据后查锁、对票据不自愈（BW1），带着它进切磋局发 163 会回 16014 而不是 16015。所以在切磋<b>开局之前</b>用 153 把它等掉：
+     * 153 是纯读，与 163 读的是同一张票，153 回 NOT_QUEUED 之后 163 一定越过票据检查。
      *
-     * @param residuePossible 此刻距上一局收到 177 还不满「ready TTL + 余量」
+     * <p>不在切磋局里等：切磋双方带着上一局 1V1 的结算血量进场（胜者残血、败者复活回满），不开自动的切磋局可以只有 1 回合（6 s），
+     * 等不起（2026-10-08 切片实测：1V1 打 29 回合、紧接着的切磋局 1 回合）。
+     *
+     * @param windowOpen 此刻距上一局收到 177 还不满「ready TTL + 余量」
      */
-    static InBattleWatch inBattleWatch(WatchBattleResponse response, boolean residuePossible) {
-        if (SpectateSteps.isRejection(response, SpectateSteps.TIP_IN_BATTLE, SpectateSteps.TEXT_IN_BATTLE)) {
-            return InBattleWatch.IN_BATTLE;
+    static ReadyResidue readyResidue(QueueState state, boolean windowOpen) {
+        if (state == QueueState.QUEUE_STATE_NOT_QUEUED) {
+            return ReadyResidue.GONE;
         }
-        if (residuePossible && SpectateSteps.isRejection(response, SpectateSteps.TIP_QUEUED, SpectateSteps.TEXT_QUEUED)) {
-            return InBattleWatch.READY_RESIDUE;
+        if (state == QueueState.QUEUE_STATE_READY) {
+            return windowOpen ? ReadyResidue.WAIT : ReadyResidue.OVERDUE;
         }
-        return InBattleWatch.WRONG;
+        return ReadyResidue.NOT_RESIDUE;
+    }
+
+    /**
+     * S12 的后半：切磋局里（开自动之前）A 发 163(0) 的应答必须是 {@code {16015, 战斗尚未结束,无法观战}}——切磋不建票，A 只有战斗锁。
+     * ready 残留已经在开局之前等掉了，这里再见到 16014 就是不对（不再按过渡态重试）。
+     *
+     * @return null = 没问题
+     */
+    static String inBattleWatchProblem(WatchBattleResponse response) {
+        String problem = SpectateSteps.rejectedProblem(response, SpectateSteps.TIP_IN_BATTLE, SpectateSteps.TEXT_IN_BATTLE);
+        if (problem != null && SpectateSteps.isRejection(response, SpectateSteps.TIP_QUEUED, SpectateSteps.TEXT_QUEUED)) {
+            return problem + "——回的是 16014：A 还持着票。切磋不建票，开局之前也已经等到 153 → NOT_QUEUED（或那一步已经报了票据没过期），"
+                    + "这里不该再见到它";
+        }
+        return problem;
     }
 
     /** 结果行里观战段的五个字段（{@code b_*} 两个字段名同基线 {@code bss.go:277-278}；观战帧只走直连，所以两个数相同）。 */

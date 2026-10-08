@@ -282,9 +282,10 @@ class InMemorySpectateStoreTest extends SpectateStoreContract {
         store.hang("evict");
 
         long started = System.nanoTime();
-        assertThatThrownBy(() -> store.evict(new Eviction.Invalid("junk"), Deadline.after(120))).isInstanceOf(Deadline.DependencyException.class)
+        // 截止给 1 s：从创建截止到进存储之间即使卡住几百毫秒，也不会被判成「截止已过，没有发出命令」那一支
+        assertThatThrownBy(() -> store.evict(new Eviction.Invalid("junk"), Deadline.after(1_000))).isInstanceOf(Deadline.DependencyException.class)
                 .hasMessageContaining("超过请求预算");
-        assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)).isBetween(100L, 5_000L);
+        assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)).as("等到截止才抛；上界只防无限等").isBetween(990L, 20_000L);
         assertThat(store.watchable()).as("挂起到点：没有生效").containsExactly("junk");
 
         CompletableFuture<Boolean> blocked = CompletableFuture.supplyAsync(() -> store.evict(new Eviction.Invalid("junk"), Deadline.after(10_000)));

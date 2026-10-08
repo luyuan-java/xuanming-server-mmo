@@ -114,6 +114,10 @@ final class SpectateScripts {
      * </table>
      * 重放：值里带每次请求随机的 nonce，第二次看到的是自己第一次写的值 → 0，不重写、不续期，不会误报「已在观战」。
      * 两次之间建出了票据 → 1，首轮写下的标记还在——所以调用方拿到 1 也要按本次的值释放一次（S_W_RELEASE）。
+     *
+     * <p><b>这一段挡不住「迟到的重发」</b>（其余可变脚本都有条件可比，这里标记一旦被回滚就没有东西可比）：调用方等到截止、放弃并释放之后，
+     * 重发的那一遍才到——看到「无票、无标记」又把标记写回。脚本自己不设防（那需要一把按 nonce 的墓碑键）；由 {@link RedissonSpectateStore#acquire}
+     * 在在途的命令有了结局之后再按值释放一次来收窄，漏掉的留到 TTL（标记只是提示）。
      */
     static final String ACQUIRE = """
             if redis.call('EXISTS', KEYS[1]) == 1 then return 1 end

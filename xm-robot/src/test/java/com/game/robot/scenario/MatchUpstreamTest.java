@@ -176,6 +176,13 @@ class MatchUpstreamTest {
     }
 
     @Test
+    void 回合超时的时长_与战斗引擎的常量一致() throws Exception {
+        // 屏障期的战斗 X 不开自动，按回合超时一回合一回合地走：预算（Timing.liveBudget）与「X 提前结束」的提示都按它算
+        String constants = file("xm-battle-engine/src/main/java/com/game/battle/engine/BattleConstants.java");
+        assertThat(SpectateSteps.ROUND_TIMEOUT_MS).isEqualTo(UpstreamConstantsTest.number(constants, "ROUND_DURATION_MS"));
+    }
+
+    @Test
     void 观战指标的名字与标签值_与xm_match的MatchMetrics一致() throws Exception {
         String metrics = file("xm-match/src/main/java/com/game/match/metrics/MatchMetrics.java");
         // 场景的 S13 / Z10 按 Prometheus 名（点换下划线、计数器加 _total）与小写的枚举名取值

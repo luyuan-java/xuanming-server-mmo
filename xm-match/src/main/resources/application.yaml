@@ -81,6 +81,9 @@ xm:
       threads: 16
       queue: 1024
     # 整请求预算：受理时刻起算（含排队）。须在 [500ms, 4500ms] 内（gate 调 match 的 Dubbo 超时是 5 s）。
+    # 163 观战也用它，而它的两道门槛是代码常量（判的是走到那一步时的剩余预算）：调到 2200ms 及以下，带着旧观战标记的换场 / 随机观战
+    # 恒回 16004（旧标记最长留 360 s）；调到 1000ms 及以下，凡是走到登记的 163 都回 16004。这样的配置不拒启，启动时打一条 WARN
+    # （各留 100ms 余量：低于 2300ms / 1100ms 就告警）——没有特别的理由不要调小。
     request-budget: 4500ms
     matcher:
       interval: 500ms          # 两轮凑单之间的间隔
@@ -111,7 +114,8 @@ xm:
     gather-max-inflight: 256
     # 无肇事者的 gather 失败后，回队首的票多久之内不参与凑单（0 = 关闭）。
     requeue-backoff: 2s
-    # 观战（批次 6.5，docs/porting/spectate-spec.md §5.2）。163 的预算沿用上面的 request-budget；其余时限是代码常量（MatchBudgets）。
+    # 观战（批次 6.5，docs/porting/spectate-spec.md §5.2）。163 的预算沿用上面的 request-budget（调小到 2300ms 以下换场就开始回 16004，
+    # 见那一条的注释）；其余时限是代码常量（MatchBudgets）。
     spectate:
       # 清扫可观战索引 xm:{match}:watchable 的间隔（> 0，否则拒启）：摘掉分数早于「Redis 时间 − 360 s」的成员，并采样 xm_match_watchable_battles。
       sweep-interval: 10s

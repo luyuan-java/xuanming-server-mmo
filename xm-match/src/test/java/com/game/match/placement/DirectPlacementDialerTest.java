@@ -336,9 +336,11 @@ class DirectPlacementDialerTest {
 
     @Test
     void 交给出站口的超时不超过硬截止的剩余() {
-        dial(placement(), Duration.ofSeconds(3), Deadline.after(400));
+        // 这条不等待（替身当场应答）：截止与超时都给得宽——5 s 的截止不会在发调用之前就过点，30 s 的超时与它拉得开
+        dial(placement(), Duration.ofSeconds(30), Deadline.after(5_000));
 
-        assertThat(calls.calls).singleElement().satisfies(call -> assertThat(call.timeout().toMillis()).as("min(3 s, 截止的剩余)").isBetween(1L, 400L));
+        assertThat(calls.calls).singleElement()
+                .satisfies(call -> assertThat(call.timeout().toMillis()).as("min(30 s, 截止的剩余 ≤ 5 s)").isBetween(1L, 5_000L));
     }
 
     @Test
