@@ -5,6 +5,7 @@ import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.BattleCrashScenario;
+import com.game.robot.scenario.BattleCrossZoneScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
@@ -44,13 +45,15 @@ import java.util.regex.Pattern;
  * 探针的运行参数。取值优先级：命令行 {@code --名字 值}（或 {@code --名字=值}）&gt; 环境变量 &gt; 缺省值。
  * 开发口令只从环境变量 {@value #PASSWORD_ENV} 读（不进命令行、不进 shell 历史、不打印）。
  *
+ * @param visitZoneId     battle-cross-zone 场景：另一个区（B、C 登录的区；A 登录 {@code zoneId}）。只有这个场景要求它与 {@code zoneId} 不同
  * @param runTag          移动 / 货币 / 属性场景的账号标签：账号为 {@code 前缀 + mv + 标签 + _a / _b}、{@code 前缀 + cur / at + 标签}；
  *                        缺省按当前时间生成，每次都是新号
  * @param expectGmAllowed 货币场景：服务端运行模式放行 GM 指令（allow）还是拒绝（deny）
  * @param tradeAdminUrl   trade 场景：xm-trade 管理端口（播种接口 {@code POST /admin/trade/seed-listing}）
  * @param tradeScope      trade 场景：期望的市场范围（须与 xm-trade 的 {@code xm.trade.market.scope} 一致；缺省 zone，trade-spec Q9）
  * @param battleAdminUrl  battle / battle-edge 场景：xm-battle 管理端口（dev 接口 {@code POST /admin/battle/dev/*} 与指标）
- * @param matchAdminUrl   battle-smoke / match-activity / match-5v5 场景：xm-match 管理端口（dev 接口 {@code /admin/match/dev/*} 与指标）
+ * @param matchAdminUrl   battle-smoke / battle-cross-zone / match-activity / match-5v5 场景：xm-match 管理端口（dev 接口
+ *                        {@code /admin/match/dev/*} 与指标）
  * @param expectDevAllowed battle / battle-edge 场景：xm-battle 的 dev 接口开放（allow，dev / test 运行模式）还是回 403（deny，prod）
  * @param slow            battle-edge 场景：也跑慢用例（连上不握手、等 10 s 握手期限）
  */
@@ -58,6 +61,7 @@ public record RobotOptions(
         Scenario scenario,
         String gatewayUrl,
         int zoneId,
+        int visitZoneId,
         String accountPrefix,
         int count,
         String runTag,
@@ -124,11 +128,17 @@ public record RobotOptions(
          */
         BATTLE_SETTLE,
         /**
-         * 匹配端到端（批次 6.4，match-spec §15.5「battle-smoke」）；子命令写作 {@code battle-smoke}。A / B / C 三个新号经 gate → xm-match：
+         * 匹配与观战端到端（批次 6.4 match-spec §15.5「battle-smoke」+ 批次 6.5 spectate-spec §10.7 的观战段）；子命令写作 {@code battle-smoke}。
+         * 观战段四个新号（163 / 164、观众直连 161 / 158 / 166、165、换场与重看、开局清退），随后 A / B / C 三个新号经 gate → xm-match：
          * 排队语义与拒绝码、PVE_SOLO 开战、179 补签、直连挂机打完、再排、1V1 与评分（经 {@code --match-admin-url} 的 dev 评分接口核对）、
-         * 切磋全套、163 / 164 的 6.4 临时应答、xm-match 指标。
+         * 切磋全套、xm-match 指标。
          */
         BATTLE_SMOKE,
+        /**
+         * 跨区 1V1（批次 6.5，spectate-spec §10.8）；子命令写作 {@code battle-cross-zone}，需要 {@code XM_ZONES=2} 的切片。A 经 {@code --zone}、
+         * B 与观众 C 经 {@code --visit-zone} 登录：同一局、同一个 battle 节点、两侧同一个终局、各自的大厅 150、评分、跨区观众、连打第二局。
+         */
+        BATTLE_CROSS_ZONE,
         /** 帮会活动开战的 dev 入口（批次 6.4，match-spec §15.5「match-activity」）；子命令写作 {@code match-activity}，只在 dev / test 运行模式下跑。 */
         MATCH_ACTIVITY,
         /** 5V5 排队成局与蛇形分队（批次 6.4，match-spec §15.5「match-5v5」，可选，10 个新号）；子命令写作 {@code match-5v5}。 */
@@ -139,6 +149,8 @@ public record RobotOptions(
     enum Opt {
         GATEWAY("gateway", "XM_ROBOT_GATEWAY", "http://127.0.0.1:18081", "xm-gateway 地址（assign-gate 入口）"),
         ZONE("zone", "XM_ROBOT_ZONE", "1", "区号（assign-gate 的 zone_id，≥ 1）"),
+        VISIT_ZONE("visit-zone", "XM_ROBOT_VISIT_ZONE", "2",
+                "另一个区（≥ 1）：battle-cross-zone 里 B 与观众 C 登录的区（A 登录 --zone），必须与 --zone 不同；别的子命令不看它"),
         PREFIX("prefix", "XM_ROBOT_ACCOUNT_PREFIX", "robot_java_", "账号前缀（须在 xm-login 的开发账号前缀白名单里）"),
         COUNT("count", "XM_ROBOT_COUNT", "3", "smoke 的账号数（1–" + MAX_COUNT + "）"),
         RUN_TAG("run-tag", "XM_ROBOT_RUN_TAG", null, "smoke 以外各子命令的账号标签 [a-z0-9]{1,16}；缺省按当前时间生成（每次新号）"),
@@ -175,7 +187,7 @@ public record RobotOptions(
         BATTLE_ADMIN_URL("battle-admin-url", "XM_ROBOT_BATTLE_ADMIN_URL", "http://127.0.0.1:18112",
                 "battle / battle-edge：xm-battle 管理端口（dev 接口 POST /admin/battle/dev/*、指标；运维令牌同 audit）"),
         MATCH_ADMIN_URL("match-admin-url", "XM_ROBOT_MATCH_ADMIN_URL", "http://127.0.0.1:18113",
-                "battle-smoke / match-activity / match-5v5：xm-match 管理端口（dev 接口 GET /admin/match/dev/rating/{pid}、"
+                "battle-smoke / battle-cross-zone / match-activity / match-5v5：xm-match 管理端口（dev 接口 GET /admin/match/dev/rating/{pid}、"
                         + "POST /admin/match/dev/activity-battle 与指标；运维令牌同 audit）"),
         EXPECT_DEV("expect-dev", "XM_ROBOT_EXPECT_DEV", "allow",
                 "battle / battle-edge：xm-battle dev 接口的期望：allow（dev / test 运行模式）/ deny（prod：403，只跑不需要建房的步骤）"),
@@ -259,6 +271,11 @@ public record RobotOptions(
             gateway = gateway.substring(0, gateway.length() - 1);
         }
         int zone = intValue(Opt.ZONE, given, env, 1, Integer.MAX_VALUE);
+        int visitZone = intValue(Opt.VISIT_ZONE, given, env, 1, Integer.MAX_VALUE);
+        // 只有跨区场景要求两个区不同：别的子命令不看 --visit-zone（smoke --zone 2 配缺省的 2 是正常用法）
+        if (scenario == Scenario.BATTLE_CROSS_ZONE && visitZone == zone) {
+            throw new UsageException("battle-cross-zone 要两个不同的区：--visit-zone 与 --zone 都是 " + zone);
+        }
         String prefix = value(Opt.PREFIX, given, env);
         if (prefix.isEmpty() || !prefix.equals(prefix.strip()) || prefix.chars().anyMatch(Character::isWhitespace)) {
             throw new UsageException("--prefix 不能为空、不能含空白：\"" + prefix + "\"");
@@ -343,6 +360,7 @@ public record RobotOptions(
             case BATTLE_EDGE -> BattleEdgeScenario.accountName(prefix, runTag, "a");
             case BATTLE_SETTLE -> BattleSettleScenario.accountName(prefix, runTag, "a");
             case BATTLE_SMOKE -> BattleSmokeScenario.accountName(prefix, runTag, "a");
+            case BATTLE_CROSS_ZONE -> BattleCrossZoneScenario.accountName(prefix, runTag, "a");
             case MATCH_ACTIVITY -> MatchActivityScenario.accountName(prefix, runTag, "a");
             case MATCH_5V5 -> Match5v5Scenario.accountName(prefix, runTag, Match5v5Scenario.PLAYERS - 1);
         };
@@ -350,7 +368,7 @@ public record RobotOptions(
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
         }
 
-        return new RobotOptions(scenario, gateway, zone, prefix, count, runTag,
+        return new RobotOptions(scenario, gateway, zone, visitZone, prefix, count, runTag,
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
@@ -361,7 +379,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|match-activity|match-5v5|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -448,14 +466,32 @@ public record RobotOptions(
                 + "并跑「PREPARING 时 63 指向另一节点 → 3023，取消后跨节点成功」，单 scene 切片跳过这一步。"
                 + "故障变体 --crash-window scene-after-150 / battle-after-store 配 --crash-phase arm / verify、--crash-state，"
                 + "由 tools/local/battle-crash-window.sh 编排 kill -9 与重启（robot 自己不杀进程）\n");
-        out.append("  battle-smoke 匹配端到端（A / B / C 三个新号，批次 6.4；需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService、Kafka、"
-                + "dev 运行模式与运维令牌）：153 NOT_QUEUED → 157 拒绝码 16002 / 16003（parameters 逐字节）→ 1V1 排队、再排 16001 带原票、"
+        out.append("  battle-smoke 匹配与观战端到端（批次 6.4 + 6.5；需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService、Kafka、"
+                + "dev 运行模式与运维令牌）。先跑观战段（四个新号 SA / SB / SC / SD）：164 的形状 → 预清理残留场次（列表非空就发 163(0)，至多 30 轮）→ "
+                + "SA 开 PVE 战斗 X、直连不开自动，自己发 163(X) 回 16014 → X 进了 164 的列表（mode / config / 角色名 / created_at_ms）→ "
+                + "SB 发 163(X)：大厅 177 role = 2、直连握手应答紧跟 161 → 重看同一场：177 经直连重推且逐字节相同、再一条 161、不清退 → "
+                + "观众 179 补签 → 观战中排一条凑不成局的 1V1 不被清退、163(0) 回 16014 → 163(不存在的 id) 回 16018 → "
+                + "SC 随机观战后 165 退出（应答 → FIN、没有 166）→ SA 开自动：SB 收 158、166 FINISHED 后 FIN，大厅上没有战斗帧 → "
+                + "再发 163(X) 回 16018、列表里没有 X → 开局清退（SB 观战 SD 的局时去排 PVE_SOLO：166 REMOVED 后 FIN）；"
+                + "S1 收到 177 到 S8 结束合计预算 60 s（超出 step=s<n>-budget，X 提前结束 step=s<n>-x-ended-early）。"
+                + "然后是匹配段（A / B / C 三个新号）：153 NOT_QUEUED → 157 拒绝码 16002 / 16003（parameters 逐字节）→ 1V1 排队、再排 16001 带原票、"
                 + "148 不回包（错票不动、原票取消）→ PVE_SOLO 受理后大厅先 177 后 143、expire_at_ms ≈ 发起时刻 + 300 s → 179 补签与 177 逐字节相同、"
                 + "非成员与不存在的局 1005 → 凭补签的票直连、战斗中再排 16000、挂机打到 150 后 FIN → 立即再排（16000 按过渡态重试、不得 16001）"
                 + "打第二局、旧局补签 1005 → 1V1（A 先受理是锚点：A 在 0 队、B 在 1 队）打完后经 --match-admin-url 查评分（games 各 + 1；"
                 + "胜负且不满 30 回合 |Δ| = 16，平局或打满 Δ = 0）→ 切磋 16007 / 156 / 16011 / 16013 / 拒绝只推发起者 / 16012 / 接受后 154 与"
-                + "同一局的 177、143 / 16009 / 16008 → 163 回 1006、164 空列表 → xm-match 指标；"
-                + "结尾写 BATTLE_SMOKE_OK … 或 BATTLE_SMOKE_FAIL step=… reason=…\n");
+                + "同一局的 177、143 / 16009 / 切磋局里发 163(0) 回 16015（上一局的 ready 票还在时先回 16014，等到收到 177 后 62 s）/ 16008 → "
+                + "xm-match 的匹配与观战指标；结尾写 BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… "
+                + "challenge_battle_id=… spectate_battle_id=… b_spectate_turns=… b_direct_spectate_turns=… removed_ok=1 s12_ready_residue=0|1 "
+                + "或 BATTLE_SMOKE_FAIL step=… reason=…\n");
+        out.append("  battle-cross-zone 跨区 1V1（A / B / C 三个新号，批次 6.5；需要 XM_ZONES=2 的切片——两个区各有 gate 与 scene 且都在区服列表里，"
+                + "另需 xm-match、xm-battle、Kafka、dev 运行模式与运维令牌）：区服列表里 --zone 与 --visit-zone 都是 OPEN（否则失败 step=preflight）→ "
+                + "A 经 --zone、B 与 C 经 --visit-zone 登录，两个区的 gate 端点不同 → A 发 157 {1V1, config = 1} 受理之后 B 再发（A 是锚点）→ "
+                + "两侧先 177 后 143、同一个 battle_id、两张票的地址与签发节点实例相同、A 在 0 队 B 在 1 队 → 各自直连，--visit-zone 的 C 发 163 "
+                + "观战（177 role = 2 → 161）→ 都开自动打到 150：两侧同一个终局、直连回合数 ≥ 1、大厅上没有 139，C 收 158 与 166 FINISHED → "
+                + "两侧各等大厅 150（结算回到了各自区的 scene）→ 经 --match-admin-url 查评分（games 各 + 1；胜负且不满 30 回合 |Δ| = 16）→ "
+                + "立即再排打第二局（16000 重试、不得 16001）→ 指标 gather_zone_mix{mix=\"cross\"} 至少 + 2；1 号配置的 1V1 队列全服共享，"
+                + "收尾给 A、B 各发一条 148；结尾写 CROSS_ZONE_MATCH_OK battle_id=… zone_a=… zone_b=… a_turns=… b_turns=… a_direct_turns=… "
+                + "b_direct_turns=… observer_zone=… c_spectate_turns=… second_battle_id=… 或 CROSS_ZONE_MATCH_FAIL step=… reason=…\n");
         out.append("  match-activity 帮会活动开战的 dev 入口（A / B 两个新号 + 已登出的 C；需要切片带 xm-match、xm-battle、dev 运行模式与运维令牌）："
                 + "经 --match-admin-url 的 POST /admin/match/dev/activity-battle → 发起人不在首位 INVALID_ARGUMENT → 名单里有已登出的账号 "
                 + "MEMBER_OFFLINE（offender = 该账号）→ 名单 [A, B] 受理、battle_id ≠ 0、两人收到同一局的 177 / 143 → 战斗中再发 "
@@ -480,7 +516,7 @@ public record RobotOptions(
     /** 口令不进日志。 */
     @Override
     public String toString() {
-        return "RobotOptions[scenario=" + scenario + ", gateway=" + gatewayUrl + ", zone=" + zoneId + ", prefix="
+        return "RobotOptions[scenario=" + scenario + ", gateway=" + gatewayUrl + ", zone=" + zoneId + ", visitZone=" + visitZoneId + ", prefix="
                 + accountPrefix + ", count=" + count + ", runTag=" + runTag + ", connectTimeout=" + connectTimeout
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
@@ -493,7 +529,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / match-activity / match-5v5）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / battle-cross-zone / match-activity / match-5v5）");
         }
     }
 

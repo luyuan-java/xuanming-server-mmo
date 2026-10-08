@@ -103,8 +103,8 @@ final class MatchSupport {
      * @param respondChallenge 151 RespondChallenge
      * @param challengeInvite  156 推送 ChallengeInviteS2C
      * @param challengeResult  154 推送 ChallengeResultS2C
-     * @param watchBattle      163 WatchBattle（6.4 临时回 1006）
-     * @param listWatchable    164 ListWatchableBattles（6.4 临时回空列表）
+     * @param watchBattle      163 WatchBattle（观战；请求与应答的判读见 {@link SpectateSteps}）
+     * @param listWatchable    164 ListWatchableBattles（可观战列表）
      * @param requestTicket    179 RequestBattleTicket（补签）
      */
     record Ids(int joinQueue, int cancelQueue, int queueStatus, int challenge, int respondChallenge, int challengeInvite, int challengeResult,

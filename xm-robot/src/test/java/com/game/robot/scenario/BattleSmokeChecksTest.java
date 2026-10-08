@@ -230,7 +230,6 @@ class BattleSmokeChecksTest {
                 BattleSmokeChecks.TIP_CHALLENGE_EXPIRED, BattleSmokeChecks.TIP_CHALLENGE_NOT_TARGET))
                 .containsExactly(16007, 16008, 16009, 16010, 16011, 16012, 16013);
         assertThat(BattleSmokeChecks.TIP_INVALID_PARAMETER).isEqualTo(1005);
-        assertThat(BattleSmokeChecks.TIP_FEATURE_UNAVAILABLE).isEqualTo(1006);
         for (String text : List.of(BattleSmokeChecks.TEXT_IN_BATTLE, BattleSmokeChecks.TEXT_CHALLENGE_SELF_BUSY)) {
             assertThat(text).contains(",").doesNotContain("，");
         }
@@ -389,5 +388,77 @@ class BattleSmokeChecksTest {
         assertThat(BattleSmokeChecks.resultProblem(declined, 5, true, BIG)).contains("accepted=false", "期望 {5, true, 9223372036854775809}");
         assertThat(BattleSmokeChecks.resultProblem(declined, 6, false, BIG)).isNotNull();
         assertThat(BattleSmokeChecks.resultProblem(declined, 5, false, 7)).isNotNull();
+    }
+
+    // ---------------------------------------------------------------- 观战段（批次 6.5）
+
+    @Test
+    void S6的配置号_900000加runTag按36进制读的低16位_缺省的时间戳标签与16位长标签都落在范围内() {
+        assertThat(BattleSmokeChecks.soloQueueConfig("0")).isEqualTo(900_000);
+        assertThat(BattleSmokeChecks.soloQueueConfig("z")).as("z = 35").isEqualTo(900_035);
+        assertThat(BattleSmokeChecks.soloQueueConfig("10")).as("36 进制的 10 = 36").isEqualTo(900_036);
+        // 低 16 位：36^4 = 1679616 = 0x19A100 → 0xA100 = 41216
+        assertThat(BattleSmokeChecks.soloQueueConfig("10000")).isEqualTo(900_000 + 0xA100);
+        // 缺省 run-tag 是当前毫秒的 36 进制串
+        long now = 1_760_000_000_000L;
+        assertThat(BattleSmokeChecks.soloQueueConfig(Long.toString(now, 36))).isEqualTo(900_000 + (int) (now & 0xFFFF));
+        // 16 位的标签超出 long：照样只取低 16 位，不溢出、不为负
+        assertThat(BattleSmokeChecks.soloQueueConfig("z".repeat(16))).isBetween(900_000, 900_000 + 0xFFFF);
+        assertThat(BattleSmokeChecks.soloQueueConfig("x1")).as("不同的标签给出不同的队列").isNotEqualTo(BattleSmokeChecks.soloQueueConfig("x2"));
+        assertThat(BattleSmokeChecks.SOLO_QUEUE_CONFIG_BASE + 0xFFFF).as("与 battle-smoke 的 0、跨区场景的 1、PVE 的副本号都不相交").isGreaterThan(900_000);
+    }
+
+    @Test
+    void 角色名取自143里本人的actor_不在名单里为空() {
+        BattleStateS2C state = BattleStateS2C.newBuilder()
+                .addActors(BattleActorState.newBuilder().setActorId(BIG).setName("侠客一"))
+                .addActors(BattleActorState.newBuilder().setActorId(7).setName("怪")).build();
+        assertThat(BattleSmokeChecks.actorName(state, BIG)).contains("侠客一");
+        assertThat(BattleSmokeChecks.actorName(state, 7)).contains("怪");
+        assertThat(BattleSmokeChecks.actorName(state, 8)).isEmpty();
+        assertThat(BattleSmokeChecks.actorName(BattleStateS2C.newBuilder().addActors(BattleActorState.newBuilder().setActorId(9)).build(), 9))
+                .as("actor 在、名字没填：空串，由场景报「无从核对」").contains("");
+    }
+
+    @Test
+    void 屏障期预算_恰好用满不算超_超出时写明用时与预算() {
+        assertThat(BattleSmokeChecks.budgetProblem(0, 60_000)).isNull();
+        assertThat(BattleSmokeChecks.budgetProblem(60_000, 60_000)).isNull();
+        assertThat(BattleSmokeChecks.budgetProblem(60_001, 60_000)).contains("已用 60001 ms", "超出预算 60000 ms");
+    }
+
+    @Test
+    void S12的应答判读_16015才是结局_16014只在ready残留的窗口内算过渡态_文案不对或别的应答都判错() {
+        com.game.proto.match.WatchBattleResponse inBattle = watchTip(16015, "战斗尚未结束,无法观战");
+        com.game.proto.match.WatchBattleResponse queued = watchTip(16014, "匹配中无法观战");
+        assertThat(BattleSmokeChecks.inBattleWatch(inBattle, true)).isEqualTo(BattleSmokeChecks.InBattleWatch.IN_BATTLE);
+        assertThat(BattleSmokeChecks.inBattleWatch(inBattle, false)).isEqualTo(BattleSmokeChecks.InBattleWatch.IN_BATTLE);
+        assertThat(BattleSmokeChecks.inBattleWatch(queued, true)).isEqualTo(BattleSmokeChecks.InBattleWatch.READY_RESIDUE);
+        assertThat(BattleSmokeChecks.inBattleWatch(queued, false)).as("过了窗口还回 16014：ready 票早该过期了")
+                .isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
+        // 全角逗号、缺文案、别的码、居然成功了
+        assertThat(BattleSmokeChecks.inBattleWatch(watchTip(16015, "战斗尚未结束，无法观战"), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
+        assertThat(BattleSmokeChecks.inBattleWatch(com.game.proto.match.WatchBattleResponse.newBuilder()
+                .setErrorMessage(TipInfoMessage.newBuilder().setId(16014)).build(), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
+        assertThat(BattleSmokeChecks.inBattleWatch(watchTip(16004, "服务器繁忙,请稍后再试"), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
+        assertThat(BattleSmokeChecks.inBattleWatch(com.game.proto.match.WatchBattleResponse.newBuilder().setBattleId(BIG).build(), true))
+                .isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
+        // 带着 battle_id 的拒绝也不算
+        assertThat(BattleSmokeChecks.inBattleWatch(inBattle.toBuilder().setBattleId(1).build(), true)).isEqualTo(BattleSmokeChecks.InBattleWatch.WRONG);
+        assertThat(BattleSmokeChecks.READY_TICKET_TTL_MS).isEqualTo(60_000);
+        assertThat(SpectateSteps.Timing.STANDARD.readyResidue().toMillis()).as("等的窗口 = ready TTL + 2 s 余量")
+                .isEqualTo(BattleSmokeChecks.READY_TICKET_TTL_MS + 2_000);
+    }
+
+    private static com.game.proto.match.WatchBattleResponse watchTip(int code, String text) {
+        return com.game.proto.match.WatchBattleResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder().setId(code).addParameters(text)).build();
+    }
+
+    @Test
+    void 结果行的观战字段_战斗号按无符号十进制_两个回合数字段同值_布尔写成0和1() {
+        assertThat(BattleSmokeChecks.spectateFields(BIG, 14, true, false))
+                .isEqualTo("spectate_battle_id=9223372036854775809 b_spectate_turns=14 b_direct_spectate_turns=14 removed_ok=1 s12_ready_residue=0");
+        assertThat(BattleSmokeChecks.spectateFields(0, 0, false, true))
+                .isEqualTo("spectate_battle_id=0 b_spectate_turns=0 b_direct_spectate_turns=0 removed_ok=0 s12_ready_residue=1");
     }
 }

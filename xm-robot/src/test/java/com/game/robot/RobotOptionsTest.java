@@ -235,11 +235,55 @@ class RobotOptionsTest {
     }
 
     @Test
+    void battle_cross_zone_另一个区缺省2_命令行盖过环境变量_与zone相同是参数错误_别的子命令不受这条约束() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("battle-cross-zone", "--run-tag", "t1"), ENV, NOW);
+        assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.BATTLE_CROSS_ZONE);
+        assertThat(o.zoneId()).isEqualTo(1);
+        assertThat(o.visitZoneId()).isEqualTo(2);
+        assertThat(o.matchAdminUrl()).as("评分经 xm-match 的管理端口查").isEqualTo("http://127.0.0.1:18113");
+        assertThat(com.game.robot.scenario.BattleCrossZoneScenario.accountName(o.accountPrefix(), o.runTag(), "a")).isEqualTo("robot_java_xzt1_a");
+        assertThat(o.toString()).contains("zone=1, visitZone=2,").doesNotContain("dev-secret");
+
+        // 哪个区当 A 都行；两种写法都认
+        RobotOptions swapped = RobotOptions.parse(List.of("battle-cross-zone", "--zone", "2", "--visit-zone=1"), ENV, NOW);
+        assertThat(swapped.zoneId()).isEqualTo(2);
+        assertThat(swapped.visitZoneId()).isEqualTo(1);
+        Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "XM_ROBOT_VISIT_ZONE", "3");
+        assertThat(RobotOptions.parse(List.of("battle-cross-zone"), env, NOW).visitZoneId()).isEqualTo(3);
+        assertThat(RobotOptions.parse(List.of("battle-cross-zone", "--visit-zone", "4"), env, NOW).visitZoneId()).isEqualTo(4);
+
+        // 两个区相同：不是跨区，参数错误（基线 robot 的配置校验同样拒绝 zone_a == zone_b）
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("battle-cross-zone", "--visit-zone", "1"), ENV, NOW))
+                .isInstanceOf(UsageException.class).hasMessageContaining("--visit-zone 与 --zone 都是 1");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("battle-cross-zone", "--zone", "2"), ENV, NOW))
+                .as("--zone 2 配缺省的 --visit-zone 2").isInstanceOf(UsageException.class).hasMessageContaining("都是 2");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("battle-cross-zone", "--visit-zone", "0"), ENV, NOW)).hasMessageContaining("--visit-zone");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("battle-cross-zone", "--visit-zone", "two"), ENV, NOW)).hasMessageContaining("不是整数");
+
+        // 别的子命令不看 --visit-zone：在二区上跑单区场景是正常用法
+        assertThat(RobotOptions.parse(List.of("smoke", "--zone", "2"), ENV, NOW).zoneId()).isEqualTo(2);
+        assertThat(RobotOptions.parse(List.of("battle-smoke", "--zone", "2"), ENV, NOW).visitZoneId()).isEqualTo(2);
+        assertThat(RobotOptions.parse(List.of("smoke", "--zone", "3", "--visit-zone", "3"), ENV, NOW).zoneId()).isEqualTo(3);
+
+        assertThat(RobotOptions.usage()).contains("--visit-zone <值>", "XM_ROBOT_VISIT_ZONE", "  battle-cross-zone ", "XM_ZONES=2", "CROSS_ZONE_MATCH_OK",
+                "CROSS_ZONE_MATCH_FAIL step=", "step=preflight");
+    }
+
+    @Test
+    void battle_smoke的帮助写明观战段_结果行的新字段_不再提6_4的临时应答() {
+        String usage = RobotOptions.usage();
+        String line = usage.lines().filter(l -> l.startsWith("  battle-smoke ")).findFirst().orElseThrow();
+        assertThat(line).contains("观战段", "163(0)", "16014", "16015", "16018", "166 REMOVED", "165", "spectate_battle_id=", "b_spectate_turns=",
+                "b_direct_spectate_turns=", "removed_ok=1", "s12_ready_residue=0|1", "step=s<n>-budget", "step=s<n>-x-ended-early");
+        assertThat(line).doesNotContain("1006").doesNotContain("空列表");
+    }
+
+    @Test
     void 匹配类子命令的账号都放得进64个字符_十个5V5账号按最长的那个算() {
-        // 前缀 + 标签（bm / ma / m5）+ 16 位 run-tag + _ + 一位后缀
+        // 前缀 + 标签（bm / xz / ma / m5）+ 16 位 run-tag + _ + 一位后缀
         String prefix = "p".repeat(64 - 2 - 16 - 2);
         String tag = "t".repeat(16);
-        for (String sub : List.of("battle-smoke", "match-activity", "match-5v5")) {
+        for (String sub : List.of("battle-smoke", "battle-cross-zone", "match-activity", "match-5v5")) {
             assertThat(catchUsage(List.of(sub, "--prefix", prefix, "--run-tag", tag))).as(sub + " 恰好 64 个字符").isNull();
             assertThat(catchUsage(List.of(sub, "--prefix", prefix + "p", "--run-tag", tag))).as(sub + " 65 个字符").contains("超过 64");
         }

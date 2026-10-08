@@ -72,6 +72,26 @@ class RobotMainTest {
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void battle_cross_zone接到了跨区场景上_连不上gateway时第一步就失败_最后一行是CROSS_ZONE_MATCH_FAIL() throws Exception {
+        Run cross = run("battle-cross-zone", closedPort());
+
+        assertThat(cross.exit()).isEqualTo(RobotMain.EXIT_FAIL);
+        assertThat(cross.out()).contains("== xm-robot battle-cross-zone：robot_java_xzt1_a 等", "zone=1 visit-zone=2", "结论：失败");
+        assertThat(cross.lastLine()).as("先读区服列表：两个区都开着才往下走").startsWith("CROSS_ZONE_MATCH_FAIL step=preflight reason=流程中断：")
+                .contains("xm-gateway");
+    }
+
+    @Test
+    void battle_cross_zone两个区相同_参数错误退出码2_不建任何连接() {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        PrintStream sink = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        int exit = RobotMain.run(List.of("battle-cross-zone", "--zone", "2"), Map.of(RobotOptions.PASSWORD_ENV, "p"), sink, sink);
+        assertThat(exit).isEqualTo(RobotMain.EXIT_USAGE);
+        assertThat(bytes.toString(StandardCharsets.UTF_8)).contains("参数错误：battle-cross-zone 要两个不同的区").doesNotContain("开始 ==");
+    }
+
+    @Test
     void 别的子命令没有结果行_报告的最后一行仍是结论() throws Exception {
         // movement 第一步同样连不上；它不是匹配类场景，不写 XXX_OK / XXX_FAIL
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();

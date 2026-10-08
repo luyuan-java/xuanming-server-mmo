@@ -15,6 +15,7 @@ import com.game.robot.scenario.AttributeScenario;
 import com.game.robot.scenario.AuditScenario;
 import com.game.robot.scenario.BagScenario;
 import com.game.robot.scenario.BattleCrashScenario;
+import com.game.robot.scenario.BattleCrossZoneScenario;
 import com.game.robot.scenario.BattleEdgeScenario;
 import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
@@ -96,7 +97,7 @@ public final class RobotMain {
                 String target = "gateway=" + options.gatewayUrl() + " zone=" + options.zoneId();
                 CheckReport report;
                 String title;
-                // 给外层脚本按子串消费的一行结论（XXX_OK … / XXX_FAIL step=… reason=…）：只有批次 6.4 的匹配类场景与 team 有
+                // 给外层脚本按子串消费的一行结论（XXX_OK … / XXX_FAIL step=… reason=…）：只有匹配类场景（批次 6.4、6.5）与 team 有
                 String resultLine = null;
                 if (options.scenario() == RobotOptions.Scenario.SMOKE) {
                     title = "xm-robot smoke：" + options.count() + " 个账号（前缀 " + options.accountPrefix() + "），" + target;
@@ -166,6 +167,21 @@ public final class RobotMain {
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                     resultLine = scenario.resultLine();
+                } else if (options.scenario() == RobotOptions.Scenario.BATTLE_CROSS_ZONE) {
+                    // A 用上面那个 --zone 的客户端；B、C 另起一个 --visit-zone 的（assign-gate 按区给 gate）
+                    try (RobotClient visitClient = new RobotClient(options.gatewayUrl(), options.visitZoneId(), ids,
+                            options.connectTimeout(), options.requestTimeout())) {
+                        PlayerFlow visitFlow = new PlayerFlow(visitClient, options.password(), options.requestTimeout(),
+                                options.enterSceneTimeout());
+                        BattleCrossZoneScenario scenario = new BattleCrossZoneScenario(client, flow, visitClient, visitFlow,
+                                new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), registry, matchAdmin(options, env),
+                                options.accountPrefix(), options.runTag(), options.zoneId(), options.visitZoneId(), options.requestTimeout());
+                        title = "xm-robot battle-cross-zone：" + scenario.accountA() + " 等，" + target + " visit-zone=" + options.visitZoneId()
+                                + " match-admin=" + options.matchAdminUrl();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                        resultLine = scenario.resultLine();
+                    }
                 } else if (options.scenario() == RobotOptions.Scenario.MATCH_ACTIVITY) {
                     MatchActivityScenario scenario = new MatchActivityScenario(client, flow, registry, matchAdmin(options, env),
                             options.accountPrefix(), options.runTag(), options.requestTimeout());

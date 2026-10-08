@@ -124,10 +124,67 @@ class MatchUpstreamTest {
         robot.put("CHALLENGE_EXPIRED", BattleSmokeChecks.TEXT_CHALLENGE_EXPIRED);
         robot.put("CHALLENGE_NOT_TARGET", BattleSmokeChecks.TEXT_CHALLENGE_NOT_TARGET);
         robot.put("REISSUE_BATTLE_GONE", BattleSmokeChecks.TEXT_BATTLE_GONE);
+        // 163 观战的七条（批次 6.5，spectate-spec §3.2；两条 16004 复用别的号的 NO_IDENTITY / BUSY，robot 不断言它们）
+        robot.put("WATCH_QUEUED", SpectateSteps.TEXT_QUEUED);
+        robot.put("WATCH_IN_BATTLE", SpectateSteps.TEXT_IN_BATTLE);
+        robot.put("WATCH_ALREADY", SpectateSteps.TEXT_ALREADY_WATCHING);
+        robot.put("WATCH_NO_BATTLE", SpectateSteps.TEXT_NO_BATTLE);
+        robot.put("WATCH_NOT_FOUND", SpectateSteps.TEXT_NOT_FOUND);
+        robot.put("WATCH_NOT_WATCHABLE", SpectateSteps.TEXT_NOT_WATCHABLE);
+        robot.put("WATCH_OFFLINE", SpectateSteps.TEXT_OFFLINE);
         assertThat(upstream).containsAllEntriesOf(robot);
-        // 163 的临时应答（1006，不带 parameters）自批次 6.5 的先行件起不再是 MatchTip 的常量（过渡期由观战包的占位处理器自己拼，场景第 10 步照旧
-        // 只断言 id）；MatchTip 里换成了观战真语义的文案，等场景的观战段落地时在上面的表里逐条对照
-        assertThat(upstream).doesNotContainKey("FEATURE_UNAVAILABLE").containsKeys("WATCH_QUEUED", "WATCH_NOT_FOUND", "WATCH_NOT_WATCHABLE");
+        // 6.4 的临时应答（1006）随 M22 关闭删除：MatchTip 里不再有它，robot 的场景也不再断言它
+        assertThat(upstream).doesNotContainKey("FEATURE_UNAVAILABLE");
+        assertThat(upstream.keySet().stream().filter(k -> k.startsWith("WATCH_"))).as("MatchTip 加了新的观战文案就同步 SpectateSteps 与本测试")
+                .containsExactlyInAnyOrder("WATCH_QUEUED", "WATCH_IN_BATTLE", "WATCH_ALREADY", "WATCH_NO_BATTLE", "WATCH_NOT_FOUND",
+                        "WATCH_NOT_WATCHABLE", "WATCH_OFFLINE");
+    }
+
+    @Test
+    void 观战码的常量名_与xm_match的MatchTips用的是同一组导表枚举() throws Exception {
+        String tips = file("xm-match/src/main/java/com/game/match/support/MatchTips.java");
+        // robot 与 xm-match 各自从导表生成的枚举取值；这里只钉「取的是同一个枚举常量」，数值由 SpectateStepsTest 钉
+        for (String constant : List.of("kMatchSpectateWhileQueued_VALUE", "kMatchSpectateWhileInBattle_VALUE", "kMatchAlreadyWatching_VALUE",
+                "kMatchNoWatchableBattle_VALUE", "kMatchBattleNotWatchable_VALUE", "kMatchSpectateOffline_VALUE")) {
+            assertThat(tips).as("MatchTips 用到 %s", constant).contains("MatchErrorTip.match_error." + constant);
+        }
+    }
+
+    @Test
+    void 观战文案_规格里逐字写着() throws Exception {
+        String spec = file("docs/porting/spectate-spec.md");
+        for (String text : List.of(SpectateSteps.TEXT_QUEUED, SpectateSteps.TEXT_IN_BATTLE, SpectateSteps.TEXT_ALREADY_WATCHING, SpectateSteps.TEXT_NO_BATTLE,
+                SpectateSteps.TEXT_NOT_FOUND, SpectateSteps.TEXT_NOT_WATCHABLE, SpectateSteps.TEXT_OFFLINE)) {
+            assertThat(spec).as("spectate-spec 里逐字写着「%s」", text).contains(text);
+        }
+    }
+
+    @Test
+    void 列表的条数收口与过期分界_ready票据的TTL_与xm_match一致() throws Exception {
+        String budgets = file(MATCH_BUDGETS);
+        assertThat(SpectateSteps.LIST_DEFAULT).isEqualTo((int) UpstreamConstantsTest.number(budgets, "WATCHABLE_LIST_DEFAULT"));
+        assertThat(SpectateSteps.LIST_MAX).isEqualTo((int) UpstreamConstantsTest.number(budgets, "WATCHABLE_LIST_MAX"));
+        // 过期分界 = 落点记录的 TTL（一局的最长时长 + 60 s）：这两个常量在 MatchBudgets 里是用别的常量算出来的，按写法钉
+        assertThat(budgets).contains("PLACEMENT_TTL_SECONDS = BATTLE_MAX_DURATION_SECONDS + 60;", "SPECTATE_STALE_MS = PLACEMENT_TTL_SECONDS * 1_000L;");
+        assertThat(SpectateSteps.STALE_MS).isEqualTo((UpstreamConstantsTest.number(budgets, "BATTLE_MAX_DURATION_SECONDS") + 60) * 1000);
+
+        Matcher ready = Pattern.compile("(?m)^\\s*ready-ticket-ttl:\\s*(\\d+)s\\b").matcher(file(MATCH_YAML));
+        assertThat(ready.find()).as("application.yaml 里有 ready-ticket-ttl: Ns").isTrue();
+        // S12 等上一局的 ready 票据过期：窗口 = 这个 TTL + 2 s
+        assertThat(BattleSmokeChecks.READY_TICKET_TTL_MS).isEqualTo(Long.parseLong(ready.group(1)) * 1000);
+        assertThat(SpectateSteps.Timing.STANDARD.readyResidue().toMillis()).isGreaterThan(BattleSmokeChecks.READY_TICKET_TTL_MS);
+    }
+
+    @Test
+    void 观战指标的名字与标签值_与xm_match的MatchMetrics一致() throws Exception {
+        String metrics = file("xm-match/src/main/java/com/game/match/metrics/MatchMetrics.java");
+        // 场景的 S13 / Z10 按 Prometheus 名（点换下划线、计数器加 _total）与小写的枚举名取值
+        assertThat(metrics).contains("WATCH_BATTLE = \"xm.match.watch.battle\"", "SPECTATE_EVICTIONS = \"xm.match.spectate.evictions\"",
+                "GATHER_ZONE_MIX = \"xm.match.gather.zone.mix\"");
+        assertThat(metrics).as("163 出口的枚举里有 ok / queued / in_battle / not_found").containsPattern(
+                "enum WatchOutcome \\{[^}]*\\bOK\\b[^}]*\\bQUEUED\\b[^}]*\\bIN_BATTLE\\b[^}]*\\bNOT_FOUND\\b[^}]*}");
+        assertThat(metrics).containsPattern("enum EvictReason \\{[^}]*\\bENTER_GATHER\\b[^}]*}").containsPattern("enum EvictResult \\{[^}]*\\bREMOVED\\b[^}]*}")
+                .containsPattern("enum ZoneMix \\{[^}]*\\bCROSS\\b[^}]*}");
     }
 
     @Test

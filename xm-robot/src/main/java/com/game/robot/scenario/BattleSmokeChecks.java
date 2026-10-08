@@ -10,11 +10,14 @@ import com.game.proto.match.ChallengeInviteS2C;
 import com.game.proto.match.ChallengeResultS2C;
 import com.game.proto.match.GetQueueStatusResponse;
 import com.game.proto.match.JoinQueueResponse;
+import com.game.proto.match.WatchBattleResponse;
 import com.game.robot.client.MatchAdminClient.Rating;
 import com.game.table.CommonErrorTip;
 import com.game.table.MatchErrorTip;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.regex.Pattern;
 
@@ -40,7 +43,6 @@ final class BattleSmokeChecks {
     static final int TIP_CHALLENGE_EXPIRED = MatchErrorTip.match_error.kMatchChallengeExpired_VALUE;
     static final int TIP_CHALLENGE_NOT_TARGET = MatchErrorTip.match_error.kMatchChallengeNotTarget_VALUE;
     static final int TIP_INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
-    static final int TIP_FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
 
     // ---- parameters[0]（逐字节；半角逗号） ----
     static final String TEXT_IN_BATTLE = "战斗尚未结束,无法排队";
@@ -72,6 +74,16 @@ final class BattleSmokeChecks {
     static final long MAX_DELTA_CENTI = 3_200;
     /** 5V5 评分相同时按弹出序的蛇形分队（§2.9）。 */
     static final List<Integer> SNAKE_5V5 = List.of(0, 1, 1, 0, 0, 1, 1, 0, 0, 1);
+    /**
+     * ready 票据的 TTL（xm-match 的 {@code xm.match.ready-ticket-ttl}）：开局成功后票还留这么久，163 在此期间一律回 16014
+     * （对票据不自愈，spectate-spec BW1）。
+     */
+    static final long READY_TICKET_TTL_MS = 60_000;
+    /**
+     * 观战段 S6 用的「凑不成局」的 1V1 配置号的起点（spectate-spec §10.7 S6：900000 + runTag 低 16 位；1V1 不校验 config，
+     * 它只是队列键的一部分）。
+     */
+    static final int SOLO_QUEUE_CONFIG_BASE = 900_000;
 
     private BattleSmokeChecks() {
     }
@@ -381,5 +393,70 @@ final class BattleSmokeChecks {
         return "154 {challenge_id=" + Long.toUnsignedString(result.getChallengeId()) + ", accepted=" + result.getAccepted() + ", responder_id="
                 + Long.toUnsignedString(result.getResponderId()) + "}，期望 {" + Long.toUnsignedString(challengeId) + ", " + accepted + ", "
                 + Long.toUnsignedString(responderId) + "}";
+    }
+
+    // ---------------------------------------------------------------- 观战段（spectate-spec §10.7）
+
+    /**
+     * 观战段 S6 的 1V1 配置号：{@value #SOLO_QUEUE_CONFIG_BASE} + run-tag（按 36 进制数读）的低 16 位。每轮 run-tag 不同，这条队列里只有本轮的
+     * SB 一个人，凑不成局——用来证明「观战中可以排队，而且只排队不会被清退」。
+     *
+     * @param runTag {@code [a-z0-9]{1,16}}
+     */
+    static int soloQueueConfig(String runTag) {
+        return SOLO_QUEUE_CONFIG_BASE + new BigInteger(runTag, 36).and(BigInteger.valueOf(0xFFFF)).intValueExact();
+    }
+
+    /** 143 / 140 的状态里某个玩家的角色名（{@code BattleActorState.name}，来自备战快照的 {@code player_name}）；不在 actors 里为空。 */
+    static Optional<String> actorName(BattleStateS2C state, long playerId) {
+        for (BattleActorState actor : state.getActorsList()) {
+            if (actor.getActorId() == playerId) {
+                return Optional.of(actor.getName());
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * 屏障期（S1 收到 177 到 S8 结束）的用时预算：战斗 X 不开自动，靠 6 s 的回合超时活着，脚本慢了它会先打完。
+     *
+     * @return null = 没超
+     */
+    static String budgetProblem(long elapsedMs, long budgetMs) {
+        return elapsedMs <= budgetMs ? null : "已用 " + elapsedMs + " ms，超出预算 " + budgetMs + " ms（各步的等待上限照旧，合计超出即失败："
+                + "先看是哪一步等得久）";
+    }
+
+    /** S12 里一条 163 应答的判读。 */
+    enum InBattleWatch {
+        /** {@code {16015, 战斗尚未结束,无法观战}}：期望的结局。 */
+        IN_BATTLE,
+        /** {@code {16014, 匹配中无法观战}}，且上一局的 ready 票据还可能没过期：过渡态，稍后重试。 */
+        READY_RESIDUE,
+        /** 其余：不对。 */
+        WRONG
+    }
+
+    /**
+     * S12（切磋局里、开自动之前，A 发 163(0)）的应答怎么算（spectate-spec §10.7 S12、评审 F1）。切磋不建票，A 只有战斗锁，本该回 16015；
+     * 但 A 在上一步刚打完 1V1，那一局的 ready 票据（{@value #READY_TICKET_TTL_MS} ms）可能还在，而 163 先查票据后查锁、对票据不自愈（BW1），
+     * 这时回 16014。所以 16014 只在 ready 票据还可能活着的窗口内算过渡态，过了窗口必须是 16015。
+     *
+     * @param residuePossible 此刻距上一局收到 177 还不满「ready TTL + 余量」
+     */
+    static InBattleWatch inBattleWatch(WatchBattleResponse response, boolean residuePossible) {
+        if (SpectateSteps.isRejection(response, SpectateSteps.TIP_IN_BATTLE, SpectateSteps.TEXT_IN_BATTLE)) {
+            return InBattleWatch.IN_BATTLE;
+        }
+        if (residuePossible && SpectateSteps.isRejection(response, SpectateSteps.TIP_QUEUED, SpectateSteps.TEXT_QUEUED)) {
+            return InBattleWatch.READY_RESIDUE;
+        }
+        return InBattleWatch.WRONG;
+    }
+
+    /** 结果行里观战段的五个字段（{@code b_*} 两个字段名同基线 {@code bss.go:277-278}；观战帧只走直连，所以两个数相同）。 */
+    static String spectateFields(long spectateBattleId, int spectateTurns, boolean removedOk, boolean readyResidue) {
+        return "spectate_battle_id=" + Long.toUnsignedString(spectateBattleId) + " b_spectate_turns=" + spectateTurns + " b_direct_spectate_turns="
+                + spectateTurns + " removed_ok=" + (removedOk ? 1 : 0) + " s12_ready_residue=" + (readyResidue ? 1 : 0);
     }
 }
