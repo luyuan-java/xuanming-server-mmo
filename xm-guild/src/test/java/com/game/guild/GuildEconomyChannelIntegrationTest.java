@@ -254,11 +254,22 @@ class GuildEconomyChannelIntegrationTest {
         meters = new SimpleMeterRegistry();
 
         // ---- 假 scene：真 Triple 提供方，地址写进 Redis 节点目录，玩家位置记录指向它 ----
-        int port;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            port = socket.getLocalPort();
+        // 探到的空闲端口在「探测用的 socket 关掉」到「Dubbo 绑上去」之间可能被别的出站连接拿去当本地端口（同进程里上面刚建的 Redis
+        // 连接池就在这时候建连；全量构建里因此红过一次：Address already in use）。绑不上就换一个端口再来；只对「地址已被占用」重试，
+        // 别的导出失败照抛，次数有上限
+        int port = 0;
+        for (int attempt = 1; sceneServer == null; attempt++) {
+            try (ServerSocket socket = new ServerSocket(0)) {
+                port = socket.getLocalPort();
+            }
+            try {
+                sceneServer = exportScene(scene, port);
+            } catch (RuntimeException e) {
+                if (attempt >= EXPORT_ATTEMPTS || !addressInUse(e)) {
+                    throw e;
+                }
+            }
         }
-        sceneServer = exportScene(scene, port);
         scenes = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
         scenes.publish(zone, SCENE_NODE, SceneNodeInfo.newBuilder().setZoneId(zone).setNodeId(SCENE_NODE)
                 .setInstanceId("fake-scene").setRpcHost("127.0.0.1").setRpcPort(port).build(), Duration.ofMinutes(2));
@@ -333,8 +344,31 @@ class GuildEconomyChannelIntegrationTest {
         service.setRegister(false);
         service.setRegistry(new RegistryConfig(RegistryConfig.NO_AVAILABLE));
         service.setProtocol(protocol);
-        service.export();
+        try {
+            service.export();
+        } catch (RuntimeException e) {
+            // 没导出成（多半是端口被抢）：这个 Dubbo 模型不会再用，关掉再把异常交给调用方决定要不要换端口重试
+            dubbo.close();
+            throw e;
+        }
         return dubbo;
+    }
+
+    /** 假 scene 导出时换端口重试的次数上限。 */
+    private static final int EXPORT_ATTEMPTS = 5;
+
+    /** 异常链里有没有「地址已被占用」（{@link java.net.BindException}，或 Dubbo 包了一层只留下文案）。 */
+    private static boolean addressInUse(Throwable error) {
+        for (Throwable t = error; t != null; t = t.getCause()) {
+            if (t instanceof java.net.BindException
+                    || (t.getMessage() != null && t.getMessage().contains("Address already in use"))) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
     }
 
     private static String tableDir() {
