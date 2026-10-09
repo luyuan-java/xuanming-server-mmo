@@ -351,4 +351,99 @@ class RobotOptionsTest {
         assertThat(RobotMain.run(List.of("smoke"), Map.of(), sink, sink)).isEqualTo(RobotMain.EXIT_USAGE);
         assertThat(RobotMain.run(List.of("--help"), Map.of(), sink, sink)).isEqualTo(RobotMain.EXIT_PASS);
     }
+
+    // ---------------------------------------------------------------- 批次 5.4：travel 三个子命令与 --cross-zone
+
+    @Test
+    void travel三个子命令_连字符写法_访客区缺省2_账号带tv标签() throws Exception {
+        RobotOptions travel = RobotOptions.parse(List.of("travel", "--run-tag", "t1"), ENV, NOW);
+        assertThat(travel.scenario()).isEqualTo(RobotOptions.Scenario.TRAVEL);
+        assertThat(travel.zoneId()).isEqualTo(1);
+        assertThat(travel.visitZoneId()).isEqualTo(2);
+        assertThat(RobotOptions.parse(List.of("travel-abandon"), ENV, NOW).scenario()).isEqualTo(RobotOptions.Scenario.TRAVEL_ABANDON);
+        assertThat(RobotOptions.parse(List.of("travel-long"), ENV, NOW).scenario()).isEqualTo(RobotOptions.Scenario.TRAVEL_LONG);
+        assertThat(com.game.robot.scenario.TravelScenario.accountName(travel.accountPrefix(), travel.runTag(), "a")).isEqualTo("robot_java_tvt1_a");
+
+        // 反向：从区 2 出发去区 1
+        RobotOptions reverse = RobotOptions.parse(List.of("travel", "--zone", "2", "--visit-zone=1"), ENV, NOW);
+        assertThat(reverse.zoneId()).isEqualTo(2);
+        assertThat(reverse.visitZoneId()).isEqualTo(1);
+
+        assertThat(RobotOptions.subcommand(RobotOptions.Scenario.TRAVEL_ABANDON)).isEqualTo("travel-abandon");
+        assertThat(RobotOptions.isTravel(RobotOptions.Scenario.TRAVEL_LONG)).isTrue();
+        assertThat(RobotOptions.isTravel(RobotOptions.Scenario.BATTLE_CROSS_ZONE)).isFalse();
+    }
+
+    @Test
+    void travel三个子命令_访客区与出发区相同是参数错误_文案点名子命令() {
+        for (String sub : List.of("travel", "travel-abandon", "travel-long")) {
+            assertThat(catchUsage(List.of(sub, "--visit-zone", "1"))).as(sub).isEqualTo(sub + " 要两个不同的区：--visit-zone 与 --zone 都是 1");
+            assertThat(catchUsage(List.of(sub, "--zone", "2"))).as(sub + " --zone 2 配缺省的 --visit-zone 2").contains("都是 2");
+            assertThat(catchUsage(List.of(sub, "--zone", "2", "--visit-zone", "1"))).as(sub + " 反向").isNull();
+        }
+    }
+
+    @Test
+    void travel的账号放得进64个字符_三个子命令按同一个长度算() {
+        // 前缀 + tv + 16 位 run-tag + _ + 一位后缀
+        String prefix = "p".repeat(64 - 2 - 16 - 2);
+        String tag = "t".repeat(16);
+        for (String sub : List.of("travel", "travel-abandon", "travel-long")) {
+            assertThat(catchUsage(List.of(sub, "--prefix", prefix, "--run-tag", tag))).as(sub + " 恰好 64 个字符").isNull();
+            assertThat(catchUsage(List.of(sub, "--prefix", prefix + "p", "--run-tag", tag))).as(sub + " 65 个字符").contains("超过 64");
+        }
+    }
+
+    @Test
+    void cross_zone_缺省auto_三个取值_命令行盖过环境变量_其他取值报错() throws Exception {
+        assertThat(RobotOptions.parse(List.of("team"), ENV, NOW).crossZone()).isEqualTo(com.game.robot.scenario.CrossZoneGate.Mode.AUTO);
+        assertThat(RobotOptions.parse(List.of("guild", "--cross-zone", "require"), ENV, NOW).crossZone())
+                .isEqualTo(com.game.robot.scenario.CrossZoneGate.Mode.REQUIRE);
+        assertThat(RobotOptions.parse(List.of("trade", "--cross-zone=skip"), ENV, NOW).crossZone())
+                .isEqualTo(com.game.robot.scenario.CrossZoneGate.Mode.SKIP);
+        Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "XM_ROBOT_CROSS_ZONE", "skip");
+        assertThat(RobotOptions.parse(List.of("team"), env, NOW).crossZone()).isEqualTo(com.game.robot.scenario.CrossZoneGate.Mode.SKIP);
+        assertThat(RobotOptions.parse(List.of("team", "--cross-zone", "require"), env, NOW).crossZone())
+                .isEqualTo(com.game.robot.scenario.CrossZoneGate.Mode.REQUIRE);
+
+        assertThat(catchUsage(List.of("team", "--cross-zone", "always"))).isEqualTo("--cross-zone 只能是 auto / require / skip：always");
+        assertThat(catchUsage(List.of("team", "--cross-zone", "REQUIRE"))).as("只认小写").contains("--cross-zone 只能是");
+        assertThat(RobotOptions.parse(List.of("team", "--cross-zone", "require"), ENV, NOW).toString())
+                .contains("visitZone=2, crossZone=require, prefix=").doesNotContain("dev-secret");
+    }
+
+    @Test
+    void cross_zone_require而两个区相同_team_guild_trade是参数错误_auto与skip照常_别的子命令不管() {
+        for (String sub : List.of("team", "guild", "trade")) {
+            assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2"))).as(sub)
+                    .isEqualTo(sub + " --cross-zone require 要两个不同的区：--visit-zone 与 --zone 都是 2");
+            assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2", "--visit-zone", "1"))).as(sub + " 两个区不同").isNull();
+            // 在二区上跑单区场景是正常用法：auto 下跳过跨区步骤，不是参数错误
+            assertThat(catchUsage(List.of(sub, "--zone", "2"))).as(sub + " auto").isNull();
+            assertThat(catchUsage(List.of(sub, "--zone", "2", "--cross-zone", "skip"))).as(sub + " skip").isNull();
+        }
+        assertThat(catchUsage(List.of("smoke", "--zone", "2", "--cross-zone", "require"))).as("没有跨区步骤的子命令不看它").isNull();
+        assertThat(catchUsage(List.of("guild-economy", "--zone", "2", "--cross-zone", "require"))).isNull();
+    }
+
+    @Test
+    void 帮助写明travel的前置与结果行_三态开关_访客区的用途() {
+        String usage = RobotOptions.usage();
+
+        String travel = usage.lines().filter(l -> l.startsWith("  travel ")).findFirst().orElseThrow();
+        assertThat(travel).contains("XM_ZONES=2", "step=preflight", "3024", "3007", "3026", "3027", "13000", "2011", "--dwell-ms", "--travel-scene-config",
+                "严格重登", "绝不建角", "TRAVEL_SMOKE_OK", "TRAVEL_SMOKE_FAIL step=", "move_ack", "ticket_binding", "hops=");
+        assertThat(usage.lines().filter(l -> l.startsWith("  travel-abandon ")).findFirst().orElseThrow())
+                .contains("不跟随", "TRAVEL_ABANDON_OK", "TRAVEL_ABANDON_FAIL step=");
+        assertThat(usage.lines().filter(l -> l.startsWith("  travel-long ")).findFirst().orElseThrow())
+                .contains("31 s", "TRAVEL_LONG_OK", "TRAVEL_LONG_FAIL step=");
+
+        assertThat(usage).contains("--cross-zone <值>", "XM_ROBOT_CROSS_ZONE", "auto（", "require（", "skip（", "缺省 auto");
+        String visit = usage.lines().filter(l -> l.startsWith("  --visit-zone ")).findFirst().orElseThrow();
+        assertThat(visit).contains("battle-cross-zone", "travel / travel-abandon / travel-long", "--cross-zone");
+        for (String sub : List.of("team", "guild", "trade")) {
+            String line = usage.lines().filter(l -> l.startsWith("  " + sub + " ")).findFirst().orElseThrow();
+            assertThat(line).as(sub + " 的说明不再说「单 zone 时跳过」").contains("--cross-zone", "--visit-zone").doesNotContain("单 zone 时跳过");
+        }
+    }
 }

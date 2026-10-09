@@ -7,6 +7,7 @@ import com.game.robot.client.GatewayHttp;
 import com.game.robot.client.LoginHttpClient;
 import com.game.robot.client.MatchAdminClient;
 import com.game.robot.client.MessageIds;
+import com.game.robot.client.RedirectTarget;
 import com.game.robot.client.RobotClient;
 import com.game.robot.client.SceneAdminClient;
 import com.game.robot.client.TradeAdminClient;
@@ -46,6 +47,7 @@ import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TeamScenario;
 import com.game.robot.scenario.TokenScenario;
 import com.game.robot.scenario.TradeScenario;
+import com.game.robot.scenario.TravelScenario;
 import com.game.robot.scenario.ZonesScenario;
 import java.io.PrintStream;
 import java.nio.file.Path;
@@ -74,9 +76,12 @@ public final class RobotMain {
         RobotOptions options;
         // battle-settle 的故障变体选项：与主选项一起先解析，写错了在建任何连接之前就按参数错误退出
         CrashWindowOptions crash;
+        // travel 三个子命令的附加选项（停留、去程地图）：同样先解析，写错了按参数错误退出
+        TravelOptions travel;
         try {
             options = RobotOptions.parse(args, env, System.currentTimeMillis());
             crash = options.scenario() == RobotOptions.Scenario.BATTLE_SETTLE ? CrashWindowOptions.parse(args, env) : null;
+            travel = RobotOptions.isTravel(options.scenario()) ? TravelOptions.parse(args, env) : null;
         } catch (UsageException e) {
             if (e.isHelp()) {
                 out.print(RobotOptions.usage());
@@ -90,14 +95,14 @@ public final class RobotMain {
         try {
             MessageIdRegistry registry = MessageIdRegistry.loadFromClasspath();
             MessageIds ids = MessageIds.resolve(registry);
-            try (RobotClient client = new RobotClient(options.gatewayUrl(), options.zoneId(), ids,
-                    options.connectTimeout(), options.requestTimeout())) {
-                PlayerFlow flow = new PlayerFlow(client, options.password(), options.requestTimeout(),
-                        options.enterSceneTimeout());
+            // 124 RedirectToGate 不在 MessageIds 里（批次 5.4）：登录流程靠它认出「进游戏之后来的是 124 不是 79」
+            int redirectToGateId = RedirectTarget.messageId(registry);
+            try (RobotClient client = clientFor(options, options.zoneId(), ids, redirectToGateId)) {
+                PlayerFlow flow = flowFor(client, options);
                 String target = "gateway=" + options.gatewayUrl() + " zone=" + options.zoneId();
                 CheckReport report;
                 String title;
-                // 给外层脚本按子串消费的一行结论（XXX_OK … / XXX_FAIL step=… reason=…）：只有匹配类场景（批次 6.4、6.5）与 team 有
+                // 给外层脚本按子串消费的一行结论（XXX_OK … / XXX_FAIL step=… reason=…）：只有匹配类场景（批次 6.4、6.5）、team 与 travel（批次 5.4）有
                 String resultLine = null;
                 if (options.scenario() == RobotOptions.Scenario.SMOKE) {
                     title = "xm-robot smoke：" + options.count() + " 个账号（前缀 " + options.accountPrefix() + "），" + target;
@@ -169,15 +174,27 @@ public final class RobotMain {
                     resultLine = scenario.resultLine();
                 } else if (options.scenario() == RobotOptions.Scenario.BATTLE_CROSS_ZONE) {
                     // A 用上面那个 --zone 的客户端；B、C 另起一个 --visit-zone 的（assign-gate 按区给 gate）
-                    try (RobotClient visitClient = new RobotClient(options.gatewayUrl(), options.visitZoneId(), ids,
-                            options.connectTimeout(), options.requestTimeout())) {
-                        PlayerFlow visitFlow = new PlayerFlow(visitClient, options.password(), options.requestTimeout(),
-                                options.enterSceneTimeout());
+                    try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
+                        PlayerFlow visitFlow = flowFor(visitClient, options);
                         BattleCrossZoneScenario scenario = new BattleCrossZoneScenario(client, flow, visitClient, visitFlow,
                                 new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), registry, matchAdmin(options, env),
                                 options.accountPrefix(), options.runTag(), options.zoneId(), options.visitZoneId(), options.requestTimeout());
                         title = "xm-robot battle-cross-zone：" + scenario.accountA() + " 等，" + target + " visit-zone=" + options.visitZoneId()
                                 + " match-admin=" + options.matchAdminUrl();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                        resultLine = scenario.resultLine();
+                    }
+                } else if (RobotOptions.isTravel(options.scenario())) {
+                    // 出发区（也是新号的归属区）用上面那个 --zone 的客户端；访客区另起一个 --visit-zone 的。两个区各一套登录流程：
+                    // 经哪个区的入口登录，就用哪个区的 flow
+                    try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
+                        PlayerFlow visitFlow = flowFor(visitClient, options);
+                        TravelScenario scenario = new TravelScenario(client, flow, visitClient, visitFlow,
+                                new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), registry, options, travel);
+                        title = "xm-robot " + RobotOptions.subcommand(options.scenario()) + "：" + scenario.accountA() + " 等，" + target
+                                + " visit-zone=" + options.visitZoneId() + " dwell-ms=" + travel.dwell().toMillis()
+                                + " travel-scene-config=" + travel.sceneConfigId();
                         out.println("== " + title + " 开始 ==");
                         report = scenario.run();
                         resultLine = scenario.resultLine();
@@ -379,6 +396,20 @@ public final class RobotMain {
             e.printStackTrace(err);
             return EXIT_FAIL;
         }
+    }
+
+    /**
+     * 某个区的探针客户端（assign-gate 按区给 gate）。跨区的子命令要两个：{@code --zone} 的与 {@code --visit-zone} 的，各自 try-with-resources 关闭。
+     *
+     * @param redirectToGateId 124 的消息号（{@link RedirectTarget#messageId}）
+     */
+    private static RobotClient clientFor(RobotOptions options, int zoneId, MessageIds ids, int redirectToGateId) {
+        return new RobotClient(options.gatewayUrl(), zoneId, ids, redirectToGateId, options.connectTimeout(), options.requestTimeout());
+    }
+
+    /** 某个区的登录流程（经哪个区的入口登录，就用哪个区的）。 */
+    private static PlayerFlow flowFor(RobotClient client, RobotOptions options) {
+        return new PlayerFlow(client, options.password(), options.requestTimeout(), options.enterSceneTimeout());
     }
 
     /** xm-battle dev 接口客户端（运维令牌同 audit：XM_ADMIN_TOKEN 或 run/xm-admin-token）。 */

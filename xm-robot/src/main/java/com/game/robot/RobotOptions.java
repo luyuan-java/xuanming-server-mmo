@@ -12,6 +12,7 @@ import com.game.robot.scenario.BattleSettleScenario;
 import com.game.robot.scenario.BattleSmokeScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CrossNodeScenario;
+import com.game.robot.scenario.CrossZoneGate;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.DungeonScenario;
 import com.game.robot.scenario.ExpectJump;
@@ -34,6 +35,7 @@ import com.game.robot.scenario.SmokeScenario;
 import com.game.robot.scenario.TeamScenario;
 import com.game.robot.scenario.TokenScenario;
 import com.game.robot.scenario.TradeScenario;
+import com.game.robot.scenario.TravelScenario;
 import java.time.Duration;
 import java.util.EnumMap;
 import java.util.List;
@@ -45,7 +47,10 @@ import java.util.regex.Pattern;
  * 探针的运行参数。取值优先级：命令行 {@code --名字 值}（或 {@code --名字=值}）&gt; 环境变量 &gt; 缺省值。
  * 开发口令只从环境变量 {@value #PASSWORD_ENV} 读（不进命令行、不进 shell 历史、不打印）。
  *
- * @param visitZoneId     battle-cross-zone 场景：另一个区（B、C 登录的区；A 登录 {@code zoneId}）。只有这个场景要求它与 {@code zoneId} 不同
+ * @param visitZoneId     另一个区。battle-cross-zone：B、C 登录的区（A 登录 {@code zoneId}）；travel 三个子命令：要去的访客区（从 {@code zoneId} 出发）——
+ *                        这四个子命令要求它与 {@code zoneId} 不同。team / guild / trade 的跨区步骤里另一个号从它登录（见 {@code crossZone}）
+ * @param crossZone       team / guild / trade：跨区步骤跑不跑（{@code --cross-zone auto|require|skip}，批次 5.4 裁决 J6）；
+ *                        {@code require} 时这三个子命令也要求 {@code visitZoneId} 与 {@code zoneId} 不同
  * @param runTag          移动 / 货币 / 属性场景的账号标签：账号为 {@code 前缀 + mv + 标签 + _a / _b}、{@code 前缀 + cur / at + 标签}；
  *                        缺省按当前时间生成，每次都是新号
  * @param expectGmAllowed 货币场景：服务端运行模式放行 GM 指令（allow）还是拒绝（deny）
@@ -62,6 +67,7 @@ public record RobotOptions(
         String gatewayUrl,
         int zoneId,
         int visitZoneId,
+        CrossZoneGate.Mode crossZone,
         String accountPrefix,
         int count,
         String runTag,
@@ -142,7 +148,17 @@ public record RobotOptions(
         /** 帮会活动开战的 dev 入口（批次 6.4，match-spec §15.5「match-activity」）；子命令写作 {@code match-activity}，只在 dev / test 运行模式下跑。 */
         MATCH_ACTIVITY,
         /** 5V5 排队成局与蛇形分队（批次 6.4，match-spec §15.5「match-5v5」，可选，10 个新号）；子命令写作 {@code match-5v5}。 */
-        MATCH_5V5
+        MATCH_5V5,
+        /**
+         * 跨 zone 传送往返（批次 5.4，zone-travel-spec §11.11）；需要 {@code XM_ZONES=2} 的切片。从 {@code --zone} 发 226 传送到
+         * {@code --visit-zone}、跟随 124、严格重登，停留后再传送回来；附加选项 {@code --dwell-ms / --travel-scene-config}
+         * （{@link TravelOptions}）。结果行 {@code TRAVEL_SMOKE_OK …} / {@code TRAVEL_SMOKE_FAIL step=… reason=…}。
+         */
+        TRAVEL,
+        /** travel 的子模式：拿到 124 不跟随，分别经两个区的入口重登；子命令写作 {@code travel-abandon}。 */
+        TRAVEL_ABANDON,
+        /** travel 的子模式：在访客区断线、等过 30 s 重连租约，再经出发区的入口重登；子命令写作 {@code travel-long}。 */
+        TRAVEL_LONG
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -150,7 +166,12 @@ public record RobotOptions(
         GATEWAY("gateway", "XM_ROBOT_GATEWAY", "http://127.0.0.1:18081", "xm-gateway 地址（assign-gate 入口）"),
         ZONE("zone", "XM_ROBOT_ZONE", "1", "区号（assign-gate 的 zone_id，≥ 1）"),
         VISIT_ZONE("visit-zone", "XM_ROBOT_VISIT_ZONE", "2",
-                "另一个区（≥ 1）：battle-cross-zone 里 B 与观众 C 登录的区（A 登录 --zone），必须与 --zone 不同；别的子命令不看它"),
+                "另一个区（≥ 1）：battle-cross-zone 里 B 与观众 C 登录的区（A 登录 --zone）；travel / travel-abandon / travel-long 里要去的访客区"
+                        + "（从 --zone 出发）——这四个子命令要求它与 --zone 不同。team / guild / trade 的跨区步骤里另一个号从它登录"
+                        + "（见 --cross-zone）；别的子命令不看它"),
+        CROSS_ZONE("cross-zone", "XM_ROBOT_CROSS_ZONE", "auto",
+                "team / guild / trade：跨区步骤（另一个号经 --visit-zone 登录）跑不跑：auto（--visit-zone 与 --zone 不同、且在区服列表里是 OPEN 才跑，"
+                        + "否则跳过并写明原因）/ require（跑不了即失败，验收用；两个区相同是参数错误）/ skip（不跑）；跑没跑写进报告与结果行"),
         PREFIX("prefix", "XM_ROBOT_ACCOUNT_PREFIX", "robot_java_", "账号前缀（须在 xm-login 的开发账号前缀白名单里）"),
         COUNT("count", "XM_ROBOT_COUNT", "3", "smoke 的账号数（1–" + MAX_COUNT + "）"),
         RUN_TAG("run-tag", "XM_ROBOT_RUN_TAG", null, "smoke 以外各子命令的账号标签 [a-z0-9]{1,16}；缺省按当前时间生成（每次新号）"),
@@ -200,7 +221,12 @@ public record RobotOptions(
         CRASH_PHASE("crash-phase", "XM_ROBOT_CRASH_PHASE", "arm",
                 "battle-settle 故障变体的阶段：arm（打到断点、写状态文件；battle-after-store 还要留在线上看 rescue 到账）/ verify（进程重启之后重登核对）"),
         CRASH_STATE("crash-state", "XM_ROBOT_CRASH_STATE", "run/battle-crash-window.state",
-                "battle-settle 故障变体的状态文件：arm 在断点处原子地写出（脚本等它出现就 kill -9），verify 读它");
+                "battle-settle 故障变体的状态文件：arm 在断点处原子地写出（脚本等它出现就 kill -9），verify 读它"),
+        DWELL("dwell-ms", "XM_ROBOT_TRAVEL_DWELL_MS", "35000",
+                "travel：到访客区之后的停留毫秒数（0–600000，可以是 0）；停留期间不该被踢、不该再收到 124（缺省 35 s 是为了越过 30 s 的重连租约）"),
+        TRAVEL_SCENE_CONFIG("travel-scene-config", "XM_ROBOT_TRAVEL_SCENE_CONFIG", "0",
+                "travel：去程 226 指定的地图（World 表的 scene_config_id，≥ 0）；0 = 由目标区挑默认主世界。非 0 时才分得清"
+                        + "「落在请求的地图」与「回落默认主世界」");
 
         /** 布尔开关：命令行可以只写 {@code --名字}（下一个参数不是 true / false 时不吃掉它）。 */
         boolean isFlag() {
@@ -273,8 +299,17 @@ public record RobotOptions(
         int zone = intValue(Opt.ZONE, given, env, 1, Integer.MAX_VALUE);
         int visitZone = intValue(Opt.VISIT_ZONE, given, env, 1, Integer.MAX_VALUE);
         // 只有跨区场景要求两个区不同：别的子命令不看 --visit-zone（smoke --zone 2 配缺省的 2 是正常用法）
-        if (scenario == Scenario.BATTLE_CROSS_ZONE && visitZone == zone) {
-            throw new UsageException("battle-cross-zone 要两个不同的区：--visit-zone 与 --zone 都是 " + zone);
+        if (needsTwoZones(scenario) && visitZone == zone) {
+            throw new UsageException(subcommand(scenario) + " 要两个不同的区：--visit-zone 与 --zone 都是 " + zone);
+        }
+        String crossZoneText = value(Opt.CROSS_ZONE, given, env);
+        CrossZoneGate.Mode crossZone = CrossZoneGate.Mode.ofWire(crossZoneText);
+        if (crossZone == null) {
+            throw new UsageException("--cross-zone 只能是 auto / require / skip：" + crossZoneText);
+        }
+        // require 是「跨区步骤必须跑」：两个区相同就不可能跑，在建任何连接之前就说清楚（auto 下同样的情形是跳过，不是错误）
+        if (crossZone == CrossZoneGate.Mode.REQUIRE && hasCrossZoneSteps(scenario) && visitZone == zone) {
+            throw new UsageException(subcommand(scenario) + " --cross-zone require 要两个不同的区：--visit-zone 与 --zone 都是 " + zone);
         }
         String prefix = value(Opt.PREFIX, given, env);
         if (prefix.isEmpty() || !prefix.equals(prefix.strip()) || prefix.chars().anyMatch(Character::isWhitespace)) {
@@ -363,12 +398,13 @@ public record RobotOptions(
             case BATTLE_CROSS_ZONE -> BattleCrossZoneScenario.accountName(prefix, runTag, "a");
             case MATCH_ACTIVITY -> MatchActivityScenario.accountName(prefix, runTag, "a");
             case MATCH_5V5 -> Match5v5Scenario.accountName(prefix, runTag, Match5v5Scenario.PLAYERS - 1);
+            case TRAVEL, TRAVEL_ABANDON, TRAVEL_LONG -> TravelScenario.accountName(prefix, runTag, "a");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
         }
 
-        return new RobotOptions(scenario, gateway, zone, visitZone, prefix, count, runTag,
+        return new RobotOptions(scenario, gateway, zone, visitZone, crossZone, prefix, count, runTag,
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
@@ -379,7 +415,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|team> [选项]\n");
+        out.append("用法：java -jar xm-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|travel|travel-abandon|travel-long|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -419,12 +455,14 @@ public record RobotOptions(
                 + "拒绝申请与各推送 → A 换图 B 跟随（读 --table-dir 的 World 表）→ 开战拒绝码（非队长 4018、未配置的副本 4027 且视图 IDLE、"
                 + "B 持 1V1 排队票 4026[B] 后取消）→ S7 整队开战（211 回 STARTING、B 收 MATCH_STARTED、两人同一 battle_id 的 177 / 143、"
                 + "直连挂机打到 150、两人收 MATCH_ENDED）→ S8 B 单人 PVE 战斗中 A 开战 4025[B] → 解散；"
-                + "另钉 4003 / 4005 / 4006 / 4007 / 4013 / 4017、MEMBER_ONLINE、上行 213 不回包；跨区步骤单 zone 时跳过。"
+                + "另钉 4003 / 4005 / 4006 / 4007 / 4013 / 4017、MEMBER_ONLINE、上行 213 不回包；跨区步骤（另一个新号 C 经 --visit-zone 登录、"
+                + "归属区是 --visit-zone：C 申请 A 的队、A 邀请 C 都回 4020）按 --cross-zone 决定跑不跑，跑没跑写进报告与结果行。"
                 + "整队开战（批次 6.4）需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService；结尾写 TEAM_SMOKE_OK … 或 TEAM_SMOKE_FAIL step=…\n");
         out.append("  guild     帮会核心（A / B / D / E / F 五个新号）：建帮落归属区 / 重复建帮 14000 / 本区榜 / 改公告 / 申请 → 审批 → "
                 + "各推送 / 伪造 player_id 退帮按会话受理 / 上行 8 与 220 信封 1003 / 任命长老 / 长老踢人边界 / 两次转让 / 退帮 / 解散后 "
                 + "14002 / 14007 且删申请；另钉 14009 / 14010 / 14006 / 14001 / 14018 / 14015 / 14014 / 14016 / 14004 / 14005、"
-                + "待审数只对管理者可见、榜单页长回显、DonateToGuild(0) 14027；跨区步骤单 zone 时跳过\n");
+                + "待审数只对管理者可见、榜单页长回显、DonateToGuild(0) 14027；跨区步骤（另一个新号 C 经 --visit-zone 登录、归属区是 --visit-zone："
+                + "查帮会 14001、查名次 14007、本区榜里没有、申请 14001、同名建帮 14010）按 --cross-zone 决定跑不跑，跑没跑写进报告\n");
         out.append("  guild-economy 帮会经济（A / B 两个新号）：建帮 → GM 给 A 发银两 / 灵石 → 大捐两次（资金 / 帮贡）、第三次 14024 → 灵石捐 → "
                 + "B 余额不足 14025 + REJECTED → 升级（B 14016、A 升 Lv.2、B 收 LEVEL_UP、旧等级重升不扣钱）→ 商店解锁 → 兑换入包 → "
                 + "14029 / 14031 / 14030 → 限购 → 解散；结算中的单轮询到落定，后台终结的推 FUNDS_CHANGED / DELIVERY_DONE；"
@@ -432,8 +470,9 @@ public record RobotOptions(
         out.append("  trade     聚宝斋只读面（A / B / C 三个新号）：经 xm-trade 播种接口造种子（market_zone = 卖家归属区）→ 经 gate 发 199 无回包 → "
                 + "寄售 / 公示页签与本轮种子逐字段一致 → 单区范围断言（zone_filter 在 zone 下被忽略、global 下生效）→ 页长 50 回显 20、"
                 + "超末页钳到末页 → 拍卖 20003 → 详情（不存在 20000、卖家看已结束的、买家 20000）→ 收藏 / 只看收藏 / 取消 → 货架；"
-                + "另钉参数非法 1005、LIKE 通配按字面量、按编号搜索。需要 dev 运行模式与运维令牌；--trade-scope 须与 xm-trade 一致，"
-                + "跨区步骤单 zone 时跳过\n");
+                + "另钉参数非法 1005、LIKE 通配按字面量、按编号搜索。需要 dev 运行模式与运维令牌；--trade-scope 须与 xm-trade 一致；"
+                + "跨区步骤（zone 范围：C 改经 --visit-zone 登录、归属区是 --visit-zone，C 的种子落在 --visit-zone 的市场，本区的 B 看不到 C）"
+                + "按 --cross-zone 决定跑不跑，跑没跑写进报告\n");
         out.append("  cross-node 跨节点换图（三个新号；需要 XM_SCENE_NODES=2 起两个 scene 节点、per-node 覆盖、每图每节点一个频道）：落位到同图"
                 + "两个频道（同场景就登出等 6 s 重登，有上限）→ A 63 {scene_id = B 的场景} 应答 {0}、79 / 新实体号的 21 / 含 B 的 47、"
                 + "B 收 A 的 21、留在原场景的 C 收 A 旧实体的 51 → 目标节点上移动（B 收 66）与 77 → 断开重连回原实例原位 → 63 换回 → "
@@ -502,6 +541,23 @@ public record RobotOptions(
         out.append("  match-5v5 5V5 排队（10 个新号，可选；前置同 battle-smoke）：按次序逐个 157 {mode = 1} 受理 → 十人收到同一个 battle_id 的 "
                 + "177 / 143 → 评分相同按入队次序蛇形分队 0,1,1,0,0,1,1,0,0,1 → 全员直连挂机打到 150 → 评分查询每人 games + 1；"
                 + "结尾写 MATCH_5V5_OK … 或 MATCH_5V5_FAIL step=… reason=…\n");
+        out.append("  travel    跨 zone 传送往返（A、B 两个新号，批次 5.4；需要 XM_ZONES=2 的切片——两个区各有 gate 与 scene 且都在区服列表里，"
+                + "另需 dev 运行模式）：区服列表里 --zone 与 --visit-zone 都是 OPEN（否则失败 step=preflight）→ A、B 经 --zone 登录，"
+                + "A 的归属区是 --zone、登录期间没有 124、GM 加金币得出发值 → 226 的同步拒绝（目标为 0 或本区 3024、表外地图 3007、在队 3026）→ "
+                + "去没有部署的区：应答 {0} 后 23 {3027}，留在原地照常可玩 → 226 {--visit-zone, --travel-scene-config}：应答 {0} 先于 124、"
+                + "票据的 zone_id / player_id / target_zone_id 与到期时刻 → 跟随 124（握手成功后才关旧连接，晚关的那一会儿旧连接上的请求没有回包）→ "
+                + "严格重登（角色列表必须有原角色、绝不建角、归属区不变）、79 在 124 之后、新连接上没有第二条 124、金币不变 → 停留 --dwell-ms 后"
+                + "没有 23 / 34 / 124 → B 拿 A 的票据握手后进自己的角色 2011（持票者不符）、同一张票据交给出发区的 gate 握手被拒 → "
+                + "连发两条 226 回程（一条 {0}、一条 13000，"
+                + "先关旧连接再握手）、金币不回档 → 登出后经 --visit-zone 的入口登录没有 124；结尾写 TRAVEL_SMOKE_OK …"
+                + "（字段名与次序同基线 robot：player_id home_zone visit_zone home_gate visit_gate back_gate gold_home gold_back move_ack "
+                + "ticket_binding reject_tip reject_map_tip，后接 hops=…）或 TRAVEL_SMOKE_FAIL step=… reason=…。"
+                + "同一批账号换区重跑要隔 30 s（重连租约）或换 --run-tag\n");
+        out.append("  travel-abandon 拿到 124 不跟随（两个新号；前置同 travel）：发 226 拿到 124 后直接关旧连接、不去目标 gate → 一个号经 --zone 的"
+                + "入口严格重登：落在 --zone、没有 124、金币等于出发值；另一个号经 --visit-zone 的入口严格重登：落在 226 请求的那张"
+                + "（非默认的）地图；结尾写 TRAVEL_ABANDON_OK … 或 TRAVEL_ABANDON_FAIL step=… reason=…\n");
+        out.append("  travel-long 访客区断线久等（一个新号；前置同 travel）：传送到 --visit-zone 后直接关 TCP，等 31 s（越过 30 s 的重连租约）→ "
+                + "经 --zone 的入口严格重登：落在 --zone、没有 124；结尾写 TRAVEL_LONG_OK … 或 TRAVEL_LONG_FAIL step=… reason=…\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -518,7 +574,8 @@ public record RobotOptions(
     /** 口令不进日志。 */
     @Override
     public String toString() {
-        return "RobotOptions[scenario=" + scenario + ", gateway=" + gatewayUrl + ", zone=" + zoneId + ", visitZone=" + visitZoneId + ", prefix="
+        return "RobotOptions[scenario=" + scenario + ", gateway=" + gatewayUrl + ", zone=" + zoneId + ", visitZone=" + visitZoneId
+                + ", crossZone=" + crossZone.wire() + ", prefix="
                 + accountPrefix + ", count=" + count + ", runTag=" + runTag + ", connectTimeout=" + connectTimeout
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
@@ -531,8 +588,28 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / battle-cross-zone / match-activity / match-5v5）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / battle-cross-zone / match-activity / match-5v5 / travel / travel-abandon / travel-long）");
         }
+    }
+
+    /** 子命令的命令行写法（小写，下划线写成连字符）。 */
+    static String subcommand(Scenario scenario) {
+        return scenario.name().toLowerCase(Locale.ROOT).replace('_', '-');
+    }
+
+    /** 本身就是跨区的子命令：{@code --visit-zone} 必须与 {@code --zone} 不同。 */
+    private static boolean needsTwoZones(Scenario scenario) {
+        return scenario == Scenario.BATTLE_CROSS_ZONE || isTravel(scenario);
+    }
+
+    /** travel 的三个子命令（共用 {@link TravelScenario} 与 {@link TravelOptions}）。 */
+    static boolean isTravel(Scenario scenario) {
+        return scenario == Scenario.TRAVEL || scenario == Scenario.TRAVEL_ABANDON || scenario == Scenario.TRAVEL_LONG;
+    }
+
+    /** 带可选跨区步骤的子命令（由 {@code --cross-zone} 决定跑不跑）。 */
+    static boolean hasCrossZoneSteps(Scenario scenario) {
+        return scenario == Scenario.TEAM || scenario == Scenario.GUILD || scenario == Scenario.TRADE;
     }
 
     private static Opt byArg(String name) throws UsageException {
