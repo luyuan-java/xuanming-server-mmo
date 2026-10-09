@@ -3,6 +3,7 @@ package com.game.scene.storage;
 import com.game.player.store.OwnerState;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
+import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.PlayerStore.HandOffResult;
 import com.game.player.store.state.PlayerState;
 import com.game.scene.metrics.SceneMetrics;
@@ -21,6 +22,7 @@ import java.sql.SQLTransientException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -219,9 +221,20 @@ public final class StoragePlayerRepository implements PlayerRepository {
     }
 
     @Override
-    public void handOff(PlayerSave frozen, Consumer<HandOffOutcome> onDone) {
+    public void handOff(PlayerSave frozen, HandOffMode mode, Consumer<HandOffOutcome> onDone) {
+        Objects.requireNonNull(mode, "mode");
         transfersUnsettled.incrementAndGet();
-        submit(new HandOffTask(frozen, onDone));
+        HandOffTask task = new HandOffTask(frozen, mode, onDone);
+        if (mode == HandOffMode.RELEASE) {
+            // 批次 5.4 先行件的占位：「交出并释放」的重试改判与探测要按另一张表判（已提交的那次读回来是「已释放」），
+            // 那部分还没接上。照现有的 HOLD 逻辑去做会把已提交的传送误判成围栏，所以这里一笔库事务都不发，
+            // 以「一次也没尝试」的结局不明交回——探测见到空的尝试记录直接判没提交，调用方原地解冻。
+            metrics.storageWrite(StorageOp.HANDOFF, WriteResult.REJECTED, 0);
+            log.error("交出并释放（跨 zone 传送，批次 5.4）的存储实现还没接上（施工中），不发库事务、按没提交交回 {}", task.describe());
+            task.deliver(task.failed());
+            return;
+        }
+        submit(task);
     }
 
     @Override
@@ -489,13 +502,16 @@ public final class StoragePlayerRepository implements PlayerRepository {
     private final class HandOffTask extends StorageTask {
 
         private final PlayerSave frozen;
+        /** 这次交出的模式（随结局不明的记录带给探测）。先行件阶段只有 HOLD 会真的执行。 */
+        private final HandOffMode mode;
         private final Consumer<HandOffOutcome> onDone;
         /** 每次尝试写下的新租约值 L_i，按尝试先后；在发出之前记下，应答丢了也认得出。 */
         private final List<Long> leases = new ArrayList<>();
         private long firstAttemptNanos;
 
-        HandOffTask(PlayerSave frozen, Consumer<HandOffOutcome> onDone) {
+        HandOffTask(PlayerSave frozen, HandOffMode mode, Consumer<HandOffOutcome> onDone) {
             this.frozen = frozen;
+            this.mode = mode;
             this.onDone = onDone;
         }
 
@@ -548,7 +564,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
         private HandOffOutcome.Failed failed() {
             return new HandOffOutcome.Failed(frozen.playerId(), frozen.ownerEpoch(),
-                    new HandOffAttempts(firstAttemptNanos, leases));
+                    new HandOffAttempts(firstAttemptNanos, leases), mode);
         }
 
         @Override
@@ -709,6 +725,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
             case HandOffOutcome.HandedOff handedOff -> WriteResult.HANDED_OFF;
             case HandOffOutcome.LeaseTooShort tooShort -> WriteResult.LEASE_TOO_SHORT;
             case HandOffOutcome.Fenced fenced -> WriteResult.FENCED;
+            case HandOffOutcome.Superseded superseded -> WriteResult.SUPERSEDED;
             case HandOffOutcome.Failed failed -> WriteResult.FAILED;
         };
     }
@@ -717,6 +734,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
         return switch (outcome) {
             case ProbeOutcome.HandedOff handedOff -> WriteResult.HANDED_OFF;
             case ProbeOutcome.NotCommitted notCommitted -> WriteResult.NOT_COMMITTED;
+            case ProbeOutcome.Superseded superseded -> WriteResult.SUPERSEDED;
             case ProbeOutcome.Lost lost -> WriteResult.LOST;
         };
     }

@@ -73,6 +73,7 @@ import com.game.scene.player.ItemGuids;
 import com.game.scene.rpc.SceneRpcServer;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.team.TeamFollowService;
+import com.game.scene.team.TravelTeamChecks;
 import com.game.scene.transfer.SceneManagerSwitchTargets;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.CrossNodeSwitch;
@@ -83,6 +84,7 @@ import com.game.scene.world.SceneMessageIds;
 import com.game.scene.world.SceneTables;
 import com.game.scene.world.SceneTicker;
 import com.game.scene.world.SceneWorld;
+import com.game.scene.world.ZoneTravel;
 import io.netty.channel.DefaultEventLoop;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
@@ -317,6 +319,10 @@ public class SceneNode implements SmartLifecycle {
                 renewer.renewSoon(owned);
             }
         }, settings.switchResolveTimeout(), settings.transferTombstoneTtl());
+        // 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）：选目标复用同一个 scene-manager 客户端；受理前的在队检查与组队跟随共用成员关系的读口。
+        // 两个时限与 63 共用配置键，但装配记录各带各的——226 不依赖跨节点换图是否启用
+        ZoneTravel zoneTravel = new ZoneTravel(zoneId, switchTargets, new TravelTeamChecks(teamMemberships::readAsync, logic),
+                settings.travel().teamCheckTimeout(), settings.switchResolveTimeout(), settings.transferTombstoneTtl());
         // 镜像 / 副本实例（批次 5.3，dungeon-mirror-spec §6）：取号复用同一个 scene-manager 客户端（同一个 Dubbo 引用，retries = 0）；
         // 实例建立 / 回收 / 级联 / 销毁后立即补发目录（目录是实例的唯一登记，D1）
         SceneNodeProperties.InstanceSettings instance = settings.instance();
@@ -341,8 +347,8 @@ public class SceneNode implements SmartLifecycle {
                     AssetOpService.checkLedgerOnLoad(player);
                     // 战斗结算账本损坏时大声报一次（结算一律延后、备战一律 1006，原样保留；scene-battle-spec §7.12，D24）
                     PlayerBattleService.checkLedgerOnLoad(player);
-                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId), teamFollow,
-                crossNode, instances, battle);
+                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId, logic), teamFollow,
+                crossNode, instances, battle, zoneTravel);
         battle.attach(sceneWorld);
         battleService = battle;
         links = gateLinks;

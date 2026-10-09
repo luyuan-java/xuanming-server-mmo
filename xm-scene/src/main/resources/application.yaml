@@ -114,10 +114,18 @@ xm:
     # 滚动升级顺序（dungeon-mirror-spec R7）：先升级 scene-manager 再升级 scene——旧 scene-manager 选频道不看目录的 SceneEntry.kind，
     # 会把登录分进本节点上的镜像；旧 scene-manager 没有 createInstance，建镜像调用失败推 23 {1003}（fail-closed）。
     scene-manager-url: ${XM_SCENE_MANAGER_URL:tri://127.0.0.1:20882}
-    # 选目标的本地兜底超时（须大于 scene-manager 的 Dubbo 超时 3s）：到时推 23 {1003}；也是 63 在途槽（期间再发 63 回 3014）的寿命
+    # 选目标的本地兜底超时（须大于 scene-manager 的 Dubbo 超时 3s）：到时推 23 {1003}；也是 63 在途槽（期间再发 63 回 3014）的寿命。
+    # 226 跨 zone 传送的选目标（selectTravelTarget）共用它：226 到时推 23 {3027}
     switch-resolve-timeout: 4s
     # 交出墓碑存活时长：交出后与 PlayerTransfer 在链路上交叉到达的 PlayerLeave 靠它按旧 epoch 补写登出墓碑 / 重连租约
     transfer-tombstone-ttl: 30s
+    # 跨 zone 传送（226，批次 5.4，zone-travel-spec §5.5）。不满足校验拒启。
+    # 滚动升级顺序：scene-manager 与 gate 都先于 scene——旧 scene-manager 没有 selectTravelTarget（226 受理后推 23 {3027}，fail-closed）；
+    # 旧 gate 不认识重定向帧，会把它当成非法的改绑指令（推 23 {3023} 后断开；归属已释放、数据安全，客户端重登即可）。
+    travel:
+      # 226 受理前「在不在队」那次读的上限（> 0 且 ≤ 5s）：到时按读失败回 3027。226 的应答上界是它 + 1s。
+      # 另一条校验：team-check-timeout + switch-resolve-timeout + transfer-lease-margin + 5s 必须小于 60s（缺省 2 + 4 + 15 + 5 = 26s）
+      team-check-timeout: 2s
     # 镜像 / 副本实例（批次 5.3，dungeon-mirror-spec §6.10、§7.2）：实例空置满超时进入回收宽限（不接本地新进入、目录报 draining，
     # 宽限内有在途进场到达即复活），宽限满且仍空、没有在途进场才销毁；每秒判定一次。不满足校验拒启。
     # 本机切片为 robot 提速可用环境变量把镜像超时调到 5s、宽限调到 10s（宽限下限）。

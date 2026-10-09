@@ -69,7 +69,7 @@ class RedisPlayerLocationsTest {
         repo = new FakePlayerRepository();
         world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, new RecordingSink(), repo,
                 new AtomicLong(1000)::incrementAndGet, new ManualClock(), SceneMetrics.noop(), PlayerInitializer.NONE,
-                PlayerSnapshots.NONE, new RedisPlayerLocations(directory, 3, 9));
+                PlayerSnapshots.NONE, new RedisPlayerLocations(directory, 3, 9, Runnable::run));
         map1 = world.createScene(1);
         map2 = world.createScene(2);
     }

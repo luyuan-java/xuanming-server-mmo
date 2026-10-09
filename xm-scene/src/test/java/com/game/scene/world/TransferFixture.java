@@ -190,8 +190,17 @@ final class TransferFixture {
         return count("xm.scene.switch.resolves", result);
     }
 
+    /**
+     * 5.2 跨节点换图的交出结局：批次 5.4 起 {@code xm.scene.transfers} 多了 {@code reason} 标签，这条路径一律计在 {@code reason = player}。
+     * 显式带上它（而不是对两个 reason 求和）：计错到 {@code travel} 下面时这里读到 0、用例会红。
+     */
     double transfers(String result) {
-        return count("xm.scene.transfers", result);
+        return transfers("player", result);
+    }
+
+    double transfers(String reason, String result) {
+        return meters.get("xm.scene.transfers").tag("reason", reason).tag("result", result.toLowerCase(Locale.ROOT))
+                .counter().count();
     }
 
     double inFlight() {

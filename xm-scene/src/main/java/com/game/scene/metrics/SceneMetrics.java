@@ -80,6 +80,10 @@ public final class SceneMetrics {
     static final String TRANSFERS_IN_FLIGHT = "xm.scene.transfers.in.flight";
     static final String TRANSFER_ENTERS = "xm.scene.transfer.enters";
     static final String TRANSFER_POST_FREEZE_MUTATIONS = "xm.scene.transfer.post.freeze.mutations";
+    static final String TRAVEL_REQUESTS = "xm.scene.travel.requests";
+    static final String TRAVEL_RESOLVES = "xm.scene.travel.resolves";
+    static final String TRAVEL_PLACEMENTS = "xm.scene.travel.placements";
+    static final String TRAVEL_FRAMES_PENDING = "xm.scene.travel.frames.pending";
     static final String FROZEN_REJECTIONS = "xm.scene.frozen.rejections";
     static final String BATTLE_GATE_REJECTS = "xm.scene.battle.gate.rejects";
     static final String INSTANCES = "xm.scene.instances";
@@ -217,11 +221,15 @@ public final class SceneMetrics {
         RELEASE(WriteResult.RELEASED, WriteResult.FENCED, WriteResult.FAILED, WriteResult.REJECTED),
         /** 在线存盘（周期存盘，不释放归属）。 */
         PROGRESS(WriteResult.SAVED, WriteResult.FENCED, WriteResult.FAILED, WriteResult.REJECTED),
-        /** 交出归属（跨节点换图：写回冻结快照 + epoch 加一，一笔事务）。FAILED / REJECTED = 结局不明，交给探测。 */
+        /**
+         * 交出归属（跨节点换图 / 跨 zone 传送：写回冻结快照 + epoch 加一，一笔事务）。FAILED / REJECTED = 结局不明，交给探测。
+         * SUPERSEDED 只在「交出并释放」（批次 5.4）出现。
+         */
         HANDOFF(WriteResult.HANDED_OFF, WriteResult.LEASE_TOO_SHORT, WriteResult.FENCED, WriteResult.FAILED,
-                WriteResult.REJECTED),
-        /** 交出结局不明之后的加锁读探测（只读）。 */
-        PROBE(WriteResult.HANDED_OFF, WriteResult.NOT_COMMITTED, WriteResult.LOST, WriteResult.REJECTED);
+                WriteResult.REJECTED, WriteResult.SUPERSEDED),
+        /** 交出结局不明之后的加锁读探测（只读）。SUPERSEDED 只在「交出并释放」（批次 5.4）出现。 */
+        PROBE(WriteResult.HANDED_OFF, WriteResult.NOT_COMMITTED, WriteResult.LOST, WriteResult.REJECTED,
+                WriteResult.SUPERSEDED);
 
         private final Set<WriteResult> results;
 
@@ -254,7 +262,12 @@ public final class SceneMetrics {
         /** 探测：交出没提交（仍由交出方持有、未释放），也不会再提交。 */
         NOT_COMMITTED,
         /** 探测：截止前判定不了，或读到别人的归属 / 已释放 / 玩家不存在，按失去归属处理（fail-closed）。 */
-        LOST
+        LOST,
+        /**
+         * 交出并释放（批次 5.4）：有过结局不明的更早尝试，重试 / 探测读到库里已是 ≥ E+2（多半是已交出、随后被别的登录接管）。
+         * 只是标签：后果与失去归属相同，不算「已交出」。
+         */
+        SUPERSEDED
     }
 
     /** 审计记录的种类（{@code xm.scene.audit.records{kind}}）。 */
@@ -357,7 +370,22 @@ public final class SceneMetrics {
         IN_BATTLE
     }
 
-    /** 一次交出的结局（{@code xm.scene.transfers{result}}，scene-handoff-spec §7.2），每次冻结恰好终结一次。 */
+    /**
+     * 一次冻结交出是为了什么（{@code xm.scene.transfers{reason}}，批次 5.4 起；zone-travel-spec §7.2，裁决 J3）。
+     * 5.2 的跨节点换图一律是 {@link #PLAYER}，加标签之前的序列等于现在 {@code reason="player"} 的那一组。
+     */
+    public enum TransferReason {
+        /** 63 的远端去向：同 zone 跨节点换图（交出并保持）。 */
+        PLAYER,
+        /** 226 跨 zone 传送（交出并释放）。 */
+        TRAVEL
+    }
+
+    /**
+     * 一次交出的结局（{@code xm.scene.transfers{reason, result}}，scene-handoff-spec §7.2），每次冻结恰好终结一次。
+     * 下面各取值的说明按跨节点换图（{@code reason = player}）写；跨 zone 传送（{@code reason = travel}）用同一组取值，
+     * 差别是不释放新 epoch、推的 tip 不同（zone-travel-spec §5.5）。
+     */
     public enum TransferResult {
         /** 已交出并把 PlayerTransfer 交给了链路。 */
         HANDED_OFF,
@@ -374,7 +402,57 @@ public final class SceneMetrics {
         /** 已交出，但冻结中被请求让出（顶号）：源节点释放新 epoch、踢旧会话 2017。 */
         TAKEN_OVER,
         /** 已交出，但写 PlayerTransfer 时链路已断 / 不可写：源节点释放新 epoch、写重连租约。 */
-        LINK_GONE
+        LINK_GONE,
+        /**
+         * 只在 {@code reason = travel} 出现（批次 5.4）：交出并释放的重试 / 探测读到库里已是 ≥ E+2（多半已交出、随后被别的登录接管）。
+         * 移除并踢 2017，与 {@link #FENCED} 的处理相同；不算「已交出」。名字不用 taken_over：那个取值是「冻结中被请求让出」，含义不同。
+         */
+        SUPERSEDED
+    }
+
+    /**
+     * 一条 226 TravelToZone 在受理之前的结局（{@code xm.scene.travel.requests{result}}，zone-travel-spec §7.2），每条请求恰好计一次。
+     */
+    public enum TravelRequest {
+        /** 受理：应答 {@code {0}} 已回，进选目标。 */
+        ACCEPTED,
+        /** 目标 zone 为 0 或就是本 zone：3024。 */
+        ZONE_INVALID,
+        /** 指定的地图不是 World 表里的主世界地图：3007。 */
+        MAP_INVALID,
+        /** 回合制战斗 / 备战在途：3025（同步段，或在队检查读回来时复查到）。 */
+        IN_BATTLE,
+        /** 在队：3026（延迟应答）。 */
+        IN_TEAM,
+        /** 已有一次传送在途，或任何冻结（交出）在途：13000。 */
+        BUSY_TRANSFER,
+        /** 63 的选目标 / 镜像取号在途：3014。 */
+        BUSY_SWITCH,
+        /** 在队检查读失败 / 超时 / 槽过期 / 实例被移出：3027。 */
+        TEAM_READ_ERROR,
+        /** 跨 zone 传送没装配（没有可达的 scene-manager）：同步回 3027。 */
+        UNAVAILABLE
+    }
+
+    /** 226 受理之后选目标的结局（{@code xm.scene.travel.resolves{result}}），每次受理恰好计一次。 */
+    public enum TravelResolve {
+        /** 选中了目标 gate：冻结、提交「交出并释放」。 */
+        CHOSEN,
+        /** scene-manager 业务拒绝：推 23 {3027}。 */
+        REJECTED,
+        /** 调用失败、本地兜底超时或应答残缺：推 23 {3027}。 */
+        ERROR,
+        /** 结果回来时实例已离开 / 已重新进场 / 这次传送已作废：丢弃。 */
+        STALE,
+        /** 选中了，但玩家此刻有在途的回合制战斗：中止、推 23 {3025}。 */
+        IN_BATTLE
+    }
+
+    /** 交出之后写待落点记录的结局（{@code xm.scene.travel.placements{result}}）。写失败照样发重定向帧。 */
+    public enum TravelPlacement {
+        WRITTEN,
+        /** 没写上（被更新的写盖过、Redis 故障）：第二条腿按首登落目标 zone 的默认主世界。 */
+        FAILED
     }
 
     /**
@@ -392,10 +470,11 @@ public final class SceneMetrics {
 
     /**
      * 回合制战斗在途闸（scene-battle-spec §7.13，§9）挡掉的一次操作（{@code xm.scene.battle.gate.rejects{gate}}）：入口集中闸（default = 缺省 REJECT、
-     * move = 移动上行）与各服务闸（63 / 84 / 属性 / 宝宝 / 192 / 资产通道）各计一次。
+     * move = 移动上行）与各服务闸（63 / 84 / 属性 / 宝宝 / 192 / 资产通道）各计一次。批次 5.4 加 {@code zone_travel}：226 被战斗在途拒（3025，
+     * 码与 63 的 3023 不同，所以单列一个取值；裁决 J4）。
      */
     public enum BattleGate {
-        ENTER_SCENE, SKILL, ATTRIBUTE, PET, BAG_SORT, ASSET, MOVE, DEFAULT
+        ENTER_SCENE, SKILL, ATTRIBUTE, PET, BAG_SORT, ASSET, MOVE, DEFAULT, ZONE_TRAVEL
     }
 
     /** 目标节点上交出进场（{@code PlayerEnter.transfer = true}）的结果（{@code xm.scene.transfer.enters{result}}）。 */
@@ -514,8 +593,11 @@ public final class SceneMetrics {
     private final Counter channelPlanPollFailures;
     private final Map<ChannelRelocation, Counter> channelRelocations;
     private final Map<SwitchResolve, Counter> switchResolves;
-    private final Map<TransferResult, Counter> transfers;
+    private final Map<TransferReason, Map<TransferResult, Counter>> transfers;
     private final Timer transferFreeze;
+    private final Map<TravelRequest, Counter> travelRequests;
+    private final Map<TravelResolve, Counter> travelResolves;
+    private final Map<TravelPlacement, Counter> travelPlacements;
     private final Map<TransferEnter, Counter> transferEnters;
     private final Counter postFreezeMutations;
     private final Map<FrozenRejection, Counter> frozenRejections;
@@ -527,6 +609,8 @@ public final class SceneMetrics {
     private final Map<MirrorResolve, Counter> mirrorResolves;
     /** 冻结中（交出在途）的玩家数（逻辑线程推绝对值，抓取线程读）。 */
     private final AtomicInteger transfersInFlight = new AtomicInteger();
+    /** 已移出世界、重定向帧还没发出（或没收口）的旅客数（逻辑线程写，抓取线程读）。 */
+    private final AtomicInteger travelFramesPending = new AtomicInteger();
     /** 本节点承载中 / 排空中的频道数（逻辑线程推绝对值，抓取线程读）。 */
     private final AtomicInteger activeChannels = new AtomicInteger();
     private final AtomicInteger drainingChannels = new AtomicInteger();
@@ -618,10 +702,32 @@ public final class SceneMetrics {
         // 跨节点换图（批次 5.2，scene-handoff-spec §7.2）：全部预注册，不带 player / zone / 场景实例号 / 节点号
         this.switchResolves = counters(SwitchResolve.class, SWITCH_RESOLVES, "result",
                 "63 远端去向的选目标结果（经 scene-manager 的每次恰好计一次）");
-        this.transfers = counters(TransferResult.class, TRANSFERS, "result", "跨节点换图交出的结局（每次冻结恰好终结一次）");
+        // 批次 5.4 起多一个 reason 标签（player = 63 跨节点换图，travel = 226 跨 zone 传送）：reason × result 全部预注册
+        this.transfers = new EnumMap<>(TransferReason.class);
+        for (TransferReason reason : TransferReason.values()) {
+            EnumMap<TransferResult, Counter> byResult = new EnumMap<>(TransferResult.class);
+            for (TransferResult result : TransferResult.values()) {
+                byResult.put(result, Counter.builder(TRANSFERS)
+                        .description("冻结交出的结局（每次冻结恰好终结一次）：reason = player 是跨节点换图，travel 是跨 zone 传送")
+                        .tag("reason", tagValue(reason))
+                        .tag("result", tagValue(result))
+                        .register(registry));
+            }
+            transfers.put(reason, byResult);
+        }
         this.transferFreeze = Timer.builder(TRANSFER_FREEZE)
-                .description("跨节点换图的冻结时长（从冻结到交出结局处理完）")
+                .description("跨节点换图 / 跨 zone 传送的冻结时长（从冻结到交出结局处理完）")
                 .serviceLevelObjectives(TRANSFER_FREEZE_BUCKETS)
+                .register(registry);
+        // 跨 zone 传送（批次 5.4，zone-travel-spec §7.2）：全部预注册，不带 player / zone / 节点号
+        this.travelRequests = counters(TravelRequest.class, TRAVEL_REQUESTS, "result",
+                "226 TravelToZone 在受理之前的结局（每条请求恰好计一次）：accepted = 应答 {0}，其余各回一个拒绝码");
+        this.travelResolves = counters(TravelResolve.class, TRAVEL_RESOLVES, "result",
+                "226 受理之后选目标（scene-manager 选 gate、签票据）的结局（每次受理恰好计一次）");
+        this.travelPlacements = counters(TravelPlacement.class, TRAVEL_PLACEMENTS, "result",
+                "跨 zone 传送交出之后写待落点记录的结局（写失败照样发重定向帧）");
+        Gauge.builder(TRAVEL_FRAMES_PENDING, travelFramesPending, AtomicInteger::get)
+                .description("已交出并移出世界、重定向帧还没发出的旅客数（待落点在写）；应很快回到 0")
                 .register(registry);
         Gauge.builder(TRANSFERS_IN_FLIGHT, transfersInFlight, AtomicInteger::get)
                 .description("冻结中（交出在途）的玩家数")
@@ -790,10 +896,35 @@ public final class SceneMetrics {
         switchResolves.get(result).increment();
     }
 
-    /** 一次交出终结（逻辑线程）：计结局，并记从冻结到此刻的冻结时长。 */
-    public void transfer(TransferResult result, long frozenNanos) {
-        transfers.get(result).increment();
+    /** 一次交出终结（逻辑线程）：按用途计结局，并记从冻结到此刻的冻结时长。 */
+    public void transfer(TransferReason reason, TransferResult result, long frozenNanos) {
+        transfers.get(reason).get(result).increment();
         transferFreeze.record(Math.max(0, frozenNanos), TimeUnit.NANOSECONDS);
+    }
+
+    // ================================================================ 跨 zone 传送（批次 5.4）
+
+    /** 一条 226 在受理之前的结局（逻辑线程）。 */
+    public void travelRequest(TravelRequest result) {
+        travelRequests.get(result).increment();
+    }
+
+    /** 一次 226 选目标的结局（逻辑线程）。 */
+    public void travelResolve(TravelResolve result) {
+        travelResolves.get(result).increment();
+    }
+
+    /** 一次待落点写入的结局（逻辑线程）。 */
+    public void travelPlacement(TravelPlacement result) {
+        travelPlacements.get(result).increment();
+    }
+
+    /**
+     * 已移出世界、重定向帧还没发出的旅客数（{@code xm.scene.travel.frames.pending}；逻辑线程在变化后推绝对值）。
+     * 本批只有计数，停服次序不读它（留给 5.5 的收敛谓词）。
+     */
+    public void travelFramesPending(int count) {
+        travelFramesPending.set(count);
     }
 
     /** 冻结中的玩家数（逻辑线程在变化后推绝对值）。 */

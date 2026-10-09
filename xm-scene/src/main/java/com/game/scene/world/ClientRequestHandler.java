@@ -51,6 +51,9 @@ import org.slf4j.LoggerFactory;
  *   <li>应答的 {@code message_id} 同请求、{@code id} 回显请求号；应答里的 {@code error_message} 总是带上（成功时 id=0）；</li>
  *   <li>没有处理器的方法回 {@code kFeatureUnavailable}(1006)，不断连、不抛异常。136 TeleportRequest 也在其中
  *       （基线是空桩，回 id=0 的空 tip；Java 如实说「不支持」，PARITY 登记为有意差异）；</li>
+ *   <li>有应答的方法，处理器返回时必须已经回过（{@link PlayerCall#reply}）或已转成延迟应答（{@link PlayerCall#defer}，批次 5.4）；
+ *       两样都没做（或中途抛了异常）由这里补回 1006，不让客户端卡住。已延迟的不补——除非处理器在延迟之后抛了异常且还没人回，
+ *       这时经同一个 {@link DeferredReply} 补 1006；</li>
  *   <li><b>冻结闸</b>（跨节点换图的交出事务在途，{@link ScenePlayer#frozen()}；scene-handoff-spec §5.9，D7）：排在 GM 闸与
  *       「有没有处理器」之后、调处理器之前，按注册时声明的 {@link FreezePolicy} 处理——DROP 静默丢（移动）、REJECT 回应答内
  *       {@code error_message{1005}}（缺省，没声明的方法都是它），其余照常进处理器（GATED 由服务闸回基线码）。
@@ -241,13 +244,29 @@ public final class ClientRequestHandler {
             return;
         }
         PlayerCall call = new PlayerCall(world, player, method, requestId);
+        boolean threw = false;
         try {
             registered.handler().handle(call, request);
         } catch (RuntimeException e) {
             // 处理器的编程错误：留 ERROR 待修；逻辑线程继续服务其他玩家，下面照常补应答
+            threw = true;
             log.error("处理器抛出异常 {} player={}", method.key(), player.playerId(), e);
         }
-        if (hasResponse && !call.replied()) {
+        if (!hasResponse) {
+            return;
+        }
+        if (call.deferred()) {
+            // 应答已转成延迟应答（PlayerCall.defer，批次 5.4）：由拿着 DeferredReply 的人稍后回，这里不补 1006。
+            // 唯一的例外：处理器在 defer() 之后又抛了异常——后续的异步步骤多半没发起，没人会再回这条请求；
+            // 趁它还待回，经同一个 DeferredReply 补 1006（之后迟到的 reply 返回 false、不会有第二个应答）
+            DeferredReply deferred = call.deferredReply();
+            if (threw && deferred.pending()) {
+                log.error("处理器在转成延迟应答之后抛了异常，补回 1006 {} player={}", method.key(), player.playerId());
+                deferred.send(errorContent(method, requestId, FEATURE_UNAVAILABLE));
+            }
+            return;
+        }
+        if (!call.replied()) {
             // 处理器的编程错误（没回或中途抛了）：客户端在等应答，回 1006 不让它卡住
             log.error("处理器没有回应答，补回 1006 {} player={}", method.key(), player.playerId());
             replyUnavailable(player, method, requestId);
@@ -411,20 +430,22 @@ public final class ClientRequestHandler {
      * 否则放在信封的 {@code MessageContent.error_message}。
      */
     private void replyError(ScenePlayer player, MessageMethod method, long requestId, int tipId) {
+        world.sendTo(player, errorContent(method, requestId, tipId));
+    }
+
+    /** {@link #replyError} 下发的那条应答信封。 */
+    private static MessageContent errorContent(MessageMethod method, long requestId, int tipId) {
         Message prototype = method.responsePrototype();
         FieldDescriptor field = prototype.getDescriptorForType().findFieldByName("error_message");
-        MessageContent content;
         if (field != null && field.getJavaType() == FieldDescriptor.JavaType.MESSAGE
                 && field.getMessageType().getFullName().equals(TipInfoMessage.getDescriptor().getFullName())) {
             Message response = prototype.toBuilder().setField(field, tip(tipId)).build();
-            content = reply(method.messageId(), requestId, response);
-        } else {
-            content = MessageContent.newBuilder()
-                    .setMessageId(method.messageId())
-                    .setId(requestId)
-                    .setErrorMessage(tip(tipId))
-                    .build();
+            return reply(method.messageId(), requestId, response);
         }
-        world.sendTo(player, content);
+        return MessageContent.newBuilder()
+                .setMessageId(method.messageId())
+                .setId(requestId)
+                .setErrorMessage(tip(tipId))
+                .build();
     }
 }

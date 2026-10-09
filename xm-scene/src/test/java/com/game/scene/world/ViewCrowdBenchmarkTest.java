@@ -3,6 +3,7 @@ package com.game.scene.world;
 import static com.game.scene.world.SceneWorldTest.enterFrame;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.proto.ZoneRedirect;
 import com.game.proto.MessageContent;
 import com.game.proto.Rotation;
 import com.game.scene.metrics.SceneMetrics;
@@ -64,6 +65,12 @@ class ViewCrowdBenchmarkTest {
         @Override
         public boolean playerTransfer(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch,
                                       int targetNodeId, long targetSceneId, Runnable onWriteFailed) {
+            return true;
+        }
+
+        @Override
+        public boolean playerRedirect(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch,
+                                      ZoneRedirect redirect, Runnable onWriteFailed) {
             return true;
         }
     };

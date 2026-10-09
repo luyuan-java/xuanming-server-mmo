@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
 import com.game.api.proto.ClientForward;
+import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorBaseAttributesS2C;
@@ -672,8 +673,8 @@ class MovementSyncTest {
             }
 
             @Override
-            public void handOff(PlayerSave frozen, Consumer<HandOffOutcome> onDone) {
-                inner.handOff(frozen, onDone);
+            public void handOff(PlayerSave frozen, HandOffMode mode, Consumer<HandOffOutcome> onDone) {
+                inner.handOff(frozen, mode, onDone);
             }
 
             @Override

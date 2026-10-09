@@ -1,5 +1,6 @@
 package com.game.scene.testing;
 
+import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository;
 import com.game.scene.world.PlayerSave;
@@ -13,6 +14,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -92,8 +94,11 @@ public final class FakePlayerRepository implements PlayerRepository {
         return progress.size();
     }
 
-    /** 一次挂起的交出：测试决定何时、以什么结局完成（模拟结局投递回逻辑线程）。 */
-    public record PendingHandOff(PlayerSave frozen, Consumer<HandOffOutcome> callback) {
+    /**
+     * 一次挂起的交出：测试决定何时、以什么结局完成（模拟结局投递回逻辑线程）。{@code mode} 是调用方传的交出模式
+     * （HOLD = 跨节点换图，RELEASE = 跨 zone 传送）。
+     */
+    public record PendingHandOff(PlayerSave frozen, HandOffMode mode, Consumer<HandOffOutcome> callback) {
 
         public void complete(HandOffOutcome outcome) {
             callback.accept(outcome);
@@ -112,8 +117,8 @@ public final class FakePlayerRepository implements PlayerRepository {
     private final Deque<PendingProbe> probes = new ArrayDeque<>();
 
     @Override
-    public void handOff(PlayerSave frozen, Consumer<HandOffOutcome> onDone) {
-        handOffs.add(new PendingHandOff(frozen, onDone));
+    public void handOff(PlayerSave frozen, HandOffMode mode, Consumer<HandOffOutcome> onDone) {
+        handOffs.add(new PendingHandOff(frozen, Objects.requireNonNull(mode, "mode"), onDone));
     }
 
     @Override

@@ -71,13 +71,15 @@ public record SceneNodeProperties(
      *                              行锁被占时尝试以超时失败（重试 / 探测），而不是在冻结里一直等
      * @param sceneManagerUrl       跨节点换图选目标（scene-manager {@code selectSwitchTarget}）的直连地址（缺省 {@code tri://127.0.0.1:20882}，
      *                              与 login 同；scene-handoff-spec §5.4、§6.2）。本批只支持直连（scene 没带 Nacos 注册中心依赖），不能为空
-     * @param switchResolveTimeout  选目标的本地兜底超时（缺省 4s；须大于 scene-manager 的 Dubbo 提供方超时 3s、不超过 30s）：到时推 23 {1003}，
+     * @param switchResolveTimeout  选目标的本地兜底超时（缺省 4s；须大于 scene-manager 的 Dubbo 提供方超时 3s、不超过 30s）：到时推 23 {1003}
+     *                              （226 跨 zone 传送的选目标共用它，到时推 23 {3027}），
      *                              也决定 63 在途槽（RESOLVING，期间再发 63 回 3014）的寿命
      * @param transferTombstoneTtl  交出墓碑的存活时长（缺省 30s，1s～5min）：与 PlayerTransfer 在链路上交叉的 PlayerLeave 靠它按旧 epoch 补写位置
      * @param instance              镜像 / 副本实例的回收与上限（批次 5.3，{@code xm.scene.instance.*}，dungeon-mirror-spec §7.2）
      * @param battleRpcMaxInflight  回合制战斗入口 {@code SceneBattleService} 的在途上限（缺省 256，与资产通道各自独立；scene-battle-spec §8）：
      *                              超出回 OVERLOADED（零副作用），不排队进逻辑线程
      * @param battle                回合制战斗（{@code xm.scene.battle.*}，scene-battle-spec §8）
+     * @param travel                跨 zone 传送（批次 5.4，{@code xm.scene.travel.*}，zone-travel-spec §6.2）
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -105,7 +107,8 @@ public record SceneNodeProperties(
             @DefaultValue("30s") Duration transferTombstoneTtl,
             @DefaultValue InstanceSettings instance,
             @DefaultValue("256") int battleRpcMaxInflight,
-            @DefaultValue BattleSettings battle) {
+            @DefaultValue BattleSettings battle,
+            @DefaultValue TravelSettings travel) {
 
         public SceneSettings {
             // 启动期校验（不满足即拒启）：续约周期 < M < 租约 − 续约周期，语句时限 < M
@@ -156,11 +159,58 @@ public record SceneNodeProperties(
             if (saveInterval.isNegative() || saveInterval.toMillis() % 1000 != 0 || saveInterval.toSeconds() > 86_400) {
                 throw new IllegalArgumentException("xm.scene.save-interval 必须是 0 到 1 天之间的整秒: " + saveInterval);
             }
+            requireTravelBudget(travel.teamCheckTimeout(), switchResolveTimeout, transferLeaseMargin);
+        }
+
+        /** 跨 zone 传送在源节点上的时间预算（{@link #requireTravelBudget}）。 */
+        static final Duration TRAVEL_BUDGET = Duration.ofSeconds(60);
+        /** 预算里留给「写待落点、发重定向帧」的余量。 */
+        static final Duration TRAVEL_SLACK = Duration.ofSeconds(5);
+
+        /**
+         * 跨 zone 传送（批次 5.4）在源节点上的最坏耗时必须小于 60 s：在队检查 + 选目标 + 交出（探测截止在安全边际之内）+ 余量 5 s
+         * （待落点写与发帧）。60 s 是 gate 上已重定向会话的收口时限（{@code xm.gate.redirect-linger} 的缺省）与第二条腿服务端上界的口径。
+         *
+         * <p>按三个键今天各自的上界（5 s、30 s、&lt; 20 s）这条不等式恰好恒成立，所以它眼下拦不到任何配置；单列出来是为了把这条跨键的约束
+         * 写在代码里——将来放宽其中任何一个上界时，由它而不是由线上的超时来提醒。
+         *
+         * @throws IllegalArgumentException 不满足（拒启）
+         */
+        static void requireTravelBudget(Duration teamCheckTimeout, Duration switchResolveTimeout, Duration transferLeaseMargin) {
+            Duration worstCase = teamCheckTimeout.plus(switchResolveTimeout).plus(transferLeaseMargin).plus(TRAVEL_SLACK);
+            if (worstCase.compareTo(TRAVEL_BUDGET) >= 0) {
+                throw new IllegalArgumentException("xm.scene.travel.team-check-timeout + xm.scene.switch-resolve-timeout"
+                        + " + xm.scene.transfer-lease-margin + " + TRAVEL_SLACK.toSeconds() + "s 必须小于 " + TRAVEL_BUDGET.toSeconds()
+                        + "s（跨 zone 传送在源节点上的时间预算）: " + teamCheckTimeout + " + " + switchResolveTimeout + " + "
+                        + transferLeaseMargin + " + " + TRAVEL_SLACK + " = " + worstCase);
+            }
         }
 
         /** 交出归属在存储层的参数（已在构造时校验）。 */
         public HandOffSettings handOff() {
             return new HandOffSettings(transferLeaseMargin, transferProbeStatementTimeout);
+        }
+    }
+
+    /**
+     * 跨 zone 传送（{@code xm.scene.travel}，批次 5.4，zone-travel-spec §5.5、§6.2）。不满足校验拒启。
+     *
+     * @param teamCheckTimeout 226 受理前「在不在队」那次读的上限（缺省 2s；必须为正且不超过 5s）：到时按读失败回 3027。
+     *                         226 的应答是延迟的同步应答，上界是它加 1 s（缺省 3 s，远小于客户端的 15 s 请求超时）；
+     *                         它与选目标超时、交出的安全边际之和另有上限，见 {@link SceneSettings} 的校验
+     */
+    public record TravelSettings(
+            @DefaultValue("2s") Duration teamCheckTimeout) {
+
+        /** {@code team-check-timeout} 的上限。 */
+        static final Duration MAX_TEAM_CHECK_TIMEOUT = Duration.ofSeconds(5);
+
+        public TravelSettings {
+            if (teamCheckTimeout == null || teamCheckTimeout.isNegative() || teamCheckTimeout.isZero()
+                    || teamCheckTimeout.compareTo(MAX_TEAM_CHECK_TIMEOUT) > 0) {
+                throw new IllegalArgumentException("xm.scene.travel.team-check-timeout 必须为正且不超过 "
+                        + MAX_TEAM_CHECK_TIMEOUT.toSeconds() + "s: " + teamCheckTimeout);
+            }
         }
     }
 

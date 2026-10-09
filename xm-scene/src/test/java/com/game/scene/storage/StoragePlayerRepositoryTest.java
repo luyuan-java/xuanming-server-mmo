@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 import com.game.player.store.OwnerState;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
+import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.PlayerStore.HandOffResult;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
@@ -573,6 +574,58 @@ class StoragePlayerRepositoryTest {
         verify(store, org.mockito.Mockito.never()).probeOwnership(anyLong(), any());
         assertThat(writes("handoff", "rejected").count()).isEqualTo(1);
         assertThat(writes("probe", "not_committed").count()).isEqualTo(1);
+    }
+
+    /**
+     * 批次 5.4 先行件的占位（之后由「交出并释放」的工作包换成真实现并改写本用例）：RELEASE 模式的交出<b>一笔库事务都不发</b>——
+     * 重试改判与探测还按 HOLD 的表判，照着做会把已提交的传送误判成围栏。结局是「一次也没尝试」的结局不明（带着 RELEASE 模式），
+     * 仍然异步投递；随后的探测不读库、直接判没提交，调用方据此原地解冻。全程不释放任何 epoch，在途计数回到 0。
+     */
+    @Test
+    void 交出并释放的占位_不发库事务_以空尝试的结局不明交回_探测判没提交_在途计数归零() throws Exception {
+        StoragePlayerRepository repository = handing();
+        List<HandOffOutcome> handOffs = new ArrayList<>();
+
+        repository.handOff(FROZEN, HandOffMode.RELEASE, handOffs::add);
+
+        assertThat(handOffs).as("仍异步回调，不在调用栈内").isEmpty();
+        HandOffOutcome outcome = runLogic(handOffs).get(0);
+        assertThat(outcome).isEqualTo(new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(0, List.of()), HandOffMode.RELEASE));
+        assertThat(outcome).as("模式不同就不是同一个结局：HOLD 的三参数形式不等于它")
+                .isNotEqualTo(new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(0, List.of())));
+        assertThat(handOffs).hasSize(1);
+
+        List<ProbeOutcome> probes = new ArrayList<>();
+        repository.probe((HandOffOutcome.Failed) outcome, probes::add);
+        assertThat(runLogic(probes)).containsExactly(new ProbeOutcome.NotCommitted());
+
+        verify(store, org.mockito.Mockito.never()).handOffOwnership(any(), any(), anyLong(), anyLong(), any());
+        verify(store, org.mockito.Mockito.never()).handOffOwnership(any(), any(), anyLong(), anyLong(), any(), any());
+        verify(store, org.mockito.Mockito.never()).probeOwnership(anyLong(), any());
+        verify(store, org.mockito.Mockito.never()).releaseOwnership(anyLong(), anyLong());
+        assertThat(writes("handoff", "rejected").count()).as("没执行的交出计一次 rejected").isEqualTo(1);
+        assertThat(writes("handoff", "handed_off").count()).isZero();
+        assertThat(writes("probe", "not_committed").count()).isEqualTo(1);
+        assertThat(repository.writeFailures()).isZero();
+        assertThat(repository.awaitTransfersSettled(TimeUnit.SECONDS.toNanos(5))).as("交出与探测都已处理完，没有在途").isZero();
+    }
+
+    /** 模式不给是编程错误：当场抛，不提交任务、不留在途计数。两参数形式（5.2 的调用点）等于 HOLD，照常发库事务。 */
+    @Test
+    void 交出的模式为null当场抛_两参数形式等于HOLD() throws Exception {
+        when(attemptHandOff()).thenReturn(new HandOffResult.HandedOff(10));
+        StoragePlayerRepository repository = handing();
+        List<HandOffOutcome> results = new ArrayList<>();
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repository.handOff(FROZEN, null, results::add))
+                .isInstanceOf(NullPointerException.class);
+        assertThat(repository.awaitTransfersSettled(TimeUnit.SECONDS.toNanos(5))).as("抛出的那次没有留下在途计数").isZero();
+
+        repository.handOff(FROZEN, HandOffMode.HOLD, results::add);
+        repository.handOff(FROZEN, results::add);
+
+        assertThat(runLogic(results)).containsExactly(new HandOffOutcome.HandedOff(10), new HandOffOutcome.HandedOff(10));
+        verify(store, times(2)).handOffOwnership(any(), any(), anyLong(), anyLong(), any());
     }
 
     @Test

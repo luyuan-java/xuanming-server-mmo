@@ -8,7 +8,9 @@ import com.game.scene.world.ScenePlayer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,11 +25,20 @@ public final class RedisPlayerLocations implements PlayerLocations {
     private final PlayerLocationDirectory directory;
     private final int zoneId;
     private final int sceneNodeId;
+    /**
+     * 投递回场景逻辑线程。只有带完成回调的写口（{@link PlayerLocations#awaitingPlacement}，批次 5.4）用它；先行件阶段那个写口
+     * 还是接口的缺省实现（不写、当场回 false），这里先把执行器接进来，真实现由位置适配的工作包补上。
+     */
+    private final Executor logic;
 
-    public RedisPlayerLocations(PlayerLocationDirectory directory, int zoneId, int sceneNodeId) {
+    /**
+     * @param logic 场景逻辑线程的执行器（已停止时抛拒绝异常，那时回调丢弃）
+     */
+    public RedisPlayerLocations(PlayerLocationDirectory directory, int zoneId, int sceneNodeId, Executor logic) {
         this.directory = directory;
         this.zoneId = zoneId;
         this.sceneNodeId = sceneNodeId;
+        this.logic = Objects.requireNonNull(logic, "logic");
     }
 
     @Override

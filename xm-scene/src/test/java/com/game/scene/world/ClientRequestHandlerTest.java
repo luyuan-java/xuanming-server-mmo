@@ -286,6 +286,89 @@ class ClientRequestHandlerTest {
                 .getErrorMessage().getId()).containsExactly(1006, 1006, 0, 1006);
     }
 
+    /**
+     * 延迟应答（批次 5.4 先行件）：处理器 {@code defer()} 之后返回，分发处<b>不补 1006</b>；应答稍后经 {@link DeferredReply} 回，
+     * 恰好一个、回显原请求号。期间来的另一条请求照常同步回，不受影响。
+     */
+    @Test
+    void 已延迟的调用_处理器返回后不补1006_稍后经延迟应答回_恰好一个应答() throws Exception {
+        int getCurrencyList = Contracts.REGISTRY.requireId("SceneCurrencyClientPlayer", "GetCurrencyList");
+        List<DeferredReply> held = new java.util.ArrayList<>();
+        SceneFeature deferring = r -> r.on("SceneCurrencyClientPlayer", "GetCurrencyList", GetCurrencyListRequest.class,
+                (call, req) -> held.add(call.defer()));
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, RunMode.DEV, List.of(deferring));
+
+        forward(11, 1001, getCurrencyList, GetCurrencyListRequest.getDefaultInstance(), 500);
+
+        assertThat(held).hasSize(1);
+        assertThat(sink.to(LINK, 11)).as("已延迟：处理器返回时没有应答、也没有被补 1006").isEmpty();
+        assertThat(held.get(0).pending()).isTrue();
+
+        forward(11, 1001, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 501);
+        assertThat(sink.to(LINK, 11)).extracting(MessageContent::getId).as("延迟期间别的请求照常同步回").containsExactly(501L);
+
+        GetCurrencyListResponse refused = GetCurrencyListResponse.newBuilder().setErrorMessage(SceneMessageIds.tip(3026)).build();
+        assertThat(held.get(0).reply(refused)).isTrue();
+
+        List<MessageContent> replies = sink.to(LINK, 11);
+        assertThat(replies).extracting(MessageContent::getId).containsExactly(501L, 500L);
+        MessageContent late = replies.get(1);
+        assertThat(late.getMessageId()).isEqualTo(getCurrencyList);
+        assertThat(GetCurrencyListResponse.parseFrom(late.getSerializedMessage()).getErrorMessage().getId()).isEqualTo(3026);
+        assertThat(held.get(0).reply(refused)).as("第二次回：不发").isFalse();
+        assertThat(sink.to(LINK, 11)).hasSize(2);
+    }
+
+    /**
+     * 延迟之后处理器又抛了异常：后续的异步步骤多半没发起，没人会再回这条请求——分发处经同一个延迟应答补 1006，
+     * 之后迟到的 {@code reply} 返回 false、不产生第二个应答。延迟、回完再抛的不补（已经有应答了）。
+     */
+    @Test
+    void 延迟之后处理器抛异常_还待回的经延迟应答补1006_已回过的不再补() throws Exception {
+        int getCurrencyList = Contracts.REGISTRY.requireId("SceneCurrencyClientPlayer", "GetCurrencyList");
+        AtomicInteger mode = new AtomicInteger();
+        List<DeferredReply> held = new java.util.ArrayList<>();
+        GetCurrencyListResponse ok = GetCurrencyListResponse.newBuilder().setErrorMessage(SceneMessageIds.tip(0)).build();
+        SceneFeature buggy = r -> r.on("SceneCurrencyClientPlayer", "GetCurrencyList", GetCurrencyListRequest.class,
+                (call, req) -> {
+                    DeferredReply deferred = call.defer();
+                    held.add(deferred);
+                    if (mode.get() == 1) {
+                        deferred.reply(ok);
+                    }
+                    throw new IllegalArgumentException("boom");
+                });
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, RunMode.DEV, List.of(buggy));
+
+        mode.set(0);
+        forward(11, 1001, getCurrencyList, GetCurrencyListRequest.getDefaultInstance(), 600);
+        mode.set(1);
+        forward(11, 1001, getCurrencyList, GetCurrencyListRequest.getDefaultInstance(), 601);
+
+        List<MessageContent> replies = sink.to(LINK, 11);
+        assertThat(replies).extracting(MessageContent::getId).as("两条请求各恰好一个应答").containsExactly(600L, 601L);
+        assertThat(replies).extracting(r -> GetCurrencyListResponse.parseFrom(r.getSerializedMessage())
+                .getErrorMessage().getId()).as("待回的补 1006；已回过的保持处理器回的 0").containsExactly(1006, 0);
+        assertThat(replies).allSatisfy(r -> assertThat(r.getMessageId()).isEqualTo(getCurrencyList));
+        assertThat(held).hasSize(2);
+        assertThat(held.get(0).pending()).as("补过 1006 之后不再待回").isFalse();
+        assertThat(held.get(0).reply(ok)).as("迟到的结果不会造成第二个应答").isFalse();
+        assertThat(sink.to(LINK, 11)).hasSize(2);
+    }
+
+    /** 延迟之后作废（确定不该回）：分发处不补、之后也没有应答——作废是持有者的决定，不是「忘了回」。 */
+    @Test
+    void 延迟之后处理器自己作废_不补1006_没有应答() {
+        int getCurrencyList = Contracts.REGISTRY.requireId("SceneCurrencyClientPlayer", "GetCurrencyList");
+        SceneFeature cancelling = r -> r.on("SceneCurrencyClientPlayer", "GetCurrencyList", GetCurrencyListRequest.class,
+                (call, req) -> call.defer().cancel());
+        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS, RunMode.DEV, List.of(cancelling));
+
+        forward(11, 1001, getCurrencyList, GetCurrencyListRequest.getDefaultInstance(), 700);
+
+        assertThat(sink.to(LINK, 11)).isEmpty();
+    }
+
     @Test
     void 静默丢弃_未知会话_player不符_非scene域_Empty应答方法_请求体坏() {
         byte[] truncated = {0x0a, 0x05};

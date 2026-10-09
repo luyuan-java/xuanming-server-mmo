@@ -5,6 +5,7 @@ import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerTransfer;
 import com.game.api.proto.ToClient;
+import com.game.api.proto.ZoneRedirect;
 import com.game.proto.MessageContent;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.LinkDrop;
@@ -15,6 +16,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
@@ -31,8 +33,10 @@ import org.slf4j.LoggerFactory;
  * <p>出站缓冲：链路 channel 越过写缓冲高水位（gate 长时间读不动）时直接关闭这条链路——其上的玩家按断线写回、
  * gate 关闭这些会话。宁可断链也不让出站缓冲无限增长，也不能丢帧（丢掉 21 / 51 会让客户端的场景状态永久错乱）。
  *
- * <p>跨节点换图的 {@code PlayerTransfer}（批次 5.2）另挂写结果监听：同步就知道写不出（链路已断 / 不可写）时返回 false；
- * 交给链路之后异步写失败时，把调用方的回调投递回场景逻辑线程（源节点据此释放新 epoch，scene-handoff-spec §5.5）。
+ * <p>跨节点换图的 {@code PlayerTransfer}（批次 5.2）与跨 zone 传送的 {@code PlayerTransfer{redirect}}（批次 5.4）另挂写结果监听：
+ * 同步就知道写不出（链路已断 / 不可写）时返回 false；
+ * 交给链路之后异步写失败时，把调用方的回调投递回场景逻辑线程（改绑指令：源节点据此释放新 epoch，scene-handoff-spec §5.5；
+ * 重定向帧：源节点据此把位置改回源场景，zone-travel-spec §5.5）。
  */
 public final class GateLinks implements ClientSink {
 
@@ -148,32 +152,68 @@ public final class GateLinks implements ClientSink {
     @Override
     public boolean playerTransfer(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch,
                                   int targetNodeId, long targetSceneId, Runnable onWriteFailed) {
-        ChannelFuture written = write(linkId, NodeLinkFrame.newBuilder()
-                .setPlayerTransfer(PlayerTransfer.newBuilder()
-                        .setSessionId(sessionId)
-                        .setPlayerId(playerId)
-                        .setFromEpoch(fromEpoch)
-                        .setToEpoch(toEpoch)
-                        .setTargetSceneNodeId(targetNodeId)
-                        .setTargetSceneId(targetSceneId))
-                .build());
+        return writeTransfer(linkId, PlayerTransfer.newBuilder()
+                .setSessionId(sessionId)
+                .setPlayerId(playerId)
+                .setFromEpoch(fromEpoch)
+                .setToEpoch(toEpoch)
+                .setTargetSceneNodeId(targetNodeId)
+                .setTargetSceneId(targetSceneId)
+                .build(), onWriteFailed);
+    }
+
+    /**
+     * 跨 zone 传送的重定向帧（批次 5.4）：{@code PlayerTransfer{redirect}}，目标节点与场景都不填（0）。{@code redirect} 整个子消息原样放进帧
+     * ——其中的 {@code token_payload} 是 {@code bytes} 字段，这里不解析、不重组，写出去的就是选目标时签名的那一份字节。
+     * 写帧与两条失败口同 {@link #playerTransfer}。
+     */
+    @Override
+    public boolean playerRedirect(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch,
+                                  ZoneRedirect redirect, Runnable onWriteFailed) {
+        return writeTransfer(linkId, redirectFrame(sessionId, playerId, fromEpoch, toEpoch, redirect), onWriteFailed);
+    }
+
+    /** 重定向帧的帧体（独立出来供字节金样测试对着同一个函数断言：scene 写出的字节就是 gate 解析的字节）。 */
+    static PlayerTransfer redirectFrame(int sessionId, long playerId, long fromEpoch, long toEpoch, ZoneRedirect redirect) {
+        return PlayerTransfer.newBuilder()
+                .setSessionId(sessionId)
+                .setPlayerId(playerId)
+                .setFromEpoch(fromEpoch)
+                .setToEpoch(toEpoch)
+                .setRedirect(Objects.requireNonNull(redirect, "redirect"))
+                .build();
+    }
+
+    /**
+     * 写一帧 {@code PlayerTransfer}（改绑指令或重定向帧）并挂写结果监听。同步就知道写不出（链路已断 / 不可写）返回 false、
+     * {@code onWriteFailed} 不会被调用；交给链路之后异步写失败，把 {@code onWriteFailed} 投递回场景逻辑线程。
+     */
+    private boolean writeTransfer(long linkId, PlayerTransfer transfer, Runnable onWriteFailed) {
+        ChannelFuture written = write(linkId, NodeLinkFrame.newBuilder().setPlayerTransfer(transfer).build());
         if (written == null) {
             return false;
         }
+        int sessionId = transfer.getSessionId();
+        long playerId = transfer.getPlayerId();
+        long fromEpoch = transfer.getFromEpoch();
+        long toEpoch = transfer.getToEpoch();
+        boolean redirect = transfer.hasRedirect();
         written.addListener(future -> {
             if (future.isSuccess()) {
                 return;
             }
-            // 链路 I/O 线程上：帧没写出去（链路在冲刷前关闭）。gate 没收到改绑指令，源节点要自己释放新 epoch——切回逻辑线程做。
+            // 链路 I/O 线程上：帧没写出去（链路在冲刷前关闭）。gate 没收到这一帧，源节点要自己善后
+            // （改绑指令：释放新 epoch；重定向帧：位置改回源场景）——切回逻辑线程做。
             metrics.linkFrameDropped(LinkDrop.WRITE_FAILED);
-            log.warn("PlayerTransfer 交给链路后写失败 link={} session={} player={} epoch {}→{}: {}", linkId, sessionId,
-                    Long.toUnsignedString(playerId), fromEpoch, toEpoch, String.valueOf(future.cause()));
+            log.warn("PlayerTransfer{} 交给链路后写失败 link={} session={} player={} epoch {}→{}: {}",
+                    redirect ? "{redirect}" : "", linkId, sessionId, Long.toUnsignedString(playerId), fromEpoch, toEpoch,
+                    String.valueOf(future.cause()));
             try {
                 logic.execute(onWriteFailed);
             } catch (RejectedExecutionException e) {
-                // 逻辑线程已停（停服）：新 epoch 等租约过期（scene-handoff-spec §8.2 R-J1）
-                log.warn("逻辑线程已停止，PlayerTransfer 写失败的善后丢弃 player={} epoch={}（等租约过期）",
-                        Long.toUnsignedString(playerId), toEpoch);
+                // 逻辑线程已停（停服）：改绑指令的新 epoch 等租约过期（scene-handoff-spec §8.2 R-J1）；重定向帧的新 epoch 本来就已释放
+                log.warn("逻辑线程已停止，PlayerTransfer 写失败的善后丢弃 player={} epoch={}", Long.toUnsignedString(playerId),
+                        toEpoch);
             }
         });
         return true;

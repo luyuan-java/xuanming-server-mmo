@@ -210,14 +210,16 @@ class SceneMetricsTest {
         try {
             SceneMetrics exported = new SceneMetrics(prometheus);
             String before = prometheus.scrape();
-            for (String result : new String[] {"handed_off", "lease_too_short", "fenced", "failed", "rejected"}) {
+            // superseded 是批次 5.4「交出并释放」多出来的结局，交出与探测都可能出现
+            for (String result : new String[] {"handed_off", "lease_too_short", "fenced", "failed", "rejected", "superseded"}) {
                 assertThat(before).contains("xm_scene_storage_writes_seconds_count{op=\"handoff\",result=\"" + result + "\"} 0");
             }
-            for (String result : new String[] {"handed_off", "not_committed", "lost", "rejected"}) {
+            for (String result : new String[] {"handed_off", "not_committed", "lost", "rejected", "superseded"}) {
                 assertThat(before).contains("xm_scene_storage_writes_seconds_count{op=\"probe\",result=\"" + result + "\"} 0");
             }
             assertThat(before).doesNotContain("op=\"save\",result=\"lease_too_short\"", "op=\"probe\",result=\"fenced\"",
-                    "op=\"progress\",result=\"released\"", "op=\"handoff\",result=\"saved\"");
+                    "op=\"progress\",result=\"released\"", "op=\"handoff\",result=\"saved\"",
+                    "op=\"save\",result=\"superseded\"", "op=\"release\",result=\"superseded\"", "op=\"progress\",result=\"superseded\"");
 
             exported.storageWrite(StorageOp.HANDOFF, WriteResult.HANDED_OFF, TimeUnit.MILLISECONDS.toNanos(30));
             exported.storageWrite(StorageOp.SAVE, WriteResult.LOST, 1);
@@ -316,8 +318,9 @@ class SceneMetricsTest {
     }
 
     /**
-     * 跨节点换图（批次 5.2，scene-handoff-spec §7.2）：启动即注册（初值 0），导出名与标签；标签只有 result，不带 player / zone /
-     * 场景实例号 / 节点号。冻结时长与在途数一并导出。
+     * 跨节点换图（批次 5.2，scene-handoff-spec §7.2）：启动即注册（初值 0），导出名与标签；不带 player / zone /
+     * 场景实例号 / 节点号。冻结时长与在途数一并导出。批次 5.4 起 {@code xm_scene_transfers_total} 多一个 {@code reason} 标签
+     * （player = 63 跨节点换图，travel = 226 跨 zone 传送；裁决 J3），两个 reason × 全部 result 都预注册。
      */
     @Test
     void 跨节点换图指标_启动即注册_导出名与标签() {
@@ -328,10 +331,18 @@ class SceneMetricsTest {
             for (String result : new String[] {"local", "remote", "same", "rejected", "error", "stale"}) {
                 assertThat(before).contains("xm_scene_switch_resolves_total{result=\"" + result + "\"} 0");
             }
-            for (String result : new String[] {"handed_off", "lease_too_short", "fenced", "aborted_in_place",
-                    "lost_unknown", "left", "taken_over", "link_gone"}) {
-                assertThat(before).contains("xm_scene_transfers_total{result=\"" + result + "\"} 0");
+            String[] transferResults = {"handed_off", "lease_too_short", "fenced", "aborted_in_place",
+                    "lost_unknown", "left", "taken_over", "link_gone", "superseded"};
+            for (String reason : new String[] {"player", "travel"}) {
+                for (String result : transferResults) {
+                    assertThat(before).contains(
+                            "xm_scene_transfers_total{reason=\"" + reason + "\",result=\"" + result + "\"} 0");
+                }
             }
+            assertThat(before.lines().filter(line -> line.startsWith("xm_scene_transfers_total{")).count())
+                    .as("两个 reason × 九个 result，不多不少").isEqualTo(2L * transferResults.length);
+            assertThat(SceneMetrics.TransferResult.values()).hasSize(transferResults.length);
+            assertThat(SceneMetrics.TransferReason.values()).hasSize(2);
             for (String result : new String[] {"ok", "failed"}) {
                 assertThat(before).contains("xm_scene_transfer_enters_total{result=\"" + result + "\"} 0");
             }
@@ -343,20 +354,35 @@ class SceneMetricsTest {
 
             exported.switchResolve(SceneMetrics.SwitchResolve.REMOTE);
             exported.transfersInFlight(1);
-            exported.transfer(SceneMetrics.TransferResult.HANDED_OFF, TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfer(SceneMetrics.TransferReason.PLAYER, SceneMetrics.TransferResult.HANDED_OFF,
+                    TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.SUPERSEDED,
+                    TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.HANDED_OFF,
+                    TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.HANDED_OFF,
+                    TimeUnit.MILLISECONDS.toNanos(40));
             exported.transfersInFlight(0);
             exported.transferEnter(SceneMetrics.TransferEnter.OK);
             exported.postFreezeMutation();
 
             String after = prometheus.scrape();
             assertThat(after).contains("xm_scene_switch_resolves_total{result=\"remote\"} 1",
-                    "xm_scene_transfers_total{result=\"handed_off\"} 1",
-                    "xm_scene_transfer_freeze_seconds_count 1",
-                    "xm_scene_transfer_freeze_seconds_bucket{le=\"0.05\"} 1",
+                    "xm_scene_transfers_total{reason=\"player\",result=\"handed_off\"} 1",
+                    "xm_scene_transfers_total{reason=\"travel\",result=\"handed_off\"} 2",
+                    "xm_scene_transfers_total{reason=\"travel\",result=\"superseded\"} 1",
+                    "xm_scene_transfers_total{reason=\"player\",result=\"superseded\"} 0",
+                    "xm_scene_transfer_freeze_seconds_count 4",
+                    "xm_scene_transfer_freeze_seconds_bucket{le=\"0.05\"} 4",
                     "xm_scene_transfers_in_flight 0",
                     "xm_scene_transfer_enters_total{result=\"ok\"} 1",
                     "xm_scene_transfer_post_freeze_mutations_total 1");
-            assertThat(labelNames(after, "xm_scene_transfer")).containsExactlyInAnyOrder("result", "le");
+            assertThat(after.lines().filter(line -> line.startsWith("xm_scene_transfers_total{")).count())
+                    .as("发射不新增时间序列").isEqualTo(2L * transferResults.length);
+            assertThat(labelNames(after, "xm_scene_transfer")).containsExactlyInAnyOrder("reason", "result", "le");
+            assertThat(labelNames(after, "xm_scene_transfers_total")).as("交出结局只有 reason 与 result 两个标签")
+                    .containsExactlyInAnyOrder("reason", "result");
+            assertThat(labelNames(after, "xm_scene_transfer_freeze")).as("冻结时长不按 reason 拆").containsExactly("le");
             assertThat(labelNames(after, "xm_scene_switch")).containsExactly("result");
         } finally {
             prometheus.close();
@@ -391,22 +417,23 @@ class SceneMetricsTest {
     }
 
     /**
-     * 回合制战斗在途闸（批次 6.3，scene-battle-spec §9）：{@code xm_scene_battle_gate_rejects_total{gate}} 八个闸启动即注册（初值 0）、标签只有 gate；
+     * 回合制战斗在途闸（批次 6.3，scene-battle-spec §9）：{@code xm_scene_battle_gate_rejects_total{gate}} 的闸启动即注册（初值 0）、标签只有 gate；
      * 现有指标补的取值也预建：移动 / 组队跟随 / 选目标 / 排空改派的 {@code in_battle}、组队跟随的 {@code battle_lock}。放技能补的是
      * {@code caster_in_battle} / {@code target_in_battle} 两个取值（按两个不同的回码拆开，没有 {@code in_battle}；审计 OPS-14）。
+     * 6.3 是八个闸；批次 5.4 加第九个 {@code zone_travel}（226 被战斗在途拒回 3025，码与 63 的 3023 不同，裁决 J4）。
      */
     @Test
-    void 战斗在途闸指标_八个闸启动即注册_现有指标补的in_battle取值() {
+    void 战斗在途闸指标_九个闸启动即注册_现有指标补的in_battle取值() {
         PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
         try {
             SceneMetrics exported = new SceneMetrics(prometheus);
             String before = prometheus.scrape();
-            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default"};
+            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default", "zone_travel"};
             for (String gate : gates) {
                 assertThat(before).contains("xm_scene_battle_gate_rejects_total{gate=\"" + gate + "\"} 0");
             }
             assertThat(before.lines().filter(line -> line.startsWith("xm_scene_battle_gate_rejects_total{")).count())
-                    .as("恰好规格列的八个闸").isEqualTo(gates.length);
+                    .as("恰好规格列的八个闸加 5.4 的 zone_travel").isEqualTo(gates.length);
             assertThat(SceneMetrics.BattleGate.values()).hasSize(gates.length);
             assertThat(before).contains(
                     "xm_scene_moves_total{result=\"in_battle\"} 0",
@@ -445,6 +472,60 @@ class SceneMetricsTest {
             assertThat(labelNames(after, "xm_scene_battle_gate")).as("不带 player_id / battle_id / 消息号").containsExactly("gate");
             assertThat(after.lines().filter(line -> line.startsWith("xm_scene_battle_gate_rejects_total{")).count())
                     .as("发射不新增时间序列").isEqualTo(gates.length);
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 跨 zone 传送（批次 5.4，zone-travel-spec §7.2）：受理前的结局、选目标的结局、待落点写的结局全部取值启动即注册（初值 0），
+     * 「已移出、帧未发」的旅客数是一个不带标签的 gauge；标签只有 result，不带 player / zone / 节点号 / 目标 zone。
+     */
+    @Test
+    void 跨zone传送指标_全部取值启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            String[] requests = {"accepted", "zone_invalid", "map_invalid", "in_battle", "in_team", "busy_transfer",
+                    "busy_switch", "team_read_error", "unavailable"};
+            for (String result : requests) {
+                assertThat(before).contains("xm_scene_travel_requests_total{result=\"" + result + "\"} 0");
+            }
+            assertThat(before.lines().filter(line -> line.startsWith("xm_scene_travel_requests_total{")).count())
+                    .as("226 的每个出口恰好一个取值（含未装配的 unavailable）").isEqualTo(requests.length);
+            assertThat(SceneMetrics.TravelRequest.values()).hasSize(requests.length);
+            String[] resolves = {"chosen", "rejected", "error", "stale", "in_battle"};
+            for (String result : resolves) {
+                assertThat(before).contains("xm_scene_travel_resolves_total{result=\"" + result + "\"} 0");
+            }
+            assertThat(SceneMetrics.TravelResolve.values()).hasSize(resolves.length);
+            assertThat(before).contains("xm_scene_travel_placements_total{result=\"written\"} 0",
+                    "xm_scene_travel_placements_total{result=\"failed\"} 0",
+                    "xm_scene_travel_frames_pending 0");
+            assertThat(SceneMetrics.TravelPlacement.values()).hasSize(2);
+
+            exported.travelRequest(SceneMetrics.TravelRequest.ACCEPTED);
+            exported.travelRequest(SceneMetrics.TravelRequest.UNAVAILABLE);
+            exported.travelRequest(SceneMetrics.TravelRequest.UNAVAILABLE);
+            exported.travelResolve(SceneMetrics.TravelResolve.CHOSEN);
+            exported.travelPlacement(SceneMetrics.TravelPlacement.FAILED);
+            exported.travelFramesPending(3);
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("xm_scene_travel_requests_total{result=\"accepted\"} 1",
+                    "xm_scene_travel_requests_total{result=\"unavailable\"} 2",
+                    "xm_scene_travel_requests_total{result=\"in_team\"} 0",
+                    "xm_scene_travel_resolves_total{result=\"chosen\"} 1",
+                    "xm_scene_travel_resolves_total{result=\"error\"} 0",
+                    "xm_scene_travel_placements_total{result=\"failed\"} 1",
+                    "xm_scene_travel_placements_total{result=\"written\"} 0",
+                    "xm_scene_travel_frames_pending 3");
+            exported.travelFramesPending(0);
+            assertThat(prometheus.scrape()).as("推的是绝对值").contains("xm_scene_travel_frames_pending 0");
+            assertThat(labelNames(after, "xm_scene_travel")).as("不带 player / zone / 节点号").containsExactly("result");
+            assertThat(after.lines().filter(line -> line.startsWith("xm_scene_travel_requests_total{")).count())
+                    .as("发射不新增时间序列").isEqualTo(requests.length);
         } finally {
             prometheus.close();
         }

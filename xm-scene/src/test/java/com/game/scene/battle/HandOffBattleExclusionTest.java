@@ -398,7 +398,7 @@ class HandOffBattleExclusionTest {
         handOff.complete(new HandOffOutcome.HandedOff(2));
 
         assertThat(f.count("xm.scene.transfer.post.freeze.mutations")).isZero();
-        assertThat(f.count("xm.scene.transfers", "result", "handed_off")).isEqualTo(1);
+        assertThat(f.count("xm.scene.transfers", "reason", "player", "result", "handed_off")).isEqualTo(1);
         assertThat(f.world.playerById(PLAYER)).isNull();
         f.locks.release(Op.ACK);
         f.locks.clearCalls();

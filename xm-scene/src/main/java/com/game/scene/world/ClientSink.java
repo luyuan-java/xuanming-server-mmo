@@ -1,5 +1,6 @@
 package com.game.scene.world;
 
+import com.game.api.proto.ZoneRedirect;
 import com.game.proto.MessageContent;
 import java.util.List;
 
@@ -39,4 +40,19 @@ public interface ClientSink {
      */
     boolean playerTransfer(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch, int targetNodeId,
                            long targetSceneId, Runnable onWriteFailed);
+
+    /**
+     * 跨 zone 传送的重定向帧（{@code PlayerTransfer{redirect}}，批次 5.4，zone-travel-spec §5.3、§5.5）：「交出并释放」事务已提交
+     * （{@code fromEpoch} → {@code toEpoch}，{@code toEpoch} 已释放、没有持有者），实例已从本节点移除；gate 校验绑定后解绑会话上的场景、
+     * 给客户端推 124 {@code RedirectToGateNotify}，不改绑、不向任何 scene 发 {@code PlayerEnter}。帧里不带目标节点与场景（都是 0）。
+     * 与发给该会话的其余下行走同一条链路、保持提交顺序（226 的应答恒先于 124）。
+     *
+     * <p>独立于 {@link #playerTransfer}：重定向帧没有目标节点与场景，分成两个方法就没有「两者都有 / 都没有」的非法组合。
+     *
+     * @param redirect      选目标的结果原样带来；{@code token_payload} 是签名时的原字节，实现<b>原样拷贝</b>进帧，不得解析后重新序列化
+     * @param onWriteFailed 帧已交给链路、但最终没写出去（异步写失败）时调用；实现负责把它投递回场景逻辑线程执行
+     * @return false = 链路已断 / 不可写，帧<b>确定</b>没写出（{@code onWriteFailed} 不会再被调用）
+     */
+    boolean playerRedirect(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch, ZoneRedirect redirect,
+                           Runnable onWriteFailed);
 }

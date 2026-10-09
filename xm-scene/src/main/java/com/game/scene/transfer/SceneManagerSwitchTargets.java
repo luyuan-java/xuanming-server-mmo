@@ -8,6 +8,7 @@ import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
 import com.game.scene.world.InstanceIds;
 import com.game.scene.world.RemoteSwitchTargets;
+import com.game.scene.world.TravelTargets;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -39,7 +40,7 @@ import org.slf4j.LoggerFactory;
  * {@link InstanceIds}）——不幂等，同样 {@code retries = 0}；结果投递与本地兜底超时同选目标。业务拒绝（tip ≠ 0）→ {@link InstanceIds.Result.Refused}；
  * 调用失败 / 超时 / 发号租约无效（提供方以异常完成）/ 应答残缺（节点号或场景号为 0）→ {@link InstanceIds.Result.Failed}。
  */
-public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, InstanceIds, AutoCloseable {
+public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, InstanceIds, TravelTargets, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(SceneManagerSwitchTargets.class);
 
@@ -47,6 +48,8 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
     public static final Duration DUBBO_TIMEOUT = Duration.ofSeconds(3);
     /** Dubbo 应用名（进 URL，便于在 scene-manager 日志里认出调用方）。 */
     static final String APPLICATION = "xm-scene-switch";
+    /** 先行件阶段 {@link #selectTravel} 的占位结果里的原因（真实现接上后删掉）。 */
+    static final String TRAVEL_PLACEHOLDER = "5.4 施工中";
 
     /** 建一个 scene-manager 服务引用（阻塞，只在本类的连接线程上调）。 */
     interface Connector extends AutoCloseable {
@@ -131,6 +134,16 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
                 .build();
         call(service -> service.createInstance(wire))
                 .whenComplete((response, failure) -> deliver(request.playerId(), onDone, toResult(response, failure)));
+    }
+
+    /**
+     * 跨 zone 传送的选目标（批次 5.4，{@link SceneDirectoryService#selectTravelTarget}）。<b>先行件阶段的占位</b>：不发调用，
+     * 经逻辑执行器回 {@link TravelSelection.Failed}（恰好一次、不在调用栈内，线程纪律与真实现相同）；调用方按「选目标失败」处理
+     * （226 受理后推 23 {3027}、留在原地）。真实现复用 {@link #call} / {@link #deliver} 与本地兜底超时。
+     */
+    @Override
+    public void selectTravel(long playerId, int toZoneId, int wantSceneConfigId, Consumer<TravelSelection> onDone) {
+        deliver(playerId, onDone, new TravelSelection.Failed(TRAVEL_PLACEHOLDER));
     }
 
     /** 在连接线程上取引用并发起调用，套上本地兜底超时。 */

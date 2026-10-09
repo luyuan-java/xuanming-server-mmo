@@ -149,6 +149,66 @@ class SceneNodePropertiesTest {
         assertThatThrownBy(() -> bind(Map.of("xm.scene.transfer-tombstone-ttl", "6m"))).isInstanceOf(BindException.class);
     }
 
+    /**
+     * 批次 5.4 的第一条启动校验：{@code xm.scene.travel.team-check-timeout} 缺省 2 s，必须为正且不超过 5 s
+     * （226 的应答是延迟的同步应答，上界 = 它 + 1 s，要远小于客户端 15 s 的请求超时）。只构造记录，不起容器。
+     */
+    @Test
+    void 跨zone传送_在队检查上限缺省2秒_可覆盖_0与负数与超过5秒拒启() {
+        assertThat(bind(Map.of()).scene().travel().teamCheckTimeout()).isEqualTo(Duration.ofSeconds(2));
+        assertThat(teamCheckTimeout("1500ms")).isEqualTo(Duration.ofMillis(1500));
+        assertThat(teamCheckTimeout("5s")).as("上界本身合法").isEqualTo(Duration.ofSeconds(5));
+        assertThat(teamCheckTimeout("1ms")).as("下界是开区间，任何正数都行").isEqualTo(Duration.ofMillis(1));
+
+        for (String rejected : List.of("0", "0s", "0ms", "-1s", "5001ms", "6s", "1m")) {
+            assertThatThrownBy(() -> teamCheckTimeout(rejected)).as("team-check-timeout = %s 应拒启", rejected)
+                    .isInstanceOf(BindException.class)
+                    .hasRootCauseInstanceOf(IllegalArgumentException.class)
+                    .rootCause().hasMessageContaining("xm.scene.travel.team-check-timeout");
+        }
+        assertThatThrownBy(() -> new SceneNodeProperties.TravelSettings(null)).as("直接构造给 null 也拒")
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private static Duration teamCheckTimeout(String value) {
+        return bind(Map.of("xm.scene.travel.team-check-timeout", value)).scene().travel().teamCheckTimeout();
+    }
+
+    /**
+     * 批次 5.4 的第二条启动校验：在队检查 + 选目标 + 交出的安全边际 + 5 s 必须小于 60 s（缺省 2 + 4 + 15 + 5 = 26 s）。
+     * 三个键各自的上界（5 s、30 s、&lt; 20 s）加起来恰好到不了 60 s，所以经配置绑定造不出违反它的组合——这里直接对着校验函数断言不等式本身
+     * （边界两侧各一条），再确认「三个键都取到各自上界」的配置仍然起得来（校验没有把合法配置误拒）。
+     */
+    @Test
+    void 跨zone传送_时间预算_三个时限加5秒必须小于60秒_各键取到上界时仍合法() {
+        Duration s2 = Duration.ofSeconds(2);
+        Duration s4 = Duration.ofSeconds(4);
+        Duration s15 = Duration.ofSeconds(15);
+        SceneNodeProperties.SceneSettings.requireTravelBudget(s2, s4, s15);
+        SceneNodeProperties.SceneSettings.requireTravelBudget(Duration.ofSeconds(5), Duration.ofSeconds(30),
+                Duration.ofMillis(19_999));
+
+        assertThatThrownBy(() -> SceneNodeProperties.SceneSettings.requireTravelBudget(Duration.ofSeconds(5),
+                Duration.ofSeconds(30), Duration.ofSeconds(20))).as("5 + 30 + 20 + 5 = 60，不小于 60")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("xm.scene.travel.team-check-timeout")
+                .hasMessageContaining("xm.scene.switch-resolve-timeout")
+                .hasMessageContaining("xm.scene.transfer-lease-margin")
+                .hasMessageContaining("60");
+        assertThatThrownBy(() -> SceneNodeProperties.SceneSettings.requireTravelBudget(Duration.ofSeconds(2),
+                Duration.ofSeconds(40), s15)).as("2 + 40 + 15 + 5 = 62").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> SceneNodeProperties.SceneSettings.requireTravelBudget(Duration.ofSeconds(5),
+                Duration.ofSeconds(30), Duration.ofMillis(20_001))).isInstanceOf(IllegalArgumentException.class);
+
+        SceneNodeProperties.SceneSettings atBounds = bind(Map.of("xm.scene.travel.team-check-timeout", "5s",
+                "xm.scene.switch-resolve-timeout", "30s", "xm.scene.transfer-lease-margin", "19999ms")).scene();
+        assertThat(atBounds.travel().teamCheckTimeout().plus(atBounds.switchResolveTimeout())
+                .plus(atBounds.transferLeaseMargin()).plus(SceneNodeProperties.SceneSettings.TRAVEL_SLACK))
+                .as("三个键都在各自上界时仍小于预算").isLessThan(SceneNodeProperties.SceneSettings.TRAVEL_BUDGET);
+        assertThat(SceneNodeProperties.SceneSettings.TRAVEL_BUDGET).isEqualTo(Duration.ofSeconds(60));
+        assertThat(SceneNodeProperties.SceneSettings.TRAVEL_SLACK).isEqualTo(Duration.ofSeconds(5));
+    }
+
     @Test
     void 镜像副本实例_缺省镜像30秒副本300秒宽限30秒上限200与3_可覆盖_越界拒启() {
         SceneNodeProperties.InstanceSettings s = bind(Map.of()).scene().instance();

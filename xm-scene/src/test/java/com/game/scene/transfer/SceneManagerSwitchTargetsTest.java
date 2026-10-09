@@ -17,6 +17,7 @@ import com.game.api.proto.SelectSwitchTargetResponse;
 import com.game.api.proto.SelectTravelTargetRequest;
 import com.game.api.proto.SelectTravelTargetResponse;
 import com.game.scene.world.RemoteSwitchTargets.Selection;
+import com.game.scene.world.TravelTargets;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -64,7 +65,8 @@ class SceneManagerSwitchTargetsTest {
             return nextInstanceReply;
         }
 
-        // 批次 5.4 先行件 a：接口多了两个方法，这里只为能编译；跨 zone 选目标的用例由先行件 b / S2 接上。
+        // 批次 5.4 先行件：接口多了两个方法，这里只为能编译（占位阶段的 selectTravel 不发调用，见文末两条用例）；
+        // 跨 zone 选目标的真调用由适配器的工作包接上并改写这两个桩。
         @Override
         public CompletableFuture<SelectTravelTargetResponse> selectTravelTarget(SelectTravelTargetRequest request) {
             throw new UnsupportedOperationException();
@@ -268,5 +270,47 @@ class SceneManagerSwitchTargetsTest {
         });
 
         assertThat(rejected.await(5, TimeUnit.SECONDS)).isTrue();
+    }
+
+    /**
+     * 批次 5.4 先行件的占位：跨 zone 传送的选目标（{@code selectTravel}）还没接上真调用——不建引用、不发 Dubbo 调用，
+     * 结果是 {@code Failed("5.4 施工中")}，经逻辑执行器投递、恰好一次、不在调用栈内（调用方按「选目标失败」推 23 {3027}，留在原地）。
+     * 真实现接上后这条用例由对应的工作包改写。
+     */
+    @Test
+    void 跨zone选目标的占位_不发调用_经逻辑执行器回Failed_恰好一次() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        List<TravelTargets.TravelSelection> results = new CopyOnWriteArrayList<>();
+
+        client.selectTravel(1001, 2, 5, results::add);
+
+        assertThat(results).as("回调不在 selectTravel 的调用栈内").isEmpty();
+        Runnable task = logicQueue.poll(5, TimeUnit.SECONDS);
+        assertThat(task).as("结果投递到了逻辑执行器").isNotNull();
+        task.run();
+        assertThat(results).containsExactly(new TravelTargets.TravelSelection.Failed("5.4 施工中"));
+        assertThat(logicQueue).as("恰好一次").isEmpty();
+        assertThat(connects.get()).as("占位不建 scene-manager 引用").isZero();
+        assertThat(requests).isEmpty();
+    }
+
+    @Test
+    void 跨zone选目标的占位_逻辑线程已停_结果丢弃不抛() {
+        client = new SceneManagerSwitchTargets(7, 3, task -> {
+            throw new RejectedExecutionException("逻辑线程已停");
+        }, Duration.ofSeconds(4), new SceneManagerSwitchTargets.Connector() {
+            @Override
+            public SceneDirectoryService connect() {
+                return service;
+            }
+
+            @Override
+            public void close() {
+            }
+        });
+
+        client.selectTravel(1001, 2, 0, selection -> {
+            throw new AssertionError("不该执行");
+        });
     }
 }

@@ -27,7 +27,8 @@ public record SceneMessageIds(
         int moveSync,
         int moveStop,
         int notifyMoveAck,
-        int sendTipToClient) {
+        int sendTipToClient,
+        int travelToZone) {
 
     private static final String SCENE_SERVICE = "SceneSceneClientPlayer";
     private static final String SKILL_SERVICE = "SceneSkillClientPlayer";
@@ -54,7 +55,8 @@ public record SceneMessageIds(
                 registry.requireId(MOVEMENT_SERVICE, "MoveSync"),
                 registry.requireId(MOVEMENT_SERVICE, "MoveStop"),
                 registry.requireId(MOVEMENT_SERVICE, "NotifyMoveAck"),
-                registry.requireId(COMMON_SERVICE, "SendTipToClient"));
+                registry.requireId(COMMON_SERVICE, "SendTipToClient"),
+                registry.requireId(SCENE_SERVICE, "TravelToZone"));
     }
 
     /** 服务端主动推送：{@code MessageContent.id} 不设（0），与基线 GateSendMessageToPlayer 一致。 */

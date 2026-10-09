@@ -31,6 +31,7 @@ import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.metrics.SceneMetrics.PeriodicSave;
 import com.game.scene.metrics.SceneMetrics.SwitchResolve;
 import com.game.scene.metrics.SceneMetrics.TransferEnter;
+import com.game.scene.metrics.SceneMetrics.TransferReason;
 import com.game.scene.metrics.SceneMetrics.TransferResult;
 import com.game.scene.player.PlayerLevels;
 import com.game.scene.team.TeamFollow;
@@ -52,6 +53,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -173,6 +175,8 @@ public final class SceneWorld {
     private final CrossNodeSwitch crossNode;
     private final SceneInstances instances;
     private final BattleHooks battle;
+    /** 跨 zone 传送（226，批次 5.4）的装配：本 zone 号、选目标、在队检查与三个时限。先行件阶段只装配，226 的处理器还没注册。 */
+    private final ZoneTravel zoneTravel;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
     private final Map<Long, ScenePlayer> playersById = new HashMap<>();
@@ -262,6 +266,19 @@ public final class SceneWorld {
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
                       TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances, BattleHooks battle) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots, locations,
+                teamFollow, crossNode, instances, battle, ZoneTravel.DISABLED);
+    }
+
+    /**
+     * @param zoneTravel 跨 zone 传送的装配（批次 5.4；{@link ZoneTravel#DISABLED} = 226 同步回 3027）
+     */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
+                      TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances, BattleHooks battle,
+                      ZoneTravel zoneTravel) {
+        this.zoneTravel = Objects.requireNonNull(zoneTravel, "zoneTravel");
         this.battle = battle;
         this.crossNode = crossNode;
         this.instances = instances;
@@ -1670,6 +1687,9 @@ public final class SceneWorld {
             case HandOffOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
             case HandOffOutcome.LeaseTooShort ignored -> unfreezeInPlace(player, sw, TransferResult.LEASE_TOO_SHORT);
             case HandOffOutcome.Fenced ignored -> onTransferFenced(player, sw);
+            // 只在「交出并释放」（226，批次 5.4）出现；这条路径（HOLD）走不到。先行件阶段先按失去归属处理：
+            // Superseded 的后果必须与 Fenced 完全相同（它不是「本次已提交」的证据），226 的状态机接手后在这里定稿
+            case HandOffOutcome.Superseded ignored -> onTransferFenced(player, sw);
             case HandOffOutcome.Failed failed -> {
                 // 结局不明（重试用尽 / 线程池拒绝）：加锁读探测，截止前给出确定结论；仍然冻结
                 log.warn("交出结局不明，探测归属 player={} token={} epoch={} 尝试={}",
@@ -1690,6 +1710,8 @@ public final class SceneWorld {
         switch (outcome) {
             case ProbeOutcome.NotCommitted ignored -> unfreezeInPlace(player, sw, TransferResult.ABORTED_IN_PLACE);
             case ProbeOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
+            // 同上：只在「交出并释放」出现，后果与失去归属相同
+            case ProbeOutcome.Superseded ignored -> onTransferFenced(player, sw);
             case ProbeOutcome.Lost ignored -> onTransferLost(player, sw);
         }
     }
@@ -1846,7 +1868,8 @@ public final class SceneWorld {
         }
         transfersInFlight--;
         metrics.transfersInFlight(transfersInFlight);
-        metrics.transfer(result, clock.nanoTime() - sw.frozenAtNanos());
+        // 批次 5.4 起带用途标签：这条路径（63 的跨节点换图）一律是 player；226 的 travel 由跨 zone 传送的实现计
+        metrics.transfer(TransferReason.PLAYER, result, clock.nanoTime() - sw.frozenAtNanos());
     }
 
     /** 冻结中会话离开 / 所在链路断开：只记下，等交出结局（同一玩家只有一个写在途；实例与旁人视野保持到结局回来）。 */
@@ -2426,6 +2449,11 @@ public final class SceneWorld {
     /** 本世界的指标出口（包内给请求分发计冻结闸的拒绝 / 丢弃用）。 */
     SceneMetrics metrics() {
         return metrics;
+    }
+
+    /** 跨 zone 传送的装配（包内给 226 的处理器用：本 zone 号、是否启用、时限）。 */
+    ZoneTravel zoneTravel() {
+        return zoneTravel;
     }
 
     /** 按 player_id 找本节点上的玩家（已进场的实例；加载中的不算）；没有为 null。 */
