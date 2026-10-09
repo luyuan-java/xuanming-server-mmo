@@ -144,16 +144,22 @@ class AssetOpCallerTest {
         assertThat(count("xm.guild.assetop.rpc", "stream", "guild_debit", "rpc", "debit", "outcome", "applied")).isEqualTo(3);
     }
 
+    /**
+     * 预算与重查间隔都放在秒级（预算 2.5 s，间隔 1 s / 2 s / 4 s）：{@code Deadline} 读的是真的单调时钟，原先 250 ms 的预算配 100 ms 的间隔，
+     * 机器一忙（全量构建并行跑着别的模块）首投前后停顿一百多毫秒，第一次重查就被判成「预算不够」、只发出 1 次——在全量构建里红过。
+     * 现在第一次重查前有 1.5 s 的余量；第二次重查要等 2 s，而那时剩下的预算至多 1.5 s，所以无论多快都不会有第 3 次。断言不变。
+     */
     @Test
-    void 预算到期就停止重查_返回最后一次未durable的结果() {
+    void 预算到期就停止重查_返回最后一次未durable的结果() throws Exception {
         resolutions.add(found(A));
         script(A, answer(AssetOutcome.ASSET_OUTCOME_REJECTED, false));
-        Delivery d = caller(List.of(100L, 200L, 400L)).deliver(AssetRpc.DEBIT, request(), Deadline.after(250)).join();
+        Delivery d = caller(List.of(1_000L, 2_000L, 4_000L)).deliver(AssetRpc.DEBIT, request(), Deadline.after(2_500))
+                .get(15, java.util.concurrent.TimeUnit.SECONDS);
 
         assertThat(d.answered()).isTrue();
         assertThat(d.result().outcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
         assertThat(d.result().durable()).isFalse();
-        // 首投 + 第一次重查（100 ms 之后还有预算），第二次重查要等 200 ms、预算不够就不睡了
+        // 首投 + 第一次重查（1 s 之后还有预算），第二次重查要等 2 s、预算不够就不睡了
         assertThat(sent).hasSize(2);
         assertThat(count("xm.guild.assetop.requery", "rpc", "debit", "result", "timeout")).isEqualTo(1);
         assertThat(AssetOpDecisions.decide(d.result(), d.error())).isEqualTo(AssetOpAction.AWAIT_DURABLE);

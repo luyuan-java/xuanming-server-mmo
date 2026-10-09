@@ -51,8 +51,12 @@ final class BattleSettleChecks {
      * 84（施法者 7004 与目标 7002）→ skill、134 → move。
      */
     static final List<String> EXERCISED_GATES = List.of("enter_scene", "attribute", "pet", "bag_sort", "skill", "move");
-    /** 本场景打不到的两个闸：asset（资产通道，要 xm-guild 发指令）与 default（缺省 REJECT 的方法）。只进观察记录，不断言。 */
-    static final List<String> UNEXERCISED_GATES = List.of("asset", "default");
+    /**
+     * 本场景打不到的三个闸：asset（资产通道，要 xm-guild 发指令）、default（缺省 REJECT 的方法）与 zone_travel
+     * （226 跨 zone 传送被战斗在途拒回 3025，批次 5.4 加的取值；本场景第 4 步不发 226，它由 travel 场景与 scene 的闸表单测覆盖）。
+     * 只进观察记录，不断言。
+     */
+    static final List<String> UNEXERCISED_GATES = List.of("asset", "default", "zone_travel");
 
     private BattleSettleChecks() {
     }

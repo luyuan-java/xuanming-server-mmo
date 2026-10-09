@@ -411,7 +411,8 @@ public final class BattleSettleScenario {
         if (sceneBefore != null && sceneAfter != null) {
             BattleSettleChecks.judgeSceneMetrics(report, sceneBefore, sceneAfter, sceneMetricsUrls.size(),
                     secondNodeChannel == null ? null : describe(secondNodeChannel));
-            report.note("第 13 步 本场景打不到的闸不断言（asset 要 xm-guild 的资产指令、default 是缺省 REJECT 的方法），增量："
+            report.note("第 13 步 本场景打不到的闸不断言（asset 要 xm-guild 的资产指令、default 是缺省 REJECT 的方法、"
+                    + "zone_travel 是战斗在途时发 226 跨 zone 传送），增量："
                     + BattleSettleChecks.gateRejectDeltas(sceneBefore, sceneAfter, BattleSettleChecks.UNEXERCISED_GATES));
         } else {
             report.note("第 13 步 scene 指标没有抓到（开头或结尾），scene 侧的三组指标不判");

@@ -194,6 +194,7 @@ class BattleSettleChecksTest {
                 + "xm_scene_battle_gate_rejects_total{gate=\"move\"} " + move + "\n"
                 + "xm_scene_battle_gate_rejects_total{gate=\"asset\"} 0.0\n"
                 + "xm_scene_battle_gate_rejects_total{gate=\"default\"} 4.0\n"
+                + "xm_scene_battle_gate_rejects_total{gate=\"zone_travel\"} 0.0\n"
                 + "xm_scene_battle_settlements_total{path=\"online\",result=\"applied\"} 2.0\n";
     }
 
@@ -206,7 +207,7 @@ class BattleSettleChecksTest {
                 .containsExactly(Map.entry("enter_scene", 2.0), Map.entry("attribute", 1.0), Map.entry("pet", 2.0), Map.entry("bag_sort", 1.0),
                         Map.entry("skill", 2.0), Map.entry("move", 1.0));
         assertThat(BattleSettleChecks.gateRejectDeltas(before, after, BattleSettleChecks.UNEXERCISED_GATES))
-                .containsExactly(Map.entry("asset", 0.0), Map.entry("default", 0.0));
+                .containsExactly(Map.entry("asset", 0.0), Map.entry("default", 0.0), Map.entry("zone_travel", 0.0));
     }
 
     @Test
