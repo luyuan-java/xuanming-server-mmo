@@ -100,6 +100,11 @@ public final class ClientDispatcher {
     private final LongSupplier nanoClock;
     private final MessageRoutes routes;
     private final int tipMessageId;
+    /**
+     * 推 124 {@code RedirectToGateNotify} 用的消息号（{@code SceneClientPlayerCommon.RedirectToGate}，批次 5.4）；0 = 没装配
+     * （只收 tip 号的旧重载）。先行件阶段只把它接进来，重定向帧 / 重定向指令的分支由会话层的工作包实现并读它。
+     */
+    private final int redirectToGateMessageId;
     private final ClientMessageService login;
     /** login 以外的客户端消息后端：Dubbo group（= 消息域）→ 服务（friend ……）。 */
     private final Map<String, ClientMessageService> backends;
@@ -119,7 +124,7 @@ public final class ClientDispatcher {
     public ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                             ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
                             GateMetrics metrics, PresenceRecorder presence) {
-        this(identity, tokens, clock, routes, tipMessageId, login, Map.of(), links, registry, limits, metrics, presence,
+        this(identity, tokens, clock, routes, PushMessageIds.tipOnly(tipMessageId), login, Map.of(), links, registry, limits, metrics, presence,
                 System::nanoTime);
     }
 
@@ -127,7 +132,7 @@ public final class ClientDispatcher {
     public ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                             ClientMessageService login, Map<String, ClientMessageService> backends, SceneLinks links,
                             SessionRegistry registry, GateLimits limits, GateMetrics metrics, PresenceRecorder presence) {
-        this(identity, tokens, clock, routes, tipMessageId, login, backends, links, registry, limits, metrics, presence,
+        this(identity, tokens, clock, routes, PushMessageIds.tipOnly(tipMessageId), login, backends, links, registry, limits, metrics, presence,
                 System::nanoTime);
     }
 
@@ -135,7 +140,7 @@ public final class ClientDispatcher {
     ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes, int tipMessageId,
                      ClientMessageService login, SceneLinks links, SessionRegistry registry, GateLimits limits,
                      GateMetrics metrics, PresenceRecorder presence, LongSupplier nanoClock) {
-        this(identity, tokens, clock, routes, tipMessageId, login, Map.of(), links, registry, limits, metrics, presence,
+        this(identity, tokens, clock, routes, PushMessageIds.tipOnly(tipMessageId), login, Map.of(), links, registry, limits, metrics, presence,
                 nanoClock);
     }
 
@@ -143,11 +148,36 @@ public final class ClientDispatcher {
                      ClientMessageService login, Map<String, ClientMessageService> backends, SceneLinks links,
                      SessionRegistry registry, GateLimits limits, GateMetrics metrics, PresenceRecorder presence,
                      LongSupplier nanoClock) {
+        this(identity, tokens, clock, routes, PushMessageIds.tipOnly(tipMessageId), login, backends, links, registry, limits,
+                metrics, presence, nanoClock);
+    }
+
+    /**
+     * 生产装配（批次 5.4 起）：两个推送消息号一起给——tip（23）与重定向通知（124）。上面四个只收 {@code tipMessageId} 的重载
+     * 等于 {@link PushMessageIds#tipOnly}（重定向通知的号为 0），给不关心重定向的测试装配用。
+     *
+     * @param pushIds  gate 自己组包下发的推送消息号
+     * @param backends login 以外的客户端消息后端（消息域 → Dubbo 服务），没有的域回「服务不可用」
+     */
+    public ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes,
+                            PushMessageIds pushIds, ClientMessageService login, Map<String, ClientMessageService> backends,
+                            SceneLinks links, SessionRegistry registry, GateLimits limits, GateMetrics metrics,
+                            PresenceRecorder presence) {
+        this(identity, tokens, clock, routes, pushIds, login, backends, links, registry, limits, metrics, presence,
+                System::nanoTime);
+    }
+
+    /** 同上；限频用的单调时钟可注入（测试用）。全部重载最终都到这里。 */
+    ClientDispatcher(GateIdentity identity, GateTokens tokens, InstantSource clock, MessageRoutes routes,
+                     PushMessageIds pushIds, ClientMessageService login, Map<String, ClientMessageService> backends,
+                     SceneLinks links, SessionRegistry registry, GateLimits limits, GateMetrics metrics,
+                     PresenceRecorder presence, LongSupplier nanoClock) {
         this.identity = identity;
         this.tokens = tokens;
         this.clock = clock;
         this.routes = routes;
-        this.tipMessageId = tipMessageId;
+        this.tipMessageId = pushIds.tip();
+        this.redirectToGateMessageId = pushIds.redirectToGate();
         this.login = login;
         this.backends = Map.copyOf(backends);
         this.links = links;

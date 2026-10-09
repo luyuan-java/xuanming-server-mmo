@@ -1,6 +1,7 @@
 # xm-gate 默认（local）配置：Dubbo 直连 login，不需要 Nacos。从仓库根目录启动。
 # 秘密只从环境变量注入（缺失即启动失败）：
-#   XM_GATE_TOKEN_SECRET  gate 令牌密钥，须与 xm-gateway 一致
+#   XM_GATE_TOKEN_SECRET  gate 令牌密钥，须与 xm-gateway、xm-scene-manager 一致（原值逐字节相同，不做去空白：gateway 签登录令牌，
+#                         scene-manager 签跨 zone 重定向票据，批次 5.4；全部 zone 的 gate 共用同一把）
 #   XM_NODE_LINK_SECRET   gate → scene 节点链路握手密钥，须与 xm-scene 一致
 #   XM_DUBBO_SECRET       Dubbo 调用方鉴权密钥，须与 gate 调用的全部 Dubbo 后端一致（login / friend / chat / team / guild / trade / match）
 spring:
@@ -73,6 +74,10 @@ xm:
     link-hello-timeout: 5s
     link-max-queued-frames: 10000
     shutdown-drain-timeout: 3s
+    # 已重定向的会话（给客户端推过 124 RedirectToGateNotify：226 跨 zone 传送、登录期重定向，批次 5.4）最多再留多久；
+    # 客户端通常连上目标 gate 后自己断开，到点仍在的由 gate 关闭（不推 tip）。短于 15s 拒启（客户端探测目标 gate 5s + 验票 10s）。
+    # 滚动升级顺序：gate 先于 scene 与 login——旧 gate 不认识重定向帧（当成非法改绑指令：推 23 {3023} 后断开）与 RedirectToGate 指令（静默忽略）
+    redirect-linger: 60s
 
 dubbo:
   application:

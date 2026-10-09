@@ -32,6 +32,12 @@
             <groupId>com.game</groupId>
             <artifactId>xm-api</artifactId>
         </dependency>
+        <!-- 批次 5.4：跨 zone 重定向票据由 scene-manager 签（GateTokens / GateTokenIssuer）。此前只经 xm-discovery 传递进来，
+             现在直接用令牌类，显式声明 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>xm-common</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.game</groupId>
             <artifactId>xm-discovery</artifactId>

@@ -41,6 +41,7 @@ public final class GateMetrics {
     static final String LINK_EVENTS = "xm.gate.link.events";
     static final String PUSHES = "xm.gate.pushes";
     static final String SCENE_TRANSFERS = "xm.gate.scene.transfers";
+    static final String REDIRECTS = "xm.gate.redirects";
 
     /** 不在客户端白名单里的消息号（以及没有路由的请求）统一用的标签值。 */
     public static final String UNKNOWN = "unknown";
@@ -110,7 +111,12 @@ public final class GateMetrics {
         /** 会话排队请求超限：断开。 */
         OVERFLOW,
         /** 会话已在关闭，排队中或迟到的请求被丢弃。 */
-        DROPPED
+        DROPPED,
+        /**
+         * 会话已被重定向（推过 124 RedirectToGateNotify，批次 5.4）：之后收到的请求一律丢弃、<b>不回包</b>、不计非法包，
+         * 等客户端自己断开或收口时限到（zone-travel-spec §5.7）。
+         */
+        REDIRECTED
     }
 
     /** gate 主动断开连接的原因（{@code xm.gate.disconnects{reason}}），每次主动断开恰好计一次；客户端自己断开、停服 / 丢租约的批量关闭不计。 */
@@ -138,7 +144,35 @@ public final class GateMetrics {
          * 跨节点换图交出之后没能落到目标节点（目标节点拒绝、到目标的链路不可用 / 建链失败、改绑指令非法）：
          * 推 23 {tip} 后断开，不回大厅、不发 34（scene-handoff-spec D5 / D11）。
          */
-        TRANSFER_FAILED
+        TRANSFER_FAILED,
+        /**
+         * 已重定向的会话（推过 124，批次 5.4）在收口时限（{@code xm.gate.redirect-linger}）内没有自己断开：到点直接关，不推 tip。
+         */
+        REDIRECT_LINGER
+    }
+
+    /** 重定向（给客户端推 124 RedirectToGateNotify，批次 5.4）的来源（{@code xm.gate.redirects{source}}）。 */
+    public enum RedirectSource {
+        /** 226 跨 zone 传送：源 scene 发来带 {@code redirect} 的 {@code PlayerTransfer}。 */
+        TRAVEL,
+        /** 登录期重定向（GO-5）：login 在 EnterGame 的应答里带 {@code RedirectToGate} 会话指令。 */
+        LOGIN
+    }
+
+    /**
+     * 一次重定向在 gate 的结局（{@code xm.gate.redirects{result}}），每条重定向帧 / 每条重定向指令恰好计一次。
+     * 重定向帧<b>不</b>计进 {@code xm.gate.scene.transfers}：那个指标与 5.2 改绑的 {@code handed_off} 勾稽，不能混。
+     * 勾稽：scene 侧 {@code transfers{reason = travel, result = handed_off}} ≈ {@code redirects{source = travel}} 的 sent + invalid + stale + orphan。
+     */
+    public enum RedirectResult {
+        /** 已给客户端推 124，会话转入已重定向状态。 */
+        SENT,
+        /** 绑定对得上但内容非法（地址空、端口越界、票据或签名为空、同时带目标节点、新 epoch 不大于旧 epoch）：推 23 {3027} 后断开。 */
+        INVALID,
+        /** 会话线程上判定过期（会话已关闭 / 正在关闭，或绑定对不上）：丢弃，不推 124。 */
+        STALE,
+        /** 路由层找不到会话（已断开并从会话表释放）：丢弃。只会出现在 {@code source = travel}。 */
+        ORPHAN
     }
 
     /**
@@ -230,6 +264,7 @@ public final class GateMetrics {
     private final Map<LinkDrop, Counter> linkDrops;
     private final Map<PushKind, Map<PushResult, Counter>> pushes;
     private final Map<SceneTransferResult, Counter> sceneTransfers;
+    private final Map<RedirectSource, Map<RedirectResult, Counter>> redirects;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesOut;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesIn;
     private final Map<LoginCall, Timer> loginCallsOk;
@@ -260,6 +295,19 @@ public final class GateMetrics {
         }
         this.sceneTransfers = counters(SceneTransferResult.class, SCENE_TRANSFERS, "result",
                 "跨节点换图改绑指令（scene 的 PlayerTransfer）在 gate 的结局");
+        // 重定向（批次 5.4）：source × result 全量预建（2 × 4 条），平时恒为 0 的组合也在
+        this.redirects = new EnumMap<>(RedirectSource.class);
+        for (RedirectSource source : RedirectSource.values()) {
+            EnumMap<RedirectResult, Counter> byResult = new EnumMap<>(RedirectResult.class);
+            for (RedirectResult result : RedirectResult.values()) {
+                byResult.put(result, Counter.builder(REDIRECTS)
+                        .description("重定向（给客户端推 124 RedirectToGateNotify）在 gate 的结局：travel = 226 跨 zone 传送，login = 登录期重定向")
+                        .tag("source", tagValue(source))
+                        .tag("result", tagValue(result))
+                        .register(registry));
+            }
+            redirects.put(source, byResult);
+        }
         this.framesOut = frameCounters("out");
         this.framesIn = frameCounters("in");
         this.loginCallsOk = loginTimers("ok");
@@ -378,6 +426,11 @@ public final class GateMetrics {
     /** 跨节点换图改绑的一个结局（见 {@link SceneTransferResult} 的计数口径）。 */
     public void sceneTransfer(SceneTransferResult result) {
         sceneTransfers.get(result).increment();
+    }
+
+    /** 一次重定向的结局（{@code xm.gate.redirects{source, result}}，见 {@link RedirectResult} 的计数口径）。 */
+    public void redirect(RedirectSource source, RedirectResult result) {
+        redirects.get(source).get(result).increment();
     }
 
     public void push(PushKind kind, PushResult result, int targets) {

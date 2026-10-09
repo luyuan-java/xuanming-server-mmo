@@ -25,6 +25,7 @@ import com.game.gate.session.ClientPipeline;
 import com.game.gate.session.GateIdentity;
 import com.game.gate.session.GateLimits;
 import com.game.gate.session.MessageRoutes;
+import com.game.gate.session.PushMessageIds;
 import com.game.gate.session.SceneEventRouter;
 import com.game.gate.session.SessionIdAllocator;
 import com.game.gate.session.SessionRegistry;
@@ -93,6 +94,11 @@ public final class GateNode {
     /** 运行模式：只决定 GM 类客户端指令放不放行（prod 拒绝）。 */
     private final RunMode runMode;
     private final String instanceId = UUID.randomUUID().toString();
+    /**
+     * 进程启动时刻（Unix 毫秒）：构造时取定一次，之后每次刷新目录都写这同一个值（{@code GateNodeInfo.started_at_ms}，批次 5.4）。
+     * 读的是墙钟：只用来在同一地址的几条目录条目之间比新旧，对钟的要求同租约（部署要求 NTP）。
+     */
+    private final long startedAtMs;
     private final NodeDirectory<GateNodeInfo> gateDirectory;
 
     private boolean started;
@@ -136,6 +142,7 @@ public final class GateNode {
         this.advertiseHost = advertiseHost;
         this.tableDir = tableDir;
         this.metrics = metrics;
+        this.startedAtMs = System.currentTimeMillis();
         this.gateDirectory = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
     }
 
@@ -179,12 +186,13 @@ public final class GateNode {
                 new LinkSettings(properties.linkHelloTimeout(), properties.linkMaxQueuedFrames()),
                 heldLease::isValid, metrics);
 
-        int tipMessageId = messageIdRegistry.requireId("SceneClientPlayerCommon", "SendTipToClient");
+        // gate 自己组包下发的两个推送：23 tip 与 124 重定向通知（批次 5.4）。号按名字解析，缺一个即启动失败
+        PushMessageIds pushIds = PushMessageIds.resolve(messageIdRegistry);
         MessageLimits messageLimits = TableMessageLimits.load(tableDir);
         ClientDispatcher dispatcher = new ClientDispatcher(identity, tokens, InstantSource.system(),
-                MessageRoutes.of(messageIdRegistry), tipMessageId, login, backends, links, registry,
+                MessageRoutes.of(messageIdRegistry), pushIds, login, backends, links, registry,
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
-                        messageLimits, runMode.allowsGmCommands()), metrics, presence);
+                        messageLimits, runMode.allowsGmCommands(), properties.redirectLinger()), metrics, presence);
         links.bindListener(new SceneEventRouter(registry, dispatcher));
         // 服务端 → 玩家推送：订阅本 gate 的频道（任何服务按在线目录找到本 gate 后发布到这里）。
         pushSubscriber = new GatePushSubscriber(
@@ -242,20 +250,37 @@ public final class GateNode {
         return r == null ? 0 : r.size();
     }
 
+    /** 本进程的启动时刻（Unix 毫秒，构造时取定一次；写进节点目录条目的 {@code started_at_ms}）。 */
+    long startedAtMs() {
+        return startedAtMs;
+    }
+
+    /**
+     * 本 gate 的节点目录条目。{@code started_at_ms}（批次 5.4）是进程启动时刻：同一个进程每次刷新都写同一个值，
+     * 读方据此在「同一个客户端地址有多条条目」（进程重启换了节点号、旧条目还没过期）时只留最新的一条。
+     * gate 自己从不标排空（{@code draining} 恒为 false；排空标记由运维另写，见 {@code RedisGateSource}）。
+     */
+    static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
+                                       int playerCount, long startedAtMs) {
+        return GateNodeInfo.newBuilder()
+                .setZoneId(zoneId)
+                .setNodeId(nodeId)
+                .setInstanceId(instanceId)
+                .setClientHost(clientHost)
+                .setClientPort(clientPort)
+                .setPlayerCount(playerCount)
+                .setDraining(false)
+                .setStartedAtMs(startedAtMs)
+                .build();
+    }
+
     /** 每 5s 刷新一次节点目录条目（TTL 15s）。在后台线程上执行，阻塞 Redis 调用不碰 I/O 线程。 */
     private void publish() {
         if (acceptingStopped) {
             return;
         }
-        GateNodeInfo info = GateNodeInfo.newBuilder()
-                .setZoneId(zoneId)
-                .setNodeId(lease.nodeId())
-                .setInstanceId(instanceId)
-                .setClientHost(advertiseHost)
-                .setClientPort(properties.advertisePort())
-                .setPlayerCount(registry.size())
-                .setDraining(false)
-                .build();
+        GateNodeInfo info = directoryEntry(zoneId, lease.nodeId(), instanceId, advertiseHost, properties.advertisePort(),
+                registry.size(), startedAtMs);
         try {
             gateDirectory.publish(zoneId, lease.nodeId(), info, DIRECTORY_TTL);
         } catch (RuntimeException e) {

@@ -12,6 +12,7 @@ import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
 import com.game.api.proto.SelectTravelTargetRequest;
 import com.game.api.proto.SelectTravelTargetResponse;
+import com.game.scenemanager.travel.TravelRouting;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
@@ -20,14 +21,17 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 import org.apache.dubbo.config.annotation.DubboService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * {@link SceneDirectoryService} 的 Dubbo 提供方（Triple，无 group / version）。只做协议适配，规则在 {@link SceneAssigner}（进游戏）、
- * {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）与 {@link InstanceIdIssuer}（镜像 / 副本实例取号，批次 5.3）。
+ * {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）、{@link InstanceIdIssuer}（镜像 / 副本实例取号，批次 5.3）
+ * 与 {@link TravelRouting}（跨 zone 传送选目标、登录期重定向，批次 5.4：选 gate、签票据；这两个方法的计时与指标在它那边）。
  *
  * <p>分配与选目标都只读一次 Redis（外加至多一次软预占），实例取号不碰 Redis；都直接在 Dubbo 业务线程上同步算完再返回已完成的 future
  * （不占 Netty I/O 线程）。业务拒绝走 {@code tip_id}；场景目录读不到（Redis 故障等）或发号租约无效时 future 以异常完成，表示「调用失败」
@@ -77,6 +81,7 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
     private final SceneAssigner assigner;
     private final SwitchTargetSelector switchSelector;
     private final InstanceIdIssuer instanceIssuer;
+    private final TravelRouting travelRouting;
     private final MeterRegistry meterRegistry;
     private final Map<AssignResult, Timer> timers = new EnumMap<>(AssignResult.class);
     private final Map<SwitchTargetSelector.Result, Timer> switchTimers = new EnumMap<>(SwitchTargetSelector.Result.class);
@@ -84,11 +89,16 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
     /** 种类标签 → 结果标签 → 计时器（3 × 5 个，启动时全部注册，序列稳定）。 */
     private final Map<String, Map<String, Timer>> instanceTimers = new HashMap<>();
 
+    /**
+     * @param travelRouting 跨 zone 的两种选路（批次 5.4：226 传送选目标、登录期重定向），两个新方法原样委托给它
+     */
     public SceneDirectoryProvider(SceneAssigner assigner, SwitchTargetSelector switchSelector,
-                                  InstanceIdIssuer instanceIssuer, MeterRegistry meterRegistry) {
+                                  InstanceIdIssuer instanceIssuer, TravelRouting travelRouting,
+                                  MeterRegistry meterRegistry) {
         this.assigner = assigner;
         this.switchSelector = switchSelector;
         this.instanceIssuer = instanceIssuer;
+        this.travelRouting = Objects.requireNonNull(travelRouting, "travelRouting");
         this.meterRegistry = meterRegistry;
         for (AssignResult result : AssignResult.values()) {
             timers.put(result, Timer.builder(ASSIGN_METRIC)
@@ -196,18 +206,34 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
     }
 
     /**
-     * 跨 zone 传送选目标（批次 5.4）。先行件 a 的占位：接口已冻结、实现还没接上，一律以异常完成（调用方按「调用失败」处理）。
-     * 由先行件 c 换成对 {@code TravelRouting} 的委托。
+     * 跨 zone 传送选目标（批次 5.4）：原样委托给 {@link TravelRouting}（规则、计时、指标、把读失败转成异常完成都在它那边）。
+     * 这里只兜一件事：实现违反契约同步抛出或返回 null 时，仍以异常完成的 future 交回——Dubbo 调用方看到的总是「调用失败」，
+     * 不会是一次没有应答的调用。
      */
     @Override
     public CompletableFuture<SelectTravelTargetResponse> selectTravelTarget(SelectTravelTargetRequest request) {
-        return CompletableFuture.failedFuture(new IllegalStateException("5.4 施工中"));
+        return guarded("selectTravelTarget", () -> travelRouting.selectTravelTarget(request));
     }
 
-    /** 登录期重定向选目标（批次 5.4 的 GO-5）。占位，同 {@link #selectTravelTarget}。 */
+    /** 登录期重定向选目标（批次 5.4 的 GO-5）：同 {@link #selectTravelTarget}，原样委托。 */
     @Override
     public CompletableFuture<RedirectToZoneResponse> redirectToZone(RedirectToZoneRequest request) {
-        return CompletableFuture.failedFuture(new IllegalStateException("5.4 施工中"));
+        return guarded("redirectToZone", () -> travelRouting.redirectToZone(request));
+    }
+
+    private static <R> CompletableFuture<R> guarded(String method, Supplier<CompletableFuture<R>> call) {
+        try {
+            CompletableFuture<R> future = call.get();
+            if (future == null) {
+                log.error("{} 的实现返回了 null（违反 TravelRouting 的契约），按调用失败交回", method);
+                return CompletableFuture.failedFuture(new IllegalStateException("跨 zone 选路暂不可用"));
+            }
+            return future;
+        } catch (RuntimeException e) {
+            // 完整堆栈留在本进程日志，交给调用方的异常只带概要（同 assign / selectSwitchTarget 的做法）
+            log.error("{} 的实现同步抛出（违反 TravelRouting 的契约），按调用失败交回", method, e);
+            return CompletableFuture.failedFuture(new IllegalStateException("跨 zone 选路暂不可用"));
+        }
     }
 
     static AssignResult resultOf(AssignSceneResponse response) {

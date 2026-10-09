@@ -1,5 +1,6 @@
 package com.game.gate;
 
+import com.game.gate.session.GateLimits;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -21,6 +22,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param linkHelloTimeout       连上 scene 后等握手应答的上限
  * @param linkMaxQueuedFrames    scene 链路未就绪时单链路最多排队帧数
  * @param shutdownDrainTimeout   退出时等待会话收尾（PlayerLeave / 断线通知发出）的上限
+ * @param redirectLinger         已重定向的会话（推过 124，批次 5.4 的跨 zone 传送与登录期重定向）最多再留多久，到点由 gate 关闭；
+ *                               缺省 60s，短于 15s 拒启（客户端要先连上目标 gate、验完票才关旧连接）
  */
 @ConfigurationProperties("xm.gate")
 public record GateProperties(
@@ -34,7 +37,8 @@ public record GateProperties(
         Duration linkConnectTimeout,
         Duration linkHelloTimeout,
         Integer linkMaxQueuedFrames,
-        Duration shutdownDrainTimeout) {
+        Duration shutdownDrainTimeout,
+        Duration redirectLinger) {
 
     public GateProperties {
         clientPort = clientPort == null ? 11000 : clientPort;
@@ -48,6 +52,7 @@ public record GateProperties(
         linkHelloTimeout = linkHelloTimeout == null ? Duration.ofSeconds(5) : linkHelloTimeout;
         linkMaxQueuedFrames = linkMaxQueuedFrames == null ? 10_000 : linkMaxQueuedFrames;
         shutdownDrainTimeout = shutdownDrainTimeout == null ? Duration.ofSeconds(3) : shutdownDrainTimeout;
+        redirectLinger = redirectLinger == null ? GateLimits.DEFAULT_REDIRECT_LINGER : redirectLinger;
         if (clientPort <= 0 || clientPort > 65535) {
             throw new IllegalArgumentException("xm.gate.client-port 非法: " + clientPort);
         }
@@ -56,6 +61,10 @@ public record GateProperties(
         }
         if (linkThreads <= 0) {
             throw new IllegalArgumentException("xm.gate.link-threads 必须为正: " + linkThreads);
+        }
+        if (redirectLinger.compareTo(GateLimits.MIN_REDIRECT_LINGER) < 0) {
+            throw new IllegalArgumentException("xm.gate.redirect-linger 不得短于 "
+                    + GateLimits.MIN_REDIRECT_LINGER.toSeconds() + "s: " + redirectLinger);
         }
     }
 }

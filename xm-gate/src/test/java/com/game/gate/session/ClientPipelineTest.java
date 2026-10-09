@@ -147,6 +147,36 @@ class ClientPipelineTest {
     // ---------------------------------------------------------------- 工具
 
     /** 校验和错误的一帧（解码层判非法、立即断开）。 */
+    /**
+     * 批次 5.4 先行件：生产装配走带 {@link PushMessageIds} 的新构造器（tip 与重定向通知两个号一起给）。握手与「未进场景推 tip」
+     * 的字节与只给 tip 号的旧构造器完全一样——tip 用的仍是 {@code tip()}，不会因为多带了一个号而发错消息号。
+     */
+    @Test
+    void 带两个推送消息号的新构造器_握手与tip推送同旧构造器_tip不会发成重定向的号() throws Exception {
+        SessionRegistry sessions = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+        ClientDispatcher wired = new ClientDispatcher(
+                new GateIdentity(GATE_NODE, "gate-uuid", 1), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
+                id -> id == 77 ? new MessageRoute(id, "scene") : null, new PushMessageIds(23, 124), new FakeLogin(), Map.of(),
+                new FakeLinks(), sessions, new GateLimits(8, 50, Duration.ZERO, com.game.net.limit.MessageLimits.UNLIMITED,
+                        false, Duration.ofSeconds(15)), new GateMetrics(new SimpleMeterRegistry()), PresenceRecorder.NONE);
+        EmbeddedChannel ch = new EmbeddedChannel(new ChannelInitializer<Channel>() {
+            @Override
+            protected void initChannel(Channel c) {
+                ClientPipeline.install(c.pipeline(), sessions, wired);
+            }
+        });
+
+        ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(verifyRequest(GATE_NODE), ' ')));
+        assertThat(((ClientTokenVerifyResponse) decode(ch.readOutbound())).getSuccess()).isTrue();
+        ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(ClientRequest.newBuilder().setId(3).setMessageId(77).build(), ' ')));
+
+        MessageContent tip = (MessageContent) decode(ch.readOutbound());
+        assertThat(tip.getMessageId()).isEqualTo(23);
+        assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage()).getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat((Object) ch.readOutbound()).as("先行件阶段没有任何路径会发 124").isNull();
+        assertThat(ch.isOpen()).isTrue();
+    }
+
     private static byte[] corruptFrame() {
         byte[] frame = robotFrame(ClientRequest.newBuilder().setId(9).setMessageId(77).build(), ' ');
         frame[frame.length - 1] ^= 0x5A;
