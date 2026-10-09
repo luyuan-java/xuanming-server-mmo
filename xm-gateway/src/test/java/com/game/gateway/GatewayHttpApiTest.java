@@ -23,7 +23,7 @@ import com.game.proto.login.AccountSimplePlayerWrapper;
 import com.game.proto.login.LoginResponse;
 import com.game.proto.login.RefreshTokenResponse;
 import java.util.concurrent.CompletableFuture;
-import com.game.gateway.gate.GateSource;
+import com.game.discovery.gate.GateSource;
 import com.game.gateway.serverlist.ServerListController;
 import com.game.gateway.announcement.AnnouncementController;
 import com.game.gateway.store.AnnouncementRow;

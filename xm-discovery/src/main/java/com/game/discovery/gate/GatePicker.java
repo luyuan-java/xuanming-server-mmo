@@ -1,4 +1,4 @@
-package com.game.gateway.gate;
+package com.game.discovery.gate;
 
 import com.game.api.proto.GateNodeInfo;
 import java.util.Comparator;

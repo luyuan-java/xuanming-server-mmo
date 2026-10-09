@@ -1,4 +1,4 @@
-package com.game.gateway.gate;
+package com.game.discovery.gate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

@@ -8,7 +8,7 @@ import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
 import com.game.discovery.drain.GateDrainMarks.MarkResult;
-import com.game.gateway.gate.RedisGateSource;
+import com.game.discovery.gate.RedisGateSource;
 import com.game.gateway.store.ZoneRow;
 import java.time.Duration;
 import java.util.List;

@@ -1,10 +1,10 @@
 package com.game.gateway.assign;
 
 import com.game.api.proto.GateNodeInfo;
-import com.game.gateway.gate.GatePicker;
-import com.game.gateway.gate.GateSource;
-import com.game.gateway.gate.GateTokenIssuer;
-import com.game.gateway.gate.GateTokenIssuer.IssuedGateToken;
+import com.game.common.token.GateTokenIssuer;
+import com.game.common.token.GateTokenIssuer.IssuedGateToken;
+import com.game.discovery.gate.GatePicker;
+import com.game.discovery.gate.GateSource;
 import com.game.gateway.queue.LoginQueue;
 import com.game.gateway.queue.QueueCapacity;
 import com.game.gateway.queue.QueueTokens;

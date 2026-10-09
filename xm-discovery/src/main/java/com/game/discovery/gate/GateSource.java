@@ -1,10 +1,10 @@
-package com.game.gateway.gate;
+package com.game.discovery.gate;
 
 import com.game.api.proto.GateNodeInfo;
 import java.util.List;
 
 /**
- * gate 在线目录的读取面（gateway 只读不写）。生产实现是 {@link RedisGateSource}；测试注入替身，不需要 Redis。
+ * gate 在线目录的读取面（读取方只读不写）。生产实现是 {@link RedisGateSource}；测试注入替身，不需要 Redis。
  *
  * <p>契约：
  * <ul>

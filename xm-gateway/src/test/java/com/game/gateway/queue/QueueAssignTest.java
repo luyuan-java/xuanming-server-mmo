@@ -13,11 +13,11 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.game.api.proto.GateNodeInfo;
+import com.game.common.token.GateTokenIssuer;
 import com.game.common.token.GateTokens;
+import com.game.discovery.gate.GateSource;
 import com.game.gateway.assign.AssignGateResponse;
 import com.game.gateway.assign.AssignGateService;
-import com.game.gateway.gate.GateSource;
-import com.game.gateway.gate.GateTokenIssuer;
 import com.game.gateway.ratelimit.RateLimitDecision;
 import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.store.ZoneRow;

@@ -1,9 +1,8 @@
-package com.game.gateway.gate;
+package com.game.common.token;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.game.common.token.GateTokens;
-import com.game.gateway.gate.GateTokenIssuer.IssuedGateToken;
+import com.game.common.token.GateTokenIssuer.IssuedGateToken;
 import com.game.proto.GateTokenPayload;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;

@@ -1,8 +1,8 @@
 package com.game.gateway.queue;
 
 import com.game.api.proto.GateNodeInfo;
-import com.game.gateway.gate.GatePicker;
-import com.game.gateway.gate.GateSource;
+import com.game.discovery.gate.GatePicker;
+import com.game.discovery.gate.GateSource;
 import com.game.gateway.store.ZoneManualStatus;
 import com.game.gateway.store.ZoneRow;
 import com.game.gateway.zone.ZoneDirectory;

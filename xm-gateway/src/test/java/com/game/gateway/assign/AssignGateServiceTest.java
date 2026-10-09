@@ -4,8 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
-import com.game.gateway.gate.GateSource;
-import com.game.gateway.gate.GateTokenIssuer;
+import com.game.common.token.GateTokenIssuer;
+import com.game.discovery.gate.GateSource;
 import com.game.gateway.store.ZoneRow;
 import com.game.gateway.zone.ZoneDirectory;
 import java.util.List;

@@ -1,6 +1,5 @@
-package com.game.gateway.gate;
+package com.game.common.token;
 
-import com.game.common.token.GateTokens;
 import com.game.proto.GateTokenPayload;
 import com.google.protobuf.ByteString;
 import java.security.SecureRandom;
