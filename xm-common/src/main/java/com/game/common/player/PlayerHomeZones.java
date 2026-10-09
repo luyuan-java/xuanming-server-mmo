@@ -9,7 +9,7 @@ import java.util.Map;
 import java.util.function.BiFunction;
 
 /**
- * {@link HomeZones} 的生产实现：归属区 = {@code xm_java.player.zone_id}，即建角时 login 所在的 zone（team D5、guild D3、trade T3；
+ * {@link HomeZones} 的生产实现：归属区 = {@code xm_java.player.zone_id}，即建角时会话所在的 zone（team D5、guild D3、trade T3；
  * 基线读 data_service 的 {@code player:zone} 映射，合服重映射等批次 7.3）。原先 xm-team 与 xm-guild 各有一份同形的
  * {@code PlayerTableHomeZones}，聚宝斋是第三个用户，按 trade-spec Q6 上移到这里，行为不变。
  *

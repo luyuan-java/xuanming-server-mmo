@@ -4,16 +4,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.game.api.proto.SessionContext;
 import com.game.common.id.Snowflake;
+import com.game.discovery.zone.ZoneMergeFence;
 import com.game.login.character.CharacterRules;
 import com.game.login.character.PlayerIdGenerator;
 import com.game.login.character.RoleNameRules;
@@ -28,8 +31,11 @@ import com.game.proto.login.CreatePlayerRequest;
 import com.game.proto.login.CreatePlayerResponse;
 import com.game.table.LoginErrorTip;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntSupplier;
@@ -44,12 +50,23 @@ class CreatePlayerHandlerTest {
     private static final SessionContext SESSION = SessionContext.newBuilder()
             .setGateNodeId(1).setSessionId((1 << 17) | 5).setZoneId(ZONE).setAccount(ACCOUNT).build();
 
+    private static final int TIP_2020 = LoginErrorTip.login_error.kLoginDataSerializeFailed_VALUE;
+
     private final PlayerStore store = mock(PlayerStore.class);
     private final CharacterRules rules = mock(CharacterRules.class);
     private final AtomicBoolean leaseLost = new AtomicBoolean(false);
     private final long[] clock = {Snowflake.DEFAULT_EPOCH_MS + 5_000};
+    /**
+     * 按发生次序记下「围栏被问」与「发号器被调用」：围栏每被问一次记 {@code fence:<zone>}，发号器每被调用一次记 {@code mint}
+     * （{@link PlayerIdGenerator#nextId} 每次发号前必查租约，租约无效时也查）。用它断言「拒绝时零发号」与「围栏在发号之前」。
+     */
+    private final List<String> events = new ArrayList<>();
     private final PlayerIdGenerator ids = new PlayerIdGenerator(
-            new Snowflake(3, Snowflake.DEFAULT_EPOCH_MS, () -> clock[0]), () -> !leaseLost.get());
+            new Snowflake(3, Snowflake.DEFAULT_EPOCH_MS, () -> clock[0]), () -> {
+                events.add("mint");
+                return !leaseLost.get();
+            });
+    private final FakeFence fence = new FakeFence();
     /** 每次生成名消耗 6 个字节；按调用次数轮换出不同的名字（第 n 次全是字母表第 n 个字符）。 */
     private final int[] generated = {0};
     private final IntSupplier randomByte = () -> generated[0]++ / 6;
@@ -88,7 +105,43 @@ class CreatePlayerHandlerTest {
             }
             return new CreateOutcome(CreateStatus.NAME_TAKEN, existing);
         });
-        handler = new CreatePlayerHandler(store, rules, ids, randomByte, ZONE, 5, new LoginMetrics(meters));
+        handler = new CreatePlayerHandler(store, rules, ids, randomByte, fence, 5, new LoginMetrics(meters));
+    }
+
+    /**
+     * 假围栏：记下被问到的 zone，可脚本化「合服中」与「读不到」。建角在 login 工作线程上同步判围栏，异步版调到即失败。
+     */
+    private final class FakeFence implements ZoneMergeFence {
+
+        private boolean merging;
+        private Exception unreadable;
+
+        @Override
+        public boolean inProgress(int zoneId) throws Exception {
+            events.add("fence:" + Integer.toUnsignedString(zoneId));
+            if (unreadable != null) {
+                throw unreadable;
+            }
+            return merging;
+        }
+
+        @Override
+        public CompletionStage<Boolean> inProgressAsync(int zoneId) {
+            throw new AssertionError("建角应同步判围栏，不该调异步版 zone=" + Integer.toUnsignedString(zoneId));
+        }
+    }
+
+    /** 同一个账号、会话落在指定 zone 的 gate 上（gate 把自己的 zone 填进 SessionContext.zone_id）。 */
+    private static SessionContext sessionIn(int zoneId) {
+        return SESSION.toBuilder().setZoneId(zoneId).build();
+    }
+
+    /** 拒绝发生在发号之前：发号器没被调用、事务版建角没被调用、一行都没插、新建计数没动。 */
+    private void assertNothingMintedOrInserted() {
+        assertThat(events).doesNotContain("mint");
+        verify(store, never()).createPlayerWithinCap(any(), anyInt(), anyList());
+        verify(store, never()).createPlayer(any());
+        assertThat(playersCreated()).isZero();
     }
 
     private double playersCreated() {
@@ -102,7 +155,7 @@ class CreatePlayerHandlerTest {
     }
 
     private CreatePlayerResponse create(SessionContext session, CreatePlayerRequest request) throws Exception {
-        return response(handler.handle(session, request).join());
+        return response(handler.handle(session, request).get(5, TimeUnit.SECONDS));
     }
 
     private CreatePlayerResponse create(CreatePlayerRequest request) throws Exception {
@@ -338,10 +391,148 @@ class CreatePlayerHandlerTest {
 
     @Test
     void 设备数续期被拒_回拒绝码_不碰存储() throws Exception {
-        CreatePlayerHandler limited = new CreatePlayerHandler(store, rules, ids, randomByte, ZONE, 5,
+        CreatePlayerHandler limited = new CreatePlayerHandler(store, rules, ids, randomByte, fence, 5,
                 new LoginMetrics(meters), session -> LoginErrorTip.login_error.kTooManyDevices_VALUE);
         assertError(response(limited.handle(SESSION, CreatePlayerRequest.getDefaultInstance()).join()),
                 LoginErrorTip.login_error.kTooManyDevices_VALUE);
         verify(store, never()).listPlayers(org.mockito.ArgumentMatchers.anyString());
+        assertThat(events).isEmpty();
+    }
+
+    // ---- 归属区取会话所在的 zone（X16）与合服围栏检查点 F1 ----
+
+    @Test
+    void 归属区取会话所在的zone_同一个处理器上区2与区1的会话各记各的() throws Exception {
+        // login 不分 zone：一个进程（xm.zone-id = 1）同时服务区 1、区 2 的 gate。X16 之前处理器在构造时收进程 zone，
+        // 从区 2 进来的号也被记成 1；现在构造器没有 zone 参数，归属区只能来自会话。
+        CreatePlayerResponse fromZone2 = create(sessionIn(2), CreatePlayerRequest.newBuilder().setName("张三").build());
+        CreatePlayerResponse fromZone1 = create(sessionIn(1), CreatePlayerRequest.newBuilder().setName("李四").build());
+
+        assertThat(fromZone2.hasErrorMessage()).isFalse();
+        assertThat(fromZone1.hasErrorMessage()).isFalse();
+        ArgumentCaptor<PlayerRow> inserted = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store, times(2)).createPlayer(inserted.capture());
+        assertThat(inserted.getAllValues()).extracting(PlayerRow::getName).containsExactly("张三", "李四");
+        assertThat(inserted.getAllValues()).extracting(PlayerRow::getZoneId).containsExactly(2, 1);
+        // 应答里的角色列表带的也是行上的归属区（客户端按它过滤选角界面）。
+        assertThat(fromZone2.getPlayers(0).getPlayer().getZoneId()).isEqualTo(2);
+        assertThat(fromZone1.getPlayers(0).getPlayer().getZoneId()).isEqualTo(1);
+        assertThat(playersCreated()).isEqualTo(2);
+    }
+
+    @Test
+    void 合服围栏在发号之前被问一次_判的是会话zone() throws Exception {
+        assertThat(create(sessionIn(2), CreatePlayerRequest.getDefaultInstance()).hasErrorMessage()).isFalse();
+
+        assertThat(events).containsExactly("fence:2", "mint");
+    }
+
+    @Test
+    void 会话zone为0回2020_不回落进程zone_不问围栏_不发号_不插行() throws Exception {
+        assertThat(TIP_2020).isEqualTo(2020);
+
+        assertError(create(sessionIn(0), CreatePlayerRequest.newBuilder().setName("张三").build()), TIP_2020);
+        assertError(create(sessionIn(0), CreatePlayerRequest.getDefaultInstance()), TIP_2020);
+
+        // 围栏对 zone 0 一律放行，问了也没有意义；发号器一次都没被调用。
+        assertThat(events).isEmpty();
+        assertNothingMintedOrInserted();
+    }
+
+    @Test
+    void 合服围栏命中回2020_不发号_不插行() throws Exception {
+        fence.merging = true;
+
+        assertError(create(sessionIn(2), CreatePlayerRequest.newBuilder().setName("张三").build()), TIP_2020);
+
+        assertThat(events).containsExactly("fence:2");
+        assertNothingMintedOrInserted();
+
+        // 围栏撤掉之后同一个处理器照常建角（拒绝没有留下在途闸门之类的残留）。
+        fence.merging = false;
+        CreatePlayerResponse after = create(sessionIn(2), CreatePlayerRequest.newBuilder().setName("张三").build());
+        assertThat(after.hasErrorMessage()).isFalse();
+        assertThat(after.getPlayers(0).getPlayer().getZoneId()).isEqualTo(2);
+        assertThat(events).containsExactly("fence:2", "fence:2", "mint");
+    }
+
+    @Test
+    void 合服围栏读不到按封锁处理回2020_不发号_不插行() throws Exception {
+        fence.unreadable = new IOException("redis 超时");
+
+        assertError(create(sessionIn(2), CreatePlayerRequest.newBuilder().setName("张三").build()), TIP_2020);
+
+        assertThat(events).containsExactly("fence:2");
+        assertNothingMintedOrInserted();
+    }
+
+    @Test
+    void 合服围栏被中断按封锁处理回2020_保留线程的中断标记() throws Exception {
+        fence.unreadable = new InterruptedException("工作线程池正在关停");
+        try {
+            assertError(create(sessionIn(2), CreatePlayerRequest.getDefaultInstance()), TIP_2020);
+
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            assertThat(events).containsExactly("fence:2");
+        } finally {
+            // 清掉本线程的中断标记，不带进后面的用例。
+            Thread.interrupted();
+        }
+        assertNothingMintedOrInserted();
+    }
+
+    @Test
+    void 归属区检查点排在纯校验之后_校验的拒绝码在前且不问围栏() throws Exception {
+        // 同基线：职业 / 性别 / 外观 / 名字的拒绝先于归属登记（createplayerlogic.go 6a、6a' 在 6d 之前）。
+        // 两种「归属区不能用」的会话都一样：会话 zone 为 0；围栏封锁着的 zone 2。
+        fence.merging = true;
+        for (SessionContext session : List.of(sessionIn(0), sessionIn(2))) {
+            assertError(create(session, CreatePlayerRequest.newBuilder().setClassId(10).build()),
+                    LoginErrorTip.login_error.kLoginUnknownError_VALUE);
+            assertError(create(session, CreatePlayerRequest.newBuilder().setAppearanceId("99_unknown").build()),
+                    LoginErrorTip.login_error.kLoginUnknownError_VALUE);
+            assertError(create(session, CreatePlayerRequest.newBuilder().setName("官方客服").build()),
+                    LoginErrorTip.login_error.kRoleNameSensitive_VALUE);
+            assertError(create(session, CreatePlayerRequest.newBuilder().setName("a").build()),
+                    LoginErrorTip.login_error.kRoleNameInvalid_VALUE);
+        }
+        List<PlayerRow> five = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            five.add(LoginHandlerTest.row(i + 1, ACCOUNT, "角色" + i));
+        }
+        when(store.listPlayers(ACCOUNT)).thenReturn(five);
+        for (SessionContext session : List.of(sessionIn(0), sessionIn(2))) {
+            assertError(create(session, CreatePlayerRequest.getDefaultInstance()),
+                    LoginErrorTip.login_error.kLoginAccountPlayerFull_VALUE);
+        }
+
+        assertThat(events).isEmpty();
+        assertNothingMintedOrInserted();
+    }
+
+    @Test
+    void 丢应答重试命中已有行_归属区不变() throws Exception {
+        // 角色当初在区 1 建成、应答丢了；客户端拿同样的参数重试，这次的会话落在区 2 的 gate 上。
+        // 命中的是已有的那一行：原样返回，归属区还是 1，不因为重试的会话在区 2 而改写，也不多出一个区 2 的角色。
+        PlayerRow mine = LoginHandlerTest.row(100, ACCOUNT, "张三");
+        assertThat(mine.getZoneId()).isEqualTo(1);
+        when(store.listPlayers(ACCOUNT)).thenReturn(List.of(mine));
+        when(store.createPlayer(any())).thenReturn(CreateResult.NAME_TAKEN);
+
+        CreatePlayerResponse response = create(sessionIn(2), CreatePlayerRequest.newBuilder().setName("张三").build());
+
+        assertThat(response.hasErrorMessage()).isFalse();
+        assertThat(response.getPlayersList()).hasSize(1);
+        assertThat(response.getPlayers(0).getPlayer().getPlayerId()).isEqualTo(100L);
+        assertThat(response.getPlayers(0).getPlayer().getZoneId()).isEqualTo(1);
+        assertThat(mine.getZoneId()).isEqualTo(1);
+        assertThat(playersCreated()).isZero();
+        // 对存储只有这三种调用：读列表、事务版建角一次、其中那一次被名字唯一键挡回的插入；没有任何改写已有行的调用。
+        verify(store, atLeastOnce()).listPlayers(ACCOUNT);
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        ArgumentCaptor<PlayerRow> attempted = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store).createPlayer(attempted.capture());
+        assertThat(attempted.getValue().getPlayerId()).isNotEqualTo(100L);
+        verifyNoMoreInteractions(store);
     }
 }

@@ -8,6 +8,7 @@ import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisProperties;
 import com.game.discovery.location.PlayerLocationDirectory;
+import com.game.discovery.zone.ZoneMergeFence;
 import com.game.login.account.AccountLogin;
 import com.game.login.auth.DevPasswordRule;
 import com.game.login.auth.ExternalAuthProviders;
@@ -243,14 +244,27 @@ public class LoginConfiguration {
         return new RefreshTokenHandler(loginTokens);
     }
 
+    /**
+     * 合服围栏的读侧（建角的检查点 F1 等）。批次 7.3 之前 Java 版没有合服，恒放行；7.3 把这个 bean 换成读 Redis 的实现
+     * （zone-merge-spec §2.6），调用方不动。
+     */
+    @Bean
+    public ZoneMergeFence zoneMergeFence() {
+        return ZoneMergeFence.OPEN;
+    }
+
+    /**
+     * 建角。新角色的归属区取<b>会话所在的 zone</b>（gate 填的），不取本进程的 {@code xm.zone-id}：
+     * login 不分 zone，一个进程服务全部 zone 的 gate。
+     */
     @Bean
     public CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
                                                    PlayerIdGenerator playerIds, LoginProperties props,
                                                    LoginMetrics loginMetrics, AccountLogin accountLogin,
-                                                   @Value("${xm.zone-id:1}") int zoneId) {
+                                                   ZoneMergeFence zoneMergeFence) {
         SecureRandom random = new SecureRandom();
         return new CreatePlayerHandler(store, characterRules, playerIds, () -> random.nextInt(256),
-                zoneId, props.maxPlayersPerAccount(), loginMetrics, accountLogin::renewDevice);
+                zoneMergeFence, props.maxPlayersPerAccount(), loginMetrics, accountLogin::renewDevice);
     }
 
     /** 归属接管请求（Redis pub/sub，全部 scene 节点订阅）。 */
