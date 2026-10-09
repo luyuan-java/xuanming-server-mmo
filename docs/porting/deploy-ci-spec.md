@@ -268,6 +268,14 @@
 | xm-gate | 客户端 11000 | 18103 | 11000 | `xm-gate:11000` 能连上 |
 | xm-gateway | HTTP 18081（`/api`） | 18105 | 18081 | `xm-gateway:18081` 能连上 |
 | xm-battle（6.2，未入库） | 直连 12000、控制面 Dubbo 21200 | 18112 | 12000、18112 | 以 6.2 落地时的版本为准 |
+| xm-scene-z2（区 2；**只在本机切片 `XM_ZONES=2`**，批次 6.5） | 链路 21010、资产通道 21110 | 18115 | —（整栈里还没有这个服务，见表下） | 同 xm-scene：两个端口能连上，且 `xm_scene_channels{state="active"} ≥ 1`（`start-slice.sh` 的 `start_zone2_scene`） |
+| xm-gate-z2（区 2；**只在本机切片 `XM_ZONES=2`**，批次 6.5） | 客户端 11010 | 18123 | —（同上） | 11010 能连上；随后 `GET /api/server-list` 里区 2 是 OPEN 且带 `load_level`（`sync_zone2_status`） |
+
+- **区 2 的五个端口**（21010 / 21110 / 18115 / 11010 / 18123）现在只被本机切片占用：`tools/local/start-slice.sh` 在 `XM_ZONES=2` 时用命令行参数把它们传给 `--xm.zone-id=2` 的 xm-scene 与 xm-gate（脚本里的 `ZONE2_SCENE_NODE` / `ZONE2_GATE`），
+  各模块的 `application*.yaml` 缺省端口不得与它们相撞——xm-robot 的 `SliceScriptsTest` 会扫描全部模块的 yaml 并在相撞时失败。区 2 的进程与区 1 的同类用同一份 jar、同一份 yaml，没有新的模块。
+- **整栈（compose）里的两 zone 形态没有做，留给 7.1b**：spectate-spec Q22 列了前置清单（compose 里给 xm-battle 配 `XM_BATTLE_CLIENT_ADVERTISE_HOST`；xm-gate-z2 的 `xm.dubbo.match-url` 指向 `tri://xm-match:20888`；
+  gateway 两个区一起播种、用覆盖文件 `deploy/compose/two-zones.yaml` 而不是 profile；z2 服务放在覆盖文件里以免模块清单漂移守卫判红；与 zone-travel-spec §11.9「多 zone 用例不进 CI」的口径对齐——只有 robot 的 `battle-cross-zone` / `travel` 进 CI）。
+  容器里两个区的 scene / gate 各有各的容器 IP，不需要像本机切片这样错开容器内端口（同 §2.6 对 `two-scenes` 的说明），只有发布到宿主的端口要错开；届时本表补上发布端口一列。
 
 ### 2.2 进容器之前必须能覆盖的地址
 

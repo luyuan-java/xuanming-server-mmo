@@ -67,7 +67,7 @@
 | match-battle-ticket | `:274-284` | 全部（§4） | — |
 | match-activity-battle | `:286-296` | match 侧全部（§7.1–§7.2） | xm-guild 调用方与结果消费归 4.6 |
 | team-match | `:334-344` | match 端口 + xm-team 接线（§7.3–§7.6） | — |
-| match-spectate | `:262-272` | 只划边界：落点记录的形状供 6.5 复用、开局前清退的钩子、163 / 164 的临时应答（§8.6） | 6.5 |
+| match-spectate | `:262-272` | 只划边界：落点记录的形状供 6.5 复用、开局前清退的钩子、163 / 164 的临时应答（§8.6） | 6.5（2026-10-08 已落地，spectate-spec） |
 
 ### 0.3 与相邻批次的边界
 
@@ -75,7 +75,7 @@
 |---|---|---|
 | **6.2 battle**（已落地） | `BattleNodeService` 与 `CreateBattleResult.admission`（`xm-api/src/main/java/com/game/api/BattleNodeService.java`、`xm-api/src/main/proto/xm/api/battle_control.proto:18-22`）；目录 `BattleNodeInfo{accepting, instance_id, rpc_host, rpc_port}`（`node_directory.proto:55-72`，键 `xm:nodes:battle:0`）；出站端口 `BattleResultSink`（`xm-battle/src/main/java/com/game/battle/port/BattleResultSink.java`） | `KafkaBattleResultSink`（§5.4，已是 xm-battle 的缺省 `BattleResultSink`）；`MatchBudgets.MAX_MATCHED_TTL_SECONDS = 96`，xm-battle 的 `ConfirmWindowConstraintTest` 已改为直接引用它（`bn-spec` §10.4） |
 | **6.3 scene**（规格 `docs/porting/scene-battle-spec.md`；2026-10-06 已落地，接口与键以那份的正文和实现记录为准） | `SceneBattleService.prepareBattle / cancelBattlePrepare`（`SceneBattleReply.status` 的映射见 §9.7.2）；scene 写战斗锁 `RedisKeys.battleLock(pid)`（6.3 定为一个 Hash），match 只经 `BattleLockReader` 做 EXISTS（咨询性读，权威在 scene，§9.7.2 第 4 条）；快照填好 `BattleRouting`；PREPARING 按 `prepare_deadline_ms` 由 reaper 解冻；确认之后拒绝取消（§3.5 的 R1–R6、§9.7.2） | `PrepareBattleRequest` 的 `deadline_ms` / `prepare_deadline_ms` 口径（§3.2） |
-| **6.5 观战** | — | 落点记录 `xm:{match}:battle:<id>`（同时充当观战记录）；`GatherHooks.beforePrepare / onStarted`；163 / 164 的路由已接好，6.5 只替换处理器；`MatchBudgets.GATHER_CREATE_STAGE_WORST_MS`（22.2 s，WatchBattle 的「记录已写、房间可能还在建」窗口判定要用，`queue.go:340-342`）；`TicketStore` 的只读口 `ticket.TicketReader`（16014「匹配中无法观战」要读票据）；按落点记录直拨并判死的 `placement.PlacementDialer`（179 与观众 RPC 共用，直拨用自己的客户端缓存 `PlacementClients`）；落点的 `created_at_ms` 取 Redis `TIME`、`player_names` 是各成员快照里的角色名按成员顺序（spectate-spec §4.11 的要求，已做）。基线每轮凑单顺手清观战索引（`matcher.go:201-204`），Java 不挂在 matcher 上，由 6.5 自带定时任务。6.5 接手时要动的地方见文末实现记录「给 6.5 与 4.6 的接口与义务」 |
+| **6.5 观战** | — | 落点记录 `xm:{match}:battle:<id>`（同时充当观战记录）；`GatherHooks.beforePrepare / onStarted`；163 / 164 的路由已接好，6.5 只替换处理器；`MatchBudgets.GATHER_CREATE_STAGE_WORST_MS`（22.2 s，WatchBattle 的「记录已写、房间可能还在建」窗口判定要用，`queue.go:340-342`）；`TicketStore` 的只读口 `ticket.TicketReader`（16014「匹配中无法观战」要读票据）；按落点记录直拨并判死的 `placement.PlacementDialer`（179 与观众 RPC 共用，直拨用自己的客户端缓存 `PlacementClients`）；落点的 `created_at_ms` 取 Redis `TIME`、`player_names` 是各成员快照里的角色名按成员顺序（spectate-spec §4.11 的要求，已做）。基线每轮凑单顺手清观战索引（`matcher.go:201-204`），Java 不挂在 matcher 上，由 6.5 自带定时任务。6.5 接手时要动的地方见文末实现记录「给 6.5 与 4.6 的接口与义务」（6.5 已于 2026-10-08 落地，逐条的结果标在那里） |
 | **5.2 交接**（已落地，设计以 `ho-spec` §5 为准） | PrepareBattle 拒绝 `switchState ≠ NONE` 的玩家；交出流程拒绝战斗中的玩家（`ho-spec:106`）。match 不读 5.2 的任何新结构 | — |
 | **5.1 频道** | scene 目录条目（`SceneNodeInfo` 的 rpc 地址）与位置记录的稳定字段 | — |
 | **4.3 组队** | `TeamBattlePort` 与 `TeamService.startTeamMatch`（6.4 之前端口是 `NoTeamBattle`、人数恒为 0、211 恒回 4027；本批换成 `MatchTeamBattle`，§7.6） | `MatchTeamService`（§7.5） |
@@ -988,15 +988,18 @@ public interface MatchTeamService {
 | 152 / 151 | 应答体（§6.1） | in-band 16004 `缺少玩家身份` | 信封 1003 | in-band 16004 `服务器繁忙,请稍后再试` | in-band 16004 `服务器繁忙,请稍后再试` |
 | 179 | 应答体（§4.3） | in-band 16004 `缺少玩家身份` | 信封 1003 | §4.3 表 | in-band 16004 `服务器繁忙,请稍后再试` |
 | 156 / 154 上行 | Empty，不回包 | 同左 | 信封 1003 | — | — |
-| 163（6.4 临时） | in-band `error_message{1006}`（M22） | 同左 | 信封 1003 | — | — |
-| 164（6.4 临时） | 空列表 | 同左 | 信封 1003 | — | — |
+| 163（6.5） | spectate-spec §3.1 | in-band 16004 `缺少玩家身份` | 信封 1003 | in-band 16004 `服务器繁忙,请稍后再试`（spectate-spec §3.1 第 2 / 4 / 6 / 8 / 10 / 11 行） | in-band 16004 `服务器繁忙,请稍后再试`（在途已满，或轮到执行时预算已用完；spectate-spec §3.1 J 行①，outcome `overloaded`） |
+| 164（6.5） | spectate-spec §3.3 | **照常回列表**（不看身份，spectate-spec BW4） | 信封 1003 | 读索引失败 → 信封 1003；读落点失败 → 逐条跳过、回变短的列表（spectate-spec §4.5） | 信封 1003（M29） |
 
 - 信封 1003 = `MessageContent{message_id, id = 请求号, error_message{1003}}`；gate 调 match 失败或超时同样回它（`arch` §4.1；同基线路由服 `forwardlogic.go:170-184`）。
-- 156 / 154 / 163 / 164 不涉及 I/O，直接在 Dubbo 线程上回，不进工作池（`dispatch.InlineHandlers`，不做过载保护）。163 的 1006 不带 `parameters`；164 的空列表是 0 字节的应答体（应答类型不是 Empty，gate 照常回包）。
+- 156 / 154 不涉及 I/O，直接在 Dubbo 线程上回，不进工作池（`dispatch.InlineHandlers`，不做过载保护）。
+- **163 / 164 自批次 6.5 起是真实现**（M22 关闭；上面两行取自 spectate-spec §4.11）：163 不在 Dubbo 线程上、也不在 `match-worker` 上跑，经 `MatchMethodHandler.executor()` 交给它自己的执行器（每个请求一条虚拟线程 + 在途上限 128，§9.3）；
+  164 跑在 `match-worker` 上，空列表仍是 0 字节的应答体（应答类型不是 Empty，gate 照常回包）。处理器内未预期异常两个号都回信封 1003（§9.9 第 5 条），163 已抢到、还没交给 battle 的观战标记按值尽力释放。
+  6.4 期间的临时应答（163 回 in-band 1006、164 回空列表）见 §8.6。
 - **发号租约已丢失时**（M28，§9.8）：157 与 152 在派发层当场回 in-band 16004 `服务器繁忙,请稍后再试`，不进处理器、不进工作池；排在它前面的两条判定不变（请求体解析失败 → 信封 1003；会话没绑定玩家 → 16004 `缺少玩家身份`）。
   其余八个号（148 / 153 / 179 / 151 / 156 / 154 / 163 / 164）照常。
 - 「过载」列是 Java 独有的出口（基线没有工作池，过载表现为 zrpc 5 s 超时 → 信封 1003）：有 in-band 错误字段的 157 / 152 / 151 / 179 回 in-band 16004，
-  只能用信封的 148 / 153 回信封 1003（M29）。先例：xm-guild 过载回 in-band 14021（`arch` §4.17）。
+  只能用信封的 148 / 153 回信封 1003（M29）。先例：xm-guild 过载回 in-band 14021（`arch` §4.17）。6.5 的两个号同一口径：163 有 in-band 错误字段、回 in-band 16004（它的「过载」是自己的在途上限满了）；164 没有、回信封 1003。
 - 148 的「不回包」：基线缺省是 gate 直连模式（`cpp/nodes/gate/gate_router_mode.h:29`，环境变量不设即 direct），直连模式按应答类型反查消息号，`Empty` 会被映射到最后登记的那个以 Empty 应答的方法号、且不带请求号（`cpp/nodes/gate/main.cpp:270-313`），
   客户端在基线缺省模式下本来就收不到与 148 对得上的回包；路由模式回 148 空包（`forwardlogic.go:186-191`）。Java 的「不回包」与缺省模式在客户端看来一致（B6、M4）。
 
@@ -1013,11 +1016,11 @@ public interface MatchTeamService {
 | 16004 | kMatchInternal | 服务繁忙，请稍后重试 | 身份缺失、依赖故障、过载、邀请发送失败、179 读记录失败 |
 | 16005 / 16006 | TicketMismatch / CancelTooLate | — | **永不发出** |
 | 16007–16013 | 切磋七个码 | 见表 | §6.1 |
-| 16014–16019 | 观战 | — | 6.5 |
+| 16014–16019 | 观战 | — | 6.5 已做：163 的各个出口，码与 `parameters[0]` 见 spectate-spec §3.1、§3.2 |
 | 16020 | kMatchNotInScene | 请先进入场景 | JoinQueue 第 8 步 |
 | 1003 | kServiceUnavailable | 服务不可用 | 信封；179 的「战斗服务暂不可用」 |
 | 1005 | kInvalidParameter | 参数无效 | 179 的「该战斗不存在或已结束」，以及 battle 透传 |
-| 1006 | kFeatureUnavailable | 该功能当前不可用 | 163（6.4 临时） |
+| 1006 | kFeatureUnavailable | 该功能当前不可用 | 6.4 期间 163 的临时应答（M22）；6.5 之后 xm-match 不再发它 |
 | 4018 / 4023–4030 | 组队段 | — | 211（xm-team 发，§7.3） |
 
 ### 8.3 推送与顺序
@@ -1055,7 +1058,10 @@ public interface MatchTeamService {
 | 整队 | 213 MATCH_FAILED，不带 tip |
 | 活动 | 只在 guild 侧可见（巡检判 EXPIRED） |
 
-### 8.6 6.4 期间的临时行为
+### 8.6 6.4 期间的临时行为（已关闭）
+
+> **已关闭（2026-10-08，批次 6.5）**：下面两条只在 6.4 落地到 6.5 落地之间成立，留作记录。163 / 164 现在是真实现（§8.1；spectate-spec §3），`InlineHandlers` 里的两个临时处理器、`MatchTips.watchUnavailable` 与 `MatchTip.FEATURE_UNAVAILABLE` 已删；
+> 开局钩子是 `spectate.SpectateGatherHooks`（开局前清退观众、开局后登记可观战索引，spectate-spec §4.6），每人至多 3 s，正好是 matched TTL 公式里的那一项。M22 关闭。
 
 - 163 WatchBattle → in-band `error_message{1006}`；164 ListWatchableBattles → 空列表（合法的「当前没有可观战的战斗」）。6.5 替换处理器（M22）。
 - 开局前的观战清退是空钩子（6.4 还没有观众）。matched TTL 公式里每人 3 s 的 RemoveObserver 项**保留**，数值不变。
@@ -1105,6 +1111,7 @@ public interface MatchTeamService {
 | `lifecycle.MatchLifecycle / MatchStartupChecks / MatchLeaseHealthIndicator / MatcherControl / ResultConsumerControl` | 启停次序、启动门禁的预算断言、租约的健康组件、凑单与评分消费的启停口 | `msvc.go:69-249` |
 | `admin.MatchAdminAuthFilter / DevRatingController / DevActivityBattleController` | 管理口鉴权；dev / test 专用的两个管理口（§9.10） | Java 独有 |
 | `metrics.MatchMetrics / MetricLabels` | §11；标签净化 | `metrics.go` |
+| `spectate.*`（批次 6.5）：`WatchBattleService / WatchBattleHandler / SpectateExecutor`、`WatchableListService / ListWatchableHandler`、`SpectateStore`（`RedissonSpectateStore`，11 段 Lua 在 `SpectateScripts`）、`SpectateRules`、`ObserverDialer`（`DefaultObserverDialer`）、`SpectateGatherHooks`、`SpectateSweeper`、三个装配类；另 `placement.PlacementRecords`、`lifecycle.InflightWatches / SweeperControl` | 163 / 164、观战标记与可观战索引、观众 RPC、开局前清退与开局后公开、清扫；规格与实现记录在 spectate-spec | `watchbattlelogic.go`、`listwatchablebattleslogic.go`、`spectate.go` |
 
 与本稿原文的类划分的出入（行为不变）：`rating.RatingRules` 按所有权拆成三处（容差 `matcher.Tolerance`、分队 `gather.TeamAssignment`、Elo `rating.EloRules`）；`RatingStore.loadOrDefault` 拆成原始读与 `JdbcRatingReader`；
 `admin.DevMatchController` 拆成两个控制器；`ticket.BattleTicketReissue` 落在 `reissue` 包；`gather.BattleNodePicker` 落成 `gather.BattleNodes`。测试替身在 `com.game.match.testing`。
@@ -1127,7 +1134,7 @@ public interface MatchTeamService {
 
 | 线程 | 做什么 | 不得做什么 |
 |---|---|---|
-| Dubbo 提供方线程 | 解析调用、身份检查、投递到 `match-worker`；不涉及 I/O 的 156 / 154 / 163 / 164 当场回；`runTeamGather` 只登记 future 就返回 | 阻塞 I/O |
+| Dubbo 提供方线程 | 解析调用、身份检查、投递到 `match-worker`（或处理器自带的执行器：163 在这里当场试拿在途许可，拿不到即回过载应答）；不涉及 I/O 的 156 / 154 当场回；`runTeamGather` 只登记 future 就返回 | 阻塞 I/O |
 | `match-worker`（固定 16 线程，队列 1024，AbortPolicy） | 客户端请求、`MatchTeamService` 的前三个方法、`MatchInternalService`。可以同步等 Redisson / JDBC（它既不是 Netty I/O 线程，也不是场景逻辑线程，`AGENTS.md` §3）。整请求预算 4500 ms（基线 zrpc 超时 5000 − 500，同 trade 口径） | — |
 | `match-matcher`（单线程，`scheduleWithFixedDelay(500 ms)`） | 读注册集 → 逐个队列抢锁 → 弹组 → 把 gather 交给 `GatherLauncher`。每轮 `try/catch Throwable`：JDK 调度器遇到一次异常就会永久停止后续执行，这一点与 safego 不同 | 跑 gather 本身 |
 | `match-gather`（**虚拟线程**，每次 gather 一个；全局信号量 `gather-max-inflight`，缺省 256） | 照基线顺序写的阻塞式 gather，每跳 `future.get(剩余预算)`（Dubbo 异步调用、Redisson 异步命令），与 `gather.go` 逐段对照 | 在 `synchronized` 块内阻塞（JDK 21 会钉住载体线程）；直接跑 JDBC（经 `match-db`） |
@@ -1136,6 +1143,10 @@ public interface MatchTeamService {
 | `match-push`（固定 2 线程、队列 1024） | `PlayerPushes` 回调与计数；切磋开局失败后补推 154 false | 阻塞 |
 | `match-rating-init` / `match-rating-cleanup` | topic 核对的后台重试（每 30 s）/ 入账标记的保留期清理（每小时） | — |
 | `match-lease` | 发号租约续期 | — |
+| `match-spectate-N`（**虚拟线程**，每个受理的 163 一条；全局在途上限 `xm.match.spectate.max-inflight`，缺省 128；批次 6.5） | 163 WatchBattle 的整个流程：阻塞等 Redis 与至多两跳 battle RPC（换场的 RemoveObserver、登记的 AddObserver），每一跳按请求截止 / 硬截止限时等（spectate-spec §4.4、§4.9）。放在这里而不是 `match-worker`：一个慢的 battle 节点不该把 157 / 148 / 153 / 179 挤成过载 | 在 `synchronized` 块内阻塞 |
+| `match-spectate-recheck-N` / `match-spectate-evict-N`（虚拟线程，不占 163 的在途许可；批次 6.5） | 163 登记成功后复查的两次读（票据、战斗锁，每请求至多两条，只活到请求截止）/ 自我清退的异步 RemoveObserver（至多 3 s） | — |
+| `match-spectate-sweeper`（单线程守护线程，`scheduleWithFixedDelay`，缺省 10 s；批次 6.5） | 摘掉可观战索引里过期的成员、采样 `xm_match_watchable_battles`；每轮 `try/catch Throwable`；由 `MatchLifecycle` 启停（§9.8） | — |
+| `match-stop-watches`（平台线程，只在停机时存在；批次 6.5） | 停机第 3 步：有界等在途的 163（至多 5 s），与停机线程排空 `match-worker` 并行 | — |
 | `match-rpc-sweep`（守护线程，60 s 一轮） | 清掉三份直连客户端缓存里空闲 ≥ 360 s 的地址（§9.7.1） | — |
 | `match-scene-connect-N` / `match-battle-connect-N` / `match-placement-connect-N` | 三份 `NodeRpcClients` 各自的建连线程（每份至多 2 条，空闲 30 s 回收） | — |
 | 管理 Tomcat（至多 4 线程） | actuator；dev 读评分口直读 `RatingStore`；dev 活动开战口在它上面执行（截止 = `request-budget`） | — |
@@ -1151,6 +1162,7 @@ public interface MatchTeamService {
   - gather 选 battle 节点（首选与换节点各一次）与凑单每轮的目录概况，经 `NodeDirectory.list` 走 Redisson 的**同步**读，没有本地截止。它不持锁、不钉住载体线程，等待上界是 Redisson 自己的超时与重试（启动门禁断言 ≤ 6100 ms）。
   - 179 在共用的 `match-worker` 上同步等直拨（每条至多 3 s）：battle 节点「连得上但不应答」时，16 条并发的补签就能占满工作池，其余入口排队超预算后按过载应答。这是本稿选定的线程模型；
     spectate-spec 给 6.5 的 163 定的是虚拟线程 + 在途上限，179 是否同改（异步应答、不占工作线程）留给后续批次定。
+    6.5 落地时给 `MatchMethodHandler` 加了 `executor()`（处理器可自带执行器，缺省 null = `match-worker`；§9.9），179 以后要挪出工作池可以直接用这个钩子，本批没有动 179。
 
 ### 9.4 Redis 键与脚本（全部经 `RedisKeys` 生成，`xm:` 前缀，tag `{match}`）
 
@@ -1165,6 +1177,7 @@ public interface MatchTeamService {
 | `xm:{match}:requeue:<token>` | STRING（值 = 那一次回队首放回去的人数，含 0），PX 60 s | match | Java 独有（回队首重放标记，评审 TKT-1 后新增；`RedisKeys.matchRequeueMarker`） |
 | `xm:{match}:challenge:<id>` / `xm:{match}:challenge-target:<pid>` / `xm:{match}:challenge-done:<id>` | HASH / STRING / HASH，60 s | match | `challenge:<id>` / `challenge:target:<pid>`；墓碑是 Java 独有 |
 | `xm:{match}:battle:<battle_id>` | HASH（`a`、`pb` = `BattlePlacement`），360 s | match | `spectate:battle:<id>` |
+| `xm:{match}:watching:<pid>` / `xm:{match}:watchable`（批次 6.5；`RedisKeys.matchWatching` / `matchWatchable`） | STRING（`<battle_id>:<nonce>`，PX 360 s）/ ZSET（member = battle_id，score = `created_at_ms`，无 TTL） | match（`spectate` 包；11 段 Lua 在 `SpectateScripts`，spectate-spec §4.2、§4.3） | `spectate:watching:{pid}` / `spectate:battles:active` |
 | `xm:presence:<pid>` / `xm:location:<pid>` / `xm:nodes:battle:0` / `xm:nodes:scene:<zone>` / `RedisKeys.battleLock(pid)`（Hash，键名与形状归 6.3，经 `BattleLockReader`） | 只读 | gate / scene / battle / scene（6.3） | `keys.go:36-43` |
 
 **为什么一个 tag**：票据与队列同 slot 后，回队首、入队、取消、弹组都能在一段 Lua 里完成，基线的跨 slot 孤儿票与假 16001（B11）都不再出现。Java 的 Redis 是单实例，一个 tag 没有热点问题；
@@ -1256,7 +1269,7 @@ record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 | 0 | 拿在途许可，失败 → `overloaded`（无副作用、无肇事者） |
 | 1 | 用预发的号或 `MatchIds` 发号；失败 → `internal` |
 | 2 | `BattleNodePicker.pickRandom(exclude = ∅)`：只从 `accepting = true` 的条目里等概率选；没有 → `no_battle_node`。`deadlineMs = TIME + 300 000`，`prepareDeadlineMs = TIME + matchedTtl(n) × 1000`（两者取同一次时钟读数，在任何 Prepare 之前） |
-| 2.5 | `GatherHooks.beforePrepare(members)`：6.4 是空操作，6.5 在这里接观战清退 |
+| 2.5 | `GatherHooks.beforePrepare(members)`：6.4 是空操作，6.5 在这里接观战清退（已接：`spectate.SpectateGatherHooks`，批读标记至多 1 s + 每名有标记的成员至多 3 s，永不阻断开局；spectate-spec §4.6） |
 | 2.6 | `TeamAssignment`：5V5 经 `match-db` 读评分后蛇形分配；其余按下标 |
 | 3 | 逐人：`ScenePreparer.resolve(pid)`（位置 `o` → scene 目录 → rpc 地址，判定顺序同 `SceneAssetLocator`）。找不到持有者或读出错 → `no_location`（该玩家是肇事者，同 B-g2）。`prepareBattle`（3 s）：传输失败或超时 → `prepare_failed`，并把该玩家记进「结局不明」集合（F-g1）；tip ≠ 0 或快照为空 → `prepare_failed` |
 | 3.5 | zone 组成指标 |
@@ -1265,7 +1278,7 @@ record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 | 4.1 | `PlacementStore.write(attempt = 1)`：一次 Redisson 调用，外层截止 6.1 s；失败 → `index_failed`，补偿之后删记录 |
 | 4.2 | `createBattle`（5 s）：`ADMITTED` 且 tip = 0 → 成功；`NOT_ALLOCATABLE` → 按 (节点号, 实例) 排除后再挑一个，`write(attempt = 2)`（失败 → `index_failed`）→ 再建一次；没有可换的节点 → 直接进 4.3 |
 | 4.3 | 最后一次的结局：`NOT_ALLOCATABLE` → `not_allocatable`（不发 destroy，删记录）；`ADMITTED` 且 tip ≠ 0 → **`create_rejected`**（不发 destroy，删记录，F-g2）；这一次调用**确定没有送达**（`RpcFailures` 判 `NOT_SENT` 且地址是本次目标）→ **`create_not_sent`**（不发 destroy，删记录，不换节点重试；M30，§3.3）；`UNSPECIFIED`、应答为空或解析失败、其余异常或超时 → 对**最后尝试的节点** `destroyBattle(reason = "gather_rollback")`（3 s）：成功 → `create_failed` 并删记录；失败 → `create_failed_room_alive`（不解冻、不动票据、保留记录）。建房成功只看准入 `ADMITTED` 且 tip = 0，不核对应答里的 battle_id |
-| 5 | 全员 `S_READY`（CAS）→ `PlacementStore.write(同一 attempt)` 补写 → `GatherHooks.onStarted(placement)`（6.5 在这里加入活跃集合）→ 指标 |
+| 5 | 全员 `S_READY`（CAS）→ `PlacementStore.write(同一 attempt)` 补写 → `GatherHooks.onStarted(placement)`（6.5 在这里加入活跃集合：已接，落点的 attempt 仍是这一次的才登记进可观战索引 `xm:{match}:watchable`，至多等 1 s、失败只计数）→ 指标 |
 | fail | `REQUEUE_SURVIVORS` 时先 `S_EXTEND`（TTL = (已冻结人数 + 结局不明人数) × 3 + 10）→ 逐人 `cancelBattlePrepare`（已冻结 ∪ 结局不明，每人 3 s，失败只记日志）→ 按 `onFail` 处理票据：肇事者 `S_DEL`、幸存者 `S_REQUEUE`（无肇事者时带 2 s 的 `not_before_ms`）；或 `S_DEL_GROUP` → 删预写的记录 → 指标。Cancel 发往**该成员 Prepare 时用的那个 scene 节点**（记下的 (节点号, 实例, rpc 地址)，同基线 `p.sceneEndpoint`，`gather.go:532-537`），不按位置记录重新解析：Java 断线即移除实体、位置随之变 `l`，重新解析会找不到持有者而漏发 Cancel（R4 正是给这种「玩家已不在本节点」的 Cancel 用的）；对端已重启时回实例不符或传输失败，都只记日志，冻结与锁由 R6 / 锁 TTL 收尾。落地：续期续的是本组全员的票（含肇事者，随后删），人数可以为 0；回队首每次补偿生成一个新的 requeue token（§9.4）；取消与回滚的 destroy 都经 `NodeCalls.callRemembered` 发——带着先前记下的目标发调用时复用该地址上现有的引用，不因过时的实例号销毁重建（§9.7.1） |
 
 - **落地的判定细节**（`gather.GatherPipeline` / `ScenePreparer` / `Compensation`）：
@@ -1354,24 +1367,32 @@ record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 5. 占 `NodeTypes.MATCH` 租约。
 6. pbmysql `syncAll` 建两张评分表（失败时已占的号交还）；其余单例。
 7. 导出 Dubbo。
-8. 起 matcher。
+8. 起 matcher；随后起观战清扫（批次 6.5：`SweeperControl.start()`，只是排上定时任务，不阻塞）。
 9. 起评分消费：对局结果 topic 的首次核对在这一步**同步**做（至多等 `xm.match.kafka.init-timeout`）——与契约不符 = 拒启；Kafka 不可达时告警并照常启动，每 30 s 后台重试（同 `msvc.go:114-134`；§5.3）。
 
 落地的装配（`MatchConfiguration` / `MatchLifecycle`）：
 - **前六步由 bean 的参数依赖钉住次序**（密钥 → 配置表 → 启动检查 → 发号租约 → 评分建表），门禁没过不占号。
 - **Dubbo 的导出 / 撤导出挂在上下文事件上**（`ContextRefreshedEvent` 同步导出、`ContextClosedEvent` 销毁），`SmartLifecycle` 的启停都落在它的同一侧，所以不是「一个 `SmartLifecycle` 做完」。`MatchLifecycle` 用三个挂点：
-  `ApplicationStartedEvent` 起凑单再起评分消费（此时 Dubbo 端口已在听）；`ContextClosedEvent`（次序 `HIGHEST_PRECEDENCE + 1000`，排在 Dubbo 的监听器之前）停凑单；`SmartLifecycle.stop` 做其余；租约在单例销毁时交还。
+  `ApplicationStartedEvent` 起凑单（6.5 起随后起观战清扫）再起评分消费（此时 Dubbo 端口已在听）；`ContextClosedEvent`（次序 `HIGHEST_PRECEDENCE + 1000`，排在 Dubbo 的监听器之前）停凑单；`SmartLifecycle.stop` 做其余；租约在单例销毁时交还。
   第 8 / 9 步抛异常 = 拒启，随后走同一个停机序列。
   启动的第 8 / 9 步在启动线程上、停机各步在关停线程上，「刚启动完就收到 SIGTERM」时两条线程会同时在这个类里：「判停机 → 起凑单」与「置停机 → 停凑单」经同一把锁串行（要么停机先到、凑单不再起，
   要么凑单先起完、停机接着把它停掉；评审 PLAT-2）；评分消费的 `start` 会同步核对 topic，不放在锁里，起完再看一眼停机是否已经走过、走过了就自己补停。
 - **别的包的 bean 都是硬依赖**：凑单 / 评分消费的启停口（`MatcherControl` / `ResultConsumerControl`）、开局管线、凑单的三个协作件、契约 `MatchService` 十个方法的处理器，缺任何一个拒启（少一包的进程会照收请求而永不成局 / 不入账）；
   同一个启停口出现两个 bean 也拒启。包与包之间不用 `@ConditionalOnMissingBean` 给缺省 bean（组件扫描到的配置类之间，它的判定取决于扫描次序，随平台而变）；测试里换掉某个 bean 用 `@Primary`。
-- **就绪日志**「match 已就绪：Dubbo 已导出，凑单与评分消费已启动」是 `start-slice.sh` 的就绪判据（§15.4），改措辞要同步脚本与 xm-gate 的 `LocalSliceOrderTest`。
+- **就绪日志**「match 已就绪：Dubbo 已导出，凑单、观战清扫与评分消费已启动」（6.5 之前是「…凑单与评分消费已启动」）是 `start-slice.sh` 的就绪判据（§15.4）：脚本只认其中的子串「match 已就绪」，改这个子串要同步脚本与 xm-gate 的 `LocalSliceOrderTest`。
 - **启动依赖**：MySQL 可达（Druid 启动即建连）与 Redis 可达（占发号租约）；Kafka 不可达照常启动（多等一个 `init-timeout`，这段时间 Dubbo 已在服务；评分不更新）；不依赖 xm-scene / xm-battle 在场（battle 目录为空时凑单暂停、队列保留）。
 
-**停机**：停 matcher（等当前一轮结束）→ 撤 Dubbo 导出 → **排空 `match-worker`** → 有界等待在途 gather（10 s，代码常量 `MatchLifecycle.GATHER_DRAIN_TIMEOUT`），超时直接放弃（票据按 matched TTL 自愈，scene 按 prepare 期限解冻，同基线「进程退出不等」）→ 停消费者 → 交还租约、关直连客户端。
+**停机**（这一段是 6.4 的次序；6.5 在中间加了两步，见本小节「批次 6.5 之后的停机序列」）：停 matcher（等当前一轮结束）→ 撤 Dubbo 导出 → **排空 `match-worker`** → 有界等待在途 gather（10 s，代码常量 `MatchLifecycle.GATHER_DRAIN_TIMEOUT`），超时直接放弃（票据按 matched TTL 自愈，scene 按 prepare 期限解冻，同基线「进程退出不等」）→ 停消费者 → 交还租约、关直连客户端。
 「排空 `match-worker`」是原稿之外补的一步：已受理的 PVE_SOLO / 切磋应答还可能交出新的 gather，先排空，等的才是全集。各步幂等、出错只记日志继续。停机时仍挂着的 `runTeamGather` 被撤导出切断，xm-team 按传输失败处理（§7.5），gather 本身在等待窗口里跑完并自己收尾票据。
 最坏停机时长约为 Dubbo 停服等待（缺省 10 s）+ 工作池排空 + gather 等待 10 s，可能超过 `stop-slice.sh` 给每个进程的 20 s 而被强制结束，后果自愈。
+
+**批次 6.5 之后的停机序列**（`MatchLifecycle`，日志编号「停机 n/6」；spectate-spec §4.9）：停凑单 → 撤 Dubbo 导出 → **[排空 `match-worker`（至多 10 s）∥ 有界等在途的 163 观战（至多 `MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS` = 5 s）]**
+→ 停观战清扫（当场中断手上那一轮，不等它做完）→ 等在途 gather（至多 10 s）→ 停评分消费 → 交还租约、关直连客户端。
+- 等 163 与排空工作池**并行**（163 不在工作池上；辅助线程 `match-stop-watches`，实现不守约时再多等 1 s 后放弃并打断）：串行会让 `SmartLifecycle.stop()` 里这几步的最坏时长从 10 + 10 = 20 s 变成 25 s；并行之后与加观战之前相同。
+  清扫是幂等的只删操作，停机时直接中断（已发出的命令 Redis 照样执行，没摘完的下一次启动 / 另一个实例接着摘），不给停机加时间。
+- **20 s 是设计预算，不是 Spring 的强制截断**：取值与 `spring.lifecycle.timeout-per-shutdown-phase` 相同，但 `MatchLifecycle` 只实现同步的 `stop()`，Spring 不会拿这个时限截断它（同 scene-drain-spec G16）。
+  真正的硬期限在进程外、从 SIGTERM 起算、还包含停凑单与撤 Dubbo 导出：本机切片是 `stop-slice.sh` 的 20 s（上一段说的「可能超过而被强杀」照旧成立），容器部署是按这个值推出来的宽限期（ops-release-spec §0.6 #30：5 + 20 + 10 = 35 s）。
+- 等不完的 163：已抢到的观战标记留到 TTL，客户端按 gate 的超时收到信封 1003。
 
 **租约丢失**（有意差异 M28）：基线是「先 Fence 发号器，再注销发现 key、flush Kafka、`os.Exit(1)` 重启换 worker」（`msvc.go:207-221`）；
 Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停发号。**「续期恢复后自动恢复」只对续期滞后成立；租约真正丢失（`NodeIdLease` 的 lost）不会自愈**（lead 裁决二，开工前定）。两种状态分开处理（`MatchIds.leaseValid()` / `leaseLost()`）：
@@ -1397,12 +1418,15 @@ Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停
 `MatchClientMessageService.handle(ClientCall)`：
 1. 按消息号取方法，未知号 → `tip_id = 1003`；
 2. 解析请求体，失败 → `tip_id = 1003`；
-3. 156 / 154 / 163 / 164 当场回（§8.1）；
-4. 其余投递到 `match-worker`，带受理时刻 + 4500 ms 的 `Deadline`；投递被拒或排队超预算按 §8.1 的「过载」列回；
+3. 156 / 154 当场回（§8.1）；6.4 期间 163 / 164 的临时应答也在这一步当场回，6.5 起它们走第 4 步；
+4. 其余投递到执行器上，带受理时刻 + 4500 ms 的 `Deadline`：缺省是 `match-worker`，处理器自带执行器的投到它自己的那个（6.5 的 163：每请求一条虚拟线程 + 在途上限）；投递被拒或排队超预算按 §8.1 的「过载」列回；
 5. 业务方法内部异常 → `tip_id = 1003`（信封）；
 6. 回 `ClientReply{body}`。不产生会话指令。
 
-落地（`dispatch.MatchDispatcher`；每个号一个 `MatchMethodHandler` bean，由排队、切磋、补签各包与 `InlineHandlers` 提供）：
+落地（`dispatch.MatchDispatcher`；每个号一个 `MatchMethodHandler` bean，由排队、切磋、补签、观战各包与 `InlineHandlers` 提供）：
+- **处理器可自带执行器**（批次 6.5，`MatchMethodHandler.executor()`；缺省返回 null = 共用 `match-worker`）：派发器每次派发读一次，inline 的处理器不看它；自带执行器的 `execute` 不得阻塞 Dubbo 线程，受理不了（在途已满、已关闭）抛 `RejectedExecutionException`，
+  派发器随即调该处理器的 `onOverload()`——与工作池满同一个口径；「轮到执行时预算已用完」同样走 `onOverload()`。受理的任务必须恰好执行一次，许可之类的资源由执行器自己归还；停机时「等在途任务结束」由执行器的拥有者提供（163 是 `lifecycle.InflightWatches`）。
+  `executor()` 自己抛异常按处理器异常回信封 1003。现在只有 163 用它（`spectate.SpectateExecutor`）。
 - 处理器按契约方法名登记（`MatchMethods`，经 `MessageIdRegistry` 换成消息号）；同一个方法两个处理器、或方法名不在契约的 `MatchService` 里，构造即失败；**十个方法里有任何一个没有处理器 → 拒启**（`MatchDispatchConfiguration`）。
 - 截止 = 受理时刻 + `xm.match.request-budget`（含排队）。工作池拒收、或轮到执行时预算已用完 → 不调 `handle`，按该处理器的 `onOverload()` 回，且不碰任何依赖。
 - **发号租约已丢失时**，在「有没有处理器」之后、inline / 投工作池之前：157 与 152 换成 `LostLeaseRefusals` 里的拒收处理器，在调用线程上当场回（§8.1、§9.8）。
@@ -1435,7 +1459,7 @@ Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停
 | 配置 | 缺省 | 说明 / 校验 |
 |---|---|---|
 | `worker.threads` / `worker.queue` | 16 / 1024 | 同 trade |
-| `request-budget` | 4500 ms | 基线 zrpc 5000 − 500；必须在 [500 ms, 4500 ms] 内（gate 调 match 的 Dubbo 超时 5 s 先到会让客户端看到信封 1003 而不是 in-band 结果） |
+| `request-budget` | 4500 ms | 基线 zrpc 5000 − 500；必须在 [500 ms, 4500 ms] 内（gate 调 match 的 Dubbo 超时 5 s 先到会让客户端看到信封 1003 而不是 in-band 结果）。6.5：163 也用它，而 163 的两道门槛是代码常量——调到 2200 ms 及以下时带旧观战标记的换场 / 随机观战恒回 16004，1000 ms 及以下时凡走到登记的 163 都回 16004；合法区间不变、不拒启，低于 2300 ms / 1100 ms 时启动打一条 WARN（spectate-spec §4.9） |
 | `matcher.interval` | 500 ms | `yaml:49` |
 | `matcher.lock-ttl` | 10 s | `yaml:53`；必须 ≥ 1 s 且 ≥ `matcher.interval` |
 | `ticket-ttl` | 6 h | `yaml:63`（QUEUED 最长保持，客户端可见）；必须 > 96 s（回队首的票要恢复成比最长 matched TTL 更长的寿命） |
@@ -1448,6 +1472,8 @@ Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停
 | `table-fingerprint-mode` | warn | 枚举绑定（off / warn / enforce），非法拒启 |
 | `gather-max-inflight` | 256 | 同 battle `rpc-max-inflight` |
 | `requeue-backoff` | 2 s | 无肇事者失败后的 `not_before_ms`（M11）；[0, 60 s]，0 关闭 |
+| `spectate.sweep-interval`（批次 6.5） | 10 s | 可观战索引的清扫间隔；> 0 且是整毫秒，否则拒启（spectate-spec §5.2） |
+| `spectate.max-inflight`（批次 6.5） | 128 | 同时在途的 163 上限；≥ 1，否则拒启；超限当场回 in-band 16004 |
 | `rating.consumer-group` | `xm-match-rating` | — |
 | `kafka.bootstrap-servers` | `${XM_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}` | 对局结果 topic 的连接（原稿没给这几个键，按 `xm.audit.*` 的口径补，lead 裁决问题 8） |
 | `kafka.topic-generation` | `${XM_BATTLE_RESULT_TOPIC_GENERATION:1}` | ≥ 1；必须与 xm-battle 一致 |
@@ -1463,6 +1489,9 @@ Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停
 
 不开放配置的（代码常量，`MatchBudgets`）：各跳超时、落点记录写入最坏 6.1 s、matched TTL 公式（含已失效的下限 30）、补偿续期、开战锁余量 10 s、战斗最长时限 300 s、落点记录 TTL 360 s。
 它们出现在跨进程不等式里（§10.3），改一处要连带核对，不适合做成运行期配置（M21；基线这些是 yaml 可调的，`cfg.go:55-80`）。
+批次 6.5 给 `MatchBudgets` 增补的观战常量同样不开放配置（数值与不等式见 spectate-spec §5.1、§5.3）：`ADD_OBSERVER_TIMEOUT_MS` = 3000（`REMOVE_OBSERVER_TIMEOUT_MS` 保留原名，仍是 matched TTL 公式里每人的那一项）、
+`WATCHING_TTL_SECONDS` = 360、`SPECTATE_STALE_MS` = 360 000、`WATCHABLE_LIST_DEFAULT / MAX` = 20 / 50、`RANDOM_WATCH_ROUNDS` / `RANDOM_PICK_TRIES` = 2 / 3、`WATCH_REWATCH_RESERVE_MS` / `WATCH_ADD_RESERVE_MS` / `WATCH_ADD_MIN_BUDGET_MS` = 1200 / 200 / 1000、
+`SPECTATE_DRAIN_TIMEOUT_MS` = 5000（= `DEFAULT_REQUEST_BUDGET_MS` + 500）。1 / 2 / 5 / 10 人的 matched TTL 仍是 42 / 48 / 66 / 96 s。
 
 ### 10.2 环境变量
 
@@ -1569,6 +1598,10 @@ Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停
 租约丢失的派发层拒收计 `join_queue{outcome=internal}` / `challenges{stage=invite, result=internal}`，`requests_seconds` 的 `result` 记 `ok`。常见的标签组合启动时预建为 0。
 xm-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 
+**批次 6.5 新增的八个观战指标**（同在 `MatchMetrics`，取值与计数口径见 spectate-spec §6）：`xm_match_watch_battle_total{outcome}`、`xm_match_list_watchable_total{result}`、`xm_match_spectate_evictions_total{reason, result}`、
+`xm_match_watchable_index_evictions_total{reason}`、`xm_match_watchable_anomalies_total{reason}`、`xm_match_watchable_battles`（gauge，多实例取 max）、`xm_match_observer_rpc_total{method, result}`、`xm_match_spectate_inflight`（gauge，每实例的真实值）。
+`xm_match_requests_seconds` 的 `method` 标签里 `WatchBattle` / `ListWatchableBattles` 现在计的是真处理器。
+
 ---
 
 ## 12 隐患与边界
@@ -1658,6 +1691,7 @@ xm-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 
 > **落地状态（2026-10-08）**：M1–M29 全部按本表落地；其中 M5、M6、M8、M10、M16、M17、M19、M20、M24、M26、M28 的措辞按实现更新过（行内标「落地」的部分）。
 > **本批新增 M30–M33**（接在表尾）：M30 是集成之后 lead 裁决的有意差异，M31 是评审后补的 Java 新增行为，M32、M33 是实现中形成、登记备查的差异。涉及改 mmorpg 的都只登记、未动 mmorpg，需用户同意。
+> **2026-10-08 批次 6.5**：M22 关闭（163 / 164 是真实现）；观战自己的有意差异在 spectate-spec §8。
 
 | # | 差异 | 基线 | Java | 客户端可见？ | 两版同改？ |
 |---|---|---|---|---|---|
@@ -1682,7 +1716,7 @@ xm-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 | M19 | 结果 topic 与消费 | `match-results`；失败重试 3 次后跳过 | `xm-battle-result-g<N>`，启动核对；可恢复故障不跳过。落地：分区数与契约不符时两边都拒启；数据错误（SQLState 22 / 23）写毒丸日志后跳过；生产方发不出去的事件带完整字节进兜底日志 `xm.battle.result.fallback` | 否 | 否 |
 | M20 | 整队开战跨进程 | 同进程端口；ticket id 由端口生成 | `MatchTeamService`；预检合成一次调用（顺序不变）；ticket id 由 xm-team 每人生成；gather 结果靠长挂 RPC；match 崩溃或分区时推 MATCH_FAILED；match 侧建票 Redis 出错照基线回 4026[roster[0]]。落地：应答枚举首值 `UNSPECIFIED`、建票应答用 `CREATED / FAILED / EXPIRED`（`EXPIRED` = 没执行、什么都没写，xm-team 按结果不明回 4030）；`xm-budget-ms` 带每跳超时；xm-team 自己优雅停机时在途 gather 的结果不明不清锁、不推 MATCH_FAILED（锁自然过期，同基线进程退出）；4025 只由 xm-match 的预检给出 | 只在 xm-match 崩溃 / 分区 / 调不通 / 过载 / 租约无效时：211 回 4030（基线没有这个故障面），多一条 MATCH_FAILED，分区时可能随后又到 177 / 143；match 侧 Redis 挂起时建票那一跳多半先超时，客户端看到 4030 而不是 4026[队长] | 否 |
 | M21 | 时限与配置 | yaml 可调；matched TTL 下限配置无效；指纹模式由 go-zero `options=off\|warn\|enforce` 在加载时校验（`cfg.go:90`，写错即起不来；只有空串回落 warn，`gather.go:465-468`）；PVE 人数不校验、值 0 视为未配置（`cfg.go:198-201`） | `MatchBudgets` 代码常量（数值相同）；去掉下限配置；指纹模式枚举绑定、非法拒启（与基线同效）；PVE 人数 id 必须在 Dungeon 表里、值 ≥ 1，否则拒启 | 否 | 否 |
-| M22 | 163 / 164 | 已实现 | 6.4 期间 163 回 in-band 1006、164 回空列表，6.5 补齐 | **是**（只在本批期间） | 按批次登记 |
+| M22 | 163 / 164 | 已实现 | 6.4 期间 163 回 in-band 1006、164 回空列表，6.5 补齐。**已关闭（2026-10-08，批次 6.5）**：两个号都是真实现，临时处理器与临时 tip 已删；此后的差异见 spectate-spec §8（W1–W20） | **是**（只在 6.4 落地到 6.5 落地之间）；关闭后不再是差异 | 已关闭 |
 | M23 | 发号 | team_id、battle_id、challenge_id 同一个发号器 | battle_id 与 challenge_id 用 `NodeTypes.MATCH`；team_id 用 `NodeTypes.TEAM` | 否 | 否 |
 | M24 | 156 / 154 推送 | Kafka gate-cmd | `PlayerPushes`（Redis pub/sub + gate 玩家栅栏）。落地：156 在工作线程上等到请求截止，`SENT` 才算成功，截止内没有结果也按发送失败清理并回 16004；154 只发起、不等完成 | 否（同为至多一次；不会推错人） | 否 |
 | M25 | 整队 / 活动建票 | 逐人建、失败回滚 | 一段 Lua 原子建全员；只在结果不明时按 id 回滚 | 否 | 否 |
@@ -1712,7 +1746,7 @@ xm-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 | Q5 回合打满的阈值 | 采纳：照搬基线 30 + 覆盖表（缺省空）；`draw-round-cap = 0` 关闭。「按 Dungeon.time_limit 推导」登记为 mmorpg 待做（两版同批改） |
 | Q6 补签判死 | 采纳，并在评审后收紧：直拨的请求确定没送达 + 同号换实例 + 原地址的建连探测明确连不上，三条都成立才 1005；超时一律 1003（§4.3） |
 | Q7 148 成功是否回包 | 采纳：不回包（tip 0 + 空应答体，gate 按 Empty 规则不回）；`MatchBackendForwardingTest` 钉住 |
-| Q8 163 / 164 在 6.4 怎么回 | 采纳：163 回 in-band 1006（不带 parameters）、164 回空列表，`InlineHandlers`；6.5 替换（M22） |
+| Q8 163 / 164 在 6.4 怎么回 | 采纳：163 回 in-band 1006（不带 parameters）、164 回空列表，`InlineHandlers`；6.5 替换（M22）。6.5 已替换成真处理器，M22 关闭（§8.6） |
 | Q9 整队开战的结果怎么回到 team | 采纳：长挂异步 RPC `runTeamGather`，调用级超时 = 开战锁时长；回环测试实测挂 6 s、跨 3 个心跳周期不被掐断（§7.5） |
 | Q10 整队的 ticket id | 采纳：xm-team 每人一个 UUID |
 | Q11 PVE 组队人数的来源 | 采纳：`xm.match.pve-team-size-by-config-id`（缺省 `{1: 5}`），启动校验键在 Dungeon 表里；xm-team 经 `checkTeamMatch` 取，自己不配 |
@@ -1876,6 +1910,9 @@ xm-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 7. **再排**：A 立即再发 157 PVE_SOLO：6.3 的结算落地之前允许遇到 16000（在设定时限内重试，同 `tss.go:850-880`）；**不得**出现 16001（ready 残留必须已自愈）。
    受理之后这是 A 的**第二局**：同样直连、开自动、等到 150，否则 A 带着战斗锁进第 8 步会一直 16000。第一局结束后 A 发旧 battle_id 的 179 → 1005
    （落点记录还在 TTL 内，这个 1005 是 battle「房间不存在」的透传，不带 `parameters`，只断言 id）。
+   **第二局只要求「打完」，不要求打赢**（2026-10-08 订正，批次 6.5 的切片上暴露）：血量随第一局的结算带进第二局（基线同此），种子每局随机，第二局阵亡是合法结果；基线的 robot 也只对第一局断言胜利（`robot/features_battle_smoke.go:82-95`）。
+   落地的判据是 `BattleSmokeChecks.pveFinishedProblem`——外层与 settlement 的 battle_id 都是本局、`settlement.player_id` 是本人、两处 outcome 一致且是胜 / 负 / 平之一、真打过回合；第 6 步（新号的第一局）仍用 `pveVictoryProblem` 断言 SIDE_A_WIN。
+   6.4 落地时这一步多写了一条「必须 SIDE_A_WIN」，是 robot 的断言过严，不是服务端的问题，也不是两版差异。
 8. **1V1 与评分**：A 发 157 `{mode = 3, config = 0}`（第二局的锁未释放时按过渡态重试 16000），**收到 A 的受理应答之后** B 再发同样的 157（保证 A 是锚点）
    → 两人收到同一个 battle_id 的 177 / 143，143 的 actors 里 A（锚点）在 0 队、B 在 1 队 → 都开自动 → 都收到 150。
    收到 150 后最多等 10 s，查 `GET /admin/match/dev/rating/{pid}`：两人 games 各 +1；胜负局且 `total_rounds < 30` 时 Δ 互为相反数、`|Δ| = 16`（两个新号都是 1500）；平局或 `total_rounds ≥ 30` 时 Δ 都是 0。
@@ -1884,12 +1921,15 @@ xm-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
    A 再发 152(B)，B 接受 → A、B 都收到 154 true → 都收到同一个 battle_id 的 177 / 143（mode 6）；**此时、开自动之前** C 发 152(A) → 16009（A 持战斗锁）
    → 都开自动 → 都收到 150；C 下线后 A 发 152(C)：A 的锁在结算落地前仍在，会先命中第 3 行 16010，按过渡态重试，直到断言 16008。
 10. **163 / 164（6.4 临时）**：A 发 163 → `error_message{1006}`；A 发 164 → 空列表。
+    **批次 6.5 起这一步已删除**（M22 关闭）：163 / 164 的验收改由观战段承担——四个新号的 S0–S11 排在第 1 步的登录之前，S12 插在第 9 步的切磋里，S13 在第 11 步之后，见 spectate-spec §10.7。步骤号 `10-spectate-placeholder` 不再出现。
 11. **指标**：抓 18113，按**本轮的增量**、**带标签**断言（评审 ROBOT-3；原稿的「`gathers{outcome=success} ≥ 4`、`challenges` 有增长」没有判别力——第 9 步第一个动作「挑战自己 → 16007」就会让不带标签的切磋计数 +1，
     别的机器人的成功开局也能顶数）：`xm_match_gathers_total{outcome="success"}` 按 `mode` 拆成 `MATCH_MODE_PVE_SOLO` ≥ 2、`MATCH_MODE_1V1` ≥ 1、`MATCH_MODE_PVP_CHALLENGE` ≥ 1；
     `xm_match_battle_ticket_reissues_total{result="ok"} ≥ 1`；`xm_match_challenges_total` 的 `{stage=invite, result=ok}` ≥ 2、`{stage=respond, result=declined}` ≥ 1、`{stage=respond, result=accepted}` ≥ 1；
     `xm_match_rating_updates_total{outcome="applied"} ≥ 1`。
 12. **输出**：`BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… challenge_battle_id=…`（`a_turns` 与 `a_direct_turns` 同值）；失败输出 `BATTLE_SMOKE_FAIL step=… reason=…`，
     步骤号是 `1-login`、`2-reject-codes`、`3-queue-cancel`、`4-pve-solo`、`5-reissue`、`6-direct-fight`、`7-requeue`、`8-pvp-rating`、`9-challenge`、`10-spectate-placeholder`、`11-metrics`。6.5 再追加 B 侧观战与 `battle_smoke_cross_zone`。
+    6.5 已追加：结果行末尾多了 `spectate_battle_id=… b_spectate_turns=… b_direct_spectate_turns=… removed_ok=1 s12_ready_residue=0|1`，步骤号多了 `s0-…` 到 `s13-metrics`（两套编号不合并，观战段的步骤与判据在 spectate-spec §10.7）；
+    跨区 1V1 是独立场景 `battle-cross-zone`（spectate-spec §10.8）。
 
 **场景 `team` 升级**（`xm-robot/src/main/java/com/game/robot/scenario/TeamScenario.java:65`、`:88`、`:377-383` 现在断言 4027 / 4018；照 `tss.go:441-470` 升级，`team-spec` D16）：
 - **S7**：A（队长）与 B 组队，A 发 211(1) → 回包 STARTING；B 收到 213 MATCH_STARTED（A 不收）；两人收到同一个 battle_id 的 177 / 143 → 都开自动 → 都收到 150；两人都收到 213 MATCH_ENDED。
@@ -1910,10 +1950,11 @@ xm-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 **场景 `match-5v5`**（可选，10 个新号）：全员发 157 `{mode = 1, config = 0}` → 同一个 battle_id；评分相同，所以 143 的 actors 按弹出序蛇形分为 `0,1,1,0,0,1,1,0,0,1`；评分查询每人 games + 1。
 落地（`Match5v5Scenario`）：步骤 `1-login`、`2-queue`、`3-teams`、`4-fight`、`5-rating`；评分判据同第 8 步（全员赛前同分时 0 队每人 Δ 恰为 +16.00 / −16.00 / 0，1 队取相反数）；结果行 `MATCH_5V5_OK battle_id=… outcome=<枚举数值> rounds=…`。
 
-**两条使用上的注意**：1V1 / 5V5 的 config 0 队列全服共享，切片上同时有别的排队者时 `battle-smoke` 的第 3 / 8 步或 `match-5v5` 会失败；PVE 局都断言 SIDE_A_WIN，数值调整后可能要放宽。
+**两条使用上的注意**：1V1 / 5V5 的 config 0 队列全服共享，切片上同时有别的排队者时 `battle-smoke` 的第 3 / 8 步或 `match-5v5` 会失败；PVE 局都断言 SIDE_A_WIN，数值调整后可能要放宽
+（`battle-smoke` 第 7 步——同一个号的第二局——自 2026-10-08 起不再断言胜负，见上；新号的第一局仍断言）。
 场景的单测跑在按本稿手写的本机假服务端 `FakeMatchWorld` 上，它不依赖 xm-match，不是服务端行为的证明；服务端行为的证据是切片上的运行（文末「实现记录」与「最终验证」）。
 
-**跨版本**：Go robot `features` 模式的战斗段（JoinQueue PVE_SOLO → `FEATURES_BATTLE_OK`）在 6.3 结算落地后对 Java 跑；`team_smoke` S7 / S8 对 Java 跑；`battle_smoke`（含 WatchBattle）与 `battle_smoke_cross_zone` 归 6.5。（6.4 没有做跨版本运行——用基线 Go robot 打 Java 服务端；验收用的是 Java robot。）
+**跨版本**：Go robot `features` 模式的战斗段（JoinQueue PVE_SOLO → `FEATURES_BATTLE_OK`）在 6.3 结算落地后对 Java 跑；`team_smoke` S7 / S8 对 Java 跑；`battle_smoke`（含 WatchBattle）与 `battle_smoke_cross_zone` 归 6.5。（6.4 没有做跨版本运行——用基线 Go robot 打 Java 服务端；验收用的是 Java robot。6.5 同样没有跑：本机没有 Go 工具链，spectate-spec §10.9。）
 
 ### 15.6 交付清单（随 6.4 提交）
 
@@ -2290,7 +2331,7 @@ xm-gate 214、xm-gateway 90、xm-data 305、xm-robot 400。GitHub Actions：`11d
 **xm-gate / xm-robot**
 
 - `BackendReconnectTest` 含一个 5 s 的否定时间窗与同端口重新导出，Linux 上若偶发失败先看端口复用或时间窗。`GateConfiguration.gateNode` 把七个引用交给 `backends()` 的位置对应关系靠反射核对形参名钉住。
-- robot：`TeamScenario` 的 S0–S6、S9 没有假服务端覆盖；PVE 局都断言 SIDE_A_WIN；`match-activity` 的进场次序只是放大时间余量；162 应答的新检查在「多人局里本人发出 162 时 150 还没到本端、但服务端已因回合超时把这一局打完并关了连接」这种少见时序下可能误报。
+- robot：`TeamScenario` 的 S0–S6、S9 没有假服务端覆盖；PVE 局都断言 SIDE_A_WIN（`battle-smoke` 第 7 步的第二局已随 6.5 改成只要求打完，§15.5）；`match-activity` 的进场次序只是放大时间余量；162 应答的新检查在「多人局里本人发出 162 时 150 还没到本端、但服务端已因回合超时把这一局打完并关了连接」这种少见时序下可能误报。
 
 ### 给 6.5 与 4.6 的接口与义务
 
@@ -2301,6 +2342,22 @@ xm-gate 214、xm-gateway 90、xm-data 305、xm-robot 400。GitHub Actions：`11d
 - 要动的地方：删掉 `InlineHandlers` 里 163 / 164 两个临时处理器与 `MatchTips` 里的临时应答，换成自己的处理器（非 inline；163 要走虚拟线程的话可能要扩 `MatchMethodHandler` 并调整执行器）；
   删掉 `MatchConfiguration.gatherHooks()` 这个 bean 方法、提供自己的 `GatherHooks`；`RedisKeys` 加观战键（`matchWatching` / `matchWatchable`）；`BattleNodes.lookup` 需要按请求预算收短时加截止参数；
   停机序列在「排空 `match-worker`」之后加「有界等待在途 163 → 停清扫器」；关闭 M22。现状逐条对照见 spectate-spec §4.11。
+
+**6.5 的落地情况（2026-10-08；逐条回到代码核对过，细节见 spectate-spec 的正文与实现记录）**
+
+- 落点记录与 `PlacementStore` —— **6.5 已做：**观战直接复用它作观战记录，没有另建键；163 换场读旧场落点用 `PlacementStore.read`。落点 HASH 的字段名与损坏判据抽成了 `placement.PlacementRecords`，`RedissonPlacementStore` 与观战存储共用
+  （179 仍只看 `pb`；观战读路径另把「`a` 字段缺失或与消息里的 attempt 不一致」也算损坏）。观战存储对落点只读，外加两种有条件的删除（按 attempt 守护的剔除、过期剔除）与「attempt 一致才公开」。
+- `PlacementDialer` / `PlacementClients` —— **6.5 已做：**观众 RPC（`spectate.DefaultObserverDialer`）经它发。6.5 给接口加了带硬截止的重载 `dial(placement, timeout, Deadline hardStop, call)`：到点一律按「没调通、不判死」返回；不带截止的旧重载（179）行为不变。
+- `TicketReader` —— **6.5 已做：**只用于 163 登记成功之后的复查（读失败按无票）；入口与抢标记时的「有没有票」在观战存储的脚本里对票据键做 `EXISTS`（原子性只能在脚本里做）。
+- `MatchBudgets.GATHER_CREATE_STAGE_WORST_MS` —— **6.5 已做：**`SpectateRules.roomMayBeCreating` 用它判建房窗口。`MatchBudgets` 另增补了一组观战常量（§10.1 表下）。
+- `GatherHooks.beforePrepare / onStarted` —— **6.5 已做：**`spectate.SpectateGatherHooks`（`WatchableConfiguration.gatherHooks`）；调用位置没有动。`MatchConfiguration.gatherHooks()` 已删，仍不带条件装配。
+- 删 `InlineHandlers` 里的两个临时处理器与 `MatchTips` 的临时应答 —— **6.5 已做：**`InlineHandlers` 只剩 156 / 154；`MatchTips.watchUnavailable` 与 `MatchTip.FEATURE_UNAVAILABLE` 已删。真处理器是 `spectate.WatchBattleHandler`（163）与 `ListWatchableHandler`（164），都非 inline。
+- 「163 要走虚拟线程的话可能要扩 `MatchMethodHandler`」—— **6.5 已做：**`MatchMethodHandler.executor()`（缺省 null = `match-worker`），派发器按它投递、拒收走 `onOverload()`（§9.9）；163 的执行器是 `spectate.SpectateExecutor`。
+- `RedisKeys` 加观战键 —— **6.5 已做：**`matchWatching(playerId)` → `xm:{match}:watching:<pid>`，`matchWatchable()` → `xm:{match}:watchable`（§9.4）。
+- `BattleNodes.lookup` 加截止参数 —— **6.5 已做：**`lookup(nodeId, instanceId, Deadline)`，至多等 `min(1 s, 剩余)`，已过不读、回 ERROR；旧签名不变。
+- 停机序列 —— **6.5 已做，但与这里写的不同：**「等在途 163」不是串在「排空 `match-worker`」之后，而是与它**并行**（否则 `stop()` 里这几步最坏 25 s），随后停清扫器（当场中断）；见 §9.8。
+- 关闭 M22 —— **6.5 已做**（§8.6、§13）。
+- 6.5 没有做、仍留给后续批次的：179 改成不占工作线程（钩子已有，§9.3）；直连客户端缓存「锁内摘表、锁外销毁」（带硬截止的直拨管不到 `NodeClientCache` 清扫占锁的那一小段，spectate-spec 实现记录的遗留，归 7.6）。
 
 **给 4.6（帮会活动，xm-guild 是调用方）**——两条义务，都还没有落到代码里：
 

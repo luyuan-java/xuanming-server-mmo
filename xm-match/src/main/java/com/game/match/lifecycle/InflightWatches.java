@@ -7,7 +7,7 @@ import java.time.Duration;
  * （每个请求一条虚拟线程 + 在途上限，spectate-spec §4.9），排空工作池等不到它，所以单独要这个口。观战包把自己的执行器做成这个接口的 bean
  * （一个进程恰好一个）；上下文里没有这个 bean 时进程拒绝启动。
  *
- * <p><b>契约</b>（spectate-spec §4.11；lead 裁决 4）：
+ * <p><b>契约</b>（spectate-spec §4.9；lead 裁决 4）：
  * <ul>
  *   <li>{@link #awaitIdle} 在停机线程之外的一条辅助线程上被调用，与「排空 {@code match-worker}」<b>并行</b>；调用时 Dubbo 已撤导出，
  *       不会再有新的 163 进来。</li>

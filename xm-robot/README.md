@@ -21,14 +21,22 @@
 
    ```bash
    export XM_MYSQL_PASSWORD=... XM_GATE_TOKEN_SECRET=... XM_LOGIN_DEV_PASSWORD=... XM_NODE_LINK_SECRET=... XM_DUBBO_SECRET=...
-   tools/local/start-slice.sh
+   tools/local/start-slice.sh                      # 单 zone、单 scene：13 个进程
+   XM_SCENE_NODES=2 tools/local/start-slice.sh     # 区 1 再起一个 scene 节点 xm-scene-2（cross-node 等场景用）
+   XM_ZONES=2 tools/local/start-slice.sh           # 再起区 2 的 xm-scene-z2 与 xm-gate-z2，共 15 个进程（battle-cross-zone 用）
    ```
+
+   `XM_ZONES`（1 / 2，缺省 1；只有 `start-slice.sh` 读，可与 `XM_SCENE_NODES=2` 同用）= 2 时，在 `SERVICES` 的十三项之外再起区 2 的两个实例：
+   `xm-scene-z2`（节点链路 21010、资产通道 21110、管理端口 18115）与 `xm-gate-z2`（客户端 11010、管理端口 18123），其余进程两个区共用。
+   区 2 的 scene / gate 节点号也是 1 号（节点号按区分配，与区 1 同号是有意的）。区 2 在区服列表里的状态由脚本跟着 `XM_ZONES` 改——=2 时置为 OPEN（库里还没有就建出来），
+   =1 时置为维护——脚本等 `GET /api/server-list` 反映出来才报「全部就绪（场景节点 N 个、区 M 个）」。所以回到单 zone 切片后区 2 显示 MAINTENANCE 是预期的；手工改过的区 2 状态下次启动会被覆盖。
 
 2. 同一个 shell 里（探针只读 `XM_LOGIN_DEV_PASSWORD`，与 xm-login 相同；口令不接受命令行传入）：
 
    ```bash
    java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar smoke                       # 3 个账号 robot_java_0001..0003
    java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar smoke --count 10
+   java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar smoke --zone 2              # 双 zone 切片（XM_ZONES=2）：区 2 能登录、进场
    java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar movement                    # 每次新账号 robot_java_mv<时间标签>_a / _b
    java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar movement --expect-jump correct
    java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar --help
@@ -58,7 +66,7 @@ Windows 注意：
 | `--expect-jump` | `XM_ROBOT_EXPECT_JUMP` | `auto` | `auto` 纠偏或 fail-open 都接受 / `correct` 必须回 137 / `accept` 必须原样接受 |
 
 上表只列 smoke / movement 用到的选项；其余子命令的选项（管理端口地址、`--expect-dev`、`--slow`、`--crash-*` 等）以 `--help` 为准，
-battle-settle、battle-smoke / match-activity / match-5v5（`--match-admin-url`）与 rollback 用到的在下面各自的小节里说明。
+battle-settle、battle-smoke / match-activity / match-5v5（`--match-admin-url`）、battle-cross-zone（`--visit-zone`）与 rollback 用到的在下面各自的小节里说明。
 
 退出码：`0` 全部检查通过；`1` 有检查失败或流程中断；`2` 参数错误。
 
@@ -173,6 +181,8 @@ tools/local/battle-crash-window.sh <变体> -- --run-tag t1   # 「--」之后�
   要等于脚本的 `ROBOT_CRASH_REVISION`，jar 不能比 xm-robot 的源码 / pom 旧。
 - `scene-after-150` 只支持单 scene 切片（`XM_SCENE_NODES=1`）；`battle-after-store` 两种切片都行，第二个 scene 节点在跑时脚本把两个
   管理端口都传给 `--scene-metrics-url`。
+- 双 zone 切片（`XM_ZONES=2`）上两个变体照常能做，但只在区 1 上做：robot 必须登录区 1（缺省）；「--」之后给了 `--zone`、或设了 `XM_ROBOT_ZONE` 而取值不是 1 的，同样在动手之前拒绝。
+  区 2 的两个实例（`xm-scene-z2`、`xm-gate-z2`）脚本不杀、不重启、不检查。
 
 脚本的退出码：`0` 两个阶段都通过；`1` 有检查失败或流程中断；`2` 用法错误或前置不满足。robot 的输出在
 `run/logs/battle-crash-window-{arm,verify}.log`，被杀进程的日志另存为 `run/logs/<实例名>.before-kill.log`。robot 没到断点就退出、
@@ -193,10 +203,11 @@ robot 每个阶段结尾写一行 `BATTLE_CRASH_OK variant=… phase=… battle_
 延后（零副作用），把「已落库、未应用」的状态撑到 battle 被杀，然后用 95 解封，等 reaper 在期限 + 10 s 时应用。
 两个变体都拿金币当「恰好一次」的见证：这一局必须打赢且 gold_gain > 0，否则 arm 停在 `fight` 步、不写状态文件，脚本不杀任何进程。
 
-**battle-smoke**（批次 6.4 匹配端到端，match-spec §15.5；对应基线 `robot/battle_smoke_scenario.go` 的 A 侧，另加排队语义、补签、1V1 评分与切磋；
-三个新账号 `前缀 + bm + 标签 + _a / _b / _c`）。全程经 gate → xm-match 真排队，不用 dev 建房接口；评分与指标经 xm-match 的管理端口读。
+**battle-smoke**（批次 6.4 匹配端到端 + 批次 6.5 观战段，match-spec §15.5、spectate-spec §10.7；对应基线 `robot/battle_smoke_scenario.go`——匹配段是它的 A 侧，
+观战段是它的 B 侧——另加排队语义、补签、1V1 评分、切磋，以及重看、观众补签、观战中排队、开局清退）。匹配段三个新账号 `前缀 + bm + 标签 + _a / _b / _c`（A / B / C），
+观战段另用四个 `_w / _x / _y / _z`（SA 参战、SB 指定观战、SC 列表与随机观战、SD 第二局参战），两段互不牵连。全程经 gate → xm-match 真排队，不用 dev 建房接口；评分与指标经 xm-match 的管理端口读。
 前提：切片带 xm-match、xm-battle 与 xm-scene，Kafka 就绪（评分靠 xm-battle 发的对局结果），dev 运行模式，运维令牌（同 battle-settle：环境变量
-`XM_ADMIN_TOKEN` 或切片脚本生成的 `run/xm-admin-token`，所以要从仓库根目录运行）。
+`XM_ADMIN_TOKEN` 或切片脚本生成的 `run/xm-admin-token`，所以要从仓库根目录运行）。单 zone 切片即可；双 zone 切片上照常在区 1 跑。
 
 ```bash
 java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar battle-smoke
@@ -205,9 +216,40 @@ java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar battle-smoke --match-admin
 
 | 选项 | 环境变量 | 缺省 | 说明 |
 |---|---|---|---|
-| `--match-admin-url` | `XM_ROBOT_MATCH_ADMIN_URL` | `http://127.0.0.1:18113` | xm-match 管理端口：dev 接口 `GET /admin/match/dev/rating/{pid}`、`POST /admin/match/dev/activity-battle` 与指标；battle-smoke / match-activity / match-5v5 共用 |
+| `--match-admin-url` | `XM_ROBOT_MATCH_ADMIN_URL` | `http://127.0.0.1:18113` | xm-match 管理端口：dev 接口 `GET /admin/match/dev/rating/{pid}`、`POST /admin/match/dev/activity-battle` 与指标；battle-smoke / battle-cross-zone / match-activity / match-5v5 共用 |
 
-步骤（括号里是结果行用的步骤名）：
+两套步骤编号不合并：观战段用 S0–S13，匹配段沿用 6.4 的第 1–12 步（原第 10 步——6.4 期间 163 / 164 的临时应答——已随观战落地删除）。实际执行次序：
+第 1 步前半（核对运维令牌、抓 xm-match 指标作基数）→ 观战段 S0–S11 → 第 1 步后半（A、B、C 登录）→ 第 2–9 步（S12 的两半都在第 9 步里）→ 第 11 步 → S13。
+结果行里的步骤名一律小写（括号里的就是）。
+
+观战段（四个号在这一段结束时就 LeaveGame 下线）：
+
+- S0（`s0-login`、`s0-list`、`s0-preclean`）：SC 发 164 `{limit = 0}` → 条数 ≤ 20、`created_at_ms` 不增、都没过期（创建不到 360 s；对 robot 本机时钟两头各留 5 s）。
+  随后**预清理**（只记观察、不参与判定）：已结束的战斗会在列表里留到创建满 360 s，前几遍留下的残留场会让 S8 的随机观战一再扑空——每轮发一条 164 `{limit = 50}` 加一条 163(0)（每次扑空都会懒剔除残留场），
+  直到列表空了为止，至多 30 轮；挑中别人的活战斗就 165 退出并停止清理。
+- S1（`s1-queued-watch`）：SA 发 157 `{mode = 4 PVE_SOLO, config = 1}` → 战斗 X → 直连、**不开自动**（屏障：X 靠 6 s 的回合超时活着，直到 S9 放行）；SA 自己发 163(X) → `{16014, 匹配中无法观战}`（持票，票据检查先于战斗锁）。
+- S2（`s2-list`）：SC 发 164 `{limit = 50}`，X 在列表里（开局公告先于登记进索引，不在时每 1 s 重试、上限 5 s）：`mode = 4`、`battle_config_id = 1`、`player_names` = [SA 的角色名]、`created_at_ms` 落在发 157 到收到 177 之间（±5 s）；再发 `{limit = 1}` → 至多一条。
+- S3（`s3-watch`）：SB 发 163(X) → 应答 `battle_id = X`、没有 `error_message`；大厅收到 177 `{role = 2}`，期限同 SA 的票、签名是 64 位小写 hex；直连上握手应答之后**紧跟** 161 `{observer_count = 1}`（冷却全空、没有 `self_items`）。
+- S4（`s4-rewatch`）：SB 再发 163(X)（重看同一场）→ 成功；重推的 177 经**直连**到达（有活直连时大厅公告直写），与第一条逐字节相同，随后再一条 161；大厅上 1 s 内没有新的 177，直连上没有 166、连接没有被关。
+- S5（`s5-reissue`）：SB 发 179(X) → assignment 与 177 逐字节相同（role 2）。
+- S6（`s6-queue-watching`）：观战中的 SB 排一条凑不成局的 1V1（config = 900000 + 标签的低 16 位，本轮独有）→ 受理，直连上 1 s 内没有 166（只排队不清退）；再发 163(0) → 16014；发 148(该票) 之后 153 → NOT_QUEUED。
+- S7（`s7-ghost`）：SC 发 163(不存在的 id) → `{16018, 该战斗不存在或已结束}`。
+- S8（`s8-random`）：SC 发 163(0)（随机；16017 每 1 s 重试、上限 10 s）→ 成功、`battle_id ≠ 0` → 177 `{role = 2}` → 直连 161（挑中的是 X 时 `observer_count = 2`）→ 在直连上发 165：应答成功 → FIN，**没有** 166。
+- S9（`s9-finish`）：放行屏障，SA 开自动打到 150；SB 的直连上 ≥ 1 条 158 → 166 `{FINISHED, outcome 同 SA 的 150}` → FIN；SB 的大厅连接上 139 / 158 / 161 / 166 都是 0 条（战斗帧只走直连）。
+- S10（`s10-ended`）：SB 再发 163(X) → `{16018, 该战斗不存在或已结束}`；SC 的 164 里没有 X（上一条 163 已把它从索引里剔除）。
+- S11（`s11-evict`）开局清退：SD 开 PVE 战斗 Z、直连不开自动；SB 观战 Z（直连收到 161）后去排 PVE_SOLO → Z 的直连上 10 s 内收到 166 `{ONGOING, REMOVED}` 后 FIN，大厅收到新战斗 W 的 177 `{role = 1}` / 143（清退不阻断开局）；
+  之后 SD、SB 都开自动打完各自的局。四个号下线之前再等这两局的**大厅 150**（结算落到 scene 才推；上限是最后一条直连 150 之后 25 s，等不到只记观察）——否则参战者在结算应用之前离场，xm-battle 要对着离线玩家重投约两分钟才放弃。
+- S12 在匹配段第 9 步里，分两半：`s12-ready-residue`——**切磋开局之前**每 1 s 发一条 153，把 A 上一局 1V1 的 ready 票（开局成功后留 60 s；它在时 163 一律回 16014）等掉，直到 NOT_QUEUED；
+  过了「第 8 步收到 177 的时刻 + 62 s」仍是 READY、或是 QUEUED / MATCHED 记一条失败后继续。`s12-in-battle`——切磋局里（A、B 开自动之前）A **只发一次** 163(0)，必须是 `{16015, 战斗尚未结束,无法观战}`，再见 16014 直接失败。
+  不在切磋局里等 ready 票过期：切磋双方带着上一局 1V1 的结算血量进场，不开自动的切磋局可以只有 1 回合（6 s）。
+- S13（`s13-metrics`，场景末尾）：xm-match 指标本轮的增量——`xm_match_watch_battle_total` 的 `outcome="ok"` ≥ 4（S3、S4、S8、S11）、`not_found` ≥ 2（S7、S10）、`queued` ≥ 2（S1、S6）、`in_battle` ≥ 1（S12）；
+  `xm_match_spectate_evictions_total{reason="enter_gather",result="removed"}` ≥ 1。
+
+**屏障期的时间预算**：从 SA 收到 X 的 177 起，S1–S8 合计预算 30 s（正常约 6 s）。新号单人 PVE（Dungeon 1）最少打 7 回合，不开自动的 X 至少活 7 × 6 s = 42 s，预算比它短一个回合以上，脚本慢了先报的是超预算而不是「X 提前结束」。
+第一次超出记一条 `step=s<n>-budget` 的失败，之后照常往下跑；S2–S9 每步开始前看 SA 的直连，X 已经出了 150 或连接已关 → `step=s<n>-x-ended-early` 并中止观战段（匹配段照常跑）。
+等观众票 177 与 161 各 15 s，等收尾 166 120 s。不在 robot 里验的：16016（只在真并发下出现）、16017 的「全服没有可观战战斗」、16019，由 xm-match 的组件测试覆盖。
+
+匹配段：
 
 1. 登录（`1-login`）：A、B、C 进场；A 发 153 → NOT_QUEUED，两个秒数都是 0。
 2. 拒绝码（`2-reject-codes`）：157 `{mode = 2}` → 16002、`{mode = 5, config = 2}` → 16003；`error_code == error_message.id`、`parameters[0]` 逐字节、不带票号。
@@ -215,25 +257,76 @@ java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar battle-smoke --match-admin
 4. PVE_SOLO（`4-pve-solo`）：157 `{mode = 4, config = 1}` 受理 → 大厅**先 177 后 143**、同一 battle_id、票据签名形状、`expire_at_ms` ≈ 发起时刻 + 300 s（±5 s，对 robot 本机时钟）→ 153 是 MATCHED 或 READY。
 5. 补签（`5-reissue`）：A 发 179 → assignment 与 177 逐字节相同；非成员 C 发同一局 → 1005、无票；不存在的局 → 1005 `该战斗不存在或已结束`。
 6. 直连（`6-direct-fight`）：A 凭补签的票直连 → 战斗中再排 → 16000 → 开挂机（162 的应答必须无错误）打到 150：SIDE_A_WIN、settlement 指向本局本人、回合数 ≥ 1 → FIN。
-7. 再排（`7-requeue`）：A 立即再排 PVE_SOLO——结算落地之前的 16000 按过渡态重试，**不得**出现 16001（ready 残留必须已自愈）→ 第二局同样打完；旧局的 179 → 1005。
+7. 再排（`7-requeue`）：A 立即再排 PVE_SOLO——结算落地之前的 16000 按过渡态重试，**不得**出现 16001（ready 残留必须已自愈）→ 第二局同样直连、开挂机打到 150 后 FIN；旧局的 179 → 1005。
+   **第二局只要求「打完」，不断言胜负**：150 的外层与 settlement 一致、是胜 / 负 / 平之一、指向本局本人、回合数 ≥ 1。血量随上一局的结算带进下一局、种子每局随机，同一个号的第二局阵亡是合法结果
+   （阵亡后 scene 在结算时原地复活，后面的步骤不受影响）；基线 robot 也只对第一局断言胜利。
 8. 1V1 与评分（`8-pvp-rating`）：A 的受理应答回来之后 B 再排（A 是锚点）→ 两人同一 battle_id、A 在 0 队 B 在 1 队 → 都挂机打到 150 → 10 s 内经 dev 评分接口查到 games 各 + 1；
    胜负且不满 30 回合时两人的增量互为相反数、|Δ| = 16，平局或打满 30 回合时都是 0。
 9. 切磋（`9-challenge`）：挑战自己 16007 → A 挑 B，B 收到 156（发起者、账号名、过期时刻 ≈ 现在 + 60 s）→ C 挑 B 16011 → C 应答别人的邀请 16013（不消费）→ B 拒绝，只有 A 收到 154 false →
-   B 再应答同一条 16012 → A 再挑、B 接受 → 双方 154 true 与同一局的 177 / 143 → 开自动之前 C 挑 A → 16009 → 打完 → C 下线后 A 挑 C：越过过渡态 16010 直到 16008。
-10. 观战占位（`10-spectate-placeholder`）：163 → in-band 1006、164 → 空列表（6.4 的临时应答，观战的 match 侧归 6.5）。
+   B 再应答同一条 16012 →（S12 前半：先用 153 把 A 的 ready 票等掉）→ A 再挑、B 接受 → 双方 154 true 与同一局的 177 / 143 → 开自动之前 C 挑 A → 16009、A 发一次 163(0) → 16015（S12 后半）→ 打完 → C 下线后 A 挑 C：越过过渡态 16010 直到 16008。
+10. （已删除：6.4 期间这里断言 163 → in-band 1006、164 → 空列表的临时应答；观战的 match 侧随 6.5 落地，改由上面的观战段覆盖。）
 11. 指标（`11-metrics`）：抓 xm-match 的 `/actuator/prometheus`，按**本轮的增量、带标签**断言——`xm_match_gathers_total{outcome="success"}` 按模式 PVE_SOLO ≥ 2、1V1 ≥ 1、PVP_CHALLENGE ≥ 1；
     `xm_match_battle_ticket_reissues_total{result="ok"}` ≥ 1；`xm_match_challenges_total` 的 invite / ok ≥ 2、respond / declined ≥ 1、respond / accepted ≥ 1；`xm_match_rating_updates_total{outcome="applied"}` ≥ 1。
 
-结尾在报告之后写一行汇总：全部通过是 `BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… challenge_battle_id=…`，否则是
-`BATTLE_SMOKE_FAIL step=<第一条失败检查所在的步骤> reason=<检查名：细节>`。退出码照常是 0 / 1 / 2。
+结尾在报告之后写一行汇总（第 12 步）：全部通过是
+`BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… challenge_battle_id=… spectate_battle_id=… b_spectate_turns=… b_direct_spectate_turns=… removed_ok=1 s12_ready_residue=0|1`，
+否则是 `BATTLE_SMOKE_FAIL step=<第一条失败检查所在的步骤> reason=<检查名：细节>`（步骤名小写：`s3-watch`、`s5-budget`、`7-requeue`……）。退出码照常是 0 / 1 / 2。
+后五个字段是观战段的：`spectate_battle_id` 是战斗 X；`b_spectate_turns` / `b_direct_spectate_turns` 是 SB 在 X 上收到的观众回合帧数（观战帧只走直连，两个数相同；字段名同基线）；
+`removed_ok` 是 S11 的开局清退是否按预期发生；`s12_ready_residue` 是「切磋开局之前的 153 见到过 READY」（A 上一局 1V1 的 ready 票那时还没过期），0 与 1 都正常，只是观察值。
 
 节奏与注意（match-activity、match-5v5 与 team 的开战段同样适用）：
 
 - gate 对 match 的十个号都按缺省每秒 3 条限频，同一会话相邻请求隔 400 ms；过渡态（157 的 16000、152 的 16010 / 16009、211 的 4025 / 4026）每 1 s 重试、上限 20 s；等开战 30 s、等终局 120 s。
-  一次全失败的 battle-smoke 可能要几分钟才出结果。
+  一次全失败的 battle-smoke 可能要几分钟才出结果。观战段让一遍正常的 battle-smoke 多出约 2–4 分钟（X 要靠回合超时活过 S1–S8、S11 另打两局单人 PVE、S12 前半可能等 ready 票过期至多几十秒），外层脚本对单个场景设了时限的要放宽。
 - 各阶段独立：前一阶段中断时记失败并继续后面的阶段；收尾时给还连着的排队者各发一条 148(`""`)，免得中断的那一步把 6 小时的排队票留在队列里。
-- 1V1 / 5V5 的 config 0 队列全服共享：切片上同时有别的排队者时，第 3 / 8 步或 match-5v5 会失败。PVE 局都断言 SIDE_A_WIN，数值表调整后可能要放宽。
+- 1V1 / 5V5 的 config 0 队列全服共享：切片上同时有别的排队者时，第 3 / 8 步或 match-5v5 会失败。battle-smoke 里只有第 6 步（新号的第一局 PVE）断言 SIDE_A_WIN，数值表调整后可能要放宽；
+  第 7 步的第二局只要求打完（见上）。可观战索引也是全服共享的：切片上有别人的活战斗时，S8 的随机观战可能挑中别人的局（照常通过，只是 `observer_count` 不按 X 核对）。
 - 场景的单元测试跑在按规格手写的本机假服务端（`FakeMatchWorld`）上，它不依赖 xm-match，不是服务端行为的证明；服务端行为的证据是活切片上的运行。
+
+**battle-cross-zone**（批次 6.5 跨区 1V1，spectate-spec §10.8；对应基线 `robot/battle_smoke_cross_zone_scenario.go`，补上它的几处弱点并加跨区观众与第二局；
+三个新账号 `前缀 + xz + 标签 + _a / _b / _c`）。A 经 `--zone` 的 gate 登录，B 与观众 C 经 `--visit-zone` 的 gate 登录；xm-match 与 xm-battle 不分区，两个区的 gate 把匹配请求转给同一组 xm-match。
+前提：**`XM_ZONES=2` 的切片**（两个区各有 gate 与 scene，并且都在 gateway 的区服列表里显示 OPEN——切片脚本报「全部就绪」时已经满足），切片带 xm-match、xm-battle，Kafka 就绪，
+dev 运行模式，运维令牌（同 battle-smoke，从仓库根目录运行）。
+
+```bash
+XM_ZONES=2 tools/local/start-slice.sh
+java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar battle-cross-zone --zone 1 --visit-zone 2
+java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar battle-cross-zone --zone 2 --visit-zone 1    # 反过来：A 在区 2，B、C 在区 1
+```
+
+| 选项 | 环境变量 | 缺省 | 说明 |
+|---|---|---|---|
+| `--zone` | `XM_ROBOT_ZONE` | `1` | A 登录的区 |
+| `--visit-zone` | `XM_ROBOT_VISIT_ZONE` | `2` | 另一个区（≥ 1）：B 与观众 C 登录的区。只有 battle-cross-zone 要求它与 `--zone` 不同（相同是参数错误、退出码 2），别的子命令不看它 |
+| `--match-admin-url` | `XM_ROBOT_MATCH_ADMIN_URL` | `http://127.0.0.1:18113` | xm-match 管理端口（评分与指标），同 battle-smoke |
+
+步骤（括号里是结果行用的步骤名，一律小写）：
+
+- Z0（`preflight`）：`GET /api/server-list` 里 `--zone` 与 `--visit-zone` 两个区都是 OPEN，否则失败、不跳过（原因多半是切片没有用 `XM_ZONES=2` 起）。没有运维令牌同样在登录之前就失败（`z8-admin-token`），不白打一局。
+- Z1（`z1-login`）：A、B、C 顺序登录进场；两个区 assign-gate 给的 gate 端点不同（切片上是 11000 / 11010）。
+- Z2（`z2-baseline`）：抓 xm-match 指标与 A、B 的评分作基数。
+- Z3（`z3-queue`）：A 发 157 `{mode = 3 1V1, config = 1}`，**A 的回包到了** B 才发（A 一定是锚点）；两个回包都受理、票号是 UUID。
+- Z4（`z4-announce`）：两侧大厅上 177 都在 143 之前、同一个非 0 的 battle_id；两张票的 `host:port`、签发节点与实例相同，`player_id` 各是自己；143 里 A 在 0 队、B 在 1 队。
+- Z5（`z5-direct-watch`）：A、B 各自直连（握手的 battle_id 一致、补拉 140 成功），都不开自动；`--visit-zone` 的 C 发 163(该局) → 成功 → 177 `{role = 2}` 经那个区的 gate 到达 → 直连 → 161 `{observer_count = 1}`。
+- Z6（`z6-fight`）：A、B 开自动打到 150：两侧同一个终局（胜 / 负 / 平之一，不断言谁赢）、`total_rounds` 相同、直连回合数 ≥ 1、大厅上没有 139；C 收到 ≥ 1 条 158，然后 166 `{FINISHED, 同一个终局}` 后 FIN。
+- Z7（`z7-lobby-end`）：两侧各等**大厅**上这一局的 150（scene 应用结算之后才推，证明结算回到了各自所在区的 scene），上限是直连 150 之后 25 s。
+- Z8（`z8-rating`）：收到 150 后 10 s 内经 xm-match 的 dev 评分接口查到 games 各 + 1；胜负且不满 30 回合时两人的增量互为相反数、绝对值 16，平局或打满 30 回合都是 0（新号都从 1500 起）。
+- Z9（`z9-second-queue` / `-announce` / `-direct` / `-fight` / `-lobby-end` / `-rating` / `-battle`）：立即再排打第二局（16000 按过渡态每 1 s 重试、上限 20 s，**不得**出现 16001），重复 Z4、Z6、Z7 与评分，不带观众；
+  第二局的 battle_id 与第一局不同、games 再各 + 1。它覆盖「连续对局」的三处：0 血带入下一局、ready 残留挡住再排、把上一局迟到的 150 当成本局的。
+- Z10（`z10-metrics`）：xm-match 指标本轮的增量——`xm_match_gather_zone_mix_total{mix="cross"}`（对 `mode` 求和）≥ 2、`xm_match_watch_battle_total{outcome="ok"}` ≥ 1。
+- Z11（`z11-leave`）：三人 LeaveGame。收尾（含失败路径）给 A、B 各发一条 148(`""`)，免得把排队票留在全服共享的队列里凑走下一遍的 A。
+
+结果行：全部通过是
+`CROSS_ZONE_MATCH_OK battle_id=… zone_a=… zone_b=… a_turns=… b_turns=… a_direct_turns=… b_direct_turns=… observer_zone=… c_spectate_turns=… second_battle_id=…`
+（前七个字段与基线同名同序；回合帧只走直连，所以 `*_turns` 与 `*_direct_turns` 相同），否则是 `CROSS_ZONE_MATCH_FAIL step=… reason=…`。除纯核对之外各步都是「不通过即中止」。
+
+注意：
+
+- 1V1 的 1 号配置队列全服共享（Unity 客户端的 1V1 也排它）：切片上同时有别的客户端或 robot 在排它时，A 或 B 会被凑走，场景在 Z4 失败。它与 battle-smoke 的 1V1（config 0）分开，两个场景并行不会互相凑走对手。
+- 区 2 的 scene / gate 节点号与区 1 一样是 1 号——这正是场景要验的形态：只按节点号寻址的代码会把区 2 玩家的公告、确认、结算送到区 1 的同号节点（被实例过滤丢掉），表现为等不到 177 / 大厅 150。
+  失败时先看 `run/logs/xm-gate-z2.log`、`xm-scene-z2.log`、`xm-battle.log`、`xm-match.log` 的 ERROR。
+- 角色的归属区：5.4（跨 zone 传送与归属区路由）还没有做，从区 2 进来的新号归属区记成 1；1V1 不读归属区，不影响本场景，「角色列表里的 zone_id」没有断言。
+- 节奏与时限同 battle-smoke（相邻请求隔 400 ms、等开战 30 s、等终局 120 s、等观众票与 161 各 15 s）；场景的单元测试同样跑在 `FakeMatchWorld`（补了第二个区）上，不是服务端行为的证明。
 
 **match-activity**（批次 6.4 帮会活动开战的 dev 入口，match-spec §15.5、§7.1–§7.2；账号 `前缀 + ma + 标签 + _a / _b / _c`）。真正的调用方 xm-guild 随批次 4.6 接入，
 这里由 robot 经 xm-match 的 dev 管理口 `POST /admin/match/dev/activity-battle`（`--match-admin-url`）调同一个实现。前提：切片带 xm-match、xm-battle，dev 运行模式（prod 下这个口回 403，

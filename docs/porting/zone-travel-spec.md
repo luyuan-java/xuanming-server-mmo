@@ -822,6 +822,18 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 `tools/local/start-slice.sh` 加 `XM_ZONES`（1 或 2，缺省 1，行为与现在相同）。等于 2 时多起 zone 2 的 gate 与 scene；其余进程共用（都不分 zone，或按会话 / 归属区取 zone）。
 
+> **落地状态（2026-10-08）**：本小节的**切片脚本部分已由批次 6.5（观战与跨区 1V1）提前落地**——6.5 的 robot 场景 `battle-cross-zone` 需要两个区，而 5.4 还没有实施；落地的只有脚本与 robot 的 `--visit-zone` 选项，**不含 5.4 的任何生产代码**
+> （226 / 124、GO-5、X16 都还没有）。实际形态与下表有三处出入，以脚本与 spectate-spec §10.6 为准：
+> 1. **xm-gateway 的命令行不带播种参数**（下表 xm-gateway 一行的 `seed-zones[0] / [1]` 没有照做）：本机 JDK 启动器按 ANSI 代码页取命令行，中文区名到进程时已是「??」，而播种只在库里没有这个区时写、写了不再改。
+>    区 2 在区服目录里的那一行改由脚本经 xm-data 的运维接口管，**状态跟随 `XM_ZONES`**：=2 → `POST /admin/zones/2/open`（回 404 就 `POST /admin/zones` 建区，名字「二区」、`sort_order` 2）；
+>    =1 → `POST /admin/zones/2/maintenance`（回 404 就什么都不做）——免得单 zone 切片上留下一个没有 gate 的 OPEN 区。脚本等 `GET /api/server-list` 反映出来（=2 时要区 2 是 OPEN 且带 `load_level`）才报「全部就绪」。
+> 2. `stop-slice.sh` 的清单行没有加名字（xm-gate 的 `LocalSliceOrderTest` 逐项钉着），区 2 的两个实例在循环体里紧挨同类先停：xm-gate-z2 在 xm-gate 之前、xm-scene-z2 在 xm-scene-2 之前；它不读 `XM_ZONES`，只看 PID 文件。
+> 3. 第三个脚本 `battle-crash-window.sh` 也同步了（它与 `start-slice.sh` 的函数、端口表逐字钉着）：故障变体只在区 1 上做，robot 要登录的区不是 1 时拒绝。
+>
+> 端口与关键参数同下表：xm-scene-z2 链路 21010 / 资产通道 21110 / 管理 18115（另带 `--xm.scene.scene-manager-url`，等区 2 的主世界频道铺好），xm-gate-z2 客户端 11010 / 管理 18123；两者的节点号按 zone 租约也是 1 号。
+> `XM_ZONES` 只有 `start-slice.sh` 读，其它值退出码 1；可与 `XM_SCENE_NODES=2` 同用。单 zone 13 个进程，双 zone 15 个。
+> 「顺带解锁」的组队 X1 / X2 与帮会第 4 步的跨区步骤**没有**随 6.5 打开，仍归 5.4。X16 合入之前，双 zone 切片上从区 2 进来的新号归属区会记成 1（下表 xm-login 一行）。
+
 | 进程 | zone | 端口（客户端 / 链路 / 资产 / 管理） | 关键参数 |
 |---|---|---|---|
 | xm-scene-manager | 共用 | Dubbo 20882 / 管理 18102 | 继承 `XM_GATE_TOKEN_SECRET`（脚本已要求，`:23`）；领导者按 `xm:world:zones` 自动竞选 zone 2（`RedisKeys.java:279`） |
@@ -831,7 +843,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 | xm-gate-z2 | 2 | 11010 / — / — / 18123 | `--xm.zone-id=2 --xm.gate.client-port=11010 --server.port=18123`；节点号也会是 1（按 zone 租约），用来测 MZ7 |
 | xm-scene（+ 可选 xm-scene-2） | 1 | 21000 / 21100 / 18104（21001 / 21101 / 18114） | 不变（5.2 的 `XM_SCENE_NODES`，`:72-103`） |
 | xm-scene-z2 | 2 | 21010 / 21110 / 18115 | `--xm.zone-id=2 --xm.scene.link-port=21010 --xm.scene.asset-rpc-port=21110 --server.port=18115 --xm.scene.scene-manager-url=…`；等 zone 2 的 `xm_scene_channels{state="active"} ≥ 1` |
-| friend / chat / team / guild / trade / data / battle | 共用 | 不变 | 不分 zone |
+| friend / chat / team / guild / trade / data / battle / **match** | 共用 | 不变 | 不分 zone。xm-match（6.4；Dubbo 20888 / 管理 18113）全服一份：两个区的 gate 都用缺省的 `xm.dubbo.match-url` 指向同一个 xm-match（spectate-spec §4.10） |
 
 - 已占用 / 已规划的管理端口：18081、18101–18112（18105 是 xm-gateway 管理口、18112 是 6.2 的 xm-battle）、18113（6.4 xm-match，`match-spec.md:35`、`:916`）、18114（xm-scene-2）；
   5.1 规划了 18124 / 21002。zone 2 用 18123 / 18115、21010 / 21110、11010。
@@ -1165,6 +1177,10 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 ### 11.9 多 zone 切片用例（`XM_ZONES=2`，手工 / IT，不进 CI）
 
+> **2026-10-08 登记**：`XM_ZONES=2` 的切片脚本已由批次 6.5 落地（§5.13 的落地状态），但下表的 MZ1–MZ18 都依赖 5.4 的生产代码，**一条都还没有跑**。
+> 关于「进不进 CI」：本节的用例（含故障注入）仍是手工 / IT、不进 CI。spectate-spec Q22 说的是另一件事——等 7.1b 的整栈 compose 就位后，把 robot 的 `battle-cross-zone`（以及 5.4 同意时的 `travel`）放进两 zone 覆盖文件里跑；
+> 6.5 没有做这一项（`deploy/compose/` 里还没有整栈文件），前置清单留给 7.1b。两处说法不冲突：进 CI 的只是 robot 的正常路径场景，本表不进。
+
 | 编号 | 用例 | 期望 |
 |---|---|---|
 | MZ1 | z1 玩家 226 `{2, 0}` | 应答 `{0}` → 旁人 51 → 124：票据 `zone_id = target_zone_id = 2`、`player_id` 本人、地址 = z2 gate → 新连接 48 / 26 → 79（z2 的 scene_id）；库里 epoch +2、`owner_released = 0`；`xm:location` = (E+2, `o`, z2) |
@@ -1197,6 +1213,10 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 - 基线自身从没跑通过（§0.1），失败时先分清是 Java 的问题还是基线 robot 的问题。
 
 ### 11.11 robot：Java `travel` 场景（新增 `RobotOptions.Scenario.TRAVEL`，子命令 `travel`）
+
+> **2026-10-08 登记**：选项 `--visit-zone`（环境变量 `XM_ROBOT_VISIT_ZONE`，缺省 2，必须 ≥ 1）**已存在**——批次 6.5 为 `battle-cross-zone` 加的（`RobotOptions` 记录的 `visitZoneId`），帮助文本写的是「另一个区」：
+> 目前只写了 `battle-cross-zone` 的用途（B 与观众 C 登录的区；只有这个子命令要求它与 `--zone` 不同，否则参数错误、退出码 2），`travel` 落地时补上「travel 的目的区」并让 `travel` 也做同样的校验。
+> T0「缺区报『需要 XM_ZONES=2』后失败」的写法 `battle-cross-zone` 的 Z0 已照做（`step=preflight`）。本小节的 `travel` 场景本身（`Scenario.TRAVEL`、`RedirectFollower`、226 / 124 的消息号）还没有实现。
 
 **入口**：`java -jar xm-robot.jar travel --zone 1 --visit-zone 2 [--travel-scene-config 0] [--dwell 35s]`。账号按现有场景的命名惯例 `<prefix>tv<runTag>_a`（旅客 A）、`<prefix>tv<runTag>_b`
 （旁观者 / 冒用者 B；对照 `CrossNodeScenario.accountName` = `prefix + "xn" + runTag + "_" + role`、`TeamScenario.accountName` 的 `tm`），每轮新号、首登即在 home 区建角，

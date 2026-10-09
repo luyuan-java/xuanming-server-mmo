@@ -171,7 +171,7 @@ SERVICES=(
   "xm-login 20881"
   "xm-friend 20883"
   "xm-chat 20884"
-  "xm-match"              # 匹配：先等 Dubbo 20888，再等凑单与评分消费起来（见 wait_match_ready）。它是 xm-team 与 xm-gate 的
+  "xm-match"              # 匹配：先等 Dubbo 20888，再等凑单、观战清扫与评分消费起来（见 wait_match_ready）。它是 xm-team 与 xm-gate 的
                           # Dubbo 提供方，必须排在两者之前（文件头「启动次序的一条硬约束」）
   "xm-team 20885"
   "xm-guild 20886"
@@ -407,7 +407,7 @@ wait_battle_ready() {
 # xm-match 就绪（批次 6.4，match-spec §9.8）：进程按「密钥 / 配置表 / 预算检查 → 占发号租约 → 建评分表 → 导出 Dubbo（20888）→ 起凑单 →
 # 起评分消费 → 打就绪日志」的顺序起来，任何一步失败即退出。只等端口不够：端口在导出 Dubbo 那一步就开了，而凑单或评分消费起不来时
 # 进程随即关闭上下文退出——只看端口会把一个正在退出的进程报成就绪。所以端口能连之后再等日志里出现「match 已就绪」
-# （xm-match 的 MatchLifecycle 在凑单与评分消费都起来之后打这一行；改那行日志的措辞要同步这里）。
+# （xm-match 的 MatchLifecycle 在凑单、观战清扫与评分消费都起来之后打这一行；改那行日志的措辞要同步这里）。
 # 不等的两样：Kafka（不可达时评分消费后台每 30 s 重试，不拦启动）；xm-battle（它排在后面，就绪之前凑单暂停、队列原样保留）。
 wait_match_ready() {
   local name=xm-match deadline
@@ -419,7 +419,7 @@ wait_match_ready() {
       return 1
     fi
     if (( SECONDS > deadline )); then
-      echo "[$name] 端口 $MATCH_RPC_PORT 已开，但 60s 内日志里没有出现「match 已就绪」（凑单 / 评分消费没起来？看 run/logs/$name.log）" >&2
+      echo "[$name] 端口 $MATCH_RPC_PORT 已开，但 60s 内日志里没有出现「match 已就绪」（凑单 / 观战清扫 / 评分消费没起来？看 run/logs/$name.log）" >&2
       return 1
     fi
     sleep 1
@@ -444,7 +444,7 @@ for entry in "${SERVICES[@]}"; do
   if [[ "$name" == "xm-match" ]]; then
     launch xm-match xm-match
     wait_match_ready
-    echo "  xm-match 就绪（Dubbo $MATCH_RPC_PORT、管理端口 $MATCH_MGMT_PORT，凑单与评分消费已启动）"
+    echo "  xm-match 就绪（Dubbo $MATCH_RPC_PORT、管理端口 $MATCH_MGMT_PORT，凑单、观战清扫与评分消费已启动）"
     continue
   fi
   launch "$name" "$name"

@@ -20,7 +20,7 @@ import org.springframework.context.event.SmartApplicationListener;
 import org.springframework.core.Ordered;
 
 /**
- * xm-match 后台件的启停次序（match-spec §9.8；观战的两步见 spectate-spec §4.11）。一个类把次序钉死，三个挂点都是 Spring / Dubbo 的标准时机：
+ * xm-match 后台件的启停次序（match-spec §9.8；观战的两步见 spectate-spec §4.9）。一个类把次序钉死，三个挂点都是 Spring / Dubbo 的标准时机：
  *
  * <table>
  *   <caption>启动（前 6 步是 bean 的创建次序，见 {@code MatchConfiguration}；任一步失败即拒绝启动）</caption>

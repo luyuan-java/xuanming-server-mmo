@@ -289,7 +289,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-match-service-queue、svc-battle-client-player（观战首帧 161 经 Kafka 推）
 - behavior: battle_id=0 随机观战；收到 161 NotifySpectateState 首帧才算进入观战；错误 kMatchSpectateWhileQueued / SpectateWhileInBattle / SpectateOffline / NoWatchableBattle / BattleNotWatchable / AlreadyWatching；补签只给参战者 / 观众（battle 本地核对名单并自签），客户端丢票或冷启动时用
 - internal: spectate:battle:{battle_id} 索引定位 battle 节点
-- java: missing
+- java: done（两批各做一段）— **179 RequestBattleTicket 随批次 6.4**（2026-10-08，规格 `docs/porting/match-spec.md` §4，提交见 git log「批次 6.4」）：xm-match `com.game.match.reissue.BattleTicketReissue` 按落点记录的地址直拨 battle 的 `issueBattleTicket`，判死规则是有意差异 M16。**163 WatchBattle / 164 ListWatchableBattles 随批次 6.5**（2026-10-08，规格 `docs/porting/spectate-spec.md` §3、§4，提交见 git log「批次 6.5」）：xm-match `com.game.match.spectate`（`WatchBattleHandler` / `ListWatchableHandler`），码与 `parameters[0]` 逐字节照搬，有意差异 W1–W20；6.4 期间 163 / 164 的临时应答（in-band 1006 / 空列表，M22）已关闭。gate 把 `MatchService` 的十个号都路由到 xm-match。**勘误**（spectate-spec §8.5 E4）：上面 depends on 的「161 经 Kafka 推」已过时——首帧 161 只走直连，随观众的直连握手应答之后下发；behavior 把 AlreadyWatching 列成一般的拒绝原因也不对——「已在观战」不拒绝（服务端先清退旧场再接新场），AlreadyWatching（16016）只有并发抢占观战标记这一个出口。internal 的 `spectate:battle:{battle_id}` 在 Java 是 6.4 的落点记录 `xm:{match}:battle:<id>`。robot `battle-smoke`（第 5 步的 179、观战段的 163 / 164 / 179）。
 - size: M
 - robot: robot-battle-smoke（B 观战跟看）
 - hazards: RequestBattleTicket 曾在 BattleClientPlayer 下，gate 收缩后搬到 match；号 179 归 MatchService
@@ -413,7 +413,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-match-service-queue、svc-match-service-spectate-ticket、svc-battle-client-player
 - behavior: 账号 robot_9001 / robot_9002；A 收到开战后先建直连再等「观战就绪屏障」才开自动（PVE 秒杀约 100ms，否则 B 扑空回 tip 5）；断言 B 的 battle_id = A 的、观战回合 ≥ 1、直连计数 ≥ 1、A 回合 ≥ 1；输出 BATTLE_SMOKE_OK / BATTLE_SMOKE_FAIL step=…，退出码 0 / 1；开战 30s、终局 120s 超时
 - internal: 无
-- java: missing
+- java: done（A 侧 2026-10-08 批次 6.4，规格 `docs/porting/match-spec.md` §15.5；B 侧观战段 2026-10-08 批次 6.5，规格 `docs/porting/spectate-spec.md` §10.7，提交见 git log「批次 6.5」）— xm-robot 子命令 `battle-smoke`（`com.game.robot.scenario.{BattleSmokeScenario,BattleSmokeChecks,SpectateSteps}`）。比基线多：排队语义与拒绝码、179 补签、1V1 评分、切磋（6.4 的第 1–11 步）；观战段 S0–S13 用四个新号——164 的条数 / 次序 / 摘要字段，163 的指定、重看同一场（重推的 177 经直连到达且逐字节相同）、随机、16014 / 16015 / 16018 的各个出口，观众直连的 161 → 158 → 166 → FIN 与 165，观战中可以排队，开局前被清退（166 REMOVED），以及 xm-match 的观战指标增量。每轮新建账号（不用固定的 robot_9001 / 9002）；结果行沿基线的 `BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=…`，追加 `pvp_battle_id / challenge_battle_id / spectate_battle_id / b_spectate_turns / b_direct_spectate_turns / removed_ok / s12_ready_residue`，失败行 `BATTLE_SMOKE_FAIL step=… reason=…`（步骤号小写）。同一个号的第二局 PVE 只要求打完、不断言胜负（血量随结算带进下一局，同基线）。**勘误**（spectate-spec §8.5 E3）：上面 behavior 的两处照抄了基线 `battle_smoke_scenario.go:70-72` 已过时的注释——①「B 扑空回 tip 5」：随机扑空回 16017、指定扑空回 16018；②「PVE 秒杀约 100ms」：现行表数值下单人 PVE 要打多个回合（基线运行记录 13–21 回合；Java 切片上新号实测 7–10 回合），屏障期间战斗靠 6 s 的回合超时推进。基线 Go robot 的 `battle_smoke` 没有对 Java 跑过（本机没有 Go 工具链）。
 - size: S（随战斗功能移植）
 - robot: 本身
 - hazards: 直连拨号失败即 FAIL，无经 gate 回落
@@ -425,7 +425,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-match-service-queue（跨 zone 匹配）、svc-battle-client-player、多 zone 部署
 - behavior: 断言 A / B 的 gate 地址不同（不同 zone 证据）、battle_id 相同、双方回合 ≥ 1、直连计数 ≥ 1；输出 CROSS_ZONE_MATCH_OK / FAIL；账号与 battle-smoke 错开防互顶
 - internal: 无
-- java: missing — Java 也无跨 zone
+- java: done（2026-10-08，批次 6.5，规格 `docs/porting/spectate-spec.md` §2、§10.8；提交见 git log「批次 6.5」）— xm-robot 独立子命令 `battle-cross-zone`（`com.game.robot.scenario.{BattleCrossZoneScenario,BattleCrossZoneChecks}`；`--zone` 是 A 的区，`--visit-zone` / `XM_ROBOT_VISIT_ZONE` 是 B 与观众 C 的区，两者相同即参数错误），需要 `XM_ZONES=2` 的本机切片（`tools/local/start-slice.sh`，批次 6.5 落地：多起区 2 的 xm-scene-z2 与 xm-gate-z2，其余进程共用，xm-match 全服一份）。服务端没有为跨区加任何生产代码：排队池全局、battle 池全局、scene 按 (zone, 节点号) 定位、推送按带 zone 的在线目录寻址；两个区的第一台 scene / gate 都是 1 号，同号碰撞由组件测试与本场景覆盖。比基线严：157 的回包、两张票指向同一节点与实例、两侧同一个终局、各自的大厅 150（结算回到各自区的 scene）、评分、跨区观众、同一次运行连打第二局；每轮新建账号（不用固定的 robot_9003 / 9004）。结果行 `CROSS_ZONE_MATCH_OK battle_id=… zone_a=… zone_b=… a_turns=… b_turns=… a_direct_turns=… b_direct_turns=…`（前七个字段与基线同名同序）后接 `observer_zone=… c_spectate_turns=… second_battle_id=…`；失败行 `CROSS_ZONE_MATCH_FAIL step=… reason=…`（步骤号小写）。没有做：角色列表里归属区的断言（等 5.4 的 X16）。**勘误**（spectate-spec §8.5 E6）：上面 behavior 的「直连计数 ≥ 1」准确的判据是 `state_replies ≥ 1 ∧ turn_results ≥ 1 ∧ battle_ends ≥ 1`（基线 `battle_smoke_cross_zone_scenario.go:300`）；另，基线配置里的「match 每 zone 一份」只是它的本地部署形态，不是需求（E7）。基线 Go robot 的 `battle_smoke_cross_zone` 没有对 Java 跑过（本机没有 Go 工具链）。
 - size: S
 - robot: 本身
 - hazards: 需要两个 zone 的 gate 同时在线

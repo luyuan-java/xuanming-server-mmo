@@ -96,7 +96,7 @@ public final class RedissonSpectateStore implements SpectateStore {
         requireNonEmptyMark(markValue);
         List<Object> keys = List.of(RedisKeys.matchTicket(playerId), RedisKeys.matchWatching(playerId));
         byte[][] args = {markBytes(markValue), ascii(Long.toString(MARK_TTL_MS))};
-        // 九段可变脚本里只有这一段挡不住「迟到的重发」（标记一旦被调用方回滚，就没有东西可比）：等到截止而命令还在路上时，
+        // 可变的几段脚本里只有这一段挡不住「迟到的重发」（标记一旦被调用方回滚，就没有东西可比）：等到截止而命令还在路上时，
         // 调用方当场发的那次释放可能先于 Redisson 重发的那一遍到达 Redis——等在途的命令有了结局，再按值释放一次
         long code = await("抢观战标记", d, () -> redis.getScript(ByteArrayCodec.INSTANCE).<Long>evalAsync(RScript.Mode.READ_WRITE, SpectateScripts.ACQUIRE,
                 RScript.ReturnType.INTEGER, keys, (Object[]) args), () -> releaseAsync(playerId, markValue));

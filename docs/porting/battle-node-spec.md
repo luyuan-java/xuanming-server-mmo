@@ -1202,6 +1202,8 @@ message BattleNodeInfo {
   3. **不作废**在打的房间：battle 不持有权威数据；票据带实例 id，同号的新进程不会接受旧票；结算与确认按玩家和 battle_id 寻址，与节点号无关；
   4. 房间按期限或胜负自然结束；房间数归零时打一行「可安全重启」；进程保持存活但不可分配。
   - **代价**：match 按 node_id 补签时，会找不到节点（回 1003），或者打到同号的新持有者（回 1005，客户端判 BattleGone）。
+    **勘误（spectate-spec §8.5 E8；2026-10-08）：这条代价已不成立**——6.4 的补签（179）与 6.5 的观众 RPC（163 的 AddObserver、清退的 RemoveObserver）都不按 node_id 找节点，而是按落点记录里的**地址直拨**（xm-match `placement.PlacementDialer`）：
+    丢了租约但还活着的节点照样补得到票、照样能观战；只有「请求确定没送达 + 目录里同号节点已换实例 + 原地址探测明确连不上」三条都成立才判这一局没了（match-spec M16、spectate-spec W5），超时永远不算。
   - 与 gate 不同：gate 丢租约必须关会话，因为会话号高位就是节点号（`arch` §6）；battle 没有这种复用冲突。
 
 ### 7.11 启动与停机（`BattleNode`）
@@ -1251,7 +1253,7 @@ message BattleNodeInfo {
 | `POST /admin/battle/dev/create` | 契约 `CreateBattleRequest` 字节 | `CreateBattleResult` 字节 | 快照里 `routing.gate_instance_id` 为空的，由接口补全路由，补不全回 422 并写原因、不建房：gate 部分（session / gate 节点与实例 / zone）取在线目录；scene 部分取位置记录（只认状态 `o`，同 `SceneAssetLocator`）+ scene 目录的 `instance_id`。房间标 `origin = DEV` |
 | `POST /admin/battle/dev/destroy` | `DestroyBattleRequest` | 204 | |
 | `POST /admin/battle/dev/issue-ticket` | `IssueBattleTicketRequest` | `IssueBattleTicketResponse` | 模拟 179 的 battle 侧 |
-| `POST /admin/battle/dev/add-observer` / `remove-observer` | `AddObserverRequest` / `RemoveObserverRequest` | 契约应答 / 204 | Q1 采纳时开放；add 同样从在线目录补 gate 路由 |
+| `POST /admin/battle/dev/add-observer` / `remove-observer` | `AddObserverRequest` / `RemoveObserverRequest` | 契约应答 / 204 | Q1 采纳时开放；add 同样从在线目录补 gate 路由（换算在 xm-discovery 的 `BattleRoutings.gatePart`，批次 6.5 起与 xm-match 的 163 共用）。**不写 match 的观战标记**（`xm:{match}:watching:<pid>` 只有 xm-match 的 163 才写）：经这个接口登记的观众，match 不知道他在观战——他随后排队 / 被挑战 / 整队开战时开局前的清退摘不到他，名单里的这一项要等该场结束或调 `remove-observer` 才清；要验「观战中开局被清退」请走真的 163。只在 dev / test 出现（spectate-spec Q14、§7.1 第 14 条） |
 | `POST /admin/battle/dev/gather`（批次 6.3） | `DevGatherRequest{mode = PREPARE_ONLY / CREATE, …}` | `DevGatherResponse`（422 也带 protobuf 体） | 经 `SceneBattleService` 真实备战、取 scene 出的快照；`CREATE` 再建房，房间标 `origin = DEV_GATHER`。形状、补偿取消与时限见 scene-battle-spec §7.18 与其实现记录 |
 | `POST /admin/battle/dev/cancel-prepare`（批次 6.3） | `{player_id, battle_id}` | 204 | 解析位置后调 scene 取消；玩家没有持有者节点回 422 |
 
