@@ -508,9 +508,11 @@ class MatchSkeletonContextTest {
         assertThat(scrape).as("读评分的线程池").containsPattern("executor_pool_core_threads\\{[^}]*name=\"match-db\"[^}]*} 8\\.0");
         assertThat(scrape).containsPattern("xm_match_rating_updates_total\\{[^}]*mode=\"MATCH_MODE_1V1\"[^}]*outcome=\"applied\"[^}]*} 1\\.0");
         assertThat(scrape).containsPattern("xm_match_rating_consumer_paused(\\{[^}]*})? 0\\.0");
-        assertThat(scrape).as("过滤器按路径归类了这两次调用")
-                .containsPattern("xm_match_admin_requests_total\\{[^}]*op=\"rating\"[^}]*status=\"200\"[^}]*} 1\\.0")
-                .containsPattern("xm_match_admin_requests_total\\{[^}]*op=\"rating\"[^}]*status=\"401\"[^}]*} 1\\.0");
+        // 过滤器在 finally 里计数，排在应答写回之后：紧跟着抓指标时刚才那一次可能还没计上，所以带上限地重抓
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(get("/actuator/prometheus", false).body()).as("过滤器按路径归类了这两次调用")
+                        .containsPattern("xm_match_admin_requests_total\\{[^}]*op=\"rating\"[^}]*status=\"200\"[^}]*} 1\\.0")
+                        .containsPattern("xm_match_admin_requests_total\\{[^}]*op=\"rating\"[^}]*status=\"401\"[^}]*} 1\\.0"));
     }
 
     @Test

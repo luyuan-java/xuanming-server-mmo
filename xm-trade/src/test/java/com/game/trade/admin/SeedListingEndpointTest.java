@@ -6,11 +6,13 @@ import static com.game.trade.admin.SeedEndpointTestApp.parse;
 import static com.game.trade.admin.SeedEndpointTestApp.post;
 import static com.game.trade.admin.SeedEndpointTestApp.seed;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.game.proto.trade.SeedListingResponse;
 import com.game.trade.rules.TradeTips;
 import com.game.trade.service.TradeServiceFixture;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -61,7 +63,8 @@ class SeedListingEndpointTest {
         assertThat(a.getMarketZone()).isEqualTo(TradeServiceFixture.ZONE_A);
         assertThat(b.getListingId()).as("不幂等").isEqualTo(5002);
         assertThat(f.store.insertedListings).hasSize(2);
-        assertThat(admin("200") - before).isEqualTo(2);
+        // 过滤器在 finally 里计数，排在应答写回之后：客户端拿到应答时这一次可能还没计上（CI 上红过一次：expected 2.0 but was 1.0），所以带上限地等
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(admin("200") - before).isEqualTo(2));
     }
 
     @Test

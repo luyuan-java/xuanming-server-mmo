@@ -5,9 +5,11 @@ import static com.game.trade.admin.SeedEndpointTestApp.TOKEN;
 import static com.game.trade.admin.SeedEndpointTestApp.post;
 import static com.game.trade.admin.SeedEndpointTestApp.seed;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.game.trade.service.TradeServiceFixture;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -40,7 +42,8 @@ class SeedListingEndpointProdTest {
         assertThat(f.store.calls).isEmpty();
         assertThat(f.homes.calls).isEmpty();
         assertThat(f.idCalls.get()).isZero();
-        assertThat(f.meters.get("xm.trade.admin.requests").tag("op", "seed_listing").tag("status", "403").counter().count())
-                .isEqualTo(2);
+        // 过滤器在 finally 里计数，排在应答写回之后：带上限地等（同 SeedListingEndpointTest）
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(
+                f.meters.get("xm.trade.admin.requests").tag("op", "seed_listing").tag("status", "403").counter().count()).isEqualTo(2));
     }
 }
