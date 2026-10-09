@@ -6,8 +6,12 @@ import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.ChannelKind;
 import com.game.api.proto.CreateInstanceRequest;
 import com.game.api.proto.CreateInstanceResponse;
+import com.game.api.proto.RedirectToZoneRequest;
+import com.game.api.proto.RedirectToZoneResponse;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
+import com.game.api.proto.SelectTravelTargetRequest;
+import com.game.api.proto.SelectTravelTargetResponse;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
@@ -189,6 +193,21 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
                     request.getPlayerId(), request.getKindValue(), e);
             return CompletableFuture.failedFuture(new IllegalStateException("实例取号暂不可用: " + e.getClass().getSimpleName()));
         }
+    }
+
+    /**
+     * 跨 zone 传送选目标（批次 5.4）。先行件 a 的占位：接口已冻结、实现还没接上，一律以异常完成（调用方按「调用失败」处理）。
+     * 由先行件 c 换成对 {@code TravelRouting} 的委托。
+     */
+    @Override
+    public CompletableFuture<SelectTravelTargetResponse> selectTravelTarget(SelectTravelTargetRequest request) {
+        return CompletableFuture.failedFuture(new IllegalStateException("5.4 施工中"));
+    }
+
+    /** 登录期重定向选目标（批次 5.4 的 GO-5）。占位，同 {@link #selectTravelTarget}。 */
+    @Override
+    public CompletableFuture<RedirectToZoneResponse> redirectToZone(RedirectToZoneRequest request) {
+        return CompletableFuture.failedFuture(new IllegalStateException("5.4 施工中"));
     }
 
     static AssignResult resultOf(AssignSceneResponse response) {

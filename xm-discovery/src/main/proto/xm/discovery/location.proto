@@ -11,11 +11,19 @@ option java_multiple_files = true;
 
 // 玩家的数据归属此刻（在线）或刚才（断线后的重连租约内）在哪个场景实例。login 进游戏时按它把玩家送回原场景实例
 // （对应 mmorpg scene_manager 的 PlayerLocation 与 player_locator 的断线租约；基线在 zone 内只用它定 zone，Java 回原实例，见 PARITY）。
+//
+// 待落点（批次 5.4 跨 zone 传送，docs/porting/zone-travel-spec.md §5.9）：状态 s = l、scene_node_id = 0、scene_id = 0，
+// zone_id = 目标 zone，scene_config_id = 要落的地图，owner_epoch = 源节点交出前持有的 epoch。它由源 zone 的节点写（唯一一种
+// zone_id 不是写者所在 zone 的记录），表示「这名玩家已交出并释放、正在去 zone_id 的路上，还没有落到任何实例」；TTL 跟着重定向票据走（至多 300 s）。
+// 读者按「s = l 且 scene_node_id = 0」认它：目标 zone 的 login 只取 scene_config_id 当想去的地图、不带实例；
+// 别的 zone 的 login 不被它牵引（按首登）；只看状态的读者（资产通道、组队）把它当普通的重连租约 = 此刻没有节点持有。
 message PlayerLocation {
   uint64 player_id = 1;
+  // 记录所指的 zone。在线 / 重连租约记录 = 写者所在的 zone；待落点 = 目标 zone。
   uint32 zone_id = 2;
+  // 持有（或刚才持有）归属的 scene 节点号；0 只出现在待落点记录里。
   uint32 scene_node_id = 3;
-  // 场景实例号（雪花，进程内创建时发，跨进程重启不重复）：目录里找不到同号的实例 = 原实例已不在。
+  // 场景实例号（雪花，进程内创建时发，跨进程重启不重复）：目录里找不到同号的实例 = 原实例已不在。待落点记录为 0。
   uint64 scene_id = 4;
   uint32 scene_config_id = 5;
   // 写入它的那次进场夺得的归属 epoch：同一玩家的两次进场以它定先后，旧持有者迟到的写不覆盖新持有者的记录。

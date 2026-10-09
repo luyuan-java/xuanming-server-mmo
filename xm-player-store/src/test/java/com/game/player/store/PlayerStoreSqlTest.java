@@ -1,8 +1,10 @@
 package com.game.player.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.player.store.PlayerStore.ClaimResult;
+import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.PlayerStore.HandOffResult;
 import com.game.player.store.state.BattleLedgerEntry;
 import com.game.player.store.state.BattleLedgerState;
@@ -348,6 +350,60 @@ class PlayerStoreSqlTest {
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(3));
     }
 
+    // ---------------------------------------------------------------- 交出并释放（跨 zone 传送，批次 5.4）
+    // 先行件的冒烟用例：只钉「RELEASE 这一笔事务做对了」与「六参数的 HOLD = 五参数形式」。
+    // 提交后旧 epoch 的各种写、未提交的三种情况、重试改判、探测、并发，见 zone-travel-spec §11.2。
+
+    @Test
+    void 交出并释放_提交后是E加1且已释放_租约是传入值_不等租约立即夺到E加2且读到冻结快照() {
+        long p = newPlayer(1381, "释放甲");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        assertThat(store.saveStateHeld(save(p, 1, 2, 10), facing(0.5))).isTrue();
+        CLOCK.addAndGet(5_000);
+        long lease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
+
+        HandOffResult result = store.handOffOwnership(save(p, 1, 5, 77.5), facing(3), lease, CLOCK.get() + MARGIN_MS,
+                TX_TIMEOUT, HandOffMode.RELEASE);
+
+        assertThat(result).isEqualTo(new HandOffResult.HandedOff(2));
+        assertThat(owner(p)).as("(E+1, 已释放, 这次尝试的租约值)").isEqualTo(new OwnerState(2, true, lease));
+        PlayerRow row = store.findPlayer(p).orElseThrow();
+        assertThat(row.getSceneConfigId()).isEqualTo(5);
+        assertThat(row.getPosX()).isEqualTo(77.5);
+        assertThat(row.getLevel()).isEqualTo(3);
+        assertThat(row.getUpdatedAt()).isEqualTo(CLOCK.get());
+        assertThat(row.getZoneId()).as("交出不动归属区").isEqualTo(1);
+        assertThat(store.loadState(p)).isEqualTo(facing(3));
+        assertThat(savedEpoch(p)).as("玩法数据由交出方 E 写入").isEqualTo(1);
+
+        // 时钟没有再走：E+1 的租约还有整整 30 s，这次夺权成功只能是因为已释放
+        assertThat(store.claimOwnership(p)).as("第二条腿：目标 zone 的登录立即夺到 E+2").isEqualTo(new ClaimResult.Claimed(3));
+        PlayerRow loaded = store.findPlayer(p).orElseThrow();
+        assertThat(loaded.getOwnerEpoch()).isEqualTo(3);
+        assertThat(loaded.getSceneConfigId()).as("夺到的是冻结快照").isEqualTo(5);
+        assertThat(loaded.getPosX()).isEqualTo(77.5);
+        assertThat(store.loadState(p)).isEqualTo(facing(3));
+        assertThat(owner(p).released()).as("E+2 由新的持有者持有").isFalse();
+    }
+
+    @Test
+    void 六参数形式传HOLD等于五参数形式_E加1未释放_同一时刻夺权回Held_模式为null在动库之前就拒() {
+        long p = newPlayer(1382, "释放乙");
+        store.claimOwnership(p);
+        List<Object> before = everything(p);
+        long lease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
+
+        assertThatThrownBy(() -> store.handOffOwnership(save(p, 1, 5, 77.5), facing(3), lease, CLOCK.get() + MARGIN_MS,
+                TX_TIMEOUT, null)).isInstanceOf(NullPointerException.class);
+        assertThat(everything(p)).isEqualTo(before);
+
+        assertThat(store.handOffOwnership(save(p, 1, 5, 77.5), facing(3), lease, CLOCK.get() + MARGIN_MS, TX_TIMEOUT,
+                HandOffMode.HOLD)).isEqualTo(new HandOffResult.HandedOff(2));
+        assertThat(owner(p)).isEqualTo(new OwnerState(2, false, lease));
+        assertThat(store.claimOwnership(p)).as("与交出并释放的唯一区别：E+1 有人持有，要等它释放或租约过期")
+                .isEqualTo(new ClaimResult.Held(2));
+    }
+
     @Test
     void 已提交的交出再执行一次_读到Fenced且带着上一次写下的租约值_供调用方认领() {
         long p = newPlayer(1331, "交出庚");
@@ -400,7 +456,7 @@ class PlayerStoreSqlTest {
         CountDownLatch release = new CountDownLatch(1);
         long lease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
         CompletableFuture<Void> holder = holdRowLock(() -> {
-            assertThat(mapper.updateStateAndHandOff(stamped(save(p, 1, 5, 20)), lease, CLOCK.get() + MARGIN_MS)).isEqualTo(1);
+            assertThat(mapper.updateStateAndHandOff(stamped(save(p, 1, 5, 20)), lease, CLOCK.get() + MARGIN_MS, 0)).isEqualTo(1);
             mapper.upsertState(p, facing(2).toByteArray(), 1, CLOCK.get());
         }, locked, release, true);
         assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
@@ -504,7 +560,7 @@ class PlayerStoreSqlTest {
         CountDownLatch release = new CountDownLatch(1);
         long lease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
         CompletableFuture<Void> holder = holdRowLock(() -> assertThat(mapper.updateStateAndHandOff(
-                stamped(save(p, 1, 5, 20)), lease, CLOCK.get() + MARGIN_MS)).isEqualTo(1), locked, release, commit);
+                stamped(save(p, 1, 5, 20)), lease, CLOCK.get() + MARGIN_MS, 0)).isEqualTo(1), locked, release, commit);
         assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
 
         CompletableFuture<java.util.Optional<OwnerState>> probe =

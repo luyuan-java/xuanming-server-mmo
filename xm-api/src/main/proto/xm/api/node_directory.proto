@@ -19,6 +19,10 @@ message GateNodeInfo {
   uint32 player_count = 6;
   // 排空中：不再分配新玩家。
   bool draining = 7;
+  // gate 进程的启动时刻（Unix 毫秒，进程启动时取定一次，之后每次刷新目录都写同一个值；批次 5.4）。
+  // 读方用它在「同一个客户端地址有多条目录条目」（进程重启换了节点号，旧条目还没过期）时只留最新的一条。
+  // 不认识这个字段的旧版本 gate 写的条目读出来是 0 = 最旧。
+  uint64 started_at_ms = 8;
 }
 
 message SceneNodeInfo {

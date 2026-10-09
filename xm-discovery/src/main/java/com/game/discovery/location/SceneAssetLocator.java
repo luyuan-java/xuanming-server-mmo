@@ -30,7 +30,10 @@ import org.slf4j.LoggerFactory;
  *       条目的 {@code rpc_port = 0} 或 {@code rpc_host} 为空（不提供资产通道的旧版本节点）→ NO_RPC_PORT；</li>
  *   <li>找到 → {@link Found}（地址 + 实例 id）。</li>
  * </ol>
- * 基线有、Java 没有的状态：AwaitingPlacement（Java 跨区随 5.4）、同身份歧义（Redis 目录按节点号做键，天然唯一）、镜像未同步（每次现读目录）。
+ * 基线的 AwaitingPlacement 在 Java 不是单独的状态：跨 zone 传送的待落点（批次 5.4）写成 {@code s=l} 加节点号 0
+ * （{@link PlayerLocationDirectory#awaitPlacementAsync}），在第 2 步就按重连租约归到 {@link NoHolder}(LEASE)——判状态先于读节点号，
+ * 走不到第 3 步的 NODE_UNKNOWN；两条腿之间确实没有任何节点持有该玩家，调用方照常合成 NOT_HERE、稍后重投。
+ * 基线有、Java 没有的状态：同身份歧义（Redis 目录按节点号做键，天然唯一）、镜像未同步（每次现读目录）。
  * 节点号按区租约、实例退出即交还，位置记录可能指向「同号新实例」：新实例回 NOT_HERE，调用方重定位，正确性在 scene 账本与归属围栏。
  * <b>不读 {@code xm:presence}</b>：在线目录由 gate 写；资产通道要找的是数据持有者（持有归属的 scene 写的位置记录）。
  *

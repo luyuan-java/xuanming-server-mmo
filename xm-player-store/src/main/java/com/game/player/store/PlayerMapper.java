@@ -82,22 +82,27 @@ public interface PlayerMapper {
     int updateStateHeld(PlayerRow row);
 
     /**
-     * 带围栏的交出（跨节点换图，归属协议第 6 步）：与 {@link #updateStateHeld} 同形地写回冻结快照，同时把 epoch 加一、保持未释放、
-     * 给新租约 {@code leaseUntil}。只有仍由 {@code row.ownerEpoch} 持有、尚未释放、且剩余租约不短于安全边际
-     * （{@code owner_lease_until >= requireLeaseAtLeast}）时才改，否则影响 0 行、什么也不改。
+     * 带围栏的交出（跨节点换图，归属协议第 6 步）：与 {@link #updateStateHeld} 同形地写回冻结快照，同时把 epoch 加一、
+     * 把释放标记置为 {@code released}、给新租约 {@code leaseUntil}。只有仍由 {@code row.ownerEpoch} 持有、尚未释放、且剩余租约不短于安全边际
+     * （{@code owner_lease_until >= requireLeaseAtLeast}）时才改，否则影响 0 行、什么也不改——判定条件（WHERE）不随 {@code released} 变。
      * 与随后的 {@link #selectOwnerEpoch} / {@link #selectOwnerForUpdate} 必须在同一事务里，见 {@link PlayerStore#handOffOwnership}。
+     *
+     * @param released 交出后 {@code owner_released} 的取值，只能是 0 或 1（由 {@link PlayerStore.HandOffMode} 决定，调用方不自己拼）：
+     *                 0 = 新 epoch 保持未释放，等接手的节点来续约（跨节点换图，批次 5.2）；
+     *                 1 = 新 epoch 同时释放，没有持有者，下一次夺权立即成功（跨 zone 传送，批次 5.4）。
+     *                 为 1 时 {@code leaseUntil} 对夺权没有语义（夺权先看释放标记），只当这次尝试的标识
      */
     @Update("""
             UPDATE player
                SET level = #{row.level}, scene_config_id = #{row.sceneConfigId},
                    pos_x = #{row.posX}, pos_y = #{row.posY}, pos_z = #{row.posZ},
-                   owner_epoch = owner_epoch + 1, owner_released = 0, owner_lease_until = #{leaseUntil},
+                   owner_epoch = owner_epoch + 1, owner_released = #{released}, owner_lease_until = #{leaseUntil},
                    updated_at = #{row.updatedAt}
              WHERE player_id = #{row.playerId} AND owner_epoch = #{row.ownerEpoch} AND owner_released = 0
                AND owner_lease_until >= #{requireLeaseAtLeast}
             """)
     int updateStateAndHandOff(@Param("row") PlayerRow row, @Param("leaseUntil") long leaseUntil,
-                              @Param("requireLeaseAtLeast") long requireLeaseAtLeast);
+                              @Param("requireLeaseAtLeast") long requireLeaseAtLeast, @Param("released") int released);
 
     /**
      * 加锁读归属三列（主键记录锁）：会等任何仍持有这一行行锁的在途事务结束，所以读到的结论确定——没提交的不会再提交。

@@ -52,6 +52,8 @@ public final class RedisKeys {
      * 玩家位置：{@code xm:location:{player_id}}，Hash（字段 {@code e} = owner_epoch 十进制、{@code q} = 写序号、{@code s} = 状态 o 在线 / l 重连租约 / x 已登出、
      * {@code v} = {@code xm.discovery.PlayerLocation}），带 TTL；持有归属的 scene 节点是唯一写者（进场 / 换场景写、在线续期、
      * 断线写成重连租约、主动离开写成登出墓碑；按 (epoch, 写序号) 只收更新的写），login 进游戏时读。
+     * 跨 zone 传送的待落点（批次 5.4）复用这把键、不另起键：源节点交出并释放之后写 {@code s = l}，值里 zone = 目标 zone、节点号与场景号为 0、
+     * 配置号 = 要落的地图，TTL 跟着重定向票据走（至多 300 s）；「{@code l} + 节点号 0」就是待落点，见 {@code PlayerLocationDirectory}。
      */
     public static String playerLocation(long playerId) {
         return PREFIX + "location:" + Long.toUnsignedString(playerId);

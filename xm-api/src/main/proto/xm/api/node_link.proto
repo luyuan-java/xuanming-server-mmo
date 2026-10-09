@@ -7,6 +7,8 @@ package xm.api;
 option java_package = "com.game.api.proto";
 option java_multiple_files = true;
 
+import "xm/api/zone_redirect.proto";
+
 message NodeLinkFrame {
   oneof body {
     LinkHello hello = 1;
@@ -89,8 +91,17 @@ message PlayerTransfer {
   uint64 to_epoch = 4;
   uint32 target_scene_node_id = 5;
   uint64 target_scene_id = 6;
-  // 预留给批次 5.4 跨 zone 传送的重定向（gate 地址 + 令牌，gate 推 124 而不是改绑）。
-  reserved 7;
+  // 跨 zone 传送（226，批次 5.4，docs/porting/zone-travel-spec.md §5.3）的重定向。带它的这一帧不是改绑指令，而是「请客户端改连目标 zone 的 gate」：
+  // 源节点已用一笔带围栏的「交出并释放」事务把冻结快照落库、把归属从 from_epoch 推进到 to_epoch（E → E+1）并同时释放
+  // （E+1 没有持有者，目标 zone 的 login 立即夺到 E+2），实例已从本节点移除。这时 target_scene_node_id = 0、target_scene_id = 0。
+  // gate 仍按 (节点, 链路代次, player_id, from_epoch) 校验会话绑定，然后解绑会话上的场景（不发 PlayerLeave）、推 124 RedirectToGateNotify，
+  // 不改绑、不向任何 scene 发 PlayerEnter、不 abandonEnter（to_epoch 已释放，没有可放弃的归属）。
+  // 「带 redirect」与「target_scene_node_id != 0」必须恰好成立一个，两者都有 / 都没有是非法帧；
+  // 判别只用 has_redirect()（子消息字段有存在性），不看里面的字段是不是默认值。
+  // redirect.token_payload 原样拷贝进 124，不得解析后重新序列化（见 zone_redirect.proto）。
+  // 滚动升级顺序：先 gate、后 scene。不认识 7 号字段的旧 gate 会把这一帧当成目标节点号为 0 的非法改绑指令
+  // （推 23 {3023} 后断开；归属已释放，数据安全，客户端重登即可）。
+  ZoneRedirect redirect = 7;
 }
 
 // gate → scene：玩家离开（断线或主动离开），scene 写回数据并移除玩家。

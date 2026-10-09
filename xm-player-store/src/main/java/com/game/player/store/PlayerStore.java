@@ -10,6 +10,7 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
@@ -44,7 +45,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  *       {@link #releaseOwnership} 只释放。都带 epoch 围栏，旧写者碰不到新 epoch；</li>
  *   <li>跨节点换图时持有者用 {@link #handOffOwnership} <b>原子交出</b>：一笔事务里带围栏写回冻结快照、epoch 加一、保持未释放、
  *       给新租约。提交即同时证明「最终状态已落库」与「从此只有新 epoch 的持有者能写」，释放与夺权之间没有可被第三方夺走的窗口。
- *       任何时刻库里仍只有一个写者（交出之后、目标节点加载之前没有写者）。结局不明时用 {@link #probeOwnership} 加锁读探测。</li>
+ *       任何时刻库里仍只有一个写者（交出之后、目标节点加载之前没有写者）。结局不明时用 {@link #probeOwnership} 加锁读探测。
+ *       跨 zone 传送用同一笔事务的另一种模式 {@link HandOffMode#RELEASE}（批次 5.4）：新 epoch 同时释放，库里没有持有者，
+ *       目标 zone 的 login 按第 1 步夺权立即成功。</li>
  * </ol>
  * 租约用各进程的墙钟（login 判过期、scene 续约、交出的安全边际）：各进程时钟偏差必须远小于 {@link #OWNER_LEASE} 与交出安全边际
  * （部署要求 NTP）。
@@ -333,10 +336,38 @@ public class PlayerStore {
         return lost;
     }
 
+    /**
+     * 交出之后新 epoch（E+1）由谁持有（{@link #handOffOwnership} 的最后一个参数）。两种模式只差提交时 {@code owner_released} 写 0 还是 1：
+     * 判定条件（仍由 E 持有、未释放、剩余租约够）、写回的冻结快照、E → E+1、租约值都相同。
+     */
+    public enum HandOffMode {
+        /**
+         * 交出并保持（批次 5.2，跨节点换图）：E+1 <b>未释放</b>，租约 = {@code leaseUntil}，等同 zone 的目标节点收到交出通知后续约。
+         * 目标节点没接住时要有人释放 E+1，否则只能等租约过期。
+         */
+        HOLD(0),
+        /**
+         * 交出并释放（批次 5.4，跨 zone 传送，zone-travel-spec §5.2）：E+1 <b>同时释放</b>，库里没有持有者——目标 zone 的 login
+         * 夺权立即成功、得到 E+2，不必等租约。{@code leaseUntil} 照样写，但这时它对夺权没有语义（夺权先看释放标记），
+         * 只当这次尝试的标识。提交之后 E 的一切写（在线存盘、最终写回、续约、释放）都被围栏拒；对 E+1 的释放是空操作。
+         */
+        RELEASE(1);
+
+        /** 提交时写进 {@code owner_released} 的值。 */
+        private final int released;
+
+        HandOffMode(int released) {
+            this.released = released;
+        }
+    }
+
     /** {@link #handOffOwnership} 的结果。 */
     public sealed interface HandOffResult {
 
-        /** 已交出：库里 epoch = {@code newEpoch}（交出前 + 1）、未释放、租约 = 传入的 {@code leaseUntil}；冻结快照已落库。 */
+        /**
+         * 已交出：库里 epoch = {@code newEpoch}（交出前 + 1）、租约 = 传入的 {@code leaseUntil}；冻结快照已落库。
+         * 释放标记随模式：{@link HandOffMode#HOLD} 未释放（由接手的节点持有），{@link HandOffMode#RELEASE} 已释放（没有持有者）。
+         */
         record HandedOff(long newEpoch) implements HandOffResult {
         }
 
@@ -380,12 +411,34 @@ public class PlayerStore {
      */
     public HandOffResult handOffOwnership(PlayerRow frozen, PlayerState state, long leaseUntil, long requireLeaseAtLeast,
                                           Duration timeout) {
+        return handOffOwnership(frozen, state, leaseUntil, requireLeaseAtLeast, timeout, HandOffMode.HOLD);
+    }
+
+    /**
+     * 原子交出归属，按 {@code mode} 决定 E+1 是否同时释放。{@link HandOffMode#HOLD} 就是上面五个参数的形式（跨节点换图）；
+     * {@link HandOffMode#RELEASE}（跨 zone 传送）在同一笔事务里把 {@code owner_released} 置 1：提交即「冻结快照已落库、E 再也写不进来、
+     * 库里没有持有者」，目标 zone 的 {@link #claimOwnership} 立即得到 E+2。
+     *
+     * <p>除释放标记外，两种模式的事务完全相同：同一个判定条件、同样写回 player 行与 {@code player_state}（{@code saved_epoch} = E）、
+     * 同样的三种结果与时限语义，参数含义见五个参数的重载。没提交的两种结果（{@link HandOffResult.LeaseTooShort}、
+     * {@link HandOffResult.Fenced}）不看模式——库里什么也没改。
+     *
+     * <p>RELEASE 下调用方的重试改判与探测要按另一张表判：「已提交、应答丢了」的那次尝试读回来是 (E+1, <b>已释放</b>, 那次写下的租约)，
+     * 而不是 HOLD 的 (E+1, 未释放, …)；提交后别人立即就能夺到 E+2，所以读到 ≥ E+2 既可能是「本次已提交、随后被接手」，
+     * 也可能是「本次没提交、E 是被别人夺走的」，不能当成已提交的证据。改判规则在调用方（xm-scene 的存储适配），这里只负责把这一笔事务做对。
+     *
+     * @param mode 不能为 null
+     * @throws IllegalStateException 提交后读到的 epoch 不是 E+1（不变量被破坏，事务回滚），或本实例没有事务管理器
+     */
+    public HandOffResult handOffOwnership(PlayerRow frozen, PlayerState state, long leaseUntil, long requireLeaseAtLeast,
+                                          Duration timeout, HandOffMode mode) {
+        Objects.requireNonNull(mode, "mode");
         return transaction(timeout).execute(status -> {
             long playerId = frozen.getPlayerId();
             long epoch = frozen.getOwnerEpoch();
             long now = clockMs.getAsLong();
             frozen.setUpdatedAt(now);
-            if (mapper.updateStateAndHandOff(frozen, leaseUntil, requireLeaseAtLeast) == 1) {
+            if (mapper.updateStateAndHandOff(frozen, leaseUntil, requireLeaseAtLeast, mode.released) == 1) {
                 mapper.upsertState(playerId, state.toByteArray(), epoch, now);
                 Long next = mapper.selectOwnerEpoch(playerId);
                 if (next == null || next != epoch + 1) {

@@ -1,0 +1,32 @@
+// Java 版内部契约：跨 zone 重定向的载荷（批次 5.4，docs/porting/zone-travel-spec.md §5.3）。只在 Java 版内部使用，不是客户端契约。
+// xm-api 的 proto 不 import 同步来的契约目录（AGENTS.md §1），所以客户端 124 RedirectToGateNotify 的五个字段在这里复刻一份，
+// 由 gate 组装成契约消息下发。三条通路共用这一个消息：
+//   scene-manager → scene / login（SelectTravelTargetResponse.redirect、RedirectToZoneResponse.redirect，scene_directory.proto）；
+//   scene → gate（PlayerTransfer.redirect，node_link.proto：226 传送）；
+//   login → gate（SessionDirective.redirect_to_gate，client_call.proto：登录期重定向 GO-5）。
+syntax = "proto3";
+
+package xm.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+// 「请客户端改连目标 zone 的这台 gate」。由 scene-manager 选 gate 并签票据后原样产出，下游各环（scene、login、gate）只转发、不改写。
+message ZoneRedirect {
+  // 目标 zone（= 票据的 target_zone_id）。只进日志与校验，不下发给客户端。
+  uint32 target_zone_id = 1;
+  // 选中的目标 gate 节点号（= 票据的 gate_node_id）。只进日志。
+  uint32 gate_node_id = 2;
+  // 目标 gate 对外通告的客户端地址 → 124 的 target_ip / target_port。
+  string gate_host = 3;
+  uint32 gate_port = 4;
+  // 票据：GateTokenPayload 的序列化字节，就是签名时的那一份原字节 → 124 的 token_payload。
+  // 硬约束：链路各环一律原样拷贝这个 bytes 字段，不得解析后重新序列化（重新序列化的字节与签名不一定对得上，
+  // 而验票失败发生在目标 gate 上——那时源端已经交出并释放了归属）。
+  bytes token_payload = 5;
+  // 票据签名：HMAC-SHA256 的 64 字节小写 hex ASCII（com.game.common.token.GateTokens）→ 124 的 token_signature。
+  bytes token_signature = 6;
+  // 票据过期时刻（Unix 秒）= 票据 payload 里的 expire_timestamp → 124 的 token_deadline。
+  // 签发时刻 + 300 s（com.game.common.token.GateTokenIssuer#REDIRECT_TICKET_TTL）。
+  int64 token_deadline = 7;
+}

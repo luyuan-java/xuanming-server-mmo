@@ -8,10 +8,14 @@ import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.ChannelKind;
 import com.game.api.proto.CreateInstanceRequest;
 import com.game.api.proto.CreateInstanceResponse;
+import com.game.api.proto.RedirectToZoneRequest;
+import com.game.api.proto.RedirectToZoneResponse;
 import com.game.scene.world.InstanceIds;
 import com.game.scene.world.SceneKind;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
+import com.game.api.proto.SelectTravelTargetRequest;
+import com.game.api.proto.SelectTravelTargetResponse;
 import com.game.scene.world.RemoteSwitchTargets.Selection;
 import java.time.Duration;
 import java.util.List;
@@ -58,6 +62,17 @@ class SceneManagerSwitchTargetsTest {
         public CompletableFuture<CreateInstanceResponse> createInstance(CreateInstanceRequest request) {
             instanceRequests.add(request);
             return nextInstanceReply;
+        }
+
+        // 批次 5.4 先行件 a：接口多了两个方法，这里只为能编译；跨 zone 选目标的用例由先行件 b / S2 接上。
+        @Override
+        public CompletableFuture<SelectTravelTargetResponse> selectTravelTarget(SelectTravelTargetRequest request) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public CompletableFuture<RedirectToZoneResponse> redirectToZone(RedirectToZoneRequest request) {
+            throw new UnsupportedOperationException();
         }
     };
     private final List<CreateInstanceRequest> instanceRequests = new CopyOnWriteArrayList<>();

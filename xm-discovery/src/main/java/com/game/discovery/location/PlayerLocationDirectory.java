@@ -31,6 +31,13 @@ import org.slf4j.LoggerFactory;
  * {@code l} 重连租约（断线，TTL {@link #RECONNECT_LEASE}）、{@code x} 已登出（LeaveGame 留的不带位置的墓碑，TTL {@link #ONLINE_TTL}，
  * 读者当没有）。被接管 / 失去归属 / 停服不动记录：新持有者进场时覆盖，否则按 TTL 消失。
  *
+ * <p><b>待落点</b>（批次 5.4 跨 zone 传送，zone-travel-spec §5.9；{@link #awaitPlacementAsync}）：不是新状态，而是 {@code s = l} 加
+ * <b>节点号 0</b>——值里 {@code zone_id} = 目标 zone、{@code scene_node_id = 0}、{@code scene_id = 0}、{@code scene_config_id} = 要落的地图，
+ * TTL 由写者给（至多 {@link #AWAIT_PLACEMENT_MAX_TTL}，跟着重定向票据的有效期走）。写者仍是源节点，用它交出前持有的 epoch 与续接的序号写，
+ * 所以这是唯一一种「记录里的 zone ≠ 写者所在 zone」的记录。读者不用为它改：{@link #find}（login）照常拿到值，按节点号 0 认出待落点；
+ * {@link #findHolderAsync} 与 {@link #statusesAsync} 只看状态，回 RECONNECT_LEASE（此刻没有节点持有该玩家）。
+ * 目标 zone 的进场以更大的 epoch 写在线记录时覆盖它；没人来落地就按 TTL 消失。
+ *
  * <p><b>写序号</b>：Redisson 的命令可能乱序执行——走连接池里的不同连接，或脚本第一次执行遇到 NOSCRIPT 后重新加载再发
  * （实测进场、换场景、断线三条连发时会被重排）。所以每次写都带上写者在本次进场（epoch）内单调递增的序号与<b>完整</b>的此刻状态，
  * 按 (epoch, 序号) 只收比已存的更新的写：乱序晚到的旧写一律丢弃，最后生效的总是最新的那一次。在线续期不递增序号，
@@ -47,6 +54,12 @@ public final class PlayerLocationDirectory {
     public static final Duration REFRESH_INTERVAL = Duration.ofSeconds(20);
     /** 断线重连租约（同 mmorpg player_locator 的 30 s 断线租约）。 */
     public static final Duration RECONNECT_LEASE = Duration.ofSeconds(30);
+    /**
+     * 待落点记录的存活时长上限（{@link #awaitPlacementAsync}）：与重定向票据的有效期同值（xm-common 的
+     * {@code GateTokenIssuer.REDIRECT_TICKET_TTL}，300 s）——票据过期后没人能再凭它落地，记录不该比票据活得久。
+     * 写者按「票据到期时刻 − 现在」算 TTL 并截到 [1 s, 本值]。
+     */
+    public static final Duration AWAIT_PLACEMENT_MAX_TTL = Duration.ofSeconds(300);
 
     /** 一条在线续期：此刻的位置与写者当前的序号（不递增）。 */
     public record Refresh(PlayerLocation location, long seq) {
@@ -144,6 +157,35 @@ public final class PlayerLocationDirectory {
     public CompletionStage<Boolean> leaseAsync(PlayerLocation location, long seq) {
         return write(location.getPlayerId(), location.getOwnerEpoch(), seq, LEASED, location.toByteArray(),
                 RECONNECT_LEASE);
+    }
+
+    /**
+     * 跨 zone 传送的待落点（批次 5.4，zone-travel-spec §5.9）：源节点在「交出并释放」提交之后、发重定向帧之前写。
+     * 写成 {@code s = l}（读者眼里是「此刻没有节点持有」）、TTL = {@code ttl}；与 {@link #leaseAsync} 走同一段脚本，
+     * 同样按 (epoch, 序号) 只收更新的写——目标 zone 的进场以更大的 epoch 写在线记录时覆盖它，源节点之后补写的
+     * (同 epoch, 更大序号) 也覆盖它。
+     *
+     * @param location 待落点：{@code player_id} 与 {@code zone_id}（目标 zone）非 0，{@code scene_node_id} 与 {@code scene_id} 必须为 0
+     *                 （节点号 0 就是「待落点」的判别），{@code scene_config_id} = 要落的地图（0 = 目标 zone 的默认主世界），
+     *                 {@code owner_epoch} = 源节点交出前持有的 epoch（不是交出铸出的 E+1：位置记录只由持有者以自己写过的 epoch 写）
+     * @param seq      写者在这个 epoch 内续接的写序号
+     * @param ttl      存活时长：至少 1 ms、至多 {@link #AWAIT_PLACEMENT_MAX_TTL}；调用方自己截到 [1 s, 300 s]，这里不替它截
+     * @return 是否生效（false = 已有更新的写，例如别的登录已经以更大的 epoch 进场）；Redis 出错时异常完成
+     * @throws IllegalArgumentException 上面任一条不满足（调用方的编程错误；在发出任何 Redis 命令之前抛）
+     */
+    public CompletionStage<Boolean> awaitPlacementAsync(PlayerLocation location, long seq, Duration ttl) {
+        if (location.getPlayerId() == 0 || location.getZoneId() == 0) {
+            throw new IllegalArgumentException("待落点缺 player_id 或目标 zone: player="
+                    + Long.toUnsignedString(location.getPlayerId()) + " zone=" + Integer.toUnsignedString(location.getZoneId()));
+        }
+        if (location.getSceneNodeId() != 0 || location.getSceneId() != 0) {
+            throw new IllegalArgumentException("待落点的节点号与场景号必须为 0: node="
+                    + Integer.toUnsignedString(location.getSceneNodeId()) + " scene=" + Long.toUnsignedString(location.getSceneId()));
+        }
+        if (ttl == null || ttl.toMillis() < 1 || ttl.compareTo(AWAIT_PLACEMENT_MAX_TTL) > 0) {
+            throw new IllegalArgumentException("待落点的存活时长必须在 [1 ms, " + AWAIT_PLACEMENT_MAX_TTL.toSeconds() + " s] 内: " + ttl);
+        }
+        return write(location.getPlayerId(), location.getOwnerEpoch(), seq, LEASED, location.toByteArray(), ttl);
     }
 
     /** 主动离开：写成登出墓碑（读者当没有）。@return 是否生效 */

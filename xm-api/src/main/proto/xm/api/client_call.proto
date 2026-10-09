@@ -6,6 +6,8 @@ package xm.api;
 option java_package = "com.game.api.proto";
 option java_multiple_files = true;
 
+import "xm/api/zone_redirect.proto";
+
 // 会话上下文：gate 发往后端的每个客户端调用都带上。后端只信任 gate 填的这些字段。
 message SessionContext {
   uint32 gate_node_id = 1;
@@ -18,6 +20,15 @@ message SessionContext {
   // 已绑定玩家；未进游戏（含进场失败、LeaveGame 之后）为 0。login 据此拒绝已在游戏里的会话再次 EnterGame / CreatePlayer。
   uint64 player_id = 6;
   string client_ip = 7;
+  // 这条连接握手时出示的 gate 票据里的持票者与目标 zone（批次 5.4，docs/porting/zone-travel-spec.md §5.7、§5.8）：gate 在验票通过时从
+  // GateTokenPayload.player_id / target_zone_id 原样抄下、此后每次调用都带上；gate 只存不判。
+  // 重定向票据（226 传送、登录期重定向 GO-5，scene-manager 签）：ticket_player_id = 持票者（非 0），ticket_target_zone_id = 目标 zone。
+  // 普通登录令牌（gateway 签）：ticket_player_id = 0，ticket_target_zone_id = 签发时的 zone（Java 把普通令牌钉在签发 zone，等于本会话的 zone_id）。
+  // login 的用法：ticket_player_id != 0 且不等于请求进游戏的角色 → 2011（持票者不符）；
+  // ticket_player_id != 0 且 ticket_target_zone_id == zone_id → 这条连接是持票来到本 zone 的，不再按位置记录把它重定向到别的 zone。
+  // 不认识这两个字段的旧 gate 发来的调用两者都是 0 = 按普通登录处理。
+  uint64 ticket_player_id = 8;
+  uint32 ticket_target_zone_id = 9;
 }
 
 message ClientCall {
@@ -49,6 +60,7 @@ message SessionDirective {
     EnterScene enter_scene = 2;
     CloseSession close_session = 3;
     UnbindPlayer unbind_player = 4;
+    RedirectToGate redirect_to_gate = 5;
   }
 }
 
@@ -74,6 +86,16 @@ message CloseSession {
 // 离开游戏（LeaveGame 成功）：gate 向会话所在 scene 节点发 PlayerLeave{voluntary=true}（不在场景里则不发），
 // 并清掉会话上的玩家与场景绑定；账号绑定保留，客户端可以回到选角。
 message UnbindPlayer {
+}
+
+// 登录期重定向（GO-5，批次 5.4 的 b 段，zone-travel-spec §5.7、§5.8）：login 发现请求进游戏的角色此刻正在别的 zone（在线或断线重连租约内），
+// 不夺权、不分配场景，改为请客户端连过去。login 在 EnterGame 的成功应答（EnterGameResponse{player_id}，不设 error_message）里带上本指令；
+// gate 先把应答发给客户端，再推 124 RedirectToGateNotify（26 应答恒先于 124），会话随后转入「已重定向」状态等客户端断开。
+// 这条指令不绑定玩家、不进任何场景（与 EnterScene 互斥：同一个应答里不会两者都有）。
+// 不认识 5 号分支的旧 gate 读到的是 KIND_NOT_SET，只记一条告警、不推 124——所以滚动升级顺序是先 gate、后 login。
+message RedirectToGate {
+  // 必填：scene-manager 的 RedirectToZoneResponse.redirect 原样带来（token_payload 不得解析后重新序列化）。
+  ZoneRedirect redirect = 1;
 }
 
 // gate 通知后端会话结束（断线或主动离开）。
