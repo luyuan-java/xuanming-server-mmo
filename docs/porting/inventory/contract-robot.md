@@ -61,7 +61,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-client-player-login（进场）、scene-manager、svc-scene-client-player-common（124 跨区落地）
 - behavior: 进场顺序 79 → 21(自己) → 47；63 校验顺序 3001 参数错 / 3004 / 3014 / 3023 / 已在当前场景；镜像场景（mirror_config_id）；跨节点换场景；226 无错应答 = 已受理（到达 = 随后收 124；未成 = 随后收 23{kZoneTravel*}，含 kZoneTravelTargetBusy / TargetZoneNotFound / InBattle / InTeam）；视野半径 10 m
 - internal: scene_manager 选场景、跨节点玩家迁移（SceneNodeGrpc / Kafka 场景命令）、跨 zone 交接（冻结→存盘→handoff→RedirectToGate）
-- java: partial — `xm-scene/src/main/java/com/game/scene/world/ClientRequestHandler.java`（63 节点内换图、43→31）、`SceneWorld` / `ViewIndex`（21/47/64/51，行为有意不同见 PARITY「视野」行）；缺跨节点换场景、镜像 / 副本（回 3023）、226 TravelToZone（回 1006）
+- java: partial — `xm-scene/src/main/java/com/game/scene/world/ClientRequestHandler.java`（63 节点内换图、43→31）、`SceneWorld` / `ViewIndex`（21/47/64/51，行为有意不同见 PARITY「视野」行）；缺跨节点换场景、镜像 / 副本（回 3023）、226 TravelToZone（回 1006）。（2026-10-11 订正 226：批次 5.4 已注册 226、不再回 1006，同步段 3024 / 3007 / 3025 / 13000 / 3014、在队 3026，受理后 124 或 23 {3027}，代码已集成、切片未验证，见 scene-core.md zone-travel 与 PARITY「跨 zone 传送（226）与重定向（124）」行；跨节点换场景与镜像 / 副本见 PARITY 5.2 / 5.3 各行，本条其余部分没有随之回写）
 - size: L（跨节点换场景 M + 跨 zone 传送 L 另立）
 - robot: robot-stress-smoke（AI 15% 发 63）、robot-travel-smoke（226）；Java xm-robot smoke（79）、movement（21/47/51）
 - hazards: TravelToZone 必须追加在 service 末尾（C++ CallMethod 按 method index 分发）；79 可能早于 26 应答到达；基线 21/47 单向通知（旁人看不到新来者）已在 Java 修正

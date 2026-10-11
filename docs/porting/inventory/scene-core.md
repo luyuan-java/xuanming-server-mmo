@@ -128,7 +128,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: none
 - behavior: 路由带 owner_epoch（0 = 旧版不覆盖），实体按 max 记；存盘 Redis 写带 Lua CAS、DBTask 带 epoch；进场命中本节点旧实体且 epoch 至少 +2（中间有别的持有者）时不存盘销毁后重载；home_zone 决定落库 topic（未知时 fail-closed 用进程 zone 并计数）。
 - internal: [OwnerEpoch] 三个健康计数；A1′/A2′ handoff 标记协议。
-- java: done（机制不同，PARITY「玩家数据归属」行登记为 Java 内部）— `PlayerStore` owner_epoch / owner_released / owner_lease_until，夺权 / 续约（`OwnerLeaseRenewer`）/ 释放，写回带围栏；跨 zone 的 home_zone 不适用（Java 不跨 zone）。
+- java: done（机制不同，PARITY「玩家数据归属」行登记为 Java 内部）— `PlayerStore` owner_epoch / owner_released / owner_lease_until，夺权 / 续约（`OwnerLeaseRenewer`）/ 释放，写回带围栏；「home_zone 决定落库 topic」不适用：Java 单库，存盘不按归属区路由。（2026-10-11 订正：原写「Java 不跨 zone」已不成立——批次 5.4 的跨 zone 传送同样不改归属区、不按它路由存盘（zone-travel-spec X10），归属交给目标 zone 用的是同一套 MySQL 归属列的「交出并释放」（`HandOffMode.RELEASE`），见下文 ownership-handoff / zone-travel 两条；代码已集成，切片未验证。）
 - size: L
 - robot: login_test AccountDisplacement / RapidReconnect
 - hazards: 基线允许 epoch=0 跳过 CAS（滚动升级窗口），等于假防护；Java 任何新写回路径（周期存盘、资产写）都必须走同一围栏。
@@ -177,6 +177,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - behavior: 每个 zone 每张 World 地图保持 N 个频道（MinChannelsPerMap 默认 1，按负载扩缩容，带冷却与排空集合），节点重启后对所有频道重发 CreateScene（幂等）；只挑主世界类型节点承载频道。
 - internal: Redis 锁串行化补建；scene_manager 领导者执行。属 scene_manager 区域，scene 节点只被动登记。
 - java: partial — 每个 scene 节点各自为每张 World 地图建 1 个场景、经 Redis 节点目录上报（`SceneDirectoryPublisher`），`xm-scene-manager` `SceneAssigner` 挑人数最少者（PARITY：不预占名额、不跨 zone）；无频道数配置、无扩缩容 / 排空。
+  （2026-10-11 订正：括号里是本条写成时的 PARITY 口径，「不跨 zone」已删——`assign` 仍只在请求的 zone 内选，跨 zone 由批次 5.4 的 `selectTravelTarget` / `redirectToZone` 在目标 zone 选 gate、签票，见 PARITY「场景分配」「跨 zone 传送（226）与重定向（124）」行（代码已集成，切片未验证）；频道、软预占与排空的现状见 PARITY「场景实例与主世界频道」行（批次 5.1），本条其余部分没有随之回写。）
 - size: L
 - robot: robot.stress-*（基线多频道）
 - hazards: 缩容排空依赖 scene 的 BeginSceneDrain；频道上有镜像时不得缩容（channelHasMirrors）。
@@ -558,7 +559,10 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 ## Open questions
 
 1. 玩家持久化载体怎么扩：`player` 表加列、按系统分表，还是加一个 proto blob 列（类似基线 PlayerAllData）？这决定 periodic-dirty-save、属性、背包、货币等所有后续功能的写回形状，且必须与 owner_epoch 围栏同事务。
-2. 跨节点换图 / 跨 zone 传送在 Java 是否沿用「源节点写回并释放 → 目标节点夺权加载」（复用现有 MySQL 归属协议），而不移植 Redis handoff 标记 + 冻结 + 看门狗？若是，客户端可见的失败码（3023 / 3027 / 13000 / 34 踢线）与「最迟约 71s 出结论」需要另定口径。
+2. ~~跨节点换图 / 跨 zone 传送在 Java 是否沿用「源节点写回并释放 → 目标节点夺权加载」（复用现有 MySQL 归属协议），而不移植 Redis handoff 标记 + 冻结 + 看门狗？若是，客户端可见的失败码（3023 / 3027 / 13000 / 34 踢线）与「最迟约 71s 出结论」需要另定口径。~~
+   已答（2026-10-11）：都复用 MySQL 归属协议、不移植 Redis 标记与看门狗。跨节点换图（批次 5.2）是冻结 + 一笔交出事务（E→E+1、保持未释放）交给目标节点，见 PARITY「跨节点换图与归属交接」行与 scene-handoff-spec；
+   跨 zone 传送（批次 5.4）用同一笔交出事务的 RELEASE 模式（写回冻结快照 + E→E+1 + `owner_released = 1`，目标 zone 的登录夺到 E+2，zone-travel-spec X1）；客户端口径：受理后失败 23 {3027}、交出后判失去 23 {3027} 后断开、
+   被围栏 / 被接管 23 {2017} 后断开，都不发 34（X7）；受理到出结论约 25 s（X12，基线约 71 s）。5.4 代码已集成，切片未验证（PARITY「跨 zone 传送（226）与重定向（124）」行）。
 3. Java 是否要引入「世界频道数 / 扩缩容 / 场景排空」：目前每个 scene 节点各建一份全部 World 地图，scene-manager 只挑人数最少者；多节点时同一 World 地图的频道数 = 节点数，与基线（SM 统一编排）不同。
 4. 基线 PlayerLoginEvent 对 LOGIN_FIRST / RECONNECT / REPLACE 全是 TODO：Java 做短线重连时 enter_gs_type 是否需要下发 / 使用，还是继续只靠「写回 + 重载」？
 5. 基线有意的「错误码被 TLS tip 覆盖成 0」（ReleaseSkill 1001）在属性系统里不存在（属性 handler 都走 SetTip），Java 统一如实回码即可；其它区域的 handler 需逐个核对是否属于被覆盖的那一类。

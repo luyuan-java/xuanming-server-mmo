@@ -580,9 +580,10 @@ Java 版已经用 `tools/ContractSync.java` 接住了「两版共享的契约产
 - client messages: BattleClientPlayer（12 个：139,140,143,144,149,150,158,161,162,165,166,177，含 NotifyBattleStart / NotifyTurnResult / NotifyBattleEnd / GetBattleState / SetAutoBattle）、MatchService（10 个：148,151–154,156,157,163,164,179）、226 SceneSceneClientPlayerTravelToZone、124 RedirectToGate（S2C push）
 - tables: Dungeon、Monster、Skill、Buff
 - depends on: robot-core-client（重定向跟随）；Java 的战斗节点、匹配、跨区传送（均未做；PARITY：战斗直连、重定向待做）
+  ——2026-10-11 订正：括号里是本条写成时的状态。battle 节点与战斗直连（6.2）、匹配（6.4）、观战与跨区 1V1（6.5）已对齐；跨 zone 传送与重定向（5.4）代码已集成、全量单测通过，切片未验证（PARITY 各行）。
 - behavior: battle：A 排 PVE_SOLO 自动战斗，B `WatchBattle(battle_id=0)` 随机观战，断言观战分配与 A 同局、握手快照从直连到达、观战回合 ≥ 1；战斗帧只走与 battle 节点的直连（gate 拒绝战斗上行）；cross-zone：两 zone 两机器人 1V1 匹配进同一局、gate 地址不同；travel：TravelToZone 往返，必须登记连接注册表供 124 反查，重登必须按 player_id 严格选角（防自动建角假绿）。
 - internal: Java 设计：战斗与跨区功能落地后移植；Java robot 的直连需要第二条 `GameConnection` 与分配消息里的通告地址（PARITY「节点客户端可达地址」行：battle 分配的通告地址随功能一起做）。
-- java: missing
+- java: partial（2026-10-11 订正，原写 missing：已由各批次的 xm-robot 子命令承接——`battle-smoke`（6.4 / 6.5）、`battle-cross-zone`（6.5）已对真切片跑过；`travel` / `travel-abandon` / `travel-long`（5.4）只在本机假服务端上跑过单测，没有对真切片跑过。逐条见 `contract-robot.md` 的 robot-battle-smoke、robot-battle-smoke-cross-zone、robot-travel-smoke）
 - size: M
 - robot: Go battle / battle cross-zone / travel smoke
 - hazards: travel 场景列出四个「不照做就假绿或卡死」的坑（未注册连接导致 124 静默超时、通用重登自动建角等），Java 版底座设计时要避免同类全局可变状态（Go 的 `SetRedirectRelogin` 是进程全局）。

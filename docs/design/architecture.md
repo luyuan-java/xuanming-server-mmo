@@ -208,7 +208,8 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
   `id` 回显请求号；每条请求至多回一次，应答类型必须与契约一致，`Empty` 应答的方法不能回。处理器没回、回错类型、抛异常
   （记 ERROR，逻辑线程继续）时由分发补回 `kFeatureUnavailable`(1006)，客户端不会卡在等应答上。没有处理器的方法同样回 1006
   （`Empty` 应答的方法静默忽略）。**延迟应答**（批次 5.4）：处理器可以 `call.defer()` 拿一个一次性的 `DeferredReply`，稍后在逻辑线程上回；已延迟的调用分发不补 1006
-  （处理器在延迟之后又抛异常且还没人回时，经同一个 `DeferredReply` 补 1006）。目前只有 226 用它（在队检查读回来才回），由 `SceneWorld` 保证在在队检查上限 + 1 s 内必到、至多一个。
+  （处理器在延迟之后又抛异常且还没人回时，经同一个 `DeferredReply` 补 1006）。目前只有 226 用它（在队检查读回来才回），由 `SceneWorld` 保证必有一个、至多一个：正常在在队检查上限（`orTimeout`，缺省 2 s）内回；
+  读结果的回调丢了时由 PRECHECK 槽过期兜底——槽期限是上限 + 1 s 宽限，过期后要等下一次 226 / 63 或每秒维护作废它时才回 3027，所以最坏约 4 s（§8.2「超时预算」）。
 - **冻结策略**（批次 5.2，§8.1）：每个方法注册时声明 `FreezePolicy`（`SceneFeature.Registrar.on` 的六参数形式，与下一条的战斗策略一并声明；四参数形式两者都缺省 REJECT，
   以后新加而没声明的方法冻结中一律拒绝）。玩家处于跨节点换图的冻结中（FREEZING）时，分发入口在 GM 闸与找处理器之后、调用处理器之前裁决：
   ALLOW / READ_ONLY / GATED 照常进处理器（GATED 由服务闸回基线码），REJECT 回应答内 `error_message{1005}`（`Empty` 应答的静默丢），
@@ -1623,7 +1624,7 @@ client     gate G1(z1)                  源 scene S(z1)                      sce
 - **226 的同步段与延迟应答**（`SceneWorld.requestTravel`，`ClientRequestHandler` 注册为 `FreezePolicy.ALLOW`、`BattlePolicy.GATED`）：3024（目标 zone 为 0 或本 zone）→ 3007（地图不在 World 表，表空不拦）→ 3025（战斗在途）→
   13000（TRAVEL 任一阶段或任何冻结在途）/ 3014（63 / 镜像取号在途）→ 没装配跨 zone 传送时同步 3027。之后应答转成延迟应答（`PlayerCall.defer()` → `DeferredReply`，至多回一次），占 `PlayerSwitch{reason = TRAVEL, phase = PRECHECK}` 槽，
   读成员关系（`TravelTeamChecks`，`orTimeout(xm.scene.travel.team-check-timeout)`，缺省 2 s，启动校验 > 0 且 ≤ 5 s）：在队 3026、读失败 / 超时 3027、复查到战斗 3025，不在队回 `{0}`（受理）后进 RESOLVING。
-  延迟应答因此可能晚约 2 s，连发两条 226 时第二条的 13000 可能先于第一条的 `{0}`（客户端按信封 `id` 配对）。另一条启动校验：`team-check-timeout + switch-resolve-timeout + transfer-lease-margin + 5 s < 60 s`。
+  延迟应答因此正常晚约 2 s（回调丢失时最坏约 4 s，见本节「超时预算」），连发两条 226 时第二条的 13000 可能先于第一条的 `{0}`（客户端按信封 `id` 配对）。另一条启动校验：`team-check-timeout + switch-resolve-timeout + transfer-lease-margin + 5 s < 60 s`。
 - **选目标**（`SceneDirectoryService.selectTravelTarget`，scene-manager `travel.TravelRouter`）：参数（3005）→ 地图预检（读目标 zone 的频道计划快照，有这张图的主世界频道 ACTIVE / DRAINING 就放行，否则 3000；读失败调用失败）→
   合服围栏检查点 F4 → 选 gate（`GatePicker`：剔除连不上的、同地址只留最新、剔排空但全部排空时忽略、按 (人数, 节点号) 取最小；没有回内部码 3003）→ `GateTokenIssuer.issueRedirect`
   （`gate_node_id`、`zone_id` = gate 的 zone、300 s、持票者、`target_zone_id` = 目标，不带会话密钥）→ `{conf, ZoneRedirect}`，地址取 gate 的客户端通告地址、票据原字节。scene 侧 `SceneManagerSwitchTargets.selectTravel`
@@ -1633,7 +1634,9 @@ client     gate G1(z1)                  源 scene S(z1)                      sce
   → 写完（或写失败，计 `travel.placements{failed}`、照发帧）回到逻辑线程后墓碑仍在才发重定向帧；墓碑已被交叉的 `PlayerLeave` 消费 → 不发帧、计 `travel.frames.withheld`；帧写不出 / 异步写失败 → (E, 序号 + 2) 写源场景重连租约、计 `link_gone`；
   没提交（租约不足 / 探测确认没提交）→ 原地解冻、23 {3027}；被围栏或 `Superseded` → 23 {2017} 后断开；探测判失去 → 23 {3027} 后断开（不发 34）；冻结中会话离开 / 被顶号按 §8.1 处理，但**不释放 E+1**。
   `SceneWorld.travelFramesPending()` 是给 5.5 停服 / 冲突疏散的收敛谓词用的读口。
-- **gate**（§4.2 的重定向帧，§4.1 的 `RedirectToGate` 指令）：两条入口共用「核对 → 解绑 → REDIRECTED → 124 → 收口定时器」；REDIRECTED 之后客户端的一切请求（含再次握手）静默丢弃、计 `client_requests{redirected}`，
+- **gate**（§4.2 的重定向帧，§4.1 的 `RedirectToGate` 指令）：两条入口共用「内容校验 → 解绑 → REDIRECTED → 124 → 收口定时器」；绑定核对（节点、链路代次、玩家、from_epoch，对不上只计 `redirects{travel, stale}`、
+  不 `abandonEnter`）只在 226 的重定向帧（`onTravelRedirect`）上做，login 的指令（`redirectByLogin`）没有场景绑定可核对，迟到 / 重复的由应答处理按会话已断、正在断或已 REDIRECTED 计 `redirects{login, stale}`；
+  REDIRECTED 之后客户端的请求静默丢弃、计 `client_requests{redirected}`，再次握手也静默丢弃但不计数，
   之前转出、之后回来的应答照常下发而其中的会话指令一律忽略；断线照常通知 login、不发 `PlayerLeave`；`xm.gate.redirect-linger`（缺省 60 s，≥ 15 s）到点会话还在就关（原因 `redirect_linger`，不推 tip）。
   握手时把票据的持票者与目标 zone 存进会话，经 `SessionContext` 8 / 9 号字段交给 login；他区同号 gate 的票据按 `GateTokens.verify` 的验票顺序回 `token not for this zone`。
 - **login 的去向**（`EnterRoutes.resolveEnterRoute(G, TP, TZ, L)`，纯函数；G = 入口 zone，TP / TZ = 票据的持票者与目标 zone，L = 位置记录；钉住 = `TP ≠ 0 ∧ TZ == G`，Java 普通令牌的 TP 恒为 0）：
@@ -1846,14 +1849,14 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | scene | `xm_scene_mirror_resolves_total` | Counter | `result`=created / rejected / error / stale / wrong_node / source_moved / create_rejected | 镜像取号结果回到逻辑线程后的结局，每次受理恰好计一次：建好换入 / scene-manager 拒绝（23 {3023}）/ 调用失败、超时、租约无效、没装配（23 {1003}）/ 玩家已离开或在途已作废（丢弃，号作废）/ 号落在别的节点（23 {3023}，不该出现）/ 玩家已不在源、源已不在或在排空、停止接客、达上限（23 {3023}）/ 本地重号或建实例被拒（23 {3023}）。勾稽：`mirror_requests{accepted}` = Σ`mirror_resolves` + 在途数 |
 | scene | `xm_scene_admin_requests_total` | Counter | `op`=instance_create / instance_destroy / other，`status`=HTTP 状态码 | scene 管理端口 `/admin/**`（dev / test 建 / 毁副本，§4.21）的调用，鉴权失败也计；首次用到时才注册 |
 | scene | `xm_scene_switch_resolves_total` | Counter | `result`=local / remote / same / rejected / error / stale / in_battle | 63 远端去向经 scene-manager 选目标的结果（§8.1），每次恰好计一次（本节点直接解析掉的 63 不计）：落在本节点本地换 / 别的节点（冻结、交出）/ 就是当前场景 / 拒绝或指向本节点却不在、在排空（23 {3023}）/ 调用失败、兜底超时、应答残缺（23 {1003}）/ 回来时实例已离开或令牌不符（丢弃）/ 玩家在回合制战斗中（批次 6.3，§4.23）：选目标期间进了战斗（例如迟到的确认按锁重建了冻结），结果回来时中止换图、推 23 {3023}；发起交出的入口 `beginRemoteSwitch` 遇到在途玩家也计在这里（63 已先回 3023，那一支只是纵深防御） |
-| scene | `xm_scene_transfers_total` | Counter | `reason`=player / travel（批次 5.4），`result`=handed_off / lease_too_short / fenced / aborted_in_place / lost_unknown / left / taken_over / link_gone / superseded | 冻结交出的结局（§8.1 结局表），每次冻结恰好终结一次；reason × result 全量预注册，player = 63 的跨节点换图、travel = 226 的跨 zone 传送（§8.2）。勾稽：`switch_resolves{remote}` ≈ Σ`transfers{player}` + `transfers_in_flight`；handed_off 在 `PlayerTransfer` 交给链路时就计，之后异步写失败另计 `link_dropped{write_failed}`。travel 下：superseded = 交出 / 探测读到 ≥ E+2（踢 2017）；帧没写出的 link_gone 在 handed_off **之外另计**、不是终结结局；travel 的冻结时长同样记进 `transfer_freeze` |
+| scene | `xm_scene_transfers_total` | Counter | `reason`=player / travel（批次 5.4），`result`=handed_off / lease_too_short / fenced / aborted_in_place / lost_unknown / left / taken_over / link_gone / superseded | 冻结交出的结局（§8.1 结局表），每次冻结恰好终结一次；reason × result 全量预注册，player = 63 的跨节点换图、travel = 226 的跨 zone 传送（§8.2）。勾稽：`switch_resolves{remote}` ≈ Σ`transfers{player}` + 在途的 63 冻结数——`transfers_in_flight` 不分 reason、含 226 的冻结（`freezeForTravel` 同样加一），没有跨 zone 冻结在途时才等于它；player 的 handed_off 在 `PlayerTransfer` 交给链路时就计，之后异步写失败另计 `link_dropped{write_failed}`。travel 下：handed_off 在交出提交、移除实例时就计（帧还没发，勾稽见 zone-travel-spec §7.3 第二条）；superseded = 交出 / 探测读到 ≥ E+2（踢 2017）；帧没写出的 link_gone 在 handed_off **之外另计**、不是终结结局；travel 的冻结时长同样记进 `transfer_freeze` |
 | scene | `xm_scene_travel_requests_total` | Counter | `result`=accepted / zone_invalid / map_invalid / in_battle / in_team / busy_transfer / busy_switch / team_read_error / unavailable | 226 在受理之前的结局（批次 5.4，§8.2），每条恰好计一次；team_read_error 含读失败、超时与 PRECHECK 槽过期由作废方回 3027；unavailable = 没装配跨 zone 传送、同步 3027 |
 | scene | `xm_scene_travel_resolves_total` | Counter | `result`=chosen / rejected / error / stale / in_battle | 226 受理之后选目标的结局，每次受理恰好计一次；error 含调用失败、本地兜底超时、应答残缺与 RESOLVING 槽过期（作废方推 23 {3027}）；in_battle = 选中时在战斗中（推 23 {3025}） |
 | scene | `xm_scene_travel_placements_total` | Counter | `result`=written / failed | 交出之后写待落点的结局（写失败照样发重定向帧，第二条腿落目标 zone 的默认主世界） |
 | scene | `xm_scene_travel_frames_pending` | Gauge | — | 已交出并移出世界、重定向帧还没定的旅客数（`SceneWorld.travelFramesPending()`，给 5.5 的收敛谓词）；应很快回到 0，长时间不归零要告警 |
 | scene | `xm_scene_travel_frames_withheld_total` | Counter | — | 帧发出之前墓碑已被交叉的离开消费、重定向帧不发的次数（帧发出之后才交叉的由 gate 计 `redirects{travel, stale / orphan}`）；进 `redirects` 那一行的勾稽 |
 | scene | `xm_scene_transfer_freeze_seconds` | Timer | — | 从冻结到交出结局处理完的时长（与 `transfers` 同时记）；桶 5ms～20s |
-| scene | `xm_scene_transfers_in_flight` | Gauge | — | 冻结中（交出在途）的玩家数，逻辑线程在变化后推绝对值 |
+| scene | `xm_scene_transfers_in_flight` | Gauge | — | 冻结中（交出在途）的玩家数，逻辑线程在变化后推绝对值；批次 5.4 起不分 reason，63 与 226 两种冻结都算在内 |
 | scene | `xm_scene_transfer_enters_total` | Counter | `result`=ok / failed | 目标节点上交出进场（`PlayerEnter.transfer = true`）的结果；failed = 回了失败的进场结果（场景不在、停止接客、epoch 不符、加载 / 初始化失败），被离开 / 断链 / 接管 / 停服取消的不计 |
 | scene | `xm_scene_frozen_rejections_total` | Counter | `kind`=request / asset_op / move | 冻结闸在入口挡掉的操作（§8.1）：REJECT 回 1005 / 资产通道未见 seq 回 RETRY 27003 / 移动上行静默丢。GATED 方法由服务闸回的基线码不计 |
 | scene | `xm_scene_transfer_post_freeze_mutations_total` | Counter | — | 交出提交后发现冻结期间状态被改过（`toSave()` 与冻结快照不同）：**应恒为 0**，非 0 说明有入口漏了冻结闸，要告警 |
@@ -1876,7 +1879,7 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | scene | `xm_scene_battle_settlements_total` | Counter | `path`=online / by_lock / login / rescue，`result`=applied / already_applied / discarded_invalid / discarded_mismatch / discarded_void / deferred_frozen / deferred_currency / deferred_recovering / deferred_lock_read / deferred_ledger / not_here | 结算到达的结论，按四条应用路径分：在线冻结匹配 / 没有冻结按锁 / 进场恢复 / rescue。already_applied 含「本实例已销账的局被过期读带回来」。deferred_currency 持续出现 = 该玩家金币入账一直被拒、开不了下一局，要 GM 处置 |
 | scene | `xm_scene_battle_acks_total` | Counter | `trigger`=apply / persisted / reaper / login / discard，`result`=released / not_ours / deferred / error | 销账（`ACK` 脚本）：released = 删到了记录或锁；not_ours = 都不是本局；deferred = 还没落盘（压一次存盘）；error = 脚本失败（账本条目保留，之后重试） |
 | scene | `xm_scene_battle_items_total`、`xm_scene_battle_ledger_evictions_total`、`xm_scene_battle_pending_corrupt_total`、`xm_scene_battle_exp_ignored_total` | Counter | 第一个 `kind`=consume_clamped / consume_rejected / drop_overflow / drop_lost；其余无标签 | 结算道具的异常路径（消耗按持有夹紧 / 非战斗道具拒扣 / 掉落改投临时格 / 两处都放不下丢失）；账本满 64 淘汰最旧项；待结算记录里的坏字段；结算里的经验（两版都没有经验系统，只记日志）。drop_lost、ledger_evictions、pending_corrupt 非 0 要告警 |
-| scene | `xm_scene_battle_gate_rejects_total` | Counter | `gate`=enter_scene / skill / attribute / pet / bag_sort / asset / move / default / zone_travel | 回合制战斗在途闸挡掉的操作（§4.23），每条被拒的请求恰好计一次、只计在自己的闸上：63 / 84（施法者与目标）/ 属性六写 / 宝宝六写 / 192 / 资产通道 debit·credit / 移动上行 / 缺省 REJECT / 226（zone_travel，批次 5.4：3025，同步段或在队检查回来时复查到）。定义在 `SceneMetrics`（各服务闸共用） |
+| scene | `xm_scene_battle_gate_rejects_total` | Counter | `gate`=enter_scene / skill / attribute / pet / bag_sort / asset / move / default / zone_travel | 回合制战斗在途闸挡掉的操作（§4.23），每条被拒的请求恰好计一次、只计在自己的闸上：63 / 84（施法者与目标）/ 属性六写 / 宝宝六写 / 192 / 资产通道 debit·credit / 移动上行 / 缺省 REJECT / 226（zone_travel，批次 5.4：只在同步段计，`SceneWorld.requestTravel`；在队检查或选目标回来时复查到战斗只回 3025 / 推 23 {3025}，分别计 `travel_requests{in_battle}` / `travel_resolves{in_battle}`，不计本指标）。定义在 `SceneMetrics`（各服务闸共用） |
 | battle | `xm_battle_rooms` | Gauge | — | 本节点的房间数（房间表 hooks 维护的原子量） |
 | battle | `xm_battle_room_creates_total` | Counter | `result`=ok / idempotent / invalid / fingerprint_reject / engine_reject / ticket_failed / not_allocatable | 建房结局，每次 createBattle 恰好计一次：新建 / 幂等命中 / 1005 / enforce 指纹不符 1006 / 引擎拒绝 1002 / 预签失败 1003 / 节点级拒绝（准入闸、在途超限，由控制面计） |
 | battle | `xm_battle_room_ends_total` | Counter | `reason`=finished / deadline / destroyed / aborted | 房间结局，每间房移除时恰好计一次：分出胜负 / 整场期限强制平局 / DestroyBattle / 停机作废 |

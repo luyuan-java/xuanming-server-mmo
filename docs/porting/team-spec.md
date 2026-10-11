@@ -1727,6 +1727,8 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
    - 不发、不收 `PlayerTeamRefreshEvent`（事件号 48 在 Java 不用）。
    - 不做 kTeammate AOI 优先级：Java 的 `ViewIndex` 表满时不挤人（`xm-scene/.../world/ViewIndex.java:15-25`）。
    - 跨 zone 传送（5.4）落地时，用同一个 Reader 判断「在队就拒 kZoneTravelInTeam」。
+     （2026-10-11 已落地：xm-scene 的 `team.TravelTeamChecks` 经 `TeamMembershipReader.readAsync` 读、套 `orTimeout(xm.scene.travel.team-check-timeout)`（缺省 2 s），在队 → 3026、读失败 / 超时 → 3027；
+     每次 226 现读，不缓存队伍号。代码已集成、全量单测通过，切片未验证，见 zone-travel-spec §5.5 与 PARITY「跨 zone 传送（226）与重定向（124）」行。）
 7. **涌现行为**：§4.8 的第 1–4 条自然成立。被跟随者换图也会触发钩子，但它已经和队长同场景，所以什么都不做，不会循环。
 8. **指标**：`xm_scene_team_follow_total{result=followed / same_scene / not_in_team / projection_missing / not_member / leader_not_on_node / stale / read_error}`，启动即注册。
 

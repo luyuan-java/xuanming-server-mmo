@@ -1093,6 +1093,7 @@ Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + �
 
 勾稽（对标基线 `[TravelHandoff]`）：`switch_resolves{remote}` ≈ Σ`transfers{*}` + `in_flight`；`transfers{handed_off}` ≈ `gate_scene_transfers{rebound}` + `{stale}` + `{orphan}`；
 `gate_scene_transfers{rebound}` = `{entered}` + `{enter_failed}` + `{link_unavailable}` + `{undeliverable}` + 断线中断的。
+（批次 5.4 起 `transfers` 带 `reason`：上面两式只取 `reason=player`；`in_flight` 不分 reason、含 226 的冻结，第一式应加的是在途的 63 冻结数。226 的勾稽见 zone-travel-spec §7.3，architecture.md §11 同口径。）
 
 ---
 

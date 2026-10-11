@@ -884,7 +884,7 @@ public interface SceneAssetOpService {
 
 - **新读法**：`PlayerLocationDirectory.findHolderAsync(pid) → {ONLINE(location) | NO_HOLDER(MISSING / LEASED / LOGGED_OUT) | ERROR}`（一段只读 Lua 同时取 `s` 与 `v`，异步）；
   `NodeDirectory` 增加按 (zone, nodeId) 的异步单条读（现在只有阻塞的 `list(zone)`，`xm-discovery/.../NodeDirectory.java:52-63`）。
-- **基线有、Java 没有的状态**：AwaitingPlacement（Java 跨区随 5.4）、同身份歧义（Redis map 按节点号做键，天然唯一）、镜像未同步（每次现读目录；可加 1 s 本地缓存，陈旧只多一次 NOT_HERE 或传输失败，正确性在 scene 账本与围栏）。
+- **基线有、Java 没有的状态**：AwaitingPlacement（Java 跨区随 5.4；2026-10-11 落地后也不是单独的状态：待落点写成 `s=l` 加节点号 0，`SceneAssetLocator` 判状态先于读节点号，按重连租约归到 `NoHolder(LEASE)`，调用方合成 NOT_HERE、稍后重投；代码已集成，切片未验证）、同身份歧义（Redis map 按节点号做键，天然唯一）、镜像未同步（每次现读目录；可加 1 s 本地缓存，陈旧只多一次 NOT_HERE 或传输失败，正确性在 scene 账本与围栏）。
 - 节点号按区租约、实例退出即交还（`architecture.md` §6），位置记录可能指向「同号新实例」：新实例回 NOT_HERE，Caller 重定位，不影响正确性。
 - **客户端缓存**：按 (host, port, instance_id) 缓存编程式 `ReferenceConfig<SceneAssetOpService>`（直连 `tri://host:port`、**`retries = 0`**、`check = false`、`timeout = 800`），
   条目在目录里消失或实例变了就 `destroy`（对应 `ConnCache.Remove`，`scenenode/conn.go:69-79`）。仓库里还没有编程式 ReferenceConfig 的先例（grep 无结果），实现时以测试为准；
