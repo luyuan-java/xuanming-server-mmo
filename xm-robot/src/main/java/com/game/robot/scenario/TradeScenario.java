@@ -42,7 +42,7 @@ import java.util.Set;
  * 聚宝斋只读面端到端（对应 mmorpg robot/trade_smoke_scenario.go，三个同区机器人 A（卖家）/ B（买家）/ C（卖家兼买家）经 gate → xm-trade；
  * trade-spec §4.9、§4.10、§9.6）。基线第 0–9 步照跑（Go :195-526）：
  * <ol>
- *   <li>第 0 步 A / B / C 进场。本机切片只有一个 zone，C 与 A 同区（相当于基线 {@code cross_zone = false}，Go :190-193）；</li>
+ *   <li>第 0 步 A / B / C 进场。C 与 A 同区（跨区步骤还没有接入，相当于基线 {@code cross_zone = false}，Go :190-193）；</li>
  *   <li>第 1 步 经 xm-trade 播种接口（{@link TradeAdminClient}，T5；基线 gRPC 直连 TradeAdmin）造 A 寄售、C 寄售、A 公示三条武器（子类 1）种子，
  *       标题带本轮 nonce；断言 {@code market_zone} = 卖家归属区 = 本区（Go :234-279）；</li>
  *   <li>第 2 步 A 经 gate 发 199 {@code TradeAdmin.SeedListing} → gate 按不认识的号丢弃：没有任何回包；只发一次（非法包阈值 50），
@@ -58,8 +58,8 @@ import java.util.Set;
  * 用编号纯数字搜索命中；已结束种子（公示 0、寄售 1 ms）卖家详情 ENDED、买家 20000、货架可见、寄售列表看不到；公示中的商品可收藏；
  * page / page_size 为 0 回显 1 / 20；拒绝应答只带 error_message（收藏另带 listing_id）、成功应答不设 error_message、tip 不带 parameters（§0.3）。
  *
- * <p>跨区步骤（C 在别区：zone 下互不可见、zone_filter 不能扩大范围；global 下 zone_filter = zone_b 只剩 C；C 看 A 的详情）只在有第二个 zone 时跑，
- * 本机切片跳过并记观察（T10、Q3）。账号是 run-tag 新号（基线固定 robot_9401–9403）。限频：196 / 197 / 200 每秒 10 条、198 每秒 5 条
+ * <p>跨区步骤（C 在别区：zone 下互不可见、zone_filter 不能扩大范围；global 下 zone_filter = zone_b 只剩 C；C 看 A 的详情）还没有接入（批次 5.4 只解锁了 team / guild / reconnect 的），
+ * 现在跳过并记观察（T10、Q3）。账号是 run-tag 新号（基线固定 robot_9401–9403）。限频：196 / 197 / 200 每秒 10 条、198 每秒 5 条
  * （messagelimiter.json:183-206），同一机器人相邻请求隔 {@link #REQUEST_SPACING}，任意 1 s 内同号至多 4 条。
  * 「不存在」的编号用 {@code Long.MAX_VALUE}（雪花号恒 &lt; 2^63 且远小于它，Go :109-111）。
  */
@@ -233,7 +233,7 @@ public final class TradeScenario {
                     "第 3 步 global 范围：zone_filter=本区 → 仍看到 A、C", describe(own), REF);
         }
         report.note("跨区步骤（C 在别区：zone 下 B 看不到 C、C 看不到 A、zone_filter=zone_b 不能扩大范围；global 下 zone_filter=zone_b 只剩 C；"
-                + "详情 C 看 A zone 下 20000 / global 下受理）：本机切片只有一个 zone，跳过（T10 / Q3）；由 xm-trade 服务单测与 MySQL 测试覆盖");
+                + "详情 C 看 A zone 下 20000 / global 下受理）：还没有接入（批次 5.4 只解锁了 team / guild / reconnect 的跨区步骤），跳过（T10 / Q3）；由 xm-trade 服务单测与 MySQL 测试覆盖");
 
         // ---- 第 4 步：公示页签 ----
         report.check(find(bOnSale.getListingsList(), listingNotice) == null && find(bOnSale.getListingsList(), listingEnded) == null,

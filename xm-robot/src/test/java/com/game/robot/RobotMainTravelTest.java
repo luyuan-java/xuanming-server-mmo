@@ -16,8 +16,8 @@ import org.junit.jupiter.api.Timeout;
 
 /**
  * 入口把 travel 三个子命令接到了 {@code TravelScenario} 上（批次 5.4）。对着一个没人监听的端口跑，验证的是接线、退出码与结果行的位置：
- * 不管场景停在哪一步（现在是骨架的 {@code not-implemented}，步骤落地之后是连不上 gateway 的那一步），最后一行都得是
- * {@code <标记>_FAIL step=…}，不能没有结果行、更不能是通过。
+ * 场景停在读区服列表那一步（{@code preflight}），最后一行都得是 {@code <标记>_FAIL step=preflight …}，不能没有结果行、更不能是通过。
+ * 场景本身的编排与判定见 {@code TravelScenarioTest}（对着假服务端整条跑）。
  */
 class RobotMainTravelTest {
 
@@ -55,19 +55,19 @@ class RobotMainTravelTest {
         assertThat(travel.exit()).isEqualTo(RobotMain.EXIT_FAIL);
         assertThat(travel.out()).contains("== xm-robot travel：robot_java_tvt1_a 等，gateway=http://127.0.0.1:" + port
                 + " zone=1 visit-zone=2 dwell-ms=0 travel-scene-config=2 开始 ==", "结论：失败");
-        assertThat(travel.lastLine()).startsWith("TRAVEL_SMOKE_FAIL step=").contains(" reason=");
+        assertThat(travel.lastLine()).startsWith("TRAVEL_SMOKE_FAIL step=preflight reason=");
         assertThat(travel.out()).doesNotContain("TRAVEL_SMOKE_OK");
 
         Run abandon = run(port, "travel-abandon");
         assertThat(abandon.exit()).isEqualTo(RobotMain.EXIT_FAIL);
         assertThat(abandon.out()).contains("== xm-robot travel-abandon：robot_java_tvt1_", "dwell-ms=35000 travel-scene-config=0");
-        assertThat(abandon.lastLine()).startsWith("TRAVEL_ABANDON_FAIL step=");
+        assertThat(abandon.lastLine()).startsWith("TRAVEL_ABANDON_FAIL step=preflight reason=");
 
         // 反向：从区 2 出发
         Run longStay = run(port, "travel-long", "--zone", "2", "--visit-zone", "1");
         assertThat(longStay.exit()).isEqualTo(RobotMain.EXIT_FAIL);
         assertThat(longStay.out()).contains("== xm-robot travel-long：", "zone=2 visit-zone=1");
-        assertThat(longStay.lastLine()).startsWith("TRAVEL_LONG_FAIL step=");
+        assertThat(longStay.lastLine()).startsWith("TRAVEL_LONG_FAIL step=preflight reason=");
     }
 
     @Test

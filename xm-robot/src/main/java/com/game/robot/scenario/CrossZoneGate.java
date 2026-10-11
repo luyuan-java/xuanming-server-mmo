@@ -2,11 +2,14 @@ package com.game.robot.scenario;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.game.robot.client.GatewayHttp;
+import com.game.robot.client.RobotClient;
 import com.game.robot.client.RobotException;
+import com.game.robot.flow.PlayerFlow;
 import java.util.Locale;
 
 /**
- * team / guild / trade 的<b>跨区步骤</b>（另一个号经 {@code --visit-zone} 登录）跑不跑的统一判定（批次 5.4，裁决 J6）。
+ * team / guild / trade / reconnect 的<b>跨区步骤</b>（另一个号经 {@code --visit-zone} 登录；reconnect 是经 {@code --visit-zone} 的入口重连）
+ * 跑不跑的统一判定（批次 5.4，裁决 J6）。
  *
  * <p>为什么要显式三态而不是「看区服列表自动决定」：自动判定在切片没起对（只起了一个区）时会静默跳过，结果看起来是绿的。
  * 所以给一个开关 {@code --cross-zone auto|require|skip}：
@@ -46,6 +49,20 @@ public final class CrossZoneGate {
                 }
             }
             return null;
+        }
+    }
+
+    /**
+     * 场景做跨区步骤要用的东西（批次 5.4 解锁 team / guild / reconnect 的跨区步骤）：开关、区服列表、另一个区的客户端与登录流程、两个区号。
+     *
+     * @param client 另一个区（{@code --visit-zone}）的客户端：assign-gate 按区给 gate；跟随 124 时也用它建连（地址由 124 定，与它的区号无关）
+     * @param flow   经另一个区的入口登录的流程
+     */
+    public record Visit(Mode mode, GatewayHttp gateway, RobotClient client, PlayerFlow flow, int homeZone, int visitZone) {
+
+        /** 读区服列表后判定（见 {@link CrossZoneGate#resolve}）。 */
+        public Decision resolve() throws RobotException {
+            return CrossZoneGate.resolve(mode, gateway, homeZone, visitZone);
         }
     }
 

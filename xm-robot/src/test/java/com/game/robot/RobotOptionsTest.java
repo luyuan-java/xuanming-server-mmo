@@ -409,12 +409,12 @@ class RobotOptionsTest {
         assertThat(catchUsage(List.of("team", "--cross-zone", "always"))).isEqualTo("--cross-zone 只能是 auto / require / skip：always");
         assertThat(catchUsage(List.of("team", "--cross-zone", "REQUIRE"))).as("只认小写").contains("--cross-zone 只能是");
         assertThat(RobotOptions.parse(List.of("team", "--cross-zone", "require"), ENV, NOW).toString())
-                .contains("visitZone=2, crossZone=require, prefix=").doesNotContain("dev-secret");
+                .contains("visitZone=2, crossZone=require, teamCrossZone=deny, prefix=").doesNotContain("dev-secret");
     }
 
     @Test
-    void cross_zone_require而两个区相同_team_guild_trade是参数错误_auto与skip照常_别的子命令不管() {
-        for (String sub : List.of("team", "guild", "trade")) {
+    void cross_zone_require而两个区相同_team_guild_trade_reconnect是参数错误_auto与skip照常_别的子命令不管() {
+        for (String sub : List.of("team", "guild", "trade", "reconnect")) {
             assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2"))).as(sub)
                     .isEqualTo(sub + " --cross-zone require 要两个不同的区：--visit-zone 与 --zone 都是 2");
             assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2", "--visit-zone", "1"))).as(sub + " 两个区不同").isNull();
@@ -432,7 +432,8 @@ class RobotOptionsTest {
 
         String travel = usage.lines().filter(l -> l.startsWith("  travel ")).findFirst().orElseThrow();
         assertThat(travel).contains("XM_ZONES=2", "step=preflight", "3024", "3007", "3026", "3027", "13000", "2011", "--dwell-ms", "--travel-scene-config",
-                "严格重登", "绝不建角", "TRAVEL_SMOKE_OK", "TRAVEL_SMOKE_FAIL step=", "move_ack", "ticket_binding", "hops=");
+                "严格重登", "绝不建角", "TRAVEL_SMOKE_OK", "TRAVEL_SMOKE_FAIL step=", "move_ack", "ticket_binding", "hops=", "reconnect_gate=", "GO-5",
+                "token not for this zone");
         assertThat(usage.lines().filter(l -> l.startsWith("  travel-abandon ")).findFirst().orElseThrow())
                 .contains("不跟随", "TRAVEL_ABANDON_OK", "TRAVEL_ABANDON_FAIL step=");
         assertThat(usage.lines().filter(l -> l.startsWith("  travel-long ")).findFirst().orElseThrow())
@@ -441,9 +442,26 @@ class RobotOptionsTest {
         assertThat(usage).contains("--cross-zone <值>", "XM_ROBOT_CROSS_ZONE", "auto（", "require（", "skip（", "缺省 auto");
         String visit = usage.lines().filter(l -> l.startsWith("  --visit-zone ")).findFirst().orElseThrow();
         assertThat(visit).contains("battle-cross-zone", "travel / travel-abandon / travel-long", "--cross-zone");
-        for (String sub : List.of("team", "guild", "trade")) {
+        for (String sub : List.of("team", "guild", "trade", "reconnect")) {
             String line = usage.lines().filter(l -> l.startsWith("  " + sub + " ")).findFirst().orElseThrow();
             assertThat(line).as(sub + " 的说明不再说「单 zone 时跳过」").contains("--cross-zone", "--visit-zone").doesNotContain("单 zone 时跳过");
         }
+    }
+
+    @Test
+    void team_cross_zone_缺省deny_allow走X2_命令行盖过环境变量_其他取值报错_帮助写明两支() throws Exception {
+        assertThat(RobotOptions.parse(List.of("team"), ENV, NOW).teamCrossZoneAllowed()).isFalse();
+        assertThat(RobotOptions.parse(List.of("team", "--team-cross-zone", "allow"), ENV, NOW).teamCrossZoneAllowed()).isTrue();
+        Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "XM_ROBOT_TEAM_CROSS_ZONE", "allow");
+        assertThat(RobotOptions.parse(List.of("team"), env, NOW).teamCrossZoneAllowed()).isTrue();
+        assertThat(RobotOptions.parse(List.of("team", "--team-cross-zone=deny"), env, NOW).teamCrossZoneAllowed()).isFalse();
+        assertThat(RobotOptions.parse(List.of("team", "--team-cross-zone", "allow"), ENV, NOW).toString()).contains("teamCrossZone=allow");
+
+        assertThat(catchUsage(List.of("team", "--team-cross-zone", "yes"))).isEqualTo("--team-cross-zone 只能是 allow / deny：yes");
+
+        String option = RobotOptions.usage().lines().filter(l -> l.startsWith("  --team-cross-zone ")).findFirst().orElseThrow();
+        assertThat(option).contains("XM_ROBOT_TEAM_CROSS_ZONE", "xm.team.allow-cross-zone", "4020", "X1", "X2", "缺省 deny");
+        String team = RobotOptions.usage().lines().filter(l -> l.startsWith("  team ")).findFirst().orElseThrow();
+        assertThat(team).contains("--team-cross-zone", "X1", "X2", "cross_zone=");
     }
 }

@@ -24,6 +24,7 @@ import com.game.robot.scenario.BattleSmokeScenario;
 import com.game.robot.scenario.ChatScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CrossNodeScenario;
+import com.game.robot.scenario.CrossZoneGate;
 import com.game.robot.scenario.CurrencyScenario;
 import com.game.robot.scenario.DrainScenario;
 import com.game.robot.scenario.DungeonScenario;
@@ -51,6 +52,7 @@ import com.game.robot.scenario.TravelScenario;
 import com.game.robot.scenario.ZonesScenario;
 import java.io.PrintStream;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -159,12 +161,17 @@ public final class RobotMain {
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.TEAM) {
-                    TeamScenario scenario = new TeamScenario(client, flow, registry, Path.of(options.tableDir()),
-                            options.accountPrefix(), options.runTag(), options.zoneId(), options.requestTimeout());
-                    title = "xm-robot team：" + scenario.accountA() + " 等，" + target;
-                    out.println("== " + title + " 开始 ==");
-                    report = scenario.run();
-                    resultLine = scenario.resultLine();
+                    // 跨区步骤（X1 / X2）的 C 经 --visit-zone 登录：另起一个那个区的客户端（不跑跨区步骤时它不建任何连接）
+                    try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
+                        TeamScenario scenario = new TeamScenario(client, flow, visitFor(options, visitClient), options.teamCrossZoneAllowed(),
+                                registry, Path.of(options.tableDir()), options.accountPrefix(), options.runTag(), options.zoneId(),
+                                options.requestTimeout());
+                        title = "xm-robot team：" + scenario.accountA() + " 等，" + target + " cross-zone=" + options.crossZone().wire()
+                                + " visit-zone=" + options.visitZoneId() + " team-cross-zone=" + (options.teamCrossZoneAllowed() ? "allow" : "deny");
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                        resultLine = scenario.resultLine();
+                    }
                 } else if (options.scenario() == RobotOptions.Scenario.BATTLE_SMOKE) {
                     BattleSmokeScenario scenario = new BattleSmokeScenario(client, flow, registry, matchAdmin(options, env),
                             options.accountPrefix(), options.runTag(), options.requestTimeout());
@@ -189,8 +196,10 @@ public final class RobotMain {
                     // 出发区（也是新号的归属区）用上面那个 --zone 的客户端；访客区另起一个 --visit-zone 的。两个区各一套登录流程：
                     // 经哪个区的入口登录，就用哪个区的 flow
                     try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
-                        PlayerFlow visitFlow = flowFor(visitClient, options);
-                        TravelScenario scenario = new TravelScenario(client, flow, visitClient, visitFlow,
+                        // 跟随 124 之后等 79 按「一跳 60 s」算（zone-travel-spec §11.11；第二条腿服务端约 26 s），不用通用的 15 s
+                        PlayerFlow homeFlow = travelFlowFor(client, options);
+                        PlayerFlow visitFlow = travelFlowFor(visitClient, options);
+                        TravelScenario scenario = new TravelScenario(client, homeFlow, visitClient, visitFlow,
                                 new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), registry, options, travel);
                         title = "xm-robot " + RobotOptions.subcommand(options.scenario()) + "：" + scenario.accountA() + " 等，" + target
                                 + " visit-zone=" + options.visitZoneId() + " dwell-ms=" + travel.dwell().toMillis()
@@ -215,11 +224,15 @@ public final class RobotMain {
                     report = scenario.run();
                     resultLine = scenario.resultLine();
                 } else if (options.scenario() == RobotOptions.Scenario.GUILD) {
-                    GuildScenario scenario = new GuildScenario(flow, registry, options.accountPrefix(), options.runTag(),
-                            options.zoneId(), options.requestTimeout());
-                    title = "xm-robot guild：" + scenario.accountA() + " 等，" + target;
-                    out.println("== " + title + " 开始 ==");
-                    report = scenario.run();
+                    // 跨区第 4 步的 C 经 --visit-zone 登录
+                    try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
+                        GuildScenario scenario = new GuildScenario(flow, visitFor(options, visitClient), registry, options.accountPrefix(),
+                                options.runTag(), options.zoneId(), options.requestTimeout());
+                        title = "xm-robot guild：" + scenario.accountA() + " 等，" + target + " cross-zone=" + options.crossZone().wire()
+                                + " visit-zone=" + options.visitZoneId();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                    }
                 } else if (options.scenario() == RobotOptions.Scenario.GUILD_ECONOMY) {
                     GuildEconomyScenario scenario = new GuildEconomyScenario(flow, registry, options.accountPrefix(),
                             options.runTag(), options.requestTimeout());
@@ -332,11 +345,16 @@ public final class RobotMain {
                         report = scenario.run();
                     }
                 } else if (options.scenario() == RobotOptions.Scenario.RECONNECT) {
-                    ReconnectScenario scenario = new ReconnectScenario(flow, ids, registry, Path.of(options.tableDir()),
-                            options.accountPrefix(), options.runTag(), options.requestTimeout(), options.observeTimeout());
-                    title = "xm-robot reconnect：" + scenario.account() + "，" + target;
-                    out.println("== " + title + " 开始 ==");
-                    report = scenario.run();
+                    // 跨区一步（批次 5.4）：经 --visit-zone 的入口重连，走 GO-5 回原处
+                    try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
+                        ReconnectScenario scenario = new ReconnectScenario(flow, visitFor(options, visitClient), ids, registry,
+                                Path.of(options.tableDir()), options.accountPrefix(), options.runTag(), options.requestTimeout(),
+                                options.observeTimeout());
+                        title = "xm-robot reconnect：" + scenario.account() + "，" + target + " cross-zone=" + options.crossZone().wire()
+                                + " visit-zone=" + options.visitZoneId();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                    }
                 } else if (options.scenario() == RobotOptions.Scenario.PET) {
                     PetScenario scenario = new PetScenario(flow, registry, options.accountPrefix(), options.runTag(),
                             options.requestTimeout(), options.observeTimeout());
@@ -410,6 +428,22 @@ public final class RobotMain {
     /** 某个区的登录流程（经哪个区的入口登录，就用哪个区的）。 */
     private static PlayerFlow flowFor(RobotClient client, RobotOptions options) {
         return new PlayerFlow(client, options.password(), options.requestTimeout(), options.enterSceneTimeout());
+    }
+
+    /**
+     * team / guild / reconnect 的跨区步骤用的另一个区（批次 5.4）：开关、区服列表、{@code --visit-zone} 的客户端与登录流程。
+     * 等 79 的上限同 travel（跨区重连要跟随 124）。
+     */
+    private static CrossZoneGate.Visit visitFor(RobotOptions options, RobotClient visitClient) {
+        return new CrossZoneGate.Visit(options.crossZone(), new GatewayHttp(options.gatewayUrl(), options.requestTimeout()), visitClient,
+                travelFlowFor(visitClient, options), options.zoneId(), options.visitZoneId());
+    }
+
+    /** travel 三个子命令的登录流程：等 79 的上限取 {@code --enter-scene-timeout-ms} 与一跳的上限（60 s）中较大的那个。 */
+    private static PlayerFlow travelFlowFor(RobotClient client, RobotOptions options) {
+        Duration enterScene = options.enterSceneTimeout().compareTo(TravelScenario.HOP_TIMEOUT) > 0
+                ? options.enterSceneTimeout() : TravelScenario.HOP_TIMEOUT;
+        return new PlayerFlow(client, options.password(), options.requestTimeout(), enterScene);
     }
 
     /** xm-battle dev 接口客户端（运维令牌同 audit：XM_ADMIN_TOKEN 或 run/xm-admin-token）。 */

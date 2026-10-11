@@ -49,8 +49,10 @@ import java.util.regex.Pattern;
  *
  * @param visitZoneId     另一个区。battle-cross-zone：B、C 登录的区（A 登录 {@code zoneId}）；travel 三个子命令：要去的访客区（从 {@code zoneId} 出发）——
  *                        这四个子命令要求它与 {@code zoneId} 不同。team / guild / trade 的跨区步骤里另一个号从它登录（见 {@code crossZone}）
- * @param crossZone       team / guild / trade：跨区步骤跑不跑（{@code --cross-zone auto|require|skip}，批次 5.4 裁决 J6）；
- *                        {@code require} 时这三个子命令也要求 {@code visitZoneId} 与 {@code zoneId} 不同
+ * @param crossZone       team / guild / trade / reconnect：跨区步骤跑不跑（{@code --cross-zone auto|require|skip}，批次 5.4 裁决 J6）；
+ *                        {@code require} 时这四个子命令也要求 {@code visitZoneId} 与 {@code zoneId} 不同
+ * @param teamCrossZoneAllowed team 的跨区步骤按哪一支跑（{@code --team-cross-zone allow|deny}，须与 xm-team 的
+ *                        {@code xm.team.allow-cross-zone} 一致）：false = X1（4020），true = X2（跨区同队、别区成员不跟随换图）
  * @param runTag          移动 / 货币 / 属性场景的账号标签：账号为 {@code 前缀 + mv + 标签 + _a / _b}、{@code 前缀 + cur / at + 标签}；
  *                        缺省按当前时间生成，每次都是新号
  * @param expectGmAllowed 货币场景：服务端运行模式放行 GM 指令（allow）还是拒绝（deny）
@@ -68,6 +70,7 @@ public record RobotOptions(
         int zoneId,
         int visitZoneId,
         CrossZoneGate.Mode crossZone,
+        boolean teamCrossZoneAllowed,
         String accountPrefix,
         int count,
         String runTag,
@@ -167,11 +170,15 @@ public record RobotOptions(
         ZONE("zone", "XM_ROBOT_ZONE", "1", "区号（assign-gate 的 zone_id，≥ 1）"),
         VISIT_ZONE("visit-zone", "XM_ROBOT_VISIT_ZONE", "2",
                 "另一个区（≥ 1）：battle-cross-zone 里 B 与观众 C 登录的区（A 登录 --zone）；travel / travel-abandon / travel-long 里要去的访客区"
-                        + "（从 --zone 出发）——这四个子命令要求它与 --zone 不同。team / guild / trade 的跨区步骤里另一个号从它登录"
+                        + "（从 --zone 出发）——这四个子命令要求它与 --zone 不同。team / guild / trade 的跨区步骤里另一个号从它登录、reconnect 的跨区重连经它的入口"
                         + "（见 --cross-zone）；别的子命令不看它"),
         CROSS_ZONE("cross-zone", "XM_ROBOT_CROSS_ZONE", "auto",
-                "team / guild / trade：跨区步骤（另一个号经 --visit-zone 登录）跑不跑：auto（--visit-zone 与 --zone 不同、且在区服列表里是 OPEN 才跑，"
+                "team / guild / reconnect：跨区步骤（另一个号经 --visit-zone 登录，reconnect 是经 --visit-zone 的入口重连；trade 的还没接入）跑不跑："
+                        + "auto（--visit-zone 与 --zone 不同、且在区服列表里是 OPEN 才跑，"
                         + "否则跳过并写明原因）/ require（跑不了即失败，验收用；两个区相同是参数错误）/ skip（不跑）；跑没跑写进报告与结果行"),
+        TEAM_CROSS_ZONE("team-cross-zone", "XM_ROBOT_TEAM_CROSS_ZONE", "deny",
+                "team 的跨区步骤按哪一支跑，须与 xm-team 的 xm.team.allow-cross-zone 一致：deny（xm-team 缺省：X1 别区的 C 申请 A 的队、"
+                        + "A 邀请 C 都回 4020）/ allow（X2：C 跨区入队，A 换图时同区的 B 跟进、别区的 C 不跟随）"),
         PREFIX("prefix", "XM_ROBOT_ACCOUNT_PREFIX", "robot_java_", "账号前缀（须在 xm-login 的开发账号前缀白名单里）"),
         COUNT("count", "XM_ROBOT_COUNT", "3", "smoke 的账号数（1–" + MAX_COUNT + "）"),
         RUN_TAG("run-tag", "XM_ROBOT_RUN_TAG", null, "smoke 以外各子命令的账号标签 [a-z0-9]{1,16}；缺省按当前时间生成（每次新号）"),
@@ -190,7 +197,8 @@ public record RobotOptions(
         SCENE_METRICS_URL("scene-metrics-url", "XM_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
                 "audit / guard：xm-scene 管理端口（抓指标）；battle-settle 可给逗号分隔的多个地址（双 scene 切片的两个节点，按节点之和判定）"),
         TABLE_DIR("table-dir", "XM_ROBOT_TABLE_DIR", "config-data/tables",
-                "reconnect / team：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点；team 选换图目标）"),
+                "reconnect / team / travel-abandon：配置表目录（读 World / BaseScene：选第二张世界地图、核对出生点；team 选换图目标；"
+                        + "travel-abandon 没给 --travel-scene-config 时取第二张世界地图当目标图）"),
         TRADE_ADMIN_URL("trade-admin-url", "XM_ROBOT_TRADE_ADMIN_URL", "http://127.0.0.1:18111",
                 "trade：xm-trade 管理端口（播种接口 POST /admin/trade/seed-listing，运维令牌同 audit）"),
         TRADE_SCOPE("trade-scope", "XM_ROBOT_TRADE_SCOPE", "zone",
@@ -311,6 +319,10 @@ public record RobotOptions(
         if (crossZone == CrossZoneGate.Mode.REQUIRE && hasCrossZoneSteps(scenario) && visitZone == zone) {
             throw new UsageException(subcommand(scenario) + " --cross-zone require 要两个不同的区：--visit-zone 与 --zone 都是 " + zone);
         }
+        String teamCrossZone = value(Opt.TEAM_CROSS_ZONE, given, env);
+        if (!teamCrossZone.equals("allow") && !teamCrossZone.equals("deny")) {
+            throw new UsageException("--team-cross-zone 只能是 allow / deny：" + teamCrossZone);
+        }
         String prefix = value(Opt.PREFIX, given, env);
         if (prefix.isEmpty() || !prefix.equals(prefix.strip()) || prefix.chars().anyMatch(Character::isWhitespace)) {
             throw new UsageException("--prefix 不能为空、不能含空白：\"" + prefix + "\"");
@@ -404,7 +416,7 @@ public record RobotOptions(
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
         }
 
-        return new RobotOptions(scenario, gateway, zone, visitZone, crossZone, prefix, count, runTag,
+        return new RobotOptions(scenario, gateway, zone, visitZone, crossZone, teamCrossZone.equals("allow"), prefix, count, runTag,
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
@@ -439,7 +451,8 @@ public record RobotOptions(
         out.append("  token     令牌与 HTTP 登录：/api/login 口令登录拿令牌（错口令 401、未知区 500）→ TCP access token 登录不签新令牌 → "
                 + "127 / HTTP 刷新轮换、用过的作废 → 旧 access 仍可用 → 同账号第 4 个未进游戏的连接 2024、断开一个后放行\n");
         out.append("  reconnect 落点：首登落默认主世界 → 63 换图 → 断开立即重连回原实例原位置 → 顶号时旧连接收 23 {2017}、"
-                + "新连接回原实例 → LeaveGame 后再进按首登落默认主世界出生点；读 --table-dir 的 World / BaseScene 表\n");
+                + "新连接回原实例 → 跨区重连（--cross-zone 决定跑不跑；批次 5.4）：断开后经 --visit-zone 的入口严格重登，26 无错后恰好一条 124（GO-5），"
+                + "跟随回到原实例原位置 → LeaveGame 后再进按首登落默认主世界出生点；读 --table-dir 的 World / BaseScene 表\n");
         out.append("  zones     区服目录 / 健康探测 / 公告：经 xm-data 运维接口建临时区（预告 → 维护 → 开放 → 删），核对区服列表与"
                 + " assign-gate 跟着变、本区显示负载档；白名单增删；公告只下发生效中的；需要 xm-data 与运维令牌\n");
         out.append("  queue     登录排队：经 xm-data 把本区容量压到 1 → assign-gate 回 100 + 排队令牌 → 轮询仍排 → 放开容量后轮询拿到"
@@ -456,7 +469,8 @@ public record RobotOptions(
                 + "B 持 1V1 排队票 4026[B] 后取消）→ S7 整队开战（211 回 STARTING、B 收 MATCH_STARTED、两人同一 battle_id 的 177 / 143、"
                 + "直连挂机打到 150、两人收 MATCH_ENDED）→ S8 B 单人 PVE 战斗中 A 开战 4025[B] → 解散；"
                 + "另钉 4003 / 4005 / 4006 / 4007 / 4013 / 4017、MEMBER_ONLINE、上行 213 不回包；跨区步骤（另一个新号 C 经 --visit-zone 登录、"
-                + "归属区是 --visit-zone：C 申请 A 的队、A 邀请 C 都回 4020）按 --cross-zone 决定跑不跑，跑没跑写进报告与结果行。"
+                + "归属区是 --visit-zone）按 --cross-zone 决定跑不跑，按 --team-cross-zone 走一支：deny 是 X1（C 申请 A 的队、A 邀请 C 都回 4020），"
+                + "allow 是 X2（C 跨区入队，A 换图时同区的 B 跟进、别区的 C 不跟随）；跑没跑写进报告与结果行（cross_zone=run / skip / fail）。"
                 + "整队开战（批次 6.4）需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService；结尾写 TEAM_SMOKE_OK … 或 TEAM_SMOKE_FAIL step=…\n");
         out.append("  guild     帮会核心（A / B / D / E / F 五个新号）：建帮落归属区 / 重复建帮 14000 / 本区榜 / 改公告 / 申请 → 审批 → "
                 + "各推送 / 伪造 player_id 退帮按会话受理 / 上行 8 与 220 信封 1003 / 任命长老 / 长老踢人边界 / 两次转让 / 退帮 / 解散后 "
@@ -472,7 +486,7 @@ public record RobotOptions(
                 + "超末页钳到末页 → 拍卖 20003 → 详情（不存在 20000、卖家看已结束的、买家 20000）→ 收藏 / 只看收藏 / 取消 → 货架；"
                 + "另钉参数非法 1005、LIKE 通配按字面量、按编号搜索。需要 dev 运行模式与运维令牌；--trade-scope 须与 xm-trade 一致；"
                 + "跨区步骤（zone 范围：C 改经 --visit-zone 登录、归属区是 --visit-zone，C 的种子落在 --visit-zone 的市场，本区的 B 看不到 C）"
-                + "按 --cross-zone 决定跑不跑，跑没跑写进报告\n");
+                + "还没有接入（只写观察记录，--cross-zone 对 trade 暂不生效）\n");
         out.append("  cross-node 跨节点换图（三个新号；需要 XM_SCENE_NODES=2 起两个 scene 节点、per-node 覆盖、每图每节点一个频道）：落位到同图"
                 + "两个频道（同场景就登出等 6 s 重登，有上限）→ A 63 {scene_id = B 的场景} 应答 {0}、79 / 新实体号的 21 / 含 B 的 47、"
                 + "B 收 A 的 21、留在原场景的 C 收 A 旧实体的 51 → 目标节点上移动（B 收 66）与 77 → 断开重连回原实例原位 → 63 换回 → "
@@ -544,18 +558,20 @@ public record RobotOptions(
         out.append("  travel    跨 zone 传送往返（A、B 两个新号，批次 5.4；需要 XM_ZONES=2 的切片——两个区各有 gate 与 scene 且都在区服列表里，"
                 + "另需 dev 运行模式）：区服列表里 --zone 与 --visit-zone 都是 OPEN（否则失败 step=preflight）→ A、B 经 --zone 登录，"
                 + "A 的归属区是 --zone、登录期间没有 124、GM 加金币得出发值 → 226 的同步拒绝（目标为 0 或本区 3024、表外地图 3007、在队 3026）→ "
-                + "去没有部署的区：应答 {0} 后 23 {3027}，留在原地照常可玩 → 226 {--visit-zone, --travel-scene-config}：应答 {0} 先于 124、"
-                + "票据的 zone_id / player_id / target_zone_id 与到期时刻 → 跟随 124（握手成功后才关旧连接，晚关的那一会儿旧连接上的请求没有回包）→ "
-                + "严格重登（角色列表必须有原角色、绝不建角、归属区不变）、79 在 124 之后、新连接上没有第二条 124、金币不变 → 停留 --dwell-ms 后"
-                + "没有 23 / 34 / 124 → B 拿 A 的票据握手后进自己的角色 2011（持票者不符）、同一张票据交给出发区的 gate 握手被拒 → "
-                + "连发两条 226 回程（一条 {0}、一条 13000，"
-                + "先关旧连接再握手）、金币不回档 → 登出后经 --visit-zone 的入口登录没有 124；结尾写 TRAVEL_SMOKE_OK …"
-                + "（字段名与次序同基线 robot：player_id home_zone visit_zone home_gate visit_gate back_gate gold_home gold_back move_ack "
-                + "ticket_binding reject_tip reject_map_tip，后接 hops=…）或 TRAVEL_SMOKE_FAIL step=… reason=…。"
+                + "去没有部署的区：应答 {0} 后 23 {3027}，留在原地照常可玩 → 226 {--visit-zone, --travel-scene-config}：应答 {0}（0a 00）先于 124、"
+                + "B 收到 A 的 51、票据的 zone_id / player_id / target_zone_id 与到期时刻 → 跟随 124（握手成功后晚 3 s 关旧连接，那一会儿旧连接上的请求没有回包）→ "
+                + "严格重登（角色列表必须有原角色、绝不建角、归属区不变）、79 在 124 之后、金币不变、GM +7 → 停留 --dwell-ms 后"
+                + "没有 23 / 34 / 124 → 直接关 TCP、经 --zone 的入口重连：26 无错后恰好一条 124（GO-5）→ 跟随回到原实例原坐标 → "
+                + "再关 TCP、经 --visit-zone 的入口直连：没有 124、原实例 → B 拿 A 的票据握手后进自己的角色 2011（持票者不符）、"
+                + "同一张票据交给出发区的 gate 握手被拒（token not for this zone）→ 连发两条 226 回程（按信封 id 配对：一条 {0}、一条 13000；"
+                + "先关旧连接再握手）、金币不回档 → 登出后经 --visit-zone 的入口登录没有 124 → 留底：124 共 3 条、每个窗口恰好一条、79 都在 124 之后；"
+                + "结尾写 TRAVEL_SMOKE_OK …（字段名与次序同基线 robot：player_id home_zone visit_zone home_gate visit_gate back_gate gold_home "
+                + "gold_back move_ack ticket_binding reject_tip reject_map_tip，后接 hops=… reconnect_gate=…）或 TRAVEL_SMOKE_FAIL step=… reason=…。"
                 + "同一批账号换区重跑要隔 30 s（重连租约）或换 --run-tag\n");
         out.append("  travel-abandon 拿到 124 不跟随（两个新号；前置同 travel）：发 226 拿到 124 后直接关旧连接、不去目标 gate → 一个号经 --zone 的"
                 + "入口严格重登：落在 --zone、没有 124、金币等于出发值；另一个号经 --visit-zone 的入口严格重登：落在 226 请求的那张"
-                + "（非默认的）地图；结尾写 TRAVEL_ABANDON_OK … 或 TRAVEL_ABANDON_FAIL step=… reason=…\n");
+                + "（非默认的）地图（--travel-scene-config 为 0 时取 --table-dir 里 World 表的第二张世界地图）；"
+                + "结尾写 TRAVEL_ABANDON_OK … 或 TRAVEL_ABANDON_FAIL step=… reason=…\n");
         out.append("  travel-long 访客区断线久等（一个新号；前置同 travel）：传送到 --visit-zone 后直接关 TCP，等 31 s（越过 30 s 的重连租约）→ "
                 + "经 --zone 的入口严格重登：落在 --zone、没有 124；结尾写 TRAVEL_LONG_OK … 或 TRAVEL_LONG_FAIL step=… reason=…\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
@@ -575,7 +591,7 @@ public record RobotOptions(
     @Override
     public String toString() {
         return "RobotOptions[scenario=" + scenario + ", gateway=" + gatewayUrl + ", zone=" + zoneId + ", visitZone=" + visitZoneId
-                + ", crossZone=" + crossZone.wire() + ", prefix="
+                + ", crossZone=" + crossZone.wire() + ", teamCrossZone=" + (teamCrossZoneAllowed ? "allow" : "deny") + ", prefix="
                 + accountPrefix + ", count=" + count + ", runTag=" + runTag + ", connectTimeout=" + connectTimeout
                 + ", requestTimeout=" + requestTimeout + ", enterSceneTimeout=" + enterSceneTimeout
                 + ", observeTimeout=" + observeTimeout + ", expectJump=" + expectJump + ", expectGmAllowed=" + expectGmAllowed
@@ -609,7 +625,7 @@ public record RobotOptions(
 
     /** 带可选跨区步骤的子命令（由 {@code --cross-zone} 决定跑不跑）。 */
     static boolean hasCrossZoneSteps(Scenario scenario) {
-        return scenario == Scenario.TEAM || scenario == Scenario.GUILD || scenario == Scenario.TRADE;
+        return scenario == Scenario.TEAM || scenario == Scenario.GUILD || scenario == Scenario.TRADE || scenario == Scenario.RECONNECT;
     }
 
     private static Opt byArg(String name) throws UsageException {

@@ -17,8 +17,10 @@ import com.game.robot.client.GameConnection;
 import com.game.robot.client.MessageIds;
 import com.game.robot.client.Received;
 import com.game.robot.client.RobotException;
+import com.game.robot.flow.EnterOutcome;
 import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
+import com.game.robot.flow.RedirectFollower;
 import com.game.robot.flow.Timings;
 import com.game.table.ConfigTables;
 import com.game.table.LoginErrorTip;
@@ -37,6 +39,9 @@ import java.util.Set;
  *   <li>进游戏落在默认主世界（World 表第一行），用 63 换到另一张世界地图 M2（落 M2 出生点），走几步停下；</li>
  *   <li><b>短线重连</b>：A 断开后立即重连进游戏 → 回到 M2 的同一个场景实例、断开前走到的点（重连租约内按位置记录落点）；</li>
  *   <li><b>顶号</b>：A 在线时从另一条连接进同一角色 → 旧连接收到 23 {2017} 后被关闭，新连接回到 M2 同一实例；</li>
+ *   <li><b>跨区重连</b>（批次 5.4，zone-travel-spec §11.12；{@code --cross-zone} 决定跑不跑，{@link CrossZoneGate}）：A 断开后经
+ *       {@code --visit-zone} 的入口严格重登 → 26 无错、随后恰好一条 124（GO-5：角色还在本区，那个区的 login 只送连接）→ 跟随 →
+ *       回到 M2 原实例、原位置；</li>
  *   <li><b>干净登出</b>：发完 LeaveGame 立即关连接（契约里的收尾方式），再进游戏 → 按首登落默认主世界出生点。</li>
  * </ol>
  * 依据：登录契约 §8；scene 契约 §1（首登落 World 第一行）。第 2、3 步回原实例与第 4 步换图落出生点是 Java 的行为——基线在 zone 内
@@ -53,7 +58,10 @@ public final class ReconnectScenario {
     private static final Duration WALK_TIME = Duration.ofMillis(500);
     private static final Vec3 FACING = new Vec3(0, 0, 90);
 
+    private static final String REF_CROSS = "zone-travel-spec §11.12、§4.3 R1 / R2、X18；PARITY「短线重连与落点」行 ⑥";
+
     private final PlayerFlow flow;
+    private final CrossZoneGate.Visit visit;
     private final MessageIds ids;
     private final ConfigTables tables;
     private final String account;
@@ -64,9 +72,11 @@ public final class ReconnectScenario {
     private final CheckReport report = new CheckReport();
     private final List<GameConnection> connections = new ArrayList<>();
 
-    public ReconnectScenario(PlayerFlow flow, MessageIds ids, MessageIdRegistry registry, Path tableDir,
+    /** @param visit 跨区重连（批次 5.4）用的另一个区与开关 */
+    public ReconnectScenario(PlayerFlow flow, CrossZoneGate.Visit visit, MessageIds ids, MessageIdRegistry registry, Path tableDir,
                              String accountPrefix, String runTag, Duration requestTimeout, Duration observeTimeout) {
         this.flow = flow;
+        this.visit = visit;
         this.ids = ids;
         this.tables = ConfigTables.load(tableDir);
         this.account = accountName(accountPrefix, runTag);
@@ -129,10 +139,13 @@ public final class ReconnectScenario {
                 REF);
         checkSameInstance(replacing.sceneInfo(), m2, "顶号：新连接回到原场景实例");
 
+        // 3b. 跨区重连（批次 5.4）：经另一个区的入口重连，走 GO-5 回原处
+        EnteredPlayer current = crossZoneReconnect(replacing, m2, walked);
+
         // 4. 干净登出后再进：按首登落默认主世界出生点
         // 契约里的收尾方式：发完 17 立即关连接、不等应答（gate 按主动离开通知 scene）
-        replacing.connection().send(leaveGame, LeaveGameRequest.getDefaultInstance());
-        replacing.connection().close();
+        current.connection().send(leaveGame, LeaveGameRequest.getDefaultInstance());
+        current.connection().close();
         EnteredPlayer fresh = enter();
         ActorCreateS2C freshSelf = flow.awaitSelfActor(fresh, observeTimeout);
         report.check(fresh.sceneInfo().getSceneConfigId() == home, "LeaveGame 后再进游戏按首登落默认主世界",
@@ -142,6 +155,57 @@ public final class ReconnectScenario {
         Vec3 spawnHome = spawn(home);
         report.check(freshAt.approx(spawnHome, LOCATION_EPS), "换了地图落出生点",
                 "自己的 21 位置 " + freshAt + "，期望 " + spawnHome, REF);
+    }
+
+    /**
+     * 3b. 跨区重连（批次 5.4，zone-travel-spec §11.12、§4.3 R1 / R2）：A 断开后经另一个区的入口严格重登。角色的位置记录在本区、带节点号，
+     * 那个区的 login 不夺权、不分配，回 26 成功再推一条 124（GO-5）；跟随之后在本区严格重登，回到 M2 原实例、原位置（PARITY ⑥ 延伸到跨 zone，X18）。
+     * 跑不跑由 {@link CrossZoneGate} 定；中断只记失败，返回 A 此刻所在的连接（第 4 步接着用）。
+     */
+    private EnteredPlayer crossZoneReconnect(EnteredPlayer current, SceneInfoComp m2, Vec3 walked) throws RobotException {
+        CrossZoneGate.Decision decision;
+        try {
+            decision = visit.resolve();
+        } catch (RobotException e) {
+            report.fail("跨区重连：读区服列表", e.getMessage(), REF_CROSS);
+            return current;
+        }
+        if (decision instanceof CrossZoneGate.Fail fail) {
+            report.fail("跨区重连要有第二个区", fail.reason(), REF_CROSS);
+            return current;
+        }
+        if (!decision.runs()) {
+            report.note("跨区重连没跑：" + decision.reason());
+            return current;
+        }
+        long playerId = current.playerId();
+        current.connection().close();
+        GameConnection viaVisit = visit.client().connect(visit.client().assignGate());
+        connections.add(viaVisit);
+        EnterOutcome outcome = visit.flow().reenterOrRedirect(viaVisit, account, playerId, new Timings());
+        if (outcome instanceof EnterOutcome.Entered entered) {
+            report.fail("跨区重连：经区 " + visit.visitZone() + " 的入口重连 → 26 无错，随后一条 124（GO-5）",
+                    "直接在区 " + visit.visitZone() + " 进了场：scene_config_id=" + entered.player().sceneInfo().getSceneConfigId()
+                            + "（那个区的 login 没有按位置记录把人送回区 " + visit.homeZone() + "）", REF_CROSS);
+            return entered.player();
+        }
+        EnterOutcome.Redirected redirected = (EnterOutcome.Redirected) outcome;
+        long now = System.currentTimeMillis() / 1000;
+        List<String> problems = TravelChecks.ticketProblems(redirected.target().ticket(), redirected.target(), playerId, visit.homeZone(), now);
+        report.check(problems.isEmpty(), "跨区重连：经区 " + visit.visitZone() + " 的入口重连 → 26 无错，随后一条 124 送回区 " + visit.homeZone()
+                        + "（GO-5；票据钉区 " + visit.homeZone() + "、持票者是 A）",
+                TravelChecks.describe(redirected.target().ticket()) + (problems.isEmpty() ? "" : "；不符：" + String.join("；", problems)), REF_CROSS);
+        RedirectFollower.Followed followed = new RedirectFollower(visit.client()).follow(viaVisit, redirected.target());
+        connections.add(followed.connection());
+        EnteredPlayer back = flow.reenter(followed.connection(), account, playerId, new Timings());
+        ActorCreateS2C self = flow.awaitSelfActor(back, observeTimeout);
+        checkSameInstance(back.sceneInfo(), m2, "跨区重连：跟随 124 后回到原场景实例");
+        Vec3 at = Vec3.of(self.getTransform().getLocation());
+        report.check(at.approx(walked, LOCATION_EPS), "跨区重连：回到原位置", "自己的 21 位置 " + at + "，期望 " + walked, REF_CROSS);
+        long redirects = viaVisit.inbox().snapshot(0).stream().filter(r -> r.messageId() == redirected.frame().messageId()).count()
+                + back.connection().inbox().snapshot(0).stream().filter(r -> r.messageId() == redirected.frame().messageId()).count();
+        report.check(redirects == 1, "跨区重连：全程恰好一条 124（票据钉住本区，回来之后不再被送走）", "124 共 " + redirects + " 条", REF_CROSS);
+        return back;
     }
 
     /**

@@ -202,8 +202,8 @@ public final class BattleCrossZoneScenario {
         queuers.add(b);
         report.note("A=" + uid(a.id()) + "（区 " + zoneA + "） B=" + uid(b.id()) + " C=" + uid(c.id()) + "（区 " + zoneB + "） match-admin="
                 + admin.baseUrl());
-        report.note("Z1 角色列表的 zone_id（建角归属区）没有核对：建角取会话 zone 归批次 5.4（X16），合入之前 B、C 的归属区会被记成 login 的区；"
-                + "1V1 不读归属区，不影响本场景");
+        report.note("Z1 角色列表的 zone_id（建角归属区）不在本场景核对：1V1 不读归属区；建角取会话 zone（X16）由 travel 与 team / guild 的跨区步骤核对，"
+                + "不影响本场景");
 
         // ---- Z2：指标与评分的基数 ----
         steps.step("z2-baseline", report);

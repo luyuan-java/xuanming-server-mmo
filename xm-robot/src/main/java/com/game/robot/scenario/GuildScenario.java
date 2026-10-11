@@ -16,6 +16,8 @@ import com.game.proto.guild.GetGuildRankByGuildRequest;
 import com.game.proto.guild.GetGuildRankByGuildResponse;
 import com.game.proto.guild.GetGuildRankRequest;
 import com.game.proto.guild.GetGuildRankResponse;
+import com.game.proto.guild.GetGuildRequest;
+import com.game.proto.guild.GetGuildResponse;
 import com.game.proto.guild.GetPlayerGuildRequest;
 import com.game.proto.guild.GetPlayerGuildResponse;
 import com.game.proto.guild.GuildApplicantView;
@@ -69,7 +71,9 @@ import java.util.Optional;
  * <ol>
  *   <li>第 0 步 预清理：各自撤回遗留的待审申请，在帮就解散（帮主）或退帮（成员），固定标签可重复跑（Go :264-275、:908-948）；</li>
  *   <li>第 1–2 步 A 建帮（请求体 zone_id 故意填错 → 帮会落 A 的归属区、A 是帮主）→ 再建 14000（Go :277-303）；</li>
- *   <li>第 3 步 B 在本区榜上看得到（名次 ≠ 0、名字对）（Go :305-316）；第 4 步跨区：本机切片单 zone，跳过并记观察（D18）；</li>
+ *   <li>第 3 步 B 在本区榜上看得到（名次 ≠ 0、名字对）（Go :305-316）；第 4 步跨区（批次 5.4 解锁，{@code --cross-zone} 决定跑不跑，
+ *       {@link CrossZoneGate}）：新号 C 经 {@code --visit-zone} 登录（归属区必须是那个区，X16），查 A 的帮 14001、查名次 14007、
+ *       C 那个区的榜里没有 A 的帮、申请 14001、同名建帮 14010（帮名全服唯一）；</li>
  *   <li>第 5 步 B 未入帮改公告 14006；第 6 步 B 申请 → 两侧列表各见一条 → A 通过 → B 收 MEMBER_JOINED、
  *       自己查到在册、成员名与帮主名非空（Go :350-428）；</li>
  *   <li>第 7 步 公告写读、700 字节 14011；第 8 步 B 伪造帮主 id 退帮按会话身份受理；
@@ -145,15 +149,20 @@ public final class GuildScenario {
 
     private static final SecureRandom RANDOM = new SecureRandom();
 
+    private static final String REF_CROSS = "PARITY「帮会核心」行；guild-spec §11.6 第 4 步、D18；zone-travel-spec §5.13";
+
     private final PlayerFlow flow;
+    private final CrossZoneGate.Visit visit;
     private final String accountA;
     private final String accountB;
+    private final String accountC;
     private final String accountD;
     private final String accountE;
     private final String accountF;
     private final int zoneId;
     private final Duration requestTimeout;
     private final int create;
+    private final int getGuild;
     private final int getPlayerGuild;
     private final int leave;
     private final int disband;
@@ -174,18 +183,24 @@ public final class GuildScenario {
     private final CheckReport report = new CheckReport();
     private final List<GameConnection> connections = new ArrayList<>();
 
-    /** @param zoneId 本区（第 1 步断言帮会 zone_id == 建帮者的归属区 == 新号建角所在区） */
-    public GuildScenario(PlayerFlow flow, MessageIdRegistry registry, String accountPrefix, String runTag, int zoneId,
+    /**
+     * @param visit  第 4 步跨区用的另一个区与开关
+     * @param zoneId 本区（第 1 步断言帮会 zone_id == 建帮者的归属区 == 新号建角所在区）
+     */
+    public GuildScenario(PlayerFlow flow, CrossZoneGate.Visit visit, MessageIdRegistry registry, String accountPrefix, String runTag, int zoneId,
                          Duration requestTimeout) {
         this.flow = flow;
+        this.visit = visit;
         this.accountA = accountName(accountPrefix, runTag, "a");
         this.accountB = accountName(accountPrefix, runTag, "b");
+        this.accountC = accountName(accountPrefix, runTag, "c");
         this.accountD = accountName(accountPrefix, runTag, "d");
         this.accountE = accountName(accountPrefix, runTag, "e");
         this.accountF = accountName(accountPrefix, runTag, "f");
         this.zoneId = zoneId;
         this.requestTimeout = requestTimeout;
         this.create = registry.requireId(SERVICE, "CreateGuild");
+        this.getGuild = registry.requireId(SERVICE, "GetGuild");
         this.getPlayerGuild = registry.requireId(SERVICE, "GetPlayerGuild");
         this.leave = registry.requireId(SERVICE, "LeaveGuild");
         this.disband = registry.requireId(SERVICE, "DisbandGuild");
@@ -294,8 +309,8 @@ public final class GuildScenario {
         report.check(tipOf(page0) == 0 && page0.getPageSize() == DEFAULT_RANK_PAGE_SIZE && page0.getPage() == 1,
                 "GetGuildRank 页长 0 / 页 0 → 回显 20 / 1", describe(page0), REF);
 
-        report.note("第 4 步跨区（别区 GetGuild 14001、名次 14007、榜单不可见、申请 14001、同名 14010）：本机切片只有一个 zone，跳过（D18）；"
-                + "跨区可见性由 xm-guild 服务单测与 MySQL 测试覆盖");
+        // ---- 第 4 步：别区看不见、申请不了、同名建不了（批次 5.4 解锁） ----
+        crossZone(gid, guildName);
 
         // ---- 第 5 步：非成员不能改公告 ----
         expect(b, setAnnouncement, SetAnnouncementRequest.newBuilder().setGuildId(gid).setAnnouncement("非成员不该能改").build(),
@@ -519,7 +534,72 @@ public final class GuildScenario {
                 describeTip(fApps) + " " + fApps.getApplicationsCount() + " 条", REF);
 
         report.note("guild_id=" + uid(gid) + " zone=" + zoneId + " leader=A officer=D kicked=E rejected=F（同基线 GUILD_MGMT_OK / "
-                + "GUILD_SMOKE_OK 的字段；单 zone，没有 C）");
+                + "GUILD_SMOKE_OK 的字段；C 只在跨区第 4 步出现）");
+    }
+
+    // ================================================================ 第 4 步：跨区（Go :318-348）
+
+    /**
+     * 第 4 步跨区（guild-spec §11.6；基线 robot 用另一个区的号 C）：跑不跑由 {@link CrossZoneGate} 定。C 经 {@code --visit-zone} 登录，
+     * 归属区必须是那个区（建角取会话 zone，X16）；然后 A 的帮对 C 而言就是「别区的帮」：查不到（14001，与不存在同一答复）、没有名次（14007）、
+     * C 那个区的榜里没有它、申请 14001（不泄露「在别区」）、同名建帮 14010（帮名全服唯一、不分区）。
+     * 自成一体：中断只记失败，不影响后面的步骤。
+     */
+    private void crossZone(long gid, String guildName) throws RobotException {
+        CrossZoneGate.Decision decision;
+        try {
+            decision = visit.resolve();
+        } catch (RobotException e) {
+            report.fail("第 4 步跨区：读区服列表", e.getMessage(), REF_CROSS);
+            return;
+        }
+        if (decision instanceof CrossZoneGate.Fail fail) {
+            report.fail("第 4 步跨区要有第二个区", fail.reason(), REF_CROSS);
+            return;
+        }
+        if (!decision.runs()) {
+            report.note("第 4 步跨区没跑：" + decision.reason() + "；跨区可见性另由 xm-guild 服务单测与 MySQL 测试覆盖");
+            return;
+        }
+        Bot c;
+        try {
+            c = enter(visit.flow(), "C", accountC);
+        } catch (RobotException e) {
+            report.fail("第 4 步 C 经区 " + visit.visitZone() + " 的入口登录", e.getMessage(), REF_CROSS);
+            return;
+        }
+        int cHome = c.player.homeZoneId();
+        report.check(cHome == visit.visitZone(), "第 4 步 C 经区 " + visit.visitZone() + " 登录，角色列表的 zone_id == " + visit.visitZone()
+                        + "（建角取会话 zone，X16；不然后面的跨区断言没有意义）",
+                "角色列表 " + c.player.roles() + (c.player.created() ? "（本次新建）" : ""), REF_CROSS);
+        if (cHome != visit.visitZone()) {
+            return;
+        }
+        String problem = cancelAllApplications(c);
+        if (problem.isEmpty()) {
+            problem = leaveAnyGuild(c);
+        }
+        if (!problem.isEmpty()) {
+            report.fail("第 4 步 预清理：C 不在帮、没有待审申请", problem, REF_CROSS);
+            return;
+        }
+        expect(c, getGuild, GetGuildRequest.newBuilder().setGuildId(gid).build(), GetGuildResponse.parser(), TIP_NOT_FOUND,
+                "第 4 步 别区的 C 查 A 的帮（60）→ " + TIP_NOT_FOUND + "（别区的帮与不存在的帮同一答复）");
+        expect(c, getRankByGuild, GetGuildRankByGuildRequest.newBuilder().setGuildId(gid).build(), GetGuildRankByGuildResponse.parser(),
+                TIP_NOT_RANKED, "第 4 步 别区的 C 查 A 的帮的名次 → " + TIP_NOT_RANKED);
+        GetGuildRankResponse page = c.call(getRank, GetGuildRankRequest.newBuilder().setPage(1).setPageSize(MAX_RANK_PAGE_SIZE).build(),
+                GetGuildRankResponse.parser());
+        boolean listed = page.getEntriesList().stream().anyMatch(entry -> entry.getGuildId() == gid);
+        report.check(tipOf(page) == 0 && !listed, "第 4 步 别区的 C 看的是自己那个区的榜，里面没有 A 的帮",
+                describe(page) + " 含 A 的帮=" + listed, REF_CROSS);
+        expect(c, apply, ApplyJoinGuildRequest.newBuilder().setGuildId(gid).build(), ApplyJoinGuildResponse.parser(), TIP_NOT_FOUND,
+                "第 4 步 别区的 C 申请 A 的帮 → " + TIP_NOT_FOUND + "（不泄露「在别区」）");
+        CreateGuildResponse sameName = expect(c, create, CreateGuildRequest.newBuilder().setName(guildName).build(), CreateGuildResponse.parser(),
+                TIP_NAME_TAKEN, "第 4 步 别区的 C 用同一个帮名建帮 → " + TIP_NAME_TAKEN + "（帮名全服唯一、不分区）");
+        if (tipOf(sameName) == 0) {
+            // 不该建成：解散掉，别给下一轮留一个同名的帮
+            c.call(disband, DisbandGuildRequest.getDefaultInstance(), DisbandGuildResponse.parser());
+        }
     }
 
     // ================================================================ 预清理（Go cancelAllApplications / leaveAnyGuild）
@@ -646,7 +726,12 @@ public final class GuildScenario {
     }
 
     private Bot enter(String name, String account) throws RobotException {
-        EnteredPlayer player = flow.enter(account, new Timings());
+        return enter(flow, name, account);
+    }
+
+    /** 经 {@code entry} 那个区的入口登录（第 4 步的 C 走另一个区）。 */
+    private Bot enter(PlayerFlow entry, String name, String account) throws RobotException {
+        EnteredPlayer player = entry.enter(account, new Timings());
         connections.add(player.connection());
         return new Bot(name, player, requestTimeout);
     }

@@ -69,7 +69,10 @@ import java.util.function.Predicate;
  *       通常早于战斗结束，按 mark 扫描不会漏）。遇到 4025 / 4026 的过渡态在 20 s 内重试；</li>
  *   <li>S8 战斗中拒绝（Go :448-470）：B 单人 PVE 开战、已直连但尚未开自动（持战斗锁）时 A 发 211 → 4025，{@code parameters[0] = B}；
  *       先撞到别的队员（上一场结算尚未落地）时在 20 s 内重试；随后 B 把这一局打完；</li>
- *   <li>X1 / X2 跨区：本机切片单 zone，跳过并记观察（D16）；</li>
+ *   <li>X1 / X2 跨区（批次 5.4 解锁，放在 S6 之后、开战段之前；{@code --cross-zone} 决定跑不跑，{@link CrossZoneGate}）：新号 C 经
+ *       {@code --visit-zone} 登录，角色列表的归属区必须是那个区（X16）。按 {@code --team-cross-zone}（须与 xm-team 的
+ *       {@code xm.team.allow-cross-zone} 一致）走一支——deny（缺省）：X1 C 申请 A 的队 → 4020、A 邀请 C → 4020、A 的视图里没有 C；
+ *       allow：X2 C 申请 → A 同意 → 三人同队，A 换图时同区的 B 跟进、别区的 C 不跟随（跨 zone 不跟随，team-spec §6.10），随后 C 离队；</li>
  *   <li>S9 A 解散：其余成员收 DISBANDED，team_id = 0（Go :534-567）。</li>
  * </ol>
  * Java 增项（钉住契约细节，team-spec §10.5）：重复建队 4003 带 leader = A 的视图；用不符的 expected 离队 → 成功带当前视图；
@@ -78,9 +81,11 @@ import java.util.function.Predicate;
  *
  * <p>开战拒绝码、S7、S8 三段（批次 6.4，需要切片带 xm-match、xm-battle 与 scene 的 SceneBattleService）各自独立：某一段中断时记失败并继续，
  * S9 照常跑——切片里没有 xm-match 时只有这三段失败，其余步骤不受影响。结果行（{@link #resultLine}，供外层脚本按子串消费）：
- * {@code TEAM_SMOKE_OK team_id=… zone=… player_a=… player_b=… player_d=… battle_id=…} / {@code TEAM_SMOKE_FAIL step=… reason=…}。
+ * {@code TEAM_SMOKE_OK team_id=… zone=… player_a=… player_b=… player_d=… battle_id=… cross_zone=run|skip}（最后一个字段是 Java 加的，
+ * 说明跨区步骤跑没跑）/ {@code TEAM_SMOKE_FAIL step=… reason=…}。
  *
- * <p>账号是 run-tag 新号（D16，基线是固定的 robot_9301–9304），第四个账号 E 只用来充当「已登出的玩家」：进场后立即 LeaveGame 断开。
+ * <p>账号是 run-tag 新号（D16，基线是固定的 robot_9301–9304），第四个账号 E 只用来充当「已登出的玩家」：进场后立即 LeaveGame 断开；
+ * 跨区步骤另有 C（{@code _c}）。
  * 推送按 {@link com.game.robot.client.Inbox} 的到达序：触发动作之前记 mark、之后从 mark 起找（先到的推送不会漏，上一步的不会被误认）。
  * gate 对组队消息号限频每秒 3 条（GetMyTeam / ListMyInvites 5 条），同一机器人相邻请求至少隔 {@link #REQUEST_SPACING}（同 Go :97-99）。
  */
@@ -106,11 +111,18 @@ public final class TeamScenario {
     private static final int TIP_PLAYER_NOT_FOUND = TeamErrorTip.team_error.kTeamPlayerNotFound_VALUE;
     private static final int TIP_HOME_ZONE_UNKNOWN = TeamErrorTip.team_error.kTeamHomeZoneUnknown_VALUE;
     private static final int TIP_IN_MATCH = TeamErrorTip.team_error.kTeamInMatch_VALUE;
+    private static final int TIP_CROSS_ZONE_DENIED = TeamErrorTip.team_error.kTeamCrossZoneDenied_VALUE;
+    private static final String REF_CROSS = "PARITY「组队」行；team-spec §10.5 X1 / X2、§6.10；zone-travel-spec §5.13";
+    /** X2：B 跟进之后再看这么久，确认别区的 C 没有收到 79。 */
+    private static final Duration CROSS_ZONE_QUIET = Duration.ofSeconds(2);
 
     private final PlayerFlow flow;
+    private final CrossZoneGate.Visit visit;
+    private final boolean crossZoneTeamAllowed;
     private final Path tableDir;
     private final String accountA;
     private final String accountB;
+    private final String accountC;
     private final String accountD;
     private final String accountE;
     private final int zoneId;
@@ -144,19 +156,26 @@ public final class TeamScenario {
     private long playerA;
     private long playerB;
     private long playerD;
+    /** 跨区步骤跑没跑（结果行的 {@code cross_zone=…}）；还没判定时是 skip。 */
+    private String crossZoneField = "cross_zone=skip";
 
     /**
-     * @param client   建战斗直连用（S7 / S8）
-     * @param tableDir 配置表目录（S6 从 World 表选换图目标）
-     * @param zoneId   本区（S1 断言队伍 zone_id == 建队者的 home zone == 新号建角所在区）
+     * @param client               建战斗直连用（S7 / S8）
+     * @param visit                跨区步骤（X1 / X2）用的另一个区与开关
+     * @param crossZoneTeamAllowed {@code --team-cross-zone allow}：xm-team 允许跨区组队，走 X2；否则走 X1
+     * @param tableDir             配置表目录（S6 / X2 从 World 表选换图目标）
+     * @param zoneId               本区（S1 断言队伍 zone_id == 建队者的 home zone == 新号建角所在区）
      */
-    public TeamScenario(RobotClient client, PlayerFlow flow, MessageIdRegistry registry, Path tableDir, String accountPrefix, String runTag,
-                        int zoneId, Duration requestTimeout) {
+    public TeamScenario(RobotClient client, PlayerFlow flow, CrossZoneGate.Visit visit, boolean crossZoneTeamAllowed, MessageIdRegistry registry,
+                        Path tableDir, String accountPrefix, String runTag, int zoneId, Duration requestTimeout) {
         this.flow = flow;
+        this.visit = visit;
+        this.crossZoneTeamAllowed = crossZoneTeamAllowed;
         this.matchSteps = new TeamMatchSteps(client, registry, report, steps, requestTimeout, MatchSupport.Tempo.STANDARD);
         this.tableDir = tableDir;
         this.accountA = accountName(accountPrefix, runTag, "a");
         this.accountB = accountName(accountPrefix, runTag, "b");
+        this.accountC = accountName(accountPrefix, runTag, "c");
         this.accountD = accountName(accountPrefix, runTag, "d");
         this.accountE = accountName(accountPrefix, runTag, "e");
         this.zoneId = zoneId;
@@ -204,7 +223,7 @@ public final class TeamScenario {
     /** 结果行（跑完 {@link #run} 之后取）：{@code TEAM_SMOKE_OK …} 或 {@code TEAM_SMOKE_FAIL step=… reason=…}。 */
     public String resultLine() {
         return steps.line(report, "team_id=" + uid(teamId) + " zone=" + zoneId + " player_a=" + uid(playerA) + " player_b=" + uid(playerB)
-                + " player_d=" + uid(playerD) + " battle_id=" + uid(matchSteps.teamBattleId()));
+                + " player_d=" + uid(playerD) + " battle_id=" + uid(matchSteps.teamBattleId()) + " " + crossZoneField);
     }
 
     private void runChecks() throws RobotException {
@@ -409,9 +428,11 @@ public final class TeamScenario {
         steps.step("s6-follow", report);
         follow(a, b);
 
+        // ---- X1 / X2：跨区（批次 5.4 解锁）。放在开战段之前：X2 里 C 进过队，开战段只该有 A、B 两人 ----
+        crossZone(a, b, tid);
+
         // ---- 开战拒绝码、S7、S8（批次 6.4，TeamMatchSteps）：各自独立，中断时记失败并继续，S9 照常跑 ----
         matchSteps.run(a, b, tid);
-        report.note("X1 / X2 跨区：本机切片只有一个 zone，跳过；4020 由 xm-team 单测用不同 zone_id 的预置玩家覆盖（team-spec §10.5、D16）");
 
         // ---- S9：解散 ----
         steps.step("s9-disband", report);
@@ -490,6 +511,111 @@ public final class TeamScenario {
                 "A 换到 scene_config_id=" + target + " scene_id=" + uid(leader.getSceneId())
                         + followed.map(s -> "；B 进入 scene_id=" + uid(s.getSceneInfo().getSceneId())).orElse("；" + b.describeSince(bMark)),
                 REF_FOLLOW);
+    }
+
+    /**
+     * X1 / X2 跨区（team-spec §10.5；基线 X1 跨区拒绝 kTeamCrossZoneDenied、X2 允许时跨区组队且别区成员不跟随换图）。
+     * 跑不跑由 {@link CrossZoneGate} 定；跑的话新号 C 经 {@code --visit-zone} 登录，按 {@code --team-cross-zone} 走 X1 或 X2。
+     * 这一段自成一体：中断时记失败并继续（S9 照常跑），只有 A 的队伍状态不确定时才往外抛。
+     */
+    private void crossZone(Bot a, Bot b, long tid) throws RobotException {
+        CrossZoneGate.Decision decision;
+        try {
+            decision = visit.resolve();
+        } catch (RobotException e) {
+            steps.step("x-preflight", report);
+            crossZoneField = "cross_zone=fail";
+            report.fail("X1 / X2 跨区：读区服列表", e.getMessage(), REF_CROSS);
+            return;
+        }
+        crossZoneField = decision.field();
+        if (decision instanceof CrossZoneGate.Fail fail) {
+            steps.step("x-preflight", report);
+            report.fail("X1 / X2 跨区步骤要有第二个区", fail.reason(), REF_CROSS);
+            return;
+        }
+        if (!decision.runs()) {
+            report.note("X1 / X2 跨区没跑：" + decision.reason());
+            return;
+        }
+        steps.step("x0-visitor", report);
+        Bot c;
+        try {
+            c = enter(visit.flow(), "C", accountC);
+        } catch (RobotException e) {
+            report.fail("X C 经区 " + visit.visitZone() + " 的入口登录", e.getMessage(), REF_CROSS);
+            return;
+        }
+        int cHome = c.player.homeZoneId();
+        report.check(cHome == visit.visitZone(), "X C 经区 " + visit.visitZone() + " 登录，角色列表的 zone_id == " + visit.visitZone()
+                        + "（建角取会话 zone，X16；不然后面的跨区断言没有意义）",
+                "角色列表 " + c.player.roles() + (c.player.created() ? "（本次新建）" : ""), REF_CROSS);
+        if (cHome != visit.visitZone()) {
+            return;
+        }
+        String left = leaveAnyTeam(c);
+        if (!left.isEmpty()) {
+            report.fail("X C 不在任何队伍", left, REF_CROSS);
+            return;
+        }
+        if (crossZoneTeamAllowed) {
+            crossZoneAllowed(a, b, c, tid);
+        } else {
+            crossZoneDenied(a, c, tid);
+        }
+    }
+
+    /** X1（xm-team 缺省 allow-cross-zone = false）：别区的 C 申请、被邀请都回 4020，队伍不变。 */
+    private void crossZoneDenied(Bot a, Bot c, long tid) throws RobotException {
+        steps.step("x1-cross-zone-denied", report);
+        expectTip(c, applyJoin, ApplyJoinTeamRequest.newBuilder().setTargetPlayerId(a.id()).build(), TIP_CROSS_ZONE_DENIED,
+                "X1 别区的 C 申请加入 A 的队伍 → " + TIP_CROSS_ZONE_DENIED);
+        expectTip(a, invite, InviteToTeamRequest.newBuilder().setTargetPlayerId(c.id()).setExpectedTeamId(tid).build(), TIP_CROSS_ZONE_DENIED,
+                "X1 A 邀请别区的 C → " + TIP_CROSS_ZONE_DENIED);
+        TeamView view = myTeam(a);
+        report.check(view.getTeamId() == tid && countMember(view, c.id()) == 0 && !hasApplication(view, c.id()) && !hasPendingInvite(view, c.id()),
+                "X1 之后 A 的队伍里没有 C、也没有 C 的申请或给 C 的邀请", describe(view), REF_CROSS);
+        report.note("X2（允许跨区组队时别区成员不跟随换图）要 xm-team 打开 xm.team.allow-cross-zone 并用 --team-cross-zone allow 跑；本轮按 deny 跑了 X1");
+    }
+
+    /** X2（xm-team allow-cross-zone = true）：C 跨区入队；A 换图时同区的 B 跟进、别区的 C 不跟随；C 离队。 */
+    private void crossZoneAllowed(Bot a, Bot b, Bot c, long tid) throws RobotException {
+        steps.step("x2-cross-zone-team", report);
+        expectTip(c, applyJoin, ApplyJoinTeamRequest.newBuilder().setTargetPlayerId(a.id()).build(), 0,
+                "X2 别区的 C 申请加入 A 的队伍：受理（xm-team 允许跨区）");
+        TeamResponse approved = a.call(handleApplication, HandleApplicationRequest.newBuilder().setApplicantId(c.id()).setApprove(true)
+                .setExpectedTeamId(tid).build(), TeamResponse.parser());
+        boolean joined = tipOf(approved) == 0 && countMember(approved.getTeam(), c.id()) == 1;
+        report.check(joined, "X2 A 同意：C 入队，三人跨区同队（队伍 zone_id 仍是 A 的区 " + zoneId + "）",
+                describe(approved) + " zone_id=" + approved.getTeam().getZoneId(), REF_CROSS);
+        if (!joined) {
+            return;
+        }
+        try {
+            List<Integer> worlds = worldConfigs(ConfigTables.load(tableDir));
+            int target = pickSceneConfig(worlds, a.scene.getSceneConfigId(), b.scene.getSceneConfigId());
+            if (target == 0) {
+                report.fail("X2 选换图目标", "World 表 " + worlds + " 里没有与 A 当前地图不同的配置", REF_CROSS);
+            } else {
+                int bMark = b.mark();
+                int cMark = c.mark();
+                SceneInfoComp leader = switchScene(a, target);
+                Optional<EnterSceneS2C> followed = awaitPush(b, bMark, notifyEnterScene, EnterSceneS2C.parser(),
+                        s -> s.getSceneInfo().getSceneId() == leader.getSceneId(), FOLLOW_TIMEOUT);
+                followed.ifPresent(s -> b.scene = s.getSceneInfo());
+                report.check(followed.isPresent(), "X2 A 换图 → 同区的 B 跟进（对照：跟随确实触发了）",
+                        followed.isPresent() ? "scene_id=" + uid(leader.getSceneId()) : FOLLOW_TIMEOUT.toSeconds() + " s 内没收到"
+                                + b.describeSince(bMark), REF_CROSS);
+                Optional<Received> cEntered = c.connection().await(cMark, r -> r.messageId() == notifyEnterScene, CROSS_ZONE_QUIET);
+                report.check(cEntered.isEmpty(), "X2 别区的 C 不跟随换图（跨 zone 不跟随）",
+                        cEntered.map(r -> "C 收到了 79" + c.describeSince(cMark)).orElse(""), REF_CROSS);
+            }
+        } catch (RobotException | RuntimeException e) {
+            report.fail("X2 A 换图看跟随", e.getMessage() == null ? e.toString() : e.getMessage(), REF_CROSS);
+        }
+        TeamResponse left = c.call(leaveTeam, LeaveTeamRequest.newBuilder().setExpectedTeamId(tid).build(), TeamResponse.parser());
+        report.check(tipOf(left) == 0 && left.getTeam().getTeamId() == 0, "X2 C 离队（开战段只该有 A、B）", describe(left), REF_CROSS);
+        report.note("X1（禁止跨区时 4020）要 xm-team 的 xm.team.allow-cross-zone 为 false（缺省）并用 --team-cross-zone deny 跑；本轮按 allow 跑了 X2");
     }
 
     /** 63 换到 {@code configId}：应答无错、随后的 79 是目标地图（同 {@link ReconnectScenario}）。返回新场景。 */
@@ -602,7 +728,12 @@ public final class TeamScenario {
     }
 
     private Bot enter(String name, String account) throws RobotException {
-        EnteredPlayer player = flow.enter(account, new Timings());
+        return enter(flow, name, account);
+    }
+
+    /** 经 {@code entry} 那个区的入口登录（跨区步骤的 C 走另一个区）。 */
+    private Bot enter(PlayerFlow entry, String name, String account) throws RobotException {
+        EnteredPlayer player = entry.enter(account, new Timings());
         connections.add(player.connection());
         return new Bot(name, player, requestTimeout);
     }
