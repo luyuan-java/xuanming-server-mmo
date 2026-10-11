@@ -15,6 +15,7 @@ import com.game.api.proto.ClientForward;
 import com.game.api.proto.PlayerEnter;
 import com.game.common.RunMode;
 import com.game.contract.MessageMethod;
+import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.proto.AllocateAttributePointsRequest;
 import com.game.proto.AllocatePetPointsRequest;
 import com.game.proto.AttributePanelChangedS2C;
@@ -87,6 +88,8 @@ import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakePlayerRepository.PendingHandOff;
 import com.game.scene.testing.FakeSceneTables;
 import com.game.scene.testing.FakeSwitchTargets;
+import com.game.scene.testing.FakeTeamChecks;
+import com.game.scene.testing.FakeTravelTargets;
 import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingAssetAudit;
 import com.game.scene.testing.RecordingSink;
@@ -110,11 +113,17 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * 冻结闸（批次 5.2，scene-handoff-spec §5.9、§10.3「冻结闸」）：全功能装配（同 SceneNode）下逐方法核对冻结策略表；
  * 冻结中 READ_ONLY 照常、GATED 回基线码、REJECT 回应答内 1005、DROP 不回包、84 照常，资产通道 RETRY 27003；
  * 冻结中把全部入口打一遍之后交出，冻结快照与内存一致（{@code post_freeze_mutations} 为 0）；选目标中不冻结、一律照常。
+ *
+ * <p>批次 5.4（zone-travel-spec §5.10、§11.5「冻结闸沿用 5.2 用例，加 reason = travel」）：冻结相关的用例对两种冻结各跑一遍——
+ * 63 远端去向的交出并保持（{@link Freeze#ENTER_SCENE}）与 226 选中之后的交出并释放（{@link Freeze#TRAVEL}）；不冻结的那条对 63 的选目标与
+ * 226 的在队检查 / 选目标各跑一遍（{@link InFlight}）。
  */
 class FreezeGateTest {
 
@@ -148,9 +157,43 @@ class FreezeGateTest {
         }
     }
 
+    /** 冻结的入口（两种都复用 5.2 的冻结：停下、拍快照、FREEZING，冻结闸与 {@code ScenePlayer.frozen()} 都与用途无关）。 */
+    enum Freeze {
+        /** 63 指定别的节点上的场景 → 选中别的节点 → 交出并保持（批次 5.2，{@code transfers{reason = player}}）。 */
+        ENTER_SCENE(HandOffMode.HOLD, "player"),
+        /** 226 → 不在队 → 选中目标 zone 的 gate → 交出并释放（批次 5.4，{@code transfers{reason = travel}}）。 */
+        TRAVEL(HandOffMode.RELEASE, "travel");
+
+        final HandOffMode mode;
+        final String reason;
+
+        Freeze(HandOffMode mode, String reason) {
+            this.mode = mode;
+            this.reason = reason;
+        }
+    }
+
+    /** 冻结之前的在途（都不冻结：PRECHECK / RESOLVING 照常游玩，zone-travel-spec §5.10、X5）。 */
+    enum InFlight {
+        /** 63 的远端去向在选目标（5.2 RESOLVING）。 */
+        ENTER_SCENE_RESOLVING(SwitchPhase.RESOLVING),
+        /** 226 在队检查中（PRECHECK，应答还没回）。 */
+        TRAVEL_PRECHECK(SwitchPhase.PRECHECK),
+        /** 226 已受理、在选目标（RESOLVING）。 */
+        TRAVEL_RESOLVING(SwitchPhase.RESOLVING);
+
+        final SwitchPhase phase;
+
+        InFlight(SwitchPhase phase) {
+            this.phase = phase;
+        }
+    }
+
     private final RecordingSink sink = new RecordingSink();
     private final FakePlayerRepository repo = new FakePlayerRepository();
     private final FakeSwitchTargets targets = new FakeSwitchTargets();
+    private final FakeTeamChecks teamChecks = new FakeTeamChecks();
+    private final FakeTravelTargets travelTargets = new FakeTravelTargets();
     private final ManualClock clock = new ManualClock();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final RecordingAssetAudit audit = new RecordingAssetAudit();
@@ -170,7 +213,10 @@ class FreezeGateTest {
         config = ConfigTables.load(dir);
     }
 
-    /** 同 SceneNode 的装配：全部玩法功能、开了跨节点换图（假选目标）、DEV 运行模式（GM 方法放行）。玩家 30 级、1000 银两。 */
+    /**
+     * 同 SceneNode 的装配：全部玩法功能、开了跨节点换图（假选目标）与跨 zone 传送（本 zone {@link TravelFixture#LOCAL_ZONE}，假在队检查、
+     * 假选目标）、DEV 运行模式（GM 方法放行）。玩家 30 级、1000 银两。
+     */
     @BeforeEach
     void start() {
         SceneMetrics metrics = new SceneMetrics(meters);
@@ -196,7 +242,10 @@ class FreezeGateTest {
                     missions.initializeOnLoad(p);
                     AssetOpService.checkLedgerOnLoad(p);
                 }, PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE,
-                new CrossNodeSwitch(LOCAL_NODE, targets, owned -> { }, Duration.ofSeconds(4), Duration.ofSeconds(30)));
+                new CrossNodeSwitch(LOCAL_NODE, targets, owned -> { }, Duration.ofSeconds(4), Duration.ofSeconds(30)),
+                SceneInstances.DISABLED, BattleHooks.NONE,
+                new ZoneTravel(TravelFixture.LOCAL_ZONE, travelTargets, teamChecks, TravelFixture.TEAM_CHECK_TIMEOUT,
+                        TravelFixture.RESOLVE_TIMEOUT, TravelFixture.TOMBSTONE_TTL));
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV, List.of(
                 new CurrencyFeature(currency),
                 new AttributeFeature(attributes, Contracts.REGISTRY, call -> {
@@ -276,8 +325,12 @@ class FreezeGateTest {
                 List.of(dropper))).isInstanceOf(IllegalStateException.class).hasMessageContaining("DROP");
     }
 
-    @Test
-    void 没声明策略的方法缺省REJECT_冻结中回应答内1005不进处理器_无应答的静默丢_解冻后照常() throws Exception {
+    @ParameterizedTest
+    @EnumSource(Freeze.class)
+    void 没声明策略的方法缺省REJECT_冻结中回应答内1005不进处理器_无应答的静默丢_解冻后照常(Freeze via) throws Exception {
+        // 先经全功能装配走真实流程冻结（63 / 226 的处理器在这套装配里），再换成只有未声明策略方法的处理器
+        PendingHandOff handOff = freezeVia(via);
+        sink.clear();
         AtomicInteger calls = new AtomicInteger();
         SceneFeature undeclared = r -> {
             r.on("SceneCurrencyClientPlayer", "GetCurrencyList", GetCurrencyListRequest.class, (call, req) -> {
@@ -291,7 +344,6 @@ class FreezeGateTest {
         int getCurrencyList = Contracts.REGISTRY.requireId("SceneCurrencyClientPlayer", "GetCurrencyList");
         int notify = Contracts.REGISTRY.requireId("SceneAttributeClientPlayer", "NotifyAttributePanelChanged");
         assertThat(handler.freezePolicy(getCurrencyList)).isEqualTo(FreezePolicy.REJECT);
-        WorldTestAccess.startFreezing(player);
 
         forward(getCurrencyList, GetCurrencyListRequest.getDefaultInstance(), 41);
         forward(notify, AttributePanelChangedS2C.getDefaultInstance(), 42);
@@ -306,7 +358,8 @@ class FreezeGateTest {
         });
         assertThat(frozenRejections("request")).isEqualTo(2);
 
-        WorldTestAccess.clearSwitch(player);
+        handOff.complete(new HandOffOutcome.LeaseTooShort());
+        assertThat(player.frozen()).as("交出没提交，原地解冻").isFalse();
         forward(getCurrencyList, GetCurrencyListRequest.getDefaultInstance(), 43);
         assertThat(calls).hasValue(1);
         assertThat(tipOf(sink.to(LINK, SESSION).getLast())).isZero();
@@ -314,13 +367,14 @@ class FreezeGateTest {
 
     // ------------------------------------------------------------------ 冻结中逐方法
 
-    @Test
-    void 冻结中逐方法按策略处理_全部入口打一遍后交出_冻结快照与内存一致() throws Exception {
+    @ParameterizedTest
+    @EnumSource(Freeze.class)
+    void 冻结中逐方法按策略处理_全部入口打一遍后交出_冻结快照与内存一致(Freeze via) throws Exception {
         long petId = grantPet();
         List<Probe> probes = probes(petId);
         assertThat(probes).extracting(Probe::key).as("探测覆盖全部注册的方法（新加方法要在这里补一行）")
                 .containsExactlyInAnyOrderElementsOf(registeredPolicies().keySet());
-        PendingHandOff handOff = freezeViaEnterScene();
+        PendingHandOff handOff = freezeVia(via);
         int itemAudits = audit.items.size();
         int currencyAudits = audit.currencies.size();
         sink.clear();
@@ -357,16 +411,33 @@ class FreezeGateTest {
         handOff.complete(new HandOffOutcome.HandedOff(E + 1));
 
         assertThat(meters.get("xm.scene.transfer.post.freeze.mutations").counter().count()).isZero();
-        assertThat(sink.transfers()).hasSize(1);
+        assertThat(meters.get("xm.scene.transfers").tag("reason", via.reason).tag("result", "handed_off").counter().count())
+                .isEqualTo(1);
+        if (via == Freeze.TRAVEL) {
+            assertThat(sink.redirects()).as("交出并释放之后发重定向帧").hasSize(1);
+            assertThat(sink.transfers()).isEmpty();
+        } else {
+            assertThat(sink.transfers()).hasSize(1);
+            assertThat(sink.redirects()).isEmpty();
+        }
         assertThat(world.playerById(PLAYER)).isNull();
     }
 
-    @Test
-    void 选目标中不冻结_同一批入口照常改动_冻结闸一次不计() throws Exception {
+    @ParameterizedTest
+    @EnumSource(InFlight.class)
+    void 冻结之前的在途不冻结_同一批入口照常改动_冻结闸一次不计(InFlight inFlight) throws Exception {
         long petId = grantPet();
         PlayerSave before = player.toSave();
-        enterScene(REMOTE_SCENE, 1);
-        assertThat(player.switchPhase()).isEqualTo(SwitchPhase.RESOLVING);
+        switch (inFlight) {
+            case ENTER_SCENE_RESOLVING -> enterScene(REMOTE_SCENE, 1);
+            case TRAVEL_PRECHECK -> travel(1);
+            case TRAVEL_RESOLVING -> {
+                travel(1);
+                teamChecks.take().notInTeam();
+            }
+        }
+        assertThat(player.switchPhase()).isEqualTo(inFlight.phase);
+        assertThat(player.frozen()).isFalse();
         sink.clear();
 
         // 资产通道先办（后面那一轮会把银两花在洗点 / 改名上）
@@ -381,6 +452,9 @@ class FreezeGateTest {
         assertThat(lastTip("SceneAttributeClientPlayer", "AutoAllocateAttributePoints")).as("173 选目标中照常").isZero();
         assertThat(lastTip("SceneAttributeClientPlayer", "GmSetPlayerLevel")).isZero();
         assertThat(lastTip("SceneSceneClientPlayer", "EnterScene")).as("在途再发 63").isEqualTo(CHANGING_SCENE);
+        assertThat(lastTip("SceneSceneClientPlayer", "TravelToZone")).as("在途再发 226")
+                .isEqualTo(inFlight == InFlight.ENTER_SCENE_RESOLVING ? CHANGING_SCENE : TRANSFER_IN_PROGRESS);
+        assertThat(player.switchPhase()).as("在途没被这批入口改动").isEqualTo(inFlight.phase);
         assertThat(player.toSave()).isNotEqualTo(before);
         for (String kind : List.of("request", "move", "asset_op")) {
             assertThat(frozenRejections(kind)).as(kind).isZero();
@@ -388,9 +462,10 @@ class FreezeGateTest {
         assertThat(meters.get("xm.scene.moves").tag("result", "frozen").counter().count()).isZero();
     }
 
-    @Test
-    void 交出没提交原地解冻_写操作与173恢复照常() throws Exception {
-        PendingHandOff handOff = freezeViaEnterScene();
+    @ParameterizedTest
+    @EnumSource(Freeze.class)
+    void 交出没提交原地解冻_写操作与173恢复照常(Freeze via) throws Exception {
+        PendingHandOff handOff = freezeVia(via);
         assertThat(sendTip("SceneCurrencyClientPlayer", "GmAddCurrency",
                 GmAddCurrencyRequest.newBuilder().setCurrencyType(0).setAmount(5).build())).isEqualTo(ASSET_FROZEN);
         assertThat(sendTip("SceneAttributeClientPlayer", "AutoAllocateAttributePoints",
@@ -399,6 +474,8 @@ class FreezeGateTest {
         handOff.complete(new HandOffOutcome.LeaseTooShort());
 
         assertThat(player.frozen()).isFalse();
+        assertThat(meters.get("xm.scene.transfers").tag("reason", via.reason).tag("result", "lease_too_short").counter().count())
+                .isEqualTo(1);
         assertThat(sendTip("SceneCurrencyClientPlayer", "GmAddCurrency",
                 GmAddCurrencyRequest.newBuilder().setCurrencyType(0).setAmount(5).build())).isZero();
         assertThat(sendTip("SceneAttributeClientPlayer", "AutoAllocateAttributePoints",
@@ -503,16 +580,37 @@ class FreezeGateTest {
         return granted.getPetId();
     }
 
-    /** 走真实流程进 FREEZING：63 指定别的节点上的场景 → 选目标回别的节点 → 冻结，返回挂起的交出。 */
-    private PendingHandOff freezeViaEnterScene() {
-        enterScene(REMOTE_SCENE, 1);
-        targets.take().chosen(TARGET_NODE, REMOTE_SCENE, 2);
+    /**
+     * 走真实流程进 FREEZING，返回挂起的交出：63 指定别的节点上的场景 → 选目标回别的节点 → 冻结（交出并保持）；或 226 → 在队检查回「不在队」
+     * → 选目标回目标 zone 的 gate → 冻结（交出并释放）。
+     */
+    private PendingHandOff freezeVia(Freeze via) {
+        switch (via) {
+            case ENTER_SCENE -> {
+                enterScene(REMOTE_SCENE, 1);
+                targets.take().chosen(TARGET_NODE, REMOTE_SCENE, 2);
+            }
+            case TRAVEL -> {
+                travel(1);
+                teamChecks.take().notInTeam();
+                travelTargets.take().chosen(TravelFixture.TARGET_MAP, TravelFixture.REDIRECT);
+            }
+        }
         assertThat(player.frozen()).isTrue();
-        return repo.takeHandOff();
+        assertThat(player.switching().reason()).isEqualTo(via == Freeze.TRAVEL ? SwitchReason.TRAVEL : SwitchReason.PLAYER);
+        PendingHandOff handOff = repo.takeHandOff();
+        assertThat(handOff.mode()).isEqualTo(via.mode);
+        return handOff;
     }
 
     private void enterScene(long sceneId, long requestId) {
         forward(Contracts.IDS.enterScene(), enterSceneRequest(sceneId), requestId);
+    }
+
+    /** 发一条 226 {目标 zone = {@link TravelFixture#TARGET_ZONE}，不带地图}。 */
+    private void travel(long requestId) {
+        forward(Contracts.IDS.travelToZone(),
+                TravelToZoneRequest.newBuilder().setTargetZoneId(TravelFixture.TARGET_ZONE).build(), requestId);
     }
 
     private static EnterSceneC2SRequest enterSceneRequest(long sceneId) {

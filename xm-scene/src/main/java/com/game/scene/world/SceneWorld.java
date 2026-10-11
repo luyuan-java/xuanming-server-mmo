@@ -1571,8 +1571,10 @@ public final class SceneWorld {
     /**
      * 换图「在途」判定（基线 IsSceneChangeBusy）：226 的在队检查中（PRECHECK，批次 5.4）、选目标中 / 镜像取号中（RESOLVING，批次 5.3 D4）
      * 或冻结中（FREEZING）为 true。PRECHECK / RESOLVING 槽过了期限（结果回调丢了，正常不会）就<b>当场作废</b>（有副作用：清掉这个槽）、不再挡，
-     * 迟到的结果按过期丢弃（{@code player.switching() != sw} → STALE）。作废的是 PRECHECK 槽时，<b>先经槽上的延迟应答回 3027 再清槽</b>
-     * （zone-travel-spec TF17）：226 的应答因此一定在在队检查上限 + 1 s 内到，之后迟到的在队结果不会二次应答。逻辑线程上调用。
+     * 迟到的结果按过期丢弃（{@code player.switching() != sw}）。作废的是 226 的槽时，作废方<b>先给出这次传送的结论再清槽</b>
+     * （{@link #concludeExpiredTravel}）：PRECHECK 经槽上的延迟应答回 3027（zone-travel-spec TF17，226 的应答因此一定在在队检查上限 + 1 s 内到）；
+     * RESOLVING（{@code {0}} 已回、客户端在「已受理」窗口里）推 23 {3027}（§4.4：受理之后一定有 124 或失败 tip）。之后迟到的结果不会二次应答 / 推送。
+     * 63 的 RESOLVING 照 5.2 只清槽（玩家在原地游玩，应答 {@code {0}} 之后没有等待中的结论）。逻辑线程上调用。
      *
      * <p>四个调用方：63 的处理器（在途回 3014）；226 的处理器（在途回 13000 / 3014）；回合制战斗的备战闸（在途回 1006，scene-battle-spec §7.5
      * 第 1.3 步 / D4）；组队跟随的守卫（在途不跟随，{@code TeamFollowService.followLeader}）。后两个必须经这里而不是直接看
@@ -1587,13 +1589,36 @@ public final class SceneWorld {
         if (sw.phase() != SwitchPhase.FREEZING && clock.nanoTime() - sw.deadlineNanos() >= 0) {
             log.warn("在队检查 / 选目标 / 取号的结果过了期限还没回来，作废这次在途 player={} token={} 用途={} 阶段={}",
                     Long.toUnsignedString(player.playerId()), sw.token(), sw.reason(), sw.phase());
-            if (sw.phase() == SwitchPhase.PRECHECK && sw.deferred().reply(travelResponse(TRAVEL_FAILED))) {
-                metrics.travelRequest(TravelRequest.TEAM_READ_ERROR);
+            if (sw.reason() == SwitchReason.TRAVEL) {
+                concludeExpiredTravel(player, sw);
             }
             player.setSwitching(null);
             return false;
         }
         return true;
+    }
+
+    /**
+     * 作废过期的 226 槽之前给出这次传送的结论（{@link #switchInFlight} 调，槽还挂着）。PRECHECK：经延迟应答回 3027、计
+     * {@code travel_requests{team_read_error}}（TF17）。RESOLVING：{@code {0}} 已回，客户端在「已受理」窗口里等 124 或失败 tip——
+     * 同选目标超时（TF4）推 23 {3027}、计 {@code travel_resolves{error}}，不让旅客在 75 s 的客户端预算里干等（§4.4）。两种都把槽记成
+     * {@link PlayerSwitch#expired}：迟到的结果按引用比对丢弃，不再应答、推送或计数。实例已不在世界里（调用方都是世界里的玩家，纵深防御）的
+     * RESOLVING 槽不推不计，迟到的结果照常计 stale。
+     */
+    private void concludeExpiredTravel(ScenePlayer player, PlayerSwitch sw) {
+        if (sw.phase() == SwitchPhase.PRECHECK) {
+            sw.expire();
+            if (sw.deferred().reply(travelResponse(TRAVEL_FAILED))) {
+                metrics.travelRequest(TravelRequest.TEAM_READ_ERROR);
+            }
+            return;
+        }
+        if (playersById.get(player.playerId()) != player) {
+            return;
+        }
+        sw.expire();
+        metrics.travelResolve(TravelResolve.ERROR);
+        pushTip(player, TRAVEL_FAILED);
     }
 
     /**
@@ -2150,13 +2175,20 @@ public final class SceneWorld {
     }
 
     /**
-     * 选目标的结果（逻辑线程，同 5.2 {@link #onSwitchTargetSelected} 的纪律：先核对实例与槽，对不上计 stale、丢弃）。
+     * 选目标的结果（逻辑线程，同 5.2 {@link #onSwitchTargetSelected} 的纪律：先核对实例与槽，对不上计 stale、丢弃；槽是过期作废的
+     * ——作废方已推 23 {3027} 并计 error——只丢弃、不再计）。
      * 调用失败 / 超时 / 应答残缺 → 23 {3027}（计 error）；scene-manager 拒绝（没这张图、没 gate…）→ 23 {3027}（计 rejected）；
      * 选中但此刻有回合制战斗在途 → 23 {3025}（纵深防御）；选中 → 冻结并提交交出并释放（{@link #freezeForTravel}）。前三种都清槽、留原地、照常游玩。
      */
     private void onTravelTargetSelected(ScenePlayer player, PlayerSwitch sw, TravelSelection selection) {
         if (playersById.get(player.playerId()) != player || player.switching() != sw
                 || sw.phase() != SwitchPhase.RESOLVING) {
+            if (sw.expired()) {
+                // 槽过期时作废方已推 23 {3027} 并计 error（concludeExpiredTravel）：这次受理已有结论，不再推、不再计
+                log.info("跨 zone 选目标的结果在槽过期作废之后才回来（已推过 3027），丢弃 player={} token={} 结果={}",
+                        Long.toUnsignedString(player.playerId()), sw.token(), selection.getClass().getSimpleName());
+                return;
+            }
             metrics.travelResolve(TravelResolve.STALE);
             log.debug("跨 zone 选目标的结果回来时实例已离开 / 已重新进场 / 这次传送已作废，丢弃 player={} token={}",
                     Long.toUnsignedString(player.playerId()), sw.token());
@@ -2681,7 +2713,7 @@ public final class SceneWorld {
     /**
      * 位置续期的一秒（每秒在逻辑线程上调一次）：{@code player_id} 对 {@link #LOCATION_REFRESH_SLOTS} 取模等于本秒槽号的在线玩家
      * 续一次位置记录的 TTL，每人每 {@link PlayerLocationDirectory#REFRESH_INTERVAL} 恰好一次。顺带的每秒维护：清过期的交出墓碑；
-     * 过期的 226 在队检查槽当场作废并补回 3027（{@link #switchInFlight}）。
+     * 过期的 226 冻结前的槽（在队检查 / 选目标）当场作废并给出结论（{@link #switchInFlight}：PRECHECK 补回 3027，RESOLVING 推 23 {3027}）。
      *
      * @return 本次续期的人数
      */
@@ -2693,9 +2725,11 @@ public final class SceneWorld {
             if (Long.remainderUnsigned(player.playerId(), LOCATION_REFRESH_SLOTS) == slot) {
                 due.add(player);
             }
-            if (player.switchPhase() == SwitchPhase.PRECHECK) {
-                // 226 的在队检查槽（TF17）：结果回调丢了（正常不会）而这名玩家又没再发请求时，也在槽过期后一秒内经 switchInFlight 作废、
-                // 补回 3027——226 的应答一定在在队检查上限 + 1 s（+ 至多一秒）内到，不靠玩家再碰一次
+            PlayerSwitch sw = player.switching();
+            if (sw != null && sw.reason() == SwitchReason.TRAVEL && sw.phase() != SwitchPhase.FREEZING) {
+                // 226 冻结前的槽：结果回调丢了（正常不会）而这名玩家又没再发请求时，也在槽过期后一秒内经 switchInFlight 作废并给出结论——
+                // PRECHECK 补回 3027（TF17，226 的应答一定在在队检查上限 + 1 s（+ 至多一秒）内到）；RESOLVING 推 23 {3027}
+                // （受理之后一定有结论，§4.4）。不靠玩家再碰一次
                 switchInFlight(player);
             }
         }

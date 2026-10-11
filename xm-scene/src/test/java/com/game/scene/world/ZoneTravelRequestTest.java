@@ -28,8 +28,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * 跨 zone 传送（批次 5.4，zone-travel-spec §5.5、§11.5）在冻结之前的部分：226 的注册、同步段四步与「没装配」、PRECHECK（延迟应答、
- * 在队检查、槽过期作废）、RESOLVING（选目标的四种结果、过期丢弃）、与 63 / 5.2 在途 / 回合制战斗 / 5.3 实例的交错，以及
- * {@code xm.scene.travel.requests} 每条 226 恰好计一次。冻结之后的结局在 {@link ZoneTravelHandOffTest}。
+ * 在队检查、槽过期作废并补回 3027）、RESOLVING（选目标的四种结果、槽过期作废并推 23 {3027}、迟到结果丢弃）、与 63 / 5.2 在途 / 回合制战斗 /
+ * 5.3 实例的交错，以及 {@code xm.scene.travel.requests} 每条 226、{@code resolves} 每次受理恰好计一次。冻结之后的结局在
+ * {@link ZoneTravelHandOffTest}。
  */
 class ZoneTravelRequestTest {
 
@@ -503,20 +504,102 @@ class ZoneTravelRequestTest {
         assertThat(tipFor(11, again)).isEqualTo(TRANSFER_IN_PROGRESS);
     }
 
-    /** RESOLVING 槽过期（结果丢了）：照 5.2 只清槽、不推 tip；迟到的结果计 stale、丢弃，不冻结。 */
+    /**
+     * RESOLVING 槽过期（结果丢了或迟到，正常不会）：{@code {0}} 已回、客户端在「已受理」窗口里，作废方（这里是 63）先推 23 {3027}、
+     * 计 {@code resolves{error}} 再清槽（§4.4：受理之后一定有 124 或失败 tip），63 自己照常办；迟到的选中结果不冻结、不再推、不再计数
+     * （每次受理在 resolves 上恰好计一次）。
+     */
     @Test
-    void 选目标槽过期作废后_迟到的选中结果计stale丢弃_不冻结() {
+    void 选目标槽过期_作废方先推3027计error再清槽_迟到的选中结果不冻结不再推不再计() {
         PendingTravel resolve = f.resolve(a);
-        f.clock.advanceMillis(RESOLVE_TIMEOUT.toMillis() + 1000);
+        f.clock.advanceMillis(RESOLVE_TIMEOUT.toMillis() + 999);
         f.enterScene(a, f.scene2.sceneId(), 2);
+        assertThat(f.enterSceneTips(11)).as("期限前仍挡").containsExactly(CHANGING_SCENE);
+        assertThat(f.pushedTips(11)).isEmpty();
+
+        f.clock.advanceMillis(1);
+        f.enterScene(a, f.scene2.sceneId(), 2);
+
+        List<MessageContent> all = f.sink.to(LINK, 11);
+        int tip = lastIndexOf(all, TravelFixture.TIP);
+        assertThat(tip).as("作废方推了 23").isGreaterThanOrEqualTo(0);
+        assertThat(tip).as("23 {3027} 在这条 63 的应答之前").isLessThan(lastIndexOf(all, Contracts.IDS.enterScene()));
+        assertThat(f.pushedTips(11)).containsExactly(TRAVEL_FAILED);
+        assertThat(f.enterSceneTips(11)).containsExactly(CHANGING_SCENE, 0);
         assertThat(a.scene()).as("过期槽不再挡 63").isSameAs(f.scene2);
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.NONE);
+        assertThat(f.resolves("error")).isEqualTo(1);
 
         resolve.chosen(TARGET_MAP, REDIRECT);
 
         assertThat(a.frozen()).isFalse();
         assertThat(f.repo.pendingHandOffs()).isZero();
-        assertThat(f.pushedTips(11)).isEmpty();
-        assertThat(f.resolves("stale")).isEqualTo(1);
+        assertThat(f.pushedTips(11)).as("迟到的结果不再推第二次").containsExactly(TRAVEL_FAILED);
+        assertThat(f.resolves("stale")).isZero();
+        assertThat(f.resolvesTotal()).as("这次受理恰好计一次").isEqualTo(1);
+        assertThat(f.requests("accepted")).isEqualTo(1);
+    }
+
+    /** 下一条 226 作废过期的 RESOLVING 槽：旧的推 23 {3027}，新的照常进在队检查；旧的迟到结果（失败）不再推、不再计。 */
+    @Test
+    void 选目标槽过期_下一条226作废旧的推3027_新的照常进在队检查() {
+        PendingTravel stale = f.resolve(a);
+        f.clock.advanceMillis(RESOLVE_TIMEOUT.toMillis() + 1000);
+
+        long second = f.travel(a, TARGET_ZONE, 0);
+
+        assertThat(f.pushedTips(11)).containsExactly(TRAVEL_FAILED);
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.PRECHECK);
+        stale.failed("迟到的兜底超时");
+        assertThat(f.pushedTips(11)).containsExactly(TRAVEL_FAILED);
+
+        f.teamChecks.take().notInTeam();
+
+        assertThat(tipFor(11, second)).isZero();
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.RESOLVING);
+        assertThat(f.resolves("error")).isEqualTo(1);
+        assertThat(f.resolvesTotal()).isEqualTo(1);
+    }
+
+    /**
+     * 选目标的结果回调丢了而这名玩家什么都不再发、也没有别的调用方碰它：每秒维护在槽过期后作废它、推 23 {3027}，期限之前不动。
+     * 63 的 RESOLVING 槽不归它管（照 5.2：过期只在下一次碰到时清，玩家在原地游玩，没有等待中的结论）。
+     */
+    @Test
+    void 选目标槽过期_没人再碰这名玩家_每秒维护推3027_63的槽不动() {
+        PendingTravel resolve = f.resolve(a);
+        f.resolveRemote(b);
+        f.clock.advanceMillis(RESOLVE_TIMEOUT.toMillis() + 999);
+        f.world.refreshDueLocations();
+        assertThat(f.pushedTips(11)).as("期限前不动").isEmpty();
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.RESOLVING);
+
+        f.clock.advanceMillis(1);
+        f.world.refreshDueLocations();
+
+        assertThat(f.pushedTips(11)).containsExactly(TRAVEL_FAILED);
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.NONE);
+        assertThat(b.switchPhase()).as("63 的槽每秒维护不碰").isEqualTo(SwitchPhase.RESOLVING);
+        assertThat(f.pushedTips(12)).isEmpty();
+        resolve.failed("迟到");
+        assertThat(f.pushedTips(11)).hasSize(1);
+        assertThat(f.resolves("error")).isEqualTo(1);
+        assertThat(f.resolvesTotal()).isEqualTo(1);
+    }
+
+    /** 备战闸、组队跟随也经 {@code switchInFlight}：它们作废过期的 RESOLVING 槽时同样先推 23 {3027}，再问不再推。 */
+    @Test
+    void 选目标槽过期_任何经switchInFlight的调用方作废时都先推3027() {
+        f.resolve(a);
+        f.clock.advanceMillis(RESOLVE_TIMEOUT.toMillis() + 1000);
+
+        assertThat(f.world.switchInFlight(a)).isFalse();
+
+        assertThat(f.pushedTips(11)).containsExactly(TRAVEL_FAILED);
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.NONE);
+        assertThat(f.world.switchInFlight(a)).as("再问不再推").isFalse();
+        assertThat(f.pushedTips(11)).hasSize(1);
+        assertThat(f.travelReplies(11)).as("226 的应答只有受理时那一个 {0}").hasSize(1);
     }
 
     @Test

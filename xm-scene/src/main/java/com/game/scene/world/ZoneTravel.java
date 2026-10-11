@@ -14,6 +14,7 @@ import java.util.Objects;
  * @param teamCheckTimeout 在队检查的上限（{@code xm.scene.travel.team-check-timeout}）；延迟应答的槽（PRECHECK）在它之后再过 1 s 作废，
  *                         所以 226 的应答上界是它加 1 s
  * @param resolveTimeout   选目标的本地兜底超时（与 63 共用 {@code xm.scene.switch-resolve-timeout}）；RESOLVING 槽在它之后再过 1 s 作废
+ *                         （作废方推 23 {3027}，所以受理之后到失败 tip 的上界是它加 1 s，再加每秒维护的至多一秒）
  * @param tombstoneTtl     交出墓碑的存活时长（与 63 共用 {@code xm.scene.transfer-tombstone-ttl}）
  */
 public record ZoneTravel(int localZoneId, TravelTargets targets, TeamChecks teamChecks, Duration teamCheckTimeout,

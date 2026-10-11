@@ -236,6 +236,11 @@ final class TravelFixture {
         return count("xm.scene.travel.resolves", result);
     }
 
+    /** 全部 {@code travel.resolves} 之和（每次受理恰好计一次）。 */
+    double resolvesTotal() {
+        return meters.find("xm.scene.travel.resolves").counters().stream().mapToDouble(c -> c.count()).sum();
+    }
+
     double placements(String result) {
         return count("xm.scene.travel.placements", result);
     }

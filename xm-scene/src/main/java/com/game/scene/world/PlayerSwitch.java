@@ -51,7 +51,7 @@ final class PlayerSwitch {
     private final int wantConfigId;
     /** TRAVEL：226 的目标 zone；其余为 0。 */
     private final int toZoneId;
-    /** TRAVEL：226 的延迟应答（PRECHECK 结束时回；槽过期时由作废方回 3027）；其余为 null。 */
+    /** TRAVEL：226 的延迟应答（PRECHECK 结束时回；PRECHECK 槽过期时由作废方回 3027）；其余为 null。 */
     private final DeferredReply deferred;
     /**
      * 槽的过期时刻（单调时钟纳秒）：结果回调迟迟不回（实现保证会回，这里只是兜底）时，之后的 63 / 226 不再被挡住。
@@ -75,6 +75,12 @@ final class PlayerSwitch {
      * 跨 zone 传送的新 epoch 已在交出事务里释放，什么都不用做。
      */
     private boolean detached;
+    /**
+     * TRAVEL：槽过了期限、已由作废方（{@link SceneWorld#switchInFlight}）给出这次传送的结论——PRECHECK 经延迟应答回 3027 并计
+     * {@code travel_requests{team_read_error}}，RESOLVING 推 23 {3027} 并计 {@code travel_resolves{error}}。之后迟到的结果只丢弃，
+     * 不再推、也不再计数（每次受理在 {@code travel_resolves} 上恰好计一次）。
+     */
+    private boolean expired;
 
     PlayerSwitch(long token, long wantSceneId, int wantConfigId, long resolveDeadlineNanos) {
         this(token, SwitchReason.PLAYER, Purpose.REMOTE_SWITCH, SwitchPhase.RESOLVING, wantSceneId, wantConfigId, 0, null,
@@ -241,5 +247,17 @@ final class PlayerSwitch {
 
     void detach() {
         detached = true;
+    }
+
+    boolean expired() {
+        return expired;
+    }
+
+    /** TRAVEL 的 PRECHECK / RESOLVING 槽过期、作废方已给出结论（见 {@link #expired}）。 */
+    void expire() {
+        if (reason != SwitchReason.TRAVEL || phase == SwitchPhase.FREEZING) {
+            throw new IllegalStateException("只有冻结前的跨 zone 传送槽会过期作废并给结论: " + phase + " " + reason);
+        }
+        expired = true;
     }
 }
