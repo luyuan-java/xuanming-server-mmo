@@ -441,14 +441,17 @@ public final class ScenePlayer {
         this.progressSaveInFlight = inFlight;
     }
 
-    /** 跨节点换图的阶段（scene-handoff-spec §5.5）：NONE / RESOLVING（等选目标，不冻结）/ FREEZING（交出在途）。 */
+    /**
+     * 换图在途的阶段（scene-handoff-spec §5.5、zone-travel-spec §5.5）：NONE / PRECHECK（226 的在队检查，不冻结）/ RESOLVING（等选目标，不冻结）/
+     * FREEZING（交出在途）。只读状态、不做过期判定；要判「在途」挡请求的经 {@link SceneWorld#switchInFlight}。
+     */
     public SwitchPhase switchPhase() {
         return switching == null ? SwitchPhase.NONE : switching.phase();
     }
 
     /**
-     * 是否处于冻结（交出事务在途，§5.9）：冻结中玩家的可变状态必须与冻结快照一致，各写入口按基线码拒绝
-     * （背包 / 宝宝 / 属性 / 任务 1005，货币与资产通道 27003）。RESOLVING 不算冻结。
+     * 是否处于冻结（交出事务在途，§5.9；跨节点换图与跨 zone 传送都算）：冻结中玩家的可变状态必须与冻结快照一致，各写入口按基线码拒绝
+     * （背包 / 宝宝 / 属性 / 任务 1005，货币与资产通道 27003）。PRECHECK / RESOLVING 不算冻结。
      */
     public boolean frozen() {
         return switching != null && switching.phase() == SwitchPhase.FREEZING;

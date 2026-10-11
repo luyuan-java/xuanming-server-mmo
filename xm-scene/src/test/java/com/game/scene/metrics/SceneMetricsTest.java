@@ -389,6 +389,28 @@ class SceneMetricsTest {
         }
     }
 
+    /**
+     * 跨 zone 传送的 TF7（zone-travel-spec §2.3、§7.3）：已按 handed_off 终结之后重定向帧没写出，另计 {@code transfers{travel, link_gone}}——
+     * 不动 player 那一组，也不再记冻结时长（冻结在交出提交时已结束）。
+     */
+    @Test
+    void 跨zone传送帧没写出_只另计travel的link_gone_不记冻结时长() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        SceneMetrics metrics = new SceneMetrics(registry);
+        metrics.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.HANDED_OFF, TimeUnit.MILLISECONDS.toNanos(40));
+
+        metrics.travelLinkGone();
+        metrics.travelLinkGone();
+
+        assertThat(registry.get("xm.scene.transfers").tag("reason", "travel").tag("result", "link_gone").counter().count())
+                .isEqualTo(2);
+        assertThat(registry.get("xm.scene.transfers").tag("reason", "travel").tag("result", "handed_off").counter().count())
+                .isEqualTo(1);
+        assertThat(registry.get("xm.scene.transfers").tag("reason", "player").tag("result", "link_gone").counter().count())
+                .isZero();
+        assertThat(registry.get("xm.scene.transfer.freeze").timer().count()).as("只有那一次终结记了冻结时长").isEqualTo(1);
+    }
+
     /** 冻结闸（scene-handoff-spec §5.9、§7.2）：入口拒绝按 kind 计，移动丢弃另在 moves{result=frozen} 里计，启动即注册。 */
     @Test
     void 冻结闸指标_启动即注册_导出名与标签() {

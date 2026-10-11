@@ -9,7 +9,9 @@ import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.WorldChannel;
+import com.game.api.proto.ZoneRedirect;
 import com.game.discovery.location.PlayerLocationDirectory;
+import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorDestroyS2C;
@@ -19,7 +21,9 @@ import com.game.proto.EnterSceneS2C;
 import com.game.proto.MessageContent;
 import com.game.proto.MoveAckS2C;
 import com.game.proto.SceneInfoComp;
+import com.game.proto.TravelToZoneResponse;
 import com.game.scene.metrics.SceneMetrics;
+import com.game.scene.metrics.SceneMetrics.BattleGate;
 import com.game.scene.metrics.SceneMetrics.BroadcastKind;
 import com.game.scene.metrics.SceneMetrics.ChannelPlanApply;
 import com.game.scene.metrics.SceneMetrics.ChannelRelocation;
@@ -33,6 +37,9 @@ import com.game.scene.metrics.SceneMetrics.SwitchResolve;
 import com.game.scene.metrics.SceneMetrics.TransferEnter;
 import com.game.scene.metrics.SceneMetrics.TransferReason;
 import com.game.scene.metrics.SceneMetrics.TransferResult;
+import com.game.scene.metrics.SceneMetrics.TravelPlacement;
+import com.game.scene.metrics.SceneMetrics.TravelRequest;
+import com.game.scene.metrics.SceneMetrics.TravelResolve;
 import com.game.scene.player.PlayerLevels;
 import com.game.scene.team.TeamFollow;
 import com.game.scene.world.PlayerRepository.HandOffOutcome;
@@ -40,9 +47,13 @@ import com.game.scene.world.PlayerRepository.LoadResult;
 import com.game.scene.world.PlayerRepository.ProbeOutcome;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.scene.world.RemoteSwitchTargets.Selection;
+import com.game.scene.world.TeamChecks.TeamCheck;
+import com.game.scene.world.TravelTargets.TravelSelection;
 import com.game.table.CommonErrorTip;
+import com.game.table.CrossServerErrorTip;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -132,6 +143,13 @@ import org.slf4j.LoggerFactory;
  * 居民同图改派；管理口显式销毁同样「排空后销毁」（{@link #maintainScenes}、{@link #destroyInstance}）。人数、在途进场、销毁同在本线程，
  * 不需要基线那套 Redis Lua CAS。
  *
+ * <p><b>跨 zone 传送</b>（批次 5.4，zone-travel-spec §5.5；装配见 {@link ZoneTravel}）：226 同步校验（3024 / 3007 / 3025 / 13000 或 3014）后
+ * 应答转成延迟应答、进 PRECHECK 读在队关系（{@link TeamChecks}）；不在队才回 {@code {0}}、进 RESOLVING 请 scene-manager 在目标 zone 选 gate、
+ * 签票据（{@link TravelTargets}）；选中就复用 5.2 的冻结，提交一笔<b>交出并释放</b>（{@link HandOffMode#RELEASE}：写回快照 + E→E+1 + 释放，原子），
+ * 两条腿之间没有持有者。提交后移除实例（旁人 51，不写回、不拍 LOGOUT）、留墓碑，先写<b>待落点</b>位置记录（E, 序号+1），写完才经同一条链路
+ * 发重定向帧（{@link ClientSink#playerRedirect}），gate 推 124、客户端到目标 zone 重新登录。与 5.2 共用在途槽、冻结闸、pendingAbort、
+ * 交出 / 探测结局的分派与墓碑；差别是任何路径都不再释放新 epoch、失败推 3027、读到 ≥ E+2（Superseded）踢 2017。
+ *
  * <p><b>指标</b>（{@link SceneMetrics}）：场景配置下的在线人数在每次人数变化后推送绝对值；移动裁决、视野变化通知、
  * 帧与帧内广播耗时（经 {@link SceneClock} 计时）、频道数与计划应用 / 改派、跨节点换图的选目标 / 交出 / 交出进场都在这里记，
  * 与规则写在同一处，不另设观察者。
@@ -149,6 +167,20 @@ public final class SceneWorld {
     private static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 被别的会话接管 / 失去归属时推给旧会话的 tip（基线顶号同码，经 23 推送，本里程碑不发 34）。 */
     static final int KICKED_BY_ANOTHER = LoginErrorTip.login_error.kLoginBeKickByAnOtherAccount_VALUE;
+    /** 226：目标 zone 为 0 或就是本 zone（基线 player_lifecycle.cpp:2759-2763）。 */
+    private static final int TRAVEL_ZONE_INVALID = SceneErrorTip.scene_error.kZoneTravelTargetZoneNotFound_VALUE;
+    /** 226：指定的地图不在 World 表（基线复用 3007，:2773-2779）。 */
+    private static final int TRAVEL_MAP_INVALID = SceneErrorTip.scene_error.kEnterSceneSceneNotFound_VALUE;
+    /** 226：回合制战斗 / 备战在途（:2784-2788）。 */
+    private static final int TRAVEL_IN_BATTLE = SceneErrorTip.scene_error.kZoneTravelInBattle_VALUE;
+    /** 226：在队（:2789-2799；Java 是延迟应答，X4）。 */
+    private static final int TRAVEL_IN_TEAM = SceneErrorTip.scene_error.kZoneTravelInTeam_VALUE;
+    /** 跨 zone 传送的兜底失败码（基线 genericFailTip）：在队检查判不了、选目标失败 / 拒绝、交出没提交 / 结局判不了。 */
+    private static final int TRAVEL_FAILED = SceneErrorTip.scene_error.kZoneTravelTargetBusy_VALUE;
+    /** 226：已有一次传送在途或交出冻结在途（基线 IsSceneChangeBusy 的「已冻结 / 已有交接组件」，:2803-2812）。 */
+    private static final int TRANSFER_IN_PROGRESS = CrossServerErrorTip.cross_server_error.kSceneTransferInProgress_VALUE;
+    /** 226：63 的选目标 / 镜像取号在途（基线「普通 63 在途」）。 */
+    private static final int CHANGING_SCENE = SceneErrorTip.scene_error.kEnterSceneChangingScene_VALUE;
     /**
      * RESOLVING 槽比选目标的本地兜底超时多活的时长：结果回调由实现保证恰好一次（兜底超时到了也会回），这个槽只防回调丢失
      * 让玩家永远卡在 3014；多给 1 s，正常的超时结果总是先于槽过期回来。
@@ -175,7 +207,7 @@ public final class SceneWorld {
     private final CrossNodeSwitch crossNode;
     private final SceneInstances instances;
     private final BattleHooks battle;
-    /** 跨 zone 传送（226，批次 5.4）的装配：本 zone 号、选目标、在队检查与三个时限。先行件阶段只装配，226 的处理器还没注册。 */
+    /** 跨 zone 传送（226，批次 5.4）的装配：本 zone 号、选目标、在队检查与三个时限。 */
     private final ZoneTravel zoneTravel;
 
     private final Map<Long, Scene> scenes = new LinkedHashMap<>();
@@ -202,8 +234,16 @@ public final class SceneWorld {
     private long switchTokens;
     /** 冻结中（交出在途）的玩家数（指标 {@code xm.scene.transfers.in.flight}）。 */
     private int transfersInFlight;
-    /** 交出后留下的墓碑（会话 → 墓碑；见 {@link TransferTombstone}）。过期的在每秒的位置续期里清掉。 */
+    /**
+     * 交出后留下的墓碑（会话 → 墓碑；见 {@link TransferTombstone}）。过期的在每秒的位置续期里清掉；跨 zone 传送里重定向帧还没定的不过期、
+     * 也不随链路断开 / 停服清掉（由待落点写完的回调裁决，{@link #onPlacementWritten}）。
+     */
     private final Map<SessionKey, TransferTombstone> transferTombstones = new HashMap<>();
+    /**
+     * 已交出并释放、实例已移出世界、重定向帧还没定（发出或确定不发）的旅客数（zone-travel-spec §5.3「世界计数」、TF16）：
+     * 交出提交且实例移除时 +1，待落点写完的回调里定下帧的去留时 −1。给 5.5 的停服 / 冲突疏散收敛谓词用（{@link #travelFramesPending()}）。
+     */
+    private int travelFramesPending;
 
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
                       LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics) {
@@ -1529,13 +1569,14 @@ public final class SceneWorld {
     // ------------------------------------------------------------------ 跨节点换图（批次 5.2，scene-handoff-spec §5.5）
 
     /**
-     * 换图「在途」判定（基线 IsSceneChangeBusy）：选目标中 / 镜像取号中（RESOLVING，批次 5.3 D4）或冻结中（FREEZING）为 true。
-     * RESOLVING 槽过了期限（结果回调丢了，正常不会）就<b>当场作废</b>（有副作用：清掉这个槽）、不再挡，迟到的结果按过期丢弃
-     * （{@code player.switching() != sw} → STALE）。逻辑线程上调用。
+     * 换图「在途」判定（基线 IsSceneChangeBusy）：226 的在队检查中（PRECHECK，批次 5.4）、选目标中 / 镜像取号中（RESOLVING，批次 5.3 D4）
+     * 或冻结中（FREEZING）为 true。PRECHECK / RESOLVING 槽过了期限（结果回调丢了，正常不会）就<b>当场作废</b>（有副作用：清掉这个槽）、不再挡，
+     * 迟到的结果按过期丢弃（{@code player.switching() != sw} → STALE）。作废的是 PRECHECK 槽时，<b>先经槽上的延迟应答回 3027 再清槽</b>
+     * （zone-travel-spec TF17）：226 的应答因此一定在在队检查上限 + 1 s 内到，之后迟到的在队结果不会二次应答。逻辑线程上调用。
      *
-     * <p>三个调用方：63 的处理器（在途回 3014）；回合制战斗的备战闸（在途回 1006，scene-battle-spec §7.5 第 1.3 步 / D4）；
-     * 组队跟随的守卫（在途不跟随，{@code TeamFollowService.followLeader}）。后两个必须经这里而不是直接看 {@link ScenePlayer#switchPhase()}：
-     * 后者不做过期判定，回调万一丢了，这名玩家的备战 / 跟随会一直被挡到他再发一次 63 或重登
+     * <p>四个调用方：63 的处理器（在途回 3014）；226 的处理器（在途回 13000 / 3014）；回合制战斗的备战闸（在途回 1006，scene-battle-spec §7.5
+     * 第 1.3 步 / D4）；组队跟随的守卫（在途不跟随，{@code TeamFollowService.followLeader}）。后两个必须经这里而不是直接看
+     * {@link ScenePlayer#switchPhase()}：后者不做过期判定，回调万一丢了，这名玩家的备战 / 跟随会一直被挡到他再发一次 63 或重登
      * （审计 GAT-14；D4 只允许 ≤ 选目标兜底超时的竞态）。槽在这里清掉之后，迟到的选目标结果不会在战斗冻结挂上之后再进交出。
      */
     public boolean switchInFlight(ScenePlayer player) {
@@ -1543,9 +1584,12 @@ public final class SceneWorld {
         if (sw == null) {
             return false;
         }
-        if (sw.phase() == SwitchPhase.RESOLVING && clock.nanoTime() - sw.resolveDeadlineNanos() >= 0) {
-            log.warn("选目标 / 取号的结果过了期限还没回来，作废这次在途 player={} token={} 用途={}",
-                    Long.toUnsignedString(player.playerId()), sw.token(), sw.purpose());
+        if (sw.phase() != SwitchPhase.FREEZING && clock.nanoTime() - sw.deadlineNanos() >= 0) {
+            log.warn("在队检查 / 选目标 / 取号的结果过了期限还没回来，作废这次在途 player={} token={} 用途={} 阶段={}",
+                    Long.toUnsignedString(player.playerId()), sw.token(), sw.reason(), sw.phase());
+            if (sw.phase() == SwitchPhase.PRECHECK && sw.deferred().reply(travelResponse(TRAVEL_FAILED))) {
+                metrics.travelRequest(TravelRequest.TEAM_READ_ERROR);
+            }
             player.setSwitching(null);
             return false;
         }
@@ -1662,11 +1706,7 @@ public final class SceneWorld {
      * {@link PlayerRepository#handOff}。冻结前已在途的在线存盘不等：它与交出都带 (E, 未释放) 围栏，谁先提交都安全。
      */
     private void freeze(ScenePlayer player, PlayerSwitch sw, Selection.Chosen target) {
-        if (!player.velocity().isOrigin()) {
-            player.stopMotion();
-            player.markDirty(ScenePlayer.DIRTY_VELOCITY);
-        }
-        PlayerSave snapshot = player.toSave();
+        PlayerSave snapshot = haltForFreeze(player);
         sw.freeze(target.sceneNodeId(), target.sceneId(), target.sceneConfigId(), snapshot, clock.nanoTime());
         transfersInFlight++;
         metrics.transfersInFlight(transfersInFlight);
@@ -1674,6 +1714,15 @@ public final class SceneWorld {
                 Long.toUnsignedString(player.playerId()), sw.token(), player.ownerEpoch(), target.sceneNodeId(),
                 Long.toUnsignedString(target.sceneId()), target.sceneConfigId());
         repository.handOff(snapshot, outcome -> onHandOffDone(player, sw, outcome));
+    }
+
+    /** 冻结前停下（旁人下一个同步帧收到「停了」的 66，服务器不再外推）并拍冻结快照；跨节点换图与跨 zone 传送共用。 */
+    private PlayerSave haltForFreeze(ScenePlayer player) {
+        if (!player.velocity().isOrigin()) {
+            player.stopMotion();
+            player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+        }
+        return player.toSave();
     }
 
     /** 交出的结局（逻辑线程）。 */
@@ -1686,10 +1735,10 @@ public final class SceneWorld {
         switch (outcome) {
             case HandOffOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
             case HandOffOutcome.LeaseTooShort ignored -> unfreezeInPlace(player, sw, TransferResult.LEASE_TOO_SHORT);
-            case HandOffOutcome.Fenced ignored -> onTransferFenced(player, sw);
-            // 只在「交出并释放」（226，批次 5.4）出现；这条路径（HOLD）走不到。先行件阶段先按失去归属处理：
-            // Superseded 的后果必须与 Fenced 完全相同（它不是「本次已提交」的证据），226 的状态机接手后在这里定稿
-            case HandOffOutcome.Superseded ignored -> onTransferFenced(player, sw);
+            case HandOffOutcome.Fenced ignored -> onTransferFenced(player, sw, TransferResult.FENCED);
+            // 只在「交出并释放」（226，批次 5.4）出现：读到 ≥ E+2（多半已交出、随后被别的登录接管，§0.6 裁决 14）。
+            // 后果与 Fenced 完全相同（移除、不写回、踢 2017）——它不是「本次已提交」的证据，不写待落点、不发重定向帧，只是另计一个结局
+            case HandOffOutcome.Superseded ignored -> onTransferFenced(player, sw, TransferResult.SUPERSEDED);
             case HandOffOutcome.Failed failed -> {
                 // 结局不明（重试用尽 / 线程池拒绝）：加锁读探测，截止前给出确定结论；仍然冻结
                 log.warn("交出结局不明，探测归属 player={} token={} epoch={} 尝试={}",
@@ -1711,15 +1760,16 @@ public final class SceneWorld {
             case ProbeOutcome.NotCommitted ignored -> unfreezeInPlace(player, sw, TransferResult.ABORTED_IN_PLACE);
             case ProbeOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
             // 同上：只在「交出并释放」出现，后果与失去归属相同
-            case ProbeOutcome.Superseded ignored -> onTransferFenced(player, sw);
+            case ProbeOutcome.Superseded ignored -> onTransferFenced(player, sw, TransferResult.SUPERSEDED);
             case ProbeOutcome.Lost ignored -> onTransferLost(player, sw);
         }
     }
 
     /**
-     * 已交出（库里 E+1、未释放、冻结快照已落库）。冻结中没有别的事：移除实例（旁人 51，不写回、不拍 LOGOUT）→ 留墓碑 →
-     * 经同一条链路发 PlayerTransfer。帧确定没写出（链路已断 / 不可写）→ 源节点释放 E+1、位置以 (E, 序号+1) 转重连租约。
-     * 冻结中会话已离开 / 被请求让出 → 不发 PlayerTransfer（没人会拿 E+1 进场，释放安全），照离开 / 接管收尾。
+     * 已交出（库里 E+1、冻结快照已落库；跨节点换图 E+1 未释放，跨 zone 传送 E+1 已释放）。冻结中没有别的事：移除实例（旁人 51，不写回、
+     * 不拍 LOGOUT）→ 留墓碑 → 跨节点换图经同一条链路发 PlayerTransfer（{@link #sendTransfer}）；跨 zone 传送先写待落点、写完再发重定向帧
+     * （{@link #sendRedirect}）。冻结中会话已离开 / 被请求让出 → 不发帧，照离开 / 接管收尾：跨节点换图释放 E+1（没人会拿它进场，释放安全）；
+     * 跨 zone 传送什么都不释放（E+1 已在交出事务里释放，zone-travel-spec §5.5）。
      */
     private void onHandedOff(ScenePlayer player, PlayerSwitch sw, long newEpoch) {
         long playerId = player.playerId();
@@ -1729,11 +1779,12 @@ public final class SceneWorld {
             log.error("交出后的 epoch 不是 E+1 player={} E={} 新={}", Long.toUnsignedString(playerId), fromEpoch, newEpoch);
         }
         if (sw.detached()) {
-            // 实例已被停服 / 换角色 / 接替移出（那条路径已写回，必被围栏拒）：PlayerTransfer 没发、也不会发，新 epoch 只有本节点知道
+            // 实例已被停服 / 换角色 / 接替移出（那条路径已写回，必被围栏拒）：帧没发、也不会发。跨节点换图的新 epoch 只有本节点知道，释放它；
+            // 跨 zone 传送的新 epoch 已释放，只计结局
             finishTransfer(player, sw, TransferResult.LEFT);
-            repository.release(playerId, newEpoch);
-            log.info("交出已提交但实例已移出世界，释放新 epoch player={} epoch {}→{}", Long.toUnsignedString(playerId),
-                    fromEpoch, newEpoch);
+            releaseHandedOff(sw, playerId, newEpoch);
+            log.info("交出已提交但实例已移出世界 player={} epoch {}→{} 用途={}", Long.toUnsignedString(playerId), fromEpoch, newEpoch,
+                    sw.reason());
             return;
         }
         if (!player.toSave().equals(sw.snapshot())) {
@@ -1746,18 +1797,34 @@ public final class SceneWorld {
             case LEAVE -> {
                 finishTransfer(player, sw, TransferResult.LEFT);
                 removePlayer(player, false);
-                repository.release(playerId, newEpoch);
+                releaseHandedOff(sw, playerId, newEpoch);
                 writeLeaveLocation(player, sw.leaveVoluntary());
-                log.info("交出已提交但冻结中会话已离开，释放新 epoch player={} epoch {}→{} 主动={}",
-                        Long.toUnsignedString(playerId), fromEpoch, newEpoch, sw.leaveVoluntary());
+                log.info("交出已提交但冻结中会话已离开，不发帧 player={} epoch {}→{} 主动={} 用途={}",
+                        Long.toUnsignedString(playerId), fromEpoch, newEpoch, sw.leaveVoluntary(), sw.reason());
             }
             case TAKEOVER -> {
                 finishTransfer(player, sw, TransferResult.TAKEN_OVER);
                 removePlayer(player, false);
-                repository.release(playerId, newEpoch);
-                kick(player, KICKED_BY_ANOTHER, "冻结中数据归属被新的进游戏接管（交出已提交，释放新 epoch）");
+                releaseHandedOff(sw, playerId, newEpoch);
+                kick(player, KICKED_BY_ANOTHER, "冻结中数据归属被新的进游戏接管（交出已提交，不发帧）");
             }
-            case NONE -> sendTransfer(player, sw, newEpoch);
+            case NONE -> {
+                if (sw.reason() == SwitchReason.TRAVEL) {
+                    sendRedirect(player, sw, newEpoch);
+                } else {
+                    sendTransfer(player, sw, newEpoch);
+                }
+            }
+        }
+    }
+
+    /**
+     * 已交出、帧不发的收尾里释放新 epoch：只有跨节点换图（交出并保持）要释放；跨 zone 传送（交出并释放）的 E+1 在交出事务里已释放，
+     * 再释放是空操作，按规格一律不调（zone-travel-spec §5.2「RELEASE 下任何路径都不再释放新 epoch」）。
+     */
+    private void releaseHandedOff(PlayerSwitch sw, long playerId, long newEpoch) {
+        if (sw.reason() != SwitchReason.TRAVEL) {
+            repository.release(playerId, newEpoch);
         }
     }
 
@@ -1819,9 +1886,10 @@ public final class SceneWorld {
                 kick(player, KICKED_BY_ANOTHER, "冻结中数据归属被新的进游戏接管（交出没提交，写回并释放）");
             }
             case NONE -> {
-                log.info("交出没提交，原地解冻 player={} token={} 结局={}", Long.toUnsignedString(player.playerId()),
-                        sw.token(), result);
-                pushTip(player, ENTER_FAILED);
+                log.info("交出没提交，原地解冻 player={} token={} 结局={} 用途={}", Long.toUnsignedString(player.playerId()),
+                        sw.token(), result, sw.reason());
+                // 跨 zone 传送推 3027（基线跨 zone 兜底码），跨节点换图推 3023
+                pushTip(player, sw.reason() == SwitchReason.TRAVEL ? TRAVEL_FAILED : ENTER_FAILED);
                 // 冻结期间到达的确认只续了锁、没挂冻结，到达的结算被延后，销账回来也没 forget 账本（scene-battle-spec §7.7、§7.10、§7.12）：
                 // 原地解冻后重跑一次完整的进场恢复（第 1 步起，不是只补「锁步骤」；同规格 §7.8 末段、§10.5，D34）。期间 recovery = PENDING：
                 // 备战 1006、结算 DEFERRED，读失败由 reaper 重试
@@ -1830,9 +1898,12 @@ public final class SceneWorld {
         }
     }
 
-    /** 交出被围栏拒：归属已不是本实例的（租约过期被夺），同续约失去归属——移除（不写回）并踢 2017；会话已离开的不踢。 */
-    private void onTransferFenced(ScenePlayer player, PlayerSwitch sw) {
-        finishTransfer(player, sw, TransferResult.FENCED);
+    /**
+     * 交出被围栏拒：归属已不是本实例的（租约过期被夺），同续约失去归属——移除（不写回）并踢 2017；会话已离开的不踢。
+     * 跨 zone 传送读到 ≥ E+2（{@code Superseded}，已交出且已被别的登录接管，§0.6 裁决 14）同样处理，只是结局计 {@code superseded}。
+     */
+    private void onTransferFenced(ScenePlayer player, PlayerSwitch sw, TransferResult result) {
+        finishTransfer(player, sw, result);
         if (sw.detached()) {
             return;
         }
@@ -1846,7 +1917,8 @@ public final class SceneWorld {
 
     /**
      * 交出结局不明且探测判定不了（锁等待超时、读到别人的归属 / 已释放）：fail-closed，移除（不写回、不释放）并踢 3023
-     * （gate 推 23 {3023} 后断开，D5）。可能已提交（E+1 无人持有，等租约过期）或已被夺。会话已离开的不踢。
+     * （gate 推 23 {3023} 后断开，D5）；跨 zone 传送踢 3027（23 {3027} 后断开，不发 34，X7）。可能已提交（跨节点换图的 E+1 无人持有，
+     * 等租约过期）或已被夺。会话已离开的不踢。
      */
     private void onTransferLost(ScenePlayer player, PlayerSwitch sw) {
         finishTransfer(player, sw, TransferResult.LOST_UNKNOWN);
@@ -1855,7 +1927,7 @@ public final class SceneWorld {
         }
         removePlayer(player, false);
         if (sw.pendingAbort() != PlayerSwitch.PendingAbort.LEAVE) {
-            kick(player, ENTER_FAILED, "交出结局无法确认（fail-closed）");
+            kick(player, sw.reason() == SwitchReason.TRAVEL ? TRAVEL_FAILED : ENTER_FAILED, "交出结局无法确认（fail-closed）");
         } else {
             log.warn("交出结局无法确认（会话已离开） player={}", Long.toUnsignedString(player.playerId()));
         }
@@ -1868,8 +1940,9 @@ public final class SceneWorld {
         }
         transfersInFlight--;
         metrics.transfersInFlight(transfersInFlight);
-        // 批次 5.4 起带用途标签：这条路径（63 的跨节点换图）一律是 player；226 的 travel 由跨 zone 传送的实现计
-        metrics.transfer(TransferReason.PLAYER, result, clock.nanoTime() - sw.frozenAtNanos());
+        // 批次 5.4 起带用途标签（§0.6 裁决 16）：63 的跨节点换图一律 player，226 的跨 zone 传送是 travel
+        metrics.transfer(sw.reason() == SwitchReason.TRAVEL ? TransferReason.TRAVEL : TransferReason.PLAYER, result,
+                clock.nanoTime() - sw.frozenAtNanos());
     }
 
     /** 冻结中会话离开 / 所在链路断开：只记下，等交出结局（同一玩家只有一个写在途；实例与旁人视野保持到结局回来）。 */
@@ -1886,7 +1959,9 @@ public final class SceneWorld {
 
     /**
      * 实例已不在时到来的 PlayerLeave：若这个会话刚交出（墓碑在、玩家对得上、没过期），就是与 PlayerTransfer 在链路上交叉的那条——
-     * 按 voluntary 用 (E, 序号+1) 写登出墓碑或重连租约（gate 随后把那次 transfer 当过期并放弃 E+1）。绝不释放 E+1。
+     * 按 voluntary 用旧 epoch E、续接的序号写登出墓碑或重连租约（跨节点换图是 (E, 序号+1)，gate 随后把那次 transfer 当过期并放弃 E+1；
+     * 跨 zone 传送是 (E, 序号+2)，排在待落点之后）。绝不释放 E+1。跨 zone 传送的墓碑在待落点写完之前被消费时，重定向帧随之不再发
+     * （{@link #onPlacementWritten} 看墓碑还在不在）。
      */
     private boolean consumeTransferTombstone(SessionKey key, PlayerLeave leave) {
         TransferTombstone tombstone = transferTombstones.get(key);
@@ -1925,6 +2000,352 @@ public final class SceneWorld {
     /** 给本人推 23 {@code TipInfoMessage{tip}}（异步换图的结局，应答早已回过）。 */
     private void pushTip(ScenePlayer player, int tipId) {
         sendTo(player, push(ids.sendTipToClient(), SceneMessageIds.tip(tipId)));
+    }
+
+    // ------------------------------------------------------------------ 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）
+
+    /**
+     * 226 TravelToZone（逻辑线程，{@link ClientRequestHandler} 调；冻结闸与战斗闸都对它放行，它自己判）。同步段按基线顺序（§1.5、§5.5 表），
+     * 命中即在应答里回码、不改任何状态：
+     * <ol>
+     *   <li>目标 zone 为 0 或就是本 zone → 3024；</li>
+     *   <li>指定了地图且不在 World 表（表空不拦）→ 3007；</li>
+     *   <li>回合制战斗 / 备战在途 → 3025（计 {@code battle.gate.rejects{zone_travel}}）；</li>
+     *   <li>换图在途（{@link #switchInFlight}，过期的槽在这里当场作废）：任一阶段的跨 zone 传送或任何交出冻结 → 13000，63 的选目标 / 镜像取号 → 3014；</li>
+     *   <li>没装配跨 zone 传送（没有可达的 scene-manager）→ 3027（基线 :2870-2873 的同步 3027）。</li>
+     * </ol>
+     * 都过了：应答转成延迟应答（{@link PlayerCall#defer}），挂上 PRECHECK 槽读在队关系（{@link TeamChecks}，上限
+     * {@code xm.scene.travel.team-check-timeout}）；结果回到逻辑线程再回应答（{@link #onTravelTeamChecked}）。第 4 步排在在队检查之前，所以 PRECHECK
+     * 期间再发的 226 回 13000、63 回 3014（等价基线「受理即冻结」挡住后来的请求）。每条 226 在 {@code xm.scene.travel.requests} 上恰好计一次：
+     * 同步段当场计，延迟的在出结论时计。
+     */
+    void requestTravel(PlayerCall call, int targetZoneId, int sceneConfigId) {
+        ScenePlayer player = call.player();
+        TravelRequest rejected = travelRejection(player, targetZoneId, sceneConfigId);
+        if (rejected != null) {
+            metrics.travelRequest(rejected);
+            if (rejected == TravelRequest.IN_BATTLE) {
+                metrics.battleGateReject(BattleGate.ZONE_TRAVEL);
+            }
+            log.info("拒绝跨 zone 传送（{}） player={} 目标 zone={} scene_config_id={}", rejected,
+                    Long.toUnsignedString(player.playerId()), Integer.toUnsignedString(targetZoneId),
+                    Integer.toUnsignedString(sceneConfigId));
+            call.reply(travelResponse(travelTip(rejected)));
+            return;
+        }
+        DeferredReply deferred = call.defer();
+        long token = ++switchTokens;
+        PlayerSwitch sw = PlayerSwitch.travel(token, targetZoneId, sceneConfigId, deferred,
+                clock.nanoTime() + zoneTravel.teamCheckTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
+        player.setSwitching(sw);
+        log.info("跨 zone 传送：在队检查 player={} token={} 目标 zone={} scene_config_id={} request_id={}",
+                Long.toUnsignedString(player.playerId()), token, Integer.toUnsignedString(targetZoneId),
+                Integer.toUnsignedString(sceneConfigId), call.requestId());
+        try {
+            zoneTravel.teamChecks().check(player.playerId(), zoneTravel.teamCheckTimeout(),
+                    result -> onTravelTeamChecked(player, sw, result));
+        } catch (RuntimeException e) {
+            // 实现的编程错误（契约是不抛、恰好回一次）：判定不了 = fail-closed，当场回 3027、清槽，不让 226 挂到槽过期
+            log.error("在队检查调用抛出异常，回 3027 player={} token={}", Long.toUnsignedString(player.playerId()), token, e);
+            if (player.switching() == sw && sw.phase() == SwitchPhase.PRECHECK) {
+                player.setSwitching(null);
+                if (deferred.reply(travelResponse(TRAVEL_FAILED))) {
+                    metrics.travelRequest(TravelRequest.TEAM_READ_ERROR);
+                }
+            }
+        }
+    }
+
+    /** 226 的同步段（§5.5 表第 1–4 步与「没装配」）：拒绝的结局，放行为 null。第 4 步经 {@link #switchInFlight}（过期的槽当场作废）。 */
+    private TravelRequest travelRejection(ScenePlayer player, int targetZoneId, int sceneConfigId) {
+        if (targetZoneId == 0 || targetZoneId == zoneTravel.localZoneId()) {
+            return TravelRequest.ZONE_INVALID;
+        }
+        List<Integer> worldMaps = tables.worldSceneConfigIds();
+        if (sceneConfigId != 0 && !worldMaps.isEmpty() && !worldMaps.contains(sceneConfigId)) {
+            return TravelRequest.MAP_INVALID;
+        }
+        if (player.inBattle()) {
+            // 6.3 的战斗在途（备战或战斗中）：基线 kZoneTravelInBattle
+            return TravelRequest.IN_BATTLE;
+        }
+        if (switchInFlight(player)) {
+            PlayerSwitch busy = player.switching();
+            return busy.reason() == SwitchReason.TRAVEL || busy.phase() == SwitchPhase.FREEZING ? TravelRequest.BUSY_TRANSFER
+                    : TravelRequest.BUSY_SWITCH;
+        }
+        if (!zoneTravel.enabled()) {
+            return TravelRequest.UNAVAILABLE;
+        }
+        return null;
+    }
+
+    private static int travelTip(TravelRequest result) {
+        return switch (result) {
+            case ACCEPTED -> 0;
+            case ZONE_INVALID -> TRAVEL_ZONE_INVALID;
+            case MAP_INVALID -> TRAVEL_MAP_INVALID;
+            case IN_BATTLE -> TRAVEL_IN_BATTLE;
+            case IN_TEAM -> TRAVEL_IN_TEAM;
+            case BUSY_TRANSFER -> TRANSFER_IN_PROGRESS;
+            case BUSY_SWITCH -> CHANGING_SCENE;
+            case TEAM_READ_ERROR, UNAVAILABLE -> TRAVEL_FAILED;
+        };
+    }
+
+    /** 226 的应答：{@code error_message} 总是带上（受理时是空子消息，编码为 {@code 0a 00}，§4.5）。 */
+    private static TravelToZoneResponse travelResponse(int tipId) {
+        return TravelToZoneResponse.newBuilder().setErrorMessage(SceneMessageIds.tip(tipId)).build();
+    }
+
+    /**
+     * 在队检查的结果（逻辑线程）。先核对槽：已被作废（过期，作废方已回 3027 并计数）→ 丢弃；实例已移出世界（会话已走）→ 延迟应答作废、不回，
+     * 计 {@code team_read_error}。然后：在队 → 3026；判定不了 → 3027（fail-closed，X4）；不在队但此刻已有回合制战斗在途（迟到确认挂上的冻结，
+     * 纵深防御）→ 3025；都不是 → 回 {@code {0}}（已受理）、进 RESOLVING 请 scene-manager 选 gate、签票据（本地兜底复用 {@code switch-resolve-timeout}）。
+     * {@code {0}} 在发起选目标之前回、走同一条链路，所以之后的 23 恒在它之后到（X3）。
+     */
+    private void onTravelTeamChecked(ScenePlayer player, PlayerSwitch sw, TeamCheck result) {
+        if (player.switching() != sw || sw.phase() != SwitchPhase.PRECHECK) {
+            log.info("在队检查的结果回来时这次传送已作废（槽过期，已由作废方回 3027），丢弃 player={} token={} 结果={}",
+                    Long.toUnsignedString(player.playerId()), sw.token(), result);
+            return;
+        }
+        if (playersById.get(player.playerId()) != player) {
+            player.setSwitching(null);
+            sw.deferred().cancel();
+            metrics.travelRequest(TravelRequest.TEAM_READ_ERROR);
+            log.info("在队检查的结果回来时实例已离开 / 已重新进场，作废 226 的应答 player={} token={}",
+                    Long.toUnsignedString(player.playerId()), sw.token());
+            return;
+        }
+        TravelRequest outcome;
+        if (result == TeamCheck.NOT_IN_TEAM) {
+            outcome = player.inBattle() ? TravelRequest.IN_BATTLE : TravelRequest.ACCEPTED;
+        } else if (result == TeamCheck.IN_TEAM) {
+            outcome = TravelRequest.IN_TEAM;
+        } else {
+            outcome = TravelRequest.TEAM_READ_ERROR;
+        }
+        metrics.travelRequest(outcome);
+        if (outcome != TravelRequest.ACCEPTED) {
+            player.setSwitching(null);
+            sw.deferred().reply(travelResponse(travelTip(outcome)));
+            log.info("拒绝跨 zone 传送（{}） player={} token={} 在队检查={}", outcome, Long.toUnsignedString(player.playerId()),
+                    sw.token(), result);
+            return;
+        }
+        sw.deferred().reply(travelResponse(0));
+        sw.accept(clock.nanoTime() + zoneTravel.resolveTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
+        log.info("跨 zone 传送已受理，请 scene-manager 选 gate、签票据 player={} token={} 目标 zone={} scene_config_id={}",
+                Long.toUnsignedString(player.playerId()), sw.token(), Integer.toUnsignedString(sw.toZoneId()),
+                Integer.toUnsignedString(sw.wantConfigId()));
+        try {
+            zoneTravel.targets().selectTravel(player.playerId(), sw.toZoneId(), sw.wantConfigId(),
+                    selection -> onTravelTargetSelected(player, sw, selection));
+        } catch (RuntimeException e) {
+            // 实现的编程错误（契约是不抛、恰好回一次）：按调用失败收口，不让玩家挂在 RESOLVING 到槽过期
+            log.error("选目标调用抛出异常，按调用失败处理 player={} token={}", Long.toUnsignedString(player.playerId()), sw.token(), e);
+            onTravelTargetSelected(player, sw, new TravelSelection.Failed("选目标调用抛出异常: " + e));
+        }
+    }
+
+    /**
+     * 选目标的结果（逻辑线程，同 5.2 {@link #onSwitchTargetSelected} 的纪律：先核对实例与槽，对不上计 stale、丢弃）。
+     * 调用失败 / 超时 / 应答残缺 → 23 {3027}（计 error）；scene-manager 拒绝（没这张图、没 gate…）→ 23 {3027}（计 rejected）；
+     * 选中但此刻有回合制战斗在途 → 23 {3025}（纵深防御）；选中 → 冻结并提交交出并释放（{@link #freezeForTravel}）。前三种都清槽、留原地、照常游玩。
+     */
+    private void onTravelTargetSelected(ScenePlayer player, PlayerSwitch sw, TravelSelection selection) {
+        if (playersById.get(player.playerId()) != player || player.switching() != sw
+                || sw.phase() != SwitchPhase.RESOLVING) {
+            metrics.travelResolve(TravelResolve.STALE);
+            log.debug("跨 zone 选目标的结果回来时实例已离开 / 已重新进场 / 这次传送已作废，丢弃 player={} token={}",
+                    Long.toUnsignedString(player.playerId()), sw.token());
+            return;
+        }
+        switch (selection) {
+            case TravelSelection.Failed failed -> {
+                player.setSwitching(null);
+                metrics.travelResolve(TravelResolve.ERROR);
+                log.warn("跨 zone 选目标调用失败，留在原地 player={} token={}: {}", Long.toUnsignedString(player.playerId()),
+                        sw.token(), failed.reason());
+                pushTip(player, TRAVEL_FAILED);
+            }
+            case TravelSelection.Refused refused -> {
+                player.setSwitching(null);
+                metrics.travelResolve(TravelResolve.REJECTED);
+                log.info("scene-manager 拒绝跨 zone 传送，留在原地 player={} token={} 目标 zone={} tip={}",
+                        Long.toUnsignedString(player.playerId()), sw.token(), Integer.toUnsignedString(sw.toZoneId()),
+                        refused.tipId());
+                pushTip(player, TRAVEL_FAILED);
+            }
+            case TravelSelection.Chosen chosen -> onTravelTargetChosen(player, sw, chosen);
+        }
+    }
+
+    private void onTravelTargetChosen(ScenePlayer player, PlayerSwitch sw, TravelSelection.Chosen chosen) {
+        String residual = residualRedirect(sw, chosen);
+        if (residual != null) {
+            // 实现已把残缺的应答转成 Failed；这里是纵深防御：残缺的票据交出去之后客户端跟不过去，而那时归属已经释放
+            player.setSwitching(null);
+            metrics.travelResolve(TravelResolve.ERROR);
+            log.error("scene-manager 的跨 zone 选目标应答残缺（{}），留在原地 player={} token={}", residual,
+                    Long.toUnsignedString(player.playerId()), sw.token());
+            pushTip(player, TRAVEL_FAILED);
+            return;
+        }
+        if (player.inBattle()) {
+            // 两种冻结互斥（scene-battle-spec §7.13 世界内部第 1 条）：选目标期间迟到确认 / 进场恢复挂上了战斗冻结 → 中止，按应恒为 0
+            player.setSwitching(null);
+            metrics.travelResolve(TravelResolve.IN_BATTLE);
+            log.info("跨 zone 选目标回来时玩家已在回合制战斗中，中止传送 player={} battle={}",
+                    Long.toUnsignedString(player.playerId()), player.battle().freeze());
+            pushTip(player, TRAVEL_IN_BATTLE);
+            return;
+        }
+        metrics.travelResolve(TravelResolve.CHOSEN);
+        freezeForTravel(player, sw, chosen);
+    }
+
+    /** 选中结果的完整性（{@link TravelSelection.Failed} 列的那几条，外加目标 zone 对得上）：不完整的原因，完整为 null。 */
+    private static String residualRedirect(PlayerSwitch sw, TravelSelection.Chosen chosen) {
+        ZoneRedirect redirect = chosen.redirect();
+        if (chosen.sceneConfigId() == 0) {
+            return "地图为 0";
+        }
+        if (redirect.getTargetZoneId() != sw.toZoneId()) {
+            return "目标 zone 不符 " + Integer.toUnsignedString(redirect.getTargetZoneId());
+        }
+        if (redirect.getGateHost().isEmpty()) {
+            return "gate 地址为空";
+        }
+        if (redirect.getGatePort() < 1 || redirect.getGatePort() > 65535) {
+            return "gate 端口不在 1..65535: " + Integer.toUnsignedString(redirect.getGatePort());
+        }
+        if (redirect.getTokenPayload().isEmpty() || redirect.getTokenSignature().isEmpty()) {
+            return "票据或签名为空";
+        }
+        if (redirect.getTokenDeadline() <= 0) {
+            return "票据过期时刻 ≤ 0";
+        }
+        return null;
+    }
+
+    /**
+     * 冻结并提交<b>交出并释放</b>（§5.5「选中」行，复用 5.2 的冻结）：停下 → 拍冻结快照 → FREEZING（记下解析后的地图与重定向载荷）→
+     * {@link PlayerRepository#handOff}（{@link HandOffMode#RELEASE}：写回快照 + E→E+1 + 释放，原子）。结局走与 5.2 共用的分派
+     * （{@link #onHandOffDone} / {@link #onProbeDone}），按 {@link SwitchReason#TRAVEL} 分流。
+     */
+    private void freezeForTravel(ScenePlayer player, PlayerSwitch sw, TravelSelection.Chosen chosen) {
+        PlayerSave snapshot = haltForFreeze(player);
+        sw.freezeTravel(chosen.sceneConfigId(), chosen.redirect(), snapshot, clock.nanoTime());
+        transfersInFlight++;
+        metrics.transfersInFlight(transfersInFlight);
+        log.info("跨 zone 传送：冻结并提交交出并释放 player={} token={} epoch={} → zone={} gate={} scene_config_id={}",
+                Long.toUnsignedString(player.playerId()), sw.token(), player.ownerEpoch(),
+                Integer.toUnsignedString(sw.toZoneId()), Integer.toUnsignedString(chosen.redirect().getGateNodeId()),
+                chosen.sceneConfigId());
+        repository.handOff(snapshot, HandOffMode.RELEASE, outcome -> onHandOffDone(player, sw, outcome));
+    }
+
+    /**
+     * 跨 zone 传送已交出并释放、会话没离开（§5.5「HandedOff / NONE」行）：② 移除实例（旁人 51，不写回、不拍 LOGOUT）→ ③ 留墓碑、
+     * {@code travelFramesPending++}、计 {@code handed_off} → ④ 写待落点 (E, 序号+1)（§5.9）→ ⑤ 写完（或写失败）的回调回到逻辑线程后
+     * 墓碑仍在才发重定向帧（{@link #onPlacementWritten}）。墓碑与计数先放好再调写口：写口的回调可能就在调用栈内。
+     */
+    private void sendRedirect(ScenePlayer player, PlayerSwitch sw, long newEpoch) {
+        SessionKey session = player.session();
+        player.setSwitching(null);
+        removePlayer(player, false);
+        TransferTombstone tombstone = TransferTombstone.forRedirect(session, newEpoch, player,
+                clock.nanoTime() + zoneTravel.tombstoneTtl().toNanos());
+        purgeExpiredTombstones();
+        transferTombstones.put(session, tombstone);
+        travelFramesPending++;
+        metrics.travelFramesPending(travelFramesPending);
+        finishTransfer(player, sw, TransferResult.HANDED_OFF);
+        ZoneRedirect redirect = sw.redirect();
+        Duration ttl = placementTtl(redirect);
+        log.info("跨 zone 传送：已交出并释放、实例已移除，写待落点 player={} token={} epoch {}→{} → zone={} scene_config_id={} ttl={}",
+                Long.toUnsignedString(player.playerId()), sw.token(), player.ownerEpoch(), newEpoch,
+                Integer.toUnsignedString(sw.toZoneId()), sw.targetConfigId(), ttl);
+        locations.awaitingPlacement(player, sw.toZoneId(), sw.targetConfigId(), ttl,
+                written -> onPlacementWritten(tombstone, redirect, written));
+    }
+
+    /** 待落点的存活时长：票据过期时刻 − 现在（墙钟），截到 [1 s, {@link PlayerLocationDirectory#AWAIT_PLACEMENT_MAX_TTL}]（§5.9、R-T10）。 */
+    private Duration placementTtl(ZoneRedirect redirect) {
+        // token_deadline 是 Unix 秒（选中时已校验 > 0）；离谱的大值直接按上限截
+        long deadlineSeconds = redirect.getTokenDeadline();
+        long remainingMillis = deadlineSeconds > Long.MAX_VALUE / 1000 ? Long.MAX_VALUE
+                : deadlineSeconds * 1000 - clock.epochMillis();
+        long max = PlayerLocationDirectory.AWAIT_PLACEMENT_MAX_TTL.toMillis();
+        return Duration.ofMillis(Math.max(1000, Math.min(max, remainingMillis)));
+    }
+
+    /**
+     * 待落点写完 / 写失败（逻辑线程；写口保证投递回来、恰好一次）。不论写没写上都定下帧的去留、{@code travelFramesPending--}：
+     * 墓碑已被交叉的 PlayerLeave 消费（它已按 voluntary 写过 (E, 序号+2)）或被同会话的新墓碑取代 → 不发帧；墓碑还在 → 发重定向帧——
+     * 写失败也照发（TF15：第二条腿落目标 zone 的默认主世界），帧确定没写出（链路已断，含写待落点期间链路断开）→ TF7：
+     * 位置以 (E, 序号+2) 改回源场景的重连租约，另计 {@code link_gone}，什么都不释放。
+     */
+    private void onPlacementWritten(TransferTombstone tombstone, ZoneRedirect redirect, boolean written) {
+        if (!tombstone.settleRedirect()) {
+            log.error("同一次待落点写的结果回了两次，忽略 player={}", Long.toUnsignedString(tombstone.playerId()));
+            return;
+        }
+        travelFramesPending--;
+        metrics.travelFramesPending(travelFramesPending);
+        metrics.travelPlacement(written ? TravelPlacement.WRITTEN : TravelPlacement.FAILED);
+        if (!written) {
+            log.warn("待落点没写上（照样发重定向帧，第二条腿按首登落目标 zone 的默认主世界） player={} epoch={}",
+                    Long.toUnsignedString(tombstone.playerId()), tombstone.fromEpoch());
+        }
+        SessionKey session = tombstone.session();
+        if (transferTombstones.get(session) != tombstone) {
+            log.info("待落点写完时墓碑已被交叉的离开消费，不发重定向帧 player={} session={}",
+                    Long.toUnsignedString(tombstone.playerId()), session);
+            return;
+        }
+        boolean sent = sink.playerRedirect(session.linkId(), session.sessionId(), tombstone.playerId(), tombstone.fromEpoch(),
+                tombstone.toEpoch(), redirect, () -> onRedirectWriteFailed(tombstone));
+        if (!sent) {
+            transferTombstones.remove(session, tombstone);
+            if (tombstone.markLocationWritten()) {
+                locations.disconnected(tombstone.removed());
+            }
+            metrics.travelLinkGone();
+            log.warn("跨 zone 传送已交出但到 gate 的链路已断 / 不可写，重定向帧没发出，位置改回源场景重连租约 player={} epoch {}→{}",
+                    Long.toUnsignedString(tombstone.playerId()), tombstone.fromEpoch(), tombstone.toEpoch());
+            return;
+        }
+        log.info("跨 zone 传送：重定向帧已交给链路 player={} epoch {}→{} → zone={} gate={}",
+                Long.toUnsignedString(tombstone.playerId()), tombstone.fromEpoch(), tombstone.toEpoch(),
+                Integer.toUnsignedString(redirect.getTargetZoneId()), Integer.toUnsignedString(redirect.getGateNodeId()));
+    }
+
+    /**
+     * 重定向帧交给链路之后异步写失败（逻辑线程，TF7）：gate 没收到、不会推 124（它随链路断开关会话）。位置改回源场景的重连租约
+     * （交叉的 leave 已按墓碑写过就不再写），另计 {@code link_gone}；E+1 已释放，什么都不释放。同一墓碑重复回调只处理一次。
+     */
+    private void onRedirectWriteFailed(TransferTombstone tombstone) {
+        if (!tombstone.markWriteFailed()) {
+            return;
+        }
+        transferTombstones.remove(tombstone.session(), tombstone);
+        if (tombstone.markLocationWritten()) {
+            locations.disconnected(tombstone.removed());
+        }
+        metrics.travelLinkGone();
+        log.warn("重定向帧没写出去，位置改回源场景重连租约 player={} epoch {}→{}", Long.toUnsignedString(tombstone.playerId()),
+                tombstone.fromEpoch(), tombstone.toEpoch());
+    }
+
+    /**
+     * 已交出并释放、实例已移出世界、重定向帧还没定的旅客数（zone-travel-spec TF16）。给 5.5 的停服 / 冲突疏散收敛谓词用：
+     * 逻辑线程在帧定下之前退出，客户端就收不到 124。逻辑线程上调用。
+     */
+    public int travelFramesPending() {
+        return travelFramesPending;
     }
 
     // ------------------------------------------------------------------ 移动
@@ -2129,7 +2550,7 @@ public final class SceneWorld {
     /**
      * gate 链路断开：取消这条链路上的进场（释放归属），移除其上全部玩家（看得见它们的人收到 51）并写回。幂等。
      * 冻结中（交出在途）的玩家只记下「断线离开」，实例保留到交出结局出来（见「跨节点换图」）；这条链路上的交出墓碑随之作废
-     * （之后不会再有从它来的 PlayerLeave）。
+     * （之后不会再有从它来的 PlayerLeave），跨 zone 传送里重定向帧还没定的除外（见 {@link #onPlacementWritten}）。
      */
     public void onLinkClosed(long linkId) {
         for (Iterator<PendingEnter> it = pendingEnters.values().iterator(); it.hasNext(); ) {
@@ -2154,7 +2575,8 @@ public final class SceneWorld {
             locations.disconnected(player);
             removed++;
         }
-        transferTombstones.keySet().removeIf(session -> session.linkId() == linkId);
+        // 跨 zone 传送里重定向帧还没定的墓碑留着：待落点写完时照常尝试发帧，链路已断就按 TF7 改回源场景重连租约（§5.5）
+        transferTombstones.values().removeIf(tombstone -> tombstone.session().linkId() == linkId && !tombstone.redirectPending());
         if (!onLink.isEmpty()) {
             log.info("gate 链路断开，移除其上玩家 link={} 人数={} 冻结中待结局={}", linkId, removed, onLink.size() - removed);
         }
@@ -2258,7 +2680,8 @@ public final class SceneWorld {
 
     /**
      * 位置续期的一秒（每秒在逻辑线程上调一次）：{@code player_id} 对 {@link #LOCATION_REFRESH_SLOTS} 取模等于本秒槽号的在线玩家
-     * 续一次位置记录的 TTL，每人每 {@link PlayerLocationDirectory#REFRESH_INTERVAL} 恰好一次。
+     * 续一次位置记录的 TTL，每人每 {@link PlayerLocationDirectory#REFRESH_INTERVAL} 恰好一次。顺带的每秒维护：清过期的交出墓碑；
+     * 过期的 226 在队检查槽当场作废并补回 3027（{@link #switchInFlight}）。
      *
      * @return 本次续期的人数
      */
@@ -2269,6 +2692,11 @@ public final class SceneWorld {
         for (ScenePlayer player : playersById.values()) {
             if (Long.remainderUnsigned(player.playerId(), LOCATION_REFRESH_SLOTS) == slot) {
                 due.add(player);
+            }
+            if (player.switchPhase() == SwitchPhase.PRECHECK) {
+                // 226 的在队检查槽（TF17）：结果回调丢了（正常不会）而这名玩家又没再发请求时，也在槽过期后一秒内经 switchInFlight 作废、
+                // 补回 3027——226 的应答一定在在队检查上限 + 1 s（+ 至多一秒）内到，不靠玩家再碰一次
+                switchInFlight(player);
             }
         }
         if (!due.isEmpty()) {
@@ -2410,6 +2838,8 @@ public final class SceneWorld {
      * 结局回到逻辑线程时释放新 epoch，scene-handoff-spec §5.2、§5.5）。这笔释放在本方法返回之后才提交，所以停服流程在关存储线程池
      * 之前要等在途交出 / 探测的结局处理完（{@code SceneShutdown} → {@code StoragePlayerRepository.awaitTransfersSettled}），
      * 否则它撞上已关闭的池被拒、E+1 悬空到租约过期；逻辑线程先停的（投递被拒）由存储线程代为释放。
+     * 跨 zone 传送（批次 5.4）的冻结中玩家同样照常提交写回 E：交出并释放先提交则写回被拒、什么都不用释放。已交出、重定向帧还没定的旅客
+     * （{@link #travelFramesPending()}）的墓碑留着：逻辑线程还在时待落点写完照常发帧；逻辑线程先停的客户端收不到 124（TF16，5.5 的收敛谓词等它归零）。
      */
     public int shutdown() {
         acceptingEnters = false;
@@ -2418,7 +2848,7 @@ public final class SceneWorld {
             releaseClaim(pending.playerId(), pending.ownerEpoch());
         }
         pendingEnters.clear();
-        transferTombstones.clear();
+        transferTombstones.values().removeIf(tombstone -> !tombstone.redirectPending());
         List<ScenePlayer> all = List.copyOf(playersById.values());
         for (ScenePlayer player : all) {
             PlayerSwitch sw = player.switching();

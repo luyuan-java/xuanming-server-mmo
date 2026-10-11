@@ -34,7 +34,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * 批次 5.4 先行件在 xm-scene 里冻结的接缝，以及每个占位都「安全」的证据：装配记录的校验、世界的新构造器层、位置写口的缺省实现、
- * 在队检查的占位、消息号，以及<b>226 仍然没有处理器、回应答内 1006</b>（注册是源侧状态机那个工作包的事，注册时本类最后一条用例随之改写）。
+ * 在队检查的占位、消息号，以及 226 注册之后<b>没装配跨 zone 传送</b>时的安全出口（同步 3027，不挂槽、不交出）。
+ * 226 的状态机本身见 {@code ZoneTravelRequestTest} / {@code ZoneTravelHandOffTest}。
  */
 class ZoneTravelSeamsTest {
 
@@ -203,21 +204,21 @@ class ZoneTravelSeamsTest {
                 .isInstanceOf(TravelToZoneResponse.class);
     }
 
+
     /**
-     * 先行件阶段 226 没有注册处理器：照「没有处理器的方法」回应答内 1006、回显请求号，不冻结、不选目标、不查在队、不碰存储，
-     * 新指标一个都不动——即使世界已经装上了启用的 {@link ZoneTravel}。战斗在途时的同一结论由 {@code InBattleGateMatrixTest} 钉着。
+     * 226 已注册（批次 5.4）：冻结闸与战斗闸都放行（它自己判在途与战斗）。没装配跨 zone 传送（{@link ZoneTravel#DISABLED}，没有可达的
+     * scene-manager）时同步回应答内 3027（基线 player_lifecycle.cpp:2870-2873）、回显请求号，不冻结、不挂槽、不碰存储，
+     * 只计 {@code travel.requests{unavailable}}；其余新指标都不动。
      */
     @Test
-    void 先行件阶段226没有处理器_回应答内1006_即使已装配也不选目标不查在队不交出() throws Exception {
+    void 未装配跨zone传送_226同步回应答内3027_不挂槽不冻结不交出() throws Exception {
         RecordingSink sink = new RecordingSink();
         FakePlayerRepository repo = new FakePlayerRepository();
-        FakeTravelTargets targets = new FakeTravelTargets();
-        FakeTeamChecks teamChecks = new FakeTeamChecks();
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
         SceneWorld world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo,
                 new AtomicLong(5000)::incrementAndGet, new ManualClock(), new SceneMetrics(meters), PlayerInitializer.NONE,
                 PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE, CrossNodeSwitch.DISABLED,
-                SceneInstances.DISABLED, BattleHooks.NONE, new ZoneTravel(1, targets, teamChecks, S2, S4, S30));
+                SceneInstances.DISABLED, BattleHooks.NONE, ZoneTravel.DISABLED);
         ClientRequestHandler handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS);
         Scene scene = world.createScene(1);
         repo.putNewPlayer(1001, 1);
@@ -226,8 +227,8 @@ class ZoneTravelSeamsTest {
         sink.clear();
         int travelToZone = Contracts.IDS.travelToZone();
 
-        assertThat(handler.freezePolicy(travelToZone)).as("没有注册").isNull();
-        assertThat(handler.battlePolicy(travelToZone)).isNull();
+        assertThat(handler.freezePolicy(travelToZone)).isEqualTo(FreezePolicy.ALLOW);
+        assertThat(handler.battlePolicy(travelToZone)).isEqualTo(BattlePolicy.GATED);
 
         handler.onClientForward(1, ClientForward.newBuilder().setSessionId(11).setPlayerId(1001).setMessageId(travelToZone)
                 .setBody(TravelToZoneRequest.newBuilder().setTargetZoneId(2).build().toByteString()).setRequestId(77).build());
@@ -238,15 +239,16 @@ class ZoneTravelSeamsTest {
         assertThat(replies.get(0).getId()).isEqualTo(77L);
         assertThat(replies.get(0).hasErrorMessage()).as("拒绝码在应答体里，不是信封错误").isFalse();
         assertThat(TravelToZoneResponse.parseFrom(replies.get(0).getSerializedMessage()).getErrorMessage().getId())
-                .isEqualTo(1006);
+                .isEqualTo(3027);
         ScenePlayer player = world.playerBySession(new SessionKey(1, 11));
         assertThat(player.switchPhase()).as("没有在途槽").isEqualTo(SwitchPhase.NONE);
         assertThat(player.frozen()).isFalse();
-        assertThat(targets.calls()).isEmpty();
-        assertThat(teamChecks.calls()).isEmpty();
         assertThat(repo.pendingHandOffs()).isZero();
         assertThat(sink.redirects()).isEmpty();
-        for (String meter : List.of("xm.scene.travel.requests", "xm.scene.travel.resolves", "xm.scene.travel.placements")) {
+        assertThat(meters.get("xm.scene.travel.requests").tag("result", "unavailable").counter().count()).isEqualTo(1);
+        assertThat(meters.find("xm.scene.travel.requests").counters()).extracting(Counter::count).as("每条 226 恰好计一次")
+                .containsOnly(0.0, 1.0).filteredOn(count -> count == 1.0).hasSize(1);
+        for (String meter : List.of("xm.scene.travel.resolves", "xm.scene.travel.placements")) {
             assertThat(meters.find(meter).counters()).as(meter + " 已预注册").isNotEmpty()
                     .allSatisfy(counter -> assertThat(counter.count()).isZero());
         }

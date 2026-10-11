@@ -384,10 +384,14 @@ public final class SceneMetrics {
     /**
      * 一次交出的结局（{@code xm.scene.transfers{reason, result}}，scene-handoff-spec §7.2），每次冻结恰好终结一次。
      * 下面各取值的说明按跨节点换图（{@code reason = player}）写；跨 zone 传送（{@code reason = travel}）用同一组取值，
-     * 差别是不释放新 epoch、推的 tip 不同（zone-travel-spec §5.5）。
+     * 差别是不释放新 epoch、推的 tip 是 3027 而不是 3023（zone-travel-spec §5.5），以及 {@link #HANDED_OFF} / {@link #LINK_GONE} 的口径
+     * （见这两个取值；勾稽见 zone-travel-spec §7.3）。
      */
     public enum TransferResult {
-        /** 已交出并把 PlayerTransfer 交给了链路。 */
+        /**
+         * 已交出并把 PlayerTransfer 交给了链路。跨 zone 传送：已交出并释放、实例已移除（这一刻终结并计数，之后先写待落点再发重定向帧；
+         * 帧没写出另计 {@link #LINK_GONE}）。
+         */
         HANDED_OFF,
         /** 没提交：剩余租约不足安全边际，原地解冻、推 23 {3023}。 */
         LEASE_TOO_SHORT,
@@ -401,7 +405,11 @@ public final class SceneMetrics {
         LEFT,
         /** 已交出，但冻结中被请求让出（顶号）：源节点释放新 epoch、踢旧会话 2017。 */
         TAKEN_OVER,
-        /** 已交出，但写 PlayerTransfer 时链路已断 / 不可写：源节点释放新 epoch、写重连租约。 */
+        /**
+         * 已交出，但写 PlayerTransfer 时链路已断 / 不可写：源节点释放新 epoch、写重连租约。跨 zone 传送（TF7）：重定向帧没写出（链路已断、
+         * 异步写失败），位置改回源场景的重连租约、不释放；它<b>不是</b>终结——这次交出已计过 {@link #HANDED_OFF}，这里另计一次
+         * （{@link SceneMetrics#travelLinkGone()}，不记冻结时长）。
+         */
         LINK_GONE,
         /**
          * 只在 {@code reason = travel} 出现（批次 5.4）：交出并释放的重试 / 探测读到库里已是 ≥ E+2（多半已交出、随后被别的登录接管）。
@@ -428,7 +436,10 @@ public final class SceneMetrics {
         BUSY_TRANSFER,
         /** 63 的选目标 / 镜像取号在途：3014。 */
         BUSY_SWITCH,
-        /** 在队检查读失败 / 超时 / 槽过期 / 实例被移出：3027。 */
+        /**
+         * 在队检查读失败 / 超时 / 调用抛异常 / 槽过期（作废方回）：3027。在队检查期间实例被移出世界（会话已走）也计在这里，
+         * 但延迟应答作废、不回（zone-travel-spec §5.5）。
+         */
         TEAM_READ_ERROR,
         /** 跨 zone 传送没装配（没有可达的 scene-manager）：同步回 3027。 */
         UNAVAILABLE
@@ -900,6 +911,14 @@ public final class SceneMetrics {
     public void transfer(TransferReason reason, TransferResult result, long frozenNanos) {
         transfers.get(reason).get(result).increment();
         transferFreeze.record(Math.max(0, frozenNanos), TimeUnit.NANOSECONDS);
+    }
+
+    /**
+     * 跨 zone 传送已交出（已按 {@link TransferResult#HANDED_OFF} 终结）之后重定向帧确定没写出（逻辑线程；zone-travel-spec TF7）：
+     * 另计一次 {@code transfers{reason = travel, result = link_gone}}，不记冻结时长（冻结在交出提交时已结束）。
+     */
+    public void travelLinkGone() {
+        transfers.get(TransferReason.TRAVEL).get(TransferResult.LINK_GONE).increment();
     }
 
     // ================================================================ 跨 zone 传送（批次 5.4）

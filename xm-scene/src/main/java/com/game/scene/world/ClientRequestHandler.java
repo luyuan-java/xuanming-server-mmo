@@ -21,6 +21,7 @@ import com.game.proto.PlayerSkillListComp;
 import com.game.proto.SceneInfoComp;
 import com.game.proto.SceneInfoS2C;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.TravelToZoneRequest;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BattleGate;
 import com.game.scene.metrics.SceneMetrics.FrozenRejection;
@@ -52,7 +53,8 @@ import org.slf4j.LoggerFactory;
  *   <li>没有处理器的方法回 {@code kFeatureUnavailable}(1006)，不断连、不抛异常。136 TeleportRequest 也在其中
  *       （基线是空桩，回 id=0 的空 tip；Java 如实说「不支持」，PARITY 登记为有意差异）；</li>
  *   <li>有应答的方法，处理器返回时必须已经回过（{@link PlayerCall#reply}）或已转成延迟应答（{@link PlayerCall#defer}，批次 5.4）；
- *       两样都没做（或中途抛了异常）由这里补回 1006，不让客户端卡住。已延迟的不补——除非处理器在延迟之后抛了异常且还没人回，
+ *       两样都没做（或中途抛了异常）由这里补回 1006，不让客户端卡住。已延迟的不补（目前只有 226：在队检查读回来才回，
+ *       由 {@link SceneWorld} 保证在在队检查上限 + 1 s 内必到、至多一个）——除非处理器在延迟之后抛了异常且还没人回，
  *       这时经同一个 {@link DeferredReply} 补 1006；</li>
  *   <li><b>冻结闸</b>（跨节点换图的交出事务在途，{@link ScenePlayer#frozen()}；scene-handoff-spec §5.9，D7）：排在 GM 闸与
  *       「有没有处理器」之后、调处理器之前，按注册时声明的 {@link FreezePolicy} 处理——DROP 静默丢（移动）、REJECT 回应答内
@@ -60,7 +62,7 @@ import org.slf4j.LoggerFactory;
  *       基线没有中心闸、各系统自己查冻结；Java 收拢到这里、缺省拒绝，漏掉的闸由交出时的快照比对兜底检测。
  *       选目标中（RESOLVING）不冻结，不经这道闸。</li>
  * </ul>
- * 处理器按功能注册（{@link SceneFeature}）；本类自己注册场景核心的移动、技能列表（77）、换场景、场景信息
+ * 处理器按功能注册（{@link SceneFeature}）；本类自己注册场景核心的移动、技能列表（77）、换场景、场景信息、跨 zone 传送（226）
  * （放技能 84 在 {@code SkillFeature}）。
  */
 public final class ClientRequestHandler {
@@ -137,6 +139,10 @@ public final class ClientRequestHandler {
         // 应答是 Empty 不回包，改推 31（基线 player_scene_handler.cpp SceneInfoC2S）。
         register(ids.sceneInfoC2S(), Message.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, req) -> world.sendTo(call.player(),
                 push(ids.notifySceneInfo(), SceneInfoS2C.newBuilder().addSceneInfo(call.player().scene().info()).build())));
+        // 226 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）：自己判战斗在途（3025）与换图在途（冻结中 / 传送在途 13000，63 在途 3014），
+        // 冻结闸与战斗闸都放行；应答可能是延迟应答（在队检查读回来才回）
+        register(ids.travelToZone(), TravelToZoneRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED,
+                (call, req) -> world.requestTravel(call, req.getTargetZoneId(), req.getSceneConfigId()));
     }
 
     @SuppressWarnings("unchecked")

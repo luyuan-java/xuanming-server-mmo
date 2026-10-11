@@ -51,6 +51,8 @@ import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakePlayerRepository.PendingHandOff;
 import com.game.scene.testing.FakeSceneTables;
 import com.game.scene.testing.FakeSwitchTargets;
+import com.game.scene.testing.FakeTeamChecks;
+import com.game.scene.testing.FakeTravelTargets;
 import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.ManualExecutor;
 import com.game.scene.testing.RecordingAssetAudit;
@@ -69,8 +71,10 @@ import com.game.scene.world.SceneInstances;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
 import com.game.scene.world.SwitchPhase;
+import com.game.scene.world.TeamChecks.TeamCheck;
 import com.game.scene.world.Vec3;
 import com.game.scene.world.WorldTestAccess;
+import com.game.scene.world.ZoneTravel;
 import com.game.table.ConfigTables;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
@@ -89,14 +93,15 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 /**
- * 回合制战斗（批次 6.3）组件测试的共用装配：与 {@code SceneNode} 同形的一整套——真 {@link SceneWorld}（14 参构造，战斗钩子 = 真
+ * 回合制战斗（批次 6.3）组件测试的共用装配：与 {@code SceneNode} 同形的一整套——真 {@link SceneWorld}（15 参构造，跨 zone 传送开着，战斗钩子 = 真
  * {@link PlayerBattleService}）、真 {@link BattleSettlementService} 与全部玩法服务（货币 / 背包 / 属性 / 宝宝 / 任务 / 技能，<b>正式配表</b>）、
  * 全功能的 {@link ClientRequestHandler}（DEV 运行模式），外部依赖全是假的：
  * <ul>
  *   <li>{@link #locks}：内存版 Redis（{@link FakeBattleLocks}，按真值表执行；可挂起、乱序完成、注入失败与重放）；</li>
  *   <li>{@link #logic}：手动驱动的逻辑线程（{@link ManualExecutor}）——Redis 结局的回调只入队，{@link #drain()} 才跑；</li>
  *   <li>{@link #repo}：假仓库（加载、在线存盘、交出都挂起，测试决定结局；durable 由 {@code repo.takeProgress().complete(SAVED)} 控制）；</li>
- *   <li>{@link #sink}：记录全部出站；{@link #clock}：手动时钟（Redis 的 TTL 也按它走）；{@link #targets}：假的跨节点选目标（开了 5.2）；</li>
+ *   <li>{@link #sink}：记录全部出站；{@link #clock}：手动时钟（Redis 的 TTL 也按它走）；{@link #targets}：假的跨节点选目标（开了 5.2）；
+ *       {@link #travelTargets} / {@link #teamChecks}：跨 zone 传送（5.4）的假选目标与假在队检查；</li>
  *   <li>{@link #follows}：记录型组队跟随（要换成别的实现用带工厂的构造）。</li>
  * </ul>
  * 两张主世界地图各一个场景（{@link #scene1}、{@link #scene2}）。全部调用都在测试线程上（它就是逻辑线程）。
@@ -147,6 +152,9 @@ public final class BattleFixture {
     public final RecordingSink sink = new RecordingSink();
     public final FakePlayerRepository repo = new FakePlayerRepository();
     public final FakeSwitchTargets targets = new FakeSwitchTargets();
+    /** 跨 zone 传送（批次 5.4）的假选目标（缺省挂起）与假在队检查（缺省经 {@link #logic} 回「不在队」）。 */
+    public final FakeTravelTargets travelTargets = new FakeTravelTargets();
+    public final FakeTeamChecks teamChecks = new FakeTeamChecks();
     public final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     public final RecordingAssetAudit audit = new RecordingAssetAudit();
     public final FakeBattleLocks locks = new FakeBattleLocks(clock::epochMillis);
@@ -230,7 +238,10 @@ public final class BattleFixture {
                     PlayerBattleService.checkLedgerOnLoad(player);
                 }, PlayerSnapshots.NONE, PlayerLocations.NONE, teamFollow,
                 new CrossNodeSwitch(LOCAL_NODE, targets, owned -> { }, Duration.ofSeconds(4), Duration.ofSeconds(30)),
-                SceneInstances.DISABLED, battle);
+                SceneInstances.DISABLED, battle,
+                new ZoneTravel(ZONE, travelTargets, teamChecks, Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(30)));
+        // 226 的在队检查缺省经逻辑线程回「不在队」（drain 之后才回，同真实现的投递）；选目标缺省挂起
+        teamChecks.replyWith(logic, call -> TeamCheck.NOT_IN_TEAM);
         battle.attach(world);
         features = List.of(
                 new CurrencyFeature(currency),

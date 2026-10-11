@@ -54,6 +54,7 @@ import com.game.proto.SortBagRequest;
 import com.game.proto.SummonPetRequest;
 import com.game.proto.SwitchAttributeSchemeRequest;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.TravelToZoneRequest;
 import com.game.proto.Vector3;
 import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpService;
@@ -128,6 +129,7 @@ class FreezeGateTest {
     private static final int INVALID_PARAMETER = 1005;
     private static final int ASSET_FROZEN = 27003;
     private static final int CHANGING_SCENE = 3014;
+    private static final int TRANSFER_IN_PROGRESS = 13000;
 
     /** 冻结中的预期：什么都不发。 */
     private static final int DROPPED = -1;
@@ -223,6 +225,8 @@ class FreezeGateTest {
         Map<String, FreezePolicy> expected = new TreeMap<>();
         expected.put("SceneSceneClientPlayerEnterScene", FreezePolicy.ALLOW);
         expected.put("SceneSceneClientPlayerSceneInfoC2S", FreezePolicy.READ_ONLY);
+        // 批次 5.4：226 自己判在途（冻结中回 13000，zone-travel-spec §5.10）
+        expected.put("SceneSceneClientPlayerTravelToZone", FreezePolicy.ALLOW);
         expected.put("SceneMovementClientPlayerMoveStart", FreezePolicy.DROP);
         expected.put("SceneMovementClientPlayerMoveSync", FreezePolicy.DROP);
         expected.put("SceneMovementClientPlayerMoveStop", FreezePolicy.DROP);
@@ -254,6 +258,7 @@ class FreezeGateTest {
         assertThat(registeredPolicies()).containsExactlyInAnyOrderEntriesOf(expected);
         // 规格 §5.9 按消息号列：抽查几处号与名对得上
         assertThat(handler.freezePolicy(63)).isEqualTo(FreezePolicy.ALLOW);
+        assertThat(handler.freezePolicy(226)).isEqualTo(FreezePolicy.ALLOW);
         assertThat(handler.freezePolicy(84)).isEqualTo(FreezePolicy.ALLOW);
         assertThat(handler.freezePolicy(173)).isEqualTo(FreezePolicy.REJECT);
         assertThat(handler.freezePolicy(94)).isEqualTo(FreezePolicy.REJECT);
@@ -482,6 +487,9 @@ class FreezeGateTest {
                 CHANGING_SCENE));
         probes.add(new Probe("SceneSceneClientPlayer", "SceneInfoC2S", SceneInfoRequest.getDefaultInstance(),
                 PUSH_ONLY));
+        // 批次 5.4：226 自己判在途，交出冻结中回 13000（zone-travel-spec §5.10），不改任何状态
+        probes.add(new Probe("SceneSceneClientPlayer", "TravelToZone", TravelToZoneRequest.newBuilder().setTargetZoneId(2).build(),
+                TRANSFER_IN_PROGRESS));
         return probes;
     }
 

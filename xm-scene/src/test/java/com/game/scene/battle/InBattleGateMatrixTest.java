@@ -54,6 +54,7 @@ import com.game.proto.SortBagResponse;
 import com.game.proto.SummonPetRequest;
 import com.game.proto.SwitchAttributeSchemeRequest;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.TravelToZoneRequest;
 import com.game.proto.Vector3;
 import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpService;
@@ -127,6 +128,9 @@ class InBattleGateMatrixTest {
     private static final int ATTRIBUTE_IN_BATTLE = 25011;
     private static final int PET_IN_BATTLE = 26008;
     private static final int ASSET_IN_BATTLE = 27002;
+    private static final int ZONE_TRAVEL_IN_BATTLE = 3025;
+    /** 226 的目标：别的 zone（夹具的本 zone 是 {@link BattleFixture#ZONE}）。 */
+    private static final int OTHER_ZONE = BattleFixture.ZONE + 1;
 
     /** 角色属性池与其中的力量维度、宝宝池里的一个维度（正式配表）。 */
     private static final int PLAYER_POOL = 1;
@@ -180,6 +184,8 @@ class InBattleGateMatrixTest {
             new Row(189, PET, "RenamePet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(187, PET, "GmGrantPet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(192, BAG, "SortBag", BattlePolicy.GATED, INVALID_PARAMETER),
+            // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
+            new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
             new Row(43, SCENE, "SceneInfoC2S", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(77, SKILL, "ListSkills", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -273,7 +279,7 @@ class InBattleGateMatrixTest {
         // 规格按号列：逐类再用号核一遍
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
-        assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192))
+        assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
         assertThat(List.of(43, 77, 54, 167, 181, 190, 191, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
@@ -386,8 +392,7 @@ class InBattleGateMatrixTest {
 
     /**
      * 没有处理器的方法排在战斗闸之前（§7.13：闸在 GM 闸与「有没有处理器」之后）：战斗与否都回信封 / 应答内 1006、应答是 Empty 的忽略，
-     * 不计任何闸。其中 226（跨 zone 传送，5.4 还没做）落地时必须先进 §7.13 的表（基线 3025 kZoneTravelInBattle），由上面的
-     * 「新方法不在表里即失败」把关；这里钉住的是现状。
+     * 不计任何闸。226（跨 zone 传送）在批次 5.4 注册（GATED，战斗中 3025），已进上面的闸表与探测，不再属于这一类。
      */
     @Test
     void 没有处理器的方法_排在战斗闸之前_战斗中照旧回1006_不计闸拒() throws Exception {
@@ -396,7 +401,7 @@ class InBattleGateMatrixTest {
         f.sink.clear();
         Map<String, Double> before = gateRejectsByGate();
 
-        for (int messageId : List.of(136, 226)) {
+        for (int messageId : List.of(136)) {
             MessageMethod method = Contracts.REGISTRY.byId(messageId).orElseThrow();
             assertThat(f.handler.battlePolicy(messageId)).as("%s 没有处理器", method.key()).isNull();
             f.request(player, messageId, method.requestPrototype().getDefaultInstanceForType());
@@ -409,7 +414,7 @@ class InBattleGateMatrixTest {
             }
         }
 
-        assertThat(f.messageIds(player)).as("除了应答没有别的下行").allMatch(id -> id == 136 || id == 226);
+        assertThat(f.messageIds(player)).as("除了应答没有别的下行").allMatch(id -> id == 136);
         assertThat(gateRejectsSince(before)).as("没有处理器的方法不计战斗闸").isEmpty();
         assertThat(player.inBattle()).isTrue();
     }
@@ -501,6 +506,8 @@ class InBattleGateMatrixTest {
         out.put(SCENE + "EnterScene", s -> EnterSceneC2SRequest.newBuilder().setSceneInfo(SceneInfoComp.newBuilder()
                 .setSceneId(s.world().scene2.sceneId()).setSceneConfigId(s.world().scene2.configId())).build());
         out.put(SCENE + "SceneInfoC2S", s -> SceneInfoRequest.getDefaultInstance());
+        // 不在队（夹具的在队检查缺省回「不在队」）：不在战斗时受理 {0}，之后挂在选目标上
+        out.put(SCENE + "TravelToZone", s -> TravelToZoneRequest.newBuilder().setTargetZoneId(OTHER_ZONE).build());
         // 技能 2：范围技能、无前摇无冷却（正式配表），不在战斗时一定放得出
         out.put(SKILL + "ReleaseSkill", s -> ReleaseSkillRequest.newBuilder().setSkillTableId(2).setTargetId(s.player().entity())
                 .setPosition(Vector3.newBuilder().setX(1).setY(2).setZ(3)).build());
@@ -905,6 +912,10 @@ class InBattleGateMatrixTest {
         int messageId = Contracts.REGISTRY.requireId(row.service(), row.method());
         int before = w.sink.to(player.session().linkId(), player.session().sessionId()).size();
         long requestId = w.request(player, messageId, request.apply(who));
+        if (messageId == Contracts.IDS.travelToZone()) {
+            // 226 不在战斗时是延迟应答：在队检查的结果经逻辑线程回来才回（战斗中是同步 3025，排空也不会多出任何下行）
+            w.drain();
+        }
         List<MessageContent> all = w.sink.to(player.session().linkId(), player.session().sessionId());
         List<Integer> ids = new ArrayList<>();
         Integer tip = null;
@@ -957,7 +968,8 @@ class InBattleGateMatrixTest {
     }
 
     /** 规格 §9 的八个闸（{@code xm_scene_battle_gate_rejects_total{gate}}）。 */
-    private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default");
+    private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
+            "zone_travel");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();
@@ -980,7 +992,7 @@ class InBattleGateMatrixTest {
     /** 一条 GATED 的方法被拒时计在哪个闸上（按系统分：63 / 84 / 属性写 / 宝宝写 / 192）。 */
     private static String gateOf(Row row) {
         return switch (row.service()) {
-            case SCENE -> "enter_scene";
+            case SCENE -> row.method().equals("TravelToZone") ? "zone_travel" : "enter_scene";
             case SKILL -> "skill";
             case ATTRIBUTE -> "attribute";
             case PET -> "pet";
