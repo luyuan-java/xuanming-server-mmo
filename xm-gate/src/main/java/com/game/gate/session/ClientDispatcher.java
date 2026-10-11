@@ -13,9 +13,11 @@ import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.PlayerTransfer;
+import com.game.api.proto.RedirectToGate;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
+import com.game.api.proto.ZoneRedirect;
 import com.game.common.killswitch.KillSwitch;
 import com.game.common.token.GateTokens;
 import com.game.gate.link.SceneLinks;
@@ -24,6 +26,8 @@ import com.game.gate.metrics.GateMetrics.DisconnectReason;
 import com.game.gate.metrics.GateMetrics.HandshakeResult;
 import com.game.gate.metrics.GateMetrics.LoginCall;
 import com.game.gate.metrics.GateMetrics.PushResult;
+import com.game.gate.metrics.GateMetrics.RedirectResult;
+import com.game.gate.metrics.GateMetrics.RedirectSource;
 import com.game.gate.metrics.GateMetrics.RequestResult;
 import com.game.gate.metrics.GateMetrics.SceneTransferResult;
 import com.game.gate.session.ClientSession.BackendPending;
@@ -32,6 +36,7 @@ import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.MessageContent;
+import com.game.proto.RedirectToGateNotify;
 import com.game.proto.TipInfoMessage;
 import com.game.table.CommonErrorTip;
 import com.game.table.SceneErrorTip;
@@ -72,6 +77,11 @@ import org.slf4j.LoggerFactory;
  *   <li>跨节点换图（源 scene 发来 {@code PlayerTransfer}）：会话改绑到目标节点，不发 PlayerLeave、在线登记保持，客户端只看到
  *       目标节点的 79 / 21 / 47；交出之后没能落到目标节点（目标节点拒绝、链路不可用 / 建链失败）推 23 {3023 或目标节点的 tip}
  *       后断开——不回大厅、不弹回源场景、不发 34（scene-handoff-spec §5.7，D5 / D11）。</li>
+ *   <li>跨 zone 重定向（批次 5.4，zone-travel-spec §5.7）：源 scene 发来带 {@code redirect} 的 {@code PlayerTransfer}（226 传送），
+ *       或 login 在 EnterGame 应答里带 {@code RedirectToGate} 指令（登录期重定向 GO-5，应答先发）：解绑场景（不发 PlayerLeave、撤在线登记），
+ *       推 124 {@code RedirectToGateNotify}（{@code MessageContent} 不设 id），<b>不断开</b>；会话转入已重定向状态，之后的请求静默丢弃，
+ *       客户端在收口时限（{@code xm.gate.redirect-linger}）内没自己断开就由 gate 关闭（不推 tip）。重定向载荷非法推 23 {3027} 后断开。</li>
+ *   <li>握手时出示的票据里的持票者与目标 zone 存进会话，随每个转 login / 后端的调用交出（{@code SessionContext} 8 / 9 号字段）；gate 只存不判。</li>
  * </ul>
  */
 public final class ClientDispatcher {
@@ -91,6 +101,8 @@ public final class ClientDispatcher {
     static final int TIP_MESSAGE_SIZE_EXCEEDED = CommonErrorTip.common_error.kMessageSizeExceeded_VALUE;
     static final int TIP_RATE_LIMIT_EXCEEDED = CommonErrorTip.common_error.kRateLimitExceeded_VALUE;
     static final int TIP_ENTER_SCENE_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
+    /** 跨 zone 传送受理后未成（3027，基线 {@code genericFailTip}）：重定向载荷非法时推这个码后断开。 */
+    static final int TIP_ZONE_TRAVEL_FAILED = SceneErrorTip.scene_error.kZoneTravelTargetBusy_VALUE;
 
     private static final ClientTokenVerifyResponse VERIFY_OK = ClientTokenVerifyResponse.newBuilder().setSuccess(true).build();
 
@@ -102,7 +114,7 @@ public final class ClientDispatcher {
     private final int tipMessageId;
     /**
      * 推 124 {@code RedirectToGateNotify} 用的消息号（{@code SceneClientPlayerCommon.RedirectToGate}，批次 5.4）；0 = 没装配
-     * （只收 tip 号的旧重载）。先行件阶段只把它接进来，重定向帧 / 重定向指令的分支由会话层的工作包实现并读它。
+     * （只收 tip 号的旧重载）：这时重定向帧 / 重定向指令一律按内容非法收口（推 23 {3027} 后断开），绝不发消息号为 0 的包。
      */
     private final int redirectToGateMessageId;
     private final ClientMessageService login;
@@ -219,8 +231,12 @@ public final class ClientDispatcher {
         if (s.closing || s.closed) {
             return;
         }
+        if (s.redirected) {
+            // 已重定向：客户端的一切上行都静默丢弃（含再次握手），等它自己断开或收口时限到
+            return;
+        }
         if (s.verified) {
-            // 已验证的会话再次 verify 直接回成功（C++ 同）。
+            // 已验证的会话再次 verify 直接回成功（C++ 同）；不重新验票，会话上的票据字段也不被覆盖。
             s.send(VERIFY_OK);
             return;
         }
@@ -239,6 +255,10 @@ public final class ClientDispatcher {
             return;
         }
         s.verified = true;
+        // 只存不判（基线 DispatchTokenVerify :1092-1099）：gate 要到绑定会话才知道玩家，持票者是否就是进游戏的角色由 login 判（2011），
+        // 在 gate 拒只会在 login 留下残留会话。普通登录令牌的 player_id 为 0
+        s.ticketPlayerId = verdict.payload().getPlayerId();
+        s.ticketTargetZoneId = verdict.payload().getTargetZoneId();
         s.cancelHandshakeTimeout();
         metrics.handshake(HandshakeResult.OK);
         s.send(VERIFY_OK);
@@ -249,6 +269,12 @@ public final class ClientDispatcher {
             if (s.verified) {
                 countRequest(routes.clientRoute(request.getMessageId()), RequestResult.DROPPED);
             }
+            return;
+        }
+        if (s.redirected) {
+            // 已重定向（推过 124）：一切请求静默丢弃——不回包、不推 23 {1003}、不计非法包、不限频、不转发
+            // （zone-travel-spec §5.7；合规客户端此刻正在换连接，几秒内自己关闭）
+            countRequest(routes.clientRoute(request.getMessageId()), RequestResult.REDIRECTED);
             return;
         }
         if (!s.verified) {
@@ -341,7 +367,10 @@ public final class ClientDispatcher {
         s.closed = true;
         s.closing = true;
         s.cancelHandshakeTimeout();
-        discardPending(s);
+        // 客户端先关（已重定向的会话正常就是这样收场）：收口定时器作废
+        s.cancelRedirectLinger();
+        discardPending(s, RequestResult.DROPPED);
+        // 已重定向的会话没有场景绑定，这里什么也不发
         leaveScene(s, s.leaveGameRequests > 0);
         if (s.inFlight) {
             // 等在途的 login 调用完成后再通知 login（见 onLoginCompleted），否则 login 可能先收到断线、后处理完进游戏。
@@ -353,7 +382,7 @@ public final class ClientDispatcher {
     // ================================================================ 上行处理（同一会话严格按到达顺序）
 
     private void drain(ClientSession s) {
-        while (!s.inFlight && !s.closing && !s.closed) {
+        while (!s.inFlight && !s.closing && !s.closed && !s.redirected) {
             PendingRequest next = s.pending.poll();
             if (next == null) {
                 return;
@@ -401,7 +430,8 @@ public final class ClientDispatcher {
 
     private void drainBackend(ClientSession s, String domain, ClientMessageService backend) {
         ArrayDeque<BackendPending> queue = s.backendQueues.get(domain);
-        while (queue != null && !queue.isEmpty() && !s.backendInFlight.contains(domain) && !s.closing && !s.closed) {
+        while (queue != null && !queue.isEmpty() && !s.backendInFlight.contains(domain) && !s.closing && !s.closed
+                && !s.redirected) {
             BackendPending next = queue.poll();
             countRequest(next.route(), RequestResult.FORWARDED);
             callBackend(s, domain, backend, next.request(), next.session());
@@ -452,6 +482,7 @@ public final class ClientDispatcher {
                     rootCause(error).toString());
             s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
         } else {
+            // 已重定向之前转出、之后才回来的应答也照常下发（zone-travel-spec §5.7：合规客户端已在换连接，无害）
             replyToClient(s, request, reply);
         }
         drainBackend(s, domain, backend);
@@ -504,6 +535,8 @@ public final class ClientDispatcher {
             log.warn("login 调用失败 session={} message_id={} 原因={}", sid(s), request.getMessageId(), rootCause(error).toString());
             sendTip(s, TIP_SERVICE_UNAVAILABLE);
         } else {
+            // 先回应答、再执行指令：登录期重定向（RedirectToGate）的 26 应答因此恒先于 124。
+            // 已重定向之前转出、之后才回来的应答照常下发，其中的指令由 applyDirectives 一律忽略
             replyToClient(s, request, reply);
             applyDirectives(s, reply.getDirectivesList());
         }
@@ -534,16 +567,34 @@ public final class ClientDispatcher {
     }
 
     private void applyDirectives(ClientSession s, List<SessionDirective> directives) {
-        for (SessionDirective directive : directives) {
-            if (s.closing) {
+        for (int i = 0; i < directives.size(); i++) {
+            if (s.closing || s.redirected) {
+                // 会话已在关闭，或已重定向（之前的重定向帧 / 指令，或本应答里排在前面的 RedirectToGate）：余下的指令一律不再生效——
+                // 已重定向的会话没有场景绑定，UnbindPlayer / EnterScene 都不能再生效，CloseSession 由收口定时器覆盖（zone-travel-spec §5.7）
+                ignoreDirectives(s, directives.subList(i, directives.size()), s.closing ? "会话已在关闭" : "会话已重定向");
                 return;
             }
+            SessionDirective directive = directives.get(i);
             switch (directive.getKindCase()) {
                 case BIND_ACCOUNT -> s.account = directive.getBindAccount().getAccount();
                 case ENTER_SCENE -> enterScene(s, directive.getEnterScene());
                 case CLOSE_SESSION -> closeByServer(s, directive.getCloseSession().getTipId());
                 case UNBIND_PLAYER -> unbindPlayer(s);
+                case REDIRECT_TO_GATE -> redirectByLogin(s, directive.getRedirectToGate());
                 case KIND_NOT_SET -> log.warn("login 下发了空会话指令 session={}", sid(s));
+            }
+        }
+    }
+
+    /** 不再执行的指令：只记日志；其中的重定向指令按过期计数（每条重定向指令恰好计一次结局）。 */
+    private void ignoreDirectives(ClientSession s, List<SessionDirective> directives, String reason) {
+        for (SessionDirective directive : directives) {
+            if (directive.hasRedirectToGate()) {
+                log.info("忽略 login 的重定向指令（{}） session={} target_zone={}", reason, sid(s),
+                        directive.getRedirectToGate().getRedirect().getTargetZoneId());
+                metrics.redirect(RedirectSource.LOGIN, RedirectResult.STALE);
+            } else {
+                log.debug("忽略 login 的会话指令（{}） session={} kind={}", reason, sid(s), directive.getKindCase());
             }
         }
     }
@@ -562,6 +613,12 @@ public final class ClientDispatcher {
                     abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), "会话已在关闭");
                 }
                 case UNBIND_PLAYER -> s.playerId = 0;
+                case REDIRECT_TO_GATE -> {
+                    // 登录期重定向不夺权、不绑定玩家，没有要释放的东西；连接已断，124 也无处可推
+                    log.info("会话已断，忽略迟到的重定向指令 session={} target_zone={}", sid(s),
+                            directive.getRedirectToGate().getRedirect().getTargetZoneId());
+                    metrics.redirect(RedirectSource.LOGIN, RedirectResult.STALE);
+                }
                 default -> {
                     // CloseSession 无需再执行：连接已断。
                 }
@@ -770,8 +827,15 @@ public final class ClientDispatcher {
      * </ul>
      * 改绑之后源节点的迟到帧（ToClient、PlayerKicked{E}、PlayerEnterResult{E}、链路断开）因 (节点, 代次) 不再匹配被丢弃；
      * 改绑之前源节点发出的下行（冻结中请求的应答等）与本帧同链路、按序先到，照常下发。
+     *
+     * <p>带 {@code redirect} 的帧不是改绑指令，而是跨 zone 传送的重定向（批次 5.4），先按 {@code hasRedirect()} 分流给
+     * {@link #onTravelRedirect}，不走下面任何一条 5.2 判定。
      */
     public void onPlayerTransfer(ClientSession s, int sceneNodeId, long linkGen, PlayerTransfer transfer) {
+        if (transfer.hasRedirect()) {
+            onTravelRedirect(s, sceneNodeId, linkGen, transfer);
+            return;
+        }
         long playerId = transfer.getPlayerId();
         long fromEpoch = transfer.getFromEpoch();
         long toEpoch = transfer.getToEpoch();
@@ -810,9 +874,18 @@ public final class ClientDispatcher {
     /**
      * 路由层找不到会话（已断开并从会话表释放，或会话线程已停）时的改绑指令：E+1 不会再有人为它发 PlayerEnter，
      * 请 login 带围栏放弃（scene-handoff-spec §5.7：会话关闭后很快就从会话表删除，不在路由层收尾这份归属就只能等租约过期）。
+     * 带 {@code redirect} 的帧（跨 zone 传送，批次 5.4）只计 {@code orphan}、不放弃：源节点的交出已同时释放 E+1，没有可放弃的归属。
      * 不碰任何会话状态，任意线程可调。
      */
     public void onPlayerTransferWithoutSession(int sceneNodeId, long linkGen, PlayerTransfer transfer) {
+        if (transfer.hasRedirect()) {
+            log.info("跨 zone 重定向帧的会话已不在，丢弃（新 epoch 已由源节点释放） session={} player_id={} node={} gen={} epoch={}→{} "
+                            + "target_zone={}", Integer.toUnsignedString(transfer.getSessionId()), transfer.getPlayerId(),
+                    sceneNodeId, linkGen, transfer.getFromEpoch(), transfer.getToEpoch(),
+                    transfer.getRedirect().getTargetZoneId());
+            metrics.redirect(RedirectSource.TRAVEL, RedirectResult.ORPHAN);
+            return;
+        }
         log.info("改绑指令的会话已不在，放弃新 epoch session={} player_id={} node={} gen={} epoch={}→{}",
                 Integer.toUnsignedString(transfer.getSessionId()), transfer.getPlayerId(), sceneNodeId, linkGen,
                 transfer.getFromEpoch(), transfer.getToEpoch());
@@ -872,8 +945,177 @@ public final class ClientDispatcher {
         }
         metrics.disconnected(DisconnectReason.TRANSFER_FAILED);
         s.closing = true;
-        discardPending(s);
+        discardPending(s, RequestResult.DROPPED);
         s.sendThenClose(tip(tipId != 0 ? tipId : TIP_ENTER_SCENE_FAILED));
+    }
+
+    // ================================================================ 跨 zone 重定向（批次 5.4，zone-travel-spec §5.7）
+
+    /**
+     * 源 scene 的跨 zone 传送重定向（{@code PlayerTransfer.redirect}）。源节点已用一笔「交出并释放」事务把冻结快照落库、
+     * 把归属从 from_epoch 推进到 to_epoch 并同时释放（E+1 没有持有者，目标 zone 的 login 夺到 E+2），实例已移除。
+     * <ol>
+     *   <li>会话已关闭 / 正在关闭，或 (节点, 链路代次, 玩家, from_epoch) 对不上：过期帧，只计 {@code stale}——<b>不</b>放弃 E+1
+     *       （已释放，没有可放弃的归属；与 5.2 改绑的过期处理不同）；</li>
+     *   <li>帧内容非法（地址空、端口越界、票据或签名为空、同时带目标节点、新 epoch 不大于旧 epoch，或本 gate 没装配 124 的号）：
+     *       计 {@code invalid}，解绑场景后推 23 {3027} 并断开（基线隐患「空 payload 兜底会推出空地址的 124」，inventory gate.md:321）；</li>
+     *   <li>否则解绑场景（<b>不发</b> PlayerLeave——源节点已移除实例；撤在线登记），推 124，会话转入已重定向。</li>
+     * </ol>
+     * 这一帧之前源节点发出的下行（226 应答等）同链路先到、照常下发；之后源节点的迟到帧因绑定已清被丢弃。
+     */
+    private void onTravelRedirect(ClientSession s, int sceneNodeId, long linkGen, PlayerTransfer transfer) {
+        long playerId = transfer.getPlayerId();
+        long fromEpoch = transfer.getFromEpoch();
+        long toEpoch = transfer.getToEpoch();
+        ZoneRedirect redirect = transfer.getRedirect();
+        if (s.closed || s.closing || !s.boundTo(sceneNodeId, linkGen) || s.scenePlayerId != playerId
+                || s.sceneOwnerEpoch != fromEpoch) {
+            log.info("跨 zone 重定向帧已过期（会话已离开 / 已关闭 / 已换进别处），丢弃（新 epoch 已由源节点释放） session={} player_id={} "
+                            + "node={} gen={} epoch={}→{} target_zone={} 会话绑定 node={} gen={} player_id={} epoch={}", sid(s),
+                    playerId, sceneNodeId, linkGen, fromEpoch, toEpoch, redirect.getTargetZoneId(), s.sceneNodeId,
+                    s.sceneLinkGen, s.scenePlayerId, s.sceneOwnerEpoch);
+            metrics.redirect(RedirectSource.TRAVEL, RedirectResult.STALE);
+            return;
+        }
+        String invalid;
+        if (transfer.getTargetSceneNodeId() != 0) {
+            invalid = "同时带目标节点";
+        } else if (toEpoch <= fromEpoch) {
+            invalid = "新 epoch 不大于旧 epoch";
+        } else {
+            invalid = invalidRedirect(redirect);
+        }
+        if (invalid != null) {
+            // scene 的缺陷，不该出现。源节点发这一帧之前已交出并移除实例：解绑（断线不再发 PlayerLeave），推 3027 后断开；
+            // 客户端重登按位置记录与归属重新进游戏（E+1 已释放，立即可进）
+            log.error("非法的跨 zone 重定向帧（{}），断开 session={} player_id={} node={} 目标 node={} epoch={}→{} target_zone={} "
+                            + "gate_node={} gate={}:{} payload={}B signature={}B", invalid, sid(s), playerId, sceneNodeId,
+                    transfer.getTargetSceneNodeId(), fromEpoch, toEpoch, redirect.getTargetZoneId(), redirect.getGateNodeId(),
+                    redirect.getGateHost(), Integer.toUnsignedString(redirect.getGatePort()), redirect.getTokenPayload().size(),
+                    redirect.getTokenSignature().size());
+            metrics.redirect(RedirectSource.TRAVEL, RedirectResult.INVALID);
+            unbindScene(s);
+            closeForTransfer(s, TIP_ZONE_TRAVEL_FAILED);
+            return;
+        }
+        unbindScene(s);
+        log.info("会话跨 zone 传送：解绑源场景并推重定向 session={} player_id={} node={} epoch={}→{}", sid(s), playerId,
+                sceneNodeId, fromEpoch, toEpoch);
+        enterRedirected(s, RedirectSource.TRAVEL, redirect);
+    }
+
+    /**
+     * login 的登录期重定向（GO-5：请求进游戏的角色此刻在别的 zone）。EnterGame 的应答已先发出（{@link #onLoginCompleted} 先回包、
+     * 后执行指令），这里推 124、会话转入已重定向；会话本就没有场景绑定。指令内容非法：计 {@code invalid}，推 23 {3027} 后断开。
+     */
+    private void redirectByLogin(ClientSession s, RedirectToGate directive) {
+        ZoneRedirect redirect = directive.getRedirect();
+        String invalid = directive.hasRedirect() ? invalidRedirect(redirect) : "缺 redirect";
+        if (invalid != null) {
+            log.error("login 下发的重定向指令非法（{}），断开 session={} target_zone={} gate_node={} gate={}:{} payload={}B signature={}B",
+                    invalid, sid(s), redirect.getTargetZoneId(), redirect.getGateNodeId(), redirect.getGateHost(),
+                    Integer.toUnsignedString(redirect.getGatePort()), redirect.getTokenPayload().size(),
+                    redirect.getTokenSignature().size());
+            metrics.redirect(RedirectSource.LOGIN, RedirectResult.INVALID);
+            closeForTransfer(s, TIP_ZONE_TRAVEL_FAILED);
+            return;
+        }
+        if (s.sceneNodeId != 0) {
+            // 防御：login 不会给已在场景里的会话下发（EnterGame 对已绑定玩家的会话回 2028）。已重定向的会话绝不挂着场景，先让场景放掉
+            log.error("login 对仍在场景里的会话下发了重定向指令，先离场 session={} player_id={} node={}", sid(s), s.scenePlayerId,
+                    s.sceneNodeId);
+            leaveScene(s, false);
+        }
+        log.info("会话登录期重定向 session={} account={}", sid(s), s.account);
+        enterRedirected(s, RedirectSource.LOGIN, redirect);
+    }
+
+    /**
+     * 重定向载荷的内容校验（两种来源共用）。返回 null = 合法，否则是不合法的原因（只进日志）。
+     * 只看推 124 用得到的字段；票据内容 gate 不解析、不验签（目标 gate 验），{@code target_zone_id} / {@code gate_node_id} 只进日志。
+     */
+    private String invalidRedirect(ZoneRedirect redirect) {
+        if (redirectToGateMessageId == 0) {
+            return "本 gate 没装配 124 的消息号";
+        }
+        if (redirect.getGateHost().isBlank()) {
+            return "gate_host 为空";
+        }
+        int port = redirect.getGatePort();
+        if (port < 1 || port > 65535) {
+            return "gate_port 越界";
+        }
+        if (redirect.getTokenPayload().isEmpty()) {
+            return "token_payload 为空";
+        }
+        if (redirect.getTokenSignature().isEmpty()) {
+            return "token_signature 为空";
+        }
+        return null;
+    }
+
+    /**
+     * 会话转入已重定向：丢弃排队中的请求（计 {@code redirected}）→ 推 124 → 挂收口定时器。调用方已解绑场景（或会话本就不在场景里）。
+     * 在途的 login / 后端调用不撤：它们的应答回来照常下发、指令忽略。
+     */
+    private void enterRedirected(ClientSession s, RedirectSource source, ZoneRedirect redirect) {
+        s.redirected = true;
+        discardPending(s, RequestResult.REDIRECTED);
+        s.send(redirectNotify(redirect));
+        metrics.redirect(source, RedirectResult.SENT);
+        // 定时任务只捕获会话号，不持有会话对象：到点重新查表、确认仍是这个已重定向的会话再关（AGENTS.md §3 回调生命周期）
+        int sessionId = s.sessionId();
+        s.scheduleRedirectLinger(limits.redirectLinger(), () -> onRedirectLingerExpired(sessionId));
+        log.info("已推 124 重定向 session={} source={} target_zone={} gate_node={} gate={}:{} deadline={} linger={}s", sid(s),
+                source, redirect.getTargetZoneId(), redirect.getGateNodeId(), redirect.getGateHost(),
+                Integer.toUnsignedString(redirect.getGatePort()), redirect.getTokenDeadline(),
+                limits.redirectLinger().toSeconds());
+    }
+
+    /**
+     * 124 {@code RedirectToGateNotify}：五个字段逐一取自 {@link ZoneRedirect}（gate_host → target_ip、gate_port → target_port、
+     * token_payload / token_signature / token_deadline 原样）。票据原字节直接拷贝（{@code ByteString} 不解析、不重新序列化，
+     * 否则字节与签名不一定对得上）。信封 {@code MessageContent{message_id = 124}} <b>不设 id</b>（基线 gate_event_handler.cpp:234-271）。
+     */
+    private MessageContent redirectNotify(ZoneRedirect redirect) {
+        RedirectToGateNotify notify = RedirectToGateNotify.newBuilder()
+                .setTargetIp(redirect.getGateHost())
+                .setTargetPort(redirect.getGatePort())
+                .setTokenPayload(redirect.getTokenPayload())
+                .setTokenSignature(redirect.getTokenSignature())
+                .setTokenDeadline(redirect.getTokenDeadline())
+                .build();
+        return MessageContent.newBuilder()
+                .setMessageId(redirectToGateMessageId)
+                .setSerializedMessage(notify.toByteString())
+                .build();
+    }
+
+    /**
+     * 收口定时器到点（在原会话的 EventLoop 上）。定时器在断线时撤销、会话号要等断线流程结束才释放，所以查到的只可能是原会话；
+     * 仍按「回调先查有效」再判一遍：会话已不在、已在关闭或不再是已重定向就什么都不做。
+     */
+    private void onRedirectLingerExpired(int sessionId) {
+        ClientSession s = registry.get(sessionId);
+        if (s == null) {
+            return;
+        }
+        if (!s.inEventLoop()) {
+            s.execute(() -> closeLingering(s));
+            return;
+        }
+        closeLingering(s);
+    }
+
+    /** 已重定向的会话到收口时限仍没自己断开：直接关闭，不推任何 tip（客户端此刻要么已在新连接上，要么根本没实现跟随 124）。 */
+    private void closeLingering(ClientSession s) {
+        if (s.closed || s.closing || !s.redirected) {
+            return;
+        }
+        log.info("已重定向的会话到收口时限仍未断开，关闭 session={} player_id={} linger={}s", sid(s), s.playerId,
+                limits.redirectLinger().toSeconds());
+        metrics.disconnected(DisconnectReason.REDIRECT_LINGER);
+        closeNow(s);
     }
 
     /**
@@ -893,7 +1135,7 @@ public final class ClientDispatcher {
         }
         metrics.disconnected(DisconnectReason.KICKED);
         s.closing = true;
-        discardPending(s);
+        discardPending(s, RequestResult.DROPPED);
         if (kicked.getTipId() != 0) {
             s.sendThenClose(tip(kicked.getTipId()));
         } else {
@@ -923,7 +1165,7 @@ public final class ClientDispatcher {
         log.info("服务端踢下线 session={} player_id={} tip={}", sid(s), playerId, tipId);
         metrics.disconnected(DisconnectReason.SERVER_KICK);
         s.closing = true;
-        discardPending(s);
+        discardPending(s, RequestResult.DROPPED);
         s.sendThenClose(tip(tipId));
         return PushResult.DELIVERED;
     }
@@ -1055,6 +1297,10 @@ public final class ClientDispatcher {
         }
     }
 
+    /**
+     * 会话上下文：所有转 login 与后端域的调用（客户端消息、断线通知、未送达进场的释放）都经它，同基线「两种转发模式同一个
+     * BuildSessionDetails」（inventory gate.md:330，基线曾漏掉一种）。票据的持票者与目标 zone（8 / 9 号字段）也在这里带上。
+     */
     private SessionContext context(ClientSession s) {
         return SessionContext.newBuilder()
                 .setGateNodeId(identity.nodeId())
@@ -1064,10 +1310,12 @@ public final class ClientDispatcher {
                 .setAccount(s.account)
                 .setPlayerId(s.playerId)
                 .setClientIp(s.clientIp())
+                .setTicketPlayerId(s.ticketPlayerId)
+                .setTicketTargetZoneId(s.ticketTargetZoneId)
                 .build();
     }
 
-    /** 会话已不在会话表里时的上下文：只有本 gate 的身份与帧里的会话号（login 只拿它打日志）。 */
+    /** 会话已不在会话表里时的上下文：只有本 gate 的身份与帧里的会话号（login 只拿它打日志），不带票据字段。 */
     private SessionContext sessionlessContext(int sessionId) {
         return SessionContext.newBuilder()
                 .setGateNodeId(identity.nodeId())
@@ -1097,15 +1345,18 @@ public final class ClientDispatcher {
         }
     }
 
-    /** 会话关闭时丢弃还没处理的排队请求（逐个计 {@code dropped}，每个请求在 gate 只计一次去向）。 */
-    private void discardPending(ClientSession s) {
+    /**
+     * 丢弃还没处理的排队请求（login / scene 的会话队列与各后端队列），逐个计去向（每个请求在 gate 只计一次）：
+     * 会话关闭时计 {@code dropped}，会话转入已重定向时计 {@code redirected}。
+     */
+    private void discardPending(ClientSession s, RequestResult result) {
         for (PendingRequest p : s.pending) {
-            countRequest(p.route(), RequestResult.DROPPED);
+            countRequest(p.route(), result);
         }
         s.pending.clear();
         for (ArrayDeque<BackendPending> queue : s.backendQueues.values()) {
             for (BackendPending p : queue) {
-                countRequest(p.route(), RequestResult.DROPPED);
+                countRequest(p.route(), result);
             }
             queue.clear();
         }

@@ -143,6 +143,7 @@ public final class GateMetrics {
         /**
          * 跨节点换图交出之后没能落到目标节点（目标节点拒绝、到目标的链路不可用 / 建链失败、改绑指令非法）：
          * 推 23 {tip} 后断开，不回大厅、不发 34（scene-handoff-spec D5 / D11）。
+         * 重定向帧 / 重定向指令内容非法（{@code xm.gate.redirects{result = invalid}}，批次 5.4）推 23 {3027} 后断开，也计在这里。
          */
         TRANSFER_FAILED,
         /**
@@ -169,7 +170,10 @@ public final class GateMetrics {
         SENT,
         /** 绑定对得上但内容非法（地址空、端口越界、票据或签名为空、同时带目标节点、新 epoch 不大于旧 epoch）：推 23 {3027} 后断开。 */
         INVALID,
-        /** 会话线程上判定过期（会话已关闭 / 正在关闭，或绑定对不上）：丢弃，不推 124。 */
+        /**
+         * 会话线程上判定过期（会话已关闭 / 正在关闭，或绑定对不上）：丢弃，不推 124、不放弃任何 epoch。
+         * {@code source = login} 时是迟到的应答（会话已断 / 正在断）或已重定向的会话上又来的重定向指令。
+         */
         STALE,
         /** 路由层找不到会话（已断开并从会话表释放）：丢弃。只会出现在 {@code source = travel}。 */
         ORPHAN

@@ -12,8 +12,10 @@ import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerEnterResult;
 import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerTransfer;
+import com.game.api.proto.ZoneRedirect;
 import com.game.common.token.GateTokens;
 import com.game.gate.metrics.GateMetrics;
+import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
@@ -26,8 +28,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * 链路事件路由层（链路 I/O 线程）：找得到会话就投递到会话线程；找不到会话（已从会话表释放）或会话线程已停时，
- * 带着归属的事件（改绑指令、未送达的进场帧）由路由层直接请 login 放弃（scene-handoff-spec §5.7、§10.4，修 G10）。
- * 会话线程上的裁决见 {@link ClientDispatcherTest}。
+ * 带着归属的事件（改绑指令、未送达的进场帧）由路由层直接请 login 放弃（scene-handoff-spec §5.7、§10.4，修 G10）；
+ * 跨 zone 传送的重定向帧（批次 5.4）只计 {@code orphan}、不放弃（zone-travel-spec §5.7、§11.6）。
+ * 会话线程上的裁决见 {@link ClientDispatcherTest}、{@link ClientRedirectTest}。
  */
 class SceneEventRouterTest {
 
@@ -110,6 +113,44 @@ class SceneEventRouterTest {
     }
 
     @Test
+    void 找不到会话的跨zone重定向帧_只计orphan_不请login放弃_不计改绑指标() {
+        router.onPlayerTransfer(SCENE_NODE, LINK_GEN, redirect(GONE_SESSION));
+
+        assertThat(login.abandoned).as("源节点的交出已同时释放新 epoch，没有可放弃的归属").isEmpty();
+        assertThat(links.sent).isEmpty();
+        assertThat(redirects("orphan")).isEqualTo(1);
+        assertThat(transfers("orphan")).as("重定向帧不计改绑指标").isZero();
+    }
+
+    @Test
+    void 会话线程已停投递被拒的跨zone重定向帧_同样只计orphan() {
+        EventLoop stopped = mock(EventLoop.class);
+        doThrow(new RejectedExecutionException("会话线程已关闭")).when(stopped).execute(any(Runnable.class));
+        Channel channel = mock(Channel.class);
+        when(channel.eventLoop()).thenReturn(stopped);
+        ClientSession session = registry.open(channel, "127.0.0.1");
+
+        router.onPlayerTransfer(SCENE_NODE, LINK_GEN, redirect(session.sessionId()));
+
+        assertThat(login.abandoned).isEmpty();
+        assertThat(redirects("orphan")).isEqualTo(1);
+        assertThat(redirects("stale")).isZero();
+    }
+
+    @Test
+    void 找得到会话的跨zone重定向帧投递到会话线程裁决_不在链路线程上动会话() {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        ClientSession session = registry.open(channel, "127.0.0.1");
+
+        router.onPlayerTransfer(SCENE_NODE, LINK_GEN, redirect(session.sessionId()));
+        assertThat(redirects("stale") + redirects("orphan")).as("链路线程上只投递").isZero();
+
+        channel.runPendingTasks();
+        assertThat(redirects("stale")).as("会话没进场景：会话线程上按过期丢弃").isEqualTo(1);
+        assertThat(login.abandoned).isEmpty();
+    }
+
+    @Test
     void 不带归属的链路事件找不到会话照旧丢弃() {
         router.onPlayerEnterResult(SCENE_NODE, LINK_GEN, PlayerEnterResult.newBuilder()
                 .setSessionId(GONE_SESSION).setPlayerId(PLAYER).setOwnerEpoch(5).setTipId(3023).build());
@@ -122,6 +163,21 @@ class SceneEventRouterTest {
 
     private double transfers(String result) {
         return meters.get("xm.gate.scene.transfers").tag("result", result).counter().count();
+    }
+
+    private double redirects(String result) {
+        return meters.get("xm.gate.redirects").tag("source", "travel").tag("result", result).counter().count();
+    }
+
+    /** 跨 zone 传送的重定向帧（批次 5.4）：目标节点 / 场景为 0，带 redirect。 */
+    private static PlayerTransfer redirect(int sessionId) {
+        return PlayerTransfer.newBuilder()
+                .setSessionId(sessionId).setPlayerId(PLAYER).setFromEpoch(5).setToEpoch(6)
+                .setRedirect(ZoneRedirect.newBuilder()
+                        .setTargetZoneId(ZONE + 1).setGateNodeId(1).setGateHost("10.0.2.15").setGatePort(11010)
+                        .setTokenPayload(ByteString.copyFromUtf8("ticket")).setTokenSignature(ByteString.copyFromUtf8("sig"))
+                        .setTokenDeadline(1_800_000_300L))
+                .build();
     }
 
     private static PlayerTransfer transfer(int sessionId) {

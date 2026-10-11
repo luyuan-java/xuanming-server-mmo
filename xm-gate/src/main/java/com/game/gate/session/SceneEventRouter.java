@@ -18,6 +18,8 @@ import org.slf4j.LoggerFactory;
  * <p>找不到会话（会话已断开并从会话表释放——断线流程很快就 {@code registry.release}）时，普通下行整帧丢弃；
  * 但带着一份「只有这帧知道」的归属的事件——改绑指令（{@code PlayerTransfer}）与没送到 scene 的进场帧——
  * 不能丢：交给 {@link ClientDispatcher} 不经会话直接请 login 带围栏放弃（scene-handoff-spec §5.7、G10）。
+ * 带 {@code redirect} 的 {@code PlayerTransfer}（跨 zone 传送，批次 5.4）同样交给它，但只计 {@code orphan}、不放弃：
+ * 源节点的「交出并释放」已经释放了新 epoch（zone-travel-spec §5.3、§5.7）。
  */
 public final class SceneEventRouter implements SceneLinkListener {
 

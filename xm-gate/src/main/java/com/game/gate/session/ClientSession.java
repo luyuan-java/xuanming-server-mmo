@@ -38,6 +38,20 @@ public final class ClientSession {
 
     /** 已通过 gate 令牌校验。 */
     boolean verified;
+    /**
+     * 握手时出示的 gate 票据里的持票者（{@code GateTokenPayload.player_id}，批次 5.4）：重定向票据（226 传送、登录期重定向，
+     * scene-manager 签）非 0，普通登录令牌为 0。验票通过时抄下一次、之后不再改（已验证的会话再次 verify 不覆盖），
+     * 随 {@code SessionContext.ticket_player_id} 交给 login / 后端。gate 只存不判：持票者是否就是进游戏的角色由 login 判（2011）。
+     */
+    long ticketPlayerId;
+    /** 同上，票据里的目标 zone（{@code GateTokenPayload.target_zone_id} → {@code SessionContext.ticket_target_zone_id}）。 */
+    int ticketTargetZoneId;
+    /**
+     * 已重定向（REDIRECTED，批次 5.4）：已给客户端推过 124 {@code RedirectToGateNotify}，请它改连别的 zone 的 gate。
+     * 此后客户端的一切请求静默丢弃（不回包、不推 tip）；此前转出、此后才回来的 login / 后端应答照常下发，但其中的会话指令一律忽略；
+     * 没有场景绑定（推 124 之前已解绑或本就没有）。会话一直停在这个状态，直到客户端自己断开或收口时限到点由 gate 关闭。
+     */
+    boolean redirected;
     /** 已决定关闭（握手被拒、CloseSession 指令、超限）：不再处理任何上行。 */
     boolean closing;
     /** 连接已断开，断线流程已开始。 */
@@ -96,6 +110,8 @@ public final class ClientSession {
     /** 按消息号的发送频率限制（C++ MessageLimiter 同义；与 battle 直连面共用 xm-net 的实现）。 */
     final MessageRateLimiter rateLimiter = new MessageRateLimiter();
     private ScheduledFuture<?> handshakeTimeout;
+    /** 已重定向会话的收口定时器（{@link #redirected} 之后挂上，断线时撤销）。 */
+    private ScheduledFuture<?> redirectLinger;
 
     ClientSession(int sessionId, Channel channel, String clientIp) {
         this.sessionId = sessionId;
@@ -156,6 +172,33 @@ public final class ClientSession {
             handshakeTimeout.cancel(false);
             handshakeTimeout = null;
         }
+    }
+
+    /**
+     * 挂已重定向会话的收口定时器（在本连接的 EventLoop 上到点执行）。{@code onExpired} 不应捕获本会话对象——
+     * 到点时由调用方按会话号重新查找、确认会话仍在且仍是已重定向再动手（AGENTS.md §3 回调生命周期）。
+     * EventLoop 已关闭（进程退出中）时不挂：连接会随之关闭，不需要收口。
+     */
+    void scheduleRedirectLinger(Duration linger, Runnable onExpired) {
+        cancelRedirectLinger();
+        try {
+            redirectLinger = channel.eventLoop().schedule(onExpired, linger.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            log.debug("会话线程已关闭，不挂重定向收口定时器 session={}", Integer.toUnsignedString(sessionId));
+        }
+    }
+
+    /** 撤销收口定时器（断线时；客户端先关则定时器作废）。 */
+    void cancelRedirectLinger() {
+        if (redirectLinger != null) {
+            redirectLinger.cancel(false);
+            redirectLinger = null;
+        }
+    }
+
+    /** 当前线程是不是本连接的 EventLoop（会话状态只能在它上面读写）。 */
+    boolean inEventLoop() {
+        return channel.eventLoop().inEventLoop();
     }
 
     boolean boundTo(int nodeId, long linkGen) {

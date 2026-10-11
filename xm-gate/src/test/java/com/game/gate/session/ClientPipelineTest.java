@@ -2,6 +2,11 @@ package com.game.gate.session;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.proto.ClientReply;
+import com.game.api.proto.EnterScene;
+import com.game.api.proto.PlayerTransfer;
+import com.game.api.proto.SessionDirective;
+import com.game.api.proto.ZoneRedirect;
 import com.game.common.token.GateTokens;
 import com.game.gate.metrics.GateMetrics;
 import com.game.net.client.ClientFrames;
@@ -10,6 +15,7 @@ import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.GateTokenPayload;
 import com.game.proto.MessageContent;
+import com.game.proto.RedirectToGateNotify;
 import com.game.proto.TipInfoMessage;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
@@ -23,6 +29,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
+import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.zip.Adler32;
 import org.junit.jupiter.api.Test;
@@ -144,9 +152,6 @@ class ClientPipelineTest {
         assertThat(meters.get("xm.gate.client.invalid.frames").tag("reason", "checksum").counter().count()).isZero();
     }
 
-    // ---------------------------------------------------------------- 工具
-
-    /** 校验和错误的一帧（解码层判非法、立即断开）。 */
     /**
      * 批次 5.4 先行件：生产装配走带 {@link PushMessageIds} 的新构造器（tip 与重定向通知两个号一起给）。握手与「未进场景推 tip」
      * 的字节与只给 tip 号的旧构造器完全一样——tip 用的仍是 {@code tip()}，不会因为多带了一个号而发错消息号。
@@ -173,10 +178,98 @@ class ClientPipelineTest {
         MessageContent tip = (MessageContent) decode(ch.readOutbound());
         assertThat(tip.getMessageId()).isEqualTo(23);
         assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage()).getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
-        assertThat((Object) ch.readOutbound()).as("先行件阶段没有任何路径会发 124").isNull();
+        assertThat((Object) ch.readOutbound()).as("未进场景的请求只推 tip，不会发 124").isNull();
         assertThat(ch.isOpen()).isTrue();
     }
 
+    // ---------------------------------------------------------------- 124 RedirectToGateNotify 的线上字节（批次 5.4，zone-travel-spec §4.5）
+
+    /** 金样里的票据签名：64 字节小写 hex ASCII 的形状（gate 不验签，只原样转发）。 */
+    private static final String GOLDEN_SIGNATURE = "0123456789abcdef".repeat(4);
+    /**
+     * 金样里的票据原字节：故意不是规范序列化（zone_id 排在 gate_node_id 前面），gate 若解析后重新序列化就会变序，
+     * 字节与签名对不上。依次是 zone_id = 2、gate_node_id = 1、expire_timestamp = 1800000300、player_id = 42、target_zone_id = 2。
+     */
+    private static final String GOLDEN_TICKET_HEX = "1002" + "0801" + "18aca6a7da06" + "282a" + "3002";
+    /**
+     * 124 的信封 {@code MessageContent} 字节，按 proto3 线格式手工排出（不取自被测代码）：
+     * 字段 1 serialized_message（0x0a，长 0x66 = 102）里是 {@code RedirectToGateNotify}：
+     * target_ip（0x0a，9 字节 "127.0.0.1"）、target_port（0x10，varint 11010 = 82 56）、token_payload（0x1a，14 字节票据原样）、
+     * token_signature（0x22，64 字节）、token_deadline（0x28，varint 1800000300 = ac a6 a7 da 06）；
+     * 字段 2 message_id（0x10，124 = 0x7c）；字段 3 id 不设（推送没有请求 id），字段 4 error_message 不设。
+     */
+    private static final String GOLDEN_124_HEX = "0a66"
+            + "0a09" + "3132372e302e302e31"
+            + "108256"
+            + "1a0e" + GOLDEN_TICKET_HEX
+            + "2240" + "30313233343536373839616263646566".repeat(4)
+            + "28aca6a7da06"
+            + "107c";
+
+    @Test
+    void 重定向通知124的线上字节金样_五项逐字段等于帧_票据原字节不重排_信封不带id() throws Exception {
+        SessionRegistry sessions = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+        FakeLogin login = new FakeLogin();
+        FakeLinks links = new FakeLinks();
+        ClientDispatcher wired = new ClientDispatcher(
+                new GateIdentity(GATE_NODE, "gate-uuid", 1), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
+                id -> id == 26 ? new MessageRoute(id, "login") : null, new PushMessageIds(23, 124), login, Map.of(),
+                links, sessions, new GateLimits(8, 50, Duration.ZERO), new GateMetrics(new SimpleMeterRegistry()),
+                PresenceRecorder.NONE);
+        SceneEventRouter router = new SceneEventRouter(sessions, wired);
+        EmbeddedChannel ch = new EmbeddedChannel(new ChannelInitializer<Channel>() {
+            @Override
+            protected void initChannel(Channel c) {
+                ClientPipeline.install(c.pipeline(), sessions, wired);
+            }
+        });
+        ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(verifyRequest(GATE_NODE), ' ')));
+        ((ByteBuf) ch.readOutbound()).release();
+        ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(ClientRequest.newBuilder().setId(1).setMessageId(26).build(), ' ')));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
+                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5)))
+                .build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) decode(ch.readOutbound())).getMessageId()).isEqualTo(26);
+        int sessionId = sessions.all().iterator().next().sessionId();
+        ZoneRedirect redirect = ZoneRedirect.newBuilder()
+                .setTargetZoneId(2).setGateNodeId(1).setGateHost("127.0.0.1").setGatePort(11010)
+                .setTokenPayload(ByteString.copyFrom(HexFormat.of().parseHex(GOLDEN_TICKET_HEX)))
+                .setTokenSignature(ByteString.copyFromUtf8(GOLDEN_SIGNATURE))
+                .setTokenDeadline(1_800_000_300L)
+                .build();
+
+        router.onPlayerTransfer(7, links.generation, PlayerTransfer.newBuilder()
+                .setSessionId(sessionId).setPlayerId(42).setFromEpoch(5).setToEpoch(6).setRedirect(redirect).build());
+        ch.runPendingTasks();
+
+        ByteBuf out = ch.readOutbound();
+        byte[] raw = new byte[out.readableBytes()];
+        out.getBytes(out.readerIndex(), raw);
+        int nameLen = out.getInt(4);
+        assertThat(new String(raw, 8, nameLen, StandardCharsets.US_ASCII)).isEqualTo("MessageContent\0");
+        byte[] body = Arrays.copyOfRange(raw, 8 + nameLen, raw.length - 4);
+        assertThat(HexFormat.of().formatHex(body)).isEqualTo(GOLDEN_124_HEX);
+
+        MessageContent content = (MessageContent) decode(out);
+        assertThat(content.getId()).isZero();
+        assertThat(content.hasErrorMessage()).isFalse();
+        RedirectToGateNotify notify = RedirectToGateNotify.parseFrom(content.getSerializedMessage());
+        assertThat(notify).isEqualTo(RedirectToGateNotify.newBuilder()
+                .setTargetIp(redirect.getGateHost())
+                .setTargetPort(redirect.getGatePort())
+                .setTokenPayload(redirect.getTokenPayload())
+                .setTokenSignature(redirect.getTokenSignature())
+                .setTokenDeadline(redirect.getTokenDeadline())
+                .build());
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(ch.isOpen()).as("推 124 不断开").isTrue();
+    }
+
+    // ---------------------------------------------------------------- 工具
+
+    /** 校验和错误的一帧（解码层判非法、立即断开）。 */
     private static byte[] corruptFrame() {
         byte[] frame = robotFrame(ClientRequest.newBuilder().setId(9).setMessageId(77).build(), ' ');
         frame[frame.length - 1] ^= 0x5A;
