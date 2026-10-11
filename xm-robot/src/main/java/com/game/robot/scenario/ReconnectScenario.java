@@ -160,7 +160,8 @@ public final class ReconnectScenario {
     /**
      * 3b. 跨区重连（批次 5.4，zone-travel-spec §11.12、§4.3 R1 / R2）：A 断开后经另一个区的入口严格重登。角色的位置记录在本区、带节点号，
      * 那个区的 login 不夺权、不分配，回 26 成功再推一条 124（GO-5）；跟随之后在本区严格重登，回到 M2 原实例、原位置（PARITY ⑥ 延伸到跨 zone，X18）。
-     * 跑不跑由 {@link CrossZoneGate} 定；中断只记失败，返回 A 此刻所在的连接（第 4 步接着用）。
+     * 跑不跑由 {@link CrossZoneGate} 定；返回 A 此刻所在的连接（第 4 步接着用）。中断（等不到应答、跟随时握手被拒……）只记一条失败：
+     * 这时 A 落在哪条连接上说不准，就经本区的入口重新进游戏（重连租约内回原处）交给第 4 步；连这一下也进不去才往外抛。
      */
     private EnteredPlayer crossZoneReconnect(EnteredPlayer current, SceneInfoComp m2, Vec3 walked) throws RobotException {
         CrossZoneGate.Decision decision;
@@ -178,6 +179,16 @@ public final class ReconnectScenario {
             report.note("跨区重连没跑：" + decision.reason());
             return current;
         }
+        try {
+            return crossZoneSteps(current, m2, walked);
+        } catch (RobotException | RuntimeException e) {
+            report.fail("跨区重连中断", e.getMessage() == null ? e.toString() : e.getMessage(), REF_CROSS);
+        }
+        return enter();
+    }
+
+    /** {@link #crossZoneReconnect} 真跑的部分：断开 → 经另一个区的入口重连 → GO-5 的 124 → 跟随 → 回原处。 */
+    private EnteredPlayer crossZoneSteps(EnteredPlayer current, SceneInfoComp m2, Vec3 walked) throws RobotException {
         long playerId = current.playerId();
         current.connection().close();
         GameConnection viaVisit = visit.client().connect(visit.client().assignGate());
@@ -275,8 +286,12 @@ public final class ReconnectScenario {
         return List.copyOf(worlds);
     }
 
-    /** 同 scene：BaseScene 的出生点（有限且不全为 0），否则基线常量 (180, 200, 0)。 */
     private Vec3 spawn(int configId) {
+        return spawnOf(tables, configId);
+    }
+
+    /** 同 scene：BaseScene 的出生点（有限且不全为 0），否则基线常量 (180, 200, 0)。 */
+    static Vec3 spawnOf(ConfigTables tables, int configId) {
         return tables.baseScene().find(configId)
                 .map(row -> new Vec3(row.getSpawnX(), row.getSpawnY(), row.getSpawnZ()))
                 .filter(v -> Double.isFinite(v.x()) && Double.isFinite(v.y()) && Double.isFinite(v.z())

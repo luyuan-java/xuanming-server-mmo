@@ -68,6 +68,36 @@ class TeamScenarioTest {
     }
 
     @Test
+    void X2同意之后的视图_受理且ABC各一次共3人_队伍zone仍是A的区才算三人跨区同队() {
+        long a = 11;
+        long b = 12;
+        long c = BIG;
+        TeamView.Builder three = TeamView.newBuilder().setTeamId(5).setLeaderId(a).setZoneId(1)
+                .addMembers(TeamMemberView.newBuilder().setPlayerId(a))
+                .addMembers(TeamMemberView.newBuilder().setPlayerId(b))
+                .addMembers(TeamMemberView.newBuilder().setPlayerId(c));
+        assertThat(TeamScenario.crossZoneJoinProblems(TeamResponse.newBuilder().setTeam(three).build(), a, b, c, 1)).isEmpty();
+
+        // 队伍 zone 被改成了 C 的区：C 在队、受理，旧判据（只看受理与 C 出现一次）会放过
+        assertThat(TeamScenario.crossZoneJoinProblems(TeamResponse.newBuilder().setTeam(three.clone().setZoneId(2)).build(), a, b, c, 1))
+                .containsExactly("队伍 zone_id=2，不是 A 的区 1");
+        // 同意时把 B 挤掉了
+        TeamView withoutB = TeamView.newBuilder().setTeamId(5).setLeaderId(a).setZoneId(1)
+                .addMembers(TeamMemberView.newBuilder().setPlayerId(a))
+                .addMembers(TeamMemberView.newBuilder().setPlayerId(c)).build();
+        assertThat(TeamScenario.crossZoneJoinProblems(TeamResponse.newBuilder().setTeam(withoutB).build(), a, b, c, 1))
+                .containsExactly("B 出现 0 次", "成员 2 人");
+        // 多出一个别人
+        assertThat(TeamScenario.crossZoneJoinProblems(TeamResponse.newBuilder().setTeam(three.clone()
+                .addMembers(TeamMemberView.newBuilder().setPlayerId(99))).build(), a, b, c, 1)).containsExactly("成员 4 人");
+        // 拒绝（带视图、C 不在）
+        TeamResponse denied = TeamResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder().setId(4020))
+                .setTeam(TeamView.newBuilder().setTeamId(5).setZoneId(1).addMembers(TeamMemberView.newBuilder().setPlayerId(a))
+                        .addMembers(TeamMemberView.newBuilder().setPlayerId(b))).build();
+        assertThat(TeamScenario.crossZoneJoinProblems(denied, a, b, c, 1)).containsExactly("同意回 4020", "C 出现 0 次", "成员 2 人");
+    }
+
+    @Test
     void 摘要里的号按无符号十进制_区分有没有视图() {
         TeamResponse withView = TeamResponse.newBuilder()
                 .setErrorMessage(TipInfoMessage.newBuilder().setId(4004).addParameters(Long.toUnsignedString(BIG)))

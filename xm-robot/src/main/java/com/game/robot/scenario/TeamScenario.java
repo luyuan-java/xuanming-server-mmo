@@ -516,7 +516,8 @@ public final class TeamScenario {
     /**
      * X1 / X2 跨区（team-spec §10.5；基线 X1 跨区拒绝 kTeamCrossZoneDenied、X2 允许时跨区组队且别区成员不跟随换图）。
      * 跑不跑由 {@link CrossZoneGate} 定；跑的话新号 C 经 {@code --visit-zone} 登录，按 {@code --team-cross-zone} 走 X1 或 X2。
-     * 这一段自成一体：中断时记失败并继续（S9 照常跑），只有 A 的队伍状态不确定时才往外抛。
+     * 这一段自成一体：中断（谁的请求等不到应答都算）时记一条失败，确认 C 不在 A 的队伍里之后继续（开战段、S9 照常跑）；
+     * 确认不了——A 的队伍状态不确定——才往外抛（{@link #ensureVisitorOut}）。
      */
     private void crossZone(Bot a, Bot b, long tid) throws RobotException {
         CrossZoneGate.Decision decision;
@@ -553,15 +554,47 @@ public final class TeamScenario {
         if (cHome != visit.visitZone()) {
             return;
         }
-        String left = leaveAnyTeam(c);
+        String left;
+        try {
+            left = leaveAnyTeam(c);
+        } catch (RobotException e) {
+            left = e.getMessage();
+        }
         if (!left.isEmpty()) {
+            // C 还没碰过 A 的队伍：记失败、不往下跑跨区断言，A 的队伍不受影响
             report.fail("X C 不在任何队伍", left, REF_CROSS);
             return;
         }
-        if (crossZoneTeamAllowed) {
-            crossZoneAllowed(a, b, c, tid);
-        } else {
-            crossZoneDenied(a, c, tid);
+        try {
+            if (crossZoneTeamAllowed) {
+                crossZoneAllowed(a, b, c, tid);
+            } else {
+                crossZoneDenied(a, c, tid);
+            }
+        } catch (RobotException | RuntimeException e) {
+            report.fail("X1 / X2 跨区中断", e.getMessage() == null ? e.toString() : e.getMessage(), REF_CROSS);
+            ensureVisitorOut(a, c, tid);
+        }
+    }
+
+    /**
+     * 跨区段中断之后的收口：别区的 C 必须不在 A 的队伍里（开战段只该有 A、B，S9 也按这个判）。按 A 的视图看，C 在就让 C 离队再看一次；
+     * 还在、或者 A 的请求本身失败，就是 A 的队伍状态不确定——往外抛，后面的步骤无从验证。
+     */
+    private void ensureVisitorOut(Bot a, Bot c, long tid) throws RobotException {
+        if (countMember(myTeam(a), c.id()) == 0) {
+            return;
+        }
+        String left;
+        try {
+            left = describe(c.call(leaveTeam, LeaveTeamRequest.newBuilder().setExpectedTeamId(tid).build(), TeamResponse.parser()));
+        } catch (RobotException e) {
+            left = e.getMessage();
+        }
+        TeamView after = myTeam(a);
+        if (countMember(after, c.id()) != 0) {
+            throw new RobotException("X1 / X2 跨区段中断后别区的 C 仍在 A 的队伍里（C 离队：" + left + "；A 的视图 " + describe(after)
+                    + "），开战段与 S9 无从验证");
         }
     }
 
@@ -585,10 +618,12 @@ public final class TeamScenario {
                 "X2 别区的 C 申请加入 A 的队伍：受理（xm-team 允许跨区）");
         TeamResponse approved = a.call(handleApplication, HandleApplicationRequest.newBuilder().setApplicantId(c.id()).setApprove(true)
                 .setExpectedTeamId(tid).build(), TeamResponse.parser());
-        boolean joined = tipOf(approved) == 0 && countMember(approved.getTeam(), c.id()) == 1;
-        report.check(joined, "X2 A 同意：C 入队，三人跨区同队（队伍 zone_id 仍是 A 的区 " + zoneId + "）",
-                describe(approved) + " zone_id=" + approved.getTeam().getZoneId(), REF_CROSS);
-        if (!joined) {
+        List<String> problems = crossZoneJoinProblems(approved, a.id(), b.id(), c.id(), zoneId);
+        report.check(problems.isEmpty(), "X2 A 同意：C 入队，三人跨区同队（A、B、C 各恰好一次、共 3 人；队伍 zone_id 仍是 A 的区 " + zoneId + "）",
+                describe(approved) + " zone_id=" + approved.getTeam().getZoneId() + (problems.isEmpty() ? "" : "；不符：" + String.join("；", problems)),
+                REF_CROSS);
+        if (countMember(approved.getTeam(), c.id()) == 0) {
+            // C 没进队：后面的「别区成员不跟随」无从谈起，C 也不用离队
             return;
         }
         try {
@@ -614,8 +649,39 @@ public final class TeamScenario {
             report.fail("X2 A 换图看跟随", e.getMessage() == null ? e.toString() : e.getMessage(), REF_CROSS);
         }
         TeamResponse left = c.call(leaveTeam, LeaveTeamRequest.newBuilder().setExpectedTeamId(tid).build(), TeamResponse.parser());
-        report.check(tipOf(left) == 0 && left.getTeam().getTeamId() == 0, "X2 C 离队（开战段只该有 A、B）", describe(left), REF_CROSS);
+        boolean out = tipOf(left) == 0 && left.getTeam().getTeamId() == 0;
+        report.check(out, "X2 C 离队（开战段只该有 A、B）", describe(left), REF_CROSS);
+        if (!out) {
+            ensureVisitorOut(a, c, tid);
+        }
         report.note("X1（禁止跨区时 4020）要 xm-team 的 xm.team.allow-cross-zone 为 false（缺省）并用 --team-cross-zone deny 跑；本轮按 allow 跑了 X2");
+    }
+
+    /**
+     * X2 A 同意之后回包视图的不符之处（空 = 符合，team-spec §10.5 X2）：受理；A、B、C 各恰好出现一次、共 3 人（C 入队没挤掉谁、也没多出谁）；
+     * 队伍 {@code zone_id} 仍是 A 的区（队伍归建队者的区，不随别区成员改）。
+     */
+    static List<String> crossZoneJoinProblems(TeamResponse approved, long a, long b, long c, int zoneId) {
+        List<String> problems = new ArrayList<>();
+        if (tipOf(approved) != 0) {
+            problems.add("同意回 " + tipOf(approved));
+        }
+        TeamView team = approved.getTeam();
+        String[] names = {"A", "B", "C"};
+        long[] ids = {a, b, c};
+        for (int i = 0; i < ids.length; i++) {
+            int count = countMember(team, ids[i]);
+            if (count != 1) {
+                problems.add(names[i] + " 出现 " + count + " 次");
+            }
+        }
+        if (team.getMembersCount() != 3) {
+            problems.add("成员 " + team.getMembersCount() + " 人");
+        }
+        if (team.getZoneId() != zoneId) {
+            problems.add("队伍 zone_id=" + team.getZoneId() + "，不是 A 的区 " + zoneId);
+        }
+        return problems;
     }
 
     /** 63 换到 {@code configId}：应答无错、随后的 79 是目标地图（同 {@link ReconnectScenario}）。返回新场景。 */

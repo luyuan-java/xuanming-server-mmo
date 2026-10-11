@@ -8,6 +8,8 @@ import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.CurrencyComp;
+import com.game.proto.EnterSceneC2SRequest;
+import com.game.proto.EnterSceneC2SResponse;
 import com.game.proto.EnterSceneS2C;
 import com.game.proto.GateTokenPayload;
 import com.game.proto.GetCurrencyListResponse;
@@ -57,10 +59,11 @@ import java.util.concurrent.TimeUnit;
  * travel 场景的本机假服务端（批次 5.4 的测试替身）：两个区各一个 {@link FakeGate}（区 1 = 出发区、区 2 = 访客区），背后是同一份
  * 「login + scene」状态；配 {@link FakeGateway}（assign-gate 按区给 gate、区服列表）。只按客户端契约回帧，大意照 zone-travel-spec 的
  * Java 设计：226 的同步段与延迟应答、受理后推 124（票据钉目标区与持票者）并让旧会话 REDIRECTED、目标 gate 只认本区票据、
- * login 拒他人持票（2011）、GO-5（位置在别区且有节点就回 26 再推 124、票据钉住本区时不弹走）、待落点按目标图落地、断线留重连租约。
+ * login 拒他人持票（2011）、GO-5（位置在别区且有节点就回 26 再推 124、票据钉住本区时不弹走）、待落点按目标图落地、断线留重连租约、
+ * 17 登出清位置记录（可以拖后，模拟离场异步落定）、63 换图、区内移动。reconnect 的跨区重连也借它跑（两个区、GO-5、跟随都是同一套）。
  * 可以按 {@link Fault} 故意做错一处，看探针在对应的那一步失败。<b>它不是服务端行为的证明</b>，只钉探针这一侧的判定。
  *
- * <p>线程：两台假 gate 各一条 I/O 线程，延迟应答与「受理后」的动作在一条定时线程上；状态一律在本对象的锁里读写。
+ * <p>线程：每台假 gate 各一条 I/O 线程，延迟应答与「受理后」的动作在一条定时线程上；状态一律在本对象的锁里读写。
  */
 final class FakeTravelWorld implements AutoCloseable {
 
@@ -72,6 +75,8 @@ final class FakeTravelWorld implements AutoCloseable {
     static final List<Integer> WORLDS = List.of(DEFAULT_CONF, OTHER_CONF);
     static final Duration TIMEOUT = Duration.ofSeconds(3);
     static final Vec3 SPAWN = new Vec3(180, 200, 0);
+    /** 区内移动的边界：上报的点任一分量超出 ±它就截断在原地并回 137（移动探针打到 100000），之内照收、不回 137。 */
+    static final double WORLD_LIMIT = 50_000;
     /** 重定向票据与 124 里的签名：64 个小写 hex 字符（假 gate 不验签）。 */
     static final ByteString SIGNATURE = ByteString.copyFromUtf8("ab".repeat(32));
 
@@ -92,7 +97,9 @@ final class FakeTravelWorld implements AutoCloseable {
         /** login 没有 GO-5：位置在别区也就地进场。 */
         NO_GO5,
         /** 推出 124 之后旧会话照常处理请求。 */
-        REDIRECTED_STILL_ANSWERS
+        REDIRECTED_STILL_ANSWERS,
+        /** gate 拒绝带 player_id 的票据（124 给的那种，握手回 token not for this gate）：跟随在握手这一步失败。 */
+        REJECT_REDIRECT_TICKET
     }
 
     private enum Kind { ONLINE, LEASE, PENDING }
@@ -148,10 +155,17 @@ final class FakeTravelWorld implements AutoCloseable {
     final Set<Fault> faults = EnumSet.noneOf(Fault.class);
     /** 断线租约（真服务端 30 s）。 */
     volatile Duration leaseTtl = Duration.ofSeconds(2);
-    /** 世界地图（226 的 3007 按它判）；缺省 {@link #WORLDS}，读真 World 表的用例换成表里的。 */
+    /** 世界地图（226 的 3007 按它判，第一张是首登落的默认主世界）；缺省 {@link #WORLDS}，读真 World 表的用例换成表里的。 */
     volatile List<Integer> worlds = WORLDS;
+    /** 各地图的出生点（首登、换图落在这里）；没列的用 {@link #SPAWN}。读真 BaseScene 表的用例换成表里的。 */
+    volatile Map<Integer, Vec3> spawns = Map.of();
     /** 226 的延迟应答（真服务端 ≤ 2 s，等组队读回来）。 */
     volatile Duration replyDelay = Duration.ofMillis(200);
+    /**
+     * 17 登出之后过多久才清位置记录（真服务端离场是异步的：gate → login → scene 逻辑线程处理离场 → 写登出墓碑）。缺省 0 = 立即；
+     * 落定之前位置记录仍是「本区在线」，别的区的 login 读到它就走 GO-5。
+     */
+    volatile Duration leaveLag = Duration.ZERO;
 
     private final MessageIdRegistry registry = MessageIdRegistry.loadFromClasspath();
     private final MessageIds ids = MessageIds.resolve(registry);
@@ -162,8 +176,12 @@ final class FakeTravelWorld implements AutoCloseable {
     private final int createTeam = registry.requireId("ClientPlayerTeam", "CreateTeam");
     private final int disbandTeam = registry.requireId("ClientPlayerTeam", "DisbandTeam");
     private final int leaveGame = registry.requireId("ClientPlayerLogin", "LeaveGame");
+    private final int enterScene = registry.requireId("SceneSceneClientPlayer", "EnterScene");
     private final FakeGate.Events events = new FakeGate.Events();
+    /** 每个区的第一台 gate（124 指向它）。 */
     private final Map<Integer, FakeGate> gates = new HashMap<>();
+    /** {@link #addGate} 加的第二台起的 gate。 */
+    private final List<FakeGate> extraGates = new ArrayList<>();
     private final FakeGateway gateway;
     private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "fake-travel-timer");
@@ -185,12 +203,25 @@ final class FakeTravelWorld implements AutoCloseable {
             gates.put(zone, new FakeGate("zone" + zone, events, new Script(zone)));
         }
         gateway = new FakeGateway();
-        long expire = System.currentTimeMillis() / 1000 + 600;
         for (int zone : List.of(HOME, VISIT)) {
-            ByteString token = GateTokenPayload.newBuilder().setGateNodeId(1).setZoneId(zone).setExpireTimestamp(expire)
-                    .setHmacSessionKey(ByteString.copyFrom(new byte[32])).setTargetZoneId(zone).build().toByteString();
-            gateway.assign(zone, gates.get(zone).endpoint(), token, SIGNATURE);
+            gateway.assign(zone, gates.get(zone).endpoint(), gateToken(zone), SIGNATURE);
         }
+    }
+
+    /** assign-gate 给的普通令牌：钉本区、不带 player_id。 */
+    private static ByteString gateToken(int zone) {
+        return GateTokenPayload.newBuilder().setGateNodeId(1).setZoneId(zone).setExpireTimestamp(System.currentTimeMillis() / 1000 + 600)
+                .setHmacSessionKey(ByteString.copyFrom(new byte[32])).setTargetZoneId(zone).build().toByteString();
+    }
+
+    /** 给这个区再加一台 gate：之后这个区的 assign-gate 在各台之间轮流给（第一次仍给第一台）；124 仍指向第一台。返回它的端口。 */
+    int addGate(int zone) throws IOException {
+        FakeGate gate = new FakeGate("zone" + zone + "-" + (extraGates.size() + 2), events, new Script(zone));
+        synchronized (this) {
+            extraGates.add(gate);
+        }
+        gateway.addGate(zone, gate.endpoint(), gateToken(zone), SIGNATURE);
+        return gate.port();
     }
 
     MessageIdRegistry registry() {
@@ -245,6 +276,7 @@ final class FakeTravelWorld implements AutoCloseable {
         timer.shutdownNow();
         gateway.close();
         gates.values().forEach(FakeGate::close);
+        extraGates.forEach(FakeGate::close);
     }
 
     // ================================================================ 一个区的 gate 背后的脚本
@@ -273,6 +305,9 @@ final class FakeTravelWorld implements AutoCloseable {
                 }
                 if (payload.getExpireTimestamp() <= System.currentTimeMillis() / 1000) {
                     return FakeGate.verifyRejected("token expired");
+                }
+                if (payload.getPlayerId() != 0 && faults.contains(Fault.REJECT_REDIRECT_TICKET)) {
+                    return FakeGate.verifyRejected("token not for this gate");
                 }
                 conn.ticketPlayer = payload.getPlayerId();
                 conn.ticketZone = payload.getTargetZoneId();
@@ -332,9 +367,11 @@ final class FakeTravelWorld implements AutoCloseable {
         } else if (id == leaveGame) {
             if (player != null && player.conn == conn) {
                 player.conn = null;
-                player.loc = null;
                 conn.playerId = 0;
+                leave(player);
             }
+        } else if (id == enterScene && player != null) {
+            switchScene(conn, player, request);
         } else if (id == getCurrencyList && player != null) {
             conn.session.reply(request, GetCurrencyListResponse.newBuilder()
                     .setCurrency(CurrencyComp.newBuilder().addValues(player.gold).addValues(0)).build());
@@ -352,11 +389,24 @@ final class FakeTravelWorld implements AutoCloseable {
             player.teamId = 0;
             conn.session.reply(request, TeamResponse.newBuilder().setTeam(TeamView.getDefaultInstance()).build());
         } else if ((id == ids.moveStart() || id == ids.moveStop()) && player != null) {
-            int seq = id == ids.moveStart() ? MoveStartC2S.parseFrom(request.getBody()).getInputSeq()
-                    : MoveStopC2S.parseFrom(request.getBody()).getInputSeq();
-            // 上报的点远在地图外：截断在原地，回 137
-            conn.session.push(ids.notifyMoveAck(), MoveAckS2C.newBuilder().setInputSeq(seq)
-                    .setServerLocation(player.position.toLocation()).build());
+            int seq;
+            Vec3 at;
+            if (id == ids.moveStart()) {
+                MoveStartC2S start = MoveStartC2S.parseFrom(request.getBody());
+                seq = start.getInputSeq();
+                at = Vec3.of(start.getStartLocation());
+            } else {
+                MoveStopC2S stop = MoveStopC2S.parseFrom(request.getBody());
+                seq = stop.getInputSeq();
+                at = Vec3.of(stop.getEndLocation());
+            }
+            if (Math.abs(at.x()) > WORLD_LIMIT || Math.abs(at.y()) > WORLD_LIMIT || Math.abs(at.z()) > WORLD_LIMIT) {
+                // 上报的点远在地图外：截断在原地，回 137
+                conn.session.push(ids.notifyMoveAck(), MoveAckS2C.newBuilder().setInputSeq(seq)
+                        .setServerLocation(player.position.toLocation()).build());
+            } else {
+                player.position = at;
+            }
         } else if (id == travel && player != null) {
             travel(conn, player, request, TravelToZoneRequest.parseFrom(request.getBody()));
         }
@@ -386,15 +436,15 @@ final class FakeTravelWorld implements AutoCloseable {
         if (loc != null && loc.zone() == conn.zone && loc.kind() == Kind.PENDING) {
             conf = loc.conf();
             sceneId = sceneId(conn.zone, conf);
-            position = SPAWN;
+            position = spawnOf(conf);
         } else if (loc != null && loc.zone() == conn.zone) {
             conf = loc.conf();
             sceneId = loc.sceneId();
             position = player.position;
         } else {
-            conf = DEFAULT_CONF;
+            conf = worlds.get(0);
             sceneId = sceneId(conn.zone, conf);
-            position = SPAWN;
+            position = spawnOf(conf);
         }
         if (player.conn != null && player.conn != conn) {
             player.conn.session.push(ids.sendTip(), TipInfoMessage.newBuilder().setId(2017).build());
@@ -407,8 +457,13 @@ final class FakeTravelWorld implements AutoCloseable {
         player.loc = new Loc(Kind.ONLINE, conn.zone, conf, sceneId, 0);
         conn.session.reply(request, EnterGameResponse.newBuilder().setPlayerId(pid).build());
         conn.session.push(ids.notifyEnterScene(), enterScene(conf, sceneId));
-        conn.session.push(ids.notifyActorCreate(), ActorCreateS2C.newBuilder().setEntity(player.entity).setGuid(pid)
-                .setTransform(Transform.newBuilder().setLocation(Vector3.newBuilder().setX(position.x()).setY(position.y()).setZ(position.z()))).build());
+        conn.session.push(ids.notifyActorCreate(), selfActor(player));
+    }
+
+    private static ActorCreateS2C selfActor(Player player) {
+        Vec3 at = player.position;
+        return ActorCreateS2C.newBuilder().setEntity(player.entity).setGuid(player.id)
+                .setTransform(Transform.newBuilder().setLocation(Vector3.newBuilder().setX(at.x()).setY(at.y()).setZ(at.z()))).build();
     }
 
     private void travel(Conn conn, Player player, ClientRequest request, TravelToZoneRequest travelRequest) {
@@ -473,7 +528,7 @@ final class FakeTravelWorld implements AutoCloseable {
         if (faults.contains(Fault.SCENE_BEFORE_REDIRECT)) {
             conn.session.push(ids.notifyEnterScene(), enterScene(source.conf(), source.sceneId()));
         }
-        player.loc = new Loc(Kind.PENDING, target, conf == 0 ? DEFAULT_CONF : conf, 0, System.nanoTime() + TimeUnit.SECONDS.toNanos(300));
+        player.loc = new Loc(Kind.PENDING, target, conf == 0 ? worlds.get(0) : conf, 0, System.nanoTime() + TimeUnit.SECONDS.toNanos(300));
         player.conn = null;
         player.travelling = false;
         conn.playerId = 0;
@@ -482,6 +537,45 @@ final class FakeTravelWorld implements AutoCloseable {
         if (faults.contains(Fault.DOUBLE_REDIRECT)) {
             conn.session.push(redirect, redirectTo(target, player.id));
         }
+    }
+
+    /** 17 登出：清位置记录（下次按首登落点）；{@link #leaveLag} 非 0 时拖后清，期间记录仍是「本区在线」。 */
+    private void leave(Player player) {
+        Duration lag = leaveLag;
+        if (lag.isZero()) {
+            player.loc = null;
+            return;
+        }
+        Loc online = player.loc;
+        timer.schedule(() -> {
+            synchronized (this) {
+                // 这期间又进了场（记录换了）就不动
+                if (player.loc == online) {
+                    player.loc = null;
+                }
+            }
+        }, lag.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /** 63 换图（只按配置号）：应答 {0}，推 79 与自己的 21，落在那张图的出生点。 */
+    private void switchScene(Conn conn, Player player, ClientRequest request) throws InvalidProtocolBufferException {
+        int conf = EnterSceneC2SRequest.parseFrom(request.getBody()).getSceneInfo().getSceneConfigId();
+        if (!worlds.contains(conf)) {
+            conn.session.reply(request, EnterSceneC2SResponse.newBuilder()
+                    .setErrorMessage(TipInfoMessage.newBuilder().setId(TravelScenario.TIP_MAP_INVALID)).build());
+            return;
+        }
+        long sceneId = sceneId(conn.zone, conf);
+        player.entity = nextEntity++;
+        player.position = spawnOf(conf);
+        player.loc = new Loc(Kind.ONLINE, conn.zone, conf, sceneId, 0);
+        conn.session.reply(request, EnterSceneC2SResponse.getDefaultInstance());
+        conn.session.push(ids.notifyEnterScene(), enterScene(conf, sceneId));
+        conn.session.push(ids.notifyActorCreate(), selfActor(player));
+    }
+
+    private Vec3 spawnOf(int conf) {
+        return spawns.getOrDefault(conf, SPAWN);
     }
 
     private void replyTravel(Conn conn, ClientRequest request, int tip) {

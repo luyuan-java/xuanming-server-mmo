@@ -8,8 +8,8 @@ import com.game.robot.flow.PlayerFlow;
 import java.util.Locale;
 
 /**
- * team / guild / trade / reconnect 的<b>跨区步骤</b>（另一个号经 {@code --visit-zone} 登录；reconnect 是经 {@code --visit-zone} 的入口重连）
- * 跑不跑的统一判定（批次 5.4，裁决 J6）。
+ * team / guild / reconnect 的<b>跨区步骤</b>（另一个号经 {@code --visit-zone} 登录；reconnect 是经 {@code --visit-zone} 的入口重连）
+ * 跑不跑的统一判定（批次 5.4，裁决 J6）。trade 的跨区步骤还没接入、不经过本类：它配 {@code require} 在参数解析时就报错（{@code RobotOptions}）。
  *
  * <p>为什么要显式三态而不是「看区服列表自动决定」：自动判定在切片没起对（只起了一个区）时会静默跳过，结果看起来是绿的。
  * 所以给一个开关 {@code --cross-zone auto|require|skip}：

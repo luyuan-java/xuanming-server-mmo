@@ -67,7 +67,7 @@ Windows 注意：
 
 上表只列 smoke / movement 用到的选项；其余子命令的选项（管理端口地址、`--expect-dev`、`--slow`、`--crash-*` 等）以 `--help` 为准，
 battle-settle、battle-smoke / match-activity / match-5v5（`--match-admin-url`）、battle-cross-zone 与 travel（`--visit-zone`、`--dwell-ms`、`--travel-scene-config`）、
-team / guild / trade / reconnect 的跨区步骤（`--cross-zone`、`--team-cross-zone`）与 rollback 用到的在下面各自的小节里说明。
+team / guild / reconnect 的跨区步骤（`--cross-zone`、`--team-cross-zone`）与 rollback 用到的在下面各自的小节里说明。
 
 退出码：`0` 全部检查通过；`1` 有检查失败或流程中断；`2` 参数错误。
 
@@ -298,7 +298,7 @@ java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar battle-cross-zone --zone 2
 | 选项 | 环境变量 | 缺省 | 说明 |
 |---|---|---|---|
 | `--zone` | `XM_ROBOT_ZONE` | `1` | A 登录的区 |
-| `--visit-zone` | `XM_ROBOT_VISIT_ZONE` | `2` | 另一个区（≥ 1）：B 与观众 C 登录的区。battle-cross-zone 与 travel 三个子命令要求它与 `--zone` 不同（相同是参数错误、退出码 2）；team / guild / trade / reconnect 的跨区步骤也用它（见下面的「跨区步骤」） |
+| `--visit-zone` | `XM_ROBOT_VISIT_ZONE` | `2` | 另一个区（≥ 1）：B 与观众 C 登录的区。battle-cross-zone 与 travel 三个子命令要求它与 `--zone` 不同（相同是参数错误、退出码 2）；team / guild / reconnect 的跨区步骤也用它（见下面的「跨区步骤」） |
 | `--match-admin-url` | `XM_ROBOT_MATCH_ADMIN_URL` | `http://127.0.0.1:18113` | xm-match 管理端口（评分与指标），同 battle-smoke |
 
 步骤（括号里是结果行用的步骤名，一律小写）：
@@ -379,7 +379,9 @@ java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar travel-long
 - T8b（`t8b-wrong-zone`）：同一张票据交给出发区的 gate（切片上两个区的第一台 gate 都是 1 号）→ 握手 `success = false`、`token not for this zone`、连接被服务端关闭。
 - T9（`t9-double-travel`）：连发两条 226 `{--zone, 0}`（间隔 < 2 s）：**按信封 `id` 配对**，第一条 `{0}`、第二条 13000（13000 可能先到，X21）→ 一条 124 →
   跟随（**先关旧连接再握手**，真实客户端的次序）→ 回到出发区、金币 G0 + 7（不回档）。
-- T10（`t10-leave-enter-visit`）：17 登出 → 经 `--visit-zone` 的入口登录：没有 124（79 之后再等 3 s），落在访客区；最后 17。
+- T10（`t10-leave-enter-visit`）：17 登出 → 等 3 s → 经 `--visit-zone` 的入口登录：没有 124（79 之后再等 3 s），落在访客区；最后 17。
+  先等是因为离场是异步的（gate → login → 出发区 scene 的逻辑线程处理离场 → 写登出墓碑）：墓碑落下之前访客区的 login 读到的仍是出发区的在线记录，
+  按规格走 GO-5（回 26 再推 124，不夺权、不复查位置）——那是正确行为，不是 R5 的反例。等过 3 s 仍收到 124，失败详情会写明这种可能。
 - T11（`t11-summary`）留底：场景打开过的每条连接按到达时刻合成一条时间线（连接序号、消息号、包体），124 共 3 条（T5、T7、T9）、每个窗口恰好一条、窗口里的 79 都在 124 之后。
 
 三跳用了三种关旧连接的次序（T5 晚关、T7 握手成功即关、T9 握手前就关），服务端两种次序都要支持。结果行：全部通过是
@@ -388,7 +390,8 @@ java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar travel-long
 
 子模式（各用自己的新号，可单独跑）：
 
-- `travel-abandon`（R6 / R7）：A 发 226 拿到 124 后**不跟随**、直接关旧连接 → 经 `--zone` 的入口严格重登：直接进场、没有 124（别处的待落点不牵引）、落在出发区、金币 == 出发值；
+- `travel-abandon`（R6 / R7）：A 发 226 拿到 124 后**不跟随**、直接关旧连接 → 经 `--zone` 的入口严格重登：直接进场、没有 124（别处的待落点不牵引；
+  经出发区的入口直接进场就是落在出发区——出发区有不止一台 gate 时重登可能换一台，只记观察、不判 gate 端点相等）、金币 == 出发值；
   B 同样不跟随 → 经 `--visit-zone` 的入口严格重登：落在 226 请求的那张地图（待落点记的目标图）。结果行 `TRAVEL_ABANDON_OK player_a=… player_b=… home_zone=… visit_zone=… pending_scene_config=… gold_home=…`。
 - `travel-long`（R4）：传送到访客区后直接关 TCP，等 31 s（越过 30 s 的重连租约）→ 经 `--zone` 的入口严格重登：直接进场、没有 124、落在出发区、金币 == 出发值。
   结果行 `TRAVEL_LONG_OK player_id=… home_zone=… visit_zone=… visit_gate=… back_gate=… waited_ms=…`。
@@ -417,7 +420,9 @@ java -jar xm-robot/target/xm-robot-0.1.0-SNAPSHOT.jar reconnect --cross-zone req
   A 换图时同区的 B 跟进、别区的 C 2 s 内没有 79（跨 zone 不跟随），随后 C 离队。结果行末尾多一个 `cross_zone=run|skip|fail`。
 - guild（新号 C = `前缀 + gd + 标签 + _c`，第 3 步之后）：别区的 C 查 A 的帮（60）→ 14001、查名次 → 14007、C 那个区的榜里没有 A 的帮、申请 → 14001、同名建帮 → 14010（帮名全服唯一）。
 - reconnect（顶号之后、干净登出之前）：A 断开后经 `--visit-zone` 的入口严格重登 → 26 无错、随后一条 124 送回本区（GO-5，票据钉本区、持票者 A）→ 跟随 → 回到原实例、原位置；全程恰好一条 124。
-- trade 的跨区步骤还没有接（仍只写观察记录），不在 5.4 的范围里。
+- 各段自成一体：中断（谁的请求等不到应答、跟随时握手被拒……）只记一条失败，后面的步骤照常跑——team 先确认 C 不在 A 的队伍里（在就让 C 离队，
+  确认不了才中止，因为开战段与 S9 无从验证）；reconnect 中断后经本区入口重新进游戏，接着跑干净登出那一步。
+- trade 的跨区步骤还没有接（auto / skip 下只写观察记录），不在 5.4 的范围里；`trade --cross-zone require` 是参数错误（退出码 2），免得「该跑的没跑」看起来是绿的。
 
 **match-activity**（批次 6.4 帮会活动开战的 dev 入口，match-spec §15.5、§7.1–§7.2；账号 `前缀 + ma + 标签 + _a / _b / _c`）。真正的调用方 xm-guild 随批次 4.6 接入，
 这里由 robot 经 xm-match 的 dev 管理口 `POST /admin/match/dev/activity-battle`（`--match-admin-url`）调同一个实现。前提：切片带 xm-match、xm-battle，dev 运行模式（prod 下这个口回 403，

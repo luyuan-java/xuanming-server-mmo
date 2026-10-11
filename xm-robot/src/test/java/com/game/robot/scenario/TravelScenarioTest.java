@@ -37,10 +37,13 @@ import org.junit.jupiter.api.Timeout;
 class TravelScenarioTest {
 
     private static final Map<String, String> ENV = Map.of(RobotOptions.PASSWORD_ENV, "dev-secret");
-    /** 调快的节奏：相邻请求 5 ms、同步应答 3 s、一跳 5 s、等 23 3 s、晚关 300 ms、静默 200 ms、租约之后等 2.5 s、旁人 2 s、落位 50 ms。 */
+    /**
+     * 调快的节奏：相邻请求 5 ms、同步应答 3 s、一跳 5 s、等 23 3 s、晚关 300 ms、静默 200 ms、租约之后等 2.5 s、旁人 2 s、落位 50 ms、
+     * 登出之后等离场落定 400 ms。
+     */
     private static final TravelScenario.Tempo FAST = new TravelScenario.Tempo(Duration.ofMillis(5), Duration.ofSeconds(3), Duration.ofSeconds(5),
             Duration.ofSeconds(3), Duration.ofMillis(300), Duration.ofMillis(200), Duration.ofMillis(2500), Duration.ofSeconds(2),
-            Duration.ofMillis(50));
+            Duration.ofMillis(50), Duration.ofMillis(400));
     private static final Pattern OK_LINE = Pattern.compile("TRAVEL_SMOKE_OK player_id=(\\d+) home_zone=1 visit_zone=2"
             + " home_gate=127\\.0\\.0\\.1:(\\d+) visit_gate=127\\.0\\.0\\.1:(\\d+) back_gate=127\\.0\\.0\\.1:(\\d+) gold_home=11 gold_back=18"
             + " move_ack=true ticket_binding=true reject_tip=(\\d+) reject_map_tip=(\\d+) hops=3 reconnect_gate=127\\.0\\.0\\.1:(\\d+)");
@@ -171,6 +174,55 @@ class TravelScenarioTest {
         assertThat(line.group(1)).isEqualTo(Integer.toString(world.gatePort(FakeTravelWorld.VISIT)));
         assertThat(line.group(2)).isEqualTo(Integer.toString(world.gatePort(FakeTravelWorld.HOME)));
         assertThat(Long.parseLong(line.group(3))).isGreaterThanOrEqualTo(FAST.leaseWait().toMillis());
+    }
+
+    @Test
+    void 出发区不止一台gate_abandon的A重登换了一台_照常通过_只记观察() throws Exception {
+        // assign-gate(出发区) 轮流给：A 登录第一台、A 重登第二台、B 登录第一台
+        int second = world.addGate(FakeTravelWorld.HOME);
+        TravelScenario scenario = scenario("travel-abandon", "mg", "--travel-scene-config", Integer.toString(FakeTravelWorld.OTHER_CONF));
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report)).as(report.render("travel-abandon")).isEmpty();
+        assertThat(report.notes()).anyMatch(n -> n.startsWith("A 重登连的 gate 127.0.0.1:" + second) && n.contains("不止一台 gate"));
+    }
+
+    @Test
+    void 出发区不止一台gate_long重登换了一台_照常通过_结果行写实际连的gate() throws Exception {
+        int second = world.addGate(FakeTravelWorld.HOME);
+        TravelScenario scenario = scenario("travel-long", "mg");
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report)).as(report.render("travel-long")).isEmpty();
+        assertThat(scenario.resultLine()).contains(" back_gate=127.0.0.1:" + second + " ");
+        assertThat(report.notes()).anyMatch(n -> n.startsWith("重登连的 gate 127.0.0.1:" + second));
+    }
+
+    // ---------------------------------------------------------------- T10：登出之后离场是异步的
+
+    @Test
+    void 离场落定得慢于发17_T10先等离场落定再经访客区登录_没有124() throws Exception {
+        // 17 之后 150 ms 才清位置记录：不等就去访客区登录，访客区按规格走 GO-5（读到的仍是出发区在线）；场景先等 400 ms
+        world.leaveLag = Duration.ofMillis(150);
+        TravelScenario scenario = roundTrip("lag");
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report)).as(report.render("travel")).isEmpty();
+        assertThat(names(report)).anyMatch(n -> n.startsWith("T10 登出（等 " + FAST.leaveSettle().toMillis() + " ms 离场落定）后经访客区入口登录"));
+    }
+
+    @Test
+    void 离场迟迟不落定_T10收到GO5的124_失败详情点明可能是离场没落定() throws Exception {
+        world.leaveLag = Duration.ofSeconds(30);
+        TravelScenario scenario = roundTrip("stuck");
+
+        CheckReport report = scenario.run();
+
+        assertThat(scenario.resultLine()).startsWith("TRAVEL_SMOKE_FAIL step=t10-leave-enter-visit reason=T10 登出");
+        assertThat(failed(report)).anyMatch(f -> f.startsWith("T10 ") && f.contains("走了 GO-5") && f.contains("登出墓碑") && f.contains("竞态"));
     }
 
     // ---------------------------------------------------------------- 前置
@@ -316,6 +368,7 @@ class TravelScenarioTest {
         assertThat(standard.hop()).isEqualTo(TravelScenario.HOP_TIMEOUT).isEqualTo(Duration.ofSeconds(60));
         assertThat(standard.lateClose()).isEqualTo(Duration.ofSeconds(3));
         assertThat(standard.leaseWait()).as("越过 30 s 的重连租约").isGreaterThan(Duration.ofSeconds(30));
+        assertThat(standard.leaveSettle()).as("T10 登出之后等离场落定").isEqualTo(Duration.ofSeconds(3));
         assertThat(standard.observe()).as("观察上限至少 3 s").isEqualTo(Duration.ofSeconds(3));
         assertThat(TravelScenario.Tempo.standard(Duration.ofSeconds(7)).observe()).isEqualTo(Duration.ofSeconds(7));
     }

@@ -413,8 +413,8 @@ class RobotOptionsTest {
     }
 
     @Test
-    void cross_zone_require而两个区相同_team_guild_trade_reconnect是参数错误_auto与skip照常_别的子命令不管() {
-        for (String sub : List.of("team", "guild", "trade", "reconnect")) {
+    void cross_zone_require而两个区相同_team_guild_reconnect是参数错误_auto与skip照常_别的子命令不管() {
+        for (String sub : List.of("team", "guild", "reconnect")) {
             assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2"))).as(sub)
                     .isEqualTo(sub + " --cross-zone require 要两个不同的区：--visit-zone 与 --zone 都是 2");
             assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2", "--visit-zone", "1"))).as(sub + " 两个区不同").isNull();
@@ -424,6 +424,22 @@ class RobotOptionsTest {
         }
         assertThat(catchUsage(List.of("smoke", "--zone", "2", "--cross-zone", "require"))).as("没有跨区步骤的子命令不看它").isNull();
         assertThat(catchUsage(List.of("guild-economy", "--zone", "2", "--cross-zone", "require"))).isNull();
+    }
+
+    @Test
+    void trade的跨区步骤没接入_配require是参数错误_不然会假绿_auto与skip照常() {
+        String notWired = "trade 的跨区步骤还没有接入，--cross-zone require 跑不了";
+        assertThat(catchUsage(List.of("trade", "--cross-zone", "require"))).startsWith(notWired);
+        assertThat(catchUsage(List.of("trade", "--cross-zone", "require", "--zone", "2", "--visit-zone", "1"))).as("两个区不同也一样")
+                .startsWith(notWired);
+        Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "XM_ROBOT_CROSS_ZONE", "require");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("trade"), env, NOW)).isInstanceOf(UsageException.class)
+                .hasMessageStartingWith(notWired);
+        assertThat(catchUsage(List.of("trade", "--zone", "2"))).as("auto").isNull();
+        assertThat(catchUsage(List.of("trade", "--zone", "2", "--cross-zone", "skip"))).as("skip").isNull();
+        assertThat(RobotOptions.hasCrossZoneSteps(RobotOptions.Scenario.TRADE)).isFalse();
+        assertThat(RobotOptions.usage().lines().filter(l -> l.startsWith("  trade ")).findFirst().orElseThrow())
+                .contains("--cross-zone require 是参数错误");
     }
 
     @Test

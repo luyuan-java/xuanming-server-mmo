@@ -82,7 +82,8 @@ import java.util.Optional;
  *       {@code success = false}、{@code token not for this zone}、连接被关；</li>
  *   <li>T9 连发两条 226 {@code {H}}：按信封 {@code id} 配对，第一条 {@code {0}}、第二条 13000（13000 可能先到）→ 一条 124 → 跟随（<b>先关旧连接再握手</b>）
  *       → 回到 H、金币 G0 + 7（不回档）；</li>
- *   <li>T10 17 登出 → 经 V 的入口登录：无 124（79 之后再等一会儿），落在 V；最后 17；</li>
+ *   <li>T10 17 登出 → 等 {@link Tempo#leaveSettle()}（离场是异步的：登出墓碑落下之前 V 的 login 读到的仍是 H 的在线记录，按规格走 GO-5）→
+ *       经 V 的入口登录：无 124（79 之后再等一会儿），落在 V；最后 17；</li>
  *   <li>T11 留底：124 共 3 条（T5、T7、T9），每个窗口恰好一条、窗口里的 79 都在 124 之后；结果行
  *       {@code TRAVEL_SMOKE_OK player_id=… home_zone=… visit_zone=… home_gate=… visit_gate=… back_gate=… gold_home=… gold_back=… move_ack=…
  *       ticket_binding=… reject_tip=… reject_map_tip=… hops=… reconnect_gate=…}。</li>
@@ -167,14 +168,19 @@ public final class TravelScenario {
      * @param leaseWait      travel-long 断线之后等多久（31 s：越过 30 s 的重连租约）
      * @param observe        等旁人 51、自己 21、137 的上限
      * @param placementWait  B 与 A 不同场景时，B 登出后等多久再登（节点目录 5 s 刷新）
+     * @param leaveSettle    T10 发 17 登出之后、经访客区入口登录之前等多久（3 s）。离场是异步的（gate → login → 出发区 scene 的逻辑线程
+     *                       处理离场 → 写登出墓碑），墓碑落下之前访客区的 login 读到的仍是「出发区、节点号 ≠ 0」的在线记录，按规格走 GO-5
+     *                       （回 26 再推 124，不夺权、不复查位置，§5.8）——那是正确行为，不是 R5 的反例。同区的 LeaveGame 紧跟 EnterGame
+     *                       由 login 夺权后的复查兜住（{@code rerouteIfStale}），跨区的 GO-5 分支没有这道复查，只能等
      */
     record Tempo(Duration requestSpacing, Duration syncReply, Duration hop, Duration failTip, Duration lateClose, Duration quiet,
-                 Duration leaseWait, Duration observe, Duration placementWait) {
+                 Duration leaseWait, Duration observe, Duration placementWait, Duration leaveSettle) {
 
         static Tempo standard(Duration observe) {
             Duration atLeast = Duration.ofSeconds(3);
             return new Tempo(Duration.ofMillis(1100), Duration.ofSeconds(10), HOP_TIMEOUT, Duration.ofSeconds(10), Duration.ofSeconds(3),
-                    Duration.ofSeconds(3), Duration.ofSeconds(31), observe.compareTo(atLeast) > 0 ? observe : atLeast, Duration.ofSeconds(6));
+                    Duration.ofSeconds(3), Duration.ofSeconds(31), observe.compareTo(atLeast) > 0 ? observe : atLeast, Duration.ofSeconds(6),
+                    Duration.ofSeconds(3));
         }
     }
 
@@ -512,10 +518,15 @@ public final class TravelScenario {
         steps.step("t10-leave-enter-visit", report);
         leave(home.connection());
         long t10 = System.nanoTime();
+        // 先等出发区处理完离场、写下登出墓碑（见 Tempo#leaveSettle）：早了访客区的 login 按规格会走 GO-5，测到的就不是 R5
+        sleep(tempo.leaveSettle());
         GameConnection fresh = connect(visitClient, "A-visit-fresh");
         EnterOutcome freshOutcome = visitFlow.reenterOrRedirect(fresh, accountA, playerA, new Timings());
-        must(freshOutcome instanceof EnterOutcome.Entered, "T10 登出后经访客区入口登录：没有 124、直接进场（窗口外按入口落地，R5）",
-                freshOutcome instanceof EnterOutcome.Redirected r ? "收到了 124（目标 " + r.target().endpoint() + "）" : "");
+        must(freshOutcome instanceof EnterOutcome.Entered, "T10 登出（等 " + tempo.leaveSettle().toMillis()
+                        + " ms 离场落定）后经访客区入口登录：没有 124、直接进场（窗口外按入口落地，R5）",
+                freshOutcome instanceof EnterOutcome.Redirected r ? "收到了 124（目标 " + r.target().endpoint() + "）：访客区的 login 读到的位置记录"
+                        + "仍是出发区在线，走了 GO-5——登出之后已等 " + tempo.leaveSettle().toMillis() + " ms，出发区的 scene 没写登出墓碑"
+                        + "（17 被当成了断线、或离场没处理），或者离场处理得比这还慢（竞态，不一定是缺陷：看出发区 scene 的离场日志）" : "");
         loggedIn.add(fresh);
         sleep(tempo.quiet());
         report.check(countOf(fresh, 0, redirectToGate) == 0, "T10 79 之后再等 " + tempo.quiet().toMillis() + " ms 仍没有 124",
@@ -663,9 +674,7 @@ public final class TravelScenario {
         loggedIn.add(home.connection());
         backGate = home.gate();
         checkLanding("T9", home, new Hop(firstReply, redirect, target, mark), visitGate);
-        if (!home.gate().equals(homeGate)) {
-            report.note("T9 回程落到的 gate " + home.gate() + " 与出发时的 " + homeGate + " 不同（出发区有不止一台 gate）");
-        }
+        noteOtherHomeGate("T9 回程", home.gate());
         long count = countOf(connection, mark, redirectToGate);
         report.check(count == 1, "T9 旧连接上恰好一条 124", "共 " + count + " 条", REF + " T9");
         goldBack = gold(home.connection());
@@ -711,9 +720,9 @@ public final class TravelScenario {
         loggedIn.remove(a.connection());
         steps.step("a3-home-relogin", report);
         long ta2 = System.nanoTime();
-        EnteredPlayer backA = strictRelogin("A 拿到 124 不跟随，经出发区入口严格重登：直接进场、没有 124（别处的待落点不牵引，R6）", homeClient, homeFlow,
-                accountA, playerA, "A-home-relogin");
-        report.check(backA.gate().equals(homeGate), "A 落在出发区（连的是出发区的 gate）", backA.gate() + "，出发区 gate " + homeGate, REF + " R6");
+        EnteredPlayer backA = strictRelogin("A 拿到 124 不跟随，经出发区入口严格重登：直接进场、没有 124，落在出发区（别处的待落点不牵引，R6）",
+                homeClient, homeFlow, accountA, playerA, "A-home-relogin");
+        noteOtherHomeGate("A 重登", backA.gate());
         long gold = gold(backA.connection());
         report.check(gold == goldHome, "A 金币 == 出发值（库里是交出时的冻结快照）", "金币 " + gold + "，出发值 " + goldHome, REF + " R6");
         leave(backA.connection());
@@ -798,10 +807,10 @@ public final class TravelScenario {
 
         steps.step("l4-home-relogin", report);
         long t2 = System.nanoTime();
-        EnteredPlayer back = strictRelogin("在访客区断线 " + waitedMillis + " ms（越过重连租约）后经出发区入口严格重登：直接进场、没有 124（R4）",
-                homeClient, homeFlow, accountA, playerA, "A-home-relogin");
+        EnteredPlayer back = strictRelogin("在访客区断线 " + waitedMillis + " ms（越过重连租约）后经出发区入口严格重登：直接进场、没有 124，"
+                + "落在出发区（R4）", homeClient, homeFlow, accountA, playerA, "A-home-relogin");
         backGate = back.gate();
-        report.check(back.gate().equals(homeGate), "落在出发区（连的是出发区的 gate）", back.gate() + "，出发区 gate " + homeGate, REF + " R4");
+        noteOtherHomeGate("重登", back.gate());
         long gold = gold(back.connection());
         report.check(gold == goldHome, "金币 == 出发值（数据随传送走、回来不丢）", "金币 " + gold + "，出发值 " + goldHome, REF + " R4");
         leave(back.connection());
@@ -904,7 +913,20 @@ public final class TravelScenario {
                 REF);
     }
 
-    /** 自己建连（assign-gate → 握手）后严格重登，要求直接进场（没有 124），再等一个静默窗口确认之后也没有 124。 */
+    /**
+     * 回到出发区时连的 gate 与出发时的不同：只记观察。出发区有不止一台 gate 时 assign-gate 按人数挑，换一台是正常的——
+     * 「落在出发区」的证据是经出发区的入口（或 124 给的出发区地址）直接进场、没有 124，不是 gate 端点相等。
+     */
+    private void noteOtherHomeGate(String label, GateEndpoint landed) {
+        if (!landed.equals(homeGate)) {
+            report.note(label + "连的 gate " + landed + " 与出发时的 " + homeGate + " 不同（出发区有不止一台 gate）");
+        }
+    }
+
+    /**
+     * 自己建连（assign-gate → 握手）后严格重登，要求直接进场（没有 124），再等一个静默窗口确认之后也没有 124。
+     * 经某个区的入口直接进场、没有 124，就是落在那个区（gate 只把会话送进本区的 scene；别处有位置记录时 login 回的是 124）。
+     */
     private EnteredPlayer strictRelogin(String name, RobotClient client, PlayerFlow flow, String account, long playerId, String label)
             throws RobotException {
         GameConnection connection = connect(client, label);

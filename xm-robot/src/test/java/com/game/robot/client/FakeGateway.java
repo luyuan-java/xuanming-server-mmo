@@ -8,8 +8,10 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
@@ -25,7 +27,8 @@ public final class FakeGateway implements AutoCloseable {
     }
 
     private final HttpServer http;
-    private final Map<Integer, Assignment> assignments = new HashMap<>();
+    /** 每个区的 gate（不止一台时 assign-gate 按调用次数轮流给）。 */
+    private final Map<Integer, List<Assignment>> assignments = new HashMap<>();
     private final Map<Integer, String> statuses = new TreeMap<>();
     private final Map<Integer, Integer> assignCalls = new HashMap<>();
     private int serverListCalls;
@@ -42,8 +45,23 @@ public final class FakeGateway implements AutoCloseable {
 
     /** 之后这个区的 assign-gate 给这台 gate 与这份令牌（令牌非空，探针就会握手）；同时把这个区记成 OPEN。 */
     public synchronized FakeGateway assign(int zone, GateEndpoint gate, ByteString tokenPayload, ByteString tokenSignature) {
-        assignments.put(zone, new Assignment(gate, tokenPayload, tokenSignature, System.currentTimeMillis() / 1000 + 300));
+        List<Assignment> gates = new ArrayList<>();
+        gates.add(new Assignment(gate, tokenPayload, tokenSignature, System.currentTimeMillis() / 1000 + 300));
+        assignments.put(zone, gates);
         statuses.putIfAbsent(zone, "OPEN");
+        return this;
+    }
+
+    /**
+     * 给这个区再加一台 gate（区里不止一台时）：之后这个区的 assign-gate 按调用次数在各台之间轮流给——第 n 次（从 0 起）给第 n % 台数 台。
+     * 先要 {@link #assign} 过这个区。
+     */
+    public synchronized FakeGateway addGate(int zone, GateEndpoint gate, ByteString tokenPayload, ByteString tokenSignature) {
+        List<Assignment> gates = assignments.get(zone);
+        if (gates == null) {
+            throw new IllegalStateException("区 " + zone + " 还没有 assign 过");
+        }
+        gates.add(new Assignment(gate, tokenPayload, tokenSignature, System.currentTimeMillis() / 1000 + 300));
         return this;
     }
 
@@ -100,11 +118,13 @@ public final class FakeGateway implements AutoCloseable {
     private synchronized String assignGate(String requestBody) {
         Matcher zone = Pattern.compile("\"zone_id\"\\s*:\\s*(\\d+)").matcher(requestBody);
         int zoneId = zone.find() ? Integer.parseInt(zone.group(1)) : 0;
+        int calls = assignCalls.getOrDefault(zoneId, 0);
         assignCalls.merge(zoneId, 1, Integer::sum);
-        Assignment assignment = assignments.get(zoneId);
-        if (assignment == null) {
+        List<Assignment> gates = assignments.get(zoneId);
+        if (gates == null) {
             return "{\"code\":404,\"error\":\"zone_not_found\"}";
         }
+        Assignment assignment = gates.get(calls % gates.size());
         Base64.Encoder base64 = Base64.getEncoder();
         return "{\"code\":0,\"gate_ip\":\"" + assignment.gate().host() + "\",\"gate_port\":" + assignment.gate().port()
                 + ",\"token_payload\":\"" + base64.encodeToString(assignment.payload().toByteArray())

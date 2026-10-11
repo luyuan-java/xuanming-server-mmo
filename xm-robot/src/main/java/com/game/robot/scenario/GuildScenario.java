@@ -543,9 +543,9 @@ public final class GuildScenario {
      * 第 4 步跨区（guild-spec §11.6；基线 robot 用另一个区的号 C）：跑不跑由 {@link CrossZoneGate} 定。C 经 {@code --visit-zone} 登录，
      * 归属区必须是那个区（建角取会话 zone，X16）；然后 A 的帮对 C 而言就是「别区的帮」：查不到（14001，与不存在同一答复）、没有名次（14007）、
      * C 那个区的榜里没有它、申请 14001（不泄露「在别区」）、同名建帮 14010（帮名全服唯一、不分区）。
-     * 自成一体：中断只记失败，不影响后面的步骤。
+     * 自成一体：中断（C 的请求等不到应答等）只记一条失败，不影响后面的步骤——这一段只有 C 发请求，按规格全是拒绝，不改 A 的帮。
      */
-    private void crossZone(long gid, String guildName) throws RobotException {
+    private void crossZone(long gid, String guildName) {
         CrossZoneGate.Decision decision;
         try {
             decision = visit.resolve();
@@ -575,6 +575,15 @@ public final class GuildScenario {
         if (cHome != visit.visitZone()) {
             return;
         }
+        try {
+            crossZoneVisitor(c, gid, guildName);
+        } catch (RobotException | RuntimeException e) {
+            report.fail("第 4 步跨区中断", e.getMessage() == null ? e.toString() : e.getMessage(), REF_CROSS);
+        }
+    }
+
+    /** 第 4 步里别区的 C 的那几步（见 {@link #crossZone}）。 */
+    private void crossZoneVisitor(Bot c, long gid, String guildName) throws RobotException {
         String problem = cancelAllApplications(c);
         if (problem.isEmpty()) {
             problem = leaveAnyGuild(c);
