@@ -386,6 +386,7 @@ class ZoneTravelHandOffTest {
         assertThat(f.locations.writes()).containsExactly(new Write("disconnected", 1001, E, seqBefore + 2, f.scene1.sceneId()));
         assertThat(f.transfers("travel", "link_gone")).isEqualTo(1);
         assertThat(f.transfers("travel", "handed_off")).as("已交出照计，link_gone 另计").isEqualTo(1);
+        assertThat(f.framesWithheld()).as("墓碑还在、帧写不出：只计 link_gone").isZero();
         assertThat(f.repo.releases()).isEmpty();
         assertThat(f.framesPending()).isZero();
     }
@@ -440,6 +441,8 @@ class ZoneTravelHandOffTest {
         assertThat(f.repo.releases()).isEmpty();
         assertThat(f.framesPending()).isZero();
         assertThat(f.placements("written")).isEqualTo(1);
+        // §7.3 第二条：gate 收不到这一帧、什么都不计，scene 必须自己计一次，否则勾稽里它就像丢了一帧 124
+        assertThat(f.framesWithheld()).as("帧发出之前被交叉的离开消费：计 withheld").isEqualTo(1);
     }
 
     @Test
@@ -458,6 +461,9 @@ class ZoneTravelHandOffTest {
 
         assertThat(f.locations.writes()).containsExactly(new Write("disconnected", 1001, E, seqA + 2, f.scene1.sceneId()));
         assertThat(f.repo.releases()).isEmpty();
+        // 帧已发出：那一帧到 gate 时会话已离开，gate 计 stale / orphan；scene 再计就把同一次旅途在勾稽里算两遍
+        assertThat(f.sink.redirects()).hasSize(2);
+        assertThat(f.framesWithheld()).as("帧发出之后的交叉不计 withheld").isZero();
     }
 
     /** 帧还没定的墓碑不过期：待落点写得再久（远超墓碑存活时长）、期间每秒清过期墓碑，写完照样发帧。 */
@@ -548,6 +554,11 @@ class ZoneTravelHandOffTest {
         assertThat(f.sink.redirects()).hasSize(1);
         assertThat(f.transfers("travel", "handed_off")).isEqualTo(3);
         assertThat(f.transfers("travel", "link_gone")).isEqualTo(1);
+        assertThat(f.framesWithheld()).isEqualTo(1);
+        // §7.3 第二条的 scene 一侧：每次 handed_off 恰好落进「交给链路的帧（到 gate 计 sent / invalid / stale / orphan）」、link_gone、
+        // withheld、pending 之一
+        assertThat(f.sink.redirects().size() + f.transfers("travel", "link_gone") + f.framesWithheld() + f.framesPending())
+                .isEqualTo(f.transfers("travel", "handed_off"));
     }
 
     // ------------------------------------------------------------------ 工具

@@ -501,7 +501,8 @@ class SceneMetricsTest {
 
     /**
      * 跨 zone 传送（批次 5.4，zone-travel-spec §7.2）：受理前的结局、选目标的结局、待落点写的结局全部取值启动即注册（初值 0），
-     * 「已移出、帧未发」的旅客数是一个不带标签的 gauge；标签只有 result，不带 player / zone / 节点号 / 目标 zone。
+     * 「已移出、帧未发」的旅客数是一个不带标签的 gauge，「帧发出前墓碑被交叉的离开消费、帧不发」是一个不带标签的 counter（§7.3 第二条要它）；
+     * 标签只有 result，不带 player / zone / 节点号 / 目标 zone。
      */
     @Test
     void 跨zone传送指标_全部取值启动即注册_导出名与标签() {
@@ -524,7 +525,8 @@ class SceneMetricsTest {
             assertThat(SceneMetrics.TravelResolve.values()).hasSize(resolves.length);
             assertThat(before).contains("xm_scene_travel_placements_total{result=\"written\"} 0",
                     "xm_scene_travel_placements_total{result=\"failed\"} 0",
-                    "xm_scene_travel_frames_pending 0");
+                    "xm_scene_travel_frames_pending 0",
+                    "xm_scene_travel_frames_withheld_total 0");
             assertThat(SceneMetrics.TravelPlacement.values()).hasSize(2);
 
             exported.travelRequest(SceneMetrics.TravelRequest.ACCEPTED);
@@ -533,6 +535,7 @@ class SceneMetricsTest {
             exported.travelResolve(SceneMetrics.TravelResolve.CHOSEN);
             exported.travelPlacement(SceneMetrics.TravelPlacement.FAILED);
             exported.travelFramesPending(3);
+            exported.travelFrameWithheld();
 
             String after = prometheus.scrape();
             assertThat(after).contains("xm_scene_travel_requests_total{result=\"accepted\"} 1",
@@ -542,7 +545,8 @@ class SceneMetricsTest {
                     "xm_scene_travel_resolves_total{result=\"error\"} 0",
                     "xm_scene_travel_placements_total{result=\"failed\"} 1",
                     "xm_scene_travel_placements_total{result=\"written\"} 0",
-                    "xm_scene_travel_frames_pending 3");
+                    "xm_scene_travel_frames_pending 3",
+                    "xm_scene_travel_frames_withheld_total 1");
             exported.travelFramesPending(0);
             assertThat(prometheus.scrape()).as("推的是绝对值").contains("xm_scene_travel_frames_pending 0");
             assertThat(labelNames(after, "xm_scene_travel")).as("不带 player / zone / 节点号").containsExactly("result");

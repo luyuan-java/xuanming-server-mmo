@@ -1986,7 +1986,8 @@ public final class SceneWorld {
      * 实例已不在时到来的 PlayerLeave：若这个会话刚交出（墓碑在、玩家对得上、没过期），就是与 PlayerTransfer 在链路上交叉的那条——
      * 按 voluntary 用旧 epoch E、续接的序号写登出墓碑或重连租约（跨节点换图是 (E, 序号+1)，gate 随后把那次 transfer 当过期并放弃 E+1；
      * 跨 zone 传送是 (E, 序号+2)，排在待落点之后）。绝不释放 E+1。跨 zone 传送的墓碑在待落点写完之前被消费时，重定向帧随之不再发
-     * （{@link #onPlacementWritten} 看墓碑还在不在）。
+     * （{@link #onPlacementWritten} 看墓碑还在不在，在那里计 {@code travel.frames.withheld}）；帧发出之后才被消费的这里不计——那一帧到 gate 时
+     * 会话已离开，gate 计 {@code stale / orphan}。
      */
     private boolean consumeTransferTombstone(SessionKey key, PlayerLeave leave) {
         TransferTombstone tombstone = transferTombstones.get(key);
@@ -2316,7 +2317,8 @@ public final class SceneWorld {
 
     /**
      * 待落点写完 / 写失败（逻辑线程；写口保证投递回来、恰好一次）。不论写没写上都定下帧的去留、{@code travelFramesPending--}：
-     * 墓碑已被交叉的 PlayerLeave 消费（它已按 voluntary 写过 (E, 序号+2)）或被同会话的新墓碑取代 → 不发帧；墓碑还在 → 发重定向帧——
+     * 墓碑已被交叉的 PlayerLeave 消费（它已按 voluntary 写过 (E, 序号+2)）或被同会话的新墓碑取代 → 不发帧，计 {@code travel.frames.withheld}
+     * （gate 收不到这一帧、什么都不计，不计这一项勾稽里它就像丢了一帧 124，见 {@link TransferResult}）；墓碑还在 → 发重定向帧——
      * 写失败也照发（TF15：第二条腿落目标 zone 的默认主世界），帧确定没写出（链路已断，含写待落点期间链路断开）→ TF7：
      * 位置以 (E, 序号+2) 改回源场景的重连租约，另计 {@code link_gone}，什么都不释放。
      */
@@ -2334,6 +2336,7 @@ public final class SceneWorld {
         }
         SessionKey session = tombstone.session();
         if (transferTombstones.get(session) != tombstone) {
+            metrics.travelFrameWithheld();
             log.info("待落点写完时墓碑已被交叉的离开消费，不发重定向帧 player={} session={}",
                     Long.toUnsignedString(tombstone.playerId()), session);
             return;

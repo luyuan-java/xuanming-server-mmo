@@ -84,6 +84,7 @@ public final class SceneMetrics {
     static final String TRAVEL_RESOLVES = "xm.scene.travel.resolves";
     static final String TRAVEL_PLACEMENTS = "xm.scene.travel.placements";
     static final String TRAVEL_FRAMES_PENDING = "xm.scene.travel.frames.pending";
+    static final String TRAVEL_FRAMES_WITHHELD = "xm.scene.travel.frames.withheld";
     static final String FROZEN_REJECTIONS = "xm.scene.frozen.rejections";
     static final String BATTLE_GATE_REJECTS = "xm.scene.battle.gate.rejects";
     static final String INSTANCES = "xm.scene.instances";
@@ -385,12 +386,18 @@ public final class SceneMetrics {
      * 一次交出的结局（{@code xm.scene.transfers{reason, result}}，scene-handoff-spec §7.2），每次冻结恰好终结一次。
      * 下面各取值的说明按跨节点换图（{@code reason = player}）写；跨 zone 传送（{@code reason = travel}）用同一组取值，
      * 差别是不释放新 epoch、推的 tip 是 3027 而不是 3023（zone-travel-spec §5.5），以及 {@link #HANDED_OFF} / {@link #LINK_GONE} 的口径
-     * （见这两个取值；勾稽见 zone-travel-spec §7.3）。
+     * （见这两个取值）。
+     *
+     * <p><b>跨 zone 传送的勾稽</b>（zone-travel-spec §7.3 第二条，按本类与 gate 的实际计数口径）：每次 {@code transfers{travel, handed_off}}
+     * 的重定向帧恰好落进下面一项——gate {@code xm.gate.redirects{source = travel}} 的 sent / invalid / stale / orphan（帧到了 gate；
+     * 帧发出<b>之后</b>才交叉的离开也在这里，gate 计 stale / orphan，scene 不另计）、{@code transfers{travel, link_gone}}（帧没写出）、
+     * {@code xm.scene.travel.frames.withheld}（帧发出<b>之前</b>墓碑已被交叉的离开消费，不发帧）、{@code xm.scene.travel.frames.pending}（还没定）。
+     * 剩下的差额才是真正丢在路上的帧（已交给链路、gate 没收到也没报写失败）。
      */
     public enum TransferResult {
         /**
          * 已交出并把 PlayerTransfer 交给了链路。跨 zone 传送：已交出并释放、实例已移除（这一刻终结并计数，之后先写待落点再发重定向帧；
-         * 帧没写出另计 {@link #LINK_GONE}）。
+         * 帧没写出另计 {@link #LINK_GONE}，帧发出前墓碑已被交叉的离开消费另计 {@link SceneMetrics#travelFrameWithheld()}）。
          */
         HANDED_OFF,
         /** 没提交：剩余租约不足安全边际，原地解冻、推 23 {3023}。 */
@@ -612,6 +619,7 @@ public final class SceneMetrics {
     private final Map<TravelRequest, Counter> travelRequests;
     private final Map<TravelResolve, Counter> travelResolves;
     private final Map<TravelPlacement, Counter> travelPlacements;
+    private final Counter travelFramesWithheld;
     private final Map<TransferEnter, Counter> transferEnters;
     private final Counter postFreezeMutations;
     private final Map<FrozenRejection, Counter> frozenRejections;
@@ -740,6 +748,9 @@ public final class SceneMetrics {
                 "226 受理之后选目标（scene-manager 选 gate、签票据）的结局（每次受理恰好计一次）");
         this.travelPlacements = counters(TravelPlacement.class, TRAVEL_PLACEMENTS, "result",
                 "跨 zone 传送交出之后写待落点记录的结局（写失败照样发重定向帧）");
+        this.travelFramesWithheld = Counter.builder(TRAVEL_FRAMES_WITHHELD)
+                .description("跨 zone 传送已交出、待落点写完时墓碑已被交叉的离开消费，重定向帧不发（帧发出之后才交叉的由 gate 计 stale / orphan）")
+                .register(registry);
         Gauge.builder(TRAVEL_FRAMES_PENDING, travelFramesPending, AtomicInteger::get)
                 .description("已交出并移出世界、重定向帧还没发出的旅客数（待落点在写）；应很快回到 0")
                 .register(registry);
@@ -939,6 +950,15 @@ public final class SceneMetrics {
     /** 一次待落点写入的结局（逻辑线程）。 */
     public void travelPlacement(TravelPlacement result) {
         travelPlacements.get(result).increment();
+    }
+
+    /**
+     * 跨 zone 传送已交出（已按 {@link TransferResult#HANDED_OFF} 终结），待落点写完时墓碑已被交叉的 {@code PlayerLeave} 消费（或被同会话的新墓碑取代），
+     * 重定向帧不发（逻辑线程；{@code xm.scene.travel.frames.withheld}）。只计帧发出<b>之前</b>的交叉：帧发出之后墓碑再被消费的，那一帧到 gate 时
+     * 会话已离开，由 gate 计 {@code redirects{travel, stale / orphan}}，这里不计，免得同一次旅途在勾稽里算两遍（见 {@link TransferResult}）。
+     */
+    public void travelFrameWithheld() {
+        travelFramesWithheld.increment();
     }
 
     /**

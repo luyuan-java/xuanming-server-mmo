@@ -245,6 +245,11 @@ final class TravelFixture {
         return count("xm.scene.travel.placements", result);
     }
 
+    /** {@code xm.scene.travel.frames.withheld}：帧发出之前墓碑已被交叉的离开消费、重定向帧不发的次数。 */
+    double framesWithheld() {
+        return meters.get("xm.scene.travel.frames.withheld").counter().count();
+    }
+
     double transfers(String reason, String result) {
         return meters.get("xm.scene.transfers").tag("reason", reason).tag("result", result.toLowerCase(Locale.ROOT))
                 .counter().count();

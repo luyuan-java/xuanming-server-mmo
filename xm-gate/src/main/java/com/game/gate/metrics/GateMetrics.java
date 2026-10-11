@@ -163,7 +163,10 @@ public final class GateMetrics {
     /**
      * 一次重定向在 gate 的结局（{@code xm.gate.redirects{result}}），每条重定向帧 / 每条重定向指令恰好计一次。
      * 重定向帧<b>不</b>计进 {@code xm.gate.scene.transfers}：那个指标与 5.2 改绑的 {@code handed_off} 勾稽，不能混。
-     * 勾稽：scene 侧 {@code transfers{reason = travel, result = handed_off}} ≈ {@code redirects{source = travel}} 的 sent + invalid + stale + orphan。
+     * 勾稽（zone-travel-spec §7.3 第二条，按两边实际的计数口径）：scene 侧 {@code transfers{reason = travel, result = handed_off}} ≈
+     * 本指标 {@code source = travel} 的 sent + invalid + stale + orphan + scene 侧 {@code transfers{reason = travel, result = link_gone}}（帧没写出）
+     * + scene 侧 {@code xm.scene.travel.frames.withheld}（帧发出之前墓碑已被交叉的离开消费，帧不发）+ scene 侧 {@code xm.scene.travel.frames.pending}
+     * （还没定）。帧发出<b>之后</b>才交叉的离开只在这里计 stale / orphan（scene 侧补写位置但不计数），不会算两遍。
      */
     public enum RedirectResult {
         /** 已给客户端推 124，会话转入已重定向状态。 */
