@@ -72,7 +72,7 @@ Java 21 · Spring Boot 3.5 · Netty · Apache Dubbo 3.3（Triple + protobuf）·
 ./mvnw -B install                     # 构建并运行全部单元测试
 
 export XM_MYSQL_PASSWORD=...          # 本地 MySQL root 密码
-export XM_GATE_TOKEN_SECRET=...       # gateway 签发 / gate 校验令牌的共享密钥
+export XM_GATE_TOKEN_SECRET=...       # gate 令牌共享密钥：gateway 签普通令牌、scene-manager 签跨 zone 重定向票据、gate 校验（三个进程原值相同，scene-manager 缺它拒启）
 export XM_LOGIN_DEV_PASSWORD=...      # 开发模式登录口令
 export XM_NODE_LINK_SECRET=...        # gate ↔ scene 链路握手密钥
 export XM_DUBBO_SECRET=...            # Dubbo 调用方鉴权密钥（各进程读同一个值）
@@ -90,9 +90,11 @@ XM_ZONES=2 tools/local/start-slice.sh         # 再起区 2 的 scene 与 gate�
 次序里有一条硬约束：静态直连的 Dubbo 提供方要先于调用方启动，所以 xm-match（Dubbo 20888、管理端口 18113）排在 xm-team 与 xm-gate 之前；运行中单独重启某个后端后，调用方到它的连接约一分钟才重连上。
 运维令牌、GM 停机密钥、帮会资产指令签名密钥、战斗票据密钥没设环境变量时由脚本生成到 `run/`；日志在 `run/logs/`。
 
-端到端验收用 `xm-robot`（按客户端契约跑登录、移动、组队、帮会、匹配与战斗、观战、跨区 1V1、战斗结算、GM 回档等场景，退出码即结论），在同一个 shell 里执行：
+端到端验收用 `xm-robot`（按客户端契约跑登录、移动、组队、帮会、匹配与战斗、观战、跨区 1V1、跨 zone 传送、战斗结算、GM 回档等场景，退出码即结论），在同一个 shell 里执行：
 `java -jar xm-robot/target/xm-robot-*.jar smoke`；场景与选项见 `java -jar xm-robot/target/xm-robot-*.jar --help` 与 [xm-robot/README.md](xm-robot/README.md)。
-双 zone 切片上：`smoke --zone 2` 核对区 2 能登录进场，`battle-cross-zone --zone 1 --visit-zone 2` 跑跨区 1V1（要 dev 运行模式，切片缺省就是）。
+双 zone 切片上：`smoke --zone 2` 核对区 2 能登录进场，`battle-cross-zone --zone 1 --visit-zone 2` 跑跨区 1V1（要 dev 运行模式，切片缺省就是）；
+`travel --zone 1 --visit-zone 2`、`travel-abandon`、`travel-long` 跑跨 zone 传送 226 / 重定向 124（批次 5.4），`team` / `guild` / `reconnect` 带 `--cross-zone require` 跑它们的跨区步骤（缺省 `auto`：有第二个区才跑）——
+前置、步骤与结果行见 [xm-robot/README.md](xm-robot/README.md)。5.4 的这些场景**还没有在真切片上跑过**（只在 robot 的假服务端上跑过单测），状态见 PARITY「跨 zone 传送（226）与重定向（124）」行。
 
 客户端入口：`POST http://127.0.0.1:18081/api/assign-gate`，body 为 `{"zone_id":1}`。
 

@@ -521,7 +521,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-scene-client-player（226）、svc-scene-client-player-common（124）、svc-client-player-login（HomeZone、票据 target_zone_id）、svc-scene-currency-client-player
 - behavior: 账号 96xx（首次在 home_zone 建角）；T1 登 home 并 GM +11 金币得出发值（登录中就收到 124 = 上轮残留，直接失败）；T2 target_zone_id=0 必须同步拒（tip≠0）且不重定向、金币不变；T2b 不存在的 scene_config_id 同步拒；T3 去程等 124 → 先连新后关旧、票据原样验签、按 player_id 严格重登 → 等排在 124 之后的 79，断言 player_id 不变、票据 zone == visit、gate 地址变化；T4 访客区金币 == 出发值、+7 可写、停留熬过 home 区 30s 断线租约不被踢 / 不二次重定向；T5 回程同链反向；T6 回家金币 == 出发值 + 7、全程恰好 2 次 124；一次窗口内出现第二个 124 判失败；226 回包可选（124 到达后旧连接关闭，回包可能丢）
 - internal: 无
-- java: missing — Java 无跨 zone、无 226 / 124
+- java: partial（2026-10-11，批次 5.4：只在本机假服务端上跑过单测，没有对真切片跑过）— xm-robot 子命令 `travel`（T0–T11：同步拒、在队 3026、未部署区 `{0}` 后 23 {3027}、去程 226 → 124 → 跟随严格重登、停留、GO-5 经出发区入口重连回原实例、持票者 2011、他区票据 `token not for this zone`、连发 226 按 `id` 配对、登出后经访客区登录无 124；结果行 `TRAVEL_SMOKE_OK` 与基线同名同序，后接 `hops` / `reconnect_gate`）、`travel-abandon`（R6 / R7）、`travel-long`（R4）；`RedirectFollower` 每个登录会话至多 3 跳、三跳用三种关旧连接的次序；每轮新号，不用固定号段。规格 zone-travel-spec §11.11，用法见 `xm-robot/README.md`；Go robot `travel_smoke` 对 Java 的跨实现验收（§11.10）没有做
 - size: S（随跨 zone 传送功能移植）
 - robot: 本身
 - hazards: 通用重登在角色列表为空时会自动建角（假绿 + 脏数据），必须严格按 player_id 选角；「到了」不能用一次性 WaitSceneReady 信号判断
@@ -610,3 +610,4 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 8. **ScenePlayerSync 的 65/55/82/68/75**：AttributeDelta*S2C 目前只有 entity_id，基线按距离三档调度但无有效载荷；mmorpg 是否计划填字段（届时 Java 要同步分档频率）？
 9. **SceneRollbackClientPlayer** 十二条 GM 回档在 mmorpg 仍是空桩，Java 是否跳过直到 mmorpg 填实？
 10. **robot 账号号段**：Go 冒烟用 robot_9001–97xx 固定号段且依赖「首次在某 zone 建角」登记 HomeZone；Java 无 HomeZone 概念，移植 trade / team / travel 场景前要先定 Java 的 HomeZone / 多 zone 设计。
+    **已定（批次 5.4，zone-travel-spec §8.4 勘误 11）**：归属区 = `player.zone_id`，建角取会话 zone（X16）；Java robot 每轮新号、首登即在 `--zone` 建角，跨区步骤先核对另一个号的角色列表 `zone_id`；Go robot 的 robot_9601 首次在 zone 1 建角即可。

@@ -1056,8 +1056,8 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 
 **客户端请求**：`SceneFeature.Registrar` 注册时除 `FreezePolicy` 外再声明 `BattlePolicy`（只给冻结策略的旧重载删掉，防止新方法静默得到缺省值；四参数重载两者都缺省 REJECT）。
 `ClientRequestHandler.onClientForward` 在 GM 闸与「有没有处理器」之后：`frozen()` 按 `FreezePolicy`（现有，`ClientRequestHandler.java:218`）；否则 `inBattle()` 按 `BattlePolicy`。
-两种冻结互斥，判定先后不影响结果（只在指标上可见：`moves{frozen}` 对 `moves{in_battle}`）。**没有处理器的方法排在战斗闸之前**：136（传送）与 226（跨 zone 传送，5.4 未做）
-战斗中照旧回 1006、不计闸；226 接入时必须先进下表（基线 3025），届时 `InBattleGateMatrixTest` 的「新方法不在表里即失败」会拦住。
+两种冻结互斥，判定先后不影响结果（只在指标上可见：`moves{frozen}` 对 `moves{in_battle}`）。**没有处理器的方法排在战斗闸之前**：136（传送）
+战斗中照旧回 1006、不计闸。226（跨 zone 传送）**批次 5.4 已接入**（2026-10-11）：注册为 GATED，进了下表，`InBattleGateMatrixTest` 加了这一行（「没有处理器的方法」用例去掉 226）。
 注册期的约束：玩法功能声明 DROP / STOP_ONLY（只给场景核心的移动上行）、或在应答为 `Empty` 的方法上声明它们，都启动即失败。
 
 | `BattlePolicy` | 方法 | 战斗中 | 基线 |
@@ -1068,6 +1068,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 | GATED | 84 ReleaseSkill | `SkillService.release`（`:74` 的桩）：1001 之后施法者 7004；`SkillRules.checkTarget`（`:51` 的桩）：目标是本节点玩家但在战斗中 → 7002（与「不是玩家」的 7001 分开）。目标闸只管**指定目标**的技能：范围 / 无目标技能在目标方式处先放行，目标号指向在途玩家也回 0（同基线 `ValidateTarget`，`skill.cpp:386-389`） | `skill.cpp:219-229`、`:410-414` |
 | GATED | 168 / 172 / 174 / 171 / 169 / 175 | `AttributeService.checkWritable`：冻结 1005 → 战斗 25011（`AttributeService.java:532-534`） | `attr.cpp:279-291` |
 | GATED | 183 / 185 / 186 / 182 / 189 / 187 | `PetService.checkWritable`：冻结 1005 → 战斗 26008（`PetService.java:497-499`） | `pet.cpp:230-242` |
+| GATED | 226 TravelToZone（批次 5.4） | `SceneWorld.requestTravel` 同步段第 3 步：3024 / 3007 之后、在途（13000 / 3014）之前判 → 应答内 **3025**，计 `gate_rejects{zone_travel}`（码与 63 的 3023 不同，所以单列一个取值）；在队检查读回来时复查一次（3025），选中目标时再复查一次（23 {3025}、计 `travel_resolves{in_battle}`） | `player_lifecycle.cpp:2784-2788`、`:2849-2859` |
 | GATED | 192 SortBag | `BagFeature.sortBag`：类型合法之后、`sortByPlayer` 之前判 → 1005（`BagFeature.java:62-66`）。`BagService` 保持不闸（D48） | `snap.cpp:160-172` |
 | ALLOW | 43、77、54、167、181、190、191、193（只读）；173、188（只给建议）；37、49、94、95（GM 货币）；194、195（任务） | 照常 | §2.3 |
 | REJECT（缺省） | 以后新加、没声明的方法 | 应答内 `error_message{1005}`（与冻结 REJECT 同形，`ClientRequestHandler.java:251-258`） | Java 独有（D11）；现有方法逐个显式声明，**没有行为变化** |
@@ -1099,7 +1100,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
    读的范围是一次视图构建的全体 rosterIds（成员、申请人、被邀请人、邀请人，最多 26 人；基线 `loadDisplay` 的 MGET 也是对全体 id 做的），每人一条 EXISTS 并发发出。
    任何一条读失败整批按 false（同基线「MGET 失败 → 全 false」，`team-spec:1221`）：同步抛出、异常完成、超时、被中断、结果为 null 都只记一行 WARN、视图照常，不让 RPC 失败。
    没有单独的超时键，与在线读共用请求预算（§8）。咨询性读，部署约束见 §10.5。
-5. **5.4 / 7.2 钩子**：226 在 3024 / 3007 之后、3026 之前判 → 3025（5.4 未做）。**GM 回档（7.2b）已接**，但不在 scene 侧、也不是 1005：xm-data 的回档作业在夺权之后、账本差集之前
+5. **5.4 / 7.2 钩子**：226 在 3024 / 3007 之后、3026 之前判 → 3025（**5.4 已接**，2026-10-11，见上表 226 一行；5.4 的跨 zone 冻结（`reason = TRAVEL`）与战斗冻结同样互斥，`BattleFixture` 装上了跨 zone 传送）。**GM 回档（7.2b）已接**，但不在 scene 侧、也不是 1005：xm-data 的回档作业在夺权之后、账本差集之前
    批量读战斗锁（`BattleLockGate`），命中记逐玩家结局 `in_battle`，读失败 fail-closed 记 `battle_lock_unknown`，无条件拒绝（不走 acceptDivergence），整区有人在战计入 `zone_not_quiescent`
    （见 data-ops-spec）。7.2c 的回收 / 精确回收 / 欠款写操作落地时也要过同一道闸。
 6. **帧外推**（`SceneWorld.integrate`，第二轮修正）：有战斗冻结（备战或战斗中）的玩家整个跳过——不外推、不动速度、不置脏位，也不走挂机停推那一支

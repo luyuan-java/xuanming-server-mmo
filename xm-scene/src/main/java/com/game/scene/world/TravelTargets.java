@@ -41,7 +41,8 @@ public interface TravelTargets {
         }
 
         /**
-         * 调用失败、本地兜底超时，或应答残缺（地图为 0、gate 地址空、端口不在 1..65535、票据或签名为空、过期时刻 ≤ 0）。
+         * 调用失败、本地兜底超时，或应答残缺（地图为 0、gate 地址空、端口不在 1..65535、票据或签名为空、过期时刻 ≤ 0，
+         * 或 {@code redirect.target_zone_id} 与请求的目标 zone 对不上——fail-closed：不能拿别的 zone 的票据去交出并释放）。
          * 结局未知，但选目标没有副作用。
          */
         record Failed(String reason) implements TravelSelection {

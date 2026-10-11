@@ -110,7 +110,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: sm-gate-command-channel、sm-owner-epoch-handoff、sm-home-zone-routing、gate 令牌签名（xm-common 已有）
 - behavior: gate zone ≠ 目标 zone 时不解析场景、只送连接：在目标 zone 的 gate 里按 player_count 最小挑一台（同地址去重取最新 launch_time；RequireClientEndpoint=true 时没有 client_endpoint 的 gate 跳过），签 GateTokenPayload{gate_node_id, zone_id, expire=now+300s, player_id, target_zone_id}，HMAC-SHA256 hex；只在玩家真的离开所在 zone 时动归属（过换手门、写「等待落点」location{node_id="", zone=目标, pending_scene_conf_id}）；目标图在目标 zone 没频道 / 默认大世界未配置 → ErrNoAvailableNode，在不可回头点之前拒绝；等待落点第二条腿解析失败回落默认大世界；票据过期的等待落点不牵引去向。重连 zone_id=0 时跟随 location 所在 zone（GO-5）。
 - internal: 应答 RedirectToGateInfo 同时回给调用方；推送失败单调回滚；GateCommand 带 gate UUID。Java 需要：多 zone 部署、跨区 gate 选择、票据绑定 player_id + target_zone_id、登录侧认票不弹回（CZ-8）。
-- java: missing — PARITY：gate「重定向待做」；architecture.md §10「跨 zone 首批不做」；xm-gateway `zone_id=0` 回 404；`SceneAssigner` 只在请求 zone 内选。
+- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片 / 真 Redis 集成测试未验证）— 新类 `com.game.scenemanager.travel.TravelRouter`：`selectTravelTarget`（源 scene 给 226 调：参数 3005 → 读目标 zone 的频道计划预检地图（ACTIVE / DRAINING 都算，没有 3000，读失败调用失败 X20）→ 合服围栏 F4（7.3 前恒放行）→ `GatePicker` 选 gate（同地址只留 `started_at_ms` 最大、剔排空、按人数）→ `GateTokenIssuer.issueRedirect` 签 300 s 票据）与 `redirectToZone`（login 的 GO-5：目标 zone 没有可用 scene 节点 3000，不查地图与围栏）。**不铸 epoch、不写位置**（X2）：等待落点由源 scene 交出并释放之后写成 `s = l` + 节点号 0（X14），第二条腿是目标 zone 的普通 assign（待落点的地图作 preferred）+ 夺权；推送经链路帧 / login 指令，不经 Kafka。`SceneAssigner` 仍只在请求 zone 内选。必填 `XM_GATE_TOKEN_SECRET`。
 - size: L
 - robot: travel_smoke（T1–T6）、battle_smoke_cross_zone（基线）；Java robot 无
 - hazards: 必须先判跨区再解析场景，否则目标 zone 过渡期（频道没建好）会让合服后源区玩家登录永远卡死；124 一到客户端就关旧连接，从旧 gate 发出的 TravelToZone 回包可能丢；不认票据 target_zone_id 的目标区会再发 124 把人送回去（robot 必须断言每跳只出现一次 124）。
@@ -122,7 +122,7 @@ Java 版目前只有 scene-manager 的「无状态选场景」：每个 scene �
 - depends on: data_service（player:zone 映射、home_zone_merging 标志）
 - behavior: 进场带 GateId 时查一次 GetPlayerHomeZone：有映射用它；正在合服 → ErrHomeZoneMerging(21) 拒；无映射时首次落点 / 同 zone 换图按 gate zone，跨 zone 传送任一条腿拒；超时 / 不可用 → ErrHomeZoneUnavailable(20) 可重试；未配置 data_service 且未开 AllowGateZoneAsHomeZone → 拒。结果随 RoutePlayerEvent.home_zone_id 下发，scene 据此选存盘 topic。组队建队 / 申请 / 邀请也按 home zone 做跨区校验。
 - internal: gRPC data_service（etcd 发现、熔断、NonBlock）；指标 home_zone_lookup_total{outcome}。
-- java: missing — Java 单 zone、单库 `xm_java`，玩家没有 home zone 概念；跨 zone / 合服首批不做（architecture.md §10）。
+- java: partial（2026-10-11，批次 5.4）— 本条原写「Java 单 zone、单库，玩家没有 home zone 概念」已过时（zone-travel-spec §8.4 勘误 1）：归属区就是 `player.zone_id`（建角同行写入、恒有值；X16 起取会话 zone），组队、帮会、聚宝斋自 4.3 / 4.4 / 4.7 起经 `PlayerHomeZones` 读它。存盘不按归属区路由（单库，无需 `RoutePlayerEvent.home_zone_id`），没有「未映射拒传送」与 20（X10）；合服围栏只立检查点（`ZoneMergeFence.OPEN`：F1 建角、F2 进游戏、F4 226 选目标），真实现与合服 21 随 7.3。
 - size: M
 - robot: travel_smoke（基线）
 - hazards: 「拒绝先于任何写」只对带 GateId 的请求成立，不带 GateId 的调用方（将来的疏散 / GM）会绕过合服围栏（代码注释登记的已知缺口）；归属未知时绝不能静默落进程 zone 库。

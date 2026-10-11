@@ -395,9 +395,9 @@ Schema 是 `RoleNameRuleTable{id=1,min_chars=2,max_chars=3,generated_prefix=4,ge
 | 设备数超限（处于 Login→EnterGame 窗口的连接超过 3 条） | 2024 |
 | 同一角色并发 EnterGame，或上一条异步链还没结束 | 2005。压测记录里有 `enter game: server error id:2005`（`robot/login_test_results.csv:12`） |
 | **顶号**：旧会话仍在线，新连接对同一角色 EnterGame | 旧连接先收到 **msg 34**，负载 `MessageContent{message_id:34, serialized: GameKickPlayerRequest{reason: TipInfoMessage{id: 2017 kLoginBeKickByAnOtherAccount}}}`，随后 gate 执行 `shutdown()`（`gate_event_handler.cpp:108-140`；`GameKickPlayerRequest{TipInfoMessage reason=1; string operator=2}` 见 `proto/scene/client_player_common.proto:12-15`）。新连接收到正常的 26 应答，接着收到 79 |
-| **短线重连**：旧会话处于断线租约内（30s）且账号相同 | 不踢任何连接；新连接正常收到 26，接着收到 79；location 只决定 zone，zone 内落默认主世界人数最少的频道（scene 契约 §1 第 5 条） |
+| **短线重连**：旧会话处于断线租约内（30s）且账号相同 | 不踢任何连接；新连接正常收到 26，接着收到 79；location 只决定 zone，zone 内落默认主世界人数最少的频道（scene 契约 §1 第 5 条）。location 在别的 zone 时 26 之后是一条 124（GO-5，见下面「跨区重定向」一行） |
 | 租约过期，或曾经 LeaveGame | 按 FirstLogin 处理 |
-| 跨区重定向（dev 默认关闭，`RedirectOnEnterEnabled: false`，login.yaml:205） | msg 124 `RedirectToGateNotify`；26 同步应答仍然是成功 |
+| 跨区重定向（dev 默认关闭，`RedirectOnEnterEnabled: false`，login.yaml:205） | msg 124 `RedirectToGateNotify`；26 同步应答仍然是成功。**Java 版（批次 5.4，2026-10-11 代码已集成、双 zone 切片未验证）**：`RedirectOnEnter` 没做（随合服批次 7.3）；Java 在两种情形发 124——① 226 跨 zone 传送受理之后（226 的应答 `{0}` 恒先于 124）；② 登录期重定向 GO-5：重连 / 顶号时角色还在别的 zone 的场景里（在线或 30 s 断线租约内），login 回 26 成功、**26 恒先于 124**，不夺权；目标 zone 没有可用 gate / scene 时不发 124，在入口 zone 进游戏。持票（124 给的票据）连上目标 gate 后的那次 26 不会再收到 124（一次动作至多一跳）；持别人的票进角色回 2011。推出 124 的旧连接之后的请求都没有回包，客户端不关时 60 s 后由服务端关闭 |
 | 断线租约到期而 TCP 还挂着 | gate 执行 forceClose，没有任何通知消息（`gate_event_handler.cpp:146-198`） |
 
 ---

@@ -225,7 +225,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: home-zone-mapping; enter-game-core
 - behavior: SessionDetails.ticket_player_id 非 0 且不等于请求的 player_id，在加锁之前就回 2011。ticket_target_zone_id 等于本 zone 时直接进本 zone，不弹回。ShortReconnect 和 ReplaceLogin 的 ZoneId=0，由 scene_manager 按原位置决定。FirstLogin 且会话里没有场景、并开启 RedirectOnEnterEnabled（dev 默认关）时，查 home zone（超时 1.5s），不在本 zone 就由 scene_manager 回 Redirect：客户端收到 124，26 的应答仍然是成功。
 - internal: data_service GetPlayerHomeZone；scene_manager 负责签发重定向票据。
-- java: missing — Java 的 EnterGame 不看票据和 home zone；xm-gateway 签 gate 令牌时把 target_zone_id 填成 zone_id，而 mmorpg 普通 AssignGate 令牌填 0，表示「普通票据」
+- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片未验证）— `EnterGameHandler`：持票者 ≠ 请求的角色回 2011（2018 之后、2028 / 设备续期 / 在途闸门之前，同基线）；纯函数 `EnterRoutes.resolveEnterRoute` 按票据与位置记录定去向：钉住 = `ticket_player_id ≠ 0 ∧ ticket_target_zone_id == 会话 zone`（Java 普通令牌 target_zone_id = zone_id、持票者 0，按 player_id 判，X13）；位置在别的 zone 的节点上且未钉 → GO-5（login 调 scene-manager `redirectToZone`，回 26 成功 + `RedirectToGate` 指令，签票失败退化为本 zone 首登，X11），ShortReconnect / ReplaceLogin 的等价判定来自位置记录（Java 没有会话登记）。`RedirectOnEnter` 没做（随 7.3，X17）。整条链受 `xm.login.enter-game-budget`（4 s）约束。
 - size: M
 - robot: travel_smoke.yaml（跨区传送）
 - hazards: 
@@ -237,7 +237,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: create-player
 - behavior: 建角时调 data_service.RegisterPlayerZone（超时 3s），失败则整体拒绝建角并回 2020，同时释放已登记的名字。可按 Placement.PinOnCreate / NewPlayerStorageId 一并写 storage_id。Login 的角色列表用 BatchGetPlayerHomeZone（超时 500ms）覆盖各角色的 zone_id：查询失败或映射缺失时保留建角时的 zone，结果不回写账号（映射是唯一真源）。开关 RefreshRoleListDisabled 可关掉刷新。
 - internal: player:zone:{id} 与 player:placement:{id} 位于映射用的 Redis，无 TTL；合服工具只改映射。
-- java: missing — Java 角色的 zone_id 就是 player 行的建角 zone，没有合服映射
+- java: partial（2026-10-08 X16 / 2026-10-11 批次 5.4）— 本条原写「missing」说重了（zone-travel-spec §8.4 勘误 2）：`player.zone_id` 就是映射，与角色行同一条 INSERT 写入，角色列表直接读它（就是基线刷新之后的结果，不需要 RefreshRoleZones）；真实缺口是建角取 login 进程的 zone，X16 已改为取会话 zone（为 0 回 2020），合服围栏检查点 F1 在发号之前（恒放行，7.3 换实现）。不做落点记录 storage_id（单库）与回填工具（列 NOT NULL）。见 PARITY「归属区映射」行（Java 进行中：双 zone 切片验证待做）。
 - size: M
 - robot: none
 - hazards: 

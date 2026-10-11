@@ -46,7 +46,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   forceCloseWithDelay(0.1s)；成功后重置非法包计数、存 hmac_session_key、存票据 player_id / target_zone_id；空密钥 + dev/test 时建连即 verified。
 - internal: 密钥来自 base_deploy_config gate_token_secret；令牌由 login AssignGate / scene_manager 重定向签发。
 - java: done — ClientDispatcher.onTokenVerify + xm-common GateTokens.verify（同顺序、同文案，sendThenClose）；ClientDispatcherTest「握手通过回成功_重复握手再回成功」
-  「握手失败先回原因再断开」「过期令牌与签名错误都被拒」。差异：Java 不存票据字段（见 redirect-ticket-binding）、无 dev 空密钥放行（更严）、
+  「握手失败先回原因再断开」「过期令牌与签名错误都被拒」。差异：Java 不存票据字段（见 redirect-ticket-binding；批次 5.4 起已存）、无 dev 空密钥放行（更严）、
   未握手的 ClientRequest 断开且计指标 MISSING。
 - size: S
 - robot: 全部场景的 connectAndVerify；xm-robot GameConnection
@@ -315,7 +315,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - behavior: gate 只把 Kafka 事件原样包成 124 推给客户端，不断连；客户端探测目标 gate → 新连接 ClientTokenVerify → 目标 zone 重跑 Login + EnterGame，最多 3 跳；
   目标 gate 按 target_zone_id 拒他区票据。scene_manager 按目标 zone gate 的 client_endpoint 选址、player_count 最小、同地址去重取最新。
 - internal: 票据由 scene_manager 用 GateTokenSecret 签，含 player_id / target_zone_id。
-- java: missing — 无跨 zone（architecture §10 首批不做）；GateTokens 已校验 target_zone_id，gateway 已下发 advertise 地址，可复用。
+- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片未验证）— 124 不经 Kafka：226 的经源 scene 的链路帧 `PlayerTransfer.redirect`、GO-5 的经 login 会话指令 `RedirectToGate`（`ClientDispatcher.onTravelRedirect` / `redirectByLogin`），核对绑定、校验内容（空地址 / 端口越界 / 空票据或签名 → 推 23 {3027} 断开，不推空地址的 124）、解绑、会话转 REDIRECTED（之后请求无回包）、`MessageContent{message_id = 124}` 不设 id、票据原字节；与基线不同的是 gate 在 `xm.gate.redirect-linger`（60 s）后关闭不跟随的旧连接（X8）。选址与签票在 scene-manager（`TravelRouter`：目标 gate 的通告地址、同地址只留最新、剔排空），见 sm-cross-zone-redirect。
 - size: M（gate 侧推送 S，签票 / 选址在 scene-manager）
 - robot: Go travel_smoke、features_smoke（124 处理）、battle_smoke_cross_zone
 - hazards: 空 payload 兜底会推出空地址的 124；客户端刻意不按 token_deadline 拦截，以目标 gate 判过期为准。
@@ -329,7 +329,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - behavior: gate 只存不判：验签通过后把 payload.player_id / target_zone_id 写进会话，随每个 gRPC 请求的 SessionDetails 交给 login；login 在 EnterGame 拒绝他人持票，
   看到 target_zone_id == 本 zone 时不按 home_zone 弹回。0 = 普通票据放行。两种转发模式必须走同一个 BuildSessionDetails（曾漏掉一种）。
 - internal: none
-- java: missing — SessionContext 没有票据字段，GateTokens.verify 的 payload 未被保存。
+- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片未验证）— 握手通过后把 payload 的 player_id / target_zone_id 存进 `ClientSession.ticketPlayerId / ticketTargetZoneId`（再次验票不覆盖），`ClientDispatcher.context` 经 `SessionContext.ticket_player_id = 8 / ticket_target_zone_id = 9` 带进全部 login 与后端调用（同基线「两种转发模式同一个 BuildSessionDetails」），gate 只存不判；login 拒他人持票 2011、票据钉 zone 不弹回（见 login.md enter-game-cross-zone）。
 - size: S
 - robot: Go travel_smoke
 - hazards: gate 自己要到 BindSession 才知道 player_id，在 gate 拒只会在 login 留下残留会话，所以判定放 login。

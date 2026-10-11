@@ -1178,7 +1178,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | `XM_MYSQL_PASSWORD`（`xm_app` 的口令） | login、friend、team、guild、trade、gateway、data、scene |
 | `XM_REDIS_PASSWORD`（新增） | 全部 12 个进程（6.4 后加 match） |
 | `XM_DUBBO_SECRET` | scene-manager、login、friend、chat、team、guild、trade、scene、gate、gateway、battle、match |
-| `XM_GATE_TOKEN_SECRET` | gate、gateway。**不注入 battle**：「battle 密钥 ≠ gate 密钥」由 preflight 在部署侧比对（6.2 Q11，`battle-node-spec.md:1524`） |
+| `XM_GATE_TOKEN_SECRET` | gate、gateway、scene-manager（批次 5.4 起：签跨 zone 重定向票据，缺键时 Pod 卡在 `CreateContainerConfigError`，`assign` 也随之不可用；三个进程同一个值）。**不注入 battle**：「battle 密钥 ≠ gate 密钥」由 preflight 在部署侧比对（6.2 Q11，`battle-node-spec.md:1524`） |
 | `XM_NODE_LINK_SECRET` | gate、scene |
 | `XM_ASSET_OP_SECRET_GUILD` / `XM_ASSET_OP_SECRET_TRADE` | guild、scene / trade、scene（后者 4.8 用到时） |
 | `XM_BATTLE_TOKEN_SECRET` | battle |

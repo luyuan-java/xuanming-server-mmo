@@ -100,7 +100,7 @@ gate 改绑；目标节点的「交出进场」；scene → scene-manager 的选
 | 覆盖模式 per-node → hash（5.1 D6，`scene-channels-spec.md:1069`） | 5.1 配置、5.2 上线后切 | per-node 下「只带地图」永远在本节点完成，跨节点只由显式 scene_id 触发；切 hash 的时机见 Q4 |
 | 换手门 18、ReleasePlayer、epoch 铸造、location CAS、推路由与回滚、源端冻结 / 存盘 / 标记 / 取证、A2′、gate 改绑（`enterscenelogic.go:479-767`；`player_lifecycle.cpp:2818-4373`） | **5.2** | 本稿 §1–§5 |
 | 镜像自动进场（CreateScene 应答驱动，落到别的节点时同样走 18 交接，`sm_reply.cpp:136-176`）；副本 | **5.3** | 复用同一原语：`SceneTransfers.begin(player, Target(node, scene), Reason.MIRROR / DUNGEON, playerRequested = true)`；63 的镜像分支（`ClientRequestHandler.java:216-217`）届时改为「请求建场景，再 begin」 |
-| 跨 zone 传送（同一个 `StartTravelHandoff`，targetZone ≠ 本 zone，`player_lifecycle.cpp:2745-2816`；SM 第 2 步 `enterscenelogic.go:366-431`、`:1006-1088`） | **5.4** | 交出事务相同（Java 单库 `xm_java`，`player.zone_id` 列已在，`schema.sql:14`）；`PlayerTransfer` 预留字段 7 承载 `redirect{gate 地址, 令牌}`，gate 推 124 而不是改绑；失败码 3027 / 13000 按跨 zone 分支（`player_lifecycle.cpp:2826-2829`、`:2856-2860`）；冻结闸共用 |
+| 跨 zone 传送（同一个 `StartTravelHandoff`，targetZone ≠ 本 zone，`player_lifecycle.cpp:2745-2816`；SM 第 2 步 `enterscenelogic.go:366-431`、`:1006-1088`） | **5.4** | 交出事务相同（Java 单库 `xm_java`，`player.zone_id` 列已在，`schema.sql:14`）；`PlayerTransfer` 预留字段 7 承载 `redirect{gate 地址, 令牌}`，gate 推 124 而不是改绑；失败码 3027 / 13000 按跨 zone 分支（`player_lifecycle.cpp:2826-2829`、`:2856-2860`）；冻结闸共用。**落地（2026-10-11，批次 5.4）**：交出用同一个原语，但多一个 `HandOffMode.RELEASE`（E+1 同时 `owner_released = 1`，第二条腿由目标 zone 的登录夺权得 E+2；「交出事务相同」的说法以此为准，`zone-travel-spec.md` X1、§8.4 勘误 3）；字段 7 = `ZoneRedirect redirect`，gate 推 124 而不是改绑 |
 | 疏散 / 排空改派（也写标记并发不带等待者的 `EnterScene(0,0)`，`player_lifecycle.cpp:2249-2363`）、死节点接管（`enterscenelogic.go:300-331`、`:840-940`）、再入屏障 | **5.5** | 疏散 = 服务器发起的批量 `begin(…, Reason.EVACUATE, playerRequested = false)`，失败不推 tip，并发受存储线程池约束（`StoragePlayerRepository.java:170-176`）。死节点无法交出，只能等租约过期（30 s）；5.5 若要提前释放必须先确认旧进程已不能写库 |
 | A1′ 断线释放标记（`exit_release_mark.h:16-19`；交接在途压制 A1′，`player_lifecycle.cpp:2064`、`:2129-2131`） | 基线横跨 reconnect 与 5.2 | Java 不需要：断线即写回并释放（`SceneWorld.java:637-667`），重连按新 epoch 从库重载（`architecture.md:637`） |
 | 回合制战斗在途闸（63 的 3023、资产通道 27002） | **6.3** | 交出与战斗冻结互斥：`begin` 拒绝战斗中的玩家，`PrepareBattle` 拒绝 `switchState ≠ NONE` 的玩家（批次 6.3 已落地，两条都兑现，见 §11.7） |
@@ -683,7 +683,7 @@ client      gate                          scene S（逻辑线程）
 | J2 | 一个 `ScenePlayer` 终生一个会话、一个 epoch | `ScenePlayer.java:39-40` | 保持：跨节点 = 新建实例 |
 | J3 | gate 会话的场景绑定只由 login `EnterScene` 指令建立 | `ClientDispatcher.java:484`、`:513-543` | **打破**：新增 scene 发起的 `PlayerTransfer` 改绑 |
 | J4 | 进场失败即回大厅 | `:550-556` | 只对登录进场保持；交出进场失败改为断开 |
-| J5 | 位置记录只由持有者写，epoch 高者覆盖 | `PlayerLocationDirectory.java:66-87` | 保持（新增「交出未送达时源节点以旧 epoch 补写一次」，§5.14） |
+| J5 | 位置记录只由持有者写，epoch 高者覆盖 | `PlayerLocationDirectory.java:66-87` | 保持（新增「交出未送达时源节点以旧 epoch 补写一次」，§5.14；批次 5.4 的跨 zone 交出扩展为至多两次（待落点 + TF7 / 交叉离开），见 `zone-travel-spec.md` §5.9） |
 | J6 | 63 同步完成，没有在途态 | `ClientRequestHandler.java:203-207` | **打破**：远端目标有在途态，再发 63 回 3014 |
 
 ### 4.9 缺口
@@ -1000,6 +1000,9 @@ Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + �
 - 写入点：源节点 E 的 `o`（进场或换图写入），目标节点 E+1 的 `o`（交出进场写入）。gap 期间记录仍指向 S；资产通道定位到 S 得 NOT_HERE，调用方重投（`architecture.md:351`），T 写入后自愈。
 - 交出提交后源节点**只在两种情形**补写一次（用 E、序号+1）：`pendingAbort = LEAVE`（墓碑或租约）、`PlayerTransfer` 确定没发出（重连租约）。这仍是「以自己写过的 epoch 写」，
   E+1 的写一定更新（J5 保持）。
+  **批次 5.4 的扩展**（跨 zone 传送，`zone-travel-spec.md` §5.9、§0.6 裁决 4；2026-10-11 已实现）：「只补写一次」只对本节的同 zone 交出成立。跨 zone 的交出并释放之后源节点**至多写两次**，都用 E、
+  序号都来自同一个 `ScenePlayer.nextLocationSeq()`——先 (E, 序号+1) 的待落点（`s = l`、节点号 0、zone = 目标），之后只在重定向帧没写出（TF7）或与 `PlayerLeave` 交叉时再写 (E, 序号+2) 的源场景重连租约 / 墓碑；
+  乱序到达按 (epoch, 序号) 收敛到后一次，目标 zone 进场以 E+2 写的记录覆盖它们。J5「只由持有者以自己写过的 epoch 写」照样成立。
 - 不增加 `t`（交出中）状态：读者只有 login / team / asset 三类，`o` / `l` / `x` 足够。不做「S 在发 `PlayerTransfer` 时写一条指向 T 的 `o`」（Q3，见 §9.3）。
 - 读者不用改：`find` 宽松、`findHolderAsync` 严格的约定不变（`PlayerLocationDirectory.java:253-304`、`:359-378`）。
 

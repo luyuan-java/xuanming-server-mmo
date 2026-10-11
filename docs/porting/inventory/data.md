@@ -135,7 +135,10 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: placement-routing（可选钉落点）、merge-fence-and-remap
 - behavior: 建角时 `player:zone:{id}` SETNX 登记，绝不覆盖：同值幂等成功、异值返回冲突（ErrCodeZoneMappingConflict）；目标 zone 有合服围栏 `merge:in_progress:{zone}` 时拒绝（预检 EXISTS + Lua 提交点复核，查询失败按封锁）；storage_id≠0 时同一段 Lua 只在 home 新写成时 SETNX 落点记录；查询无映射 → gRPC NotFound（login 回退账号 blob 里的建角 zone），值畸形 → 错误；GetPlayerHomeZone 同时报告 home_zone_merging；批量查询走 pipeline。
 - internal: mapping Redis（DB 0）键 `player:zone:{id}`；data_service 按 home_zone 选 zone Redis Cluster（dev 单实例）。Java 需要：一个可被各服务（scene-manager、将来的 guild / trade / friend）查询的「玩家 → 归属区」真源与合服期间的拒绝语义。
-- java: partial — `player.zone_id` 在建角时写入（`PlayerMapper.insertPlayer`），`PlayerViews` 下发；但没有对外查询接口、没有合服围栏；`EnterGameHandler` 选场景用的是会话 zone（`session.getZoneId()`，缺省 defaultZoneId），不是角色行的 zone_id
+- java: partial — `player.zone_id` 在建角时写入（`PlayerMapper.insertPlayer`），`PlayerViews` 下发；但没有对外查询接口、没有合服围栏；`EnterGameHandler` 选场景用的是会话 zone（`session.getZoneId()`，缺省 defaultZoneId），不是角色行的 zone_id。
+  **2026-10-11 更新（批次 5.4）**：建角的 zone 改取会话 zone（X16，为 0 回 2020）；读者已不止 login——组队 / 帮会 / 聚宝斋经 xm-common `PlayerHomeZones` 直接读这一列（同库，不需要 RPC 查询接口）；
+  合服围栏接口 `ZoneMergeFence` 与检查点 F1 / F2 / F4 已接线、恒放行（真实现随 7.3）；EnterGame 用会话 zone 选场景是**有意且同基线**的——会话 zone 是入口，不是归属（基线 login 同样按 Node.ZoneId 发 GateZoneId），
+  F2 判的才是角色行的 zone_id（zone-travel-spec §8.4 勘误 10）。
 - size: M
 - robot: robot.stress-3zone-*.yaml（多区）
 - hazards: 旧实现无条件 SET，合服后一次建角重试就能把玩家送回已下线源区（现为 SETNX）；Java EnterGame 用会话 zone 而非角色 zone，跨区角色列表出现时会进错区（需 login 区域确认）。
@@ -401,4 +404,5 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 5. **mmorpg 侧存疑（mmorpg 待做候选）**：(a) GM 快照 / 回档 / 回收建在 `player:{id}:*` 字段图上，而权威数据是 `PlayerAllData:{id}` blob，且 RollbackFence 未接线、回档恒 NotImplemented——Java 做回档时应直接以玩家记录 + scene 快照（source=1）为源，不要照搬；(b) player_database_1、player_centre_database、player_debt、rollback_audit、user / user_oauth / user_phone / user_password 在本区域代码里没有业务读写者（死表或仅工具用）；(c) 角色列表（user_accounts.simple_players）只看到 Redis 读写，未发现 MySQL 写回路径；(d) DeletePlayerData / SavePlayerData / BatchRecallItems / CreatePlayerSnapshot 无管理令牌。
 6. **合服在 Java 的范围**：Java 名字全服唯一（name_key 唯一索引），合服不会产生重名，force_rename 可永不置位；单库下合服退化为「改 zone_id + 帮会 / 交易 / 排行榜迁区 + 一次性提示」，merge-player-data 与 storage-relocate 可判不适用。是否需要做、何时做，取决于运营是否会开多区。
 7. **归属区来源**：Java EnterGame 用会话 zone 而非角色行 zone_id 选场景（login 区域需确认是否有意）；Java 没有对其他服务开放的「查玩家归属区」接口，帮会 / 交易 / 组队移植时需要。
+   **已定（2026-10-11，批次 5.4，zone-travel-spec §8.4 勘误 10）**：有意且同基线——会话 zone 是入口、不是归属；归属区 = `player.zone_id`，建角取会话 zone（X16）；帮会 / 交易 / 组队经 `PlayerHomeZones` 直接读库，不需要查询接口。
 8. **号段 vs 雪花**：mmorpg 已把 player_id 从雪花迁到号段（值域 < 2^55，与存量雪花号不相交）。Java 继续用雪花（≥ 2^55 的大号），两版 player_id 值域不同；客户端只要求 uint64 唯一，但若将来两版数据互导需注意。物品 guid / 帮会 id 在 Java 的发号源待定。

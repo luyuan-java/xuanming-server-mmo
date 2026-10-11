@@ -213,6 +213,8 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - behavior: 冻结期间所有业务写（AOI / 战斗 / 货币 / 背包 / 移动 / 属性）被丢弃，客户端消息静默丢；存盘落地后 SET player:{id}:handoff "{epoch}:{ms}" EX 300 再请求 EnterScene；结局三选一：到达（目标节点 79 或 124）/ 原地解冻 + 失败 tip / 无法原地恢复则 tip + 34 + 不存盘销毁（客户端回选服重登）；最迟约 71s 出结论（存盘 30s、应答 30s 看门狗、35s 晚发窗口、70s 冻结上限）。
 - internal: Redis Lua 原子取证（删本族标记再读 epoch）、回滚回执采纳（B5）、[TravelHandoff] 30s 计数行。
 - java: missing — Java 归属在 MySQL（owner_epoch + released + lease），可用「源节点写回并释放 → 目标节点夺权加载」替代整套标记协议，不需要照抄。
+  **更新（zone-travel-spec §8.4 勘误 4）**：这条建议对同 zone 改绑被 5.2 否决（一笔交出事务 E→E+1、保持未释放，见 PARITY「跨节点换图与归属交接」行）；跨 zone 正是批次 5.4 采用的形态，并多推进一代——
+  交出并释放（`HandOffMode.RELEASE`：写回冻结快照 + E→E+1 + `owner_released = 1`），第二条腿由目标 zone 的登录夺权得 E+2（2026-10-11 代码已集成，切片未验证；PARITY「跨 zone 传送（226）与重定向（124）」行）。
 - size: XL（Java 版按自身归属协议重做约 L）
 - robot: travel_smoke（基线）
 - hazards: 冻结中实体仍在场景里，必须由每个业务系统主动查 IsCrossZoneFrozen（二十余处），漏查即分叉；不变量 I3：未冻结即一定仍是属主；退出优先（交接在途时断线作废交接）。
@@ -224,7 +226,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: ownership-handoff, owner-epoch-fencing
 - behavior: 同步拒绝：目标 zone 为 0 或等于本 zone 3024；地图不在 World 表 3007；战斗 / 备战在途 3025；在队伍中 3026；交接在途 13000、换图在途 3014；受理后结局见 ownership-handoff；访客期间存盘按 home_zone 落库，回家不回档。
 - internal: 数据不搬家，目标 zone 直接从 home 盘加载；gate 票据带 zone。
-- java: missing — Java 不跨 zone（PARITY 场景分配行「不跨 zone」）；未实现时 Java 对 226 回 `TravelToZoneResponse{error_message=1006}`（ClientRequestHandler.replyUnavailable）。
+- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片 / robot 端到端 / 真 Redis·MySQL 集成测试未验证）— `ClientRequestHandler` 注册 226（FreezePolicy.ALLOW、BattlePolicy.GATED），`SceneWorld.requestTravel`：同步段 3024 / 3007 / 3025 / 13000 / 3014 同基线顺序；3026 改为延迟的同步应答（每次现读成员关系，≤ 2 s，读失败 3027，X4）；受理后经 scene-manager `selectTravelTarget` 选 gate 签票，一笔「交出并释放」MySQL 事务（`HandOffMode.RELEASE`）替代标记链（X1），写待落点（`s = l` + 节点号 0）后经同一条链路帧发 `PlayerTransfer{redirect}`，gate 推 124。访客期间存盘不按 home_zone 路由（单库，回家不回档按构造成立）。规格 `docs/porting/zone-travel-spec.md`，PARITY「跨 zone 传送（226）与重定向（124）」行。上面 hazards 在 Java：124 恒在 226 应答之后（X3）；受理到结论约 25 s（X12）；没有 gate-cmd 通道。
 - size: L
 - robot: travel_smoke（T1–T6）
 - hazards: 客户端预算须大于服务端最坏结论时长（约 71s）；124 可能先于 226 应答到达；gate-cmd 消费滞后 >30s 时成功的传送也可能被踢回选服。

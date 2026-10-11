@@ -877,7 +877,7 @@ exit 0
 |---|---|---|---|
 | `XM_MYSQL_PASSWORD` | mysql 容器（root 口令）、login、friend、team、guild、trade、gateway、data、scene；集成测试 | 连接被拒，启动失败 | `:?` |
 | `XM_DUBBO_SECRET` | scene-manager、login、friend、chat、team、guild、trade、scene、gate、gateway、battle | 拒启 | `:?` |
-| `XM_GATE_TOKEN_SECRET` | gate、gateway；battle 可选（用来检查两把密钥不相同） | 拒启 | `:?` |
+| `XM_GATE_TOKEN_SECRET` | gate、gateway、scene-manager（批次 5.4：给跨 zone 传送与登录期重定向签票据，缺失拒启——`assign` 也在它上面，漏给它连普通进游戏都会失败）；三个进程原值逐字节相同；battle 可选（用来检查两把密钥不相同） | 拒启 | `:?` |
 | `XM_NODE_LINK_SECRET` | gate、scene | 拒启 | `:?` |
 | `XM_LOGIN_DEV_PASSWORD` | login（`xm.login.mode` 缺省 dev，见 xm-login `:84`）、robot | 拒启 | `:?` |
 | `XM_ASSET_OP_SECRET_GUILD` | guild、scene、robot guild-economy；去掉首尾空白后至少 32 字节 | guild 拒启，scene 验签全部失败 | `:?` |

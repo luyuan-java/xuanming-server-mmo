@@ -4,6 +4,12 @@
 > 与 6.2（battle 节点）正在实现、尚未提交，恰好改着本批要动的文件（`ClientDispatcher`、`SceneWorld`、`ClientRequestHandler`、`PlayerStore`、`PlayerMapper`、
 > `node_link.proto`、`scene_directory.proto`、`start-slice.sh` 等）。**本稿引用的 Java 行号一律按工作树**（标「工作树」的会随实现漂移），引用时同时写类名 / 方法名。
 >
+> **状态（2026-10-11）**：**批次 5.4 已实现并集成到 main**（先行件 `ffb6168` / `813dfd6` / `f7143b0` / `888d404`、X16 `0765a18`、下沉重构 `9a81db3`、合拢 `77b245b` / `14ea692`；
+> 六个工作包 W1–W6 的实现与评审修正 `bca69b9` … `52d6875`；合并后跨模块评审的修正 `b24582d`、`e7ff9a2`），本机全量单测通过；**双 zone 本机切片（§11.9）、robot 端到端（§11.11 / §11.12）、
+> Go robot 跨实现验收（§11.10）与 5.4 新写的真 Redis / MySQL 集成测试都还没有跑**，PARITY 登记为「Java 进行中」。正文已按实现回写（标「落地」的是实现阶段定下来的口径，
+> 与原稿不同的地方在原句后面就地注明）；类的落点、与原稿的出入、评审的发现与处理、证据与遗留见文末「实现记录（2026-10-11）」，与正文冲突时以它和代码为准。
+> 下面「Java 侧」一句与正文里引的 Java 行号是成稿时的工作树，没有逐个更新，**以类名 / 方法名为准**。
+>
 > **路径怎么读**（同 5.2 规格 `docs/porting/scene-handoff-spec.md:9-35`）：
 > - 以 `go/`、`cpp/`、`proto/`、`robot/`、`tools/merge_zone/`、`generated/` 开头的路径，以及 `travel.md`（= `docs/design/cross-zone-scene-travel.md`）、
 >   `runbook.md`（= `docs/ops/cross-zone-failure-test-runbook.md`）在 `D:\work\mmorpg` 下；
@@ -339,14 +345,14 @@ handoff 标记 SET 是「不可回头点」：SET 发出之前一律可以解冻
 |---|---|---|---|---|
 | TF1 | 同步拒绝（3024 / 3007 / 3025 / 13000 / 3014） | 不变 | 226 应答内码 | `travel_requests{result}` |
 | TF2 | 在队 / 组队读失败或超时 | 不变 | 226 应答 3026 / 3027（≤ 2 s 延迟） | 同上 |
-| TF3 | 选目标拒绝（没 gate / 没这张图 / 参数） | 不变 | 23 {3027} | `travel_resolves{rejected}` |
-| TF4 | 选目标调用失败 / 超时 | 不变 | 23 {3027} | `travel_resolves{error}` |
+| TF3 | 选目标拒绝（没 gate / 没这张图 / 参数；7.3 起还有围栏） | 不变 | 23 {3027} | `travel_resolves{rejected}` |
+| TF4 | 选目标调用失败 / 超时 / 应答残缺（**落地**：含 `redirect.target_zone_id` 与请求的目标 zone 对不上）；**落地**：RESOLVING 槽过期（结果回调丢了或迟到）由作废方推 23 {3027}、迟到的结果只记日志 | 不变 | 23 {3027} | `travel_resolves{error}` |
 | TF5 | 交出 `LeaseTooShort`；探测 `NotCommitted` | 仍是 E，原地解冻 | 23 {3027} | `transfers{lease_too_short / aborted_in_place}` |
 | TF6 | 交出 `Fenced` | 别人持有 | 23 {2017} 后断开 | `transfers{fenced}` |
-| TF6′ | 交出或探测读到 epoch ≥ E+2（已交出且已被别的登录接管，§0.6 裁决 14） | 新持有者 | 23 {2017} 后断开 | `transfers{taken_over}` |
+| TF6′ | 交出或探测读到 epoch ≥ E+2（已交出且已被别的登录接管，§0.6 裁决 14） | 新持有者 | 23 {2017} 后断开 | `transfers{superseded}`（**落地**：原稿写 taken_over，那个取值已是 5.2 的「冻结中被请求让出」，先行件预注册了 superseded） |
 | TF6″ | 探测 `Lost`（锁等待超时 / 读到无法解释的状态） | 不明，fail-closed | 23 {3027} 后断开（不发 34，X7） | `transfers{lost_unknown}` |
-| TF7 | 提交后 `PlayerTransfer` 没写出（链路已断 / 异步写失败） | E+1 已释放；位置以 (E, 序号+2) 改回**源场景的重连租约** | gate 随链路断开关会话；重连回原场景原坐标（X15） | `transfers{link_gone}` |
-| TF8 | gate 收到过期的 redirect 帧 / 会话已不在 | E+1 已释放；位置由墓碑补写 | 无（会话已走） | gate `scene_transfers{stale / orphan}` |
+| TF7 | 提交后 `PlayerTransfer` 没写出（链路已断 / 异步写失败） | E+1 已释放；位置以 (E, 序号+2) 改回**源场景的重连租约** | gate 随链路断开关会话；重连回原场景原坐标（X15） | `transfers{link_gone}`（**落地**：在 `handed_off` 之外另计一次，不是 5.2 那样代替它的终结结局，`SceneMetrics.travelLinkGone()`） |
+| TF8 | gate 收到过期的 redirect 帧 / 会话已不在 | E+1 已释放；位置由墓碑补写 | 无（会话已走） | gate `redirects{source=travel, stale / orphan}`（**落地**：原稿写 `scene_transfers`；重定向帧不计进 gate 的改绑指标 `xm.gate.scene.transfers`）。墓碑在帧发出**之前**就被交叉的离开消费、帧不发的，由 scene 计 `travel_frames_withheld`（合拢评审 D1） |
 | TF9 | redirect 字段非法 | E+1 已释放 | 23 {3027} 后断开 | gate `redirects{invalid}` |
 | TF10 | 客户端没跟随 124 / 探测不通 / 验票被拒 | 无人持有；待落点 ≤ 300 s | 客户端自行回选服（转述）；从 B 进 → 落待落点地图，从别处进 → 入口 zone 首登 | — |
 | TF11 | 第二条腿持票者不符 | 不变 | 26 应答 2011 | login `ticket_holder_rejected` |
@@ -356,6 +362,11 @@ handoff 标记 SET 是「不可回头点」：SET 发出之前一律可以解冻
 | TF15 | 写待落点失败 | 已释放；记录仍是源节点的 `o`(E)（≤ 60 s） | 第二条腿落目标 zone 默认主世界（同基线 pending 回落） | `travel_placements{failed}` |
 | TF16（评审补） | 源节点停服 / 冲突疏散恰在「已交出、待落点在写、帧未写出」窗口里退出（逻辑线程停了，写完的回调投递被拒） | E+1 已释放；位置是待落点（若已写）或源节点 `o`(E)（≤ 60 s） | gate 随链路断开关会话、没收到 124；重连从 A 进：待落点不牵引 → A 首登（默认主世界），从 B 进：落待落点地图 | `transfers{reason=travel, link_gone}`（能计到的话）；5.5 收敛谓词须等 `travelFramesPending == 0`（§0.5） |
 | TF17（评审补） | PRECHECK 槽过期作废（组队读回调丢失，正常不会） | 不变 | 由作废方经 `DeferredReply` 补回 3027，绝不让 226 无应答 | `travel_requests{team_read_error}` |
+
+> **落地（2026-10-11）**：槽过期的作废方有三个——`SceneWorld.switchInFlight` 的任意调用方（下一条 63 / 226、备战闸、组队跟随）与每秒一次的维护（`refreshDueLocations`），
+> 都经 `concludeExpiredTravel` 先给结论再清槽：PRECHECK 经 `DeferredReply` 回 3027（TF17），**RESOLVING 推 23 {3027}、计 `travel_resolves{error}`**（W2 评审意见 1：原稿「照 5.2 静默清槽」，
+> 可客户端此时已收到 `{0}`、处在传送窗口里，§4.4 要求受理之后一定有 124 或失败 tip）。槽上的 `expired` 标记让迟到的结果只记日志、不再推、不再计 stale，每次受理在 `travel_resolves` 上恰好计一次。
+> 实例已不在世界里的槽不推不计。63 的 RESOLVING 照 5.2 不变，每秒维护不碰它。
 
 **断开后重连**：RELEASE 模式下 E+1 无人持有、`released = 1`，任何入口的夺权立即成功（不等 30 s 租约）；落点按 §5.8 的表。数据一定是冻结快照或更新的状态。
 
@@ -455,7 +466,7 @@ handoff 标记 SET 是「不可回头点」：SET 发出之前一律可以解冻
 | F1 | CreatePlayer，铸号之前 | 会话 zone（新角色的归属区） | 14 `{2020}` | 同 `createplayerlogic.go:257-268` |
 | F2 | EnterGame 的落地路径，`assign` / 夺权之前 | `row.zone_id` | 26 `{error_message 3023}` | 基线 26 成功再推 23 {3023}；沿用 Java 进场拒绝的同步口径（`PARITY.md:27`） |
 | F3 | EnterGame 的重定向路径 | 不查 | — | 同基线「只送连接不查」（`enterscenelogic.go:400-417` 注释） |
-| F4 | 226 第一条腿：scene-manager `selectTravelTarget` 第 3 步 | 归属区（7.3 时请求加 `home_zone_id`，取自加载时的 `player.zone_id`） | scene 留原地 + 23 {3027} | 同 `enterscenelogic.go:413` → `player_lifecycle.cpp:4362-4372` |
+| F4 | 226 第一条腿：scene-manager `selectTravelTarget` 第 3 步 | 归属区（7.3 时请求加 `home_zone_id`，取自加载时的 `player.zone_id`）。**落地**：7.3 之前请求里没有归属区，`TravelRouter.fenced` 按围栏契约判 zone 0（= 不封锁）；7.3 接 Redis 围栏时必须同批改判 `home_zone_id` 并把 0 当读不到（zone-merge-spec §2.6），否则静默放行 | scene 留原地 + 23 {3027}（**落地**：内部码 `TravelRouter.TIP_ZONE_FENCED` = 3027，计 `xm_scene_manager_travel_seconds{result="fenced"}`） | 同 `enterscenelogic.go:413` → `player_lifecycle.cpp:4362-4372` |
 | F5 | 帮会写 RPC（事务外、事务内） | 调用者 / 帮会 zone | 14013 | 已有 |
 
 - **一致性（D-H4，7.3 定稿）**：Java 的归属在 MySQL、围栏在 Redis，做不到基线在一段 Lua 里原子读 home 与围栏（`router.go:283-330`）。残余窗口：读到旧 `zone_id` 后合服整段恰好完成再读围栏。
@@ -639,6 +650,16 @@ xm-api 的 proto 不 import 同步来的契约目录（`AGENTS.md` §1），所�
 scene-manager 新增必填密钥 `XM_GATE_TOKEN_SECRET`，缺失即拒绝启动（`AGENTS.md` §3）。只用到 `xm:nodes:gate:{zone}`、`xm:nodes:scene:{zone}`、`xm:gate-draining:*`、`xm:world:{z:*}:ch`，
 都经 `RedisKeys`，没有新键。
 
+> **落地（2026-10-11，W3 `bca69b9`）**：实现是 `com.game.scenemanager.travel.TravelRouter`（`TravelRouting` 的真实现，`TravelConfiguration` 装配 `RedisGateSource`、`ZoneMergeFence.OPEN`、`GateTokenIssuer`），
+> 提供方 `SceneDirectoryProvider` 原样委托。与上文的出入与规格没写死处的取舍：
+> - **内部码**：`TIP_NO_GATE` = 3003（`kEnterNodeUnavailable`）、`TIP_ZONE_FENCED` = 3027（`kZoneTravelTargetBusy`，正是 scene 随后推给客户端的码）；scene 与 login 对任何非 0 一律同样处理，具体取值不影响它们。
+> - 第 1 步多挡 `from_zone_id == 0`（proto 注释要求非 0）；第 2 步只认主世界种类的频道记录（`ChannelKinds.isWorldChannel`），状态限 ACTIVE / DRAINING；目标 zone 不存在时计划为空 → 3000（scene 推 3027，§0.6 裁决 13）。
+> - 第 4 步的同地址去重按 `host:port` 原串、`started_at_ms` 按无符号比、缺字段当 0；**并列最大都留下**，交给 (人数, 节点号) 排序（没有依据判断哪条陈旧，保持去重前的行为）。`pick` 与 `eligible` 都经过它，
+>   gateway 的 assign-gate 与登录排队的放行循环同时生效（`AssignGateService`、`QueueDispatcher`）；`QueueCapacity.budget` 仍按原始目录求人数和（见实现记录「遗留」）。
+> - 目录 / 计划读失败与签名意外失败都以异常完成，异常只带概要（不外发 Redis 地址）；同步阻塞读、返回已完成的 future，构造后只读、线程安全。
+> - 指标名按 scene-manager 的习惯写 `xm.scene_manager.travel` / `xm.scene_manager.redirect`（Prometheus `xm_scene_manager_travel_seconds` / `xm_scene_manager_redirect_seconds`），travel 的 `result` 多一个 `fenced`（§7.2）。
+> - 密钥：与 xm-gate / xm-gateway 同一个键、同一种取法（`Environment` 读，缺失或全空白拒启，原值按 UTF-8 作密钥、不去空白）。部署模板 `deploy/compose/env.example` 的必填清单随合拢评审 `e7ff9a2` 加上 scene-manager（§5.14）。
+
 ### 5.5 scene：226 处理器与 TRAVEL 状态机（全部在场景逻辑线程）
 
 **注册**：`register(ids.travelToZone(), TravelToZoneRequest.class, FreezePolicy.ALLOW, this::travelToZone)`（工作树 `ClientRequestHandler.java:120-131` 的注册段）。与 63 一样自己判在途、冻结闸放行。
@@ -688,8 +709,25 @@ scene-manager 新增必填密钥 `XM_GATE_TOKEN_SECRET`，缺失即拒绝启动�
 - **TF7 收口**：位置以 (E, q+2) 写回**源场景的重连租约**（`zone = 本 zone`、源节点、源 scene_id、源地图，TTL 30 s，即 5.2 的 `locations.disconnected`），计 `link_gone`。链路已断，gate 会关会话
   （`onSceneLinkDown` → `SCENE_LINK_DOWN`，`inventory/gate.md:344-345`）；客户端重连回原场景原坐标，库里就是冻结快照（X15）。
 - **墓碑**：只服务「`PlayerLeave` 与 `PlayerTransfer{redirect}` 在链路上交叉」（5.2 `consumeTransferTombstone`）；命中时按 voluntary 用 (E, q+2) 写源场景墓碑或重连租约，并且第 ⑤ 步不再发帧。
+  **落地**：帧不发的这一支计 `xm.scene.travel.frames.withheld`（合拢评审 D1，`b24582d`；不带标签、启动即注册）——只计帧发出**之前**的交叉；帧发出之后墓碑才被消费的，
+  那一帧到 gate 时会话已离开，gate 已计 `redirects{travel, stale / orphan}`，scene 不另计（§7.3 第二条）。跨 zone 的墓碑（`TransferTombstone.forRedirect`）在帧还没定之前
+  不过期、不随所在链路断开或停服清掉，帧的去留由待落点写完的回调裁决（链路已断就走 TF7）。
 - **RESOLVING / PRECHECK 不冻结**（同 5.2，X5）：离场、断链、接管、失去归属照现有逻辑处理，迟到结果丢弃；组队跟随按 `switching ≠ null` 跳过；5.1 排空改派只跳过 FREEZING。
 - **5.3 实例里发 226**：放行（Q13）。
+
+> **落地（2026-10-11，W2 `83e884d` / `52d6875`，W1 `49d5086` / `f2c4264`）**：注册是 `register(ids.travelToZone(), TravelToZoneRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, …)`，处理器 `SceneWorld.requestTravel`；
+> 同步段第 3 步是 6.3 的真钩子 `inBattle()`（计 `xm.scene.battle.gate.rejects{gate=zone_travel}`），之后多一步「没装配跨 zone 传送（`ZoneTravel.DISABLED`）→ 同步 3027、计 `travel.requests{unavailable}`」。
+> 在队检查 `TeamChecks` 的生产实现是 `team.TravelTeamChecks`（读口 future 的副本套 `orTimeout`，在队 / 投影缺失 → IN_TEAM，无队 / 键缺失 → NOT_IN_TEAM，读失败 / 超时 / 数据损坏 / 同步抛出 → UNKNOWN，
+> 经逻辑执行器恰好投递一次）；选目标 `TravelTargets` 的生产实现是 `transfer.SceneManagerSwitchTargets.selectTravel`。与上文的出入：
+> - **RESOLVING 槽过期推 23 {3027}**（W2 评审意见 1，见 §2.3 TF17 后的落地注）；槽期限：PRECHECK = `team-check-timeout + 1 s`，RESOLVING = `switch-resolve-timeout + 1 s`，每秒维护再给至多 1 s。
+> - 在队检查 / 选目标调用**同步抛异常**按失败收口（3027 / 23 {3027}），不靠分发处的 1006 兜底。
+> - 选中结果在逻辑线程上再核对一遍完整性（纵深防御），并多查 `redirect.target_zone_id` 等于请求的目标 zone；`SceneManagerSwitchTargets` 在适配层已按同样的判据把残缺应答转成 Failed（§5.4 第 6 步）。
+> - 选中时在战斗中 → 23 {3025}、计 `travel_resolves{in_battle}`（6.3 的复查点，原稿 §7.2 没列这个取值）。
+> - 交出结局：`Superseded` 在交出与探测两处都踢 2017、计 `transfers{superseded}`；W1 的重试改判只在**有过结局不明的更早尝试**时才把 ≥ E+2 判成 Superseded，第一次尝试就读到仍是 Fenced（同样踢 2017）。
+>   §5.2 表里「不可能出现」的两格（RELEASE 的 (E+1, 未释放, ∈ {L_i})、HOLD 的 (E+1, 已释放, …)）在交出改判里落成 Fenced，在探测里是 Lost。
+> - `PlayerSwitch` 的判别字段是 `reason`（`SwitchReason {PLAYER, TRAVEL}`，5.5 追加 EVACUATE）；「怎么交出」仍由 5.2 的 `Purpose` 表达（TRAVEL 用 REMOTE_SWITCH）。
+>   读口 `SceneWorld.travelFramesPending()` 与 gauge `xm.scene.travel.frames.pending` 给 5.5 的收敛谓词。
+> - 待落点写完的回调（`onPlacementWritten`）里墓碑已被消费 → 计 withheld、不发帧；写失败照发帧并计 `placements{failed}`；帧写不出 / 异步写失败（`onRedirectWriteFailed`）→ (E, q+2) 源场景重连租约、计 `link_gone`。
 
 ### 5.6 正常时序（Java）
 
@@ -743,6 +781,13 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
   发往源 scene、提交后才到的 `ClientForward` 在 scene 侧按「玩家不在」丢弃（§5.10），不会有应答。交叉的 17 在 scene 侧由 FREEZING 的 `pendingAbort = LEAVE(voluntary)` 或墓碑接住（§5.5）。
 - **路由层**：`SceneEventRouter` 找不到会话时 redirect 帧只计 `orphan`。
 
+> **落地（2026-10-11，W4 `de19d45`；先行件 c `f7143b0`）**：`ClientDispatcher.onPlayerTransfer` 先按 `hasRedirect()` 分流到 `onTravelRedirect`，login 的指令走 `redirectByLogin`，两者共用 `invalidRedirect` 与 `enterRedirected`；
+> 收口定时器 `onRedirectLingerExpired` 只捕获会话号、到点重新查表；路由层是 `onPlayerTransferWithoutSession`。124 的消息号由新记录 `PushMessageIds`（23 与 124，按名字从契约解析）带进会话层；
+> `xm.gate.redirect-linger` 在 `GateLimits` / `GateProperties` 里校验 ≥ 15 s。规格没写死处的取舍：非法重定向（两种来源）的断开原因计 `disconnects{transfer_failed}`，来源由 `redirects{source, invalid}` 区分；
+> 已重定向的会话再次 `ClientTokenVerify` 也静默丢弃（未重定向的已验证会话仍按基线回成功、不覆盖票据字段）；转入 REDIRECTED 时排队中的请求计请求去向 `redirected`（不是 dropped）；
+> 已重定向会话上又来的、或关闭途中遇到的 `RedirectToGate` 指令计 `redirects{login, stale}`，保持「每条重定向指令恰好计一次」；没装配 124 消息号（只收 tip 号的旧构造器）时一律按内容非法收口，绝不发消息号为 0 的包；
+> 防御：login 若对仍挂着场景的会话下发重定向（不会发生，EnterGame 对这种会话回 2028），先按断线离场再重定向；`gate_host` 用 `isBlank` 判空。login 来源的指令内容非法时，EnterGame 应答已先发出，再推 23 {3027} 并断开。
+
 ### 5.8 login
 
 `EnterGameHandler.handle`（工作树 `:172-197`）的新顺序：
@@ -770,6 +815,19 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 - **基线依据**：基线 ShortReconnect / ReplaceLogin 来自会话登记（`entergamelogic.go:664-668`）；Java 没有会话登记（`PARITY.md:91` ①），等价判定来自位置记录的 `l` / `o`，客户端所见相同。
 - **`CreatePlayer`**：归属区 = `session.zone_id`，为 0 回 2020；合服围栏检查点 F1（`OPEN`）在铸号与事务之前（§3.2）。
 
+> **落地（2026-10-11，W5 `bdbb7bd` / `89d7f3b`；X16 `0765a18`）**：去向表是纯函数 `EnterRoutes.resolveEnterRoute(G, TP, TZ, L)`（替换原来的 `applyLocation`），输出 `Land`（带 zone 恒为 G 的分配请求）或 `Redirect`（GO-5，同时带一个本 zone 首登的回落请求）；
+> GO-5 经 `callSceneManager` 异步调 `redirectToZone`，完成后 `handleAsync` 回工作线程。与上文的出入与规格没写死处的取舍：
+> - **时间预算 `xm.login.enter-game-budget`**（缺省 4 s，`EnterGameHandler.DEFAULT_ENTER_BUDGET`，必须为正；W5 评审意见 1）：从 `EnterGameHandler.handle` 起算，整条链按剩余预算收紧——签票、分配、夺权后重新分配的本地兜底取
+>   `scene-assign-timeout` 与剩余预算中较小的，预算用完就不再发起调用（按调用超时，回 3023）；夺权截止取 `owner-claim-wait` 与预算截止中较早的，分配回来时预算已用完就不夺权、不请持有者让出（回 2005）；
+>   夺到归属时预算已用完就不再复查位置。原因：GO-5 回落 = 签票 + 分配 + 夺权可能超过 gate 调 login 的 5 s，超时后迟到的应答被 Dubbo 消费端丢弃（到不了 gate），那时夺到的归属无人接、玩家要等 30 s 租约；
+>   普通路径「分配 3 s + 夺权 3 s」的同类残余一并收掉。预算不含派发层工作队列的排队时间（残余，见实现记录「遗留」）。
+> - 指标口径：`route=pinned` 只在「钉住且记录在别的 zone 的节点上」（本该 GO-5、被票据挡住）时计，钉住时其余格按记录计 first / resume / awaiting / location_error；签票耗时计进现有 `xm_login_backend_calls_seconds{backend=scene-manager, method=redirectToZone, result}`；
+>   签票回来时工作队列已满（链以异常结束）的那一次不计 `enter_routes`，计在 `xm_login_requests{result=internal_error}`。
+> - GO-5 成功前的完整性校验多一条 `redirect.target_zone_id` 等于请求的 zone，端口按 uint32 判越界；位置记录的 zone 为 0（不该出现）按本 zone 首登，不往 zone 0 签票。
+> - 第 5 步「`rerouteIfStale` 不改」照做：它只认 `zone == G` 的记录，别 zone 的记录当作没有，于是夺权后读到别 zone 的记录时**按首登在本 zone 重新分配一次**（与登出墓碑同一条路）——不重定向、不签票、只夺一次权。
+>   §11.7 原写「不触发重新分配」与此字面冲突，已改为「不触发重定向」（W5 偏离 1，评审认为现实现与本节一致）。
+> - F2 在落地路径（含 GO-5 回落）上、分配之前，判角色行的 `player.zone_id`，命中 / 读不到（含中断，保留中断标记）→ 26 `{3023}`；`LoginConfiguration` 把 X16 注册的 `zoneMergeFence` bean 注入进游戏 bean。
+
 ### 5.9 位置记录：待落点（sm-player-location 的 5.4 部分）
 
 - **形状**：`xm:location:{pid}` = `{e = E, q = q+1, s = l, v = PlayerLocation{player_id, zone = 目标, scene_node_id = 0, scene_id = 0, scene_config_id = SM 解析后的地图, owner_epoch = E}}`，
@@ -790,6 +848,11 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 | 改绑帧没写出 / 交叉的离开 | `(E, q+2) l @S`（30 s）或 `(E, q+2) x` |
 | 第二条腿进场 | `(E+2, 1) o @T` |
 | 旅途放弃，TTL 到期 | 无记录 → 任意 zone 首登 |
+
+> **落地（2026-10-11，先行件 a `ffb6168`，W1 `49d5086`）**：底层是 `PlayerLocationDirectory.awaitPlacementAsync`（同一段 `WRITE_IF_NEWER` 脚本，TTL 上限 `AWAIT_PLACEMENT_MAX_TTL` = 300 s，与 `GateTokenIssuer.REDIRECT_TICKET_TTL` 同值；
+> 不合法的参数在发命令之前拒）；scene 写口 `RedisPlayerLocations.awaitingPlacement` 取 `(removed.ownerEpoch(), removed.nextLocationSeq())`，TTL = `token_deadline` 减本地墙钟、截到 [1 s, 300 s]，
+> Redisson 回调线程上只做投递（只捕获玩家号），`onDone` 经逻辑执行器恰好一次；没生效 / Redis 失败 / 目录当场拒参数都回 false，投递被拒（逻辑线程已停）丢弃、回调在哪条线程上都不执行。
+> 指标 `travel_placements{written / failed}` 由 world 在 `onDone` 里计（适配层不计，免得重复）。`removed` / `ttl` / `onDone` 为 null 是编程错误，当场抛 NPE。
 
 ### 5.10 冻结闸与客户端请求
 
@@ -815,7 +878,9 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 | 写待落点 | Redis 单命令最坏约 4.2 s | `architecture.md:607-609` |
 | **受理 → 124 或失败 tip** | ≈ 4 + 15 + 4.2 ≈ 23 s（加 226 应答前的 2 s 约 25 s） | < 75 s（`travel_freeze_cap.h:90`）；基线最长 71 s（`:71`、`:78`） |
 | 票据 / 待落点 | 300 s | `gate_redirect.go:27` |
-| 第二条腿（服务端） | assign 5 s + 夺权 ≤ 3 s + 建链 3 + 握手 5 s + 加载 ≤ 10 s ≈ 26 s | `xm-login/src/main/resources/application.yaml:88-95`；`scene-handoff-spec.md:992-993`；客户端等 79 60 s（转述） |
+| 第二条腿（服务端） | assign 5 s + 夺权 ≤ 3 s + 建链 3 + 握手 5 s + 加载 ≤ 10 s ≈ 26 s（**落地**：login 一侧的 assign + 夺权受 `xm.login.enter-game-budget` 4 s 约束，见下一行） | `xm-login/src/main/resources/application.yaml:88-95`；`scene-handoff-spec.md:992-993`；客户端等 79 60 s（转述） |
+| **落地**：一次 EnterGame 在 login 里的总时长 | `xm.login.enter-game-budget` 4 s（签票 / 分配 / 夺权都按剩余预算收紧，GO-5 回落 = 签票 + 分配 + 夺权也不超过它） | 必须小于 gate 调 login 的 Dubbo 超时 5 s（`xm-gate` 的 `dubbo.consumer.timeout`）：gate 到点推 23 {1003} 之后，迟到的应答被 Dubbo 消费端丢弃、到不了 gate（W5 评审意见 1） |
+| **落地**：226 应答 / 受理后到结论的槽期限 | PRECHECK 槽 `team-check-timeout + 1 s`、RESOLVING 槽 `switch-resolve-timeout + 1 s`，每秒维护再给至多 1 s | 槽过期由作废方给 3027（§2.3 TF17 后的落地注）；合并后评审按真实配置算出 226 应答最坏约 4 s、受理到 124 或 23 约 25 s |
 | REDIRECTED 收口 | 60 s | > 探测 5 s + 验票 10 s（`redirect.go:73-75`；`travel.md:1438`） |
 
 ### 5.13 多 zone 本机切片
@@ -833,6 +898,10 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 > 端口与关键参数同下表：xm-scene-z2 链路 21010 / 资产通道 21110 / 管理 18115（另带 `--xm.scene.scene-manager-url`，等区 2 的主世界频道铺好），xm-gate-z2 客户端 11010 / 管理 18123；两者的节点号按 zone 租约也是 1 号。
 > `XM_ZONES` 只有 `start-slice.sh` 读，其它值退出码 1；可与 `XM_SCENE_NODES=2` 同用。单 zone 13 个进程，双 zone 15 个。
 > 「顺带解锁」的组队 X1 / X2 与帮会第 4 步的跨区步骤**没有**随 6.5 打开，仍归 5.4。X16 合入之前，双 zone 切片上从区 2 进来的新号归属区会记成 1（下表 xm-login 一行）。
+>
+> **落地状态（2026-10-11）**：5.4 的生产代码已全部在 main（X16 `0765a18`，其余见文首状态）；切片脚本没有为 5.4 再改（`start-slice.sh` 早已要求并导出 `XM_GATE_TOKEN_SECRET`，所有进程继承同一环境，scene-manager 拿得到）。
+> robot 的跨区步骤由 `--cross-zone auto / require / skip` 管（team X1 / X2、guild 第 4 步、reconnect 的跨区重连；trade 的跨区步骤**没有接入**，`trade --cross-zone require` 是参数错误）。
+> **双 zone 切片上 5.4 的任何场景都还没有跑**（§11.9、§11.11）。X16 之前在双 zone 切片上从区 2 建出来的「归属区 = 1」的本机数据不清理，验证一律用新的账号前缀。
 
 | 进程 | zone | 端口（客户端 / 链路 / 资产 / 管理） | 关键参数 |
 |---|---|---|---|
@@ -863,6 +932,16 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 - **5.2 / 5.5 规格**：5.2 J5 的「提交后只补写一次」改为引用本稿 §5.9；5.5 的 `SwitchReason`、指标 `reason` 标签与收敛谓词按 §0.6 裁决 16 与 §0.5 对齐（由 5.5 规格的作者改，本批只登记）。
 - **`docs/reference/mmorpg-client-contract-login.md:400`**：注明 Java 在 GO-5 / 传送时发 124，GO-5 下 26 先到。
 - **路线图**：`roadmap.md:74` 状态；`:93`（7.3）加 §3.5 的写侧约束与 `RedirectOnEnter`。
+- **（合拢评审补，本清单原先漏列）部署侧的按进程密钥表**：`deploy/compose/env.example`（整栈 stack.yaml 的必填清单）、`docs/porting/deploy-ci-spec.md` §6.1 秘密矩阵、`docs/porting/ops-release-spec.md` §7.2 的
+  Secret 注入表——`XM_GATE_TOKEN_SECRET` 的使用者都要加上 xm-scene-manager（缺了它 scene-manager 拒启，`assign` 也在它上面，连单 zone 的普通进游戏都会失败）；README 快速开始里这个变量的注释同样要提到它。
+- **（实现阶段补）其它规格**：`scene-battle-spec.md` §7.13 的闸门表加 226（GATED，在途 3025，计 `zone_travel`）；5.5 规格（`scene-drain-spec.md`）登记 `SwitchReason` / `PRECHECK` / `travelFramesPending` 已由本批落地。
+
+> **落地（2026-10-11，文档阶段）**：上面各条都已改：`architecture.md`（§2、§4.1–§4.4、§5、§6、§7 第 4 / 6 步与「玩家位置」「归属区」两段、§8 第 5 / 12 步、§8.1 的冻结闸与新 §8.2、§10、§11）；`PARITY.md`（新增「跨 zone 传送（226）与重定向（124）」「合服围栏与合服」两行，
+> 更新「归属区映射」与分配 gate、场景分配、gate 接入与路由、节点客户端可达地址、服务端推送、短线重连与落点几行；原写 `:25` / `:27` / `:28` / `:50` / `:59` / `:91` 的行号已漂移，按内容找）；
+> 盘点的 java 列（`scene-core.md` zone-travel 与 ownership-handoff、`gate.md` token-handshake / cross-zone-redirect / redirect-ticket-binding、`scene-manager-match.md` sm-cross-zone-redirect / sm-home-zone-routing、`login.md` enter-game-cross-zone / home-zone-mapping、
+> `data.md` home-zone-registry 与开放问题第 7 条、`contract-robot.md` robot-travel-smoke 与开放问题第 10 条；`gate.md` scene-node-loss-handling 仍归 5.5，未改）；5.2 J5（`scene-handoff-spec.md`）；5.5 的登记（`scene-drain-spec.md` §0.4）；
+> `scene-battle-spec.md` §7.13；`deploy-ci-spec.md` §6.1；`ops-release-spec.md` §7.2；`docs/reference/mmorpg-client-contract-login.md` §8；路线图 5.4 / 7.3 两行；README。
+> **代码注释**都已随各工作包改好（`SceneAssetLocator`、`GateTokenIssuer`、`node_link.proto` 字段 7、`ClientRequestHandler` 的 1006 补应答注释、`xm-scene` 的 `switch-resolve-timeout` 注释）；`deploy/compose/env.example` 随合拢评审 `e7ff9a2` 改。
 
 ---
 
@@ -877,16 +956,17 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 | 配置 / 常量 | 缺省 | 进程 | 说明 |
 |---|---|---|---|
-| `XM_GATE_TOKEN_SECRET` | 必填 | xm-scene-manager（新增） | 与 xm-gateway / xm-gate 同值；缺失拒启（`AGENTS.md` §3） |
+| `XM_GATE_TOKEN_SECRET` | 必填 | xm-scene-manager（新增） | 与 xm-gateway / xm-gate 同值；缺失拒启（`AGENTS.md` §3）。**落地**：三个进程取法相同（`Environment` 读，缺失或全空白拒启，原值按 UTF-8 作密钥、不去空白，原值逐字节相同）；三方缺密钥的报错互相点名；部署侧的按进程密钥表见 §5.14 |
 | `GateTokenIssuer.REDIRECT_TICKET_TTL` | 300 s（常量） | xm-common | 客户端可见（`token_deadline`），同 `gate_redirect.go:27`，不做成配置 |
 | `GateTokenIssuer.TOKEN_TTL` | 600 s（常量） | xm-common | 不变（`GateTokenIssuer.java:22`） |
 | `xm.scene.travel.team-check-timeout` | 2 s | xm-scene | 启动校验 ≤ 5 s（226 应答要远小于客户端 15 s） |
 | `xm.scene.switch-resolve-timeout` / `transfer-lease-margin` / `transfer-probe-statement-timeout` / `transfer-tombstone-ttl` | 4 s / 15 s / 3 s / 30 s | xm-scene | 复用 5.2（`xm-scene/src/main/resources/application.yaml:104-113`） |
 | 启动校验（新增） | — | xm-scene | `team-check-timeout + switch-resolve-timeout + transfer-lease-margin + 5 s < 60 s`（给客户端 75 s 预算留 15 s 余量） |
-| `xm.gate.redirect-linger` | 60 s | xm-gate | 启动校验 ≥ 15 s |
+| `xm.gate.redirect-linger` | 60 s | xm-gate | 启动校验 ≥ 15 s（**落地**：`GateProperties` 与 `GateLimits.MIN_REDIRECT_LINGER` 都校验） |
 | `xm.gate.handshake-timeout` | 30 s | xm-gate | 复用（`xm-gate/src/main/resources/application.yaml` `gate.handshake-timeout`）：跟随 124 的新连接须在 30 s 内发 `ClientTokenVerify`，远大于客户端探测 5 s + 验票 10 s |
 | `xm.login.scene-assign-timeout` / `owner-claim-wait` | 5 s / 3 s | xm-login | 复用（`xm-login/src/main/resources/application.yaml:91-95`）：第二条腿与 GO-5 后的落地；`redirectToZone` 的本地兜底也取 `scene-assign-timeout` |
-| gate → login Dubbo 调用超时 | 5 s | xm-gate | 复用（`xm-gate` 的 `dubbo.consumer.timeout`）：GO-5 时 EnterGame 的 `redirectToZone`（提供方 3 s）+ 查库须在其内；超时则 gate 推 23 {1003}（现有 `onLoginCompleted` 口径），login 侧迟到的 `RedirectToGate` 指令按「会话已断 / 已应答」忽略 |
+| gate → login Dubbo 调用超时 | 5 s | xm-gate | 复用（`xm-gate` 的 `dubbo.consumer.timeout`）：GO-5 时 EnterGame 的 `redirectToZone`（提供方 3 s）+ 查库须在其内；超时则 gate 推 23 {1003}（现有 `onLoginCompleted` 口径）。~~login 侧迟到的 `RedirectToGate` 指令按「会话已断 / 已应答」忽略~~ **订正（W5 评审）**：超时之后迟到的应答被 Dubbo 消费端直接丢弃，**根本到不了 gate**（`recordIdentity` / `abandonEnter` 的迟到处理只管「会话已断 / 正在断」时回来的应答）。对 `RedirectToGate` 无害（票据无人使用、到期作废）；对落地路径有害——login 那时夺到的归属无人持有、无人代为释放，玩家要等 30 s 租约，期间重试撞 Held 回 2005。由下一行的 login 预算挡住 |
+| `xm.login.enter-game-budget`（**落地新增**） | 4 s | xm-login | 一次 EnterGame 从 login 处理器开始算的时间预算（`EnterGameHandler.DEFAULT_ENTER_BUDGET`，必须为正）：签票 / 分配的本地兜底取 `scene-assign-timeout` 与剩余预算中较小的，夺权截止取 `owner-claim-wait` 与预算截止中较早的，用完就不再调用（回 3023）、不再夺权（回 2005）、不再复查位置；必须小于上一行的 5 s，差值留给链路往返、派发排队、最后一次夺权的 SQL 与回包 |
 | `PlayerLocationDirectory.RECONNECT_LEASE` / `ONLINE_TTL` | 30 s / 60 s | xm-discovery | 复用（`PlayerLocationDirectory.java:45-49`）；待落点 TTL 由调用方给 |
 | 方法热关停 | — | 全部 | 运维可经现有 `xm:killswitch` 关掉 `SceneSceneClientPlayer/TravelToZone`（`architecture.md:416-435`），不另加开关 |
 
@@ -905,24 +985,32 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 | 进程 | 指标 | 类型 | 标签 / 说明 |
 |---|---|---|---|
-| scene | `xm_scene_travel_requests_total` | Counter | `result` = accepted / zone_invalid / map_invalid / in_battle / in_team / busy_transfer / busy_switch / team_read_error；每条 226 恰好计一次 |
-| scene | `xm_scene_travel_resolves_total` | Counter | `result` = chosen / rejected / error / stale |
-| scene | `xm_scene_transfers_total`（5.2） | Counter | 加 `reason` = player / travel（5.5 再加 evacuate，§0.6 裁决 16、Q12）；`result` 加 taken_over（Superseded） |
+| scene | `xm_scene_travel_requests_total` | Counter | `result` = accepted / zone_invalid / map_invalid / in_battle / in_team / busy_transfer / busy_switch / team_read_error / **unavailable**（落地：没装配跨 zone 传送、同步回 3027）；每条 226 恰好计一次。team_read_error 含 PRECHECK 槽过期由作废方回 3027 |
+| scene | `xm_scene_travel_resolves_total` | Counter | `result` = chosen / rejected / error / stale / **in_battle**（落地：选中时在战斗中，推 23 {3025}）；每次受理恰好计一次。error 含调用失败、本地兜底超时、应答残缺与 RESOLVING 槽过期（落地：作废方推 23 {3027}，迟到的结果不再计） |
+| scene | `xm_scene_transfers_total`（5.2） | Counter | 加 `reason` = player / travel（5.5 再加 evacuate，§0.6 裁决 16、Q12），reason × result 全部预注册；`result` 加 **superseded**（落地：原写 taken_over，见 §2.3 TF6′）。travel 下 `link_gone` 在 `handed_off` 之外另计（不是终结结局） |
 | scene | `xm_scene_travel_placements_total` | Counter | `result` = written / failed（待落点写入） |
-| gate | `xm_gate_redirects_total` | Counter | `source` = travel / login；`result` = sent / invalid / stale / orphan |
-| gate | `xm_gate_disconnects_total` | Counter | `reason` 加 redirect_linger |
-| gate | `xm_gate_requests_total` | Counter | `result` 加 redirected（REDIRECTED 会话丢弃） |
+| scene | `xm_scene_travel_frames_pending`（落地） | Gauge | — 已交出并移出世界、重定向帧还没定的旅客数（`SceneWorld.travelFramesPending()`，给 5.5 的收敛谓词），应很快回到 0 |
+| scene | `xm_scene_travel_frames_withheld_total`（落地，合拢评审 D1） | Counter | — 帧发出**之前**墓碑已被交叉的离开消费、重定向帧不发的次数（帧发出之后才交叉的由 gate 计 stale / orphan） |
+| scene | `xm_scene_battle_gate_rejects_total`（6.3） | Counter | `gate` 加 zone_travel（226 被战斗在途拒，3025） |
+| gate | `xm_gate_redirects_total` | Counter | `source` = travel / login；`result` = sent / invalid / stale / orphan（2 × 4 全量预建；orphan 只出现在 travel；login 的 stale 含迟到的应答与已重定向会话上又来的指令） |
+| gate | `xm_gate_disconnects_total` | Counter | `reason` 加 redirect_linger；**落地**：非法重定向（两种来源）推 23 {3027} 后断开计 transfer_failed |
+| gate | `xm_gate_client_requests_total` | Counter | `result` 加 redirected（REDIRECTED 会话丢弃，含转入 REDIRECTED 时还在排队的请求）。**落地**：原写 `xm_gate_requests_total`，实际沿用既有的 `xm_gate_client_requests_total` |
 | gate | `xm_gate_handshakes_total` | Counter | 复用（`WRONG_ZONE` 覆盖他区同号 gate 的票据，`GateMetrics.java:57-67`） |
-| scene-manager | `xm_scene_manager_travel_seconds` | Timer | `result` = ok / no_gate / no_map / bad_request / error |
-| scene-manager | `xm_scene_manager_redirect_seconds` | Timer | `result` = ok / no_gate / no_scene / bad_request / error |
-| login | `xm_login_enter_routes_total` | Counter | `route` = first / resume / awaiting / pinned / redirect / redirect_fallback / location_error |
+| scene-manager | `xm_scene_manager_travel_seconds` | Timer | `result` = ok / no_gate / no_map / **fenced**（落地：F4 命中或读不到，7.3 之前恒为 0）/ bad_request / error。Micrometer 名 `xm.scene_manager.travel` |
+| scene-manager | `xm_scene_manager_redirect_seconds` | Timer | `result` = ok / no_gate / no_scene / bad_request / error。Micrometer 名 `xm.scene_manager.redirect` |
+| login | `xm_login_enter_routes_total` | Counter | `route` = first / resume / awaiting / pinned / redirect / redirect_fallback / location_error（全量预建；pinned 的口径见 §5.8 落地注） |
 | login | `xm_login_ticket_holder_rejected_total` | Counter | — |
+| login | `xm_login_backend_calls_seconds`（既有，落地） | Timer | `method` 加 redirectToZone（GO-5 签票的耗时，`backend` = scene-manager，`result` = ok / rejected / error） |
 | login、scene-manager | `xm_merge_fence_checks_total` | Counter | 7.3 起：`site` = create / enter / travel；`result` = open / fenced / unreadable |
 
 ### 7.3 勾稽
 
 - `travel_requests{accepted}` ≈ Σ `travel_resolves{*}` + 在途。
-- `transfers{reason=travel, handed_off}` ≈ `gate_redirects{source=travel, sent}` + `{invalid}` + `{stale}` + `{orphan}` + `transfers{reason=travel, link_gone}` + 被墓碑消费（交叉离开）的次数 + 在途 `travelFramesPending`。
+- `transfers{reason=travel, handed_off}` ≈ `gate_redirects{source=travel, sent + invalid + stale + orphan}` + `transfers{reason=travel, link_gone}` + `travel_frames_withheld` + `travel_frames_pending`。
+  **落地（合拢评审 D1，`b24582d`）**：原式的「被墓碑消费（交叉离开）的次数」改成 `travel_frames_withheld`——它只计帧发出**之前**的交叉；帧发出之后墓碑才被消费的，gate 已计 stale / orphan，
+  原式按字面会把这类旅途算两遍，而帧发出之前的那类在任何指标里都看不到（与真正丢了一帧 124 分不开）。剩下的差额才是真正丢在路上的帧（已交给链路、gate 没收到、也没报写失败）。
+  同一个式子写进了 `SceneMetrics.TransferResult` 与 `GateMetrics.RedirectResult` 的 javadoc。没有用 `transfers{travel, left}`：left 是「冻结中会话离开」的终结取值，那时不计 handed_off。
+  scene 一侧可单独核对：交给链路的帧 + link_gone + withheld + pending = handed_off（`ZoneTravelHandOffTest`）。
 - `login_enter_routes{redirect}` ≈ `gate_redirects{source=login}`（迟到应答除外）。
 
 ---
@@ -1005,6 +1093,9 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
     （= gate zone）发 `GateZoneId`（`entergamelogic.go:727`、`:743`）。
 11. `inventory/contract-robot.md:612` 第 10 条「Java 无 HomeZone 概念，移植 travel 前要先定」：已定——归属区 = `player.zone_id`、建角取会话 zone；Java robot 每轮新号，Go robot 的 robot_9601 首次在 zone 1 建角即可。
 12. `architecture.md:740` §10「首批不做：跨 zone」随本批删除。
+
+> **落地（2026-10-11）**：第二组 1–7、10–12 都已在文档阶段（或随各工作包的代码注释）改掉，改在哪里见 §5.14 末尾的落地注；第 8 条（`gate.md` scene-node-loss-handling）仍归 5.5，没有改；
+> 第 9 条是对 5.2 D8 的说明（5.4 第二条腿照常拍 LOGIN 快照，与基线一致），不需要改文件。
 
 ---
 
@@ -1166,7 +1257,8 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 - **REDIRECT**：回 `{player_id}` + `RedirectToGate` 指令；`assign`、`claimOwnership`、takeovers **零调用**；不复查位置；`redirectToZone` 失败 / 超时 / `tip ≠ 0` → 回落本 zone 首登并计数；
   回复带指令时设备窗口被注销。
 - **第二条腿夺权**：库里 `released = 1` → 一次成功、不发让出请求。
-- **夺权后**别 zone 的记录不触发重新分配（`rerouteIfStale` 回归）。
+- **夺权后**别 zone 的记录不触发重定向（`rerouteIfStale` 回归）。**订正（落地）**：原写「不触发重新分配」与 §5.8 第 5 步「`rerouteIfStale` 不改」字面冲突；实现照「不改」，别 zone 的记录当作没有，
+  于是按首登在本 zone 重新分配一次（与登出墓碑同一条路）。回归用例钉的是「不重定向、不签票、所有分配请求都在 G、只夺一次权」（`EnterGameZoneTravelTest`）。两种口径都只影响落点、不影响归属与数据。
 - **`CreatePlayer`**：构造时进程 zone 1、会话 zone 2 → 行上是 2；会话 zone 0 → 2020、`PlayerIdGenerator` 零调用、零插行；丢应答重试命中已有行时 zone 不变；围栏检查点被调用（`OPEN`）。
 
 ### 11.8 真 Redis 集成测试（`-Dxm.it.redis`）
@@ -1178,6 +1270,8 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 ### 11.9 多 zone 切片用例（`XM_ZONES=2`，手工 / IT，不进 CI）
 
 > **2026-10-08 登记**：`XM_ZONES=2` 的切片脚本已由批次 6.5 落地（§5.13 的落地状态），但下表的 MZ1–MZ18 都依赖 5.4 的生产代码，**一条都还没有跑**。
+> **2026-10-11：未运行。** 5.4 的生产代码已在 main，但本机（Windows）没有 Redis / MySQL / Kafka，双 zone 切片没有起过，下表**一条都没有跑**；PARITY 因此登记「Java 进行中」，跑完后补运行结论再改「已对齐」。
+> 下表的期望按实现核对过一遍，没有改动；与单测的对应关系见文末实现记录「证据」。
 > 关于「进不进 CI」：本节的用例（含故障注入）仍是手工 / IT、不进 CI。spectate-spec Q22 说的是另一件事——等 7.1b 的整栈 compose 就位后，把 robot 的 `battle-cross-zone`（以及 5.4 同意时的 `travel`）放进两 zone 覆盖文件里跑；
 > 6.5 没有做这一项（`deploy/compose/` 里还没有整栈文件），前置清单留给 7.1b。两处说法不冲突：进 CI 的只是 robot 的正常路径场景，本表不进。
 
@@ -1204,6 +1298,8 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 ### 11.10 robot：mmorpg Go robot `travel_smoke` 跨实现契约验收（不改 robot 代码）
 
+> **2026-10-11：未运行。** 本机没有双 zone 切片，也没有 Go 工具链与基线代码；这一项与 §11.9 一起做。
+
 - **配置**：复制 `robot/etc/travel_smoke.yaml`，`gateway_addr: http://127.0.0.1:18081`、`home_zone: 1`、`visit_zone: 2`；口令 = `XM_LOGIN_DEV_PASSWORD`（或把切片口令设成配置里的 `123456`，
   `travel_smoke.yaml:53`）；账号前缀 `robot_` 在 Java 开发白名单里（`xm-login/src/main/resources/application.yaml:84-86`）。
 - **前置**：Java 切片 `XM_ZONES=2`、`XM_RUN_MODE=dev`（放行 37 GmAddCurrency）；`robot_9601` 首次在 zone 1 建角（X16 保证归属区正确）。
@@ -1217,6 +1313,12 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 > **2026-10-08 登记**：选项 `--visit-zone`（环境变量 `XM_ROBOT_VISIT_ZONE`，缺省 2，必须 ≥ 1）**已存在**——批次 6.5 为 `battle-cross-zone` 加的（`RobotOptions` 记录的 `visitZoneId`），帮助文本写的是「另一个区」：
 > 目前只写了 `battle-cross-zone` 的用途（B 与观众 C 登录的区；只有这个子命令要求它与 `--zone` 不同，否则参数错误、退出码 2），`travel` 落地时补上「travel 的目的区」并让 `travel` 也做同样的校验。
 > T0「缺区报『需要 XM_ZONES=2』后失败」的写法 `battle-cross-zone` 的 Z0 已照做（`step=preflight`）。本小节的 `travel` 场景本身（`Scenario.TRAVEL`、`RedirectFollower`、226 / 124 的消息号）还没有实现。
+>
+> **落地（2026-10-11，R0 `888d404`，W6 `bc76c6d` / `e0a7664`）**：`travel`（T0–T11）、`travel-abandon`（R6 / R7）、`travel-long`（R4）都已实现（`scenario.TravelScenario`、留底 `TravelLedger`、纯判据 `TravelChecks`；
+> 客户端件 `client.RedirectTarget`、`flow.RedirectFollower`、`PlayerFlow.reenter / reenterOrRedirect`；选项类 `TravelOptions`），用法与步骤以 `xm-robot/README.md` 为准。与上表的出入：结果行在规格字段之外还带 `move_ack`、`ticket_binding`（与基线同名同序）与 `hops`；
+> T4「坐标不变」用「没有 79、没有自己的 21、旁人没收到 51」判（客户端读不到自己的坐标）；移动探针放在 T7b 之后、只记观察；**T10 发 17 后先等 `leaveSettle`（3 s）再经访客区登录**（W6 评审 major：离场是异步的，墓碑落下之前访客区的 login 读到的仍是出发区的在线记录，按 §5.8 会走 GO-5，那是正确行为）；
+> travel-abandon / travel-long 不再拿 gate 端点判「落在出发区」，证据是经出发区入口严格重登时直接进场、没有 124；travel-abandon 没给 `--travel-scene-config` 时取 World 表的第二张世界地图；travel 三个子命令等 79 至少按一跳 60 s。
+> 子模式里的**故障注入**（停 scene-manager、停目标 gate，MZ8–MZ11 的 robot 化）没有做，只在 IT / 手工做。**这些场景只在本机假服务端 `FakeTravelWorld` 上跑过单测，没有对真服务端跑过**（未运行，同 §11.9）。
 
 **入口**：`java -jar xm-robot.jar travel --zone 1 --visit-zone 2 [--travel-scene-config 0] [--dwell 35s]`。账号按现有场景的命名惯例 `<prefix>tv<runTag>_a`（旅客 A）、`<prefix>tv<runTag>_b`
 （旁观者 / 冒用者 B；对照 `CrossNodeScenario.accountName` = `prefix + "xn" + runTag + "_" + role`、`TeamScenario.accountName` 的 `tm`），每轮新号、首登即在 home 区建角，
@@ -1259,6 +1361,8 @@ tip 用生成的表枚举断言，不写数字；请求间隔 1.1 s（避开按�
   （`docs/reference/mmorpg-client-contract-robot.md:514` 第 13 条仍成立）。
 - `XM_ZONES=2` 下 `team` X1 / X2 与 `guild` 第 4 步的跨区步骤开始执行（§5.13）。
 - `reconnect` 在 `XM_ZONES=2` 下加一条：从另一个 zone 的入口重连 → 走 GO-5 回原处。
+  **落地（2026-10-11）**：team X1 / X2（新选项 `--team-cross-zone deny / allow`，须与 xm-team 的 `xm.team.allow-cross-zone` 一致，一次只能跑一支）、guild 第 4 步、reconnect 的跨区重连都已接上，由 `--cross-zone auto / require / skip` 管；
+  中断（等不到应答、跟随时握手被拒）只记一条失败、不中止整个场景；trade 的跨区步骤没有接入。单 zone 与双 zone 下的这些回归**都没有在真切片上跑过**（只在假服务端上跑过单测）。
 - Go robot 的 `features-smoke` 收到 124 直接关连接、按失败处理（`robot/features_smoke_scenario.go:287-291`：通用重登可能自动建角）：`XM_ZONES=2` 下必须从角色位置所在的 zone 入口跑，
   或等位置记录过期后再跑；它不是 5.4 的回归失败。Go `login-test` / `battle_smoke` 同理只在单 zone 或正确入口下跑。
 
@@ -1304,3 +1408,167 @@ tip 用生成的表枚举断言，不写数字；请求间隔 1.1 s（避开按�
 核对后**未改**、确认成立的要点：226 / 124 / 23 / 34 帧与字段、tip 与消息号行号、`GateTokens` 验票顺序与五条文案、票据字段与 hex 签名、SM 第一条腿顺序（`enterscenelogic.go:337`、`:372`、`:384`、`:395`、`:413`、`:420`、`:1018-1099`、`:1123-1168`）、
 登录 2011 位置（`entergamelogic.go:78-87` 早于 `:89-95`）、`TicketPinsZone`、GO-5 去向、`updateStateAndRelease` 不要求 `released = 0`（裁决 2 的前提）、RELEASE 模式改判表与 Superseded 论证、`PlayerLocationDirectory` 三个读者对 `l` 的处理、
 本机切片端口无冲突（含 6.2 / 6.4 / 5.1 规划）。
+
+---
+
+## 实现记录（2026-10-11）
+
+范围：226 TravelToZone 全流程（同步段、延迟应答的在队检查、选目标与签票、交出并释放、待落点、重定向帧）、124 的两个来源（传送、登录期 GO-5）、票据的持票者绑定与钉 zone、
+建角取会话 zone（X16）、合服围栏检查点 F1 / F2 / F4（恒放行）、gate 目录同地址去重、指标与配置、Java robot 的 `travel` 三个子命令与 team / guild / reconnect 的跨区步骤。
+没有新进程、没有新 Redis 键（待落点复用 `xm:location:{pid}`）、没有改表结构（`PlayerMapper` 只把 `owner_released` 的取值改成参数）、没有新增第三方依赖（`tech-stack.md` 不改）。
+
+过程：X16 先行（`0765a18`，与 PARITY「归属区映射」行的登记同一提交）→ 下沉重构（`9a81db3`：`GateTokenIssuer` 到 xm-common，`GatePicker` / `GateSource` / `RedisGateSource` 到 xm-discovery）→
+先行件 a（`ffb6168`：协议字段、票据签发、待落点写口、交出并释放的存储口）、b（`813dfd6`：xm-scene 的冻结接口、装配、指标与测试替身，226 仍未注册）、c（`f7143b0`：xm-gate 的共享文件与 scene-manager 的选路骨架）、
+robot 先行件 R0（`888d404`）→ 先行件合拢（`77b245b`、`14ea692`）→ 六个工作包各在自己的 worktree 里并行实现、各自接受一次独立的对照规格评审、再修正
+（W3 scene-manager `bca69b9`；W4 gate `de19d45`；W5 login `bdbb7bd` / `89d7f3b`；W6 robot `bc76c6d` / `e0a7664`；W1 scene 适配层 `49d5086` / `f2c4264`；W2 scene 226 状态机 `83e884d` / `52d6875`；
+提交号是合进 main 之后的，与工作包分支上的不同）→ 合并后五个视角的跨模块评审，每条意见两个反驳者复核 → 合拢评审修正（`b24582d`、`e7ff9a2`）→ 文档与登记（本节所在的提交）。
+工作包代号 W1–W6 是开工时的分工名，与 §9 的有意差异编号 X1–X22 无关。正文已按本节的事实回写（标「落地」）；本节只记正文里放不下的东西。
+
+### 落地的类（按模块、按包）
+
+| 模块 | 提交 | 类 / 文件 |
+|---|---|---|
+| xm-api | 先行件 a | 新 `xm/api/zone_redirect.proto`（`ZoneRedirect` 七个字段）；`node_link.proto` 的 `PlayerTransfer.redirect = 7`（原 `reserved 7`，注释写明滚动升级先 gate 后 scene）；`client_call.proto` 的 `SessionContext.ticket_player_id = 8` / `ticket_target_zone_id = 9` 与 `SessionDirective.redirect_to_gate = 5`（`RedirectToGate`）；`scene_directory.proto` 的 `SelectTravelTarget*` / `RedirectToZone*`（`SelectTravelTargetRequest` 的 5 号字段留给 7.3 的 `home_zone_id`）；`node_directory.proto` 的 `GateNodeInfo.started_at_ms = 8`；`SceneDirectoryService.selectTravelTarget / redirectToZone` |
+| xm-common | `9a81db3`、先行件 a | `com.game.common.token.GateTokenIssuer`（从 xm-gateway 下沉；新 `issueRedirect(gateNodeId, gateZoneId, playerId, targetZoneId)`、常量 `REDIRECT_TICKET_TTL` = 300 s，不带会话密钥，任一参数为 0 拒签） |
+| xm-discovery | `0765a18`、`9a81db3`、先行件 a、W3 | `zone.ZoneMergeFence`（`inProgress` / `inProgressAsync`、`OPEN`）；`gate.{GatePicker, GateSource, RedisGateSource}`（下沉；`GatePicker` 的同地址去重是 W3）；`location.PlayerLocationDirectory.awaitPlacementAsync` 与 `AWAIT_PLACEMENT_MAX_TTL`；`SceneAssetLocator`、`RedisKeys.playerLocation`、`location.proto` 的注释 |
+| xm-player-store | 先行件 a | `PlayerStore.HandOffMode {HOLD, RELEASE}` 与六参数 `handOffOwnership`（五参数形式 = HOLD）；`PlayerMapper.updateStateAndHandOff` 多一个 `released` 参数（只改 SET） |
+| xm-scene | 先行件 b、W1、W2、`b24582d` | `world`：新 `SwitchReason {PLAYER, TRAVEL}`、`DeferredReply`、`ZoneTravel`（装配记录，`DISABLED` = 226 同步回 3027）、`TravelTargets`、`TeamChecks`；`SwitchPhase.PRECHECK`；`PlayerSwitch`（reason、目标 zone、延迟应答、`expired`、选中后的 `ZoneRedirect` 与解析后的地图）；`PlayerCall.defer()`；`TransferTombstone.forRedirect`；`ClientSink.playerRedirect`；`PlayerLocations.awaitingPlacement`（default 不写、回 false）；`PlayerRepository.handOff(…, HandOffMode, …)` 与结局 `Superseded`；`SceneWorld`（`requestTravel`、`onTravelTeamChecked`、`onTravelTargetSelected`、`freezeForTravel`、`sendRedirect`、`onPlacementWritten`、`onRedirectWriteFailed`、`concludeExpiredTravel`、`travelFramesPending()`）；`ClientRequestHandler`（注册 226、已延迟的调用不补 1006）；`SceneMessageIds.travelToZone`。`link.GateLinks`（重定向帧，与改绑指令共用写帧与两条失败口）；`location.RedisPlayerLocations.awaitingPlacement`；`storage.StoragePlayerRepository`（RELEASE、按模式改判与探测）；新 `team.TravelTeamChecks`；`transfer.SceneManagerSwitchTargets.selectTravel`；`metrics.SceneMetrics`（`TransferReason`、`TravelRequest` / `TravelResolve` / `TravelPlacement`、`travelLinkGone()`、`travelFrameWithheld()`、`BattleGate.ZONE_TRAVEL`）；`SceneNode` 装配 `ZoneTravel`、`SceneNodeProperties`（`xm.scene.travel.team-check-timeout` 与跨键校验 `requireTravelBudget`） |
+| xm-scene-manager | 先行件 c、W3、`e7ff9a2` | `travel.TravelRouting`（接口）、`travel.TravelRouter`（真实现）、`travel.TravelConfiguration`（装配与必填密钥）；`SceneDirectoryProvider` 原样委托两个新方法；`application.yaml` 头部登记 `XM_GATE_TOKEN_SECRET` |
+| xm-gate | 先行件 c、W4、`e7ff9a2` | `session.ClientDispatcher`（握手存票据字段、`context` 带 8 / 9 号字段、`onTravelRedirect`、`redirectByLogin`、`invalidRedirect`、`enterRedirected`、`onRedirectLingerExpired`、REDIRECTED 下的请求 / 指令收口）、`session.ClientSession`（`ticketPlayerId`、`ticketTargetZoneId`、`redirected`、收口定时器）、新 `session.PushMessageIds`、`session.GateLimits` / `GateProperties`（`redirect-linger`）、`session.SceneEventRouter`、`metrics.GateMetrics`（`redirects{source, result}`、`REDIRECT_LINGER`、`REDIRECTED`）、`GateNode`（解析 124、目录条目带 `started_at_ms`）、`GateConfiguration`（缺密钥报错点名 scene-manager） |
+| xm-gateway | `9a81db3`、`e7ff9a2` | 主代码只有下沉后的 import 与缺密钥报错的文案；去重随 xm-discovery 的 `GatePicker` 生效 |
+| xm-login | `0765a18`、W5 | `handler.CreatePlayerHandler`（会话 zone、F1）；`handler.EnterGameHandler`（持票者 2011、去向、GO-5、F2、预算）；新 `handler.EnterRoutes`；`handler.PlayerLocationLookup`；`LoginClientMessageService`（带 `RedirectToGate` 指令时注销设备窗口）；`LoginConfiguration`（围栏 bean、预算注入）；`LoginProperties`（`enter-game-budget`）；`metrics.LoginMetrics`（`EnterRoute`、`ticket.holder.rejected`） |
+| xm-robot | R0、W6、`77b245b` | `TravelOptions`、`RobotOptions`（`Scenario.TRAVEL / TRAVEL_ABANDON / TRAVEL_LONG`、`--cross-zone`、`--team-cross-zone`）、`RobotMain`；`client.{RedirectTarget, GateEndpoint, GameConnection, RobotClient}`；`flow.{RedirectFollower, PlayerFlow, EnterOutcome, EnteredPlayer, RoleZone}`；`scenario.{TravelScenario, TravelLedger, TravelChecks, CrossZoneGate}`，`TeamScenario`（X1 / X2）、`GuildScenario`（第 4 步）、`ReconnectScenario`（跨区重连）、`TradeScenario` / `BattleCrossZoneScenario`（注释）、`BattleSettleChecks`（认 zone_travel 闸）；`README.md` |
+| deploy | `e7ff9a2` | `deploy/compose/env.example`：`XM_GATE_TOKEN_SECRET` 的必填清单加 scene-manager |
+
+### 与规格原稿的出入
+
+行为上的出入都已回写进正文相应小节（标「落地」），这里汇总，便于对照原稿：
+
+- **scene（W1 / W2）**：RESOLVING 槽过期推 23 {3027}、计 `resolves{error}`（原稿「照 5.2 静默清槽」，W2 评审意见 1）；每秒维护也作废过期的 PRECHECK / RESOLVING 槽（TF17 的加强）；在队检查 / 选目标同步抛异常按失败收口；
+  选中结果在 world 里再核对一遍并多查 `target_zone_id`；TF7 的 `link_gone` 是 `handed_off` 之外的附加计数；≥ E+2 计 `superseded`（原稿 taken_over）；交出改判只在有过结局不明的更早尝试时判 Superseded；
+  §5.2 表里「不可能」的两格在交出改判里是 Fenced、在探测里是 Lost；跨 zone 的墓碑在帧还没定之前不过期、不随链路断开或停服清；`Purpose` 仍表达「怎么交出」，`SwitchReason` 是唯一的「为什么」判别字段；
+  `awaitingPlacement` 的空参数当场抛 NPE。
+- **scene-manager（W3）**：内部码 3003 / 3027，travel 多一个 `fenced`；多挡 `from_zone_id == 0`；只认主世界种类的频道；同地址 `started_at_ms` 并列都留下、地址按原串比较；F4 在 7.3 之前判 zone 0；指标名 `xm.scene_manager.*`。
+- **gate（W4）**：非法重定向计 `transfer_failed`；已重定向会话再握手静默丢弃；排队请求计 `redirected`；重复 / 迟到指令计 `redirects{login, stale}`；没装配 124 号按非法收口；挂着场景时先离场的防御；`isBlank`；login 来源非法时 26 已先发。
+- **login（W5）**：新增 `xm.login.enter-game-budget`；`route=pinned` 的口径；签票耗时计进 `backend_calls{method=redirectToZone}`；GO-5 多查 `target_zone_id` 与端口无符号越界；记录 zone 为 0 按首登；签票回来时队列满不计 `enter_routes`；
+  `rerouteIfStale` 照「不改」（§11.7 措辞订正）；原稿 §6.2「迟到的 `RedirectToGate` 按会话已断忽略」的说法订正（迟到应答到不了 gate）。
+- **robot（W6）**：结果行多 `move_ack`、`ticket_binding`、`hops`；T4 的判据；新选项 `--team-cross-zone`；trade 的跨区步骤不接（`require` 是参数错误）；travel-abandon 缺省目标图取第二张世界地图；等 79 至少 60 s；T10 先等 3 s；
+  abandon / long 不比 gate 端点；故障注入不做。
+- **合拢评审**：新指标 `xm.scene.travel.frames.withheld` 与 §7.3 第二条的改式（D1）；部署模板的密钥分配（D2 / E1）。
+- **规格本身的勘误**：§2.3 TF8 的指标列（应是 gate `redirects{travel, stale / orphan}`）；§7.2 漏了 `unavailable`、`in_battle`、`fenced`、`frames_pending`、`frames_withheld`，gate 请求计数的名字是既有的 `xm_gate_client_requests_total`；§5.14 漏列部署侧的三处密钥表。
+
+### 评审的发现与处理
+
+**工作包评审**（每个工作包合并前一次独立的对照规格评审；评审者都复跑了工作包的模块单测）：
+
+| 工作包 | 结论 | 发现 | 处理 |
+|---|---|---|---|
+| W1 scene 适配层 | 通过，2 条 minor | ① 「逻辑线程已停」三条用例里「不该执行 / 不抛」的断言是空的：投递跑在 `CompletableFuture.whenComplete` 的回调里，回调抛的 `AssertionError` 被吞成依赖 future 的异常完成 | 成立，修（`f2c4264`）：`onDone` 只记录、等完成线程跑完再断言、恰好投递一次；新测试工具 `testing.CapturedLogs` 数「丢弃」日志；同文件 5.2 起就有的 63 同类用例一并改写；两种变异（被拒分支补调 `onDone` / 改成重新抛出）下这 4 条都失败 |
+| | | ② `ZoneTravelSeamsTest`「在队检查的占位_逻辑线程已停时结果丢弃不抛…」换上真实现后测不到投递被拒（读口 future 永不完成，结果要等 `orTimeout` 2 s，`pending()` 恒为 0），另有三处「占位」字样过时 | 成立，**暂缓**（W2 的文件；同一行为的有效覆盖在 `TravelTeamChecksTest`）。文档阶段只订正了注释，用例本身的弱点登记为遗留 |
+| W2 scene 226 状态机 | 基本合格，2 条 minor | ① RESOLVING 槽过期静默清槽、迟到结果按 stale 丢弃：客户端已收 `{0}` 却可能等到 75 s 都没有结论 | 成立，修（`52d6875`）：`concludeExpiredTravel`、`expired` 标记、每秒维护扩到两个阶段；原用例把旧行为钉死了，改写并新增三条 |
+| | | ② §11.5「冻结闸沿用 5.2 用例，加 reason = travel」只覆盖一部分 | 成立，修：`FreezeGateTest` 的冻结入口参数化（63 远端 / 226 选中），矩阵与两条原地解冻用例两种冻结各跑一遍，「冻结之前的在途不冻结」对三种在途各跑一遍（6 → 11 条） |
+| W3 scene-manager | 通过，无缺陷 | 不阻塞的记录：F4 判 zone 0（7.3 必须同批改）；`fenced` 与内部码要进规格；`QueueCapacity.budget` 对陈旧条目重复计数；`env.example` 缺 scene-manager；拒启用例没覆盖「完全不设」（null，分支是对的） | 记录；env.example 由合拢评审 E1 修，其余登记为遗留 / 写进正文 |
+| W4 gate | 通过，无缺陷 | 评审者独立复算了 124 金样的字节；「粗测」几处关键守卫的变异是读代码推断、没有实跑 | — |
+| W5 login | 无 blocker / major，2 条 minor | ① GO-5 回落链（签票 + 分配 + 夺权）可能超过 gate 调 login 的 5 s，迟到应答被 Dubbo 丢弃，夺到的归属无人接、锁住约 30 s；实现者「迟到的 EnterScene 走 gate 现有的迟到处理」的说法不准确 | 成立，修（`89d7f3b`）：`xm.login.enter-game-budget`，整条链按剩余预算收紧，普通路径的同类残余一并收掉；预算不含派发排队时间，登记为残余 |
+| | | ② 测试执行器是 `Runnable::run`，没覆盖签票后回工作线程与回线程时队列满 | 成立，修：手动泵的工作线程池替身，补三条；把 `handleAsync` 改成 `handle` 的变异下三条都失败 |
+| W6 robot | 修掉 major 后可合入 | ① **major**：T10 登出后立刻经访客区登录，与离场处理有竞态，按规格行事的服务端会回 GO-5 的 124 | 成立，修（`e0a7664`）：`leaveSettle` 3 s，仍收到 124 时失败详情点明 GO-5 / 竞态 |
+| | | ② 跨区步骤的异常没接住、与注释不符（reconnect、team；guild 同类） | 成立，修：中断只记一条失败，reconnect 经本区入口重新进游戏交给第 4 步，team 确认 C 不在 A 的队里；新增 `ReconnectScenarioTest` |
+| | | ③ `trade --cross-zone require` 被接受却从不执行（假绿） | 成立，修：改成参数错误（退出码 2） |
+| | | ④ X2 的检查名不副实 | 成立，修：纯判据 `TeamScenario.crossZoneJoinProblems` |
+| | | ⑤ abandon / long 用 gate 端点判「落在出发区」，多 gate 时误报 | 成立，修：只记观察 |
+| | | （规格缺口）§11.11 子模式的故障注入没做 | 不在任务书的三个子命令里，**延后**（规格写明只在 IT / 手工做） |
+
+**合并后的跨模块评审**（五个视角：正常路径、失败路径、GO-5 与票据、配置与装配、回归；每条意见两个反驳者复核）：共 3 条意见，复核**全部成立、驳回 0 条**，都在主仓库修正并全量构建：
+
+| 编号 | 级别 | 发现 | 处理 |
+|---|---|---|---|
+| D1 | minor | §7.3 第二条勾稽在实现的计数口径下核对不了：帧发出前被交叉离开消费的旅途在任何指标里都看不到，帧发出后才消费的 gate 已计 stale / orphan、原式会算两遍；`GateMetrics.RedirectResult` 的 javadoc 式子漏了 link_gone / 墓碑 / pending | 修（`b24582d`）：`onPlacementWritten` 的「墓碑已被消费、不发帧」分支计 `xm.scene.travel.frames.withheld`；式子改为 handed_off ≈ gate redirects{travel, sent+invalid+stale+orphan} + link_gone + withheld + pending，写进两处 javadoc；`ZoneTravelHandOffTest` 钉帧前 / 帧后 / 写不出三种，去掉计数调用后两条用例失败 |
+| D2 / E1 | minor | scene-manager 缺 `XM_GATE_TOKEN_SECRET` 即拒启，但 `deploy/compose/env.example`、deploy-ci-spec §6.1、ops-release-spec §7.2 的按进程密钥表仍只分给 gate、gateway（README 的注释同样不全）；本稿 §5.14 也漏列了这几处 | 修（`e7ff9a2`）：env.example 的必填清单加 scene-manager 并注明用途与「三个进程原值逐字节相同」；gateway / gate 缺密钥的报错同时点名 scene-manager；`TravelConfigurationTest` 加 env.example 的文本核对（换回旧模板时失败）。两份规格与 README 在文档阶段改（见下） |
+
+五个视角逐项核对过、没有列为发现的要点（摘要）：226 同步段与在队检查的顺序与槽期限；`{0}` 的 `0a 00` 字节与「226 应答恒先于 124」（同一条链路、同一个会话 EventLoop、FIFO）；选目标请求字段与 3 s / 4 s 的时限关系；
+`TravelRouter` 的地图预检、去重、签票字段与原字节透传；scene、gate、login、robot 四处对重定向载荷的校验一致（scene 一侧最严，凡 scene 发出的帧都过得了 gate）；RELEASE 交出的 SQL、改判与探测表；
+待落点 (E, q+1) 与 TF7 / 交叉离开 (E, q+2) 的序号来源与 `WRITE_IF_NEWER` 收敛；交叉的 17 / `PlayerLeave` 与重定向帧的四种到达顺序；各结局的 tip 与断开方式；R-T2（旅途中另一设备登录，后登录者赢）；
+待落点与 TTL 到期的去向；停服（TF16）只保留旅途墓碑；「`l` + 节点号 0」的全部读者（含规格读者清单之外的 xm-match / xm-battle，按重连租约跳过）；gate 不 `abandonEnter` 的前提在唯一的发帧路径上成立；
+票据链路（普通令牌 TP = 0、重定向票据 TP = 持票者，他区同号 gate `WRONG_ZONE`）；一次动作至多一跳；设备窗口两侧都注销且幂等；时限链（226 应答最坏约 4 s、受理到结论约 25 s、login 预算 4 s < 5 s）；
+装配无重复 bean、三个进程的密钥取法一致；全部新指标预注册、没有高基数标签；X22 热关停的规则键 `SceneSceneClientPlayer/TravelToZone`；5.2 / 5.3 / 6.3 / 4.3 / 5.1 / 资产通道 / 运维夺权的回归；
+`transfer-tombstone-ttl` 调小不会吞掉 124（旅途墓碑不过期，用临时单测证实后删除）。评审期间各 worktree 只读或已还原。
+
+### docsFollowups 的落实
+
+合并后评审与各工作包留给文档阶段的事项，逐条：
+
+1. §7.2 补 `xm_scene_travel_frames_withheld_total`（scene，Counter，无标签）——已补，另补 `frames_pending` 的 gauge 行。
+2. §7.3 第二条改式、删掉「被墓碑消费的次数」——已改。
+3. §5.5 墓碑一条补「墓碑被消费、不发帧时计 withheld」；§2.3 TF8 的指标列改成 gate `redirects{source=travel, stale / orphan}`——已改。
+4. §7.2 的取值：`travel_requests` 补 `unavailable`、`travel_resolves` 补 `in_battle`、`transfers` 与 TF6′ 的 taken_over 改 superseded；另补 travel 的 `fenced`、login 的 `backend_calls{method=redirectToZone}`、gate 请求计数的实际名字——已改。
+5. deploy-ci-spec §6.1 秘密矩阵、ops-release-spec §7.2 Secret 注入表：`XM_GATE_TOKEN_SECRET` 加 scene-manager——已改。
+6. README 快速开始里 `XM_GATE_TOKEN_SECRET` 的注释提到 scene-manager——已改。
+7. §5.14 补漏列的部署侧文档——已补。
+8. 新指标是否进 PARITY / architecture 的指标表、ops-release-spec 是否加告警：architecture.md §11 已登记 withheld 与全部 5.4 指标；PARITY「跨 zone 传送」行提到它；**告警没有加**（ops-release-spec 的告警清单不在本批改动范围，候选：「§7.3 第二条的残差持续大于 0」「`travel_frames_pending` 长时间不归零」），登记为遗留。
+9. （W5）§6.2 / §5.12 登记 `xm.login.enter-game-budget`，订正「迟到的 `RedirectToGate` 按会话已断忽略」；architecture.md 归属协议第 4 步「只能等租约过期」的清单补「gate 调 login 超时」——已改。
+10. （W5）§11.7 `rerouteIfStale` 的措辞——已改为「不触发重定向」并写明实现口径。
+11. （W3）内部码 `TIP_NO_GATE` / `TIP_ZONE_FENCED` 与 `fenced` 进 §5.4、§7.2——已改。
+12. （W2）scene-battle-spec §7.13 的闸门表加 226；5.5 规格登记 `SwitchReason` / `PRECHECK` / `travelFramesPending` 已落地——已改。
+13. （W4）盘点 `gate.md` cross-zone-redirect / redirect-ticket-binding 的 java 列、architecture.md §4.1 / §4.2——已改。
+14. （W6）§11.11 / §11.12 的 robot 落地与 `--team-cross-zone`——已在正文落地注与 PARITY 登记。
+15. （W1）`TravelTargets.TravelSelection.Failed` 的 javadoc 补「`target_zone_id` 对不上」；`ZoneTravelSeamsTest` 过时的「占位」字样——文档阶段只改了注释（不改行为，见「遗留」）。
+
+### 证据
+
+**全量构建**（合拢评审修正之后，代码 `e7ff9a2`）：本机 Windows，便携 JDK 21.0.12 + Maven 3.9.9，`mvn -o -B -fae clean install` → 27 个模块 BUILD SUCCESS，**9760 条用例，0 失败，0 错误，796 条跳过**。
+本机**没有 Redis / MySQL / Kafka**，跳过的就是缺省关闭的 `-Dxm.it.*` 集成测试与基准——其中包括 5.4 新写的 `AwaitingPlacementRedisIntegrationTest`、`TravelRouterRedisIntegrationTest`、`RedisGateSourceIntegrationTest`；
+`PlayerStoreSqlTest` 里 5.4 的新用例（含探测阻塞与两个并发用例）只在 H2 上跑过，`EnterGameSecondLegSqlTest` 也是 H2。这批提交还没有推送，没有 GitHub Actions 的运行记录。
+
+**模块级的运行**（各提交正文里记下的汇总行，离线 `-o`、`-Dtest` 限定本模块，上游模块只编译；各行对应的是当时那个分支 / 时点的代码，**条数只供对照规模，以上面的全量构建为准**）：
+
+| 时点 | 模块与结果 |
+|---|---|
+| 先行件 a `ffb6168` | 全仓 `-DskipTests clean install` 通过；xm-api / xm-common / xm-discovery / xm-player-store / xm-scene-manager / xm-data 带真 Redis 与真 MySQL 共 1063 条通过；xm-login 181、xm-scene 1417、xm-gate 214 整模块通过 |
+| 先行件 b `813dfd6` / c `f7143b0` | xm-scene 1463 条（带真 Redis 与 Kafka）；xm-gate 230、xm-scene-manager 242（带真 Redis）——那时 226 还没注册、两个新 RPC 以异常完成 |
+| 先行件合拢 `14ea692` | `clean install` + 真 Redis / MySQL / Kafka，27 个模块，9452 条 0 失败 0 错误 2 跳过——**六个工作包都还没合入**，不是 5.4 功能的证据 |
+| W1 `49d5086` / `f2c4264` | xm-player-store 70 条（4 跳过）、xm-scene 1495 条（8 跳过，含 4 条真 Redis 用例）；`PlayerStoreSqlTest` 另连跑 3 轮（H2） |
+| W2 `83e884d` / `52d6875` | xm-scene 1522 → 1530 条（4 跳过）；其中 `FreezeGateTest` 11、`ZoneTravelRequestTest` 31、`ZoneTravelHandOffTest` 27、`ZoneTravelSeamsTest` 8 |
+| W3 `bca69b9` | xm-discovery 253（116 跳过）、xm-scene-manager 273（14 跳过）、xm-gateway 81（11 跳过）；`TravelRouterTest` 26、`GatePickerTest` 15 |
+| W4 `de19d45` | xm-gate 255 条，0 跳过；`ClientRedirectTest` 21 |
+| W5 `bdbb7bd` / `89d7f3b` | xm-login 272 → 281 条（11 条 Redis 集成测试跳过）；`EnterRoutesTest` 46、`EnterGameZoneTravelTest` 45 |
+| W6 `bc76c6d` / `e0a7664` | xm-robot 597 → 606 条，0 跳过；`TravelScenarioTest` 21、`ReconnectScenarioTest` 3 另连跑 2 遍 |
+
+**判别力核对（变异）**——都是「临时改错、跑对应用例确认失败、还原」：W1 被拒分支补调 `onDone` / 改成重新抛出（4 条失败）；W4 去掉断线流程里撤销收口定时器（对应用例失败）；W5 `handleAsync` 改 `handle`（三条线程用例失败）；
+D1 去掉 `SceneWorld` 里 withheld 的计数调用（两条失败）；E1 换回旧的 env.example（文本核对失败）。W4 评审对另外几处守卫的「变异」只是读代码推断，没有实跑。
+
+**没有运行的验证**（所以 PARITY 是「Java 进行中」）：
+- 双 zone 本机切片（`XM_ZONES=2`）一次都没有起过：§11.9 的 MZ1–MZ18 一条都没跑；
+- Java robot 的 `travel` / `travel-abandon` / `travel-long` 与 team X1 / X2、guild 第 4 步、reconnect 跨区重连只在假服务端（`FakeTravelWorld` 等）上跑过单测，没有对真服务端跑过；单 zone 下的回归场景（§11.12）也没有在切片上重跑；
+- §11.10 的 mmorpg Go robot `travel_smoke` 跨实现验收没有做；
+- 5.4 新写的真 Redis 集成测试三类、`PlayerStoreSqlTest` 的真 MySQL 档没有运行；
+- 故障注入（MZ8–MZ11 的 robot 化）没有做。
+
+### 遗留与残余风险
+
+设计层面的残余已写进正文（§2.4、§8.2 的 R-T1–R-T13）；这里列实现与测试层面仍然成立的：
+
+- **login 的预算不含派发排队时间**：从 `EnterGameHandler.handle` 起算，派发层工作队列里排队超过约 1 s 时，迟到夺权（归属无人接、要等 30 s 租约）的窗口仍在；彻底消除要 gate 在 `ClientCall` 里带截止时间（或透传 Dubbo 的剩余超时），跨 xm-api / xm-gate，没有做。
+- **`QueueCapacity.budget` 对陈旧条目重复计数**：登录排队的容量预算仍按原始 gate 目录求人数和，崩溃重启的 gate 的旧条目在 15 s 的 TTL 内被重复计入，只让预算偏保守。
+- **trade 的跨区步骤没有接入**（`trade --cross-zone require` 是参数错误，`auto` 只记观察）。
+- **故障注入的 robot 化没有做**（停 scene-manager、停目标 gate；规格只要求 IT / 手工）。
+- **`ZoneTravelSeamsTest` 的一条用例测不到它名字里说的东西**（W1 评审意见 2）：文档阶段只订正了注释；有效覆盖在 `TravelTeamChecksTest`。改法：读口立即完成（或给很短的上限并等到投递），`onDone` 记录而不是抛，断言投递被拒且回调没执行。
+- gate `onRedirectLingerExpired` 里「不在会话线程就改投递」的防御分支没有单测（按构造到不了，`EmbeddedChannel` 也模拟不出跨 EventLoop）。
+- 拒启用例只覆盖「设了但为空 / 全空白」的密钥，没有覆盖完全不设（分支是对的）。
+- robot：T8b 要求两个区的第一台 gate 节点号相同（切片上都是 1 号），不同时服务端回的是 `token not for this gate`；team X2 要 xm-team 配 `xm.team.allow-cross-zone=true` 再用 `--team-cross-zone allow` 跑，本机切片缺省只走 X1；T10 的 3 s 是否够要看切片上的离场日志；
+  `FakeTravelWorld` 是按规格手写的替身，只证明探针一侧的判定。
+- **7.3 的义务**：F4 改判请求里的 `home_zone_id` 并把 0 当读不到（同批接 Redis 围栏，否则静默放行）；`RedirectOnEnter`；合服作业的写侧约束（roadmap 7.3 行）。
+- **5.5 的义务**：收敛谓词并入 `travelFramesPending`（TF16 / R-T12），`SwitchReason` 追加 EVACUATE；5.5 落地之前，停服 / 冲突疏散恰在「已交出、帧未写出」窗口退出时客户端收不到 124（数据完整，重登即可）。
+- 没有加告警（§7.3 残差、`travel_frames_pending` 不归零），归 ops-release-spec 的告警清单。
+- 客户端侧：23 {3027} / {2017} 后紧跟断线时 Unity 显示通用断线文案（B-7 / R-T13）；Unity 是否按信封 `id` 配对 226 的应答没有在客户端代码上复核（X21）。
+
+### 给 7.1b / 5.5 / 7.3 的接口与义务
+
+- **7.1b（整栈 compose 与 CI）**：scene-manager 的容器要注入 `XM_GATE_TOKEN_SECRET`（三个进程原值逐字节相同）；两 zone 的覆盖文件里可以加 robot `travel`（spectate-spec Q22 的同一份前置清单）；5.4 的三个 `xm.it.redis` 集成测试类都是类级的 `@EnabledIfSystemProperty(named = "xm.it.redis")`，落在 `TestReport --require-it-executed` 的扫描范围里——推送之后 CI 的 Integration 作业会要求它们真的执行，那将是它们的第一次运行。
+- **5.5**：读口 `SceneWorld.travelFramesPending()`；`SwitchReason` 在 `com.game.scene.world`；疏散占着 `switching` 槽时 226 回 13000 / 3014、已在 TRAVEL（含 PRECHECK）的玩家被疏散跳过，都按本稿 §0.5 已实现的口径；
+  5.4 只给 `xm.scene.transfers` 加了 `reason`，`xm.scene.switch.resolves` 与 `xm.scene.transfer.freeze` 没有加（226 的选目标计在 `travel.resolves`）。
+- **7.3**：见上一节与 PARITY「合服围栏与合服」行。
+
+### 最终验证
+
+**还没有做。** 本节写成时（2026-10-11）唯一的运行证据是上面的本机离线全量构建；双 zone 切片、robot 端到端、Go robot 跨实现验收与真依赖的集成测试做完后，在这里补记命令、环境、各场景的检查项数与结论，
+并把 PARITY「跨 zone 传送（226）与重定向（124）」「归属区映射」两行改为「已对齐」（先例：6.5 的 `976d7ff` → `775f991`）。

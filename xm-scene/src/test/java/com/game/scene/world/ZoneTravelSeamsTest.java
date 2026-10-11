@@ -33,9 +33,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 /**
- * 批次 5.4 先行件在 xm-scene 里冻结的接缝，以及每个占位都「安全」的证据：装配记录的校验、世界的新构造器层、位置写口的缺省实现、
- * 在队检查的占位、消息号，以及 226 注册之后<b>没装配跨 zone 传送</b>时的安全出口（同步 3027，不挂槽、不交出）。
- * 226 的状态机本身见 {@code ZoneTravelRequestTest} / {@code ZoneTravelHandOffTest}。
+ * 批次 5.4 先行件在 xm-scene 里冻结的接缝：装配记录的校验、世界的新构造器层、位置写口的缺省实现、在队检查（先行件时是占位，
+ * W1 起是真实现 {@link TravelTeamChecks}）、消息号，以及 226 注册之后<b>没装配跨 zone 传送</b>时的安全出口（同步 3027，不挂槽、不交出）。
+ * 226 的状态机本身见 {@code ZoneTravelRequestTest} / {@code ZoneTravelHandOffTest}；在队检查的逐格用例见 {@code team/TravelTeamChecksTest}。
  */
 class ZoneTravelSeamsTest {
 
@@ -117,7 +117,7 @@ class ZoneTravelSeamsTest {
 
     // ------------------------------------------------------------------ 位置写口的缺省实现
 
-    /** 没有覆盖 {@code awaitingPlacement} 的写口（生产的 Redis 实现在占位阶段、以及只关心别的写口的替身）：不写，当场回「没写上」，恰好一次。 */
+    /** 没有覆盖 {@code awaitingPlacement} 的写口（{@link PlayerLocations#NONE} 与只关心别的写口的替身；生产的 Redis 实现 W1 起已覆盖它）：不写，当场回「没写上」，恰好一次。 */
     @Test
     void 待落点写口的缺省实现_在调用栈内回false恰好一次() {
         PlayerLocations bare = new PlayerLocations() {
@@ -152,7 +152,7 @@ class ZoneTravelSeamsTest {
         assertThat(removed.locationSeq()).as("缺省实现不取位置序号（没有写）").isEqualTo(seqBefore);
     }
 
-    // ------------------------------------------------------------------ 在队检查的占位
+    // ------------------------------------------------------------------ 在队检查（W1 起是真实现 TravelTeamChecks）
 
     @Test
     void 在队检查_读一次成员关系_经逻辑执行器回结果恰好一次_不在调用栈内() {
@@ -175,6 +175,12 @@ class ZoneTravelSeamsTest {
         assertThat(reads.get()).isEqualTo(1);
     }
 
+    /**
+     * 名字是先行件（占位实现）时起的，没有改。换上真实现之后，前半段<b>测不到</b>「逻辑线程已停时结果丢弃」：读口给的 future 永不完成，
+     * 结果要等 {@code orTimeout} 到点才出来，这里紧接着断言的 {@code pending() == 0} 恒真（批次 5.4 W1 评审意见 2，暂缓，登记在
+     * zone-travel-spec 实现记录「遗留」）。这一行为的有效覆盖在 {@code team/TravelTeamChecksTest}「逻辑线程已停_投递被拒_…」；
+     * 本用例真正钉住的是后半段的参数校验（上限不为正、读口 / 执行器为 null）。
+     */
     @Test
     void 在队检查的占位_逻辑线程已停时结果丢弃不抛_上限不为正是编程错误() {
         ManualExecutor logic = new ManualExecutor();
