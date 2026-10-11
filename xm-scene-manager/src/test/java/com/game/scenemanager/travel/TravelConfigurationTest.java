@@ -27,11 +27,16 @@ import com.game.scenemanager.world.FakeWorldChannelStore;
 import com.game.scenemanager.world.NodeAvailability;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -84,6 +89,47 @@ class TravelConfigurationTest {
     @Test
     void 环境变量名与gateway_gate是同一个键() {
         assertThat(TravelConfiguration.TOKEN_SECRET_ENV).isEqualTo("XM_GATE_TOKEN_SECRET");
+    }
+
+    /**
+     * 部署模板（{@code deploy/compose/env.example}：整栈 stack.yaml 按进程最小授权注入秘密的依据，每个进程只拿清单里点了它名的）
+     * 把 scene-manager 拒启必填的两把秘密都分给了 scene-manager。批次 5.4 让 gate 令牌密钥对 scene-manager 必填而模板没跟上：照模板注入，
+     * scene-manager 起不来——assign 也在它上面，连单 zone 的普通进游戏都会失败。只做文本核对；找不到 {@code deploy/compose}（单独构建本模块）时跳过。
+     */
+    @Test
+    void 部署模板的按进程秘密清单_两把必填秘密都分给了scene_manager() throws IOException {
+        Path file = Files.isRegularFile(Path.of("../deploy/compose/env.example"))
+                ? Path.of("../deploy/compose/env.example") : Path.of("deploy/compose/env.example");
+        Assumptions.assumeTrue(Files.isRegularFile(file), "找不到 deploy/compose/env.example（单独构建 xm-scene-manager）");
+        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+
+        assertThat(requiredBy(lines, TravelConfiguration.TOKEN_SECRET_ENV))
+                .as("gate 令牌密钥：签重定向票据的 scene-manager、签登录令牌的 gateway、验票的 gate 三方同值，缺一方拒启")
+                .contains("scene-manager", "gateway", "gate");
+        assertThat(requiredBy(lines, "XM_DUBBO_SECRET")).as("Dubbo 调用签名密钥").contains("scene-manager");
+    }
+
+    /**
+     * 模板里 {@code 变量=} 那一行上方紧挨着的注释块（不含分节线）中「…（必填）：进程、进程；…」那一行的必填进程清单
+     * （到第一个「；」为止，之后是可选的进程）。
+     */
+    private static List<String> requiredBy(List<String> lines, String variable) {
+        int at = lines.indexOf(variable + "=");
+        assertThat(at).as("env.example 里有 %s= 这一行", variable).isPositive();
+        String marker = "（必填）：";
+        String head = null;
+        for (int i = at - 1; i >= 0 && lines.get(i).startsWith("# ") && !lines.get(i).startsWith("# ---"); i--) {
+            if (lines.get(i).contains(marker)) {
+                head = lines.get(i);
+            }
+        }
+        assertThat(head).as("%s 上方的注释写了「（必填）：进程清单」", variable).isNotNull();
+        String list = head.substring(head.indexOf(marker) + marker.length());
+        int optional = list.indexOf('；');
+        if (optional >= 0) {
+            list = list.substring(0, optional);
+        }
+        return List.of(list.strip().split("、"));
     }
 
     @Test

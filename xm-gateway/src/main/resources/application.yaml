@@ -1,5 +1,6 @@
 # xm-gateway：客户端 HTTP 入口（区服列表、分配 gate、HTTP 登录与刷新令牌、登录公告）。进程从仓库根目录启动。
-# 必需环境变量：XM_GATE_TOKEN_SECRET（gate 令牌签名密钥，须与 xm-gate 一致）、XM_DUBBO_SECRET（Dubbo 调用鉴权，须与 xm-login 一致）；
+# 必需环境变量：XM_GATE_TOKEN_SECRET（gate 令牌签名密钥，须与 xm-gate、xm-scene-manager 一致——批次 5.4 起 scene-manager 用同一把签重定向票据）、
+# XM_DUBBO_SECRET（Dubbo 调用鉴权，须与 xm-login 一致）；
 # 缺失则启动失败。
 server:
   port: 18081

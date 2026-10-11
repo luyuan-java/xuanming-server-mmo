@@ -130,7 +130,7 @@ public class GatewayConfiguration {
     private static String gateSecret(Environment environment) {
         String secret = environment.getProperty(TOKEN_SECRET_ENV);
         if (secret == null || secret.isBlank()) {
-            throw new IllegalStateException("缺少环境变量 " + TOKEN_SECRET_ENV + "（gate 令牌签名密钥，须与 xm-gate 一致）");
+            throw new IllegalStateException("缺少环境变量 " + TOKEN_SECRET_ENV + "（gate 令牌签名密钥，须与 xm-gate、xm-scene-manager 一致）");
         }
         return secret;
     }

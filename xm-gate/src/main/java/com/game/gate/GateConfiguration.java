@@ -51,7 +51,7 @@ public class GateConfiguration {
     public GateTokens gateTokens(Environment environment) {
         String secret = environment.getProperty(TOKEN_SECRET_ENV);
         if (secret == null || secret.isBlank()) {
-            throw new IllegalStateException("缺少环境变量 " + TOKEN_SECRET_ENV + "（gate 令牌密钥，须与 xm-gateway 一致）");
+            throw new IllegalStateException("缺少环境变量 " + TOKEN_SECRET_ENV + "（gate 令牌密钥，须与 xm-gateway、xm-scene-manager 一致）");
         }
         return GateTokens.ofUtf8(secret);
     }
