@@ -17,12 +17,18 @@ import com.game.api.proto.SelectSwitchTargetResponse;
 import com.game.api.proto.SelectTravelTargetRequest;
 import com.game.api.proto.SelectTravelTargetResponse;
 import com.game.api.proto.ZoneRedirect;
-import com.game.scenemanager.travel.TravelConfiguration;
+import com.game.common.token.GateTokenIssuer;
+import com.game.common.token.GateTokens;
+import com.game.discovery.zone.ZoneMergeFence;
+import com.game.scenemanager.travel.TravelRouter;
 import com.game.scenemanager.travel.TravelRouting;
+import com.game.scenemanager.world.FakeWorldChannelStore;
 import com.game.scenemanager.world.NodeAvailability;
 import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.security.SecureRandom;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -53,8 +59,18 @@ class SceneDirectoryProviderTest {
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private boolean leaseValid = true;
-    /** 跨 zone 选路（批次 5.4）：缺省是先行件装配的占位，个别用例换成记录用的假实现。 */
-    private TravelRouting travel = new TravelConfiguration().travelRouting();
+    /** 跨 zone 选路（批次 5.4）：缺省是总以异常完成的替身（与本类其余用例无关），个别用例换成记录用的假实现或真实现。 */
+    private TravelRouting travel = new TravelRouting() {
+        @Override
+        public CompletableFuture<SelectTravelTargetResponse> selectTravelTarget(SelectTravelTargetRequest request) {
+            return CompletableFuture.failedFuture(new IllegalStateException("本用例不走跨 zone 选路"));
+        }
+
+        @Override
+        public CompletableFuture<RedirectToZoneResponse> redirectToZone(RedirectToZoneRequest request) {
+            return CompletableFuture.failedFuture(new IllegalStateException("本用例不走跨 zone 选路"));
+        }
+    };
     private InstanceIdIssuer issuer = new InstanceIdIssuer(SceneIdAllocator.forTesting(5, () -> leaseValid),
             NodeAvailability.ALL);
 
@@ -295,7 +311,7 @@ class SceneDirectoryProviderTest {
                         "other/ok", "other/bad_request", "other/node_unavailable", "other/no_lease", "other/error");
     }
 
-    // ---------- 跨 zone 选路（批次 5.4 先行件）：两个新方法原样委托给 TravelRouting ----------
+    // ---------- 跨 zone 选路（批次 5.4）：两个新方法原样委托给 TravelRouting ----------
 
     private static final SelectTravelTargetRequest TRAVEL = SelectTravelTargetRequest.newBuilder()
             .setFromZoneId(1).setToZoneId(2).setPlayerId(42).setWantSceneConfigId(5).build();
@@ -366,24 +382,25 @@ class SceneDirectoryProviderTest {
     }
 
     /**
-     * 先行件阶段装配的是 {@link TravelConfiguration} 的占位：两个方法都以 {@link IllegalStateException}（「5.4 施工中」）完成，
-     * 不是 tip、不是 null、不是挂起——调用方按「调用失败」处理（226 受理后推 23 {3027}，登录期重定向回落入口 zone）。
+     * 接上真实现（{@link TravelRouter}）：两个新方法经提供方走到它，业务拒绝是正常应答（tip），计时记在选路自己的指标上、
+     * 提供方不另计（规则本身见 {@code TravelRouterTest}）。
      */
     @Test
-    void 先行件的占位选路_两个新方法都以异常完成_不挂起不回空应答() {
-        travel = new TravelConfiguration().travelRouting();
+    void 真实现经提供方_业务拒绝走tip_计时记在选路的指标上() throws Exception {
+        travel = new TravelRouter(new FakeWorldChannelStore(), zone -> List.of(), zone -> List.of(), WORLD,
+                ZoneMergeFence.OPEN, new GateTokenIssuer(GateTokens.ofUtf8("s"), Clock.systemUTC(), new SecureRandom()),
+                meters);
         SceneDirectoryProvider provider = provider(zone -> List.of());
 
-        CompletableFuture<SelectTravelTargetResponse> selected = provider.selectTravelTarget(TRAVEL);
-        CompletableFuture<RedirectToZoneResponse> redirected = provider.redirectToZone(REDIRECT);
+        // 地图 5 不在 World 表里 → 参数错；目标 zone 没有 scene 节点 → 无场景
+        assertThat(provider.selectTravelTarget(TRAVEL).get(5, TimeUnit.SECONDS).getTipId())
+                .isEqualTo(SceneAssigner.TIP_BAD_REQUEST);
+        assertThat(provider.redirectToZone(REDIRECT).get(5, TimeUnit.SECONDS).getTipId())
+                .isEqualTo(SceneAssigner.TIP_NO_SCENE);
 
-        assertThat(selected).isCompletedExceptionally();
-        assertThat(redirected).isCompletedExceptionally();
-        assertThatThrownBy(() -> selected.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
-                .cause().isInstanceOf(IllegalStateException.class).hasMessage("5.4 施工中");
-        assertThatThrownBy(() -> redirected.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
-                .cause().isInstanceOf(IllegalStateException.class).hasMessage("5.4 施工中");
-        assertThat(travel).hasToString("TravelRouting.PLACEHOLDER");
+        assertThat(meters.get("xm.scene_manager.travel").tag("result", "bad_request").timer().count()).isEqualTo(1);
+        assertThat(meters.get("xm.scene_manager.redirect").tag("result", "no_scene").timer().count()).isEqualTo(1);
+        assertThat(assigns("ok") + switches("ok")).isZero();
     }
 
     /** 选路的实现违反契约（同步抛出 / 返回 null）时，提供方仍交回以异常完成的 future，内部细节不外泄。 */

@@ -80,4 +80,87 @@ class GatePickerTest {
     void 空目录返回空() {
         assertThat(GatePicker.pick(ZONE, List.of())).isEqualTo(Optional.empty());
     }
+
+    // ---------- 同一客户端地址只留最新启动的一条（批次 5.4，zone-travel-spec §5.4 第 4 步、Q10） ----------
+
+    /** 与 {@code base} 同一客户端地址、换了节点号的条目（gate 在同一地址重启后的新进程，或重启前的旧进程）。 */
+    private static GateNodeInfo sameAddress(GateNodeInfo base, int nodeId, int playerCount, long startedAtMs) {
+        return base.toBuilder().setNodeId(nodeId).setInstanceId("inst-" + nodeId).setPlayerCount(playerCount)
+                .setStartedAtMs(startedAtMs).build();
+    }
+
+    /**
+     * 对照基线 {@code NeverPicksStaleRecordOfCrashedGate}（gate_redirect_client_endpoint_test.go:182）：gate 崩溃后在同一地址重启、
+     * 换了节点号，旧条目还没过期、人数停在崩溃时更少——也不选它（签给旧节点号的令牌在新进程上验不过）。
+     */
+    @Test
+    void 同一客户端地址两条_只留启动时刻大者_人数更少的陈旧条目也不选_与输入顺序无关() {
+        GateNodeInfo stale = sameAddress(gate(1, 0, false), 1, 0, 1_000L);
+        GateNodeInfo fresh = sameAddress(stale, 2, 50, 2_000L);
+
+        assertThat(pickedNode(List.of(stale, fresh))).isEqualTo(2);
+        assertThat(pickedNode(List.of(fresh, stale))).isEqualTo(2);
+        assertThat(GatePicker.eligible(ZONE, List.of(stale, fresh))).as("放行循环用的候选表同样去重").containsExactly(fresh);
+    }
+
+    @Test
+    void 缺启动时刻的旧版本条目当0_同地址有新条目时被去掉() {
+        GateNodeInfo legacy = gate(1, 0, false); // 不认识 started_at_ms 的旧版本 gate 写的条目
+        GateNodeInfo fresh = sameAddress(legacy, 2, 9, 1_700_000_000_000L);
+
+        assertThat(pickedNode(List.of(legacy, fresh))).isEqualTo(2);
+    }
+
+    @Test
+    void 同地址启动时刻并列_都留下按人数与节点号挑() {
+        GateNodeInfo a = sameAddress(gate(1, 0, false), 5, 7, 0L);
+        GateNodeInfo b = sameAddress(a, 3, 7, 0L);
+        GateNodeInfo c = sameAddress(a, 4, 2, 0L);
+
+        assertThat(GatePicker.eligible(ZONE, List.of(a, b, c))).containsExactly(a, b, c);
+        assertThat(pickedNode(List.of(a, b, c))).isEqualTo(4);
+        assertThat(pickedNode(List.of(a, b))).isEqualTo(3);
+    }
+
+    @Test
+    void 不同地址的条目互不影响_同主机不同端口不算同地址() {
+        GateNodeInfo one = gate(1, 30, false).toBuilder().setClientHost("10.0.0.9").setClientPort(11000)
+                .setStartedAtMs(1_000L).build();
+        GateNodeInfo otherPort = gate(2, 10, false).toBuilder().setClientHost("10.0.0.9").setClientPort(11001)
+                .setStartedAtMs(500L).build();
+        GateNodeInfo otherHost = gate(3, 20, false).toBuilder().setClientHost("10.0.0.10").setClientPort(11000)
+                .setStartedAtMs(100L).build();
+
+        assertThat(GatePicker.eligible(ZONE, List.of(one, otherPort, otherHost))).containsExactly(one, otherPort, otherHost);
+        assertThat(pickedNode(List.of(one, otherPort, otherHost))).isEqualTo(2);
+    }
+
+    @Test
+    void 去重先于排空_陈旧条目不会因为最新那条在排空而复活() {
+        GateNodeInfo stale = sameAddress(gate(1, 0, false), 1, 0, 1_000L);
+        GateNodeInfo drainingFresh = sameAddress(stale, 2, 40, 2_000L).toBuilder().setDraining(true).build();
+        GateNodeInfo other = gate(3, 90, false);
+
+        assertThat(pickedNode(List.of(stale, drainingFresh, other))).as("剔排空之后只剩另一台").isEqualTo(3);
+        assertThat(pickedNode(List.of(stale, drainingFresh)))
+                .as("只剩最新那条（在排空）：走「全部排空时忽略标记」，仍不选陈旧条目").isEqualTo(2);
+    }
+
+    @Test
+    void 连不上的条目不参与去重_不会挤掉同地址的可用条目() {
+        GateNodeInfo usable = sameAddress(gate(1, 0, false), 1, 5, 1_000L);
+        GateNodeInfo wrongZoneNewer = sameAddress(usable, 2, 0, 9_000L).toBuilder().setZoneId(ZONE + 1).build();
+        GateNodeInfo zeroNodeNewer = sameAddress(usable, 0, 0, 9_000L);
+
+        assertThat(pickedNode(List.of(usable, wrongZoneNewer, zeroNodeNewer))).isEqualTo(1);
+    }
+
+    @Test
+    void 启动时刻按无符号比较() {
+        // uint64 的高位为 1 的值在 Java long 里是负数，有符号比较会把它当成最旧。
+        GateNodeInfo small = sameAddress(gate(1, 0, false), 1, 0, 5L);
+        GateNodeInfo huge = sameAddress(small, 2, 9, Long.MIN_VALUE);
+
+        assertThat(pickedNode(List.of(small, huge))).isEqualTo(2);
+    }
 }

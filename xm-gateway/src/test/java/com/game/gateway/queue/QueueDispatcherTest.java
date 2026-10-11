@@ -73,6 +73,21 @@ class QueueDispatcherTest {
         assertThat(admits.get()).isEqualTo(118);
     }
 
+    /** 同一客户端地址的陈旧条目（gate 重启前的旧节点号）不当放行目标，即使人数更少（批次 5.4 GatePicker 同地址去重）。 */
+    @Test
+    void 同一客户端地址只放给最新启动的条目() {
+        when(queue.queueLength(1)).thenReturn(5L);
+        GateNodeInfo stale = gate(1, 0).toBuilder().setStartedAtMs(1_000L).build();
+        GateNodeInfo restarted = stale.toBuilder().setNodeId(3).setInstanceId("g3").setPlayerCount(4)
+                .setStartedAtMs(2_000L).build();
+        when(gates.listGates(1)).thenReturn(List.of(stale, restarted));
+        when(queue.dispatch(eq(1), anyLong(), anyInt(), any())).thenReturn(new LoginQueue.Dispatched(5, 0));
+
+        dispatcher(1000, QueueDispatcher.always()).tick();
+
+        verify(queue, times(1)).dispatch(1, 996, QueueDispatcher.CHUNK, restarted);
+    }
+
     @Test
     void 没预算或没gate不放行() {
         when(queue.queueLength(1)).thenReturn(5L);

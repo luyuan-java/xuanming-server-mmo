@@ -221,6 +221,29 @@ class GatewayHttpApiTest {
         assertThat(TOKENS.verify(payload, signature, 4, 1, now).failure()).isEqualTo(GateTokens.Failure.WRONG_GATE);
     }
 
+    /**
+     * 同一客户端地址两条目录条目（gate 在同一地址重启、换了节点号，旧条目还没过期）：只认启动时刻大的那条，
+     * 人数更少的陈旧条目也不选——令牌签给新节点号，旧节点号验不过（批次 5.4 下沉共用的 GatePicker 规则，gateway 分配同样生效）。
+     */
+    @Test
+    void 同一客户端地址只认最新启动的条目_人数更少的陈旧条目不选() throws Exception {
+        GateNodeInfo stale = gate(4, 0, false).toBuilder().setStartedAtMs(1_000L).build();
+        GateNodeInfo restarted = stale.toBuilder().setNodeId(6).setInstanceId("inst-6").setPlayerCount(30)
+                .setStartedAtMs(2_000L).build();
+        when(gateSource.listGates(1)).thenReturn(List.of(stale, restarted));
+
+        JsonNode resp = assignGate("{\"zone_id\":1}");
+
+        assertThat(resp.get("code").intValue()).isZero();
+        assertThat(resp.get("gate_ip").asText()).isEqualTo("10.0.0.4");
+        assertThat(resp.get("gate_port").intValue()).isEqualTo(11004);
+        ByteString payload = ByteString.copyFrom(stdBase64(resp.get("token_payload")));
+        ByteString signature = ByteString.copyFrom(stdBase64(resp.get("token_signature")));
+        assertThat(GateTokenPayload.parseFrom(payload).getGateNodeId()).isEqualTo(6);
+        long now = Instant.now().getEpochSecond();
+        assertThat(TOKENS.verify(payload, signature, 6, 1, now).ok()).isTrue();
+    }
+
     @Test
     void 全部排空时仍然分配() throws Exception {
         when(gateSource.listGates(1)).thenReturn(List.of(gate(2, 5, true), gate(1, 9, true)));

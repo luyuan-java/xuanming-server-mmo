@@ -1,45 +1,65 @@
 package com.game.scenemanager.travel;
 
-import com.game.api.proto.RedirectToZoneRequest;
-import com.game.api.proto.RedirectToZoneResponse;
-import com.game.api.proto.SelectTravelTargetRequest;
-import com.game.api.proto.SelectTravelTargetResponse;
-import java.util.concurrent.CompletableFuture;
+import com.game.common.token.GateTokenIssuer;
+import com.game.common.token.GateTokens;
+import com.game.discovery.gate.GateSource;
+import com.game.discovery.gate.RedisGateSource;
+import com.game.discovery.world.WorldChannelStore;
+import com.game.discovery.zone.ZoneMergeFence;
+import com.game.scenemanager.SceneNodeSource;
+import com.game.scenemanager.WorldSceneConfigs;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.security.SecureRandom;
+import java.time.Clock;
+import org.redisson.api.RedissonClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 
 /**
- * 跨 zone 选路的装配（批次 5.4）。
+ * 跨 zone 选路的装配（批次 5.4，zone-travel-spec §5.4）：gate 目录（叠加排空标记）+ 频道计划 + scene 节点目录 + 合服围栏 + 票据签发 →
+ * {@link TravelRouter}。
  *
- * <p><b>先行件阶段只有占位</b>：{@link TravelRouting} 的两个方法都以 {@link IllegalStateException}（{@value #PLACEHOLDER_REASON}）完成——
- * 调用方按「调用失败」处理：226 受理后推 23 {3027}、留在原地；登录期重定向回落入口 zone。占位不选 gate、不签票据、不读任何存储，
- * 所以<b>这里还不要求 gate 令牌密钥</b>（{@code XM_GATE_TOKEN_SECRET}）：真实现接上时在本类里经 {@code Environment} 读它，
- * 缺失即拒启，取法与 xm-gate / xm-gateway 逐字节相同（{@code GateTokens.ofUtf8(环境变量原值)}，只判 {@code isBlank()}、<b>不去空白</b>）。
+ * <p><b>gate 令牌密钥必填</b>：scene-manager 给跨 zone 传送（226）与登录期重定向（GO-5）签重定向票据，用的就是 gateway 签登录令牌、
+ * gate 验票的那一把（{@value #TOKEN_SECRET_ENV}）。取法与 xm-gate / xm-gateway 逐字节相同：经 {@link Environment} 读同名键，
+ * 缺失或全是空白即拒绝启动；有值时<b>原值</b>按 UTF-8 作密钥（{@link GateTokens#ofUtf8}），<b>不去首尾空白</b>——三个进程任何一边多做一次
+ * trim，带空白的密钥就会让 scene-manager 签的票据在目标 gate 上验不过，而验票失败发生在源端已经交出并释放归属之后。
+ * 密钥只从环境变量注入，不进仓库（AGENTS.md §3）。
  */
 @Configuration(proxyBeanMethods = false)
 public class TravelConfiguration {
 
-    /** 占位阶段两个方法失败的原因（进调用方的日志）。 */
-    static final String PLACEHOLDER_REASON = "5.4 施工中";
+    /** 环境变量名：与 xm-gateway（签登录令牌）、xm-gate（验票）同一个键、同一个值。 */
+    static final String TOKEN_SECRET_ENV = "XM_GATE_TOKEN_SECRET";
 
-    /** 占位：两个方法都以异常完成。真实现（选 gate、签票据）换掉这个 bean。 */
+    /** gate 目录的读取面（xm-gate 发布的 {@code xm:nodes:gate:{zone}}，叠加运维排空标记 {@code xm:gate-draining:*}）。 */
     @Bean
-    public TravelRouting travelRouting() {
-        return new TravelRouting() {
-            @Override
-            public CompletableFuture<SelectTravelTargetResponse> selectTravelTarget(SelectTravelTargetRequest request) {
-                return CompletableFuture.failedFuture(new IllegalStateException(PLACEHOLDER_REASON));
-            }
+    public GateSource gateSource(RedissonClient redis) {
+        return new RedisGateSource(redis);
+    }
 
-            @Override
-            public CompletableFuture<RedirectToZoneResponse> redirectToZone(RedirectToZoneRequest request) {
-                return CompletableFuture.failedFuture(new IllegalStateException(PLACEHOLDER_REASON));
-            }
+    /** 合服围栏的读侧（检查点 F4）：批次 7.3 之前没有合服，恒放行；7.3 换成读 Redis 的实现，不动 {@link TravelRouter}。 */
+    @Bean
+    public ZoneMergeFence zoneMergeFence() {
+        return ZoneMergeFence.OPEN;
+    }
 
-            @Override
-            public String toString() {
-                return "TravelRouting.PLACEHOLDER";
-            }
-        };
+    /** 重定向票据的签发器：缺 gate 令牌密钥即拒绝启动（见类注释）。 */
+    @Bean
+    public GateTokenIssuer gateTokenIssuer(Environment environment) {
+        String secret = environment.getProperty(TOKEN_SECRET_ENV);
+        if (secret == null || secret.isBlank()) {
+            throw new IllegalStateException("缺少环境变量 " + TOKEN_SECRET_ENV
+                    + "（gate 令牌密钥，scene-manager 用它签跨 zone 重定向票据，须与 xm-gateway、xm-gate 一致）");
+        }
+        return new GateTokenIssuer(GateTokens.ofUtf8(secret), Clock.systemUTC(), new SecureRandom());
+    }
+
+    @Bean
+    public TravelRouting travelRouting(WorldChannelStore worldChannelStore, SceneNodeSource sceneNodeSource, GateSource gateSource,
+                                       WorldSceneConfigs worldSceneConfigs, ZoneMergeFence zoneMergeFence,
+                                       GateTokenIssuer gateTokenIssuer, MeterRegistry meterRegistry) {
+        return new TravelRouter(worldChannelStore, sceneNodeSource, gateSource, worldSceneConfigs, zoneMergeFence,
+                gateTokenIssuer, meterRegistry);
     }
 }

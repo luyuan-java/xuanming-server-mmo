@@ -11,7 +11,7 @@ import java.util.List;
  *   <li>返回该 zone 下当前未过期的 gate 条目，顺序不保证；可能包含刚死、尚未过期的节点，调用方不得假设都连得上；</li>
  *   <li>条目内容来自各 gate 自己发布，调用方要自行过滤不可用的条目（见 {@link GatePicker}）；</li>
  *   <li>目录不可达时抛 {@link RuntimeException}，调用方按 fail-closed 处理，不得当成「没有 gate」以外的成功；</li>
- *   <li>阻塞调用，线程安全；只能在 Servlet 请求线程等允许阻塞的线程上调用。</li>
+ *   <li>阻塞调用，线程安全；只能在 Servlet 请求线程、Dubbo 业务线程（scene-manager 的跨 zone 选路，批次 5.4）等允许阻塞的线程上调用。</li>
  * </ul>
  */
 public interface GateSource {
