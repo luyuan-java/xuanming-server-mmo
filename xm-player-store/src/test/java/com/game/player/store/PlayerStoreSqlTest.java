@@ -350,9 +350,16 @@ class PlayerStoreSqlTest {
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(3));
     }
 
-    // ---------------------------------------------------------------- 交出并释放（跨 zone 传送，批次 5.4）
-    // 先行件的冒烟用例：只钉「RELEASE 这一笔事务做对了」与「六参数的 HOLD = 五参数形式」。
-    // 提交后旧 epoch 的各种写、未提交的三种情况、重试改判、探测、并发，见 zone-travel-spec §11.2。
+    // ---------------------------------------------------------------- 交出并释放（跨 zone 传送，批次 5.4，zone-travel-spec §5.2、§11.2）
+    // 本节钉存储原语在库里的行为：提交即 (E+1, 已释放, L_i)、立即夺到 E+2、旧 epoch 的写全被拒、没提交的不改任何列、
+    // 重试 / 探测读到的那一行（改判与探测的分类在 xm-scene 的 StoragePlayerRepository，按这里读到的行查表）、并发下结论确定。
+
+    /** 按「现在」取一次给定模式的交出尝试：新租约 now + 30 s，剩余租约下限 now + 15 s。 */
+    private HandOffResult handOff(long playerId, long epoch, int sceneConfigId, double x, PlayerState state, HandOffMode mode) {
+        long now = CLOCK.get();
+        return store.handOffOwnership(save(playerId, epoch, sceneConfigId, x), state,
+                now + PlayerStore.OWNER_LEASE.toMillis(), now + MARGIN_MS, TX_TIMEOUT, mode);
+    }
 
     @Test
     void 交出并释放_提交后是E加1且已释放_租约是传入值_不等租约立即夺到E加2且读到冻结快照() {
@@ -402,6 +409,186 @@ class PlayerStoreSqlTest {
         assertThat(owner(p)).isEqualTo(new OwnerState(2, false, lease));
         assertThat(store.claimOwnership(p)).as("与交出并释放的唯一区别：E+1 有人持有，要等它释放或租约过期")
                 .isEqualTo(new ClaimResult.Held(2));
+    }
+
+    @Test
+    void 交出并释放之后旧epoch的写全被拒_对E加1的释放与续约都是空操作_什么也不改_随后立即夺到E加2() {
+        long p = newPlayer(1383, "释放丙");
+        store.claimOwnership(p);
+        long lease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
+        assertThat(handOff(p, 1, 5, 77.5, facing(3), HandOffMode.RELEASE)).isEqualTo(new HandOffResult.HandedOff(2));
+        List<Object> handedOff = everything(p);
+
+        assertThat(store.saveStateAndRelease(save(p, 1, 9, 99), facing(9))).as("停服 / 离场的最终写回(E)").isFalse();
+        assertThat(store.saveStateHeld(save(p, 1, 9, 99), facing(9))).as("迟到的在线存盘(E)").isFalse();
+        assertThat(store.renewOwnerLeases(List.of(new OwnerLease(p, 1)))).as("续约(E)").containsExactly(new OwnerLease(p, 1));
+        assertThat(store.releaseOwnership(p, 1)).as("释放(E)").isFalse();
+        assertThat(handOff(p, 1, 9, 99, facing(9), HandOffMode.RELEASE)).as("再交出(E)").isInstanceOf(HandOffResult.Fenced.class);
+        assertThat(handOff(p, 1, 9, 99, facing(9), HandOffMode.HOLD)).isInstanceOf(HandOffResult.Fenced.class);
+        assertThat(store.releaseOwnership(p, 2)).as("E+1 提交时已释放：对它的释放是空操作").isFalse();
+        assertThat(store.renewOwnerLeases(List.of(new OwnerLease(p, 2)))).as("E+1 没有持有者，续不上")
+                .containsExactly(new OwnerLease(p, 2));
+        assertThat(everything(p)).as("迟到的写碰不到交出并释放之后的行").isEqualTo(handedOff);
+        assertThat(owner(p)).isEqualTo(new OwnerState(2, true, lease));
+
+        assertThat(store.claimOwnership(p)).as("不等租约：已释放即可夺权").isEqualTo(new ClaimResult.Claimed(3));
+        assertThat(store.findPlayer(p).orElseThrow().getSceneConfigId()).as("夺到的是冻结快照").isEqualTo(5);
+        assertThat(store.loadState(p)).isEqualTo(facing(3));
+    }
+
+    /** 归属区（zone-travel-spec §3.2、§3.4）：建角写调用方给的 zone（login 传会话 zone）；去程交出并释放、目标 zone 夺权都不动它。 */
+    @Test
+    void 建角写入传入的zone_交出并释放与目标zone的夺权都不动归属区() {
+        PlayerRow row = new PlayerRow();
+        row.setPlayerId(1385);
+        row.setAccount(ACCOUNT);
+        row.setZoneId(2);
+        row.setClassId(1);
+        row.setGender(1);
+        assertThat(store.createPlayerWithinCap(row, 5, List.of("归属乙")).status()).isEqualTo(PlayerStore.CreateStatus.CREATED);
+        assertThat(store.findPlayer(1385).orElseThrow().getZoneId()).isEqualTo(2);
+
+        store.claimOwnership(1385);
+        assertThat(handOff(1385, 1, 5, 77.5, facing(3), HandOffMode.RELEASE)).isEqualTo(new HandOffResult.HandedOff(2));
+        assertThat(store.claimOwnership(1385)).isEqualTo(new ClaimResult.Claimed(3));
+        assertThat(store.findPlayer(1385).orElseThrow().getZoneId()).as("传送不改归属区").isEqualTo(2);
+    }
+
+    /** 没提交的三种情况（epoch 不是 E、已释放、剩余租约不足）两种模式各试一遍：结果相同、库里什么也不改。 */
+    @Test
+    void 交出没提交的三种情况_两种模式都回对应结局且什么也不改() {
+        long stale = newPlayer(1391, "未提交甲");
+        store.claimOwnership(stale);
+        long released = newPlayer(1392, "未提交乙");
+        store.claimOwnership(released);
+        assertThat(store.saveStateAndRelease(save(released, 1, 2, 20), facing(0.75))).isTrue();
+        long shortLease = newPlayer(1393, "未提交丙");
+        store.claimOwnership(shortLease);
+        List<Object> staleBefore = everything(stale);
+        List<Object> releasedBefore = everything(released);
+        List<Object> shortBefore = everything(shortLease);
+
+        for (HandOffMode mode : HandOffMode.values()) {
+            CLOCK.set(1_000_000L);
+            assertThat(handOff(stale, 7, 5, 1, facing(9), mode)).as("%s：epoch 不是 E", mode)
+                    .isEqualTo(new HandOffResult.Fenced(new OwnerState(1, false, CLAIMED_LEASE)));
+            assertThat(handOff(released, 1, 5, 1, facing(9), mode)).as("%s：已释放", mode)
+                    .isEqualTo(new HandOffResult.Fenced(new OwnerState(1, true, CLAIMED_LEASE)));
+            CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() - MARGIN_MS + 1);
+            assertThat(handOff(shortLease, 1, 5, 1, facing(9), mode)).as("%s：剩余租约比安全边际少 1 ms", mode)
+                    .isEqualTo(new HandOffResult.LeaseTooShort(new OwnerState(1, false, CLAIMED_LEASE)));
+            assertThat(handOff(424242, 1, 5, 1, facing(9), mode)).as("%s：玩家不存在", mode)
+                    .isEqualTo(new HandOffResult.Fenced(null));
+
+            assertThat(everything(stale)).isEqualTo(staleBefore);
+            assertThat(everything(released)).isEqualTo(releasedBefore);
+            assertThat(everything(shortLease)).isEqualTo(shortBefore);
+        }
+    }
+
+    /**
+     * 重试改判要读到的行（分类在 xm-scene 的 StoragePlayerRepository）：已提交的交出并释放再执行一次，回 Fenced 且带着
+     * (E+1, <b>已释放</b>, 上一次写下的租约值)——不是 HOLD 的「未释放」；随后被别的登录接管，再重试读到 (E+2, 未释放, 新持有者的租约)。
+     */
+    @Test
+    void 交出并释放已提交后再执行一次_读到E加1已释放与上一次的租约值_被接管后读到E加2() {
+        long p = newPlayer(1384, "释放丁");
+        store.claimOwnership(p);
+        long firstLease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
+        assertThat(handOff(p, 1, 5, 77.5, facing(3), HandOffMode.RELEASE)).isEqualTo(new HandOffResult.HandedOff(2));
+
+        CLOCK.addAndGet(400);
+        assertThat(handOff(p, 1, 5, 77.5, facing(3), HandOffMode.RELEASE)).as("应答丢失后的重试")
+                .isEqualTo(new HandOffResult.Fenced(new OwnerState(2, true, firstLease)));
+        assertThat(owner(p).leaseUntil()).as("重试没有改动租约").isEqualTo(firstLease);
+
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(3));
+        long claimedLease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
+        CLOCK.addAndGet(400);
+        assertThat(handOff(p, 1, 5, 77.5, facing(3), HandOffMode.RELEASE)).as("被第二条腿接管之后的重试")
+                .isEqualTo(new HandOffResult.Fenced(new OwnerState(3, false, claimedLease)));
+        assertThat(store.probeOwnership(p, TX_TIMEOUT)).as("探测读到同一行").contains(new OwnerState(3, false, claimedLease));
+    }
+
+    @Test
+    void 交出并释放与最终写回同时发起_恰好一个成功_库里是同一份快照() throws Exception {
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < 5; i++) {
+                long p = newPlayer(1440 + i, "释放并发" + i);
+                store.claimOwnership(p);
+                java.util.concurrent.CyclicBarrier start = new java.util.concurrent.CyclicBarrier(2);
+                java.util.concurrent.Future<HandOffResult> handOff = pool.submit(() -> {
+                    start.await();
+                    return handOff(p, 1, 7, 33.5, facing(4), HandOffMode.RELEASE);
+                });
+                java.util.concurrent.Future<Boolean> finalSave = pool.submit(() -> {
+                    start.await();
+                    return store.saveStateAndRelease(save(p, 1, 7, 33.5), facing(4));
+                });
+                HandOffResult handOffResult = handOff.get(15, TimeUnit.SECONDS);
+                boolean saved = finalSave.get(15, TimeUnit.SECONDS);
+
+                boolean handedOff = handOffResult instanceof HandOffResult.HandedOff;
+                assertThat(handedOff ^ saved).as("第 %d 轮恰好一个成功：交出=%s 写回=%s", i, handOffResult, saved).isTrue();
+                assertThat(owner(p)).as("两种结局都没有持有者").isEqualTo(handedOff
+                        ? new OwnerState(2, true, CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis())
+                        : new OwnerState(1, true, CLAIMED_LEASE));
+                if (!handedOff) {
+                    assertThat(handOffResult).isEqualTo(new HandOffResult.Fenced(new OwnerState(1, true, CLAIMED_LEASE)));
+                }
+                PlayerRow row = store.findPlayer(p).orElseThrow();
+                assertThat(row.getSceneConfigId()).isEqualTo(7);
+                assertThat(row.getPosX()).isEqualTo(33.5);
+                assertThat(store.loadState(p)).isEqualTo(facing(4));
+                assertThat(savedEpoch(p)).isEqualTo(1);
+                assertThat(store.claimOwnership(p)).as("无论谁赢，下一次夺权都立即成功")
+                        .isEqualTo(new ClaimResult.Claimed(handedOff ? 3 : 2));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * 交出并释放与别的登录夺权同时发起（第二条腿 / 回家重登 / 另一台设备）：E 的租约没到期，夺权只能在交出提交之后成功。
+     * 结论确定：交出恒成功；夺权要么拿到 E+2（库里由它持有），要么回 Held（库里是 (E+1, 已释放)，没有持有者，下一次夺权立即成功）。
+     */
+    @Test
+    void 交出并释放与夺权同时发起_结论确定_库里至多一个持有者() throws Exception {
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < 5; i++) {
+                long p = newPlayer(1450 + i, "夺权并发" + i);
+                store.claimOwnership(p);
+                java.util.concurrent.CyclicBarrier start = new java.util.concurrent.CyclicBarrier(2);
+                java.util.concurrent.Future<HandOffResult> handOff = pool.submit(() -> {
+                    start.await();
+                    return handOff(p, 1, 7, 33.5, facing(4), HandOffMode.RELEASE);
+                });
+                java.util.concurrent.Future<ClaimResult> claim = pool.submit(() -> {
+                    start.await();
+                    return store.claimOwnership(p);
+                });
+                HandOffResult handOffResult = handOff.get(15, TimeUnit.SECONDS);
+                ClaimResult claimResult = claim.get(15, TimeUnit.SECONDS);
+
+                assertThat(handOffResult).as("第 %d 轮：E 的租约没到期，夺权不可能先于交出成功", i)
+                        .isEqualTo(new HandOffResult.HandedOff(2));
+                if (claimResult instanceof ClaimResult.Claimed claimed) {
+                    assertThat(claimed.ownerEpoch()).isEqualTo(3);
+                    assertThat(owner(p)).isEqualTo(new OwnerState(3, false, CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis()));
+                } else {
+                    assertThat(claimResult).as("第 %d 轮", i).isInstanceOf(ClaimResult.Held.class);
+                    assertThat(owner(p)).isEqualTo(new OwnerState(2, true, CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis()));
+                    assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(3));
+                }
+                assertThat(store.findPlayer(p).orElseThrow().getPosX()).as("夺到的是冻结快照").isEqualTo(33.5);
+                assertThat(store.saveStateAndRelease(save(p, 1, 9, 99), facing(9))).as("E 的迟到写回被拒").isFalse();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -553,14 +740,51 @@ class PlayerStoreSqlTest {
         assertProbeWaitsForInFlightHandOff(1373, false);
     }
 
-    private void assertProbeWaitsForInFlightHandOff(long playerId, boolean commit) throws Exception {
-        long p = newPlayer(playerId, "探测" + playerId);
+    @Test
+    void 探测_另一连接持有未提交的交出并释放时阻塞_提交后读到E加1已释放与它写下的租约() throws Exception {
+        assertProbeWaitsForInFlightHandOff(1376, true, HandOffMode.RELEASE);
+    }
+
+    @Test
+    void 探测_另一连接持有未提交的交出并释放时阻塞_回滚后读到原epoch未释放() throws Exception {
+        assertProbeWaitsForInFlightHandOff(1377, false, HandOffMode.RELEASE);
+    }
+
+    /** 交出并释放提交后、探测之前又被别的登录夺权：探测读到 E+2（xm-scene 据此判 Superseded，按被接管踢 2017）。 */
+    @Test
+    void 探测_交出并释放提交后又被另一连接夺权_读到E加2未释放() throws Exception {
+        long p = newPlayer(1378, "探测丙");
         store.claimOwnership(p);
         CountDownLatch locked = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         long lease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
         CompletableFuture<Void> holder = holdRowLock(() -> assertThat(mapper.updateStateAndHandOff(
-                stamped(save(p, 1, 5, 20)), lease, CLOCK.get() + MARGIN_MS, 0)).isEqualTo(1), locked, release, commit);
+                stamped(save(p, 1, 5, 20)), lease, CLOCK.get() + MARGIN_MS, 1)).isEqualTo(1), locked, release, true);
+        assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+        release.countDown();
+        holder.get(10, TimeUnit.SECONDS);
+
+        CLOCK.addAndGet(1_000);
+        assertThat(store.claimOwnership(p)).as("另一连接（第二条腿）立即夺到 E+2").isEqualTo(new ClaimResult.Claimed(3));
+        assertThat(store.probeOwnership(p, TX_TIMEOUT))
+                .contains(new OwnerState(3, false, CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis()));
+    }
+
+    private void assertProbeWaitsForInFlightHandOff(long playerId, boolean commit) throws Exception {
+        assertProbeWaitsForInFlightHandOff(playerId, commit, HandOffMode.HOLD);
+    }
+
+    /** 另一个连接按 {@code mode} 执行交出的那条 UPDATE、拿住行锁不提交：探测必须等它结束，再按提交 / 回滚读到确定的行。 */
+    private void assertProbeWaitsForInFlightHandOff(long playerId, boolean commit, HandOffMode mode) throws Exception {
+        long p = newPlayer(playerId, "探测" + playerId);
+        store.claimOwnership(p);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        long lease = CLOCK.get() + PlayerStore.OWNER_LEASE.toMillis();
+        boolean releasedOnCommit = mode == HandOffMode.RELEASE;
+        CompletableFuture<Void> holder = holdRowLock(() -> assertThat(mapper.updateStateAndHandOff(
+                stamped(save(p, 1, 5, 20)), lease, CLOCK.get() + MARGIN_MS, releasedOnCommit ? 1 : 0)).isEqualTo(1),
+                locked, release, commit);
         assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
 
         CompletableFuture<java.util.Optional<OwnerState>> probe =
@@ -571,7 +795,7 @@ class PlayerStoreSqlTest {
         release.countDown();
         holder.get(10, TimeUnit.SECONDS);
         assertThat(probe.get(10, TimeUnit.SECONDS)).contains(commit
-                ? new OwnerState(2, false, lease) : new OwnerState(1, false, CLAIMED_LEASE));
+                ? new OwnerState(2, releasedOnCommit, lease) : new OwnerState(1, false, CLAIMED_LEASE));
     }
 
     @Test

@@ -3,7 +3,9 @@ package com.game.scene.storage;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -576,38 +578,269 @@ class StoragePlayerRepositoryTest {
         assertThat(writes("probe", "not_committed").count()).isEqualTo(1);
     }
 
+    // ------------------------------------------------------------------ 交出并释放（批次 5.4，zone-travel-spec §5.2、§11.2）
+
+    private static final HandOffOutcome HANDED_OFF = new HandOffOutcome.HandedOff(10);
+    private static final HandOffOutcome FENCED = new HandOffOutcome.Fenced();
+    private static final HandOffOutcome SUPERSEDED = new HandOffOutcome.Superseded();
+
+    /** 按模式取一次交出尝试的桩：HOLD 走五个参数的形式（5.2 的调用原样不动），RELEASE 走六个参数的形式。 */
+    private HandOffResult attemptHandOff(HandOffMode mode) {
+        return mode == HandOffMode.HOLD ? attemptHandOff()
+                : store.handOffOwnership(any(), any(), anyLong(), anyLong(), any(), eq(HandOffMode.RELEASE));
+    }
+
+    private static HandOffOutcome.Failed failed(HandOffMode mode, long firstAttemptNanos, Long... leases) {
+        return new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(firstAttemptNanos, List.of(leases)), mode);
+    }
+
+    private long storageWrites(String op) {
+        return meters.find("xm.scene.storage.writes").tag("op", op).timers().stream().mapToLong(Timer::count).sum();
+    }
+
+    @Test
+    void 交出并释放_发RELEASE事务_租约与安全边际同HOLD_不走五参数形式_不释放_结局投递回逻辑线程() throws Exception {
+        when(attemptHandOff(HandOffMode.RELEASE)).thenReturn(new HandOffResult.HandedOff(10));
+        StoragePlayerRepository repository = handing();
+        List<HandOffOutcome> results = new ArrayList<>();
+
+        repository.handOff(FROZEN, HandOffMode.RELEASE, results::add);
+
+        assertThat(results).as("回调不在调用栈内").isEmpty();
+        assertThat(runLogic(results)).containsExactly(HANDED_OFF);
+        ArgumentCaptor<PlayerRow> row = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store).handOffOwnership(row.capture(), eq(FROZEN.state()), eq(1_030_000L), eq(1_015_000L),
+                eq(Duration.ofSeconds(3)), eq(HandOffMode.RELEASE));
+        verify(store, never()).handOffOwnership(any(), any(), anyLong(), anyLong(), any());
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
+        assertThat(row.getValue().getPlayerId()).isEqualTo(1001L);
+        assertThat(row.getValue().getOwnerEpoch()).as("围栏是交出方持有的 E").isEqualTo(9L);
+        assertThat(row.getValue().getSceneConfigId()).isEqualTo(2);
+        assertThat(row.getValue().getPosX()).isEqualTo(7);
+        assertThat(writes("handoff", "handed_off").count()).isEqualTo(1);
+        assertThat(repository.writeFailures()).isZero();
+        assertThat(repository.awaitTransfersSettled(TimeUnit.SECONDS.toNanos(5))).isZero();
+    }
+
     /**
-     * 批次 5.4 先行件的占位（之后由「交出并释放」的工作包换成真实现并改写本用例）：RELEASE 模式的交出<b>一笔库事务都不发</b>——
-     * 重试改判与探测还按 HOLD 的表判，照着做会把已提交的传送误判成围栏。结局是「一次也没尝试」的结局不明（带着 RELEASE 模式），
-     * 仍然异步投递；随后的探测不读库、直接判没提交，调用方据此原地解冻。全程不释放任何 epoch，在途计数回到 0。
+     * 重试改判逐格（zone-travel-spec §5.2 的表）：第一次尝试以超时失败（结局不明，写下 L1 = 1_030_000），第二次尝试（L2 = 1_030_200）
+     * 回 Fenced 并带着同一事务里加锁读到的那一行。E = 9。两种模式各查各的表：HOLD 的行为与 5.2 逐字相同。
      */
     @Test
-    void 交出并释放的占位_不发库事务_以空尝试的结局不明交回_探测判没提交_在途计数归零() throws Exception {
+    void 重试改判表_逐格_两种模式各按各的表() {
+        record Cell(String what, OwnerState read, HandOffOutcome hold, HandOffOutcome release) {
+        }
+        List<Cell> table = List.of(
+                new Cell("(E+1, 未释放, L1)", new OwnerState(10, false, 1_030_000), HANDED_OFF, FENCED),
+                new Cell("(E+1, 已释放, L1)", new OwnerState(10, true, 1_030_000), FENCED, HANDED_OFF),
+                new Cell("(E+1, 未释放, 别人的租约值)", new OwnerState(10, false, 1_031_234), FENCED, FENCED),
+                new Cell("(E+1, 已释放, 别人的租约值)", new OwnerState(10, true, 1_031_234), FENCED, FENCED),
+                new Cell("(E+1, 已释放, 本次尝试的 L2)", new OwnerState(10, true, 1_030_200), FENCED, FENCED),
+                new Cell("(E+2, 未释放, *)", new OwnerState(11, false, 1_030_000), FENCED, SUPERSEDED),
+                new Cell("(E+2, 已释放, *)", new OwnerState(11, true, 1_030_000), FENCED, SUPERSEDED),
+                new Cell("(E+7, 未释放, *)", new OwnerState(16, false, 1), FENCED, SUPERSEDED),
+                new Cell("(2^64−1, 未释放, *)：epoch 按无符号比", new OwnerState(-1L, false, 1), FENCED, SUPERSEDED),
+                new Cell("(E, 已释放, *)", new OwnerState(9, true, 1_030_000), FENCED, FENCED),
+                new Cell("玩家不存在", null, FENCED, FENCED));
+        StoragePlayerRepository repository = handing();
+        for (Cell cell : table) {
+            for (HandOffMode mode : HandOffMode.values()) {
+                org.mockito.Mockito.reset(store);
+                wall[0] = 1_000_000;
+                when(attemptHandOff(mode)).thenThrow(new QueryTimeoutException("提交应答丢失"))
+                        .thenReturn(new HandOffResult.Fenced(cell.read()));
+                List<HandOffOutcome> results = new ArrayList<>();
+
+                repository.handOff(FROZEN, mode, results::add);
+
+                assertThat(runLogic(results)).as("%s / %s", cell.what(), mode)
+                        .containsExactly(mode == HandOffMode.HOLD ? cell.hold() : cell.release());
+                verify(store, never()).releaseOwnership(anyLong(), anyLong());
+            }
+        }
+        assertThat(writes("handoff", "superseded").count()).isEqualTo(4);
+        assertThat(writes("handoff", "handed_off").count()).isEqualTo(2);
+        assertThat(writes("handoff", "fenced").count()).isEqualTo(table.size() * 2 - 6);
+    }
+
+    /** 没有结局不明的更早尝试时，读到 ≥ E+2 就是被围栏拒（epoch 在这次交出之前就被夺走了），不是 Superseded；没提交的两种结果不看模式。 */
+    @Test
+    void 交出并释放_第一次尝试就读到E加2是Fenced不是Superseded_租约不足原样回报_不重试() {
+        when(attemptHandOff(HandOffMode.RELEASE))
+                .thenReturn(new HandOffResult.Fenced(new OwnerState(11, false, 1)))
+                .thenReturn(new HandOffResult.Fenced(new OwnerState(10, true, 1_030_000)))
+                .thenReturn(new HandOffResult.LeaseTooShort(new OwnerState(9, false, 1_010_000)));
+        StoragePlayerRepository repository = handing();
+        List<HandOffOutcome> results = new ArrayList<>();
+
+        repository.handOff(FROZEN, HandOffMode.RELEASE, results::add);
+        repository.handOff(FROZEN, HandOffMode.RELEASE, results::add);
+        repository.handOff(FROZEN, HandOffMode.RELEASE, results::add);
+
+        assertThat(runLogic(results)).as("第二次：本次尝试影响 0 行，库里的租约值不可能是它写的")
+                .containsExactly(FENCED, FENCED, new HandOffOutcome.LeaseTooShort());
+        assertThat(sleeps).isEmpty();
+        assertThat(writes("handoff", "superseded").count()).isZero();
+        assertThat(writes("handoff", "fenced").count()).isEqualTo(2);
+        assertThat(writes("handoff", "lease_too_short").count()).isEqualTo(1);
+    }
+
+    @Test
+    void 交出并释放_重试用尽_结局不明带RELEASE模式与每次的租约值_探测按RELEASE的表认回已交出() throws Exception {
+        nanos[0] = 7_000;
+        when(attemptHandOff(HandOffMode.RELEASE)).thenThrow(new CannotGetJdbcConnectionException("库挂了"));
+        when(store.probeOwnership(1001, Duration.ofSeconds(3))).thenReturn(Optional.of(new OwnerState(10, true, 1_030_200)));
         StoragePlayerRepository repository = handing();
         List<HandOffOutcome> handOffs = new ArrayList<>();
 
         repository.handOff(FROZEN, HandOffMode.RELEASE, handOffs::add);
 
-        assertThat(handOffs).as("仍异步回调，不在调用栈内").isEmpty();
+        HandOffOutcome outcome = runLogic(handOffs).get(0);
+        assertThat(outcome).isEqualTo(failed(HandOffMode.RELEASE, 7_000, 1_030_000L, 1_030_200L, 1_030_600L));
+        assertThat(repository.writeFailures()).isZero();
+        assertThat(writes("handoff", "failed").count()).isEqualTo(1);
+
+        List<ProbeOutcome> probes = new ArrayList<>();
+        repository.probe((HandOffOutcome.Failed) outcome, probes::add);
+        assertThat(probes).as("回调不在调用栈内").isEmpty();
+        assertThat(runLogic(probes)).containsExactly(new ProbeOutcome.HandedOff(10));
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
+        assertThat(writes("probe", "handed_off").count()).isEqualTo(1);
+        assertThat(repository.awaitTransfersSettled(TimeUnit.SECONDS.toNanos(5))).isZero();
+    }
+
+    @Test
+    void 交出并释放被线程池拒绝_结局不明带RELEASE模式且尝试为空_探测不读库直接判没提交() throws Exception {
+        StoragePlayerRepository repository = handing(new RejectingExecutorService(), logic);
+        List<HandOffOutcome> handOffs = new ArrayList<>();
+
+        repository.handOff(FROZEN, HandOffMode.RELEASE, handOffs::add);
+
+        assertThat(handOffs).as("仍异步回调").isEmpty();
         HandOffOutcome outcome = runLogic(handOffs).get(0);
         assertThat(outcome).isEqualTo(new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(0, List.of()), HandOffMode.RELEASE));
-        assertThat(outcome).as("模式不同就不是同一个结局：HOLD 的三参数形式不等于它")
-                .isNotEqualTo(new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(0, List.of())));
-        assertThat(handOffs).hasSize(1);
+        assertThat(outcome).as("模式不同就不是同一个结局").isNotEqualTo(new HandOffOutcome.Failed(1001, 9, new HandOffAttempts(0, List.of())));
 
         List<ProbeOutcome> probes = new ArrayList<>();
         repository.probe((HandOffOutcome.Failed) outcome, probes::add);
         assertThat(runLogic(probes)).containsExactly(new ProbeOutcome.NotCommitted());
-
-        verify(store, org.mockito.Mockito.never()).handOffOwnership(any(), any(), anyLong(), anyLong(), any());
-        verify(store, org.mockito.Mockito.never()).handOffOwnership(any(), any(), anyLong(), anyLong(), any(), any());
-        verify(store, org.mockito.Mockito.never()).probeOwnership(anyLong(), any());
-        verify(store, org.mockito.Mockito.never()).releaseOwnership(anyLong(), anyLong());
-        assertThat(writes("handoff", "rejected").count()).as("没执行的交出计一次 rejected").isEqualTo(1);
-        assertThat(writes("handoff", "handed_off").count()).isZero();
+        verify(store, never()).probeOwnership(anyLong(), any());
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
+        assertThat(writes("handoff", "rejected").count()).isEqualTo(1);
         assertThat(writes("probe", "not_committed").count()).isEqualTo(1);
-        assertThat(repository.writeFailures()).isZero();
-        assertThat(repository.awaitTransfersSettled(TimeUnit.SECONDS.toNanos(5))).as("交出与探测都已处理完，没有在途").isZero();
+        assertThat(repository.awaitTransfersSettled(TimeUnit.SECONDS.toNanos(5))).isZero();
+    }
+
+    /** 探测逐格（zone-travel-spec §5.2 的表）：这次交出写过 L1 = 1_030_000、L2 = 1_030_200，E = 9。 */
+    @Test
+    void 探测表_逐格_两种模式各按各的表() {
+        ProbeOutcome notCommitted = new ProbeOutcome.NotCommitted();
+        ProbeOutcome handedOff = new ProbeOutcome.HandedOff(10);
+        ProbeOutcome superseded = new ProbeOutcome.Superseded();
+        ProbeOutcome lost = new ProbeOutcome.Lost();
+        record Cell(String what, Optional<OwnerState> read, ProbeOutcome hold, ProbeOutcome release) {
+        }
+        List<Cell> table = List.of(
+                new Cell("(E, 未释放, *)", Optional.of(new OwnerState(9, false, 1_029_000)), notCommitted, notCommitted),
+                new Cell("(E+1, 未释放, L2)", Optional.of(new OwnerState(10, false, 1_030_200)), handedOff, lost),
+                new Cell("(E+1, 已释放, L1)", Optional.of(new OwnerState(10, true, 1_030_000)), lost, handedOff),
+                new Cell("(E+1, 已释放, 别人的租约值)", Optional.of(new OwnerState(10, true, 1_031_234)), lost, lost),
+                new Cell("(E+1, 未释放, 别人的租约值)", Optional.of(new OwnerState(10, false, 1_031_234)), lost, lost),
+                new Cell("(E+2, 未释放, *)", Optional.of(new OwnerState(11, false, 1_030_000)), lost, superseded),
+                new Cell("(E+2, 已释放, *)", Optional.of(new OwnerState(11, true, 1_030_000)), lost, superseded),
+                new Cell("(2^64−1, 未释放, *)：epoch 按无符号比", Optional.of(new OwnerState(-1L, false, 1)), lost, superseded),
+                new Cell("(E, 已释放, *)", Optional.of(new OwnerState(9, true, 1_030_000)), lost, lost),
+                new Cell("玩家不存在", Optional.empty(), lost, lost));
+        StoragePlayerRepository repository = handing();
+        for (Cell cell : table) {
+            for (HandOffMode mode : HandOffMode.values()) {
+                org.mockito.Mockito.reset(store);
+                when(store.probeOwnership(1001, Duration.ofSeconds(3))).thenReturn(cell.read());
+                List<ProbeOutcome> results = new ArrayList<>();
+
+                repository.probe(failed(mode, 0, 1_030_000L, 1_030_200L), results::add);
+
+                assertThat(results).as("回调不在调用栈内").isEmpty();
+                assertThat(runLogic(results)).as("%s / %s", cell.what(), mode)
+                        .containsExactly(mode == HandOffMode.HOLD ? cell.hold() : cell.release());
+                verify(store, never()).releaseOwnership(anyLong(), anyLong());
+            }
+        }
+        assertThat(writes("probe", "superseded").count()).isEqualTo(3);
+        assertThat(writes("probe", "handed_off").count()).isEqualTo(2);
+        assertThat(writes("probe", "not_committed").count()).isEqualTo(2);
+        assertThat(writes("probe", "lost").count()).isEqualTo(table.size() * 2 - 7);
+    }
+
+    @Test
+    void 探测_交出并释放_一直读不到_到截止判失去() {
+        when(store.probeOwnership(anyLong(), any())).thenAnswer(inv -> {
+            nanos[0] += Duration.ofSeconds(3).toNanos();
+            throw new QueryTimeoutException("锁一直被占");
+        });
+        List<ProbeOutcome> results = new ArrayList<>();
+
+        handing().probe(failed(HandOffMode.RELEASE, 0, 1_030_000L), results::add);
+
+        assertThat(runLogic(results)).containsExactly(new ProbeOutcome.Lost());
+        verify(store, times(4)).probeOwnership(anyLong(), any());
+        assertThat(writes("probe", "lost").count()).isEqualTo(1);
+    }
+
+    /**
+     * 结局投递被拒（逻辑线程已停）：交出并释放提交时 E+1 已释放，「已交出」的结局投递不到时什么都不做（不像 HOLD 那样在存储线程上释放 E+1），
+     * 其余结局照常丢弃；在途计数照样归零。
+     */
+    @Test
+    void 结局投递被拒_交出并释放什么都不释放_在途计数归零() throws Exception {
+        Executor stopped = task -> {
+            throw new RejectedExecutionException("逻辑线程已停");
+        };
+        when(attemptHandOff(HandOffMode.RELEASE)).thenReturn(new HandOffResult.HandedOff(10))
+                .thenReturn(new HandOffResult.Fenced(new OwnerState(12, false, 1)));
+        when(store.probeOwnership(anyLong(), any())).thenReturn(Optional.of(new OwnerState(10, true, 1_030_000)))
+                .thenReturn(Optional.of(new OwnerState(11, false, 1_029_000)))
+                .thenReturn(Optional.of(new OwnerState(9, false, 1_029_000)));
+        StoragePlayerRepository repository = handing(new DirectExecutorService(), stopped);
+
+        repository.handOff(FROZEN, HandOffMode.RELEASE, outcome -> {
+            throw new AssertionError("不该执行");
+        });
+        repository.handOff(FROZEN, HandOffMode.RELEASE, outcome -> {
+            throw new AssertionError("不该执行");
+        });
+        for (int i = 0; i < 3; i++) {
+            repository.probe(failed(HandOffMode.RELEASE, 0, 1_030_000L), outcome -> {
+                throw new AssertionError("不该执行");
+            });
+        }
+
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
+        assertThat(storageWrites("release")).as("没有任何释放任务").isZero();
+        assertThat(writes("handoff", "handed_off").count()).isEqualTo(1);
+        assertThat(writes("probe", "handed_off").count()).isEqualTo(1);
+        assertThat(writes("probe", "superseded").count()).isEqualTo(1);
+        assertThat(writes("probe", "not_committed").count()).isEqualTo(1);
+        assertThat(repository.awaitTransfersSettled(TimeUnit.SECONDS.toNanos(5))).isZero();
+    }
+
+    @Test
+    void 停服丢弃的交出并释放与探测任务能逐条描述_带上模式() {
+        List<Runnable> queued = new ArrayList<>();
+        StoragePlayerRepository queuing = handing(new DirectExecutorService() {
+            @Override
+            public void execute(Runnable command) {
+                queued.add(command);
+            }
+        }, logic);
+
+        queuing.handOff(FROZEN, HandOffMode.RELEASE, outcome -> { });
+        queuing.probe(failed(HandOffMode.RELEASE, 0, 1_030_000L), outcome -> { });
+
+        assertThat(StoragePlayerRepository.describeDropped(queued.get(0))).hasValueSatisfying(text -> assertThat(text)
+                .contains("交出并释放").contains("1001").contains("epoch=9").contains("scene_config=2"));
+        assertThat(StoragePlayerRepository.describeDropped(queued.get(1))).hasValueSatisfying(text -> assertThat(text)
+                .contains("探测").contains("RELEASE").contains("1030000"));
     }
 
     /** 模式不给是编程错误：当场抛，不提交任务、不留在途计数。两参数形式（5.2 的调用点）等于 HOLD，照常发库事务。 */

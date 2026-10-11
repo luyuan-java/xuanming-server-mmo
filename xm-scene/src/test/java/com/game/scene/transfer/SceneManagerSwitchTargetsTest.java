@@ -16,8 +16,10 @@ import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
 import com.game.api.proto.SelectTravelTargetRequest;
 import com.game.api.proto.SelectTravelTargetResponse;
+import com.game.api.proto.ZoneRedirect;
 import com.game.scene.world.RemoteSwitchTargets.Selection;
-import com.game.scene.world.TravelTargets;
+import com.game.scene.world.TravelTargets.TravelSelection;
+import com.google.protobuf.ByteString;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -65,18 +67,20 @@ class SceneManagerSwitchTargetsTest {
             return nextInstanceReply;
         }
 
-        // 批次 5.4 先行件：接口多了两个方法，这里只为能编译（占位阶段的 selectTravel 不发调用，见文末两条用例）；
-        // 跨 zone 选目标的真调用由适配器的工作包接上并改写这两个桩。
         @Override
         public CompletableFuture<SelectTravelTargetResponse> selectTravelTarget(SelectTravelTargetRequest request) {
-            throw new UnsupportedOperationException();
+            travelRequests.add(request);
+            return nextTravelReply;
         }
 
+        // 登录期重定向（GO-5）只由 login 调，scene 不用
         @Override
         public CompletableFuture<RedirectToZoneResponse> redirectToZone(RedirectToZoneRequest request) {
             throw new UnsupportedOperationException();
         }
     };
+    private final List<SelectTravelTargetRequest> travelRequests = new CopyOnWriteArrayList<>();
+    private volatile CompletableFuture<SelectTravelTargetResponse> nextTravelReply = new CompletableFuture<>();
     private final List<CreateInstanceRequest> instanceRequests = new CopyOnWriteArrayList<>();
     private volatile CompletableFuture<CreateInstanceResponse> nextInstanceReply = new CompletableFuture<>();
 
@@ -272,31 +276,136 @@ class SceneManagerSwitchTargetsTest {
         assertThat(rejected.await(5, TimeUnit.SECONDS)).isTrue();
     }
 
-    /**
-     * 批次 5.4 先行件的占位：跨 zone 传送的选目标（{@code selectTravel}）还没接上真调用——不建引用、不发 Dubbo 调用，
-     * 结果是 {@code Failed("5.4 施工中")}，经逻辑执行器投递、恰好一次、不在调用栈内（调用方按「选目标失败」推 23 {3027}，留在原地）。
-     * 真实现接上后这条用例由对应的工作包改写。
-     */
-    @Test
-    void 跨zone选目标的占位_不发调用_经逻辑执行器回Failed_恰好一次() throws Exception {
-        client = newClient(Duration.ofSeconds(4));
-        List<TravelTargets.TravelSelection> results = new CopyOnWriteArrayList<>();
+    // ------------------------------------------------------------------ 跨 zone 传送的选目标（批次 5.4，zone-travel-spec §5.4、§5.5）
 
-        client.selectTravel(1001, 2, 5, results::add);
+    /** scene-manager 签好的重定向：目标 zone 2 的 4 号 gate。票据是任意字节（scene 不解析、只原样转发，验票在目标 gate 上）。 */
+    private static final ZoneRedirect REDIRECT = ZoneRedirect.newBuilder().setTargetZoneId(2).setGateNodeId(4)
+            .setGateHost("10.0.0.2").setGatePort(11010)
+            .setTokenPayload(ByteString.copyFrom(new byte[] {0x08, 0x04, 0x10, 0x02, (byte) 0xff, 0x00}))
+            .setTokenSignature(ByteString.copyFromUtf8("ab".repeat(32))).setTokenDeadline(1_700_000_300L).build();
 
-        assertThat(results).as("回调不在 selectTravel 的调用栈内").isEmpty();
+    private static SelectTravelTargetResponse chosen(int sceneConfigId, ZoneRedirect redirect) {
+        return SelectTravelTargetResponse.newBuilder().setSceneConfigId(sceneConfigId).setRedirect(redirect).build();
+    }
+
+    /** 选一次跨 zone 目标，等结果投递进逻辑队列后在测试线程上执行，返回结果；断言恰好一次。 */
+    private TravelSelection travelAndAwait(int toZoneId, int wantSceneConfigId) throws InterruptedException {
+        List<TravelSelection> results = new CopyOnWriteArrayList<>();
+        client.selectTravel(1001, toZoneId, wantSceneConfigId, results::add);
         Runnable task = logicQueue.poll(5, TimeUnit.SECONDS);
         assertThat(task).as("结果投递到了逻辑执行器").isNotNull();
+        assertThat(results).as("回调不在别的线程上直接跑").isEmpty();
         task.run();
-        assertThat(results).containsExactly(new TravelTargets.TravelSelection.Failed("5.4 施工中"));
-        assertThat(logicQueue).as("恰好一次").isEmpty();
-        assertThat(connects.get()).as("占位不建 scene-manager 引用").isZero();
-        assertThat(requests).isEmpty();
+        assertThat(logicQueue.poll(100, TimeUnit.MILLISECONDS)).as("恰好一次").isNull();
+        assertThat(results).hasSize(1);
+        return results.get(0);
     }
 
     @Test
-    void 跨zone选目标的占位_逻辑线程已停_结果丢弃不抛() {
+    void 跨zone选目标_请求带上源zone_目标zone_玩家与想去的地图_选中映射成Chosen_票据原样() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        SelectTravelTargetResponse reply = chosen(5, REDIRECT);
+        nextTravelReply = CompletableFuture.completedFuture(reply);
+
+        TravelSelection selection = travelAndAwait(2, 5);
+
+        assertThat(selection).isEqualTo(new TravelSelection.Chosen(5, REDIRECT));
+        assertThat(((TravelSelection.Chosen) selection).redirect().getTokenPayload()).as("票据字节原样，不解析、不重组")
+                .isSameAs(reply.getRedirect().getTokenPayload());
+        assertThat(travelRequests).singleElement().isEqualTo(SelectTravelTargetRequest.newBuilder()
+                .setFromZoneId(7).setToZoneId(2).setPlayerId(1001).setWantSceneConfigId(5).build());
+        assertThat(requests).as("不经 63 的选目标").isEmpty();
+    }
+
+    @Test
+    void 跨zone选目标_不指定地图_请求带0_应答里是解析后的默认主世界() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        nextTravelReply = CompletableFuture.completedFuture(chosen(1, REDIRECT));
+
+        assertThat(travelAndAwait(2, 0)).isEqualTo(new TravelSelection.Chosen(1, REDIRECT));
+        assertThat(travelRequests).singleElement().extracting(SelectTravelTargetRequest::getWantSceneConfigId).isEqualTo(0);
+    }
+
+    @Test
+    void 跨zone选目标_tip非0映射成Refused() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        nextTravelReply = CompletableFuture.completedFuture(SelectTravelTargetResponse.newBuilder().setTipId(3000).build());
+        assertThat(travelAndAwait(2, 5)).isEqualTo(new TravelSelection.Refused(3000));
+
+        nextTravelReply = CompletableFuture.completedFuture(chosen(5, REDIRECT).toBuilder().setTipId(3005).build());
+        assertThat(travelAndAwait(2, 5)).as("带了 redirect 也按拒绝").isEqualTo(new TravelSelection.Refused(3005));
+    }
+
+    @Test
+    void 跨zone选目标_调用异常完成与本地兜底超时映射成Failed() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        nextTravelReply = CompletableFuture.failedFuture(new IllegalStateException("频道计划读不到"));
+        assertThat(travelAndAwait(2, 5)).isInstanceOf(TravelSelection.Failed.class);
+
+        nextTravelReply = CompletableFuture.completedFuture(null);
+        assertThat(travelAndAwait(2, 5)).isEqualTo(new TravelSelection.Failed("空应答"));
+
+        client.close();
+        client = newClient(Duration.ofMillis(200));
+        nextTravelReply = new CompletableFuture<>();
+        assertThat(travelAndAwait(2, 5)).isEqualTo(new TravelSelection.Failed("选目标超时"));
+    }
+
+    /** tip = 0 而应答残缺（TravelSelection.Failed 的 javadoc 列的几种，加上目标 zone 对不上）：按调用失败，不当成选中。 */
+    @Test
+    void 跨zone选目标_应答残缺逐项映射成Failed() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        record Case(String what, SelectTravelTargetResponse reply) {
+        }
+        List<Case> cases = List.of(
+                new Case("地图为 0", chosen(0, REDIRECT)),
+                new Case("没带 redirect", SelectTravelTargetResponse.newBuilder().setSceneConfigId(5).build()),
+                new Case("目标 zone 对不上", chosen(5, REDIRECT.toBuilder().setTargetZoneId(3).build())),
+                new Case("目标 zone 为 0", chosen(5, REDIRECT.toBuilder().setTargetZoneId(0).build())),
+                new Case("gate 地址空", chosen(5, REDIRECT.toBuilder().setGateHost("").build())),
+                new Case("gate 地址全是空白", chosen(5, REDIRECT.toBuilder().setGateHost("  ").build())),
+                new Case("端口 0", chosen(5, REDIRECT.toBuilder().setGatePort(0).build())),
+                new Case("端口 65536", chosen(5, REDIRECT.toBuilder().setGatePort(65536).build())),
+                new Case("端口超出 int（uint32 读成负数）", chosen(5, REDIRECT.toBuilder().setGatePort(0x8000_0050).build())),
+                new Case("票据为空", chosen(5, REDIRECT.toBuilder().clearTokenPayload().build())),
+                new Case("签名为空", chosen(5, REDIRECT.toBuilder().clearTokenSignature().build())),
+                new Case("过期时刻 0", chosen(5, REDIRECT.toBuilder().setTokenDeadline(0).build())),
+                new Case("过期时刻为负", chosen(5, REDIRECT.toBuilder().setTokenDeadline(-1).build())));
+        for (Case c : cases) {
+            nextTravelReply = CompletableFuture.completedFuture(c.reply());
+            assertThat(travelAndAwait(2, 5)).as(c.what()).isInstanceOfSatisfying(TravelSelection.Failed.class,
+                    failed -> assertThat(failed.reason()).startsWith("应答残缺"));
+        }
+
+        nextTravelReply = CompletableFuture.completedFuture(chosen(5, REDIRECT.toBuilder().setGatePort(65535).build()));
+        assertThat(travelAndAwait(2, 5)).as("端口上界 65535 合法").isInstanceOf(TravelSelection.Chosen.class);
+        nextTravelReply = CompletableFuture.completedFuture(chosen(5, REDIRECT.toBuilder().setGatePort(1).build()));
+        assertThat(travelAndAwait(2, 5)).as("端口下界 1 合法").isInstanceOf(TravelSelection.Chosen.class);
+    }
+
+    @Test
+    void 跨zone选目标_与63共用引用_建引用失败这次Failed下次重建_关闭后Failed() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        connectFailure = new IllegalStateException("缺 XM_DUBBO_SECRET");
+        assertThat(travelAndAwait(2, 5)).isInstanceOf(TravelSelection.Failed.class);
+
+        connectFailure = null;
+        nextTravelReply = CompletableFuture.completedFuture(chosen(5, REDIRECT));
+        nextReply = CompletableFuture.completedFuture(SelectSwitchTargetResponse.newBuilder()
+                .setSceneNodeId(9).setSceneId(1).setSceneConfigId(1).build());
+        assertThat(travelAndAwait(2, 5)).isInstanceOf(TravelSelection.Chosen.class);
+        assertThat(selectAndAwait()).isInstanceOf(Selection.Chosen.class);
+        assertThat(connects.get()).as("226 与 63 共用同一个引用").isEqualTo(2);
+
+        client.close();
+        assertThat(travelAndAwait(2, 5)).isInstanceOf(TravelSelection.Failed.class);
+    }
+
+    @Test
+    void 跨zone选目标_逻辑线程已停_结果丢弃不抛() throws Exception {
+        CountDownLatch rejected = new CountDownLatch(1);
         client = new SceneManagerSwitchTargets(7, 3, task -> {
+            rejected.countDown();
             throw new RejectedExecutionException("逻辑线程已停");
         }, Duration.ofSeconds(4), new SceneManagerSwitchTargets.Connector() {
             @Override
@@ -308,9 +417,13 @@ class SceneManagerSwitchTargetsTest {
             public void close() {
             }
         });
+        nextTravelReply = CompletableFuture.completedFuture(chosen(5, REDIRECT));
 
         client.selectTravel(1001, 2, 0, selection -> {
             throw new AssertionError("不该执行");
         });
+
+        assertThat(rejected.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(travelRequests).hasSize(1);
     }
 }

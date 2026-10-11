@@ -60,20 +60,25 @@ import org.springframework.transaction.TransactionTimedOutException;
  * 在线存盘（{@link #saveProgress}，周期存盘用）同样带重试，结局投递回逻辑线程；进程被 kill 时丢的是最近一次在线存盘之后的增量，
  * 归属租约过期后玩家可以重新进入，读到的是最近一次落库的状态。
  *
- * <p><b>交出（{@link #handOff}）与探测（{@link #probe}）</b>（scene-handoff-spec §5.2）：
+ * <p><b>交出（{@link #handOff}）与探测（{@link #probe}）</b>（scene-handoff-spec §5.2；交出模式见 zone-travel-spec §5.2）：
  * <ul>
  *   <li>交出复用上面的重试（瞬时故障、截止时间、次数上限）。每次尝试现取墙钟 {@code now_i}，传
  *       {@code leaseUntil = L_i = now_i + 租约}、{@code requireLeaseAtLeast = now_i + M}（M = {@link HandOffSettings#leaseMargin()}），
- *       并在发出前记下 {@code L_i}。某次尝试回 Fenced 而那一行是 (E+1, 未释放, 更早某次的 L_j)，就是「更早那次已提交、应答丢了」，
- *       改判为已交出——不当成失去归属去踢人；</li>
+ *       并在发出前记下 {@code L_i}。某次尝试回 Fenced 而那一行是 (E+1, <i>与模式相符的释放标记</i>, 更早某次的 L_j)，就是「更早那次已提交、
+ *       应答丢了」，改判为已交出——不当成失去归属去踢人；</li>
  *   <li>重试用尽 / 非瞬时故障 / 被拒的交出是「结局不明」（{@link HandOffOutcome.Failed}），不计入 {@link #writeFailures()}，
  *       由调用方接着探测：加锁读，读失败在「第一次尝试起 M − 2 s」之内退避重试（至少读一次）；(E, 未释放) → 没提交；
- *       (E+1, 未释放, ∈ {L_i}) → 已交出；其余或到截止 → 失去（fail-closed）；</li>
+ *       (E+1, 与模式相符的释放标记, ∈ {L_i}) → 已交出；其余或到截止 → 失去（fail-closed）；</li>
+ *   <li>两种模式只差「已提交的那一行」的释放标记，改判与探测按模式查表（{@link HandOffMode#HOLD} 认未释放，{@link HandOffMode#RELEASE}
+ *       认已释放，另一种取值一律不认）。RELEASE 多一种结局 {@code Superseded}：有过结局不明的更早尝试、读到 epoch ≥ E+2——交出并释放提交后
+ *       任何登录都能立即夺到 E+2，所以它多半是「已交出、随后被接管」，但不是已提交的证据，只是标签（调用方按失去归属处理、踢 2017）。
+ *       第一次尝试就读到 ≥ E+2 仍是 Fenced；</li>
  *   <li>停服：结局在逻辑线程上的处理可能再提交「释放 E+1」或探测（冻结中被停服写回移出的实例，交出 / 探测认出已提交就释放 E+1），
  *       这些必须赶在存储线程池关闭之前提交，否则被已关闭的池拒绝、E+1 悬空到租约过期。所以停服流程在写回交出去之后、关池之前
  *       等全部已提交的交出 / 探测「结局已在逻辑线程上处理完」（{@link #awaitTransfersSettled}，与写回共用停服预算）；</li>
  *   <li>结局投递被拒（逻辑线程已停）而结局是「已交出」：交出通知只由逻辑线程发出，它收不到结局就一定没发，E+1 没有别的知情者，
- *       存储线程直接带围栏释放 E+1（逻辑线程先于存储线程池停下时的兜底；正常停服顺序下走上一条）。</li>
+ *       HOLD 下存储线程直接带围栏释放 E+1（逻辑线程先于存储线程池停下时的兜底；正常停服顺序下走上一条）；RELEASE 下 E+1 在提交时
+ *       已释放，什么都不做（对它的释放本来也是空操作）。</li>
  * </ul>
  *
  * <p>{@link PlayerRow} 是可变 JavaBean，只在存储线程内使用；跨线程传递的都是不可变的 {@link PlayerData} /
@@ -224,17 +229,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
     public void handOff(PlayerSave frozen, HandOffMode mode, Consumer<HandOffOutcome> onDone) {
         Objects.requireNonNull(mode, "mode");
         transfersUnsettled.incrementAndGet();
-        HandOffTask task = new HandOffTask(frozen, mode, onDone);
-        if (mode == HandOffMode.RELEASE) {
-            // 批次 5.4 先行件的占位：「交出并释放」的重试改判与探测要按另一张表判（已提交的那次读回来是「已释放」），
-            // 那部分还没接上。照现有的 HOLD 逻辑去做会把已提交的传送误判成围栏，所以这里一笔库事务都不发，
-            // 以「一次也没尝试」的结局不明交回——探测见到空的尝试记录直接判没提交，调用方原地解冻。
-            metrics.storageWrite(StorageOp.HANDOFF, WriteResult.REJECTED, 0);
-            log.error("交出并释放（跨 zone 传送，批次 5.4）的存储实现还没接上（施工中），不发库事务、按没提交交回 {}", task.describe());
-            task.deliver(task.failed());
-            return;
-        }
-        submit(task);
+        submit(new HandOffTask(frozen, mode, onDone));
     }
 
     @Override
@@ -502,7 +497,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
     private final class HandOffTask extends StorageTask {
 
         private final PlayerSave frozen;
-        /** 这次交出的模式（随结局不明的记录带给探测）。先行件阶段只有 HOLD 会真的执行。 */
+        /** 这次交出的模式：决定提交时 E+1 的释放标记与改判按哪张表（随结局不明的记录带给探测）。 */
         private final HandOffMode mode;
         private final Consumer<HandOffOutcome> onDone;
         /** 每次尝试写下的新租约值 L_i，按尝试先后；在发出之前记下，应答丢了也认得出。 */
@@ -529,8 +524,15 @@ public final class StoragePlayerRepository implements PlayerRepository {
             long now = wallClockMs.getAsLong();
             long leaseUntil = now + PlayerStore.OWNER_LEASE.toMillis();
             leases.add(leaseUntil);
-            return store.handOffOwnership(toRow(frozen), frozen.state(), leaseUntil, now + handOff.leaseMargin().toMillis(),
-                    handOff.statementTimeout());
+            long requireLeaseAtLeast = now + handOff.leaseMargin().toMillis();
+            if (mode == HandOffMode.HOLD) {
+                // 五个参数的形式就是 HOLD（批次 5.2 的调用原样不动）
+                return store.handOffOwnership(toRow(frozen), frozen.state(), leaseUntil, requireLeaseAtLeast,
+                        handOff.statementTimeout());
+            }
+            // 交出并释放（批次 5.4）：同一笔事务，提交时 E+1 同时释放；租约值照样写 L_i，只当这次尝试的标识
+            return store.handOffOwnership(toRow(frozen), frozen.state(), leaseUntil, requireLeaseAtLeast,
+                    handOff.statementTimeout(), mode);
         }
 
         private HandOffOutcome classify(HandOffResult result) {
@@ -550,16 +552,30 @@ public final class StoragePlayerRepository implements PlayerRepository {
                                 fenced.owner().leaseUntil());
                         yield new HandOffOutcome.HandedOff(fenced.owner().ownerEpoch());
                     }
+                    if (isSupersededAfterEarlierAttempt(fenced.owner())) {
+                        log.warn("{}重试读到库里已是 epoch={}（≥ E+2）：更早一次结局不明的尝试多半已交出并释放、随后被别的登录接管，"
+                                + "按被接管处理 库里={}", describe(), fenced.owner().ownerEpoch(), fenced.owner());
+                        yield new HandOffOutcome.Superseded();
+                    }
                     log.warn("{}被归属围栏拒绝（已失去归属） 库里={}", describe(), fenced.owner());
                     yield new HandOffOutcome.Fenced();
                 }
             };
         }
 
-        /** 库里是 (E+1, 未释放, 更早某次尝试写下的租约值)：那次尝试已提交，只是应答丢了。本次尝试影响 0 行，不算。 */
+        /**
+         * 库里是 (E+1, 与模式相符的释放标记, 更早某次尝试写下的租约值)：那次尝试已提交，只是应答丢了。本次尝试影响 0 行，不算。
+         * 释放标记对不上的 (E+1, …) 不认（RELEASE 读到未释放的 E+1、HOLD 读到已释放的 E+1 都不可能是自己的提交，fail-closed）。
+         */
         private boolean isEarlierAttempt(OwnerState owner) {
-            return owner != null && owner.ownerEpoch() == frozen.ownerEpoch() + 1 && !owner.released()
+            return owner != null && owner.ownerEpoch() == frozen.ownerEpoch() + 1 && owner.released() == releasedOnCommit(mode)
                     && leases.subList(0, leases.size() - 1).contains(owner.leaseUntil());
+        }
+
+        /** 只在 RELEASE：有过结局不明的更早尝试（本次不是第一次），读到 epoch ≥ E+2。 */
+        private boolean isSupersededAfterEarlierAttempt(OwnerState owner) {
+            return mode == HandOffMode.RELEASE && owner != null && leases.size() > 1
+                    && isBeyondNextEpoch(owner.ownerEpoch(), frozen.ownerEpoch());
         }
 
         private HandOffOutcome.Failed failed() {
@@ -593,7 +609,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
             } catch (RejectedExecutionException e) {
                 try {
                     if (outcome instanceof HandOffOutcome.HandedOff handedOff) {
-                        releaseUndelivered(frozen.playerId(), handedOff.newEpoch());
+                        handedOffUndelivered(mode, frozen.playerId(), handedOff.newEpoch());
                     } else {
                         log.warn("场景逻辑线程已停止，丢弃交出结局 {} 结局={}", describe(), outcome);
                     }
@@ -605,7 +621,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
         @Override
         String describe() {
-            return "交出归属" + describeSave(frozen);
+            return (mode == HandOffMode.RELEASE ? "交出并释放归属" : "交出归属") + describeSave(frozen);
         }
     }
 
@@ -655,6 +671,10 @@ public final class StoragePlayerRepository implements PlayerRepository {
             }
         }
 
+        /**
+         * 按交出模式查表（zone-travel-spec §5.2）：(E, 未释放) → 没提交；(E+1, 与模式相符的释放标记, ∈ {L_i}) → 已交出；
+         * RELEASE 下 epoch ≥ E+2 → Superseded（标签，后果同失去）；其余 → 失去（fail-closed）。
+         */
         private ProbeOutcome classify(Optional<OwnerState> read) {
             long epoch = failed.fromEpoch();
             if (read.isPresent()) {
@@ -663,10 +683,15 @@ public final class StoragePlayerRepository implements PlayerRepository {
                     log.info("{}结论：没提交（仍由 epoch={} 持有）", describe(), epoch);
                     return new ProbeOutcome.NotCommitted();
                 }
-                if (owner.ownerEpoch() == epoch + 1 && !owner.released()
+                if (owner.ownerEpoch() == epoch + 1 && owner.released() == releasedOnCommit(failed.mode())
                         && failed.attempts().leases().contains(owner.leaseUntil())) {
                     log.info("{}结论：其实已提交 → epoch={}", describe(), owner.ownerEpoch());
                     return new ProbeOutcome.HandedOff(owner.ownerEpoch());
+                }
+                if (failed.mode() == HandOffMode.RELEASE && isBeyondNextEpoch(owner.ownerEpoch(), epoch)) {
+                    log.warn("{}结论：库里已是 epoch={}（≥ E+2），多半已交出并释放、随后被别的登录接管，按被接管处理 库里={}",
+                            describe(), owner.ownerEpoch(), owner);
+                    return new ProbeOutcome.Superseded();
                 }
             }
             log.error("{}结论：已不是自己的归属，按失去处理 库里={}", describe(), read.orElse(null));
@@ -693,7 +718,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
             } catch (RejectedExecutionException e) {
                 try {
                     if (outcome instanceof ProbeOutcome.HandedOff handedOff) {
-                        releaseUndelivered(failed.playerId(), handedOff.newEpoch());
+                        handedOffUndelivered(failed.mode(), failed.playerId(), handedOff.newEpoch());
                     } else {
                         log.warn("场景逻辑线程已停止，丢弃探测结局 {} 结局={}", describe(), outcome);
                     }
@@ -706,18 +731,38 @@ public final class StoragePlayerRepository implements PlayerRepository {
         @Override
         String describe() {
             return "交出探测 player=" + Long.toUnsignedString(failed.playerId()) + " epoch=" + failed.fromEpoch()
-                    + " 已尝试租约=" + failed.attempts().leases();
+                    + " 模式=" + failed.mode() + " 已尝试租约=" + failed.attempts().leases();
         }
     }
 
     /**
-     * 「已交出」的结局投递不到逻辑线程（已停）：交出通知只由逻辑线程发出，所以一定没发，E+1 没有别的知情者。
-     * 在当前存储线程上带围栏释放 E+1（同 {@link #release}：重试、指标、失败记 ERROR），让玩家立即可以重新进入而不是等租约过期。
+     * 「已交出」的结局投递不到逻辑线程（已停）：交出通知 / 重定向帧只由逻辑线程发出，所以一定没发，E+1 没有别的知情者。
+     * <ul>
+     *   <li>{@link HandOffMode#HOLD}：在当前存储线程上带围栏释放 E+1（同 {@link #release}：重试、指标、失败记 ERROR），
+     *       让玩家立即可以重新进入而不是等租约过期；</li>
+     *   <li>{@link HandOffMode#RELEASE}：E+1 在提交时已释放（对它的释放是空操作），什么都不做——玩家从任何入口重登都立即夺到 E+2，
+     *       库里是冻结快照。</li>
+     * </ul>
      */
-    private void releaseUndelivered(long playerId, long newEpoch) {
+    private void handedOffUndelivered(HandOffMode mode, long playerId, long newEpoch) {
+        if (mode == HandOffMode.RELEASE) {
+            log.warn("场景逻辑线程已停止，交出并释放的结局投递不到（重定向帧一定没发）；新 epoch 提交时已释放，不用再释放 player={} epoch={}",
+                    Long.toUnsignedString(playerId), newEpoch);
+            return;
+        }
         log.warn("场景逻辑线程已停止，交出结局投递不到（交出通知一定没发），在存储线程上释放新 epoch player={} epoch={}",
                 Long.toUnsignedString(playerId), newEpoch);
         new WriteTask(Kind.RELEASE, null, playerId, newEpoch, null).run();
+    }
+
+    /** 交出在提交时写进 E+1 的释放标记（{@link HandOffMode#RELEASE} 已释放，{@link HandOffMode#HOLD} 未释放）：改判与探测据此认自己的提交。 */
+    static boolean releasedOnCommit(HandOffMode mode) {
+        return mode == HandOffMode.RELEASE;
+    }
+
+    /** {@code epoch ≥ fromEpoch + 2}（无符号比较，epoch 是 uint64）：交出方的 E 之后至少又过了两代。 */
+    static boolean isBeyondNextEpoch(long epoch, long fromEpoch) {
+        return Long.compareUnsigned(epoch, fromEpoch + 1) > 0;
     }
 
     private static WriteResult resultOf(HandOffOutcome outcome) {

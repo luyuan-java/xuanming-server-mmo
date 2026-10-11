@@ -6,6 +6,9 @@ import com.game.api.proto.CreateInstanceRequest;
 import com.game.api.proto.CreateInstanceResponse;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.SelectSwitchTargetResponse;
+import com.game.api.proto.SelectTravelTargetRequest;
+import com.game.api.proto.SelectTravelTargetResponse;
+import com.game.api.proto.ZoneRedirect;
 import com.game.scene.world.InstanceIds;
 import com.game.scene.world.RemoteSwitchTargets;
 import com.game.scene.world.TravelTargets;
@@ -39,6 +42,10 @@ import org.slf4j.LoggerFactory;
  * <p>批次 5.3（dungeon-mirror-spec §6.5、§6.6）：同一个引用也做镜像 / 副本实例取号（{@link SceneDirectoryService#createInstance}，
  * {@link InstanceIds}）——不幂等，同样 {@code retries = 0}；结果投递与本地兜底超时同选目标。业务拒绝（tip ≠ 0）→ {@link InstanceIds.Result.Refused}；
  * 调用失败 / 超时 / 发号租约无效（提供方以异常完成）/ 应答残缺（节点号或场景号为 0）→ {@link InstanceIds.Result.Failed}。
+ *
+ * <p>批次 5.4（zone-travel-spec §5.4、§5.5）：同一个引用也做跨 zone 传送（226）的选目标（{@link SceneDirectoryService#selectTravelTarget}，
+ * {@link TravelTargets}）——只读预检 + 选 gate + 签票据，每次签一张新票据，同样 {@code retries = 0}；结果投递与本地兜底超时同选目标。
+ * 业务拒绝（tip ≠ 0）→ {@link TravelSelection.Refused}；调用失败 / 超时 / 应答残缺 → {@link TravelSelection.Failed}（见 {@link #toTravelSelection}）。
  */
 public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, InstanceIds, TravelTargets, AutoCloseable {
 
@@ -48,8 +55,6 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
     public static final Duration DUBBO_TIMEOUT = Duration.ofSeconds(3);
     /** Dubbo 应用名（进 URL，便于在 scene-manager 日志里认出调用方）。 */
     static final String APPLICATION = "xm-scene-switch";
-    /** 先行件阶段 {@link #selectTravel} 的占位结果里的原因（真实现接上后删掉）。 */
-    static final String TRAVEL_PLACEHOLDER = "5.4 施工中";
 
     /** 建一个 scene-manager 服务引用（阻塞，只在本类的连接线程上调）。 */
     interface Connector extends AutoCloseable {
@@ -137,13 +142,75 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
     }
 
     /**
-     * 跨 zone 传送的选目标（批次 5.4，{@link SceneDirectoryService#selectTravelTarget}）。<b>先行件阶段的占位</b>：不发调用，
-     * 经逻辑执行器回 {@link TravelSelection.Failed}（恰好一次、不在调用栈内，线程纪律与真实现相同）；调用方按「选目标失败」处理
-     * （226 受理后推 23 {3027}、留在原地）。真实现复用 {@link #call} / {@link #deliver} 与本地兜底超时。
+     * 跨 zone 传送的选目标（批次 5.4，{@link SceneDirectoryService#selectTravelTarget}，zone-travel-spec §5.4、§5.5）：请求带本节点的 zone
+     * 作源 zone。与 {@link #select} 同一个引用、同一条连接线程、同一个本地兜底超时（{@code xm.scene.switch-resolve-timeout}），
+     * {@code retries = 0}（每次调用签一张新票据，不幂等也无须重发）。结果经逻辑执行器投递、恰好一次、不在调用栈内（{@link #toTravelSelection}）。
      */
     @Override
     public void selectTravel(long playerId, int toZoneId, int wantSceneConfigId, Consumer<TravelSelection> onDone) {
-        deliver(playerId, onDone, new TravelSelection.Failed(TRAVEL_PLACEHOLDER));
+        SelectTravelTargetRequest request = SelectTravelTargetRequest.newBuilder()
+                .setFromZoneId(zoneId)
+                .setToZoneId(toZoneId)
+                .setPlayerId(playerId)
+                .setWantSceneConfigId(wantSceneConfigId)
+                .build();
+        call(service -> service.selectTravelTarget(request))
+                .whenComplete((response, failure) -> deliver(playerId, onDone, toTravelSelection(toZoneId, response, failure)));
+    }
+
+    /**
+     * 选目标的应答 → 结果。业务拒绝（tip ≠ 0）→ {@link TravelSelection.Refused}；调用失败 / 本地兜底超时 / 空应答，或 tip = 0 而应答残缺
+     * （地图为 0、没带 redirect、gate 地址空、端口不在 1..65535、票据或签名为空、过期时刻 ≤ 0）→ {@link TravelSelection.Failed}。
+     * 另外 {@code redirect.target_zone_id} 必须等于请求的目标 zone（zone-travel-spec §5.3「target_zone_id 只进日志与校验」）：
+     * 对不上说明 scene-manager 送错了 zone，按应答残缺 fail-closed，不能拿着别的 zone 的票据去交出并释放归属。
+     * 票据字节原样放进结果（不解析、不重新序列化）。
+     */
+    static TravelSelection toTravelSelection(int toZoneId, SelectTravelTargetResponse response, Throwable failure) {
+        if (failure != null) {
+            Throwable cause = unwrap(failure);
+            return new TravelSelection.Failed(cause instanceof TimeoutException ? "选目标超时" : cause.toString());
+        }
+        if (response == null) {
+            return new TravelSelection.Failed("空应答");
+        }
+        if (response.getTipId() != 0) {
+            return new TravelSelection.Refused(response.getTipId());
+        }
+        String incomplete = incompleteTravel(toZoneId, response);
+        if (incomplete != null) {
+            log.error("scene-manager 选目标应答残缺，按调用失败处理（226 推 23 {3027}）: {}", incomplete);
+            return new TravelSelection.Failed("应答残缺 " + incomplete);
+        }
+        return new TravelSelection.Chosen(response.getSceneConfigId(), response.getRedirect());
+    }
+
+    /** tip = 0 的应答缺了什么；齐全返回 null。 */
+    private static String incompleteTravel(int toZoneId, SelectTravelTargetResponse response) {
+        if (response.getSceneConfigId() == 0) {
+            return "scene_config_id=0";
+        }
+        if (!response.hasRedirect()) {
+            return "没有 redirect";
+        }
+        ZoneRedirect redirect = response.getRedirect();
+        if (redirect.getTargetZoneId() != toZoneId) {
+            return "target_zone_id=" + Integer.toUnsignedString(redirect.getTargetZoneId()) + " 不是请求的 "
+                    + Integer.toUnsignedString(toZoneId);
+        }
+        if (redirect.getGateHost().isBlank()) {
+            return "gate_host 为空";
+        }
+        // uint32：超出 int 的值读成负数，同样落在 1..65535 之外
+        if (redirect.getGatePort() < 1 || redirect.getGatePort() > 65535) {
+            return "gate_port=" + Integer.toUnsignedString(redirect.getGatePort());
+        }
+        if (redirect.getTokenPayload().isEmpty() || redirect.getTokenSignature().isEmpty()) {
+            return "票据或签名为空";
+        }
+        if (redirect.getTokenDeadline() <= 0) {
+            return "token_deadline=" + redirect.getTokenDeadline();
+        }
+        return null;
     }
 
     /** 在连接线程上取引用并发起调用，套上本地兜底超时。 */

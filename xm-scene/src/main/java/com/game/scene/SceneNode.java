@@ -125,8 +125,10 @@ import org.springframework.context.SmartLifecycle;
  *       （Redis I/O；MySQL 交给存储线程池；拉到的计划投递逻辑线程应用）；</li>
  *   <li>资产通道（architecture.md §4.12）：Dubbo Triple 的 I/O 与业务线程只把请求投递到逻辑线程；逻辑线程上完成的结局由
  *       {@code scene-asset-reply}（2 条，队列由在途上限 {@code xm.scene.asset-op-max-inflight} 兜住）切出来回写，Dubbo 的序列化不占逻辑线程；</li>
- *   <li>{@code scene-switch-rpc}（1 条，{@link SceneManagerSwitchTargets}）：跨节点换图向 scene-manager 选目标的建引用与发起调用，
- *       结果投递回逻辑线程（批次 5.2）。</li>
+ *   <li>{@code scene-switch-rpc}（1 条，{@link SceneManagerSwitchTargets}）：跨节点换图（批次 5.2）、实例取号（5.3）与跨 zone 传送（226，5.4）
+ *       向 scene-manager 选目标的建引用与发起调用，结果投递回逻辑线程；</li>
+ *   <li>226 受理前的在队检查（{@link TravelTeamChecks}）与待落点写（{@link RedisPlayerLocations}）不另起线程：在 Redisson 的回调线程
+ *       （在队检查到时则在 JDK 的延迟线程）上完成，只做投递，回到逻辑线程再碰场景状态（zone-travel-spec §5.11）。</li>
  * </ul>
  *
  * <p>节点号租约丢失时（号可能已被别的实例占用，雪花号与目录条目都会撞）：停止刷新目录、关闭监听、

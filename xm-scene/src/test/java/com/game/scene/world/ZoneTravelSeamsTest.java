@@ -154,7 +154,7 @@ class ZoneTravelSeamsTest {
     // ------------------------------------------------------------------ 在队检查的占位
 
     @Test
-    void 在队检查的占位_不读成员关系_经逻辑执行器回UNKNOWN恰好一次_不在调用栈内() {
+    void 在队检查_读一次成员关系_经逻辑执行器回结果恰好一次_不在调用栈内() {
         AtomicInteger reads = new AtomicInteger();
         ManualExecutor logic = new ManualExecutor();
         TravelTeamChecks checks = new TravelTeamChecks(playerId -> {
@@ -168,9 +168,10 @@ class ZoneTravelSeamsTest {
         assertThat(results).as("回调不在 check 的调用栈内").isEmpty();
         assertThat(logic.pending()).isEqualTo(1);
         logic.runAll();
-        assertThat(results).as("占位是 fail-closed 的结果：调用方回 3027、不放行").containsExactly(TeamCheck.UNKNOWN);
+        // 批次 5.4 W1 接上真实现（逐格用例在 team/TravelTeamChecksTest）：索引键缺失 = 无队
+        assertThat(results).containsExactly(TeamCheck.NOT_IN_TEAM);
         assertThat(logic.pending()).as("恰好一次").isZero();
-        assertThat(reads.get()).as("占位不读 Redis").isZero();
+        assertThat(reads.get()).isEqualTo(1);
     }
 
     @Test
