@@ -13,17 +13,19 @@ import static org.mockito.Mockito.when;
 
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.proto.PlayerLocation;
+import com.game.scene.testing.CapturedLogs;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.WorldTestAccess;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
@@ -31,7 +33,7 @@ import org.redisson.api.RedissonClient;
 /**
  * 跨 zone 传送的待落点写口（批次 5.4，zone-travel-spec §5.3、§5.9、§11.5「线程」）：记录的形状与 (epoch, 序号)、TTL 截到 [1 s, 300 s]、
  * 结果只经逻辑执行器投递（恰好一次、不在调用栈内、从 Redisson 的回调线程完成时也回到逻辑线程）、写失败 / 没生效 / 参数被拒都回 false、
- * 逻辑线程已停时丢弃不抛。位置目录是替身（真 Redis 的用例见 {@link AwaitingPlacementRedisIntegrationTest}）。
+ * 逻辑线程已停时丢弃（回调在哪条线程上都不执行）。位置目录是替身（真 Redis 的用例见 {@link AwaitingPlacementRedisIntegrationTest}）。
  */
 class RedisPlayerLocationsAwaitingPlacementTest {
 
@@ -180,28 +182,37 @@ class RedisPlayerLocationsAwaitingPlacementTest {
         assertThat(removed.locationSeq()).isEqualTo(seqAfterCall).isEqualTo(3);
     }
 
+    /**
+     * 逻辑线程已停（§5.11）：投递被拒时结果丢弃、只记日志，回调不在完成写的线程（这里是测试线程与假的 Redisson 线程）上补跑。
+     * 回调里不能拿「抛 AssertionError」当断言：它跑在 {@code whenComplete} 里，抛出的东西会被 CompletableFuture 吞掉、谁也看不到，
+     * 所以改为记下调用，等完成写的线程跑完（{@code whenComplete} 的回调在完成 future 的那条线程上同步执行）再断言一次也没有；
+     * 走的确实是丢弃分支（拒绝异常被接住），由日志确认。
+     */
     @Test
-    void 逻辑线程已停_结果丢弃不抛() throws Exception {
-        CountDownLatch rejected = new CountDownLatch(2);
+    void 逻辑线程已停_投递被拒_结果丢弃只记日志_回调在哪条线程上都不执行() throws Exception {
+        AtomicInteger offered = new AtomicInteger();
         Executor stopped = task -> {
-            rejected.countDown();
+            offered.incrementAndGet();
             throw new RejectedExecutionException("逻辑线程已停");
         };
         RedisPlayerLocations stoppedLocations = new RedisPlayerLocations(directory, 1, 9, stopped);
+        List<Thread> ranOn = new CopyOnWriteArrayList<>();
+        Consumer<Boolean> onDone = written -> ranOn.add(Thread.currentThread());
 
-        stoppedLocations.awaitingPlacement(removed(0), 2, 5, Duration.ofSeconds(60), written -> {
-            throw new AssertionError("不该执行");
-        });
-        stoppedLocations.awaitingPlacement(removed(0), 2, 5, Duration.ofSeconds(60), written -> {
-            throw new AssertionError("不该执行");
-        });
-        calls.get(0).reply().complete(true);
-        Thread redisson = new Thread(() -> calls.get(1).reply().completeExceptionally(new IllegalStateException("断开")),
-                "fake-redisson");
-        redisson.start();
-        redisson.join(5_000);
+        try (CapturedLogs logs = new CapturedLogs(RedisPlayerLocations.class)) {
+            stoppedLocations.awaitingPlacement(removed(0), 2, 5, Duration.ofSeconds(60), onDone);
+            stoppedLocations.awaitingPlacement(removed(0), 2, 5, Duration.ofSeconds(60), onDone);
+            calls.get(0).reply().complete(true);
+            Thread redisson = new Thread(() -> calls.get(1).reply().completeExceptionally(new IllegalStateException("断开")),
+                    "fake-redisson");
+            redisson.start();
+            redisson.join(5_000);
+            assertThat(redisson.isAlive()).as("完成写的线程已跑完（回调随之跑完）").isFalse();
 
-        assertThat(rejected.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(offered).as("两个结果各尝试投递一次").hasValue(2);
+            assertThat(ranOn).as("投递被拒后回调没有在任何线程上补跑").isEmpty();
+            assertThat(logs.count("丢弃待落点的写结果")).as("走的是丢弃分支（拒绝异常被接住）").isEqualTo(2);
+        }
     }
 
     @Test

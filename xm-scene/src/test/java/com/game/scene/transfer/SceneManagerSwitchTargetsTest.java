@@ -10,6 +10,7 @@ import com.game.api.proto.CreateInstanceRequest;
 import com.game.api.proto.CreateInstanceResponse;
 import com.game.api.proto.RedirectToZoneRequest;
 import com.game.api.proto.RedirectToZoneResponse;
+import com.game.scene.testing.CapturedLogs;
 import com.game.scene.world.InstanceIds;
 import com.game.scene.world.SceneKind;
 import com.game.api.proto.SelectSwitchTargetRequest;
@@ -24,7 +25,6 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -251,11 +251,10 @@ class SceneManagerSwitchTargetsTest {
         assertThat(createAndAwait(MIRROR)).isEqualTo(new InstanceIds.Result.Failed("取号超时"));
     }
 
-    @Test
-    void 逻辑线程已停_结果丢弃不抛() throws Exception {
-        CountDownLatch rejected = new CountDownLatch(1);
-        client = new SceneManagerSwitchTargets(7, 3, task -> {
-            rejected.countDown();
+    /** 逻辑线程已停的客户端：每次投递都把任务记进 {@code offered}，再抛拒绝异常。 */
+    private SceneManagerSwitchTargets newStoppedClient(LinkedBlockingQueue<Runnable> offered) {
+        return new SceneManagerSwitchTargets(7, 3, task -> {
+            offered.add(task);
             throw new RejectedExecutionException("逻辑线程已停");
         }, Duration.ofSeconds(4), new SceneManagerSwitchTargets.Connector() {
             @Override
@@ -267,13 +266,37 @@ class SceneManagerSwitchTargetsTest {
             public void close() {
             }
         });
+    }
+
+    /**
+     * 等第一次投递出现，再关掉客户端：{@link SceneManagerSwitchTargets#close} 等连接线程把手上的任务跑完——应答已完成时，
+     * 投递与被拒后的处理都在那个任务里同步执行，关完之后再看回调与日志不会和它赛跑。
+     */
+    private void awaitOfferThenClose(LinkedBlockingQueue<Runnable> offered) throws InterruptedException {
+        assertThat(offered.poll(5, TimeUnit.SECONDS)).as("结果尝试投递到了逻辑执行器").isNotNull();
+        client.close();
+        assertThat(offered).as("恰好一次").isEmpty();
+    }
+
+    /**
+     * 逻辑线程已停：投递被拒时结果丢弃、只记日志，回调不在连接线程上补跑。回调里不能拿「抛 AssertionError」当断言：投递跑在
+     * {@code whenComplete} 里，抛出的东西会被 CompletableFuture 吞掉、谁也看不到，所以改为记下调用、等连接线程跑完再断言一次也没有；
+     * 走的确实是丢弃分支（拒绝异常被接住），由日志确认。
+     */
+    @Test
+    void 逻辑线程已停_投递被拒_结果丢弃只记日志_回调不执行() throws Exception {
+        LinkedBlockingQueue<Runnable> offered = new LinkedBlockingQueue<>();
+        client = newStoppedClient(offered);
         nextReply = CompletableFuture.completedFuture(SelectSwitchTargetResponse.getDefaultInstance());
+        List<Selection> delivered = new CopyOnWriteArrayList<>();
 
-        client.select(1001, 50, 60, 2, selection -> {
-            throw new AssertionError("不该执行");
-        });
+        try (CapturedLogs logs = new CapturedLogs(SceneManagerSwitchTargets.class)) {
+            client.select(1001, 50, 60, 2, delivered::add);
+            awaitOfferThenClose(offered);
 
-        assertThat(rejected.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(delivered).as("投递被拒后回调没有在任何线程上补跑").isEmpty();
+            assertThat(logs.count("丢弃选目标 / 取号结果")).as("走的是丢弃分支（拒绝异常被接住）").isEqualTo(1);
+        }
     }
 
     // ------------------------------------------------------------------ 跨 zone 传送的选目标（批次 5.4，zone-travel-spec §5.4、§5.5）
@@ -401,29 +424,21 @@ class SceneManagerSwitchTargetsTest {
         assertThat(travelAndAwait(2, 5)).isInstanceOf(TravelSelection.Failed.class);
     }
 
+    /** 同 63 的那条（见 {@link #逻辑线程已停_投递被拒_结果丢弃只记日志_回调不执行}）：结果丢弃、只记日志，回调在哪条线程上都不执行。 */
     @Test
-    void 跨zone选目标_逻辑线程已停_结果丢弃不抛() throws Exception {
-        CountDownLatch rejected = new CountDownLatch(1);
-        client = new SceneManagerSwitchTargets(7, 3, task -> {
-            rejected.countDown();
-            throw new RejectedExecutionException("逻辑线程已停");
-        }, Duration.ofSeconds(4), new SceneManagerSwitchTargets.Connector() {
-            @Override
-            public SceneDirectoryService connect() {
-                return service;
-            }
-
-            @Override
-            public void close() {
-            }
-        });
+    void 跨zone选目标_逻辑线程已停_投递被拒_结果丢弃只记日志_回调不执行() throws Exception {
+        LinkedBlockingQueue<Runnable> offered = new LinkedBlockingQueue<>();
+        client = newStoppedClient(offered);
         nextTravelReply = CompletableFuture.completedFuture(chosen(5, REDIRECT));
+        List<TravelSelection> delivered = new CopyOnWriteArrayList<>();
 
-        client.selectTravel(1001, 2, 0, selection -> {
-            throw new AssertionError("不该执行");
-        });
+        try (CapturedLogs logs = new CapturedLogs(SceneManagerSwitchTargets.class)) {
+            client.selectTravel(1001, 2, 0, delivered::add);
+            awaitOfferThenClose(offered);
 
-        assertThat(rejected.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(delivered).as("投递被拒后回调没有在任何线程上补跑").isEmpty();
+            assertThat(logs.count("丢弃选目标 / 取号结果")).as("走的是丢弃分支（拒绝异常被接住）").isEqualTo(1);
+        }
         assertThat(travelRequests).hasSize(1);
     }
 }

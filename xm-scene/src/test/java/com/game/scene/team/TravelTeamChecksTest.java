@@ -5,24 +5,25 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamMembership;
+import com.game.scene.testing.CapturedLogs;
 import com.game.scene.world.TeamChecks.TeamCheck;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 
 /**
  * 226 受理前的在队检查（批次 5.4，zone-travel-spec §5.5 第 5 步、X4、§11.5「延迟应答」与「PRECHECK 过期」的适配层部分）：
  * 读结果的三态映射、读口套的上限（到时 UNKNOWN，迟到的读结果不再投递）、结果只经逻辑执行器投递（恰好一次、不在 {@code check} 的调用栈内、
- * 从别的线程完成时也回到逻辑线程），逻辑线程已停时丢弃不抛。读口是假的（测试决定何时、在哪条线程上、以什么结果完成）。
+ * 从别的线程完成时也回到逻辑线程），逻辑线程已停时丢弃（回调在哪条线程上都不执行）。读口是假的（测试决定何时、在哪条线程上、以什么结果完成）。
  */
 class TravelTeamChecksTest {
 
@@ -139,29 +140,38 @@ class TravelTeamChecksTest {
         assertThat(ranOn).containsExactly(Thread.currentThread());
     }
 
+    /**
+     * 逻辑线程已停（zone-travel-spec §5.11）：投递被拒时结果丢弃、只记日志，回调不在完成读的线程上补跑——读口已完成时那是
+     * {@code check} 的调用方（测试线程），否则是完成读的线程（假的 Redisson 线程）。回调里不能拿「抛 AssertionError」当断言：
+     * 它跑在 {@code whenComplete} 里，抛出的东西会被 CompletableFuture 吞掉、谁也看不到，所以改为记下调用，等完成读的线程跑完
+     * （{@code whenComplete} 的回调在完成 future 的那条线程上同步执行）再断言一次也没有；走的确实是丢弃分支，由日志确认。
+     */
     @Test
-    void 逻辑线程已停_结果丢弃不抛() throws Exception {
-        CountDownLatch rejected = new CountDownLatch(2);
+    void 逻辑线程已停_投递被拒_结果丢弃只记日志_回调在哪条线程上都不执行() throws Exception {
+        AtomicInteger offered = new AtomicInteger();
         Executor stopped = task -> {
-            rejected.countDown();
+            offered.incrementAndGet();
             throw new RejectedExecutionException("逻辑线程已停");
         };
         CompletableFuture<TeamMembership> later = new CompletableFuture<>();
         TravelTeamChecks immediate = new TravelTeamChecks(playerId -> CompletableFuture.completedFuture(TeamMembership.KEY_MISSING),
                 stopped);
         TravelTeamChecks onOtherThread = new TravelTeamChecks(playerId -> later, stopped);
+        List<Thread> ranOn = new CopyOnWriteArrayList<>();
+        Consumer<TeamCheck> onDone = result -> ranOn.add(Thread.currentThread());
 
-        immediate.check(PLAYER, S2, result -> {
-            throw new AssertionError("不该执行");
-        });
-        onOtherThread.check(PLAYER, S2, result -> {
-            throw new AssertionError("不该执行");
-        });
-        Thread completer = new Thread(() -> later.complete(TeamMembership.KEY_MISSING), "fake-redisson");
-        completer.start();
-        completer.join(5_000);
+        try (CapturedLogs logs = new CapturedLogs(TravelTeamChecks.class)) {
+            immediate.check(PLAYER, S2, onDone);
+            onOtherThread.check(PLAYER, S2, onDone);
+            Thread completer = new Thread(() -> later.complete(TeamMembership.KEY_MISSING), "fake-redisson");
+            completer.start();
+            completer.join(5_000);
+            assertThat(completer.isAlive()).as("完成读的线程已跑完（回调随之跑完）").isFalse();
 
-        assertThat(rejected.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(offered).as("两个结果各尝试投递一次").hasValue(2);
+            assertThat(ranOn).as("投递被拒后回调没有在任何线程上补跑").isEmpty();
+            assertThat(logs.count("丢弃在队检查的结果")).as("走的是丢弃分支（拒绝异常被接住）").isEqualTo(2);
+        }
     }
 
     @Test
