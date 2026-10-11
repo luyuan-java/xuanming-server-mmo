@@ -61,7 +61,7 @@ public final class LoginMetrics {
         CLAIMED,
         /** 撞上仍被持有、请持有者让出后在等待窗口内夺到（顶号 / 快速重进）。 */
         WAITED,
-        /** 等待窗口内一直被持有，回 2005。 */
+        /** 等待窗口内一直被持有，或分配回来时进游戏的时间预算已用完（没有发起夺权），回 2005。 */
         TIMEOUT,
         /** 夺权时角色已不存在，回 2011。 */
         NOT_FOUND,
@@ -74,7 +74,9 @@ public final class LoginMetrics {
         OK,
         /** scene-manager 回了 tip（无场景、目标 zone 没有可用的 gate / scene 节点等）。 */
         REJECTED,
-        /** 调用失败 / 超时；登录期重定向的应答残缺（tip 为 0 却缺票据或地址）也算这一类。 */
+        /**
+         * 调用失败 / 超时（含进游戏的时间预算已用完、没有发起调用）；登录期重定向的应答残缺（tip 为 0 却缺票据或地址）也算这一类。
+         */
         ERROR
     }
 

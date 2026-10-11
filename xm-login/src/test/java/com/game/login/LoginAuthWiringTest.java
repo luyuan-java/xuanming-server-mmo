@@ -17,7 +17,7 @@ class LoginAuthWiringTest {
     private final PlayerStore store = mock(PlayerStore.class);
 
     private static LoginProperties mode(String mode) {
-        return new LoginProperties(mode, null, null, null, null, null, null, null, null, null, null);
+        return new LoginProperties(mode, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private static LoginAuthProperties.PasswordAuth production(boolean enabled) {

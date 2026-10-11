@@ -1,6 +1,7 @@
 package com.game.login.handler;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
@@ -39,12 +40,17 @@ import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -59,7 +65,8 @@ import org.mockito.ArgumentCaptor;
 
 /**
  * 批次 5.4 在 EnterGame 上加的东西（zone-travel-spec §5.8、§11.7）：持票者校验 2011 的位置与副作用、去向表经处理器落到
- * 分配请求上、登录期重定向（GO-5）与它的回落、合服围栏检查点 F2、第二条腿的夺权、夺权后复查位置的回归。
+ * 分配请求上、登录期重定向（GO-5）与它的回落、签票回来后回到工作线程（§5.11）、回落链受进游戏时间预算约束（不超出 gate 调 login
+ * 的等待）、合服围栏检查点 F2、第二条腿的夺权、夺权后复查位置的回归。
  * 去向表逐格的纯函数测试在 {@link EnterRoutesTest}；第二条腿对真实 SQL 的夺权在 {@link EnterGameSecondLegSqlTest}。
  */
 class EnterGameZoneTravelTest {
@@ -93,6 +100,8 @@ class EnterGameZoneTravelTest {
 
     private static final Duration ASSIGN_TIMEOUT = Duration.ofMillis(200);
     private static final Duration CLAIM_WAIT = Duration.ofSeconds(3);
+    /** 进游戏的时间预算（同 xm.login.enter-game-budget 的缺省；gate 调 login 5 s 超时）。 */
+    private static final Duration BUDGET = Duration.ofSeconds(4);
 
     private final PlayerStore store = mock(PlayerStore.class);
     private final SceneDirectoryService scenes = mock(SceneDirectoryService.class);
@@ -107,18 +116,23 @@ class EnterGameZoneTravelTest {
     private List<Supplier<Optional<PlayerLocation>>> locationReads = List.of(Optional::empty);
     private final AtomicInteger reads = new AtomicInteger();
 
-    private final EnterGameHandler handler = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
-            ASSIGN_TIMEOUT, CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get,
-            session -> {
-                events.add("renew");
-                return null;
-            },
-            playerId -> {
-                events.add("find");
-                int n = reads.getAndIncrement();
-                return locationReads.get(Math.min(n, locationReads.size() - 1)).get();
-            },
-            fence);
+    private final EnterGameHandler handler = handler(Runnable::run, ASSIGN_TIMEOUT);
+
+    /** 退避用同步执行器、单调时钟手动拨动（只在桩里拨）；工作线程池与分配兜底可换。 */
+    private EnterGameHandler handler(Executor workers, Duration assignTimeout) {
+        return new EnterGameHandler(store, scenes, takeovers, workers, 1, assignTimeout, CLAIM_WAIT, metrics,
+                delay -> Runnable::run, nanos::get,
+                session -> {
+                    events.add("renew");
+                    return null;
+                },
+                playerId -> {
+                    events.add("find");
+                    int n = reads.getAndIncrement();
+                    return locationReads.get(Math.min(n, locationReads.size() - 1)).get();
+                },
+                fence, BUDGET);
+    }
 
     @BeforeEach
     void setUp() {
@@ -231,6 +245,54 @@ class EnterGameZoneTravelTest {
 
     private double claims(String outcome) {
         return meters.get("xm.login.owner.claims").tag("outcome", outcome).timer().count();
+    }
+
+    private double assigns(String result) {
+        return meters.get("xm.login.backend.calls").tag("backend", "scene-manager").tag("method", "assign")
+                .tag("result", result).timer().count();
+    }
+
+    private static long ms(long millis) {
+        return Duration.ofMillis(millis).toNanos();
+    }
+
+    /** 签票挂起：返回的 future 由测试来完成（相当于 Dubbo 的回调线程）。 */
+    private CompletableFuture<RedirectToZoneResponse> redirectPending() {
+        CompletableFuture<RedirectToZoneResponse> pending = new CompletableFuture<>();
+        doAnswer(inv -> {
+            events.add("redirect:" + inv.<RedirectToZoneRequest>getArgument(0).getToZoneId());
+            return pending;
+        }).when(scenes).redirectToZone(any());
+        return pending;
+    }
+
+    /**
+     * 手动泵的 login 工作线程池：投递的任务先排队，测试逐个执行——断言哪些事发生在「回到工作线程」之后，而不是在完成
+     * scene-manager 应答的回调线程上内联执行。{@code full} 时拒绝投递（工作队列满）。
+     */
+    private static final class ManualWorkers implements Executor {
+
+        private final Deque<Runnable> queued = new ArrayDeque<>();
+        private boolean full;
+
+        @Override
+        public void execute(Runnable task) {
+            if (full) {
+                throw new RejectedExecutionException("login 工作队列已满");
+            }
+            queued.add(task);
+        }
+
+        /** 执行排在最前的一个任务（它投递的新任务排到队尾）。 */
+        void runNext() {
+            Runnable task = queued.poll();
+            assertThat(task).as("工作线程池里应有待执行的任务").isNotNull();
+            task.run();
+        }
+
+        int pending() {
+            return queued.size();
+        }
     }
 
     // ================================================================ 持票者校验（2011）
@@ -517,6 +579,206 @@ class EnterGameZoneTravelTest {
 
         assertThat(enter(NORMAL, PLAYER).directives().get(0).getRedirectToGate().getRedirect()).isEqualTo(REDIRECT);
         assertThat(events).doesNotContain("fence:1");
+    }
+
+    // ================================================================ 签票回来后回到工作线程（zone-travel-spec §5.11）
+
+    @Test
+    void 签票没成_回落的围栏分配与夺权都回到工作线程上执行_不在签票的回调线程上() throws Exception {
+        ManualWorkers workers = new ManualWorkers();
+        EnterGameHandler onWorkers = handler(workers, ASSIGN_TIMEOUT);
+        locations(record(H, 4, 99_000_001L, 2));
+        CompletableFuture<RedirectToZoneResponse> pending = redirectPending();
+
+        CompletableFuture<HandlerReply> result =
+                onWorkers.handle(NORMAL, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build());
+        // 签票失败由 Dubbo 的回调线程完成（这里是测试线程）：它只往工作线程池投递，自己不问围栏（7.3 起读 Redis）、不夺权（MySQL）。
+        pending.completeExceptionally(new IllegalStateException("scene-manager 不可达"));
+
+        assertThat(result).isNotDone();
+        assertThat(events).containsExactly("renew", "find", "redirect:8");
+        assertThat(workers.pending()).isEqualTo(1);
+        assertNoRoute();
+
+        // 工作线程：定结局（计回落）→ 围栏 → 发起分配；分配的应答再投递回工作线程。
+        workers.runNext();
+        assertThat(events).containsExactly("renew", "find", "redirect:8", "fence:1", "assign:7");
+        assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
+        verify(store, never()).claimOwnership(anyLong());
+        assertThat(result).isNotDone();
+
+        // 工作线程：夺权 → 应答。
+        workers.runNext();
+        verify(store, times(1)).claimOwnership(PLAYER);
+        assertEntered(result.get(5, TimeUnit.SECONDS), 5);
+        assertThat(workers.pending()).isZero();
+    }
+
+    @Test
+    void 签票成功_同样回到工作线程才收口() throws Exception {
+        ManualWorkers workers = new ManualWorkers();
+        EnterGameHandler onWorkers = handler(workers, ASSIGN_TIMEOUT);
+        locations(record(H, 4, 99_000_001L, 2));
+        CompletableFuture<RedirectToZoneResponse> pending = redirectPending();
+
+        CompletableFuture<HandlerReply> result =
+                onWorkers.handle(NORMAL, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build());
+        pending.complete(REDIRECTED);
+
+        assertThat(result).isNotDone();
+        assertNoRoute();
+        assertThat(redirectCalls("ok")).isZero();
+
+        workers.runNext();
+        assertThat(result.get(5, TimeUnit.SECONDS).directives().get(0).getRedirectToGate().getRedirect())
+                .isEqualTo(REDIRECT);
+        assertOnlyRoute(EnterRoute.REDIRECT);
+        assertThat(redirectCalls("ok")).isEqualTo(1);
+    }
+
+    @Test
+    void 签票回来时工作队列已满_链以异常结束_不计去向不分配不夺权_在途闸门释放() throws Exception {
+        ManualWorkers workers = new ManualWorkers();
+        EnterGameHandler onWorkers = handler(workers, ASSIGN_TIMEOUT);
+        locations(record(H, 4, 99_000_001L, 2));
+        CompletableFuture<RedirectToZoneResponse> pending = redirectPending();
+
+        CompletableFuture<HandlerReply> result =
+                onWorkers.handle(NORMAL, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build());
+        workers.full = true;
+        // 签票失败（本该回落），但回工作线程的那一跳被拒：链当场以异常结束（派发层回 1003），不在回调线程上兜着做回落。
+        pending.completeExceptionally(new IllegalStateException("scene-manager 不可达"));
+
+        assertThat(result).isCompletedExceptionally();
+        assertThatThrownBy(result::join).isInstanceOf(CompletionException.class)
+                .hasCauseInstanceOf(RejectedExecutionException.class);
+        assertNoRoute();
+        assertThat(redirectCalls("ok") + redirectCalls("rejected") + redirectCalls("error")).as("没走到定结局").isZero();
+        assertThat(events).containsExactly("renew", "find", "redirect:8");
+        verify(scenes, never()).assign(any());
+        verify(store, never()).claimOwnership(anyLong());
+
+        // 在途闸门已释放：同一角色下一次进游戏不回 2005。
+        workers.full = false;
+        doReturn(CompletableFuture.completedFuture(REDIRECTED)).when(scenes).redirectToZone(any());
+        CompletableFuture<HandlerReply> again =
+                onWorkers.handle(NORMAL, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build());
+        workers.runNext();
+        assertThat(again.get(5, TimeUnit.SECONDS).directives().get(0).hasRedirectToGate()).isTrue();
+        assertOnlyRoute(EnterRoute.REDIRECT);
+    }
+
+    // ================================================================ 时间预算：回落链不超出 gate 调 login 的等待
+
+    @Test
+    void 签票耗掉大半预算后回落_夺权只等到预算截止_不按claimWait等满() throws Exception {
+        // scene-manager 变慢：签票 3 s 才失败，回落的分配 0.5 s 成功，夺权撞上角色在 H 的在线实例（Held）。
+        // claimWait（3 s）本可以等到第 6.5 s，可 gate 调 login 5 s 就放弃、迟到的应答被丢弃，那时夺到的归属没人接，
+        // 玩家要等租约 30 s 过期——所以夺权只等到预算截止（4 s），回 2005 让客户端重试。
+        locations(record(H, 4, 99_000_001L, 2));
+        long start = nanos.get();
+        doAnswer(inv -> {
+            nanos.addAndGet(ms(3000));
+            return CompletableFuture.failedFuture(new IllegalStateException("签票超时"));
+        }).when(scenes).redirectToZone(any());
+        doAnswer(inv -> {
+            nanos.addAndGet(ms(500));
+            return CompletableFuture.completedFuture(ASSIGNED);
+        }).when(scenes).assign(any());
+        List<Long> attempts = new ArrayList<>();
+        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+            attempts.add(nanos.get() - start);
+            nanos.addAndGet(ms(300));
+            return new ClaimResult.Held(4);
+        });
+
+        assertError(enter(NORMAL, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
+
+        assertThat(attempts).as("每次夺权都在预算之内发起").containsExactly(ms(3500), ms(3800));
+        verify(takeovers, times(2)).request(PLAYER, 4);
+        assertThat(claims("timeout")).isEqualTo(1);
+        assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
+    }
+
+    @Test
+    void 分配回来时预算已用完_不夺权不请持有者让出_回2005() throws Exception {
+        locations(record(H, 4, 99_000_001L, 2));
+        doAnswer(inv -> {
+            nanos.addAndGet(ms(3000));
+            return CompletableFuture.failedFuture(new IllegalStateException("签票超时"));
+        }).when(scenes).redirectToZone(any());
+        doAnswer(inv -> {
+            nanos.addAndGet(ms(1000));
+            return CompletableFuture.completedFuture(ASSIGNED);
+        }).when(scenes).assign(any());
+
+        assertError(enter(NORMAL, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
+
+        verify(store, never()).claimOwnership(anyLong());
+        verifyNoInteractions(takeovers);
+        assertThat(assigns("ok")).isEqualTo(1);
+        assertThat(claims("timeout")).as("没发起夺权也记一次等不到").isEqualTo(1);
+        assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
+    }
+
+    @Test
+    void 签票把预算用完_回落不再调scene_manager分配_回3023() throws Exception {
+        locations(record(H, 4, 99_000_001L, 2));
+        doAnswer(inv -> {
+            events.add("redirect:" + inv.<RedirectToZoneRequest>getArgument(0).getToZoneId());
+            nanos.addAndGet(BUDGET.toNanos());
+            return CompletableFuture.failedFuture(new IllegalStateException("签票超时"));
+        }).when(scenes).redirectToZone(any());
+
+        assertError(enter(NORMAL, PLAYER), SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
+
+        assertThat(events).as("回落照样过围栏，但不再发起分配").containsExactly("renew", "find", "redirect:8", "fence:1");
+        verify(scenes, never()).assign(any());
+        verify(store, never()).claimOwnership(anyLong());
+        assertThat(assigns("error")).as("按调用超时计").isEqualTo(1);
+        assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
+    }
+
+    @Test
+    void 回落的分配按剩余预算收紧本地兜底_不按scene_assign_timeout等满() throws Exception {
+        // 分配兜底配成 1 h：要是没按剩余预算（50 ms）收紧，下面等 5 s 就会超时。
+        EnterGameHandler patient = handler(Runnable::run, Duration.ofHours(1));
+        locations(record(H, 4, 99_000_001L, 2));
+        doAnswer(inv -> {
+            nanos.addAndGet(BUDGET.minusMillis(50).toNanos());
+            return CompletableFuture.failedFuture(new IllegalStateException("签票超时"));
+        }).when(scenes).redirectToZone(any());
+        CompletableFuture<AssignSceneResponse> never = new CompletableFuture<>();
+        doReturn(never).when(scenes).assign(any());
+
+        HandlerReply reply = patient.handle(NORMAL, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build())
+                .orTimeout(5, TimeUnit.SECONDS).join();
+
+        assertError(reply, SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
+        assertThat(never).isNotDone();
+        verify(store, never()).claimOwnership(anyLong());
+        assertThat(assigns("error")).isEqualTo(1);
+    }
+
+    @Test
+    void 夺到归属时预算已用完_不再复查位置_沿用原落点() throws Exception {
+        // 回原实例这一种去向本该在夺权后复查位置（第二次读到的别 zone 记录会触发本 zone 重新分配）；
+        // 预算已用完时归属已经在手，应答得赶在 gate 放弃之前回去：不复查、不重新分配。
+        locations(record(G, 4, 99_000_001L, 2), record(H, 9, 55L, 6));
+        doAnswer(inv -> {
+            nanos.addAndGet(ms(3900));
+            return CompletableFuture.completedFuture(ASSIGNED);
+        }).when(scenes).assign(any());
+        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+            nanos.addAndGet(ms(200));
+            return new ClaimResult.Claimed(5);
+        });
+
+        assertEntered(enter(NORMAL, PLAYER), 5);
+
+        assertThat(reads.get()).as("只在定去向时读了一次").isEqualTo(1);
+        assertThat(assignRequests(1).get(0).getPreferredSceneId()).isEqualTo(99_000_001L);
+        assertOnlyRoute(EnterRoute.RESUME);
     }
 
     // ================================================================ 合服围栏检查点 F2

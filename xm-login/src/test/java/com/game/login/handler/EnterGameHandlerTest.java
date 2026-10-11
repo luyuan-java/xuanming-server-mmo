@@ -192,6 +192,31 @@ class EnterGameHandlerTest {
     }
 
     @Test
+    void 归属等待的截止不晚于进游戏的时间预算_分配慢时夺权少等() throws Exception {
+        // 分配用了 2 s：claimWait（3 s）本可以等到第 5 s，可 gate 调 login 5 s 就放弃、迟到的应答被丢弃，
+        // 那时夺到的归属没人接——所以夺权只等到时间预算（缺省 4 s）截止，回 2005 让客户端重试。
+        assertThat(EnterGameHandler.DEFAULT_ENTER_BUDGET).isEqualTo(Duration.ofSeconds(4));
+        long start = nanos.get();
+        when(scenes.assign(any())).thenAnswer(inv -> {
+            nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+            return CompletableFuture.completedFuture(ASSIGNED);
+        });
+        List<Duration> attempts = new ArrayList<>();
+        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+            attempts.add(Duration.ofNanos(nanos.get() - start));
+            nanos.addAndGet(Duration.ofMillis(500).toNanos());
+            return new ClaimResult.Held(4);
+        });
+
+        assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
+
+        assertThat(attempts).as("每次夺权都在预算之内发起，最后一次排在预算截止上").containsExactly(Duration.ofMillis(2000),
+                Duration.ofMillis(2500), Duration.ofMillis(3000), Duration.ofMillis(3500));
+        verify(takeovers, times(4)).request(PLAYER, 4);
+        assertThat(claims("timeout")).isEqualTo(1);
+    }
+
+    @Test
     void 角色不存在或不属于本账号回2011() throws Exception {
         when(store.findPlayer(PLAYER)).thenReturn(Optional.empty());
         assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE);

@@ -38,6 +38,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -65,15 +66,24 @@ import org.slf4j.LoggerFactory;
  *       回 {@code EnterGameResponse{player_id}}（不设 {@code error_message}）+ {@code RedirectToGate} 指令，gate 先回应答、再推 124——
  *       不夺权、不分配、不查合服围栏；签票调用失败 / 超时 / 拒绝 / 应答残缺 → 退化为本 zone 首登（X11）；</li>
  *   <li>落地路径：合服围栏检查点 F2（判角色的归属区 {@code player.zone_id}；命中或读不到 → 3023）→ 分配 → 夺权；</li>
- *   <li>scene-manager 回 tip → 原样放进 {@code error_message}；调用失败 / 超时 → 3023 kEnterSceneFailed；</li>
+ *   <li>scene-manager 回 tip → 原样放进 {@code error_message}；调用失败 / 超时（含时间预算已用完）→ 3023 kEnterSceneFailed；</li>
  *   <li>归属仍被上一个写者持有（旧实例还没写回释放、租约也没过期）：请持有者让出（{@link OwnerTakeovers}，
- *       旧会话被踢下线），在 {@code claimWait} 内退避重试夺权；等不到 → 2005 kLoginInProgress，客户端稍后重试。
+ *       旧会话被踢下线），在 {@code claimWait} 内（截止不晚于时间预算）退避重试夺权；等不到，或分配回来时预算已用完
+ *       → 2005 kLoginInProgress，客户端稍后重试。
  *       跨 zone 传送的第二条腿上源节点已「交出并释放」（{@code owner_released = 1}），夺权一次即成；</li>
  *   <li>成功：{@code player_id} = 请求值，不设置 {@code error_message}，合服相关两个字段保持默认（0 / false）。</li>
  * </ol>
  *
  * <p>线程：持票者 / 归属校验、读位置、合服围栏、夺权在工作线程上同步执行；等 scene-manager（分配、签票）与退避重试都是异步组合，
  * 完成后回到工作线程，不阻塞任何线程。在途闸门一直持有到整条异步链结束（含登录期重定向的签票）。
+ *
+ * <p>时间预算（{@code enterBudget}，从 {@link #handle} 开始算）：gate 调 login 有自己的 Dubbo 超时（xm-gate
+ * {@code dubbo.consumer.timeout}，5 s），到点就向客户端推 23 {1003}，迟到的应答被 Dubbo 消费端直接丢弃、到不了 gate——
+ * 这时夺到的归属没有任何节点持有，也没人代为释放，玩家要等租约（{@link PlayerStore#OWNER_LEASE}）过期才能再进。
+ * 所以整条链按剩余预算收紧：等 scene-manager（签票、分配、夺权后的重新分配）的本地兜底取 {@code assignTimeout} 与剩余预算中较小的，
+ * 预算用完就不再发起调用（按调用超时处理）；夺权的等待截止取 {@code claimWait} 与预算截止中较早的，分配回来时预算已用完就不夺权（2005）；
+ * 夺到之后预算已用完就不再复查位置（沿用原落点）。预算必须小于 gate 的超时，差值留给链路往返、工作队列排队（预算从处理器开始算，
+ * 不含排队）、最后一次夺权的 SQL 与回包。登录期重定向没成时的回落（签票 + 分配 + 夺权）因此也不会超出 gate 的等待。
  *
  * <p>数据一致性：owner_epoch 在分配到场景之后才夺取，分配失败不产生夺权；夺权只在上一个写者已释放（最终写回已落库）
  * 或其租约已过期时成功（{@link PlayerStore#claimOwnership}），新写者加载到的一定是上一个写者写回后的状态。
@@ -91,6 +101,12 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     static final Duration FIRST_CLAIM_BACKOFF = Duration.ofMillis(100);
     static final Duration MAX_CLAIM_BACKOFF = Duration.ofMillis(800);
 
+    /**
+     * 一次进游戏的时间预算缺省值（{@code xm.login.enter-game-budget} 的缺省，见类注释「时间预算」）：
+     * 比 gate 调 login 的 Dubbo 超时（5 s）少 1 s。
+     */
+    public static final Duration DEFAULT_ENTER_BUDGET = Duration.ofSeconds(4);
+
     /** 端口合法范围的上界（uint32 线类型，Java 里按无符号比较）。 */
     private static final int MAX_PORT = 65535;
 
@@ -103,6 +119,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     private final int defaultZoneId;
     private final Duration assignTimeout;
     private final Duration claimWait;
+    private final Duration enterBudget;
     private final LoginMetrics metrics;
     private final Function<SessionContext, Integer> deviceRenewal;
     private final PlayerLocationLookup locations;
@@ -113,8 +130,9 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      * @param takeovers     归属仍被持有时请持有者让出
      * @param executor      login 工作线程池（查库、夺权在上面执行）
      * @param defaultZoneId 会话没带 zone 时用的 zone（本 login 的 zone）
-     * @param assignTimeout 等 scene-manager 结果（分配场景、登录期重定向签票）的兜底上限；超时按调用失败处理，保证在途闸门一定释放
-     * @param claimWait     归属仍被持有时最多等多久（期间退避重试夺权），之后回 2005
+     * @param assignTimeout 等 scene-manager 结果（分配场景、登录期重定向签票）的兜底上限，再按剩余的时间预算收紧；
+     *                      超时按调用失败处理，保证在途闸门一定释放
+     * @param claimWait     归属仍被持有时最多等多久（期间退避重试夺权，截止不晚于时间预算），之后回 2005
      * @param metrics       去向、场景分配、签票与夺权的指标
      */
     public EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
@@ -131,21 +149,22 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                             Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
                             LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal) {
         this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
-                deviceRenewal, PlayerLocationLookup.NONE, ZoneMergeFence.OPEN);
+                deviceRenewal, PlayerLocationLookup.NONE, ZoneMergeFence.OPEN, DEFAULT_ENTER_BUDGET);
     }
 
     /**
-     * @param locations 玩家位置记录（在线 / 断线重连租约 / 待落点）：按它与票据定去向（{@link EnterRoutes}）
-     * @param fence     合服围栏的读侧（检查点 F2，判角色的归属区；批次 7.3 之前是恒放行的 {@link ZoneMergeFence#OPEN}），
-     *                  在 login 工作线程上同步调用
+     * @param locations   玩家位置记录（在线 / 断线重连租约 / 待落点）：按它与票据定去向（{@link EnterRoutes}）
+     * @param fence       合服围栏的读侧（检查点 F2，判角色的归属区；批次 7.3 之前是恒放行的 {@link ZoneMergeFence#OPEN}），
+     *                    在 login 工作线程上同步调用
+     * @param enterBudget 一次进游戏的时间预算（见类注释「时间预算」），必须小于 gate 调 login 的 Dubbo 超时
      */
     public EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
                             Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
                             LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
-                            PlayerLocationLookup locations, ZoneMergeFence fence) {
+                            PlayerLocationLookup locations, ZoneMergeFence fence, Duration enterBudget) {
         this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
                 delay -> CompletableFuture.delayedExecutor(delay.toMillis(), TimeUnit.MILLISECONDS),
-                System::nanoTime, deviceRenewal, locations, fence);
+                System::nanoTime, deviceRenewal, locations, fence, enterBudget);
     }
 
     /**
@@ -166,6 +185,18 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                      LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock,
                      Function<SessionContext, Integer> deviceRenewal, PlayerLocationLookup locations,
                      ZoneMergeFence fence) {
+        this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics, timer,
+                nanoClock, deviceRenewal, locations, fence, DEFAULT_ENTER_BUDGET);
+    }
+
+    EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                     Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
+                     LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock,
+                     Function<SessionContext, Integer> deviceRenewal, PlayerLocationLookup locations,
+                     ZoneMergeFence fence, Duration enterBudget) {
+        if (enterBudget.isNegative() || enterBudget.isZero()) {
+            throw new IllegalArgumentException("进游戏的时间预算必须为正: " + enterBudget);
+        }
         this.locations = locations;
         this.deviceRenewal = deviceRenewal;
         this.store = store;
@@ -175,6 +206,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         this.defaultZoneId = defaultZoneId;
         this.assignTimeout = assignTimeout;
         this.claimWait = claimWait;
+        this.enterBudget = enterBudget;
         this.metrics = metrics;
         this.timer = timer;
         this.nanoClock = nanoClock;
@@ -198,6 +230,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
 
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, EnterGameRequest request) {
+        long enterDeadline = nanoClock.getAsLong() + enterBudget.toNanos();
         if (session.getSessionId() == 0) {
             return done(error(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE));
         }
@@ -226,7 +259,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         }
         CompletableFuture<HandlerReply> result;
         try {
-            result = enter(session, account, playerId);
+            result = enter(session, account, playerId, enterDeadline);
         } catch (RuntimeException e) {
             playersInFlight.release(playerId);
             throw e;
@@ -234,7 +267,9 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return result.whenComplete((reply, error) -> playersInFlight.release(playerId));
     }
 
-    private CompletableFuture<HandlerReply> enter(SessionContext session, String account, long playerId) {
+    /** @param enterDeadline 时间预算的截止时刻（{@link #nanoClock} 的读数） */
+    private CompletableFuture<HandlerReply> enter(SessionContext session, String account, long playerId,
+                                                  long enterDeadline) {
         Optional<PlayerRow> found = store.findPlayer(playerId);
         if (found.isEmpty() || !account.equals(found.get().getAccount())) {
             log.info("进游戏拒绝：角色不属于本账号 account={} player={} 存在={}", account, playerId, found.isPresent());
@@ -247,10 +282,10 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                 session.getTicketTargetZoneId(), location, playerId, row.getSceneConfigId());
         logCrossZone(session, playerId, zoneId, location, decision);
         return switch (decision) {
-            case EnterRoutes.Redirect go5 -> redirect(session, playerId, row, zoneId, go5);
+            case EnterRoutes.Redirect go5 -> redirect(session, playerId, row, zoneId, go5, enterDeadline);
             case EnterRoutes.Land land -> {
                 metrics.enterRouted(land.route());
-                yield land(session, playerId, row, land.assign());
+                yield land(session, playerId, row, land.assign(), enterDeadline);
             }
         };
     }
@@ -286,23 +321,23 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     // ================================================================ 登录期重定向（GO-5）
 
     /**
-     * 请 scene-manager 在角色所在的 zone 选 gate、签票（本地兜底 {@code assignTimeout}），完成后回到工作线程定结局：
-     * 成功只回应答与指令；没成按首登落在入口 zone。
+     * 请 scene-manager 在角色所在的 zone 选 gate、签票（本地兜底 {@code assignTimeout}，再按剩余预算收紧），完成后回到工作线程定结局：
+     * 成功只回应答与指令；没成按首登落在入口 zone（回落用的是签票剩下的预算）。
      */
     private CompletableFuture<HandlerReply> redirect(SessionContext session, long playerId, PlayerRow row, int zoneId,
-                                                     EnterRoutes.Redirect route) {
+                                                     EnterRoutes.Redirect route, long enterDeadline) {
         RedirectToZoneRequest request = RedirectToZoneRequest.newBuilder()
                 .setFromZoneId(zoneId).setToZoneId(route.toZoneId()).setPlayerId(playerId).build();
         long start = nanoClock.getAsLong();
-        return callSceneManager(() -> sceneDirectory.redirectToZone(request))
-                .handleAsync((response, failure) -> afterRedirect(session, playerId, row, route, response, failure, start),
-                        executor)
+        return callSceneManager(() -> sceneDirectory.redirectToZone(request), enterDeadline)
+                .handleAsync((response, failure) -> afterRedirect(session, playerId, row, route, response, failure, start,
+                        enterDeadline), executor)
                 .thenCompose(Function.identity());
     }
 
     private CompletableFuture<HandlerReply> afterRedirect(SessionContext session, long playerId, PlayerRow row,
                                                           EnterRoutes.Redirect route, RedirectToZoneResponse response,
-                                                          Throwable failure, long start) {
+                                                          Throwable failure, long start, long enterDeadline) {
         long elapsed = nanoClock.getAsLong() - start;
         AssignResult result;
         String why;
@@ -328,7 +363,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         log.warn("登录期重定向没成，退化为在入口 zone 按首登进游戏 player={} session={} 入口zone={} 角色所在zone={}: {}", playerId,
                 session.getSessionId(), Integer.toUnsignedString(route.fallback().getZoneId()),
                 Integer.toUnsignedString(route.toZoneId()), why);
-        return land(session, playerId, row, route.fallback());
+        return land(session, playerId, row, route.fallback(), enterDeadline);
     }
 
     /**
@@ -377,14 +412,14 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
 
     /** 在入口 zone 落地：合服围栏检查点 F2 → 分配 → 夺权（工作线程上调用）。 */
     private CompletableFuture<HandlerReply> land(SessionContext session, long playerId, PlayerRow row,
-                                                 AssignSceneRequest assignRequest) {
+                                                 AssignSceneRequest assignRequest, long enterDeadline) {
         if (mergeFenced(session, playerId, row.getZoneId())) {
             return done(error(SceneErrorTip.scene_error.kEnterSceneFailed_VALUE));
         }
         long assignStart = nanoClock.getAsLong();
-        return callSceneManager(() -> sceneDirectory.assign(assignRequest))
-                .handleAsync((assigned, failure) -> afterAssign(session, playerId, assignRequest, assigned, failure, assignStart),
-                        executor)
+        return callSceneManager(() -> sceneDirectory.assign(assignRequest), enterDeadline)
+                .handleAsync((assigned, failure) -> afterAssign(session, playerId, assignRequest, assigned, failure,
+                        assignStart, enterDeadline), executor)
                 .thenCompose(Function.identity());
     }
 
@@ -416,9 +451,14 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
 
     /**
      * 调 scene-manager：把同步抛出、返回 null、超时都统一成一个一定会完成的 future（copy 出来再加超时，不改动 Dubbo 的 future）。
-     * 分配与登录期重定向签票共用同一个本地兜底 {@code assignTimeout}。
+     * 分配与登录期重定向签票共用同一个本地兜底 {@code assignTimeout}，再按剩余的时间预算收紧；预算已用完就不发起调用，
+     * 直接按超时失败（调用方照调用失败处理）。
      */
-    private <T> CompletableFuture<T> callSceneManager(Supplier<CompletableFuture<T>> call) {
+    private <T> CompletableFuture<T> callSceneManager(Supplier<CompletableFuture<T>> call, long enterDeadline) {
+        long timeoutNanos = Math.min(assignTimeout.toNanos(), enterDeadline - nanoClock.getAsLong());
+        if (timeoutNanos <= 0) {
+            return CompletableFuture.failedFuture(new TimeoutException("进游戏的时间预算已用完，没有发起调用"));
+        }
         CompletableFuture<T> future;
         try {
             future = call.get();
@@ -428,11 +468,12 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         if (future == null) {
             return CompletableFuture.failedFuture(new IllegalStateException("scene-manager 返回了 null future"));
         }
-        return future.copy().orTimeout(assignTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        return future.copy().orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
     }
 
     private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, AssignSceneRequest routed,
-                                                        AssignSceneResponse assigned, Throwable failure, long assignStart) {
+                                                        AssignSceneResponse assigned, Throwable failure, long assignStart,
+                                                        long enterDeadline) {
         long assignElapsed = nanoClock.getAsLong() - assignStart;
         if (failure != null) {
             metrics.sceneAssignCompleted(AssignResult.ERROR, assignElapsed);
@@ -447,10 +488,19 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         metrics.sceneAssignCompleted(AssignResult.OK, assignElapsed);
 
         long claimStart = nanoClock.getAsLong();
-        long deadline = claimStart + claimWait.toNanos();
+        if (enterDeadline - claimStart <= 0) {
+            // 分配回到工作线程时预算已用完：gate 可能已经按超时放弃了这次调用，这时夺到的归属没人接（迟到的应答被丢弃），
+            // 玩家要等租约过期——宁可回 2005 让客户端重试，也不夺权。
+            metrics.ownerClaimCompleted(ClaimOutcome.TIMEOUT, 0);
+            log.warn("进游戏失败：时间预算 {} 已用完，不再夺权 player={} session={}", enterBudget, playerId,
+                    session.getSessionId());
+            return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
+        }
+        long claimDeadline = claimStart + claimWait.toNanos();
+        long deadline = claimDeadline - enterDeadline < 0 ? claimDeadline : enterDeadline;
         CompletableFuture<ClaimStep> chain;
         try {
-            chain = claim(session, playerId, routed, assigned, deadline, FIRST_CLAIM_BACKOFF, false);
+            chain = claim(session, playerId, routed, assigned, deadline, enterDeadline, FIRST_CLAIM_BACKOFF, false);
         } catch (RuntimeException e) {
             metrics.ownerClaimCompleted(ClaimOutcome.ERROR, nanoClock.getAsLong() - claimStart);
             throw e;
@@ -465,15 +515,17 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     /**
      * 在工作线程上夺权一次；仍被持有就请持有者让出，退避后在工作线程上再试，直到截止时间。
      *
-     * @param retried 之前已经撞上过「仍被持有」（夺到时记为 {@link ClaimOutcome#WAITED}）
+     * @param deadline      夺权等待的截止（{@code claimWait} 与时间预算截止中较早的）：最后一次重试排在它上面
+     * @param enterDeadline 时间预算的截止（夺到之后是否还复查位置）
+     * @param retried       之前已经撞上过「仍被持有」（夺到时记为 {@link ClaimOutcome#WAITED}）
      */
     private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, AssignSceneRequest routed,
-                                               AssignSceneResponse assigned, long deadline, Duration backoff,
-                                               boolean retried) {
+                                               AssignSceneResponse assigned, long deadline, long enterDeadline,
+                                               Duration backoff, boolean retried) {
         ClaimResult result = store.claimOwnership(playerId);
         if (result instanceof ClaimResult.Claimed claimed) {
             ClaimOutcome outcome = retried ? ClaimOutcome.WAITED : ClaimOutcome.CLAIMED;
-            return rerouteIfStale(playerId, routed, assigned).thenApply(target -> new ClaimStep(
+            return rerouteIfStale(playerId, routed, assigned, enterDeadline).thenApply(target -> new ClaimStep(
                     accepted(session, playerId, target, claimed.ownerEpoch()), outcome));
         }
         if (result instanceof ClaimResult.NotFound) {
@@ -486,8 +538,8 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         metrics.takeoverRequested();
         long remainingNanos = deadline - nanoClock.getAsLong();
         if (remainingNanos <= 0) {
-            log.warn("进游戏失败：玩家数据归属仍被持有，{} 内没等到释放 player={} session={} held_epoch={}",
-                    claimWait, playerId, session.getSessionId(), heldEpoch);
+            log.warn("进游戏失败：玩家数据归属仍被持有，等待窗口内（{}，截止不晚于时间预算 {}）没等到释放 player={} session={}"
+                    + " held_epoch={}", claimWait, enterBudget, playerId, session.getSessionId(), heldEpoch);
             return CompletableFuture.completedFuture(new ClaimStep(
                     error(LoginErrorTip.login_error.kLoginInProgress_VALUE), ClaimOutcome.TIMEOUT));
         }
@@ -498,7 +550,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         Duration nextBackoff = backoff.multipliedBy(2).compareTo(MAX_CLAIM_BACKOFF) < 0
                 ? backoff.multipliedBy(2) : MAX_CLAIM_BACKOFF;
         return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, routed, assigned, deadline,
-                nextBackoff, true));
+                enterDeadline, nextBackoff, true));
     }
 
     /**
@@ -506,10 +558,16 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      * 读记录时 scene 还没处理离场，登出墓碑在夺权等释放的这段时间才落下）就按新的记录重新分配一次——同基线「LeaveGame 之后按首登」。
      * 只在路由用了原实例（回原实例这一种去向）时才看；读出错或重新分配失败都沿用第一次的结果（只影响落点，不影响归属）。
      * 只认入口 zone 的记录：夺权之后出现的别 zone 记录（含别处的待落点）当作没有——已经持有归属，不再重定向。
+     * 时间预算已用完就不复查、沿用原落点：归属已经夺到，应答必须赶在 gate 放弃这次调用之前回去（见类注释「时间预算」）；
+     * 重新分配的等待同样按剩余预算收紧。
      */
     private CompletableFuture<AssignSceneResponse> rerouteIfStale(long playerId, AssignSceneRequest routed,
-                                                                  AssignSceneResponse assigned) {
+                                                                  AssignSceneResponse assigned, long enterDeadline) {
         if (routed.getPreferredSceneId() == 0) {
+            return CompletableFuture.completedFuture(assigned);
+        }
+        if (enterDeadline - nanoClock.getAsLong() <= 0) {
+            log.warn("夺到归属时时间预算 {} 已用完，不再复查玩家位置，沿用原落点 player={}", enterBudget, playerId);
             return CompletableFuture.completedFuture(assigned);
         }
         Optional<PlayerLocation> now;
@@ -531,11 +589,12 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         log.info("夺权期间玩家位置变了（如 LeaveGame 的登出墓碑），重新分配场景 player={} 原落点={}/{} 现记录={}", playerId,
                 routed.getPreferredSceneNodeId(), routed.getPreferredSceneId(), usable.isPresent() ? "有" : "无");
         long start = nanoClock.getAsLong();
-        return callSceneManager(() -> sceneDirectory.assign(again.build())).handle((target, failure) -> {
+        return callSceneManager(() -> sceneDirectory.assign(again.build()), enterDeadline).handle((target, failure) -> {
             long elapsed = nanoClock.getAsLong() - start;
             if (failure != null || target.getTipId() != 0) {
                 metrics.sceneAssignCompleted(failure != null ? AssignResult.ERROR : AssignResult.REJECTED, elapsed);
-                log.warn("重新分配场景失败，沿用原落点 player={}", playerId);
+                log.warn("重新分配场景失败，沿用原落点 player={}: {}", playerId,
+                        failure != null ? unwrap(failure).toString() : "tip=" + target.getTipId());
                 return assigned;
             }
             metrics.sceneAssignCompleted(AssignResult.OK, elapsed);

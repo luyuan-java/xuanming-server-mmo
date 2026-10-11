@@ -61,7 +61,7 @@ class LoginHomeZoneWiringTest {
     private final AccountLogin accountLogin =
             new AccountLogin(LoginAuthenticator.passwordDisabled(tokens), store, tokens, devices);
     private final PlayerIdGenerator ids = new PlayerIdGenerator(new Snowflake(3), () -> true);
-    private final LoginProperties props = new LoginProperties(null, null, null, null, null, null, null, null, null, null, null);
+    private final LoginProperties props = new LoginProperties(null, null, null, null, null, null, null, null, null, null, null, null);
 
     private static SessionContext sessionIn(int zoneId) {
         return SessionContext.newBuilder().setGateNodeId(7).setGateInstanceId("gate-z" + zoneId)

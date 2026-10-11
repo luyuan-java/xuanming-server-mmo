@@ -279,6 +279,7 @@ public class LoginConfiguration {
     /**
      * 进游戏。去向按位置记录与连接握手时的票据定（批次 5.4：持票者校验、票据钉 zone、登录期重定向 GO-5）；
      * 落地路径上问合服围栏（检查点 F2，判角色的归属区）。{@code xm.zone-id} 只在会话没带 zone 时兜底。
+     * 整条链（含登录期重定向没成时的回落）按 {@code xm.login.enter-game-budget} 收紧，赶在 gate 调 login 的超时之前应答。
      */
     @Bean
     public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers, RedissonClient redis,
@@ -287,7 +288,7 @@ public class LoginConfiguration {
                                              ZoneMergeFence zoneMergeFence, @Value("${xm.zone-id:1}") int zoneId) {
         return new EnterGameHandler(store, sceneDirectory, ownerTakeovers, loginWorkerPool, zoneId,
                 props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice,
-                new PlayerLocationDirectory(redis)::find, zoneMergeFence);
+                new PlayerLocationDirectory(redis)::find, zoneMergeFence, props.enterGameBudget());
     }
 
     /**

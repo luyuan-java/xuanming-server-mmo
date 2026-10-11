@@ -1,5 +1,6 @@
 package com.game.login;
 
+import com.game.login.handler.EnterGameHandler;
 import java.time.Duration;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -12,9 +13,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param maxPlayersPerAccount  每账号角色上限（mmorpg 默认 5）
  * @param workerThreads         阻塞工作线程数（MySQL 等阻塞 I/O 都在这组线程上跑，不占 Dubbo 线程）
  * @param workerQueueCapacity   工作队列上限；满了直接拒绝（回「服务不可用」），不无限堆积
- * @param sceneAssignTimeout    进游戏时等 scene-manager 分配结果的兜底上限；登录期重定向（GO-5）等签票也用它
+ * @param sceneAssignTimeout    进游戏时等 scene-manager 分配结果的兜底上限；登录期重定向（GO-5）等签票也用它；
+ *                              再按 {@code enterGameBudget} 的剩余收紧
  * @param ownerClaimWait        进游戏夺取玩家数据归属时，归属仍被上一个写者持有，最多等它释放多久（期间退避重试），之后回 2005；
- *                              加上场景分配的上限必须小于客户端 EnterGame 的 15s 预算
+ *                              截止不晚于 {@code enterGameBudget}
+ * @param enterGameBudget       一次 EnterGame 从 login 处理器开始算的时间预算：等 scene-manager（签票、分配）按剩余预算收紧，
+ *                              用完就不再发起调用、不再夺权。必须小于 gate 调 login 的 Dubbo 超时（xm-gate
+ *                              {@code dubbo.consumer.timeout}，5s）：gate 到点回 1003 之后迟到的应答被丢弃，那时夺到的归属没人接，
+ *                              玩家要等租约（30s）过期才能再进
  * @param accessTokenTtl        access token 有效期（基线 2h）
  * @param refreshTokenTtl       refresh token 有效期（基线 720h）
  * @param maxDevicesPerAccount  每账号处于「已登录、未进游戏」窗口的连接上限（基线 3，超出回 2024）
@@ -29,6 +35,7 @@ public record LoginProperties(
         Integer workerQueueCapacity,
         Duration sceneAssignTimeout,
         Duration ownerClaimWait,
+        Duration enterGameBudget,
         Duration accessTokenTtl,
         Duration refreshTokenTtl,
         Integer maxDevicesPerAccount,
@@ -58,6 +65,7 @@ public record LoginProperties(
         } else if (ownerClaimWait.isNegative()) {
             throw new IllegalArgumentException("xm.login.owner-claim-wait 不能为负: " + ownerClaimWait);
         }
+        enterGameBudget = positiveOr(enterGameBudget, EnterGameHandler.DEFAULT_ENTER_BUDGET, "enter-game-budget");
         accessTokenTtl = positiveOr(accessTokenTtl, Duration.ofHours(2), "access-token-ttl");
         refreshTokenTtl = positiveOr(refreshTokenTtl, Duration.ofHours(720), "refresh-token-ttl");
         maxDevicesPerAccount = positiveOr(maxDevicesPerAccount, 3, "max-devices-per-account");

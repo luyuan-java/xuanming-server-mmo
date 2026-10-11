@@ -92,8 +92,11 @@ xm:
     # 登录期重定向（GO-5，角色在别的 zone）等 scene-manager 签票也用它兜底，到点按调用失败、退化为在入口 zone 按首登进游戏。
     scene-assign-timeout: 5s
     # 进游戏夺取数据归属时，上一个写者（旧实例）还没写回释放：请它让出并等待的上限，之后回 2005。
-    # 与 scene-assign-timeout 之和须小于客户端 EnterGame 的 15s 预算。
     owner-claim-wait: 3s
+    # 一次 EnterGame 的时间预算（从 login 处理器开始算）：上面两项的等待都按它的剩余收紧，用完就不再调 scene-manager、不再夺权
+    # （登录期重定向没成时的回落 = 签票 + 分配 + 夺权，三段加起来也不超过它）。必须小于 gate 调 login 的 Dubbo 超时
+    # （xm-gate dubbo.consumer.timeout 5s）：gate 到点回 1003 之后迟到的应答被丢弃，那时夺到的归属没人接，玩家要等租约 30s 过期。
+    enter-game-budget: 4s
     # access / refresh 令牌有效期（基线 2h / 720h）；令牌存 Redis，全服共用、不分 zone。
     access-token-ttl: 2h
     refresh-token-ttl: 720h
