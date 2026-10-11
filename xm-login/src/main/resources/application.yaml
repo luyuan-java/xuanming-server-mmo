@@ -89,6 +89,7 @@ xm:
     worker-threads: 16
     worker-queue-capacity: 1024
     # 进游戏时等 scene-manager 分配结果的上限（Dubbo 调用本身 3s 超时，这里是兜底）。
+    # 登录期重定向（GO-5，角色在别的 zone）等 scene-manager 签票也用它兜底，到点按调用失败、退化为在入口 zone 按首登进游戏。
     scene-assign-timeout: 5s
     # 进游戏夺取数据归属时，上一个写者（旧实例）还没写回释放：请它让出并等待的上限，之后回 2005。
     # 与 scene-assign-timeout 之和须小于客户端 EnterGame 的 15s 预算。

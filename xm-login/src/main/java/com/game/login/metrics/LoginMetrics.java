@@ -27,6 +27,8 @@ public final class LoginMetrics {
     static final String PLAYERS_CREATED = "xm.login.players.created";
     static final String BACKEND_CALLS = "xm.login.backend.calls";
     static final String ABANDONED_ENTERS = "xm.login.abandoned.enters";
+    static final String ENTER_ROUTES = "xm.login.enter.routes";
+    static final String TICKET_HOLDER_REJECTED = "xm.login.ticket.holder.rejected";
 
     /** 没有处理器接管的消息号（契约里有但 Java 版未实现、或根本不存在）统一用的方法标签。 */
     public static final String UNROUTED = "unrouted";
@@ -67,13 +69,36 @@ public final class LoginMetrics {
         ERROR
     }
 
-    /** login 调 scene-manager 分配场景的结果。 */
+    /** login 调 scene-manager 的结果（分配场景 {@code assign}、登录期重定向签票 {@code redirectToZone}）。 */
     public enum AssignResult {
         OK,
-        /** scene-manager 回了 tip（无场景等）。 */
+        /** scene-manager 回了 tip（无场景、目标 zone 没有可用的 gate / scene 节点等）。 */
         REJECTED,
-        /** 调用失败 / 超时。 */
+        /** 调用失败 / 超时；登录期重定向的应答残缺（tip 为 0 却缺票据或地址）也算这一类。 */
         ERROR
+    }
+
+    /**
+     * EnterGame 的去向（{@code xm.login.enter.routes{route}}，批次 5.4，zone-travel-spec §5.8 的去向表）：
+     * 每次走到「选去向」的进游戏（过了 2018 / 持票者 / 2028 / 设备续期 / 2005 / 角色归属这些前置校验）计一次；
+     * 登录期重定向（GO-5）等签票有了结局才计 {@link #REDIRECT} 或 {@link #REDIRECT_FALLBACK} 之一（签票回来时工作队列已满、
+     * 链以异常结束的那一次不计，它在 {@code xm.login.requests{result=internal_error}} 里）。只描述去向，不描述随后分配 / 夺权的成败。
+     */
+    public enum EnterRoute {
+        /** 本 zone 首登（默认主世界）：没有位置记录 / 登出墓碑 / 别的 zone 的待落点（不牵引）。 */
+        FIRST,
+        /** 回原实例：本 zone 的在线或断线重连租约记录（顶号、短线重连）。 */
+        RESUME,
+        /** 本 zone 的待落点（跨 zone 传送的第二条腿）：按记录里的地图落，不带实例。 */
+        AWAITING,
+        /** 这条连接持票钉在本 zone，位置记录却在别的 zone 的节点上：票据优先、不再弹走，本 zone 首登。 */
+        PINNED,
+        /** 登录期重定向（GO-5）成功：回 EnterGame 成功应答 + RedirectToGate 指令，不夺权、不分配。 */
+        REDIRECT,
+        /** 登录期重定向没成（调用失败 / 超时 / 拒绝 / 应答残缺），退化为本 zone 首登（X11）。 */
+        REDIRECT_FALLBACK,
+        /** 读位置记录失败，按存档里上次所在的地图选。 */
+        LOCATION_ERROR
     }
 
     /** gate 通知「进场未送达」后 login 代为释放归属的结果（{@code xm.login.abandoned.enters{result}}）。 */
@@ -93,9 +118,12 @@ public final class LoginMetrics {
     private final ConcurrentHashMap<RequestKey, Timer> requests = new ConcurrentHashMap<>();
     private final Map<ClaimOutcome, Timer> claims;
     private final Map<AssignResult, Timer> sceneAssigns;
+    private final Map<AssignResult, Timer> sceneRedirects;
     private final Map<AbandonResult, Counter> abandoned;
+    private final Map<EnterRoute, Counter> enterRoutes;
     private final Counter takeoverRequests;
     private final Counter playersCreated;
+    private final Counter ticketHolderRejected;
 
     public LoginMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -117,6 +145,26 @@ public final class LoginMetrics {
                     .serviceLevelObjectives(LATENCY_BUCKETS)
                     .register(registry));
         }
+        this.sceneRedirects = new EnumMap<>(AssignResult.class);
+        for (AssignResult result : AssignResult.values()) {
+            sceneRedirects.put(result, Timer.builder(BACKEND_CALLS)
+                    .description("login 对后端的 Dubbo 调用耗时")
+                    .tag("backend", "scene-manager")
+                    .tag("method", "redirectToZone")
+                    .tag("result", tagValue(result))
+                    .serviceLevelObjectives(LATENCY_BUCKETS)
+                    .register(registry));
+        }
+        this.enterRoutes = new EnumMap<>(EnterRoute.class);
+        for (EnterRoute route : EnterRoute.values()) {
+            enterRoutes.put(route, Counter.builder(ENTER_ROUTES)
+                    .description("EnterGame 的去向（首登 / 回原实例 / 待落点 / 票据钉住 / 登录期重定向及其回落 / 读位置失败）")
+                    .tag("route", tagValue(route))
+                    .register(registry));
+        }
+        this.ticketHolderRejected = Counter.builder(TICKET_HOLDER_REJECTED)
+                .description("EnterGame 因持票者不符回 2011 的次数（连接握手时出示的重定向票据属于别的角色）")
+                .register(registry);
         this.abandoned = new EnumMap<>(AbandonResult.class);
         for (AbandonResult result : AbandonResult.values()) {
             abandoned.put(result, Counter.builder(ABANDONED_ENTERS)
@@ -172,6 +220,23 @@ public final class LoginMetrics {
     /** 一次 scene-manager 场景分配调用结束（{@code xm.login.backend.calls{backend=scene-manager, method=assign}}）。 */
     public void sceneAssignCompleted(AssignResult result, long elapsedNanos) {
         sceneAssigns.get(result).record(Math.max(0, elapsedNanos), TimeUnit.NANOSECONDS);
+    }
+
+    /**
+     * 一次登录期重定向签票调用结束（{@code xm.login.backend.calls{backend=scene-manager, method=redirectToZone}}）。
+     */
+    public void sceneRedirectCompleted(AssignResult result, long elapsedNanos) {
+        sceneRedirects.get(result).record(Math.max(0, elapsedNanos), TimeUnit.NANOSECONDS);
+    }
+
+    /** 一次进游戏选定了去向（{@code xm.login.enter.routes{route}}）。 */
+    public void enterRouted(EnterRoute route) {
+        enterRoutes.get(route).increment();
+    }
+
+    /** 持票者不符，回 2011（{@code xm.login.ticket.holder.rejected}）。 */
+    public void ticketHolderRejected() {
+        ticketHolderRejected.increment();
     }
 
     public void playerCreated() {

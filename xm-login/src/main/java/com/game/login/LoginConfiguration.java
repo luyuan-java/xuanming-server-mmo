@@ -75,7 +75,10 @@ public class LoginConfiguration {
     static final Duration LEASE_TTL = Duration.ofSeconds(15);
     static final Duration WORKER_DRAIN_TIMEOUT = Duration.ofSeconds(15);
 
-    /** Dubbo 调用本身 3s 超时、不重试（重试会把总耗时拖过客户端预算）；scene-manager 不在时不影响 login 启动。 */
+    /**
+     * Dubbo 调用本身 3s 超时、不重试（重试会把总耗时拖过客户端预算）；scene-manager 不在时不影响 login 启动。
+     * 进游戏用到两个方法：分配场景 {@code assign}、登录期重定向签票 {@code redirectToZone}（批次 5.4 的 GO-5）。
+     */
     @DubboReference(check = false, url = "${xm.dubbo.scene-manager-url:}", timeout = 3000, retries = 0)
     private SceneDirectoryService sceneDirectory;
 
@@ -245,8 +248,8 @@ public class LoginConfiguration {
     }
 
     /**
-     * 合服围栏的读侧（建角的检查点 F1 等）。批次 7.3 之前 Java 版没有合服，恒放行；7.3 把这个 bean 换成读 Redis 的实现
-     * （zone-merge-spec §2.6），调用方不动。
+     * 合服围栏的读侧（建角的检查点 F1、进游戏落地路径的检查点 F2）。批次 7.3 之前 Java 版没有合服，恒放行；
+     * 7.3 把这个 bean 换成读 Redis 的实现（zone-merge-spec §2.6），调用方不动。
      */
     @Bean
     public ZoneMergeFence zoneMergeFence() {
@@ -273,14 +276,18 @@ public class LoginConfiguration {
         return new RedisOwnerTakeovers(redis);
     }
 
+    /**
+     * 进游戏。去向按位置记录与连接握手时的票据定（批次 5.4：持票者校验、票据钉 zone、登录期重定向 GO-5）；
+     * 落地路径上问合服围栏（检查点 F2，判角色的归属区）。{@code xm.zone-id} 只在会话没带 zone 时兜底。
+     */
     @Bean
     public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers, RedissonClient redis,
                                              LoginWorkerPool loginWorkerPool, LoginProperties props,
                                              LoginMetrics loginMetrics, AccountLogin accountLogin,
-                                             @Value("${xm.zone-id:1}") int zoneId) {
+                                             ZoneMergeFence zoneMergeFence, @Value("${xm.zone-id:1}") int zoneId) {
         return new EnterGameHandler(store, sceneDirectory, ownerTakeovers, loginWorkerPool, zoneId,
                 props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice,
-                new PlayerLocationDirectory(redis)::find);
+                new PlayerLocationDirectory(redis)::find, zoneMergeFence);
     }
 
     /**

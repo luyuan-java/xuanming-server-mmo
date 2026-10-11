@@ -18,6 +18,7 @@ import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.EnterScene;
 import com.game.api.proto.SessionContext;
 import com.game.discovery.proto.PlayerLocation;
+import com.game.discovery.zone.ZoneMergeFence;
 import com.game.login.dispatch.HandlerReply;
 import com.game.login.metrics.LoginMetrics;
 import com.game.login.ownership.OwnerTakeovers;
@@ -319,17 +320,22 @@ class EnterGameHandlerTest {
     void 设备数续期被拒_回拒绝码_不查角色不分配场景() throws Exception {
         EnterGameHandler limited = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
                 Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get,
-                session -> LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE, PlayerLocationLookup.NONE);
+                session -> LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE, PlayerLocationLookup.NONE,
+                ZoneMergeFence.OPEN);
         HandlerReply reply = limited.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
         assertThat(response(reply).getErrorMessage().getId()).isEqualTo(LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE);
         org.mockito.Mockito.verifyNoInteractions(scenes);
         verify(store, never()).findPlayer(org.mockito.ArgumentMatchers.anyLong());
     }
     private AssignSceneRequest assignWith(PlayerLocationLookup locations) {
+        return assignWith(SESSION, locations);
+    }
+
+    private AssignSceneRequest assignWith(SessionContext entry, PlayerLocationLookup locations) {
         EnterGameHandler located = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
                 Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get, session -> null,
-                locations);
-        located.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
+                locations, ZoneMergeFence.OPEN);
+        located.handle(entry, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
         ArgumentCaptor<AssignSceneRequest> request = ArgumentCaptor.forClass(AssignSceneRequest.class);
         verify(scenes).assign(request.capture());
         return request.getValue();
@@ -348,9 +354,12 @@ class EnterGameHandlerTest {
     }
 
     @Test
-    void 位置记录在别的zone_按首登不指定落点() {
-        AssignSceneRequest request = assignWith(id -> Optional.of(location(8)));
+    void 位置记录在别的zone_连接持票钉在本zone_按首登不指定落点() {
+        // 没钉住时是登录期重定向（GO-5），见 EnterGameZoneTravelTest；这里是持票来到本 zone 的连接：票据优先，不再弹走。
+        SessionContext pinned = SESSION.toBuilder().setTicketPlayerId(PLAYER).setTicketTargetZoneId(7).build();
+        AssignSceneRequest request = assignWith(pinned, id -> Optional.of(location(8)));
         assertThat(request).isEqualTo(AssignSceneRequest.newBuilder().setZoneId(7).setPlayerId(PLAYER).build());
+        verify(scenes, never()).redirectToZone(any());
     }
 
     @Test
@@ -364,7 +373,7 @@ class EnterGameHandlerTest {
     private HandlerReply enterWith(PlayerLocationLookup locations) {
         EnterGameHandler located = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1,
                 Duration.ofMillis(200), CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get, session -> null,
-                locations);
+                locations, ZoneMergeFence.OPEN);
         return located.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
     }
 

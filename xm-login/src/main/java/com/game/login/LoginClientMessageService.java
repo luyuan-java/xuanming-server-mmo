@@ -26,9 +26,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 /**
  * {@link ClientMessageService} 的 Dubbo 提供方（group {@code login}，Triple）。只做协议适配：
  * 客户端消息交给 {@link ClientMessageDispatcher}（在 login 工作线程池上执行，不占 Dubbo 线程），
- * 未送达的进场释放归属；会话离开「已绑定、没在游戏里」的窗口（应答里带进场指令、会话结束）时注销设备数登记。
+ * 未送达的进场释放归属；会话离开「已绑定、没在游戏里」的窗口（应答里带进场指令或重定向指令、会话结束）时注销设备数登记。
  * 进场指令发出之后 gate / scene 仍可能进场失败（3023）回到大厅：那时会话不计数，直到它再建角 / 进游戏时重新登记
- * （见 {@link AccountLogin#renewDevice}）。
+ * （见 {@link AccountLogin#renewDevice}）。重定向指令（登录期重定向 GO-5，批次 5.4）之后这条连接在 gate 上转为「已重定向」、
+ * 不再受理任何请求，客户端到目标 zone 的新连接上重新登录、重新登记，所以与进场同样注销。
  */
 @DubboService(group = DubboGroups.LOGIN)
 public class LoginClientMessageService implements ClientMessageService {
@@ -64,11 +65,16 @@ public class LoginClientMessageService implements ClientMessageService {
     @Override
     public CompletableFuture<ClientReply> handle(ClientCall call) {
         return dispatcher.dispatch(call).thenApply(reply -> {
-            if (reply.getDirectivesList().stream().anyMatch(SessionDirective::hasEnterScene)) {
+            if (reply.getDirectivesList().stream().anyMatch(LoginClientMessageService::leavesDeviceWindow)) {
                 leaveDeviceWindow(call.getSession());
             }
             return reply;
         });
+    }
+
+    /** 这条指令让会话离开「已登录、未进游戏」的窗口：进场景，或被重定向到别的 zone 的 gate。 */
+    private static boolean leavesDeviceWindow(SessionDirective directive) {
+        return directive.hasEnterScene() || directive.hasRedirectToGate();
     }
 
     /**

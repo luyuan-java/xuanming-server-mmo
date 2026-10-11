@@ -12,7 +12,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param maxPlayersPerAccount  每账号角色上限（mmorpg 默认 5）
  * @param workerThreads         阻塞工作线程数（MySQL 等阻塞 I/O 都在这组线程上跑，不占 Dubbo 线程）
  * @param workerQueueCapacity   工作队列上限；满了直接拒绝（回「服务不可用」），不无限堆积
- * @param sceneAssignTimeout    进游戏时等 scene-manager 分配结果的兜底上限
+ * @param sceneAssignTimeout    进游戏时等 scene-manager 分配结果的兜底上限；登录期重定向（GO-5）等签票也用它
  * @param ownerClaimWait        进游戏夺取玩家数据归属时，归属仍被上一个写者持有，最多等它释放多久（期间退避重试），之后回 2005；
  *                              加上场景分配的上限必须小于客户端 EnterGame 的 15s 预算
  * @param accessTokenTtl        access token 有效期（基线 2h）

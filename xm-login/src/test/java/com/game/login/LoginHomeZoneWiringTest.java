@@ -17,8 +17,11 @@ import com.game.login.auth.LoginAuthenticator;
 import com.game.login.character.CharacterRules;
 import com.game.login.character.PlayerIdGenerator;
 import com.game.login.character.RoleNameRules;
+import com.game.login.dispatch.LoginWorkerPool;
 import com.game.login.handler.CreatePlayerHandler;
+import com.game.login.handler.EnterGameHandler;
 import com.game.login.metrics.LoginMetrics;
+import com.game.login.ownership.OwnerTakeovers;
 import com.game.login.testing.InMemoryLoginDevices;
 import com.game.login.testing.InMemoryLoginTokens;
 import com.game.player.store.PlayerRow;
@@ -27,7 +30,10 @@ import com.game.player.store.PlayerStore.CreateOutcome;
 import com.game.player.store.PlayerStore.CreateStatus;
 import com.game.proto.login.CreatePlayerRequest;
 import com.game.proto.login.CreatePlayerResponse;
+import com.game.proto.login.EnterGameRequest;
+import com.game.proto.login.EnterGameResponse;
 import com.game.table.LoginErrorTip;
+import com.game.table.SceneErrorTip;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayList;
 import java.util.List;
@@ -36,11 +42,12 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.redisson.api.RedissonClient;
 
 /**
  * 建角 bean 的装配（X16）：归属区来自会话、不来自 login 进程的 {@code xm.zone-id}；合服围栏是注入进来的那个 bean
  * （7.3 换实现时只换 bean，不动处理器），批次 7.3 之前这个 bean 是恒放行的 {@link ZoneMergeFence#OPEN}。
- * 只调装配方法、不起容器。
+ * 进游戏 bean 同样拿注入的围栏（检查点 F2，判角色的归属区）。只调装配方法、不起容器。
  */
 class LoginHomeZoneWiringTest {
 
@@ -101,6 +108,42 @@ class LoginHomeZoneWiringTest {
         assertThat(fromZone3.getPlayers(0).getPlayer().getZoneId()).isEqualTo(3);
         // 建角前的设备数续期照旧接着（accountLogin::renewDevice）：两个区的 gate 各登记了一个设备。
         assertThat(devices.of(ACCOUNT)).hasSize(2);
+    }
+
+    @Test
+    void 进游戏bean用的也是注入的围栏_检查点F2判角色的归属区而不是会话zone() throws Exception {
+        List<Integer> asked = new ArrayList<>();
+        ZoneMergeFence merging = new ZoneMergeFence() {
+            @Override
+            public boolean inProgress(int zoneId) {
+                asked.add(zoneId);
+                return true;
+            }
+
+            @Override
+            public CompletionStage<Boolean> inProgressAsync(int zoneId) {
+                return CompletableFuture.failedStage(new AssertionError("进游戏应同步判围栏"));
+            }
+        };
+        PlayerRow row = new PlayerRow();
+        row.setPlayerId(42);
+        row.setAccount(ACCOUNT);
+        row.setZoneId(1);
+        when(store.findPlayer(42)).thenReturn(java.util.Optional.of(row));
+        try (LoginWorkerPool pool = new LoginWorkerPool(1, 8, java.time.Duration.ofSeconds(1))) {
+            // 位置记录的 Redis 是替身（读即失败 → 按存档地图）；场景目录没接（Dubbo 引用为空）——围栏挡在分配之前，碰不到它。
+            EnterGameHandler handler = configuration.enterGameHandler(store, mock(OwnerTakeovers.class),
+                    mock(RedissonClient.class), pool, props, new LoginMetrics(new SimpleMeterRegistry()), accountLogin,
+                    merging, 1);
+
+            var reply = handler.handle(sessionIn(2), EnterGameRequest.newBuilder().setPlayerId(42).build())
+                    .get(5, TimeUnit.SECONDS);
+
+            EnterGameResponse response = EnterGameResponse.parseFrom(reply.body().orElseThrow().toByteString());
+            assertThat(response.getErrorMessage().getId()).isEqualTo(SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
+            assertThat(asked).as("会话在区 2，角色的归属区是 1").containsExactly(1);
+            verify(store, never()).claimOwnership(org.mockito.ArgumentMatchers.anyLong());
+        }
     }
 
     @Test

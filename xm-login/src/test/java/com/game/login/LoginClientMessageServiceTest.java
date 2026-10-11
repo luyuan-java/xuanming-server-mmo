@@ -11,8 +11,11 @@ import com.game.api.proto.AbandonedEnter;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.EnterScene;
+import com.game.api.proto.RedirectToGate;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionDirective;
+import com.game.api.proto.UnbindPlayer;
+import com.game.api.proto.ZoneRedirect;
 import com.game.api.proto.Ack;
 import com.game.api.proto.SessionContext;
 import com.game.login.account.AccountLogin;
@@ -112,6 +115,32 @@ class LoginClientMessageServiceTest {
         when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(entered));
         assertThat(service.handle(call).join()).isSameAs(entered);
         assertThat(devices.of("robot_0001")).isEmpty();
+    }
+
+    @Test
+    void 应答带重定向指令_同进场一样注销设备_应答原样交回() {
+        // 登录期重定向（GO-5）：这条连接随后在 gate 上转为「已重定向」，客户端到目标 zone 的新连接上重新登录、重新登记。
+        devices.admit("robot_0001", "g/9");
+        ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(26).build();
+        ClientReply redirected = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
+                .setRedirectToGate(RedirectToGate.newBuilder().setRedirect(ZoneRedirect.newBuilder()
+                        .setTargetZoneId(2).setGateHost("10.0.0.2").setGatePort(11010)))).build();
+        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(redirected));
+
+        assertThat(service.handle(call).join()).isSameAs(redirected);
+        assertThat(devices.of("robot_0001")).isEmpty();
+    }
+
+    @Test
+    void 应答里只有别的指令_不注销设备() {
+        devices.admit("robot_0001", "g/9");
+        ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(17).build();
+        ClientReply unbound = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
+                .setUnbindPlayer(UnbindPlayer.getDefaultInstance())).build();
+        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(unbound));
+
+        service.handle(call).join();
+        assertThat(devices.of("robot_0001")).containsExactly("g/9");
     }
 
     @Test
