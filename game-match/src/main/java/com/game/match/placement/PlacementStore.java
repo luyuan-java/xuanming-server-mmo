@@ -4,7 +4,7 @@ import com.game.common.deadline.Deadline;
 import com.game.match.proto.BattlePlacement;
 
 /**
- * 战斗落点记录的存取（Redis {@code RedisKeys.matchBattlePlacement(battle_id)}，HASH：{@code a} = attempt、{@code pb} = {@link BattlePlacement} 字节，
+ * 战斗落点记录的存取（Redis {@code RedisKeys#matchBattlePlacement(battle_id)}，HASH：{@code a} = attempt、{@code pb} = {@link BattlePlacement} 字节，
  * TTL {@code MatchBudgets.PLACEMENT_TTL_SECONDS}；match-spec §4.2、§4.3）。写者只有 gather；读者是 179 补签与 6.5 观战。
  *
  * <p>生命周期：建房<b>之前</b>写入（写不进去就不建房）→ 换节点重试时改写（attempt = 2）→ 成功后同值补写 → 确认房间没建成时在补偿之后删除 →

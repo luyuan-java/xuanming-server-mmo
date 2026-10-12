@@ -45,6 +45,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.InstantSource;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -80,6 +81,8 @@ public final class GateNode {
     private static final WriteBufferWaterMark CLIENT_WATER_MARK = new WriteBufferWaterMark(1 << 20, 2 << 20);
 
     private final RedissonClient redis;
+    /** 本部署命名空间的键名（节点目录、节点号租约、在线目录、推送频道都由它取名）。 */
+    private final RedisKeys keys;
     private final MessageIdRegistry messageIdRegistry;
     private final GateTokens tokens;
     private final NodeLinkAuth linkAuth;
@@ -122,16 +125,19 @@ public final class GateNode {
     private volatile GatePushSubscriber pushSubscriber;
 
     /**
+     * @param keys     本部署命名空间的键名
      * @param backends login 以外的客户端消息后端（消息域 → Dubbo 服务，friend ……）
      * @param linkAuth gate → scene 链路握手鉴权（密钥来自环境变量 {@code GAME_NODE_LINK_SECRET}，须与 scene 一致）
      * @param tableDir 配置表目录（只读 MessageLimiter 表做按消息号限频）
      * @param metrics  gate 指标（会话层与链路层共用一份）
      */
-    public GateNode(RedissonClient redis, MessageIdRegistry messageIdRegistry, GateTokens tokens, NodeLinkAuth linkAuth,
-                    ClientMessageService login, Map<String, ClientMessageService> backends, GateProperties properties,
-                    int zoneId, String advertiseHost, Path tableDir, GateMetrics metrics, RunMode runMode) {
+    public GateNode(RedissonClient redis, RedisKeys keys, MessageIdRegistry messageIdRegistry, GateTokens tokens,
+                    NodeLinkAuth linkAuth, ClientMessageService login, Map<String, ClientMessageService> backends,
+                    GateProperties properties, int zoneId, String advertiseHost, Path tableDir, GateMetrics metrics,
+                    RunMode runMode) {
         this.runMode = runMode;
         this.redis = redis;
+        this.keys = Objects.requireNonNull(keys, "keys");
         this.messageIdRegistry = messageIdRegistry;
         this.tokens = tokens;
         this.linkAuth = linkAuth;
@@ -143,7 +149,7 @@ public final class GateNode {
         this.tableDir = tableDir;
         this.metrics = metrics;
         this.startedAtMs = System.currentTimeMillis();
-        this.gateDirectory = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
+        this.gateDirectory = new NodeDirectory<>(redis, keys, NodeTypes.GATE, GateNodeInfo.parser());
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -163,17 +169,17 @@ public final class GateNode {
 
     private void doStart() {
         scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("gate-bg").daemon(true).factory());
-        lease = NodeIdLease.acquire(redis, scheduler, NodeTypes.GATE, zoneId,
+        lease = NodeIdLease.acquire(redis, keys, scheduler, NodeTypes.GATE, zoneId,
                 SessionIdAllocator.MIN_NODE_ID, SessionIdAllocator.MAX_NODE_ID, instanceId, LEASE_TTL, this::onLeaseLost);
         GateIdentity identity = new GateIdentity(lease.nodeId(), instanceId, zoneId);
         registry = new SessionRegistry(new SessionIdAllocator(identity.nodeId()));
-        presence = new GatePresence(new PlayerPresenceDirectory(redis), zoneId, identity.nodeId(), instanceId,
+        presence = new GatePresence(new PlayerPresenceDirectory(redis, keys), zoneId, identity.nodeId(), instanceId,
                 System::currentTimeMillis);
 
         // scene 链路：寻址查 Redis（阻塞）放在单独线程，连接放在链路 I/O 线程。
         linkGroup = new NioEventLoopGroup(properties.linkThreads(), new DefaultThreadFactory("gate-link"));
         linkResolver = Executors.newSingleThreadExecutor(Thread.ofPlatform().name("gate-link-resolve").daemon(true).factory());
-        NodeDirectory<SceneNodeInfo> sceneDirectory = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        NodeDirectory<SceneNodeInfo> sceneDirectory = new NodeDirectory<>(redis, keys, NodeTypes.SCENE, SceneNodeInfo.parser());
         SceneNodeResolver resolver = nodeId -> sceneDirectory.list(zoneId).stream()
                 .filter(info -> info.getNodeId() == nodeId)
                 .findFirst();
@@ -196,7 +202,7 @@ public final class GateNode {
         links.bindListener(new SceneEventRouter(registry, dispatcher));
         // 服务端 → 玩家推送：订阅本 gate 的频道（任何服务按在线目录找到本 gate 后发布到这里）。
         pushSubscriber = new GatePushSubscriber(
-                redis.getTopic(RedisKeys.gatePushTopic(zoneId, identity.nodeId()), ByteArrayCodec.INSTANCE),
+                redis.getTopic(keys.gatePushTopic(zoneId, identity.nodeId()), ByteArrayCodec.INSTANCE),
                 instanceId, registry, dispatcher, metrics);
         pushSubscriber.start();
         presence.start(scheduler);

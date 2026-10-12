@@ -3,6 +3,7 @@ package com.game.discovery.presence;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes.Outcome;
 import com.game.discovery.proto.GatePush;
@@ -31,6 +32,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class PresenceIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long BASE = (1L << 50) + ThreadLocalRandom.current().nextLong(1L << 40);
     private static final int ZONE = 9000 + ThreadLocalRandom.current().nextInt(1000);
 
@@ -43,14 +46,14 @@ class PresenceIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        directory = new PlayerPresenceDirectory(redis);
-        pushes = new PlayerPushes(redis, directory);
+        directory = new PlayerPresenceDirectory(redis, REDIS_KEYS);
+        pushes = new PlayerPushes(redis, REDIS_KEYS, directory);
     }
 
     @AfterAll
     static void cleanup() {
         for (long i = 0; i < 12; i++) {
-            redis.getBucket(RedisKeys.presence(BASE + i)).delete();
+            redis.getBucket(REDIS_KEYS.presence(BASE + i)).delete();
         }
         redis.shutdown();
     }
@@ -71,7 +74,7 @@ class PresenceIntegrationTest {
 
         assertThat(directory.find(BASE)).contains(p);
         assertThat(await(directory.findAsync(BASE))).contains(p);
-        long ttl = redis.getBucket(RedisKeys.presence(BASE)).remainTimeToLive();
+        long ttl = redis.getBucket(REDIS_KEYS.presence(BASE)).remainTimeToLive();
         assertThat(ttl).isPositive().isLessThanOrEqualTo(PlayerPresenceDirectory.TTL.toMillis());
     }
 
@@ -95,12 +98,12 @@ class PresenceIntegrationTest {
         PlayerPresence overwritten = entry(BASE + 4, 1, "gate-a", 13);
         PlayerPresence other = entry(BASE + 4, 2, "gate-b", 99);
         await(directory.putAsync(mine));
-        redis.getBucket(RedisKeys.presence(BASE + 2)).expire(java.time.Duration.ofSeconds(5));
+        redis.getBucket(REDIS_KEYS.presence(BASE + 2)).expire(java.time.Duration.ofSeconds(5));
         await(directory.putAsync(other));
 
         assertThat(await(directory.refreshAsync(List.of(mine, lost, overwritten)))).as("补回 1 条").isEqualTo(1);
 
-        assertThat(redis.getBucket(RedisKeys.presence(BASE + 2)).remainTimeToLive()).isGreaterThan(5_000);
+        assertThat(redis.getBucket(REDIS_KEYS.presence(BASE + 2)).remainTimeToLive()).isGreaterThan(5_000);
         assertThat(directory.find(BASE + 3)).contains(lost);
         assertThat(directory.find(BASE + 4)).as("玩家已在别处，不抢回").contains(other);
     }
@@ -110,7 +113,7 @@ class PresenceIntegrationTest {
         PlayerPresence p = entry(BASE + 2, 1, "gate-a", 11);
         await(directory.refreshAsync(List.of(p)));          // 先让脚本进缓存
         redis.getScript().scriptFlush();                     // SCRIPT FLUSH：服务端忘掉全部脚本
-        redis.getBucket(RedisKeys.presence(BASE + 2)).delete();
+        redis.getBucket(REDIS_KEYS.presence(BASE + 2)).delete();
 
         assertThat(await(directory.refreshAsync(List.of(p)))).as("NOSCRIPT 后自动重新加载并补回").isEqualTo(1);
         assertThat(directory.find(BASE + 2)).contains(p);
@@ -120,7 +123,7 @@ class PresenceIntegrationTest {
     @Test
     void 批量查只含在线的_损坏条目按不在线() throws Exception {
         await(directory.putAsync(entry(BASE + 5, 1, "gate-a", 11)));
-        redis.getBucket(RedisKeys.presence(BASE + 6), ByteArrayCodec.INSTANCE).set(new byte[] {(byte) 0xff, 0x01});
+        redis.getBucket(REDIS_KEYS.presence(BASE + 6), ByteArrayCodec.INSTANCE).set(new byte[] {(byte) 0xff, 0x01});
 
         Map<Long, PlayerPresence> online = directory.findAll(List.of(BASE + 5, BASE + 6, BASE + 7));
         assertThat(online).containsOnlyKeys(BASE + 5);
@@ -130,7 +133,7 @@ class PresenceIntegrationTest {
     @Test
     void 推送按gate分组发布_带玩家栅栏_不在线的报OFFLINE() throws Exception {
         LinkedBlockingQueue<GatePush> gate1 = new LinkedBlockingQueue<>();
-        RTopic topic = redis.getTopic(RedisKeys.gatePushTopic(ZONE, 1), ByteArrayCodec.INSTANCE);
+        RTopic topic = redis.getTopic(REDIS_KEYS.gatePushTopic(ZONE, 1), ByteArrayCodec.INSTANCE);
         int listener = topic.addListener(byte[].class, (ch, msg) -> {
             try {
                 gate1.add(GatePush.parseFrom(msg));
@@ -166,7 +169,7 @@ class PresenceIntegrationTest {
     @Test
     void 按序推送_一次查目录一次发布_订阅端按原顺序收到整批() throws Exception {
         LinkedBlockingQueue<GatePush> gate3 = new LinkedBlockingQueue<>();
-        RTopic topic = redis.getTopic(RedisKeys.gatePushTopic(ZONE, 3), ByteArrayCodec.INSTANCE);
+        RTopic topic = redis.getTopic(REDIS_KEYS.gatePushTopic(ZONE, 3), ByteArrayCodec.INSTANCE);
         int listener = topic.addListener(byte[].class, (ch, msg) -> {
             try {
                 gate3.add(GatePush.parseFrom(msg));

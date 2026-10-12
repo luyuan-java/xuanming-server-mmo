@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.game.api.proto.OwnerTakeover;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
@@ -24,16 +25,18 @@ import org.redisson.misc.CompletableFutureWrapper;
  */
 class RedisTakeoverRequestsTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     @Test
     void 发到归属让出频道_字节编解码_消息是OwnerTakeover_uint64原样() throws Exception {
         RedissonClient redis = mock(RedissonClient.class);
         RTopic topic = mock(RTopic.class);
-        when(redis.getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE)).thenReturn(topic);
+        when(redis.getTopic(REDIS_KEYS.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE)).thenReturn(topic);
         when(topic.publishAsync(any())).thenReturn(new CompletableFutureWrapper<Long>(CompletableFuture.completedFuture(1L)));
         long player = 0xF000_0000_0000_1234L; // ≥ 2^63：按无符号传
         long epoch = 77;
 
-        new RedisTakeoverRequests(() -> redis).request(player, epoch);
+        new RedisTakeoverRequests(() -> redis, REDIS_KEYS).request(player, epoch);
 
         ArgumentCaptor<Object> message = ArgumentCaptor.forClass(Object.class);
         verify(topic).publishAsync(message.capture());
@@ -51,18 +54,18 @@ class RedisTakeoverRequestsTest {
         // 懒加载的客户端建不出来（Redis 不可达）
         assertThatCode(() -> new RedisTakeoverRequests(() -> {
             throw new IllegalStateException("redissonClient 建不出来");
-        }).request(1, 2)).doesNotThrowAnyException();
+        }, REDIS_KEYS).request(1, 2)).doesNotThrowAnyException();
 
         RedissonClient noTopic = mock(RedissonClient.class);
         when(noTopic.getTopic(any(String.class), any())).thenThrow(new IllegalStateException("客户端已关闭"));
-        assertThatCode(() -> new RedisTakeoverRequests(() -> noTopic).request(1, 2)).doesNotThrowAnyException();
+        assertThatCode(() -> new RedisTakeoverRequests(() -> noTopic, REDIS_KEYS).request(1, 2)).doesNotThrowAnyException();
 
         RedissonClient redis = mock(RedissonClient.class);
         RTopic topic = mock(RTopic.class);
-        when(redis.getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE)).thenReturn(topic);
+        when(redis.getTopic(REDIS_KEYS.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE)).thenReturn(topic);
         when(topic.publishAsync(any())).thenReturn(new CompletableFutureWrapper<Long>(
                 CompletableFuture.failedFuture(new IllegalStateException("READONLY 主库切换中"))));
-        assertThatCode(() -> new RedisTakeoverRequests(() -> redis).request(1, 2)).doesNotThrowAnyException();
+        assertThatCode(() -> new RedisTakeoverRequests(() -> redis, REDIS_KEYS).request(1, 2)).doesNotThrowAnyException();
         verify(topic).publishAsync(any());
     }
 }

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.contract.MessageIdRegistry;
@@ -77,6 +78,8 @@ import org.redisson.config.Config;
  * </ul>
  */
 final class TeamServiceFixture {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     static final int DB = 12;
     static final int ZONE = 1;
@@ -172,7 +175,7 @@ final class TeamServiceFixture {
                 return real.hget(key, field);
             }
         };
-        this.store = new TeamStore(intercepting, new TeamStore.Hooks() {
+        this.store = new TeamStore(intercepting, REDIS_KEYS, new TeamStore.Hooks() {
             @Override
             public void afterRead(Bind bind) {
                 afterRead.get().accept(bind);
@@ -292,12 +295,12 @@ final class TeamServiceFixture {
     List<String> allKeys() {
         List<String> keys = new ArrayList<>();
         for (long t : tids) {
-            keys.add(RedisKeys.teamRecord(t));
-            keys.add(RedisKeys.teamInfo(t));
+            keys.add(REDIS_KEYS.teamRecord(t));
+            keys.add(REDIS_KEYS.teamInfo(t));
         }
         for (long p : pids) {
-            keys.add(RedisKeys.teamPlayer(p));
-            keys.add(RedisKeys.teamInvite(p));
+            keys.add(REDIS_KEYS.teamPlayer(p));
+            keys.add(REDIS_KEYS.teamInvite(p));
         }
         return keys;
     }
@@ -362,15 +365,15 @@ final class TeamServiceFixture {
     }
 
     long epochOf(long pid) {
-        return Long.parseUnsignedLong(hget(RedisKeys.teamPlayer(pid), TeamRedisFields.EPOCH));
+        return Long.parseUnsignedLong(hget(REDIS_KEYS.teamPlayer(pid), TeamRedisFields.EPOCH));
     }
 
     String tidOf(long pid) {
-        return hget(RedisKeys.teamPlayer(pid), TeamRedisFields.TID);
+        return hget(REDIS_KEYS.teamPlayer(pid), TeamRedisFields.TID);
     }
 
     long versionOf(long tid) {
-        return Long.parseUnsignedLong(hget(RedisKeys.teamRecord(tid), TeamRedisFields.VER));
+        return Long.parseUnsignedLong(hget(REDIS_KEYS.teamRecord(tid), TeamRedisFields.VER));
     }
 
     boolean exists(String key) {
@@ -392,7 +395,7 @@ final class TeamServiceFixture {
     }
 
     TeamRecord loadRecord(long tid) {
-        byte[] raw = redis.<byte[], byte[]>getMap(RedisKeys.teamRecord(tid), ByteArrayCodec.INSTANCE)
+        byte[] raw = redis.<byte[], byte[]>getMap(REDIS_KEYS.teamRecord(tid), ByteArrayCodec.INSTANCE)
                 .get(TeamRedisFields.PB.getBytes(StandardCharsets.US_ASCII));
         assertThat(raw).as("记录 %s 不存在", Long.toUnsignedString(tid)).isNotNull();
         try {
@@ -404,7 +407,7 @@ final class TeamServiceFixture {
 
     /** 直接改写记录的 pb（ver 不变；造「过期的申请」这类真 Redis 拨不动时钟做不到的状态）。 */
     void writeRecord(long tid, TeamRecord rec) {
-        redis.<byte[], byte[]>getMap(RedisKeys.teamRecord(tid), ByteArrayCodec.INSTANCE)
+        redis.<byte[], byte[]>getMap(REDIS_KEYS.teamRecord(tid), ByteArrayCodec.INSTANCE)
                 .put(TeamRedisFields.PB.getBytes(StandardCharsets.US_ASCII), rec.toByteArray());
     }
 

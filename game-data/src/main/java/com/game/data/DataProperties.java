@@ -1,6 +1,6 @@
 package com.game.data;
 
-import com.game.audit.KafkaNames;
+import com.game.common.KafkaNames;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
@@ -29,12 +29,12 @@ public record DataProperties(
         @DefaultValue Rollback rollback) {
 
     /**
-     * 一个消费者的参数（各 topic 缺省值不同，所以每个 topic 一个记录类型）。消费组的缺省值随部署命名空间（{@code <ns>-data-…}，经 {@link KafkaNames}），
-     * 所以不写在 {@code @DefaultValue} 上（注解值只能是常量），而是在紧凑构造器里把「没配」（null）换成缺省；显式配的空白照旧拒绝。
+     * 一个消费者的参数（各 topic 缺省值不同，所以每个 topic 一个记录类型）。消费组的缺省值随部署命名空间（{@code <ns>-data-…}，由注入的
+     * {@link KafkaNames} 给出），所以配置里不写缺省：没配时 {@link #group()} 为 null，由 {@link DataNode} 在装配时换成缺省组；显式配的空白照旧拒绝。
      */
     public interface ConsumerSettings {
 
-        /** 消费组。 */
+        /** 显式配置的消费组；null = 没配（用 {@link KafkaNames} 给的缺省组）。 */
         String group();
 
         /** 一次拉取的上限（同一次拉取的记录在一个库事务里落库）。 */
@@ -43,24 +43,21 @@ public record DataProperties(
         /** 多行 INSERT 每条语句的行数。 */
         int insertChunk();
 
-        /** 紧凑构造器里字段还没赋值，只能校验参数本身。 */
+        /** 紧凑构造器里字段还没赋值，只能校验参数本身。group 为 null 表示没配（合法）；显式配的空白拒绝。 */
         static void validate(String group, int maxPollRecords, int insertChunk) {
-            if (group == null || group.isBlank() || maxPollRecords < 1 || insertChunk < 1) {
+            if ((group != null && group.isBlank()) || maxPollRecords < 1 || insertChunk < 1) {
                 throw new IllegalArgumentException("game.data 消费者配置非法");
             }
         }
     }
 
-    /** @param group 消费组；没配时缺省 {@code <ns>-data-transaction-log}（缺省命名空间下即 {@code game-data-transaction-log}） */
+    /** @param group 消费组；没配（null）时用 {@code <ns>-data-transaction-log}（缺省命名空间下即 {@code game-data-transaction-log}） */
     public record TransactionLogConsumer(
             String group,
             @DefaultValue("500") int maxPollRecords,
             @DefaultValue("200") int insertChunk) implements ConsumerSettings {
 
         public TransactionLogConsumer {
-            if (group == null) {
-                group = KafkaNames.of("data-transaction-log");
-            }
             ConsumerSettings.validate(group, maxPollRecords, insertChunk);
         }
     }
@@ -68,7 +65,7 @@ public record DataProperties(
     /**
      * 快照单条可达约 1MB：拉取与分块都小，一条 INSERT 至多约 10MB。
      *
-     * @param group 消费组；没配时缺省 {@code <ns>-data-player-snapshot}（缺省命名空间下即 {@code game-data-player-snapshot}）
+     * @param group 消费组；没配（null）时用 {@code <ns>-data-player-snapshot}（缺省命名空间下即 {@code game-data-player-snapshot}）
      */
     public record PlayerSnapshotConsumer(
             String group,
@@ -76,9 +73,6 @@ public record DataProperties(
             @DefaultValue("10") int insertChunk) implements ConsumerSettings {
 
         public PlayerSnapshotConsumer {
-            if (group == null) {
-                group = KafkaNames.of("data-player-snapshot");
-            }
             ConsumerSettings.validate(group, maxPollRecords, insertChunk);
         }
     }

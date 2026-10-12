@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.chat.metrics.ChatMetrics;
 import com.game.chat.store.ChatStore;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.proto.chat.ChatChannelType;
 import com.game.proto.chat.ChatMessage;
@@ -25,11 +26,13 @@ import org.junit.jupiter.api.Test;
 
 class ChatServiceTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final MemoryStore store = new MemoryStore();
     private final AtomicLong clock = new AtomicLong(1_000);
     private final ChatService service = new ChatService(store, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7),
-            20, 50, Duration.ofSeconds(60), clock::get);
+            20, 50, Duration.ofSeconds(60), clock::get, REDIS_KEYS);
 
     private static SendChatRequest world(String content, String requestId) {
         return SendChatRequest.newBuilder().setRequestId(requestId).setMessage(ChatMessage.newBuilder()
@@ -90,7 +93,26 @@ class ChatServiceTest {
         assertThat(first.getSenderPlayerId()).isEqualTo(42);
         assertThat(first.getTargetPlayerId()).isZero();
         assertThat(first.getSendTimeMs()).isEqualTo(1_000);
-        assertThat(store.ttls.get(RedisKeys.chatWorldLog())).isEqualTo(Duration.ofDays(7).toSeconds());
+        assertThat(store.ttls.get(REDIS_KEYS.chatWorldLog())).isEqualTo(Duration.ofDays(7).toSeconds());
+    }
+
+    @Test
+    void 缺省命名空间的键与金样相同_非缺省命名空间的键全部换前缀() {
+        assertThat(send(5, world("w", "req-ns"))).isZero();
+        assertThat(send(5, privateTo(9, "p"))).isZero();
+        assertThat(store.lists).containsOnlyKeys("game:chat:{world}:log", "game:chat:{p:5:9}:log");
+        assertThat(store.strings).containsOnlyKeys("game:chat:{req:5}:req-ns");
+        assertThat(store.counters).containsOnlyKeys("game:chat:{rl:5}");
+
+        MemoryStore other = new MemoryStore();
+        ChatService nstest = new ChatService(other, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7), 20, 50,
+                Duration.ofSeconds(60), clock::get, new RedisKeys(GameNamespace.of("nstest")));
+        assertThat(nstest.send(5, world("w", "req-ns"), 1000).toCompletableFuture().join().hasErrorMessage()).isFalse();
+        assertThat(nstest.send(5, privateTo(9, "p"), 1000).toCompletableFuture().join().hasErrorMessage()).isFalse();
+        assertThat(other.lists).containsOnlyKeys("nstest:chat:{world}:log", "nstest:chat:{p:5:9}:log");
+        assertThat(other.strings).containsOnlyKeys("nstest:chat:{req:5}:req-ns");
+        assertThat(other.counters).containsOnlyKeys("nstest:chat:{rl:5}");
+        assertThat(other.ttls.keySet()).isNotEmpty().allMatch(k -> k.startsWith("nstest:"));
     }
 
     @Test
@@ -100,7 +122,7 @@ class ChatServiceTest {
         assertThat(pull(9, ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE, 5, 10).getMessagesCount()).isEqualTo(2);
         assertThat(pull(5, ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE, 9, 10).getMessagesCount()).isEqualTo(2);
         assertThat(pull(7, ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE, 9, 10).getMessagesCount()).isZero();
-        assertThat(store.lists).containsKey(RedisKeys.chatPrivateLog(9, 5));
+        assertThat(store.lists).containsKey(REDIS_KEYS.chatPrivateLog(9, 5));
         assertThat(pull(5, ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE, 5, 10).getErrorMessage().getId()).isEqualTo(1005);
         assertThat(pull(5, ChatChannelType.CHAT_CHANNEL_TYPE_TEAM, 0, 10).getErrorMessage().getId()).isEqualTo(1006);
         assertThat(pull(0, ChatChannelType.CHAT_CHANNEL_TYPE_WORLD, 0, 10).getErrorMessage().getId()).isEqualTo(1005);
@@ -110,10 +132,10 @@ class ChatServiceTest {
     void 幂等_同request_id重发不重复写_首发未完成回1008() {
         assertThat(send(1, world("once", "req-1"))).isZero();
         assertThat(send(1, world("once", "req-1"))).isZero();
-        assertThat(store.lists.get(RedisKeys.chatWorldLog())).hasSize(1);
+        assertThat(store.lists.get(REDIS_KEYS.chatWorldLog())).hasSize(1);
         assertThat(sends("world", "duplicate")).isEqualTo(1);
         // 首发还在途（键是 pending）
-        store.strings.put(RedisKeys.chatRequestId(1, "req-2"), "pending:abc");
+        store.strings.put(REDIS_KEYS.chatRequestId(1, "req-2"), "pending:abc");
         assertThat(send(1, world("x", "req-2"))).isEqualTo(1008);
         assertThat(sends("world", "in_flight")).isEqualTo(1);
     }
@@ -128,12 +150,12 @@ class ChatServiceTest {
             }
         };
         ChatService s = new ChatService(holding, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7), 20, 50,
-                Duration.ofSeconds(60), clock::get);
+                Duration.ofSeconds(60), clock::get, REDIS_KEYS);
         CompletableFuture<SendChatResponse> reply = s.send(1, world("x", "req-held"), 1000).toCompletableFuture();
         assertThat(reply).isNotDone();
         held.complete(true);
         assertThat(reply.join().hasErrorMessage()).isFalse();
-        assertThat(holding.strings.get(RedisKeys.chatRequestId(1, "req-held"))).isEqualTo("done");
+        assertThat(holding.strings.get(REDIS_KEYS.chatRequestId(1, "req-held"))).isEqualTo("done");
     }
 
     @Test
@@ -142,15 +164,15 @@ class ChatServiceTest {
             assertThat(send(1, world("m" + i, ""))).isZero();
         }
         assertThat(send(1, world("m5", "req-x"))).isEqualTo(1008);
-        assertThat(store.strings).doesNotContainKey(RedisKeys.chatRequestId(1, "req-x"));
-        assertThat(store.ttls.get(RedisKeys.chatRateLimit(1))).isEqualTo(1);
+        assertThat(store.strings).doesNotContainKey(REDIS_KEYS.chatRequestId(1, "req-x"));
+        assertThat(store.ttls.get(REDIS_KEYS.chatRateLimit(1))).isEqualTo(1);
     }
 
     @Test
     void 写入失败回1003并释放幂等键_读失败回1003() {
         store.failAppend = true;
         assertThat(send(1, world("x", "req-f"))).isEqualTo(1003);
-        assertThat(store.strings).doesNotContainKey(RedisKeys.chatRequestId(1, "req-f"));
+        assertThat(store.strings).doesNotContainKey(REDIS_KEYS.chatRequestId(1, "req-f"));
         store.failAppend = false;
         store.failRange = true;
         assertThat(pull(1, ChatChannelType.CHAT_CHANNEL_TYPE_WORLD, 0, 0).getErrorMessage().getId()).isEqualTo(1003);
@@ -159,10 +181,10 @@ class ChatServiceTest {
     @Test
     void 拉取条数_0取缺省_超上限钳到上限_坏条目跳过() {
         for (int i = 0; i < 60; i++) {
-            store.lists.computeIfAbsent(RedisKeys.chatWorldLog(), k -> new LinkedList<>()).addFirst(
+            store.lists.computeIfAbsent(REDIS_KEYS.chatWorldLog(), k -> new LinkedList<>()).addFirst(
                     ChatMessage.newBuilder().setContent("m" + i).setSendTimeMs(i).build().toByteArray());
         }
-        store.lists.get(RedisKeys.chatWorldLog()).addFirst(new byte[] {(byte) 0xFF});
+        store.lists.get(REDIS_KEYS.chatWorldLog()).addFirst(new byte[] {(byte) 0xFF});
         assertThat(pull(1, ChatChannelType.CHAT_CHANNEL_TYPE_WORLD, 0, 0).getMessagesCount()).isEqualTo(19);
         assertThat(pull(1, ChatChannelType.CHAT_CHANNEL_TYPE_WORLD, 0, 1000).getMessagesCount()).isEqualTo(49);
         assertThat(service.clampLimit(-1)).isEqualTo(50); // uint32 的大值

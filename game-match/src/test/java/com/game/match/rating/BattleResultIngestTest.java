@@ -6,8 +6,11 @@ import static org.awaitility.Awaitility.await;
 
 import com.game.audit.AuditBrokerUnavailableException;
 import com.game.audit.AuditTopicContractException;
+import com.game.audit.BattleResultTopics;
 import com.game.audit.TopicAdmin;
 import com.game.audit.TopicSpec;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.match.lifecycle.MatchLifecycle;
 import com.game.match.lifecycle.SweeperControl;
 import com.game.match.lifecycle.MatcherControl;
@@ -46,6 +49,8 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
  * {@code MockConsumer}，真 broker 的用例在 {@code BattleResultTopicIntegrationTest}。
  */
 class BattleResultIngestTest {
+
+    private static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("game"));
 
     private static final int GENERATION = 7;
     private static final String TOPIC = "game-battle-result-g7";
@@ -137,8 +142,9 @@ class BattleResultIngestTest {
     }
 
     private BattleResultIngest ingest(boolean enabled, Supplier<Consumer<String, byte[]>> consumerFactory) {
-        ingest = new BattleResultIngest(new BattleResultIngest.Settings(enabled, GENERATION, (short) 2, Duration.ofSeconds(5)), adminFactory(),
-                consumerFactory, handled::add, metrics, Duration.ofMillis(30), Duration.ofMillis(30), Duration.ofMillis(10));
+        ingest = new BattleResultIngest(new BattleResultIngest.Settings(enabled, GENERATION, (short) 2, Duration.ofSeconds(5)),
+                new BattleResultTopics(KAFKA_NAMES), adminFactory(), consumerFactory, handled::add, metrics,
+                Duration.ofMillis(30), Duration.ofMillis(30), Duration.ofMillis(10));
         return ingest;
     }
 
@@ -250,7 +256,8 @@ class BattleResultIngestTest {
     void 还在等重试时停止_立即结束_之后也不会起消费者() throws Exception {
         admin.unreachable.set(Integer.MAX_VALUE / 2);
         BattleResultIngest slowRetry = new BattleResultIngest(new BattleResultIngest.Settings(true, GENERATION, (short) 1, Duration.ofSeconds(5)),
-                adminFactory(), consumerFactory(), handled::add, metrics, Duration.ofSeconds(30), Duration.ofSeconds(30), Duration.ofMillis(10));
+                new BattleResultTopics(KAFKA_NAMES), adminFactory(), consumerFactory(), handled::add, metrics,
+                Duration.ofSeconds(30), Duration.ofSeconds(30), Duration.ofMillis(10));
         ingest = slowRetry;
         slowRetry.start();
 

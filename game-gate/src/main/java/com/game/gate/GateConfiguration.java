@@ -9,6 +9,7 @@ import com.game.common.token.GmShutdownHandler;
 import com.game.common.RunMode;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.gate.admin.GmShutdownController;
 import com.game.gate.metrics.GateMetrics;
 import com.game.gate.session.MessageRoutes;
@@ -193,7 +194,7 @@ public class GateConfiguration {
      * @param tableDir 配置表目录（只读 MessageLimiter 表做按消息号限频），相对进程工作目录；从别处启动时用 GAME_TABLE_DIR 覆盖
      */
     @Bean
-    public GateNode gateNode(RedissonClient redis, MessageIdRegistry messageIdRegistry, GateTokens gateTokens,
+    public GateNode gateNode(RedissonClient redis, RedisKeys keys, MessageIdRegistry messageIdRegistry, GateTokens gateTokens,
                              NodeLinkAuth nodeLinkAuth,
                              @Qualifier("loginClientMessageService") ClientMessageService loginClientMessageService,
                              @Qualifier("friendClientMessageService") ClientMessageService friendClientMessageService,
@@ -210,7 +211,7 @@ public class GateConfiguration {
             LoggerFactory.getLogger(GateConfiguration.class)
                     .warn("game.run-mode（GAME_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", runMode);
         }
-        return new GateNode(redis, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
+        return new GateNode(redis, keys, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
                 backends(friendClientMessageService, chatClientMessageService, teamClientMessageService,
                         guildClientMessageService, tradeClientMessageService, matchClientMessageService),
                 properties, zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode));

@@ -16,6 +16,8 @@ import com.game.audit.proto.PlayerSnapshotRecord;
 import com.game.audit.proto.SnapshotCause;
 import com.game.audit.proto.TransactionLogRecord;
 import com.game.audit.proto.TransactionReason;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.data.consume.ConsumerLoop;
 import com.game.data.metrics.DataMetrics;
 import com.game.data.snapshot.PlayerSnapshotDecoder;
@@ -51,16 +53,17 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 class KafkaAuditPipelineTest {
 
     private static final int GENERATION = 9001;
+    private static final AuditTopics AUDIT_TOPICS = new AuditTopics(new KafkaNames(GameNamespace.of("game")));
     private static final String BOOTSTRAP = System.getProperty("game.it.kafka");
 
     @Test
     void topic核对幂等_分区不符拒绝() {
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-it-admin")) {
-            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
-            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
-            assertThat(admin.partitionCounts(List.of(AuditTopics.transactionLog(GENERATION).name()), Duration.ofSeconds(10)))
-                    .containsEntry(AuditTopics.transactionLog(GENERATION).name(), 6);
-            assertThat(admin.configs(AuditTopics.transactionLog(GENERATION).name(), List.of("retention.ms"),
+            AuditTopicInitializer.ensure(admin, AUDIT_TOPICS.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+            AuditTopicInitializer.ensure(admin, AUDIT_TOPICS.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+            assertThat(admin.partitionCounts(List.of(AUDIT_TOPICS.transactionLog(GENERATION).name()), Duration.ofSeconds(10)))
+                    .containsEntry(AUDIT_TOPICS.transactionLog(GENERATION).name(), 6);
+            assertThat(admin.configs(AUDIT_TOPICS.transactionLog(GENERATION).name(), List.of("retention.ms"),
                     Duration.ofSeconds(10))).containsEntry("retention.ms", "2592000000");
 
             TopicSpec twoPartitions = new TopicSpec("game-it-mismatch-p2", 2, Map.of());
@@ -74,9 +77,9 @@ class KafkaAuditPipelineTest {
 
     @Test
     void 生产到消费落库_重复与坏记录_提交后换消费者不重放() throws Exception {
-        String topic = AuditTopics.transactionLog(GENERATION).name();
+        String topic = AUDIT_TOPICS.transactionLog(GENERATION).name();
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-it-admin")) {
-            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+            AuditTopicInitializer.ensure(admin, AUDIT_TOPICS.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
         }
         long base = System.currentTimeMillis() * 1000;
         List<Long> txIds = LongStream.range(0, 20).map(i -> base + i).boxed().toList();
@@ -144,9 +147,9 @@ class KafkaAuditPipelineTest {
 
     @Test
     void 快照接近大小上限也能经真broker缺省配置往返() throws Exception {
-        String topic = AuditTopics.playerSnapshot(GENERATION).name();
+        String topic = AUDIT_TOPICS.playerSnapshot(GENERATION).name();
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-it-admin")) {
-            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+            AuditTopicInitializer.ensure(admin, AUDIT_TOPICS.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
         }
         long snapshotId = System.currentTimeMillis() * 1000;
         PlayerSnapshotRecord.Builder builder = PlayerSnapshotRecord.newBuilder().setSnapshotId(snapshotId).setPlayerId(1001)
@@ -187,7 +190,7 @@ class KafkaAuditPipelineTest {
     @Test
     void 新原因值经Kafka往返落库_重复快照号只落一行() throws Exception {
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-it-admin")) {
-            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+            AuditTopicInitializer.ensure(admin, AUDIT_TOPICS.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
         }
         long base = System.currentTimeMillis() * 1000;
         long player = base % 1_000_000_000L + 1;
@@ -203,10 +206,10 @@ class KafkaAuditPipelineTest {
                 PlayerSnapshotRecord r = PlayerSnapshotRecord.newBuilder().setSnapshotId(base + i).setPlayerId(player)
                         .setTimeMs(1000 + i).setCauseValue(causes[i]).setZoneId(1).setOwnerEpoch(1).setLevel(1)
                         .setPlayerState(ByteString.copyFrom(new byte[] {8, (byte) i})).build();
-                producer.send(new ProducerRecord<>(AuditTopics.playerSnapshot(GENERATION).name(), AuditKeys.playerKey(player),
+                producer.send(new ProducerRecord<>(AUDIT_TOPICS.playerSnapshot(GENERATION).name(), AuditKeys.playerKey(player),
                         r.toByteArray())).get();
                 if (i == 0) {
-                    producer.send(new ProducerRecord<>(AuditTopics.playerSnapshot(GENERATION).name(),
+                    producer.send(new ProducerRecord<>(AUDIT_TOPICS.playerSnapshot(GENERATION).name(),
                             AuditKeys.playerKey(player), r.toByteArray())).get();
                 }
             }
@@ -214,7 +217,7 @@ class KafkaAuditPipelineTest {
                 TransactionLogRecord r = TransactionLogRecord.newBuilder().setTxId(base + 100 + i).setTimeMs(2000 + i)
                         .setReasonValue(reasons[i]).setKind(AssetKind.ASSET_CURRENCY).setFromPlayer(player)
                         .setCurrencyDelta(-1).setCorrelationId(base).setZoneId(1).build();
-                producer.send(new ProducerRecord<>(AuditTopics.transactionLog(GENERATION).name(),
+                producer.send(new ProducerRecord<>(AUDIT_TOPICS.transactionLog(GENERATION).name(),
                         AuditKeys.transactionKey(player, 0), r.toByteArray())).get();
             }
         }
@@ -225,11 +228,11 @@ class KafkaAuditPipelineTest {
             metrics.registerConsumer("it-snap");
             metrics.registerConsumer("it-tx");
             ConsumerLoop<PlayerSnapshotRow> snapLoop = new ConsumerLoop<>("it-snap", consumer("game-it-snap-" + base),
-                    AuditTopics.playerSnapshot(GENERATION).name(), new PlayerSnapshotDecoder(),
+                    AUDIT_TOPICS.playerSnapshot(GENERATION).name(), new PlayerSnapshotDecoder(),
                     new com.game.data.snapshot.PlayerSnapshotSink(db.snapshots, db.tx(), 10, clock), metrics,
                     Duration.ofMillis(200), Duration.ofMillis(100), Duration.ofSeconds(1));
             ConsumerLoop<TransactionLogRow> txLoop = new ConsumerLoop<>("it-tx", consumer("game-it-tx-" + base),
-                    AuditTopics.transactionLog(GENERATION).name(), new TransactionLogDecoder(),
+                    AUDIT_TOPICS.transactionLog(GENERATION).name(), new TransactionLogDecoder(),
                     new com.game.data.txlog.TransactionLogSink(db.txlog, db.tx(), 200, clock), metrics,
                     Duration.ofMillis(200), Duration.ofMillis(100), Duration.ofSeconds(1));
             Thread t1 = new Thread(snapLoop);

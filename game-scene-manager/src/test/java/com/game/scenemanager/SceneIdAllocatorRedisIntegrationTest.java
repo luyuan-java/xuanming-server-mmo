@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.proto.ChannelKind;
 import com.game.api.proto.CreateInstanceRequest;
 import com.game.api.proto.CreateInstanceResponse;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.discovery.world.WorldChannels;
@@ -42,6 +43,9 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class SceneIdAllocatorRedisIntegrationTest {
 
+    /** 缺省部署命名空间 game 的键名。 */
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final CreateInstanceRequest MIRROR = CreateInstanceRequest.newBuilder()
             .setZoneId(1).setRequesterSceneNodeId(7).setPlayerId(42).setKind(ChannelKind.CHANNEL_KIND_MIRROR)
             .setSourceSceneId(0x8000_0000_0000_0101L).setSceneConfigId(1).setMirrorConfigId(1).build();
@@ -59,14 +63,14 @@ class SceneIdAllocatorRedisIntegrationTest {
     @AfterAll
     static void cleanup() {
         for (int worker : WORKERS) {
-            redis.getBucket(RedisKeys.nodeIdEpoch(WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE, worker))
+            redis.getBucket(REDIS_KEYS.nodeIdEpoch(WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE, worker))
                     .delete();
         }
         redis.shutdown();
     }
 
     private static SceneIdAllocator acquire() {
-        SceneIdAllocator ids = SceneIdAllocator.acquire(redis);
+        SceneIdAllocator ids = SceneIdAllocator.acquire(redis, REDIS_KEYS);
         synchronized (WORKERS) {
             WORKERS.add(ids.worker());
         }
@@ -74,7 +78,7 @@ class SceneIdAllocatorRedisIntegrationTest {
     }
 
     private static boolean leaseKeyExists(int worker) {
-        return redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE, worker))
+        return redis.getBucket(REDIS_KEYS.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE, worker))
                 .isExists();
     }
 
@@ -137,7 +141,7 @@ class SceneIdAllocatorRedisIntegrationTest {
         InstanceIdIssuer issuer = new InstanceIdIssuer(ids, NodeAvailability.ALL);
         assertThat(issuer.issue(MIRROR).result()).isEqualTo(InstanceIdIssuer.Result.OK);
 
-        String key = RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE, worker);
+        String key = REDIS_KEYS.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE, worker);
         redis.<String>getBucket(key, StringCodec.INSTANCE).set("someone-else", Duration.ofSeconds(30));
         try {
             // 续期周期 = TTL/3 = 5 s：最多再等一轮多一点

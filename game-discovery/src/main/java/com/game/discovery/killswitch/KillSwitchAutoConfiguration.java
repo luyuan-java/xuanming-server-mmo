@@ -1,6 +1,7 @@
 package com.game.discovery.killswitch;
 
 import com.game.common.killswitch.KillSwitch;
+import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,8 +28,8 @@ public class KillSwitchAutoConfiguration {
     }
 
     @Bean(initMethod = "start", destroyMethod = "close")
-    public RedisKillSwitchSync redisKillSwitchSync(RedissonClient redis, KillSwitch killSwitch,
+    public RedisKillSwitchSync redisKillSwitchSync(RedissonClient redis, RedisKeys keys, KillSwitch killSwitch,
                                                    @Value("${game.killswitch.sync-interval:1s}") Duration interval) {
-        return new RedisKillSwitchSync(redis, killSwitch, interval);
+        return new RedisKillSwitchSync(redis, keys, killSwitch, interval);
     }
 }

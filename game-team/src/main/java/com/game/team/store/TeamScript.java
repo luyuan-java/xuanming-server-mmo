@@ -2,7 +2,7 @@ package com.game.team.store;
 
 /**
  * 组队的七段 Lua（基线 go/match/internal/team/scripts.go，team-spec §1.6、§6.5），语义逐字照搬，只换键名（键由 Java 经
- * {@code RedisKeys.teamRecord / teamInfo / teamPlayer / teamInvite} 生成后从 KEYS 传入，统一 hash tag {@code {team}}，D2）。
+ * {@code RedisKeys#teamRecord / teamInfo / teamPlayer / teamInvite} 生成后从 KEYS 传入，统一 hash tag {@code {team}}，D2）。
  *
  * <p>通用约定（scripts.go:3-16）：
  * <ul>

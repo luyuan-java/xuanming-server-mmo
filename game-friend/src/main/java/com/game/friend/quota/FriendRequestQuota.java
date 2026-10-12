@@ -6,6 +6,7 @@ import com.game.friend.metrics.FriendMetrics.QuotaOutcome;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Function;
 import org.redisson.api.RScript;
@@ -40,19 +41,24 @@ public final class FriendRequestQuota {
             """;
 
     private final Function<String, CompletionStage<Long>> incr;
+    private final RedisKeys redisKeys;
     private final int limit;
     private final FriendMetrics metrics;
 
-    /** @param incr 对给定键执行 {@link #INCR_WITH_TTL} 的异步调用（测试注入假实现） */
-    public FriendRequestQuota(Function<String, CompletionStage<Long>> incr, int limit, FriendMetrics metrics) {
+    /**
+     * @param incr      对给定键执行 {@link #INCR_WITH_TTL} 的异步调用（测试注入假实现）
+     * @param redisKeys 本部署命名空间的键名（计数器键由它生成）
+     */
+    public FriendRequestQuota(Function<String, CompletionStage<Long>> incr, RedisKeys redisKeys, int limit, FriendMetrics metrics) {
         this.incr = incr;
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.limit = limit;
         this.metrics = metrics;
     }
 
-    public static FriendRequestQuota redisson(RedissonClient redis, int limit, FriendMetrics metrics) {
+    public static FriendRequestQuota redisson(RedissonClient redis, RedisKeys redisKeys, int limit, FriendMetrics metrics) {
         return new FriendRequestQuota(key -> redis.getScript(StringCodec.INSTANCE).<Long>evalAsync(RScript.Mode.READ_WRITE,
-                INCR_WITH_TTL, RScript.ReturnType.INTEGER, List.of(key), WINDOW_SECONDS), limit, metrics);
+                INCR_WITH_TTL, RScript.ReturnType.INTEGER, List.of(key), WINDOW_SECONDS), redisKeys, limit, metrics);
     }
 
     /** 消耗一次配额；返回是否放行（工作线程上调用，等待上界是请求预算）。 */
@@ -62,7 +68,7 @@ public final class FriendRequestQuota {
         }
         Long count;
         try {
-            count = deadline.await(incr.apply(RedisKeys.friendRequestQuota(playerId)), "好友申请配额");
+            count = deadline.await(incr.apply(redisKeys.friendRequestQuota(playerId)), "好友申请配额");
         } catch (DependencyException e) {
             metrics.quota(QuotaOutcome.ERROR);
             log.warn("[friend] 好友申请配额不可用，本次放行（fail-open） player={}: {}", Long.toUnsignedString(playerId),

@@ -2,6 +2,7 @@ package com.game.login.session;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.time.Clock;
 import java.time.Duration;
@@ -23,6 +24,8 @@ import org.redisson.config.Config;
 /** 连真 Redis（{@code -Dgame.it.redis=...}，缺省跳过）：设备数上限的先判再登记、续期、注销、按有效期自愈。 */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisLoginDevicesIntegrationTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final Duration TTL = Duration.ofMinutes(30);
 
@@ -53,18 +56,18 @@ class RedisLoginDevicesIntegrationTest {
                 return now.get();
             }
         };
-        devices = new RedisLoginDevices(redis, clock, TTL, 3);
+        devices = new RedisLoginDevices(redis, REDIS_KEYS, clock, TTL, 3);
     }
 
     @AfterEach
     void tearDown() {
-        redis.getKeys().delete(RedisKeys.loginDevices(account), RedisKeys.loginDevices(other),
-                RedisKeys.loginDeviceSession("g/1"), RedisKeys.loginDeviceSession("g/2"), RedisKeys.loginDeviceSession("g/9"));
+        redis.getKeys().delete(REDIS_KEYS.loginDevices(account), REDIS_KEYS.loginDevices(other),
+                REDIS_KEYS.loginDeviceSession("g/1"), REDIS_KEYS.loginDeviceSession("g/2"), REDIS_KEYS.loginDeviceSession("g/9"));
         redis.shutdown();
     }
 
     private RScoredSortedSet<String> set() {
-        return redis.getScoredSortedSet(RedisKeys.loginDevices(account), StringCodec.INSTANCE);
+        return redis.getScoredSortedSet(REDIS_KEYS.loginDevices(account), StringCodec.INSTANCE);
     }
 
     @Test
@@ -107,20 +110,20 @@ class RedisLoginDevicesIntegrationTest {
     void 登录成功记下归属_换号成功从旧名单注销_会话结束按归属注销_gate记的账号为空也行() {
         devices.admit(account, "g/1");
         devices.bind(account, "g/1", "");
-        assertThat(redis.<String>getBucket(RedisKeys.loginDeviceSession("g/1"), StringCodec.INSTANCE).get())
+        assertThat(redis.<String>getBucket(REDIS_KEYS.loginDeviceSession("g/1"), StringCodec.INSTANCE).get())
                 .isEqualTo(account);
-        assertThat(redis.getBucket(RedisKeys.loginDeviceSession("g/1")).remainTimeToLive())
+        assertThat(redis.getBucket(REDIS_KEYS.loginDeviceSession("g/1")).remainTimeToLive())
                 .isBetween(TTL.toMillis() - 60_000, TTL.toMillis());
 
         devices.admit(other, "g/1");
         devices.bind(other, "g/1", account);
         assertThat(set().contains("g/1")).as("换号成功后旧账号名单里没有它").isFalse();
-        RScoredSortedSet<String> otherSet = redis.getScoredSortedSet(RedisKeys.loginDevices(other), StringCodec.INSTANCE);
+        RScoredSortedSet<String> otherSet = redis.getScoredSortedSet(REDIS_KEYS.loginDevices(other), StringCodec.INSTANCE);
         assertThat(otherSet.contains("g/1")).isTrue();
 
         devices.leave("g/1", "");
         assertThat(otherSet.contains("g/1")).isFalse();
-        assertThat(redis.getBucket(RedisKeys.loginDeviceSession("g/1")).isExists()).isFalse();
+        assertThat(redis.getBucket(REDIS_KEYS.loginDeviceSession("g/1")).isExists()).isFalse();
     }
 
     @Test

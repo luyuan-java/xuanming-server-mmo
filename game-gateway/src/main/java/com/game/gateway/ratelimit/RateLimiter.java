@@ -48,14 +48,17 @@ public final class RateLimiter {
 
     private final RateLimitSettings settings;
     private final RateLimitStore store;
+    private final RedisKeys redisKeys;
     private final WaveSchedule wave;
     private final LongSupplier nowMs;
     /** 0 = 正常；否则存储出错后直接放行到这个时刻（毫秒），到期由抢到的那一个请求去探。 */
     private final AtomicLong bypassUntilMs = new AtomicLong();
 
-    public RateLimiter(RateLimitSettings settings, RateLimitStore store, LongSupplier nowMs) {
+    /** @param redisKeys 本进程部署命名空间的键名（区桶、IP 桶、冷却的键都由它生成） */
+    public RateLimiter(RateLimitSettings settings, RateLimitStore store, RedisKeys redisKeys, LongSupplier nowMs) {
         this.settings = settings;
         this.store = store;
+        this.redisKeys = redisKeys;
         this.wave = new WaveSchedule(settings.wave());
         this.nowMs = nowMs;
     }
@@ -95,8 +98,8 @@ public final class RateLimiter {
         String ip = clientIp == null || clientIp.isBlank() ? "?" : clientIp;
         try {
             RateLimitStore.Admission admission = store.admit(
-                    new RateLimitStore.Bucket(RedisKeys.rateLimitIp(ip), settings.ipRps(), settings.ipBurst()),
-                    zoneBucket && zoneId > 0 ? new RateLimitStore.Bucket(RedisKeys.rateLimitZone(zoneId),
+                    new RateLimitStore.Bucket(redisKeys.rateLimitIp(ip), settings.ipRps(), settings.ipBurst()),
+                    zoneBucket && zoneId > 0 ? new RateLimitStore.Bucket(redisKeys.rateLimitZone(zoneId),
                             settings.zoneRps(zoneId), settings.zoneBurst(zoneId)) : null);
             if (until != 0) {
                 bypassUntilMs.set(0);
@@ -113,7 +116,7 @@ public final class RateLimiter {
                 }
             }
             if (identity != null && !identity.isBlank() && !store.tryCooldown(
-                    RedisKeys.rateLimitCooldown(scope.key, digest(identity) + ":" + ip),
+                    redisKeys.rateLimitCooldown(scope.key, digest(identity) + ":" + ip),
                     Duration.ofMillis(settings.accountCooldownMs()))) {
                 return RateLimitDecision.deny(RateLimitDecision.ACCOUNT_COOLDOWN);
             }

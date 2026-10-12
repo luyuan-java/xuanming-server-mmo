@@ -3,6 +3,7 @@ package com.game.discovery.gate;
 import com.game.api.proto.GateNodeInfo;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,9 +27,9 @@ public final class RedisGateSource implements GateSource {
     private final NodeDirectory<GateNodeInfo> directory;
     private final GateDrainMarks drainMarks;
 
-    public RedisGateSource(RedissonClient redis) {
-        this.directory = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
-        this.drainMarks = new GateDrainMarks(redis);
+    public RedisGateSource(RedissonClient redis, RedisKeys keys) {
+        this.directory = new NodeDirectory<>(redis, keys, NodeTypes.GATE, GateNodeInfo.parser());
+        this.drainMarks = new GateDrainMarks(redis, keys);
     }
 
     @Override

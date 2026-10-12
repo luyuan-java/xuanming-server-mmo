@@ -10,6 +10,7 @@ import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.trade.admin.TradeAdminAuthFilter;
 import com.game.trade.dispatch.TradeDispatcher;
 import com.game.trade.dispatch.TradeWorkerPool;
@@ -136,10 +137,10 @@ public class TradeConfiguration {
      * 自动恢复，丢失则需重启。
      */
     @Bean(destroyMethod = "close")
-    public NodeIdLease tradeIdLease(RedissonClient redis,
+    public NodeIdLease tradeIdLease(RedissonClient redis, RedisKeys keys,
                                     @Qualifier("tradeLeaseScheduler") ScheduledExecutorService tradeLeaseScheduler,
                                     SchemaReady tradeSchemaReady) {
-        return NodeIdLease.acquire(redis, tradeLeaseScheduler, NodeTypes.TRADE, LISTING_ID_LEASE_SCOPE, 1, Snowflake.MAX_WORKER,
+        return NodeIdLease.acquire(redis, keys, tradeLeaseScheduler, NodeTypes.TRADE, LISTING_ID_LEASE_SCOPE, 1, Snowflake.MAX_WORKER,
                 UUID.randomUUID().toString(), LEASE_TTL,
                 () -> log.error("trade 雪花 worker 租约丢失：停止发 listing_id（播种一律 in-band 1003），需要重启本进程"));
     }

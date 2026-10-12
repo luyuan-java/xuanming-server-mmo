@@ -3,7 +3,9 @@ package com.game.match.ticket;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
 import com.game.match.ticket.TicketHealing.Free;
@@ -18,6 +20,8 @@ import org.junit.jupiter.api.Test;
  * 按票号条件删后放行；其余都算在途、带读到的票号、不碰它。排队 157 与成员预检共用这一条规则。
  */
 class DefaultTicketHealingTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final QueueRef Q = new QueueRef(3, 0);
     private static final long QUEUED_TTL = 21_600_000;
@@ -48,7 +52,7 @@ class DefaultTicketHealingTest {
 
     @Test
     void 孤儿queued票_队列里找不到这个人_删掉后放行() {
-        store.putTicket(1001, new Ticket("orphan", 3, 0, TicketState.QUEUED, 1, 1, Q.queueKey(), 150_000, 0, 0, 0), QUEUED_TTL);
+        store.putTicket(1001, new Ticket("orphan", 3, 0, TicketState.QUEUED, 1, 1, Q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), QUEUED_TTL);
 
         assertThat(healing.healOrBlock(1001, d())).isEqualTo(new Free());
 

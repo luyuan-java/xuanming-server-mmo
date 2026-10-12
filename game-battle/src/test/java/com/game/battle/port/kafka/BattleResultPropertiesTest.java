@@ -3,6 +3,9 @@ package com.game.battle.port.kafka;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.audit.BattleResultTopics;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +25,8 @@ import org.springframework.core.io.ClassPathResource;
  * {@code GAME_BATTLE_RESULT_TOPIC_GENERATION}（必须与 game-match 一致，否则两边各写各读一个 topic）。
  */
 class BattleResultPropertiesTest {
+
+    private static final BattleResultTopics RESULT_TOPICS = new BattleResultTopics(new KafkaNames(GameNamespace.of("game")));
 
     private static BattleResultProperties bind(Map<String, String> values) {
         return new Binder(new MapConfigurationPropertySource(values)).bindOrCreate("game.battle.result", BattleResultProperties.class);
@@ -48,7 +53,7 @@ class BattleResultPropertiesTest {
         assertThat(props.replicationFactor()).isEqualTo((short) 1);
         assertThat(props.initTimeout()).isEqualTo(Duration.ofSeconds(10));
         assertThat(props).isEqualTo(BattleResultProperties.defaults());
-        assertThat(props.topic()).isEqualTo("game-battle-result-g1");
+        assertThat(RESULT_TOPICS.name(props.topicGeneration())).isEqualTo("game-battle-result-g1");
     }
 
     @Test
@@ -63,7 +68,7 @@ class BattleResultPropertiesTest {
         assertThat(props.topicGeneration()).isEqualTo(12);
         assertThat(props.replicationFactor()).isEqualTo((short) 3);
         assertThat(props.initTimeout()).isEqualTo(Duration.ofMillis(2500));
-        assertThat(props.topic()).isEqualTo("game-battle-result-g12");
+        assertThat(RESULT_TOPICS.name(props.topicGeneration())).isEqualTo("game-battle-result-g12");
     }
 
     @Test
@@ -87,7 +92,7 @@ class BattleResultPropertiesTest {
 
         assertThat(props.bootstrapServers()).isEqualTo("kafka.internal:19092");
         assertThat(props.topicGeneration()).isEqualTo(4);
-        assertThat(props.topic()).as("与 game-match 读同一个变量，得到同一个 topic 名").isEqualTo("game-battle-result-g4");
+        assertThat(RESULT_TOPICS.name(props.topicGeneration())).as("与 game-match 读同一个变量，得到同一个 topic 名").isEqualTo("game-battle-result-g4");
         assertThat(props.replicationFactor()).isEqualTo((short) 1);
         assertThat(props.initTimeout()).isEqualTo(Duration.ofSeconds(10));
     }

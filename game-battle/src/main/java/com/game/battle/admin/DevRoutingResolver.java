@@ -3,6 +3,7 @@ package com.game.battle.admin;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleRoutings;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
@@ -89,10 +90,10 @@ public final class DevRoutingResolver {
     }
 
     /** 生产装配：三种读都来自同一个 Redis。 */
-    public static DevRoutingResolver redis(RedissonClient redis) {
-        PlayerPresenceDirectory presence = new PlayerPresenceDirectory(redis);
-        PlayerLocationDirectory locations = new PlayerLocationDirectory(redis);
-        NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+    public static DevRoutingResolver redis(RedissonClient redis, RedisKeys redisKeys) {
+        PlayerPresenceDirectory presence = new PlayerPresenceDirectory(redis, redisKeys);
+        PlayerLocationDirectory locations = new PlayerLocationDirectory(redis, redisKeys);
+        NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
         return new DevRoutingResolver(new Lookups() {
             @Override
             public Optional<PlayerPresence> presence(long playerId) throws Exception {

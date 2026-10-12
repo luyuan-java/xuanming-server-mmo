@@ -23,11 +23,14 @@ import org.redisson.api.RBucket;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.Codec;
+import com.game.common.GameNamespace;
 
 /**
  * {@link NodeIdLease#isValid()} 的界（不连 Redis）：Redis 用替身，单调时钟手动拨动，续期由测试直接驱动。
  */
 class NodeIdLeaseTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final Duration TTL = Duration.ofSeconds(15);
     private static final long SEC = 1_000_000_000L;
@@ -60,14 +63,14 @@ class NodeIdLeaseTest {
         when(scheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any(TimeUnit.class)))
                 .thenAnswer(inv -> mock(ScheduledFuture.class));
 
-        lease = NodeIdLease.acquire(redis, scheduler, NodeTypes.LOGIN, 0, 0, 3, "me", TTL, lostCalls::incrementAndGet,
+        lease = NodeIdLease.acquire(redis, REDIS_KEYS, scheduler, NodeTypes.LOGIN, 0, 0, 3, "me", TTL, lostCalls::incrementAndGet,
                 () -> now[0]);
     }
 
     @Test
     void 每次占号领一个严格递增的防护代次() {
         assertThat(lease.leaseEpoch()).isEqualTo(1);
-        NodeIdLease again = NodeIdLease.acquire(redis, scheduler, NodeTypes.LOGIN, 0, 0, 3, "me-2", TTL, () -> { },
+        NodeIdLease again = NodeIdLease.acquire(redis, REDIS_KEYS, scheduler, NodeTypes.LOGIN, 0, 0, 3, "me-2", TTL, () -> { },
                 () -> now[0]);
         assertThat(again.leaseEpoch()).isEqualTo(2);
     }
@@ -79,7 +82,7 @@ class NodeIdLeaseTest {
         when(redis.getAtomicLong(anyString())).thenReturn(broken);
         evalResults.add(() -> 1L);
 
-        assertThatThrownBy(() -> NodeIdLease.acquire(redis, scheduler, NodeTypes.LOGIN, 0, 0, 3, "me-3", TTL, () -> { },
+        assertThatThrownBy(() -> NodeIdLease.acquire(redis, REDIS_KEYS, scheduler, NodeTypes.LOGIN, 0, 0, 3, "me-3", TTL, () -> { },
                 () -> now[0])).isInstanceOf(IllegalStateException.class).hasMessageContaining("防护代次");
         assertThat(evalResults).as("已执行释放脚本（删掉仍属于本实例的租约键）").isEmpty();
     }

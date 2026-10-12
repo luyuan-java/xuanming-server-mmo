@@ -1,8 +1,10 @@
 package com.game.audit;
 
+import com.game.common.KafkaNames;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 对局结果 topic 的规格（match-spec §5.4，落实 battle-node-spec Q12）：game-battle 生产、game-match 消费（评分），4.6 起 game-guild 用自己的消费组读活动局。
@@ -14,12 +16,11 @@ import java.util.Map;
  * （{@link AuditTopicInitializer.Mode#CREATE_AND_VERIFY}）。两边都调 {@link #ensure}，分区数不符时的报错指向 {@value #GENERATION_ENV}
  * 而不是审计的代次变量。
  *
- * <p>基名随部署命名空间：{@code <ns>-battle-result}（缺省 {@code game-battle-result}，经 {@link KafkaNames}）；game-battle 与 game-match 必须同一个命名空间。
+ * <p>基名随部署命名空间：{@code <ns>-battle-result}（缺省 {@code game-battle-result}），由注入的 {@link KafkaNames} 给出；game-battle 与 game-match
+ * 各用自己进程的 {@code KafkaNames} bean 构造本类，两端必须是同一个命名空间。
  */
 public final class BattleResultTopics {
 
-    /** topic 基名 {@code <ns>-battle-result}（缺省 {@code game-battle-result}；类初始化时取定格的命名空间，不是编译期常量）；实际名字带代次后缀（{@link #name}）。 */
-    public static final String BASE = KafkaNames.of("battle-result");
     /** 分区数（同基线 match-results 的 3 分区）。key = battle_id，同一局保序即可。 */
     public static final int PARTITIONS = 3;
     /** 代次的环境变量名（缺省 1）：game-battle 与 game-match 读同一个，本机切片由 start-slice.sh 导出。 */
@@ -30,16 +31,24 @@ public final class BattleResultTopics {
             "retention.bytes", "-1",
             "cleanup.policy", "delete");
 
-    private BattleResultTopics() {
+    private final String base;
+
+    public BattleResultTopics(KafkaNames names) {
+        this.base = Objects.requireNonNull(names, "names").battleResultTopicBase();
+    }
+
+    /** topic 基名 {@code <ns>-battle-result}（缺省 {@code game-battle-result}）；实际名字带代次后缀（{@link #name}）。 */
+    public String base() {
+        return base;
     }
 
     /** 代次后的 topic 名：{@code <ns>-battle-result-g<generation>}（缺省 {@code game-battle-result-g<generation>}）。 */
-    public static String name(int generation) {
-        return AuditTopics.name(BASE, generation);
+    public String name(int generation) {
+        return AuditTopics.name(base, generation);
     }
 
     /** 这一代次的 topic 规格。 */
-    public static TopicSpec spec(int generation) {
+    public TopicSpec spec(int generation) {
         return new TopicSpec(name(generation), PARTITIONS, RETENTION);
     }
 
@@ -53,7 +62,7 @@ public final class BattleResultTopics {
      * 分区数不符抛 {@link AuditTopicContractException}（报错提示升 {@value #GENERATION_ENV}）；连不上 broker 抛 {@link AuditBrokerUnavailableException}
      * （可恢复：调用方后台重试，核对通过之前生产方不得发送）。阻塞，最长 {@code timeout}；在调用方自己的启动 / 后台线程上调。
      */
-    public static void ensure(TopicAdmin admin, int generation, AuditTopicInitializer.Mode mode, short replicationFactor, Duration timeout) {
+    public void ensure(TopicAdmin admin, int generation, AuditTopicInitializer.Mode mode, short replicationFactor, Duration timeout) {
         AuditTopicInitializer.ensureLabeled(admin, List.of(spec(generation)), mode, replicationFactor, timeout, "对局结果 topic", GENERATION_ENV);
     }
 }

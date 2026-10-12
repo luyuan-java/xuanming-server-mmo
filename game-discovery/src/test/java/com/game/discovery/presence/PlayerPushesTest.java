@@ -7,6 +7,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes.Outcome;
 import com.game.discovery.proto.GatePush;
 import com.game.discovery.proto.PlayerPresence;
@@ -39,6 +41,8 @@ import org.redisson.misc.CompletableFutureWrapper;
  */
 class PlayerPushesTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long A = 1001;
     private static final long B = 1002;
     private static final long C = 1003;
@@ -50,7 +54,7 @@ class PlayerPushesTest {
 
     private final RedissonClient redis = mock(RedissonClient.class);
     private final PlayerPresenceDirectory directory = mock(PlayerPresenceDirectory.class);
-    private final PlayerPushes pushes = new PlayerPushes(redis, directory);
+    private final PlayerPushes pushes = new PlayerPushes(redis, REDIS_KEYS, directory);
     /** 频道名 → 发布到它上面的消息，按发布顺序。 */
     private final Map<String, List<GatePush>> published = new LinkedHashMap<>();
     /** 频道名 → 订阅者数（发布的返回值）；缺省 1。 */

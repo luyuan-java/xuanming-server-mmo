@@ -6,6 +6,7 @@ import static com.game.guild.service.ScriptedStore.guild;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.discovery.RedisKeys;
 import com.game.guild.rules.GuildTip;
@@ -23,6 +24,8 @@ import org.junit.jupiter.api.Test;
  * 排行两个读 RPC（guild-spec §5.6–§5.7；基线 client_zone_test.go:186-236、guild_logic_names_test.go:113-152、rank_page_test.go 的回显）。
  */
 class GuildRankServiceTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long ME = 42;
 
@@ -64,11 +67,11 @@ class GuildRankServiceTest {
         f.store.put(guild(11, ZONE, 7));
         f.names.put(5L, "五");
         f.names.put(7L, "七");
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE), 10, 30);
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE), 11, 20);
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE), 12, 10); // 幽灵条目：帮会已不存在
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE + 1), 99, 100);
-        f.rankRedis.put(RedisKeys.guildRankAll(), 99, 100);
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE), 10, 30);
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE), 11, 20);
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE), 12, 10); // 幽灵条目：帮会已不存在
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE + 1), 99, 100);
+        f.rankRedis.put(REDIS_KEYS.guildRankAll(), 99, 100);
         GetGuildRankResponse r = page(1, 20, ZONE + 1);
         assertThat(r.getTotalCount()).isEqualTo(3);
         assertThat(r.getEntriesList()).extracting(GuildRankEntry::getGuildId).containsExactly(10L, 11L, 12L);
@@ -92,7 +95,7 @@ class GuildRankServiceTest {
     @Test
     void 读不到帮会快照只记日志_条目只带id分数名次() {
         f.store.put(guild(10, ZONE, 5));
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE), 10, 30);
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE), 10, 30);
         f.cacheRedis.failReads = true;
         GetGuildRankResponse r = page(1, 20, 0);
         assertThat(r.getEntriesList()).singleElement().satisfies(e -> {
@@ -114,7 +117,7 @@ class GuildRankServiceTest {
     @Test
     void 单帮名次_别区的帮与guild_id为0都回14007() {
         f.store.put(guild(99, ZONE + 1, 5));
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE + 1), 99, 100);
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE + 1), 99, 100);
         assertThat(f.rankService.getGuildRankByGuild(ME,
                 GetGuildRankByGuildRequest.newBuilder().setGuildId(99).setZoneId(ZONE + 1).build(), d()).getErrorMessage())
                 .isEqualTo(GuildTip.NOT_RANKED.proto());
@@ -127,8 +130,8 @@ class GuildRankServiceTest {
     void 单帮名次_补帮会与单个帮主名_帮会读不到时只带id分数名次_读快照故障原样抛() {
         f.store.put(guild(10, ZONE, 5, 6));
         f.names.put(5L, "五");
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE), 11, 50);
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE), 10, 30);
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE), 11, 50);
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE), 10, 30);
         GetGuildRankByGuildResponse r = f.rankService.getGuildRankByGuild(ME,
                 GetGuildRankByGuildRequest.newBuilder().setGuildId(10).build(), d());
         assertThat(r.getEntry()).satisfies(e -> {

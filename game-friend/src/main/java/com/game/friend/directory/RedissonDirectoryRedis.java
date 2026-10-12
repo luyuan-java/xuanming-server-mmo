@@ -22,7 +22,7 @@ public final class RedissonDirectoryRedis implements OnlineDirectory.DirectoryRe
     private final RedissonClient redis;
     private final String pattern;
 
-    /** @param keyPrefix 在线目录键前缀（{@code game:presence:}），匹配 {@code <前缀>*} */
+    /** @param keyPrefix 在线目录键前缀（{@code RedisKeys#presencePrefix()}，缺省 {@code game:presence:}），匹配 {@code <前缀>*} */
     public RedissonDirectoryRedis(RedissonClient redis, String keyPrefix) {
         this.redis = redis;
         this.pattern = keyPrefix + "*";

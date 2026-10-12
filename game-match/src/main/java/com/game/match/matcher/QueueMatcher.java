@@ -2,6 +2,7 @@ package com.game.match.matcher;
 
 import com.game.api.match.MatchBudgets;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
@@ -111,6 +112,7 @@ public final class QueueMatcher {
     private final MetricLabels labels;
     private final MatchProperties props;
     private final String instanceId;
+    private final RedisKeys redisKeys;
     private final Tolerance tolerance;
     private final long lockTtlMs;
     /** 队列的共用截止剩余不到这么多就不再开始挑下一组。 */
@@ -135,13 +137,14 @@ public final class QueueMatcher {
     private final Map<String, QueueRef> reportedLabels = new HashMap<>();
 
     public QueueMatcher(TicketStore store, PlayerStatusReader players, GatherLauncher gather, BattleNodes battleNodes, MatchIds ids,
-                        MatchMetrics metrics, MetricLabels labels, MatchProperties props, MatchInstance instance) {
-        this(store, players, gather, battleNodes, ids, metrics, labels, props, instance, System::nanoTime);
+                        MatchMetrics metrics, MetricLabels labels, MatchProperties props, MatchInstance instance, RedisKeys redisKeys) {
+        this(store, players, gather, battleNodes, ids, metrics, labels, props, instance, redisKeys, System::nanoTime);
     }
 
     /** @param nanoClock 单调时钟（只用于告警与清理的限频；测试注入） */
     QueueMatcher(TicketStore store, PlayerStatusReader players, GatherLauncher gather, BattleNodes battleNodes, MatchIds ids,
-                 MatchMetrics metrics, MetricLabels labels, MatchProperties props, MatchInstance instance, LongSupplier nanoClock) {
+                 MatchMetrics metrics, MetricLabels labels, MatchProperties props, MatchInstance instance, RedisKeys redisKeys,
+                 LongSupplier nanoClock) {
         this.store = Objects.requireNonNull(store, "store");
         this.players = Objects.requireNonNull(players, "players");
         this.gather = Objects.requireNonNull(gather, "gather");
@@ -151,6 +154,7 @@ public final class QueueMatcher {
         this.labels = Objects.requireNonNull(labels, "labels");
         this.props = Objects.requireNonNull(props, "props");
         this.instanceId = Objects.requireNonNull(instance, "instance").id();
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.tolerance = Tolerance.of(props.rating().tolerance());
         this.lockTtlMs = props.matcher().lockTtl().toMillis();
         this.minPickBudgetMs = Math.max(1, lockTtlMs / MIN_PICK_BUDGET_DIVISOR);
@@ -198,7 +202,7 @@ public final class QueueMatcher {
                 stopped = true;
                 break;
             }
-            Optional<QueueRef> queue = QueueRef.ofQueueKey(queueKey);
+            Optional<QueueRef> queue = QueueRef.ofQueueKey(redisKeys, queueKey);
             if (queue.isEmpty()) {
                 // 注册集里混进了不是本服务写的东西：不动它，只告警
                 warnLimited("bad-key:" + queueKey, () -> log.error("凑单无法解析注册集里的队列键，跳过: '{}'", queueKey));
@@ -272,7 +276,7 @@ public final class QueueMatcher {
             gauges.starved(queue, 0);
             if (depth == 0) {
                 if (store.pruneIfEmpty(queue, d)) {
-                    lastStaleSweepNanos.remove(queue.queueKey());
+                    lastStaleSweepNanos.remove(queue.queueKey(redisKeys));
                     log.info("空队列已从注册集剔除 queue={}", queue);
                 }
             } else if (staleSweepDue(queue)) {
@@ -351,7 +355,7 @@ public final class QueueMatcher {
     /** 这条凑不满的队列现在该不该做一次票据清理（见 {@link #sweepStale}）。 */
     private boolean staleSweepDue(QueueRef queue) {
         long now = nanoClock.getAsLong();
-        String key = queue.queueKey();
+        String key = queue.queueKey(redisKeys);
         Long last = lastStaleSweepNanos.get(key);
         if (last == null) {
             // 第一次见到：只开始计时，满一个间隔还凑不满再清——刚有人排进来的队列不必为它多读两次。
@@ -389,7 +393,7 @@ public final class QueueMatcher {
         int kept = 0;
         for (SnapshotEntry entry : snapshot.entries()) {
             Ticket ticket = entry.playerId() == 0 ? null : tickets.get(entry.playerId());
-            boolean stale = ticket == null || ticket.state() != TicketState.QUEUED || !queue.queueKey().equals(ticket.queueKey());
+            boolean stale = ticket == null || ticket.state() != TicketState.QUEUED || !queue.queueKey(redisKeys).equals(ticket.queueKey());
             if (!stale) {
                 kept++;
             } else if (evicted.add(entry.member())) {
@@ -400,7 +404,7 @@ public final class QueueMatcher {
             log.info("凑不满的队列清掉了 {} 个没有有效票据的残项 queue={} 剩余={}", evicted.size(), queue, kept);
         }
         if (kept == 0 && !evicted.isEmpty() && store.pruneIfEmpty(queue, d)) {
-            lastStaleSweepNanos.remove(queue.queueKey());
+            lastStaleSweepNanos.remove(queue.queueKey(redisKeys));
             log.info("清理之后队列已空，从注册集剔除 queue={}", queue);
         }
     }
@@ -415,7 +419,7 @@ public final class QueueMatcher {
             }
         }
         Map<Long, Ticket> tickets = playerIds.isEmpty() ? Map.of() : store.readAll(playerIds, d);
-        return new GroupPicker(queue, required, rated, snapshot, tickets, tolerance, new QueueGate(queue, d)).pick();
+        return new GroupPicker(queue.queueKey(redisKeys), required, rated, snapshot, tickets, tolerance, new QueueGate(queue, d)).pick();
     }
 
     /**

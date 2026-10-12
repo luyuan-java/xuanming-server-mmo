@@ -19,7 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 订阅本 gate 的推送频道（{@code RedisKeys.gatePushTopic(zone, 节点号)}，消息 {@code game.api.GatePush}），
+ * 订阅本 gate 的推送频道（{@code RedisKeys#gatePushTopic(zone, 节点号)}，消息 {@code game.api.GatePush}），
  * 把每个目标投递到会话所属 EventLoop，由 {@link ClientDispatcher} 按玩家栅栏核对后下发。
  *
  * <p>回调在 Redisson 网络线程上：只解析与投递，不读写会话状态。gate 实例不符（节点号被复用前的旧条目）、格式不对的整条丢弃。

@@ -9,6 +9,8 @@ import com.game.audit.AuditTopicInitializer.Mode;
 import com.game.audit.BattleResultTopics;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.audit.TopicSpec;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
 import com.game.match.support.MatchModes;
@@ -49,6 +51,7 @@ class BattleResultTopicIntegrationTest {
     private static final String BOOTSTRAP = System.getProperty("game.it.kafka");
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
     private static final Duration WAIT = Duration.ofSeconds(90);
+    private static final BattleResultTopics TOPICS = new BattleResultTopics(new KafkaNames(GameNamespace.of("game")));
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
@@ -70,23 +73,23 @@ class BattleResultTopicIntegrationTest {
 
     /** 按契约发一条：key = battle_id 的无符号十进制，value = 事件字节。 */
     private static RecordMetadata send(KafkaProducer<String, byte[]> producer, BattleResultEvent event) throws Exception {
-        return producer.send(new ProducerRecord<>(BattleResultTopics.name(GENERATION), BattleResultTopics.key(event.getBattleId()), event.toByteArray()))
+        return producer.send(new ProducerRecord<>(TOPICS.name(GENERATION), BattleResultTopics.key(event.getBattleId()), event.toByteArray()))
                 .get();
     }
 
     private BattleResultIngest ingest(int generation, String group, BattleResultConsumer.Handler handler) {
-        return new BattleResultIngest(new BattleResultIngest.Settings(true, generation, (short) 1, TIMEOUT),
+        return new BattleResultIngest(new BattleResultIngest.Settings(true, generation, (short) 1, TIMEOUT), TOPICS,
                 () -> new KafkaTopicAdmin(BOOTSTRAP, "game-match-it-admin"),
                 BattleResultIngest.kafkaConsumers(BOOTSTRAP, group, "game-match-it-" + UUID.randomUUID()), handler, metrics);
     }
 
     @Test
     void topic的创建与核对_三分区保留七天_幂等_主人把被改动的保留期校正回来() {
-        String topic = BattleResultTopics.name(GENERATION);
+        String topic = TOPICS.name(GENERATION);
         assertThat(topic).isEqualTo("game-battle-result-g9641");
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-match-it-admin")) {
-            BattleResultTopics.ensure(admin, GENERATION, Mode.OWN, (short) 1, TIMEOUT);
-            BattleResultTopics.ensure(admin, GENERATION, Mode.OWN, (short) 1, TIMEOUT);
+            TOPICS.ensure(admin, GENERATION, Mode.OWN, (short) 1, TIMEOUT);
+            TOPICS.ensure(admin, GENERATION, Mode.OWN, (short) 1, TIMEOUT);
 
             assertThat(admin.partitionCounts(List.of(topic), TIMEOUT)).containsEntry(topic, 3);
             assertThat(admin.configs(topic, List.of("retention.ms", "retention.bytes", "cleanup.policy"), TIMEOUT))
@@ -94,16 +97,16 @@ class BattleResultTopicIntegrationTest {
 
             // 有人把保留期改短了：生产方（game-battle 的口径，只核对分区数）不管它，主人（game-match）校正回 7 天
             admin.alterConfigs(topic, Map.of("retention.ms", "3600000"), TIMEOUT);
-            BattleResultTopics.ensure(admin, GENERATION, Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT);
+            TOPICS.ensure(admin, GENERATION, Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT);
             assertThat(admin.configs(topic, List.of("retention.ms"), TIMEOUT)).containsEntry("retention.ms", "3600000");
-            BattleResultTopics.ensure(admin, GENERATION, Mode.OWN, (short) 1, TIMEOUT);
+            TOPICS.ensure(admin, GENERATION, Mode.OWN, (short) 1, TIMEOUT);
             assertThat(admin.configs(topic, List.of("retention.ms"), TIMEOUT)).containsEntry("retention.ms", "604800000");
         }
     }
 
     @Test
     void 分区数与契约不符_结果消费拒绝启动_不建消费者() {
-        String topic = BattleResultTopics.name(MISMATCH_GENERATION);
+        String topic = TOPICS.name(MISMATCH_GENERATION);
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-match-it-admin")) {
             // 模拟「broker 自动建出来的 / 别人手工建的」2 分区 topic（已存在视为成功）
             admin.create(List.of(new TopicSpec(topic, 2, Map.of())), (short) 1, TIMEOUT);

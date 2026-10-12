@@ -1,5 +1,6 @@
 package com.game.match.placement;
 
+import com.game.discovery.RedisKeys;
 import com.game.match.gather.BattleNodes;
 import org.redisson.api.RedissonClient;
 import org.springframework.context.annotation.Bean;
@@ -15,8 +16,8 @@ import org.springframework.context.annotation.Configuration;
 public class PlacementConfiguration {
 
     @Bean
-    public PlacementStore placementStore(RedissonClient redis) {
-        return new RedissonPlacementStore(redis);
+    public PlacementStore placementStore(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedissonPlacementStore(redis, redisKeys);
     }
 
     /** 直拨专用的直连客户端缓存。销毁时关闭（Spring 按依赖逆序：先停用到它的补签入口）。 */

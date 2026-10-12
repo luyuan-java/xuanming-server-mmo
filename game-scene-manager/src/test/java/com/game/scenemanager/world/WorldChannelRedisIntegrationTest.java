@@ -9,6 +9,7 @@ import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.api.proto.SelectSwitchTargetRequest;
 import com.game.api.proto.WorldChannel;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
@@ -55,6 +56,9 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class WorldChannelRedisIntegrationTest {
 
+    /** 缺省部署命名空间 game 的键名。 */
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final List<Integer> CONFS = List.of(1, 2);
 
     private static RedissonClient redis;
@@ -67,14 +71,14 @@ class WorldChannelRedisIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(9);
         redis = Redisson.create(config);
-        store = new RedissonWorldChannelStore(redis);
+        store = new RedissonWorldChannelStore(redis, REDIS_KEYS);
     }
 
     @AfterAll
     static void cleanup() {
         for (int zone : ZONES) {
             redis.getKeys().deleteByPattern("game:world:{z:" + Integer.toUnsignedString(zone) + "}:*");
-            redis.getSet(RedisKeys.worldZones(), StringCodec.INSTANCE).remove(Integer.toUnsignedString(zone));
+            redis.getSet(REDIS_KEYS.worldZones(), StringCodec.INSTANCE).remove(Integer.toUnsignedString(zone));
         }
         redis.shutdown();
     }
@@ -204,7 +208,7 @@ class WorldChannelRedisIntegrationTest {
             b.tick();
         }
         assertThat(b.ledZones()).containsExactly(zone);
-        assertThat(redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo("it-b:" + zone);
+        assertThat(redis.<String>getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo("it-b:" + zone);
         // 接管后计划不变（b 读到的就是 a 写的）
         assertThat(store.readPlan(zone).channels()).hasSize(2);
         assertThat(store.planVersion(zone)).isEqualTo(versionByA);
@@ -215,7 +219,7 @@ class WorldChannelRedisIntegrationTest {
         a.renewLeaders();
         assertThat(a.ledZones()).isEmpty();
         a.releaseAll();
-        assertThat(redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo("it-b:" + zone);
+        assertThat(redis.<String>getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo("it-b:" + zone);
         b.releaseAll();
     }
 
@@ -231,7 +235,7 @@ class WorldChannelRedisIntegrationTest {
         long version = store.planVersion(zone);
 
         // 双领导窗口：锁值已是别人的，但 a 本地仍认为有效；新节点出现，a 要写
-        redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).set("it-x:" + zone, Duration.ofSeconds(30));
+        redis.<String>getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).set("it-x:" + zone, Duration.ofSeconds(30));
         dir.host(20);
         a.tick();
 
@@ -239,7 +243,7 @@ class WorldChannelRedisIntegrationTest {
         assertThat(a.ledZones()).isEmpty();
         assertThat(store.planVersion(zone)).isEqualTo(version);
         assertThat(store.readPlan(zone).channelsOn(20)).isEmpty();
-        redis.getBucket(RedisKeys.worldLeader(zone)).delete();
+        redis.getBucket(REDIS_KEYS.worldLeader(zone)).delete();
     }
 
     @Test
@@ -253,7 +257,7 @@ class WorldChannelRedisIntegrationTest {
         AtomicBoolean bumped = new AtomicBoolean();
         dir.onList = () -> {
             if (bumped.compareAndSet(false, true)) {
-                redis.getAtomicLong(RedisKeys.worldPlanVersion(zone)).incrementAndGet();
+                redis.getAtomicLong(REDIS_KEYS.worldPlanVersion(zone)).incrementAndGet();
             }
         };
 
@@ -277,7 +281,7 @@ class WorldChannelRedisIntegrationTest {
         dir.host(10);
         WorldChannelProperties props = PlanFixture.props(Map.of("tick", "200ms", "leader-lock-ttl", "3s"));
         // 发号租约由独立的 SceneIdAllocator 占（批次 5.3 R5），控制面只借用；停服顺序同 Spring：先停控制面，再还租约
-        SceneIdAllocator ids = SceneIdAllocator.acquire(redis);
+        SceneIdAllocator ids = SceneIdAllocator.acquire(redis, REDIS_KEYS);
         WorldChannelControlPlane plane = WorldChannelControlPlane.start(scoped(zone), dir,
                 new WorldSceneConfigs(1, new LinkedHashSet<>(CONFS)), props,
                 new WorldChannelMetrics(new SimpleMeterRegistry(), CONFS), ids);
@@ -293,18 +297,18 @@ class WorldChannelRedisIntegrationTest {
                 assertThat(c.getSceneId()).isPositive();
                 assertThat(c.getNodeId()).isEqualTo(10);
             });
-            assertThat(redis.<String>getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).get())
+            assertThat(redis.<String>getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).get())
                     .isEqualTo(plane.coordinator().token());
-            assertThat(redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists()).isTrue();
+            assertThat(redis.getBucket(REDIS_KEYS.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists()).isTrue();
         } finally {
             plane.close();
         }
-        assertThat(redis.getBucket(RedisKeys.worldLeader(zone)).isExists()).isFalse();
-        assertThat(redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists())
+        assertThat(redis.getBucket(REDIS_KEYS.worldLeader(zone)).isExists()).isFalse();
+        assertThat(redis.getBucket(REDIS_KEYS.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists())
                 .as("控制面停了，租约仍归发号器（实例取号还在用）").isTrue();
         ids.close();
-        assertThat(redis.getBucket(RedisKeys.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists()).isFalse();
-        redis.getBucket(RedisKeys.nodeIdEpoch(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).delete();
+        assertThat(redis.getBucket(REDIS_KEYS.nodeId(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).isExists()).isFalse();
+        redis.getBucket(REDIS_KEYS.nodeIdEpoch(WorldChannels.ID_LEASE_NODE_TYPE, 0, worker)).delete();
     }
 
     @Test
@@ -337,10 +341,10 @@ class WorldChannelRedisIntegrationTest {
         }
         info.addScenes(SceneEntry.newBuilder().setSceneId(mirrorId).setSceneConfigId(1)
                 .setKind(ChannelKind.CHANNEL_KIND_MIRROR).setSourceSceneId(mirrorSource));
-        NodeDirectory<SceneNodeInfo> published = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        NodeDirectory<SceneNodeInfo> published = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
         published.publish(zone, 10, info.build(), Duration.ofSeconds(15));
         try {
-            RedisSceneNodeSource source = new RedisSceneNodeSource(redis);
+            RedisSceneNodeSource source = new RedisSceneNodeSource(redis, REDIS_KEYS);
             DirectoryView view = DirectoryView.of(zone, source.list(zone));
             DirectoryView.Scene mirror = view.node(10).scenes().get(mirrorId);
             assertThat(mirror.kind()).isEqualTo(ChannelKind.CHANNEL_KIND_MIRROR);

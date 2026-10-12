@@ -2,6 +2,7 @@ package com.game.team.presence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
@@ -33,6 +34,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TeamSessionsRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final int DB = 12;
 
     private static RedissonClient redis;
@@ -59,27 +62,27 @@ class TeamSessionsRedisIntegrationTest {
     }
 
     private void presence(long pid, byte[] value) {
-        String key = RedisKeys.presence(pid);
+        String key = REDIS_KEYS.presence(pid);
         written.add(key);
         redis.<byte[]>getBucket(key, ByteArrayCodec.INSTANCE).set(value);
     }
 
     private void location(long pid, String state) {
-        String key = RedisKeys.playerLocation(pid);
+        String key = REDIS_KEYS.playerLocation(pid);
         written.add(key);
         redis.<String, String>getMap(key, StringCodec.INSTANCE).putAll(Map.of("e", "1", "q", "1", "s", state));
     }
 
     private void locationWrongType(long pid) {
-        String key = RedisKeys.playerLocation(pid);
+        String key = REDIS_KEYS.playerLocation(pid);
         written.add(key);
         redis.<String>getBucket(key, StringCodec.INSTANCE).set("not-a-hash");
     }
 
     @Test
     void 真实条目的状态矩阵() {
-        PlayerPresenceDirectory presenceDir = new PlayerPresenceDirectory(redis);
-        PlayerLocationDirectory locationDir = new PlayerLocationDirectory(redis);
+        PlayerPresenceDirectory presenceDir = new PlayerPresenceDirectory(redis, REDIS_KEYS);
+        PlayerLocationDirectory locationDir = new PlayerLocationDirectory(redis, REDIS_KEYS);
         TeamSessions sessions = new TeamSessions(presenceDir::findEachStrictAsync, locationDir::statusesAsync,
                 presenceDir::findStrictAsync);
 

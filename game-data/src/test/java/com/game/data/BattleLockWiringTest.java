@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.game.common.GameNamespace;
 import com.game.data.rollback.BattleLockGate;
 import com.game.discovery.RedisKeys;
 import java.time.Duration;
@@ -35,6 +36,8 @@ import org.springframework.context.support.GenericApplicationContext;
  */
 class BattleLockWiringTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static DataProperties props() {
         return propsOf(Map.of());
     }
@@ -52,7 +55,7 @@ class BattleLockWiringTest {
     void 装配期不取Redis客户端_读锁时才取_取不到按读不到处理不抛出() {
         ObjectProvider<RedissonClient> redis = provider();
 
-        BattleLockGate gate = new DataConfiguration().battleLockGate(redis, props());
+        BattleLockGate gate = new DataConfiguration().battleLockGate(redis, REDIS_KEYS, props());
 
         verifyNoInteractions(redis);
 
@@ -72,7 +75,7 @@ class BattleLockWiringTest {
         RedissonClient client = mock(RedissonClient.class);
         RKeys keys = mock(RKeys.class);
         when(client.getKeys()).thenReturn(keys);
-        when(keys.countExistsAsync(RedisKeys.battleLock(7))).thenReturn(new CompletableFutureWrapper<Long>(1L));
+        when(keys.countExistsAsync(REDIS_KEYS.battleLock(7))).thenReturn(new CompletableFutureWrapper<Long>(1L));
         // 只装配要看的这一颗：整个 DataConfiguration 要库 / Kafka，这里把它当普通 bean，按容器调 @Bean 方法的同一种方式
         //（工厂方法 + 按类型注入参数）建出 battleLockGate，并让容器把全部单例实例化一遍
         try (GenericApplicationContext context = new GenericApplicationContext()) {
@@ -82,6 +85,7 @@ class BattleLockWiringTest {
                 return client;
             }, definition -> definition.setLazyInit(true));
             context.registerBean(DataProperties.class, BattleLockWiringTest::props);
+            context.registerBean(RedisKeys.class, () -> REDIS_KEYS);
             context.registerBean("dataConfiguration", DataConfiguration.class);
             RootBeanDefinition gateDefinition = new RootBeanDefinition(BattleLockGate.class);
             gateDefinition.setFactoryBeanName("dataConfiguration");
@@ -107,9 +111,9 @@ class BattleLockWiringTest {
         RKeys keys = mock(RKeys.class);
         when(redis.getObject()).thenReturn(client);
         when(client.getKeys()).thenReturn(keys);
-        when(keys.countExistsAsync(RedisKeys.battleLock(7))).thenReturn(new CompletableFutureWrapper<Long>(1L));
-        when(keys.countExistsAsync(RedisKeys.battleLock(8))).thenReturn(new CompletableFutureWrapper<Long>(0L));
-        BattleLockGate gate = new DataConfiguration().battleLockGate(redis, props());
+        when(keys.countExistsAsync(REDIS_KEYS.battleLock(7))).thenReturn(new CompletableFutureWrapper<Long>(1L));
+        when(keys.countExistsAsync(REDIS_KEYS.battleLock(8))).thenReturn(new CompletableFutureWrapper<Long>(0L));
+        BattleLockGate gate = new DataConfiguration().battleLockGate(redis, REDIS_KEYS, props());
 
         BattleLockGate.Result r = gate.check(List.of(7L, 8L), () -> { });
 
@@ -120,7 +124,7 @@ class BattleLockWiringTest {
         verify(keys).countExistsAsync("game:battle:{8}:lock");
 
         // 一个键读失败：existsAll 整体异常完成 → 这一批谁也不当成「不在战」
-        when(keys.countExistsAsync(RedisKeys.battleLock(8)))
+        when(keys.countExistsAsync(REDIS_KEYS.battleLock(8)))
                 .thenReturn(new CompletableFutureWrapper<Long>(new IllegalStateException("Redis 超时")));
         BattleLockGate.Result failed = gate.check(List.of(7L, 8L), () -> { });
         assertThat(failed.unknown()).containsExactly(7L, 8L);
@@ -137,12 +141,12 @@ class BattleLockWiringTest {
         when(client.getKeys()).thenReturn(keys);
         // EXISTS 发出去之后一直没有应答（连接卡住）：只有闸自己的等待上限能让这次检查结束
         CompletableFuture<Long> never = new CompletableFuture<>();
-        when(keys.countExistsAsync(RedisKeys.battleLock(7))).thenReturn(new CompletableFutureWrapper<Long>(never));
+        when(keys.countExistsAsync(REDIS_KEYS.battleLock(7))).thenReturn(new CompletableFutureWrapper<Long>(never));
         // 230 ms：与缺省 5 s、以及 game.data 里别的时长（claim-wait 35 s、heartbeat 5 s、job-timeout 30 min……）都对不上
         DataProperties props = propsOf(Map.of("game.data.ops.battle-lock-wait", "230ms"));
         assertThat(props.ops().battleLockWait()).isEqualTo(Duration.ofMillis(230));
 
-        BattleLockGate gate = new DataConfiguration().battleLockGate(redis, props);
+        BattleLockGate gate = new DataConfiguration().battleLockGate(redis, REDIS_KEYS, props);
         long start = System.nanoTime();
         // 接成别的时长时不陪它等满（最长的是 30 min）：3 s 没回来就判失败
         BattleLockGate.Result r = assertTimeoutPreemptively(Duration.ofSeconds(3), () -> gate.check(List.of(7L), () -> { }),

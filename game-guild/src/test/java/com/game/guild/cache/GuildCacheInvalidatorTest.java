@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import java.nio.charset.StandardCharsets;
@@ -21,6 +22,8 @@ import org.junit.jupiter.api.Test;
 /** 提交后失效与后台有界重试（基线 guild_manage_repo_test.go:508 的移植 + Java 增项）。 */
 class GuildCacheInvalidatorTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final Duration TTL = Duration.ofMinutes(30);
     private static final long G = Long.MIN_VALUE + 11;
 
@@ -34,7 +37,7 @@ class GuildCacheInvalidatorTest {
     }
 
     private GuildCacheInvalidator invalidator(List<Long> delays, long budgetMillis) {
-        return new GuildCacheInvalidator(redis, TTL, background, metrics, delays, budgetMillis);
+        return new GuildCacheInvalidator(redis, REDIS_KEYS, TTL, background, metrics, delays, budgetMillis);
     }
 
     private static byte[] bytes(String s) {
@@ -53,17 +56,17 @@ class GuildCacheInvalidatorTest {
 
     @Test
     void 失效快照与映射_0被忽略_重复的键只失效一次_代次带两倍TTL() {
-        String snap = RedisKeys.guildSnapshot(G);
-        String map1 = RedisKeys.guildOfPlayer(1);
-        String map2 = RedisKeys.guildOfPlayer(-1L);
+        String snap = REDIS_KEYS.guildSnapshot(G);
+        String map1 = REDIS_KEYS.guildOfPlayer(1);
+        String map2 = REDIS_KEYS.guildOfPlayer(-1L);
         redis.values.put(snap, bytes("x"));
         redis.values.put(map1, bytes("1"));
         redis.values.put(map2, bytes("1"));
         invalidator(List.of(1L), 100).afterCommit(InvalidationOp.DISBAND, G, Deadline.after(1_000), 1, 0, -1L, 1);
         assertThat(redis.values).doesNotContainKeys(snap, map1, map2);
         assertThat(redis.invalidateCalls).hasValue(3);
-        assertThat(redis.ttls.get(RedisKeys.cacheGeneration(snap))).isEqualTo(TTL.toMillis() * 2);
-        assertThat(redis.text(RedisKeys.cacheGeneration(map2))).isNotBlank();
+        assertThat(redis.ttls.get(REDIS_KEYS.cacheGeneration(snap))).isEqualTo(TTL.toMillis() * 2);
+        assertThat(redis.text(REDIS_KEYS.cacheGeneration(map2))).isNotBlank();
     }
 
     @Test
@@ -72,14 +75,14 @@ class GuildCacheInvalidatorTest {
         assertThat(redis.invalidateCalls).hasValue(0);
         invalidator(List.of(1L), 100).afterCommit(InvalidationOp.VERIFY_MAPPING, 0, Deadline.after(1_000), 5);
         assertThat(redis.invalidateCalls).hasValue(1);
-        assertThat(redis.values).containsKey(RedisKeys.cacheGeneration(RedisKeys.guildOfPlayer(5)));
-        assertThat(redis.values).doesNotContainKey(RedisKeys.cacheGeneration(RedisKeys.guildSnapshot(0)));
+        assertThat(redis.values).containsKey(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildOfPlayer(5)));
+        assertThat(redis.values).doesNotContainKey(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildSnapshot(0)));
     }
 
     @Test
     void 同步失败_后台第一轮重试成功_不计放弃() throws Exception {
         redis.failInvalidations.set(1);
-        String snap = RedisKeys.guildSnapshot(G);
+        String snap = REDIS_KEYS.guildSnapshot(G);
         redis.values.put(snap, bytes("x"));
         invalidator(List.of(1L, 1L, 1L), 1_000).afterCommit(InvalidationOp.KICK, G, Deadline.after(1_000), 7);
         // 同步那次：快照失败、映射成功
@@ -124,7 +127,7 @@ class GuildCacheInvalidatorTest {
         };
         ScheduledExecutorService closed = Executors.newSingleThreadScheduledExecutor();
         closed.shutdownNow();
-        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(throwing, TTL, closed, metrics, List.of(1L), 1_000);
+        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(throwing, REDIS_KEYS, TTL, closed, metrics, List.of(1L), 1_000);
         assertThatCode(() -> invalidator.afterCommit(InvalidationOp.CREATE, G, Deadline.after(1_000), 3))
                 .doesNotThrowAnyException();
         assertThat(metrics.gaveUp(InvalidationOp.CREATE)).isEqualTo(1);
@@ -137,7 +140,7 @@ class GuildCacheInvalidatorTest {
                 return new CompletableFuture<>(); // 永不完成
             }
         };
-        GuildCacheInvalidator stuck = new GuildCacheInvalidator(slow, TTL, background, metrics, List.of(1L), 100);
+        GuildCacheInvalidator stuck = new GuildCacheInvalidator(slow, REDIS_KEYS, TTL, background, metrics, List.of(1L), 100);
         assertThatCode(() -> stuck.afterCommit(InvalidationOp.REVIEW, G, Deadline.after(0), 3)).doesNotThrowAnyException();
         eventually(() -> metrics.gaveUp(InvalidationOp.REVIEW) == 1);
     }

@@ -1037,7 +1037,7 @@ Java 版是独立进程 game-match，规格与逐条出处见 `docs/porting/matc
   建的是正常房间）。鉴权同 game-trade 播种接口（`MatchAdminAuthFilter`：令牌没配 503 → 令牌不符 401 → 操作人不合法 400 → 运行模式不是 dev / test 403），每次调用写审计日志并计数。
 - **配置**（`game.match.*`）：`worker.threads` 16 / `worker.queue` 1024、`request-budget` 4500 ms（须在 [500 ms, 4500 ms]，小于 gate 调它的 5 s）、`matcher.interval` 500 ms、`matcher.lock-ttl` 10 s、
   `ticket-ttl` 6 h（须大于 96 s）、`ready-ticket-ttl` 60 s、`challenge-ttl` 60 s、`rating.enabled` true、`rating.tolerance.*` 100 / 5 / 100 / 1000 / 90、`rating.draw-round-cap` 30 与按副本的覆盖表（缺省空）、
-  `rating.consumer-group` `<ns>-match-rating`（缺省 `game-match-rating`；yaml 写 `${game.namespace:game}-match-rating`）、`pve-team-size-by-config-id` `{1: 5}`、`table-fingerprint-mode` warn（off / warn / enforce，写错拒启）、`gather-max-inflight` 256、`requeue-backoff` 2 s（[0, 60 s]）、
+  `rating.consumer-group` 缺省不配（yaml 里也不写），由代码 `KafkaNames.matchRatingGroup()` 给出 `<ns>-match-rating`（缺省命名空间下即 `game-match-rating`；显式配置的值原样用，不带 `<ns>-` 前缀时装配处 WARN）、`pve-team-size-by-config-id` `{1: 5}`、`table-fingerprint-mode` warn（off / warn / enforce，写错拒启）、`gather-max-inflight` 256、`requeue-backoff` 2 s（[0, 60 s]）、
   `kafka.{bootstrap-servers, topic-generation, replication-factor, init-timeout}`（`${GAME_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}` / `${GAME_BATTLE_RESULT_TOPIC_GENERATION:1}` / 1 / 10 s）；
   6.5 的 `spectate.sweep-interval` 10 s（> 0 且是整毫秒）与 `spectate.max-inflight` 128（≥ 1），不合法拒启。
   各跳超时、matched TTL 公式、补偿续期、开战锁余量、落点记录 TTL 是 `MatchBudgets` 的代码常量，不开放配置——它们出现在跨进程不等式里（battle 的确认补发窗口、scene 的锁余量、game-team 的开战锁与收尾截止），
@@ -1198,8 +1198,8 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
   battle 进程异常退出后条目最多留 15 s：这段时间选中它的开局，建房请求确定没有送达时按没建房补偿（不走「销毁也连不上 → 不解冻」），分不清的仍按可能已建房处理。
   **battle 丢了租约**（与 gate 不同）：在逻辑线程上关准入闸、停止发布并尽力删条目（只删仍带本实例 id 的），**不作废**在打的房间——battle 不持有权威数据，
   票据带实例 id，结算按玩家与 battle_id 寻址；房间按期限或胜负自然结束，房间数归零时打「可安全重启」，进程保持存活但不可分配。
-- **Nacos 只做 Dubbo 注册中心**（`nacos` profile）。Nacos namespace 随部署命名空间：`game` 不派生（留在 public，现状不变），其余映射成同名 namespace，
-  显式配置（`dubbo.registry.parameters.namespace` 或地址里的 `?namespace=`）优先，见 §6.2。`local` profile 下 Dubbo 用直连 URL，不需要 Nacos 服务端，
+- **Nacos 只做 Dubbo 注册中心**（`nacos` profile）。Nacos namespace 不随部署命名空间自动变：缺省落在 public（现状不变）；多个部署共用一个 Nacos 时在
+  `GAME_NACOS_ADDR` 里带 `?namespace=`（或 Dubbo 的配置项 `dubbo.registry.parameters.namespace`）显式配置，见 §6.2。`local` profile 下 Dubbo 用直连 URL，不需要 Nacos 服务端，
   本地开发与端到端测试用它。
 - 节点号（gate 的 session 高位、雪花 worker）由 Redis 租约分配（`NodeIdLease`）：`SET NX PX` 占号，
   「值仍是本实例才续」的原子续期（每 TTL/3 一次）；号被夺或续期失败超过一个 TTL 即回调丢失，进程停止接客。
@@ -1317,61 +1317,123 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
 
 服务端要复用到别的游戏，或同一游戏起多套部署（测试服、体验服）时，常见做法是共用同一套 Redis / Kafka / MySQL（以及 Nacos）。
 **部署命名空间** `game.namespace`（环境变量 `GAME_NAMESPACE`，缺省 `game`）是共享中间件里一切名字的租户段：各部署取不同的值就互不串数据。
-缺省 `game` 时生成的每一个键名、频道、topic、消费组、client.id、库名都与引入它之前**逐字节相同**（金样测试钉住），现有部署什么都不用改。
+缺省 `game` 时生成的每一个键名、频道、topic、消费组、client.id、库名都与引入它之前**逐字节相同**（金样测试钉住）。
+缺省值下唯一的行为变化是新增的库名核对（下面「库名核对」一条；按规格部署的库名就是 `game`，照常通过）。
 
-- **取值与校验**（`game-common` 的 `GameNamespace`）：`[a-z][a-z0-9]{0,31}`，且不是 `mysql` / `sys`（MySQL 系统库）/ `public`（Nacos 缺省命名空间 ID）。
-  不 trim、不转小写：空串、首尾空白、大写一律拒启（fail-closed）。这个字符集在 Redis 键、Kafka topic、MySQL 库名、K8s 标签值、Nacos namespace ID 里都合法、
-  不需要转义，`<ns>:` 与 `<ns>-` 两类前缀互不为前缀，不进 hash tag、不含 glob 元字符。按 `<ns>_app` 起 MySQL 账号时命名空间不超过 28 个字符（用户名上限 32）。
+**「namespace」一词的四种含义**（同一份 .env / ConfigMap 里会并列出现，别填混）：
+
+| 名字 | 是什么 | 取值示例 | 与部署命名空间的关系 |
+|---|---|---|---|
+| 部署命名空间 `GAME_NAMESPACE`（`game.namespace`，本节；文档记作 `<ns>`） | 共享中间件里名字的租户段 | `game`、`t1`、`xmtest` | — |
+| K8s namespace（ops-release-spec 记作 `<k8s-ns>`，缺省 `game-java`） | 集群里放一个环境的工作负载 | `game-java`、`game-java-staging` | **一个部署命名空间对应一个 K8s 应用 namespace**（ops-release-spec §5.2 本来就是一个环境一个 namespace）；监控与告警靠 K8s namespace 区分部署（下面「可观测性与 ID」） |
+| Nacos namespace（`GAME_NACOS_ADDR` 的 `?namespace=`，或 Dubbo 的 `dubbo.registry.parameters.namespace`） | 注册中心的隔离单元 | `public`、`t1`、控制台生成的 UUID | 不自动关联：缺省 `public`；多个部署共用一个 Nacos 时各自显式配置（建议取 `<ns>`，下面「Nacos」） |
+| 镜像命名空间 `GAME_IMAGE_NAMESPACE` | 镜像仓库路径前缀 | `game-java`、`ghcr.io/luyuan-java` | 无关；填进 `GAME_NAMESPACE` 会被拒启（含 `-` 与 `/`） |
+
+将来 Helm chart 的 values 键用 `gameNamespace`，不用 `namespace`（与 `.Release.Namespace` 混淆）。
+
+- **取值与校验**（`game-common` 的 `GameNamespace`）：`[a-z][a-z0-9]{0,27}`（1–28 个字符），且不是 `mysql` / `sys`（MySQL 系统库）/ `public`（Nacos 缺省命名空间 ID）。
+  上限 28 由标准 MySQL 账号名 `<ns>_app` 推出（MySQL 用户名上限 32，减去后缀 `_app`），校验直接强制，超长的值启动即被拒，不会拖到 `CREATE USER` 才失败。
+  不 trim、不转小写：空串、首尾空白、大写一律拒启（fail-closed）。这个字符集在 Redis 键、Kafka topic、MySQL 库名与账号名、K8s 标签值与 namespace 名、
+  Nacos namespace ID 里都合法、不需要转义，`<ns>:` 与 `<ns>-` 两类前缀互不为前缀，不进 hash tag、不含 glob 元字符。
   MySQL 关键字（如 `select`）语法上合法，但运维 SQL 要加反引号，建议避开。
-- **定格**：进程内只定一次、没有 reset。名字类（`RedisKeys`、`KafkaNames`、`AuditTopics`、`BattleResultTopics`、`GuildStartupChecks` 的锁名、`TeamMembershipReader` 的投影前缀）
-  在类初始化时（`KafkaNames` 是每次生成时）取它，定格保证类初始化时取到的与之后恒等。
-  - **Spring 进程**：game-discovery 的 `GameNamespaceEnvironmentPostProcessor`（`META-INF/spring.factories`，order 最低、排在 ConfigData 之后）在建任何 bean 之前，
-    经 `Binder` 宽松绑定读出取值（`--game.namespace`、`-Dgame.namespace`、`GAME_NAMESPACE`、`SPRING_APPLICATION_JSON`、yaml 与 profile 都认）、校验、定格，
-    并打一行「部署命名空间 game.namespace=<ns>（来源 …）」。非法或冲突抛 `InvalidGameNamespaceException`：此时日志系统尚未初始化，由 `GameNamespaceFailureAnalyzer`
-    按 Spring Boot 的 `APPLICATION FAILED TO START` 格式报告（原值、来源、合法取值）。第二道防线 `GameNamespaceAutoConfiguration` 在上下文内比对 Environment 与定格值，
-    兜住不经 SpringApplication 的上下文。13 个 Spring 进程都直接依赖 game-discovery，自动生效。Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
-  - **两条顺序约束**：`main()` 在 `SpringApplication.run` 之前不得触碰名字类；EnvironmentPostProcessor 在定格之前不得引用名字类。违反时命名空间会按系统属性 /
-    环境变量提前定格，之后 Spring 解析出不同的值就拒启（不会静默用错）。
-  - **命令行工具**：`AuditFallbackReplay` 按「系统属性 → 环境变量 `GAME_NAMESPACE` → game」解析、显式定格并打印；assetopfix 从同一份配置解析后定格。
-    两者连上库后、建表或写库之前核对 `SELECT DATABASE()` 等于期望库名（缺省 = 命名空间；库名另取的部署用 `--expect-database` / `-expect-database`），不一致退出 2。
-    PasswordAdmin 只用调用方给的整串 JDBC URL，不涉及 Redis / Kafka。game-robot 与 `tools/*.java` 不连共享中间件，不需要命名空间。
-  - **运维约定**：命名空间只经环境变量 `GAME_NAMESPACE` 注入，不写进 yaml（命令行工具读不到服务的 yaml）；一个部署的全部进程与工具必须同值；
-    compose / 部署模板写 `${GAME_NAMESPACE:-game}`，不能写 `${GAME_NAMESPACE:-}`（空串会被拒启）。
+- **机制：注入式，没有进程级全局值**（同 Spring Session 的 `spring.session.redis.namespace`、Spring Cache 的 key-prefix 的做法）：
+  - `GameNamespace` 是不可变的值类型（record，构造即校验）。名字类都是持有它的不可变实例：`RedisKeys`（game-discovery，`new RedisKeys(ns)`，方法名与语义
+    与引入命名空间之前相同，只是从 static 变成实例方法，前缀由 `prefix()` 给出）、`KafkaNames`（game-common，topic 基名 / 消费组缺省值 / client.id）、
+    由 `KafkaNames` 构造的 `AuditTopics` / `BattleResultTopics`（game-audit），以及 `GuildStartupChecks` 的锁名、`TeamMembershipReader` 的投影前缀（实例字段）。
+    同一个 JVM 里可以并存多个命名空间的实例。
+  - **Spring 进程**：game-discovery 的 `GameNamespaceProperties`（`@ConfigurationProperties("game")` + `@Validated`，字段 `@DefaultValue("game") @NotNull
+    @Pattern(regexp = GameNamespace.REGEX)`）在绑定时校验；非法值抛 `BindValidationException`，由 Spring Boot 自带的 `BindValidationFailureAnalyzer` 报
+    `APPLICATION FAILED TO START`（`Property: game.namespace`、`Value`、`Origin`、`Reason`）。只有「没配」才取缺省 `game`：显式给的空串（`GAME_NAMESPACE=`）
+    照样被 `@Pattern` 拒绝，不会被 `@DefaultValue` 换回 game。Bean Validation 的实现是 Hibernate Validator（spring-boot-starter-validation，tech-stack.md）。
+    不写自定义 EnvironmentPostProcessor / FailureAnalyzer。
+  - `GameNamespaceAutoConfiguration`（game-discovery 的 `AutoConfiguration.imports`）注册三个 bean——`GameNamespace`、`RedisKeys`、`KafkaNames`——经构造器 / bean 方法参数
+    注入给各模块的使用方；都不加 `@ConditionalOnMissingBean`（只有这一个来源，测试要换命名空间就设属性），都是非懒加载单例（懒取 Redis 的 game-data 也在启动时完成校验）。
+    启动日志打一行「部署命名空间 game.namespace=<ns>（Redis 前缀 <ns>:，Kafka 前缀 <ns>-，MySQL 库 <ns>）」；Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
+    13 个 Spring 进程都直接依赖 game-discovery（game-robot 的 `NamespaceLiteralGuardTest` 核对每个 `@SpringBootApplication` 模块的 pom），自动生效。
+  - **校验先于一切连接**：Redisson 客户端依赖 `RedisKeys` bean，Redis 连接在校验之后；每个 DataSource 经 Spring Boot 自带的 `AbstractDependsOnBeanFactoryPostProcessor`
+    depends-on `GameNamespace`——JDBC URL 里的 `${game.namespace:game}` 只在校验通过之后才拿去建连接（否则 `mysql`、或带 `?` / `&` 的值可能先拼进 URL，
+    触发 `createDatabaseIfNotExist` 或建表）；Kafka 客户端都在注入了 `KafkaNames` 的模块 bean 里创建。
+  - **命令行工具**：AuditFallbackReplay 与 PasswordAdmin 不起 Spring，用 `GameNamespace.fromEnv(System.getenv())` 取值（只认环境变量 `GAME_NAMESPACE`：没设取 game，
+    设了空串照样拒绝）并打印，再自己 `new` 名字类；assetopfix 用同一个 `GameNamespaceProperties` 从它自己加载的 `-f` yaml 与环境变量绑定。非法值在连任何外部系统之前退出 2。
+    game-robot 与 `tools/*.java` 不连共享中间件，不需要命名空间。
+  - **运维约定**：命名空间**只经环境变量 `GAME_NAMESPACE` 注入**，不写进 yaml、命令行参数或 `SPRING_APPLICATION_JSON`——Spring 进程会认这些来源，但 AuditFallbackReplay /
+    PasswordAdmin 只认环境变量，服务若经别的来源拿到命名空间，同一部署的工具会解析成另一个值（三个连库的工具有库名核对兜底）。一个部署的全部进程与工具必须同值。
+    模板里的缺省值写 `${GAME_NAMESPACE-game}`（不带冒号：只在没设时取 game，设了空串照原样交给进程拒启）；**共用中间件的整栈模板写 `${GAME_NAMESPACE:?}`**
+    （缺省部署也显式写 `game`，漏设即失败，不静默落进缺省部署）；不要写 `${GAME_NAMESPACE:-game}`——它把空串也换成 game，`GAME_NAMESPACE=$TENANT` 而 `TENANT`
+    恰好没设时，进程会以 game 加入另一个部署的键空间、节点号租约池与库。K8s / Helm 没有 shell 式缺省值，Helm 的 `default` 同样把空值当没设：values 的 `gameNamespace`
+    必填（`required`），见 ops-release-spec §7.1。本机切片：`start-slice.sh` 起进程之前按同一套规则校验，生效的值记在 `run/game-namespace`，`battle-crash-window.sh`
+    重启进程时读回核对（不一致或两头都没有就拒绝，不回落 game）。
+- **库名核对**（规格：**库名恒等于部署命名空间**）：JDBC URL 的库名段写 `${game.namespace:game}`，部署只覆盖 host / port（deploy-ci-spec §2.2；`GAME_MYSQL_HOST` /
+  `GAME_MYSQL_PORT` 占位符随 7.1b 落地，在那之前整串覆盖 `spring.datasource.url` 的部署，库名段必须写成命名空间）。
+  - 连库的服务进程：game-discovery 的 `NamespaceDatabaseVerifier`（BeanPostProcessor，由 `GameNamespaceAutoConfiguration` 登记）在每个 DataSource 初始化完成、交给任何使用者
+    （`spring.sql.init` 建表、pbmysql 同步、MyBatis、业务存储）之前执行 `SELECT DATABASE()`，必须等于 `<ns>`，否则抛 `IllegalStateException` 拒启（Spring Boot 缺省流程报告），
+    一张表都不建；连不上库同样拒启（报错只带 SQLState 与错误码，驱动消息里可能有连接串）。只核 MySQL 系，测试用的 H2 跳过。这些进程本来就在启动期连库
+    （Druid `initial-size` ≥ 1），不新增启动依赖。防的是「命名空间与库分属两个部署」：例如照抄了别的部署的整串 `SPRING_DATASOURCE_URL=…/game`，`GAME_NAMESPACE=t1`
+    的进程会拿 t1 的 Redis 与 Kafka 去配 game 的库，player 行、`owner_epoch` 围栏、运维表都写进另一个部署。
+  - 命令行工具：AuditFallbackReplay、assetopfix、PasswordAdmin 连上库后、建表 / 写库 / 读口令之前做同一个核对（game-common 的 `NamespaceDatabaseCheck`），不一致退出 2、报错不带 URL。
+  - **应急开关**（只给库名偏离规格的存量部署，放行时打 WARN）：服务进程 `game.mysql.expect-database`（环境变量 `GAME_MYSQL_EXPECT_DATABASE`；设了空值直接拒启），
+    工具 `--expect-database`（AuditFallbackReplay、PasswordAdmin）/ `-expect-database`（assetopfix）。用了它就意味着部署偏离规格，应安排按 db-migrations M13 迁到「库名 = 命名空间」。
 - **跟命名空间走的**（共享中间件里的名字）：
-  - Redis 键与 pub/sub 频道：前缀 `<ns>:`，唯一出处 `RedisKeys`（`PREFIX` 一处改动覆盖全部生成方法；Lua 里经 ARGV 拼的前缀与 SCAN 模式都由它推出）。
-    Redisson 由对象名派生的内部键与频道（`redisson__timeout__set:{<ns>:…}`、`redisson_lock__channel:{<ns>:…}`）随之隔离。
+  - Redis 键与 pub/sub 频道：前缀 `<ns>:`，唯一出处注入的 `RedisKeys` 实例（前缀在构造时定下，覆盖全部生成方法；Lua 里经 ARGV 拼的前缀与 SCAN 模式都由它推出）。
+    Redisson 由对象名派生的内部键与频道（`redisson__timeout__set:{<ns>:…}`、`redisson_lock__channel:{<ns>:…}`）随之隔离——但它们**不以 `<ns>:` 开头**，
+    按前缀批量改名 / 删除时要另外处理（db-migrations M13）。
     匹配票据的 `queue_key` 字段与 `{match}:index` 的成员里嵌着完整键名，同一命名空间内自洽；`parseMatchQueue` 把别的命名空间的队列键当坏成员。
     **不用 Redisson NameMapper**：它管不到 ARGV 前缀和 SCAN 模式，会静默读到别的部署。
-  - Kafka：topic 基名、消费组缺省值、client.id 的前缀 `<ns>-`，唯一出处 game-audit 的 `KafkaNames`（transactional.id / group.instance.id 现在没有，将来加也必须经它）。
-    显式覆盖的消费组不强制带前缀（装配处打 WARN）。
-  - MySQL 缺省库名：各 `application.yaml` 的 JDBC URL 写 `${game.namespace:game}`；整串覆盖 `spring.datasource.url` 的部署可以另取库名（此时命令行工具要给期望库名）。
-    帮会建哨兵行的命名锁 `game_guild_insert_guard_init:<ns>`（GET_LOCK 的名字整个实例共用）。compose 的 `MYSQL_DATABASE` 取 `${GAME_NAMESPACE:-game}`。
-  - Nacos：`<ns>` ≠ game、注册中心地址是 `nacos://`、没有显式配置 Nacos namespace（`dubbo.registry.parameters.namespace` 及其宽松名，或地址查询串里的 `namespace=`）
-    时，EPP 追加最低优先级的 `dubbo.registry.parameters.namespace=<ns>`；`game` 什么都不加（留在 public）。Dubbo 3.3.6 的字节码显示注册中心兼作元数据中心时
-    `putIfAbsent` 继承这个参数、兼作配置中心时 `setNamespace(registry.group)`（没配 group 时为 null，跳过），推断三者都落在 `<ns>`，**需在真 Nacos 上核对**。
-    多注册中心写法（`dubbo.registries.*`）不处理，用时必须显式配置。
+  - Kafka：topic 基名、消费组缺省值、client.id 的前缀 `<ns>-`，唯一出处注入的 `KafkaNames` 实例（transactional.id / group.instance.id 现在没有，将来加也必须经它）。
+    消费组的缺省值只在代码里（`KafkaNames.dataTransactionLogGroup()` / `dataPlayerSnapshotGroup()` / `matchRatingGroup()`），yaml 不写；显式覆盖的消费组不强制带前缀（装配处打 WARN）。
+  - MySQL 库名：见上面「库名核对」。帮会建哨兵行的命名锁 `game_guild_insert_guard_init:<ns>`（GET_LOCK 的名字整个实例共用）。
+    compose 的 `MYSQL_DATABASE` 取 `${GAME_NAMESPACE-game}`，只决定 infra 第一次初始化时预建哪个库（共用 infra 时可写空值，什么都不预建）。
+- **Nacos**（`nacos` profile）：**不由部署命名空间自动推导**，缺省落在 public（与以前相同）。多个部署共用一个 Nacos 时，各部署显式给（都是 Dubbo 自带的写法）：
+  - **推荐**：在 `GAME_NACOS_ADDR` 里带 `?namespace=<ID>`（如 `GAME_NACOS_ADDR=127.0.0.1:8848?namespace=t1`，yaml 拼成 `nacos://127.0.0.1:8848?namespace=t1`）——
+    只是一个环境变量，容器 / K8s 都好给；
+  - 或 Dubbo 的配置项 `dubbo.registry.parameters.namespace`，但只能以**键名原样**的属性源给：`-D` 系统属性（如 `JAVA_TOOL_OPTIONS`）、`--` 命令行参数、
+    `SPRING_APPLICATION_JSON`。
+  - **不生效的写法**：环境变量 `DUBBO_REGISTRY_PARAMETERS_NAMESPACE` 与方括号写法 `dubbo.registry.parameters[namespace]`。Dubbo 的 Spring 集成只把 Spring Environment 里
+    键名以 `dubbo.` 开头的属性交给 Dubbo，再按原始键名取 `parameters` 子属性：环境变量名对不上、方括号写法被解析成空表，服务静默注册进 public。
+    2026-10-12 本机用 game-chat 的 jar 实测：前三种写法下注册中心与配置中心的 parameters 都带 `namespace=t1`，环境变量写法两处都没有；game-chat 的
+    `NacosRegistryNamespaceTest` 按 Dubbo 的 Spring 集成同一条路径钉住这几种写法。
+  各 `application-nacos.yaml` 不配这个参数（`NamespaceLiteralGuardTest` 守着）。多注册中心写法（`dubbo.registries.*`）要逐个配置。
+  **部署前置条件**：先在 Nacos 控制台或 OpenAPI 建好**命名空间 ID 恰好等于所配值**（建议取 `<ns>`）的 namespace（显示名随意），无论 Nacos 版本是否强制预建——
+  控制台不填 ID 会生成 UUID，与配置的值对不上，服务也不会出现在你建的那个命名空间下。
+  **待在真 Nacos 上核对**（PARITY「部署命名空间」行登记）：注册、元数据中心、配置中心三处落点。Dubbo 3.3.6 的字节码显示注册中心兼作元数据中心时
+  `putIfAbsent` 继承这个参数、兼作配置中心时 `setNamespace(registry.group)`（没配 group 时为 null，跳过），推断三者都落在所配的 namespace，没有实测。
 - **不跟命名空间走的**（代码身份与本机名字）：配置键前缀 `game.`、环境变量前缀 `GAME_`、Java 包 `com.game`、Maven 模块与 proto 包；指标名 `game_*`
-  （部署之间靠 Prometheus 的目标标签区分）；HTTP 运维头 `X-Game-*`；Dubbo 鉴权附件键 `game-auth-ts` / `game-auth-mac`、`game-budget-ms` 与服务分组；
+  （部署之间靠 Prometheus 的目标标签区分，见「可观测性与 ID」）；HTTP 运维头 `X-Game-*`；Dubbo 鉴权附件键 `game-auth-ts` / `game-auth-mac`、`game-budget-ms` 与服务分组；
   HMAC 域分隔串 `game-login-queue`（租户之间靠不同的密钥隔离）；`spring.application.name`（注册层的隔离由 Nacos namespace 承担）；
   十个隔离 Dubbo 模块的应用名（不配注册中心、按节点直连）；实例 id / 租约持有者 / 作业执行者的值（`game-data-<uuid>` 等，是存进去的值不是名字）；
   键里前缀之后的结构（节点类型、hash tag、字段名）；Redis DB 号；Sa-Token 的外部键；pbmysql 的结构同步锁（已按 `DATABASE()` 区分）；表名；
   topic 的代次后缀与分区规格；本机的 `run/` 目录、compose 项目名、K8s namespace、镜像名。
+- **可观测性与 ID**：指标名不带命名空间，部署之间靠抓取目标的标签区分——K8s 上按「一个部署命名空间 = 一个 K8s 应用 namespace」，Prometheus 重标加
+  `namespace ← __meta_kubernetes_namespace`，告警规则的 `by (…)` 与 Alertmanager 的 `group_by` 都带上 `namespace`，Loki 本来就有 `namespace` 标签
+  （ops-release-spec §5.2、§5.12、§5.13 的 2026-10-12 补记）；compose / 静态目标给每个目标加同名标签 `namespace=<ns>`。NetworkPolicy 只在本 K8s namespace 内
+  按 `part-of=game-java` 放行，两套部署分属两个 K8s namespace 时互不相通（同一个 K8s namespace 里放两套部署是不支持的形态：互通只剩 HMAC 一道防线、告警按 zone 合并）。
+  **ID 只在部署命名空间内唯一**：节点号租约池按命名空间分开，同一个 Redis 上两套部署会各自发出相同的 `player_id`、雪花号、作业号；跨部署检索日志、汇总数仓时
+  必须带部署维度（K8s namespace 或 `<ns>`）。同一台主机起第二套 compose 整栈要换项目名（`docker compose -p …`）。
 - **边界：这是命名隔离（防误串），不是安全边界**。Redis 只有口令（`game.redis.*` 没有 username），Kafka 没有 SASL / SSL 配置，按租户的 ACL 现在配不了；
-  而且 Redis ACL 不过滤 SCAN 的结果。只有 MySQL 已有 `GAME_MYSQL_USER`，「每个部署一个账号」现在就能做。后续项：给 `game.redis` 加 username 后按
-  `~<ns>:* &<ns>:* ~redisson__*{<ns>:* &redisson_*{<ns>:*` 配 Redis 用户；给 Kafka 加安全配置后按 PREFIXED `<ns>-` 写 topic / group 的 ACL 与配额。
+  而且 Redis ACL 不过滤 SCAN 的结果。只有 MySQL 已有 `GAME_MYSQL_USER`，「每个部署一个账号」（`<ns>_app`）现在就能做。后续项：给 `game.redis` 加 username 后按
+  `~<ns>:* &<ns>:* ~redisson__*{<ns>:* &redisson_*{<ns>:*` 配 Redis 用户；给 Kafka 接入 SASL 后，**ACL** 按 PREFIXED `<ns>-` 授 Topic 与 Group（将来有事务时再加
+  TransactionalId），**配额**按租户的 SASL principal（user 实体）配——Kafka 的配额只能按 user、(user, client-id)、client-id 的精确名或 `<default>` 配，没有前缀匹配，
+  而 client.id 里还带节点地址等变量，按 client-id 配租户配额做不到。client.id 带 `<ns>-` 前缀的作用只是便于在 broker 日志与指标里辨认租户，不承载配额。
   各部署的密钥必须不同（`GAME_GATE_TOKEN_SECRET`、`GAME_DUBBO_SECRET`、`GAME_NODE_LINK_SECRET`、`GAME_BATTLE_TOKEN_SECRET`、`GAME_ASSET_OP_SECRET_GUILD` 等）：
-  域分隔串与附件键不带命名空间，密钥相同时票据与调用可以在两个部署之间重放。
+  域分隔串与附件键不带命名空间，密钥相同时票据与调用可以在两个部署之间重放。**怎么选**：dev / CI / 演示可以按命名空间共用中间件；生产缺省各部署一套
+  （物理隔离），要共用必须先落地 Redis username 与 Kafka SASL ACL（ops-release-spec Q54 的 2026-10-12 补记）。
 - **风险与约束**：只支持单机 Redis（`useSingleServer`）；共用同一个 DB 时 SCAN（好友在线目录）会被别的部署的键稀释，可给各部署不同的 `game.redis.database`；
   将来共用 Redis Cluster 时 `{team}` / `{match}` / `{rank}` 等 hash tag 不带命名空间，多个部署的同类热点压到同一个槽。命名空间只保证本系统的部署之间不撞键，
   同一个 DB 里的别的应用要用不同的 DB 号或实例。各进程的命名空间不一致不会串数据，但表现为「彼此看不见」（gate 找不到 scene 目录、match 收不到对局结果）。
   命名空间定下后不能在线改：改了就是空的键空间、空库、新 topic 与新消费组位点（迁移见 db-migrations M13，不提供工具）。共用实例的资源争用（maxmemory、Kafka 吞吐、
   MySQL 连接数）不在命名能解决的范围内，要做容量规划。
-- **测试**：surefire 把测试 JVM 的 `game.namespace` 钉成 `game`（金样与全部现有用例在缺省命名空间里跑）；非缺省命名空间的用例打 `@Tag("namespace")`，
-  由 game-discovery / game-audit / game-data / game-match / game-guild / game-login 各自的 `namespace` 执行在另一个 fork 里钉成 `nstest` 跑（含 `-Dgame.it.*` 门控的
-  真 Redis / Kafka / MySQL 隔离用例，在 CI integration job 里执行）。跑测试不要给 mvn 传 `-Dgame.namespace`（surefire 3.2.5 让它覆盖两边的钉值，两类用例的
-  `@BeforeAll` 会直说原因）；surefire 必须 fork。game-robot 的 `NamespaceLiteralGuardTest` 常驻扫描源码，挡住写死的 `"game:…"` 键与 `"game-…"` Kafka 名字。
-- **验证同一套 infra 上的两个部署**：`start-slice.sh` 的端口写死、`run/` 共用，同一个检出不能同时起两套；先 `GAME_NAMESPACE=t1 tools/local/start-slice.sh` 跑 robot、停掉，
-  确认 `t1:*` 键、`t1-*` topic、`t1` 库出现而 `game:*` 与库 `game` 不变，再用缺省值起一套；要并行就用两个检出或两台机器、共用 infra。
+- **测试与守卫**：测试直接构造实例——每个测试类一行 `new RedisKeys(GameNamespace.of("game"))` / `new KafkaNames(...)`，非缺省命名空间就另构造一个（同一个 JVM 里并存）；
+  Spring 上下文测试用属性 `game.namespace=…`（`ApplicationContextRunner` 加 `AutoConfigurations.of(GameNamespaceAutoConfiguration.class)`）。不用系统属性钉值、
+  不分 surefire 执行，main 里也不放缺省实例或静态工厂（那就是绕过注入的入口）。金样（`RedisKeysGoldenTest` 反射核对 74 个实例方法全有金样、各模块的 Kafka 金样、
+  `GuildLockNameGoldenTest`）的期望字面量与引入命名空间之前一个字不差。守卫分三层：类型层（`RedisKeys` 的 public static 只剩 `GAIN_BLOCK_*`、`KafkaNames` 没有静态方法、
+  `GameNamespace` 没有可变静态状态）；game-robot 的 `NamespaceLiteralGuardTest`（main 非注释行不出现 `game:`；`"game-…"` 字面量只能是按文件登记的代码身份；
+  只有装配类与三个命令行工具能构造命名空间 / `RedisKeys` / `KafkaNames`；旧的全局机制、`@Tag("namespace")` 与 surefire 钉值不回来；9 条 JDBC URL 金样；nacos yaml
+  不配 namespace；13 个进程都依赖 game-discovery；compose 预建库写 `-game`）；`SliceScriptsTest`（两个脚本的命名空间校验逐字相同、切片记录与读回核对）。
+  三个 `-Dgame.it.*` 门控用例（`NamespaceRedisIsolationIntegrationTest`、`NamespaceKafkaTopicsIntegrationTest`、`NamespaceMysqlDatabaseIntegrationTest`）在同一个 JVM 里
+  构造 game 与 nstest 两个实例连真中间件，验证的是名字层的隔离（Redis 键与节点号租约、topic 建立、库名），不是两套部署同时运行；CI integration job 执行。
+- **验证同一套 infra 上的两个部署**（端到端，手工；CI 不覆盖）：`start-slice.sh` 的端口写死、`run/` 共用，同一个检出不能同时起两套；先 `GAME_NAMESPACE=t1 tools/local/start-slice.sh`
+  跑 robot、停掉，确认 `t1:*` 键、`t1-*` topic、`t1` 库出现而 `game:*` 与库 `game` 不变，再用缺省值起一套；要并行就用两个检出或两台机器、共用 infra。
+  用 nacos profile 验证时两套各在 `GAME_NACOS_ADDR` 里带自己的 `?namespace=`（先建好对应 ID 的 Nacos 命名空间）。
 
 ## 7. 存储
 
@@ -1786,7 +1848,7 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
   构建信息从批次 7.1a 起已经写进各进程 jar 的 `META-INF/build-info.properties`（§6.1）；`info` 端点与 readiness / liveness 探针要到 7.1b 才打开。
   gate / scene 的这个端口上另有 GM 签名停机的 `GET /gm/identity` 与 `POST /gm/graceful-shutdown`（§6）：它们只收本机来的请求，
   为跨机抓取放宽 `GAME_MANAGEMENT_ADDRESS` 不会把它们一起暴露（确需远程调用时另设 `GAME_GM_ALLOW_REMOTE=true`）。
-- **公共标签**：`application=<进程名>`。实例由 Prometheus 的抓取目标区分，不在进程里加实例标签。
+- **公共标签**：`application=<进程名>`。实例由 Prometheus 的抓取目标区分，不在进程里加实例标签；部署（部署命名空间）同样由抓取目标的 `namespace` 标签区分（§6.2「可观测性与 ID」）。
 - **基数约束**（AGENTS.md §5）：不以 player_id / session_id / 账号 / IP / zone_id 作标签。消息维度只用 `服务.方法`
   （`MessageIdRegistry` 的客户端白名单，有界），不认识的消息号一律归 `unknown`——公网流量造不出新的时间序列；
   scene 的场景维度只用场景配置号 `scene_config`（频道按计划、镜像 / 副本按需建出，但取值仍受 BaseScene 表约束、有界；镜像居民计入源地图），

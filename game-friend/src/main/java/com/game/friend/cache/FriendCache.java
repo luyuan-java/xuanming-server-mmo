@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -64,13 +65,16 @@ public final class FriendCache {
     }
 
     private final CacheRedis redis;
+    /** 本部署命名空间的键名（代次键由它从数据键派生）。 */
+    private final RedisKeys redisKeys;
     private final Duration ttl;
     private final FriendMetrics metrics;
     private final ObjectMapper json = new ObjectMapper().setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
     private final ConcurrentHashMap<String, CompletableFuture<Void>> flights = new ConcurrentHashMap<>();
 
-    public FriendCache(CacheRedis redis, Duration ttl, FriendMetrics metrics) {
+    public FriendCache(CacheRedis redis, RedisKeys redisKeys, Duration ttl, FriendMetrics metrics) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.ttl = ttl;
         this.metrics = metrics;
     }
@@ -113,7 +117,7 @@ public final class FriendCache {
             return hit;
         }
         metrics.cache(kind, CacheResult.MISS);
-        String generationKey = RedisKeys.friendCacheGeneration(dataKey);
+        String generationKey = redisKeys.friendCacheGeneration(dataKey);
         // 代次必须在 SQL 之前读（正确性论证的前提）；缺失时建一个自己的（否则回填永远写不进去且零报错）
         String generation;
         try {
@@ -176,7 +180,7 @@ public final class FriendCache {
         List<CompletableFuture<Void>> calls = new ArrayList<>(dataKeys.size());
         for (String dataKey : dataKeys) {
             String generation = UUID.randomUUID().toString();
-            calls.add(redis.invalidate(RedisKeys.friendCacheGeneration(dataKey), dataKey, generation, generationTtl)
+            calls.add(redis.invalidate(redisKeys.friendCacheGeneration(dataKey), dataKey, generation, generationTtl)
                     .toCompletableFuture());
         }
         List<String> keys = List.copyOf(dataKeys);

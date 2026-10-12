@@ -7,6 +7,7 @@ import com.game.api.proto.ChannelState;
 import com.game.api.proto.DrainReason;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.WorldChannel;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.world.RedissonWorldChannelStore;
 import com.game.discovery.world.WorldChannelStore;
@@ -39,6 +40,7 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class ScenePlanPullIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     private static final int NODE = 3;
     private static final String TOKEN = "scene-it:" + java.util.UUID.randomUUID();
 
@@ -51,16 +53,16 @@ class ScenePlanPullIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(9);
         redis = Redisson.create(config);
-        store = new RedissonWorldChannelStore(redis);
+        store = new RedissonWorldChannelStore(redis, REDIS_KEYS);
         zone = ThreadLocalRandom.current().nextInt(100_000_000, 2_000_000_000);
         assertThat(store.tryAcquireLeader(zone, TOKEN, Duration.ofSeconds(30))).isTrue();
     }
 
     @AfterEach
     void tearDown() {
-        redis.getKeys().delete(RedisKeys.worldChannels(zone), RedisKeys.worldDesired(zone), RedisKeys.worldCooldown(zone),
-                RedisKeys.worldPlanVersion(zone), RedisKeys.worldLeader(zone));
-        redis.getSet(RedisKeys.worldZones(), StringCodec.INSTANCE).remove(Integer.toUnsignedString(zone));
+        redis.getKeys().delete(REDIS_KEYS.worldChannels(zone), REDIS_KEYS.worldDesired(zone), REDIS_KEYS.worldCooldown(zone),
+                REDIS_KEYS.worldPlanVersion(zone), REDIS_KEYS.worldLeader(zone));
+        redis.getSet(REDIS_KEYS.worldZones(), StringCodec.INSTANCE).remove(Integer.toUnsignedString(zone));
         redis.shutdown();
     }
 

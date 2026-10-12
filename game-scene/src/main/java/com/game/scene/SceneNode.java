@@ -7,8 +7,8 @@ import com.game.api.proto.SceneNodeInfo;
 import com.game.proto.BattleRouting;
 import com.game.audit.AuditProperties;
 import com.game.audit.AuditTopics;
-import com.game.audit.KafkaNames;
 import com.game.audit.KafkaTopicAdmin;
+import com.game.common.KafkaNames;
 import com.game.common.RunMode;
 import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
@@ -91,6 +91,7 @@ import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
 import java.time.InstantSource;
 import java.util.List;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.SplittableRandom;
 import java.util.UUID;
@@ -159,6 +160,7 @@ public class SceneNode implements SmartLifecycle {
 
     private final SceneNodeProperties props;
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final PlayerStore playerStore;
     private final MessageIdRegistry registry;
     private final SceneTables tables;
@@ -170,6 +172,7 @@ public class SceneNode implements SmartLifecycle {
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final AuditProperties audit;
+    private final KafkaNames kafkaNames;
     private final SceneBattleTables battleTables;
     private final SceneBattleMetrics battleMetrics;
     private final String instanceId = UUID.randomUUID().toString();
@@ -218,19 +221,22 @@ public class SceneNode implements SmartLifecycle {
      * @param missionTables   任务配表视图（同上）
      * @param skillTables     技能配表视图（同上）
      * @param petTables       宝宝配表视图（同上）
+     * @param redisKeys 本部署命名空间的 Redis 键（节点号租约、目录、位置、战斗锁、频道计划、接管与掉落阻断频道）
      * @param audit    资产审计管线配置（Kafka）
+     * @param kafkaNames 本部署命名空间的 Kafka 名字（审计 topic 与 client.id）
      * @param linkAuth gate 链路握手鉴权（密钥来自环境变量 {@code GAME_NODE_LINK_SECRET}，须与 gate 一致）
      * @param metrics  scene 指标（各组件共用一份）
      * @param battleTables  回合制战斗的配表视图（指纹、技能可施放、道具 battle_usable、职业初值）
      * @param battleMetrics 回合制战斗的指标
      */
-    public SceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
+    public SceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore,
                      MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables, BagTables bagTables,
                      MissionTables missionTables, SkillTables skillTables, PetTables petTables, NodeLinkAuth linkAuth,
-                     SceneMetrics metrics, AuditProperties audit, SceneBattleTables battleTables,
+                     SceneMetrics metrics, AuditProperties audit, KafkaNames kafkaNames, SceneBattleTables battleTables,
                      SceneBattleMetrics battleMetrics) {
         this.props = props;
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.playerStore = playerStore;
         this.registry = registry;
         this.tables = tables;
@@ -242,6 +248,7 @@ public class SceneNode implements SmartLifecycle {
         this.linkAuth = linkAuth;
         this.metrics = metrics;
         this.audit = audit;
+        this.kafkaNames = Objects.requireNonNull(kafkaNames, "kafkaNames");
         this.battleTables = battleTables;
         this.battleMetrics = battleMetrics;
     }
@@ -270,7 +277,7 @@ public class SceneNode implements SmartLifecycle {
 
         // 3 条：频道计划拉取与目录发布都可能同步等逻辑线程（各至多 5 s），留一条给节点号续期，续期不被它们拖到有效期之外
         scheduler = Executors.newScheduledThreadPool(SCHED_THREADS, new DefaultThreadFactory("scene-sched", true));
-        lease = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE, zoneId, MIN_NODE_ID, MAX_NODE_ID, instanceId,
+        lease = NodeIdLease.acquire(redis, redisKeys, scheduler, NodeTypes.SCENE, zoneId, MIN_NODE_ID, MAX_NODE_ID, instanceId,
                 LEASE_TTL, this::onLeaseLost);
         int nodeId = lease.nodeId();
         Snowflake snowflake = new Snowflake(nodeId);
@@ -308,9 +315,9 @@ public class SceneNode implements SmartLifecycle {
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
         // 组队跟随：进场 / 换场景后异步读成员关系（Redis I/O 不在逻辑线程上等），结果投递回逻辑线程（team-spec §6.10）
-        TeamMembershipReader teamMemberships = new TeamMembershipReader(redis);
+        TeamMembershipReader teamMemberships = new TeamMembershipReader(redis, redisKeys);
         // 6.3：与成员关系那次读并行发战斗锁 EXISTS（存在或读失败都按在途、不跟随，scene-battle-spec §7.13）
-        BattleLockReader battleLocks = new BattleLockReader(redis);
+        BattleLockReader battleLocks = new BattleLockReader(redis, redisKeys);
         TeamFollowService teamFollow = new TeamFollowService(teamMemberships::readAsync, battleLocks::exists, logic, metrics);
         // 跨节点换图（批次 5.2，scene-handoff-spec §5.4–§5.8）：选目标经 Dubbo 直连 scene-manager（引用在第一次调用时才建，不阻塞启动）；
         // 交出进场成功后的立即续约经 leaseRenewer（它在下面才建，所以经 volatile 字段转一手，还没建出来 / 已停时跳过，周期续约兜底）
@@ -336,9 +343,9 @@ public class SceneNode implements SmartLifecycle {
         // 世界的战斗钩子就是它（进场恢复、落盘后销账、原地解冻后重跑进场恢复），世界建好后再绑定
         BattleSettlementService settlements = new BattleSettlementService(currency, bags, petService, missions, battleTables,
                 battleMetrics, SceneClock.SYSTEM, registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"));
-        PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis)), settlements, battleTables,
-                petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics, SceneClock.SYSTEM,
-                logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
+        PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis, redisKeys)), settlements,
+                battleTables, petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics,
+                SceneClock.SYSTEM, logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
                 registry.requireId("BattleClientPlayer", "NotifyBattleEnd"));
         // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
@@ -350,7 +357,7 @@ public class SceneNode implements SmartLifecycle {
                     AssetOpService.checkLedgerOnLoad(player);
                     // 战斗结算账本损坏时大声报一次（结算一律延后、备战一律 1006，原样保留；scene-battle-spec §7.12，D24）
                     PlayerBattleService.checkLedgerOnLoad(player);
-                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis), zoneId, nodeId, logic), teamFollow,
+                }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis, redisKeys), zoneId, nodeId, logic), teamFollow,
                 crossNode, instances, battle, zoneTravel);
         battle.attach(sceneWorld);
         battleService = battle;
@@ -386,7 +393,7 @@ public class SceneNode implements SmartLifecycle {
         // 先登记 zone、同步拉一次计划并在逻辑线程上应用（启动时本地没有场景，只会建出 ACTIVE 记录），再起周期拉取。
         // 拉不到只告警、不带频道启动：领导者下一拍按覆盖规则给本节点铺频道，拉取每周期重试。
         NodeIdLease nodeLease = lease;
-        ChannelPlanFollower follower = new ChannelPlanFollower(new RedissonWorldChannelStore(redis), zoneId, nodeId,
+        ChannelPlanFollower follower = new ChannelPlanFollower(new RedissonWorldChannelStore(redis, redisKeys), zoneId, nodeId,
                 nodeLease::isValid, (version, mine) -> callOnLogic(() -> sceneWorld.applyChannelPlan(version, mine)),
                 this::requestDirectoryPublish, metrics);
         channelFollower = follower;
@@ -437,7 +444,7 @@ public class SceneNode implements SmartLifecycle {
 
         // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
         takeoverSubscriber = new OwnerTakeoverSubscriber(
-                redis.getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE),
+                redis.getTopic(redisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE),
                 (playerId, epoch) -> postToLogic(() -> sceneWorld.onTakeoverRequested(playerId, epoch)));
         takeoverSubscriber.start();
         leaseRenewer = new OwnerLeaseRenewer(() -> callOnLogic(sceneWorld::ownedPlayers), playerStore, storageExecutor,
@@ -471,7 +478,7 @@ public class SceneNode implements SmartLifecycle {
                 .setRpcHost(props.advertiseHost())
                 .setRpcPort(rpc.port())
                 .build();
-        publisher = new SceneDirectoryPublisher(new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser()), info,
+        publisher = new SceneDirectoryPublisher(new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser()), info,
                 () -> callOnLogic(() -> {
                     List<SceneEntry> entries = sceneWorld.sceneEntries();
                     approxPlayers.set(entries.stream().mapToInt(SceneEntry::getPlayerCount).sum());
@@ -725,7 +732,7 @@ public class SceneNode implements SmartLifecycle {
      * 共用（两个同 worker 的雪花实例会发出相同的号）。不论审计开不开都要：物品入包离不开它。
      */
     private LeaseGatedSnowflake acquireSceneGuids() {
-        NodeIdLease guids = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
+        NodeIdLease guids = NodeIdLease.acquire(redis, redisKeys, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
                 Snowflake.MAX_WORKER, instanceId, LEASE_TTL,
                 () -> log.error("全服发号租约丢失：物品入包发不出号（回 6004）、资产流水改写兜底日志，请尽快重启本节点"));
         guidLease = guids;
@@ -777,13 +784,15 @@ public class SceneNode implements SmartLifecycle {
             log.warn("资产流水未接 Kafka（game.audit.enabled=false），只写本地日志 {}", AssetAudit.LOGGER);
             return AssetAudit.log();
         }
-        String clientId = auditClientId(zoneId, nodeId);
+        // client.id = <ns>-scene-audit-z<zone>-n<node>（缺省命名空间下即 game-scene-audit-z<zone>-n<node>）；核对 topic 的 admin 客户端再加 -admin
+        String clientId = kafkaNames.sceneAuditClientId(zoneId, nodeId);
         int generation = audit.topicGeneration();
+        AuditTopics topics = new AuditTopics(kafkaNames);
         AuditPipeline pipeline = new AuditPipeline(
                 () -> AuditPipeline.kafkaProducer(audit.bootstrapServers(), clientId, settings.auditMaxBlock()),
                 () -> new KafkaTopicAdmin(audit.bootstrapServers(), clientId + "-admin"),
-                AuditTopics.all(generation), AuditTopics.transactionLog(generation).name(),
-                AuditTopics.playerSnapshot(generation).name(), settings.snapshotMaxBytes(), audit.replicationFactor(),
+                topics.all(generation), topics.transactionLog(generation).name(),
+                topics.playerSnapshot(generation).name(), settings.snapshotMaxBytes(), audit.replicationFactor(),
                 audit.initTimeout(), guids,
                 settings.auditQueueCapacity(), metrics);
         auditPipeline = pipeline;
@@ -795,14 +804,6 @@ public class SceneNode implements SmartLifecycle {
         log.info("资产审计就绪 kafka={} topic 代次={} topic 已核对={}", audit.bootstrapServers(), generation,
                 pipeline.verified());
         return new KafkaAssetAudit(pipeline, SceneClock.SYSTEM, zoneId);
-    }
-
-    /**
-     * 审计生产者的 Kafka client.id：{@code <ns>-scene-audit-z<zone>-n<node>}（缺省命名空间下即 {@code game-scene-audit-z<zone>-n<node>}；
-     * 核对 topic 的 admin 客户端再加 {@code -admin}）。
-     */
-    static String auditClientId(int zoneId, int nodeId) {
-        return KafkaNames.clientId("scene-audit-z" + zoneId + "-n" + nodeId);
     }
 
     /** 租约丢失回调（调度线程上，只调一次）。 */
@@ -832,7 +833,7 @@ public class SceneNode implements SmartLifecycle {
      * 名单投递到逻辑线程换上；第一份在接受 gate 链路之前就排进逻辑线程，所以第一个玩家请求到来时名单已生效。
      */
     private void startGainBlockSync(CurrencyService currency, BagService bags, SceneNodeProperties.SceneSettings settings) {
-        GainBlockSync sync = new GainBlockSync(new RedisGainBlockSource(redis), blocks -> postToLogic(() -> {
+        GainBlockSync sync = new GainBlockSync(new RedisGainBlockSource(redis, redisKeys), blocks -> postToLogic(() -> {
             currency.applyGlobalBlocks(blocks);
             bags.applyGlobalBlocks(blocks);
         }), metrics, SceneClock.SYSTEM::nanoTime);
@@ -846,7 +847,7 @@ public class SceneNode implements SmartLifecycle {
             return s == null ? Double.NaN : s.syncAgeSeconds();
         });
         sync.start(settings.gainBlockRefresh());
-        gainBlockListener = redis.getTopic(RedisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE)
+        gainBlockListener = redis.getTopic(redisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE)
                 .addListener(String.class, (channel, category) -> sync.requestRefresh());
         sync.loadNow();
     }
@@ -860,7 +861,7 @@ public class SceneNode implements SmartLifecycle {
         int listener = gainBlockListener;
         if (listener >= 0) {
             try {
-                redis.getTopic(RedisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE).removeListener(listener);
+                redis.getTopic(redisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE).removeListener(listener);
             } catch (RuntimeException e) {
                 log.warn("取消订阅全服产出封禁变更通知失败", e);
             }

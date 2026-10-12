@@ -5,8 +5,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchDispatcher;
 import com.game.match.dispatch.MatchMethodHandler;
@@ -43,6 +45,8 @@ import org.junit.jupiter.api.Test;
  */
 class QueueHandlersTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
     private static final long A = 1001;
     private static final long VICTIM = 2002;
@@ -58,7 +62,7 @@ class QueueHandlersTest {
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
     private final QueueService service = new QueueService(new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null),
             players, store, new DefaultTicketHealing(store), new FixedRatingReader(), new FakeGatherLauncher(),
-            new MatchIds(new Snowflake(7), () -> true, () -> false), metrics, () -> "ticket-1");
+            new MatchIds(new Snowflake(7), () -> true, () -> false), metrics, REDIS_KEYS, () -> "ticket-1");
     private final List<MatchMethodHandler> handlers = List.of(new QueueHandlers.Join(service, metrics), new QueueHandlers.Cancel(service),
             new QueueHandlers.Status(service));
     private final MatchDispatcher dispatcher = new MatchDispatcher(REGISTRY, handlers, Runnable::run, metrics, 4500);

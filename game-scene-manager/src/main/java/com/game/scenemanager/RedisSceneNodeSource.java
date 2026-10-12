@@ -3,6 +3,7 @@ package com.game.scenemanager;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import java.util.List;
 import org.redisson.api.RedissonClient;
 
@@ -15,8 +16,8 @@ public final class RedisSceneNodeSource implements SceneNodeSource {
 
     private final NodeDirectory<SceneNodeInfo> directory;
 
-    public RedisSceneNodeSource(RedissonClient redis) {
-        this.directory = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+    public RedisSceneNodeSource(RedissonClient redis, RedisKeys redisKeys) {
+        this.directory = new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
     }
 
     @Override

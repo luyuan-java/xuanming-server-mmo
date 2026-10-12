@@ -3,6 +3,8 @@ package com.game.match.rating;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.audit.BattleResultTopics;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.match.rating.pb.MatchRatingAppliedRow;
 import com.game.match.rating.pb.MatchRatingRow;
 import com.game.pbmysql.PbMysql;
@@ -23,6 +25,8 @@ import org.junit.jupiter.api.Test;
  * {@link RatingStore} 手写 SQL 里的表名、列名与表定义一致；H2 上用同一份 DDL 建得出来。
  */
 class MatchRatingTablesTest {
+
+    private static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("game"));
 
     @Test
     void 登记了两张表_名字与原型一一对应() {
@@ -93,7 +97,7 @@ class MatchRatingTablesTest {
      */
     @Test
     void 入账标记的保留期长于结果消息在topic里的最长寿命_保留期加滚段周期再加一周余量() {
-        Map<String, String> topic = BattleResultTopics.spec(1).configs();
+        Map<String, String> topic = new BattleResultTopics(KAFKA_NAMES).spec(1).configs();
         long retentionMs = Long.parseLong(topic.get("retention.ms"));
         // 没有声明 segment.ms 时取 broker 的缺省滚段周期（log.roll.hours = 168）
         long segmentRollMs = topic.containsKey("segment.ms") ? Long.parseLong(topic.get("segment.ms")) : Duration.ofDays(7).toMillis();

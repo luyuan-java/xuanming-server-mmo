@@ -1,5 +1,7 @@
 package com.game.match.matcher;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
 import com.game.match.ticket.QueueRef;
@@ -15,6 +17,8 @@ import java.util.Optional;
  * 同一套用例在真 Redis 实现上的那一遍见 {@link MatcherRedisIntegrationTest}。
  */
 class MatcherPortedInMemoryTest extends MatcherPortedScenarios {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private final ManualRedisClock clock = new ManualRedisClock();
     private final InMemoryTicketStore memory = new InMemoryTicketStore(clock);
@@ -59,7 +63,7 @@ class MatcherPortedInMemoryTest extends MatcherPortedScenarios {
 
     @Override
     protected void registerQueue(QueueRef queue) {
-        memory.putIndexMember(queue.queueKey());
+        memory.putIndexMember(queue.queueKey(REDIS_KEYS));
     }
 
     @Override

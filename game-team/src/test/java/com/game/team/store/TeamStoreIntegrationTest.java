@@ -5,6 +5,7 @@ import static com.game.team.store.TeamRedisFixture.u;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamRedisFields;
@@ -52,6 +53,8 @@ import org.redisson.api.RedissonClient;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TeamStoreIntegrationTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final RuleConfig CFG = RuleConfig.DEFAULT;
     private static final long IDLE_TTL = TeamStore.IDLE_TTL_SECONDS;
@@ -115,19 +118,19 @@ class TeamStoreIntegrationTest {
     }
 
     private static String rec(long tid) {
-        return RedisKeys.teamRecord(tid);
+        return REDIS_KEYS.teamRecord(tid);
     }
 
     private static String info(long tid) {
-        return RedisKeys.teamInfo(tid);
+        return REDIS_KEYS.teamInfo(tid);
     }
 
     private static String idx(long pid) {
-        return RedisKeys.teamPlayer(pid);
+        return REDIS_KEYS.teamPlayer(pid);
     }
 
     private static String inv(long pid) {
-        return RedisKeys.teamInvite(pid);
+        return REDIS_KEYS.teamInvite(pid);
     }
 
     private static void assertIdleTtl(long ttlSeconds, String key) {
@@ -553,7 +556,7 @@ class TeamStoreIntegrationTest {
                 List.of(new InviteAdd(p9, overlapExpire)), List.of(p9), TeamChangeReason.TEAM_CHANGE_REASON_INVITE_CHANGED,
                 p1, false, false, List.of(), 0, p9);
         assertThatThrownBy(() -> CommitSets.validate(tid, overlap, current)).isInstanceOf(IllegalStateException.class);
-        CommitSets.Call call = CommitSets.build(tid, fx.ver(tid), overlap);
+        CommitSets.Call call = CommitSets.build(REDIS_KEYS, tid, fx.ver(tid), overlap);
         List<Object> raw = TeamReplies.multi(fx.teamRedis.eval(TeamScript.COMMIT, call.keys(), call.args())
                 .toCompletableFuture().join(), "S_COMMIT");
         assertThat(raw.get(0)).isEqualTo(1L);

@@ -2,6 +2,7 @@ package com.game.discovery.presence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes.Outcome;
 import com.game.discovery.proto.GatePush;
@@ -36,6 +37,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class GatePushCrossZoneIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     /** 两台 1 号 gate 发出的第一个会话号（{@code 节点号 << 17 | 序号}）。 */
     private static final int SAME_SESSION = (1 << 17) | 1;
     private static final long BASE = (1L << 51) + ThreadLocalRandom.current().nextLong(1L << 40) * 8;
@@ -60,21 +63,21 @@ class GatePushCrossZoneIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        directory = new PlayerPresenceDirectory(redis);
-        pushes = new PlayerPushes(redis, directory);
+        directory = new PlayerPresenceDirectory(redis, REDIS_KEYS);
+        pushes = new PlayerPushes(redis, REDIS_KEYS, directory);
     }
 
     @AfterAll
     static void cleanup() {
-        redis.getBucket(RedisKeys.presence(A)).delete();
-        redis.getBucket(RedisKeys.presence(B)).delete();
+        redis.getBucket(REDIS_KEYS.presence(A)).delete();
+        redis.getBucket(REDIS_KEYS.presence(B)).delete();
         redis.shutdown();
     }
 
     @BeforeEach
     void subscribe() throws Exception {
-        topic1 = redis.getTopic(RedisKeys.gatePushTopic(ZONE1, 1), ByteArrayCodec.INSTANCE);
-        topic2 = redis.getTopic(RedisKeys.gatePushTopic(ZONE2, 1), ByteArrayCodec.INSTANCE);
+        topic1 = redis.getTopic(REDIS_KEYS.gatePushTopic(ZONE1, 1), ByteArrayCodec.INSTANCE);
+        topic2 = redis.getTopic(REDIS_KEYS.gatePushTopic(ZONE2, 1), ByteArrayCodec.INSTANCE);
         listener1 = topic1.addListener(byte[].class, (channel, message) -> zone1Gate1.add(parse(message)));
         listener2 = topic2.addListener(byte[].class, (channel, message) -> zone2Gate1.add(parse(message)));
         // 两人的 gate 节点号与会话号全部相同，只有 zone 与 gate 实例不同
@@ -109,8 +112,8 @@ class GatePushCrossZoneIntegrationTest {
 
     @Test
     void 频道名带zone_两个zone的1号gate订的是两个不同的频道() {
-        assertThat(RedisKeys.gatePushTopic(ZONE1, 1)).isEqualTo("game:gate-push:" + ZONE1 + ":1");
-        assertThat(RedisKeys.gatePushTopic(ZONE2, 1)).isEqualTo("game:gate-push:" + ZONE2 + ":1").isNotEqualTo(RedisKeys.gatePushTopic(ZONE1, 1));
+        assertThat(REDIS_KEYS.gatePushTopic(ZONE1, 1)).isEqualTo("game:gate-push:" + ZONE1 + ":1");
+        assertThat(REDIS_KEYS.gatePushTopic(ZONE2, 1)).isEqualTo("game:gate-push:" + ZONE2 + ":1").isNotEqualTo(REDIS_KEYS.gatePushTopic(ZONE1, 1));
     }
 
     @Test

@@ -15,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -102,6 +103,7 @@ public final class GuildRanks {
     }
 
     private final GuildRankRedis redis;
+    private final RedisKeys redisKeys;
     private final ScheduledExecutorService scheduler;
     private final GuildRankMetrics metrics;
     private final long lockTtlMillis;
@@ -112,17 +114,19 @@ public final class GuildRanks {
     private final long tmpTtlMillis;
 
     /**
+     * @param keys      排行键的出处（带部署命名空间，装配方注入）
      * @param scheduler 维护锁续期用的调度器（装配方持有、负责关闭；可与缓存失效的后台调度器共用）
      */
-    public GuildRanks(GuildRankRedis redis, ScheduledExecutorService scheduler, GuildRankMetrics metrics) {
-        this(redis, scheduler, metrics, GuildLimits.RANK_LOCK_TTL_MS, RENEW_EVERY_MS, GuildLimits.RANK_LOCK_MAX_WAIT_MS,
+    public GuildRanks(GuildRankRedis redis, RedisKeys keys, ScheduledExecutorService scheduler, GuildRankMetrics metrics) {
+        this(redis, keys, scheduler, metrics, GuildLimits.RANK_LOCK_TTL_MS, RENEW_EVERY_MS, GuildLimits.RANK_LOCK_MAX_WAIT_MS,
                 GuildLimits.RANK_LOCK_POLL_MS, GuildLimits.RANK_LOCK_REQUEST_RESERVE_MS, GuildLimits.RANK_REBUILD_TMP_TTL_MS);
     }
 
     /** 单测用：可缩短锁 TTL / 续期 / 等锁上限。 */
-    GuildRanks(GuildRankRedis redis, ScheduledExecutorService scheduler, GuildRankMetrics metrics, long lockTtlMillis,
+    GuildRanks(GuildRankRedis redis, RedisKeys keys, ScheduledExecutorService scheduler, GuildRankMetrics metrics, long lockTtlMillis,
                long renewEveryMillis, long maxWaitMillis, long pollMillis, long reserveMillis, long tmpTtlMillis) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.scheduler = scheduler;
         this.metrics = metrics;
         this.lockTtlMillis = lockTtlMillis;
@@ -152,10 +156,10 @@ public final class GuildRanks {
                         Integer.toUnsignedString(zoneId));
                 return false;
             }
-            String zoneKey = zoneId != 0 ? RedisKeys.guildRankZone(zoneId) : null;
+            String zoneKey = zoneId != 0 ? redisKeys.guildRankZone(zoneId) : null;
             String zoneMember = zoneId != 0 ? Integer.toUnsignedString(zoneId) : null;
-            boolean written = deadline.await(redis.add(RedisKeys.guildRankLock(), lease.token, RedisKeys.guildRankAll(),
-                    RedisKeys.guildRankZones(), zoneKey, zoneMember, Long.toString(score), member), "入榜 " + member);
+            boolean written = deadline.await(redis.add(redisKeys.guildRankLock(), lease.token, redisKeys.guildRankAll(),
+                    redisKeys.guildRankZones(), zoneKey, zoneMember, Long.toString(score), member), "入榜 " + member);
             if (!written) {
                 metrics.rankOp(RankOp.ADD, RankOutcome.ERROR);
                 log.error("[guild] 入榜时排行维护锁已失效，什么都没写 guild={}（下次启动重建自愈）", member);
@@ -191,16 +195,16 @@ public final class GuildRanks {
                         Integer.toUnsignedString(hintZone));
                 return false;
             }
-            Set<String> zoneMembers = deadline.await(redis.members(RedisKeys.guildRankZones()), "读区榜索引");
+            Set<String> zoneMembers = deadline.await(redis.members(redisKeys.guildRankZones()), "读区榜索引");
             Set<String> keys = new LinkedHashSet<>();
-            keys.add(RedisKeys.guildRankAll());
+            keys.add(redisKeys.guildRankAll());
             for (int zone : parseZones(zoneMembers)) {
-                keys.add(RedisKeys.guildRankZone(zone));
+                keys.add(redisKeys.guildRankZone(zone));
             }
             if (hintZone != 0) {
-                keys.add(RedisKeys.guildRankZone(hintZone)); // 区榜可能还没进索引；ZREM 对不存在的键是空操作
+                keys.add(redisKeys.guildRankZone(hintZone)); // 区榜可能还没进索引；ZREM 对不存在的键是空操作
             }
-            boolean removed = deadline.await(redis.remove(RedisKeys.guildRankLock(), lease.token, List.copyOf(keys), member),
+            boolean removed = deadline.await(redis.remove(redisKeys.guildRankLock(), lease.token, List.copyOf(keys), member),
                     "清榜 " + member);
             if (!removed) {
                 metrics.rankOp(RankOp.REMOVE, RankOutcome.ERROR);
@@ -246,19 +250,19 @@ public final class GuildRanks {
         try (lease) {
             source.scan(temp::add);
             temp.flushAll();
-            Set<String> oldMembers = await(redis.members(RedisKeys.guildRankZones()), "读区榜索引");
+            Set<String> oldMembers = await(redis.members(redisKeys.guildRankZones()), "读区榜索引");
             List<String> oldZoneKeys = new ArrayList<>();
             for (int zone : parseZones(oldMembers)) {
-                oldZoneKeys.add(RedisKeys.guildRankZone(zone));
+                oldZoneKeys.add(redisKeys.guildRankZone(zone));
             }
             List<ZoneSwap> zones = new ArrayList<>();
             for (Map.Entry<Integer, Long> zone : temp.zoneCounts.entrySet()) {
                 int zoneId = zone.getKey();
-                zones.add(new ZoneSwap(RedisKeys.guildRankTmpZone(tmpToken, zoneId), RedisKeys.guildRankZone(zoneId),
+                zones.add(new ZoneSwap(redisKeys.guildRankTmpZone(tmpToken, zoneId), redisKeys.guildRankZone(zoneId),
                         Integer.toUnsignedString(zoneId), zone.getValue()));
             }
-            long swapped = await(redis.swap(new SwapPlan(RedisKeys.guildRankLock(), lease.token, RedisKeys.guildRankAll(),
-                    RedisKeys.guildRankZones(), temp.allKey, temp.allCount, oldZoneKeys, zones)), "换榜");
+            long swapped = await(redis.swap(new SwapPlan(redisKeys.guildRankLock(), lease.token, redisKeys.guildRankAll(),
+                    redisKeys.guildRankZones(), temp.allKey, temp.allCount, oldZoneKeys, zones)), "换榜");
             if (swapped == 0) {
                 throw new IllegalStateException("换榜时排行维护锁已失效（被别的实例接管），本次重建作废");
             }
@@ -290,7 +294,7 @@ public final class GuildRanks {
 
         TempKeys(String token) {
             this.token = token;
-            this.allKey = RedisKeys.guildRankTmpAll(token);
+            this.allKey = redisKeys.guildRankTmpAll(token);
         }
 
         void add(RankRow row) {
@@ -308,7 +312,7 @@ public final class GuildRanks {
                 batch.add(score);
                 batch.add(member);
                 if (batch.size() >= REBUILD_BATCH * 2) {
-                    zoneCounts.merge(row.zoneId(), flush(RedisKeys.guildRankTmpZone(token, row.zoneId()), batch), Long::sum);
+                    zoneCounts.merge(row.zoneId(), flush(redisKeys.guildRankTmpZone(token, row.zoneId()), batch), Long::sum);
                 }
             }
         }
@@ -319,7 +323,7 @@ public final class GuildRanks {
             }
             for (Map.Entry<Integer, List<String>> batch : zoneBatches.entrySet()) {
                 if (!batch.getValue().isEmpty()) {
-                    zoneCounts.merge(batch.getKey(), flush(RedisKeys.guildRankTmpZone(token, batch.getKey()), batch.getValue()),
+                    zoneCounts.merge(batch.getKey(), flush(redisKeys.guildRankTmpZone(token, batch.getKey()), batch.getValue()),
                             Long::sum);
                 }
             }
@@ -336,7 +340,7 @@ public final class GuildRanks {
             List<String> keys = new ArrayList<>();
             keys.add(allKey);
             for (int zone : zoneCounts.keySet()) {
-                keys.add(RedisKeys.guildRankTmpZone(token, zone));
+                keys.add(redisKeys.guildRankTmpZone(token, zone));
             }
             try {
                 await(redis.delete(keys), "删重建临时键");
@@ -359,7 +363,7 @@ public final class GuildRanks {
      * @throws DependencyException Redis 故障或预算用完
      */
     public RankPage page(int zoneId, int page, int pageSize, Deadline deadline) {
-        String key = zoneId != 0 ? RedisKeys.guildRankZone(zoneId) : RedisKeys.guildRankAll();
+        String key = zoneId != 0 ? redisKeys.guildRankZone(zoneId) : redisKeys.guildRankAll();
         long p = Integer.toUnsignedLong(page);
         long size = Integer.toUnsignedLong(pageSize);
         long start = p == 0 ? 0 : (p - 1) * size; // ≤ (2^32−2)(2^32−1) < 2^64：按无符号看不溢出
@@ -380,7 +384,7 @@ public final class GuildRanks {
      * @throws DependencyException Redis 故障或预算用完
      */
     public Optional<RankEntry> rankOf(long guildId, int zoneId, Deadline deadline) {
-        String key = zoneId != 0 ? RedisKeys.guildRankZone(zoneId) : RedisKeys.guildRankAll();
+        String key = zoneId != 0 ? redisKeys.guildRankZone(zoneId) : redisKeys.guildRankAll();
         RawRank raw = deadline.await(redis.rank(key, Long.toUnsignedString(guildId)), "读名次 " + key);
         if (raw == null) {
             return Optional.empty();
@@ -414,7 +418,7 @@ public final class GuildRanks {
             if (closed.get()) {
                 return;
             }
-            call(() -> redis.renewLock(RedisKeys.guildRankLock(), token, lockTtlMillis)).whenComplete((held, error) -> {
+            call(() -> redis.renewLock(redisKeys.guildRankLock(), token, lockTtlMillis)).whenComplete((held, error) -> {
                 if (error != null) {
                     log.warn("[guild] 排行维护锁续期失败（下个周期再试）: {}", rootMessage(error));
                 } else if (!Boolean.TRUE.equals(held) && !closed.get()) {
@@ -472,7 +476,7 @@ public final class GuildRanks {
             boolean acquired;
             try {
                 acquired = Boolean.TRUE.equals(bound.next().await(
-                        call(() -> redis.tryLock(RedisKeys.guildRankLock(), token, lockTtlMillis)), "抢排行维护锁"));
+                        call(() -> redis.tryLock(redisKeys.guildRankLock(), token, lockTtlMillis)), "抢排行维护锁"));
             } catch (DependencyException e) {
                 releaseQuietly(token);
                 throw e;
@@ -498,7 +502,7 @@ public final class GuildRanks {
     }
 
     private void releaseQuietly(String token) {
-        call(() -> redis.unlock(RedisKeys.guildRankLock(), token)).whenComplete((released, error) -> {
+        call(() -> redis.unlock(redisKeys.guildRankLock(), token)).whenComplete((released, error) -> {
             if (error != null) {
                 log.error("[guild] 释放排行维护锁失败（最多占用 {} ms 后自动过期）: {}", lockTtlMillis, rootMessage(error));
             }

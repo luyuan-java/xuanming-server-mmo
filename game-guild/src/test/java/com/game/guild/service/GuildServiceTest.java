@@ -8,6 +8,7 @@ import static com.game.guild.service.ScriptedStore.withRole;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.discovery.RedisKeys;
 import com.game.guild.rules.GuildReject;
@@ -51,6 +52,8 @@ import org.junit.jupiter.api.Test;
  * guild_manage_logic_test.go 的公共前置用例、guild_logic_names_test.go），以及所有写 RPC 共用的会话 → 归属区 → 闸门顺序。
  */
 class GuildServiceTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long ME = 42;
     private static final long G = 10;
@@ -188,10 +191,10 @@ class GuildServiceTest {
         assertThat(f.zoneCalls).containsExactly(List.of(ME));
         assertThat(f.fenceZones).containsExactly(ZONE);
         // 提交后：失效 guild(G) 与建帮者映射，然后入榜；不推送
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildSnapshot(901))).isGreaterThan(f.indexOf("store.create"));
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.create"));
-        assertThat(f.indexOf("rank.add 901")).isGreaterThan(f.indexOf("invalidate " + RedisKeys.guildSnapshot(901)));
-        assertThat(f.rankRedis.zsets.get(RedisKeys.guildRankZone(ZONE))).containsKey("901");
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(901))).isGreaterThan(f.indexOf("store.create"));
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.create"));
+        assertThat(f.indexOf("rank.add 901")).isGreaterThan(f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(901)));
+        assertThat(f.rankRedis.zsets.get(REDIS_KEYS.guildRankZone(ZONE))).containsKey("901");
         assertThat(f.pushes).isEmpty();
         // 名字一次批量（成员 + 帮主），在线一次
         assertThat(f.nameCalls).hasSize(1);
@@ -262,7 +265,7 @@ class GuildServiceTest {
         f.journal.clear();
         assertThat(f.guilds.createGuild(ME, CreateGuildRequest.newBuilder().setName("青云门").build(), d()).getErrorMessage())
                 .isEqualTo(GuildTip.ALREADY_IN_GUILD.proto());
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.create"));
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.create"));
         assertThat(f.pushes).isEmpty();
         // 存储内部错误按故障（先让他回到「不在任何帮」，否则预检就挡住了）
         f.store.playerGuild.remove(ME);
@@ -412,8 +415,8 @@ class GuildServiceTest {
         assertThat(push.change().getTargetPlayerId()).isEqualTo(ME);
         assertThat(push.recipients()).containsExactly(5L, 7L);
         int push0 = f.indexOf("push");
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildSnapshot(G))).isBetween(0, push0);
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(ME))).isBetween(0, push0);
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(G))).isBetween(0, push0);
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(ME))).isBetween(0, push0);
     }
 
     @Test
@@ -481,8 +484,8 @@ class GuildServiceTest {
     void 解散成功_失效_按事务内zone清榜_再推DISBANDED给除帮主外全体() {
         meInZone();
         f.store.put(guild(G, ZONE, ME, 5, 7));
-        f.rankRedis.put(RedisKeys.guildRankZone(ZONE + 3), G, 0);
-        f.rankRedis.sets.computeIfAbsent(RedisKeys.guildRankZones(), k -> new java.util.LinkedHashSet<>())
+        f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE + 3), G, 0);
+        f.rankRedis.sets.computeIfAbsent(REDIS_KEYS.guildRankZones(), k -> new java.util.LinkedHashSet<>())
                 .add(Integer.toString(ZONE + 3));
         f.store.disband = g -> TxOutcome.ok(new Disbanded(G, ZONE + 3, ME, List.of(5L, 7L, ME)));
         assertThat(f.guilds.disbandGuild(ME, DisbandGuildRequest.getDefaultInstance(), d()).hasErrorMessage()).isFalse();
@@ -492,15 +495,15 @@ class GuildServiceTest {
         assertThat(push.change().getActorPlayerId()).isEqualTo(ME);
         assertThat(push.change().getTargetPlayerId()).isZero();
         assertThat(push.recipients()).containsExactly(5L, 7L);
-        int inv = f.indexOf("invalidate " + RedisKeys.guildSnapshot(G));
+        int inv = f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(G));
         int rm = f.indexOf("rank.remove " + G);
         int pushAt = f.indexOf("push");
         assertThat(inv).isGreaterThanOrEqualTo(0).isLessThan(rm);
         assertThat(rm).isLessThan(pushAt);
         for (long m : List.of(5L, 7L, ME)) {
-            assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(m))).isBetween(0, pushAt);
+            assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(m))).isBetween(0, pushAt);
         }
-        assertThat(f.rankRedis.zsets.get(RedisKeys.guildRankZone(ZONE + 3))).doesNotContainKey(Long.toString(G));
+        assertThat(f.rankRedis.zsets.get(REDIS_KEYS.guildRankZone(ZONE + 3))).doesNotContainKey(Long.toString(G));
     }
 
     @Test
@@ -514,7 +517,7 @@ class GuildServiceTest {
         f.journal.clear();
         assertThat(f.guilds.disbandGuild(ME, DisbandGuildRequest.getDefaultInstance(), d()).getErrorMessage())
                 .isEqualTo(GuildTip.GUILD_NOT_FOUND.proto());
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.disband"));
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.disband"));
     }
 
     // ================================================================ SetAnnouncement（§3.7）
@@ -552,7 +555,7 @@ class GuildServiceTest {
         assertThat(push.change().getKind()).isEqualTo(GuildChangeKind.GUILD_CHANGE_KIND_ANNOUNCEMENT_CHANGED);
         assertThat(push.change().getTargetPlayerId()).isZero();
         assertThat(push.recipients()).containsExactly(5L, 7L);
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildSnapshot(G))).isBetween(0, f.indexOf("push"));
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(G))).isBetween(0, f.indexOf("push"));
     }
 
     @Test

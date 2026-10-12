@@ -2,6 +2,7 @@ package com.game.discovery.location;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
 import com.game.discovery.proto.PlayerLocation;
@@ -25,6 +26,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class LocationStatusIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long BASE = Long.MIN_VALUE + (1L << 51) + ThreadLocalRandom.current().nextLong(1L << 40);
 
     private static RedissonClient redis;
@@ -35,13 +38,13 @@ class LocationStatusIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(11);
         redis = Redisson.create(config);
-        directory = new PlayerLocationDirectory(redis);
+        directory = new PlayerLocationDirectory(redis, REDIS_KEYS);
     }
 
     @AfterAll
     static void cleanup() {
         for (long i = 0; i < 10; i++) {
-            redis.getKeys().delete(RedisKeys.playerLocation(BASE + i));
+            redis.getKeys().delete(REDIS_KEYS.playerLocation(BASE + i));
         }
         redis.shutdown();
     }
@@ -62,8 +65,8 @@ class LocationStatusIntegrationTest {
         directory.putAsync(at(online), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
         directory.leaseAsync(at(leased), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
         directory.removeAsync(loggedOut, 5, 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        redis.<String, String>getMap(RedisKeys.playerLocation(badState), StringCodec.INSTANCE).put("s", "z");
-        redis.<String>getBucket(RedisKeys.playerLocation(wrongType), StringCodec.INSTANCE).set("not-a-hash");
+        redis.<String, String>getMap(REDIS_KEYS.playerLocation(badState), StringCodec.INSTANCE).put("s", "z");
+        redis.<String>getBucket(REDIS_KEYS.playerLocation(wrongType), StringCodec.INSTANCE).set("not-a-hash");
 
         Map<Long, LocationStatus> statuses = directory.statusesAsync(
                 List.of(online, leased, loggedOut, missing, badState, wrongType, online)).get(5, TimeUnit.SECONDS);
@@ -90,7 +93,7 @@ class LocationStatusIntegrationTest {
         RedissonClient closed = Redisson.create(config);
         closed.shutdown();
 
-        Map<Long, LocationStatus> statuses = new PlayerLocationDirectory(closed)
+        Map<Long, LocationStatus> statuses = new PlayerLocationDirectory(closed, REDIS_KEYS)
                 .statusesAsync(List.of(BASE + 6, BASE + 7)).get(5, TimeUnit.SECONDS);
 
         assertThat(statuses).containsEntry(BASE + 6, LocationStatus.ERROR).containsEntry(BASE + 7, LocationStatus.ERROR);

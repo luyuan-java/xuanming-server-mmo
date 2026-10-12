@@ -4,6 +4,7 @@ import com.game.discovery.RedisKeys;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.util.Objects;
 import org.redisson.api.BatchOptions;
 import org.redisson.api.RBatch;
 import org.redisson.api.RScript;
@@ -33,16 +34,19 @@ public final class RedisLoginDevices implements LoginDevices {
             """;
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final Clock clock;
     private final Duration ttl;
     private final int max;
 
     /**
-     * @param ttl 一次登记的有效期（基线 SessionExpireMin = 30 分钟）
-     * @param max 名单上限（基线 3）
+     * @param keys 名单键与反查键的出处（带部署命名空间，装配方注入）
+     * @param ttl  一次登记的有效期（基线 SessionExpireMin = 30 分钟）
+     * @param max  名单上限（基线 3）
      */
-    public RedisLoginDevices(RedissonClient redis, Clock clock, Duration ttl, int max) {
+    public RedisLoginDevices(RedissonClient redis, RedisKeys keys, Clock clock, Duration ttl, int max) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.clock = clock;
         this.ttl = ttl;
         this.max = max;
@@ -53,7 +57,7 @@ public final class RedisLoginDevices implements LoginDevices {
         long now = clock.millis();
         Long admitted = redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, ADMIT_SCRIPT,
                 RScript.ReturnType.INTEGER,
-                List.of(RedisKeys.loginDevices(account), RedisKeys.loginDeviceSession(sessionKey)),
+                List.of(redisKeys.loginDevices(account), redisKeys.loginDeviceSession(sessionKey)),
                 String.valueOf(now), sessionKey, String.valueOf(now + ttl.toMillis()), String.valueOf(ttl.toMillis()),
                 String.valueOf(max));
         return admitted != null && admitted == 1L;
@@ -63,26 +67,26 @@ public final class RedisLoginDevices implements LoginDevices {
     public void bind(String account, String sessionKey, String previousAccount) {
         RBatch batch = redis.createBatch(BatchOptions.defaults().executionMode(BatchOptions.ExecutionMode.IN_MEMORY_ATOMIC));
         if (!previousAccount.isEmpty() && !previousAccount.equals(account)) {
-            batch.getScoredSortedSet(RedisKeys.loginDevices(previousAccount), StringCodec.INSTANCE).removeAsync(sessionKey);
+            batch.getScoredSortedSet(redisKeys.loginDevices(previousAccount), StringCodec.INSTANCE).removeAsync(sessionKey);
         }
-        batch.getBucket(RedisKeys.loginDeviceSession(sessionKey), StringCodec.INSTANCE).setAsync(account, ttl);
+        batch.getBucket(redisKeys.loginDeviceSession(sessionKey), StringCodec.INSTANCE).setAsync(account, ttl);
         batch.execute();
     }
 
     @Override
     public void revoke(String account, String sessionKey) {
-        redis.getScoredSortedSet(RedisKeys.loginDevices(account), StringCodec.INSTANCE).remove(sessionKey);
+        redis.getScoredSortedSet(redisKeys.loginDevices(account), StringCodec.INSTANCE).remove(sessionKey);
     }
 
     @Override
     public void leave(String sessionKey, String accountHint) {
-        String recorded = redis.<String>getBucket(RedisKeys.loginDeviceSession(sessionKey), StringCodec.INSTANCE)
+        String recorded = redis.<String>getBucket(redisKeys.loginDeviceSession(sessionKey), StringCodec.INSTANCE)
                 .getAndDelete();
         if (recorded != null) {
-            redis.getScoredSortedSet(RedisKeys.loginDevices(recorded), StringCodec.INSTANCE).remove(sessionKey);
+            redis.getScoredSortedSet(redisKeys.loginDevices(recorded), StringCodec.INSTANCE).remove(sessionKey);
         }
         if (!accountHint.isEmpty() && !accountHint.equals(recorded)) {
-            redis.getScoredSortedSet(RedisKeys.loginDevices(accountHint), StringCodec.INSTANCE).remove(sessionKey);
+            redis.getScoredSortedSet(redisKeys.loginDevices(accountHint), StringCodec.INSTANCE).remove(sessionKey);
         }
     }
 }

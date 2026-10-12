@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -13,10 +15,12 @@ import org.redisson.api.RedissonClient;
 /** 不连 Redis 的部分：令牌格式闸、值的解码、存储异常不带原消息。 */
 class RedisLoginTokensTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     @Test
     void 格式不对的令牌不碰Redis直接无效() {
         RedissonClient redis = mock(RedissonClient.class);
-        RedisLoginTokens tokens = new RedisLoginTokens(redis, Clock.systemUTC(), Duration.ofHours(2), Duration.ofHours(720),
+        RedisLoginTokens tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2), Duration.ofHours(720),
                 new SecureRandom());
         assertThat(tokens.validateAccess(null)).isEmpty();
         assertThat(tokens.validateAccess("")).isEmpty();

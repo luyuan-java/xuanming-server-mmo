@@ -75,6 +75,7 @@ public final class BattleResultIngest implements ResultConsumerControl {
     }
 
     private final Settings settings;
+    private final BattleResultTopics topics;
     private final Supplier<TopicAdmin> adminFactory;
     private final Supplier<Consumer<String, byte[]>> consumerFactory;
     private final BattleResultConsumer.Handler handler;
@@ -92,19 +93,21 @@ public final class BattleResultIngest implements ResultConsumerControl {
     private volatile Thread consumerThread;
 
     /**
+     * @param topics          对局结果 topic 的规格（由本进程注入的 {@code KafkaNames} 构造：基名 {@code <ns>-battle-result}）
      * @param adminFactory    建 topic 管理客户端（每次核对新建一个、用完关闭）
      * @param consumerFactory 建 KafkaConsumer（关自动提交、{@code earliest}；每次（重）启动消费循环新建一个，由循环关闭）
      * @param handler         入账（{@code ratingStore::apply}）
      */
-    public BattleResultIngest(Settings settings, Supplier<TopicAdmin> adminFactory, Supplier<Consumer<String, byte[]>> consumerFactory,
-                              BattleResultConsumer.Handler handler, MatchMetrics metrics) {
-        this(settings, adminFactory, consumerFactory, handler, metrics, INIT_RETRY, RESTART_DELAY, POLL_TIMEOUT);
+    public BattleResultIngest(Settings settings, BattleResultTopics topics, Supplier<TopicAdmin> adminFactory,
+                              Supplier<Consumer<String, byte[]>> consumerFactory, BattleResultConsumer.Handler handler, MatchMetrics metrics) {
+        this(settings, topics, adminFactory, consumerFactory, handler, metrics, INIT_RETRY, RESTART_DELAY, POLL_TIMEOUT);
     }
 
-    BattleResultIngest(Settings settings, Supplier<TopicAdmin> adminFactory, Supplier<Consumer<String, byte[]>> consumerFactory,
-                       BattleResultConsumer.Handler handler, MatchMetrics metrics, Duration initRetry, Duration restartDelay,
-                       Duration pollTimeout) {
+    BattleResultIngest(Settings settings, BattleResultTopics topics, Supplier<TopicAdmin> adminFactory,
+                       Supplier<Consumer<String, byte[]>> consumerFactory, BattleResultConsumer.Handler handler, MatchMetrics metrics,
+                       Duration initRetry, Duration restartDelay, Duration pollTimeout) {
         this.settings = Objects.requireNonNull(settings, "settings");
+        this.topics = Objects.requireNonNull(topics, "topics");
         this.adminFactory = Objects.requireNonNull(adminFactory, "adminFactory");
         this.consumerFactory = Objects.requireNonNull(consumerFactory, "consumerFactory");
         this.handler = Objects.requireNonNull(handler, "handler");
@@ -112,7 +115,7 @@ public final class BattleResultIngest implements ResultConsumerControl {
         this.initRetry = initRetry;
         this.restartDelay = restartDelay;
         this.pollTimeout = pollTimeout;
-        this.topic = BattleResultTopics.name(settings.topicGeneration());
+        this.topic = topics.name(settings.topicGeneration());
     }
 
     /** 消费的 topic 名（{@code <ns>-battle-result-g<代次>}，缺省 {@code game-battle-result-g<代次>}）。 */
@@ -197,7 +200,7 @@ public final class BattleResultIngest implements ResultConsumerControl {
     /** @return true = 核对通过；false = Kafka 暂时不可达（稍后重试）。分区数不符抛 {@link AuditTopicContractException}。 */
     private boolean verify() {
         try (TopicAdmin admin = adminFactory.get()) {
-            BattleResultTopics.ensure(admin, settings.topicGeneration(), AuditTopicInitializer.Mode.OWN, settings.replicationFactor(),
+            topics.ensure(admin, settings.topicGeneration(), AuditTopicInitializer.Mode.OWN, settings.replicationFactor(),
                     settings.initTimeout());
             return true;
         } catch (AuditTopicContractException e) {

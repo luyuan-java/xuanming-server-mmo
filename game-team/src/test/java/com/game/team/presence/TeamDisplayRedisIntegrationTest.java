@@ -3,6 +3,7 @@ package com.game.team.presence;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.player.PlayerProfiles.Profile;
 import com.game.discovery.RedisKeys;
@@ -40,6 +41,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TeamDisplayRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final int DB = 12;
 
     private static RedissonClient redis;
@@ -58,7 +61,7 @@ class TeamDisplayRedisIntegrationTest {
     @BeforeAll
     static void connect() {
         redis = Redisson.create(config());
-        scripts = new BattleRedis(redis);
+        scripts = new BattleRedis(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -76,10 +79,10 @@ class TeamDisplayRedisIntegrationTest {
     /** 第 n 名玩家；它可能被写到的键（锁、待结算记录、本局的已销账墓碑、在线条目）全部登记，测完只删这些。 */
     private long player(int n) {
         long pid = base + n;
-        written.add(RedisKeys.battleLock(pid));
-        written.add(RedisKeys.battleSettlements(pid));
-        written.add(RedisKeys.battleSettled(pid, battle));
-        written.add(RedisKeys.presence(pid));
+        written.add(REDIS_KEYS.battleLock(pid));
+        written.add(REDIS_KEYS.battleSettlements(pid));
+        written.add(REDIS_KEYS.battleSettled(pid, battle));
+        written.add(REDIS_KEYS.presence(pid));
         return pid;
     }
 
@@ -88,8 +91,8 @@ class TeamDisplayRedisIntegrationTest {
     }
 
     private static TeamDisplay display(RedissonClient client, Map<Long, Profile> profiles) {
-        return new TeamDisplay((ids, d) -> profiles, new PlayerPresenceDirectory(client)::findAllAsync,
-                new BattleLockReader(client)::existsAll);
+        return new TeamDisplay((ids, d) -> profiles, new PlayerPresenceDirectory(client, REDIS_KEYS)::findAllAsync,
+                new BattleLockReader(client, REDIS_KEYS)::existsAll);
     }
 
     @Test
@@ -97,7 +100,7 @@ class TeamDisplayRedisIntegrationTest {
         long fighter = player(1);
         long teammate = player(2);
         long applicant = player(3);
-        redis.<byte[]>getBucket(RedisKeys.presence(teammate), ByteArrayCodec.INSTANCE)
+        redis.<byte[]>getBucket(REDIS_KEYS.presence(teammate), ByteArrayCodec.INSTANCE)
                 .set(PlayerPresence.newBuilder().setPlayerId(teammate).setGateNodeId(1).build().toByteArray());
         TeamDisplay display = display(redis, Map.of(fighter, new Profile(fighter, "甲", 31, 2, 1, "ap", 3)));
         List<Long> roster = List.of(fighter, teammate, applicant);
@@ -140,11 +143,11 @@ class TeamDisplayRedisIntegrationTest {
         long idle = player(2);
         long now = System.currentTimeMillis();
         assertThat(await(scripts.prepareLock(fighter, battle, 3, now + 96_000, now + 30_000, 156))).isEqualTo("0");
-        String lockKey = RedisKeys.battleLock(fighter);
+        String lockKey = REDIS_KEYS.battleLock(fighter);
         assertThat(redis.getKeys().countExists(lockKey)).as("前提：锁确实在").isEqualTo(1L);
 
         // 基线的读法：一批键 MGET、值非空即在战斗。锁在、但 MGET 一个值也读不到，也不报错
-        Map<String, byte[]> viaMget = redis.getBuckets(ByteArrayCodec.INSTANCE).get(lockKey, RedisKeys.battleLock(idle));
+        Map<String, byte[]> viaMget = redis.getBuckets(ByteArrayCodec.INSTANCE).get(lockKey, REDIS_KEYS.battleLock(idle));
         assertThat(viaMget).as("MGET 对 Hash 键回 nil：有锁的人和没锁的人读出来一样").isEmpty();
         // 报错的是 GET；MGET 式的实现不会这样自己暴露
         assertThatThrownBy(() -> redis.<byte[]>getBucket(lockKey, ByteArrayCodec.INSTANCE).get()).hasMessageContaining("WRONGTYPE");
@@ -164,7 +167,7 @@ class TeamDisplayRedisIntegrationTest {
         assertThat(await(scripts.storeSettlement(recordOnly, battle, new byte[] {9}, BattleRedis.SETTLEMENT_TTL_SEC))).isEqualTo(1L);
         // 没有锁也没有记录时销账：只留下墓碑
         assertThat(await(scripts.ack(tombstoneOnly, battle))).isZero();
-        assertThat(redis.getKeys().countExists(RedisKeys.battleSettlements(recordOnly), RedisKeys.battleSettled(tombstoneOnly, battle)))
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.battleSettlements(recordOnly), REDIS_KEYS.battleSettled(tombstoneOnly, battle)))
                 .as("前提：记录与墓碑确实都在").isEqualTo(2L);
 
         Map<Long, MemberDisplay> dc = display(redis, Map.of()).load(List.of(recordOnly, tombstoneOnly), Deadline.after(5000));

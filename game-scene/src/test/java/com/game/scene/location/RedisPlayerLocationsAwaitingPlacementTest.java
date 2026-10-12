@@ -11,6 +11,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.proto.PlayerLocation;
 import com.game.scene.testing.CapturedLogs;
@@ -37,6 +39,7 @@ import org.redisson.api.RedissonClient;
  */
 class RedisPlayerLocationsAwaitingPlacementTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     private static final long PLAYER = 0x8000_0000_0000_1001L;   // ≥ 2^63：id 一律按无符号处理
 
     /** 一次待落点写：调用时的参数与测试控制的结果。 */
@@ -145,7 +148,7 @@ class RedisPlayerLocationsAwaitingPlacementTest {
     @Test
     void 目录当场拒绝参数_按没写上经逻辑执行器回false() throws Exception {
         RedissonClient redis = mock(RedissonClient.class);
-        RedisPlayerLocations real = new RedisPlayerLocations(new PlayerLocationDirectory(redis), 1, 9, logicQueue::add);
+        RedisPlayerLocations real = new RedisPlayerLocations(new PlayerLocationDirectory(redis, REDIS_KEYS), 1, 9, logicQueue::add);
         List<Boolean> results = new CopyOnWriteArrayList<>();
 
         real.awaitingPlacement(removed(0), 0, 5, Duration.ofSeconds(60), results::add);

@@ -3,6 +3,7 @@ package com.game.discovery.world;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -30,6 +31,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class ChannelReservationIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final Duration TTL = Duration.ofSeconds(10);
 
     private static RedissonClient redis;
@@ -41,7 +44,7 @@ class ChannelReservationIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(9);
         redis = Redisson.create(config);
-        store = new RedissonWorldChannelStore(redis);
+        store = new RedissonWorldChannelStore(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -139,7 +142,7 @@ class ChannelReservationIntegrationTest {
         Duration shortTtl = Duration.ofMillis(400);
         assertThat(store.reserve(zone, candidates(0, 0), 1, shortTtl).index()).isZero();
         assertThat(store.reserve(zone, candidates(0, 0), 2, shortTtl).index()).isEqualTo(1);
-        long pttl = redis.getScoredSortedSet(RedisKeys.worldReservations(zone, 1_000), StringCodec.INSTANCE).remainTimeToLive();
+        long pttl = redis.getScoredSortedSet(REDIS_KEYS.worldReservations(zone, 1_000), StringCodec.INSTANCE).remainTimeToLive();
         assertThat(pttl).isPositive().isLessThanOrEqualTo(400);
         assertThat(counts(zone, 2)).containsExactly(1L, 1L);
         Thread.sleep(250);

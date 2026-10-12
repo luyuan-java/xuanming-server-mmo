@@ -22,11 +22,13 @@ import org.redisson.api.RedissonClient;
 public final class BattleLockReader {
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final BattleRedis scripts;
 
-    public BattleLockReader(RedissonClient redis) {
+    public BattleLockReader(RedissonClient redis, RedisKeys keys) {
         this.redis = Objects.requireNonNull(redis, "redis");
-        this.scripts = new BattleRedis(redis);
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
+        this.scripts = new BattleRedis(redis, keys);
     }
 
     /**
@@ -35,7 +37,7 @@ public final class BattleLockReader {
      */
     public CompletableFuture<Boolean> exists(long playerId) {
         try {
-            return redis.getKeys().countExistsAsync(RedisKeys.battleLock(playerId)).toCompletableFuture()
+            return redis.getKeys().countExistsAsync(redisKeys.battleLock(playerId)).toCompletableFuture()
                     .thenApply(n -> n != null && n > 0);
         } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);

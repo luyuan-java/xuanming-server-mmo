@@ -2,7 +2,9 @@ package com.game.match.matcher;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
@@ -47,6 +49,8 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  */
 @ExtendWith(OutputCaptureExtension.class)
 class MatcherTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final QueueRef Q1V1 = new QueueRef(3, 0);
     private static final QueueRef Q5V5 = new QueueRef(1, 0);
@@ -350,7 +354,7 @@ class MatcherTest {
     @Test
     void 空队列从注册集剔除_深度归零() {
         QueueRef empty = new QueueRef(1, 3);
-        memory.putIndexMember(empty.queueKey());
+        memory.putIndexMember(empty.queueKey(REDIS_KEYS));
 
         assertThat(round()).isEqualTo(MatcherRound.OK);
 
@@ -628,7 +632,7 @@ class MatcherTest {
     void 评分镜像缺分的成员按票里的评分用_计一次异常_不回写() {
         join(1, Q1V1, 150_000);
         rig.players.online(2, 1, 7);
-        memory.putTicket(2, new Ticket("t-2", 3, 0, TicketState.QUEUED, clock.peekMs(), 1, Q1V1.queueKey(), 153_000, 0, 0, 0), TTL);
+        memory.putTicket(2, new Ticket("t-2", 3, 0, TicketState.QUEUED, clock.peekMs(), 1, Q1V1.queueKey(REDIS_KEYS), 153_000, 0, 0, 0), TTL);
         memory.putQueueMember(Q1V1, "2", null);
         memory.calls.clear();
 
@@ -886,7 +890,7 @@ class MatcherTest {
 
     private QueueMatcher matcherWith(GatherLauncher launcher, MatchMetrics metrics) {
         return new QueueMatcher(store, rig.players, launcher, rig.nodes, rig.ids, metrics, rig.labels, MatcherRig.defaults(),
-                new MatchInstance(MatcherRig.INSTANCE), rig.nanos::get);
+                new MatchInstance(MatcherRig.INSTANCE), REDIS_KEYS, rig.nanos::get);
     }
 
     @Test

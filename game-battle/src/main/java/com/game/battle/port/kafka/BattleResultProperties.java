@@ -11,7 +11,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *
  * @param bootstrapServers  Kafka 地址（{@code GAME_KAFKA_BOOTSTRAP_SERVERS}，缺省 127.0.0.1:9092）
  * @param topicGeneration   topic 代次（{@code GAME_BATTLE_RESULT_TOPIC_GENERATION}，≥ 1，<b>必须与 game-match 一致</b>）：
- *                          topic 名是 {@code game-battle-result-g<代次>}；分区数是契约，改分区数只能升代次换新 topic
+ *                          topic 名是 {@code <ns>-battle-result-g<代次>}（缺省命名空间下即 {@code game-battle-result-g<代次>}，
+ *                          由注入的 {@code KafkaNames} 构造的 {@link BattleResultTopics} 给出）；分区数是契约，改分区数只能升代次换新 topic
  * @param replicationFactor 新建 topic 的副本数（只在本进程先于 game-match 启动、topic 还不存在时用到）
  * @param initTimeout       启动期核对 / 创建 topic 的上限：Kafka 不可达时启动线程最多等这么久，之后照常启动、结果事件只写兜底日志，
  *                          有事件要发时每 30 s 再试一次（每次再试也用这个上限，只占 {@code battle-result-out} 线程）
@@ -41,10 +42,5 @@ public record BattleResultProperties(
     /** 全部取缺省值（测试用）。 */
     public static BattleResultProperties defaults() {
         return new BattleResultProperties("127.0.0.1:9092", 1, (short) 1, Duration.ofSeconds(10));
-    }
-
-    /** 这一代次的 topic 名（{@code game-battle-result-g<代次>}）。 */
-    public String topic() {
-        return BattleResultTopics.name(topicGeneration);
     }
 }

@@ -7,6 +7,7 @@ import com.game.guild.rules.GuildLimits;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,17 +26,6 @@ public final class GuildStartupChecks {
 
     private static final Logger log = LoggerFactory.getLogger(GuildStartupChecks.class);
 
-    /**
-     * 建哨兵行的会话级命名锁（死锁复核 C1，guild_manage_repo.go:841-845）。GET_LOCK 的名字在整个 MySQL 实例内共用、不分库，所以尾段是
-     * <b>部署命名空间</b>（{@code game.namespace}，缺省 {@code game}，与缺省库名一一对应）：共用同一个 MySQL 实例的两个部署互不排队；
-     * 前段 {@code game_guild_insert_guard_init:} 是代码身份，不随命名空间变。缺省命名空间下整串与以前逐字节相同。
-     *
-     * <p>与 pbmysql 的结构同步咨询锁 {@code proto2mysql:sync:<fnv32(DATABASE())>} 口径不同：那把按运行时的实际库名，这把按命名空间——
-     * 集成测试（GuildLockOrderMysqlTest）在临时库 {@code game_guild_it_*} 上拿这个常量抢锁，按 DATABASE() 取名会让它失效。
-     * 两把锁不同名，在启动期先后获取、从不嵌套。类初始化时取已定格的命名空间（不是编译期常量）。
-     */
-    public static final String INSERT_GUARD_INIT_LOCK_NAME = "game_guild_insert_guard_init:" + GameNamespace.get();
-
     /** GET_LOCK 的等待上限（秒），必须明显短于调用方预算（基线给整步 10 s）。 */
     static final int INSERT_GUARD_INIT_LOCK_WAIT_SECONDS = 5;
 
@@ -49,9 +39,26 @@ public final class GuildStartupChecks {
     static final String RELEASE_LOCK = "SELECT RELEASE_LOCK(?)";
 
     private final GuildTx tx;
+    /** 本部署建哨兵行用的命名锁名（{@link #insertGuardInitLockName}）。 */
+    private final String initLockName;
 
-    public GuildStartupChecks(GuildTx tx) {
+    /** @param namespace 部署命名空间（装配方注入的 bean；决定命名锁名的尾段） */
+    public GuildStartupChecks(GuildTx tx, GameNamespace namespace) {
         this.tx = tx;
+        this.initLockName = insertGuardInitLockName(namespace);
+    }
+
+    /**
+     * 建哨兵行的会话级命名锁名（死锁复核 C1，guild_manage_repo.go:841-845）。GET_LOCK 的名字在整个 MySQL 实例内共用、不分库，所以尾段是
+     * <b>部署命名空间</b>（{@code game.namespace}，缺省 {@code game}，与库名一一对应）：共用同一个 MySQL 实例的两个部署互不排队；
+     * 前段 {@code game_guild_insert_guard_init:} 是代码身份，不随命名空间变。缺省命名空间下整串与以前逐字节相同。纯函数。
+     *
+     * <p>与 pbmysql 的结构同步咨询锁 {@code proto2mysql:sync:<fnv32(DATABASE())>} 口径不同：那把按运行时的实际库名，这把按命名空间——
+     * 集成测试（GuildLockOrderMysqlTest）在临时库 {@code game_guild_it_*} 上拿这个名字抢锁，按 DATABASE() 取名会让它失效。
+     * 两把锁不同名，在启动期先后获取、从不嵌套。
+     */
+    public static String insertGuardInitLockName(GameNamespace namespace) {
+        return "game_guild_insert_guard_init:" + Objects.requireNonNull(namespace, "namespace").value();
     }
 
     /**
@@ -104,13 +111,13 @@ public final class GuildStartupChecks {
                 Long got = db.one(GET_LOCK, rs -> {
                     long v = rs.getLong(1);
                     return rs.wasNull() ? null : v;
-                }, INSERT_GUARD_INIT_LOCK_NAME, INSERT_GUARD_INIT_LOCK_WAIT_SECONDS);
+                }, initLockName, INSERT_GUARD_INIT_LOCK_WAIT_SECONDS);
                 if (got == null || got != 1) {
                     if (JdbcGuildStore.missingPlayerStateRows(db, guard).isEmpty()) {
                         return; // 持锁者已建好、只是还没放锁
                     }
                     throw new GuildStoreException(GuildStoreException.Kind.GLOBAL_INSERT_GUARD_MISSING,
-                            "命名锁 " + INSERT_GUARD_INIT_LOCK_NAME + " 在 " + INSERT_GUARD_INIT_LOCK_WAIT_SECONDS
+                            "命名锁 " + initLockName + " 在 " + INSERT_GUARD_INIT_LOCK_WAIT_SECONDS
                                     + " s 内没拿到（结果 " + got + "），哨兵行仍缺失");
                 }
                 try {
@@ -209,12 +216,12 @@ public final class GuildStartupChecks {
         log.info("已建全局插入守卫哨兵行 guild_player_state(0)");
     }
 
-    private static void releaseInitLock(Connection c) {
+    private void releaseInitLock(Connection c) {
         try {
             new GuildJdbc(c, Deadline.after(INSERT_GUARD_INIT_RELEASE_TIMEOUT_MS), 0)
-                    .one(RELEASE_LOCK, rs -> rs.getObject(1) == null ? 0L : rs.getLong(1), INSERT_GUARD_INIT_LOCK_NAME);
+                    .one(RELEASE_LOCK, rs -> rs.getObject(1) == null ? 0L : rs.getLong(1), initLockName);
         } catch (SQLException | RuntimeException e) {
-            log.error("释放命名锁 {} 失败（连接关闭时服务端会释放）: {}", INSERT_GUARD_INIT_LOCK_NAME, e.toString());
+            log.error("释放命名锁 {} 失败（连接关闭时服务端会释放）: {}", initLockName, e.toString());
         }
     }
 }

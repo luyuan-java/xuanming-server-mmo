@@ -3,6 +3,7 @@ package com.game.discovery.battle;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,6 +30,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class BattleLockReaderIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long PLAYER_BASE = Long.MIN_VALUE + (1L << 54) + ThreadLocalRandom.current().nextLong(1L << 40);
     private static final long BATTLE = Long.MIN_VALUE + (1L << 55) + ThreadLocalRandom.current().nextLong(1L << 40);
     private static final AtomicLong playerSeq = new AtomicLong();
@@ -43,8 +46,8 @@ class BattleLockReaderIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(BattleRedisScriptsIntegrationTest.DB);
         redis = Redisson.create(config);
-        scripts = new BattleRedis(redis);
-        reader = new BattleLockReader(redis);
+        scripts = new BattleRedis(redis, REDIS_KEYS);
+        reader = new BattleLockReader(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -57,9 +60,9 @@ class BattleLockReaderIntegrationTest {
 
     private static long newPlayer() {
         long player = PLAYER_BASE + playerSeq.incrementAndGet();
-        written.add(RedisKeys.battleLock(player));
-        written.add(RedisKeys.battleSettlements(player));
-        written.add(RedisKeys.battleSettled(player, BATTLE));
+        written.add(REDIS_KEYS.battleLock(player));
+        written.add(REDIS_KEYS.battleSettlements(player));
+        written.add(REDIS_KEYS.battleSettled(player, BATTLE));
         return player;
     }
 
@@ -106,7 +109,7 @@ class BattleLockReaderIntegrationTest {
         assertThat(await(reader.exists(player))).isFalse();
         assertThat(await(reader.battleId(player))).isZero();
         // 墓碑与待结算记录不是锁：销账后留下的墓碑不会让读者误判在途
-        assertThat(redis.getKeys().countExists(RedisKeys.battleSettled(player, BATTLE))).isEqualTo(1);
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.battleSettled(player, BATTLE))).isEqualTo(1);
     }
 
     @Test
@@ -153,7 +156,7 @@ class BattleLockReaderIntegrationTest {
     void 锁键被写成别的类型_exists仍为true_读b异常完成() throws Exception {
         // EXISTS 不看类型：键在就按在途（咨询性读，宁可多挡）；读 b 走 HGET，类型不对以异常完成，不会被当成「没有锁」
         long player = newPlayer();
-        redis.getBucket(RedisKeys.battleLock(player), StringCodec.INSTANCE).set("not-a-hash");
+        redis.getBucket(REDIS_KEYS.battleLock(player), StringCodec.INSTANCE).set("not-a-hash");
 
         assertThat(await(reader.exists(player))).isTrue();
         assertThatThrownBy(() -> await(reader.battleId(player))).isInstanceOf(ExecutionException.class);
@@ -165,7 +168,7 @@ class BattleLockReaderIntegrationTest {
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(BattleRedisScriptsIntegrationTest.DB);
         RedissonClient closed = Redisson.create(config);
         closed.shutdown();
-        BattleLockReader dead = new BattleLockReader(closed);
+        BattleLockReader dead = new BattleLockReader(closed, REDIS_KEYS);
 
         CompletableFuture<Boolean> exists = dead.exists(PLAYER_BASE);
         CompletableFuture<Long> battleId = dead.battleId(PLAYER_BASE);

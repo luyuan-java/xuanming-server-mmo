@@ -20,16 +20,18 @@ public final class RedisTakeoverRequests implements AdminOwnership.TakeoverReque
     private static final Logger log = LoggerFactory.getLogger(RedisTakeoverRequests.class);
 
     private final Supplier<RedissonClient> redis;
+    private final String topic;
 
-    public RedisTakeoverRequests(Supplier<RedissonClient> redis) {
+    public RedisTakeoverRequests(Supplier<RedissonClient> redis, RedisKeys keys) {
         this.redis = redis;
+        this.topic = keys.ownerTakeoverTopic();
     }
 
     @Override
     public void request(long playerId, long heldEpoch) {
         byte[] message = OwnerTakeover.newBuilder().setPlayerId(playerId).setOwnerEpoch(heldEpoch).build().toByteArray();
         try {
-            redis.get().getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE).publishAsync(message)
+            redis.get().getTopic(topic, ByteArrayCodec.INSTANCE).publishAsync(message)
                     .whenComplete((receivers, error) -> {
                         if (error != null) {
                             log.warn("运维发布归属让出请求失败（等租约过期兜底） player={} epoch={}：{}",

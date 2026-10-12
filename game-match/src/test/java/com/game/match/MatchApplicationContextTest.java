@@ -4,11 +4,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.game.common.RunMode;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.activity.ActivityBattleService;
 import com.game.match.activity.ActivityConfiguration;
 import com.game.match.activity.MatchInternalServiceImpl;
@@ -102,6 +107,7 @@ import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.actuate.health.Status;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.context.event.ApplicationStartedEvent;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -168,7 +174,7 @@ class MatchApplicationContextTest {
         List<Class<?>> classes = new ArrayList<>(components);
         classes.add(Wiring.class);
         String database = "game-match-context-" + UUID.randomUUID();
-        return new ApplicationContextRunner()
+        return new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
                 .withUserConfiguration(classes.toArray(Class<?>[]::new))
                 .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
                 .withBean(RedissonClient.class, () -> client)
@@ -366,6 +372,19 @@ class MatchApplicationContextTest {
             assertThat(startMs).as("至多等 init-timeout（这里 1 s）外加客户端的建连开销，不是无限等").isLessThan(20_000);
         });
         assertThat(ingest[0].isRunning()).as("上下文关闭：MatchLifecycle 把它停了").isFalse();
+    }
+
+    // ================================================================ 部署命名空间
+
+    @Test
+    void 非缺省部署命名空间_发号租约的键与结果topic都取注入的名字() {
+        runner.withPropertyValues("game.namespace=nstest", "game.match.kafka.topic-generation=9644").run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context.getBean(RedisKeys.class).prefix()).isEqualTo("nstest:");
+            verify(redis.client).getBucket(startsWith("nstest:node-id:match:0:"), any(Codec.class));
+            verify(redis.client, never()).getBucket(startsWith("game:"), any(Codec.class));
+            assertThat(context.getBean(BattleResultIngest.class).topic()).isEqualTo("nstest-battle-result-g9644");
+        });
     }
 
     // ================================================================ 装配清单

@@ -12,6 +12,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.game.audit.AuditProperties;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.data.metrics.DataMetrics;
 import com.game.data.snapshot.SnapshotCauses;
 import com.game.data.store.PlayerSnapshotMapper;
@@ -34,6 +36,7 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 class DataNodeTest {
 
     private static final long NOW = 1_800_000_000_000L;
+    private static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("game"));
 
     private final TransactionLogMapper transactionLog = mock(TransactionLogMapper.class);
     private final PlayerSnapshotMapper playerSnapshot = mock(PlayerSnapshotMapper.class);
@@ -47,7 +50,7 @@ class DataNodeTest {
                 "game.data.retention.gm-snapshot", gmRetention,
                 "game.data.retention.batch", "2"))).bindOrCreate("game.data", DataProperties.class);
         AuditProperties audit = new AuditProperties(true, "127.0.0.1:1", 1, (short) 1, Duration.ofMillis(10));
-        node = new DataNode(audit, props, transactionLog, playerSnapshot, null, new DataMetrics(meters), () -> {
+        node = new DataNode(audit, props, KAFKA_NAMES, transactionLog, playerSnapshot, null, new DataMetrics(meters), () -> {
             throw new IllegalStateException("Kafka 不可达");
         }, Clock.fixed(Instant.ofEpochMilli(NOW), ZoneOffset.UTC));
         return node;

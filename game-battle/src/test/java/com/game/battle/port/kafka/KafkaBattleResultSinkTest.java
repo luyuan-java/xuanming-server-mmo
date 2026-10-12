@@ -8,6 +8,7 @@ import static org.awaitility.Awaitility.await;
 import ch.qos.logback.classic.Level;
 import com.game.audit.AuditBrokerUnavailableException;
 import com.game.audit.AuditTopicContractException;
+import com.game.audit.BattleResultTopics;
 import com.game.audit.TopicAdmin;
 import com.game.battle.metrics.BattleMetrics;
 import com.game.battle.port.BattleResultSink.Channel;
@@ -16,6 +17,8 @@ import com.game.battle.testing.FakeResultKafka.Created;
 import com.game.battle.testing.FakeResultKafka.Sent;
 import com.game.battle.testing.ResultFallbackCapture;
 import com.game.battle.testing.ResultFallbackCapture.Line;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.contracts.kafka.BattleResultTeam;
@@ -53,6 +56,8 @@ import org.junit.jupiter.api.Test;
  */
 class KafkaBattleResultSinkTest {
 
+    private static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("game"));
+    private static final BattleResultTopics RESULT_TOPICS = new BattleResultTopics(KAFKA_NAMES);
     private static final int GENERATION = 7;
     private static final String TOPIC = "game-battle-result-g7";
     private static final Duration WAIT = Duration.ofSeconds(5);
@@ -67,7 +72,8 @@ class KafkaBattleResultSinkTest {
     private KafkaBattleResultSink sink;
 
     private KafkaBattleResultSink sink(int queueCapacity) {
-        sink = new KafkaBattleResultSink(kafka, GENERATION, (short) 2, Duration.ofSeconds(1), metrics, queueCapacity, nanos::get);
+        sink = new KafkaBattleResultSink(kafka, RESULT_TOPICS, GENERATION, (short) 2, Duration.ofSeconds(1), metrics, queueCapacity,
+                nanos::get);
         return sink;
     }
 
@@ -148,6 +154,20 @@ class KafkaBattleResultSinkTest {
         assertThat(sink.verified()).isTrue();
         assertThat(kafka.created()).isEmpty();
         assertThat(kafka.adminCalls()).containsExactly("open", "partitions", "close");
+    }
+
+    @Test
+    void 非缺省命名空间_topic名字跟着注入的BattleResultTopics走_核对与发送都用它() {
+        BattleResultTopics nstest = new BattleResultTopics(new KafkaNames(GameNamespace.of("nstest")));
+        sink = new KafkaBattleResultSink(kafka, nstest, GENERATION, (short) 2, Duration.ofSeconds(1), metrics, 10, nanos::get);
+        sink.start();
+
+        assertThat(sink.topic()).isEqualTo("nstest-battle-result-g7");
+        assertThat(kafka.created()).extracting(Created::topic).containsExactly("nstest-battle-result-g7");
+        sink.publish(event(5));
+        await().atMost(WAIT).until(() -> events("sent") == 1);
+        assertThat(kafka.sent()).extracting(Sent::topic).containsExactly("nstest-battle-result-g7");
+        assertThat(kafka.partitionsOf(TOPIC)).as("缺省命名空间的 topic 不受影响").isNull();
     }
 
     @Test
@@ -436,7 +456,7 @@ class KafkaBattleResultSinkTest {
     @Test
     void 生产用的队列上限是规格的1024_正在发的那条不占队列_第1026条才溢出() {
         assertThat(KafkaBattleResultSink.QUEUE_CAPACITY).isEqualTo(1024);
-        sink = new KafkaBattleResultSink(kafka, GENERATION, (short) 1, Duration.ofSeconds(1), metrics);
+        sink = new KafkaBattleResultSink(kafka, RESULT_TOPICS, GENERATION, (short) 1, Duration.ofSeconds(1), metrics);
         sink.start();
         kafka.holdSends();
         sink.publish(event(1));
@@ -530,7 +550,7 @@ class KafkaBattleResultSinkTest {
             public TopicAdmin admin() {
                 return kafka.admin();
             }
-        }, GENERATION, (short) 1, Duration.ofSeconds(1), metrics, 10, nanos::get);
+        }, RESULT_TOPICS, GENERATION, (short) 1, Duration.ofSeconds(1), metrics, 10, nanos::get);
         sink.start();
 
         sink.publish(event(431));
@@ -691,7 +711,7 @@ class KafkaBattleResultSinkTest {
         assertThatThrownBy(real::admin).isInstanceOf(AuditBrokerUnavailableException.class);
         assertThatThrownBy(real::producer).isInstanceOf(KafkaException.class);
 
-        sink = new KafkaBattleResultSink(real, GENERATION, (short) 1, Duration.ofSeconds(1), metrics, 10, nanos::get);
+        sink = new KafkaBattleResultSink(real, RESULT_TOPICS, GENERATION, (short) 1, Duration.ofSeconds(1), metrics, 10, nanos::get);
         assertThatCode(sink::start).doesNotThrowAnyException();
         assertThat(sink.verified()).isFalse();
 

@@ -416,9 +416,11 @@ public final class BattleRedis {
     }
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public BattleRedis(RedissonClient redis) {
+    public BattleRedis(RedissonClient redis, RedisKeys keys) {
         this.redis = Objects.requireNonNull(redis, "redis");
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
     }
 
     // ------------------------------------------------------------------ 纯函数
@@ -449,7 +451,7 @@ public final class BattleRedis {
     public CompletableFuture<String> prepareLock(long playerId, long battleId, int battleNodeId, long deadlineMs,
                                                  long prepareDeadlineMs, long ttlSec) {
         return this.<byte[]>eval(PREPARE_LOCK, RScript.ReturnType.VALUE,
-                        List.of(RedisKeys.battleLock(playerId)), unsigned(battleId), text(Integer.toUnsignedString(battleNodeId)),
+                        List.of(redisKeys.battleLock(playerId)), unsigned(battleId), text(Integer.toUnsignedString(battleNodeId)),
                         unsigned(deadlineMs), unsigned(prepareDeadlineMs), number(ttlSec))
                 .thenApply(raw -> {
                     if (raw == null) {
@@ -465,7 +467,7 @@ public final class BattleRedis {
      */
     public CompletableFuture<Map<String, String>> confirm(long playerId, long battleId, long deadlineMs, long ttlSec) {
         return this.<List<Object>>eval(CONFIRM, RScript.ReturnType.MULTI,
-                        List.of(RedisKeys.battleLock(playerId)), unsigned(battleId), unsigned(deadlineMs), number(ttlSec))
+                        List.of(redisKeys.battleLock(playerId)), unsigned(battleId), unsigned(deadlineMs), number(ttlSec))
                 .thenApply(list -> list == null || list.isEmpty() ? null : pairs(list, 0, list.size()));
     }
 
@@ -474,7 +476,7 @@ public final class BattleRedis {
      * {@link #PREPARING_DELETE_MISS} 0 不是本局。
      */
     public CompletableFuture<Long> cancelOffline(long playerId, long battleId) {
-        return integer("CANCEL_OFFLINE", CANCEL_OFFLINE, List.of(RedisKeys.battleLock(playerId)), unsigned(battleId));
+        return integer("CANCEL_OFFLINE", CANCEL_OFFLINE, List.of(redisKeys.battleLock(playerId)), unsigned(battleId));
     }
 
     /**
@@ -485,12 +487,12 @@ public final class BattleRedis {
      * @return {@link #PREPARING_DELETE_DONE} 1 删了 / {@link #PREPARING_DELETE_FIGHTING} 2 是本局但已 F、没删 / {@link #PREPARING_DELETE_MISS} 0 不是本局或锁不在
      */
     public CompletableFuture<Long> deletePreparingIfMatch(long playerId, long battleId) {
-        return integer("DELETE_PREPARING_IF_MATCH", CANCEL_OFFLINE, List.of(RedisKeys.battleLock(playerId)), unsigned(battleId));
+        return integer("DELETE_PREPARING_IF_MATCH", CANCEL_OFFLINE, List.of(redisKeys.battleLock(playerId)), unsigned(battleId));
     }
 
     /** {@link #DELETE_IF_MATCH}：1 删了 / 0 不是本局。<b>不看 s</b>（F 也删），只给 reaper 判废用；只该删备战锁的路径用 {@link #deletePreparingIfMatch}。 */
     public CompletableFuture<Long> deleteIfMatch(long playerId, long battleId) {
-        return integer("DELETE_IF_MATCH", DELETE_IF_MATCH, List.of(RedisKeys.battleLock(playerId)), unsigned(battleId));
+        return integer("DELETE_IF_MATCH", DELETE_IF_MATCH, List.of(redisKeys.battleLock(playerId)), unsigned(battleId));
     }
 
     /**
@@ -499,13 +501,13 @@ public final class BattleRedis {
      */
     public CompletableFuture<Long> touch(long playerId, long battleId, long ttlSec, String state, long deadlineMs,
                                          long prepareDeadlineMs) {
-        return integer("TOUCH", TOUCH, List.of(RedisKeys.battleLock(playerId)), unsigned(battleId), number(ttlSec), text(state),
+        return integer("TOUCH", TOUCH, List.of(redisKeys.battleLock(playerId)), unsigned(battleId), number(ttlSec), text(state),
                 unsigned(deadlineMs), unsigned(prepareDeadlineMs));
     }
 
     /** {@link #HOLD}：1 命中（只延不缩）/ 0 不是本局。 */
     public CompletableFuture<Long> hold(long playerId, long battleId, long holdSec) {
-        return integer("HOLD", HOLD, List.of(RedisKeys.battleLock(playerId)), unsigned(battleId), number(holdSec));
+        return integer("HOLD", HOLD, List.of(redisKeys.battleLock(playerId)), unsigned(battleId), number(holdSec));
     }
 
     /**
@@ -513,27 +515,27 @@ public final class BattleRedis {
      * 此后这一局的 {@link #storeSettlement} 回 {@link #STORE_ALREADY_SETTLED}——所以只许对已经有结论（应用过 / 丢弃了）的局调用。
      */
     public CompletableFuture<Long> ack(long playerId, long battleId) {
-        return integer("ACK", ACK, List.of(RedisKeys.battleLock(playerId), RedisKeys.battleSettlements(playerId),
-                RedisKeys.battleSettled(playerId, battleId)), unsigned(battleId), number(SETTLED_TOMBSTONE_TTL_SEC));
+        return integer("ACK", ACK, List.of(redisKeys.battleLock(playerId), redisKeys.battleSettlements(playerId),
+                redisKeys.battleSettled(playerId, battleId)), unsigned(battleId), number(SETTLED_TOMBSTONE_TTL_SEC));
     }
 
     /** {@link #ENTER_READ}（读主库，见类注释）。 */
     public CompletableFuture<EnterRead> enterRead(long playerId) {
         return this.<List<Object>>eval(ENTER_READ, RScript.ReturnType.MULTI,
-                        List.of(RedisKeys.battleLock(playerId), RedisKeys.battleSettlements(playerId)))
+                        List.of(redisKeys.battleLock(playerId), redisKeys.battleSettlements(playerId)))
                 .thenApply(BattleRedis::toEnterRead);
     }
 
     /** {@link #READ_IF_OURS}（读主库，见类注释）：本局记录的字节，没有为 null。 */
     public CompletableFuture<byte[]> readSettlement(long playerId, long battleId) {
         return this.<byte[]>eval(READ_IF_OURS, RScript.ReturnType.VALUE,
-                List.of(RedisKeys.battleSettlements(playerId)), unsigned(battleId));
+                List.of(redisKeys.battleSettlements(playerId)), unsigned(battleId));
     }
 
     /** {@link #READ_LOCK_BATTLE}（读主库，见类注释）：锁的 b；没有锁（或 b 不是无符号十进制）为 0。 */
     public CompletableFuture<Long> readLockBattleId(long playerId) {
         return this.<byte[]>eval(READ_LOCK_BATTLE, RScript.ReturnType.VALUE,
-                        List.of(RedisKeys.battleLock(playerId)))
+                        List.of(redisKeys.battleLock(playerId)))
                 .thenApply(raw -> raw == null ? 0L : parseUnsigned(new String(raw, StandardCharsets.UTF_8)));
     }
 
@@ -542,7 +544,7 @@ public final class BattleRedis {
      */
     public CompletableFuture<Long> deleteSettlementField(long playerId, byte[] rawField) {
         Objects.requireNonNull(rawField, "rawField");
-        return integer("DELETE_SETTLEMENT_FIELD", DELETE_SETTLEMENT_FIELD, List.of(RedisKeys.battleSettlements(playerId)), rawField);
+        return integer("DELETE_SETTLEMENT_FIELD", DELETE_SETTLEMENT_FIELD, List.of(redisKeys.battleSettlements(playerId)), rawField);
     }
 
     // ------------------------------------------------------------------ battle 侧
@@ -552,13 +554,13 @@ public final class BattleRedis {
      */
     public CompletableFuture<Long> storeSettlement(long playerId, long battleId, byte[] payload, long ttlSec) {
         return integer("STORE_SETTLEMENT", STORE_SETTLEMENT,
-                List.of(RedisKeys.battleSettlements(playerId), RedisKeys.battleSettled(playerId, battleId)), unsigned(battleId), payload,
+                List.of(redisKeys.battleSettlements(playerId), redisKeys.battleSettled(playerId, battleId)), unsigned(battleId), payload,
                 number(ttlSec));
     }
 
     /** {@link #PROBE_SETTLEMENT}：记录还在吗。回复为空以异常完成（不映射成「不在」，D15）。 */
     public CompletableFuture<Boolean> settlementExists(long playerId, long battleId) {
-        return integer("PROBE_SETTLEMENT", PROBE_SETTLEMENT, List.of(RedisKeys.battleSettlements(playerId)), unsigned(battleId))
+        return integer("PROBE_SETTLEMENT", PROBE_SETTLEMENT, List.of(redisKeys.battleSettlements(playerId)), unsigned(battleId))
                 .thenApply(n -> n != 0);
     }
 
@@ -567,20 +569,20 @@ public final class BattleRedis {
      * {@link #STORE_ALREADY_SETTLED}）。
      */
     public CompletableFuture<Long> ackIfSuperseded(long playerId, long battleId) {
-        return integer("ACK_IF_SUPERSEDED", ACK_IF_SUPERSEDED, List.of(RedisKeys.battleLock(playerId),
-                RedisKeys.battleSettlements(playerId), RedisKeys.battleSettled(playerId, battleId)), unsigned(battleId),
+        return integer("ACK_IF_SUPERSEDED", ACK_IF_SUPERSEDED, List.of(redisKeys.battleLock(playerId),
+                redisKeys.battleSettlements(playerId), redisKeys.battleSettled(playerId, battleId)), unsigned(battleId),
                 number(SETTLED_TOMBSTONE_TTL_SEC));
     }
 
     /** 活动结果落库（{@code SET EX}）：回 1。 */
     public CompletableFuture<Long> storeActivityResult(long battleId, byte[] payload, long ttlSec) {
-        return integer("STORE_ACTIVITY_RESULT", STORE_ACTIVITY_RESULT, List.of(RedisKeys.battleActivityResult(battleId)), payload,
+        return integer("STORE_ACTIVITY_RESULT", STORE_ACTIVITY_RESULT, List.of(redisKeys.battleActivityResult(battleId)), payload,
                 number(ttlSec));
     }
 
     /** 活动结果还在吗（EXISTS）。回复为空以异常完成（不映射成「不在」）。 */
     public CompletableFuture<Boolean> activityResultExists(long battleId) {
-        return integer("PROBE_ACTIVITY_RESULT", PROBE_ACTIVITY_RESULT, List.of(RedisKeys.battleActivityResult(battleId)))
+        return integer("PROBE_ACTIVITY_RESULT", PROBE_ACTIVITY_RESULT, List.of(redisKeys.battleActivityResult(battleId)))
                 .thenApply(n -> n != 0);
     }
 

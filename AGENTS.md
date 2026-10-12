@@ -32,13 +32,19 @@
 ## 3. 编码约定
 
 - 中文注释、中文 commit message、中文文档；Java 21；包名 `com.game.<模块>`。
-- **部署命名空间** `<ns>` = `game.namespace`（环境变量 `GAME_NAMESPACE`，缺省 `game`；`com.game.common.GameNamespace`，architecture.md §6.2）：
-  共享中间件里的名字都带它，缺省时与以前逐字节相同。
-  - 所有 Redis 键与频道经 `com.game.discovery.RedisKeys` 生成（前缀 `<ns>:`，缺省 `game:`）；Kafka 的 topic / 消费组 / client.id / transactional.id
-    一律经 `com.game.audit.KafkaNames` 生成（前缀 `<ns>-`）；MySQL 缺省库名 = `<ns>`（yaml 的 JDBC URL 写 `${game.namespace:game}`）。
-    新增共享中间件里的名字必须经这三个出处（game-robot 的 `NamespaceLiteralGuardTest` 守着）；配置键 `game.`、环境变量 `GAME_`、包名、指标名不跟命名空间走。
-  - 命名空间进程内定格、不可再改：`main()` 在 `SpringApplication.run` 之前、EnvironmentPostProcessor 在定格之前，都不得触碰名字类（RedisKeys、KafkaNames、
-    AuditTopics……）；不起 Spring 的入口在生成第一个名字之前显式 `GameNamespace.set`。命名空间只经环境变量注入，不写进 yaml。
+- **部署命名空间** `<ns>` = `game.namespace`（环境变量 `GAME_NAMESPACE`，缺省 `game`；architecture.md §6.2）：共享中间件里的名字都带它，缺省时与以前逐字节相同。
+  它是**注入的**，没有进程级全局值（同 Spring Session 的 `spring.session.redis.namespace`）：
+  - `<ns>` 由不可变值类型 `com.game.common.GameNamespace` 表示（`[a-z][a-z0-9]{0,27}`、不是 mysql / sys / public，构造即校验）；Spring 进程里由 game-discovery 的
+    `GameNamespaceProperties`（`@ConfigurationProperties` + `@Validated`）绑定，非法值由 Spring Boot 自带的绑定校验报告拒启。不写自定义 EnvironmentPostProcessor / FailureAnalyzer。
+  - Redis 键与频道一律经注入的 `com.game.discovery.RedisKeys` 实例生成（前缀 `<ns>:`）；Kafka 的 topic / 消费组 / client.id（将来的 transactional.id）一律经注入的
+    `com.game.common.KafkaNames` 实例生成（前缀 `<ns>-`；`AuditTopics` / `BattleResultTopics` 由它构造）。`GameNamespace`、`RedisKeys`、`KafkaNames` 三者都是
+    game-discovery 的 `GameNamespaceAutoConfiguration` 注册的 bean，使用方经构造器 / bean 方法参数拿到。
+  - MySQL 库名 = `<ns>`（yaml 的 JDBC URL 写 `${game.namespace:game}`，部署只覆盖 host / port）；连库的服务进程（`NamespaceDatabaseVerifier`）与命令行工具都核对 `DATABASE()`。
+  - 不起 Spring 的命令行工具（AuditFallbackReplay、PasswordAdmin）用 `GameNamespace.fromEnv(System.getenv())` 取值后自己 `new`（assetopfix 用同一个
+    `GameNamespaceProperties` 从它的 `-f` yaml 与环境变量绑定）。部署一律经环境变量 `GAME_NAMESPACE` 给值，不写进 yaml。
+  - main 代码里不得静态持有命名空间或名字类实例，也不得在装配类（`GameNamespaceAutoConfiguration`）与上述三个命令行工具之外 `new RedisKeys` / `new KafkaNames` /
+    `GameNamespace.of`；不得写死 `game:` 键或未登记的 `"game-…"` 名字（game-robot 的 `NamespaceLiteralGuardTest` 守着）。配置键 `game.`、环境变量 `GAME_`、包名、
+    指标名不跟命名空间走。
 - **线程所有权**：scene 的场景状态只在场景逻辑线程读写；gate 的会话状态只在该连接的 EventLoop 上读写；
   阻塞 I/O（MySQL / Redis）不得在 Netty I/O 线程或场景逻辑线程上执行，结果投递回所属线程。
 - 连接与回调生命周期（同 mmorpg §11.7 的精神）：长期持有的 Netty `Channel` 引用在关闭后必须清掉；
@@ -60,10 +66,8 @@ Claude 在本仓库**可以自行编译和跑测试**（用户 2026-09-29 授权
 
 网络受限的机器用进程级镜像配置：`./mvnw -s <本机 settings.xml> ...`（settings 不进仓库）。
 
-**部署命名空间与测试**：测试 JVM 的 `game.namespace` 由根 pom 的 surefire 钉成 `game`；非缺省命名空间的用例打 `@Tag("namespace")`，只在六个模块各自的
-`namespace` 执行（另一个 fork，钉成 `nstest`）里跑，IDE 里单跑要加 `-Dgame.namespace=nstest`。**跑测试不要给 mvn 传 `-Dgame.namespace`**
-（surefire 3.2.5 让命令行的 -D 覆盖 POM 钉的值，两类用例都会在 `@BeforeAll` 失败并说明原因）。surefire 必须 fork，不得配 `forkCount=0`（定格的全局状态会在
-Maven JVM 里跨模块共享）。
+**部署命名空间与测试**：测试直接构造实例（每个测试类一行 `new RedisKeys(GameNamespace.of("game"))` / `new KafkaNames(...)`，非缺省命名空间就另构造一个，
+同一个 JVM 里可以并存），Spring 上下文测试用属性 `game.namespace=…`（`ApplicationContextRunner` 加 `GameNamespaceAutoConfiguration`）；不用系统属性钉值，也不分 surefire 执行。
 
 **同步契约之后必须 `clean install`**：protoc 插件是增量生成，删掉或改名的 proto 类型留下的旧生成类不会被清理，
 会让本应失败的引用继续编译通过（2026-09-29 实例：旧包名下残留的生成类掩盖了一处未迁移的 import）。

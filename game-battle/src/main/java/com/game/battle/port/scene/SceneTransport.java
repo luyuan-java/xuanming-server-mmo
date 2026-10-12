@@ -16,6 +16,7 @@ import com.game.battle.port.BattleResultSink;
 import com.game.battle.room.EventLoopBattleScheduler;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleRedis;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.location.SceneAssetLocator;
@@ -58,17 +59,17 @@ public final class SceneTransport implements AutoCloseable {
     private final Duration timeout;
     private final BattleMetrics metrics;
 
-    public SceneTransport(RedissonClient redis, BattleMetrics metrics, OutboxMetrics outboxMetrics, SceneTransportProperties props,
-                          BattleResultSink results) {
+    public SceneTransport(RedissonClient redis, RedisKeys redisKeys, BattleMetrics metrics, OutboxMetrics outboxMetrics,
+                          SceneTransportProperties props, BattleResultSink results) {
         this.drainTimeout = props.outboxDrainTimeout();
         this.metrics = metrics;
         this.timeout = props.sceneRpcTimeout();
         this.clients = new NodeRpcClients<>(APPLICATION, SceneBattleService.class, DubboGroups.SCENE_BATTLE, timeout,
                 "battle-scene-connect");
-        NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
         this.sweeper = new SceneClientSweeper(scenes::list, endpoint -> clients.evict(target(endpoint)));
-        SceneAssetLocator locator = new SceneAssetLocator(new PlayerLocationDirectory(redis), scenes, null);
-        BattleRedis scripts = new BattleRedis(redis);
+        SceneAssetLocator locator = new SceneAssetLocator(new PlayerLocationDirectory(redis, redisKeys), scenes, null);
+        BattleRedis scripts = new BattleRedis(redis, redisKeys);
         this.outboxLoop = new DefaultEventLoop(new DefaultThreadFactory("battle-outbox", true));
         EventLoopBattleScheduler outbox = new EventLoopBattleScheduler(outboxLoop);
         this.settlements = new SettlementOutbox(outbox, SettlementOutbox.Store.redis(scripts), locator::resolveAsync,

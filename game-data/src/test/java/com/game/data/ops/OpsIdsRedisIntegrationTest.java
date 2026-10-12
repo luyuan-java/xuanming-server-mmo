@@ -3,6 +3,7 @@ package com.game.data.ops;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import com.game.common.GameNamespace;
 import com.game.common.id.Snowflake;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
@@ -27,6 +28,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class OpsIdsRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private RedissonClient redis;
     private ScheduledExecutorService scheduler;
 
@@ -47,10 +50,10 @@ class OpsIdsRedisIntegrationTest {
     @Test
     void 与scene共池占SCENE_GUID_worker不重叠_停机交还() {
         String sceneInstance = "scene-it-" + UUID.randomUUID();
-        NodeIdLease scene = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE_GUID, OpsIds.SCOPE, 1, Snowflake.MAX_WORKER,
-                sceneInstance, OpsIds.LEASE_TTL, () -> { });
+        NodeIdLease scene = NodeIdLease.acquire(redis, REDIS_KEYS, scheduler, NodeTypes.SCENE_GUID, OpsIds.SCOPE, 1,
+                Snowflake.MAX_WORKER, sceneInstance, OpsIds.LEASE_TTL, () -> { });
         String dataInstance = "game-data-it-" + UUID.randomUUID();
-        OpsIds ids = new OpsIds(OpsIds.sceneGuidPool(() -> redis, scheduler, dataInstance), scheduler,
+        OpsIds ids = new OpsIds(OpsIds.sceneGuidPool(() -> redis, REDIS_KEYS, scheduler, dataInstance), scheduler,
                 System::currentTimeMillis, Duration.ofMillis(200));
         try {
             ids.start();
@@ -58,13 +61,13 @@ class OpsIdsRedisIntegrationTest {
             int worker = ids.workerId().getAsInt();
 
             assertThat(worker).as("与 scene 的 worker 不重叠").isNotEqualTo(scene.nodeId());
-            assertThat(redis.<String>getBucket(RedisKeys.nodeId(NodeTypes.SCENE_GUID, OpsIds.SCOPE, worker),
+            assertThat(redis.<String>getBucket(REDIS_KEYS.nodeId(NodeTypes.SCENE_GUID, OpsIds.SCOPE, worker),
                     StringCodec.INSTANCE).get()).as("占的就是 scene-guid 全服池里的号").isEqualTo(dataInstance);
             long id = ids.tryNext().orElseThrow();
             assertThat((id >>> Snowflake.SEQUENCE_BITS) & Snowflake.MAX_WORKER).isEqualTo(worker);
 
             ids.stop();
-            assertThat(redis.getBucket(RedisKeys.nodeId(NodeTypes.SCENE_GUID, OpsIds.SCOPE, worker), StringCodec.INSTANCE)
+            assertThat(redis.getBucket(REDIS_KEYS.nodeId(NodeTypes.SCENE_GUID, OpsIds.SCOPE, worker), StringCodec.INSTANCE)
                     .isExists()).as("停机交还").isFalse();
         } finally {
             ids.close();

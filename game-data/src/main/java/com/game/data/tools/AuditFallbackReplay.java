@@ -9,6 +9,7 @@ import com.game.data.ops.OpsTables;
 import com.game.data.ops.pb.AuditReplayLineRow;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.pbmysql.PbMysql;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -36,14 +37,16 @@ import org.redisson.config.Config;
  * <p>用法（在仓库根目录，game-data 已打包；只回灌<b>已轮转、不再写入</b>的日志文件）：
  * <pre>
  * export GAME_NAMESPACE=game        # 部署命名空间，必须与服务进程同值（缺省 game）
- * export GAME_AUDIT_REPLAY_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名&gt;?user=...&amp;password=...'
+ * export GAME_AUDIT_REPLAY_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名 = 部署命名空间&gt;?user=...&amp;password=...'
  * java -cp game-data/target/game-data-0.1.0-SNAPSHOT.jar -Dloader.main=com.game.data.tools.AuditFallbackReplay \
  *      org.springframework.boot.loader.launch.PropertiesLauncher --file &lt;兜底日志文件&gt; [--dry-run] \
  *      [--redis redis://127.0.0.1:6379] [--redis-database 12] [--expect-database &lt;库名&gt;]
  * </pre>
  * JDBC URL（含库名与账号口令）只从环境变量读（{@code --jdbc-url-env} 可换变量名）；Redis 口令取环境变量 {@code GAME_AUDIT_REPLAY_REDIS_PASSWORD}（可不设）。
- * 部署命名空间（Redis 键前缀，见 {@code GameNamespace}）按「系统属性 {@code game.namespace} → 环境变量 {@code GAME_NAMESPACE} → game」解析后显式定格并打印；
- * 连上库后、建运维表之前核对 {@code SELECT DATABASE()} 等于期望库名（缺省 = 命名空间；库名另取的部署用 {@code --expect-database} 给出），不一致退出 2。
+ * 部署命名空间（Redis 键前缀，见 {@link GameNamespace}）只认环境变量 {@code GAME_NAMESPACE}（{@link GameNamespace#fromEnv}；没设取 game，设了空串照样拒绝），
+ * 不读系统属性、yaml 或命令行参数——部署一律经环境变量给命名空间，工具与服务进程才保证同值；取到后打印，再自己构造 {@link RedisKeys}。
+ * 连上库后、建运维表之前核对 {@code SELECT DATABASE()} 等于期望库名（规格：库名 = 命名空间；{@code --expect-database} 只是给库名偏离规格的存量部署的
+ * 应急开关），不一致退出 2。
  * 文件里有 {@code tx_id=0} 的行时才连 Redis：在 {@code NodeTypes.SCENE_GUID} 全服池占一个 worker 发新号（与 scene / game-data 同池，不撞号），
  * 结束时交还。{@code --dry-run} 只解析、报告计数，不连库（也不做库名核对）。
  * 退出码 0 成功、1 失败（含有解析不了的行、发号中止、库错误）、2 参数错误 / 命名空间非法 / 库名核对不过。
@@ -52,6 +55,8 @@ public final class AuditFallbackReplay {
 
     static final String DEFAULT_URL_ENV = "GAME_AUDIT_REPLAY_JDBC_URL";
     static final String REDIS_PASSWORD_ENV = "GAME_AUDIT_REPLAY_REDIS_PASSWORD";
+    /** 库名核对失败时报错里给出的应急开关写法。 */
+    static final String EXPECT_DATABASE_HINT = "--expect-database <库名>";
     private static final int TIMEOUT_SECONDS = 10;
 
     /**
@@ -78,13 +83,15 @@ public final class AuditFallbackReplay {
             err.println(e.getMessage());
             err.println("用法：--file <兜底日志文件> [--dry-run] [--jdbc-url-env <变量名>] [--redis <地址>] [--redis-database <库号>]"
                     + " [--expect-database <库名>]");
+            err.println("部署命名空间只取环境变量 " + GameNamespace.ENV + "（缺省 " + GameNamespace.DEFAULT_VALUE + "）；库名必须等于命名空间，"
+                    + "--expect-database 只是库名偏离规格的存量部署的应急开关");
             return 2;
         }
-        // 部署命名空间：在生成第一个名字（节点号租约的 Redis 键）之前显式定格；用 run() 注入的 env 映射，不靠 System.getenv，可测
-        String namespace;
+        // 部署命名空间：只认 run() 注入的 env 映射里的 GAME_NAMESPACE（不靠 System.getenv，可测）；非法值在连任何外部系统之前退出 2
+        GameNamespace namespace;
         try {
-            namespace = defineNamespace(env, err);
-        } catch (IllegalArgumentException | IllegalStateException e) {
+            namespace = resolveNamespace(env, err);
+        } catch (IllegalArgumentException e) {
             err.println(e.getMessage());
             return 2;
         }
@@ -105,10 +112,12 @@ public final class AuditFallbackReplay {
             err.println("环境变量 " + args.urlEnv() + " 未设置或不是 jdbc: 开头的 URL");
             return 1;
         }
+        // 不起 Spring 的入口：按取到的命名空间自己构造键的出处（只用于节点号租约）
+        RedisKeys keys = new RedisKeys(namespace);
         try (Connection conn = DriverManager.getConnection(url);
-             LazyIds ids = new LazyIds(args.redis(), args.redisDatabase(), env.get(REDIS_PASSWORD_ENV), err)) {
+             LazyIds ids = new LazyIds(keys, args.redis(), args.redisDatabase(), env.get(REDIS_PASSWORD_ENV), err)) {
             // 建运维表（OpsTables.sync）之前核对库名：命名空间与库必须属于同一个部署
-            String mismatch = NamespaceDatabaseCheck.verify(conn, args.expectDatabase(), namespace);
+            String mismatch = NamespaceDatabaseCheck.verify(conn, args.expectDatabase(), namespace, EXPECT_DATABASE_HINT);
             if (mismatch != null) {
                 err.println(mismatch);
                 return 2;
@@ -131,26 +140,14 @@ public final class AuditFallbackReplay {
     }
 
     /**
-     * 解析部署命名空间（系统属性 {@code game.namespace} → env 映射里的 {@code GAME_NAMESPACE} → game）、显式定格并打印到 err。
+     * 取部署命名空间（{@link GameNamespace#fromEnv}：env 映射里的 {@code GAME_NAMESPACE}，没设取 game）并打印到 err。
      *
-     * @return 命名空间
-     * @throws IllegalArgumentException 取值非法
-     * @throws IllegalStateException    进程里已定格为别的值
+     * @throws IllegalArgumentException 取值非法（含空串）
      */
-    static String defineNamespace(Map<String, String> env, PrintStream err) {
-        String value = System.getProperty(GameNamespace.PROPERTY);
-        String source = "系统属性 " + GameNamespace.PROPERTY;
-        if (value == null) {
-            value = env.get(GameNamespace.ENV);
-            source = "环境变量 " + GameNamespace.ENV;
-        }
-        if (value == null) {
-            value = GameNamespace.DEFAULT;
-            source = "缺省";
-        }
-        GameNamespace.set(value, "AuditFallbackReplay（" + source + "）");
-        err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + value + "（来源 " + source + "）");
-        return value;
+    static GameNamespace resolveNamespace(Map<String, String> env, PrintStream err) {
+        GameNamespace.Sourced sourced = GameNamespace.fromEnv(env);
+        err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + sourced.namespace() + "（来源 " + sourced.source() + "）");
+        return sourced.namespace();
     }
 
     static Args parse(List<String> argv) {
@@ -207,6 +204,7 @@ public final class AuditFallbackReplay {
 
     /** 第一次需要新号时才连 Redis、占 SCENE_GUID worker；关闭时交还。 */
     private static final class LazyIds implements AutoCloseable {
+        private final RedisKeys keys;
         private final String address;
         private final int database;
         private final String password;
@@ -217,7 +215,9 @@ public final class AuditFallbackReplay {
         private LeaseGatedSnowflake snowflake;
         private boolean failed;
 
-        LazyIds(String address, int database, String password, PrintStream err) {
+        /** @param keys 节点号租约键的出处（按本工具取到的部署命名空间构造） */
+        LazyIds(RedisKeys keys, String address, int database, String password, PrintStream err) {
+            this.keys = keys;
             this.address = address;
             this.database = database;
             this.password = password;
@@ -233,7 +233,7 @@ public final class AuditFallbackReplay {
                     redis = Redisson.create(config);
                     scheduler = Executors.newSingleThreadScheduledExecutor(
                             Thread.ofPlatform().name("audit-replay-lease").daemon(true).factory());
-                    lease = NodeIdLease.acquire(redis, scheduler, NodeTypes.SCENE_GUID, OpsIds.SCOPE, 1, Snowflake.MAX_WORKER,
+                    lease = NodeIdLease.acquire(redis, keys, scheduler, NodeTypes.SCENE_GUID, OpsIds.SCOPE, 1, Snowflake.MAX_WORKER,
                             "game-audit-replay-" + UUID.randomUUID(), OpsIds.LEASE_TTL,
                             () -> err.println("全服发号租约丢失：停止发号"));
                     snowflake = new LeaseGatedSnowflake(new Snowflake(lease.nodeId()), lease::isValid);

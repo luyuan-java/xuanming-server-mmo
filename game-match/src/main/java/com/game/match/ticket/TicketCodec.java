@@ -7,7 +7,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 
 /**
- * 票据 HASH（{@code RedisKeys.matchTicket(pid)}）与队列成员在 Redis 里的文本形状（match-spec §9.4），票据存储的 Lua 与 Java 两侧共用这一处定义。
+ * 票据 HASH（{@code RedisKeys#matchTicket(pid)}）与队列成员在 Redis 里的文本形状（match-spec §9.4），票据存储的 Lua 与 Java 两侧共用这一处定义。
  *
  * <p><b>字段</b>（值全部是 ASCII 文本；数字是十进制）：
  * <table>

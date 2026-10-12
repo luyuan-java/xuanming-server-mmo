@@ -9,6 +9,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.game.common.GameNamespace;
 import com.game.common.token.GateTokenIssuer;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.PlayerLocation;
@@ -29,6 +30,8 @@ import org.redisson.misc.CompletableFutureWrapper;
  * Redis 客户端是替身，只记下脚本调用的参数。真 Redis 上的读写（乱序收敛、各读者看到什么）见位置记录的集成测试。
  */
 class PlayerLocationDirectoryTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long PLAYER = 9_000_000_123L;
     private static final long EPOCH = 7;
@@ -59,7 +62,7 @@ class PlayerLocationDirectoryTest {
                     evals.add(new Eval(call.getArgument(3), args));
                     return new CompletableFutureWrapper<Object>((Object) Long.valueOf(scriptReply));
                 });
-        return new PlayerLocationDirectory(redis);
+        return new PlayerLocationDirectory(redis, REDIS_KEYS);
     }
 
     /** 待落点：目标 zone 2、节点号 0、场景号 0、要落的地图 3、源节点交出前的 epoch。 */
@@ -83,7 +86,7 @@ class PlayerLocationDirectoryTest {
         assertThat(applied).isTrue();
         assertThat(evals).hasSize(1);
         Eval eval = evals.get(0);
-        assertThat(eval.keys()).containsExactly(RedisKeys.playerLocation(PLAYER));
+        assertThat(eval.keys()).containsExactly(REDIS_KEYS.playerLocation(PLAYER));
         assertThat(eval.args()).hasSize(5);
         assertThat(eval.arg(0)).as("e = 源节点交出前持有的 epoch").isEqualTo("7");
         assertThat(eval.arg(1)).as("q = 续接的写序号").isEqualTo("5");
@@ -131,7 +134,7 @@ class PlayerLocationDirectoryTest {
 
     @Test
     void 存活时长不为正或超过上限即拒_不发任何Redis命令() {
-        PlayerLocationDirectory directory = new PlayerLocationDirectory(redis);
+        PlayerLocationDirectory directory = new PlayerLocationDirectory(redis, REDIS_KEYS);
 
         for (Duration bad : new Duration[] {null, Duration.ZERO, Duration.ofSeconds(-1), Duration.ofNanos(999_999),
                 PlayerLocationDirectory.AWAIT_PLACEMENT_MAX_TTL.plusMillis(1), Duration.ofHours(1)}) {
@@ -143,7 +146,7 @@ class PlayerLocationDirectoryTest {
 
     @Test
     void 带着节点号或场景号的记录不是待落点_拒写() {
-        PlayerLocationDirectory directory = new PlayerLocationDirectory(redis);
+        PlayerLocationDirectory directory = new PlayerLocationDirectory(redis, REDIS_KEYS);
 
         // 写进去会是一条能活 5 分钟、指着某个实例的「重连租约」：login 会按它回原实例
         assertThatThrownBy(() -> directory.awaitPlacementAsync(pending().toBuilder().setSceneNodeId(4).build(), 5,
@@ -155,7 +158,7 @@ class PlayerLocationDirectoryTest {
 
     @Test
     void 缺玩家号或目标zone的待落点_拒写() {
-        PlayerLocationDirectory directory = new PlayerLocationDirectory(redis);
+        PlayerLocationDirectory directory = new PlayerLocationDirectory(redis, REDIS_KEYS);
 
         assertThatThrownBy(() -> directory.awaitPlacementAsync(pending().toBuilder().clearPlayerId().build(), 5,
                 Duration.ofSeconds(60))).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("player=0");

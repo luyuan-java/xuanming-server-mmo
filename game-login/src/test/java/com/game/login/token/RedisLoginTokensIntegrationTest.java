@@ -2,6 +2,7 @@ package com.game.login.token;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.security.SecureRandom;
 import java.time.Clock;
@@ -30,6 +31,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisLoginTokensIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final Instant NOW = Instant.parse("2026-10-04T00:00:00Z");
     private static final Duration ACCESS = Duration.ofHours(2);
     private static final Duration REFRESH = Duration.ofHours(720);
@@ -44,24 +47,24 @@ class RedisLoginTokensIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        tokens = new RedisLoginTokens(redis, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, new SecureRandom());
+        tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, new SecureRandom());
     }
 
     @AfterEach
     void tearDown() {
-        RScoredSortedSet<String> set = redis.getScoredSortedSet(RedisKeys.loginAccountRefresh(account), StringCodec.INSTANCE);
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
         for (String token : set.readAll()) {
-            touched.add(RedisKeys.loginRefreshToken(token));
+            touched.add(REDIS_KEYS.loginRefreshToken(token));
         }
-        touched.add(RedisKeys.loginAccountRefresh(account));
+        touched.add(REDIS_KEYS.loginAccountRefresh(account));
         redis.getKeys().delete(touched.toArray(String[]::new));
         redis.shutdown();
     }
 
     private TokenPair issue() {
         TokenPair pair = tokens.issue(account, "password", "");
-        touched.add(RedisKeys.loginAccessToken(pair.accessToken()));
-        touched.add(RedisKeys.loginRefreshToken(pair.refreshToken()));
+        touched.add(REDIS_KEYS.loginAccessToken(pair.accessToken()));
+        touched.add(REDIS_KEYS.loginRefreshToken(pair.refreshToken()));
         return pair;
     }
 
@@ -73,13 +76,13 @@ class RedisLoginTokensIntegrationTest {
         assertThat(pair.refreshToken()).hasSize(43).matches("[A-Za-z0-9_-]{43}");
         assertThat(pair.accessExpireSeconds()).isEqualTo(NOW.getEpochSecond() + 7200);
         assertThat(pair.refreshExpireSeconds()).isEqualTo(NOW.getEpochSecond() + 720 * 3600);
-        var access = redis.<String>getBucket(RedisKeys.loginAccessToken(pair.accessToken()), StringCodec.INSTANCE);
+        var access = redis.<String>getBucket(REDIS_KEYS.loginAccessToken(pair.accessToken()), StringCodec.INSTANCE);
         assertThat(access.remainTimeToLive()).isBetween(ACCESS.toMillis() - 60_000, ACCESS.toMillis());
         assertThat(access.get()).contains("\"account\":\"" + account + "\"").contains("\"auth_type\":\"password\"")
                 .contains("\"created_at\":" + NOW.getEpochSecond());
-        assertThat(redis.getBucket(RedisKeys.loginRefreshToken(pair.refreshToken())).remainTimeToLive())
+        assertThat(redis.getBucket(REDIS_KEYS.loginRefreshToken(pair.refreshToken())).remainTimeToLive())
                 .isBetween(REFRESH.toMillis() - 60_000, REFRESH.toMillis());
-        RScoredSortedSet<String> set = redis.getScoredSortedSet(RedisKeys.loginAccountRefresh(account), StringCodec.INSTANCE);
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
         assertThat(set.getScore(pair.refreshToken())).isEqualTo((double) pair.refreshExpireSeconds());
         assertThat(set.remainTimeToLive()).isPositive();
     }
@@ -98,13 +101,13 @@ class RedisLoginTokensIntegrationTest {
     void 轮换_旧refresh一次性作废_新的一对可用_access不随之作废() {
         TokenPair first = issue();
         TokenPair second = tokens.refresh(first.refreshToken()).orElseThrow();
-        touched.add(RedisKeys.loginAccessToken(second.accessToken()));
+        touched.add(REDIS_KEYS.loginAccessToken(second.accessToken()));
 
         assertThat(second.refreshToken()).isNotEqualTo(first.refreshToken());
         assertThat(tokens.refresh(first.refreshToken())).as("用过的 refresh").isEmpty();
         assertThat(tokens.validateAccess(first.accessToken())).isPresent();
         assertThat(tokens.validateAccess(second.accessToken()).orElseThrow().authType()).isEqualTo("password");
-        RScoredSortedSet<String> set = redis.getScoredSortedSet(RedisKeys.loginAccountRefresh(account), StringCodec.INSTANCE);
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
         assertThat(set.readAll()).containsExactly(second.refreshToken());
         assertThat(tokens.refresh("")).isEmpty();
     }
@@ -130,7 +133,7 @@ class RedisLoginTokensIntegrationTest {
             Optional<TokenPair> won = racer.get();
             if (won.isPresent()) {
                 winners++;
-                touched.add(RedisKeys.loginAccessToken(won.get().accessToken()));
+                touched.add(REDIS_KEYS.loginAccessToken(won.get().accessToken()));
             }
         }
         assertThat(winners).isEqualTo(1);
@@ -156,8 +159,8 @@ class RedisLoginTokensIntegrationTest {
                 return now.get();
             }
         };
-        tokens = new RedisLoginTokens(redis, moving, ACCESS, REFRESH, new SecureRandom());
-        RScoredSortedSet<String> set = redis.getScoredSortedSet(RedisKeys.loginAccountRefresh(account), StringCodec.INSTANCE);
+        tokens = new RedisLoginTokens(redis, REDIS_KEYS, moving, ACCESS, REFRESH, new SecureRandom());
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
         set.add(NOW.getEpochSecond() - 1, "dead-member");
         List<TokenPair> pairs = new ArrayList<>();
         pairs.add(issue());
@@ -168,7 +171,7 @@ class RedisLoginTokensIntegrationTest {
         }
         assertThat(set.size()).isEqualTo(RedisLoginTokens.MAX_REFRESH_PER_ACCOUNT);
         for (int i = 0; i < pairs.size(); i++) {
-            boolean exists = redis.getBucket(RedisKeys.loginRefreshToken(pairs.get(i).refreshToken())).isExists();
+            boolean exists = redis.getBucket(REDIS_KEYS.loginRefreshToken(pairs.get(i).refreshToken())).isExists();
             assertThat(exists).as("第 %d 个 refresh", i).isEqualTo(i >= 2);
             assertThat(set.contains(pairs.get(i).refreshToken())).isEqualTo(i >= 2);
         }
@@ -178,11 +181,11 @@ class RedisLoginTokensIntegrationTest {
     void 值解不开或没有账号按无效处理() {
         String badJson = "b".repeat(43);
         String noAccount = "n".repeat(43);
-        redis.getBucket(RedisKeys.loginAccessToken(badJson), StringCodec.INSTANCE).set("{not json");
-        redis.getBucket(RedisKeys.loginAccessToken(noAccount), StringCodec.INSTANCE)
+        redis.getBucket(REDIS_KEYS.loginAccessToken(badJson), StringCodec.INSTANCE).set("{not json");
+        redis.getBucket(REDIS_KEYS.loginAccessToken(noAccount), StringCodec.INSTANCE)
                 .set("{\"auth_type\":\"password\"}");
-        touched.add(RedisKeys.loginAccessToken(badJson));
-        touched.add(RedisKeys.loginAccessToken(noAccount));
+        touched.add(REDIS_KEYS.loginAccessToken(badJson));
+        touched.add(REDIS_KEYS.loginAccessToken(noAccount));
         assertThat(tokens.validateAccess(badJson)).isEmpty();
         assertThat(tokens.validateAccess(noAccount)).isEmpty();
     }

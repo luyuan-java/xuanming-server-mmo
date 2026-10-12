@@ -2,6 +2,7 @@ package com.game.scene.gainblock;
 
 import com.game.discovery.RedisKeys;
 import java.util.HashSet;
+import java.util.Objects;
 import java.util.Set;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
@@ -20,9 +21,11 @@ public final class RedisGainBlockSource implements GainBlockSync.Source {
     private static final Logger log = LoggerFactory.getLogger(RedisGainBlockSource.class);
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public RedisGainBlockSource(RedissonClient redis) {
+    public RedisGainBlockSource(RedissonClient redis, RedisKeys redisKeys) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
     }
 
     @Override
@@ -31,7 +34,7 @@ public final class RedisGainBlockSource implements GainBlockSync.Source {
     }
 
     private Set<Integer> read(String category) {
-        return parse(redis.<String, String>getMap(RedisKeys.gainBlocks(category), StringCodec.INSTANCE).readAllKeySet());
+        return parse(redis.<String, String>getMap(redisKeys.gainBlocks(category), StringCodec.INSTANCE).readAllKeySet());
     }
 
     static Set<Integer> parse(Set<String> fields) {

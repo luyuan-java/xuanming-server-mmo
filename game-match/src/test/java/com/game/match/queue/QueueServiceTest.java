@@ -5,8 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.match.MatchBudgets;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.match.MatchProperties;
@@ -57,6 +59,8 @@ import org.junit.jupiter.api.Test;
  */
 class QueueServiceTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long A = 1001;
     private static final long B = 1002;
     private static final int MODE_5V5 = 1;
@@ -88,7 +92,7 @@ class QueueServiceTest {
     }
 
     private QueueService serviceOn(TicketStore tickets, GatherLauncher launcher) {
-        return new QueueService(props, players, tickets, new DefaultTicketHealing(tickets), ratings, launcher, ids, metrics,
+        return new QueueService(props, players, tickets, new DefaultTicketHealing(tickets), ratings, launcher, ids, metrics, REDIS_KEYS,
                 () -> "ticket-" + ticketSeq.incrementAndGet());
     }
 
@@ -344,7 +348,7 @@ class QueueServiceTest {
     void 受理_票号是UUIDv4小写带连字符_每次不同() {
         inScene(A);
         inScene(B);
-        QueueService real = new QueueService(props, players, store, new DefaultTicketHealing(store), ratings, gather, ids, metrics);
+        QueueService real = new QueueService(props, players, store, new DefaultTicketHealing(store), ratings, gather, ids, metrics, REDIS_KEYS);
 
         String first = real.join(A, request(MODE_1V1, 0), d()).getQueueTicket();
         String second = real.join(B, request(MODE_1V1, 0), d()).getQueueTicket();
@@ -431,7 +435,7 @@ class QueueServiceTest {
     @Test
     void 孤儿queued票被清掉_按本次请求入队_不是把旧票补回旧队列() {
         inScene(A);
-        store.putTicket(A, new Ticket("orphan", MODE_1V1, 0, TicketState.QUEUED, clock.peekMs() - 60_000, 1, Q_1V1.queueKey(), 150_000, 0, 0, 0),
+        store.putTicket(A, new Ticket("orphan", MODE_1V1, 0, TicketState.QUEUED, clock.peekMs() - 60_000, 1, Q_1V1.queueKey(REDIS_KEYS), 150_000, 0, 0, 0),
                 SIX_HOURS);
 
         JoinQueueResponse response = join(A, MODE_5V5, 7);
@@ -800,7 +804,7 @@ class QueueServiceTest {
     @Test
     void 取消_按票里记下的队列键出队_不按模式与副本号重算() {
         QueueRef recorded = new QueueRef(MODE_1V1, 777);
-        store.putTicket(A, new Ticket("tk", MODE_1V1, 0, TicketState.QUEUED, clock.peekMs(), 1, recorded.queueKey(), 150_000, 0, 0, 0), SIX_HOURS);
+        store.putTicket(A, new Ticket("tk", MODE_1V1, 0, TicketState.QUEUED, clock.peekMs(), 1, recorded.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), SIX_HOURS);
         store.putQueueMember(recorded, "1001", 150_000L);
 
         assertThat(service.cancel(A, "tk", d())).isEqualTo(CancelOutcome.CANCELLED);
@@ -887,9 +891,9 @@ class QueueServiceTest {
 
     @Test
     void 查状态_入队时刻在存储时间之后_夹到0_不下溢() {
-        store.putTicket(A, new Ticket("future", MODE_1V1, 0, TicketState.QUEUED, clock.peekMs() + 5_000, 1, Q_1V1.queueKey(), 150_000, 0, 0, 0),
+        store.putTicket(A, new Ticket("future", MODE_1V1, 0, TicketState.QUEUED, clock.peekMs() + 5_000, 1, Q_1V1.queueKey(REDIS_KEYS), 150_000, 0, 0, 0),
                 SIX_HOURS);
-        store.putTicket(B, new Ticket("zero", MODE_1V1, 0, TicketState.QUEUED, 0, 1, Q_1V1.queueKey(), 150_000, 0, 0, 0), SIX_HOURS);
+        store.putTicket(B, new Ticket("zero", MODE_1V1, 0, TicketState.QUEUED, 0, 1, Q_1V1.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), SIX_HOURS);
 
         assertThat(service.status(A, d())).isEqualTo(GetQueueStatusResponse.newBuilder().setStateValue(1).build());
         assertThat(service.status(B, d()).getQueuedSeconds()).as("入队时刻为 0（旧数据）不算等待").isZero();

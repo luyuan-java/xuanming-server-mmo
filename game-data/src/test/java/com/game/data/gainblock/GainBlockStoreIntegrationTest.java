@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.List;
@@ -27,6 +28,8 @@ import org.springframework.beans.factory.support.StaticListableBeanFactory;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class GainBlockStoreIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private RedissonClient redis;
     private GainBlockStore store;
 
@@ -35,21 +38,21 @@ class GainBlockStoreIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        redis.getKeys().delete(RedisKeys.gainBlocks(GainBlockStore.CURRENCY), RedisKeys.gainBlocks(GainBlockStore.ITEM));
+        redis.getKeys().delete(REDIS_KEYS.gainBlocks(GainBlockStore.CURRENCY), REDIS_KEYS.gainBlocks(GainBlockStore.ITEM));
         store = new GainBlockStore(new StaticListableBeanFactory(Map.of("redis", redis))
-                .getBeanProvider(RedissonClient.class), new ObjectMapper());
+                .getBeanProvider(RedissonClient.class), new ObjectMapper(), REDIS_KEYS);
     }
 
     @AfterEach
     void tearDown() {
-        redis.getKeys().delete(RedisKeys.gainBlocks(GainBlockStore.CURRENCY), RedisKeys.gainBlocks(GainBlockStore.ITEM));
+        redis.getKeys().delete(REDIS_KEYS.gainBlocks(GainBlockStore.CURRENCY), REDIS_KEYS.gainBlocks(GainBlockStore.ITEM));
         redis.shutdown();
     }
 
     @Test
     void 封禁写进Hash并通知_列表按id升序带元数据_解封幂等() {
         List<String> notices = new CopyOnWriteArrayList<>();
-        RTopic topic = redis.getTopic(RedisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE);
+        RTopic topic = redis.getTopic(REDIS_KEYS.gainBlockChangedTopic(), StringCodec.INSTANCE);
         int listener = topic.addListener(String.class, (channel, message) -> notices.add(message));
         try {
             store.block(GainBlockStore.CURRENCY, 2, "运维甲", 100, "刷钻漏洞");
@@ -59,7 +62,7 @@ class GainBlockStoreIntegrationTest {
             assertThat(store.list(GainBlockStore.CURRENCY)).containsExactly(
                     new GainBlockStore.Entry(1, "ops", 200, "dupe"),
                     new GainBlockStore.Entry(2, "ops", 300, "再确认"));
-            assertThat(redis.<String, String>getMap(RedisKeys.gainBlocks(GainBlockStore.CURRENCY), StringCodec.INSTANCE)
+            assertThat(redis.<String, String>getMap(REDIS_KEYS.gainBlocks(GainBlockStore.CURRENCY), StringCodec.INSTANCE)
                     .readAllKeySet()).containsExactlyInAnyOrder("1", "2");
 
             assertThat(store.unblock(GainBlockStore.CURRENCY, 2)).isTrue();
@@ -76,7 +79,7 @@ class GainBlockStoreIntegrationTest {
 
     @Test
     void 元数据坏了照样列出() {
-        redis.<String, String>getMap(RedisKeys.gainBlocks(GainBlockStore.CURRENCY), StringCodec.INSTANCE)
+        redis.<String, String>getMap(REDIS_KEYS.gainBlocks(GainBlockStore.CURRENCY), StringCodec.INSTANCE)
                 .fastPut("5", "不是 JSON");
         assertThat(store.list(GainBlockStore.CURRENCY)).containsExactly(new GainBlockStore.Entry(5, "", 0, ""));
     }
@@ -86,7 +89,7 @@ class GainBlockStoreIntegrationTest {
         store.block(GainBlockStore.ITEM, 10, "ops", 1, "刷药");
         assertThat(store.list(GainBlockStore.ITEM)).containsExactly(new GainBlockStore.Entry(10, "ops", 1, "刷药"));
         assertThat(store.list(GainBlockStore.CURRENCY)).isEmpty();
-        assertThat(redis.<String, String>getMap(RedisKeys.gainBlocks(GainBlockStore.ITEM), StringCodec.INSTANCE)
+        assertThat(redis.<String, String>getMap(REDIS_KEYS.gainBlocks(GainBlockStore.ITEM), StringCodec.INSTANCE)
                 .readAllKeySet()).containsExactly("10");
     }
 }

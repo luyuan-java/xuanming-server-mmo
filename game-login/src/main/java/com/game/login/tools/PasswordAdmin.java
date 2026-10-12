@@ -1,5 +1,7 @@
 package com.game.login.tools;
 
+import com.game.common.GameNamespace;
+import com.game.common.NamespaceDatabaseCheck;
 import com.game.login.auth.Argon2id;
 import com.game.login.auth.ProductionPasswordAuthenticator;
 import java.io.BufferedReader;
@@ -26,16 +28,26 @@ import java.util.Map;
  *
  * <p>用法（在仓库根目录，game-login 已打包）：
  * <pre>
- * export GAME_PASSWORD_ADMIN_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名（缺省 = 部署命名空间 GAME_NAMESPACE，即 game）&gt;?user=...&amp;password=...'
+ * export GAME_NAMESPACE=game        # 部署命名空间，必须与服务进程同值（不设 = game）
+ * export GAME_PASSWORD_ADMIN_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名 = 部署命名空间&gt;?user=...&amp;password=...'
  * java -cp game-login/target/game-login-0.1.0-SNAPSHOT.jar -Dloader.main=com.game.login.tools.PasswordAdmin \
- *      org.springframework.boot.loader.launch.PropertiesLauncher --account &lt;账号&gt; [--password-stdin]
+ *      org.springframework.boot.loader.launch.PropertiesLauncher --account &lt;账号&gt; [--password-stdin] [--expect-database &lt;库名&gt;]
  * </pre>
  * 口令从终端读两遍（不回显）；{@code --password-stdin} 从标准输入读恰好两行（批处理用）。JDBC URL（含库名与账号口令）只从环境变量读，
- * 变量名可用 {@code --jdbc-url-env} 换。退出码 0 成功、1 失败、2 参数解析错误（未知参数 / 缺值），同基线。
+ * 变量名可用 {@code --jdbc-url-env} 换。
+ *
+ * <p>部署命名空间只取环境变量 {@code GAME_NAMESPACE}（{@link GameNamespace#fromEnv}；不设为 game，空串与非法值拒绝），打印到标准错误；
+ * 连上库后、<b>读口令之前</b>核对 {@code SELECT DATABASE()} 等于期望库名（规格：库名 = 命名空间；{@code --expect-database} 只是给库名偏离规格的
+ * 存量部署的应急开关），不一致退出 2、不读口令、不写库——URL 指错库时不会给另一个部署的账号设口令（与服务进程、AuditFallbackReplay、assetopfix
+ * 同一套核对，{@link NamespaceDatabaseCheck}）。
+ *
+ * <p>退出码 0 成功、1 失败、2 参数解析错误（未知参数 / 缺值 / {@code --expect-database} 为空，同基线）或命名空间非法 / 库名核对不过（Java 版新增）。
  */
 public final class PasswordAdmin {
 
     static final String DEFAULT_URL_ENV = "GAME_PASSWORD_ADMIN_JDBC_URL";
+    /** 库名核对报错里给出的应急开关写法。 */
+    static final String EXPECT_DATABASE_HINT = "--expect-database <库名>";
     /** 建连与每条语句的超时（同基线 10 s）。 */
     private static final int TIMEOUT_SECONDS = 10;
 
@@ -59,21 +71,28 @@ public final class PasswordAdmin {
                    Connections connections, PrintStream out, PrintStream err) {
         String account = null;
         String urlEnv = DEFAULT_URL_ENV;
+        String expectDatabase = null;
         boolean passwordStdin = false;
         // 参数解析错误回 2（同基线 Go flag 包），其余失败回 1
         for (int i = 0; i < args.size(); i++) {
             String arg = args.get(i);
             switch (arg) {
-                case "--account", "--jdbc-url-env" -> {
+                case "--account", "--jdbc-url-env", "--expect-database" -> {
                     if (i + 1 >= args.size()) {
                         err.println("参数缺值：" + arg);
                         return 2;
                     }
                     String value = args.get(++i);
-                    if (arg.equals("--account")) {
-                        account = value;
-                    } else {
-                        urlEnv = value;
+                    switch (arg) {
+                        case "--account" -> account = value;
+                        case "--jdbc-url-env" -> urlEnv = value;
+                        default -> {
+                            if (value.isBlank()) {
+                                err.println("--expect-database 不能为空");
+                                return 2;
+                            }
+                            expectDatabase = value;
+                        }
                     }
                 }
                 case "--password-stdin" -> passwordStdin = true;
@@ -101,10 +120,27 @@ public final class PasswordAdmin {
             err.println("环境变量 " + urlEnv + " 不是 JDBC URL（应以 jdbc:mysql:// 开头）");
             return 1;
         }
+        // 部署命名空间：只认环境变量（部署一律经它给值，与服务进程同值）；库名核对的期望值缺省取它
+        GameNamespace namespace;
         try {
+            GameNamespace.Sourced sourced = GameNamespace.fromEnv(env);
+            namespace = sourced.namespace();
+            err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + namespace + "（来源 " + sourced.source() + "）");
+        } catch (IllegalArgumentException e) {
+            err.println(e.getMessage());
+            return 2;
+        }
+        // migrate 自己也会关连接；JDBC 的 close 对已关的连接是空操作
+        try (Connection connection = connections.open(url)) {
+            // 读口令、写库之前核对库名：命名空间与库必须属于同一个部署
+            String mismatch = NamespaceDatabaseCheck.verify(connection, expectDatabase, namespace, EXPECT_DATABASE_HINT);
+            if (mismatch != null) {
+                err.println(mismatch + "；拒绝执行（没有读口令，没有改任何数据）");
+                return 2;
+            }
             String password = passwordStdin ? readPasswordLines(stdin) : readPasswordTwice(console);
             String encoded = Argon2id.hash(password, new SecureRandom());
-            migrate(connections.open(url), account, encoded);
+            migrate(connection, account, encoded);
             out.println("已为既有账号写入口令哈希");
             return 0;
         } catch (IllegalArgumentException | IllegalStateException e) {

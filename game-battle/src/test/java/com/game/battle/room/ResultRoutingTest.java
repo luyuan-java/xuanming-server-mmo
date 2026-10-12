@@ -5,12 +5,15 @@ import static com.game.battle.room.RoomHarness.MONSTER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import com.game.audit.BattleResultTopics;
 import com.game.battle.port.BattleResultSink;
 import com.game.battle.port.kafka.KafkaBattleResultSink;
 import com.game.battle.room.RoomHarness.FakeLink;
 import com.game.battle.testing.FakeBattleData;
 import com.game.battle.testing.FakeResultKafka;
 import com.game.battle.testing.ResultFallbackCapture;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.DestroyBattleRequest;
@@ -28,6 +31,8 @@ import org.junit.jupiter.api.Test;
  * 销毁与停机作废的房间一条都没有（match-spec §5.4、§12.1 坑 10：否则 dev 接口会变成刷分的口子）。
  */
 class ResultRoutingTest {
+
+    private static final BattleResultTopics RESULT_TOPICS = new BattleResultTopics(new KafkaNames(GameNamespace.of("game")));
 
     private final RoomHarness h = new RoomHarness();
 
@@ -106,7 +111,7 @@ class ResultRoutingTest {
 
     /** 把房间的普通结果端口换成接着假 Kafka 的真传输（必须在第一次用房间服务之前）。 */
     private KafkaBattleResultSink kafkaSink(FakeResultKafka kafka) {
-        KafkaBattleResultSink sink = new KafkaBattleResultSink(kafka, 1, (short) 1, Duration.ofSeconds(1), h.metrics);
+        KafkaBattleResultSink sink = new KafkaBattleResultSink(kafka, RESULT_TOPICS, 1, (short) 1, Duration.ofSeconds(1), h.metrics);
         sink.start();
         h.results = sink;
         return sink;

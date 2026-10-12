@@ -11,6 +11,7 @@ import com.game.data.snapshot.SnapshotAdminService;
 import com.game.data.snapshot.SnapshotDiffService;
 import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -45,8 +46,10 @@ class AdminEndpointSecurityTest {
 
     @Configuration(proxyBeanMethods = false)
     @ImportAutoConfiguration({ServletWebServerFactoryAutoConfiguration.class, DispatcherServletAutoConfiguration.class,
-            WebMvcAutoConfiguration.class, HttpMessageConvertersAutoConfiguration.class, JacksonAutoConfiguration.class})
-    // gate 排空运维接口：上下文里没有 Redis 客户端也能起来（Redis 懒加载，第一次调用这些接口时才建）
+            WebMvcAutoConfiguration.class, HttpMessageConvertersAutoConfiguration.class, JacksonAutoConfiguration.class,
+            GameNamespaceAutoConfiguration.class})
+    // gate 排空运维接口：上下文里没有 Redis 客户端也能起来（Redis 懒加载，第一次调用这些接口时才建）；键的出处 RedisKeys 来自
+    // game-discovery 的部署命名空间自动配置（与生产同一个来源）
     @Import({AuditQueryController.class, GateDrainAdminController.class, SnapshotAdminController.class,
             PlayerOpsAdminController.class, ItemAdminController.class, RecallAdminController.class, OpsErrorAdvice.class})
     static class App {

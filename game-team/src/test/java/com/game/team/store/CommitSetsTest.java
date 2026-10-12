@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.TeamInfo;
 import com.game.proto.team.TeamChangeReason;
@@ -17,6 +18,7 @@ import com.game.team.rules.RuleConfig;
 import com.game.team.rules.SessionState;
 import com.game.team.rules.TeamRules;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -26,6 +28,8 @@ import org.junit.jupiter.api.Test;
  * （store.go:815-849）。纯函数，不起 Redis。
  */
 class CommitSetsTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long NOW = 1_900_000_000_000L;
     private static final long TID = Long.MIN_VALUE + 7; // ≥ 2^63
@@ -131,12 +135,12 @@ class CommitSetsTest {
         Decision d = decision(rec, List.of(B), List.of(A), List.of(C),
                 List.of(new InviteAdd(Long.MIN_VALUE + 301, -2L), new InviteAdd(Long.MIN_VALUE + 302, 5)),
                 List.of(Long.MIN_VALUE + 303));
-        CommitSets.Call call = CommitSets.build(TID, "41", d);
+        CommitSets.Call call = CommitSets.build(REDIS_KEYS, TID, "41", d);
         assertThat(call.keys()).containsExactly(
-                RedisKeys.teamRecord(TID), RedisKeys.teamInfo(TID),
-                RedisKeys.teamPlayer(B), RedisKeys.teamPlayer(A), RedisKeys.teamPlayer(C),
-                RedisKeys.teamInvite(Long.MIN_VALUE + 301), RedisKeys.teamInvite(Long.MIN_VALUE + 302),
-                RedisKeys.teamInvite(Long.MIN_VALUE + 303));
+                REDIS_KEYS.teamRecord(TID), REDIS_KEYS.teamInfo(TID),
+                REDIS_KEYS.teamPlayer(B), REDIS_KEYS.teamPlayer(A), REDIS_KEYS.teamPlayer(C),
+                REDIS_KEYS.teamInvite(Long.MIN_VALUE + 301), REDIS_KEYS.teamInvite(Long.MIN_VALUE + 302),
+                REDIS_KEYS.teamInvite(Long.MIN_VALUE + 303));
         assertThat(call.keys().get(0)).isEqualTo("game:{team}:rec:" + Long.toUnsignedString(TID));
         List<byte[]> a = call.args();
         assertThat(a).hasSize(13);
@@ -152,14 +156,32 @@ class CommitSetsTest {
         assertThat(s(a.get(12))).as("被邀请人待处理邀请上限").isEqualTo("10");
     }
 
+    /** 键名只跟传入的 RedisKeys 走：同一个 JVM 里两个命名空间互不影响，hash tag {team} 不带命名空间（同槽）。 */
+    @Test
+    void 键名跟传入的命名空间走_ARGV不变() {
+        RedisKeys nstest = new RedisKeys(GameNamespace.of("nstest"));
+        Decision d = decision(team(A, B), List.of(B), List.of(A), List.of(C),
+                List.of(new InviteAdd(Long.MIN_VALUE + 301, 5)), List.of(Long.MIN_VALUE + 303));
+        CommitSets.Call ns = CommitSets.build(nstest, TID, "41", d);
+        CommitSets.Call game = CommitSets.build(REDIS_KEYS, TID, "41", d);
+
+        assertThat(ns.keys()).containsExactly(
+                "nstest:{team}:rec:" + Long.toUnsignedString(TID), "nstest:{team}:info:" + Long.toUnsignedString(TID),
+                nstest.teamPlayer(B), nstest.teamPlayer(A), nstest.teamPlayer(C),
+                nstest.teamInvite(Long.MIN_VALUE + 301), nstest.teamInvite(Long.MIN_VALUE + 303));
+        assertThat(ns.keys()).allSatisfy(k -> assertThat((String) k).startsWith("nstest:{team}:"));
+        assertThat(game.keys()).allSatisfy(k -> assertThat((String) k).startsWith("game:{team}:"));
+        assertThat(ns.args()).usingElementComparator(Arrays::compare).containsExactlyElementsOf(game.args());
+    }
+
     @Test
     void 参数布局_解散时记录与投影为空串_建队用new哨兵() {
         Decision disband = decision(null, List.of(), List.of(), List.of(A), List.of(), List.of());
-        CommitSets.Call call = CommitSets.build(TID, "3", disband);
+        CommitSets.Call call = CommitSets.build(REDIS_KEYS, TID, "3", disband);
         assertThat(call.args().get(1)).isEmpty();
         assertThat(call.args().get(2)).isEmpty();
         Decision create = TeamRules.apply(Op.create(A, TID, 1), null, NOW, null, RuleConfig.DEFAULT);
-        assertThat(s(CommitSets.build(TID, TeamStore.NEW_TEAM_VERSION, create).args().get(0))).isEqualTo("new");
+        assertThat(s(CommitSets.build(REDIS_KEYS, TID, TeamStore.NEW_TEAM_VERSION, create).args().get(0))).isEqualTo("new");
     }
 
     @Test

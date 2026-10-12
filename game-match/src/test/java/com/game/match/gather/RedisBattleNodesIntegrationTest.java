@@ -3,8 +3,10 @@ package com.game.match.gather;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.proto.BattleNodeInfo;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.match.gather.BattleNodes.Census;
 import com.game.match.gather.BattleNodes.Lookup;
 import com.game.match.metrics.MatchMetrics;
@@ -33,6 +35,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisBattleNodesIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static RedissonClient redis;
     private static NodeDirectory<BattleNodeInfo> directory;
     private final Set<Integer> published = new HashSet<>();
@@ -43,7 +47,7 @@ class RedisBattleNodesIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13).setConnectionMinimumIdleSize(1).setConnectionPoolSize(4);
         redis = Redisson.create(config);
-        directory = new NodeDirectory<>(redis, NodeTypes.BATTLE, BattleNodeInfo.parser());
+        directory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.BATTLE, BattleNodeInfo.parser());
     }
 
     @AfterAll

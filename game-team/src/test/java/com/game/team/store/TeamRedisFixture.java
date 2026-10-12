@@ -2,6 +2,7 @@ package com.game.team.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.team.TeamRedisFields;
@@ -37,6 +38,8 @@ import org.redisson.config.Config;
  */
 final class TeamRedisFixture {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     static final int DB = 12;
     static final int ZONE = 1;
 
@@ -65,7 +68,7 @@ final class TeamRedisFixture {
     TeamRedisFixture(RedissonClient redis, TeamStore.Hooks hooks) {
         this.redis = redis;
         this.teamRedis = new RedissonTeamRedis(redis);
-        this.store = new TeamStore(teamRedis, hooks);
+        this.store = new TeamStore(teamRedis, REDIS_KEYS, hooks);
         long r = ThreadLocalRandom.current().nextLong(1L << 38) * 16_384;
         this.pidBase = Long.MIN_VALUE + (1L << 52) + r;
         this.tidBase = Long.MIN_VALUE + (1L << 53) + r;
@@ -97,12 +100,12 @@ final class TeamRedisFixture {
     List<String> allKeys() {
         List<String> keys = new ArrayList<>();
         for (long t : tids) {
-            keys.add(RedisKeys.teamRecord(t));
-            keys.add(RedisKeys.teamInfo(t));
+            keys.add(REDIS_KEYS.teamRecord(t));
+            keys.add(REDIS_KEYS.teamInfo(t));
         }
         for (long p : pids) {
-            keys.add(RedisKeys.teamPlayer(p));
-            keys.add(RedisKeys.teamInvite(p));
+            keys.add(REDIS_KEYS.teamPlayer(p));
+            keys.add(REDIS_KEYS.teamInvite(p));
         }
         return keys;
     }
@@ -189,7 +192,7 @@ final class TeamRedisFixture {
     }
 
     TeamRecord loadRecord(long tid) {
-        byte[] raw = hgetBytes(RedisKeys.teamRecord(tid), TeamRedisFields.PB);
+        byte[] raw = hgetBytes(REDIS_KEYS.teamRecord(tid), TeamRedisFields.PB);
         assertThat(raw).as("记录 %s 不存在", u(tid)).isNotNull();
         try {
             return TeamRecord.parseFrom(raw);
@@ -200,12 +203,12 @@ final class TeamRedisFixture {
 
     /** 直接改写记录的 pb（ver 不变；测试造数用，模拟「时钟走到截止」这类真 Redis 做不到的状态）。 */
     void writeRecord(long tid, TeamRecord rec) {
-        redis.<byte[], byte[]>getMap(RedisKeys.teamRecord(tid), ByteArrayCodec.INSTANCE)
+        redis.<byte[], byte[]>getMap(REDIS_KEYS.teamRecord(tid), ByteArrayCodec.INSTANCE)
                 .put(TeamRedisFields.PB.getBytes(StandardCharsets.US_ASCII), rec.toByteArray());
     }
 
     String ver(long tid) {
-        return hget(RedisKeys.teamRecord(tid), TeamRedisFields.VER);
+        return hget(REDIS_KEYS.teamRecord(tid), TeamRedisFields.VER);
     }
 
     // ---------------------------------------------------------------- 状态快照（替代基线 mr.Dump）

@@ -3,6 +3,7 @@ package com.game.discovery.team;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.TeamInfo;
 import java.nio.charset.StandardCharsets;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.Test;
 
 /** {@link TeamMembershipReader} 的回复解析（不连 Redis）：三态判定同基线 ParseTeamIndexReply（player_team.h:79-108）。 */
 class TeamMembershipReaderTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long PLAYER = 42;
 
@@ -25,8 +28,8 @@ class TeamMembershipReaderTest {
 
     @Test
     void 投影键与索引键同一hash_tag_前缀由RedisKeys推出() {
-        assertThat(TeamMembershipReader.INFO_KEY_PREFIX).isEqualTo("game:{team}:info:");
-        assertThat(RedisKeys.teamPlayer(1)).startsWith("game:{team}:");
+        assertThat(TeamMembershipReader.infoKeyPrefix(REDIS_KEYS)).isEqualTo("game:{team}:info:");
+        assertThat(REDIS_KEYS.teamPlayer(1)).startsWith("game:{team}:");
     }
 
     @Test

@@ -3,8 +3,10 @@ package com.game.match.queue;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.match.MatchBudgets;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchProperties;
 import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
@@ -57,6 +59,8 @@ import org.redisson.api.RedissonClient;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class QueuePortedIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final int MODE_1V1 = MatchMode.MATCH_MODE_1V1_VALUE;
     private static final int MODE_5V5 = MatchMode.MATCH_MODE_5V5_VALUE;
     private static final int MODE_PVE_SOLO = MatchMode.MATCH_MODE_PVE_SOLO_VALUE;
@@ -105,7 +109,7 @@ class QueuePortedIntegrationTest {
     }
 
     private QueueService serviceOn(TicketStore tickets) {
-        return new QueueService(props, players, tickets, new DefaultTicketHealing(tickets), ratings, gather, ids, metrics);
+        return new QueueService(props, players, tickets, new DefaultTicketHealing(tickets), ratings, gather, ids, metrics, REDIS_KEYS);
     }
 
     private static Deadline d() {
@@ -168,9 +172,9 @@ class QueuePortedIntegrationTest {
     @Test
     void 排队自愈孤儿queued票_按新请求入队_旧队列不被塞回去() {
         long a = inScene(1, 1);
-        fx.putTicket(a, new Ticket("orphan", MODE_1V1, config, TicketState.QUEUED, fx.nowMs() - 60_000, 1, queue.queueKey(), 150_000, 0, 0, 0),
+        fx.putTicket(a, new Ticket("orphan", MODE_1V1, config, TicketState.QUEUED, fx.nowMs() - 60_000, 1, queue.queueKey(REDIS_KEYS), 150_000, 0, 0, 0),
                 SIX_HOURS);
-        assertThat(fx.exists(queue.queueKey())).as("前置：队列里没有他").isFalse();
+        assertThat(fx.exists(queue.queueKey(REDIS_KEYS))).as("前置：队列里没有他").isFalse();
         int otherConfig = fx.configId(7);
         QueueRef newQueue = fx.track(new QueueRef(MODE_5V5, otherConfig));
 
@@ -182,9 +186,9 @@ class QueuePortedIntegrationTest {
         Ticket ticket = ticket(a);
         assertThat(ticket.ticketId()).isEqualTo(response.getQueueTicket());
         assertThat(ticket.mode()).isEqualTo(MODE_5V5);
-        assertThat(ticket.queueKey()).isEqualTo(newQueue.queueKey());
+        assertThat(ticket.queueKey()).isEqualTo(newQueue.queueKey(REDIS_KEYS));
         assertThat(fx.queueMembers(newQueue)).containsExactly(u(a));
-        assertThat(fx.exists(queue.queueKey())).as("旧队列不能被塞回去").isFalse();
+        assertThat(fx.exists(queue.queueKey(REDIS_KEYS))).as("旧队列不能被塞回去").isFalse();
     }
 
     /** TestJoinQueueStillRejectsLiveTickets：真在队列里的 queued 票、以及 matched 票，仍按「已在匹配队列中」拒（legacy 一段不移植）。 */
@@ -221,7 +225,7 @@ class QueuePortedIntegrationTest {
 
         assertThat(store.enqueue(a, "t2", other, 2, 150_000, 100_000, d())).as("已存在不得覆盖").isEqualTo(new JoinResult.Exists("t1"));
 
-        assertThat(fx.rawTicket(a)).containsEntry("ticket", "t1").containsEntry("queue_key", queue.queueKey()).containsEntry("zone_id", "1");
+        assertThat(fx.rawTicket(a)).containsEntry("ticket", "t1").containsEntry("queue_key", queue.queueKey(REDIS_KEYS)).containsEntry("zone_id", "1");
         assertThat(fx.queueMembers(other)).isEmpty();
         assertThat(fx.indexed(other)).isFalse();
     }
@@ -294,7 +298,7 @@ class QueuePortedIntegrationTest {
         String ticketId = joinQueue1v1(a).getQueueTicket();
         TicketRef ref = new TicketRef(a, ticketId);
         pop("pop-1", MatchBudgets.matchedTicketTtlSeconds(2) * 1000L, ref);
-        assertThat(fx.exists(queue.queueKey())).as("弹出后队列是空的").isFalse();
+        assertThat(fx.exists(queue.queueKey(REDIS_KEYS))).as("弹出后队列是空的").isFalse();
 
         assertThat(store.requeueFront(queue, fx.freshToken(), List.of(ref), SIX_HOURS, 0, d())).isEqualTo(1);
 
@@ -312,13 +316,13 @@ class QueuePortedIntegrationTest {
         long a = inScene(2, 1);
         String ticketId = joinQueue1v1(a).getQueueTicket();
         pop("pop-1", 48_000, new TicketRef(a, ticketId));
-        fx.setString(queue.queueKey(), "not-a-list");
+        fx.setString(queue.queueKey(REDIS_KEYS), "not-a-list");
 
         store.requeueFront(queue, fx.freshToken(), List.of(new TicketRef(a, ticketId)), SIX_HOURS, 0, d());
 
         assertThat(fx.exists(TicketRedisFixture.ticketKey(a))).as("入队失败必须删票，不留 queued 孤儿").isFalse();
         // 玩家可以立即重排（队列键恢复为 list 之后）
-        fx.del(queue.queueKey());
+        fx.del(queue.queueKey(REDIS_KEYS));
         assertThat(joinQueue1v1(a).getErrorCode()).isZero();
     }
 
@@ -397,7 +401,7 @@ class QueuePortedIntegrationTest {
         store.enqueue(b, "t-b", queue, 1, 150_000, SIX_HOURS, d());
 
         assertThat(fx.indexed(queue)).as("队列键必须进注册集").isTrue();
-        assertThat(store.queueIndex(d())).contains(queue.queueKey());
+        assertThat(store.queueIndex(d())).contains(queue.queueKey(REDIS_KEYS));
         assertThat(fx.queueMembers(queue)).as("RPUSH 保持 FIFO").containsExactly(u(a), u(b));
         assertThat(fx.rankOf(queue)).containsOnlyKeys(u(a), u(b));
     }
@@ -414,7 +418,7 @@ class QueuePortedIntegrationTest {
         assertThat(response.getQueueTicket()).isEmpty();
         assertThat(fx.ticketOf(a)).as("被拒不能留票据").isEmpty();
         assertThat(fx.indexed(queue)).as("被拒不能登记队列").isFalse();
-        assertThat(fx.exists(queue.queueKey())).isFalse();
+        assertThat(fx.exists(queue.queueKey(REDIS_KEYS))).isFalse();
     }
 
     /** TestJoinQueueRecordsZoneAndQueueKey：票据记下位置记录里的 zone 与入队的队列键；queued 是长 TTL。 */
@@ -432,7 +436,7 @@ class QueuePortedIntegrationTest {
         Ticket ticket = ticket(a);
         assertThat(ticket.zoneId()).isEqualTo(2);
         assertThat(ticket.state()).isEqualTo(TicketState.QUEUED);
-        assertThat(ticket.queueKey()).isEqualTo(queue.queueKey());
+        assertThat(ticket.queueKey()).isEqualTo(queue.queueKey(REDIS_KEYS));
         assertThat(ticket.enqueuedAtMs()).as("入队时刻取 Redis TIME").isBetween(before, after);
         assertThat(fx.rawTicket(a)).as("zone_id 必须落盘").containsEntry("zone_id", "2").containsEntry("rating_centi", "162550");
         assertThat(fx.queueMembers(queue)).containsExactly(u(a));
@@ -469,14 +473,14 @@ class QueuePortedIntegrationTest {
         long a = fx.pid(1);
         // 票里的队列键故意与 (mode, config) 重算出来的不同
         QueueRef recorded = fx.track(new QueueRef(MODE_1V1, fx.configId(77)));
-        fx.putTicket(a, new Ticket("tk", MODE_1V1, config, TicketState.QUEUED, fx.nowMs(), 1, recorded.queueKey(), 150_000, 0, 0, 0), SIX_HOURS);
+        fx.putTicket(a, new Ticket("tk", MODE_1V1, config, TicketState.QUEUED, fx.nowMs(), 1, recorded.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), SIX_HOURS);
         fx.putQueueMember(recorded, u(a), 150_000L);
 
         assertThat(service.cancel(a, "tk", d())).isEqualTo(CancelOutcome.CANCELLED);
 
         assertThat(fx.exists(TicketRedisFixture.ticketKey(a))).isFalse();
-        assertThat(fx.exists(recorded.queueKey())).as("玩家应从票据记录的队列里出队").isFalse();
-        assertThat(fx.exists(recorded.rankKey())).as("评分镜像一并摘掉").isFalse();
+        assertThat(fx.exists(recorded.queueKey(REDIS_KEYS))).as("玩家应从票据记录的队列里出队").isFalse();
+        assertThat(fx.exists(recorded.rankKey(REDIS_KEYS))).as("评分镜像一并摘掉").isFalse();
     }
 
     // ================================================================ ticket_cas_test.go
@@ -576,7 +580,7 @@ class QueuePortedIntegrationTest {
         assertThat(service.status(a, d()).getState()).isEqualTo(QueueState.QUEUE_STATE_QUEUED);
         assertThat(service.cancel(a, ticketId, d())).isEqualTo(CancelOutcome.CANCELLED);
         assertThat(service.status(a, d()).getState()).isEqualTo(QueueState.QUEUE_STATE_NOT_QUEUED);
-        assertThat(fx.exists(queue.queueKey())).isFalse();
+        assertThat(fx.exists(queue.queueKey(REDIS_KEYS))).isFalse();
         assertThat(service.cancel(a, ticketId, d())).as("重复取消").isEqualTo(CancelOutcome.NO_TICKET);
     }
 

@@ -10,7 +10,9 @@ import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.SceneAssetLocator;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
@@ -37,6 +39,7 @@ import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -113,12 +116,13 @@ class GatherWiringTest {
         }
 
         @Bean
-        NodeDirectory<BattleNodeInfo> battleNodeDirectory(RedissonClient redis) {
-            return new NodeDirectory<>(redis, NodeTypes.BATTLE, BattleNodeInfo.parser());
+        NodeDirectory<BattleNodeInfo> battleNodeDirectory(RedissonClient redis, RedisKeys redisKeys) {
+            return new NodeDirectory<>(redis, redisKeys, NodeTypes.BATTLE, BattleNodeInfo.parser());
         }
     }
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withUserConfiguration(Collaborators.class, GatherConfiguration.class, PlacementConfiguration.class, ReissueConfiguration.class);
 
     @Test
@@ -241,8 +245,8 @@ class GatherWiringTest {
 
         /** 只为满足 {@code GatherConfiguration.battleNodes} 的入参；管线实际用的是下面那个 {@code @Primary}。 */
         @Bean
-        NodeDirectory<BattleNodeInfo> battleNodeDirectory() {
-            return new NodeDirectory<>(Collaborators.REDIS.client, NodeTypes.BATTLE, BattleNodeInfo.parser());
+        NodeDirectory<BattleNodeInfo> battleNodeDirectory(RedisKeys redisKeys) {
+            return new NodeDirectory<>(Collaborators.REDIS.client, redisKeys, NodeTypes.BATTLE, BattleNodeInfo.parser());
         }
 
         @Bean
@@ -252,7 +256,8 @@ class GatherWiringTest {
         }
     }
 
-    private final ApplicationContextRunner live = new ApplicationContextRunner().withBean(GatherFixture.class, GatherFixture::new)
+    private final ApplicationContextRunner live = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class)).withBean(GatherFixture.class, GatherFixture::new)
             .withUserConfiguration(LiveCollaborators.class, GatherConfiguration.class);
 
     private static GatherResult launch(AssertableApplicationContext context, GatherPlan plan) throws Exception {
@@ -319,6 +324,7 @@ class GatherWiringTest {
     @Test
     void 少了别的包该提供的票据存储_上下文起不来_不会悄悄少一个入口() {
         new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
                 .withUserConfiguration(NoTicketStore.class, GatherConfiguration.class, PlacementConfiguration.class, ReissueConfiguration.class)
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -383,8 +389,8 @@ class GatherWiringTest {
         }
 
         @Bean
-        NodeDirectory<BattleNodeInfo> battleNodeDirectory(RedissonClient redis) {
-            return all.battleNodeDirectory(redis);
+        NodeDirectory<BattleNodeInfo> battleNodeDirectory(RedissonClient redis, RedisKeys redisKeys) {
+            return all.battleNodeDirectory(redis, redisKeys);
         }
     }
 }

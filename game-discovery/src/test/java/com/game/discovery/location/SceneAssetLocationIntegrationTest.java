@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.asset.SceneAssetEndpoint;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
@@ -38,6 +39,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class SceneAssetLocationIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long BASE = Long.MIN_VALUE + (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 40);
     /** 随机 zone：节点目录键 game:nodes:scene:{zone} 只属于本测试。 */
     private static final int ZONE = 900_000 + ThreadLocalRandom.current().nextInt(90_000);
@@ -54,17 +57,17 @@ class SceneAssetLocationIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(10);
         redis = Redisson.create(config);
-        locations = new PlayerLocationDirectory(redis);
-        scenes = new NodeDirectory<>(redis, TYPE, SceneNodeInfo.parser());
+        locations = new PlayerLocationDirectory(redis, REDIS_KEYS);
+        scenes = new NodeDirectory<>(redis, REDIS_KEYS, TYPE, SceneNodeInfo.parser());
     }
 
     @AfterAll
     static void cleanup() {
         for (long i = 0; i < 20; i++) {
-            redis.getKeys().delete(RedisKeys.playerLocation(BASE + i));
+            redis.getKeys().delete(REDIS_KEYS.playerLocation(BASE + i));
         }
-        redis.getKeys().delete(RedisKeys.nodeDirectory(TYPE, ZONE));
-        redis.getKeys().delete(RedisKeys.nodeDirectory(TYPE, OTHER_ZONE));
+        redis.getKeys().delete(REDIS_KEYS.nodeDirectory(TYPE, ZONE));
+        redis.getKeys().delete(REDIS_KEYS.nodeDirectory(TYPE, OTHER_ZONE));
         redis.shutdown();
     }
 
@@ -95,13 +98,13 @@ class SceneAssetLocationIntegrationTest {
         locations.putAsync(at(online, 3, 5), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
         locations.leaseAsync(at(leased, 3, 5), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
         locations.removeAsync(loggedOut, 5, 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        redis.<String, String>getMap(RedisKeys.playerLocation(badState), StringCodec.INSTANCE).put("s", "z");
-        redis.<String>getBucket(RedisKeys.playerLocation(wrongType), StringCodec.INSTANCE).set("not-a-hash");
+        redis.<String, String>getMap(REDIS_KEYS.playerLocation(badState), StringCodec.INSTANCE).put("s", "z");
+        redis.<String>getBucket(REDIS_KEYS.playerLocation(wrongType), StringCodec.INSTANCE).set("not-a-hash");
         var raw = new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE);
-        redis.<String, byte[]>getMap(RedisKeys.playerLocation(corrupt), raw).put("s", "o".getBytes());
-        redis.<String, byte[]>getMap(RedisKeys.playerLocation(corrupt), raw).put("v", new byte[] {(byte) 0xff, 1});
-        redis.<String, byte[]>getMap(RedisKeys.playerLocation(mismatched), raw).put("s", "o".getBytes());
-        redis.<String, byte[]>getMap(RedisKeys.playerLocation(mismatched), raw).put("v", at(online, 3, 5).toByteArray());
+        redis.<String, byte[]>getMap(REDIS_KEYS.playerLocation(corrupt), raw).put("s", "o".getBytes());
+        redis.<String, byte[]>getMap(REDIS_KEYS.playerLocation(corrupt), raw).put("v", new byte[] {(byte) 0xff, 1});
+        redis.<String, byte[]>getMap(REDIS_KEYS.playerLocation(mismatched), raw).put("s", "o".getBytes());
+        redis.<String, byte[]>getMap(REDIS_KEYS.playerLocation(mismatched), raw).put("v", at(online, 3, 5).toByteArray());
 
         assertThat(holder(online)).isEqualTo(new HolderRead(LocationStatus.ONLINE, at(online, 3, 5), null));
         assertThat(holder(leased).status()).isEqualTo(LocationStatus.RECONNECT_LEASE);
@@ -147,7 +150,7 @@ class SceneAssetLocationIntegrationTest {
         Thread.sleep(600);
         assertThat(scenes.findAsync(ZONE, 13).get(5, TimeUnit.SECONDS)).as("TTL 过期").isEmpty();
 
-        redis.getMapCache(RedisKeys.nodeDirectory(TYPE, ZONE), new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE))
+        redis.getMapCache(REDIS_KEYS.nodeDirectory(TYPE, ZONE), new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE))
                 .fastPut("14", new byte[] {(byte) 0xff, 0x01}, 30, TimeUnit.SECONDS);
         assertThatThrownBy(() -> scenes.findAsync(ZONE, 14).get(5, TimeUnit.SECONDS))
                 .isInstanceOf(ExecutionException.class).hasMessageContaining("解析失败");
@@ -194,7 +197,7 @@ class SceneAssetLocationIntegrationTest {
         PlayerLocation thereAt = at(there, 1, 5).toBuilder().setZoneId(OTHER_ZONE).build();
         locations.putAsync(thereAt, 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
 
-        assertThat(RedisKeys.nodeDirectory(TYPE, ZONE)).isNotEqualTo(RedisKeys.nodeDirectory(TYPE, OTHER_ZONE));
+        assertThat(REDIS_KEYS.nodeDirectory(TYPE, ZONE)).isNotEqualTo(REDIS_KEYS.nodeDirectory(TYPE, OTHER_ZONE));
         assertThat(locator.resolveAsync(here).get(5, TimeUnit.SECONDS)).isEqualTo(new Found(at(here, 1, 5),
                 new SceneAssetEndpoint(ZONE, 1, "inst-here", "127.0.0.1", 21100)));
         assertThat(locator.resolveAsync(there).get(5, TimeUnit.SECONDS)).isEqualTo(new Found(thereAt,

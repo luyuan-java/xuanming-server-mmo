@@ -25,6 +25,7 @@ import com.game.battle.testing.ResultFallbackCapture;
 import com.game.common.RunMode;
 import com.game.common.token.BattleTickets;
 import com.game.discovery.RedisProperties;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
@@ -47,6 +48,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
@@ -69,6 +71,7 @@ class BattleConfigurationTest {
     /** 同生产的装配：<b>不</b>提供 Kafka 客户端的替换口（{@code BattleConfiguration} 自己建真 Kafka 客户端）。只有末尾两条用例用它。 */
     private final ApplicationContextRunner realKafkaClients = new ApplicationContextRunner()
             .withUserConfiguration(BattleConfiguration.class)
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(BattleInfrastructure.class, () -> infra)
@@ -83,6 +86,7 @@ class BattleConfigurationTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(BattleConfiguration.class)
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(BattleInfrastructure.class, () -> infra)
@@ -550,6 +554,17 @@ class BattleConfigurationTest {
         assertThat(kafka.adminsOpened()).as("这条用例没有走假 Kafka").isZero();
         assertThat(output.getOut()).contains("对局结果经 Kafka 发布 kafka=没有端口的地址 topic=" + RESULT_TOPIC
                 + " client_id=game-battle-result-127.0.0.1-21200 已核对=false");
+    }
+
+    @Test
+    void 非缺省命名空间_对局结果的topic与客户端id都换成注入的命名空间(CapturedOutput output) {
+        realKafkaClients.withPropertyValues("game.namespace=nstest", "game.battle.result.bootstrap-servers=没有端口的地址").run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            assertThat(ctx.getBean(KafkaBattleResultSink.class).topic()).isEqualTo("nstest-battle-result-g1");
+        });
+
+        assertThat(output.getOut()).contains("对局结果经 Kafka 发布 kafka=没有端口的地址 topic=nstest-battle-result-g1"
+                + " client_id=nstest-battle-result-127.0.0.1-21200 已核对=false");
     }
 
     /**

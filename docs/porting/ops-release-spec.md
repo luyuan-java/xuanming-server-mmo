@@ -11,9 +11,11 @@
 >   `docs/reference/mmorpg-client-contract-robot.md:77`（`gate_ip / gate_port / token_*`）。
 > - **没有哪条结论因为目录缺失而定不下来。**
 >
-> **记号说明（2026-10-12 补记）**：本稿的 `<ns>` 一律指 **K8s namespace**（如 `<ns>-infra`、`mysql.<ns>-infra`），不是后来引入的**部署命名空间**
-> `game.namespace`（环境变量 `GAME_NAMESPACE`，缺省 `game`；architecture.md §6.2）。后者在本稿里写作「部署命名空间」或 `<部署命名空间>`：
-> Redis 键前缀、Kafka topic / 消费组前缀、MySQL 缺省库名都随它，文中的 `game:`、`game-*` topic、库 `game`、账号 `game_app` 都是它取缺省值时的写法。
+> **记号说明（2026-10-12 补记）**：本稿把 **K8s namespace** 记作 `<k8s-ns>`（如 `<k8s-ns>-infra`、`mysql.<k8s-ns>-infra`；原稿写的是 `<ns>`，为免与部署命名空间重名已全部改写），
+> 不是后来引入的**部署命名空间** `game.namespace`（环境变量 `GAME_NAMESPACE`，缺省 `game`；architecture.md §6.2 记作 `<ns>`）。后者在本稿里写作「部署命名空间」或
+> `<部署命名空间>`：Redis 键前缀、Kafka topic / 消费组前缀、MySQL 库名都随它，文中的 `game:`、`game-*` topic、库 `game`、账号 `game_app` 都是它取缺省值时的写法。
+> 两者的关系：**一个部署命名空间对应一个 K8s 应用 namespace**（§5.2 补记）。镜像命名空间 `GAME_IMAGE_NAMESPACE` 与 Nacos namespace 是另两种含义，对照表见 architecture.md §6.2；
+> chart 的 values 键将来用 `gameNamespace`，不用 `namespace`（与 `.Release.Namespace` 混淆）。
 >
 > **Java 侧**：以 2026-10-05 的工作区为准，HEAD `9fde7d8`。已提交：5.2（`6b28e9d`）、7.1a（`37dd8dc`：三个 workflow、`deploy/compose/infra.yaml`、`deploy/docker/Dockerfile`、根 pom 的 build-info）、
 > 7.2a。工作区里未提交的并行改动：6.2（新模块 `game-battle`，根 pom 已登记）、5.3 的 scene-manager 部分（`InstanceIdIssuer`、`SceneIdAllocator`）、gate 限频重构（`game-net/.../limit`）。
@@ -55,7 +57,7 @@
 | 1 | Java 版上不上 K8s（盘点开放问题 7，`java-infra.md:389`；7.1 Q10 留给本批） | **上 K8s，不上 Agones**。正确性靠 CI 里一次性 k3s 集群上的真部署 + robot 证明；compose 整栈（7.1）继续作为单机演示形态 |
 | 2 | 清单怎么生成 | **Helm**（30.3K，同类最高）：一个 library chart + 三个 chart，只管声明式部分。命令式步骤（区服目录、排空、等待、门禁）放 Java 运维 CLI 模块 **`game-ops`**，它只调 `helm` / `kubectl` 和 game-data 的运维接口。5583 行的 PowerShell 生成器不移植 |
 | 3 | 哪些东西按 zone 部署 | **只有 game-gate、game-scene**。login、gateway、scene-manager、社交五服、data、battle、match 都全局一份（`zone-travel-spec.md:821-834`）。一个 zone = 一个 Helm release `game-zone-<id>`。多 zone 以 5.4 的 X16 为前置 |
-| 4 | namespace | 一个环境一个应用 namespace（缺省 `game-java`），放全局服务和全部 zone；依赖放 `<ns>-infra`，只给 dev / CI / 演示用，生产外接托管的 MySQL / Redis / Kafka |
+| 4 | namespace | 一个环境一个应用 namespace（缺省 `game-java`），放全局服务和全部 zone；依赖放 `<k8s-ns>-infra`，只给 dev / CI / 演示用，生产外接托管的 MySQL / Redis / Kafka |
 | 5 | 服务发现 | **K8s Service DNS + Dubbo 直连 URL**（`tri://game-login:20881`，与 compose 同名）；K8s 上不部署 Nacos。按节点的调用（gate→scene 链路、资产通道、match→battle 控制面）照旧从 Redis 节点目录取 Pod IP |
 | 6 | gate / battle 对外入口 | StatefulSet + 每序号一个 Service（`publishNotReadyAddresses: true`）+ PDB `maxUnavailable: 0`，与基线 external 同形。通告地址由 Java 进程按 Pod 序号自己算（四种暴露模式，§5.5）。**同一 zone 的每个 gate 必须有独立的客户端地址** |
 | 7 | scene | 单池 Deployment，不建 Service。滚动 `maxSurge: 100% / maxUnavailable: 0`，每个玩家至多被疏散一次（基线每次 scene 发版都断开玩家，B19）。PDB `maxUnavailable: 1`。宽限期由模板按 5.5 的 C2 公式求下限，不低于 60 s |
@@ -755,9 +757,9 @@ loop 心跳停发 health → `logicLoop` liveness（J5）；FleetAutoscaler → 
 ### 5.2 namespace、chart 与 release
 
 ```
-<ns>-infra   （缺省 game-java-infra；只给 dev / CI / 演示）
+<k8s-ns>-infra   （缺省 game-java-infra；只给 dev / CI / 演示）
   release game-infra     chart deploy/helm/game-infra      mysql / redis / kafka（StatefulSet + PVC）
-<ns>         （缺省 game-java；一个环境一个）
+<k8s-ns>         （缺省 game-java；一个环境一个）
   release game-platform  chart deploy/helm/game-platform   game-gateway game-login game-scene-manager game-friend game-chat game-team game-guild
                                                        game-trade game-data game-battle [game-match]，NetworkPolicy、PDB、可选 Ingress / PodMonitor / 规则包装
   release game-zone-<id> chart deploy/helm/game-zone       game-gate-z<id>（StatefulSet + headless + 每序号 Service + PDB）、game-scene-z<id>（Deployment + PDB）
@@ -770,10 +772,23 @@ deploy/helm/
 ```
 
 - **一个环境 = 一个应用 namespace = 一套 Redis / MySQL 库 / Kafka**。节点号租约与防护代次的键里没有环境段（`tools.md:416`），基线靠 `ClusterId` 区分（`k8s_deploy.ps1:13-22`），Java 靠物理隔离（Q54）。
+  **（2026-10-12 补记）** 上面的理由已成历史：部署命名空间（architecture.md §6.2）让 Java 的租约与代次键有了环境段（`<部署命名空间>:node-id:…`、`…:node-id-epoch:…`），
+  Redis 键、Kafka topic / 消费组、MySQL 库名都按它分开。新口径：
+  - **一个环境 = 一个 K8s 应用 namespace = 一个部署命名空间**（`GAME_NAMESPACE`，一个环境的全部 Pod 与运维工具同值）。中间件既可以各环境一套（物理隔离），
+    也可以多个部署命名空间共用一套（名字隔离）。
+  - **怎么选**：共用只是名字隔离、**不是安全边界**——Redis 没有按租户的用户、Kafka 没有 SASL ACL，一个环境的进程能读写另一个环境的键与 topic，ID（`player_id`、
+    雪花号）也只在部署命名空间内唯一。dev / CI / 演示可以共用；**生产缺省各一套**，要共用必须先落地 Redis username（`~<部署命名空间>:*` 一类的 ACL）与 Kafka SASL
+    （PREFIXED `<部署命名空间>-` 的 Topic / Group ACL、按 SASL principal 的配额），并且各环境的密钥不同（Q54）。
+  - **可观测性随之带部署维度**：指标名不带命名空间，部署之间靠 K8s namespace 区分——§5.13 的重标加 `namespace ← __meta_kubernetes_namespace`，告警的 `by (…)`
+    与 Alertmanager 的 `group_by` 带上它；Loki 本来就有 `namespace` 标签（§5.12）；NetworkPolicy 本来就按 K8s namespace 生效（§5.7）。同一个 K8s namespace 里
+    放两个部署命名空间不支持：Pod 互通只剩 HMAC、告警按 zone 合并（例如 A25 会被另一套的健康 scene 掩盖）。
+  - Nacos 不在 K8s 上部署（§5.3：Service DNS + Dubbo 直连），K8s 形态不涉及 Nacos namespace。
 - **全局服务和各 zone 同一个 namespace**：按 zone 部署的只有 gate / scene；Secret 只存一份、Service 用短名（与 compose 同名，环境变量两边一致）、NetworkPolicy 简单。
 - **infra 单独一个 namespace**：误删应用 namespace 不会带走 PVC；NetworkPolicy 只放行来自应用 namespace 的流量。
 - **每个 zone 一个 release**：开关一个 zone 不碰别的 zone；`helm history` / `helm rollback` 按 zone 粒度。配置全部入库（values + zones 文件），从根上消灭基线「参数不粘滞」（B17）。
 - **标签**：`app.kubernetes.io/{name,instance,part-of=game-java,version}`；zone 级资源另加 `game/zone: "<id>"`（Prometheus 里是 `__meta_kubernetes_pod_label_game_zone`）。
+  （2026-10-12 补记）没有承载部署命名空间的 Pod 标签：`instance` 已被「每个 zone 一个 release」占用，部署维度取 K8s namespace（上一条补记），不另加 `game/namespace`；
+  所以一个 K8s 应用 namespace 只放一个部署命名空间。
 
 ### 5.3 服务发现
 
@@ -850,7 +865,7 @@ spec:
 | kafka | infra / StatefulSet + PVC，`fsGroup` | 1 / — | 同上 | 9092 → `kafka`（通告 headless FQDN） | minAvailable 1 | 60 s | — / 1Gi |
 
 **infra 的补充约定**（只 dev / CI / 演示）：
-- MySQL readiness 用 `mysqladmin ping --protocol=tcp`（socket 在 initdb 期间会谎报，`deploy-ci-spec.md:325-326`）；`MYSQL_DATABASE=${GAME_NAMESPACE:-game}`（库名 = 部署命名空间；game-team 冷启动的坑，`:993`）；initdb 脚本用 Secret 里的口令建 `game_app` 并只授 §7.5 的权限——**口令同源**（修 B2 / B3），CI 就用它跑，权限不够会当场暴露。
+- MySQL readiness 用 `mysqladmin ping --protocol=tcp`（socket 在 initdb 期间会谎报，`deploy-ci-spec.md:325-326`）；`MYSQL_DATABASE` = 本环境的部署命名空间（values 必填的 `gameNamespace`，见 §7.1；库名 = 部署命名空间；game-team 冷启动的坑，`:993`）；initdb 脚本用 Secret 里的口令建 `game_app` 并只授 §7.5 的权限——**口令同源**（修 B2 / B3），CI 就用它跑，权限不够会当场暴露。
 - Redis：`--appendonly yes --appendfsync everysec`、`maxmemory-policy noeviction`（里面是锁、租约、组队等权威数据），CI 也设 `--requirepass`，**每个 Java 进程都注入 `GAME_REDIS_PASSWORD`**（修 B4 那一类：preflight 逐进程核对拿到了口令）；readiness `redis-cli ping`，PONG 或 NOAUTH 都算（照基线 `redis.yaml:108-135`）。
 - Kafka：KRaft 单节点，关自动建 topic，副本因子 1，挂 PVC（`fsGroup` 取镜像运行用户 gid，CI 首轮核对，H8）；只改 replicas 不会带来冗余；探针里把 `KAFKA_HEAP_OPTS` 压小（基线 README `:1004-1008`）。
 - 镜像 digest 与 `deploy/compose/infra.yaml` 逐字相同，CI 守卫比对文件（§0.6 #25）。infra Pod 同样 `enableServiceLinks: false`。
@@ -906,6 +921,8 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | 出站 | 不限制（DNS、托管依赖、GHCR 拉取都要；YAGNI） |
 
 这同时堵住盘点隐患②「Dubbo 端口对整个集群开放」（`java-infra.md:342`）。port-forward 走 kubelet 进 Pod 网络回环，不受 NetworkPolicy 影响。
+（2026-10-12 补记）规则 ① 的 `podSelector` 不带 `namespaceSelector`，只匹配本 K8s namespace 里的 Pod：两个部署命名空间分属两个 K8s namespace 时互不相通（§5.2 补记）。
+同一个 K8s namespace 里放两套部署不支持——那样 ① 会让两套互通，只剩 HMAC 一道防线。
 
 **securityContext**（Java 容器）：见 §5.4 模板。infra 容器沿用各镜像缺省，不强制只读根。
 
@@ -1044,6 +1061,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
   （只读挂 docker.sock，只用于 CI 与单机，H28）。VRL：`parse_json` 失败就回落 Spring 文本正则（照基线 `config.alloy:443-467`），文本格式的堆栈续行按行头合并；Loki sink 打开**磁盘缓冲**（H12）。
 - **Loki 标签只用低基数字段**：`env`、`namespace`（K8s）、`service`（JSON 字段，缺省取 Pod 标签 `app.kubernetes.io/name` 或 compose 服务名）、`zone`（Pod 标签 `game/zone`；全局进程填 `global`）、
   `level`（小写）、`stream_class`（`logger_name` 以 `game.audit.` 开头为 `audit`，否则 `app`）。pod、logger、thread 留在行内（`| json` 查询）——pod 不作标签，因为每次滚动都换 pod 名、制造新流。CI 查 `/loki/api/v1/labels` 必须是白名单子集。
+  （2026-10-12 补记）`namespace`（K8s）就是部署维度（§5.2 补记）：同一个 Loki 收多套部署时按它区分；`player_id`、雪花号只在部署命名空间内唯一，跨部署检索必须带它。
 - **存储**：Loki 3.5.x（tag + digest 钉死），`retention_period: 168h`；`retention_stream: [{selector: '{stream_class="audit"}', priority: 1, period: 720h}]`，与审计 topic 30 天对齐（`data-ops-spec.md:194`）；
   compactor retention 与 `delete_request_store` 都要配（基线 `loki.yaml:68-73`）；不配 ruler。
 - **审计兜底在 JSON 日志与 K8s 上的可回灌性**（J10，同批阻断项）：`game.audit.fallback` 是 Kafka 没确认的流水唯一的回灌来源（`AuditFallbackLog.java:29-30`：WARN 级、`extra=` 在行尾）。现状的两处断点：
@@ -1061,10 +1079,14 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 - **抓取**：每个 Java Pod 打 `prometheus.io/*` 注解（基线 Go 服务同约定，`manifests/go-svc/chat.yaml:52`）；chart 可选生成 PodMonitor（不作为依赖）。重标规则（`deploy/observability/prometheus/scrape-k8s.example.yaml`）：
   `job` ← `app.kubernetes.io/name`（**必须等于进程的 `spring.application.name`**，即公共标签 `application`，由 A12 与 CI 守卫）、`zone` ← `__meta_kubernetes_pod_label_game_zone`（全局进程没有）、`instance` ← Pod 名。
   compose 用静态目标 `game-<模块>:<管理端口>`，给出相同的 job 与 zone。抓取 15 s，规则评估 30 s（同基线 `interval: 30s`）。
+  （2026-10-12 补记）重标再加 `namespace` ← `__meta_kubernetes_namespace`（K8s 应用 namespace = 部署命名空间，§5.2 补记）；compose 的静态目标给 `namespace=<部署命名空间>`。
+  全部告警规则的 `by (…)` 带上 `namespace`（如 A25「zone 有 gate 却没有活 scene」按 `by (namespace, zone)`，否则会被另一套部署的健康 scene 掩盖），
+  规则的单元测试（promtool）同样带这个标签。
 - **口径**：进程里仍不加 zone / 实例标签（architecture §11）；zone 是**部署层**的抓取目标标签，基数等于目标数。architecture §11 补这一句（Q46）。
 - **规则载体**：纯 Prometheus `groups:` 文件 `deploy/observability/prometheus/rules/game-*.rules.yaml` 是唯一来源；K8s 的 PrometheusRule 或 ConfigMap 包装由 game-platform chart 从同一份文件生成（可选，缺省关）。
 - **路由**：仓库只交付规则（`severity`、`runbook_url`）与 `docs/ops/alerts.md`；接收端由环境提供（Q42）。建议：critical → 呼人、warning → 频道、info → 丢弃；`group_by: [alertname, zone, job]`；A1 / A2 抑制同 instance 的其他告警；
   开区、整 zone 维护前 silence（同基线 `scene-node-role-split.md:206-216`；game-ops 开关区时打印 silence 命令）。
+  （2026-10-12 补记）`group_by` 改成 `[alertname, namespace, zone, job]`：两个部署命名空间进同一个 Prometheus / Alertmanager 时，不带 `namespace` 会把两套的同号 zone 合成一条。
 - **CI 验证**不需要 Alertmanager：Prometheus 自己求值，`ALERTS{alertstate=…}` 就能看到 pending / firing（C9）。
 
 ### 5.14 Java 代码改动（随 7.6；全部不是客户端可见）
@@ -1148,11 +1170,11 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | 变量 | 值 | 用在 |
 |---|---|---|
 | `GAME_RUN_MODE` | prod；CI 用 dev（要跑 GM 类 robot 场景） | 全部 |
-| `GAME_NAMESPACE`（2026-10-12 补记） | 部署命名空间，缺省 `game`；同一套托管 MySQL / Redis / Kafka 上跑多个游戏或多套环境时各取不同的值。一个环境的全部 Pod 与运维工具（AuditFallbackReplay、assetopfix）取同一个值（同一个 ConfigMap 键），定下后不改；模板写 `${GAME_NAMESPACE:-game}` | 全部 |
+| `GAME_NAMESPACE`（2026-10-12 补记） | 部署命名空间（不是 K8s namespace，也不是镜像命名空间；对照表见 architecture.md §6.2），取值 `[a-z][a-z0-9]{0,27}`（1–28 个字符）；同一套托管 MySQL / Redis / Kafka 上跑多个游戏或多套环境时各取不同的值，一个 K8s 应用 namespace 对应一个值（§5.2 补记）。一个环境的全部 Pod 与运维工具（AuditFallbackReplay、assetopfix、PasswordAdmin）取同一个值（同一个 ConfigMap 键，只经环境变量注入），定下后不改。K8s / Helm 没有 shell 式缺省值，Helm 的 `default` 也把空值当没设：chart 的 values 键 `gameNamespace` **必填**（模板用 `required`，缺省部署也显式写 `game`），漏设即渲染失败，不静默落进缺省部署。库名恒等于它（服务启动期核对 `DATABASE()`，§7.5）；`GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` 只覆盖地址 | 全部 |
 | `GAME_MANAGEMENT_ADDRESS` | `0.0.0.0` | 全部 |
-| `GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` / `GAME_MYSQL_USER` | 托管地址；dev / CI 为 `mysql.<ns>-infra` / 3306；用户 `game_app` | 8 个连库进程 |
-| `GAME_REDIS_ADDRESS` | 托管地址；dev / CI 为 `redis://redis.<ns>-infra:6379` | 全部 |
-| `GAME_KAFKA_BOOTSTRAP_SERVERS`、`GAME_AUDIT_REPLICATION_FACTOR` | prod ≥3 个 broker、3；dev / CI `kafka.<ns>-infra:9092`、1 | scene、data |
+| `GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` / `GAME_MYSQL_USER` | 托管地址；dev / CI 为 `mysql.<k8s-ns>-infra` / 3306；用户 `game_app` | 8 个连库进程 |
+| `GAME_REDIS_ADDRESS` | 托管地址；dev / CI 为 `redis://redis.<k8s-ns>-infra:6379` | 全部 |
+| `GAME_KAFKA_BOOTSTRAP_SERVERS`、`GAME_AUDIT_REPLICATION_FACTOR` | prod ≥3 个 broker、3；dev / CI `kafka.<k8s-ns>-infra:9092`、1 | scene、data |
 | `GAME_*_URL` | Service 名（§5.3） | 各 Dubbo 调用方 |
 | `GAME_ZONE_ID` | zone 号 | gate、scene |
 | `GAME_ADVERTISE_HOST` | scene：`$(POD_IP)`；gate：按暴露模式（§5.5）；battle：`$(POD_IP)`（目录 `rpc_host`） | scene、gate、battle |
@@ -1207,9 +1229,13 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 ### 7.5 MySQL 账号
 
 - 应用账号 **`game_app`**：`GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON game.* TO 'game_app'@'%'`，不给 DROP、不给全局权限。启动期建表（`spring.sql.init`、pbmysql 只扩不缩）需要 CREATE / ALTER / INDEX；
-  （2026-10-12 补记）库名与账号随部署命名空间：一般写法是 ``GRANT … ON `<库名>`.* TO '<部署命名空间>_app'@'%'``，库名缺省 = 部署命名空间；MySQL 用户名上限 32 字符，
-  所以部署命名空间不超过 28 个字符。共用一个 MySQL 实例的多个部署各用自己的账号，互相看不到对方的库——这是本轮唯一现在就能做的按租户权限隔离。Redis / Kafka 的按部署账号（Redis ACL 用户 `~<部署命名空间>:*`、Kafka PREFIXED `<部署命名空间>-` 的 ACL 与配额）是后续项：
-  它们依赖的配置项还不存在（`game.redis.*` 只有 password、没有 username；Kafka 客户端没有任何 SASL / SSL 配置）。
+  （2026-10-12 补记）库名与账号随部署命名空间：写法是 ``GRANT … ON `<部署命名空间>`.* TO '<部署命名空间>_app'@'%'``（库名恒等于部署命名空间，服务启动期核对 `DATABASE()`，
+  偏离规格的存量部署只能经应急开关 `GAME_MYSQL_EXPECT_DATABASE`）；MySQL 用户名上限 32 字符，`GameNamespace` 因此把部署命名空间限制在 1–28 个字符（启动时校验，
+  不会拖到 `CREATE USER` 才失败）。共用一个 MySQL 实例的多个部署各用自己的账号，互相看不到对方的库——这是本轮唯一现在就能做的按租户权限隔离。Redis / Kafka 的按部署账号
+  是后续项，它们依赖的配置项还不存在（`game.redis.*` 只有 password、没有 username；Kafka 客户端没有任何 SASL / SSL 配置）：Redis ACL 用户按 `~<部署命名空间>:*` 一类的
+  键模式授权；Kafka 的 **ACL** 按 PREFIXED `<部署命名空间>-` 授 Topic、Group（将来有事务时加 TransactionalId），**配额**按租户的 SASL principal（user 实体）配——
+  Kafka 配额只能按 user、(user, client-id)、client-id 的精确名或 `<default>` 配，没有前缀匹配，而 client.id 里还带节点地址等变量，按 client-id 配租户配额做不到；
+  client.id 的 `<部署命名空间>-` 前缀只用来在 broker 日志与指标里辨认租户。
   pbmysql 的 `GET_LOCK` 不需要额外权限；它打印的修复语句（含 `DROP INDEX`）本来就不执行（`SchemaPlanner.java:326`）。
 - 库 `game`（= 部署命名空间，缺省 game）由 `MYSQL_DATABASE`（dev / CI）或 DBA（生产）预建，不再依赖 `createDatabaseIfNotExist`；带这个参数的 URL 在库已存在时是否要求库级 CREATE 权限，以 CI 实测为准（C4）。
 - 需要 DROP 的结构变更由 DBA 账号按 `db-migrations.md` 手工做。7.1 的集成测试仍用 root 建临时库，不受影响。root 只给 MySQL 容器与 initdb 用；prod 运行模式下进程用 root 一律拒启（§5.11）。
@@ -1333,7 +1359,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | Q18 | 单节点房间上限 `game.battle.max-rooms`（6.2 Q7 留给 7.6，`battle-node-spec.md:1516`） | **7.6 不加**，7.4 压测后再定 | 连接上限已兜住负载；没有数据定值 |
 | Q19 | 上不上 HPA | **7.6 不上** | gate / scene / battle 缩容必须先排空 / 疏散，HPA 绕过这一步；全局服务没有压测数据（YAGNI） |
 | Q20 | 上不上 NetworkPolicy | **上** | 修 B14；同 part-of 粗放行的维护成本低 |
-| Q21 | MySQL 账号 | **`game_app`（部署命名空间非缺省时为 `<部署命名空间>_app`；§7.5 权限）；prod 下用 root 拒启（两层）；infra initdb 用同一个 Secret 值建账号** | 7.1 §6.2 交来；最小权限；同源修 B3 |
+| Q21 | MySQL 账号 | **`game_app`（部署命名空间非缺省时为 `<部署命名空间>_app`，部署命名空间最长 28 个字符、启动时校验，账号名因此不超过 MySQL 的 32 字符上限；§7.5 权限）；prod 下用 root 拒启（两层）；infra initdb 用同一个 Secret 值建账号** | 7.1 §6.2 交来；最小权限；同源修 B3 |
 | Q22 | 备份 CronJob | **不移植** | infra 只给 dev / CI；生产托管 PITR；基线自己有 B9 |
 | Q23 | PriorityClass | **chart 留值、缺省空**；手册建议给 gate / scene / battle 配高优先级 | 集群级对象，托管集群常受限 |
 | Q24 | 资源怎么配 | **memory request = limit；CPU 只写 request + ActiveProcessorCount；初值见 §5.4，7.4 压测后改** | CPU limit 的 CFS 节流造成 scene 帧尾延迟；不写 memory limit 堆按节点算 |
@@ -1366,7 +1392,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | Q51 | 生产保留期（`data-ops-spec.md:1101`） | **流水 180 天、LOGIN / LOGOUT / PERIODIC 快照 90 天、GM / 安全快照永久，写进 `values/prod.example.yaml`；prod 为 0 时 preflight WARN** | 采纳 7.2 的建议值；0 只是容量问题 |
 | Q52 | PARITY 版本基线怎么写 | **首个发布起按 `vX.Y.Z ↔ mmorpg commit` 登记** | 现在每行都是 0.1.0-SNAPSHOT，区分不开 |
 | Q53 | K8s 上要不要支持挂卷换表（7.1 §3.7） | **不支持**；换表 = 出新镜像 | 「镜像 = 代码 + 同一提交的表」才能追溯 |
-| Q54 | 多个环境能不能共享一个 Redis | **不能**；一个环境一套 Redis / MySQL / Kafka | 租约与代次键里没有环境段（`tools.md:416`） |
+| Q54 | 多个环境能不能共享一个 Redis | ~~**不能**；一个环境一套 Redis / MySQL / Kafka~~ **（2026-10-12 补记，取代原裁决）dev / CI / 演示可共享（各环境取不同的部署命名空间）；生产缺省各一套，共享前先落地 Redis username 与 Kafka SASL ACL**（§5.2 补记） | 原理由「租约与代次键里没有环境段（`tools.md:416`）」已成历史：部署命名空间（architecture.md §6.2）让 Redis 键、Kafka topic / 消费组、MySQL 库名都按环境分开。共享只是名字隔离、不是安全边界（没有按租户的 Redis 用户与 Kafka ACL，ID 只在部署命名空间内唯一），所以生产仍缺省物理隔离 |
 | Q55 | k8s CI 的频率 | **静态检查每次 push；k3s 端到端每日 + `deploy/helm/**` / `deploy/observability/**` / `game-ops/**` 变动时 + 手动** | 端到端约 30–40 分钟 |
 | Q56 | 发布说明的契约差异（7.5 CQ13 设想由 `tools/Release.java` 复用 `ContractGate`） | **由 `game-ops release manifest` 以库依赖调用 `ContractGate`**，比「上一个发布 tag → 当前」 | 工具形态已改为模块（Q28）；一份实现 |
 | Q57 | 集群内压测、robot 镜像、压测编排（7.4 Q35 / Q36 交来） | **7.6 不做**：robot 在 runner 宿主上跑（经 Ingress 与 NodePort 已覆盖真实入口）；chart 留一个可选的集群内 robot Job 入口，缺省关；压测编排等 7.4 的 `summary.json` 落地后另起 | 7.1 Q6 / D18 同口径；YAGNI |

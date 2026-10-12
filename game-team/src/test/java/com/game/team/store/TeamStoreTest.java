@@ -3,8 +3,10 @@ package com.game.team.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
+import com.game.discovery.RedisKeys;
 import com.game.proto.team.TeamChangeReason;
 import com.game.team.proto.TeamMemberRecord;
 import com.game.team.proto.TeamRecord;
@@ -33,6 +35,8 @@ import org.junit.jupiter.api.Test;
  * 退避被中断即停）；单轮清锁受调用方预算约束。真脚本上的同一组行为在 {@code TeamStoreIntegrationTest}。
  */
 class TeamStoreTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long NOW = 1_900_000_000_000L;
     private static final long TID = Long.MIN_VALUE + 5; // ≥ 2^63
@@ -114,7 +118,7 @@ class TeamStoreTest {
     @Test
     void Redis失败或超出预算_mutate抛依赖故障() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onEval = (s, k, a) -> new RuntimeException("boom");
         assertThatThrownBy(() -> mutate(store, Bind.target(C, TID), Op.apply(C, 1), SessionLoader.NONE))
                 .isInstanceOf(DependencyException.class).hasRootCauseMessage("boom");
@@ -131,7 +135,7 @@ class TeamStoreTest {
     @Test
     void 回复形状不对或下标越界_是故障() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onEval = (s, k, a) -> List.of(b("1"));
         assertThatThrownBy(() -> store.read(A, TID, deadline())).isInstanceOf(DependencyException.class);
 
@@ -147,7 +151,7 @@ class TeamStoreTest {
     @Test
     void 提交前预算已过期_回4029且不发提交() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onEval = (s, k, a) -> read(null, NOW, 1, team(A, B));
         SessionLoader slow = (members, deadline) -> {
             while (!deadline.expired()) {
@@ -165,7 +169,7 @@ class TeamStoreTest {
     @Test
     void 版本冲突累计三次回4029_不退避立即重读() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onEval = (s, k, a) -> s == TeamScript.READ ? read(null, NOW, 1, team(A, B)) : List.of(0L);
         MutateResult res = mutate(store, Bind.target(C, TID), Op.apply(C, 1), SessionLoader.NONE);
         assertThat(res.outcome()).isEqualTo(Outcome.REJECTED);
@@ -180,7 +184,7 @@ class TeamStoreTest {
     @Test
     void 绑定与记录缺失() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onEval = (s, k, a) -> s == TeamScript.READ ? read(null, NOW, 1, team(A, B)) : 1L;
         MutateResult unbound = mutate(store, Bind.caller(A, 0), Op.leave(A), SessionLoader.NONE);
         assertThat(unbound.outcome()).as("expected=0 一律未绑定").isEqualTo(Outcome.NOT_BOUND);
@@ -210,7 +214,7 @@ class TeamStoreTest {
     @Test
     void 会话读取抛异常_按全员UNKNOWN_不惰性转让() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         AtomicInteger commits = new AtomicInteger();
         redis.onEval = (s, k, a) -> {
             if (s == TeamScript.READ) {
@@ -240,7 +244,7 @@ class TeamStoreTest {
     @Test
     void 保留成员索引错位_修复落盘后重读重算原操作() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         long other = TID + 100;
         AtomicInteger reads = new AtomicInteger();
         AtomicInteger commits = new AtomicInteger();
@@ -270,7 +274,7 @@ class TeamStoreTest {
     @Test
     void 自由读_先治过孤儿再失败_仍带出healed() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         AtomicInteger hgets = new AtomicInteger();
         redis.onHget = () -> hgets.getAndIncrement() == 0 ? u(TID) : new RuntimeException("hget boom");
         redis.onEval = (s, k, a) -> s == TeamScript.READ ? read(TID, 9, 0, null) : 1L;
@@ -284,7 +288,7 @@ class TeamStoreTest {
     @Test
     void 自由读_索引持续变化_三轮后不稳定() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onHget = () -> u(TID);
         redis.onEval = (s, k, a) -> read(TID + 1, 9, 1, team(A));
         FreeRead r = store.readFree(A, deadline());
@@ -296,7 +300,7 @@ class TeamStoreTest {
     @Test
     void 自由读_索引tid不是十进制是故障_缺失为无队() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onHget = () -> b("abc");
         assertThat(store.readFree(A, deadline()).status()).isEqualTo(FreeRead.Status.FAILED);
 
@@ -323,7 +327,7 @@ class TeamStoreTest {
     @Test
     void 读成员_成员表持续变化抛MembersChanged_长度不对是故障() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         TeamRecord[] seq = {team(A, B), team(A, B, C), team(A)};
         AtomicInteger n = new AtomicInteger();
         redis.onEval = (s, k, a) -> members(1, seq[n.getAndIncrement() % 3], k.size() - 1);
@@ -339,7 +343,7 @@ class TeamStoreTest {
     @Test
     void 续期_自愈_剪除按返回值1判定() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         redis.onEval = (s, k, a) -> 1L;
         Snapshot snap = new Snapshot(A, TID, 9, TID, 3, team(A, B), 100, NOW);
         assertThat(store.touch(snap, deadline())).isTrue();
@@ -419,7 +423,7 @@ class TeamStoreTest {
     @Test
     void 开战锁提交_在本轮快照上钉版本写入令牌截止与名单_不重读不重算() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         List<String> expectedVers = new ArrayList<>();
         List<TeamRecord> written = new ArrayList<>();
         redis.onEval = (s, k, a) -> {
@@ -449,7 +453,7 @@ class TeamStoreTest {
     @Test
     void 开战锁提交_快照缺记录是故障_规则拒绝与预算过期都不发提交() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         Snapshot snap = new Snapshot(A, TID, 9, TID, 7, team(A, B), 86_000, NOW);
 
         assertThatThrownBy(() -> store.commitMatchLock(null, A, "tok", List.of(A, B), NOW + LOCK_MS, SessionLoader.NONE, deadline()))
@@ -480,7 +484,7 @@ class TeamStoreTest {
     @Test
     void 开战锁提交_版本冲突回retry_索引错位时修复提交钉在同一版本_意外返回与Redis故障抛依赖故障() {
         FakeRedis redis = new FakeRedis();
-        TeamStore store = new TeamStore(redis);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
         Snapshot snap = new Snapshot(A, TID, 9, TID, 7, team(A, B), 86_000, NOW);
 
         redis.onEval = (s, k, a) -> List.of(0L);
@@ -521,7 +525,7 @@ class TeamStoreTest {
     void EndMatch_记录缺失_令牌不符_锁已过期_都停止_不提交不退避() {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
-        TeamStore store = new TeamStore(redis, hooks);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
 
         redis.onEval = (s, k, a) -> read(null, NOW, 0, null);
         assertThat(store.endMatch(TID, "tok", true, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.RECORD_MISSING);
@@ -548,7 +552,7 @@ class TeamStoreTest {
     void EndMatch_冲突与故障都退避后重读_没有三次上限_最终清锁() {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
-        TeamStore store = new TeamStore(redis, hooks);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         AtomicInteger reads = new AtomicInteger();
         AtomicInteger commits = new AtomicInteger();
         List<String> expectedVers = new ArrayList<>();
@@ -591,7 +595,7 @@ class TeamStoreTest {
     void EndMatch_索引错位的修复落盘后立即重读_不退避不计冲突() {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
-        TeamStore store = new TeamStore(redis, hooks);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         long other = TID + 100;
         AtomicInteger reads = new AtomicInteger();
         AtomicInteger commits = new AtomicInteger();
@@ -624,7 +628,7 @@ class TeamStoreTest {
     void EndMatch_Redis持续故障_到110秒的单调截止放弃_锁留给自然过期() {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
-        TeamStore store = new TeamStore(redis, hooks);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         redis.onEval = (s, k, a) -> new RuntimeException("redis down");
         // 单调时钟每问一次走 25 s：起点 0，25 / 50 / 75 / 100 s 各跑一轮，125 s 时越过 110 s
         AtomicInteger asked = new AtomicInteger();
@@ -652,7 +656,7 @@ class TeamStoreTest {
     void EndMatch_每轮只有独立的2秒预算_Redis不应答也不会永远挂住() {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
-        TeamStore store = new TeamStore(redis, hooks);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         redis.onEval = (s, k, a) -> FakeRedis.NEVER;
         // 起点与第一次检查都是 0：跑一轮（真等 2 s 的轮预算）；之后时钟跳过截止
         AtomicInteger asked = new AtomicInteger();
@@ -674,7 +678,7 @@ class TeamStoreTest {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
         hooks.interruptOnSleep = true;
-        TeamStore store = new TeamStore(redis, hooks);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         redis.onEval = (s, k, a) -> s == TeamScript.READ ? read(null, NOW, 7, locked("tok")) : List.of(0L);
 
         EndMatchResult res;
@@ -696,7 +700,7 @@ class TeamStoreTest {
     void 单轮清锁_只跑一轮_受调用方预算约束_停止_已清_没清三种形态() {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
-        TeamStore store = new TeamStore(redis, hooks);
+        TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         List<TeamRecord> written = new ArrayList<>();
 
         redis.onEval = (s, k, a) -> read(null, NOW, 8, locked("other"));

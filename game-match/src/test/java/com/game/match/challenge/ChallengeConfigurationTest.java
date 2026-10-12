@@ -6,6 +6,7 @@ import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
@@ -31,6 +32,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -107,7 +109,7 @@ class ChallengeConfigurationTest {
         }
     }
 
-    private final ApplicationContextRunner runner = new ApplicationContextRunner()
+    private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withUserConfiguration(Collaborators.class, ChallengeConfiguration.class);
 
     private static SessionContext session(long playerId) {

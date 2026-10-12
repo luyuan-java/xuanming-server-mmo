@@ -14,8 +14,10 @@ import com.game.battle.admission.AdmissionGate;
 import com.game.battle.admission.AdmissionPhase;
 import com.game.battle.port.kafka.KafkaBattleResultSink;
 import com.game.battle.testing.FakeResultKafka;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.proto.BaseAttributesComp;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattleRouting;
@@ -69,6 +71,7 @@ import org.springframework.test.context.DynamicPropertySource;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class BattleApplicationIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     static final String ADMIN_TOKEN = "battle-it-admin-token";
     static final int CLIENT_PORT = freePort();
     static final int RPC_PORT = freePort();
@@ -164,7 +167,7 @@ class BattleApplicationIntegrationTest {
         assertThat(admission.phase()).isEqualTo(AdmissionPhase.OPEN);
         BattleIdentity identity = node.identity().orElseThrow();
         assertThat(identity.advertisePort()).isEqualTo(CLIENT_PORT);
-        BattleNodeInfo entry = new NodeDirectory<>(redis, NodeTypes.BATTLE, BattleNodeInfo.parser()).list(0).stream()
+        BattleNodeInfo entry = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.BATTLE, BattleNodeInfo.parser()).list(0).stream()
                 .filter(info -> info.getInstanceId().equals(node.instanceId())).findFirst().orElseThrow();
         assertThat(entry.getNodeId()).isEqualTo(identity.nodeId());
         assertThat(entry.getAccepting()).isTrue();

@@ -58,15 +58,17 @@ public final class RedissonPlacementStore implements PlacementStore {
     static final long TTL_MS = TimeUnit.SECONDS.toMillis(MatchBudgets.PLACEMENT_TTL_SECONDS);
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final long writeBudgetMs;
 
-    public RedissonPlacementStore(RedissonClient redis) {
-        this(redis, MatchBudgets.PLACEMENT_WRITE_WORST_MS);
+    public RedissonPlacementStore(RedissonClient redis, RedisKeys redisKeys) {
+        this(redis, redisKeys, MatchBudgets.PLACEMENT_WRITE_WORST_MS);
     }
 
     /** @param writeBudgetMs 一次写的外层截止（生产恒为 {@value MatchBudgets#PLACEMENT_WRITE_WORST_MS}；测试收短） */
-    RedissonPlacementStore(RedissonClient redis, long writeBudgetMs) {
+    RedissonPlacementStore(RedissonClient redis, RedisKeys redisKeys, long writeBudgetMs) {
         this.redis = Objects.requireNonNull(redis, "redis");
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         if (writeBudgetMs < 1) {
             throw new IllegalArgumentException("落点写入的截止必须为正: " + writeBudgetMs);
         }
@@ -109,7 +111,7 @@ public final class RedissonPlacementStore implements PlacementStore {
     public void delete(long battleId) {
         String battle = Long.toUnsignedString(battleId);
         try {
-            redis.getKeys().deleteAsync(RedisKeys.matchBattlePlacement(battleId)).toCompletableFuture().get(DELETE_WAIT_MS, TimeUnit.MILLISECONDS);
+            redis.getKeys().deleteAsync(redisKeys.matchBattlePlacement(battleId)).toCompletableFuture().get(DELETE_WAIT_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.warn("删落点记录时被中断（随 TTL 自清） battle_id={}", battle);
@@ -148,7 +150,7 @@ public final class RedissonPlacementStore implements PlacementStore {
     private <R> CompletableFuture<R> eval(String script, RScript.ReturnType type, long battleId, byte[]... args) {
         try {
             return redis.getScript(ByteArrayCodec.INSTANCE).<R>evalAsync(RScript.Mode.READ_WRITE, script, type,
-                    List.of(RedisKeys.matchBattlePlacement(battleId)), (Object[]) args).toCompletableFuture();
+                    List.of(redisKeys.matchBattlePlacement(battleId)), (Object[]) args).toCompletableFuture();
         } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);
         }

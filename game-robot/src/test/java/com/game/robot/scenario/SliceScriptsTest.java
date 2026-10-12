@@ -7,6 +7,7 @@ import com.game.robot.CrashWindowOptions.Variant;
 import com.game.robot.RobotOptions;
 import com.game.robot.scenario.BattleCrashChecks.Stage;
 import com.game.robot.scenario.BattleCrashChecks.State;
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
@@ -18,11 +19,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * {@code tools/local/battle-crash-window.sh}（故障变体的编排脚本）不走样：它「按 start-slice.sh 的方式」单独重启一个进程，所以重启用的函数、
@@ -103,9 +106,12 @@ class SliceScriptsTest {
 
     @Test
     void start_slice导出的每个环境变量本脚本都带上_缺省值相同() {
-        // 带缺省值的：整行相同
-        List<String> defaulted = matches(startSlice, "^(export (GAME_[A-Z_]+)=\"\\$\\{GAME_[A-Z_]+:-[^}]*}\")$");
-        assertThat(defaulted).as("start-slice.sh 里带缺省值导出的变量").hasSizeGreaterThanOrEqualTo(10);
+        // 带缺省值的（${X:-v} 与只在没设时生效的 ${X-v} 两种写法）：整行相同。部署命名空间除外——它不靠本脚本的环境，
+        // start-slice.sh 把切片生效的值写进 run/game-namespace、本脚本读回核对（见「部署命名空间」用例）
+        List<String> defaulted = new ArrayList<>(matches(startSlice, "^(export (GAME_[A-Z_]+)=\"\\$\\{GAME_[A-Z_]+:?-[^}]*}\")$"));
+        assertThat(defaulted).as("start-slice.sh 里带缺省值导出的变量").hasSizeGreaterThanOrEqualTo(11)
+                .contains("export GAME_NAMESPACE=\"${GAME_NAMESPACE-game}\"");
+        defaulted.remove("export GAME_NAMESPACE=\"${GAME_NAMESPACE-game}\"");
         for (String line : defaulted) {
             assertThat(crashWindow).as("本脚本有同一行 %s", line).contains("\n" + line + "\n");
         }
@@ -130,6 +136,101 @@ class SliceScriptsTest {
         assertThat(required).containsExactly("GAME_MYSQL_PASSWORD", "GAME_GATE_TOKEN_SECRET", "GAME_LOGIN_DEV_PASSWORD", "GAME_NODE_LINK_SECRET",
                 "GAME_DUBBO_SECRET");
         assertThat(crashWindow).contains("for required in " + String.join(" ", required) + "; do");
+    }
+
+    @Test
+    void 部署命名空间_start_slice校验后记进run_本脚本读回核对_两份校验逐字相同() {
+        String validate = function(startSlice, "validate_namespace");
+        assertThat(validate).as("start-slice.sh 里有 validate_namespace()").isNotNull()
+                .contains("[[ \"$ns\" =~ ^[a-z][a-z0-9]{0,27}$ ]]").contains("[[ \"$ns\" =~ ^(mysql|sys|public)$ ]]").contains("LC_ALL=C");
+        assertThat(function(crashWindow, "validate_namespace")).as("两份校验逐字相同").isEqualTo(validate);
+
+        // start-slice.sh：只在没设时取 game → 校验（不过退出 1）→ 写 run/game-namespace，都在起第一个进程之前
+        int export = startSlice.indexOf("\nexport GAME_NAMESPACE=\"${GAME_NAMESPACE-game}\"\n");
+        int check = startSlice.indexOf("\nvalidate_namespace \"$GAME_NAMESPACE\" || exit 1\n");
+        int record = startSlice.indexOf("\nprintf \"%s\" \"$GAME_NAMESPACE\" > run/game-namespace\n");
+        int processes = startSlice.indexOf("\nmkdir -p run/logs run/pids\n");
+        assertThat(export).as("没设才取 game（不带冒号）").isPositive();
+        assertThat(check).as("先校验").isGreaterThan(export);
+        assertThat(record).as("再记进 run/").isGreaterThan(check);
+        assertThat(processes).as("都在起进程之前").isGreaterThan(record);
+        assertThat(startSlice).doesNotContain("${GAME_NAMESPACE:-");
+
+        // 本脚本：读回、核对（不一致或两头都缺退出 2），在读秘密与重启任何进程之前；不取缺省值
+        String resolve = function(crashWindow, "resolve_slice_namespace");
+        assertThat(resolve).isNotNull().contains("recorded=$(cat run/game-namespace)").contains("${GAME_NAMESPACE+x}")
+                .contains("validate_namespace \"$GAME_NAMESPACE\" || return 1").contains("export GAME_NAMESPACE");
+        int resolved = crashWindow.indexOf("\nresolve_slice_namespace || exit 2\n");
+        assertThat(resolved).isPositive().isLessThan(crashWindow.indexOf("\nload_secret GAME_ADMIN_TOKEN run/game-admin-token || exit 2\n"));
+        assertThat(crashWindow).doesNotContain("${GAME_NAMESPACE:-").doesNotContain("${GAME_NAMESPACE-");
+    }
+
+    /**
+     * PATH 上第一个能用的 bash（绝对路径）；没有为 null。按 PATH 自己找：Windows 上直接用 "bash" 时进程创建会先去 System32 找到 WSL 的 bash.exe，
+     * 而不是 PATH 上 Git 自带的那个。
+     */
+    private static String bash() {
+        for (String dir : System.getenv().getOrDefault("PATH", "").split(File.pathSeparator)) {
+            for (String name : List.of("bash", "bash.exe")) {
+                Path candidate = dir.isBlank() ? null : Path.of(dir, name);
+                if (candidate == null || !Files.isRegularFile(candidate)) {
+                    continue;
+                }
+                try {
+                    Process p = new ProcessBuilder(candidate.toString(), "-c", "echo ok").redirectErrorStream(true).start();
+                    String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
+                    if (p.waitFor(30, TimeUnit.SECONDS) && p.exitValue() == 0 && out.equals("ok")) {
+                        return candidate.toString();
+                    }
+                } catch (IOException e) {
+                    // 换下一个
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 在 {@code dir} 里用 bash 跑本脚本的两个命名空间函数；{@code recorded} / {@code env} 为 null 表示没有文件 / 没设变量。返回「退出码|输出」。 */
+    private static String resolveIn(String bash, Path dir, String recorded, String env) throws Exception {
+        Files.createDirectories(dir.resolve("run"));
+        Files.deleteIfExists(dir.resolve("run/game-namespace"));
+        if (recorded != null) {
+            Files.writeString(dir.resolve("run/game-namespace"), recorded, StandardCharsets.UTF_8);
+        }
+        String script = "set -u\n"
+                + "validate_namespace() {\n" + function(crashWindow, "validate_namespace") + "}\n"
+                + "resolve_slice_namespace() {\n" + function(crashWindow, "resolve_slice_namespace") + "}\n"
+                + (env == null ? "unset GAME_NAMESPACE\n" : "export GAME_NAMESPACE='" + env + "'\n")
+                + "resolve_slice_namespace 2>/dev/null || exit 2\nprintf '%s' \"$GAME_NAMESPACE\"\n";
+        ProcessBuilder pb = new ProcessBuilder(bash, "-s").directory(dir.toFile()).redirectErrorStream(true);
+        pb.environment().remove("GAME_NAMESPACE");
+        Process p = pb.start();
+        try (var stdin = p.getOutputStream()) {
+            stdin.write(script.getBytes(StandardCharsets.UTF_8));
+        }
+        String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
+        assertThat(p.waitFor(30, TimeUnit.SECONDS)).isTrue();
+        return p.exitValue() + "|" + out;
+    }
+
+    @Test
+    void 部署命名空间_读回核对的实际行为(@TempDir Path dir) throws Exception {
+        String bash = bash();
+        Assumptions.assumeTrue(bash != null, "PATH 上没有可用的 bash");
+        assertThat(resolveIn(bash, dir, "t1", null)).as("没设变量：用切片记下的值").isEqualTo("0|t1");
+        assertThat(resolveIn(bash, dir, "t1", "t1")).as("相同：照常").isEqualTo("0|t1");
+        assertThat(resolveIn(bash, dir, "t1", "game")).as("不同：拒绝，不以 game 重启 t1 的切片").isEqualTo("2|");
+        assertThat(resolveIn(bash, dir, "t1", "")).as("设了空串也算不同").isEqualTo("2|");
+        assertThat(resolveIn(bash, dir, null, null)).as("两头都没有：拒绝，不回落 game").isEqualTo("2|");
+        assertThat(resolveIn(bash, dir, null, "t2")).as("旧切片没有记录：用变量").isEqualTo("0|t2");
+        assertThat(resolveIn(bash, dir, null, "")).as("空串按非法拒绝").isEqualTo("2|");
+        assertThat(resolveIn(bash, dir, "Bad", null)).as("记录的值也要校验").isEqualTo("2|");
+        assertThat(resolveIn(bash, dir, null, "mysql")).as("保留字").isEqualTo("2|");
+        assertThat(resolveIn(bash, dir, null, "a" + "0".repeat(28))).as("29 个字符").isEqualTo("2|");
+        assertThat(resolveIn(bash, dir, null, "a" + "0".repeat(27))).as("28 个字符").isEqualTo("0|a" + "0".repeat(27));
     }
 
     @Test

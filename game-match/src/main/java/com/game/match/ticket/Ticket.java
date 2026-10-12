@@ -3,7 +3,7 @@ package com.game.match.ticket;
 import java.util.Objects;
 
 /**
- * 一张排队票据（Redis {@code RedisKeys.matchTicket(pid)} 的内存镜像；match-spec §1.3、§9.4）。每个玩家至多一张；不可变。
+ * 一张排队票据（Redis {@code RedisKeys#matchTicket(pid)} 的内存镜像；match-spec §1.3、§9.4）。每个玩家至多一张；不可变。
  *
  * @param ticketId     票号（UUIDv4 小写带连字符；157 回给客户端的 {@code queue_ticket}）。<b>所有写都带它做 CAS</b>：迟到的写盖不到玩家重排之后的新票上
  * @param mode         {@code MatchMode} 的数值

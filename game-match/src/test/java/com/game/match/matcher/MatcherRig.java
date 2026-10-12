@@ -1,7 +1,9 @@
 package com.game.match.matcher;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
 import com.game.match.id.MatchIds;
@@ -25,6 +27,8 @@ import java.util.function.IntPredicate;
  * （内存实现，或真 Redis 实现）。缺省状态是「可以凑单」：目录里有一个可分配的 battle 节点、租约有效、开局许可充足。
  */
 final class MatcherRig {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     /** 被测凑单所属的实例标识（凑单锁的持有者）。 */
     static final String INSTANCE = "inst-self";
@@ -65,7 +69,7 @@ final class MatcherRig {
     }
 
     QueueMatcher matcher(TicketStore store, PlayerStatusReader statusReader, MatchProperties props) {
-        return new QueueMatcher(store, statusReader, gather, nodes, ids, metrics, labels, props, new MatchInstance(INSTANCE), nanos::get);
+        return new QueueMatcher(store, statusReader, gather, nodes, ids, metrics, labels, props, new MatchInstance(INSTANCE), REDIS_KEYS, nanos::get);
     }
 
     static Deadline d() {

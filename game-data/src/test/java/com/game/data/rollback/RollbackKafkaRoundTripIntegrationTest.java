@@ -11,6 +11,8 @@ import com.game.audit.AuditTopics;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.audit.proto.PlayerSnapshotRecord;
 import com.game.audit.proto.SnapshotCause;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.data.consume.ConsumerLoop;
 import com.game.data.ops.pb.OpsJobPlayerRow;
 import com.game.data.ops.pb.OpsJobRow;
@@ -56,6 +58,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 class RollbackKafkaRoundTripIntegrationTest {
 
     private static final int GENERATION = 9001;
+    private static final AuditTopics AUDIT_TOPICS = new AuditTopics(new KafkaNames(GameNamespace.of("game")));
     private static final String BOOTSTRAP = System.getProperty("game.it.kafka");
 
     private RollbackHarness h;
@@ -102,9 +105,9 @@ class RollbackKafkaRoundTripIntegrationTest {
 
     @Test
     void scene的快照经Kafka落库后_回档按时刻选中目标之前最近的那份LOGOUT_写回的玩法数据与快照字节一致_封禁保留现档() throws Exception {
-        String topic = AuditTopics.playerSnapshot(GENERATION).name();
+        String topic = AUDIT_TOPICS.playerSnapshot(GENERATION).name();
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-it-admin")) {
-            AuditTopicInitializer.ensure(admin, AuditTopics.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
+            AuditTopicInitializer.ensure(admin, AUDIT_TOPICS.all(GENERATION), Mode.OWN, (short) 1, Duration.ofSeconds(20));
         }
         long now = System.currentTimeMillis();
         long base = now * 1000;

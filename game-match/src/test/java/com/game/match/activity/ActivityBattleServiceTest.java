@@ -2,8 +2,10 @@ package com.game.match.activity;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
 import com.game.match.gather.FailPolicy;
 import com.game.match.gather.GatherOutcome;
@@ -48,6 +50,8 @@ import org.junit.jupiter.api.Test;
  * 预检是真的实现接在替身的玩家状态与内存票据存储上（连自愈的副作用一起走），开局管线与发号租约是替身。
  */
 class ActivityBattleServiceTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long A = 9701;
     private static final long B = 9702;
@@ -230,7 +234,7 @@ class ActivityBattleServiceTest {
 
     @Test
     void 残留的孤儿queued票与ready票先被自愈_然后照常开局_换成本次的活动票() {
-        String queueKey = new QueueRef(MatchMode.MATCH_MODE_1V1_VALUE, 0).queueKey();
+        String queueKey = new QueueRef(MatchMode.MATCH_MODE_1V1_VALUE, 0).queueKey(REDIS_KEYS);
         tickets.putTicket(A, ticket("orphan-a", MatchMode.MATCH_MODE_1V1_VALUE, TicketState.QUEUED, queueKey), 21_600_000);
         tickets.putTicket(B, ticket("ready-b", MatchMode.MATCH_MODE_PVE_SOLO_VALUE, TicketState.READY, ""), 60_000);
 

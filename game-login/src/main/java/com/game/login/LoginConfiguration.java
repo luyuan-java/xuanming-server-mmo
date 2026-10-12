@@ -6,6 +6,7 @@ import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.zone.ZoneMergeFence;
@@ -104,15 +105,16 @@ public class LoginConfiguration {
 
     /** access / refresh 令牌（Redis；全服共用、不分 zone）。 */
     @Bean
-    public LoginTokens loginTokens(RedissonClient redis, LoginProperties props) {
-        return new RedisLoginTokens(redis, Clock.systemUTC(), props.accessTokenTtl(), props.refreshTokenTtl(),
+    public LoginTokens loginTokens(RedissonClient redis, RedisKeys redisKeys, LoginProperties props) {
+        return new RedisLoginTokens(redis, redisKeys, Clock.systemUTC(), props.accessTokenTtl(), props.refreshTokenTtl(),
                 new SecureRandom());
     }
 
     /** 每账号设备数上限（Redis）。 */
     @Bean
-    public LoginDevices loginDevices(RedissonClient redis, LoginProperties props) {
-        return new RedisLoginDevices(redis, Clock.systemUTC(), props.deviceSessionTtl(), props.maxDevicesPerAccount());
+    public LoginDevices loginDevices(RedissonClient redis, RedisKeys redisKeys, LoginProperties props) {
+        return new RedisLoginDevices(redis, redisKeys, Clock.systemUTC(), props.deviceSessionTtl(),
+                props.maxDevicesPerAccount());
     }
 
     @Bean
@@ -218,8 +220,8 @@ public class LoginConfiguration {
      * 建角回 2020（登录 / 进游戏不受影响）；续期滞后恢复后自动恢复，丢失则需重启。
      */
     @Bean(destroyMethod = "close")
-    public NodeIdLease playerIdLease(RedissonClient redis, ScheduledExecutorService loginLeaseScheduler) {
-        return NodeIdLease.acquire(redis, loginLeaseScheduler, NodeTypes.LOGIN, PLAYER_ID_LEASE_SCOPE,
+    public NodeIdLease playerIdLease(RedissonClient redis, RedisKeys redisKeys, ScheduledExecutorService loginLeaseScheduler) {
+        return NodeIdLease.acquire(redis, redisKeys, loginLeaseScheduler, NodeTypes.LOGIN, PLAYER_ID_LEASE_SCOPE,
                 WORKER_MIN, WORKER_MAX, UUID.randomUUID().toString(), LEASE_TTL,
                 () -> log.error("player_id 雪花 worker 租约丢失：停止建角（新的 CreatePlayer 一律失败），需要重启本进程"));
     }
@@ -272,8 +274,8 @@ public class LoginConfiguration {
 
     /** 归属接管请求（Redis pub/sub，全部 scene 节点订阅）。 */
     @Bean
-    public OwnerTakeovers ownerTakeovers(RedissonClient redis) {
-        return new RedisOwnerTakeovers(redis);
+    public OwnerTakeovers ownerTakeovers(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedisOwnerTakeovers(redis, redisKeys);
     }
 
     /**
@@ -283,12 +285,12 @@ public class LoginConfiguration {
      */
     @Bean
     public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers, RedissonClient redis,
-                                             LoginWorkerPool loginWorkerPool, LoginProperties props,
+                                             RedisKeys redisKeys, LoginWorkerPool loginWorkerPool, LoginProperties props,
                                              LoginMetrics loginMetrics, AccountLogin accountLogin,
                                              ZoneMergeFence zoneMergeFence, @Value("${game.zone-id:1}") int zoneId) {
         return new EnterGameHandler(store, sceneDirectory, ownerTakeovers, loginWorkerPool, zoneId,
                 props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice,
-                new PlayerLocationDirectory(redis)::find, zoneMergeFence, props.enterGameBudget());
+                new PlayerLocationDirectory(redis, redisKeys)::find, zoneMergeFence, props.enterGameBudget());
     }
 
     /**

@@ -104,8 +104,8 @@ game:
         max-wait-seconds: 90
       # 「回合打满按平局」的阈值（0 = 关闭）；可按副本覆盖：draw-round-cap-by-config-id: {1: 300}。缺省不覆盖（照搬基线，match-spec §5.5）。
       draw-round-cap: 30
-      # 对局结果的消费组：<部署命名空间>-match-rating（缺省 game-match-rating；与代码缺省同值，MatchPropertiesTest 钉住两者相同）
-      consumer-group: ${game.namespace:game}-match-rating
+      # 对局结果的消费组（consumer-group）缺省不配：由代码按部署命名空间给出 <ns>-match-rating（缺省命名空间下即 game-match-rating，
+      # 出处 KafkaNames#matchRatingGroup）。显式配置时原样使用（只去首尾空白），不强制带 <ns>- 前缀（启动日志打 WARN）。
     # PVE 组队各副本（DungeonTable id）的凑满人数：键必须在 Dungeon 表里、值 ≥ 1，用时按 5 收口；没列出的副本 = 未开放组队。
     # 不能改成查表（表里 id 2 / 3 也有人数，会把它们从「未开放」变成可排队，客户端可见）。
     pve-team-size-by-config-id:

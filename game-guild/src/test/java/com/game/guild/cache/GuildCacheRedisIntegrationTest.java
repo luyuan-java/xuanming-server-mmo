@@ -2,6 +2,7 @@ package com.game.guild.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.guild.cache.GuildCacheMetrics.CacheKind;
@@ -43,6 +44,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class GuildCacheRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final int DB = 10;
     private static final Duration TTL = Duration.ofMinutes(30);
     private static final long BASE = Long.MIN_VALUE + (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 40) * 64;
@@ -66,12 +69,12 @@ class GuildCacheRedisIntegrationTest {
     static void cleanup() {
         List<String> keys = new ArrayList<>();
         for (long id : USED) {
-            for (String key : List.of(RedisKeys.guildSnapshot(id), RedisKeys.guildOfPlayer(id))) {
+            for (String key : List.of(REDIS_KEYS.guildSnapshot(id), REDIS_KEYS.guildOfPlayer(id))) {
                 keys.add(key);
-                keys.add(RedisKeys.cacheGeneration(key));
+                keys.add(REDIS_KEYS.cacheGeneration(key));
             }
             for (long other : USED) {
-                keys.add(RedisKeys.guildApplyPush(id, other));
+                keys.add(REDIS_KEYS.guildApplyPush(id, other));
             }
         }
         if (!keys.isEmpty()) {
@@ -92,9 +95,9 @@ class GuildCacheRedisIntegrationTest {
     }
 
     private GuildCache cache(GuildCache.CacheRedis cacheRedis) {
-        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(cacheRedis, TTL, background, metrics, List.of(5L, 5L, 5L),
+        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(cacheRedis, REDIS_KEYS, TTL, background, metrics, List.of(5L, 5L, 5L),
                 1_000);
-        return new GuildCache(cacheRedis, TTL, (guildId, deadline) -> {
+        return new GuildCache(cacheRedis, REDIS_KEYS, TTL, (guildId, deadline) -> {
             snapshotLoads.incrementAndGet();
             return guildRows.get(guildId);
         }, (playerId, deadline) -> memberRows.getOrDefault(playerId, 0L), invalidator, metrics);
@@ -125,17 +128,17 @@ class GuildCacheRedisIntegrationTest {
         guildRows.put(g, row);
         GuildCache cache = cache(new RedissonGuildCacheRedis(redis));
         assertThat(cache.guild(g, Deadline.after(3_000))).contains(row);
-        String key = RedisKeys.guildSnapshot(g);
+        String key = REDIS_KEYS.guildSnapshot(g);
         assertThat(GuildSnapshot.parseFrom(raw(key))).isEqualTo(row);
         assertThat(ttl(key)).isBetween(TimeUnit.MINUTES.toMillis(29), TimeUnit.MINUTES.toMillis(30));
-        String gen = RedisKeys.cacheGeneration(key);
+        String gen = REDIS_KEYS.cacheGeneration(key);
         assertThat(ttl(gen)).isBetween(TimeUnit.MINUTES.toMillis(59), TimeUnit.MINUTES.toMillis(60));
         assertThat(cache.guild(g, Deadline.after(3_000))).contains(row);
         assertThat(snapshotLoads).hasValue(1);
 
         // 失效：代次换成「UUID:服务器时间」并删数据键
         String before = redis.<String>getBucket(gen, StringCodec.INSTANCE).get();
-        new GuildCacheInvalidator(new RedissonGuildCacheRedis(redis), TTL, background, metrics)
+        new GuildCacheInvalidator(new RedissonGuildCacheRedis(redis), REDIS_KEYS, TTL, background, metrics)
                 .afterCommit(InvalidationOp.ANNOUNCEMENT, g, List.of(), Deadline.after(3_000));
         assertThat(redis.getBucket(key).isExists()).isFalse();
         String after = redis.<String>getBucket(gen, StringCodec.INSTANCE).get();
@@ -166,7 +169,7 @@ class GuildCacheRedisIntegrationTest {
         long missing = id(9);
         GuildCache cache = cache(new RedissonGuildCacheRedis(redis));
         assertThat(cache.guild(missing, Deadline.after(3_000))).isEmpty();
-        String gen = RedisKeys.cacheGeneration(RedisKeys.guildSnapshot(missing));
+        String gen = REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildSnapshot(missing));
         assertThat(ttl(gen)).isBetween(1L, GuildCache.CANDIDATE_GENERATION_TTL_MS);
         redis.getKeys().delete(gen);
     }
@@ -181,13 +184,13 @@ class GuildCacheRedisIntegrationTest {
             public CompletionStage<Boolean> fill(String generationKey, String dataKey, byte[] expectedGeneration,
                                                  byte[] payload, long ttlMillis) {
                 guildRows.put(g, snapshot(g, "新"));
-                new GuildCacheInvalidator(real, TTL, background, metrics)
+                new GuildCacheInvalidator(real, REDIS_KEYS, TTL, background, metrics)
                         .afterCommit(InvalidationOp.SET_ROLE, g, List.of(), Deadline.after(3_000));
                 return super.fill(generationKey, dataKey, expectedGeneration, payload, ttlMillis);
             }
         };
         assertThat(cache(racing).guild(g, Deadline.after(3_000)).orElseThrow().getName()).isEqualTo("旧");
-        assertThat(raw(RedisKeys.guildSnapshot(g))).isNull();
+        assertThat(raw(REDIS_KEYS.guildSnapshot(g))).isNull();
         assertThat(metrics.count(CacheKind.SNAPSHOT, CacheResult.FILL_SKIPPED)).isEqualTo(1);
         assertThat(cache(real).guild(g, Deadline.after(3_000)).orElseThrow().getName()).isEqualTo("新");
     }
@@ -197,7 +200,7 @@ class GuildCacheRedisIntegrationTest {
         long p = id(4);
         GuildCache cache = cache(new RedissonGuildCacheRedis(redis));
         assertThat(cache.guildIdOf(p, Deadline.after(3_000))).isZero();
-        assertThat(redis.<String>getBucket(RedisKeys.guildOfPlayer(p), StringCodec.INSTANCE).get()).isEqualTo("0");
+        assertThat(redis.<String>getBucket(REDIS_KEYS.guildOfPlayer(p), StringCodec.INSTANCE).get()).isEqualTo("0");
 
         long q = id(5);
         long g = id(6);
@@ -212,7 +215,7 @@ class GuildCacheRedisIntegrationTest {
         assertThat(cache(failingFill).guildIdOf(q, Deadline.after(3_000))).isEqualTo(g);
         assertThat(metrics.count(CacheKind.MAPPING, CacheResult.FILL_FAILED)).isEqualTo(1);
         assertThat(cache.guildIdOf(q, Deadline.after(3_000))).isEqualTo(g);
-        assertThat(redis.<String>getBucket(RedisKeys.guildOfPlayer(q), StringCodec.INSTANCE).get())
+        assertThat(redis.<String>getBucket(REDIS_KEYS.guildOfPlayer(q), StringCodec.INSTANCE).get())
                 .isEqualTo(Long.toUnsignedString(g));
     }
 
@@ -225,9 +228,9 @@ class GuildCacheRedisIntegrationTest {
         CountDownLatch inLoader = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger loadsOfG = new AtomicInteger();
-        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(new RedissonGuildCacheRedis(redis), TTL, background,
+        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(new RedissonGuildCacheRedis(redis), REDIS_KEYS, TTL, background,
                 metrics);
-        GuildCache cache = new GuildCache(new RedissonGuildCacheRedis(redis), TTL, (guildId, deadline) -> {
+        GuildCache cache = new GuildCache(new RedissonGuildCacheRedis(redis), REDIS_KEYS, TTL, (guildId, deadline) -> {
             if (guildId == g) {
                 loadsOfG.incrementAndGet();
                 inLoader.countDown();
@@ -272,18 +275,18 @@ class GuildCacheRedisIntegrationTest {
         Map<Long, GuildSnapshot> found = cache.guildsForDisplay(List.of(g1, g2, ghost), Deadline.after(3_000));
         assertThat(found).containsOnlyKeys(g1, g2);
         assertThat(snapshotLoads).hasValue(2);
-        assertThat(raw(RedisKeys.guildSnapshot(g2))).isNotNull();
-        assertThat(raw(RedisKeys.guildSnapshot(ghost))).isNull(); // 不做负缓存
+        assertThat(raw(REDIS_KEYS.guildSnapshot(g2))).isNotNull();
+        assertThat(raw(REDIS_KEYS.guildSnapshot(ghost))).isNull(); // 不做负缓存
     }
 
     @Test
     void 申请推送冷却_60秒内只放行一次() {
         long g = id(12);
         long p = id(13);
-        ApplyPushCooldown cooldown = ApplyPushCooldown.redisson(redis);
+        ApplyPushCooldown cooldown = ApplyPushCooldown.redisson(redis, REDIS_KEYS);
         assertThat(cooldown.tryMark(g, p, Deadline.after(3_000))).isTrue();
         assertThat(cooldown.tryMark(g, p, Deadline.after(3_000))).isFalse();
-        String key = RedisKeys.guildApplyPush(g, p);
+        String key = REDIS_KEYS.guildApplyPush(g, p);
         assertThat(redis.<String>getBucket(key, StringCodec.INSTANCE).get()).isEqualTo("1");
         assertThat(redis.getBucket(key).remainTimeToLive()).isBetween(1L, 60_000L);
         redis.getKeys().delete(key); // 冷却过期

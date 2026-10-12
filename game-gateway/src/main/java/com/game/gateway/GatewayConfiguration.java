@@ -7,6 +7,7 @@ import com.game.common.token.GateTokenIssuer;
 import com.game.common.token.GateTokens;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
 import com.game.discovery.gate.GateSource;
 import com.game.discovery.gate.RedisGateSource;
@@ -47,8 +48,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 
 /**
- * game-gateway 的装配（显式构造，不靠组件扫描）。{@link RedissonClient} 由 game-discovery 的自动配置提供，
- * {@link GatewayStore}（区服目录 / 公告的库表）由 game-gateway-store 的自动配置提供。
+ * game-gateway 的装配（显式构造，不靠组件扫描）。{@link RedissonClient} 与 {@link RedisKeys}（带部署命名空间的键名，经构造器注入给
+ * gate 目录、排空标记、登录排队、限流）由 game-discovery 的自动配置提供，{@link GatewayStore}（区服目录 / 公告的库表）由 game-gateway-store
+ * 的自动配置提供。
  *
  * <p>启动即校验（fail-fast）：缺 {@value #TOKEN_SECRET_ENV}、播种区服配置不合法都会让进程起不来。
  */
@@ -84,13 +86,14 @@ public class GatewayConfiguration {
     }
 
     @Bean
-    public GateSource gateSource(RedissonClient redis) {
-        return new RedisGateSource(redis);
+    public GateSource gateSource(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedisGateSource(redis, redisKeys);
     }
 
     @Bean
-    public ZoneHealthProbe zoneHealthProbe(ZoneDirectory zones, GateSource gates, RedissonClient redis, Clock clock) {
-        NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+    public ZoneHealthProbe zoneHealthProbe(ZoneDirectory zones, GateSource gates, RedissonClient redis, RedisKeys redisKeys,
+                                           Clock clock) {
+        NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
         return new ZoneHealthProbe(zones::zones, gates::listGates, scenes::list, clock::millis,
                 ZoneHealthProbe.STATUS_TTL);
     }
@@ -107,9 +110,10 @@ public class GatewayConfiguration {
 
     /** gate 排空判定（每个 gateway 都跑，写入幂等），读原始 gate 目录与排空标记、写 drained 信号。 */
     @Bean
-    public GateDrainMonitor gateDrainMonitor(ZoneDirectory zones, RedissonClient redis, GatewayProperties properties) {
-        NodeDirectory<GateNodeInfo> gates = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
-        GateDrainMarks marks = new GateDrainMarks(redis);
+    public GateDrainMonitor gateDrainMonitor(ZoneDirectory zones, RedissonClient redis, RedisKeys redisKeys,
+                                             GatewayProperties properties) {
+        NodeDirectory<GateNodeInfo> gates = new NodeDirectory<>(redis, redisKeys, NodeTypes.GATE, GateNodeInfo.parser());
+        GateDrainMarks marks = new GateDrainMarks(redis, redisKeys);
         return new GateDrainMonitor(zones::zones, gates::list, marks, properties.gateDrain(), marks::serverTimeSec);
     }
 
@@ -137,8 +141,8 @@ public class GatewayConfiguration {
 
     /** 登录排队的存储（构造不碰 Redis；排队关闭时也建，没有调用方）。 */
     @Bean
-    public LoginQueue loginQueue(RedissonClient redis, GatewayProperties properties, Clock clock) {
-        return new LoginQueue(redis, clock::millis, properties.queue().entryTtl(), properties.queue().admitTtl());
+    public LoginQueue loginQueue(RedissonClient redis, RedisKeys redisKeys, GatewayProperties properties, Clock clock) {
+        return new LoginQueue(redis, redisKeys, clock::millis, properties.queue().entryTtl(), properties.queue().admitTtl());
     }
 
     @Bean
@@ -163,14 +167,14 @@ public class GatewayConfiguration {
 
     /** 开服限流（关闭时 check 一律放行，不碰 Redis；存储出错 fail-open）。 */
     @Bean
-    public RateLimiter rateLimiter(RedissonClient redis, GatewayProperties properties, Clock clock) {
+    public RateLimiter rateLimiter(RedissonClient redis, RedisKeys redisKeys, GatewayProperties properties, Clock clock) {
         RateLimitSettings settings = properties.rateLimit();
         if (settings.enabled()) {
             log.info("开服限流已打开 区桶 {}/s 容量 {}（覆盖 {} 个区）IP 桶 {}/s 容量 {} 冷却 {} ms 分波={}", settings.zoneDefaultRps(),
                     settings.zoneDefaultBurst(), settings.zoneOverrides().size(), settings.ipRps(), settings.ipBurst(),
                     settings.accountCooldownMs(), settings.wave().enabled());
         }
-        return new RateLimiter(settings, new RedisRateLimitStore(redis), clock::millis);
+        return new RateLimiter(settings, new RedisRateLimitStore(redis), redisKeys, clock::millis);
     }
 
     @Bean
@@ -184,13 +188,13 @@ public class GatewayConfiguration {
      */
     @Bean(destroyMethod = "close")
     public QueueDispatcherRunner queueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones,
-                                                 GateSource gates, RedissonClient redis, GatewayProperties properties,
-                                                 MeterRegistry meterRegistry) {
+                                                 GateSource gates, RedissonClient redis, RedisKeys redisKeys,
+                                                 GatewayProperties properties, MeterRegistry meterRegistry) {
         if (!properties.queue().enabled()) {
             return QueueDispatcherRunner.idle();
         }
         Counter admits = Counter.builder("game.gateway.queue.admits").description("排队放行的人数").register(meterRegistry);
-        return new QueueDispatcherRunner(redis, properties.queue().dispatchInterval(),
+        return new QueueDispatcherRunner(redis, redisKeys, properties.queue().dispatchInterval(),
                 leadership -> new QueueDispatcher(queue, capacity, zones, gates, leadership, admits::increment));
     }
 

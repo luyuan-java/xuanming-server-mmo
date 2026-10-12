@@ -7,6 +7,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
@@ -129,9 +130,11 @@ public final class GateDrainMarks {
             """;
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public GateDrainMarks(RedissonClient redis) {
+    public GateDrainMarks(RedissonClient redis, RedisKeys keys) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
     }
 
     /**
@@ -146,11 +149,11 @@ public final class GateDrainMarks {
         if (instanceId == null || instanceId.isEmpty() || instanceId.indexOf(':') >= 0) {
             throw new IllegalArgumentException("gate 实例 id 不合法");
         }
-        List<Object> keys = new ArrayList<>(List.of(RedisKeys.gateDraining(zoneId, nodeId), RedisKeys.gateDrained(zoneId, nodeId)));
+        List<Object> keys = new ArrayList<>(List.of(redisKeys.gateDraining(zoneId, nodeId), redisKeys.gateDrained(zoneId, nodeId)));
         List<Object> args = new ArrayList<>(List.of(Long.toString(ttl.toSeconds()), instanceId, others == null ? "0" : "1"));
         if (others != null) {
             others.forEach((node, instance) -> {
-                keys.add(RedisKeys.gateDraining(zoneId, node));
+                keys.add(redisKeys.gateDraining(zoneId, node));
                 args.add(instance);
             });
         }
@@ -167,13 +170,13 @@ public final class GateDrainMarks {
 
     /** 撤销排空（取消缩容 / 已下线清理）：两个标记一起删。 */
     public void clear(int zoneId, int nodeId) {
-        redis.getKeys().delete(RedisKeys.gateDraining(zoneId, nodeId), RedisKeys.gateDrained(zoneId, nodeId));
+        redis.getKeys().delete(redisKeys.gateDraining(zoneId, nodeId), redisKeys.gateDrained(zoneId, nodeId));
     }
 
     /** 标记仍是 {@code mark} 那一份时两个一起删（清旧实例留下的标记，不误删刚打上的新标记）。 */
     public boolean clearIf(int zoneId, int nodeId, Mark mark) {
         Long r = redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, CLEAR_IF, RScript.ReturnType.INTEGER,
-                List.of(RedisKeys.gateDraining(zoneId, nodeId), RedisKeys.gateDrained(zoneId, nodeId)), mark.raw());
+                List.of(redisKeys.gateDraining(zoneId, nodeId), redisKeys.gateDrained(zoneId, nodeId)), mark.raw());
         return r != null && r == 1;
     }
 
@@ -193,14 +196,14 @@ public final class GateDrainMarks {
     public DrainedWrite markDrained(int zoneId, int nodeId, Mark mark, String reason) {
         Long written = redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, MARK_DRAINED,
                 RScript.ReturnType.INTEGER,
-                List.of(RedisKeys.gateDraining(zoneId, nodeId), RedisKeys.gateDrained(zoneId, nodeId)), reason, mark.raw());
+                List.of(redisKeys.gateDraining(zoneId, nodeId), redisKeys.gateDrained(zoneId, nodeId)), reason, mark.raw());
         long w = written == null ? 0 : written;
         return w == 1 ? DrainedWrite.WRITTEN : w == -1 ? DrainedWrite.NO_TTL : DrainedWrite.MARK_CHANGED;
     }
 
     /** 清掉 drained（没在排空、或已不再满足排空条件的 gate 不该带着它）。 */
     public void clearDrained(int zoneId, int nodeId) {
-        redis.getKeys().delete(RedisKeys.gateDrained(zoneId, nodeId));
+        redis.getKeys().delete(redisKeys.gateDrained(zoneId, nodeId));
     }
 
     /** Redis 服务器时间（秒）：与标记起点同一个时钟，算「已等多久」不受各副本时钟偏差影响。 */
@@ -217,7 +220,7 @@ public final class GateDrainMarks {
         List<String> keys = new ArrayList<>(nodeIds.size());
         Map<String, Integer> nodeOf = new HashMap<>();
         for (int node : nodeIds) {
-            String key = draining ? RedisKeys.gateDraining(zoneId, node) : RedisKeys.gateDrained(zoneId, node);
+            String key = draining ? redisKeys.gateDraining(zoneId, node) : redisKeys.gateDrained(zoneId, node);
             keys.add(key);
             nodeOf.put(key, node);
         }

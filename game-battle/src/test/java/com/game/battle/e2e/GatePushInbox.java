@@ -1,5 +1,6 @@
 package com.game.battle.e2e;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.proto.GatePush;
@@ -26,6 +27,8 @@ import org.redisson.client.codec.ByteArrayCodec;
  */
 final class GatePushInbox implements AutoCloseable {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     /** 一条到达的推送：原样的 {@code GatePush} 与它携带的客户端消息（按序）。 */
     record Delivery(GatePush push, List<MessageContent> contents) {
     }
@@ -45,8 +48,8 @@ final class GatePushInbox implements AutoCloseable {
         this.zoneId = zoneId;
         this.gateNodeId = gateNodeId;
         this.gateInstanceId = gateInstanceId;
-        this.presence = new PlayerPresenceDirectory(redis);
-        this.topic = redis.getTopic(RedisKeys.gatePushTopic(zoneId, gateNodeId), ByteArrayCodec.INSTANCE);
+        this.presence = new PlayerPresenceDirectory(redis, REDIS_KEYS);
+        this.topic = redis.getTopic(REDIS_KEYS.gatePushTopic(zoneId, gateNodeId), ByteArrayCodec.INSTANCE);
         this.listenerId = topic.addListener(byte[].class, (channel, bytes) -> onMessage(bytes));
     }
 

@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -18,14 +19,26 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
- * 部署命名空间的常驻守卫（扫描仓库文件，与 SliceScriptsTest 同类）：共享中间件里的名字只经三个出处生成——Redis 经 {@code RedisKeys}（前缀 {@code <ns>:}），
- * Kafka 经 {@code KafkaNames}（前缀 {@code <ns>-}），MySQL 缺省库名经 yaml 的 {@code ${game.namespace:game}}。以后有人在别处写死
- * {@code "game:…"} 的键、{@code "game-…"} 的 topic / 消费组 / client.id、或把库名写回 {@code /game?}，本测试就会失败。
- *
- * <p>同时是 yaml 的金样：9 个进程的 JDBC URL 按缺省命名空间解析后与引入命名空间之前的整串逐字节相同。
- * 代码身份（Dubbo 隔离模块的应用名、鉴权附件键、HMAC 域分隔串、实例 id、日志文案）不跟命名空间走，不在检查范围内。
+ * 部署命名空间的常驻守卫（扫描仓库文件，与 SliceScriptsTest 同类）。命名空间是注入的：{@code game.namespace} 经 game-discovery 的
+ * {@code GameNamespaceProperties} 绑定校验，自动配置注册 {@code GameNamespace} / {@code RedisKeys} / {@code KafkaNames} 三个 bean，经构造器注入给使用方；
+ * MySQL 库名经 yaml 的 {@code ${game.namespace:game}}。共享中间件里的名字只经这三个出处生成，本测试守住绕过它们的写法：
+ * <ul>
+ *   <li>R1：main 代码（game-robot 除外：它是客户端）的非注释行——含 Lua 文本块、日志——不出现 {@code game:}（Redis 键 / 频道写死了缺省命名空间）；</li>
+ *   <li>R2：完整字面量 {@code "game-…"} 只能是登记过的代码身份（{@link #CODE_IDENTITY}）；topic / 消费组 / client.id 不得写死；</li>
+ *   <li>R3：只有装配类与三个命令行工具（以及定义它们的三个类）能构造命名空间、{@code RedisKeys}、{@code KafkaNames}（{@link #CONSTRUCTION_SITES}），
+ *       别处一律构造器注入；</li>
+ *   <li>R4：旧的进程级全局机制（静态 get / set、NamespaceHolder、EnvironmentPostProcessor / FailureAnalyzer、spring.factories、
+ *       {@code @Tag("namespace")} 与 surefire 钉值）不回来；</li>
+ *   <li>R5：9 个进程的 JDBC URL 按缺省命名空间解析后与以前逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
+ *       registry 的 namespace（缺省行为不变：由部署显式给，{@code GAME_NACOS_ADDR} 带 {@code ?namespace=} 或 {@code dubbo.registry.parameters.namespace}）；13 个进程都直接依赖 game-discovery；</li>
+ *   <li>R6：compose 预建库只在没设 {@code GAME_NAMESPACE} 时取 game。</li>
+ * </ul>
+ * 切片脚本的命名空间校验与读回核对（R7）在 {@link SliceScriptsTest}。配置键 {@code game.}、环境变量 {@code GAME_}、包名、指标名、日志文案不跟命名空间走。
  */
 class NamespaceLiteralGuardTest {
+
+    /** 本文件自己：规则里写着要禁的字面量，扫描时跳过。 */
+    private static final String SELF = "game-robot/src/test/java/com/game/robot/scenario/NamespaceLiteralGuardTest.java";
 
     private static Path root;
 
@@ -35,78 +48,251 @@ class NamespaceLiteralGuardTest {
         Assumptions.assumeTrue(Files.isDirectory(root.resolve("game-discovery/src/main/java")), "找不到仓库根（单独构建 game-robot）");
     }
 
-    /** 全部模块的 src/main/java 下的 Java 源文件（相对仓库根的路径 → 内容）。 */
-    private static Map<String, String> mainSources() throws IOException {
+    /** 全部 game-* 模块里 {@code sourceDir}（如 src/main/java）下的 Java 源文件（相对仓库根的路径 → 内容），不含本文件。 */
+    private static Map<String, String> sources(String sourceDir) throws IOException {
         Map<String, String> sources = new TreeMap<>();
-        try (Stream<Path> modules = Files.list(root)) {
-            for (Path module : modules.filter(p -> p.getFileName().toString().startsWith("game-")).toList()) {
-                Path java = module.resolve("src/main/java");
-                if (!Files.isDirectory(java)) {
-                    continue;
-                }
-                try (Stream<Path> files = Files.walk(java)) {
-                    for (Path file : files.filter(f -> f.toString().endsWith(".java")).toList()) {
-                        sources.put(root.relativize(file).toString().replace('\\', '/'), Files.readString(file, StandardCharsets.UTF_8));
+        for (Path module : modules()) {
+            Path dir = module.resolve(sourceDir);
+            if (!Files.isDirectory(dir)) {
+                continue;
+            }
+            try (Stream<Path> files = Files.walk(dir)) {
+                for (Path file : files.filter(f -> f.toString().endsWith(".java")).toList()) {
+                    String path = root.relativize(file).toString().replace('\\', '/');
+                    if (!path.equals(SELF)) {
+                        sources.put(path, Files.readString(file, StandardCharsets.UTF_8));
                     }
                 }
             }
         }
-        assertThat(sources).as("扫到了源码").hasSizeGreaterThan(500);
+        assertThat(sources).as("扫到了 %s 下的源码", sourceDir).hasSizeGreaterThan(300);
         return sources;
     }
 
-    /** 去掉注释行（javadoc / 行注释）之后的代码行。 */
-    private static List<String> codeLines(String source) {
-        List<String> lines = new ArrayList<>();
-        for (String line : source.split("\n")) {
-            String t = line.strip();
-            if (t.startsWith("*") || t.startsWith("//") || t.startsWith("/*")) {
+    private static List<Path> modules() throws IOException {
+        try (Stream<Path> modules = Files.list(root)) {
+            return modules.filter(p -> p.getFileName().toString().startsWith("game-") && Files.isRegularFile(p.resolve("pom.xml")))
+                    .sorted().toList();
+        }
+    }
+
+    private static boolean commentLine(String line) {
+        String t = line.strip();
+        return t.startsWith("*") || t.startsWith("//") || t.startsWith("/*");
+    }
+
+    private static String module(String path) {
+        return path.substring(0, path.indexOf('/'));
+    }
+
+    // ================================================================ R1–R3：main 代码
+
+    /** R1：非注释行里出现 {@code game:} 的（「文件:行: 代码」）。game-robot 不查。 */
+    static List<String> redisLiteralOffenders(Map<String, String> mainSources) {
+        List<String> offenders = new ArrayList<>();
+        mainSources.forEach((file, source) -> {
+            if (module(file).equals("game-robot")) {
+                return;
+            }
+            String[] lines = source.split("\n", -1);
+            for (int i = 0; i < lines.length; i++) {
+                if (!commentLine(lines[i]) && lines[i].contains("game:")) {
+                    offenders.add(file + ":" + (i + 1) + ": " + lines[i].strip());
+                }
+            }
+        });
+        return offenders;
+    }
+
+    /**
+     * R2 的白名单：代码身份（不跟命名空间走，architecture.md §6.2「不跟命名空间走的」），按「文件 → 字面量」登记。新增一条前先确认它不是共享中间件里的名字
+     * （Redis 键 / 频道、Kafka topic / 消费组 / client.id / transactional.id、MySQL 库名）；是的话改经注入的 RedisKeys / KafkaNames。
+     */
+    static final Map<String, Set<String>> CODE_IDENTITY = Map.ofEntries(
+            // Dubbo 调用的附件键（协议身份；租户之间靠各自的密钥隔离）
+            Map.entry("game-api/src/main/java/com/game/api/match/MatchRpcAttachments.java", Set.of("game-budget-ms")),
+            Map.entry("game-common/src/main/java/com/game/common/token/DubboCallAuth.java", Set.of("game-auth-ts", "game-auth-mac")),
+            // HMAC 域分隔串（租户之间靠不同的密钥隔离）
+            Map.entry("game-gateway/src/main/java/com/game/gateway/queue/QueueTokens.java", Set.of("game-login-queue")),
+            // 隔离 Dubbo 模块的应用名（不配注册中心、按节点直连）
+            Map.entry("game-scene/src/main/java/com/game/scene/rpc/SceneRpcServer.java", Set.of("game-scene-asset")),
+            Map.entry("game-scene/src/main/java/com/game/scene/transfer/SceneManagerSwitchTargets.java", Set.of("game-scene-switch")),
+            Map.entry("game-battle/src/main/java/com/game/battle/admin/DevGatherConfiguration.java", Set.of("game-battle-dev-gather")),
+            Map.entry("game-battle/src/main/java/com/game/battle/port/scene/SceneTransport.java", Set.of("game-battle-scene")),
+            Map.entry("game-battle/src/main/java/com/game/battle/rpc/BattleRpcServer.java", Set.of("game-battle")),
+            Map.entry("game-guild/src/main/java/com/game/guild/GuildConfiguration.java", Set.of("game-guild-asset")),
+            Map.entry("game-match/src/main/java/com/game/match/MatchConfiguration.java", Set.of("game-match-scene-battle", "game-match-battle-node")),
+            Map.entry("game-match/src/main/java/com/game/match/placement/PlacementClients.java", Set.of("game-match-battle-placement")),
+            Map.entry("game-data/src/main/java/com/game/data/rollback/DubboGuildInternalClient.java", Set.of("game-data-guild-check")),
+            // 存进去的值（发号租约的持有者 id 前缀），不是名字
+            Map.entry("game-data/src/main/java/com/game/data/DataConfiguration.java", Set.of("game-data-")),
+            Map.entry("game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java", Set.of("game-audit-replay-")));
+
+    /** 完整字面量 {@code "game-…"}（引号之间只有名字字符）。拆行、先赋给局部变量再传给 client.id 的写法同样挡得住：看的是字面量本身。 */
+    private static final Pattern GAME_DASH_LITERAL = Pattern.compile("\"(game-[A-Za-z0-9._-]*)\"");
+
+    /** R2：非注释行里不在白名单上的 {@code "game-…"} 字面量。game-robot 不查。 */
+    static List<String> kafkaLiteralOffenders(Map<String, String> mainSources) {
+        List<String> offenders = new ArrayList<>();
+        mainSources.forEach((file, source) -> {
+            if (module(file).equals("game-robot")) {
+                return;
+            }
+            Set<String> allowed = CODE_IDENTITY.getOrDefault(file, Set.of());
+            String[] lines = source.split("\n", -1);
+            for (int i = 0; i < lines.length; i++) {
+                if (commentLine(lines[i])) {
+                    continue;
+                }
+                Matcher m = GAME_DASH_LITERAL.matcher(lines[i]);
+                while (m.find()) {
+                    if (!allowed.contains(m.group(1))) {
+                        offenders.add(file + ":" + (i + 1) + ": " + m.group());
+                    }
+                }
+            }
+        });
+        return offenders;
+    }
+
+    /** R3 的构造入口白名单：装配类、三个命令行工具（不起 Spring，自己取命名空间再 new），以及定义这几个类型的三个类。 */
+    static final Set<String> CONSTRUCTION_SITES = Set.of(
+            "game-discovery/src/main/java/com/game/discovery/namespace/GameNamespaceAutoConfiguration.java",
+            "game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java",
+            "game-guild/src/main/java/com/game/guild/asset/fix/AssetOpFixEnvironment.java",
+            "game-login/src/main/java/com/game/login/tools/PasswordAdmin.java",
+            "game-common/src/main/java/com/game/common/GameNamespace.java",
+            "game-common/src/main/java/com/game/common/KafkaNames.java",
+            "game-discovery/src/main/java/com/game/discovery/RedisKeys.java");
+
+    private static final Pattern CONSTRUCTION =
+            Pattern.compile("new RedisKeys\\(|new KafkaNames\\(|new GameNamespace\\(|GameNamespace\\.of\\(|GameNamespace\\.fromEnv\\(");
+
+    /** R3：白名单以外的非注释行里构造命名空间 / RedisKeys / KafkaNames 的。 */
+    static List<String> constructionOffenders(Map<String, String> mainSources) {
+        List<String> offenders = new ArrayList<>();
+        mainSources.forEach((file, source) -> {
+            if (CONSTRUCTION_SITES.contains(file)) {
+                return;
+            }
+            String[] lines = source.split("\n", -1);
+            for (int i = 0; i < lines.length; i++) {
+                if (!commentLine(lines[i]) && CONSTRUCTION.matcher(lines[i]).find()) {
+                    offenders.add(file + ":" + (i + 1) + ": " + lines[i].strip());
+                }
+            }
+        });
+        return offenders;
+    }
+
+    @Test
+    void R1_Redis键与频道只经注入的RedisKeys_main非注释行没有game冒号() throws IOException {
+        assertThat(redisLiteralOffenders(sources("src/main/java")))
+                .as("写死缺省命名空间的 Redis 键 / 频道（含 Lua 文本块与日志）：改经注入的 RedisKeys 生成，日志里写 <ns>: 或 keys.prefix()").isEmpty();
+    }
+
+    @Test
+    void R2_game横杠字面量只能是登记过的代码身份_白名单条目都还在用() throws IOException {
+        Map<String, String> sources = sources("src/main/java");
+        assertThat(kafkaLiteralOffenders(sources)).as("Kafka topic / 消费组 / client.id 改经注入的 KafkaNames；确实是代码身份的，在 CODE_IDENTITY 里按文件登记并写明理由")
+                .isEmpty();
+        // 白名单不悄悄变宽：删了代码就删登记
+        CODE_IDENTITY.forEach((file, allowed) -> {
+            assertThat(sources).as("白名单文件 %s 还在", file).containsKey(file);
+            List<String> present = new ArrayList<>();
+            Matcher m = GAME_DASH_LITERAL.matcher(sources.get(file));
+            while (m.find()) {
+                present.add(m.group(1));
+            }
+            assertThat(present).as("%s 里白名单字面量都还在", file).containsAll(allowed);
+        });
+    }
+
+    @Test
+    void R3_命名空间与键名类只在装配类和三个命令行工具里构造_别处构造器注入() throws IOException {
+        Map<String, String> sources = sources("src/main/java");
+        assertThat(constructionOffenders(sources)).as("main 里不得自己 new RedisKeys / KafkaNames / GameNamespace：经构造器注入自动配置的 bean").isEmpty();
+        assertThat(sources.keySet()).as("白名单文件都还在").containsAll(CONSTRUCTION_SITES);
+    }
+
+    @Test
+    void 守卫挡得住评审指出的写法_拆行的client_id_Lua单引号_日志_自己new() {
+        // 引入注入式之前与评审（C4）指出的真实写法：前两处旧守卫（只看同一行的 CLIENT_ID_CONFIG）漏掉了
+        Map<String, String> before = new TreeMap<>(Map.of(
+                "game-scene/src/main/java/com/game/scene/SceneNode.java",
+                "class SceneNode {\n    void f() {\n        String clientId = \"game-scene-audit-z\" + zoneId + \"-n\" + nodeId;\n"
+                        + "        p.put(CLIENT_ID_CONFIG, clientId);\n    }\n}\n",
+                "game-match/src/main/java/com/game/match/rating/RatingConfiguration.java",
+                "class R {\n    Object c = BattleResultIngest.kafkaConsumers(kafka.bootstrapServers(), group,\n"
+                        + "            \"game-match-rating-\" + instance.id());\n    Object k = new KafkaNames(GameNamespace.of(\"game\"));\n}\n",
+                "game-discovery/src/main/java/com/game/discovery/Lua.java",
+                "class L {\n    // 注释里的 \"game:x\" 不算\n    String a = \"return redis.call('GET', 'game:nodes:' .. ARGV[1])\";\n"
+                        + "    String b = \"\"\"\n        redis.call('DEL', 'game:lock')\n        \"\"\";\n"
+                        + "    String d = \"game-auth-ts\";\n    RedisKeys keys = new RedisKeys(ns);\n}\n",
+                "game-guild/src/main/java/com/game/guild/GuildConfiguration.java",
+                "class G {\n    void f() {\n        log.info(\"定位 = game:location + scene 节点目录直连\");\n    }\n}\n",
+                "game-robot/src/main/java/com/game/robot/client/AdminClient.java",
+                "class A {\n    String agent = \"game-robot\";\n    String key = \"game:x\";\n}\n"));
+        assertThat(redisLiteralOffenders(before)).containsExactly(
+                "game-discovery/src/main/java/com/game/discovery/Lua.java:3: String a = \"return redis.call('GET', 'game:nodes:' .. ARGV[1])\";",
+                "game-discovery/src/main/java/com/game/discovery/Lua.java:5: redis.call('DEL', 'game:lock')",
+                "game-guild/src/main/java/com/game/guild/GuildConfiguration.java:3: log.info(\"定位 = game:location + scene 节点目录直连\");");
+        assertThat(kafkaLiteralOffenders(before)).containsExactly(
+                "game-discovery/src/main/java/com/game/discovery/Lua.java:7: \"game-auth-ts\"",
+                "game-match/src/main/java/com/game/match/rating/RatingConfiguration.java:3: \"game-match-rating-\"",
+                "game-scene/src/main/java/com/game/scene/SceneNode.java:3: \"game-scene-audit-z\"");
+        assertThat(constructionOffenders(before)).containsExactly(
+                "game-discovery/src/main/java/com/game/discovery/Lua.java:8: RedisKeys keys = new RedisKeys(ns);",
+                "game-match/src/main/java/com/game/match/rating/RatingConfiguration.java:4: Object k = new KafkaNames(GameNamespace.of(\"game\"));");
+    }
+
+    // ================================================================ R4：旧的全局机制不回来
+
+    @Test
+    void R4_没有进程级全局状态与surefire钉值_旧机制的类不再被引用() throws IOException {
+        Map<String, String> all = new TreeMap<>(sources("src/main/java"));
+        all.putAll(sources("src/test/java"));
+        List<String> offenders = new ArrayList<>();
+        Pattern global = Pattern.compile("GameNamespace\\.get\\(|GameNamespace\\.set\\(|NamespaceHolder|@Tag\\(\"namespace\"\\)"
+                + "|GameNamespaceEnvironmentPostProcessor|GameNamespaceFailureAnalyzer|InvalidGameNamespaceException");
+        all.forEach((file, source) -> {
+            Matcher m = global.matcher(source);
+            while (m.find()) {
+                offenders.add(file + ": " + m.group());
+            }
+        });
+        // 注释也算：nacos profile 的 yaml 里还在讲「由 EPP 派生」就是过时的说明
+        for (Path module : modules()) {
+            Path resources = module.resolve("src/main/resources");
+            if (!Files.isDirectory(resources)) {
                 continue;
             }
-            lines.add(line);
+            try (Stream<Path> files = Files.walk(resources)) {
+                for (Path file : files.filter(Files::isRegularFile).filter(f -> f.toString().matches(".*\\.(ya?ml|properties|factories|imports)$"))
+                        .toList()) {
+                    Matcher m = global.matcher(Files.readString(file, StandardCharsets.UTF_8));
+                    while (m.find()) {
+                        offenders.add(root.relativize(file).toString().replace('\\', '/') + ": " + m.group());
+                    }
+                }
+            }
         }
-        return lines;
-    }
+        assertThat(offenders).as("命名空间是注入的：不用静态 get / set、NamespaceHolder、EnvironmentPostProcessor / FailureAnalyzer，测试直接构造实例、不打 namespace 标签")
+                .isEmpty();
+        assertThat(root.resolve("game-discovery/src/main/resources/META-INF/spring.factories")).as("game-discovery 不再登记 EPP / FailureAnalyzer")
+                .doesNotExist();
 
-    @Test
-    void Redis键只经RedisKeys生成_main里没有game冒号开头的字符串字面量() throws IOException {
-        List<String> offenders = new ArrayList<>();
-        mainSources().forEach((file, source) -> codeLines(source).forEach(line -> {
-            if (line.contains("\"game:")) {
-                offenders.add(file + ": " + line.strip());
-            }
-        }));
-        assertThat(offenders).as("写死缺省命名空间的 Redis 键 / 频道：改经 RedisKeys 生成").isEmpty();
-    }
-
-    @Test
-    void Kafka名字只经KafkaNames生成_topic消费组client_id不写死game横杠() throws IOException {
-        Pattern kafkaName = Pattern.compile("CLIENT_ID_CONFIG|GROUP_ID_CONFIG|TRANSACTIONAL_ID_CONFIG|GROUP_INSTANCE_ID_CONFIG|new KafkaTopicAdmin\\(");
-        List<String> offenders = new ArrayList<>();
-        mainSources().forEach((file, source) -> codeLines(source).forEach(line -> {
-            if (kafkaName.matcher(line).find() && line.contains("\"game-")) {
-                offenders.add(file + ": " + line.strip());
-            }
-            if (line.contains("@DefaultValue(\"game-")) {
-                offenders.add(file + ": " + line.strip());
-            }
-        }));
-        assertThat(offenders).as("Kafka 的 client.id / 消费组 / topic 改经 KafkaNames").isEmpty();
-
-        Map<String, String> sources = mainSources();
-        for (String file : List.of("game-audit/src/main/java/com/game/audit/AuditTopics.java",
-                "game-audit/src/main/java/com/game/audit/BattleResultTopics.java", "game-match/src/main/java/com/game/match/MatchProperties.java",
-                "game-data/src/main/java/com/game/data/DataProperties.java")) {
-            assertThat(sources).containsKey(file);
-            assertThat(codeLines(sources.get(file))).as("%s 里不写死 game- 开头的 topic 基名 / 消费组", file)
-                    .noneMatch(line -> line.contains("\"game-"));
+        List<Path> poms = new ArrayList<>(List.of(root.resolve("pom.xml")));
+        for (Path module : modules()) {
+            poms.add(module.resolve("pom.xml"));
         }
-        assertThat(sources.get("game-audit/src/main/java/com/game/audit/AuditTopics.java"))
-                .contains("KafkaNames.of(\"transaction-log\")").contains("KafkaNames.of(\"player-snapshot\")");
-        assertThat(sources.get("game-audit/src/main/java/com/game/audit/BattleResultTopics.java")).contains("KafkaNames.of(\"battle-result\")");
-        assertThat(sources.get("game-discovery/src/main/java/com/game/discovery/RedisKeys.java"))
-                .contains("public static final String PREFIX = GameNamespace.get() + \":\";");
+        for (Path pom : poms) {
+            assertThat(Files.readString(pom, StandardCharsets.UTF_8)).as("%s 不钉 game.namespace、不按 namespace 标签分 surefire 执行", root.relativize(pom))
+                    .doesNotContain("<game.namespace>").doesNotContain("<groups>namespace").doesNotContain("excludedGroups>namespace");
+        }
     }
+
+    // ================================================================ R5：yaml 与模块依赖
 
     /** 引入命名空间之前 9 个进程 application.yaml 里的 JDBC URL（金样）。 */
     private static final Map<String, String> GOLDEN_JDBC_URLS = Map.of(
@@ -133,45 +319,88 @@ class NamespaceLiteralGuardTest {
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2");
 
-    @Test
-    void 九个进程的JDBC_URL库名用命名空间占位符_缺省解析后与以前逐字节相同() throws IOException {
-        Pattern url = Pattern.compile("(?m)^\\s+url:\\s+\"?(jdbc:mysql://[^\"\\s]+)\"?\\s*$");
-        Map<String, String> found = new TreeMap<>();
-        try (Stream<Path> modules = Files.list(root)) {
-            for (Path module : modules.filter(p -> p.getFileName().toString().startsWith("game-")).toList()) {
-                Path yaml = module.resolve("src/main/resources/application.yaml");
-                if (!Files.isRegularFile(yaml)) {
-                    continue;
-                }
-                String text = Files.readString(yaml, StandardCharsets.UTF_8);
-                assertThat(text).as("%s 不把库名写死成 game", yaml).doesNotContain("3306/game?");
-                Matcher m = url.matcher(text);
-                if (m.find()) {
-                    found.put(module.getFileName().toString(), m.group(1));
+    private static final Pattern JDBC_URL_LINE = Pattern.compile("^\\s+url:\\s+\"?(jdbc:mysql://[^\"\\s]+)\"?\\s*$");
+
+    /** 各模块 src/main/resources 下的 application*.yaml / .yml（相对仓库根的路径 → 内容）。 */
+    private static Map<String, String> applicationYamls() throws IOException {
+        Map<String, String> yamls = new TreeMap<>();
+        for (Path module : modules()) {
+            Path resources = module.resolve("src/main/resources");
+            if (!Files.isDirectory(resources)) {
+                continue;
+            }
+            try (Stream<Path> files = Files.list(resources)) {
+                for (Path file : files.filter(f -> f.getFileName().toString().matches("application.*\\.ya?ml")).toList()) {
+                    yamls.put(root.relativize(file).toString().replace('\\', '/'), Files.readString(file, StandardCharsets.UTF_8));
                 }
             }
         }
+        return yamls;
+    }
+
+    @Test
+    void R5_九个进程的JDBC_URL库名用命名空间占位符_缺省解析后与以前逐字节相同_别处yaml不引用命名空间() throws IOException {
+        Map<String, String> found = new TreeMap<>();
+        List<String> elsewhere = new ArrayList<>();
+        applicationYamls().forEach((file, text) -> {
+            assertThat(text).as("%s 不把库名写死成 game", file).doesNotContain("3306/game?");
+            for (String line : text.split("\n", -1)) {
+                Matcher m = JDBC_URL_LINE.matcher(line);
+                if (file.endsWith("/application.yaml") && m.matches() && !found.containsKey(module(file))) {
+                    found.put(module(file), m.group(1));
+                } else if (line.contains("${game.namespace")) {
+                    elsewhere.add(file + ": " + line.strip());
+                }
+            }
+        });
         assertThat(found.keySet()).containsExactlyInAnyOrderElementsOf(GOLDEN_JDBC_URLS.keySet());
         found.forEach((module, raw) -> {
             assertThat(raw).as(module).startsWith("jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?");
             assertThat(raw.replace("${game.namespace:game}", "game")).as("%s 缺省解析后与以前逐字节相同", module)
                     .isEqualTo(GOLDEN_JDBC_URLS.get(module));
         });
+        assertThat(elsewhere).as("除 9 条 JDBC URL 之外 yaml 不引用 game.namespace：缺省值只在代码里（KafkaNames / RedisKeys）一个出处").isEmpty();
     }
 
     @Test
-    void compose预建库与match的消费组随命名空间() throws IOException {
-        String infra = Files.readString(root.resolve("deploy/compose/infra.yaml"), StandardCharsets.UTF_8);
-        assertThat(infra).contains("\n      MYSQL_DATABASE: ${GAME_NAMESPACE:-game}\n").doesNotContain("${GAME_NAMESPACE:-}");
-        String match = Files.readString(root.resolve("game-match/src/main/resources/application.yaml"), StandardCharsets.UTF_8);
-        assertThat(match).contains("\n      consumer-group: ${game.namespace:game}-match-rating\n");
+    void R5_nacos_profile不配registry的namespace_缺省行为不变() throws IOException {
+        Map<String, String> nacos = new TreeMap<>();
+        applicationYamls().forEach((file, text) -> {
+            if (file.endsWith("/application-nacos.yaml")) {
+                nacos.put(file, text);
+            }
+        });
+        assertThat(nacos).as("各进程的 nacos profile").hasSizeGreaterThanOrEqualTo(10);
+        nacos.forEach((file, text) -> {
+            for (String line : text.split("\n", -1)) {
+                if (!line.strip().startsWith("#")) {
+                    assertThat(line).as("%s：Nacos namespace 由部署显式给（GAME_NACOS_ADDR 带 ?namespace= 或 dubbo.registry.parameters.namespace），yaml 不配", file)
+                            .doesNotContainIgnoringCase("namespace");
+                }
+            }
+        });
     }
 
     @Test
-    void 切片脚本带缺省值导出命名空间() throws IOException {
-        for (String script : List.of("tools/local/start-slice.sh", "tools/local/battle-crash-window.sh")) {
-            assertThat(Files.readString(root.resolve(script), StandardCharsets.UTF_8)).as(script)
-                    .contains("\nexport GAME_NAMESPACE=\"${GAME_NAMESPACE:-game}\"\n");
+    void R5_每个SpringBoot进程都直接依赖game_discovery_命名空间校验键名bean与库名核对才生效() throws IOException {
+        List<String> apps = new ArrayList<>();
+        sources("src/main/java").forEach((file, source) -> {
+            if (source.contains("@SpringBootApplication") && !apps.contains(module(file))) {
+                apps.add(module(file));
+            }
+        });
+        assertThat(apps).as("Spring Boot 进程模块").hasSizeGreaterThanOrEqualTo(13);
+        for (String module : apps) {
+            assertThat(Files.readString(root.resolve(module).resolve("pom.xml"), StandardCharsets.UTF_8)).as("%s/pom.xml", module)
+                    .contains("<artifactId>game-discovery</artifactId>");
         }
+    }
+
+    // ================================================================ R6：compose
+
+    @Test
+    void R6_compose预建库只在没设时取game_空串不被换成game() throws IOException {
+        String infra = Files.readString(root.resolve("deploy/compose/infra.yaml"), StandardCharsets.UTF_8);
+        assertThat(infra).contains("\n      MYSQL_DATABASE: ${GAME_NAMESPACE-game}\n").doesNotContain("${GAME_NAMESPACE:-");
     }
 }

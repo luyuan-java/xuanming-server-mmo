@@ -1,7 +1,8 @@
 # nacos profile：Dubbo 走 Nacos 注册中心，直连 URL 置空。启动加 --spring.profiles.active=nacos。
-# Nacos namespace 随部署命名空间 game.namespace（GAME_NAMESPACE，architecture.md §6.2）：缺省 game 时不派生（留在 public，现状不变）；
-# 其余取值由 game-discovery 的 GameNamespaceEnvironmentPostProcessor 追加 dubbo.registry.parameters.namespace=<ns>（最低优先级）。
-# 显式覆盖：配 dubbo.registry.parameters.namespace（如 Nacos 控制台生成的 UUID），或在 GAME_NACOS_ADDR 里带 ?namespace=。
+# Nacos namespace 不与部署命名空间 game.namespace 自动关联：不设则落在 public（与以前相同）。多个部署共用一个 Nacos 时各自显式配置——
+# 在 GAME_NACOS_ADDR 里带 ?namespace=<ID>（如 GAME_NACOS_ADDR=127.0.0.1:8848?namespace=t1），或给 Dubbo 的配置项 dubbo.registry.parameters.namespace
+# （-D 系统属性 / --命令行参数 / SPRING_APPLICATION_JSON），并先在 Nacos 建好 ID 等于该值的命名空间（建议取 <ns>）。环境变量
+# DUBBO_REGISTRY_PARAMETERS_NAMESPACE 与方括号写法 parameters[namespace] Dubbo 都不认，会静默落进 public（architecture.md §6.2）。
 dubbo:
   registry:
     address: nacos://${GAME_NACOS_ADDR:127.0.0.1:8848}

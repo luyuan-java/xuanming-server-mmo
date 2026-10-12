@@ -3,6 +3,7 @@ package com.game.friend.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.friend.metrics.FriendMetrics;
 import com.game.friend.metrics.FriendMetrics.CacheKind;
@@ -23,12 +24,14 @@ import org.junit.jupiter.api.Test;
 
 class FriendCacheTest {
 
-    private static final String KEY = RedisKeys.friendList(42);
-    private static final String GEN = RedisKeys.friendCacheGeneration(KEY);
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
+    private static final String KEY = REDIS_KEYS.friendList(42);
+    private static final String GEN = REDIS_KEYS.friendCacheGeneration(KEY);
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final InMemoryCacheRedis redis = new InMemoryCacheRedis();
-    private final FriendCache cache = new FriendCache(redis, Duration.ofMinutes(30), new FriendMetrics(registry));
+    private final FriendCache cache = new FriendCache(redis, REDIS_KEYS, Duration.ofMinutes(30), new FriendMetrics(registry));
 
     private List<FriendEdge> load(List<FriendEdge> rows, AtomicInteger loads) {
         return cache.load(CacheKind.LIST, KEY, FriendEdge.class, Deadline.after(2000), () -> {
@@ -116,7 +119,7 @@ class FriendCacheTest {
         assertThat(registry.get("game.friend.cache").tag("cache", "list").tag("result", "fill_failed").counter().count()).isEqualTo(1);
 
         redis.failInvalidate = true;
-        cache.invalidateAfterCommit(List.of(KEY, RedisKeys.friendPending(42)), Deadline.after(1000));
+        cache.invalidateAfterCommit(List.of(KEY, REDIS_KEYS.friendPending(42)), Deadline.after(1000));
         assertThat(registry.get("game.friend.cache.invalidation.failures").counter().count()).isEqualTo(2);
     }
 

@@ -3,6 +3,7 @@ package com.game.scenemanager.world;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.scenemanager.SceneIdAllocator;
 import com.game.scenemanager.SceneNodeSource;
@@ -14,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
@@ -27,6 +29,7 @@ class WorldChannelConfigurationTest {
     private static final int WORKER = 17;
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withUserConfiguration(WorldChannelConfiguration.class)
             .withBean(SceneIdAllocator.class, () -> SceneIdAllocator.forTesting(WORKER, () -> true))
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))

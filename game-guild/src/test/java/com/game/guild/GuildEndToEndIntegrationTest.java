@@ -6,6 +6,7 @@ import com.alibaba.druid.pool.DruidDataSource;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.player.PlayerProfiles;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
@@ -95,6 +96,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class GuildEndToEndIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final String MYSQL = System.getProperty("game.it.mysql");
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
@@ -156,20 +159,20 @@ class GuildEndToEndIntegrationTest {
         ConfigTables tables = wiring.guildConfigTables(tableDir());
         PbMysql synced = wiring.guildTables(dataSource, tables);
         GuildTx tx = wiring.guildTx(dataSource, props, metrics);
-        GuildConfiguration.SchemaReady ready = wiring.guildSchemaReady(tx, synced);
+        GuildConfiguration.SchemaReady ready = wiring.guildSchemaReady(tx, synced, REDIS_KEYS.namespace());
         assertThat(ready.serverVersion()).isNotBlank();
         GuildStore store = wiring.guildStore(tx, ready);
         leaseScheduler = wiring.guildLeaseScheduler();
-        lease = wiring.guildIdLease(redis, leaseScheduler, ready);
+        lease = wiring.guildIdLease(redis, REDIS_KEYS, leaseScheduler, ready);
         GuildIds ids = wiring.guildIds(lease);
         background = wiring.guildBackgroundScheduler();
         GuildCache.CacheRedis cacheRedis = wiring.guildCacheRedis(redis);
-        GuildCacheInvalidator invalidator = wiring.guildCacheInvalidator(cacheRedis, props, background, metrics);
-        GuildCache cache = wiring.guildCache(cacheRedis, props, store, invalidator, metrics);
-        GuildRanks ranks = wiring.guildRanks(redis, background, metrics, store, lease, CHANNEL_OFF);
-        ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis);
-        PlayerPresenceDirectory presence = wiring.playerPresenceDirectory(redis);
-        PlayerPushes playerPushes = wiring.playerPushes(redis, presence);
+        GuildCacheInvalidator invalidator = wiring.guildCacheInvalidator(cacheRedis, REDIS_KEYS, props, background, metrics);
+        GuildCache cache = wiring.guildCache(cacheRedis, REDIS_KEYS, props, store, invalidator, metrics);
+        GuildRanks ranks = wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, CHANNEL_OFF);
+        ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis, REDIS_KEYS);
+        PlayerPresenceDirectory presence = wiring.playerPresenceDirectory(redis, REDIS_KEYS);
+        PlayerPushes playerPushes = wiring.playerPushes(redis, REDIS_KEYS, presence);
         PlayerProfiles profiles = wiring.playerProfiles(dataSource, props);
         GuildPushes pushes = wiring.guildPushes(playerPushes, metrics, props, REGISTRY);
         GuildTableLookup lookup = wiring.guildTableLookup(tables);
@@ -208,7 +211,7 @@ class GuildEndToEndIntegrationTest {
         if (lease != null) {
             int node = lease.nodeId();
             lease.close();
-            redis.getKeys().delete(RedisKeys.nodeIdEpoch(NodeTypes.GUILD, 0, node));
+            redis.getKeys().delete(REDIS_KEYS.nodeIdEpoch(NodeTypes.GUILD, 0, node));
         }
         if (leaseScheduler != null) {
             leaseScheduler.shutdownNow();
@@ -216,19 +219,19 @@ class GuildEndToEndIntegrationTest {
         if (redis != null) {
             List<String> keys = new ArrayList<>();
             for (long id : guildIds) {
-                keys.add(RedisKeys.guildSnapshot(id));
-                keys.add(RedisKeys.cacheGeneration(RedisKeys.guildSnapshot(id)));
+                keys.add(REDIS_KEYS.guildSnapshot(id));
+                keys.add(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildSnapshot(id)));
                 for (long p : List.of(a, b, c)) {
-                    keys.add(RedisKeys.guildApplyPush(id, p));
+                    keys.add(REDIS_KEYS.guildApplyPush(id, p));
                 }
             }
             for (long p : List.of(a, b, c)) {
-                keys.add(RedisKeys.guildOfPlayer(p));
-                keys.add(RedisKeys.cacheGeneration(RedisKeys.guildOfPlayer(p)));
+                keys.add(REDIS_KEYS.guildOfPlayer(p));
+                keys.add(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildOfPlayer(p)));
             }
-            keys.add(RedisKeys.guildRankAll());
-            keys.add(RedisKeys.guildRankZone(ZONE));
-            keys.add(RedisKeys.guildRankZones());
+            keys.add(REDIS_KEYS.guildRankAll());
+            keys.add(REDIS_KEYS.guildRankZone(ZONE));
+            keys.add(REDIS_KEYS.guildRankZones());
             redis.getKeys().delete(keys.toArray(String[]::new));
             redis.shutdown();
         }
@@ -363,14 +366,14 @@ class GuildEndToEndIntegrationTest {
         long g = created.getGuild().getGuildId();
         guildIds.add(g);
         // 榜键被清掉（模拟 Redis 丢数据），再按装配跑一次重建
-        redis.getKeys().delete(RedisKeys.guildRankAll(), RedisKeys.guildRankZone(ZONE), RedisKeys.guildRankZones());
+        redis.getKeys().delete(REDIS_KEYS.guildRankAll(), REDIS_KEYS.guildRankZone(ZONE), REDIS_KEYS.guildRankZones());
         GuildConfiguration wiring = new GuildConfiguration();
         GuildProperties props = new GuildProperties(null, null, null, null, null, null, null, null);
         GuildMetrics metrics = wiring.guildMetrics(new SimpleMeterRegistry());
         GuildTx tx = wiring.guildTx(dataSource, props, metrics);
         GuildStore store = wiring.guildStore(tx, new GuildConfiguration.SchemaReady("test"));
-        wiring.guildRanks(redis, background, metrics, store, lease, CHANNEL_OFF);
-        assertThat(redis.getScoredSortedSet(RedisKeys.guildRankZone(ZONE), org.redisson.client.codec.StringCodec.INSTANCE)
+        wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, CHANNEL_OFF);
+        assertThat(redis.getScoredSortedSet(REDIS_KEYS.guildRankZone(ZONE), org.redisson.client.codec.StringCodec.INSTANCE)
                 .contains(Long.toUnsignedString(g))).isTrue();
         GetGuildRankByGuildResponse byGuild = call(a, GuildMethods.GET_GUILD_RANK_BY_GUILD,
                 GetGuildRankByGuildRequest.newBuilder().setGuildId(g).build(), GetGuildRankByGuildResponse.parser());

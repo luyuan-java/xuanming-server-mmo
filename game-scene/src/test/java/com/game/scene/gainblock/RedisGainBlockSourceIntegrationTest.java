@@ -2,6 +2,7 @@ package com.game.scene.gainblock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +19,8 @@ import org.redisson.config.Config;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisGainBlockSourceIntegrationTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private RedissonClient redis;
 
@@ -36,20 +39,20 @@ class RedisGainBlockSourceIntegrationTest {
     }
 
     private void clear() {
-        redis.getKeys().delete(RedisKeys.gainBlocks(RedisKeys.GAIN_BLOCK_CURRENCY),
-                RedisKeys.gainBlocks(RedisKeys.GAIN_BLOCK_ITEM));
+        redis.getKeys().delete(REDIS_KEYS.gainBlocks(RedisKeys.GAIN_BLOCK_CURRENCY),
+                REDIS_KEYS.gainBlocks(RedisKeys.GAIN_BLOCK_ITEM));
     }
 
     @Test
     void 币种与物品两个名单各读各的_非法字段跳过() {
-        redis.<String, String>getMap(RedisKeys.gainBlocks(RedisKeys.GAIN_BLOCK_CURRENCY), StringCodec.INSTANCE)
+        redis.<String, String>getMap(REDIS_KEYS.gainBlocks(RedisKeys.GAIN_BLOCK_CURRENCY), StringCodec.INSTANCE)
                 .fastPut("2", "{}");
-        redis.<String, String>getMap(RedisKeys.gainBlocks(RedisKeys.GAIN_BLOCK_ITEM), StringCodec.INSTANCE)
+        redis.<String, String>getMap(REDIS_KEYS.gainBlocks(RedisKeys.GAIN_BLOCK_ITEM), StringCodec.INSTANCE)
                 .fastPut("10", "{}");
-        redis.<String, String>getMap(RedisKeys.gainBlocks(RedisKeys.GAIN_BLOCK_ITEM), StringCodec.INSTANCE)
+        redis.<String, String>getMap(REDIS_KEYS.gainBlocks(RedisKeys.GAIN_BLOCK_ITEM), StringCodec.INSTANCE)
                 .fastPut("bad", "{}");
 
-        GlobalGainBlocks blocks = new RedisGainBlockSource(redis).load();
+        GlobalGainBlocks blocks = new RedisGainBlockSource(redis, REDIS_KEYS).load();
 
         assertThat(blocks.currencies()).containsExactly(2);
         assertThat(blocks.items()).containsExactly(10);

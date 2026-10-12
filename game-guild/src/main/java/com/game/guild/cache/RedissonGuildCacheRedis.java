@@ -18,7 +18,7 @@ import org.redisson.client.codec.ByteArrayCodec;
  *   <li>三段 Lua 各是一次原子调用，用单条 {@code evalAsync}（遇 NOSCRIPT 自动重载），不用 RBatch（批里的脚本遇到 NOSCRIPT 不会重新加载）。</li>
  *   <li>Redisson 在响应超时后会重发同一段 EVAL：取代次是「有就读、没有才写」，重发无害；回填写的是同一份值；失效把服务器 {@code TIME}
  *       拼进代次，重发时代次已不同——不会把后来的写者设的代次改回读者手里的旧值（ABA）。</li>
- *   <li>同一实体的数据键与代次键共用 hash tag（{@code RedisKeys.guildSnapshot / guildOfPlayer} + {@code cacheGeneration}），Cluster 下同槽。</li>
+ *   <li>同一实体的数据键与代次键共用 hash tag（{@code RedisKeys#guildSnapshot / guildOfPlayer} + {@code cacheGeneration}），Cluster 下同槽。</li>
  * </ul>
  */
 public final class RedissonGuildCacheRedis implements GuildCache.CacheRedis {

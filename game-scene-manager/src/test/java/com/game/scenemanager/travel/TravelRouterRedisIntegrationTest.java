@@ -12,10 +12,12 @@ import com.game.api.proto.SceneNodeInfo;
 import com.game.api.proto.SelectTravelTargetRequest;
 import com.game.api.proto.SelectTravelTargetResponse;
 import com.game.api.proto.WorldChannel;
+import com.game.common.GameNamespace;
 import com.game.common.token.GateTokenIssuer;
 import com.game.common.token.GateTokens;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
 import com.game.discovery.gate.RedisGateSource;
 import com.game.discovery.world.RedissonWorldChannelStore;
@@ -53,6 +55,9 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TravelRouterRedisIntegrationTest {
 
+    /** 缺省部署命名空间 game 的键名。 */
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final int FROM = 1;
     private static final long PLAYER = 4242;
     private static final String SECRET = "travel-it-secret";
@@ -72,12 +77,13 @@ class TravelRouterRedisIntegrationTest {
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(9);
         redis = Redisson.create(config);
         zone = ThreadLocalRandom.current().nextInt(100_000_000, 2_000_000_000);
-        store = new RedissonWorldChannelStore(redis);
-        gateDirectory = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
-        sceneDirectory = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
-        marks = new GateDrainMarks(redis);
-        router = new TravelRouter(store, new RedisSceneNodeSource(redis), new RedisGateSource(redis), WORLD, ZoneMergeFence.OPEN,
-                new GateTokenIssuer(GateTokens.ofUtf8(SECRET), Clock.systemUTC(), new SecureRandom()), new SimpleMeterRegistry());
+        store = new RedissonWorldChannelStore(redis, REDIS_KEYS);
+        gateDirectory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.GATE, GateNodeInfo.parser());
+        sceneDirectory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
+        marks = new GateDrainMarks(redis, REDIS_KEYS);
+        router = new TravelRouter(store, new RedisSceneNodeSource(redis, REDIS_KEYS), new RedisGateSource(redis, REDIS_KEYS), WORLD,
+                ZoneMergeFence.OPEN, new GateTokenIssuer(GateTokens.ofUtf8(SECRET), Clock.systemUTC(), new SecureRandom()),
+                new SimpleMeterRegistry());
     }
 
     @AfterEach

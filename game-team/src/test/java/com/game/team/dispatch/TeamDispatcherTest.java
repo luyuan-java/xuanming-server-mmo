@@ -6,9 +6,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.TeamContractFixtures;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.proto.team.ApplyJoinTeamRequest;
 import com.game.proto.team.ListMyInvitesResponse;
@@ -49,6 +51,8 @@ import org.junit.jupiter.api.Test;
  * in-band 4030、不认识的号、指标 result、契约缺号启动失败。不连 Redis：存储层用假 {@link TeamRedis}。
  */
 class TeamDispatcherTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
     private static final long NOW = 1_800_000_000_000L;
@@ -121,7 +125,7 @@ class TeamDispatcherTest {
     private final List<Long> pushed = Collections.synchronizedList(new ArrayList<>());
 
     private TeamService service(Mode mode) {
-        TeamStore store = new TeamStore(new FakeRedis(mode));
+        TeamStore store = new TeamStore(new FakeRedis(mode), REDIS_KEYS);
         TeamPushes pushes = new TeamPushes(store, (ids, d) -> Map.of(), (pid, content) -> {
             pushed.add(pid);
             return CompletableFuture.completedFuture(PlayerPushes.Outcome.SENT);

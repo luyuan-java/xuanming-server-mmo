@@ -14,7 +14,7 @@ public interface TeamRedis {
     /**
      * 执行一段组队脚本。
      *
-     * @param keys 键（{@code RedisKeys.team*} 生成的字符串）
+     * @param keys 键（{@code RedisKeys#team*} 生成的字符串）
      * @param args 参数（任意字节；数字一律 ASCII 十进制）
      * @return {@link TeamScript#multi()} 为 true 时是 {@code List<Object>}（整数 {@code Long}、字符串 {@code byte[]}），否则是 {@code Long}
      */

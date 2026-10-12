@@ -3,6 +3,7 @@ package com.game.gateway.queue;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.proto.GateNodeInfo;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
@@ -24,6 +25,9 @@ import org.redisson.config.Config;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class LoginQueueIntegrationTest {
+
+    /** 缺省部署命名空间 game 的键名。 */
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static RedissonClient redis;
     private final AtomicLong now = new AtomicLong(1_800_000_000_000L);
@@ -48,12 +52,12 @@ class LoginQueueIntegrationTest {
     @BeforeEach
     void setUp() {
         zone = 800_000 + ThreadLocalRandom.current().nextInt(100_000);
-        queue = new LoginQueue(redis, now::get, Duration.ofMinutes(10), Duration.ofMillis(300));
+        queue = new LoginQueue(redis, REDIS_KEYS, now::get, Duration.ofMinutes(10), Duration.ofMillis(300));
     }
 
     @AfterEach
     void cleanup() {
-        redis.getKeys().delete(RedisKeys.loginQueue(zone), RedisKeys.loginQueueAdmitted(zone));
+        redis.getKeys().delete(REDIS_KEYS.loginQueue(zone), REDIS_KEYS.loginQueueAdmitted(zone));
     }
 
     @Test
@@ -66,7 +70,7 @@ class LoginQueueIntegrationTest {
         assertThat(b.total()).isEqualTo(2);
         assertThat(queue.queueLength(zone)).isEqualTo(2);
         assertThat(queue.lookup(zone, b.queueId())).isEqualTo(new LoginQueue.Waiting(1, 2));
-        redis.getKeys().delete(RedisKeys.loginQueueMeta(a.queueId()), RedisKeys.loginQueueMeta(b.queueId()));
+        redis.getKeys().delete(REDIS_KEYS.loginQueueMeta(a.queueId()), REDIS_KEYS.loginQueueMeta(b.queueId()));
     }
 
     @Test
@@ -100,7 +104,7 @@ class LoginQueueIntegrationTest {
         assertThat(((LoginQueue.Admitted) first).gate()).isEqualTo(GATE);
         assertThat(((LoginQueue.Admitted) first).enqueuedAtMs()).isEqualTo(1_800_000_000_000L);
         assertThat(queue.admittedCount(zone)).as("取走后占位还在（等 gate 发布人数）").isEqualTo(2);
-        assertThat(redis.getScoredSortedSet(RedisKeys.loginQueueAdmitted(zone), StringCodec.INSTANCE)
+        assertThat(redis.getScoredSortedSet(REDIS_KEYS.loginQueueAdmitted(zone), StringCodec.INSTANCE)
                 .getScore(a.queueId())).isEqualTo((double) (now.get() + LoginQueue.TAKEN_GRACE.toMillis()));
         assertThat(queue.lookup(zone, a.queueId())).as("只取一次").isInstanceOf(LoginQueue.Expired.class);
 
@@ -109,8 +113,8 @@ class LoginQueueIntegrationTest {
         assertThat(queue.lookup(zone, b.queueId())).as("放行槽过期没取").isInstanceOf(LoginQueue.Expired.class);
         assertThat(queue.lookup(zone, QueueTokens.newQueueId())).as("不认识的排队号").isInstanceOf(LoginQueue.Expired.class);
         assertThat(queue.lookup(zone, c.queueId())).isEqualTo(new LoginQueue.Waiting(0, 1));
-        redis.getKeys().delete(RedisKeys.loginQueueMeta(a.queueId()), RedisKeys.loginQueueMeta(b.queueId()),
-                RedisKeys.loginQueueMeta(c.queueId()));
+        redis.getKeys().delete(REDIS_KEYS.loginQueueMeta(a.queueId()), REDIS_KEYS.loginQueueMeta(b.queueId()),
+                REDIS_KEYS.loginQueueMeta(c.queueId()));
     }
 
     @Test
@@ -122,7 +126,7 @@ class LoginQueueIntegrationTest {
         assertThat(queue.lookup(zone, a.queueId(), "r1")).as("Redisson 重发同一段 EVAL").isEqualTo(first);
         assertThat(queue.lookup(zone, a.queueId(), "r2")).as("新请求").isInstanceOf(LoginQueue.Expired.class);
         assertThat(queue.lookup(zone, a.queueId())).isInstanceOf(LoginQueue.Expired.class);
-        redis.getKeys().delete(RedisKeys.loginQueueMeta(a.queueId()));
+        redis.getKeys().delete(REDIS_KEYS.loginQueueMeta(a.queueId()));
     }
 
     @Test
@@ -130,11 +134,11 @@ class LoginQueueIntegrationTest {
         LoginQueue.Enqueued a = queue.enqueue(zone);
         now.incrementAndGet();
         LoginQueue.Enqueued b = queue.enqueue(zone);
-        redis.getKeys().delete(RedisKeys.loginQueueMeta(a.queueId()));
+        redis.getKeys().delete(REDIS_KEYS.loginQueueMeta(a.queueId()));
         assertThat(queue.dispatch(zone, 10, 50, GATE)).isEqualTo(new LoginQueue.Dispatched(1, 1));
         assertThat(queue.admittedCount(zone)).isEqualTo(1);
-        assertThat(redis.getBucket(RedisKeys.loginQueueAdmit(a.queueId())).isExists()).isFalse();
+        assertThat(redis.getBucket(REDIS_KEYS.loginQueueAdmit(a.queueId())).isExists()).isFalse();
         assertThat(queue.lookup(zone, b.queueId())).isInstanceOf(LoginQueue.Admitted.class);
-        redis.getKeys().delete(RedisKeys.loginQueueMeta(b.queueId()));
+        redis.getKeys().delete(REDIS_KEYS.loginQueueMeta(b.queueId()));
     }
 }

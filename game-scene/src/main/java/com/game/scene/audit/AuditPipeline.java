@@ -74,7 +74,7 @@ public final class AuditPipeline {
     private volatile boolean verified;
 
     /**
-     * @param topics           要核对的全部审计 topic（{@code AuditTopics.all(generation)}）
+     * @param topics           要核对的全部审计 topic（{@code AuditTopics#all}；名字带部署命名空间，由本进程的 {@code KafkaNames} bean 构造的实例给出）
      * @param transactionTopic 资产流水 topic 名（属于 {@code topics}）
      * @param snapshotTopic    玩家快照 topic 名（属于 {@code topics}）
      * @param snapshotMaxBytes 一条快照序列化后的上限（超了丢弃并记 ERROR；须小于生产者与 broker 的消息上限）

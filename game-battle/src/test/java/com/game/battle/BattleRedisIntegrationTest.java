@@ -19,6 +19,7 @@ import com.game.battle.port.LoggingSettlementSink;
 import com.game.battle.room.BattleClock;
 import com.game.battle.room.BattleRoomService;
 import com.game.battle.room.RoomDependencies;
+import com.game.common.GameNamespace;
 import com.game.common.RunMode;
 import com.game.common.token.BattleTickets;
 import com.game.discovery.NodeDirectory;
@@ -53,6 +54,7 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class BattleRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     private static final int DB = 14;
     private static final long PLAYER = 7_700_001L;
 
@@ -79,8 +81,8 @@ class BattleRedisIntegrationTest {
     private void cleanUp() {
         redis.getKeys().deleteByPattern("game:node-id:battle:0:*");
         redis.getKeys().deleteByPattern("game:node-id-epoch:battle:0:*");
-        redis.getKeys().delete(RedisKeys.nodeDirectory(NodeTypes.BATTLE, 0), RedisKeys.nodeDirectory(NodeTypes.SCENE, 1),
-                RedisKeys.presence(PLAYER), RedisKeys.playerLocation(PLAYER));
+        redis.getKeys().delete(REDIS_KEYS.nodeDirectory(NodeTypes.BATTLE, 0), REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, 1),
+                REDIS_KEYS.presence(PLAYER), REDIS_KEYS.playerLocation(PLAYER));
     }
 
     /** 租约与目录是真的，其余借用假实现。 */
@@ -89,7 +91,7 @@ class BattleRedisIntegrationTest {
         final FakeBattleInfrastructure fake = new FakeBattleInfrastructure();
 
         HybridInfrastructure(RedissonClient redis) {
-            this.real = BattleInfrastructure.production(redis);
+            this.real = BattleInfrastructure.production(redis, REDIS_KEYS);
         }
 
         @Override
@@ -129,7 +131,7 @@ class BattleRedisIntegrationTest {
     }
 
     private List<BattleNodeInfo> directoryEntries() {
-        return new NodeDirectory<>(redis, NodeTypes.BATTLE, BattleNodeInfo.parser()).list(0);
+        return new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.BATTLE, BattleNodeInfo.parser()).list(0);
     }
 
     private static void eventually(Duration within, Runnable assertion) throws InterruptedException {
@@ -153,11 +155,11 @@ class BattleRedisIntegrationTest {
         BattleNode n = start(new HybridInfrastructure(redis), admission, new BattleMetrics(new SimpleMeterRegistry()));
         int nodeId = n.identity().orElseThrow().nodeId();
 
-        String leaseKey = RedisKeys.nodeId(NodeTypes.BATTLE, 0, nodeId);
+        String leaseKey = REDIS_KEYS.nodeId(NodeTypes.BATTLE, 0, nodeId);
         assertThat(leaseKey).isEqualTo("game:node-id:battle:0:" + nodeId);
         assertThat(redis.<String>getBucket(leaseKey, StringCodec.INSTANCE).get()).isEqualTo(n.instanceId());
         assertThat(redis.getBucket(leaseKey).remainTimeToLive()).isBetween(1L, 15_000L);
-        assertThat(redis.getAtomicLong(RedisKeys.nodeIdEpoch(NodeTypes.BATTLE, 0, nodeId)).get()).isPositive();
+        assertThat(redis.getAtomicLong(REDIS_KEYS.nodeIdEpoch(NodeTypes.BATTLE, 0, nodeId)).get()).isPositive();
 
         assertThat(directoryEntries()).singleElement().satisfies(info -> {
             assertThat(info.getNodeId()).isEqualTo(nodeId);
@@ -184,7 +186,7 @@ class BattleRedisIntegrationTest {
         infra.fake.rooms.rooms.set(1);
 
         // 别的实例占走了这个号（模拟 Redis 故障期间键过期后被抢）：下一次续期（≤ TTL/3 = 5 s）发现「号已不属于本实例」
-        redis.<String>getBucket(RedisKeys.nodeId(NodeTypes.BATTLE, 0, nodeId), StringCodec.INSTANCE)
+        redis.<String>getBucket(REDIS_KEYS.nodeId(NodeTypes.BATTLE, 0, nodeId), StringCodec.INSTANCE)
                 .set("someone-else", Duration.ofSeconds(15));
 
         eventually(Duration.ofSeconds(8), () -> assertThat(admission.phase()).isEqualTo(AdmissionPhase.CLOSED));
@@ -195,21 +197,21 @@ class BattleRedisIntegrationTest {
 
         n.stop();
         node = null;
-        assertThat(redis.<String>getBucket(RedisKeys.nodeId(NodeTypes.BATTLE, 0, nodeId), StringCodec.INSTANCE).get())
+        assertThat(redis.<String>getBucket(REDIS_KEYS.nodeId(NodeTypes.BATTLE, 0, nodeId), StringCodec.INSTANCE).get())
                 .as("丢失后交还不删别人的键").isEqualTo("someone-else");
     }
 
     @Test
     void dev路由补全_读在线目录_位置记录_scene目录() throws Exception {
-        new PlayerPresenceDirectory(redis).putAsync(PlayerPresence.newBuilder().setPlayerId(PLAYER).setZoneId(1)
+        new PlayerPresenceDirectory(redis, REDIS_KEYS).putAsync(PlayerPresence.newBuilder().setPlayerId(PLAYER).setZoneId(1)
                 .setGateNodeId(2).setGateInstanceId("gate-inst").setSessionId(33).build()).toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        new PlayerLocationDirectory(redis).putAsync(PlayerLocation.newBuilder().setPlayerId(PLAYER).setZoneId(1)
+        new PlayerLocationDirectory(redis, REDIS_KEYS).putAsync(PlayerLocation.newBuilder().setPlayerId(PLAYER).setZoneId(1)
                 .setSceneNodeId(4).setSceneId(99).setOwnerEpoch(1).build(), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser()).publish(1, 4, SceneNodeInfo.newBuilder()
+        new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser()).publish(1, 4, SceneNodeInfo.newBuilder()
                 .setZoneId(1).setNodeId(4).setInstanceId("scene-inst").build(), Duration.ofSeconds(15));
 
-        DevRoutingResolver.Resolution<CreateBattleRequest> r = DevRoutingResolver.redis(redis).fillCreate(
+        DevRoutingResolver.Resolution<CreateBattleRequest> r = DevRoutingResolver.redis(redis, REDIS_KEYS).fillCreate(
                 CreateBattleRequest.newBuilder().setBattleId(1).addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(PLAYER))
                         .build());
 
@@ -218,7 +220,7 @@ class BattleRedisIntegrationTest {
                 .setGateNodeId(2).setGateInstanceId("gate-inst").setZoneId(1).setSceneNodeId(4).setSceneInstanceId("scene-inst")
                 .build());
 
-        DevRoutingResolver.Resolution<CreateBattleRequest> offline = DevRoutingResolver.redis(redis).fillCreate(
+        DevRoutingResolver.Resolution<CreateBattleRequest> offline = DevRoutingResolver.redis(redis, REDIS_KEYS).fillCreate(
                 CreateBattleRequest.newBuilder().addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(PLAYER + 1)).build());
         assertThat(offline.ok()).isFalse();
     }

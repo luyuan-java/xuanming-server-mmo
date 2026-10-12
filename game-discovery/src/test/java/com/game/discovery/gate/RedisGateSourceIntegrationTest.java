@@ -3,8 +3,10 @@ package com.game.discovery.gate;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.proto.GateNodeInfo;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
 import com.game.discovery.drain.GateDrainMarks.MarkResult;
 import java.time.Duration;
@@ -27,6 +29,8 @@ import org.redisson.config.Config;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisGateSourceIntegrationTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static RedissonClient redis;
     private final int zone = 900_000 + ThreadLocalRandom.current().nextInt(90_000);
@@ -60,13 +64,13 @@ class RedisGateSourceIntegrationTest {
 
     @Test
     void 同地址只认最新启动的条目_排空标记照旧叠加() {
-        directory = new NodeDirectory<>(redis, NodeTypes.GATE, GateNodeInfo.parser());
-        marks = new GateDrainMarks(redis);
+        directory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.GATE, GateNodeInfo.parser());
+        marks = new GateDrainMarks(redis, REDIS_KEYS);
         // 节点 1：崩溃前的旧进程（人数最少、条目还没过期）；节点 2：同一地址重启后的新进程；节点 3：另一台
         directory.publish(zone, 1, gate(1, "10.9.0.1", 11000, 0, 1_000L), Duration.ofSeconds(30));
         directory.publish(zone, 2, gate(2, "10.9.0.1", 11000, 40, 2_000L), Duration.ofSeconds(30));
         directory.publish(zone, 3, gate(3, "10.9.0.3", 11000, 60, 500L), Duration.ofSeconds(30));
-        RedisGateSource source = new RedisGateSource(redis);
+        RedisGateSource source = new RedisGateSource(redis, REDIS_KEYS);
 
         List<GateNodeInfo> listed = source.listGates(zone);
         assertThat(listed).extracting(GateNodeInfo::getNodeId).containsExactlyInAnyOrder(1, 2, 3);

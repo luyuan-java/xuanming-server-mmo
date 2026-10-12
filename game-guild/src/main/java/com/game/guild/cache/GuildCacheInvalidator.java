@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -41,6 +42,7 @@ public final class GuildCacheInvalidator {
     private static final Logger log = LoggerFactory.getLogger(GuildCacheInvalidator.class);
 
     private final GuildCache.CacheRedis redis;
+    private final RedisKeys redisKeys;
     private final long generationTtlMillis;
     private final ScheduledExecutorService background;
     private final GuildCacheMetrics metrics;
@@ -48,22 +50,24 @@ public final class GuildCacheInvalidator {
     private final long backgroundBudgetMillis;
 
     /**
+     * @param keys       缓存键的出处（带部署命名空间，装配方注入；须与 {@link GuildCache} 用同一个）
      * @param ttl        缓存 TTL（代次键带 2 × TTL，与 {@link GuildCache} 用同一个值）
      * @param background 后台重试的调度器（装配方持有、负责关闭）
      */
-    public GuildCacheInvalidator(GuildCache.CacheRedis redis, Duration ttl, ScheduledExecutorService background,
+    public GuildCacheInvalidator(GuildCache.CacheRedis redis, RedisKeys keys, Duration ttl, ScheduledExecutorService background,
                                  GuildCacheMetrics metrics) {
-        this(redis, ttl, background, metrics, GuildLimits.INVALIDATE_RETRY_DELAYS_MS,
+        this(redis, keys, ttl, background, metrics, GuildLimits.INVALIDATE_RETRY_DELAYS_MS,
                 GuildLimits.INVALIDATE_BACKGROUND_BUDGET_MS);
     }
 
     /** 单测用：可把退避间隔与后台预算缩短（基线单测同样把 invalidateRetryDelays 改成毫秒级）。 */
-    GuildCacheInvalidator(GuildCache.CacheRedis redis, Duration ttl, ScheduledExecutorService background,
+    GuildCacheInvalidator(GuildCache.CacheRedis redis, RedisKeys keys, Duration ttl, ScheduledExecutorService background,
                           GuildCacheMetrics metrics, List<Long> retryDelaysMillis, long backgroundBudgetMillis) {
         if (ttl.toMillis() <= 0) {
             throw new IllegalArgumentException("缓存 TTL 必须 > 0: " + ttl);
         }
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.generationTtlMillis = ttl.toMillis() * 2;
         this.background = background;
         this.metrics = metrics;
@@ -92,11 +96,11 @@ public final class GuildCacheInvalidator {
         try {
             Set<String> keys = new LinkedHashSet<>();
             if (guildId != 0) {
-                keys.add(RedisKeys.guildSnapshot(guildId));
+                keys.add(redisKeys.guildSnapshot(guildId));
             }
             for (Long playerId : playerIds) {
                 if (playerId != null && playerId != 0) {
-                    keys.add(RedisKeys.guildOfPlayer(playerId));
+                    keys.add(redisKeys.guildOfPlayer(playerId));
                 }
             }
             if (keys.isEmpty()) {
@@ -133,7 +137,7 @@ public final class GuildCacheInvalidator {
             byte[] generation = UUID.randomUUID().toString().getBytes(StandardCharsets.US_ASCII);
             CompletableFuture<Void> call;
             try {
-                call = redis.invalidate(RedisKeys.cacheGeneration(dataKey), dataKey, generation, generationTtlMillis)
+                call = redis.invalidate(redisKeys.cacheGeneration(dataKey), dataKey, generation, generationTtlMillis)
                         .toCompletableFuture();
             } catch (RuntimeException e) {
                 call = CompletableFuture.failedFuture(e);

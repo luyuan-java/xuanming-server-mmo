@@ -2,6 +2,7 @@ package com.game.scenemanager.travel;
 
 import com.game.common.token.GateTokenIssuer;
 import com.game.common.token.GateTokens;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.gate.GateSource;
 import com.game.discovery.gate.RedisGateSource;
 import com.game.discovery.world.WorldChannelStore;
@@ -32,10 +33,10 @@ public class TravelConfiguration {
     /** 环境变量名：与 game-gateway（签登录令牌）、game-gate（验票）同一个键、同一个值。 */
     static final String TOKEN_SECRET_ENV = "GAME_GATE_TOKEN_SECRET";
 
-    /** gate 目录的读取面（game-gate 发布的 {@code game:nodes:gate:{zone}}，叠加运维排空标记 {@code game:gate-draining:*}）。 */
+    /** gate 目录的读取面（game-gate 发布的 {@code <ns>:nodes:gate:{zone}}，叠加运维排空标记 {@code <ns>:gate-draining:*}）。 */
     @Bean
-    public GateSource gateSource(RedissonClient redis) {
-        return new RedisGateSource(redis);
+    public GateSource gateSource(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedisGateSource(redis, redisKeys);
     }
 
     /** 合服围栏的读侧（检查点 F4）：批次 7.3 之前没有合服，恒放行；7.3 换成读 Redis 的实现，不动 {@link TravelRouter}。 */

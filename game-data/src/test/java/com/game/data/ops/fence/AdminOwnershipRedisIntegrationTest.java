@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.game.api.proto.OwnerTakeover;
+import com.game.common.GameNamespace;
 import com.game.data.DataConfiguration;
 import com.game.data.metrics.DataMetrics;
 import com.game.data.ops.fence.AdminOwnership.Claim;
@@ -56,6 +57,8 @@ import org.springframework.beans.factory.ObjectProvider;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class AdminOwnershipRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private RedissonClient redis;
     private DataSqlFixture db;
     private ScheduledExecutorService fence;
@@ -76,15 +79,15 @@ class AdminOwnershipRedisIntegrationTest {
         ObjectProvider<RedissonClient> provider = mock(ObjectProvider.class);
         when(provider.getObject()).thenReturn(redis);
         ownership = new DataConfiguration().adminOwnership(db.playerStore(System::currentTimeMillis), db.transactionManager,
-                provider, new DataMetrics(meters), fence);
-        directory = new PlayerLocationDirectory(redis);
+                provider, REDIS_KEYS, new DataMetrics(meters), fence);
+        directory = new PlayerLocationDirectory(redis, REDIS_KEYS);
     }
 
     @AfterEach
     void tearDown() throws Exception {
         fence.shutdownNow();
         for (long player : players) {
-            redis.getKeys().delete(RedisKeys.playerLocation(player));
+            redis.getKeys().delete(REDIS_KEYS.playerLocation(player));
         }
         redis.shutdown();
         db.close();
@@ -135,7 +138,7 @@ class AdminOwnershipRedisIntegrationTest {
         byte[] sameAsLogin = OwnerTakeover.newBuilder().setPlayerId(p).setOwnerEpoch(5).build().toByteArray();
         List<byte[]> received = new CopyOnWriteArrayList<>();
         // 同 game-scene OwnerTakeoverSubscriber：ByteArrayCodec 的频道、byte[] 监听、OwnerTakeover.parseFrom
-        RTopic topic = redis.getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE);
+        RTopic topic = redis.getTopic(REDIS_KEYS.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE);
         int listener = topic.addListener(byte[].class, (channel, message) -> {
             OwnerTakeover takeover;
             try {
@@ -174,7 +177,7 @@ class AdminOwnershipRedisIntegrationTest {
     void 没有任何scene持有那个epoch_让出请求发出去也没人放手_到点Busy_归属原样() {
         long p = player(5, false);
         List<OwnerTakeover> received = new CopyOnWriteArrayList<>();
-        RTopic topic = redis.getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE);
+        RTopic topic = redis.getTopic(REDIS_KEYS.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE);
         int listener = topic.addListener(byte[].class, (channel, message) -> {
             try {
                 OwnerTakeover takeover = OwnerTakeover.parseFrom(message);
@@ -219,11 +222,11 @@ class AdminOwnershipRedisIntegrationTest {
         assertThat(directory.find(p)).isEmpty();
         assertThat(get(directory.statusesAsync(List.of(p)))).containsEntry(p, LocationStatus.LOGGED_OUT);
         assertThat(get(directory.findHolderAsync(p)).status()).isEqualTo(LocationStatus.LOGGED_OUT);
-        Map<String, String> fields = redis.<String, String>getMap(RedisKeys.playerLocation(p), StringCodec.INSTANCE)
+        Map<String, String> fields = redis.<String, String>getMap(REDIS_KEYS.playerLocation(p), StringCodec.INSTANCE)
                 .readAllMap();
         assertThat(fields).containsOnly(Map.entry("e", "6"), Map.entry("q", Long.toString(AdminOwnership.TOMBSTONE_SEQ)),
                 Map.entry("s", "x"));
-        assertThat(redis.getKeys().remainTimeToLive(RedisKeys.playerLocation(p)))
+        assertThat(redis.getKeys().remainTimeToLive(REDIS_KEYS.playerLocation(p)))
                 .isBetween(1L, PlayerLocationDirectory.ONLINE_TTL.toMillis());
         assertThat(tombstones("ok")).isEqualTo(1);
         // 墓碑先于释放，释放也做了

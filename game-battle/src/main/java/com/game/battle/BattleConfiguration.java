@@ -1,7 +1,7 @@
 package com.game.battle;
 
 import com.game.audit.AuditTopicContractException;
-import com.game.audit.KafkaNames;
+import com.game.audit.BattleResultTopics;
 import com.game.battle.BattleTables.RowReport;
 import com.game.battle.admin.BattleAdminAuthFilter;
 import com.game.battle.admin.DevBattleBackend;
@@ -18,12 +18,14 @@ import com.game.battle.port.kafka.KafkaBattleResultSink;
 import com.game.battle.port.scene.SceneTransport;
 import com.game.battle.port.scene.SceneTransportProperties;
 import com.game.battle.outbox.OutboxMetrics;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
 import org.springframework.beans.factory.ObjectProvider;
 import com.game.battle.protocol.BattleMessageIds;
 import com.game.battle.push.LobbyAnnouncer;
 import com.game.battle.push.PresenceLobbyAnnouncer;
 import com.game.battle.room.BattleClock;
+import com.game.common.KafkaNames;
 import com.game.common.RunMode;
 import com.game.common.token.BattleSecretPolicy;
 import com.game.common.token.BattleTickets;
@@ -170,8 +172,8 @@ public class BattleConfiguration {
     /** 大厅公告 177 / 143 的 gate 回落：查在线目录取当前会话，一条 {@code GatePush{message_batch}} 保序（§7.7、Q3）。 */
     @Bean
     @ConditionalOnMissingBean(LobbyAnnouncer.class)
-    public LobbyAnnouncer battleLobbyAnnouncer(RedissonClient redis, BattleMetrics battleMetrics) {
-        return new PresenceLobbyAnnouncer(new PlayerPushes(redis, new PlayerPresenceDirectory(redis)), battleMetrics);
+    public LobbyAnnouncer battleLobbyAnnouncer(RedissonClient redis, RedisKeys redisKeys, BattleMetrics battleMetrics) {
+        return new PresenceLobbyAnnouncer(new PlayerPushes(redis, redisKeys, new PlayerPresenceDirectory(redis, redisKeys)), battleMetrics);
     }
 
     /** battle 侧发件箱与结算投递的指标（scene-battle-spec §9）。 */
@@ -187,12 +189,12 @@ public class BattleConfiguration {
      * {@code results} 是对局结果的发布端口：活动结果通道经它按 {@code channel=activity} 发布，普通局由房间按 {@code plain} 发布。
      */
     @Bean(destroyMethod = "close")
-    public SceneTransport battleSceneTransport(RedissonClient redis, BattleMetrics battleMetrics, OutboxMetrics battleOutboxMetrics,
-                                               SceneTransportProperties transportProps, ObjectProvider<RedisProperties> redisProps,
-                                               BattleResultSink results) {
+    public SceneTransport battleSceneTransport(RedissonClient redis, RedisKeys redisKeys, BattleMetrics battleMetrics,
+                                               OutboxMetrics battleOutboxMetrics, SceneTransportProperties transportProps,
+                                               ObjectProvider<RedisProperties> redisProps, BattleResultSink results) {
         RedisProperties redisSettings = redisProps.getIfAvailable(() -> new RedisProperties(null, null, null, null, null, null, null));
         transportProps.requireAbove(redisSettings.worstCaseCommandMillis());
-        return new SceneTransport(redis, battleMetrics, battleOutboxMetrics, transportProps, results);
+        return new SceneTransport(redis, redisKeys, battleMetrics, battleOutboxMetrics, transportProps, results);
     }
 
     /** 确认事件 → scene：Dubbo {@code SceneBattleService.confirmBattle}（6.3，Q13；实例不符时回落定位器，D28）。 */
@@ -218,7 +220,8 @@ public class BattleConfiguration {
 
     /**
      * 对局结果 → Kafka（批次 6.4，match-spec §5.4；落实 battle-node-spec Q12）：普通局由房间在 {@code battle-logic} 上交来，活动局由活动结果通道在
-     * {@code battle-outbox} 上交来（首发 + 重发）；发送在专用的 {@code battle-result-out} 线程上。topic {@code game-battle-result-g<代次>}，
+     * {@code battle-outbox} 上交来（首发 + 重发）；发送在专用的 {@code battle-result-out} 线程上。topic {@code <ns>-battle-result-g<代次>}
+     * （缺省命名空间下即 {@code game-battle-result-g<代次>}，由注入的 {@link KafkaNames} 构造 {@link BattleResultTopics} 给出），
      * 代次 {@code game.battle.result.topic-generation}（{@code GAME_BATTLE_RESULT_TOPIC_GENERATION}）必须与 game-match 一致。
      *
      * <p>第一次核对 topic 在这里（建 bean 的启动线程上）同步做：分区数与契约不符 → 拒启；Kafka 不可达 → 最多等
@@ -226,17 +229,19 @@ public class BattleConfiguration {
      * （battle 节点停机、{@link SceneTransport} 关闭之后——后者依赖本 bean，先销毁）有界地发完队列、关生产者，没发完的写兜底日志。
      *
      * <p>{@code clients} 是测试的替换口（{@code MockProducer} + 假的 topic 管理）；生产不提供这个 bean，用真 Kafka 客户端。
-     * 客户端 id 带控制面通告地址与端口，便于在 broker 日志里认出是哪个 battle 实例。
+     * 客户端 id 是 {@link KafkaNames#battleResultClientId}：{@code <ns>-battle-result-<通告地址>-<控制面端口>}（缺省命名空间下即
+     * {@code game-battle-result-…}；admin 客户端再加 {@code -admin}），带控制面通告地址与端口，便于在 broker 日志里认出是哪个 battle 实例。
      */
     @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean(BattleResultSink.class)
     public KafkaBattleResultSink battleResultSink(BattleResultProperties resultProps, BattleProperties props,
                                                   @Value("${game.advertise-host}") String advertiseHost, BattleMetrics battleMetrics,
-                                                  ObjectProvider<KafkaBattleResultSink.Clients> clients) {
-        String clientId = resultClientId(advertiseHost, props.rpcPort());
+                                                  ObjectProvider<KafkaBattleResultSink.Clients> clients, KafkaNames kafkaNames) {
+        String clientId = kafkaNames.battleResultClientId(advertiseHost, props.rpcPort());
         KafkaBattleResultSink sink = new KafkaBattleResultSink(
                 clients.getIfAvailable(() -> KafkaBattleResultSink.Clients.kafka(resultProps.bootstrapServers(), clientId)),
-                resultProps.topicGeneration(), resultProps.replicationFactor(), resultProps.initTimeout(), battleMetrics);
+                new BattleResultTopics(kafkaNames), resultProps.topicGeneration(), resultProps.replicationFactor(),
+                resultProps.initTimeout(), battleMetrics);
         try {
             sink.start();
         } catch (AuditTopicContractException e) {
@@ -248,19 +253,11 @@ public class BattleConfiguration {
         return sink;
     }
 
-    /**
-     * 对局结果生产者的 Kafka client.id：{@code <ns>-battle-result-<通告地址>-<控制面端口>}（缺省命名空间下即 {@code game-battle-result-…}；
-     * admin 客户端再加 {@code -admin}）。通告地址是部署给的值（可能是 IPv6 字面量），走不收紧字符集的 {@link KafkaNames#clientId}。
-     */
-    static String resultClientId(String advertiseHost, int rpcPort) {
-        return KafkaNames.clientId("battle-result-" + advertiseHost + "-" + rpcPort);
-    }
-
     /** 要 Redis / 端口 / 节点身份的部件的工厂（测试换成假实现）。 */
     @Bean
     @ConditionalOnMissingBean(BattleInfrastructure.class)
-    public BattleInfrastructure battleInfrastructure(RedissonClient redis) {
-        return BattleInfrastructure.production(redis);
+    public BattleInfrastructure battleInfrastructure(RedissonClient redis, RedisKeys redisKeys) {
+        return BattleInfrastructure.production(redis, redisKeys);
     }
 
     /**
@@ -288,8 +285,8 @@ public class BattleConfiguration {
 
     /** dev 建房 / 登记观众时补全快照路由（读在线目录、位置记录与 scene 目录；只在 Tomcat 线程上用）。 */
     @Bean
-    public DevRoutingResolver devRoutingResolver(RedissonClient redis) {
-        return DevRoutingResolver.redis(redis);
+    public DevRoutingResolver devRoutingResolver(RedissonClient redis, RedisKeys redisKeys) {
+        return DevRoutingResolver.redis(redis, redisKeys);
     }
 
     /** 只注册在 {@code /admin/*}（容器按规范路径匹配）；令牌只从环境变量 {@code GAME_ADMIN_TOKEN} 读。 */

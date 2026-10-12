@@ -98,23 +98,23 @@ public class FriendConfiguration {
     }
 
     @Bean
-    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis) {
-        return new PlayerPresenceDirectory(redis);
+    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis, RedisKeys keys) {
+        return new PlayerPresenceDirectory(redis, keys);
     }
 
     @Bean
-    public PlayerPushes playerPushes(RedissonClient redis, PlayerPresenceDirectory directory) {
-        return new PlayerPushes(redis, directory);
+    public PlayerPushes playerPushes(RedissonClient redis, RedisKeys keys, PlayerPresenceDirectory directory) {
+        return new PlayerPushes(redis, keys, directory);
     }
 
     @Bean
-    public FriendCache friendCache(RedissonClient redis, FriendProperties props, FriendMetrics metrics) {
-        return new FriendCache(new RedissonFriendCacheRedis(redis), props.cacheTtl(), metrics);
+    public FriendCache friendCache(RedissonClient redis, RedisKeys keys, FriendProperties props, FriendMetrics metrics) {
+        return new FriendCache(new RedissonFriendCacheRedis(redis), keys, props.cacheTtl(), metrics);
     }
 
     @Bean
-    public FriendRequestQuota friendRequestQuota(RedissonClient redis, FriendProperties props, FriendMetrics metrics) {
-        return FriendRequestQuota.redisson(redis, props.requestQuotaPerMinute(), metrics);
+    public FriendRequestQuota friendRequestQuota(RedissonClient redis, RedisKeys keys, FriendProperties props, FriendMetrics metrics) {
+        return FriendRequestQuota.redisson(redis, keys, props.requestQuotaPerMinute(), metrics);
     }
 
     @Bean
@@ -126,26 +126,26 @@ public class FriendConfiguration {
     }
 
     @Bean
-    public FriendService friendService(FriendStore store, FriendCache cache, FriendRequestQuota quota,
+    public FriendService friendService(FriendStore store, FriendCache cache, RedisKeys keys, FriendRequestQuota quota,
                                        PlayerProfiles profiles, PlayerPresenceDirectory presence, PlayerPushes pushes,
                                        FriendMetrics metrics, FriendProperties props, MessageIdRegistry registry) {
         int listLimit = props.listReadHardLimit();
-        return new FriendService(store, cache, quota, profiles::load,
+        return new FriendService(store, cache, keys, quota, profiles::load,
                 ids -> presence.findAllStrictAsync(ids, listLimit),
                 pushes::pushToPlayer, metrics, listLimit, props.pushTimeout(), System::currentTimeMillis,
                 registry.requireId(FriendDispatcher.SERVICE, "NotifyFriendEvent"));
     }
 
-    /** 推荐（mutual / random 两条 SQL）与在线目录（SCAN {@code game:presence:*} + player 表）。 */
+    /** 推荐（mutual / random 两条 SQL）与在线目录（SCAN {@code <ns>:presence:*} + player 表）。 */
     @Bean
-    public RecommendService recommendService(DataSource dataSource, RedissonClient redis, PlayerProfiles profiles,
+    public RecommendService recommendService(DataSource dataSource, RedissonClient redis, RedisKeys keys, PlayerProfiles profiles,
                                              PlayerPresenceDirectory presence, FriendMetrics metrics, FriendProperties props) {
         int queryTimeout = (int) Math.max(1, props.queryTimeout().toSeconds());
         RecommendStore store = new RecommendStore(dataSource, queryTimeout, RecommendPivot::pick);
-        OnlineDirectory directory = new OnlineDirectory(new RedissonDirectoryRedis(redis, RedisKeys.presencePrefix()),
-                RedisKeys.presencePrefix(), profiles::loadStrictOnce);
+        OnlineDirectory directory = new OnlineDirectory(new RedissonDirectoryRedis(redis, keys.presencePrefix()),
+                keys.presencePrefix(), profiles::loadStrictOnce);
         FriendProperties.Recommend r = props.recommend();
-        return new RecommendService(store, directory, DirectoryQuota.redisson(redis, metrics), profiles::loadStrict,
+        return new RecommendService(store, directory, DirectoryQuota.redisson(redis, keys, metrics), profiles::loadStrict,
                 ids -> presence.findAllStrictAsync(ids, props.listReadHardLimit()), metrics, r.defaultLimit(), r.maxLimit(),
                 r.maxExclude());
     }

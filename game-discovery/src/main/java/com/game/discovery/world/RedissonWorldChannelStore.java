@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.ByteArrayCodec;
@@ -161,14 +162,16 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
             """;
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public RedissonWorldChannelStore(RedissonClient redis) {
+    public RedissonWorldChannelStore(RedissonClient redis, RedisKeys keys) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
     }
 
     @Override
     public long planVersion(int zoneId) {
-        String key = RedisKeys.worldPlanVersion(zoneId);
+        String key = redisKeys.worldPlanVersion(zoneId);
         byte[] raw = redis.<byte[]>getBucket(key, ByteArrayCodec.INSTANCE).get();
         return WorldPlanCodec.parseVersion(key, raw);
     }
@@ -176,15 +179,15 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
     @Override
     public WorldPlan readPlan(int zoneId) {
         Object raw = script().eval(RScript.Mode.READ_ONLY, PLAN, RScript.ReturnType.MULTI,
-                keys(RedisKeys.worldChannels(zoneId), RedisKeys.worldPlanVersion(zoneId)));
+                keys(redisKeys.worldChannels(zoneId), redisKeys.worldPlanVersion(zoneId)));
         return WorldPlanCodec.parsePlan(zoneId, raw);
     }
 
     @Override
     public WorldPlanSnapshot snapshot(int zoneId) {
         Object raw = script().eval(RScript.Mode.READ_ONLY, SNAPSHOT, RScript.ReturnType.MULTI,
-                keys(RedisKeys.worldChannels(zoneId), RedisKeys.worldDesired(zoneId), RedisKeys.worldCooldown(zoneId),
-                        RedisKeys.worldPlanVersion(zoneId)));
+                keys(redisKeys.worldChannels(zoneId), redisKeys.worldDesired(zoneId), redisKeys.worldCooldown(zoneId),
+                        redisKeys.worldPlanVersion(zoneId)));
         return WorldPlanCodec.parseSnapshot(zoneId, raw);
     }
 
@@ -192,8 +195,8 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
     public WorldPlanWriteResult write(int zoneId, String leaderToken, WorldPlanBatch batch) {
         requireToken(leaderToken);
         Object raw = script().eval(RScript.Mode.READ_WRITE, WRITE, RScript.ReturnType.INTEGER,
-                keys(RedisKeys.worldLeader(zoneId), RedisKeys.worldChannels(zoneId), RedisKeys.worldDesired(zoneId),
-                        RedisKeys.worldCooldown(zoneId), RedisKeys.worldPlanVersion(zoneId)),
+                keys(redisKeys.worldLeader(zoneId), redisKeys.worldChannels(zoneId), redisKeys.worldDesired(zoneId),
+                        redisKeys.worldCooldown(zoneId), redisKeys.worldPlanVersion(zoneId)),
                 WorldPlanCodec.writeArgs(leaderToken, batch).toArray());
         WorldPlanWriteResult result = WorldPlanCodec.writeResult(raw, batch);
         if (log.isDebugEnabled()) {
@@ -206,21 +209,21 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
     public boolean tryAcquireLeader(int zoneId, String token, Duration ttl) {
         requireToken(token);
         return flag(script().eval(RScript.Mode.READ_WRITE, LEADER_TRY, RScript.ReturnType.INTEGER,
-                keys(RedisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
+                keys(redisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
     }
 
     @Override
     public boolean renewLeader(int zoneId, String token, Duration ttl) {
         requireToken(token);
         return flag(script().eval(RScript.Mode.READ_WRITE, LEADER_RENEW, RScript.ReturnType.INTEGER,
-                keys(RedisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
+                keys(redisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
     }
 
     @Override
     public boolean releaseLeader(int zoneId, String token) {
         requireToken(token);
         return flag(script().eval(RScript.Mode.READ_WRITE, LEADER_RELEASE, RScript.ReturnType.INTEGER,
-                keys(RedisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token)));
+                keys(redisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token)));
     }
 
     @Override
@@ -233,7 +236,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
         args.add(millis(ttl));
         args.add(WorldPlanCodec.ascii(Long.toUnsignedString(playerId)));
         for (ReservationCandidate candidate : candidates) {
-            keys.add(RedisKeys.worldReservations(zoneId, candidate.sceneId()));
+            keys.add(redisKeys.worldReservations(zoneId, candidate.sceneId()));
             args.add(WorldPlanCodec.ascii(Integer.toUnsignedString(candidate.directoryPlayers())));
         }
         Object raw = script().eval(RScript.Mode.READ_WRITE, RESERVE, RScript.ReturnType.MULTI, keys, args.toArray());
@@ -243,13 +246,13 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
     @Override
     public void reserveScene(int zoneId, long sceneId, long playerId, Duration ttl) {
         script().eval(RScript.Mode.READ_WRITE, RESERVE_ONE, RScript.ReturnType.INTEGER,
-                keys(RedisKeys.worldReservations(zoneId, sceneId)), millis(ttl),
+                keys(redisKeys.worldReservations(zoneId, sceneId)), millis(ttl),
                 WorldPlanCodec.ascii(Long.toUnsignedString(playerId)));
     }
 
     @Override
     public boolean releaseReservation(int zoneId, long sceneId, long playerId) {
-        return redis.getScoredSortedSet(RedisKeys.worldReservations(zoneId, sceneId), StringCodec.INSTANCE)
+        return redis.getScoredSortedSet(redisKeys.worldReservations(zoneId, sceneId), StringCodec.INSTANCE)
                 .remove(Long.toUnsignedString(playerId));
     }
 
@@ -260,7 +263,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
         }
         List<Object> keys = new ArrayList<>(sceneIds.size());
         for (long sceneId : sceneIds) {
-            keys.add(RedisKeys.worldReservations(zoneId, sceneId));
+            keys.add(redisKeys.worldReservations(zoneId, sceneId));
         }
         Object raw = script().eval(RScript.Mode.READ_ONLY, COUNT, RScript.ReturnType.MULTI, keys);
         return WorldPlanCodec.parseCounts(raw, sceneIds.size());
@@ -268,18 +271,18 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
 
     @Override
     public void registerZone(int zoneId) {
-        redis.getSet(RedisKeys.worldZones(), StringCodec.INSTANCE).add(Integer.toUnsignedString(zoneId));
+        redis.getSet(redisKeys.worldZones(), StringCodec.INSTANCE).add(Integer.toUnsignedString(zoneId));
     }
 
     @Override
     public List<Integer> zones() {
         List<Integer> out = new ArrayList<>();
-        for (Object member : redis.getSet(RedisKeys.worldZones(), StringCodec.INSTANCE).readAll()) {
+        for (Object member : redis.getSet(redisKeys.worldZones(), StringCodec.INSTANCE).readAll()) {
             String s = String.valueOf(member);
             try {
                 out.add(Integer.parseUnsignedInt(s));
             } catch (NumberFormatException e) {
-                log.warn("zone 集合里有非法成员，跳过 key={} member={}", RedisKeys.worldZones(), s);
+                log.warn("zone 集合里有非法成员，跳过 key={} member={}", redisKeys.worldZones(), s);
             }
         }
         out.sort(Integer::compareUnsigned);

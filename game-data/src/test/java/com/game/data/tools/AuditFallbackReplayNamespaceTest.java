@@ -18,8 +18,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * 回灌工具的部署命名空间与库名核对（缺省 JVM，命名空间钉在 game；库用 H2）：显式定格并打印命名空间；连上库后、建运维表之前核对
- * {@code DATABASE()}，期望值缺省 = 命名空间、{@code --expect-database} 覆盖；不一致退出 2、不建表、报错里不带 URL；{@code --dry-run} 不做这项检查。
+ * 回灌工具的部署命名空间与库名核对（库用 H2）：命名空间只取 run() 注入的 env 映射里的 {@code GAME_NAMESPACE}（没设取 game），打印出来，非法值退出 2；
+ * 连上库后、建运维表之前核对 {@code DATABASE()}，期望值缺省 = 命名空间、{@code --expect-database} 覆盖；不一致退出 2、不建表、报错里不带 URL；
+ * {@code --dry-run} 不做这项检查。
  */
 class AuditFallbackReplayNamespaceTest {
 
@@ -73,6 +74,36 @@ class AuditFallbackReplayNamespaceTest {
             int matched = run(List.of("--file", log.toString(), "--expect-database", actual), Map.of(AuditFallbackReplay.DEFAULT_URL_ENV, url));
             assertThat(err()).as("期望库名给对时核对通过、往下走").doesNotContain("库名核对失败");
             assertThat(matched).isNotEqualTo(2);
+        }
+    }
+
+    @Test
+    void 命名空间取自环境变量GAME_NAMESPACE_库名按它核对(@TempDir Path dir) throws Exception {
+        Path log = dir.resolve("fallback.log");
+        Files.writeString(log, "unrelated log line\n");
+        String url = h2Url();
+        try (Connection keepAlive = DriverManager.getConnection(url)) {
+            String actual = NamespaceDatabaseCheck.currentDatabase(keepAlive);
+
+            int code = run(List.of("--file", log.toString()), Map.of(AuditFallbackReplay.DEFAULT_URL_ENV, url, "GAME_NAMESPACE", "nstest"));
+
+            assertThat(code).isEqualTo(2);
+            assertThat(err()).contains("部署命名空间 game.namespace=nstest（来源 环境变量 GAME_NAMESPACE）")
+                    .contains("game.namespace=nstest，当前连接的库 DATABASE()=" + actual).contains("期望 nstest");
+            assertThat(hasTable(url, "audit_replay_line")).isFalse();
+        }
+    }
+
+    @Test
+    void 命名空间非法_连库读文件之前退出2_报错点名原值(@TempDir Path dir) {
+        Path missing = dir.resolve("不存在.log");
+        for (String bad : List.of("Bad", "", " game", "mysql", "a".repeat(29))) {
+            err.reset();
+            int code = run(List.of("--file", missing.toString()), Map.of(AuditFallbackReplay.DEFAULT_URL_ENV, "jdbc:h2:mem:never",
+                    "GAME_NAMESPACE", bad));
+            assertThat(code).as("取值 \"%s\"", bad).isEqualTo(2);
+            assertThat(err()).as("取值 \"%s\"", bad).contains("GAME_NAMESPACE").contains("\"" + bad + "\"")
+                    .doesNotContain("读文件失败").doesNotContain("部署命名空间 game.namespace=");
         }
     }
 

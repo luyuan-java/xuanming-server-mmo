@@ -1,7 +1,6 @@
 package com.game.match.matcher;
 
 import com.game.match.rating.RatingReader;
-import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
 import com.game.match.ticket.TicketState;
 import com.game.match.ticket.TicketStore.QueueSnapshot;
@@ -125,16 +124,17 @@ final class GroupPicker {
     private final Set<String> evictedMalformed = new HashSet<>();
 
     /**
+     * @param queueKey 这条队列的键全文（{@code QueueRef#queueKey}；票据的 {@code queue_key} 不等于它的成员按「不属于这条队列」摘掉）
      * @param required 凑满一局的人数（≥ 1）
      * @param rated    评分模式（1V1 / 5V5）
      * @param snapshot 队列前缀的快照（等待序）与取快照那一刻的 Redis 时间
      * @param tickets  快照里各玩家此刻的票据（没有票的人不在里面）
      */
-    GroupPicker(QueueRef queue, int required, boolean rated, QueueSnapshot snapshot, Map<Long, Ticket> tickets, Tolerance tolerance, Gate gate) {
+    GroupPicker(String queueKey, int required, boolean rated, QueueSnapshot snapshot, Map<Long, Ticket> tickets, Tolerance tolerance, Gate gate) {
         if (required < 1) {
             throw new IllegalArgumentException("凑满人数必须 ≥ 1: " + required);
         }
-        this.queueKey = queue.queueKey();
+        this.queueKey = Objects.requireNonNull(queueKey, "queueKey");
         this.required = required;
         this.rated = rated;
         this.entries = snapshot.entries();

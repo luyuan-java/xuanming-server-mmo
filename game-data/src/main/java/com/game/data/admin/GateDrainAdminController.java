@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.game.api.proto.GateNodeInfo;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Duration;
@@ -61,10 +62,10 @@ public class GateDrainAdminController {
     private final long minTtlSeconds;
 
     @Autowired
-    public GateDrainAdminController(ObjectProvider<RedissonClient> redis,
+    public GateDrainAdminController(ObjectProvider<RedissonClient> redis, RedisKeys keys,
                                     @Value("${game.data.gate-drain.min-ttl:30m}") Duration minTtl) {
-        this(() -> new NodeDirectory<>(redis.getObject(), NodeTypes.GATE, GateNodeInfo.parser()),
-                () -> new GateDrainMarks(redis.getObject()), minTtl);
+        this(() -> new NodeDirectory<>(redis.getObject(), keys, NodeTypes.GATE, GateNodeInfo.parser()),
+                () -> new GateDrainMarks(redis.getObject(), keys), minTtl);
     }
 
     GateDrainAdminController(Supplier<NodeDirectory<GateNodeInfo>> gates, Supplier<GateDrainMarks> marks, Duration minTtl) {

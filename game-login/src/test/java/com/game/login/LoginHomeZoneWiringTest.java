@@ -10,7 +10,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.id.Snowflake;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.zone.ZoneMergeFence;
 import com.game.login.account.AccountLogin;
 import com.game.login.auth.LoginAuthenticator;
@@ -50,6 +52,8 @@ import org.redisson.api.RedissonClient;
  * 进游戏 bean 同样拿注入的围栏（检查点 F2，判角色的归属区）。只调装配方法、不起容器。
  */
 class LoginHomeZoneWiringTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final String ACCOUNT = "robot_0001";
 
@@ -133,7 +137,7 @@ class LoginHomeZoneWiringTest {
         try (LoginWorkerPool pool = new LoginWorkerPool(1, 8, java.time.Duration.ofSeconds(1))) {
             // 位置记录的 Redis 是替身（读即失败 → 按存档地图）；场景目录没接（Dubbo 引用为空）——围栏挡在分配之前，碰不到它。
             EnterGameHandler handler = configuration.enterGameHandler(store, mock(OwnerTakeovers.class),
-                    mock(RedissonClient.class), pool, props, new LoginMetrics(new SimpleMeterRegistry()), accountLogin,
+                    mock(RedissonClient.class), REDIS_KEYS, pool, props, new LoginMetrics(new SimpleMeterRegistry()), accountLogin,
                     merging, 1);
 
             var reply = handler.handle(sessionIn(2), EnterGameRequest.newBuilder().setPlayerId(42).build())

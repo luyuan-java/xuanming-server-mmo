@@ -6,8 +6,10 @@ import com.game.api.proto.AssignSceneRequest;
 import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.Set;
 import org.junit.jupiter.api.AfterAll;
@@ -26,6 +28,9 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisSceneNodeSourceTest {
 
+    /** 缺省部署命名空间 game 的键名。 */
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     /** 远离真实 zone 的测试 zone 号。 */
     private static final int ZONE = 900_001;
 
@@ -40,7 +45,7 @@ class RedisSceneNodeSourceTest {
 
     @AfterAll
     static void cleanup() {
-        NodeDirectory<SceneNodeInfo> dir = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        NodeDirectory<SceneNodeInfo> dir = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
         dir.remove(ZONE, 1);
         dir.remove(ZONE, 2);
         redis.shutdown();
@@ -48,11 +53,11 @@ class RedisSceneNodeSourceTest {
 
     @Test
     void 读到scene节点上报的目录并选人数最少的场景() {
-        NodeDirectory<SceneNodeInfo> dir = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        NodeDirectory<SceneNodeInfo> dir = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
         dir.publish(ZONE, 1, node(1, 1001, 20), Duration.ofSeconds(15));
         dir.publish(ZONE, 2, node(2, 2001, 5), Duration.ofSeconds(15));
 
-        RedisSceneNodeSource source = new RedisSceneNodeSource(redis);
+        RedisSceneNodeSource source = new RedisSceneNodeSource(redis, REDIS_KEYS);
         assertThat(source.list(ZONE)).extracting(SceneNodeInfo::getNodeId).containsExactlyInAnyOrder(1, 2);
 
         AssignSceneResponse resp = new SceneAssigner(source, new WorldSceneConfigs(1, Set.of(1)))

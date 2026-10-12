@@ -13,9 +13,11 @@
 #   1. 切片是 tools/local/start-slice.sh 起的、正在跑（run/pids/ 里有 PID 文件），dev 运行模式（robot 要用 dev gather 与 GM 94 / 95），
 #      game-scene 的 reaper 间隔是切片缺省的 2s（battle-after-store 等的就是它；生产缺省 30s 时要多等半分钟）。
 #   2. 在**启动切片的同一个 shell**里执行，或导出同一组环境变量：GAME_MYSQL_PASSWORD、GAME_GATE_TOKEN_SECRET、GAME_LOGIN_DEV_PASSWORD、
-#      GAME_NODE_LINK_SECRET、GAME_DUBBO_SECRET，以及当时显式设过的任何一个 GAME_*（部署命名空间 GAME_NAMESPACE、运行模式、reaper 间隔……）。重启出来的进程读的是本脚本的环境，
+#      GAME_NODE_LINK_SECRET、GAME_DUBBO_SECRET，以及当时显式设过的任何一个 GAME_*（运行模式、reaper 间隔……）。重启出来的进程读的是本脚本的环境，
 #      环境不同它就和被杀的那个不是同一种配置。start-slice.sh 自己生成的四个秘密（运维令牌、GM 停机密钥、帮会资产签名密钥、战斗票据密钥）
 #      当时没设环境变量的话，本脚本从 run/ 下的文件读回同一个值；当时是从环境变量来的，这里也必须有同一个环境变量。
+#      部署命名空间 GAME_NAMESPACE 不靠环境：start-slice.sh 把切片生效的值写在 run/game-namespace，本脚本读回；这里设了而与它不同、
+#      或两头都没有时拒绝（退出 2），不会以缺省的 game 重启另一个命名空间的切片。
 #   3. 已执行 ./mvnw -DskipTests install（要 game-robot、game-scene / game-battle 的可执行 jar）。game-robot 的旧包会被拒绝，三道检查：帮助里认
 #      --crash-window；帮助里报的故障变体判定版本 [crash-window-rev=N] 等于本脚本的 ROBOT_CRASH_REVISION（下面两段承诺的行为是这一版才有的）；
 #      jar 不比 game-robot 的源码 / pom 旧（改了源码没重新打包）。
@@ -99,10 +101,41 @@ for required in GAME_MYSQL_PASSWORD GAME_GATE_TOKEN_SECRET GAME_LOGIN_DEV_PASSWO
   fi
 done
 
+# 部署命名空间的校验：与 start-slice.sh 的 validate_namespace() 逐字相同（SliceScriptsTest 钉住）
+validate_namespace() {
+  local ns=$1
+  if ! (LC_ALL=C; [[ "$ns" =~ ^[a-z][a-z0-9]{0,27}$ ]]) || [[ "$ns" =~ ^(mysql|sys|public)$ ]]; then
+    echo "部署命名空间 GAME_NAMESPACE=\"$ns\" 不合法：必须匹配 [a-z][a-z0-9]{0,27}（小写字母开头，只含小写字母与数字，1–28 个字符），且不是保留字 mysql、sys、public；不设则为 game" >&2
+    return 1
+  fi
+}
+
+# 部署命名空间：重启出来的进程必须与还在跑的进程同一个。不同就是另一套部署——同一套 infra 上另有缺省 game 的部署时，以 game 重启的进程会
+# 登记进对方的 scene 目录、占对方的节点号租约、连对方的库（跨租户写入），crash-window 的结论也是假的。start-slice.sh 把切片生效的值写在
+# run/game-namespace：没设 GAME_NAMESPACE 就用它；设了而与它不同就拒绝（点名两个值）；两头都没有说明切片不是当前的 start-slice.sh 起的，同样拒绝
+# （不回落 game）。最后按与进程同一套规则校验。
+resolve_slice_namespace() {
+  local recorded=""
+  if [[ -f run/game-namespace ]]; then
+    recorded=$(cat run/game-namespace)
+  fi
+  if [[ -z "${GAME_NAMESPACE+x}" ]]; then
+    if [[ ! -f run/game-namespace ]]; then
+      echo "没有环境变量 GAME_NAMESPACE，也没有 run/game-namespace：切片不是当前的 tools/local/start-slice.sh 起的；导出启动切片时的 GAME_NAMESPACE 再执行" >&2
+      return 1
+    fi
+    GAME_NAMESPACE=$recorded
+  elif [[ -f run/game-namespace && "$GAME_NAMESPACE" != "$recorded" ]]; then
+    echo "GAME_NAMESPACE=\"$GAME_NAMESPACE\" 与切片启动时的 \"$recorded\"（run/game-namespace）不同：重启出来的进程会进另一个部署，拒绝；取消这个环境变量（用切片的值），或先用 stop-slice.sh 停掉切片再按新值重起" >&2
+    return 1
+  fi
+  validate_namespace "$GAME_NAMESPACE" || return 1
+  export GAME_NAMESPACE
+}
+resolve_slice_namespace || exit 2
+
 # 下面这些的缺省值与 start-slice.sh 逐个相同；启动切片时显式设过别的值，这里也要设成那个值
 export GAME_RUN_MODE="${GAME_RUN_MODE:-dev}"
-# 部署命名空间：重启出来的进程必须与还在跑的进程同一个（不同就是另一套部署，看不见彼此的 Redis 键与 topic）
-export GAME_NAMESPACE="${GAME_NAMESPACE:-game}"
 export GAME_SCENE_MIRROR_IDLE_TIMEOUT="${GAME_SCENE_MIRROR_IDLE_TIMEOUT:-5s}"
 export GAME_SCENE_INSTANCE_RECLAIM_GRACE="${GAME_SCENE_INSTANCE_RECLAIM_GRACE:-10s}"
 export GAME_SCENE_BATTLE_REAPER_INTERVAL="${GAME_SCENE_BATTLE_REAPER_INTERVAL:-2s}"

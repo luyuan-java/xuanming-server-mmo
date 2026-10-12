@@ -283,7 +283,10 @@
   各进程的 URL 参数各不相同：guild / trade / friend 带 `sessionVariables`，data 带 `socketTimeout=30000` 和 `useAffectedRows`，team 没有 `createDatabaseIfNotExist`。
   所以**不能**照基线那样用 `SPRING_DATASOURCE_URL` 整串覆盖（`docker-compose.login-stack.yml:124`），那样每个容器的参数会各自分叉。只把 host 和 port 换成占位符。
   （2026-10-12 补记）URL 的**库名段**已经改成占位符 `${game.namespace:game}`（部署命名空间，architecture.md §6.2、db-migrations M13）：缺省解析后与原串逐字节相同，
-  game-match 的 URL（批次 6.4 新增，本节盘点之后）同样如此，共 9 处。
+  game-match 的 URL（批次 6.4 新增，本节盘点之后）同样如此，共 9 处。规格因此是**库名恒等于部署命名空间、部署只覆盖 host / port**：服务进程启动期核对
+  `DATABASE()` 等于命名空间（game-discovery 的 `NamespaceDatabaseVerifier`），不一致拒启。库名偏离规格（整串覆盖了 URL、库名另取）的存量部署只能经应急开关
+  `GAME_MYSQL_EXPECT_DATABASE`（`game.mysql.expect-database`；命令行工具 `--expect-database` / `-expect-database`）放行，那是偏离规格的标志，不是受支持的配置路径。
+  host / port 占位符（§6.4 #1）落地之前，非本机 MySQL 只能整串覆盖 URL——那时库名段照样写成命名空间。
 - **Redis 地址**：11 个 yaml 都写死 `redis://127.0.0.1:6379`（如 game-scene `:76`、game-gate `:48`），没有占位符；game-battle 同样如此。
 - **Dubbo 直连 URL**：
   - game-gate 有 6 个（`:51-60`）；
@@ -313,10 +316,19 @@
      Java 只用审计这两个 topic；`__consumer_offsets` 是内部 topic，不受这个开关影响。
 3. **项目名固定为 `name: game-java`，不写 `container_name`**。基线的项目名缺省取目录名，并且写死了 `kafka` / `redis` / `mysql` 这些容器名。两版不得共享存储（architecture.md:27），只能靠项目名把卷隔开。
 4. **宿主端口可以改**：用 `GAME_MYSQL_HOST_PORT`、`GAME_REDIS_HOST_PORT`、`GAME_KAFKA_HOST_PORT`，避免与开发机上已经在跑的本地进程或基线的 compose 冲突。
-5. **多个游戏 / 多套部署共用一套 infra**（2026-10-12 补记）：各自设不同的部署命名空间 `GAME_NAMESPACE`（缺省 `game`；architecture.md §6.2）。Redis 键前缀 `<ns>:`、
-   Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 随之分开；`infra.yaml` 的 `MYSQL_DATABASE` 写 `${GAME_NAMESPACE:-game}`（只预建第一个使用者的库，其余靠
-   `createDatabaseIfNotExist`）。这只是命名隔离，Redis / Kafka 没有按租户的账号；要强隔离就各用一套 infra。整栈 `stack.yaml` 里给每个 Java 服务都写
-   `GAME_NAMESPACE: ${GAME_NAMESPACE:-game}`（不能写 `:-`，空串会被进程拒启）。
+5. **多个游戏 / 多套部署共用一套 infra**（2026-10-12 补记）：各部署的进程各设不同的部署命名空间 `GAME_NAMESPACE`（缺省 `game`；architecture.md §6.2）。Redis 键前缀 `<ns>:`、
+   Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 随之分开。`infra.yaml` 的 `MYSQL_DATABASE` 写 `${GAME_NAMESPACE-game}`：只决定第一次初始化时预建哪个库
+   （没设时预建 game；共用 infra 时可设空值、什么都不预建，各部署的库靠 `createDatabaseIfNotExist` 或 DBA），不决定任何进程的命名空间。
+   这只是命名隔离，Redis / Kafka 没有按租户的账号；要强隔离就各用一套 infra。
+   - **缺省值的写法**：单租户模板（`start-slice.sh`、`infra.yaml`）写不带冒号的 `${GAME_NAMESPACE-game}`——只在没设时取 game，设了空串照原样交给进程拒启
+     （`start-slice.sh` 起进程之前就按同一套规则校验，并把生效的值记进 `run/game-namespace` 供 `battle-crash-window.sh` 读回核对）；
+     **共用 infra 的整栈模板**给每个 Java 服务写 `GAME_NAMESPACE: ${GAME_NAMESPACE:?需要 GAME_NAMESPACE}`，不给缺省值，缺省部署也显式写 game，漏设时 compose
+     启动前就失败（§2.5 的 `x-java-env`）。**不要写 `${GAME_NAMESPACE:-game}`**：它把空串也换成 game，`GAME_NAMESPACE=$TENANT` 而 `TENANT` 恰好没设时，进程会以 game
+     加入同一套 infra 上缺省部署的键空间、节点号租约池与库——进程侧对空串的拒启就此失效。
+   - **同一主机两套整栈**：§2.5 的草图写死 `name: game-java` 并 `include: [infra.yaml]`，第二套要用 `docker compose -p <项目名>` 换项目名，得到的是另一套 infra
+     （物理隔离）；两套整栈要共用一套 infra，整栈文件得拆成不 include infra、连外部依赖的形态（7.1b 落地时定）。
+   - **Nacos**（只在用 nacos profile 时）：namespace 不随 `GAME_NAMESPACE` 自动变，共用一个 Nacos 的各部署在 `GAME_NACOS_ADDR` 里带 `?namespace=<ID>`（环境变量 `DUBBO_REGISTRY_PARAMETERS_NAMESPACE` Dubbo 不认），
+     并先在 Nacos 建好 ID 等于该值的命名空间（architecture.md §6.2）。
 
 ### 2.4 `deploy/compose/infra.yaml`（草图）
 
@@ -391,6 +403,7 @@ x-java: &java
   deploy: {resources: {limits: {memory: 768m}}}   # 设了上限，MaxRAMPercentage 才有意义
 x-java-env: &java-env
   GAME_RUN_MODE: ${GAME_RUN_MODE:-dev}    # 同 start-slice.sh:30；进程自身缺省 prod
+  GAME_NAMESPACE: ${GAME_NAMESPACE:?需要 GAME_NAMESPACE}   # 部署命名空间（2026-10-12 补记，§2.3 第 5 条）：必填、不给缺省值
   GAME_MANAGEMENT_ADDRESS: 0.0.0.0      # 只在容器网卡上；宿主侧只发布到 127.0.0.1
   GAME_REDIS_ADDRESS: redis://redis:6379
   GAME_MYSQL_HOST: mysql
@@ -611,7 +624,7 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 
 ### 3.8 镜像名与 tag（留给 7.6 的接口）
 
-- **镜像名**：`${GAME_IMAGE_NAMESPACE:-game-java}/<模块名>`，例如 `game-java/game-gate`。与基线的 `mmorpg-*` 明显区分，两版即使推到同一个 registry 也不会混。7.6 推 GHCR 时把 namespace 改成 `ghcr.io/luyuan-java`；`org.opencontainers.image.source` 这个 label 能让 GHCR 把包关联回本仓库。
+- **镜像名**：`${GAME_IMAGE_NAMESPACE:-game-java}/<模块名>`，例如 `game-java/game-gate`。与基线的 `mmorpg-*` 明显区分，两版即使推到同一个 registry 也不会混。7.6 推 GHCR 时把 namespace 改成 `ghcr.io/luyuan-java`；`org.opencontainers.image.source` 这个 label 能让 GHCR 把包关联回本仓库。（2026-10-12 补记）这里的 namespace 是镜像仓库路径，与部署命名空间 `GAME_NAMESPACE` 无关，两者在同一份 .env 里并列时别填混（四种 namespace 的对照表见 architecture.md §6.2）。
 - **tag**：
   - 快照轨：12 位 sha，脏树加 `-dirty`。CI 每次全新检出，永远不脏。
   - 发布轨：`v<X.Y.Z>-<sha12>`，脏树直接拒绝，长度不超过 128，归 7.6。
@@ -890,7 +903,7 @@ exit 0
 | `GAME_BATTLE_TOKEN_SECRET`（6.2） | battle；至少 32 字节，且不得与 gate 的密钥相同 | 拒启 | `:?` |
 | `GAME_ADMIN_TOKEN` | data、trade、battle（dev 接口）、robot | `/admin/**` 一律回 503 | `:-`（可选） |
 | `GAME_GM_ADMIN_SECRET` | gate、scene | GM 停机接口一律拒绝 | `:-`（可选） |
-| `GAME_NAMESPACE`（不是秘密，2026-10-12 补记；部署命名空间） | 全部 13 个进程，以及命令行工具 AuditFallbackReplay、assetopfix；**一个部署内必须同值**（不一致不串数据，但彼此看不见） | 缺省 `game`；非法值（大写、空串、mysql / sys / public……）拒启 | `:-game`（不能写 `:-`） |
+| `GAME_NAMESPACE`（不是秘密，2026-10-12 补记；部署命名空间，与镜像命名空间 `GAME_IMAGE_NAMESPACE` 无关） | 全部 13 个进程，以及命令行工具 AuditFallbackReplay、assetopfix、PasswordAdmin；**一个部署内必须同值**（不一致不串数据，但彼此看不见；连库的进程与工具还会因库名核对拒启） | 单租户缺省 `game`；非法值（大写、空串、首尾空白、超过 28 个字符、mysql / sys / public……）拒启。Nacos namespace 不由它派生（另在 `GAME_NACOS_ADDR` 里带 `?namespace=`） | 整栈 `:?`（必填，§2.3 第 5 条）；单租户模板 `-game`（不带冒号）；不写 `:-game` |
 
 ### 6.2 注入方式
 
@@ -908,7 +921,7 @@ exit 0
 
 | # | 改什么 | 新值 | 涉及 |
 |---|---|---|---|
-| 1 | JDBC URL 的 host 和 port | `jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:3306}/${game.namespace:game}?<原参数原样保留>`（库名段已于 2026-10-12 随部署命名空间改成占位符） | §2.2 列出的 8 处（加 game-match 共 9 处） |
+| 1 | JDBC URL 的 host 和 port | `jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:3306}/${game.namespace:game}?<原参数原样保留>`（库名段已于 2026-10-12 随部署命名空间改成占位符；规格是库名 = 命名空间、只覆盖 host / port，服务进程启动期核对 `DATABASE()`，§2.2） | §2.2 列出的 8 处（加 game-match 共 9 处） |
 | 2 | Redis 地址 | `${GAME_REDIS_ADDRESS:redis://127.0.0.1:6379}` | 11 个 yaml，加上 game-battle |
 | 3 | 通告地址 | `${GAME_ADVERTISE_HOST:127.0.0.1}` | 9 个 yaml，加上 game-battle（compose 只给 scene / gate / battle 设值，§2.6） |
 | 4 | scene 链路绑定 | `link-bind-host: ${GAME_SCENE_LINK_BIND_HOST:127.0.0.1}` | game-scene `:81` |

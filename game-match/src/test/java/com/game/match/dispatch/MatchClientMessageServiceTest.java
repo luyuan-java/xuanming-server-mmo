@@ -10,9 +10,11 @@ import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchProperties;
 import com.game.match.challenge.ChallengeHandlers;
 import com.game.match.challenge.ChallengeService;
@@ -87,6 +89,8 @@ import org.junit.jupiter.api.Test;
  * </ul>
  */
 class MatchClientMessageServiceTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
     private static final String BUSY_TEXT = "服务器繁忙,请稍后再试";
@@ -522,7 +526,7 @@ class MatchClientMessageServiceTest {
         MatchProperties props = new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null);
         MatchIds ids = new MatchIds(new Snowflake(3), () -> true, () -> false);
         QueueService queue = new QueueService(props, realPlayers, realTickets, new DefaultTicketHealing(realTickets), new FixedRatingReader(),
-                realGather, ids, metrics);
+                realGather, ids, metrics, REDIS_KEYS);
         ChallengeService challenge = new ChallengeService(realPlayers, realChallenges, ids, new RecordingPushes(), realGather, metrics,
                 Runnable::run, 60_000, IDS.get(MatchMethods.NOTIFY_CHALLENGE_INVITE), IDS.get(MatchMethods.NOTIFY_CHALLENGE_RESULT));
         BattleTicketReissue reissue = new BattleTicketReissue(realPlacements, new FakePlacementDialer(new FakeBattleNode()), metrics);

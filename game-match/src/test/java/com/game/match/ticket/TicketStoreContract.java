@@ -3,7 +3,9 @@ package com.game.match.ticket;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.match.ticket.TicketStore.DropReason;
 import com.game.match.ticket.TicketStore.GroupMember;
 import com.game.match.ticket.TicketStore.HealMode;
@@ -31,6 +33,8 @@ import org.junit.jupiter.api.Test;
  * 玩家号、队列、弹组 token 都经钩子分配（{@link #p} / {@link #q} / {@link #tok}）：Redis 版每个用例用随机的一段，互不相扰、用完只删自己的键。
  */
 public abstract class TicketStoreContract {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     protected static final long QUEUED_TTL = 21_600_000;
     protected static final long MATCHED_TTL = 48_000;
@@ -186,7 +190,7 @@ public abstract class TicketStoreContract {
         assertThat(queueMembers(q)).as("等得最久的在队首").containsExactly(u(a), u(b));
         assertThat(rankOf(q)).as("I2：镜像与队列成员一致").containsOnlyKeys(u(a), u(b)).containsEntry(u(a), 162_500L).containsEntry(u(b), 150_000L);
         assertThat(indexed(q)).as("I1：非空队列一定在注册集里").isTrue();
-        assertThat(store().read(a, d())).contains(new Ticket(tid(a), q.mode(), q.configId(), TicketState.QUEUED, enqueuedAt, 2, q.queueKey(),
+        assertThat(store().read(a, d())).contains(new Ticket(tid(a), q.mode(), q.configId(), TicketState.QUEUED, enqueuedAt, 2, q.queueKey(REDIS_KEYS),
                 162_500, 0, 0, 0));
         assertTtl(a, QUEUED_TTL);
     }
@@ -390,7 +394,7 @@ public abstract class TicketStoreContract {
         long elsewhere = p(3);
         putQueueMember(q, u(noTicket), 150_000L);
         enqueue(matched, q, 150_000);
-        putTicket(matched, new Ticket(tid(matched), 3, q.configId(), TicketState.MATCHED, 1, 1, q.queueKey(), 150_000, 0, 0, 0), MATCHED_TTL);
+        putTicket(matched, new Ticket(tid(matched), 3, q.configId(), TicketState.MATCHED, 1, 1, q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), MATCHED_TTL);
         enqueue(elsewhere, other, 150_000);
         putQueueMember(q, u(elsewhere), 150_000L);
 
@@ -463,7 +467,7 @@ public abstract class TicketStoreContract {
         assertTtl(c, MATCHED_TTL);
         assertTtl(b, QUEUED_TTL);
         assertThat(ticket(a).enqueuedAtMs()).as("入队时刻不变").isEqualTo(enqueuedAt);
-        assertThat(ticket(a).queueKey()).as("队列键留在票上：回队首按它核对").isEqualTo(q.queueKey());
+        assertThat(ticket(a).queueKey()).as("队列键留在票上：回队首按它核对").isEqualTo(q.queueKey(REDIS_KEYS));
     }
 
     @Test
@@ -496,10 +500,10 @@ public abstract class TicketStoreContract {
         long orphan = p(1);
         long elsewhere = p(2);
         long matched = p(3);
-        putTicket(orphan, new Ticket(tid(orphan), 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(), 150_000, 0, 0, 0), QUEUED_TTL);
+        putTicket(orphan, new Ticket(tid(orphan), 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), QUEUED_TTL);
         enqueue(elsewhere, other, 150_000);
         putQueueMember(q, u(elsewhere), 150_000L);
-        putTicket(matched, new Ticket(tid(matched), 3, q.configId(), TicketState.MATCHED, 1, 1, q.queueKey(), 150_000, 0, 0, 0), MATCHED_TTL);
+        putTicket(matched, new Ticket(tid(matched), 3, q.configId(), TicketState.MATCHED, 1, 1, q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), MATCHED_TTL);
         putQueueMember(q, u(matched), 150_000L);
 
         assertThat(store().pop(q, tok("pop-1"), List.of(ref(orphan), ref(elsewhere), ref(matched)), MATCHED_TTL, d()))
@@ -823,7 +827,7 @@ public abstract class TicketStoreContract {
         QueueRef q = q(1);
         long orphanPlayer = p(1);
         long alivePlayer = p(2);
-        Ticket orphan = new Ticket("t-o", 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(), 150_000, 0, 0, 0);
+        Ticket orphan = new Ticket("t-o", 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0);
         putTicket(orphanPlayer, orphan, QUEUED_TTL);
         enqueue(alivePlayer, q, 150_000);
         Ticket alive = ticket(alivePlayer);
@@ -863,8 +867,8 @@ public abstract class TicketStoreContract {
         Ticket queuedSeen = ticket(a);
         store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d());
         // moved：读到时票在 q（孤儿），之后同一票号被改到了 other 队列（人为构造）
-        Ticket movedSeen = new Ticket(tid(moved), 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(), 150_000, 0, 0, 0);
-        putTicket(moved, new Ticket(tid(moved), 3, other.configId(), TicketState.QUEUED, 1, 1, other.queueKey(), 150_000, 0, 0, 0), QUEUED_TTL);
+        Ticket movedSeen = new Ticket(tid(moved), 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0);
+        putTicket(moved, new Ticket(tid(moved), 3, other.configId(), TicketState.QUEUED, 1, 1, other.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), QUEUED_TTL);
         Object before = fingerprint();
 
         assertThat(store().heal(a, stale, HealMode.READY, d())).as("票号不符").isFalse();
@@ -886,14 +890,14 @@ public abstract class TicketStoreContract {
         assertThat(store().queueLength(q, d())).isEqualTo(1);
         assertThat(store().pruneIfEmpty(q, d())).isFalse();
         assertThat(indexed(q)).isTrue();
-        assertThat(store().queueIndex(d())).contains(q.queueKey());
+        assertThat(store().queueIndex(d())).contains(q.queueKey(REDIS_KEYS));
 
         store().delete(ref(a), d());
         store().dropMalformed(q, u(a), d());
-        assertThat(store().queueIndex(d())).as("队列空了也不自动出注册集：由凑单懒剔除").contains(q.queueKey());
+        assertThat(store().queueIndex(d())).as("队列空了也不自动出注册集：由凑单懒剔除").contains(q.queueKey(REDIS_KEYS));
         assertThat(store().queueLength(q, d())).isZero();
         assertThat(store().pruneIfEmpty(q, d())).isTrue();
-        assertThat(store().queueIndex(d())).doesNotContain(q.queueKey());
+        assertThat(store().queueIndex(d())).doesNotContain(q.queueKey(REDIS_KEYS));
         assertThat(rankOf(q)).isEmpty();
     }
 
@@ -1039,7 +1043,7 @@ public abstract class TicketStoreContract {
         long ready = p(1);
         long orphanPlayer = p(2);
         putTicket(ready, new Ticket("t-r", 3, 0, TicketState.READY, 1, 1, "", 150_000, 0, 77, 0), READY_TTL);
-        Ticket orphan = new Ticket("t-o", 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(), 150_000, 0, 0, 0);
+        Ticket orphan = new Ticket("t-o", 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0);
         putTicket(orphanPlayer, orphan, QUEUED_TTL);
         Ticket seen = ticket(ready);
         store().heal(ready, seen, HealMode.READY, d());

@@ -10,6 +10,7 @@ import io.micrometer.core.instrument.binder.MeterBinder;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.Executors;
@@ -37,6 +38,7 @@ public final class RedisKillSwitchSync implements AutoCloseable, MeterBinder {
     static final long FAILURE_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(10);
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final KillSwitch killSwitch;
     private final Duration interval;
     private final AtomicLong syncFailures = new AtomicLong();
@@ -44,8 +46,9 @@ public final class RedisKillSwitchSync implements AutoCloseable, MeterBinder {
     private final AtomicReference<Map<String, String>> lastRaw = new AtomicReference<>(Map.of());
     private ScheduledExecutorService scheduler;
 
-    public RedisKillSwitchSync(RedissonClient redis, KillSwitch killSwitch, Duration interval) {
+    public RedisKillSwitchSync(RedissonClient redis, RedisKeys keys, KillSwitch killSwitch, Duration interval) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.killSwitch = killSwitch;
         this.interval = interval;
     }
@@ -56,7 +59,7 @@ public final class RedisKillSwitchSync implements AutoCloseable, MeterBinder {
         }
         scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("killswitch-sync").daemon(true).factory());
         scheduler.scheduleWithFixedDelay(this::syncSafely, 0, interval.toMillis(), TimeUnit.MILLISECONDS);
-        log.info("[killswitch] 开始同步规则 key={} 间隔={}", RedisKeys.killSwitch(), interval);
+        log.info("[killswitch] 开始同步规则 key={} 间隔={}", redisKeys.killSwitch(), interval);
     }
 
     private void syncSafely() {
@@ -77,7 +80,7 @@ public final class RedisKillSwitchSync implements AutoCloseable, MeterBinder {
      * 已是规范形的那个字段胜出，其余按字段名字典序取第一个（确定性，不依赖 HGETALL 的返回顺序），并记 ERROR。
      */
     public void syncOnce() {
-        Map<String, String> raw = redis.<String, String>getMap(RedisKeys.killSwitch(), StringCodec.INSTANCE).readAllMap();
+        Map<String, String> raw = redis.<String, String>getMap(redisKeys.killSwitch(), StringCodec.INSTANCE).readAllMap();
         Map<String, String> previous = lastRaw.getAndSet(Map.copyOf(raw));
         boolean changed = !raw.equals(previous);
         Map<String, KillSwitch.Rule> rules = new HashMap<>();

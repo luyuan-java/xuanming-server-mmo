@@ -2,6 +2,7 @@ package com.game.team.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes;
@@ -76,6 +77,8 @@ import org.redisson.api.RedissonClient;
  * </ul>
  */
 final class TeamMatchFixture {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     static final int ZONE = 1;
     static final int CONFIG = 1;
@@ -216,7 +219,7 @@ final class TeamMatchFixture {
                 return real.hget(key, field);
             }
         };
-        this.store = new TeamStore(counting, new TeamStore.Hooks() {
+        this.store = new TeamStore(counting, REDIS_KEYS, new TeamStore.Hooks() {
             @Override
             public void afterRead(Bind bind) {
                 afterRead.get().accept(bind);
@@ -385,12 +388,12 @@ final class TeamMatchFixture {
     void cleanup() {
         List<String> keys = new ArrayList<>();
         for (long t : tids) {
-            keys.add(RedisKeys.teamRecord(t));
-            keys.add(RedisKeys.teamInfo(t));
+            keys.add(REDIS_KEYS.teamRecord(t));
+            keys.add(REDIS_KEYS.teamInfo(t));
         }
         for (long p : pids) {
-            keys.add(RedisKeys.teamPlayer(p));
-            keys.add(RedisKeys.teamInvite(p));
+            keys.add(REDIS_KEYS.teamPlayer(p));
+            keys.add(REDIS_KEYS.teamInvite(p));
         }
         backend.delete(keys);
     }

@@ -5,7 +5,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 落点记录（Redis HASH {@code RedisKeys.matchBattlePlacement(battle_id)}）的<b>存储形状</b>：字段名与「读回来的字段算不算一条好记录」的判据。
+ * 落点记录（Redis HASH {@code RedisKeys#matchBattlePlacement(battle_id)}）的<b>存储形状</b>：字段名与「读回来的字段算不算一条好记录」的判据。
  * 这条 HASH 有两个读写方——{@link RedissonPlacementStore}（gather 写、179 读）与 6.5 的观战存储（{@code spectate} 包：原子读快照、
  * 按 attempt 守护的剔除与公开都在自己的 Lua 里碰同一条 HASH）——字段名与损坏判据放在这里，两边不各写一份。
  *

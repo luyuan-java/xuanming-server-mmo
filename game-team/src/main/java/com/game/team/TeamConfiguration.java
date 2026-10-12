@@ -7,6 +7,7 @@ import com.game.common.player.PlayerProfiles;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.battle.BattleLockReader;
 import com.game.discovery.location.PlayerLocationDirectory;
@@ -67,23 +68,23 @@ public class TeamConfiguration {
     }
 
     @Bean
-    public TeamStore teamStore(RedissonClient redis) {
-        return new TeamStore(new RedissonTeamRedis(redis));
+    public TeamStore teamStore(RedissonClient redis, RedisKeys keys) {
+        return new TeamStore(new RedissonTeamRedis(redis), keys);
     }
 
     @Bean
-    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis) {
-        return new PlayerPresenceDirectory(redis);
+    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis, RedisKeys keys) {
+        return new PlayerPresenceDirectory(redis, keys);
     }
 
     @Bean
-    public PlayerLocationDirectory playerLocationDirectory(RedissonClient redis) {
-        return new PlayerLocationDirectory(redis);
+    public PlayerLocationDirectory playerLocationDirectory(RedissonClient redis, RedisKeys keys) {
+        return new PlayerLocationDirectory(redis, keys);
     }
 
     @Bean
-    public PlayerPushes playerPushes(RedissonClient redis, PlayerPresenceDirectory presence) {
-        return new PlayerPushes(redis, presence);
+    public PlayerPushes playerPushes(RedissonClient redis, RedisKeys keys, PlayerPresenceDirectory presence) {
+        return new PlayerPushes(redis, keys, presence);
     }
 
     /** 只读 {@code game.player}（展示资料与 home zone；这张表不归 game-team 所有）。 */
@@ -106,8 +107,8 @@ public class TeamConfiguration {
      * 按名单逐人交错检查，拆开做会改变「谁先被报出来」，match-spec §7.5）。
      */
     @Bean
-    public BattleLockReader battleLockReader(RedissonClient redis) {
-        return new BattleLockReader(redis);
+    public BattleLockReader battleLockReader(RedissonClient redis, RedisKeys keys) {
+        return new BattleLockReader(redis, keys);
     }
 
     /** in_battle 由战斗锁批量 EXISTS 算出（收掉 team-spec D10）；读失败按 false，不让 RPC 失败（见 {@link TeamDisplay}）。 */
@@ -126,8 +127,8 @@ public class TeamConfiguration {
      * 拒绝发号，CreateTeam 回 4030 + 空视图（其余 RPC 不受影响）；续期滞后恢复后自动恢复，丢失则需重启。
      */
     @Bean(destroyMethod = "close")
-    public NodeIdLease teamIdLease(RedissonClient redis, ScheduledExecutorService teamLeaseScheduler) {
-        return NodeIdLease.acquire(redis, teamLeaseScheduler, NodeTypes.TEAM, TEAM_ID_LEASE_SCOPE, 0, Snowflake.MAX_WORKER,
+    public NodeIdLease teamIdLease(RedissonClient redis, RedisKeys keys, ScheduledExecutorService teamLeaseScheduler) {
+        return NodeIdLease.acquire(redis, keys, teamLeaseScheduler, NodeTypes.TEAM, TEAM_ID_LEASE_SCOPE, 0, Snowflake.MAX_WORKER,
                 UUID.randomUUID().toString(), LEASE_TTL,
                 () -> log.error("team_id 雪花 worker 租约丢失：停止建队（新的 CreateTeam 一律 4030），需要重启本进程"));
     }

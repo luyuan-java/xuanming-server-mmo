@@ -4,7 +4,7 @@ package com.game.discovery.team;
  * 组队 Redis hash 的字段名：写者 game-team（Lua）与读者 game-scene（{@link TeamMembershipReader}）之间的进程间契约，
  * 改名必须两边同改（team-spec §1.3「字段名共享」、§6.5；基线 go/match/internal/team/keys.go:25-35，
  * C++ scene 按同名 {@code HMGET tid epoch}，cpp/libs/services/scene/player/system/player_team.cpp:37、:194）。
- * 键名经 {@code RedisKeys.teamRecord / teamPlayer} 生成。
+ * 键名经 {@code RedisKeys#teamRecord / teamPlayer} 生成。
  */
 public final class TeamRedisFields {
 

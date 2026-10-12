@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamRedisFields;
@@ -47,6 +48,8 @@ import org.redisson.client.codec.ByteArrayCodec;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TeamScriptIntegrationTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static RedissonClient redis;
     private final List<TeamRedisFixture> fixtures = new ArrayList<>();
@@ -104,10 +107,10 @@ class TeamScriptIntegrationTest {
         long now = fx.nowMs();
         assertThat(fx.store.commit(tid, fx.ver(tid), d, now, before, fx.deadline()).status()).isEqualTo(CommitStatus.OK);
 
-        assertThat(fx.hgetBytes(RedisKeys.teamRecord(tid), TeamRedisFields.PB)).as("Redis 里的字节原样").isEqualTo(bytes);
+        assertThat(fx.hgetBytes(REDIS_KEYS.teamRecord(tid), TeamRedisFields.PB)).as("Redis 里的字节原样").isEqualTo(bytes);
         Snapshot snap = fx.store.read(leader, tid, fx.deadline());
         assertThat(snap.record()).as("S_READ 读回的记录原样").isEqualTo(odd);
-        byte[] projection = fx.getBytes(RedisKeys.teamInfo(tid));
+        byte[] projection = fx.getBytes(REDIS_KEYS.teamInfo(tid));
         assertThat(projection).isEqualTo(TeamStore.projectionOf(odd).toByteArray());
         assertThat(TeamInfo.parseFrom(projection).getLeaderId()).isEqualTo(leader);
         MembersSnapshot members = fx.store.readMembers(tid, List.of(leader), fx.deadline());
@@ -121,7 +124,7 @@ class TeamScriptIntegrationTest {
         fx.mustCreate(p1, tid);
         TeamRecord rec = fx.loadRecord(tid);
         Decision d = TeamRules.apply(Op.apply(p6, ZONE), rec, fx.nowMs(), null, RuleConfig.DEFAULT);
-        CommitSets.Call call = CommitSets.build(tid, fx.ver(tid), d);
+        CommitSets.Call call = CommitSets.build(REDIS_KEYS, tid, fx.ver(tid), d);
 
         List<Object> first = TeamReplies.multi(fx.teamRedis.eval(TeamScript.COMMIT, call.keys(), call.args())
                 .toCompletableFuture().join(), "S_COMMIT");
@@ -155,7 +158,7 @@ class TeamScriptIntegrationTest {
         long tid = fx.tid(1), p1 = fx.pid(1), p6 = fx.pid(6);
         fx.mustCreate(p1, tid);
 
-        replayOnce.set(RedisKeys.teamRecord(tid));
+        replayOnce.set(REDIS_KEYS.teamRecord(tid));
         MutateResult apply = fx.mutate(Bind.target(p6, tid), Op.apply(p6, ZONE));
         assertThat(apply.outcome()).isEqualTo(Outcome.COMMITTED);
         assertThat(apply.conflicts()).as("重发回 {0}，重读后按重放语义（刷新过期时间）再提交").isEqualTo(1);
@@ -163,12 +166,12 @@ class TeamScriptIntegrationTest {
         assertThat(fx.loadRecord(tid).getApplicationsList()).hasSize(1);
 
         long tid2 = fx.tid(2), p2 = fx.pid(2);
-        replayOnce.set(RedisKeys.teamRecord(tid2));
+        replayOnce.set(REDIS_KEYS.teamRecord(tid2));
         MutateResult create = fx.mutate(Bind.create(p2, tid2), Op.create(p2, tid2, ZONE));
         assertThat(create.outcome()).isEqualTo(Outcome.REJECTED);
         assertThat(create.code()).as("重读发现新 tid 已有记录，走发号器故障分支").isEqualTo(TeamTips.INTERNAL);
         assertThat(create.conflicts()).isEqualTo(1);
-        assertThat(fx.hget(RedisKeys.teamPlayer(p2), TeamRedisFields.TID)).as("但队伍已经建好，自由读能看到").isEqualTo(u(tid2));
+        assertThat(fx.hget(REDIS_KEYS.teamPlayer(p2), TeamRedisFields.TID)).as("但队伍已经建好，自由读能看到").isEqualTo(u(tid2));
         FreeRead view = fx.store.readFree(p2, fx.deadline());
         assertThat(view.snapshot().playerTeamId()).isEqualTo(tid2);
         assertThat(view.snapshot().record().getLeaderId()).isEqualTo(p2);
@@ -191,10 +194,10 @@ class TeamScriptIntegrationTest {
             }
         };
         long p4 = fx.pid(4), stale = fx.tid(9);
-        String key = RedisKeys.teamInvite(p4);
+        String key = REDIS_KEYS.teamInvite(p4);
         fx.zadd(key, fx.nowMs() - 1, u(stale));
 
-        InviteList list = new TeamStore(recording).listInvites(p4, fx.deadline());
+        InviteList list = new TeamStore(recording, REDIS_KEYS).listInvites(p4, fx.deadline());
         assertThat(issued).containsExactly(TeamScript.INVITE_LIST);
         assertThat(TeamScript.INVITE_LIST.writes()).isTrue();
         assertThat(list.entries()).isEmpty();

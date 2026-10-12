@@ -6,6 +6,7 @@ import com.game.friend.metrics.FriendMetrics.QuotaOutcome;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Function;
 import org.redisson.api.RScript;
@@ -25,23 +26,29 @@ public final class DirectoryQuota {
     public enum Result { ALLOWED, REJECTED, ERROR }
 
     private final Function<String, CompletionStage<Long>> incr;
+    private final RedisKeys redisKeys;
     private final FriendMetrics metrics;
 
-    public DirectoryQuota(Function<String, CompletionStage<Long>> incr, FriendMetrics metrics) {
+    /**
+     * @param incr      对给定键执行 {@link FriendRequestQuota#INCR_WITH_TTL} 的异步调用（测试注入假实现）
+     * @param redisKeys 本部署命名空间的键名（计数器键由它生成）
+     */
+    public DirectoryQuota(Function<String, CompletionStage<Long>> incr, RedisKeys redisKeys, FriendMetrics metrics) {
         this.incr = incr;
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.metrics = metrics;
     }
 
-    public static DirectoryQuota redisson(RedissonClient redis, FriendMetrics metrics) {
+    public static DirectoryQuota redisson(RedissonClient redis, RedisKeys redisKeys, FriendMetrics metrics) {
         return new DirectoryQuota(key -> redis.getScript(StringCodec.INSTANCE).<Long>evalAsync(RScript.Mode.READ_WRITE,
                 FriendRequestQuota.INCR_WITH_TTL, RScript.ReturnType.INTEGER, List.of(key), FriendRequestQuota.WINDOW_SECONDS),
-                metrics);
+                redisKeys, metrics);
     }
 
     public Result tryAcquire(long playerId, Deadline deadline) {
         Long count;
         try {
-            count = deadline.await(incr.apply(RedisKeys.friendDirectoryQuota(playerId)), "在线目录配额");
+            count = deadline.await(incr.apply(redisKeys.friendDirectoryQuota(playerId)), "在线目录配额");
         } catch (DependencyException e) {
             metrics.directoryQuota(QuotaOutcome.ERROR);
             return Result.ERROR;

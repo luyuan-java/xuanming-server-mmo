@@ -59,8 +59,9 @@ public class KillSwitchAdminController {
     /** Redis 客户端懒加载（game-data 的主业务是审计落库，Redis 不可达不能挡启动）。 */
     private final Supplier<RMap<String, String>> rules;
 
-    public KillSwitchAdminController(ObjectProvider<RedissonClient> redis) {
-        this.rules = () -> redis.getObject().getMap(RedisKeys.killSwitch(), StringCodec.INSTANCE);
+    public KillSwitchAdminController(ObjectProvider<RedissonClient> redis, RedisKeys keys) {
+        String key = keys.killSwitch();
+        this.rules = () -> redis.getObject().getMap(key, StringCodec.INSTANCE);
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)

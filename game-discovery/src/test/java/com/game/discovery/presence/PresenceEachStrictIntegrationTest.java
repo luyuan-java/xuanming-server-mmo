@@ -2,6 +2,7 @@ package com.game.discovery.presence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory.PresenceRead;
 import com.game.discovery.presence.PlayerPresenceDirectory.PresenceRead.Status;
@@ -26,6 +27,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class PresenceEachStrictIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     /** 高位为 1（≥ 2^63，有符号视角是负数）的玩家号：键与比较都必须按无符号处理。 */
     private static final long BASE = Long.MIN_VALUE + (1L << 50) + ThreadLocalRandom.current().nextLong(1L << 40);
 
@@ -37,13 +40,13 @@ class PresenceEachStrictIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(11);
         redis = Redisson.create(config);
-        directory = new PlayerPresenceDirectory(redis);
+        directory = new PlayerPresenceDirectory(redis, REDIS_KEYS);
     }
 
     @AfterAll
     static void cleanup() {
         for (long i = 0; i < 10; i++) {
-            redis.getKeys().delete(RedisKeys.presence(BASE + i));
+            redis.getKeys().delete(REDIS_KEYS.presence(BASE + i));
         }
         redis.shutdown();
     }
@@ -60,8 +63,8 @@ class PresenceEachStrictIntegrationTest {
         long corrupt = BASE + 2;
         long mismatch = BASE + 3;
         directory.putAsync(entry(online)).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        redis.getBucket(RedisKeys.presence(corrupt), ByteArrayCodec.INSTANCE).set(new byte[] {(byte) 0xff, 0x01});
-        redis.getBucket(RedisKeys.presence(mismatch), ByteArrayCodec.INSTANCE).set(entry(BASE + 9).toByteArray());
+        redis.getBucket(REDIS_KEYS.presence(corrupt), ByteArrayCodec.INSTANCE).set(new byte[] {(byte) 0xff, 0x01});
+        redis.getBucket(REDIS_KEYS.presence(mismatch), ByteArrayCodec.INSTANCE).set(entry(BASE + 9).toByteArray());
 
         Map<Long, PresenceRead> reads = directory.findEachStrictAsync(List.of(online, absent, corrupt, mismatch, online))
                 .get(5, TimeUnit.SECONDS);
@@ -86,7 +89,7 @@ class PresenceEachStrictIntegrationTest {
         RedissonClient closed = Redisson.create(config);
         closed.shutdown();
 
-        Map<Long, PresenceRead> reads = new PlayerPresenceDirectory(closed)
+        Map<Long, PresenceRead> reads = new PlayerPresenceDirectory(closed, REDIS_KEYS)
                 .findEachStrictAsync(List.of(BASE + 4, BASE + 5)).get(5, TimeUnit.SECONDS);
 
         assertThat(reads).containsOnlyKeys(BASE + 4, BASE + 5);

@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.audit.AuditTopicInitializer.Mode;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -77,7 +79,8 @@ class AuditTopicInitializerTest {
         }
     }
 
-    private static final TopicSpec TXLOG = AuditTopics.transactionLog(1);
+    private static final AuditTopics AUDIT_TOPICS = new AuditTopics(new KafkaNames(GameNamespace.of("game")));
+    private static final TopicSpec TXLOG = AUDIT_TOPICS.transactionLog(1);
 
     @Test
     void 不存在就按规格创建() {

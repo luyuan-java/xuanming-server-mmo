@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import com.game.api.match.MatchBudgets;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.proto.BattlePlacement;
@@ -67,6 +68,8 @@ import org.redisson.connection.CRC16;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedissonSpectateStoreIntegrationTest extends SpectateStoreContract {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long STALE_MS = MatchBudgets.SPECTATE_STALE_MS;
     private static final byte[] GARBAGE_PB = {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
@@ -236,7 +239,7 @@ class RedissonSpectateStoreIntegrationTest extends SpectateStoreContract {
         int expected = slotOf(TicketRedisFixture.ticketKey(playerId));
 
         assertThat(expected).isEqualTo(CRC16.crc16("match".getBytes(StandardCharsets.UTF_8)) % 16384);
-        for (String key : List.of(SpectateRedisFixture.markKey(playerId), SpectateRedisFixture.placementKey(battleId), RedisKeys.matchWatchable(),
+        for (String key : List.of(SpectateRedisFixture.markKey(playerId), SpectateRedisFixture.placementKey(battleId), REDIS_KEYS.matchWatchable(),
                 fx.indexKey)) {
             assertThat(key).startsWith("game:{match}:");
             assertThat(slotOf(key)).as(key).isEqualTo(expected);
@@ -838,7 +841,7 @@ class RedissonSpectateStoreIntegrationTest extends SpectateStoreContract {
 
     @Test
     void 缺省构造用的索引键就是RedisKeys的那一把_与夹具自己的索引互不相干() {
-        RedissonSpectateStore production = new RedissonSpectateStore(redis);
+        RedissonSpectateStore production = new RedissonSpectateStore(redis, REDIS_KEYS);
         long battleId = fx.battle(1);
         BattlePlacement placement = placement(battleId, 1, fx.nowMs() - 1_000);
         fx.putPlacement(placement);
@@ -846,15 +849,15 @@ class RedissonSpectateStoreIntegrationTest extends SpectateStoreContract {
 
         assertThat(production.publish(placement, d())).isTrue();
 
-        assertThat(RedisKeys.matchWatchable()).isEqualTo("game:{match}:watchable");
-        assertThat(fx.indexOf(RedisKeys.matchWatchable())).containsEntry(member, placement.getCreatedAtMs());
+        assertThat(REDIS_KEYS.matchWatchable()).isEqualTo("game:{match}:watchable");
+        assertThat(fx.indexOf(REDIS_KEYS.matchWatchable())).containsEntry(member, placement.getCreatedAtMs());
         assertThat(fx.index()).as("夹具的索引键没有被碰").isEmpty();
         assertThat(production.read(battleId, d()).published()).isTrue();
         assertThat(fx.store.read(battleId, d()).published()).isFalse();
         assertThat(production.watchableCount(d())).isPositive();
 
         assertThat(production.evict(new Eviction.Dead(battleId, 1), d())).isTrue();
-        assertThat(fx.indexOf(RedisKeys.matchWatchable())).doesNotContainKey(member);
+        assertThat(fx.indexOf(REDIS_KEYS.matchWatchable())).doesNotContainKey(member);
     }
 
     // ================================================================ 故障、线程、并发
@@ -862,7 +865,7 @@ class RedissonSpectateStoreIntegrationTest extends SpectateStoreContract {
     @Test
     void Redis客户端不可用_每个同步方法都抛依赖异常_各自在截止附近返回_两个尽力方法不抛() {
         RedissonClient closed = TicketRedisFixture.connect();
-        RedissonSpectateStore store = new RedissonSpectateStore(closed, fx.indexKey);
+        RedissonSpectateStore store = new RedissonSpectateStore(closed, REDIS_KEYS, fx.indexKey);
         long playerId = fx.pid(1);
         long battleId = fx.battle(1);
         String value = mark(battleId);

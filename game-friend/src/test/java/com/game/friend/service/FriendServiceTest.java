@@ -2,6 +2,7 @@ package com.game.friend.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory.StrictLookup;
 import com.game.discovery.presence.PlayerPushes;
@@ -42,6 +43,8 @@ import org.junit.jupiter.api.Test;
 
 class FriendServiceTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long ME = 100;
     private static final int NOTIFY_ID = 235;
 
@@ -60,10 +63,10 @@ class FriendServiceTest {
     private int quotaLimit = 10;
 
     private FriendService service() {
-        FriendCache cache = new FriendCache(new RecordingRedis(), Duration.ofMinutes(30), metrics);
+        FriendCache cache = new FriendCache(new RecordingRedis(), REDIS_KEYS, Duration.ofMinutes(30), metrics);
         FriendRequestQuota quota = new FriendRequestQuota(
-                key -> CompletableFuture.completedFuture((long) quotaCount.incrementAndGet()), quotaLimit, metrics);
-        return new FriendService(store, cache, quota, (ids, deadline) -> {
+                key -> CompletableFuture.completedFuture((long) quotaCount.incrementAndGet()), REDIS_KEYS, quotaLimit, metrics);
+        return new FriendService(store, cache, REDIS_KEYS, quota, (ids, deadline) -> {
             Map<Long, Profile> out = new HashMap<>();
             ids.forEach(id -> {
                 if (profiles.containsKey(id)) {
@@ -144,7 +147,7 @@ class FriendServiceTest {
     void 发申请成功_只失效对方收件箱_失效之后才推送_推送内容() throws Exception {
         FriendService s = service();
         assertThat(s.addFriend(ME, add(200), deadline()).hasErrorMessage()).isFalse();
-        assertThat(events).containsExactly("invalidate:" + RedisKeys.friendPending(200), "push:200");
+        assertThat(events).containsExactly("invalidate:" + REDIS_KEYS.friendPending(200), "push:200");
         MessageContent content = pushed.get(0);
         assertThat(content.getMessageId()).isEqualTo(NOTIFY_ID);
         assertThat(content.getId()).isZero();
@@ -203,8 +206,8 @@ class FriendServiceTest {
         store.accept = FriendStore.AcceptResult.OK;
         assertThat(s.acceptFriend(ME, accept(200), deadline()).hasErrorMessage()).isFalse();
         assertThat(store.calls).last().isEqualTo("accept:200->100");
-        assertThat(events).containsExactly("invalidate:" + RedisKeys.friendList(200), "invalidate:" + RedisKeys.friendList(ME),
-                "invalidate:" + RedisKeys.friendPending(ME), "invalidate:" + RedisKeys.friendPending(200), "push:200");
+        assertThat(events).containsExactly("invalidate:" + REDIS_KEYS.friendList(200), "invalidate:" + REDIS_KEYS.friendList(ME),
+                "invalidate:" + REDIS_KEYS.friendPending(ME), "invalidate:" + REDIS_KEYS.friendPending(200), "push:200");
         assertThat(FriendEventS2C.parseFrom(pushed.get(0).getSerializedMessage()).getReason())
                 .isEqualTo(FriendEventReason.FRIEND_EVENT_REASON_REQUEST_ACCEPTED);
     }
@@ -220,7 +223,7 @@ class FriendServiceTest {
         assertThat(events).isEmpty();
         store.reject = FriendStore.RejectResult.OK;
         assertThat(s.rejectFriend(ME, reject(200), deadline()).hasErrorMessage()).isFalse();
-        assertThat(events).containsExactly("invalidate:" + RedisKeys.friendPending(ME));
+        assertThat(events).containsExactly("invalidate:" + REDIS_KEYS.friendPending(ME));
     }
 
     @Test
@@ -235,7 +238,7 @@ class FriendServiceTest {
         assertThat(events).isEmpty();
         store.remove = FriendStore.RemoveResult.REMOVED;
         assertThat(s.removeFriend(ME, remove(200), deadline()).hasErrorMessage()).isFalse();
-        assertThat(events).containsExactly("invalidate:" + RedisKeys.friendList(ME), "invalidate:" + RedisKeys.friendList(200));
+        assertThat(events).containsExactly("invalidate:" + REDIS_KEYS.friendList(ME), "invalidate:" + REDIS_KEYS.friendList(200));
     }
 
     // ================================================================ Block / Unblock
@@ -251,8 +254,8 @@ class FriendServiceTest {
         store.block = FriendStore.BlockResult.OK;
         assertThat(s.block(ME, BlockRequest.newBuilder().setTargetPlayerId(200).build(), deadline()).hasErrorMessage())
                 .isFalse();
-        assertThat(events).containsExactly("invalidate:" + RedisKeys.friendList(ME), "invalidate:" + RedisKeys.friendList(200),
-                "invalidate:" + RedisKeys.friendPending(ME), "invalidate:" + RedisKeys.friendPending(200));
+        assertThat(events).containsExactly("invalidate:" + REDIS_KEYS.friendList(ME), "invalidate:" + REDIS_KEYS.friendList(200),
+                "invalidate:" + REDIS_KEYS.friendPending(ME), "invalidate:" + REDIS_KEYS.friendPending(200));
         events.clear();
         assertThat(s.unblock(ME, UnblockRequest.newBuilder().setTargetPlayerId(0).build(), deadline()).getErrorMessage())
                 .isEqualTo(tip(1005, "target_player_id invalid"));

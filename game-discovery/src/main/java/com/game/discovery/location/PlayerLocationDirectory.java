@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -141,9 +142,11 @@ public final class PlayerLocationDirectory {
     private static final byte[] NO_VALUE = new byte[0];
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public PlayerLocationDirectory(RedissonClient redis) {
+    public PlayerLocationDirectory(RedissonClient redis, RedisKeys keys) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
     }
 
     // ------------------------------------------------------------------ 写（scene，异步）
@@ -217,7 +220,7 @@ public final class PlayerLocationDirectory {
 
     private CompletionStage<Long> eval(String script, long playerId, byte[]... args) {
         return redis.getScript(ByteArrayCodec.INSTANCE).<Long>evalAsync(RScript.Mode.READ_WRITE, script,
-                RScript.ReturnType.INTEGER, List.of(RedisKeys.playerLocation(playerId)), (Object[]) args);
+                RScript.ReturnType.INTEGER, List.of(redisKeys.playerLocation(playerId)), (Object[]) args);
     }
 
     private static byte[] number(long unsigned) {
@@ -265,7 +268,7 @@ public final class PlayerLocationDirectory {
         for (long playerId : ids) {
             CompletableFuture<String> state;
             try {
-                state = redis.<String, String>getMap(RedisKeys.playerLocation(playerId), StringCodec.INSTANCE)
+                state = redis.<String, String>getMap(redisKeys.playerLocation(playerId), StringCodec.INSTANCE)
                         .getAsync(STATE_FIELD).toCompletableFuture();
             } catch (RuntimeException e) {
                 state = CompletableFuture.failedFuture(e);
@@ -332,7 +335,7 @@ public final class PlayerLocationDirectory {
         CompletableFuture<List<Object>> read;
         try {
             read = redis.getScript(ByteArrayCodec.INSTANCE).<List<Object>>evalAsync(RScript.Mode.READ_ONLY,
-                    READ_STATE_AND_VALUE, RScript.ReturnType.MULTI, List.of(RedisKeys.playerLocation(playerId)))
+                    READ_STATE_AND_VALUE, RScript.ReturnType.MULTI, List.of(redisKeys.playerLocation(playerId)))
                     .toCompletableFuture();
         } catch (RuntimeException e) {
             read = CompletableFuture.failedFuture(e);
@@ -401,7 +404,7 @@ public final class PlayerLocationDirectory {
     /** 玩家的位置记录（在线或重连租约内）；没有、已登出、损坏或与键不符为空（损坏记告警）。Redis 出错抛出（调用方决定怎么退化）。 */
     public Optional<PlayerLocation> find(long playerId) {
         Object raw = redis.getScript(ByteArrayCodec.INSTANCE).eval(RScript.Mode.READ_ONLY, READ_VALUE,
-                RScript.ReturnType.VALUE, List.of(RedisKeys.playerLocation(playerId)));
+                RScript.ReturnType.VALUE, List.of(redisKeys.playerLocation(playerId)));
         if (!(raw instanceof byte[] value)) {
             return Optional.empty();
         }

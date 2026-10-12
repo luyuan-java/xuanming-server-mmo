@@ -8,7 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 订阅 login 发来的归属接管请求（Redis pub/sub，频道 {@code RedisKeys.ownerTakeoverTopic()}，消息 {@code game.api.OwnerTakeover}），
+ * 订阅 login 发来的归属接管请求（Redis pub/sub，频道 {@code RedisKeys#ownerTakeoverTopic()}，消息 {@code game.api.OwnerTakeover}），
  * 交给场景逻辑处理（{@code SceneWorld.onTakeoverRequested}）。
  *
  * <p>回调在 Redisson 的网络线程上，不得阻塞：只解析并投递。投递目标由调用方给（负责切到逻辑线程）。

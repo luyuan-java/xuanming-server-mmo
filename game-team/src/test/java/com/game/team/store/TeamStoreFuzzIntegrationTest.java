@@ -4,6 +4,7 @@ import static com.game.team.store.TeamRedisFixture.ZONE;
 import static com.game.team.store.TeamRedisFixture.u;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamRedisFields;
@@ -50,6 +51,8 @@ import org.redisson.api.RedissonClient;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TeamStoreFuzzIntegrationTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final int PLAYERS = 20;
     private static final int WORKERS = 8;
@@ -177,7 +180,7 @@ class TeamStoreFuzzIntegrationTest {
         Map<Long, Long> teamOf = new HashMap<>();
         for (int n = TID_BASE + 1; n <= nextTid.get(); n++) {
             long tid = fx.tid(n);
-            if (!fx.exists(RedisKeys.teamRecord(tid))) {
+            if (!fx.exists(REDIS_KEYS.teamRecord(tid))) {
                 continue;
             }
             TeamRecord r = fx.loadRecord(tid);
@@ -186,22 +189,22 @@ class TeamStoreFuzzIntegrationTest {
             for (long m : TeamRules.memberIds(r)) {
                 Long prev = teamOf.put(m, tid);
                 assertThat(prev).as("player %s 同时在 %s 与 %s", u(m), prev == null ? "-" : u(prev), u(tid)).isNull();
-                assertThat(fx.hget(RedisKeys.teamPlayer(m), TeamRedisFields.TID)).as("成员索引必须指向记录").isEqualTo(u(tid));
+                assertThat(fx.hget(REDIS_KEYS.teamPlayer(m), TeamRedisFields.TID)).as("成员索引必须指向记录").isEqualTo(u(tid));
             }
             for (TeamInviteRecord inv : r.getInvitesList()) {
                 if (Long.compareUnsigned(inv.getExpireAtMs(), now) > 0) {
-                    assertThat(fx.zscore(RedisKeys.teamInvite(inv.getInviteeId()), u(tid)))
+                    assertThat(fx.zscore(REDIS_KEYS.teamInvite(inv.getInviteeId()), u(tid)))
                             .as("邀请反查索引 ⊇ 记录中未过期邀请 tid=%s invitee=%s", u(tid), u(inv.getInviteeId())).isNotNull();
                 }
             }
-            TeamInfo info = TeamInfo.parseFrom(fx.getBytes(RedisKeys.teamInfo(tid)));
+            TeamInfo info = TeamInfo.parseFrom(fx.getBytes(REDIS_KEYS.teamInfo(tid)));
             assertThat(info.getTeamId()).isEqualTo(tid);
             assertThat(info.getLeaderId()).as("投影与记录同步").isEqualTo(r.getLeaderId());
             assertThat(info.getMembersList()).containsExactlyInAnyOrderElementsOf(TeamRules.memberIds(r));
         }
         for (int i = 1; i <= PLAYERS; i++) {
             long pid = players[i];
-            String key = RedisKeys.teamPlayer(pid);
+            String key = REDIS_KEYS.teamPlayer(pid);
             String tidStr = fx.hget(key, TeamRedisFields.TID);
             if (tidStr != null && !tidStr.equals("0")) {
                 assertThat(teamOf.get(pid)).as("索引指向的队伍必须包含该玩家 player=%s", u(pid))

@@ -50,9 +50,11 @@ public final class RedissonTicketStore implements TicketStore {
     private static final String HEAL_ORPHAN = "orphan";
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public RedissonTicketStore(RedissonClient redis) {
+    public RedissonTicketStore(RedissonClient redis, RedisKeys redisKeys) {
         this.redis = Objects.requireNonNull(redis, "redis");
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
     }
 
     // ================================================================ TicketReader
@@ -100,7 +102,7 @@ public final class RedissonTicketStore implements TicketStore {
         Objects.requireNonNull(mode, "mode");
         List<Object> keys = new ArrayList<>(2);
         keys.add(ticketKey(playerId));
-        if (mode == HealMode.ORPHAN && QueueRef.ofQueueKey(seen.queueKey()).isPresent()) {
+        if (mode == HealMode.ORPHAN && QueueRef.ofQueueKey(redisKeys, seen.queueKey()).isPresent()) {
             keys.add(seen.queueKey());
         }
         return evalInteger("自愈残留票", TicketScripts.HEAL, keys, d, seen.ticketId(), mode == HealMode.READY ? HEAL_READY : HEAL_ORPHAN,
@@ -112,7 +114,7 @@ public final class RedissonTicketStore implements TicketStore {
         new TicketRef(playerId, ticketId);
         Objects.requireNonNull(queue, "queue");
         requireTtl(ttlMs);
-        List<Object> keys = List.of(ticketKey(playerId), RedisKeys.matchQueueIndex(), queue.queueKey(), queue.rankKey());
+        List<Object> keys = List.of(ticketKey(playerId), redisKeys.matchQueueIndex(), queue.queueKey(redisKeys), queue.rankKey(redisKeys));
         return join("入队建票", keys, d, ticketId, queue.mode(), queue.configId(), zoneId, ratingCenti, ttlMs, playerId);
     }
 
@@ -183,7 +185,7 @@ public final class RedissonTicketStore implements TicketStore {
     public boolean cancel(long playerId, String ticketId, QueueRef queue, Deadline d) {
         new TicketRef(playerId, ticketId);
         Objects.requireNonNull(queue, "queue");
-        return evalInteger("取消排队", TicketScripts.CANCEL, List.of(ticketKey(playerId), queue.queueKey(), queue.rankKey()), d, ticketId,
+        return evalInteger("取消排队", TicketScripts.CANCEL, List.of(ticketKey(playerId), queue.queueKey(redisKeys), queue.rankKey(redisKeys)), d, ticketId,
                 TicketCodec.member(playerId)) == 1;
     }
 
@@ -193,7 +195,7 @@ public final class RedissonTicketStore implements TicketStore {
         if (limit < 1) {
             throw new IllegalArgumentException("快照长度必须 ≥ 1: " + limit);
         }
-        List<Object> reply = evalList("读队列快照", TicketScripts.SNAPSHOT, List.of(queue.queueKey(), queue.rankKey()), d, Integer.toString(limit));
+        List<Object> reply = evalList("读队列快照", TicketScripts.SNAPSHOT, List.of(queue.queueKey(redisKeys), queue.rankKey(redisKeys)), d, Integer.toString(limit));
         long now = integerAt(reply, 0, "读队列快照");
         if (reply.size() % 2 != 1) {
             throw new Deadline.DependencyException("队列快照的回复不成对: size=" + reply.size());
@@ -216,7 +218,7 @@ public final class RedissonTicketStore implements TicketStore {
             case IN_BATTLE -> REASON_IN_BATTLE;
             case OFFLINE -> REASON_OFFLINE;
         };
-        return evalInteger("剔出队列", TicketScripts.DROP, List.of(queue.queueKey(), queue.rankKey(), ticketKey(playerId)), d,
+        return evalInteger("剔出队列", TicketScripts.DROP, List.of(queue.queueKey(redisKeys), queue.rankKey(redisKeys), ticketKey(playerId)), d,
                 TicketCodec.member(playerId), wire, seenTicketId == null ? "" : seenTicketId) == 1;
     }
 
@@ -224,7 +226,7 @@ public final class RedissonTicketStore implements TicketStore {
     public boolean dropMalformed(QueueRef queue, String member, Deadline d) {
         Objects.requireNonNull(queue, "queue");
         Objects.requireNonNull(member, "member");
-        return evalInteger("剔除非法成员", TicketScripts.DROP, List.of(queue.queueKey(), queue.rankKey()), d, member, REASON_INVALID, "") == 1;
+        return evalInteger("剔除非法成员", TicketScripts.DROP, List.of(queue.queueKey(redisKeys), queue.rankKey(redisKeys)), d, member, REASON_INVALID, "") == 1;
     }
 
     @Override
@@ -236,9 +238,9 @@ public final class RedissonTicketStore implements TicketStore {
         }
         requireDistinct(members.stream().map(TicketRef::playerId).toList(), "弹组");
         List<Object> keys = new ArrayList<>(3 + members.size());
-        keys.add(queue.queueKey());
-        keys.add(queue.rankKey());
-        keys.add(RedisKeys.matchPopMarker(popToken));
+        keys.add(queue.queueKey(redisKeys));
+        keys.add(queue.rankKey(redisKeys));
+        keys.add(redisKeys.matchPopMarker(popToken));
         List<Object> args = new ArrayList<>(2 + 2 * members.size());
         args.add(Long.toString(matchedTtlMs));
         args.add(Long.toString(POP_MARKER_TTL_MS));
@@ -334,10 +336,10 @@ public final class RedissonTicketStore implements TicketStore {
             return 0;
         }
         List<Object> keys = new ArrayList<>(4 + survivorsInOrder.size());
-        keys.add(RedisKeys.matchQueueIndex());
-        keys.add(queue.queueKey());
-        keys.add(queue.rankKey());
-        keys.add(RedisKeys.matchRequeueMarker(requeueToken));
+        keys.add(redisKeys.matchQueueIndex());
+        keys.add(queue.queueKey(redisKeys));
+        keys.add(queue.rankKey(redisKeys));
+        keys.add(redisKeys.matchRequeueMarker(requeueToken));
         List<Object> args = new ArrayList<>(4 + 2 * survivorsInOrder.size());
         args.add(Long.toString(queuedTtlMs));
         args.add(Long.toString(notBeforeDelayMs));
@@ -355,21 +357,21 @@ public final class RedissonTicketStore implements TicketStore {
 
     @Override
     public Set<String> queueIndex(Deadline d) {
-        Set<String> members = await("读队列注册集", d, () -> redis.<String>getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).readAllAsync());
+        Set<String> members = await("读队列注册集", d, () -> redis.<String>getSet(redisKeys.matchQueueIndex(), StringCodec.INSTANCE).readAllAsync());
         return new LinkedHashSet<>(members);
     }
 
     @Override
     public long queueLength(QueueRef queue, Deadline d) {
         Objects.requireNonNull(queue, "queue");
-        Integer size = await("读队列长度", d, () -> redis.<String>getList(queue.queueKey(), StringCodec.INSTANCE).sizeAsync());
+        Integer size = await("读队列长度", d, () -> redis.<String>getList(queue.queueKey(redisKeys), StringCodec.INSTANCE).sizeAsync());
         return size;
     }
 
     @Override
     public boolean pruneIfEmpty(QueueRef queue, Deadline d) {
         Objects.requireNonNull(queue, "queue");
-        return evalInteger("剔除空队列", TicketScripts.PRUNE, List.of(RedisKeys.matchQueueIndex(), queue.queueKey(), queue.rankKey()), d) == 1;
+        return evalInteger("剔除空队列", TicketScripts.PRUNE, List.of(redisKeys.matchQueueIndex(), queue.queueKey(redisKeys), queue.rankKey(redisKeys)), d) == 1;
     }
 
     @Override
@@ -378,7 +380,7 @@ public final class RedissonTicketStore implements TicketStore {
         requireTtl(ttlMs);
         requireInstance(instanceId);
         Boolean acquired = await("抢凑单锁", d,
-                () -> redis.<String>getBucket(queue.lockKey(), StringCodec.INSTANCE).setIfAbsentAsync(instanceId, Duration.ofMillis(ttlMs)));
+                () -> redis.<String>getBucket(queue.lockKey(redisKeys), StringCodec.INSTANCE).setIfAbsentAsync(instanceId, Duration.ofMillis(ttlMs)));
         return acquired;
     }
 
@@ -386,14 +388,14 @@ public final class RedissonTicketStore implements TicketStore {
     public void unlockQueue(QueueRef queue, String instanceId, Deadline d) {
         Objects.requireNonNull(queue, "queue");
         requireInstance(instanceId);
-        evalInteger("释放凑单锁", TicketScripts.LOCK_RELEASE, List.of(queue.lockKey()), d, instanceId);
+        evalInteger("释放凑单锁", TicketScripts.LOCK_RELEASE, List.of(queue.lockKey(redisKeys)), d, instanceId);
     }
 
     // ================================================================ 内部
 
-    private static String ticketKey(long playerId) {
+    private String ticketKey(long playerId) {
         requirePlayer(playerId);
-        return RedisKeys.matchTicket(playerId);
+        return redisKeys.matchTicket(playerId);
     }
 
     private long evalInteger(String what, String lua, List<Object> keys, Deadline d, Object... args) {

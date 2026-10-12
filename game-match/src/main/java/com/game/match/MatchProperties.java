@@ -1,7 +1,6 @@
 package com.game.match;
 
 import com.game.api.match.MatchBudgets;
-import com.game.audit.KafkaNames;
 import com.game.match.gather.FingerprintMode;
 import com.game.match.support.MatchModes;
 import java.time.Duration;
@@ -167,8 +166,9 @@ public record MatchProperties(
      *                                {@code total_rounds ≥} 它的胜负结果按平局结算
      * @param drawRoundCapByConfigId  按副本覆盖阈值（缺省空；值为 0 视为没配，同基线 {@code cfg.go:177-189}）。照搬基线：缺省不配，
      *                                阈值对所有副本都是 30，不按引擎的回合上限推导（§5.5）
-     * @param consumerGroup           结果 topic 的消费组（缺省 {@code <ns>-match-rating}，缺省命名空间下即 {@code game-match-rating}，经 {@code KafkaNames}；
-     *                                多个 match 实例同组分摊分区）。显式覆盖不强制带 {@code <ns>-} 前缀（装配处打 WARN）
+     * @param consumerGroup           结果 topic 的消费组（多个 match 实例同组分摊分区）。没配（null 或空白）记为 null，由装配处取注入的
+     *                                {@code KafkaNames#matchRatingGroup()}（{@code <ns>-match-rating}，缺省命名空间下即 {@code game-match-rating}）；
+     *                                配了只去首尾空白，不强制带 {@code <ns>-} 前缀（装配处打 WARN）
      */
     public record Rating(Boolean enabled, Tolerance tolerance, Integer drawRoundCap, Map<Integer, Integer> drawRoundCapByConfigId,
                          String consumerGroup) {
@@ -191,7 +191,7 @@ public record MatchProperties(
                 });
             }
             drawRoundCapByConfigId = Collections.unmodifiableMap(caps);
-            consumerGroup = consumerGroup == null || consumerGroup.isBlank() ? KafkaNames.of("match-rating") : consumerGroup.trim();
+            consumerGroup = consumerGroup == null || consumerGroup.isBlank() ? null : consumerGroup.trim();
         }
 
         /**

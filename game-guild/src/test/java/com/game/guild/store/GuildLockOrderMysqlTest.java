@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.guild.rules.GuildReject;
 import com.game.guild.rules.GuildRoles;
 import com.game.guild.store.GuildMysqlFixture.GateHooks;
@@ -44,6 +45,9 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 @EnabledIfSystemProperty(named = "game.it.mysql", matches = ".+")
 class GuildLockOrderMysqlTest {
 
+    /** 缺省部署命名空间与它的建哨兵行命名锁名（临时库 game_guild_it_* 上照样用这个名字抢锁，见 GuildStartupChecks#insertGuardInitLockName）。 */
+    private static final GameNamespace NAMESPACE = GameNamespace.of("game");
+    private static final String LOCK_NAME = GuildStartupChecks.insertGuardInitLockName(NAMESPACE);
     /** 无编排的对撞轮数：单轮不撞是运气，几十轮都不撞才说明取锁顺序真的一致。 */
     private static final int ROUNDS = 30;
     /** 带「先卡住一方」编排的轮数（每轮有几百毫秒的有界等待）。 */
@@ -621,7 +625,7 @@ class GuildLockOrderMysqlTest {
                 GuildMysqlFixture.BASE_URL + "/" + db.database + GuildMysqlFixture.PARAMS, GuildMysqlFixture.USER,
                 GuildMysqlFixture.PASSWORD)) {
             try (var ps = holder.prepareStatement("SELECT GET_LOCK(?, 5)")) {
-                ps.setString(1, GuildStartupChecks.INSERT_GUARD_INIT_LOCK_NAME);
+                ps.setString(1, LOCK_NAME);
                 try (var rs = ps.executeQuery()) {
                     assertThat(rs.next() && rs.getLong(1) == 1).as("持锁方先拿到命名锁").isTrue();
                 }
@@ -631,12 +635,12 @@ class GuildLockOrderMysqlTest {
                 sleep(1_500);
                 try {
                     execOn(holder, "INSERT IGNORE INTO guild_player_state (player_id, updated_ms) VALUES (0, ?)", NOW + 30);
-                    execOn(holder, "SELECT RELEASE_LOCK(?)", GuildStartupChecks.INSERT_GUARD_INIT_LOCK_NAME);
+                    execOn(holder, "SELECT RELEASE_LOCK(?)", LOCK_NAME);
                 } catch (SQLException e) {
                     throw new IllegalStateException(e);
                 }
             });
-            GuildStartupChecks startup = new GuildStartupChecks(new GuildTx(shortSocket::getConnection, 10, recorder));
+            GuildStartupChecks startup = new GuildStartupChecks(new GuildTx(shortSocket::getConnection, 10, recorder), NAMESPACE);
             Throwable failure = null;
             try {
                 startup.ensureGlobalInsertGuard(NOW + 31, d());

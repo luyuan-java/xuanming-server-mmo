@@ -16,7 +16,8 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 20s
   datasource:
-    # 库名 = 部署命名空间 game.namespace（环境变量 GAME_NAMESPACE，缺省 game）；整串覆盖本键的部署可以另取库名。
+    # 库名 = 部署命名空间 game.namespace（环境变量 GAME_NAMESPACE，缺省 game）；部署只覆盖 host / port，启动时核对 DATABASE() 等于命名空间
+    # （库名偏离规格的存量部署应急用 game.mysql.expect-database，环境变量 GAME_MYSQL_EXPECT_DATABASE）。
     # createDatabaseIfNotExist：本地开发首次启动自动建库 <ns>（缺省 game）。connect / socket 超时给阻塞 I/O 设上界，
     # 数据库卡死时请求在客户端 15s 预算内失败，而不是把 login-worker 线程永久挂住。
     url: jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000

@@ -191,25 +191,9 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.2.5</version>
-                    <!-- 部署命名空间（game.namespace，进程内定格、没有 reset）：测试 JVM 一律钉成缺省 game（金样与现有用例在缺省命名空间里成立）；
-                         非缺省命名空间的用例打 @Tag("namespace")，缺省执行 default-test 排除它们，由六个模块各自的 namespace 执行
-                         在另一个 fork 里钉成 nstest 跑。surefire 3.2.5 让 mvn 的 -D（含 MAVEN_ARGS、.mvn/maven.config）覆盖这里的
-                         systemPropertyVariables，所以跑测试不要给 -Dgame.namespace（两类用例的 @BeforeAll 断言会直说原因）。
-                         surefire 必须 fork（不得配 forkCount=0：全局状态会在 Maven JVM 里跨模块共享）。 -->
                     <configuration>
                         <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
-                        <systemPropertyVariables>
-                            <game.namespace>game</game.namespace>
-                        </systemPropertyVariables>
                     </configuration>
-                    <executions>
-                        <execution>
-                            <id>default-test</id>
-                            <configuration>
-                                <excludedGroups>namespace</excludedGroups>
-                            </configuration>
-                        </execution>
-                    </executions>
                 </plugin>
                 <plugin>
                     <groupId>io.github.ascopes</groupId>

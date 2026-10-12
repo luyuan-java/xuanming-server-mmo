@@ -3,6 +3,7 @@ package com.game.match.placement;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.placement.PlacementStore.Read;
@@ -35,6 +36,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class PlacementStoreIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static RedissonClient redis;
     private final List<Long> used = new ArrayList<>();
 
@@ -59,7 +62,7 @@ class PlacementStoreIntegrationTest {
     @AfterEach
     void cleanUp() {
         for (long battleId : used) {
-            redis.getKeys().delete(RedisKeys.matchBattlePlacement(battleId));
+            redis.getKeys().delete(REDIS_KEYS.matchBattlePlacement(battleId));
         }
     }
 
@@ -81,11 +84,11 @@ class PlacementStoreIntegrationTest {
     }
 
     private static RMap<String, byte[]> raw(long battleId) {
-        return redis.getMap(RedisKeys.matchBattlePlacement(battleId), new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE));
+        return redis.getMap(REDIS_KEYS.matchBattlePlacement(battleId), new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE));
     }
 
     private static long ttlMs(long battleId) {
-        return redis.getKeys().remainTimeToLive(RedisKeys.matchBattlePlacement(battleId));
+        return redis.getKeys().remainTimeToLive(REDIS_KEYS.matchBattlePlacement(battleId));
     }
 
     private static BattlePlacement found(Read read) {
@@ -97,13 +100,13 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 首写_键是带tag的无符号十进制_HASH两个字段_读回逐字节相同_TTL是360秒() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         BattlePlacement placement = placement(battleId, 1, 1, "inst-a");
 
         assertThat(store.write(placement)).isTrue();
 
-        String key = RedisKeys.matchBattlePlacement(battleId);
+        String key = REDIS_KEYS.matchBattlePlacement(battleId);
         assertThat(key).isEqualTo("game:{match}:battle:" + Long.toUnsignedString(battleId));
         assertThat(raw(battleId).readAllMap()).containsOnlyKeys("a", "pb");
         assertThat(new String(raw(battleId).get("a"), StandardCharsets.US_ASCII)).isEqualTo("1");
@@ -114,7 +117,7 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 单调写_attempt小的迟到写盖不掉换节点之后的新写_仍回true() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         BattlePlacement first = placement(battleId, 1, 1, "inst-a");
         BattlePlacement rewritten = placement(battleId, 2, 2, "inst-b");
@@ -132,7 +135,7 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 被丢弃的迟到写不刷新TTL_不续别人的命() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         store.write(placement(battleId, 2, 2, "inst-b"));
         raw(battleId).expire(Duration.ofSeconds(20));
@@ -144,7 +147,7 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void attempt更大的写覆盖旧值_换节点改写() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         store.write(placement(battleId, 1, 1, "inst-a"));
 
@@ -155,7 +158,7 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 同值补写_内容不变_TTL刷回360秒_写两次与写一次结果相同() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         BattlePlacement placement = placement(battleId, 2, 2, "inst-b");
         store.write(placement);
@@ -172,7 +175,7 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 已存的attempt不是数字_按没有处理_直接覆盖() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         raw(battleId).put("a", "乱码".getBytes(StandardCharsets.UTF_8));
         BattlePlacement placement = placement(battleId, 1, 1, "inst-a");
@@ -184,7 +187,7 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 入参不合法是调用方的bug_直接抛() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
 
         assertThatThrownBy(() -> store.write(BattlePlacement.newBuilder().setAttempt(1).build())).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> store.write(BattlePlacement.newBuilder().setBattleId(5).build())).isInstanceOf(IllegalArgumentException.class);
@@ -194,14 +197,14 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 没有记录_Absent() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
 
         assertThat(store.read(newBattleId(), d())).isInstanceOf(Read.Absent.class);
     }
 
     @Test
     void 损坏的记录是Failed_不折成不存在_缺pb_pb解析不了_与键不符_键类型不对() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long missingPb = newBattleId();
         raw(missingPb).put("a", "1".getBytes(StandardCharsets.US_ASCII));
         long garbage = newBattleId();
@@ -211,7 +214,7 @@ class PlacementStoreIntegrationTest {
         raw(mismatched).put("a", "1".getBytes(StandardCharsets.US_ASCII));
         raw(mismatched).put("pb", placement(12345, 1, 1, "inst-a").toByteArray());
         long wrongType = newBattleId();
-        redis.getBucket(RedisKeys.matchBattlePlacement(wrongType), StringCodec.INSTANCE).set("不是 HASH");
+        redis.getBucket(REDIS_KEYS.matchBattlePlacement(wrongType), StringCodec.INSTANCE).set("不是 HASH");
 
         for (long battleId : new long[] {missingPb, garbage, mismatched, wrongType}) {
             Read read = store.read(battleId, d());
@@ -225,7 +228,7 @@ class PlacementStoreIntegrationTest {
 
     @Test
     void 删除无条件_删完读不到_删不存在的不抛_删了之后迟到的写会复活记录() {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         BattlePlacement placement = placement(battleId, 2, 2, "inst-b");
         store.write(placement);
@@ -247,7 +250,7 @@ class PlacementStoreIntegrationTest {
     @Test
     void Redis客户端不可用_写回false_读是Failed_删不抛_都不折成成功或不存在() {
         RedissonClient closed = connect();
-        RedissonPlacementStore store = new RedissonPlacementStore(closed, 1_500);
+        RedissonPlacementStore store = new RedissonPlacementStore(closed, REDIS_KEYS, 1_500);
         long battleId = newBattleId();
         assertThat(store.write(placement(battleId, 1, 1, "inst-a"))).isTrue();
         closed.shutdown();
@@ -261,12 +264,12 @@ class PlacementStoreIntegrationTest {
         assertThat(written).isFalse();
         assertThat(read).isInstanceOf(Read.Failed.class);
         assertThat(elapsedMs).as("各自在自己的截止附近返回").isLessThan(10_000);
-        assertThat(found(new RedissonPlacementStore(redis).read(battleId, d())).getAttempt()).as("失败的写没有落盘").isEqualTo(1);
+        assertThat(found(new RedissonPlacementStore(redis, REDIS_KEYS).read(battleId, d())).getAttempt()).as("失败的写没有落盘").isEqualTo(1);
     }
 
     @Test
     void 在虚拟线程上读写删_同gather的用法() throws Exception {
-        RedissonPlacementStore store = new RedissonPlacementStore(redis);
+        RedissonPlacementStore store = new RedissonPlacementStore(redis, REDIS_KEYS);
         long battleId = newBattleId();
         BattlePlacement placement = placement(battleId, 1, 1, "inst-a");
         AtomicReference<Object> outcome = new AtomicReference<>();

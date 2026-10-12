@@ -5,7 +5,8 @@ import java.util.Optional;
 
 /**
  * 一条排队队列的身份：模式数值 + 副本号（match-spec §9.4）。{@code battle_config_id} 不校验，每个不同的值一条队列（照搬基线，客户端可见）。
- * 三把 Redis 键都由 {@link RedisKeys} 生成，同在 {@code {match}} 槽。
+ * 三把 Redis 键都由注入的 {@link RedisKeys} 生成（带部署命名空间前缀），同在 {@code {match}} 槽；身份本身不带命名空间，键由调用方按自己进程的
+ * {@code RedisKeys} 算。
  *
  * @param mode     {@code MatchMode} 的数值（≥ 0）
  * @param configId {@code battle_config_id}（uint32 的位模式）
@@ -19,23 +20,23 @@ public record QueueRef(int mode, int configId) {
     }
 
     /** 队列（LIST，等待序）的键；也是票据 {@code queue_key} 字段与注册集成员的取值。 */
-    public String queueKey() {
-        return RedisKeys.matchQueue(mode, configId);
+    public String queueKey(RedisKeys redisKeys) {
+        return redisKeys.matchQueue(mode, configId);
     }
 
     /** 评分镜像（ZSET）的键。 */
-    public String rankKey() {
-        return RedisKeys.matchRank(mode, configId);
+    public String rankKey(RedisKeys redisKeys) {
+        return redisKeys.matchRank(mode, configId);
     }
 
     /** 凑单锁的键。 */
-    public String lockKey() {
-        return RedisKeys.matchQueueLock(mode, configId);
+    public String lockKey(RedisKeys redisKeys) {
+        return redisKeys.matchQueueLock(mode, configId);
     }
 
-    /** 从队列键全文（票据的 {@code queue_key}、注册集成员）解析；不是规范的队列键为空。 */
-    public static Optional<QueueRef> ofQueueKey(String queueKey) {
-        return RedisKeys.parseMatchQueue(queueKey).map(id -> new QueueRef(id.mode(), id.config()));
+    /** 从队列键全文（票据的 {@code queue_key}、注册集成员）解析；不是本命名空间下规范的队列键为空。 */
+    public static Optional<QueueRef> ofQueueKey(RedisKeys redisKeys, String queueKey) {
+        return redisKeys.parseMatchQueue(queueKey).map(id -> new QueueRef(id.mode(), id.config()));
     }
 
     @Override

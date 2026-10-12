@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.game.api.proto.ChannelState;
 import com.game.api.proto.DrainReason;
 import com.game.api.proto.WorldChannel;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -39,6 +40,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class WorldPlanRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static RedissonClient redis;
     private static WorldChannelStore store;
     private static final List<Integer> ZONES = new ArrayList<>();
@@ -48,14 +51,14 @@ class WorldPlanRedisIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(9);
         redis = Redisson.create(config);
-        store = new RedissonWorldChannelStore(redis);
+        store = new RedissonWorldChannelStore(redis, REDIS_KEYS);
     }
 
     @AfterAll
     static void cleanup() {
         for (int zone : ZONES) {
             redis.getKeys().deleteByPattern("game:world:{z:" + Integer.toUnsignedString(zone) + "}:*");
-            redis.getSet(RedisKeys.worldZones(), StringCodec.INSTANCE).remove(Integer.toUnsignedString(zone));
+            redis.getSet(REDIS_KEYS.worldZones(), StringCodec.INSTANCE).remove(Integer.toUnsignedString(zone));
         }
         redis.shutdown();
     }
@@ -146,9 +149,9 @@ class WorldPlanRedisIntegrationTest {
         assertThat(store.planVersion(zone)).isEqualTo(lostBatch.writtenVersion());
 
         // 模拟主从切换丢了这次写：版本号与记录都退回写之前
-        redis.getBucket(RedisKeys.worldPlanVersion(zone), StringCodec.INSTANCE)
+        redis.getBucket(REDIS_KEYS.worldPlanVersion(zone), StringCodec.INSTANCE)
                 .set(Long.toString(before.version()));
-        redis.getMap(RedisKeys.worldChannels(zone), StringCodec.INSTANCE).fastRemove("77");
+        redis.getMap(REDIS_KEYS.worldChannels(zone), StringCodec.INSTANCE).fastRemove("77");
         Thread.sleep(5);
 
         WorldPlanSnapshot after = store.snapshot(zone);
@@ -168,7 +171,7 @@ class WorldPlanRedisIntegrationTest {
         assertThat(store.write(zone, old, new WorldPlanBatch(0).putChannel(channel(1, 1, 1, 0))).isWritten()).isTrue();
 
         // 锁过期后被别人拿走（这里直接改值模拟被夺）
-        redis.getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).set("sm-new:" + zone);
+        redis.getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).set("sm-new:" + zone);
         assertThat(store.write(zone, old, new WorldPlanBatch(1).removeChannel(1).seedDesired(1, 9)))
                 .isEqualTo(WorldPlanWriteResult.FENCED);
         assertThat(store.renewLeader(zone, old, Duration.ofSeconds(30))).isFalse();
@@ -179,7 +182,7 @@ class WorldPlanRedisIntegrationTest {
         assertThat(snap.desired()).isEmpty();
 
         // 锁不存在也算不是领导者
-        redis.getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).delete();
+        redis.getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).delete();
         assertThat(store.write(zone, old, new WorldPlanBatch(1).removeChannel(1))).isEqualTo(WorldPlanWriteResult.FENCED);
     }
 
@@ -280,8 +283,8 @@ class WorldPlanRedisIntegrationTest {
     void 非法_op_整批拒绝_一条也不写() {
         int zone = newZone();
         String token = leader(zone, "sm:" + zone);
-        List<Object> keys = List.of(RedisKeys.worldLeader(zone), RedisKeys.worldChannels(zone), RedisKeys.worldDesired(zone),
-                RedisKeys.worldCooldown(zone), RedisKeys.worldPlanVersion(zone));
+        List<Object> keys = List.of(REDIS_KEYS.worldLeader(zone), REDIS_KEYS.worldChannels(zone), REDIS_KEYS.worldDesired(zone),
+                REDIS_KEYS.worldCooldown(zone), REDIS_KEYS.worldPlanVersion(zone));
         RScript script = redis.getScript(ByteArrayCodec.INSTANCE);
         assertThatThrownBy(() -> script.eval(RScript.Mode.READ_WRITE, RedissonWorldChannelStore.WRITE,
                 RScript.ReturnType.INTEGER, keys, ascii(token), ascii("0"), ascii("1"),
@@ -299,7 +302,7 @@ class WorldPlanRedisIntegrationTest {
     @Test
     void 坏记录让拉取与快照整体失败() {
         int zone = newZone();
-        redis.<byte[], byte[]>getMap(RedisKeys.worldChannels(zone), ByteArrayCodec.INSTANCE)
+        redis.<byte[], byte[]>getMap(REDIS_KEYS.worldChannels(zone), ByteArrayCodec.INSTANCE)
                 .fastPut(ascii("7"), channel(8, 1, 1, 0).toByteArray());
         assertThatThrownBy(() -> store.readPlan(zone)).isInstanceOf(IllegalStateException.class).hasMessageContaining("field=7");
         assertThatThrownBy(() -> store.snapshot(zone)).isInstanceOf(IllegalStateException.class);
@@ -315,7 +318,7 @@ class WorldPlanRedisIntegrationTest {
         assertThat(a.tryAcquire()).isTrue();                 // 已是本令牌：幂等续期
         assertThat(b.tryAcquire()).isFalse();
         assertThat(a.renew()).isEqualTo(WorldLeaderLock.RenewOutcome.RENEWED);
-        long pttl = redis.getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).remainTimeToLive();
+        long pttl = redis.getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).remainTimeToLive();
         assertThat(pttl).isPositive().isLessThanOrEqualTo(800);
         assertThat(store.write(zone, a.token(), new WorldPlanBatch(0).seedDesired(1, 2)).isWritten()).isTrue();
 
@@ -334,9 +337,9 @@ class WorldPlanRedisIntegrationTest {
 
         // 放锁只删自己的；b 放了之后 a 能重新当选
         a.release();
-        assertThat(redis.getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo(b.token());
+        assertThat(redis.getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).get()).isEqualTo(b.token());
         b.release();
-        assertThat(redis.getBucket(RedisKeys.worldLeader(zone), StringCodec.INSTANCE).isExists()).isFalse();
+        assertThat(redis.getBucket(REDIS_KEYS.worldLeader(zone), StringCodec.INSTANCE).isExists()).isFalse();
         assertThat(a.tryAcquire()).isTrue();
         a.release();
     }

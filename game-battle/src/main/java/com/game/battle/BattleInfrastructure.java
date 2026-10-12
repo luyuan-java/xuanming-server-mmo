@@ -12,13 +12,14 @@ import com.game.battle.room.RoomDependencies;
 import com.game.battle.rpc.BattleRpcServer;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import org.redisson.api.RedissonClient;
 
 /**
- * {@link BattleNode} 在启动时才能建的部件（要 Redis、要开端口、要节点身份）的工厂：生产实现 {@link #production(RedissonClient)}，
+ * {@link BattleNode} 在启动时才能建的部件（要 Redis、要开端口、要节点身份）的工厂：生产实现 {@link #production(RedissonClient, RedisKeys)}，
  * 测试换成假实现，就能在没有 Redis、不开端口的情况下核对启停顺序与租约丢失处置（battle-node-spec §13.5）。
  * 节点自己的线程（逻辑线程、调度线程、回复执行器）与准入闸不在这里：它们的创建与释放顺序就是 {@link BattleNode} 要守的契约。
  */
@@ -71,8 +72,8 @@ public interface BattleInfrastructure {
     DirectEdge edge(EdgeDependencies deps);
 
     /** 生产实现：Redis 租约与目录、Dubbo Triple 导出、真房间服务与真直连面。 */
-    static BattleInfrastructure production(RedissonClient redis) {
-        return new Production(redis);
+    static BattleInfrastructure production(RedissonClient redis, RedisKeys redisKeys) {
+        return new Production(redis, redisKeys);
     }
 
     /** 生产实现。 */
@@ -85,14 +86,16 @@ public interface BattleInfrastructure {
         static final Duration LEASE_TTL = Duration.ofSeconds(15);
 
         private final RedissonClient redis;
+        private final RedisKeys redisKeys;
 
-        Production(RedissonClient redis) {
+        Production(RedissonClient redis, RedisKeys redisKeys) {
             this.redis = Objects.requireNonNull(redis, "redis");
+            this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         }
 
         @Override
         public Lease acquireLease(ScheduledExecutorService scheduler, String instanceId, Runnable onLost) {
-            NodeIdLease lease = NodeIdLease.acquire(redis, scheduler, NodeTypes.BATTLE, RedisBattleDirectory.SCOPE,
+            NodeIdLease lease = NodeIdLease.acquire(redis, redisKeys, scheduler, NodeTypes.BATTLE, RedisBattleDirectory.SCOPE,
                     MIN_NODE_ID, MAX_NODE_ID, instanceId, LEASE_TTL, onLost);
             return new Lease() {
                 @Override
@@ -119,7 +122,7 @@ public interface BattleInfrastructure {
 
         @Override
         public BattleDirectoryPublisher.Directory directory(int nodeId) {
-            return new RedisBattleDirectory(redis, nodeId);
+            return new RedisBattleDirectory(redis, redisKeys, nodeId);
         }
 
         @Override

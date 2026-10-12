@@ -11,8 +11,9 @@
 # - 只放依赖。基线的 etcd / Nacos / Redis Cluster / kafka-ui / topic-init 都不移植（spec §2.3）。
 # - 重置：MySQL 与 Redis 必须一起清（docker compose -f deploy/compose/infra.yaml down -v），禁止单独删 redis-data：
 #   Redis 里的 <ns>:node-id-epoch:* 回退会让 scene 重新接受旧 gate 的链路，组队等只在 Redis 的权威数据也会和 MySQL 对不上。
-# - 多个游戏（或同一游戏的多套部署）共用这一套 infra：各自取不同的部署命名空间 GAME_NAMESPACE（缺省 game；architecture.md「部署命名空间」），
-#   Redis 键前缀 <ns>:、Kafka topic / 消费组 <ns>-、MySQL 库 <ns> 互不相同。这只是命名隔离（防误串），不是安全边界：Redis / Kafka 没有按租户的账号，
+# - 多个游戏（或同一游戏的多套部署）共用这一套 infra：各部署的进程各取不同的部署命名空间 GAME_NAMESPACE（在起进程的 shell 里 export，
+#   缺省 game；architecture.md「部署命名空间」），Redis 键前缀 <ns>:、Kafka topic / 消费组 <ns>-、MySQL 库 <ns> 互不相同。infra 本身不属于哪个部署，
+#   这里只用它决定预建哪个库（见 mysql 的 MYSQL_DATABASE）。这只是命名隔离（防误串），不是安全边界：Redis / Kafka 没有按租户的账号，
 #   要强隔离就各用一套 infra。同一个 Redis DB 里 SCAN 会扫到别的部署的键，可以再给各部署不同的 game.redis.database 减轻。
 #
 # 用法（有 Docker 的机器）：
@@ -36,10 +37,12 @@ services:
       # 各进程与集成测试用 root 连接：createDatabaseIfNotExist、schema init、pbmysql 建表、集成测试建临时库都要 CREATE 权限。
       # 生产的最小权限账号由批次 7.6 定。
       MYSQL_ROOT_PASSWORD: ${GAME_MYSQL_PASSWORD:?需要环境变量 GAME_MYSQL_PASSWORD（见 deploy/compose/env.example）}
-      # 预建库 <ns>（部署命名空间，缺省 game）：game-team 的 JDBC URL 不带 createDatabaseIfNotExist，冷库上先起它会因库不存在失败。
-      # 只在第一次初始化数据目录时生效；第二个命名空间共用这个 MySQL 时，它的库由进程的 createDatabaseIfNotExist 建（game-login 先起）。
-      # 必须写 :-game 而不是 :-：空串会被进程按 fail-closed 拒绝
-      MYSQL_DATABASE: ${GAME_NAMESPACE:-game}
+      # 预建库（只在第一次初始化数据目录时生效）：game-team 的 JDBC URL 不带 createDatabaseIfNotExist，冷库上先起它会因库不存在失败。
+      # 缺省预建缺省部署命名空间的库 game；compose 读到的 GAME_NAMESPACE（shell 或 .env）只决定预建哪个库，不决定宿主进程的命名空间
+      # （start-slice.sh 起的进程读的是它自己 shell 里的 GAME_NAMESPACE）。infra 是共用的，不属于某个部署：共用时可以在 .env 里写空值
+      # GAME_NAMESPACE=，这里就什么库都不预建，各部署的库由各自进程的 createDatabaseIfNotExist（game-login 先起）或 DBA 建。
+      # 写 -game 不写 :-game：只在没设时取 game，设了空串就是「不预建」，不被换成 game
+      MYSQL_DATABASE: ${GAME_NAMESPACE-game}
     ports:
       - "127.0.0.1:${GAME_MYSQL_HOST_PORT:-3306}:3306"
     volumes:

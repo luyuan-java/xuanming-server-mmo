@@ -3,6 +3,7 @@ package com.game.guild.rank;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.guild.rank.GuildRankMetrics.RankOp;
@@ -41,6 +42,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class GuildRanksRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final int DB = 10;
     private static final int[] ZONES = {2, 10, 11, 20, 21, 30, -1};
     /** 重建临时键的通配（{@code RedisKeys.guildRankTmpAll / guildRankTmpZone} 的公共前缀）。 */
@@ -67,7 +70,7 @@ class GuildRanksRedisIntegrationTest {
     @BeforeEach
     void setUp() {
         wipe();
-        ranks = new GuildRanks(new RedissonGuildRankRedis(redis), scheduler, metrics);
+        ranks = new GuildRanks(new RedissonGuildRankRedis(redis), REDIS_KEYS, scheduler, metrics);
     }
 
     @AfterEach
@@ -78,10 +81,10 @@ class GuildRanksRedisIntegrationTest {
 
     /** 只删排行这一组键（含历史区榜与临时键）。 */
     private static void wipe() {
-        List<String> keys = new ArrayList<>(List.of(RedisKeys.guildRankAll(), RedisKeys.guildRankZones(),
-                RedisKeys.guildRankLock()));
+        List<String> keys = new ArrayList<>(List.of(REDIS_KEYS.guildRankAll(), REDIS_KEYS.guildRankZones(),
+                REDIS_KEYS.guildRankLock()));
         for (int zone : ZONES) {
-            keys.add(RedisKeys.guildRankZone(zone));
+            keys.add(REDIS_KEYS.guildRankZone(zone));
         }
         redis.getKeys().getKeysStream(KeysScanOptions.defaults().pattern(TMP_PATTERN)).forEach(keys::add);
         redis.getKeys().delete(keys.toArray(String[]::new));
@@ -101,7 +104,7 @@ class GuildRanksRedisIntegrationTest {
 
     private void awaitUnlocked() throws InterruptedException {
         long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (redis.getBucket(RedisKeys.guildRankLock()).isExists()) {
+        while (redis.getBucket(REDIS_KEYS.guildRankLock()).isExists()) {
             if (System.nanoTime() > until) {
                 throw new AssertionError("锁没有被释放");
             }
@@ -113,9 +116,9 @@ class GuildRanksRedisIntegrationTest {
     void 建帮以0分进全服榜区榜与区索引_成员是无符号十进制() throws Exception {
         long big = Long.MIN_VALUE + 9;
         assertThat(ranks.add(big, 2, 0, budget())).isTrue();
-        assertThat(zset(RedisKeys.guildRankAll()).getScore("9223372036854775817")).isEqualTo(0.0);
-        assertThat(zset(RedisKeys.guildRankZone(2)).getScore("9223372036854775817")).isEqualTo(0.0);
-        assertThat(redis.<String>getSet(RedisKeys.guildRankZones(), StringCodec.INSTANCE).readAll()).containsExactly("2");
+        assertThat(zset(REDIS_KEYS.guildRankAll()).getScore("9223372036854775817")).isEqualTo(0.0);
+        assertThat(zset(REDIS_KEYS.guildRankZone(2)).getScore("9223372036854775817")).isEqualTo(0.0);
+        assertThat(redis.<String>getSet(REDIS_KEYS.guildRankZones(), StringCodec.INSTANCE).readAll()).containsExactly("2");
         awaitUnlocked();
         assertThat(ranks.rankOf(big, 2, budget())).contains(new RankEntry(big, 0, 1));
         assertThat(ranks.page(2, 1, 20, budget())).isEqualTo(new RankPage(List.of(new RankEntry(big, 0, 1)), 1));
@@ -126,8 +129,8 @@ class GuildRanksRedisIntegrationTest {
         assertThat(ranks.rankOf(big, 0, budget()).orElseThrow().score()).isEqualTo(-123_456_789_012L);
         // zone 0 只进全服榜，不进区索引
         assertThat(ranks.add(77, 0, 3, budget())).isTrue();
-        assertThat(zset(RedisKeys.guildRankAll()).getScore("77")).isEqualTo(3.0);
-        assertThat(redis.<String>getSet(RedisKeys.guildRankZones(), StringCodec.INSTANCE).readAll()).containsExactly("2");
+        assertThat(zset(REDIS_KEYS.guildRankAll()).getScore("77")).isEqualTo(3.0);
+        assertThat(redis.<String>getSet(REDIS_KEYS.guildRankZones(), StringCodec.INSTANCE).readAll()).containsExactly("2");
         assertThat(ranks.rankOf(77, 2, budget())).isEmpty();
         assertThat(metrics.count(RankOp.ADD, RankOutcome.OK)).isEqualTo(4);
     }
@@ -179,13 +182,13 @@ class GuildRanksRedisIntegrationTest {
         int sourceZone = 10;
         int targetZone = 20;
         ranks.add(guild, targetZone, 999, budget());
-        zset(RedisKeys.guildRankZone(sourceZone)).add(999, "5001"); // 历史残留
+        zset(REDIS_KEYS.guildRankZone(sourceZone)).add(999, "5001"); // 历史残留
         ranks.add(5004, targetZone, 200, budget());
         assertThat(ranks.remove(guild, sourceZone, budget())).isTrue();
-        assertNotRanked(RedisKeys.guildRankAll(), guild);
-        assertNotRanked(RedisKeys.guildRankZone(targetZone), guild);
-        assertNotRanked(RedisKeys.guildRankZone(sourceZone), guild);
-        assertThat(zset(RedisKeys.guildRankZone(targetZone)).getScore("5004")).isEqualTo(200.0);
+        assertNotRanked(REDIS_KEYS.guildRankAll(), guild);
+        assertNotRanked(REDIS_KEYS.guildRankZone(targetZone), guild);
+        assertNotRanked(REDIS_KEYS.guildRankZone(sourceZone), guild);
+        assertThat(zset(REDIS_KEYS.guildRankZone(targetZone)).getScore("5004")).isEqualTo(200.0);
         assertThat(ranks.rankOf(guild, targetZone, budget())).isEmpty();
         awaitUnlocked();
     }
@@ -206,16 +209,16 @@ class GuildRanksRedisIntegrationTest {
         });
         assertThat(tmpTtl.get()).isBetween(Duration.ofMinutes(9).toMillis(), Duration.ofMinutes(10).toMillis());
         assertThat(result).isEqualTo(new GuildRanks.RebuildResult(300, 2));
-        assertThat(zset(RedisKeys.guildRankAll()).size()).isEqualTo(300);
-        assertNotRanked(RedisKeys.guildRankAll(), 666);
-        assertNotRanked(RedisKeys.guildRankZone(21), 666);
-        assertThat(zset(RedisKeys.guildRankZone(11)).getScore("1")).isEqualTo(1_000.0);
-        assertThat(zset(RedisKeys.guildRankZone(-1)).size()).isEqualTo(150);
-        assertThat(redis.<String>getSet(RedisKeys.guildRankZones(), StringCodec.INSTANCE).readAll())
+        assertThat(zset(REDIS_KEYS.guildRankAll()).size()).isEqualTo(300);
+        assertNotRanked(REDIS_KEYS.guildRankAll(), 666);
+        assertNotRanked(REDIS_KEYS.guildRankZone(21), 666);
+        assertThat(zset(REDIS_KEYS.guildRankZone(11)).getScore("1")).isEqualTo(1_000.0);
+        assertThat(zset(REDIS_KEYS.guildRankZone(-1)).size()).isEqualTo(150);
+        assertThat(redis.<String>getSet(REDIS_KEYS.guildRankZones(), StringCodec.INSTANCE).readAll())
                 .containsExactlyInAnyOrder("11", "4294967295");
         assertThat(redis.getKeys().getKeysStream(KeysScanOptions.defaults().pattern(TMP_PATTERN)).count())
                 .isZero();
-        for (String key : List.of(RedisKeys.guildRankAll(), RedisKeys.guildRankZone(11), RedisKeys.guildRankZone(-1))) {
+        for (String key : List.of(REDIS_KEYS.guildRankAll(), REDIS_KEYS.guildRankZone(11), REDIS_KEYS.guildRankZone(-1))) {
             assertThat(redis.getKeys().remainTimeToLive(key)).as(key).isEqualTo(-1L);
         }
         assertThat(ranks.page(11, 1, 3, budget()).entries()).extracting(RankEntry::guildId).containsExactly(1L, 3L, 5L);
@@ -229,15 +232,15 @@ class GuildRanksRedisIntegrationTest {
         awaitUnlocked();
         assertThat(ranks.rebuild(sink -> {
         })).isEqualTo(new GuildRanks.RebuildResult(0, 0));
-        assertThat(redis.getKeys().countExists(RedisKeys.guildRankAll(), RedisKeys.guildRankZone(11),
-                RedisKeys.guildRankZones())).isZero();
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.guildRankAll(), REDIS_KEYS.guildRankZone(11),
+                REDIS_KEYS.guildRankZones())).isZero();
     }
 
     @Test
     void 维护锁续期_持锁期间别人等不到_释放后接管() throws Exception {
-        GuildRanks slowOwner = new GuildRanks(new RedissonGuildRankRedis(redis), scheduler, metrics, 300, 100, 5_000, 20,
+        GuildRanks slowOwner = new GuildRanks(new RedissonGuildRankRedis(redis), REDIS_KEYS, scheduler, metrics, 300, 100, 5_000, 20,
                 300, 600_000);
-        GuildRanks other = new GuildRanks(new RedissonGuildRankRedis(redis), scheduler, metrics);
+        GuildRanks other = new GuildRanks(new RedissonGuildRankRedis(redis), REDIS_KEYS, scheduler, metrics);
         AtomicInteger blocked = new AtomicInteger();
         slowOwner.rebuild(sink -> {
             sink.accept(new RankRow(1, 2, 1));
@@ -249,7 +252,7 @@ class GuildRanksRedisIntegrationTest {
             if (!other.add(2, 2, 2, Deadline.after(500))) {
                 blocked.incrementAndGet();
             }
-            assertThat(redis.getBucket(RedisKeys.guildRankLock()).remainTimeToLive()).isBetween(1L, 300L);
+            assertThat(redis.getBucket(REDIS_KEYS.guildRankLock()).remainTimeToLive()).isBetween(1L, 300L);
         });
         assertThat(blocked).hasValue(1);
         assertThat(metrics.count(RankOp.ADD, RankOutcome.LOCK_TIMEOUT)).isEqualTo(1);
@@ -259,7 +262,7 @@ class GuildRanksRedisIntegrationTest {
 
     @Test
     void 维护锁过期接管_持锁实例崩溃后最多卡一个TTL() {
-        redis.<String>getBucket(RedisKeys.guildRankLock(), StringCodec.INSTANCE).set("crashed-instance", Duration.ofMillis(300));
+        redis.<String>getBucket(REDIS_KEYS.guildRankLock(), StringCodec.INSTANCE).set("crashed-instance", Duration.ofMillis(300));
         long started = System.nanoTime();
         assertThat(ranks.add(7, 2, 1, budget())).isTrue();
         assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)).isBetween(150L, 2_000L);
@@ -270,11 +273,11 @@ class GuildRanksRedisIntegrationTest {
         ranks.add(42, 2, 1, budget());
         assertThatThrownBy(() -> ranks.rebuild(sink -> {
             sink.accept(new RankRow(1, 2, 1));
-            redis.<String>getBucket(RedisKeys.guildRankLock(), StringCodec.INSTANCE).set("thief", Duration.ofSeconds(30));
+            redis.<String>getBucket(REDIS_KEYS.guildRankLock(), StringCodec.INSTANCE).set("thief", Duration.ofSeconds(30));
         })).isInstanceOf(IllegalStateException.class).hasMessageContaining("锁已失效");
-        assertThat(zset(RedisKeys.guildRankAll()).getScore("42")).isEqualTo(1.0);
-        assertThat(zset(RedisKeys.guildRankAll()).getScore("1")).isNull();
-        assertThat(redis.<String>getBucket(RedisKeys.guildRankLock(), StringCodec.INSTANCE).get()).isEqualTo("thief");
+        assertThat(zset(REDIS_KEYS.guildRankAll()).getScore("42")).isEqualTo(1.0);
+        assertThat(zset(REDIS_KEYS.guildRankAll()).getScore("1")).isNull();
+        assertThat(redis.<String>getBucket(REDIS_KEYS.guildRankLock(), StringCodec.INSTANCE).get()).isEqualTo("thief");
         assertThat(redis.getKeys().getKeysStream(KeysScanOptions.defaults().pattern(TMP_PATTERN)).count())
                 .isZero();
     }

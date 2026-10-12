@@ -2,6 +2,7 @@ package com.game.discovery.battle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
 import java.lang.reflect.Field;
@@ -19,6 +20,8 @@ import org.junit.jupiter.api.Test;
  * 这里的不等式是跨批次的数值依赖：改任何一个常量都必须让它们继续成立。
  */
 class BattleRedisConstantsTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     /** node-spec §10.4：battle 的确认补发窗口（秒）与 match 的备战期限上限（秒）。两个数分别属于 game-battle / 6.4，这里只能按字面值钉住。 */
     private static final long CONFIRM_RESEND_WINDOW_SEC = 180;
@@ -114,20 +117,20 @@ class BattleRedisConstantsTest {
     void 键名_game前缀_玩家号与战斗号按无符号十进制() {
         long player = Long.MIN_VALUE + 7;          // 2^63 + 7
         long battle = -1L;                         // 2^64 − 1
-        assertThat(RedisKeys.battleLock(player)).isEqualTo("game:battle:{9223372036854775815}:lock");
-        assertThat(RedisKeys.battleSettlements(player)).isEqualTo("game:battle:{9223372036854775815}:settlement");
-        assertThat(RedisKeys.battleSettled(player, battle)).isEqualTo("game:battle:{9223372036854775815}:settled:18446744073709551615");
-        assertThat(RedisKeys.battleActivityResult(battle)).isEqualTo("game:battle:activity-result:18446744073709551615");
-        assertThat(RedisKeys.battleLock(42)).isEqualTo("game:battle:{42}:lock").startsWith(RedisKeys.PREFIX);
+        assertThat(REDIS_KEYS.battleLock(player)).isEqualTo("game:battle:{9223372036854775815}:lock");
+        assertThat(REDIS_KEYS.battleSettlements(player)).isEqualTo("game:battle:{9223372036854775815}:settlement");
+        assertThat(REDIS_KEYS.battleSettled(player, battle)).isEqualTo("game:battle:{9223372036854775815}:settled:18446744073709551615");
+        assertThat(REDIS_KEYS.battleActivityResult(battle)).isEqualTo("game:battle:activity-result:18446744073709551615");
+        assertThat(REDIS_KEYS.battleLock(42)).isEqualTo("game:battle:{42}:lock").startsWith(REDIS_KEYS.prefix());
     }
 
     @Test
     void 同一玩家的锁_记录_墓碑_同hash_tag同槽_不同玩家不同tag() {
         long player = Long.MIN_VALUE + 123_456_789L;
-        String lock = RedisKeys.battleLock(player);
-        String settlement = RedisKeys.battleSettlements(player);
-        String settledA = RedisKeys.battleSettled(player, 1);
-        String settledB = RedisKeys.battleSettled(player, Long.MIN_VALUE + 9);
+        String lock = REDIS_KEYS.battleLock(player);
+        String settlement = REDIS_KEYS.battleSettlements(player);
+        String settledA = REDIS_KEYS.battleSettled(player, 1);
+        String settledB = REDIS_KEYS.battleSettled(player, Long.MIN_VALUE + 9);
 
         assertThat(hashTag(lock)).isEqualTo(Long.toUnsignedString(player));
         assertThat(hashTag(settlement)).isEqualTo(hashTag(lock));
@@ -139,7 +142,7 @@ class BattleRedisConstantsTest {
         assertThat(keySlot(settledB)).isEqualTo(keySlot(lock));
         // 墓碑按 (玩家, 战斗) 分键
         assertThat(settledA).isNotEqualTo(settledB);
-        assertThat(hashTag(RedisKeys.battleLock(player + 1))).isNotEqualTo(hashTag(lock));
+        assertThat(hashTag(REDIS_KEYS.battleLock(player + 1))).isNotEqualTo(hashTag(lock));
     }
 
     @Test

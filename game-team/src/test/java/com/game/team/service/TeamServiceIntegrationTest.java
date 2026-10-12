@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.team.TeamRedisFields;
@@ -72,6 +73,8 @@ import org.redisson.api.RedissonClient;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TeamServiceIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static RedissonClient redis;
     private TeamServiceFixture fx;
     private TeamService svc;
@@ -121,7 +124,7 @@ class TeamServiceIntegrationTest {
 
     private void requireNoTeamKeys(long... players) {
         for (long p : players) {
-            assertThat(fx.exists(RedisKeys.teamPlayer(p))).as("不应写入组队索引 %s", u(p)).isFalse();
+            assertThat(fx.exists(REDIS_KEYS.teamPlayer(p))).as("不应写入组队索引 %s", u(p)).isFalse();
         }
     }
 
@@ -365,8 +368,8 @@ class TeamServiceIntegrationTest {
         ev = requireEvent(pushes.get(0), p4, TeamEventType.TEAM_EVENT_TYPE_INVITE_REVOKED);
         assertThat(ev.getTeamId()).isEqualTo(tid);
         assertThat(ev.getActorId()).isEqualTo(p1);
-        assertThat(fx.exists(RedisKeys.teamRecord(tid))).isFalse();
-        assertThat(fx.exists(RedisKeys.teamInfo(tid))).isFalse();
+        assertThat(fx.exists(REDIS_KEYS.teamRecord(tid))).isFalse();
+        assertThat(fx.exists(REDIS_KEYS.teamInfo(tid))).isFalse();
     }
 
     // ================================================================ #7 / §H.3 整队过期后的空视图（service_test.go:519）
@@ -382,7 +385,7 @@ class TeamServiceIntegrationTest {
         Map<Long, Long> curEpoch = Map.of(p1, fx.epochOf(p1), p2, fx.epochOf(p2));
 
         // 全队空闲 24 h：记录、投影、全员索引同批过期（真 Redis 拨不动时钟，删键模拟；再等 Redis 时钟越过旧 epoch）
-        fx.del(RedisKeys.teamRecord(tid), RedisKeys.teamInfo(tid), RedisKeys.teamPlayer(p1), RedisKeys.teamPlayer(p2));
+        fx.del(REDIS_KEYS.teamRecord(tid), REDIS_KEYS.teamInfo(tid), REDIS_KEYS.teamPlayer(p1), REDIS_KEYS.teamPlayer(p2));
         fx.waitRedisAfter(Math.max(curEpoch.get(p1), curEpoch.get(p2)));
 
         java.util.function.BiConsumer<Long, TeamResponse> requireAccepted = (pid, resp) -> {
@@ -404,7 +407,7 @@ class TeamServiceIntegrationTest {
         requireAccepted.accept(p1, disbanded);
 
         requireNoTeamKeys(p1, p2); // 读路径与未绑定分支都不写
-        assertThat(fx.exists(RedisKeys.teamRecord(tid))).isFalse();
+        assertThat(fx.exists(REDIS_KEYS.teamRecord(tid))).isFalse();
         assertThat(fx.takePushes()).isEmpty();
     }
 
@@ -426,7 +429,7 @@ class TeamServiceIntegrationTest {
             }
             rounds.incrementAndGet();
             // 每轮读完都有别的实例抢先提交：ver 前移，本轮 S_COMMIT 必然 {0}
-            fx.hset(RedisKeys.teamRecord(tid), TeamRedisFields.VER, Long.toUnsignedString(fx.versionOf(tid) + 1));
+            fx.hset(REDIS_KEYS.teamRecord(tid), TeamRedisFields.VER, Long.toUnsignedString(fx.versionOf(tid) + 1));
         });
         TeamResponse resp = kick(p1, p2, tid);
         fx.afterRead.set(b -> {
@@ -551,7 +554,7 @@ class TeamServiceIntegrationTest {
         fx.takePushes();
 
         // 3 的索引已指向别的队；4 已下线（会话不存在，非队长不触发转让）
-        fx.hset(RedisKeys.teamPlayer(p3), TeamRedisFields.TID, "424242");
+        fx.hset(REDIS_KEYS.teamPlayer(p3), TeamRedisFields.TID, "424242");
         fx.states.put(p4, SessionState.ABSENT);
 
         TeamResponse resp = getMyTeam(p1, true);
@@ -585,7 +588,7 @@ class TeamServiceIntegrationTest {
                 .setZoneId(ZONE).setAppliedAtMs(1).setExpireAtMs(2)).build());
         fx.afterRead.set(bind -> {
             if (bind.playerId() == p1 && bind.teamId() == tid) {
-                fx.hset(RedisKeys.teamRecord(tid), TeamRedisFields.VER, Long.toUnsignedString(fx.versionOf(tid) + 1));
+                fx.hset(REDIS_KEYS.teamRecord(tid), TeamRedisFields.VER, Long.toUnsignedString(fx.versionOf(tid) + 1));
             }
         });
         TeamResponse resp = getMyTeam(p1, true);
@@ -605,7 +608,7 @@ class TeamServiceIntegrationTest {
         long p1 = fx.pid(1), p5 = fx.pid(5);
         fx.addPlayers(ZONE, p1, p5);
         long tid = fx.create(p1);
-        String key = RedisKeys.teamInvite(p5);
+        String key = REDIS_KEYS.teamInvite(p5);
         // 残留索引项：记录里没有给 5 的邀请，score 与之后的重邀不同
         fx.zadd(key, fx.nowMs() + 30_000, u(tid));
 
@@ -898,12 +901,12 @@ class TeamServiceIntegrationTest {
         fx.addPlayers(ZONE, p6, p7);
         long t2 = fx.create(p7);
         requireCode(0, invite(p7, p6, t2));
-        assertThat(fx.zmembers(RedisKeys.teamInvite(p6))).containsExactly(u(t2));
-        fx.del(RedisKeys.teamRecord(t2), RedisKeys.teamInfo(t2));
+        assertThat(fx.zmembers(REDIS_KEYS.teamInvite(p6))).containsExactly(u(t2));
+        fx.del(REDIS_KEYS.teamRecord(t2), REDIS_KEYS.teamInfo(t2));
         TeamResponse missing = respond(p6, t2, false);
         requireCode(TeamTips.NO_TEAM, missing);
         assertThat(missing.getTeam().getTeamId()).isZero();
-        assertThat(fx.zmembers(RedisKeys.teamInvite(p6))).isEmpty();
+        assertThat(fx.zmembers(REDIS_KEYS.teamInvite(p6))).isEmpty();
     }
 
     @Test
@@ -962,7 +965,7 @@ class TeamServiceIntegrationTest {
         requireCode(0, last);
         assertThat(last.getTeam().getTeamId()).isZero();
         assertThat(last.getTeam().getMembershipEpoch()).isEqualTo(fx.epochOf(p2));
-        assertThat(fx.exists(RedisKeys.teamRecord(tid))).isFalse();
+        assertThat(fx.exists(REDIS_KEYS.teamRecord(tid))).isFalse();
     }
 
     @Test
@@ -971,11 +974,11 @@ class TeamServiceIntegrationTest {
         fx.addPlayers(ZONE, p1);
         long tid = fx.create(p1);
         long ver = fx.versionOf(tid);
-        fx.expireSeconds(RedisKeys.teamRecord(tid), 100);
+        fx.expireSeconds(REDIS_KEYS.teamRecord(tid), 100);
         TeamResponse resp = getMyTeam(p1, false);
         requireCode(0, resp);
         assertThat(resp.getTeam().getVersion()).isEqualTo(ver);
-        assertThat(fx.ttlSeconds(RedisKeys.teamRecord(tid))).isGreaterThan(TeamStore.TOUCH_THRESHOLD_SECONDS);
+        assertThat(fx.ttlSeconds(REDIS_KEYS.teamRecord(tid))).isGreaterThan(TeamStore.TOUCH_THRESHOLD_SECONDS);
         assertThat(fx.versionOf(tid)).isEqualTo(ver);
     }
 

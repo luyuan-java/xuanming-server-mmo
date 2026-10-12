@@ -3,6 +3,7 @@ package com.game.match.ticket;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.ticket.TicketStore.DropReason;
@@ -41,6 +42,8 @@ import org.redisson.api.RedissonClient;
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static RedissonClient redis;
     private TicketRedisFixture fx;
@@ -146,17 +149,17 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
 
     @Override
     protected void expirePopMarker(String popToken) {
-        fx.del(RedisKeys.matchPopMarker(popToken));
+        fx.del(REDIS_KEYS.matchPopMarker(popToken));
     }
 
     @Override
     protected void expireRequeueMarker(String requeueToken) {
-        fx.del(RedisKeys.matchRequeueMarker(requeueToken));
+        fx.del(REDIS_KEYS.matchRequeueMarker(requeueToken));
     }
 
     @Override
     protected void expireLock(QueueRef queue) {
-        fx.del(queue.lockKey());
+        fx.del(queue.lockKey(REDIS_KEYS));
     }
 
     /** 结构化内容之外再加逐键的原始字节：重放用例的「第二次什么都不改」按 DUMP 比。 */
@@ -201,7 +204,7 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
         expected.put("state", "queued");
         expected.put("enqueued_at_ms", Long.toString(enqueuedAt));
         expected.put("zone_id", "2");
-        expected.put("queue_key", q.queueKey());
+        expected.put("queue_key", q.queueKey(REDIS_KEYS));
         expected.put("rating_centi", "162500");
         assertThat(fx.rawTicket(a)).isEqualTo(expected);
         assertThat(fx.rawTicket(a).get("enqueued_at_ms")).as("十进制整数，不是科学计数法").matches("\\d{13}");
@@ -281,14 +284,14 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
         assertThat(store().requeueFront(q, none, List.of(ref(a), ref(b)), QUEUED_TTL, 0, d())).as("都已是 queued").isZero();
         assertThat(store().requeueFront(q, empty, List.of(), QUEUED_TTL, 0, d())).isZero();
 
-        String bothKey = RedisKeys.matchRequeueMarker(both);
+        String bothKey = REDIS_KEYS.matchRequeueMarker(both);
         assertThat(bothKey).isEqualTo("game:{match}:requeue:" + both);
         assertThat(fx.type(bothKey)).isEqualTo("string");
         assertThat(fx.string(bothKey)).isEqualTo("2");
         assertThat(fx.pttl(bothKey)).as("回队首重放标记 60 s").isBetween(55_000L, RedissonTicketStore.REQUEUE_MARKER_TTL_MS);
-        assertThat(fx.string(RedisKeys.matchRequeueMarker(none))).as("一个人都没放回去也要记：否则这一次的重发会按现状重判").isEqualTo("0");
-        assertThat(fx.pttl(RedisKeys.matchRequeueMarker(none))).isBetween(55_000L, RedissonTicketStore.REQUEUE_MARKER_TTL_MS);
-        assertThat(fx.exists(RedisKeys.matchRequeueMarker(empty))).as("空名单不发命令").isFalse();
+        assertThat(fx.string(REDIS_KEYS.matchRequeueMarker(none))).as("一个人都没放回去也要记：否则这一次的重发会按现状重判").isEqualTo("0");
+        assertThat(fx.pttl(REDIS_KEYS.matchRequeueMarker(none))).isBetween(55_000L, RedissonTicketStore.REQUEUE_MARKER_TTL_MS);
+        assertThat(fx.exists(REDIS_KEYS.matchRequeueMarker(empty))).as("空名单不发命令").isFalse();
     }
 
     // ================================================================ TTL
@@ -301,12 +304,12 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
         enqueue(a, q, 150_000);
         enqueue(b, q, 150_000);
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(a))).isBetween(QUEUED_TTL - 5_000, QUEUED_TTL);
-        assertThat(fx.pttl(q.queueKey())).as("队列没有 TTL").isEqualTo(-1);
-        assertThat(fx.pttl(q.rankKey())).as("评分镜像没有 TTL").isEqualTo(-1);
+        assertThat(fx.pttl(q.queueKey(REDIS_KEYS))).as("队列没有 TTL").isEqualTo(-1);
+        assertThat(fx.pttl(q.rankKey(REDIS_KEYS))).as("评分镜像没有 TTL").isEqualTo(-1);
 
         store().pop(q, tok("pop-1"), List.of(ref(a)), 66_000, d());
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(a))).isBetween(61_000L, 66_000L);
-        assertThat(fx.pttl(RedisKeys.matchPopMarker(tok("pop-1")))).as("弹组重放标记 60 s").isBetween(55_000L, RedissonTicketStore.POP_MARKER_TTL_MS);
+        assertThat(fx.pttl(REDIS_KEYS.matchPopMarker(tok("pop-1")))).as("弹组重放标记 60 s").isBetween(55_000L, RedissonTicketStore.POP_MARKER_TTL_MS);
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(b))).as("没被弹的人 TTL 不动").isGreaterThan(66_000L);
 
         store().extendMatched(List.of(ref(a)), 25_000, d());
@@ -315,7 +318,7 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
         assertThat(fx.pttl(TicketRedisFixture.ticketKey(a))).isBetween(55_000L, 60_000L);
 
         store().tryLockQueue(q, "inst-a", 10_000, d());
-        assertThat(fx.pttl(q.lockKey())).isBetween(5_000L, 10_000L);
+        assertThat(fx.pttl(q.lockKey(REDIS_KEYS))).isBetween(5_000L, 10_000L);
     }
 
     @Test
@@ -338,7 +341,7 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
         QueueRef q = q(1);
         long a = p(1);
         long b = p(2);
-        fx.putTicket(a, new Ticket("will-be-removed", 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(), 150_000, 0, 0, 0), QUEUED_TTL);
+        fx.putTicket(a, new Ticket("will-be-removed", 3, q.configId(), TicketState.QUEUED, 1, 1, q.queueKey(REDIS_KEYS), 150_000, 0, 0, 0), QUEUED_TTL);
         fx.removeField(a, "ticket");
         String popToken = tok("pop-1"); // 先分配：下面的 dump 里包含它的重放标记（此刻不存在）
         Object before = fx.dump();
@@ -381,13 +384,13 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
     void 入队中途出错_不留孤儿票_最多留下一个没有票的队列项() {
         QueueRef q = q(1);
         long a = p(1);
-        fx.setString(q.rankKey(), "not-a-zset"); // ZADD 会报 WRONGTYPE：此时注册集与队列已写
+        fx.setString(q.rankKey(REDIS_KEYS), "not-a-zset"); // ZADD 会报 WRONGTYPE：此时注册集与队列已写
 
         assertThatThrownBy(() -> store().enqueue(a, tid(a), q, 1, 150_000, QUEUED_TTL, d())).isInstanceOf(Deadline.DependencyException.class);
 
         assertThat(ticketOf(a)).as("先写队列后写票：出错时没有「票是 queued、人不在队列」的状态").isEmpty();
         assertThat(queueMembers(q)).as("残留项没有票，凑单的校验会剔掉").containsExactly(u(a));
-        fx.del(q.rankKey());
+        fx.del(q.rankKey(REDIS_KEYS));
         assertThat(store().drop(q, a, DropReason.INVALID, null, d())).isTrue();
         assertThat(queueMembers(q)).isEmpty();
         assertThat(store().enqueue(a, tid(a), q, 1, 150_000, QUEUED_TTL, d())).as("玩家可以照常重排").isInstanceOf(JoinResult.Created.class);
@@ -401,14 +404,14 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
         enqueue(a, q, 150_000);
         enqueue(b, q, 150_000);
         store().pop(q, tok("pop-1"), List.of(ref(a), ref(b)), MATCHED_TTL, d());
-        fx.setString(q.queueKey(), "not-a-list");
+        fx.setString(q.queueKey(REDIS_KEYS), "not-a-list");
 
         int requeued = store().requeueFront(q, rq(), List.of(ref(a), ref(b)), QUEUED_TTL, 0, d());
 
         assertThat(requeued).isZero();
         assertThat(ticketOf(a)).as("入队失败必须删票").isEmpty();
         assertThat(ticketOf(b)).isEmpty();
-        fx.del(q.queueKey());
+        fx.del(q.queueKey(REDIS_KEYS));
         assertThat(store().enqueue(a, "t-again", q, 1, 150_000, QUEUED_TTL, d())).as("队列键恢复后可以立即重排").isInstanceOf(JoinResult.Created.class);
         assertThat(queueMembers(q)).containsExactly(u(a));
     }
@@ -419,13 +422,13 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
         long a = p(1);
         enqueue(a, q, 162_500);
         store().pop(q, tok("pop-1"), List.of(ref(a)), MATCHED_TTL, d());
-        fx.setString(q.rankKey(), "not-a-zset");
+        fx.setString(q.rankKey(REDIS_KEYS), "not-a-zset");
 
         assertThat(store().requeueFront(q, rq(), List.of(ref(a)), QUEUED_TTL, 0, d())).isEqualTo(1);
 
         assertThat(ticketOf(a).orElseThrow().state()).isEqualTo(TicketState.QUEUED);
         assertThat(queueMembers(q)).containsExactly(u(a));
-        fx.del(q.rankKey());
+        fx.del(q.rankKey(REDIS_KEYS));
         assertThat(store().snapshot(q, 10, d()).entries()).singleElement()
                 .satisfies(entry -> assertThat(entry.ratingCenti()).as("镜像缺分：凑单按票里的评分用").isEmpty());
     }
@@ -452,7 +455,7 @@ class RedissonTicketStoreIntegrationTest extends TicketStoreContract {
     @Test
     void 客户端已不可用_在请求预算内以依赖异常失败_不折成没有票() {
         RedissonClient closed = TicketRedisFixture.connect();
-        RedissonTicketStore dead = new RedissonTicketStore(closed);
+        RedissonTicketStore dead = new RedissonTicketStore(closed, REDIS_KEYS);
         long a = p(1);
         assertThat(dead.read(a, d())).isEmpty();
         closed.shutdown();

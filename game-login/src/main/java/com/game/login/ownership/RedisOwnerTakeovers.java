@@ -18,8 +18,9 @@ public final class RedisOwnerTakeovers implements OwnerTakeovers {
 
     private final RTopic topic;
 
-    public RedisOwnerTakeovers(RedissonClient redis) {
-        this.topic = redis.getTopic(RedisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE);
+    /** @param keys 频道名的出处（带部署命名空间，装配方注入；须与 scene 订阅的是同一个命名空间） */
+    public RedisOwnerTakeovers(RedissonClient redis, RedisKeys keys) {
+        this.topic = redis.getTopic(keys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE);
     }
 
     @Override

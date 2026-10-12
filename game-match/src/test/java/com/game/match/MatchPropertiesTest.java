@@ -47,7 +47,7 @@ class MatchPropertiesTest {
         assertThat(p.rating().tolerance()).isEqualTo(new MatchProperties.Tolerance(100, 5, 100, 1000, 90));
         assertThat(p.rating().drawRoundCap()).isEqualTo(30);
         assertThat(p.rating().drawRoundCapByConfigId()).isEmpty();
-        assertThat(p.rating().consumerGroup()).isEqualTo("game-match-rating");
+        assertThat(p.rating().consumerGroup()).as("没配：由装配处取注入的 KafkaNames 给的 <ns>-match-rating（金样见 rating.MatchKafkaNamesGoldenTest）").isNull();
         assertThat(p.pveTeamSizeByConfigId()).containsExactly(Map.entry(1, 5));
         assertThat(p.tableFingerprintMode()).isEqualTo(FingerprintMode.WARN);
         assertThat(p.gatherMaxInflight()).isEqualTo(256);
@@ -326,8 +326,8 @@ class MatchPropertiesTest {
     }
 
     @Test
-    void 消费组空白按缺省() {
-        assertThat(new MatchProperties.Rating(null, null, null, null, "  ").consumerGroup()).isEqualTo("game-match-rating");
+    void 消费组空白视为没配_配了去首尾空白() {
+        assertThat(new MatchProperties.Rating(null, null, null, null, "  ").consumerGroup()).isNull();
         assertThat(new MatchProperties.Rating(null, null, null, null, " g ").consumerGroup()).isEqualTo("g");
     }
 }

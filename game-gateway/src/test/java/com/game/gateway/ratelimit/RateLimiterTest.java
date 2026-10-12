@@ -3,6 +3,8 @@ package com.game.gateway.ratelimit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -12,6 +14,9 @@ import org.junit.jupiter.api.Test;
 
 /** 限流的判定顺序与结局（分波 → 区桶 → IP 桶 → 账号冷却）、存储出错放行、配置校验。存储是内存实现（真 Redis 见集成测试）。 */
 class RateLimiterTest {
+
+    /** 缺省部署命名空间 game 的键名。 */
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private final AtomicLong now = new AtomicLong(1_800_000_000_000L);
 
@@ -78,7 +83,7 @@ class RateLimiterTest {
 
     @Test
     void 关闭时一律放行() {
-        RateLimiter limiter = new RateLimiter(RateLimitSettings.disabled(), new MemoryStore(), now::get);
+        RateLimiter limiter = new RateLimiter(RateLimitSettings.disabled(), new MemoryStore(), REDIS_KEYS, now::get);
         for (int i = 0; i < 100; i++) {
             assertThat(limiter.check(1, "1.2.3.4", "a", RateLimiter.Scope.ASSIGN).kind())
                     .isEqualTo(RateLimitDecision.Kind.PASS);
@@ -89,7 +94,7 @@ class RateLimiterTest {
     void 区桶空了排队_带补一个令牌要等的毫秒() {
         MemoryStore store = new MemoryStore();
         RateLimiter limiter = new RateLimiter(settings(Map.of(1, new RateLimitSettings.ZoneLimit(1L, 2L)), null), store,
-                now::get);
+                REDIS_KEYS, now::get);
         assertThat(limiter.check(1, "10.0.0.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         assertThat(limiter.check(1, "10.0.0.2", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         RateLimitDecision queued = limiter.check(1, "10.0.0.3", null, RateLimiter.Scope.ASSIGN);
@@ -101,7 +106,7 @@ class RateLimiterTest {
 
     @Test
     void 同IP超频429() {
-        RateLimiter limiter = new RateLimiter(settings(null, null), new MemoryStore(), now::get);
+        RateLimiter limiter = new RateLimiter(settings(null, null), new MemoryStore(), REDIS_KEYS, now::get);
         assertThat(limiter.check(1, "1.1.1.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         assertThat(limiter.check(1, "1.1.1.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         assertThat(limiter.check(1, "1.1.1.1", null, RateLimiter.Scope.ASSIGN).reason()).isEqualTo("IP_RATE_LIMIT");
@@ -111,7 +116,7 @@ class RateLimiterTest {
     @Test
     void 同身份同IP冷却429_冷却按端点分开_别的IP报同一账号不受影响() {
         MemoryStore store = new MemoryStore();
-        RateLimiter limiter = new RateLimiter(settings(null, null, 10L), store, now::get);
+        RateLimiter limiter = new RateLimiter(settings(null, null, 10L), store, REDIS_KEYS, now::get);
 
         assertThat(limiter.check(1, "2.2.2.2", "robot_0001", RateLimiter.Scope.LOGIN).kind())
                 .isEqualTo(RateLimitDecision.Kind.PASS);
@@ -131,7 +136,7 @@ class RateLimiterTest {
         long start = now.get() / 1000;
         RateLimitSettings.Wave wave = new RateLimitSettings.Wave(true, start, List.of(
                 new RateLimitSettings.WaveStep(0, List.of(1L)), new RateLimitSettings.WaveStep(600, List.of(-1L))));
-        RateLimiter limiter = new RateLimiter(settings(null, wave), new MemoryStore(), now::get);
+        RateLimiter limiter = new RateLimiter(settings(null, wave), new MemoryStore(), REDIS_KEYS, now::get);
         assertThat(limiter.check(1, "1.1.1.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         RateLimitDecision closed = limiter.check(2, "1.1.1.2", null, RateLimiter.Scope.ASSIGN);
         assertThat(closed.kind()).isEqualTo(RateLimitDecision.Kind.QUEUE);
@@ -145,7 +150,7 @@ class RateLimiterTest {
     void 存储出错放行_之后一段时间不再碰存储() {
         MemoryStore store = new MemoryStore();
         store.broken = true;
-        RateLimiter limiter = new RateLimiter(settings(null, null), store, now::get);
+        RateLimiter limiter = new RateLimiter(settings(null, null), store, REDIS_KEYS, now::get);
         assertThat(limiter.check(1, "1.1.1.1", "a", RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         assertThat(store.calls).isEqualTo(1);
         assertThat(limiter.check(1, "1.1.1.1", "a", RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
@@ -160,7 +165,7 @@ class RateLimiterTest {
     void 先判IP桶再判区桶_被IP拒掉的请求不吃区令牌() {
         MemoryStore store = new MemoryStore();
         RateLimiter limiter = new RateLimiter(settings(Map.of(1, new RateLimitSettings.ZoneLimit(1L, 3L)), null), store,
-                now::get);
+                REDIS_KEYS, now::get);
         for (int i = 0; i < 10; i++) {
             limiter.check(1, "6.6.6.6", null, RateLimiter.Scope.ASSIGN);
         }
@@ -172,7 +177,7 @@ class RateLimiterTest {
     void 区桶空时排队不吃IP令牌_同一NAT后面等区桶的人不会被429() {
         MemoryStore store = new MemoryStore();
         RateLimiter limiter = new RateLimiter(settings(Map.of(1, new RateLimitSettings.ZoneLimit(1L, 1L)), null), store,
-                now::get);
+                REDIS_KEYS, now::get);
         assertThat(limiter.check(1, "9.9.9.9", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         for (int i = 0; i < 5; i++) {
             assertThat(limiter.check(1, "9.9.9.9", null, RateLimiter.Scope.ASSIGN).kind())
@@ -187,7 +192,7 @@ class RateLimiterTest {
         MemoryStore store = new MemoryStore();
         RateLimitSettings.Wave wave = new RateLimitSettings.Wave(true, now.get() / 1000,
                 List.of(new RateLimitSettings.WaveStep(0, List.of(1L))));
-        RateLimiter limiter = new RateLimiter(settings(null, wave), store, now::get);
+        RateLimiter limiter = new RateLimiter(settings(null, wave), store, REDIS_KEYS, now::get);
         assertThat(limiter.checkUnverifiedZone(1, "1.1.1.1", "a", RateLimiter.Scope.LOGIN).kind())
                 .isEqualTo(RateLimitDecision.Kind.PASS);
         assertThat(store.buckets.keySet()).noneMatch(k -> k.contains(":zone:"));
@@ -203,5 +208,20 @@ class RateLimiterTest {
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("start-epoch-sec");
         assertThatThrownBy(() -> new RateLimitSettings(true, 0L, null, null, null, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 桶与冷却的键取注入的命名空间_缺省game与以前逐字节相同() {
+        String digest = RateLimiter.digest("robot_0001");
+        MemoryStore store = new MemoryStore();
+        new RateLimiter(settings(null, null), store, REDIS_KEYS, now::get).check(1, "1.1.1.1", "robot_0001", RateLimiter.Scope.ASSIGN);
+        assertThat(store.buckets.keySet()).containsExactlyInAnyOrder("game:rl:ip:1.1.1.1", "game:rl:zone:1");
+        assertThat(store.cooldowns.keySet()).containsExactly("game:rl:cd:assign:" + digest + ":1.1.1.1");
+
+        MemoryStore other = new MemoryStore();
+        new RateLimiter(settings(null, null), other, new RedisKeys(GameNamespace.of("nstest")), now::get)
+                .check(1, "1.1.1.1", "robot_0001", RateLimiter.Scope.LOGIN);
+        assertThat(other.buckets.keySet()).containsExactlyInAnyOrder("nstest:rl:ip:1.1.1.1", "nstest:rl:zone:1");
+        assertThat(other.cooldowns.keySet()).containsExactly("nstest:rl:cd:login:" + digest + ":1.1.1.1");
     }
 }

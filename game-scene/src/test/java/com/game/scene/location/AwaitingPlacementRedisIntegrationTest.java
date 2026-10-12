@@ -2,6 +2,7 @@ package com.game.scene.location;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
@@ -37,6 +38,7 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class AwaitingPlacementRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     private static final long BASE = (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 40);
     private static final int SOURCE_ZONE = 1;
     private static final int SOURCE_NODE = 3;
@@ -54,13 +56,13 @@ class AwaitingPlacementRedisIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        directory = new PlayerLocationDirectory(redis);
+        directory = new PlayerLocationDirectory(redis, REDIS_KEYS);
     }
 
     @AfterAll
     static void cleanup() {
         for (long i = 0; i < 10; i++) {
-            redis.getKeys().delete(RedisKeys.playerLocation(BASE + i));
+            redis.getKeys().delete(REDIS_KEYS.playerLocation(BASE + i));
         }
         redis.shutdown();
     }
@@ -92,7 +94,7 @@ class AwaitingPlacementRedisIntegrationTest {
     }
 
     private static long ttlMillis(long player) {
-        return redis.getKeys().remainTimeToLive(RedisKeys.playerLocation(player));
+        return redis.getKeys().remainTimeToLive(REDIS_KEYS.playerLocation(player));
     }
 
     private static LocationStatus status(long player) throws Exception {

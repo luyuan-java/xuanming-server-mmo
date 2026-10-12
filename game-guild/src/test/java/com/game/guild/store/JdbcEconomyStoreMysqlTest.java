@@ -23,6 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.GameNamespace;
 import com.game.guild.rules.GuildLimits;
 import com.game.guild.rules.GuildReject;
 import com.game.guild.rules.GuildRoles;
@@ -626,7 +627,8 @@ class JdbcEconomyStoreMysqlTest {
                     .replace("&useAffectedRows=true", ""));
             foundRows.setUsername(GuildMysqlFixture.USER);
             foundRows.setPassword(GuildMysqlFixture.PASSWORD);
-            GuildStartupChecks wrong = new GuildStartupChecks(new GuildTx(foundRows::getConnection, 10, recorder));
+            GuildStartupChecks wrong = new GuildStartupChecks(new GuildTx(foundRows::getConnection, 10, recorder),
+                    GameNamespace.of("game"));
             assertThatThrownBy(() -> wrong.checkAffectedRowsSemantics(roomy())).isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("useAffectedRows=true");
             // 同一个池上 C1 达上限确实回 1：自检看不出来，这正是要在启动期拒启的原因

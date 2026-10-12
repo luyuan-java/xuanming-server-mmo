@@ -3,6 +3,7 @@ package com.game.discovery.team;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.TeamInfo;
 import java.util.ArrayList;
@@ -28,6 +29,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class TeamMembershipReaderIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     /** 玩家号与队伍号都取高位为 1（≥ 2^63）的值：键名、Lua 里的比较、解析都必须按无符号。 */
     private static final long PLAYER = Long.MIN_VALUE + (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 40);
     private static final long TEAM = Long.MIN_VALUE + (1L << 53) + ThreadLocalRandom.current().nextLong(1L << 40);
@@ -41,7 +44,7 @@ class TeamMembershipReaderIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(11);
         redis = Redisson.create(config);
-        reader = new TeamMembershipReader(redis);
+        reader = new TeamMembershipReader(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -51,7 +54,7 @@ class TeamMembershipReaderIntegrationTest {
     }
 
     private static void index(long player, String tid, String epoch) {
-        String key = RedisKeys.teamPlayer(player);
+        String key = REDIS_KEYS.teamPlayer(player);
         written.add(key);
         var hash = redis.<String, String>getMap(key, StringCodec.INSTANCE);
         hash.delete();
@@ -64,7 +67,7 @@ class TeamMembershipReaderIntegrationTest {
     }
 
     private static void projection(long team, byte[] value) {
-        String key = RedisKeys.teamInfo(team);
+        String key = REDIS_KEYS.teamInfo(team);
         written.add(key);
         redis.getBucket(key, ByteArrayCodec.INSTANCE).set(value);
     }
@@ -95,7 +98,7 @@ class TeamMembershipReaderIntegrationTest {
         long player = PLAYER + 2;
         long team = TEAM + 2;
         index(player, Long.toUnsignedString(team), "9");
-        redis.getKeys().delete(RedisKeys.teamInfo(team));
+        redis.getKeys().delete(REDIS_KEYS.teamInfo(team));
 
         TeamMembership m = read(player);
 
@@ -120,7 +123,7 @@ class TeamMembershipReaderIntegrationTest {
         assertThat(m.epoch()).isEqualTo(epoch);
         assertThat(m.keyMissing()).isFalse();
         assertThat(m.info()).isEqualTo(info);
-        assertThat(RedisKeys.teamPlayer(player)).endsWith(":" + Long.toUnsignedString(player));
+        assertThat(REDIS_KEYS.teamPlayer(player)).endsWith(":" + Long.toUnsignedString(player));
     }
 
     @Test
@@ -148,14 +151,14 @@ class TeamMembershipReaderIntegrationTest {
         long player = PLAYER + 9;
         long team = TEAM + 9;
         index(player, Long.toUnsignedString(team), "3");
-        long ttlBefore = redis.getKeys().remainTimeToLive(RedisKeys.teamPlayer(player));
+        long ttlBefore = redis.getKeys().remainTimeToLive(REDIS_KEYS.teamPlayer(player));
 
         read(player);
 
-        assertThat(redis.<String, String>getMap(RedisKeys.teamPlayer(player), StringCodec.INSTANCE).readAllMap())
+        assertThat(redis.<String, String>getMap(REDIS_KEYS.teamPlayer(player), StringCodec.INSTANCE).readAllMap())
                 .isEqualTo(Map.of(TeamRedisFields.TID, Long.toUnsignedString(team), TeamRedisFields.EPOCH, "3"));
-        assertThat(redis.getKeys().remainTimeToLive(RedisKeys.teamPlayer(player))).isEqualTo(ttlBefore);
-        assertThat(redis.getKeys().countExists(RedisKeys.teamInfo(team))).isZero();
+        assertThat(redis.getKeys().remainTimeToLive(REDIS_KEYS.teamPlayer(player))).isEqualTo(ttlBefore);
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.teamInfo(team))).isZero();
     }
 
     @Test
@@ -165,7 +168,7 @@ class TeamMembershipReaderIntegrationTest {
         RedissonClient closed = Redisson.create(config);
         closed.shutdown();
 
-        var future = new TeamMembershipReader(closed).readAsync(PLAYER);
+        var future = new TeamMembershipReader(closed, REDIS_KEYS).readAsync(PLAYER);
         assertThatThrownBy(() -> future.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class);
     }
 }

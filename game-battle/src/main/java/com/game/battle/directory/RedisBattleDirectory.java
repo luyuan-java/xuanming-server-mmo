@@ -3,6 +3,7 @@ package com.game.battle.directory;
 import com.game.api.proto.BattleNodeInfo;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -24,8 +25,8 @@ public final class RedisBattleDirectory implements BattleDirectoryPublisher.Dire
     private final NodeDirectory<BattleNodeInfo> directory;
     private final int nodeId;
 
-    public RedisBattleDirectory(RedissonClient redis, int nodeId) {
-        this(new NodeDirectory<>(redis, NodeTypes.BATTLE, BattleNodeInfo.parser()), nodeId);
+    public RedisBattleDirectory(RedissonClient redis, RedisKeys redisKeys, int nodeId) {
+        this(new NodeDirectory<>(redis, redisKeys, NodeTypes.BATTLE, BattleNodeInfo.parser()), nodeId);
     }
 
     public RedisBattleDirectory(NodeDirectory<BattleNodeInfo> directory, int nodeId) {

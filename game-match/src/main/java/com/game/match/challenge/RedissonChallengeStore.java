@@ -26,9 +26,11 @@ public final class RedissonChallengeStore implements ChallengeStore {
     static final long TOMBSTONE_TTL_MS = 60_000;
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public RedissonChallengeStore(RedissonClient redis) {
+    public RedissonChallengeStore(RedissonClient redis, RedisKeys redisKeys) {
         this.redis = Objects.requireNonNull(redis, "redis");
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
     }
 
     @Override
@@ -41,7 +43,7 @@ public final class RedissonChallengeStore implements ChallengeStore {
             throw new IllegalArgumentException("邀请的 TTL 必须 ≥ 1 ms: " + ttlMs);
         }
         List<Object> reply = eval("发起切磋", d, ChallengeScripts.INVITE,
-                List.of(RedisKeys.matchChallenge(challengeId), RedisKeys.matchChallengeTarget(targetId)),
+                List.of(redisKeys.matchChallenge(challengeId), redisKeys.matchChallengeTarget(targetId)),
                 Long.toUnsignedString(challengeId), Long.toUnsignedString(challengerId), Long.toUnsignedString(targetId),
                 Integer.toUnsignedString(configId), Long.toString(ttlMs));
         String tag = tagOf(reply, "发起切磋");
@@ -62,7 +64,7 @@ public final class RedissonChallengeStore implements ChallengeStore {
         requireIds(challengeId, targetId);
         CompletableFuture<Object> call = start("清理切磋记录", () -> redis.getScript(StringCodec.INSTANCE)
                 .<Object>evalAsync(RScript.Mode.READ_WRITE, ChallengeScripts.DELETE, RScript.ReturnType.INTEGER,
-                        List.<Object>of(RedisKeys.matchChallenge(challengeId), RedisKeys.matchChallengeTarget(targetId)),
+                        List.<Object>of(redisKeys.matchChallenge(challengeId), redisKeys.matchChallengeTarget(targetId)),
                         Long.toUnsignedString(challengeId))
                 .toCompletableFuture());
         d.await(call, "清理切磋记录");
@@ -74,7 +76,7 @@ public final class RedissonChallengeStore implements ChallengeStore {
             return Optional.empty();
         }
         CompletableFuture<Map<String, String>> call = start("读切磋记录", () -> redis
-                .<String, String>getMap(RedisKeys.matchChallenge(challengeId), StringCodec.INSTANCE).readAllMapAsync().toCompletableFuture());
+                .<String, String>getMap(redisKeys.matchChallenge(challengeId), StringCodec.INSTANCE).readAllMapAsync().toCompletableFuture());
         Map<String, String> fields = d.await(call, "读切磋记录");
         if (fields == null || fields.isEmpty()) {
             return Optional.empty();
@@ -90,8 +92,8 @@ public final class RedissonChallengeStore implements ChallengeStore {
             throw new IllegalArgumentException("消费切磋记录必须带请求 nonce");
         }
         List<Object> reply = eval("消费切磋记录", d, ChallengeScripts.CONSUME,
-                List.of(RedisKeys.matchChallenge(challengeId), RedisKeys.matchChallengeTarget(responderId),
-                        RedisKeys.matchChallengeDone(challengeId)),
+                List.of(redisKeys.matchChallenge(challengeId), redisKeys.matchChallengeTarget(responderId),
+                        redisKeys.matchChallengeDone(challengeId)),
                 Long.toUnsignedString(challengeId), Long.toUnsignedString(responderId), nonce, Long.toString(TOMBSTONE_TTL_MS));
         String tag = tagOf(reply, "消费切磋记录");
         if (ChallengeScripts.GONE.equals(tag)) {

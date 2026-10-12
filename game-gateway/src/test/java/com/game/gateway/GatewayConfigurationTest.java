@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import com.game.api.AccountLoginService;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.gateway.assign.AssignGateService;
 import com.game.gateway.login.LoginHttpService;
 import com.game.gateway.store.GatewayStore;
@@ -13,12 +14,17 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
-/** 启动期 fail-fast：缺密钥、播种区服配置不合法时进程起不来；齐全时装配完整。不连 Redis / MySQL（替身）。 */
+/**
+ * 启动期 fail-fast：缺密钥、播种区服配置不合法时进程起不来；齐全时装配完整。不连 Redis / MySQL（替身）；
+ * 键名 {@code RedisKeys} 由 game-discovery 的命名空间自动配置给出（同生产）。
+ */
 class GatewayConfigurationTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withUserConfiguration(GatewayConfiguration.class)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(GatewayStore.class, () -> mock(GatewayStore.class))

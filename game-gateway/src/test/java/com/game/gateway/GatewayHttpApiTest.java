@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.api.proto.GateNodeInfo;
 import com.game.common.token.GateTokens;
 import com.game.api.AccountLoginService;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.gateway.assign.AssignGateController;
 import com.game.gateway.login.LoginController;
 import com.game.proto.AccountSimplePlayer;
@@ -46,6 +47,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
@@ -61,9 +63,11 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
 /**
  * HTTP 契约测试：按 Go robot 的解析方式核对 JSON 键名（snake_case）、类型、业务码，以及签出的令牌能被 gate 侧验过。
  * 走真实装配（{@link GatewayConfiguration} + application.yaml 的 Jackson 配置），只把 gate 目录换成替身，不需要 Redis。
+ * MVC 切片不带 game-discovery 的自动配置：键名 {@code RedisKeys} 由命名空间自动配置给出（同生产，缺省 game）。
  */
 @WebMvcTest(controllers = {AssignGateController.class, ServerListController.class, LoginController.class,
         AnnouncementController.class})
+@ImportAutoConfiguration(GameNamespaceAutoConfiguration.class)
 @Import({GatewayConfiguration.class, GatewayHttpApiTest.Meters.class})
 @TestPropertySource(properties = {
         GatewayConfiguration.TOKEN_SECRET_ENV + "=" + GatewayHttpApiTest.SECRET,

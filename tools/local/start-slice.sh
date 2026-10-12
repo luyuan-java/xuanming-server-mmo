@@ -23,7 +23,8 @@
 #
 # 部署命名空间 GAME_NAMESPACE（architecture.md「部署命名空间」）：Redis 键前缀 <ns>:、Kafka topic / 消费组 <ns>-、MySQL 库 <ns>。缺省 game
 # （与引入命名空间之前完全相同，本文件里的 game: / game- / 库 game 都指缺省）；本脚本导出后全部进程继承同一个值。同一套 infra 上起第二个游戏 /
-# 第二套部署时设不同的值：GAME_NAMESPACE=t1 tools/local/start-slice.sh。本脚本的端口写死、run/ 下的 PID 与秘密文件共用，
+# 第二套部署时设不同的值：GAME_NAMESPACE=t1 tools/local/start-slice.sh。只在没设时取 game；设成空串或非法值时本脚本在起任何进程之前就退出。
+# 生效的值写进 run/game-namespace，battle-crash-window.sh 重启进程时读回核对。本脚本的端口写死、run/ 下的 PID 与秘密文件共用，
 # 同一个检出不能同时起两套（先 stop-slice.sh 停掉一套再起另一套，或用两个检出 / 两台机器各起一套、共用 infra）。
 #
 # 启动次序的一条硬约束：local profile 下静态直连（各进程 application.yaml 的 game.dubbo.*-url）的 Dubbo 提供方必须先于它的调用方启动。
@@ -67,10 +68,26 @@ cd "$(dirname "$0")/../.."
 export GAME_RUN_MODE="${GAME_RUN_MODE:-dev}"
 echo "运行模式 GAME_RUN_MODE=$GAME_RUN_MODE"
 
-# 部署命名空间（见文件头）：显式导出缺省值，免得只给其中几个进程设了别的值（不一致不会串数据，但表现为彼此看不见：gate 找不到 scene 目录……）。
-# 取值非法（大写、空串、mysql / sys / public……）时各进程启动即失败
-export GAME_NAMESPACE="${GAME_NAMESPACE:-game}"
+# 部署命名空间的校验（与 com.game.common.GameNamespace 同口径：正则、1–28 个字符、保留字），battle-crash-window.sh 有逐字相同的一份。
+# 正则在 C 区域设置下匹配（别的区域设置里 [a-z] 可能连大写也算进去）。
+validate_namespace() {
+  local ns=$1
+  if ! (LC_ALL=C; [[ "$ns" =~ ^[a-z][a-z0-9]{0,27}$ ]]) || [[ "$ns" =~ ^(mysql|sys|public)$ ]]; then
+    echo "部署命名空间 GAME_NAMESPACE=\"$ns\" 不合法：必须匹配 [a-z][a-z0-9]{0,27}（小写字母开头，只含小写字母与数字，1–28 个字符），且不是保留字 mysql、sys、public；不设则为 game" >&2
+    return 1
+  fi
+}
+
+# 部署命名空间（见文件头）：显式导出，免得只给其中几个进程设了别的值（不一致不会串数据，但表现为彼此看不见：gate 找不到 scene 目录……）。
+# 只在没设时取 game（${GAME_NAMESPACE-game}，不带冒号）：设了空串——例如 GAME_NAMESPACE=$TENANT 而 TENANT 恰好没设——原样交给校验拒绝，
+# 不会静默换成 game、在共用的 infra 上加入缺省部署的键空间、节点号租约池与库 game。在起任何进程之前就校验，不必等第一个进程拒启。
+export GAME_NAMESPACE="${GAME_NAMESPACE-game}"
+validate_namespace "$GAME_NAMESPACE" || exit 1
 echo "部署命名空间 GAME_NAMESPACE=$GAME_NAMESPACE"
+# 记下本切片生效的命名空间（不是秘密，照常权限）：battle-crash-window.sh 重启进程时读回核对——在新开的、没设 GAME_NAMESPACE 的 shell 里
+# 对 t1 的切片执行它，重启出来的进程也不会以 game 起来、跨进另一个部署
+mkdir -p run
+printf "%s" "$GAME_NAMESPACE" > run/game-namespace
 
 # 镜像 / 副本实例的空闲回收（批次 5.3，dungeon-mirror-spec §7.3）：本机切片为 robot mirror 提速，缺省把镜像空置超时调到 5s、
 # 回收宽限调到下限 10s（game-scene 进程缺省 30s / 30s，副本 300s 不动）；要按生产缺省验证就显式设这两个环境变量。

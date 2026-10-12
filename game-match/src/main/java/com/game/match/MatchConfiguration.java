@@ -14,6 +14,7 @@ import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
 import com.game.discovery.battle.BattleLockReader;
 import com.game.discovery.location.PlayerLocationDirectory;
@@ -201,9 +202,10 @@ public class MatchConfiguration {
      * 凑单暂停，健康检查 DOWN（{@link #matchLeaseHealthIndicator}）。{@code matchStartupChecks} 参数只为钉住次序：门禁没过不去占号。
      */
     @Bean(destroyMethod = "close")
-    public NodeIdLease matchIdLease(RedissonClient redis, @Qualifier("matchLeaseScheduler") ScheduledExecutorService matchLeaseScheduler,
+    public NodeIdLease matchIdLease(RedissonClient redis, RedisKeys redisKeys,
+                                    @Qualifier("matchLeaseScheduler") ScheduledExecutorService matchLeaseScheduler,
                                     MatchInstance matchInstance, MatchMetrics matchMetrics, MatchStartupChecks.Passed matchStartupChecks) {
-        return NodeIdLease.acquire(redis, matchLeaseScheduler, NodeTypes.MATCH, ID_LEASE_SCOPE, 0, Snowflake.MAX_WORKER,
+        return NodeIdLease.acquire(redis, redisKeys, matchLeaseScheduler, NodeTypes.MATCH, ID_LEASE_SCOPE, 0, Snowflake.MAX_WORKER,
                 matchInstance.id(), LEASE_TTL, () -> {
                     matchMetrics.leaseLost(true);
                     log.error("match 发号租约丢失：停止发 battle_id / challenge_id，排队与一切开局入口一律拒绝（取消排队、查状态、补签不受影响）；"
@@ -260,37 +262,37 @@ public class MatchConfiguration {
 
     // ================================================================ 只读目录（都是别的进程写的键）
 
-    /** battle 节点目录 {@code game:nodes:battle:0}（全服一个池）。 */
+    /** battle 节点目录 {@code <ns>:nodes:battle:0}（全服一个池；缺省命名空间下即 {@code game:nodes:battle:0}）。 */
     @Bean
-    public NodeDirectory<BattleNodeInfo> battleNodeDirectory(RedissonClient redis) {
-        return new NodeDirectory<>(redis, NodeTypes.BATTLE, BattleNodeInfo.parser());
+    public NodeDirectory<BattleNodeInfo> battleNodeDirectory(RedissonClient redis, RedisKeys redisKeys) {
+        return new NodeDirectory<>(redis, redisKeys, NodeTypes.BATTLE, BattleNodeInfo.parser());
     }
 
-    /** scene 节点目录 {@code game:nodes:scene:<zone>}（按玩家位置记录里的 zone 读）。 */
+    /** scene 节点目录 {@code <ns>:nodes:scene:<zone>}（按玩家位置记录里的 zone 读）。 */
     @Bean
-    public NodeDirectory<SceneNodeInfo> sceneNodeDirectory(RedissonClient redis) {
-        return new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
-    }
-
-    @Bean
-    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis) {
-        return new PlayerPresenceDirectory(redis);
+    public NodeDirectory<SceneNodeInfo> sceneNodeDirectory(RedissonClient redis, RedisKeys redisKeys) {
+        return new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
     }
 
     @Bean
-    public PlayerLocationDirectory playerLocationDirectory(RedissonClient redis) {
-        return new PlayerLocationDirectory(redis);
+    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis, RedisKeys redisKeys) {
+        return new PlayerPresenceDirectory(redis, redisKeys);
     }
 
     @Bean
-    public PlayerPushes playerPushes(RedissonClient redis, PlayerPresenceDirectory presence) {
-        return new PlayerPushes(redis, presence);
+    public PlayerLocationDirectory playerLocationDirectory(RedissonClient redis, RedisKeys redisKeys) {
+        return new PlayerLocationDirectory(redis, redisKeys);
+    }
+
+    @Bean
+    public PlayerPushes playerPushes(RedissonClient redis, RedisKeys redisKeys, PlayerPresenceDirectory presence) {
+        return new PlayerPushes(redis, redisKeys, presence);
     }
 
     /** 战斗锁的只读工具（咨询性读，权威在 scene 的备战写锁）。 */
     @Bean
-    public BattleLockReader battleLockReader(RedissonClient redis) {
-        return new BattleLockReader(redis);
+    public BattleLockReader battleLockReader(RedissonClient redis, RedisKeys redisKeys) {
+        return new BattleLockReader(redis, redisKeys);
     }
 
     /**

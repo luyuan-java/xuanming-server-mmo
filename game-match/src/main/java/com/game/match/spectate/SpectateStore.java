@@ -8,9 +8,9 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 观战的存储口（spectate-spec §4.2、§4.3）：<b>观战标记</b>（{@code RedisKeys.matchWatching(player)}，STRING，PX 360 s：这名玩家可能正在看哪一场）、
- * <b>可观战索引</b>（{@code RedisKeys.matchWatchable()}，ZSET：成员 = battle_id 无符号十进制，分数 = {@code created_at_ms}），以及对 6.4 的
- * <b>落点记录</b>（{@code RedisKeys.matchBattlePlacement(battle)}，HASH）的原子读与两种有条件的删除。三类键与票据同在 {@code {match}} 槽，
+ * 观战的存储口（spectate-spec §4.2、§4.3）：<b>观战标记</b>（{@code RedisKeys#matchWatching(player)}，STRING，PX 360 s：这名玩家可能正在看哪一场）、
+ * <b>可观战索引</b>（{@code RedisKeys#matchWatchable()}，ZSET：成员 = battle_id 无符号十进制，分数 = {@code created_at_ms}），以及对 6.4 的
+ * <b>落点记录</b>（{@code RedisKeys#matchBattlePlacement(battle)}，HASH）的原子读与两种有条件的删除。三类键与票据同在 {@code {match}} 槽，
  * 每个方法对应一段 Lua（规格 §4.3 的九段 S_W_*，外加两段只读的批读 S_W_MARKS / S_W_RECORDS），只有 {@link #watchableCount} 是一条普通命令；
  * 脚本一律按读写模式发出（只读的也读主库）。使用者：163（{@code WatchBattleService}）、164（{@code WatchableListService}）、
  * 开局钩子（{@code SpectateGatherHooks}）、清扫器（{@code SpectateSweeper}）。生产实现 {@code RedissonSpectateStore}；

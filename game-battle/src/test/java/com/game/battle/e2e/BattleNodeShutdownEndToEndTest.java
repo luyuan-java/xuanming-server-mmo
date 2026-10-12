@@ -22,8 +22,10 @@ import com.game.battle.BattleNode;
 import com.game.battle.admission.AdmissionPhase;
 import com.game.battle.rpc.BattleNodeServiceImpl;
 import com.game.battle.testing.FakeResultKafka;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.proto.AddObserverRequest;
 import com.game.proto.BattleAssignedS2C;
 import com.game.proto.SpectateEndS2C;
@@ -66,6 +68,7 @@ import org.springframework.test.context.DynamicPropertySource;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class BattleNodeShutdownEndToEndTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     static final int CLIENT_PORT = E2eSupport.freePort();
     static final int RPC_PORT = E2eSupport.freePort();
     static final int ZONE = 9702;
@@ -123,7 +126,7 @@ class BattleNodeShutdownEndToEndTest {
                 .setRouting(routing(gate, 603)).build()).get(10, TimeUnit.SECONDS).hasErrorMessage()).isFalse();
         BattleAssignedS2C ticketA = reissue(battle, battleId, a);
         BattleAssignedS2C ticketW = reissue(battle, battleId, watcher);
-        NodeDirectory<BattleNodeInfo> directory = new NodeDirectory<>(redis, NodeTypes.BATTLE, BattleNodeInfo.parser());
+        NodeDirectory<BattleNodeInfo> directory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.BATTLE, BattleNodeInfo.parser());
         assertThat(directory.list(0)).anySatisfy(info -> {
             assertThat(info.getInstanceId()).isEqualTo(node.instanceId());
             assertThat(info.getAccepting()).isTrue();

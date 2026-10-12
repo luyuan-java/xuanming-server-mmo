@@ -20,7 +20,7 @@ import java.util.function.BiFunction;
 /**
  * 在线目录（RecommendFriends 的 {@code online_only = true}，mmorpg go/friend internal/data/online_directory.go，friend-spec.md §5.2）。
  *
- * <p>与基线的有意差异（D5）：枚举源是 {@code game:presence:*}（条目存在、能解码、player_id 与键一致就算在线），资料与 home zone 取自
+ * <p>与基线的有意差异（D5）：枚举源是 {@code <ns>:presence:*}（条目存在、能解码、player_id 与键一致就算在线），资料与 home zone 取自
  * {@code game.player}（基线是 PlayerAllData 缓存 + data_service）。算法、游标格式、每页至多 4 轮 SCAN、COUNT 64、单批 1024 上限、
  * 键按字典序、offset 与 next_cursor 规则逐条照搬：
  * <ul>
@@ -61,7 +61,7 @@ public final class OnlineDirectory {
     private final BiFunction<List<Long>, Deadline, Map<Long, Profile>> profiles;
 
     /**
-     * @param keyPrefix 在线目录键前缀（{@code game:presence:}）
+     * @param keyPrefix 在线目录键前缀（{@code RedisKeys#presencePrefix()}，缺省 {@code game:presence:}）
      * @param profiles  批量读 player 行（读失败须抛异常，不许返回部分结果当成「不存在」）
      */
     public OnlineDirectory(DirectoryRedis redis, String keyPrefix, BiFunction<List<Long>, Deadline, Map<Long, Profile>> profiles) {

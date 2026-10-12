@@ -78,21 +78,21 @@ public final class NodeIdLease implements AutoCloseable {
      *
      * @param onLost 租约丢失回调（在调度线程上调用，只调一次）
      */
-    public static NodeIdLease acquire(RedissonClient redis, ScheduledExecutorService scheduler, String nodeType,
+    public static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType,
                                       int zoneId, int minId, int maxId, String instanceId, Duration ttl, Runnable onLost) {
-        return acquire(redis, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, System::nanoTime);
+        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, System::nanoTime);
     }
 
     /** 同上，单调时钟可注入（测试用）。 */
-    static NodeIdLease acquire(RedissonClient redis, ScheduledExecutorService scheduler, String nodeType, int zoneId,
+    static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType, int zoneId,
                                int minId, int maxId, String instanceId, Duration ttl, Runnable onLost,
                                LongSupplier nanoClock) {
         for (int id = minId; id <= maxId; id++) {
-            String key = RedisKeys.nodeId(nodeType, zoneId, id);
+            String key = keys.nodeId(nodeType, zoneId, id);
             long sentAt = nanoClock.getAsLong();
             boolean taken = redis.<String>getBucket(key, StringCodec.INSTANCE).setIfAbsent(instanceId, ttl);
             if (taken) {
-                long epoch = nextLeaseEpoch(redis, key, instanceId, RedisKeys.nodeIdEpoch(nodeType, zoneId, id));
+                long epoch = nextLeaseEpoch(redis, key, instanceId, keys.nodeIdEpoch(nodeType, zoneId, id));
                 log.info("节点号租约已获取 type={} zone={} nodeId={} leaseEpoch={} instance={}",
                         nodeType, zoneId, id, epoch, instanceId);
                 return new NodeIdLease(redis, key, id, epoch, instanceId, ttl, onLost, scheduler, nanoClock, sentAt);

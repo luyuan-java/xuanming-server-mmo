@@ -111,9 +111,10 @@ final class CommitSets {
      * 组装 S_COMMIT 的 KEYS / ARGV（store.go:815-849）。只翻译，不去重、不改集合：集合的正确性由 {@link #validate} 把关，
      * Lua 的「先 ZREM 后 ZADD」是第二道保险。数字一律无符号 ASCII 十进制；recPb / projPb 在解散时为空。
      *
+     * @param redisKeys   本部署命名空间的键名
      * @param expectedVer 十进制 ver，或建队用 {@code "new"}
      */
-    static Call build(long teamId, String expectedVer, Decision d) {
+    static Call build(RedisKeys redisKeys, long teamId, String expectedVer, Decision d) {
         byte[] recPb = EMPTY;
         byte[] projPb = EMPTY;
         if (d.record() != null) {
@@ -122,18 +123,18 @@ final class CommitSets {
         }
         List<Object> keys = new ArrayList<>(2 + d.joined().size() + d.kept().size() + d.left().size()
                 + d.invitesAdded().size() + d.invitesRemoved().size());
-        keys.add(RedisKeys.teamRecord(teamId));
-        keys.add(RedisKeys.teamInfo(teamId));
+        keys.add(redisKeys.teamRecord(teamId));
+        keys.add(redisKeys.teamInfo(teamId));
         for (List<Long> group : List.of(d.joined(), d.kept(), d.left())) {
             for (long pid : group) {
-                keys.add(RedisKeys.teamPlayer(pid));
+                keys.add(redisKeys.teamPlayer(pid));
             }
         }
         for (InviteAdd a : d.invitesAdded()) {
-            keys.add(RedisKeys.teamInvite(a.inviteeId()));
+            keys.add(redisKeys.teamInvite(a.inviteeId()));
         }
         for (long pid : d.invitesRemoved()) {
-            keys.add(RedisKeys.teamInvite(pid));
+            keys.add(redisKeys.teamInvite(pid));
         }
         List<byte[]> args = new ArrayList<>(11 + d.invitesAdded().size());
         args.add(ascii(expectedVer));

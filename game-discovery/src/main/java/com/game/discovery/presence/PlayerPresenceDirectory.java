@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -64,23 +65,25 @@ public final class PlayerPresenceDirectory {
             """;
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
 
-    public PlayerPresenceDirectory(RedissonClient redis) {
+    public PlayerPresenceDirectory(RedissonClient redis, RedisKeys keys) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
     }
 
     // ------------------------------------------------------------------ 写（gate）
 
     /** 写入 / 覆盖（同一玩家在别处的旧条目被新会话取代）。 */
     public CompletionStage<Void> putAsync(PlayerPresence presence) {
-        return redis.getBucket(RedisKeys.presence(presence.getPlayerId()), ByteArrayCodec.INSTANCE)
+        return redis.getBucket(redisKeys.presence(presence.getPlayerId()), ByteArrayCodec.INSTANCE)
                 .setAsync(presence.toByteArray(), TTL);
     }
 
     /** @return 是否真的删了（值已被别的会话覆盖、或已过期时为 false） */
     public CompletionStage<Boolean> removeAsync(PlayerPresence presence) {
         return script().<Long>evalAsync(RScript.Mode.READ_WRITE, REMOVE_IF_SAME, RScript.ReturnType.INTEGER,
-                List.of(RedisKeys.presence(presence.getPlayerId())), presence.toByteArray())
+                List.of(redisKeys.presence(presence.getPlayerId())), presence.toByteArray())
                 .thenApply(deleted -> deleted != null && deleted > 0);
     }
 
@@ -98,7 +101,7 @@ public final class PlayerPresenceDirectory {
         List<java.util.concurrent.CompletableFuture<Long>> calls = new ArrayList<>(presences.size());
         for (PlayerPresence presence : presences) {
             calls.add(script().<Long>evalAsync(RScript.Mode.READ_WRITE, REFRESH_OR_RESTORE, RScript.ReturnType.INTEGER,
-                    List.of(RedisKeys.presence(presence.getPlayerId())), presence.toByteArray(), ttl).toCompletableFuture());
+                    List.of(redisKeys.presence(presence.getPlayerId())), presence.toByteArray(), ttl).toCompletableFuture());
         }
         return java.util.concurrent.CompletableFuture.allOf(calls.toArray(java.util.concurrent.CompletableFuture[]::new))
                 .thenApply(done -> (int) calls.stream().map(java.util.concurrent.CompletableFuture::join)
@@ -113,7 +116,7 @@ public final class PlayerPresenceDirectory {
 
     /** 玩家此刻是否在游戏里、在哪个 gate；不在线为空。条目损坏按不在线处理（记告警）。 */
     public Optional<PlayerPresence> find(long playerId) {
-        byte[] raw = redis.<byte[]>getBucket(RedisKeys.presence(playerId), ByteArrayCodec.INSTANCE).get();
+        byte[] raw = redis.<byte[]>getBucket(redisKeys.presence(playerId), ByteArrayCodec.INSTANCE).get();
         return decode(playerId, raw);
     }
 
@@ -123,7 +126,7 @@ public final class PlayerPresenceDirectory {
             return Map.of();
         }
         List<Long> ids = new ArrayList<>(playerIds);
-        String[] keys = ids.stream().map(RedisKeys::presence).toArray(String[]::new);
+        String[] keys = ids.stream().map(redisKeys::presence).toArray(String[]::new);
         Map<String, byte[]> raw = redis.getBuckets(ByteArrayCodec.INSTANCE).get(keys);
         Map<Long, PlayerPresence> online = new HashMap<>();
         for (int i = 0; i < ids.size(); i++) {
@@ -134,7 +137,7 @@ public final class PlayerPresenceDirectory {
 
     /** {@link #find} 的异步版（不阻塞调用线程）。 */
     public CompletionStage<Optional<PlayerPresence>> findAsync(long playerId) {
-        return redis.<byte[]>getBucket(RedisKeys.presence(playerId), ByteArrayCodec.INSTANCE).getAsync()
+        return redis.<byte[]>getBucket(redisKeys.presence(playerId), ByteArrayCodec.INSTANCE).getAsync()
                 .thenApply(raw -> decode(playerId, raw));
     }
 
@@ -143,7 +146,7 @@ public final class PlayerPresenceDirectory {
      * 不降级成「不在线」——调用方据此区分「对方离线」与「在线目录坏了」。
      */
     public CompletionStage<Optional<PlayerPresence>> findStrictAsync(long playerId) {
-        return redis.<byte[]>getBucket(RedisKeys.presence(playerId), ByteArrayCodec.INSTANCE).getAsync().thenApply(raw -> {
+        return redis.<byte[]>getBucket(redisKeys.presence(playerId), ByteArrayCodec.INSTANCE).getAsync().thenApply(raw -> {
             if (raw == null) {
                 return Optional.<PlayerPresence>empty();
             }
@@ -167,7 +170,7 @@ public final class PlayerPresenceDirectory {
             return java.util.concurrent.CompletableFuture.completedFuture(Map.of());
         }
         List<Long> ids = new ArrayList<>(playerIds);
-        String[] keys = ids.stream().map(RedisKeys::presence).toArray(String[]::new);
+        String[] keys = ids.stream().map(redisKeys::presence).toArray(String[]::new);
         return redis.getBuckets(ByteArrayCodec.INSTANCE).<byte[]>getAsync(keys).thenApply(raw -> {
             Map<Long, PlayerPresence> online = new HashMap<>();
             for (int i = 0; i < ids.size(); i++) {
@@ -198,7 +201,7 @@ public final class PlayerPresenceDirectory {
         List<java.util.concurrent.CompletableFuture<StrictLookup>> batches = new ArrayList<>();
         for (int from = 0; from < ids.size(); from += size) {
             List<Long> batch = ids.subList(from, Math.min(ids.size(), from + size));
-            String[] keys = batch.stream().map(RedisKeys::presence).toArray(String[]::new);
+            String[] keys = batch.stream().map(redisKeys::presence).toArray(String[]::new);
             batches.add(redis.getBuckets(ByteArrayCodec.INSTANCE).<byte[]>getAsync(keys).toCompletableFuture()
                     .handle((raw, error) -> error != null ? new StrictLookup(Map.of(), 0, batch.size())
                             : strict(batch, keys, raw)));
@@ -282,7 +285,7 @@ public final class PlayerPresenceDirectory {
         if (ids.isEmpty()) {
             return CompletableFuture.completedFuture(Map.of());
         }
-        String[] keys = ids.stream().map(RedisKeys::presence).toArray(String[]::new);
+        String[] keys = ids.stream().map(redisKeys::presence).toArray(String[]::new);
         CompletableFuture<Map<String, byte[]>> mget;
         try {
             mget = redis.getBuckets(ByteArrayCodec.INSTANCE).<byte[]>getAsync(keys).toCompletableFuture();

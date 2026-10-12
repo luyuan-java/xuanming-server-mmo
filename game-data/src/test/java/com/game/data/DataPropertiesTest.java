@@ -3,6 +3,8 @@ package com.game.data;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -13,6 +15,8 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 /** 走 Spring Boot 真实的构造器绑定（缺省值、各 topic 各自的消费者缺省、校验、保留期启动约束 T-P3）。 */
 class DataPropertiesTest {
 
+    private static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("game"));
+
     private static DataProperties bind(Map<String, String> values) {
         return new Binder(new MapConfigurationPropertySource(values)).bindOrCreate("game.data", DataProperties.class);
     }
@@ -21,9 +25,11 @@ class DataPropertiesTest {
     void 什么都不配_各消费者取各自的缺省() {
         DataProperties p = bind(Map.of());
 
-        assertThat(p.transactionLog().group()).isEqualTo("game-data-transaction-log");
+        assertThat(p.transactionLog().group()).as("没配：缺省组由注入的 KafkaNames 给出").isNull();
+        assertThat(DataKafkaNamesGoldenTest.node(KAFKA_NAMES, Map.of()).transactionLogGroup()).isEqualTo("game-data-transaction-log");
         assertThat(p.transactionLog().maxPollRecords()).isEqualTo(500);
-        assertThat(p.playerSnapshot().group()).isEqualTo("game-data-player-snapshot");
+        assertThat(p.playerSnapshot().group()).isNull();
+        assertThat(DataKafkaNamesGoldenTest.node(KAFKA_NAMES, Map.of()).playerSnapshotGroup()).isEqualTo("game-data-player-snapshot");
         assertThat(p.playerSnapshot().maxPollRecords()).isEqualTo(50);
         assertThat(p.playerSnapshot().insertChunk()).isEqualTo(10);
         assertThat(p.retention().transactionLog()).isZero();
@@ -38,13 +44,16 @@ class DataPropertiesTest {
         DataProperties p = bind(Map.of("game.data.player-snapshot.insert-chunk", "3",
                 "game.data.retention.player-snapshot", "30d"));
         assertThat(p.playerSnapshot().insertChunk()).isEqualTo(3);
-        assertThat(p.playerSnapshot().group()).isEqualTo("game-data-player-snapshot");
+        assertThat(p.playerSnapshot().group()).as("只配别的字段时组仍是没配").isNull();
         assertThat(p.retention().playerSnapshot()).isEqualTo(Duration.ofDays(30));
+        assertThat(bind(Map.of("game.data.transaction-log.group", "g2")).transactionLog().group()).isEqualTo("g2");
 
         assertThatThrownBy(() -> bind(Map.of("game.data.player-snapshot.max-poll-records", "0")))
                 .isInstanceOf(BindException.class);
         assertThatThrownBy(() -> bind(Map.of("game.data.transaction-log.group", " ")))
                 .isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("game.data.player-snapshot.group", "")))
+                .as("显式空串也算空白：不当成没配").isInstanceOf(BindException.class);
         assertThatThrownBy(() -> bind(Map.of("game.data.ops.max-window", "0s"))).isInstanceOf(BindException.class);
         assertThatThrownBy(() -> bind(Map.of("game.data.recall.max-rows", "0"))).isInstanceOf(BindException.class);
     }

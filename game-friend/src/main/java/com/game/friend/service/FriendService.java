@@ -53,6 +53,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
@@ -84,6 +85,8 @@ public final class FriendService {
 
     private final FriendStore store;
     private final FriendCache cache;
+    /** 本部署命名空间的键名（写后要失效的缓存数据键由它生成）。 */
+    private final RedisKeys redisKeys;
     private final FriendRequestQuota quota;
     private final BiFunction<List<Long>, Deadline, Map<Long, Profile>> profiles;
     private final Function<List<Long>, CompletionStage<StrictLookup>> onlineLookup;
@@ -95,13 +98,14 @@ public final class FriendService {
     private final int notifyMessageId;
 
     /**
+     * @param redisKeys       本部署命名空间的键名
      * @param profiles        批量读展示资料（{@link PlayerProfiles#load}；失败时返回已读到的部分、永不抛）
      * @param onlineLookup    严格在线批量读（{@code PlayerPresenceDirectory.findAllStrictAsync}，按 listLimit 分批）
      * @param pusher          推一条 {@code MessageContent} 给一个玩家（{@code PlayerPushes.pushToPlayer}）
      * @param listLimit       列表读上限（ListReadHardLimit）
      * @param notifyMessageId 推送 {@code NotifyFriendEvent} 的消息号（取自契约注册表）
      */
-    public FriendService(FriendStore store, FriendCache cache, FriendRequestQuota quota, 
+    public FriendService(FriendStore store, FriendCache cache, RedisKeys redisKeys, FriendRequestQuota quota,
                          BiFunction<List<Long>, Deadline, Map<Long, Profile>> profiles,
                          Function<List<Long>, CompletionStage<StrictLookup>> onlineLookup,
                          BiFunction<Long, MessageContent, CompletionStage<PlayerPushes.Outcome>> pusher,
@@ -109,6 +113,7 @@ public final class FriendService {
                          int notifyMessageId) {
         this.store = store;
         this.cache = cache;
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.quota = quota;
         this.profiles = profiles;
         this.onlineLookup = onlineLookup;
@@ -157,7 +162,7 @@ public final class FriendService {
             return AddFriendResponse.newBuilder().setErrorMessage(rejected).build();
         }
         // 申请行落在接收者的收件箱里，只失效 req(target)
-        cache.invalidateAfterCommit(List.of(RedisKeys.friendPending(target)), deadline);
+        cache.invalidateAfterCommit(List.of(redisKeys.friendPending(target)), deadline);
         push(target, FriendEventReason.FRIEND_EVENT_REASON_REQUEST_RECEIVED, me);
         log.info("[friend] AddFriend ok from={} to={}", Long.toUnsignedString(me), Long.toUnsignedString(target));
         return AddFriendResponse.getDefaultInstance();
@@ -193,8 +198,8 @@ public final class FriendService {
             return AcceptFriendResponse.newBuilder().setErrorMessage(rejected).build();
         }
         // req(from) 不能漏：反向 pending 落在 from 的收件箱里
-        cache.invalidateAfterCommit(List.of(RedisKeys.friendList(from), RedisKeys.friendList(me),
-                RedisKeys.friendPending(me), RedisKeys.friendPending(from)), deadline);
+        cache.invalidateAfterCommit(List.of(redisKeys.friendList(from), redisKeys.friendList(me),
+                redisKeys.friendPending(me), redisKeys.friendPending(from)), deadline);
         push(from, FriendEventReason.FRIEND_EVENT_REASON_REQUEST_ACCEPTED, me);
         log.info("[friend] AcceptFriend ok from={} me={}", Long.toUnsignedString(from), Long.toUnsignedString(me));
         return AcceptFriendResponse.getDefaultInstance();
@@ -221,7 +226,7 @@ public final class FriendService {
             return RejectFriendResponse.newBuilder().setErrorMessage(
                     tip(FriendErrorTip.friend_error.kFriendNoPendingRequest_VALUE, "no pending friend request")).build();
         }
-        cache.invalidateAfterCommit(List.of(RedisKeys.friendPending(me)), deadline);
+        cache.invalidateAfterCommit(List.of(redisKeys.friendPending(me)), deadline);
         // 刻意不推送：避免社交尴尬，也不暴露拒绝方刚刚在线
         return RejectFriendResponse.getDefaultInstance();
     }
@@ -243,7 +248,7 @@ public final class FriendService {
             return RemoveFriendResponse.newBuilder().setErrorMessage(fault("RemoveFriend", e)).build();
         }
         if (result == RemoveResult.REMOVED) {
-            cache.invalidateAfterCommit(List.of(RedisKeys.friendList(me), RedisKeys.friendList(target)), deadline);
+            cache.invalidateAfterCommit(List.of(redisKeys.friendList(me), redisKeys.friendList(target)), deadline);
         }
         return RemoveFriendResponse.getDefaultInstance(); // 不是好友也回成功（幂等），不推送
     }
@@ -267,8 +272,8 @@ public final class FriendService {
                     .setErrorMessage(tip(FriendErrorTip.friend_error.kFriendBlockListFull_VALUE, "block list full")).build();
         }
         // 幂等命中（已拉黑过）也失效：事务里照样收敛了残留的边与 pending
-        cache.invalidateAfterCommit(List.of(RedisKeys.friendList(me), RedisKeys.friendList(target),
-                RedisKeys.friendPending(me), RedisKeys.friendPending(target)), deadline);
+        cache.invalidateAfterCommit(List.of(redisKeys.friendList(me), redisKeys.friendList(target),
+                redisKeys.friendPending(me), redisKeys.friendPending(target)), deadline);
         // 不推送：被拉黑者不该知道自己被拉黑了
         return BlockResponse.getDefaultInstance();
     }
@@ -293,7 +298,7 @@ public final class FriendService {
         List<FriendEdge> edges;
         StrictLookup online;
         try {
-            edges = cache.load(CacheKind.LIST, RedisKeys.friendList(me), FriendEdge.class, deadline,
+            edges = cache.load(CacheKind.LIST, redisKeys.friendList(me), FriendEdge.class, deadline,
                     () -> store.friends(me, listLimit, deadline));
             online = onlineStatuses(edges, deadline);
         } catch (RuntimeException e) {
@@ -351,7 +356,7 @@ public final class FriendService {
     public GetPendingRequestsResponse getPendingRequests(long me, GetPendingRequestsRequest request, Deadline deadline) {
         List<PendingRequest> pending;
         try {
-            pending = cache.load(CacheKind.PENDING, RedisKeys.friendPending(me), PendingRequest.class, deadline,
+            pending = cache.load(CacheKind.PENDING, redisKeys.friendPending(me), PendingRequest.class, deadline,
                     () -> store.pendingRequests(me, listLimit, deadline));
         } catch (RuntimeException e) {
             return GetPendingRequestsResponse.newBuilder().setErrorMessage(fault("GetPendingRequests", e)).build();

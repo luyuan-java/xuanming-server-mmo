@@ -3,6 +3,7 @@ package com.game.guild.store;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.guild.rules.GuildReject;
 import com.game.guild.rules.GuildRoles;
@@ -107,7 +108,7 @@ public final class GuildMysqlFixture implements AutoCloseable {
     }
 
     public GuildStartupChecks startup(GuildTxListener listener) {
-        return new GuildStartupChecks(tx(listener));
+        return new GuildStartupChecks(tx(listener), GameNamespace.of("game"));
     }
 
     /** 每次调用一个宽裕的请求预算（关心的是 SQL 行为，不是超时；子预算照样是 1500 / 2500）。 */

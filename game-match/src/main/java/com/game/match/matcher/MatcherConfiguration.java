@@ -1,5 +1,6 @@
 package com.game.match.matcher;
 
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
 import com.game.match.gather.BattleNodes;
@@ -35,8 +36,8 @@ public class MatcherConfiguration {
     @Bean
     public MatcherRunner matcherRunner(MatchProperties props, MatchInstance instance, MatchIds ids, MatchMetrics metrics, MetricLabels labels,
                                        PlayerStatusReader players, TicketStore ticketStore, GatherLauncher gatherLauncher,
-                                       BattleNodes battleNodes) {
-        QueueMatcher matcher = new QueueMatcher(ticketStore, players, gatherLauncher, battleNodes, ids, metrics, labels, props, instance);
+                                       BattleNodes battleNodes, RedisKeys redisKeys) {
+        QueueMatcher matcher = new QueueMatcher(ticketStore, players, gatherLauncher, battleNodes, ids, metrics, labels, props, instance, redisKeys);
         return new MatcherRunner(matcher::runRound, props.matcher().interval(), props.matcher().lockTtl().plus(STOP_MARGIN), metrics);
     }
 }

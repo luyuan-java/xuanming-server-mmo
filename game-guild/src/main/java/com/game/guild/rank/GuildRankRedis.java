@@ -7,7 +7,7 @@ import java.util.concurrent.CompletionStage;
 /**
  * {@link GuildRanks} 需要的 Redis 操作（生产实现 {@link RedissonGuildRankRedis}；单测可换成内存假实现制造故障）。
  *
- * <p>键全部由调用方经 {@code RedisKeys.guildRank*} 生成并显式传入（脚本里不拼键名：Cluster 下键必须出现在 KEYS 里；
+ * <p>键全部由调用方经 {@code RedisKeys#guildRank*} 生成并显式传入（脚本里不拼键名：Cluster 下键必须出现在 KEYS 里；
  * 排行的键共用 hash tag {@code {rank}}，多键脚本同槽）。成员是帮会号的无符号十进制，分数是 int64 的十进制
  * （Redis 按 strtod 取最近的 double，与基线 {@code float64(score)} 相同）。
  *

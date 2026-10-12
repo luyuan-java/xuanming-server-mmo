@@ -1,7 +1,8 @@
 package com.game.match.rating;
 
-import com.game.audit.KafkaNames;
+import com.game.audit.BattleResultTopics;
 import com.game.audit.KafkaTopicAdmin;
+import com.game.common.KafkaNames;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
 import com.game.match.id.MatchIds;
@@ -71,33 +72,45 @@ public class RatingConfiguration {
      * 对局结果的消费（{@code game.match.rating.enabled = false} 时照样提供这个 bean，{@code start()} 是空操作）。
      * 只建对象、不启动：它实现 {@code lifecycle.ResultConsumerControl}，启停由 {@code MatchLifecycle} 调它的 {@code start()} / {@code stop()}
      * （启动第 9 步；停机时在等完在途 gather 之后）。上下文里不许有第二个 {@code ResultConsumerControl}。
+     * topic、消费组缺省值与两个 client.id 都由注入的 {@link KafkaNames} 给出（带部署命名空间前缀，见 {@link #kafkaIds}）。
      */
     @Bean
-    public BattleResultIngest battleResultIngest(MatchProperties props, RatingStore ratingStore, MatchMetrics metrics, MatchInstance instance) {
+    public BattleResultIngest battleResultIngest(MatchProperties props, RatingStore ratingStore, MatchMetrics metrics, MatchInstance instance,
+                                                 KafkaNames kafkaNames) {
         MatchProperties.Kafka kafka = props.kafka();
         MatchProperties.Rating rating = props.rating();
+        RatingKafkaIds ids = kafkaIds(rating, kafkaNames, instance.id());
         BattleResultIngest.Settings settings = new BattleResultIngest.Settings(rating.enabled(), kafka.topicGeneration(),
                 kafka.replicationFactor(), kafka.initTimeout());
-        BattleResultIngest ingest = new BattleResultIngest(settings,
-                () -> new KafkaTopicAdmin(kafka.bootstrapServers(), adminClientId()),
-                BattleResultIngest.kafkaConsumers(kafka.bootstrapServers(), rating.consumerGroup(), ratingClientId(instance.id())),
+        BattleResultIngest ingest = new BattleResultIngest(settings, new BattleResultTopics(kafkaNames),
+                () -> new KafkaTopicAdmin(kafka.bootstrapServers(), ids.adminClientId()),
+                BattleResultIngest.kafkaConsumers(kafka.bootstrapServers(), ids.group(), ids.clientId()),
                 ratingStore::apply, metrics);
-        log.info("评分回流 enabled={} topic={} group={} 回合打满按平局阈值={} 覆盖={}", rating.enabled(), ingest.topic(), rating.consumerGroup(),
+        log.info("评分回流 enabled={} topic={} group={} 回合打满按平局阈值={} 覆盖={}", rating.enabled(), ingest.topic(), ids.group(),
                 rating.drawRoundCap(), rating.drawRoundCapByConfigId());
-        if (!rating.consumerGroup().startsWith(KafkaNames.prefix())) {
+        if (!ids.group().startsWith(kafkaNames.prefix())) {
             log.warn("对局结果的消费组 {} 不以部署命名空间前缀 {} 开头：与共用同一 Kafka 的别的部署同名时会互相触发重平衡，将来按前缀配 ACL 时会授权失败",
-                    rating.consumerGroup(), KafkaNames.prefix());
+                    ids.group(), kafkaNames.prefix());
         }
         return ingest;
     }
 
-    /** 对局结果消费者的 Kafka client.id：{@code <ns>-match-rating-<实例 id>}（缺省命名空间下即 {@code game-match-rating-<实例 id>}）。 */
-    static String ratingClientId(String instanceId) {
-        return KafkaNames.clientId("match-rating-" + instanceId);
+    /**
+     * 评分消费用到的 Kafka 名字。
+     *
+     * @param group         实际生效的消费组：配了 {@code game.match.rating.consumer-group} 用配置值，没配用 {@code <ns>-match-rating}
+     * @param clientId      消费者的 client.id：{@code <ns>-match-rating-<实例 id>}
+     * @param adminClientId 核对对局结果 topic 用的 admin 客户端的 client.id：{@code <ns>-match-admin}
+     */
+    record RatingKafkaIds(String group, String clientId, String adminClientId) {
     }
 
-    /** 核对对局结果 topic 用的 admin 客户端的 client.id：{@code <ns>-match-admin}（缺省 {@code game-match-admin}）。 */
-    static String adminClientId() {
-        return KafkaNames.of("match-admin");
+    /**
+     * 由配置与注入的 {@link KafkaNames} 算出评分消费的 Kafka 名字（纯函数）。缺省命名空间、没配消费组时即 {@code game-match-rating} /
+     * {@code game-match-rating-<实例 id>} / {@code game-match-admin}，与引入命名空间之前逐字节相同。
+     */
+    static RatingKafkaIds kafkaIds(MatchProperties.Rating rating, KafkaNames kafkaNames, String instanceId) {
+        String group = rating.consumerGroup() != null ? rating.consumerGroup() : kafkaNames.matchRatingGroup();
+        return new RatingKafkaIds(group, kafkaNames.matchRatingClientId(instanceId), kafkaNames.matchAdminClientId());
     }
 }

@@ -9,6 +9,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,6 +30,8 @@ import org.springframework.web.server.ResponseStatusException;
  */
 class KillSwitchAdminControllerTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     @SuppressWarnings("unchecked")
     private final RMap<String, String> map = mock(RMap.class);
     private final MockHttpServletRequest request = new MockHttpServletRequest();
@@ -38,10 +41,25 @@ class KillSwitchAdminControllerTest {
     @SuppressWarnings("unchecked")
     void setUp() {
         RedissonClient redis = mock(RedissonClient.class);
-        when(redis.<String, String>getMap(RedisKeys.killSwitch(), StringCodec.INSTANCE)).thenReturn(map);
+        when(redis.<String, String>getMap(REDIS_KEYS.killSwitch(), StringCodec.INSTANCE)).thenReturn(map);
         ObjectProvider<RedissonClient> provider = mock(ObjectProvider.class);
         when(provider.getObject()).thenReturn(redis);
-        controller = new KillSwitchAdminController(provider);
+        controller = new KillSwitchAdminController(provider, REDIS_KEYS);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void 规则哈希的键取自注入的RedisKeys_缺省与金样相同() {
+        assertThat(REDIS_KEYS.killSwitch()).isEqualTo("game:killswitch");
+        RedissonClient redis = mock(RedissonClient.class);
+        RMap<String, String> other = mock(RMap.class);
+        when(redis.<String, String>getMap("nstest:killswitch", StringCodec.INSTANCE)).thenReturn(other);
+        when(other.readAllMap()).thenReturn(Map.of());
+        ObjectProvider<RedissonClient> provider = mock(ObjectProvider.class);
+        when(provider.getObject()).thenReturn(redis);
+
+        assertThat(new KillSwitchAdminController(provider, new RedisKeys(GameNamespace.of("nstest"))).list()).isEmpty();
+        verify(redis).getMap("nstest:killswitch", StringCodec.INSTANCE);
     }
 
     @Test

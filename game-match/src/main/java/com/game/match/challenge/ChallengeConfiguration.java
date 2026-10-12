@@ -1,6 +1,7 @@
 package com.game.match.challenge;
 
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
@@ -27,8 +28,8 @@ public class ChallengeConfiguration {
     }
 
     @Bean
-    public ChallengeStore challengeStore(RedissonClient redis) {
-        return new RedissonChallengeStore(redis);
+    public ChallengeStore challengeStore(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedissonChallengeStore(redis, redisKeys);
     }
 
     @Bean

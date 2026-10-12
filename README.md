@@ -76,7 +76,7 @@ export GAME_GATE_TOKEN_SECRET=...     # gate 令牌共享密钥：gateway 签普
 export GAME_LOGIN_DEV_PASSWORD=...    # 开发模式登录口令
 export GAME_NODE_LINK_SECRET=...      # gate ↔ scene 链路握手密钥
 export GAME_DUBBO_SECRET=...          # Dubbo 调用方鉴权密钥（各进程读同一个值）
-# export GAME_NAMESPACE=game          # 可选：部署命名空间（缺省 game，与以前完全相同）；同一套 MySQL / Redis / Kafka 上起第二个游戏时换一个值
+# export GAME_NAMESPACE=game          # 可选：部署命名空间（缺省 game，名字与以前完全相同）；同一套 MySQL / Redis / Kafka 上起第二个游戏时换一个值
 tools/local/start-slice.sh            # 按依赖顺序启动 13 个进程（local profile，Dubbo 直连，不需要 Nacos）
 tools/local/stop-slice.sh             # 哪种切片都用同一条命令停（只看 PID 文件）
 
@@ -89,8 +89,13 @@ GAME_ZONES=2 tools/local/start-slice.sh         # 再起区 2 的 scene 与 gate
 > 本机 MySQL 库与 Redis 一起重建或一起迁移（库 `xm_java` → `game`、键前缀 `xm:` → `game:`；compose 项目名 `xuanming-java` → `game-java`，旧卷用 `docker compose -p xuanming-java -f deploy/compose/infra.yaml down -v` 清掉，见 `docs/design/db-migrations.md` M12）。新旧进程不能混跑。
 
 > **部署命名空间** `GAME_NAMESPACE`（可选，缺省 `game`）：Redis 键前缀 `<ns>:`、Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 都取它，
-> 多个游戏（或多套部署）因此能共用同一套中间件而互不串数据。缺省值下所有名字与以前逐字节相同，现有环境什么都不用改。合法值 `[a-z][a-z0-9]{0,31}`
-> （不能是 mysql / sys / public），非法即拒启；只经环境变量给，一个部署的全部进程与命令行工具必须同值，定下后不能改。
+> 多个游戏（或多套部署）因此能共用同一套中间件而互不串数据。缺省值下所有名字与以前逐字节相同。合法值 `[a-z][a-z0-9]{0,27}`
+> （1–28 个字符，不能是 mysql / sys / public），非法即拒启（Spring Boot 的标准绑定校验报告）；只经环境变量给，一个部署的全部进程与命令行工具必须同值，定下后不能改。
+> 起切片时写 `GAME_NAMESPACE=t1 tools/local/start-slice.sh`：脚本先校验、把生效的值记进 `run/game-namespace`（`battle-crash-window.sh` 读回核对）；
+> 设成空串不会被换成 `game`，照样拒绝。**库名必须等于命名空间**：连库的服务进程与三个命令行工具（AuditFallbackReplay、assetopfix、PasswordAdmin）启动时核对 `DATABASE()`，
+> 库名不叫 `game` 的存量环境升级前先看 [db-migrations.md M13](docs/design/db-migrations.md)。
+> nacos profile 下 Nacos namespace 不随它自动变：多个部署共用一个 Nacos 时在 `GAME_NACOS_ADDR` 里带 `?namespace=<ID>`（或用 Dubbo 的配置项 `dubbo.registry.parameters.namespace`）
+> 显式配置，并先在 Nacos 建好 ID 等于该值的命名空间；不设则落在 public（与以前相同）。环境变量 `DUBBO_REGISTRY_PARAMETERS_NAMESPACE` Dubbo 不认，别用。
 > 这是命名隔离，不是安全边界；细节见 [architecture.md §6.2](docs/design/architecture.md)。
 
 进程清单与启动顺序以 `tools/local/start-slice.sh` 的 `SERVICES` 为准（scene-manager、login、friend、chat、match、team、guild、trade、data、scene、gate、gateway、battle；`GAME_SCENE_NODES=2` 时多起一个 scene 节点 `game-scene-2`）。

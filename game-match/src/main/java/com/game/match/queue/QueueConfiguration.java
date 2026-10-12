@@ -1,5 +1,6 @@
 package com.game.match.queue;
 
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.gather.GatherLauncher;
@@ -29,8 +30,8 @@ import org.springframework.context.annotation.Configuration;
 public class QueueConfiguration {
 
     @Bean
-    public TicketStore ticketStore(RedissonClient redis) {
-        return new RedissonTicketStore(redis);
+    public TicketStore ticketStore(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedissonTicketStore(redis, redisKeys);
     }
 
     @Bean
@@ -40,8 +41,9 @@ public class QueueConfiguration {
 
     @Bean
     public QueueService queueService(MatchProperties props, PlayerStatusReader players, TicketStore ticketStore, TicketHealing ticketHealing,
-                                     RatingReader ratings, GatherLauncher gather, MatchIds matchIds, MatchMetrics metrics) {
-        return new QueueService(props, players, ticketStore, ticketHealing, ratings, gather, matchIds, metrics);
+                                     RatingReader ratings, GatherLauncher gather, MatchIds matchIds, MatchMetrics metrics,
+                                     RedisKeys redisKeys) {
+        return new QueueService(props, players, ticketStore, ticketHealing, ratings, gather, matchIds, metrics, redisKeys);
     }
 
     @Bean

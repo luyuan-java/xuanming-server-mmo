@@ -1,5 +1,6 @@
 package com.game.match.spectate;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.placement.PlacementStore;
@@ -44,6 +45,8 @@ import org.redisson.codec.CompositeCodec;
  */
 public final class SpectateRedisFixture {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     public final RedissonClient redis;
     /** 本夹具的可观战索引键（不是生产键）。 */
     public final String indexKey;
@@ -63,9 +66,9 @@ public final class SpectateRedisFixture {
         this.redis = redis;
         this.tickets = new TicketRedisFixture(redis, true);
         this.battleBase = Long.MIN_VALUE + (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 36) * 4096;
-        this.indexKey = RedisKeys.matchWatchable() + ":it:" + Long.toHexString(ThreadLocalRandom.current().nextLong());
-        this.store = new RedissonSpectateStore(redis, indexKey);
-        this.placements = new RedissonPlacementStore(redis);
+        this.indexKey = REDIS_KEYS.matchWatchable() + ":it:" + Long.toHexString(ThreadLocalRandom.current().nextLong());
+        this.store = new RedissonSpectateStore(redis, REDIS_KEYS, indexKey);
+        this.placements = new RedissonPlacementStore(redis, REDIS_KEYS);
     }
 
     // ---------------------------------------------------------------- 分配（并登记清理）
@@ -83,11 +86,11 @@ public final class SpectateRedisFixture {
     }
 
     public static String markKey(long playerId) {
-        return RedisKeys.matchWatching(playerId);
+        return REDIS_KEYS.matchWatching(playerId);
     }
 
     public static String placementKey(long battleId) {
-        return RedisKeys.matchBattlePlacement(battleId);
+        return REDIS_KEYS.matchBattlePlacement(battleId);
     }
 
     /** 本夹具的全部键：票、标记、落点、自己的索引键（不含生产索引键）。 */
@@ -117,7 +120,7 @@ public final class SpectateRedisFixture {
             redis.getKeys().delete(keys.subList(i, Math.min(keys.size(), i + 256)).toArray(String[]::new));
         }
         if (!productionMembers.isEmpty()) {
-            redis.getScoredSortedSet(RedisKeys.matchWatchable(), StringCodec.INSTANCE).removeAll(productionMembers);
+            redis.getScoredSortedSet(REDIS_KEYS.matchWatchable(), StringCodec.INSTANCE).removeAll(productionMembers);
         }
         tickets.cleanup();
     }

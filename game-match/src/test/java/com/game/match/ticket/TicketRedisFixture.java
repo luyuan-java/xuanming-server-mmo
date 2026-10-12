@@ -1,5 +1,6 @@
 package com.game.match.ticket;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -32,6 +33,8 @@ import org.redisson.config.Config;
  */
 public final class TicketRedisFixture {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     public static final int DB = 13;
 
     public final RedissonClient redis;
@@ -58,7 +61,7 @@ public final class TicketRedisFixture {
      */
     public TicketRedisFixture(RedissonClient redis, boolean highIds) {
         this.redis = redis;
-        this.store = new RedissonTicketStore(redis);
+        this.store = new RedissonTicketStore(redis, REDIS_KEYS);
         long r = ThreadLocalRandom.current().nextLong(1L << 36) * 4096;
         this.pidBase = (highIds ? Long.MIN_VALUE : 0) + (1L << 50) + r;
         this.configBase = ThreadLocalRandom.current().nextInt() & 0xFFFF_FF00;
@@ -110,7 +113,7 @@ public final class TicketRedisFixture {
     }
 
     public static String ticketKey(long playerId) {
-        return RedisKeys.matchTicket(playerId);
+        return REDIS_KEYS.matchTicket(playerId);
     }
 
     public List<String> allKeys() {
@@ -119,12 +122,12 @@ public final class TicketRedisFixture {
             keys.add(ticketKey(playerId));
         }
         for (QueueRef queue : queues) {
-            keys.add(queue.queueKey());
-            keys.add(queue.rankKey());
-            keys.add(queue.lockKey());
+            keys.add(queue.queueKey(REDIS_KEYS));
+            keys.add(queue.rankKey(REDIS_KEYS));
+            keys.add(queue.lockKey(REDIS_KEYS));
         }
         for (String token : tokens) {
-            keys.add(RedisKeys.matchPopMarker(token));
+            keys.add(REDIS_KEYS.matchPopMarker(token));
         }
         return keys;
     }
@@ -133,14 +136,14 @@ public final class TicketRedisFixture {
         List<String> keys = allKeys();
         // 回队首的重放标记只在这里清，不进 allKeys()：它不属于「票据 / 队列的状态」，逐字节比「什么都没改」的快照不看它（各用例单独断言）
         for (String token : requeueTokens) {
-            keys.add(RedisKeys.matchRequeueMarker(token));
+            keys.add(REDIS_KEYS.matchRequeueMarker(token));
         }
         for (int i = 0; i < keys.size(); i += 256) {
             redis.getKeys().delete(keys.subList(i, Math.min(keys.size(), i + 256)).toArray(String[]::new));
         }
         if (!queues.isEmpty()) {
-            List<String> queueKeys = queues.stream().map(QueueRef::queueKey).toList();
-            redis.<String>getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).removeAll(queueKeys);
+            List<String> queueKeys = queues.stream().map(q -> q.queueKey(REDIS_KEYS)).toList();
+            redis.<String>getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).removeAll(queueKeys);
         }
     }
 
@@ -233,35 +236,35 @@ public final class TicketRedisFixture {
 
     /** 直接往队尾放一个成员并登记注册集；{@code ratingCenti} 为 null 时不写评分镜像。 */
     public void putQueueMember(QueueRef queue, String member, Long ratingCenti) {
-        redis.<String>getList(queue.queueKey(), StringCodec.INSTANCE).add(member);
+        redis.<String>getList(queue.queueKey(REDIS_KEYS), StringCodec.INSTANCE).add(member);
         if (ratingCenti != null) {
-            redis.<String>getScoredSortedSet(queue.rankKey(), StringCodec.INSTANCE).add(ratingCenti, member);
+            redis.<String>getScoredSortedSet(queue.rankKey(REDIS_KEYS), StringCodec.INSTANCE).add(ratingCenti, member);
         }
-        redis.<String>getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).add(queue.queueKey());
+        redis.<String>getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).add(queue.queueKey(REDIS_KEYS));
     }
 
     public List<String> queueMembers(QueueRef queue) {
-        return new ArrayList<>(redis.<String>getList(queue.queueKey(), StringCodec.INSTANCE).readAll());
+        return new ArrayList<>(redis.<String>getList(queue.queueKey(REDIS_KEYS), StringCodec.INSTANCE).readAll());
     }
 
     public Map<String, Long> rankOf(QueueRef queue) {
         Map<String, Long> out = new LinkedHashMap<>();
-        for (ScoredEntry<String> entry : redis.<String>getScoredSortedSet(queue.rankKey(), StringCodec.INSTANCE).entryRange(0, -1)) {
+        for (ScoredEntry<String> entry : redis.<String>getScoredSortedSet(queue.rankKey(REDIS_KEYS), StringCodec.INSTANCE).entryRange(0, -1)) {
             out.put(entry.getValue(), Math.round(entry.getScore()));
         }
         return out;
     }
 
     public boolean indexed(QueueRef queue) {
-        return redis.<String>getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).contains(queue.queueKey());
+        return redis.<String>getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).contains(queue.queueKey(REDIS_KEYS));
     }
 
     public void unindex(QueueRef queue) {
-        redis.<String>getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).remove(queue.queueKey());
+        redis.<String>getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).remove(queue.queueKey(REDIS_KEYS));
     }
 
     public Optional<String> lockHolder(QueueRef queue) {
-        return Optional.ofNullable(redis.<String>getBucket(queue.lockKey(), StringCodec.INSTANCE).get());
+        return Optional.ofNullable(redis.<String>getBucket(queue.lockKey(REDIS_KEYS), StringCodec.INSTANCE).get());
     }
 
     /** 一把 STRING 键的值；不存在为 null。 */

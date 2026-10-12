@@ -13,7 +13,7 @@ import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.ByteArrayCodec;
 
 /**
- * 登录排队的 Redis 存储（同 mmorpg loginqueue.Queue 的模型，键走 {@link RedisKeys}）：
+ * 登录排队的 Redis 存储（同 mmorpg loginqueue.Queue 的模型，键走注入的 {@link RedisKeys}，带部署命名空间前缀）：
  * <ul>
  *   <li>区队列 ZSET（排队号按入队毫秒排）；条目元数据 Hash（区、入队时刻、是否已放行），TTL = 排队条目有效期；</li>
  *   <li>已放行占位 ZSET：成员 = 排队号或快速通道的 {@code fast:<uuid>}，<b>分数 = 占位到期毫秒</b>，计数前清掉过期的——
@@ -25,7 +25,8 @@ import org.redisson.client.codec.ByteArrayCodec;
  * 入队与快速通道的成员号在 Java 侧生成（重跑是同一个成员）；放行重跑只会在空位以内再放一批（这一批同样原子地写好了放行槽）；
  * 取走放行槽带本次调用的请求号，重跑认得出是同一次。
  *
- * <p>线程安全；阻塞（Redis），只在允许阻塞的线程上调用。只支持单节点 Redis（与其余键一样，脚本按前缀拼出条目的键）。
+ * <p>线程安全；阻塞（Redis），只在允许阻塞的线程上调用。只支持单节点 Redis（与其余键一样，脚本按前缀拼出条目的键：
+ * 放行槽与元数据的前缀由 {@link RedisKeys} 以空排队号生成、经 ARGV 传入，脚本正文不含命名空间）。
  */
 public final class LoginQueue {
 
@@ -154,16 +155,19 @@ public final class LoginQueue {
             """;
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final LongSupplier nowMs;
     private final Duration entryTtl;
     private final Duration admitTtl;
 
     /**
+     * @param redisKeys 本进程部署命名空间的键名
      * @param entryTtl 排队条目有效期（基线 QueueEntryTTL 1 h）
      * @param admitTtl 放行有效期：放行后多久内来取，也是没取走时占位的存活时长（基线 AdmitTTL 60 s）
      */
-    public LoginQueue(RedissonClient redis, LongSupplier nowMs, Duration entryTtl, Duration admitTtl) {
+    public LoginQueue(RedissonClient redis, RedisKeys redisKeys, LongSupplier nowMs, Duration entryTtl, Duration admitTtl) {
         this.redis = redis;
+        this.redisKeys = redisKeys;
         this.nowMs = nowMs;
         this.entryTtl = entryTtl;
         this.admitTtl = admitTtl;
@@ -176,20 +180,20 @@ public final class LoginQueue {
     public Enqueued enqueue(int zoneId) {
         String queueId = QueueTokens.newQueueId();
         List<Object> result = eval(ENQUEUE, RScript.ReturnType.MULTI,
-                List.of(RedisKeys.loginQueue(zoneId), RedisKeys.loginQueueMeta(queueId)),
+                List.of(redisKeys.loginQueue(zoneId), redisKeys.loginQueueMeta(queueId)),
                 ascii(queueId), number(nowMs.getAsLong()), number(entryTtl.toMillis()), number(zoneId));
         return new Enqueued(queueId, asLong(result.get(0)), asLong(result.get(1)));
     }
 
     public long queueLength(int zoneId) {
         Long n = eval("return redis.call('zcard', KEYS[1])", RScript.ReturnType.INTEGER,
-                List.of(RedisKeys.loginQueue(zoneId)));
+                List.of(redisKeys.loginQueue(zoneId)));
         return n == null ? 0 : n;
     }
 
     /** 清掉过期占位后的占位数（测试与排查用）。 */
     long admittedCount(int zoneId) {
-        Long n = eval(ADMITTED_COUNT, RScript.ReturnType.INTEGER, List.of(RedisKeys.loginQueueAdmitted(zoneId)),
+        Long n = eval(ADMITTED_COUNT, RScript.ReturnType.INTEGER, List.of(redisKeys.loginQueueAdmitted(zoneId)),
                 number(nowMs.getAsLong()));
         return n == null ? 0 : n;
     }
@@ -200,7 +204,7 @@ public final class LoginQueue {
             return false;
         }
         long now = nowMs.getAsLong();
-        Long reserved = eval(RESERVE_FAST, RScript.ReturnType.INTEGER, List.of(RedisKeys.loginQueueAdmitted(zoneId)),
+        Long reserved = eval(RESERVE_FAST, RScript.ReturnType.INTEGER, List.of(redisKeys.loginQueueAdmitted(zoneId)),
                 number(now), number(budget), ascii("fast:" + UUID.randomUUID()), number(now + admitTtl.toMillis()),
                 number(admitTtl.toMillis()));
         return reserved != null && reserved == 1;
@@ -216,9 +220,9 @@ public final class LoginQueue {
             return new Dispatched(0, 0);
         }
         List<Object> result = eval(DISPATCH, RScript.ReturnType.MULTI,
-                List.of(RedisKeys.loginQueue(zoneId), RedisKeys.loginQueueAdmitted(zoneId)),
+                List.of(redisKeys.loginQueue(zoneId), redisKeys.loginQueueAdmitted(zoneId)),
                 number(nowMs.getAsLong()), number(budget), number(max), number(admitTtl.toMillis()), gate.toByteArray(),
-                ascii(RedisKeys.loginQueueAdmit("")), ascii(RedisKeys.loginQueueMeta("")));
+                ascii(redisKeys.loginQueueAdmit("")), ascii(redisKeys.loginQueueMeta("")));
         return new Dispatched((int) asLong(result.get(0)), (int) asLong(result.get(1)));
     }
 
@@ -229,8 +233,8 @@ public final class LoginQueue {
 
     /** 测试用：指定请求号（模拟 Redisson 重发同一段 EVAL）。 */
     Lookup lookup(int zoneId, String queueId, String requestId) {
-        List<Object> result = eval(LOOKUP, RScript.ReturnType.MULTI, List.of(RedisKeys.loginQueueAdmit(queueId),
-                RedisKeys.loginQueueAdmitted(zoneId), RedisKeys.loginQueue(zoneId), RedisKeys.loginQueueMeta(queueId)),
+        List<Object> result = eval(LOOKUP, RScript.ReturnType.MULTI, List.of(redisKeys.loginQueueAdmit(queueId),
+                redisKeys.loginQueueAdmitted(zoneId), redisKeys.loginQueue(zoneId), redisKeys.loginQueueMeta(queueId)),
                 ascii(queueId), ascii(requestId), number(nowMs.getAsLong() + TAKEN_GRACE.toMillis()),
                 number(TAKEN_GRACE.toMillis()));
         long kind = asLong(result.get(0));

@@ -12,6 +12,8 @@ import com.game.audit.TopicSpec;
 import com.game.audit.proto.AssetKind;
 import com.game.audit.proto.TransactionLogRecord;
 import com.game.audit.proto.TransactionReason;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
 import com.game.scene.audit.AssetAudit.Reason;
@@ -35,9 +37,10 @@ import org.junit.jupiter.api.Test;
 
 class AuditPipelineTest {
 
+    private static final AuditTopics AUDIT_TOPICS = new AuditTopics(new KafkaNames(GameNamespace.of("game")));
     private static final int GENERATION = 1;
-    private static final String TOPIC = AuditTopics.transactionLog(GENERATION).name();
-    private static final String SNAPSHOT_TOPIC = AuditTopics.playerSnapshot(GENERATION).name();
+    private static final String TOPIC = AUDIT_TOPICS.transactionLog(GENERATION).name();
+    private static final String SNAPSHOT_TOPIC = AUDIT_TOPICS.playerSnapshot(GENERATION).name();
     private static final int SNAPSHOT_MAX_BYTES = 2_000;
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
@@ -104,7 +107,7 @@ class AuditPipelineTest {
             }
             producersMade.incrementAndGet();
             return producer;
-        }, () -> admin, AuditTopics.all(GENERATION), TOPIC, SNAPSHOT_TOPIC, SNAPSHOT_MAX_BYTES, (short) 1,
+        }, () -> admin, AUDIT_TOPICS.all(GENERATION), TOPIC, SNAPSHOT_TOPIC, SNAPSHOT_MAX_BYTES, (short) 1,
                 Duration.ofSeconds(1), guids, queueCapacity, new SceneMetrics(meters));
         return pipeline;
     }

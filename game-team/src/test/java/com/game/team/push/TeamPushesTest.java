@@ -2,6 +2,8 @@ package com.game.team.push;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.proto.MessageContent;
 import com.game.proto.TipInfoMessage;
@@ -44,6 +46,8 @@ import org.junit.jupiter.api.Test;
  * 不连 Redis：提交结果直接构造，S_READ_MEMBERS 用假 {@link TeamRedis} 回放。
  */
 class TeamPushesTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final int SNAPSHOT = 213;
     private static final int INVITE = 215;
@@ -99,7 +103,7 @@ class TeamPushesTest {
 
     private TeamPushes pushes(TeamPushes.Pusher pusher, Executor executor, Duration budget, TeamRedis redis) {
         Map<Long, MemberDisplay> online = Map.of(A, display(true), B, display(true), C, display(true), D, display(false));
-        return new TeamPushes(new TeamStore(redis == null ? new FailingRedis() : redis), (ids, d) -> online, pusher,
+        return new TeamPushes(new TeamStore(redis == null ? new FailingRedis() : redis, REDIS_KEYS), (ids, d) -> online, pusher,
                 executor, metrics, budget, new TeamPushes.MessageIds(SNAPSHOT, INVITE, EVENT));
     }
 
@@ -341,7 +345,7 @@ class TeamPushesTest {
     void 预算从提交时刻起算_在执行器里排队超过预算的整批按error丢弃_不读资料不发出() throws InterruptedException {
         List<Runnable> queued = new ArrayList<>();
         List<Long> displayLoads = Collections.synchronizedList(new ArrayList<>());
-        TeamPushes p = new TeamPushes(new TeamStore(new FailingRedis()), (ids, d) -> {
+        TeamPushes p = new TeamPushes(new TeamStore(new FailingRedis(), REDIS_KEYS), (ids, d) -> {
             displayLoads.add((long) ids.size());
             return Map.of();
         }, recording(PlayerPushes.Outcome.SENT), queued::add, metrics, Duration.ofMillis(20),

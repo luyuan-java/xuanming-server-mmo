@@ -37,8 +37,9 @@ import org.slf4j.LoggerFactory;
  *     [-f application.yaml] [-expect-database &lt;库名&gt;] list [-min-age-min 60] [-limit 50]
  * ... resolve -op &lt;op_id&gt; -as applied|aborted -operator &lt;名字&gt; -reason &lt;依据&gt; -confirm &lt;op_id&gt; -txlog-checked [-force]
  * </pre>
- * 配置与服务进程同一份（缺省读 jar 里的 {@code application.yaml}，环境变量 / {@code -D} 覆盖规则同 Spring Boot）。部署命名空间（{@code GAME_NAMESPACE}，
- * 缓存键前缀与缺省库名）从同一份配置解析、显式定格；连上库后核对 {@code DATABASE()} 等于期望库名（缺省 = 命名空间，库名另取的部署用 {@code -expect-database}），
+ * 配置与服务进程同一份（缺省读 jar 里的 {@code application.yaml}，环境变量 / {@code -D} 覆盖规则同 Spring Boot）。部署命名空间（{@code game.namespace} /
+ * {@code GAME_NAMESPACE}，缓存键前缀与库名）从同一份配置按服务进程同一个绑定类型解析并校验，非法退出 2；用它构造缓存键（{@code RedisKeys}）。
+ * 连上库后核对 {@code DATABASE()} 等于期望库名（规格：库名 = 命名空间；{@code -expect-database} 只是给库名偏离规格的存量部署的应急开关），
  * 不一致退出 2、不连 Redis。
  *
  * <p>退出码：0 成功；1 执行出错；2 参数不合法或前置条件不满足（含缺 {@code -txlog-checked}）；3 行已不在 PENDING（被自动终结或别人抢先），本次未做任何改动。
@@ -73,8 +74,9 @@ public final class AssetOpFixMain {
               assetopfix [-f <配置 yaml>] [-expect-database <库名>] resolve -op <op_id> -as applied|aborted -operator <名字> -reason <依据> \\
                   -confirm <op_id> -txlog-checked [-force]
 
-            部署命名空间取环境变量 GAME_NAMESPACE（缺省 game，必须与服务进程同值）；连上库后核对 DATABASE() 等于期望库名
-            （缺省 = 命名空间，库名另取的部署用 -expect-database 给出），不一致退出 2。
+            部署命名空间取环境变量 GAME_NAMESPACE（缺省 game，必须与服务进程同值；取值规则同服务进程，非法退出 2）；
+            连上库后核对 DATABASE() 等于期望库名（规格：库名 = 命名空间；库名偏离规格的存量部署应急时用 -expect-database 给出），
+            不一致退出 2。
 
             resolve 的前置条件（任一不满足即拒绝，不改任何数据）：
               行存在且为 PENDING；创建早于 30 分钟前；
@@ -102,7 +104,7 @@ public final class AssetOpFixMain {
         }
     }
 
-    /** 打开 Store 前的前置条件不满足（部署命名空间非法 / 冲突、库名核对不过）：退出 2，不连 Redis、不改数据。 */
+    /** 打开 Store 前的前置条件不满足（部署命名空间非法、库名核对不过）：退出 2，不连 Redis、不改数据。 */
     static final class PreconditionException extends IllegalStateException {
         PreconditionException(String message) {
             super(message);

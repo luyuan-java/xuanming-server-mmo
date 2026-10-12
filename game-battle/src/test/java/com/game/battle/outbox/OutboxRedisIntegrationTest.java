@@ -10,6 +10,7 @@ import com.game.battle.room.EventLoopBattleScheduler;
 import com.game.battle.testing.CallJournal;
 import com.game.battle.testing.FakeSceneLocator;
 import com.game.battle.testing.RecordingSceneTransport;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleRedis;
 import com.game.proto.BattleActivityContext;
@@ -54,6 +55,7 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class OutboxRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     static final int DB = 14;
 
     private static final long PLAYER_BASE = Long.MIN_VALUE + (1L << 50) + ThreadLocalRandom.current().nextLong(1L << 40);
@@ -81,7 +83,7 @@ class OutboxRedisIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(DB);
         redis = Redisson.create(config);
-        scripts = new BattleRedis(redis);
+        scripts = new BattleRedis(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -102,10 +104,10 @@ class OutboxRedisIntegrationTest {
     /** 一个新玩家号；它的锁、待结算记录、X / Y 两局的墓碑都登记进清理名单。 */
     private static long newPlayer() {
         long player = PLAYER_BASE + sequence.incrementAndGet();
-        written.add(RedisKeys.battleLock(player));
-        written.add(RedisKeys.battleSettlements(player));
-        written.add(RedisKeys.battleSettled(player, X));
-        written.add(RedisKeys.battleSettled(player, Y));
+        written.add(REDIS_KEYS.battleLock(player));
+        written.add(REDIS_KEYS.battleSettlements(player));
+        written.add(REDIS_KEYS.battleSettled(player, X));
+        written.add(REDIS_KEYS.battleSettled(player, Y));
         return player;
     }
 
@@ -156,7 +158,7 @@ class OutboxRedisIntegrationTest {
         assertThat(count(SettlementEvent.STORED)).isEqualTo(1);
         assertThat(get(scripts.readSettlement(player, X))).as("Redis 里的记录就是投出去的那份字节").isEqualTo(wire(player, X))
                 .isEqualTo(transport.sent.get(0).call().getBody().toByteArray());
-        assertThat(redis.getKeys().remainTimeToLive(RedisKeys.battleSettlements(player)))
+        assertThat(redis.getKeys().remainTimeToLive(REDIS_KEYS.battleSettlements(player)))
                 .isBetween((BattleRedis.SETTLEMENT_TTL_SEC - 60) * 1000, BattleRedis.SETTLEMENT_TTL_SEC * 1000);
         assertThat(journal.entries()).containsExactly("locate:" + Long.toUnsignedString(player),
                 "deliver:" + Long.toUnsignedString(player) + "/" + Long.toUnsignedString(X) + "@scene-3#0");
@@ -215,8 +217,8 @@ class OutboxRedisIntegrationTest {
         assertThat(get(stillInTheSocket.get().get())).isEqualTo(BattleRedis.STORE_ALREADY_SETTLED);
 
         assertThat(get(scripts.settlementExists(player, X))).isFalse();
-        assertThat(redis.getKeys().countExists(RedisKeys.battleSettlements(player))).as("没有孤儿记录，下次进场不会重复发奖").isZero();
-        assertThat(redis.getKeys().remainTimeToLive(RedisKeys.battleSettled(player, X))).as("墓碑带 TTL")
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.battleSettlements(player))).as("没有孤儿记录，下次进场不会重复发奖").isZero();
+        assertThat(redis.getKeys().remainTimeToLive(REDIS_KEYS.battleSettled(player, X))).as("墓碑带 TTL")
                 .isBetween((BattleRedis.SETTLED_TOMBSTONE_TTL_SEC - 60) * 1000, BattleRedis.SETTLED_TOMBSTONE_TTL_SEC * 1000);
     }
 
@@ -251,7 +253,7 @@ class OutboxRedisIntegrationTest {
     @Test
     void 活动结果_落库后发布同一份字节_副本在就重发_消费方删掉后摘除() throws Exception {
         long battle = BATTLE_BASE + 100 + sequence.incrementAndGet();
-        String key = RedisKeys.battleActivityResult(battle);
+        String key = REDIS_KEYS.battleActivityResult(battle);
         written.add(key);
         BattleResultEvent event = BattleResultEvent.newBuilder().setBattleId(battle).setTotalRounds(4).addFledPlayerIds(11)
                 .setActivityContext(BattleActivityContext.newBuilder().setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_TRIAL)

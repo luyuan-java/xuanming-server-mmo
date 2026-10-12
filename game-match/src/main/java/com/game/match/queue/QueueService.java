@@ -2,6 +2,7 @@ package com.game.match.queue;
 
 import com.game.api.match.MatchBudgets;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
 import com.game.match.MatchProperties;
@@ -102,17 +103,18 @@ public final class QueueService {
     private final GatherLauncher gather;
     private final MatchIds ids;
     private final MatchMetrics metrics;
+    private final RedisKeys redisKeys;
     private final Supplier<String> ticketIds;
 
     /** 生产装配：票号是 UUIDv4（小写带连字符，同基线 {@code uuid.New().String()}）。 */
     public QueueService(MatchProperties props, PlayerStatusReader players, TicketStore tickets, TicketHealing healing, RatingReader ratings,
-                        GatherLauncher gather, MatchIds ids, MatchMetrics metrics) {
-        this(props, players, tickets, healing, ratings, gather, ids, metrics, () -> UUID.randomUUID().toString());
+                        GatherLauncher gather, MatchIds ids, MatchMetrics metrics, RedisKeys redisKeys) {
+        this(props, players, tickets, healing, ratings, gather, ids, metrics, redisKeys, () -> UUID.randomUUID().toString());
     }
 
     /** @param ticketIds 票号来源（测试给确定的序列） */
     public QueueService(MatchProperties props, PlayerStatusReader players, TicketStore tickets, TicketHealing healing, RatingReader ratings,
-                        GatherLauncher gather, MatchIds ids, MatchMetrics metrics, Supplier<String> ticketIds) {
+                        GatherLauncher gather, MatchIds ids, MatchMetrics metrics, RedisKeys redisKeys, Supplier<String> ticketIds) {
         this.props = Objects.requireNonNull(props, "props");
         this.players = Objects.requireNonNull(players, "players");
         this.tickets = Objects.requireNonNull(tickets, "tickets");
@@ -121,6 +123,7 @@ public final class QueueService {
         this.gather = Objects.requireNonNull(gather, "gather");
         this.ids = Objects.requireNonNull(ids, "ids");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.ticketIds = Objects.requireNonNull(ticketIds, "ticketIds");
     }
 
@@ -310,7 +313,7 @@ public final class QueueService {
         }
         // 出队用票里记下的队列键，不按 (mode, config) 重算。队列键不是规范形的 queued 票只可能来自人为改数据：它进不了任何队列，
         // 按孤儿票的条件删（票号一致、仍是 queued、队列键没变）。
-        Optional<QueueRef> queue = QueueRef.ofQueueKey(ticket.queueKey());
+        Optional<QueueRef> queue = QueueRef.ofQueueKey(redisKeys, ticket.queueKey());
         boolean deleted = queue.isPresent() ? tickets.cancel(playerId, ticket.ticketId(), queue.get(), d)
                 : tickets.heal(playerId, ticket, HealMode.ORPHAN, d);
         if (!deleted) {

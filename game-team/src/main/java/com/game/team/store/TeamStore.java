@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ThreadLocalRandom;
@@ -130,14 +131,17 @@ public final class TeamStore {
     }
 
     private final TeamRedis redis;
+    /** 本部署命名空间的键名（装配时注入）。方法里的局部变量 {@code keys} 指一次 EVAL 的 KEYS 列表，所以字段不叫 keys。 */
+    private final RedisKeys redisKeys;
     private final Hooks hooks;
 
-    public TeamStore(TeamRedis redis) {
-        this(redis, Hooks.NONE);
+    public TeamStore(TeamRedis redis, RedisKeys redisKeys) {
+        this(redis, redisKeys, Hooks.NONE);
     }
 
-    public TeamStore(TeamRedis redis, Hooks hooks) {
+    public TeamStore(TeamRedis redis, RedisKeys redisKeys, Hooks hooks) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.hooks = hooks == null ? Hooks.NONE : hooks;
     }
 
@@ -283,7 +287,7 @@ public final class TeamStore {
             throw new DependencyException("提交集合违反契约（程序缺陷）team=" + Long.toUnsignedString(teamId) + ": "
                     + e.getMessage(), e);
         }
-        CommitSets.Call call = CommitSets.build(teamId, expectedVer, d);
+        CommitSets.Call call = CommitSets.build(redisKeys, teamId, expectedVer, d);
         hooks.beforeCommitEval(d, call.keys(), call.args());
         Object raw = eval(TeamScript.COMMIT, call.keys(), call.args(), deadline, "S_COMMIT team=" + Long.toUnsignedString(teamId));
         return TeamReplies.parseCommit(raw, teamId, d, nowMs);
@@ -487,7 +491,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障、回复形状不对、记录解不开
      */
     public Snapshot read(long playerId, long teamId, Deadline deadline) {
-        Object raw = eval(TeamScript.READ, List.of(RedisKeys.teamPlayer(playerId), RedisKeys.teamRecord(teamId)), List.of(),
+        Object raw = eval(TeamScript.READ, List.of(redisKeys.teamPlayer(playerId), redisKeys.teamRecord(teamId)), List.of(),
                 deadline, "S_READ player=" + Long.toUnsignedString(playerId) + " team=" + Long.toUnsignedString(teamId));
         return TeamReplies.parseRead(playerId, teamId, raw);
     }
@@ -504,9 +508,9 @@ public final class TeamStore {
         String what = "S_READ_MEMBERS team=" + Long.toUnsignedString(teamId);
         for (int i = 0; i < READ_MEMBERS_RETRIES; i++) {
             List<Object> keys = new ArrayList<>(1 + members.size());
-            keys.add(RedisKeys.teamRecord(teamId));
+            keys.add(redisKeys.teamRecord(teamId));
             for (long pid : members) {
-                keys.add(RedisKeys.teamPlayer(pid));
+                keys.add(redisKeys.teamPlayer(pid));
             }
             List<Object> arr = TeamReplies.multi(eval(TeamScript.READ_MEMBERS, keys, List.of(), deadline, what), what);
             if (arr.size() != 3 + 2 * members.size()) {
@@ -553,10 +557,10 @@ public final class TeamStore {
         TeamRecord rec = snap.record();
         long tid = rec.getTeamId();
         List<Object> keys = new ArrayList<>(2 + rec.getMembersCount());
-        keys.add(RedisKeys.teamRecord(tid));
-        keys.add(RedisKeys.teamInfo(tid));
+        keys.add(redisKeys.teamRecord(tid));
+        keys.add(redisKeys.teamInfo(tid));
         for (long pid : TeamRules.memberIds(rec)) {
-            keys.add(RedisKeys.teamPlayer(pid));
+            keys.add(redisKeys.teamPlayer(pid));
         }
         List<byte[]> args = List.of(CommitSets.ascii(Long.toUnsignedString(snap.version())), TTL_ARG.clone(),
                 projectionOf(rec).toByteArray(), CommitSets.ascii(Long.toUnsignedString(tid)));
@@ -570,7 +574,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障
      */
     public boolean healOrphan(long playerId, long teamId, Deadline deadline) {
-        Object raw = eval(TeamScript.HEAL_ORPHAN, List.of(RedisKeys.teamPlayer(playerId), RedisKeys.teamRecord(teamId)),
+        Object raw = eval(TeamScript.HEAL_ORPHAN, List.of(redisKeys.teamPlayer(playerId), redisKeys.teamRecord(teamId)),
                 List.of(CommitSets.ascii(Long.toUnsignedString(teamId)), TTL_ARG.clone()), deadline,
                 "S_HEAL_ORPHAN player=" + Long.toUnsignedString(playerId) + " team=" + Long.toUnsignedString(teamId));
         return isOne(raw);
@@ -585,7 +589,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障、回复形状不对、score 不是十进制数
      */
     public InviteList listInvites(long playerId, Deadline deadline) {
-        Object raw = eval(TeamScript.INVITE_LIST, List.of(RedisKeys.teamInvite(playerId)), List.of(), deadline,
+        Object raw = eval(TeamScript.INVITE_LIST, List.of(redisKeys.teamInvite(playerId)), List.of(), deadline,
                 "S_INVITE_LIST player=" + Long.toUnsignedString(playerId));
         return TeamReplies.parseInviteList(raw);
     }
@@ -596,7 +600,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障
      */
     public boolean pruneInvite(long playerId, long teamId, String score, Deadline deadline) {
-        Object raw = eval(TeamScript.INVITE_PRUNE, List.of(RedisKeys.teamInvite(playerId)),
+        Object raw = eval(TeamScript.INVITE_PRUNE, List.of(redisKeys.teamInvite(playerId)),
                 List.of(CommitSets.ascii(Long.toUnsignedString(teamId)), score.getBytes(StandardCharsets.ISO_8859_1)),
                 deadline, "S_INVITE_PRUNE player=" + Long.toUnsignedString(playerId) + " team=" + Long.toUnsignedString(teamId));
         return isOne(raw);
@@ -617,7 +621,7 @@ public final class TeamStore {
 
     /** 玩家索引的 tid（store.go:722-731）：键或字段不存在为 0；值不是无符号十进制是故障。 */
     private long indexTeamId(long playerId, Deadline deadline) {
-        byte[] raw = await(redis.hget(RedisKeys.teamPlayer(playerId), TeamRedisFields.TID), deadline,
+        byte[] raw = await(redis.hget(redisKeys.teamPlayer(playerId), TeamRedisFields.TID), deadline,
                 "HGET 组队索引 player=" + Long.toUnsignedString(playerId));
         return raw == null ? 0 : TeamReplies.parseIndexTid(raw, playerId);
     }

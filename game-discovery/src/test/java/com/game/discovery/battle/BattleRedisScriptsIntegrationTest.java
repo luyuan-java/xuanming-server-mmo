@@ -3,6 +3,7 @@ package com.game.discovery.battle;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleRedis.EnterRead;
 import com.game.discovery.battle.BattleRedis.SettlementField;
@@ -42,6 +43,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class BattleRedisScriptsIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     static final int DB = 15;
 
     /** 玩家号与战斗号都取高位为 1（≥ 2^63）的值：键名、Lua 里的等值比较、解析都必须按无符号十进制。 */
@@ -64,7 +67,7 @@ class BattleRedisScriptsIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(DB);
         redis = Redisson.create(config);
-        scripts = new BattleRedis(redis);
+        scripts = new BattleRedis(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -80,10 +83,10 @@ class BattleRedisScriptsIntegrationTest {
     /** 一个新玩家号；它的锁、记录、X / Y 两局的墓碑都登记进清理名单。 */
     private static long newPlayer() {
         long player = PLAYER_BASE + playerSeq.incrementAndGet();
-        written.add(RedisKeys.battleLock(player));
-        written.add(RedisKeys.battleSettlements(player));
-        written.add(RedisKeys.battleSettled(player, X));
-        written.add(RedisKeys.battleSettled(player, Y));
+        written.add(REDIS_KEYS.battleLock(player));
+        written.add(REDIS_KEYS.battleSettlements(player));
+        written.add(REDIS_KEYS.battleSettled(player, X));
+        written.add(REDIS_KEYS.battleSettled(player, Y));
         return player;
     }
 
@@ -92,7 +95,7 @@ class BattleRedisScriptsIntegrationTest {
     }
 
     private static RMap<String, String> lockMap(long player) {
-        return redis.getMap(RedisKeys.battleLock(player), StringCodec.INSTANCE);
+        return redis.getMap(REDIS_KEYS.battleLock(player), StringCodec.INSTANCE);
     }
 
     private static Map<String, String> lock(long player) {
@@ -120,7 +123,7 @@ class BattleRedisScriptsIntegrationTest {
     }
 
     private static RMap<String, byte[]> settlementMap(long player) {
-        return redis.getMap(RedisKeys.battleSettlements(player), new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE));
+        return redis.getMap(REDIS_KEYS.battleSettlements(player), new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE));
     }
 
     /** 直接写一条待结算记录（不经被测脚本）。 */
@@ -131,7 +134,7 @@ class BattleRedisScriptsIntegrationTest {
     /** 直接按原始字节写一个字段（坏字段名用）。 */
     private static void seedRawField(long player, byte[] rawName, byte[] value) {
         redis.getScript(ByteArrayCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, "return redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])",
-                RScript.ReturnType.INTEGER, List.<Object>of(RedisKeys.battleSettlements(player)), rawName, value);
+                RScript.ReturnType.INTEGER, List.<Object>of(REDIS_KEYS.battleSettlements(player)), rawName, value);
     }
 
     private static long ttlMs(String key) {
@@ -149,7 +152,7 @@ class BattleRedisScriptsIntegrationTest {
     }
 
     private static String tomb(long player, long battle) {
-        return RedisKeys.battleSettled(player, battle);
+        return REDIS_KEYS.battleSettled(player, battle);
     }
 
     private static byte[] bytes(int... values) {
@@ -178,7 +181,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(results).containsExactly("0", "0");
         assertThat(lock(player)).isEqualTo(lockFields(X, "2147483649", "P", 1_760_000_096_000L, 1_760_000_030_000L));
-        assertTtlSec(RedisKeys.battleLock(player), 156);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 156);
     }
 
     @Test
@@ -190,7 +193,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(held).isEqualTo("0");
         assertThat(lock(player)).isEqualTo(lockFields(X, "8", "P", 2000, 1900));
-        assertTtlSec(RedisKeys.battleLock(player), 500);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 500);
     }
 
     @Test
@@ -202,7 +205,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(results).containsExactly(XS, XS);
         assertThat(lock(player)).isEqualTo(lockFields(X, "7", "F", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(player), 1000);   // 没被改成 50：在打的局不会被改回备战期 TTL
+        assertTtlSec(REDIS_KEYS.battleLock(player), 1000);   // 没被改成 50：在打的局不会被改回备战期 TTL
     }
 
     @Test
@@ -214,7 +217,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(results).containsExactly(YS, YS);
         assertThat(lock(player)).isEqualTo(lockFields(Y, "7", "P", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(player), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 1000);
     }
 
     /**
@@ -234,7 +237,7 @@ class BattleRedisScriptsIntegrationTest {
         Map<String, String> expected = lockFields(X, "8", "P", 2000, 1900);
         expected.put("zz", "keep");
         assertThat(lock(player)).isEqualTo(expected);
-        assertTtlSec(RedisKeys.battleLock(player), 50);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 50);
     }
 
     // ================================================================== CONFIRM
@@ -250,7 +253,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(results.get(0)).isEqualTo(expected);
         assertThat(results.get(1)).isEqualTo(expected);
         assertThat(lock(player)).isEqualTo(expected);
-        assertTtlSec(RedisKeys.battleLock(player), 500);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 500);
     }
 
     @Test
@@ -262,7 +265,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(fields).isEqualTo(lockFields(X, "7", "F", 1000, 900));
         assertThat(lock(player)).isEqualTo(lockFields(X, "7", "F", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(player), 1000);   // 仍带原来的 TTL：既没被续成别的值，也没被抹成永不过期
+        assertTtlSec(REDIS_KEYS.battleLock(player), 1000);   // 仍带原来的 TTL：既没被续成别的值，也没被抹成永不过期
     }
 
     @Test
@@ -270,12 +273,12 @@ class BattleRedisScriptsIntegrationTest {
         long onlyTtl = newPlayer();
         seedLock(onlyTtl, X, "P", 1000, 900, 1000);
         assertThat(await(scripts.confirm(onlyTtl, X, 0, 300))).isEqualTo(lockFields(X, "7", "F", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(onlyTtl), 300);
+        assertTtlSec(REDIS_KEYS.battleLock(onlyTtl), 300);
 
         long onlyDeadline = newPlayer();
         seedLock(onlyDeadline, X, "P", 1000, 900, 1000);
         assertThat(await(scripts.confirm(onlyDeadline, X, 2000, 0))).isEqualTo(lockFields(X, "7", "F", 2000, 900));
-        assertTtlSec(RedisKeys.battleLock(onlyDeadline), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(onlyDeadline), 1000);
     }
 
     @Test
@@ -285,13 +288,13 @@ class BattleRedisScriptsIntegrationTest {
         List<Map<String, String>> none = twice(() -> scripts.confirm(absent, X, 2000, 500));
         assertThat(none.get(0)).isNull();
         assertThat(none.get(1)).isNull();
-        assertThat(exists(RedisKeys.battleLock(absent))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(absent))).isFalse();
 
         long other = newPlayer();
         seedLock(other, Y, "P", 1000, 900, 1000);
         assertThat(await(scripts.confirm(other, X, 2000, 50))).isNull();
         assertThat(lock(other)).isEqualTo(lockFields(Y, "7", "P", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(other), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(other), 1000);
     }
 
     // ================================================================== CANCEL_OFFLINE / 只删备战锁
@@ -307,7 +310,7 @@ class BattleRedisScriptsIntegrationTest {
         seedLock(preparing, X, "P", 1000, 900, 1000);
         assertThat(twice(() -> delete.call(preparing, X)))
                 .containsExactly(BattleRedis.PREPARING_DELETE_DONE, BattleRedis.PREPARING_DELETE_MISS);
-        assertThat(exists(RedisKeys.battleLock(preparing))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(preparing))).isFalse();
 
         // 是本局、已 F → 拒绝回 2，锁的字段与 TTL 都不变；重放仍回 2
         long fighting = newPlayer();
@@ -315,7 +318,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(twice(() -> delete.call(fighting, X)))
                 .containsExactly(BattleRedis.PREPARING_DELETE_FIGHTING, BattleRedis.PREPARING_DELETE_FIGHTING);
         assertThat(lock(fighting)).isEqualTo(lockFields(X, "7", "F", 2000, 900));
-        assertTtlSec(RedisKeys.battleLock(fighting), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(fighting), 1000);
 
         // 别的局 → 0，不误删
         long other = newPlayer();
@@ -326,7 +329,7 @@ class BattleRedisScriptsIntegrationTest {
         // 没有锁 → 0，不创建键
         long absent = newPlayer();
         assertThat(await(delete.call(absent, X))).isEqualTo(BattleRedis.PREPARING_DELETE_MISS);
-        assertThat(exists(RedisKeys.battleLock(absent))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(absent))).isFalse();
     }
 
     @Test
@@ -349,7 +352,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(await(scripts.deletePreparingIfMatch(player, X))).isEqualTo(BattleRedis.PREPARING_DELETE_FIGHTING);
 
         assertThat(lock(player)).isEqualTo(lockFields(X, "7", "F", 2000, 900));
-        assertTtlSec(RedisKeys.battleLock(player), 500);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 500);
     }
 
     // ================================================================== DELETE_IF_MATCH
@@ -360,18 +363,18 @@ class BattleRedisScriptsIntegrationTest {
         seedLock(other, Y, "P", 1000, 900, 1000);
         assertThat(twice(() -> scripts.deleteIfMatch(other, X))).containsExactly(0L, 0L);
         assertThat(lock(other)).isEqualTo(lockFields(Y, "7", "P", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(other), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(other), 1000);
 
         long preparing = newPlayer();
         seedLock(preparing, X, "P", 1000, 900, 1000);
         assertThat(twice(() -> scripts.deleteIfMatch(preparing, X))).containsExactly(1L, 0L);
-        assertThat(exists(RedisKeys.battleLock(preparing))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(preparing))).isFalse();
 
         // 与「只删备战锁」的区别：F 也删（reaper 判废用）
         long fighting = newPlayer();
         seedLock(fighting, X, "F", 1000, 900, 1000);
         assertThat(twice(() -> scripts.deleteIfMatch(fighting, X))).containsExactly(1L, 0L);
-        assertThat(exists(RedisKeys.battleLock(fighting))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(fighting))).isFalse();
 
         long absent = newPlayer();
         assertThat(await(scripts.deleteIfMatch(absent, X))).isZero();
@@ -386,13 +389,13 @@ class BattleRedisScriptsIntegrationTest {
     void 复核_不命中回0_不创建键也不动别的局() throws Exception {
         long absent = newPlayer();
         assertThat(twice(() -> scripts.touch(absent, X, 500, "F", 2000, 900))).containsExactly(BattleRedis.TOUCH_MISS, BattleRedis.TOUCH_MISS);
-        assertThat(exists(RedisKeys.battleLock(absent))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(absent))).isFalse();
 
         long other = newPlayer();
         seedLock(other, Y, "P", 1000, 900, 1000);
         assertThat(await(scripts.touch(other, X, 50, "F", 2000, 1900))).isEqualTo(BattleRedis.TOUCH_MISS);
         assertThat(lock(other)).isEqualTo(lockFields(Y, "7", "P", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(other), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(other), 1000);
     }
 
     @Test
@@ -401,21 +404,21 @@ class BattleRedisScriptsIntegrationTest {
         seedLock(preparing, X, "P", 1000, 900, 50);
         assertThat(twice(() -> scripts.touch(preparing, X, 500, "P", 2000, 1900))).containsExactly(BattleRedis.TOUCH_HIT, BattleRedis.TOUCH_HIT);
         assertThat(lock(preparing)).isEqualTo(lockFields(X, "7", "P", 2000, 1900));
-        assertTtlSec(RedisKeys.battleLock(preparing), 500);
+        assertTtlSec(REDIS_KEYS.battleLock(preparing), 500);
 
         // P 锁上 TOUCH(F)：照写（升级方向不受限）
         long upgraded = newPlayer();
         seedLock(upgraded, X, "P", 1000, 900, 50);
         assertThat(await(scripts.touch(upgraded, X, 500, "F", 2000, 900))).isEqualTo(BattleRedis.TOUCH_HIT);
         assertThat(lock(upgraded)).isEqualTo(lockFields(X, "7", "F", 2000, 900));
-        assertTtlSec(RedisKeys.battleLock(upgraded), 500);
+        assertTtlSec(REDIS_KEYS.battleLock(upgraded), 500);
 
         // F 锁上 TOUCH(F)：照写
         long fighting = newPlayer();
         seedLock(fighting, X, "F", 1000, 900, 1000);
         assertThat(twice(() -> scripts.touch(fighting, X, 300, "F", 3000, 900))).containsExactly(BattleRedis.TOUCH_HIT, BattleRedis.TOUCH_HIT);
         assertThat(lock(fighting)).isEqualTo(lockFields(X, "7", "F", 3000, 900));
-        assertTtlSec(RedisKeys.battleLock(fighting), 300);
+        assertTtlSec(REDIS_KEYS.battleLock(fighting), 300);
     }
 
     @Test
@@ -427,7 +430,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(results).containsExactly(BattleRedis.TOUCH_KEPT_FIGHTING, BattleRedis.TOUCH_KEPT_FIGHTING);
         assertThat(lock(player)).isEqualTo(lockFields(X, "7", "F", 2000, 900));   // 没降回 P，d / p 没被备战期的值覆盖
-        assertTtlSec(RedisKeys.battleLock(player), 1000);                          // TTL 没被缩回 50
+        assertTtlSec(REDIS_KEYS.battleLock(player), 1000);                          // TTL 没被缩回 50
     }
 
     @Test
@@ -442,7 +445,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(late).containsExactly(BattleRedis.TOUCH_KEPT_FIGHTING, BattleRedis.TOUCH_KEPT_FIGHTING);
         assertThat(lock(player)).isEqualTo(lockFields(X, "7", "F", 600_000, 30_000));
-        assertTtlSec(RedisKeys.battleLock(player), 660);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 660);
     }
 
     // ================================================================== HOLD
@@ -453,20 +456,20 @@ class BattleRedisScriptsIntegrationTest {
         long shorter = newPlayer();
         seedLock(shorter, X, "F", 1000, 900, 50);
         assertThat(twice(() -> scripts.hold(shorter, X, 180))).containsExactly(1L, 1L);
-        assertTtlSec(RedisKeys.battleLock(shorter), 180);
+        assertTtlSec(REDIS_KEYS.battleLock(shorter), 180);
 
         // TTL 大于 hold → 不缩
         long longer = newPlayer();
         seedLock(longer, X, "F", 1000, 900, 1000);
         assertThat(twice(() -> scripts.hold(longer, X, 180))).containsExactly(1L, 1L);
-        assertTtlSec(RedisKeys.battleLock(longer), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(longer), 1000);
 
         // 永不过期（TTL = -1）→ 不加 TTL
         long persistent = newPlayer();
         seedLock(persistent, X, "F", 1000, 900, 0);
-        assertThat(ttlMs(RedisKeys.battleLock(persistent))).isEqualTo(-1);
+        assertThat(ttlMs(REDIS_KEYS.battleLock(persistent))).isEqualTo(-1);
         assertThat(await(scripts.hold(persistent, X, 180))).isEqualTo(1L);
-        assertThat(ttlMs(RedisKeys.battleLock(persistent))).isEqualTo(-1);
+        assertThat(ttlMs(REDIS_KEYS.battleLock(persistent))).isEqualTo(-1);
 
         // 字段不动
         assertThat(lock(shorter)).isEqualTo(lockFields(X, "7", "F", 1000, 900));
@@ -477,11 +480,11 @@ class BattleRedisScriptsIntegrationTest {
         long other = newPlayer();
         seedLock(other, Y, "F", 1000, 900, 50);
         assertThat(twice(() -> scripts.hold(other, X, 180))).containsExactly(0L, 0L);
-        assertThat(ttlMs(RedisKeys.battleLock(other))).isBetween(1L, 50_000L);
+        assertThat(ttlMs(REDIS_KEYS.battleLock(other))).isBetween(1L, 50_000L);
 
         long absent = newPlayer();
         assertThat(await(scripts.hold(absent, X, 180))).isZero();
-        assertThat(exists(RedisKeys.battleLock(absent))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(absent))).isFalse();
     }
 
     // ================================================================== ACK
@@ -506,10 +509,10 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(bits).as(label).isEqualTo(expectedBits);
         assertThat(settlementMap(player).containsKey(XS)).as("%s：记录已删", label).isFalse();
         switch (lockState) {
-            case OURS, ABSENT -> assertThat(exists(RedisKeys.battleLock(player))).as("%s：锁不在", label).isFalse();
+            case OURS, ABSENT -> assertThat(exists(REDIS_KEYS.battleLock(player))).as("%s：锁不在", label).isFalse();
             case OTHER -> {
                 assertThat(lock(player)).as("%s：别的局的锁不动", label).isEqualTo(lockFields(Y, "7", "P", 1000, 900));
-                assertTtlSec(RedisKeys.battleLock(player), 1000);
+                assertTtlSec(REDIS_KEYS.battleLock(player), 1000);
             }
         }
         // 无论记录在不在、锁是谁的，都写墓碑
@@ -546,11 +549,11 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(settlementMap(player).readAllMap().keySet()).containsExactly(YS);
         assertThat(settlementMap(player).get(YS)).isEqualTo(bytes(2));
-        assertTtlSec(RedisKeys.battleSettlements(player), 1000);   // 销账不动整键 TTL
+        assertTtlSec(REDIS_KEYS.battleSettlements(player), 1000);   // 销账不动整键 TTL
 
         assertThat(await(scripts.ack(player, Y))).isEqualTo(1L);
 
-        assertThat(exists(RedisKeys.battleSettlements(player))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleSettlements(player))).isFalse();
         assertThat(exists(tomb(player, X))).isTrue();
         assertThat(exists(tomb(player, Y))).isTrue();
     }
@@ -604,8 +607,8 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(read.settlements()).containsExactlyInAnyOrder(SettlementField.of(X, first), SettlementField.of(Y, second));
         // 只读：锁、记录、TTL 都没变，没有墓碑
         assertThat(lock(player)).isEqualTo(lockFields(Y, "7", "F", 2000, 900));
-        assertTtlSec(RedisKeys.battleLock(player), 1000);
-        assertTtlSec(RedisKeys.battleSettlements(player), 2000);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 1000);
+        assertTtlSec(REDIS_KEYS.battleSettlements(player), 2000);
         assertThat(settlementMap(player).size()).isEqualTo(2);
         assertThat(exists(tomb(player, X))).isFalse();
     }
@@ -659,7 +662,7 @@ class BattleRedisScriptsIntegrationTest {
     void 删字段_键不存在回0() throws Exception {
         long player = newPlayer();
         assertThat(await(scripts.deleteSettlementField(player, bytes('7')))).isZero();
-        assertThat(exists(RedisKeys.battleSettlements(player))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleSettlements(player))).isFalse();
     }
 
     @Test
@@ -685,7 +688,7 @@ class BattleRedisScriptsIntegrationTest {
 
         lockMap(player).fastPut("b", "not-a-number");
         assertThat(await(scripts.readLockBattleId(player))).isZero();
-        assertTtlSec(RedisKeys.battleLock(player), 1000);   // 只读
+        assertTtlSec(REDIS_KEYS.battleLock(player), 1000);   // 只读
     }
 
     // ================================================================== STORE_SETTLEMENT 与墓碑
@@ -700,7 +703,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(results).containsExactly(1L, 1L);
         assertThat(settlementMap(player).readAllMap().keySet()).containsExactly(XS);
         assertThat(settlementMap(player).get(XS)).isEqualTo(payload);
-        assertTtlSec(RedisKeys.battleSettlements(player), BattleRedis.SETTLEMENT_TTL_SEC);
+        assertTtlSec(REDIS_KEYS.battleSettlements(player), BattleRedis.SETTLEMENT_TTL_SEC);
         assertThat(exists(tomb(player, X))).isFalse();   // 落库不写墓碑
     }
 
@@ -708,11 +711,11 @@ class BattleRedisScriptsIntegrationTest {
     void 落库_每局一个字段_第二局回2_整键TTL被刷新() throws Exception {
         long player = newPlayer();
         assertThat(await(scripts.storeSettlement(player, X, bytes(1), 100))).isEqualTo(1L);
-        assertTtlSec(RedisKeys.battleSettlements(player), 100);
+        assertTtlSec(REDIS_KEYS.battleSettlements(player), 100);
 
         assertThat(await(scripts.storeSettlement(player, Y, bytes(2), BattleRedis.SETTLEMENT_TTL_SEC))).isEqualTo(2L);
 
-        assertTtlSec(RedisKeys.battleSettlements(player), BattleRedis.SETTLEMENT_TTL_SEC);
+        assertTtlSec(REDIS_KEYS.battleSettlements(player), BattleRedis.SETTLEMENT_TTL_SEC);
         assertThat(settlementMap(player).get(XS)).isEqualTo(bytes(1));
         assertThat(settlementMap(player).get(YS)).isEqualTo(bytes(2));
         // 同一局再落一次（内容变了也只是覆盖）：字段数不变
@@ -733,7 +736,7 @@ class BattleRedisScriptsIntegrationTest {
         List<Long> late = twice(() -> scripts.storeSettlement(player, X, payload, BattleRedis.SETTLEMENT_TTL_SEC));
 
         assertThat(late).containsExactly(BattleRedis.STORE_ALREADY_SETTLED, BattleRedis.STORE_ALREADY_SETTLED);
-        assertThat(exists(RedisKeys.battleSettlements(player))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleSettlements(player))).isFalse();
         assertThat(await(scripts.settlementExists(player, X))).isFalse();
         assertThat(await(scripts.readSettlement(player, X))).isNull();
         assertThat(await(scripts.enterRead(player)).settlements()).isEmpty();   // 下次进场读不到孤儿记录
@@ -748,7 +751,7 @@ class BattleRedisScriptsIntegrationTest {
 
         assertThat(await(scripts.storeSettlement(player, X, bytes(1), BattleRedis.SETTLEMENT_TTL_SEC))).isEqualTo(BattleRedis.STORE_ALREADY_SETTLED);
 
-        assertThat(exists(RedisKeys.battleSettlements(player))).isFalse();
+        assertThat(exists(REDIS_KEYS.battleSettlements(player))).isFalse();
     }
 
     @Test
@@ -761,11 +764,11 @@ class BattleRedisScriptsIntegrationTest {
         // X 已销账：被挡，键上只剩 Y，TTL 仍是 100（没被这次落库刷成 7 天）
         assertThat(await(scripts.storeSettlement(player, X, bytes(1), BattleRedis.SETTLEMENT_TTL_SEC))).isEqualTo(BattleRedis.STORE_ALREADY_SETTLED);
         assertThat(settlementMap(player).readAllMap().keySet()).containsExactly(YS);
-        assertTtlSec(RedisKeys.battleSettlements(player), 100);
+        assertTtlSec(REDIS_KEYS.battleSettlements(player), 100);
 
         // Y 没销账：照常落库（重放幂等），回字段数 1
         assertThat(await(scripts.storeSettlement(player, Y, bytes(2), BattleRedis.SETTLEMENT_TTL_SEC))).isEqualTo(1L);
-        assertTtlSec(RedisKeys.battleSettlements(player), BattleRedis.SETTLEMENT_TTL_SEC);
+        assertTtlSec(REDIS_KEYS.battleSettlements(player), BattleRedis.SETTLEMENT_TTL_SEC);
 
         // 另一名玩家的同一局不受影响（墓碑按 (玩家, 战斗)）
         long another = newPlayer();
@@ -826,7 +829,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(twice(() -> scripts.ackIfSuperseded(ours, X))).containsExactly(1L, 1L);
         assertThat(settlementMap(ours).get(XS)).isEqualTo(bytes(1));
         assertThat(lock(ours)).isEqualTo(lockFields(X, "7", "F", 1000, 900));
-        assertTtlSec(RedisKeys.battleLock(ours), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(ours), 1000);
         assertThat(exists(tomb(ours, X))).isFalse();
     }
 
@@ -842,7 +845,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(results).containsExactly(2L, 3L);
         assertThat(settlementMap(player).readAllMap().keySet()).containsExactly(YS);   // 只删本局字段
         assertThat(lock(player)).isEqualTo(lockFields(Y, "7", "P", 1000, 900));         // 下一局的锁不动
-        assertTtlSec(RedisKeys.battleLock(player), 1000);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 1000);
         assertThat(redis.<String>getBucket(tomb(player, X), StringCodec.INSTANCE).get()).isEqualTo("1");
         assertTtlSec(tomb(player, X), BattleRedis.SETTLED_TOMBSTONE_TTL_SEC);
         assertThat(exists(tomb(player, Y))).isFalse();
@@ -857,7 +860,7 @@ class BattleRedisScriptsIntegrationTest {
     @Test
     void 活动结果_SET_EX与EXISTS_值原样_重放幂等() throws Exception {
         long battle = BATTLE_BASE + 100 + playerSeq.incrementAndGet();
-        String key = RedisKeys.battleActivityResult(battle);
+        String key = REDIS_KEYS.battleActivityResult(battle);
         written.add(key);
         byte[] payload = bytes(0x00, 0xFF, 0x42);
         assertThat(await(scripts.activityResultExists(battle))).isFalse();
@@ -887,7 +890,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(await(scripts.readSettlement(player, X))).isEqualTo(payload);
         assertThat(await(scripts.ackIfSuperseded(player, X))).isEqualTo(1L);   // 离线分支看：仍是本局
         assertThat(await(scripts.hold(player, X, BattleRedis.LOCK_HOLD_AFTER_APPLY_SEC))).isEqualTo(1L);
-        assertTtlSec(RedisKeys.battleLock(player), 660);                        // 660 > 180：只延不缩
+        assertTtlSec(REDIS_KEYS.battleLock(player), 660);                        // 660 > 180：只延不缩
 
         assertThat(await(scripts.ack(player, X))).isEqualTo(3L);
 
@@ -920,8 +923,8 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(await(scripts.ackIfSuperseded(player, X))).isEqualTo(3L);
         assertThat(await(scripts.storeSettlement(player, X, bytes(1), BattleRedis.SETTLEMENT_TTL_SEC))).isEqualTo(BattleRedis.STORE_ALREADY_SETTLED);
 
-        assertThat(exists(RedisKeys.battleLock(player))).as("锁没有被造回来").isFalse();
-        assertThat(exists(RedisKeys.battleSettlements(player))).as("记录没有被造回来").isFalse();
+        assertThat(exists(REDIS_KEYS.battleLock(player))).as("锁没有被造回来").isFalse();
+        assertThat(exists(REDIS_KEYS.battleSettlements(player))).as("记录没有被造回来").isFalse();
         EnterRead after = await(scripts.enterRead(player));
         assertThat(after.lockTtlSec()).isEqualTo(-2);
         assertThat(after.settlements()).isEmpty();
@@ -938,7 +941,7 @@ class BattleRedisScriptsIntegrationTest {
         assertThat(twice(() -> scripts.ack(player, X))).containsExactly(1L, 0L);
 
         assertThat(lock(player)).isEqualTo(lockFields(Y, "7", "P", 96_000, 30_000));
-        assertTtlSec(RedisKeys.battleLock(player), 156);
+        assertTtlSec(REDIS_KEYS.battleLock(player), 156);
         assertThat(settlementMap(player).readAllMap().keySet()).containsExactly(YS);
         assertThat(exists(tomb(player, Y))).isFalse();
         // Y 的落库重放照常幂等（X 的墓碑不挡 Y），Y 的确认照常命中
@@ -953,7 +956,7 @@ class BattleRedisScriptsIntegrationTest {
         // OBX-9 / D15：没问到结论不能当成「不在」。这里用一段回 nil 的脚本走同一条 integer 路径
         long player = newPlayer();
         CompletableFuture<Long> future = scripts.integer("NIL_PROBE", "return redis.call('HGET', KEYS[1], 'missing')",
-                List.of(RedisKeys.battleSettlements(player)));
+                List.of(REDIS_KEYS.battleSettlements(player)));
 
         assertThatThrownBy(() -> future.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
                 .hasRootCauseInstanceOf(IllegalStateException.class).hasStackTraceContaining("NIL_PROBE 回复为空");
@@ -963,7 +966,7 @@ class BattleRedisScriptsIntegrationTest {
     void 脚本报错_异常完成() {
         // 对 String 键做 HGET → WRONGTYPE：future 异常完成（调用方走各自的「出错」分支，不当成没有锁）
         long player = newPlayer();
-        redis.getBucket(RedisKeys.battleLock(player), StringCodec.INSTANCE).set("not-a-hash");
+        redis.getBucket(REDIS_KEYS.battleLock(player), StringCodec.INSTANCE).set("not-a-hash");
 
         assertThatThrownBy(() -> await(scripts.readLockBattleId(player))).isInstanceOf(ExecutionException.class);
         assertThatThrownBy(() -> await(scripts.enterRead(player))).isInstanceOf(ExecutionException.class);
@@ -977,7 +980,7 @@ class BattleRedisScriptsIntegrationTest {
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(DB);
         RedissonClient closed = Redisson.create(config);
         closed.shutdown();
-        BattleRedis dead = new BattleRedis(closed);
+        BattleRedis dead = new BattleRedis(closed, REDIS_KEYS);
         long player = PLAYER_BASE;
 
         List<Supplier<CompletableFuture<?>>> calls = List.of(

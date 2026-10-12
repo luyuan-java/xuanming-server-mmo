@@ -7,6 +7,7 @@ import static com.game.guild.service.ScriptedStore.withRole;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.discovery.RedisKeys;
 import com.game.guild.rules.GuildReject;
@@ -47,6 +48,8 @@ import org.junit.jupiter.api.Test;
  * guild_manage_logic_test.go 的 TestTargetValidationBeforeRepo、TestReviewApproveChecksApplicantZoneBeforeRepo、guild_logic_names_test.go）。
  */
 class GuildManageServiceTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long ME = 42;
     private static final long T = 7;
@@ -143,7 +146,7 @@ class GuildManageServiceTest {
         assertThat(push.change().getActorPlayerId()).isEqualTo(ME);
         assertThat(push.change().getTargetPlayerId()).isEqualTo(T);
         assertThat(push.recipients()).containsExactly(T, 8L);
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildSnapshot(G))).isBetween(0, f.indexOf("push"));
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(G))).isBetween(0, f.indexOf("push"));
         // 长老上限按帮会等级现查配表
         assertThat(f.store.lastCaps.maxOfficers(1)).hasValue(GuildServiceFixture.MAX_OFFICERS);
     }
@@ -158,7 +161,7 @@ class GuildManageServiceTest {
                 SetGuildMemberRoleRequest.newBuilder().setTargetPlayerId(T).setRole(1).build(), d());
         assertThat(r.hasGuild()).isTrue();
         assertThat(f.pushes).isEmpty();
-        assertThat(f.called("invalidate " + RedisKeys.guildSnapshot(G))).isFalse();
+        assertThat(f.called("invalidate " + REDIS_KEYS.guildSnapshot(G))).isFalse();
     }
 
     @Test
@@ -192,8 +195,8 @@ class GuildManageServiceTest {
         assertThat(push.change().getTargetPlayerId()).isEqualTo(T);
         assertThat(push.recipients()).containsExactly(5L, 8L, T);
         int pushAt = f.indexOf("push");
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildSnapshot(G))).isBetween(0, pushAt);
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(T))).isBetween(0, pushAt);
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(G))).isBetween(0, pushAt);
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(T))).isBetween(0, pushAt);
     }
 
     @Test
@@ -209,7 +212,7 @@ class GuildManageServiceTest {
         f.journal.clear();
         assertThat(f.manage.kickGuildMember(ME, KickGuildMemberRequest.newBuilder().setTargetPlayerId(T).build(), d())
                 .getErrorMessage()).isEqualTo(GuildTip.NOT_A_MEMBER.proto());
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.kick"));
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(ME))).isGreaterThan(f.indexOf("store.kick"));
         assertThat(f.pushes).isEmpty();
     }
 
@@ -385,7 +388,7 @@ class GuildManageServiceTest {
         f.journal.clear();
         assertThat(f.manage.listGuildApplications(ME, ListGuildApplicationsRequest.getDefaultInstance(), d())
                 .getErrorMessage()).isEqualTo(GuildTip.NOT_A_MEMBER.proto());
-        assertThat(f.called("invalidate " + RedisKeys.guildOfPlayer(ME))).isTrue();
+        assertThat(f.called("invalidate " + REDIS_KEYS.guildOfPlayer(ME))).isTrue();
     }
 
     @Test
@@ -479,8 +482,8 @@ class GuildManageServiceTest {
         assertThat(push.change().getTargetPlayerId()).isEqualTo(T);
         assertThat(push.recipients()).containsExactly(5L, T);
         int pushAt = f.indexOf("push");
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildSnapshot(G))).isBetween(0, pushAt);
-        assertThat(f.indexOf("invalidate " + RedisKeys.guildOfPlayer(T))).isBetween(0, pushAt);
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildSnapshot(G))).isBetween(0, pushAt);
+        assertThat(f.indexOf("invalidate " + REDIS_KEYS.guildOfPlayer(T))).isBetween(0, pushAt);
     }
 
     @Test

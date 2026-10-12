@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory.StrictLookup;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.friend.cache.FriendCache;
@@ -33,6 +35,8 @@ import java.util.concurrent.RejectedExecutionException;
 import org.junit.jupiter.api.Test;
 
 class FriendDispatcherTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
     private static final int ADD = REGISTRY.requireId(FriendDispatcher.SERVICE, "AddFriend");
@@ -88,14 +92,14 @@ class FriendDispatcherTest {
                 return List.of();
             }
         };
-        FriendService service = new FriendService(store, new FriendCache(new InMemoryCacheRedis(), Duration.ofMinutes(1), metrics),
-                new FriendRequestQuota(k -> CompletableFuture.completedFuture(1L), 10, metrics), (ids, d) -> Map.of(),
+        FriendService service = new FriendService(store, new FriendCache(new InMemoryCacheRedis(), REDIS_KEYS, Duration.ofMinutes(1), metrics), REDIS_KEYS,
+                new FriendRequestQuota(k -> CompletableFuture.completedFuture(1L), REDIS_KEYS, 10, metrics), (ids, d) -> Map.of(),
                 ids -> CompletableFuture.completedFuture(new StrictLookup(Map.of(), 0, 0)),
                 (to, content) -> CompletableFuture.completedFuture(PlayerPushes.Outcome.OFFLINE),
                 metrics, 1000, Duration.ofMillis(100), System::currentTimeMillis, NOTIFY);
         RecommendService recommend = new RecommendService(new RecommendStore(null, 1, (lo, span) -> 0),
                 new OnlineDirectory(null, "game:presence:", (ids, d) -> Map.of()),
-                new DirectoryQuota(k -> CompletableFuture.completedFuture(1L), metrics), (ids, d) -> Map.of(),
+                new DirectoryQuota(k -> CompletableFuture.completedFuture(1L), REDIS_KEYS, metrics), (ids, d) -> Map.of(),
                 ids -> CompletableFuture.completedFuture(new StrictLookup(Map.of(), 0, 0)), metrics, 10, 20, 64);
         return new FriendDispatcher(REGISTRY, service, recommend, executor, metrics, 3500);
     }

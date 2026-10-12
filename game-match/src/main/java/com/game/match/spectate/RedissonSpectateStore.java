@@ -59,21 +59,23 @@ public final class RedissonSpectateStore implements SpectateStore {
     static final long MARK_TTL_MS = TimeUnit.SECONDS.toMillis(MatchBudgets.WATCHING_TTL_SECONDS);
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final String watchableKey;
 
-    public RedissonSpectateStore(RedissonClient redis) {
-        this(redis, RedisKeys.matchWatchable());
+    public RedissonSpectateStore(RedissonClient redis, RedisKeys redisKeys) {
+        this(redis, redisKeys, redisKeys.matchWatchable());
     }
 
     /**
      * @param watchableKey 可观战索引的键。生产恒为 {@link RedisKeys#matchWatchable()}；真 Redis 的集成测试给一把自己的键
      *                     （以生产键为前缀，所以仍在 {@code {match}} 槽）——索引是全局的一把键，共用一台 Redis 的别的测试 / 进程里的清扫器会动它
      */
-    RedissonSpectateStore(RedissonClient redis, String watchableKey) {
+    RedissonSpectateStore(RedissonClient redis, RedisKeys redisKeys, String watchableKey) {
         this.redis = Objects.requireNonNull(redis, "redis");
+        this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         Objects.requireNonNull(watchableKey, "watchableKey");
-        if (!watchableKey.startsWith(RedisKeys.matchWatchable())) {
-            throw new IllegalArgumentException("可观战索引的键必须以 " + RedisKeys.matchWatchable() + " 开头（同一个 hash tag）: " + watchableKey);
+        if (!watchableKey.startsWith(redisKeys.matchWatchable())) {
+            throw new IllegalArgumentException("可观战索引的键必须以 " + redisKeys.matchWatchable() + " 开头（同一个 hash tag）: " + watchableKey);
         }
         this.watchableKey = watchableKey;
     }
@@ -83,7 +85,7 @@ public final class RedissonSpectateStore implements SpectateStore {
     @Override
     public Entry entry(long playerId, Deadline d) {
         String what = "读观战入口状态";
-        List<Object> reply = evalList(what, SpectateScripts.ENTRY, List.of(RedisKeys.matchTicket(playerId), RedisKeys.matchWatching(playerId)), d);
+        List<Object> reply = evalList(what, SpectateScripts.ENTRY, List.of(redisKeys.matchTicket(playerId), redisKeys.matchWatching(playerId)), d);
         requireSize(reply, 3, what);
         boolean hasTicket = flagAt(reply, 0, what);
         boolean hasMark = flagAt(reply, 1, what);
@@ -94,7 +96,7 @@ public final class RedissonSpectateStore implements SpectateStore {
     @Override
     public Acquire acquire(long playerId, String markValue, Deadline d) {
         requireNonEmptyMark(markValue);
-        List<Object> keys = List.of(RedisKeys.matchTicket(playerId), RedisKeys.matchWatching(playerId));
+        List<Object> keys = List.of(redisKeys.matchTicket(playerId), redisKeys.matchWatching(playerId));
         byte[][] args = {markBytes(markValue), ascii(Long.toString(MARK_TTL_MS))};
         // 可变的几段脚本里只有这一段挡不住「迟到的重发」（标记一旦被调用方回滚，就没有东西可比）：等到截止而命令还在路上时，
         // 调用方当场发的那次释放可能先于 Redisson 重发的那一遍到达 Redis——等在途的命令有了结局，再按值释放一次
@@ -115,7 +117,7 @@ public final class RedissonSpectateStore implements SpectateStore {
     @Override
     public boolean release(long playerId, String markValue, Deadline d) {
         requireMark(markValue);
-        return evalInteger("删观战标记", SpectateScripts.RELEASE, List.of(RedisKeys.matchWatching(playerId)), d, markBytes(markValue)) == 1;
+        return evalInteger("删观战标记", SpectateScripts.RELEASE, List.of(redisKeys.matchWatching(playerId)), d, markBytes(markValue)) == 1;
     }
 
     @Override
@@ -123,7 +125,7 @@ public final class RedissonSpectateStore implements SpectateStore {
         requireMark(markValue);
         try {
             redis.getScript(ByteArrayCodec.INSTANCE).<Long>evalAsync(RScript.Mode.READ_WRITE, SpectateScripts.RELEASE, RScript.ReturnType.INTEGER,
-                    List.of(RedisKeys.matchWatching(playerId)), (Object) markBytes(markValue)).whenComplete((deleted, error) -> {
+                    List.of(redisKeys.matchWatching(playerId)), (Object) markBytes(markValue)).whenComplete((deleted, error) -> {
                         if (error != null) {
                             log.warn("异步删观战标记失败（标记随 {} s 的 TTL 自清） player={}: {}", MatchBudgets.WATCHING_TTL_SECONDS,
                                     Long.toUnsignedString(playerId), String.valueOf(cause(error)));
@@ -144,7 +146,7 @@ public final class RedissonSpectateStore implements SpectateStore {
         String what = "批量读观战标记";
         List<Object> keys = new ArrayList<>(ids.size());
         for (long playerId : ids) {
-            keys.add(RedisKeys.matchWatching(playerId));
+            keys.add(redisKeys.matchWatching(playerId));
         }
         List<Object> reply = evalList(what, SpectateScripts.MARKS, keys, d);
         if (reply.size() % 2 != 0) {
@@ -166,7 +168,7 @@ public final class RedissonSpectateStore implements SpectateStore {
     @Override
     public Snapshot read(long battleId, Deadline d) {
         String what = "读战斗的观战快照";
-        List<Object> reply = evalList(what, SpectateScripts.READ, List.of(watchableKey, RedisKeys.matchBattlePlacement(battleId)), d,
+        List<Object> reply = evalList(what, SpectateScripts.READ, List.of(watchableKey, redisKeys.matchBattlePlacement(battleId)), d,
                 memberBytes(SpectateRules.member(battleId)));
         requireSize(reply, 5, what);
         long now = integerAt(reply, 0, what);
@@ -227,7 +229,7 @@ public final class RedissonSpectateStore implements SpectateStore {
     public boolean publish(BattlePlacement placement, Deadline d) {
         Objects.requireNonNull(placement, "placement");
         long battleId = placement.getBattleId();
-        return evalInteger("登记可观战索引", SpectateScripts.PUBLISH, List.of(watchableKey, RedisKeys.matchBattlePlacement(battleId)), d,
+        return evalInteger("登记可观战索引", SpectateScripts.PUBLISH, List.of(watchableKey, redisKeys.matchBattlePlacement(battleId)), d,
                 ascii(PlacementRecords.attemptField(placement.getAttempt())), memberBytes(SpectateRules.member(battleId)),
                 ascii(Long.toString(placement.getCreatedAtMs()))) == 1;
     }
@@ -261,7 +263,7 @@ public final class RedissonSpectateStore implements SpectateStore {
         String what = "批量读落点记录";
         List<Object> keys = new ArrayList<>(ids.size());
         for (long battleId : ids) {
-            keys.add(RedisKeys.matchBattlePlacement(battleId));
+            keys.add(redisKeys.matchBattlePlacement(battleId));
         }
         List<Object> reply = evalList(what, SpectateScripts.RECORDS, keys, d);
         requireSize(reply, 3 * ids.size(), what);
@@ -298,11 +300,11 @@ public final class RedissonSpectateStore implements SpectateStore {
         byte[] member = memberBytes(e.member());
         return switch (e) {
             case Eviction.Invalid invalid -> new EvictCall(List.of(watchableKey), new byte[][] {ascii(SpectateScripts.MODE_INVALID), member});
-            case Eviction.Missing missing -> new EvictCall(List.of(watchableKey, RedisKeys.matchBattlePlacement(missing.battleId())),
+            case Eviction.Missing missing -> new EvictCall(List.of(watchableKey, redisKeys.matchBattlePlacement(missing.battleId())),
                     new byte[][] {ascii(SpectateScripts.MODE_MISSING), member});
-            case Eviction.Dead dead -> new EvictCall(List.of(watchableKey, RedisKeys.matchBattlePlacement(dead.battleId())),
+            case Eviction.Dead dead -> new EvictCall(List.of(watchableKey, redisKeys.matchBattlePlacement(dead.battleId())),
                     new byte[][] {ascii(SpectateScripts.MODE_DEAD), member, ascii(PlacementRecords.attemptField(dead.attempt()))});
-            case Eviction.Stale stale -> new EvictCall(List.of(watchableKey, RedisKeys.matchBattlePlacement(stale.battleId())),
+            case Eviction.Stale stale -> new EvictCall(List.of(watchableKey, redisKeys.matchBattlePlacement(stale.battleId())),
                     new byte[][] {ascii(SpectateScripts.MODE_STALE), member, ascii(Long.toString(stale.cutoffMs()))});
         };
     }

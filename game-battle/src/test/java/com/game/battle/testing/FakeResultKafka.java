@@ -37,7 +37,8 @@ import org.springframework.context.annotation.Bean;
  * <p>用法：
  * <pre>{@code
  * FakeResultKafka kafka = new FakeResultKafka();
- * KafkaBattleResultSink sink = new KafkaBattleResultSink(kafka, 1, (short) 1, Duration.ofSeconds(1), metrics);
+ * BattleResultTopics topics = new BattleResultTopics(kafkaNames);
+ * KafkaBattleResultSink sink = new KafkaBattleResultSink(kafka, topics, 1, (short) 1, Duration.ofSeconds(1), metrics);
  * sink.start();                       // 假 broker 上建出 game-battle-result-g1（3 分区）
  * sink.publish(event);
  * await().until(() -> kafka.sent().size() == 1);

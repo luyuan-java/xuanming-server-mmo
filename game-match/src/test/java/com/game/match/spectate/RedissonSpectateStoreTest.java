@@ -10,6 +10,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.proto.BattlePlacement;
@@ -52,6 +53,8 @@ import org.redisson.misc.CompletableFutureWrapper;
  */
 class RedissonSpectateStoreTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long PLAYER = Long.MIN_VALUE + 1001; // ≥ 2^63：键与成员必须是无符号十进制
     private static final long BATTLE = Long.MIN_VALUE + 77;
     private static final String PLAYER_TEXT = "9223372036854776809";
@@ -92,7 +95,7 @@ class RedissonSpectateStoreTest {
             pipelinesExecuted++;
             return pipelineResult;
         });
-        store = new RedissonSpectateStore(redis);
+        store = new RedissonSpectateStore(redis, REDIS_KEYS);
     }
 
     @SuppressWarnings("unchecked")
@@ -159,10 +162,10 @@ class RedissonSpectateStoreTest {
 
     @Test
     void 键的写法钉住_与RedisKeys一致() {
-        assertThat(RedisKeys.matchTicket(PLAYER)).isEqualTo(TICKET_KEY);
-        assertThat(RedisKeys.matchWatching(PLAYER)).isEqualTo(MARK_KEY);
-        assertThat(RedisKeys.matchBattlePlacement(BATTLE)).isEqualTo(PLACEMENT_KEY);
-        assertThat(RedisKeys.matchWatchable()).isEqualTo(INDEX_KEY);
+        assertThat(REDIS_KEYS.matchTicket(PLAYER)).isEqualTo(TICKET_KEY);
+        assertThat(REDIS_KEYS.matchWatching(PLAYER)).isEqualTo(MARK_KEY);
+        assertThat(REDIS_KEYS.matchBattlePlacement(BATTLE)).isEqualTo(PLACEMENT_KEY);
+        assertThat(REDIS_KEYS.matchWatchable()).isEqualTo(INDEX_KEY);
         assertThat(SpectateRules.member(BATTLE)).isEqualTo(BATTLE_TEXT);
     }
 
@@ -593,13 +596,16 @@ class RedissonSpectateStoreTest {
     void 构造不碰Redis_索引键必须以生产键开头() {
         RedissonClient untouched = mock(RedissonClient.class);
 
-        new RedissonSpectateStore(untouched);
-        new RedissonSpectateStore(untouched, INDEX_KEY + ":it:abc");
+        new RedissonSpectateStore(untouched, REDIS_KEYS);
+        new RedissonSpectateStore(untouched, REDIS_KEYS, INDEX_KEY + ":it:abc");
 
         verifyNoInteractions(untouched);
-        assertThatThrownBy(() -> new RedissonSpectateStore(untouched, "game:{other}:watchable")).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new RedissonSpectateStore(untouched, "watchable")).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new RedissonSpectateStore(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RedissonSpectateStore(untouched, REDIS_KEYS, "game:{other}:watchable")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RedissonSpectateStore(untouched, REDIS_KEYS, "watchable")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RedissonSpectateStore(untouched, new RedisKeys(GameNamespace.of("nstest")), INDEX_KEY + ":it:abc"))
+                .as("索引键必须以本命名空间的生产键开头").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RedissonSpectateStore(null, REDIS_KEYS)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RedissonSpectateStore(untouched, null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test

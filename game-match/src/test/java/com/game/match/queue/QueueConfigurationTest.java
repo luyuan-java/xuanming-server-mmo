@@ -5,6 +5,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.game.common.id.Snowflake;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.gather.GatherLauncher;
@@ -24,6 +25,7 @@ import com.game.match.ticket.TicketStore;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
@@ -36,7 +38,8 @@ class QueueConfigurationTest {
 
     /** 基础设施装配与别的包提供的 bean 的替身；{@code withRating} / {@code withGather} 控制那两样在不在。 */
     private ApplicationContextRunner runner(boolean withRating, boolean withGather) {
-        ApplicationContextRunner runner = new ApplicationContextRunner().withUserConfiguration(QueueConfiguration.class)
+        ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
+                .withUserConfiguration(QueueConfiguration.class)
                 .withBean(RedissonClient.class, () -> redis)
                 .withBean(MatchProperties.class, () -> new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null))
                 .withBean(PlayerStatusReader.class, FakePlayerStatus::new)

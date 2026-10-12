@@ -47,6 +47,12 @@
             <artifactId>game-api</artifactId>
         </dependency>
         <dependency>
+            <!-- 部署命名空间 game.namespace 的 @ConfigurationProperties + @Validated（Bean Validation，实现为 Hibernate Validator；
+                 版本由 Spring Boot BOM 管理）：非法值由 Spring Boot 自带的绑定校验失败报告拒启 -->
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
@@ -55,27 +61,6 @@
 
     <build>
         <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <executions>
-                    <!-- 非缺省部署命名空间的用例（@Tag("namespace")）：另起一个 surefire 执行、新 fork 的 JVM 里把 game.namespace 钉成 nstest
-                         （命名空间进程内定格、没有 reset，只能换 JVM 切换）。缺省执行 default-test 排除这一组（根 pom）。不显式配 skip，
-                         -DskipTests 对两个执行都生效；-Dtest=X 时这里过滤成 0 条不失败。跑测试不要给 mvn 传 -Dgame.namespace（会覆盖两边的钉值）。 -->
-                    <execution>
-                        <id>namespace</id>
-                        <goals>
-                            <goal>test</goal>
-                        </goals>
-                        <configuration>
-                            <groups>namespace</groups>
-                            <systemPropertyVariables>
-                                <game.namespace>nstest</game.namespace>
-                            </systemPropertyVariables>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
             <plugin>
                 <!-- 在线目录 / 推送的 Redis 值格式 game.discovery.* -->
                 <groupId>io.github.ascopes</groupId>

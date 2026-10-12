@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
@@ -71,11 +72,13 @@ public final class ChatService {
     private final int historyMaxLimit;
     private final long requestIdTtlSeconds;
     private final LongSupplier clockMs;
+    private final RedisKeys keys;
     private final SecureRandom random = new SecureRandom();
 
+    /** @param keys 历史 / 幂等 / 限速键的出处（注入的 {@link RedisKeys}；键随部署命名空间） */
     public ChatService(ChatStore store, ChatMetrics metrics, int maxContentBytes, int rateLimitPerSecond,
                        int historyMaxEntries, Duration historyTtl, int historyDefaultLimit, int historyMaxLimit,
-                       Duration requestIdTtl, LongSupplier clockMs) {
+                       Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys) {
         this.store = store;
         this.metrics = metrics;
         this.maxContentBytes = maxContentBytes;
@@ -86,18 +89,19 @@ public final class ChatService {
         this.historyMaxLimit = historyMaxLimit;
         this.requestIdTtlSeconds = requestIdTtl.toSeconds();
         this.clockMs = clockMs;
+        this.keys = Objects.requireNonNull(keys, "keys");
     }
 
     /** 频道 → 历史键；拒绝时 key 为 null、带 tip 与结局。发言（peer = target）与拉取（peer = peer_player_id）共用。 */
     record Resolved(String key, int tip, Outcome outcome) {
     }
 
-    static Resolved resolveLogKey(int channel, long self, long peer) {
+    static Resolved resolveLogKey(RedisKeys keys, int channel, long self, long peer) {
         return switch (channel) {
-            case ChatChannelType.CHAT_CHANNEL_TYPE_WORLD_VALUE -> new Resolved(RedisKeys.chatWorldLog(), 0, null);
+            case ChatChannelType.CHAT_CHANNEL_TYPE_WORLD_VALUE -> new Resolved(keys.chatWorldLog(), 0, null);
             case ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE_VALUE -> peer == 0 || peer == self
                     ? new Resolved(null, INVALID_PARAMETER, Outcome.BAD_REQUEST)
-                    : new Resolved(RedisKeys.chatPrivateLog(self, peer), 0, null);
+                    : new Resolved(keys.chatPrivateLog(self, peer), 0, null);
             // 队伍要队伍服务给成员关系、系统只能服务端发：v1 都不开放
             case ChatChannelType.CHAT_CHANNEL_TYPE_TEAM_VALUE, ChatChannelType.CHAT_CHANNEL_TYPE_SYSTEM_VALUE,
                  ChatChannelType.CHAT_CHANNEL_TYPE_UNSPECIFIED_VALUE ->
@@ -132,7 +136,7 @@ public final class ChatService {
         if (!request.hasMessage()) {
             return sendRejected(label, INVALID_PARAMETER, Outcome.BAD_REQUEST);
         }
-        Resolved resolved = resolveLogKey(msg.getChannelValue(), sender, msg.getTargetPlayerId());
+        Resolved resolved = resolveLogKey(keys, msg.getChannelValue(), sender, msg.getTargetPlayerId());
         if (resolved.key() == null) {
             return sendRejected(label, resolved.tip(), resolved.outcome());
         }
@@ -157,7 +161,7 @@ public final class ChatService {
         if (requestId.isEmpty()) {
             return rateLimitAndWrite(sender, label, resolved.key(), stored, null, null, deadline);
         }
-        String claimKey = RedisKeys.chatRequestId(sender, requestId);
+        String claimKey = keys.chatRequestId(sender, requestId);
         String claimValue = CLAIM_PENDING + ":" + token();
         return within(store.claim(claimKey, claimValue, requestIdTtlSeconds), deadline).handle((claimed, error) -> {
             if (error != null) {
@@ -173,7 +177,7 @@ public final class ChatService {
 
     private CompletionStage<SendChatResponse> rateLimitAndWrite(long sender, Channel label, String logKey, byte[] stored,
                                                                String claimKey, String claimValue, long deadline) {
-        return within(store.incrWithTtl(RedisKeys.chatRateLimit(sender), RATE_LIMIT_WINDOW_SECONDS), deadline)
+        return within(store.incrWithTtl(keys.chatRateLimit(sender), RATE_LIMIT_WINDOW_SECONDS), deadline)
                 .handle((count, error) -> {
                     if (error != null || count == null) {
                         log.error("[chat] 限速脚本失败 sender={}: {}", Long.toUnsignedString(sender),
@@ -269,7 +273,7 @@ public final class ChatService {
         if (self == 0) {
             return pullRejected(label, INVALID_PARAMETER, Outcome.NO_SESSION);
         }
-        Resolved resolved = resolveLogKey(request.getChannelValue(), self, request.getPeerPlayerId());
+        Resolved resolved = resolveLogKey(keys, request.getChannelValue(), self, request.getPeerPlayerId());
         if (resolved.key() == null) {
             return pullRejected(label, resolved.tip(), resolved.outcome());
         }

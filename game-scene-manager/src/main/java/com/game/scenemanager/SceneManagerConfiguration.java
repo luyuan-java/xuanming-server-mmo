@@ -1,6 +1,7 @@
 package com.game.scenemanager;
 
 import com.game.common.token.DubboCallAuth;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.scenemanager.world.NodeAvailability;
 import com.game.scenemanager.world.WorldChannelProperties;
@@ -15,11 +16,11 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 装配：配置表 → {@link WorldSceneConfigs}；Redis 节点目录 → {@link SceneNodeSource}；目录 + 软预占（{@code game:world:*}）→
+ * 装配：配置表 → {@link WorldSceneConfigs}；Redis 节点目录 → {@link SceneNodeSource}；目录 + 软预占（{@code <ns>:world:*}）→
  * {@link ChannelSelector}；三者 → {@link SceneAssigner}（进游戏）与 {@link SwitchTargetSelector}（在线换图选跨节点目标，批次 5.2）；
  * 全服 scene_id 发号租约 → {@link SceneIdAllocator}（每个副本都申领）→ {@link InstanceIdIssuer}（镜像 / 副本实例取号，批次 5.3）。
  * 主世界频道的控制面在 {@code com.game.scenemanager.world.WorldChannelConfiguration}。
- * {@link RedissonClient} 由 game-discovery 的自动配置提供（{@code game.redis.*}）。
+ * {@link RedissonClient}（{@code game.redis.*}）与 {@link RedisKeys}（部署命名空间 {@code game.namespace} 的键名）由 game-discovery 的自动配置提供。
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(SceneManagerProperties.class)
@@ -40,8 +41,8 @@ public class SceneManagerConfiguration {
     }
 
     @Bean
-    public SceneNodeSource sceneNodeSource(RedissonClient redis) {
-        return new RedisSceneNodeSource(redis);
+    public SceneNodeSource sceneNodeSource(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedisSceneNodeSource(redis, redisKeys);
     }
 
     /**
@@ -72,8 +73,8 @@ public class SceneManagerConfiguration {
      * （控制面与提供方都依赖它，先于它销毁）。
      */
     @Bean(destroyMethod = "close")
-    public SceneIdAllocator sceneIdAllocator(RedissonClient redis) {
-        return SceneIdAllocator.acquire(redis);
+    public SceneIdAllocator sceneIdAllocator(RedissonClient redis, RedisKeys redisKeys) {
+        return SceneIdAllocator.acquire(redis, redisKeys);
     }
 
     /**

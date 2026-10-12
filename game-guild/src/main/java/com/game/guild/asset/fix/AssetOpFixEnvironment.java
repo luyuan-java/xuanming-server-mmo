@@ -4,8 +4,9 @@ import com.alibaba.druid.pool.DruidDataSource;
 import com.game.common.GameNamespace;
 import com.game.common.NamespaceDatabaseCheck;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
-import com.game.discovery.namespace.GameNamespaceEnvironmentPostProcessor;
+import com.game.discovery.namespace.GameNamespaceProperties;
 import com.game.guild.GuildProperties;
 import com.game.guild.asset.GuildAssetStore;
 import com.game.guild.asset.JdbcGuildAssetStore;
@@ -31,8 +32,10 @@ import org.redisson.api.redisnode.RedisNodes;
 import org.redisson.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.bind.BindException;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.NestedExceptionUtils;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ClassPathResource;
@@ -55,6 +58,10 @@ final class AssetOpFixEnvironment {
     static final long PING_TIMEOUT_MS = 5_000L;
     /** 提交后同步失效的预算（没有请求预算可继承）。 */
     static final long INVALIDATE_BUDGET_MS = 2_000L;
+    /** 命名空间报错里的来源。 */
+    static final String NAMESPACE_SOURCE = "assetopfix 配置（-f yaml、-D 与环境变量）";
+    /** 库名核对报错里给出的应急开关写法。 */
+    static final String EXPECT_DATABASE_HINT = "-expect-database <库名>";
 
     private AssetOpFixEnvironment() {
     }
@@ -78,14 +85,15 @@ final class AssetOpFixEnvironment {
     }
 
     /**
-     * 按配置连库与 Redis，给出 Store。先从同一份配置解析部署命名空间并显式定格（之后才生成缓存键）；连上库后核对 {@code DATABASE()} 等于期望库名，
-     * 不一致抛 {@link AssetOpFixMain.PreconditionException}（不连 Redis）。
+     * 按配置连库与 Redis，给出 Store。顺序：读配置 → 解析并校验部署命名空间（{@link #resolveNamespace}，非法即前置条件不满足）→ 才读 JDBC URL
+     * （库名段是 {@code ${game.namespace:game}}）连库 → 核对 {@code DATABASE()} 等于期望库名（不一致抛 {@link AssetOpFixMain.PreconditionException}，
+     * 不连 Redis）→ 连 Redis，用这个命名空间构造 {@link RedisKeys} 交给缓存失效。
      *
-     * @param expectDatabase 期望库名（{@code -expect-database}）；null = 取部署命名空间
+     * @param expectDatabase 期望库名（{@code -expect-database}，应急开关）；null = 取部署命名空间（规格）
      */
     static AssetOpFixMain.OpenedStore open(String configPath, String expectDatabase) throws Exception {
         StandardEnvironment env = load(configPath);
-        String namespace = defineNamespace(env);
+        GameNamespace namespace = resolveNamespace(env);
         Binder binder = Binder.get(env);
         String url = env.getProperty("spring.datasource.url");
         if (url == null || url.isBlank()) {
@@ -105,13 +113,13 @@ final class AssetOpFixEnvironment {
         dataSource.setMaxActive(2);
         dataSource.setMaxWait(PING_TIMEOUT_MS);
         dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        String databaseLabel = expectDatabase == null ? namespace : expectDatabase;
+        String databaseLabel = expectDatabase == null ? namespace.value() : expectDatabase;
         String mismatch;
         try (Connection conn = dataSource.getConnection(PING_TIMEOUT_MS)) {
             if (!conn.isValid((int) (PING_TIMEOUT_MS / 1000))) {
                 throw new IllegalStateException("连接无效");
             }
-            mismatch = NamespaceDatabaseCheck.verify(conn, expectDatabase, namespace);
+            mismatch = NamespaceDatabaseCheck.verify(conn, expectDatabase, namespace, EXPECT_DATABASE_HINT);
         } catch (Exception e) {
             dataSource.close();
             // 连接串带口令：只报库名与原因类别
@@ -144,7 +152,9 @@ final class AssetOpFixEnvironment {
         ScheduledExecutorService background = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().name("assetopfix-invalidate").daemon(true).factory());
         GuildMetrics metrics = new GuildMetrics(new SimpleMeterRegistry());
-        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(new RedissonGuildCacheRedis(redis), props.cacheTtl(),
+        // 缓存键与服务进程同一个命名空间（上面已核对它与库属于同一个部署）
+        RedisKeys redisKeys = new RedisKeys(namespace);
+        GuildCacheInvalidator invalidator = new GuildCacheInvalidator(new RedissonGuildCacheRedis(redis), redisKeys, props.cacheTtl(),
                 background, metrics);
         BackgroundTx tx = new BackgroundTx(dataSource::getConnection, props.queryTimeoutCapSeconds(), BackgroundTx.Listener.NONE);
         GuildAssetStore store = new JdbcGuildAssetStore(tx, new ManualListener(invalidator));
@@ -163,15 +173,21 @@ final class AssetOpFixEnvironment {
     }
 
     /**
-     * 从同一份配置（与服务进程同口径的宽松绑定）解析部署命名空间并显式定格（{@link GameNamespace#set}），打到日志；非法或与已定格的值冲突抛
-     * {@link AssetOpFixMain.PreconditionException}。必须在生成第一个缓存键之前调用。
+     * 从同一份配置解析部署命名空间：与服务进程同一个绑定类型 {@link GameNamespaceProperties}、同口径的宽松绑定（{@code -f} yaml、{@code -D}、
+     * 环境变量 {@code GAME_NAMESPACE}），没配取 {@code game}；再按 {@link GameNamespace} 的规则校验（显式空串照样拒绝），打到日志。
+     * 非法抛 {@link AssetOpFixMain.PreconditionException}（退出 2，连库、连 Redis 之前）。
      */
-    static String defineNamespace(StandardEnvironment env) {
-        String namespace = GameNamespaceEnvironmentPostProcessor.resolve(env);
+    static GameNamespace resolveNamespace(StandardEnvironment env) {
+        GameNamespace namespace;
         try {
-            GameNamespace.set(namespace, "assetopfix 配置");
-        } catch (IllegalArgumentException | IllegalStateException e) {
+            GameNamespaceProperties props = Binder.get(env).bindOrCreate("game", GameNamespaceProperties.class);
+            namespace = GameNamespace.of(props.namespace(), NAMESPACE_SOURCE);
+        } catch (IllegalArgumentException e) {
             throw new AssetOpFixMain.PreconditionException(e.getMessage());
+        } catch (BindException e) {
+            Throwable cause = NestedExceptionUtils.getMostSpecificCause(e);
+            throw new AssetOpFixMain.PreconditionException("部署命名空间 " + GameNamespace.PROPERTY + "（环境变量 " + GameNamespace.ENV
+                    + "）绑定失败（来源 " + NAMESPACE_SOURCE + "）: " + cause.getClass().getSimpleName() + ": " + cause.getMessage());
         }
         log.info("部署命名空间 {}={}", GameNamespace.PROPERTY, namespace);
         return namespace;

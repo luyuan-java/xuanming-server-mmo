@@ -3,6 +3,7 @@ package com.game.scene.testing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleRedis;
 import com.game.discovery.battle.BattleRedis.EnterRead;
@@ -39,6 +40,7 @@ import org.redisson.config.Config;
  */
 class FakeBattleLocksTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     private static final long X = 0x8000_0000_0000_0007L;
     private static final long Y = 9;
     private static final long Z = 11;
@@ -295,10 +297,10 @@ class FakeBattleLocksTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(15);
         RedissonClient client = Redisson.create(config);
-        String lockKey = RedisKeys.battleLock(playerId);
-        String recordsKey = RedisKeys.battleSettlements(playerId);
+        String lockKey = REDIS_KEYS.battleLock(playerId);
+        String recordsKey = REDIS_KEYS.battleSettlements(playerId);
         try {
-            BattleRedis redis = new BattleRedis(client);
+            BattleRedis redis = new BattleRedis(client, REDIS_KEYS);
             BattleLocks real = BattleLocks.redis(redis);
             Port realPort = new Port() {
                 @Override
@@ -331,9 +333,9 @@ class FakeBattleLocksTest {
 
             assertThat(onFake).containsExactlyElementsOf(onRedis);
         } finally {
-            client.getKeys().delete(lockKey, recordsKey, RedisKeys.battleSettled(playerId, X), RedisKeys.battleSettled(playerId, Y),
-                    RedisKeys.battleSettled(playerId, Z), RedisKeys.battleSettled(playerId, 66), RedisKeys.battleSettled(playerId, 77),
-                    RedisKeys.battleSettled(playerId, 88));
+            client.getKeys().delete(lockKey, recordsKey, REDIS_KEYS.battleSettled(playerId, X), REDIS_KEYS.battleSettled(playerId, Y),
+                    REDIS_KEYS.battleSettled(playerId, Z), REDIS_KEYS.battleSettled(playerId, 66), REDIS_KEYS.battleSettled(playerId, 77),
+                    REDIS_KEYS.battleSettled(playerId, 88));
             client.shutdown();
         }
     }

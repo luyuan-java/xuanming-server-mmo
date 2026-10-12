@@ -1,8 +1,10 @@
 package com.game.guild.service;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.player.HomeZones;
 import com.game.common.player.PlayerProfiles.Profile;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.guild.cache.GuildCache;
@@ -44,6 +46,8 @@ import java.util.function.LongSupplier;
  * 所有替身把调用写进同一个 {@link #journal}，用例据此断言调用顺序（「归属区未知时不查闸门」「推送发生在失效之后」）。
  */
 public final class GuildServiceFixture implements AutoCloseable {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     static final long NOW = 1_700_000_000_000L;
     public static final int ZONE = 2;
@@ -162,11 +166,11 @@ public final class GuildServiceFixture implements AutoCloseable {
                 return levelDisplay;
             }
         };
-        invalidator = new GuildCacheInvalidator(cacheRedis, Duration.ofMinutes(30), background, metrics);
-        cache = new GuildCache(cacheRedis, Duration.ofMinutes(30),
+        invalidator = new GuildCacheInvalidator(cacheRedis, REDIS_KEYS, Duration.ofMinutes(30), background, metrics);
+        cache = new GuildCache(cacheRedis, REDIS_KEYS, Duration.ofMinutes(30),
                 (gid, d) -> store.loadGuild(gid, d).map(GuildSnapshots::toSnapshot).orElse(null),
                 store::playerGuildId, invalidator, metrics);
-        ranks = new GuildRanks(rankRedis, background, metrics);
+        ranks = new GuildRanks(rankRedis, REDIS_KEYS, background, metrics);
         guildPushes = new GuildPushes(this::push, metrics, NOTIFY_ID, Duration.ofSeconds(3));
         access = new GuildAccess(cache, homeZones, fence, invalidator);
         OnlineStatuses onlineStatuses = new OnlineStatuses(this::onlineLookup, Duration.ofMillis(800), metrics);

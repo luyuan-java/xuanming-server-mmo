@@ -2,6 +2,7 @@ package com.game.discovery.location;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.Refresh;
 import com.game.discovery.proto.PlayerLocation;
@@ -24,6 +25,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class PlayerLocationIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long BASE = (1L << 51) + ThreadLocalRandom.current().nextLong(1L << 40);
 
     private static RedissonClient redis;
@@ -34,13 +37,13 @@ class PlayerLocationIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        directory = new PlayerLocationDirectory(redis);
+        directory = new PlayerLocationDirectory(redis, REDIS_KEYS);
     }
 
     @AfterAll
     static void cleanup() {
         for (long i = 0; i < 10; i++) {
-            redis.getKeys().delete(RedisKeys.playerLocation(BASE + i));
+            redis.getKeys().delete(REDIS_KEYS.playerLocation(BASE + i));
         }
         redis.shutdown();
     }
@@ -55,7 +58,7 @@ class PlayerLocationIntegrationTest {
     }
 
     private static long ttlMillis(long player) {
-        return redis.getKeys().remainTimeToLive(RedisKeys.playerLocation(player));
+        return redis.getKeys().remainTimeToLive(REDIS_KEYS.playerLocation(player));
     }
 
     @Test
@@ -119,7 +122,7 @@ class PlayerLocationIntegrationTest {
         long lost = BASE + 4;
         long taken = BASE + 5;
         await(directory.putAsync(at(mine, 1, 100), 4));
-        redis.getKeys().expire(RedisKeys.playerLocation(mine), 5, TimeUnit.SECONDS);
+        redis.getKeys().expire(REDIS_KEYS.playerLocation(mine), 5, TimeUnit.SECONDS);
         await(directory.putAsync(at(taken, 9, 900), 1));
         int restored = await(directory.refreshAsync(List.of(new Refresh(at(mine, 1, 100), 4),
                 new Refresh(at(lost, 2, 200), 1), new Refresh(at(taken, 8, 800), 7))));
@@ -135,7 +138,7 @@ class PlayerLocationIntegrationTest {
     void 值与键不符按没有() throws Exception {
         long p = BASE + 6;
         await(directory.putAsync(at(p + 100, 1, 100), 1));
-        redis.getKeys().rename(RedisKeys.playerLocation(p + 100), RedisKeys.playerLocation(p));
+        redis.getKeys().rename(REDIS_KEYS.playerLocation(p + 100), REDIS_KEYS.playerLocation(p));
         assertThat(directory.find(p)).isEmpty();
     }
 }

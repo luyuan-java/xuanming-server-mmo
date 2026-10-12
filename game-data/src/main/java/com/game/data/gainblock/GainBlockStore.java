@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.redisson.api.RMap;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
@@ -39,10 +40,12 @@ public final class GainBlockStore {
 
     private final ObjectProvider<RedissonClient> redis;
     private final ObjectMapper json;
+    private final RedisKeys keys;
 
-    public GainBlockStore(ObjectProvider<RedissonClient> redis, ObjectMapper json) {
+    public GainBlockStore(ObjectProvider<RedissonClient> redis, ObjectMapper json, RedisKeys keys) {
         this.redis = redis;
         this.json = json;
+        this.keys = Objects.requireNonNull(keys, "keys");
     }
 
     /** 某类别的全部封禁，按 id 升序。元数据解不出的条目照样列出（操作人等为空）。 */
@@ -78,13 +81,13 @@ public final class GainBlockStore {
     }
 
     private RMap<String, String> map(String category) {
-        return redis.getObject().getMap(RedisKeys.gainBlocks(category), StringCodec.INSTANCE);
+        return redis.getObject().getMap(keys.gainBlocks(category), StringCodec.INSTANCE);
     }
 
     /** 通知是尽力而为：名单已经写进去了，发不出去时 scene 靠周期重读（缺省 10s）跟上，不让调用方误以为没封上。 */
     private void notifyChanged(String category) {
         try {
-            redis.getObject().getTopic(RedisKeys.gainBlockChangedTopic(), StringCodec.INSTANCE).publish(category);
+            redis.getObject().getTopic(keys.gainBlockChangedTopic(), StringCodec.INSTANCE).publish(category);
         } catch (RuntimeException e) {
             log.warn("全服产出封禁变更通知发送失败（scene 将在周期重读时跟上）category={}", category, e);
         }

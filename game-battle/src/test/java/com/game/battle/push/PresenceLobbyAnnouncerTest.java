@@ -12,6 +12,8 @@ import static org.mockito.Mockito.when;
 
 import com.game.battle.metrics.BattleMetrics;
 import com.game.battle.protocol.BattleFrames;
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.discovery.proto.GatePush;
@@ -32,6 +34,8 @@ import org.redisson.misc.CompletableFutureWrapper;
 
 /** 大厅公告经 gate 回落：一组公告一次交给 {@code pushAllToPlayer}（177 → 143 保序，battle-node-spec §7.7），结局只计数。 */
 class PresenceLobbyAnnouncerTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final BattleMetrics metrics = new BattleMetrics(registry);
@@ -104,7 +108,7 @@ class PresenceLobbyAnnouncerTest {
         RTopic topic = mock(RTopic.class);
         when(redis.getTopic(anyString(), any(Codec.class))).thenReturn(topic);
         when(topic.publishAsync(any())).thenReturn(new CompletableFutureWrapper<>(1L));
-        PresenceLobbyAnnouncer real = new PresenceLobbyAnnouncer(new PlayerPushes(redis, directory), metrics);
+        PresenceLobbyAnnouncer real = new PresenceLobbyAnnouncer(new PlayerPushes(redis, REDIS_KEYS, directory), metrics);
 
         real.announce(9002L, List.of(ASSIGNED, START));
 

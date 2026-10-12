@@ -3,6 +3,7 @@ package com.game.guild.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.discovery.RedisKeys;
@@ -30,6 +31,8 @@ import org.junit.jupiter.api.Test;
 /** 版本化缓存（guild-spec §1.11、§7.8、§11.4 的缓存条目；假 Redis 版）。 */
 class GuildCacheTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final Duration TTL = Duration.ofMinutes(30);
     /** ≥ 2^63 的帮会号与玩家号：键名、值、比较都必须按无符号。 */
     private static final long G = Long.MIN_VALUE + 7;
@@ -38,7 +41,7 @@ class GuildCacheTest {
     private final InMemoryGuildCacheRedis redis = new InMemoryGuildCacheRedis();
     private final RecordingCacheMetrics metrics = new RecordingCacheMetrics();
     private final ScheduledExecutorService background = Executors.newSingleThreadScheduledExecutor();
-    private final GuildCacheInvalidator invalidator = new GuildCacheInvalidator(redis, TTL, background, metrics,
+    private final GuildCacheInvalidator invalidator = new GuildCacheInvalidator(redis, REDIS_KEYS, TTL, background, metrics,
             List.of(1L, 1L, 1L), 1_000);
 
     /** 假 MySQL：帮会快照与 uk_guild_member 映射。 */
@@ -47,7 +50,7 @@ class GuildCacheTest {
     private final AtomicInteger snapshotLoads = new AtomicInteger();
     private final AtomicInteger mappingLoads = new AtomicInteger();
 
-    private final GuildCache cache = new GuildCache(redis, TTL, (guildId, deadline) -> {
+    private final GuildCache cache = new GuildCache(redis, REDIS_KEYS, TTL, (guildId, deadline) -> {
         snapshotLoads.incrementAndGet();
         return guildRows.get(guildId);
     }, (playerId, deadline) -> {
@@ -86,11 +89,11 @@ class GuildCacheTest {
         assertThat(cache.guild(G, budget())).contains(row);
         assertThat(cache.guild(G, budget())).contains(row);
         assertThat(snapshotLoads).hasValue(1);
-        String key = RedisKeys.guildSnapshot(G);
+        String key = REDIS_KEYS.guildSnapshot(G);
         assertThat(key).isEqualTo("game:guild:{g:9223372036854775815}:snap");
         assertThat(GuildSnapshot.parseFrom(redis.values.get(key))).isEqualTo(row);
         assertThat(redis.ttls.get(key)).isEqualTo(TTL.toMillis());
-        assertThat(redis.ttls.get(RedisKeys.cacheGeneration(key))).isEqualTo(TTL.toMillis() * 2);
+        assertThat(redis.ttls.get(REDIS_KEYS.cacheGeneration(key))).isEqualTo(TTL.toMillis() * 2);
         assertThat(metrics.count(CacheKind.SNAPSHOT, CacheResult.MISS)).isEqualTo(1);
         assertThat(metrics.count(CacheKind.SNAPSHOT, CacheResult.HIT)).isEqualTo(1);
     }
@@ -100,7 +103,7 @@ class GuildCacheTest {
         assertThat(cache.guild(G, budget())).isEmpty();
         assertThat(cache.guild(G, budget())).isEmpty();
         assertThat(snapshotLoads).hasValue(2);
-        assertThat(redis.values).doesNotContainKey(RedisKeys.guildSnapshot(G));
+        assertThat(redis.values).doesNotContainKey(REDIS_KEYS.guildSnapshot(G));
     }
 
     @Test
@@ -111,7 +114,7 @@ class GuildCacheTest {
             invalidator.afterCommit(InvalidationOp.ANNOUNCEMENT, G, List.of(), budget());
         };
         assertThat(cache.guild(G, budget()).orElseThrow().getName()).isEqualTo("旧"); // 本次返回读库时的 MySQL 结果
-        assertThat(redis.values).doesNotContainKey(RedisKeys.guildSnapshot(G));        // 但旧快照没有落地
+        assertThat(redis.values).doesNotContainKey(REDIS_KEYS.guildSnapshot(G));        // 但旧快照没有落地
         assertThat(cache.guild(G, budget()).orElseThrow().getName()).isEqualTo("新");
         assertThat(metrics.count(CacheKind.SNAPSHOT, CacheResult.FILL_SKIPPED)).isEqualTo(1);
     }
@@ -119,8 +122,8 @@ class GuildCacheTest {
     @Test
     void 读者遇到代次缺失自己建一个_代次在回填前被淘汰则回填落空() {
         guildRows.put(G, snapshot(G, "a", P));
-        String key = RedisKeys.guildSnapshot(G);
-        String gen = RedisKeys.cacheGeneration(key);
+        String key = REDIS_KEYS.guildSnapshot(G);
+        String gen = REDIS_KEYS.cacheGeneration(key);
         cache.guild(G, budget());
         assertThat(redis.values).containsKey(gen);
         redis.values.remove(key);
@@ -142,14 +145,14 @@ class GuildCacheTest {
         assertThat(snapshotLoads).hasValue(0); // 代次必须先于回源读到
         redis.failGeneration = false;
 
-        String key = RedisKeys.guildSnapshot(G);
+        String key = REDIS_KEYS.guildSnapshot(G);
         redis.values.put(key, new byte[] {(byte) 0xFF, 0x01});
         assertThatThrownBy(() -> cache.guild(G, budget())).isInstanceOf(DependencyException.class);
         redis.values.put(key, snapshot(G + 1, "别的帮", P).toByteArray());
         assertThatThrownBy(() -> cache.guild(G, budget())).isInstanceOf(DependencyException.class)
                 .hasMessageContaining("不符");
 
-        redis.values.put(RedisKeys.guildOfPlayer(P), "abc".getBytes(StandardCharsets.US_ASCII));
+        redis.values.put(REDIS_KEYS.guildOfPlayer(P), "abc".getBytes(StandardCharsets.US_ASCII));
         assertThatThrownBy(() -> cache.guildIdOf(P, budget())).isInstanceOf(DependencyException.class);
         assertThat(metrics.count(CacheKind.SNAPSHOT, CacheResult.ERROR)).isEqualTo(4);
         assertThat(metrics.count(CacheKind.MAPPING, CacheResult.ERROR)).isEqualTo(1);
@@ -165,7 +168,7 @@ class GuildCacheTest {
 
     @Test
     void 回源异常原样上抛_单飞已回收() {
-        GuildCache failing = new GuildCache(redis, TTL, (guildId, deadline) -> {
+        GuildCache failing = new GuildCache(redis, REDIS_KEYS, TTL, (guildId, deadline) -> {
             throw new IllegalStateException("mysql down");
         }, (playerId, deadline) -> 0L, invalidator, metrics);
         assertThatThrownBy(() -> failing.guild(G, budget())).isInstanceOf(IllegalStateException.class)
@@ -181,7 +184,7 @@ class GuildCacheTest {
         assertThat(cache.guildIdOf(P, budget())).isZero();
         assertThat(cache.guildIdOf(P, budget())).isZero();
         assertThat(mappingLoads).hasValue(1);
-        String key = RedisKeys.guildOfPlayer(P);
+        String key = REDIS_KEYS.guildOfPlayer(P);
         assertThat(key).isEqualTo("game:guild:{p:9223372036855775809}:gid");
         assertThat(redis.text(key)).isEqualTo("0");
         assertThat(redis.ttls.get(key)).isEqualTo(TTL.toMillis());
@@ -189,17 +192,17 @@ class GuildCacheTest {
         long other = P + 1;
         memberRows.put(other, G);
         assertThat(cache.guildIdOf(other, budget())).isEqualTo(G);
-        assertThat(redis.text(RedisKeys.guildOfPlayer(other))).isEqualTo(Long.toUnsignedString(G));
+        assertThat(redis.text(REDIS_KEYS.guildOfPlayer(other))).isEqualTo(Long.toUnsignedString(G));
         assertThat(cache.guildIdOf(other, budget())).isEqualTo(G);
         assertThat(mappingLoads).hasValue(2);
     }
 
     @Test
     void 同一实体的数据键与代次键共用hash标签_好友代次键形状不变() {
-        assertThat(RedisKeys.cacheGeneration(RedisKeys.guildSnapshot(G))).isEqualTo("game:guild:{g:9223372036854775815}:snap:gen");
-        assertThat(RedisKeys.cacheGeneration(RedisKeys.guildOfPlayer(5))).isEqualTo("game:guild:{p:5}:gid:gen");
-        assertThat(RedisKeys.friendCacheGeneration(RedisKeys.friendList(42))).isEqualTo("game:friend:{42}:list:gen");
-        assertThat(RedisKeys.guildApplyPush(G, 5)).isEqualTo("game:guild:{g:9223372036854775815}:apply-push:5");
+        assertThat(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildSnapshot(G))).isEqualTo("game:guild:{g:9223372036854775815}:snap:gen");
+        assertThat(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildOfPlayer(5))).isEqualTo("game:guild:{p:5}:gid:gen");
+        assertThat(REDIS_KEYS.friendCacheGeneration(REDIS_KEYS.friendList(42))).isEqualTo("game:friend:{42}:list:gen");
+        assertThat(REDIS_KEYS.guildApplyPush(G, 5)).isEqualTo("game:guild:{g:9223372036854775815}:apply-push:5");
     }
 
     // ------------------------------------------------------------------ 单飞
@@ -211,7 +214,7 @@ class GuildCacheTest {
         CountDownLatch inLoader = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger loadsOfG = new AtomicInteger();
-        GuildCache blocking = new GuildCache(redis, TTL, (guildId, deadline) -> {
+        GuildCache blocking = new GuildCache(redis, REDIS_KEYS, TTL, (guildId, deadline) -> {
             if (guildId == G) {
                 loadsOfG.incrementAndGet();
                 inLoader.countDown();
@@ -249,7 +252,7 @@ class GuildCacheTest {
     void 等单飞超过自己的预算是依赖故障() throws Exception {
         CountDownLatch inLoader = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        GuildCache blocking = new GuildCache(redis, TTL, (guildId, deadline) -> {
+        GuildCache blocking = new GuildCache(redis, REDIS_KEYS, TTL, (guildId, deadline) -> {
             inLoader.countDown();
             try {
                 release.await(5, TimeUnit.SECONDS);
@@ -279,7 +282,7 @@ class GuildCacheTest {
         guildRows.put(g2, snapshot(g2, "b", P));
         guildRows.put(g3, snapshot(g3, "c", P));
         cache.guild(G, budget()); // G 已在缓存
-        redis.values.put(RedisKeys.guildSnapshot(g3), new byte[] {(byte) 0xFF}); // g3 坏值
+        redis.values.put(REDIS_KEYS.guildSnapshot(g3), new byte[] {(byte) 0xFF}); // g3 坏值
         snapshotLoads.set(0);
 
         Map<Long, GuildSnapshot> found = cache.guildsForDisplay(List.of(G, g2, g3, ghost, G), budget());
@@ -301,10 +304,10 @@ class GuildCacheTest {
         memberRows.put(P, G);
         assertThat(cache.verifyGuildIdOf(P, G, budget())).isEqualTo(G);
         assertThat(redis.invalidateCalls).hasValue(0);
-        redis.values.put(RedisKeys.guildOfPlayer(P), "0".getBytes(StandardCharsets.US_ASCII));
+        redis.values.put(REDIS_KEYS.guildOfPlayer(P), "0".getBytes(StandardCharsets.US_ASCII));
         assertThat(cache.verifyGuildIdOf(P, 0, budget())).isEqualTo(G);
         assertThat(redis.invalidateCalls).hasValue(1);
-        assertThat(redis.values).doesNotContainKey(RedisKeys.guildOfPlayer(P));
+        assertThat(redis.values).doesNotContainKey(REDIS_KEYS.guildOfPlayer(P));
     }
 
     @Test
@@ -315,41 +318,41 @@ class GuildCacheTest {
 
     @Test
     void 解析_陈旧的0映射自愈() {
-        redis.values.put(RedisKeys.guildOfPlayer(P), "0".getBytes(StandardCharsets.US_ASCII));
+        redis.values.put(REDIS_KEYS.guildOfPlayer(P), "0".getBytes(StandardCharsets.US_ASCII));
         memberRows.put(P, G);
         guildRows.put(G, snapshot(G, "a", P));
         assertThat(cache.resolve(P, budget()).orElseThrow().getGuildId()).isEqualTo(G);
-        assertThat(redis.values).doesNotContainKey(RedisKeys.guildOfPlayer(P));
+        assertThat(redis.values).doesNotContainKey(REDIS_KEYS.guildOfPlayer(P));
     }
 
     @Test
     void 解析_快照里没有本人_复核为0回未入帮_并失效快照() {
-        redis.values.put(RedisKeys.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
+        redis.values.put(REDIS_KEYS.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
         guildRows.put(G, snapshot(G, "a", P + 9));
         cache.guild(G, budget());
         assertThat(cache.resolve(P, budget())).isEmpty();
-        assertThat(redis.values).doesNotContainKey(RedisKeys.guildSnapshot(G));
-        assertThat(redis.values).doesNotContainKey(RedisKeys.guildOfPlayer(P));
+        assertThat(redis.values).doesNotContainKey(REDIS_KEYS.guildSnapshot(G));
+        assertThat(redis.values).doesNotContainKey(REDIS_KEYS.guildOfPlayer(P));
     }
 
     @Test
     void 解析_被踢后的陈旧快照_绕过缓存直读MySQL() {
         long g2 = G + 2;
-        redis.values.put(RedisKeys.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
-        redis.values.put(RedisKeys.guildSnapshot(G), snapshot(G, "旧帮", P + 9).toByteArray());
+        redis.values.put(REDIS_KEYS.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
+        redis.values.put(REDIS_KEYS.guildSnapshot(G), snapshot(G, "旧帮", P + 9).toByteArray());
         memberRows.put(P, g2);
         guildRows.put(g2, snapshot(g2, "新帮", P + 9, P));
         assertThat(cache.resolve(P, budget()).orElseThrow().getName()).isEqualTo("新帮");
 
         // 复核后的帮会已不存在 → 未入帮
         memberRows.put(P, G + 3);
-        redis.values.put(RedisKeys.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
+        redis.values.put(REDIS_KEYS.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
         assertThat(cache.resolve(P, budget())).isEmpty();
     }
 
     @Test
     void 解析_两份MySQL数据矛盾时fail_closed() {
-        redis.values.put(RedisKeys.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
+        redis.values.put(REDIS_KEYS.guildOfPlayer(P), Long.toUnsignedString(G).getBytes(StandardCharsets.US_ASCII));
         memberRows.put(P, G);
         guildRows.put(G, snapshot(G, "a", P + 9)); // uk_guild_member 说 P 在 G，G 的成员里却没有 P
         assertThatThrownBy(() -> cache.resolve(P, budget())).isInstanceOf(IllegalStateException.class)
@@ -358,7 +361,7 @@ class GuildCacheTest {
 
     @Test
     void 构造参数校验() {
-        assertThatThrownBy(() -> new GuildCache(redis, Duration.ZERO, (g, d) -> null, (p, d) -> 0L, invalidator,
+        assertThatThrownBy(() -> new GuildCache(redis, REDIS_KEYS, Duration.ZERO, (g, d) -> null, (p, d) -> 0L, invalidator,
                 metrics)).isInstanceOf(IllegalArgumentException.class);
     }
 }

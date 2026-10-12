@@ -1,6 +1,8 @@
 package com.game.match.testing;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.match.rating.RatingReader;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.Ticket;
@@ -43,6 +45,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * 故障注入的操作名 = 接口方法名；写方法另有 {@code ":after"}（见 {@link Faults}）。线程安全（一把锁，临界区里不阻塞）。
  */
 public final class InMemoryTicketStore implements TicketStore {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     /** 弹组重放标记的寿命（同真实现的 60 s）。 */
     public static final long POP_MARKER_TTL_MS = 60_000;
@@ -104,11 +108,11 @@ public final class InMemoryTicketStore implements TicketStore {
     public InMemoryTicketStore putQueueMember(QueueRef queue, String member, Long ratingCenti) {
         lock.lock();
         try {
-            queues.computeIfAbsent(queue.queueKey(), k -> new ArrayList<>()).add(member);
+            queues.computeIfAbsent(queue.queueKey(REDIS_KEYS), k -> new ArrayList<>()).add(member);
             if (ratingCenti != null) {
-                ranks.computeIfAbsent(queue.queueKey(), k -> new LinkedHashMap<>()).put(member, ratingCenti);
+                ranks.computeIfAbsent(queue.queueKey(REDIS_KEYS), k -> new LinkedHashMap<>()).put(member, ratingCenti);
             }
-            index.add(queue.queueKey());
+            index.add(queue.queueKey(REDIS_KEYS));
             return this;
         } finally {
             lock.unlock();
@@ -152,7 +156,7 @@ public final class InMemoryTicketStore implements TicketStore {
     public List<String> queueMembers(QueueRef queue) {
         lock.lock();
         try {
-            return List.copyOf(queues.getOrDefault(queue.queueKey(), List.of()));
+            return List.copyOf(queues.getOrDefault(queue.queueKey(REDIS_KEYS), List.of()));
         } finally {
             lock.unlock();
         }
@@ -162,7 +166,7 @@ public final class InMemoryTicketStore implements TicketStore {
     public Map<String, Long> rankOf(QueueRef queue) {
         lock.lock();
         try {
-            return Map.copyOf(ranks.getOrDefault(queue.queueKey(), Map.of()));
+            return Map.copyOf(ranks.getOrDefault(queue.queueKey(REDIS_KEYS), Map.of()));
         } finally {
             lock.unlock();
         }
@@ -171,7 +175,7 @@ public final class InMemoryTicketStore implements TicketStore {
     public boolean indexed(QueueRef queue) {
         lock.lock();
         try {
-            return index.contains(queue.queueKey());
+            return index.contains(queue.queueKey(REDIS_KEYS));
         } finally {
             lock.unlock();
         }
@@ -181,7 +185,7 @@ public final class InMemoryTicketStore implements TicketStore {
     public Optional<String> lockHolder(QueueRef queue) {
         lock.lock();
         try {
-            Held held = locks.get(queue.lockKey());
+            Held held = locks.get(queue.lockKey(REDIS_KEYS));
             return held == null || held.expiresAtMs <= clock.peekMs() ? Optional.empty() : Optional.of(held.holder);
         } finally {
             lock.unlock();
@@ -225,7 +229,7 @@ public final class InMemoryTicketStore implements TicketStore {
     public InMemoryTicketStore expireLock(QueueRef queue) {
         lock.lock();
         try {
-            locks.remove(queue.lockKey());
+            locks.remove(queue.lockKey(REDIS_KEYS));
             return this;
         } finally {
             lock.unlock();
@@ -302,7 +306,7 @@ public final class InMemoryTicketStore implements TicketStore {
                 return existing;
             }
             long now = clock.peekMs();
-            String key = queue.queueKey();
+            String key = queue.queueKey(REDIS_KEYS);
             store(playerId, new Ticket(ticketId, queue.mode(), queue.configId(), TicketState.QUEUED, now, zoneId, key, ratingCenti, 0, 0, 0), ttlMs);
             index.add(key);
             ranks.computeIfAbsent(key, k -> new LinkedHashMap<>()).put(id(playerId), ratingCenti);
@@ -364,11 +368,11 @@ public final class InMemoryTicketStore implements TicketStore {
         return run("cancel", "cancel(" + id(playerId) + ")", true, () -> {
             Held held = live(playerId);
             if (held == null || !held.ticket.ticketId().equals(ref.ticketId()) || held.ticket.state() != TicketState.QUEUED
-                    || !held.ticket.queueKey().equals(queue.queueKey())) {
+                    || !held.ticket.queueKey().equals(queue.queueKey(REDIS_KEYS))) {
                 return false;
             }
             tickets.remove(playerId);
-            removeFromQueue(queue.queueKey(), id(playerId));
+            removeFromQueue(queue.queueKey(REDIS_KEYS), id(playerId));
             return true;
         });
     }
@@ -379,8 +383,8 @@ public final class InMemoryTicketStore implements TicketStore {
             throw new IllegalArgumentException("快照长度必须 ≥ 1: " + limit);
         }
         return run("snapshot", "snapshot(" + queue + ")", false, () -> {
-            List<String> members = queues.getOrDefault(queue.queueKey(), List.of());
-            Map<String, Long> rank = ranks.getOrDefault(queue.queueKey(), Map.of());
+            List<String> members = queues.getOrDefault(queue.queueKey(REDIS_KEYS), List.of());
+            Map<String, Long> rank = ranks.getOrDefault(queue.queueKey(REDIS_KEYS), Map.of());
             List<SnapshotEntry> entries = new ArrayList<>();
             for (int i = 0; i < members.size() && i < limit; i++) {
                 String member = members.get(i);
@@ -397,14 +401,14 @@ public final class InMemoryTicketStore implements TicketStore {
         requirePlayer(playerId);
         return run("drop","drop(" + queue + "," + id(playerId) + "," + reason + ")", true, () -> {
             Held held = live(playerId);
-            boolean validQueued = held != null && held.ticket.state() == TicketState.QUEUED && held.ticket.queueKey().equals(queue.queueKey());
+            boolean validQueued = held != null && held.ticket.state() == TicketState.QUEUED && held.ticket.queueKey().equals(queue.queueKey(REDIS_KEYS));
             if (!validQueued) {
-                removeFromQueue(queue.queueKey(), id(playerId));
+                removeFromQueue(queue.queueKey(REDIS_KEYS), id(playerId));
                 return true;
             }
             if (reason != DropReason.INVALID && held.ticket.ticketId().equals(seenTicketId)) {
                 tickets.remove(playerId);
-                removeFromQueue(queue.queueKey(), id(playerId));
+                removeFromQueue(queue.queueKey(REDIS_KEYS), id(playerId));
                 return true;
             }
             return false;
@@ -414,7 +418,7 @@ public final class InMemoryTicketStore implements TicketStore {
     @Override
     public boolean dropMalformed(QueueRef queue, String member, Deadline d) {
         Objects.requireNonNull(member, "member");
-        return run("dropMalformed", "dropMalformed(" + queue + "," + member + ")", true, () -> removeFromQueue(queue.queueKey(), member));
+        return run("dropMalformed", "dropMalformed(" + queue + "," + member + ")", true, () -> removeFromQueue(queue.queueKey(REDIS_KEYS), member));
     }
 
     @Override
@@ -435,7 +439,7 @@ public final class InMemoryTicketStore implements TicketStore {
             if (marker != null && marker > now) {
                 return new PopResult.Replayed();
             }
-            String key = queue.queueKey();
+            String key = queue.queueKey(REDIS_KEYS);
             List<String> list = queues.getOrDefault(key, List.of());
             List<Long> invalid = new ArrayList<>();
             for (TicketRef member : members) {
@@ -545,7 +549,7 @@ public final class InMemoryTicketStore implements TicketStore {
             if (marker != null && marker[1] > now) {
                 return (int) marker[0];
             }
-            String key = queue.queueKey();
+            String key = queue.queueKey(REDIS_KEYS);
             int requeued = 0;
             for (int i = survivorsInOrder.size() - 1; i >= 0; i--) {
                 TicketRef ref = survivorsInOrder.get(i);
@@ -577,13 +581,13 @@ public final class InMemoryTicketStore implements TicketStore {
 
     @Override
     public long queueLength(QueueRef queue, Deadline d) {
-        return run("queueLength", "queueLength(" + queue + ")", false, () -> (long) queues.getOrDefault(queue.queueKey(), List.of()).size());
+        return run("queueLength", "queueLength(" + queue + ")", false, () -> (long) queues.getOrDefault(queue.queueKey(REDIS_KEYS), List.of()).size());
     }
 
     @Override
     public boolean pruneIfEmpty(QueueRef queue, Deadline d) {
         return run("pruneIfEmpty", "pruneIfEmpty(" + queue + ")", true, () -> {
-            String key = queue.queueKey();
+            String key = queue.queueKey(REDIS_KEYS);
             if (!queues.getOrDefault(key, List.of()).isEmpty()) {
                 return false;
             }
@@ -600,14 +604,14 @@ public final class InMemoryTicketStore implements TicketStore {
         requireInstance(instanceId);
         return run("tryLockQueue","tryLockQueue(" + queue + ")", true, () -> {
             long now = clock.peekMs();
-            Held held = locks.get(queue.lockKey());
+            Held held = locks.get(queue.lockKey(REDIS_KEYS));
             if (held != null && held.expiresAtMs > now) {
                 return false;
             }
             Held mine = new Held();
             mine.holder = instanceId;
             mine.expiresAtMs = now + ttlMs;
-            locks.put(queue.lockKey(), mine);
+            locks.put(queue.lockKey(REDIS_KEYS), mine);
             return true;
         });
     }
@@ -616,9 +620,9 @@ public final class InMemoryTicketStore implements TicketStore {
     public void unlockQueue(QueueRef queue, String instanceId, Deadline d) {
         requireInstance(instanceId);
         run("unlockQueue","unlockQueue(" + queue + ")", true, () -> {
-            Held held = locks.get(queue.lockKey());
+            Held held = locks.get(queue.lockKey(REDIS_KEYS));
             if (held != null && held.holder.equals(instanceId)) {
-                locks.remove(queue.lockKey());
+                locks.remove(queue.lockKey(REDIS_KEYS));
             }
             return null;
         });

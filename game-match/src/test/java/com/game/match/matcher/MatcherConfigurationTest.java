@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
 import com.game.match.gather.BattleNodes;
@@ -26,6 +27,7 @@ import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.UnsatisfiedDependencyException;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
@@ -51,7 +53,7 @@ class MatcherConfigurationTest {
 
     /** 凑单之外的基础设施 bean（生产里由 MatchConfiguration 提供）；间隔调成 10 ms 让用例跑得快。 */
     private ApplicationContextRunner base() {
-        return new ApplicationContextRunner()
+        return new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
                 .withUserConfiguration(MatcherConfiguration.class)
                 .withBean(MatchProperties.class, () -> new MatchProperties(null, null, new MatchProperties.Matcher(Duration.ofMillis(10), null), null,
                         null, null, null, null, null, null, null, null, null))

@@ -6,13 +6,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.proto.BattlePlacement;
 import com.game.match.spectate.SpectateStore.Eviction;
 import com.game.match.testing.LeaseOnlyRedis;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
@@ -22,6 +26,8 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
  */
 class SpectateStoreConfigurationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static Deadline d() {
         return Deadline.after(1_000);
     }
@@ -30,17 +36,18 @@ class SpectateStoreConfigurationTest {
     void 装配出来的是Redis实现_构造时不碰Redis() {
         RedissonClient redis = mock(RedissonClient.class);
 
-        SpectateStore store = new SpectateStoreConfiguration().spectateStore(redis);
+        SpectateStore store = new SpectateStoreConfiguration().spectateStore(redis, REDIS_KEYS);
 
         assertThat(store).isInstanceOf(RedissonSpectateStore.class);
         verifyNoInteractions(redis);
     }
 
     @Test
-    void 上下文里恰好一个观战存储_取RedissonClient这一个依赖_起上下文不碰Redis() {
+    void 上下文里恰好一个观战存储_取RedissonClient与RedisKeys两个依赖_起上下文不碰Redis() {
         RedissonClient redis = mock(RedissonClient.class);
 
-        new ApplicationContextRunner().withBean(RedissonClient.class, () -> redis).withUserConfiguration(SpectateStoreConfiguration.class)
+        new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
+                .withBean(RedissonClient.class, () -> redis).withUserConfiguration(SpectateStoreConfiguration.class)
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(SpectateStore.class);
                     assertThat(context.getBean(SpectateStore.class)).isInstanceOf(RedissonSpectateStore.class);
@@ -48,14 +55,17 @@ class SpectateStoreConfigurationTest {
                 });
         verifyNoInteractions(redis);
 
-        new ApplicationContextRunner().withUserConfiguration(SpectateStoreConfiguration.class)
+        new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
+                .withUserConfiguration(SpectateStoreConfiguration.class)
                 .run(context -> assertThat(context).as("没有 RedissonClient 就起不来：依赖是显式的，不悄悄退回占位").hasFailed());
+        new ApplicationContextRunner().withBean(RedissonClient.class, () -> redis).withUserConfiguration(SpectateStoreConfiguration.class)
+                .run(context -> assertThat(context).as("没有 RedisKeys（命名空间）也起不来：键前缀只经注入，没有缺省实例").hasFailed());
     }
 
     @Test
     void Redis用不了_每个同步方法都抛依赖异常_不折成没有或空列表() {
         // 只应答发号租约的替身：脚本的异步口回 null、别的口也回 null——对观战存储来说就是「Redis 用不了」
-        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client);
+        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client, REDIS_KEYS);
         BattlePlacement placement = BattlePlacement.newBuilder().setBattleId(77).setAttempt(1).setCreatedAtMs(1_900_000_000_000L).build();
         Class<Deadline.DependencyException> failure = Deadline.DependencyException.class;
 
@@ -75,7 +85,7 @@ class SpectateStoreConfigurationTest {
 
     @Test
     void Redis用不了_两个尽力方法不抛() {
-        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client);
+        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client, REDIS_KEYS);
 
         assertThatCode(() -> store.releaseAsync(1001, "77:0123456789abcdef")).doesNotThrowAnyException();
         assertThatCode(() -> store.evictAsync(List.of(new Eviction.Invalid("junk"), new Eviction.Dead(77, 1)))).doesNotThrowAnyException();

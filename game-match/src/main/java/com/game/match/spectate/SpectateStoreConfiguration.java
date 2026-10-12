@@ -1,5 +1,6 @@
 package com.game.match.spectate;
 
+import com.game.discovery.RedisKeys;
 import org.redisson.api.RedissonClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -15,9 +16,9 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class SpectateStoreConfiguration {
 
-    /** 观战存储。索引键恒为 {@code RedisKeys.matchWatchable()}。 */
+    /** 观战存储。索引键恒为注入的 {@code redisKeys.matchWatchable()}。 */
     @Bean
-    public SpectateStore spectateStore(RedissonClient redis) {
-        return new RedissonSpectateStore(redis);
+    public SpectateStore spectateStore(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedissonSpectateStore(redis, redisKeys);
     }
 }

@@ -2,8 +2,8 @@ package com.game.data;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.audit.AuditProperties;
-import com.game.audit.KafkaNames;
 import com.game.audit.KafkaTopicAdmin;
+import com.game.common.KafkaNames;
 import com.game.common.token.DubboCallAuth;
 import com.game.data.admin.AdminAuthFilter;
 import com.game.data.gainblock.GainBlockStore;
@@ -31,6 +31,7 @@ import com.game.data.snapshot.ZoneSnapshotService;
 import com.game.data.store.PersistedPlayerMapper;
 import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleLockReader;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.gateway.store.GatewayStore;
@@ -100,21 +101,21 @@ public class DataConfiguration {
      * 批次 7.2a 起它实际由发号器 {@link OpsIds} 在启动后的后台线程上先连上（见 {@link #opsIds}）。
      */
     @Bean
-    public GainBlockStore gainBlockStore(ObjectProvider<RedissonClient> redis, ObjectMapper json) {
-        return new GainBlockStore(redis, json);
+    public GainBlockStore gainBlockStore(ObjectProvider<RedissonClient> redis, ObjectMapper json, RedisKeys keys) {
+        return new GainBlockStore(redis, json, keys);
     }
 
+    /**
+     * 审计消费。Kafka 侧的名字（topic 基名、消费组缺省值、消费者与 topic 管理客户端的 client.id）都取自注入的 {@link KafkaNames}：
+     * 核对审计 topic 用的 admin 客户端 client.id 为 {@code <ns>-data-admin}（缺省 {@code game-data-admin}）。
+     */
     @Bean
-    public DataNode dataNode(AuditProperties audit, DataProperties props, TransactionLogMapper transactionLog,
+    public DataNode dataNode(AuditProperties audit, DataProperties props, KafkaNames names, TransactionLogMapper transactionLog,
                              PlayerSnapshotMapper playerSnapshot, PlatformTransactionManager transactionManager,
                              DataMetrics metrics, Clock clock) {
-        return new DataNode(audit, props, transactionLog, playerSnapshot, new TransactionTemplate(transactionManager),
-                metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), adminClientId()), clock);
-    }
-
-    /** 核对审计 topic 用的 admin 客户端的 client.id：{@code <ns>-data-admin}（缺省 {@code game-data-admin}）。 */
-    static String adminClientId() {
-        return KafkaNames.of("data-admin");
+        String adminClientId = names.dataAdminClientId();
+        return new DataNode(audit, props, names, transactionLog, playerSnapshot, new TransactionTemplate(transactionManager),
+                metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), adminClientId), clock);
     }
 
     @Bean
@@ -143,10 +144,10 @@ public class DataConfiguration {
      * 生命周期阶段低于 Web 服务器，停机时最后交还。
      */
     @Bean
-    public OpsIds opsIds(ObjectProvider<RedissonClient> redis,
+    public OpsIds opsIds(ObjectProvider<RedissonClient> redis, RedisKeys keys,
                          @Qualifier("opsIdsScheduler") ScheduledExecutorService opsIdsScheduler, Clock clock) {
         String instanceId = "game-data-" + UUID.randomUUID();
-        return new OpsIds(OpsIds.sceneGuidPool(redis::getObject, opsIdsScheduler, instanceId), opsIdsScheduler,
+        return new OpsIds(OpsIds.sceneGuidPool(redis::getObject, keys, opsIdsScheduler, instanceId), opsIdsScheduler,
                 clock::millis, OpsIds.RETRY);
     }
 
@@ -245,11 +246,11 @@ public class DataConfiguration {
      */
     @Bean
     public AdminOwnership adminOwnership(PlayerStore playerStore, PlatformTransactionManager transactionManager,
-                                         ObjectProvider<RedissonClient> redis, DataMetrics metrics,
+                                         ObjectProvider<RedissonClient> redis, RedisKeys keys, DataMetrics metrics,
                                          @Qualifier("opsFenceScheduler") ScheduledExecutorService fence) {
         AdminOwnership ownership = new AdminOwnership(playerStore, new TransactionTemplate(transactionManager),
-                new RedisTakeoverRequests(redis::getObject),
-                (playerId, epoch) -> new PlayerLocationDirectory(redis.getObject()).removeAsync(playerId, epoch,
+                new RedisTakeoverRequests(redis::getObject, keys),
+                (playerId, epoch) -> new PlayerLocationDirectory(redis.getObject(), keys).removeAsync(playerId, epoch,
                         AdminOwnership.TOMBSTONE_SEQ),
                 metrics);
         long renewMs = PlayerStore.OWNER_LEASE.toMillis() / 3;
@@ -276,8 +277,8 @@ public class DataConfiguration {
      * （同 {@link RedisTakeoverRequests} 的接法），装配期不连接；取不到 / 读失败 / 超时都折成 {@code battle_lock_unknown}（不写）。
      */
     @Bean
-    public BattleLockGate battleLockGate(ObjectProvider<RedissonClient> redis, DataProperties props) {
-        return new BattleLockGate(playerIds -> new BattleLockReader(redis.getObject()).existsAll(playerIds),
+    public BattleLockGate battleLockGate(ObjectProvider<RedissonClient> redis, RedisKeys keys, DataProperties props) {
+        return new BattleLockGate(playerIds -> new BattleLockReader(redis.getObject(), keys).existsAll(playerIds),
                 props.ops().battleLockWait());
     }
 

@@ -5,9 +5,11 @@ import static org.mockito.Mockito.mock;
 
 import com.game.api.ClientMessageService;
 import com.game.api.proto.GateNodeInfo;
+import com.game.common.GameNamespace;
 import com.game.common.RunMode;
 import com.game.common.token.GateTokens;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.gate.metrics.GateMetrics;
 import java.nio.file.Path;
 import java.util.Map;
@@ -18,6 +20,8 @@ import org.redisson.api.RedissonClient;
  * gate 写进节点目录的条目（批次 5.4 先行件加了 {@code started_at_ms}）。只对着组条目的函数与构造器断言，不起 gate、不连 Redis。
  */
 class GateNodeDirectoryEntryTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     @Test
     void 目录条目_逐字段_带进程启动时刻_不标排空() throws Exception {
@@ -48,7 +52,7 @@ class GateNodeDirectoryEntryTest {
     @Test
     void 启动时刻在构造时取定一次_之后不变() {
         long before = System.currentTimeMillis();
-        GateNode node = new GateNode(mock(RedissonClient.class), MessageIdRegistry.loadFromClasspath(),
+        GateNode node = new GateNode(mock(RedissonClient.class), REDIS_KEYS, MessageIdRegistry.loadFromClasspath(),
                 GateTokens.ofUtf8("gate-node-directory-entry-test"), null, mock(ClientMessageService.class),
                 Map.of(), new GateProperties(null, null, null, null, null, null, null, null, null, null, null, null), 1,
                 "127.0.0.1", Path.of("config-data/tables"), GateMetrics.noop(), RunMode.PROD);

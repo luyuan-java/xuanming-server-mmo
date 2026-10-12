@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -105,6 +106,7 @@ public final class GuildCache {
     static final long CANDIDATE_GENERATION_TTL_MS = 10_000L;
 
     private final CacheRedis redis;
+    private final RedisKeys redisKeys;
     private final long ttlMillis;
     private final SnapshotLoader snapshots;
     private final MappingLoader mappings;
@@ -112,12 +114,14 @@ public final class GuildCache {
     private final GuildCacheMetrics metrics;
     private final ConcurrentHashMap<String, CompletableFuture<Void>> flights = new ConcurrentHashMap<>();
 
-    public GuildCache(CacheRedis redis, Duration ttl, SnapshotLoader snapshots, MappingLoader mappings,
+    /** @param keys 缓存键的出处（带部署命名空间，装配方注入；须与 {@link GuildCacheInvalidator} 用同一个） */
+    public GuildCache(CacheRedis redis, RedisKeys keys, Duration ttl, SnapshotLoader snapshots, MappingLoader mappings,
                       GuildCacheInvalidator invalidator, GuildCacheMetrics metrics) {
         if (ttl.toMillis() <= 0) {
             throw new IllegalArgumentException("缓存 TTL 必须 > 0: " + ttl);
         }
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.ttlMillis = ttl.toMillis();
         this.snapshots = snapshots;
         this.mappings = mappings;
@@ -133,7 +137,7 @@ public final class GuildCache {
      * @throws DependencyException Redis 读失败、缓存值坏、等单飞超过预算
      */
     public Optional<GuildSnapshot> guild(long guildId, Deadline deadline) {
-        String dataKey = RedisKeys.guildSnapshot(guildId);
+        String dataKey = redisKeys.guildSnapshot(guildId);
         return load(CacheKind.SNAPSHOT, dataKey, deadline,
                 raw -> Optional.of(decodeSnapshot(guildId, dataKey, raw)),
                 () -> snapshots.load(guildId, deadline),
@@ -154,7 +158,7 @@ public final class GuildCache {
         if (ids.isEmpty()) {
             return found;
         }
-        List<String> keys = ids.stream().map(RedisKeys::guildSnapshot).toList();
+        List<String> keys = ids.stream().map(redisKeys::guildSnapshot).toList();
         Map<String, byte[]> raw;
         try {
             raw = deadline.await(redis.getAll(keys), "批量读帮会快照");
@@ -196,7 +200,7 @@ public final class GuildCache {
      * @throws DependencyException Redis 读失败、缓存值坏、等单飞超过预算
      */
     public long guildIdOf(long playerId, Deadline deadline) {
-        String dataKey = RedisKeys.guildOfPlayer(playerId);
+        String dataKey = redisKeys.guildOfPlayer(playerId);
         return load(CacheKind.MAPPING, dataKey, deadline,
                 raw -> Optional.of(decodeMapping(dataKey, raw)),
                 () -> mappings.load(playerId, deadline),
@@ -320,7 +324,7 @@ public final class GuildCache {
             return hit;
         }
         metrics.cache(kind, CacheResult.MISS);
-        String generationKey = RedisKeys.cacheGeneration(dataKey);
+        String generationKey = redisKeys.cacheGeneration(dataKey);
         // 代次必须在 SQL 之前读（正确性论证的前提）；缺失时建一个自己的（否则回填永远写不进去且零报错）
         byte[] generation;
         try {

@@ -3,7 +3,9 @@ package com.game.match.matcher;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
+import com.game.discovery.RedisKeys;
 import com.game.match.matcher.GroupPicker.Group;
 import com.game.match.matcher.GroupPicker.None;
 import com.game.match.matcher.GroupPicker.Pick;
@@ -28,6 +30,8 @@ import org.junit.jupiter.api.Test;
  * 用一份手摆的快照与一个记录型的 {@link GroupPicker.Gate} 驱动，不碰任何存储。
  */
 class GroupPickerTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final QueueRef QUEUE = new QueueRef(3, 0);
     private static final QueueRef PVE = new QueueRef(5, 1);
@@ -66,7 +70,7 @@ class GroupPickerTest {
         }
 
         GroupPicker picker(int required, boolean rated, Tolerance tolerance, GroupPicker.Gate gate) {
-            return new GroupPicker(queue, required, rated, new QueueSnapshot(entries, NOW), tickets, tolerance, gate);
+            return new GroupPicker(queue.queueKey(REDIS_KEYS), required, rated, new QueueSnapshot(entries, NOW), tickets, tolerance, gate);
         }
     }
 
@@ -101,7 +105,7 @@ class GroupPickerTest {
     private final RecordingGate gate = new RecordingGate();
 
     private static Ticket queued(QueueRef queue, long playerId, long ratingCenti, long enqueuedAtMs, long notBeforeMs) {
-        return new Ticket("t-" + playerId, queue.mode(), queue.configId(), TicketState.QUEUED, enqueuedAtMs, 1, queue.queueKey(), ratingCenti, 0, 0,
+        return new Ticket("t-" + playerId, queue.mode(), queue.configId(), TicketState.QUEUED, enqueuedAtMs, 1, queue.queueKey(REDIS_KEYS), ratingCenti, 0, 0,
                 notBeforeMs);
     }
 
@@ -360,10 +364,10 @@ class GroupPickerTest {
         QueueRef other = new QueueRef(3, 9);
         Board board = new Board(QUEUE)
                 .entry(1, 150_000L)
-                .entry(2, 150_000L).ticket(2, new Ticket("t-2", 3, 0, TicketState.MATCHED, NOW, 1, QUEUE.queueKey(), 150_000, 0, 0, 0))
+                .entry(2, 150_000L).ticket(2, new Ticket("t-2", 3, 0, TicketState.MATCHED, NOW, 1, QUEUE.queueKey(REDIS_KEYS), 150_000, 0, 0, 0))
                 .entry(3, 150_000L).ticket(3, queued(other, 3, 150_000, NOW, 0))
-                .entry(4, 150_000L).ticket(4, new Ticket("t-4", 3, 0, TicketState.UNKNOWN, NOW, 1, QUEUE.queueKey(), 150_000, 0, 0, 0))
-                .entry(5, 150_000L).ticket(5, new Ticket("t-5", 3, 0, TicketState.READY, NOW, 1, QUEUE.queueKey(), 150_000, 0, 77, 0))
+                .entry(4, 150_000L).ticket(4, new Ticket("t-4", 3, 0, TicketState.UNKNOWN, NOW, 1, QUEUE.queueKey(REDIS_KEYS), 150_000, 0, 0, 0))
+                .entry(5, 150_000L).ticket(5, new Ticket("t-5", 3, 0, TicketState.READY, NOW, 1, QUEUE.queueKey(REDIS_KEYS), 150_000, 0, 77, 0))
                 .add(6, 150_000, 0).add(7, 150_000, 0);
 
         Group group = group(rated(board, 2));

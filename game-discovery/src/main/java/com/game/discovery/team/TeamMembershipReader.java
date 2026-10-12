@@ -5,6 +5,7 @@ import com.game.discovery.proto.TeamInfo;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
@@ -32,9 +33,6 @@ import org.redisson.client.codec.ByteArrayCodec;
  */
 public final class TeamMembershipReader {
 
-    /** 投影键的前缀（{@code game:{team}:info:}）：脚本里接上 tid 拼出投影键。 */
-    static final String INFO_KEY_PREFIX = infoKeyPrefix();
-
     /**
      * KEYS[1] = 玩家索引；ARGV[1] = 投影键前缀。回复 {@code {tid 或 "", epoch 或 "", 有无投影 0/1, 投影字节或 ""}}
      * （数组里不放 nil，缺失用 "" 占位，同基线 scripts.go:16 的约定）。
@@ -53,14 +51,20 @@ public final class TeamMembershipReader {
             return {tid, epoch, 1, info}
             """.formatted(TeamRedisFields.TID, TeamRedisFields.EPOCH);
 
-    private static final byte[] INFO_KEY_PREFIX_BYTES = INFO_KEY_PREFIX.getBytes(StandardCharsets.UTF_8);
     /** 无符号 64 位的十进制最多 20 位。 */
     private static final int MAX_DECIMAL_DIGITS = 20;
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
+    /** 投影键的前缀（{@code game:{team}:info:}）：脚本里接上 tid 拼出投影键。 */
+    private final String infoKeyPrefix;
+    private final byte[] infoKeyPrefixBytes;
 
-    public TeamMembershipReader(RedissonClient redis) {
+    public TeamMembershipReader(RedissonClient redis, RedisKeys keys) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
+        this.infoKeyPrefix = infoKeyPrefix(keys);
+        this.infoKeyPrefixBytes = infoKeyPrefix.getBytes(StandardCharsets.UTF_8);
     }
 
     /**
@@ -69,7 +73,7 @@ public final class TeamMembershipReader {
     public CompletableFuture<TeamMembership> readAsync(long playerId) {
         try {
             return redis.getScript(ByteArrayCodec.INSTANCE).<List<Object>>evalAsync(RScript.Mode.READ_ONLY, READ,
-                            RScript.ReturnType.MULTI, List.of(RedisKeys.teamPlayer(playerId)), INFO_KEY_PREFIX_BYTES)
+                            RScript.ReturnType.MULTI, List.of(redisKeys.teamPlayer(playerId)), infoKeyPrefixBytes)
                     .toCompletableFuture()
                     .thenApply(reply -> parse(playerId, reply));
         } catch (RuntimeException e) {
@@ -126,13 +130,16 @@ public final class TeamMembershipReader {
         return new IllegalStateException("组队索引 / 投影损坏 player=" + Long.toUnsignedString(playerId) + " " + detail);
     }
 
-    /** 由 {@code RedisKeys.teamInfo} 推出前缀，并核对投影键与索引键同一个 hash tag（脚本里拼的键必须与 KEYS[1] 同槽）。 */
-    private static String infoKeyPrefix() {
-        String probe = RedisKeys.teamInfo(0);
+    /**
+     * 由 {@code RedisKeys#teamInfo} 推出前缀，并核对投影键与索引键同一个 hash tag（脚本里拼的键必须与 KEYS[1] 同槽）。纯函数，包内可见供测试；
+     * 格式不对抛 {@link IllegalStateException}（构造时即失败）。
+     */
+    static String infoKeyPrefix(RedisKeys keys) {
+        String probe = keys.teamInfo(0);
         String prefix = probe.substring(0, probe.length() - 1);
         String tag = hashTag(prefix);
-        if (!RedisKeys.teamInfo(1234567890123L).equals(prefix + "1234567890123") || tag == null
-                || !tag.equals(hashTag(RedisKeys.teamPlayer(1)))) {
+        if (!keys.teamInfo(1234567890123L).equals(prefix + "1234567890123") || tag == null
+                || !tag.equals(hashTag(keys.teamPlayer(1)))) {
             throw new IllegalStateException("组队投影键的格式不是 <前缀><tid>，或与玩家索引不在同一 hash tag: " + probe);
         }
         return prefix;

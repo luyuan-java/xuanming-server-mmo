@@ -1,5 +1,6 @@
 package com.game.scenemanager.world;
 
+import com.game.discovery.RedisKeys;
 import com.game.discovery.world.RedissonWorldChannelStore;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.scenemanager.SceneIdAllocator;
@@ -20,8 +21,8 @@ import org.springframework.context.annotation.Configuration;
 public class WorldChannelConfiguration {
 
     @Bean
-    public WorldChannelStore worldChannelStore(RedissonClient redis) {
-        return new RedissonWorldChannelStore(redis);
+    public WorldChannelStore worldChannelStore(RedissonClient redis, RedisKeys redisKeys) {
+        return new RedissonWorldChannelStore(redis, redisKeys);
     }
 
     @Bean

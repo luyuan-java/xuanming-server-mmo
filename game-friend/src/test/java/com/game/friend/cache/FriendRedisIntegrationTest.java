@@ -2,6 +2,7 @@ package com.game.friend.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.friend.metrics.FriendMetrics;
 import com.game.friend.metrics.FriendMetrics.CacheKind;
@@ -26,6 +27,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class FriendRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long BASE = (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 40);
     private static RedissonClient redis;
 
@@ -39,16 +42,16 @@ class FriendRedisIntegrationTest {
     @AfterAll
     static void cleanup() {
         for (long i = 0; i < 4; i++) {
-            String list = RedisKeys.friendList(BASE + i);
-            redis.getKeys().delete(list, RedisKeys.friendCacheGeneration(list), RedisKeys.friendRequestQuota(BASE + i));
+            String list = REDIS_KEYS.friendList(BASE + i);
+            redis.getKeys().delete(list, REDIS_KEYS.friendCacheGeneration(list), REDIS_KEYS.friendRequestQuota(BASE + i));
         }
         redis.shutdown();
     }
 
     @Test
     void 回填与失效脚本() {
-        String key = RedisKeys.friendList(BASE);
-        FriendCache cache = new FriendCache(new RedissonFriendCacheRedis(redis), Duration.ofMinutes(30),
+        String key = REDIS_KEYS.friendList(BASE);
+        FriendCache cache = new FriendCache(new RedissonFriendCacheRedis(redis), REDIS_KEYS, Duration.ofMinutes(30),
                 new FriendMetrics(new SimpleMeterRegistry()));
         List<FriendEdge> rows = List.of(new FriendEdge(-2L, 5));
         assertThat(cache.load(CacheKind.LIST, key, FriendEdge.class, Deadline.after(3000), () -> rows)).isEqualTo(rows);
@@ -59,7 +62,7 @@ class FriendRedisIntegrationTest {
 
         cache.invalidateAfterCommit(List.of(key), Deadline.after(3000));
         assertThat(redis.getBucket(key, StringCodec.INSTANCE).isExists()).isFalse();
-        String generationKey = RedisKeys.friendCacheGeneration(key);
+        String generationKey = REDIS_KEYS.friendCacheGeneration(key);
         assertThat(redis.getBucket(generationKey, StringCodec.INSTANCE).remainTimeToLive())
                 .isBetween(TimeUnit.MINUTES.toMillis(59), TimeUnit.MINUTES.toMillis(60));
 
@@ -72,16 +75,16 @@ class FriendRedisIntegrationTest {
 
     @Test
     void 配额脚本_计数带60秒过期_自愈无TTL的存量计数器() {
-        FriendRequestQuota quota = FriendRequestQuota.redisson(redis, 2, new FriendMetrics(new SimpleMeterRegistry()));
+        FriendRequestQuota quota = FriendRequestQuota.redisson(redis, REDIS_KEYS, 2, new FriendMetrics(new SimpleMeterRegistry()));
         long player = BASE + 1;
         assertThat(quota.tryAcquire(player, Deadline.after(3000))).isTrue();
         assertThat(quota.tryAcquire(player, Deadline.after(3000))).isTrue();
         assertThat(quota.tryAcquire(player, Deadline.after(3000))).isFalse();
-        String key = RedisKeys.friendRequestQuota(player);
+        String key = REDIS_KEYS.friendRequestQuota(player);
         assertThat(redis.getBucket(key, StringCodec.INSTANCE).remainTimeToLive()).isBetween(1L, 60_000L);
 
         long legacy = BASE + 2;
-        String legacyKey = RedisKeys.friendRequestQuota(legacy);
+        String legacyKey = REDIS_KEYS.friendRequestQuota(legacy);
         redis.getBucket(legacyKey, StringCodec.INSTANCE).set("5"); // 没有 TTL 的存量计数器
         assertThat(quota.tryAcquire(legacy, Deadline.after(3000))).isFalse();
         assertThat(redis.getBucket(legacyKey, StringCodec.INSTANCE).remainTimeToLive()).isBetween(1L, 60_000L);

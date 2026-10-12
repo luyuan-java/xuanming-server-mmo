@@ -3,6 +3,7 @@ package com.game.match.rating;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.common.id.Snowflake;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
 import com.game.match.id.MatchIds;
@@ -20,6 +21,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
@@ -41,7 +43,7 @@ class RatingConfigurationTest {
 
     private ApplicationContextRunner runner(boolean ratingEnabled) {
         String database = "rating-config-" + UUID.randomUUID();
-        return new ApplicationContextRunner()
+        return new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
                 .withUserConfiguration(RatingConfiguration.class)
                 .withBean(DataSource.class, () -> RatingTestDatabase.h2DataSource(database))
                 .withBean(MatchProperties.class, () -> props(ratingEnabled))
@@ -114,6 +116,15 @@ class RatingConfigurationTest {
             assertThat(ingest.consuming()).isFalse();
             assertThat(ingest.topic()).isEqualTo("game-battle-result-g9644");
         });
+    }
+
+    @Test
+    void 非缺省命名空间_结果topic随注入的KafkaNames() {
+        runner(false).withPropertyValues("game.namespace=nstest").withBean(MatchRatingTables.SchemaSync.class, () -> RatingTestDatabase.H2_SCHEMA)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(BattleResultIngest.class).topic()).isEqualTo("nstest-battle-result-g9644");
+                });
     }
 
     @Test

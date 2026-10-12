@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
@@ -57,6 +58,8 @@ import org.springframework.boot.actuate.health.Status;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class MatchLeaseRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
     private static RedissonClient redis;
 
@@ -77,13 +80,13 @@ class MatchLeaseRedisIntegrationTest {
         Instance() {
             ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
             when(scheduler.scheduleAtFixedRate(renewal.capture(), anyLong(), anyLong(), any(TimeUnit.class))).thenReturn((ScheduledFuture) mock(ScheduledFuture.class));
-            lease = configuration.matchIdLease(redis, scheduler, new MatchInstance(id), metrics, new MatchStartupChecks.Passed(4200, 1));
+            lease = configuration.matchIdLease(redis, REDIS_KEYS, scheduler, new MatchInstance(id), metrics, new MatchStartupChecks.Passed(4200, 1));
             ids = configuration.matchIds(lease);
             written.add(new String[] {key(), id});
         }
 
         String key() {
-            return RedisKeys.nodeId(NodeTypes.MATCH, 0, lease.nodeId());
+            return REDIS_KEYS.nodeId(NodeTypes.MATCH, 0, lease.nodeId());
         }
 
         void renew() {

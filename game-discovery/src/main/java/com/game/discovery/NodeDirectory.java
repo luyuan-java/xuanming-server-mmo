@@ -6,6 +6,7 @@ import com.google.protobuf.Parser;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -33,11 +34,13 @@ public final class NodeDirectory<T extends Message> {
     private static final Logger log = LoggerFactory.getLogger(NodeDirectory.class);
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final String nodeType;
     private final Parser<T> parser;
 
-    public NodeDirectory(RedissonClient redis, String nodeType, Parser<T> parser) {
+    public NodeDirectory(RedissonClient redis, RedisKeys keys, String nodeType, Parser<T> parser) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.nodeType = nodeType;
         this.parser = parser;
     }
@@ -87,7 +90,7 @@ public final class NodeDirectory<T extends Message> {
     }
 
     private RMapCache<String, byte[]> map(int zoneId) {
-        return redis.getMapCache(RedisKeys.nodeDirectory(nodeType, zoneId),
+        return redis.getMapCache(redisKeys.nodeDirectory(nodeType, zoneId),
                 new CompositeCodec(StringCodec.INSTANCE, ByteArrayCodec.INSTANCE));
     }
 }

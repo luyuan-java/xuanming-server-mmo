@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.redisson.api.RedissonClient;
@@ -43,10 +44,12 @@ public final class PlayerPushes {
     }
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final PlayerPresenceDirectory directory;
 
-    public PlayerPushes(RedissonClient redis, PlayerPresenceDirectory directory) {
+    public PlayerPushes(RedissonClient redis, RedisKeys keys, PlayerPresenceDirectory directory) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.directory = directory;
     }
 
@@ -127,7 +130,7 @@ public final class PlayerPushes {
         for (PlayerPresence t : targets) {
             push.addTargets(PushTarget.newBuilder().setSessionId(t.getSessionId()).setPlayerId(t.getPlayerId()));
         }
-        return redis.getTopic(RedisKeys.gatePushTopic(gate.getZoneId(), gate.getGateNodeId()), ByteArrayCodec.INSTANCE)
+        return redis.getTopic(redisKeys.gatePushTopic(gate.getZoneId(), gate.getGateNodeId()), ByteArrayCodec.INSTANCE)
                 .publishAsync(push.build().toByteArray())
                 .thenApply(receivers -> receivers != null && receivers > 0 ? Outcome.SENT : Outcome.GATE_UNREACHABLE);
     }

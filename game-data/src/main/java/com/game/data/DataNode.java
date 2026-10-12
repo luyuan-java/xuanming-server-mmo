@@ -4,8 +4,8 @@ import com.game.audit.AuditTopicContractException;
 import com.game.audit.AuditProperties;
 import com.game.audit.AuditTopicInitializer;
 import com.game.audit.AuditTopics;
-import com.game.audit.KafkaNames;
 import com.game.audit.TopicAdmin;
+import com.game.common.KafkaNames;
 import com.game.data.consume.ConsumerLoop;
 import com.game.data.consume.ConsumerLoop.Decoder;
 import com.game.data.consume.ConsumerLoop.Sink;
@@ -21,6 +21,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -41,6 +42,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * 然后为每个审计 topic 起一条消费线程（资产流水、玩家快照）。第一次核对在启动线程上同步做（契约不符才能拒绝启动）；
  * Kafka 不可达（含地址解析不了）时最多等 {@code game.audit.init-timeout} 后照常启动，后台每 30 秒重试核对，通过后再起消费者。
  * 另有一条保留期清理线程。停止发生在数据源销毁之前（SmartLifecycle），未提交的批次留给下次启动重放。
+ *
+ * <p>Kafka 侧的名字都取自注入的 {@link KafkaNames}（部署命名空间 {@code <ns>}）：审计 topic 经 {@link AuditTopics}；消费组没配时取
+ * {@code <ns>-data-transaction-log} / {@code <ns>-data-player-snapshot}；消费者 client.id 为 {@code <ns>-data-<实际消费组>}。
  */
 public final class DataNode implements SmartLifecycle {
 
@@ -56,6 +60,8 @@ public final class DataNode implements SmartLifecycle {
 
     private final AuditProperties audit;
     private final DataProperties props;
+    private final KafkaNames names;
+    private final AuditTopics topics;
     private final TransactionLogMapper transactionLog;
     private final PlayerSnapshotMapper playerSnapshot;
     private final TransactionTemplate tx;
@@ -73,11 +79,16 @@ public final class DataNode implements SmartLifecycle {
         volatile ConsumerLoop<?> loop;
     }
 
-    public DataNode(AuditProperties audit, DataProperties props, TransactionLogMapper transactionLog,
+    /**
+     * @param names Kafka 名字的出处（注入的 bean）：审计 topic 由它构造 {@link AuditTopics}，消费组缺省值与 client.id 也取自它
+     */
+    public DataNode(AuditProperties audit, DataProperties props, KafkaNames names, TransactionLogMapper transactionLog,
                     PlayerSnapshotMapper playerSnapshot, TransactionTemplate tx, DataMetrics metrics,
                     Supplier<TopicAdmin> adminFactory, Clock clock) {
         this.audit = audit;
         this.props = props;
+        this.names = Objects.requireNonNull(names, "names");
+        this.topics = new AuditTopics(names);
         this.transactionLog = transactionLog;
         this.playerSnapshot = playerSnapshot;
         this.tx = tx;
@@ -120,7 +131,7 @@ public final class DataNode implements SmartLifecycle {
 
     private boolean verify() {
         try (TopicAdmin admin = adminFactory.get()) {
-            AuditTopicInitializer.ensure(admin, AuditTopics.all(audit.topicGeneration()), AuditTopicInitializer.Mode.OWN,
+            AuditTopicInitializer.ensure(admin, topics.all(audit.topicGeneration()), AuditTopicInitializer.Mode.OWN,
                     audit.replicationFactor(), audit.initTimeout());
             return true;
         } catch (AuditTopicContractException e) {
@@ -138,23 +149,46 @@ public final class DataNode implements SmartLifecycle {
         }
         int generation = audit.topicGeneration();
         DataProperties.TransactionLogConsumer txSettings = props.transactionLog();
-        startConsumer(TRANSACTION_LOG, "data-txlog", AuditTopics.transactionLog(generation).name(), txSettings,
-                new TransactionLogDecoder(), new TransactionLogSink(transactionLog, tx, txSettings.insertChunk(), clock));
+        startConsumer(TRANSACTION_LOG, "data-txlog", topics.transactionLog(generation).name(), transactionLogGroup(),
+                txSettings, new TransactionLogDecoder(),
+                new TransactionLogSink(transactionLog, tx, txSettings.insertChunk(), clock));
         DataProperties.PlayerSnapshotConsumer snapshotSettings = props.playerSnapshot();
-        startConsumer(PLAYER_SNAPSHOT, "data-snapshot", AuditTopics.playerSnapshot(generation).name(), snapshotSettings,
-                new PlayerSnapshotDecoder(),
+        startConsumer(PLAYER_SNAPSHOT, "data-snapshot", topics.playerSnapshot(generation).name(), playerSnapshotGroup(),
+                snapshotSettings, new PlayerSnapshotDecoder(),
                 new PlayerSnapshotSink(playerSnapshot, tx, snapshotSettings.insertChunk(), clock));
     }
 
-    private <R> void startConsumer(String name, String threadName, String topic, DataProperties.ConsumerSettings settings,
-                                   Decoder<R> decoder, Sink<R> sink) {
+    /** 资产流水消费者实际用的消费组：配了用配置值，没配取 {@code <ns>-data-transaction-log}（缺省命名空间下即 {@code game-data-transaction-log}）。 */
+    String transactionLogGroup() {
+        return effectiveGroup(props.transactionLog(), names.dataTransactionLogGroup());
+    }
+
+    /** 玩家快照消费者实际用的消费组：配了用配置值，没配取 {@code <ns>-data-player-snapshot}（缺省命名空间下即 {@code game-data-player-snapshot}）。 */
+    String playerSnapshotGroup() {
+        return effectiveGroup(props.playerSnapshot(), names.dataPlayerSnapshotGroup());
+    }
+
+    private static String effectiveGroup(DataProperties.ConsumerSettings settings, String fallback) {
+        return settings.group() == null ? fallback : settings.group();
+    }
+
+    /**
+     * 审计消费者的 Kafka client.id：{@code <ns>-data-<实际消费组>}（缺省命名空间与缺省消费组下即 {@code game-data-game-data-transaction-log}）。
+     * 消费组可能是部署显式配的任意串，{@link KafkaNames#dataConsumerClientId} 不收紧字符集。
+     */
+    String clientId(String group) {
+        return names.dataConsumerClientId(group);
+    }
+
+    private <R> void startConsumer(String name, String threadName, String topic, String group,
+                                   DataProperties.ConsumerSettings settings, Decoder<R> decoder, Sink<R> sink) {
         Worker worker = new Worker();
         worker.thread = new Thread(() -> {
             // 监督：消费循环意外退出（非停止）时换一个新的 KafkaConsumer 重来；未提交的批次会被重新消费
             while (running) {
                 ConsumerLoop<R> loop;
                 try {
-                    loop = new ConsumerLoop<>(name, newConsumer(settings), topic, decoder, sink, metrics, POLL_TIMEOUT,
+                    loop = new ConsumerLoop<>(name, newConsumer(group, settings), topic, decoder, sink, metrics, POLL_TIMEOUT,
                             props.dbRetry().initial(), props.dbRetry().max());
                 } catch (RuntimeException e) {
                     log.error("创建 {} 的 KafkaConsumer 失败，{} 毫秒后重试", name, RESTART_DELAY_MILLIS, e);
@@ -176,32 +210,24 @@ public final class DataNode implements SmartLifecycle {
         }, threadName);
         workers.add(worker);
         worker.thread.start();
-        log.info("{} 消费者已启动 topic={} group={}", name, topic, settings.group());
-        if (!settings.group().startsWith(KafkaNames.prefix())) {
+        log.info("{} 消费者已启动 topic={} group={}", name, topic, group);
+        if (!group.startsWith(names.prefix())) {
             log.warn("{} 的消费组 {} 不以部署命名空间前缀 {} 开头：与共用同一 Kafka 的别的部署同名时会互相触发重平衡，将来按前缀配 ACL 时会授权失败",
-                    name, settings.group(), KafkaNames.prefix());
+                    name, group, names.prefix());
         }
     }
 
-    private Consumer<String, byte[]> newConsumer(DataProperties.ConsumerSettings settings) {
+    private Consumer<String, byte[]> newConsumer(String group, DataProperties.ConsumerSettings settings) {
         Properties p = new Properties();
         p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, audit.bootstrapServers());
-        p.put(ConsumerConfig.GROUP_ID_CONFIG, settings.group());
-        p.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId(settings.group()));
+        p.put(ConsumerConfig.GROUP_ID_CONFIG, group);
+        p.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId(group));
         p.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         p.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "false");
         p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(settings.maxPollRecords()));
         p.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "500");
         return new KafkaConsumer<>(p, new StringDeserializer(), new ByteArrayDeserializer());
-    }
-
-    /**
-     * 审计消费者的 Kafka client.id：{@code <ns>-data-<消费组>}（缺省命名空间与缺省消费组下即 {@code game-data-game-data-transaction-log}）。
-     * 消费组可能是部署显式配的任意串，所以走不收紧字符集的 {@link KafkaNames#clientId}。
-     */
-    static String clientId(String group) {
-        return KafkaNames.clientId("data-" + group);
     }
 
     private void startRetention() {

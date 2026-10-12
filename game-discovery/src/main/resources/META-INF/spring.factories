@@ -1,6 +1,0 @@
-# 部署命名空间（game.namespace，见 com.game.common.GameNamespace）：建任何 bean 之前定格，失败按 Spring Boot 标准格式报告。
-# 键名是 Spring Boot 3.x 的写法（升 Boot 4 时 EnvironmentPostProcessor 的键改名，要同步）。
-org.springframework.boot.env.EnvironmentPostProcessor=\
-com.game.discovery.namespace.GameNamespaceEnvironmentPostProcessor
-org.springframework.boot.diagnostics.FailureAnalyzer=\
-com.game.discovery.namespace.GameNamespaceFailureAnalyzer

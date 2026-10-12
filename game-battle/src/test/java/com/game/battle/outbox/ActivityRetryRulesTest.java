@@ -3,6 +3,7 @@ package com.game.battle.outbox;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.battle.outbox.ActivityRetryRules.Decision;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleRedis;
 import java.time.Duration;
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.Test;
  * 已销账 &gt; 用尽 &gt; 重发；持久副本的键名与 TTL / 间隔 / 上限；只在重发时计次，所以 30 次重发之后第 31 轮才用尽（{@code room.cpp:2014}）。
  */
 class ActivityRetryRulesTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     @Test
     void 判定顺序_已销账先于用尽先于重发() {
@@ -37,8 +40,8 @@ class ActivityRetryRulesTest {
 
     @Test
     void 键名_按battle_id的无符号十进制() {
-        assertThat(RedisKeys.battleActivityResult(123)).isEqualTo("game:battle:activity-result:123");
-        assertThat(RedisKeys.battleActivityResult(-1L)).as("uint64 最大值").isEqualTo("game:battle:activity-result:18446744073709551615");
+        assertThat(REDIS_KEYS.battleActivityResult(123)).isEqualTo("game:battle:activity-result:123");
+        assertThat(REDIS_KEYS.battleActivityResult(-1L)).as("uint64 最大值").isEqualTo("game:battle:activity-result:18446744073709551615");
     }
 
     @Test

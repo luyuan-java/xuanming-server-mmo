@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.battle.metrics.BattleMetrics;
 import com.game.battle.outbox.OutboxMetrics;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.PlayerLocation;
@@ -51,6 +52,7 @@ import org.redisson.misc.CompletableFutureWrapper;
  */
 class SceneTransportTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     private static final int ZONE = 1;
     private static final int NODE = 3;
     private static final String INSTANCE = "scene-a";
@@ -83,7 +85,8 @@ class SceneTransportTest {
         }
         node = SceneNodeInfo.newBuilder().setZoneId(ZONE).setNodeId(NODE).setInstanceId(INSTANCE).setRpcHost("127.0.0.1")
                 .setRpcPort(port).build();
-        when(redis.getMapCache(eq(RedisKeys.nodeDirectory(NodeTypes.SCENE, ZONE)), any(Codec.class))).thenReturn((RMapCache) sceneDirectory);
+        when(redis.getMapCache(eq(REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, ZONE)), any(Codec.class)))
+                .thenReturn((RMapCache) sceneDirectory);
         when(sceneDirectory.getAsync(Integer.toString(NODE))).thenAnswer(call -> new CompletableFutureWrapper<>(node.toByteArray()));
         when(sceneDirectory.readAllValues()).thenAnswer(call -> {
             RuntimeException failure = listingFailure;
@@ -102,14 +105,14 @@ class SceneTransportTest {
             return new CompletableFutureWrapper<>(reply);
         });
         when(redis.getScript(any(Codec.class))).thenReturn(scripts);
-        transport = new SceneTransport(redis, new BattleMetrics(registry), OutboxMetrics.noop(), SceneTransportProperties.defaults(),
-                (event, channel) -> { });
+        transport = new SceneTransport(redis, REDIS_KEYS, new BattleMetrics(registry), OutboxMetrics.noop(),
+                SceneTransportProperties.defaults(), (event, channel) -> { });
     }
 
     /** 换一组配置重新装配（先关掉缺省装配的那一个）；结算发件箱的计数进 {@link #outboxRegistry}。 */
     private void reassemble(SceneTransportProperties props) {
         transport.close();
-        transport = new SceneTransport(redis, new BattleMetrics(registry), new OutboxMetrics(outboxRegistry), props,
+        transport = new SceneTransport(redis, REDIS_KEYS, new BattleMetrics(registry), new OutboxMetrics(outboxRegistry), props,
                 (event, channel) -> { });
     }
 
@@ -121,7 +124,7 @@ class SceneTransportTest {
         await().atMost(Duration.ofSeconds(5)).until(() -> scriptCalls.size() == 1);
         ScriptCall store = scriptCalls.get(0);
         assertThat(store.keys()).as("落库脚本的两个键：待结算记录 + 这一局的已销账墓碑")
-                .containsExactly(RedisKeys.battleSettlements(PLAYER), RedisKeys.battleSettled(PLAYER, BATTLE));
+                .containsExactly(REDIS_KEYS.battleSettlements(PLAYER), REDIS_KEYS.battleSettled(PLAYER, BATTLE));
         assertThat(transport.settlements().inFlight()).isEqualTo(1);
         return store;
     }
@@ -213,7 +216,7 @@ class SceneTransportTest {
         store.reply().complete(1L);
         await().atMost(Duration.ofSeconds(5)).until(() -> scriptCalls.size() == 2);
         ScriptCall locate = scriptCalls.get(1);
-        assertThat(locate.keys()).as("首投的定位：读这名玩家的位置记录").containsExactly(RedisKeys.playerLocation(PLAYER));
+        assertThat(locate.keys()).as("首投的定位：读这名玩家的位置记录").containsExactly(REDIS_KEYS.playerLocation(PLAYER));
         assertThat(transport.sweeper().trackedCount()).as("还没投递，没有登记").isZero();
         // 在线位置记录：玩家由 (zone, node) 持有；目录里这个节点号就是 scene-a（装配时桩好的 getAsync）
         locate.reply().complete(Arrays.asList("o".getBytes(StandardCharsets.US_ASCII),
@@ -269,7 +272,7 @@ class SceneTransportTest {
         // 落库的结局交回了还活着的发件箱线程（先排空、后停线程；反过来这份结局会被丢弃）：计 stored，并发起首投的定位——读位置记录的脚本，同样悬着
         await().atMost(Duration.ofSeconds(5)).until(() -> scriptCalls.size() == 2);
         ScriptCall locate = scriptCalls.get(1);
-        assertThat(locate.keys()).as("首投的定位：读这名玩家的位置记录").containsExactly(RedisKeys.playerLocation(PLAYER));
+        assertThat(locate.keys()).as("首投的定位：读这名玩家的位置记录").containsExactly(REDIS_KEYS.playerLocation(PLAYER));
         assertThat(outboxEvents("stored")).isEqualTo(1);
         assertThatThrownBy(() -> closing.get(200, TimeUnit.MILLISECONDS)).as("首投还在途（在途 = 落库 + 首投）：继续等")
                 .isInstanceOf(TimeoutException.class);

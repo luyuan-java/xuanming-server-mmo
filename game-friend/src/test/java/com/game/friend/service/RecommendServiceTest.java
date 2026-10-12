@@ -2,6 +2,8 @@ package com.game.friend.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory.StrictLookup;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.friend.directory.OnlineDirectory;
@@ -26,6 +28,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class RecommendServiceTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long ME = 100;
 
@@ -77,7 +81,7 @@ class RecommendServiceTest {
         }, "game:presence:", (ids, d) -> lookup(ids));
         DirectoryQuota quota = new DirectoryQuota(k -> failQuota
                 ? CompletableFuture.failedFuture(new IllegalStateException("redis down"))
-                : CompletableFuture.completedFuture(quotaCount.incrementAndGet()), metrics);
+                : CompletableFuture.completedFuture(quotaCount.incrementAndGet()), REDIS_KEYS, metrics);
         return new RecommendService(source, directory, quota, (ids, d) -> lookup(ids),
                 ids -> failOnline ? CompletableFuture.failedFuture(new IllegalStateException("down"))
                         : CompletableFuture.completedFuture(new StrictLookup(onlineOf(ids), ids.size() - onlineOf(ids).size(), 0)),

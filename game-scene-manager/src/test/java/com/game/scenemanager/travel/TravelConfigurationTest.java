@@ -12,6 +12,7 @@ import com.game.common.token.GateTokenIssuer;
 import com.game.common.token.GateTokens;
 import com.game.discovery.gate.GateSource;
 import com.game.discovery.gate.RedisGateSource;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.discovery.zone.ZoneMergeFence;
 import com.game.scenemanager.ChannelSelector;
@@ -39,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.ApplicationContextInitializer;
@@ -60,6 +62,7 @@ class TravelConfigurationTest {
 
     /** 选路装配的全部上游依赖（Redis 客户端是替身：构造 gate 目录读取面不碰 Redis，本测试也不调它）。 */
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withUserConfiguration(TravelConfiguration.class)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(WorldChannelStore.class, FakeWorldChannelStore::new)
@@ -162,6 +165,7 @@ class TravelConfigurationTest {
     @Test
     void 容器能按构造器注入建出场景目录提供方_两个新RPC经它走到选路() {
         new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
                 .withUserConfiguration(TravelConfiguration.class)
                 .withInitializer(secret("s"))
                 .withBean(RedissonClient.class, () -> mock(RedissonClient.class))

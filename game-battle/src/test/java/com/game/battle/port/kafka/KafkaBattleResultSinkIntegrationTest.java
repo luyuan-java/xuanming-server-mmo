@@ -13,6 +13,8 @@ import com.game.audit.TopicSpec;
 import com.game.battle.metrics.BattleMetrics;
 import com.game.battle.port.BattleResultSink.Channel;
 import com.game.battle.testing.ResultFallbackCapture;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.contracts.kafka.BattleResultTeam;
@@ -49,6 +51,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 @EnabledIfSystemProperty(named = "game.it.kafka", matches = ".+")
 class KafkaBattleResultSinkIntegrationTest {
 
+    private static final BattleResultTopics RESULT_TOPICS = new BattleResultTopics(new KafkaNames(GameNamespace.of("game")));
     private static final int GENERATION = 9671;
     private static final int MISMATCH_GENERATION = 9672;
     private static final String BOOTSTRAP = System.getProperty("game.it.kafka");
@@ -70,8 +73,8 @@ class KafkaBattleResultSinkIntegrationTest {
     }
 
     private KafkaBattleResultSink sink(String bootstrap, int generation, Duration verifyTimeout) {
-        sink = new KafkaBattleResultSink(KafkaBattleResultSink.Clients.kafka(bootstrap, "game-it-battle-result-" + run), generation, (short) 1,
-                verifyTimeout, metrics);
+        sink = new KafkaBattleResultSink(KafkaBattleResultSink.Clients.kafka(bootstrap, "game-it-battle-result-" + run), RESULT_TOPICS,
+                generation, (short) 1, verifyTimeout, metrics);
         return sink;
     }
 
@@ -116,7 +119,7 @@ class KafkaBattleResultSinkIntegrationTest {
 
     @Test
     void 真Kafka_启动核对按契约建出三分区保留七天的topic_发布的事件落到topic_key与字节原样_同一局进同一分区且保序_重发照发() {
-        String topic = BattleResultTopics.name(GENERATION);
+        String topic = RESULT_TOPICS.name(GENERATION);
         assertThat(topic).isEqualTo("game-battle-result-g9671");
         sink(BOOTSTRAP, GENERATION, Duration.ofSeconds(20)).start();
         assertThat(sink.verified()).isTrue();
@@ -172,7 +175,7 @@ class KafkaBattleResultSinkIntegrationTest {
 
     @Test
     void 真Kafka_topic分区数与契约不符_启动抛契约异常_报错指向结果topic的代次变量_之后的事件只写兜底() {
-        String topic = BattleResultTopics.name(MISMATCH_GENERATION);
+        String topic = RESULT_TOPICS.name(MISMATCH_GENERATION);
         try (KafkaTopicAdmin admin = new KafkaTopicAdmin(BOOTSTRAP, "game-it-battle-result-admin")) {
             // 模拟 broker 自动建 topic 建出了别的分区数：先按 2 分区建好（幂等，反复运行不变）
             AuditTopicInitializer.ensure(admin, List.of(new TopicSpec(topic, 2, Map.of())), AuditTopicInitializer.Mode.CREATE_AND_VERIFY,

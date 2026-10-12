@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.audit.AuditTopicInitializer.Mode;
+import com.game.common.GameNamespace;
+import com.game.common.KafkaNames;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -75,14 +77,17 @@ class BattleResultTopicsTest {
     }
 
     private static final Duration TIMEOUT = Duration.ofSeconds(1);
+    private static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("game"));
+    private static final BattleResultTopics BATTLE_RESULT_TOPICS = new BattleResultTopics(KAFKA_NAMES);
+    private static final AuditTopics AUDIT_TOPICS = new AuditTopics(KAFKA_NAMES);
 
     @Test
     void 规格钉住_名字带代次_三分区_保留七天() {
-        TopicSpec spec = BattleResultTopics.spec(1);
+        TopicSpec spec = BATTLE_RESULT_TOPICS.spec(1);
 
-        assertThat(BattleResultTopics.BASE).isEqualTo("game-battle-result");
-        assertThat(BattleResultTopics.name(1)).isEqualTo("game-battle-result-g1");
-        assertThat(BattleResultTopics.name(7)).isEqualTo("game-battle-result-g7");
+        assertThat(BATTLE_RESULT_TOPICS.base()).isEqualTo("game-battle-result");
+        assertThat(BATTLE_RESULT_TOPICS.name(1)).isEqualTo("game-battle-result-g1");
+        assertThat(BATTLE_RESULT_TOPICS.name(7)).isEqualTo("game-battle-result-g7");
         assertThat(spec.name()).isEqualTo("game-battle-result-g1");
         assertThat(spec.partitions()).isEqualTo(3).isEqualTo(BattleResultTopics.PARTITIONS);
         assertThat(spec.configs()).containsOnly(
@@ -95,9 +100,9 @@ class BattleResultTopicsTest {
 
     @Test
     void 代次小于1非法_与审计topic互不重名() {
-        assertThatThrownBy(() -> BattleResultTopics.name(0)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> BattleResultTopics.spec(-1)).isInstanceOf(IllegalArgumentException.class);
-        assertThat(AuditTopics.all(1)).extracting(TopicSpec::name).doesNotContain(BattleResultTopics.name(1));
+        assertThatThrownBy(() -> BATTLE_RESULT_TOPICS.name(0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> BATTLE_RESULT_TOPICS.spec(-1)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(AUDIT_TOPICS.all(1)).extracting(TopicSpec::name).doesNotContain(BATTLE_RESULT_TOPICS.name(1));
     }
 
     @Test
@@ -112,7 +117,7 @@ class BattleResultTopicsTest {
     void 不存在就按规格创建_带上保留期与副本数() {
         FakeAdmin admin = new FakeAdmin();
 
-        BattleResultTopics.ensure(admin, 2, Mode.CREATE_AND_VERIFY, (short) 3, TIMEOUT);
+        BATTLE_RESULT_TOPICS.ensure(admin, 2, Mode.CREATE_AND_VERIFY, (short) 3, TIMEOUT);
 
         assertThat(admin.created).containsExactly("game-battle-result-g2");
         assertThat(admin.replicationFactors).containsExactly((short) 3);
@@ -126,7 +131,7 @@ class BattleResultTopicsTest {
         FakeAdmin admin = new FakeAdmin();
         admin.partitions.put("game-battle-result-g1", 1);
 
-        assertThatThrownBy(() -> BattleResultTopics.ensure(admin, 1, Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT))
+        assertThatThrownBy(() -> BATTLE_RESULT_TOPICS.ensure(admin, 1, Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT))
                 .isInstanceOf(AuditTopicContractException.class)
                 .hasMessage("对局结果 topic game-battle-result-g1 分区数是 1，契约是 3；不能原地改分区数，请升 topic 代次（GAME_BATTLE_RESULT_TOPIC_GENERATION）")
                 .hasMessageNotContaining("GAME_AUDIT_TOPIC_GENERATION")
@@ -139,15 +144,15 @@ class BattleResultTopicsTest {
         FakeAdmin produced = new FakeAdmin();
         produced.partitions.put("game-battle-result-g1", 3);
         produced.configs.put("game-battle-result-g1", new HashMap<>(Map.of("retention.ms", "1800000", "cleanup.policy", "delete")));
-        BattleResultTopics.ensure(produced, 1, Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT);
+        BATTLE_RESULT_TOPICS.ensure(produced, 1, Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT);
         assertThat(produced.alters).as("game-battle 只核对分区数").isEmpty();
 
         FakeAdmin owned = new FakeAdmin();
         owned.partitions.put("game-battle-result-g1", 3);
         owned.configs.put("game-battle-result-g1", new HashMap<>(Map.of("retention.ms", "1800000", "cleanup.policy", "delete")));
-        BattleResultTopics.ensure(owned, 1, Mode.OWN, (short) 1, TIMEOUT);
+        BATTLE_RESULT_TOPICS.ensure(owned, 1, Mode.OWN, (short) 1, TIMEOUT);
         assertThat(owned.alters).containsExactly(Map.of("retention.ms", "604800000", "retention.bytes", "-1"));
-        assertThat(owned.configs.get("game-battle-result-g1")).containsAllEntriesOf(BattleResultTopics.spec(1).configs());
+        assertThat(owned.configs.get("game-battle-result-g1")).containsAllEntriesOf(BATTLE_RESULT_TOPICS.spec(1).configs());
     }
 
     @Test
@@ -155,7 +160,7 @@ class BattleResultTopicsTest {
         FakeAdmin admin = new FakeAdmin();
         admin.unreachable = true;
 
-        assertThatThrownBy(() -> BattleResultTopics.ensure(admin, 1, Mode.OWN, (short) 1, TIMEOUT))
+        assertThatThrownBy(() -> BATTLE_RESULT_TOPICS.ensure(admin, 1, Mode.OWN, (short) 1, TIMEOUT))
                 .isInstanceOf(AuditBrokerUnavailableException.class);
     }
 
@@ -177,7 +182,7 @@ class BattleResultTopicsTest {
     @Test
     void 通用重载的变量名不能为空() {
         FakeAdmin admin = new FakeAdmin();
-        List<TopicSpec> specs = List.of(BattleResultTopics.spec(1));
+        List<TopicSpec> specs = List.of(BATTLE_RESULT_TOPICS.spec(1));
 
         assertThatThrownBy(() -> AuditTopicInitializer.ensure(admin, specs, Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT, " "))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -189,7 +194,7 @@ class BattleResultTopicsTest {
     @Test
     void 审计的旧签名文案一个字不变() {
         FakeAdmin admin = new FakeAdmin();
-        TopicSpec txlog = AuditTopics.transactionLog(1);
+        TopicSpec txlog = AUDIT_TOPICS.transactionLog(1);
         admin.partitions.put(txlog.name(), 1);
 
         assertThatThrownBy(() -> AuditTopicInitializer.ensure(admin, List.of(txlog), Mode.CREATE_AND_VERIFY, (short) 1, TIMEOUT))

@@ -2,6 +2,7 @@ package com.game.guild.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.guild.asset.AssetOpStatus;
 import com.game.guild.asset.DeliveryOrigin;
@@ -20,6 +21,8 @@ import org.junit.jupiter.api.Test;
  * 后台终结推 9 / 13 只推本人、人工终结不推、未知 kind 不推；终结失效 guild 与映射；orphan / 清理计数。
  */
 class EconomyAssetEffectsTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private final GuildServiceFixture f = new GuildServiceFixture();
     private final EconomyAssetEffects effects = new EconomyAssetEffects(f.invalidator, f.guildPushes, f.metrics);
@@ -65,8 +68,8 @@ class EconomyAssetEffectsTest {
     @Test
     void 终结改过资金帮贡_失效guild与映射() {
         effects.invalidate(Invalidation.of(GuildTxOp.ASSET_FINALIZE, 500, 1001));
-        assertThat(f.journal).anyMatch(j -> j.contains(RedisKeys.guildSnapshot(500)));
-        assertThat(f.journal).anyMatch(j -> j.contains(RedisKeys.guildOfPlayer(1001)));
+        assertThat(f.journal).anyMatch(j -> j.contains(REDIS_KEYS.guildSnapshot(500)));
+        assertThat(f.journal).anyMatch(j -> j.contains(REDIS_KEYS.guildOfPlayer(1001)));
     }
 
     @Test

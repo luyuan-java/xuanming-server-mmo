@@ -4,7 +4,9 @@ import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import java.time.Duration;
+import java.util.Objects;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.RejectedExecutionException;
@@ -86,11 +88,16 @@ public final class OpsIds implements SmartLifecycle, AutoCloseable {
         this.retry = retry;
     }
 
-    /** 生产用的租约来源：{@link NodeTypes#SCENE_GUID} 池、作用域 0、worker ∈ [1, {@value Snowflake#MAX_WORKER}]。 */
-    public static LeaseSource sceneGuidPool(Supplier<RedissonClient> redis, ScheduledExecutorService renewals,
+    /**
+     * 生产用的租约来源：{@link NodeTypes#SCENE_GUID} 池、作用域 0、worker ∈ [1, {@value Snowflake#MAX_WORKER}]。
+     *
+     * @param keys 租约键的出处（注入的 {@link RedisKeys}；键随部署命名空间）
+     */
+    public static LeaseSource sceneGuidPool(Supplier<RedissonClient> redis, RedisKeys keys, ScheduledExecutorService renewals,
                                             String instanceId) {
+        Objects.requireNonNull(keys, "keys");
         return onLost -> {
-            NodeIdLease lease = NodeIdLease.acquire(redis.get(), renewals, NodeTypes.SCENE_GUID, SCOPE, 1,
+            NodeIdLease lease = NodeIdLease.acquire(redis.get(), keys, renewals, NodeTypes.SCENE_GUID, SCOPE, 1,
                     Snowflake.MAX_WORKER, instanceId, LEASE_TTL, onLost);
             return new WorkerLease() {
                 @Override

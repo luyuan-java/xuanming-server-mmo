@@ -44,6 +44,7 @@ import com.game.battle.protocol.BattleMessageIds;
 import com.game.battle.testing.FakeResultKafka;
 import com.game.battle.protocol.BattleMessageIds.Notify;
 import com.game.battle.protocol.BattleMessageIds.Upstream;
+import com.game.common.GameNamespace;
 import com.game.common.token.BattleTickets;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.GatePush;
@@ -140,6 +141,7 @@ import org.springframework.test.context.DynamicPropertySource;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class BattleNodeEndToEndTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
     static final String ADMIN_TOKEN = "battle-e2e-admin-token";
     static final int CLIENT_PORT = E2eSupport.freePort();
     static final int RPC_PORT = E2eSupport.freePort();
@@ -221,7 +223,7 @@ class BattleNodeEndToEndTest {
         }
         String[] settlementKeys = new String[MAX_PLAYER_INDEX];
         for (int n = 1; n <= MAX_PLAYER_INDEX; n++) {
-            settlementKeys[n - 1] = RedisKeys.battleSettlements(player(n));
+            settlementKeys[n - 1] = REDIS_KEYS.battleSettlements(player(n));
         }
         redis.getKeys().delete(settlementKeys);
     }

@@ -17,10 +17,12 @@ import com.game.api.proto.TeamMatchCheckResult;
 import com.game.api.proto.TeamTicketsReply;
 import com.game.api.proto.TeamTicketsRequest;
 import com.game.api.proto.TeamTicketsStatus;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeIdLease;
+import com.game.discovery.RedisKeys;
 import com.game.match.MatchConfiguration;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
@@ -104,6 +106,8 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  */
 @ExtendWith(OutputCaptureExtension.class)
 class LeaseLostTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
     private static final String BUSY_TEXT = "服务器繁忙,请稍后再试";
@@ -423,7 +427,7 @@ class LeaseLostTest {
         when(scheduler.scheduleAtFixedRate(renewal.capture(), anyLong(), anyLong(), any(TimeUnit.class))).thenReturn(renewTask);
         MatchConfiguration configuration = new MatchConfiguration();
 
-        NodeIdLease lease = configuration.matchIdLease(redis.client, scheduler, new MatchInstance("instance-under-test"), metrics,
+        NodeIdLease lease = configuration.matchIdLease(redis.client, REDIS_KEYS, scheduler, new MatchInstance("instance-under-test"), metrics,
                 new MatchStartupChecks.Passed(4200, 1));
         MatchIds realIds = configuration.matchIds(lease);
         MatchLeaseHealthIndicator indicator = configuration.matchLeaseHealthIndicator(realIds);
@@ -477,7 +481,7 @@ class LeaseLostTest {
     private final DefaultTicketHealing healing = new DefaultTicketHealing(tickets);
 
     private QueueService queueService() {
-        return new QueueService(props, players, tickets, healing, new FixedRatingReader(), gather, ids, metrics);
+        return new QueueService(props, players, tickets, healing, new FixedRatingReader(), gather, ids, metrics, REDIS_KEYS);
     }
 
     private MatchTeamServiceImpl teamService() {
@@ -619,7 +623,7 @@ class LeaseLostTest {
         tickets.enqueue(1002, "t-1002", Q1V1, 1, 150_000, 21_600_000, Deadline.after(1000));
         FakeBattleNodes nodes = new FakeBattleNodes().add(FakeBattleNodes.node(1, "battle-inst-1", 21200));
         QueueMatcher matcher = new QueueMatcher(tickets, players, gather, nodes, ids, metrics, new MetricLabels(id -> false), props,
-                new MatchInstance("instance-lease-lost-test"));
+                new MatchInstance("instance-lease-lost-test"), REDIS_KEYS);
         List<String> queueBefore = tickets.queueMembers(Q1V1);
         int storeCallsBefore = tickets.calls.size();
 

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.game.common.GameNamespace;
 import com.game.data.DataConfiguration;
 import com.game.data.DataProperties;
 import com.game.discovery.RedisKeys;
@@ -32,6 +33,8 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class BattleLockGateRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private RedissonClient redis;
     private final List<Long> written = new ArrayList<>();
 
@@ -45,7 +48,7 @@ class BattleLockGateRedisIntegrationTest {
     @AfterEach
     void close() {
         for (long playerId : written) {
-            redis.getKeys().delete(RedisKeys.battleLock(playerId));
+            redis.getKeys().delete(REDIS_KEYS.battleLock(playerId));
         }
         redis.shutdown();
     }
@@ -62,7 +65,7 @@ class BattleLockGateRedisIntegrationTest {
         when(provider.getObject()).thenReturn(redis);
         DataProperties props = new Binder(new MapConfigurationPropertySource(Map.of()))
                 .bindOrCreate("game.data", DataProperties.class);
-        return new DataConfiguration().battleLockGate(provider, props);
+        return new DataConfiguration().battleLockGate(provider, REDIS_KEYS, props);
     }
 
     @Test
@@ -72,12 +75,12 @@ class BattleLockGateRedisIntegrationTest {
         long free = randomPlayer();
         long battleId = ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE);
         long deadline = System.currentTimeMillis() + 120_000;
-        BattleRedis scripts = new BattleRedis(redis);
+        BattleRedis scripts = new BattleRedis(redis, REDIS_KEYS);
         assertThat(scripts.prepareLock(preparing, battleId, 7, deadline, deadline - 60_000, 300).get()).isEqualTo("0");
         assertThat(scripts.prepareLock(fighting, battleId, 7, deadline, deadline - 60_000, 300).get()).isEqualTo("0");
         assertThat(scripts.confirm(fighting, battleId, deadline, 300).get()).containsEntry(BattleRedis.FIELD_STATE,
                 BattleRedis.STATE_FIGHTING);
-        assertThat(redis.<String, String>getMap(RedisKeys.battleLock(preparing), StringCodec.INSTANCE)
+        assertThat(redis.<String, String>getMap(REDIS_KEYS.battleLock(preparing), StringCodec.INSTANCE)
                 .get(BattleRedis.FIELD_STATE)).isEqualTo(BattleRedis.STATE_PREPARING);
         BattleLockGate gate = productionGate();
 
@@ -91,7 +94,7 @@ class BattleLockGateRedisIntegrationTest {
         assertThat(r.outcome(fighting)).isEqualTo("in_battle");
 
         // 锁没了（TTL 到期 / 结算销账）：同一名玩家不再被挡
-        assertThat(redis.getKeys().delete(RedisKeys.battleLock(fighting))).isEqualTo(1);
+        assertThat(redis.getKeys().delete(REDIS_KEYS.battleLock(fighting))).isEqualTo(1);
         BattleLockGate.Result after = gate.check(List.of(preparing, free, fighting), () -> { });
         assertThat(after.inBattle()).containsExactly(preparing);
         assertThat(after.outcome(fighting)).isNull();
@@ -107,7 +110,8 @@ class BattleLockGateRedisIntegrationTest {
         long locked = base + 777;
         written.add(locked);
         long deadline = System.currentTimeMillis() + 120_000;
-        assertThat(new BattleRedis(redis).prepareLock(locked, 42, 7, deadline, deadline - 60_000, 300).get()).isEqualTo("0");
+        assertThat(new BattleRedis(redis, REDIS_KEYS).prepareLock(locked, 42, 7, deadline, deadline - 60_000, 300).get())
+                .isEqualTo("0");
 
         BattleLockGate.Result r = productionGate().check(ids, () -> { });
 

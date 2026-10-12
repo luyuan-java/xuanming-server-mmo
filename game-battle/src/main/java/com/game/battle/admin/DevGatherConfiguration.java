@@ -10,6 +10,7 @@ import com.game.api.rpc.NodeRpcClients;
 import com.game.battle.BattleNode;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.location.SceneAssetLocator;
 import com.game.discovery.location.SceneAssetLocator.Resolution;
@@ -38,9 +39,9 @@ public class DevGatherConfiguration {
     }
 
     @Bean
-    public DevGather devGather(RedissonClient redis, NodeRpcClients<SceneBattleService> devGatherSceneClients) {
-        SceneAssetLocator locator = new SceneAssetLocator(new PlayerLocationDirectory(redis),
-                new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser()), null);
+    public DevGather devGather(RedissonClient redis, RedisKeys redisKeys, NodeRpcClients<SceneBattleService> devGatherSceneClients) {
+        SceneAssetLocator locator = new SceneAssetLocator(new PlayerLocationDirectory(redis, redisKeys),
+                new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser()), null);
         return new DevGather(new DevGather.Scenes() {
             @Override
             public CompletableFuture<Resolution> locate(long playerId) {

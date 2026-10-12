@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -49,14 +50,17 @@ public final class RedisLoginTokens implements LoginTokens {
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private final RedissonClient redis;
+    private final RedisKeys redisKeys;
     private final Clock clock;
     private final Duration accessTtl;
     private final Duration refreshTtl;
     private final SecureRandom random;
 
-    public RedisLoginTokens(RedissonClient redis, Clock clock, Duration accessTtl, Duration refreshTtl,
+    /** @param keys 令牌键的出处（带部署命名空间，装配方注入） */
+    public RedisLoginTokens(RedissonClient redis, RedisKeys keys, Clock clock, Duration accessTtl, Duration refreshTtl,
                             SecureRandom random) {
         this.redis = redis;
+        this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.clock = clock;
         this.accessTtl = accessTtl;
         this.refreshTtl = refreshTtl;
@@ -72,12 +76,12 @@ public final class RedisLoginTokens implements LoginTokens {
         long accessExpire = nowSeconds + accessTtl.toSeconds();
         long refreshExpire = nowSeconds + refreshTtl.toSeconds();
 
-        String setKey = RedisKeys.loginAccountRefresh(account);
+        String setKey = redisKeys.loginAccountRefresh(account);
         store("签发", () -> {
             RBatch batch = redis.createBatch(BatchOptions.defaults()
                     .executionMode(BatchOptions.ExecutionMode.IN_MEMORY_ATOMIC));
-            batch.getBucket(RedisKeys.loginAccessToken(access), StringCodec.INSTANCE).setAsync(value, accessTtl);
-            batch.getBucket(RedisKeys.loginRefreshToken(refresh), StringCodec.INSTANCE).setAsync(value, refreshTtl);
+            batch.getBucket(redisKeys.loginAccessToken(access), StringCodec.INSTANCE).setAsync(value, accessTtl);
+            batch.getBucket(redisKeys.loginRefreshToken(refresh), StringCodec.INSTANCE).setAsync(value, refreshTtl);
             // 分数 = 该 refresh 的过期秒：分数已过去的成员，其令牌键早已按 TTL 过期，清成员即可（不让死成员无上界累积）
             batch.<String>getScoredSortedSet(setKey, StringCodec.INSTANCE)
                     .removeRangeByScoreAsync(Double.NEGATIVE_INFINITY, true, nowSeconds, false);
@@ -94,7 +98,7 @@ public final class RedisLoginTokens implements LoginTokens {
         if (!wellFormed(accessToken)) {
             return Optional.empty();
         }
-        return decode(store("校验", () -> redis.<String>getBucket(RedisKeys.loginAccessToken(accessToken),
+        return decode(store("校验", () -> redis.<String>getBucket(redisKeys.loginAccessToken(accessToken),
                 StringCodec.INSTANCE).get()));
     }
 
@@ -103,14 +107,14 @@ public final class RedisLoginTokens implements LoginTokens {
         if (!wellFormed(refreshToken)) {
             return Optional.empty();
         }
-        String value = store("轮换", () -> redis.<String>getBucket(RedisKeys.loginRefreshToken(refreshToken),
+        String value = store("轮换", () -> redis.<String>getBucket(redisKeys.loginRefreshToken(refreshToken),
                 StringCodec.INSTANCE).getAndDelete());
         Optional<TokenData> data = decode(value);
         if (data.isEmpty()) {
             return Optional.empty();
         }
         try {
-            redis.<String>getScoredSortedSet(RedisKeys.loginAccountRefresh(data.get().account()), StringCodec.INSTANCE)
+            redis.<String>getScoredSortedSet(redisKeys.loginAccountRefresh(data.get().account()), StringCodec.INSTANCE)
                     .remove(refreshToken);
         } catch (RuntimeException e) {
             // 同基线忽略：残留的成员按分数过期清掉 / 封顶时淘汰
@@ -134,7 +138,7 @@ public final class RedisLoginTokens implements LoginTokens {
             }
             List<String> keys = new ArrayList<>(oldest.size());
             for (String token : oldest) {
-                keys.add(RedisKeys.loginRefreshToken(token));
+                keys.add(redisKeys.loginRefreshToken(token));
             }
             RBatch batch = redis.createBatch(BatchOptions.defaults()
                     .executionMode(BatchOptions.ExecutionMode.IN_MEMORY_ATOMIC));

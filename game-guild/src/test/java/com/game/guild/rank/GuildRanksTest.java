@@ -3,6 +3,7 @@ package com.game.guild.rank;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.discovery.RedisKeys;
@@ -26,16 +27,18 @@ import org.junit.jupiter.api.Test;
 /** 排行（guild-spec §5、D16；假 Redis 版。真 Redis 见 {@link GuildRanksRedisIntegrationTest}）。 */
 class GuildRanksTest {
 
-    private static final String LOCK = RedisKeys.guildRankLock();
-    private static final String ALL = RedisKeys.guildRankAll();
-    private static final String ZONES = RedisKeys.guildRankZones();
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
+    private static final String LOCK = REDIS_KEYS.guildRankLock();
+    private static final String ALL = REDIS_KEYS.guildRankAll();
+    private static final String ZONES = REDIS_KEYS.guildRankZones();
     private static final long BIG = Long.MIN_VALUE + 5; // 9223372036854775813
 
     private final InMemoryGuildRankRedis redis = new InMemoryGuildRankRedis();
     private final RecordingRankMetrics metrics = new RecordingRankMetrics();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     /** 锁 TTL 30 s、续期 10 s、等锁上限 300 ms、轮询 5 ms、请求预留 50 ms、临时键 10 min。 */
-    private final GuildRanks ranks = new GuildRanks(redis, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
+    private final GuildRanks ranks = new GuildRanks(redis, REDIS_KEYS, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
 
     @AfterEach
     void shutdown() {
@@ -65,11 +68,11 @@ class GuildRanksTest {
     @Test
     void 键形状_统一hash标签() {
         assertThat(ALL).isEqualTo("game:guild:{rank}:all");
-        assertThat(RedisKeys.guildRankZone(-1)).isEqualTo("game:guild:{rank}:zone:4294967295");
+        assertThat(REDIS_KEYS.guildRankZone(-1)).isEqualTo("game:guild:{rank}:zone:4294967295");
         assertThat(ZONES).isEqualTo("game:guild:{rank}:zones");
         assertThat(LOCK).isEqualTo("game:guild:{rank}:lock");
-        assertThat(RedisKeys.guildRankTmpAll("t")).isEqualTo("game:guild:{rank}:tmp:t:all");
-        assertThat(RedisKeys.guildRankTmpZone("t", 7)).isEqualTo("game:guild:{rank}:tmp:t:zone:7");
+        assertThat(REDIS_KEYS.guildRankTmpAll("t")).isEqualTo("game:guild:{rank}:tmp:t:all");
+        assertThat(REDIS_KEYS.guildRankTmpZone("t", 7)).isEqualTo("game:guild:{rank}:tmp:t:zone:7");
         assertThat(GuildLimits.RANK_LOCK_TTL_MS).isEqualTo(30_000);
         assertThat(GuildRanks.RENEW_EVERY_MS).isEqualTo(10_000);
     }
@@ -79,7 +82,7 @@ class GuildRanksTest {
         assertThat(ranks.add(BIG, 3, 0, budget())).isTrue();
         assertThat(ranks.add(7, 0, 5, budget())).isTrue();
         assertThat(redis.zset(ALL)).containsOnlyKeys("9223372036854775813", "7");
-        assertThat(redis.zset(RedisKeys.guildRankZone(3))).containsOnlyKeys("9223372036854775813");
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(3))).containsOnlyKeys("9223372036854775813");
         assertThat(redis.sets.get(ZONES)).containsExactly("3"); // zone 0 只进全服榜，不进索引
         awaitUnlocked();
         assertThat(redis.ttls).doesNotContainKey(LOCK);
@@ -89,7 +92,7 @@ class GuildRanksTest {
     @Test
     void 请求路径等锁受预算约束_拿不到只记lock_timeout() {
         redis.strings.put(LOCK, "someone-else");
-        GuildRanks patient = new GuildRanks(redis, scheduler, metrics, 30_000, 10_000, 5_000, 5, 50, 600_000);
+        GuildRanks patient = new GuildRanks(redis, REDIS_KEYS, scheduler, metrics, 30_000, 10_000, 5_000, 5, 50, 600_000);
         long started = System.nanoTime();
         // 剩余 200 ms − 预留 50 ms → 最多等 150 ms（远小于等锁上限 5 s）
         assertThat(patient.add(1, 1, 0, Deadline.after(200))).isFalse();
@@ -116,7 +119,7 @@ class GuildRanksTest {
             }
         }, 50, TimeUnit.MILLISECONDS);
         assertThat(ranks.add(9, 2, 4, budget())).isTrue();
-        assertThat(redis.zset(RedisKeys.guildRankZone(2))).containsEntry("9", 4.0);
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(2))).containsEntry("9", 4.0);
     }
 
     @Test
@@ -139,7 +142,7 @@ class GuildRanksTest {
                 return super.add(lockKey, token, allKey, zonesKey, zoneKey, zoneMember, score, member);
             }
         };
-        GuildRanks fenced = new GuildRanks(stolen, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
+        GuildRanks fenced = new GuildRanks(stolen, REDIS_KEYS, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
         assertThat(fenced.add(1, 1, 0, budget())).isFalse();
         assertThat(((InMemoryGuildRankRedis) stolen).zset(ALL)).isEmpty();
         assertThat(metrics.count(RankOp.ADD, RankOutcome.ERROR)).isEqualTo(3);
@@ -155,14 +158,14 @@ class GuildRanksTest {
         ranks.add(5004, 30, 200, budget());
         ranks.add(5003, 10, 100, budget()); // 历史残留：同一帮出现在另一个区榜
         synchronized (redis) {
-            redis.zsets.computeIfAbsent(RedisKeys.guildRankZone(20), k -> new java.util.HashMap<>()).put("5003", 1.0);
+            redis.zsets.computeIfAbsent(REDIS_KEYS.guildRankZone(20), k -> new java.util.HashMap<>()).put("5003", 1.0);
         }
         // 提示区 20 不在索引里（模拟没进索引的区榜）：显式带上
         assertThat(ranks.remove(5003, 20, budget())).isTrue();
         assertThat(redis.zset(ALL)).containsOnlyKeys("5004");
-        assertThat(redis.zset(RedisKeys.guildRankZone(30))).containsOnlyKeys("5004");
-        assertThat(redis.zset(RedisKeys.guildRankZone(10))).isEmpty();
-        assertThat(redis.zset(RedisKeys.guildRankZone(20))).isEmpty();
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(30))).containsOnlyKeys("5004");
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(10))).isEmpty();
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(20))).isEmpty();
         assertThat(metrics.count(RankOp.REMOVE, RankOutcome.OK)).isEqualTo(1);
     }
 
@@ -189,9 +192,9 @@ class GuildRanksTest {
         assertThat(tmpTtlChecks.get()).isPositive();
         assertThat(result).isEqualTo(new RebuildResult(600, 2));
         assertThat(redis.zset(ALL)).hasSize(600).doesNotContainKey("666").doesNotContainKey("1");
-        assertThat(redis.zset(RedisKeys.guildRankZone(1))).hasSize(200);
-        assertThat(redis.zset(RedisKeys.guildRankZone(-1))).hasSize(200);
-        assertThat(redis.zset(RedisKeys.guildRankZone(9))).isEmpty();
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(1))).hasSize(200);
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(-1))).hasSize(200);
+        assertThat(redis.zset(REDIS_KEYS.guildRankZone(9))).isEmpty();
         assertThat(redis.sets.get(ZONES)).containsExactlyInAnyOrder("1", "4294967295");
         assertThat(redis.zsets.keySet()).noneMatch(key -> key.contains(":tmp:"));
         assertThat(redis.ttls.keySet()).noneMatch(key -> key.contains(":tmp:") || key.equals(ALL));
@@ -227,7 +230,7 @@ class GuildRanksTest {
                 zsets.remove(plan.tmpAllKey()); // 临时键在换榜前被淘汰
                 return super.swap(plan);
             }
-        }, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
+        }, REDIS_KEYS, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
         assertThatThrownBy(() -> evicting.rebuild(sink -> sink.accept(new RankRow(1, 1, 1))))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("成员数不符");
         assertThat(metrics.count(RankOp.REBUILD, RankOutcome.ERROR)).isEqualTo(1);
@@ -236,7 +239,7 @@ class GuildRanksTest {
     @Test
     void 重建_锁被接管时作废_数据源异常原样上抛() throws Exception {
         InMemoryGuildRankRedis shared = new InMemoryGuildRankRedis();
-        GuildRanks owner = new GuildRanks(shared, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
+        GuildRanks owner = new GuildRanks(shared, REDIS_KEYS, scheduler, metrics, 30_000, 10_000, 300, 5, 50, 600_000);
         assertThatThrownBy(() -> owner.rebuild(sink -> {
             sink.accept(new RankRow(1, 1, 1));
             synchronized (shared) {
@@ -256,7 +259,7 @@ class GuildRanksTest {
 
     @Test
     void 持锁期间按间隔续期_关闭后停止() throws Exception {
-        GuildRanks fastRenew = new GuildRanks(redis, scheduler, metrics, 30_000, 20, 300, 5, 50, 600_000);
+        GuildRanks fastRenew = new GuildRanks(redis, REDIS_KEYS, scheduler, metrics, 30_000, 20, 300, 5, 50, 600_000);
         fastRenew.rebuild(sink -> {
             sink.accept(new RankRow(1, 1, 1));
             try {
@@ -285,7 +288,7 @@ class GuildRanksTest {
                 return super.add(lockKey, token, allKey, zonesKey, zoneKey, zoneMember, score, member);
             }
         };
-        GuildRanks fastRenew = new GuildRanks(slow, scheduler, metrics, 30_000, 20, 300, 5, 50, 600_000);
+        GuildRanks fastRenew = new GuildRanks(slow, REDIS_KEYS, scheduler, metrics, 30_000, 20, 300, 5, 50, 600_000);
         assertThat(fastRenew.add(1, 1, 1, budget())).isTrue();
         assertThat(slow.renewCalls).hasValue(0);
     }
@@ -296,7 +299,7 @@ class GuildRanksTest {
     @Test
     void 分页边界_uint32与int64溢出() {
         for (int zone : new int[] {0, 2}) {
-            String key = zone == 0 ? ALL : RedisKeys.guildRankZone(zone);
+            String key = zone == 0 ? ALL : REDIS_KEYS.guildRankZone(zone);
             synchronized (redis) {
                 Map<String, Double> zset = redis.zsets.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
                 for (int i = 0; i < 6; i++) {

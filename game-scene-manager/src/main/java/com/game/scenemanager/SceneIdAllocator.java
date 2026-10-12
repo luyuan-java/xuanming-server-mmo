@@ -3,6 +3,7 @@ package com.game.scenemanager;
 import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
 import com.game.discovery.NodeIdLease;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.world.WorldChannels;
 import com.game.scenemanager.world.SceneIdSource;
 import java.util.ArrayList;
@@ -55,14 +56,18 @@ public final class SceneIdAllocator implements SceneIdSource, AutoCloseable {
         this.ids = new LeaseGatedSnowflake(new Snowflake(worker), () -> !lost && leaseValid.getAsBoolean());
     }
 
-    /** 生产：在 Redis 上占发号租约（阻塞，启动时调用一次）。占不到号抛异常（启动失败）。 */
-    public static SceneIdAllocator acquire(RedissonClient redis) {
+    /**
+     * 生产：在 Redis 上占发号租约（阻塞，启动时调用一次）。占不到号抛异常（启动失败）。
+     *
+     * @param redisKeys 本进程部署命名空间的键名（租约键 {@code <ns>:node-id:…}；不同命名空间的号段互不相干）
+     */
+    public static SceneIdAllocator acquire(RedissonClient redis, RedisKeys redisKeys) {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().name("scene-manager-id-lease").daemon(true).factory());
         AtomicReference<SceneIdAllocator> self = new AtomicReference<>();
         NodeIdLease lease;
         try {
-            lease = NodeIdLease.acquire(redis, scheduler, WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE,
+            lease = NodeIdLease.acquire(redis, redisKeys, scheduler, WorldChannels.ID_LEASE_NODE_TYPE, WorldChannels.ID_LEASE_ZONE,
                     WorldChannels.ID_LEASE_MIN_ID, WorldChannels.ID_LEASE_MAX_ID, UUID.randomUUID().toString(),
                     WorldChannels.ID_LEASE_TTL, () -> {
                         SceneIdAllocator allocator = self.get();

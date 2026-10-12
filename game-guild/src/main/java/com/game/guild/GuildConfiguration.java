@@ -3,6 +3,7 @@ package com.game.guild;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.api.asset.SceneAssetOpClients;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.common.player.PlayerHomeZones;
@@ -12,6 +13,7 @@ import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.location.SceneAssetLocator;
 import com.game.discovery.presence.PlayerPresenceDirectory;
@@ -183,8 +185,8 @@ public class GuildConfiguration {
      * 带上限的 upsert 「达上限」与「新插」都回 1，捐献次数与限购会被突破，拒启）与全局插入守卫哨兵行。
      */
     @Bean
-    public SchemaReady guildSchemaReady(GuildTx guildTx, PbMysql guildTables) {
-        GuildStartupChecks checks = new GuildStartupChecks(guildTx);
+    public SchemaReady guildSchemaReady(GuildTx guildTx, PbMysql guildTables, GameNamespace gameNamespace) {
+        GuildStartupChecks checks = new GuildStartupChecks(guildTx, gameNamespace);
         String version = checks.checkServerVersion(Deadline.after(VERSION_CHECK_BUDGET_MS));
         log.info("帮会数据库版本 {} 满足下限（TiDB 或 MySQL 8.0.29+）", version);
         checks.checkAffectedRowsSemantics(Deadline.after(VERSION_CHECK_BUDGET_MS));
@@ -217,11 +219,11 @@ public class GuildConfiguration {
      * 兑换回 14008（其余 RPC 不受影响）；续期滞后恢复后自动恢复，丢失则需重启。
      */
     @Bean(destroyMethod = "close")
-    public NodeIdLease guildIdLease(RedissonClient redis,
+    public NodeIdLease guildIdLease(RedissonClient redis, RedisKeys redisKeys,
                                     @Qualifier("guildLeaseScheduler") ScheduledExecutorService guildLeaseScheduler,
                                     SchemaReady guildSchemaReady) {
-        return NodeIdLease.acquire(redis, guildLeaseScheduler, NodeTypes.GUILD, GUILD_ID_LEASE_SCOPE, 1, Snowflake.MAX_WORKER,
-                UUID.randomUUID().toString(), LEASE_TTL,
+        return NodeIdLease.acquire(redis, redisKeys, guildLeaseScheduler, NodeTypes.GUILD, GUILD_ID_LEASE_SCOPE, 1,
+                Snowflake.MAX_WORKER, UUID.randomUUID().toString(), LEASE_TTL,
                 () -> log.error("guild 雪花 worker 租约丢失：停止发号（新的 CreateGuild / DonateToGuild / BuyGuildShopGoods 一律 14008），"
                         + "需要重启本进程"));
     }
@@ -247,17 +249,18 @@ public class GuildConfiguration {
     }
 
     @Bean
-    public GuildCacheInvalidator guildCacheInvalidator(GuildCache.CacheRedis guildCacheRedis, GuildProperties props,
+    public GuildCacheInvalidator guildCacheInvalidator(GuildCache.CacheRedis guildCacheRedis, RedisKeys redisKeys,
+                                                       GuildProperties props,
                                                        @Qualifier("guildBackgroundScheduler") ScheduledExecutorService background,
                                                        GuildMetrics metrics) {
-        return new GuildCacheInvalidator(guildCacheRedis, props.cacheTtl(), background, metrics);
+        return new GuildCacheInvalidator(guildCacheRedis, redisKeys, props.cacheTtl(), background, metrics);
     }
 
     /** 帮会快照与玩家 → 帮会映射：回源读 MySQL（G9 + M11 / M5），快照转成 Java 自有 proto 存 Redis。 */
     @Bean
-    public GuildCache guildCache(GuildCache.CacheRedis guildCacheRedis, GuildProperties props, GuildStore store,
-                                 GuildCacheInvalidator invalidator, GuildMetrics metrics) {
-        return new GuildCache(guildCacheRedis, props.cacheTtl(),
+    public GuildCache guildCache(GuildCache.CacheRedis guildCacheRedis, RedisKeys redisKeys, GuildProperties props,
+                                 GuildStore store, GuildCacheInvalidator invalidator, GuildMetrics metrics) {
+        return new GuildCache(guildCacheRedis, redisKeys, props.cacheTtl(),
                 (guildId, deadline) -> store.loadGuild(guildId, deadline).map(GuildSnapshots::toSnapshot).orElse(null),
                 store::playerGuildId, invalidator, metrics);
     }
@@ -267,11 +270,11 @@ public class GuildConfiguration {
      * 「租约与资产通道装配之后才重建」的顺序。
      */
     @Bean
-    public GuildRanks guildRanks(RedissonClient redis,
+    public GuildRanks guildRanks(RedissonClient redis, RedisKeys redisKeys,
                                  @Qualifier("guildBackgroundScheduler") ScheduledExecutorService background,
                                  GuildMetrics metrics, GuildStore store, NodeIdLease guildIdLease,
                                  GuildAssetRuntime guildAssetRuntime) {
-        GuildRanks ranks = new GuildRanks(new RedissonGuildRankRedis(redis), background, metrics);
+        GuildRanks ranks = new GuildRanks(new RedissonGuildRankRedis(redis), redisKeys, background, metrics);
         GuildRanks.RebuildResult rebuilt = ranks.rebuild(sink -> store.scanGuildScores(
                 Deadline.after(RANK_REBUILD_SCAN_BUDGET_MS),
                 row -> sink.accept(new GuildRanks.RankRow(row.guildId(), row.zoneId(), row.score()))));
@@ -280,20 +283,20 @@ public class GuildConfiguration {
     }
 
     @Bean
-    public ApplyPushCooldown guildApplyPushCooldown(RedissonClient redis) {
-        return ApplyPushCooldown.redisson(redis);
+    public ApplyPushCooldown guildApplyPushCooldown(RedissonClient redis, RedisKeys redisKeys) {
+        return ApplyPushCooldown.redisson(redis, redisKeys);
     }
 
     // ================================================================ 在线、名字、归属区、推送
 
     @Bean
-    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis) {
-        return new PlayerPresenceDirectory(redis);
+    public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis, RedisKeys redisKeys) {
+        return new PlayerPresenceDirectory(redis, redisKeys);
     }
 
     @Bean
-    public PlayerPushes playerPushes(RedissonClient redis, PlayerPresenceDirectory presence) {
-        return new PlayerPushes(redis, presence);
+    public PlayerPushes playerPushes(RedissonClient redis, RedisKeys redisKeys, PlayerPresenceDirectory presence) {
+        return new PlayerPushes(redis, redisKeys, presence);
     }
 
     /** 只读 {@code game.player}（展示名与归属区；这张表不归 game-guild 所有）。 */
@@ -376,7 +379,8 @@ public class GuildConfiguration {
      */
     @Bean
     public GuildAssetRuntime guildAssetRuntime(GuildProperties props, ConfigTables guildConfigTables, GuildAssetStore store,
-                                               DataSource dataSource, RedissonClient redis, GuildMetrics metrics,
+                                               DataSource dataSource, RedissonClient redis, RedisKeys redisKeys,
+                                               GuildMetrics metrics,
                                                @Qualifier("guildAssetSettlePool") GuildWorkerPool settlePool,
                                                @Qualifier("guildAssetWorkerPool") GuildWorkerPool workerPool,
                                                @Qualifier("guildAssetTimer") ScheduledExecutorService timer,
@@ -387,8 +391,8 @@ public class GuildConfiguration {
         if (cfg.enabled()) {
             EconomyTables.validateAssetOpTiming(guildConfigTables, cfg.lease(), cfg.reconcileInterval(), cfg.maxBackoff());
             AssetOpSigner signer = AssetOpSigner.fromEnvironment();
-            NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
-            SceneAssetLocator locator = new SceneAssetLocator(new PlayerLocationDirectory(redis), scenes, metrics::resolved);
+            NodeDirectory<SceneNodeInfo> scenes = new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
+            SceneAssetLocator locator = new SceneAssetLocator(new PlayerLocationDirectory(redis, redisKeys), scenes, metrics::resolved);
             SceneEndpointSweeper tracker = new SceneEndpointSweeper(scenes::list, clients);
             sweeper = tracker;
             // 定位每找到一个节点就登记：节点从目录消失 / 换实例后由清扫销毁它的客户端（基线 watcher 删连接，svc/asset_op.go:166-170）
@@ -405,8 +409,8 @@ public class GuildConfiguration {
             loop = new AssetOpLoop(loopConfig, store, caller, PersistedLedgerReader.of(dataSource), metrics,
                     System::currentTimeMillis, workerPool, settlePool, new SecureRandom(),
                     () -> ThreadLocalRandom.current().nextDouble());
-            log.info("帮会资产通道已装配（caller=guild，签名密钥来自 GAME_ASSET_OP_SECRET_GUILD；定位 = game:location + scene 节点目录直连；"
-                    + "离线读已落盘账本已接线）");
+            log.info("帮会资产通道已装配（caller=guild，签名密钥来自 GAME_ASSET_OP_SECRET_GUILD；定位 = {}location + scene 节点目录直连；"
+                    + "离线读已落盘账本已接线）", redisKeys.prefix());
         } else {
             log.error("帮会资产通道关闭（game.guild.asset-op.enabled=false）：捐献 / 兑换一律回 14026，不写任何行；升级、两个读页、清理与内部查询照常");
         }

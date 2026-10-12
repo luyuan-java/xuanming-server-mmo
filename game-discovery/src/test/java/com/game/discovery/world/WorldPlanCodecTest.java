@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.proto.WorldChannel;
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.Test;
 
 /** 脚本参数编码与回复解析（不连 Redis；回复按 ByteArrayCodec + MULTI 的形态手工构造：整数 Long、字符串 byte[]）。 */
 class WorldPlanCodecTest {
+
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static byte[] b(String s) {
         return s.getBytes(StandardCharsets.US_ASCII);
@@ -160,13 +163,13 @@ class WorldPlanCodecTest {
 
     @Test
     void 频道键共用_zone_hash_tag_号按无符号() {
-        assertThat(RedisKeys.worldChannels(3)).isEqualTo("game:world:{z:3}:ch");
-        assertThat(RedisKeys.worldDesired(3)).isEqualTo("game:world:{z:3}:desired");
-        assertThat(RedisKeys.worldCooldown(3)).isEqualTo("game:world:{z:3}:cooldown");
-        assertThat(RedisKeys.worldPlanVersion(3)).isEqualTo("game:world:{z:3}:ver");
-        assertThat(RedisKeys.worldLeader(3)).isEqualTo("game:world:{z:3}:leader");
-        assertThat(RedisKeys.worldReservations(3, -1L)).isEqualTo("game:world:{z:3}:resv:18446744073709551615");
-        assertThat(RedisKeys.worldChannels(-1)).isEqualTo("game:world:{z:4294967295}:ch");
-        assertThat(RedisKeys.worldZones()).isEqualTo("game:world:zones");
+        assertThat(REDIS_KEYS.worldChannels(3)).isEqualTo("game:world:{z:3}:ch");
+        assertThat(REDIS_KEYS.worldDesired(3)).isEqualTo("game:world:{z:3}:desired");
+        assertThat(REDIS_KEYS.worldCooldown(3)).isEqualTo("game:world:{z:3}:cooldown");
+        assertThat(REDIS_KEYS.worldPlanVersion(3)).isEqualTo("game:world:{z:3}:ver");
+        assertThat(REDIS_KEYS.worldLeader(3)).isEqualTo("game:world:{z:3}:leader");
+        assertThat(REDIS_KEYS.worldReservations(3, -1L)).isEqualTo("game:world:{z:3}:resv:18446744073709551615");
+        assertThat(REDIS_KEYS.worldChannels(-1)).isEqualTo("game:world:{z:4294967295}:ch");
+        assertThat(REDIS_KEYS.worldZones()).isEqualTo("game:world:zones");
     }
 }

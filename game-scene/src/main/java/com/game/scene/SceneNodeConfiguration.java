@@ -3,12 +3,14 @@ package com.game.scene;
 import com.game.api.proto.CreateDungeonInstanceResponse;
 import com.game.api.proto.DestroyInstanceResponse;
 import com.game.audit.AuditProperties;
+import com.game.common.KafkaNames;
 import com.game.common.RunMode;
 import com.game.common.token.DubboCallAuth;
 import com.game.common.token.GmRequestAuth;
 import com.game.common.token.GmShutdownHandler;
 import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisKeys;
 import com.game.player.store.PlayerStore;
 import com.game.scene.admin.GmShutdownController;
 import com.game.scene.admin.SceneAdminAuthFilter;
@@ -135,14 +137,14 @@ public class SceneNodeConfiguration {
     }
 
     @Bean
-    public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, PlayerStore playerStore,
+    public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
                                BagTables bagTables, MissionTables missionTables, SkillTables skillTables,
                                PetTables petTables, NodeLinkAuth nodeLinkAuth,
-                               SceneMetrics sceneMetrics, AuditProperties audit, SceneBattleTables sceneBattleTables,
-                               SceneBattleMetrics sceneBattleMetrics) {
-        return new SceneNode(props, redis, playerStore, registry, tables, attributeTables, bagTables, missionTables,
-                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, sceneBattleTables, sceneBattleMetrics);
+                               SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
+                               SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics) {
+        return new SceneNode(props, redis, redisKeys, playerStore, registry, tables, attributeTables, bagTables, missionTables,
+                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics);
     }
 
     /** GM 签名停机的校验（密钥只从环境变量 GAME_GM_ADMIN_SECRET 读，没配一律拒）。 */

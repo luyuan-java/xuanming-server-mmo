@@ -2,6 +2,7 @@ package com.game.match.matcher;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.RedissonTicketStore;
@@ -38,6 +39,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class MatcherRedisIntegrationTest extends MatcherPortedScenarios {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final String ENQUEUED_AT_FIELD = "enqueued_at_ms";
 
     private static RedissonClient redis;
@@ -48,7 +51,7 @@ class MatcherRedisIntegrationTest extends MatcherPortedScenarios {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13).setConnectionMinimumIdleSize(1).setConnectionPoolSize(4);
         redis = Redisson.create(config);
-        store = new RedissonTicketStore(redis);
+        store = new RedissonTicketStore(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -66,13 +69,13 @@ class MatcherRedisIntegrationTest extends MatcherPortedScenarios {
         }
         List<String> keys = new ArrayList<>();
         for (Long playerId : usedPlayers) {
-            keys.add(RedisKeys.matchTicket(playerId));
+            keys.add(REDIS_KEYS.matchTicket(playerId));
         }
         for (QueueRef queue : usedQueues) {
-            keys.add(queue.queueKey());
-            keys.add(queue.rankKey());
-            keys.add(queue.lockKey());
-            redis.getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).remove(queue.queueKey());
+            keys.add(queue.queueKey(REDIS_KEYS));
+            keys.add(queue.rankKey(REDIS_KEYS));
+            keys.add(queue.lockKey(REDIS_KEYS));
+            redis.getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).remove(queue.queueKey(REDIS_KEYS));
         }
         if (!keys.isEmpty()) {
             redis.getKeys().delete(keys.toArray(String[]::new));
@@ -88,7 +91,7 @@ class MatcherRedisIntegrationTest extends MatcherPortedScenarios {
 
     @Override
     protected void setEnqueuedAgo(long playerId, Duration ago) {
-        RMap<String, String> ticket = redis.getMap(RedisKeys.matchTicket(playerId), StringCodec.INSTANCE);
+        RMap<String, String> ticket = redis.getMap(REDIS_KEYS.matchTicket(playerId), StringCodec.INSTANCE);
         assertThat(ticket.containsKey(ENQUEUED_AT_FIELD)).as("票据 HASH 里入队时刻的字段名应是 %s（match-spec §9.4）；现有字段 %s", ENQUEUED_AT_FIELD,
                 ticket.readAllKeySet()).isTrue();
         ticket.fastPut(ENQUEUED_AT_FIELD, Long.toString(redisNowMs() - ago.toMillis()));
@@ -96,13 +99,13 @@ class MatcherRedisIntegrationTest extends MatcherPortedScenarios {
 
     @Override
     protected List<String> queueMembers(QueueRef queue) {
-        return redis.<String>getList(queue.queueKey(), StringCodec.INSTANCE).readAll();
+        return redis.<String>getList(queue.queueKey(REDIS_KEYS), StringCodec.INSTANCE).readAll();
     }
 
     @Override
     protected Map<String, Long> rankScores(QueueRef queue) {
         Map<String, Long> scores = new LinkedHashMap<>();
-        for (ScoredEntry<String> entry : redis.<String>getScoredSortedSet(queue.rankKey(), StringCodec.INSTANCE).entryRange(0, -1)) {
+        for (ScoredEntry<String> entry : redis.<String>getScoredSortedSet(queue.rankKey(REDIS_KEYS), StringCodec.INSTANCE).entryRange(0, -1)) {
             scores.put(entry.getValue(), Math.round(entry.getScore()));
         }
         return scores;
@@ -110,34 +113,34 @@ class MatcherRedisIntegrationTest extends MatcherPortedScenarios {
 
     @Override
     protected boolean indexed(QueueRef queue) {
-        return redis.getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).contains(queue.queueKey());
+        return redis.getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).contains(queue.queueKey(REDIS_KEYS));
     }
 
     @Override
     protected Optional<String> lockHolder(QueueRef queue) {
-        return Optional.ofNullable(redis.<String>getBucket(queue.lockKey(), StringCodec.INSTANCE).get());
+        return Optional.ofNullable(redis.<String>getBucket(queue.lockKey(REDIS_KEYS), StringCodec.INSTANCE).get());
     }
 
     @Override
     protected long ticketTtlMs(long playerId) {
-        return redis.getMap(RedisKeys.matchTicket(playerId), StringCodec.INSTANCE).remainTimeToLive();
+        return redis.getMap(REDIS_KEYS.matchTicket(playerId), StringCodec.INSTANCE).remainTimeToLive();
     }
 
     @Override
     protected void registerQueue(QueueRef queue) {
-        redis.getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).add(queue.queueKey());
+        redis.getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).add(queue.queueKey(REDIS_KEYS));
     }
 
     @Override
     protected void pushRaw(QueueRef queue, String member, long ratingCenti) {
-        redis.getSet(RedisKeys.matchQueueIndex(), StringCodec.INSTANCE).add(queue.queueKey());
-        redis.<String>getScoredSortedSet(queue.rankKey(), StringCodec.INSTANCE).add(ratingCenti, member);
-        redis.<String>getList(queue.queueKey(), StringCodec.INSTANCE).add(member);
+        redis.getSet(REDIS_KEYS.matchQueueIndex(), StringCodec.INSTANCE).add(queue.queueKey(REDIS_KEYS));
+        redis.<String>getScoredSortedSet(queue.rankKey(REDIS_KEYS), StringCodec.INSTANCE).add(ratingCenti, member);
+        redis.<String>getList(queue.queueKey(REDIS_KEYS), StringCodec.INSTANCE).add(member);
     }
 
     @Override
     protected boolean addRankOnly(QueueRef queue, String member, long ratingCenti) {
-        redis.<String>getScoredSortedSet(queue.rankKey(), StringCodec.INSTANCE).add(ratingCenti, member);
+        redis.<String>getScoredSortedSet(queue.rankKey(REDIS_KEYS), StringCodec.INSTANCE).add(ratingCenti, member);
         return true;
     }
 

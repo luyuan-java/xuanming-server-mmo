@@ -3,6 +3,7 @@ package com.game.match.challenge;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.challenge.ChallengeStore.ChallengeRecord;
@@ -34,6 +35,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static RedissonClient redis;
 
     private final List<Long> challengeIds = new ArrayList<>();
@@ -64,13 +67,13 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
         List<String> keys = new ArrayList<>();
         for (long id : challengeIds) {
             for (long variant : new long[] {id, id | Long.MIN_VALUE, (id | Long.MIN_VALUE) - 1}) {
-                keys.add(RedisKeys.matchChallenge(variant));
-                keys.add(RedisKeys.matchChallengeDone(variant));
+                keys.add(REDIS_KEYS.matchChallenge(variant));
+                keys.add(REDIS_KEYS.matchChallengeDone(variant));
             }
         }
         for (long id : playerIds) {
-            keys.add(RedisKeys.matchChallengeTarget(id));
-            keys.add(RedisKeys.matchChallengeTarget(id | Long.MIN_VALUE));
+            keys.add(REDIS_KEYS.matchChallengeTarget(id));
+            keys.add(REDIS_KEYS.matchChallengeTarget(id | Long.MIN_VALUE));
         }
         if (!keys.isEmpty()) {
             redis.getKeys().delete(keys.toArray(String[]::new));
@@ -80,7 +83,7 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
     @Override
     ChallengeStore store() {
         if (store == null) {
-            store = new RedissonChallengeStore(redis);
+            store = new RedissonChallengeStore(redis, REDIS_KEYS);
         }
         return store;
     }
@@ -127,18 +130,18 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
 
         InviteResult.Created created = (InviteResult.Created) store().invite(id, challenger, target, 12, 60_000, d());
 
-        Map<String, String> record = redis.<String, String>getMap(RedisKeys.matchChallenge(id), StringCodec.INSTANCE).readAllMap();
+        Map<String, String> record = redis.<String, String>getMap(REDIS_KEYS.matchChallenge(id), StringCodec.INSTANCE).readAllMap();
         assertThat(record).containsOnly(
                 Map.entry("challenger", Long.toUnsignedString(challenger)),
                 Map.entry("target", Long.toUnsignedString(target)),
                 Map.entry("config", "12"),
                 Map.entry("expires_at_ms", Long.toString(created.expiresAtMs())));
-        assertThat(redis.<String>getBucket(RedisKeys.matchChallengeTarget(target), StringCodec.INSTANCE).get())
+        assertThat(redis.<String>getBucket(REDIS_KEYS.matchChallengeTarget(target), StringCodec.INSTANCE).get())
                 .isEqualTo(Long.toUnsignedString(id));
-        assertThat(pttl(RedisKeys.matchChallenge(id))).isBetween(55_000L, 60_000L);
-        assertThat(pttl(RedisKeys.matchChallengeTarget(target))).isBetween(55_000L, 60_000L);
-        assertThat(RedisKeys.matchChallenge(id)).startsWith("game:{match}:challenge:");
-        assertThat(RedisKeys.matchChallengeTarget(target)).startsWith("game:{match}:challenge-target:");
+        assertThat(pttl(REDIS_KEYS.matchChallenge(id))).isBetween(55_000L, 60_000L);
+        assertThat(pttl(REDIS_KEYS.matchChallengeTarget(target))).isBetween(55_000L, 60_000L);
+        assertThat(REDIS_KEYS.matchChallenge(id)).startsWith("game:{match}:challenge:");
+        assertThat(REDIS_KEYS.matchChallengeTarget(target)).startsWith("game:{match}:challenge-target:");
     }
 
     @Test
@@ -150,8 +153,8 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
 
         ConsumeResult.Consumed consumed = (ConsumeResult.Consumed) store().consume(id, target, "nonce-77", d());
 
-        assertThat(redis.getKeys().countExists(RedisKeys.matchChallenge(id), RedisKeys.matchChallengeTarget(target))).isZero();
-        Map<String, String> tombstone = redis.<String, String>getMap(RedisKeys.matchChallengeDone(id), StringCodec.INSTANCE).readAllMap();
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.matchChallenge(id), REDIS_KEYS.matchChallengeTarget(target))).isZero();
+        Map<String, String> tombstone = redis.<String, String>getMap(REDIS_KEYS.matchChallengeDone(id), StringCodec.INSTANCE).readAllMap();
         assertThat(tombstone).containsOnly(
                 Map.entry("nonce", "nonce-77"),
                 Map.entry("challenger", Long.toUnsignedString(challenger)),
@@ -159,8 +162,8 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
                 Map.entry("config", "4"),
                 Map.entry("expires_at_ms", Long.toString(expiresAtMs)),
                 Map.entry("now_ms", Long.toString(consumed.redisNowMs())));
-        assertThat(pttl(RedisKeys.matchChallengeDone(id))).isBetween(55_000L, 60_000L);
-        assertThat(RedisKeys.matchChallengeDone(id)).startsWith("game:{match}:challenge-done:");
+        assertThat(pttl(REDIS_KEYS.matchChallengeDone(id))).isBetween(55_000L, 60_000L);
+        assertThat(REDIS_KEYS.matchChallengeDone(id)).startsWith("game:{match}:challenge-done:");
     }
 
     @Test
@@ -172,8 +175,8 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
 
         store().invite(id, newPlayerId(), target, 0, 2_000, d());
 
-        assertThat(pttl(RedisKeys.matchChallenge(id))).as("没有被重置成 2000").isLessThan(1_500L).isPositive();
-        assertThat(pttl(RedisKeys.matchChallengeTarget(target))).isLessThan(1_500L).isPositive();
+        assertThat(pttl(REDIS_KEYS.matchChallenge(id))).as("没有被重置成 2000").isLessThan(1_500L).isPositive();
+        assertThat(pttl(REDIS_KEYS.matchChallengeTarget(target))).isLessThan(1_500L).isPositive();
     }
 
     @Test
@@ -182,33 +185,33 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
         long challenger = newPlayerId();
         long target = newPlayerId();
         long first = ((InviteResult.Created) store().invite(id, challenger, target, 0, 2_000, d())).expiresAtMs();
-        redis.getKeys().delete(RedisKeys.matchChallenge(id));
+        redis.getKeys().delete(REDIS_KEYS.matchChallenge(id));
 
         long second = ((InviteResult.Created) store().invite(id, challenger, target, 0, 60_000, d())).expiresAtMs();
 
         assertThat(second).as("不是把一条读不到的记录当成重放").isGreaterThan(first + 50_000);
         assertThat(store().read(id, d())).hasValue(new ChallengeRecord(challenger, target, 0, second));
-        assertThat(pttl(RedisKeys.matchChallenge(id))).isBetween(55_000L, 60_000L);
-        assertThat(pttl(RedisKeys.matchChallengeTarget(target))).as("占坑的寿命跟着重写").isBetween(55_000L, 60_000L);
+        assertThat(pttl(REDIS_KEYS.matchChallenge(id))).isBetween(55_000L, 60_000L);
+        assertThat(pttl(REDIS_KEYS.matchChallengeTarget(target))).as("占坑的寿命跟着重写").isBetween(55_000L, 60_000L);
     }
 
     @Test
     void 损坏的记录_字段按0读_目标对不上不消费() {
         long id = newChallengeId();
         long responder = newPlayerId();
-        redis.<String, String>getMap(RedisKeys.matchChallenge(id), StringCodec.INSTANCE)
+        redis.<String, String>getMap(REDIS_KEYS.matchChallenge(id), StringCodec.INSTANCE)
                 .putAll(Map.of("challenger", "abc", "config", "-3", "expires_at_ms", "1e12"));
-        redis.getKeys().expire(RedisKeys.matchChallenge(id), 60, TimeUnit.SECONDS);
+        redis.getKeys().expire(REDIS_KEYS.matchChallenge(id), 60, TimeUnit.SECONDS);
 
         assertThat(store().read(id, d())).as("同基线：解析不了的字段按 0").hasValue(new ChallengeRecord(0, 0, 0, 0));
         assertThat(store().consume(id, responder, "nonce", d())).as("没有 target 字段 = 不是发给任何人的").isEqualTo(new ConsumeResult.NotTarget());
-        assertThat(redis.getKeys().countExists(RedisKeys.matchChallenge(id))).as("没有被消费").isEqualTo(1);
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.matchChallenge(id))).as("没有被消费").isEqualTo(1);
     }
 
     @Test
     void 客户端已不可用_各方法都在预算内以依赖异常失败() {
         RedissonClient closed = Redisson.create(config());
-        RedissonChallengeStore broken = new RedissonChallengeStore(closed);
+        RedissonChallengeStore broken = new RedissonChallengeStore(closed, REDIS_KEYS);
         long id = newChallengeId();
         long target = newPlayerId();
         assertThat(broken.read(id, d())).isEmpty();
@@ -221,6 +224,6 @@ class ChallengeStoreIntegrationTest extends ChallengeStoreContract {
         assertThatThrownBy(() -> broken.consume(id, target, "nonce", Deadline.after(1_500))).isInstanceOf(Deadline.DependencyException.class);
         assertThatThrownBy(() -> broken.delete(id, target, Deadline.after(1_500))).isInstanceOf(Deadline.DependencyException.class);
         assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)).as("四次调用都在各自的预算附近返回").isLessThan(10_000);
-        assertThat(redis.getKeys().countExists(RedisKeys.matchChallenge(id), RedisKeys.matchChallengeTarget(target))).as("什么都没写").isZero();
+        assertThat(redis.getKeys().countExists(REDIS_KEYS.matchChallenge(id), REDIS_KEYS.matchChallengeTarget(target))).as("什么都没写").isZero();
     }
 }

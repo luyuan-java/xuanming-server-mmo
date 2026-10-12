@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.api.SceneBattleService;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.api.rpc.NodeRpcClients;
+import com.game.common.GameNamespace;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
@@ -43,6 +44,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class ScenePreparerRedisIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static final long BATTLE = 7_000_000_650L;
     private static RedissonClient redis;
     private static PlayerLocationDirectory locations;
@@ -71,8 +74,8 @@ class ScenePreparerRedisIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13).setConnectionMinimumIdleSize(1).setConnectionPoolSize(4);
         redis = Redisson.create(config);
-        locations = new PlayerLocationDirectory(redis);
-        scenes = new NodeDirectory<>(redis, NodeTypes.SCENE, SceneNodeInfo.parser());
+        locations = new PlayerLocationDirectory(redis, REDIS_KEYS);
+        scenes = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
     }
 
     @AfterAll
@@ -97,11 +100,11 @@ class ScenePreparerRedisIntegrationTest {
     @AfterEach
     void removeMine() {
         for (long playerId : writtenPlayers) {
-            redis.getKeys().delete(RedisKeys.playerLocation(playerId));
+            redis.getKeys().delete(REDIS_KEYS.playerLocation(playerId));
         }
         for (int zone : new int[] {zone1, zone2, zone3}) {
             // RMapCache 除了哈希本身还有记 TTL 的伴生键：整个对象一起删
-            redis.getMapCache(RedisKeys.nodeDirectory(NodeTypes.SCENE, zone), StringCodec.INSTANCE).delete();
+            redis.getMapCache(REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone), StringCodec.INSTANCE).delete();
         }
     }
 
@@ -148,8 +151,8 @@ class ScenePreparerRedisIntegrationTest {
         assertThat(sceneZ1.calls).extracting(FakeSceneBattle.Call::targetInstanceId).containsExactly("it-scene-z1");
         assertThat(sceneZ2.calls).extracting(FakeSceneBattle.Call::targetInstanceId).containsExactly("it-scene-z2");
         // 碰撞是存储里真实存在的：两把键、同一个字段名
-        String keyZ1 = RedisKeys.nodeDirectory(NodeTypes.SCENE, zone1);
-        String keyZ2 = RedisKeys.nodeDirectory(NodeTypes.SCENE, zone2);
+        String keyZ1 = REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone1);
+        String keyZ2 = REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone2);
         assertThat(keyZ1).isNotEqualTo(keyZ2);
         assertThat(redis.<String, byte[]>getMapCache(keyZ1, StringCodec.INSTANCE).readAllKeySet()).containsExactly("1");
         assertThat(redis.<String, byte[]>getMapCache(keyZ2, StringCodec.INSTANCE).readAllKeySet()).containsExactly("1");

@@ -36,7 +36,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * 对局结果事件的 Kafka 传输（批次 6.4；match-spec §5.4，落实 battle-node-spec Q12；基线 {@code room.cpp:1181-1211} 发 {@code match-results}）。
- * topic {@code game-battle-result-g<代次>}（规格 {@link BattleResultTopics}：3 分区、保留 7 天），key = battle_id 的无符号十进制，
+ * topic {@code <ns>-battle-result-g<代次>}（缺省命名空间下即 {@code game-battle-result-g<代次>}；规格与名字由注入的 {@link BattleResultTopics}
+ * 实例给出：3 分区、保留 7 天），key = battle_id 的无符号十进制，
  * value = 契约 {@code contracts.kafka.BattleResultEvent} 的字节。消费方是 game-match 的评分（按 battle_id 幂等；4.6 起 game-guild 用自己的消费组读活动局）。
  * 模式同 scene 的审计管线（{@code AuditPipeline}，architecture.md §4.5）。
  *
@@ -109,6 +110,7 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
     }
 
     private final Clients clients;
+    private final BattleResultTopics topics;
     private final int generation;
     private final String topic;
     private final short replicationFactor;
@@ -136,21 +138,23 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
 
     /**
      * @param clients           Kafka 客户端的工厂（生产 {@link Clients#kafka}）
+     * @param topics            对局结果 topic 的规格（由本进程的 {@code KafkaNames} bean 构造，名字带部署命名空间）
      * @param generation        topic 代次（{@code game.battle.result.topic-generation}，与 game-match 一致）
      * @param replicationFactor 新建 topic 的副本数
      * @param verifyTimeout     一次核对的上限（{@code game.battle.result.init-timeout}）
      */
-    public KafkaBattleResultSink(Clients clients, int generation, short replicationFactor, Duration verifyTimeout,
-                                 BattleMetrics metrics) {
-        this(clients, generation, replicationFactor, verifyTimeout, metrics, QUEUE_CAPACITY, System::nanoTime);
+    public KafkaBattleResultSink(Clients clients, BattleResultTopics topics, int generation, short replicationFactor,
+                                 Duration verifyTimeout, BattleMetrics metrics) {
+        this(clients, topics, generation, replicationFactor, verifyTimeout, metrics, QUEUE_CAPACITY, System::nanoTime);
     }
 
     /** 测试用：可注入队列上限与单调时钟（纳秒）。 */
-    KafkaBattleResultSink(Clients clients, int generation, short replicationFactor, Duration verifyTimeout, BattleMetrics metrics,
-                          int queueCapacity, LongSupplier nanoClock) {
+    KafkaBattleResultSink(Clients clients, BattleResultTopics topics, int generation, short replicationFactor, Duration verifyTimeout,
+                          BattleMetrics metrics, int queueCapacity, LongSupplier nanoClock) {
         this.clients = Objects.requireNonNull(clients, "clients");
+        this.topics = Objects.requireNonNull(topics, "topics");
         this.generation = generation;
-        this.topic = BattleResultTopics.name(generation);
+        this.topic = topics.name(generation);
         this.replicationFactor = replicationFactor;
         this.verifyTimeout = Objects.requireNonNull(verifyTimeout, "verifyTimeout");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
@@ -212,7 +216,7 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
      */
     private boolean verifyNow() {
         try (TopicAdmin admin = clients.admin()) {
-            BattleResultTopics.ensure(admin, generation, AuditTopicInitializer.Mode.CREATE_AND_VERIFY, replicationFactor, verifyTimeout);
+            topics.ensure(admin, generation, AuditTopicInitializer.Mode.CREATE_AND_VERIFY, replicationFactor, verifyTimeout);
             synchronized (producerLock) {
                 if (closed.get()) {
                     return false;

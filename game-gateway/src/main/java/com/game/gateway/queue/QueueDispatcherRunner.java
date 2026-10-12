@@ -35,10 +35,13 @@ public final class QueueDispatcherRunner implements AutoCloseable {
         this.dispatcher = null;
     }
 
-    /** @param dispatcherFactory 用选主实现造出放行循环 */
-    public QueueDispatcherRunner(RedissonClient redis, Duration interval,
+    /**
+     * @param redisKeys         本进程部署命名空间的键名（选主锁 {@code <ns>:login-queue-dispatcher}）
+     * @param dispatcherFactory 用选主实现造出放行循环
+     */
+    public QueueDispatcherRunner(RedissonClient redis, RedisKeys redisKeys, Duration interval,
                                  Function<QueueDispatcher.Leadership, QueueDispatcher> dispatcherFactory) {
-        RLock lock = redis.getLock(RedisKeys.loginQueueDispatcherLock());
+        RLock lock = redis.getLock(redisKeys.loginQueueDispatcherLock());
         this.dispatcher = dispatcherFactory.apply(new QueueDispatcher.Leadership() {
             @Override
             public boolean holdOrAcquire() {

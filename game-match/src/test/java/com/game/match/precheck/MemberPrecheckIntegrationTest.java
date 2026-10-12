@@ -2,6 +2,7 @@ package com.game.match.precheck;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleLockReader;
@@ -51,6 +52,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class MemberPrecheckIntegrationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     private static RedissonClient redis;
     private static PlayerPresenceDirectory presences;
     private static PlayerLocationDirectory locations;
@@ -62,8 +65,8 @@ class MemberPrecheckIntegrationTest {
     @BeforeAll
     static void connect() {
         redis = Redisson.create(config());
-        presences = new PlayerPresenceDirectory(redis);
-        locations = new PlayerLocationDirectory(redis);
+        presences = new PlayerPresenceDirectory(redis, REDIS_KEYS);
+        locations = new PlayerLocationDirectory(redis, REDIS_KEYS);
     }
 
     @AfterAll
@@ -83,10 +86,10 @@ class MemberPrecheckIntegrationTest {
     void cleanup() {
         List<String> keys = new ArrayList<>();
         for (long playerId : players) {
-            keys.add(RedisKeys.presence(playerId));
-            keys.add(RedisKeys.playerLocation(playerId));
-            keys.add(RedisKeys.battleLock(playerId));
-            keys.add(RedisKeys.matchTicket(playerId));
+            keys.add(REDIS_KEYS.presence(playerId));
+            keys.add(REDIS_KEYS.playerLocation(playerId));
+            keys.add(REDIS_KEYS.battleLock(playerId));
+            keys.add(REDIS_KEYS.matchTicket(playerId));
         }
         if (!keys.isEmpty()) {
             redis.getKeys().delete(keys.toArray(String[]::new));
@@ -95,7 +98,7 @@ class MemberPrecheckIntegrationTest {
 
     /** 第四项的票据判定：真的自愈规则 + Redis 票据存储（同一个客户端）；外面包一层只为记下「对谁判过」。 */
     private TicketHealing healing(RedissonClient client) {
-        TicketHealing real = new DefaultTicketHealing(new RedissonTicketStore(client));
+        TicketHealing real = new DefaultTicketHealing(new RedissonTicketStore(client, REDIS_KEYS));
         return (playerId, d) -> {
             ticketChecks.add(playerId);
             return real.healOrBlock(playerId, d);
@@ -103,21 +106,21 @@ class MemberPrecheckIntegrationTest {
     }
 
     private DefaultMemberPrecheck precheck(RedissonClient client) {
-        return new DefaultMemberPrecheck(new RedisPlayerStatusReader(new BattleLockReader(client), new PlayerPresenceDirectory(client),
-                new PlayerLocationDirectory(client)), healing(client));
+        return new DefaultMemberPrecheck(new RedisPlayerStatusReader(new BattleLockReader(client, REDIS_KEYS), new PlayerPresenceDirectory(client, REDIS_KEYS),
+                new PlayerLocationDirectory(client, REDIS_KEYS)), healing(client));
     }
 
     /** 用存储自己的脚本给玩家建一张不入队的 matched 票（PVE_SOLO 的建法），TTL 60 s。 */
     private static String matchedTicket(long playerId) {
         String ticketId = UUID.randomUUID().toString();
-        TicketStore.JoinResult created = new RedissonTicketStore(redis).createMatched(playerId, ticketId, MatchModes.PVE_SOLO, 1, 1, 150_000,
+        TicketStore.JoinResult created = new RedissonTicketStore(redis, REDIS_KEYS).createMatched(playerId, ticketId, MatchModes.PVE_SOLO, 1, 1, 150_000,
                 60_000, d());
         assertThat(created).isInstanceOf(TicketStore.JoinResult.Created.class);
         return ticketId;
     }
 
     private static Optional<Ticket> ticketOf(long playerId) {
-        return new RedissonTicketStore(redis).read(playerId, d());
+        return new RedissonTicketStore(redis, REDIS_KEYS).read(playerId, d());
     }
 
     private static Deadline d() {
@@ -146,8 +149,8 @@ class MemberPrecheckIntegrationTest {
 
     /** scene 的战斗锁：一个 Hash（字段 b = battle_id）；预检只看键在不在。 */
     private static void lock(long playerId) {
-        redis.<String, String>getMap(RedisKeys.battleLock(playerId), StringCodec.INSTANCE).put("b", "9001");
-        redis.getKeys().expire(RedisKeys.battleLock(playerId), 60, TimeUnit.SECONDS);
+        redis.<String, String>getMap(REDIS_KEYS.battleLock(playerId), StringCodec.INSTANCE).put("b", "9001");
+        redis.getKeys().expire(REDIS_KEYS.battleLock(playerId), 60, TimeUnit.SECONDS);
     }
 
     @Test
@@ -174,7 +177,7 @@ class MemberPrecheckIntegrationTest {
     @Test
     void 在线目录条目损坏_算读失败_不算不在线() throws Exception {
         long a = online(1, 7);
-        redis.<byte[]>getBucket(RedisKeys.presence(a), ByteArrayCodec.INSTANCE).set(new byte[] {(byte) 0xFF, (byte) 0xFF, 0x01}, java.time.Duration.ofSeconds(60));
+        redis.<byte[]>getBucket(REDIS_KEYS.presence(a), ByteArrayCodec.INSTANCE).set(new byte[] {(byte) 0xFF, (byte) 0xFF, 0x01}, java.time.Duration.ofSeconds(60));
 
         assertThat(precheck(redis).check(List.of(a), d())).isEqualTo(Result.failed(Reason.PRESENCE_READ_FAILED, a));
     }
@@ -188,7 +191,7 @@ class MemberPrecheckIntegrationTest {
         assertThat(precheck(redis).check(List.of(a, b), d())).isEqualTo(Result.failed(Reason.IN_BATTLE, b));
         assertThat(ticketChecks).as("有锁的人不碰票据").containsExactly(a);
 
-        redis.getKeys().delete(RedisKeys.battleLock(b));
+        redis.getKeys().delete(REDIS_KEYS.battleLock(b));
         assertThat(precheck(redis).check(List.of(a, b), d()).passed()).isTrue();
     }
 
@@ -199,7 +202,7 @@ class MemberPrecheckIntegrationTest {
         long loggedOut = online(1, 7);
         assertThat(locations.removeAsync(loggedOut, 3, 2).toCompletableFuture().get(5, TimeUnit.SECONDS)).isTrue();
         long missing = online(1, 7);
-        redis.getKeys().delete(RedisKeys.playerLocation(missing));
+        redis.getKeys().delete(REDIS_KEYS.playerLocation(missing));
         long noNode = online(1, 0);
 
         DefaultMemberPrecheck precheck = precheck(redis);
@@ -227,7 +230,7 @@ class MemberPrecheckIntegrationTest {
     void 上一场留下的ready票_没有战斗锁时被自愈清掉_预检通过_有战斗锁时轮不到票据所以票还在() throws Exception {
         long a = online(1, 7);
         long b = online(1, 7);
-        RedissonTicketStore store = new RedissonTicketStore(redis);
+        RedissonTicketStore store = new RedissonTicketStore(redis, REDIS_KEYS);
         for (long playerId : List.of(a, b)) {
             String ticketId = matchedTicket(playerId);
             assertThat(store.markReady(new TicketRef(playerId, ticketId), 9001, 60_000, d())).isTrue();
@@ -241,7 +244,7 @@ class MemberPrecheckIntegrationTest {
         assertThat(ticketOf(a)).as("a 没有战斗锁：ready 票是残留，已被条件删清掉").isEmpty();
         assertThat(ticketOf(b).orElseThrow().state()).as("b 有战斗锁：没走到票据这一项，ready 票原样").isEqualTo(TicketState.READY);
 
-        redis.getKeys().delete(RedisKeys.battleLock(b));
+        redis.getKeys().delete(REDIS_KEYS.battleLock(b));
         Result passed = precheck(redis).check(List.of(a, b), d());
 
         assertThat(passed.passed()).isTrue();

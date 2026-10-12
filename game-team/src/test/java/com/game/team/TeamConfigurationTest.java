@@ -8,11 +8,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.game.api.DubboGroups;
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.token.DubboCallAuth;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.battle.BattleLockReader;
+import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.team.dispatch.TeamDispatcher;
 import com.game.team.dispatch.TeamWorkerPool;
@@ -51,6 +53,7 @@ import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.Codec;
 import org.redisson.misc.CompletableFutureWrapper;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.event.ContextClosedEvent;
@@ -65,6 +68,8 @@ import org.springframework.test.util.ReflectionTestUtils;
  */
 class TeamConfigurationTest {
 
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+
     /** ≥ 2^63：锁键里必须是无符号十进制。 */
     private static final long FIGHTER = Long.MIN_VALUE + 4301;
     private static final long IDLE = 4302;
@@ -73,6 +78,7 @@ class TeamConfigurationTest {
     private final FakeRedis fake = new FakeRedis();
 
     private final ApplicationContextRunner base = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
             .withUserConfiguration(TeamConfiguration.class)
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withBean(RedissonClient.class, () -> fake.client)
@@ -86,7 +92,7 @@ class TeamConfigurationTest {
     @Test
     void 上下文起得来_队伍视图的in_battle接在战斗锁的逐键EXISTS上_资料与在线各走各的来源() {
         fake.lockedKeys.add("game:battle:{" + Long.toUnsignedString(FIGHTER) + "}:lock");
-        fake.presence.put(RedisKeys.presence(IDLE), PlayerPresence.newBuilder().setPlayerId(IDLE).setGateNodeId(1).build().toByteArray());
+        fake.presence.put(REDIS_KEYS.presence(IDLE), PlayerPresence.newBuilder().setPlayerId(IDLE).setGateNodeId(1).build().toByteArray());
 
         runner.run(ctx -> {
             assertThat(ctx).hasNotFailed()
@@ -108,9 +114,30 @@ class TeamConfigurationTest {
         });
     }
 
+    /** 键名跟 game.namespace 走：装配把注入的 RedisKeys 交给战斗锁读与在线目录（缺省 game 逐字节不变由上一个用例守着）。 */
+    @Test
+    void 非缺省命名空间_战斗锁与在线目录都用注入的前缀() {
+        RedisKeys nstest = new RedisKeys(GameNamespace.of("nstest"));
+        fake.lockedKeys.add(nstest.battleLock(FIGHTER));
+        fake.presence.put(nstest.presence(IDLE), PlayerPresence.newBuilder().setPlayerId(IDLE).setGateNodeId(1).build().toByteArray());
+
+        runner.withPropertyValues("game.namespace=nstest").run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            assertThat(ctx.getBean(RedisKeys.class).prefix()).isEqualTo("nstest:");
+
+            Map<Long, MemberDisplay> dc = ctx.getBean(TeamDisplay.class).load(List.of(FIGHTER, IDLE), Deadline.after(3000));
+
+            assertThat(dc).containsExactly(
+                    Map.entry(FIGHTER, new MemberDisplay(false, true, 31, 2, "甲", "ap-1", 1)),
+                    Map.entry(IDLE, new MemberDisplay(true, false, 7, 3, "乙", "", 2)));
+            assertThat(fake.existsAsked).containsExactlyInAnyOrder(
+                    "nstest:battle:{9223372036854780109}:lock", "nstest:battle:{4302}:lock");
+        });
+    }
+
     @Test
     void 战斗锁读不到_上下文里的视图照常返回_in_battle按false() {
-        fake.lockedKeys.add(RedisKeys.battleLock(FIGHTER));
+        fake.lockedKeys.add(REDIS_KEYS.battleLock(FIGHTER));
         fake.existsError = new IllegalStateException("Unable to send command! Node source: NodeSource [slot=0]");
 
         runner.run(ctx -> {
