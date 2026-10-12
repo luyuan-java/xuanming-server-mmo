@@ -1279,7 +1279,7 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
 规格 `docs/porting/deploy-ci-spec.md`。本机没有 Docker：compose 文件与镜像只在 CI 上执行，结论以 CI 为准（读法见规格 §11.5）。
 
 - **依赖编排**（7.1a）：`deploy/compose/infra.yaml` 只起依赖：MySQL 8.4.11、Redis 8.10.2（AOF）、Kafka 4.3.1（KRaft 单节点），都钉 tag 加 index digest。
-  项目名 `xuanming-java`，不与基线 compose 混用；端口只发布到 127.0.0.1，缺省端口 = 各进程的缺省端口，所以起好之后照常用
+  项目名 `game-java`，不与基线 compose 混用；端口只发布到 127.0.0.1，缺省端口 = 各进程的缺省端口，所以起好之后照常用
   `tools/local/start-slice.sh` 在宿主上起 Java 进程，端口冲突时用 `GAME_*_HOST_PORT` 改开。Kafka 有两个监听：宿主连 `127.0.0.1:9092`，容器内连 `kafka:19092`。
   关掉自动建 topic，审计 topic 由进程自建并核对（§4.5）。MySQL 预建 `game`，服务器缺省排序规则 `utf8mb4_bin`、时区 `+00:00`（与开发机相同）。
   秘密只从环境变量或不入库的 `deploy/compose/.env` 读（模板 `env.example`），必填项写成 `${VAR:?}`，缺了 compose 在启动前就失败。

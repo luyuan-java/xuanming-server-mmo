@@ -350,7 +350,8 @@ Redis 键前缀 `xm:` → `game:`（`RedisKeys.PREFIX`）；Kafka topic `xm-*` �
 
 **新库**：无需操作（`MYSQL_DATABASE: game`；game-login 首次启动建表）。
 
-**存量库（本机开发环境）**：推荐整体重建——`docker compose -f deploy/compose/infra.yaml down -v` 后重新 `up`，MySQL 与 Redis **一起**清（只清其中一边会造成
+**存量库（本机开发环境）**：compose 项目名在同一轮改名里从 `xuanming-java` 改成了 `game-java`，卷名随之变成 `game-java_*`，新项目起来就是空库空 Redis；旧项目的卷用
+`docker compose -p xuanming-java -f deploy/compose/infra.yaml down -v` 清掉（或留着搬数据）。推荐整体重建——`docker compose -f deploy/compose/infra.yaml down -v` 后重新 `up`，MySQL 与 Redis **一起**清（只清其中一边会造成
 infra.yaml 头部明令禁止的「节点号 epoch 回退」与 Redis / MySQL 权威数据不一致）。一定要保留数据时，必须两边同时迁、不许只迁一边：
 
 1. 停掉全部 Java 进程（用改名**之前**版本的 `tools/local/stop-slice.sh`，它认 `run/pids/xm-*.pid`；或 `for p in run/pids/xm-*.pid; do kill "$(cat "$p")"; done`），删掉 `run/xm-*` 与 `run/pids/xm-*.pid`；

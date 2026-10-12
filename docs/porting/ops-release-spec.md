@@ -51,7 +51,7 @@
 | 1 | Java 版上不上 K8s（盘点开放问题 7，`java-infra.md:389`；7.1 Q10 留给本批） | **上 K8s，不上 Agones**。正确性靠 CI 里一次性 k3s 集群上的真部署 + robot 证明；compose 整栈（7.1）继续作为单机演示形态 |
 | 2 | 清单怎么生成 | **Helm**（30.3K，同类最高）：一个 library chart + 三个 chart，只管声明式部分。命令式步骤（区服目录、排空、等待、门禁）放 Java 运维 CLI 模块 **`game-ops`**，它只调 `helm` / `kubectl` 和 game-data 的运维接口。5583 行的 PowerShell 生成器不移植 |
 | 3 | 哪些东西按 zone 部署 | **只有 game-gate、game-scene**。login、gateway、scene-manager、社交五服、data、battle、match 都全局一份（`zone-travel-spec.md:821-834`）。一个 zone = 一个 Helm release `game-zone-<id>`。多 zone 以 5.4 的 X16 为前置 |
-| 4 | namespace | 一个环境一个应用 namespace（缺省 `xuanming-java`），放全局服务和全部 zone；依赖放 `<ns>-infra`，只给 dev / CI / 演示用，生产外接托管的 MySQL / Redis / Kafka |
+| 4 | namespace | 一个环境一个应用 namespace（缺省 `game-java`），放全局服务和全部 zone；依赖放 `<ns>-infra`，只给 dev / CI / 演示用，生产外接托管的 MySQL / Redis / Kafka |
 | 5 | 服务发现 | **K8s Service DNS + Dubbo 直连 URL**（`tri://game-login:20881`，与 compose 同名）；K8s 上不部署 Nacos。按节点的调用（gate→scene 链路、资产通道、match→battle 控制面）照旧从 Redis 节点目录取 Pod IP |
 | 6 | gate / battle 对外入口 | StatefulSet + 每序号一个 Service（`publishNotReadyAddresses: true`）+ PDB `maxUnavailable: 0`，与基线 external 同形。通告地址由 Java 进程按 Pod 序号自己算（四种暴露模式，§5.5）。**同一 zone 的每个 gate 必须有独立的客户端地址** |
 | 7 | scene | 单池 Deployment，不建 Service。滚动 `maxSurge: 100% / maxUnavailable: 0`，每个玩家至多被疏散一次（基线每次 scene 发版都断开玩家，B19）。PDB `maxUnavailable: 1`。宽限期由模板按 5.5 的 C2 公式求下限，不低于 60 s |
@@ -751,9 +751,9 @@ loop 心跳停发 health → `logicLoop` liveness（J5）；FleetAutoscaler → 
 ### 5.2 namespace、chart 与 release
 
 ```
-<ns>-infra   （缺省 xuanming-java-infra；只给 dev / CI / 演示）
+<ns>-infra   （缺省 game-java-infra；只给 dev / CI / 演示）
   release game-infra     chart deploy/helm/game-infra      mysql / redis / kafka（StatefulSet + PVC）
-<ns>         （缺省 xuanming-java；一个环境一个）
+<ns>         （缺省 game-java；一个环境一个）
   release game-platform  chart deploy/helm/game-platform   game-gateway game-login game-scene-manager game-friend game-chat game-team game-guild
                                                        game-trade game-data game-battle [game-match]，NetworkPolicy、PDB、可选 Ingress / PodMonitor / 规则包装
   release game-zone-<id> chart deploy/helm/game-zone       game-gate-z<id>（StatefulSet + headless + 每序号 Service + PDB）、game-scene-z<id>（Deployment + PDB）
@@ -769,7 +769,7 @@ deploy/helm/
 - **全局服务和各 zone 同一个 namespace**：按 zone 部署的只有 gate / scene；Secret 只存一份、Service 用短名（与 compose 同名，环境变量两边一致）、NetworkPolicy 简单。
 - **infra 单独一个 namespace**：误删应用 namespace 不会带走 PVC；NetworkPolicy 只放行来自应用 namespace 的流量。
 - **每个 zone 一个 release**：开关一个 zone 不碰别的 zone；`helm history` / `helm rollback` 按 zone 粒度。配置全部入库（values + zones 文件），从根上消灭基线「参数不粘滞」（B17）。
-- **标签**：`app.kubernetes.io/{name,instance,part-of=xuanming-java,version}`；zone 级资源另加 `game/zone: "<id>"`（Prometheus 里是 `__meta_kubernetes_pod_label_game_zone`）。
+- **标签**：`app.kubernetes.io/{name,instance,part-of=game-java,version}`；zone 级资源另加 `game/zone: "<id>"`（Prometheus 里是 `__meta_kubernetes_pod_label_game_zone`）。
 
 ### 5.3 服务发现
 
@@ -785,7 +785,7 @@ deploy/helm/
 
 ```yaml
 metadata:
-  labels: {app.kubernetes.io/name: game-gate, app.kubernetes.io/part-of: xuanming-java, game/zone: "1"}
+  labels: {app.kubernetes.io/name: game-gate, app.kubernetes.io/part-of: game-java, game/zone: "1"}
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/port: "18103"                 # 由 values 的 managementPort 生成，与探针、env 同源（§0.6 #24）
@@ -821,7 +821,7 @@ spec:
 ```
 
 **共同约定**：
-- **镜像**：生产用 `ghcr.io/luyuan-java/<模块>@sha256:…`；也接受不可变 tag；CI 用本地导入的 `xuanming-java/<模块>:<sha12>`。
+- **镜像**：生产用 `ghcr.io/luyuan-java/<模块>@sha256:…`；也接受不可变 tag；CI 用本地导入的 `game-java/<模块>:<sha12>`。
 - **探针**（依赖 7.1b 打开 `management.endpoint.health.probes.enabled`）：startup 打 liveness 分组，5 s × 36 = 180 s，覆盖表加载与 Dubbo 导出（不照搬基线的 300 s，§0.6 #21）；
   分组只含 `livenessState` / `readinessState` 加本进程的领域指示器（§5.6），**不含 db / redis**（理由同基线 `java-svc/gateway.yaml:63-68`）。
 - **管理端口** `GAME_MANAGEMENT_ADDRESS=0.0.0.0`（§0.3）。模板不设 `SERVER_PORT`（§0.6 #24）。
@@ -897,7 +897,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 
 | namespace | 规则 |
 |---|---|
-| 应用 ns | 缺省拒绝全部入站，再放行：① `part-of=xuanming-java` 的 Pod 之间全部端口（Dubbo 2088x、链路 21000、资产通道 21100、battle 控制面 21200；每次调用另有 HMAC）；② gate 11000、battle 12000 来自任意来源；③ gateway 18081 来自 Ingress controller 所在 namespace（选择器可配；Service 为 NodePort / LB 时放开）；④ 管理端口 181xx 来自监控 namespace（选择器可配），另可配 `probeSourceCIDRs` 给 kubelet 探针（多数 CNI 不拦宿主到 Pod，CI 实测） |
+| 应用 ns | 缺省拒绝全部入站，再放行：① `part-of=game-java` 的 Pod 之间全部端口（Dubbo 2088x、链路 21000、资产通道 21100、battle 控制面 21200；每次调用另有 HMAC）；② gate 11000、battle 12000 来自任意来源；③ gateway 18081 来自 Ingress controller 所在 namespace（选择器可配；Service 为 NodePort / LB 时放开）；④ 管理端口 181xx 来自监控 namespace（选择器可配），另可配 `probeSourceCIDRs` 给 kubelet 探针（多数 CNI 不拦宿主到 Pod，CI 实测） |
 | infra ns | 只放行来自应用 ns 的流量 |
 | 出站 | 不限制（DNS、托管依赖、GHCR 拉取都要；YAGNI） |
 
@@ -1036,7 +1036,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 
   Dockerfile 加 `ENV GAME_LOG_FORMAT=logstash`，容器里缺省 JSON。选 `logstash` 不选 `ecs` / `gelf`：字段 `@timestamp / level / logger_name / thread_name / message / stack_trace` 与基线 gateway 同口径，
   基线的 Alloy 规则与值班 LogQL 都按这组字段写。代码不用 MDC（全仓 grep），JSON 顶层不会出现 player_id，玩家号只在消息正文里（AGENTS §5）。
-- **采集**：Vector（Q39）。K8s 用 `kubernetes_logs` DaemonSet，按 `app.kubernetes.io/part-of=xuanming-java` 过滤，读 `/var/log/pods`，只读 hostPath，RBAC 只给 list / watch pods；compose 用 `docker_logs` source
+- **采集**：Vector（Q39）。K8s 用 `kubernetes_logs` DaemonSet，按 `app.kubernetes.io/part-of=game-java` 过滤，读 `/var/log/pods`，只读 hostPath，RBAC 只给 list / watch pods；compose 用 `docker_logs` source
   （只读挂 docker.sock，只用于 CI 与单机，H28）。VRL：`parse_json` 失败就回落 Spring 文本正则（照基线 `config.alloy:443-467`），文本格式的堆栈续行按行头合并；Loki sink 打开**磁盘缓冲**（H12）。
 - **Loki 标签只用低基数字段**：`env`、`namespace`（K8s）、`service`（JSON 字段，缺省取 Pod 标签 `app.kubernetes.io/name` 或 compose 服务名）、`zone`（Pod 标签 `game/zone`；全局进程填 `global`）、
   `level`（小写）、`stream_class`（`logger_name` 以 `game.audit.` 开头为 `audit`，否则 `app`）。pod、logger、thread 留在行内（`| json` 查询）——pod 不作标签，因为每次滚动都换 pod 名、制造新流。CI 查 `/loki/api/v1/labels` 必须是白名单子集。
@@ -1049,7 +1049,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
   - `AuditFallbackReplay` 加 `--format jsonl`：输入是 `game-ops obs export-fallback` 按固定、互不重叠的时间窗从 Loki 导出的 `{stream_class="audit"} | json | logger_name="game.audit.fallback"` 行（每行带 pod、`@timestamp`、`thread_name`、`message`）；
     去重键改为「pod + `@timestamp` + `thread_name` + message」的 SHA-256。推荐沿用 `audit_replay_line` 表：`file_sha256` 列存行摘要、`line_no` 存 0，不改表结构（落码时确认）。同一行被重复导出不会让 `tx_id = 0` 的行重复入库。
   - Kafka 不可用时兜底行是 WARN 级，`logback_events_total{level="warn"}` 会随之上升，属预期；A7 只看 ERROR，不受影响。
-- **Grafana**：不开匿名；admin 口令 `${GAME_GRAFANA_ADMIN_PASSWORD:?}`；compose 只发布到 127.0.0.1（同 7.1 D3）；数据源 Prometheus（uid `prometheus`）与 Loki（uid `loki`）；看板目录 `xuanming-java`、`allowUiUpdates: false`。
+- **Grafana**：不开匿名；admin 口令 `${GAME_GRAFANA_ADMIN_PASSWORD:?}`；compose 只发布到 127.0.0.1（同 7.1 D3）；数据源 Prometheus（uid `prometheus`）与 Loki（uid `loki`）；看板目录 `game-java`、`allowUiUpdates: false`。
 - **不做日志告警**：凡值得告警的事件都有计数器（`game_scene_audit_records_total`、`game_data_kafka_records_total`、`game_scene_gain_anomalies_total`），通用的「ERROR 突增」用 Actuator 自带的 `logback_events_total`（A7）。
 
 ### 5.13 指标抓取与告警架构

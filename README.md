@@ -85,7 +85,7 @@ GAME_ZONES=2 tools/local/start-slice.sh         # 再起区 2 的 scene 与 gate
 
 > **从改名前的版本升级**（2026-10-12 起 `xm` 前缀统一改为 `game`）：先用改名前版本的 `stop-slice.sh` 停掉旧切片（新脚本只认 `run/pids/game-*.pid`；
 > 或 `for p in run/pids/xm-*.pid; do kill "$(cat "$p")"; done`），删掉 `run/xm-*`；`export` 的 `XM_*` 全部换成 `GAME_*`；
-> 本机 MySQL 库与 Redis 一起重建或一起迁移（库 `xm_java` → `game`、键前缀 `xm:` → `game:`，见 `docs/design/db-migrations.md` M12）。新旧进程不能混跑。
+> 本机 MySQL 库与 Redis 一起重建或一起迁移（库 `xm_java` → `game`、键前缀 `xm:` → `game:`；compose 项目名 `xuanming-java` → `game-java`，旧卷用 `docker compose -p xuanming-java -f deploy/compose/infra.yaml down -v` 清掉，见 `docs/design/db-migrations.md` M12）。新旧进程不能混跑。
 
 进程清单与启动顺序以 `tools/local/start-slice.sh` 的 `SERVICES` 为准（scene-manager、login、friend、chat、match、team、guild、trade、data、scene、gate、gateway、battle；`GAME_SCENE_NODES=2` 时多起一个 scene 节点 `game-scene-2`）。
 `GAME_ZONES=2` 时在这十三项之外再起区 2 的两个实例（它们不在 `SERVICES` 里，各自紧跟区 1 的同类启动）：`game-scene-z2`（节点链路 21010、资产通道 21110、管理端口 18115）与 `game-gate-z2`（客户端 11010、管理端口 18123），其余进程两个区共用；

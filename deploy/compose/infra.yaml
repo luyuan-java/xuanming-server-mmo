@@ -5,7 +5,7 @@
 #   GAME_KAFKA_HOST_PORT 改开。
 # - 秘密只从环境变量读（shell 已导出的，或本目录下不入库的 .env，模板见 env.example）；必填写 ${VAR:?}，缺失时 compose
 #   在启动前就失败。
-# - 项目名固定为 xuanming-java、不写 container_name：两版不共享存储（architecture.md），只能靠项目名把卷与容器隔开。
+# - 项目名固定为 game-java、不写 container_name：两版不共享存储（architecture.md），只能靠项目名把卷与容器隔开。
 # - 镜像钉 tag + index digest（多架构清单的 digest，2026-10-05 由 registry-1.docker.io 的 Docker-Content-Digest 查得）。
 #   更新：docker buildx imagetools inspect <image:tag> 取 Digest 行替换 @sha256，推送后看 integration.yml 的 it job 是否绿。
 # - 只放依赖。基线的 etcd / Nacos / Redis Cluster / kafka-ui / topic-init 都不移植（spec §2.3）。
@@ -17,7 +17,7 @@
 #   docker compose -f deploy/compose/infra.yaml up -d --wait
 #   tools/local/start-slice.sh                           # 照常在宿主上起 Java 进程
 #   docker compose -f deploy/compose/infra.yaml down     # 保留卷；down -v 连卷一起清
-name: xuanming-java
+name: game-java
 
 services:
   mysql:

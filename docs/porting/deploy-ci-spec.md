@@ -60,7 +60,7 @@
 | 健康检查 | 所有进程打开 readiness / liveness 探针并暴露 `info`。compose 的 healthcheck 要同时满足：readiness 为 UP，且业务端口**按服务名**能连上；scene 另加「主世界频道 ≥ 1」。镜像本身不写 `HEALTHCHECK` |
 | 秘密 | 只从环境变量进。compose 中必填的写 `${VAR:?}`，可选的写 `${VAR:-}`；每个进程只拿到自己用的那几个。CI 每次运行随机生成并 mask，**不使用任何 GitHub secret** |
 | 构建信息 | 根 pom 给 spring-boot-maven-plugin 加 `build-info`，写入 git commit 与契约来源 commit（都是 40 位），经 `/actuator/info` 暴露。镜像另打 OCI label，并写 `/app/BUILD_INFO` |
-| 镜像名与 tag | `${GAME_IMAGE_NAMESPACE:-xuanming-java}/<模块名>:<12 位 sha>`，永远不打 `latest`。7.1 只构建、只冒烟，**不推送** |
+| 镜像名与 tag | `${GAME_IMAGE_NAMESPACE:-game-java}/<模块名>:<12 位 sha>`，永远不打 `latest`。7.1 只构建、只冒烟，**不推送** |
 | CI | 三个 workflow：`ci.yml`（构建 + 单测、契约 `--check`）、`integration.yml`（真依赖集成测试、整栈冒烟）、`contract-drift.yml`（每天对比 mmorpg main，**只报告、不判红**） |
 | 结论怎么看 | 不需要 Docker 的在本机验（§11.2）。用到 Docker 的都只能靠 CI，结论通过 GitHub REST **匿名**读取。job 日志匿名读不到（403），所以每一种失败都必须转成 annotation |
 | 分批 | **7.1a**：CI 构建与契约、漂移报告、`infra.yaml` 加集成测试 job、`TestReport`、mvnw 可执行位。**7.1b**：build-info、配置占位符与探针、Dockerfile、`stack.yaml` 与整栈冒烟。7.1b 要等 5.2 提交以后再做，因为两者会改同一批 yaml |
@@ -309,7 +309,7 @@
    - **topic-init**：审计 topic 由生产方和消费方在启动时按规格自己建，并核对分区数。scene 用 `CREATE_AND_VERIFY`（`game-scene/.../AuditPipeline.java:126`），data 用 `OWN`（`game-data/.../DataNode.java:119`）。
      `game-audit/.../AuditTopicInitializer.java:15` 写明：broker 开着自动建 topic 时，生产方在核对通过前不能发送。所以 broker **关掉自动建 topic** 就够了。
      Java 只用审计这两个 topic；`__consumer_offsets` 是内部 topic，不受这个开关影响。
-3. **项目名固定为 `name: xuanming-java`，不写 `container_name`**。基线的项目名缺省取目录名，并且写死了 `kafka` / `redis` / `mysql` 这些容器名。两版不得共享存储（architecture.md:27），只能靠项目名把卷隔开。
+3. **项目名固定为 `name: game-java`，不写 `container_name`**。基线的项目名缺省取目录名，并且写死了 `kafka` / `redis` / `mysql` 这些容器名。两版不得共享存储（architecture.md:27），只能靠项目名把卷隔开。
 4. **宿主端口可以改**：用 `GAME_MYSQL_HOST_PORT`、`GAME_REDIS_HOST_PORT`、`GAME_KAFKA_HOST_PORT`，避免与开发机上已经在跑的本地进程或基线的 compose 冲突。
 
 ### 2.4 `deploy/compose/infra.yaml`（草图）
@@ -319,7 +319,7 @@
 # 起好后 tools/local/start-slice.sh 不用改任何配置。秘密只从环境变量读（${VAR:?} 缺失即拒绝启动）。
 # 镜像钉 tag + index digest（2026-10-05 Docker Hub API 查得）。更新：docker buildx imagetools inspect <image:tag> 取 Digest 行，
 # 改这里后推送，看 integration.yml 的 it / stack 两个 job 是否绿。
-name: xuanming-java
+name: game-java
 services:
   mysql:
     image: mysql:8.4.11@sha256:80f4933e3835f9dc4d35a28ec500d7986cb4414e6c6821c5461239cb7beb8995
@@ -376,7 +376,7 @@ volumes: {mysql-data: {}, redis-data: {}}
 ### 2.5 `deploy/compose/stack.yaml`（草图）
 
 ```yaml
-name: xuanming-java
+name: game-java
 include: [infra.yaml]
 
 x-java: &java
@@ -394,7 +394,7 @@ x-ready: &ready {interval: 3s, timeout: 5s, retries: 60, start_period: 120s}
 services:
   game-login:
     <<: *java
-    image: ${GAME_IMAGE_NAMESPACE:-xuanming-java}/game-login:${GAME_IMAGE_TAG:-local}
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-login:${GAME_IMAGE_TAG:-local}
     build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {MODULE: game-login}}
     environment:
       <<: *java-env
@@ -411,7 +411,7 @@ services:
     <<: *java
     stop_grace_period: 45s            # timeout-per-shutdown-phase 30s（game-scene application.yaml:22）+ 余量；缺省 10s 会在停服写回中途 SIGKILL
     deploy: {resources: {limits: {memory: 1g}}}
-    image: ${GAME_IMAGE_NAMESPACE:-xuanming-java}/game-scene:${GAME_IMAGE_TAG:-local}
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-scene:${GAME_IMAGE_TAG:-local}
     build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {MODULE: game-scene}}
     environment:
       <<: *java-env
@@ -605,7 +605,7 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 
 ### 3.8 镜像名与 tag（留给 7.6 的接口）
 
-- **镜像名**：`${GAME_IMAGE_NAMESPACE:-xuanming-java}/<模块名>`，例如 `xuanming-java/game-gate`。与基线的 `mmorpg-*` 明显区分，两版即使推到同一个 registry 也不会混。7.6 推 GHCR 时把 namespace 改成 `ghcr.io/luyuan-java`；`org.opencontainers.image.source` 这个 label 能让 GHCR 把包关联回本仓库。
+- **镜像名**：`${GAME_IMAGE_NAMESPACE:-game-java}/<模块名>`，例如 `game-java/game-gate`。与基线的 `mmorpg-*` 明显区分，两版即使推到同一个 registry 也不会混。7.6 推 GHCR 时把 namespace 改成 `ghcr.io/luyuan-java`；`org.opencontainers.image.source` 这个 label 能让 GHCR 把包关联回本仓库。
 - **tag**：
   - 快照轨：12 位 sha，脏树加 `-dirty`。CI 每次全新检出，永远不脏。
   - 发布轨：`v<X.Y.Z>-<sha12>`，脏树直接拒绝，长度不超过 128，归 7.6。
@@ -1022,7 +1022,7 @@ mmorpg 侧早就有这些东西，交付说明里写「mmorpg 已有，本批 Ja
 | D11 | 表数据 | Java 镜像不带表（Go 镜像带） | 单独一层烤进镜像 | 契约随提交走；与 Go 镜像同理 |
 | D12 | build-info | 用 hack 覆盖 version；commit 12 位 | 不覆盖 version；多一个 contract；commit 40 位 | 不依赖插件实现细节；双版本需要知道契约来源 |
 | D13 | OCI created | 构建时间 | 提交时间 | 同一个提交两次构建得到相同的 label，层缓存可复用 |
-| D14 | 镜像名 | `ghcr.io/luyuancpp/mmorpg-*` | `xuanming-java/<模块>`，namespace 可配置 | 两版不混；不依赖旧用户名的重定向 |
+| D14 | 镜像名 | `ghcr.io/luyuancpp/mmorpg-*` | `game-java/<模块>`，namespace 可配置 | 两版不混；不依赖旧用户名的重定向 |
 | D15 | CI 内容 | 只跑单测；没有 IT；有 cr.yml | 单测 + 真依赖 IT + 整栈冒烟 + 契约 `--check` + 漂移报告；不移植 cr.yml；不用第三方 action；action 钉 SHA；runner 钉 ubuntu-24.04 | 本机没有 Docker，CI 是唯一能执行这些东西的地方；公开仓库不外发 diff |
 | D16 | concurrency | 按 ref 取消 | push 按 sha（不取消），PR 按 ref 取消 | 直接推 main 的工作流里，每个提交都需要结论 |
 | D17 | 漂移 | — | 每天只报告，不判红 | Java 有意在批次边界同步；常红的门禁会被无视 |
