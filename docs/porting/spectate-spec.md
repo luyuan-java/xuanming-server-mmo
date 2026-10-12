@@ -1398,6 +1398,8 @@ S_W_* 九段脚本都只访问 `{match}` slot 的键、可变脚本可安全重�
 
 ## 实现记录（2026-10-08）
 
+> **改名说明（2026-10-12，`8cbba6c`）**：本节写于 `xm` 前缀统一改为 `game` 之前。命令、模块名、环境变量、配置键、日志 / PID 文件名、指标名、测试类名已按新名改写；当时实际的输出、日志与 CI run 里是 `xm-*` / `XM_*` / `xm.*` / `xm_*` / `-Dxm.it.*`（库 `xm_java`），对照旧日志时按此换算。
+
 范围：163 WatchBattle / 164 ListWatchableBattles 的真实现、观战标记与可观战索引（11 段 Lua）、观众 RPC 的直拨、开局前清退与开局后公开、清扫与停机（都在 game-match 的 `spectate` 包）；跨区 1V1 的测试钉与寻址审计（只动测试）；
 双 zone 本机切片 `GAME_ZONES=2`（tools/local）；robot `battle-smoke` 的观战段与新场景 `battle-cross-zone`。没有改 proto、没有新增第三方依赖、没有为跨区改任何生产代码。
 

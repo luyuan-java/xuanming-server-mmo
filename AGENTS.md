@@ -47,7 +47,7 @@ Claude 在本仓库**可以自行编译和跑测试**（用户 2026-09-29 授权
 ```bash
 ./mvnw -B -DskipTests install            # 全量构建
 ./mvnw -B test                           # 单元测试
-./mvnw -B -pl game-gate -am test           # 单模块（连同依赖模块）
+./mvnw -B -pl game-gate -am test         # 单模块（连同依赖模块）
 ./mvnw -B test -Dgame.it.redis=redis://127.0.0.1:6379   # 连真 Redis 的集成测试（默认跳过）
 ./mvnw -B test -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306  # PlayerStoreSqlTest 改连真 MySQL（缺省 H2；口令取 GAME_MYSQL_PASSWORD）
 ```

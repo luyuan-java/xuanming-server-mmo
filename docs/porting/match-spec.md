@@ -2028,6 +2028,8 @@ game-team 的线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 
 ## 实现记录（2026-10-06 / 08）
 
+> **改名说明（2026-10-12，`8cbba6c`）**：本节写于 `xm` 前缀统一改为 `game` 之前。命令、模块名、环境变量、配置键、日志 / PID 文件名、指标名、测试类名已按新名改写；当时实际的输出、日志与 CI run 里是 `xm-*` / `XM_*` / `xm.*` / `xm_*` / `-Dxm.it.*`（库 `xm_java`），对照旧日志时按此换算。
+
 范围：新进程 game-match 的全部功能（排队、凑单、开局管线、补签、评分与结果回流、切磋、帮会活动开战的 match 侧、整队开战端口）、game-team 的整队开战接线、game-battle 的对局结果 Kafka 生产、
 gate 的 `MatchService` 路由与本机切片脚本、robot 的三个新场景与 `team` 的开战段。
 

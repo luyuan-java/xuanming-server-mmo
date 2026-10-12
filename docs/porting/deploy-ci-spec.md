@@ -439,7 +439,7 @@ services:
 |---|---|---|---|---|
 | game-scene-manager | — | DUBBO | — | redis |
 | game-friend / guild / trade | — | MYSQL、DUBBO；guild 加 ASSET_OP_SECRET_GUILD；trade 加 ADMIN_TOKEN（可选） | trade 18111 | mysql、redis |
-| game-team | — | MYSQL、DUBBO | — | mysql（game 由 `MYSQL_DATABASE` 预建）、redis |
+| game-team | — | MYSQL、DUBBO | — | mysql（`game` 库由 `MYSQL_DATABASE` 预建）、redis |
 | game-chat | — | DUBBO | — | redis |
 | game-data | — | MYSQL、ADMIN_TOKEN（可选） | 18106 | mysql、redis、kafka |
 | game-gate | `GAME_ADVERTISE_HOST=${GAME_GATE_PUBLIC_HOST:-127.0.0.1}`；`GAME_LOGIN_URL` / `GAME_FRIEND_URL` / `GAME_CHAT_URL` / `GAME_TEAM_URL` / `GAME_GUILD_URL` / `GAME_TRADE_URL`（`tri://<服务名>:<端口>`） | DUBBO、GATE_TOKEN、NODE_LINK、GM（可选） | `${GAME_GATE_PUBLISH_IP:-127.0.0.1}:11000:11000` | game-scene、game-login、五个社交服务 |

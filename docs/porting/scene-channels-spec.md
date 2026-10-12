@@ -565,16 +565,16 @@ gRPC `scene_node_service.cpp:68-125`（旧入口 `scene_handler.cpp:926-976` 同
 ### 4.1 总体与职责
 
 ```
-            ┌──────────────── game-scene-manager（N 副本）────────────────────────────┐
+            ┌──────────────── game-scene-manager（N 副本）──────────────────────────┐
  login ─Dubbo─►│ 数据面（每个副本）：SceneDirectoryService.assign                        │
-            │   读：节点目录（排除 draining）；写：软预占 Lua（game:world:{z:N}:resv:*）   │
+            │   读：节点目录（排除 draining）；写：软预占 Lua（game:world:{z:N}:resv:*） │
             │ 控制面（每个 zone 的领导者，线程 scene-manager-world）：                   │
             │   每 5 s：只读 Lua 取快照 + 读目录 → WorldChannelPlanner（纯函数）       │
             │   → 一段「令牌 + 版本号 CAS」Lua 原子写计划、INCR ver                    │
             └───────────────────────────┬────────────────────────────────────────┘
                                         │ Redis：game:world:{z:N}:{ch,desired,cooldown,ver,leader}
                                         ▼ （scene 每秒 GET ver，变了才读整张计划）
-            ┌──────────────── game-scene（每节点）───────────────────────────────────┐
+            ┌──────────────── game-scene（每节点）─────────────────────────────────┐
             │ scene-sched：ChannelPlanFollower 拉计划 → 投递逻辑线程                    │
             │ 逻辑线程：applyChannelPlan（建 / 标排空）→ drainStep（同节点改派 / 空了销毁）│
             │ 目录：SceneEntry.draining、applied_plan_version，应用后立即补发一次       │

@@ -88,7 +88,7 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - tables: none（配置项 Friend.MaxFriends=200（硬顶 300）、MaxPendingRequests=50、MaxIncomingRequests=200、MaxBlocks=200、ListReadHardLimit=1000、CacheTTL=30m）
 - depends on: none
 - behavior: 好友边双向两行（A→B、B→A 同事务）；`friend_request` 每对 (from,to) 一行，状态 1 pending / 2 accepted / 3 rejected，重复申请走 upsert；`friend_capacity` 显式计数行，写事务内 `SELECT ... FOR UPDATE` 按 player_id 升序锁双方计数行后才做任何锁定读——好友上限在高并发下也不超卖；`friend_block` 单向。列表读带 LIMIT 1000。
-- internal: 写路径隔离级别 READ COMMITTED；事务外先"ensure 容量行"（COUNT(*) 权威边数 + INSERT ODKU，缺行绝不猜 0），守卫缺行（被 sweep 回收竞态）整段重试至多 3 次；1213 死锁重试 3 次。私有 Redis 缓存 `friend:{f:<id>}:list:v3` / `:req:v3` + `<key>:generation`：写提交后 Lua `INCR generation + DEL`，回填 Lua 只在 generation 未变时 SET（防旧值覆盖），进程内按 key 互斥防击穿；缓存失效失败只打日志（最多陈旧一个 TTL）。Java 版：game 里建同语义四表（自己的表名 / DDL），缓存键经 RedisKeys；可用 Redisson / Spring Cache 但必须保留"代次防回填"语义。
+- internal: 写路径隔离级别 READ COMMITTED；事务外先"ensure 容量行"（COUNT(*) 权威边数 + INSERT ODKU，缺行绝不猜 0），守卫缺行（被 sweep 回收竞态）整段重试至多 3 次；1213 死锁重试 3 次。私有 Redis 缓存 `friend:{f:<id>}:list:v3` / `:req:v3` + `<key>:generation`：写提交后 Lua `INCR generation + DEL`，回填 Lua 只在 generation 未变时 SET（防旧值覆盖），进程内按 key 互斥防击穿；缓存失效失败只打日志（最多陈旧一个 TTL）。Java 版：在 `game` 库里建同语义四表（自己的表名 / DDL），缓存键经 RedisKeys；可用 Redisson / Spring Cache 但必须保留"代次防回填"语义。
 - java: missing — 无任何好友表或代码
 - size: L
 - robot: mmorpg friend-smoke 全流程间接覆盖
@@ -272,7 +272,7 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - tables: none（配置 Market{Scope=zone|global, DefaultPageSize=20, MaxPageSize=20, MaxPage=100}；子类上限写死在 constants.MaxSubcategory：角色 4、宠物 6、武器 5、防具 5、召唤令 2、其余 0）
 - depends on: social-backend-routing, player-profile-lookup（home zone）
 - behavior: 校验（任一失败 1005）：无会话；search trim 后 ≤64 字符且无控制字符；tab 只能 1 公示 / 2 寄售；section 只能 1 寄售 / 2 拍卖（0 也非法）；category 必填且 subcategory ≤ 该类上限；sort 0–4。section=拍卖 → 20003。zone 范围：分区 = 调用者 home zone（忽略 zone_filter；home zone 未知 20001、查询失败 1003）；global：zone_filter 0=全部。过滤：公示 tab = status LISTED 且 notice_end>now；寄售 tab = status LISTED/LOCKED 且 notice_end≤now<sale_end；search 为纯数字时 `listing_id = n OR title LIKE %s%`（LIKE 用 `!` 转义）；favorites_only 只看自己收藏。排序：0 listing_id DESC；1 价格升（id 升）；2 价格降（id 降）；3 等级降（id 降）；4 剩余时间升（公示 tab 按 notice_end、寄售按 sale_end）。分页：page_size 0→20、>20→20；page 0→1、超末页→末页、再封顶 100；page_count≥1。响应 `{listings, total_count, page, page_size, page_count, market_scope, server_now_ms}`；ListingSummary 带 phase（服务端用同一个 now 推导）、is_favorite、is_mine，**不带卖家 id**。
-- internal: 独占库表 trade_listing（三条联合索引：本区浏览 / 全服浏览 / 卖家货架）、trade_favorite；COUNT + LIMIT/OFFSET 分页；状态只存 LISTED，公示 / 寄售 / 结束由时间推导（不需要后台改状态）。Java：game 下同语义表 + MyBatis 动态 SQL（ORDER BY 只能来自固定映射）。
+- internal: 独占库表 trade_listing（三条联合索引：本区浏览 / 全服浏览 / 卖家货架）、trade_favorite；COUNT + LIMIT/OFFSET 分页；状态只存 LISTED，公示 / 寄售 / 结束由时间推导（不需要后台改状态）。Java：`game` 库下同语义表 + MyBatis 动态 SQL（ORDER BY 只能来自固定映射）。
 - java: missing
 - size: M
 - robot: mmorpg trade-smoke 第 3–6 步（zone / global 两种 scope 各跑一次）

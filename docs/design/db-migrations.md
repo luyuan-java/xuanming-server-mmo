@@ -6,6 +6,9 @@
 
 执行前先停掉 game-login / game-scene（它们会写 `player` 表），迁移完再起。
 
+> **改名说明**：M1–M11 写于 2026-10-12 改名（`8cbba6c`）之前，当时库名是 `xm_java`，文中各条已按新名 `game` 改写。
+> 改名前的存量库先在 `xm_java` 上补齐到 M11，再按 M12 搬到 `game`。
+
 ---
 
 ## M1（2026-09-29）玩家名唯一改为大小写不敏感：`name_key` + `uk_player_name_key`
@@ -333,3 +336,35 @@ SHOW CREATE TABLE match_rating_applied;     -- 主键 battle_id；有 KEY idx_ma
 
 **回滚**：回退代码即可（不再起 game-match），两张表可留着，别的进程不读不写它们。要清空评分重来时删表或删行即可，game-match 下次启动重建；
 入账标记是「同一局只入账一次」的唯一依据：清掉 `match_rating_applied` 之后不要再从更早的位点重放结果 topic（换消费组名、人工重置位点），否则 topic 里还留着的局会再入账一次。
+
+---
+
+## M12：库改名 `xm_java` → `game`，连带 Redis 键前缀、Kafka topic 与环境变量改名（2026-10-12，`8cbba6c`）
+
+**原因**：用户要求这套服务端可复用于别的游戏，名字里不再带本游戏的缩写 `xm`。全仓的 `xm` 前缀统一改为 `game`：库 `xm_java` → `game`、库用户 `xm_app` → `game_app`；
+Redis 键前缀 `xm:` → `game:`（`RedisKeys.PREFIX`）；Kafka topic `xm-*` → `game-*`（如 `game-transaction-log-g<N>`、`game-player-snapshot-g<N>`、`game-battle-result-g<代次>`）、消费组同改；
+环境变量 `XM_*` → `GAME_*`；配置键 `xm.*` → `game.*`。表结构**没有任何变化**。
+
+**行为变化**：无客户端可见变化。新旧进程**不能混跑**：Dubbo 鉴权附件键、排队令牌的派生域串、节点号租约的 Redis 键（`game:node-id-epoch:*`）都随前缀改了名，
+旧进程与新进程会按 fail-closed 互相拒绝；节点号 epoch 从零起算，只有在全部进程停掉之后切换才安全。
+
+**新库**：无需操作（`MYSQL_DATABASE: game`；game-login 首次启动建表）。
+
+**存量库（本机开发环境）**：推荐整体重建——`docker compose -f deploy/compose/infra.yaml down -v` 后重新 `up`，MySQL 与 Redis **一起**清（只清其中一边会造成
+infra.yaml 头部明令禁止的「节点号 epoch 回退」与 Redis / MySQL 权威数据不一致）。一定要保留数据时，必须两边同时迁、不许只迁一边：
+
+1. 停掉全部 Java 进程（用改名**之前**版本的 `tools/local/stop-slice.sh`，它认 `run/pids/xm-*.pid`；或 `for p in run/pids/xm-*.pid; do kill "$(cat "$p")"; done`），删掉 `run/xm-*` 与 `run/pids/xm-*.pid`；
+2. MySQL：`CREATE DATABASE game CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;`，按 `information_schema.tables` 生成并执行 `RENAME TABLE xm_java.<t> TO game.<t>;`（同实例可跨库改名），
+   `game_app` 按 ops-release-spec §7.5 授权；旧库 `xm_java` 留着或删掉都可以；
+3. Redis：把全部 `xm:*` 键按新前缀改名（`RENAME xm:<rest> game:<rest>`，带 hash tag 的 `xm:{match}:…` / `xm:{team}:…` 同样只换前缀，tag 不变）；
+4. Kafka：旧 topic 里没消费完的流水与快照不迁移（开发环境可以接受）；新 topic 由 game-data / game-battle 启动时经 `TopicAdmin`（`KafkaTopicAdmin`）按新名创建（compose 关了自动建 topic）；
+5. 本机 `export` 的 `XM_*` 全部换成 `GAME_*` 后再起切片。
+
+**核对**：
+
+```sql
+SHOW DATABASES LIKE 'game';                  -- 存在
+SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'game';   -- 与迁移前 xm_java 的表数相同
+```
+
+**回滚**：回退代码，并按上面的步骤反向改回 `xm_java` / `xm:` / `XM_*`（同样两边一起）。

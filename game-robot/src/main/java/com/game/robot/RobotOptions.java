@@ -585,7 +585,7 @@ public record RobotOptions(
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
-            out.append(String.format(Locale.ROOT, "  --%-24s %-32s %s%s%n", opt.arg + " <值>", opt.env, opt.help,
+            out.append(String.format(Locale.ROOT, "  --%-24s %-36s %s%s%n", opt.arg + " <值>", opt.env, opt.help,
                     opt.defaultValue == null ? "" : "，缺省 " + opt.defaultValue));
         }
         // 标记本身是纯 ASCII（编排脚本按子串匹配，不受标准输出编码影响）；改了故障变体的判定就递增，见 BattleCrashChecks.STATE_VERSION

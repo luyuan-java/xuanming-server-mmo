@@ -1850,6 +1850,8 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 
 ## 实现记录（robot 与 dev gather，2026-10-05）
 
+> **改名说明（2026-10-12，`8cbba6c`）**：本节写于 `xm` 前缀统一改为 `game` 之前。命令、模块名、环境变量、配置键、日志 / PID 文件名、指标名、测试类名已按新名改写；当时实际的输出、日志与 CI run 里是 `xm-*` / `XM_*` / `xm.*` / `xm_*` / `-Dxm.it.*`（库 `xm_java`），对照旧日志时按此换算。
+
 范围：§7.18 dev gather、§13.8 robot `battle-settle`，以及这两项依赖、契约那一步没有落地的最小共享件。scene 侧（`SceneBattleProvider`、冻结 / 闸 / 应用）与 battle 侧发件箱不在这一部分。
 
 **共享件**（形状按 §7.3 与 match-spec 的 `NodeRpcClients<S>` 条目；后到的批次只引用、不重建）
@@ -1908,11 +1910,13 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
   这说明 dev gather 已经在真进程里装配起来，链路走通了：经位置记录与目录定位 → `NodeRpcClients` 带调用方 MAC 连到 scene 的 21100 → 按结局不明补发取消 → 422 的 protobuf 体被 robot 解出。
   第 3–10 步要等 scene 侧落地后再跑。
 - 6.2 的 `battle` 场景 60 / 60 通过，`RoomOrigin` / 出站判定的改动没有回归。
-- game-battle.log 里有 8 行 ERROR，都是 Dubbo 调用方的 `RpcExceptionFilter` 在记上面那个 UNIMPLEMENTED，scene 导出 `SceneBattleService` 之后就会消失。
+- game-battle.log（当时名 xm-battle.log）里有 8 行 ERROR，都是 Dubbo 调用方的 `RpcExceptionFilter` 在记上面那个 UNIMPLEMENTED，scene 导出 `SceneBattleService` 之后就会消失。
 
 ---
 
 ## 实现记录（scene 侧、发件箱与评审修复，2026-10-05 / 06）
+
+> **改名说明（2026-10-12，`8cbba6c`）**：本节写于 `xm` 前缀统一改为 `game` 之前。命令、模块名、环境变量、配置键、日志 / PID 文件名、指标名、测试类名已按新名改写；当时实际的输出、日志与 CI run 里是 `xm-*` / `XM_*` / `xm.*` / `xm_*` / `-Dxm.it.*`（库 `xm_java`），对照旧日志时按此换算。
 
 范围：scene 侧（冻结 / 在途闸 / 结算应用 / 账本与销账 / 提供方）、game-discovery 的键与脚本、battle 侧两个发件箱与确认传输、gate 的 D12、game-team 的 `in_battle`，
 以及 robot `battle-settle` 的补全与故障变体。过程：主代码在提交 `7dff75c` 入库 → 分六个区做审计并逐条复核（另有第七个区是 7.2b，见 data-ops-spec）→ 第一轮修复与补测试 →

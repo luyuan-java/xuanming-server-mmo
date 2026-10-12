@@ -21,9 +21,9 @@
 > - proto：`rdt.proto` = mmorpg `proto/common/database/rollback_database_table.proto`；`txlog.proto(mm)` / `snap.proto(mm)` = `proto/common/rollback/{transaction_log,player_snapshot}.proto`；
 >   `data_service.proto` = `proto/data_service/data_service.proto`；`player_rollback.proto` = `proto/scene/player_rollback.proto`（Java 同步副本
 >   `game-proto/src/main/proto/proto/scene/player_rollback.proto` 多第 2–4 行 java option，**Java 行号 = mmorpg 行号 + 3**）；`currency_comp.proto` = `proto/common/component/`。
-> - Java 侧：`txlog.proto(game)` / `snap.proto(game)` = `game-audit/src/main/proto/game/audit/{transaction_log,player_snapshot}.proto`；`player_state.proto` =
+> - Java 侧：`txlog.proto(java)` / `snap.proto(java)` = `game-audit/src/main/proto/game/audit/{transaction_log,player_snapshot}.proto`；`player_state.proto` =
 >   `game-player-store/src/main/proto/game/storage/player_state.proto`；`game-data-schema.sql` = `game-data/src/main/resources/db/`；`game-player-schema.sql` =
->   `game-player-store/src/main/resources/db/`；`guild_internal.proto(game)` = `game-api/src/main/proto/game/api/`。以 `game-`、`docs/`、`tools/` 开头的路径与 `PARITY.md` 都在
+>   `game-player-store/src/main/resources/db/`；`guild_internal.proto(java)` = `game-api/src/main/proto/game/api/`。以 `game-`、`docs/`、`tools/` 开头的路径与 `PARITY.md` 都在
 >   `D:\work\xuanming-server-mmo` 下。`message_id.txt` 两版逐字节相同，**号 N 在第 N+1 行**。
 > - 设计稿 `single_player_rollback.md`、`zone_data_rollback.md`（mmorpg `docs/design/`）只作背景，与代码冲突时以代码为准。
 >
@@ -188,9 +188,9 @@ topic 保留 30 天；库内**没有**清理。设计稿曾打算「保留 N 天
 
 | 项 | Java（已有） | 与基线的差异 |
 |---|---|---|
-| 流水格式 | `game.audit.TransactionLogRecord`（`txlog.proto(game):50-75`），时间**毫秒**；与基线同义的原因沿用数值，Java 独有的从 1001 起（`:14-41`）；多一个 `kind`（`:44-48`，币种 0 是金币，单看币种分不出货币 / 物品） | 不共享基线的 proto 与 topic |
+| 流水格式 | `game.audit.TransactionLogRecord`（`txlog.proto(java):50-75`），时间**毫秒**；与基线同义的原因沿用数值，Java 独有的从 1001 起（`:14-41`）；多一个 `kind`（`:44-48`，币种 0 是金币，单看币种分不出货币 / 物品） | 不共享基线的 proto 与 topic |
 | 流水 extra | 至多 1024 字符（`game-data-schema.sql:20`；超出由 `KafkaAssetAudit` 换成截断标记） | 基线不限长 |
-| 快照格式 | `PlayerSnapshotRecord`（`snap.proto(game):23-41`）= player 行可变列（等级、场景、坐标）+ `owner_epoch` + `player_state` 原样字节；`cause` 只有 LOGIN=1、LOGOUT=2，数值同基线 trigger（`:15-21`） | 一种格式；没有 operator / note |
+| 快照格式 | `PlayerSnapshotRecord`（`snap.proto(java):23-41`）= player 行可变列（等级、场景、坐标）+ `owner_epoch` + `player_state` 原样字节；`cause` 只有 LOGIN=1、LOGOUT=2，数值同基线 trigger（`:15-21`） | 一种格式；没有 operator / note |
 | topic | `game-transaction-log-g<N>` 6 分区、`game-player-snapshot-g<N>` 3 分区，保留 30 天且 `retention.bytes=-1`；两端都核对分区数，消费方还把配置校正到规格（`architecture.md:195-197`） | 基线生产方不核对、保留期只在创建时设 |
 | 号 | 雪花，worker 取全服租约 `SCENE_GUID`（`architecture.md:726-729`；`SceneNode.acquireSceneGuids`） | 基线号段 |
 | 生产失败 | 每条完整写兜底日志 `game.audit.fallback`（`AuditFallbackLog.java:28-38`）；未核对 / 发不出号 / 队列满的行 `tx_id=0`（`AuditPipeline.java:174-191`） | 基线只记 ERROR |
@@ -205,7 +205,7 @@ topic 保留 30 天；库内**没有**清理。设计稿曾打算「保留 N 天
 | 玩家数据 | `player` 行 + `player_state`（八段：facing / currency / attribute / bag / mission / vitals / pets / asset_ledger，`player_state.proto:16-35`），同事务、同 epoch 围栏写入 | — |
 | 归属协议 | 夺权只在「已释放或租约过期」时成功（5.2 工作区 `PlayerMapper.java:53-58`、`PlayerStore.claimOwnership:232`）；在线写 `saveStateHeld:268`；最终写回 `saveStateAndRelease:252`；释放 `releaseOwnership:300`；批量续约 `renewOwnerLeases:311`；加锁读 `selectOwnerForUpdate`（`PlayerMapper.java:106-111`）；顶号让出走 `game:owner-takeover`（`architecture.md:649-667`） | — |
 | 欠款 | `CurrencyState.debts`（`player_state.proto:131-149`）与 scene `Wallet.Debt` 加币抵扣已实现，**没有写入口**（`PARITY.md:84`；`player_state.proto:131-133` 注明「GM 挂欠款随路线图 7.2」） | 两版都休眠 |
-| 帮会闸数据面 | `GuildInternalService.listAppliedAssetOpsSince`（Dubbo group `guild`）；结果码在应答里，0 不是成功；`RETENTION_REJECTED` 带 `cutoff_ms`（`GuildInternalService.java:12-26`；`guild_internal.proto(game):45-69`） | — |
+| 帮会闸数据面 | `GuildInternalService.listAppliedAssetOpsSince`（Dubbo group `guild`）；结果码在应答里，0 不是成功；`RETENTION_REJECTED` 带 `cutoff_ms`（`GuildInternalService.java:12-26`；`guild_internal.proto(java):45-69`） | — |
 | 已落盘账本只读视图 | `PersistedAssetLedger`：加载即校验，坏账本不当空账本（`game-player-store/.../asset/PersistedAssetLedger.java:16-21`） | — |
 | game-data 依赖 | game-audit、game-discovery、game-api、game-gateway-store、MyBatis、Druid（`game-data/pom.xml`）。**没有** game-player-store、game-pbmysql、Dubbo | — |
 
@@ -274,7 +274,7 @@ ALTER TABLE player_snapshot
 
 来源靠 `operator` 是否为空即可区分，不加基线那样的 `source` 列（不需要按来源分读路径）。
 
-**`SnapshotCause` 追加的值**（`snap.proto(game)`，只增不改）：
+**`SnapshotCause` 追加的值**（`snap.proto(java)`，只增不改）：
 
 | 值 | 数值 | 来源 | 说明 |
 |---|---|---|---|
@@ -489,7 +489,7 @@ ALTER TABLE player_snapshot
 | 接缝 | `GuildDivergenceChecker`，nil = 一律拒（`servicecontext.go:94-99`） | Dubbo `GuildInternalService`（group `guild`）。**编程式引用**（`DubboGuildInternalClient`，game-api 的 `IsolatedDubboModule`，同 game-scene / game-guild 的资产通道客户端；`retries = 0`、`check = false`），不引入 dubbo-spring-boot-starter：只读与 dry-run 的进程不起 Dubbo，引用在第一次检查时才建（在作业线程上）。**只支持直连** `game.dubbo.guild-url`，为空 = 没装配 = 一律 `check_failed`；nacos 注册中心发现未接（部署批次再定）。调用方 MAC `GAME_DUBBO_SECRET` 由 game-api 的 SPI 过滤器加上；`ops.enabled=true` 而缺 `GAME_DUBBO_SECRET` 拒绝启动 |
 | since | 快照秒×1000 − 余量，钳到 ≥ 1 | 快照 `time_ms`（§3.2 的内容时刻）− 余量，钳到 ≥ 1，不再取整到秒（D9）。每人各自的起点；一块（≤ 100 人）用块内最早的起点问，再按每人自己的起点过滤（`updated_ms > since_p`） |
 | 余量 / 预算 | 300 s，[5 s, 1 h]；检查 120 s、上限 1 h | 相同，做成配置项；另有单次 Dubbo 调用上限 `call-timeout`（缺省 10 s，再受剩余预算约束） |
-| 分块 / 分页 / 上限 / 样本 | 100 人 / 500 行 / 10000 行 / 20 条 | 相同（`guild_internal.proto(game):32-43`） |
+| 分块 / 分页 / 上限 / 样本 | 100 人 / 500 行 / 10000 行 / 20 条 | 相同（`guild_internal.proto(java):32-43`） |
 | 结果处理 | gRPC status + 解析 message 前缀拿 cutoff | 只认 `OK`；其它结果码、future 异常完成、超预算都算 `check_failed`，放行无效；`RETENTION_REJECTED` 用 `cutoff_ms` 钳位重查一次，钳不到的玩家记不可证明（`GuildInternalService.java:12-14`）；游标不前进或返回块外玩家算 `check_failed`（`guild-economy-spec.md:770`） |
 | 沉降 / 复查 | 30 s 常量 / 10 s | 配置项，缺省 30 s / 10 s（Q6）；复查用同一组 since，持有归属期间做。复查问不到帮会时不改变作业状态（按写入结果定 SUCCEEDED / PARTIAL），结果码记 `post_write_unverified` 并打 ERROR、转人工核对（§7.7） |
 **4.6.2 账本差集**（Java 独有，D8；`com.game.data.snapshot.LedgerDiff`——**在 game-data**，7.2a 起就在这里，没有挪进 game-player-store 的 `asset` 包；
@@ -784,7 +784,7 @@ COMMIT;
 ### 6.4 物品追溯 104（7.2a）与精确回收 110（7.2c）
 
 - **追溯** `GET /admin/items/{uuid}/trace`：按 `(item_uuid, time_ms)` 升序列出所有跳（`idx_txlog_uuid`），语义同基线 `QueryByItemUUID`（`transaction_log_store.go:217-246`）。
-  末跳给提示 `hint`：`HELD_BY`（末跳是获得）/ `DESTROYED` / `MERGED`（整理时合并掉的空实例记 TX_ITEM_DESTROY、数量 0，`txlog.proto(game):23`）。
+  末跳给提示 `hint`：`HELD_BY`（末跳是获得）/ `DESTROYED` / `MERGED`（整理时合并掉的空实例记 TX_ITEM_DESTROY、数量 0，`txlog.proto(java):23`）。
   **只是提示**：Java 没有全局物品索引，不做全表扫找当前持有者（D17）；入包流水只记第一个实例 uuid（`AssetAudit.java:84`），追溯是尽力而为。
 - **精确回收** `POST /admin/items/{uuid}/clawback {player, reason, ifOnline}`：必须显式给出持有者 `player`，不依据追溯结果推断；离线编辑，在四个背包里找到该实例整个移除，
   记 TX_CLAWBACK(17)（扣减方）；找不到回 404 `item_not_held`（可能已被合并，提示改用按配置回收）。`refundBuyer` 不支持（Java 还没有交易写侧，4.8）。
@@ -1136,7 +1136,7 @@ mmorpg 待做候选：**M1**（H1–H3、H15）回档改以 scene 权威数据�
 5. **时间选源包含安全快照**：回到「被覆盖之前」的错误状态（§3.3）。
 6. **`useAffectedRows=true` 下的同毫秒无变化写**：被误判为失去围栏（§7.5）。
 7. **为同事务另开数据源 / 用 pbmysql 自取连接**：安全快照与改写不再原子（§7.5）。
-8. **帮会检查把非 OK 当「没有分歧」**：回档复制资产；`GuildInternalService` 的 0 不是成功（`guild_internal.proto(game):45-47`）。
+8. **帮会检查把非 OK 当「没有分歧」**：回档复制资产；`GuildInternalService` 的 0 不是成功（`guild_internal.proto(java):45-47`）。
 9. **栅栏释放早于写后复查**：玩家登录后新发生的操作会被误报（基线 `rollback_logic.go:392-393` 同理）。
 10. **回收写出 `stack_size=0`**：scene 加载时丢弃并 WARN，与流水对不上（§5.5）。
 11. **dry-run 结果当执行依据**：计划与执行之间余额会变；执行以作业内的实时读为准，应答以执行结果为准。
@@ -1392,6 +1392,8 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
 ---
 
 ## 13 实现记录
+
+> **改名说明（2026-10-12，`8cbba6c`）**：本节写于 `xm` 前缀统一改为 `game` 之前。命令、模块名、环境变量、配置键、日志 / PID 文件名、指标名、测试类名已按新名改写；当时实际的输出、日志与 CI run 里是 `xm-*` / `XM_*` / `xm.*` / `xm_*` / `-Dxm.it.*`（库 `xm_java`），对照旧日志时按此换算。
 
 ### 13.1 批次 7.2b（2026-10-05）：作业框架、离线栅栏、回档、整区维护前快照、`idx_player_zone`
 
@@ -1651,7 +1653,7 @@ lead 2026-10-05 裁决：**一律以实现为准，回写正文**（规格是 7.
 回收逆转检查里 TX_BATCH_RECALL(19) 这一原因、获得方方向的行不算逆转、超过 100 条时的截断没有专门用例（17 / 19 的写入方随 7.2c）。
 
 **模块级证据**（同上的命令前缀，2026-10-06）：补齐之后缺省 H2 的整模块 `Tests run: 304, Failures: 0, Errors: 0, Skipped: 24`（`d72b-8.log`），
-加 `-Dgame.it.mysql` / `-Dgame.it.redis` / `-Dgame.it.kafka` 的整模块 `Tests run: 304, Failures: 0, Errors: 0, Skipped: 0`（`d72b-9.log`）。之后 `GameDataMysqlIntegrationTest`
+加 `-Dgame.it.mysql` / `-Dgame.it.redis` / `-Dgame.it.kafka` 的整模块 `Tests run: 304, Failures: 0, Errors: 0, Skipped: 0`（`d72b-9.log`）。之后 `GameDataMysqlIntegrationTest`（当时名 `XmDataMysqlIntegrationTest`）
 又加了上面那条无符号区号的用例，整模块的条数以最终验证为准。
 
 #### 最终验证（2026-10-06）

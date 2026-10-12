@@ -1699,7 +1699,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 - **「未接入的域推 23」的行号**（inventory :20、:23）：现在是 `ClientDispatcher.java:313-319`。
 - **「名字规范化可复用 game-player-store」**（inventory :92）：不能原样复用（§2.4）。
 - **MessageLimiter**（inventory :16）：8、220、239–243 不在表里，按缺省每秒 3 条。
-- **存储**（inventory :29「MySQL（Java：game 库 + MyBatis + Druid）」）：按用户要求改为 game-pbmysql 建表 + 原始 JDBC（`roadmap.md:50-53`）。
+- **存储**（inventory :29「MySQL（Java：`game` 库 + MyBatis + Druid）」）：按用户要求改为 game-pbmysql 建表 + 原始 JDBC（`roadmap.md:50-53`）。
 - **`Cache.MaxMembers: 500` 没有读者**（`config.go:358-361`）。
 
 ---

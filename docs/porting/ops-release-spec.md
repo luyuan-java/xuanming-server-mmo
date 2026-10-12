@@ -479,7 +479,7 @@ external 形态下客户端连的是每序号 Service（`lib:864-913`），Pod N
 | 看板 | 数据源 | 面板 |
 |---|---|---|
 | `deploy/k8s/scene-manager-dashboard.json`（uid `scene-manager-overview`，30 s） | `${DS_PROMETHEUS}`；变量 `zone_id` = `label_values(scene_manager_nodes_by_role, zone_id)`（`:44-57`） | 12 个：按角色的节点数（`:92`）、每节点人数 / 场景数 top10（`:108`、`:124`）、镜像共置命中率 stat（红 <0.5、绿 ≥0.8，`:139-166`）、镜像放置结局（`:181`）、销毁原因（`:197`）、EnterScene 拒绝（`:220`）、孤儿对账（`:236`）、源场景缺失（`:259`）、镜像去重（`:275`）、迁移原因 × 结局（`:297`）、迁移积压（`:312`） |
-| `deploy/observability/grafana/dashboards/game-logs-overview.json`（uid `game-game-logs`，10 s） | Loki（uid 写死） | 变量 job / service / zone / level / search；7 个：日志量（`:189`）、警告与错误趋势（`:242`）、错误条数（`:323`）、警告条数（`:385`）、有日志的服务数（`:447`）、错误最多的 topk(8)（`:497`）、日志流（`:551`） |
+| `deploy/observability/grafana/dashboards/game-logs-overview.json`（uid `xm-game-logs`，10 s） | Loki（uid 写死） | 变量 job / service / zone / level / search；7 个：日志量（`:189`）、警告与错误趋势（`:242`）、错误条数（`:323`）、警告条数（`:385`）、有日志的服务数（`:447`）、错误最多的 topk(8)（`:497`）、日志流（`:551`） |
 | `docs/ops/grafana-login-path-deprecation.json` | Prometheus（按名字） | `login_auth_path_total` 按 path（`:27`）、legacy 占比（`:50`）、按 auth_type（`:81`）；内嵌一条告警 |
 | `docs/ops/grafana-rollback-audit.json` | 同上 | `data_service_rollback_total` 按 scope / outcome、players_affected、orphans_cleaned、跨场景切换 p95 与结局（`:36-163`）；注释里 3 条告警（`:18-21`） |
 
@@ -673,7 +673,7 @@ Java 指标名有意与基线不同（PARITY「低基数运行指标」行），
 | `game-scene` | — | tick 超预算占比（50 ms 参考线）；逻辑队列与等待；存储写结局、存储池占用（A32）、周期存盘；审计结局；交出（5.2）；链路帧、丢弃与背压；频道（active / draining）与改派；封禁名单同步滞后 |
 | `game-scene-manager` | `scene-manager-dashboard.json` 的 Pool health / Rebalance 两行 | 频道按 scene_config / state；世界 tick 按 result；leader zones；rebalance；autoscale；assign 结局与 p99 |
 | `game-services` | — | 好友 / 聊天 / 组队 / 帮会 / 交易的请求结局与 p99、推送结局；帮会资产指令积压；审计消费 up / lag / 结局 / 入库错误与耗时；保留期删除；killswitch |
-| `game-logs`（Loki） | `game-logs-overview.json` 的 7 个面板 | 变量改为 service / zone / level / search；另加审计流面板 `{stream_class="audit"}` |
+| `game-logs`（Loki） | 基线 `game-logs-overview.json`（uid `xm-game-logs`）的 7 个面板 | 变量改为 service / zone / level / search；另加审计流面板 `{stream_class="audit"}` |
 | `game-battle-match` | — | 6.2–6.4 落地后加 |
 
 ### 4.8 规则工程纪律（对应基线 §4.4 的教训）

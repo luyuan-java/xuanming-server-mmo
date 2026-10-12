@@ -33,7 +33,7 @@ class FallbackReplayTest {
     static String line(String result, String txId, long timeMs, int reason, int kind, String from, String to,
                        int currencyType, long delta, String before, String after, String uuid, String config, String qty,
                        String correlation, String zone, String extra) {
-        return "2026-10-05T03:00:00.000+08:00  WARN 1234 --- [game-scene] [scene-audit] game.audit.fallback                       : "
+        return "2026-10-05T03:00:00.000+08:00  WARN 1234 --- [game-scene] [scene-audit] game.audit.fallback                     : "
                 + "transaction result=" + result + " tx_id=" + txId + " time_ms=" + timeMs + " reason=" + reason + " kind="
                 + kind + " from=" + from + " to=" + to + " currency_type=" + currencyType + " delta=" + delta + " before="
                 + before + " after=" + after + " item_uuid=" + uuid + " item_config_id=" + config + " item_quantity=" + qty

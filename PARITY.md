@@ -6,6 +6,7 @@
 - 「版本基线」表：Java 版本号 ↔ 已对齐到的 mmorpg commit。
 - 「功能对齐」表：逐功能记录两边状态。任一边完成一个功能都在这里登记一行（或更新已有行）。
 - 只追加、只更新状态，不删旧行。
+- 2026-10-12（`8cbba6c`）起，Java 版的模块、配置键、环境变量、Redis 键前缀、库名、内部 proto 包、指标与 Kafka topic 的 `xm` 前缀统一改为 `game`（库 `xm_java` → `game`，迁移见 `docs/design/db-migrations.md` M12）。此前各行里的证据已按新名改写，当时的实际输出、日志与 CI run 里是 `xm` 名字。这是 Java 内部的改名，与 mmorpg 无关，不单列功能行。
 
 ## 版本基线
 

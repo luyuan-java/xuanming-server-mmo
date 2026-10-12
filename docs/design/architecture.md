@@ -128,7 +128,7 @@ Java 代码不得依赖这套目录，具体做法：
 
 - gate 主动连每个 scene 节点，一条 TCP 长连接双向复用：gate 发玩家进出与客户端消息，scene 推下行消息。
 - 编解码用 Netty 自带的 `ProtobufVarint32FrameDecoder` / `ProtobufVarint32LengthFieldPrepender`，
-  帧内是 `game.internal.NodeLinkFrame`（oneof 信封）。下行携带的是已序列化的 `MessageContent` 字节，gate 原样用客户端帧下发。
+  帧内是 `game.api.NodeLinkFrame`（oneof 信封）。下行携带的是已序列化的 `MessageContent` 字节，gate 原样用客户端帧下发。
 - 链路上第一帧是握手 `LinkHello`（带节点身份、zone 与 gate 节点号租约的防护代次 `lease_epoch`），不匹配即断开。
 - **握手鉴权**：gate 与 scene 共享密钥（环境变量 `GAME_NODE_LINK_SECRET`，两个进程都必填，缺失即拒绝启动）。
   `LinkHello` 带 `auth_timestamp`（Unix 秒，每次建链现取）与

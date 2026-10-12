@@ -459,7 +459,7 @@ INSERT INTO friend_capacity (player_id, friend_count, created_ms) VALUES (?, ?, 
 ### 1.7 Java 存储层落地
 
 **表与建表**
-- 表放 game，表名、列、主键、二级索引、"无唯一键"都与 §1.1 一致。
+- 表放 `game` 库，表名、列、主键、二级索引、"无唯一键"都与 §1.1 一致。
 - 走 pbmysql（`docs/porting/roadmap.md:50-53`）。在建的 `game-pbmysql` 模块的选项号与 `proto/db/proto_option.proto` 一致（`OptionTableName = 500001` 等，见 `game-pbmysql/src/main/java/com/game/pbmysql/DescriptorOptions.java:31-55`），可以直接读同步来的 `friend_table.proto`。
 - 但这些 proto 属于契约同步产物，不许手改；是否让 Java 存储结构直接依赖它是待决项（§10.3）。
 

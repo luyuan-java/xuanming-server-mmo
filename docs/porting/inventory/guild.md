@@ -26,7 +26,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - mmorpg: proto/guild/guild_db.proto、go/guild/internal/data/tables.go、go/guild/internal/data/guild_manage_repo.go（inTx / retryOnDeadlock / 锁序 / 全局插入守卫）、go/guild/internal/data/server_version.go、go/schemamigrate
 - client messages: none（间接：kGuildBusyRetry 14021、kGuildIdGenUnavailable 14008）
 - tables: none
-- depends on: MySQL（Java：game 库 + MyBatis + Druid）
+- depends on: MySQL（Java：`game` 库 + MyBatis + Druid）
 - behavior: 写冲突（死锁重试 3 次耗尽、锁等待超过 1s、子预算到期、COMMIT 结果不明）一律回 tip 14021，让玩家原地重试。帮名全服唯一（按 name_norm），一人至多一个帮（uk player_id）。
 - internal: 8 张表（列见 guild_db.proto），全部 READ COMMITTED。锁序固定：guild → guild_player_state → guild_member → guild_application → guild_player_op_seq → guild_asset_op → guild_daily_counter → guild_activity_progress。同表多行按主键升序逐行点锁。锁定读只做完整主键等值（guild_member 用 FORCE INDEX(PRIMARY)）。凡是插入或删除 guild_member 的事务，先锁该玩家的 guild_player_state 行（缺行就在事务外 INSERT IGNORE）。player_id=0 的哨兵行是全局插入守卫：建帮与审批通过都要先锁它。单次尝试的子预算 1.5s（解散 2.5s）；DSN 钉死 innodb_lock_wait_timeout=1；推送与缓存失效只在提交之后做；启动时检查数据库版本（MySQL 8.0.29+ 或 TiDB），缺表 / 缺索引就拒绝启动。
 - java: missing — 没有任何帮会表或 DDL；game-player-store 有 MyBatis 与 Druid 的现成做法可以照搬。

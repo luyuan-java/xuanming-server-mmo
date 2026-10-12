@@ -142,7 +142,7 @@ class GateLinksTest {
 
     /** 票据金样（与 game-common 的 {@code GateTokenIssuerTest} 同一组：7 号 gate、zone 2、持票者 0x0102030405060708、目标 zone 3、过期 1_800_000_300）。 */
     private static final String TICKET_PAYLOAD_HEX = "0807100218aca6a7da0628888e98a8c0e08081013003";
-    private static final String TICKET_SIGNATURE = "d79e88f6e0720ed0012ef75ab6b3ed9714561cbe2746e3f8510acbc4493c4902";
+    private static final String TICKET_SIGNATURE = "6ce1f90cb01af6de6622028645b78ac36812434459bc6ce1cb1c1137364f8aae";
     private static final long HOLDER = 0x0102030405060708L;
 
     /**
@@ -171,8 +171,8 @@ class GateLinksTest {
             "080b10888e98a8c0e0808101180420053a71080310071a0831302e302e302e372082562a16"
                     + "0807100218aca6a7da0628888e98a8c0e08081013003"
                     + "3240"
-                    + "6437396538386636653037323065643030313265663735616236623365643937"
-                    + "3134353631636265323734366533663835313061636263343439336334393032"
+                    + "3663653166393063623031616636646536363232303238363435623738616333"
+                    + "3638313234333434353962633663653163623163313133373336346638616165"
                     + "38aca6a7da06";
 
     private static ZoneRedirect goldenRedirect() {
