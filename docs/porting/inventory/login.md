@@ -9,7 +9,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: none
 - behavior: auth_type 为 "" 或 "password" 时生效。通过条件：账号非空、首尾无空白（Go strings.TrimSpace 口径）、以白名单前缀 robot_ 或 dev_ 开头、口令等于环境变量 LOGIN_DEV_PASSWORD_SHARED_SECRET（常数时间比较）。只允许在 go-zero Mode=dev/test 下注册，与生产 PasswordAuth 互斥，两者都开则 panic；配了 DevSkipAuth 也 panic。两种口令认证都没开时口令路径 fail-closed。任何认证失败一律回 LoginResponse.error_message=2000 kLoginAccountNotFound，不区分原因。
 - internal: 进程级 provider 注册表；共享密钥只从环境变量读。
-- java: done — xm-login/src/main/java/com/game/login/auth/DevPasswordRule.java、LoginAuthenticator.java（另加 64 码点上限，因 account 列是 VARCHAR(64)）
+- java: done — game-login/src/main/java/com/game/login/auth/DevPasswordRule.java、LoginAuthenticator.java（另加 64 码点上限，因 account 列是 VARCHAR(64)）
 - size: S
 - robot: robot_smoke；login-test: NormalLogin / WrongPassword；Java SmokeScenario
 - hazards: 
@@ -21,7 +21,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: login-dev-password-auth; login-session-state; login-device-limit; login-access-refresh-token; home-zone-mapping
 - behavior: 步骤：认证 → Redis 锁 account_lock:login:{account}（TTL 20s，只试一次不等待，失败回 2005）→ 若 LegacyGateLoginEnabled=false 回 2015 → 会话 id 为 0 回 2018 → 写 login_session:{sid}=account（失败 2023）→ 设备数检查（2024）→ GetOrInitUserAccount（Lua 一次完成 GET / PERSIST / 不存在则写空账号）→ 签 token（auth_type=access_token 时不签；签发失败不致命，字段留空）→ 回角色列表。角色列表按建角顺序，每项是 AccountSimplePlayer{player_id, class_id, gender, zone_id, name, appearance_id}；zone_id 按 player:zone 映射刷新，缺名/缺外观的从注册表或 PlayerAllData 回源补齐，补齐结果不回写账号。新账号回空列表不报错。成功时应答体里不能出现 error_message。同一连接可以再次 Login，新账号覆盖旧账号。
 - internal: 账号角色目录只存在 Redis account:{account}（protobuf UserAccounts），没有 MySQL 副本。分布式锁是 UUID 值 + Lua 安全释放。旧路径调用量有指标 login_auth_path_total{path,auth_type}。Java 必须做到：跨实例防同账号并发 Login（回 2005）；或者明确确认不需要。
-- java: partial — xm-login/src/main/java/com/game/login/handler/LoginHandler.java（InFlightKeys 只防本进程并发；store.ensureAccount + listPlayers 从 MySQL 读；回 BindAccount 会话指令；不签 token）
+- java: partial — game-login/src/main/java/com/game/login/handler/LoginHandler.java（InFlightKeys 只防本进程并发；store.ensureAccount + listPlayers 从 MySQL 读；回 BindAccount 会话指令；不签 token）
 - size: M
 - robot: robot_smoke；login-test: DuplicateLoginRequest / RapidLoginSpam / BatchConcurrentLogin / ConcurrentSameAccount；Java SmokeScenario
 - hazards: Go 的角色目录只在 Redis 且无 TTL（PERSIST），Redis 数据丢失等于丢角色列表，只有 player_to_account 反向索引能自愈单个角色。Java 落在 MySQL，比基线更安全，不要照抄。Java 的同账号在途闸门只在单进程内有效。
@@ -93,7 +93,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: login-access-refresh-token; login-core
 - behavior: gateway 不带 SessionDetails 直接调 login.Login：校验凭据、取或建账号、签 token、回角色列表。这条路径不检查设备数，也不写 login_session。HTTP 请求为 snake_case {zone_id, account, password?, auth_type?, auth_token?, device_id?}；应答为 {code, message, retry_after_ms, queue_pos, access_token, refresh_token, access_token_expire, refresh_token_expire}。code：0 成功，100 排队，101 排队超时，401 认证被拒（login 的任何业务错误都映射成 401），429 限流。迁移开关 LegacyGateLoginEnabled=false 时，旧 TCP Login 回 2015。
 - internal: 有弃用期指标与告警节流。
-- java: missing — xm-gateway 只有 /api/assign-gate 与区服列表，没有 /api/login
+- java: missing — game-gateway 只有 /api/assign-gate 与区服列表，没有 /api/login
 - size: M
 - robot: robot.e2e-http.yaml（use_http_login: true）
 - hazards: 
@@ -105,7 +105,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: login-session-state; role-name-rules; player-id-generation; home-zone-mapping
 - behavior: 会话 id 为 0 回 2018，无 login_session 回 2028，账号建角锁 account_lock:create:{account} 抢不到回 2005，账号 blob 读不到回 2000、解析失败回 2022、Redis 错回 2021。角色数达到 MaxPlayersPerAccount（5）回 2001。class_id=0 取 Class 表第一行；class 不存在、gender>2、appearance_id 不在白名单（"" 加 15 个固定 id）都回 2015。gender=0 视为 1。RoleNameRule 读不出回 2020。名字预检排在发号之前：敏感词 2034，不合规 2032（parameters=[min,max]），空名由服务端生成。发号失败回 2020。玩家给的名字被占回 2033；但如果占用者就是本账号里 class/gender/appearance 都相同的角色，判定为「上次建角成功只是应答丢了」，直接回当前全量列表。生成名重试用尽回 2020。成功回账号全部角色，新角色在末尾，不带 error_message。
 - internal: Go 的顺序固定为：发号 → data_service 名字登记（预算 3s；结果未知时同名重试一次，仍未知则立即释放并延迟再释放一次）→ 登记 player:zone（fail-closed）→ 以建角锁令牌为围栏写账号 blob（锁丢失时回读确认，否则回 2005 或 2023）→ 写 player_to_account:{id} 反向索引（失败不致命）。
-- java: done — xm-login/src/main/java/com/game/login/handler/CreatePlayerHandler.java；xm-player-store PlayerStore.createPlayerWithinCap（事务内 SELECT ... FOR UPDATE 锁账号行后计数，再逐个候选名插入，名字唯一索引 uk_player_name_key）
+- java: done — game-login/src/main/java/com/game/login/handler/CreatePlayerHandler.java；game-player-store PlayerStore.createPlayerWithinCap（事务内 SELECT ... FOR UPDATE 锁账号行后计数，再逐个候选名插入，名字唯一索引 uk_player_name_key）
 - size: L
 - robot: robot_smoke（CreatePlayer {}）；Java SmokeScenario
 - hazards: Go 的账号建角锁 TTL 20s，持锁期间串着三次跨进程调用，锁可能在写 blob 前过期，所以加了围栏写。Java 用数据库事务，更简单也更强。丢应答重试的判定：Java 按大小写不敏感的 name_key 找占用者，还要求展示名逐字相同，比 Go（只比 owner id）更严。每次撞名都会烧掉一个号。
@@ -117,7 +117,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: none
 - behavior: 处理顺序：NFKC → TrimSpace → 空则判 EMPTY（由服务端生成）→ 码点数须在 [min_chars, max_chars] 内（配表 2–12，结构上限 32）→ 字符集只允许 0-9、A-Z、a-z、〇(U+3007)、CJK 扩展 A（U+3400–4DBF）、CJK 基本区（U+4E00–9FFF）→ 唯一键为小写化的结果 → 敏感词：子串命中 管理员/客服/官方/系统/运营，或以 gm 开头。默认名 = 前缀（道友）+ suffix_len（6）位 [a-z0-9]：每位取 crypto 随机字节，≥252 丢弃重取，否则 b%36。撞名最多试 max_generate_attempts（5）次。配表规则不自洽时拒绝建角。
 - internal: Go 在 login 和 data_service 两处跑同一份实现。
-- java: done — xm-login/src/main/java/com/game/login/character/PlayerNames.java、RoleNameRules.java、TableCharacterRules.java；xm-player-store PlayerStore.nameKey
+- java: done — game-login/src/main/java/com/game/login/character/PlayerNames.java、RoleNameRules.java、TableCharacterRules.java；game-player-store PlayerStore.nameKey
 - size: S
 - robot: robot_smoke（空名走生成）
 - hazards: NFKC 之后再数长度；TrimSpace 的空白集合必须用 Go 口径（Java 有 GoSpaces）。字符集向量 charset_vectors.json 值得接进 Java 单测，防止两版漂移。
@@ -129,7 +129,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: none
 - behavior: 客户端只看到不透明的 uint64 player_id。
 - internal: Go 优先用 data_service 号段（biz tag 全局唯一，步长 100），失败时按 FallbackToSnowflake 决定是否回退 bwmarrin 雪花（13 位 node 切成 cluster3 + slot10，etcd 槽租约，毫秒水位前推 2s，丢槽即 fence 并退出，水位超过 2h 未写成功也拒发）。发号失败则建角整体失败（2020）。
-- java: done — xm-login PlayerIdGenerator + xm-common Snowflake + xm-discovery NodeIdLease（isValid 为假时拒绝发号）
+- java: done — game-login PlayerIdGenerator + game-common Snowflake + game-discovery NodeIdLease（isValid 为假时拒绝发号）
 - size: M
 - robot: robot_smoke
 - hazards: Go 写路径是 INSERT ... ON DUPLICATE KEY UPDATE，撞号会静默串档，所以唯一性必须在发号侧保证。Java 是主键冲突报错，比基线安全。
@@ -141,7 +141,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: login-session-state; session-registry; player-data-preload; replace-login; short-reconnect-lease; enter-game-cross-zone
 - behavior: 同步阶段：会话 id 为 0 回 2018；重定向票据持有者与请求 player_id 不符回 2011；无 login_session 回 2028；玩家锁 player_locker:{id}（TTL 120s，每 TTL/3 心跳续期）抢不到回 2005；Redis 出错回 2021；账号 blob 读不到回 2000，解析失败回 2022；角色不属于本账号回 2011（但若反向索引 player_to_account 证明归属，就把角色补回账号再继续）；预热线程池满回 2005。成功应答为 {player_id=请求值}，不带 error_message，post_merge_notice_ts=0、force_rename=false，表示「已受理」而非「已进场」。异步链之后任何失败（预热失败、GetSession 或写会话失败、BindSession 失败、EnterScene 被拒）都经 gate 推 23 {3023}；会话上没有 gate 地址时不推，客户端靠 60s 进场超时兜底。成功后清掉 login_session。
 - internal: 异步链：Kafka DB 预热 → player_locator.GetSession → 决策（首登 / 短线重连 / 顶号）→ 身份补齐 → 写会话（版本 +1）→ 经 Kafka 发 BindSessionEvent 给 gate（带 enter_gs_type）→ scene_manager.EnterScene → 写 login_idempotent 键。整条链预算 5min；丢锁时取消整条链。
-- java: done — xm-login/src/main/java/com/game/login/handler/EnterGameHandler.java（先向 scene-manager 要落点再夺取 owner_epoch，持有者 3s 不让出回 2005）；xm-gate ClientDispatcher.failEnter 推 23 {3023}
+- java: done — game-login/src/main/java/com/game/login/handler/EnterGameHandler.java（先向 scene-manager 要落点再夺取 owner_epoch，持有者 3s 不让出回 2005）；game-gate ClientDispatcher.failEnter 推 23 {3023}
 - size: L
 - robot: robot_smoke；login-test: DuplicateEnterGame / DisconnectDuringEnter / LoginStuckDetection；Java SmokeScenario
 - hazards: login_idempotent:{pid}:{request_id} 只写不读，是死写；真正的 request_id 去重在 scene_manager。Go 的反向索引自愈会在不持建角锁的情况下改写账号 blob，可能和并发建角互相覆盖。Java 同一角色进场还在途时回 2028，基线回 2005（已登记于 PARITY）。
@@ -153,7 +153,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: session-registry
 - behavior: 清掉 login_session 和设备集合条目。只有当前会话 id 与请求一致时才 MarkOffline：带 session_id + version 的 CAS 删除会话、旧位置键和租约，然后立即调 SceneManager.LeaveScene，失败则进入租约队列重试。会话已被替换时什么也不做。不推送任何消息。之后需要重新 Login，否则 CreatePlayer / EnterGame 回 2028。
 - internal: player_locator 的 CAS 脚本和至少一次的 LeaveScene 重试。
-- java: done — xm-login/src/main/java/com/game/login/handler/LeaveGameHandler.java（下发 UnbindPlayer，gate 发 PlayerLeave{voluntary}，保留账号可回选角；行为有意不同，见 PARITY）
+- java: done — game-login/src/main/java/com/game/login/handler/LeaveGameHandler.java（下发 UnbindPlayer，gate 发 PlayerLeave{voluntary}，保留账号可回选角；行为有意不同，见 PARITY）
 - size: S
 - robot: robot_smoke 收尾；login-test: LeaveAndReEnter / LeaveAndReLogin / LoginLogoutCycle
 - hazards: Go 与 Java 在「LeaveGame 后能否不重新 Login 直接回选角」上口径不同，客户端做回选角前需两边定一个口径。
@@ -165,7 +165,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: short-reconnect-lease
 - behavior: 清掉 login_session。然后 SetDisconnecting(player_id 取自 SessionDetails, session_id 取自请求体)。客户端自己发的 58 填 0，player_locator 因会话不匹配而忽略，所以实际只起清理登录会话的作用。gate 在 TCP 断开时合成的 58 带真实 session_id，会触发 30s 断线租约。失败时重试 4 次，退避从 200ms 起翻倍，仍失败记 CRITICAL 日志。
 - internal: 这是断线租约链的唯一入口：调用丢失则会话永久停在 ONLINE（会话键没有 TTL）。
-- java: done — xm-login DisconnectHandler 只记日志；gate TCP 断开时调 ClientMessageService.sessionClosed，scene 立即写回并移除玩家（没有租约）
+- java: done — game-login DisconnectHandler 只记日志；gate TCP 断开时调 ClientMessageService.sessionClosed，scene 立即写回并移除玩家（没有租约）
 - size: S
 - robot: robot_smoke 收尾；login-test: DisconnectDuringLogin / RapidDisconnectReconnect
 - hazards: 请求体里的 session_id 来自客户端，是不可信输入；只是 player_id 取自会话上下文，所以最多影响自己的会话。
@@ -189,7 +189,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: session-registry; server-push-to-player
 - behavior: 已有会话且不满足「DISCONNECTING 且同账号」，就判为 ReplaceLogin。向旧会话所在 gate 发 KickPlayerEvent：旧连接先收到 34 {reason 2017}，然后被 shutdown。踢失败只记日志，新会话照样建立（版本 +1，BindSession 带 LOGIN_REPLACE，EnterScene 的 ZoneId=0）。新连接正常收到 26 和 79。
 - internal: 经 Kafka gate 命令投递，按 gate_instance_id 防止发给已重启的僵尸 gate。
-- java: partial — Java 走归属协议：Redis pub/sub xm:owner-takeover 请持有方 scene 让出，旧连接收到 23 {2017} 后断开；不发 34；持有方 3s 内不让出回 2005（PARITY「顶号」行）
+- java: partial — Java 走归属协议：Redis pub/sub game:owner-takeover 请持有方 scene 让出，旧连接收到 23 {2017} 后断开；不发 34；持有方 3s 内不让出回 2005（PARITY「顶号」行）
 - size: S
 - robot: login-test: AccountDisplacement / ConcurrentSameAccount
 - hazards: Go 踢旧会话失败只记日志，旧连接可能和新连接同时在线一段时间。Java 若要补 34，需要 gate 在 PlayerKicked 时先发 34 再关连接。
@@ -225,7 +225,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: home-zone-mapping; enter-game-core
 - behavior: SessionDetails.ticket_player_id 非 0 且不等于请求的 player_id，在加锁之前就回 2011。ticket_target_zone_id 等于本 zone 时直接进本 zone，不弹回。ShortReconnect 和 ReplaceLogin 的 ZoneId=0，由 scene_manager 按原位置决定。FirstLogin 且会话里没有场景、并开启 RedirectOnEnterEnabled（dev 默认关）时，查 home zone（超时 1.5s），不在本 zone 就由 scene_manager 回 Redirect：客户端收到 124，26 的应答仍然是成功。
 - internal: data_service GetPlayerHomeZone；scene_manager 负责签发重定向票据。
-- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片未验证）— `EnterGameHandler`：持票者 ≠ 请求的角色回 2011（2018 之后、2028 / 设备续期 / 在途闸门之前，同基线）；纯函数 `EnterRoutes.resolveEnterRoute` 按票据与位置记录定去向：钉住 = `ticket_player_id ≠ 0 ∧ ticket_target_zone_id == 会话 zone`（Java 普通令牌 target_zone_id = zone_id、持票者 0，按 player_id 判，X13）；位置在别的 zone 的节点上且未钉 → GO-5（login 调 scene-manager `redirectToZone`，回 26 成功 + `RedirectToGate` 指令，签票失败退化为本 zone 首登，X11），ShortReconnect / ReplaceLogin 的等价判定来自位置记录（Java 没有会话登记）。`RedirectOnEnter` 没做（随 7.3，X17）。整条链受 `xm.login.enter-game-budget`（4 s）约束。
+- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片未验证）— `EnterGameHandler`：持票者 ≠ 请求的角色回 2011（2018 之后、2028 / 设备续期 / 在途闸门之前，同基线）；纯函数 `EnterRoutes.resolveEnterRoute` 按票据与位置记录定去向：钉住 = `ticket_player_id ≠ 0 ∧ ticket_target_zone_id == 会话 zone`（Java 普通令牌 target_zone_id = zone_id、持票者 0，按 player_id 判，X13）；位置在别的 zone 的节点上且未钉 → GO-5（login 调 scene-manager `redirectToZone`，回 26 成功 + `RedirectToGate` 指令，签票失败退化为本 zone 首登，X11），ShortReconnect / ReplaceLogin 的等价判定来自位置记录（Java 没有会话登记）。`RedirectOnEnter` 没做（随 7.3，X17）。整条链受 `game.login.enter-game-budget`（4 s）约束。
 - size: M
 - robot: travel_smoke.yaml（跨区传送）
 - hazards: 
@@ -273,7 +273,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: none
 - behavior: 从 etcd 取本 zone 的 gate 候选（zone_id=0 表示 watcher 看到的任意 gate），排除标记 draining 的 gate。客户端地址按 clientendpoint.Select 选取，开启 RequireClientEndpoint 时没有客户端地址的 gate 不下发；同一 host:port 只保留 launch_time 最新的那条。按 PlayerCount 升序、NodeID 升序选负载最低的 gate。令牌 GateTokenPayload{gate_node_id, zone_id, expire_timestamp=now+10min, hmac_session_key=32 随机字节}，签名为 HMAC-SHA256 的 64 字节小写 hex。排队开启且账号已有带 gate 的会话时绕过排队。HTTP 成功时 code=0，并带 gate_ip / gate_port / token_payload / token_signature（base64）/ token_deadline。
 - internal: gateway 经 gRPC 调 login 签发；密钥来自 Secrets.GateToken.Primary。
-- java: partial — xm-gateway AssignGateService / GatePicker（最低负载、过滤 draining、跳过无地址条目）/ GateTokenIssuer（10min 有效、32 字节会话密钥）
+- java: partial — game-gateway AssignGateService / GatePicker（最低负载、过滤 draining、跳过无地址条目）/ GateTokenIssuer（10min 有效、32 字节会话密钥）
 - size: S
 - robot: robot_smoke（HTTP assign-gate）；Java SmokeScenario（AssignGateClient）
 - hazards: Java 对 zone_id=0 回 404，mmorpg 是自动选区（已登记 PARITY）。Java 令牌的 target_zone_id 填了 zone_id，而 mmorpg 填 0（客户端不解析令牌，但语义不同）。Java 没有「同地址保留最新」去重：崩溃 gate 的旧目录条目在 TTL 内仍可能被选中，客户端会被新 gate 以 node 不匹配拒绝。
@@ -285,7 +285,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: assign-gate; session-registry
 - behavior: zone 容量 = ZoneCapacityOverride，没配则 max(online, 1) × SoftCapMultiplier（1.5）。空位 = 容量 − 在线 − 已准入未入场。有空位且队列为空时走快速通道：原子占一个名额后直接签令牌。否则按毫秒时间 ZADD 入队。排队令牌 = base64url(JSON{k:"queue", q, z, e} + "." + hex HMAC)，有效 1h；验签时遍历全部候选密钥、不短路，支持轮换；签名不符或过期回 EXPIRED（HTTP 410）。分发器是单 leader（Redis 锁 30s，每 TTL/3 心跳），每秒对每个活跃 zone ZPOPMIN 一批：准入时选 gate，客户端来取时才签令牌（有效期从签发时起算 10min）。准入记录 admit:{queueId} 有效 60s，用 GETDEL 保证只能取一次。默认关闭。
 - internal: Redis 键：queue:zone:{z}（ZSET）、admitted:zone:{z}（SET，整体滑动 TTL）、admit:{id}、queue:meta:{id}、queue:token:{t}。另有指标：等待时长、过期原因、是否 leader。
-- java: missing — xm-gateway AssignGateRequest 解析 queue_token 但按首次请求处理；没有 /api/queue-status
+- java: missing — game-gateway AssignGateRequest 解析 queue_token 但按首次请求处理；没有 /api/queue-status
 - size: L
 - robot: robot 的 HTTP 排队轮询逻辑（http_assign_gate.go）；robot.smoke-5k 等压测配置
 - hazards: admitted 集合的成员从不单独删除：快速通道占位的 fast:* 永不 SREM，未来取的准入也一直留着；而整个集合的 TTL 每次 SADD 都会续上，所以持续有人登录时集合只增不减，空位最终归零，所有人都被迫排队（注释说「占位成员按 admitTTL 过期」与 Redis 语义不符）。不再轮询的幽灵条目照样消耗准入名额。选 gate 失败时以 score 0 回插，相当于插到队首。绕过排队只检查账号的第一个角色。Java 实现时应改用带每成员过期时间的 ZSET 做在途集合。
@@ -297,7 +297,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: assign-gate
 - behavior: 玩家可感知：被标记排空的 gate 不再分到新玩家，已在上面的玩家不受影响。
 - internal: 运维给 gate:{id}:draining 打标记（必须带 TTL）。监视器每 5s 检查一次：在线人数 ≤ DrainedBelowPlayers（0），或从标记起已过 Deadline（25min，此时打 ERROR），就写 gate:{id}:drained，其 TTL 取 draining 的剩余 TTL，并顺手清理残留的 drained 标记。缩容脚本 k8s_gate_drain.ps1 等到 drained 才删 Pod。
-- java: partial — xm-gateway GatePicker 会过滤 draining，全部 draining 时忽略标记继续分配；但 xm-gate GateNode 恒写 setDraining(false)，没有运维入口，也没有 drained 信号
+- java: partial — game-gateway GatePicker 会过滤 draining，全部 draining 时忽略标记继续分配；但 game-gate GateNode 恒写 setDraining(false)，没有运维入口，也没有 drained 信号
 - size: M
 - robot: none
 - hazards: 
@@ -321,7 +321,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: none
 - behavior: 客户端不可见。防止内网任意进程冒充任意会话或玩家调用 login。
 - internal: x-session-detail-bin 必须附 HMAC-SHA256 签名。被签名的串依次为：版本、caller、方法全名、sha256(subject)、毫秒时间戳、nonce。允许时钟偏差 30s；nonce 表上限 50 万条；可配调用方白名单；dev/test 只告警，其余模式强制。不带声明的调用（gateway 新路径）照常放行。密钥分 GateToken / QueueToken / InternalAuth 三把：生产环境要求非占位、不少于 32 字节、互不相同，否则拒绝启动；每把支持「主密钥 + 只验不签的旧密钥」做轮换。
-- java: not_applicable — Java 用 Dubbo 调用方鉴权：xm-common DubboCallAuth + xm-api DubboAuthProviderFilter，MAC 输入为「接口|方法|ts」，时间窗 60s
+- java: not_applicable — Java 用 Dubbo 调用方鉴权：game-common DubboCallAuth + game-api DubboAuthProviderFilter，MAC 输入为「接口|方法|ts」，时间窗 60s
 - size: M
 - robot: none
 - hazards: Java 的 MAC 不覆盖请求体和 SessionContext，也没有 nonce：能截获内网流量的人可以在 60s 内把附件嫁接到伪造的会话上下文上。Java 的 gate 令牌密钥不支持轮换。
@@ -333,7 +333,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: internal-caller-auth
 - behavior: Forward(ForwardRequest{ClientRequest, zone_id})：按 message_id 查生成的路由表。不在表里或所属服务不是客户端协议，回 MessageContent{id, message_id, error_message 1005}。目标是 Battle（战斗只走直连）、没有可用实例、拨号失败、上游 gRPC 错误或超时（5s），都回 1003。成功时回 MessageContent{id=请求 id, message_id=请求号, serialized_message=原样应答字节}。LoginNodeService 只在同 zone 实例中随机选，其他类型全局随机。请求缺少 x-session-detail-bin 元数据时回 gRPC Unauthenticated。
 - internal: 每种目标类型一个 etcd watcher；连接缓存；用原样字节编解码（不解析 body）；透传全部 x-* 元数据并在响应头回显会话；错误日志按 1/1024 采样；Forward 方法的 Stat 日志不打内容，避免账号口令落日志。
-- java: partial — xm-gate MessageRoutes：标了 OptionIsPlayerService 的服务交给 scene，ClientPlayerLogin 走 login（Dubbo）；其余服务回 23 {1003}（与 C++ 直连模式同形，路由模式是信封错误，两者都可接受）
+- java: partial — game-gate MessageRoutes：标了 OptionIsPlayerService 的服务交给 scene，ClientPlayerLogin 走 login（Dubbo）；其余服务回 23 {1003}（与 C++ 直连模式同形，路由模式是信封错误，两者都可接受）
 - size: M
 - robot: chat_smoke、friend_smoke、guild_smoke、team_smoke、trade_smoke（mmorpg）；Java 只覆盖 login
 - hazards: 路由表按「服务是否标了客户端协议」放行，因此服务端推送用的 Notify* 方法（NotifyTeamEvent、NotifyGuildChanged、NotifyFriendEvent 等）客户端也能上行调用，会被转发到后端；Java gate 的白名单同样按服务粒度。后续每接一个后端，就在 SERVICE_BACKENDS 加一项并给出 Dubbo 实现。

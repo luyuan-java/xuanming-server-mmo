@@ -10,8 +10,8 @@ friend 有完整的好友申请 / 同意 / 拒绝 / 删除 / 列表 / 黑名单 
 数据只在 Redis（7 天 / 200 条尽力窗口），**没有任何实时推送**（客户端发完自己拉历史），TEAM / SYSTEM 频道回 1006，无敏感词、无黑名单联动；
 trade 只有聚宝斋 P1（浏览 / 详情 / 收藏 / 货架 + dev 种子），P2 资产托管通道已落码但默认关闭且无客户端入口，上架 / 下单 / 支付 / 拍卖都未做。
 mmorpg 不存在"面对面玩家交易"、邮件（mail 只有设计稿）、帮会频道。Java 版（xuanming-server-mmo）三块**全部未开始**：
-gate 的 `ClientDispatcher.dispatch` 对非 login / scene 域的消息一律回信封 tip 1003（`xm-gate/.../session/ClientDispatcher.java:254`），
-仓内无任何 friend / chat / trade 代码，xm-robot 也无对应场景；gate 层按消息号限频（MessageLimiter 表）已对齐，会自动覆盖这些消息号。
+gate 的 `ClientDispatcher.dispatch` 对非 login / scene 域的消息一律回信封 tip 1003（`game-gate/.../session/ClientDispatcher.java:254`），
+仓内无任何 friend / chat / trade 代码，game-robot 也无对应场景；gate 层按消息号限频（MessageLimiter 表）已对齐，会自动覆盖这些消息号。
 
 tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 kFeatureUnavailable、1008 kRateLimitExceeded、1010 kMessageSizeExceeded；
 好友段 15000 CannotAddSelf / 15001 AlreadyFriends / 15002 ListFull / 15003 RequestAlreadySent / 15004 TargetListFull / 15005 NoPendingRequest /
@@ -26,8 +26,8 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - tables: MessageLimiter（gate 第一道限频）
 - depends on: gate 会话、登录进游戏（player_id 绑定）
 - behavior: 请求体不带自己的 player_id（friend 六个请求体 `reserved 1`），"我是谁"只取会话；带会话调白名单外方法 → 拒绝（friend 对 235 NotifyFriendEvent、trade 对 TradeAdmin/*）。客户端看到的形状：friend 发 235 → 信封 tip 1003（路由服把上游 gRPC 错误统一翻成 1003）；发 199 → gate 直接丢弃（不是客户端服务的消息号，表现为超时）。会话缺失（逻辑层取不到 player_id）→ in-band 1005，刻意不用 1012（fault）。chat 的拦截器坏头"放行到逻辑层"，最终也是 1005。所有业务失败都在响应体 `error_message`，信封只表示"没到业务"。服务超时 4000ms < 路由服转发 5000ms，逻辑层预算 = Timeout − 500ms，保证超时也能 in-band 回 1003。
-- internal: Java 需要 gate 增加 friend / chat / trade 域（`MessageRoutes.backendOf`），把 `ClientCall{session, message_id, body, request_id}` 经 Dubbo 发给对应 Java 服务（可合成一个 xm-social 进程 + 一个 xm-trade 进程），回包回填到原请求号；准入用"客户端服务且非 S2C 方法"白名单，S2C 方法号（235）上行必须被拒；回调回到连接 EventLoop。
-- java: missing — `ClientDispatcher.dispatch` default 分支回 `TIP_SERVICE_UNAVAILABLE`（xm-gate/src/main/java/com/game/gate/session/ClientDispatcher.java:254）；`MessageRoutesTest` 只断言 ClientPlayerFriend 能被识别为客户端服务
+- internal: Java 需要 gate 增加 friend / chat / trade 域（`MessageRoutes.backendOf`），把 `ClientCall{session, message_id, body, request_id}` 经 Dubbo 发给对应 Java 服务（可合成一个 game-social 进程 + 一个 game-trade 进程），回包回填到原请求号；准入用"客户端服务且非 S2C 方法"白名单，S2C 方法号（235）上行必须被拒；回调回到连接 EventLoop。
+- java: missing — `ClientDispatcher.dispatch` default 分支回 `TIP_SERVICE_UNAVAILABLE`（game-gate/src/main/java/com/game/gate/session/ClientDispatcher.java:254）；`MessageRoutesTest` 只断言 ClientPlayerFriend 能被识别为客户端服务
 - size: M
 - robot: mmorpg friend-smoke 第 6 步（235 上行被拒）、trade-smoke 第 2 步（199 经 gate 超时）
 - hazards: NotifyFriendEvent 与 10 个 C2S 同处 `ClientPlayerFriend` 服务（生成器只给含 ClientPlayer 的服务出推送 handler），所以 gate 的客户端白名单**会**放它上来——准入必须在方法级做，不能按服务名；消息号由 proto-gen 按 map 迭代顺序复用空号，Java 必须只用 ContractSync 同步来的号，不能按名字推断。
@@ -39,7 +39,7 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - depends on: player-presence-directory（找玩家所在 gate / session）
 - behavior: at-most-once：玩家不在线（会话 state≠ONLINE 或无 key）直接不推；Kafka 抖动、玩家正好掉线都会永久丢事件，客户端必须靠拉列表兜底。推送只在 MySQL 提交后、事务外做；失败只打日志 + 计指标，绝不影响 RPC 结果；不推给操作者本人。单次推送超时 1500ms。
 - internal: Java 无 Kafka（architecture.md §10 列为后续批次）。需要一条"任意 Java 服务 → 指定玩家所在 gate 连接"的下行通道（例如按 presence 里的 gate 节点号经 Dubbo / Redis pub/sub 投递，gate 在连接 EventLoop 上写帧，帧形状与 scene 下行相同：message_id + body，request_id=0）。
-- java: missing — 仓内只有 owner-takeover 的 pub/sub（xm-login/.../RedisOwnerTakeovers.java、xm-scene/.../OwnerTakeoverSubscriber.java），无通用推送；PARITY「gate 接入与路由」行注明"Kafka 命令待做"
+- java: missing — 仓内只有 owner-takeover 的 pub/sub（game-login/.../RedisOwnerTakeovers.java、game-scene/.../OwnerTakeoverSubscriber.java），无通用推送；PARITY「gate 接入与路由」行注明"Kafka 命令待做"
 - size: M
 - robot: mmorpg friend-smoke 第 1、3 步（跨 zone 推送 10s 内到达）
 - hazards: 推送事件刻意只带 reason + by_player_id + ts_ms（不带列表，防超 gate 单包上限）；跨 zone 推送（A 在 zone1、B 在 zone2）是验收点；Java 设计时注意不要把推送失败回传成业务失败。
@@ -50,8 +50,8 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - tables: none
 - depends on: 登录 / 进场 / 断线 / 顶号生命周期
 - behavior: 只有 state=ONLINE 且 key 里 player_id 与查询 id 一致才算在线，否则离线；last_active_ms 只在在线时填。好友列表的在线读是"可靠查询"：Redis / 解码 / 身份不符错误 → 整个 GetFriendList 回 1003（客户端据此禁邀，不能把"未知"当离线）；推荐是"可降级展示"：读失败当离线。
-- internal: Java 当前没有跨进程的"玩家在线 + 所在 gate"目录（gate 会话状态只在 gate 进程内；xm-player-store 的 owner_released / owner_lease_until 只表示数据归属，不含 gate / session）。需新增 Redis 键（经 `RedisKeys`，`xm:` 前缀）或 Dubbo 查询；在线目录功能还需要能"枚举在线玩家"。
-- java: missing — `RedisKeys` 只有节点号 / 节点目录 / owner-takeover 频道（xm-discovery/src/main/java/com/game/discovery/RedisKeys.java）
+- internal: Java 当前没有跨进程的"玩家在线 + 所在 gate"目录（gate 会话状态只在 gate 进程内；game-player-store 的 owner_released / owner_lease_until 只表示数据归属，不含 gate / session）。需新增 Redis 键（经 `RedisKeys`，`game:` 前缀）或 Dubbo 查询；在线目录功能还需要能"枚举在线玩家"。
+- java: missing — `RedisKeys` 只有节点号 / 节点目录 / owner-takeover 频道（game-discovery/src/main/java/com/game/discovery/RedisKeys.java）
 - size: M
 - robot: mmorpg friend-smoke 第 3 步（is_online=true、last_active_ms≠0）
 - hazards: mmorpg 的 key 无 hash tag，MGET 多 key 要求共享库不能 Cluster；friend 读错 Redis 实例不会报错、只会"全员离线"。好友服务曾有自写的 `friend:online` 键但无写者（已删）——Java 不要重蹈"只有读者"的覆辙，写者与读者同批交付。
@@ -62,7 +62,7 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - tables: none
 - depends on: 玩家持久化
 - behavior: 好友列表展示资料缺失时只打日志、照常返回（名字可能为空）；home_zone=0 → trade 回 20001，查询失败 → 1003。
-- internal: Java 玩家表已有 name / level / class_id / gender / appearance_id / zone_id（xm-player-store/src/main/resources/db/xm-player-schema.sql），缺一个批量查询入口（PlayerStore 只有 findPlayer 单查、listPlayers 按账号）；Java 无"归属区"与"当前区"之分，zone_id 即 home zone（合服时需改写）。
+- internal: Java 玩家表已有 name / level / class_id / gender / appearance_id / zone_id（game-player-store/src/main/resources/db/game-player-schema.sql），缺一个批量查询入口（PlayerStore 只有 findPlayer 单查、listPlayers 按账号）；Java 无"归属区"与"当前区"之分，zone_id 即 home zone（合服时需改写）。
 - java: partial — 数据有、接口无（`PlayerStore.findPlayer` 单行；无批量 / 无 Dubbo 暴露）
 - size: S
 - robot: none
@@ -88,7 +88,7 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - tables: none（配置项 Friend.MaxFriends=200（硬顶 300）、MaxPendingRequests=50、MaxIncomingRequests=200、MaxBlocks=200、ListReadHardLimit=1000、CacheTTL=30m）
 - depends on: none
 - behavior: 好友边双向两行（A→B、B→A 同事务）；`friend_request` 每对 (from,to) 一行，状态 1 pending / 2 accepted / 3 rejected，重复申请走 upsert；`friend_capacity` 显式计数行，写事务内 `SELECT ... FOR UPDATE` 按 player_id 升序锁双方计数行后才做任何锁定读——好友上限在高并发下也不超卖；`friend_block` 单向。列表读带 LIMIT 1000。
-- internal: 写路径隔离级别 READ COMMITTED；事务外先"ensure 容量行"（COUNT(*) 权威边数 + INSERT ODKU，缺行绝不猜 0），守卫缺行（被 sweep 回收竞态）整段重试至多 3 次；1213 死锁重试 3 次。私有 Redis 缓存 `friend:{f:<id>}:list:v3` / `:req:v3` + `<key>:generation`：写提交后 Lua `INCR generation + DEL`，回填 Lua 只在 generation 未变时 SET（防旧值覆盖），进程内按 key 互斥防击穿；缓存失效失败只打日志（最多陈旧一个 TTL）。Java 版：xm_java 里建同语义四表（自己的表名 / DDL），缓存键经 RedisKeys；可用 Redisson / Spring Cache 但必须保留"代次防回填"语义。
+- internal: 写路径隔离级别 READ COMMITTED；事务外先"ensure 容量行"（COUNT(*) 权威边数 + INSERT ODKU，缺行绝不猜 0），守卫缺行（被 sweep 回收竞态）整段重试至多 3 次；1213 死锁重试 3 次。私有 Redis 缓存 `friend:{f:<id>}:list:v3` / `:req:v3` + `<key>:generation`：写提交后 Lua `INCR generation + DEL`，回填 Lua 只在 generation 未变时 SET（防旧值覆盖），进程内按 key 互斥防击穿；缓存失效失败只打日志（最多陈旧一个 TTL）。Java 版：game 里建同语义四表（自己的表名 / DDL），缓存键经 RedisKeys；可用 Redisson / Spring Cache 但必须保留"代次防回填"语义。
 - java: missing — 无任何好友表或代码
 - size: L
 - robot: mmorpg friend-smoke 全流程间接覆盖
@@ -272,7 +272,7 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 - tables: none（配置 Market{Scope=zone|global, DefaultPageSize=20, MaxPageSize=20, MaxPage=100}；子类上限写死在 constants.MaxSubcategory：角色 4、宠物 6、武器 5、防具 5、召唤令 2、其余 0）
 - depends on: social-backend-routing, player-profile-lookup（home zone）
 - behavior: 校验（任一失败 1005）：无会话；search trim 后 ≤64 字符且无控制字符；tab 只能 1 公示 / 2 寄售；section 只能 1 寄售 / 2 拍卖（0 也非法）；category 必填且 subcategory ≤ 该类上限；sort 0–4。section=拍卖 → 20003。zone 范围：分区 = 调用者 home zone（忽略 zone_filter；home zone 未知 20001、查询失败 1003）；global：zone_filter 0=全部。过滤：公示 tab = status LISTED 且 notice_end>now；寄售 tab = status LISTED/LOCKED 且 notice_end≤now<sale_end；search 为纯数字时 `listing_id = n OR title LIKE %s%`（LIKE 用 `!` 转义）；favorites_only 只看自己收藏。排序：0 listing_id DESC；1 价格升（id 升）；2 价格降（id 降）；3 等级降（id 降）；4 剩余时间升（公示 tab 按 notice_end、寄售按 sale_end）。分页：page_size 0→20、>20→20；page 0→1、超末页→末页、再封顶 100；page_count≥1。响应 `{listings, total_count, page, page_size, page_count, market_scope, server_now_ms}`；ListingSummary 带 phase（服务端用同一个 now 推导）、is_favorite、is_mine，**不带卖家 id**。
-- internal: 独占库表 trade_listing（三条联合索引：本区浏览 / 全服浏览 / 卖家货架）、trade_favorite；COUNT + LIMIT/OFFSET 分页；状态只存 LISTED，公示 / 寄售 / 结束由时间推导（不需要后台改状态）。Java：xm_java 下同语义表 + MyBatis 动态 SQL（ORDER BY 只能来自固定映射）。
+- internal: 独占库表 trade_listing（三条联合索引：本区浏览 / 全服浏览 / 卖家货架）、trade_favorite；COUNT + LIMIT/OFFSET 分页；状态只存 LISTED，公示 / 寄售 / 结束由时间推导（不需要后台改状态）。Java：game 下同语义表 + MyBatis 动态 SQL（ORDER BY 只能来自固定映射）。
 - java: missing
 - size: M
 - robot: mmorpg trade-smoke 第 3–6 步（zone / global 两种 scope 各跑一次）
@@ -364,7 +364,7 @@ tip 码速查：1003 kServiceUnavailable(fault)、1005 kInvalidParameter、1006 
 
 ## Open questions
 
-1. **Java 后端拆分**：friend + chat 是否合进一个 `xm-social` 进程、trade 单独 `xm-trade`？两者都要求"全局一份、多副本、无状态"，Java 现有进程都是按 zone 部署的（gate / scene），需在 architecture.md 定全局服务的部署形态与 Dubbo 发现方式。
+1. **Java 后端拆分**：friend + chat 是否合进一个 `game-social` 进程、trade 单独 `game-trade`？两者都要求"全局一份、多副本、无状态"，Java 现有进程都是按 zone 部署的（gate / scene），需在 architecture.md 定全局服务的部署形态与 Dubbo 发现方式。
 2. **推送通道选型**：Java 无 Kafka。friend 推送（以及将来的 team / guild / mail 推送）用什么通道到 gate——Redis pub/sub 按 gate 节点分频道、还是 Dubbo 直调 gate？需与在线目录（presence）一起定，且必须跨 zone。
 3. **在线目录归属**：mmorpg 的写者是 player_locator（不在本区域）。Java 由 gate、login 还是 scene 写？在线目录分页（online_only）需要"按 zone 枚举在线玩家"，键结构要一并设计。
 4. **AddFriend 目标存在性**：mmorpg 不校验 target 是否存在（对不存在的 id 也回成功并建容量行）。Java 有玩家表可校验，但校验失败回什么码（15xxx 里没有"玩家不存在"）？若改要两版同批加 tip。

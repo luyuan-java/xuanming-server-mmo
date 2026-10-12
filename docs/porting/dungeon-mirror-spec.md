@@ -1,7 +1,7 @@
 # 副本与镜像场景、实例空闲回收（批次 5.3）移植统一规格：从 mmorpg 基线到 Java 版
 
 > **基线**：mmorpg `26ceb70ca`，与 `contract/SOURCE.properties` 的 `mmorpg.commit` 相同。客户端仓库 mmorpg-client `a8577c7` 只用来确认客户端读哪些字段。
-> **Java**：HEAD `5ef79a6`（批次 4.7；5.1 = `d80cf79`）。工作区里有批次 5.2（跨节点换图 + 归属交接）与 6.1（新模块 `xm-battle-engine`）未提交的改动：
+> **Java**：HEAD `5ef79a6`（批次 4.7；5.1 = `d80cf79`）。工作区里有批次 5.2（跨节点换图 + 归属交接）与 6.1（新模块 `game-battle-engine`）未提交的改动：
 > `scene_directory.proto` / `SceneDirectoryService` 的 `selectSwitchTarget`、未跟踪的 `SwitchTargetSelector.java`、`node_link.proto` 的 `PlayerTransfer`、
 > `ChannelSelector.java`（注释）、`SceneNode.java` / `SceneNodeProperties.java`（交出参数）等。**本稿把 5.2 / 6.1 当作即将落地**，钩子按
 > `docs/porting/scene-handoff-spec.md`（下称 5.2 规格）、`docs/porting/battle-engine-spec.md` 描述。
@@ -9,7 +9,7 @@
 > 按当前工作区或 HEAD（注明），并同时写出类名 / 方法名，提交后会漂移。
 >
 > **路径怎么读**
-> - 以 `go/`、`cpp/`、`proto/`、`generated/`、`robot/`、`deploy/` 开头的路径在 `D:\work\mmorpg` 下；以 `xm-`、`docs/porting/`、`docs/reference/`、`config-data/`、
+> - 以 `go/`、`cpp/`、`proto/`、`generated/`、`robot/`、`deploy/` 开头的路径在 `D:\work\mmorpg` 下；以 `game-`、`docs/porting/`、`docs/reference/`、`config-data/`、
 >   `contract/`、`tools/`、`PARITY.md`、`AGENTS.md` 开头的路径在 `D:\work\xuanming-server-mmo` 下；`architecture.md` 指 Java 仓库的 `docs/design/architecture.md`。
 > - 不带目录的 Go 文件：`createscenelogic.go`、`instance_lifecycle.go`、`destroyscenelogic.go`、`scene_atomic.go`、`scene_node_client.go`、`enterscenelogic.go`、
 >   `load_reporter.go`、`world_autoscale.go`、`world_rebalance.go`、`orphan_cleanup.go`，以及同目录的 `logic_test.go`、`world_autoscale_mirror_test.go`、`integration_test.go`，
@@ -20,16 +20,16 @@
 >   `cpp/nodes/scene/handler/grpc/`；`scene_handler.cpp` 在 `cpp/nodes/scene/handler/rpc/`；`scene_event_handler.cpp` 在 `cpp/nodes/scene/handler/event/`；
 >   `scene_spawn.cpp` 在 `cpp/libs/services/scene/spatial/system/`；`message_limiter.h` 在 `cpp/libs/engine/core/message_limiter/`。
 > - proto 用 mmorpg 行号：`sm.proto` = `proto/scene_manager/scene_manager_service.proto`；`scene_info.proto`、`scene.proto`、`player_scene.proto` 在 `proto/scene/`。
->   Java 同步副本在 `xm-proto/src/main/proto/proto/scene/`，**行号 = mmorpg 行号 + 3**（多三行 java option）。
+>   Java 同步副本在 `game-proto/src/main/proto/proto/scene/`，**行号 = mmorpg 行号 + 3**（多三行 java option）。
 > - mmorpg 文档：`sca.md` = `docs/design/scene-creation-architecture.md`；`deadline.md` = `docs/design/grpc-client-deadline-failure-callback.md`。
-> - Java 类：`SceneWorld` / `Scene` / `ClientRequestHandler` / `ScenePlayer` / `SceneTables` / `ConfigSceneTables` / `RequestFieldCheck` 在 `xm-scene/src/main/java/com/game/scene/world/`；
+> - Java 类：`SceneWorld` / `Scene` / `ClientRequestHandler` / `ScenePlayer` / `SceneTables` / `ConfigSceneTables` / `RequestFieldCheck` 在 `game-scene/src/main/java/com/game/scene/world/`；
 >   `SceneNode` 在 `.../scene/`；`SceneDirectoryPublisher` 在 `.../scene/discovery/`；`TeamFollowService` 在 `.../scene/team/`；`MissionTables` 在 `.../scene/mission/`；
->   `SceneAssigner` / `ChannelSelector` / `SwitchTargetSelector` / `SceneDirectoryProvider` 在 `xm-scene-manager/src/main/java/com/game/scenemanager/`；
+>   `SceneAssigner` / `ChannelSelector` / `SwitchTargetSelector` / `SceneDirectoryProvider` 在 `game-scene-manager/src/main/java/com/game/scenemanager/`；
 >   `WorldChannelControlPlane` / `WorldChannelPlanner` / `WorldChannelCoordinator` / `WorldAutoscaler` / `WorldRebalancePlanner` / `DirectoryView` / `MirrorSources` /
->   `PlanInput` / `PlanResult` / `NodeAvailability` 在 `.../scenemanager/world/`；`world_channel.proto`、`node_directory.proto`、`scene_directory.proto` 在 `xm-api/src/main/proto/xm/api/`；
->   `NodeDirectory`、`NodeTypes` 在 `xm-discovery/src/main/java/com/game/discovery/`；`Snowflake` 在 `xm-common/src/main/java/com/game/common/id/`。
-> - tip 数值取自 `xm-table/src/main/proto/tip/`：`scene_error_tip.proto`（3000 `:12`、3004 `:20`、3005 `:22`、3006 `:24`、3008 `:28`、3014 `:40`、3022 `:56`、3023 `:58`）、
->   `common_error_tip.proto`（1003 `:18`）。消息号取自 `xm-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
+>   `PlanInput` / `PlanResult` / `NodeAvailability` 在 `.../scenemanager/world/`；`world_channel.proto`、`node_directory.proto`、`scene_directory.proto` 在 `game-api/src/main/proto/game/api/`；
+>   `NodeDirectory`、`NodeTypes` 在 `game-discovery/src/main/java/com/game/discovery/`；`Snowflake` 在 `game-common/src/main/java/com/game/common/id/`。
+> - tip 数值取自 `game-table/src/main/proto/tip/`：`scene_error_tip.proto`（3000 `:12`、3004 `:20`、3005 `:22`、3006 `:24`、3008 `:28`、3014 `:40`、3022 `:56`、3023 `:58`）、
+>   `common_error_tip.proto`（1003 `:18`）。消息号取自 `game-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
 > - 带「推导」字样的结论没有对应的测试或用例覆盖，是把多处代码路径串起来得出的。
 >
 > **本稿的来历**：由三份分区稿合并——scene-manager 分区稿（实例登记、建实例、选点、回收；提出在 Redis 建一张独立的实例登记表，宿主节点用 Lua 认领回收）、
@@ -100,7 +100,7 @@
 
 ### 0.3 范围
 
-**5.3 做**：上表交付列；`xm-api` 内部契约（§6.5）；对 5.1 已提交代码与 5.2 在途代码的改动（§6.6、§6.9）；指标、配置；文档与 PARITY 登记；单测、真 Redis 集成测试、
+**5.3 做**：上表交付列；`game-api` 内部契约（§6.5）；对 5.1 已提交代码与 5.2 在途代码的改动（§6.6、§6.9）；指标、配置；文档与 PARITY 登记；单测、真 Redis 集成测试、
 本机切片与 robot（§12）。
 
 **5.3 不做**：
@@ -147,7 +147,7 @@
 
 ### 1.1 客户端契约里的 `SceneInfoComp` 与内部消息
 
-- **`SceneInfoComp`**（`scene_info.proto:4-11`；Java 同步副本 `xm-proto/src/main/proto/proto/scene/scene_info.proto:7-14`）：
+- **`SceneInfoComp`**（`scene_info.proto:4-11`；Java 同步副本 `game-proto/src/main/proto/proto/scene/scene_info.proto:7-14`）：
   `uint32 scene_config_id = 1`、`uint64 scene_id = 2`、`uint32 mirror_config_id = 3`、`uint32 dungeon_config_id = 4`、`map<uint64, bool> creators = 5`。
   它是 63 请求、79 推送、31 推送的载体（`player_scene.proto:13-31`；Java 副本 `:16-34`）。
 - **SM 服务**（`sm.proto:20-32`）：`CreateScene`、`DestroyScene`、`EnterScene`、`LeaveScene`。
@@ -179,9 +179,9 @@
 | `node:zone:{z}:{n}:scene_count` / `player_count` | STRING | 建 INCR；销毁减（残余人数钳 0） | 负载分、共置上限 | `createscenelogic.go:561-565`；`instance_lifecycle.go:317-329` |
 | `scene:{id}:agones_gs` | STRING | 只在 Agones 模式下写 | 名额归还 | `createscenelogic.go:249-255` |
 
-### 1.4 配表（Java 同步副本与基线逐字节相同：`config-data/tables/{mirror,dungeon,basescene,world}.pb`；schema 见 `xm-table/src/main/proto/*_table.proto`）
+### 1.4 配表（Java 同步副本与基线逐字节相同：`config-data/tables/{mirror,dungeon,basescene,world}.pb`；schema 见 `game-table/src/main/proto/*_table.proto`）
 
-**Mirror**（`xm-table/src/main/proto/mirror_table.proto:15-24`）：`id`、`scene_id`（FK → BaseScene）、`main_scene_id`（FK → World）。
+**Mirror**（`game-table/src/main/proto/mirror_table.proto:15-24`）：`id`、`scene_id`（FK → BaseScene）、`main_scene_id`（FK → World）。
 数据两行 `{1, scene 20, main 1}`、`{2, scene 21, main 2}`（`generated/tables/mirror.json`）。
 
 | 列 | 运行期读者 |
@@ -210,7 +210,7 @@ Java gate 同口径，超频回信封 1008（`ClientDispatcher.java:62-63`）。
 
 ### 1.5 Java 侧的表与访问代码
 
-- 访问代码由 `xm-table-codegen` 编译期生成；`ConfigTables.mirror()` / `dungeon()` / `baseScene()` 已可用。Dungeon 已被任务（`MissionTables.java:153-171`，可击杀怪物集合）
+- 访问代码由 `game-table-codegen` 编译期生成；`ConfigTables.mirror()` / `dungeon()` / `baseScene()` 已可用。Dungeon 已被任务（`MissionTables.java:153-171`，可击杀怪物集合）
   与战斗引擎（`TableBattleData.java:103`、`:125`）读；**没有 Mirror 表的读者**。
 - scene 的 `SceneTables` 只暴露世界地图列表、出生点、初始技能（`SceneTables.java:10-31`）；`ConfigSceneTables.spawnPoint` 对任意 BaseScene id 都能用
   （`ConfigSceneTables.java:63-70`），副本地图 17–19 的出生点因此不需要新代码。
@@ -519,7 +519,7 @@ Java 把新增的同步拒绝都归到 3005，**这个分支在客户端看来�
 | 项 | 基线 | Java 5.3 |
 |---|---|---|
 | 63 应答 | 同步 | 同步 |
-| 建镜像调用 | C++ deadline 10 s / SM 服务端 8 s（`deadline.md:125`） | Dubbo 提供方 3 s（`xm-scene-manager/src/main/resources/application.yaml:94`）+ scene 本地兜底 4 s（5.2 `switch-resolve-timeout`） |
+| 建镜像调用 | C++ deadline 10 s / SM 服务端 8 s（`deadline.md:125`） | Dubbo 提供方 3 s（`game-scene-manager/src/main/resources/application.yaml:94`）+ scene 本地兜底 4 s（5.2 `switch-resolve-timeout`） |
 | 应答到 79 | 一次 SM EnterScene 往返 + Kafka 路由 | 应答回到逻辑线程后在同一个任务里完成 |
 | 镜像可加入窗口（最后一人离开后） | 约 0–30 s（扫描相位） | 满 30 s（`mirror-idle-timeout`，1 s 粒度） |
 | 镜像销毁（最后一人离开后） | 约 0–30 s | 约 60 s（30 s 空置 + 30 s 回收宽限） |
@@ -559,8 +559,8 @@ Java 把新增的同步拒绝都归到 3005，**这个分支在客户端看来�
 
 | 方案 | 做法 | 问题 | 结论 |
 |---|---|---|---|
-| A 扩展 5.1 频道计划 | 实例作为 `kind = MIRROR / DUNGEON` 的记录写进 `xm:world:{z:<zone>}:ch` | 计划只由分 zone 领导者经「令牌 + 版本号 CAS」写（`architecture.md:500-505`），数据面每建一个镜像都要抢 `ver` 或等一拍（5 s）；每次变更让全 zone 节点重读整张 HASH；节点重启会按计划把早已无人的临时镜像重建出来；重新打开 5.1 对非 WORLD 记录的 fail-closed 门（`SceneWorld.java:356-360`） | 否决 |
-| A′ 独立的 Redis 实例登记表（scene-manager 分区稿） | `xm:world:{z:<zone>}:inst` HASH（值为 `SceneInstance` pb）+ 每节点索引与版本号 + 源到镜像索引；数据面 Lua 建；宿主节点 Lua 认领回收（人数为 0、无在途、无 Redis 预占）；领导者清死节点与级联；节点按版本号拉取 | 能支持跨节点放置与「宿主未建好就有人来」，但要多一套键空间、6 段 Lua、节点与 Redis 两份真相（需要节点局部版本守卫防误删）、三方写者；而**缺省配置下基线镜像本来就恒共置**（§2.3），这套机制只服务一个基线缺省关闭的回落 | 不采纳（留作 Q2 的升级路径） |
+| A 扩展 5.1 频道计划 | 实例作为 `kind = MIRROR / DUNGEON` 的记录写进 `game:world:{z:<zone>}:ch` | 计划只由分 zone 领导者经「令牌 + 版本号 CAS」写（`architecture.md:500-505`），数据面每建一个镜像都要抢 `ver` 或等一拍（5 s）；每次变更让全 zone 节点重读整张 HASH；节点重启会按计划把早已无人的临时镜像重建出来；重新打开 5.1 对非 WORLD 记录的 fail-closed 门（`SceneWorld.java:356-360`） | 否决 |
+| A′ 独立的 Redis 实例登记表（scene-manager 分区稿） | `game:world:{z:<zone>}:inst` HASH（值为 `SceneInstance` pb）+ 每节点索引与版本号 + 源到镜像索引；数据面 Lua 建；宿主节点 Lua 认领回收（人数为 0、无在途、无 Redis 预占）；领导者清死节点与级联；节点按版本号拉取 | 能支持跨节点放置与「宿主未建好就有人来」，但要多一套键空间、6 段 Lua、节点与 Redis 两份真相（需要节点局部版本守卫防误删）、三方写者；而**缺省配置下基线镜像本来就恒共置**（§2.3），这套机制只服务一个基线缺省关闭的回落 | 不采纳（留作 Q2 的升级路径） |
 | B 照搬基线 SM 注册表 | `instances:zone:active` ZSET + 每场景键 + SM 人数计数 + 领导者 30 s 扫描 + SM → scene 的 Create / Destroy RPC | Java scene-manager 不在进场路径上，在场人数的权威是节点；照搬就得在每条进出路径加 INCR / DECR，并引回 5.1 D3 刻意去掉的命令式 RPC（`scene-channels-spec.md:1066`） | 否决 |
 | **C 节点自有 + 目录登记** | 实例活在承载节点内存里、随进程消亡；目录 `SceneEntry` 带种类与源；scene_id 由 scene-manager 发；回收、级联、排空都在节点逻辑线程 | 目录体积随实例数增长（R6，用上限约束）；跨节点放置要另做（Q2） | **采纳** |
 
@@ -587,7 +587,7 @@ scene-manager 领导者（每拍）：DirectoryMirrorSources.of(目录) → 缩�
 - **权威**：实例的存在与人数以承载节点内存为准；目录是它的报告（5 s 一次，TTL 15 s，`SceneDirectoryPublisher.java:31-32`；建立 / 进入回收 / 复活 / 级联 / 销毁时立即补发）。
 - **scene-manager 对实例零状态**：只发号、定放置（5.3 恒为发起节点）、计指标；规划器从目录推导「谁是镜像源」。
 
-### 6.4 数据模型（xm-scene，只在逻辑线程读写；不用 ECS 命名）
+### 6.4 数据模型（game-scene，只在逻辑线程读写；不用 ECS 命名）
 
 `Scene` 新增字段：
 
@@ -659,7 +659,7 @@ future 异常完成，与 `assign` / `selectSwitchTarget` 的契约一致（`Sce
 
 **`DirectoryView.Scene`**（`DirectoryView.java:56`）加 `kind`、`sourceSceneId`；`of(...)` 照抄（`:63-81`）。
 
-**dev 管理口**（新文件 `xm-api/src/main/proto/xm/api/scene_admin.proto`，只给 robot / 切片用）：
+**dev 管理口**（新文件 `game-api/src/main/proto/game/api/scene_admin.proto`，只给 robot / 切片用）：
 `CreateDungeonInstanceRequest{uint32 dungeon_config_id = 1}` → `CreateDungeonInstanceResponse{uint32 tip_id = 1; uint64 scene_id = 2; uint32 scene_config_id = 3; uint32 scene_node_id = 4}`；
 `DestroyInstanceRequest{uint64 scene_id = 1}` → `DestroyInstanceResponse{uint32 tip_id = 1}`（§6.13）。
 
@@ -710,7 +710,7 @@ worker 号段 1..1023 全服共享（`WorldChannels.java:20-24`），scene-manag
 
 3004 不适用（D15）。请求里的 `scene_config_id`、`dungeon_config_id`、`creators` 在镜像分支里都忽略（同基线）。
 
-**镜像分支同步校验**（任一不满足回应答 `{3005}`，计 `xm.scene.mirror.requests{result}`）：
+**镜像分支同步校验**（任一不满足回应答 `{3005}`，计 `game.scene.mirror.requests{result}`）：
 
 | 检查 | 基线 | Java | result 标签 |
 |---|---|---|---|
@@ -725,7 +725,7 @@ worker 号段 1..1023 全服共享（`WorldChannels.java:20-24`），scene-manag
 5.2 规格 §5.5、§6.2）；经 5.2 的 scene → scene-manager 客户端发 `createInstance{zone, 本节点, pid, MIRROR, source, 源 conf, M, 0}`，完成后投递回逻辑线程。计 `accepted`。
 
 **结果回到逻辑线程**：先校验 `playersById.get(id) == player && switchState == RESOLVING(token)`，不符就丢弃（scene-manager 发出的号作废，**任何地方都不留幽灵**），计
-`xm.scene.mirror.resolves{stale}`。然后：
+`game.scene.mirror.resolves{stale}`。然后：
 
 | 结果 | 动作 | 客户端 | resolves 标签 |
 |---|---|---|---|
@@ -744,7 +744,7 @@ worker 号段 1..1023 全服共享（`WorldChannels.java:20-24`），scene-manag
 
 ### 6.8 scene：建立实例 `SceneWorld.createInstance(spec)`（逻辑线程）
 
-- 拒绝（ERROR 日志，计 `xm.scene.instance.lifecycle{event = rejected}`，不建）：scene_id 或 conf 为 0；种类不是 MIRROR / DUNGEON；本地已有同号（不论内容，号是全服唯一的，
+- 拒绝（ERROR 日志，计 `game.scene.instance.lifecycle{event = rejected}`，不建）：scene_id 或 conf 为 0；种类不是 MIRROR / DUNGEON；本地已有同号（不论内容，号是全服唯一的，
   同号就是发号器坏了）；MIRROR：源不在本地、源不是 WORLD、源在排空；DUNGEON：conf 与 `Dungeon[id].scene_id` 不一致；达到 `max-per-node`；停止接客。
 - 建好后：`emptySinceNanos = now`（创建者在同一任务里换入后立刻清零），`publishPopulation`，实例 gauge 加一，`requestDirectoryPublish()`，计 `created`。
 - `SceneWorld` 需要一个「目录有变」的出口：构造参数加 `Runnable directoryChanged`（缺省空操作），由 `SceneNode` 接到 `requestDirectoryPublish`（`SceneNode.java:401-406`，HEAD）。
@@ -765,7 +765,7 @@ worker 号段 1..1023 全服共享（`WorldChannels.java:20-24`），scene-manag
 | `destroyScene`（`:468-474`） | 销毁 WORLD 时触发级联（§6.11）；销毁实例时计 `destroyed_*` |
 | `drainStep`（`:381-397`） | 扩为 `maintainScenes()`：回收判定 → 级联兜底 → 排空推进 → 销毁（§6.10） |
 
-`publishPopulation`（`:216-224`）不改：镜像居民按源地图计入 `xm_scene_players{scene_config}`（同图各场景合计，口径不变）；副本居民计到 17–19 这几个标签值（表内有界）。
+`publishPopulation`（`:216-224`）不改：镜像居民按源地图计入 `game_scene_players{scene_config}`（同图各场景合计，口径不变）；副本居民计到 17–19 这几个标签值（表内有界）。
 
 ### 6.10 空闲回收（sm-instance-lifecycle 的 Java 版）
 
@@ -781,7 +781,7 @@ worker 号段 1..1023 全服共享（`WorldChannels.java:20-24`），scene-manag
    结果为 0 = 该类不自动回收（同 `:132-135`）。
 6. **为什么不需要基线的 Lua CAS**：人数、在途进场（`pendingEnters`，`SceneWorld.java:136`）、销毁都在同一个逻辑线程（`architecture.md` §5）。跨节点的在途进场在到达之前
    本节点看不见，由宽限兜住：从 scene-manager 选中目标到 `PlayerEnter` 落到目标节点，5.2 最坏约 23 s（交出 + 探测 ≤ M = 15 s，建链 + 握手 3 + 5 s，5.2 规格
-   `:982-996`），登录路径更短（软预占 TTL 10 s 不短于 login 的归属等待，`xm-scene-manager/src/main/resources/application.yaml:56`）。缺省宽限 30 s 覆盖两者；
+   `:982-996`），登录路径更短（软预占 TTL 10 s 不短于 login 的归属等待，`game-scene-manager/src/main/resources/application.yaml:56`）。缺省宽限 30 s 覆盖两者；
    `PlayerEnter` 一到，`pendingEnters` 接手保护（`hasPendingEnter` 挡住销毁）。超过宽限才到的进场按现有路径 `failEnter`（登录可以重试；5.2 交出进场是 F10「23 `{3023}` 后断开」），
    属 fail-safe（R8）。
 7. 与基线的差别：基线按 30 s 扫描、起点是「上次扫描看到有人」（§4.2）；Java 按精确的变空时刻、1 s 粒度，再加宽限（D10）。
@@ -820,7 +820,7 @@ worker 号段 1..1023 全服共享（`WorldChannels.java:20-24`），scene-manag
     player = 0, conf = Dungeon.scene_id, dungeon_config_id)` → `callOnLogic(createInstance(spec))` → 回 `{0, scene_id, conf, node}`；表里没有回 3005，取号失败回 1003，
     本地拒建回 3023。
   - `POST /admin/scene/instance/destroy`（`DestroyInstanceRequest`）：`callOnLogic(destroyInstance)`（§6.11）。
-  - 请求 / 应答是 protobuf 二进制；鉴权同 xm-trade 播种：头 `X-Xm-Admin-Token` 与环境变量 `XM_ADMIN_TOKEN` 常数时间比对（不设则 503）、`X-Xm-Operator` 必填、每次写审计行；
+  - 请求 / 应答是 protobuf 二进制；鉴权同 game-trade 播种：头 `X-Game-Admin-Token` 与环境变量 `GAME_ADMIN_TOKEN` 常数时间比对（不设则 503）、`X-Game-Operator` 必填、每次写审计行；
     运行模式不是 dev / test 一律 403。没有任何客户端消息号新增。
 
 ### 6.14 重连、位置记录与存盘
@@ -906,18 +906,18 @@ scene 侧不新增 Redis 或 MySQL I/O；Netty I/O 线程与逻辑线程上没�
 
 | 配置 | 缺省 | 进程 | 校验（不满足拒启） | 基线对应 |
 |---|---|---|---|---|
-| `xm.scene.instance.mirror-idle-timeout` | 30 s | xm-scene | ≥ 0；0 = 用 `idle-timeout` | `MirrorIdleTimeoutSeconds` |
-| `xm.scene.instance.idle-timeout` | 300 s | xm-scene | ≥ 0；0 = 副本（及回落到它的镜像）不自动回收 | `InstanceIdleTimeoutSeconds` |
-| `xm.scene.instance.reclaim-grace` | 30 s | xm-scene | ≥ 10 s（不短于 5.1 软预占 TTL / login 归属等待的口径） | 无（Java） |
-| `xm.scene.instance.max-per-node` | 200 | xm-scene | 1..10000 | 无（基线只有 Agones 房间数） |
-| `xm.scene.instance.max-per-creator` | 3 | xm-scene | 1..100 | 无 |
-| `xm.scene.switch-resolve-timeout` | 4 s | xm-scene | 复用 5.2（> Dubbo 3 s） | 在途槽 TTL 11 s |
-| `xm.scene.scene-manager-url` | `tri://127.0.0.1:20882` | xm-scene | 复用 5.2 | — |
-| `XM_ADMIN_TOKEN`（环境变量） | 无（不设则管理口 503） | xm-scene | — | — |
-| `xm.run-mode` | prod | xm-scene | 管理口只在 dev / test 放行 | — |
-| Dubbo 提供方超时 | 3000 ms | xm-scene-manager | 复用（`application.yaml:94`） | SM `Timeout` 8000 |
-| 发号租约 | `NodeTypes.SCENE_MANAGER`，作用域 0，worker 1..1023，TTL 15 s | xm-scene-manager | 复用（`WorldChannels.java:20-24`）；改为每个副本申领 | `SceneIDGen` |
-| 回收检查周期 | 1 s（复用排空推进任务，不可配） | xm-scene | — | `InstanceCheckIntervalSeconds` 30 s |
+| `game.scene.instance.mirror-idle-timeout` | 30 s | game-scene | ≥ 0；0 = 用 `idle-timeout` | `MirrorIdleTimeoutSeconds` |
+| `game.scene.instance.idle-timeout` | 300 s | game-scene | ≥ 0；0 = 副本（及回落到它的镜像）不自动回收 | `InstanceIdleTimeoutSeconds` |
+| `game.scene.instance.reclaim-grace` | 30 s | game-scene | ≥ 10 s（不短于 5.1 软预占 TTL / login 归属等待的口径） | 无（Java） |
+| `game.scene.instance.max-per-node` | 200 | game-scene | 1..10000 | 无（基线只有 Agones 房间数） |
+| `game.scene.instance.max-per-creator` | 3 | game-scene | 1..100 | 无 |
+| `game.scene.switch-resolve-timeout` | 4 s | game-scene | 复用 5.2（> Dubbo 3 s） | 在途槽 TTL 11 s |
+| `game.scene.scene-manager-url` | `tri://127.0.0.1:20882` | game-scene | 复用 5.2 | — |
+| `GAME_ADMIN_TOKEN`（环境变量） | 无（不设则管理口 503） | game-scene | — | — |
+| `game.run-mode` | prod | game-scene | 管理口只在 dev / test 放行 | — |
+| Dubbo 提供方超时 | 3000 ms | game-scene-manager | 复用（`application.yaml:94`） | SM `Timeout` 8000 |
+| 发号租约 | `NodeTypes.SCENE_MANAGER`，作用域 0，worker 1..1023，TTL 15 s | game-scene-manager | 复用（`WorldChannels.java:20-24`）；改为每个副本申领 | `SceneIDGen` |
+| 回收检查周期 | 1 s（复用排空推进任务，不可配） | game-scene | — | `InstanceCheckIntervalSeconds` 30 s |
 
 **不移植**：`InstanceCheckIntervalSeconds`、`MirrorSourceNodeLoadCap`、`MirrorDedupBySource`、`StrictNodeTypeSeparation`、负载权重、Agones（§10.2）。
 
@@ -925,8 +925,8 @@ scene 侧不新增 Redis 或 MySQL I/O；Netty I/O 线程与逻辑线程上没�
 
 ### 7.3 本机切片
 
-`tools/local/start-slice.sh` 为 robot 提速可用环境变量把 `mirror-idle-timeout` 调到 5 s、`reclaim-grace` 调到 10 s（宽限下限），并设 `XM_RUN_MODE=dev`、`XM_ADMIN_TOKEN`。
-双节点（5.2 的 `XM_SCENE_NODES=2`）用于跨节点加入实例。
+`tools/local/start-slice.sh` 为 robot 提速可用环境变量把 `mirror-idle-timeout` 调到 5 s、`reclaim-grace` 调到 10 s（宽限下限），并设 `GAME_RUN_MODE=dev`、`GAME_ADMIN_TOKEN`。
+双节点（5.2 的 `GAME_SCENE_NODES=2`）用于跨节点加入实例。
 
 ---
 
@@ -951,14 +951,14 @@ scene 侧不新增 Redis 或 MySQL I/O；Netty I/O 线程与逻辑线程上没�
 
 | 进程 | 指标（Prometheus 名） | 类型 | 标签 | 基线对应 |
 |---|---|---|---|---|
-| scene | `xm_scene_instances` | Gauge（逻辑线程在变化后推绝对值） | `kind` = mirror / dungeon；`state` = active / reclaiming / draining | 无 |
-| scene | `xm_scene_instance_lifecycle_total` | Counter | `kind`；`event` = created / rejected / reclaim_started / revived / cascade_started / destroyed_idle / destroyed_cascade / destroyed_admin | `instance_destroyed_total`（Java 没有 explicit RPC / node_death / source_migrated / source_scaled_in） |
-| scene | `xm_scene_mirror_requests_total` | Counter | `result` = accepted / bad_source / bad_mirror_config / source_draining / not_accepting / node_cap / creator_cap | 无（同步结局） |
-| scene | `xm_scene_mirror_resolves_total` | Counter | `result` = created / rejected / error / stale / wrong_node / source_moved / create_rejected | 无（异步结局） |
-| scene | `xm_scene_channels` | Gauge（5.1） | 改为只计 WORLD | — |
-| scene | `xm_scene_players` | Gauge（现有） | 镜像居民计入源地图；副本居民计入 17–19 | — |
-| scene-manager | `xm_scene_manager_instance_seconds` | Timer | `kind` = mirror / dungeon；`result` = ok / bad_request / no_lease / error | `mirror_colocate_total`（Java 恒共置，不另设） |
-| scene-manager | `xm_scene_manager_switch_seconds` | Timer（5.2） | 不变；显式号命中已回收的实例计 `not_found` | `enter_scene_rejected_total{scene_gone}` |
+| scene | `game_scene_instances` | Gauge（逻辑线程在变化后推绝对值） | `kind` = mirror / dungeon；`state` = active / reclaiming / draining | 无 |
+| scene | `game_scene_instance_lifecycle_total` | Counter | `kind`；`event` = created / rejected / reclaim_started / revived / cascade_started / destroyed_idle / destroyed_cascade / destroyed_admin | `instance_destroyed_total`（Java 没有 explicit RPC / node_death / source_migrated / source_scaled_in） |
+| scene | `game_scene_mirror_requests_total` | Counter | `result` = accepted / bad_source / bad_mirror_config / source_draining / not_accepting / node_cap / creator_cap | 无（同步结局） |
+| scene | `game_scene_mirror_resolves_total` | Counter | `result` = created / rejected / error / stale / wrong_node / source_moved / create_rejected | 无（异步结局） |
+| scene | `game_scene_channels` | Gauge（5.1） | 改为只计 WORLD | — |
+| scene | `game_scene_players` | Gauge（现有） | 镜像居民计入源地图；副本居民计入 17–19 | — |
+| scene-manager | `game_scene_manager_instance_seconds` | Timer | `kind` = mirror / dungeon；`result` = ok / bad_request / no_lease / error | `mirror_colocate_total`（Java 恒共置，不另设） |
+| scene-manager | `game_scene_manager_switch_seconds` | Timer（5.2） | 不变；显式号命中已回收的实例计 `not_found` | `enter_scene_rejected_total{scene_gone}` |
 
 勾稽：`mirror_requests{accepted}` = Σ `mirror_resolves{*}` + 在途数；`mirror_resolves{created}` = `instance_lifecycle{kind = mirror, event = created}`；
 每个 `created` 最终恰好对应一个 `destroyed_*`（或停服）。
@@ -995,7 +995,7 @@ scene 侧不新增 Redis 或 MySQL I/O；Netty I/O 线程与逻辑线程上没�
 | R1 | 镜像与源同配置号：`ChannelSelector` 会把登录、5.2 只带地图的换图、5.1 预占分进镜像 | 候选加 `kind ∈ {UNSPECIFIED, WORLD}`（§6.6） |
 | R2 | `applyChannelPlan` 把计划外的本地场景转排空，实例一建出来就被当孤儿排空 | 只对 WORLD（§6.9） |
 | R3 | `leastLoadedActive` / `relocationTarget` / `resolveSwitchTarget` 会选中别人的镜像；身在镜像里发「只带当前地图」的 63 会因并列留在镜像（D17） | 只把 WORLD 当频道；实例里只带地图必回 WORLD（§6.9） |
-| R4 | `xm.scene.channels` 把实例数成频道 | 只计 WORLD，实例另起 gauge |
+| R4 | `game.scene.channels` 把实例数成频道 | 只计 WORLD，实例另起 gauge |
 | R5 | 发号租约只在可竞选的副本上申领，`leader-eligible = false` 的副本发不出实例号 | 租约挪成独立 bean，每个副本都申领（§6.6） |
 | R6 | 目录 `scenes` 随实例数增长，login 每次分配都整读目录（`SceneAssigner.java:73`；`NodeDirectory.list` 是 `readAllValues`） | 每节点 / 每创建者上限（D19）；条目只加两个字段（每条约 30 B，200 条约 6 KB / 节点）；超出时把实例拆进单独的目录键（Q10） |
 | R7 | 滚动升级：旧 scene-manager 没有种类过滤 | 先升级 scene-manager，再升级 scene；PARITY 与发布说明写明顺序 |
@@ -1019,7 +1019,7 @@ scene 侧不新增 Redis 或 MySQL I/O；Netty I/O 线程与逻辑线程上没�
 | E9 | `config.go:131`「0 = never auto-destroy (default)」；`createscenelogic.go:267-269`、`sm.yaml:100-102`「镜像每次进入重置 NPC」 | 缺省是 300；没有重置 NPC 的代码，`OnSceneCreated` 只做 Agones 计数（`scene_event_handler.cpp:30-46`） |
 | E10 | scene-manager 分区稿「基线组队跟随可以跨节点（`player_team.cpp:475-484`）」 | 跨节点**不跟**（`player_team.cpp:434-440`）；Java 4.3 同样只在本节点 |
 | E11 | Java 映射分区稿「最后一人离开后约 1 s 就被删」 | 窗口取决于扫描相位，约 0–30 s（§4.2）；「约 1 s」只是其中一端 |
-| E12 | 5.2 规格 §5.4 / §5.13「提供方超时 `application.yaml:68`」 | 现在是 `xm-scene-manager/src/main/resources/application.yaml:94`（值仍 3000） |
+| E12 | 5.2 规格 §5.4 / §5.13「提供方超时 `application.yaml:68`」 | 现在是 `game-scene-manager/src/main/resources/application.yaml:94`（值仍 3000） |
 | E13 | `SwitchTargetSelector.java:25-27`「地图必须是世界地图（副本 / 镜像是私有实例…）」 | 镜像的配置号**就是**世界地图，这条挡不住镜像，要靠 `ChannelSelector` 的种类过滤（R1） |
 | E14 | `scene-manager-match.md:149`「Java 场景随节点启动创建、随节点停服消失」 | 5.1 起按频道计划建（`SceneWorld.java:278-340`） |
 | E15 | `scene-channels-spec.md:1078` D15「5.3 引入」用途分池 | 5.3 不引入（§10.1 D15） |
@@ -1129,13 +1129,13 @@ B1（错误应答回显 `creator_ids`）、B2 / B3（镜像创建登记在途、
 4. **陈旧结果**：玩家离开 → 丢弃、不建；token 不符 → 丢弃；玩家被 5.1 排空改派走 → 23 `{3023}`、不建；号本地已存在 → 23 `{3023}` + ERROR。
 5. **按 id 加入本地镜像**：79 的 creators 仍只有创建者；镜像里原有的人收到 21；加入者收到含他们的 47；指定的 conf 不符 → 3005；进回收宽限 / 排空中的镜像 → 3023。
 6. **离开**：镜像里只带同图 → 进 WORLD 频道（人数并列也不留在镜像）、坐标保留；只带别的图 → 出生点；`scene_id = 源` → 回源频道。
-7. **5.1 回归（R1–R4）**：应用计划不排空实例；`leastLoadedActive` / 排空改派 / 进场重定向不选实例；计划里的 MIRROR / DUNGEON 记录被拒；`xm.scene.channels` 只计 WORLD；
-   `xm.scene.players` 把镜像居民计入源地图。
+7. **5.1 回归（R1–R4）**：应用计划不排空实例；`leastLoadedActive` / 排空改派 / 进场重定向不选实例；计划里的 MIRROR / DUNGEON 记录被拒；`game.scene.channels` 只计 WORLD；
+   `game.scene.players` 把镜像居民计入源地图。
 8. **空闲回收**：29.999 s 保持 ACTIVE、30 s 进入宽限并补发目录；宽限 29.999 s 保留、30 s 销毁；计时从最后一人离开起；有人进入清零；在途进场挡住计时与销毁；
    宽限内 `PlayerEnter` → 复活并进入（计 `revived`、目录补发 ACTIVE）；宽限内本地 63 显式进入 → 3023，组队跟随跳过；镜像超时 0 回落实例超时；两者都 0 永不回收；
    DUNGEON 用 300 s。
 9. **随机交错**：假时钟下随机交错「进入 / 离开 / 在途进场开始与取消 / 时间推进」2000 轮，不变量：有人或有在途进场的实例从不被销毁；实例被销毁后目录里没有它；
-   `xm_scene_instances` 与本地实例数一致。
+   `game_scene_instances` 与本地实例数一致。
 10. **级联**：源频道（计划排空 / 孤儿图）排空完毕被销毁 → 镜像转 CASCADE → 居民同图改派、坐标保留 → 空了销毁；孤儿图 → 默认大世界出生点；源被缩容回滚（ACTIVE）→ 镜像不动；
     兜底检查（源不在本地）同样级联。
 11. **DUNGEON**：`createInstance` 的 conf 必须等于 `Dungeon.scene_id`；79 带 `dungeon_config_id`、creators 为空；进入落 BaseScene 出生点；离开回世界地图出生点；
@@ -1144,7 +1144,7 @@ B1（错误应答回显 `creator_ids`）、B2 / B3（镜像创建登记在途、
 13. **43**：在镜像里请求 → 31 里是镜像的 info。
 14. **字节级**：固定输入 `{conf = 1, scene_id = 0x0102030405060708, mirror = 1, creators = {42: true}}`，断言 `EnterSceneS2C` 序列化为
     `0A 14 08 01 10 88 8E 98 A8 C0 E0 80 81 01 18 01 2A 04 08 2A 10 01`（防止漏写 creators、写成 false 或 dungeon 非 0）。
-15. **管理口**（`SceneAdminControllerTest`）：prod → 403；缺令牌 / 令牌错 → 401 或 503；缺 `X-Xm-Operator` → 400；Dungeon 不存在 → 3005；取号失败 → 1003；成功 → 号与 conf；
+15. **管理口**（`SceneAdminControllerTest`）：prod → 403；缺令牌 / 令牌错 → 401 或 503；缺 `X-Game-Operator` → 400；Dungeon 不存在 → 3005；取号失败 → 1003；成功 → 号与 conf；
     销毁 WORLD → 3005、不存在 → 3000、重复 → 0。
 16. **配置**（`SceneNodePropertiesTest`）：缺省值；`reclaim-grace < 10 s` 拒启；上限越界拒启。
 
@@ -1158,7 +1158,7 @@ B1（错误应答回显 `creator_ids`）、B2 / B3（镜像创建登记在途、
 - `DirectoryMirrorSourcesTest`：多节点；排空中的镜像也算源；UNSPECIFIED / WORLD 条目不算。
 - 规划器：`WorldAutoscalerTest`、`WorldRebalancePlannerTest` 用真实目录跑 §12.1 对应行；`WorldChannelControlPlaneTest`：`leader-eligible = false` 时仍申领发号租约。
 
-### 12.4 真 Redis 集成测试（`-Dxm.it.redis=redis://127.0.0.1:6379`）
+### 12.4 真 Redis 集成测试（`-Dgame.it.redis=redis://127.0.0.1:6379`）
 
 - `NodeDirectory` 往返新字段（`kind`、`source_scene_id`），旧条目（无字段）按 UNSPECIFIED 读。
 - scene 发布、scene-manager 读取后，`DirectoryMirrorSources` 能认出镜像源；领导者一拍内缩容跳过它（沿用 `WorldChannelRedisIntegrationTest` 的装配）。
@@ -1172,7 +1172,7 @@ B1（错误应答回显 `creator_ids`）、B2 / B3（镜像创建登记在途、
 3. 关闭 scene-manager 再发 63 镜像：应答 `{0}` → 4 s 内 23 `{1003}`。
 4. 管理口建副本 → robot 按号进入 → 管理口销毁 → 默认主世界出生点。
 
-**双节点**（5.2 的 `XM_SCENE_NODES=2`）：
+**双节点**（5.2 的 `GAME_SCENE_NODES=2`）：
 5. 节点 2 上的玩家按号加入节点 1 上的镜像（5.2 交出）→ 79 镜像信息、库里 epoch 加一。
 6. 宽限复活：把镜像超时调短、宽限调长，在镜像进入宽限后从节点 2 按号加入（5.2 交出在途）→ 复活成功；反过来宽限调到下限、人为拖慢交出 → F10。
 7. 管理口在节点 1 建副本，节点 2 的玩家按号加入。
@@ -1196,11 +1196,11 @@ Java robot 新增两个场景（`RobotOptions.Scenario` 加 `MIRROR`、`DUNGEON`
 8. 等 `mirror-idle-timeout + reclaim-grace + 2 s`（受 `instance-wait-ms` 约束）后 B 发 63 `{scene_id = 第 1 步的镜像号}` → 没有 79；同节点同步 `{3023}`，或（5.2 落地后、号已不在本地）
    `{0}` 再 23 `{3023}`，两者都接受。
 9. 发 63 `{mirror_config_id = 999, scene_id = 0}`：strict → `{3005}`；lenient → `{0}` + 79。
-10. 抓指标：scene `xm_scene_instance_lifecycle_total{kind="mirror",event="created"}` 增加、`{event="destroyed_idle"}` 增加、`xm_scene_instances{kind="mirror",state="active"}`
-    回到 0；scene-manager `xm_scene_manager_instance_seconds_count{kind="mirror",result="ok"}` 增加。
-11. 可选（需要 xm-team）：队长进镜像，同节点队员收到镜像的 79（并入 `team` 场景亦可）。
+10. 抓指标：scene `game_scene_instance_lifecycle_total{kind="mirror",event="created"}` 增加、`{event="destroyed_idle"}` 增加、`game_scene_instances{kind="mirror",state="active"}`
+    回到 0；scene-manager `game_scene_manager_instance_seconds_count{kind="mirror",result="ok"}` 增加。
+11. 可选（需要 game-team）：队长进镜像，同节点队员收到镜像的 79（并入 `team` 场景亦可）。
 
-**`dungeon`**（需要 `XM_RUN_MODE=dev` 与 `XM_ADMIN_TOKEN`）：
+**`dungeon`**（需要 `GAME_RUN_MODE=dev` 与 `GAME_ADMIN_TOKEN`）：
 1. 管理口建 DUNGEON 1 → `{tip 0, scene_id, scene_config_id = 17}`。
 2. robot 发 63 `{scene_id}` → `{0}` → 79 的 `scene_config_id = 17`、`dungeon_config_id = 1`、`mirror_config_id = 0`、creators 为空；自己的 21 坐标是 BaseScene 17 的出生点 (180, 200, 0)。
 3. robot 发 63 `{scene_config_id = 17}` → 不会留在副本：5.2 之前同步 `{3023}`，之后 `{0}` + 23 `{3023}`（17 不是世界地图）。
@@ -1213,8 +1213,8 @@ Java robot 新增两个场景（`RobotOptions.Scenario` 加 `MIRROR`、`DUNGEON`
 
 ### 12.7 构建
 
-改了 `xm-api` 的 proto 后按 `AGENTS.md` §4 全量 `./mvnw -B -DskipTests install`，再跑 `./mvnw -B -pl xm-scene,xm-scene-manager -am test`；真 Redis 集成测试加
-`-Dxm.it.redis=redis://127.0.0.1:6379`。没有运行证据时不得声称「编译通过」「测试通过」。
+改了 `game-api` 的 proto 后按 `AGENTS.md` §4 全量 `./mvnw -B -DskipTests install`，再跑 `./mvnw -B -pl game-scene,game-scene-manager -am test`；真 Redis 集成测试加
+`-Dgame.it.redis=redis://127.0.0.1:6379`。没有运行证据时不得声称「编译通过」「测试通过」。
 
 ---
 
@@ -1224,7 +1224,7 @@ Java robot 新增两个场景（`RobotOptions.Scenario` 加 `MIRROR`、`DUNGEON`
 
 开放问题 Q1–Q13 全部按 §11 的推荐答案落地，D1–D19 全部采纳。
 
-**契约（xm-api）**
+**契约（game-api）**
 - `world_channel.proto`：`ChannelKind` 追加 `CHANNEL_KIND_MIRROR = 2`、`CHANNEL_KIND_DUNGEON = 3`。
 - `node_directory.proto` `SceneEntry`：追加 `ChannelKind kind = 5`、`uint64 source_scene_id = 6`（同一文件里的 `BattleNodeInfo` 属于批次 6.2）。
 - `scene_directory.proto`：`CreateInstanceRequest{zone_id 1, requester_scene_node_id 2, player_id 3, kind 4, source_scene_id 5, scene_config_id 6,
@@ -1237,26 +1237,26 @@ Java robot 新增两个场景（`RobotOptions.Scenario` 加 `MIRROR`、`DUNGEON`
 - `InstanceIdIssuer`（无状态）：参数错回 3005；`NodeAvailability` 判发起节点不接新实例时回 3000（5.5 钩子，5.3 装配 `ALL`）；放置恒为发起节点；
   发号租约无效回 `NO_LEASE`，提供方以异常完成 future（Q12）。不读也不写 Redis。
 - `SceneIdAllocator`（R5）：发号租约挪成独立 bean，**每个副本都申领**，主世界频道控制面与实例取号共用；租约确认丢失时回调监听（控制面借此让出领导锁）。
-- `SceneDirectoryProvider.createInstance`：指标 `xm.scene_manager.instance{kind = mirror|dungeon|other, result = ok|bad_request|node_unavailable|no_lease|error}`
-  （Prometheus `xm_scene_manager_instance_seconds`），异常只带概要。
+- `SceneDirectoryProvider.createInstance`：指标 `game.scene_manager.instance{kind = mirror|dungeon|other, result = ok|bad_request|node_unavailable|no_lease|error}`
+  （Prometheus `game_scene_manager_instance_seconds`），异常只带概要。
 - `ChannelSelector` 候选只认主世界频道（R1）；`DirectoryView.Scene` 带 `kind / sourceSceneId`；`WorldChannelPlanner` 每拍用 `DirectoryMirrorSources.of(目录)` 推导镜像源。
 - R7：滚动升级顺序写在 `SceneDirectoryService` 类注释、`node_directory.proto`、`ChannelSelector` 类注释、两个进程的 `application.yaml`。
 
-**xm-scene（只做与 5.1 逻辑的隔离，建实例本身见 13.2）**
+**game-scene（只做与 5.1 逻辑的隔离，建实例本身见 13.2）**
 - `SceneKind{WORLD, MIRROR, DUNGEON}`（与 `ChannelKind` 互转）；`Scene` 带 `kind / sourceSceneId / isWorldChannel()`。
 - 低层登记 `SceneWorld.addScene(SceneInfoComp, SceneKind, long source)`（包内可见，不做业务校验；本地重号抛异常），供 §6.8 的 `createInstance(spec)` 校验后调用。
-- `sceneEntries` 带种类与源；`xm.scene.channels` 只计 WORLD（R4）；`applyChannelPlan` 只把计划外的 **WORLD** 转排空（R2），计划里与本地实例同号的记录一律拒绝；
+- `sceneEntries` 带种类与源；`game.scene.channels` 只计 WORLD（R4）；`applyChannelPlan` 只把计划外的 **WORLD** 转排空（R2），计划里与本地实例同号的记录一律拒绝；
   `leastLoadedActive` 只看 WORLD（排空改派、进场重定向、只带地图的 63），身在实例里只带当前地图必去主世界频道、不留在实例（R3）。
 
-**测试证据**：`-pl xm-api,xm-discovery,xm-scene-manager,xm-scene install`，带 `-Dxm.it.redis` 与 `-Dxm.it.mysql` 全部通过（xm-scene 752 个用例、0 失败）。
+**测试证据**：`-pl game-api,game-discovery,game-scene-manager,game-scene install`，带 `-Dgame.it.redis` 与 `-Dgame.it.mysql` 全部通过（game-scene 752 个用例、0 失败）。
 新增 / 补充：`InstanceIdIssuerTest`、`SceneIdAllocatorTest`、`SceneIdAllocatorRedisIntegrationTest`（两个副本、一个 `leader-eligible = false`，并发取号 8000 个不重号；
 租约被夺后转 `NO_LEASE`）、`DirectoryMirrorSourcesTest`、`SceneDirectoryProviderTest`、`ChannelSelectorTest`、`SceneAssignerTest`、`SwitchTargetSelectorTest`、
 `WorldAutoscalerTest`、`WorldRebalancePlannerTest`、`WorldChannelConfigurationTest`、`WorldChannelRedisIntegrationTest`（节点经 Redis 目录上报镜像 → 种类不丢、
-login 不分进镜像、领导者一拍内缩容跳过镜像源）、xm-scene `InstanceChannelIsolationTest`。双节点切片 `smoke` / `reconnect` / `cross-node` 通过，各进程 ERROR 行为 0。
+login 不分进镜像、领导者一拍内缩容跳过镜像源）、game-scene `InstanceChannelIsolationTest`。双节点切片 `smoke` / `reconnect` / `cross-node` 通过，各进程 ERROR 行为 0。
 
 ### 13.2 scene 节点部分
 
-**xm-scene**（全部状态只在场景逻辑线程读写，没有新增 Redis / MySQL I/O）
+**game-scene**（全部状态只在场景逻辑线程读写，没有新增 Redis / MySQL I/O）
 - `Scene`：`DrainCause{NONE, PLAN, IDLE, CASCADE, ADMIN}`、`drainingSinceNanos`、`emptySinceNanos`（哨兵 `Long.MIN_VALUE`，单调时钟可取任意值）；
   5.1 的 `setDraining` 记 `PLAN`。`InstanceSpec`（`toInfo()` 即 79 / 31 的 `scene_info`，镜像 `putCreators(创建者, true)`）。
 - `SceneTables.mirrorExists`（按 uint32 位型查，`≥ 2^31` 恒无）/ `dungeonSceneConfigId`；`ConfigSceneTables` 读 Mirror / Dungeon 表。
@@ -1273,12 +1273,12 @@ login 不分进镜像、领导者一拍内缩容跳过镜像源）、xm-scene `I
   `destroyScene` 销毁 WORLD 时把以它为源、未在 CASCADE / ADMIN 中的镜像（含 IDLE 宽限中的）转 CASCADE 并在同一次推进里改派、销毁。
   `destroyInstance` 只经 dev 管理口（WORLD / 0 → 3005，不在 → 3000，已在 CASCADE / ADMIN → 0）。
 - dev 管理口（§6.13）：`SceneAdminController`（`/admin/scene/instance/{create,destroy}`，protobuf 二进制；非 dev / test 403，先于解析请求体）+
-  `SceneAdminAuthFilter`（`XM_ADMIN_TOKEN` 常数时间比对、未配 503、错 401、缺 / 非法操作人 400、审计行、`xm.scene.admin.requests{op, status}`）；
+  `SceneAdminAuthFilter`（`GAME_ADMIN_TOKEN` 常数时间比对、未配 503、错 401、缺 / 非法操作人 400、审计行、`game.scene.admin.requests{op, status}`）；
   建副本等结果超时时撤掉结果（逻辑线程据此不取号 / 不建 / 建好交不回去就当场销毁，不留没人知道号的副本）。
-- 配置 `xm.scene.instance.*`（`mirror-idle-timeout` 30s / `idle-timeout` 300s / `reclaim-grace` 30s ≥ 10s / `max-per-node` 200 / `max-per-creator` 3，
-  绑定时校验、不满足拒启；前三项可用 `XM_SCENE_MIRROR_IDLE_TIMEOUT` / `XM_SCENE_INSTANCE_IDLE_TIMEOUT` / `XM_SCENE_INSTANCE_RECLAIM_GRACE` 覆盖）。
-- 指标（§8.2）：`xm_scene_instances{kind, state}`、`xm_scene_instance_lifecycle_total{kind, event}`、`xm_scene_mirror_requests_total{result}`、
-  `xm_scene_mirror_resolves_total{result}` 启动即注册；`xm_scene_channels` 只计 WORLD，镜像居民计入源地图的 `xm_scene_players`。
+- 配置 `game.scene.instance.*`（`mirror-idle-timeout` 30s / `idle-timeout` 300s / `reclaim-grace` 30s ≥ 10s / `max-per-node` 200 / `max-per-creator` 3，
+  绑定时校验、不满足拒启；前三项可用 `GAME_SCENE_MIRROR_IDLE_TIMEOUT` / `GAME_SCENE_INSTANCE_IDLE_TIMEOUT` / `GAME_SCENE_INSTANCE_RECLAIM_GRACE` 覆盖）。
+- 指标（§8.2）：`game_scene_instances{kind, state}`、`game_scene_instance_lifecycle_total{kind, event}`、`game_scene_mirror_requests_total{result}`、
+  `game_scene_mirror_resolves_total{result}` 启动即注册；`game_scene_channels` 只计 WORLD，镜像居民计入源地图的 `game_scene_players`。
 - `SceneDirectoryPublisher`：立即补发改为单飞（标脏 + 至多一个发布任务、不加锁不碰 Redis），逻辑线程上可调。
 
 **robot**：`mirror`、`dungeon` 子命令（`InstanceOptions`：`--mirror-config-id`、`--instance-wait-ms`、`--expect-mirror-validation`、`--scene-admin-url`、
@@ -1286,9 +1286,9 @@ login 不分进镜像、领导者一拍内缩容跳过镜像源）、xm-scene `I
 对这一结局最多重试 3 次（双节点切片实测：每一轮第一次按号加入都回 23 {3023}——镜像建好约 25 ms 以上之后才进目录，重试是每次通过的一部分，不是偶发兜底；第二次即成功）。`tools/local/start-slice.sh` 缺省把镜像空置超时调到 5s、
 回收宽限调到 10s（§7.3）。
 
-**测试证据**：`-pl xm-api,xm-scene-manager,xm-scene,xm-robot install`，带 `-Dxm.it.redis` 与 `-Dxm.it.mysql` 全部通过：xm-api 38、xm-scene-manager 232、
-xm-scene 834（1 个基准测试跳过）、xm-robot 201，0 失败。新增 / 补充：`MirrorSceneTest`（§12.2 第 1–6、13、14 条）、`InstanceLifecycleTest`（第 8–11 条，
+**测试证据**：`-pl game-api,game-scene-manager,game-scene,game-robot install`，带 `-Dgame.it.redis` 与 `-Dgame.it.mysql` 全部通过：game-api 38、game-scene-manager 232、
+game-scene 834（1 个基准测试跳过）、game-robot 201，0 失败。新增 / 补充：`MirrorSceneTest`（§12.2 第 1–6、13、14 条）、`InstanceLifecycleTest`（第 8–11 条，
 含 2000 轮随机交错）、`SceneAdminControllerTest` / `SceneAdminAuthFilterTest`（第 15 条）、`SceneNodePropertiesTest`（第 16 条）、`TeamFollowServiceTest`
 （第 12 条）、`SceneMetricsTest`、`SceneDirectoryPublisherTest`、`SceneManagerSwitchTargetsTest`、`ClientRequestHandlerTest`；robot `InstanceOptionsTest`、
-`InstanceChecksTest`、`InstanceMetricsTest`、`SendPacerTest`、`SceneAdminClientTest`（字段号用 xm-api 生成类钉住）。本机切片：单节点 `mirror`（47 项）、
+`InstanceChecksTest`、`InstanceMetricsTest`、`SendPacerTest`、`SceneAdminClientTest`（字段号用 game-api 生成类钉住）。本机切片：单节点 `mirror`（47 项）、
 `dungeon`（31 项）通过；双节点 `cross-node`（41 项，含跨节点加入镜像）、`mirror`、`dungeon`、`smoke` 通过；各进程 ERROR 行为 0。

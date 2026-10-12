@@ -3,7 +3,7 @@
 范围：`go/db/**`、`go/data_service/**`、`go/schemamigrate/**`、`tools/merge_zone/**`、`tools/data_consistency_check/**`、
 `proto/common/database/**`、`proto/data_service/**`、`generated/data/mysql_database_table_list.json`；
 为看清存盘 / 加载链路，另读了 C++ scene `player_lifecycle.cpp`（SavePlayerToRedisImpl）、`player_database_loader.cpp`、
-`core/system/redis.cpp`（周期存盘）与 go/login `dataloader`。Java 侧对照 `xm-player-store`、`xm-scene/storage`、`xm-login`。
+`core/system/redis.cpp`（周期存盘）与 go/login `dataloader`。Java 侧对照 `game-player-store`、`game-scene/storage`、`game-login`。
 
 ## 区域概述
 
@@ -15,7 +15,7 @@ go/db 按 key 有序消费（子分片、合并、applied 游标、跨实例排�
 go/data_service 是全局服务：全局库（号段 `id_segment`、全服角色名 `player_name`、`transaction_log`、`player_snapshot`、回档审计）、
 mapping Redis 里的 `player:zone` 归属映射 / 合服围栏，以及一组 GM 快照 / 回档 / 回收 RPC（回档实际未接线、回收只做 dry-run）。
 tools/merge_zone 是维护窗口合服 + 在线搬库的大工具；data_consistency_check 是跨区引用巡检。
-Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `player`：等级 / 场景 / 坐标 / 外观），离场时同步写回 MySQL，
+Java 版只有 `game` 一个库两张表（`account`、结构化列的 `player`：等级 / 场景 / 坐标 / 外观），离场时同步写回 MySQL，
 用 `owner_epoch + owner_released + owner_lease_until` 做归属围栏；没有 Kafka、Redis 数据缓存层、周期存盘、组件 blob、号段、快照 / 回档、合服。
 
 ## 功能
@@ -27,7 +27,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: player-load-path、player-save-pipeline
 - behavior: 一行一个玩家，每个组件一列 proto blob：transform、uint64/uint32 通用组件、skill_list、BaseAttributes（health/mana 等）、level、currency（含补缴 debts）、stress_test_probe、merge_state、attribute（加点）、pet、bag、mission、profile（名字只读副本）、asset_op_ledger、settlement_ledger。加载时：health==0 按职业初值复活并回满到二级属性上限；等级超上限压回；技能表清洗；资产账本校验失败只关该玩家资产通道（挂 Invalid 组件）不阻断登录。
 - internal: proto2mysql 按 message 建表（子消息存 base64 MEDIUMBLOB）；加列纪律=取下一个空闲字段号且声明在末尾（merge_zone 按列名 `INSERT…SELECT` 依赖列序）；资产与账本必须同记录同一次落盘（不变量 I3）。Java 需要：一张能承载各组件状态的玩家记录（结构化列或 proto blob 列），随各玩法逐步加列。
-- java: partial — `xm-player-store/src/main/resources/db/xm-player-schema.sql` 的 `player` 只有 class/gender/appearance/level/scene_config_id/pos_xyz（朝向、血蓝、货币、技能、背包、任务、宠物、加点、账本都没有）；`PlayerRow.java`
+- java: partial — `game-player-store/src/main/resources/db/game-player-schema.sql` 的 `player` 只有 class/gender/appearance/level/scene_config_id/pos_xyz（朝向、血蓝、货币、技能、背包、任务、宠物、加点、账本都没有）；`PlayerRow.java`
 - size: M（容器与编解码本身；各组件随各自功能落地）
 - robot: robot_smoke（进场即读）、robot.data_stress.yaml
 - hazards: player_database_1 只有压测探针、player_centre_database 全仓无读写者（只 debug_fetch 认识），是死表；`profile_component` 名字副本可能缺失，读侧必须回源 BatchGetPlayerName；CopyFrom(currency) 必须在账本 / 欠款写入顺序之外，否则抹掉补缴欠款（C++ 注释踩过）。
@@ -51,7 +51,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: player-data-record、owner-epoch-write-fence、db-task-consumer-ordering、placement-routing
 - behavior: 存盘 = 整份 PlayerAllData 序列化 → Redis 裸 SET（带 epoch 时 Lua CAS）→ player_database 与 player_database_1 各发一条 `DBTask{key=player_id, op=write, msg_type=全名, body, task_id, owner_epoch}` 到 `db_task_zone_{home_zone}`（世代号>1 时加 `_g{N}`；home_zone 未知回落进程 zone 并计数）。go/db 写 MySQL 成功后回写 `{MsgType}:{id}` 缓存（TTL DefaultTTLSeconds），缓存写失败则任务整体重试（不推进游标）。离场、周期、交接前都走这条。
 - internal: Kafka 生产 key=player_id；login / db 两边分区数镜像且启动 fail-closed；落库是幂等整行覆盖（proto2mysql Save = upsert）。Java 需要：离场写回 + 周期写回 + 失败不丢的持久化重试（Java 惯用可选：存储线程池 + 本地持久化重试，或 Kafka/spring-kafka）。
-- java: partial — `xm-scene/.../storage/StoragePlayerRepository.java` 离场时在有界存储线程池上同步 `saveStateAndRelease`（带 epoch 围栏），瞬时故障 5s 内退避重试 ≤3 次，之后只记 ERROR + 计数；没有周期存盘、没有缓存层、没有持久化的失败队列
+- java: partial — `game-scene/.../storage/StoragePlayerRepository.java` 离场时在有界存储线程池上同步 `saveStateAndRelease`（带 epoch 围栏），瞬时故障 5s 内退避重试 ≤3 次，之后只记 ERROR + 计数；没有周期存盘、没有缓存层、没有持久化的失败队列
 - size: M
 - robot: robot.data_stress.yaml（全链路收敛）、robot.currency-crash.yaml（崩溃窗口快照）
 - hazards: Kafka send 失败只打日志（Redis 已写、MySQL 可能永远落后，直到下一次存盘）；`where_case` 是原样拼进 SQL 的 WHERE 串（生产者是内部服务才安全）；DBTask 不带版本号，MySQL 的新旧只靠分区内 offset + epoch 判断。
@@ -75,7 +75,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: player-save-pipeline
 - behavior: scene_manager 每次归属变更 INCR `player:{id}:owner_epoch`；scene 存 Redis 用 Lua 比对 epoch，不等即拒并回调 HandlePlayerSaveRejected（被拒 epoch ≠ 当前缓存 epoch → 只是旧代在途写，用新 epoch 重存；相等 → 本节点被废黜）；go/db 对 write 任务比对「已落库的最大 epoch」：小于即丢弃并计 stale_owner_write_rejected，等于 / 大于放行并只升不降地推进；epoch=0 为兼容窗口放行。合并写时 epoch 不同的两条写互为段边界、不互相 supersede。
 - internal: Redis Lua CAS + 消费端 applied-epoch 键（永久、无 TTL）。Java 的等价物是 MySQL 行级 `owner_epoch` + `owner_released` + `owner_lease_until`（夺权只在已释放或租约过期时成功）。
-- java: done — `PlayerStore.claimOwnership / saveStateAndRelease / releaseOwnership / renewOwnerLeases`、`PlayerMapper` 各条带 `WHERE owner_epoch = ?` 的 SQL、`xm-scene/.../ownership/OwnerLeaseRenewer.java`（10s 续约，续不上即丢实例踢会话）；db-migrations.md M2；PARITY「玩家数据归属」行
+- java: done — `PlayerStore.claimOwnership / saveStateAndRelease / releaseOwnership / renewOwnerLeases`、`PlayerMapper` 各条带 `WHERE owner_epoch = ?` 的 SQL、`game-scene/.../ownership/OwnerLeaseRenewer.java`（10s 续约，续不上即丢实例踢会话）；db-migrations.md M2；PARITY「玩家数据归属」行
 - size: M
 - robot: robot_smoke（老角色重登走围栏自增）
 - hazards: mmorpg 比对的是「已落库最大 epoch」而非当前铸造值，否则交接前的最后一笔合法写会被误杀；markAppliedOwnerEpoch 失败只记日志（守卫落后一格）；Java 租约依赖墙钟、要求 NTP（偏差需远小于 30s）。
@@ -123,7 +123,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: home-zone-registry、db-task-consumer-ordering
 - behavior: 每条读写任务一次 MGET `player:placement:{id}` 与 `player:zone:{id}`：有记录 → 记录的库；无记录 → home_zone 的 zone 库；都没有 → 本进程 zone 库。记录值 `{storage_id}:{version}` 或 `…:frozen:{run_id}`（搬库中，写延后不耗重试）；值畸形一律 fail-closed（不当缺席）；写的 home_zone ≠ 本 ZoneId → 死信（合服前滞留写）；SQL 之后再 MGET 复核，变了就作废重投（关 TOCTOU）。库名由编号派生：1..999999 → `zone_{id}_db`，≥1000000 → `player_store_{id}_db`；额外落点库按需打开（只 Ping + 只读 schema 闸，从不建库），连接池 8/2。go/db 往 mapping Redis 写 `db:capability:zone:{Z}`（TTL 90s、30s 心跳）证明本 zone 跑的是按落点选库的新版。
 - internal: Redis 契约键 + 多数据源注册表。Java 只有一个库，不需要；若 Java 做多区多库，需要等价的「玩家 → 存储库」映射与搬库冻结语义。
-- java: not_applicable — 单库 `xm_java`，`player.zone_id` 只是归属区字段
+- java: not_applicable — 单库 `game`，`player.zone_id` 只是归属区字段
 - size: L
 - robot: none
 - hazards: `Placement.Required=true` 必须在所有 login 已 PinOnCreate 且各 zone 已 pin-placement 之后才能开（顺序反了会全员 fail-closed）；落点 Redis 必须是主节点，读副本关不住 TOCTOU；mapping Redis 是 go-zero RedisConf，恒 DB 0（yaml 里写 DB 会被忽略）。
@@ -136,7 +136,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - behavior: 建角时 `player:zone:{id}` SETNX 登记，绝不覆盖：同值幂等成功、异值返回冲突（ErrCodeZoneMappingConflict）；目标 zone 有合服围栏 `merge:in_progress:{zone}` 时拒绝（预检 EXISTS + Lua 提交点复核，查询失败按封锁）；storage_id≠0 时同一段 Lua 只在 home 新写成时 SETNX 落点记录；查询无映射 → gRPC NotFound（login 回退账号 blob 里的建角 zone），值畸形 → 错误；GetPlayerHomeZone 同时报告 home_zone_merging；批量查询走 pipeline。
 - internal: mapping Redis（DB 0）键 `player:zone:{id}`；data_service 按 home_zone 选 zone Redis Cluster（dev 单实例）。Java 需要：一个可被各服务（scene-manager、将来的 guild / trade / friend）查询的「玩家 → 归属区」真源与合服期间的拒绝语义。
 - java: partial — `player.zone_id` 在建角时写入（`PlayerMapper.insertPlayer`），`PlayerViews` 下发；但没有对外查询接口、没有合服围栏；`EnterGameHandler` 选场景用的是会话 zone（`session.getZoneId()`，缺省 defaultZoneId），不是角色行的 zone_id。
-  **2026-10-11 更新（批次 5.4）**：建角的 zone 改取会话 zone（X16，为 0 回 2020）；读者已不止 login——组队 / 帮会 / 聚宝斋经 xm-common `PlayerHomeZones` 直接读这一列（同库，不需要 RPC 查询接口）；
+  **2026-10-11 更新（批次 5.4）**：建角的 zone 改取会话 zone（X16，为 0 回 2020）；读者已不止 login——组队 / 帮会 / 聚宝斋经 game-common `PlayerHomeZones` 直接读这一列（同库，不需要 RPC 查询接口）；
   合服围栏接口 `ZoneMergeFence` 与检查点 F1 / F2 / F4 已接线、恒放行（真实现随 7.3）；EnterGame 用会话 zone 选场景是**有意且同基线**的——会话 zone 是入口，不是归属（基线 login 同样按 Node.ZoneId 发 GateZoneId），
   F2 判的才是角色行的 zone_id（zone-travel-spec §8.4 勘误 10）。
 - size: M
@@ -162,7 +162,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: schema-migration
 - behavior: `AllocateIdSegment(biz_tag, step) → [lo,hi)`，半开区间、发出即作废不回收；tag 须匹配 `^[a-z0-9_]{1,64}$`，step 上限 1e7；值域 < 2^55（与存量雪花号 ≥6.7e16 不相交），见底 → Exhausted fail-closed；缺行生产环境 → UnknownTag（不自动种行），只有迁移按 BootstrapTags（player, guild, item, txlog, snapshot, trade_listing, guild_asset_op）`INSERT IGNORE` 从 1 预建；迁移对 player / guild 做地板校验（max_id ← 消费表 MAX(<2^55)+1）。客户端双 buffer 预取、动态 step（<15min 用完翻倍、>30min 减半）、范围单调性校验不过即拒用。
 - internal: 全局库 id_segment，`SELECT … FOR UPDATE` + `WHERE version=?` CAS，死锁重试 4 次；data_service 往 etcd 写 C++ 约定的 NodeInfo 路径供 scene 发现（noderegistry）。
-- java: partial — player_id 用雪花号 + 节点号租约（`xm-login/.../character/PlayerIdGenerator.java`，租约无效拒绝发号；PARITY「节点号租约有效期判定」行）；物品 guid、帮会 id、流水 / 快照 id 尚无发号源
+- java: partial — player_id 用雪花号 + 节点号租约（`game-login/.../character/PlayerIdGenerator.java`，租约无效拒绝发号；PARITY「节点号租约有效期判定」行）；物品 guid、帮会 id、流水 / 快照 id 尚无发号源
 - size: M
 - robot: none
 - hazards: 全局库从旧备份恢复 = ID 安全事件：从低水位重发会被 `INSERT … ON DUPLICATE KEY UPDATE` 静默覆盖他人角色；item / txlog / snapshot 做不了地板校验。Java 若继续用雪花号，需同样保证 worker 不重叠与时钟回拨拒发（已有）。
@@ -174,7 +174,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: none
 - behavior: 台账 `schema_migrations(version, name, checksum, dirty)`：version=1 基线（按 proto 表清单 CREATE TABLE IF NOT EXISTS，checksum=表名集合），之后每次 up 按真实库结构算漂移（缺列 ADD COLUMN；schemamigrate 还补缺表）记成 `auto_proto_sync_<checksum12>`；执行前写 dirty=1、全部成功改 0，有 dirty 拒绝继续；`GET_LOCK("mmorpg_db_migrate:<库名>")` 跨实例互斥；会话 lock_wait_timeout / innodb_lock_wait_timeout + 每条 DDL 硬超时与旁路 KILL QUERY；列类型漂移默认只报告（-allow-modify 才 MODIFY）；多余列 / 表只告警、永不删。全局库在表已存在时 proto2mysql 不建索引，ensureIndexes 按「列序前缀覆盖」补索引。
 - internal: proto2mysql 从 proto 推导 DDL（禁止手写与 proto 平行的 DDL）；业务进程启动默认不跑 DDL（DDLPolicy，env `DB_AUTO_CREATE_DATABASE` / `DB_AUTO_MIGRATE_SCHEMA` 双向覆盖）。Java 需要：有版本台账、可重复执行、跨实例互斥的迁移入口（候选：Flyway / Liquibase，均 <2 万 star，按 AGENTS §2 需另行裁决，或自写极简台账），替代「启动时 CREATE TABLE IF NOT EXISTS + 手工迁移文档」。
-- java: partial — `xm-player-schema.sql` 由 Spring SQL init 在 xm-login 启动时执行，只能建新表；存量库变更靠 `docs/design/db-migrations.md` 手工 SQL（M1、M2），无台账、无漂移检测、无互斥
+- java: partial — `game-player-schema.sql` 由 Spring SQL init 在 game-login 启动时执行，只能建新表；存量库变更靠 `docs/design/db-migrations.md` 手工 SQL（M1、M2），无台账、无漂移检测、无互斥
 - size: M
 - robot: none
 - hazards: go/db 的基线跑过后再加表永远建不出来（只有 WARN），schemamigrate 修了、go/db 未切换；存量表无 `pb:N` 注释时首迁对每一列 MODIFY = 整表重写，启动路径只给 5 分钟；TiDB 上 GET_LOCK / KILL QUERY 语义未验证。
@@ -186,7 +186,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: schema-migration
 - behavior: 启动 `SELECT DATABASE()` 必须落在与 ZoneId 无关的外部白名单（env `DB_ALLOWED_DATABASES` > 文件 > yaml），不在即拒启；库不存在 fail-closed（不顺手建库）；缺 proto 声明的列 / 可建出的缺表 → 拒启并打印补救命令（2026-09-22 缺 profile_component 致全部登录失败的教训）；每条连接 `sql_mode='STRICT_TRANS_TABLES'`（防 MEDIUMBLOB 静默截断）；落库前大字段闸：单列 256KiB、单行 1MiB（入库字节，含 base64 膨胀），80% 告警，超限拒写进重试 / 死信，player_snapshot 放宽到 8MiB。
 - internal: 指标 db_blob_bytes / db_blob_row_bytes / db_blob_guard_total。Java 需要：库名不能因配置错而静默新建；结构不符时启动即失败；严格模式。
-- java: partial — 两个 JDBC URL（`xm-login`、`xm-scene` 的 application.yaml）都带 `createDatabaseIfNotExist=true`（正是 mmorpg 要堵的「配错库名静默建新库」），未显式设置 sql_mode（依赖 MySQL 8 默认严格模式）；没有启动期 schema 核对（列缺失要到第一次 SQL 才 1054）；目前无 blob 列，大字段闸不适用
+- java: partial — 两个 JDBC URL（`game-login`、`game-scene` 的 application.yaml）都带 `createDatabaseIfNotExist=true`（正是 mmorpg 要堵的「配错库名静默建新库」），未显式设置 sql_mode（依赖 MySQL 8 默认严格模式）；没有启动期 schema 核对（列缺失要到第一次 SQL 才 1054）；目前无 blob 列，大字段闸不适用
 - size: S
 - robot: none
 - hazards: AllowlistEnforcement=warn 只许 dev 用，生产缺省 strict；Java 引入组件 blob 时要同时引入大小上限，否则一个膨胀组件会拖垮每次写回。
@@ -210,7 +210,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: id-segment-allocator（snapshot 段）、player-data-record
 - behavior: PlayerSnapshotEntry{snapshot_id, player_id, snapshot_time, trigger(LOGIN/LOGOUT/PERIODIC/PRE_TRADE/PRE_MAINTENANCE/GM_MANUAL), player_database_blob, player_database_1_blob, schema_version, zone_id=捕获时所在 zone} → topic `player_snapshot_topic_g1`（3 分区）；消费者逐条落 `player_snapshot`（source=1、snapshot_guid=snapshot_id、operator="scene-node"），MySQL 上按存储型生成列 `snapshot_guid_nz = NULLIF(snapshot_guid, 0)` 上的唯一键 `uk_snapshot_guid_nz` 用 `INSERT … ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)` 去重；建 store 时探测一次，唯一键不在（未迁移 / DDL 回滚 / TiDB）才退回单条 `INSERT … SELECT … WHERE NOT EXISTS`（间隙锁，并发会成环、靠有界 1213 重试吸收）；超 MEDIUMBLOB（2^24-1）/ id 为 0 / 解不出 → 跳过并计数；库故障停住不提交。
 - internal: 全局库 player_snapshot（自增主键，索引 player_id、snapshot_guid、(zone_id, created_at)）。Java 需要：周期 / 登录登出快照（含全部组件）与保留策略，供回档使用。
-- java: partial（2026-10-03，批次 2.3b）— xm-data 第二条 `ConsumerLoop` 落 `xm_java.player_snapshot`（主键即快照号、ODKU 幂等，不需要基线的生成列唯一键与启动探测）；保留期 `xm.data.retention.player-snapshot`（缺省永久）；运维查询 `GET /admin/player-snapshots` 只给元数据。尚缺：周期快照、回档读路径（随 GM 回档批次）
+- java: partial（2026-10-03，批次 2.3b）— game-data 第二条 `ConsumerLoop` 落 `game.player_snapshot`（主键即快照号、ODKU 幂等，不需要基线的生成列唯一键与启动探测）；保留期 `game.data.retention.player-snapshot`（缺省永久）；运维查询 `GET /admin/player-snapshots` 只给元数据。尚缺：周期快照、回档读路径（随 GM 回档批次）
 - size: M
 - robot: robot.currency-crash.yaml（currency-crash-snapshot 模式采集崩溃窗口快照）
 - hazards: 唯一键是独立迁移，未迁移 / TiDB 时去重退回 NOT EXISTS 形态（TiDB 上去重失效）；GM 读路径一律只看 source=0，source=1 的 proto blob 还没有任何回档读路径（`ListSceneSnapshotsByPlayer` 未接 RPC）——快照在落库但用不上。
@@ -294,7 +294,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - depends on: merge-fence-and-remap、placement-routing
 - behavior: pin（默认）：清单玩家无落点记录者钉 `player:placement={src}:1`，有效落点保持源库，不拷行、不拷 blob、不删缓存；动手前对 `-db-capability-zones`（必填、无缺省，可为 none）每个 zone 核对 go/db 能力标记。copy（旧语义）：撞号预检（全部玩家表）→ 无落点记录者按列名对齐 `INSERT…SELECT` 从 `zone_src_db` 拷到 `zone_dst_db`（目标已有行按策略：完全相同视为已拷）→ 失效共享缓存 `{MsgType}:{id}` / `PlayerAllData:{id}`；多集群时另拷 data Redis 的 `player:{id}:*`。两种模式都拒绝有冻结记录（搬库中）或畸形记录的玩家，清单记下模式，续跑必须同模式。
 - internal: MySQL 跨库拷贝 + Redis 缓存失效。Java 单库：玩家行不需要搬，只改 zone_id；若将来分库需要等价的搬迁。
-- java: not_applicable — 单库 `xm_java`，玩家行不随归属区移动
+- java: not_applicable — 单库 `game`，玩家行不随归属区移动
 - size: L
 - robot: none
 - hazards: 列序依赖「加列纪律」（新库 CREATE 按声明序、老库 ADD COLUMN 追加到末尾，`INSERT … SELECT *` 列序错位会静默串档，所以按列名对位）；能力标记只证明最近 90s 有新版 go/db 在跑，T-0 时 src/dst 已停机，只能列仍在跑的 zone。
@@ -329,7 +329,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - tables: none
 - depends on: merge-fence-and-remap
 - behavior: 合服最后一步给清单玩家打两把键；合服后第一次成功 EnterGame 时 login 读出并填进应答：notice 读到即删（只出现一次），force_rename 不删（要等改名 RPC 成功才删，否则关掉改名 UI 就绕过）；读失败不阻断进游戏。名字已全服唯一，force_rename 正常运营不会置位；旧客户端忽略两个字段照常进游戏。
-- internal: login Redis（DB 0）。Java 需要：EnterGame 应答在合服后首登时带上这两个字段（Java 若做合服，用 MySQL 列或 Redis `xm:` 键均可）。
+- internal: login Redis（DB 0）。Java 需要：EnterGame 应答在合服后首登时带上这两个字段（Java 若做合服，用 MySQL 列或 Redis `game:` 键均可）。
 - java: missing — Java 的 EnterGame 应答从不设置这两个字段（只有生成的 proto 类里出现）
 - size: S
 - robot: none
@@ -365,8 +365,8 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - tables: none
 - depends on: player-save-pipeline、player-data-record（stress_test_probe 字段）
 - behavior: 每次写在 `player_database.stress_test_probe` 盖 test_seq（每玩家单调）与 test_sig（两路不同种子的 FNV-1a-64 拼成 128 位，输入 player_id_be8 ‖ msg_type ‖ seq_be8，用于识别撕裂 / 错路由 / 拼接的载荷，不是 MAC）；驱动端把每玩家期望最大 seq 写 `verify:expected:{msg_type}:{player_id}`（robot 模式另写 `verify:enrolled:*`，期望值=成功登出轮数）；verifier 轮询直到截止：I1 MySQL 行 seq == 期望、I2 Redis 缓存 seq == 期望（缓存缺席软通过）、I3 Kafka 无积压（配合消费组 CLI），不一致非零退出并暴露 Prometheus 指标。scene 在 `STRESS_TEST_PROBE=1` 时才盖探针（在脏比对之后）。
-- internal: 绕过 scene 直接造 DBTask（隔离测消费者）与全链路（robot）两种。Java 需要：一个「登录 → 改状态 → 离场」循环的 robot 模式 + 对库校验最终状态的 verifier（xm-robot 已有场景框架）。
-- java: missing — `xm-robot` 只有 SmokeScenario / MovementScenario，没有数据收敛校验
+- internal: 绕过 scene 直接造 DBTask（隔离测消费者）与全链路（robot）两种。Java 需要：一个「登录 → 改状态 → 离场」循环的 robot 模式 + 对库校验最终状态的 verifier（game-robot 已有场景框架）。
+- java: missing — `game-robot` 只有 SmokeScenario / MovementScenario，没有数据收敛校验
 - size: M
 - robot: robot.data_stress.yaml（mode: data-stress）
 - hazards: 签名算法须与 C++ 一致（跨语言复刻）；探针字段必须在脏比对之后盖，否则每次都判脏、跳过率失真。
@@ -377,7 +377,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 - tables: none
 - depends on: home-zone-registry、player-data-record、gm-snapshot-diff
 - behavior: debug_fetch 模式 player（data_service 字段图）| zone | server | snapshot | sql（只读 SQL）| player-db（直接读 zone 库 player_database / player_database_1 / player_centre_database 并按 proto 解码成 JSON）；可指定 proto-type 解码二进制、输出到文件；debug_import 默认 dry-run，`--dry-run=false` 才写：Redis 模式逐字段裸 SET 并把 `__version` 重置为 1；player-db 模式每张表一个 READ COMMITTED 事务「DELETE 该玩家旧行 + INSERT 导出行」（RR 下会间隙锁成环 1213）。
-- internal: 运维 CLI，直连 Redis / MySQL。Java 需要：按 player_id 导出 / 导入完整玩家记录的运维工具（可用 xm-tools 或 Spring Boot CLI profile）。
+- internal: 运维 CLI，直连 Redis / MySQL。Java 需要：按 player_id 导出 / 导入完整玩家记录的运维工具（可用 game-tools 或 Spring Boot CLI profile）。
 - java: missing
 - size: M
 - robot: none
@@ -400,7 +400,7 @@ Java 版只有 `xm_java` 一个库两张表（`account`、结构化列的 `playe
 1. **Java 是否需要异步落库 / 周期存盘**：Java 当前「离场同步写回 + 30s 租约」在 scene 进程被 kill 时丢失整段在线增量（mmorpg 最多丢 300s）。周期写回是 Java 内部机制，是否引入 Kafka（tech-stack 已列 spring-kafka）还是保持「存储线程池 + 带 epoch 的周期 UPDATE」需要定方案；后者无需 db-task-consumer-ordering / placement-routing 那一整套。
 2. **玩家记录形状**：Java 是结构化列（现在只有等级 / 场景 / 坐标），mmorpg 是每组件一列 proto blob。货币 / 背包 / 任务 / 宠物 / 账本落地时，Java 用结构化子表还是 proto blob 列？若用 blob，需要同时引入大字段上限与「加列纪律」。资产与账本同记录同事务（不变量 I3）在 Java 里应由单事务保证。
 3. **迁移工具选型**：Flyway / Liquibase 都低于 AGENTS §2 的 2 万 star 门槛，Spring Boot 对二者有自动配置；需要用户裁决是破例采用还是自写极简台账（version / checksum / dirty + `GET_LOCK`）。
-4. **`createDatabaseIfNotExist=true`**：xm-login / xm-scene 的 JDBC URL 会在库名配错时静默建新库，正是 mmorpg go/db 用白名单堵的问题；建议改为 fail-closed，但会影响「本地一键起」体验，需确认。
+4. **`createDatabaseIfNotExist=true`**：game-login / game-scene 的 JDBC URL 会在库名配错时静默建新库，正是 mmorpg go/db 用白名单堵的问题；建议改为 fail-closed，但会影响「本地一键起」体验，需确认。
 5. **mmorpg 侧存疑（mmorpg 待做候选）**：(a) GM 快照 / 回档 / 回收建在 `player:{id}:*` 字段图上，而权威数据是 `PlayerAllData:{id}` blob，且 RollbackFence 未接线、回档恒 NotImplemented——Java 做回档时应直接以玩家记录 + scene 快照（source=1）为源，不要照搬；(b) player_database_1、player_centre_database、player_debt、rollback_audit、user / user_oauth / user_phone / user_password 在本区域代码里没有业务读写者（死表或仅工具用）；(c) 角色列表（user_accounts.simple_players）只看到 Redis 读写，未发现 MySQL 写回路径；(d) DeletePlayerData / SavePlayerData / BatchRecallItems / CreatePlayerSnapshot 无管理令牌。
 6. **合服在 Java 的范围**：Java 名字全服唯一（name_key 唯一索引），合服不会产生重名，force_rename 可永不置位；单库下合服退化为「改 zone_id + 帮会 / 交易 / 排行榜迁区 + 一次性提示」，merge-player-data 与 storage-relocate 可判不适用。是否需要做、何时做，取决于运营是否会开多区。
 7. **归属区来源**：Java EnterGame 用会话 zone 而非角色行 zone_id 选场景（login 区域需确认是否有意）；Java 没有对其他服务开放的「查玩家归属区」接口，帮会 / 交易 / 组队移植时需要。

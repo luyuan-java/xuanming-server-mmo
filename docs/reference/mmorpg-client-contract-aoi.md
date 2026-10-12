@@ -4,7 +4,7 @@
 > AOI、视野、移动、属性同步相关源码在 `766cb037c..9c9c012b7` 之间**没有改动**（`git diff --stat` 为空），所以本文与 `mmorpg-client-contract-scene.md` 用的是同一份实现。
 > 范围：进视野 / 出视野的规则与下行消息（21 / 47 / 51 / 64），移动输入如何变成下行推送（66 / 137），属性同步（66 与 65/55/82/68/75），以及这些消息之间的先后顺序。
 > 没读客户端仓库（`../mmorpg-client`，mmorpg AGENTS.md §9 要求授权才能读）。UE 客户端具体怎么消费 66，要去客户端仓库核对；robot 的处理见 §3.6。
-> 本文是 Java 版 xm-scene 实现 AOI、移动和属性同步的规格。§8 是 Java 现状，§9 是设计建议，§10 是必做清单。
+> 本文是 Java 版 game-scene 实现 AOI、移动和属性同步的规格。§8 是 Java 现状，§9 是设计建议，§10 是必做清单。
 
 ---
 
@@ -337,7 +337,7 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 
 ---
 
-## 8. Java 现状（`xm-scene/src/main/java/com/game/scene/world/*`）
+## 8. Java 现状（`game-scene/src/main/java/com/game/scene/world/*`）
 
 | 方面 | 现状 | 与基线的关系 |
 |---|---|---|

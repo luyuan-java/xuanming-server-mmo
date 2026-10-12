@@ -30,7 +30,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - internal: 纯内存 ECS 组件，单线程。Java 需要：`PlayerBags`（4 个固定包 + 可选动态包）、实例表（guid → config/size/acquire_seq）、布局（扁平 / 具名槽）、准入 / 淘汰策略接口，规划-预留-提交的三段 API；所有写只在场景逻辑线程。
 - java: done（2026-10-03，批次 2.4）— `com.game.scene.player.{Bag,BagItem,BagType,PlayerBags}`：四个固定包、堆叠、装备栏按部位分桶、临时格 FIFO 淘汰（不动点）、合并 + 重排；批量入包整批原子（含淘汰与铸号），遍历顺序确定（入包序号, guid）。未移植基线无生产调用方的单件 / 预设 guid 入包、各种扣除、扩容、准入策略、动态包、GridLayout；夹紧扣除随 6.3
 - size: L
-- robot: Go `robot/features_smoke_scenario.go`（只读 191 / 可选 192），`robot/features_battle_smoke.go`（掉落入包）；Java xm-robot none
+- robot: Go `robot/features_smoke_scenario.go`（只读 191 / 可选 192），`robot/features_battle_smoke.go`（掉落入包）；Java game-robot none
 - hazards: ① `RemoveItems` / `RemoveItemsClamped` 只扣数量、留下 size==0 的「僵尸堆」直到下一次整理，`GetBag` 不过滤，客户端会看到 count=0 的物品；② 临时格 FIFO 会**静默销毁**玩家最早的东西（只落 LogItemDestroy 流水，不通知客户端）；③ 批量入包「返回失败 ≠ 包未变」：临时格可能已淘汰、前几个 config 可能已写入（`mutated` 出参）；④ 装备栏槽号 = EquipSlot.id，若表里 id ≥ 容量 10 该槽永远不可用；⑤ 还原路径故意比活玩法宽松（位置可变、物品不丢，见 bag-persistence）；⑥ `ExpandCapacity` 存在但无生产调用（容量不可解锁）。
 
 ### bag-orchestration-service — 背包编排（禁发 / 冻结 / 流水 / 异常检测 / 战斗掉落溢出）
@@ -51,7 +51,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - tables: Item、EquipSlot（还原时按部位重新落位）
 - depends on: bag-core-container
 - behavior: 存：`capacities[4]` + 每个实例一条 `ItemEntry{item_uuid, config_id, stack_size, pos, bag_type, acquire_seq}` + 动态包 `{bag_id, capacity, profile_id, items}`。取：先 Reset → 恢复容量（拒绝压到已占格以下）→ 逐件 `InsertItemForRestore`：非法 guid / 重复 guid 跳过并 ERROR；装备栏优先按**当前表**的部位找空槽，其次用快照 pos，再不行自动选位；`bag_type` 越界的条目丢弃（WARN）。还原不跑堆叠、不落流水、不查禁发。`acquire_seq=0`（旧档）按重放顺序补盖。
-- internal: 与位置、货币、任务同一条玩家记录、同一次写回（资产与账本一起落盘、一起丢）。Java：在 xm-player-store 加背包存储（建议 protobuf blob 列或子表），写回走现有 `owner_epoch` 围栏；客户端不可见，格式 Java 自定。
+- internal: 与位置、货币、任务同一条玩家记录、同一次写回（资产与账本一起落盘、一起丢）。Java：在 game-player-store 加背包存储（建议 protobuf blob 列或子表），写回走现有 `owner_epoch` 围栏；客户端不可见，格式 Java 自定。
 - java: done（2026-10-03，批次 2.4）— `player_state.bag`（Java 自有 `BagState` / `BagItemState`，按 (bag_type, 格子) 写出、未知字段带回）；构造时原样收下、进场前规整：结构性损坏拒绝进场（不丢物品）、格子问题重新落位、不认识的 bag_type 隔离写回、数量 0 丢弃、序号 0 补盖；容量只在非缺省时存（对应 hazard ①②③）
 - size: M
 - robot: none（Go `features_smoke` 只读当下状态）
@@ -67,7 +67,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - internal: 应答在场景逻辑线程上直接构造；Java 只需在 `ClientRequestHandler` 加两个方法 + BagInfo 组装。
 - java: done（2026-10-03，批次 2.4）— `com.game.scene.bag.BagFeature`：191 / 192 同基线校验顺序与应答形态（无符号 bag_type、布局总在、按 item_id / 格子排序、货币 = 54 的 wallet.toClient()，不带 debts——hazard ① 不存在；不留僵尸——hazard ②）；战斗中禁止整理随 6.3。robot `bag` 场景
 - size: M
-- robot: Go `robot/features_smoke_scenario.go`（`readBag`，`features_smoke.sort_bag` 选项）、`robot/logic/gameobject/player_features_test.go`；Java xm-robot none
+- robot: Go `robot/features_smoke_scenario.go`（`readBag`，`features_smoke.sort_bag` 选项）、`robot/logic/gameobject/player_features_test.go`；Java game-robot none
 - hazards: ① BagInfo.currency 是 ECS 里 `CurrencyComp` 的整份拷贝，含**加载时**的 `debts`（GM 操作员名、原因）与 `blocked_types`——泄露 GM 信息且是过期数据（运行期欠款在 `PlayerCurrencyComp`，见 currency-debt-clawback）；② 不过滤 size==0 僵尸实例；③ 战斗中拒绝整理用的是通用 1005，客户端无法区分「战斗中」与「参数错」。
 
 ### equip-slot-rules — 装备栏部位规则（无穿脱协议）
@@ -102,7 +102,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - behavior: 唯一加币入口 `AddCurrency` 判定顺序（契约）：amount ≤ 0 → 1005；币种越界 → 1005；冻结 → 27003 `kAssetFrozen`（RETRY 类）；全服禁发 → 27005 `kAssetBlocked`；本人被 GM 封禁该币种 → 27005；然后先抵扣补缴欠款，再入账余额，落流水（记**请求额**与前后余额）、喂异常检测。`DeductCurrency`：同样两条参数校验 → 冻结 27003 → 余额不足 27000 `kAssetCurrencyInsufficient`（玩家可读的终局拒绝）。余额存 `CurrencyComp.values`（repeated uint64，下标 = 币种，首次访问时补齐到 3 个）。
   其它区域的生产调用方：战斗结算加金币（`player_battle.cpp:1682`）、属性洗点 / 宝宝洗点扣金币（`player_attribute.cpp:661/753`、`player_pet.cpp:587/680`）、资产通道。
 - internal: Java 需要一个 `CurrencyLedger`（场景线程内）+ 持久化列（3 个 BIGINT 或 blob）+ 流水回执；纯参数校验必须排在冻结 / 封禁前（否则资产通道对编程错误无限重投）。
-- java: missing — xm-scene / xm-player-store 无货币字段
+- java: missing — game-scene / game-player-store 无货币字段
 - size: M
 - robot: Go `robot/currency_crash_window_scenario.go`（`etc/robot.currency-crash.yaml`：读余额 → GmAddCurrency → 杀进程 → 重登比对，验证落盘窗口）；Java none
 - hazards: ① `*balance += gain` **没有溢出检查**（uint64 回绕），GM 加币可传 int64 最大值；② 新角色 `values` 为空数组，读到的余额靠「缺省 0」；客户端看到空数组；③ 流水 `currency_delta` 记请求额而非实际入账额（被补缴抵扣的部分只在另一条 clawback 流水里）。
@@ -138,7 +138,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: none
 - behavior: 入口顺序：全服封禁 → 每玩家封禁 → 正常逻辑。币种被封 → 27005；物品被封 → 1005。全服名单 `BlockGlobal/UnblockGlobal/ClearAllGlobalBlocks` 设计为「紧急止血：所有人不得再获得物品 30045」。
 - internal: 全服名单是 **thread_local** 集合，没有任何加载 / 热更 / GM 写入路径（`BlockGlobal` 只在单测里调用）；每玩家物品名单 `PlayerItemBlockList` 全仓没有 emplace，`PlayerItemBlockComp` 也不进存档。Java 若做：全服名单应来自配置中心（Nacos）或 Redis 并在所有场景节点生效，每玩家名单进玩家记录。
-- java: partial（2026-10-03，批次 2.3c）— 全服币种名单在 Redis `xm:gain-block:currency`，xm-data 运维接口读写（令牌 + 操作人 + 原因），scene `GainBlockSync` 经 pub/sub + 10s 周期同步到逻辑线程；判定顺序同基线（全服 → 本人 → 入账，都是 27005）；物品名单 `xm:gain-block:item`（批次 2.4，被封回 1005 同基线口径）。每玩家物品禁发基线从未挂载，不做。对应 hazard ①（Java 有写入口、全节点生效）
+- java: partial（2026-10-03，批次 2.3c）— 全服币种名单在 Redis `game:gain-block:currency`，game-data 运维接口读写（令牌 + 操作人 + 原因），scene `GainBlockSync` 经 pub/sub + 10s 周期同步到逻辑线程；判定顺序同基线（全服 → 本人 → 入账，都是 27005）；物品名单 `game:gain-block:item`（批次 2.4，被封回 1005 同基线口径）。每玩家物品禁发基线从未挂载，不做。对应 hazard ①（Java 有写入口、全节点生效）
 - size: S
 - robot: none
 - hazards: ① 生产上**完全不可用**：全服名单无写入口且按线程隔离（多线程 scene 上只封一个线程）；每玩家物品名单从未挂载；只有币种的每玩家封禁（94 / 95）真正生效；② 币种 / 物品的拒绝码不一致（27005 vs 1005）。
@@ -149,8 +149,8 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - tables: none
 - depends on: id-segment-client（tx_id 走 `txlog` 号段）、Kafka
 - behavior: 每次货币增减、补缴抵扣、物品创建 / 销毁 / 淘汰 / 整理退役 / 转移都发一条 `TransactionLogEntry{tx_id, timestamp(秒), tx_type(27 种), from/to_player, item_uuid, item_config_id, item_quantity, currency_type, currency_delta, balance_before/after, correlation_id, extra, zone_id}`；topic 有效名 = `transaction_log_topic_g<N>`（N 来自部署配置 `AuditTopicGeneration`，0 当 1，与 Go 消费端同一规则）；分区键 = from_player 否则 to_player（按玩家有序）；生产者盖 zone_id。fire-and-forget：拿不到 tx_id 时**整条丢弃**（fail-closed，记 ERROR），Kafka 发送失败只记日志。
-- internal: Java 版有自己的存储且不与 Go data_service 混部，所以 Java 需要：自己的流水 topic（或直接异步批量写 MySQL `xm_java` 的流水表）、全局唯一 tx_id（Java 现成 `com.game.common.id.Snowflake` + 节点号租约即可，不必照抄号段）、按玩家分区有序。只是审计，不影响玩法结果。
-- java: done（2026-10-03，批次 2.3a）— 货币变动经 `CurrencyService` → `KafkaAssetAudit` → `AuditPipeline` 发 `xm-transaction-log-g<N>`，xm-data 落 `transaction_log`；号用全服号段租约上的雪花（不照抄号段）；没被确认的完整写兜底日志。物品类流水随背包批次
+- internal: Java 版有自己的存储且不与 Go data_service 混部，所以 Java 需要：自己的流水 topic（或直接异步批量写 MySQL `game` 的流水表）、全局唯一 tx_id（Java 现成 `com.game.common.id.Snowflake` + 节点号租约即可，不必照抄号段）、按玩家分区有序。只是审计，不影响玩法结果。
+- java: done（2026-10-03，批次 2.3a）— 货币变动经 `CurrencyService` → `KafkaAssetAudit` → `AuditPipeline` 发 `game-transaction-log-g<N>`，game-data 落 `transaction_log`；号用全服号段租约上的雪花（不照抄号段）；没被确认的完整写兜底日志。物品类流水随背包批次
 - size: M
 - robot: none（Go 侧只有单测）
 - hazards: ① 流水是「尽力而为」：Kafka 不可用或号段耗尽时资产照改、流水丢失，回滚 / 追溯链会断；② `timestamp` 只到秒，同一秒多条要靠 tx_id 排序，而号段 tx_id 不保证时间序；③ 裸 topic 名会被 broker 自动建成 1 分区，消费端分区契约永久失配——世代后缀是硬约束。
@@ -162,7 +162,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: Kafka
 - behavior: 每玩家 × 每币种 / 每物品 config 一个滑动窗口（默认 600s 内 > 50 次或累计 > 100000 即告警），告警打 WARN 并发 JSON 到 Kafka `anomaly_alert_topic`（无世代后缀）。只告警、不拦截、不影响玩法。
 - internal: 阈值全是 thread_local 默认值，没有任何配置加载；Java 可用 Micrometer 计数 + 日志告警替代，**禁止**把 player_id 作为指标 label（AGENTS §5）。
-- java: partial（2026-10-03，批次 2.3c）— `GainAnomalyDetector`：每玩家 × 每币种滑动窗口（挂在玩家实例上，hazard ③ 不存在），阈值来自配置、可按币种覆盖，越线只告警一次（hazard ②），告警走日志 `xm.audit.anomaly` + 指标（不带玩家号；hazard ① 不发 Kafka）；物品窗口随批次 2.4 接入（与币种分开存）
+- java: partial（2026-10-03，批次 2.3c）— `GainAnomalyDetector`：每玩家 × 每币种滑动窗口（挂在玩家实例上，hazard ③ 不存在），阈值来自配置、可按币种覆盖，越线只告警一次（hazard ②），告警走日志 `game.audit.anomaly` + 指标（不带玩家号；hazard ① 不发 Kafka）；物品窗口随批次 2.4 接入（与币种分开存）
 - size: S
 - robot: none
 - hazards: ① `anomaly_alert_topic` 在 Go / Java 全仓**没有消费者**，告警只在日志里有用；② 超阈值后每次获取都再告警一次（无去抖），刷怪 / 批量领奖时会刷屏；③ 桶按 `entt::entity` 而非 player_id 索引，实体复用依赖下线时 ClearPlayer。
@@ -173,8 +173,8 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - tables: none
 - depends on: id-segment-client（`snapshot` 号段）、Kafka、完整玩家 marshal（含 bag / mission / currency）
 - behavior: 登录完成与登出时把 `player_database` 与 `player_database_1` 两个 blob 整份序列化，包成 `PlayerSnapshotEntry{snapshot_id, player_id, snapshot_time, trigger, 两个 blob, schema_version="v1", zone_id, total_bytes}` 发 `player_snapshot_topic_g<N>`（键 = player_id）。号段没号或 Kafka 失败就跳过（fail-closed，记 ERROR），不影响正常存盘。
-- internal: Java 若要回滚能力：在写回同一时刻把玩家记录整份拷到 `xm_java.player_snapshot`（异步、可丢），ID 用 Java Snowflake。回滚执行本身属于 data_service / GM 运维面（另一区域），基线 scene 侧也还没实现。
-- java: done（2026-10-03，批次 2.3b）— `SceneWorld` 进场成功拍 LOGIN、离场 / 停服写回拍 LOGOUT（与写回同一份 `PlayerSave`），经 `AuditPipeline` 发 `xm-player-snapshot-g<N>`；号用全服雪花；序列化后超 `xm.scene.snapshot-max-bytes` 丢弃并计数（对应 hazard ③）；不记 total_bytes（hazard ①）
+- internal: Java 若要回滚能力：在写回同一时刻把玩家记录整份拷到 `game.player_snapshot`（异步、可丢），ID 用 Java Snowflake。回滚执行本身属于 data_service / GM 运维面（另一区域），基线 scene 侧也还没实现。
+- java: done（2026-10-03，批次 2.3b）— `SceneWorld` 进场成功拍 LOGIN、离场 / 停服写回拍 LOGOUT（与写回同一份 `PlayerSave`），经 `AuditPipeline` 发 `game-player-snapshot-g<N>`；号用全服雪花；序列化后超 `game.scene.snapshot-max-bytes` 丢弃并计数（对应 hazard ③）；不记 total_bytes（hazard ①）
 - size: S
 - robot: none
 - hazards: ① `total_bytes` 是第一次序列化时的长度，写进字段后再序列化长度会变（varint 位数），记录值比实际小几个字节；② 快照只在登录 / 登出两个时刻，长在线玩家没有中间点；③ 无压缩，整份玩家记录进 Kafka，玩家记录变大时单条消息可能超 broker 上限。
@@ -185,8 +185,8 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - tables: none（部署配置 `IdSegments`：Kind + initial/min/max step）
 - depends on: data_service（另一区域）
 - behavior: 每种 GUID 一个 Leaf-segment 客户端：双 buffer（当前段 + 预取段，剩余 ≤ 10% 预取，单飞）、两段都空 `TryNext` 立刻返回 false（事件循环不阻塞）；动态 step（一段撑不到 15 分钟翻倍、超过 30 分钟减半）；服务端范围校验 lo≥1、hi>lo、hi≤2^55、lo≥上一段 hi，违反即拒用；传输失败 500ms→5s 指数退避；不持久化游标（崩溃只留空洞）。号段从 1 起、< 2^55，与存量 snowflake 号（≥ 6.7e16）不相交。
-- internal: 物品入包要先 `CanMintGuids(n)` 整批预检，铸号失败回 6004。Java 已有 `xm-common` `Snowflake` + `xm-discovery` `NodeIdLease`（租约失效即停发号），可直接作为 item / tx / snapshot 的 ID 源，不需要号段服务；要求同样「拿不到号就整批拒绝、不改状态」。
-- java: partial — ID 源（`com.game.common.id.Snowflake`、`NodeIdLease.isValid()`）已有并用于 player_id（`xm-login/.../PlayerIdGenerator.java`）；scene 侧未接物品 / 流水 ID，也无「ID 源就绪才放人进场」的门禁
+- internal: 物品入包要先 `CanMintGuids(n)` 整批预检，铸号失败回 6004。Java 已有 `game-common` `Snowflake` + `game-discovery` `NodeIdLease`（租约失效即停发号），可直接作为 item / tx / snapshot 的 ID 源，不需要号段服务；要求同样「拿不到号就整批拒绝、不改状态」。
+- java: partial — ID 源（`com.game.common.id.Snowflake`、`NodeIdLease.isValid()`）已有并用于 player_id（`game-login/.../PlayerIdGenerator.java`）；scene 侧未接物品 / 流水 ID，也无「ID 源就绪才放人进场」的门禁
 - size: M（照抄号段）/ S（Java 用现成 Snowflake）
 - robot: none
 - hazards: ① item guid 是**客户端可见**的 `BagItemInfo.item_id`（uint64），Java 用 Snowflake 时值域与基线不同但客户端只当不透明 ID，可接受；② 基线号段 ID 非时间序，不要依赖 guid 大小推断入包先后（用 `acquire_seq`）；③ 首段是硬依赖：data_service 不可用时 scene 不放玩家进入。
@@ -198,7 +198,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - depends on: currency-debt-clawback, player-snapshot, transaction-log
 - behavior: 十二条全部是 `TODO(P1-B)` 空桩：只做 GM 运行模式闸（非 dev/test → 1006）与写类的冻结 / 战斗中闸（→ 1005），然后返回空应答。gate 只放行客户端协议服务，所以客户端发这些号会被 gate 拒掉。
 - internal: 真正的回滚 / 回收走 data_service 运维面（HMAC 签名 + 审计日志），属另一区域。
-- java: done（等价）— Java gate `xm-gate/.../session/MessageRoutes.java` 同样只放行标了 `OptionIsClientProtocolService` 的方法，客户端发 102–117 被 gate 拒；scene 侧无需空桩
+- java: done（等价）— Java gate `game-gate/.../session/MessageRoutes.java` 同样只放行标了 `OptionIsClientProtocolService` 的方法，客户端发 102–117 被 gate 拒；scene 侧无需空桩
 - size: S
 - robot: none
 - hazards: scene 的节点路由（`InvokePlayerService`）能绕过 gate 直达这些 handler，基线因此在每条前面加了 GM 闸；Java 若以后加 scene 内部 RPC 路由，同样要在 scene 侧再挡一次。
@@ -213,7 +213,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - internal: 状态全在玩家内存，随玩家记录保存（见 mission-persistence）。Java 需要：场景线程内的任务状态（进行中 map + 完成 / 待领位集合 + (type,subtype) 占用集 + 条件类别 → 任务索引）。
 - java: done（2026-10-03，批次 2.5）— `com.game.scene.mission.MissionService` + `com.game.scene.player.PlayerMissions`：接取闸先后与错误码、回填、顺序 / 并行推进、封顶 / 覆盖同基线；完成后的自动领奖 / 链式接取 / 完成事实同步执行（有界工作队列，hazard ①，PARITY 记为有意差异）；冻结闸随 5.2
 - size: L
-- robot: Go `robot/features_smoke_scenario.go`（`accept_mission_id` / `claim_mission_id` 显式选项）；Java xm-robot `features`（接取闸错误码、接取 12 / 13，不依赖战斗的部分）
+- robot: Go `robot/features_smoke_scenario.go`（`accept_mission_id` / `claim_mission_id` 显式选项）；Java game-robot `features`（接取闸错误码、接取 12 / 13，不依赖战斗的部分）
 - hazards: ① **生产上 `tlsEcs.dispatcher.update()` 从未被调用**（全仓只有单测调用；生产里仅有的三处 `enqueue` 都在 `mission.cpp:358/374/383`），所以 enqueue 的三类事件永远不派发：自动发奖退化成「待领、需玩家手动 195」，链式后续任务不会自动接取（玩家可在列表里手动接），「完成任务 X」条件对**已在进行中**的任务不会实时推进（只在接取时回填），且队列无限增长（内存泄漏）。Java 应按语义同步执行，并在 PARITY 记为有意差异；② `E_MISSION_TIME_OUT / E_MISSION_FAILD` 没有任何代码会设置；③ `AbandonMission` 存在但无客户端协议；④ `CompleteAllMissions`（GM 批量完成，无副作用）与正常完成路径不能合并。
 
 ### condition-eval — 条件判定（Condition 表）
@@ -250,7 +250,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - internal: Java 在 `ClientRequestHandler` 加三个方法；时间用服务器 UTC 毫秒。
 - java: done（2026-10-03，批次 2.5）— `com.game.scene.mission.MissionFeature`：列表键集、排序、状态优先级、不可用原因、目标展示、失败只回 tip 同基线；robot `features` 场景（不依赖战斗的部分）
 - size: M
-- robot: Go `features_smoke_scenario.go`；Java xm-robot `features`（193 / 194 / 195 / 190，不依赖战斗的部分）
+- robot: Go `features_smoke_scenario.go`；Java game-robot `features`（193 / 194 / 195 / 190，不依赖战斗的部分）
 - hazards: ① 失败时 194 / 195 不带列表，客户端须重拉 193；② 每次 193 都对**全表**跑一遍接取 / 领奖门禁（含遍历 Dungeon×Monster 判可达），表大时是热点；③ 字符串原因是客户端直接展示的文案，Java 必须逐字一致。
 
 ### mission-reward-grant — 任务奖励发放（Reward 表 → 背包）
@@ -286,7 +286,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - internal: 纯读，时间源用服务器 UTC 毫秒（Java 用 `SceneClock` 同源时钟以便单测）。
 - java: done（2026-10-03，批次 2.5）— `com.game.scene.mission.{ActivitySchedules,ActivityFeature}`：190 同基线（未排期不带窗口、[start, end) 按 uint64 无符号、非法窗口启用 / 停用都清零回 1002、开放时再跑接取闸定原因）；参与走 194
 - size: S
-- robot: Go `features_smoke_scenario.go`（读活动）；Java xm-robot `features`（读活动）
+- robot: Go `features_smoke_scenario.go`（读活动）；Java game-robot `features`（读活动）
 - hazards: ① 窗口用绝对毫秒（`baseline_*`），没有周期 / 每日重复语义；② 排期配置异常时该条目 `activity_id` 也被清成 0，客户端会看到一条 id=0 的活动。
 
 ### asset-op-channel — 通用资产通道（scene 侧 AssetDebit / AbortDebit / Credit）
@@ -307,8 +307,8 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - tables: none
 - depends on: none
 - behavior: `SceneEntityComp`（实体 → 所在场景实体）、`SceneRegistryComp`（config_id → 场景实例集合）、`NodeStateComp` / `NodePressureComp`（节点正常 / 压力状态；压力状态在 scene 内无读者）、节点类型标签。
-- internal: 只是 ECS 数据定义。Java 的对应物已按 Java 方式实现：`xm-scene` `SceneWorld` / `Scene` / `ScenePlayer`（玩家所属场景、按配置查场景实例），场景选择在 `xm-scene-manager`。
-- java: not_applicable — 等价能力已在 `xm-scene/src/main/java/com/game/scene/world/{SceneWorld,Scene,ScenePlayer}.java` 与 xm-scene-manager 中，无需单独移植
+- internal: 只是 ECS 数据定义。Java 的对应物已按 Java 方式实现：`game-scene` `SceneWorld` / `Scene` / `ScenePlayer`（玩家所属场景、按配置查场景实例），场景选择在 `game-scene-manager`。
+- java: not_applicable — 等价能力已在 `game-scene/src/main/java/com/game/scene/world/{SceneWorld,Scene,ScenePlayer}.java` 与 game-scene-manager 中，无需单独移植
 - size: S
 - robot: none
 - hazards: 无。
@@ -321,7 +321,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 4. **装备穿脱 / 使用物品 / 丢弃 / 拆分 / 扩容**：mmorpg 都没有客户端协议。用户需求里提到「装备 / 卸下、使用物品」——要做得先在 mmorpg 定 proto 与消息号，再经 ContractSync 同步，不能 Java 先行。
 5. **GlobalVariable 表**：C++ 玩法模块不读它（只有导表产物）；Java 已有 `GlobalVariableRows`，没有需要移植的行为。确认是否有其它区域（Go / 战斗）在用。
 6. **物品 / 流水 / 快照 ID 源**：Java 打算直接用现有 `Snowflake` + 节点号租约（推荐），还是照抄号段服务？前者需要 scene 节点加「ID 源就绪才放人进场」门禁（对应基线 DependencyGate）。
-7. **审计落点**：Java 没有 Kafka。资产流水 / 快照是先引入 spring-kafka，还是直接异步写 `xm_java` 的流水 / 快照表？（两者都只是审计，不影响玩法结果。）
+7. **审计落点**：Java 没有 Kafka。资产流水 / 快照是先引入 spring-kafka，还是直接异步写 `game` 的流水 / 快照表？（两者都只是审计，不影响玩法结果。）
 8. **全服禁发**：基线是 thread_local 且无写入口，等于不存在。Java 是否需要真正可用的全服禁发（Nacos 配置推送）？若做属于有意增强。
 9. **任务表数据的可达性**：Mission 17 行里有多少行能通过接取门禁（依赖 Dungeon×Monster 可达与条件类别 1/6/8）？Java 在战斗 / 等级系统落地前，任务只能接不能完成，验收口径需要先定。
 10. ~~**领奖部分写入**~~ 已澄清：基线 `ReserveForBatchAdd` 整批预检铸号，Java `Bag.add` 整批原子，失败不改包、不消耗领奖资格，不需要额外幂等。

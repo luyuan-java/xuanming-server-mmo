@@ -11,7 +11,7 @@ Java 版 gate 用 `MessageIdRegistry` 从同步来的描述符集构建白名单
 77/84/63/43/134/132/131，其余带 `error_message` 的回 1006 kFeatureUnavailable），非玩家服务只有 `ClientPlayerLogin` 接到 login，
 其余（chat / friend / guild / team / jubaozhai / match / battle）一律回 23 {kServiceUnavailable}。
 Go robot（`robot/`）是验收测试：除默认 stress 模式外有 14 个独立模式 / 场景（login-test、features-smoke、data-stress、currency-crash、
-battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / travel / friend smoke）；Java 版 `xm-robot` 只有 smoke（登录→进场→77）
+battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / travel / friend smoke）；Java 版 `game-robot` 只有 smoke（登录→进场→77）
 与 movement（移动 / 视野 / 66 / 137）两个场景，Go robot 的 stress 路径已对 Java 版实测通过（PARITY「登录 → 进场景竖切」行）。
 
 下文每个 `svc-*` 条目对应一个客户端可见服务（方法 = 消息号 + 方向），每个 `robot-*` 条目对应一个 Go robot 场景 / 模式。
@@ -25,9 +25,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: client-frame-handshake、svc-login-pregate-http（gate 令牌）、scene-manager 场景分配、player 数据层
 - behavior: 细则已在 Java `docs/reference/mmorpg-client-contract-login.md`。要点：auth_type 空串 = 口令；access_token / satoken / 第三方认证；登录会话 TTL；设备数上限 kTooManyDevices；同账号 Login 并发 kLoginInProgress；CreatePlayer 每账号 5 角色（2001）、名字规则；EnterGame 成功即删登录会话（之后 14/26 回 2028）、异步失败推 23{3023}；顶号 ReplaceLogin + 34；RefreshToken 空 / 无效 refresh_token 回 kLoginAccountNotFound，成功回新 access/refresh 对与两个 expire（Unity 客户端 `GameClient.cs` 注册了 127 的 OnNotify）；HomeZone 归属不符时 EnterGame 照常成功并触发 124 跨区重定向（RedirectOnEnterEnabled 开关）
 - internal: Redis 登录会话 / 账号锁、player_locator、data_service、scene_manager.EnterScene、Kafka gate 命令（Kick / Redirect）
-- java: partial — `xm-login/src/main/java/com/game/login/handler/{Login,CreatePlayer,EnterGame,LeaveGame,Disconnect}Handler.java` 已做；127 RefreshToken 未实现（`ClientMessageDispatcher.unsupported` 回 ClientReply.tip=1006）；`LoginAuthenticator` 只认口令（access_token / satoken 一律失败）；设备数上限、短线重连、HomeZone 重定向缺；LeaveGame 语义有意不同（PARITY 已登记）
+- java: partial — `game-login/src/main/java/com/game/login/handler/{Login,CreatePlayer,EnterGame,LeaveGame,Disconnect}Handler.java` 已做；127 RefreshToken 未实现（`ClientMessageDispatcher.unsupported` 回 ClientReply.tip=1006）；`LoginAuthenticator` 只认口令（access_token / satoken 一律失败）；设备数上限、短线重连、HomeZone 重定向缺；LeaveGame 语义有意不同（PARITY 已登记）
 - size: L（剩余：token 体系 + 设备上限 + 重连 ≈ M）
-- robot: robot-stress-smoke、robot-login-test、robot-e2e-http；Java xm-robot smoke
+- robot: robot-stress-smoke、robot-login-test、robot-e2e-http；Java game-robot smoke
 - hazards: robot 在 access_token 失败后同一连接回落口令登录（login_fail 会多计一次）；Java 与基线在「上次进场在途再发 26」回码不同（2028 vs 2005，PARITY 已登记）；RefreshToken 的错误码复用 kLoginAccountNotFound，客户端无法区分「过期」与「伪造」
 
 ### svc-login-pregate-http — 分配 gate / 排队 / 区服列表（HTTP 网关 + LoginPreGate）
@@ -37,9 +37,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-client-player-login（/api/login、/api/refresh-token 走 login）、gate 节点目录
 - behavior: 恒 HTTP 200 + body.code：0 准入 / 100 排队（queue_source=ratelimit|login，retry_after_ms）/ 410 排队令牌过期 / 429 限流 / 404 zone_not_found / 503 维护·关闭·未开 / 500；`[]byte` 字段标准 Base64；JSON snake_case；zone_id=0 由客户端先拉 server-list 自动选区；白名单区服、公告
 - internal: login 侧排队（Redis 计数 + 令牌）、网关令牌桶限流、zone 状态存储
-- java: partial — `xm-gateway/.../assign/AssignGateController.java`（只 code=0 / 404 / 500 路径）与 `serverlist/ServerListController.java`；缺 queue-status、/api/login、/api/refresh-token、announcement、cdn-sign、hotfix-check、admin 接口、排队与限流（PARITY「分配 gate」行）
+- java: partial — `game-gateway/.../assign/AssignGateController.java`（只 code=0 / 404 / 500 路径）与 `serverlist/ServerListController.java`；缺 queue-status、/api/login、/api/refresh-token、announcement、cdn-sign、hotfix-check、admin 接口、排队与限流（PARITY「分配 gate」行）
 - size: M
-- robot: robot-stress-smoke（assign-gate，排队分支）、robot-e2e-http（/api/login + /api/refresh-token）；Java xm-robot smoke（assign-gate code=0）
+- robot: robot-stress-smoke（assign-gate，排队分支）、robot-e2e-http（/api/login + /api/refresh-token）；Java game-robot smoke（assign-gate code=0）
 - hazards: robot 外层 30 次退避重试，assign-gate 失败不会立刻暴露；`gate.go` 里的 resolveGateAddr 是死代码；Java 对 zone_id=0 回 404 而基线自动选区（客户端先拉 server-list 时不受影响）
 
 ### svc-scene-client-player-common — 通用下行：tip / 踢线 / 跨区重定向
@@ -49,9 +49,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: client-frame-handshake、svc-client-player-login、跨区 / 合服 HomeZone
 - behavior: 23 是传输层 / 异步失败通道（1003 内部错、1006 功能未开放、1008 超频、kServiceUnavailable、3023 进场失败、2017 被顶号）；34 先于关写端发送，reason.id = 被顶号 kLoginBeKickByAnOtherAccount 或进场失败 3023（顺序 tip → 34 → shutdown）；124 收到后客户端断开当前 gate、连 target、首包用 notify 里的 payload/signature 握手、**必须重跑 Login + EnterGame**（票据只认证连接，无跨区会话转移）
 - internal: Kafka gate 命令（KickPlayer、RedirectToGate 事件）、scene→gate 下行
-- java: partial — 23 已做（`xm-gate/.../session/ClientDispatcher.java` sendTip；顶号 23{2017}、进场失败 23{3023}）；34 有意不发（PARITY「顶号」行、robot 契约第 13 条）；124 缺（无跨区 / HomeZone）
+- java: partial — 23 已做（`game-gate/.../session/ClientDispatcher.java` sendTip；顶号 23{2017}、进场失败 23{3023}）；34 有意不发（PARITY「顶号」行、robot 契约第 13 条）；124 缺（无跨区 / HomeZone）
 - size: S（34 补发）+ M（124 随跨区一起做）
-- robot: robot-stress-smoke（被踢 / 重定向的 handler）、robot-travel-smoke（124 跟随）；Java xm-robot 不覆盖
+- robot: robot-stress-smoke（被踢 / 重定向的 handler）、robot-travel-smoke（124 跟随）；Java game-robot 不覆盖
 - hazards: 34 与 23 走同一连接时客户端可能少显示一条 tip（scene→玩家推送不保证顺序）；124 的「换连接之后失败」会话即死，客户端只能外层重连；Unity 客户端 `GameClient.cs` 已注册 23 / 34 / 124 的 OnNotify，Java 不发 34 时客户端只靠断线感知被踢
 
 ### svc-scene-scene-client-player — 场景进出与视野通知 SceneSceneClientPlayer
@@ -61,9 +61,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-client-player-login（进场）、scene-manager、svc-scene-client-player-common（124 跨区落地）
 - behavior: 进场顺序 79 → 21(自己) → 47；63 校验顺序 3001 参数错 / 3004 / 3014 / 3023 / 已在当前场景；镜像场景（mirror_config_id）；跨节点换场景；226 无错应答 = 已受理（到达 = 随后收 124；未成 = 随后收 23{kZoneTravel*}，含 kZoneTravelTargetBusy / TargetZoneNotFound / InBattle / InTeam）；视野半径 10 m
 - internal: scene_manager 选场景、跨节点玩家迁移（SceneNodeGrpc / Kafka 场景命令）、跨 zone 交接（冻结→存盘→handoff→RedirectToGate）
-- java: partial — `xm-scene/src/main/java/com/game/scene/world/ClientRequestHandler.java`（63 节点内换图、43→31）、`SceneWorld` / `ViewIndex`（21/47/64/51，行为有意不同见 PARITY「视野」行）；缺跨节点换场景、镜像 / 副本（回 3023）、226 TravelToZone（回 1006）。（2026-10-11 订正 226：批次 5.4 已注册 226、不再回 1006，同步段 3024 / 3007 / 3025 / 13000 / 3014、在队 3026，受理后 124 或 23 {3027}，代码已集成、切片未验证，见 scene-core.md zone-travel 与 PARITY「跨 zone 传送（226）与重定向（124）」行；跨节点换场景与镜像 / 副本见 PARITY 5.2 / 5.3 各行，本条其余部分没有随之回写）
+- java: partial — `game-scene/src/main/java/com/game/scene/world/ClientRequestHandler.java`（63 节点内换图、43→31）、`SceneWorld` / `ViewIndex`（21/47/64/51，行为有意不同见 PARITY「视野」行）；缺跨节点换场景、镜像 / 副本（回 3023）、226 TravelToZone（回 1006）。（2026-10-11 订正 226：批次 5.4 已注册 226、不再回 1006，同步段 3024 / 3007 / 3025 / 13000 / 3014、在队 3026，受理后 124 或 23 {3027}，代码已集成、切片未验证，见 scene-core.md zone-travel 与 PARITY「跨 zone 传送（226）与重定向（124）」行；跨节点换场景与镜像 / 副本见 PARITY 5.2 / 5.3 各行，本条其余部分没有随之回写）
 - size: L（跨节点换场景 M + 跨 zone 传送 L 另立）
-- robot: robot-stress-smoke（AI 15% 发 63）、robot-travel-smoke（226）；Java xm-robot smoke（79）、movement（21/47/51）
+- robot: robot-stress-smoke（AI 15% 发 63）、robot-travel-smoke（226）；Java game-robot smoke（79）、movement（21/47/51）
 - hazards: TravelToZone 必须追加在 service 末尾（C++ CallMethod 按 method index 分发）；79 可能早于 26 应答到达；基线 21/47 单向通知（旁人看不到新来者）已在 Java 修正
 
 ### svc-scene-skill-client-player — 技能 SceneSkillClientPlayer
@@ -75,7 +75,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - internal: 伤害事件、buff 系统、冷却组件、跨 zone 冻结目标丢弃伤害
 - java: partial（2026-10-03，批次 2.6）— 77 `ClientRequestHandler.listSkills`（场景核心）；84 `com.game.scene.skill.{SkillTables,SkillRules,SkillService,SkillFeature}`：真实 1001、目标 7001、冷却 7003、施法阶段 7000 / 打断推 33（冷却与后摇按设计意图生效）、状态表；70 / 33 含施法者本人（PARITY 登记 mmorpg 待改）。缺：消耗、命中 / 伤害、buff、7004 / 7002（随 6.3）。robot `skill` 场景覆盖
 - size: XL（战斗结算 + buff 应拆成「技能校验与冷却」M、「伤害结算」M、「buff 系统」L）
-- robot: robot-stress-smoke（AI 85% 发 84）、robot-features-smoke；Java xm-robot smoke（77 非空）
+- robot: robot-stress-smoke（AI 85% 发 84）、robot-features-smoke；Java game-robot smoke（77 非空）
 - hazards: 基线写的 1001 会被 TRANSFER_ERROR_MESSAGE 覆盖成空 tip（Java 如实回码）；施法者收不到自己的 70 时 Unity 客户端看不到自己施法表现（`GameClient.cs` 只由 70 驱动 SkillFx）
 
 ### svc-scene-movement-client-player — 移动 SceneMovementClientPlayer
@@ -85,9 +85,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-scene-client-player（视野）、svc-scene-player-sync（66 是移动广播唯一通道）
 - behavior: 上行永不回包；137 纠偏（导航射线夹持）；20 FPS 外推；600 帧挂机停推；133 / 135 / 130 基线从不发送；136 基线是空桩（回 id=0 空 tip）
 - internal: 场景帧循环、导航网格
-- java: done — `xm-scene` `SceneWorld.applyMove`、`MoveGuard`、`MovementRules`（规格 `docs/reference/mmorpg-client-contract-movement.md`；有意差异全部登记在 PARITY「移动」「移动位移校验」「136」行）；136 回 1006
+- java: done — `game-scene` `SceneWorld.applyMove`、`MoveGuard`、`MovementRules`（规格 `docs/reference/mmorpg-client-contract-movement.md`；有意差异全部登记在 PARITY「移动」「移动位移校验」「136」行）；136 回 1006
 - size: M
-- robot: robot-stress-smoke（AI move 动作）；Java xm-robot movement（Java 独有场景，Go robot 无对应断言）
+- robot: robot-stress-smoke（AI move 动作）；Java game-robot movement（Java 独有场景，Go robot 无对应断言）
 - hazards: 客户端依赖约 250 ms 一条 MoveSync；Java 的令牌桶（12 m/s、封顶 24 m）比基线严，客户端长时间不上报会被截断回 137
 
 ### svc-scene-player-sync — 属性同步下行 ScenePlayerSync
@@ -97,9 +97,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-scene-client-player（可见集合）、svc-scene-movement-client-player
 - behavior: 66 偶数帧、只带脏字段、发给看得见它的人（不含自己）；距离分三档（level1/2/3 半径系数）按不同频率发 65/55/82/68/75——但这些 AttributeDelta*S2C 目前只有 entity_id 字段（「Additional attributes can be added here」），实际线上不出现有效载荷
 - internal: 场景帧、脏标记
-- java: done（66）/ not_applicable（65/55/82/68/75 基线也无实际内容）— `xm-scene` 属性同步（PARITY「属性同步 66」行，有意差异：每条带 entity_id、新观察者补朝向 / 速度）
+- java: done（66）/ not_applicable（65/55/82/68/75 基线也无实际内容）— `game-scene` 属性同步（PARITY「属性同步 66」行，有意差异：每条带 entity_id、新观察者补朝向 / 速度）
 - size: S
-- robot: robot-stress-smoke 被动接收；robot-attribute-smoke（间接）；Java xm-robot movement 断言 66
+- robot: robot-stress-smoke 被动接收；robot-attribute-smoke（间接）；Java game-robot movement 断言 66
 - hazards: 客户端发来 55/65/66 等号（玩家服务但非客户端协议）gate 白名单就拦掉；将来给 AttributeDelta 加字段时两版要同步加频率分档
 
 ### svc-scene-currency-client-player — 货币 SceneCurrencyClientPlayer
@@ -157,7 +157,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-mission-client-player（can_participate 用任务接取检查）
 - behavior: 每项 status UNSCHEDULED/UPCOMING/OPEN/ENDED、starts/ends_at_ms、can_participate（OPEN 且可接任务）、unavailable_reason 中文原因（已完成 / 同类型任务未完成）；回 server_time_ms
 - internal: 只读，按服务器 UTC 毫秒计算日程
-- java: missing — scene 回 1006；`xm-table` 已能生成 ActivitySchedule 访问代码
+- java: missing — scene 回 1006；`game-table` 已能生成 ActivitySchedule 访问代码
 - size: S
 - robot: robot-features-smoke
 - hazards: unavailable_reason 是服务器下发的中文串（客户端直接显示），两版文案需一致
@@ -289,7 +289,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-match-service-queue、svc-battle-client-player（观战首帧 161 经 Kafka 推）
 - behavior: battle_id=0 随机观战；收到 161 NotifySpectateState 首帧才算进入观战；错误 kMatchSpectateWhileQueued / SpectateWhileInBattle / SpectateOffline / NoWatchableBattle / BattleNotWatchable / AlreadyWatching；补签只给参战者 / 观众（battle 本地核对名单并自签），客户端丢票或冷启动时用
 - internal: spectate:battle:{battle_id} 索引定位 battle 节点
-- java: done（两批各做一段）— **179 RequestBattleTicket 随批次 6.4**（2026-10-08，规格 `docs/porting/match-spec.md` §4，提交见 git log「批次 6.4」）：xm-match `com.game.match.reissue.BattleTicketReissue` 按落点记录的地址直拨 battle 的 `issueBattleTicket`，判死规则是有意差异 M16。**163 WatchBattle / 164 ListWatchableBattles 随批次 6.5**（2026-10-08，规格 `docs/porting/spectate-spec.md` §3、§4，提交见 git log「批次 6.5」）：xm-match `com.game.match.spectate`（`WatchBattleHandler` / `ListWatchableHandler`），码与 `parameters[0]` 逐字节照搬，有意差异 W1–W20；6.4 期间 163 / 164 的临时应答（in-band 1006 / 空列表，M22）已关闭。gate 把 `MatchService` 的十个号都路由到 xm-match。**勘误**（spectate-spec §8.5 E4）：上面 depends on 的「161 经 Kafka 推」已过时——首帧 161 只走直连，随观众的直连握手应答之后下发；behavior 把 AlreadyWatching 列成一般的拒绝原因也不对——「已在观战」不拒绝（服务端先清退旧场再接新场），AlreadyWatching（16016）只有并发抢占观战标记这一个出口。internal 的 `spectate:battle:{battle_id}` 在 Java 是 6.4 的落点记录 `xm:{match}:battle:<id>`。robot `battle-smoke`（第 5 步的 179、观战段的 163 / 164 / 179）。
+- java: done（两批各做一段）— **179 RequestBattleTicket 随批次 6.4**（2026-10-08，规格 `docs/porting/match-spec.md` §4，提交见 git log「批次 6.4」）：game-match `com.game.match.reissue.BattleTicketReissue` 按落点记录的地址直拨 battle 的 `issueBattleTicket`，判死规则是有意差异 M16。**163 WatchBattle / 164 ListWatchableBattles 随批次 6.5**（2026-10-08，规格 `docs/porting/spectate-spec.md` §3、§4，提交见 git log「批次 6.5」）：game-match `com.game.match.spectate`（`WatchBattleHandler` / `ListWatchableHandler`），码与 `parameters[0]` 逐字节照搬，有意差异 W1–W20；6.4 期间 163 / 164 的临时应答（in-band 1006 / 空列表，M22）已关闭。gate 把 `MatchService` 的十个号都路由到 game-match。**勘误**（spectate-spec §8.5 E4）：上面 depends on 的「161 经 Kafka 推」已过时——首帧 161 只走直连，随观众的直连握手应答之后下发；behavior 把 AlreadyWatching 列成一般的拒绝原因也不对——「已在观战」不拒绝（服务端先清退旧场再接新场），AlreadyWatching（16016）只有并发抢占观战标记这一个出口。internal 的 `spectate:battle:{battle_id}` 在 Java 是 6.4 的落点记录 `game:{match}:battle:<id>`。robot `battle-smoke`（第 5 步的 179、观战段的 163 / 164 / 179）。
 - size: M
 - robot: robot-battle-smoke（B 观战跟看）
 - hazards: RequestBattleTicket 曾在 BattleClientPlayer 下，gate 收缩后搬到 match；号 179 归 MatchService
@@ -315,9 +315,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: client-frame-handshake、MessageIdRegistry
 - behavior: 未验证令牌即发包 → 断开；消息号不存在 / 非客户端协议 → 不回包、计非法包，达阈值（默认 50）断开；体积超限回 1010 计非法包；按消息号限频回 1008 计非法包；GM 六条（37/49/94/95/175/187）在 GATE_RUN_MODE 非 dev/test 时回 23{1006} 并计非法包；BattleClientPlayer 号回 23{kServiceUnavailable} 不计非法包不断连；scene 对退出中的玩家只放行 ExitGame，其余回 1006
 - internal: 运行模式环境变量（GATE_RUN_MODE / SCENE_RUN_MODE / BATTLE_RUN_MODE）
-- java: partial — 白名单 / 体积 / 限频 / 非法包阈值已做（`xm-gate/.../session/MessageRoutes.java`、`TableMessageLimits.java`、`GateProperties.illegalPacketThreshold`、`GateMetrics`）；战斗号与未接入服务回 kServiceUnavailable（`ClientDispatcher.dispatch` default 分支）；GM 号目前因 scene 未实现而回 1006（等效拒绝），**一旦实现任何 Gm* 处理器必须先补运行模式闸**
+- java: partial — 白名单 / 体积 / 限频 / 非法包阈值已做（`game-gate/.../session/MessageRoutes.java`、`TableMessageLimits.java`、`GateProperties.illegalPacketThreshold`、`GateMetrics`）；战斗号与未接入服务回 kServiceUnavailable（`ClientDispatcher.dispatch` default 分支）；GM 号目前因 scene 未实现而回 1006（等效拒绝），**一旦实现任何 Gm* 处理器必须先补运行模式闸**
 - size: S
-- robot: robot-login-test（MessageBeforeLogin）、robot-stress-smoke；Java xm-robot 不覆盖
+- robot: robot-login-test（MessageBeforeLogin）、robot-stress-smoke；Java game-robot 不覆盖
 - hazards: GM 号挂在客户端协议服务上；GM 拒绝必须排在限频之后（否则被拒包不占额度可刷日志）
 
 ### contract-service-backend-routing — 非 scene 客户端服务的后端路由（路由服 / 直连）
@@ -327,7 +327,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: contract-gate-client-gates
 - behavior: 应答桥接只认成功响应，业务错误一律 in-band（error_message），gRPC 错误到客户端只剩超时 / 23；无可用后端回 23{kServiceUnavailable}；Login(48) 绑定后端实例（会话粘滞）
 - internal: 路由服按服务名挑实例、Login 粘滞；Java 用 `MessageRoutes.SERVICE_BACKENDS`（服务裸名 → Dubbo group）+ `ClientMessageService.handle(ClientCall)`
-- java: partial — 机制已在（`MessageRoutes`、`ClientDispatcher.callLogin`、`xm-api` ClientMessageService），表里只有 `ClientPlayerLogin`；每接一个新后端（chat / friend / guild / team / trade / match）加一行并实现对应 Dubbo provider
+- java: partial — 机制已在（`MessageRoutes`、`ClientDispatcher.callLogin`、`game-api` ClientMessageService），表里只有 `ClientPlayerLogin`；每接一个新后端（chat / friend / guild / team / trade / match）加一行并实现对应 Dubbo provider
 - size: S（每接一个服务的路由增量）
 - robot: 各 *-smoke 场景
 - hazards: Java 的 ClientReply 失败分层（body 内 error_message vs tip_id vs 23{1003}）要对所有新后端保持一致；guild 的 ClientMethods 式服务端白名单在 Java 侧也要有（UpdateGuildScore、Notify* 不可调用）
@@ -353,7 +353,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-client-player-login、svc-login-pregate-http、svc-scene-scene-client-player、svc-scene-skill-client-player、svc-client-player-chat（behavioral / chatter profile）
 - behavior: profile 权重：stress = 84:85% / 63:15%；behavioral = skill45 move25 switch20 idle5 chat5；fighter / explorer / chatter；断线后外层重连（带缓存 access_token 先试 access_token，失败回落口令）；统计 login_ok / enter_ok / login_fail / recon_fb；**退出码不反映成败**（只看统计行）；可接 LLM 顾问（默认关）
 - internal: 无
-- java: partial — Go robot 的 robot_smoke.yaml（3 账号）已对 Java 版实测 login_ok=3 enter_ok=3、stress AI 75s 稳定（PARITY「登录 → 进场景竖切」行）；Java xm-robot `scenario/SmokeScenario.java` 复刻其登录 → 进场 → 77 段并以退出码断言；chat 动作对 Java 回 23{kServiceUnavailable}（behavioral / chatter profile 会计失败）；大规模 stress（5k / 45k）未在 Java 版跑过
+- java: partial — Go robot 的 robot_smoke.yaml（3 账号）已对 Java 版实测 login_ok=3 enter_ok=3、stress AI 75s 稳定（PARITY「登录 → 进场景竖切」行）；Java game-robot `scenario/SmokeScenario.java` 复刻其登录 → 进场 → 77 段并以退出码断言；chat 动作对 Java 回 23{kServiceUnavailable}（behavioral / chatter profile 会计失败）；大规模 stress（5k / 45k）未在 Java 版跑过
 - size: S（Java 侧补：behavioral profile 实测、千级并发压测脚本）
 - robot: 本身
 - hazards: Go robot 的 move 动作只发 43，从未覆盖移动上行；`use_http_login: true` 的 stress-* 配置会先打 /api/login（Java 缺 → 回落 TCP 登录并计 login_fail）
@@ -365,8 +365,8 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-client-player-login、svc-scene-skill-client-player、svc-scene-scene-client-player、svc-scene-currency-client-player
 - behavior: 场景：NormalLogin、LoginLogoutCycle、WrongPassword、DuplicateEnterGame（拒绝或幂等受理都算过）、DuplicateLoginRequest、AccountDisplacement（A 在 5s 内收到 34 **或连接被关**即过）、ConcurrentSameAccount（至少一个成功、至多一个在线）、RapidReconnect、DisconnectDuringLogin、DisconnectDuringEnter、RapidDisconnectReconnect、AccessTokenReconnect（首登必须回 access_token；access_token 重登必须成功且**不轮换** token）、DifferentAccountSequential、LeaveAndReEnter、LeaveAndReLogin、RapidLoginSpam、MessageBeforeLogin（26 先于 48 后仍能正常登录）、LoginStuckDetection（限时完成）、BatchConcurrentLogin、SkillCast（收到 84 应答或 70）、SceneSwitch（63 后收到新的 79）、MultiRobotBehavior（≥70% 机器人进场且有行为记录）、CurrencyCrashWindow；结果写 behavior_test_results.csv / jsonl
 - internal: 无
-- java: partial — 未见在 Java 版跑过的记录；按代码推断 AccessTokenReconnect 与 CurrencyCrashWindow 必失败（无 access_token、54/37 回 1006），其余登录 / 技能 / 换图用例 Java 已具备能力；xm-robot 无对应用例
-- size: M（Java 侧：跑通并把可移植的用例并入 xm-robot，如顶号、并发同账号、断线重连）
+- java: partial — 未见在 Java 版跑过的记录；按代码推断 AccessTokenReconnect 与 CurrencyCrashWindow 必失败（无 access_token、54/37 回 1006），其余登录 / 技能 / 换图用例 Java 已具备能力；game-robot 无对应用例
+- size: M（Java 侧：跑通并把可移植的用例并入 game-robot，如顶号、并发同账号、断线重连）
 - robot: 本身
 - hazards: 用例间只睡 500ms，Java 的归属租约（释放前夺权等 3s / 租约 30s）可能让紧邻用例撞 2005；AccountDisplacement 以连接关闭为通过条件，所以 Java 不发 34 也能过
 
@@ -390,7 +390,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - behavior: 单次运行：登录 → 读 gold → GM 加币 → 再读确认落到 scene 内存 → 写快照 JSON 后**不 LeaveGame** 直接退出；外部脚本在两次运行之间 kill -9 scene 再重启，比对余额量化丢失窗口；addAmount=0 时只读
 - internal: 依赖 GATE_RUN_MODE / SCENE_RUN_MODE = dev
 - java: missing — 54 / 37 在 Java 回 1006；且 Java 无周期存盘（architecture.md §7：被 kill 时在线增量全丢），场景前提不同
-- size: S（货币服务就位后移植为 xm-robot 场景 + 周期存盘一起评估）
+- size: S（货币服务就位后移植为 game-robot 场景 + 周期存盘一起评估）
 - robot: 本身
 - hazards: 货币类型写死 slot 0；Java 要先定周期存盘策略，否则此场景必然「全丢」
 
@@ -413,7 +413,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-match-service-queue、svc-match-service-spectate-ticket、svc-battle-client-player
 - behavior: 账号 robot_9001 / robot_9002；A 收到开战后先建直连再等「观战就绪屏障」才开自动（PVE 秒杀约 100ms，否则 B 扑空回 tip 5）；断言 B 的 battle_id = A 的、观战回合 ≥ 1、直连计数 ≥ 1、A 回合 ≥ 1；输出 BATTLE_SMOKE_OK / BATTLE_SMOKE_FAIL step=…，退出码 0 / 1；开战 30s、终局 120s 超时
 - internal: 无
-- java: done（A 侧 2026-10-08 批次 6.4，规格 `docs/porting/match-spec.md` §15.5；B 侧观战段 2026-10-08 批次 6.5，规格 `docs/porting/spectate-spec.md` §10.7，提交见 git log「批次 6.5」）— xm-robot 子命令 `battle-smoke`（`com.game.robot.scenario.{BattleSmokeScenario,BattleSmokeChecks,SpectateSteps}`）。比基线多：排队语义与拒绝码、179 补签、1V1 评分、切磋（6.4 的第 1–11 步）；观战段 S0–S13 用四个新号——164 的条数 / 次序 / 摘要字段，163 的指定、重看同一场（重推的 177 经直连到达且逐字节相同）、随机、16014 / 16015 / 16018 的各个出口，观众直连的 161 → 158 → 166 → FIN 与 165，观战中可以排队，开局前被清退（166 REMOVED），以及 xm-match 的观战指标增量。每轮新建账号（不用固定的 robot_9001 / 9002）；结果行沿基线的 `BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=…`，追加 `pvp_battle_id / challenge_battle_id / spectate_battle_id / b_spectate_turns / b_direct_spectate_turns / removed_ok / s12_ready_residue`，失败行 `BATTLE_SMOKE_FAIL step=… reason=…`（步骤号小写）。同一个号的第二局 PVE 只要求打完、不断言胜负（血量随结算带进下一局，同基线）。**勘误**（spectate-spec §8.5 E3）：上面 behavior 的两处照抄了基线 `battle_smoke_scenario.go:70-72` 已过时的注释——①「B 扑空回 tip 5」：随机扑空回 16017、指定扑空回 16018；②「PVE 秒杀约 100ms」：现行表数值下单人 PVE 要打多个回合（基线运行记录 13–21 回合；Java 切片上新号实测 7–10 回合），屏障期间战斗靠 6 s 的回合超时推进。基线 Go robot 的 `battle_smoke` 没有对 Java 跑过（本机没有 Go 工具链）。
+- java: done（A 侧 2026-10-08 批次 6.4，规格 `docs/porting/match-spec.md` §15.5；B 侧观战段 2026-10-08 批次 6.5，规格 `docs/porting/spectate-spec.md` §10.7，提交见 git log「批次 6.5」）— game-robot 子命令 `battle-smoke`（`com.game.robot.scenario.{BattleSmokeScenario,BattleSmokeChecks,SpectateSteps}`）。比基线多：排队语义与拒绝码、179 补签、1V1 评分、切磋（6.4 的第 1–11 步）；观战段 S0–S13 用四个新号——164 的条数 / 次序 / 摘要字段，163 的指定、重看同一场（重推的 177 经直连到达且逐字节相同）、随机、16014 / 16015 / 16018 的各个出口，观众直连的 161 → 158 → 166 → FIN 与 165，观战中可以排队，开局前被清退（166 REMOVED），以及 game-match 的观战指标增量。每轮新建账号（不用固定的 robot_9001 / 9002）；结果行沿基线的 `BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=…`，追加 `pvp_battle_id / challenge_battle_id / spectate_battle_id / b_spectate_turns / b_direct_spectate_turns / removed_ok / s12_ready_residue`，失败行 `BATTLE_SMOKE_FAIL step=… reason=…`（步骤号小写）。同一个号的第二局 PVE 只要求打完、不断言胜负（血量随结算带进下一局，同基线）。**勘误**（spectate-spec §8.5 E3）：上面 behavior 的两处照抄了基线 `battle_smoke_scenario.go:70-72` 已过时的注释——①「B 扑空回 tip 5」：随机扑空回 16017、指定扑空回 16018；②「PVE 秒杀约 100ms」：现行表数值下单人 PVE 要打多个回合（基线运行记录 13–21 回合；Java 切片上新号实测 7–10 回合），屏障期间战斗靠 6 s 的回合超时推进。基线 Go robot 的 `battle_smoke` 没有对 Java 跑过（本机没有 Go 工具链）。
 - size: S（随战斗功能移植）
 - robot: 本身
 - hazards: 直连拨号失败即 FAIL，无经 gate 回落
@@ -425,7 +425,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-match-service-queue（跨 zone 匹配）、svc-battle-client-player、多 zone 部署
 - behavior: 断言 A / B 的 gate 地址不同（不同 zone 证据）、battle_id 相同、双方回合 ≥ 1、直连计数 ≥ 1；输出 CROSS_ZONE_MATCH_OK / FAIL；账号与 battle-smoke 错开防互顶
 - internal: 无
-- java: done（2026-10-08，批次 6.5，规格 `docs/porting/spectate-spec.md` §2、§10.8；提交见 git log「批次 6.5」）— xm-robot 独立子命令 `battle-cross-zone`（`com.game.robot.scenario.{BattleCrossZoneScenario,BattleCrossZoneChecks}`；`--zone` 是 A 的区，`--visit-zone` / `XM_ROBOT_VISIT_ZONE` 是 B 与观众 C 的区，两者相同即参数错误），需要 `XM_ZONES=2` 的本机切片（`tools/local/start-slice.sh`，批次 6.5 落地：多起区 2 的 xm-scene-z2 与 xm-gate-z2，其余进程共用，xm-match 全服一份）。服务端没有为跨区加任何生产代码：排队池全局、battle 池全局、scene 按 (zone, 节点号) 定位、推送按带 zone 的在线目录寻址；两个区的第一台 scene / gate 都是 1 号，同号碰撞由组件测试与本场景覆盖。比基线严：157 的回包、两张票指向同一节点与实例、两侧同一个终局、各自的大厅 150（结算回到各自区的 scene）、评分、跨区观众、同一次运行连打第二局；每轮新建账号（不用固定的 robot_9003 / 9004）。结果行 `CROSS_ZONE_MATCH_OK battle_id=… zone_a=… zone_b=… a_turns=… b_turns=… a_direct_turns=… b_direct_turns=…`（前七个字段与基线同名同序）后接 `observer_zone=… c_spectate_turns=… second_battle_id=…`；失败行 `CROSS_ZONE_MATCH_FAIL step=… reason=…`（步骤号小写）。没有做：角色列表里归属区的断言（等 5.4 的 X16）。**勘误**（spectate-spec §8.5 E6）：上面 behavior 的「直连计数 ≥ 1」准确的判据是 `state_replies ≥ 1 ∧ turn_results ≥ 1 ∧ battle_ends ≥ 1`（基线 `battle_smoke_cross_zone_scenario.go:300`）；另，基线配置里的「match 每 zone 一份」只是它的本地部署形态，不是需求（E7）。基线 Go robot 的 `battle_smoke_cross_zone` 没有对 Java 跑过（本机没有 Go 工具链）。
+- java: done（2026-10-08，批次 6.5，规格 `docs/porting/spectate-spec.md` §2、§10.8；提交见 git log「批次 6.5」）— game-robot 独立子命令 `battle-cross-zone`（`com.game.robot.scenario.{BattleCrossZoneScenario,BattleCrossZoneChecks}`；`--zone` 是 A 的区，`--visit-zone` / `GAME_ROBOT_VISIT_ZONE` 是 B 与观众 C 的区，两者相同即参数错误），需要 `GAME_ZONES=2` 的本机切片（`tools/local/start-slice.sh`，批次 6.5 落地：多起区 2 的 game-scene-z2 与 game-gate-z2，其余进程共用，game-match 全服一份）。服务端没有为跨区加任何生产代码：排队池全局、battle 池全局、scene 按 (zone, 节点号) 定位、推送按带 zone 的在线目录寻址；两个区的第一台 scene / gate 都是 1 号，同号碰撞由组件测试与本场景覆盖。比基线严：157 的回包、两张票指向同一节点与实例、两侧同一个终局、各自的大厅 150（结算回到各自区的 scene）、评分、跨区观众、同一次运行连打第二局；每轮新建账号（不用固定的 robot_9003 / 9004）。结果行 `CROSS_ZONE_MATCH_OK battle_id=… zone_a=… zone_b=… a_turns=… b_turns=… a_direct_turns=… b_direct_turns=…`（前七个字段与基线同名同序）后接 `observer_zone=… c_spectate_turns=… second_battle_id=…`；失败行 `CROSS_ZONE_MATCH_FAIL step=… reason=…`（步骤号小写）。没有做：角色列表里归属区的断言（等 5.4 的 X16）。**勘误**（spectate-spec §8.5 E6）：上面 behavior 的「直连计数 ≥ 1」准确的判据是 `state_replies ≥ 1 ∧ turn_results ≥ 1 ∧ battle_ends ≥ 1`（基线 `battle_smoke_cross_zone_scenario.go:300`）；另，基线配置里的「match 每 zone 一份」只是它的本地部署形态，不是需求（E7）。基线 Go robot 的 `battle_smoke_cross_zone` 没有对 Java 跑过（本机没有 Go 工具链）。
 - size: S
 - robot: 本身
 - hazards: 需要两个 zone 的 gate 同时在线
@@ -438,7 +438,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - behavior: 账号 robot_9101；预备：等级归 1、洗点（1 级免费）、切回首方案、GM 发金币；断言：面板全量非空；1→30 级总点恰好 +145；Auto 只算不落（增量和 = 剩余点）；按建议提交后剩余归零且二级属性变大；重发同一目标值 kAttributeNothingToChange；减少已分配被拒 kAttributePointsCannotDecrease；开方案按 create_scheme_cost_gold 精确扣金、新方案干净、冷却后切回原方案加点原样；重登后等级 / 方案 / 分配 / 二级属性一致；30 级洗点按 reset_cost_gold 精确扣金并全额返点；输出 ATTRIBUTE_SMOKE_OK / FAIL
 - internal: 需 dev 运行模式（GM 号）
 - java: missing
-- size: S（服务就位后移植进 xm-robot）
+- size: S（服务就位后移植进 game-robot）
 - robot: 本身
 - hazards: 依赖 GM 号放行，Java 实现 GM 闸后跑冒烟要开 dev 模式；相性 / 仙魔池 2026-09-14 已删，旧文档别照搬
 
@@ -449,7 +449,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-pet-client-player、svc-scene-attribute-client-player、svc-scene-currency-client-player
 - behavior: 账号 robot_9102；断言：列表全量非空；角色面板不得出现宝宝池、宝宝维度必须全属宝宝池（owner_type 分流）；主人 1→30 级时宝宝等级跟涨、点数 +145；洗点后 remaining == total；Auto 只算不落；提交后剩余归零二级属性变大；幂等 kPetNothingToChange；减少被拒 kPetPointsCannotDecrease；不存在 pet_id kPetNotFound；召唤后 active_pet_id 指向它、重复召唤 kPetAlreadyActive；重登一致；收回后 active 归零、再收回 kPetNotActive；输出 PET_SMOKE_OK / FAIL
 - internal: 需 dev 运行模式
-- java: done（2026-10-03，批次 2.8）— xm-robot `pet` 场景（新号，另加改名 / 洗点按 54 余额核对扣费）
+- java: done（2026-10-03，批次 2.8）— game-robot `pet` 场景（新号，另加改名 / 洗点按 54 余额核对扣费）
 - size: S
 - robot: 本身
 - hazards: 宝宝等级派生自主人（不独立升级）
@@ -521,7 +521,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-scene-scene-client-player（226）、svc-scene-client-player-common（124）、svc-client-player-login（HomeZone、票据 target_zone_id）、svc-scene-currency-client-player
 - behavior: 账号 96xx（首次在 home_zone 建角）；T1 登 home 并 GM +11 金币得出发值（登录中就收到 124 = 上轮残留，直接失败）；T2 target_zone_id=0 必须同步拒（tip≠0）且不重定向、金币不变；T2b 不存在的 scene_config_id 同步拒；T3 去程等 124 → 先连新后关旧、票据原样验签、按 player_id 严格重登 → 等排在 124 之后的 79，断言 player_id 不变、票据 zone == visit、gate 地址变化；T4 访客区金币 == 出发值、+7 可写、停留熬过 home 区 30s 断线租约不被踢 / 不二次重定向；T5 回程同链反向；T6 回家金币 == 出发值 + 7、全程恰好 2 次 124；一次窗口内出现第二个 124 判失败；226 回包可选（124 到达后旧连接关闭，回包可能丢）
 - internal: 无
-- java: partial（2026-10-11，批次 5.4：只在本机假服务端上跑过单测，没有对真切片跑过）— xm-robot 子命令 `travel`（T0–T11：同步拒、在队 3026、未部署区 `{0}` 后 23 {3027}、去程 226 → 124 → 跟随严格重登、停留、GO-5 经出发区入口重连回原实例、持票者 2011、他区票据 `token not for this zone`、连发 226 按 `id` 配对、登出后经访客区登录无 124；结果行 `TRAVEL_SMOKE_OK` 与基线同名同序，后接 `hops` / `reconnect_gate`）、`travel-abandon`（R6 / R7）、`travel-long`（R4）；`RedirectFollower` 每个登录会话至多 3 跳、三跳用三种关旧连接的次序；每轮新号，不用固定号段。规格 zone-travel-spec §11.11，用法见 `xm-robot/README.md`；Go robot `travel_smoke` 对 Java 的跨实现验收（§11.10）没有做
+- java: partial（2026-10-11，批次 5.4：只在本机假服务端上跑过单测，没有对真切片跑过）— game-robot 子命令 `travel`（T0–T11：同步拒、在队 3026、未部署区 `{0}` 后 23 {3027}、去程 226 → 124 → 跟随严格重登、停留、GO-5 经出发区入口重连回原实例、持票者 2011、他区票据 `token not for this zone`、连发 226 按 `id` 配对、登出后经访客区登录无 124；结果行 `TRAVEL_SMOKE_OK` 与基线同名同序，后接 `hops` / `reconnect_gate`）、`travel-abandon`（R6 / R7）、`travel-long`（R4）；`RedirectFollower` 每个登录会话至多 3 跳、三跳用三种关旧连接的次序；每轮新号，不用固定号段。规格 zone-travel-spec §11.11，用法见 `game-robot/README.md`；Go robot `travel_smoke` 对 Java 的跨实现验收（§11.10）没有做
 - size: S（随跨 zone 传送功能移植）
 - robot: 本身
 - hazards: 通用重登在角色列表为空时会自动建角（假绿 + 脏数据），必须严格按 player_id 选角；「到了」不能用一次性 WaitSceneReady 信号判断
@@ -550,14 +550,14 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - robot: 本身
 - hazards: 若 mmorpg 真的关掉 TCP 口令登录，Java 版将无法被新客户端登录——这是 Java 当前最大的客户端契约缺口之一
 
-### robot-java-movement — Java 独有：移动 / 视野 / 66 / 137 探针（xm-robot movement）
+### robot-java-movement — Java 独有：移动 / 视野 / 66 / 137 探针（game-robot movement）
 - mmorpg: 无对应 Go robot 场景（Go robot 的 move 动作只发 43）；依据 `docs/reference/mmorpg-client-contract-{movement,aoi}.md`
 - client messages: 134 / 132 / 131、137、21 / 47 / 51、66、48 / 14 / 26 / 79
 - tables: 无
 - depends on: svc-scene-movement-client-player、svc-scene-player-sync、svc-scene-scene-client-player
 - behavior: 两新账号同场景 ≤10 m；B 收到 A 的 21/47 且实体号 / 位置一致；A 每 250ms Start → Sync×3（末条 30 m/s）→ Stop，B 每条输入后收到 A 的 66（超速截到 10 m/s、Stop 速度全零、位置 = 停止点、rotation = 上报值），停后 1s 静默，A 对上行无回包、不收 137、不收自己的 66；A 断开 B 收 51，重登位置 = 停止点；前跳 200 m：收到 137 校验 input_seq / 偏差 > 0.5 m / server_time_ms / 信封 id=0，否则按 fail-open；重登落盘位置 = 裁决位置；`--expect-jump correct|accept|auto`
 - internal: 无
-- java: done — `xm-robot/src/main/java/com/game/robot/scenario/{MovementScenario,MoveAssertions}.java`（单测 `MoveAssertionsTest`、`MovementPlanTest`）
+- java: done — `game-robot/src/main/java/com/game/robot/scenario/{MovementScenario,MoveAssertions}.java`（单测 `MoveAssertionsTest`、`MovementPlanTest`）
 - size: S
 - robot: 本身（mmorpg 侧无，建议回移到 Go robot）
 - hazards: 对基线（无导航网格）只能用 `--expect-jump accept|auto`，对 Java（MoveGuard）用 `correct`
@@ -569,7 +569,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: 所有 svc-* 条目
 - behavior: robot 对每个 S2C / 应答号都有处理器（含 Notify*），是判断「客户端到底读哪些字段」的最快入口；Unity 客户端只经 GameClient.OnNotify 注册（生成的 HandlerRegistry 从未被调用），已注册 124 / 177 / 127 / 21 / 47 / 51 / 64 / 70 / 33 / 133 / 135 / 130 / 137 / 23 / 34 等
 - internal: 无
-- java: partial — xm-robot 只实现登录 / 进场 / 移动所需（`xm-robot/src/main/java/com/game/robot/client/{RobotClient,Inbox,MessageIds}.java`），消息号经 `MessageIdRegistry.requireId` 解析
+- java: partial — game-robot 只实现登录 / 进场 / 移动所需（`game-robot/src/main/java/com/game/robot/client/{RobotClient,Inbox,MessageIds}.java`），消息号经 `MessageIdRegistry.requireId` 解析
 - size: S（随各服务移植时逐个补）
 - robot: 全部场景
 - hazards: Unity 客户端注册了 133 / 135 / 130，但两版服务端都从不发送；客户端不区分本地玩家的 70，Java 发给施法者本人是正确的
@@ -581,9 +581,9 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - depends on: svc-login-pregate-http（GateTokenPayload 签发）
 - behavior: `[int32 len][int32 nameLen][typeName+终止符][body][int32 adler32]` 大端；len ∈ [10, 65536]；typeName 末字节剥掉（Go 写空格、C++ 写 \0）；非法帧丢弃并关闭；签名为 HMAC-SHA256 的 64 字节小写 hex；令牌校验 gate_node_id 与过期；推送 MessageContent.id=0，应答回显请求 id
 - internal: gate_token_secret（环境变量注入）
-- java: done — `xm-net/src/main/java/com/game/net/client/{ClientFrameDecoder,ClientFrameEncoder,ClientFrames}.java`（golden bytes 单测 `ClientFramesTest`）、`xm-gate/.../session/{ClientChannelHandler,ClientPipeline}.java`、`xm-common` 令牌签名（PARITY「客户端协议」行）
+- java: done — `game-net/src/main/java/com/game/net/client/{ClientFrameDecoder,ClientFrameEncoder,ClientFrames}.java`（golden bytes 单测 `ClientFramesTest`）、`game-gate/.../session/{ClientChannelHandler,ClientPipeline}.java`、`game-common` 令牌签名（PARITY「客户端协议」行）
 - size: S
-- robot: 所有场景；Java xm-robot 复用 xm-net 编解码
+- robot: 所有场景；Java game-robot 复用 game-net 编解码
 - hazards: battle 直连复用同一帧格式但握手消息是 BattleTokenVerifyRequest（Java 尚无 battle）；proto 注释写的「32 字节签名原值」与实际 hex 文本不符，以实现为准
 
 ### contract-message-id-sync — 消息号 / 客户端 proto / tip / 配表同步
@@ -592,10 +592,10 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - tables: 全部配表 + Tip
 - depends on: 无
 - behavior: 号是客户端契约但会随 proto 变化漂移，代码里不得写死数字；只能在 service 末尾追加方法（C++ 按 method index 分发）
-- internal: Java `tools/ContractSync.java`（记录源 commit 于 `contract/SOURCE.properties`）、`xm-proto/.../contract/MessageIdRegistry.java`（按「服务裸名+方法名」解析，etcd 号预期不可解析）、`xm-table` + `xm-table-codegen`
+- internal: Java `tools/ContractSync.java`（记录源 commit 于 `contract/SOURCE.properties`）、`game-proto/.../contract/MessageIdRegistry.java`（按「服务裸名+方法名」解析，etcd 号预期不可解析）、`game-table` + `game-table-codegen`
 - java: done — 当前对齐 mmorpg `26ceb70ca`；`MessageIdRegistryTest`、`SceneMessageIds.resolve`（缺号即启动失败）
 - size: S
-- robot: Java xm-robot `MessageIds` 经 `requireId` 解析
+- robot: Java game-robot `MessageIds` 经 `requireId` 解析
 - hazards: 同步后必须 `clean install`（protoc 增量生成会残留旧类，AGENTS.md §4）；帮会 239–243 新号同步后 Java gate 回 kServiceUnavailable
 
 ## Open questions
@@ -606,7 +606,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 4. **客户端发 Notify* 推送号**：基线经路由服回信封 tip kServiceUnavailable（friend-smoke 第 6 步断言），Java gate 对 Empty 应答默认不回包。friend 等服务接入时要不要在 Java 后端对 Notify* 统一回 tip_id？
 5. **login-test 套件是否要在 Java 上跑并入验收**：AccessTokenReconnect、CurrencyCrashWindow 按代码推断必失败；其余用例未见运行记录。
 6. **周期存盘**：robot-currency-crash 与 travel-smoke（T4 熬过 30s 租约后金币仍在）都隐含周期存盘 / 迁移存盘；Java 首批无周期存盘（architecture.md §7），需要先定 Java 的存盘策略再移植这类场景。
-7. **Go robot 的 move 动作只发 43**：Go robot 从未覆盖 134/132/131；是否把 xm-robot 的 movement 场景回移到 Go robot，作为两版共同的移动验收？
+7. **Go robot 的 move 动作只发 43**：Go robot 从未覆盖 134/132/131；是否把 game-robot 的 movement 场景回移到 Go robot，作为两版共同的移动验收？
 8. **ScenePlayerSync 的 65/55/82/68/75**：AttributeDelta*S2C 目前只有 entity_id，基线按距离三档调度但无有效载荷；mmorpg 是否计划填字段（届时 Java 要同步分档频率）？
 9. **SceneRollbackClientPlayer** 十二条 GM 回档在 mmorpg 仍是空桩，Java 是否跳过直到 mmorpg 填实？
 10. **robot 账号号段**：Go 冒烟用 robot_9001–97xx 固定号段且依赖「首次在某 zone 建角」登记 HomeZone；Java 无 HomeZone 概念，移植 trade / team / travel 场景前要先定 Java 的 HomeZone / 多 zone 设计。

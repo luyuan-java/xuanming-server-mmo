@@ -1,7 +1,7 @@
 # 帮会核心（guild，批次 4.4）移植统一规格：从 mmorpg 基线到 Java 版
 
 > **基线**：mmorpg `26ceb70ca`，与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。Java 侧以 `8a4726f` 为准。
-> 写作时工作区里有一批未提交的改动（组队 xm-team、`Deadline` / `PlayerProfiles` 迁到 xm-common、热关停等），涉及
+> 写作时工作区里有一批未提交的改动（组队 game-team、`Deadline` / `PlayerProfiles` 迁到 game-common、热关停等），涉及
 > `MessageRoutes.java`、`GateConfiguration.java`、`RedisKeys.java`、`NodeTypes.java`、`DubboGroups.java`、`start-slice.sh` 等文件。
 > 这些文件的行号按当前工作区给出，提交后可能小幅漂移，所以引用时同时写出方法名。
 >
@@ -15,16 +15,16 @@
 > - `session.go` / `session_test.go`：`go/guild/internal/session/`；`constants.go`：`go/guild/internal/constants/`；`config.go` / `config_test.go`：
 >   `go/guild/internal/config/`；`guild_id_minter.go` / `servicecontext.go`：`go/guild/internal/svc/`；`guild_server.go`、`inband_observability_test.go`：
 >   `go/guild/internal/server/`；`guild.go` / `guild_test.go`：`go/guild/`；`guild.yaml`：`go/guild/etc/`。
-> - `guild.proto`、`guild_db.proto`：mmorpg `proto/guild/` 下，行号用 mmorpg 的。Java 同步副本在 `xm-proto/src/main/proto/proto/guild/`，
+> - `guild.proto`、`guild_db.proto`：mmorpg `proto/guild/` 下，行号用 mmorpg 的。Java 同步副本在 `game-proto/src/main/proto/proto/guild/`，
 >   只多第 2–4 行 java option，所以 **Java 行号 = mmorpg 行号 + 3**。
 > - `forwardlogic.go`：mmorpg `go/client_rpc_router/internal/logic/forwardlogic.go`。`guild_smoke_scenario.go`：mmorpg `robot/`。
 >   `messagelimiter.json`、`guildrule.json`、`guildlevel.json`：mmorpg `generated/tables/`。
 > - `GuildClient.cs`：`D:\work\mmorpg-client\Assets\Scripts\Game\Guild\GuildClient.cs`；`GameClient.cs`：`D:\work\mmorpg-client\Assets\Scripts\Game\GameClient.cs`。
-> - 以 `xm-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`：在 `D:\work\xuanming-server-mmo` 下。
->   `guild_error_tip.proto` 指 `xm-table/src/main/proto/tip/guild_error_tip.proto`；`tip_text.json` 指 `config-data/tables/tip_text.json`；
->   `message_id.txt` 指 `xm-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
+> - 以 `game-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`：在 `D:\work\xuanming-server-mmo` 下。
+>   `guild_error_tip.proto` 指 `game-table/src/main/proto/tip/guild_error_tip.proto`；`tip_text.json` 指 `config-data/tables/tip_text.json`；
+>   `message_id.txt` 指 `game-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
 > - mmorpg 设计稿 `docs/design/guild-phase2/*.md` 只作背景；与代码冲突时以代码为准。
-> - Redis 键里的 `xm:` 是前缀；Java 键里的 `{...}` 是 hash tag（§1.10）。
+> - Redis 键里的 `game:` 是前缀；Java 键里的 `{...}` 是 hash tag（§1.10）。
 >
 > **本稿的来历**：由三份分区规格合并而成，三份分别讲数据层（表、键、事务、缓存、排行、发号）、RPC / logic 层（准入、前置、
 > 推送、在线、名字）、客户端契约 / robot / Java 落地映射。
@@ -32,8 +32,8 @@
 > - 本稿只读代码，没有改任何源文件。
 >
 > **与 pbmysql 的关系**：用户要求阶段 4 起「形状由 proto 消息决定的 MySQL 表」一律接 pbmysql（`docs/porting/roadmap.md:50-53`）。
-> 帮会四张核心表正是这类表：Java 版用自有的 `guild_tables.proto` 经 xm-pbmysql 建表，DDL 与 Go proto2mysql 逐字节相同
-> （`xm-pbmysql/src/test/java/com/game/pbmysql/CreateTableSqlTest.java:310-341` 已对同步来的 `guild_db.proto` 钉住了 `guild` 与 `guild_member` 两张表），
+> 帮会四张核心表正是这类表：Java 版用自有的 `guild_tables.proto` 经 game-pbmysql 建表，DDL 与 Go proto2mysql 逐字节相同
+> （`game-pbmysql/src/test/java/com/game/pbmysql/CreateTableSqlTest.java:310-341` 已对同步来的 `guild_db.proto` 钉住了 `guild` 与 `guild_member` 两张表），
 > 业务 SQL 全部手写（§7.5）。
 
 ---
@@ -65,20 +65,20 @@
 
 **Java 侧的对应**
 - **入口**：gate 经 Dubbo 调 `ClientMessageService.handle(ClientCall) → CompletableFuture<ClientReply>`，group 为 `guild`
-  （`docs/design/architecture.md:75-90`；`xm-api/src/main/java/com/game/api/DubboGroups.java:7-22` 的现有写法）。
-- **进程**：新模块 **xm-guild**（Spring Boot + Dubbo Triple），结构照 xm-friend（`architecture.md:350-391`；路线图规定「每个服务一个进程」，
+  （`docs/design/architecture.md:75-90`；`game-api/src/main/java/com/game/api/DubboGroups.java:7-22` 的现有写法）。
+- **进程**：新模块 **game-guild**（Spring Boot + Dubbo Triple），结构照 game-friend（`architecture.md:350-391`；路线图规定「每个服务一个进程」，
   `docs/porting/roadmap.md:48`）。批次 4.4 的范围见 `roadmap.md:61`。
-- **存储**：MySQL `xm_java` 库（`AGENTS.md` §3）四张表经 xm-pbmysql 建；Redis（Redisson，DB 12）键经 `com.game.discovery.RedisKeys` 生成。
-- **在线态与推送**：`xm:presence` + `PlayerPushes`（`architecture.md:128-147`）；展示名与归属区读 `xm_java.player`（`xm-common/.../player/PlayerProfiles.java:18-26`）。
+- **存储**：MySQL `game` 库（`AGENTS.md` §3）四张表经 game-pbmysql 建；Redis（Redisson，DB 12）键经 `com.game.discovery.RedisKeys` 生成。
+- **在线态与推送**：`game:presence` + `PlayerPushes`（`architecture.md:128-147`）；展示名与归属区读 `game.player`（`game-common/.../player/PlayerProfiles.java:18-26`）。
 
 ### 0.2 消息号、请求 / 应答形状、准入、gate 限频
 
 **数据来源**
 - 消息号只能取自 `MessageIdRegistry`（`message_id.txt`），代码里不写数字。服务全名 `guildpb.GuildService`，标了 `OptionIsClientProtocolService`、
   没标 `OptionIsPlayerService`（`guild.proto:530-531`），所以 Java gate 会把**全部 28 个号**（含 8、220）路由到同一个后端
-  （`xm-gate/.../session/MessageRoutes.java:38-49`、`:57-62`）。
+  （`game-gate/.../session/MessageRoutes.java:38-49`、`:57-62`）。
 - 限频取自 `messagelimiter.json`（Java 读同一份 `config-data/tables/messagelimiter.pb`）；表里没有的号按缺省每秒 3 条
-  （`xm-gate/.../session/MessageLimit.java:13-14`）。超频 Java 回信封 1008 并计非法包（`ClientDispatcher.java:229-235`）。
+  （`game-gate/.../session/MessageLimit.java:13-14`）。超频 Java 回信封 1008 并计非法包（`ClientDispatcher.java:229-235`）。
 - 基线客户端白名单是 `session.go:47-78` 的 `ClientMethods`；8 与 `Notify*` **永不登记**（`session.go:43-46`；单测 `session_test.go:101-120`）。
 
 | 号（`message_id.txt` 行） | 方法（`guild.proto` 行） | 请求 → 应答 | 批次 | 客户端可调 | 无会话内部调用（基线） | 限频（`messagelimiter.json`） | 客户端（`GuildClient.cs`） |
@@ -106,7 +106,7 @@
 
 - B2 起的 8 个管理 / 申请 RPC 在协议里**没有** player_id 字段（`guild.proto:105-107`），无会话一律 PermissionDenied
   （`guild_manage_logic.go:222-232`、`:534-538`、`:620-624`、`:689-693`；单测 `guild_manage_logic_test.go:180-191`）。
-- Java 的 `ClientMessageService` 只给 gate 用、总带会话（`xm-api/src/main/java/com/game/api/ClientMessageService.java:34-46`），
+- Java 的 `ClientMessageService` 只给 gate 用、总带会话（`game-api/src/main/java/com/game/api/ClientMessageService.java:34-46`），
   没有「无会话内部调用」这条口，见 D12。
 
 ### 0.3 消息形状与字段语义
@@ -216,9 +216,9 @@ FUNDS_CHANGED 9（B5）、LEVEL_UP 10（B5）、ANNOUNCEMENT_CHANGED 11、ACTIVI
 **配表**（只存 id、用时现查，查不到 fail-closed，`guild_manage_logic.go:37-42`）
 - `GuildRule[1]`（单行，`guild_manage_logic.go:45`）：当前数据 `application_expire_hours=72, max_pending_applications_per_player=3,
   max_pending_applications_per_guild=50`（`guildrule.json`）。4.4 读第 2–4 列；第 5–6 列归 4.5，第 7 列及以后归 4.6
-  （`xm-table/src/main/proto/guildrule_table.proto:13-20`）；第 8–10 列在 Java 是 `reserved`（数据未导出，`:53-59`）。
+  （`game-table/src/main/proto/guildrule_table.proto:13-20`）；第 8–10 列在 Java 是 `reserved`（数据未导出，`:53-59`）。
 - `GuildLevel`：10 级，`max_members` 30→100、`max_officers` 2→6、第 10 级 `upgrade_cost_funds=0`（`guildlevel.json`；
-  schema `xm-table/src/main/proto/guildlevel_table.proto:22-38`）。
+  schema `game-table/src/main/proto/guildlevel_table.proto:22-38`）。
 
 ### 0.6 全局规则（所有 RPC 适用）
 
@@ -264,7 +264,7 @@ FUNDS_CHANGED 9（B5）、LEVEL_UP 10（B5）、ANNOUNCEMENT_CHANGED 11、ACTIVI
 
 列类型按 proto2mysql 规则生成：uint64 → `bigint unsigned NOT NULL DEFAULT 0`、uint32 → `int unsigned NOT NULL DEFAULT 0`、
 int64 → `bigint NOT NULL DEFAULT 0`、string → `MEDIUMTEXT`（可空）、**主键或唯一键里的 string** → `VARCHAR(191) CHARACTER SET utf8mb4
-COLLATE utf8mb4_0900_bin NOT NULL DEFAULT ''`（`xm-pbmysql/.../TableSchema.java:63-75`、`:220-236`）。每张表：主键带
+COLLATE utf8mb4_0900_bin NOT NULL DEFAULT ''`（`game-pbmysql/.../TableSchema.java:63-75`、`:220-236`）。每张表：主键带
 `/*T![clustered_index] NONCLUSTERED */`，表尾 `ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci /*T! SHARD_ROW_ID_BITS=4 PRE_SPLIT_REGIONS=4 */
 COMMENT='<表名>'`，列注释 `pb:N`；普通索引名 `idx_<表>_<序号>`、唯一键名 `uk_<表>`（`TableSchema.java:307-314`；`CreateTableSqlTest.java:51`）。
 
@@ -688,12 +688,12 @@ max_members, zone_id, score, funds, members[{player_id, role, join_time_ms, last
 （`guild_repo_zone_test.go:110-151`）。
 
 **Java 实现要点**（D14）：
-- 去空白用 `com.game.common.text.GoSpaces.trim`（与 Go `unicode.IsSpace` 同义，`xm-common/.../text/GoSpaces.java:3-23`）；
+- 去空白用 `com.game.common.text.GoSpaces.trim`（与 Go `unicode.IsSpace` 同义，`game-common/.../text/GoSpaces.java:3-23`）；
 - 控制字符用 `Character.isISOControl(int)`（集合恰为 U+0000–U+001F、U+007F–U+009F，与 Go `unicode.IsControl` 相同）；
 - 计数按码点（`codePointCount`）；NFKC 用 `java.text.Normalizer.Form.NFKC`；
 - 小写**逐码点** `Character.toLowerCase(int)`（简单映射，对齐 Go `unicode.ToLower`），**不能**用 `String.toLowerCase(Locale.ROOT)`：后者对 `İ`（U+0130）
   产出两个码点、对词尾 `Σ` 产出 `ς`，与 Go 不同；
-- **不能复用** `PlayerStore.nameKey`：它是 `Normalizer.NFKC → strip() → toLowerCase(Locale.ROOT)`（`xm-player-store/.../PlayerStore.java:75-80`），
+- **不能复用** `PlayerStore.nameKey`：它是 `Normalizer.NFKC → strip() → toLowerCase(Locale.ROOT)`（`game-player-store/.../PlayerStore.java:75-80`），
   空白集合与大小写规则都与 Go 不同。
 
 ### 2.5 公告
@@ -1151,10 +1151,10 @@ robot 第 6 步、M3、M4。
 - **Kafka writer**：`MaxAttempts=1`（不重试）、`WriteTimeout=3s`、`BatchTimeout=10ms`、`RequiredAcks=RequireOne`（`servicecontext.go:97-122`）。
 
 **Java 映射**（D7）：`PlayerPushes.pushToPlayers(收件人, MessageContent{message_id = registry.requireId("GuildService","NotifyGuildChanged"),
-serialized_message = GuildChangedS2C 字节, id = 0})`（`xm-discovery/.../presence/PlayerPushes.java:63-87`）：按 gate 分组发布到
-`xm:gate-push:{zone}:{gate}`，gate 侧做玩家栅栏（`architecture.md:141-147`）。每个收件人的结局：`SENT` → ok、`OFFLINE` → offline、
+serialized_message = GuildChangedS2C 字节, id = 0})`（`game-discovery/.../presence/PlayerPushes.java:63-87`）：按 gate 分组发布到
+`game:gate-push:{zone}:{gate}`，gate 侧做玩家栅栏（`architecture.md:141-147`）。每个收件人的结局：`SENT` → ok、`OFFLINE` → offline、
 `GATE_UNREACHABLE` → error；整个 stage 异常（在线目录读失败）→ 全体计 `session_error`；超时（`orTimeout(3 s)`）→ error。
-写法照 friend 的 fire-and-forget（`xm-friend/.../service/FriendService.java`）。推送组件做成可复用的 `GuildPushes`：4.5 的 FUNDS_CHANGED /
+写法照 friend 的 fire-and-forget（`game-friend/.../service/FriendService.java`）。推送组件做成可复用的 `GuildPushes`：4.5 的 FUNDS_CHANGED /
 DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToPlayer`，`:56-61`）。
 
 ### 4.6 在线状态（`online_status_resolver.go`）
@@ -1184,8 +1184,8 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 - 填充点：成员 + 帮主（一次）、榜单一页的帮主（一次，`guild_logic.go:705-709`）、单帮名次的帮主（一次，`:673-674`）、待审名单（一次）、本人申请列表的帮主（一次）。
 - 单测 `player_name_resolver_test.go:74-222`；`guild_logic_names_test.go:75-283`。
 
-**Java 映射**（D5）：名字取 `xm_java.player.name`，`PlayerProfiles.load(ids, deadline)`：每批 64 人，某批失败或预算用完 → ERROR、停在这一批、返回已读到的部分，
-永不抛（`xm-common/.../player/PlayerProfiles.java:47-60`）。player 表 name 恒非空（`:18-22`）。帮主 id 合并进同一次批量；各填充点各自一次。
+**Java 映射**（D5）：名字取 `game.player.name`，`PlayerProfiles.load(ids, deadline)`：每批 64 人，某批失败或预算用完 → ERROR、停在这一批、返回已读到的部分，
+永不抛（`game-common/.../player/PlayerProfiles.java:47-60`）。player 表 name 恒非空（`:18-22`）。帮主 id 合并进同一次批量；各填充点各自一次。
 
 ### 4.8 客户端处理（`GuildClient.cs`，Java 的推送与回包必须满足）
 
@@ -1274,8 +1274,8 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 
 ### 5.9 Java 落地（D16）
 
-- **键**（同一 hash tag `{rank}`，Cluster 下 RENAME / 多键 Lua 同槽）：`xm:guild:{rank}:all`、`xm:guild:{rank}:zone:<z>`、区索引 `xm:guild:{rank}:zones`
-  （SET，代替 `SCAN guild_rank:zone:*`）、维护锁 `xm:guild:{rank}:lock`、临时键 `xm:guild:{rank}:tmp:<token>:all|zone:<z>`。
+- **键**（同一 hash tag `{rank}`，Cluster 下 RENAME / 多键 Lua 同槽）：`game:guild:{rank}:all`、`game:guild:{rank}:zone:<z>`、区索引 `game:guild:{rank}:zones`
+  （SET，代替 `SCAN guild_rank:zone:*`）、维护锁 `game:guild:{rank}:lock`、临时键 `game:guild:{rank}:tmp:<token>:all|zone:<z>`。
 - **维护锁保留**（基线语义，§5.2）：`SET NX PX`，令牌比较后删除。差异两处：① 请求路径（建帮入榜、解散清榜）等锁的上限取 `min(剩余预算 − 预留, 5 s)`，
   拿不到就记日志放弃（与基线「失败只记日志」同结局），不让它吃掉回包装配的预算；② TTL 改短（建议 30 s）并由重建过程按 10 s 续期（比较后 PEXPIRE），
   持锁实例崩溃后最多卡 30 s，而不是 5 min（§9.1 第 6 条）。
@@ -1322,7 +1322,7 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 ### 6.4 4.4 落地、4.5 / 4.6 复用的共用件
 
 - 事务基座 `inTx` / 重试分类（含 `errRetryTx`，`guild_manage_repo.go:276-295`）/ `errCommitThen` / `invalidateAfterCommit`：4.5 / 4.6 的仓储持有 `*GuildRepo` 复用（`:133-134`；
-  `economy_repo.go:168-170`）。Java 做成 xm-guild 内的 `GuildTx` 与 `GuildCacheInvalidator` 公共组件。
+  `economy_repo.go:168-170`）。Java 做成 game-guild 内的 `GuildTx` 与 `GuildCacheInvalidator` 公共组件。
 - `FenceFunc` 与 `checkFence`（非哨兵错误包成 `ErrZoneMerging`，`economy_repo.go:159-160`、`:323-335`）、`economyFence`（`economy_logic.go:288-311`）：
   核心解散在用，4.5 的捐献 / 升级 / 商店与 4.6 的活动复用同一个回调。
 - 成员关系解析：`operatorGuild`、`ResolvePlayerGuild`、`VerifyPlayerGuildID`、`leftGuildWhileResolving`、`memberOf`（`economy_logic.go:189-286`）——
@@ -1360,16 +1360,16 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 
 | 组件 | Java | 依据 / 先例 |
 |---|---|---|
-| 进程 | `xm-guild`（Spring Boot + Dubbo Triple）。Dubbo 端口 **20886**，管理端口 **18110**。已占用：20881 login、20882 scene-manager、20883 friend、20884 chat、20885 team；18101–18109 | `tools/local/start-slice.sh:49-59`；`docs/porting/team-spec.md:1458` |
+| 进程 | `game-guild`（Spring Boot + Dubbo Triple）。Dubbo 端口 **20886**，管理端口 **18110**。已占用：20881 login、20882 scene-manager、20883 friend、20884 chat、20885 team；18101–18109 | `tools/local/start-slice.sh:49-59`；`docs/porting/team-spec.md:1458` |
 | Dubbo group | `DubboGroups.GUILD = "guild"` | `DubboGroups.java:7-22` |
-| 提供方 | `GuildClientMessageService implements ClientMessageService`，`@DubboService(group=GUILD)`；`sessionClosed` / `abandonEnter` 直接回 Ack（无会话状态） | `xm-friend/.../FriendClientMessageService.java` |
-| 鉴权 | 必须要求 `XM_DUBBO_SECRET`，缺失即拒绝启动 | `architecture.md:91-102` |
+| 提供方 | `GuildClientMessageService implements ClientMessageService`，`@DubboService(group=GUILD)`；`sessionClosed` / `abandonEnter` 直接回 Ack（无会话状态） | `game-friend/.../FriendClientMessageService.java` |
+| 鉴权 | 必须要求 `GAME_DUBBO_SECRET`，缺失即拒绝启动 | `architecture.md:91-102` |
 | 派发 | `dispatch/GuildDispatcher` + `GuildWorkerPool`（固定线程 + 有界队列 + AbortPolicy） | `FriendDispatcher.java:53-224` |
-| 预算 | `com.game.common.deadline.Deadline`，受理时刻 + 3500 ms | `xm-common/.../deadline/Deadline.java:12-58` |
+| 预算 | `com.game.common.deadline.Deadline`，受理时刻 + 3500 ms | `game-common/.../deadline/Deadline.java:12-58` |
 | 规则（纯函数） | `rules/GuildRoles`（§2.3）、`rules/GuildNames`（§2.4）、`rules/GuildTableRules`（§2.6） | — |
 | 服务 | `service/GuildService`（建 / 查 / 退 / 解散 / 公告）、`service/GuildManageService`（任免 / 踢人 / 转让 / 申请 / 审批）、`service/GuildViews`（GuildInfo 装配）；领域对象 + `XxxService`，不用 ECS 风格 | 同 friend / team 的分层 |
-| 存储 | `store/GuildStore` 接口 + `JdbcGuildStore`；`store/GuildTx`（事务基座）；表由 `xm/guild/guild_tables.proto` 经 xm-pbmysql 建 | §7.5、§7.6 |
-| 缓存 | `cache/GuildCache`（快照 + 映射，版本化 cache-aside、按键单飞）、`cache/GuildCacheInvalidator`（提交后失效 + 后台重试） | `xm-friend/.../cache/FriendCache.java:25-140` |
+| 存储 | `store/GuildStore` 接口 + `JdbcGuildStore`；`store/GuildTx`（事务基座）；表由 `game/guild/guild_tables.proto` 经 game-pbmysql 建 | §7.5、§7.6 |
+| 缓存 | `cache/GuildCache`（快照 + 映射，版本化 cache-aside、按键单飞）、`cache/GuildCacheInvalidator`（提交后失效 + 后台重试） | `game-friend/.../cache/FriendCache.java:25-140` |
 | 排行 | `rank/GuildRanks`（Redisson + Lua，§5.9） | — |
 | 在线 / 名字 / 归属区 | `PlayerPresenceDirectory.findAllAsync`；`PlayerProfiles.load` / `loadStrict` | §4.6、§4.7、§7.10 |
 | 推送 | `push/GuildPushes`：包一层 `PlayerPushes` | §4.5 |
@@ -1381,10 +1381,10 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 
 - `MessageRoutes.SERVICE_BACKENDS` 加 `"GuildService" → DubboGroups.GUILD`（`MessageRoutes.java:28-32`）。键是**服务裸名 `GuildService`**（`message_id.txt` 的前缀，
   如 `:9` 的 `8=GuildServiceUpdateGuildScore`）。8 与 220 也会路由过来；220 的应答类型是 Empty，`hasResponse=false`（`:51-55`）。
-- `GateConfiguration` 加 `@DubboReference(group=GUILD, check=false, url="${xm.dubbo.guild-url:}", methods=@Method(name="handle", retries=0))`
+- `GateConfiguration` 加 `@DubboReference(group=GUILD, check=false, url="${game.dubbo.guild-url:}", methods=@Method(name="handle", retries=0))`
   （照抄 team 的写法 `GateConfiguration.java:103-111`；写路径不幂等，**`handle` 必须不重试**），并放进 backends Map（`:138-140`）。
-  `xm-gate/src/main/resources/application.yaml` 加 `guild-url: tri://127.0.0.1:20886`；`application-nacos.yaml` 置空。
-- `start-slice.sh` / `stop-slice.sh` 的服务清单加 `"xm-guild 20886"`（`start-slice.sh:49-59`；`stop-slice.sh:6`），注释里的 `XM_DUBBO_SECRET` 读者名单补上 xm-guild（`start-slice.sh:6`）。
+  `game-gate/src/main/resources/application.yaml` 加 `guild-url: tri://127.0.0.1:20886`；`application-nacos.yaml` 置空。
+- `start-slice.sh` / `stop-slice.sh` 的服务清单加 `"game-guild 20886"`（`start-slice.sh:49-59`；`stop-slice.sh:6`），注释里的 `GAME_DUBBO_SECRET` 读者名单补上 game-guild（`start-slice.sh:6`）。
 - 按会话、按域的在途队列是现成机制（`ClientDispatcher.java:325-350`）：同一会话的帮会请求串行；队列满 64 断开；身份取**入队时**的会话快照（`:352-364`）。
 - 现状：gate 对 GuildService 的号走「未接入的后端域」分支，推 23 {1003}（`ClientDispatcher.java:313-319`）；接入后消失。
 - 热关停：gate 按 `route.rpcPath()` = `/guildpb.GuildService/<Method>` 查规则，命中回信封 1003（`ClientDispatcher.java:248-256`），规则键与基线 etcd 键同名
@@ -1409,10 +1409,10 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 
 ### 7.4 线程、预算、超时
 
-- **线程**：Dubbo 线程只投递，处理在 `guild-worker` 有界池上（缺省 16 线程 / 1024 队列，同 friend，`xm-friend/src/main/resources/application.yaml:73-74`）；
+- **线程**：Dubbo 线程只投递，处理在 `guild-worker` 有界池上（缺省 16 线程 / 1024 队列，同 friend，`game-friend/src/main/resources/application.yaml:73-74`）；
   JDBC 与等待 Redis 都只在工作线程上做（`AGENTS.md` §3）。
 - **整请求预算** 3500 ms（= 基线 `Timeout − 500`），启动时校验 ∈ [500, 3500] ms（照 `FriendProperties`），保证先于 gate 的 5000 ms Dubbo 超时结束
-  （`xm-gate/src/main/resources/application.yaml:81`）。
+  （`game-gate/src/main/resources/application.yaml:81`）。
 - **事务子预算**：每次尝试 `min(请求剩余, 1500 ms)`，解散 2500 ms；代码常量，不开放配置。JDBC `setQueryTimeout` 只到秒级，子预算靠三样合起来实现：
   每条语句前检查子预算 Deadline（过了即中止、回滚，按 14021）、`setQueryTimeout(ceil(剩余秒))`、`innodb_lock_wait_timeout=1`。
 - **归属区**：一次 player 表点查，查询超时取 `min(1500 ms, 剩余预算)`（同 team）。审批通过时审批人与申请人的归属区可以合成一条 `IN` 查询（§7.10）。
@@ -1422,17 +1422,17 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 - **缓存失效**：先用请求 Deadline 同步失效一次；失败的键交给后台执行器按 100 / 400 / 1600 ms 重试，总预算 3 s，全部用尽才计指标（`guild_manage_repo.go:524-574`）。
 - **排行锁**：请求路径等锁上限 `min(剩余预算 − 300 ms, 5 s)`，拿不到只记日志（§5.9）。
 
-### 7.5 MySQL：自有表 proto + xm-pbmysql + 连接池
+### 7.5 MySQL：自有表 proto + game-pbmysql + 连接池
 
-- **库**：`xm_java`（`AGENTS.md` §3），不建独占库（D2）。
-- **连接池**：xm-guild 自己的 Druid 池，URL 照 friend（`xm-friend/src/main/resources/application.yaml:15-32`）但锁等待改成 1：
+- **库**：`game`（`AGENTS.md` §3），不建独占库（D2）。
+- **连接池**：game-guild 自己的 Druid 池，URL 照 friend（`game-friend/src/main/resources/application.yaml:15-32`）但锁等待改成 1：
   `...&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1`，
   Druid `default-transaction-isolation: 2`。
   - `useAffectedRows=true` 等价于 Go 的 `ClientFoundRows=false`（Connector/J 缺省设 CLIENT_FOUND_ROWS）：不带它，A2 的 IODKU 自检会把「撞上活记录」误判成插入成功，
     4.5 / 4.6 的带上限 upsert 也会多发。
   - `innodb_lock_wait_timeout=1`：基线值；friend 是 3。guild 的 1205 不重试、直接 14021，等锁更久只会吃掉预算。
-- **表定义**：`xm-guild/src/main/proto/xm/guild/guild_tables.proto`，`package xm.guild`，`java_package com.game.guild.store.pb`，`option (proto2mysql.db) = true`；
-  **不依赖**同步来的 `guild_db.proto`（契约产物，不许手改；先例 `xm-friend/src/main/proto/xm/friend/friend_tables.proto:1-5`）。四个 message：
+- **表定义**：`game-guild/src/main/proto/game/guild/guild_tables.proto`，`package game.guild`，`java_package com.game.guild.store.pb`，`option (proto2mysql.db) = true`；
+  **不依赖**同步来的 `guild_db.proto`（契约产物，不许手改；先例 `game-friend/src/main/proto/game/friend/friend_tables.proto:1-5`）。四个 message：
 
   | message（锁序） | 表选项 | 字段（字段号同 `guild_db.proto`） |
   |---|---|---|
@@ -1441,9 +1441,9 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
   | `GuildMemberRow`（M） | `table_name="guild_member"`、`primary_key="guild_id,player_id"`、`unique_key="player_id"`（→ `uk_guild_member`） | `uint64 guild_id=1; uint64 player_id=2; uint32 role=3; uint64 join_time_ms=4; uint64 last_active_ms=5; uint64 contribution_total=6; uint64 contribution_balance=7;` |
   | `GuildApplicationRow`（A） | `table_name="guild_application"`、`primary_key="guild_id,player_id"`、`index="player_id;expire_ms"` | `uint64 guild_id=1; uint64 player_id=2; uint64 apply_ms=3; uint64 expire_ms=4;` |
 
-  每张表都带 `tidb_nonclustered_pk=true`、`tidb_shard_row_id_bits=4`、`tidb_pre_split_regions=4`（选项名见 `xm-pbmysql/src/main/proto/proto2mysql/proto2mysql_option.proto:41-70`）。
+  每张表都带 `tidb_nonclustered_pk=true`、`tidb_shard_row_id_bits=4`、`tidb_pre_split_regions=4`（选项名见 `game-pbmysql/src/main/proto/proto2mysql/proto2mysql_option.proto:41-70`）。
   `name_norm` 不声明 `max_length`，保持缺省 191（与 Go DDL 逐字相同）。
-- **建表**：`PbMysql.register(...)` 后在自动提交连接上 `syncAll`（只扩不缩，整轮持咨询锁，结构漂移启动失败，`xm-friend/.../FriendConfiguration.java:64-85`；`architecture.md` §7）。
+- **建表**：`PbMysql.register(...)` 后在自动提交连接上 `syncAll`（只扩不缩，整轮持咨询锁，结构漂移启动失败，`game-friend/.../FriendConfiguration.java:64-85`；`architecture.md` §7）。
   与基线不同：pbmysql 会**补建**缺失的普通索引，Go 会拒启（`guild.go:569-589`），登记为 D2 的一部分。
 - **业务 SQL 全部手写**（§1.9 的语句逐字照搬），像 `JdbcFriendStore` 那样用原始 JDBC 连接控制事务。pbmysql 的 `findOneByPkForUpdate` 不带 `FORCE INDEX (PRIMARY)`，
   **不能用于 guild_member**。
@@ -1467,20 +1467,20 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 - 结果在闭包内累积，成功返回前才交出（每次重跑从零开始）。
 - 提交后：先失效缓存（`GuildCacheInvalidator`，永不抛），再交回 service 发推送。
 
-### 7.7 Redis 键（全部经 `RedisKeys` 生成，`xm:` 前缀）
+### 7.7 Redis 键（全部经 `RedisKeys` 生成，`game:` 前缀）
 
 | 用途 | 基线键 / 值 / TTL | Java 键（建议的 `RedisKeys` 方法） | 值 / TTL |
 |---|---|---|---|
-| 帮会快照 | `guild:v2:{id}`，JSON，30 min | `xm:guild:{g:<gid>}:snap`（`guildSnapshot(gid)`） | Java 自有 proto `xm.guild.GuildSnapshot`（字段同 GuildData，含 score / funds / 成员帮贡），ByteArrayCodec；30 min |
-| 快照代次 | `guild:v2:cache_generation:{id}`，INCR，永久 | `xm:guild:{g:<gid>}:snap:gen`（`<数据键>:gen`，与 `friendCacheGeneration` 同规则，建议抽成通用 `cacheGeneration(dataKey)`） | 「UUID + Redis 服务器 TIME」，PX 2×TTL |
-| 玩家 → 帮会映射 | `player_guild:v2:{pid}`，十进制，**0 也缓存**，30 min | `xm:guild:{p:<pid>}:gid`（`guildOfPlayer(pid)`） | 无符号十进制（0 也缓存）；30 min |
-| 映射代次 | `player_guild:v2:cache_generation:{pid}` | `xm:guild:{p:<pid>}:gid:gen` | 同快照代次 |
-| 申请推送冷却 | `guild:apply_push:{g}:{p}`，SETNX，60 s | `xm:guild:{g:<gid>}:apply-push:<pid>`（`guildApplyPush(gid, pid)`） | `SET NX PX 60000`；Redis 出错不推 |
-| 排行 | `guild_rank`、`guild_rank:zone:{z}` | `xm:guild:{rank}:all`、`xm:guild:{rank}:zone:<z>`、区索引 `xm:guild:{rank}:zones` | §5.9 |
-| 排行维护锁 / 临时键 | `guild_rank:maintenance_lock`、`guild_rank:rebuild:<token>:…` | `xm:guild:{rank}:lock`、`xm:guild:{rank}:tmp:<token>:all` 与 `xm:guild:{rank}:tmp:<token>:zone:<z>` | 锁 PX 30 s + 续期；临时键 PEXPIRE 10 min |
+| 帮会快照 | `guild:v2:{id}`，JSON，30 min | `game:guild:{g:<gid>}:snap`（`guildSnapshot(gid)`） | Java 自有 proto `game.guild.GuildSnapshot`（字段同 GuildData，含 score / funds / 成员帮贡），ByteArrayCodec；30 min |
+| 快照代次 | `guild:v2:cache_generation:{id}`，INCR，永久 | `game:guild:{g:<gid>}:snap:gen`（`<数据键>:gen`，与 `friendCacheGeneration` 同规则，建议抽成通用 `cacheGeneration(dataKey)`） | 「UUID + Redis 服务器 TIME」，PX 2×TTL |
+| 玩家 → 帮会映射 | `player_guild:v2:{pid}`，十进制，**0 也缓存**，30 min | `game:guild:{p:<pid>}:gid`（`guildOfPlayer(pid)`） | 无符号十进制（0 也缓存）；30 min |
+| 映射代次 | `player_guild:v2:cache_generation:{pid}` | `game:guild:{p:<pid>}:gid:gen` | 同快照代次 |
+| 申请推送冷却 | `guild:apply_push:{g}:{p}`，SETNX，60 s | `game:guild:{g:<gid>}:apply-push:<pid>`（`guildApplyPush(gid, pid)`） | `SET NX PX 60000`；Redis 出错不推 |
+| 排行 | `guild_rank`、`guild_rank:zone:{z}` | `game:guild:{rank}:all`、`game:guild:{rank}:zone:<z>`、区索引 `game:guild:{rank}:zones` | §5.9 |
+| 排行维护锁 / 临时键 | `guild_rank:maintenance_lock`、`guild_rank:rebuild:<token>:…` | `game:guild:{rank}:lock`、`game:guild:{rank}:tmp:<token>:all` 与 `game:guild:{rank}:tmp:<token>:zone:<z>` | 锁 PX 30 s + 续期；临时键 PEXPIRE 10 min |
 | 合服闸门 | `merge:in_progress:{zone}`（外部） | 4.4 不建（`MergeFence.NONE`） | — |
 
-- 命名沿用 friend / chat 的 `xm:<服务>:{tag}:…` 形式（`RedisKeys.java:74-130`）；同一实体的数据键与代次键共用 hash tag，两段 Lua 在 Cluster 下同槽。
+- 命名沿用 friend / chat 的 `game:<服务>:{tag}:…` 形式（`RedisKeys.java:74-130`）；同一实体的数据键与代次键共用 hash tag，两段 Lua 在 Cluster 下同槽。
 - id 一律 `Long.toUnsignedString`。
 
 ### 7.8 缓存（`GuildCache`）
@@ -1500,15 +1500,15 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 
 ### 7.9 guild_id 发号（D8）
 
-- `NodeIdLease.acquire(redis, scheduler, NodeTypes.GUILD, 0, 1, Snowflake.MAX_WORKER, …)`（`xm-discovery/.../NodeIdLease.java:81`），作用域 0（全服；理由同
+- `NodeIdLease.acquire(redis, scheduler, NodeTypes.GUILD, 0, 1, Snowflake.MAX_WORKER, …)`（`game-discovery/.../NodeIdLease.java:81`），作用域 0（全服；理由同
   `NodeTypes.SCENE_GUID`，`NodeTypes.java:16-22`）。新增 `NodeTypes.GUILD = "guild"`。
-- 每次发号前检查 `isValid()`（`NodeIdLease.java:142`）；`Snowflake` 时钟回拨会抛异常（`xm-common/.../id/Snowflake.java`）；租约无效、抛异常或返回 0 → **14008**（in-band，指标计 fault）。
+- 每次发号前检查 `isValid()`（`NodeIdLease.java:142`）；`Snowflake` 时钟回拨会抛异常（`game-common/.../id/Snowflake.java`）；租约无效、抛异常或返回 0 → **14008**（in-band，指标计 fault）。
   先例 `PlayerIdGenerator`、team-spec §6.9。
 - 发号位置照基线：名字校验 → 归属区 → 闸门 → 读 `GuildLevel[1]` → 已在帮预检 → **发号** → 事务（`guild_logic.go:193-245`）。
 
 ### 7.10 归属区、名字、在线、推送
 
-- **归属区**（D3）：`player.zone_id`（`xm-player-store/src/main/resources/db/xm-player-schema.sql`），由建角的 login 按自己的 `xm.zone-id` 写入。
+- **归属区**（D3）：`player.zone_id`（`game-player-store/src/main/resources/db/game-player-schema.sql`），由建角的 login 按自己的 `game.zone-id` 写入。
   用 `PlayerProfiles.loadStrict(List.of(pid), deadline)`（`PlayerProfiles.java:62-73`）：查不到行或 `zone_id == 0` → 14012；SQL 出错或预算用完 → `DependencyException`（信封 1003）。
   审批通过：`loadStrict([actor, applicant])` 一条 `IN` 查询；先按审批人结果判 14012、再判闸门、再按申请人结果判 14018（申请人缺行或 zone 0）。
   与基线的唯一差别：基线两次查询独立，审批人查询成功而申请人查询失败时先回闸门结果；合并后 SQL 失败直接是故障（闸门在 Java 4.4 恒放行，无可见差异）。
@@ -1519,12 +1519,12 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 1. 配表校验（`validateGuildTables`），失败拒启；
 2. pbmysql `syncAll` 建表 / 核对；
 3. 数据库版本检查（`SELECT VERSION()`，规则同 §1.1），失败拒启；
-4. 在命名锁 `GET_LOCK('xm_guild_insert_guard_init:xm_java', 5)` 下确保哨兵行 `guild_player_state(0)`（§1.7），失败拒启；
+4. 在命名锁 `GET_LOCK('game_guild_insert_guard_init:game', 5)` 下确保哨兵行 `guild_player_state(0)`（§1.7），失败拒启；
 5. 申领发号租约；
 6. 从 MySQL 全量重建排行（§5.9），失败拒启；
 7. 最后才暴露 Dubbo。
 
-### 7.12 配置项（`xm.guild.*`）
+### 7.12 配置项（`game.guild.*`）
 
 | 项 | 缺省 | 校验 / 出处 |
 |---|---|---|
@@ -1536,7 +1536,7 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 | `worker-threads` / `worker-queue-capacity` | 16 / 1024 | 同 friend |
 | 代码常量（不开放配置） | 事务子预算 1500 / 2500 ms；重试 3 次；冷却 60 s；榜页长上限 50；清理 10 行；名字 24 / 48；公告 600 字节 | §0.5 |
 
-- Redis database 12（与所有进程一致，`xm-friend/src/main/resources/application.yaml:58-60`）；`xm.killswitch.enabled: true`（`:55-56`）。
+- Redis database 12（与所有进程一致，`game-friend/src/main/resources/application.yaml:58-60`）；`game.killswitch.enabled: true`（`:55-56`）。
 - 业务上限（申请有效期、每人 / 每帮待审数、成员与长老上限）**只读配表**，不做成配置项（`guild_manage_logic.go:37-96`）。
 
 ---
@@ -1564,14 +1564,14 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 
 | 指标（Prometheus 名） | 类型 | 标签 | 对应基线 |
 |---|---|---|---|
-| `xm_guild_requests_seconds` | Timer | `method`（GuildService 的 28 个方法名 + `unrouted`），`result` = ok / business_error / **fault**（in-band 14008）/ internal_error（信封 1003）/ overloaded / bad_request / unauthenticated / forbidden / unsupported | serverbase 的 `rpc_inband_*` 与 `rpc_duration_seconds` |
-| `xm_guild_pushes_total` | Counter | `kind`（13 个固定小写串 + other），`outcome` = ok / offline / error / session_error；14 × 4 个组合启动即注册 | `guild_push_total` |
-| `xm_guild_tx_deadlocks_total`、`xm_guild_tx_budget_exceeded_total`、`xm_guild_tx_lock_wait_timeouts_total` | Counter | `op`（固定集合，同基线，含 4.5 / 4.6 预留值与 insert_guard） | `guild_tx_*` |
-| `xm_guild_cache_invalidation_failures_total` | Counter | `op` | `guild_cache_invalidate_failed_total` |
-| `xm_guild_cache_total` | Counter | `cache` = snapshot / mapping，`result` = hit / miss / fill_skipped / fill_failed / error | Java 增项（同 friend `xm_friend_cache_total`） |
-| `xm_guild_profile_lookup_failures_total` | Counter | — | `guild_player_name_lookup_failed_total` |
-| `xm_guild_online_lookups_total` | Counter | `outcome` = ok / timeout / error | Java 增项（基线只有日志） |
-| `xm_guild_rank_ops_total` | Counter | `op` = add / remove / rebuild，`outcome` = ok / lock_timeout / error | Java 增项（基线只有日志） |
+| `game_guild_requests_seconds` | Timer | `method`（GuildService 的 28 个方法名 + `unrouted`），`result` = ok / business_error / **fault**（in-band 14008）/ internal_error（信封 1003）/ overloaded / bad_request / unauthenticated / forbidden / unsupported | serverbase 的 `rpc_inband_*` 与 `rpc_duration_seconds` |
+| `game_guild_pushes_total` | Counter | `kind`（13 个固定小写串 + other），`outcome` = ok / offline / error / session_error；14 × 4 个组合启动即注册 | `guild_push_total` |
+| `game_guild_tx_deadlocks_total`、`game_guild_tx_budget_exceeded_total`、`game_guild_tx_lock_wait_timeouts_total` | Counter | `op`（固定集合，同基线，含 4.5 / 4.6 预留值与 insert_guard） | `guild_tx_*` |
+| `game_guild_cache_invalidation_failures_total` | Counter | `op` | `guild_cache_invalidate_failed_total` |
+| `game_guild_cache_total` | Counter | `cache` = snapshot / mapping，`result` = hit / miss / fill_skipped / fill_failed / error | Java 增项（同 friend `game_friend_cache_total`） |
+| `game_guild_profile_lookup_failures_total` | Counter | — | `guild_player_name_lookup_failed_total` |
+| `game_guild_online_lookups_total` | Counter | `outcome` = ok / timeout / error | Java 增项（基线只有日志） |
+| `game_guild_rank_ops_total` | Counter | `op` = add / remove / rebuild，`outcome` = ok / lock_timeout / error | Java 增项（基线只有日志） |
 | `executor_*{name="guild-worker"}` | Micrometer 标准线程池指标 | — | 同 friend |
 
 - 选 `fault` 而不是把 14008 并进 `internal_error`：基线对它单独定性（Tip 表 fault 列），合并后就看不出「发号器坏了」与「依赖故障」的区别。
@@ -1636,7 +1636,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 12. **写回包的快照必须含操作者本人**（`GuildClient.cs:710-727`）；转让 / 任免 / 踢人 / 审批 / 公告都用事务内快照。
 13. **GetGuildRank 必须回显夹过之后的 page / page_size**，`total_count = ZCARD`。
 14. **解散清榜只用事务内读到的 zone**（缓存里的 zone 在合服后会陈旧一个 TTL）。
-15. **归属区只由建角 login 的 `xm.zone-id` 决定**（一个 login 进程只服务一个 zone）：多区部署要确保每个 zone 的 login 都配对；将来做合服时 `player.zone_id`
+15. **归属区只由建角 login 的 `game.zone-id` 决定**（一个 login 进程只服务一个 zone）：多区部署要确保每个 zone 的 login 都配对；将来做合服时 `player.zone_id`
     与 `guild.zone_id` 要一起迁移（inventory 开放问题 5）。
 16. **tip 参数**：照抄基线英文原因串（客户端不读，但逐字节对拍需要）。
 17. **CreateGuild 的回包用内存构造的帮会**（不是事务内快照），字段 `level=1, funds=0, max_members=GuildLevel[1]`，与库一致。
@@ -1675,7 +1675,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
    「不进隔离」的结论成立。
 5. 分区二 §13 建议 4.4 期间经济 / 活动号回**信封** 1003，分区三建议 **in-band 1006**：本稿采用 in-band 1006（D13），列为待拍板。
 6. 分区三 §3.5 建议「编程式 `TransactionTemplate`」：本稿改为与 `JdbcFriendStore` 相同的原始 JDBC 连接事务（§7.6），避免框架把事务标成 rollback-only。
-7. **键名统一**：分区一写 `xm:guild:{g:<gid>}:info`、`xm:guild:{rank}:all`，分区三写 `xm:guild:{g:<gid>}:snap`、`xm:{guild-rank}:all`；统一为 §7.7 的形式。
+7. **键名统一**：分区一写 `game:guild:{g:<gid>}:info`、`game:guild:{rank}:all`，分区三写 `game:guild:{g:<gid>}:snap`、`game:{guild-rank}:all`；统一为 §7.7 的形式。
 8. **指标统一**：14008 在分区三里计 `internal_error`，在分区二里计 `fault`；统一为 `fault`（§8.2）。配置名 `push-budget` / `push-timeout` 统一为 `push-timeout`（同 friend）。
 9. 分区一 D16 把「回填失败是否只记日志」留作待定：本稿定为只记日志（D10）。
 10. 分区三写审批通过时申请人归属区「Java 可以串行做」、分区二写「并行或合成一条 IN 查询」：本稿采用一条 IN 查询（§7.10）。
@@ -1691,15 +1691,15 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 - **guild-application-review**：「查不到申请人归属区也回 14018」只对映射缺失（zone 为 0）成立；查询出错是故障，回信封 1003（`guild_manage_logic.go:732-734`）。
 - **guild-zone-isolation**：ListGuildApplications 不查归属区（`guild_manage_logic.go:616-619`）；ListMyGuildApplications 查归属区但不查闸门（`:532-545`）。
 - **guild-rank**：UpdateGuildScore 在 MySQL 提交后若缓存失效或 ZADD 失败，回的是 gRPC 错误而不是 tip（`guild_repo.go:604-616`；`guild_logic.go:588-589`）；建帮时这一步失败只打日志。
-- **`GuildActivityRows` 不存在**（inventory :56、:308）：xm-table 只有四张帮会表的 Rows 类（`xm-table/target/generated-sources/annotations/com/game/table/` 下
+- **`GuildActivityRows` 不存在**（inventory :56、:308）：game-table 只有四张帮会表的 Rows 类（`game-table/target/generated-sources/annotations/com/game/table/` 下
   `GuildDonateRows` / `GuildLevelRows` / `GuildRuleRows` / `GuildShopRows`）；GuildActivity 待同步（`PARITY.md:52`；`contract/SOURCE.properties:11-12`）。
 - **「220 会被 Java 判成不回包」不成立**（inventory :23、:395(d)）：`tip≠0` 时 gate 照样回信封（`ClientDispatcher.java:456-459`）；friend 对上行 235 已经这样做（`FriendDispatcher.java:141-145`）。
-- **在线目录与推送通道已经有了**（inventory :80、:200 的「Java 没有」已过时）：`xm:presence` / `PlayerPresenceDirectory` 与 `PlayerPushes`（`architecture.md:128-147`）。
-- **热关停**（inventory :19）：Java 用 Redis `xm:killswitch`、在 gate 检查，不是 etcd（`architecture.md:406-424`）。
+- **在线目录与推送通道已经有了**（inventory :80、:200 的「Java 没有」已过时）：`game:presence` / `PlayerPresenceDirectory` 与 `PlayerPushes`（`architecture.md:128-147`）。
+- **热关停**（inventory :19）：Java 用 Redis `game:killswitch`、在 gate 检查，不是 etcd（`architecture.md:406-424`）。
 - **「未接入的域推 23」的行号**（inventory :20、:23）：现在是 `ClientDispatcher.java:313-319`。
-- **「名字规范化可复用 xm-player-store」**（inventory :92）：不能原样复用（§2.4）。
+- **「名字规范化可复用 game-player-store」**（inventory :92）：不能原样复用（§2.4）。
 - **MessageLimiter**（inventory :16）：8、220、239–243 不在表里，按缺省每秒 3 条。
-- **存储**（inventory :29「MySQL（Java：xm_java 库 + MyBatis + Druid）」）：按用户要求改为 xm-pbmysql 建表 + 原始 JDBC（`roadmap.md:50-53`）。
+- **存储**（inventory :29「MySQL（Java：game 库 + MyBatis + Druid）」）：按用户要求改为 game-pbmysql 建表 + 原始 JDBC（`roadmap.md:50-53`）。
 - **`Cache.MaxMembers: 500` 没有读者**（`config.go:358-361`）。
 
 ---
@@ -1710,14 +1710,14 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 
 | 编号 | 差异 | 理由 | 客户端可见？ | 两版同改？ |
 |---|---|---|---|---|
-| D1 | 独立进程 xm-guild（Dubbo group `guild`，端口 20886，管理端口 18110） | 路线图要求每个服务一个进程（`roadmap.md:48`）；端口顺延 team | 否 | 否 |
-| D2 | 表在 `xm_java`，不建独占库；表定义是 Java 自有 `guild_tables.proto` + xm-pbmysql，没有 schemamigrate / `-migrate` / `Schema.AutoMigrate`；pbmysql **补建**缺失的普通索引（基线拒启） | `AGENTS.md` §3；`roadmap.md:50-53`；friend 先例（`PARITY.md:97`）。DDL 与 `guild_db.proto` 逐字相同 | 否 | 否 |
+| D1 | 独立进程 game-guild（Dubbo group `guild`，端口 20886，管理端口 18110） | 路线图要求每个服务一个进程（`roadmap.md:48`）；端口顺延 team | 否 | 否 |
+| D2 | 表在 `game`，不建独占库；表定义是 Java 自有 `guild_tables.proto` + game-pbmysql，没有 schemamigrate / `-migrate` / `Schema.AutoMigrate`；pbmysql **补建**缺失的普通索引（基线拒启） | `AGENTS.md` §3；`roadmap.md:50-53`；friend 先例（`PARITY.md:97`）。DDL 与 `guild_db.proto` 逐字相同 | 否 | 否 |
 | D3 | 归属区取 `player.zone_id`，代替 data_service 的 `player:zone` 映射；查不到行或为 0 → 14012，SQL 故障 → 信封 1003 | Java 没有 data_service；同 team D5 | 否 | 否 |
 | D4 | 合服闸门只留接口，4.4 用恒放行的 `MergeFence.NONE`；事务内闸门检查点照样保留（解散） | Java 首批不做合服（`architecture.md:617-620`）；14013 在 Java 暂不出现 | 否 | 否 |
-| D5 | 展示名读 `xm_java.player`（name 恒非空），代替 `BatchGetPlayerName`；每批 64；失败留空 | 同 friend D4、team D4 | 是：名字恒非空 | 否 |
-| D6 | 在线态取 `xm:presence`（gate 写，TTL 60 s，断线即删），代替 `player:session` 的 ONLINE；批量读带独立 800 ms 上限，超时按离线 | `architecture.md:128-140`；基线 MGET 无独立超时（§9.1 第 11 条） | 否（只在 Redis 卡住时） | 否 |
+| D5 | 展示名读 `game.player`（name 恒非空），代替 `BatchGetPlayerName`；每批 64；失败留空 | 同 friend D4、team D4 | 是：名字恒非空 | 否 |
+| D6 | 在线态取 `game:presence`（gate 写，TTL 60 s，断线即删），代替 `player:session` 的 ONLINE；批量读带独立 800 ms 上限，超时按离线 | `architecture.md:128-140`；基线 MGET 无独立超时（§9.1 第 11 条） | 否（只在 Redis 卡住时） | 否 |
 | D7 | 推送走 `PlayerPushes`（Redis pub/sub + 玩家栅栏），代替 Kafka gate-cmd；GATE_UNREACHABLE 记 error | `architecture.md:141-147`；同 friend | 否 | 否 |
-| D8 | guild_id 来自 xm-guild 自己的全服雪花租约（`NodeTypes.GUILD`，作用域 0），代替 data_service 号段；失败回 14008 | Java 没有号段服务；客户端只把它当 uint64 | 否 | 否 |
+| D8 | guild_id 来自 game-guild 自己的全服雪花租约（`NodeTypes.GUILD`，作用域 0），代替 data_service 号段；失败回 14008 | Java 没有号段服务；客户端只把它当 uint64 | 否 | 否 |
 | D9 | 后端调用失败或超时时 gate 推 23{1003}，不带请求 id；客户端要等 15 s 超时（`GameClient.cs:917`） | gate 现有行为（`ClientDispatcher.java:382-396`），同 team D14；结果仍是「本连接停用帮会」 | 是（只在故障时） | 否 |
 | D10 | 缓存：代次 = 「UUID + 服务器 TIME」（2×TTL）、按键单飞、快照值用 Java 自有 proto、回填失败只记日志；键带 hash tag | friend D6 / D7 先例（`FriendCache.java:31-38`）；修 §9.1 第 1、3、4 条 | 否 | 否 |
 | D11 | 工作队列满或排队超出预算 → **信封** 1003 | 基线没有应用层队列；guild 的故障一律走信封（in-band 1003 会被当成业务 tip 显示） | 是（只在过载时） | 否 |
@@ -1726,8 +1726,8 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 | D14 | 帮名规范化按 Go 语义实现（`GoSpaces.trim`、码点计数、`isISOControl`、NFKC、逐码点 `Character.toLowerCase`），不复用 `PlayerStore.nameKey` | 不这样做，两版对「重名」的判定不一致（§2.4） | 否（实现正确即无差异） | 否 |
 | D15 | 排行一页一次多键 GET 快照，不再逐条 `GetGuild` | 基线 N+1（inventory 开放问题 9(a)）；条目内容不变 | 否 | 否 |
 | D16 | 排行：键统一 hash tag `{rank}`、区索引 SET 代替 SCAN；单帮写 / 清榜 / 换榜各一段 Lua；维护锁保留但 TTL 30 s + 续期、请求路径等锁受 Deadline 约束；重建临时键带 TTL；52 的 ZREVRANK + ZSCORE 合成一段 Lua | 修 §9.1 第 6、7、8 条；Cluster 下 RENAME 要同槽。同分排序语义不变 | 极少：52 在条目恰被删的竞态里答 14007 而非故障 | 否 |
-| D17 | 热关停在 gate 按方法检查（Redis `xm:killswitch`），客户端看到的仍是信封 1003；规则键与基线 etcd 键同名 | `architecture.md:406-424` | 否 | 否 |
-| D18 | robot 用 run-tag 新账号，不用固定的 9201–9213；跨区第 4 步只在配了第二个 zone 时跑 | Java robot 惯例（`xm-robot/.../RobotOptions.java:71`）；本机切片单 zone；同 team D16 | 否 | 否 |
+| D17 | 热关停在 gate 按方法检查（Redis `game:killswitch`），客户端看到的仍是信封 1003；规则键与基线 etcd 键同名 | `architecture.md:406-424` | 否 | 否 |
+| D18 | robot 用 run-tag 新账号，不用固定的 9201–9213；跨区第 4 步只在配了第二个 zone 时跑 | Java robot 惯例（`game-robot/.../RobotOptions.java:71`）；本机切片单 zone；同 team D16 | 否 | 否 |
 
 ### 10.2 列出但不建议首批采纳（或需要两版同改）
 
@@ -1745,13 +1745,13 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 
 1. **D13：4.4 期间 10 个占位号回 in-band 1006 还是信封 1003**。推荐 1006：信封会让玩家点一下捐献页就得重登才能再用帮会。
 2. **D11：过载回信封 1003 还是 in-band 14021**。推荐信封 1003（与「故障走信封」一致，也等价于基线路由服超时）；若更看重不隔离，可改 in-band 14021「帮会操作繁忙，请稍后重试」。
-3. **跨区 robot 步骤**：是否在本机切片起第二个 zone（login + gate 都设 `xm.zone-id=2`）？否则跨区可见性只能由服务单测与 MySQL 测试覆盖。
+3. **跨区 robot 步骤**：是否在本机切片起第二个 zone（login + gate 都设 `game.zone-id=2`）？否则跨区可见性只能由服务单测与 MySQL 测试覆盖。
 4. **4.4 是否一并声明 B5 / B6 的表**（op_seq / asset_op / daily_counter / activity_progress）。推荐按批次追加（pbmysql 只扩不缩），4.4 先留钩子（§6.3）。
 5. **`name_norm` 列宽**：保持缺省 VARCHAR(191)，与 Go DDL 相同；不声明 `max_length=48`。
 6. **UpdateGuildScore 的积分来源**：两版都没有定义；先不暴露接口，需要时两版一起设计。
 7. **缓存值格式**：Java 自有 proto（推荐，类型安全、uint64 无歧义）还是照 friend 用 JSON。
 8. **榜维护锁 TTL 30 s + 续期**（推荐）还是保持基线 5 min。
-9. **共用件抽取**：friend 与 guild 的版本化缓存是否抽到公共模块（`RedisKeys.friendCacheGeneration` 改名为通用的 `cacheGeneration`）；推荐在 xm-guild 落地时一并做。
+9. **共用件抽取**：friend 与 guild 的版本化缓存是否抽到公共模块（`RedisKeys.friendCacheGeneration` 改名为通用的 `cacheGeneration`）；推荐在 game-guild 落地时一并做。
 10. **全服榜 `all`**：Java 4.4 没有读者，是否照样维护（推荐维护：成本低，日后 GM 工具或内部接口直接可用）。
 
 ---
@@ -1784,7 +1784,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
   幂等任命与同帮刷新申请不推送；推送发生在缓存失效之后；冷却拿不到键不推。
 - **`GuildPropertiesTest`**：预算区间校验。
 
-### 11.3 真 MySQL（`-Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306`，缺省跳过）
+### 11.3 真 MySQL（`-Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306`，缺省跳过）
 
 - **建表**：pbmysql 生成的四张表 DDL 与 §1.2 逐字相同（`uk_guild`、`uk_guild_member`、`idx_guild_0/1`、`idx_guild_application_0/1`）；哨兵行幂等、首插者回滚、缺失时 fail-closed、
   只有查重插入者取守卫（`guild_lock_order_mysql_test.go:1076-1293`）；版本下限（`server_version_test.go:67`）。
@@ -1798,7 +1798,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
   解散 ‖ 踢人 / 退帮；删成员先持玩家守卫；补建状态行不等已锁行；唯一键查重插入者三组；补建状态行首插者回滚；解散 ‖ 通过）。
 - **Java 增项**：大于 2^63 的无符号 id 全流程（含锁序比较）；子预算用完不写库、回 14021；1205 → 14021；COMMIT 结果不明 → 14021。
 
-### 11.4 真 Redis（`-Dxm.it.redis=redis://127.0.0.1:6379`）
+### 11.4 真 Redis（`-Dgame.it.redis=redis://127.0.0.1:6379`）
 
 - 版本化缓存：写者提交并失效之后，持旧快照的回填被拒；代次缺失时回填落空；按键单飞（同键只回源一次、不同键互不阻塞）；回填失败不让读失败；映射 0 也缓存。
 - 排行：建帮以 0 分进全服榜、区榜与区索引；分页边界；解散后从所有区榜移除（`rank_zone_integration_test.go:120-182`）；重建原子替换并清掉幽灵条目；
@@ -1811,7 +1811,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 - `MessageRoutesTest`：GuildService 的 28 个号都路由到 `guild`；220 `hasResponse=false`、8 `hasResponse=true`。
 - `ClientDispatcherTest`：Empty 应答的方法在 `tip≠0` 时回信封并带请求 id；guild 域的队列与 login / scene / friend 互不阻塞；热关停 `/guildpb.GuildService/*` 生效。
 
-### 11.6 robot `guild`（xm-robot 新增 `GuildScenario`，`RobotOptions.Scenario` 加 `GUILD`，`RobotOptions.java:61-63`）
+### 11.6 robot `guild`（game-robot 新增 `GuildScenario`，`RobotOptions.Scenario` 加 `GUILD`，`RobotOptions.java:61-63`）
 
 - **结构**：账号 `prefix+"gd"+runTag+"_a|b|d|e|f"`；配了第二个 zone 时再加 `_c`（D18）；相邻请求间隔 300 ms，同号连发 4 次时插 1100 ms 退火
   （`guild_smoke_scenario.go:96-111`）；等推送 5 s，超时即失败（`:103-105`）；输出用 `CheckReport`，引用 PARITY「帮会核心」行。

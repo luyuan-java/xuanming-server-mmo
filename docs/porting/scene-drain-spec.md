@@ -11,7 +11,7 @@
 > 5.2 提交后行号会漂移，以名字为准。
 >
 > **路径怎么读**
-> - 以 `cpp/`、`go/`、`docs/design/`、`robot/` 开头的在 `D:\work\mmorpg` 下；以 `xm-*`、`docs/porting/`、`docs/design/architecture.md`、`PARITY.md`、`tools/` 开头的在本仓库下
+> - 以 `cpp/`、`go/`、`docs/design/`、`robot/` 开头的在 `D:\work\mmorpg` 下；以 `game-*`、`docs/porting/`、`docs/design/architecture.md`、`PARITY.md`、`tools/` 开头的在本仓库下
 >   （两边都有 `docs/design/`：barrier.md 在 mmorpg，`architecture.md` / `tech-stack.md` 在本仓库）。
 > - 不带目录的 C++：`player_lifecycle.{h,cpp}`、`player_exit_intent.h` 在 `cpp/libs/services/scene/player/system/`；`player_ownership_comp.h` 在 `.../scene/player/comp/`；
 >   `node.{h,cpp}` 在 `cpp/libs/engine/core/node/system/node/`；`etcd_service.{h,cpp}` 在 `.../node/system/etcd/`；`main.cpp` = `cpp/nodes/scene/main.cpp`；
@@ -20,8 +20,8 @@
 > - 不带目录的 Go：`enterscenelogic.go`、`world_autoscale.go`、`world_init.go`、`world_rebalance.go`、`orphan_cleanup.go`、`instance_lifecycle.go`、`destroyscenelogic.go`、
 >   `reentry_barrier.go`、`load_reporter.go` 在 `go/scene_manager/internal/logic/`；`constants/reentry_barrier.go`、`constants/errors.go` 在 `go/scene_manager/internal/`；
 >   `entergamelogic.go` 在 `go/login/internal/logic/clientplayerlogin/`。
-> - 消息号取自 `xm-proto/src/main/resources/contract/message_id.txt`（号 N 在第 N+1 行）：21 NotifyActorCreate、23 SendTipToClient、34 KickPlayer、47 NotifyActorListCreate、
->   51 NotifyActorDestroy、63 EnterScene、66 SyncBaseAttribute、79 NotifyEnterScene。tip 取自 `xm-table/src/main/proto/tip/`：1003 / 1005 / 1006（`common_error_tip.proto:18`、`:22`、`:24`）、
+> - 消息号取自 `game-proto/src/main/resources/contract/message_id.txt`（号 N 在第 N+1 行）：21 NotifyActorCreate、23 SendTipToClient、34 KickPlayer、47 NotifyActorListCreate、
+>   51 NotifyActorDestroy、63 EnterScene、66 SyncBaseAttribute、79 NotifyEnterScene。tip 取自 `game-table/src/main/proto/tip/`：1003 / 1005 / 1006（`common_error_tip.proto:18`、`:22`、`:24`）、
 >   2005 / 2017（`login_error_tip.proto:22`、`:46`）、3000 / 3014 / 3023（`scene_error_tip.proto:12`、`:40`、`:58`）。
 > - 带「推导」字样的结论没有测试或运行证据，是把几处代码路径串起来得出的。
 >
@@ -68,13 +68,13 @@
 1. **服务器发起的换图**：5.2 状态机加 `SwitchReason.EVACUATE`；交出前的失败不推 tip、按玩家退避；选目标一律排除源节点（§5.2）。
 2. **改派去向**：本节点同图 → 别的节点同图 → 本节点默认大世界 → 别的节点默认大世界 → 原地退避；跨节点一律走 5.2 交出；hash 覆盖下放开 5.1 D9 的「同节点兄弟」约束、
    余量按「改派实际会落到的那组频道」算（per-node 覆盖下规则不变，§5.3、§5.6.6）。存储层出错时暂停发起新的疏散冻结，免得库抖动成批踢人（§5.3 存储闸）。
-3. **节点级疏散 `NodeEvacuation`**，三个触发：运维（xm-data 标记）、停服前（缺省开）、节点号被别的实例占用（疏散后退出）；有界 15 s；目录自报 `evacuating`，
+3. **节点级疏散 `NodeEvacuation`**，三个触发：运维（game-data 标记）、停服前（缺省开）、节点号被别的实例占用（疏散后退出）；有界 15 s；目录自报 `evacuating`，
    scene-manager 把它名下的频道转排空、同一次写入在别处补建（P2b）（§5.4、§5.6.4）。
 4. **节点号租约区分丢失原因**：Redis 失联 → 挂起、照常服务、恢复后续上或原号复占；号归别人 → 疏散后退出；目录发布受租约有效性围栏（§5.5）。
 5. **gate**：链路心跳与读空闲（15 s）；握手核对对端实例与租约代次、5 s 换代扫描、按链路代次寻址、旧链路宽限 30 s 后断开；链路断开先推 23 `{1003}` 再关（§5.7）。
 6. **scene**：gate 链路读空闲即关链路、写回其上玩家；自己背压暂停读期间不计读空闲（§5.8）。
 7. **死节点**：不移植 `death_at` / 再入屏障 / 推迟摘除 / 免标记接管（§5.13）；容量重铺加「节点号租约键已无人持有」的佐证，卡住的节点最多宽限 120 s（§5.6.5）。
-8. **运维面**：xm-data `POST / GET / DELETE /admin/scenes/evacuate…`，与 gate 排空同形（§5.9）。
+8. **运维面**：game-data `POST / GET / DELETE /admin/scenes/evacuate…`，与 gate 排空同形（§5.9）。
 9. **前置修复**：`IsolatedDubboModule` 关掉 Dubbo 自带的 JVM 停机钩子，否则 SIGTERM 时选目标客户端在疏散开始前 / 进行中就被 Dubbo 销毁（H12，§5.10）；
    停服的真正上界是外部强杀期限，不是 Spring 停机阶段时限（G16、C2）。
 
@@ -88,7 +88,7 @@
 
 ### 0.3 范围
 
-**5.5 做**：上表交付列；`xm-api` / `xm-discovery` 的内部契约变更（§6.3）；对 5.1 已提交代码与 5.2 在途代码的改动（§5.2、§5.3、§5.6）；指标、配置、启动校验；
+**5.5 做**：上表交付列；`game-api` / `game-discovery` 的内部契约变更（§6.3）；对 5.1 已提交代码与 5.2 在途代码的改动（§5.2、§5.3、§5.6）；指标、配置、启动校验；
 `architecture.md` 与 PARITY 登记；单测、真 Redis 集成测试、本机多节点切片故障注入、robot（§11）。
 
 **5.5 不做**：
@@ -105,7 +105,7 @@
 | 5.1（已提交） | 频道计划 P1–P7、`NodeAvailability` 钩子（恒 `ALL`，`WorldChannelControlPlane.java:73`）、同节点改派、D9 / D10 / D12、`DrainReason` 0–3（`world_channel.proto:31-39`） | `NodeAvailability` 实现（读目录 `evacuating`）；新增 P2b 与 P2 租约键佐证；`DRAIN_EVACUATE = 4`；放开 D9（可回滚开关）、保留 D10；`relocationTarget` 扩成三态；**不抽 `ChannelEvacuator` 接口**（只有一个实现，§8.3 勘误） |
 | 5.2（在途） | `PlayerSwitch` / `SwitchPhase`、`beginRemoteSwitch`、`selectSwitchTarget`、`PlayerTransfer`、冻结闸、墓碑 | `PlayerSwitch.reason`；`beginRemoteSwitch(player, want, reason)` 推广（5.2 / 5.3 规格里的 `SceneTransfers.begin(…, Reason.EVACUATE, playerRequested=false)` 就是它，不另建类）；`SelectSwitchTargetRequest` 追加 3 个字段；结局分派按 reason 分流；`node_link.proto` **不**为疏散加 `PlayerTransfer` 字段（Q12） |
 | 5.3（规格在途） | 实例节点自有；`DrainCause{NONE, PLAN, IDLE, CASCADE, ADMIN}`；`relocationTarget(kind)`；`createInstance` 留 `NodeAvailability` 钩子（`dungeon-mirror-spec.md:120`、`:599`、`:675`） | `DrainCause` 追加 `NODE`；实例居民按 kind 定目标图再套 §5.3；疏散中的节点本地拒绝建镜像、scene-manager `createInstance` 对 `evacuating` 节点回 3000；作废在途的镜像取号 |
-| 5.4（2026-10-11 代码已集成到 main、全量单测通过，双 zone 切片验证待做；`zone-travel-spec.md`） | 跨 zone 传送 / 重定向；`SwitchReason {PLAYER, TRAVEL}`、`SwitchPhase.PRECHECK`、`travelFramesPending`（`zone-travel-spec.md` §0.5、§0.6 裁决 16、§5.3） | 疏散只在本 zone 内选目标；`SwitchReason` 追加 `EVACUATE`（不另起判别字段）；疏散跳过任何阶段的 TRAVEL（含 PRECHECK）；疏散占着 `switching` 槽时 226 回 13000 / 3014（5.4 §5.5）；收敛谓词并入 `travelFramesPending`（§5.4.4）。**登记（5.4 已落地的部分，本稿据此对齐，只登记不改设计）**：`com.game.scene.world.SwitchReason {PLAYER, TRAVEL}`（5.5 只追加 EVACUATE）；`SwitchPhase.PRECHECK` 只给 TRAVEL；`PlayerSwitch` 带 `reason`，「怎么交出」仍由 5.2 的 `Purpose` 表达；读口 `SceneWorld.travelFramesPending()` 与 gauge `xm.scene.travel.frames.pending`（交出提交且实例移除时 +1，帧写出 / 墓碑被交叉离开消费 / TF7 时 −1；墓碑被消费另计 `xm.scene.travel.frames.withheld`），**§5.4.4 的收敛谓词要把它并进去**——5.4 没有改停服流程，TF16（停服恰在「已交出、帧未写出」窗口退出）的残余等 5.5 收掉；跨 zone 的墓碑在帧没定之前不随链路断开 / 停服清（`TransferTombstone.forRedirect`）。指标：5.4 只给 `xm.scene.transfers` 加了 `reason`（player / travel），`xm.scene.switch.resolves` 与 `xm.scene.transfer.freeze` **没有加**（226 不调 `selectSwitchTarget`，选目标计在 `xm.scene.travel.resolves`）——§7.2 那一行加 evacuate 时按此处理。`SceneWorld.switchInFlight` 对 TRAVEL 的过期槽会给结论（PRECHECK 回 3027、RESOLVING 推 23 {3027}），每秒维护也作废它们；疏散经它判在途时同样适用 |
+| 5.4（2026-10-11 代码已集成到 main、全量单测通过，双 zone 切片验证待做；`zone-travel-spec.md`） | 跨 zone 传送 / 重定向；`SwitchReason {PLAYER, TRAVEL}`、`SwitchPhase.PRECHECK`、`travelFramesPending`（`zone-travel-spec.md` §0.5、§0.6 裁决 16、§5.3） | 疏散只在本 zone 内选目标；`SwitchReason` 追加 `EVACUATE`（不另起判别字段）；疏散跳过任何阶段的 TRAVEL（含 PRECHECK）；疏散占着 `switching` 槽时 226 回 13000 / 3014（5.4 §5.5）；收敛谓词并入 `travelFramesPending`（§5.4.4）。**登记（5.4 已落地的部分，本稿据此对齐，只登记不改设计）**：`com.game.scene.world.SwitchReason {PLAYER, TRAVEL}`（5.5 只追加 EVACUATE）；`SwitchPhase.PRECHECK` 只给 TRAVEL；`PlayerSwitch` 带 `reason`，「怎么交出」仍由 5.2 的 `Purpose` 表达；读口 `SceneWorld.travelFramesPending()` 与 gauge `game.scene.travel.frames.pending`（交出提交且实例移除时 +1，帧写出 / 墓碑被交叉离开消费 / TF7 时 −1；墓碑被消费另计 `game.scene.travel.frames.withheld`），**§5.4.4 的收敛谓词要把它并进去**——5.4 没有改停服流程，TF16（停服恰在「已交出、帧未写出」窗口退出）的残余等 5.5 收掉；跨 zone 的墓碑在帧没定之前不随链路断开 / 停服清（`TransferTombstone.forRedirect`）。指标：5.4 只给 `game.scene.transfers` 加了 `reason`（player / travel），`game.scene.switch.resolves` 与 `game.scene.transfer.freeze` **没有加**（226 不调 `selectSwitchTarget`，选目标计在 `game.scene.travel.resolves`）——§7.2 那一行加 evacuate 时按此处理。`SceneWorld.switchInFlight` 对 TRAVEL 的过期槽会给结论（PRECHECK 回 3027、RESOLVING 推 23 {3027}），每秒维护也作废它们；疏散经它判在途时同样适用 |
 | 6.3（规格在途，`scene-battle-spec.md`） | 战斗冻结；`beginRemoteSwitch` / 5.5 入口拒绝 `inBattle()`（`scene-battle-spec.md:881`、`:1090`） | 改派跳过战斗冻结中的玩家（入口拒绝是纵深防御，正常走不到）；冲突 / 停服疏散到期时照常写回，结算由 6.3 落到下一个持有者（Q16，与 6.3 的 Q17 / D26 一致） |
 | 7.6 | K8s 编排、告警 | 宽限期 ≥ 60 s（C2）；§7.3 告警；readiness 在挂起 / 疏散时 DOWN |
 | 6.2（在途） | battle 节点用 `NodeIdLease` 缺省模式、租约丢失「尽力删除目录条目」（`battle-node-spec.md:1163-1169`） | 5.5 改 `NodeIdLease` 时缺省模式行为不变（battle 回归）；目录删条目的围栏（§5.5.4）建议 6.2 同样采用（§8.3） |
@@ -131,17 +131,17 @@
 | A2 | 不可用节点名下的频道记录 | ① 不计入期望与覆盖（改 5.1 约定），记录原样；③ P2b 转 `DRAINING(EVACUATE)` + 同批补建 | `NodeAvailability` 注释写「已有记录照常计数」（`NodeAvailability.java:3-6`）；① 会留下「计划 ACTIVE、节点本地排空」的长期不一致，撤销后多出频道 | 取 P2b（§5.6.4） |
 | A3 | 运维标记谁读 | ① scene 每秒读、SM 只看目录；③ SM 领导者与 scene 都读 | 两个读者 = 两份判定；领导者一拍 5 s，比 scene 拉取 1 s 慢 | scene 是唯一读者，SM 只看目录 `evacuating`（§5.9） |
 | A4 | 节点号租约丢失原因 | ① TAKEN / 续期失败（后者维持现状）；② TAKEN / EXPIRED（重占原号）；③ TAKEN / 键空闲 / 不可达 | 续期 Lua 在「键不在」与「键归别人」时都回 0（`NodeIdLease.java:41-42`、`:155-159`）；现状失联超过 TTL 即永久丢失 | 续期 Lua 三值；出错 ≥ TTL 进**挂起**、不判丢；恢复后按续期结果续上 / 原号复占 / TAKEN（§5.5） |
-| A5 | 停服前疏散的缺省 | ① 开、20 s；② 开放问题；③ 关，切片验证后再开 | `stop-slice.sh` 等 20 s 后 kill -9（`tools/local/stop-slice.sh:11-17`）；`timeout-per-shutdown-phase` 30 s（`xm-scene/.../application.yaml:22`）——但它对同步的 `SceneNode.stop()` 不起约束（评审核对，C2） | 实现并**缺省开**，预算与冲突疏散共用 15 s；目录里没有别的接客节点就跳过、中途变成没有就提前结束；配套改外部强杀期限（stop-slice 等待、K8s 宽限，Q1、C2） |
+| A5 | 停服前疏散的缺省 | ① 开、20 s；② 开放问题；③ 关，切片验证后再开 | `stop-slice.sh` 等 20 s 后 kill -9（`tools/local/stop-slice.sh:11-17`）；`timeout-per-shutdown-phase` 30 s（`game-scene/.../application.yaml:22`）——但它对同步的 `SceneNode.stop()` 不起约束（评审核对，C2） | 实现并**缺省开**，预算与冲突疏散共用 15 s；目录里没有别的接客节点就跳过、中途变成没有就提前结束；配套改外部强杀期限（stop-slice 等待、K8s 宽限，Q1、C2） |
 | A6 | 节点疏散中玩家自己发 63 | ① 一律 Remote 且排除本节点；② 一律 3014 | 全部本地场景都在排空时，现有 `resolveSwitchTarget` 自然给出 Remote（只带地图）或 3023（显式本地号，D11）（`SceneWorld.java:560-580`） | 取 ①：只多带 `exclude_from_node`；自己的换图在途的玩家，疏散跳过他（§5.4.3） |
 | A7 | 去向顺序与 SM 回落 | ① 把「回落默认大世界」合并进第 2 步的 SM 调用；③ Refused 再落下一级 | ① 的写法会让「远端默认大世界」排到「本节点默认大世界」之前，与它自己写的顺序矛盾 | `fallback` 只在本节点没有可用默认大世界时才带；SM 没给出远端去向时先试本节点默认大世界，再退避（§5.3） |
 | A8 | 选目标是否排除源节点 | ① 只在节点级疏散；②③ 疏散一律 | 计划驱动时本节点同图已先查过且没有可用的，带上无害、省一次无用往返 | `EVACUATE` 一律排除；`PLAYER` 只在节点疏散中排除（§5.2） |
-| A9 | 并发上限 | ① 一个键 32；③ 计划驱动 32 + 自疏散 64 | 存储池 4 线程、队列 1 万（`xm-scene/.../application.yaml:85-86`），交出与在线存盘共用 | 一个键 `evacuation.max-in-flight` = 32，压测后定（Q11） |
+| A9 | 并发上限 | ① 一个键 32；③ 计划驱动 32 + 自疏散 64 | 存储池 4 线程、队列 1 万（`game-scene/.../application.yaml:85-86`），交出与在线存盘共用 | 一个键 `evacuation.max-in-flight` = 32，压测后定（Q11） |
 | A10 | 失败退避 | 2 s→30 s / 下一秒 / 1 s→30 s | 排空推进每秒一拍（`SceneNode.java:337-343`） | 1 s 起翻倍、封顶 30 s |
 | A11 | gate 侧的号复用围栏 | ② 目录实例不符持续 ≥20 s 才断旧链路（期间新进场仍进老进程 → 3023）；③ 握手比对 + 5 s 换代扫描 + 按代次寻址 + 30 s 宽限 | `forwardToScene` / `leaveScene` 按节点号发（`ClientDispatcher.java:601`、`:916`）；`SceneLinkManager` 每节点一条（`SceneLinkManager.java:15-22`） | 取 ③（§5.7.2–§5.7.4）；心跳取 ②（§5.7.1） |
 | A12 | 链路心跳 | 只有 ② 提出 | gate 建链只设连接超时与写水位（`NettyLinkConnector.java:64-70`）；scene 只开 `SO_KEEPALIVE`（`NodeLinkServer.java:63`） | 采纳；滚动升级用握手字段协商（§5.7.1） |
 | A13 | 死节点判定的佐证 | 只有 ③ 提出租约键佐证 | 目录发布要在逻辑线程取快照（`SceneNode.java:405-410`，`callOnLogic` 5 s 超时），节点号续期在调度线程，两路信号独立 | 采纳（§5.6.5） |
 | A14 | 停服疏散预算 | ① 20 s；③ 15 s | — | 共用 15 s（`evacuation.budget`） |
-| A15 | 标记键与接口名 | ① `xm:scene-draining:{z:<zone>}:<node>`、`/admin/scenes/drain`；③ `xm:scene-evacuating:{zone}:{node}`、`/admin/scenes/evacuate` | gate 排空键是 `xm:gate-draining:<zone>:<node>`（`RedisKeys.java:59-64`），标记类只支持单节点 Redis（`GateDrainMarks` 类注释） | `xm:scene-evacuating:<zone>:<node>`、`/admin/scenes/evacuate`（与 5.1 的「频道排空」区分） |
+| A15 | 标记键与接口名 | ① `game:scene-draining:{z:<zone>}:<node>`、`/admin/scenes/drain`；③ `game:scene-evacuating:{zone}:{node}`、`/admin/scenes/evacuate` | gate 排空键是 `game:gate-draining:<zone>:<node>`（`RedisKeys.java:59-64`），标记类只支持单节点 Redis（`GateDrainMarks` 类注释） | `game:scene-evacuating:<zone>:<node>`、`/admin/scenes/evacuate`（与 5.1 的「频道排空」区分） |
 | A16 | `ChannelEvacuator` / `SceneTransfers` | 5.1 / 5.2 / 5.3 规格的名字 | 全仓没有这两个符号；入口是 `SceneWorld.relocationTarget` 与 `beginRemoteSwitch` | 不新建：推广现有方法；规格名视为同一入口的别名（§8.3） |
 | A17 | 「5.1 规格 `enterscenelogic.go:726-730` 应为 `:728-730`」 | ① 提出的勘误 | `:726` 起注释、`:729` 扣人数、`:730` 收尾 | 5.1 原文无误，撤销这条勘误 |
 | A18 | 基线行号 | 三稿各有偏差（如 `beginDrainWorldChannel` 记成 `:276-366`） | 逐条复核：`world_autoscale.go:324-366`；`reconcileDeadNodeScenes` 自 `load_reporter.go:413`；`ReserveBestWorldChannelForEnter` 自 `world_init.go:441` | 以本稿行号为准 |
@@ -429,7 +429,7 @@ DELETE，gate 解绑仍挂着的会话。
 |---|---|
 | t0 | 进程死，OS 关 socket → gate 关绑定在这条链路上的会话，不推 tip |
 | t0 + ≤15 s | 目录条目过期（最后一次发布在 t0 之前 ≤5 s） |
-| 期间重连 | login 读到位置记录仍是死节点的 `o`（TTL 60 s，`PlayerLocationDirectory.java:46`）→ assign（节点不在目录就按原地图选）→ 夺权得 Held → pub/sub 请让出、无人应 → 3 s 后 2005（`EnterGameHandler`；`xm-login/.../application.yaml:95`） |
+| 期间重连 | login 读到位置记录仍是死节点的 `o`（TTL 60 s，`PlayerLocationDirectory.java:46`）→ assign（节点不在目录就按原地图选）→ 夺权得 Held → pub/sub 请让出、无人应 → 3 s 后 2005（`EnterGameHandler`；`game-login/.../application.yaml:95`） |
 | t0 + 20–30 s | 归属租约过期（最后一次续约在 t0 之前 ≤10 s）→ 下一次 EnterGame 夺权 → 原地图人数最少的频道（PARITY ⑥）→ 79 / 21 / 47；数据回到最后一次落库（周期存盘 300 s，资产记账后立即存一次） |
 | t0 + 约 35–45 s | P2 删掉死节点的记录、新号重铺 |
 
@@ -455,7 +455,7 @@ DELETE，gate 解绑仍挂着的会话。
 
 - 停服顺序：停计划拉取与排空推进 → 摘目录 → 停监听 → 停封禁同步、接管订阅、续约 → 断开全部 gate 链路 → 逻辑线程写回全部玩家 → 关存储池 → … → 最后释放节点号
   （`SceneNode.release`，`SceneNode.java:478-593`）。GM 签名停机与 SIGTERM 都走这里（`SceneNodeConfiguration.java:147-154`）。玩家断线，gate 不推 tip。
-- 运维面没有 scene 疏散入口（xm-data 只有 gate 排空，`architecture.md` §6 gate 排空段；`GateDrainAdminController`）。
+- 运维面没有 scene 疏散入口（game-data 只有 gate 排空，`architecture.md` §6 gate 排空段；`GateDrainAdminController`）。
 
 ### 4.7 可复用件
 
@@ -489,7 +489,7 @@ DELETE，gate 解绑仍挂着的会话。
 | G13 | 目录发布不受租约有效性围栏 | H9 | 否 |
 | G14 | 死节点判定只看目录缺席：逻辑线程卡顿（目录取快照超时）会被当死亡、频道换号抖动 | H3；`SceneNode.java:405-410` | 是（卡顿恢复后玩家被改派） |
 | G15 | Dubbo 自带的 JVM 停机钩子在 SIGTERM 时先于 / 并行于 `SceneNode.stop()` 销毁隔离 Dubbo 模型 | H12 | 是（停服疏散失效；资产通道早于写回反导出） |
-| G16 | xm-scene 的 `spring.lifecycle.timeout-per-shutdown-phase` 注释称「停服写回要在这个上限之内完成」（`xm-scene/.../application.yaml:21-22`），但 `SceneNode` 只实现同步 `stop()`，`SmartLifecycle.stop(Runnable)` 的缺省实现先同步跑完 `stop()` 再回调，`DefaultLifecycleProcessor` 的等待在它返回之后才开始（spring-context 6.2.19，评审反汇编核对）——这个时限约束不了停服 | — | 否（真正的上界是外部强杀期限，C2） |
+| G16 | game-scene 的 `spring.lifecycle.timeout-per-shutdown-phase` 注释称「停服写回要在这个上限之内完成」（`game-scene/.../application.yaml:21-22`），但 `SceneNode` 只实现同步 `stop()`，`SmartLifecycle.stop(Runnable)` 的缺省实现先同步跑完 `stop()` 再回调，`DefaultLifecycleProcessor` 的等待在它返回之后才开始（spring-context 6.2.19，评审反汇编核对）——这个时限约束不了停服 | — | 否（真正的上界是外部强杀期限，C2） |
 
 ---
 
@@ -585,7 +585,7 @@ EVACUATE 选目标 Refused / Failed 回到逻辑线程：
 
 | 项 | 值 | 理由 |
 |---|---|---|
-| 每节点在途上限 | `xm.scene.evacuation.max-in-flight` 缺省 32，范围 [1, 256]；计数 = reason = EVACUATE 且处于 RESOLVING / FREEZING 的 `PlayerSwitch` | 冻结窗口与存储池排队可预测（存储池 4 线程，交出与在线存盘共用） |
+| 每节点在途上限 | `game.scene.evacuation.max-in-flight` 缺省 32，范围 [1, 256]；计数 = reason = EVACUATE 且处于 RESOLVING / FREEZING 的 `PlayerSwitch` | 冻结窗口与存储池排队可预测（存储池 4 线程，交出与在线存盘共用） |
 | 补位 | 每个 EVACUATE 结局回来立即补一次，另外每秒一次 | 只靠每秒补位时吞吐 ≈ 上限 / s |
 | 顺序 | (scene_id 无符号, player_id) 升序 | 确定、好测；一个场景先清空、更早销毁 |
 | 退避 | 1 s 起翻倍、封顶 30 s（`retry-backoff-initial` / `-max`）；成功改派、离开排空场景即清零 | 不对 SM 或库形成重试风暴 |
@@ -635,7 +635,7 @@ cause 只升级不降级：ADMIN → SHUTDOWN / CONFLICT；升级时 deadline �
 | cause | 来源 | 预算 | 结束 |
 |---|---|---|---|
 | ADMIN | 运维标记（§5.9），scene 每秒读、只认本实例 | 无；找不到去向的玩家原地退避 | 标记被删 / 过期 / 实例不符，且当前 cause **仍是 ADMIN**（已升级为 SHUTDOWN / CONFLICT 的不因撤标记而结束）→ `endNodeEvacuation()`：清标志；租约有效且没在停服时恢复接客；目录 `evacuating = false` 补发；强制按当前计划重应用（ACTIVE 改回承载、DRAINING 照旧）；5.3 实例的 `NODE` 排空撤回 NONE；在途 EVACUATE 照常结束（结果回来时已不在排空 → 取消）。人走空后**不自动停节点**（同 gate 排空「只判定、不踢人」，Q7） |
-| SHUTDOWN | `SceneNode.stop()` 在 `release()` 之前（SIGTERM 与 GM 签名停机都走这里，§5.10） | `xm.scene.evacuation.budget` 15 s；目录里没有别的接客 scene 节点就跳过、中途变成没有就提前结束 | 谓词成立 / 到期 / 无去处 → 原样执行 `release()`（剩下的写回、先推 23 `{1003}` 再断线） |
+| SHUTDOWN | `SceneNode.stop()` 在 `release()` 之前（SIGTERM 与 GM 签名停机都走这里，§5.10） | `game.scene.evacuation.budget` 15 s；目录里没有别的接客 scene 节点就跳过、中途变成没有就提前结束 | 谓词成立 / 到期 / 无去处 → 原样执行 `release()`（剩下的写回、先推 23 `{1003}` 再断线） |
 | CONFLICT | 节点号租约 TAKEN（§5.5） | 15 s（对齐基线 `kDrainBudget`，`node.cpp:883`） | 谓词成立 / 到期 → `ProcessExit.exitSoon()` → `stop()` → `release()`，进程退出；gate 的旧链路随之断开 |
 
 **触发矩阵（基线 → Java 现状 → 5.5）**：
@@ -667,7 +667,7 @@ cause 只升级不降级：ADMIN → SHUTDOWN / CONFLICT；升级时 deadline �
 
 - **原号复占的 INCR 失败**：同 `acquire` 的 `nextLeaseEpoch`（`NodeIdLease.java:104-121`）——领不到新代次就用 `RELEASE_LUA` 放掉刚占的键、保持挂起、下一轮再试；不许带着旧代次复占
   （否则 gate 的握手比对与换代扫描分不出「原号复占」和「旧进程」）。
-- **缺省模式的使用者**：gate、login、guild、team、trade、scene-manager 的发号租约、xm-data `OpsIds`、6.2 battle（`BattleInfrastructure.java:95`）都用
+- **缺省模式的使用者**：gate、login、guild、team、trade、scene-manager 的发号租约、game-data `OpsIds`、6.2 battle（`BattleInfrastructure.java:95`）都用
   `Runnable onLost` 构造；三值 Lua 下缺省模式把 0 与 −1 都映射到原来的 `markLost`，行为逐字不变，回归测试覆盖这些调用方的构造路径。
 - **复占与雪花**：P1 自己的 `Snowflake` 保留 `lastMs`，复占后不会与自己早先发的号撞；与「键空闲期间别的进程用过这个 worker」之间的关系，与新进程启动占到一个刚被释放的号
   完全相同（同一个 NTP 前提，`architecture.md:666`、`:731`），不新增风险。
@@ -676,7 +676,7 @@ cause 只升级不降级：ADMIN → SHUTDOWN / CONFLICT；升级时 deadline �
 
 | 回调 | 动作 |
 |---|---|
-| `onSuspended` | 停目录发布（**不删**条目）；逻辑线程拒新进场（3023）；readiness DOWN；`xm.scene.node.identity = 1`。在场玩家照常（归属在 MySQL，不依赖 Redis）；链路监听保持 |
+| `onSuspended` | 停目录发布（**不删**条目）；逻辑线程拒新进场（3023）；readiness DOWN；`game.scene.node.identity = 1`。在场玩家照常（归属在 MySQL，不依赖 Redis）；链路监听保持 |
 | `onResumed` / `onRegained` | 恢复目录发布（带新 `lease_epoch`）；同步拉一次计划——挂起期间被 P2 删掉的频道在本地成了「计划外」，按 5.1 §4.10.2 排空（玩家经 §5.3 改派）；恢复接客；readiness UP |
 | `onTaken` | CONFLICT：停计划拉取、停目录发布（不删条目）、停接新链路 → `beginNodeEvacuation(CONFLICT, budget)` → 看门狗 → 退出（§5.10） |
 
@@ -712,7 +712,7 @@ gate 的换代扫描对每个节点号记住**见过的最大** `lease_epoch`，
 - `reason = EVACUATE`：`want_scene_id` 必须为 0（否则 `BAD_REQUEST`）；按 `want_scene_config_id` 用 `ChannelSelector` 选（世界图校验同现状）；没有候选且 `fallback_scene_config_id ≠ 0`
   → 按 fallback 再选一次（同样世界图校验、同样写软预占）；都没有 → `NOT_FOUND`。
 - 「同一 scene_id 出现在多个节点」继续拒绝（`selectExplicit`，`:109-114`）。
-- 指标 `xm.scene_manager.switch{result, reason}`（reason 只有 player / evacuate 两个取值：5.4 的 TRAVEL 跨 zone、不调 `selectSwitchTarget`，所以 proto 枚举 `SwitchReason`
+- 指标 `game.scene_manager.switch{result, reason}`（reason 只有 player / evacuate 两个取值：5.4 的 TRAVEL 跨 zone、不调 `selectSwitchTarget`，所以 proto 枚举 `SwitchReason`
   与 scene 进程内的 `SwitchReason` 不是同一个类型，TRAVEL 不出现在请求里）。
 
 #### 5.6.3 `NodeAvailability` 的实现
@@ -737,7 +737,7 @@ CONFLICT 时老进程 P1 不发布目录，新进程 P2 在目录里正常在场
 | 状况 | 判定 |
 |---|---|
 | 缺席 < `dead-node-grace`（20 s） | 不动（现状） |
-| 缺席 ≥ 20 s，`xm:node-id:scene:<zone>:<N>` 不存在 | 删除该节点名下全部记录（现状） |
+| 缺席 ≥ 20 s，`game:node-id:scene:<zone>:<N>` 不存在 | 删除该节点名下全部记录（现状） |
 | 缺席 ≥ 20 s，键仍有持有者（同一实例：活着但发不出目录，典型是逻辑线程卡住、取快照超时；别的实例：正在换代重启） | 标 `world_nodes{state=stuck}`、保留记录；缺席满 `stuck-node-grace`（120 s）仍缺席才删，并打 ERROR |
 | 读键失败 | 按「有持有者」处理（偏晚、安全） |
 
@@ -747,7 +747,7 @@ CONFLICT 时老进程 P1 不发布目录，新进程 P2 在目录里正常在场
 
 #### 5.6.6 放开 5.1 D9 的缩容约束
 
-`WorldAutoscaler.pickScaleInVictim`（`WorldAutoscaler.java:134-159`）在 `xm.scene-manager.world.cross-node-relocation = true`（缺省；false 退回 5.1 口径，用于回滚）时：
+`WorldAutoscaler.pickScaleInVictim`（`WorldAutoscaler.java:134-159`）在 `game.scene-manager.world.cross-node-relocation = true`（缺省；false 退回 5.1 口径，用于回滚）时：
 
 - **余量要按「改派实际会落到的那组频道」算**，而不是一律全图：relocate pass 先去本节点同图（§5.3），本节点有同图兄弟时牺牲者的人**全部**落到这些同节点兄弟上，
   这时按全图余量放行会把某个同节点兄弟推过扩容线，重新引入基线 `hasHeadroomFor` 要防的「缩完立刻扩」振荡（`world_autoscale.go:259-262` 注释）。所以：
@@ -765,9 +765,9 @@ scene 的跨节点能力取决于 `crossNode.enabled()`（5.2 装配）；两边
 
 #### 5.6.7 观测
 
-领导者记下每个节点最近一次看到的 `(instance_id, lease_epoch)`：实例变了计 `xm.scene_manager.world.node.restarts`，只有代次变了（原号复占）计
-`xm.scene_manager.world.node.regained`（两者分开，免得 Redis 抖动后的复占被当成重启告警；指标名前缀沿用现有 `xm.scene_manager.*`，`WorldChannelMetrics.java:33-39`）；只读 actuator 端点 `worldnodes`（显式加进暴露清单，
-`xm-scene-manager/.../application.yaml`）：按 zone、按节点列出在场、实例、`lease_epoch`、`evacuating`、缺席时长、租约键持有者、`stuck`、各状态记录数。
+领导者记下每个节点最近一次看到的 `(instance_id, lease_epoch)`：实例变了计 `game.scene_manager.world.node.restarts`，只有代次变了（原号复占）计
+`game.scene_manager.world.node.regained`（两者分开，免得 Redis 抖动后的复占被当成重启告警；指标名前缀沿用现有 `game.scene_manager.*`，`WorldChannelMetrics.java:33-39`）；只读 actuator 端点 `worldnodes`（显式加进暴露清单，
+`game-scene-manager/.../application.yaml`）：按 zone、按节点列出在场、实例、`lease_epoch`、`evacuating`、缺席时长、租约键持有者、`stuck`、各状态记录数。
 
 ### 5.7 gate
 
@@ -775,8 +775,8 @@ scene 的跨节点能力取决于 `crossNode.enabled()`（5.2 装配）；两边
 
 - `NodeLinkFrame` 追加 `LinkPing ping = 10`、`LinkPong pong = 11`（都只有 `uint64 seq`）；`LinkHello` 追加 `uint32 ping_interval_ms = 7`（gate 声明会发心跳）；
   `LinkHelloAck` 追加 `uint32 ping_interval_ms = 7`（scene 回显 = 支持）、`uint64 scene_lease_epoch = 6`。
-- gate：握手成功且 ack 回显非 0 时，在链路的 EventLoop 上**固定**每 `xm.gate.link-ping-interval`（5 s）发一次 Ping（不按写空闲：有上行流量、对端却没有下行时仍要探活）；
-  Netty 自带 `IdleStateHandler` 读空闲超过 `xm.gate.link-idle-timeout`（15 s）→ `SceneLink.fail("心跳超时")`，走现有 `onLinkDown`。不加依赖。
+- gate：握手成功且 ack 回显非 0 时，在链路的 EventLoop 上**固定**每 `game.gate.link-ping-interval`（5 s）发一次 Ping（不按写空闲：有上行流量、对端却没有下行时仍要探活）；
+  Netty 自带 `IdleStateHandler` 读空闲超过 `game.gate.link-idle-timeout`（15 s）→ `SceneLink.fail("心跳超时")`，走现有 `onLinkDown`。不加依赖。
   读空闲按**任何**入站帧计（`ToClient`、进场结果、`PlayerTransfer`、Pong 都算），不是只认 Pong：scene 背压暂停读时（§5.8）Ping 会滞留在它的 TCP 缓冲里，
   只要它的逻辑线程还在往外写，gate 就不会误判；逻辑线程积压超过 1 万帧且 15 s 没有任何下行，按死链路处理是可以接受的。
 - 滚动升级：旧 scene 不回显 → gate 不做读空闲判定；旧 gate 不声明 → scene 不做读空闲判定（§5.8）。
@@ -791,8 +791,8 @@ scene 的跨节点能力取决于 `crossNode.enabled()`（5.2 装配）；两边
 
 | 步骤 | 做法 |
 |---|---|
-| 扫描 | `gate-link-resolve` 线程每 `xm.gate.link-supersede-check-interval`（5 s）读一次 `NodeDirectory.list(zone)`。对每条已就绪链路：目录里同号条目缺席 / 读失败 → 不动（死活由心跳判）；实例相同、代次更高（原号复占）→ 只更新记录的代次；**实例不同且代次更高**（或任一侧代次为 0 时，连续两次扫描都不同）→ `supersede(link)`。每个节点号记住**见过的最大代次**，代次低于它的条目当作迟到的旧写（§5.5.4）直接忽略，绝不因此换代或撤销已做的取代 |
-| 取代 | 链路从「当前」表移到「被取代」表（键 = (节点号, 代次)，带截止时刻 = 现在 + `xm.gate.link-superseded-grace` 30 s），计 `xm.gate.scene.links.superseded`；之后发往该节点的**新绑定**帧（`PlayerEnter`、5.2 改绑后的 `PlayerEnter`）建新代次链路，按目录连到新进程 |
+| 扫描 | `gate-link-resolve` 线程每 `game.gate.link-supersede-check-interval`（5 s）读一次 `NodeDirectory.list(zone)`。对每条已就绪链路：目录里同号条目缺席 / 读失败 → 不动（死活由心跳判）；实例相同、代次更高（原号复占）→ 只更新记录的代次；**实例不同且代次更高**（或任一侧代次为 0 时，连续两次扫描都不同）→ `supersede(link)`。每个节点号记住**见过的最大代次**，代次低于它的条目当作迟到的旧写（§5.5.4）直接忽略，绝不因此换代或撤销已做的取代 |
+| 取代 | 链路从「当前」表移到「被取代」表（键 = (节点号, 代次)，带截止时刻 = 现在 + `game.gate.link-superseded-grace` 30 s），计 `game.gate.scene.links.superseded`；之后发往该节点的**新绑定**帧（`PlayerEnter`、5.2 改绑后的 `PlayerEnter`）建新代次链路，按目录连到新进程 |
 | 按代次寻址 | `SceneLinks` 增加 `send(nodeId, gen, frame)`：当前链路代次相符 → 它；被取代表里有 (nodeId, gen) → 它；都没有 → 0（`LINK_UNAVAILABLE`）。已有绑定的帧——`ClientForward`（`ClientDispatcher.java:601`）、`PlayerLeave`（`:916`）——带 `s.sceneLinkGen` |
 | 宽限到期 | 被取代链路 `fail("被新实例取代")` → `onLinkDown(node, oldGen)` 只关仍绑在旧代次上的会话（断开原因 `scene_link_superseded`，先推 23 `{1003}`）；老进程在链路关闭时写回这些人（`onLinkClosed`） |
 | 疏散中的改绑 | 老进程发出的 `PlayerTransfer` 走被取代的旧链路，照 5.2 的 (节点, 代次, 玩家, from_epoch) 校验改绑；改绑后的 `PlayerEnter` 走目标 T 的当前链路（`exclude_from_node` 保证 T ≠ N） |
@@ -820,20 +820,20 @@ scene 的跨节点能力取决于 `crossNode.enabled()`（5.2 装配）；两边
 
 ### 5.9 运维面
 
-**xm-data**（管理端口只绑本机、共享令牌 + 操作人 + 审计日志，同 `GateDrainAdminController`；Redis 懒加载，不可达时这几个接口回 503、不挡启动）：
+**game-data**（管理端口只绑本机、共享令牌 + 操作人 + 审计日志，同 `GateDrainAdminController`；Redis 懒加载，不可达时这几个接口回 503、不挡启动）：
 
 | 接口 | 行为 |
 |---|---|
-| `POST /admin/scenes/evacuate {zone_id, node_id, ttl_sec?=3600, force?}` | 目录里没有该节点 → 404；TTL 不在 [`xm.data.scene-evacuate.min-ttl` 30 min, 86400 s] → 400；一段 Lua 同时做「写 `xm:scene-evacuating:<zone>:<node>` = `<Redis TIME 秒>:<目录里的实例>` EX ttl」与「打上之后本区是否还剩没在疏散的 scene 节点」：没有 → 409 `last_node`（`force` 才打）；同实例已有标记 → 起点不变、回 `marked=false`；已有同实例标记没有 TTL → 409 `existing_mark_invalid` |
+| `POST /admin/scenes/evacuate {zone_id, node_id, ttl_sec?=3600, force?}` | 目录里没有该节点 → 404；TTL 不在 [`game.data.scene-evacuate.min-ttl` 30 min, 86400 s] → 400；一段 Lua 同时做「写 `game:scene-evacuating:<zone>:<node>` = `<Redis TIME 秒>:<目录里的实例>` EX ttl」与「打上之后本区是否还剩没在疏散的 scene 节点」：没有 → 409 `last_node`（`force` 才打）；同实例已有标记 → 起点不变、回 `marked=false`；已有同实例标记没有 TTL → 409 `existing_mark_invalid` |
 | `GET /admin/scenes/{zone}` | 目录叠加：实例、`lease_epoch`、`evacuating`（节点自报）、标记（起点、`stale_mark`）、在线人数、频道（ACTIVE / 排空）、`evacuated = 标记适用 ∧ evacuating ∧ 在线 0` |
 | `DELETE /admin/scenes/evacuate/{zone}/{node}` | 删标记，恒 204 |
 
-键经 `RedisKeys.sceneEvacuating(zone, node)` 生成，格式与 gate 排空键同形（只支持单节点 Redis，同 `GateDrainMarks`）；标记类 `SceneEvacuationMarks` 放在 xm-discovery。
+键经 `RedisKeys.sceneEvacuating(zone, node)` 生成，格式与 gate 排空键同形（只支持单节点 Redis，同 `GateDrainMarks`）；标记类 `SceneEvacuationMarks` 放在 game-discovery。
 
 **scene**：`ChannelPlanFollower` 每秒那一拍（租约有效时）多 GET 一次本节点的标记；实例与自己相同 → `beginNodeEvacuation(ADMIN)`；ADMIN 进行中而标记不在 / 实例不符 →
 `endNodeEvacuation()`；读失败保持现状（不开始、不结束）。scene 是标记的唯一读者，scene-manager 只看目录 `evacuating`（裁决 A3）。
 
-**scene 管理端口**：不新增端点；`xm.scene.shutdown.evacuate-first` 同时决定 SIGTERM 与 `POST /gm/graceful-shutdown` 是否先疏散。
+**scene 管理端口**：不新增端点；`game.scene.shutdown.evacuate-first` 同时决定 SIGTERM 与 `POST /gm/graceful-shutdown` 是否先疏散。
 
 ### 5.10 停服与冲突收尾的顺序
 
@@ -867,7 +867,7 @@ onTaken（scene-sched 线程，§5.5）:
   选目标客户端与资产通道提供方只由 `release()` 关。不改的话 SIGTERM 一到 Dubbo 钩子与 Spring 钩子并行，选目标客户端在 SHUTDOWN 疏散期间已被销毁，疏散全部 Failed；
   这也顺带修正 4.5 / 5.2 现有的「资产通道反导出可能早于写回」。GM 签名停机先 `SpringApplication.exit` 关上下文、再 `System.exit`，不受影响，所以只在 SIGTERM 路径上暴露。
 - **全部节点同时停**（K8s 删除整个工作负载、本机同时 `kill` 全部 scene 进程）：各节点在同一秒内发布 `evacuating`，彼此在 ≤ 1–2 s 内发现「没有别的接客节点」而提前结束，不白等预算。
-  `tools/local/stop-slice.sh` **不是**这种情形：它按 gateway → gate → xm-scene-2 → xm-scene 的顺序**逐个**停（`stop-slice.sh:7`），gate 先停时会话已全部关掉，scene 停时没有人可疏散。
+  `tools/local/stop-slice.sh` **不是**这种情形：它按 gateway → gate → game-scene-2 → game-scene 的顺序**逐个**停（`stop-slice.sh:7`），gate 先停时会话已全部关掉，scene 停时没有人可疏散。
 - **部署（外部强杀期限，C2）**：`SceneNode` 只实现同步 `stop()`，Spring 的 `timeout-per-shutdown-phase` 约束不了它（G16），真正的上界是进程管理器的强杀期限。
   `release()` 本身最坏约 `shutdown-save-timeout`（15 s）+ 逻辑线程停止（≤ 5 s，`SceneNode.java:556`）+ 回写池（≤ 2 s）+ 审计发完（`audit-flush-timeout`，缺省 5 s）≈ 27 s，
   加上疏散预算 15 s 与其余 Bean / Dubbo 反导出余量约 3 s，合计约 45 s：`tools/local/stop-slice.sh` 的等待从 20 s 改为 50 s（现在超时即 kill -9，会打断写回）；
@@ -956,9 +956,9 @@ onTaken（scene-sched 线程，§5.5）:
 - **规格**：`scene-channels-spec.md:85`、`:777`、`:864`；`scene-handoff-spec.md:104`、`:973`，以及 5.2 F7 / F11 的客户端列（「关会话」→「推 23 `{1003}` 后关会话」，E14）；
   `battle-node-spec.md` §7.10 的「尽力删除目录条目」（§8.3）。
 - **路线图**：`docs/porting/roadmap.md:75` 状态列。
-- **工具**：`tools/local/stop-slice.sh` 等待 50 s（C2）；`tools/local/start-slice.sh` 支持 `XM_SCENE_NODES=3`（§11.4）。
-- **配置注释**：`xm-scene/src/main/resources/application.yaml:21` 改为「`SceneNode` 是同步停机，本时限约束不了停服写回；上界是外部强杀期限」（G16）。
-- **代码前置**：`xm-api` 的 `IsolatedDubboModule` 关 Dubbo 停机钩子（H12），单独提交、两版各自登记（mmorpg 无对应物）。
+- **工具**：`tools/local/stop-slice.sh` 等待 50 s（C2）；`tools/local/start-slice.sh` 支持 `GAME_SCENE_NODES=3`（§11.4）。
+- **配置注释**：`game-scene/src/main/resources/application.yaml:21` 改为「`SceneNode` 是同步停机，本时限约束不了停服写回；上界是外部强杀期限」（G16）。
+- **代码前置**：`game-api` 的 `IsolatedDubboModule` 关 Dubbo 停机钩子（H12），单独提交、两版各自登记（mmorpg 无对应物）。
 
 ---
 
@@ -983,19 +983,19 @@ onTaken（scene-sched 线程，§5.5）:
 
 | 键 | 缺省 | 校验 | 模块 |
 |---|---|---|---|
-| `xm.scene.evacuation.max-in-flight` | 32 | [1, 256] | xm-scene |
-| `xm.scene.evacuation.retry-backoff-initial` / `-max` | 1 s / 30 s | initial ∈ [100 ms, max] | xm-scene |
-| `xm.scene.evacuation.budget` | 15 s | (0, 60 s]；SHUTDOWN 与 CONFLICT 共用 | xm-scene |
-| `xm.scene.shutdown.evacuate-first` | true | — | xm-scene |
-| `spring.lifecycle.timeout-per-shutdown-phase`（scene） | 不改（30 s）；只更正注释 | 对同步 `stop()` 不起约束（G16、C2） | xm-scene |
-| `dubbo.shutdownHook.listenIgnore`（`IsolatedDubboModule` 的应用环境，代码里写死） | true | — | xm-api（H12） |
-| `xm.gate.link-ping-interval` | 5 s | [1 s, 30 s] | xm-gate |
-| `xm.gate.link-idle-timeout` | 15 s | ≥ 3 × ping-interval（C3） | xm-gate |
-| `xm.gate.link-supersede-check-interval` | 5 s | [1 s, 60 s] | xm-gate |
-| `xm.gate.link-superseded-grace` | 30 s | ≥ 20 s（C4） | xm-gate |
-| `xm.scene-manager.world.cross-node-relocation` | true | — | xm-scene-manager |
-| `xm.scene-manager.world.stuck-node-grace` | 120 s | > `dead-node-grace`（C5） | xm-scene-manager |
-| `xm.data.scene-evacuate.min-ttl` | 30 min | — | xm-data |
+| `game.scene.evacuation.max-in-flight` | 32 | [1, 256] | game-scene |
+| `game.scene.evacuation.retry-backoff-initial` / `-max` | 1 s / 30 s | initial ∈ [100 ms, max] | game-scene |
+| `game.scene.evacuation.budget` | 15 s | (0, 60 s]；SHUTDOWN 与 CONFLICT 共用 | game-scene |
+| `game.scene.shutdown.evacuate-first` | true | — | game-scene |
+| `spring.lifecycle.timeout-per-shutdown-phase`（scene） | 不改（30 s）；只更正注释 | 对同步 `stop()` 不起约束（G16、C2） | game-scene |
+| `dubbo.shutdownHook.listenIgnore`（`IsolatedDubboModule` 的应用环境，代码里写死） | true | — | game-api（H12） |
+| `game.gate.link-ping-interval` | 5 s | [1 s, 30 s] | game-gate |
+| `game.gate.link-idle-timeout` | 15 s | ≥ 3 × ping-interval（C3） | game-gate |
+| `game.gate.link-supersede-check-interval` | 5 s | [1 s, 60 s] | game-gate |
+| `game.gate.link-superseded-grace` | 30 s | ≥ 20 s（C4） | game-gate |
+| `game.scene-manager.world.cross-node-relocation` | true | — | game-scene-manager |
+| `game.scene-manager.world.stuck-node-grace` | 120 s | > `dead-node-grace`（C5） | game-scene-manager |
+| `game.data.scene-evacuate.min-ttl` | 30 min | — | game-data |
 
 `NodeIdLease` 的 TTL（15 s）、目录发布周期 / TTL（5 s / 15 s）、`dead-node-grace`（20 s）、归属租约（30 s）、续约周期（10 s）、`transfer-lease-margin`（15 s）、
 `switch-resolve-timeout`（4 s）、`shutdown-save-timeout`（15 s）都不变。
@@ -1004,12 +1004,12 @@ onTaken（scene-sched 线程，§5.5）:
 
 | 文件 | 变更 |
 |---|---|
-| `xm-api/.../node_directory.proto` `SceneNodeInfo` | `uint64 lease_epoch = 11`（本节点号租约的当前防护代次；0 = 旧版本）、`bool evacuating = 12`（节点级疏散中：不接新频道、不接新实例；全部场景同时带 `draining`） |
-| `xm-api/.../scene_directory.proto` `SelectSwitchTargetRequest` | `SwitchReason reason = 7`（`SWITCH_REASON_PLAYER = 0`、`SWITCH_REASON_EVACUATE = 1`）、`bool exclude_from_node = 8`、`uint32 fallback_scene_config_id = 9` |
-| `xm-api/.../world_channel.proto` `DrainReason` | `DRAIN_EVACUATE = 4` |
-| `xm-api/.../node_link.proto` | `NodeLinkFrame`：`LinkPing ping = 10`、`LinkPong pong = 11`；`LinkHello.ping_interval_ms = 7`；`LinkHelloAck.scene_lease_epoch = 6`、`ping_interval_ms = 7`。`PlayerTransfer` 不变 |
-| `xm-discovery` `RedisKeys` | `sceneEvacuating(zone, node)` = `xm:scene-evacuating:<zone>:<node>` |
-| `xm-discovery` `NodeIdLease` | 三值续期 Lua；`reacquireSameId` 模式；带原因的监听器（`onSuspended` / `onResumed` / `onRegained(epoch)` / `onTaken`）；旧的 `Runnable onLost` 构造保留给 gate / login |
+| `game-api/.../node_directory.proto` `SceneNodeInfo` | `uint64 lease_epoch = 11`（本节点号租约的当前防护代次；0 = 旧版本）、`bool evacuating = 12`（节点级疏散中：不接新频道、不接新实例；全部场景同时带 `draining`） |
+| `game-api/.../scene_directory.proto` `SelectSwitchTargetRequest` | `SwitchReason reason = 7`（`SWITCH_REASON_PLAYER = 0`、`SWITCH_REASON_EVACUATE = 1`）、`bool exclude_from_node = 8`、`uint32 fallback_scene_config_id = 9` |
+| `game-api/.../world_channel.proto` `DrainReason` | `DRAIN_EVACUATE = 4` |
+| `game-api/.../node_link.proto` | `NodeLinkFrame`：`LinkPing ping = 10`、`LinkPong pong = 11`；`LinkHello.ping_interval_ms = 7`；`LinkHelloAck.scene_lease_epoch = 6`、`ping_interval_ms = 7`。`PlayerTransfer` 不变 |
+| `game-discovery` `RedisKeys` | `sceneEvacuating(zone, node)` = `game:scene-evacuating:<zone>:<node>` |
+| `game-discovery` `NodeIdLease` | 三值续期 Lua；`reacquireSameId` 模式；带原因的监听器（`onSuspended` / `onResumed` / `onRegained(epoch)` / `onTaken`）；旧的 `Runnable onLost` 构造保留给 gate / login |
 
 兼容：所有新字段缺省值都等于旧行为；滚动升级先升 scene-manager（认 `reason` / `exclude_from_node` / `fallback`），再升 scene，再升 gate（5.3 已要求先升 scene-manager）。
 
@@ -1017,13 +1017,13 @@ onTaken（scene-sched 线程，§5.5）:
 
 | # | 关系 | 守卫 |
 |---|---|---|
-| C1 | `OWNER_LEASE − OwnerLeaseRenewer.PERIOD − owner-claim-wait`（30 − 10 − 3 = 17 s）> `SceneDirectoryPublisher.TTL`（15 s）：能夺到权的那次 assign 时死节点已不在目录 | xm-scene 单测（login 的 3 s 作常量入参）；只关可用性 |
-| C2 | 外部强杀期限（stop-slice 等待、K8s `terminationGracePeriodSeconds`）≥ `evacuation.budget + shutdown-save-timeout + audit-flush-timeout + 10 s`（逻辑线程停止 ≤ 5 s、回写池 ≤ 2 s、其余 Bean 与 Dubbo 反导出约 3 s）= 45 s；本稿取 stop-slice 50 s、K8s ≥ 60 s | 跨进程，不能机械校验：xm-scene 启动时把算出的下限打一行 INFO（「外部强杀期限须 ≥ N s」），7.6 的部署清单引用它；**不**用 `timeout-per-shutdown-phase` 做守卫（G16） |
-| C3 | `link-idle-timeout ≥ 3 × link-ping-interval` | xm-gate 启动校验 |
-| C4 | `link-superseded-grace ≥ 20 s`；文档要求 ≥ scene 的 `evacuation.budget + shutdown-save-timeout`（跨进程，不能机械校验） | xm-gate 启动校验 + 注释 |
-| C5 | `stuck-node-grace > dead-node-grace ≥ SceneDirectoryPublisher.PERIOD` | xm-scene-manager 启动校验 |
+| C1 | `OWNER_LEASE − OwnerLeaseRenewer.PERIOD − owner-claim-wait`（30 − 10 − 3 = 17 s）> `SceneDirectoryPublisher.TTL`（15 s）：能夺到权的那次 assign 时死节点已不在目录 | game-scene 单测（login 的 3 s 作常量入参）；只关可用性 |
+| C2 | 外部强杀期限（stop-slice 等待、K8s `terminationGracePeriodSeconds`）≥ `evacuation.budget + shutdown-save-timeout + audit-flush-timeout + 10 s`（逻辑线程停止 ≤ 5 s、回写池 ≤ 2 s、其余 Bean 与 Dubbo 反导出约 3 s）= 45 s；本稿取 stop-slice 50 s、K8s ≥ 60 s | 跨进程，不能机械校验：game-scene 启动时把算出的下限打一行 INFO（「外部强杀期限须 ≥ N s」），7.6 的部署清单引用它；**不**用 `timeout-per-shutdown-phase` 做守卫（G16） |
+| C3 | `link-idle-timeout ≥ 3 × link-ping-interval` | game-gate 启动校验 |
+| C4 | `link-superseded-grace ≥ 20 s`；文档要求 ≥ scene 的 `evacuation.budget + shutdown-save-timeout`（跨进程，不能机械校验） | game-gate 启动校验 + 注释 |
+| C5 | `stuck-node-grace > dead-node-grace ≥ SceneDirectoryPublisher.PERIOD` | game-scene-manager 启动校验 |
 | C6 | 5.2 已有：`transfer-lease-margin` ∈ (续约周期, 租约 − 续约周期) | 现有 |
-| C7 | `retry-backoff-initial ≤ retry-backoff-max` | xm-scene 启动校验 |
+| C7 | `retry-backoff-initial ≤ retry-backoff-max` | game-scene 启动校验 |
 
 预算不是安全常数：基线的 Go 屏障必须镜像 C++ 的 15 s，因为老节点停笔之前新节点不能接管（`constants/reentry_barrier.go:36-51`）；Java 里老进程迟到的写都被 epoch 围栏拒掉，
 单人一次疏散的最坏用时（4 s 选目标 + 15 s 交出与探测）超过预算也只影响体验，到期的人照常写回。
@@ -1041,22 +1041,22 @@ onTaken（scene-sched 线程，§5.5）:
 
 | 进程 | 指标 | 标签 / 说明 |
 |---|---|---|
-| scene | `xm.scene.channel.relocations` | `result` 在 5.1 的 same_map / default_world / blocked / switching 之上新增 remote_same_map、remote_default_world、deferred、deferred_cap、deferred_storage、skipped_battle、cancelled |
-| scene | `xm.scene.switch.resolves`、`xm.scene.transfers`、`xm.scene.transfer.freeze`（5.2） | 加 `reason = player / travel / evacuate`（travel 由 5.4 加，`zone-travel-spec.md:898`） |
-| scene | `xm.scene.evacuations.in.flight`（gauge） | 在途 EVACUATE |
-| scene | `xm.scene.node.evacuations` | `trigger = admin / shutdown / conflict`，`result = drained / budget_exceeded / no_target / revoked` |
-| scene | `xm.scene.node.evacuation.seconds`（timer） | 从开始到结束 |
-| scene | `xm.scene.node.evacuating`（gauge 0 / 1） | — |
-| scene | `xm.scene.node.identity`（gauge） | 0 VALID / 1 SUSPENDED / 2 TAKEN |
-| scene | `xm.scene.link.idle.closes` | scene 侧读空闲关链路次数（背压暂停读期间被忽略的读空闲事件另计 `xm.scene.link.idle.ignored`，用来核对 §5.8 的豁免没有被滥用） |
-| scene-manager | `xm.scene_manager.switch` | 加 `reason` |
-| scene-manager | `xm.scene_manager.world.nodes`（gauge，只由领导者维护） | `state = present / absent / stuck / evacuating` |
-| scene-manager | `xm.scene_manager.world.node.restarts` / `xm.scene_manager.world.node.regained` | 实例变化 / 只有代次变化（§5.6.7） |
-| scene-manager | `xm.scene_manager.world.autoscale` | 已有；跨节点缩容同样计 `scale_in/ok` |
-| gate | `xm.gate.scene.links.superseded` | — |
-| gate | `xm.gate.link.events` | `event` 加 `idle_timeout`、`superseded`、`peer_mismatch` |
-| gate | `xm.gate.disconnects` | `reason` 加 `scene_link_superseded` |
-| gate | `xm.gate.link.dropped` | `reason` 加 `gen_gone`（按代次找不到链路） |
+| scene | `game.scene.channel.relocations` | `result` 在 5.1 的 same_map / default_world / blocked / switching 之上新增 remote_same_map、remote_default_world、deferred、deferred_cap、deferred_storage、skipped_battle、cancelled |
+| scene | `game.scene.switch.resolves`、`game.scene.transfers`、`game.scene.transfer.freeze`（5.2） | 加 `reason = player / travel / evacuate`（travel 由 5.4 加，`zone-travel-spec.md:898`） |
+| scene | `game.scene.evacuations.in.flight`（gauge） | 在途 EVACUATE |
+| scene | `game.scene.node.evacuations` | `trigger = admin / shutdown / conflict`，`result = drained / budget_exceeded / no_target / revoked` |
+| scene | `game.scene.node.evacuation.seconds`（timer） | 从开始到结束 |
+| scene | `game.scene.node.evacuating`（gauge 0 / 1） | — |
+| scene | `game.scene.node.identity`（gauge） | 0 VALID / 1 SUSPENDED / 2 TAKEN |
+| scene | `game.scene.link.idle.closes` | scene 侧读空闲关链路次数（背压暂停读期间被忽略的读空闲事件另计 `game.scene.link.idle.ignored`，用来核对 §5.8 的豁免没有被滥用） |
+| scene-manager | `game.scene_manager.switch` | 加 `reason` |
+| scene-manager | `game.scene_manager.world.nodes`（gauge，只由领导者维护） | `state = present / absent / stuck / evacuating` |
+| scene-manager | `game.scene_manager.world.node.restarts` / `game.scene_manager.world.node.regained` | 实例变化 / 只有代次变化（§5.6.7） |
+| scene-manager | `game.scene_manager.world.autoscale` | 已有；跨节点缩容同样计 `scale_in/ok` |
+| gate | `game.gate.scene.links.superseded` | — |
+| gate | `game.gate.link.events` | `event` 加 `idle_timeout`、`superseded`、`peer_mismatch` |
+| gate | `game.gate.disconnects` | `reason` 加 `scene_link_superseded` |
+| gate | `game.gate.link.dropped` | `reason` 加 `gen_gone`（按代次找不到链路） |
 
 停服 / 冲突收尾各打一行 INFO：疏散用时、迁走人数、剩余人数、原因。
 
@@ -1098,7 +1098,7 @@ onTaken（scene-sched 线程，§5.5）:
 - **R6**：hash 覆盖下运维疏散一台节点时，P2b 补建的新频道要等领导者一拍（5 s）+ 拉取（1 s）才建出；这期间同图远端可能没有频道，玩家先落默认大世界（`fallback`）。
   per-node 覆盖下别的节点本来就有同图频道，不受影响。
 - **R7**：5.5 与 5.2、5.3 改同一组文件（`SceneWorld`、`SceneNode`、`ClientRequestHandler`、`SwitchTargetSelector`、`SceneMetrics`），须在 5.2 提交之后开工、重新取行号；
-  `NodeIdLease`（xm-discovery）同时被 6.2 battle 节点使用，改它的那次提交要连 `xm-battle` 一起编译、跑测试（缺省模式回归）。
+  `NodeIdLease`（game-discovery）同时被 6.2 battle 节点使用，改它的那次提交要连 `game-battle` 一起编译、跑测试（缺省模式回归）。
 - **R8**：gate 关会话前推的 23 `{1003}` 在写缓冲已满的连接上可能发不出去（`sendThenClose` 尽力而为），客户端只看到断线；与现有踢人同口径。
 - **R9**：目录发布的租约围栏只收窄 X4（§5.5.4）：Redisson 内部重试的迟到写可能把新进程的条目盖回旧的，至多到新进程下一次发布（≤ 5 s）；gate 按「见过的最大代次」忽略它，
   scene-manager 只受一拍延迟影响。数据安全不受影响。
@@ -1120,7 +1120,7 @@ onTaken（scene-sched 线程，§5.5）:
 | 基线 `main.cpp:239`、`node.cpp:839-840`、`constants/reentry_barrier.go:13-27`、barrier.md:18 | 「租约到期 → `BeginEmergencyRelocateAll` → 15 s drain」/「四个触发点」 | 与 `node.h:35-43`、`etcd_service.cpp:598-607`、`node.cpp:1531-1545` 不符（§8.1 B8） |
 | `scene-handoff-spec.md` §5.10 F7、F11 的客户端列 | 「gate 同时收到链路断开、关会话」/「链路断开即关会话」 | 5.5 起先推 23 `{1003}` 再关（E14） |
 | `battle-node-spec.md:1165`（§7.10 租约丢失第 2 条） | 「停止发布并尽力删除目录条目」 | 丢号之后号可能已归新持有者，条目键相同，删了会误删对方刚发布的条目（同 `GateNode.java:270` 的方法注释、本稿 H9 / X4）；建议 6.2 改为只停发布、不删，或只在租约仍 `isValid()` 时删 |
-| `xm-scene/src/main/resources/application.yaml:21` | 「停服写回（xm.scene.shutdown-save-timeout）要在这个上限之内完成」 | `SceneNode` 只实现同步 `stop()`，该时限约束不了它（G16） |
+| `game-scene/src/main/resources/application.yaml:21` | 「停服写回（game.scene.shutdown-save-timeout）要在这个上限之内完成」 | `SceneNode` 只实现同步 `stop()`，该时限约束不了它（G16） |
 | 分区稿 ① 对 `scene-channels-spec.md:375` 的勘误 | 「`:726-730` 应为 `:728-730`」 | 撤销：`:726` 起注释、`:729` 扣人数、`:730` 收尾，5.1 原文无误 |
 
 ---
@@ -1181,7 +1181,7 @@ onTaken（scene-sched 线程，§5.5）:
 | Q14 | `stuck-node-grace` 120 s 是否合适？ | 合适：远大于目录 TTL 与 GC 停顿，又能在真正卡死的节点上 2 分钟内恢复容量 |
 | Q15 | scene 归属续约连续失败超过租约时是否自我围栏？ | 维持现状（N7），另起评审 |
 | Q16 | 战斗冻结中的玩家阻塞疏散：冲突 / 停服到期就写回、结算由 6.3 的 outbox 落到下一个持有者，可以接受吗？ | 接受；6.3 定细节。运维疏散没有预算，等战斗结束再迁 |
-| Q17 | 本机切片扩到 `XM_SCENE_NODES=3` 并加备用实例开关（号复用测试用）？ | 做：kill -9 一台之后还要留两台才能测「疏散目标也在排空」与交出 |
+| Q17 | 本机切片扩到 `GAME_SCENE_NODES=3` 并加备用实例开关（号复用测试用）？ | 做：kill -9 一台之后还要留两台才能测「疏散目标也在排空」与交出 |
 | Q18 | PARITY「mmorpg 待做（可选）」登记哪些基线隐患？ | §8.1 标「登记」的：B1、B2、B3、B5、B8（含 B9、B10）、B11、B12、B14 |
 
 ---
@@ -1205,17 +1205,17 @@ onTaken（scene-sched 线程，§5.5）:
 
 ### 11.2 单测（缺省跑，无外部依赖）
 
-**xm-discovery**
+**game-discovery**
 - `NodeIdLeaseTest`（假 Redis 门面 + 可控时钟）：续期 1 / 0 / −1 → VALID / 原号复占（代次 +1、`onRegained`）/ `onTaken`；复占失败 → `onTaken`；出错 ≥ TTL 在 `reacquireSameId`
   模式下 `onSuspended` 一次、恢复后 `onResumed`；缺省模式行为不变（gate / login / battle 等用 `Runnable onLost` 构造的调用方回归）；`isValid` 在挂起与 TAKEN 后为假；
   复占时 INCR 失败 → 放掉刚占的键、保持挂起、代次不变（不带旧代次复占）。
 
-**xm-api**
+**game-api**
 - `IsolatedDubboModuleTest`：建出的应用模型环境里 `dubbo.shutdownHook.listenIgnore = true`；起一个直连引用后 JVM 里没有新增 `DubboShutdownHook`
   （`Runtime.removeShutdownHook` 探测或反射读 `DubboShutdownHook.registered`），H12 回归。
 - `SceneEvacuationMarksTest`：标记值格式、实例比对、TTL 校验。
 
-**xm-scene**（`SceneWorldTest` / `HandOffTransferTest` / `RemoteSwitchTest` 写法；`FakeSwitchTargets`、`FakePlayerRepository`、`RecordingSink`）
+**game-scene**（`SceneWorldTest` / `HandOffTransferTest` / `RemoteSwitchTest` 写法；`FakeSwitchTargets`、`FakePlayerRepository`、`RecordingSink`）
 - `RelocationOrderTest`：去向顺序 本节点同图 → 远端同图（请求带 `exclude_from_node`、`fallback` 只在本节点没有默认大世界时带）→ 本节点默认大世界（远端 Refused / Failed 后）→
   远端默认大世界 → blocked；孤儿图跳过同图；跨节点没装配时退回 5.1 顺序；5.3 镜像 → 同图、副本 → 默认大世界。
 - `ServerRelocationTest`：不回应答；Failed / Refused / LeaseTooShort / NotCommitted 都不推 tip（sink 里没有 23）、写下退避、退避期内不重试、过期后重试；Fenced → 2017；Lost → 3023；
@@ -1235,7 +1235,7 @@ onTaken（scene-sched 线程，§5.5）:
   **背压暂停读（pending ≥ 上限）期间读空闲到点不关链路**（计 `idle.ignored`），恢复读后重新计时。
 - 常数守卫：C1、C7 各一条断言，违反时启动失败（`SceneNodePropertiesTest` 写法）；C2 只断言启动日志里打出的「外部强杀期限下限」等于公式结果。
 
-**xm-scene-manager**
+**game-scene-manager**
 - `SwitchTargetSelectorTest`：`exclude_from_node` 排除源节点上的全部频道（含显式场景号 → NOT_FOUND）；EVACUATE 带显式场景号 → BAD_REQUEST；want 选不到时回落 fallback，回落也写软预占；
   都没有 → NOT_FOUND；疏散节点的场景（全部 `draining`）不被选中；`reason` 标签只有两个取值。
 - `WorldChannelPlannerTest`：P2 佐证矩阵（缺席 < 宽限；≥ 宽限且键不在 → 删；键归同实例 / 别的实例 → 保留到 `stuck-node-grace` 后删；读键失败按有持有者）；P2b（`evacuating` 节点的
@@ -1245,7 +1245,7 @@ onTaken（scene-sched 线程，§5.5）:
 - `NodeAvailabilityTest`：从目录推导；`createInstance` 对疏散节点回 3000（5.3 接入后）。
 - 常数守卫：C5。
 
-**xm-gate**（`ClientDispatcherTest` / `SceneLinkTest` / `SceneEventRouterTest` 写法）
+**game-gate**（`ClientDispatcherTest` / `SceneLinkTest` / `SceneEventRouterTest` 写法）
 - `SceneLinkTest`：ack 实例与解析不符 → fail；代次低于目录 → fail；任一侧代次 0 → 跳过比对；ack 回显 `ping_interval_ms` 才启用读空闲；读空闲 → fail("心跳超时")；Ping / Pong 维持链路。
 - `SceneLinkManagerTest`：被取代后 `PlayerEnter` 新建一代链路；按代次的 `ClientForward` / `PlayerLeave` 仍去旧链路、那一代不在了回 0；宽限到期只关旧代次上的会话。
 - `SupersessionSweepTest`：读目录失败 / 条目缺席不动；同实例代次更高只更新；实例不同且代次更高 → 取代；代次为 0 时要连续两次不同；
@@ -1255,24 +1255,24 @@ onTaken（scene-sched 线程，§5.5）:
   旧代次断开不影响新代次上的会话（保留现有用例）。
 - 常数守卫：C3、C4。
 
-**xm-data**
+**game-data**
 - `SceneEvacuationAdminControllerTest`：鉴权、操作人、审计；404；TTL 边界 400；409 `last_node` 与 `force`；同实例重复打不改起点；无 TTL 的已有标记 409 `existing_mark_invalid`；
   `GET` 叠加与 `stale_mark`；`DELETE` 恒 204；没有 Redis 也能启动（同 `AdminEndpointSecurityTest`）。
 
 ### 11.3 真 Redis / 真 MySQL
 
-- `-Dxm.it.redis`：
+- `-Dgame.it.redis`：
   - `NodeIdLeaseIT`：键被他人覆写 → 一个续期周期内 TAKEN；键过期 → 原号复占、代次 +1；Redis 停 20 s（测试里用假门面注入错误）→ 挂起不判丢。
   - `SceneEvacuationMarksIT`：「最后一台」检查与写入原子（两个并发请求至多一个成功）；实例不符的标记被 scene 忽略。
   - `EvacuationPlanIT`：节点发布 `evacuating` → 领导者同一次版本推进里把记录转 `DRAINING(EVACUATE)` 并在别处补建；节点排空后 P3 删记录。
   - `DeadNodeCorroborationIT`：目录条目消失但租约键还在 → 不删；删掉键 → 宽限后删除。
-- `-Dxm.it.mysql`：交出复用 5.2 的 `PlayerStoreSqlTest` 用例，不新增；补「续约停止 → 租约过期 → 夺权成功」的时刻断言。
+- `-Dgame.it.mysql`：交出复用 5.2 的 `PlayerStoreSqlTest` 用例，不新增；补「续约停止 → 租约过期 → 夺权成功」的时刻断言。
 
 ### 11.4 本机多节点切片与故障注入
 
-切片：`XM_SCENE_NODES=3`（第三个节点链路 21002、资产通道 21102、管理端口 18124；`tools/local/start-slice.sh:14-17` 现支持到 2，Q17），可选备用实例开关（号复用测试用）。
-每个用例都核对：MySQL 每个玩家的 `owner_epoch` 单调、同一时刻只有一个持有者；scene 日志里没有被围栏拒绝的写回（`FENCED`）；`xm.scene.transfer.post.freeze.mutations` 为 0。
-`kill -9` 用 `kill -9 $(cat run/pids/xm-scene-2.pid)`（与 `stop-slice.sh` 的强杀同法）。
+切片：`GAME_SCENE_NODES=3`（第三个节点链路 21002、资产通道 21102、管理端口 18124；`tools/local/start-slice.sh:14-17` 现支持到 2，Q17），可选备用实例开关（号复用测试用）。
+每个用例都核对：MySQL 每个玩家的 `owner_epoch` 单调、同一时刻只有一个持有者；scene 日志里没有被围栏拒绝的写回（`FENCED`）；`game.scene.transfer.post.freeze.mutations` 为 0。
+`kill -9` 用 `kill -9 $(cat run/pids/game-scene-2.pid)`（与 `stop-slice.sh` 的强杀同法）。
 
 | 编号 | 操作 | 期望 |
 |---|---|---|
@@ -1282,14 +1282,14 @@ onTaken（scene-sched 线程，§5.5）:
 | K4 | 疏散中，源节点刚提交交出、目标还没进场时 `kill -9` 目标节点 | 同 5.2 M5：23 `{3023}` 后断开，≤30 s 后重登成功 |
 | K5 | 疏散中 `kill -9` gate | 5.2 R-J1：E+1 至多 30 s 后才能再进；数据完整 |
 | K6 | 疏散中 `kill -9` scene-manager（单副本） | 运维疏散：改派无 tip 地退避，scene-manager 恢复后完成；停服疏散：到期写回、推 1003 后断开 |
-| K7 | `redis-cli SET xm:node-id:scene:1:2 intruder PX 60000`（号被占） | 节点 2 ≤5 s 判 TAKEN → A、B 收到非自己发起的 79、**不断线**；节点 2 在预算内退出；目录条目 2 过期 |
+| K7 | `redis-cli SET game:node-id:scene:1:2 intruder PX 60000`（号被占） | 节点 2 ≤5 s 判 TAKEN → A、B 收到非自己发起的 79、**不断线**；节点 2 在预算内退出；目录条目 2 过期 |
 | K8 | 节点 2 挂起（`kill -STOP`）> 15 s，起备用实例占到 2 号，再 `kill -CONT` 节点 2 | ≤15 s 心跳超时，A、B 推 1003 后断开；≤5 s 内 gate 发现换代，分到 2 号的新登录进新进程、不再 3023；旧进程恢复后续期回 −1 → TAKEN，写回被围栏拒或成功释放（看日志），无玩家后退出 |
 | K9 | 停 Redis 20 s | 全部 scene 挂起：**不**疏散、**不退出**、不停链路监听；新登录失败；恢复后续上或原号复占（代次 +1）、恢复接客、目录与计划恢复。**玩家会断线**：gate 的节点号租约语义本批不改（Q3），续期失败超过 15 s 即 `onLeaseLost` 关全部会话（`GateNode.java:272-283`），各会话照常经链路让 scene 写回。所以本用例要核对的是 scene 侧：断线全部来自 gate（gate 断开原因计数），scene 没有 `TAKEN` / 退出、恢复后无需重启即可重新接客、重登成功；对照现状（每台 scene 永久停接客，G1）。想单独看 scene 挂起时「在场玩家照常」，用 K9′ |
 | K9′ | 只断开节点 2 到 Redis 的连接 20 s（本机用防火墙规则或 Redis `CLIENT KILL` 循环踢掉节点 2 的连接；gate 与别的节点照常） | 节点 2 挂起：A、B 照常移动与广播、不断线；目录条目过期后新登录不落节点 2；节点 2 名下频道约 35 s 后被规划器删除、在别处重铺；恢复后节点 2 原号复占、拉到计划，本地旧频道成「计划外」→ A、B 经 §5.3 改派（per-node 下领导者通常已给节点 2 铺了新号频道，于是同节点换到新 scene_id；否则跨节点；都是非自己发起的 79、无 23） |
-| K10 | `evacuate-first` 开时 `kill $(cat run/pids/xm-scene-2.pid)`（只对节点 2 发 SIGTERM；`stop-slice.sh` 不支持单停、且先停 gate） | A、B 不断线地迁到别的节点后进程才退出（≤ 预算）；scene 日志里没有 Dubbo 的「Run shutdown hook now」、选目标调用全程成功（H12）；关掉 `evacuate-first` 时与今天相同（断线） |
+| K10 | `evacuate-first` 开时 `kill $(cat run/pids/game-scene-2.pid)`（只对节点 2 发 SIGTERM；`stop-slice.sh` 不支持单停、且先停 gate） | A、B 不断线地迁到别的节点后进程才退出（≤ 预算）；scene 日志里没有 Dubbo 的「Run shutdown hook now」、选目标调用全程成功（H12）；关掉 `evacuate-first` 时与今天相同（断线） |
 | K11 | hash 覆盖、低阈值缩容 | 节点 2 上的牺牲者没有同节点兄弟 → 居民跨节点改派（同图、坐标保留）、期望数 −1、P3 收尾 |
 | K12 | 两台都运维疏散（第二台带 `force`），第三台停掉 | 玩家原地、没有 23、不断线，`relocations{blocked}` / `refused` 增长；撤销后恢复 |
-| K13 | 全部 scene 同时 SIGTERM（`for p in run/pids/xm-scene*.pid; do kill $(cat $p) & done`；**不**用 `stop-slice.sh`，它逐个停且先停 gate） | 各节点 ≤2 s 内发现无处可去、提前结束疏散，正常写回退出，没有被 kill -9；玩家 23 `{1003}` 后断开 |
+| K13 | 全部 scene 同时 SIGTERM（`for p in run/pids/game-scene*.pid; do kill $(cat $p) & done`；**不**用 `stop-slice.sh`，它逐个停且先停 gate） | 各节点 ≤2 s 内发现无处可去、提前结束疏散，正常写回退出，没有被 kill -9；玩家 23 `{1003}` 后断开 |
 | K14 | 节点 2 逻辑线程卡顿（测试开关注入 30 s 卡顿） | 目录发布超时、节点缺席，但租约键仍在 → `world.nodes{state=stuck}`、记录保留，卡顿结束后无频道换号；卡顿期间链路背压暂停读，scene 不因读空闲自关链路（`link.idle.ignored` 增长、`idle.closes` 不变），gate 只要还有下行就不判死 |
 | K15 | 运维疏散节点 2（30 人）的过程中让 MySQL 不可达 10 s（停 mysqld 或防火墙） | 在途的至多 `max-in-flight` 人按 5.2 收尾（可能 23 `{3023}` 后断开），其余原地无感；`relocations{deferred_storage}` 增长；MySQL 恢复后疏散继续完成；没有双持有者 |
 
@@ -1310,7 +1310,7 @@ onTaken（scene-sched 线程，§5.5）:
 | `node-loss`（新，两阶段 `--phase prepare / verify`，中间由脚本 `kill -9`） | ≥ 2 个 scene 节点 | verify：连接已被关闭且关前收到 23 `{1003}`；重登先回 2005，按退避重试（本场景用 40 s 截止，现有 `PlayerFlow` 只试 4 次、间隔 1 s，`PlayerFlow.java:45-47`，覆盖不了 30 s 租约）；最终落在幸存节点同图（PARITY ⑥） |
 | 回归 | — | `cross-node`（5.2）、`drain`（gate 排空）、`reconnect`、`movement`、`skill` 照常通过；`movement` / `skill` 的「两个号同场景」假设不受影响（本场景用独立的号） |
 
-robot 要补的能力：被动等待非请求触发的 79（复用 `CrossNodeScenario` 的 79 处理）；调 xm-data 管理接口（复用 `DrainScenario` 的 HTTP 客户端）；感知连接被关闭前的 23。
+robot 要补的能力：被动等待非请求触发的 79（复用 `CrossNodeScenario` 的 79 处理）；调 game-data 管理接口（复用 `DrainScenario` 的 HTTP 客户端）；感知连接被关闭前的 23。
 
 **兼容**：用 mmorpg 的 Go robot 连 Java 切片做疏散——非自己发起的 79 无害（`SignalSceneReady` 只生效一次，`docs/reference/mmorpg-client-contract-scene.md:305`）；
 stress AI 的 `switch_scene` 在疏散期间仍可用；Go robot 感知不到连接被关（`docs/reference/mmorpg-client-contract-robot.md:204`），`node-loss` 只用 Java robot。
@@ -1336,10 +1336,10 @@ stress AI 的 `switch_scene` 在疏散期间仍可用；Go robot 感知不到连
 | 9 | 计划规则缺口 | §5.6.4：疏散节点上的 SCALE_IN 记录超时不走 D10 回滚（否则下一拍又被 P2b 转走、期望数白加 1），改转 `DRAIN_EVACUATE` | P2 → P2b → P3 的执行顺序 |
 | 10 | 失败路径缺口 | §5.3 新增「存储闸」、V15、K15、E5：MySQL 抖动时 5.2 的 `Lost` 一律踢 3023，疏散若照常按上限冻结会成批踢人；关闸期间不发起新的疏散冻结 | `SceneWorld.java:1147-1160`（`onTransferLost`）；5.2 F6 / Q8 |
 | 11 | 失败路径缺口 | V16：目标节点刚进挂起时交出进场被拒（F10）；§5.11 补「疏散在途时玩家自己发 63 → 3014」与「66 只在移动中才发」 | `SceneWorld.switchInFlight`（`:863-876`）、`freeze`（`:969-983`） |
-| 12 | 租约细节 | §5.5：原号复占时 INCR 失败的处理（放键、保持挂起）；缺省模式的全部调用方（含 6.2 battle、xm-data `OpsIds`）回归；复占与雪花的关系 | `NodeIdLease.java:104-121`；`BattleInfrastructure.java:95`、`OpsIds.java:84` |
+| 12 | 租约细节 | §5.5：原号复占时 INCR 失败的处理（放键、保持挂起）；缺省模式的全部调用方（含 6.2 battle、game-data `OpsIds`）回归；复占与雪花的关系 | `NodeIdLease.java:104-121`；`BattleInfrastructure.java:95`、`OpsIds.java:84` |
 | 13 | 目录围栏的残余 | §5.5.4 / R9 / §5.7.3：发布前查 `isValid()` 只收窄 X4（Redisson 内部重试的迟到写仍可能盖掉新条目 ≤ 5 s）；gate 换代扫描按「见过的最大代次」忽略旧条目 | 推导 |
 | 14 | 原子性 | §5.4.2 第 3 步：`evacuating` 与场景 `draining` 在同一份逻辑线程快照里取（现 `SceneNodeInfo` 是启动时的静态模板） | `SceneNode.java:396-404` |
-| 15 | 指标命名 | scene-manager 指标前缀改为现有的 `xm.scene_manager.*`（原稿写成 `xm.scene-manager.*`，那是配置键前缀）；`node.restarts` 与原号复占的 `node.regained` 分开；新增 `deferred_storage`、`link.idle.ignored` 与告警 | `WorldChannelMetrics.java:33-39`、`SceneDirectoryProvider.java:36-37` |
+| 15 | 指标命名 | scene-manager 指标前缀改为现有的 `game.scene_manager.*`（原稿写成 `game.scene-manager.*`，那是配置键前缀）；`node.restarts` 与原号复占的 `node.regained` 分开；新增 `deferred_storage`、`link.idle.ignored` 与告警 | `WorldChannelMetrics.java:33-39`、`SceneDirectoryProvider.java:36-37` |
 | 16 | 测试计划错误 | K9：停 Redis 20 s 时 gate 的租约（本批不改，Q3）会关全部会话，「没有玩家断线」不成立——改写期望并新增只断节点 2 的 K9′；K10：`stop-slice.sh` 不支持单停，改用 `kill` 单个 pid；K13：`stop-slice.sh` 是逐个停且先停 gate，改为并发 `kill`；§5.10 同步更正；`WorldAutoscalerTest` 现有 23 个用例（原稿写 13）；robot `evacuate-shutdown` 注明 GM 路径覆盖不到 H12 | `GateNode.java:272-283`；`stop-slice.sh:7-17`；`WorldAutoscalerTest` |
 | 17 | 引用勘误 | `enterscenelogic.go:704` → `:705`（写位置）、`:731-750` → `:732-750`；`pending_scene_entry_comp.h:33-35` → `:37-38`、`:19-21` → `:20-22`；`noteNodeGoneFromRegistry` 补调用点 `load_reporter.go:969`；§8.3 里 `dungeon-mirror-spec.md:102`（空行）→ `:118`、`:810`；§0.1 停服顺序是「先断链、再写回」（`SceneNode.java:523`、`:535-539`），原稿写反 | 逐条复核 |
 | 18 | 新增勘误 / 同步项 | §8.3 / §5.15：基线 `node.cpp:839-840` 注释「四个触发点」同样过时；5.2 F7 / F11 客户端列随 E14 改为「推 23 `{1003}` 后关」；6.2 `battle-node-spec.md:1165`「尽力删除目录条目」与 H9 / X4 冲突；`application.yaml:21` 注释不成立；§0.4 增 6.2 行；§5.13 增 Agones / 号段收尾不移植行；§6.1 补 `kShutdownCompletionWaitTimeout`、gate 放弃后强关 1 s、request_id 去重 60 s；R7 补 `NodeIdLease` 与 6.2 共用；新增 R10（滚动重启的多次迁移） | `node.cpp:53`、`:839-840`；`main.cpp:128`、`:136`、`:250` |

@@ -7,7 +7,7 @@ gate 经 muduo RPC 投递 `PlayerEnterGameNode` / `ProcessClientPlayerMessage`�
 （login 经 Kafka→DB 服务预热），在 20 FPS 的 `World::Update` 里跑挂机、AOI、移动、Buff、属性计算与同步；玩家写回走
 「Redis owner_epoch CAS + Kafka DBTask」，带脏快照比较、退出收敛、断线释放标记（A1′/A2′）与跨节点 / 跨 zone 归属交接（冻结 + handoff 标记 + 看门狗）。
 场景实例由 Go scene_manager 按 World / Dungeon / Mirror 表经 gRPC `CreateScene` 下发，scene 只登记；客户端换图（63）、跨 zone 传送（226）、镜像副本都绕 scene_manager 往返。
-Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 / AOI / 66、owner_epoch 围栏写回（MySQL）、顶号、停服写回；
+Java 版（game-scene）已有：进场与初始同步、场景内换图、移动 / AOI / 66、owner_epoch 围栏写回（MySQL）、顶号、停服写回；
 缺：属性点 / 方案 / 面板（167–175）、等级经验、周期存盘、跨节点换图、副本 / 镜像、断线重连租约、跨 zone 传送、GM 闸等（ActorActionState 已随 2.6 接入）。
 状态判定以 `D:\work\xuanming-server-mmo` 的 grep 结果为准（2026-10-02）。
 
@@ -20,9 +20,9 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: none
 - behavior: 20 FPS；累加器夹 [-1s,1s]，每次回调最多模拟 5 帧、超出的整帧只扣不补；帧内顺序 Afk → AOI → Movement → MovementAcceleration → Buff → 属性计算 → 属性同步(66) → 帧号+1。
 - internal: 单 EventLoop 线程拥有全部 ECS 状态；帧号 current_frame 是挂机判定、66 节奏的时钟。
-- java: done — xm-scene `SceneTicker` + `SceneWorld.step`（外推 → 视野 → 偶数帧 66）；无 Buff / 属性计算阶段（随战斗 / 属性功能补）。
+- java: done — game-scene `SceneTicker` + `SceneWorld.step`（外推 → 视野 → 偶数帧 66）；无 Buff / 属性计算阶段（随战斗 / 属性功能补）。
 - size: S
-- robot: robot_smoke（stress AI）、xm-robot MovementScenario
+- robot: robot_smoke（stress AI）、game-robot MovementScenario
 - hazards: 基线 main.cpp 在 SceneManager 连上且 GUID 号段首段领到之前不启动帧定时器（Java 无号段依赖）；帧内不得做阻塞 I/O。
 
 ### scene-client-dispatch — 客户端消息进 scene 的统一入口
@@ -32,7 +32,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: player-enter-load
 - behavior: session→player_id 映射查不到 / 消息号未知 / 方法不存在 / 解析失败一律静默丢弃不回包；路由带的 player_id 与 SessionMap 不符（gate 节点号复用造成串号）丢弃；会话不是实体当前会话（重连后的旧会话）丢弃并删映射；加载中收到 ExitGame(9) 取消加载；实体处于退出中（UnregisterPlayer）时除 ExitGame 外一律回 error_message=1006；非 Empty 应答才回包，message_id 同请求、id 回显；刷新 LastActiveFrame（退出中不刷新）。
 - internal: 生成的 CallMethod 末尾 TRANSFER_ERROR_MESSAGE 把进程级 TLS TipInfoMessage 整体覆盖进应答的 error_message。
-- java: done — `xm-scene/.../world/ClientRequestHandler.java`（会话 + player_id 校验、解析失败丢弃、Empty 不回包、未实现方法回 1006、touch 刷新活跃帧）。「退出中」状态 Java 不存在（离场即移除，后到消息按会话找不到丢弃），不适用。
+- java: done — `game-scene/.../world/ClientRequestHandler.java`（会话 + player_id 校验、解析失败丢弃、Empty 不回包、未实现方法回 1006、touch 刷新活跃帧）。「退出中」状态 Java 不存在（离场即移除，后到消息按会话找不到丢弃），不适用。
 - size: M
 - robot: robot_smoke、MovementScenario
 - hazards: 基线 handler 若直接写 response->error_message 会被 TLS 空 tip 覆盖成成功（ReleaseSkill 的 1001 实际下发为 0；player_scene_handler 曾因此 7 处拒绝全部失效）——Java 如实回码属有意差异，2026-10-03 起在 PARITY「放技能 84 的校验链」行登记（此前只写在 Javadoc 里）；GM 分支必须清 TLS tip，否则污染下一条请求。
@@ -58,7 +58,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - internal: Redis key 由 login 经 Kafka→DB 服务预热；owner_epoch / home_zone 随路由透传，epoch 取 max；A2′ 先核归属再删继承 handoff 标记，未确认不建实体。
 - java: done — `SceneWorld.onPlayerEnter/onPlayerLoaded` + `StoragePlayerRepository`（MySQL 存储线程池载入、epoch 校验、加载中取消、失败回 PlayerEnterResult{3023} 由 gate 推 23）。Redis 预热 / NIL 重试 / A2′ 标记不适用（Java 直读 MySQL，CreatePlayer 已建行）。
 - size: L
-- robot: robot_smoke（login_ok/enter_ok）、login_test DisconnectDuringEnter / RapidReconnect、xm-robot SmokeScenario
+- robot: robot_smoke（login_ok/enter_ok）、login_test DisconnectDuringEnter / RapidReconnect、game-robot SmokeScenario
 - hazards: 基线 EnterScene 找不到 scene 时若照旧置 enter_gs_type，重试后 PlayerLoginEvent 永不补发（已修）；加载回调必须以「待入场表仍是同一条」为准，否则旧会话迟到的 ExitGame 会杀掉新玩家。
 
 ### enter-scene-initial-sync — 进场初始同步（79 → 自己 21 → 47 / 旁人 21）
@@ -80,7 +80,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: owner-epoch-fencing
 - behavior: 一份 player_database 行同时恢复 transform、uint64/uint32 组件（registration_timestamp、class）、技能列表（去重 + 删表里不存在的）、基础属性（BaseAttributes）、等级（压回 85 上限）、属性加点组件、宠物、角色名只读副本、背包、任务、资产账本（校验坏了只关资产通道不阻断登录）、战斗结算幂等账本、货币；player_database_1 另一份。
 - internal: 存盘 = 整份 marshal → Redis SET（owner_epoch CAS）+ 两条 Kafka DBTask 落 MySQL；资产 / 账本必须同一次落盘（不变量 I3）。
-- java: partial — `xm-player-store` 的 `player` 表只有 class_id / gender / appearance_id / level / scene_config_id / pos_x,y,z（`xm-player-schema.sql`、`PlayerSave` 只写 level + 场景 + 坐标）；朝向、技能、属性、背包、货币等全无存储位置。需要设计可扩展的玩家数据载体（按系统分表或 proto blob 列）并保证同事务落盘。
+- java: partial — `game-player-store` 的 `player` 表只有 class_id / gender / appearance_id / level / scene_config_id / pos_x,y,z（`game-player-schema.sql`、`PlayerSave` 只写 level + 场景 + 坐标）；朝向、技能、属性、背包、货币等全无存储位置。需要设计可扩展的玩家数据载体（按系统分表或 proto blob 列）并保证同事务落盘。
 - size: L
 - robot: MovementScenario 重登核对坐标
 - hazards: 基线新号初值与阵亡回满硬编码取 Class 表首行（player_database_loader.cpp:44），ResolveClassRow 按真实 class_id 取行（Go player_class_backfill.go 回填）；角色名副本只读不写。Java 若拆多表必须在一个事务里与 owner_epoch 围栏一起写，否则重现「资产落了账本没落」。
@@ -176,7 +176,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: scene-instance-registry
 - behavior: 每个 zone 每张 World 地图保持 N 个频道（MinChannelsPerMap 默认 1，按负载扩缩容，带冷却与排空集合），节点重启后对所有频道重发 CreateScene（幂等）；只挑主世界类型节点承载频道。
 - internal: Redis 锁串行化补建；scene_manager 领导者执行。属 scene_manager 区域，scene 节点只被动登记。
-- java: partial — 每个 scene 节点各自为每张 World 地图建 1 个场景、经 Redis 节点目录上报（`SceneDirectoryPublisher`），`xm-scene-manager` `SceneAssigner` 挑人数最少者（PARITY：不预占名额、不跨 zone）；无频道数配置、无扩缩容 / 排空。
+- java: partial — 每个 scene 节点各自为每张 World 地图建 1 个场景、经 Redis 节点目录上报（`SceneDirectoryPublisher`），`game-scene-manager` `SceneAssigner` 挑人数最少者（PARITY：不预占名额、不跨 zone）；无频道数配置、无扩缩容 / 排空。
   （2026-10-11 订正：括号里是本条写成时的 PARITY 口径，「不跨 zone」已删——`assign` 仍只在请求的 zone 内选，跨 zone 由批次 5.4 的 `selectTravelTarget` / `redirectToZone` 在目标 zone 选 gate、签票，见 PARITY「场景分配」「跨 zone 传送（226）与重定向（124）」行（代码已集成，切片未验证）；频道、软预占与排空的现状见 PARITY「场景实例与主世界频道」行（批次 5.1），本条其余部分没有随之回写。）
 - size: L
 - robot: robot.stress-*（基线多频道）
@@ -251,7 +251,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: scene-instance-registry
 - behavior: scene 节点对副本场景没有专门玩法（不刷怪、不计时、不校验队伍人数）；SM 记录活跃副本，0 人超过超时即销毁（先排空）。
 - internal: SM Redis `instances:zone:%d:active`、`instance:%d:player_count`。
-- java: missing — Java 无运行期建场景；Dungeon 表仅由 xm-table 生成访问代码。
+- java: missing — Java 无运行期建场景；Dungeon 表仅由 game-table 生成访问代码。
 - size: M
 - robot: battle_smoke（PVE 走战斗节点，非场景副本）
 - hazards: Dungeon 表有 max_team_size=10 的历史行（match 侧代码收口）；副本「时间限制」在 scene 侧未实现，移植时勿当成已有行为。
@@ -383,7 +383,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: none
 - behavior: class_id 存在 PlayerUint32Comp.class；属性重算、自动加点按职业取行，取不到退回 Class 首行；新号初始基础属性与阵亡回满硬编码用 Class 首行（player_database_loader.cpp Get(0)；class_id 本身已由 Go 回填进存档），登录复活随后再由 TopUpToDerivedMax 顶到按真实职业算出的上限；不能转职。
 - internal: none
-- java: partial — 建角选职业与校验在 xm-login（`TableCharacterRules.classExists`，0 取首行），`player.class_id` 落库，`ScenePlayer.classId` 进 21 / 47；属性重算按真实 class_id 取行（`AttributeTables.classRow`，0 或查不到时退回首行，批次 2.2）；成长属性不存，用到时现算。
+- java: partial — 建角选职业与校验在 game-login（`TableCharacterRules.classExists`，0 取首行），`player.class_id` 落库，`ScenePlayer.classId` 进 21 / 47；属性重算按真实 class_id 取行（`AttributeTables.classRow`，0 或查不到时退回首行，批次 2.2）；成长属性不存，用到时现算。
 - size: S
 - robot: robot_smoke（建角）
 - hazards: 基线「按首行」是临时口径，Java 若直接按真实 class_id 取行会与基线数值不同（Class 表各行初值目前相同，暂无差异）。
@@ -431,7 +431,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: none
 - behavior: 消费本节点 topic 的 SceneCommand{event_id, payload}，缺 event_id / 空 payload / 解码失败只 WARN；按 event_id 反序列化成对应事件并在逻辑线程 dispatcher.trigger。当前用途：BattleSettlementEvent / BattleConfirmedEvent（battle → scene 结算与确认）、PlayerTeamRefreshEvent（match/team）等。
 - internal: Kafka consumer group 每节点一个；事件号表 49 项与 C++ 事件类一一对应。
-- java: missing — Java 未接 Kafka（architecture.md §10「Kafka 事件」后续），xm-scene 无外部异步命令入口。
+- java: missing — Java 未接 Kafka（architecture.md §10「Kafka 事件」后续），game-scene 无外部异步命令入口。
 - size: M
 - robot: battle_smoke、team_smoke（基线）
 - hazards: 进程内事件与外部命令共用 event_id 空间，Java 只需为真正跨进程的事件建入口，勿把纯进程内事件（BeforeLeaveScene 等）暴露成外部命令。
@@ -457,7 +457,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - internal: none
 - java: done — `SceneWorld.applyMove`、`MoveGuard`、`MovementRules`（有意差异已登记：非有限值丢弃、位移令牌桶、挂机停推清速度等）；136 回 1006（基线空桩回 id=0，已登记不适用）。
 - size: L
-- robot: xm-robot MovementScenario、robot_smoke
+- robot: game-robot MovementScenario、robot_smoke
 - hazards: 见 PARITY；朝向不持久化（Java 待补列）。
 
 ### aoi-view — 视野进出通知（已移植）
@@ -527,7 +527,7 @@ Java 版（xm-scene）已有：进场与初始同步、场景内换图、移动 
 - depends on: none
 - behavior: 每种永久 GUID 一个号段客户端，经 DataService.AllocateIdSegment 领 [lo,hi)（双 buffer、500ms→5s 退避）；首段没领到之前不放玩家进来（帧定时器也不启动），没段时铸 id 一律 fail-closed（kInvalidGuid）；临时 id 在路由 node_id 确定之后才种 node 段。
 - internal: 全局库 id_segment 表 CAS；响应归属靠单飞 + FIFO。
-- java: partial — Java scene 的场景号 / 实体号用本节点雪花（`SceneWorld.nextId`，节点号来自 Redis 租约），player_id 由 xm-login 雪花；无永久物品 / 交易流水 / 快照 GUID 来源（背包、交易、回档落地前需要，可直接复用雪花或做号段，二选一写进 architecture.md §9）。
+- java: partial — Java scene 的场景号 / 实体号用本节点雪花（`SceneWorld.nextId`，节点号来自 Redis 租约），player_id 由 game-login 雪花；无永久物品 / 交易流水 / 快照 GUID 来源（背包、交易、回档落地前需要，可直接复用雪花或做号段，二选一写进 architecture.md §9）。
 - size: S
 - robot: none
 - hazards: 基线曾在 node_id 恒 0 时种临时 id 段（已修）；号段对节点数不敏感是选它而非 snowflake 槽位协议的理由。

@@ -1,8 +1,8 @@
 # 聚宝斋只读面（trade，批次 4.7）移植统一规格：从 mmorpg 基线到 Java 版
 
 > **基线**：mmorpg `26ceb70ca`，与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。Java 侧以当前工作区为准（HEAD `49af941`，外加未提交的
-> xm-guild 及其接线改动）。`MessageRoutes.java`、`GateConfiguration.java`、`DubboGroups.java`、`NodeTypes.java`、`start-slice.sh`、`stop-slice.sh`、
-> 根 `pom.xml`、`RobotOptions.java`、`RobotMain.java` 与 xm-guild 下的文件都在未提交改动里，行号提交后可能小幅漂移，所以引用时同时写出类名 / 方法名。
+> game-guild 及其接线改动）。`MessageRoutes.java`、`GateConfiguration.java`、`DubboGroups.java`、`NodeTypes.java`、`start-slice.sh`、`stop-slice.sh`、
+> 根 `pom.xml`、`RobotOptions.java`、`RobotMain.java` 与 game-guild 下的文件都在未提交改动里，行号提交后可能小幅漂移，所以引用时同时写出类名 / 方法名。
 >
 > **路径怎么读**
 > - 不带目录的 Go 文件：
@@ -15,21 +15,21 @@
 > - `seq.go`、`decide.go`：`go/shared/assetop/`；`metrics.go`：`go/shared/serverbase/`；`forwardlogic.go`：`go/client_rpc_router/internal/logic/`；
 >   `trade_step.go`：`tools/merge_zone/`；`trade_smoke_scenario.go`、`etc/trade_smoke.yaml`、`main.go`：mmorpg `robot/`（`robot/config/config.go` 在稀疏克隆里没有检出，
 >   按 `git show HEAD:robot/config/config.go` 的行号）；`messagelimiter.json`：mmorpg `generated/tables/`。
-> - `jubaozhai.proto`、`trade_admin.proto`、`trade_table.proto`：mmorpg `proto/trade/`，行号用 mmorpg 的。Java 同步副本在 `xm-proto/src/main/proto/proto/trade/`，
+> - `jubaozhai.proto`、`trade_admin.proto`、`trade_table.proto`：mmorpg `proto/trade/`，行号用 mmorpg 的。Java 同步副本在 `game-proto/src/main/proto/proto/trade/`，
 >   只多第 2–4 行 java option，所以 **Java 行号 = mmorpg 行号 + 3**。
 > - 设计稿 `docs/design/jubaozhai-market.md`（简称「设计稿」）只作背景，与代码冲突时以代码为准。
 > - 客户端（`D:\work\mmorpg-client`）：`JubaozhaiClient.cs`、`JubaozhaiModels.cs` 在 `Assets/Scripts/Game/Jubaozhai/`；`GameClient.cs` 在 `Assets/Scripts/Game/`；
 >   `JubaozhaiWindow.cs` 在 `Assets/Scripts/UI/Ugui/Jubaozhai/`；`MessageIds.cs` 在 `Assets/Scripts/Net/`。
-> - 以 `xm-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`、`pom.xml`：在 `D:\work\xuanming-server-mmo` 下。
->   `message_id.txt` 指 `xm-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）；`tip_text.json` 指 `config-data/tables/tip_text.json`；
->   `trade_error_tip.proto` / `common_error_tip.proto` 指 `xm-table/src/main/proto/tip/` 下的同名文件。
+> - 以 `game-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`、`pom.xml`：在 `D:\work\xuanming-server-mmo` 下。
+>   `message_id.txt` 指 `game-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）；`tip_text.json` 指 `config-data/tables/tip_text.json`；
+>   `trade_error_tip.proto` / `common_error_tip.proto` 指 `game-table/src/main/proto/tip/` 下的同名文件。
 >
 > **本稿的来历**：由两份分区稿合并而成——一份讲数据层与逻辑层（表、SQL、阶段、可见性、四个 RPC 的判定顺序、播种），一份讲客户端契约、robot、写侧边界与
 > Java 落地映射。两份互相矛盾、或与代码不符的地方，都回到代码重新核对过；对分区稿的更正列在 §7.4，对 inventory / 设计稿的更正列在 §7.5。本稿只读代码，
 > 没有改任何源文件。
 >
 > **与 pbmysql 的关系**：阶段 4 起「形状由 proto 消息决定的 MySQL 表」一律接 pbmysql（`docs/porting/roadmap.md:50-53`）。聚宝斋的两张表正是这类表：
-> Java 版用自有的 `trade_tables.proto` 经 xm-pbmysql 建表，DDL 与 Go proto2mysql 逐字节相同（§1.5），业务 SQL 全部手写（§1.6）。
+> Java 版用自有的 `trade_tables.proto` 经 game-pbmysql 建表，DDL 与 Go proto2mysql 逐字节相同（§1.5），业务 SQL 全部手写（§1.6）。
 
 ---
 
@@ -62,16 +62,16 @@
 
 **Java 侧的对应**
 - **入口**：gate 经 Dubbo 调 `ClientMessageService.handle(ClientCall) → CompletableFuture<ClientReply>`，group 为 `trade`（`docs/design/architecture.md:76-104`；
-  `xm-api/src/main/java/com/game/api/ClientMessageService.java:34-46`）。
-- **进程**：新模块 **xm-trade**（Spring Boot + Dubbo Triple），结构照 xm-friend / xm-guild（`architecture.md:351-391`；「每个服务一个进程」，`roadmap.md:48`）。
-- **存储**：MySQL `xm_java` 库（`AGENTS.md` §3）两张表经 xm-pbmysql 建；4.7 **不新增任何业务 Redis 键**（Redis 只用于发号租约与热关停规则同步）。
-- **归属区**：读 `xm_java.player.zone_id`（`xm-common/src/main/java/com/game/common/player/PlayerProfiles.java:18-37`；同 guild D3，`docs/porting/guild-spec.md:1715`）。
-- **在线目录与推送**：都不需要。基线 trade 不推送（`docs/porting/inventory/social.md:37`），不读会话键；xm-trade 不读 `xm:presence`、不用 `PlayerPushes`（`architecture.md:129-149`）。
+  `game-api/src/main/java/com/game/api/ClientMessageService.java:34-46`）。
+- **进程**：新模块 **game-trade**（Spring Boot + Dubbo Triple），结构照 game-friend / game-guild（`architecture.md:351-391`；「每个服务一个进程」，`roadmap.md:48`）。
+- **存储**：MySQL `game` 库（`AGENTS.md` §3）两张表经 game-pbmysql 建；4.7 **不新增任何业务 Redis 键**（Redis 只用于发号租约与热关停规则同步）。
+- **归属区**：读 `game.player.zone_id`（`game-common/src/main/java/com/game/common/player/PlayerProfiles.java:18-37`；同 guild D3，`docs/porting/guild-spec.md:1715`）。
+- **在线目录与推送**：都不需要。基线 trade 不推送（`docs/porting/inventory/social.md:37`），不读会话键；game-trade 不读 `game:presence`、不用 `PlayerPushes`（`architecture.md:129-149`）。
 
 ### 0.2 消息号、准入、限频、客户端调用点
 
 服务全名 `trade.ClientPlayerJubaozhai`，标了 `OptionIsClientProtocolService`、没标 `OptionIsPlayerService`（`jubaozhai.proto:7`、`:154-161`），
-所以 Java gate 会把它的 4 个号路由到同一个后端（`xm-gate/src/main/java/com/game/gate/session/MessageRoutes.java:43-54`、`:62-67`）。消息号只能取自
+所以 Java gate 会把它的 4 个号路由到同一个后端（`game-gate/src/main/java/com/game/gate/session/MessageRoutes.java:43-54`、`:62-67`）。消息号只能取自
 `MessageIdRegistry`（`message_id.txt`），代码里不写数字。
 
 | 号（`message_id.txt` 行） | 方法（`jubaozhai.proto` 行） | 客户端可发 | 限频（`messagelimiter.json`） | 客户端调用点（`JubaozhaiClient.cs`） | 基线 robot 步骤 |
@@ -85,7 +85,7 @@
 - **客户端号常量**：`MessageIds.cs:48-51`。
 - **基线准入白名单**：`session.go:40-47` 的 `ClientMethods` 只含这 4 个方法；`TradeAdmin` 的任何方法都不在里面，单测遍历两个 ServiceDesc 守住（`session_test.go:104`）。
 - **Java gate 自动生效的部分**：限频读同一份 `config-data/tables/messagelimiter.pb`（已核对其中 196/197/200 为 10 次/秒、198 为 5 次/秒，与 mmorpg 一致）；
-  表里没有的号按缺省每秒 3 条（`xm-gate/.../session/MessageLimit.java:13-14`）；超频回信封 1008 并计非法包（`ClientDispatcher.java:229-236`）。
+  表里没有的号按缺省每秒 3 条（`game-gate/.../session/MessageLimit.java:13-14`）；超频回信封 1008 并计非法包（`ClientDispatcher.java:229-236`）。
 - **热关停规则键**：基线 `trade.ClientPlayerJubaozhai/<Method>`（`trade.yaml:39-44`）；Java gate 用 `route.rpcPath()` = `"/trade.ClientPlayerJubaozhai/<Method>"`
   （`MessageRoutes.java:49`），规范化去掉开头斜杠后同名（`architecture.md:407-426`）。
 
@@ -107,7 +107,7 @@
   但不设才与基线字节一致。
 - 业务拒绝与故障都**只设** `error_message`，其余字段全是零值（`jubaozhai_logic.go:101-103`、`:186-188`、`:228-230`）。唯一例外是 `SetFavorite`：拒绝时也回填请求里的
   `listing_id`（`:273-276`）。
-- tip **永不带 parameters**（`tipOf`，`jubaozhai_logic.go:420-422`）。Java friend 的 `Route.failure` 会塞英文原因串（`xm-friend/.../dispatch/FriendDispatcher.java:74-80`），
+- tip **永不带 parameters**（`tipOf`，`jubaozhai_logic.go:420-422`）。Java friend 的 `Route.failure` 会塞英文原因串（`game-friend/.../dispatch/FriendDispatcher.java:74-80`），
   guild 照基线带英文原因（guild-spec §7.3，`docs/porting/guild-spec.md:1408`）——trade 两样都不能照抄。
 
 **客户端实际读了哪些字段**（只有 robot 比它更严格）
@@ -147,7 +147,7 @@
 | 20003 | `ErrFeatureDisabled`（:38-39） | `kTradeFeatureDisabled` | 该功能尚未开放 | 否 | section = AUCTION | 浏览拍卖分区时特判成空页加「拍卖尚未开放」（`:125-130`） | 是 |
 
 - 段：`//trade_error base=20000 width=1000`（设计稿 :24、:266）。码值一律引用生成的枚举，`TestNoHandWrittenTipCodes` 机械守住（`constants_test.go:99`）。
-  Java 照 `GuildTips` 的写法（`xm-guild/.../rules/GuildTips.java:1-25`：引用 `com.game.table.*ErrorTip`，不写数字，测试扫描源文件）。
+  Java 照 `GuildTips` 的写法（`game-guild/.../rules/GuildTips.java:1-25`：引用 `com.game.table.*ErrorTip`，不写数字，测试扫描源文件）。
 - **fault 集合**：Java 配置表没有 fault 列，trade 写死 `FAULTS = {1003}`（同 guild 的做法，`GuildTips.java:13-14`）。
 - 设计稿规划的 P3 码约 20 个（设计稿 :269）**还没进** Tip.xlsx；Java 的 `trade_error_tip.proto:9-20` 也只有这 4 个，Java 不能提前加。
 
@@ -203,7 +203,7 @@ grpc-go 生成的 handler 先解码请求再调拦截器（生成代码在稀疏
 | 经 gate 发 199 | C++ gate 白名单不收，丢弃、计非法包（`trade_smoke_scenario.go:281-284`）；客户端表现为超时 | gate 走「路由为空」：计 `unknown_message_id` 非法包、不回包（`ClientDispatcher.java:217-221`、`:827-836`）。**与基线同形**，robot 第 2 步照常成立 |
 | 196–200 后端未接入 | — | 今天：路由到 `BACKEND_UNSUPPORTED`（`MessageRoutes.java:62-67`），推 23 {1003}、不带请求号（`ClientDispatcher.java:313-319`）。4.7 之后消失 |
 | trade 进程不在 / 调用失败 / 超时 | 路由服回**带请求号的信封 1003**（`forwardlogic.go:147-154`、`:170-183`）；gate 自己选不到路由服实例时推 23 {1003}（`trade_smoke_scenario.go:646-648`） | **推 23 {1003}、不带请求号**（`ClientDispatcher.java:389-393`）→ 客户端 15 s 后 `"rpc timeout"` → 隔离到重连。见 T8 |
-| 会话坏头，或 `player_id = 0` | Unauthenticated → 路由服信封 1003 | xm-trade 回信封 1003（先例 `FriendDispatcher.java:151-156`） |
+| 会话坏头，或 `player_id = 0` | Unauthenticated → 路由服信封 1003 | game-trade 回信封 1003（先例 `FriendDispatcher.java:151-156`） |
 | 请求体解析失败（含 proto3 非法 UTF-8） | gRPC 解码错误 → 信封 1003 | 信封 1003（先例 `FriendDispatcher.java:173-178`） |
 | 热关停 | killswitch 拦截器（`trade.go:335-336`）→ 信封 1003 | gate 按方法检查，回信封 1003（`ClientDispatcher.java:248-257`） |
 | 超频 / 超长 | 信封 1008 / 1010 | 同（`ClientDispatcher.java:222-236`） |
@@ -234,7 +234,7 @@ grpc-go 生成的 handler 先解码请求再调拦截器（生成代码在稀疏
 - **基线**：trade 独占库 `mmorpg_trade`（`tables.go:14-17`），`config.Validate` 断言库名必须是它（`config.go:286-289`）。表的唯一事实源是 `trade_table.proto`，
   由 schemamigrate 按 `Tables()` 建（`tables.go:19-31`），启动期 `ensureSchema`（`trade.go:166-170`、`:364-395`）或 `-migrate`（`trade.go:61-66`、`:397-420`）。
   DSN 带 `sql_mode='STRICT_TRANS_TABLES'` 与 `transaction_isolation='READ-COMMITTED'`（`servicecontext.go:225-243`）；严格模式在连接层兜底「超长文本被静默截断」。
-- **Java**：`xm_java` 库，xm-trade 自有 `xm-trade/src/main/proto/xm/trade/trade_tables.proto` 经 xm-pbmysql 建表（§5.5）。4.7 只建 `trade_listing`、`trade_favorite`。
+- **Java**：`game` 库，game-trade 自有 `game-trade/src/main/proto/game/trade/trade_tables.proto` 经 game-pbmysql 建表（§5.5）。4.7 只建 `trade_listing`、`trade_favorite`。
 
 ### 1.2 `trade_listing`（`TradeListingRecord`，`trade_table.proto:28-57`）
 
@@ -286,10 +286,10 @@ grpc-go 生成的 handler 先解码请求再调拦截器（生成代码在稀疏
 P1 没有任何代码把行改成 LISTED 以外的状态，但读路径已经按 LOCKED 写好：寄售列表包含 LOCKED（`listing_repo.go:364-368`），详情对 LOCKED 可见（`phase.go:43-48`）。
 Java 原样保留这两处（P3 直接复用）。
 
-### 1.5 DDL（按 xm-pbmysql 规则推导，**不是从真库里抄的**）
+### 1.5 DDL（按 game-pbmysql 规则推导，**不是从真库里抄的**）
 
-依据：类型映射 `xm-pbmysql/.../TableSchema.java:63-76`（uint32 → `int unsigned`，:65；enum → `int NOT NULL DEFAULT 0`，:72）、建表拼接 `:322-358`、索引名 `idx_<表>_<i>`
-（`:307-309`）、列注释 `pb:N`（`:316-318`）、表排序规则 `:57`；格式与 `CreateTableSqlTest.java:310-341`、`xm-guild/.../store/GuildTablesTest.java:25-60` 一致；
+依据：类型映射 `game-pbmysql/.../TableSchema.java:63-76`（uint32 → `int unsigned`，:65；enum → `int NOT NULL DEFAULT 0`，:72）、建表拼接 `:322-358`、索引名 `idx_<表>_<i>`
+（`:307-309`）、列注释 `pb:N`（`:316-318`）、表排序规则 `:57`；格式与 `CreateTableSqlTest.java:310-341`、`game-guild/.../store/GuildTablesTest.java:25-60` 一致；
 pbmysql 的 DDL 与 Go proto2mysql 逐字节相同（`TableSchema.java:322`）。合服工具注释直接点名 `idx_trade_listing_0(market_zone, status, ...)`（`trade_step.go:16`），可印证索引名。
 
 ```sql
@@ -475,7 +475,7 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
   `home_zone_test.go:71`）。每次查询计 `trade_home_zone_lookup_total{result=ok|unmapped|error}`（`:46-61`）。
 - **逻辑层翻译**（`resolveHomeZone`，`jubaozhai_logic.go:360-377`）：lookup 接口本身为 nil（没接线）→ ERROR、1003（这条不计数）；查询报错 → ERROR、1003；查到 0 → INFO、20001。
 - **market_zone 的来源**：上架时卖家的 home_zone，服务端写入、不接受客户端传值（`trade_admin.proto:22`；设计稿 :75）。合服时由 `tools/merge_zone` 按清单逐条主键点更新（§4.1）。
-- **Java**：归属区 = `xm_java.player.zone_id`（`xm-player-store/src/main/resources/db/xm-player-schema.sql:11-32`，`zone_id` 在 :14），由建角的 login 按自己的 `xm.zone-id` 写入；
+- **Java**：归属区 = `game.player.zone_id`（`game-player-store/src/main/resources/db/game-player-schema.sql:11-32`，`zone_id` 在 :14），由建角的 login 按自己的 `game.zone-id` 写入；
   缺行或 0 → 20001，读失败 / 预算用完 → **in-band 1003**（注意不是 guild 那种信封：trade 基线这里本来就是 in-band，`jubaozhai_logic.go:360-377`）。见 §5.6、T3。
 
 ### 2.7 搜索、分页、收藏的精确语义
@@ -652,11 +652,11 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 | 前置 | 状态 | 出处 |
 |---|---|---|
-| scene 侧资产通道（账本、验签、扣发、durable） | ✅ 2.9。TRADE 两条流已在白名单：DEBIT 收 tx 3（AUCTION_SELL），CREDIT 收 4（AUCTION_BUY）与 1（TRADE）；caller `trade`、密钥 `XM_ASSET_OP_SECRET_TRADE` | `xm-scene/.../asset/AssetOpService.java:95-98`；`AssetOpAuth.java:52-53`；`PARITY.md:83` |
-| 跨进程传输 `SceneAssetOpService`、定位 `SceneAssetLocator`（读 `xm:location`，**不读 presence**）、签名共用件 | 4.5 引入 | `docs/porting/guild-economy-spec.md:841-900` |
-| 调用方库（签名器、Caller、Loop、Decide） | 4.5 先放 xm-guild，**交易接入资产通道时再抽成共享件** | `guild-economy-spec.md:984`、`:1221`（EN5）、`:1230`（Q4）；`roadmap.md:36` |
+| scene 侧资产通道（账本、验签、扣发、durable） | ✅ 2.9。TRADE 两条流已在白名单：DEBIT 收 tx 3（AUCTION_SELL），CREDIT 收 4（AUCTION_BUY）与 1（TRADE）；caller `trade`、密钥 `GAME_ASSET_OP_SECRET_TRADE` | `game-scene/.../asset/AssetOpService.java:95-98`；`AssetOpAuth.java:52-53`；`PARITY.md:83` |
+| 跨进程传输 `SceneAssetOpService`、定位 `SceneAssetLocator`（读 `game:location`，**不读 presence**）、签名共用件 | 4.5 引入 | `docs/porting/guild-economy-spec.md:841-900` |
+| 调用方库（签名器、Caller、Loop、Decide） | 4.5 先放 game-guild，**交易接入资产通道时再抽成共享件** | `guild-economy-spec.md:984`、`:1221`（EN5）、`:1230`（Q4）；`roadmap.md:36` |
 | 背包 / 宠物交易原语 | 背包 2.4 已在；宠物交易原语「随聚宝斋资产托管，未排批次」 | `PARITY.md:81` |
-| 账号角色持久化（基线 P0-b） | Java 天然满足：`player.account` 在 MySQL | `xm-player-schema.sql:11-32` |
+| 账号角色持久化（基线 P0-b） | Java 天然满足：`player.account` 在 MySQL | `game-player-schema.sql:11-32` |
 | 合服围栏 | Java 不做合服（7.3）；可照 guild D4 留恒放行接口 | `guild-spec.md:1716` |
 | **P3 客户端契约**（消息号、tip、配表列） | **mmorpg 还没定** | §4.4 |
 
@@ -671,7 +671,7 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 ### 4.7 4.7 要留的钩子（只留形状，不做行为）
 
 - `trade_tables.proto` 字段号照抄 1..19 与 1..3，并写明追加区：P2 两张表以后在文件末尾追加、字段号照 `trade_table.proto:85-147`；P3 新列从 20 起；index 组只能追加到末尾
-  （`idx_<表>_<序号>` 按位置命名，先例 `xm-guild/src/main/proto/xm/guild/guild_tables.proto:8-10`）。
+  （`idx_<表>_<序号>` 按位置命名，先例 `game-guild/src/main/proto/game/guild/guild_tables.proto:8-10`）。
 - 阶段推导与可见性规则**完整移植**，包括 LOCKED、ESCROWING 等 P3 状态（`phase.go:17-60`）。
 - `seller_account` 写空串、`version` 写 0（`admin_logic.go:100`、`:116`）。
 - 新增 `NodeTypes.TRADE`；P3 发 listing_id 时直接复用，op_id 是否共用由写侧批次定（同 guild-economy-spec Q6 的问题）。
@@ -683,10 +683,10 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 | 方案 | 做法 | 优点 | 缺点 | 结论 |
 |---|---|---|---|---|
-| **A** | xm-trade 管理端口 `POST /admin/trade/seed-listing`：请求体是 `trade.SeedListingRequest` 的 protobuf 二进制（`Content-Type: application/x-protobuf`），应答 200 带 `SeedListingResponse` 二进制（业务拒绝写在 `error_message`）。鉴权照 xm-data `AdminAuthFilter` 的语义：令牌 `XM_ADMIN_TOKEN`、头 `X-Xm-Admin-Token`、常数时间比较、必填 `X-Xm-Operator`、令牌没配回 503、每次调用一行审计日志（`xm-data/.../admin/AdminAuthFilter.java:16-74`）。接口总注册，非 dev/test 回 403（对应 PermissionDenied）。语义与 §3.6 完全相同 | 校验 → 查归属区 → 发号 → 插入全在 xm-trade 一处；能断言服务端写入的 `market_zone`；robot 已有带令牌的 HTTP 客户端，基地址可换（`xm-robot/.../client/AdminClient.java:22-36`、`:86-90`），令牌复用 `run/xm-admin-token`（`start-slice.sh:24-31`；`AdminClient.java:38-49`）；robot 不加 Dubbo；缺省只绑本机；protobuf 二进制不引入新 JSON 依赖、uint64 无歧义 | 第二个服务挂运维 HTTP 面；鉴权过滤器要在 xm-trade 复制一份（xm-common 没有 servlet 依赖） | **推荐** |
-| B | xm-api 新增 `TradeAdminService.seedListing(SeedListingRequest) → CompletableFuture<SeedListingResponse>`，xm-trade `@DubboService(group = "trade")` 提供，非 dev/test 抛 `RpcException(FORBIDDEN)`；再由 xm-data 加 `POST /admin/trade/listings/seed` 转 Dubbo，或 robot 直连 Dubbo | 拓扑最接近基线 gRPC 直连 `TradeAdmin`；热关停提供方过滤器自动覆盖 | xm-data 目前**不是** Dubbo 消费方（只依赖 xm-api 的消息类型，`xm-data/pom.xml:24-28`，仓内无 `@DubboReference`），要加 Dubbo 运行时、`XM_DUBBO_SECRET` 与引用配置；robot 直连则要给 robot 加 Dubbo（`xm-robot/pom.xml` 没有） | 备选 |
-| C | xm-data 运维接口直接写 `trade_listing` | robot 已对接 xm-data | 一张表两个写者；发号要另占雪花 worker；校验与归属区推导要复制一份 | 不采纳 |
-| D | robot / 测试用 JDBC 直接 INSERT（SQL 夹具） | 不加服务端接口 | robot 要拿 MySQL 口令；绕过校验与「market_zone 来自卖家归属区」这条第 1 步断言；表要等 xm-trade 起来后才有 | 只用于 MySQL 集成测试 |
+| **A** | game-trade 管理端口 `POST /admin/trade/seed-listing`：请求体是 `trade.SeedListingRequest` 的 protobuf 二进制（`Content-Type: application/x-protobuf`），应答 200 带 `SeedListingResponse` 二进制（业务拒绝写在 `error_message`）。鉴权照 game-data `AdminAuthFilter` 的语义：令牌 `GAME_ADMIN_TOKEN`、头 `X-Game-Admin-Token`、常数时间比较、必填 `X-Game-Operator`、令牌没配回 503、每次调用一行审计日志（`game-data/.../admin/AdminAuthFilter.java:16-74`）。接口总注册，非 dev/test 回 403（对应 PermissionDenied）。语义与 §3.6 完全相同 | 校验 → 查归属区 → 发号 → 插入全在 game-trade 一处；能断言服务端写入的 `market_zone`；robot 已有带令牌的 HTTP 客户端，基地址可换（`game-robot/.../client/AdminClient.java:22-36`、`:86-90`），令牌复用 `run/game-admin-token`（`start-slice.sh:24-31`；`AdminClient.java:38-49`）；robot 不加 Dubbo；缺省只绑本机；protobuf 二进制不引入新 JSON 依赖、uint64 无歧义 | 第二个服务挂运维 HTTP 面；鉴权过滤器要在 game-trade 复制一份（game-common 没有 servlet 依赖） | **推荐** |
+| B | game-api 新增 `TradeAdminService.seedListing(SeedListingRequest) → CompletableFuture<SeedListingResponse>`，game-trade `@DubboService(group = "trade")` 提供，非 dev/test 抛 `RpcException(FORBIDDEN)`；再由 game-data 加 `POST /admin/trade/listings/seed` 转 Dubbo，或 robot 直连 Dubbo | 拓扑最接近基线 gRPC 直连 `TradeAdmin`；热关停提供方过滤器自动覆盖 | game-data 目前**不是** Dubbo 消费方（只依赖 game-api 的消息类型，`game-data/pom.xml:24-28`，仓内无 `@DubboReference`），要加 Dubbo 运行时、`GAME_DUBBO_SECRET` 与引用配置；robot 直连则要给 robot 加 Dubbo（`game-robot/pom.xml` 没有） | 备选 |
+| C | game-data 运维接口直接写 `trade_listing` | robot 已对接 game-data | 一张表两个写者；发号要另占雪花 worker；校验与归属区推导要复制一份 | 不采纳 |
+| D | robot / 测试用 JDBC 直接 INSERT（SQL 夹具） | 不加服务端接口 | robot 要拿 MySQL 口令；绕过校验与「market_zone 来自卖家归属区」这条第 1 步断言；表要等 game-trade 起来后才有 | 只用于 MySQL 集成测试 |
 | E | dev 档启动时加载静态夹具 | 不写代码 | 时间窗会过期；run-tag 账号每次是新 player_id，夹具事先不知道 | 不采纳 |
 | F（A 的变体） | 播种请求带 dev 专用 `market_zone` 覆盖，好在单区切片里造「别区商品」 | 单区也能覆盖跨区过滤 | 基线刻意没有这个字段（`trade_admin.proto:22`），会废掉第 1 步的推导断言 | 不推荐（跨区靠服务单测 / MySQL 测试 + `zone_filter` 断言补） |
 | G | 让客户端消息 199 经 gate 可达 | — | 违反契约；基线第 2 步就是断言 199 经 gate 无回包 | **禁止** |
@@ -720,17 +720,17 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 ### 4.10 Java robot `TradeScenario`
 
-- **接线**：`RobotOptions.Scenario` 加 `TRADE`（`xm-robot/.../RobotOptions.java:62-63`）；`RobotMain` 照 GUILD 分支接线（`RobotMain.java:132` 一带）；新增选项
-  `--trade-admin-url`（`XM_ROBOT_TRADE_ADMIN_URL`，缺省 `http://127.0.0.1:18111`）与 `--trade-scope`（`XM_ROBOT_TRADE_SCOPE`，`zone|global`，缺省 `zone`，与 xm-trade 的
+- **接线**：`RobotOptions.Scenario` 加 `TRADE`（`game-robot/.../RobotOptions.java:62-63`）；`RobotMain` 照 GUILD 分支接线（`RobotMain.java:132` 一带）；新增选项
+  `--trade-admin-url`（`GAME_ROBOT_TRADE_ADMIN_URL`，缺省 `http://127.0.0.1:18111`）与 `--trade-scope`（`GAME_ROBOT_TRADE_SCOPE`，`zone|global`，缺省 `zone`，与 game-trade 的
   `application.yaml` 一致；见 Q9）。输出用 `CheckReport`，引用 PARITY「聚宝斋只读面」行。
 - **账号**：`prefix + "td" + runTag + "_a|_b|_c"`，不用 9401–9403（同 guild D18，`guild-spec.md:1730`）。本机切片单 zone，`_c` 与 A 同区（相当于基线 `cross_zone = false`）。
 - **单区下的范围断言**：zone 范围 → B 传 `zone_filter = 当前区 + 1` 仍看到 A（过滤被忽略）；global 范围 → 同样的过滤让 A 消失、`zone_filter = 当前区` 仍看到 A。
   `market_scope` 不符时第一次浏览就失败。
 - **第 1 步**：经方案 A 播种，断言 `market_zone == 卖家 player.zone_id`（= robot 登录的区）。
 - **第 2 步**：`send(199)` 后在限定时间内断言收不到任何同请求号的消息（Java gate 不回包，`ClientDispatcher.java:217-221`）。写法照 `FriendScenario.java:251-260` 的 `send + await`，断言方向相反；
-  只发一次（非法包阈值 50，`xm-gate/src/main/resources/application.yaml:66`）。
+  只发一次（非法包阈值 50，`game-gate/src/main/resources/application.yaml:66`）。
 - **间隔**：同号相邻请求 300 ms 即可（196 / 197 / 200 每秒 10 条、198 每秒 5 条，§0.2）。
-- **gate 推 23 {1003}** 时立即判失败并提示「xm-trade 不可达」（对应基线 `:646-649`）。
+- **gate 推 23 {1003}** 时立即判失败并提示「game-trade 不可达」（对应基线 `:646-649`）。
 - 基线第 0–9 步照跑（跨区分支只在配了第二个 zone 时跑，D18 同理），Java 增项见 §9.6。
 
 ---
@@ -741,17 +741,17 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 | 组件 | Java | 依据 / 先例 |
 |---|---|---|
-| 进程 | 新模块 **xm-trade**；Dubbo 端口 **20887**，管理端口 **18111**（已占用：Dubbo 20881–20886；管理 18101–18110，已逐个核对各模块 `application.yaml`）；根 `pom.xml` 在 `<module>xm-guild</module>`（`pom.xml:31`）之后加 `<module>xm-trade</module>` | `tools/local/start-slice.sh:49-60` |
-| Dubbo group | `DubboGroups.TRADE = "trade"`（proto 一级目录） | `xm-api/.../DubboGroups.java:3-25` |
-| 提供方 | `TradeClientMessageService implements ClientMessageService`，`@DubboService(group = TRADE)`；`sessionClosed` / `abandonEnter` 直接回 Ack（无会话状态） | `xm-friend/.../FriendClientMessageService.java:15-41` |
-| 鉴权 | 必须有 `XM_DUBBO_SECRET`，缺失拒启 | `architecture.md:91-102` |
+| 进程 | 新模块 **game-trade**；Dubbo 端口 **20887**，管理端口 **18111**（已占用：Dubbo 20881–20886；管理 18101–18110，已逐个核对各模块 `application.yaml`）；根 `pom.xml` 在 `<module>game-guild</module>`（`pom.xml:31`）之后加 `<module>game-trade</module>` | `tools/local/start-slice.sh:49-60` |
+| Dubbo group | `DubboGroups.TRADE = "trade"`（proto 一级目录） | `game-api/.../DubboGroups.java:3-25` |
+| 提供方 | `TradeClientMessageService implements ClientMessageService`，`@DubboService(group = TRADE)`；`sessionClosed` / `abandonEnter` 直接回 Ack（无会话状态） | `game-friend/.../FriendClientMessageService.java:15-41` |
+| 鉴权 | 必须有 `GAME_DUBBO_SECRET`，缺失拒启 | `architecture.md:91-102` |
 | 派发 | `dispatch/TradeDispatcher` + `TradeWorkerPool`（固定线程 + 有界队列 + AbortPolicy） | `FriendDispatcher.java:53-224` |
-| 预算 | `com.game.common.deadline.Deadline`，受理时刻 + 3500 ms | `xm-common/.../deadline/Deadline.java:12-58` |
+| 预算 | `com.game.common.deadline.Deadline`，受理时刻 + 3500 ms | `game-common/.../deadline/Deadline.java:12-58` |
 | 规则（纯函数） | `rules/ListingRules`（`phase`、`visibleToBuyer`、`clampPageSize`、`pageWindow`、`escapeLike`、`validText`、`validIconKey`、`normalizeSearch`、`searchListingId`、各枚举校验、`validSeedRequest`、`maxSubcategory`）；`rules/TradeLimits`（§0.6 常量）；`rules/TradeTips`（码值 + `FAULTS`） | `phase.go`、`constants.go` |
 | 服务 | `service/JubaozhaiService`（4 个方法）、`service/SeedListingService`；领域对象 + `XxxService`，不用 ECS 风格 | 同 friend / guild 分层 |
-| 存储 | `store/ListingStore` 接口 + `JdbcListingStore`；`store/ListingQuery`（record）；`store/TradeTables`（pbmysql 注册）；表定义 `src/main/proto/xm/trade/trade_tables.proto` | §5.5 |
-| 归属区 | 复用 xm-guild 的 `HomeZones` / `PlayerTableHomeZones` 形状（建议上移到 xm-common，Q6） | `xm-guild/.../zone/HomeZones.java:7-23`；`PlayerTableHomeZones.java:19-46` |
-| 发号 | `id/ListingIds`（照 `GuildIds`）：雪花 + `NodeIdLease`，作用域 0；新增 `NodeTypes.TRADE = "trade"` | `xm-guild/.../id/GuildIds.java:6-39`；`NodeTypes.java:21-24` |
+| 存储 | `store/ListingStore` 接口 + `JdbcListingStore`；`store/ListingQuery`（record）；`store/TradeTables`（pbmysql 注册）；表定义 `src/main/proto/game/trade/trade_tables.proto` | §5.5 |
+| 归属区 | 复用 game-guild 的 `HomeZones` / `PlayerTableHomeZones` 形状（建议上移到 game-common，Q6） | `game-guild/.../zone/HomeZones.java:7-23`；`PlayerTableHomeZones.java:19-46` |
+| 发号 | `id/ListingIds`（照 `GuildIds`）：雪花 + `NodeIdLease`，作用域 0；新增 `NodeTypes.TRADE = "trade"` | `game-guild/.../id/GuildIds.java:6-39`；`NodeTypes.java:21-24` |
 | 播种 | `admin/SeedListingController` + `admin/TradeAdminAuthFilter`（§4.8 方案 A） | §5.8 |
 | 指标 | `metrics/TradeMetrics` | §6.2 |
 | 不需要的 | 在线目录、推送、缓存、Kafka、合服闸、资产通道 | §0.1、§1.11 |
@@ -761,12 +761,12 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 1. `MessageRoutes.SERVICE_BACKENDS` 加 `"ClientPlayerJubaozhai" → DubboGroups.TRADE`（`MessageRoutes.java:32-37`）。199 的服务 `TradeAdmin` 不是客户端服务，不进路由表（`:43-54` 只收 `clientService()`）。
    加完之后仍有未接入的非玩家客户端服务（`BattleClientPlayer`、`MatchService`），`MessageRoutesTest.Java版未接入的客户端服务路由到unsupported`（`MessageRoutesTest.java:57-67`）不受影响。
 2. `GateConfiguration` 加 trade 引用并放进 backends Map（照 `GateConfiguration.java:113-122`、`:136-153`）：
-   `@DubboReference(group = TRADE, check = false, url = "${xm.dubbo.trade-url:}", methods = @Method(name = "handle", retries = 0))`。
+   `@DubboReference(group = TRADE, check = false, url = "${game.dubbo.trade-url:}", methods = @Method(name = "handle", retries = 0))`。
    不重试：读路径重试会在超时时把负载翻倍、Dubbo 内部重投也会打乱预算；SetFavorite 虽幂等，也没有重投的必要。
-3. 配置：`xm-gate/src/main/resources/application.yaml` 在 `guild-url`（:58）之后加 `trade-url: tri://127.0.0.1:20887`；`application-nacos.yaml` 在 :12 之后加 `trade-url: ""`。
-4. 本机脚本：`start-slice.sh` 服务清单加 `"xm-trade 20887"`（:49-60），第 6 行的 `XM_DUBBO_SECRET` 读者名单补上 xm-trade；`stop-slice.sh:6` 的停止顺序加 xm-trade（gate 之后、guild 之前）。
+3. 配置：`game-gate/src/main/resources/application.yaml` 在 `guild-url`（:58）之后加 `trade-url: tri://127.0.0.1:20887`；`application-nacos.yaml` 在 :12 之后加 `trade-url: ""`。
+4. 本机脚本：`start-slice.sh` 服务清单加 `"game-trade 20887"`（:49-60），第 6 行的 `GAME_DUBBO_SECRET` 读者名单补上 game-trade；`stop-slice.sh:6` 的停止顺序加 game-trade（gate 之后、guild 之前）。
 5. 队列与超时：每会话每后端一条在途队列，满 64 即断开（`ClientDispatcher.java:329-341`；`application.yaml:65`）；身份取**入队时**的会话快照（`ClientDispatcher.java:352-364`）；
-   gate 的 Dubbo 超时 5000 ms（`application.yaml:83`），晚于 xm-trade 的 3500 ms 预算。
+   gate 的 Dubbo 超时 5000 ms（`application.yaml:83`），晚于 game-trade 的 3500 ms 预算。
 6. 后端调用失败的回法：见 T8 / Q1。
 
 ### 5.3 准入与错误映射（`TradeDispatcher`）
@@ -790,7 +790,7 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 ### 5.4 线程、预算、超时
 
-- **线程**：Dubbo 线程只投递；JDBC 只在 `trade-worker` 有界池上做，缺省 16 线程、队列 1024（`AGENTS.md` §3；`xm-friend/src/main/resources/application.yaml:73-74`）。播种接口在
+- **线程**：Dubbo 线程只投递；JDBC 只在 `trade-worker` 有界池上做，缺省 16 线程、队列 1024（`AGENTS.md` §3；`game-friend/src/main/resources/application.yaml:73-74`）。播种接口在
   Tomcat 线程上执行（只在 dev/test 生效、低频），同样受预算约束。
 - **整请求预算 3500 ms** = 基线 `Timeout − 500`（`config.go:28-39`、`:219-221`），从受理时刻算起、含排队；启动时校验 ∈ [500, 3500] ms（照 friend `request-budget`，`application.yaml:70`）。
 - **单次上限是代码常量**：归属区 `min(1500 ms, 剩余)`（`constants.go:71`；先例 `GuildLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS`，`GuildLimits.java:110`；`PlayerTableHomeZones.java:37-38`）；
@@ -799,11 +799,11 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
   预算用完不再发语句、不再重试。
 - **时间**：每个请求只取一次 now（§2.1），时钟可注入，便于测试。
 
-### 5.5 MySQL：自有表 proto + xm-pbmysql + 连接池
+### 5.5 MySQL：自有表 proto + game-pbmysql + 连接池
 
-- **库**：`xm_java`，不建独占库（T2）。
-- **表定义**：`xm-trade/src/main/proto/xm/trade/trade_tables.proto`，`package xm.trade`、`java_package com.game.trade.store.pb`、`option (proto2mysql.db) = true`；
-  **不 import** 同步来的 `trade_table.proto` / `jubaozhai.proto`（契约产物，不许手改；先例 `xm-friend/src/main/proto/xm/friend/friend_tables.proto:1-15`、`xm-guild/.../guild_tables.proto:1-12`）。
+- **库**：`game`，不建独占库（T2）。
+- **表定义**：`game-trade/src/main/proto/game/trade/trade_tables.proto`，`package game.trade`、`java_package com.game.trade.store.pb`、`option (proto2mysql.db) = true`；
+  **不 import** 同步来的 `trade_table.proto` / `jubaozhai.proto`（契约产物，不许手改；先例 `game-friend/src/main/proto/game/friend/friend_tables.proto:1-15`、`game-guild/.../guild_tables.proto:1-12`）。
 
   | message | 表选项（照 `trade_table.proto`） | 字段（字段号同基线） |
   |---|---|---|
@@ -813,9 +813,9 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
   `category` / `status` 用 `int32`（§1.5）；数值与契约枚举逐个相等，由单测对拍（`jubaozhai.proto:18-30`、`trade_table.proto:17-26`）。
 - **DDL 对拍**：照 `GuildTablesTest.java:23-45`，拿同步来的 `com.game.proto.trade.TradeListingRecord` / `TradeFavoriteRecord` 生成的 DDL 与 Java 自有 proto 生成的逐字节比较，
   并与 §1.5 原文逐字比较。
-- **建表**：`PbMysql.register(...)` 后在自动提交连接上 `syncAll`（`GET_LOCK` 保护、只扩不缩、结构漂移即拒启；`xm-friend/.../FriendConfiguration.java:69-81`；`PbMysql.java:120-123`；
+- **建表**：`PbMysql.register(...)` 后在自动提交连接上 `syncAll`（`GET_LOCK` 保护、只扩不缩、结构漂移即拒启；`game-friend/.../FriendConfiguration.java:69-81`；`PbMysql.java:120-123`；
   `architecture.md:536-556`）。与基线的差别：没有 `-migrate` / Job / `Schema.AutoMigrate` / 只读 plan（`trade.go:61-66`、`:364-395`），pbmysql 还会补建缺失的普通索引（同 guild D2）。
-- **连接池**：Druid，URL 照 friend（`xm-friend/src/main/resources/application.yaml:15-32`）：会话 RC + `STRICT_TRANS_TABLES`（对应基线 DSN，`servicecontext.go:239-243`），
+- **连接池**：Druid，URL 照 friend（`game-friend/src/main/resources/application.yaml:15-32`）：会话 RC + `STRICT_TRANS_TABLES`（对应基线 DSN，`servicecontext.go:239-243`），
   `default-transaction-isolation: 2`；`innodb_lock_wait_timeout` 建议取 **2**，对齐单次 SQL 上限（基线不设锁等待，但每次调用被 2000 ms 的 ctx 截断；Q7）。
 - **SQL 全部手写**，逐字照搬 §1.6 / §1.7；ORDER BY 只从固定映射取。
 - **收藏写入**：F4 可以用自动提交语句 + 同样的重试（1213 / 1205 / 9007 → 再试一次，退避 8–12 ms，受预算约束）；单语句的 RC 事务与会话级 RC 下的自动提交语句语义相同。
@@ -829,14 +829,14 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 - `HomeZones.homeZones(List.of(pid), deadline)`（`HomeZones.java:18-23`），生产实现 `PlayerTableHomeZones`：`PlayerProfiles.loadStrict`（`PlayerProfiles.java:76-87`），
   查询预算 `min(1500 ms, 剩余)`（`PlayerTableHomeZones.java:37-38`）。缺项或 `zone_id = 0` → 20001；`DependencyException` / 其它 RuntimeException → in-band 1003。
 - 只在 §2.6 列的四处查；货架、取消收藏、global 范围都不查。
-- 计数：`xm.trade.home.zone.lookups{result=ok|unmapped|error}`（§6.2）；「没接线」在 Java 是装配错误（Spring 起不来），不需要单独分支。
+- 计数：`game.trade.home.zone.lookups{result=ok|unmapped|error}`（§6.2）；「没接线」在 Java 是装配错误（Spring 起不来），不需要单独分支。
 
 ### 5.7 listing_id 发号
 
 - 基线：号段 `biz_tag = trade_listing`，没有 snowflake 回退（`servicecontext.go:30-32`、`:270-291`；`config.go:298-303`；`trade.yaml:81-89`）；启动时只领一次首段、失败只告警
   （`servicecontext.go:293-305`；`trade.go:175-177`）。
 - Java：`Snowflake`（41 位毫秒 / 10 位 worker / 12 位序号，符号位恒 0，所以恒 < 2^63；`Snowflake.java:14-20`、`:72`）+ `NodeIdLease.acquire(redis, scheduler, NodeTypes.TRADE, 0, 1,
-  Snowflake.MAX_WORKER, …)`（`NodeIdLease.java:81`；写法照 `xm-guild/.../GuildConfiguration.java:175-186`）；每次发号前检查 `isValid()`（`NodeIdLease.java:142`）；租约无效、时钟回拨抛异常、
+  Snowflake.MAX_WORKER, …)`（`NodeIdLease.java:81`；写法照 `game-guild/.../GuildConfiguration.java:175-186`）；每次发号前检查 `isValid()`（`NodeIdLease.java:142`）；租约无效、时钟回拨抛异常、
   或拿到 0 → 播种回 1003（`GuildIds.java:29-39` 同形）。
 - **启动时申领失败**：建议同 guild / team（Spring bean，失败即拒启）；与基线「首段领不到只告警」不同（Q5）。
 - **客户端可见的唯一差异**：编号变长。按 2026-01-01 的纪元（`Snowflake.java:17`），现在约 18 位十进制；客户端按 `ulong` 解析、按字符串显示（`JubaozhaiClient.cs:288-289`、`:343`），
@@ -844,10 +844,10 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 ### 5.8 播种接口（§4.8 方案 A）
 
-- `POST /admin/trade/seed-listing`，挂在管理端口（`server.port: 18111`，`server.address: ${XM_MANAGEMENT_ADDRESS:127.0.0.1}`，同 friend `application.yaml:35-37`）。
+- `POST /admin/trade/seed-listing`，挂在管理端口（`server.port: 18111`，`server.address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}`，同 friend `application.yaml:35-37`）。
 - 过滤器 `TradeAdminAuthFilter`：语义照抄 `AdminAuthFilter`（令牌常数时间比较、操作人 1–64 字符不含控制字符、令牌没配 503、每次调用一行审计日志、作用范围由注册时的 URL 模式决定、
   指标的 op 标签只取已知接口）；只注册在 `/admin/*`。
-- 控制器：先判 `RunMode.parse(xm.run-mode).allowsGmCommands()`（`RunMode.java:13-45`；本机切片缺省 dev，`start-slice.sh:19-22`）→ 否则 403、计 `rejected`；再解析
+- 控制器：先判 `RunMode.parse(game.run-mode).allowsGmCommands()`（`RunMode.java:13-45`；本机切片缺省 dev，`start-slice.sh:19-22`）→ 否则 403、计 `rejected`；再解析
   `SeedListingRequest`（失败 400）→ `SeedListingService.seed(req, deadline)` → 200 + `SeedListingResponse`。
 - `SeedListingService` 照 §3.6 第 3–7 步：校验（1005，计 `rejected`）→ 卖家归属区（20001 计 `rejected` / 1003 计 `error`）→ 发号（1003 计 `error`）→ L6（1003 计 `error`）→ 成功计 `ok`、
   INFO 日志 `listing_id / seller / market_zone / category / notice_end_ms / sale_end_ms`（`admin_logic.go:123-126`）。
@@ -860,9 +860,9 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
    会变成 −1、「≤ 上限」误判为真。`page_count` 与 `total_count` 饱和到 `0xFFFFFFFF`。
 2. **枚举一律用 `getXxxValue()` 比较整数**：proto3 未知值在 Java 是 `UNRECOGNIZED`，对它调 `getNumber()` 会抛异常；基线要求未知值与负值都回 1005（`jubaozhai_logic_test.go:357`、`:361`、
    `:365`、`:370`；负值见 `phase_test.go:210` 的 `ListingSort(-1)`）。写应答用 `setCategoryValue(int)`。
-3. **trim 按 Go 语义**：`com.game.common.text.GoSpaces.trim`（`xm-common/.../text/GoSpaces.java:13-44`），**不用** `String.strip()` / `trim()`（Java 的空白集合不认 U+0085 / U+00A0、
+3. **trim 按 Go 语义**：`com.game.common.text.GoSpaces.trim`（`game-common/.../text/GoSpaces.java:13-44`），**不用** `String.strip()` / `trim()`（Java 的空白集合不认 U+0085 / U+00A0、
    却把 U+001C–001F 算作空白，`GoSpaces.java:6-11`）。
-4. **控制字符**：Go `unicode.IsControl` ⇔ `Character.isISOControl`（U+0000–001F、U+007F–009F；`xm-guild/.../rules/GuildNames.java:12`）。字符数按码点计（`codePointCount`），不按 char。
+4. **控制字符**：Go `unicode.IsControl` ⇔ `Character.isISOControl`（U+0000–001F、U+007F–009F；`game-guild/.../rules/GuildNames.java:12`）。字符数按码点计（`codePointCount`），不按 char。
 5. **按编号搜索不能直接 `Long.parseUnsignedLong`**：它接受开头的 `+` 与非 ASCII 数字（如全角 `１２３`），Go `ParseUint(s, 10, 64)` 都不接受。先校验全是 ASCII `[0-9]`，再解析；溢出就只按标题；
    解析出 0 不按编号。
 6. **成功应答不设 `error_message`**；拒绝只填 `error_message`（SetFavorite 另填 `listing_id`）；tip 不带 parameters。
@@ -875,7 +875,7 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 ### 5.10 启动与关停（照 `trade.go:127-291`）
 
 **启动**
-1. 校验 `xm.trade.*`（scope 必填且合法、页长、预算），不合法拒启；缺 `XM_DUBBO_SECRET` 拒启。
+1. 校验 `game.trade.*`（scope 必填且合法、页长、预算），不合法拒启；缺 `GAME_DUBBO_SECRET` 拒启。
 2. pbmysql `syncAll` 建两张表，失败拒启（基线 `trade.go:166-170`）。
 3. 申领 `NodeIdLease(TRADE)`（Q5）。
 4. 打一行 INFO：scope、播种是否开放（运行模式）、库与用户（不含口令），对应基线横幅（`trade.go:263-282`，`:276-277`）。
@@ -883,25 +883,25 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 **关停**：反导出 Dubbo → 排空工作池 → 释放租约 → 关闭连接池（对应基线 `lifecycle.Shutdown` 的注销 → 排空 → 关资源，`trade.go:146-164`）。
 
-### 5.11 配置项（`xm.trade.*`）
+### 5.11 配置项（`game.trade.*`）
 
 | 项 | 缺省 | 校验 / 出处 |
 |---|---|---|
-| `market.scope` | **代码无缺省**；`application.yaml` 显式写 `${XM_TRADE_MARKET_SCOPE:zone}`（同 `trade.yaml:96` 显式写 zone） | 不是 `zone` / `global` 即拒启（`config.go:191-193`、`:305-307`） |
+| `market.scope` | **代码无缺省**；`application.yaml` 显式写 `${GAME_TRADE_MARKET_SCOPE:zone}`（同 `trade.yaml:96` 显式写 zone） | 不是 `zone` / `global` 即拒启（`config.go:191-193`、`:305-307`） |
 | `market.default-page-size` / `max-page-size` / `max-page` / `max-favorites-per-player` | 20 / 20 / 100 / 100 | 都 > 0，缺省页长 ≤ 上限（`config.go:194-201`、`:308-325`；`trade.yaml:97-100`） |
 | `request-budget` | 3500ms | ∈ [500, 3500] ms |
 | `query-timeout` | 3s | 语句超时上限（同 friend `application.yaml:72`） |
 | `worker-threads` / `worker-queue-capacity` | 16 / 1024 | 同 friend |
-| `xm.run-mode` | 进程缺省 prod（本机切片设 dev） | 播种开关（`RunMode.java:13-45`；基线判据 `config.go:228-232`） |
-| `xm.redis.*` | database 12 | 同所有进程（`xm-friend/.../application.yaml:58-60`） |
-| `xm.killswitch.enabled` | true | 同 friend / guild / team（`xm-guild/.../application.yaml:60-61`）；客户端方法已在 gate 查过，提供方过滤器不查 `ClientMessageService.handle`（`architecture.md:422-424`） |
+| `game.run-mode` | 进程缺省 prod（本机切片设 dev） | 播种开关（`RunMode.java:13-45`；基线判据 `config.go:228-232`） |
+| `game.redis.*` | database 12 | 同所有进程（`game-friend/.../application.yaml:58-60`） |
+| `game.killswitch.enabled` | true | 同 friend / guild / team（`game-guild/.../application.yaml:60-61`）；客户端方法已在 gate 查过，提供方过滤器不查 `ClientMessageService.handle`（`architecture.md:422-424`） |
 | 代码常量（不开放配置） | 归属区 1500 ms、单条 SQL 2000 ms、收藏写入 2 次尝试；文本 / 图标 / 等级 / 价格 / 时长上限 | `constants.go:49-79`；`asset_op_repo.go:873-874` |
 
 ### 5.12 本机切片、PARITY、路线图
 
-- xm-trade `application.yaml`：`server.port: 18111`、绑定 `XM_MANAGEMENT_ADDRESS`（缺省 127.0.0.1）、`dubbo.protocol.port: 20887`、`registry: N/A`；另有 `application-nacos.yaml`（同 friend）。
-  播种令牌读 `XM_ADMIN_TOKEN`（`start-slice.sh` 已导出，:24-31）。
-- PARITY 登记「聚宝斋只读面（196 / 197 / 198 / 200 + dev 播种）」一行，有意差异列 T1–T13；`PARITY.md:55` 号段那一行的「不适用」说明补一句 `trade_listing` 改由 xm-trade 雪花发号；
+- game-trade `application.yaml`：`server.port: 18111`、绑定 `GAME_MANAGEMENT_ADDRESS`（缺省 127.0.0.1）、`dubbo.protocol.port: 20887`、`registry: N/A`；另有 `application-nacos.yaml`（同 friend）。
+  播种令牌读 `GAME_ADMIN_TOKEN`（`start-slice.sh` 已导出，:24-31）。
+- PARITY 登记「聚宝斋只读面（196 / 197 / 198 / 200 + dev 播种）」一行，有意差异列 T1–T13；`PARITY.md:55` 号段那一行的「不适用」说明补一句 `trade_listing` 改由 game-trade 雪花发号；
   另登记 §4.6 的两行。
 - 路线图 4.7 完成后打勾，并按 §4.6 加写侧一行。
 
@@ -921,12 +921,12 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 | 指标 | 对应基线 | 标签 |
 |---|---|---|
-| `xm.trade.requests`（Timer，桶同 `FriendMetrics.java:43-47`） | grpcstats + serverbase 的 `rpc_inband_*` | `method` ∈ {4 个方法, `unrouted`}；`result` ∈ {ok, business_error, internal_error, overloaded, bad_request, unauthenticated, forbidden, unsupported}（同 `FriendMetrics.java:49-66`）；启动时全部预建 |
-| `xm.trade.home.zone.lookups` | `trade_home_zone_lookup_total` | `result` ∈ {ok, unmapped, error} |
-| `xm.trade.seed.listings` | `trade_seed_listing_total` | `result` ∈ {ok, rejected, error}（非 dev/test、参数非法、卖家无归属区记 rejected，同 `admin_logic.go:57`、`:66-77`） |
-| `xm.trade.favorite.retries`（Java 增项） | — | 无标签，统计收藏写入的可重试错误重跑次数 |
-| 播种接口的 HTTP 审计 | — | 审计日志行 + `xm.trade.admin.requests{op,status}`（op 只取已知路径，同 `AdminAuthFilter.java:32-36`、`:76-80`） |
-| gate 已有 | `xm_gate_client_requests_total{result}`、后端调用计时（domain = trade，`ClientDispatcher.java:376-377`）、`xm_killswitch_blocked_total{method}` | — |
+| `game.trade.requests`（Timer，桶同 `FriendMetrics.java:43-47`） | grpcstats + serverbase 的 `rpc_inband_*` | `method` ∈ {4 个方法, `unrouted`}；`result` ∈ {ok, business_error, internal_error, overloaded, bad_request, unauthenticated, forbidden, unsupported}（同 `FriendMetrics.java:49-66`）；启动时全部预建 |
+| `game.trade.home.zone.lookups` | `trade_home_zone_lookup_total` | `result` ∈ {ok, unmapped, error} |
+| `game.trade.seed.listings` | `trade_seed_listing_total` | `result` ∈ {ok, rejected, error}（非 dev/test、参数非法、卖家无归属区记 rejected，同 `admin_logic.go:57`、`:66-77`） |
+| `game.trade.favorite.retries`（Java 增项） | — | 无标签，统计收藏写入的可重试错误重跑次数 |
+| 播种接口的 HTTP 审计 | — | 审计日志行 + `game.trade.admin.requests{op,status}`（op 只取已知路径，同 `AdminAuthFilter.java:32-36`、`:76-80`） |
+| gate 已有 | `game_gate_client_requests_total{result}`、后端调用计时（domain = trade，`ClientDispatcher.java:376-377`）、`game_killswitch_blocked_total{method}` | — |
 
 ---
 
@@ -945,7 +945,7 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 ### 7.2 Java 移植时会踩的
 
 见 §5.9 的 10 条；另外：
-- **gate 后端失败推 23**：xm-trade 一不在，客户端就等 15 s 然后隔离（§0.8、T8）。
+- **gate 后端失败推 23**：game-trade 一不在，客户端就等 15 s 然后隔离（§0.8、T8）。
 - **单 zone 切片**：跨区可见性只能靠服务单测与 MySQL 测试覆盖（Q3）。
 - **`NodeTypes.TRADE` 改值等于换键空间**（`NodeTypes.java:3-7`），上线后不要改名。
 - **播种接口在 prod 也注册**：只回 403，但令牌仍是第一道闸；不要把它挂到对外端口。
@@ -979,14 +979,14 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 ### 7.4 对分区稿的勘误
 
-- **「Java 要复用 `MysqlSyntax.goTrimSpace`（包内可见）」**（数据层分区稿 §14 第 4 条）：已过时。`GoSpaces` 已在 xm-common（`xm-common/.../text/GoSpaces.java:13-44`，提交 `06fe1f0`）。
+- **「Java 要复用 `MysqlSyntax.goTrimSpace`（包内可见）」**（数据层分区稿 §14 第 4 条）：已过时。`GoSpaces` 已在 game-common（`game-common/.../text/GoSpaces.java:13-44`，提交 `06fe1f0`）。
 - **「解析先于身份检查（同 `FriendDispatcher.java:167-178`）」**（契约分区稿 §4.3）：friend 实际是先查身份（`FriendDispatcher.java:151-156`）、再在工作线程里解析（`:173-178`）。trade 建议「解析 → 身份」
   （与 grpc-go 一致），两种顺序客户端所见相同（§5.3）。
 - **`PlayerTableHomeZones.java:42-69` / `:59-69`**（契约分区稿 §4.1、§4.6）：行号有误，类在 `:19-46`，`homeZones` 在 `:37-46`。
 - **「客户端类目值换算在 `JubaozhaiClient.cs:299`」**（数据层分区稿 §2）：发送在 `:300-301`，接收在 `:333-336`。
 - **tip 段的设计稿行号**（数据层分区稿 §9）：段定义在设计稿 :24（J-7）与 :266；P3 规划码在 :269（不是 :263 / :266）。
-- **方案 A 的形状**：数据层分区稿建议「Dubbo `TradeAdminService` + xm-data HTTP 转发」，契约分区稿建议「xm-trade 管理口 HTTP」。核对后：xm-data 目前不是 Dubbo 消费方
-  （仓内无 `@DubboReference`，`xm-data/pom.xml:24-28` 只为消息类型依赖 xm-api），走 xm-data 要多接一整套 Dubbo；本稿取后者为推荐（§4.8），前者列为备选 B。
+- **方案 A 的形状**：数据层分区稿建议「Dubbo `TradeAdminService` + game-data HTTP 转发」，契约分区稿建议「game-trade 管理口 HTTP」。核对后：game-data 目前不是 Dubbo 消费方
+  （仓内无 `@DubboReference`，`game-data/pom.xml:24-28` 只为消息类型依赖 game-api），走 game-data 要多接一整套 Dubbo；本稿取后者为推荐（§4.8），前者列为备选 B。
 - **播种请求体**（契约分区稿 §5）：用 proto3 JSON 要新用 `protobuf-java-util`（根 `pom.xml:81-85` 只管版本、无人使用），与 `tech-stack.md:25`、`:35`「JSON 一律用 Jackson」冲突；
   本稿改为 protobuf 二进制（Q2）。
 - **写侧批次**：数据层分区稿说「trade 托管至少要等 4.5 之后」，契约分区稿说「等 mmorpg P3 契约、与 P3 同批」——两者不矛盾，合并为「依赖 4.5 + mmorpg P3，P2 与 P3 同批」（§4.6）。
@@ -998,7 +998,7 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 - `docs/porting/inventory/social.md:13-14`：「Java 三块全部未开始，`ClientDispatcher.java:254`」已过时：friend、chat 已完成，gate 有按域的后端队列（`ClientDispatcher.java:258-262`、`:329-350`）；
   未接入域的分支现在在 `:313-319`。
 - `social.md:28`：「会话缺失 → in-band 1005」只对无 metadata 的内部调用成立；带会话但 `player_id = 0` 是 Unauthenticated → 信封 1003（`session.go:98-100`）。
-- `social.md:29`、`:367`（开放问题 1）：「可合成 xm-social + xm-trade」已被「每个服务一个进程」取代（`roadmap.md:48`）。
+- `social.md:29`、`:367`（开放问题 1）：「可合成 game-social + game-trade」已被「每个服务一个进程」取代（`roadmap.md:48`）。
 - `social.md:275`：「MyBatis 动态 SQL」已被 pbmysql 建表 + 手写 JDBC 取代（`roadmap.md:50-53`）。
 - `social.md:293-303`（trade-favorite）：应补「卖家可以收藏自己任意状态的商品」与「过期收藏仍占名额、且列不出来」（§2.7）。
 - `social.md:323`：「Java 可做成仅开发 profile 启用的 Dubbo 管理接口」——本稿推荐管理口 HTTP（§4.8）。
@@ -1018,15 +1018,15 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 | 编号 | 差异 | 理由 | 客户端可见？ | 两版同改？ |
 |---|---|---|---|---|
-| T1 | 独立进程 xm-trade（Dubbo group `trade`，端口 20887 / 18111） | 每个服务一个进程（`roadmap.md:48`）；端口顺延 guild | 否 | 否 |
-| T2 | 表在 `xm_java`，Java 自有 `trade_tables.proto` + xm-pbmysql；没有 `-migrate` / Job / `AutoMigrate` / 只读 plan；pbmysql 补建缺失的普通索引；4.7 只建两张表 | `roadmap.md:50-53`；同 guild D2；DDL 逐字节相同 | 否 | 否 |
+| T1 | 独立进程 game-trade（Dubbo group `trade`，端口 20887 / 18111） | 每个服务一个进程（`roadmap.md:48`）；端口顺延 guild | 否 | 否 |
+| T2 | 表在 `game`，Java 自有 `trade_tables.proto` + game-pbmysql；没有 `-migrate` / Job / `AutoMigrate` / 只读 plan；pbmysql 补建缺失的普通索引；4.7 只建两张表 | `roadmap.md:50-53`；同 guild D2；DDL 逐字节相同 | 否 | 否 |
 | T3 | 归属区取 `player.zone_id`，代替 data_service 的 `player:zone` 映射；缺行或 0 → 20001，读失败 → in-band 1003 | Java 没有 data_service；同 guild D3、team D5 | 否 | 否 |
 | T4 | `listing_id` 用雪花（`NodeTypes.TRADE`，作用域 0），代替号段 | Java 不做号段（`PARITY.md:55`；`architecture.md:635-646`） | **是**：编号位数变长 | 否 |
-| T5 | 播种走 xm-trade 管理口 `POST /admin/trade/seed-listing`（令牌 + 操作人 + 审计，protobuf 二进制），代替 gRPC `TradeAdmin.SeedListing`；接口总注册、非 dev/test 回 403 | robot 不引入 Dubbo；`ClientMessageService` 没有「无会话内部调用」这条口 | 否（199 经 gate 照样无回包） | 否 |
+| T5 | 播种走 game-trade 管理口 `POST /admin/trade/seed-listing`（令牌 + 操作人 + 审计，protobuf 二进制），代替 gRPC `TradeAdmin.SeedListing`；接口总注册、非 dev/test 回 403 | robot 不引入 Dubbo；`ClientMessageService` 没有「无会话内部调用」这条口 | 否（199 经 gate 照样无回包） | 否 |
 | T6 | 会话 `player_id = 0` → 信封 1003；基线逻辑层「无会话 → 1005」在 Java 不可达（服务层仍保留判定） | 同基线 Unauthenticated → 路由服信封 1003；同 friend | 否 | 否 |
 | T7 | 工作队列满、排队超预算 → in-band 1003（不带原因串） | friend 先例；与基线预算到期的 in-band 1003 同形、不隔离 | 只在过载时 | 否 |
-| **T8** | **gate 对后端调用失败 / 超时 / 没有提供方，回带请求号的信封 1003**（`envelopeError`，`ClientDispatcher.java:861-868`），替代推 23 {1003}（`:389-393`）。**范围待定（Q1）** | 这是基线路由服的形状（`forwardlogic.go:147-154`、`:170-183`）；聚宝斋客户端按设计只在超时时隔离（`JubaozhaiClient.cs:16-18`；设计稿 :289），trade 是可选服务。不改的话 xm-trade 一不在，客户端就等 15 s 然后隔离 | **是**（让 Java 回到基线行为） | 否（只改 Java gate） |
-| T9 | 热关停在 gate 按方法检查（Redis `xm:killswitch`），规则键与基线 etcd 键同名 | `architecture.md:407-426` | 否 | 否 |
+| **T8** | **gate 对后端调用失败 / 超时 / 没有提供方，回带请求号的信封 1003**（`envelopeError`，`ClientDispatcher.java:861-868`），替代推 23 {1003}（`:389-393`）。**范围待定（Q1）** | 这是基线路由服的形状（`forwardlogic.go:147-154`、`:170-183`）；聚宝斋客户端按设计只在超时时隔离（`JubaozhaiClient.cs:16-18`；设计稿 :289），trade 是可选服务。不改的话 game-trade 一不在，客户端就等 15 s 然后隔离 | **是**（让 Java 回到基线行为） | 否（只改 Java gate） |
+| T9 | 热关停在 gate 按方法检查（Redis `game:killswitch`），规则键与基线 etcd 键同名 | `architecture.md:407-426` | 否 | 否 |
 | T10 | robot 用 run-tag 新账号；跨区步骤只在配了第二个 zone 时跑，单区用 `zone_filter` 断言补；`--trade-scope` 有缺省 `zone`（基线 `expect_scope` 必填）；两种范围各重启一次 | 同 guild D18、team D16 | 否 | 否 |
 | T11 | 指标名按 Java 风格（§6.2） | `architecture.md` §11 | 否 | 否 |
 | T12 | 播种开关读 `RunMode`（认 development / local / testing 等别名），基线只认字面 dev / test | `RunMode.java:36-38`；全仓统一的运行模式判据 | 否 | 否 |
@@ -1049,12 +1049,12 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 1. **Q1（T8）gate 后端失败的回法**：(a) 对所有非 login 后端（friend / chat / team / guild / trade）都改成带请求号的信封 1003（**推荐**：这本来就是基线路由服的行为；要同步更新 friend 行、guild D9、
    team D14 与 `architecture.md:85`，并改 `ClientDispatcherTest.java:486` 一带的断言）；(b) 只对 trade 域改；(c) 不改，登记为与 D9 / D14 同类的差异。
-2. **Q2 播种方案与请求体格式**：A（xm-trade 管理口 HTTP，**推荐**）还是 B（类型化 Dubbo，经 xm-data 转发或 robot 直连）？请求体 protobuf 二进制（**推荐**）还是 JSON（要么用 Jackson 写 DTO，
+2. **Q2 播种方案与请求体格式**：A（game-trade 管理口 HTTP，**推荐**）还是 B（类型化 Dubbo，经 game-data 转发或 robot 直连）？请求体 protobuf 二进制（**推荐**）还是 JSON（要么用 Jackson 写 DTO，
    要么引入 `protobuf-java-util` 并登记 tech-stack）？
-3. **Q3 跨区 robot 步骤**：本机切片要不要起第二个 zone（login 与 gate 都设 `xm.zone-id=2`）？不起的话，跨区可见性只能由服务单测与 MySQL 测试覆盖。
+3. **Q3 跨区 robot 步骤**：本机切片要不要起第二个 zone（login 与 gate 都设 `game.zone-id=2`）？不起的话，跨区可见性只能由服务单测与 MySQL 测试覆盖。
 4. **Q4 写侧批次**：同意 trade 侧 P2 不单独移植、等 mmorpg P3 契约后与 P3 同批（**推荐**，路线图新增 4.8）？还是 4.5 之后就先移植 P2（无客户端入口、默认关闭）？
 5. **Q5（T13）发号租约**：启动时申领、失败拒启（**推荐**，同 guild / team）；还是照基线只告警、读路径照常、播种时再懒申领？
-6. **Q6 归属区查询件**：`HomeZones` / `PlayerTableHomeZones` 上移到 xm-common 给 guild 与 trade 共用（**推荐**），还是 xm-trade 复制一份？
+6. **Q6 归属区查询件**：`HomeZones` / `PlayerTableHomeZones` 上移到 game-common 给 guild 与 trade 共用（**推荐**），还是 game-trade 复制一份？
 7. **Q7 锁等待上限**：`innodb_lock_wait_timeout` 取 2（对齐单次 SQL 上限，**推荐**）、3（同 friend）还是 1（同 guild）？trade 只有收藏写入会等锁。
 8. **Q8 过期收藏卡死 20002**：保持基线（**推荐**，P1 线上没有真实商品）还是向 mmorpg 提议两版同改（N7）？
 9. **Q9 robot 的范围选项**：`--trade-scope` 给缺省 `zone`（与 `application.yaml` 一致，**推荐**）还是照基线必填？
@@ -1095,7 +1095,7 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 
 - **不连库**：`buildListingFilter` / `listingOrderBy` 的 SQL 与参数逐字（`listing_repo_test.go:21-125`）；列清单 18 / 19 列且与读取顺序一致（`:140-158`）；收藏写入是 ODKU（`:126-138`）；
   DDL 与同步来的 `TradeListingRecord` / `TradeFavoriteRecord` 逐字节相同、与 §1.5 原文逐字相同（照 `GuildTablesTest`）。
-- **真 MySQL**（`-Dxm.it.mysql=…`，缺省跳过，照 `JdbcFriendStoreMysqlTest.java:45-56`）：
+- **真 MySQL**（`-Dgame.it.mysql=…`，缺省跳过，照 `JdbcFriendStoreMysqlTest.java:45-56`）：
   - 移植 `listing_repo_integration_test.go:120-247` 的全部子测：主键冲突报错（`:139`）、寄售含 LOCKED 且不含公示 / 过期 / 已售且新上架在前、列表不取 description、公示列表、分区 + 排序 + 分页、
     LIKE 通配按字面量、数字搜索、收藏全流程（幂等插入、计数、存在性、批量查、只看收藏、删除幂等）、货架任意状态、详情全列与不存在；
   - 收藏的删除标记复活不死锁（`:482`、`:529`）；`:449` 的 INSERT IGNORE 红对照可选；

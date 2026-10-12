@@ -3,8 +3,8 @@
 > **基线**：mmorpg `26ceb70ca`（`D:\work\mmorpg`，稀疏克隆）。本稿用到的目录都已检出。只有一处缺口：`activity.h:5-6` 引用的
 > `go/guild/internal/data/trial_result_record.go` 在仓库里不存在，`go/` 下也搜不到任何 `activity_result` 的读者——基线的活动结果持久通道只有写方、没有销账方。
 >
-> **Java**：HEAD `aa8b5b5`（6.1 已提交）。工作区里还有 5.2 的未提交改动（xm-scene / xm-gate / xm-player-store / xm-scene-manager）和 6.2 的未提交改动
-> （`xm-battle`、xm-api `BattleNodeService` / `battle_control.proto`、xm-common 票据、xm-net 限频）。Java 行号**以工作区为准**；5.2、6.2 提交后会漂移，
+> **Java**：HEAD `aa8b5b5`（6.1 已提交）。工作区里还有 5.2 的未提交改动（game-scene / game-gate / game-player-store / game-scene-manager）和 6.2 的未提交改动
+> （`game-battle`、game-api `BattleNodeService` / `battle_control.proto`、game-common 票据、game-net 限频）。Java 行号**以工作区为准**；5.2、6.2 提交后会漂移，
 > 所以同时写出类名与方法名。
 >
 > **本稿的来历**：由三份分区稿合并——① 基线冻结面（备战冻结、快照、确认 / 取消 / 清理、锁与上下文、重连提示、在途闸、gate 拒绝战斗上行）；
@@ -37,7 +37,7 @@
 > | `t_settle` / `t_route` / `t_act` | `cpp/tests/bag_test/player_battle_settlement_test.cpp` / `cpp/tests/routing_identity_test/routing_identity_test.cpp` / `cpp/tests/turn_battle_engine_test/battle_result_activity_test.cpp` |
 > | `gather.go` / `pc.go` | `go/match/internal/logic/gather.go` / `go/match/internal/playercontract/playercontract.go` |
 >
-> **proto 行号**一律用 mmorpg 的；Java 同步副本在 `xm-proto/src/main/proto/proto/...`，Java 行号 = mmorpg 行号 + 3（`battle-engine-spec.md:17-18`）。
+> **proto 行号**一律用 mmorpg 的；Java 同步副本在 `game-proto/src/main/proto/proto/...`，Java 行号 = mmorpg 行号 + 3（`battle-engine-spec.md:17-18`）。
 >
 > **Java 侧缩写**：`node-spec` = `docs/porting/battle-node-spec.md`（6.2）；`engine-spec` = `docs/porting/battle-engine-spec.md`（6.1）；
 > `handoff-spec` = `docs/porting/scene-handoff-spec.md`（5.2）；`mirror-spec` = `docs/porting/dungeon-mirror-spec.md`（5.3）；
@@ -54,10 +54,10 @@
   伴生 Redis 锁 `battle:lock:{pid}`（值 = battle_id）与上下文 `battle:ctx:{pid}`（组件序列化），所有删 / 续都「值等于本局才动」（`pb.cpp:170-191`）。
 - **Java 的根本前提不同**：断线即写回、释放、移除实例，重连从库新建实例（`SceneWorld.java:1384-1415`；`PARITY.md:91` ①）。内存冻结活不过任何一次断线，
   所以 **Java 的锁不再只是咨询性的，而是承重的**：备战时先把锁写成功再回 match，写失败就拒绝；锁独占，被别的局占着就拒绝（D3）。
-- **锁的形态**：锁与上下文合成一个 Hash `xm:battle:{<pid>}:lock`（字段 `b n s d p`），「锁与 ctx 同生共死」由结构保证（D2）。
+- **锁的形态**：锁与上下文合成一个 Hash `game:battle:{<pid>}:lock`（字段 `b n s d p`），「锁与 ctx 同生共死」由结构保证（D2）。
 - **结算幂等**：账本进 `player_state.battle_ledger`（新字段 9），与货币 / 背包 / 宝宝 / 任务同一次带 `owner_epoch` 围栏的 MySQL 写；
   「别再发一次」看内存账本，「可以销账」看 `ScenePlayer.persistedState()`——与资产通道同一条判据（`AssetOpService.java:515-534`）。不移植进程内应用缓存（D18）。
-- **发件箱**：battle 先落 Redis、后投递、未销账就有界重投（10 s × 12），照基线。待结算记录改成**每局一个字段**的 Hash `xm:battle:{<pid>}:settlement`（D13），
+- **发件箱**：battle 先落 Redis、后投递、未销账就有界重投（10 s × 12），照基线。待结算记录改成**每局一个字段**的 Hash `game:battle:{<pid>}:settlement`（D13），
   首投与重投都按位置记录 + 节点目录解析（D14），ACK 仍是 scene 在 Redis 上的条件销账（与放锁同一段 Lua）；销账同时给这一局留一个 10 min 的
   「已销账」墓碑，晚到 / 被重放的落库见到它就不写（D29）。
 - **传输**：采纳 6.2 的 Q13。scene 在现有资产 RPC 端口（21100）上再导出 `SceneBattleService`（Dubbo Triple，group `scene-battle`，`register=false`，
@@ -90,9 +90,9 @@
 
 | 批次 | 6.3 依赖 / 提供 | 对方负责 |
 |---|---|---|
-| **6.1 引擎**（已提交） | scene 只用 `BattleRules.isTurnBattleCastableSkill`（engine-spec D7，`:1543`）与 `BattleTableFingerprint.compute`（engine-spec §10.1，`:1297`）；xm-scene 新增对 xm-battle-engine 的依赖 | 引擎内的宝宝单位、actor_id、只普攻、结算里带宝宝终值（engine-spec `:250`、`:313-319`、`:617`、`:939`） |
+| **6.1 引擎**（已提交） | scene 只用 `BattleRules.isTurnBattleCastableSkill`（engine-spec D7，`:1543`）与 `BattleTableFingerprint.compute`（engine-spec §10.1，`:1297`）；game-scene 新增对 game-battle-engine 的依赖 | 引擎内的宝宝单位、actor_id、只普攻、结算里带宝宝终值（engine-spec `:250`、`:313-319`、`:617`、`:939`） |
 | **6.2 battle 节点**（实现中） | 实现 6.2 留下的三个出站端口 `SceneBattleEvents` / `SettlementSink` / `ActivityResultSink` 的真实传输；`RoomOrigin` 增加 `DEV_GATHER`；管理口增加 dev gather；修订 node-spec §7.13 的预留键名 | 收尾顺序（逐人「推 150 → 调 `SettlementSink`」，node-spec §4.6）、确认补发节奏（17 次，§4.8）、dev 房间不结算 |
-| **6.4 match** | 提供 `SceneBattleService.prepareBattle / cancelBattlePrepare`、`BattleLockReader`（EXISTS / 读 battle_id / 批量）、`BattleResultSink` 只留日志实现 | 调备战 / 取消、读锁（JoinQueue 16000、切磋 16009 / 16010 / 16012、整队开战预检 4025）、对局结果的传输与消费、179 补签；对备战失败 / 超时的成员也发取消（Q21）。match-spec 已改用 `RedisKeys.battleLock`（Hash，EXISTS 语义不变）并经 `BattleLockReader` 读；match 的备战 / 取消调用超时保持 3 s、超时按结局不明处理并补发取消（§7.3、§10.4 的裁决）。**6.4 已落地（2026-10-08，match-spec 及其实现记录）**：备战 / 取消由 xm-match 的 `gather.ScenePreparer` 经 `SceneBattleService` 调（3 s，`MatchBudgets.PREPARE_BATTLE_TIMEOUT_MS` / `CANCEL_PREPARE_TIMEOUT_MS`；超时、传输失败、`UNSPECIFIED` 都按结局不明并补发取消，取消发回备战时记下的端点）；读锁都经 `BattleLockReader`；对局结果由 xm-battle 的 `KafkaBattleResultSink` 发到 Kafka、xm-match 消费入账；179 在 xm-match。6.4 没有改 xm-scene 的代码 |
+| **6.4 match** | 提供 `SceneBattleService.prepareBattle / cancelBattlePrepare`、`BattleLockReader`（EXISTS / 读 battle_id / 批量）、`BattleResultSink` 只留日志实现 | 调备战 / 取消、读锁（JoinQueue 16000、切磋 16009 / 16010 / 16012、整队开战预检 4025）、对局结果的传输与消费、179 补签；对备战失败 / 超时的成员也发取消（Q21）。match-spec 已改用 `RedisKeys.battleLock`（Hash，EXISTS 语义不变）并经 `BattleLockReader` 读；match 的备战 / 取消调用超时保持 3 s、超时按结局不明处理并补发取消（§7.3、§10.4 的裁决）。**6.4 已落地（2026-10-08，match-spec 及其实现记录）**：备战 / 取消由 game-match 的 `gather.ScenePreparer` 经 `SceneBattleService` 调（3 s，`MatchBudgets.PREPARE_BATTLE_TIMEOUT_MS` / `CANCEL_PREPARE_TIMEOUT_MS`；超时、传输失败、`UNSPECIFIED` 都按结局不明并补发取消，取消发回备战时记下的端点）；读锁都经 `BattleLockReader`；对局结果由 game-battle 的 `KafkaBattleResultSink` 发到 Kafka、game-match 消费入账；179 在 game-match。6.4 没有改 game-scene 的代码 |
 | **5.2 跨节点换图**（实现中） | 战斗冻结与交出互斥（`handoff-spec:106`）；`BattlePolicy` 与 `FreezePolicy` 并存；交出进场也跑进场恢复 | `FreezePolicy`、`SwitchPhase`、交出事务、`requestSave` 在 FREEZING 回 IN_FLIGHT |
 | **2.8 宝宝**（已完成） | `PetService.buildBattleSnapshot` / `applyBattleSettlement` 新增；写闸 26008 接入 `PetService.checkWritable` | — |
 | **2.5 任务**（已完成） | 结算的击杀事实调用现成的 `MissionService.onMonsterKilled`（`MissionService.java:208-215`），打通「任务 12 可领」端到端 | — |
@@ -100,7 +100,7 @@
 | 5.1 / 5.3 | 排空改派、级联改派跳过战斗中的玩家（`channels-spec:788`、`mirror-spec:121`、`:797`）；63 镜像分支由 63 的入口闸统一覆盖 | — |
 | 5.4 | 留钩子：226 在 3024 / 3007 之后、3026 之前回 3025（`lc.cpp:2780-2788`）；跨 zone 起交接复查回 3025 | 实现 |
 | 5.5 | 保证「写回后由下一个持有者按锁重建、结算按位置或进场恢复落地」（Q17） | 疏散改派跳过战斗中的玩家、到期写回（`scene-drain-spec.md` Q16） |
-| 6.5 / 4.6 / 7.2 | 只提供 `BattleLockReader` | 观战 16015、帮会活动开局拒绝、活动结果的消费与巡检、GM 回档 1005（`rbh.cpp:72`）。7.2b 的 GM 回档已接：xm-data 在夺权之后批量读锁，命中记 `in_battle`、读失败记 `battle_lock_unknown`，无条件拒绝（`BattleLockGate`，见 data-ops-spec） |
+| 6.5 / 4.6 / 7.2 | 只提供 `BattleLockReader` | 观战 16015、帮会活动开局拒绝、活动结果的消费与巡检、GM 回档 1005（`rbh.cpp:72`）。7.2b 的 GM 回档已接：game-data 在夺权之后批量读锁，命中记 `in_battle`、读失败记 `battle_lock_unknown`，无条件拒绝（`BattleLockGate`，见 data-ops-spec） |
 | 4.3 组队 | 收掉 team-spec D10：`TeamMemberView.in_battle` 由锁算出；组队跟随读锁（均已落地，§7.13） | 整队开战预检（6.4） |
 
 ### 0.4 兼容面
@@ -313,12 +313,12 @@ Redisson 不保证这一点（`PARITY.md:91` 记过 NOSCRIPT 重发时命令被�
 
 | 读者 | 判定 | 客户端看到 | 出处 | Java 批次 |
 |---|---|---|---|---|
-| JoinQueue | 锁存在 → 16000；**读失败回 `kMatchInternal`**（不是 16000，`IsBattleLocked` 虽返回 `true` 但调用方先判 err） | `16000 kMatchInBattle` / 内部错误 | `joinqueuelogic.go:95-111`；`pc.go:112-121` | 6.4，**已做**（xm-match `QueueService`） |
-| 切磋发起 / 应战复查 | 自己有锁 / 目标有锁；读失败一律按「忙」 | 16010 / 16009；16012 / 16010 | `challengelogic.go:69-87`、`:245-265` | 6.4，**已做**（xm-match `ChallengeService`） |
+| JoinQueue | 锁存在 → 16000；**读失败回 `kMatchInternal`**（不是 16000，`IsBattleLocked` 虽返回 `true` 但调用方先判 err） | `16000 kMatchInBattle` / 内部错误 | `joinqueuelogic.go:95-111`；`pc.go:112-121` | 6.4，**已做**（game-match `QueueService`） |
+| 切磋发起 / 应战复查 | 自己有锁 / 目标有锁；读失败一律按「忙」 | 16010 / 16009；16012 / 16010 | `challengelogic.go:69-87`、`:245-265` | 6.4，**已做**（game-match `ChallengeService`） |
 | 观战 | 锁存在；读失败回内部错误 | 16015 | `watchbattlelogic.go:80-89` | 6.5 |
-| 整队开战预检 | 锁存在（读失败按在途） | `4025`，参数为 pid | `go/match/internal/team/service.go:429-435` | 6.4，**已做**：xm-match 的成员预检读锁、xm-team 映射成 4025[pid]（读失败按在途；team-spec §5.5） |
+| 整队开战预检 | 锁存在（读失败按在途） | `4025`，参数为 pid | `go/match/internal/team/service.go:429-435` | 6.4，**已做**：game-match 的成员预检读锁、game-team 映射成 4025[pid]（读失败按在途；team-spec §5.5） |
 | 队伍视图 | 读时由锁算出（MGET 失败为 false） | `TeamMemberView.in_battle` | `team-spec:1221` | **6.3，已做**（收掉 team-spec D10：`TeamDisplay` 经 `BattleLockReader.existsAll` 批量读，任何失败整批按 false，§7.13 世界内部第 4 条） |
-| 帮会活动开局（match 的预检） | 锁存在；读失败回 `ACTIVITY_BATTLE_REJECT_INTERNAL` | `ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE` | `go/match/internal/logic/activitybattlelogic.go:220-228` | 6.4（match 侧，**已做**：xm-match `ActivityBattleService`）/ 4.6（调用方与结果消费，未做） |
+| 帮会活动开局（match 的预检） | 锁存在；读失败回 `ACTIVITY_BATTLE_REJECT_INTERNAL` | `ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE` | `go/match/internal/logic/activitybattlelogic.go:220-228` | 6.4（match 侧，**已做**：game-match `ActivityBattleService`）/ 4.6（调用方与结果消费，未做） |
 
 ### 2.5 gate 拒绝战斗上行（`gate_cmp.cpp:937-950`）
 
@@ -540,33 +540,33 @@ pending 每人一槽，battle 无条件 SET。下一局如果在上一局销账�
 
 | 模块 | 新增 / 改动 |
 |---|---|
-| `xm-discovery` | `RedisKeys.battleLock(pid)` / `battleSettlements(pid)` / `battleSettled(pid, battleId)`（已销账墓碑，D29）/ `battleActivityResult(battleId)`；包 `com.game.discovery.battle`：`BattleRedis`（全部 Lua 文本、返回码与跨进程常量的唯一出处，scene 与 battle 共用；结果形状 `EnterRead` / `SettlementField`）、`BattleLockReader`（EXISTS / 读 battle_id / 批量，给 match、team、scene 的组队跟随、xm-data 的回档闸与以后的 guild） |
-| `xm-api` | `com.game.api.SceneBattleService`；`xm/api/scene_battle.proto`（`SceneBattleCall` / `SceneBattleReply` / `SceneBattleStatus` / `SettlementDisposition`）；`DubboGroups.SCENE_BATTLE = "scene-battle"`（改 `SCENE_ASSET` 注释里「同一端口上不会有别的服务」，`DubboGroups.java:29-33`）；新增通用的按节点直连客户端 `com.game.api.rpc.NodeRpcClients<S>`（node-spec Q9 原本留给 6.4，6.3 先用到；`SceneAssetOpClients` 还没有改成它的薄包装，见实现记录）；`battle_control.proto` 追加 `DevGatherRequest / DevGatherResponse` |
-| `xm-player-store` | `player_state.proto` 加 `BattleLedgerState battle_ledger = 9`；不改表结构 |
-| `xm-audit` | `transaction_log.proto` 加 `TX_ITEM_AWARD = 20`（同基线值）、`TX_BATTLE_REWARD = 1005`（Java 独有，按 1001+ 规则） |
-| `xm-scene` | 新包 `com.game.scene.battle`：`PlayerBattle` / `BattleFreeze`（运行态）、`BattleLedger`（持久化）、`PlayerBattleService`（备战 / 取消 / 确认 / 恢复 / reaper / 解冻入口，**以及结算到达的分流 `deliver`、应用后的收尾 `applyAndFinish` 与销账 `writeOff` / `ack`**）、`BattleSnapshots`（纯组装）、`BattleSettlementService`（**只做**一份结算在一名玩家身上的应用，184 由它直接发）、`BattleLocks`（异步 Redis 端口；生产实现是 `BattleLocks.redis(BattleRedis)` 返回的委托，没有单独的类）、`SceneBattleTables`（启动时建一次的配表视图：指纹、可施放技能、`battleUsable`、职业行）、`SceneBattleProvider`；`com.game.scene.world` 里的 `BattlePolicy` 与 `BattleHooks`（世界回调战斗的三个钩子：进场、落盘、原地解冻）。与原稿的类划分不同：没有 `SettlementWriteOff` / `RedisBattleLocks` / `BattleItems`，分流与销账收在 `PlayerBattleService`——四条应用路径只有一个收口，过期读在那里统一兜住（§7.10 第 9 步）。`SceneAssetRpcServer` 改名 `com.game.scene.rpc.SceneRpcServer`（一个模块导出两个服务；配置键、Dubbo 应用名、回写执行器名 `scene-asset-reply` 不改，避免运维配置与指标序列变动）；新依赖 `xm-battle-engine`；`PlayerData` / `ScenePlayer` 加 `name`（`PlayerRow` 已有 `name`，`PlayerMapper.java:36` 是 `SELECT *`，只需改 `StoragePlayerRepository.toData`，`:659-664`）；`BagService.removeClamped` / `Bag.drainClamped`（Java 背包现在没有任何扣除方法，`Bag.java:138`、`:299`）；`PetService.buildBattleSnapshot` / `applyBattleSettlement`；`AssetAudit.Reason.BATTLE_REWARD` / `ITEM_AWARD`；`SceneMessageIds` 加 144 / 150 |
-| `xm-battle`（6.2） | `com.game.battle.outbox`：`SettlementOutbox`（直接实现 `SettlementSink`）、`SettlementRetryRules`（纯函数，移植 `outbox.h:28-90`）、`ActivityResultOutbox`（直接实现 `ActivityResultSink`）、`ActivityRetryRules`（`activity.h:83-108`）、`OutboxMetrics`；`com.game.battle.port.scene`：`SceneTransport`（装配：`battle-outbox` 线程、直连客户端、定位器、两个发件箱与确认传输，停机排空）、`SceneTransportProperties`、`DubboSceneBattleEvents`、`SceneClientSweeper`（直连客户端缓存的清扫）；`BattleResultSink` 加 `Channel{PLAIN, ACTIVITY}`；`admin.DevGather` / `DevGatherController` / `DevGatherConfiguration`；`RoomOrigin.DEV_GATHER`。原稿列的 `OutboxSettlementSink` / `OutboxActivityResultSink` 没有单独成类 |
-| `xm-gate` | `MessageRoute` 加 `directOnly`、`MessageRoutes.DIRECT_ONLY_SERVICES`；`GateMetrics.RequestResult.BATTLE_REJECTED`；战斗上行当场拒绝（§7.19） |
-| `xm-team` | `TeamDisplay.in_battle` 由 `BattleLockReader.existsAll` 批量算出（`TeamConfiguration` 新增 `BattleLockReader` bean；收掉 team-spec D10） |
-| `xm-data`（7.2b） | 回档写之前查战斗锁（`BattleLockGate`，经 `BattleLockReader.existsAll`；见 data-ops-spec，本稿不展开） |
-| `xm-robot` | `battle-settle` 场景；`BattleAdminClient`（6.2）加 gather / cancel-prepare；故障变体 `BattleCrashScenario` + `tools/local/battle-crash-window.sh`（§13.8） |
+| `game-discovery` | `RedisKeys.battleLock(pid)` / `battleSettlements(pid)` / `battleSettled(pid, battleId)`（已销账墓碑，D29）/ `battleActivityResult(battleId)`；包 `com.game.discovery.battle`：`BattleRedis`（全部 Lua 文本、返回码与跨进程常量的唯一出处，scene 与 battle 共用；结果形状 `EnterRead` / `SettlementField`）、`BattleLockReader`（EXISTS / 读 battle_id / 批量，给 match、team、scene 的组队跟随、game-data 的回档闸与以后的 guild） |
+| `game-api` | `com.game.api.SceneBattleService`；`game/api/scene_battle.proto`（`SceneBattleCall` / `SceneBattleReply` / `SceneBattleStatus` / `SettlementDisposition`）；`DubboGroups.SCENE_BATTLE = "scene-battle"`（改 `SCENE_ASSET` 注释里「同一端口上不会有别的服务」，`DubboGroups.java:29-33`）；新增通用的按节点直连客户端 `com.game.api.rpc.NodeRpcClients<S>`（node-spec Q9 原本留给 6.4，6.3 先用到；`SceneAssetOpClients` 还没有改成它的薄包装，见实现记录）；`battle_control.proto` 追加 `DevGatherRequest / DevGatherResponse` |
+| `game-player-store` | `player_state.proto` 加 `BattleLedgerState battle_ledger = 9`；不改表结构 |
+| `game-audit` | `transaction_log.proto` 加 `TX_ITEM_AWARD = 20`（同基线值）、`TX_BATTLE_REWARD = 1005`（Java 独有，按 1001+ 规则） |
+| `game-scene` | 新包 `com.game.scene.battle`：`PlayerBattle` / `BattleFreeze`（运行态）、`BattleLedger`（持久化）、`PlayerBattleService`（备战 / 取消 / 确认 / 恢复 / reaper / 解冻入口，**以及结算到达的分流 `deliver`、应用后的收尾 `applyAndFinish` 与销账 `writeOff` / `ack`**）、`BattleSnapshots`（纯组装）、`BattleSettlementService`（**只做**一份结算在一名玩家身上的应用，184 由它直接发）、`BattleLocks`（异步 Redis 端口；生产实现是 `BattleLocks.redis(BattleRedis)` 返回的委托，没有单独的类）、`SceneBattleTables`（启动时建一次的配表视图：指纹、可施放技能、`battleUsable`、职业行）、`SceneBattleProvider`；`com.game.scene.world` 里的 `BattlePolicy` 与 `BattleHooks`（世界回调战斗的三个钩子：进场、落盘、原地解冻）。与原稿的类划分不同：没有 `SettlementWriteOff` / `RedisBattleLocks` / `BattleItems`，分流与销账收在 `PlayerBattleService`——四条应用路径只有一个收口，过期读在那里统一兜住（§7.10 第 9 步）。`SceneAssetRpcServer` 改名 `com.game.scene.rpc.SceneRpcServer`（一个模块导出两个服务；配置键、Dubbo 应用名、回写执行器名 `scene-asset-reply` 不改，避免运维配置与指标序列变动）；新依赖 `game-battle-engine`；`PlayerData` / `ScenePlayer` 加 `name`（`PlayerRow` 已有 `name`，`PlayerMapper.java:36` 是 `SELECT *`，只需改 `StoragePlayerRepository.toData`，`:659-664`）；`BagService.removeClamped` / `Bag.drainClamped`（Java 背包现在没有任何扣除方法，`Bag.java:138`、`:299`）；`PetService.buildBattleSnapshot` / `applyBattleSettlement`；`AssetAudit.Reason.BATTLE_REWARD` / `ITEM_AWARD`；`SceneMessageIds` 加 144 / 150 |
+| `game-battle`（6.2） | `com.game.battle.outbox`：`SettlementOutbox`（直接实现 `SettlementSink`）、`SettlementRetryRules`（纯函数，移植 `outbox.h:28-90`）、`ActivityResultOutbox`（直接实现 `ActivityResultSink`）、`ActivityRetryRules`（`activity.h:83-108`）、`OutboxMetrics`；`com.game.battle.port.scene`：`SceneTransport`（装配：`battle-outbox` 线程、直连客户端、定位器、两个发件箱与确认传输，停机排空）、`SceneTransportProperties`、`DubboSceneBattleEvents`、`SceneClientSweeper`（直连客户端缓存的清扫）；`BattleResultSink` 加 `Channel{PLAIN, ACTIVITY}`；`admin.DevGather` / `DevGatherController` / `DevGatherConfiguration`；`RoomOrigin.DEV_GATHER`。原稿列的 `OutboxSettlementSink` / `OutboxActivityResultSink` 没有单独成类 |
+| `game-gate` | `MessageRoute` 加 `directOnly`、`MessageRoutes.DIRECT_ONLY_SERVICES`；`GateMetrics.RequestResult.BATTLE_REJECTED`；战斗上行当场拒绝（§7.19） |
+| `game-team` | `TeamDisplay.in_battle` 由 `BattleLockReader.existsAll` 批量算出（`TeamConfiguration` 新增 `BattleLockReader` bean；收掉 team-spec D10） |
+| `game-data`（7.2b） | 回档写之前查战斗锁（`BattleLockGate`，经 `BattleLockReader.existsAll`；见 data-ops-spec，本稿不展开） |
+| `game-robot` | `battle-settle` 场景；`BattleAdminClient`（6.2）加 gather / cancel-prepare；故障变体 `BattleCrashScenario` + `tools/local/battle-crash-window.sh`（§13.8） |
 
 新增第三方依赖：无。不用 ECS：领域对象 + `XxxService`。
 
-### 7.2 Redis 键与 Lua（`BattleRedis`；全部经 `RedisKeys`，前缀 `xm:`）
+### 7.2 Redis 键与 Lua（`BattleRedis`；全部经 `RedisKeys`，前缀 `game:`）
 
 **键**：
 
 | 键 | 类型 / 字段 | 写者 | 读者 | TTL | 基线对应 |
 |---|---|---|---|---|---|
-| `xm:battle:{<pid>}:lock` | Hash：`b` battle_id（无符号十进制）、`n` battle_node_id、`s` `P` / `F`、`d` deadline_ms、`p` prepare_deadline_ms | 只有 scene | scene；match（EXISTS，含活动开局预检）；team（批量 EXISTS）；读 `b` 的接口留给 4.6（基线帮会没有生产读者，§1.2） | `max(0, 有效期限 − now)/1000 + 60`；结算应用后至少 180 s | `battle:lock` + `battle:ctx`（`pb.cpp:81-97`） |
-| `xm:battle:{<pid>}:settlement` | Hash：字段名 = battle_id（无符号十进制），值 = 契约 `BattleSettlementEvent` 字节 | battle（落库）；scene（只删字段） | battle 探测（HEXISTS）；scene 进场恢复 / rescue | 7 天，每次写刷新整键 | `pending` + `pending:id`（`outbox.h:94-99`），单槽改每局一字段（D13） |
-| `xm:battle:{<pid>}:settled:<battle_id>` | String `"1"`：这一局已销账的墓碑（`RedisKeys.battleSettled`，Java 独有，D29） | scene（`ACK`，无条件写）；battle（`ACK_IF_SUPERSEDED` 删记录的分支） | battle 的落库脚本（见到就不写） | 600 s（`SETTLED_TOMBSTONE_TTL_SEC`，≥ `OUTBOX_MAX_AGE`） | 无 |
-| `xm:battle:activity-result:<battle_id>` | String：契约 `BattleResultEvent` 字节 | battle | guild（4.6，消费后 DEL）；battle 探测（EXISTS） | 7 天 | `battle:activity_result:{id}`（`activity.h:30-41`） |
+| `game:battle:{<pid>}:lock` | Hash：`b` battle_id（无符号十进制）、`n` battle_node_id、`s` `P` / `F`、`d` deadline_ms、`p` prepare_deadline_ms | 只有 scene | scene；match（EXISTS，含活动开局预检）；team（批量 EXISTS）；读 `b` 的接口留给 4.6（基线帮会没有生产读者，§1.2） | `max(0, 有效期限 − now)/1000 + 60`；结算应用后至少 180 s | `battle:lock` + `battle:ctx`（`pb.cpp:81-97`） |
+| `game:battle:{<pid>}:settlement` | Hash：字段名 = battle_id（无符号十进制），值 = 契约 `BattleSettlementEvent` 字节 | battle（落库）；scene（只删字段） | battle 探测（HEXISTS）；scene 进场恢复 / rescue | 7 天，每次写刷新整键 | `pending` + `pending:id`（`outbox.h:94-99`），单槽改每局一字段（D13） |
+| `game:battle:{<pid>}:settled:<battle_id>` | String `"1"`：这一局已销账的墓碑（`RedisKeys.battleSettled`，Java 独有，D29） | scene（`ACK`，无条件写）；battle（`ACK_IF_SUPERSEDED` 删记录的分支） | battle 的落库脚本（见到就不写） | 600 s（`SETTLED_TOMBSTONE_TTL_SEC`，≥ `OUTBOX_MAX_AGE`） | 无 |
+| `game:battle:activity-result:<battle_id>` | String：契约 `BattleResultEvent` 字节 | battle | guild（4.6，消费后 DEL）；battle 探测（EXISTS） | 7 天 | `battle:activity_result:{id}`（`activity.h:30-41`） |
 
 - `{<pid>}` hash tag 的写法同 `RedisKeys.friendList`（`RedisKeys.java:74-80`）：锁、待结算记录、墓碑三键同槽，销账、取代、落库三段 Lua 跨键执行，将来上 Cluster 不用改。
   脚本只碰经 `KEYS` 传入的键，**不在 Lua 里用 ARGV 拼键**（`BattleRedisConstantsTest` 钉住）。
-- 这组键名**取代** node-spec §7.13 预留的 `xm:battle:settlement:pending:{pid}` / `…:pending-id:{pid}` / `xm:battle:lock:{pid}` / `xm:battle:ctx:{pid}`（没有 hash tag，销账脚本无法同槽）；6.2 不写这些键，改名只影响文档。
+- 这组键名**取代** node-spec §7.13 预留的 `game:battle:settlement:pending:{pid}` / `…:pending-id:{pid}` / `game:battle:lock:{pid}` / `game:battle:ctx:{pid}`（没有 hash tag，销账脚本无法同槽）；6.2 不写这些键，改名只影响文档。
 - 所有比较用 `Long.toUnsignedString(battle_id)`；脚本用 `ByteArrayCodec`；读者一律经 `BattleLockReader`（锁是 Hash，Go 侧的 MGET 写法不移植：对 Hash 键 `MGET` 回 nil、**不报错**，
   照搬基线 `presence.go:92-97`「值非空即在战斗」的写法会让 `in_battle` 静默恒为 false——报 `WRONGTYPE` 的是 `GET`。真 Redis 用例钉住）。
 - **待结算字段名只认规范的无符号十进制**（1–20 位数字、无前导零、不溢出、不是 0，`SettlementField.battleId()`）：`"05"` / `"+5"` 这类写法能被宽松解析成 5，
@@ -631,7 +631,7 @@ match 也从不对同一 battle_id 重发备战（`gather.go:236-255` 失败即�
 | `SETTLEMENT_TTL_SEC` | 604800 | 两端同值 |
 | `SETTLEMENT_RETRY_INTERVAL` / `_MAX` | 10 s / 12 | `room.h:172-176` |
 | `ACTIVITY_RESULT_TTL_SEC` / `ACTIVITY_RETRY_INTERVAL` / `_MAX` | 7 天 / 10 s / 30 | `activity.h:30-36` |
-| `REAPER_INTERVAL` | 30 s | `pb.h:101-102`；是缺省值，`xm.scene.battle.reaper-interval`（§8）只许调小（启动校验 ≤ 30 s），供本机切片 |
+| `REAPER_INTERVAL` | 30 s | `pb.h:101-102`；是缺省值，`game.scene.battle.reaper-interval`（§8）只许调小（启动校验 ≤ 30 s），供本机切片 |
 | `FIGHTING_EXPIRY_GRACE` | 10 s | D21；单测钉住 `GRACE + REAPER_INTERVAL < LOCK_EXTRA_TTL_SEC`（10 + 30 < 60）：第一次 rescue 最晚在期限 + 40 s，此时锁一定还在 |
 | `OUTBOX_MAX_AGE` | 10 min | Java 独有：两个发件箱的条目登记超过它仍没有结论（探测 / 定位一直出错、不计次）→ 按用尽摘除。D15 让出错不计次，没有这条上界，持久性的单键错误会让条目永远留在内存里 |
 | `SETTLED_TOMBSTONE_TTL_SEC` | 600 | Java 独有（D29）：已销账墓碑的寿命。单测钉住 ≥ `OUTBOX_MAX_AGE`——发件箱还可能为这一局发出落库 / 重发的整个窗口里，销账之后的落库都被挡住 |
@@ -643,11 +643,11 @@ match 也从不对同一 battle_id 重发备战（`gather.go:236-255` 失败即�
 **返回码常量**（`BattleRedis`，调用方不写字面值）：`STORE_ALREADY_SETTLED = -1`；`TOUCH_MISS / TOUCH_HIT / TOUCH_KEPT_FIGHTING = 0 / 1 / 2`；
 `PREPARING_DELETE_MISS / _DONE / _FIGHTING = 0 / 1 / 2`（`cancelOffline` 与 `deletePreparingIfMatch` 共用）。锁的字段名与阶段取值也是常量（`FIELD_*`、`STATE_PREPARING / STATE_FIGHTING`）。
 
-### 7.3 `SceneBattleService`（xm-api）与提供方
+### 7.3 `SceneBattleService`（game-api）与提供方
 
 ```java
 package com.game.api;
-/** scene 节点的回合制战斗入口（node-spec Q13）。每个 scene 节点在 xm.scene.asset-rpc-port 上与 SceneAssetOpService 一并导出，
+/** scene 节点的回合制战斗入口（node-spec Q13）。每个 scene 节点在 game.scene.asset-rpc-port 上与 SceneAssetOpService 一并导出，
  *  group DubboGroups.SCENE_BATTLE，register = false；调用方按 Redis 节点目录直连，引用 retries = 0。
  *  future 异常完成 = 传输失败（结局未知）：prepareBattle 时调用方按「可能已冻结」补发一次 cancel。 */
 public interface SceneBattleService {
@@ -659,7 +659,7 @@ public interface SceneBattleService {
 ```
 
 ```proto
-// xm-api/src/main/proto/xm/api/scene_battle.proto（Java 自有；xm-api 的 proto 不 import 依赖里的 proto，xm-api/pom.xml:70，契约消息按字节嵌入）
+// game-api/src/main/proto/game/api/scene_battle.proto（Java 自有；game-api 的 proto 不 import 依赖里的 proto，game-api/pom.xml:70，契约消息按字节嵌入）
 message SceneBattleCall {
   string target_instance_id = 1;  // 必填：调用方从目录读到的 scene 实例；与本进程不符 → NOT_HERE（等价基线 Kafka target_instance_id 过滤）
   uint64 player_id = 2;           // 冗余，Dubbo 线程上只用于日志
@@ -682,23 +682,23 @@ enum SettlementDisposition {
 message SceneBattleReply { SceneBattleStatus status = 1; bytes body = 2; SettlementDisposition settlement = 3; }
 ```
 
-- **提供方** `SceneBattleProvider`（照 `SceneAssetOpProvider.java:87-128`）：Dubbo 线程依次做在途名额（`xm.scene.battle-rpc-max-inflight`，缺省 256，与资产通道各自独立；
+- **提供方** `SceneBattleProvider`（照 `SceneAssetOpProvider.java:87-128`）：Dubbo 线程依次做在途名额（`game.scene.battle-rpc-max-inflight`，缺省 256，与资产通道各自独立；
   超出回 OVERLOADED）→ 实例核对（不符直接 NOT_HERE，不进逻辑线程）→ 解析 body（失败：备战回 HANDLED + `{1005}`，结算回 HANDLED + DISCARDED，其余 HANDLED，都打 ERROR）→
   `logic.execute`（被拒 = 逻辑线程已停 → future 异常完成）。应答在 `scene-asset-reply` 回写执行器上完成；需要异步 Redis 的分支等结果回来再完成，最坏约 4.2 s
-  （一条脚本的 Redisson 最坏耗时，§7.2）。**battle → scene 的确认 / 结算与 dev gather** 的调用方超时必须大于它（battle 侧 `xm.battle.scene-rpc-timeout` 缺省 5 s，
+  （一条脚本的 Redisson 最坏耗时，§7.2）。**battle → scene 的确认 / 结算与 dev gather** 的调用方超时必须大于它（battle 侧 `game.battle.scene-rpc-timeout` 缺省 5 s，
   启动校验；dev gather 单次 scene 调用 5 s），否则 scene 已给出确定结论而调用方先按「结局未知」处理。
   **match 的备战 / 取消调用不在此列（裁决，2026-10-06）**：match 的超时保持 3 s（match-spec 的数值表与跨进程不等式整表不动，42 / 48 / 66 / 96 与基线逐字相同），
   超时按结局不明处理并补发取消；scene 在写锁在途时收到取消会延后到写锁完成再删锁（§7.6，`PrepareBattleTest` 钉住），兜底还有 reaper 与锁 TTL。
   `SceneBattleService` 接口注释里「调用方超时必须大于它」那一句随 6.4 改，不在本批。
   **6.4 已改并按裁决落地**：接口注释现在分两种口径写（battle → scene 的确认 / 结算与 dev gather 必须大于 scene 的最坏耗时；match 的备战 / 取消是 3 s、超时按结局不明并补发取消）；
-  xm-match 的备战 / 取消超时就是 `MatchBudgets` 里的 3000 ms，启动门禁断言它们不超过 3 s（改大会让 matched TTL 表偏离基线的 42 / 48 / 54 / 60 / 66 / 96）。
+  game-match 的备战 / 取消超时就是 `MatchBudgets` 里的 3000 ms，启动门禁断言它们不超过 3 s（改大会让 matched TTL 表偏离基线的 42 / 48 / 54 / 60 / 66 / 96）。
   - **应答的时机**：取消等删锁脚本的结局、按锁结算等读锁回来才完成，期间在途名额占着，`rpc{method,result}` 在结局出来时才计。
   - **应答 future 的结局**：备战与结算按锁分支，在逻辑线程回调抛出意外异常、或逻辑线程拒绝投递（停服）时**异常完成**（= 结局未知，调用方按传输失败处理；
     不异常完成的话提供方的在途名额永不归还）。备战回调抛异常时还会摘掉仍挂着的这个冻结，并尽力发一次只删备战锁（`abandonPrepare`）。
     取消（离线 / 在线）与解冻的 future 在同样情形下**正常完成**——效果在应答前已经生效，调用方不按传输失败重试。异常完成时交给 Dubbo 的是原始异常，不带 `CompletionException` 包装。
   - **信封与结算体的玩家不符**：结算按信封 `player_id` 核对，不符回 HANDLED + DISCARDED，计 `settlements{online, discarded_invalid}`，不应用、不销账，不影响随后信封相符的重投。
 - **导出**：`SceneRpcServer` 一个 `IsolatedDubboModule`、一个 `ProtocolConfig`、两个 `ServiceConfig`；启停顺序不变（导出成功后才写目录；停服先摘目录、写回、再撤导出，`SceneAssetRpcServer.java:50-73`）。
-- **鉴权**：Dubbo 调用方 MAC（`XM_DUBBO_SECRET`）自动生效；结算 body 不另加 HMAC（Q13）。缺 MAC 的 Triple 调用在调用方以 `StatusRpcException`、状态码 `UNAUTHENTICATED` 异常完成，
+- **鉴权**：Dubbo 调用方 MAC（`GAME_DUBBO_SECRET`）自动生效；结算 body 不另加 HMAC（Q13）。缺 MAC 的 Triple 调用在调用方以 `StatusRpcException`、状态码 `UNAUTHENTICATED` 异常完成，
   到不了提供方，rpc 指标不动（过滤器给的中文原因经 Triple 传到调用方只剩问号，调用方只能按状态码认，见实现记录的遗留）。
 - **基线对照**：gRPC 线程 `runInLoop` 后 `future.get()` 同步等（`sns.cpp:308-340`）；Kafka 事件在 loop 上分发（`beh.cpp:18-34`）。Java 全程异步（D1）。
 
@@ -782,7 +782,7 @@ final class BattleFreeze {      // 可变：只在逻辑线程上改
      - `"0"` → `lockPending = false`；若 `cancelRequested` → `clearFreeze(DELETE_PREPARING)`、回 1006（计 `prepare{cancelled}`）；否则回快照与指纹（成功的应答**不带** `error_message`，
        dev gather / robot 按「没有 error_message 且带快照」判成功）；
      - 被占（别的局，或同局已 F）→ `clearFreeze(KEEP_LOCK)` → 1006（`lock_held`），锁不动；Redisson 重发造成的「同局 P」已在脚本里按成功处理（§7.2 重放语义）；
-     - Redis 出错 / 超时（`xm.redis` 缺省 2 s × 重试 1 次，最坏 4.2 s）→ `clearFreeze(KEEP_LOCK)`，再尽力发一次**只删备战锁**（脚本可能已执行、只是回复丢了；D31）→ 1003（`redis_error`）。
+     - Redis 出错 / 超时（`game.redis` 缺省 2 s × 重试 1 次，最坏 4.2 s）→ `clearFreeze(KEEP_LOCK)`，再尽力发一次**只删备战锁**（脚本可能已执行、只是回复丢了；D31）→ 1003（`redis_error`）。
        残余：若 Redis 侧排队的那次 `PREPARE_LOCK` 晚于这条删除才执行，锁会留到备战 TTL（§10.5）。
    - **实例已换或冻结已不是这个**（stale）：占到了、**或结局不明**（出错 / 超时）都尽力只删一次备战锁（match 认为这人没冻结成功，不会对他发取消；
      原稿只在「占到了」时删）；被别的局占着时不删别人的锁；回 1004（`stale`）。
@@ -934,7 +934,7 @@ final class BattleFreeze {      // 可变：只在逻辑线程上改
   `settlements{path=rescue, result=deferred_*}`）都判废删锁（`DELETE_IF_MATCH`）并计 `freeze_expired{fighting}`；`gave_up` 是期限 + 60 s 不读直接判废。
 - **判废删锁之后的补跟随**：`clearFreeze(DELETE_IF_MATCH)` 的删锁结局回来后按 §7.4「删锁结局回来之后补给谁」处理——被判废的那个实例还在就补给它；
   删锁在途期间玩家同 epoch 重进了，锁确实是这一次删掉的（返回 1）才补给新实例，返回 0 或玩家已离场都不补。
-- **`xm_scene_battle_frozen` 的口径**：reaper 每轮数一遍。本轮因备战到期被摘的 PREPARING 不计入；本轮同步判废（期限 + 60 s 放弃）的 FIGHTING 仍计入本轮的 fighting，下一轮才归零。
+- **`game_scene_battle_frozen` 的口径**：reaper 每轮数一遍。本轮因备战到期被摘的 PREPARING 不计入；本轮同步判废（期限 + 60 s 放弃）的 FIGHTING 仍计入本轮的 fighting，下一轮才归零。
 - reaper 处理单个玩家抛异常只记 ERROR、继续下一个；遍历的是快照，逐个再核对实例仍在。
 
 ### 7.10 结算到达 `applySettlement`（对应 `ApplySettlement`）
@@ -1004,7 +1004,7 @@ final class BattleFreeze {      // 可变：只在逻辑线程上改
 
 ### 7.12 账本与销账
 
-**格式**（Java 自有，`xm-player-store/src/main/proto/xm/storage/player_state.proto`，下一个空闲号是 9，`:16-35`）：
+**格式**（Java 自有，`game-player-store/src/main/proto/game/storage/player_state.proto`，下一个空闲号是 9，`:16-35`）：
 
 ```proto
 // 回合制战斗结算幂等账本（mmorpg BattleSettlementLedgerComp 的 Java 自有对应）：只登记「已应用、销账未确认」的局，稳态 0~1 条，上限 64 是异常兜底。
@@ -1085,7 +1085,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 2. **5.1 排空改派**（`SceneWorld.relocateResidents`，`:441-480`）与 **5.3 级联 / 管理口改派**：`inBattle()` 跳过、计 `channel_relocations{in_battle}`，下次推进再看（D26）。
 3. **组队跟随**（`TeamFollowService`）：新增结果 `IN_BATTLE`（内存冻结）与 `BATTLE_LOCK`（锁存在或读失败，对应 `team.cpp:378-402`）；新增 `onBattleFreezeCleared(world, player)` 入口，
    按「只跟随、不扇出」处理。与原稿、与基线写法的出入：
-   - **锁读并进了成员关系那一跳**：读成员关系的同时并行发一条 `EXISTS xm:battle:{pid}:lock`（`BattleLockProbe`，生产 = `BattleLockReader.exists`），两个结果都回来后一起投递回逻辑线程。
+   - **锁读并进了成员关系那一跳**：读成员关系的同时并行发一条 `EXISTS game:battle:{pid}:lock`（`BattleLockProbe`，生产 = `BattleLockReader.exists`），两个结果都回来后一起投递回逻辑线程。
      基线是两跳（先读成员关系，第二跳 `MGET` 队长位置 + 自己的锁）；Java 同节点跟随用内存里的队长场景、不读位置（team-spec D9），没有第二跳。
    - **内存冻结只在回调后判一次**，不做原稿写的「读之前与回调后各判一次」：基线在第二跳之前、回调之后各判一次（`player_team.cpp:353`、`:402`），Java 没有「第二跳之前」这个位置；
      也不能把预判加在发起读之前——成员关系那一跳不受战斗闸约束，队长在战斗中进场照样要扇出（基线 `player_team.cpp:327-345` 同）。代价：战斗中的非队长多发一次 EXISTS，结果相同。
@@ -1095,12 +1095,12 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
    - **`onBattleFreezeCleared` 的触发点**（三类）：解冻且条件删锁完成之后（取消备战、reaper 判废）；保留锁的解冻（备战到期、结算应用后、复核落空撤销）——这次检查会读到锁而放弃，等于空跑；
      销账脚本确实放掉了锁之后（位 2）——真正补上的是这一次。删锁 / 销账的结局回来时发起它的实例已经换掉（同 epoch 重进）的，或者那次删除本来就不跟着一次解冻的
      （备战失败 / 过期后的尽力删锁、离线取消），只要锁确实是这一次删掉 / 放掉的，就补给**现任实例**（它没有战斗冻结时）——它进场那次检查读到的还是这把锁（§7.4、§7.12）。
-4. **xm-team 队伍视图**：`TeamDisplay.in_battle` 用 `BattleLockReader.existsAll` 批量 EXISTS 算出，收掉 team-spec D10。口径：锁存在即为 true，只看锁在不在，不看 `s` 也不看 `b`——
+4. **game-team 队伍视图**：`TeamDisplay.in_battle` 用 `BattleLockReader.existsAll` 批量 EXISTS 算出，收掉 team-spec D10。口径：锁存在即为 true，只看锁在不在，不看 `s` 也不看 `b`——
    备战中、战斗中、已结算待销账（含续锁的 180 s）都显示在战斗；销账放锁、锁过期或判废后变回 false；只有待结算记录或墓碑、没有锁时为 false。
    读的范围是一次视图构建的全体 rosterIds（成员、申请人、被邀请人、邀请人，最多 26 人；基线 `loadDisplay` 的 MGET 也是对全体 id 做的），每人一条 EXISTS 并发发出。
    任何一条读失败整批按 false（同基线「MGET 失败 → 全 false」，`team-spec:1221`）：同步抛出、异常完成、超时、被中断、结果为 null 都只记一行 WARN、视图照常，不让 RPC 失败。
    没有单独的超时键，与在线读共用请求预算（§8）。咨询性读，部署约束见 §10.5。
-5. **5.4 / 7.2 钩子**：226 在 3024 / 3007 之后、3026 之前判 → 3025（**5.4 已接**，2026-10-11，见上表 226 一行；5.4 的跨 zone 冻结（`reason = TRAVEL`）与战斗冻结同样互斥，`BattleFixture` 装上了跨 zone 传送）。**GM 回档（7.2b）已接**，但不在 scene 侧、也不是 1005：xm-data 的回档作业在夺权之后、账本差集之前
+5. **5.4 / 7.2 钩子**：226 在 3024 / 3007 之后、3026 之前判 → 3025（**5.4 已接**，2026-10-11，见上表 226 一行；5.4 的跨 zone 冻结（`reason = TRAVEL`）与战斗冻结同样互斥，`BattleFixture` 装上了跨 zone 传送）。**GM 回档（7.2b）已接**，但不在 scene 侧、也不是 1005：game-data 的回档作业在夺权之后、账本差集之前
    批量读战斗锁（`BattleLockGate`），命中记逐玩家结局 `in_battle`，读失败 fail-closed 记 `battle_lock_unknown`，无条件拒绝（不走 acceptDivergence），整区有人在战计入 `zone_not_quiescent`
    （见 data-ops-spec）。7.2c 的回收 / 精确回收 / 欠款写操作落地时也要过同一道闸。
 6. **帧外推**（`SceneWorld.integrate`，第二轮修正）：有战斗冻结（备战或战斗中）的玩家整个跳过——不外推、不动速度、不置脏位，也不走挂机停推那一支
@@ -1127,7 +1127,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
   有条目时推一次 184。服务闸 `checkWritable` 不参与（结算在 c 步已排除冻结；战斗闸只在入口）。
 - 局内号与宝宝号分离由引擎负责（engine-spec `:250`），scene 只认 `pet_id`。
 
-### 7.15 battle 侧发件箱（xm-battle，`SettlementOutbox`）
+### 7.15 battle 侧发件箱（game-battle，`SettlementOutbox`）
 
 - **线程**：独占一条单线程执行器 `battle-outbox`（D25）。`battle-logic` 上的 `SettlementSink.dispatch` 只把任务交给它；名单、计时器、判定都在它上面；Redisson / Dubbo 的回调投递回它。
   好处：不与直连面 I/O 争线程；停机时逻辑线程可以先停、发件箱另行有界排空。
@@ -1154,7 +1154,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
     `EXHAUSTED` → 摘除，记录留给 scene 的进场恢复 / rescue：最后一轮无目标的计 `exhausted_offline`（WARN，玩家离线时的常态），有目标的计 `exhausted`（ERROR，告警）。
 - **投递应答只计数**（`delivery{result}`），**不改 outbox 状态**（D16）：scene 应用之后要等落盘才能销账，「已应用」不等于「可以停止重投」。
   `outbox{delivered}` 是**发出次数**（首投与每次重投都计；一次重投同时计 `resend` 与 `delivered`，首投数 = `delivered − resend`）。
-- **停机**：最多等 `xm.battle.outbox-drain-timeout`（缺省 3 s；0 = 不等），让在途的 `STORE_SETTLEMENT` 和首投回来，然后丢弃内存名单（记录留在 Redis）。这缩小了 B-2 窗口。
+- **停机**：最多等 `game.battle.outbox-drain-timeout`（缺省 3 s；0 = 不等），让在途的 `STORE_SETTLEMENT` 和首投回来，然后丢弃内存名单（记录留在 Redis）。这缩小了 B-2 窗口。
   **挂载点与原稿不同**：不在 `BattleNode` 的停止序列里，而是靠 Spring 销毁 `SceneTransport` bean——发生在 `BattleNode.stop`（关闸 → AbortAllRooms → 停逻辑线程）之后；
   关闭顺序 `drainAndClose` → 停 `battle-outbox` → 停清扫线程 → 销毁直连客户端（`BattleConfigurationTest` / `SceneTransportTest` 钉住「节点先停、传输后关、关之前等到在途结算」）。
   只排空结算发件箱，活动结果通道在途的落库与首发不等。`drainAndClose` 之后才回来的落库成功仍会首投一次，但不登记、不重开表。
@@ -1173,7 +1173,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
   条目损坏而玩家还在该节点时，定位器对同一条目回 Failure，计 `skipped`；玩家已换节点则 `rerouted`。
 - `confirmBattle(SceneBattleCall{target_instance_id = 上面选定的实例, …, body = BattleConfirmedEvent})` 异步发出、不等结果；补发节奏仍是 6.2 的 17 次。
   回调不碰房间状态（只计数），可以在任意线程上完成。
-- **每次确认必有一个计数结局**（`xm_battle_scene_events_total{kind=confirm}`）：发出计 `sent` / `rerouted`；应答是 NOT_HERE 另计 `not_here`，传输失败 / UNSPECIFIED 另计 `error`；
+- **每次确认必有一个计数结局**（`game_battle_scene_events_total{kind=confirm}`）：发出计 `sent` / `rerouted`；应答是 NOT_HERE 另计 `not_here`，传输失败 / UNSPECIFIED 另计 `error`；
   不发计 `skipped`；回调里的意外（程序缺陷、损坏的输入、端口返回 null future）计 `error` 并打 ERROR——三段回调都挂在无人持有的 future 上，不兜这一层异常会被悄悄吞掉。
   确认的 OVERLOADED / DEFERRED / HANDLED 只有发出时的 `sent`，不另计。
 - **dev 房间**（`origin = DEV`）照 node-spec §7.12 继续发确认：scene 侧按锁匹配，dev 房间的 battle_id 不会命中任何锁，零副作用（Q12）。
@@ -1181,22 +1181,22 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 ### 7.17 活动结果通道（`ActivityResultOutbox`，`battle-outbox` 线程）
 
 - 出口 `ActivityResultSink.dispatch(event)` 只在 `kind ≠ NONE` 时被调（判定在 6.2 的 `BattleResultAssembler`，不认识的 kind 也算）。
-- 序列化失败计 `serialize_failed`、不发；`SET xm:battle:activity-result:<id> EX 7d`：成功 → 经 `BattleResultSink` 发布**同一份字节**并登记；失败或没有结论（null）→ 发布一次 + `not_durable`。
+- 序列化失败计 `serialize_failed`、不发；`SET game:battle:activity-result:<id> EX 7d`：成功 → 经 `BattleResultSink` 发布**同一份字节**并登记；失败或没有结论（null）→ 发布一次 + `not_durable`。
   登记的是事件对象（不可变），重发时再序列化，结果与落库的字节相同（真 Redis 用例断言了持久副本与发布事件逐字节相同）；是否改存 `byte[]` 等 6.4 定真实传输的签名。
   （6.4 的真实传输 `KafkaBattleResultSink` 沿用 `publish(event, Channel)` 的签名、在自己的发送线程上序列化，登记的仍是事件对象，没有改存 `byte[]`。）
 - **发布端口带通道**：`BattleResultSink.publish(event, Channel)`，`Channel{PLAIN, ACTIVITY}`；`publish(event)` 是 default = PLAIN（房间的调用点不变）。
-  活动通道的首发与每次重发都传 ACTIVITY，`xm_battle_results_total{channel=activity}` 统计活动局的首发与重发，`plain` 只统计普通局。
+  活动通道的首发与每次重发都传 ACTIVITY，`game_battle_results_total{channel=activity}` 统计活动局的首发与重发，`plain` 只统计普通局。
   自 6.3 起这个端口有**两个调用方、两条线程**：普通局在 `battle-logic` 上一局调一次；活动局由本通道在 `battle-outbox` 上调，首发 1 次，未销账每 10 s 重发同一个事件对象，
   一局最多 1 + 30 = 31 次，落库失败只发 1 次。6.4 的真实实现必须线程安全、容忍同一 battle_id 多次调用、按 channel 分开计数。
-  （6.4 已按这三条实现：xm-battle 的 `KafkaBattleResultSink`，每次调用原样再发一条同 key 同字节的消息；match-spec §5.4。）
+  （6.4 已按这三条实现：game-battle 的 `KafkaBattleResultSink`，每次调用原样再发一条同 key 同字节的消息；match-spec §5.4。）
 - 每 10 s 对每条 `EXISTS`：0 → 摘除（acked）；1 → 用尽（30）则 ERROR 并摘除，否则 `++attempts` 后重发原字节（只在重发时计次，同 `room.cpp:2014`）；
   **出错或没有结论一律跳过、不计次**（计 `probe_error`；与 D15 统一，基线空回复跳过、出错当仍在）；登记超过 `OUTBOX_MAX_AGE` 仍没有结论 → 按用尽摘除（记录仍在 Redis，留给 4.6 的巡检器）。
 - 销账方是 4.6 的帮会同道历练消费方与巡检器，两版现在都不存在；6.4 接上 `BattleResultSink` 的真实传输之前发布端口只记日志——整条通道两版都不可达（Q11）。
-  **6.4 之后的现状**：发布的真实传输已做（活动局的结果真的进了 Kafka topic `xm-battle-result-g<代次>`，首发 + 每 10 s 重发、一局最多 31 条同 key 同字节的消息），xm-match 还提供了帮会活动开战的入口
-  `MatchInternalService.startActivityBattle` 与 dev 管理口；但消费方与销账方仍不存在——持久副本要等 7 天 TTL，重发用尽后 battle 记一条 ERROR 摘除。xm-match 的评分消费对这些消息一律 `ignored`。
+  **6.4 之后的现状**：发布的真实传输已做（活动局的结果真的进了 Kafka topic `game-battle-result-g<代次>`，首发 + 每 10 s 重发、一局最多 31 条同 key 同字节的消息），game-match 还提供了帮会活动开战的入口
+  `MatchInternalService.startActivityBattle` 与 dev 管理口；但消费方与销账方仍不存在——持久副本要等 7 天 TTL，重发用尽后 battle 记一条 ERROR 摘除。game-match 的评分消费对这些消息一律 `ignored`。
   4.6 的消费方必须按 battle_id 幂等，并把不认识的 (guild, activity)（dev 活动开战口建出来的）当终态销账（match-spec §7.2）。
 
-### 7.18 dev / test 管理接口（Java 独有，xm-battle 管理端口 18112）
+### 7.18 dev / test 管理接口（Java 独有，game-battle 管理端口 18112）
 
 | 接口 | 请求 | 应答 | 说明 |
 |---|---|---|---|
@@ -1204,7 +1204,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 | `POST /admin/battle/dev/cancel-prepare` | `{player_id, battle_id}` | 204 | 解析位置后调 scene 取消 |
 
 - **`DEV_GATHER` 房间**：快照来自 scene（不是调用方伪造），照常确认、照常结算；对局结果事件仍跳过（没有 match）；不接受 `activity_context`。6.2 的 `dev/create`（`origin = DEV`）保持永不结算。
-- **鉴权**同 node-spec §7.12：`X-Xm-Admin-Token`（`XM_ADMIN_TOKEN`，常数时间比较，不设则 503）+ `X-Xm-Operator` 审计；运行模式不是 dev / test 一律 403。
+- **鉴权**同 node-spec §7.12：`X-Game-Admin-Token`（`GAME_ADMIN_TOKEN`，常数时间比较，不设则 503）+ `X-Game-Operator` 审计；运行模式不是 dev / test 一律 403。
 - **线程**：Tomcat 线程上做 Redis 查询与 Dubbo 调用，整体等待上限 10 s；不碰房间（建房走同一条准入与投递路径）。
 
 ### 7.19 gate 拒绝战斗上行
@@ -1219,7 +1219,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
     合成判据圈出的号必须等于 `directOnly` 的 12 个号；并钉住「前两级不命中且文件没写 option」的客户端服务清单（现在恰为 Login / Friend / Guild 三个）——
     mmorpg 以后新增这类服务时用例先失败，由人去 mmorpg 生成物确认它是不是 `BattleNodeService`。残余盲区：option 与目录自相矛盾的文件测不出，属 mmorpg 自身错配。
   - `ClientDispatcher.onRequest` 的闸序：关闭中 / 未握手 → 白名单 → 体积 → 限频 → GM 闸 → **直连闸（新）** → 热关停 → 后端队列 / 待处理队列，与基线 `gate_cmp.cpp:858-950` 逐段相同。
-    直连闸当场推 23 `{1003}`、计 `xm_gate_client_requests_total{result="battle_rejected"}`、return：不进待处理队列与后端队列、不计非法包、不断连、不调热关停的计数，逐条只打 DEBUG。
+    直连闸当场推 23 `{1003}`、计 `game_gate_client_requests_total{result="battle_rejected"}`、return：不进待处理队列与后端队列、不计非法包、不断连、不调热关停的计数，逐条只打 DEBUG。
   - 由闸序得出的行为：被拒的战斗号照样占限频额度（超频回信封 1008、超长回 1010，都计非法包，同基线）；热关停规则（`BattleClientPlayer/<Method>`、`BattleClientPlayer/*`、`*`）对 gate 上的战斗号
     没有可见效果，客户端始终收到 23 `{1003}`；直连闸不看 `domain`，即使有人把战斗服务错接到某个后端，请求也到不了后端——「6.4 接入 `MatchService` 后 `BattleClientPlayer` 仍被拒」由此保证；
     Notify 号（应答类型 Empty）发上来同样回 23 `{1003}`；GM 闸在前，契约里若以后出现 GM 名字的战斗方法，生产模式下它先被 GM 闸按非法包拒（同基线次序）。
@@ -1239,7 +1239,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 | battle `battle-outbox`（新增，单线程） | 两个发件箱的名单与计时器；发起异步调用，回调投递回本线程；活动局的 `BattleResultSink.publish(…, ACTIVITY)` | 碰房间 |
 | battle `battle-scene-sweep`（新增，守护线程，每 60 s） | 阻塞读 scene 节点目录、销毁已不在目录的节点的直连客户端（§7.15） | 碰房间与发件箱名单 |
 | battle 管理 Tomcat | dev gather | 碰房间 / 发件箱 |
-| xm-team 工作线程 / 推送线程 | 在请求预算内限时等战斗锁的批量读（§7.13 第 4 条） | 无限等待 |
+| game-team 工作线程 / 推送线程 | 在请求预算内限时等战斗锁的批量读（§7.13 第 4 条） | 无限等待 |
 
 ### 7.21 Java 的失败与崩溃窗口一览
 
@@ -1282,20 +1282,20 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
 
 | 键 | 缺省 | 位置 | 说明 |
 |---|---|---|---|
-| `xm.scene.battle-rpc-max-inflight` | 256 | `SceneNodeProperties`（校验 ≥ 1，同 `asset-op-max-inflight`，`:93-94`、`:126-127`） | `SceneBattleService` 在途上限 |
-| `xm.scene.battle.reaper-interval` | 30 s | 同上（嵌套的 `BattleSettings` 记录） | yaml 里取环境变量 `XM_SCENE_BATTLE_REAPER_INTERVAL`（缺省 30 s）；本机切片由 `tools/local/start-slice.sh` 导出 2 s 供 robot 用，生产不改。启动校验 0 < 值 ≤ 30 s（保住 `GRACE + 间隔 < LOCK_EXTRA_TTL_SEC`，§7.2） |
-| `xm.battle.scene-rpc-timeout` | 5 s | `SceneTransportProperties`（与 `BattleProperties` 同前缀、分开绑定；不在 `BattleProperties` 里） | 确认 / 结算调用超时；必须大于 scene 侧一条 Redis 脚本的最坏耗时 4.2 s（§7.2、§7.3），启动时与 `RedisProperties.worstCaseCommandMillis()` 比较（`requireAbove`）、不满足拒绝启动；必须为正 |
-| `xm.battle.outbox-drain-timeout` | 3 s | 同上 | 停机时等待在途落库与首投；0 合法，表示停机不等；不能为负 |
+| `game.scene.battle-rpc-max-inflight` | 256 | `SceneNodeProperties`（校验 ≥ 1，同 `asset-op-max-inflight`，`:93-94`、`:126-127`） | `SceneBattleService` 在途上限 |
+| `game.scene.battle.reaper-interval` | 30 s | 同上（嵌套的 `BattleSettings` 记录） | yaml 里取环境变量 `GAME_SCENE_BATTLE_REAPER_INTERVAL`（缺省 30 s）；本机切片由 `tools/local/start-slice.sh` 导出 2 s 供 robot 用，生产不改。启动校验 0 < 值 ≤ 30 s（保住 `GRACE + 间隔 < LOCK_EXTRA_TTL_SEC`，§7.2） |
+| `game.battle.scene-rpc-timeout` | 5 s | `SceneTransportProperties`（与 `BattleProperties` 同前缀、分开绑定；不在 `BattleProperties` 里） | 确认 / 结算调用超时；必须大于 scene 侧一条 Redis 脚本的最坏耗时 4.2 s（§7.2、§7.3），启动时与 `RedisProperties.worstCaseCommandMillis()` 比较（`requireAbove`）、不满足拒绝启动；必须为正 |
+| `game.battle.outbox-drain-timeout` | 3 s | 同上 | 停机时等待在途落库与首投；0 合法，表示停机不等；不能为负 |
 
-两个 `xm.battle.*` 键已写进 xm-battle 的 `application.yaml`（值等于代码缺省），文件头的 Redis 读写说明同步更新。xm-team 的战斗锁读**没有**单独的超时键：与在线读共用调用方传入的请求预算
-（请求 3500 ms、推送批 3 s）。xm-data 回档闸的 `xm.data.ops.battle-lock-wait`（缺省 5 s）见 data-ops-spec。除此之外 6.3 的评审修复没有新增配置键。
+两个 `game.battle.*` 键已写进 game-battle 的 `application.yaml`（值等于代码缺省），文件头的 Redis 读写说明同步更新。game-team 的战斗锁读**没有**单独的超时键：与在线读共用调用方传入的请求预算
+（请求 3500 ms、推送批 3 s）。game-data 回档闸的 `game.data.ops.battle-lock-wait`（缺省 5 s）见 data-ops-spec。除此之外 6.3 的评审修复没有新增配置键。
 
-端口不新增：`SceneBattleService` 用 `xm.scene.asset-rpc-port`（缺省 21100，`application.yaml:93-95`）。
+端口不新增：`SceneBattleService` 用 `game.scene.asset-rpc-port`（缺省 21100，`application.yaml:93-95`）。
 
 **代码常量**：见 §7.2 的 `BattleRedis` 表（注释写清与谁联动）。scene 私有的还有 `PlayerBattle.WRITTEN_OFF_CAPACITY`（64）、`PlayerBattleService.MAX_DEADLINE_AHEAD_MS`（7 天）；
 battle 私有的 `SceneClientSweeper.SWEEP_INTERVAL`（60 s）。
 
-**真 Redis 测试用的库号**（约定，供后来的测试避让）：xm-discovery 与 xm-scene 的战斗脚本测试用 DB 15，xm-battle 用 DB 14，xm-team 的 `TeamDisplayRedisIntegrationTest` 沿用该模块的 DB 12
+**真 Redis 测试用的库号**（约定，供后来的测试避让）：game-discovery 与 game-scene 的战斗脚本测试用 DB 15，game-battle 用 DB 14，game-team 的 `TeamDisplayRedisIntegrationTest` 沿用该模块的 DB 12
 （与生产缺省库同号，只用随机 ≥ 2^63 的 id、只删自己登记的键）；都用随机大号玩家、结束时只删自己写的键。
 
 ---
@@ -1306,24 +1306,24 @@ battle 私有的 `SceneClientSweeper.SWEEP_INTERVAL`（60 s）。
 
 | 指标 | 标签 |
 |---|---|
-| `xm_scene_battle_prepares_total` | `result` = ok / invalid / not_here / switching / in_battle / not_ready / dead / lock_held / redis_error / stale / cancelled |
-| `xm_scene_battle_cancels_total` | `result` = cleared / idempotent / mismatch / rejected_fighting / deferred / offline_deleted / offline_rejected_fighting / offline_absent / offline_error |
-| `xm_scene_battle_confirms_total` | `result` = upgraded / idempotent / reextended / mismatch / rebuilt / frozen_extended / offline_extended / offline_miss / ledger_hit / invalid / error |
-| `xm_scene_battle_rebuilds_total` | `reason` = login / late_confirm / carried；`result` = rebuilt / reverted / ledger_hit / skipped_corrupt / skipped_pending / miss / error |
-| `xm_scene_battle_freeze_expired_total` | `phase` = preparing / fighting |
-| `xm_scene_battle_rescues_total` | `result` = applied / already_applied / deferred / miss / error（读出错、下一轮重试）/ gave_up（期限 + 60 s 仍读不到，直接判废） |
-| `xm_scene_battle_reconnect_hints_total` | `trigger` = confirm / late_confirm / login / carried |
-| `xm_scene_battle_frozen`（gauge） | `state` = preparing / fighting |
-| `xm_scene_battle_rpc_total` | `method`（4 个）；`result` = handled / not_here / deferred / overloaded / error |
-| `xm_scene_battle_settlements_total` | `path` = online / by_lock / login / rescue；`result` = applied / already_applied / discarded_invalid / discarded_mismatch / discarded_void / deferred_frozen / deferred_currency / deferred_recovering / deferred_lock_read / deferred_ledger / not_here |
-| `xm_scene_battle_acks_total` | `trigger` = apply / persisted / reaper / login / discard；`result` = released / not_ours / deferred / error |
-| `xm_scene_battle_recovery_total` | `result` = ready / retry / error |
-| `xm_scene_battle_items_total` | `kind` = consume_clamped / consume_rejected / drop_overflow / drop_lost |
-| `xm_scene_battle_ledger_evictions_total`、`xm_scene_battle_pending_corrupt_total`、`xm_scene_battle_exp_ignored_total` | — |
-| `xm_scene_battle_gate_rejects_total` | `gate` = enter_scene / skill / attribute / pet / bag_sort / asset / move / default |
+| `game_scene_battle_prepares_total` | `result` = ok / invalid / not_here / switching / in_battle / not_ready / dead / lock_held / redis_error / stale / cancelled |
+| `game_scene_battle_cancels_total` | `result` = cleared / idempotent / mismatch / rejected_fighting / deferred / offline_deleted / offline_rejected_fighting / offline_absent / offline_error |
+| `game_scene_battle_confirms_total` | `result` = upgraded / idempotent / reextended / mismatch / rebuilt / frozen_extended / offline_extended / offline_miss / ledger_hit / invalid / error |
+| `game_scene_battle_rebuilds_total` | `reason` = login / late_confirm / carried；`result` = rebuilt / reverted / ledger_hit / skipped_corrupt / skipped_pending / miss / error |
+| `game_scene_battle_freeze_expired_total` | `phase` = preparing / fighting |
+| `game_scene_battle_rescues_total` | `result` = applied / already_applied / deferred / miss / error（读出错、下一轮重试）/ gave_up（期限 + 60 s 仍读不到，直接判废） |
+| `game_scene_battle_reconnect_hints_total` | `trigger` = confirm / late_confirm / login / carried |
+| `game_scene_battle_frozen`（gauge） | `state` = preparing / fighting |
+| `game_scene_battle_rpc_total` | `method`（4 个）；`result` = handled / not_here / deferred / overloaded / error |
+| `game_scene_battle_settlements_total` | `path` = online / by_lock / login / rescue；`result` = applied / already_applied / discarded_invalid / discarded_mismatch / discarded_void / deferred_frozen / deferred_currency / deferred_recovering / deferred_lock_read / deferred_ledger / not_here |
+| `game_scene_battle_acks_total` | `trigger` = apply / persisted / reaper / login / discard；`result` = released / not_ours / deferred / error |
+| `game_scene_battle_recovery_total` | `result` = ready / retry / error |
+| `game_scene_battle_items_total` | `kind` = consume_clamped / consume_rejected / drop_overflow / drop_lost |
+| `game_scene_battle_ledger_evictions_total`、`game_scene_battle_pending_corrupt_total`、`game_scene_battle_exp_ignored_total` | — |
+| `game_scene_battle_gate_rejects_total` | `gate` = enter_scene / skill / attribute / pet / bag_sort / asset / move / default |
 
-现有指标的结果枚举补值：`xm_scene_moves_total{result=in_battle}`、放技能结果（`xm_scene_skill_releases_total`）补 **`caster_in_battle` / `target_in_battle` 两个取值**
-（按 7004 / 7002 两个回码拆开，没有 `in_battle` 这个取值）、`xm_scene_team_follow_total{result=in_battle|battle_lock}`、`xm_scene_switch_resolves_total{result=in_battle}`、`xm_scene_channel_relocations_total{result=in_battle}`。
+现有指标的结果枚举补值：`game_scene_moves_total{result=in_battle}`、放技能结果（`game_scene_skill_releases_total`）补 **`caster_in_battle` / `target_in_battle` 两个取值**
+（按 7004 / 7002 两个回码拆开，没有 `in_battle` 这个取值）、`game_scene_team_follow_total{result=in_battle|battle_lock}`、`game_scene_switch_resolves_total{result=in_battle}`、`game_scene_channel_relocations_total{result=in_battle}`。
 
 全部 scene 战斗计数器在 `SceneBattleMetrics` 构造时预建全部标签组合（「从没发生」与「指标不存在」分得开）。**口径**（单测已钉住）：
 
@@ -1351,18 +1351,18 @@ battle 私有的 `SceneClientSweeper.SWEEP_INTERVAL`（60 s）。
 
 | 指标 | 标签 |
 |---|---|
-| `xm_battle_settlement_outbox_total` | `event` = stored / not_durable / delivered / resend / skip_no_target / superseded / acked / exhausted / exhausted_offline / expired / probe_error / locate_error / serialize_failed / **already_settled** / **fields_overflow**（共 15 个取值，全部预建） |
-| `xm_battle_settlement_outbox_entries`（gauge） | — |
-| `xm_battle_settlement_delivery_total` | `result` = applied / already_applied / discarded / deferred / not_here / overloaded / transport_error |
-| `xm_battle_scene_events_total`（6.2 已定义） | `kind` = confirm：`result` 增加 sent / rerouted / skipped / not_here / error（§7.16）；`kind` = settlement：`result = sent` 表示房间把这份结算交给了发件箱（落库 / 投递 / 重投的结局看上面两行） |
-| `xm_battle_results_total`（6.2 已定义） | `channel` = plain / activity：活动局的首发与每次重发计 `activity`，`plain` 只统计普通局（§7.17） |
-| `xm_battle_activity_result_outbox_total` | `event` = stored / not_durable / resend / acked / exhausted / expired / probe_error / serialize_failed |
-| `xm_battle_dev_gather_total` | `mode` = prepare_only / create / unknown；`result` = ok / prepare_failed / create_failed / forbidden / rejected（`unknown` 与 `rejected` 见 dev gather 的实现记录） |
+| `game_battle_settlement_outbox_total` | `event` = stored / not_durable / delivered / resend / skip_no_target / superseded / acked / exhausted / exhausted_offline / expired / probe_error / locate_error / serialize_failed / **already_settled** / **fields_overflow**（共 15 个取值，全部预建） |
+| `game_battle_settlement_outbox_entries`（gauge） | — |
+| `game_battle_settlement_delivery_total` | `result` = applied / already_applied / discarded / deferred / not_here / overloaded / transport_error |
+| `game_battle_scene_events_total`（6.2 已定义） | `kind` = confirm：`result` 增加 sent / rerouted / skipped / not_here / error（§7.16）；`kind` = settlement：`result = sent` 表示房间把这份结算交给了发件箱（落库 / 投递 / 重投的结局看上面两行） |
+| `game_battle_results_total`（6.2 已定义） | `channel` = plain / activity：活动局的首发与每次重发计 `activity`，`plain` 只统计普通局（§7.17） |
+| `game_battle_activity_result_outbox_total` | `event` = stored / not_durable / resend / acked / exhausted / expired / probe_error / serialize_failed |
+| `game_battle_dev_gather_total` | `mode` = prepare_only / create / unknown；`result` = ok / prepare_failed / create_failed / forbidden / rejected（`unknown` 与 `rejected` 见 dev gather 的实现记录） |
 
 **battle 的口径**：`stored` 只在落库脚本真的写入时计；落库时这一局已销账（脚本回 -1）计 `already_settled`，两者互斥，也不计 `acked`；`fields_overflow` 在 `stored` 之外另计；
 `delivered` 是发出次数（首投 + 每次重投），首投数 = `delivered − resend`；`probe_error` / `locate_error` 含「没有结论」（null）。
 
-**gate**：`xm_gate_client_requests_total{result=battle_rejected}`（`route = unsupported`、`method = BattleClientPlayer.<方法名>`，12 条序列装配时预建；战斗上行不再计 `result=unsupported`，§7.19）。
+**gate**：`game_gate_client_requests_total{result=battle_rejected}`（`route = unsupported`、`method = BattleClientPlayer.<方法名>`，12 条序列装配时预建；战斗上行不再计 `result=unsupported`，§7.19）。
 
 **告警**：`not_durable > 0`；`exhausted`（有目标）> 0；`expired > 0`；`fields_overflow > 0`；`ledger_evictions > 0`；`drop_lost > 0`；`pending_corrupt > 0`；`recovery{error} > 0`（代码缺陷）；
 `frozen{state=fighting}` 长时间不降；`recovery{retry}` 持续增长；`settlements{result=deferred_currency}` 持续出现（该玩家按 Q18 开不了战，需 GM 处置）；
@@ -1432,17 +1432,17 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 ### 10.4 跨批次的数值依赖
 
 - 确认补发窗口 180 s ≥ match 最长 matched TTL 96 s + `LOCK_EXTRA_TTL_SEC` 60 s（node-spec §10.4）：6.2 的单测 `ConfirmWindowConstraintTest` 已改为引用 `BattleRedis.LOCK_EXTRA_TTL_SEC`
-  （match 的 96 s 仍是字面值，等 6.4 有了 match 的常量再换——6.4 已换：xm-battle 的 `ConfirmWindowConstraintTest` 直接引用 `MatchBudgets.MAX_MATCHED_TTL_SECONDS`；xm-discovery 的 `BattleRedisConstantsTest` 里的 96 仍是字面值）。实现时另钉一条更严的：计次实现下 +180 s 那次只停表、不发，**最后一次实际补发在 170 s**，它同样要 ≥ 156 s——
+  （match 的 96 s 仍是字面值，等 6.4 有了 match 的常量再换——6.4 已换：game-battle 的 `ConfirmWindowConstraintTest` 直接引用 `MatchBudgets.MAX_MATCHED_TTL_SECONDS`；game-discovery 的 `BattleRedisConstantsTest` 里的 96 仍是字面值）。实现时另钉一条更严的：计次实现下 +180 s 那次只停表、不发，**最后一次实际补发在 170 s**，它同样要 ≥ 156 s——
   实际余量是 14 s，不是标称的 24 s（基线同样如此，`room.cpp:1115`）；`LOCK_EXTRA_TTL_SEC` 或 match 最长 matched TTL 合计再涨超过 14 s 时这条用例会失败。
 - `LOCK_HOLD_AFTER_APPLY_SEC`（180）≥ `SETTLEMENT_RETRY_INTERVAL × MAX + 60`（单测钉住）。
 - `FIGHTING_EXPIRY_GRACE`（10 s）+ reaper 间隔（≤ 30 s）< `LOCK_EXTRA_TTL_SEC`（60 s）：第一次 rescue 最晚发生在期限 + 40 s，锁一定还在（单测钉住；reaper 间隔配置启动校验 ≤ 30 s）。
-- battle → scene 的确认 / 结算调用超时（`xm.battle.scene-rpc-timeout`）与 dev gather 的单次 scene 调用 > scene 侧一条脚本最坏耗时 4.2 s（`RedisProperties.java:14`）；改 `xm.redis.*` 时一起核。
+- battle → scene 的确认 / 结算调用超时（`game.battle.scene-rpc-timeout`）与 dev gather 的单次 scene 调用 > scene 侧一条脚本最坏耗时 4.2 s（`RedisProperties.java:14`）；改 `game.redis.*` 时一起核。
   **match 的备战 / 取消调用不受这条约束（裁决，2026-10-06）**：保持 3 s，超时按结局不明处理并补发取消（§7.3）；match-spec 的数值表与跨进程不等式整表不动。
 - `SETTLED_TOMBSTONE_TTL_SEC`（600 s）≥ `OUTBOX_MAX_AGE`（10 min）：发件箱里一份结算从登记到摘除的最长寿命内，销账之后的落库都被墓碑挡住（单测钉住）。
 - `MAX_DEADLINE_AHEAD_MS`（7 天）= 待结算记录的保留期：对应的锁 TTL 是 604 860 s，EXPIRE 不会报错；正常对局的期限（集合起点 + 300 s）远小于它。
 - **D13 的「按 battle_id 升序 = 时间顺序」依赖 battle_id 生成器按时间递增**：基线是 match 节点的 snowflake（`gather.go:83`、`:202-209`；切磋 `challengelogic.go:105` 同源）。
   6.4 的 Java match 必须用时间在高位的雪花号；dev gather 由调用方给 battle_id，robot 必须按时间递增取号（§13.8 的 X1 < X2 < …）。
-  （6.4 已满足：xm-match 的 battle_id 由 `MatchIds` 发——`Snowflake` + `NodeTypes.MATCH` 的 worker 租约，时间在高位；活动开战预发的号同源。）
+  （6.4 已满足：game-match 的 battle_id 由 `MatchIds` 发——`Snowflake` + `NodeTypes.MATCH` 的 worker 租约，时间在高位；活动开战预发的号同源。）
 - 房间期限 = 确认里的 `deadline_ms` = scene 冻结的正式期限 = 票据寿命（node-spec §10.4）。
 - `SETTLEMENT_TTL_SEC` 两端同值（同一常量）。
 
@@ -1460,7 +1460,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 - **落库晚到已由墓碑消除，剩两处不保护**（D29）：① 墓碑 10 min 过期之后才落地的落库（远大于 Redisson 的 4.2 s 最坏耗时与发件箱 130 s 的重投窗口，实际不可达）；
   ② reaper 判废（`DELETE_IF_MATCH`）与删坏字段不写墓碑——判废之后晚到的结算照常落库，由进场恢复应用（B13，与原有语义一致）。
 - **`BattleLockReader.exists / existsAll` 是咨询性的读，上主从 / 集群前有部署约束**：它走 Redisson 的普通读路由，主从部署下可能读到从库的旧值。队伍视图、组队跟随、6.4 的 match 预检
-  读到旧值只是显示或排队判断晚一拍；但 **xm-data 的回档闸是安全门**，读到从库的「没有锁」会放行一次本该拒绝的回档。现在是单机 Redis，没有影响。
+  读到旧值只是显示或排队判断晚一拍；但 **game-data 的回档闸是安全门**，读到从库的「没有锁」会放行一次本该拒绝的回档。现在是单机 Redis，没有影响。
   上主从 / 集群之前必须二选一：Redisson 的 `readMode` 设 `MASTER`，或给回档闸一个读主库的批量入口（写进 architecture 的部署约束与 PARITY 残余风险）。
   同类的还有 battle 发件箱每轮定位用的 `PlayerLocationDirectory.findHolderAsync`（`READ_ONLY`）：读到过期位置最坏是多一轮 NOT_HERE 或 skip_no_target，下一轮纠正；全仓其余 `READ_ONLY` 的读届时一并审查。
 - **`TOUCH` 返回 2 后冻结停在 PREPARING**（B17「S1 还在」一支）：之后没有补发确认到达本实例的话，冻结到备战期限被 reaper 摘掉，在途闸敞开到结算，结算仍按锁应用。裁决为不改（最小修法）。
@@ -1562,9 +1562,9 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 | D24 | 账本格式与校验 | 无序、不校验 | battle_id 升序写出；加载校验，损坏时该玩家 fail-closed | 脏比对；同资产通道账本 | 仅损坏时 | 否 |
 | D25 | battle 发件箱线程与停机 | 与房间同 loop；停机立即退出 | 独立单线程；停机有界等待在途落库与首投（≤ 3 s） | 缩小 B-2 | 否 | 否 |
 | D26 | 排空 / 级联 / 疏散改派遇到战斗中的玩家 | SceneDrain / 疏散照常退出并改派 | 跳过，下次推进再看（5.1 / 5.3 规格已写定；5.5 到期写回，Q17） | 交出与战斗互斥的不变量保持简单；写回后由下一个持有者按锁重建 | **是**：战斗中的玩家留在排空频道直到结算 | 否 |
-| D27 | dev gather 管理口 | 无 | dev / test 专用；`DEV_GATHER` 房间照常结算。6.4 之后保留：真排队的端到端由 xm-match + robot `battle-smoke` 覆盖，`battle-settle` 与故障变体仍用它建房 | 6.4 之前验收 6.3；6.4 之后给需要精确控制 battle_id 与期限的场景用 | prod 不可用 | 否 |
+| D27 | dev gather 管理口 | 无 | dev / test 专用；`DEV_GATHER` 房间照常结算。6.4 之后保留：真排队的端到端由 game-match + robot `battle-smoke` 覆盖，`battle-settle` 与故障变体仍用它建房 | 6.4 之前验收 6.3；6.4 之后给需要精确控制 battle_id 与期限的场景用 | prod 不可用 | 否 |
 | D28 | 确认的投递目标 | 只发快照路由的 `(node, instance)`，实例不符就被丢弃 | 实例相符照旧；不符（备战节点已重启 / 下线）回落到定位器，Found 才发（§7.16） | 修 B17 的崩溃变体：否则锁按备战 TTL 过期，玩家会在这局还在打时被再次匹配、这局结算被丢弃 | **是**（仅故障路径）：备战节点崩溃后已重进的玩家能收到 144、回到这一局 | 可选 |
-| D29 | 已销账墓碑 | 没有：销账只删 pending 两键与锁。靠「先落库、后投递」的次序防孤儿记录；Redis 不可用时只投一次、不落库 | 销账（scene 的 `ACK`，以及 battle 的 `ACK_IF_SUPERSEDED` 删记录的分支）在同一段 Lua 里写 `xm:battle:{pid}:settled:<battle_id>`（TTL 600 s ≥ 发件箱条目最长寿命）；落库脚本见到它就不写、回 -1，发件箱按已销账处理（不登记、不投递，计 `already_settled`） | Java 的落库多半败在响应超时、命令其实已写出，且 Redisson 会原样重发：迟到 / 被重放的落库若落在销账之后，会把记录重新造出来，而账本此时已 forget → 下次进场恢复重复发奖（审计 RDS-6 / OBX-7）。基线不重发 EVAL，只剩「回复丢了而命令已执行」那一种来路，窗口更窄 | 否 | 可选 |
+| D29 | 已销账墓碑 | 没有：销账只删 pending 两键与锁。靠「先落库、后投递」的次序防孤儿记录；Redis 不可用时只投一次、不落库 | 销账（scene 的 `ACK`，以及 battle 的 `ACK_IF_SUPERSEDED` 删记录的分支）在同一段 Lua 里写 `game:battle:{pid}:settled:<battle_id>`（TTL 600 s ≥ 发件箱条目最长寿命）；落库脚本见到它就不写、回 -1，发件箱按已销账处理（不登记、不投递，计 `already_settled`） | Java 的落库多半败在响应超时、命令其实已写出，且 Redisson 会原样重发：迟到 / 被重放的落库若落在销账之后，会把记录重新造出来，而账本此时已 forget → 下次进场恢复重复发奖（审计 RDS-6 / OBX-7）。基线不重发 EVAL，只剩「回复丢了而命令已执行」那一种来路，窗口更窄 | 否 | 可选 |
 | D30 | 重建复核（TOUCH）单调 | `ConfirmRebuiltFreeze` 只比锁值：匹配就覆写 ctx（连同阶段）并按入参续 TTL，不看 ctx 里已有的阶段（`pb.cpp:540-579`、`:179-182`）；同一连接上靠 FIFO 保序 | 锁上已是 F 而入参是 P → 什么都不改、返回 2；scene 按命中保留冻结（停在 PREPARING，等下一次补发确认升级） | Redisson 的重发 / 重排（以及别的节点的离线确认）会让登录重建的 `TOUCH(P)` 落到 `CONFIRM` 之后，把在打的局降回备战、把 TTL 缩回备战期（审计 RDS-7 / FRZ-5） | 否 | 可选（基线跨节点同样可能把 ctx 写回 PREPARING） |
 | D31 | 只删备战锁 | 取消 / `ClearBattleFreeze` 的条件删锁只比锁值（`kDeleteLockIfMatchScript`，`pb.cpp:174-176`），不看阶段；同一连接上靠 FIFO 保证删除不会落到确认之后 | 在线取消、延后取消、备战失败 / 回调异常后的尽力删锁、stale 分支用「`b == X` 且 `s ≠ F` 才删」（与离线取消同一段脚本）；reaper 判废仍用不看 `s` 的删除。stale 分支在写锁结局不明时也删 | 删除被排到确认之后时锁已标 F、迟到确认已据此重建 FIGHTING，再删就留下没有锁的在打冻结（审计 FRZ-7 / FRZ-6） | 否 | 否 |
 | D32 | 过期读的防线：恢复代际 + 本实例已销账集合 | 没有：销账 / 续锁排在读锁之前靠同连接 FIFO（§1.8 第 2 条）；reaper 第二遍对所有带账本条目的玩家销账 | 进场恢复读带代际号，回调只认最新一代；发出 `ACK` 的局记进本实例的已销账集合（64，FIFO），之后任何一条读把它带回来都按已应用处理、不再应用、不按锁重建；reaper 只对 `recovery == READY` 的玩家排空账本，RETRY 只重启恢复 | 两条脚本的执行次序与回调次序都没有保证：快照早于销账而回调晚于 `forget` 会把已销账的局再应用一遍（审计 FRZ-1，critical） | 仅故障路径：本实例「丢弃并销账」而 ACK 失败的局，同一实例重跑恢复时保持丢弃（新实例上仍按 B13 补发，§7.10 第 9 步） | 否 |
@@ -1604,7 +1604,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 - **Q19 已 FIGHTING 的补发确认是否零 Redis？** 推荐**只在续期未成功时再发**（D9）。
 - **Q20 `NodeRpcClients<S>` 泛化放哪批？** 推荐 **6.3**：battle 调 scene 先用到，6.4 的 match 直接复用。
 - **Q21 match 对备战 RPC 失败 / 超时的成员也发取消？** 推荐 **6.4 采纳**（取消幂等，battle_id 不符会忽略）；登记 mmorpg 待做（可选）。
-  **6.4 落地**：采纳。xm-match 把备战的传输失败、超时、`UNSPECIFIED` 等不该出现的状态、应答解析失败、错误码为 0 却没有快照，都按结局不明并补发取消；`HANDLED` 且 tip ≠ 0、`NOT_HERE`、`OVERLOADED` 不发（scene 保证零冻结痕迹）。
+  **6.4 落地**：采纳。game-match 把备战的传输失败、超时、`UNSPECIFIED` 等不该出现的状态、应答解析失败、错误码为 0 却没有快照，都按结局不明并补发取消；`HANDLED` 且 tip ≠ 0、`NOT_HERE`、`OVERLOADED` 不发（scene 保证零冻结痕迹）。
 - **Q22 确认改按位置记录解析，修 B17？** 推荐**只做回落**（D28，评审修订）：快照路由的实例相符时照旧（离线玩家靠它续锁），只在实例不符时改问定位器——只多一次 Redis 读，
   只在故障路径上发生，修掉 B17 里危险的那一支（备战节点崩溃 → 锁按备战 TTL 过期 → 同时进两局、丢结算）。全面改按位置解析仍不做：会失去离线确认对锁的续期。
   B17 里「原节点还在」那一支（新节点上的 PREPARING 到期被摘、不推 144、在途闸敞开到结算）照搬；要修可在 reaper 摘掉 `preparedHere = false` 的 PREPARING 时重读一次锁、看到 `F` 就升级，留作备选。
@@ -1615,35 +1615,35 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 
 ## 13 测试计划与 robot
 
-构建：`./mvnw -B -pl xm-scene,xm-battle,xm-gate,xm-team,xm-player-store,xm-api,xm-discovery,xm-audit -am test`。改了 proto（`scene_battle.proto`、`player_state.proto`、
+构建：`./mvnw -B -pl game-scene,game-battle,game-gate,game-team,game-player-store,game-api,game-discovery,game-audit -am test`。改了 proto（`scene_battle.proto`、`player_state.proto`、
 `transaction_log.proto`、`battle_control.proto`）必须 `clean install`（`AGENTS.md` §4）。测试方法名用中文。没有运行证据时不得声称通过。
 
 **落地后的测试类分布与原计划的出入**（§13.1–§13.7 的各行保留原计划的「内容」列，实际的类名与落点以这里为准；条数与运行证据见末尾的实现记录）：
 
 | 模块 / 包 | 测试类 | 对应本节 |
 |---|---|---|
-| xm-discovery `com.game.discovery.battle` | `BattleRedisConstantsTest`、`LockTtlTest`、`BattleRedisReplyTest`（`ENTER_READ` 的回复形状、字段名原始字节与规范判定，新增）；真 Redis：`BattleRedisScriptsIntegrationTest`（每段脚本的真值表，每段可变脚本连跑两次）、`BattleLockReaderIntegrationTest` | §13.1、§13.4 |
-| xm-scene `com.game.scene.battle` | 计划内：`PrepareBattleTest`、`CancelBattlePrepareTest`、`ConfirmBattleTest`、`BattleRecoveryTest`、`BattleReaperTest`、`SettlementDeliverTest`、`SettlementApplyTest`、`SettlementApplyValuesTest`、`BattleLedgerTest`、`BattleSnapshotsTest`、`FreezeFromLockTest`、`InBattleGateMatrixTest`、`HandOffBattleExclusionTest`、`TeamFollowBattleTest`、`SceneBattleProviderTest`。**评审修复新增的回归类**：`BattleStaleReadTest`（过期读 / 代际 / 已销账集合 / reaper 不排空）、`BattleCallbackFailureTest`（回调抛异常、逻辑线程已停时各应答的结局）、`BattleRebuildRegressionTest`（TOUCH 的三种结局、144 恰好一次、迟到确认不带期限、rebuild 指标三分）、`BattleLockDeletionRegressionTest`（只删备战锁、按锁回调的判定次序）、`BattleLedgerEntryFieldsTest`（条目级未知字段逐字节往返）、`BattleUnfreezeRecoveryTest`（真的 5.2 交出流程：原地解冻后重跑完整恢复）。**第二轮修正新增**：`BattleFreezeCarryTest`（沿用副本：`preparedHere` 随会话取值、运行态标记复位） | §13.1、§13.2 |
-| xm-scene 其它包 | `com.game.scene.pet.PetBattleSnapshotTest`；`com.game.scene.rpc.SceneRpcServerTest`（一个端口两个服务 + §13.7 的四条跨进程断言并在其中）；`com.game.scene.metrics.SceneBattleMetricsTest`（导出的时间序列与 §9 逐项相等、初值 0、标签键有界）与 `SceneMetricsTest`；`com.game.scene.SceneNodePropertiesTest`（`reaper-interval` 边界、`battle-rpc-max-inflight`）；`com.game.scene.storage.StoragePlayerRepositoryTest`（`toData` 带出 name 与账本） | §13.1–§13.3、§13.7 |
-| xm-scene 测试件 `com.game.scene.testing` | `FakeBattleLocks`（内存版 Redis，按 `BattleRedis` 真值表执行，可控「Redis 执行」与「回复交回」的次序、重放、先执行再失败）+ `FakeBattleLocksTest`（约 60 步走遍每段脚本每个分支，先对字面期望，`-Dxm.it.redis` 下再与真 Redis 逐步对拍）、`ManualExecutor`、`RecordingTeamFollow`；`com.game.scene.battle.BattleFixture`（与 `SceneNode` 同形的一整套装配，别的包可用） | §13.2 的假件 |
-| xm-player-store | `PlayerStoreSqlTest`（H2 与真 MySQL 各一遍） | §13.3 |
-| xm-battle `outbox` / `port.scene` / `testing` | `SettlementOutboxTest`、`ActivityResultOutboxTest`、`SettlementRetryRulesTest`、`ActivityRetryRulesTest`、`OutboxMetricsTest`（新增）、`OutboxRedisIntegrationTest`（真发件箱 + 真脚本的整链，新增）；`DubboSceneBattleEventsTest`、`SceneTransportTest`、`SceneTransportPropertiesTest`、`SceneClientSweeperTest`（后三个新增）；假件 `FakeSettlementStore`（+ `FakeSettlementStoreTest`）、`FakeActivityStore`、`FakeSceneLocator`、`RecordingSceneTransport`、`Scripted`、`CallJournal` | §13.1、§13.4、§13.5 |
-| xm-battle 其它 | `room.ConfirmWindowConstraintTest`、`room.ResultRoutingTest`、`room.ConfirmResendTest`、`port.LoggingPortsTest`、`BattleConfigurationTest`、`admin.DevGatherTest` / `DevGatherControllerTest` / `DevGatherControllerProdTest` / `DevGatherControllerNoTokenTest`、`e2e.BattleNodeEndToEndTest` | §13.5 |
-| xm-gate | `BattleUplinkRejectedTest`（真实契约的 12 个号）、`ClientDispatcherTest`「战斗上行」一节（手写路由的闸序）、`MessageRoutesTest`（`directOnly` 与基线判据的等价） | §13.6 |
-| xm-team | `TeamDisplayTest`、`TeamDisplayRedisIntegrationTest`（真 Redis、真脚本）、`TeamConfigurationTest`、`TeamViewsTest` | §13.8 第 12 步的组件级等价验证 |
-| xm-api | `rpc.NodeRpcClientsTest`（真 Triple 回环） | §13.7 |
-| xm-common | `deadline.DeadlineTest`（第二轮修正补 `Deadline.await` 中断分支的两条：等待中被中断、调用时已带中断标志） | — |
-| xm-robot | `BattleSettleChecksTest`、`BattleAdminGatherTest`、`BattleCrashChecksTest`、`BattleCrashScenarioTest`、`CrashWindowOptionsTest`、`SliceScriptsTest`、`UpstreamConstantsTest`、`RobotOptionsTest` | §13.8 |
+| game-discovery `com.game.discovery.battle` | `BattleRedisConstantsTest`、`LockTtlTest`、`BattleRedisReplyTest`（`ENTER_READ` 的回复形状、字段名原始字节与规范判定，新增）；真 Redis：`BattleRedisScriptsIntegrationTest`（每段脚本的真值表，每段可变脚本连跑两次）、`BattleLockReaderIntegrationTest` | §13.1、§13.4 |
+| game-scene `com.game.scene.battle` | 计划内：`PrepareBattleTest`、`CancelBattlePrepareTest`、`ConfirmBattleTest`、`BattleRecoveryTest`、`BattleReaperTest`、`SettlementDeliverTest`、`SettlementApplyTest`、`SettlementApplyValuesTest`、`BattleLedgerTest`、`BattleSnapshotsTest`、`FreezeFromLockTest`、`InBattleGateMatrixTest`、`HandOffBattleExclusionTest`、`TeamFollowBattleTest`、`SceneBattleProviderTest`。**评审修复新增的回归类**：`BattleStaleReadTest`（过期读 / 代际 / 已销账集合 / reaper 不排空）、`BattleCallbackFailureTest`（回调抛异常、逻辑线程已停时各应答的结局）、`BattleRebuildRegressionTest`（TOUCH 的三种结局、144 恰好一次、迟到确认不带期限、rebuild 指标三分）、`BattleLockDeletionRegressionTest`（只删备战锁、按锁回调的判定次序）、`BattleLedgerEntryFieldsTest`（条目级未知字段逐字节往返）、`BattleUnfreezeRecoveryTest`（真的 5.2 交出流程：原地解冻后重跑完整恢复）。**第二轮修正新增**：`BattleFreezeCarryTest`（沿用副本：`preparedHere` 随会话取值、运行态标记复位） | §13.1、§13.2 |
+| game-scene 其它包 | `com.game.scene.pet.PetBattleSnapshotTest`；`com.game.scene.rpc.SceneRpcServerTest`（一个端口两个服务 + §13.7 的四条跨进程断言并在其中）；`com.game.scene.metrics.SceneBattleMetricsTest`（导出的时间序列与 §9 逐项相等、初值 0、标签键有界）与 `SceneMetricsTest`；`com.game.scene.SceneNodePropertiesTest`（`reaper-interval` 边界、`battle-rpc-max-inflight`）；`com.game.scene.storage.StoragePlayerRepositoryTest`（`toData` 带出 name 与账本） | §13.1–§13.3、§13.7 |
+| game-scene 测试件 `com.game.scene.testing` | `FakeBattleLocks`（内存版 Redis，按 `BattleRedis` 真值表执行，可控「Redis 执行」与「回复交回」的次序、重放、先执行再失败）+ `FakeBattleLocksTest`（约 60 步走遍每段脚本每个分支，先对字面期望，`-Dgame.it.redis` 下再与真 Redis 逐步对拍）、`ManualExecutor`、`RecordingTeamFollow`；`com.game.scene.battle.BattleFixture`（与 `SceneNode` 同形的一整套装配，别的包可用） | §13.2 的假件 |
+| game-player-store | `PlayerStoreSqlTest`（H2 与真 MySQL 各一遍） | §13.3 |
+| game-battle `outbox` / `port.scene` / `testing` | `SettlementOutboxTest`、`ActivityResultOutboxTest`、`SettlementRetryRulesTest`、`ActivityRetryRulesTest`、`OutboxMetricsTest`（新增）、`OutboxRedisIntegrationTest`（真发件箱 + 真脚本的整链，新增）；`DubboSceneBattleEventsTest`、`SceneTransportTest`、`SceneTransportPropertiesTest`、`SceneClientSweeperTest`（后三个新增）；假件 `FakeSettlementStore`（+ `FakeSettlementStoreTest`）、`FakeActivityStore`、`FakeSceneLocator`、`RecordingSceneTransport`、`Scripted`、`CallJournal` | §13.1、§13.4、§13.5 |
+| game-battle 其它 | `room.ConfirmWindowConstraintTest`、`room.ResultRoutingTest`、`room.ConfirmResendTest`、`port.LoggingPortsTest`、`BattleConfigurationTest`、`admin.DevGatherTest` / `DevGatherControllerTest` / `DevGatherControllerProdTest` / `DevGatherControllerNoTokenTest`、`e2e.BattleNodeEndToEndTest` | §13.5 |
+| game-gate | `BattleUplinkRejectedTest`（真实契约的 12 个号）、`ClientDispatcherTest`「战斗上行」一节（手写路由的闸序）、`MessageRoutesTest`（`directOnly` 与基线判据的等价） | §13.6 |
+| game-team | `TeamDisplayTest`、`TeamDisplayRedisIntegrationTest`（真 Redis、真脚本）、`TeamConfigurationTest`、`TeamViewsTest` | §13.8 第 12 步的组件级等价验证 |
+| game-api | `rpc.NodeRpcClientsTest`（真 Triple 回环） | §13.7 |
+| game-common | `deadline.DeadlineTest`（第二轮修正补 `Deadline.await` 中断分支的两条：等待中被中断、调用时已带中断标志） | — |
+| game-robot | `BattleSettleChecksTest`、`BattleAdminGatherTest`、`BattleCrashChecksTest`、`BattleCrashScenarioTest`、`CrashWindowOptionsTest`、`SliceScriptsTest`、`UpstreamConstantsTest`、`RobotOptionsTest` | §13.8 |
 
 出入：
 
-- **`BattleRedisConstantsTest` 与 `LockTtlTest` 在 xm-discovery**（常量与纯函数的出处），不在 xm-scene。前者里的确认补发窗口 180 s、备战期限上限 96 s、`scene-rpc-timeout` 缺省 5000 ms 只能写字面值
-  （这些常量在 xm-battle / 6.4，xm-discovery 不能反向依赖）；引用常量的版本在 xm-battle：`ConfirmWindowConstraintTest`、`SceneTransportPropertiesTest`。
+- **`BattleRedisConstantsTest` 与 `LockTtlTest` 在 game-discovery**（常量与纯函数的出处），不在 game-scene。前者里的确认补发窗口 180 s、备战期限上限 96 s、`scene-rpc-timeout` 缺省 5000 ms 只能写字面值
+  （这些常量在 game-battle / 6.4，game-discovery 不能反向依赖）；引用常量的版本在 game-battle：`ConfirmWindowConstraintTest`、`SceneTransportPropertiesTest`。
 - **§13.2 的四个类没有放进审计建议的 world / team 包**：`InBattleGateMatrixTest`、`HandOffBattleExclusionTest`、`TeamFollowBattleTest`、`SceneBattleProviderTest` 都在 `com.game.scene.battle`，共用 `BattleFixture`。
 - **§13.5 的几个短语落在房间层**：「`DEV` 房间不调端口、`DEV_GATHER` 照调」「`kind = NONE` 不进通道、不认识的 kind 进通道」「`DEV_GATHER` 房间的结算端口被调用、结果事件端口不被调用」在 `ResultRoutingTest`；
   「补发节奏」在 `ConfirmResendTest`；「非 dev → 403」在 `DevGatherControllerProdTest`；「缺令牌 → 503」在 `DevGatherControllerNoTokenTest`。
 - **§13.6 分两处**：真实契约的 12 个号在 `BattleUplinkRejectedTest`，手写路由的闸序用例在 `ClientDispatcherTest`。
-- **§13.7 并进 `SceneRpcServerTest`**：调用方用 xm-api 的 `NodeRpcClients<SceneBattleService>`，对面是真的 `SceneBattleProvider` 加真的 `PlayerBattleService`；鉴权拒绝按 Triple 状态码 `UNAUTHENTICATED` 断言。
+- **§13.7 并进 `SceneRpcServerTest`**：调用方用 game-api 的 `NodeRpcClients<SceneBattleService>`，对面是真的 `SceneBattleProvider` 加真的 `PlayerBattleService`；鉴权拒绝按 Triple 状态码 `UNAUTHENTICATED` 断言。
 - **`InBattleGateMatrixTest` 多一道守卫**：扫描主代码编译产物里全部 `SceneFeature` 实现类，必须与 `BattleFixture.features` 相等——新功能类不进夹具即失败，进了夹具其方法又必须进 §7.13 的表与探测。
   「钉住不闸」的定义是：对照玩家（另一套相同装配、不在战斗）发同一条请求办得成，在途玩家得到逐项相同的结果。
 - **§13.5 `SettlementOutboxTest` 补一项**：跑满 12 轮后、第 13 轮前销账 → `acked`，不是 `exhausted` / `exhausted_offline`（有目标、无目标各一条）——这条性质由探测在前的次序保证（§7.15）。
@@ -1660,7 +1660,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 | `BattleLedgerTest` | 登记幂等与 forget；0 号永不登记、永不命中；满 64 按时间戳不按下标淘汰；state 往返；写出顺序确定；未知字段保留；损坏判定（0 号、重复、超 64） | `t_settle:325-360` |
 | `SettlementRetryRulesTest` | 停止于已销账；按重新解析的目标重投；无位置时等待；用尽响亮但不丢；最后一轮已销账算成功；**次数在判定之后才加**：attemptsSoFar = 11 → resend、12 → exhausted（共 12 次重投，第 13 轮用尽） | `t_route:353-397` |
 | `ActivityRetryRulesTest` | 判定顺序；键名；只在重发时计次（30 次重发后第 31 轮用尽） | `t_act:116-135`；`room.cpp:2014` |
-| `BattleRedisConstantsTest` | `LOCK_HOLD ≥ INTERVAL × MAX + 60`；`GRACE + REAPER_INTERVAL < LOCK_EXTRA`；确认补发窗口不等式（给 6.2 引用）；`xm.battle.scene-rpc-timeout` 缺省值 > `RedisProperties` 缺省最坏耗时 4.2 s | `pb.h:112-117` |
+| `BattleRedisConstantsTest` | `LOCK_HOLD ≥ INTERVAL × MAX + 60`；`GRACE + REAPER_INTERVAL < LOCK_EXTRA`；确认补发窗口不等式（给 6.2 引用）；`game.battle.scene-rpc-timeout` 缺省值 > `RedisProperties` 缺省最坏耗时 4.2 s | `pb.h:112-117` |
 | `LockTtlTest` | 期限已过 → 60；`(d − now)/1000` 截断 | `pb.cpp:229-234` |
 | `FreezeFromLockTest` | §1.2 的四条取值规则（字段缺失、`s` 缺失按 F、`d` 按 TTL 反推、P 缺 `p` 取 `d`） | `pb.cpp:608-637` |
 | `BattleSnapshotsTest` | 各字段来源；speed 0 → 120；level 至少 1；max 兜底；技能剔除被动 / 开关 / 持续施法、空 `skill_type` 保留、0 与无表行跳过、保持原顺序；道具只取主背包、临时格不算、数量 0 跳过、`battle_usable = 0` 跳过、config 无符号升序合并（含 > 2^31 的 id）、uint64 累加；routing；`team_index = 0`；指纹等于 `TableBattleData.fingerprint()`；名字来自 `PlayerData` | `pb.cpp:885-1103` |
@@ -1684,11 +1684,11 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 | `SceneBattleProviderTest` | 在途上限 → OVERLOADED 且未进逻辑线程；实例不符 → NOT_HERE 且未进逻辑线程；解析失败的各方法回包；在回写线程上完成；逻辑线程已停 → 异常完成 |
 | `SceneRpcServerTest` | 一个端口导出两个服务的真 Triple 回环，`register = false`，两个 group |
 
-### 13.3 存储（`PlayerStoreSqlTest`，缺省 H2，`-Dxm.it.mysql` 连真库）
+### 13.3 存储（`PlayerStoreSqlTest`，缺省 H2，`-Dgame.it.mysql` 连真库）
 
 `battle_ledger` 随 `player_state` 往返；被围栏拒绝的写不落账本；交出事务把账本带过去（handoff-spec §5.2）；`PlayerData.name` 读出。
 
-### 13.4 真 Redis（`-Dxm.it.redis`，缺省跳过）
+### 13.4 真 Redis（`-Dgame.it.redis`，缺省跳过）
 
 - `BattleRedis` 每段脚本的真值表：`PREPARE_LOCK`（空 → 写入；同局 P → 重放成功并刷新 TTL；同局 F → 拒绝且不改 TTL；别的局 → 拒绝）；**每段可变脚本连跑两次**，第二次的返回与副作用符合 §7.2 的重放语义；`CONFIRM` 命中与不命中；`CANCEL_OFFLINE` 的 P / F / 不符；`DELETE_IF_MATCH` 不误删别的局；
   `TOUCH`；`HOLD` 只延不缩；`ACK` 位掩码（记录匹配 / 不匹配 × 锁匹配 / 不匹配 / 不在），删掉最后一个字段后键自然消失；`ENTER_READ` 在无锁、有锁无记录、两者都有时的返回；
@@ -1720,9 +1720,9 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 
 进程内真 Triple 回环：battle 的 `NodeRpcClients<SceneBattleService>` → scene 提供方。断言实例不符 → NOT_HERE；缺 Dubbo MAC → 鉴权拒绝；在途超限 → OVERLOADED；应答在 `scene-asset-reply` 上完成。
 
-### 13.8 robot：`battle-settle` 场景（xm-robot）
+### 13.8 robot：`battle-settle` 场景（game-robot）
 
-- **前置**：本机切片带 xm-battle 与 xm-scene（`SceneBattleService`），dev 模式，`XM_ADMIN_TOKEN` 已设，scene 的 `reaper-interval = 2s`。复用 6.2 的 `BattleDirectConnection`、
+- **前置**：本机切片带 game-battle 与 game-scene（`SceneBattleService`），dev 模式，`GAME_ADMIN_TOKEN` 已设，scene 的 `reaper-interval = 2s`。复用 6.2 的 `BattleDirectConnection`、
   `BattleAdminClient`、大厅 177 记录。账号 A（新号）、B（同场景观察者）。基线对照：`robot/features_battle_smoke.go`（任务 12、PVE1、`verify_relogin`，胜利判据 `:82-95`）。
 
 1. **准备**：A、B 登录进同一场景。A 用 GM 187 领宝宝并 183 出战；194 接任务 12；记下 54 金币、191 背包、167 气血、181 宝宝。
@@ -1746,8 +1746,8 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
     `dev/destroy` → A 收不到 150；63 一直回 3023；期限 + 10 s 宽限 + 2 s 内 63 恢复（rescue 读不到本局记录 → 判废）。
 11. **与 5.2 互斥**（只在双 scene 切片上跑，复用 `CrossNodeScenario` 的前置）：PREPARING 时 63 指向另一节点的场景 → 3023（不是 3014）；取消后同一条 63 跨节点成功。
 12. **队伍视图**（`team` 场景扩展）：成员备战后 `TeamMemberView.in_battle` 为 true；结算销账后变回 false。
-13. **指标**：scene `xm_scene_battle_settlements_total{result="applied"} ≥ 2`、`xm_scene_battle_acks_total{result="released"} ≥ 2`、`xm_scene_battle_gate_rejects_total` 各 gate 有增长；
-    battle（18112）`xm_battle_settlement_outbox_total{event="acked"} ≥ 1`、`exhausted` 不变。
+13. **指标**：scene `game_scene_battle_settlements_total{result="applied"} ≥ 2`、`game_scene_battle_acks_total{result="released"} ≥ 2`、`game_scene_battle_gate_rejects_total` 各 gate 有增长；
+    battle（18112）`game_battle_settlement_outbox_total{event="acked"} ≥ 1`、`exhausted` 不变。
 14. **输出**：`BATTLE_SETTLE_OK battle_id=… gold=… mission=12 relogin=ok offline=ok`；失败 `BATTLE_SETTLE_FAIL step=…`。
 
 - **故障变体**（只在本机切片跑，形态参照基线 `robot/currency_crash_window_scenario.go`，由 `tools/local/` 脚本 kill -9）：大厅收到 150 之后立即 kill scene、重启、重登 → 金币恰好增一次、150 至多一份；
@@ -1766,7 +1766,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
   （备战前 false / 备战后 true / 取消后 false / 确认后 true / 销账放锁后 false），每次最多等 5 s；后两次嵌在第 6–7 步里采样，失败记在第 12 步名下。
 - **第 11 步**：A、B 登录时同图不同频道就直接跑（目标 = B 原来的频道）；否则只有 `--scene-metrics-url` 给了两个及以上地址（= 声明双 scene 切片）时才用探针账号落位，
   落不到判失败；只有一个地址时跳过并写观察记录。判据依赖「per-node 覆盖、每图每节点一个频道」（与 `cross-node` 场景同一前提）。双 scene 切片上这一步之后 A 留在另一个节点。
-- **第 13 步**：在途闸逐个断言 `gate = enter_scene / attribute / pet / bag_sort / skill / move` 各 ≥ 1（取值由单测读 xm-scene 的 `SceneMetrics.BattleGate` 钉住）；`asset` 与 `default` 本场景打不到，只记观察。
+- **第 13 步**：在途闸逐个断言 `gate = enter_scene / attribute / pet / bag_sort / skill / move` 各 ≥ 1（取值由单测读 game-scene 的 `SceneMetrics.BattleGate` 钉住）；`asset` 与 `default` 本场景打不到，只记观察。
   双 scene 切片必须把两个节点的管理端口都传给 `--scene-metrics-url`；robot 见过第二个节点、地址不足两个、增量又不达标时，只记一条写明原因的失败（仍是 `step=13`，不降成观察记录）。
 - **故障变体**：`battle-settle --crash-window scene-after-150|battle-after-store --crash-phase arm|verify --crash-state <文件>`（`BattleCrashScenario`），由 `tools/local/battle-crash-window.sh` 编排
   （等断点 → `kill -9` → 等 arm 退出 → 按 `start-slice.sh` 的方式重启 → verify）；robot 只是客户端、不杀进程，断点信号是状态文件的出现。
@@ -1776,8 +1776,8 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
     与「纯」窗口的差别：scene 在 battle 被杀之前见过一次被延后的投递。
   - 判定版本：`BattleCrashChecks.STATE_VERSION = 2`（也是状态文件的 `version`）：打赢且 `gold_gain > 0` 才写断点、verify 拒绝 `gold_gain = 0`、`battle-after-store` 的 verify 只认 rescued。
     robot 帮助里报出 `[crash-window-rev=2]`，脚本的 `ROBOT_CRASH_REVISION` 必须相等；改判定要两边一起加一。
-  - 脚本前置：只支持 `start-slice.sh` 起的切片，要在启动切片的同一个 shell 里执行；只允许 dev / test；robot 包要认 `--crash-window`、判定版本相符、且不比 `xm-robot/src/main` 与 `pom.xml` 里任何文件旧
-    （改了 xm-robot 源码必须重新打包）；`scene-after-150` 在第二个 scene 节点活着时拒绝。脚本里重启用的函数、端口表、命令行是从 `start-slice.sh` 逐字复制的，由 `SliceScriptsTest` 在构建期钉住两份不走样。
+  - 脚本前置：只支持 `start-slice.sh` 起的切片，要在启动切片的同一个 shell 里执行；只允许 dev / test；robot 包要认 `--crash-window`、判定版本相符、且不比 `game-robot/src/main` 与 `pom.xml` 里任何文件旧
+    （改了 game-robot 源码必须重新打包）；`scene-after-150` 在第二个 scene 节点活着时拒绝。脚本里重启用的函数、端口表、命令行是从 `start-slice.sh` 逐字复制的，由 `SliceScriptsTest` 在构建期钉住两份不走样。
 
 ### 13.9 交付清单（随 6.3 提交）
 
@@ -1816,7 +1816,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 **不安全的 Java 设计（已改）**
 4. §7.2 / §7.5 / §10.6 第 3 条：Java 的 Redisson 是 `retryAttempts = 1`，超时的 EVAL 会被重发（`RedisProperties.java:14`）。原稿 `PREPARE_LOCK`「同局也拒」在重放下会把自己刚写的锁当成被占，
    scene 回 1006、match 不发取消，锁却留到备战 TTL。改为「同局且仍是 P → 重放成功」，并给每段脚本写明重放语义；Redisson 最坏耗时更正为 4.2 s（原稿写 3 s）。
-5. §7.3 / §8 / §10.4：`xm.battle.scene-rpc-timeout` 从 3 s 改为 5 s，并要求所有 `SceneBattleService` 的调用方超时都大于 scene 侧最坏 4.2 s，启动时校验。
+5. §7.3 / §8 / §10.4：`game.battle.scene-rpc-timeout` 从 3 s 改为 5 s，并要求所有 `SceneBattleService` 的调用方超时都大于 scene 侧最坏 4.2 s，启动时校验。
 6. §7.8 第 0 步：沿用旧实例时，原稿「原样搬」同一个冻结对象。`lockPending` 的冻结会变成没有锁的孤儿；带着 `rescuing = true` 的冻结会让 reaper 永远跳过它，冻结永不过期。
    改为复制成新对象、复位运行态标记，写锁在途的冻结不沿用。
 7. §7.8 第 2 / 3 步：原稿遇到延后的记录就整步停下，连锁步骤一起停。金币长期被封时，一场仍在打的局在本实例上没有冻结，在途闸全部敞开。改为锁步骤照做，并补上判据：
@@ -1854,13 +1854,13 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 
 **共享件**（形状按 §7.3 与 match-spec 的 `NodeRpcClients<S>` 条目；后到的批次只引用、不重建）
 
-- xm-api：`SceneBattleService`；`xm/api/scene_battle.proto`（同 §7.3）；`DubboGroups.SCENE_BATTLE`，`SCENE_ASSET` 的注释已同步；
+- game-api：`SceneBattleService`；`game/api/scene_battle.proto`（同 §7.3）；`DubboGroups.SCENE_BATTLE`，`SCENE_ASSET` 的注释已同步；
   `battle_control.proto` 追加 `DevGatherMode / DevGatherMember / DevGatherRequest / DevGatherPrepareResult / DevGatherResponse`，并 import `scene_battle.proto` 以引用 `SceneBattleStatus`。
-- xm-api：`com.game.api.rpc.NodeRpcClients<S>`（Q20）。按 (host, port) 缓存编程式引用，实例变了就重建；`retries = 0`；引用在自己的守护线程上建；重连间隔与心跳都是 1 s（同资产通道）。
+- game-api：`com.game.api.rpc.NodeRpcClients<S>`（Q20）。按 (host, port) 缓存编程式引用，实例变了就重建；`retries = 0`；引用在自己的守护线程上建；重连间隔与心跳都是 1 s（同资产通道）。
   `SceneAssetOpClients` 还**没有**改成它的薄包装，留到与 guild 资产通道同批合入时再改，这次不动 guild 的调用面。测试：`NodeRpcClientsTest`（5 条，真 Triple 回环）。
-- xm-battle：`RoomOrigin.DEV_GATHER`，加 `settles()` / `publishesResult()`。`BattleRoomServiceImpl` 的结算与结果出站改按这两个方法判断：
+- game-battle：`RoomOrigin.DEV_GATHER`，加 `settles()` / `publishesResult()`。`BattleRoomServiceImpl` 的结算与结果出站改按这两个方法判断：
   DEV 仍不结算；DEV_GATHER 照常结算、不发结果事件；MATCH 不变。`ResultRoutingTest` 补 2 条。
-- xm-battle 指标：`xm_battle_dev_gather_total{mode, result}`。与 §9 相比多两个取值：`mode=unknown` 用于解析请求体之前就被拒的请求（403、坏请求体）；
+- game-battle 指标：`game_battle_dev_gather_total{mode, result}`。与 §9 相比多两个取值：`mode=unknown` 用于解析请求体之前就被拒的请求（403、坏请求体）；
   `result=rejected` 用于 400 和节点没在运行的 503。
 
 **dev gather**（`com.game.battle.admin`：`DevGather` 负责编排，`DevGatherController` 是 HTTP 入口，`DevGatherConfiguration` 是独立装配）
@@ -1884,10 +1884,10 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 
 测试：`DevGatherTest`（18 条，纯编排）、`DevGatherControllerTest`（6 条，真 Tomcat + 真控制面 + 桩房间 + 指标）、`DevGatherControllerProdTest`（1 条）、`BattleMetricsTest` 补 1 条。
 
-**robot `battle-settle`**（xm-robot）
+**robot `battle-settle`**（game-robot）
 
 新增 `BattleSettleScenario`；纯函数放在 `BattleSettleChecks`，由 `BattleSettleChecksTest` 覆盖（9 条）。`BattleAdminClient` 加了 `gather / gatherRaw / cancelPrepare`，
-请求与应答都按字段号编解码，`BattleAdminGatherTest`（6 条）用 xm-api 的生成类逐字节钉住字段号。子命令是 `battle-settle`，`--slow` 加跑慢用例，`--expect-dev deny` 只核对 403。
+请求与应答都按字段号编解码，`BattleAdminGatherTest`（6 条）用 game-api 的生成类逐字节钉住字段号。子命令是 `battle-settle`，`--slow` 加跑慢用例，`--expect-dev deny` 只核对 403。
 
 与 §13.8 的出入：
 
@@ -1896,7 +1896,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 - **第 4 步 173**：只断言不回 25011。1 级角色没有剩余点，会回 25014，这同样算「照常」。
 - **A、B 不在同一频道**：B 先发 63 换到 A 的 scene_id。
 - **63 会真的换图**：第 7 步「闸已解除」就是一次真换图；第 10 步的判废时刻取 63 第一次成功的时刻。
-- **reaper 等待**：按缺省 30 s 间隔取上界（再加 2 s）等待，实际时延写进检查细节；切片把 `xm.scene.battle.reaper-interval` 调到 2 s 时，实际值远小于上界。
+- **reaper 等待**：按缺省 30 s 间隔取上界（再加 2 s）等待，实际时延写进检查细节；切片把 `game.scene.battle.reaper-interval` 调到 2 s 时，实际值远小于上界。
 - **第 9 步的等待**：不用固定的 15 s，而是轮询 dev/issue-ticket，直到房间消失（回 1005），再等 3 s（`--slow` 等 130 s）才登录。
 - **任务 12**：只在 `settlement.defeated_monsters` 里有怪物 1 时才检查；没有就记一条失败并写明 outcome。胜负按基线判 SIDE_A_WIN。
 - **第 13 步指标**：指标名照 §9 写死；scene 指标抓不到时只记观察记录，不判失败。
@@ -1908,20 +1908,20 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
   这说明 dev gather 已经在真进程里装配起来，链路走通了：经位置记录与目录定位 → `NodeRpcClients` 带调用方 MAC 连到 scene 的 21100 → 按结局不明补发取消 → 422 的 protobuf 体被 robot 解出。
   第 3–10 步要等 scene 侧落地后再跑。
 - 6.2 的 `battle` 场景 60 / 60 通过，`RoomOrigin` / 出站判定的改动没有回归。
-- xm-battle.log 里有 8 行 ERROR，都是 Dubbo 调用方的 `RpcExceptionFilter` 在记上面那个 UNIMPLEMENTED，scene 导出 `SceneBattleService` 之后就会消失。
+- game-battle.log 里有 8 行 ERROR，都是 Dubbo 调用方的 `RpcExceptionFilter` 在记上面那个 UNIMPLEMENTED，scene 导出 `SceneBattleService` 之后就会消失。
 
 ---
 
 ## 实现记录（scene 侧、发件箱与评审修复，2026-10-05 / 06）
 
-范围：scene 侧（冻结 / 在途闸 / 结算应用 / 账本与销账 / 提供方）、xm-discovery 的键与脚本、battle 侧两个发件箱与确认传输、gate 的 D12、xm-team 的 `in_battle`，
+范围：scene 侧（冻结 / 在途闸 / 结算应用 / 账本与销账 / 提供方）、game-discovery 的键与脚本、battle 侧两个发件箱与确认传输、gate 的 D12、game-team 的 `in_battle`，
 以及 robot `battle-settle` 的补全与故障变体。过程：主代码在提交 `7dff75c` 入库 → 分六个区做审计并逐条复核（另有第七个区是 7.2b，见 data-ops-spec）→ 第一轮修复与补测试 →
 逐模块评审与评审修正（到这里为止的代码与测试在提交 `4f3f345`；CI 上一处测试竞态修在 `d6b6b1e`）→ 第二轮修正（7 项）及其评审修正（2 项），与文档一起见其后的提交
 （git log「批次 6.3 收尾」）。正文 §7–§13 已按本节的事实回写；本节只记正文里放不下的东西：类的落点、缺陷清单、证据与遗留。
 
 ### 落地的类与职责
 
-**xm-discovery**（`com.game.discovery`、`com.game.discovery.battle`）
+**game-discovery**（`com.game.discovery`、`com.game.discovery.battle`）
 
 - `RedisKeys`：`battleLock` / `battleSettlements` / `battleSettled`（已销账墓碑）/ `battleActivityResult`；前三个共用 `{pid}` hash tag。
 - `BattleRedis`：全部 Lua 文本（`PREPARE_LOCK`、`CONFIRM`、`CANCEL_OFFLINE`、`DELETE_IF_MATCH`、`TOUCH`、`HOLD`、`ACK`、`ENTER_READ`、`READ_IF_OURS`、`READ_LOCK_BATTLE`、
@@ -1929,7 +1929,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
   纯函数 `lockTtlSec` / `parseUnsigned`，结果形状 `EnterRead` / `SettlementField`。类注释逐段写明重放语义与「与销账交错」的结论。全部方法异步，future 在 Redisson 回调线程上完成。
 - `BattleLockReader`：`exists`（普通读，咨询性）/ `battleId`（经脚本，读主库）/ `existsAll`（按入参顺序去重，任一读失败整体异常完成）。
 
-**xm-scene**
+**game-scene**
 
 - `com.game.scene.battle.PlayerBattle`：挂在 `ScenePlayer` 上的运行态——冻结、恢复状态、不重入标记、恢复代际、本实例已销账集合。
 - `BattleFreeze`：一名玩家身上的冻结；纯函数 `fromLock`（§1.2 的取值规则）、`carriedCopy(sameSession)`。
@@ -1948,13 +1948,13 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 - `com.game.scene.metrics.SceneBattleMetrics`（本批全部战斗计数，构造时预建）；`SceneMetrics` 的 `BattleGate` 与各 `in_battle` 取值。
 - 各服务闸：`AttributeService.checkWritable`（25011）、`PetService.checkWritable`（26008）、`BagFeature.sortBag`（1005）、`SkillService` / `SkillRules`（7004 / 7002）、`AssetOpService`（27002）；
   `PetService.buildBattleSnapshot` / `applyBattleSettlement`；`BagService.removeClamped` / `mergeOnly`、`Bag.drainClamped`。
-- `SceneNode`：装配（`BattleLockReader` → 跟随的锁探针；`PlayerInitializer` 里的两个账本检查；reaper 按 `xm.scene.battle.reaper-interval` 注册在逻辑线程上）。
+- `SceneNode`：装配（`BattleLockReader` → 跟随的锁探针；`PlayerInitializer` 里的两个账本检查；reaper 按 `game.scene.battle.reaper-interval` 注册在逻辑线程上）。
 
 **与 §7.1 原稿类划分的出入**（审计 STL-12；裁决为不改代码、记在这里）：没有 `SettlementWriteOff`——销账并在 `PlayerBattleService.writeOff / ack / onPersisted`；没有 `BattleItems.usable`——
 判据在 `SceneBattleTables.battleUsable`；没有 `RedisBattleLocks` 类；结算到达的分流在 `PlayerBattleService.deliver` 而不是 `BattleSettlementService`；184 由 `BattleSettlementService` 直接发，
 不经 `PetFeature`。行为等价；分流与销账放在一个类里，四条应用路径才只有一个收口（`applyAndFinish`）。
 
-**xm-battle**
+**game-battle**
 
 - `com.game.battle.outbox`：`SettlementOutbox`（实现 `SettlementSink`；端口 `Store` / `Locator` / `Transport`）、`SettlementRetryRules`、`ActivityResultOutbox`（实现 `ActivityResultSink`）、
   `ActivityRetryRules`、`OutboxMetrics`。
@@ -1964,14 +1964,14 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
   `LoggingBattleResultSink` 按通道计数。
 - 配置：`application.yaml` 补两个键与文件头的 Redis 读写说明。
 
-**xm-gate**：`MessageRoute.directOnly`、`MessageRoutes.DIRECT_ONLY_SERVICES` / `directOnly(method)` / `all()`、`GateMetrics.RequestResult.BATTLE_REJECTED` 与 `registerRequest`、`ClientDispatcher.onRequest` 的直连闸。
+**game-gate**：`MessageRoute.directOnly`、`MessageRoutes.DIRECT_ONLY_SERVICES` / `directOnly(method)` / `all()`、`GateMetrics.RequestResult.BATTLE_REJECTED` 与 `registerRequest`、`ClientDispatcher.onRequest` 的直连闸。
 
-**xm-team**：`TeamDisplay` 多一个依赖 `battleLocks`（构造器三参数）；`TeamConfiguration` 新增 `BattleLockReader` bean，`teamDisplay` 注入 `battleLocks::existsAll`（6.4 的整队开战预检可以直接复用这个 bean）。
+**game-team**：`TeamDisplay` 多一个依赖 `battleLocks`（构造器三参数）；`TeamConfiguration` 新增 `BattleLockReader` bean，`teamDisplay` 注入 `battleLocks::existsAll`（6.4 的整队开战预检可以直接复用这个 bean）。
 
-**xm-robot 与脚本**：`BattleSettleScenario`（补第 11、12 步，第 13 步逐闸）、`BattleSettleChecks`、`BattleCrashScenario` / `BattleCrashChecks` / `CrashWindowOptions`、`tools/local/battle-crash-window.sh`。
+**game-robot 与脚本**：`BattleSettleScenario`（补第 11、12 步，第 13 步逐闸）、`BattleSettleChecks`、`BattleCrashScenario` / `BattleCrashChecks` / `CrashWindowOptions`、`tools/local/battle-crash-window.sh`。
 
 **lead 的三处小改动**：根 `pom.xml` 钉 maven-surefire-plugin 3.2.5 并加 `forkedProcessTimeoutInSeconds = 1800`（某条用例无限等待时构建在 30 分钟后失败，而不是把测试进程永远挂住）；
-`SettlementOutbox.dispatch` 入口挡住空的结算（+ 用例），`xm-battle/pom.xml` 的 description 补 6.3 起的 Redis 使用面；xm-data 的 `PersistedPlayerMapper` 区号按无符号绑定（属 7.2b，见 data-ops-spec）。
+`SettlementOutbox.dispatch` 入口挡住空的结算（+ 用例），`game-battle/pom.xml` 的 description 补 6.3 起的 Redis 使用面；game-data 的 `PersistedPlayerMapper` 区号按无符号绑定（属 7.2b，见 data-ops-spec）。
 
 ### 审计确认并修掉的缺陷
 
@@ -2004,15 +2004,15 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 | OBX-12 | 活动局的结果计在 `plain` 通道 | 发布端口带 `Channel`，活动局计 `activity` |
 | OBX-13 | 目录条目端口越界时异常被无人持有的 future 吞掉，这次确认没有任何计数结局 | 越界按实例不符回落；回调体的异常计 `error` 并打 ERROR |
 | GAT-2 / GAT-8（gate） | D12 没有落地：战斗上行仍走 unsupported 域 → 待处理队列 → 缺省分支，三处细节差异都在 | `directOnly` 直连闸 + 指标预建 + 用例（§7.19） |
-| GAT-1 / RDS-5 / OPS-12 | `TeamMemberView.in_battle` 仍恒为 false，`BattleLockReader.existsAll` 没有调用方 | xm-team 接上，team-spec D10 收口 |
+| GAT-1 / RDS-5 / OPS-12 | `TeamMemberView.in_battle` 仍恒为 false，`BattleLockReader.existsAll` 没有调用方 | game-team 接上，team-spec D10 收口 |
 | OPS-13 / OPS-14 / OPS-22 | rebuild 指标把「坏字段」「常态的账本命中」「延后」都计成 `skipped_corrupt`；放技能取值与规格不一致；几处口径没写 | 新取值 `skipped_pending` 并三分；放技能保留两个取值；口径写进注释与 §9 |
-| OPS-15 / OBX-16 / OPS-21 | 两个 `xm.battle.*` 键不在 yaml、文件头过时；`delivered` 的口径没写 | yaml 补齐；注释与 §9 写明 |
+| OPS-15 / OBX-16 / OPS-21 | 两个 `game.battle.*` 键不在 yaml、文件头过时；`delivered` 的口径没写 | yaml 补齐；注释与 §9 写明 |
 | GAT-15 / RDS-16 | `TeamFollowService` 类注释仍写「不读 battle:lock」，与实现矛盾 | 注释重写；规格 §7.13 第 3 条按实现改 |
 | RDS-4 | 6.2 的约束单测仍私有写死 60_000 | 引用 `BattleRedis.LOCK_EXTRA_TTL_SEC` |
 | OPS-18 / OPS-19 / OPS-20（robot） | 没有故障变体；第 13 步不逐闸；普通检查失败不登记步骤号 | `BattleCrashScenario` 与脚本；逐闸断言；`step()` 登记失败步骤，汇总行抽成纯函数 |
 | RDS-1–3、FRZ-11–16、STL-1–7、GAT-3–7、OBX-1–6、OPS-16 / 17 | §13 计划里的测试类大多不存在 | 全部补齐（§13 开头的分布表） |
 
-复核判为不成立、没有改的：FRZ-8（同一行为由 GAT-14 的修法覆盖）、GAT-12（镜像取号回来后不复查战斗）、OPS-23（B7 + B14 的基线怪癖）。area7 的两条与战斗有关（回档前查战斗锁），修法在 xm-data（`BattleLockGate`），记在 data-ops-spec。
+复核判为不成立、没有改的：FRZ-8（同一行为由 GAT-14 的修法覆盖）、GAT-12（镜像取号回来后不复查战斗）、OPS-23（B7 + B14 的基线怪癖）。area7 的两条与战斗有关（回档前查战斗锁），修法在 game-data（`BattleLockGate`），记在 data-ops-spec。
 
 **评审阶段的发现**（都是测试质量或文档问题，主代码没有再发现缺陷）：gate 2 条（`MessageRoutesTest` 的守卫用错了基线判据、既有用例取到了 `directOnly` 的号）；team 3 条
 （类级 `@Timeout` 缺省是 SAME_THREAD、兜不住 `join()` 式的无限等待；缺中断形态的用例；注释把 MGET 的行为写错）；battle 两轮共 7 条（停机排空的接线没有判别力、OBX-7 的回归用例只断言了假件、
@@ -2039,12 +2039,12 @@ team 的那条有一个值得记的通用结论：本仓库 JUnit 5.12.2 的 `@T
 | d | 组队跟随判换图在途时同样让过期的 RESOLVING 槽失效 | `TeamFollowService.followLeader` 改经 `SceneWorld.switchInFlight`（现在有三个调用方）；§7.13 第 3 条 |
 | e | 帧外推跳过战斗在途的玩家（同基线 `movement.cpp:49-52`；纵深防御） | `SceneWorld.integrate`；§7.13 第 6 条 |
 | f | 销账放了锁（位 2）而回调时实例已换：对现任实例（没有冻结时）补一次组队跟随 | `PlayerBattleService.ack` 的回调；§7.12 |
-| g | xm-common 的 `Deadline.await` 中断分支补直接用例（主代码没有改） | `DeadlineTest`（等待中被中断、调用时已带中断标志两条） |
+| g | game-common 的 `Deadline.await` 中断分支补直接用例（主代码没有改） | `DeadlineTest`（等待中被中断、调用时已带中断标志两条） |
 | h | 评审修正：要删锁的解冻（取消、reaper 判废）与不跟着解冻的删锁（备战失败 / 过期后的尽力删锁、离线取消），删锁结局回来时实例已换、现任实例上又没有可摘的冻结——原来不给现任实例补跟随（与 f 同一种丢失）。改为锁确实是这一次删掉的（返回 1）就补给现任实例 | `PlayerBattleService.followCurrentIfLockDeleted`（`clearFreeze` 的回调、`deletePreparingLock`、离线取消的回调）；§7.4「删锁结局回来之后补给谁」 |
 | i | 评审修正：按 F 锁重建的 FIGHTING 冻结复核还在途（144 还没推）时同会话重复进场，沿用后这个会话永远收不到这一局的 144。改为沿用时推不推只看副本的 `preparedHere` 与阶段，不再另判会话 | `PlayerBattleService.onEntered`（沿用后无条件调 `pushReconnectOnce`）；§7.8 第 0 步、§9 的 `reconnect_hints` 口径 |
 
 第二轮新增 / 改动的测试：`BattleFreezeCarryTest`（新增）、`DeadlineTest`，以及 `PrepareBattleTest`、`CancelBattlePrepareTest`、`ConfirmBattleTest`、`BattleRecoveryTest`、`BattleReaperTest`、
-`SettlementApplyTest`、`TeamFollowBattleTest`、`InBattleGateMatrixTest` 里的相应用例。模块级的运行证据在下一小节（xm-scene、xm-common 两行）。
+`SettlementApplyTest`、`TeamFollowBattleTest`、`InBattleGateMatrixTest` 里的相应用例。模块级的运行证据在下一小节（game-scene、game-common 两行）。
 
 ### 测试与模块级证据
 
@@ -2053,50 +2053,50 @@ team 的那条有一个值得记的通用结论：本仓库 JUnit 5.12.2 的 `@T
 
 | 模块 | 命令的其余部分（日志） | 汇总行 | 时点 |
 |---|---|---|---|
-| xm-discovery | `-Dxm.it.redis=redis://127.0.0.1:6379`（`sceneRv-disc-1.log`） | `Tests run: 196, Failures: 0, Errors: 0, Skipped: 0` | 10-06，scene 评审修正之后 |
-| xm-discovery | 不带 Redis（`disc-4.log`） | `Tests run: 195, Failures: 0, Errors: 0, Skipped: 109` | 10-05，实现之后（之后又加了 1 条集成用例） |
-| xm-scene | 整模块，不带 Redis（`r2rev2-full-scene-2.log`） | `Tests run: 1417, Failures: 0, Errors: 0, Skipped: 4` | 10-06 07:59，**第二轮修正及其评审修正之后**（最终状态的主代码） |
-| xm-scene | 战斗相关类 + 真 Redis：`-Dtest='com.game.scene.battle.*Test,FakeBattleLocksTest,PetBattleSnapshotTest,TeamFollowServiceTest,SceneBattleMetricsTest,MovementSyncTest' -Dsurefire.failIfNoSpecifiedTests=false -Dxm.it.redis=…`（`r2-redis-scene.log`） | `Tests run: 597, Failures: 0, Errors: 0, Skipped: 0` | 10-06 06:36，第二轮修正（a–g）之后、它的评审修正（h、i）之前；h、i 不涉及 Redis 脚本，之后没有带真 Redis 重跑 |
-| xm-scene | 整模块，不带 Redis（`sceneRv-full-2.log`） | `Tests run: 1382, Failures: 0, Errors: 0, Skipped: 4` | 10-06 05:39，第一轮评审修正之后、第二轮修正之前（留作对照） |
-| xm-common | 整模块（`r2-full-common.log`） | `Tests run: 116, Failures: 0, Errors: 0, Skipped: 0` | 10-06 06:36，第二轮修正之后 |
-| xm-player-store | 整模块 H2（`sceneC2-store-h2.log`） | `Tests run: 59, Failures: 0, Errors: 0, Skipped: 4` | 10-06 |
-| xm-player-store | `-Dtest='PlayerStoreSqlTest' -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306`（`sceneC2-store-mysql.log`） | `Tests run: 30, Failures: 0, Errors: 0, Skipped: 0` | 10-06 |
-| xm-battle | 整模块，不带 Redis（`r63c-full-2.log`） | `Tests run: 472, Failures: 0, Errors: 0, Skipped: 15` | 10-06，第二轮评审修正之后 |
-| xm-battle | 整模块 + 真 Redis（`battle63-full-it.log`） | `Tests run: 460, Failures: 0, Errors: 0, Skipped: 0` | 10-05，实现之后（之后两轮评审修正各加了用例，没有带真 Redis 重跑整模块；`OutboxRedisIntegrationTest` 单跑过，`r63b-it.log`） |
-| xm-gate | 整模块（`gate-review-3-full.log`） | `Tests run: 187, Failures: 0, Errors: 0, Skipped: 0` | 10-06 |
-| xm-team | 整模块，不带 Redis（`teamfix-5-full.log`） | `Tests run: 248, Failures: 0, Errors: 0, Skipped: 53` | 10-05 23:35 |
-| xm-team | `-Dtest='TeamDisplayTest,TeamDisplayRedisIntegrationTest' -Dxm.it.redis=…`（`teamfix-6.log`） | `Tests run: 22, Failures: 0, Errors: 0, Skipped: 0` | 10-05 23:36 |
-| xm-robot | `package`（全部单测 + 重新打可执行 jar；`robotfix-full.log`） | `Tests run: 305, Failures: 0, Errors: 0, Skipped: 0` | 10-06 03:22 |
+| game-discovery | `-Dgame.it.redis=redis://127.0.0.1:6379`（`sceneRv-disc-1.log`） | `Tests run: 196, Failures: 0, Errors: 0, Skipped: 0` | 10-06，scene 评审修正之后 |
+| game-discovery | 不带 Redis（`disc-4.log`） | `Tests run: 195, Failures: 0, Errors: 0, Skipped: 109` | 10-05，实现之后（之后又加了 1 条集成用例） |
+| game-scene | 整模块，不带 Redis（`r2rev2-full-scene-2.log`） | `Tests run: 1417, Failures: 0, Errors: 0, Skipped: 4` | 10-06 07:59，**第二轮修正及其评审修正之后**（最终状态的主代码） |
+| game-scene | 战斗相关类 + 真 Redis：`-Dtest='com.game.scene.battle.*Test,FakeBattleLocksTest,PetBattleSnapshotTest,TeamFollowServiceTest,SceneBattleMetricsTest,MovementSyncTest' -Dsurefire.failIfNoSpecifiedTests=false -Dgame.it.redis=…`（`r2-redis-scene.log`） | `Tests run: 597, Failures: 0, Errors: 0, Skipped: 0` | 10-06 06:36，第二轮修正（a–g）之后、它的评审修正（h、i）之前；h、i 不涉及 Redis 脚本，之后没有带真 Redis 重跑 |
+| game-scene | 整模块，不带 Redis（`sceneRv-full-2.log`） | `Tests run: 1382, Failures: 0, Errors: 0, Skipped: 4` | 10-06 05:39，第一轮评审修正之后、第二轮修正之前（留作对照） |
+| game-common | 整模块（`r2-full-common.log`） | `Tests run: 116, Failures: 0, Errors: 0, Skipped: 0` | 10-06 06:36，第二轮修正之后 |
+| game-player-store | 整模块 H2（`sceneC2-store-h2.log`） | `Tests run: 59, Failures: 0, Errors: 0, Skipped: 4` | 10-06 |
+| game-player-store | `-Dtest='PlayerStoreSqlTest' -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306`（`sceneC2-store-mysql.log`） | `Tests run: 30, Failures: 0, Errors: 0, Skipped: 0` | 10-06 |
+| game-battle | 整模块，不带 Redis（`r63c-full-2.log`） | `Tests run: 472, Failures: 0, Errors: 0, Skipped: 15` | 10-06，第二轮评审修正之后 |
+| game-battle | 整模块 + 真 Redis（`battle63-full-it.log`） | `Tests run: 460, Failures: 0, Errors: 0, Skipped: 0` | 10-05，实现之后（之后两轮评审修正各加了用例，没有带真 Redis 重跑整模块；`OutboxRedisIntegrationTest` 单跑过，`r63b-it.log`） |
+| game-gate | 整模块（`gate-review-3-full.log`） | `Tests run: 187, Failures: 0, Errors: 0, Skipped: 0` | 10-06 |
+| game-team | 整模块，不带 Redis（`teamfix-5-full.log`） | `Tests run: 248, Failures: 0, Errors: 0, Skipped: 53` | 10-05 23:35 |
+| game-team | `-Dtest='TeamDisplayTest,TeamDisplayRedisIntegrationTest' -Dgame.it.redis=…`（`teamfix-6.log`） | `Tests run: 22, Failures: 0, Errors: 0, Skipped: 0` | 10-05 23:36 |
+| game-robot | `package`（全部单测 + 重新打可执行 jar；`robotfix-full.log`） | `Tests run: 305, Failures: 0, Errors: 0, Skipped: 0` | 10-06 03:22 |
 
-xm-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`RedisGainBlockSourceIntegrationTest`、`FakeBattleLocksTest` 的真 Redis 对拍、`ViewCrowdBenchmarkTest`。xm-data 的战斗锁闸用例见 data-ops-spec。
+game-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`RedisGainBlockSourceIntegrationTest`、`FakeBattleLocksTest` 的真 Redis 对拍、`ViewCrowdBenchmarkTest`。game-data 的战斗锁闸用例见 data-ops-spec。
 
 各测试类的条数（取自上表各自那份日志里的逐类汇总行；只供对照规模，**以最终验证为准**）：
 
-- xm-discovery：`BattleRedisScriptsIntegrationTest` 46、`BattleLockReaderIntegrationTest` 9、`BattleRedisConstantsTest` 15、`BattleRedisReplyTest` 14、`LockTtlTest` 6。
-- xm-scene（`r2rev2-full-scene-2.log`，第二轮之后）：`PrepareBattleTest` 44、`CancelBattlePrepareTest` 39、`ConfirmBattleTest` 35、`BattleRecoveryTest` 34、`BattleReaperTest` 25、`SettlementDeliverTest` 26、
+- game-discovery：`BattleRedisScriptsIntegrationTest` 46、`BattleLockReaderIntegrationTest` 9、`BattleRedisConstantsTest` 15、`BattleRedisReplyTest` 14、`LockTtlTest` 6。
+- game-scene（`r2rev2-full-scene-2.log`，第二轮之后）：`PrepareBattleTest` 44、`CancelBattlePrepareTest` 39、`ConfirmBattleTest` 35、`BattleRecoveryTest` 34、`BattleReaperTest` 25、`SettlementDeliverTest` 26、
   `SettlementApplyTest` 24、`SettlementApplyValuesTest` 36、`BattleLedgerTest` 20、`BattleSnapshotsTest` 20、`FreezeFromLockTest` 11、`InBattleGateMatrixTest` 118、`HandOffBattleExclusionTest` 13、
   `TeamFollowBattleTest` 17、`SceneBattleProviderTest` 12、`BattleStaleReadTest` 13、`BattleCallbackFailureTest` 9、`BattleRebuildRegressionTest` 18、`BattleLockDeletionRegressionTest` 6、
   `BattleLedgerEntryFieldsTest` 6、`BattleUnfreezeRecoveryTest` 3、`BattleFreezeCarryTest` 2、`FakeBattleLocksTest` 11、`PetBattleSnapshotTest` 15、`SceneRpcServerTest` 8、`SceneBattleMetricsTest` 5；
-  xm-player-store 的 `PlayerStoreSqlTest` 30；xm-common 的 `DeadlineTest` 7。
-- xm-battle：`SettlementOutboxTest` 56、`ActivityResultOutboxTest` 19、`SettlementRetryRulesTest` 10、`ActivityRetryRulesTest` 6、`OutboxMetricsTest` 6、
+  game-player-store 的 `PlayerStoreSqlTest` 30；game-common 的 `DeadlineTest` 7。
+- game-battle：`SettlementOutboxTest` 56、`ActivityResultOutboxTest` 19、`SettlementRetryRulesTest` 10、`ActivityRetryRulesTest` 6、`OutboxMetricsTest` 6、
   `OutboxRedisIntegrationTest` 4、`DubboSceneBattleEventsTest` 19、`SceneTransportTest` 6、`SceneTransportPropertiesTest` 8、`SceneClientSweeperTest` 9、`ConfirmWindowConstraintTest` 3。
-- xm-gate：`BattleUplinkRejectedTest` 9、`ClientDispatcherTest` 95、`MessageRoutesTest` 17。
-- xm-team：`TeamDisplayTest` 17、`TeamDisplayRedisIntegrationTest` 5、`TeamConfigurationTest` 2、`TeamViewsTest` 10。
-- xm-robot：`BattleSettleChecksTest` 28、`BattleCrashChecksTest` 19、`BattleCrashScenarioTest` 11、`SliceScriptsTest` 13、`UpstreamConstantsTest` 6、`CrashWindowOptionsTest` 7、`RobotOptionsTest` 19。
+- game-gate：`BattleUplinkRejectedTest` 9、`ClientDispatcherTest` 95、`MessageRoutesTest` 17。
+- game-team：`TeamDisplayTest` 17、`TeamDisplayRedisIntegrationTest` 5、`TeamConfigurationTest` 2、`TeamViewsTest` 10。
+- game-robot：`BattleSettleChecksTest` 28、`BattleCrashChecksTest` 19、`BattleCrashScenarioTest` 11、`SliceScriptsTest` 13、`UpstreamConstantsTest` 6、`CrashWindowOptionsTest` 7、`RobotOptionsTest` 19。
 
 **判别力核对（变异）**——每一处都是「临时改错、跑对应用例确认失败、还原并 `cmp`」：
 
-- xm-discovery：去掉 TOUCH 单调、两处墓碑写入、落库的墓碑判断 → 三个相关类 `Tests run: 67, Failures: 11`（`disc-mutation.log`）。
-- xm-scene 第一轮修复：把 `PlayerBattleService` 换回修复前的版本，当时的 85 条战斗用例 `Failures: 37, Errors: 3`（`scene1-mut.log`），失败原因与各缺陷对应
+- game-discovery：去掉 TOUCH 单调、两处墓碑写入、落库的墓碑判断 → 三个相关类 `Tests run: 67, Failures: 11`（`disc-mutation.log`）。
+- game-scene 第一轮修复：把 `PlayerBattleService` 换回修复前的版本，当时的 85 条战斗用例 `Failures: 37, Errors: 3`（`scene1-mut.log`），失败原因与各缺陷对应
   （FRZ-1：金币 expected 100 but was 200；FRZ-4：144 为 [7, 7]、期望 [7]；FRZ-2：recovery expected RETRY but was PENDING；STL-9：销账 X 的 ACK 次数 0、期望 1）。
-- xm-scene 三组测试：A 组 140 条单点变异，补 2 条用例后全部被杀（1 条为等价变异、用伪造回复区分）；B 组 47 个全部被杀；C 组 115 个，114 个判红、1 个等价。评审修正另做了 7 处变异（`sceneRv-mut-*.log`），全部判红。
-- xm-scene 第二轮修正（a–f）：30 条单点变异（去掉某个删锁调用点的摘冻结、四条守卫各去一条、`preparedHere` 的三种错法、期限上界的七种错法、销账补跟随的五种错法、换回 `switchPhase`、
-  去掉帧外推的跳过等），在相关的 10 个测试类（未变异时 349 条）上逐条判红（`r2-mut-verdicts-scene.txt`）。xm-common（g）：3 条变异只在草稿区的模块副本里做，各让两条新用例失败
+- game-scene 三组测试：A 组 140 条单点变异，补 2 条用例后全部被杀（1 条为等价变异、用伪造回复区分）；B 组 47 个全部被杀；C 组 115 个，114 个判红、1 个等价。评审修正另做了 7 处变异（`sceneRv-mut-*.log`），全部判红。
+- game-scene 第二轮修正（a–f）：30 条单点变异（去掉某个删锁调用点的摘冻结、四条守卫各去一条、`preparedHere` 的三种错法、期限上界的七种错法、销账补跟随的五种错法、换回 `switchPhase`、
+  去掉帧外推的跳过等），在相关的 10 个测试类（未变异时 349 条）上逐条判红（`r2-mut-verdicts-scene.txt`）。game-common（g）：3 条变异只在草稿区的模块副本里做，各让两条新用例失败
   （`r2-mut-verdicts-common.txt`）。评审修正（h、i）：8 条变异在相关的 224 条用例上逐条判红（`r2rev2-mut-summary-1.log` / `-2.log`）。
   一条经验：还原主代码时若保留原修改时间（`cp -p`），还原后的源文件比变异版编译出的 class 旧，Maven 增量编译不会重编，`target/classes` 里会留下变异版的 class——
   还原后要 `touch` 源文件再编一遍（这一轮在最后一个变异后发现并当场重编，上表 07:59 的整模块运行在重编之后）。
-- xm-battle：8 处同时变异 → `Tests run: 95, Failures: 19`（`battle63-mutation.log`）；两轮评审修正各自的变异见 `r63b-*` / `r63c-mut-all3.log`。
-- xm-gate：整体关掉直连闸 → `Tests run: 120, Failures: 11, Errors: 3`（`gate63-mutant.log`）。xm-team：限时等待改成 `join()` → 4 条超时失败、构建没有卡住；吞中断标志 → 2 条失败。
+- game-battle：8 处同时变异 → `Tests run: 95, Failures: 19`（`battle63-mutation.log`）；两轮评审修正各自的变异见 `r63b-*` / `r63c-mut-all3.log`。
+- game-gate：整体关掉直连闸 → `Tests run: 120, Failures: 11, Errors: 3`（`gate63-mutant.log`）。game-team：限时等待改成 `join()` → 4 条超时失败、构建没有卡住；吞中断标志 → 2 条失败。
 - 按设计存活的等价变异（没有用例能区分的防御性代码）：`applyGained` 里「只补没进主包的部分」（Java 的批量入包整批原子，主包失败时一件都没进）；e–j 外层的 `finally` 登记账本
   （各步自己已捕获 `RuntimeException`，`finally` 只在 `Error` 时有区别）；reaper 里「账本损坏就不排空」（损坏的账本 `battleIds()` 本来就是空的）；
   `ClientRequestHandler.register` 里「有应答的方法不能 DROP」的检查（玩法功能的 DROP 在注册入口已先被拒）；`abandonPrepare` 里「冻结还挂着就摘掉」那一支（没找到能让它成立的抛出点）。
@@ -2104,7 +2104,7 @@ xm-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`R
 ### robot 与故障变体脚本的现状
 
 - **`battle-settle`**：第 1、2 步有 2026-10-05 13:05 的切片证据（上一段实现记录，当时 scene 侧还没有导出 `SceneBattleService`）。**第 3–10 步在 scene 侧落地之后、以及后来补的第 11、12 步与改过的第 13 步，
-  都还没有在活的切片上跑过**（写本节时的状态：实现、评审与修正阶段都不起本机切片，证据只有编译与纯函数单测 `BattleSettleChecksTest` 等；切片上的结论见最后的「最终验证」）。第 12 步依赖 xm-team 的 `in_battle`，切片里没部署 xm-team 时会如实失败（`step=12`）。
+  都还没有在活的切片上跑过**（写本节时的状态：实现、评审与修正阶段都不起本机切片，证据只有编译与纯函数单测 `BattleSettleChecksTest` 等；切片上的结论见最后的「最终验证」）。第 12 步依赖 game-team 的 `in_battle`，切片里没部署 game-team 时会如实失败（`step=12`）。
 - **故障变体**（`scene-after-150` / `battle-after-store`）：`BattleCrashScenario` 的全部在线流程、脚本对真进程的 kill 与重启都没有在活的切片上跑过。证据只有：纯函数与状态文件编解码的单测；
   `bash -n`；第一轮在草稿目录里用假仓库树 + 假 java + 假节点做的编排模拟（36 项，覆盖两个变体的全流程）；评审修正之后只在沙箱里重跑了前置检查与 arm 段（重启与 verify 两段没有重跑）；
   真仓库 `--dry-run`（切片没在跑时如实报四条「没在运行」）。
@@ -2130,12 +2130,12 @@ xm-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`R
 - `a–d 步返回时零副作用` 的用例只对 a 步与 d 步做了整份状态比对；b 步（账本命中）只断言了账本、金币与气血。
 - `PlayerRevive.reviveIfDead` 在气血上限为 0 且气血为 0 时回「满」到 0；基线注释说取不到上限时退回职业初值（那个函数的实现没有读，差异未证实）。只在派生上限缺配时出现，不属于 6.3。
 - 几个测试写死了正式配表的现值（技能 13 行及其类型、物品 10 / 11 可用、职业初值、灵狐的数值等）：契约表同步后变了，这些断言会失败并指出要重看。
-- `DubboAuthProviderFilter`（xm-api）给调用方的中文原因经 Triple 传过去只剩问号，调用方日志里只有状态码 `UNAUTHENTICATED`；改成 ASCII 文案即可，不属于本批文件。
-- `FakeBattleLocksTest` 的真 Redis 对拍与 xm-discovery 的脚本用例缺省跳过，日常回归只跑字面期望。
+- `DubboAuthProviderFilter`（game-api）给调用方的中文原因经 Triple 传过去只剩问号，调用方日志里只有状态码 `UNAUTHENTICATED`；改成 ASCII 文案即可，不属于本批文件。
+- `FakeBattleLocksTest` 的真 Redis 对拍与 game-discovery 的脚本用例缺省跳过，日常回归只跑字面期望。
 
-**xm-discovery / xm-battle**
+**game-discovery / game-battle**
 
-- `BattleRedisConstantsTest` 里的 180 s / 96 s / 5000 ms 是字面值（不能反向依赖 xm-battle / 6.4）；`ConfirmWindowConstraintTest` 里 match 的 96 s 也是字面值，等 6.4 有了常量再换。（6.4 已换成 `MatchBudgets.MAX_MATCHED_TTL_SECONDS`。）
+- `BattleRedisConstantsTest` 里的 180 s / 96 s / 5000 ms 是字面值（不能反向依赖 game-battle / 6.4）；`ConfirmWindowConstraintTest` 里 match 的 96 s 也是字面值，等 6.4 有了常量再换。（6.4 已换成 `MatchBudgets.MAX_MATCHED_TTL_SECONDS`。）
 - `DevGatherConfiguration` 自己那份 `NodeRpcClients<SceneBattleService>` 没有接清扫（只在 dev / test 下建连接）。
 - `SceneTransport.close` 不排空活动结果通道（§10.5）；`drainAndClose` 之后才回来的落库成功仍会首投一次、不登记。
 - `OutboxRedisIntegrationTest` 没有覆盖 `ACK_IF_SUPERSEDED` 回 0 / 1 的「保留」分支（真线程上难以确定地等到往返结束），这两格由假 Store 的用例和脚本真值表覆盖；
@@ -2144,12 +2144,12 @@ xm-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`R
 - `SettlementRetryRules.classify` 的 `stillOurs` 形参与走不到的 `DONE` 分支有意保留（§7.15）。
 - `SceneAssetOpClients` 还没有改成 `NodeRpcClients<S>` 的薄包装（上一段实现记录）。
 
-**xm-gate / xm-team**
+**game-gate / game-team**
 
 - `MessageRoutesTest` 里的 package 驼峰化是简化版（按 `_ . -` 分词、各词首字母大写），不是 `strcase.ToCamel` 的逐字节复刻；对现行契约的 package 名结果相同。
   6.4 把 `MatchService` 接进 `SERVICE_BACKENDS` 后，用例「Java版未接入的客户端服务路由到unsupported_且不是directOnly」会带说明失败，届时直接删掉它（缺省分支由另一条用例继续钉住）。
   （6.4 已接入：那条用例按它自己的说明删掉，换成「现行契约里的客户端服务都有去向」；以后同步契约新增了 Java 还没接的客户端服务，这条用例会失败并提示怎么处理。`BattleClientPlayer` 的 12 个直连号仍被当场拒。）
-- 整队开战预检的 4025 仍恒回 4027，属 6.4。（6.4 已接：4025 由 xm-match 的成员预检给出，team-spec §5.5。）
+- 整队开战预检的 4025 仍恒回 4027，属 6.4。（6.4 已接：4025 由 game-match 的成员预检给出，team-spec §5.5。）
 - `TeamDisplay` 原有的在线读 WARN 不带原始 cause；资料读或在线读若返回 null 会 NPE（生产实现都不会给 null，潜在问题，没有顺手改）。`TeamConfigurationTest` 的 Redis 是 Mockito 替身。
 - `TeamDisplayRedisIntegrationTest` 用 DB 12（生产缺省库），与其它新测试的 DB 15 / 14 不一致，是否对齐未定（§8）。
 
@@ -2161,11 +2161,11 @@ xm-scene 跳过的 4 条是缺省跳过的：`ScenePlanPullIntegrationTest`、`R
 
 在含第二轮修正、评审修正与注释订正的最终代码上执行（本机 Windows 11，JDK 21.0.12；Redis 8.10.2、MySQL 8.4.11、Kafka 4.3.1 单机，与 CI 的依赖镜像同版本）。
 
-**全量构建**：`./mvnw -B clean install -Dxm.it.redis=redis://127.0.0.1:6379 -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dxm.it.kafka=127.0.0.1:9092`
+**全量构建**：`./mvnw -B clean install -Dgame.it.redis=redis://127.0.0.1:6379 -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dgame.it.kafka=127.0.0.1:9092`
 → 26 个模块 BUILD SUCCESS，7096 条用例、0 失败、0 错误，跳过 1 条（`ViewCrowdBenchmarkTest`，缺省关闭的基准）。各模块条数：
-xm-proto 7、xm-table-codegen 18、xm-table 22、xm-net 21、xm-common 116、xm-battle-engine 2236、xm-pbmysql 127、xm-api 43、xm-discovery 196、xm-player-store 59、
-xm-gateway-store 10、xm-audit 8、xm-scene-manager 232、xm-login 170、xm-friend 84、xm-chat 10、xm-team 248、xm-guild 531、xm-trade 175、xm-scene 1417、xm-battle 472、
-xm-gate 194、xm-gateway 90、xm-data 305、xm-robot 305。
+game-proto 7、game-table-codegen 18、game-table 22、game-net 21、game-common 116、game-battle-engine 2236、game-pbmysql 127、game-api 43、game-discovery 196、game-player-store 59、
+game-gateway-store 10、game-audit 8、game-scene-manager 232、game-login 170、game-friend 84、game-chat 10、game-team 248、game-guild 531、game-trade 175、game-scene 1417、game-battle 472、
+game-gate 194、game-gateway 90、game-data 305、game-robot 305。
 
 **GitHub Actions**：`4f3f345`（第一轮修复与测试）的 Integration 通过，CI「构建与单测」失败在 `SceneBattleProviderTest` 的测试竞态（不是功能缺陷，见上面「评审阶段的发现」）；
 `d6b6b1e`（只改那两条测试的等待次序）的 CI 与 Integration 都通过。本次收尾提交的结果以它自己的 run 为准。
@@ -2180,9 +2180,9 @@ xm-gate 194、xm-gateway 90、xm-data 305、xm-robot 305。
 - 故障变体（`tools/local/battle-crash-window.sh`）：`scene-after-150` 通过（arm 6 项、verify 8 项，`outcome=durable`：kill 落在落盘之后，重登不重发、金币恰好增一次）；
   `battle-after-store` 通过（arm 15 项、verify 8 项，`outcome=rescued`：battle 被杀后没有人重投，期限 + 10 s 之后 scene 的 reaper 读到记录并应用，金币恰好增一次）。
   `recovered`（kill 落在「已应用、未落盘」）这一支本机没有打中，原因见上面「robot 与故障变体脚本的现状」。
-- 服务端日志里的 ERROR 只有：故障变体杀掉 scene 期间 xm-battle / xm-guild 连它的 21100 失败的 Dubbo 重连日志，以及 guild、killswitch 两个场景的负面用例各触发的一条。
+- 服务端日志里的 ERROR 只有：故障变体杀掉 scene 期间 game-battle / game-guild 连它的 21100 失败的 Dubbo 重连日志，以及 guild、killswitch 两个场景的负面用例各触发的一条。
 
-**本机双 scene 切片**（`XM_SCENE_NODES=2`）：smoke(3)、cross-node(41)、**battle-settle(77，给两个节点的指标地址；含第 11 步：PREPARING 时 63 指向另一节点 → 3023，
+**本机双 scene 切片**（`GAME_SCENE_NODES=2`）：smoke(3)、cross-node(41)、**battle-settle(77，给两个节点的指标地址；含第 11 步：PREPARING 时 63 指向另一节点 → 3023，
 取消后同一条 63 跨节点成功)**、reconnect(9)、mirror(40)、dungeon(31)、battle(60)、guild-economy(78)、rollback(19)、friend(26)、chat(8)、guild(75) 全部通过；
 `battle-after-store` 通过（`outcome=rescued`）。`movement` 要求两个号落在同一场景实例，双 scene 切片上按它自己的前提不适用，没有计入。
 

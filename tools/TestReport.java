@@ -37,9 +37,9 @@ import org.w3c.dom.NodeList;
  *       GitHub 每个 step 最多显示 10 条 error annotation，超出的合并成最后一条「另有 N 个……」。
  *       job 日志匿名读不到，annotation 是匿名读取失败原因的唯一途径。</li>
  *   <li>{@code --require-it-executed}：防「集成测试标志传错、全部静默跳过、结果却是绿的」。扫描
- *       {@code <模块>/src/test/java} 里带 {@code @EnabledIfSystemProperty(named = "xm.it.…")} 的类（类级注解）与方法（方法级注解），
- *       每个门控单元都必须至少有一个用例真的执行了（没有报告、或者全被跳过都算没执行）；另外，任何因 {@code xm.it.*}
- *       没给而被跳过的用例（{@code assumeTrue(… "需要 -Dxm.it.mysql")} 这类不用注解的门控）也算。命中即退出码 1。</li>
+ *       {@code <模块>/src/test/java} 里带 {@code @EnabledIfSystemProperty(named = "game.it.…")} 的类（类级注解）与方法（方法级注解），
+ *       每个门控单元都必须至少有一个用例真的执行了（没有报告、或者全被跳过都算没执行）；另外，任何因 {@code game.it.*}
+ *       没给而被跳过的用例（{@code assumeTrue(… "需要 -Dgame.it.mysql")} 这类不用注解的门控）也算。命中即退出码 1。</li>
  * </ul>
  *
  * <p>一个报告都没有时（编译阶段就失败了）只在 Summary 里写「无测试报告」，退出码 0，失败原因交给 Maven 问题匹配器；
@@ -62,9 +62,9 @@ public final class TestReport {
     private static final int MAX_MESSAGE_LINES = 3;
     private static final int MAX_MESSAGE_CHARS = 400;
 
-    private static final String IT_PROPERTY_PREFIX = "xm.it.";
+    private static final String IT_PROPERTY_PREFIX = "game.it.";
     private static final Pattern IT_ANNOTATION = Pattern.compile("@EnabledIfSystemProperty\\s*\\(");
-    private static final Pattern IT_NAMED = Pattern.compile("named\\s*=\\s*\"(xm\\.it\\.[^\"]*)\"");
+    private static final Pattern IT_NAMED = Pattern.compile("named\\s*=\\s*\"(game\\.it\\.[^\"]*)\"");
     private static final Pattern PACKAGE = Pattern.compile("^\\s*package\\s+([\\w.]+)\\s*;", Pattern.MULTILINE);
     private static final Pattern TYPE_DECLARATION =
             Pattern.compile("\\b(?:class|record|interface|enum)\\s+([\\p{L}\\p{N}_$]+)");
@@ -285,7 +285,7 @@ public final class TestReport {
                 missingClasses.add(unit.className());
             }
         }
-        // 不用注解的门控（assumeTrue(… "需要 -Dxm.it.mysql")）：跳过原因里带 xm.it. 的用例，去掉已经按单元算过的
+        // 不用注解的门控（assumeTrue(… "需要 -Dgame.it.mysql")）：跳过原因里带 game.it. 的用例，去掉已经按单元算过的
         List<TestCase> gateSkipped = new ArrayList<>();
         for (TestCase c : cases) {
             if (c.outcome() == Outcome.SKIPPED && c.message().contains(IT_PROPERTY_PREFIX)
@@ -296,7 +296,7 @@ public final class TestReport {
         return new ItStatus(units, missing, gateSkipped, classes.size(), classes.size() - missingClasses.size());
     }
 
-    /** 从一个源文件里找出全部 {@code @EnabledIfSystemProperty(named = "xm.it.…")}，判定是类级还是方法级。 */
+    /** 从一个源文件里找出全部 {@code @EnabledIfSystemProperty(named = "game.it.…")}，判定是类级还是方法级。 */
     static List<ItUnit> itUnits(String module, Path source, String original) {
         String text = blankComments(original);   // 注释里提到的注解不算
         String fileName = source.getFileName().toString();
@@ -476,14 +476,14 @@ public final class TestReport {
             System.out.printf("%s：%s.%s%n    %s%n", c.outcome() == Outcome.ERROR ? "出错" : "失败", simpleName(c.className()),
                     c.name(), String.join("\n    ", messageLines(c)));
         }
-        System.out.printf("集成测试（@EnabledIfSystemProperty(named = \"xm.it.*\")）：%d 个类中实际执行 %d 个（门控单元 %d 个）%n",
+        System.out.printf("集成测试（@EnabledIfSystemProperty(named = \"game.it.*\")）：%d 个类中实际执行 %d 个（门控单元 %d 个）%n",
                 it.classes(), it.executedClasses(), it.units().size());
         if (requireIt) {
             for (ItUnit u : it.missing()) {
                 System.out.println("  未执行：" + u.label());
             }
             for (TestCase c : it.gateSkipped()) {
-                System.out.println("  因缺 -Dxm.it.* 跳过：" + c.className() + "#" + c.name() + "（" + oneLine(c.message()) + "）");
+                System.out.println("  因缺 -Dgame.it.* 跳过：" + c.className() + "#" + c.name() + "（" + oneLine(c.message()) + "）");
             }
         }
     }
@@ -515,7 +515,7 @@ public final class TestReport {
             }
             md.append('\n');
         }
-        md.append("#### 集成测试\n\n带 `@EnabledIfSystemProperty(named = \"xm.it.*\")` 的类：")
+        md.append("#### 集成测试\n\n带 `@EnabledIfSystemProperty(named = \"game.it.*\")` 的类：")
                 .append(it.classes()).append(" 个，实际执行 ").append(it.executedClasses()).append(" 个（门控单元 ")
                 .append(it.units().size()).append(" 个）")
                 .append(requireIt ? "；本次要求全部执行（`--require-it-executed`）" : "")
@@ -525,7 +525,7 @@ public final class TestReport {
         }
         if (requireIt) {
             it.missing().forEach(u -> md.append("- 未执行：`").append(u.label()).append("`\n"));
-            it.gateSkipped().forEach(c -> md.append("- 因缺 `-Dxm.it.*` 跳过：`").append(c.className()).append('#')
+            it.gateSkipped().forEach(c -> md.append("- 因缺 `-Dgame.it.*` 跳过：`").append(c.className()).append('#')
                     .append(c.name()).append("`（").append(mdEscape(oneLine(c.message()))).append("）\n"));
         }
         Files.writeString(file, md.append('\n').toString(), StandardCharsets.UTF_8, StandardOpenOption.CREATE,
@@ -563,7 +563,7 @@ public final class TestReport {
             if (noReports) {
                 msg.append("没有任何测试报告：要求集成测试执行（--require-it-executed），但一个用例都没跑");
             } else {
-                msg.append("以下集成测试没有执行（-Dxm.it.* 没传到、或依赖没起来被跳过）：");
+                msg.append("以下集成测试没有执行（-Dgame.it.* 没传到、或依赖没起来被跳过）：");
                 it.missing().forEach(u -> msg.append('\n').append(u.label()));
                 it.gateSkipped().forEach(c -> msg.append('\n').append(c.className()).append('#').append(c.name())
                         .append("（").append(oneLine(c.message())).append("）"));
@@ -715,7 +715,7 @@ public final class TestReport {
                 用法：java tools/TestReport.java [--root <仓库根>] [--summary <文件>] [--annotate] [--require-it-executed]
                   --summary <文件>         把汇总以 Markdown 追加进该文件（CI：$GITHUB_STEP_SUMMARY）
                   --annotate               为失败用例输出 ::error annotation（每步最多 10 条，超出合并）
-                  --require-it-executed    带 @EnabledIfSystemProperty(named = "xm.it.*") 的测试必须真的执行，否则退出码 1
+                  --require-it-executed    带 @EnabledIfSystemProperty(named = "game.it.*") 的测试必须真的执行，否则退出码 1
                 退出码：0 通过；1 有失败用例或集成测试没执行；2 用法错误""");
     }
 }

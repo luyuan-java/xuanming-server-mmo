@@ -383,12 +383,12 @@ ai.client.SendRequest(game.SceneSceneClientPlayerSceneInfoC2SMessageId, &scene.S
 ## 11. 让 robot 跑「move」动作的配置（Java 版，本地临时文件，不入库）
 
 ```yaml
-# 连 Java 版：xm-gateway 缺省端口 18081；连 mmorpg 用 8081
+# 连 Java 版：game-gateway 缺省端口 18081；连 mmorpg 用 8081
 gateway_addr: "http://127.0.0.1:18081"
 zone_id: 1
 robot_count: 3
 account_fmt: "robot_%04d"
-password: "<与 xm-login 的 XM_LOGIN_DEV_PASSWORD 相同>"   # 不要把真实值写进任何仓库
+password: "<与 game-login 的 GAME_LOGIN_DEV_PASSWORD 相同>"   # 不要把真实值写进任何仓库
 auth_type: "password"
 skill_ids: []
 table_dir: "../generated/tables"   # 相对 mmorpg/robot 目录运行

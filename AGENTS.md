@@ -14,11 +14,11 @@
 - **所有功能两个版本都要做**。一边完成一个功能，就在 `PARITY.md` 登记一行；交付说明写明另一版状态。
 - **两版共享的只有客户端契约**：客户端 ↔ gate 帧格式与握手、`proto/` 里客户端可见的消息、消息号、tip 码、配置表数据、
   客户端访问的 HTTP 接口形状。这些由 `tools/ContractSync.java` 从 mmorpg 同步，**不许手改**：
-  - `xm-proto/src/main/proto/**`、`xm-proto/src/main/resources/contract/**`
-  - `xm-table/src/main/proto/**`、`xm-table/src/main/java/com/game/table/TableConstants.java`
+  - `game-proto/src/main/proto/**`、`game-proto/src/main/resources/contract/**`
+  - `game-table/src/main/proto/**`、`game-table/src/main/java/com/game/table/TableConstants.java`
   - `config-data/tables/**`、`contract/SOURCE.properties`
   改契约先改 mmorpg，再运行 `java tools/ContractSync.java --mmorpg <mmorpg 根目录>` 同步，两边同批提交。
-  `--check` 只比对不写入（不一致退出码 1）。配置表的 Java 访问代码不再同步，由 `xm-table-codegen` 在编译期按权威 schema
+  `--check` 只比对不写入（不一致退出码 1）。配置表的 Java 访问代码不再同步，由 `game-table-codegen` 在编译期按权威 schema
   生成（见 `docs/design/config-tables.md`）。
 - **服务端内部按 Java 惯用方式实现，不照抄 C++/Go**。Java 版有自己的库表与 Redis 键空间，不与 C++/Go 服务混部。
 - **目录、模块、工具都按 Java 标准自行组织，不对应 mmorpg 的目录结构**；Java 代码不得依赖同步来的 proto 所在目录
@@ -32,7 +32,7 @@
 ## 3. 编码约定
 
 - 中文注释、中文 commit message、中文文档；Java 21；包名 `com.game.<模块>`。
-- 所有 Redis 键经 `com.game.discovery.RedisKeys` 生成（前缀 `xm:`）；MySQL 库 `xm_java`。
+- 所有 Redis 键经 `com.game.discovery.RedisKeys` 生成（前缀 `game:`）；MySQL 库 `game`。
 - **线程所有权**：scene 的场景状态只在场景逻辑线程读写；gate 的会话状态只在该连接的 EventLoop 上读写；
   阻塞 I/O（MySQL / Redis）不得在 Netty I/O 线程或场景逻辑线程上执行，结果投递回所属线程。
 - 连接与回调生命周期（同 mmorpg §11.7 的精神）：长期持有的 Netty `Channel` 引用在关闭后必须清掉；
@@ -47,9 +47,9 @@ Claude 在本仓库**可以自行编译和跑测试**（用户 2026-09-29 授权
 ```bash
 ./mvnw -B -DskipTests install            # 全量构建
 ./mvnw -B test                           # 单元测试
-./mvnw -B -pl xm-gate -am test           # 单模块（连同依赖模块）
-./mvnw -B test -Dxm.it.redis=redis://127.0.0.1:6379   # 连真 Redis 的集成测试（默认跳过）
-./mvnw -B test -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306  # PlayerStoreSqlTest 改连真 MySQL（缺省 H2；口令取 XM_MYSQL_PASSWORD）
+./mvnw -B -pl game-gate -am test           # 单模块（连同依赖模块）
+./mvnw -B test -Dgame.it.redis=redis://127.0.0.1:6379   # 连真 Redis 的集成测试（默认跳过）
+./mvnw -B test -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306  # PlayerStoreSqlTest 改连真 MySQL（缺省 H2；口令取 GAME_MYSQL_PASSWORD）
 ```
 
 网络受限的机器用进程级镜像配置：`./mvnw -s <本机 settings.xml> ...`（settings 不进仓库）。

@@ -6,8 +6,8 @@
 > **没有因为目录缺失而无法下结论的地方。**
 >
 > **Java 侧**：以 2026-10-05 的工作区为准（HEAD `aa8b5b5`）。有两批改动正在并行进行：
-> - 批次 5.2 在 `xm-scene`、`xm-gate`、`xm-scene-manager`、`xm-player-store`、`tools/local/start-slice.sh` 等处有未提交的改动；
-> - 批次 6.2 的新模块 `xm-battle` 还没入库，但根 `pom.xml` 的工作区里已经加了 `<module>xm-battle</module>`。
+> - 批次 5.2 在 `game-scene`、`game-gate`、`game-scene-manager`、`game-player-store`、`tools/local/start-slice.sh` 等处有未提交的改动；
+> - 批次 6.2 的新模块 `game-battle` 还没入库，但根 `pom.xml` 的工作区里已经加了 `<module>game-battle</module>`。
 >
 > 这些文件的行号在提交后可能小幅漂移，所以引用时同时写出配置键或类名。
 >
@@ -16,9 +16,9 @@
 >
 > **路径怎么读**
 > - 以 `deploy/`、`.github/`、`tools/scripts/`、`java/gateway_node/`、`dev.bat` 开头的路径在 mmorpg 里。
-> - 以 `xm-`、`docs/`、`tools/`（`tools/scripts/` 除外）、`contract/`、`config-data/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`、`README.md`、`pom.xml`、`mvnw`，
+> - 以 `game-`、`docs/`、`tools/`（`tools/scripts/` 除外）、`contract/`、`config-data/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`、`README.md`、`pom.xml`、`mvnw`，
 >   都在 `D:\work\xuanming-server-mmo` 里。
-> - `xm-<模块> application.yaml:N` 指该模块 `src/main/resources/application.yaml` 的第 N 行。
+> - `game-<模块> application.yaml:N` 指该模块 `src/main/resources/application.yaml` 的第 N 行。
 >
 > **本稿的来历**：由两份分区稿合并而成。一份是基线盘点（compose、镜像、脚本、CI、秘密），一份是 Java 设计（两个 compose 文件、参数化 Dockerfile、
 > 三个 workflow、验证计划）。两稿互相矛盾、或与代码不符的地方，都回到代码重新核对过，更正列在 §1.10。本稿只读代码，除本文件外没有改任何文件。
@@ -54,13 +54,13 @@
 | 问题 | 结论 |
 |---|---|
 | compose 只起依赖，还是连 Java 进程一起起 | **两个文件**。`deploy/compose/infra.yaml` 只有 MySQL、Redis、Kafka 三个依赖；`deploy/compose/stack.yaml` 用 `include` 引入 infra，再加全部 Java 进程（第二个 scene 用 profile 控制，可选）。本机没有 Docker，所以这两个文件**唯一的执行者是 CI**：集成测试 job 用 infra，整栈冒烟 job 用 stack。有 Docker 的机器上可以「infra + start-slice.sh」，也可以直接起整栈 |
-| 镜像怎么构建 | **所有进程模块共用一个参数化 Dockerfile**（`--build-arg MODULE=xm-gate`）。jar 由 CI 宿主上的 Maven 一次打齐；Dockerfile 只用 Spring Boot 自带的 `-Djarmode=tools extract --layers` 解包，再组装运行层。不用 Jib（14.4K star）。不用 Buildpacks：虽然 goal 是 Spring Boot 自带的，但实际干活的是 Paketo（buildpacks/pack 3.0K、paketo-buildpacks/java 151） |
+| 镜像怎么构建 | **所有进程模块共用一个参数化 Dockerfile**（`--build-arg MODULE=game-gate`）。jar 由 CI 宿主上的 Maven 一次打齐；Dockerfile 只用 Spring Boot 自带的 `-Djarmode=tools extract --layers` 解包，再组装运行层。不用 Jib（14.4K star）。不用 Buildpacks：虽然 goal 是 Spring Boot 自带的，但实际干活的是 Paketo（buildpacks/pack 3.0K、paketo-buildpacks/java 151） |
 | 基础镜像 | `eclipse-temurin:21.0.12.1_1-jre-noble`，钉 digest。与本机 JDK 21.0.12.1+1 是同一个构建；glibc，自带 curl 和 bash |
 | JVM 参数 | 镜像缺省 `JDK_JAVA_OPTIONS="-XX:MaxRAMPercentage=60 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError"`，不写死 Xmx |
 | 健康检查 | 所有进程打开 readiness / liveness 探针并暴露 `info`。compose 的 healthcheck 要同时满足：readiness 为 UP，且业务端口**按服务名**能连上；scene 另加「主世界频道 ≥ 1」。镜像本身不写 `HEALTHCHECK` |
 | 秘密 | 只从环境变量进。compose 中必填的写 `${VAR:?}`，可选的写 `${VAR:-}`；每个进程只拿到自己用的那几个。CI 每次运行随机生成并 mask，**不使用任何 GitHub secret** |
 | 构建信息 | 根 pom 给 spring-boot-maven-plugin 加 `build-info`，写入 git commit 与契约来源 commit（都是 40 位），经 `/actuator/info` 暴露。镜像另打 OCI label，并写 `/app/BUILD_INFO` |
-| 镜像名与 tag | `${XM_IMAGE_NAMESPACE:-xuanming-java}/<模块名>:<12 位 sha>`，永远不打 `latest`。7.1 只构建、只冒烟，**不推送** |
+| 镜像名与 tag | `${GAME_IMAGE_NAMESPACE:-xuanming-java}/<模块名>:<12 位 sha>`，永远不打 `latest`。7.1 只构建、只冒烟，**不推送** |
 | CI | 三个 workflow：`ci.yml`（构建 + 单测、契约 `--check`）、`integration.yml`（真依赖集成测试、整栈冒烟）、`contract-drift.yml`（每天对比 mmorpg main，**只报告、不判红**） |
 | 结论怎么看 | 不需要 Docker 的在本机验（§11.2）。用到 Docker 的都只能靠 CI，结论通过 GitHub REST **匿名**读取。job 日志匿名读不到（403），所以每一种失败都必须转成 annotation |
 | 分批 | **7.1a**：CI 构建与契约、漂移报告、`infra.yaml` 加集成测试 job、`TestReport`、mvnw 可执行位。**7.1b**：build-info、配置占位符与探针、Dockerfile、`stack.yaml` 与整栈冒烟。7.1b 要等 5.2 提交以后再做，因为两者会改同一批 yaml |
@@ -77,7 +77,7 @@
 
 | 项 | 7.1 | 7.6 |
 |---|---|---|
-| compose | 依赖与整栈，供开发和 CI 使用，`XM_RUN_MODE` 缺省 dev | 是否另出生产形态的 compose 或 K8s，由 7.6 定 |
+| compose | 依赖与整栈，供开发和 CI 使用，`GAME_RUN_MODE` 缺省 dev | 是否另出生产形态的 compose 或 K8s，由 7.6 定 |
 | 镜像 | 构建；本机 / CI 冒烟；快照 tag `<sha12>` | 推送 registry（GHCR）、发布轨 tag `vX.Y.Z-<sha12>`、多架构、签名与扫描、只读根文件系统 |
 | 版本 | `build.version` = `project.version`（0.1.0-SNAPSHOT），另带 commit 和契约 commit | 版本号方案、CHANGELOG、`tools/Release.java` 的 preflight、制品目录与离线包 |
 | 秘密 | 环境变量名矩阵（§6.1）；compose 写 `:?`；CI 随机生成 | prod 档位启动自检（缺失、过短、命中占位串时拒启）、K8s Secret、轮换 |
@@ -88,8 +88,8 @@
 
 ### 0.4 与并行批次的关系
 
-- **5.2**（跨节点换图）正在修改 `xm-scene` / `xm-scene-manager` 的 `application.yaml` 和 `tools/local/start-slice.sh`。7.1b 也要改这几个 yaml（§6.4），所以必须等 5.2 提交以后再做。
-- **6.2**（`xm-battle`）会新增一个进程模块，带来新的秘密 `XM_BATTLE_TOKEN_SECRET` 和新的端口 12000 / 21200 / 18112。整栈冒烟里的「模块清单漂移守卫」（§4.5 第 4 步）会强制要求把它登记进 `stack.yaml`。
+- **5.2**（跨节点换图）正在修改 `game-scene` / `game-scene-manager` 的 `application.yaml` 和 `tools/local/start-slice.sh`。7.1b 也要改这几个 yaml（§6.4），所以必须等 5.2 提交以后再做。
+- **6.2**（`game-battle`）会新增一个进程模块，带来新的秘密 `GAME_BATTLE_TOKEN_SECRET` 和新的端口 12000 / 21200 / 18112。整栈冒烟里的「模块清单漂移守卫」（§4.5 第 4 步）会强制要求把它登记进 `stack.yaml`。
   **规则**：从 7.1b 起，任何新增进程模块的批次，都要同时登记 `stack.yaml`、`start-slice.sh` 和 `deploy/compose/env.example`（秘密矩阵见 §6.1）。
 - **7.1a 不依赖上面两批**，可以先做。
 
@@ -141,9 +141,9 @@
 
 | 组件 | 基线 compose | 基线 K8s | Java 现状 / 需求 |
 |---|---|---|---|
-| MySQL | `mysql:latest`（`:390`） | `mysql:8.0`（`deploy/k8s/manifests/infra/mysql.yaml:109`） | 必需。库 `xm_java`；8 个进程连接它（§2.2）。本机 8.4.11 |
+| MySQL | `mysql:latest`（`:390`） | `mysql:8.0`（`deploy/k8s/manifests/infra/mysql.yaml:109`） | 必需。库 `game`；8 个进程连接它（§2.2）。本机 8.4.11 |
 | Redis | `redis:latest`（`:218`） | `redis:7.2` | 必需。DB 12，集成测试 DB 13。本机 8.10.2 |
-| Kafka | `apache/kafka:latest`（`:6`） | 同左 | 必需，用于资产审计 xm-scene → xm-data。本机 4.3.1 KRaft（`tech-stack.md:15`）。topic 由进程自己按规格建（§2.3） |
+| Kafka | `apache/kafka:latest`（`:6`） | 同左 | 必需，用于资产审计 game-scene → game-data。本机 4.3.1 KRaft（`tech-stack.md:15`）。topic 由进程自己按规格建（§2.3） |
 | etcd / Nacos / Redis Cluster / kafka-ui / TiDB | 有 | 部分有 | 都不需要（§2.3） |
 | Loki / Alloy / Grafana | 钉了 tag | `loki:3.5.8` | 归 7.6 |
 
@@ -230,11 +230,11 @@
 | # | 原说法 | 核对结果 |
 |---|---|---|
 | 1 | 盘点稿：MySQL 镜像在 `docker-compose.yml:391` | 实际在 `:390`，`:391` 是 `container_name` |
-| 2 | 盘点稿：「12 个模块配了 spring-boot-maven-plugin，含 xm-robot」 | HEAD 上是 12 个（11 个进程 + xm-robot）。工作区里多了未入库的 `xm-battle`（6.2），一共 13 个。所以镜像清单不能写死，必须用漂移守卫（§4.5） |
+| 2 | 盘点稿：「12 个模块配了 spring-boot-maven-plugin，含 game-robot」 | HEAD 上是 12 个（11 个进程 + game-robot）。工作区里多了未入库的 `game-battle`（6.2），一共 13 个。所以镜像清单不能写死，必须用漂移守卫（§4.5） |
 | 3 | 盘点稿：Buildpacks（`spring-boot:build-image`）可以算 Spring Boot 内置 | goal 确实是 Boot 自带的，但构建逻辑和运行时 JRE 都来自 Paketo builder（buildpacks/pack 3.0K、paketo-buildpacks/java 151），不满足 AGENTS §2 |
 | 4 | 盘点稿与 `java-infra.md:331` 第 ③ 条：表数据不要烤进镜像 | 那条把「表数据」和「秘密」混在了一起。表数据是随提交走的契约，烤进镜像（单独一层，约 82 KB）。秘密永远不进镜像（§3.7） |
-| 5 | 设计稿：healthcheck 用 `</dev/tcp/127.0.0.1/<Dubbo 端口>` 探活 | 只要 `xm.advertise-host` 是非回环的主机名，Dubbo 就**只绑该地址**，127.0.0.1 上没有监听（§2.6）。改为按服务名探活，并且只给真正需要的进程设通告地址 |
-| 6 | 设计稿：xm-team 只依赖 mysql / redis 就绪 | `xm-team application.yaml:19` 的 URL 不带 `createDatabaseIfNotExist`，并且 Druid 有 `initial-size: 2`，冷库上会因为库不存在而起不来。对策：在 infra.yaml 里设 `MYSQL_DATABASE: xm_java` 预建库（§2.4） |
+| 5 | 设计稿：healthcheck 用 `</dev/tcp/127.0.0.1/<Dubbo 端口>` 探活 | 只要 `game.advertise-host` 是非回环的主机名，Dubbo 就**只绑该地址**，127.0.0.1 上没有监听（§2.6）。改为按服务名探活，并且只给真正需要的进程设通告地址 |
+| 6 | 设计稿：game-team 只依赖 mysql / redis 就绪 | `game-team application.yaml:19` 的 URL 不带 `createDatabaseIfNotExist`，并且 Druid 有 `initial-size: 2`，冷库上会因为库不存在而起不来。对策：在 infra.yaml 里设 `MYSQL_DATABASE: game` 预建库（§2.4） |
 | 7 | 设计稿：action 用 `@v5` | 已有更新的 major：checkout v7.0.1、setup-java v6.0.1、upload-artifact v7.0.1，都是 node24。按 commit SHA 钉死（§4.2） |
 | 8 | 设计稿：漂移 workflow 判红，排除 SOURCE.properties 那一行后比较 | 改为**只报告**（§10 Q5）。判定方法改用 ContractSync 自带的 `--commit <已记录的 sha>`，不用解析输出（§4.6） |
 | 9 | 设计稿：`concurrency` 按 ref 分组并取消进行中的运行 | main 上每个提交都要有结论，push 改为按 sha 分组（§4.2） |
@@ -244,11 +244,11 @@
 | 13 | 盘点稿：在 7.1 加一个手动触发的 workflow 推 GHCR | 推迟到 7.6（§10 Q1） |
 | 14 | 盘点稿：Nacos、kafka-ui 用 profile 设为可选 | 不移植（§2.3） |
 | 15 | `java-infra.md:350`：快照轨是 `g<sha12>` | `g<sha12>` 是**制品目录名**；**镜像 tag** 是不带 g 的 `<sha12>`（§1.5） |
-| 16 | `java-infra.md:315`、`tools.md:392`、`tools.md:598`：「tech-stack 写集成测试用仓库自带的 docker compose」 | 这是旧说法。`tech-stack.md:27` 现在写的是「连本机进程，按 `-Dxm.it.*` 开启」，Testcontainers（8.7K）已经落选。本批让 CI 的集成测试用 compose 起依赖，tech-stack 要补一行（§7.3） |
+| 16 | `java-infra.md:315`、`tools.md:392`、`tools.md:598`：「tech-stack 写集成测试用仓库自带的 docker compose」 | 这是旧说法。`tech-stack.md:27` 现在写的是「连本机进程，按 `-Dgame.it.*` 开启」，Testcontainers（8.7K）已经落选。本批让 CI 的集成测试用 compose 起依赖，tech-stack 要补一行（§7.3） |
 | 17 | `java-infra.md:327`：只有 5 个进程模块 | 现在是 11 个，6.2 落地后是 12 个 |
 | 18 | `tools.md:392` 提议用 `deploy/local/compose.yaml` | 本稿改用 `deploy/compose/{infra,stack}.yaml` |
 | 19 | `README.md:38` 写「Kafka（后续批次）」；`:43` 的前置条件里没有 Kafka | 过时。Kafka 早已用于资产审计（`start-slice.sh:10` 已经把它列为前置条件） |
-| 20 | `xm-gateway application.yaml:36-38` 的注释说管理端点在 18081 | 与 `:41-43` 的实际配置（18105）不符，属于过时注释。顺手修 |
+| 20 | `game-gateway application.yaml:36-38` 的注释说管理端点在 18081 | 与 `:41-43` 的实际配置（18105）不符，属于过时注释。顺手修 |
 
 ---
 
@@ -260,57 +260,57 @@
 
 | 进程 | 业务端口 | 管理端口 | 整栈冒烟时发布到宿主 127.0.0.1 的端口 | 就绪判据（除 readiness 之外） |
 |---|---|---|---|---|
-| xm-scene-manager | Dubbo 20882 | 18102 | — | `xm-scene-manager:20882` 能连上 |
-| xm-login | Dubbo 20881 | 18101 | — | `xm-login:20881` 能连上 |
-| xm-friend / chat / team / guild / trade | Dubbo 20883 / 20884 / 20885 / 20886 / 20887 | 18107 / 18108 / 18109 / 18110 / 18111 | 18111（robot 播种） | 各自的 Dubbo 端口能按服务名连上 |
-| xm-data | — | 18106（Web + `/admin/**`） | 18106（robot 的运维接口） | — |
-| xm-scene | 链路 21000、资产通道 21100 | 18104 | 18104（robot guard 读指标） | `xm-scene:21000`、`xm-scene:21100` 都能连上，且 `xm_scene_channels{state="active"} ≥ 1`（等价于 `start-slice.sh:134-154`） |
-| xm-gate | 客户端 11000 | 18103 | 11000 | `xm-gate:11000` 能连上 |
-| xm-gateway | HTTP 18081（`/api`） | 18105 | 18081 | `xm-gateway:18081` 能连上 |
-| xm-battle（6.2，未入库） | 直连 12000、控制面 Dubbo 21200 | 18112 | 12000、18112 | 以 6.2 落地时的版本为准 |
-| xm-scene-z2（区 2；**只在本机切片 `XM_ZONES=2`**，批次 6.5） | 链路 21010、资产通道 21110 | 18115 | —（整栈里还没有这个服务，见表下） | 同 xm-scene：两个端口能连上，且 `xm_scene_channels{state="active"} ≥ 1`（`start-slice.sh` 的 `start_zone2_scene`） |
-| xm-gate-z2（区 2；**只在本机切片 `XM_ZONES=2`**，批次 6.5） | 客户端 11010 | 18123 | —（同上） | 11010 能连上；随后 `GET /api/server-list` 里区 2 是 OPEN 且带 `load_level`（`sync_zone2_status`） |
+| game-scene-manager | Dubbo 20882 | 18102 | — | `game-scene-manager:20882` 能连上 |
+| game-login | Dubbo 20881 | 18101 | — | `game-login:20881` 能连上 |
+| game-friend / chat / team / guild / trade | Dubbo 20883 / 20884 / 20885 / 20886 / 20887 | 18107 / 18108 / 18109 / 18110 / 18111 | 18111（robot 播种） | 各自的 Dubbo 端口能按服务名连上 |
+| game-data | — | 18106（Web + `/admin/**`） | 18106（robot 的运维接口） | — |
+| game-scene | 链路 21000、资产通道 21100 | 18104 | 18104（robot guard 读指标） | `game-scene:21000`、`game-scene:21100` 都能连上，且 `game_scene_channels{state="active"} ≥ 1`（等价于 `start-slice.sh:134-154`） |
+| game-gate | 客户端 11000 | 18103 | 11000 | `game-gate:11000` 能连上 |
+| game-gateway | HTTP 18081（`/api`） | 18105 | 18081 | `game-gateway:18081` 能连上 |
+| game-battle（6.2，未入库） | 直连 12000、控制面 Dubbo 21200 | 18112 | 12000、18112 | 以 6.2 落地时的版本为准 |
+| game-scene-z2（区 2；**只在本机切片 `GAME_ZONES=2`**，批次 6.5） | 链路 21010、资产通道 21110 | 18115 | —（整栈里还没有这个服务，见表下） | 同 game-scene：两个端口能连上，且 `game_scene_channels{state="active"} ≥ 1`（`start-slice.sh` 的 `start_zone2_scene`） |
+| game-gate-z2（区 2；**只在本机切片 `GAME_ZONES=2`**，批次 6.5） | 客户端 11010 | 18123 | —（同上） | 11010 能连上；随后 `GET /api/server-list` 里区 2 是 OPEN 且带 `load_level`（`sync_zone2_status`） |
 
-- **区 2 的五个端口**（21010 / 21110 / 18115 / 11010 / 18123）现在只被本机切片占用：`tools/local/start-slice.sh` 在 `XM_ZONES=2` 时用命令行参数把它们传给 `--xm.zone-id=2` 的 xm-scene 与 xm-gate（脚本里的 `ZONE2_SCENE_NODE` / `ZONE2_GATE`），
-  各模块的 `application*.yaml` 缺省端口不得与它们相撞——xm-robot 的 `SliceScriptsTest` 会扫描全部模块的 yaml 并在相撞时失败。区 2 的进程与区 1 的同类用同一份 jar、同一份 yaml，没有新的模块。
-- **整栈（compose）里的两 zone 形态没有做，留给 7.1b**：spectate-spec Q22 列了前置清单（compose 里给 xm-battle 配 `XM_BATTLE_CLIENT_ADVERTISE_HOST`；xm-gate-z2 的 `xm.dubbo.match-url` 指向 `tri://xm-match:20888`；
+- **区 2 的五个端口**（21010 / 21110 / 18115 / 11010 / 18123）现在只被本机切片占用：`tools/local/start-slice.sh` 在 `GAME_ZONES=2` 时用命令行参数把它们传给 `--game.zone-id=2` 的 game-scene 与 game-gate（脚本里的 `ZONE2_SCENE_NODE` / `ZONE2_GATE`），
+  各模块的 `application*.yaml` 缺省端口不得与它们相撞——game-robot 的 `SliceScriptsTest` 会扫描全部模块的 yaml 并在相撞时失败。区 2 的进程与区 1 的同类用同一份 jar、同一份 yaml，没有新的模块。
+- **整栈（compose）里的两 zone 形态没有做，留给 7.1b**：spectate-spec Q22 列了前置清单（compose 里给 game-battle 配 `GAME_BATTLE_CLIENT_ADVERTISE_HOST`；game-gate-z2 的 `game.dubbo.match-url` 指向 `tri://game-match:20888`；
   gateway 两个区一起播种、用覆盖文件 `deploy/compose/two-zones.yaml` 而不是 profile；z2 服务放在覆盖文件里以免模块清单漂移守卫判红；与 zone-travel-spec §11.9「多 zone 用例不进 CI」的口径对齐——只有 robot 的 `battle-cross-zone` / `travel` 进 CI）。
   容器里两个区的 scene / gate 各有各的容器 IP，不需要像本机切片这样错开容器内端口（同 §2.6 对 `two-scenes` 的说明），只有发布到宿主的端口要错开；届时本表补上发布端口一列。
 
 ### 2.2 进容器之前必须能覆盖的地址
 
-- **JDBC host 写死在 URL 串里，共 8 处**：xm-login `:21`、xm-friend `:19`、xm-team `:19`、xm-guild `:31`、xm-trade `:23`、xm-gateway `:22`、xm-data `:15`、xm-scene `:27`。
+- **JDBC host 写死在 URL 串里，共 8 处**：game-login `:21`、game-friend `:19`、game-team `:19`、game-guild `:31`、game-trade `:23`、game-gateway `:22`、game-data `:15`、game-scene `:27`。
   各进程的 URL 参数各不相同：guild / trade / friend 带 `sessionVariables`，data 带 `socketTimeout=30000` 和 `useAffectedRows`，team 没有 `createDatabaseIfNotExist`。
   所以**不能**照基线那样用 `SPRING_DATASOURCE_URL` 整串覆盖（`docker-compose.login-stack.yml:124`），那样每个容器的参数会各自分叉。只把 host 和 port 换成占位符。
-- **Redis 地址**：11 个 yaml 都写死 `redis://127.0.0.1:6379`（如 xm-scene `:76`、xm-gate `:48`），没有占位符；xm-battle 同样如此。
+- **Redis 地址**：11 个 yaml 都写死 `redis://127.0.0.1:6379`（如 game-scene `:76`、game-gate `:48`），没有占位符；game-battle 同样如此。
 - **Dubbo 直连 URL**：
-  - xm-gate 有 6 个（`:51-60`）；
-  - xm-gateway 的 `login-url` 在 `:65`；
-  - xm-login 的 `scene-manager-url` 在 `:79`；
-  - xm-scene 已经有 `XM_SCENE_MANAGER_URL` 占位符（`:109`）。
-- **通告地址**：`xm.advertise-host: 127.0.0.1` 出现在 9 个进程里，另有 xm-battle。它在不同进程里的作用不同，见 §2.6。
+  - game-gate 有 6 个（`:51-60`）；
+  - game-gateway 的 `login-url` 在 `:65`；
+  - game-login 的 `scene-manager-url` 在 `:79`；
+  - game-scene 已经有 `GAME_SCENE_MANAGER_URL` 占位符（`:109`）。
+- **通告地址**：`game.advertise-host: 127.0.0.1` 出现在 9 个进程里，另有 game-battle。它在不同进程里的作用不同，见 §2.6。
   scene 的 `link-bind-host: 127.0.0.1`（`:81`）在容器里必须改成 0.0.0.0。
 - **管理端口**：缺省只绑 127.0.0.1（architecture.md:766-771）。
   - 容器内的 healthcheck 走 127.0.0.1，不受影响。
-  - 宿主要访问时，在容器里设 `XM_MANAGEMENT_ADDRESS=0.0.0.0`，宿主侧只发布到 127.0.0.1。
+  - 宿主要访问时，在容器里设 `GAME_MANAGEMENT_ADDRESS=0.0.0.0`，宿主侧只发布到 127.0.0.1。
   - GM 停机接口只接受本机请求。经端口映射进来的请求，源地址是 bridge 网关，会被拒绝。这是期望的行为。
-- **表目录**：`xm.table-dir: config-data/tables` 是相对路径。镜像的 `WORKDIR /app` 下有 `/app/config-data/tables`，**不用改配置**。
+- **表目录**：`game.table-dir: config-data/tables` 是相对路径。镜像的 `WORKDIR /app` 下有 `/app/config-data/tables`，**不用改配置**。
 
 ### 2.3 决策
 
 1. **两个文件**：
    - `infra.yaml` 只放依赖，缺省端口等于各进程 `application.yaml` 里的缺省值，都发布到 127.0.0.1。起好以后 `start-slice.sh` 一行都不用改；CI 的集成测试 job 也用它。
-   - `stack.yaml` 先 `include: [infra.yaml]`，再加全部 Java 进程；profile `two-scenes` 下另有 `xm-scene-2`，给 5.2 的跨节点换图用。这是让镜像真正跑起来的唯一途径，也是「单机演示」这种部署形态。
+   - `stack.yaml` 先 `include: [infra.yaml]`，再加全部 Java 进程；profile `two-scenes` 下另有 `game-scene-2`，给 5.2 的跨节点换图用。这是让镜像真正跑起来的唯一途径，也是「单机演示」这种部署形态。
 2. **不移植的**：
    - etcd：Java 不用。ContractSync 自己都排除了 `proto/etcd`（`tools/ContractSync.java:59-60`）。
-   - Nacos：compose 走 local profile 的 Dubbo 直连。scene 的 `scene-manager-url` 本来就只支持直连（xm-scene `:107-109`），所以 nacos profile 在整栈里跑不通。注册中心随 7.6 一起定。
+   - Nacos：compose 走 local profile 的 Dubbo 直连。scene 的 `scene-manager-url` 本来就只支持直连（game-scene `:107-109`），所以 nacos profile 在整栈里跑不通。注册中心随 7.6 一起定。
    - Redis Cluster：随 6.4 匹配。
    - kafka-ui、TiDB（roadmap「不移植」）、观测栈（7.6）。
-   - **topic-init**：审计 topic 由生产方和消费方在启动时按规格自己建，并核对分区数。scene 用 `CREATE_AND_VERIFY`（`xm-scene/.../AuditPipeline.java:126`），data 用 `OWN`（`xm-data/.../DataNode.java:119`）。
-     `xm-audit/.../AuditTopicInitializer.java:15` 写明：broker 开着自动建 topic 时，生产方在核对通过前不能发送。所以 broker **关掉自动建 topic** 就够了。
+   - **topic-init**：审计 topic 由生产方和消费方在启动时按规格自己建，并核对分区数。scene 用 `CREATE_AND_VERIFY`（`game-scene/.../AuditPipeline.java:126`），data 用 `OWN`（`game-data/.../DataNode.java:119`）。
+     `game-audit/.../AuditTopicInitializer.java:15` 写明：broker 开着自动建 topic 时，生产方在核对通过前不能发送。所以 broker **关掉自动建 topic** 就够了。
      Java 只用审计这两个 topic；`__consumer_offsets` 是内部 topic，不受这个开关影响。
 3. **项目名固定为 `name: xuanming-java`，不写 `container_name`**。基线的项目名缺省取目录名，并且写死了 `kafka` / `redis` / `mysql` 这些容器名。两版不得共享存储（architecture.md:27），只能靠项目名把卷隔开。
-4. **宿主端口可以改**：用 `XM_MYSQL_HOST_PORT`、`XM_REDIS_HOST_PORT`、`XM_KAFKA_HOST_PORT`，避免与开发机上已经在跑的本地进程或基线的 compose 冲突。
+4. **宿主端口可以改**：用 `GAME_MYSQL_HOST_PORT`、`GAME_REDIS_HOST_PORT`、`GAME_KAFKA_HOST_PORT`，避免与开发机上已经在跑的本地进程或基线的 compose 冲突。
 
 ### 2.4 `deploy/compose/infra.yaml`（草图）
 
@@ -324,10 +324,10 @@ services:
   mysql:
     image: mysql:8.4.11@sha256:80f4933e3835f9dc4d35a28ec500d7986cb4414e6c6821c5461239cb7beb8995
     environment:
-      MYSQL_ROOT_PASSWORD: ${XM_MYSQL_PASSWORD:?需要环境变量 XM_MYSQL_PASSWORD}
-      # 预建库：xm-team 的 URL 不带 createDatabaseIfNotExist（xm-team application.yaml:19），冷库上先起它会失败
-      MYSQL_DATABASE: xm_java
-    ports: ["127.0.0.1:${XM_MYSQL_HOST_PORT:-3306}:3306"]
+      MYSQL_ROOT_PASSWORD: ${GAME_MYSQL_PASSWORD:?需要环境变量 GAME_MYSQL_PASSWORD}
+      # 预建库：game-team 的 URL 不带 createDatabaseIfNotExist（game-team application.yaml:19），冷库上先起它会失败
+      MYSQL_DATABASE: game
+    ports: ["127.0.0.1:${GAME_MYSQL_HOST_PORT:-3306}:3306"]
     volumes: [mysql-data:/var/lib/mysql]
     healthcheck:
       # 走 TCP：初始化阶段的临时 mysqld 关着网络（skip-networking），走 socket 的 ping 会提前报健康（基线 :405 走 socket）
@@ -337,8 +337,8 @@ services:
       retries: 60
   redis:
     image: redis:8.10.2@sha256:7ef5b5cec96495a04ca7feff88a9492efeab8053fb284d24bdd73344c9245a48
-    command: ["redis-server", "--appendonly", "yes"]   # 持久化：xm:node-id-epoch:* 不得回退（architecture.md:585）
-    ports: ["127.0.0.1:${XM_REDIS_HOST_PORT:-6379}:6379"]
+    command: ["redis-server", "--appendonly", "yes"]   # 持久化：game:node-id-epoch:* 不得回退（architecture.md:585）
+    ports: ["127.0.0.1:${GAME_REDIS_HOST_PORT:-6379}:6379"]
     volumes: [redis-data:/data]
     healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 3s, timeout: 3s, retries: 30}
   kafka:
@@ -350,7 +350,7 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENERS: INTERNAL://:19092,HOST://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://127.0.0.1:${XM_KAFKA_HOST_PORT:-9092}
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://127.0.0.1:${GAME_KAFKA_HOST_PORT:-9092}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -359,11 +359,11 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # 审计 topic 由进程按规格建（AuditTopicInitializer），不要 topic-init
       KAFKA_HEAP_OPTS: "-Xms256m -Xmx256m"
-    ports: ["127.0.0.1:${XM_KAFKA_HOST_PORT:-9092}:9092"]
+    ports: ["127.0.0.1:${GAME_KAFKA_HOST_PORT:-9092}:9092"]
     # 不挂卷：镜像以非 root 运行，命名卷挂到镜像里不存在的目录时属主是 root（基线为此改成 root 运行，:54）；
     # topic 由进程启动时重建，开发与 CI 可以接受
     healthcheck:
-      # 走 INTERNAL 监听：HOST 监听通告的是宿主端口，改了 XM_KAFKA_HOST_PORT 后在容器里连不上
+      # 走 INTERNAL 监听：HOST 监听通告的是宿主端口，改了 GAME_KAFKA_HOST_PORT 后在容器里连不上
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
       interval: 5s
       timeout: 10s
@@ -384,52 +384,52 @@ x-java: &java
   stop_grace_period: 30s              # ≥ 各进程的 spring.lifecycle.timeout-per-shutdown-phase（login / team / data 20s）
   deploy: {resources: {limits: {memory: 768m}}}   # 设了上限，MaxRAMPercentage 才有意义
 x-java-env: &java-env
-  XM_RUN_MODE: ${XM_RUN_MODE:-dev}    # 同 start-slice.sh:30；进程自身缺省 prod
-  XM_MANAGEMENT_ADDRESS: 0.0.0.0      # 只在容器网卡上；宿主侧只发布到 127.0.0.1
-  XM_REDIS_ADDRESS: redis://redis:6379
-  XM_MYSQL_HOST: mysql
-  XM_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+  GAME_RUN_MODE: ${GAME_RUN_MODE:-dev}    # 同 start-slice.sh:30；进程自身缺省 prod
+  GAME_MANAGEMENT_ADDRESS: 0.0.0.0      # 只在容器网卡上；宿主侧只发布到 127.0.0.1
+  GAME_REDIS_ADDRESS: redis://redis:6379
+  GAME_MYSQL_HOST: mysql
+  GAME_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
 x-ready: &ready {interval: 3s, timeout: 5s, retries: 60, start_period: 120s}
 
 services:
-  xm-login:
+  game-login:
     <<: *java
-    image: ${XM_IMAGE_NAMESPACE:-xuanming-java}/xm-login:${XM_IMAGE_TAG:-local}
-    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {MODULE: xm-login}}
+    image: ${GAME_IMAGE_NAMESPACE:-xuanming-java}/game-login:${GAME_IMAGE_TAG:-local}
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {MODULE: game-login}}
     environment:
       <<: *java-env
-      XM_SCENE_MANAGER_URL: tri://xm-scene-manager:20882
-      XM_MYSQL_PASSWORD: ${XM_MYSQL_PASSWORD:?需要 XM_MYSQL_PASSWORD}
-      XM_DUBBO_SECRET: ${XM_DUBBO_SECRET:?需要 XM_DUBBO_SECRET}
-      XM_LOGIN_DEV_PASSWORD: ${XM_LOGIN_DEV_PASSWORD:?需要 XM_LOGIN_DEV_PASSWORD}
+      GAME_SCENE_MANAGER_URL: tri://game-scene-manager:20882
+      GAME_MYSQL_PASSWORD: ${GAME_MYSQL_PASSWORD:?需要 GAME_MYSQL_PASSWORD}
+      GAME_DUBBO_SECRET: ${GAME_DUBBO_SECRET:?需要 GAME_DUBBO_SECRET}
+      GAME_LOGIN_DEV_PASSWORD: ${GAME_LOGIN_DEV_PASSWORD:?需要 GAME_LOGIN_DEV_PASSWORD}
     healthcheck:
       <<: *ready
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18101/actuator/health/readiness >/dev/null && bash -c '</dev/tcp/xm-login/20881'"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18101/actuator/health/readiness >/dev/null && bash -c '</dev/tcp/game-login/20881'"]
     depends_on: {mysql: {condition: service_healthy}, redis: {condition: service_healthy}}
 
-  xm-scene:
+  game-scene:
     <<: *java
-    stop_grace_period: 45s            # timeout-per-shutdown-phase 30s（xm-scene application.yaml:22）+ 余量；缺省 10s 会在停服写回中途 SIGKILL
+    stop_grace_period: 45s            # timeout-per-shutdown-phase 30s（game-scene application.yaml:22）+ 余量；缺省 10s 会在停服写回中途 SIGKILL
     deploy: {resources: {limits: {memory: 1g}}}
-    image: ${XM_IMAGE_NAMESPACE:-xuanming-java}/xm-scene:${XM_IMAGE_TAG:-local}
-    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {MODULE: xm-scene}}
+    image: ${GAME_IMAGE_NAMESPACE:-xuanming-java}/game-scene:${GAME_IMAGE_TAG:-local}
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {MODULE: game-scene}}
     environment:
       <<: *java-env
-      XM_ADVERTISE_HOST: xm-scene               # 节点目录里的链路 / 资产通道地址，gate / guild 按它连
-      XM_SCENE_LINK_BIND_HOST: 0.0.0.0          # 链路不加密：只在 compose 网络内可达，不发布到宿主
-      XM_SCENE_MANAGER_URL: tri://xm-scene-manager:20882
-      XM_MYSQL_PASSWORD: ${XM_MYSQL_PASSWORD:?}
-      XM_DUBBO_SECRET: ${XM_DUBBO_SECRET:?}
-      XM_NODE_LINK_SECRET: ${XM_NODE_LINK_SECRET:?}
-      XM_ASSET_OP_SECRET_GUILD: ${XM_ASSET_OP_SECRET_GUILD:?}
-      XM_GM_ADMIN_SECRET: ${XM_GM_ADMIN_SECRET:-}
+      GAME_ADVERTISE_HOST: game-scene               # 节点目录里的链路 / 资产通道地址，gate / guild 按它连
+      GAME_SCENE_LINK_BIND_HOST: 0.0.0.0          # 链路不加密：只在 compose 网络内可达，不发布到宿主
+      GAME_SCENE_MANAGER_URL: tri://game-scene-manager:20882
+      GAME_MYSQL_PASSWORD: ${GAME_MYSQL_PASSWORD:?}
+      GAME_DUBBO_SECRET: ${GAME_DUBBO_SECRET:?}
+      GAME_NODE_LINK_SECRET: ${GAME_NODE_LINK_SECRET:?}
+      GAME_ASSET_OP_SECRET_GUILD: ${GAME_ASSET_OP_SECRET_GUILD:?}
+      GAME_GM_ADMIN_SECRET: ${GAME_GM_ADMIN_SECRET:-}
     ports: ["127.0.0.1:18104:18104"]
     healthcheck:
       <<: *ready
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18104/actuator/health/readiness >/dev/null && bash -c '</dev/tcp/xm-scene/21000 && </dev/tcp/xm-scene/21100' && curl -fsS http://127.0.0.1:18104/actuator/prometheus | awk '/^xm_scene_channels\\{.*state=\"active\"/ {if ($$NF+0 >= 1) ok=1} END {exit !ok}'"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18104/actuator/health/readiness >/dev/null && bash -c '</dev/tcp/game-scene/21000 && </dev/tcp/game-scene/21100' && curl -fsS http://127.0.0.1:18104/actuator/prometheus | awk '/^game_scene_channels\\{.*state=\"active\"/ {if ($$NF+0 >= 1) ok=1} END {exit !ok}'"]
     depends_on:
-      xm-login: {condition: service_healthy}          # player 表由 login 建（scene 的 sql.init 是 never，:36-39）
-      xm-scene-manager: {condition: service_healthy}  # 主世界频道计划由 scene-manager 领导者铺
+      game-login: {condition: service_healthy}          # player 表由 login 建（scene 的 sql.init 是 never，:36-39）
+      game-scene-manager: {condition: service_healthy}  # 主世界频道计划由 scene-manager 领导者铺
       kafka: {condition: service_healthy}
 ```
 
@@ -437,27 +437,27 @@ services:
 
 | 服务 | 额外的非秘密环境变量 | 秘密（§6.1） | 发布端口 | depends_on（都是 healthy） |
 |---|---|---|---|---|
-| xm-scene-manager | — | DUBBO | — | redis |
-| xm-friend / guild / trade | — | MYSQL、DUBBO；guild 加 ASSET_OP_SECRET_GUILD；trade 加 ADMIN_TOKEN（可选） | trade 18111 | mysql、redis |
-| xm-team | — | MYSQL、DUBBO | — | mysql（xm_java 由 `MYSQL_DATABASE` 预建）、redis |
-| xm-chat | — | DUBBO | — | redis |
-| xm-data | — | MYSQL、ADMIN_TOKEN（可选） | 18106 | mysql、redis、kafka |
-| xm-gate | `XM_ADVERTISE_HOST=${XM_GATE_PUBLIC_HOST:-127.0.0.1}`；`XM_LOGIN_URL` / `XM_FRIEND_URL` / `XM_CHAT_URL` / `XM_TEAM_URL` / `XM_GUILD_URL` / `XM_TRADE_URL`（`tri://<服务名>:<端口>`） | DUBBO、GATE_TOKEN、NODE_LINK、GM（可选） | `${XM_GATE_PUBLISH_IP:-127.0.0.1}:11000:11000` | xm-scene、xm-login、五个社交服务 |
-| xm-gateway | `XM_LOGIN_URL`、`XM_GATEWAY_QUEUE_ENABLED=true`、`XM_GATEWAY_RATE_LIMIT_ENABLED=true`（同 `start-slice.sh:68-70`） | MYSQL、DUBBO、GATE_TOKEN | `${XM_GATE_PUBLISH_IP:-127.0.0.1}:18081:18081` | xm-gate、xm-login、mysql |
-| xm-scene-2（profile `two-scenes`） | 与 xm-scene 相同，只是 `XM_ADVERTISE_HOST=xm-scene-2`，并复用 xm-scene 的镜像（不写 `build`） | 同 xm-scene | `127.0.0.1:18114:18104` | 同 xm-scene |
-| xm-battle（6.2 落地后） | 通告地址见 §10 Q9 | DUBBO、BATTLE_TOKEN、GATE_TOKEN（可选，用于「两把密钥不能相同」的检查）、ADMIN_TOKEN（可选） | 12000、18112 | redis |
+| game-scene-manager | — | DUBBO | — | redis |
+| game-friend / guild / trade | — | MYSQL、DUBBO；guild 加 ASSET_OP_SECRET_GUILD；trade 加 ADMIN_TOKEN（可选） | trade 18111 | mysql、redis |
+| game-team | — | MYSQL、DUBBO | — | mysql（game 由 `MYSQL_DATABASE` 预建）、redis |
+| game-chat | — | DUBBO | — | redis |
+| game-data | — | MYSQL、ADMIN_TOKEN（可选） | 18106 | mysql、redis、kafka |
+| game-gate | `GAME_ADVERTISE_HOST=${GAME_GATE_PUBLIC_HOST:-127.0.0.1}`；`GAME_LOGIN_URL` / `GAME_FRIEND_URL` / `GAME_CHAT_URL` / `GAME_TEAM_URL` / `GAME_GUILD_URL` / `GAME_TRADE_URL`（`tri://<服务名>:<端口>`） | DUBBO、GATE_TOKEN、NODE_LINK、GM（可选） | `${GAME_GATE_PUBLISH_IP:-127.0.0.1}:11000:11000` | game-scene、game-login、五个社交服务 |
+| game-gateway | `GAME_LOGIN_URL`、`GAME_GATEWAY_QUEUE_ENABLED=true`、`GAME_GATEWAY_RATE_LIMIT_ENABLED=true`（同 `start-slice.sh:68-70`） | MYSQL、DUBBO、GATE_TOKEN | `${GAME_GATE_PUBLISH_IP:-127.0.0.1}:18081:18081` | game-gate、game-login、mysql |
+| game-scene-2（profile `two-scenes`） | 与 game-scene 相同，只是 `GAME_ADVERTISE_HOST=game-scene-2`，并复用 game-scene 的镜像（不写 `build`） | 同 game-scene | `127.0.0.1:18114:18104` | 同 game-scene |
+| game-battle（6.2 落地后） | 通告地址见 §10 Q9 | DUBBO、BATTLE_TOKEN、GATE_TOKEN（可选，用于「两把密钥不能相同」的检查）、ADMIN_TOKEN（可选） | 12000、18112 | redis |
 
 ### 2.6 通告地址与 Dubbo 的绑定规则
 
-- **Dubbo 只做直连的进程**（login、scene-manager、friend、chat、team、guild、trade）：在 local profile 下，`xm.advertise-host` 只喂给 `dubbo.protocol.host`（如 xm-login `:132`）。
+- **Dubbo 只做直连的进程**（login、scene-manager、friend、chat、team、guild、trade）：在 local profile 下，`game.advertise-host` 只喂给 `dubbo.protocol.host`（如 game-login `:132`）。
   - 保持缺省值 127.0.0.1 时，Dubbo 把它当作无效的绑定地址，改为监听 0.0.0.0（architecture.md §4.1）。调用方按服务名直连照样能通。
-  - 改成服务名（例如 `xm-login`）时，Dubbo 不再认为它无效，会**只绑这个名字解析出的容器 IP**，容器里的 127.0.0.1 上就没有监听了。这一半按 Dubbo 3.3 的绑定规则推断，architecture.md 记录的只是回环那一半，要在 §11.2 V5 用非回环主机名在本机复核。
-  - **结论**：compose 不给这些进程设 `XM_ADVERTISE_HOST`。healthcheck 一律按服务名探测，两种绑定方式下都成立。
-- **xm-scene**：通告地址写进节点目录，作为链路地址和资产通道地址（`SceneNode.java:393` 把它交给 `SceneAssetRpcServer`），gate 和 guild 按它去连。所以必须设成服务名。资产通道因此只绑容器 IP，链路由 `XM_SCENE_LINK_BIND_HOST=0.0.0.0` 控制。
-- **xm-gate**：通告地址只作为下发给客户端的地址（`GateNode.java:254`）；Netty 绑全部网卡（`GateNode.java:214`）。缺省 `127.0.0.1:11000`，宿主上的 robot 经发布端口连进来。
-  做远程演示时，改 `XM_GATE_PUBLIC_HOST` 和 `XM_GATE_PUBLISH_IP`，这正是 PARITY 第 50 行「通告地址 ≠ 监听地址」要解决的场景。
-- **两个 scene 不需要错开容器内的端口**：它们各有各的容器 IP，节点目录里写的是 `xm-scene-2:21000`。只有发布到宿主的端口要错开。`start-slice.sh:97-103` 那套错端口的约定在容器里用不上。
-- **xm-battle（6.2）**：通告地址同时用于票据里给客户端的主机和目录里的 `rpc_host`（xm-battle `application.yaml` 的 `advertise-host` 注释）。
+  - 改成服务名（例如 `game-login`）时，Dubbo 不再认为它无效，会**只绑这个名字解析出的容器 IP**，容器里的 127.0.0.1 上就没有监听了。这一半按 Dubbo 3.3 的绑定规则推断，architecture.md 记录的只是回环那一半，要在 §11.2 V5 用非回环主机名在本机复核。
+  - **结论**：compose 不给这些进程设 `GAME_ADVERTISE_HOST`。healthcheck 一律按服务名探测，两种绑定方式下都成立。
+- **game-scene**：通告地址写进节点目录，作为链路地址和资产通道地址（`SceneNode.java:393` 把它交给 `SceneAssetRpcServer`），gate 和 guild 按它去连。所以必须设成服务名。资产通道因此只绑容器 IP，链路由 `GAME_SCENE_LINK_BIND_HOST=0.0.0.0` 控制。
+- **game-gate**：通告地址只作为下发给客户端的地址（`GateNode.java:254`）；Netty 绑全部网卡（`GateNode.java:214`）。缺省 `127.0.0.1:11000`，宿主上的 robot 经发布端口连进来。
+  做远程演示时，改 `GAME_GATE_PUBLIC_HOST` 和 `GAME_GATE_PUBLISH_IP`，这正是 PARITY 第 50 行「通告地址 ≠ 监听地址」要解决的场景。
+- **两个 scene 不需要错开容器内的端口**：它们各有各的容器 IP，节点目录里写的是 `game-scene-2:21000`。只有发布到宿主的端口要错开。`start-slice.sh:97-103` 那套错端口的约定在容器里用不上。
+- **game-battle（6.2）**：通告地址同时用于票据里给客户端的主机和目录里的 `rpc_host`（game-battle `application.yaml` 的 `advertise-host` 注释）。
   在端口映射的部署形态下，这两者需要不同的值：客户端要能从宿主访问的地址，`rpc_host` 要容器网络内的服务名。这是 6.2 的接口问题，见 §10 Q9。
 
 ### 2.7 用法
@@ -478,7 +478,7 @@ docker compose -f deploy/compose/stack.yaml down -v                         # �
 - 只有 MySQL 和 Redis 两个命名卷，Kafka 不挂卷。
 - **MySQL 和 Redis 必须一起重置**，原因有两条：
   - Redis 里有一部分权威数据和 MySQL 是配套的，比如组队数据只在 Redis（architecture.md §4.16），而帮会、好友的缓存和排行对应 MySQL 里的表。只清一边，两边就对不上了。
-  - 进程还在运行时清 Redis，会让 `xm:node-id-epoch:*` 回退，scene 就会重新接受旧 gate 的链路（architecture.md:585-586，`tools.md:444`）。
+  - 进程还在运行时清 Redis，会让 `game:node-id-epoch:*` 回退，scene 就会重新接受旧 gate 的链路（architecture.md:585-586，`tools.md:444`）。
 
   所以要么在停机状态下 `down -v` 全部清掉，要么一个都不清。**禁止单独删 redis-data。**
 - Kafka 不挂卷，`down` 之后在途的审计消息就丢了。开发和 CI 可以接受这一点，因为已经落进 MySQL 的流水不受影响。
@@ -499,7 +499,7 @@ docker compose -f deploy/compose/stack.yaml down -v                         # �
 
 ### 3.2 构建流程
 
-1. 在宿主（CI）上执行 `./mvnw -B -ntp -DskipTests package -Dxm.build.commit=… -Dxm.build.contract=…`，一次打出全部 Boot jar。
+1. 在宿主（CI）上执行 `./mvnw -B -ntp -DskipTests package -Dgame.build.commit=… -Dgame.build.contract=…`，一次打出全部 Boot jar。
 2. 执行 `docker compose -f deploy/compose/stack.yaml build --build-arg …`。BuildKit 会并行构建，每个镜像里只有 COPY 和一次解包。
 
 不照搬基线「在容器里跑 mvn」（`Dockerfile.java-svc:25-51`），理由有三：
@@ -513,7 +513,7 @@ docker compose -f deploy/compose/stack.yaml down -v                         # �
 ### 3.3 `deploy/docker/Dockerfile`（草图）
 
 ```dockerfile
-# 一个 Dockerfile 服务全部 Spring Boot 进程模块：docker build --build-arg MODULE=xm-gate -f deploy/docker/Dockerfile .
+# 一个 Dockerfile 服务全部 Spring Boot 进程模块：docker build --build-arg MODULE=game-gate -f deploy/docker/Dockerfile .
 # 构建上下文 = 仓库根；.dockerignore 只放行 */target/*.jar 与 config-data/tables。jar 先由宿主 Maven 打出（-DskipTests package）。
 # 基础镜像钉 index digest（2026-10-05 Docker Hub API 查得，与本机 JDK 21.0.12.1+1 同一构建）。
 # 更新方法：docker buildx imagetools inspect <image:tag> 取 Digest 行替换 @sha256，推送后看 integration.yml / stack 是否绿。
@@ -529,8 +529,8 @@ RUN java -Djarmode=tools -jar app.jar extract --layers --destination out
 
 FROM ${JRE_IMAGE}
 # 非 root（uid / gid 10001，同基线各镜像）。home 必须可写：Dubbo 3 往 ${user.home}/.dubbo 写文件缓存
-RUN groupadd --system --gid 10001 xm \
- && useradd --system --uid 10001 --gid xm --create-home --home-dir /home/xm --shell /usr/sbin/nologin xm
+RUN groupadd --system --gid 10001 game \
+ && useradd --system --uid 10001 --gid game --create-home --home-dir /home/game --shell /usr/sbin/nologin game
 WORKDIR /app
 # 层顺序 = 变化频率从低到高：三方依赖 → loader → 表数据 → 本仓库各库模块（SNAPSHOT）→ 进程模块自身
 COPY --from=layers /x/out/dependencies/ ./
@@ -541,18 +541,18 @@ COPY --from=layers /x/out/application/ ./
 ENV JDK_JAVA_OPTIONS="-XX:MaxRAMPercentage=60 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError"
 # 版本戳 ARG 放在运行阶段末尾，只让下面几层随提交失效（同基线 Dockerfile.java-svc:71-76）
 ARG MODULE
-ARG XM_BUILD_VERSION=unknown
-ARG XM_BUILD_COMMIT=unknown
-ARG XM_BUILD_CONTRACT=unknown
-ARG XM_BUILD_CREATED=unknown
+ARG GAME_BUILD_VERSION=unknown
+ARG GAME_BUILD_COMMIT=unknown
+ARG GAME_BUILD_CONTRACT=unknown
+ARG GAME_BUILD_CREATED=unknown
 LABEL org.opencontainers.image.title="${MODULE}" \
-      org.opencontainers.image.version="${XM_BUILD_VERSION}" \
-      org.opencontainers.image.revision="${XM_BUILD_COMMIT}" \
-      org.opencontainers.image.created="${XM_BUILD_CREATED}" \
+      org.opencontainers.image.version="${GAME_BUILD_VERSION}" \
+      org.opencontainers.image.revision="${GAME_BUILD_COMMIT}" \
+      org.opencontainers.image.created="${GAME_BUILD_CREATED}" \
       org.opencontainers.image.source="https://github.com/luyuan-java/xuanming-server-mmo" \
-      com.game.contract.mmorpg-commit="${XM_BUILD_CONTRACT}"
+      com.game.contract.mmorpg-commit="${GAME_BUILD_CONTRACT}"
 RUN printf 'module=%s\nversion=%s\ncommit=%s\ncontract=%s\ncreated=%s\n' \
-      "${MODULE}" "${XM_BUILD_VERSION}" "${XM_BUILD_COMMIT}" "${XM_BUILD_CONTRACT}" "${XM_BUILD_CREATED}" > /app/BUILD_INFO
+      "${MODULE}" "${GAME_BUILD_VERSION}" "${GAME_BUILD_COMMIT}" "${GAME_BUILD_CONTRACT}" "${GAME_BUILD_CREATED}" > /app/BUILD_INFO
 USER 10001:10001
 # exec 形式：java 是 PID 1，直接收 SIGTERM 走 Spring 优雅停机；不写 HEALTHCHECK（编排层负责）
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
@@ -565,7 +565,7 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 
 ```
 *
-!xm-*/target/xm-*.jar
+!game-*/target/game-*.jar
 !config-data/tables
 ```
 
@@ -578,7 +578,7 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 - `/app` 归 root 所有，运行用户只读（同基线 `Dockerfile.go-svc:146-162` 的属主划分）。
 - 可写的只有两处：
   - `/tmp`：Tomcat 工作目录、Netty native 库的解压位置、hsperfdata；
-  - `/home/xm`：Dubbo 文件缓存。基线把 home 设成 `/app`（`Dockerfile.java-svc:63`），在这里不能照抄。
+  - `/home/game`：Dubbo 文件缓存。基线把 home 设成 `/app`（`Dockerfile.java-svc:63`），在这里不能照抄。
 - 停机：java 就是 PID 1，不需要 tini。compose 的 `stop_grace_period` 见 §2.5。scene 必须设 45 s，这一点由 §4.5 的停机断言来验证。
 
 ### 3.6 JVM 参数（镜像缺省值；compose 或 K8s 用 `JDK_JAVA_OPTIONS` 整串替换）
@@ -590,7 +590,7 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 - **不加的参数**：
   - HeapDump：`/tmp` 是临时目录，GB 级的 dump 会把磁盘写满；
   - CDS / AOT：训练运行时要连 Redis / MySQL，7.1 不值得做；
-  - `TZ`：游戏日按固定的 +8 计算（`xm-common/.../GameDay.java:28`），日志时间用 UTC。
+  - `TZ`：游戏日按固定的 +8 计算（`game-common/.../GameDay.java:28`），日志时间用 UTC。
 
 ### 3.7 表数据进镜像
 
@@ -599,13 +599,13 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 - 表数据是随提交走的契约，「镜像 = 代码 + 同一个提交的表」，才能追溯；
 - 基线 Go 镜像也是这样做的（`Dockerfile.go-svc:51-57`）；
 - 运行时照样校验 manifest 的 sha256；
-- 需要临时换表时，仍可以挂一个卷，再用 `XM_TABLE_DIR` 指过去（7.6 决定）。
+- 需要临时换表时，仍可以挂一个卷，再用 `GAME_TABLE_DIR` 指过去（7.6 决定）。
 
 **秘密永远不进镜像。**
 
 ### 3.8 镜像名与 tag（留给 7.6 的接口）
 
-- **镜像名**：`${XM_IMAGE_NAMESPACE:-xuanming-java}/<模块名>`，例如 `xuanming-java/xm-gate`。与基线的 `mmorpg-*` 明显区分，两版即使推到同一个 registry 也不会混。7.6 推 GHCR 时把 namespace 改成 `ghcr.io/luyuan-java`；`org.opencontainers.image.source` 这个 label 能让 GHCR 把包关联回本仓库。
+- **镜像名**：`${GAME_IMAGE_NAMESPACE:-xuanming-java}/<模块名>`，例如 `xuanming-java/game-gate`。与基线的 `mmorpg-*` 明显区分，两版即使推到同一个 registry 也不会混。7.6 推 GHCR 时把 namespace 改成 `ghcr.io/luyuan-java`；`org.opencontainers.image.source` 这个 label 能让 GHCR 把包关联回本仓库。
 - **tag**：
   - 快照轨：12 位 sha，脏树加 `-dirty`。CI 每次全新检出，永远不脏。
   - 发布轨：`v<X.Y.Z>-<sha12>`，脏树直接拒绝，长度不超过 128，归 7.6。
@@ -627,7 +627,7 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 |---|---|---|---|---|
 | `ci.yml` / build | push main、PR、手动；`paths-ignore: docs/**, **/*.md` | `./mvnw -B -ntp verify` + `TestReport` | 红绿 | 7.1a |
 | `ci.yml` / contract | 同上 | 稀疏检出 mmorpg 在 SOURCE 里记录的那个提交，再跑 `ContractSync --check` | 红绿 | 7.1a |
-| `integration.yml` / it | push main、每日 UTC 19:00（北京时间 03:00）、手动 | 用 infra compose 起依赖，`verify -Dxm.it.*`，再跑 `TestReport --require-it-executed` | 红绿 | 7.1a |
+| `integration.yml` / it | push main、每日 UTC 19:00（北京时间 03:00）、手动 | 用 infra compose 起依赖，`verify -Dgame.it.*`，再跑 `TestReport --require-it-executed` | 红绿 | 7.1a |
 | `integration.yml` / stack | 同上 | package → 模块漂移守卫 → compose build → 镜像断言 → `up --wait` → info 断言 → robot → 停机断言 → `down -v` | 红绿；robot 场景分期加入 | 7.1b |
 | `contract-drift.yml` / drift | 每日、手动 | 对比 mmorpg main HEAD | **只报告**（warning + Summary，job 始终绿） | 7.1a |
 
@@ -723,16 +723,16 @@ jobs:
 ### 4.4 `integration.yml` / it（7.1a）
 
 1. 环境自检。
-2. 生成本次运行的秘密：`v=$(openssl rand -hex 32); echo "::add-mask::$v"; echo "XM_MYSQL_PASSWORD=$v" >> "$GITHUB_ENV"`。
+2. 生成本次运行的秘密：`v=$(openssl rand -hex 32); echo "::add-mask::$v"; echo "GAME_MYSQL_PASSWORD=$v" >> "$GITHUB_ENV"`。
 3. compose 静态检查：
    - `docker compose -f deploy/compose/infra.yaml config -q` 必须成功；
-   - **反例**：`env -u XM_MYSQL_PASSWORD docker compose -f deploy/compose/infra.yaml config -q` 必须**失败**，否则输出 `::error` 并判红，以此证明 `:?` 生效。
+   - **反例**：`env -u GAME_MYSQL_PASSWORD docker compose -f deploy/compose/infra.yaml config -q` 必须**失败**，否则输出 `::error` 并判红，以此证明 `:?` 生效。
 4. `docker compose -f deploy/compose/infra.yaml up -d --wait --wait-timeout 180`。失败时，把 `docker compose ps` 的状态和不健康服务日志的最后 30 行编码进 `::error`。
-5. `./mvnw -B -ntp verify -Dxm.it.redis=redis://127.0.0.1:6379 -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dxm.it.kafka=127.0.0.1:9092`。
-   - 测试从环境变量读 `XM_MYSQL_PASSWORD`，`xm.it.mysql.user` 缺省是 root。MySQL 集成测试各自建临时库，root 有这个权限。
-   - xm-guild / xm-scene 等模块需要的测试用密钥，由 surefire 注入（如 `xm-api/pom.xml:58-60`、`xm-guild/pom.xml:110-113`），不需要另给。
+5. `./mvnw -B -ntp verify -Dgame.it.redis=redis://127.0.0.1:6379 -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dgame.it.kafka=127.0.0.1:9092`。
+   - 测试从环境变量读 `GAME_MYSQL_PASSWORD`，`game.it.mysql.user` 缺省是 root。MySQL 集成测试各自建临时库，root 有这个权限。
+   - game-guild / game-scene 等模块需要的测试用密钥，由 surefire 注入（如 `game-api/pom.xml:58-60`、`game-guild/pom.xml:110-113`），不需要另给。
    - 不加 `-T`：各模块的集成测试共用 Redis 的 DB 13 和同一个 broker，必须串行跑。
-6. `java tools/TestReport.java --summary … --annotate --require-it-executed`。49 个带 `@EnabledIfSystemProperty(named = "xm.it.*")` 的类（按注解数是 redis 32、mysql 19、kafka 1）里，只要有一个整类都被跳过，就判红。这样能防止「标志传错、集成测试全部静默跳过、结果却是绿的」。
+6. `java tools/TestReport.java --summary … --annotate --require-it-executed`。49 个带 `@EnabledIfSystemProperty(named = "game.it.*")` 的类（按注解数是 redis 32、mysql 19、kafka 1）里，只要有一个整类都被跳过，就判红。这样能防止「标志传错、集成测试全部静默跳过、结果却是绿的」。
 7. 失败时上传 `docker compose logs --no-color --timestamps` 的输出和 surefire 报告；无论成败（`always()`）都执行 `down -v`。
 
 **为什么不用 `services:` 服务容器**：
@@ -743,28 +743,28 @@ jobs:
 
 ### 4.5 `integration.yml` / stack（7.1b）
 
-1. **环境自检；生成秘密**：§6.1 里的全部变量都随机生成并 mask，`XM_BATTLE_TOKEN_SECRET` 和 `XM_GATE_TOKEN_SECRET` 各自独立生成。
+1. **环境自检；生成秘密**：§6.1 里的全部变量都随机生成并 mask，`GAME_BATTLE_TOKEN_SECRET` 和 `GAME_GATE_TOKEN_SECRET` 各自独立生成。
 2. **生成构建戳**：
-   - `XM_IMAGE_TAG=${GITHUB_SHA::12}`
-   - `XM_BUILD_COMMIT=$GITHUB_SHA`
-   - `XM_BUILD_CONTRACT` 取自 `SOURCE.properties`
-   - `XM_BUILD_CREATED=$(git log -1 --format=%cI)`：用提交时间而不是墙钟时间，同一个提交两次构建得到相同的 label
-   - `XM_BUILD_VERSION=0.1.0-SNAPSHOT`：取 `project.version`
-3. **打包**：`./mvnw -B -ntp -DskipTests package -Dxm.build.commit=$GITHUB_SHA -Dxm.build.contract=$XM_BUILD_CONTRACT`。
-4. **模块清单漂移守卫**：把 pom 里声明了 `<goal>repackage</goal>` 的模块去掉 xm-robot，得到集合 A；把 `docker compose -f deploy/compose/stack.yaml config --services` 的结果去掉 mysql / redis / kafka，得到集合 B（未激活 profile 的服务本来就不会列出）。A 必须等于 B。
-   6.2 新增 xm-battle 时，如果漏写 compose，这一步就判红。这类漂移基线也出过，见 `cpp-build-ci.yml:18-21`。
-5. **构建镜像**：`docker compose -f deploy/compose/stack.yaml build --build-arg XM_BUILD_VERSION=… --build-arg XM_BUILD_COMMIT=… --build-arg XM_BUILD_CONTRACT=… --build-arg XM_BUILD_CREATED=…`。
+   - `GAME_IMAGE_TAG=${GITHUB_SHA::12}`
+   - `GAME_BUILD_COMMIT=$GITHUB_SHA`
+   - `GAME_BUILD_CONTRACT` 取自 `SOURCE.properties`
+   - `GAME_BUILD_CREATED=$(git log -1 --format=%cI)`：用提交时间而不是墙钟时间，同一个提交两次构建得到相同的 label
+   - `GAME_BUILD_VERSION=0.1.0-SNAPSHOT`：取 `project.version`
+3. **打包**：`./mvnw -B -ntp -DskipTests package -Dgame.build.commit=$GITHUB_SHA -Dgame.build.contract=$GAME_BUILD_CONTRACT`。
+4. **模块清单漂移守卫**：把 pom 里声明了 `<goal>repackage</goal>` 的模块去掉 game-robot，得到集合 A；把 `docker compose -f deploy/compose/stack.yaml config --services` 的结果去掉 mysql / redis / kafka，得到集合 B（未激活 profile 的服务本来就不会列出）。A 必须等于 B。
+   6.2 新增 game-battle 时，如果漏写 compose，这一步就判红。这类漂移基线也出过，见 `cpp-build-ci.yml:18-21`。
+5. **构建镜像**：`docker compose -f deploy/compose/stack.yaml build --build-arg GAME_BUILD_VERSION=… --build-arg GAME_BUILD_COMMIT=… --build-arg GAME_BUILD_CONTRACT=… --build-arg GAME_BUILD_CREATED=…`。
 6. **镜像断言**，每个镜像都要满足：
    - `docker image inspect` 读出的 `org.opencontainers.image.revision` 等于 `$GITHUB_SHA`；
    - `.Config.User` 等于 `10001:10001`；
    - `docker run --rm --entrypoint cat <img> /app/BUILD_INFO` 输出的 `commit=` 正确。
 7. **启动**：`docker compose -f deploy/compose/stack.yaml up -d --wait --wait-timeout 300`。失败时的处理同 it 第 4 步。
 8. **info 断言**：对每个服务执行 `docker compose exec -T <svc> curl -fsS http://127.0.0.1:<管理端口>/actuator/info`，返回里的 `build.commit` 必须等于 `$GITHUB_SHA`，`build.contract` 必须等于 SOURCE 里记录的值。
-9. **在 runner 宿主上跑 robot**：`java -jar xm-robot/target/xm-robot-*.jar <场景>`，环境变量里带上 `XM_LOGIN_DEV_PASSWORD`、`XM_ADMIN_TOKEN`、`XM_ASSET_OP_SECRET_GUILD`；robot 缺省的地址正好对上发布出来的端口（`RobotOptions.java:82`、`:98-103`）。每个场景失败时，都把最后 20 行输出编码进 `::error title=robot <场景>`。场景**分三期**加入，前一期连续绿了才加下一期，口径同 `cpp-build-ci.yml:27-34`：
-   - **第一期**：smoke、token、movement、audit、trade。覆盖 gateway HTTP → gate TCP → login → scene → Kafka → xm-data 的全部跳点。
+9. **在 runner 宿主上跑 robot**：`java -jar game-robot/target/game-robot-*.jar <场景>`，环境变量里带上 `GAME_LOGIN_DEV_PASSWORD`、`GAME_ADMIN_TOKEN`、`GAME_ASSET_OP_SECRET_GUILD`；robot 缺省的地址正好对上发布出来的端口（`RobotOptions.java:82`、`:98-103`）。每个场景失败时，都把最后 20 行输出编码进 `::error title=robot <场景>`。场景**分三期**加入，前一期连续绿了才加下一期，口径同 `cpp-build-ci.yml:27-34`：
+   - **第一期**：smoke、token、movement、audit、trade。覆盖 gateway HTTP → gate TCP → login → scene → Kafka → game-data 的全部跳点。
    - **第二期**：reconnect、currency、bag、features、skill、pet、friend、chat、team、guild、guild-economy、guard、attribute（约 70 s）。
    - **第三期**：zones、queue、drain、killswitch，最后跑 ratelimit（它会消耗 IP 令牌桶，经端口映射进来的请求都来自同一个 bridge 网关 IP）。5.2 落地后，在 `--profile two-scenes` 下加跑 cross-node。
-10. **停机断言**：执行 `docker compose stop xm-scene`，然后用 `docker inspect -f '{{.State.ExitCode}}'` 检查退出码。退出码**不得是 137**（被 SIGKILL）；正常优雅退出应当是 143。这一步证明 45 s 的宽限期够 scene 完成停服写回。
+10. **停机断言**：执行 `docker compose stop game-scene`，然后用 `docker inspect -f '{{.State.ExitCode}}'` 检查退出码。退出码**不得是 137**（被 SIGKILL）；正常优雅退出应当是 143。这一步证明 45 s 的宽限期够 scene 完成停服写回。
 11. **收尾**：失败时上传 compose 日志、robot 输出和 `images.json`（每个镜像的模块 / ref / id / 大小 / revision，几 KB，保留 30 天）；无论成败都执行 `down -v`。
 
 ### 4.6 `contract-drift.yml`（只报告）
@@ -804,7 +804,7 @@ exit 0
 - **`--summary <文件>`**：写出每个模块的 Markdown 汇总表。
 - **`--annotate`**：为每个失败或出错的用例输出一行 `::error file=<模块>/src/test/java/<包路径>.java,line=<栈里本类的那一行>,title=<类>.<方法>::<消息首行>`。
   最多输出 9 条，超出部分合并成第 10 条：「另有 N 个失败用例，见 Summary / 制品」。
-- **`--require-it-executed`**：扫描 `*/src/test/java/**` 中带 `@EnabledIfSystemProperty(named = "xm.it.` 的类。只要有一个类没有对应的 XML，或者它的用例全被跳过，就列出这些类并以退出码 1 结束。
+- **`--require-it-executed`**：扫描 `*/src/test/java/**` 中带 `@EnabledIfSystemProperty(named = "game.it.` 的类。只要有一个类没有对应的 XML，或者它的用例全被跳过，就列出这些类并以退出码 1 结束。
 - **没有任何报告时**（比如编译阶段就失败了）：退出码 0，只在 Summary 里写「无测试报告」。失败原因交给 Maven 问题匹配器去报。
 - **退出码**：0 通过；1 有失败，或者有 IT 被静默跳过；2 用法错误。
 
@@ -822,8 +822,8 @@ exit 0
 
 ```xml
 <!-- properties：CI / 镜像构建用 -D 覆盖；本机构建取缺省（命令行 -D 优先于 pom 属性） -->
-<xm.build.commit>unknown</xm.build.commit>
-<xm.build.contract>unknown</xm.build.contract>
+<game.build.commit>unknown</game.build.commit>
+<game.build.contract>unknown</game.build.contract>
 
 <!-- pluginManagement 里已有的 spring-boot-maven-plugin（pom.xml:197-201）追加： -->
 <executions>
@@ -832,15 +832,15 @@ exit 0
     <goals><goal>build-info</goal></goals>
     <configuration>
       <additionalProperties>
-        <commit>${xm.build.commit}</commit>
-        <contract>${xm.build.contract}</contract>
+        <commit>${game.build.commit}</commit>
+        <contract>${game.build.contract}</contract>
       </additionalProperties>
     </configuration>
   </execution>
 </executions>
 ```
 
-- 13 个模块（含 xm-robot 和 xm-battle）都声明了这个插件。各自的 `repackage` execution（如 `xm-gate/pom.xml:105-111`）会与这里的 `build-info` 合并，模块的 pom 不用动；库模块没有声明这个插件，不受影响。
+- 13 个模块（含 game-robot 和 game-battle）都声明了这个插件。各自的 `repackage` execution（如 `game-gate/pom.xml:105-111`）会与这里的 `build-info` 合并，模块的 pom 不用动；库模块没有声明这个插件，不受影响。
 - 结果：`META-INF/build-info.properties` 里有 `build.version`（即 `project.version`）、`build.time`、`build.commit`、`build.contract`；`/actuator/info` 出现 `build` 段（由 Spring Boot 的 `ProjectInfoAutoConfiguration` 自动装配）。
 - **与基线的区别**：
   1. 不覆盖 `version`。基线靠 3.4.3 写入顺序的那个 hack 覆盖（`java/gateway_node/pom.xml:155-169`），升级 Spring Boot 后可能静默失效。Java 的发布版本号方案由 7.6 定。
@@ -850,7 +850,7 @@ exit 0
 
 ### 5.2 端点
 
-- 11 个 yaml（加上 xm-battle）的 `management.endpoints.web.exposure.include` 从 `health,prometheus` 改为 `health,info,prometheus`，并加 `management.endpoint.health.probes.enabled: true`，得到 `/actuator/health/readiness` 和 `/actuator/health/liveness`。
+- 11 个 yaml（加上 game-battle）的 `management.endpoints.web.exposure.include` 从 `health,prometheus` 改为 `health,info,prometheus`，并加 `management.endpoint.health.probes.enabled: true`，得到 `/actuator/health/readiness` 和 `/actuator/health/liveness`。
 - `info` 只有 build 段：Boot 3 缺省不开 env / java / os 这些贡献者；而且它在只绑本机的管理端口上。
 - architecture.md §11 那句「actuator 只暴露 health 与 prometheus 两个端点」要同步改。
 
@@ -862,7 +862,7 @@ exit 0
 ### 5.4 留给 7.6 的接口
 
 - 7.6 生成制品清单时，应读同一组字段：模块、版本、40 位 commit、契约 commit、提交时间、镜像 ref、digest。
-- 发布轨的 `XM_BUILD_VERSION` 改成 `vX.Y.Z`，镜像 tag 改成 `vX.Y.Z-<sha12>`。
+- 发布轨的 `GAME_BUILD_VERSION` 改成 `vX.Y.Z`，镜像 tag 改成 `vX.Y.Z-<sha12>`。
 - 在根 pom 用 `-Drevision` 或 `versions:set` 设版本号，由 7.6 定。
 
 ---
@@ -871,19 +871,19 @@ exit 0
 
 ### 6.1 秘密矩阵（compose 按进程最小授权）
 
-出处：`start-slice.sh:3-9`、`:22-26`，各个 yaml 文件头的注释，以及 `System.getenv` 和 `@Value("${XM_…}")` 的读取点（例如 `xm-login/.../LoginConfiguration.java:117`、`:144-145`）。
+出处：`start-slice.sh:3-9`、`:22-26`，各个 yaml 文件头的注释，以及 `System.getenv` 和 `@Value("${GAME_…}")` 的读取点（例如 `game-login/.../LoginConfiguration.java:117`、`:144-145`）。
 
 | 变量 | 谁需要 | 缺失时 | compose 写法 |
 |---|---|---|---|
-| `XM_MYSQL_PASSWORD` | mysql 容器（root 口令）、login、friend、team、guild、trade、gateway、data、scene；集成测试 | 连接被拒，启动失败 | `:?` |
-| `XM_DUBBO_SECRET` | scene-manager、login、friend、chat、team、guild、trade、scene、gate、gateway、battle | 拒启 | `:?` |
-| `XM_GATE_TOKEN_SECRET` | gate、gateway、scene-manager（批次 5.4：给跨 zone 传送与登录期重定向签票据，缺失拒启——`assign` 也在它上面，漏给它连普通进游戏都会失败）；三个进程原值逐字节相同；battle 可选（用来检查两把密钥不相同） | 拒启 | `:?` |
-| `XM_NODE_LINK_SECRET` | gate、scene | 拒启 | `:?` |
-| `XM_LOGIN_DEV_PASSWORD` | login（`xm.login.mode` 缺省 dev，见 xm-login `:84`）、robot | 拒启 | `:?` |
-| `XM_ASSET_OP_SECRET_GUILD` | guild、scene、robot guild-economy；去掉首尾空白后至少 32 字节 | guild 拒启，scene 验签全部失败 | `:?` |
-| `XM_BATTLE_TOKEN_SECRET`（6.2） | battle；至少 32 字节，且不得与 gate 的密钥相同 | 拒启 | `:?` |
-| `XM_ADMIN_TOKEN` | data、trade、battle（dev 接口）、robot | `/admin/**` 一律回 503 | `:-`（可选） |
-| `XM_GM_ADMIN_SECRET` | gate、scene | GM 停机接口一律拒绝 | `:-`（可选） |
+| `GAME_MYSQL_PASSWORD` | mysql 容器（root 口令）、login、friend、team、guild、trade、gateway、data、scene；集成测试 | 连接被拒，启动失败 | `:?` |
+| `GAME_DUBBO_SECRET` | scene-manager、login、friend、chat、team、guild、trade、scene、gate、gateway、battle | 拒启 | `:?` |
+| `GAME_GATE_TOKEN_SECRET` | gate、gateway、scene-manager（批次 5.4：给跨 zone 传送与登录期重定向签票据，缺失拒启——`assign` 也在它上面，漏给它连普通进游戏都会失败）；三个进程原值逐字节相同；battle 可选（用来检查两把密钥不相同） | 拒启 | `:?` |
+| `GAME_NODE_LINK_SECRET` | gate、scene | 拒启 | `:?` |
+| `GAME_LOGIN_DEV_PASSWORD` | login（`game.login.mode` 缺省 dev，见 game-login `:84`）、robot | 拒启 | `:?` |
+| `GAME_ASSET_OP_SECRET_GUILD` | guild、scene、robot guild-economy；去掉首尾空白后至少 32 字节 | guild 拒启，scene 验签全部失败 | `:?` |
+| `GAME_BATTLE_TOKEN_SECRET`（6.2） | battle；至少 32 字节，且不得与 gate 的密钥相同 | 拒启 | `:?` |
+| `GAME_ADMIN_TOKEN` | data、trade、battle（dev 接口）、robot | `/admin/**` 一律回 503 | `:-`（可选） |
+| `GAME_GM_ADMIN_SECRET` | gate、scene | GM 停机接口一律拒绝 | `:-`（可选） |
 
 ### 6.2 注入方式
 
@@ -901,18 +901,18 @@ exit 0
 
 | # | 改什么 | 新值 | 涉及 |
 |---|---|---|---|
-| 1 | JDBC URL 的 host 和 port | `jdbc:mysql://${XM_MYSQL_HOST:127.0.0.1}:${XM_MYSQL_PORT:3306}/xm_java?<原参数原样保留>` | §2.2 列出的 8 处 |
-| 2 | Redis 地址 | `${XM_REDIS_ADDRESS:redis://127.0.0.1:6379}` | 11 个 yaml，加上 xm-battle |
-| 3 | 通告地址 | `${XM_ADVERTISE_HOST:127.0.0.1}` | 9 个 yaml，加上 xm-battle（compose 只给 scene / gate / battle 设值，§2.6） |
-| 4 | scene 链路绑定 | `link-bind-host: ${XM_SCENE_LINK_BIND_HOST:127.0.0.1}` | xm-scene `:81` |
-| 5 | Dubbo 直连 URL | `${XM_LOGIN_URL:tri://127.0.0.1:20881}` 等；login 的 `scene-manager-url` 与 scene 共用 `XM_SCENE_MANAGER_URL` | xm-gate `:51-60`、xm-gateway `:65`、xm-login `:79` |
-| 6 | 探针与 info | `management.endpoint.health.probes.enabled: true`；exposure 加上 `info` | 11 个 yaml，加上 xm-battle |
+| 1 | JDBC URL 的 host 和 port | `jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:3306}/game?<原参数原样保留>` | §2.2 列出的 8 处 |
+| 2 | Redis 地址 | `${GAME_REDIS_ADDRESS:redis://127.0.0.1:6379}` | 11 个 yaml，加上 game-battle |
+| 3 | 通告地址 | `${GAME_ADVERTISE_HOST:127.0.0.1}` | 9 个 yaml，加上 game-battle（compose 只给 scene / gate / battle 设值，§2.6） |
+| 4 | scene 链路绑定 | `link-bind-host: ${GAME_SCENE_LINK_BIND_HOST:127.0.0.1}` | game-scene `:81` |
+| 5 | Dubbo 直连 URL | `${GAME_LOGIN_URL:tri://127.0.0.1:20881}` 等；login 的 `scene-manager-url` 与 scene 共用 `GAME_SCENE_MANAGER_URL` | game-gate `:51-60`、game-gateway `:65`、game-login `:79` |
+| 6 | 探针与 info | `management.endpoint.health.probes.enabled: true`；exposure 加上 `info` | 11 个 yaml，加上 game-battle |
 
 **规则**：compose 里设的每一个非秘密变量，都必须在 `application.yaml` 里有同名的占位符。
 
-- Spring 的宽松绑定虽然也能把 `XM_ADVERTISE_HOST` 绑到 `xm.advertise-host`，但靠的是「横线转下划线」这条兼容规则，读配置的人不容易查到。显式占位符可以 grep，也能在本机做反向验证（§11.2 V5）。
-- `xm-login application.yaml:68` 的注释已经写着「用 XM_ADVERTISE_HOST 覆盖」，这正好说明这个变量名早就是事实约定。
-- 现有的 `XM_TABLE_DIR` 也是靠宽松绑定生效的，不在本批改动范围内，保持不变。
+- Spring 的宽松绑定虽然也能把 `GAME_ADVERTISE_HOST` 绑到 `game.advertise-host`，但靠的是「横线转下划线」这条兼容规则，读配置的人不容易查到。显式占位符可以 grep，也能在本机做反向验证（§11.2 V5）。
+- `game-login application.yaml:68` 的注释已经写着「用 GAME_ADVERTISE_HOST 覆盖」，这正好说明这个变量名早就是事实约定。
+- 现有的 `GAME_TABLE_DIR` 也是靠宽松绑定生效的，不在本批改动范围内，保持不变。
 
 ---
 
@@ -936,7 +936,7 @@ exit 0
 | 文件 | 内容 |
 |---|---|
 | 根 `pom.xml` | build-info execution 和两个属性（§5.1） |
-| 11 个进程的 `application.yaml`（以及 xm-battle，如果 6.2 已经落地） | §6.4 的占位符、探针、info；顺手修 xm-gateway `:36-38` 的过时注释 |
+| 11 个进程的 `application.yaml`（以及 game-battle，如果 6.2 已经落地） | §6.4 的占位符、探针、info；顺手修 game-gateway `:36-38` 的过时注释 |
 | `deploy/docker/Dockerfile`、`.dockerignore` | §3.3、§3.4 |
 | `deploy/compose/stack.yaml` | §2.5 |
 | `.github/workflows/integration.yml` | 加 stack job，robot 场景先只放第一期（§4.5） |
@@ -986,21 +986,21 @@ mmorpg 侧早就有这些东西，交付说明里写「mmorpg 已有，本批 Ja
 3. **测试第一次在 Linux 上跑**。已经扫过：代码里没有 `systemDefault()`、`Locale.getDefault()`、写死的路径分隔符；表文件名全是小写；测试按 `../config-data/tables` 相对路径读表。即便如此，第一轮仍可能暴露平台差异，要预留修正提交。runner 的时区是 UTC，游戏日固定按 +8 计算，不受影响。
 4. **推送 `.github/workflows/**` 需要凭据带 `workflow` 权限**。如果 GitHub 拒绝推送（提示缺 workflow scope），要由用户重新授权；Claude 不经手任何凭据。
 5. **Dubbo 的绑定规则**（§2.6）：通告地址一旦设成非回环的主机名，Dubbo 就只绑这一个 IP。所以 healthcheck 一律按服务名探测；Dubbo 只做直连的进程在 compose 里不设通告地址。
-6. **停机宽限期**：compose 缺省 10 s，K8s 缺省 30 s，都不够 scene 的 30 s 停机阶段（xm-scene `:22`）用。scene 设 45 s，由 §4.5 第 10 步验证。7.6 的 `terminationGracePeriodSeconds` 同样要调。
-7. **Dubbo 文件缓存**：Dubbo 3 往 `${user.home}/.dubbo` 写缓存，所以镜像给了一个可写的 `/home/xm`。首轮冒烟时要在日志里搜一遍有没有权限类的告警。
+6. **停机宽限期**：compose 缺省 10 s，K8s 缺省 30 s，都不够 scene 的 30 s 停机阶段（game-scene `:22`）用。scene 设 45 s，由 §4.5 第 10 步验证。7.6 的 `terminationGracePeriodSeconds` 同样要调。
+7. **Dubbo 文件缓存**：Dubbo 3 往 `${user.home}/.dubbo` 写缓存，所以镜像给了一个可写的 `/home/game`。首轮冒烟时要在日志里搜一遍有没有权限类的告警。
 8. **Kafka 不挂卷**：`down` 之后在途的审计消息就丢了，开发和 CI 可以接受（§2.8）。以后如果要持久化，先解决卷的属主问题。
 9. **MySQL 和 Redis 必须一起重置**（§2.8）。
-10. **端口冲突**：开发机上已经有本地进程占着 3306 / 6379 / 9092，基线 compose 也是发布到 0.0.0.0 的同一组端口。在这样的机器上同时起 infra，端口会撞，用 `XM_*_HOST_PORT` 改开。
+10. **端口冲突**：开发机上已经有本地进程占着 3306 / 6379 / 9092，基线 compose 也是发布到 0.0.0.0 的同一组端口。在这样的机器上同时起 infra，端口会撞，用 `GAME_*_HOST_PORT` 改开。
 11. **runner 容量**：公开仓库的标准 runner 规格以环境自检的输出为准，预计 4 vCPU、16 GB。整栈有 11 到 12 个 JVM，内存上限合计约 9.5 GB，再加 infra 约 1.5 GB。
     `start_period` 设为 120 s，`--wait-timeout` 设为 300 s。首轮如果超时，先看自检输出，再调整 limit。
 12. **ContractSync 读的目录变了**：稀疏检出的目录列表要跟着改，否则 contract job 会因为「目录不存在」报红。这种失败很明显，不会悄悄通过。
 13. **digest 钉死以后**：上游重推 tag 不会影响我们，但安全补丁也要手动更新，流程同基线 `Dockerfile.java-svc:17-20`。
     Docker Hub 对匿名拉取有频率限制，遇到 `toomanyrequests` 时先重跑。如果频繁出现，再考虑镜像代理，归 7.6。
 14. **失败只能通过 annotation 看到**：job 日志匿名读不到；制品要登录才能下载，只有用户看得到；Step Summary 只能在网页上看。所以每一种失败路径都必须变成 `::error`，并且总数不超过上限（§4.2、§4.8）。
-15. **xm-battle 的通告地址一址两用**（§2.6）。不解决的话，6.2 在 compose 里只能二选一：要么客户端连不上，要么控制面连不上。
-16. **xm-team 冷启动**：xm-team 的 URL 不带 `createDatabaseIfNotExist`，靠 infra 里的 `MYSQL_DATABASE: xm_java` 兜住。在不带 initdb 的环境（比如 7.6 的托管数据库）里，还得另外保证 login 先起来。
-17. **`XM_RUN_MODE=dev`**：stack 缺省用 dev，GM 指令和 trade 播种都是开着的。stack 是开发 / CI 用的东西，端口只发布到 127.0.0.1。要对外演示，必须改用 `XM_RUN_MODE=prod`，并重新评估要发布哪些端口。
-18. **通过端口映射进来的客户端 IP 都是 bridge 网关**：gateway 的 IP 限流和排队会把所有宿主请求看成同一个 IP。冒烟时的 ratelimit 场景依赖这一点，所以放在最后跑（§4.5 第 9 步）。生产入口的真实 IP 由 7.6 处理（`xm.gateway.rate-limit.trusted-proxies`）。
+15. **game-battle 的通告地址一址两用**（§2.6）。不解决的话，6.2 在 compose 里只能二选一：要么客户端连不上，要么控制面连不上。
+16. **game-team 冷启动**：game-team 的 URL 不带 `createDatabaseIfNotExist`，靠 infra 里的 `MYSQL_DATABASE: game` 兜住。在不带 initdb 的环境（比如 7.6 的托管数据库）里，还得另外保证 login 先起来。
+17. **`GAME_RUN_MODE=dev`**：stack 缺省用 dev，GM 指令和 trade 播种都是开着的。stack 是开发 / CI 用的东西，端口只发布到 127.0.0.1。要对外演示，必须改用 `GAME_RUN_MODE=prod`，并重新评估要发布哪些端口。
+18. **通过端口映射进来的客户端 IP 都是 bridge 网关**：gateway 的 IP 限流和排队会把所有宿主请求看成同一个 IP。冒烟时的 ratelimit 场景依赖这一点，所以放在最后跑（§4.5 第 9 步）。生产入口的真实 IP 由 7.6 处理（`game.gateway.rate-limit.trusted-proxies`）。
 19. **并行批次**：5.2 和 6.2 会改变 stack 的形状。漂移守卫只管模块清单；端口、秘密、依赖关系仍然要由新增模块的那一批自己登记（§0.4 的规则）。
 
 ---
@@ -1018,7 +1018,7 @@ mmorpg 侧早就有这些东西，交付说明里写「mmorpg 已有，本批 Ja
 | D7 | Dockerfile | 每个服务一个 context，在容器里跑 mvn | 一个参数化 Dockerfile，jar 由 CI 宿主打出 | 多模块 reactor；缓存；镜像只在 CI 构建 |
 | D8 | 基础镜像 | temurin 23 JRE alpine | temurin 21 JRE noble（glibc） | LTS，与本机同一构建；Java 版统一用 21 |
 | D9 | JVM | `-Xmx384m` 写死 | `MaxRAMPercentage=60` + G1 + ExitOnOOM | 随 limit 伸缩；小容器下也不会退化到 SerialGC |
-| D10 | home | `/app` | 可写的 `/home/xm` | Dubbo 文件缓存 |
+| D10 | home | `/app` | 可写的 `/home/game` | Dubbo 文件缓存 |
 | D11 | 表数据 | Java 镜像不带表（Go 镜像带） | 单独一层烤进镜像 | 契约随提交走；与 Go 镜像同理 |
 | D12 | build-info | 用 hack 覆盖 version；commit 12 位 | 不覆盖 version；多一个 contract；commit 40 位 | 不依赖插件实现细节；双版本需要知道契约来源 |
 | D13 | OCI created | 构建时间 | 提交时间 | 同一个提交两次构建得到相同的 label，层缓存可复用 |
@@ -1040,11 +1040,11 @@ mmorpg 侧早就有这些东西，交付说明里写「mmorpg 已有，本批 Ja
 | Q4 | 是否同意拆成 7.1a / 7.1b 两批 | **同意** | 7.1a 不碰 5.2 正在改的 yaml，可以马上做；7.1b 等 5.2 提交以后再做 |
 | Q5 | 漂移 workflow 判红还是只报告 | **只报告**（warning + Summary） | 落后于 mmorpg 是常态；常红的门禁会被无视（基线 C++ 门禁的现状） |
 | Q6 | robot 要不要出镜像 | **不出** | 冒烟时直接在 runner 宿主上跑 jar；集群内压测归 7.4 / 7.6 |
-| Q7 | Nacos 要不要进 compose（用 profile 控制） | **不进** | scene 的跨节点选目标只支持直连（xm-scene `:107-109`），nacos profile 在整栈里跑不通。注册中心随 7.6 的部署形态一起定 |
+| Q7 | Nacos 要不要进 compose（用 profile 控制） | **不进** | scene 的跨节点选目标只支持直连（game-scene `:107-109`），nacos profile 在整栈里跑不通。注册中心随 7.6 的部署形态一起定 |
 | Q8 | 要不要写 `tools/Images.java` 来编排构建和打 tag | **7.1 不写** | 快照 tag 三行 shell 就够了；发布轨规则（拒绝脏树、可变 tag 黑名单、digest 清单）由 7.6 的 `tools/Release.java` 统一实现（YAGNI） |
-| Q9 | xm-battle 的通告地址同时给客户端和 `rpc_host` 用，怎么拆 | **在 6.2 加 `xm.battle.client-advertise-host`（缺省等于 `xm.advertise-host`）**，票据用它，目录里的 `rpc_host` 继续用 `xm.advertise-host` | 端口映射或 NodePort 部署时这两个地址必然不同。gate 已经有同类的拆分（`advertise-port` 与 `client-port`）。这是 6.2 的接口，要转告 6.2 的负责人 |
+| Q9 | game-battle 的通告地址同时给客户端和 `rpc_host` 用，怎么拆 | **在 6.2 加 `game.battle.client-advertise-host`（缺省等于 `game.advertise-host`）**，票据用它，目录里的 `rpc_host` 继续用 `game.advertise-host` | 端口映射或 NodePort 部署时这两个地址必然不同。gate 已经有同类的拆分（`advertise-port` 与 `client-port`）。这是 6.2 的接口，要转告 6.2 的负责人 |
 | Q10 | Java 版最终上不上 K8s（盘点开放问题 7） | **7.1 不决定** | compose 整栈先作为单机演示形态；7.6 再在 K8s 与「compose + 单机」之间定。7.1 交付的探针、宽限期、环境变量矩阵在两种形态下都能用 |
-| Q11 | stack 的 `XM_RUN_MODE` 缺省用 dev 还是 prod | **dev**（与 `start-slice.sh:30` 一致） | robot 的 GM 类场景和 trade 播种都需要 dev；`XM_RUN_MODE=prod docker compose … up` 可以验证生产口径 |
+| Q11 | stack 的 `GAME_RUN_MODE` 缺省用 dev 还是 prod | **dev**（与 `start-slice.sh:30` 一致） | robot 的 GM 类场景和 trade 播种都需要 dev；`GAME_RUN_MODE=prod docker compose … up` 可以验证生产口径 |
 | Q12 | AGENTS.md §4 要不要增加 CI 相关的口径 | **要加**，交付说明里单独列出，请用户过目 | 「推送后读 CI 结论」「compose / 镜像结论以 CI 为准」「新增进程模块要登记 stack.yaml」，都是以后每一批都要遵守的协作规则 |
 
 ---
@@ -1066,15 +1066,15 @@ mmorpg 侧早就有这些东西，交付说明里写「mmorpg 已有，本批 Ja
 |---|---|---|---|
 | V1 | 7.1a | 可执行位 | `git update-index --chmod=+x mvnw` 之后，`git ls-files -s mvnw` 显示 100755，且 `git diff --cached --stat` 里只有模式变化 |
 | V2 | 7.1a | 全量构建不受影响 | `./mvnw -B install` 通过，单测数不少于上一批 |
-| V3 | 7.1a | TestReport | 本机 `./mvnw test` 之后运行，汇总数与 Maven 的 `Results` 一致。在 scratch 目录里造一份失败的 XML 和 12 个失败用例，输出的 `::error` 行恰好 10 条。不带 `-Dxm.it.*` 时，`--require-it-executed` 退出码为 1，并列出 49 个类；带上本机 Redis / MySQL / Kafka 时退出码为 0 |
+| V3 | 7.1a | TestReport | 本机 `./mvnw test` 之后运行，汇总数与 Maven 的 `Results` 一致。在 scratch 目录里造一份失败的 XML 和 12 个失败用例，输出的 `::error` 行恰好 10 条。不带 `-Dgame.it.*` 时，`--require-it-executed` 退出码为 1，并列出 49 个类；带上本机 Redis / MySQL / Kafka 时退出码为 0 |
 | V4 | 7.1a | 问题匹配器的正则 | 用 `grep -E` 和 Java 的 `Pattern` 各匹配一条造出来的 `[ERROR] /x/A.java:[12,5] msg` 和 `[ERROR] Failed to execute goal …`，抽出的文件、行、消息都正确 |
 | V5 | 7.1a | 契约检查与稀疏目录 | 做一份新的 `git clone --filter=blob:none --no-checkout --depth 1`，`git sparse-checkout set` 那 5 个目录，检出 SOURCE 里记录的提交，`--check` 退出码为 0，证明这 5 个目录刚好够用。**反例**：把仓库复制一份到 scratch，改一个受管文件，用 `--repo <scratch>` 跑 `--check`，退出码为 1。漂移模式：对同一个检出加 `--commit <recorded>`，退出码为 0。都不碰真实工作区 |
-| V6 | 7.1b | 构建信息 | `./mvnw -B install -Dxm.build.commit=$(git rev-parse HEAD) -Dxm.build.contract=<SOURCE 里的 sha>`；`unzip -p xm-gate/target/xm-gate-*.jar BOOT-INF/classes/META-INF/build-info.properties` 里有 40 位的 `build.commit` 和 `build.contract`。不带 `-D` 时两者都是 `unknown` |
+| V6 | 7.1b | 构建信息 | `./mvnw -B install -Dgame.build.commit=$(git rev-parse HEAD) -Dgame.build.contract=<SOURCE 里的 sha>`；`unzip -p game-gate/target/game-gate-*.jar BOOT-INF/classes/META-INF/build-info.properties` 里有 40 位的 `build.commit` 和 `build.contract`。不带 `-D` 时两者都是 `unknown` |
 | V7 | 7.1b | 分层解包后能启动（等价于容器里的启动方式） | 对每个 Boot jar 跑 `java -Djarmode=tools -jar <jar> list-layers`，都列出 4 层。挑两个（scene-manager、login）`extract --layers`，把各层合并到一个目录，复制一份 `config-data/tables` 进去，在这个目录下执行 `java -jar app.jar`，`/actuator/health/readiness` 和 `/actuator/info` 都正常 |
 | V8 | 7.1b | JVM 参数能被接受 | `JDK_JAVA_OPTIONS="-XX:MaxRAMPercentage=60 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError" java -version` 正常，stderr 里有 `Picked up JDK_JAVA_OPTIONS` |
 | V9 | 7.1b | 新占位符（正向） | 把所有新变量设成「意思相同、字面不同」的值（如 `localhost`），跑本机切片，robot smoke / token / movement / audit 都通过 |
-| V10 | 7.1b | 新占位符（反向，证明绑定确实生效） | 每类变量各设一个必然失败的值：`XM_REDIS_ADDRESS=redis://127.0.0.1:1` 进程启动失败；`XM_MYSQL_PORT=1` 进程启动失败；gate 设 `XM_LOGIN_URL=tri://127.0.0.1:1` 时 robot smoke 登录得到 1003；`XM_SCENE_LINK_BIND_HOST=0.0.0.0` 时 `netstat` 显示 21000 监听在 0.0.0.0 |
-| V11 | 7.1b | Dubbo 绑定规则（§2.6） | 给 scene 设 `XM_ADVERTISE_HOST=<本机局域网 IP 或可解析的主机名>`。`netstat -ano` 应显示 21100 只绑在这个 IP 上（不是 0.0.0.0）；缺省 127.0.0.1 时应显示 0.0.0.0。结论回填 architecture.md §6 |
+| V10 | 7.1b | 新占位符（反向，证明绑定确实生效） | 每类变量各设一个必然失败的值：`GAME_REDIS_ADDRESS=redis://127.0.0.1:1` 进程启动失败；`GAME_MYSQL_PORT=1` 进程启动失败；gate 设 `GAME_LOGIN_URL=tri://127.0.0.1:1` 时 robot smoke 登录得到 1003；`GAME_SCENE_LINK_BIND_HOST=0.0.0.0` 时 `netstat` 显示 21000 监听在 0.0.0.0 |
+| V11 | 7.1b | Dubbo 绑定规则（§2.6） | 给 scene 设 `GAME_ADVERTISE_HOST=<本机局域网 IP 或可解析的主机名>`。`netstat -ano` 应显示 21100 只绑在这个 IP 上（不是 0.0.0.0）；缺省 127.0.0.1 时应显示 0.0.0.0。结论回填 architecture.md §6 |
 | V12 | 7.1b | 探针 | 每个进程的 `/actuator/health/readiness`、`/liveness` 都返回 UP |
 
 ### 11.3 CI 验收（逐个 job）
@@ -1092,7 +1092,7 @@ mmorpg 侧早就有这些东西，交付说明里写「mmorpg 已有，本批 Ja
 - **`:?` 生效**：it job 的第 3 步每次都会跑一遍反例（§4.4）。
 - **契约不一致判红**：在本机 scratch 上验（V5）。不为验证专门推送临时分支：推送和删除远端分支会产生噪声，也需要额外授权。
 - **IT 被静默跳过时判红**：本机验（V3）。
-- **模块漂移守卫**：本机先验证集合 A 的计算（对 `*/pom.xml` 做 `grep -l '<goal>repackage</goal>'`，结果去掉 xm-robot，应当等于 §2.1 的进程清单）。集合 B 的计算只能在 CI 上跑。6.2 落地时这个守卫会被真实地触发一次；如果 6.2 那一批漏登记，它应当判红。这一点在交付说明里写明。
+- **模块漂移守卫**：本机先验证集合 A 的计算（对 `*/pom.xml` 做 `grep -l '<goal>repackage</goal>'`，结果去掉 game-robot，应当等于 §2.1 的进程清单）。集合 B 的计算只能在 CI 上跑。6.2 落地时这个守卫会被真实地触发一次；如果 6.2 那一批漏登记，它应当判红。这一点在交付说明里写明。
 - **停机宽限期**：stack 的第 10 步。
 
 ### 11.5 怎么读 CI 结论（不需要令牌，也不需要 gh）

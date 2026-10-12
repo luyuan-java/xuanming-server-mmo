@@ -1,5 +1,5 @@
 # 集成测试门禁（批次 7.1a，docs/porting/deploy-ci-spec.md §4.4）：用 deploy/compose/infra.yaml 起真 MySQL / Redis / Kafka，
-# 跑 -Dxm.it.* 打开的全量 verify，再用 TestReport --require-it-executed 证明集成测试真的执行了（标志传错时不会「全部跳过还是绿」）。
+# 跑 -Dgame.it.* 打开的全量 verify，再用 TestReport --require-it-executed 证明集成测试真的执行了（标志传错时不会「全部跳过还是绿」）。
 # 本机没有 Docker，compose 文件除了这里不会在任何地方执行：让集成测试用它起依赖，等于每天自测一遍这个文件；
 # 依赖版本、关闭自动建 topic、Kafka 双监听也只写在 infra.yaml 一处（不另写一份 services: 服务容器）。
 # 整栈冒烟（stack job：镜像构建、整栈 up、robot、停机断言）随批次 7.1b 加进来（§4.5）。
@@ -62,7 +62,7 @@ jobs:
         run: |
           v=$(openssl rand -hex 32)
           echo "::add-mask::$v"
-          echo "XM_MYSQL_PASSWORD=$v" >> "$GITHUB_ENV"
+          echo "GAME_MYSQL_PASSWORD=$v" >> "$GITHUB_ENV"
 
       - name: compose 静态检查（含 :? 反例）
         # 这里是唯一真正执行 compose 校验的地方（本机没有 compose，spec Q3）：compose 拒绝 infra.yaml 的原因只在 job 日志里，
@@ -80,8 +80,8 @@ jobs:
             exit 1
           fi
           # 反例：缺必填秘密时 compose 必须在启动前就失败，证明 ${VAR:?} 生效
-          if env -u XM_MYSQL_PASSWORD docker compose -f "$INFRA" config -q > /dev/null 2>&1; then
-            echo "::error file=$INFRA,title=compose 秘密守卫::不设 XM_MYSQL_PASSWORD 时 config 竟然成功，\${XM_MYSQL_PASSWORD:?} 没有生效"
+          if env -u GAME_MYSQL_PASSWORD docker compose -f "$INFRA" config -q > /dev/null 2>&1; then
+            echo "::error file=$INFRA,title=compose 秘密守卫::不设 GAME_MYSQL_PASSWORD 时 config 竟然成功，\${GAME_MYSQL_PASSWORD:?} 没有生效"
             exit 1
           fi
 
@@ -111,15 +111,15 @@ jobs:
           echo "::error file=$INFRA,title=依赖没有就绪::$report"
           exit 1
 
-      - name: 构建与集成测试（mvnw verify -Dxm.it.*）
+      - name: 构建与集成测试（mvnw verify -Dgame.it.*）
         id: verify
         # 不加 -T：各模块的集成测试共用 Redis 的 DB 与同一个 broker，必须串行。
-        # 测试从环境变量读 XM_MYSQL_PASSWORD（xm.it.mysql.user 缺省 root，各自建临时库）；测试用的其它密钥由各模块 surefire 配置注入。
+        # 测试从环境变量读 GAME_MYSQL_PASSWORD（game.it.mysql.user 缺省 root，各自建临时库）；测试用的其它密钥由各模块 surefire 配置注入。
         run: >-
           ./mvnw -B -ntp -fae verify
-          -Dxm.it.redis=redis://127.0.0.1:6379
-          -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306
-          -Dxm.it.kafka=127.0.0.1:9092
+          -Dgame.it.redis=redis://127.0.0.1:6379
+          -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306
+          -Dgame.it.kafka=127.0.0.1:9092
 
       - name: 测试报告
         if: ${{ !cancelled() }}
@@ -148,4 +148,4 @@ jobs:
       - name: 停依赖并清卷
         if: ${{ always() }}
         # compose 对任何子命令都先做变量插值：秘密那一步没跑到时给个占位值，免得 down 本身因 :? 失败
-        run: XM_MYSQL_PASSWORD="${XM_MYSQL_PASSWORD:-unused}" docker compose -f "$INFRA" down -v
+        run: GAME_MYSQL_PASSWORD="${GAME_MYSQL_PASSWORD:-unused}" docker compose -f "$INFRA" down -v

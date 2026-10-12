@@ -1,19 +1,19 @@
 # 组队服务（team）移植统一规格：从 mmorpg 基线到 Java 版
 
 > **基线**：mmorpg `26ceb70ca`，与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。Java 侧以 `acc5684` 为准。
-> 写作时工作区里有一批未提交的「热关停」改动，涉及 `xm-gate/.../session/ClientDispatcher.java`、`MessageRoutes.java`、
-> `xm-discovery/.../RedisKeys.java`、`xm-gate/src/main/resources/application.yaml` 等文件。这些文件的行号按当前工作区给出，提交后可能小幅漂移，所以引用时同时写出方法名。
+> 写作时工作区里有一批未提交的「热关停」改动，涉及 `game-gate/.../session/ClientDispatcher.java`、`MessageRoutes.java`、
+> `game-discovery/.../RedisKeys.java`、`game-gate/src/main/resources/application.yaml` 等文件。这些文件的行号按当前工作区给出，提交后可能小幅漂移，所以引用时同时写出方法名。
 >
 > **路径怎么读**
 > - 不带目录的 `rules.go` / `store.go` / `scripts.go` / `service.go` / `notify.go` / `view.go` / `presence.go` / `homezone.go` / `keys.go` / `errors.go` / `server.go`，以及它们的 `*_test.go`：都在 mmorpg `go/match/internal/team/` 下。
 > - `team_battle.go`、`queue.go`、`matcher.go`：在 mmorpg `go/match/internal/logic/` 下。`playercontract.go`：在 mmorpg `go/match/internal/playercontract/` 下。
 > - `team-system.md`：mmorpg `docs/design/team-system.md`。这是设计稿，与代码冲突时以代码为准，冲突项见 §8.4。
 > - 以 `go/`、`proto/`、`cpp/`、`robot/`、`generated/` 开头的路径：在 mmorpg 下。
-> - 以 `xm-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`：在 `D:\work\xuanming-server-mmo` 下。
+> - 以 `game-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`：在 `D:\work\xuanming-server-mmo` 下。
 > - `TeamClient.cs` / `TeamViewMapper.cs` / `TeamAppearanceTransport.cs` / `TeamModels.cs`：在 `D:\work\mmorpg-client\Assets\Scripts\Game\Team\` 下。其余以 `mmorpg-client/` 开头的路径在 `D:\work\mmorpg-client` 下。
-> - `team.proto` 指 Java 同步副本 `xm-proto/src/main/proto/proto/team/team.proto`。它只比 mmorpg `proto/team/team.proto` 多第 2–4 行 java option，所以 **Java 行号 = mmorpg 行号 + 3**。
-> - `team_error_tip.proto` 指 `xm-table/src/main/proto/tip/team_error_tip.proto`；`tip_text.json` 指 `config-data/tables/tip_text.json`。
-> - Redis 键里的 `xm:` 是前缀。Java 键里的 `{...}` 是 hash tag（§1.3）。
+> - `team.proto` 指 Java 同步副本 `game-proto/src/main/proto/proto/team/team.proto`。它只比 mmorpg `proto/team/team.proto` 多第 2–4 行 java option，所以 **Java 行号 = mmorpg 行号 + 3**。
+> - `team_error_tip.proto` 指 `game-table/src/main/proto/tip/team_error_tip.proto`；`tip_text.json` 指 `config-data/tables/tip_text.json`。
+> - Redis 键里的 `game:` 是前缀。Java 键里的 `{...}` 是 hash tag（§1.3）。
 >
 > **本稿的来历**：由三份分区规格合并而成，三份分别讲数据模型与状态机、RPC 层与推送、客户端契约 / robot / 场景跟随 / Java 映射。
 > - 分区稿之间互相矛盾、或与代码不符的地方，都回到代码重新核对过。
@@ -21,9 +21,9 @@
 > - 本稿只读代码，没有改任何源文件。
 >
 > **与 pbmysql 的关系**：
-> - 用户要的「pbmysql 的 Java 版」已经由 xm-pbmysql 在批次 4.0 完成（`docs/porting/roadmap.md:57`）。
+> - 用户要的「pbmysql 的 Java 版」已经由 game-pbmysql 在批次 4.0 完成（`docs/porting/roadmap.md:57`）。
 > - 组队的权威数据全部在 Redis，没有 MySQL 表，所以不适用阶段 4「proto 形状的 MySQL 表接 pbmysql」的约定（`docs/porting/roadmap.md:50-53`）。
-> - xm-team 只读 `xm_java.player`（展示资料与 home zone）。这张表不归 xm-team 所有，仍由 MyBatis 侧维护（`docs/design/architecture.md:161`）。
+> - game-team 只读 `game.player`（展示资料与 home zone）。这张表不归 game-team 所有，仍由 MyBatis 侧维护（`docs/design/architecture.md:161`）。
 
 ---
 
@@ -56,11 +56,11 @@
 | 票据域 / gather | 只经 `BattleStarter` 端口使用，仅 StartTeamMatch 需要 | `service.go:40-60`；`team_battle.go` |
 
 **Java 侧的对应**
-- **入口**：gate 经 Dubbo 调 `ClientMessageService.handle(ClientCall) → CompletableFuture<ClientReply>`。group 等于 proto 一级目录 `team`（`xm-api/src/main/java/com/game/api/DubboGroups.java:3-19` 的现有写法；`docs/design/architecture.md:75-90`）。
-- **进程**：新模块 **xm-team**（Spring Boot + Dubbo Triple），结构照 xm-friend（`architecture.md:350-391`；路线图规定「每个服务一个进程」，`docs/porting/roadmap.md:48`）。
-  - 不并进 match：定稿时 Java 还没有 match（批次 6.4，`roadmap.md:84`），见 D1。6.4 落地后 xm-match 也是独立进程，两者经 `MatchTeamService` 往来（§5.5）。
-- **存储**：Redis（Redisson）。键经 `com.game.discovery.RedisKeys` 生成，带 `xm:` 前缀（`AGENTS.md` §3；`architecture.md:511`）。
-- **在线态与推送**：在线态取 `xm:presence` + `xm:location`，推送走 `PlayerPushes`（`architecture.md:128-147`、`:541-548`）。
+- **入口**：gate 经 Dubbo 调 `ClientMessageService.handle(ClientCall) → CompletableFuture<ClientReply>`。group 等于 proto 一级目录 `team`（`game-api/src/main/java/com/game/api/DubboGroups.java:3-19` 的现有写法；`docs/design/architecture.md:75-90`）。
+- **进程**：新模块 **game-team**（Spring Boot + Dubbo Triple），结构照 game-friend（`architecture.md:350-391`；路线图规定「每个服务一个进程」，`docs/porting/roadmap.md:48`）。
+  - 不并进 match：定稿时 Java 还没有 match（批次 6.4，`roadmap.md:84`），见 D1。6.4 落地后 game-match 也是独立进程，两者经 `MatchTeamService` 往来（§5.5）。
+- **存储**：Redis（Redisson）。键经 `com.game.discovery.RedisKeys` 生成，带 `game:` 前缀（`AGENTS.md` §3；`architecture.md:511`）。
+- **在线态与推送**：在线态取 `game:presence` + `game:location`，推送走 `PlayerPushes`（`architecture.md:128-147`、`:541-548`）。
 - **批次归属**：
   - 4.3 做名册、申请邀请、推送、场景投影与跟随（`roadmap.md:60`）。
   - 整队开战在 6.4（`roadmap.md:84`）；4.3 期间怎么处理见 §5.4。**6.4 已接（2026-10-08）**，现状见 §5.5。
@@ -68,8 +68,8 @@
 ### 0.2 消息号、请求 / 应答形状、gate 限频
 
 **数据来源**
-- 消息号只能取自 `MessageIdRegistry`（同步产物 `xm-proto/src/main/resources/contract/message_id.txt:202-216`），代码里不写数字。
-- 限频数据：`generated/tables/messagelimiter.json:207-278`。Java gate 读同一份 `config-data/tables/messagelimiter.pb`。表里没有的消息号，按缺省每秒 3 条处理（`xm-gate/.../session/MessageLimit.java:13-14`）。
+- 消息号只能取自 `MessageIdRegistry`（同步产物 `game-proto/src/main/resources/contract/message_id.txt:202-216`），代码里不写数字。
+- 限频数据：`generated/tables/messagelimiter.json:207-278`。Java gate 读同一份 `config-data/tables/messagelimiter.pb`。表里没有的消息号，按缺省每秒 3 条处理（`game-gate/.../session/MessageLimit.java:13-14`）。
 - 超频时回信封 1008，并计非法包（`ClientDispatcher.java:229-235`）。
 
 | 号 | 方法 | 方向 | 请求（`team.proto`） | 应答 | 限频 |
@@ -117,19 +117,19 @@
 - **存储记录**：`TeamRecord / TeamMemberRecord / TeamApplicationRecord / TeamInviteRecord`（:224-258）不下发客户端。
 - **Java 生成类**：
   - 包名 `com.game.proto.team`（`team.proto:2-4`）。
-  - 投影 `TeamInfo{team_id=1; leader_id=2; repeated members=3}` 和 scene 组件 `TeamId{team_id=1; membership_epoch=2}` 在包 `com.game.proto`（`xm-proto/src/main/proto/proto/common/component/team_comp.proto:11-24`）。
-  - `PlayerTeamRefreshEvent{player_id=1}` 定义在 `xm-proto/src/main/proto/proto/common/event/team_event.proto:16-18`，事件号 48（`xm-proto/src/main/resources/contract/event_id.txt:49`）。
+  - 投影 `TeamInfo{team_id=1; leader_id=2; repeated members=3}` 和 scene 组件 `TeamId{team_id=1; membership_epoch=2}` 在包 `com.game.proto`（`game-proto/src/main/proto/proto/common/component/team_comp.proto:11-24`）。
+  - `PlayerTeamRefreshEvent{player_id=1}` 定义在 `game-proto/src/main/proto/proto/common/event/team_event.proto:16-18`，事件号 48（`game-proto/src/main/resources/contract/event_id.txt:49`）。
 
 **两条形状纪律**
 1. **成功时不设 `error_message`**（`tipOf(0)` 返回 nil，`service.go:816-826`）。
    - 失败时为 `TipInfoMessage{id}`；`param≠0` 时再加 `parameters=[十进制 param]`，`param==0` 时不带 parameters。
-   - Java gate 按契约里的应答类型决定是否回包：非 `Empty` 应答一律回，哪怕 0 字节；`Empty` 应答只在 `tip_id≠0` 时回（`xm-gate/.../session/MessageRoutes.java:50-54` `hasResponse`；`ClientDispatcher.java:452-473` `replyToClient`）。
+   - Java gate 按契约里的应答类型决定是否回包：非 `Empty` 应答一律回，哪怕 0 字节；`Empty` 应答只在 `tip_id≠0` 时回（`game-gate/.../session/MessageRoutes.java:50-54` `hasResponse`；`ClientDispatcher.java:452-473` `replyToClient`）。
 2. **`TeamResponse` 尽量带调用者视图，失败也带**；只有服务端自己读失败时才不带（§3.1）。
    - 客户端靠「有没有视图」来区分「服务端读失败」与「你不在队」（`TeamClient.cs:350-372`、`:411-413`）。
 
 ### 0.3 tip 码表（team_error 段，base=4000）
 
-- **Java 写法**：`com.game.table.TeamErrorTip.team_error.kTeamXxx_VALUE`（生成类已存在于 `xm-table/target/classes/com/game/table/TeamErrorTip$team_error.class`）。
+- **Java 写法**：`com.game.table.TeamErrorTip.team_error.kTeamXxx_VALUE`（生成类已存在于 `game-table/target/classes/com/game/table/TeamErrorTip$team_error.class`）。
 - **故障分类**：team 段**只有 4030 是故障**（fault=1）。
   - 基线来源：`go/shared/generated/tip/faults.go:56`；`errors_test.go:83-90` `TestInternalIsTheOnlyFault`；`team-system.md:741`。
   - Java 没有 Tip 表的 fault 列（`config-data/tables/` 里只有 `tip_text.json`），所以 Java 只能写死「team 段故障 = {4030}」，并用测试钉住。
@@ -183,7 +183,7 @@
 **parameters 的口径**
 - 只放十进制的 player_id（`service.go:816-826`）。
 - 客户端只对 4024 / 4025 / 4026 和 MATCH_FAILED 解析 `parameters[0]`，用来给成员行着色（`TeamClient.cs:92-93`、`:337-341`、`:435`、`:521`、`:595-597`）。
-- **Java 不得往 team 的 tip 里塞文字参数**。friend 的 `failure` 会塞 `"service overloaded"` 这类文字（`xm-friend/.../dispatch/FriendDispatcher.java:75-80`、`:164`），team 不能照抄。
+- **Java 不得往 team 的 tip 里塞文字参数**。friend 的 `failure` 会塞 `"service overloaded"` 这类文字（`game-friend/.../dispatch/FriendDispatcher.java:75-80`、`:164`），team 不能照抄。
 
 ### 0.4 配置与常量
 
@@ -224,8 +224,8 @@
 | 项 | 值 | 出处 |
 |---|---|---|
 | gate 单包上限 | 整个 ClientRequest 1 KB | `ClientDispatcher.java:76` |
-| gate 单会话、单后端域排队上限 | 64，超出即断开 | `xm-gate/src/main/resources/application.yaml:61`；`ClientDispatcher.java:329-341` `enqueueBackend` |
-| gate 的 Dubbo consumer 超时 | 5000 ms | `xm-gate/src/main/resources/application.yaml:79` |
+| gate 单会话、单后端域排队上限 | 64，超出即断开 | `game-gate/src/main/resources/application.yaml:61`；`ClientDispatcher.java:329-341` `enqueueBackend` |
+| gate 的 Dubbo consumer 超时 | 5000 ms | `game-gate/src/main/resources/application.yaml:79` |
 | Redisson 单条命令最坏阻塞 | 4.2 s，缺省 `retry-attempts=1` | `architecture.md:474-476` |
 
 ### 0.5 全局规则（所有 RPC 适用）
@@ -310,10 +310,10 @@
 
 | 基线键（`keys.go`） | 类型与值 | TTL | 写者 / 读者 | Java 建议（经 `RedisKeys`） |
 |---|---|---|---|---|
-| `team:rec:<tid>`（:37-40） | hash：`ver` 是十进制，首次为 1，每次提交严格 +1；`pb` 是 TeamRecord 字节（字段名见 :25-29） | 每次提交 EXPIRE 86400（`scripts.go:96-97`）；S_TOUCH 续期（:204）；解散时 DEL（:94） | 写：S_COMMIT / S_TOUCH。读：team；C++ scene 只做 `EXISTS`（`cpp/libs/services/scene/player/system/player_team.cpp:39`）；合服 preflight | `xm:{team}:rec:<tid>` |
-| `team:<tid>`（:42-45） | string：`TeamInfo` pb，由 `projectionOf` 生成，members 按 join_seq 升序只为确定性（`store.go:904-911`） | 每次提交 `SET … EX 86400`（`scripts.go:98`）；S_TOUCH 发现缺失时重写（:205-209）；解散时 DEL | 写：S_COMMIT / S_TOUCH。读：C++ scene `GET`（`player_team.cpp:38`） | `xm:{team}:info:<tid>`（改名，避免与其他段混淆） |
-| `team:player:<pid>`（:47-50） | hash：`tid` 十进制，无队为 `"0"`；`epoch` 十进制（字段名见 :31-35） | 每次 setIdx 都 EXPIRE 86400（`scripts.go:88`）。**离队不删键，只把 tid 置 0**（`team-system.md:442`） | 写：S_COMMIT / S_HEAL_ORPHAN / S_TOUCH。读：team；C++ scene `HMGET tid epoch`（`player_team.cpp:37`、`:194`） | `xm:{team}:player:<pid>` |
-| `team:invite:<pid>`（:52-55） | zset：member = tid 十进制，score = `expire_at_ms` | 每次 ZADD 后 EXPIRE 3600（`scripts.go:120-122`） | 写：S_COMMIT 的 ZADD / ZREM、S_INVITE_LIST、S_INVITE_PRUNE。读：team | `xm:{team}:invite:<pid>` |
+| `team:rec:<tid>`（:37-40） | hash：`ver` 是十进制，首次为 1，每次提交严格 +1；`pb` 是 TeamRecord 字节（字段名见 :25-29） | 每次提交 EXPIRE 86400（`scripts.go:96-97`）；S_TOUCH 续期（:204）；解散时 DEL（:94） | 写：S_COMMIT / S_TOUCH。读：team；C++ scene 只做 `EXISTS`（`cpp/libs/services/scene/player/system/player_team.cpp:39`）；合服 preflight | `game:{team}:rec:<tid>` |
+| `team:<tid>`（:42-45） | string：`TeamInfo` pb，由 `projectionOf` 生成，members 按 join_seq 升序只为确定性（`store.go:904-911`） | 每次提交 `SET … EX 86400`（`scripts.go:98`）；S_TOUCH 发现缺失时重写（:205-209）；解散时 DEL | 写：S_COMMIT / S_TOUCH。读：C++ scene `GET`（`player_team.cpp:38`） | `game:{team}:info:<tid>`（改名，避免与其他段混淆） |
+| `team:player:<pid>`（:47-50） | hash：`tid` 十进制，无队为 `"0"`；`epoch` 十进制（字段名见 :31-35） | 每次 setIdx 都 EXPIRE 86400（`scripts.go:88`）。**离队不删键，只把 tid 置 0**（`team-system.md:442`） | 写：S_COMMIT / S_HEAL_ORPHAN / S_TOUCH。读：team；C++ scene `HMGET tid epoch`（`player_team.cpp:37`、`:194`） | `game:{team}:player:<pid>` |
+| `team:invite:<pid>`（:52-55） | zset：member = tid 十进制，score = `expire_at_ms` | 每次 ZADD 后 EXPIRE 3600（`scripts.go:120-122`） | 写：S_COMMIT 的 ZADD / ZREM、S_INVITE_LIST、S_INVITE_PRUNE。读：team | `game:{team}:invite:<pid>` |
 
 **Java 的键设计（D2）**
 - **hash tag 统一用 `{team}`**。
@@ -322,7 +322,7 @@
   - Java 现在也是单实例（`architecture.md:511`），所以这一条眼下只是为将来预留，见 §9.3 的待决项。
 - **对照**：好友按玩家打 tag（`RedisKeys.java:74-85`），聊天用 `{world}`（:110-113）。组队无法按玩家打 tag，因为 S_COMMIT 会同时碰到任意玩家的键。
 - **数字格式**：一律用 `Long.toUnsignedString`（`RedisKeys.java:45-47` 的惯例）。
-- **字段名共享**：`ver / pb / tid / epoch` 这几个 hash 字段名，是 xm-team（写者）与 xm-scene（读者）之间的进程间契约。建议把常量与读脚本一起放进 xm-discovery（§6.10）。
+- **字段名共享**：`ver / pb / tid / epoch` 这几个 hash 字段名，是 game-team（写者）与 game-scene（读者）之间的进程间契约。建议把常量与读脚本一起放进 game-discovery（§6.10）。
 
 ### 1.4 epoch 规则
 
@@ -1413,8 +1413,8 @@ MGET 失败或返回长度不符时只记日志，按「全部缺失」处理，
 
 Java 现状：
 - 首批不做战斗（`architecture.md:597-603`），整队开战排在 6.4（`roadmap.md:83`）。
-- Java 有位置记录 `xm:location`（`PlayerLocationDirectory`；`scene_node_id` 是 uint32，没有「空串」语义，见 `xm-discovery/src/main/proto/xm/discovery/location.proto:14-23`），但没有 battle lock，也没有票据。
-- **以上是 4.3 定稿时的现状**。之后：战斗锁随 6.3 落地（`RedisKeys.battleLock`，经 `BattleLockReader` 读），票据、gather 与整队开战端口随 6.4 落地（xm-match），见 §5.5。
+- Java 有位置记录 `game:location`（`PlayerLocationDirectory`；`scene_node_id` 是 uint32，没有「空串」语义，见 `game-discovery/src/main/proto/game/discovery/location.proto:14-23`），但没有 battle lock，也没有票据。
+- **以上是 4.3 定稿时的现状**。之后：战斗锁随 6.3 落地（`RedisKeys.battleLock`，经 `BattleLockReader` 读），票据、gather 与整队开战端口随 6.4 落地（game-match），见 §5.5。
 
 ### 5.4 Java 4.3 批次的处理（D11）
 
@@ -1428,7 +1428,7 @@ Java 现状：
   3. 非队长 → 4018。
   4. 4023 不可达，因为占位版永不加锁。
   5. 其余一律回 **4027 kTeamDungeonNotOpen** + 同源视图（IDLE）。
-- **指标**：`xm_team_matches_total{outcome=rejected}`。不加锁、不建票、不推 MATCH_*。
+- **指标**：`game_team_matches_total{outcome=rejected}`。不加锁、不建票、不推 MATCH_*。
 - **理由**：
   - 这正是基线在「该副本未配置组队人数」时的真实路径（`team_battle_test.go:240`）。
   - 客户端只弹「该副本未开放组队」，不停用组队（`TeamClient.cs:327`、`:411-440`）。
@@ -1444,31 +1444,31 @@ Java 现状：
 
 ### 5.5 6.4 要补齐的清单（已补齐，2026-10-08）
 
-原清单五条都已落地；设计与跨进程契约的正文在 `docs/porting/match-spec.md` §7.3–§7.6，这里只记 xm-team 一侧的现状（以代码为准）。
+原清单五条都已落地；设计与跨进程契约的正文在 `docs/porting/match-spec.md` §7.3–§7.6，这里只记 game-team 一侧的现状（以代码为准）。
 
-**1. 开战端口：`BattleStarter` 的五个方法 → xm-match 的四方法 Dubbo 接口**
+**1. 开战端口：`BattleStarter` 的五个方法 → game-match 的四方法 Dubbo 接口**
 
-- 跨进程接口 `com.game.api.MatchTeamService`（xm-api，group `match`，xm-match 提供），消息在 `xm/api/match_control.proto`。基线的 `TeamSizeFor` + `MatchLockTTLSeconds` + `TicketBlocked` 合成一次 `checkTeamMatch`
+- 跨进程接口 `com.game.api.MatchTeamService`（game-api，group `match`，game-match 提供），消息在 `game/api/match_control.proto`。基线的 `TeamSizeFor` + `MatchLockTTLSeconds` + `TicketBlocked` 合成一次 `checkTeamMatch`
   （人数检查 + 逐成员预检 + 回开战锁时长），`CreateMatchedTickets` → `createTeamTickets`，`RunGather` → `runTeamGather`，另加一个基线没有的 `releaseTeamTickets`（跨进程后建票的回包可能丢失，要能按票号回滚）。
-- xm-team 一侧的端口 `match.TeamBattlePort`（四个方法，与上面一一对应）：
+- game-team 一侧的端口 `match.TeamBattlePort`（四个方法，与上面一一对应）：
   - `checkTeamMatch(configId, roster, deadline) → Check(code, param, zones, lockTtlSeconds)`：`code` 已翻译成 team 段 tip（0 / 4027 / 4028 / 4024 / 4025 / 4026 / 4030）；
-  - `createTeamTickets(configId, teamId, roster, zones, ticketIds, deadline) → Created | Failed(playerId) | Unknown(why)`：票号由 xm-team 每人生成一个 UUID；
+  - `createTeamTickets(configId, teamId, roster, zones, ticketIds, deadline) → Created | Failed(playerId) | Unknown(why)`：票号由 game-team 每人生成一个 UUID；
   - `releaseTeamTickets(ticketIds, deadline) → boolean`：只用于建票结果不明、且还没发出 gather 的情形；
   - `runTeamGather(configId, teamId, roster, ticketIds, lockTtlSeconds) → CompletionStage<Gather(ok, outcome, battleId)>`：长挂调用，不阻塞 worker。
   前三个阻塞且从不抛（调不通、超出预算、应答缺字段都折成返回值里的「故障 / 结果不明」）。
 - 生产实现 `match.MatchTeamBattle`（Dubbo 客户端）；占位实现 `NoTeamBattle` 已删。引用的装配在 `TeamDubboConfiguration`：`group = match`、`retries = 0`（Dubbo 缺省的 failover 会重发建票与 gather）、`check = false`
-  （xm-match 不在时本进程照常启动，211 回 4030）、直连 `xm.dubbo.match-url`（缺省 `tri://127.0.0.1:20888`，nacos profile 置空走注册中心）。
-- **调用纪律**：前三个方法每跳的调用级超时 = min(3000 ms, 剩余请求预算)，**同一个值**经附件 `xm-budget-ms` 带给 xm-match 作它的本地截止（带整请求的剩余预算时，迟到的建票会在本端已判「结果不明」并回滚之后照常写票）；
+  （game-match 不在时本进程照常启动，211 回 4030）、直连 `game.dubbo.match-url`（缺省 `tri://127.0.0.1:20888`，nacos profile 置空走注册中心）。
+- **调用纪律**：前三个方法每跳的调用级超时 = min(3000 ms, 剩余请求预算)，**同一个值**经附件 `game-budget-ms` 带给 game-match 作它的本地截止（带整请求的剩余预算时，迟到的建票会在本端已判「结果不明」并回滚之后照常写票）；
   剩余预算 ≤ 0 时不发。`runTeamGather` 的调用级超时 = `lock_ttl_seconds × 1000`，不带预算附件，另加晚 2 s 的本地兜底。应答枚举的 `UNSPECIFIED`、不认识的值、空应答、future 异常完成一律按传输失败；
   `checkTeamMatch` 回 OK 时还要校验 zones 覆盖名单、锁时长在 [1, 110] 秒。
 
 **2. 预检顺序与分工**
 
-- 顺序不变：按名单顺序逐人「在线 → 战斗锁（读失败按在战斗中）→ 位置（`xm:location`，状态 `o` 且节点号 ≠ 0）→ 票据（先按排队的规则自愈）」，第一个不满足的人即为结论。
-- **预检整个在 xm-match 做**（`MemberPrecheck`），xm-team 只映射结论、不另读战斗锁：拆开做会改变「谁先被报出来」这个客户端可见结果（例：成员 1 有在途票、成员 2 离线，基线回 4026[成员 1]）。
-  所以 4025 由 xm-match 读战斗锁（`BattleLockReader`，咨询性读，权威在 scene 的备战写锁）给出；`TeamConfiguration` 里的 `BattleLockReader` bean 仍只给视图的 `in_battle` 用。
+- 顺序不变：按名单顺序逐人「在线 → 战斗锁（读失败按在战斗中）→ 位置（`game:location`，状态 `o` 且节点号 ≠ 0）→ 票据（先按排队的规则自愈）」，第一个不满足的人即为结论。
+- **预检整个在 game-match 做**（`MemberPrecheck`），game-team 只映射结论、不另读战斗锁：拆开做会改变「谁先被报出来」这个客户端可见结果（例：成员 1 有在途票、成员 2 离线，基线回 4026[成员 1]）。
+  所以 4025 由 game-match 读战斗锁（`BattleLockReader`，咨询性读，权威在 scene 的备战写锁）给出；`TeamConfiguration` 里的 `BattleLockReader` bean 仍只给视图的 `in_battle` 用。
 - 映射：`DUNGEON_NOT_OPEN → 4027`、`SIZE_EXCEEDED → 4028`、`MEMBER_OFFLINE → 4024[pid]`、`MEMBER_IN_BATTLE → 4025[pid]`、`MEMBER_NOT_READY → 4026[pid]`；`INTERNAL`、调不通、超出请求预算、应答不可信 → 4030。
-  一律带本轮 S_READ 的同源视图。组队人数的配置（`pve-team-size-by-config-id`）在 xm-match，xm-team 不配。
+  一律带本轮 S_READ 的同源视图。组队人数的配置（`pve-team-size-by-config-id`）在 game-match，game-team 不配。
 
 **3. 开战锁：钉版本提交与「提交结果未知」的补偿**
 
@@ -1482,21 +1482,21 @@ Java 现状：
 - `TeamStore.endMatch`：110 s 单调截止（`MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS`）、每轮 2 s 的独立预算、50 ms 起翻倍到 1 s 的退避加 ±20% 抖动；终止原因 `EndMatchStop`（`RELEASED / RECORD_MISSING / TOKEN_MISMATCH / LOCK_EXPIRED / DEADLINE`，
   另有 Java 独有的 `INTERRUPTED`：停机时等不完的清锁被中断即停，锁靠自然过期）。
 - `TeamService.finishMatch`：清锁提交成功 → 按提交推全员（含发起人）MATCH_ENDED / MATCH_FAILED；没有提交（锁已被清 / 重新加锁 / 自然过期 / 截止）→ 仍尽力给当前队员推一次当前视图与结果原因（`TeamPushes.publishMatchView` → `pushMatchView`），保证客户端不停在 STARTING。
-- 收尾都在新增的有界线程池 `team-match-end` 上跑（`xm.team.match-end-threads = 4`、`xm.team.match-end-queue-capacity = 1024`，启动校验必须为正）；一次收尾最坏阻塞 110 s；队列满时放弃这次收尾并记 ERROR，锁靠自然过期。
+- 收尾都在新增的有界线程池 `team-match-end` 上跑（`game.team.match-end-threads = 4`、`game.team.match-end-queue-capacity = 1024`，启动校验必须为正）；一次收尾最坏阻塞 110 s；队列满时放弃这次收尾并记 ERROR，锁靠自然过期。
   关闭次序：请求池 → 收尾池 → 推送池，各等 10 s。gather 的回调在 Dubbo 的线程上只做定性、计数与投递。
-- **gather 结果不明**（xm-match 中途退出、网络分区、调用超时）：计 `gather_unknown`，按失败收尾（推 MATCH_FAILED），**不退票**——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈。
+- **gather 结果不明**（game-match 中途退出、网络分区、调用超时）：计 `gather_unknown`，按失败收尾（推 MATCH_FAILED），**不退票**——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈。
 - **本进程优雅停机时**（`TeamShutdown`：`ContextClosedEvent` 监听器，次序排在 Dubbo 的监听器之前，置一个停机标志）：之后才异常完成的 gather 结果只计 `gather_unknown`、记 WARN，不清锁、不推 MATCH_FAILED，
   锁靠自然过期（最长 101 s）——与进程崩溃一致（§5.2）。正常到达的结果在停机中照常收尾。
 
-**5. `in_battle` 与跟随的战斗守卫**：批次 6.3 已做（视图的 `in_battle` 与 scene 组队跟随的战斗守卫，见 §6.7、§6.10 第 5 条与 D10）；整队开战预检的 4025 随 6.4 由 xm-match 给出（上面第 2 点）。
+**5. `in_battle` 与跟随的战斗守卫**：批次 6.3 已做（视图的 `in_battle` 与 scene 组队跟随的战斗守卫，见 §6.7、§6.10 第 5 条与 D10）；整队开战预检的 4025 随 6.4 由 game-match 给出（上面第 2 点）。
 
 **客户端可见的推送**（§2.5 的 Reason / Actor 与 §4.4 的收件人表不变）：除发起人外的成员收 MATCH_STARTED；gather 成功后全员（含发起人）收 MATCH_ENDED；失败收 MATCH_FAILED——建票失败带 tip 4026[pid]，gather 失败与结果不明不带 tip。
 
-**指标**：`xm_team_matches_total{outcome}` 在原有的 rejected / internal / unknown_code 之外新增 `success / gather_failed / ticket_failed / gather_unknown`，一次 211 恰好计一次；线程池标准指标 `executor_*` 新增 `name=team-match-end`。
+**指标**：`game_team_matches_total{outcome}` 在原有的 rejected / internal / unknown_code 之外新增 `success / gather_failed / ticket_failed / gather_unknown`，一次 211 恰好计一次；线程池标准指标 `executor_*` 新增 `name=team-match-end`。
 
 **测试与 robot**：`TeamServiceTest`（用例在 `TeamMatchScenarios`，内存后端）与 `TeamMatchRedisIntegrationTest`（同一批用例跑真 Redis）、`MatchTeamBattleTest`、`MatchTeamBattleLoopbackTest`（真 Triple 回环）、`TeamDubboConfigurationTest`、
 `TeamBudgetConstraintTest`、`TeamConfigurationTest`、`TeamStoreTest` / `TeamStoreIntegrationTest` 里开战锁与 EndMatch 的用例。robot `team` 场景的开战段（拒绝码 4018 / 4027 / 4026[B]、S7、S8）见 match-spec §15.5。
-残余风险与遗留登记在 match-spec 文末的实现记录里（xm-team 一段）。
+残余风险与遗留登记在 match-spec 文末的实现记录里（game-team 一段）。
 
 ---
 
@@ -1506,30 +1506,30 @@ Java 现状：
 
 | 组件 | Java | 依据 / 先例 |
 |---|---|---|
-| 进程 | `xm-team`（Spring Boot + Dubbo Triple）。Dubbo 端口 **20885**，管理端口 **18109**。已占用：20881 login、20882 scene-manager、20883 friend、20884 chat；18101–18108 | `xm-*/src/main/resources/application.yaml` 的端口；`tools/local/start-slice.sh:49-55` |
+| 进程 | `game-team`（Spring Boot + Dubbo Triple）。Dubbo 端口 **20885**，管理端口 **18109**。已占用：20881 login、20882 scene-manager、20883 friend、20884 chat；18101–18108 | `game-*/src/main/resources/application.yaml` 的端口；`tools/local/start-slice.sh:49-55` |
 | Dubbo group | `DubboGroups.TEAM = "team"` | `DubboGroups.java:7-19` |
-| 提供方 | `TeamClientMessageService implements ClientMessageService`，`@DubboService(group=TEAM)`。`sessionClosed` / `abandonEnter` 直接回 Ack（进程无状态） | `xm-friend/.../FriendClientMessageService.java:18-40` |
-| 鉴权 | xm-team 必须要求 `XM_DUBBO_SECRET`，缺失即拒绝启动（调用方鉴权过滤器） | `architecture.md:91-102` |
+| 提供方 | `TeamClientMessageService implements ClientMessageService`，`@DubboService(group=TEAM)`。`sessionClosed` / `abandonEnter` 直接回 Ack（进程无状态） | `game-friend/.../FriendClientMessageService.java:18-40` |
+| 鉴权 | game-team 必须要求 `GAME_DUBBO_SECRET`，缺失即拒绝启动（调用方鉴权过滤器） | `architecture.md:91-102` |
 | 派发 | `dispatch/TeamDispatcher` + `TeamWorkerPool`（固定线程 + 有界队列 + AbortPolicy） | `FriendDispatcher.java:93-126`、`:138-194`；`FriendWorkerPool.java:23-38` |
-| 预算 | `Deadline`（受理时刻 + 3500 ms）。建议把 `com.game.friend.support.Deadline` 抽到 xm-common，team 是第二个用户 | `xm-friend/.../support/Deadline.java:12-58` |
+| 预算 | `Deadline`（受理时刻 + 3500 ms）。建议把 `com.game.friend.support.Deadline` 抽到 game-common，team 是第二个用户 | `game-friend/.../support/Deadline.java:12-58` |
 | 规则 | `rules/TeamRules`：纯函数，输入 `(Op, TeamRecord, nowMs, Map<Long,SessionState>, RuleConfig)`，输出 `Decision`。不读墙钟。用领域对象 + `XxxService` 命名，不用 ECS 风格 | `rules.go`；`architecture.md:436-437` |
 | 存储 | `store/TeamStore` 接口 + `RedissonTeamStore`（七段 Lua，`evalAsync`）；Mutate 循环、修复、自由读照 §1.7 | `store.go`；`scripts.go` |
 | 视图 | `view/TeamViews`：纯函数，三个同源入口 | `view.go` |
 | 在线 / 资料 | `presence/TeamSessions`（规则用的四态，§6.6）、`presence/TeamDisplay`（展示缓存，§6.7） | `presence.go` |
-| 推送 | `push/TeamPushes`：包一层 `PlayerPushes`，按批串行 | `xm-discovery/.../presence/PlayerPushes.java:56-108` |
+| 推送 | `push/TeamPushes`：包一层 `PlayerPushes`，按批串行 | `game-discovery/.../presence/PlayerPushes.java:56-108` |
 | 发号 | `id/TeamIds`：`Snowflake` + `NodeIdLease`，新增 `NodeTypes.TEAM="team"`，作用域 0（全服） | `NodeTypes.java:8-24`；`PlayerIdGenerator.java:14-32`；`SceneNode.java:480-491` |
 | 指标 | `metrics/TeamMetrics`（§7） | `FriendMetrics` |
-| 开战端口 | `match/TeamBattlePort`；4.3 实现为 `NoTeamBattle`，`teamSizeFor → 0`。**6.4 起**是四个方法的端口，生产实现 `match/MatchTeamBattle`（调 xm-match 的 `MatchTeamService`），装配在 `TeamDubboConfiguration`；另有停机标志 `TeamShutdown` 与收尾池 `team-match-end` | §5.4、§5.5 |
-| scene 侧 | xm-discovery 新增 `team/TeamMembershipReader`（只读）；xm-scene 新增 `team/TeamFollow` | §6.10 |
+| 开战端口 | `match/TeamBattlePort`；4.3 实现为 `NoTeamBattle`，`teamSizeFor → 0`。**6.4 起**是四个方法的端口，生产实现 `match/MatchTeamBattle`（调 game-match 的 `MatchTeamService`），装配在 `TeamDubboConfiguration`；另有停机标志 `TeamShutdown` 与收尾池 `team-match-end` | §5.4、§5.5 |
+| scene 侧 | game-discovery 新增 `team/TeamMembershipReader`（只读）；game-scene 新增 `team/TeamFollow` | §6.10 |
 
 ### 6.2 gate 接入（照 friend / chat）
 
 - **路由**：`MessageRoutes.SERVICE_BACKENDS` 加一行 `"ClientPlayerTeam" → DubboGroups.TEAM`（`MessageRoutes.java:28-31`）。203 / 213 / 215 的应答类型是 Empty，`hasResponse=false`（:50-54）。
-- **Dubbo 引用**：`GateConfiguration` 加 `@DubboReference(group=TEAM, check=false, url="${xm.dubbo.team-url:}", methods=@Method(name="handle", retries=0))`（先例 `GateConfiguration.java:77-97`），并放进 backends Map（:126-127）。
+- **Dubbo 引用**：`GateConfiguration` 加 `@DubboReference(group=TEAM, check=false, url="${game.dubbo.team-url:}", methods=@Method(name="handle", retries=0))`（先例 `GateConfiguration.java:77-97`），并放进 backends Map（:126-127）。
   - 写路径不幂等，必须 `retries=0`。
 - **配置**：
-  - `xm-gate/src/main/resources/application.yaml:50-54` 加 `team-url: tri://127.0.0.1:20885`；nacos profile 置空。
-  - `start-slice.sh` / `stop-slice.sh` 的 `SERVICES` 加 `"xm-team 20885"`。
+  - `game-gate/src/main/resources/application.yaml:50-54` 加 `team-url: tri://127.0.0.1:20885`；nacos profile 置空。
+  - `start-slice.sh` / `stop-slice.sh` 的 `SERVICES` 加 `"game-team 20885"`。
 - **按会话、按域的在途队列**是现成机制（`ClientDispatcher.java:257-261`、`:329-350`）：
   - team 请求之间串行，保证写后读；
   - 不占 login / scene 的 `inFlight`；
@@ -1560,7 +1560,7 @@ Java 现状：
 ### 6.4 线程、预算、重试
 
 - **线程**：
-  - Dubbo 线程只投递，处理在 `team-worker` 有界池上执行（缺省 16 线程 / 1024 队列，同 friend，`xm-friend/src/main/resources/application.yaml:73-74`）。
+  - Dubbo 线程只投递，处理在 `team-worker` 有界池上执行（缺省 16 线程 / 1024 队列，同 friend，`game-friend/src/main/resources/application.yaml:73-74`）。
   - 所有 Redis 调用都用 async，并在工作线程上 `deadline.await`。
   - MySQL（资料、home zone）只在工作线程上执行（`AGENTS.md` §3）。
 - **预算**：
@@ -1581,12 +1581,12 @@ Java 现状：
 
 ### 6.5 Redis 键与 Lua 的落地
 
-- **键**：在 `RedisKeys` 新增 `teamRecord(tid)` / `teamInfo(tid)` / `teamPlayer(pid)` / `teamInvite(pid)`，形如 `xm:{team}:rec:<tid>`（§1.3，D2）。
+- **键**：在 `RedisKeys` 新增 `teamRecord(tid)` / `teamInfo(tid)` / `teamPlayer(pid)` / `teamInvite(pid)`，形如 `game:{team}:rec:<tid>`（§1.3，D2）。
   - hash 字段名 `ver / pb / tid / epoch` 不变。
   - TTL 与阈值同基线：空闲 86400 s、续期阈值 43200 s、邀请反查 ZSET 3600 s。
 - **脚本**：七段 Lua 逐字照搬语义，包括 J / K 判定的 `"0"` 差异与 IA 上限的判定时机（§8.1 第 1、2 条）。
 - **编解码**：
-  - recPb / projPb 是任意字节。好友脚本用的是 `StringCodec`（`xm-friend/.../directory/RedissonDirectoryRedis.java:33`），按 UTF-8 处理会破坏这些字节。
+  - recPb / projPb 是任意字节。好友脚本用的是 `StringCodec`（`game-friend/.../directory/RedissonDirectoryRedis.java:33`），按 UTF-8 处理会破坏这些字节。
   - 组队脚本一律用 `ByteArrayCodec`：参数全部是 `byte[]`，数字写成 ASCII 十进制。
   - 返回值按 MULTI 解码：整数是 `Long`，字符串是 `byte[]`；空串解析为 0，同 `parseUint`。
   - 先例：`PlayerPresenceDirectory` 的脚本用的就是 ByteArrayCodec（`PlayerPresenceDirectory.java:105-107`）。
@@ -1598,18 +1598,18 @@ Java 现状：
   - player_id / team_id 一律用 `Long.toUnsignedString` / `Long.parseUnsignedLong`。
   - 排序中的 id 比较用 `Long.compareUnsigned`，join_seq 用 `Integer.compareUnsigned`，否则在大值上会与 Go 的顺序不同。
 - **记录与投影的 proto**（D18）：
-  - 建议用 Java 自有的 proto：`TeamRecord` 及三个子记录放 xm-team，`TeamInfo` 投影放 xm-discovery（写者 xm-team 与读者 xm-scene 都依赖它）。
+  - 建议用 Java 自有的 proto：`TeamRecord` 及三个子记录放 game-team，`TeamInfo` 投影放 game-discovery（写者 game-team 与读者 game-scene 都依赖它）。
   - 形状与同步来的 `team.proto:224-258` / `team_comp.proto:19-24` 相同，但不依赖契约同步产物。
   - 先例：friend 的表定义用的是 Java 自有 proto（`PARITY.md:97` 的 ⑧）。
 
 ### 6.6 在线态映射（替代 `player:session`，D3）
 
-Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 在断线时就删掉，没有 DISCONNECTING 状态（`architecture.md:132-140`）。
+Java 的 `game:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 在断线时就删掉，没有 DISCONNECTING 状态（`architecture.md:132-140`）。
 
 | Java 观察到的情况 | 映射为 |
 |---|---|
-| `xm:presence:{pid}` 存在、能解码、玩家号一致 | **Online** |
-| presence 不存在，且 `xm:location:{pid}` 的 `s` 为 `l`（30 s 重连租约）或 `o`（scene 认为在线，但 presence 还没写或已丢） | **Present** |
+| `game:presence:{pid}` 存在、能解码、玩家号一致 | **Online** |
+| presence 不存在，且 `game:location:{pid}` 的 `s` 为 `l`（30 s 重连租约）或 `o`（scene 认为在线，但 presence 还没写或已丢） | **Present** |
 | presence 不存在，且 location 不存在或 `s=x`（登出墓碑） | **Absent** |
 | 该玩家任一读失败、条目损坏、身份不符 | **Unknown**，逐成员 fail-closed |
 
@@ -1635,15 +1635,15 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
 ### 6.7 展示资料与 home zone（D4、D5）
 
 **展示资料**
-- 读 `xm_java.player`：`SELECT player_id, name, level, class_id, gender, appearance_id, zone_id … WHERE player_id IN (...)`，每批 64 人（`xm-friend/.../profile/PlayerProfiles.java:33-36`、`:92-117`）。
+- 读 `game.player`：`SELECT player_id, name, level, class_id, gender, appearance_id, zone_id … WHERE player_id IN (...)`，每批 64 人（`game-friend/.../profile/PlayerProfiles.java:33-36`、`:92-117`）。
 - 失败语义取 `load`：某批失败时记 ERROR、填零值，**不让 RPC 失败**，与 `presence.go:25-27` 一致。
 - 与基线的差别：name 恒非空；新角色的 level 是 1；level 到存盘才更新（同 friend D4）。
-- 建议把 `PlayerProfiles` 迁到 xm-player-store（它拥有 player 表），由 friend 和 team 共用。
+- 建议把 `PlayerProfiles` 迁到 game-player-store（它拥有 player 表），由 friend 和 team 共用。
 - 一次视图构建只读一份，覆盖 `rosterIds`：最多 5 名成员 + 10 名申请人 + 10 名被邀请人 + 邀请人。
 
 **in_battle**：Java 在 6.3 之前没有战斗锁，**恒为 false**（D10）。**批次 6.3 已接上**（2026-10-06，D10 收口）：
 
-- **口径**：回合制战斗锁 `xm:battle:{<pid>}:lock`（`RedisKeys.battleLock`，scene 写；键与脚本见 scene-battle-spec §7.2）**存在即为 true**，只看锁在不在，不看锁里的阶段也不看 battle_id。
+- **口径**：回合制战斗锁 `game:battle:{<pid>}:lock`（`RedisKeys.battleLock`，scene 写；键与脚本见 scene-battle-spec §7.2）**存在即为 true**，只看锁在不在，不看锁里的阶段也不看 battle_id。
   锁从备战起就在，到结算销账（或锁过期 / reaper 判废）才没——备战中、战斗中、已结算待销账（含结算后续锁的 180 s）都显示为在战斗；只有待结算记录或已销账墓碑、没有锁时为 false。
 - **读法**：`TeamDisplay` 多一个依赖 `battleLocks`（生产 = `BattleLockReader::existsAll`，`TeamConfiguration` 里的 bean）。一次视图构建只读一次，范围同展示资料——全体 `rosterIds`
   （成员、申请人、被邀请人、邀请人，最多 26 人；基线 `loadDisplay` 的 InBattle MGET 也是对全体 id 做的，每个 `TeamMemberView` 都带 `in_battle`）；空名单不读。
@@ -1659,7 +1659,7 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
   运行证据见 scene-battle-spec 末尾的实现记录。robot 的端到端验证放在 `battle-settle` 第 12 步（不在 `team` 场景：它没有 battle 管理口客户端）；写本段时还没有切片证据，切片上的结论见 scene-battle-spec 末尾的「最终验证」。
 
 **home zone**
-- 取 `player.zone_id`，即建角时 login 所在的 zone（`xm-player-store/src/main/resources/db/xm-player-schema.sql:14`；`xm-login/.../CreatePlayerHandler.java:262`）。
+- 取 `player.zone_id`，即建角时 login 所在的 zone（`game-player-store/src/main/resources/db/game-player-schema.sql:14`；`game-login/.../CreatePlayerHandler.java:262`）。
 - 查不到行或 `zone_id=0` → 4019；SQL 出错或预算用完 → 4030。
 - 查询超时取 `min(1500 ms, 剩余预算)`。每次最多查 2 个 id。
 
@@ -1667,7 +1667,7 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
 
 - **下发形态**：`MessageContent{message_id=213 | 215 | 203, serialized_message}`，id=0。消息号取 `registry.requireId("ClientPlayerTeam", "NotifyTeamSnapshot" | "NotifyTeamInvite" | "NotifyTeamEvent")`。
 - **收件人、内容、caller 排除、不可构建则跳过**：全部照 §4.4–§4.6。
-- **结局映射**（照 `xm-friend/.../service/FriendService.java:415-425`）：
+- **结局映射**（照 `game-friend/.../service/FriendService.java:415-425`）：
 
   | `PlayerPushes` 结局 | 指标 outcome |
   |---|---|
@@ -1679,11 +1679,11 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
 
 ### 6.9 team_id 发号（D15）
 
-- 雪花号，worker 取 xm-team 的全服租约（`NodeTypes.TEAM`，作用域 0；理由同 `NodeTypes.SCENE_GUID`，`NodeTypes.java:16-20`）。
-- 每次发号前检查 `isValid()`，无效即拒绝；时钟回拨也拒绝（`PlayerIdGenerator.java:26-31`；`xm-common/.../id/Snowflake.java:5-14`）。
+- 雪花号，worker 取 game-team 的全服租约（`NodeTypes.TEAM`，作用域 0；理由同 `NodeTypes.SCENE_GUID`，`NodeTypes.java:16-20`）。
+- 每次发号前检查 `isValid()`，无效即拒绝；时钟回拨也拒绝（`PlayerIdGenerator.java:26-31`；`game-common/.../id/Snowflake.java:5-14`）。
 - 发号失败或返回 0 → CreateTeam 回 4030 + 空视图（同 `service.go:126-130`）。
 
-### 6.10 场景跟随（xm-scene，批次 4.3，`roadmap.md:60`）
+### 6.10 场景跟随（game-scene，批次 4.3，`roadmap.md:60`）
 
 **Java 现状**
 - 场景节点都是主世界，没有战斗。
@@ -1692,9 +1692,9 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
 - 场景状态只在逻辑线程读写，Redis 的结果投递回逻辑线程（`AGENTS.md` §3）。
 
 **设计（D7、D8、D9）**
-1. **读者**：xm-discovery 的 `TeamMembershipReader.readAsync(pid)`。用一段只读 Lua，一次往返原子读出：
-   - `HMGET xm:{team}:player:<pid> tid epoch`；
-   - tid≠0 时再 `GET xm:{team}:info:<tid>`；
+1. **读者**：game-discovery 的 `TeamMembershipReader.readAsync(pid)`。用一段只读 Lua，一次往返原子读出：
+   - `HMGET game:{team}:player:<pid> tid epoch`；
+   - tid≠0 时再 `GET game:{team}:info:<tid>`；
    - 返回 `{tid, info 字节或 nil}`。
    - 这比基线的两跳少一跳，而且同源。两个键同在 `{team}` 槽。
    - 不需要 `EXISTS rec`：Java 不缓存 TeamId，「投影缺失」和「无队」的处理一样，都是不跟随。
@@ -1711,7 +1711,7 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
    - 队长不在本节点（跨节点、跨 zone、离线都落在这里）→ 不跟随。
    - 与 p 在同一场景 → 什么都不做。
    - 否则 `world.switchScene(p, leader.scene())`：精确到场景实例，与基线一致。
-   - 用内存里的队长场景，不读 `xm:location`，因为同节点时内存就是权威。
+   - 用内存里的队长场景，不读 `game:location`，因为同节点时内存就是权威。
 5. **基线守卫在 Java 的对应**：
    - 战斗中 / 战斗锁：6.3 补，届时加上「冻结解除后补一次」。**批次 6.3 已做**（scene-battle-spec §7.13 世界内部第 3 条）：读成员关系的同时并行发一条战斗锁的 `EXISTS`；
      回调里自己有内存里的战斗冻结 → 不跟随（`team_follow{in_battle}`），锁存在或读锁失败 → 不跟随（`battle_lock`，fail-closed，同基线 `player_team.cpp:378-402`）；
@@ -1725,14 +1725,14 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
    - 会话不活：断线即移出，不存在。
 6. **不做的部分**：
    - 不发、不收 `PlayerTeamRefreshEvent`（事件号 48 在 Java 不用）。
-   - 不做 kTeammate AOI 优先级：Java 的 `ViewIndex` 表满时不挤人（`xm-scene/.../world/ViewIndex.java:15-25`）。
+   - 不做 kTeammate AOI 优先级：Java 的 `ViewIndex` 表满时不挤人（`game-scene/.../world/ViewIndex.java:15-25`）。
    - 跨 zone 传送（5.4）落地时，用同一个 Reader 判断「在队就拒 kZoneTravelInTeam」。
-     （2026-10-11 已落地：xm-scene 的 `team.TravelTeamChecks` 经 `TeamMembershipReader.readAsync` 读、套 `orTimeout(xm.scene.travel.team-check-timeout)`（缺省 2 s），在队 → 3026、读失败 / 超时 → 3027；
+     （2026-10-11 已落地：game-scene 的 `team.TravelTeamChecks` 经 `TeamMembershipReader.readAsync` 读、套 `orTimeout(game.scene.travel.team-check-timeout)`（缺省 2 s），在队 → 3026、读失败 / 超时 → 3027；
      每次 226 现读，不缓存队伍号。代码已集成、全量单测通过，切片未验证，见 zone-travel-spec §5.5 与 PARITY「跨 zone 传送（226）与重定向（124）」行。）
 7. **涌现行为**：§4.8 的第 1–4 条自然成立。被跟随者换图也会触发钩子，但它已经和队长同场景，所以什么都不做，不会循环。
-8. **指标**：`xm_scene_team_follow_total{result=followed / same_scene / not_in_team / projection_missing / not_member / leader_not_on_node / stale / read_error}`，启动即注册。
+8. **指标**：`game_scene_team_follow_total{result=followed / same_scene / not_in_team / projection_missing / not_member / leader_not_on_node / stale / read_error}`，启动即注册。
 
-### 6.11 配置项（`xm.team.*`）
+### 6.11 配置项（`game.team.*`）
 
 | 配置项 | 缺省 | 校验 / 依据 |
 |---|---|---|
@@ -1742,9 +1742,9 @@ Java 的 `xm:presence:{id}` 只表示「此刻在游戏里」，TTL 60 s，gate 
 | `home-zone-timeout` | 1500 ms | `homezone.go:31-33` |
 | `worker-threads` / `worker-queue-capacity` | 16 / 1024 | 同 friend |
 | `push-threads` / `push-queue-capacity` | 4 / 1024 | Java 自有，§6.4 |
-| （6.4 再加）`pve-team-size-by-config-id` | — | 4.3 不开放，§5.4。**6.4 落地**：这项配置放在 xm-match（`xm.match.pve-team-size-by-config-id`，缺省 `{1: 5}`），xm-team 不配，经 `checkTeamMatch` 取结论 |
+| （6.4 再加）`pve-team-size-by-config-id` | — | 4.3 不开放，§5.4。**6.4 落地**：这项配置放在 game-match（`game.match.pve-team-size-by-config-id`，缺省 `{1: 5}`），game-team 不配，经 `checkTeamMatch` 取结论 |
 | `match-end-threads` / `match-end-queue-capacity` | 4 / 1024 | 6.4 新增：整队开战收尾池 `team-match-end`；必须为正（§5.5） |
-| `xm.dubbo.match-url`（不在 `xm.team.*` 下） | `tri://127.0.0.1:20888` | 6.4 新增：调 xm-match 的直连地址；nacos profile 置空走注册中心 |
+| `game.dubbo.match-url`（不在 `game.team.*` 下） | `tri://127.0.0.1:20888` | 6.4 新增：调 game-match 的直连地址；nacos profile 置空走注册中心 |
 
 规则常量**不做成配置**（§0.4）。
 
@@ -1770,17 +1770,17 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 
 ### 7.2 Java 建议
 
-照 `FriendMetrics` 的模式：前缀 `xm_team_`，启动时注册全部 label 组合（`architecture.md:661-671`）。
+照 `FriendMetrics` 的模式：前缀 `game_team_`，启动时注册全部 label 组合（`architecture.md:661-671`）。
 
 | 指标 | 类型 | label | 对应基线 |
 |---|---|---|---|
-| `xm_team_requests_seconds` | Timer | method = `ClientPlayerTeam.<方法>` / unrouted；result = ok / business_error / internal_error（tip==4030）/ overloaded / bad_request / unauthenticated / forbidden / unsupported | `team_rpc_total` |
-| `xm_team_commit_retries_total` | Counter | op | `team_commit_retry_total` |
-| `xm_team_heals_total` | Counter | kind = orphan_index / index_mismatch | `team_heal_total` |
-| `xm_team_pushes_total` | Counter | kind = snapshot / invite / event / members_changed；outcome = ok / offline / error / skipped | `team_push_total` |
-| `xm_team_matches_total` | Counter | outcome（4.3 只会出现 rejected） | `team_match_total` |
-| `xm_team_cross_zone_allowed` | Gauge | — | `team_cross_zone_allowed` |
-| `xm_scene_team_follow_total` | Counter | result（§6.10） | 基线只有 `metric=team_follow_skipped` 日志行 |
+| `game_team_requests_seconds` | Timer | method = `ClientPlayerTeam.<方法>` / unrouted；result = ok / business_error / internal_error（tip==4030）/ overloaded / bad_request / unauthenticated / forbidden / unsupported | `team_rpc_total` |
+| `game_team_commit_retries_total` | Counter | op | `team_commit_retry_total` |
+| `game_team_heals_total` | Counter | kind = orphan_index / index_mismatch | `team_heal_total` |
+| `game_team_pushes_total` | Counter | kind = snapshot / invite / event / members_changed；outcome = ok / offline / error / skipped | `team_push_total` |
+| `game_team_matches_total` | Counter | outcome（4.3 只会出现 rejected） | `team_match_total` |
+| `game_team_cross_zone_allowed` | Gauge | — | `team_cross_zone_allowed` |
+| `game_scene_team_follow_total` | Counter | result（§6.10） | 基线只有 `metric=team_follow_skipped` 日志行 |
 | `executor_*{name="team-worker"}`、`{name="team-push"}` | 线程池 | — | — |
 
 - `team_scene_refresh_total` **不移植**，因为没有 scene 信号（D7）。
@@ -1884,11 +1884,11 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
    - 4002 写「开战时满员」，照抄了 `errors.go:16` 的注释，代码不产生。
 2. 分区三 §1.4 写 INVITE_REVOKED 发给「因解散或满员而失效的被邀请人」：只有解散会发（`rules.go:736-744`）。
 3. 分区三引用的邀请 4003[target] 位置应为 `service.go:221-223`，不是 `:219-221`。
-4. **键名统一**：三份稿分别写成 `xm:team:rec:<tid>`、`xm:team:rec:{tid}`、`xm:{team}:rec:<tid>`。统一为 `xm:{team}:rec|info|player|invite:<id>`，并说明 `{team}` 是 hash tag（§1.3）。
-5. **指标名统一**：`xm_team_match_total` 与 `xm_team_matches_total` 统一为后者。scene 刷新信号不移植（分区二曾建议记 `no_consumer`），见 D7。
+4. **键名统一**：三份稿分别写成 `game:team:rec:<tid>`、`game:team:rec:{tid}`、`game:{team}:rec:<tid>`。统一为 `game:{team}:rec|info|player|invite:<id>`，并说明 `{team}` 是 hash tag（§1.3）。
+5. **指标名统一**：`game_team_match_total` 与 `game_team_matches_total` 统一为后者。scene 刷新信号不移植（分区二曾建议记 `no_consumer`），见 D7。
 6. 分区一说「被邀请人上限可被绕过一次、最多 11 条」，核对属实，补上了上界的论证（§8.1 第 1 条）。
 7. **补充三条分区稿都没有的隐患**：Mutate 出错时丢失修复推送（§8.1 第 8 条）；建队结果未知时回 4030（第 9 条）；`findAllStrictAsync` 不能逐成员给结果（§8.2 第 5 条）。
-8. **补充**：xm-team 需要 `XM_DUBBO_SECRET`（§6.1）；Java 没有 Tip fault 列（§0.3）；4.3 不开放组队人数配置（§5.4）。
+8. **补充**：game-team 需要 `GAME_DUBBO_SECRET`（§6.1）；Java 没有 Tip fault 列（§0.3）；4.3 不开放组队人数配置（§5.4）。
 
 **对 `docs/porting/inventory/scene-manager-match.md`**
 1. `:316` 写「解散 / 满员时被邀请人收 INVITE_REVOKED」：只有解散会发。
@@ -1903,22 +1903,22 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 
 | 编号 | 差异 | 理由 | 客户端可见？ | 两版同改？ |
 |---|---|---|---|---|
-| D1 | 独立进程 xm-team（Dubbo group `team`，端口 20885，管理端口 18109），不与 match 同进程 | Java 还没有 match；路线图要求每个服务一个进程。整队开战在 6.4 经 Dubbo 接入（已接：`MatchTeamService`，match-spec M1 / M20） | 否 | 否 |
-| D2 | 键空间 `xm:{team}:rec / info / player / invite:<id>`，统一 hash tag `{team}`；投影键改名为 info | `AGENTS.md` §3 要求经 `RedisKeys` 生成、带 `xm:` 前缀；多玩家 Lua 将来在 Cluster 下仍同槽 | 否 | 否 |
-| D3 | 会话四态由 `xm:presence` 加 `xm:location.s` 组合得出，代替 `player:session` | Java 没有 player_locator；用 location 的 l / o 保住「断线宽限内不惰性转让」 | 轻微：崩溃后的残留窗口 ≤ 60 s（§6.6） | 否 |
-| D4 | 展示资料读 `xm_java.player`，代替 PlayerAllData 缓存 | Java 没有这份缓存；同 friend D4 | 是：name 恒非空；level 到存盘才更新；新角色 level 为 1 | 否，登记即可 |
+| D1 | 独立进程 game-team（Dubbo group `team`，端口 20885，管理端口 18109），不与 match 同进程 | Java 还没有 match；路线图要求每个服务一个进程。整队开战在 6.4 经 Dubbo 接入（已接：`MatchTeamService`，match-spec M1 / M20） | 否 | 否 |
+| D2 | 键空间 `game:{team}:rec / info / player / invite:<id>`，统一 hash tag `{team}`；投影键改名为 info | `AGENTS.md` §3 要求经 `RedisKeys` 生成、带 `game:` 前缀；多玩家 Lua 将来在 Cluster 下仍同槽 | 否 | 否 |
+| D3 | 会话四态由 `game:presence` 加 `game:location.s` 组合得出，代替 `player:session` | Java 没有 player_locator；用 location 的 l / o 保住「断线宽限内不惰性转让」 | 轻微：崩溃后的残留窗口 ≤ 60 s（§6.6） | 否 |
+| D4 | 展示资料读 `game.player`，代替 PlayerAllData 缓存 | Java 没有这份缓存；同 friend D4 | 是：name 恒非空；level 到存盘才更新；新角色 level 为 1 | 否，登记即可 |
 | D5 | home zone = `player.zone_id`，代替 data_service 的 `player:zone` 映射 | Java 没有 data_service；合服重映射等 7.3 | 否 | 否 |
 | D6 | 推送走 `PlayerPushes`（Redis pub/sub + 玩家栅栏），代替 Kafka gate-cmd；GATE_UNREACHABLE 记 error | `architecture.md` §4.3；排序契约 `(epoch, version)` 不变 | 否 | 否 |
 | D7 | 不发 `PlayerTeamRefreshEvent`，scene 不缓存 TeamId，进场时现读；不移植 `team_scene_refresh_total` | Java scene 里 TeamId 的消费方只有跟随；少一个 Kafka 依赖 | 否 | 否 |
 | D8 | 不做队友 AOI 优先级（kTeammate） | Java 的 `ViewIndex` 表满时不挤人，优先级没有可见效果；以后引入挤出时再加 | 否（眼下） | 否 |
 | D9 | 跟随用内存里同节点队长的场景，同步 `switchScene`；不读 location，不经 scene-manager | 基线也只做同节点跟随；Java 同节点换图是同步的，没有在途槽，也没有 60 s 去重 | 否（行为等价） | 否 |
-| D10 | `in_battle` 恒为 false；跟随与开战预检没有战斗锁（6.3 前）。**已收口（批次 6.3，2026-10-06）**：`in_battle` 由 `BattleLockReader.existsAll` 批量 EXISTS 算出（全体 rosterIds，任何失败整批按 false，§6.7）；scene 组队跟随读锁并有内存冻结守卫（§6.10 第 5 条）。只剩整队开战预检的 4025 随 6.4（现在恒回 4027，D11）。**6.4 已接（2026-10-08）**：4025 由 xm-match 的成员预检读战斗锁给出（§5.5 第 2 点） | Java 还没有战斗（6.3 起有了） | 收口后与基线相同 | 否 |
-| D11 | 4.3 的 StartTeamMatch 走规则路径回 4027（端口恒为 0）。**已关闭（批次 6.4，2026-10-08）**：端口换成 `MatchTeamBattle`，211 走真实的预检 → 加锁 → 建票 → gather → EndMatch（§5.5）；4027 只在该副本未配置组队人数时出现。跨进程带来的新故障面（xm-match 调不通 / 过载 / 租约无效时回 4030）登记在 match-spec M20 | 基线未接线时回 4030（fault）；4027 文案真实、不触发告警，6.4 换真端口零改动 | 关闭后与基线相同（只在 xm-match 故障时多 4030 与一条 MATCH_FAILED） | 否，按批次登记 |
+| D10 | `in_battle` 恒为 false；跟随与开战预检没有战斗锁（6.3 前）。**已收口（批次 6.3，2026-10-06）**：`in_battle` 由 `BattleLockReader.existsAll` 批量 EXISTS 算出（全体 rosterIds，任何失败整批按 false，§6.7）；scene 组队跟随读锁并有内存冻结守卫（§6.10 第 5 条）。只剩整队开战预检的 4025 随 6.4（现在恒回 4027，D11）。**6.4 已接（2026-10-08）**：4025 由 game-match 的成员预检读战斗锁给出（§5.5 第 2 点） | Java 还没有战斗（6.3 起有了） | 收口后与基线相同 | 否 |
+| D11 | 4.3 的 StartTeamMatch 走规则路径回 4027（端口恒为 0）。**已关闭（批次 6.4，2026-10-08）**：端口换成 `MatchTeamBattle`，211 走真实的预检 → 加锁 → 建票 → gather → EndMatch（§5.5）；4027 只在该副本未配置组队人数时出现。跨进程带来的新故障面（game-match 调不通 / 过载 / 租约无效时回 4030）登记在 match-spec M20 | 基线未接线时回 4030（fault）；4027 文案真实、不触发告警，6.4 换真端口零改动 | 关闭后与基线相同（只在 game-match 故障时多 4030 与一条 MATCH_FAILED） | 否，按批次登记 |
 | D12 | 过载（队列满 / 排队超预算 / 处理器异常）回 in-band 4030，不带视图和参数 | 基线没有对应；用 team 自己的故障码，客户端按「读失败」重拉 | 是（只在过载时） | 否 |
 | D13 | 上行 213 / 215 / 203 时 gate 不回包 | 基线服务端回 Empty，路由服回一个空应答体；客户端不发这三个号 | 否 | 否 |
 | D14 | team 后端调用失败或超时时，gate 推 23{1003}（已有差异） | 与 login / friend / chat 同形；基线是信封 1003 → 客户端 Suspended。Java 下客户端要等 15 s 超时 → RequiresReconnect，结果也是本连接停用组队 | 是（只在故障时） | 否 |
-| D15 | team_id 来自 xm-team 自己的全服雪花租约，不与 battle_id / challenge_id 共用 | 客户端契约只要求非 0、唯一 | 否 | 否 |
-| D16 | robot 用 run-tag 新账号，不用固定的 9301–9304；跨区步骤只在配了第二个 zone 时跑；开战步骤 6.4 再跑（6.4 已加：拒绝码 4018 / 4027 / 4026[B]、S7、S8，match-spec §15.5） | Java robot 惯例（`xm-robot/.../RobotOptions.java:70`）；本机切片只有单 zone | 否 | 否 |
+| D15 | team_id 来自 game-team 自己的全服雪花租约，不与 battle_id / challenge_id 共用 | 客户端契约只要求非 0、唯一 | 否 | 否 |
+| D16 | robot 用 run-tag 新账号，不用固定的 9301–9304；跨区步骤只在配了第二个 zone 时跑；开战步骤 6.4 再跑（6.4 已加：拒绝码 4018 / 4027 / 4026[B]、S7、S8，match-spec §15.5） | Java robot 惯例（`game-robot/.../RobotOptions.java:70`）；本机切片只有单 zone | 否 | 否 |
 | D17 | gate 热关停对 team 消息号生效（依赖工作区里未提交的热关停功能） | Java 在 gate 统一做按方法关停；基线 match 没有接 killswitch | 是（只在运维关停时：客户端看到信封 1003，停用组队） | 否 |
 | D18 | 记录与投影用 Java 自有 proto（形状同 `TeamRecord` / `TeamInfo`），不依赖同步来的契约 proto | friend 的先例（`PARITY.md:97` 的 ⑧）：存储格式不该随契约同步漂移 | 否 | 否 |
 
@@ -1937,11 +1937,11 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 
 ### 9.3 待用户拍板 / 开放问题
 
-1. **xm-team 与将来 xm-match 的边界**（inventory 开放问题 9，`scene-manager-match.md:392`）。本稿按独立进程写。到 6.4 要定：`BattleStarter` 做成 xm-match 的 Dubbo 接口，还是把 team 并入 xm-match。**已定（6.4）**：做成 xm-match 提供的 Dubbo 接口 `MatchTeamService`，两个进程分开（§5.5）。
+1. **game-team 与将来 game-match 的边界**（inventory 开放问题 9，`scene-manager-match.md:392`）。本稿按独立进程写。到 6.4 要定：`BattleStarter` 做成 game-match 的 Dubbo 接口，还是把 team 并入 game-match。**已定（6.4）**：做成 game-match 提供的 Dubbo 接口 `MatchTeamService`，两个进程分开（§5.5）。
 2. **`{team}` 单槽的代价**：将来上 Cluster 且组队写量大时，要改按队伍打 tag，同时放弃多玩家索引同槽，并拆分 Lua。另一个选择是在 `architecture.md` 登记「组队要求 Redis 单实例」。推荐先用 `{team}`。
 3. **location 为 `o`、presence 缺失时按 Present 处理是否合适**。这是偏保守的选择（不转让）。代价是 scene 崩溃后最多推迟 60 s 转让。
-4. **PvE 组队人数的来源**：yaml `PveTeamSizeByConfigId`，还是 `DungeonTable.max_team_size`（表里有 10 的历史行，`scene-manager-match.md:389`；Java 已同步 `config-data/tables/dungeon.pb`）。6.4 时两版必须同源同值。**已定（6.4）**：照基线用配置（xm-match 的 `pve-team-size-by-config-id`，缺省 `{1: 5}`），不查表——查表会额外开放 id 2 和 3，客户端可见，须先改 mmorpg（match-spec Q11）。
-5. **共用件抽取**：`Deadline` 抽到 xm-common，`PlayerProfiles` 迁到 xm-player-store。推荐在 xm-team 落地时一并做。
+4. **PvE 组队人数的来源**：yaml `PveTeamSizeByConfigId`，还是 `DungeonTable.max_team_size`（表里有 10 的历史行，`scene-manager-match.md:389`；Java 已同步 `config-data/tables/dungeon.pb`）。6.4 时两版必须同源同值。**已定（6.4）**：照基线用配置（game-match 的 `pve-team-size-by-config-id`，缺省 `{1: 5}`），不查表——查表会额外开放 id 2 和 3，客户端可见，须先改 mmorpg（match-spec Q11）。
+5. **共用件抽取**：`Deadline` 抽到 game-common，`PlayerProfiles` 迁到 game-player-store。推荐在 game-team 落地时一并做。
 6. **D19 / D20 是否推动 mmorpg 先改**：如果要改，Java 首批就可以直接按修正后的语义实现。
 
 ---
@@ -1964,7 +1964,7 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
   - `Left ⊇ 旧 \ 新`（若采纳 D25）；
   - tip 段与 fault 集合 = {4030} 的钉子（对应 `errors_test.go`）。
 
-### 10.2 存储（真 Redis，`-Dxm.it.redis=redis://127.0.0.1:6379`，缺省跳过）
+### 10.2 存储（真 Redis，`-Dgame.it.redis=redis://127.0.0.1:6379`，缺省跳过）
 
 逐个对应 `store_test.go`：
 - 拒绝分支零写入（:90，Dump 前后相等）。
@@ -2003,7 +2003,7 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
   - Refresh 有提交时整轮重来，最多 3 轮；
   - 不加锁、不推 MATCH_*。
 - **StartTeamMatch（6.4，取代上一条里「队长 → 4027」「不加锁」两项）**：用例在 `TeamMatchScenarios`，由 `TeamServiceTest`（内存后端）与 `TeamMatchRedisIntegrationTest`（真 Redis）共跑——加锁之前就拒绝（带同源视图）、
-  建票失败释放锁并带 tip 4026[pid]、roster 顺序、锁过期后可重开、并发只锁一次、整轮重来、提交结果未知时的补偿、EndMatch 冲突、xm-match 调不通 / 应答不可信 → 4030、建票结果不明 → 退票 + MATCH_FAILED（无 tip）+ 4030、
+  建票失败释放锁并带 tip 4026[pid]、roster 顺序、锁过期后可重开、并发只锁一次、整轮重来、提交结果未知时的补偿、EndMatch 冲突、game-match 调不通 / 应答不可信 → 4030、建票结果不明 → 退票 + MATCH_FAILED（无 tip）+ 4030、
   gather 传输失败 → MATCH_FAILED 且不退票、停机中的 gather 结果不明不清锁（清单见 §5.5 末）。
 - **TeamDispatcher**：
   - 12 个 C2S 都有路由；203 / 213 / 215 回 `tip=0`、空 body；
@@ -2020,9 +2020,9 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
   - MEMBER_ONLINE 只推在线、非 caller、tid==本队的成员；
   - 批内按落盘顺序推送；执行器拒绝时记 error。
 - **`MessageRoutesTest`**：`ClientPlayerTeam` → `team`；203 / 213 / 215 `hasResponse=false`，其余为 true。gate 的按域队列测试沿用 friend 的。
-- **Properties 校验**：request-budget 在 [500, 3500] ms 内；`XM_DUBBO_SECRET` 缺失时拒绝启动。
+- **Properties 校验**：request-budget 在 [500, 3500] ms 内；`GAME_DUBBO_SECRET` 缺失时拒绝启动。
 
-### 10.4 场景跟随（xm-scene `TeamFollow`，假 Reader，在逻辑线程上执行）
+### 10.4 场景跟随（game-scene `TeamFollow`，假 Reader，在逻辑线程上执行）
 
 - 非队长进场 → 跟随到队长的**场景实例**。
 - 队长进场 → 扇出给本节点成员（每个成员再读自己的成员关系），不循环。
@@ -2032,11 +2032,11 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 - 队员自己换图后被拉回（§4.8 第 2 条）；入队（没有进场事件）不拉人。
 - 指标 result 正确。
 
-### 10.5 robot `team`（`xm-robot` 新增 `TeamScenario`，`RobotOptions.Scenario` 加 `TEAM`）
+### 10.5 robot `team`（`game-robot` 新增 `TeamScenario`，`RobotOptions.Scenario` 加 `TEAM`）
 
 - **结构**：
   - 三个机器人 A / B / D，同 zone，run-tag 账号（`RobotOptions.java:70`）。
-  - 用 `Inbox` 的到达序做 mark 和扫描（`xm-robot/.../client/Inbox.java:20-34`）；相邻请求间隔 ≥ 400 ms。
+  - 用 `Inbox` 的到达序做 mark 和扫描（`game-robot/.../client/Inbox.java:20-34`）；相邻请求间隔 ≥ 400 ms。
   - 换图候选从 World 表取（照 `ReconnectScenario.java:99-109`）。
 - **步骤**（对应基线 `team_smoke_scenario.go`）：
 

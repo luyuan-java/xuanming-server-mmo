@@ -1,0 +1,119 @@
+# game-guild 默认（local）配置：Dubbo 直连、不需要 Nacos 服务端。用 Nacos 做注册中心时加 --spring.profiles.active=nacos。
+# 进程从仓库根目录启动（table-dir 是相对路径）。
+#
+# 秘密只从环境变量注入，不写进本文件：
+#   GAME_DUBBO_SECRET            Dubbo 调用方鉴权密钥（必填，与 game-gate / game-scene 一致；缺失即拒绝启动）
+#   GAME_ASSET_OP_SECRET_GUILD   资产通道请求签名密钥（game.guild.asset-op.enabled=true 时必填，与 game-scene 同一个值；
+#                              去首尾空白后不足 32 字节即拒绝启动；本机由 tools/local/start-slice.sh 生成并注入）
+#   GAME_MYSQL_PASSWORD          MySQL 密码（本机无密码的 root 可不设）
+#
+# 权威数据在 MySQL game 的七张帮会表（guild / guild_player_state / guild_member / guild_application，4.5 的
+# guild_player_op_seq / guild_asset_op / guild_daily_counter，经 game-pbmysql 建表）；缓存、排行、申请推送冷却在 Redis；
+# 只读 game.player（展示名与归属区）与 game.player_state（离线读已落盘的资产账本），这两张表不归本服所有。
+#
+# 人工终结 CLI（同一个 jar 的第二个主类，读同一份配置）：
+#   java -cp game-guild.jar -Dloader.main=com.game.guild.asset.fix.AssetOpFixMain \
+#        org.springframework.boot.loader.launch.PropertiesLauncher list | resolve ...
+spring:
+  application:
+    name: game-guild
+  main:
+    # 只为管理端点起一个 Servlet 容器；Dubbo 端口不经过它。
+    web-application-type: servlet
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    # 会话级 READ COMMITTED（guild-spec §1.6、§7.5：事务外的自动提交语句也不能落回 RR 拿间隙锁）；STRICT_TRANS_TABLES 同基线 DSN；
+    # innodb_lock_wait_timeout=1 是基线值（guild 的 1205 不重试、直接 14021，等锁更久只会吃掉预算；friend 是 3）；
+    # useAffectedRows=true 等价于 Go 的 ClientFoundRows=false：申请 IODKU 自检与 4.5 / 4.6 的带上限 upsert 依赖「实际改动行数」，不带它会静默出错；
+    # socketTimeout 4 s ≤ 整请求预算之上的余量。
+    url: "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
+    username: ${GAME_MYSQL_USER:root}
+    password: ${GAME_MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    druid:
+      initial-size: 2
+      min-idle: 2
+      max-active: 32
+      max-wait: 3000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+      # 2 = READ COMMITTED（连接池按它设置每条连接；URL 里的会话变量是第二道保证）
+      default-transaction-isolation: 2
+
+# 管理端点：http://127.0.0.1:18110/actuator/health 与 /actuator/prometheus。
+server:
+  port: 18110
+  address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+game:
+  # 按方法热关停（运维止血阀）：每秒全量读 Redis 哈希 game:killswitch；失联超过 60 s 整体放行（fail-open）
+  killswitch:
+    enabled: true
+  advertise-host: 127.0.0.1
+  # 配置表目录（导表器 .pb 产物），相对进程工作目录；从别处启动时用 GAME_TABLE_DIR 覆盖。
+  table-dir: config-data/tables
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  guild:
+    # 缺省值同 mmorpg go/guild（guild-spec §7.12）；启动时校验 request-budget ∈ [500ms, 3500ms]。
+    # 业务上限（申请有效期、每人 / 每帮待审数、成员与长老上限）只读配表 GuildRule / GuildLevel，不在这里配。
+    request-budget: 3500ms
+    cache-ttl: 30m
+    push-timeout: 3s
+    online-lookup-timeout: 800ms
+    query-timeout: 3s
+    worker-threads: 16
+    worker-queue-capacity: 1024
+    # 资产通道（guild-economy-spec §0.6、§7.6；基线 guild.yaml:117-143）。整段缺省 = enabled false（fail-closed：捐献 / 兑换回 14026）；
+    # 本机切片开启。地址只来自 Redis 的 game:location 与 scene 节点目录（rpc_host / rpc_port），按节点直连，不经注册中心。
+    # 区间只在对应开关打开时校验（保留期总是校验）；交叉校验：lease + reconcile-interval < GuildRule.asset_op_deadline_seconds，
+    # GuildRule.asset_op_retry_base_ms <= max-backoff。代码常量（同步预算 2500 ms、单次调用 800 ms、重查 100/200/400 ms、
+    # settle 700 ms、未决守卫 16 / 512……）不开放。
+    asset-op:
+      enabled: true
+      reconcile-interval: 2s           # [200ms, 60s]
+      reconcile-batch: 100             # [workers, 1000]
+      workers: 8                       # [1, 64]：每个副本同时在途的资产 RPC 上限
+      lease: 10s                       # [op-budget + 2s, 600s]：循环的行租约，也是插行租约
+      op-budget: 2500ms                # [1s, 10s]：单行预算，其中 700 ms 固定留给落库
+      max-backoff: 60s                 # [1s, 600s]：退避封顶，也是 ALERT 的重排间隔
+      poison-delay: 1h                 # [60s, 24h]
+      ledger-read-min-attempts: 3      # >= 1：本地 NOT_HERE 达到这么多次后离线读已落盘账本（E8）
+      cleanup-enabled: true            # 与 enabled 互相独立
+      cleanup-interval: 10m            # [1m, 1440m]
+      terminal-retention: 30d          # [7d, 365d]：也是内部查询（回档前检查）可证明窗口的下界
+      counter-retention: 30d           # [7d, 365d]：计数行清理按 max(它, 8d) 算
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    qos-enable: false
+  protocol:
+    name: tri
+    port: 20886
+    host: ${game.advertise-host}
+  registry:
+    address: N/A
+  provider:
+    timeout: 10000
+  consumer:
+    check: false

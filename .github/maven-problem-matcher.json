@@ -1,7 +1,7 @@
 {
   "problemMatcher": [
     {
-      "owner": "xm-maven-compile",
+      "owner": "game-maven-compile",
       "severity": "error",
       "pattern": [
         {
@@ -14,7 +14,7 @@
       ]
     },
     {
-      "owner": "xm-maven-goal",
+      "owner": "game-maven-goal",
       "severity": "error",
       "pattern": [
         {

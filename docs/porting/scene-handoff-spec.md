@@ -2,13 +2,13 @@
 
 > **基线**：mmorpg `26ceb70ca`，与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。Java 侧以 `58afbba` 为准（HEAD）。
 > 写作时工作区里有批次 5.1（主世界多频道）正在实现的未提交改动，**正好落在本批要动的文件上**：
-> `xm-scene` 的 `SceneWorld.java`、`ClientRequestHandler.java`、`SceneNode.java`、`Scene.java`、`TeamFollowService.java`、`SceneMetrics.java`、
-> `application.yaml`，以及 `xm-gate/src/main/resources/application.yaml`、`tools/local/start-slice.sh`、`xm-discovery/.../RedisKeys.java`。
+> `game-scene` 的 `SceneWorld.java`、`ClientRequestHandler.java`、`SceneNode.java`、`Scene.java`、`TeamFollowService.java`、`SceneMetrics.java`、
+> `application.yaml`，以及 `game-gate/src/main/resources/application.yaml`、`tools/local/start-slice.sh`、`game-discovery/.../RedisKeys.java`。
 > **本稿引用的 Java 行号一律按 HEAD `58afbba`**（用 `git show HEAD:<path>` 核对过），5.1 提交后会漂移，所以引用时同时写出类名 / 方法名。
 >
 > **路径怎么读**
 > - 以 `go/`、`cpp/`、`proto/`、`robot/`、`deploy/`、`PROGRESS.md` 开头的路径，以及 `travel.md`（= `docs/design/cross-zone-scene-travel.md`）在 `D:\work\mmorpg` 下；
->   以 `xm-`、`docs/`、`tools/`、`config-data/`、`contract/`、`PARITY.md`、`AGENTS.md` 开头的路径在 `D:\work\xuanming-server-mmo` 下。
+>   以 `game-`、`docs/`、`tools/`、`config-data/`、`contract/`、`PARITY.md`、`AGENTS.md` 开头的路径在 `D:\work\xuanming-server-mmo` 下。
 > - 不带目录的 Go 文件：`enterscenelogic.go`、`owner_epoch.go`、`changesceneutil.go`、`leavescenelogic.go`、`scene_node_client.go` 在
 >   `go/scene_manager/internal/logic/`；`errors.go` 在 `go/scene_manager/internal/constants/`；`metrics.go` 在 `go/scene_manager/internal/metrics/`；
 >   `config.go` 在 `go/scene_manager/internal/config/`；`sm.yaml` = `go/scene_manager/etc/scene_manager_service.yaml`；`ownerepoch.go` 在 `go/shared/ownerepoch/`；
@@ -22,17 +22,17 @@
 >   `scene_entry_dispatch.{h,cpp}`、`scene_route_helper.h` 在 `cpp/nodes/gate/handler/event/`；`client_message_processor.cpp` 在 `cpp/nodes/gate/handler/rpc/`。
 > - proto（mmorpg 行号）：`sm.proto` = `proto/scene_manager/scene_manager_service.proto`，`storage.proto`、`scene_node_service.proto` 同目录；
 >   `gate_event.proto`、`gate_command.proto` 在 `proto/contracts/kafka/`；`scene.proto` 在 `proto/scene/`。
-> - Java 类：`SceneWorld` / `ClientRequestHandler` / `ScenePlayer` / `SceneMessageIds` / `ClientSink` 在 `xm-scene/src/main/java/com/game/scene/world/`；
+> - Java 类：`SceneWorld` / `ClientRequestHandler` / `ScenePlayer` / `SceneMessageIds` / `ClientSink` 在 `game-scene/src/main/java/com/game/scene/world/`；
 >   `StoragePlayerRepository` 在 `.../scene/storage/`；`OwnerLeaseRenewer` / `OwnerTakeoverSubscriber` 在 `.../scene/ownership/`；`GateLinks` 在 `.../scene/link/`；
 >   `RedisPlayerLocations` 在 `.../scene/location/`；`AssetOpService` 在 `.../scene/asset/`；`PlayerStore` / `PlayerMapper` 在
->   `xm-player-store/src/main/java/com/game/player/store/`，表结构 `xm-player-store/src/main/resources/db/xm-player-schema.sql`（下称 `schema.sql`）；
->   `ClientDispatcher` / `SceneEventRouter` / `ClientSession` / `SessionRegistry` 在 `xm-gate/src/main/java/com/game/gate/session/`，`GatePresence` 在 `xm-gate/.../gate/presence/`；
->   `SceneLink` / `SceneLinks` / `SceneLinkManager` 在 `xm-gate/.../gate/link/`；`EnterGameHandler` 在 `xm-login/src/main/java/com/game/login/handler/`；
->   `LoginClientMessageService` 在 `xm-login/.../login/`；`PlayerLocationDirectory` 在 `xm-discovery/src/main/java/com/game/discovery/location/`；
->   `SceneAssigner` 在 `xm-scene-manager/src/main/java/com/game/scenemanager/`；`node_link.proto`、`scene_directory.proto`、`client_call.proto` 在 `xm-api/src/main/proto/xm/api/`。
-> - tip 数值取自 `xm-table/src/main/proto/tip/`：`scene_error_tip.proto`（3000 `:12`、3005 `:22`、3008 `:28`、3014 `:40`、3023 `:58`、3027 `:66`）、
+>   `game-player-store/src/main/java/com/game/player/store/`，表结构 `game-player-store/src/main/resources/db/game-player-schema.sql`（下称 `schema.sql`）；
+>   `ClientDispatcher` / `SceneEventRouter` / `ClientSession` / `SessionRegistry` 在 `game-gate/src/main/java/com/game/gate/session/`，`GatePresence` 在 `game-gate/.../gate/presence/`；
+>   `SceneLink` / `SceneLinks` / `SceneLinkManager` 在 `game-gate/.../gate/link/`；`EnterGameHandler` 在 `game-login/src/main/java/com/game/login/handler/`；
+>   `LoginClientMessageService` 在 `game-login/.../login/`；`PlayerLocationDirectory` 在 `game-discovery/src/main/java/com/game/discovery/location/`；
+>   `SceneAssigner` 在 `game-scene-manager/src/main/java/com/game/scenemanager/`；`node_link.proto`、`scene_directory.proto`、`client_call.proto` 在 `game-api/src/main/proto/game/api/`。
+> - tip 数值取自 `game-table/src/main/proto/tip/`：`scene_error_tip.proto`（3000 `:12`、3005 `:22`、3008 `:28`、3014 `:40`、3023 `:58`、3027 `:66`）、
 >   `common_error_tip.proto`（1003 `:18`、1005 `:22`、1006 `:24`）、`login_error_tip.proto`（2005 `:22`、2017 `:46`）、`asset_error_tip.proto`（27003 `:18`、27006 `:24`）、
->   `cross_server_error_tip.proto`（13000 `:12`）。消息号取自 `xm-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
+>   `cross_server_error_tip.proto`（13000 `:12`）。消息号取自 `game-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
 > - 带「推导」字样的结论没有对应的测试或用例覆盖，是把多处代码路径串起来得出的。
 >
 > **本稿的来历**：由两份分区稿合并而成——基线分区稿（协议、时序、失败与回滚、客户端所见、竞态、指标）与 Java 分区稿（现状、缺口、设计、测试）。
@@ -100,7 +100,7 @@ gate 改绑；目标节点的「交出进场」；scene → scene-manager 的选
 | 覆盖模式 per-node → hash（5.1 D6，`scene-channels-spec.md:1069`） | 5.1 配置、5.2 上线后切 | per-node 下「只带地图」永远在本节点完成，跨节点只由显式 scene_id 触发；切 hash 的时机见 Q4 |
 | 换手门 18、ReleasePlayer、epoch 铸造、location CAS、推路由与回滚、源端冻结 / 存盘 / 标记 / 取证、A2′、gate 改绑（`enterscenelogic.go:479-767`；`player_lifecycle.cpp:2818-4373`） | **5.2** | 本稿 §1–§5 |
 | 镜像自动进场（CreateScene 应答驱动，落到别的节点时同样走 18 交接，`sm_reply.cpp:136-176`）；副本 | **5.3** | 复用同一原语：`SceneTransfers.begin(player, Target(node, scene), Reason.MIRROR / DUNGEON, playerRequested = true)`；63 的镜像分支（`ClientRequestHandler.java:216-217`）届时改为「请求建场景，再 begin」 |
-| 跨 zone 传送（同一个 `StartTravelHandoff`，targetZone ≠ 本 zone，`player_lifecycle.cpp:2745-2816`；SM 第 2 步 `enterscenelogic.go:366-431`、`:1006-1088`） | **5.4** | 交出事务相同（Java 单库 `xm_java`，`player.zone_id` 列已在，`schema.sql:14`）；`PlayerTransfer` 预留字段 7 承载 `redirect{gate 地址, 令牌}`，gate 推 124 而不是改绑；失败码 3027 / 13000 按跨 zone 分支（`player_lifecycle.cpp:2826-2829`、`:2856-2860`）；冻结闸共用。**落地（2026-10-11，批次 5.4）**：交出用同一个原语，但多一个 `HandOffMode.RELEASE`（E+1 同时 `owner_released = 1`，第二条腿由目标 zone 的登录夺权得 E+2；「交出事务相同」的说法以此为准，`zone-travel-spec.md` X1、§8.4 勘误 3）；字段 7 = `ZoneRedirect redirect`，gate 推 124 而不是改绑 |
+| 跨 zone 传送（同一个 `StartTravelHandoff`，targetZone ≠ 本 zone，`player_lifecycle.cpp:2745-2816`；SM 第 2 步 `enterscenelogic.go:366-431`、`:1006-1088`） | **5.4** | 交出事务相同（Java 单库 `game`，`player.zone_id` 列已在，`schema.sql:14`）；`PlayerTransfer` 预留字段 7 承载 `redirect{gate 地址, 令牌}`，gate 推 124 而不是改绑；失败码 3027 / 13000 按跨 zone 分支（`player_lifecycle.cpp:2826-2829`、`:2856-2860`）；冻结闸共用。**落地（2026-10-11，批次 5.4）**：交出用同一个原语，但多一个 `HandOffMode.RELEASE`（E+1 同时 `owner_released = 1`，第二条腿由目标 zone 的登录夺权得 E+2；「交出事务相同」的说法以此为准，`zone-travel-spec.md` X1、§8.4 勘误 3）；字段 7 = `ZoneRedirect redirect`，gate 推 124 而不是改绑 |
 | 疏散 / 排空改派（也写标记并发不带等待者的 `EnterScene(0,0)`，`player_lifecycle.cpp:2249-2363`）、死节点接管（`enterscenelogic.go:300-331`、`:840-940`）、再入屏障 | **5.5** | 疏散 = 服务器发起的批量 `begin(…, Reason.EVACUATE, playerRequested = false)`，失败不推 tip，并发受存储线程池约束（`StoragePlayerRepository.java:170-176`）。死节点无法交出，只能等租约过期（30 s）；5.5 若要提前释放必须先确认旧进程已不能写库 |
 | A1′ 断线释放标记（`exit_release_mark.h:16-19`；交接在途压制 A1′，`player_lifecycle.cpp:2064`、`:2129-2131`） | 基线横跨 reconnect 与 5.2 | Java 不需要：断线即写回并释放（`SceneWorld.java:637-667`），重连按新 epoch 从库重载（`architecture.md:637`） |
 | 回合制战斗在途闸（63 的 3023、资产通道 27002） | **6.3** | 交出与战斗冻结互斥：`begin` 拒绝战斗中的玩家，`PrepareBattle` 拒绝 `switchState ≠ NONE` 的玩家（批次 6.3 已落地，两条都兑现，见 §11.7） |
@@ -597,11 +597,11 @@ Client   Gate                Scene A(源)                         SM            
 client   gate                     login(EnterGameHandler)                 scene-manager   MySQL        Redis
  26 ───▶ callLogin ──Dubbo──────▶ 在途闸门(2005) :185-188
                                   findPlayer / 归属校验 :200-204
-                                  读位置记录 applyLocation :221-241 ───────────────────────────────────▶ xm:location
+                                  读位置记录 applyLocation :221-241 ───────────────────────────────────▶ game:location
                                   assign（5 s 兜底）:244-255 ───────▶ SceneAssigner.assign
                                   ◀────────────────────────────────── (node, scene)
                                   claim :295-327 ─────────────────────────────────▶ claimOwnerEpoch
-                                    Held(E) → takeovers.request(E) :310 ──────────────────────────────▶ PUBLISH xm:owner-takeover
+                                    Held(E) → takeovers.request(E) :310 ──────────────────────────────▶ PUBLISH game:owner-takeover
                                     退避 100→800 ms（:71-72），最长 3 s（application.yaml:95）；等不到回 2005（:313-318）
                                   Claimed(E') → 复查位置记录 rerouteIfStale :334-368
  ◀26 应答 ◀ ClientReply{EnterScene(node, scene, E')} :390-403
@@ -632,13 +632,13 @@ client   gate                     login(EnterGameHandler)                 scene-
 
 - 阻塞调用在有界存储线程池，结果投递回逻辑线程（`StoragePlayerRepository.java:35-53`、`:121-149`）；写任务 `SAVE`、`RELEASE`、`PROGRESS`（`:260-267`、`:302-308`）。
 - 瞬时故障在 5 s 内最多 3 次，首退避 200 ms 翻倍（`:65-74`、`:212-243`）；判定见 `:246-257`；围栏拒绝不重试（`:221-222`）。**单次尝试的时长不受 5 s 截止约束**：
-  一次尝试最长受 JDBC `connectTimeout=3000&socketTimeout=10000`（`xm-scene/src/main/resources/application.yaml:27`），截止只在两次尝试之间判。
+  一次尝试最长受 JDBC `connectTimeout=3000&socketTimeout=10000`（`game-scene/src/main/resources/application.yaml:27`），截止只在两次尝试之间判。
 - 只有 `PROGRESS` 有回调（`:311-325`），`SAVE` / `RELEASE` 没有（`:151-159`）。**交出需要带结局回调的写**，现在没有。
-- 指标 `xm_scene_storage_writes_seconds{op, result}`（`architecture.md:806`）。
+- 指标 `game_scene_storage_writes_seconds{op, result}`（`architecture.md:806`）。
 
 ### 4.5 位置记录与短线重连（sm-player-location 的现状）
 
-- 键 `xm:location:{player_id}`，Hash 字段 `e` / `q` / `s`（o / l / x）/ `v`（`PlayerLocationDirectory.java:24-32`；`RedisKeys.java:54-56`；消息 `xm-discovery/src/main/proto/xm/discovery/location.proto:14-23`）。
+- 键 `game:location:{player_id}`，Hash 字段 `e` / `q` / `s`（o / l / x）/ `v`（`PlayerLocationDirectory.java:24-32`；`RedisKeys.java:54-56`；消息 `game-discovery/src/main/proto/game/discovery/location.proto:14-23`）。
 - 按 (epoch, 序号) 只收更新的写，epoch 更高的一律覆盖（`PlayerLocationDirectory.java:66-87`）；TTL 在线 60 s、重连租约 30 s、续期 20 s（`:46-49`）。
 - 唯一写者是持有归属的 scene（`RedisPlayerLocations.java:34-53`）：进场 / 换场景写在线（`SceneWorld.java:380`、`:473`），断线写租约（`:664`、`:686`），主动离开写墓碑（`:662`、`:645`）；
   被接管 / 失去归属 / 停服不写（`architecture.md:632`）。
@@ -658,7 +658,7 @@ client   gate                     login(EnterGameHandler)                 scene-
   会话一旦 `registry.release` 就从表里删掉（`SessionRegistry.java:35-37`）。同一链路的帧按到达顺序投递到会话 EventLoop。
 - 链路层：按节点号按需建链，代次区分新旧（`SceneLinkManager.java:72-96`）；未就绪时帧排队，建链失败时排队中的 `PlayerEnter` 逐条回报（`SceneLink.java:77-120`、`:216-255`；契约 `SceneLinks.java:8-17`）。
 - scene 侧：同一 gate 节点号只留一条链路，新顶旧（`GateLinks.java:58-70`）；`write` 在链路已断或不可写时丢帧（`:131-148`，`LINK_GONE` 计数 `:135`）。
-- 在线目录 `xm:presence` 由 gate 写，以 epoch 高者为准（`GatePresence.java:51-73`；`architecture.md:134-142`）。
+- 在线目录 `game:presence` 由 gate 写，以 epoch 高者为准（`GatePresence.java:51-73`；`architecture.md:134-142`）。
 
 ### 4.7 今天的 63（同节点换图）
 
@@ -724,7 +724,7 @@ client      gate                          scene S（逻辑线程）
 - **否决**「源先写回并释放，目标 / login 再夺权」（inventory `scene-core.md:215` 的提法）：释放与夺权之间另一台设备的 EnterGame 会直接夺走（released=1），交出必然失败，
   而且多一跳 login 的 Dubbo 往返。原子交出没有这个窗口。
 
-### 5.2 存储原语（xm-player-store）
+### 5.2 存储原语（game-player-store）
 
 ```java
 // PlayerStore
@@ -771,7 +771,7 @@ SELECT owner_epoch, owner_released, owner_lease_until FROM player WHERE player_i
 - 存储层的重试（`StoragePlayerRepository.java:212-243`）会把「第一次已提交、应答丢了」的交出再执行一遍，第二次影响 0 行。要把它认成「自己的提交」，得排除
   「期间别人夺了权、恰好也是 E+1」。别人能夺权只有一种可能：E 的租约过期（`PlayerMapper.java:51-56`）。分区稿假设「结局不明的窗口只有几秒，远小于 30 s」，
   但剩余租约可以是 0–30 s 之间任何值——恰恰是库抖动、续约也在失败的时候，结局不明最常见。
-- 所以交出 SQL 要求 `owner_lease_until ≥ now + M`（M = `xm.scene.transfer-lease-margin`，缺省 15 s）：每次尝试开始时 E 至少还有 M 的租约，S 冻结期间照常续约
+- 所以交出 SQL 要求 `owner_lease_until ≥ now + M`（M = `game.scene.transfer-lease-margin`，缺省 15 s）：每次尝试开始时 E 至少还有 M 的租约，S 冻结期间照常续约
   （冻结中的实例仍在 `ownedPlayers()` 里，`SceneWorld.java:217-223`），于是从第一次尝试起 M 之内**不可能**有人夺到 E 的下一代。
   再把每次尝试写入的 `L_i = now_i + 30 s` 记下来：结局不明之后读到 `(E+1, released=0, lease ∈ {L_i})` 才认作自己的提交。目标节点在拿到 `PlayerTransfer` 之前不会续 E+1，
   所以这段时间里 `owner_lease_until` 不会被别人改写。前提：各进程墙钟偏差远小于 M 与窗口之差（与现有「部署要求 NTP」同一前提，`architecture.md:622`）。
@@ -782,7 +782,7 @@ SELECT owner_epoch, owner_released, owner_lease_until FROM player WHERE player_i
 - 新写任务 `HANDOFF`：带结局回调 `HandOffOutcome{HandedOff(E+1) | LeaseTooShort | Fenced | Failed}`，复用现有重试（瞬时故障、5 s 截止）与「结局只回调一次」
   （`StoragePlayerRepository.java:311-325` 的纪律）。每次尝试现取 `now_i`，`leaseUntil = now_i + 30 s`、`requireLeaseAtLeast = now_i + M`，记下 `L_i`；
   某次得到 `Fenced(owner)` 而 `owner = (E+1, released=0, lease ∈ 之前的 L_j)`，就改判 `HandedOff(E+1)`。
-- 新只读任务 `PROBE`：`probeOwnership` 加锁读，语句超时 `xm.scene.transfer-probe-statement-timeout`（缺省 3 s，MyBatis `@Options(timeout=…)`，MySQL 与 H2 都支持）；
+- 新只读任务 `PROBE`：`probeOwnership` 加锁读，语句超时 `game.scene.transfer-probe-statement-timeout`（缺省 3 s，MyBatis `@Options(timeout=…)`，MySQL 与 H2 都支持）；
   按 `firstAttemptAt + M − 2 s` 截止，读失败 / 锁等待超时在截止内退避重试。结论：`(E, 0)` → `NotCommitted`；`(E+1, 0, lease ∈ {L_i})` → `HandedOff(E+1)`；其余或到截止 → `Lost`。
   加锁读会等任何仍持有行锁的在途交出事务结束，所以读到 `(E, 0)` 时那笔事务一定已回滚、不会再提交——分区稿的残余 R2「探测读到 E 而服务端随后才提交」因此消失，
   换成「锁一直等不到 → Lost（fail-closed）」。
@@ -790,8 +790,8 @@ SELECT owner_epoch, owner_released, owner_lease_until FROM player WHERE player_i
   逻辑线程收不到结局就一定没发，E+1 没有别的知情者，释放安全。缩小停服时的 E+1 悬空窗口（§8.2 R-J1）。
 - 两类任务的指标都记在 `StorageOp` 上（`SceneMetrics.java:159-176` 的枚举加 `HANDOFF` / `PROBE`）。
 - **不改表结构**：只用现有三列；SQL 在 H2 上同样能跑（`PlayerStoreSqlTest` 缺省 H2，`AGENTS.md` §4）。`saved_epoch` 写 E（写者），语义与现有一致（`schema.sql:40`）。
-- **新 epoch 的租约** 30 s，与登录夺权一致。它要覆盖「提交 → 目标节点首次续约」：gate 建链至多 3 s + 握手 5 s（`xm-gate/src/main/resources/application.yaml:68-69`）、
-  加载受 `socketTimeout=10000`（`xm-scene/src/main/resources/application.yaml:27`）、续约周期 10 s（`OwnerLeaseRenewer.java:30`），最坏约 28 s，紧贴 30 s（登录进场今天也是这个余量）。
+- **新 epoch 的租约** 30 s，与登录夺权一致。它要覆盖「提交 → 目标节点首次续约」：gate 建链至多 3 s + 握手 5 s（`game-gate/src/main/resources/application.yaml:68-69`）、
+  加载受 `socketTimeout=10000`（`game-scene/src/main/resources/application.yaml:27`）、续约周期 10 s（`OwnerLeaseRenewer.java:30`），最坏约 28 s，紧贴 30 s（登录进场今天也是这个余量）。
   目标节点交出进场成功后**立即单独续约一次**（`OwnerLeaseRenewer.renewSoon(OwnedPlayer)`），把余量拉回 20 s 以上。
 
 ### 5.3 内部契约变更（Java 自有 proto，不是同步产物）
@@ -809,14 +809,14 @@ SELECT owner_epoch, owner_released, owner_lease_until FROM player WHERE player_i
 
 ### 5.4 scene-manager：`selectSwitchTarget`
 
-- 数据面与 5.1 的选频道共用（`scene-channels-spec.md:830`；5.1 实现在途，落点可能在 `xm-discovery` 的 `com.game.discovery.world` 包）。
+- 数据面与 5.1 的选频道共用（`scene-channels-spec.md:830`；5.1 实现在途，落点可能在 `game-discovery` 的 `com.game.discovery.world` 包）。
 - `want_scene_id ≠ 0`：在可用节点目录里找这个场景号（5.1 之后必须没在排空）。找不到或在排空中 → `TIP_NO_SCENE`（`SceneAssigner.java:42`）；指定了配置而与该场景不符 → 3005（`TIP_BAD_REQUEST`，`:45`）。
   不回落到「按地图挑」，与基线显式 scene_id 的解析一致（`scene-channels-spec.md:81`）。
 - `want_scene_id = 0`（只带地图）：`ChannelSelector.select(zone, conf, excludeSceneId = from_scene_id, playerId)`，写软预占（5.1 D7）。
 - 不铸 epoch、不写位置记录、不碰归属；基础设施异常原样上抛，与 `SceneAssigner.java:25-28` 的契约一致。
 - 客户端只看到 3023 / 1003：SM 的 tip 只进日志与指标，scene 一律推 23 `{3023}`（基线同样把任何非 0 非 18 映射成 3023，`player_lifecycle.cpp:3956-3961`）。
-- Dubbo：提供方超时 3000 ms（`xm-scene-manager/src/main/resources/application.yaml:68`）。scene 侧编程式引用（照 `xm-api/.../asset/IsolatedDubboModule.java:23-74` + `ReferenceConfig`），
-  `retries=0`、`check=false`；local profile 直连 `xm.scene.scene-manager-url`（缺省 `tri://127.0.0.1:20882`，与 login 同，`xm-login/src/main/resources/application.yaml:79`）；
+- Dubbo：提供方超时 3000 ms（`game-scene-manager/src/main/resources/application.yaml:68`）。scene 侧编程式引用（照 `game-api/.../asset/IsolatedDubboModule.java:23-74` + `ReferenceConfig`），
+  `retries=0`、`check=false`；local profile 直连 `game.scene.scene-manager-url`（缺省 `tri://127.0.0.1:20882`，与 login 同，`game-login/src/main/resources/application.yaml:79`）；
   调用方鉴权由 SPI 过滤器自动带上（`architecture.md:93-100`）；完成后投递回逻辑线程，再加本地兜底超时 4 s。
 
 ### 5.5 scene：换图状态机（只在逻辑线程读写）
@@ -912,7 +912,7 @@ client     gate G                     源 scene S                     scene-mana
 
 - 沿用 `onPlayerEnter` / `onPlayerLoaded`（`SceneWorld.java:252-387`）；epoch 校验天然覆盖「交出之后又被夺权」：库里不是 E+1 就 3023（`:305-308`）。
 - 落位：`resolveEnterPosition` 用库里的配置号与坐标（`:400-405`）：同图保留、换图落出生点（D10）。
-- `transfer = true` 时：不拍 LOGIN 快照（D8）；计 `xm_scene_transfer_enters_total{result}`；进场后 `renewSoon`；照常写位置（新实例写序号从 1 起，`ScenePlayer.java:203-205`；E+1 高于 E 直接覆盖，
+- `transfer = true` 时：不拍 LOGIN 快照（D8）；计 `game_scene_transfer_enters_total{result}`；进场后 `renewSoon`；照常写位置（新实例写序号从 1 起，`ScenePlayer.java:203-205`；E+1 高于 E 直接覆盖，
   `PlayerLocationDirectory.java:66-87`）；照常触发组队跟随（`SceneWorld.java:386`）。
 - 运行态随新实例清空（施法阶段、冷却、获取异常窗口、位移校验锚点、资产账本补存限频时刻；实体号换新，`:360`），与「接管 / 重新进场即清空」同口径（`architecture.md:294`）。
   基线 B 侧同样新建实体（`player_lifecycle.cpp:1253-1323`），冷却与技能上下文在基线本就不挂到玩家身上（`PARITY.md:76`），所以这一条**不是**差异（分区稿 D9 撤销，§8.3）。
@@ -935,7 +935,7 @@ client     gate G                     源 scene S                     scene-mana
 2. **资产通道**（`AssetOpService.java:196-202`）：FREEZING 回 RETRY 27003；RESOLVING 放行。已见的 seq 照常只读答复（durable 看 `persistedState`，交出提交后由目标节点据实回报）。
 3. **世界内部**：在线存盘、`requestSave`、组队跟随、5.1 改派、续约失去、围栏拒踢人，按 §5.5 跳过。
 
-另外服务闸桩（§0.5）按 `player.frozen()` 回基线码作纵深防御；§5.5 的快照比对兜底检测漏掉的闸（`xm_scene_transfer_post_freeze_mutations_total` 应恒 0）。
+另外服务闸桩（§0.5）按 `player.frozen()` 回基线码作纵深防御；§5.5 的快照比对兜底检测漏掉的闸（`game_scene_transfer_post_freeze_mutations_total` 应恒 0）。
 
 ### 5.10 失败与回滚一览
 
@@ -984,13 +984,13 @@ E+1 无人持有时撞上 Held、让出请求没人应，3 s 后回 2005（`Ente
 | 段 | 上限 | 出处 / 理由 |
 |---|---|---|
 | 63 应答 | 同步 | `ClientRequestHandler.java:185-189` |
-| 选目标（scene → SM） | Dubbo 3 s，本地兜底 4 s；RESOLVING 槽同 TTL | 提供方 3000 ms（`xm-scene-manager/.../application.yaml:68`）；基线槽 TTL = SM deadline + 1 s（`player_lifecycle.cpp:186-191`） |
-| 交出写 | 两次尝试之间 5 s 截止；单次尝试受 socketTimeout 10 s | `StoragePlayerRepository.java:67`；`xm-scene/.../application.yaml:27` |
+| 选目标（scene → SM） | Dubbo 3 s，本地兜底 4 s；RESOLVING 槽同 TTL | 提供方 3000 ms（`game-scene-manager/.../application.yaml:68`）；基线槽 TTL = SM deadline + 1 s（`player_lifecycle.cpp:186-191`） |
+| 交出写 | 两次尝试之间 5 s 截止；单次尝试受 socketTimeout 10 s | `StoragePlayerRepository.java:67`；`game-scene/.../application.yaml:27` |
 | 结局不明窗口（首次尝试起到探测结论） | < M − 2 s（M 缺省 15 s） | §5.2；保证窗口内没人能夺到 E 的下一代 |
 | **冻结总长** | ≈ 交出写 + 探测 ≤ M（约 15 s）+ 排队 | 基线 70 s + 1 s 扫描（`travel_freeze_cap.h:71`、`:78`） |
 | 新 epoch 租约 | 30 s | `PlayerStore.java:51` |
-| gate 建链 / 握手 | 3 s / 5 s | `xm-gate/.../application.yaml:68-69` |
-| 目标加载 | ≤ socketTimeout 10 s | `xm-scene/.../application.yaml:27` |
+| gate 建链 / 握手 | 3 s / 5 s | `game-gate/.../application.yaml:68-69` |
+| 目标加载 | ≤ socketTimeout 10 s | `game-scene/.../application.yaml:27` |
 | 客户端「已受理交接」预算（基线，跨 zone 客户端） | 75 s | `travel_freeze_cap.h:86-98` |
 
 Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + 探测）+ 8（建链 + 握手）+ 10（加载）≈ 37 s，小于 75 s。
@@ -1030,16 +1030,16 @@ Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + �
 
 | 配置 | 缺省 | 进程 | 说明 |
 |---|---|---|---|
-| `xm.scene.scene-manager-url` | `tri://127.0.0.1:20882` | xm-scene | local profile 直连 scene-manager；nacos profile 走注册中心 |
-| `xm.scene.switch-resolve-timeout` | 4 s | xm-scene | 选目标本地兜底超时，也是 RESOLVING 槽 TTL；须 > Dubbo 提供方超时 3 s |
-| `xm.scene.transfer-lease-margin`（M） | 15 s | xm-scene | 交出要求的剩余租约下限；须 < 租约 30 s − 续约周期 10 s = 20 s（否则健康续约下也会 LeaseTooShort），且 > 一次交出尝试的最长时长 |
-| `xm.scene.transfer-probe-statement-timeout` | 3 s | xm-scene | 探测加锁读的语句超时 |
-| `xm.scene.transfer-tombstone-ttl` | 30 s | xm-scene | 交叉 `PlayerLeave` 的墓碑存活时长 |
-| `PlayerStore.OWNER_LEASE` | 30 s（常量） | xm-player-store | 新 epoch 租约，复用（`PlayerStore.java:51`） |
-| `OwnerLeaseRenewer.PERIOD` | 10 s（常量） | xm-scene | 复用（`OwnerLeaseRenewer.java:30`）；加 `renewSoon` |
-| 存储重试 `RetryPolicy.DEFAULT` | 3 次 / 200 ms / 5 s | xm-scene | 复用（`StoragePlayerRepository.java:65-67`） |
-| `xm.login.owner-claim-wait` | 3 s | xm-login | 不改（`xm-login/src/main/resources/application.yaml:95`） |
-| 5.1 预占 TTL | 10 s | xm-scene-manager | 复用（5.1 `WorldChannels.DEFAULT_RESERVATION_TTL`） |
+| `game.scene.scene-manager-url` | `tri://127.0.0.1:20882` | game-scene | local profile 直连 scene-manager；nacos profile 走注册中心 |
+| `game.scene.switch-resolve-timeout` | 4 s | game-scene | 选目标本地兜底超时，也是 RESOLVING 槽 TTL；须 > Dubbo 提供方超时 3 s |
+| `game.scene.transfer-lease-margin`（M） | 15 s | game-scene | 交出要求的剩余租约下限；须 < 租约 30 s − 续约周期 10 s = 20 s（否则健康续约下也会 LeaseTooShort），且 > 一次交出尝试的最长时长 |
+| `game.scene.transfer-probe-statement-timeout` | 3 s | game-scene | 探测加锁读的语句超时 |
+| `game.scene.transfer-tombstone-ttl` | 30 s | game-scene | 交叉 `PlayerLeave` 的墓碑存活时长 |
+| `PlayerStore.OWNER_LEASE` | 30 s（常量） | game-player-store | 新 epoch 租约，复用（`PlayerStore.java:51`） |
+| `OwnerLeaseRenewer.PERIOD` | 10 s（常量） | game-scene | 复用（`OwnerLeaseRenewer.java:30`）；加 `renewSoon` |
+| 存储重试 `RetryPolicy.DEFAULT` | 3 次 / 200 ms / 5 s | game-scene | 复用（`StoragePlayerRepository.java:65-67`） |
+| `game.login.owner-claim-wait` | 3 s | game-login | 不改（`game-login/src/main/resources/application.yaml:95`） |
+| 5.1 预占 TTL | 10 s | game-scene-manager | 复用（5.1 `WorldChannels.DEFAULT_RESERVATION_TTL`） |
 
 启动期校验（不满足即拒启）：`switch-resolve-timeout > Dubbo 超时`；`renewPeriod < transfer-lease-margin < OWNER_LEASE − renewPeriod`；`probe-statement-timeout < transfer-lease-margin`。
 
@@ -1077,19 +1077,19 @@ Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + �
 
 | 进程 | 指标 | 类型 | 标签 / 说明 |
 |---|---|---|---|
-| scene | `xm_scene_switch_resolves_total` | Counter | `result` = local / remote / same / rejected / error / stale |
-| scene | `xm_scene_transfers_total` | Counter | `result` = handed_off / lease_too_short / fenced / aborted_in_place / lost_unknown / left / taken_over / link_gone；每次开始的交出恰好终结一次 |
-| scene | `xm_scene_transfer_freeze_seconds` | Timer | 从冻结到结局处理完；桶沿用逻辑线程那组 |
-| scene | `xm_scene_transfers_in_flight` | Gauge | 逻辑线程在变化后推绝对值 |
-| scene | `xm_scene_transfer_enters_total` | Counter | `result` = ok / failed（目标节点） |
-| scene | `xm_scene_frozen_rejections_total` | Counter | `kind` = request / asset_op / move |
-| scene | `xm_scene_transfer_post_freeze_mutations_total` | Counter | **应恒 0**，非 0 告警（漏掉的闸） |
-| scene | `xm_scene_storage_writes_seconds` | Timer | `op` 加 handoff / probe（`SceneMetrics.java:159-176`）；`result` 加 lease_too_short / not_committed / lost |
-| gate | `xm_gate_scene_transfers_total` | Counter | `result` = rebound / stale / orphan（路由层找不到会话）/ link_unavailable / undeliverable / entered / enter_failed |
-| gate | `xm_gate_disconnects_total` | Counter | `reason` 加 transfer_failed（`GateMetrics.java:109`） |
-| gate | `xm_gate_link_frames_total` | Counter | `type` 自动出现 player_transfer |
-| scene-manager | `xm_scene_manager_switch_seconds` | Timer | `result` = ok / not_found / draining / bad_request / error |
-| login | `xm_login_abandoned_enters_total` | Counter | 复用（`architecture.md:755`）；交出孤儿走 `released` / `stale` |
+| scene | `game_scene_switch_resolves_total` | Counter | `result` = local / remote / same / rejected / error / stale |
+| scene | `game_scene_transfers_total` | Counter | `result` = handed_off / lease_too_short / fenced / aborted_in_place / lost_unknown / left / taken_over / link_gone；每次开始的交出恰好终结一次 |
+| scene | `game_scene_transfer_freeze_seconds` | Timer | 从冻结到结局处理完；桶沿用逻辑线程那组 |
+| scene | `game_scene_transfers_in_flight` | Gauge | 逻辑线程在变化后推绝对值 |
+| scene | `game_scene_transfer_enters_total` | Counter | `result` = ok / failed（目标节点） |
+| scene | `game_scene_frozen_rejections_total` | Counter | `kind` = request / asset_op / move |
+| scene | `game_scene_transfer_post_freeze_mutations_total` | Counter | **应恒 0**，非 0 告警（漏掉的闸） |
+| scene | `game_scene_storage_writes_seconds` | Timer | `op` 加 handoff / probe（`SceneMetrics.java:159-176`）；`result` 加 lease_too_short / not_committed / lost |
+| gate | `game_gate_scene_transfers_total` | Counter | `result` = rebound / stale / orphan（路由层找不到会话）/ link_unavailable / undeliverable / entered / enter_failed |
+| gate | `game_gate_disconnects_total` | Counter | `reason` 加 transfer_failed（`GateMetrics.java:109`） |
+| gate | `game_gate_link_frames_total` | Counter | `type` 自动出现 player_transfer |
+| scene-manager | `game_scene_manager_switch_seconds` | Timer | `result` = ok / not_found / draining / bad_request / error |
+| login | `game_login_abandoned_enters_total` | Counter | 复用（`architecture.md:755`）；交出孤儿走 `released` / `stale` |
 
 勾稽（对标基线 `[TravelHandoff]`）：`switch_resolves{remote}` ≈ Σ`transfers{*}` + `in_flight`；`transfers{handed_off}` ≈ `gate_scene_transfers{rebound}` + `{stale}` + `{orphan}`；
 `gate_scene_transfers{rebound}` = `{entered}` + `{enter_failed}` + `{link_unavailable}` + `{undeliverable}` + 断线中断的。
@@ -1144,7 +1144,7 @@ Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + �
 4. §3.6「成功 → `presence.online(…, E+1)`」需要改代码才成立：现有 `onPlayerEnterResult` 只在 `!s.presenceOnline` 时登记（`ClientDispatcher.java:623-627`），列为 G12。
 5. §3.9 F10「`PlayerTransfer` 写出时链路已断 → E+1 无人持有」可以收掉：`GateLinks.write` 同步知道链路已断 / 不可写（`GateLinks.java:131-145`），异步写失败也有 future，源节点据此自己释放 E+1（§5.5）。
 6. §3.16 D9「跨节点后运行态清空，需由基线分区稿核对」：已核对，基线 B 同样新建实体，冷却 / 技能上下文在基线本就不挂到玩家身上（`PARITY.md:76`），不是差异，撤销。
-7. §3.2 引 `xm-scene/src/main/resources/application.yaml:28` 的 socketTimeout，实际在 `:27`。
+7. §3.2 引 `game-scene/src/main/resources/application.yaml:28` 的 socketTimeout，实际在 `:27`。
 8. §1.4「单次写」漏了一点：重试截止只在两次尝试之间判，单次尝试最长受 socketTimeout 10 s，交出写的上界是「约 10 s 加一次退避」，不是 5 s（§4.4、§5.13 已按此计算）。
 
 **对 inventory**
@@ -1218,7 +1218,7 @@ Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + �
 | C++ TravelOwnership / TravelOutcomeReset / ExitRelease* | 退出优先、去留裁决 | FREEZING 中 leave / takeover / 链路断开的结局表（§10.3） |
 | C++ TravelFreezeCap ×17 | 冻结有界 | 交出写 + 探测截止（§10.3） |
 
-### 10.2 存储（`PlayerStoreSqlTest` 风格，缺省 H2，`-Dxm.it.mysql` 连真库，`AGENTS.md` §4）
+### 10.2 存储（`PlayerStoreSqlTest` 风格，缺省 H2，`-Dgame.it.mysql` 连真库，`AGENTS.md` §4）
 
 - 交出成功：epoch = E+1、released = 0、租约 = 传入的 L、`player` 行与 `player_state` 都是快照、`saved_epoch = E`。
 - 交出未提交的三种情况各回对应结局且不改任何列：epoch ≠ E（Fenced）；released = 1（Fenced）；剩余租约 < M（LeaseTooShort）；玩家不存在（Fenced(null)）。
@@ -1256,19 +1256,19 @@ Java 从受理到出结论的最坏情形 ≈ 4（选目标）+ 15（交出 + �
 
 `selectSwitchTarget`：显式场景号在别的节点 → 回该节点；不存在或在排空 → `TIP_NO_SCENE`；配置不符 → 3005；只带地图 → 排除源场景、按人数加预占挑；zone = 0 → 参数错；目录读失败原样上抛；指标计数。
 
-### 10.6 真 Redis 集成测试（`-Dxm.it.redis`）
+### 10.6 真 Redis 集成测试（`-Dgame.it.redis`）
 
 - 位置记录：T 先写 E+1 后，S 的 (E, q+1) 迟到写被拒；S 补写的 (E, q+1) 租约随后被 T 的 E+1 覆盖。
 - 接管频道：交出 gap 期间的 takeover(E+1) 由 T 处理。
 
 ### 10.7 本机多节点切片
 
-`start-slice.sh` 加 `XM_SCENE_NODES=2`，两个 scene 各用不同的 `link-port`（21000 / 21001）、`asset-rpc-port`（21100 / 21101）、`SERVER_PORT`（18104 / 18114）（与 5.1 §9.6 共用改动，
-`scene-channels-spec.md:1169`），并加 `xm.scene.scene-manager-url`。
+`start-slice.sh` 加 `GAME_SCENE_NODES=2`，两个 scene 各用不同的 `link-port`（21000 / 21001）、`asset-rpc-port`（21100 / 21101）、`SERVER_PORT`（18104 / 18114）（与 5.1 §9.6 共用改动，
+`scene-channels-spec.md:1169`），并加 `game.scene.scene-manager-url`。
 
 | 编号 | 用例 | 期望 |
 |---|---|---|
-| M1 | A 在节点 1，63 `{scene_id = 节点 2 上的场景}` | §3.2 成功行；库里 epoch 加一；`xm:location` 指向节点 2、E+1；`xm_scene_transfers_total{handed_off}` +1 |
+| M1 | A 在节点 1，63 `{scene_id = 节点 2 上的场景}` | §3.2 成功行；库里 epoch 加一；`game:location` 指向节点 2、E+1；`game_scene_transfers_total{handed_off}` +1 |
 | M2 | 再 63 回到节点 1 | 同上，epoch 再加一 |
 | M3 | 在节点 2 上断开后立即重连 | 回到节点 2 原实例、原坐标 |
 | M4 | 冻结窗口内用另一个 mysql 会话 `SELECT … FOR UPDATE` 持行锁 8 s | 交出尝试超时 → 探测在锁释放后读到 (E, 0) → 23 `{3023}`，玩家留在原地、可以继续玩；`stale_owner` 类拒绝为 0 |
@@ -1311,19 +1311,19 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
 
 | 规格 | 代码 |
 |---|---|
-| §5.2 存储原语 | xm-player-store：`PlayerStore.handOffOwnership(frozen, state, leaseUntil, requireLeaseAtLeast, timeout)` / `probeOwnership(playerId, timeout)`、`HandOffResult{HandedOff, LeaseTooShort, Fenced}`、`OwnerState`（新文件）、`PlayerMapper.updateStateAndHandOff` / `selectOwnerForUpdate`；xm-scene：`StoragePlayerRepository` 的 `HANDOFF` / `PROBE` 任务、`HandOffOutcome`、`HandOffAttempts`（各次尝试写入的 L_i）、`ProbeOutcome`、`HandOffSettings`、`awaitTransfersSettled`；`OwnerLeaseRenewer.renewSoon` |
+| §5.2 存储原语 | game-player-store：`PlayerStore.handOffOwnership(frozen, state, leaseUntil, requireLeaseAtLeast, timeout)` / `probeOwnership(playerId, timeout)`、`HandOffResult{HandedOff, LeaseTooShort, Fenced}`、`OwnerState`（新文件）、`PlayerMapper.updateStateAndHandOff` / `selectOwnerForUpdate`；game-scene：`StoragePlayerRepository` 的 `HANDOFF` / `PROBE` 任务、`HandOffOutcome`、`HandOffAttempts`（各次尝试写入的 L_i）、`ProbeOutcome`、`HandOffSettings`、`awaitTransfersSettled`；`OwnerLeaseRenewer.renewSoon` |
 | §5.3 内部契约 | `node_link.proto`：`PlayerTransfer`（oneof 9，字段 7 预留）、`PlayerEnter.transfer = 5`、`PlayerEnterResult` 注释；`scene_directory.proto`：`SelectSwitchTarget{Request, Response}`；`SceneDirectoryService.selectSwitchTarget`；`ClientSink.playerTransfer`（`GateLinks` 实现）；`SceneLinkListener.onPlayerTransfer`；`SceneMessageIds.sendTipToClient` |
 | §5.4 scene-manager | `SwitchTargetSelector`（规则）+ `SceneDirectoryProvider.selectSwitchTarget`（适配与指标） |
 | §5.5 状态机 | `SwitchPhase{NONE, RESOLVING, FREEZING}` + 挂在 `ScenePlayer` 上的 `PlayerSwitch`（异步回调捕获对象本身、回来按引用比对，代替 §5.5 的 token）；`SceneWorld.resolveSwitchTarget` → `SwitchTarget.Remote`；`RemoteSwitchTargets` / `CrossNodeSwitch`；`TransferTombstone`；`com.game.scene.transfer.SceneManagerSwitchTargets`（Dubbo 调用方） |
 | §5.7 gate | `SceneLink.onFrame`、`SceneEventRouter`（`on*WithoutSession`）、`ClientDispatcher.onPlayerTransfer` / `rebindForTransfer` / `transferEntering`、`DisconnectReason.TRANSFER_FAILED`、`GateMetrics.SceneTransferResult` |
 | §5.9 冻结闸 | `FreezePolicy`、`SceneFeature.Registrar.on` 五参数形式、`ClientRequestHandler.onClientForward`；`AssetOpService` 第 5 步；`BagService` / `PetService` / `AttributeService` / `MissionService` / `CurrencyService` / `Wallet` 的闸 |
 | §5.5 停服行 | `SceneShutdown.TransferSettlement`（见 K40） |
-| §10.7 / §10.8 | `tools/local/{start,stop}-slice.sh` 的 `XM_SCENE_NODES`；xm-robot `CrossNodeScenario`（子命令 `cross-node`，`RobotOptions.Scenario.CROSS_NODE`） |
+| §10.7 / §10.8 | `tools/local/{start,stop}-slice.sh` 的 `GAME_SCENE_NODES`；game-robot `CrossNodeScenario`（子命令 `cross-node`，`RobotOptions.Scenario.CROSS_NODE`） |
 | §5.15 代码注释 | 已按清单改：`ClientRequestHandler`（3014 会出现）、`AssetOpService` 类注释、`Wallet`、`BagService`、`PetService`、`AttributeService`、`MissionService`、`node_link.proto` 的 `PlayerEnterResult` |
 
 ### 11.3 偏差与补全
 
-**存储（xm-player-store、`StoragePlayerRepository`）**
+**存储（game-player-store、`StoragePlayerRepository`）**
 
 | # | 规格 | 实现 | 原因 |
 |---|---|---|---|
@@ -1332,9 +1332,9 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
 | K3 | §5.2 读到 (E+1, 0, 租约 ∈ 之前的 L_j) 改判 HandedOff | 只认**更早**某次尝试的 L_j，不认本次的 L_i | 本次影响 0 行说明本次没写，同值只可能是巧合 |
 | K4 | §5.2 `Failed` 交给探测 | `Failed` 不计 `writeFailures`（结局不明不是写丢失）；交出任务被池拒时尝试列表为空，探测不读库、直接 `NotCommitted` | 任务没执行就一定没提交 |
 | K5 | §5.2 探测「到截止 → Lost」 | 读失败退避重试（封顶 1 s）到「第一次尝试 + M − 2 s」（`HandOffSettings.PROBE_DEADLINE_SLACK`），**截止已过也至少读一次** | 评审确认不削弱安全：截止之后能夺到下一代的只有登录夺权，其租约 now + 30 s 一定晚于任何 L_i，晚到的「已交出」不会把别人的 E+1 认成自己的（前提仍是 NTP，R-J5） |
-| K6 | §7.2 `result` 加 lease_too_short / not_committed / lost | 另加 `handed_off`；`xm_scene_storage_writes_seconds` 只注册各 op 可能出现的组合（21 个，不是 5 种 op × 9 种结局的 45 个全组合），不可能的组合静默不记、不抛 | 存储线程还要接着投递结局 |
+| K6 | §7.2 `result` 加 lease_too_short / not_committed / lost | 另加 `handed_off`；`game_scene_storage_writes_seconds` 只注册各 op 可能出现的组合（21 个，不是 5 种 op × 9 种结局的 45 个全组合），不可能的组合静默不记、不抛 | 存储线程还要接着投递结局 |
 | K7 | §6.2 启动期校验 | `续约周期 10 s < M < 30 s − 10 s`（不含端点）、`M > 2 s`、`1 s ≤ 语句时限 < M` | JDBC 查询超时粒度是秒 |
-| K8 | §10.2 「持锁超过语句超时 → 探测失败」 | H2 的查询超时打断不了行锁等待，两条持锁超时用例只在 `-Dxm.it.mysql` 真库上跑（约 1.2–1.6 s 超时） | H2 限制 |
+| K8 | §10.2 「持锁超过语句超时 → 探测失败」 | H2 的查询超时打断不了行锁等待，两条持锁超时用例只在 `-Dgame.it.mysql` 真库上跑（约 1.2–1.6 s 超时） | H2 限制 |
 
 **scene-manager**
 
@@ -1352,8 +1352,8 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
 |---|---|---|---|
 | K14 | §5.5 第 3 条 Remote | 只带地图、本节点没有、且**不是主世界地图** → 直接 3023，不问 scene-manager；`CrossNodeSwitch.DISABLED`（旧构造器与旧单测）下远端去向一律仍回 3023 | 与 K10 同理；旧装配行为不变 |
 | K15 | §5.5 结果表 | 补两行：结果节点是本节点但场景不在本节点 → 23 {3023}（绝不交给自己）；节点号或场景号为 0 → 23 {1003}。RESOLVING 槽在兜底超时 + 1 s 时清掉 | 应答残缺按调用失败；回调丢失的兜底 |
-| K16 | §5.4 / §6.2 local 直连、nacos 走注册中心 | `SceneManagerSwitchTargets`：独立 Dubbo 模块 + `ReferenceConfig`（`retries=0`、`check=false`、3 s），自己的守护线程建引用并调用，逻辑线程不碰 Dubbo；**只支持直连**（xm-scene 没有 Nacos 注册中心依赖）。校验：`switch-resolve-timeout` 大于 3 s 且不超过 30 s，`scene-manager-url` 不能为空，`transfer-tombstone-ttl` 1 s～5 min | 接 Nacos 要给 xm-scene 加依赖，留到部署批次 |
-| K17 | §5.5「`onWriteFailed` 回调同样处理」并计 `link_gone` | 异步写失败照样释放 E+1、写重连租约，但计 `xm_scene_link_dropped_total{reason="write_failed"}`（新 `LinkDrop.WRITE_FAILED`），**不**再计 `transfers{link_gone}` | `handed_off` 已在交给链路时计过，§7.2「每次交出恰好终结一次」优先；勾稽改为 `transfers{handed_off}` − `link_dropped{write_failed}` ≈ gate `rebound + stale + orphan + invalid` |
+| K16 | §5.4 / §6.2 local 直连、nacos 走注册中心 | `SceneManagerSwitchTargets`：独立 Dubbo 模块 + `ReferenceConfig`（`retries=0`、`check=false`、3 s），自己的守护线程建引用并调用，逻辑线程不碰 Dubbo；**只支持直连**（game-scene 没有 Nacos 注册中心依赖）。校验：`switch-resolve-timeout` 大于 3 s 且不超过 30 s，`scene-manager-url` 不能为空，`transfer-tombstone-ttl` 1 s～5 min | 接 Nacos 要给 game-scene 加依赖，留到部署批次 |
+| K17 | §5.5「`onWriteFailed` 回调同样处理」并计 `link_gone` | 异步写失败照样释放 E+1、写重连租约，但计 `game_scene_link_dropped_total{reason="write_failed"}`（新 `LinkDrop.WRITE_FAILED`），**不**再计 `transfers{link_gone}` | `handed_off` 已在交给链路时计过，§7.2「每次交出恰好终结一次」优先；勾稽改为 `transfers{handed_off}` − `link_dropped{write_failed}` ≈ gate `rebound + stale + orphan + invalid` |
 | K18 | §7.2 冻结时长桶「沿用逻辑线程那组」 | 5 ms～20 s 共 13 个 | 逻辑线程那组止于 1 s，装不下带重试的库事务 |
 | K19 | §7.2 `transfer_enters{ok/failed}` | 只计明确的 ok / failed，被离开 / 断链 / 接管 / 停服取消的不计 | 取消不是目标节点的失败 |
 | K20 | §5.5 组队跟随与 5.1 改派跳过 | 跟随在 `switchPhase ≠ NONE` 时跳过（`team_follow{switching}`）；排空改派只跳过 FREEZING（`channel_relocations{switching}`）；`switchScene` 拒绝冻结中的玩家并记 ERROR（兜底） | 同规格，补上指标值与兜底 |
@@ -1379,7 +1379,7 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
 | K30 | §5.12「重复帧按过期处理」（会放弃） | 会话已绑在同一玩家的 `to_epoch` 上时只计 `stale`、**不**放弃 | 放弃会释放目标节点正在加载的 E+1 |
 | K31 | §7.2 勾稽「rebound = … + 断线中断的」 | `undeliverable` 也计会话已断开之后才报未送达的交出进场（路由层路径）；「每次 rebound 至多一个终结结果」仍成立（评审核过），只是「断线中断的」一部分落在 undeliverable | 那次进场确实没送到 |
 | K32 | §5.7 第 1 条路由层代为放弃 | `ClientSession.execute` 改为返回 boolean，会话 EventLoop 拒收任务时同样走无会话路径（`onPlayerTransferWithoutSession` / `onEnterUndeliverableWithoutSession`） | 拒收与找不到会话等价 |
-| K33 | §5.5 Lost → `kick(3023)` | 经 `PlayerKicked{3023}` 到 gate，计 `xm_gate_disconnects_total{reason="kicked"}`；`transfer_failed` 只计 gate 改绑之后自己看到的失败（`send` 为 0、未送达、目标拒绝、invalid） | Lost 不一定已提交，也可能是归属被夺；scene 侧 `transfers{lost_unknown}` 是唯一计数 |
+| K33 | §5.5 Lost → `kick(3023)` | 经 `PlayerKicked{3023}` 到 gate，计 `game_gate_disconnects_total{reason="kicked"}`；`transfer_failed` 只计 gate 改绑之后自己看到的失败（`send` 为 0、未送达、目标拒绝、invalid） | Lost 不一定已提交，也可能是归属被夺；scene 侧 `transfers{lost_unknown}` 是唯一计数 |
 | K34 | §5.7 目标链路断开 | 交出进场途中目标链路断开沿用现有行为：`scene_link_down` 关会话、不推 tip | 同规格 |
 | K35 | §10.4 G10 | 现有用例改名为「更早一次进场的迟到建链失败回报_只请login放弃那一次的epoch_不解绑新的进场」：G10 之后对旧 epoch 也调 `abandonEnter`（带围栏、无害），绑定不变 | — |
 
@@ -1387,7 +1387,7 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
 
 | # | 规格 | 实现 | 原因 |
 |---|---|---|---|
-| K36 | §10.7 `XM_SCENE_NODES=2` | 缺省 1（行为不变），只接受 1 / 2；第二个实例 `xm-scene-2` 链路 21001、资产 21101、管理 18114，经命令行参数传；每个实例都带 `--xm.scene.scene-manager-url=$XM_SCENE_MANAGER_URL`；两个实例依次起，各等链路端口、资产端口与自己管理端口上的 ACTIVE 频道；日志 / pid 为 `xm-scene-2.*`，`stop-slice.sh` 先停 `xm-scene-2` | 节点号由 Redis 租约自动分 |
+| K36 | §10.7 `GAME_SCENE_NODES=2` | 缺省 1（行为不变），只接受 1 / 2；第二个实例 `game-scene-2` 链路 21001、资产 21101、管理 18114，经命令行参数传；每个实例都带 `--game.scene.scene-manager-url=$GAME_SCENE_MANAGER_URL`；两个实例依次起，各等链路端口、资产端口与自己管理端口上的 ACTIVE 频道；日志 / pid 为 `game-scene-2.*`，`stop-slice.sh` 先停 `game-scene-2` | 节点号由 Redis 租约自动分 |
 | K37 | §10.8 robot 步骤 | 用三个新账号（`<prefix>xn<tag>_1/_2/_3`）：前两个同场景就让 2 号 LeaveGame、等 6 s 重登（至多 4 次），3 号决定谁是 A、自己当留在 S_A 的观察者 C；63 在 MessageLimiter 表里没有行（缺省每秒 3 条），连发步骤前等 1.2 s，单测对着同步来的配表核对 | 不让限频在 scene 之前挡掉第二条 63 |
 | K38 | §10.7 M1–M11 | robot 覆盖 M1–M3、M8 与目标不存在、顶号；M4–M7、M9–M11（持行锁、kill -9、停 scene-manager、资产通道、停服交错、停续约）没有自动化（停服交错由 `SceneShutdownHandOffTest` 单测覆盖） | 需要人工注入故障 |
 | K39 | §10.8「改造」 | ReconnectScenario / TeamScenario 不用改（per-node 保持）；但 movement robot 假定 A、B 在同一场景实例，双节点切片上登录按人数把两人分到不同节点，起步条件不成立（「A、B 没有分到同一场景实例」），team robot 在双节点切片上只是碰巧同节点才过——两者照旧在单节点切片上跑；要在双节点上跑需让 B 先 63 到 A 的场景（未做） | 登录分配按人数挑频道 |
@@ -1430,22 +1430,22 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
   货币、属性加点、背包、任务、放技能、宝宝、通用资产通道七行一并改为已接入（放技能记为有意不照搬基线对冻结施法者的早退，K28）。盘点（`docs/porting/inventory/`）的 java 列与勘误没有改：
   盘点是 2026-10-02 的参考快照（roadmap 头注「以代码为准」），勘误留在 §8.3。architecture.md 的 §10 原本就没有列跨节点换图，改为在已补上的括注里登记。
 - **§6.2**：nacos profile 下经注册中心找 scene-manager 没做（K16）。
-- **§7.2**：冻结时长桶见 K18；gate 多 `invalid`（K29）；存储写多 `handed_off`（K6）；勾稽按 K17、K31 调整；另有 `xm_scene_link_dropped_total{reason="write_failed"}`、
-  `xm_scene_moves_total{result="frozen"}`、`xm_scene_team_follow_total{result="switching"}`、`xm_scene_channel_relocations_total{result="switching"}`、
-  `xm_gate_link_frames_total{type="player_transfer"}` / `xm_scene_link_frames_total{type="player_transfer"}`（按帧类型自动出现）。指标全集以 architecture.md §11 为准。
+- **§7.2**：冻结时长桶见 K18；gate 多 `invalid`（K29）；存储写多 `handed_off`（K6）；勾稽按 K17、K31 调整；另有 `game_scene_link_dropped_total{reason="write_failed"}`、
+  `game_scene_moves_total{result="frozen"}`、`game_scene_team_follow_total{result="switching"}`、`game_scene_channel_relocations_total{result="switching"}`、
+  `game_gate_link_frames_total{type="player_transfer"}` / `game_scene_link_frames_total{type="player_transfer"}`（按帧类型自动出现）。指标全集以 architecture.md §11 为准。
 - **§10.8「改造」**：见 K39。
 
 ### 11.6 验证
 
-- 全量 `clean install`（真 Redis / MySQL / Kafka 集成测试打开；xm-battle-engine 与并行批次在建的 xm-battle 不在内）共 3053 个测试，唯一的错误是 4.5 起就有的 xm-api
-  `SceneAssetOpClientsTest` 首次建连计时用例（在 HEAD 导出的代码上同样失败、单跑通过），已另行放宽「第一次调用」的预算修好（之后 xm-api 31 个全绿）。
-  评审修复后 `-pl xm-scene,xm-gate install`（真 Redis / MySQL）全绿：xm-scene 738 个（1 个默认跳过的基准）、xm-gate 161 个，各含工作区里其他批次未提交的 3 个用例，
-  本批代码对应 xm-scene 735 个、xm-gate 158 个；xm-player-store 55 个、xm-scene-manager 191 个、xm-robot 129 个。
-- 双节点切片（`XM_RUN_MODE=dev XM_SCENE_NODES=2`）：robot `cross-node` 34 / 34 共 4 轮（第一轮单独一套切片，另三轮连跑在第二套上），修复后的新包上再跑一轮 34 / 34、smoke 3 / 3，
+- 全量 `clean install`（真 Redis / MySQL / Kafka 集成测试打开；game-battle-engine 与并行批次在建的 game-battle 不在内）共 3053 个测试，唯一的错误是 4.5 起就有的 game-api
+  `SceneAssetOpClientsTest` 首次建连计时用例（在 HEAD 导出的代码上同样失败、单跑通过），已另行放宽「第一次调用」的预算修好（之后 game-api 31 个全绿）。
+  评审修复后 `-pl game-scene,game-gate install`（真 Redis / MySQL）全绿：game-scene 738 个（1 个默认跳过的基准）、game-gate 161 个，各含工作区里其他批次未提交的 3 个用例，
+  本批代码对应 game-scene 735 个、game-gate 158 个；game-player-store 55 个、game-scene-manager 191 个、game-robot 129 个。
+- 双节点切片（`GAME_RUN_MODE=dev GAME_SCENE_NODES=2`）：robot `cross-node` 34 / 34 共 4 轮（第一轮单独一套切片，另三轮连跑在第二套上），修复后的新包上再跑一轮 34 / 34、smoke 3 / 3，
   两个 scene 与 gate 的日志没有 ERROR。连跑三轮的指标：9 次交出，scene `transfers{handed_off}` 9 = gate `scene_transfers{rebound}` 9 = `{entered}` 9 = 目标节点
   `transfer_enters{ok}` 9；scene-manager `switch{ok}` 9、`{not_found}` 3 = scene `switch_resolves{rejected}` 3（不存在的 scene_id 那一步）；冻结后改动、冻结闸拒绝、
   链路丢帧都是 0；最长冻结 243 ms。smoke / reconnect / team（碰巧同节点）/ guild-economy 在双节点切片上也过，movement 见 K39。
-  唯一的 ERROR 在 xm-guild 停服时（scene 节点先停，Dubbo 重连资产端口失败），与 5.2 无关。
+  唯一的 ERROR 在 game-guild 停服时（scene 节点先停，Dubbo 重连资产端口失败），与 5.2 无关。
 - 单节点切片：smoke 3 / 3、movement 20 / 20、skill 15 / 15、team 38 / 38、reconnect 9 / 9、guild-economy 81 / 81。
 
 ### 11.7 批次 6.3（回合制战斗冻结）接入后的变化（2026-10-06）
@@ -1456,7 +1456,7 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
 **交出这一侧拒绝战斗中的玩家**（兑现 §0.4 那一行的契约）
 
 - **63**：处理器第一步判 `inBattle()` → 应答 3023，先于换图在途的 3014（§5.5 第 1 条的次序）。
-- **`SceneWorld.beginRemoteSwitch` 拒绝战斗中的玩家**：不进 RESOLVING，只记 ERROR 并计 `xm_scene_switch_resolves_total{result="in_battle"}`。63 已先回 3023，走到这里说明调用方漏了战斗闸；
+- **`SceneWorld.beginRemoteSwitch` 拒绝战斗中的玩家**：不进 RESOLVING，只记 ERROR 并计 `game_scene_switch_resolves_total{result="in_battle"}`。63 已先回 3023，走到这里说明调用方漏了战斗闸；
   把判断放在 `begin` 入口，以后新增的交出发起方（5.5 的疏散等）不必各自记得判战斗。
 - **`onSwitchTargetChosen` 的远端分支在冻结之前复查 `inBattle()`**：选目标期间进了战斗（迟到确认 / 进场恢复在 RESOLVING 时挂上了战斗冻结）→ 回 NONE、推 23 `{3023}`、计 `switch_resolves{in_battle}`
   （基线起交接前复查，`player_lifecycle.cpp:2853-2860`，§2.11 R12）。本节点分支照旧同步 `switchScene`。

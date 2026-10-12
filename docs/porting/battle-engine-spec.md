@@ -15,13 +15,13 @@
 > - `expr.h`：`cpp/libs/engine/config/table_expression.h`；`sha256.cpp`：`cpp/libs/engine/core/utils/encode/sha256.cpp`；
 >   `cpp_config.h.j2`：`tools/data_table_exporter/templates/cpp_config.h.j2`
 > - `battle_data.proto` / `battle_node.proto` / `player_battle.proto`：mmorpg `proto/battle/` 下，**行号用 mmorpg 的**。
->   Java 同步副本在 `xm-proto/src/main/proto/proto/battle/`，只多第 2–4 行 java option，所以 **Java 行号 = mmorpg 行号 + 3**（去掉这几行后逐行 diff 为空）。
+>   Java 同步副本在 `game-proto/src/main/proto/proto/battle/`，只多第 2–4 行 java option，所以 **Java 行号 = mmorpg 行号 + 3**（去掉这几行后逐行 diff 为空）。
 >
 > **路径缩写**（Java 侧，相对 `D:\work\xuanming-server-mmo`）
-> - 以 `xm-`、`docs/`、`config-data/`、`contract/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`。
-> - 表 schema 是同步产物 `xm-table/src/main/proto/<sheet>_table.proto`。真表数据 `config-data/tables/*.pb` 里七张战斗表与 mmorpg
+> - 以 `game-`、`docs/`、`config-data/`、`contract/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`。
+> - 表 schema 是同步产物 `game-table/src/main/proto/<sheet>_table.proto`。真表数据 `config-data/tables/*.pb` 里七张战斗表与 mmorpg
 >   `generated/tables/*.pb` 的 sha256 逐一相同（本稿核对过）。
-> - 「生成的 `SkillRows.java`」等指 `xm-table/target/generated-sources/annotations/com/game/table/` 下的编译期产物（`docs/design/config-tables.md`）。
+> - 「生成的 `SkillRows.java`」等指 `game-table/target/generated-sources/annotations/com/game/table/` 下的编译期产物（`docs/design/config-tables.md`）。
 >
 > **本稿的来历**：由三份分区稿合并：
 > - 核心：状态、初始化、行动、回合、普攻 / 防御 / 逃跑、死亡、胜负、快照、RNG；
@@ -122,7 +122,7 @@ Java 的做法：
 **2.6 伤害公式（已移植）**
 
 - 基线：`rules.h:36-81` 是实时与回合共用的纯公式。暴击 ×2、PvP ×0.3、防御 ×0.5 都不在公式里（`rules.h:6-7`）。
-- Java：直接复用 `com.game.common.combat.CombatDamageRules`（`xm-common/src/main/java/com/game/common/combat/CombatDamageRules.java:38-94`；`PARITY.md:77`）。
+- Java：直接复用 `com.game.common.combat.CombatDamageRules`（`game-common/src/main/java/com/game/common/combat/CombatDamageRules.java:38-94`；`PARITY.md:77`）。
   它的无符号换算 `unsignedToDouble` / `unsignedFromDouble` 是包私有的（`:97`、`:105`），要抽成公共件（§10.7）。
 
 **2.7 当前气血 / 复活（已移植部分）**
@@ -134,7 +134,7 @@ Java 的做法：
 
 - 基线：C++ 用 exprtk，每次求值都重新编译；`random()` 走全局 `rand()`，值域 [0,1]（`expr.h:6-11`、`:59-63`）。
   调用方式是两步：先设参数，再取值（`table_provider.cpp:61-72`；`cpp_config.h.j2:118-133`）。
-- Java：`TableExpression` 在加载期编译、求值无状态（`xm-table/src/main/java/com/game/table/load/TableExpression.java:39-64`；`PARITY.md:53`）。
+- Java：`TableExpression` 在加载期编译、求值无状态（`game-table/src/main/java/com/game/table/load/TableExpression.java:39-64`；`PARITY.md:53`）。
   生成的 `evalDamage(row, level)` 缺省用 `ThreadLocalRandom`（生成的 `SkillRows.java:80-88`；`docs/design/config-tables.md:72`）。
 - **引擎必须调用带 `RandomGenerator` 参数的重载，并禁用 `random()`**（§9.3、D4）。
 
@@ -144,7 +144,7 @@ Java 的做法：
 |---|---|---|---|
 | kRoundDurationMs | 6000 | :15 | 时间换回合 |
 | kDefaultMaxRounds | 30 | :18 | 回合上限的缺省值 |
-| kMatchModePveSolo / PveTeam | 4 / 5 | :22-23 | 判定 PVE（`engine.cpp:1312-1315`）。其余值一律按非 PVE 处理，包括 0、1 = 5V5、3 = 1V1、6 = 切磋（`xm-proto/src/main/proto/proto/match/match_service.proto:56-62`） |
+| kMatchModePveSolo / PveTeam | 4 / 5 | :22-23 | 判定 PVE（`engine.cpp:1312-1315`）。其余值一律按非 PVE 处理，包括 0、1 = 5V5、3 = 1V1、6 = 切磋（`game-proto/src/main/proto/proto/match/match_service.proto:56-62`） |
 | kMaxBattleTeamSize | 5 | :30 | 每队玩家上限 |
 | kAutoRoundIntervalMs | 2000 | :35 | 只有节点用 |
 | 技能类型位号 Passive / General / Channel / Toggle / Activate / BasicAttack | 0 / 1 / 2 / 3 / 4 / 5 | :40-45 | `skill_type` 存的是**位号**，不是掩码 |
@@ -180,13 +180,13 @@ Java 的做法：
 
 | 码 | 名 | 出处 | Java 取法 |
 |---|---|---|---|
-| 1000 | kSuccess | `xm-table/src/main/proto/tip/common_error_tip.proto:12` | `CommonErrorTip.common_error.kSuccess_VALUE`（包 `com.game.table`，参照 `xm-scene/src/main/java/com/game/scene/skill/SkillRules.java:22-25`） |
+| 1000 | kSuccess | `game-table/src/main/proto/tip/common_error_tip.proto:12` | `CommonErrorTip.common_error.kSuccess_VALUE`（包 `com.game.table`，参照 `game-scene/src/main/java/com/game/scene/skill/SkillRules.java:22-25`） |
 | 1001 | kInvalidTableId | 同上 :14 | 同上 |
 | 1002 | kInvalidTableData | 同上 :16 | 同上 |
 | 1005 | kInvalidParameter | 同上 :22 | 同上 |
 | 1009 | kThisEntityIsInvalid | 同上 :30 | 同上 |
-| 6007 | kBagInsufficientItems | `xm-table/src/main/proto/tip/bag_error_tip.proto:26` | `BagErrorTip.bag_error.kBagInsufficientItems_VALUE` |
-| 7001 | kSkillInvalidTargetId | `xm-table/src/main/proto/tip/skill_error_tip.proto:14` | `SkillErrorTip.skill_error.*_VALUE` |
+| 6007 | kBagInsufficientItems | `game-table/src/main/proto/tip/bag_error_tip.proto:26` | `BagErrorTip.bag_error.kBagInsufficientItems_VALUE` |
+| 7001 | kSkillInvalidTargetId | `game-table/src/main/proto/tip/skill_error_tip.proto:14` | `SkillErrorTip.skill_error.*_VALUE` |
 | 7002 | kSkillInvalidTarget | 同上 :16 | 同上 |
 | 7003 | kSkillCooldownNotReady | 同上 :18 | 同上 |
 | 7004 | kSkillCannotBeCastInCurrentState（法力不足也借用这个码） | 同上 :20 | 同上 |
@@ -685,13 +685,13 @@ else if (roundIndex >= maxRounds) outcome = SIDE_B_WIN    // 打满回合进攻�
 
 1. 施法者身上没有类型 31 的 buff（表行缺失的条目跳过）→ 通过。
 2. `FindSkillPermission(1)` 为空 → **1002**。
-   - 注意：Java 实时侧 `SkillRules.checkSkillPermission` 在行缺失时回 1001（`xm-scene/src/main/java/com/game/scene/skill/SkillRules.java:78-80`）。口径不同，**不能复用**。
+   - 注意：Java 实时侧 `SkillRules.checkSkillPermission` 在行缺失时回 1001（`game-scene/src/main/java/com/game/scene/skill/SkillRules.java:78-80`）。口径不同，**不能复用**。
 3. 对技能的每个 `skill_type` 取值 `b` 依次判断：
    - `(int32) b ≥ 行宽` → 1002（`:575-578`）；
    - 格值为 0 → 1002（`:583-585`）；
    - 格值不是 1000 → 原样返回这个格值（`:586-588`）。
 4. 全部通过，或 `skill_type` 为空 → 1000。
-5. C++ 遇到 `b ≥ 2^31` 时，`static_cast<int32_t>` 会变成负下标（UB）。Java 用 `Integer.compareUnsigned(b, size) >= 0` 判为 1002，与 xm-scene 一致（`SkillRules.java:82-84`；D5）。
+5. C++ 遇到 `b ≥ 2^31` 时，`static_cast<int32_t>` 会变成负下标（UB）。Java 用 `Integer.compareUnsigned(b, size) >= 0` 判为 1002，与 game-scene 一致（`SkillRules.java:82-84`；D5）。
 
 ### 4.6 耗蓝
 
@@ -884,7 +884,7 @@ else if (roundIndex >= maxRounds) outcome = SIDE_B_WIN    // 打满回合进攻�
 2. 取表行、副本条目（第一个 count > 0 的）、目标（target 为 0 时取自己）。任一为空就 return，属于最后防线（`:966-972`）。
 3. 扣副本：`count - 1`，`itemUseCounts[本人]++`（`:975-976`）。
 4. 记消耗账：在 `settlements[本人].items_consumed` 里找第一条同 item id 的条目，找不到就追加；`count + 1`（`:978-991`）。**记在用药者名下**，给队友用药也一样。
-5. 回血：`healed = heal_hp > 0 ? ApplyHeal(target, toDouble(heal_hp)) : 0`（`:994-996`）。`heal_hp` 是 uint64（`xm-table/src/main/proto/item_table.proto:28`）。
+5. 回血：`healed = heal_hp > 0 ? ApplyHeal(target, toDouble(heal_hp)) : 0`（`:994-996`）。`heal_hp` 是 uint64（`game-table/src/main/proto/item_table.proto:28`）。
 6. 回蓝：`heal_mp > 0` 且目标未死时（`:998-1004`）：
    - `after = minUnsigned(max_mana, before + heal_mp)`，加法按 uint64，可能回绕；
    - `restored = after - before`，`before > max_mana` 时回绕成巨大值；
@@ -1143,7 +1143,7 @@ public interface BattleData {
 | C++ 生产实现（`table_provider.cpp`） | `TableBattleData` 的写法 | 注意 |
 |---|---|---|
 | 各表 `FindByIdSilent(id).first`（:13-36） | `tables.skill().find(id)` 等（生成的 `SkillRows.java:67-69`；`ConfigTables.java:164-269`） | 一律用 `find`。`get` 遇到缺行会抛 `NoSuchElementException`（`SkillRows.java:71-78`） |
-| `GetCooldownDurationMs`（:38-42） | `cooldown().find(id).map(r -> Integer.toUnsignedLong(r.getDuration())).orElse(0L)` | `duration` 是 uint32 毫秒（`xm-table/src/main/proto/cooldown_table.proto:21`） |
+| `GetCooldownDurationMs`（:38-42） | `cooldown().find(id).map(r -> Integer.toUnsignedLong(r.getDuration())).orElse(0L)` | `duration` 是 uint32 毫秒（`game-table/src/main/proto/cooldown_table.proto:21`） |
 | `GetDungeonMonsterIds`（:44-59，只收 `monster(i) != 0`） | `getMonsterList()` 过滤掉 0，保持表内顺序 | |
 | `GetSkillDamage`（:61-66，先 `SetDamageParam({level})` 再 `GetDamage`） | `find(id).map(r -> tables.skill().evalDamage(r, level, FORBID_RANDOM)).orElse(0.0)` | 行不存在时 C++ 返回 0.0（`cpp_config.h.j2:119-128`），但引擎只在查到行之后才调用。行对象必须来自同一份快照，否则抛 `IllegalArgumentException`（`SkillRows.java:86-96`） |
 | `GetBuffHealthRegeneration`（:68-72，参数 `{level, lostHealth}`） | `tables.buff().evalHealthRegeneration(r, level, lostHealth, FORBID_RANDOM)`（生成的 `BuffRows.java:102-104`） | schema 里第二个参数叫 `health`（`buff_table.proto:92`），但引擎传的是**已损失气血**（`engine.cpp:1125-1128`），按位置传即可 |
@@ -1222,7 +1222,7 @@ private static void section(ByteArrayOutputStream buf, String name, List<? exten
 }
 ```
 
-- Java 没有外层 `<Sheet>TableData` 类。`TableSource` 按字段 1 逐条解析（`xm-table/src/main/java/com/game/table/load/TableSource.java:35-36`），所以逐行写字段 1，得到的字节与序列化外层消息相同。
+- Java 没有外层 `<Sheet>TableData` 类。`TableSource` 按字段 1 逐条解析（`game-table/src/main/java/com/game/table/load/TableSource.java:35-36`），所以逐行写字段 1，得到的字节与序列化外层消息相同。
 - 行里不会有未知字段，加载期就拒绝了（`TableSource.java:132-137`）。
 - **按快照计算、挂在 `TableBattleData` 上**：构造时就算好，以便提前暴露问题。热更产生新快照时自然重算，不存在 C++「热重载后指纹与内存表脱节」的隐患（`fp.h:17-19`；D3）。
 - 已核对：对当前 `config-data/tables`，Java 确定性重序列化后求出的指纹，与直接对七个 `.pb` 原始字节按同一格式求哈希的结果相同（§13.2）。
@@ -1287,14 +1287,14 @@ private static void section(ByteArrayOutputStream buf, String name, List<? exten
 
 | 项 | 取值 | 依据 |
 |---|---|---|
-| 模块 | 新建纯库模块 **`xm-battle-engine`**（jar） | `docs/porting/inventory/combat.md:167` |
-| 包名 | **`com.game.battle.engine`**；6.2 的节点用 `com.game.battle.*` 下的其他子包 | `AGENTS.md:34`；先例 `xm-player-store` → `com.game.player.store` |
-| 编译依赖 | `xm-proto`（战斗消息、`BaseAttributesComp`、`com.game.proto.match.MatchMode`）；`xm-table`（`ConfigTables`、行类、tip 枚举）；`xm-common`（`CombatDamageRules` 与新抽出的 `Unsigned`） | `xm-common/pom.xml:20` 已依赖 xm-proto |
+| 模块 | 新建纯库模块 **`game-battle-engine`**（jar） | `docs/porting/inventory/combat.md:167` |
+| 包名 | **`com.game.battle.engine`**；6.2 的节点用 `com.game.battle.*` 下的其他子包 | `AGENTS.md:34`；先例 `game-player-store` → `com.game.player.store` |
+| 编译依赖 | `game-proto`（战斗消息、`BaseAttributesComp`、`com.game.proto.match.MatchMode`）；`game-table`（`ConfigTables`、行类、tip 枚举）；`game-common`（`CombatDamageRules` 与新抽出的 `Unsigned`） | `game-common/pom.xml:20` 已依赖 game-proto |
 | 不依赖 | Spring、Netty、Redis、日志框架 | 纯库（`engine.cpp:19-20`） |
 | 测试依赖 | `spring-boot-starter-test`（test scope），与其他库模块一致 | `docs/design/tech-stack.md:27` |
 | 新增第三方依赖 | 无。属性测试**不引入 jqwik**（star 远低于门槛），用 JUnit 参数化 + 测试侧随机场景生成 | `AGENTS.md:29` |
-| 根 pom | `<modules>` 里加在 `xm-common` 之后、第一个进程模块之前（`pom.xml:15-37`） | 依赖方向单向（`docs/design/architecture.md:55`） |
-| 消费方 | 6.2 battle 节点进程（模块名随 6.2 定）；6.3 `xm-scene`（只用 `BattleRules`、`BattleTableFingerprint`） | |
+| 根 pom | `<modules>` 里加在 `game-common` 之后、第一个进程模块之前（`pom.xml:15-37`） | 依赖方向单向（`docs/design/architecture.md:55`） |
+| 消费方 | 6.2 battle 节点进程（模块名随 6.2 定）；6.3 `game-scene`（只用 `BattleRules`、`BattleTableFingerprint`） | |
 
 ### 10.2 类清单
 
@@ -1312,7 +1312,7 @@ private static void section(ByteArrayOutputStream buf, String name, List<? exten
 | `BattleUnit`（包私有） | 包着 `BattleActorState.Builder`，提供无符号访问器 | `engine.h:221` |
 | `EventLog`（包私有） | `group_id` / `hit_index` 计数与 `append` | `engine.cpp:1772-1788` |
 | `ActionChecks`、`BuffEngine`、`ItemLedger`（包私有） | 行动校验链；buff 增删与 tick；道具副本与消耗账。只是按职责拆文件，共用同一份状态与同一个 RNG，调用顺序严格照 C++ | `engine.cpp:386-602`、`:1037-1167`、`:1402-1564`、`:947-1012`、`:1680-1711` |
-| `com.game.common.math.Unsigned`（xm-common，新增） | 无符号 long 与 double 互转（含饱和变体）、`minUnsigned`。`CombatDamageRules` 改为委托它，行为不变 | `CombatDamageRules.java:96-111` |
+| `com.game.common.math.Unsigned`（game-common，新增） | 无符号 long 与 double 互转（含饱和变体）、`minUnsigned`。`CombatDamageRules` 改为委托它，行为不变 | `CombatDamageRules.java:96-111` |
 
 ### 10.3 API
 
@@ -1401,19 +1401,19 @@ public final class TurnBattleEngine {
 
 ### 10.7 需要改动的既有模块（小改动）
 
-- **xm-common**：新增 `com.game.common.math.Unsigned`：
+- **game-common**：新增 `com.game.common.math.Unsigned`：
   - `toDouble(long)`：照 `CombatDamageRules.java:97-102`；
   - `fromDouble(double)`：照 `:105-111`，前置条件 `0 ≤ d < 2^64`；
   - 饱和变体 `fromDoubleSaturating`：NaN → 0，≥ 2^64 → UINT64_MAX；
   - `minUnsigned`。
 
   `CombatDamageRules` 改为委托它，现有 `CombatDamageRulesTest` 必须仍然全绿。也可以只把这两个方法改成 public（§12.3 Q6）。
-- **xm-table**（手写运行时，不是同步产物，可以改）：按 §9.3 选定的 random 检测方式改动，或者不改。
+- **game-table**（手写运行时，不是同步产物，可以改）：按 §9.3 选定的 random 检测方式改动，或者不改。
 
 ### 10.8 文档与 PARITY 交付
 
 - **PARITY.md**：
-  - 新增两行：「回合制战斗确定性引擎（纯库）」「战斗配表指纹」。基线路径即本稿开头列出的文件，模块 `xm-battle-engine`。状态写「已对齐（有意差异见 battle-engine-spec §12）」，跨语言金样未落地前注明「跨语言金样待 mmorpg」。
+  - 新增两行：「回合制战斗确定性引擎（纯库）」「战斗配表指纹」。基线路径即本稿开头列出的文件，模块 `game-battle-engine`。状态写「已对齐（有意差异见 battle-engine-spec §12）」，跨语言金样未落地前注明「跨语言金样待 mmorpg」。
   - 更新三行：`PARITY.md:53`（表达式列）和 `:77`（伤害公式）补「6.1 消费方已接入」；`:80`（实时 buff）补「回合制 buff 镜像随 6.1 已移植」。
 - **docs/design/architecture.md**：§2 模块表加一行（库：回合制战斗确定性引擎、战斗配表指纹），并调整依赖方向（`:29-55`）。
 - **docs/porting/roadmap.md:80**：完成时标 ✅ 与 commit。
@@ -1464,7 +1464,7 @@ public final class TurnBattleEngine {
 8. **`AddBuffToActor` 的递归**之后，一律按实例号重新查找下标，不持有 builder 引用（§5.2）。
 9. **事件分组**：被跳过、落空的出手也要先开组（§3.4）。
 10. **表达式**：只用带 `RandomGenerator` 的重载，传入 `FORBID_RANDOM`；行对象必须来自同一份快照（§9.1）。
-11. **不复用 xm-scene 的 `SkillRules` / `SkillTables`**：缺行时的回码（1001 对 1002）、状态集合、目标语义都不同，而且引擎是纯库，不应依赖 xm-scene。
+11. **不复用 game-scene 的 `SkillRules` / `SkillTables`**：缺行时的回码（1001 对 1002）、状态集合、目标语义都不同，而且引擎是纯库，不应依赖 game-scene。
 12. **`ValidateAction` 与 `SubmitAction` 必须走同一份校验代码**，否则会出现「客户端收到成功、实际没落账」（`engine.h:43-46`）。
 
 ### 11.4 边界速查
@@ -1493,7 +1493,7 @@ public final class TurnBattleEngine {
 4. Java 分区稿只建议给 `TableExpression` 加 `usesRandom()`：生成的 `SkillRows` / `BuffRows` 不暴露每行的表达式对象（`SkillRows.java:37`），光加这个方法用不上，需要另选一种接法（§9.3、§12.3 Q5）。
 5. **分歧裁定**：
    - 挂机开关的成功码，核心稿主张照搬 0，Java 稿主张 1000。本稿取 1000（D2，§12.3 Q3）。
-   - 模块 / 包名，核心稿留待编者定。本稿取 `xm-battle-engine` / `com.game.battle.engine`（§10.1）。
+   - 模块 / 包名，核心稿留待编者定。本稿取 `game-battle-engine` / `com.game.battle.engine`（§10.1）。
    - 单位状态的承载，核心稿说可以用领域对象 + `toProto()`，Java 稿主张包 builder。本稿取 builder（§10.4），理由是快照字段保真。
 6. 技能分区稿写「怪物 2 掉物品 10×1（5000 万分比）」：drop_rate 是万分比，5000 即 50%。
 7. 核心分区稿说 scene「max 气血 / 法力缺失时回落」，没有写回落值：scene 回落到 `max(当前, 1)`（`pb.cpp:932-940`）；引擎的 `FallbackMax` 回落到当前值，可能为 0（`engine.cpp:27-29`）。
@@ -1538,7 +1538,7 @@ public final class TurnBattleEngine {
 | D2 | 挂机开关的成功码 | 返回 **0**，与 tip 不同域；节点专门注释过这个坑（`room.cpp:1002-1004`） | 返回 1000，与 `validateAction` 同域；节点成功时不填 `error_message` | 否 | 否 |
 | D3 | 表快照绑定 | 每次读全局表管理器；指纹进程内缓存，靠 `Refresh` 保持同步（`fp.cpp:99-114`） | 每局绑定开局时的 `ConfigTables` 快照；指纹按快照计算、随快照替换 | 否（基线也没有热更） | 否 |
 | D4 | 战斗公式里的 `random()` | exprtk 的 `random()` 走 C 的 `rand()`，破坏确定性（`expr.h:6-11`） | 构造 `TableBattleData` 时拒绝（`TableLoadException`）；求值时传入的随机源一被调用就抛异常 | 否（现有数据不含） | 建议 mmorpg 导表期也拒绝（N11） |
-| D5 | C++ UB 改为有定义（现有数据都触达不到） | 见 §11.2 | ① `roundsFromSeconds`：`!(s > 0)`（含 NaN）→ 1；`s × 1000 ≥ 2^64`（含 +∞）→ 毫秒数按 UINT64_MAX 处理，结果为 1。② `ApplyHeal`：非有限 raw → 0（不回血、不出事件）；和 ≥ 2^64 → 饱和到 UINT64_MAX 再与上限取小。③ 周期回合数为 0 → 不 tick（不抛异常），递减照常。④ SkillPermission 位号 ≥ 2^31 → 1002，同 xm-scene（`SkillRules.java:82-84`） | 否 | 否 |
+| D5 | C++ UB 改为有定义（现有数据都触达不到） | 见 §11.2 | ① `roundsFromSeconds`：`!(s > 0)`（含 NaN）→ 1；`s × 1000 ≥ 2^64`（含 +∞）→ 毫秒数按 UINT64_MAX 处理，结果为 1。② `ApplyHeal`：非有限 raw → 0（不回血、不出事件）；和 ≥ 2^64 → 饱和到 UINT64_MAX 再与上限取小。③ 周期回合数为 0 → 不 tick（不抛异常），递减照常。④ SkillPermission 位号 ≥ 2^31 → 1002，同 game-scene（`SkillRules.java:82-84`） | 否 | 否 |
 | D6 | `SelfItems` 排序 | 不稳定的 `std::sort` | 稳定排序，同 id 时保持快照顺序 | 否（scene 已按 id 合并，`pb.cpp:1059`） | 否 |
 | D7 | 可施放技能过滤 | 引擎与 scene 两处各写一份（`engine.h:115`；`pb.cpp:973-988`） | 都调用 `BattleRules.isTurnBattleCastableSkill` | 否 | 可选（mmorpg 合并一处） |
 | D8 | `BattleData` 没有 `bonus_damage` | 接口有，引擎不调用（`provider.h:52`） | 不移植 | 否 | 否 |
@@ -1568,10 +1568,10 @@ public final class TurnBattleEngine {
    方案 A：由 `tools/ContractSync.java` 新增一个「测试夹具」类别同步过来，`--check` 一并覆盖，不许手改（与契约同一纪律）。方案 B：人工拷贝，在文件头记录源 commit。推荐 A。
 3. **Q3：D2 挂机开关返回 1000 还是照搬 0？**
    推荐 1000：内部 API 统一 tip 域，基线节点里专门注释过这个坑（`room.cpp:1002-1004`）；客户端看不出差别。
-4. **Q4：模块名、包名**：`xm-battle-engine` / `com.game.battle.engine`（推荐），还是并入 6.2 的进程模块？
+4. **Q4：模块名、包名**：`game-battle-engine` / `com.game.battle.engine`（推荐），还是并入 6.2 的进程模块？
    推荐独立库：6.3 的 scene 也要用 `BattleRules` 与指纹，不应依赖战斗进程。
 5. **Q5：`random()` 检测的接法**（§9.3 的 a / b / c）。
-   推荐 (b) 正则：不改 xm-table 与 codegen，判定口径与 `TableExpression` 的词法一致。若希望语法级精确，选 (a)。
+   推荐 (b) 正则：不改 game-table 与 codegen，判定口径与 `TableExpression` 的词法一致。若希望语法级精确，选 (a)。
 6. **Q6：无符号工具放哪？**
    新建 `com.game.common.math.Unsigned`、`CombatDamageRules` 改为委托（推荐），还是只把 `CombatDamageRules` 的两个方法改成 public。
 7. **Q7：exprtk 是否改写 `0.013*level*health` 的运算顺序？**
@@ -1585,8 +1585,8 @@ public final class TurnBattleEngine {
 ## 13 测试计划
 
 **命令**
-- `./mvnw -B -pl xm-battle-engine -am test`。
-- 改了 xm-common（`Unsigned`）之后：`./mvnw -B -pl xm-common,xm-battle-engine -am test`，`CombatDamageRulesTest` 必须仍然全绿。
+- `./mvnw -B -pl game-battle-engine -am test`。
+- 改了 game-common（`Unsigned`）之后：`./mvnw -B -pl game-common,game-battle-engine -am test`，`CombatDamageRulesTest` 必须仍然全绿。
 - 同步契约之后照 `AGENTS.md` §4 做 `clean install`。
 
 测试方法名用中文，与 `CombatDamageRulesTest` 一致。
@@ -1651,7 +1651,7 @@ public final class TurnBattleEngine {
   - 可施放：[0]、[2]、[3]、[5,3]、[11,3] 不可；[]、[1]、[1,1]、[4]、[6]…[10] 可；
   - `isAreaSkill`：[1,2] 与 [2,2] 为真，[3]、[1,1]、[] 为假；
   - 法力消耗：只认资源 1，真表技能 1 的 `[1:40, 2:20, 0:0, 0:0]` → 40。
-- **`UnsignedTest`**（xm-common）：
+- **`UnsignedTest`**（game-common）：
   - `toDouble(-1L) = 1.8446744073709552E19`；
   - `fromDouble` 在 2^63 附近的值；
   - 饱和变体对 NaN、+∞、2^64 的处理。
@@ -1906,7 +1906,7 @@ public final class TurnBattleEngine {
 - 环境变量 `TURN_BATTLE_GOLDEN_UPDATE=1` 时写出金样，否则比对。
 - 同时在 `fp_test.cpp` 加一条 `EXPECT_EQ(MakeTables 指纹, "11ca1a2d9b625cceb3ce199148d03133")`。
 
-**Java 侧**：`TurnBattleGoldenTest` 用移植过来的场景构造器建出相同的输入。**先比对输入摘要**（防止两边场景搭建走样），再逐回合比对输出。金样放在 `xm-battle-engine/src/test/resources/golden/turn_battle/`，来源见 Q2。
+**Java 侧**：`TurnBattleGoldenTest` 用移植过来的场景构造器建出相同的输入。**先比对输入摘要**（防止两边场景搭建走样），再逐回合比对输出。金样放在 `game-battle-engine/src/test/resources/golden/turn_battle/`，来源见 Q2。
 
 **场景目录**（每个场景固定种子）
 

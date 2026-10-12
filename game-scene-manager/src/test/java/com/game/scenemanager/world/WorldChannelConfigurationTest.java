@@ -1,0 +1,69 @@
+package com.game.scenemanager.world;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+
+import com.game.discovery.world.WorldChannelStore;
+import com.game.scenemanager.SceneIdAllocator;
+import com.game.scenemanager.SceneNodeSource;
+import com.game.scenemanager.WorldSceneConfigs;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
+import java.util.LinkedHashSet;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+import org.redisson.api.RedissonClient;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+
+/**
+ * 装配（不起 Dubbo、不连 Redis）：{@code game.scene-manager.world.*} 绑定、Q8 启动校验让上下文起不来、{@code leader-eligible=false} 不起线程、
+ * 健康组件与指标 bean 在场。发号租约不归控制面（批次 5.3 R5）：{@link SceneIdAllocator} 是 {@code SceneManagerConfiguration} 里的独立 bean，
+ * 这里用不占租约的测试版代替，{@code leader-eligible=false} 时控制面照样拿得到它的 worker；真 Redis 上「每个副本都申领」见
+ * {@code SceneIdAllocatorRedisIntegrationTest}。
+ */
+class WorldChannelConfigurationTest {
+
+    private static final int WORKER = 17;
+
+    private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withUserConfiguration(WorldChannelConfiguration.class)
+            .withBean(SceneIdAllocator.class, () -> SceneIdAllocator.forTesting(WORKER, () -> true))
+            .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
+            .withBean(SceneNodeSource.class, () -> zone -> List.of())
+            .withBean(WorldSceneConfigs.class, () -> new WorldSceneConfigs(1, new LinkedHashSet<>(List.of(1, 2))))
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+            .withPropertyValues("game.scene-manager.world.leader-eligible=false");
+
+    @Test
+    void 只做数据面时不起控制面_其余bean在场() {
+        runner.withPropertyValues("game.scene-manager.world.channel-count-by-config.[1]=16",
+                        "game.scene-manager.world.coverage=per-node")
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    assertThat(ctx.getBean(WorldChannelControlPlane.class).coordinator()).isNull();
+                    assertThat(ctx.getBean(WorldChannelControlPlane.class).idWorker())
+                            .as("不竞选的副本也有发号 worker（实例取号用，R5）").isEqualTo(WORKER);
+                    assertThat(ctx).hasSingleBean(WorldChannelStore.class);
+                    assertThat(ctx).hasSingleBean(WorldChannelMetrics.class);
+                    assertThat(ctx).hasBean("worldChannelsHealthIndicator");
+                    WorldChannelProperties props = ctx.getBean(WorldChannelProperties.class);
+                    assertThat(props.seedFor(1)).isEqualTo(16);
+                    assertThat(props.reservationTtl()).isEqualTo(Duration.ofSeconds(10));
+                    assertThat(ctx.getBean(MeterRegistry.class).get(WorldChannelMetrics.CHANNELS)
+                            .tags("scene_config", "other", "state", "draining").gauge().value()).isZero();
+                });
+    }
+
+    @Test
+    void 预占TTL短于login归属夺取等待时上下文起不来_Q8() {
+        runner.withPropertyValues("game.scene-manager.world.reservation-ttl=2s",
+                        "game.scene-manager.world.login-owner-claim-wait=3s")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure()).rootCause()
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining("owner-claim-wait");
+                });
+    }
+}

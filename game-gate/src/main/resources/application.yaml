@@ -1,0 +1,92 @@
+# game-gate 默认（local）配置：Dubbo 直连 login，不需要 Nacos。从仓库根目录启动。
+# 秘密只从环境变量注入（缺失即启动失败）：
+#   GAME_GATE_TOKEN_SECRET  gate 令牌密钥，须与 game-gateway、game-scene-manager 一致（原值逐字节相同，不做去空白：gateway 签登录令牌，
+#                         scene-manager 签跨 zone 重定向票据，批次 5.4；全部 zone 的 gate 共用同一把）
+#   GAME_NODE_LINK_SECRET   gate → scene 节点链路握手密钥，须与 game-scene 一致
+#   GAME_DUBBO_SECRET       Dubbo 调用方鉴权密钥，须与 gate 调用的全部 Dubbo 后端一致（login / friend / chat / team / guild / trade / match）
+spring:
+  application:
+    name: game-gate
+  main:
+    # 只为管理端点起一个 Servlet 容器（Tomcat）；客户端端口、scene 链路、Dubbo 都不经过它（architecture.md §11）。
+    web-application-type: servlet
+
+# 管理端点：http://127.0.0.1:18103/actuator/health 与 /actuator/prometheus；另有 GM 签名停机 /gm/identity、/gm/graceful-shutdown
+# （只收本机来的请求，GAME_GM_ALLOW_REMOTE=true 才放开；密钥 GAME_GM_ADMIN_SECRET，没配一律拒），没有别的业务接口。
+# 默认只绑本机；要被别的机器上的 Prometheus 抓取时用 GAME_MANAGEMENT_ADDRESS 指定内网地址（不要暴露到公网）。
+# 端口可用 SERVER_PORT 覆盖（Windows 上避开保留端口段 50060-50159）。
+server:
+  port: 18103
+  address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
+  # 管理端口上没有需要排空的业务请求。
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+game:
+  # 按方法热关停（运维止血阀）：每秒全量读 Redis 哈希 game:killswitch；失联超过 60 s 整体放行（fail-open）
+  killswitch:
+    enabled: true
+  zone-id: 1
+  # 运行模式：只有 dev / test 放行 GM 类客户端指令（Gm* / Debug* / Test*），其余一律按 prod 拒绝
+  run-mode: ${GAME_RUN_MODE:prod}
+  # 写进节点目录、由 gateway 下发给客户端的 gate 地址
+  advertise-host: 127.0.0.1
+  # 配置表目录（只读 MessageLimiter 表：按消息号限频，缺省每秒 3 条），相对进程工作目录；从别处启动时用 GAME_TABLE_DIR 覆盖。
+  table-dir: config-data/tables
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  dubbo:
+    login-url: tri://127.0.0.1:20881
+    # 好友后端 game-friend（Dubbo group friend）
+    friend-url: tri://127.0.0.1:20883
+    chat-url: tri://127.0.0.1:20884
+    # 组队后端 game-team（Dubbo group team）
+    team-url: tri://127.0.0.1:20885
+    # 帮会后端 game-guild（Dubbo group guild）
+    guild-url: tri://127.0.0.1:20886
+    # 聚宝斋后端 game-trade（Dubbo group trade）
+    trade-url: tri://127.0.0.1:20887
+    # 匹配后端 game-match（Dubbo group match）：MatchService 的 10 个号（排队 / 切磋 / 观战 / 补签）
+    match-url: tri://127.0.0.1:20888
+  gate:
+    client-port: 11000
+    # 对外通告的客户端端口（经 NodePort / 端口映射对外时与 client-port 不同）；0 或不配 = client-port
+    advertise-port: ${GAME_GATE_ADVERTISE_PORT:0}
+    worker-threads: 0
+    link-threads: 2
+    max-pending-requests: 64
+    illegal-packet-threshold: 50
+    handshake-timeout: 30s
+    link-connect-timeout: 3s
+    link-hello-timeout: 5s
+    link-max-queued-frames: 10000
+    shutdown-drain-timeout: 3s
+    # 已重定向的会话（给客户端推过 124 RedirectToGateNotify：226 跨 zone 传送、登录期重定向，批次 5.4）最多再留多久；
+    # 客户端通常连上目标 gate 后自己断开，到点仍在的由 gate 关闭（不推 tip）。短于 15s 拒启（客户端探测目标 gate 5s + 验票 10s）。
+    # 滚动升级顺序：gate 先于 scene 与 login——旧 gate 不认识重定向帧（当成非法改绑指令：推 23 {3023} 后断开）与 RedirectToGate 指令（静默忽略）
+    redirect-linger: 60s
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    # 同机多个 Dubbo 进程会抢 QoS 端口 22222
+    qos-enable: false
+  registry:
+    address: N/A
+  consumer:
+    check: false
+    # 与 mmorpg 路由服 ForwardTimeoutMs 一致；robot 登录各步等 15s
+    timeout: 5000

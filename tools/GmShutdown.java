@@ -23,12 +23,12 @@ import javax.crypto.spec.SecretKeySpec;
  * canonical 串签名（目标 = {@code 区:节点号:实例}，签名只对这一个进程有效），再 {@code POST /gm/graceful-shutdown}
  * （信封与原因都在请求头里），打印应答（{@code affected_count} = gate 的会话数 / scene 的在线玩家数）。
  *
- * <p>密钥只从环境变量 {@code XM_GM_ADMIN_SECRET} 读（不接受命令行传入，免得进 shell 历史）。接口只收本机来的请求，
- * 在目标机器上运行（或目标打开了 XM_GM_ALLOW_REMOTE）。
+ * <p>密钥只从环境变量 {@code GAME_GM_ADMIN_SECRET} 读（不接受命令行传入，免得进 shell 历史）。接口只收本机来的请求，
+ * 在目标机器上运行（或目标打开了 GAME_GM_ALLOW_REMOTE）。
  *
  * <p>用法（JDK 21 单文件运行）：
  * <pre>
- * XM_GM_ADMIN_SECRET=... java tools/GmShutdown.java --url http://127.0.0.1:18103 --operator alice --reason "滚动发布" \
+ * GAME_GM_ADMIN_SECRET=... java tools/GmShutdown.java --url http://127.0.0.1:18103 --operator alice --reason "滚动发布" \
  *     [--expect-node 3]
  * </pre>
  * {@code --expect-node}：只在目标的节点号就是它时才发（防止端口指错停错进程）。
@@ -48,9 +48,9 @@ public final class GmShutdown {
             usage();
             System.exit(2);
         }
-        String secret = System.getenv("XM_GM_ADMIN_SECRET");
+        String secret = System.getenv("GAME_GM_ADMIN_SECRET");
         if (secret == null || secret.isBlank()) {
-            System.err.println("没设环境变量 XM_GM_ADMIN_SECRET");
+            System.err.println("没设环境变量 GAME_GM_ADMIN_SECRET");
             System.exit(2);
         }
         String operator = opts.get("operator");
@@ -96,11 +96,11 @@ public final class GmShutdown {
 
         HttpResponse<String> response = send(http, HttpRequest.newBuilder(URI.create(url + "/gm/graceful-shutdown"))
                 .timeout(Duration.ofSeconds(10))
-                .header("X-Xm-Gm-Operator", operator)
-                .header("X-Xm-Gm-Timestamp", timestamp)
-                .header("X-Xm-Gm-Nonce", nonce)
-                .header("X-Xm-Gm-Signature", signature)
-                .header("X-Xm-Gm-Reason", URLEncoder.encode(reason, StandardCharsets.UTF_8))
+                .header("X-Game-Gm-Operator", operator)
+                .header("X-Game-Gm-Timestamp", timestamp)
+                .header("X-Game-Gm-Nonce", nonce)
+                .header("X-Game-Gm-Signature", signature)
+                .header("X-Game-Gm-Reason", URLEncoder.encode(reason, StandardCharsets.UTF_8))
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build());
         System.out.println("HTTP " + response.statusCode() + " " + response.body());
@@ -143,7 +143,7 @@ public final class GmShutdown {
     }
 
     private static void usage() {
-        System.err.println("用法：XM_GM_ADMIN_SECRET=... java tools/GmShutdown.java --url <管理端口地址> --operator <操作人>"
+        System.err.println("用法：GAME_GM_ADMIN_SECRET=... java tools/GmShutdown.java --url <管理端口地址> --operator <操作人>"
                 + " [--reason <原因>] [--expect-node <节点号>]");
     }
 

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>game-api</artifactId>
+    <name>game-api</name>
+    <description>Java 版内部契约：Dubbo 服务接口、调用方鉴权过滤器与内部 protobuf 消息（包 game.api，不是客户端契约）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <!-- Dubbo 调用鉴权的 MAC 算法（DubboCallAuth） -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-common</artifactId>
+        </dependency>
+        <!-- AccountLoginService 直接用客户端契约里的 loginpb 消息做参数 / 返回值 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-proto</artifactId>
+        </dependency>
+        <!-- 只有 com.game.api.auth 的 Dubbo 过滤器用到；optional：不用 Dubbo 的进程（game-scene 等）不会被带进 Dubbo，
+             用 Dubbo 的进程自己已依赖 dubbo-spring-boot-starter -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 资产通道传输测试（SceneAssetOpClientsTest）起真 Dubbo 提供方与调用方：调用方鉴权过滤器只从环境变量读密钥，
+                 这里给一个仅测试用的假值（不是任何环境的真密钥；先例 game-gateway/pom.xml） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <GAME_DUBBO_SECRET>game-api-unit-test-only</GAME_DUBBO_SECRET>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                    <!-- 本模块的 proto 不 import 任何依赖里的 proto；不扫描项目依赖，免得把 Dubbo 的传递依赖也拉来解析 -->
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

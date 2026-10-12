@@ -1,8 +1,8 @@
 # 功能清单：mmorpg 现有 Java 代码 + 基础设施 + 部署（对照 Java 版 xuanming-server-mmo）
 
-基线：mmorpg `26ceb70ca`；Java 版 HEAD（xm-gateway 等 14 个模块）。2026-10-02 读源码整理。
+基线：mmorpg `26ceb70ca`；Java 版 HEAD（game-gateway 等 14 个模块）。2026-10-02 读源码整理。
 
-**区域概述。** mmorpg 的 Java 部分有三块：`java/gateway_node`（Spring Boot 3.4 + JPA + jetcd + gRPC，对外 HTTP 入口：区服列表、分配 gate、排队轮询、`/api/login`、`/api/refresh-token`、公告、CDN 签名、热更检查，以及 `/admin/**` 运维接口），它在 2026-05 之后已退化为 go-zero login 的**传输垫片**——选 gate、签令牌、排队都在 `go/login` 的 `LoginPreGate`，网关自己只做区服准入（`zone_config` 表 + 1s 缓存）、Bucket4j 限流 / 开服分波、健康探测与负载档；`java/config_node`（配置表查询 / 热加载 REST，基本是演示级）；`java/springboot_satoken_auth_starter`（Sa-Token + JustAuth 的账号认证样例，往 Redis 写 `satoken:login:token:<v>`，由 go/login 的 satoken provider 读）。基础设施侧是 C++ `infra` 库（Kafka 生产 / 消费封装与控制面分区策略、带 owner_epoch 围栏的 Redis 热缓存存盘、Agones GameServer 生命周期与客户端地址自报），`deploy/`（docker compose：Kafka KRaft + 定分区 topic-init、Redis / Redis Cluster、MySQL、Nacos、Loki / Alloy / Grafana、TiDB；K8s：infra / go / java 清单、开区脚本、Agones、告警、发布打包）与 8 条 GitHub Actions。Java 版目前只有 xm-gateway 的「静态区服列表 + 自签令牌的分配 gate」两条 HTTP 路径与 Prometheus 指标；**没有 `/api/login`**（Unity 客户端 `GameClient.EnterZone` 第一步就是它，code≠0 直接失败——Java 版目前接不了 Unity 客户端，只能接 robot 的 assign-gate 直连路径）、没有排队 / 限流 / 公告 / 运维接口、没有任何部署资产（无 Dockerfile、无 compose、无 K8s、无 CI），Kafka 只在选型表里。
+**区域概述。** mmorpg 的 Java 部分有三块：`java/gateway_node`（Spring Boot 3.4 + JPA + jetcd + gRPC，对外 HTTP 入口：区服列表、分配 gate、排队轮询、`/api/login`、`/api/refresh-token`、公告、CDN 签名、热更检查，以及 `/admin/**` 运维接口），它在 2026-05 之后已退化为 go-zero login 的**传输垫片**——选 gate、签令牌、排队都在 `go/login` 的 `LoginPreGate`，网关自己只做区服准入（`zone_config` 表 + 1s 缓存）、Bucket4j 限流 / 开服分波、健康探测与负载档；`java/config_node`（配置表查询 / 热加载 REST，基本是演示级）；`java/springboot_satoken_auth_starter`（Sa-Token + JustAuth 的账号认证样例，往 Redis 写 `satoken:login:token:<v>`，由 go/login 的 satoken provider 读）。基础设施侧是 C++ `infra` 库（Kafka 生产 / 消费封装与控制面分区策略、带 owner_epoch 围栏的 Redis 热缓存存盘、Agones GameServer 生命周期与客户端地址自报），`deploy/`（docker compose：Kafka KRaft + 定分区 topic-init、Redis / Redis Cluster、MySQL、Nacos、Loki / Alloy / Grafana、TiDB；K8s：infra / go / java 清单、开区脚本、Agones、告警、发布打包）与 8 条 GitHub Actions。Java 版目前只有 game-gateway 的「静态区服列表 + 自签令牌的分配 gate」两条 HTTP 路径与 Prometheus 指标；**没有 `/api/login`**（Unity 客户端 `GameClient.EnterZone` 第一步就是它，code≠0 直接失败——Java 版目前接不了 Unity 客户端，只能接 robot 的 assign-gate 直连路径）、没有排队 / 限流 / 公告 / 运维接口、没有任何部署资产（无 Dockerfile、无 compose、无 K8s、无 CI），Kafka 只在选型表里。
 
 ## 功能
 
@@ -12,10 +12,10 @@
 - tables: none
 - depends on: gateway-zone-directory（准入）、节点目录（mmorpg etcd `GateNodeService.rpc/`；Java Redis NodeDirectory）
 - behavior: 请求 `{zone_id, account, device_id, queue_token}`。准入顺序：zone 不在 zone_config → 404 `zone_not_found`；MAINTENANCE / CLOSED / PREVIEW → 503 `zone_maintenance` / `zone_closed` / `zone_not_open`；DB 查准入失败 → 500 `zone_admission_unavailable`（fail-closed）。之后 login 选在线最少、非排空、有客户端地址的 gate，签 `GateTokenPayload`（TTL 10 min，32 字节会话密钥）→ code 0 + `gate_ip/gate_port/token_payload/token_signature(Base64)/token_deadline`。login gRPC UNAVAILABLE / DEADLINE → 500 `login_unavailable`；其它 gRPC 码 → 500 + 码名；ADMITTED 却无 ip → 500 `admitted_without_endpoint`。客户端（GatewayHttpClient.AssignGateResult）按 0/100/404/410/429/500/503 分支。
-- internal: 网关不签令牌，转发 go/login `LoginPreGate.AssignGate`（按 zone 钉实例）。Java 版由 xm-gateway 自己读 Redis gate 目录并签令牌（GatePicker 规则与 loginqueue.PickGate + FilterDrainingGates 一致）。
-- java: done — xm-gateway/src/main/java/com/game/gateway/assign/*、gate/GatePicker.java、gate/GateTokenIssuer.java、gate/RedisGateSource.java，单测 GatePickerTest / GateTokenIssuerTest / GatewayHttpApiTest。差异：区服准入来自静态配置（无 PREVIEW / zone_not_open、无运行时切换）；`target_zone_id` 填 zone_id（mmorpg 普通登录填 0）；400 `bad_request` 为 Java 补充；`account / device_id / queue_token` 照收不用。
+- internal: 网关不签令牌，转发 go/login `LoginPreGate.AssignGate`（按 zone 钉实例）。Java 版由 game-gateway 自己读 Redis gate 目录并签令牌（GatePicker 规则与 loginqueue.PickGate + FilterDrainingGates 一致）。
+- java: done — game-gateway/src/main/java/com/game/gateway/assign/*、gate/GatePicker.java、gate/GateTokenIssuer.java、gate/RedisGateSource.java，单测 GatePickerTest / GateTokenIssuerTest / GatewayHttpApiTest。差异：区服准入来自静态配置（无 PREVIEW / zone_not_open、无运行时切换）；`target_zone_id` 填 zone_id（mmorpg 普通登录填 0）；400 `bad_request` 为 Java 补充；`account / device_id / queue_token` 照收不用。
 - size: M
-- robot: robot_smoke.yaml（mmorpg Go robot）、xm-robot AssignGateClient；客户端 GameClient.EnterZone 第 2 步
+- robot: robot_smoke.yaml（mmorpg Go robot）、game-robot AssignGateClient；客户端 GameClient.EnterZone 第 2 步
 - hazards: ① PARITY 说「mmorpg zone_id=0 为自动选区」不准确：gateway 的 `checkZoneAdmission` 对 0 放行，但 `LoginRpcClient.unaryCall(zoneRequired=true)` 对 zoneId≤0 抛 IllegalArgumentException，被 `catch (Exception)` 兜成 500 `internal_error`——实际上 mmorpg 网关上 zone_id=0 恒失败；客户端 / robot 都先调 server-list 取推荐区，从不发 0。Java 回 404 也是失败，口径一致即可。② mmorpg Login / AssignGate / QueryQueueStatus 都不自动重试（非幂等），Java 若改成走 login Dubbo 需保持。③ `gate.token-secret` / `token-ttl-seconds` 仍留在网关配置里，但已只被 CDN 签名使用（见 gateway-cdn-sign）。
 
 ### gateway-server-list — 区服列表
@@ -25,7 +25,7 @@
 - depends on: gateway-zone-directory、gateway-zone-health-probe
 - behavior: 按 `sort_order` 升序；`status` 四值 OPEN / MAINTENANCE / CLOSED / PREVIEW：手工状态非 OPEN 时以手工为准；手工 OPEN 且探测 DOWN → 显示 MAINTENANCE；探测 UNKNOWN 仍显示 OPEN 且不下发 load_level。`load_level` 只在显示 OPEN 且探测非 UNKNOWN 时下发；`maintenance_msg` 只在 MAINTENANCE / CLOSED 时下发；`open_time`（Unix 秒）只在 PREVIEW；`is_new` = created_at 在 7 天内；字段名必须是 `is_new`（Jackson 默认会剥成 `new`）。空字段不输出。Unity 客户端 QdaoServerSelectView 展示这些字段；robot 只读 zone_id / recommended。
 - internal: 每次请求查一次 `zone_config`（无缓存）+ 读探测快照。
-- java: partial — xm-gateway/serverlist/{ServerListController,ZoneInfo}.java + zone/ZoneCatalog.java：区服来自 `xm.gateway.zones` 静态配置，启动后不变；没有 PREVIEW / open_time / load_level，is_new 恒 false，不叠加健康探测。
+- java: partial — game-gateway/serverlist/{ServerListController,ZoneInfo}.java + zone/ZoneCatalog.java：区服来自 `game.gateway.zones` 静态配置，启动后不变；没有 PREVIEW / open_time / load_level，is_new 恒 false，不叠加健康探测。
 - size: S（补齐 PREVIEW / is_new / load_level 字段；数据源见 gateway-zone-directory）
 - robot: robot.yaml / robot_smoke.yaml 在 zone_id=0 时调用；客户端 GatewayHttpClient.GetServerList
 - hazards: ① `ManualZoneStatus.fromCode` 对未知码回 OPEN（fail-open：库里写错状态码等于开服）。② `open_time` 用 `LocalDateTime.toEpochSecond(ZoneOffset.UTC)`，而 JDBC 设 `serverTimezone=UTC`、`created_at` 由 JVM 本地时钟写：JVM 不在 UTC 时 open_time / is_new 会差整数小时。③ 每次请求都打 MySQL，开服洪峰下区服列表是 DB 热点。
@@ -37,7 +37,7 @@
 - depends on: 节点目录（gate / scene 在线条目）、gateway-zone-directory
 - behavior: 每 5s 探测：某区无 gate → DOWN（server-list 显示 MAINTENANCE）；有 gate 无 scene → DEGRADED（仍显示 OPEN）；都有 → HEALTHY。负载档 = 全区 gate 在线人数 / capacity：<0.5 SMOOTH、<0.8 BUSY、否则 FULL（capacity≤0 → SMOOTH）。探测失败保留 last-known-good 快照，超过 `status-ttl-ms`（15s）或冷启动无快照 → UNKNOWN（不下发 load_level、不降级）。连续 3 次失败升 ERROR 日志。
 - internal: 三张结果表与采集时刻作为一个不可变快照原子发布；etcd 查询失败抛 NodeDiscoveryException 而不是返回空表（否则一次抖动全服显示维护）；任一 NodeInfo 记录解析失败整批作废；跳过 `allocated/` 雪花哨兵键。Java 版对应数据在 Redis NodeDirectory（GateNodeInfo.player_count、SceneNodeInfo）。
-- java: missing — xm-gateway 不探测、不出负载档（ServerListController 注释写明「本批不叠加节点健康探测」）。
+- java: missing — game-gateway 不探测、不出负载档（ServerListController 注释写明「本批不叠加节点健康探测」）。
 - size: M
 - robot: none（robot 不读 status / load_level）
 - hazards: ① 注入了 `StringRedisTemplate` 但从未使用。② 探测每轮 `findAll` 一次 zone_config。③ 「无 gate 判 DOWN」修过一次反向 bug（曾判 DEGRADED → 显示「开放 · 流畅」）；Java 实现时 DOWN / DEGRADED 语义要照此区分。④ 读 Redis 目录时要区分「查询失败」与「真的没有节点」（Java RedisGateSource 抛异常时 assign-gate 已 fail-closed，探测侧同理）。
@@ -49,7 +49,7 @@
 - depends on: admin-api-auth
 - behavior: create = ODKU upsert（已存在则覆盖业务列、保留 created_at），缺 zone_id / name → 400；update 不存在 → 404、绝不插入；delete 204 / 404；maintenance 只改状态与（给了的）文案；open 置 OPEN 并清文案。手工状态变更约 1s 内对 assign-gate / queue-status 生效（准入缓存 TTL 1s）；排队中的玩家轮询时也被拦（fail-closed）。
 - internal: 准入快照缓存：按 zone 1s TTL、同 zone 并发 miss 用 CompletableFuture 合并、失败不缓存、最多 4096 项防随机 zone_id 撑爆；写路径「单条主键写 + 同事务非锁定回读」，create 包 InnoDB 1213 有界重试。Java 版需要：可运行时修改的区服目录（MySQL 表或 Nacos 配置）+ 运维接口 + 短 TTL 准入缓存。
-- java: missing — xm-gateway zone/ZoneCatalog.java 是启动时一次性加载的不可变静态配置，改状态要改配置重启；无任何 /admin 接口。
+- java: missing — game-gateway zone/ZoneCatalog.java 是启动时一次性加载的不可变静态配置，改状态要改配置重启；无任何 /admin 接口。
 - size: M
 - robot: none
 - hazards: update 的「行不在 → 404」论证依赖 RR 隔离级别的间隙锁，换 RC / TiDB 会出现「没改到却回 200」；`created_at` 用 JVM 本地时间、`updated_at` 有 DB ON UPDATE，两种时钟混用；JSON 直接序列化 JPA 实体（字段名随实体变）。
@@ -72,7 +72,7 @@
 - tables: none（login.yaml `Queue` 段：Enabled 默认 false、AdmitTTL 60s、QueueEntryTTL 1h、DefaultRetryAfterMs 2000）
 - depends on: gateway-assign-gate、login-queue-dispatcher、gateway-zone-directory
 - behavior: 决策顺序：带 queue_token → 验 HMAC 后查状态（验不过 → 410）；账号已有在线会话 → 绕过队列直接签；队列关 → 直接签；有空位且队列为空 → Lua 原子占位后直接签；否则入队回 100。重入 / 轮询时被放行的条目在**取走时**才签 gate 令牌（TTL 从客户端拿到时起算）。客户端：`queue_source=="login"` 时保存 token 改调 /queue-status，展示「排队中 rank+1/total」，410 时清 token 从 assign-gate 重来；带 token 的 assign-gate 与 queue-status 都绕过网关限流。
-- internal: Redis：`queue:zone:{z}` ZSET、`admitted:zone:{z}`、`admit:{queueId}`（AdmitSlot，只存选好的 gate，不存令牌）、`queue:meta:{id}`、`queue:token:{token}`；queue_token 为 HMAC 签名不透明串（支持多密钥轮换验证）；queue-status 必须路由回签发 token 的那个 zone 的 login 实例。Java 版需要：xm-login（或 xm-gateway）内的 Redisson 队列 + 令牌签名 + HTTP 端点；Java 版 Redis 键走 RedisKeys（`xm:` 前缀）。
+- internal: Redis：`queue:zone:{z}` ZSET、`admitted:zone:{z}`、`admit:{queueId}`（AdmitSlot，只存选好的 gate，不存令牌）、`queue:meta:{id}`、`queue:token:{token}`；queue_token 为 HMAC 签名不透明串（支持多密钥轮换验证）；queue-status 必须路由回签发 token 的那个 zone 的 login 实例。Java 版需要：game-login（或 game-gateway）内的 Redisson 队列 + 令牌签名 + HTTP 端点；Java 版 Redis 键走 RedisKeys（`game:` 前缀）。
 - java: missing — AssignGateResponse 注释「排队（100 / 410）与限流（429）不在本批」，带 queue_token 的请求按首次处理；无 /api/queue-status。
 - size: L
 - robot: robot.stress-*.yaml / robot.stress-3zone-z*.yaml / robot.smoke-5k-z1.yaml（mmorpg robot http_assign_gate.go 自动轮询）；客户端 GameClient.EnterZone
@@ -97,7 +97,7 @@
 - depends on: gateway-assign-gate、gateway-http-login
 - behavior: 依次判：① 分波：zone 不在当前波次 → 100（retry_after = 距开放秒数 × 1000，永不开放给 3600s）；② zone 令牌桶（Redis 分布式）空 → 100（retry_after = 重填等待）；③ IP 桶空 → 429 `IP_RATE_LIMIT`；④ 同账号冷却（按端点分 scope：login / assign，进程内）→ 429 `ACCOUNT_COOLDOWN`。带 queue_token 的 assign-gate、queue-status、refresh-token 不限流。Redis 异常 fail-open 放行。客户端：100 + ratelimit 显示「服务器繁忙」并按 retry_after 重试，429 报错退出。
 - internal: Bucket4j-redis（Lettuce 独立连接），桶键 `rl:zone:{z}` / `rl:ip:{ip}`，必须给过期策略（否则每个 IP 一条永久键）；客户端 IP 只在 socket 对端属于可信代理网段时才从 X-Forwarded-For 右往左剥可信跳，不做 DNS 解析。Java 版选型：Sentinel（tech-stack.md 已列「后续批次」）或 Redisson RRateLimiter；分波与 IP 解析自写。
-- java: missing — xm-gateway 无任何限流；gate 侧按消息号限频（MessageLimiter）已做，但那是 TCP 消息层，不是这里。
+- java: missing — game-gateway 无任何限流；gate 侧按消息号限频（MessageLimiter）已做，但那是 TCP 消息层，不是这里。
 - size: M
 - robot: robot.stress-*.yaml（开服洪峰，Bucket4j 路径）
 - hazards: ① `queue-timeout-ms` 与 code 101 QUEUE_TIMEOUT 只有定义、从不产生（死配置；客户端 / LoginResponse 文档仍列 101）。② 分波基线缺省为网关进程启动时刻，多副本 / 重启会让各副本波次不同步——生产必须配 start-epoch-sec。③ 账号冷却是进程内的，多副本下等于 N 倍窗口。④ 「login 成功紧接着 assign-gate」曾因共用冷却键必 429，已按端点分 scope，Java 照做。⑤ IP 桶键随客户端 IP 无界增长（靠 1h 空闲 TTL 收）。
@@ -109,7 +109,7 @@
 - depends on: gateway-assign-gate
 - behavior: 运维把某 gate 标为 draining（Redis 键带 TTL，值为标记时刻）→ 新玩家不再分到它；全部 gate 都 draining 时忽略标记照常分配并告警；监视器判定在线降到阈值以下或超时后写 `gate:{id}:drained` 信号，由缩容脚本 / 运维决定何时下线，**不自动踢人**（现有踢人原语会弹「账号在别处登录」，对计划内维护是误导）。
 - internal: Redis 标记 + 监视循环。Java 版需要：一个设置 / 清除排空的入口（运维接口或 Nacos 配置）、gate 进程把排空状态写进 GateNodeInfo.draining（或 gateway 读独立键）、drained 判定。
-- java: partial — GatePicker 已按 `GateNodeInfo.draining` 过滤并在全排空时忽略（与 mmorpg 同向），但没有任何代码会把 draining 置真（xm-api node_directory.proto 有字段，xm-gate 从不写）。
+- java: partial — GatePicker 已按 `GateNodeInfo.draining` 过滤并在全排空时忽略（与 mmorpg 同向），但没有任何代码会把 draining 置真（game-api node_directory.proto 有字段，game-gate 从不写）。
 - size: S
 - robot: none
 - hazards: 标记带 TTL 是有意的 fail-safe（标记人挂了容量不永久蒸发），Java 若放进 GateNodeInfo 由 gate 自己上报，需另想「谁、怎么撤销」；缺少「服务器维护、为你切换接入点」类 tip 码，若将来要主动迁移玩家需先改契约。
@@ -120,8 +120,8 @@
 - tables: none
 - depends on: 账号认证 provider（password / satoken / wechat / qq / access_token，在 go/login）、access / refresh token 签发（go/login）、gateway-rate-limit、satoken-auth-service
 - behavior: code 0 成功；100 限流排队（客户端显示「前方约 queue_pos 人」后重试）；101 队列超时（从不产生）；401 认证失败（login 回任何业务错误都映射 401，message 带上游文案；非 UNAVAILABLE 的 gRPC 错也是 401）；429 限流；500 login 不可用 / 内部错误。三方认证时以 `tok:<authToken.hashCode 十六进制>` 作冷却键。**Unity 客户端 `GameClient.EnterZone` 第 1 步固定调它（auth_type="password"），code≠0 直接报错退出**；随后 TCP Login 优先用 access_token、无 token 时回落口令。
-- internal: 按 zone 钉 login 实例的 gRPC，不重试。Java 版需要：xm-gateway 增加 `/api/login`，经 Dubbo 调 xm-login 的认证 + 发 token 接口（ClientMessageService 是会话型接口，需另开类型化接口）；xm-login 需要 access / refresh token 存储（Redis）与 TCP Login 的 `access_token` 认证类型。
-- java: missing — Java 版只有 TCP 48 Login 的开发口令认证（PARITY「登录」行：access token 待做）；xm-gateway 无 /api/login。**这是 Java 版接 Unity 客户端的第一道缺口**。
+- internal: 按 zone 钉 login 实例的 gRPC，不重试。Java 版需要：game-gateway 增加 `/api/login`，经 Dubbo 调 game-login 的认证 + 发 token 接口（ClientMessageService 是会话型接口，需另开类型化接口）；game-login 需要 access / refresh token 存储（Redis）与 TCP Login 的 `access_token` 认证类型。
+- java: missing — Java 版只有 TCP 48 Login 的开发口令认证（PARITY「登录」行：access token 待做）；game-gateway 无 /api/login。**这是 Java 版接 Unity 客户端的第一道缺口**。
 - size: M（gateway 端点 + login token 发放 / 校验；三方 provider 另计）
 - robot: robot.e2e-http.yaml（use_http_login: true）、robot.stress-*.yaml / robot.smoke-5k-z1.yaml（use_http_login）；客户端 GameClient.EnterZone
 - hazards: ① `players[].level` 永远是 0：手写解析器只取 player_id(1) 与 name(5)，网关 DTO 却声明了 level。② 认证失败一律 401 且透传上游错误文案，会把「账号不存在」与「密码错误」区分暴露给攻击者（取决于 login 文案）。③ `effectiveAccount` 用 `String.hashCode` 做冷却键，碰撞容易（只影响冷却误伤）。④ HTTP Login 是否会在 login 侧创建「登录会话」与 TCP Login 的会话语义要定清楚（mmorpg 靠 path=legacy/new 区分并计划下线 legacy 路径）。
@@ -145,7 +145,7 @@
 - depends on: gateway-http-login、login-queue
 - behavior: 客户端不可见。Login / AssignGate / QueryQueueStatus 必须落到该 zone 的 login 实例（每个 login 只看本区 gate 目录；轮询会让 2/3 的 assign-gate 回「no gate available」），查不到即报错、绝不跨区兜底；RefreshToken 在全体实例间轮询。
 - internal: 静态 `<zoneId>=host:port` + 每 5s 从 etcd `LoginNodeService.rpc/` 拉动态池（同区多实例轮询，失败保留 last-known-good）；gRPC 关空闲 keepalive（grpc-go 默认策略会以 too_many_pings 踢断）；每次尝试单独算 deadline。
-- java: not_applicable — Java 版 gateway 自己读 Redis gate 目录签令牌，不调 login；xm-login 不按 zone 分片（单 zone 竖切）。将来 /api/login、排队落到 xm-login 时用 Dubbo + Nacos（或 local 直连）路由；多 zone 时需要 Dubbo 按 zone 选提供者（tag 路由 / group），不要照搬 etcd 轮询。
+- java: not_applicable — Java 版 gateway 自己读 Redis gate 目录签令牌，不调 login；game-login 不按 zone 分片（单 zone 竖切）。将来 /api/login、排队落到 game-login 时用 Dubbo + Nacos（或 local 直连）路由；多 zone 时需要 Dubbo 按 zone 选提供者（tag 路由 / group），不要照搬 etcd 轮询。
 - size: S
 - robot: none
 - hazards: 手写 protobuf 编解码绕开生成代码，proto 字段号一改就静默错位（Java 版用同步来的生成类即可避免）。
@@ -156,7 +156,7 @@
 - tables: none（MySQL `announcement`：title、content、type notice / maintenance / update、start_time、end_time、created_at）
 - depends on: admin-api-auth
 - behavior: 只返回生效中的（start 为空或 ≤ now，且 end 为空或 ≥ now），按 created_at 倒序；时间字段为 Unix 秒，为空不输出。Unity 客户端选服界面（QdaoServerSelectView）拉取展示，失败只打警告。
-- internal: JPA 直查，无缓存。Java 版：xm-gateway 加一张表（`xm_java` 库）或 Nacos 配置 + 只读端点 + 运维接口。
+- internal: JPA 直查，无缓存。Java 版：game-gateway 加一张表（`game` 库）或 Nacos 配置 + 只读端点 + 运维接口。
 - java: missing
 - size: S
 - robot: none
@@ -205,7 +205,7 @@
 - depends on: deploy-k8s-zone-orchestration、observability-logs-alerts
 - behavior: 运维可见：`/actuator/health/liveness` 只含 livenessState、`/actuator/health/readiness` 只含 readinessState（**不含 DB / Redis**，避免共享依赖一挂全体 NotReady + 重启风暴）；`/actuator/health` 保留复合健康给人看；`/actuator/info` 带构建版本与提交；控制台一行一条 logstash 风格 JSON（与 go-zero 同口径，Alloy 采进 Loki）。
 - internal: Spring Boot 配置 + Maven build-info 目标。
-- java: partial — 五个进程都有 Actuator + Prometheus（独立管理端口、默认只绑本机，architecture.md §11），但没有 liveness / readiness 分组、没有结构化 JSON 日志、没有 build-info；也没有 xm-gate / xm-scene 的「就绪」语义（例如 gate 节点号租约未拿到时应 NotReady）。
+- java: partial — 五个进程都有 Actuator + Prometheus（独立管理端口、默认只绑本机，architecture.md §11），但没有 liveness / readiness 分组、没有结构化 JSON 日志、没有 build-info；也没有 game-gate / game-scene 的「就绪」语义（例如 gate 节点号租约未拿到时应 NotReady）。
 - size: S
 - robot: none
 - hazards: mmorpg 的 build-info 版本覆盖依赖 Spring Boot 插件的属性写入顺序（pom 注释：升级 Boot 后可能静默失效，需回归）；Java 版的 gate / scene 不是 Web 进程，探针要挂在管理端口上，K8s 清单需对应端口（18103 / 18104）且不能只绑 127.0.0.1。
@@ -216,8 +216,8 @@
 - tables: none（自有库 users / user_password / user_phone / user_oauth）
 - depends on: gateway-http-login
 - behavior: provider 支持 github / wechat（开放平台）/ qq，未配置 client-id 的 provider 抛错；优先 unionid、否则 openid；首次登录建 users + user_oauth；Sa-Token 登录内部 userId，并手工写 Redis `<token_name>:login:token:<token>` = loginId（TTL 7 天）。go/login 的 SaTokenProvider 按 `{TokenName}:{LoginType}:token:{v}` GET 出 loginId 作为账号。
-- internal: 独立 Spring Boot 进程（端口 18080，默认 H2 内存库），Redis 是与 go/login 之间唯一的契约面。Java 版：账号体系在 xm-player-store（account 表），可直接在 xm-login 内实现 satoken 式「外部认证令牌 → 账号」provider 抽象，或把本服务当外部组件复用（它本身已是 Java）；**不要**把它并进 Java 版 gateway。
-- java: missing — Java 版只有 TCP Login 的开发口令认证（`XM_LOGIN_DEV_PASSWORD`），无 provider 抽象、无三方登录。
+- internal: 独立 Spring Boot 进程（端口 18080，默认 H2 内存库），Redis 是与 go/login 之间唯一的契约面。Java 版：账号体系在 game-player-store（account 表），可直接在 game-login 内实现 satoken 式「外部认证令牌 → 账号」provider 抽象，或把本服务当外部组件复用（它本身已是 Java）；**不要**把它并进 Java 版 gateway。
+- java: missing — Java 版只有 TCP Login 的开发口令认证（`GAME_LOGIN_DEV_PASSWORD`），无 provider 抽象、无三方登录。
 - size: M（provider 抽象 + satoken 校验；三方 OAuth 各 S）
 - robot: robot（auth_type=satoken 的配置项，dev-login 取 token）
 - hazards: ① `/auth/dev-login` 无任何开关，任何人可为任意账号签 token——部署即认证绕过（Java 版必须按 profile 关闭）。② 新用户 id = `System.currentTimeMillis()`，并发首登撞主键。③ 默认配置开 H2 console、`sa-token.debug=true`、`show-sql=true`。④ OAuth state 校验依赖 JustAuth 进程内缓存，多副本下回调落到另一副本会失败。⑤ SmsService / UserService 的手机号、游客、口令能力没有任何端点调用（死代码）；`getOrCreateByPhone` 实际从不查已有用户。⑥ logout 只删手工写的那把键，按 account 登出不删手工键。⑦ production_application.properties 里 `justauth.weixin.appId` 键名与代码读取的 `justauth.wechat.client-id` 不符，配了也不生效。
@@ -228,8 +228,8 @@
 - tables: 全部配置表（JSON 格式，目录 `config.table-dir` 默认 `./config`）
 - depends on: none
 - behavior: 启动加载全部表；reload 重新加载并递增 loadVersion、回 `{status, loadVersion, lastLoadTimeMs}`；按表名 + id 反射查一行回 JSON，查不到 404。定位为「GM 工具 / 运维看板 / 配表校验」。
-- internal: 反射调 `com.game.table.<Name>TableManager.getInstance().getById(int)`，JsonFormat 输出。Java 版对应能力：xm-table 的 `ConfigTables`（编译期生成、加载时校验 manifest / 主键 / 外键）是库而不是服务；运行期热加载两版都没有对外的正式方案。
-- java: missing — 无独立配置查询服务、无热加载入口（xm-table 只在进程启动时加载）。是否移植待定：若做，宜作为 xm-gateway / 独立管理进程上受鉴权的只读端点，热加载要整表集原子替换。
+- internal: 反射调 `com.game.table.<Name>TableManager.getInstance().getById(int)`，JsonFormat 输出。Java 版对应能力：game-table 的 `ConfigTables`（编译期生成、加载时校验 manifest / 主键 / 外键）是库而不是服务；运行期热加载两版都没有对外的正式方案。
+- java: missing — 无独立配置查询服务、无热加载入口（game-table 只在进程启动时加载）。是否移植待定：若做，宜作为 game-gateway / 独立管理进程上受鉴权的只读端点，热加载要整表集原子替换。
 - size: S
 - robot: none
 - hazards: ① **查询基本是坏的**：生成的管理器只有 `findById(int)`；`getById` 只在带名为 Id 的二级索引的表（如 ActivitySchedule）上存在且返回 List，其余表反射抛 NoSuchMethodException 被吞成 null → 恒 404。② `/api/reload` 无鉴权。③ reload 逐表替换快照，期间并发读看到新旧表混合（跨表外键可能临时不一致）；加载失败时前面的表已换新、后面的还是旧的。④ 用 JSON 而非 .pb 加载（`loadTables(dir)` 缺省 JSON），与 C++ / Go 运行时用的二进制不是同一份产物。⑤ id 固定 int，uint64 主键表无法查询。
@@ -241,7 +241,7 @@
 - depends on: none
 - behavior: 运维可见：broker 不可用时节点照常启动（后台重连），但若 topic 分区数与契约不符则拒绝启动；生产失败日志限流（窗口内前 N 条逐条、其余计数并在窗口过期 / 重建 / 析构时补报）。
 - internal: 生产者：幂等（acks=all）、本地队列满先 poll(0) 再重试一次（不阻塞主循环）、ERR__FATAL 时按最小间隔重建实例、purge 回执计数但不再触发重建、停机有界 flush；消费者：`session.timeout.ms=45000`、`max.poll.interval.ms=900000`、可选显式分区 assign + 从末尾开始 + 不提交 offset（控制面用）、后台线程 poll 并把解码后的回调投递回节点 EventLoop；`DecodeKafkaProtoPayload<T>` 空载荷 / 解析失败只记日志丢弃。Java 版：spring-kafka（tech-stack 已选），等价配置为 `enable.idempotence=true`、手动 `assign()` + `seekToEnd()` + `enable.auto.commit=false`，回调投递到 scene 逻辑线程 / gate EventLoop（§3 线程所有权）。
-- java: partial（2026-10-03，批次 2.3a）— `xm-audit`（topic 规格、启动期核对：缺就建、分区不符拒绝启动、消费方校正配置）+ scene `AuditPipeline`（专用线程、幂等生产者、兜底日志）+ xm-data `ConsumerLoop`（落库成功才提交、可恢复故障暂停重试、毒丸隔离）。用官方 kafka-clients，不用 spring-kafka 容器。生产者进入致命状态时丢弃、由 30 秒一次的核对重建。尚缺：生产失败日志限流（现在每条失败都打 WARN）；通用消费封装（把解码后的回调投递到 scene 逻辑线程 / gate EventLoop，以及控制面用的显式 assign + seekToEnd + 不提交模式），随首个需要它的批次。
+- java: partial（2026-10-03，批次 2.3a）— `game-audit`（topic 规格、启动期核对：缺就建、分区不符拒绝启动、消费方校正配置）+ scene `AuditPipeline`（专用线程、幂等生产者、兜底日志）+ game-data `ConsumerLoop`（落库成功才提交、可恢复故障暂停重试、毒丸隔离）。用官方 kafka-clients，不用 spring-kafka 容器。生产者进入致命状态时丢弃、由 30 秒一次的核对重建。尚缺：生产失败日志限流（现在每条失败都打 WARN）；通用消费封装（把解码后的回调投递到 scene 逻辑线程 / gate EventLoop，以及控制面用的显式 assign + seekToEnd + 不提交模式），随首个需要它的批次。
 - size: M
 - robot: none
 - hazards: ① broker 自动建 topic（`auto.create.topics.enable` + `num.partitions=1`）抢在 topic-init 之前会建出 1 分区的 topic，显式分区的消费者永远收不到——必须启动期核对分区数（mmorpg 只在「查到且不等」时拒绝启动，查不到只告警）。② 共享分区上提交 offset 会互相覆盖，所以控制面消费者禁止提交。③ C++ 的 900s max.poll.interval 掩盖了主循环卡顿，Java 若用 group 消费需另配。
@@ -265,7 +265,7 @@
 - depends on: kafka-client-infra
 - behavior: 运维可见：资产变更流水与玩家快照异步落 data_service 库（流水按 tx_id 主键 INSERT IGNORE 幂等、快照按 snapshot_guid 去重），供客服查询 / 回档；异常检测命中发告警 topic。topic 代次 g<N> 与 data_service 配置对齐，分区数不可原地扩。
 - internal: 生产方 C++ scene，消费方 go/data_service（攒批落库）。Java 版需要：scene 侧在资产变更点产出流水 / 快照事件（Kafka 或直接写库）+ 落库消费者。
-- java: partial（2026-10-03，批次 2.3a / 2.3b）— 资产流水 topic `xm-transaction-log-g<N>`（6 分区、30 天、不限大小）+ xm-data 落 `transaction_log`；玩家快照 topic `xm-player-snapshot-g<N>`（3 分区）+ xm-data 落 `player_snapshot`；异常告警改为日志 + 指标（2.3c 已做，无 Kafka topic）。
+- java: partial（2026-10-03，批次 2.3a / 2.3b）— 资产流水 topic `game-transaction-log-g<N>`（6 分区、30 天、不限大小）+ game-data 落 `transaction_log`；玩家快照 topic `game-player-snapshot-g<N>`（3 分区）+ game-data 落 `player_snapshot`；异常告警改为日志 + 指标（2.3c 已做，无 Kafka topic）。
 - size: M（不含各资产系统本身；业务归 data_service / 资产区域，这里只登记基础管线）
 - robot: robot.currency-crash.yaml（currency_crash_window_scenario.go）、robot.data_stress.yaml
 - hazards: ① retention 必须逐 topic 显式声明且大于消费者最长滞后（C++ 900s poll 间隔），topic-init 会校验；继承 broker 默认（compose 里 30 min）会在消费者积压时丢审计数据。② 快照「先查后插」非原子，并发同 guid 依赖唯一键兜底。
@@ -276,7 +276,7 @@
 - tables: none
 - depends on: 节点号 / owner_epoch 铸造（player_locator）、kafka-client-infra（db_task）
 - behavior: 客户端不可见（体现为玩家数据不丢、被顶号的旧节点存盘被拒）。
-- internal: 玩家 protobuf 以 `<全名>:<id>` 存 Redis；带围栏存盘用 Lua 一次完成「比对 `player:{id}:owner_epoch` → SET 数据 → SADD dirty_keys_set」，guard 键缺失时补种调用方期望值（Redis 被清空时不把全服在线玩家判成已废黜）；异步客户端有待重试队列、重连后重发、加载失败回调。Java 版走另一条路：MyBatis 直写 MySQL `xm_java.player`，`owner_epoch` + `owner_released` + 租约围栏（architecture.md §7），没有 Redis 热缓存层。
+- internal: 玩家 protobuf 以 `<全名>:<id>` 存 Redis；带围栏存盘用 Lua 一次完成「比对 `player:{id}:owner_epoch` → SET 数据 → SADD dirty_keys_set」，guard 键缺失时补种调用方期望值（Redis 被清空时不把全服在线玩家判成已废黜）；异步客户端有待重试队列、重连后重发、加载失败回调。Java 版走另一条路：MyBatis 直写 MySQL `game.player`，`owner_epoch` + `owner_released` + 租约围栏（architecture.md §7），没有 Redis 热缓存层。
 - java: partial — 围栏语义已用 Java 方式实现（离场 / 断线 / 停服 / 被接管写回，带 epoch 围栏）；**缺周期存盘**（architecture.md §10：进程被 kill 丢本次在线增量），也无 Redis 热缓存（目前不需要）。
 - size: M（Java 版只需补周期 / 脏标记存盘，不移植 Redis 层）
 - robot: robot.currency-crash.yaml（崩溃窗口不丢资产）
@@ -288,7 +288,7 @@
 - tables: none
 - depends on: deploy-k8s-zone-orchestration
 - behavior: 运维可见：进程起来后有界退避 POST /ready（30 次，≈1 分钟，失败留在 Starting、拒绝一切创建）；第一个单元（scene 的场景 / battle 的房间）**创建之前**必须拿到 Allocation 许可（POST /allocate，阻塞等 3s，拿不到即拒绝创建，fail-closed）；最后一个单元销毁后回 Ready 由 Fleet 回收；每 2s POST /health；可选：读 `mmorpg.io/drain` 标签进入排空（拒绝新单元、清空后回 Ready），EventLoop 心跳超过 10s 不更新即停发 health 让 Agones 替换实例。停机不调 /shutdown（避免 SIGTERM 递归删 Pod）。
-- internal: 状态机 Disabled / Starting / Ready / Allocating / Allocated / ReturningToReady / ShuttingDown / Stopped；HTTP 只在独立 worker 线程；许可对象覆盖「已放行、尚未建出」的在途创建；单元 key 幂等计数。Java 版：xm-scene 若上 Agones，需同等状态机（JDK HttpClient 调 sidecar REST），许可在场景逻辑线程之外获取、结果投递回逻辑线程。
+- internal: 状态机 Disabled / Starting / Ready / Allocating / Allocated / ReturningToReady / ShuttingDown / Stopped；HTTP 只在独立 worker 线程；许可对象覆盖「已放行、尚未建出」的在途创建；单元 key 幂等计数。Java 版：game-scene 若上 Agones，需同等状态机（JDK HttpClient 调 sidecar REST），许可在场景逻辑线程之外获取、结果投递回逻辑线程。
 - java: missing — 无 K8s / Agones 部署；Java scene 是常驻进程，场景在启动时按配置创建。
 - size: L
 - robot: none
@@ -301,7 +301,7 @@
 - depends on: gateway-assign-gate、deploy-k8s-zone-orchestration
 - behavior: 运维可见：`CLIENT_ENDPOINT_SOURCE=agones` 时节点在发布目录前向本机 sidecar `GET /gameserver` 取 `status.address` + 名为 `client` 的端口；地址为空 / 无 client 端口 / sidecar 不可达按 200ms 起翻倍、封顶 2s 退避，30 次或 60s 预算先到者耗尽即 FATAL 退出由 Agones 重建 Pod；`CLIENT_ENDPOINT_HOST` 可覆盖 host（kind 填 127.0.0.1）。external 模式缺地址的节点被 login 跳过。非 Agones 时 NodePort 模式按 `gateNodePortBase + i` 给每个 gate 固定端口。
 - internal: 纯构造期阻塞调用，不在运行中的 EventLoop 上；端口名 `client` 是与部署生成器的跨语言字符串契约。
-- java: partial — 已有静态通告地址（`xm.advertise-host` + `XM_GATE_ADVERTISE_PORT`，写进 GateNodeInfo.client_host / client_port，PARITY「节点客户端可达地址」行）；没有 Agones sidecar 来源，也没有按部署模式生成通告地址的编排。
+- java: partial — 已有静态通告地址（`game.advertise-host` + `GAME_GATE_ADVERTISE_PORT`，写进 GateNodeInfo.client_host / client_port，PARITY「节点客户端可达地址」行）；没有 Agones sidecar 来源，也没有按部署模式生成通告地址的编排。
 - size: S
 - robot: none（k8s 冒烟走 robot_stress.ps1）
 - hazards: ① Agones REST 网关字段名有 `object_meta` / `objectMeta` 两种写法、未设置的子消息输出 null，解析要两种都认。② 只靠次数上限会在 sidecar 可连不响应时拖到 ≈113s，所以另设总时间预算。③ Java 版的通告地址缺省 127.0.0.1，在容器里部署时若漏配会把回环地址发给外部客户端（mmorpg external 模式是缺地址即跳过节点）。
@@ -312,7 +312,7 @@
 - tables: none
 - depends on: none
 - behavior: 开发者 / 运维可见：一条命令起齐依赖；topic-init 预建控制面与审计 topic 并校验分区 / retention；mysql-init 建各 zone 库与授权、gateway 表；MySQL healthcheck 后 Nacos 才起。
-- internal: Kafka 资源压到极小（heap 128–256m、tmpfs 日志、broker 默认 retention 30 min）适配开发机。Java 版需要：MySQL（`xm_java` 库 + xm-player-schema.sql 初始化）、Redis（DB 12）、可选 Nacos（`nacos` profile）、后续 Kafka；tech-stack.md「测试」行写着「集成测试用仓库自带的 docker compose」，但仓库里**没有**任何 compose 文件。
+- internal: Kafka 资源压到极小（heap 128–256m、tmpfs 日志、broker 默认 retention 30 min）适配开发机。Java 版需要：MySQL（`game` 库 + game-player-schema.sql 初始化）、Redis（DB 12）、可选 Nacos（`nacos` profile）、后续 Kafka；tech-stack.md「测试」行写着「集成测试用仓库自带的 docker compose」，但仓库里**没有**任何 compose 文件。
 - java: missing — README 前置条件是「本地 MySQL（3306）与 Redis（6379）」，启动靠 tools/local/start-slice.sh（裸进程，local profile，Dubbo 直连）。
 - size: S
 - robot: login-stack 用于 robot 1k/2k/5k 压测（backlog #221）
@@ -324,11 +324,11 @@
 - tables: none
 - depends on: none
 - behavior: 运维可见：每个镜像带 `org.opencontainers.image.{version,revision,created,source,title}` 与 `/app/BUILD_INFO`，`kubectl exec <pod> -- cat /app/BUILD_INFO` 可确认 Pod 跑的提交；基础镜像按 digest 钉死。
-- internal: Java 镜像以服务目录为 build context，先 `dependency:go-offline` 缓存依赖层。Java 版需要：多模块 Maven 下每个进程模块（xm-gateway / xm-login / xm-scene-manager / xm-gate / xm-scene）一个可运行 jar 的镜像（可用一个参数化 Dockerfile 或 Spring Boot `build-image` / Jib），并把 `config-data/tables` 打进 scene / gate / login 镜像（`xm.table-dir`）。
+- internal: Java 镜像以服务目录为 build context，先 `dependency:go-offline` 缓存依赖层。Java 版需要：多模块 Maven 下每个进程模块（game-gateway / game-login / game-scene-manager / game-gate / game-scene）一个可运行 jar 的镜像（可用一个参数化 Dockerfile 或 Spring Boot `build-image` / Jib），并把 `config-data/tables` 打进 scene / gate / login 镜像（`game.table-dir`）。
 - java: missing — 无任何 Dockerfile。
 - size: S
 - robot: none
-- hazards: ① mmorpg Java 镜像用 JDK 23 构建，而 gateway_node pom 写 java.version 23、config_node 写 21——Java 版统一 21。② 两条 C++ 运行镜像路径运行层不等价（README 已警告）。③ Java 版 gate / scene 需要表数据与密钥（`XM_*` 环境变量）在镜像外注入，不能烤进镜像。
+- hazards: ① mmorpg Java 镜像用 JDK 23 构建，而 gateway_node pom 写 java.version 23、config_node 写 21——Java 版统一 21。② 两条 C++ 运行镜像路径运行层不等价（README 已警告）。③ Java 版 gate / scene 需要表数据与密钥（`GAME_*` 环境变量）在镜像外注入，不能烤进镜像。
 
 ### deploy-k8s-zone-orchestration — K8s 开区编排（基础设施 + 服务清单 + 一键开 / 关区）
 - mmorpg: deploy/k8s/manifests/infra/{etcd,kafka,kafka-topic-init,redis,redis-match-cluster,mysql,mysql-backup-cronjob,loki}.yaml、manifests/go-svc/*.yaml、manifests/java-svc/gateway.yaml、zones.{sample,ops-recommended,10zones}.yaml、kind-config.yaml、README.md、AGENTS.md、robot_stress.ps1；tools/scripts/k8s_deploy.ps1（dev_tools.ps1 `k8s-zone-up / k8s-all-up / k8s-zone-status / k8s-zone-down / infra-up`）；docs/ops/k8s-open-server-runbook.md
@@ -336,11 +336,11 @@
 - tables: none
 - depends on: deploy-container-images、agones-client-endpoint、agones-gameserver-lifecycle、kafka-control-plane-bus
 - behavior: 运维可见：按 zones.yaml（zoneId、各角色副本数、`gateNodePortBase`、scene 拆 world / instance 两池）为每个 zone 建 namespace 并部署 C++ 节点 + Go 服务 + Java gateway；infra 层 etcd 3 副本 StatefulSet、Kafka 单 broker StatefulSet + PVC、Redis / MySQL 单副本、MySQL 定时备份、可选 Loki；gate 对外用 LoadBalancer（托管云）或 NodePort + 外部 L4（自建）；`-ReleaseProfile staging|prod` 时校验不可变镜像 tag 并跑 release_preflight。Java gateway：2 副本、反亲和、PDB minAvailable 1、startup / readiness / liveness 探针、ConfigMap 挂 /app/config、`SPRING_PROFILES_ACTIVE=k8s`。
-- internal: PowerShell 生成器把模板里的 PLACEHOLDER_IMAGE 等替换后 `kubectl apply`；告警规则 owner-epoch-alerts.yaml、scene-manager-alerts.yaml 与看板 JSON。Java 版需要：xm-gateway（无状态，可多副本）、xm-login、xm-scene-manager（Dubbo 提供者，Nacos 注册或 headless Service 直连）、xm-gate（对外 TCP + 通告地址）、xm-scene（链路端口仅集群内）的清单；Redis / MySQL / Nacos 的 infra；环境变量注入 `XM_GATE_TOKEN_SECRET / XM_NODE_LINK_SECRET / XM_DUBBO_SECRET / XM_MYSQL_PASSWORD`（Secret）；管理端口改绑 Pod IP 供 Prometheus 抓取与探针。
+- internal: PowerShell 生成器把模板里的 PLACEHOLDER_IMAGE 等替换后 `kubectl apply`；告警规则 owner-epoch-alerts.yaml、scene-manager-alerts.yaml 与看板 JSON。Java 版需要：game-gateway（无状态，可多副本）、game-login、game-scene-manager（Dubbo 提供者，Nacos 注册或 headless Service 直连）、game-gate（对外 TCP + 通告地址）、game-scene（链路端口仅集群内）的清单；Redis / MySQL / Nacos 的 infra；环境变量注入 `GAME_GATE_TOKEN_SECRET / GAME_NODE_LINK_SECRET / GAME_DUBBO_SECRET / GAME_MYSQL_PASSWORD`（Secret）；管理端口改绑 Pod IP 供 Prometheus 抓取与探针。
 - java: missing — Java 版「当前部署方案」只有 tools/local/start-slice.sh 本机起 5 个进程；无任何 K8s 资产。
 - size: L（Java 版只需 5 个进程 + 3 个依赖，不必移植 Agones / 多 shard 那部分）
 - robot: deploy/k8s/robot_stress.ps1（集群内 robot 压测）
-- hazards: ① manifests/go-svc/gateway.yaml 部署一个 Go `gateway`（端口 8080、`-f /app/etc/gateway.yaml`），但 go/ 下没有 gateway 服务，与 java-svc/gateway.yaml 同名 Service `gateway` 冲突——疑似遗留清单。② Java 版 Dubbo 把 127.* 视为无效绑定（architecture.md §4.1），容器里必须用 `DUBBO_IP_TO_BIND` 绑 Pod IP 并配 NetworkPolicy，否则 login / scene-manager 端口对整个集群开放（靠 XM_DUBBO_SECRET 兜底）。③ Java 版 gate 节点号租约与 scene 归属租约都依赖墙钟（§7 要求 NTP），K8s 节点时钟漂移需监控。④ Java 进程默认把管理端口绑 127.0.0.1，直接照搬探针会全部失败。
+- hazards: ① manifests/go-svc/gateway.yaml 部署一个 Go `gateway`（端口 8080、`-f /app/etc/gateway.yaml`），但 go/ 下没有 gateway 服务，与 java-svc/gateway.yaml 同名 Service `gateway` 冲突——疑似遗留清单。② Java 版 Dubbo 把 127.* 视为无效绑定（architecture.md §4.1），容器里必须用 `DUBBO_IP_TO_BIND` 绑 Pod IP 并配 NetworkPolicy，否则 login / scene-manager 端口对整个集群开放（靠 GAME_DUBBO_SECRET 兜底）。③ Java 版 gate 节点号租约与 scene 归属租约都依赖墙钟（§7 要求 NTP），K8s 节点时钟漂移需监控。④ Java 进程默认把管理端口绑 127.0.0.1，直接照搬探针会全部失败。
 
 ### release-packaging — 版本发布与制品管理
 - mmorpg: .github/workflows/release.yml；tools/scripts/{publish_images,make_release,fetch_images,import_images,artifacts_retention,release_preflight}.ps1、lib/release_common.ps1；docs/design/release-packaging-standard-20260914.md、docs/ops/release-checklist.md；CHANGELOG.md
@@ -372,7 +372,7 @@
 - tables: none
 - depends on: none
 - behavior: 开发者可见：push / PR 到 main 时按路径触发——C++ 容器内编译（Dockerfile.cpp 只到 builder 阶段）+ 构建脚本契约；Go 全模块 `go build` / `go test`；登录链（Java gateway `./mvnw test` + go/login + robot）；导表器单测（含 config_node 生成物路径）；部署配置 pwsh 契约测试（tools/scripts/tests/*.ps1）；include-cleaner；手动发布；ChatGPT 代码评审（cr.yml）。
-- internal: GitHub Actions ubuntu-latest。Java 版需要：`./mvnw -B install`（全部单测）、`java tools/ContractSync.java --mmorpg <checkout> --check`（README 写「CI 用」但没有 CI）、可选 `-Dxm.it.redis` 集成测试（service container 起 Redis / MySQL）、契约同步后强制 `clean install`（AGENTS §4 的 protoc 增量生成坑）。
+- internal: GitHub Actions ubuntu-latest。Java 版需要：`./mvnw -B install`（全部单测）、`java tools/ContractSync.java --mmorpg <checkout> --check`（README 写「CI 用」但没有 CI）、可选 `-Dgame.it.redis` 集成测试（service container 起 Redis / MySQL）、契约同步后强制 `clean install`（AGENTS §4 的 protoc 增量生成坑）。
 - java: missing — 仓库无 `.github/`。
 - size: S
 - robot: login-path-tests 跑 robot 单测（不连服务）
@@ -380,9 +380,9 @@
 
 ## Open questions
 
-1. **`/api/login` 与 access token 归谁做**：Unity 客户端硬依赖 `/api/login`（code 0 才往下走）和 TCP Login 的 `auth_type="access_token"`。Java 版放 xm-gateway（经 Dubbo 调 xm-login）还是让 xm-login 直接暴露 HTTP？token 存储（Redis 键空间 `xm:`）与 refresh 轮换的 owner 是 xm-login——这一项与「登录」区域（go/login）的 access-token 功能重叠，需要和那边的清单合并成一个交付。
-2. **排队与限流放哪一层**：mmorpg 是「网关 Bucket4j 粗筛 + go/login Redis 队列权威」两层。Java 版的 gate 选择与签令牌在 xm-gateway 里，排队是否也整体放 xm-gateway（少一跳 Dubbo，但 gateway 需选主放行线程），还是挪到 xm-login 与 mmorpg 同构？Sentinel（选型表）是否足以替代 Bucket4j 的分区桶 + 分波？
-3. **区服目录的数据源**：Java 版是否建 `xm_java.zone_config` 表 + 运维接口（与 mmorpg 同构），还是用 Nacos 配置中心热更新（Nacos 目前只做注册中心）？PREVIEW / open_time / is_new 依赖 created_at，用配置中心时需要另存。
+1. **`/api/login` 与 access token 归谁做**：Unity 客户端硬依赖 `/api/login`（code 0 才往下走）和 TCP Login 的 `auth_type="access_token"`。Java 版放 game-gateway（经 Dubbo 调 game-login）还是让 game-login 直接暴露 HTTP？token 存储（Redis 键空间 `game:`）与 refresh 轮换的 owner 是 game-login——这一项与「登录」区域（go/login）的 access-token 功能重叠，需要和那边的清单合并成一个交付。
+2. **排队与限流放哪一层**：mmorpg 是「网关 Bucket4j 粗筛 + go/login Redis 队列权威」两层。Java 版的 gate 选择与签令牌在 game-gateway 里，排队是否也整体放 game-gateway（少一跳 Dubbo，但 gateway 需选主放行线程），还是挪到 game-login 与 mmorpg 同构？Sentinel（选型表）是否足以替代 Bucket4j 的分区桶 + 分波？
+3. **区服目录的数据源**：Java 版是否建 `game.zone_config` 表 + 运维接口（与 mmorpg 同构），还是用 Nacos 配置中心热更新（Nacos 目前只做注册中心）？PREVIEW / open_time / is_new 依赖 created_at，用配置中心时需要另存。
 4. **zone_id=0 的语义**：PARITY 写「mmorpg 为自动选区」，但按代码 mmorpg 网关对 0 恒回 500 `internal_error`（LoginRpcClient 的 zoneRequired 检查）。建议 PARITY 改口径，两版都要求客户端先拉 server-list。
 5. **服务 → 玩家推送通道**：好友 / 聊天 / 帮会 / 组队 / 战斗都依赖 gate-cmd 控制面。Java 版用 Kafka（照分区契约）还是 Dubbo 直调 gate（gate 当 Dubbo 提供者 + 会话定位）？这决定 kafka-client-infra 是否是硬前置。
 6. **config_node / satoken 服务是否移植**：config_node 查询功能实际是坏的、热加载不原子；satoken 服务是样例级（dev-login 无开关）。建议 Java 版只吸收「认证 provider 抽象 + satoken Redis 校验」与「受鉴权的配表只读查询」，不整体移植。需用户确认。

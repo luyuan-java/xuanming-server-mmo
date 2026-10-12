@@ -12,32 +12,32 @@
     <description>MMORPG 服务器 Java 版，与 mmorpg（C++/Go 版）双版本并行，对账见 PARITY.md</description>
 
     <modules>
-        <module>xm-proto</module>
-        <module>xm-table-codegen</module>
-        <module>xm-table</module>
-        <module>xm-net</module>
-        <module>xm-common</module>
-        <module>xm-battle-engine</module>
-        <module>xm-pbmysql</module>
-        <module>xm-api</module>
-        <module>xm-discovery</module>
-        <module>xm-player-store</module>
-        <module>xm-gateway-store</module>
-        <module>xm-audit</module>
-        <module>xm-scene-manager</module>
-        <module>xm-login</module>
-        <module>xm-friend</module>
-        <module>xm-chat</module>
-        <module>xm-team</module>
-        <module>xm-guild</module>
-        <module>xm-trade</module>
-        <module>xm-match</module>
-        <module>xm-scene</module>
-        <module>xm-battle</module>
-        <module>xm-gate</module>
-        <module>xm-gateway</module>
-        <module>xm-data</module>
-        <module>xm-robot</module>
+        <module>game-proto</module>
+        <module>game-table-codegen</module>
+        <module>game-table</module>
+        <module>game-net</module>
+        <module>game-common</module>
+        <module>game-battle-engine</module>
+        <module>game-pbmysql</module>
+        <module>game-api</module>
+        <module>game-discovery</module>
+        <module>game-player-store</module>
+        <module>game-gateway-store</module>
+        <module>game-audit</module>
+        <module>game-scene-manager</module>
+        <module>game-login</module>
+        <module>game-friend</module>
+        <module>game-chat</module>
+        <module>game-team</module>
+        <module>game-guild</module>
+        <module>game-trade</module>
+        <module>game-match</module>
+        <module>game-scene</module>
+        <module>game-battle</module>
+        <module>game-gate</module>
+        <module>game-gateway</module>
+        <module>game-data</module>
+        <module>game-robot</module>
     </modules>
 
     <properties>
@@ -59,10 +59,10 @@
         <protobuf-maven-plugin.version>5.1.10</protobuf-maven-plugin.version>
         <!-- 默认按版本从 Maven 仓库取 protoc；网络受限的机器可用 -Dprotoc.spec=file:///.../protoc.exe 指向同版本的本地 protoc -->
         <protoc.spec>${protobuf.version}</protoc.spec>
-        <!-- 构建戳（见下面 spring-boot-maven-plugin 的 build-info）：CI / 镜像构建用 -Dxm.build.commit=<40 位 sha>
-             -Dxm.build.contract=<contract/SOURCE.properties 的 mmorpg.commit> 覆盖；本机构建取缺省（命令行 -D 优先于 pom 属性） -->
-        <xm.build.commit>unknown</xm.build.commit>
-        <xm.build.contract>unknown</xm.build.contract>
+        <!-- 构建戳（见下面 spring-boot-maven-plugin 的 build-info）：CI / 镜像构建用 -Dgame.build.commit=<40 位 sha>
+             -Dgame.build.contract=<contract/SOURCE.properties 的 mmorpg.commit> 覆盖；本机构建取缺省（命令行 -D 优先于 pom 属性） -->
+        <game.build.commit>unknown</game.build.commit>
+        <game.build.contract>unknown</game.build.contract>
     </properties>
 
     <dependencyManagement>
@@ -119,57 +119,57 @@
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-proto</artifactId>
+                <artifactId>game-proto</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-table-codegen</artifactId>
+                <artifactId>game-table-codegen</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-table</artifactId>
+                <artifactId>game-table</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-net</artifactId>
+                <artifactId>game-net</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-common</artifactId>
+                <artifactId>game-common</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-pbmysql</artifactId>
+                <artifactId>game-pbmysql</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-api</artifactId>
+                <artifactId>game-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-discovery</artifactId>
+                <artifactId>game-discovery</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-player-store</artifactId>
+                <artifactId>game-player-store</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-gateway-store</artifactId>
+                <artifactId>game-gateway-store</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.game</groupId>
-                <artifactId>xm-audit</artifactId>
+                <artifactId>game-audit</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>
@@ -186,7 +186,7 @@
                 <plugin>
                     <!-- 测试进程的总时限：某条用例无限等待（例如对永不完成的 future 调 join()）时，让构建在 30 分钟后失败，
                          而不是把 surefire 进程永远挂在那里（2026-10-06 本机实例：一个挂死的 fork 占着模块 target 一个多小时）。
-                         最慢的模块（xm-scene / xm-data 带真依赖）本机约 3 分钟，CI 上按几倍估仍远小于此值。
+                         最慢的模块（game-scene / game-data 带真依赖）本机约 3 分钟，CI 上按几倍估仍远小于此值。
                          版本钉在此前由 Maven 缺省绑定解析出来的 3.2.5，行为不变；各模块自己的 configuration 与这里合并。 -->
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
@@ -218,7 +218,7 @@
                     <executions>
                         <!-- 构建信息（docs/porting/deploy-ci-spec.md §5.1）：写 META-INF/build-info.properties，经 /actuator/info 暴露。
                              build.version = project.version（不覆盖：发布版本号方案归 7.6），另加 40 位的 commit 与契约来源 contract。
-                             声明了本插件的进程模块（含 xm-robot）都会把这个 execution 与自己的 repackage 合并，模块 pom 不用动；
+                             声明了本插件的进程模块（含 game-robot）都会把这个 execution 与自己的 repackage 合并，模块 pom 不用动；
                              库模块没有声明本插件，不受影响。不用 git-commit-id 插件（star 不够），commit 由 CI / 镜像构建用 -D 传入。 -->
                         <execution>
                             <id>build-info</id>
@@ -227,8 +227,8 @@
                             </goals>
                             <configuration>
                                 <additionalProperties>
-                                    <commit>${xm.build.commit}</commit>
-                                    <contract>${xm.build.contract}</contract>
+                                    <commit>${game.build.commit}</commit>
+                                    <contract>${game.build.contract}</contract>
                                 </additionalProperties>
                             </configuration>
                         </execution>

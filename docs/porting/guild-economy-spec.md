@@ -1,7 +1,7 @@
 # 帮会经济（guild，批次 4.5）移植统一规格：资产指令账本、跨进程投递、捐献 / 升级 / 商店
 
 > **基线**：mmorpg `26ceb70ca`（`git log -1` = `26ceb70 保存发布窗口结束前的进度记录补充`），与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。
-> Java 侧以 `3b071ce` 加当前工作区为准：工作区里 `xm-guild/`（4.4 进行中，未提交）、`pom.xml`、`DubboGroups.java`、`NodeTypes.java`、`RedisKeys.java`、
+> Java 侧以 `3b071ce` 加当前工作区为准：工作区里 `game-guild/`（4.4 进行中，未提交）、`pom.xml`、`DubboGroups.java`、`NodeTypes.java`、`RedisKeys.java`、
 > `tools/local/start-slice.sh` 等有未提交改动，这些文件的行号按当前工作区给出，提交后可能小幅漂移，引用时同时写出方法名。
 >
 > **范围**：路线图批次 4.5「帮会经济（资产指令账本与投递、捐献、升级、商店）」（`docs/porting/roadmap.md:62`），外加 2.9 留给 4.5 的
@@ -21,13 +21,13 @@
 >   `scenenode/{locator,conn,watcher,metrics}.go`：`go/shared/scenenode/`；`gameday.go`：`go/shared/gameday/`；
 >   `guild_divergence.go`：`go/data_service/internal/guildcheck/`；`asset_op_ledger_logic.go`：`go/data_service/internal/logic/`。
 > - `asset_op_system.cpp`：mmorpg `cpp/libs/services/scene/player/system/`；`scene_node_service.cpp`：`cpp/nodes/scene/handler/grpc/`；`node.cpp`：`cpp/libs/engine/core/node/system/node/`。
-> - proto：`guild.proto`、`guild_db.proto`、`guild_internal.proto` 在 mmorpg `proto/guild/`（Java 同步副本在 `xm-proto/src/main/proto/proto/guild/`，
+> - proto：`guild.proto`、`guild_db.proto`、`guild_internal.proto` 在 mmorpg `proto/guild/`（Java 同步副本在 `game-proto/src/main/proto/proto/guild/`，
 >   只多第 2–4 行 java option，所以 **Java 行号 = mmorpg 行号 + 3**）；`asset_op.proto(mm)` 指 `proto/common/asset/asset_op.proto`；
 >   `transaction_log.proto` 在 `proto/common/rollback/`；`scene_node_service.proto` 在 `proto/scene_manager/`；`asset_op_ledger_comp.proto` 在 `proto/common/component/`。
 > - 配表数据：mmorpg `generated/tables/{guildrule,guildlevel,guilddonate,guildshop,item,messagelimiter}.json`（Java 用 `config-data/tables/*.pb` 里的同一份）。
 > - `GuildClient.cs` = `D:\work\mmorpg-client\Assets\Scripts\Game\Guild\GuildClient.cs`；robot = mmorpg `robot/guild_economy_smoke.go`。
-> - 以 `xm-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`：在 `D:\work\xuanming-server-mmo` 下。
->   `guild-spec` 指 `docs/porting/guild-spec.md`（批次 4.4 统一规格）；`message_id.txt` 指 `xm-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
+> - 以 `game-`、`docs/`、`config-data/`、`contract/`、`tools/` 开头的路径，以及 `PARITY.md`、`AGENTS.md`：在 `D:\work\xuanming-server-mmo` 下。
+>   `guild-spec` 指 `docs/porting/guild-spec.md`（批次 4.4 统一规格）；`message_id.txt` 指 `game-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
 > - mmorpg 设计稿 `docs/design/guild-phase2/*.md` 只作背景；与代码冲突时以代码为准（`assetop/types.go:13-15` 自己也这么约定）。
 >
 > **本稿的来历**：由两份分区规格合并（guild 侧经济 / scene 侧与传输）。分区稿之间矛盾、或与代码不符的地方都回到代码重新核对过，
@@ -52,10 +52,10 @@
 - **Kafka 不在投递链上**：scene 应用时按请求的 tx 记资产流水、关联号 = op_id，只供审计与人工对账（`PARITY.md:63`；`assetopfix/main.go:1-18`）。
 
 **Java（本稿建议，细节见 §4、§7）**
-- 请求：gate → Dubbo `ClientMessageService.handle` → xm-guild（group `guild`，端口 20886，guild-spec §7.1）。
-- 资产指令：xm-guild 在 `xm_java` 写 outbox → 读 `xm:location:{pid}`（持有归属的 scene 写，状态 `o`）+ Redis 节点目录 `SceneNodeInfo`（新增 `rpc_host / rpc_port`）→
-  **按节点直连**调 xm-scene 新增的 Dubbo Triple 异步提供方 `SceneAssetOpService`（debit / abortDebit / credit）→ scene 侧已有的 `AssetOpEndpoint`（2.9）。
-- durable：Java scene 只看最近一次**确认落库到 MySQL** 的快照（`xm-scene/.../asset/AssetOpService.java:491-513`），介质与基线（Redis blob）不同、语义相同。
+- 请求：gate → Dubbo `ClientMessageService.handle` → game-guild（group `guild`，端口 20886，guild-spec §7.1）。
+- 资产指令：game-guild 在 `game` 写 outbox → 读 `game:location:{pid}`（持有归属的 scene 写，状态 `o`）+ Redis 节点目录 `SceneNodeInfo`（新增 `rpc_host / rpc_port`）→
+  **按节点直连**调 game-scene 新增的 Dubbo Triple 异步提供方 `SceneAssetOpService`（debit / abortDebit / credit）→ scene 侧已有的 `AssetOpEndpoint`（2.9）。
+- durable：Java scene 只看最近一次**确认落库到 MySQL** 的快照（`game-scene/.../asset/AssetOpService.java:491-513`），介质与基线（Redis blob）不同、语义相同。
 - 推送：`GuildPushes → PlayerPushes`（Redis pub/sub，`architecture.md` §4.3），与 4.4 相同。
 
 **本批不做**：4.6 活动（`ACTIVITY_REWARD` 行、`ACTIVITY` 计数）只留形状；7.2 回档闸（`ListAppliedAssetOpsSince` 的消费方）；交易（TRADE_* 流）的调用方。
@@ -97,7 +97,7 @@
 
 ### 0.4 tip 码表
 
-每个 tip 是 `TipInfoMessage{id, parameters:[一句英文原因]}`（`guild_logic.go:120-122`）。码值见 `xm-table/src/main/proto/tip/guild_error_tip.proto:56-74`、
+每个 tip 是 `TipInfoMessage{id, parameters:[一句英文原因]}`（`guild_logic.go:120-122`）。码值见 `game-table/src/main/proto/tip/guild_error_tip.proto:56-74`、
 `asset_error_tip.proto:12-28`；文案见 `config-data/tables/tip_text.json`。
 
 | 码 | 枚举 | 发生点与英文参数（出处） |
@@ -130,7 +130,7 @@
 
 ### 0.5 配表与启动校验（`ValidateEconomyTables`，失败拒启，`guild.go:98-103`）
 
-**当前数据**（`generated/tables/*.json`；Java schema `xm-table/src/main/proto/{guildrule,guildlevel,guilddonate,guildshop}_table.proto`）
+**当前数据**（`generated/tables/*.json`；Java schema `game-table/src/main/proto/{guildrule,guildlevel,guilddonate,guildshop}_table.proto`）
 - `GuildRule[1]`：`asset_op_deadline_seconds = 600`（第 5 列）、`asset_op_retry_base_ms = 1000`（第 6 列）（`guildrule_table.proto:42-47`；列注释写「会叠加抖动」，见 §9.1 第 2 条）。
 - `GuildLevel` 1–10：`upgrade_cost_funds` = 20000 / 50000 / 100000 / 180000 / 300000 / 460000 / 680000 / 960000 / 1300000 / **0**（满级）；
   `max_members` = 30 / 35 / 40 / 45 / 50 / 60 / 70 / 80 / 90 / 100；`max_officers` = 2 / 2 / 3 / 3 / 4 / 4 / 5 / 5 / 6 / 6。
@@ -207,7 +207,7 @@
 
 ## 1 数据模型
 
-### 1.1 三张表（`guild_db.proto:88-197`；Java 在 `xm-guild/src/main/proto/xm/guild/guild_tables.proto` **追加**，字段号与索引照抄，guild-spec §6.2）
+### 1.1 三张表（`guild_db.proto:88-197`；Java 在 `game-guild/src/main/proto/game/guild/guild_tables.proto` **追加**，字段号与索引照抄，guild-spec §6.2）
 
 每张表都带 `TiDBNonclusteredPK = true`、`ShardRowIDBits = 4`、`PreSplitRegions = 4`（`guild_db.proto:126-128`、`:147-149`、`:186-188`）。
 
@@ -226,7 +226,7 @@
   `idx_guild_asset_op_2(player_id, stream, stream_epoch, status, seq)`（未决读、提前截止候选、待结算列表）。索引名从 0 编号，**组只能追加、不得调序**（`:142-146`）。
 - 28 列（列序 = proto 字段序 = SQL 列清单序，`economy_repo.go:62-72`；单测 `TestAssetOpColumnsCoverEveryProtoField`，`economy_repo_test.go:58`）：
 
-| # | 列 | DDL 类型（pbmysql，`xm-pbmysql/.../TableSchema.java:63-75`） | 语义 |
+| # | 列 | DDL 类型（pbmysql，`game-pbmysql/.../TableSchema.java:63-75`） | 语义 |
 |---|---|---|---|
 | 1 | op_id | bigint unsigned | 发号（基线号段 `biz_tag=guild_asset_op`）；同时作 correlation_id |
 | 2 | player_id | bigint unsigned | |
@@ -381,7 +381,7 @@
 - `NextDailyReset`：严格晚于 t 的下一个 05:00；`NextWeeklyReset`：严格晚于 t 的下一个周一 05:00（`:49-62`）。
 - `PeriodKey(p, t)`：0 → (0, ok)；1 → DayKey；2 → WeekKey；其它 → !ok（`:64-86`）。两种键数值域不相交，可放进同一条 `IN`（`economy_repo.go:951`）。
 - **一个请求只取一次 now**，周期键、截止、租约、created_ms 都从它算（`economy_logic.go:708-710`）。
-- Java：xm-common 新增 `GameDay`（仓库里目前没有，grep 无结果）：`ZoneOffset.ofHours(8)`，平移 −5 h，周用 `IsoFields.WEEK_BASED_YEAR` / `WEEK_OF_WEEK_BASED_YEAR`；全部以 `Instant` 入参、时钟可注入（guild-spec §6.7）。
+- Java：game-common 新增 `GameDay`（仓库里目前没有，grep 无结果）：`ZoneOffset.ofHours(8)`，平移 −5 h，周用 `IsoFields.WEEK_BASED_YEAR` / `WEEK_OF_WEEK_BASED_YEAR`；全部以 `Instant` 入参、时钟可注入（guild-spec §6.7）。
 
 ---
 
@@ -813,10 +813,10 @@ APPLIED 显示成功并重拉背包；PENDING 且 reason = 27000 显示「余额
 
 | 能力 | Java 位置 | 与基线 |
 |---|---|---|
-| 内部契约 | `xm-api/src/main/proto/xm/api/asset_op.proto:13-83`（`AssetStream / AssetOutcome / AssetBundle / AssetAuth / AssetOpRequest / AssetOpResponse`；**reason 是 uint32，没有 snapshot**） | 字段语义与数值同基线，Java 自有格式（`:1-4`） |
-| 进程内入口 | `AssetOpEndpoint`：任意线程调，投到逻辑线程，future 带回；future 异常完成 = 传输失败（`xm-scene/.../asset/AssetOpEndpoint.java:11-56`）；`SceneNode.assetOps()`（`SceneNode.java:154`、`:267-268`、`:399-401`） | 「跨进程传输随 4.5 接在这一层外面」（`AssetOpEndpoint.java:13`）。**future 在逻辑线程上 complete**（`:45`） |
+| 内部契约 | `game-api/src/main/proto/game/api/asset_op.proto:13-83`（`AssetStream / AssetOutcome / AssetBundle / AssetAuth / AssetOpRequest / AssetOpResponse`；**reason 是 uint32，没有 snapshot**） | 字段语义与数值同基线，Java 自有格式（`:1-4`） |
+| 进程内入口 | `AssetOpEndpoint`：任意线程调，投到逻辑线程，future 带回；future 异常完成 = 传输失败（`game-scene/.../asset/AssetOpEndpoint.java:11-56`）；`SceneNode.assetOps()`（`SceneNode.java:154`、`:267-268`、`:399-401`） | 「跨进程传输随 4.5 接在这一层外面」（`AssetOpEndpoint.java:13`）。**future 在逻辑线程上 complete**（`:45`） |
 | 判定顺序 | `AssetOpService.decide`（`AssetOpService.java:141-229`）：信封 / 流方向 / tx 白名单（`:90-102`：GUILD_DEBIT {24}、GUILD_CREDIT {25, 26}）→ 验签 → 找人 → 账本损坏 RETRY 27005 → 分类 → 归属围栏 RETRY 27003 → 中止占位 → 包内容 → 应用 | 同 C++；冻结 / 交接 / 战斗三道闸恒放行（随 5.x / 6.x） |
-| 验签 | `AssetOpAuth`：`CANONICAL_VERSION`、300 s、≥ 32 字节、白名单先于取密钥、常数时间比对；密钥 `XM_ASSET_OP_SECRET_GUILD / _TRADE`（`AssetOpAuth.java:37-53`、`:96-150`、`:158-184`） | 规范串逐字节相同（`AssetOpAuthTest`，golden 同输入） |
+| 验签 | `AssetOpAuth`：`CANONICAL_VERSION`、300 s、≥ 32 字节、白名单先于取密钥、常数时间比对；密钥 `GAME_ASSET_OP_SECRET_GUILD / _TRADE`（`AssetOpAuth.java:37-53`、`:96-150`、`:158-184`） | 规范串逐字节相同（`AssetOpAuthTest`，golden 同输入） |
 | 账本 | `AssetOpLedger`（1024 位窗口、跳号、纪元、拒绝环、部分发放名单；`restore` 校验，坏账本原样带回）（`AssetOpLedger.java:25-35`、`:82-93`、`:127`） | 同基线 |
 | durable | 只看 `ScenePlayer.persistedState()`（最近一次**确认落库到 MySQL** 的快照，`AssetOpService.java:491-513`）；记账后 `SceneWorld.requestSave`（`:477-488`）；已见未 durable 的重查 500 ms 内至多补存一次（`:64`、`:452-474`） | 介质 MySQL（基线 Redis） |
 | 接管守卫 | `SceneWorld` 进场（`PARITY.md:38`） | Java 自有修复 |
@@ -827,55 +827,55 @@ APPLIED 显示成功并重拉背包；PENDING 且 reason = 27000 显示「余额
 
 | # | 缺口 | 现状证据 |
 |---|---|---|
-| G1 | scene 没有任何跨进程入口：xm-scene 不依赖 Dubbo（xm-api 的 dubbo 依赖是 `optional`，`xm-api/pom.xml:33-38`），只有 Netty 节点链路与管理端口 | `xm-scene/pom.xml`；`xm-scene/src/main/resources/application.yaml` |
-| G2 | 节点目录没有 RPC 地址：`SceneNodeInfo` 只有 `link_host / link_port` | `xm-api/src/main/proto/xm/api/node_directory.proto:22-30`；`SceneNode.java:332-338` |
+| G1 | scene 没有任何跨进程入口：game-scene 不依赖 Dubbo（game-api 的 dubbo 依赖是 `optional`，`game-api/pom.xml:33-38`），只有 Netty 节点链路与管理端口 | `game-scene/pom.xml`；`game-scene/src/main/resources/application.yaml` |
+| G2 | 节点目录没有 RPC 地址：`SceneNodeInfo` 只有 `link_host / link_port` | `game-api/src/main/proto/game/api/node_directory.proto:22-30`；`SceneNode.java:332-338` |
 | G3 | 没有「按玩家定位持有者节点」的严格读法：`PlayerLocationDirectory.find` 对 `o` 与 `l` 都返回位置、对损坏 / 键不符返回空（把数据面事故吞成「不在线」），且阻塞；`statusesAsync` 只回状态 | `PlayerLocationDirectory.java:108-115`、`:212-246`、`:262-281` |
-| G4 | 调用方全部缺失：签名器、Caller、Decide / FinalStatus / NextAttemptMs、循环、Store、seq 分配 | xm-guild 只有 4.4 骨架 |
-| G5 | 规范串只在 xm-scene（`AssetOpAuth.canonical / sign` 是 public static），xm-guild 不能依赖 xm-scene | `AssetOpAuth.java:96`、`:142` |
-| G6 | 已落盘账本只读查询（asset-op-ledger-read）：没有读端，也没有调用方可用的分类器（`AssetOpLedger` 在 xm-scene，依赖 xm-api 的 `AssetStream` 与 xm-player-store 的状态 proto） | `PARITY.md:79`；`AssetOpLedger.java:3-6`、`:300-304` |
+| G4 | 调用方全部缺失：签名器、Caller、Decide / FinalStatus / NextAttemptMs、循环、Store、seq 分配 | game-guild 只有 4.4 骨架 |
+| G5 | 规范串只在 game-scene（`AssetOpAuth.canonical / sign` 是 public static），game-guild 不能依赖 game-scene | `AssetOpAuth.java:96`、`:142` |
+| G6 | 已落盘账本只读查询（asset-op-ledger-read）：没有读端，也没有调用方可用的分类器（`AssetOpLedger` 在 game-scene，依赖 game-api 的 `AssetStream` 与 game-player-store 的状态 proto） | `PARITY.md:79`；`AssetOpLedger.java:3-6`、`:300-304` |
 | G7 | `ListAppliedAssetOpsSince` 的 Java 接口 | guild-spec §6.6 |
-| G8 | 本机脚本没注入 `XM_ASSET_OP_SECRET_GUILD`；scene 跑 Dubbo 提供方后也需要 `XM_DUBBO_SECRET`（提供方过滤器缺密钥即暴露失败），但 scene 不在读者名单 | `tools/local/start-slice.sh:3-17`；`DubboAuthProviderFilter.java:24-41` |
+| G8 | 本机脚本没注入 `GAME_ASSET_OP_SECRET_GUILD`；scene 跑 Dubbo 提供方后也需要 `GAME_DUBBO_SECRET`（提供方过滤器缺密钥即暴露失败），但 scene 不在读者名单 | `tools/local/start-slice.sh:3-17`；`DubboAuthProviderFilter.java:24-41` |
 | G9 | scene 侧没有在途上限：逻辑线程 `DefaultEventLoop` 任务队列无界，异步提供方会把突发全部堆进去 | `SceneNode.java:223` |
 | G10 | scene 侧资产通道没有指标（只有 INFO / WARN 日志） | `AssetOpService.java:128-137` |
 
-### 4.5 Java 传输：接口（xm-api）
+### 4.5 Java 传输：接口（game-api）
 
 ```java
-// com.game.api.SceneAssetOpService —— xm-scene 提供；每个 scene 节点一份，按节点直连（不进注册中心）
+// com.game.api.SceneAssetOpService —— game-scene 提供；每个 scene 节点一份，按节点直连（不进注册中心）
 public interface SceneAssetOpService {
     CompletableFuture<AssetOpResponse> debit(AssetOpRequest request);
     CompletableFuture<AssetOpResponse> abortDebit(AssetOpRequest request);
     CompletableFuture<AssetOpResponse> credit(AssetOpRequest request);
 }
 ```
-- 参数 / 返回用现成的 `xm.api.AssetOpRequest / AssetOpResponse`，Triple 走 protobuf；异步签名有先例 `ClientMessageService`（`xm-api/.../ClientMessageService.java:36`）。
+- 参数 / 返回用现成的 `game.api.AssetOpRequest / AssetOpResponse`，Triple 走 protobuf；异步签名有先例 `ClientMessageService`（`game-api/.../ClientMessageService.java:36`）。
 - 三个方法对应 `AssetOpService.Rpc.DEBIT / ABORT_DEBIT / CREDIT`；规范串第 3 行用 `wireName()`（debit / abort_debit / credit），**与 Dubbo 方法名无关**（`AssetOpService.java:69-83`）。
 - `DubboGroups` 新增一个常量（例如 `SCENE_ASSET = "scene-asset"`）只作分组标识。
 
-### 4.6 scene 提供方（xm-scene）
+### 4.6 scene 提供方（game-scene）
 
 1. **依赖与协议**：加 `dubbo-spring-boot-starter`；`dubbo.protocol.name = tri`；`registry.address = N/A`；服务 `@DubboService(register = false)`——地址只来自 Redis 节点目录
    （与 gate 连 scene 同一个发现源，不造第二份真相）。Dubbo 不接受回环绑定（`architecture.md` §4.1），端口对内网可达。
-2. **端口**：同机多实例必须各不相同（同 `link-port` / `SERVER_PORT` 的规则）。建议 `xm.scene.asset-rpc-port`，缺省 21100（link 21000 旁边；现有 Dubbo 端口 20881–20886 已占）；见 Q2。
-3. **鉴权两层**：Dubbo 调用方 MAC（`DubboAuthProviderFilter` SPI 自动生效，管 `com.game.*`，缺 `XM_DUBBO_SECRET` 暴露失败）+ 请求体 HMAC（已有 `AssetOpAuth`）。
+2. **端口**：同机多实例必须各不相同（同 `link-port` / `SERVER_PORT` 的规则）。建议 `game.scene.asset-rpc-port`，缺省 21100（link 21000 旁边；现有 Dubbo 端口 20881–20886 已占）；见 Q2。
+3. **鉴权两层**：Dubbo 调用方 MAC（`DubboAuthProviderFilter` SPI 自动生效，管 `com.game.*`，缺 `GAME_DUBBO_SECRET` 暴露失败）+ 请求体 HMAC（已有 `AssetOpAuth`）。
    前者不覆盖请求体（`architecture.md` §4.1 残余风险），后者覆盖全部字段含 `;u=;p=`，互补。
 4. **实现**：`assetOps()` 为 null（未就绪）→ 失败的 future（= 传输失败，调用方重投）；否则调 `AssetOpEndpoint`，并**在 future 上切出逻辑线程**
    （`whenCompleteAsync` / `thenApplyAsync` 到专用执行器）：Dubbo 的回写不应跑在场景逻辑线程上（`AGENTS.md` §3）。
-5. **在途上限**（补 G9）：`xm.scene.asset-op-max-inflight`（建议缺省 256），Semaphore 控制，超出直接回失败的 future（「过载」）——调用方当传输失败、走 Retry，不会误记账。
+5. **在途上限**（补 G9）：`game.scene.asset-op-max-inflight`（建议缺省 256），Semaphore 控制，超出直接回失败的 future（「过载」）——调用方当传输失败、走 Retry，不会误记账。
    基线的上限是 8 条 poller 隐式给的；Java 异步提供方没有这层天然闸，必须显式加。上限应 ≥ 副本数 × Workers + 同步投递并发。
 6. **生命周期**：启动时只在 `assetOps` 建好、Dubbo 导出成功之后，才在 `SceneNodeInfo` 带上 `rpc_host / rpc_port` 再发布目录（`SceneNode.java:332-345`）；
    停服 `release` 第一步摘目录（调用方随之找不到它），逻辑线程停后 `AssetOpEndpoint` 回 `RejectedExecutionException`（`AssetOpEndpoint.java:52-54`）= 传输失败；
    停服写回之后再到的请求是 NOT_HERE，此前已记账、已落库的结局可经 §4.9 的离线读终结。Dubbo 反导出排在摘目录之后、逻辑线程停之前。
 7. **目录字段**：`SceneNodeInfo` 追加 `string rpc_host = 7; uint32 rpc_port = 8;`（Java 内部 proto，不是同步产物）。`rpc_port = 0` = 这个节点不提供资产通道（滚动升级期间的旧版本），调用方按「没人持有」处理。
-8. **指标**（补 G10）：`xm_scene_asset_ops_total{rpc, outcome}`（outcome 含 `overloaded`、`error`）、`xm_scene_asset_ops_inflight`。
+8. **指标**（补 G10）：`game_scene_asset_ops_total{rpc, outcome}`（outcome 含 `overloaded`、`error`）、`game_scene_asset_ops_inflight`。
 
-### 4.7 定位（xm-discovery；供 xm-guild 与以后的交易用）
+### 4.7 定位（game-discovery；供 game-guild 与以后的交易用）
 
 `SceneAssetLocator.resolve(playerId)`，判定顺序照 `scenenode/locator.go:149-215`：
 
 | 步 | 情形 | 结果 |
 |---|---|---|
-| 1 | 读 `xm:location:{pid}` 出错 | **故障**（Retry 并告警），不算「没人持有」 |
+| 1 | 读 `game:location:{pid}` 出错 | **故障**（Retry 并告警），不算「没人持有」 |
 | 2 | 键不存在 / `s = x`（登出墓碑）/ `s = l`（重连租约） | 没人持有：本地合成 NOT_HERE。Java 断线即最终写回并释放归属，**租约期间没有任何节点持有该玩家**（`PlayerLocationDirectory.java:24-33`；`PARITY.md:87` 有意差异 ①） |
 | 3 | 值解析失败 / `player_id` 与键不符 / 状态值不认识 | **故障**（照 `locator.go:145-146`；现有 `find` 会吞掉，所以要新增读法） |
 | 4 | `SceneNodeInfo`（zone = 记录里的 zone_id）里没有 `scene_node_id`，或该条目 `rpc_port = 0` | 没人持有（node_unknown / no_rpc_port） |
@@ -883,27 +883,27 @@ public interface SceneAssetOpService {
 | 6 | 找到 `rpc_host:rpc_port`（+ instance_id） | 取（或建）这个地址的 Dubbo 客户端 |
 
 - **新读法**：`PlayerLocationDirectory.findHolderAsync(pid) → {ONLINE(location) | NO_HOLDER(MISSING / LEASED / LOGGED_OUT) | ERROR}`（一段只读 Lua 同时取 `s` 与 `v`，异步）；
-  `NodeDirectory` 增加按 (zone, nodeId) 的异步单条读（现在只有阻塞的 `list(zone)`，`xm-discovery/.../NodeDirectory.java:52-63`）。
+  `NodeDirectory` 增加按 (zone, nodeId) 的异步单条读（现在只有阻塞的 `list(zone)`，`game-discovery/.../NodeDirectory.java:52-63`）。
 - **基线有、Java 没有的状态**：AwaitingPlacement（Java 跨区随 5.4；2026-10-11 落地后也不是单独的状态：待落点写成 `s=l` 加节点号 0，`SceneAssetLocator` 判状态先于读节点号，按重连租约归到 `NoHolder(LEASE)`，调用方合成 NOT_HERE、稍后重投；代码已集成，切片未验证）、同身份歧义（Redis map 按节点号做键，天然唯一）、镜像未同步（每次现读目录；可加 1 s 本地缓存，陈旧只多一次 NOT_HERE 或传输失败，正确性在 scene 账本与围栏）。
 - 节点号按区租约、实例退出即交还（`architecture.md` §6），位置记录可能指向「同号新实例」：新实例回 NOT_HERE，Caller 重定位，不影响正确性。
 - **客户端缓存**：按 (host, port, instance_id) 缓存编程式 `ReferenceConfig<SceneAssetOpService>`（直连 `tri://host:port`、**`retries = 0`**、`check = false`、`timeout = 800`），
   条目在目录里消失或实例变了就 `destroy`（对应 `ConnCache.Remove`，`scenenode/conn.go:69-79`）。仓库里还没有编程式 ReferenceConfig 的先例（grep 无结果），实现时以测试为准；
   Dubbo 3 的「按调用指定地址」是备选。**`retries` 必须是 0**：Dubbo 缺省 failover 会重发，打乱预算与指标；重投由 Caller 与循环负责。
-- **不读 `xm:presence`**：在线目录由 gate 写；资产通道要找的是**数据持有者**（持有归属的 scene 写的位置记录）。
+- **不读 `game:presence`**：在线目录由 gate 写；资产通道要找的是**数据持有者**（持有归属的 scene 写的位置记录）。
 
-### 4.8 签名共用件（xm-api）
+### 4.8 签名共用件（game-api）
 
-- 把 `canonical / sign / CANONICAL_VERSION` 与「去首尾空白后 ≥ 32 字节」的密钥规则从 xm-scene 的 `AssetOpAuth` 挪到 **xm-api**（例如 `com.game.api.asset.AssetOpSignatures`）：
-  `AssetOpRequest` 在 xm-api（`com.game.api.proto`），xm-api 已有 `com.game.api.auth` 鉴权代码；xm-common 不依赖 xm-api（`xm-common/pom.xml`），放不进去。
-- scene 的 `verify` 与 xm-guild 的签名器都用它；golden 用例跟着搬、两侧各钉一次。对应基线「本包唯一允许出现串格式知识的地方」（`assetop/auth.go:72-74`）。
+- 把 `canonical / sign / CANONICAL_VERSION` 与「去首尾空白后 ≥ 32 字节」的密钥规则从 game-scene 的 `AssetOpAuth` 挪到 **game-api**（例如 `com.game.api.asset.AssetOpSignatures`）：
+  `AssetOpRequest` 在 game-api（`com.game.api.proto`），game-api 已有 `com.game.api.auth` 鉴权代码；game-common 不依赖 game-api（`game-common/pom.xml`），放不进去。
+- scene 的 `verify` 与 game-guild 的签名器都用它；golden 用例跟着搬、两侧各钉一次。对应基线「本包唯一允许出现串格式知识的地方」（`assetop/auth.go:72-74`）。
 - 签名器写法：先在克隆的请求上设 `auth{caller = "guild", timestamp_ms = now}`，再按 canonical（它读 auth 里的 caller 与 timestamp）算 HMAC 写 `signature_hex`。
   trim 规则两侧必须同一个函数（Go `strings.TrimSpace` 与 Java `String.trim` 对 Unicode 空白不同；两侧都是 Java 后只要共用同一份代码即可）。
 
 ### 4.9 已落盘账本只读查询（Java）
 
-- **介质**：Java 的 durable 就是 `xm_java.player_state` 里已提交、带 owner_epoch 围栏的那份记录（scene 读的 `persistedState` 是它的镜像），与基线「Redis 是 durable、MySQL 可能更旧」口径不同
+- **介质**：Java 的 durable 就是 `game.player_state` 里已提交、带 owner_epoch 围栏的那份记录（scene 读的 `persistedState` 是它的镜像），与基线「Redis 是 durable、MySQL 可能更旧」口径不同
   （`asset_op_ledger_logic.go:25-30`）。所以 Java **直接读 MySQL**，正好读到 durable 的那份，不需要 data_service 式中转。
-- **读法**：`SELECT data FROM player_state WHERE player_id = ?`（`xm-player-store/src/main/resources/db/xm-player-schema.sql:37-40`）：没有行 → absent；解析失败 → error；
+- **读法**：`SELECT data FROM player_state WHERE player_id = ?`（`game-player-store/src/main/resources/db/game-player-schema.sql:37-40`）：没有行 → absent；解析失败 → error；
   没有 `asset_ledger` 段（`player_state.proto:34`）→ 空账本 → unseen；单次上限 300 ms；阻塞 JDBC，只在循环 worker 线程上调。
 - **分类**：`restore` + 校验 + `classify` + `isPartial` + `rejectionReason`，与 scene 的 `AssetOpLedger` **同一份代码或同一张用例表**（基线是 Go / C++ 两份实现跑同一张表，`classify_test.go`）。放哪里见 Q3。
 - **触发**：只有本地合成 NOT_HERE、`attempts ≥ LedgerReadMinAttempts(3)`、接了读端时才读（`reconcile.go:503-505`、`:641-667`）；读到未见**绝不判中止**（I7）。
@@ -915,7 +915,7 @@ public interface SceneAssetOpService {
 
 ### 4.11 Java scene 契约对调用方的影响
 
-- 应答 `reason` 是 uint32（不是 TipInfoMessage），没有 snapshot（`xm-api/.../asset_op.proto:76-83`）。
+- 应答 `reason` 是 uint32（不是 TipInfoMessage），没有 snapshot（`game-api/.../asset_op.proto:76-83`）。
 - 流水原因白名单：GUILD_DEBIT 只收 24，GUILD_CREDIT 收 25、26（`AssetOpService.java:90-94`）——帮会请求必须带对 tx_type，否则 UNKNOWN 27004（Alert，不终结）。
 - 物品整批原子，物品段不会部分发放；账本损坏 RETRY 27005；退出存盘在途是 NOT_HERE（`AssetOpService.java:30-49`）。
 - durable 要等 MySQL 落库确认；`SceneWorld.requestSave` 回 `IN_FLIGHT` 时不会自动追加存盘（`SceneWorld.java:795-833`），要靠 ≥ 500 ms 后的重查或下个周期才追平，
@@ -949,12 +949,12 @@ public interface SceneAssetOpService {
 | GuildInfo 装配已填 `funds`、成员帮贡、`max_officers`、`upgrade_cost_funds` | 4.5 不改视图代码；快照格式不变 | `guild_logic.go:747-784`；guild-spec §6.1 |
 | 锁序 G<S<M<A<**Q(5)<O(6)<C(7)**<P(8) | 4.5 在 `guild_tables.proto` 追加 Q、O、C 三个 message（声明顺序 = 锁序）；捐献 / 兑换普通读 G，升级 G `FOR UPDATE` | `tables.go:15-34`；guild-spec §6.2 |
 | `MemberExitHooks.accelerateDonationDeadlines`（4.4 空操作） | 实现 §2.9（O1 → O2 → O3） | `economy_repo.go:370-456`；guild-spec §6.3 |
-| op 标签 `upgrade / asset_finalize / donate / shop` 已预注册 | 直接用（Java `GuildTxOp`、`InvalidationOp` 已有） | `guild_manage_repo.go:410-421`；`xm-guild/.../store/GuildTxOp.java:26-32` |
+| op 标签 `upgrade / asset_finalize / donate / shop` 已预注册 | 直接用（Java `GuildTxOp`、`InvalidationOp` 已有） | `guild_manage_repo.go:410-421`；`game-guild/.../store/GuildTxOp.java:26-32` |
 | 推送 kind 9 / 10 / 13 已预留 | 本批发出 | `push.go:240-266` |
 | 事务基座 `inTx` / `invalidateAfterCommit` / `mapWriteErr` / `verifyMapping` / `operatorGuild` / `ResolvePlayerGuild` / `VerifyPlayerGuildID` / `leftGuildWhileResolving` | 请求路径复用；后台写**不用** inTx（§1.5） | `economy_repo.go:168-188`；`asset_store.go:16-19`；guild-spec §6.4 |
 | 派发器 53 / 76 / 120 / 228 / 233 回 in-band 1006（D13） | 4.5 只换处理器，不动白名单与启动校验 | guild-spec §6.5 |
 | 发号失败 14008（D8） | op_id 发号失败沿用 14008 | `economy_logic.go:386-401`；guild-spec §6.6 |
-| `GuildReject` 注释已预告经济哨兵 | 追加 `LEVEL_TOO_LOW、DONATE_LIMIT、SHOP_LIMIT、CONTRIBUTION_INSUFFICIENT、MAX_LEVEL、FUNDS_INSUFFICIENT、TOO_MANY_PENDING`；`GuildTips.forReject` 穷举 §3.0 的表 | `xm-guild/.../rules/GuildReject.java:10-12` |
+| `GuildReject` 注释已预告经济哨兵 | 追加 `LEVEL_TOO_LOW、DONATE_LIMIT、SHOP_LIMIT、CONTRIBUTION_INSUFFICIENT、MAX_LEVEL、FUNDS_INSUFFICIENT、TOO_MANY_PENDING`；`GuildTips.forReject` 穷举 §3.0 的表 | `game-guild/.../rules/GuildReject.java:10-12` |
 
 ### 6.2 `MemberExitHooks` 的契约（4.4 调用方必须满足）
 
@@ -980,23 +980,23 @@ public interface SceneAssetOpService {
 | 表 proto | `guild_tables.proto` 追加 `GuildPlayerOpSeqRow`、`GuildAssetOpRow`、`GuildDailyCounterRow` 与三个枚举 | §7.2 |
 | 经济仓储 | `store/JdbcEconomyStore`（T-D、T-S、T-U、读 C2 / C3 / M14 / O6 / O7 / O8、提前截止） | SQL 逐字照搬 §1.4；请求路径用 4.4 的 `GuildTx` |
 | 资产 Store | `asset/JdbcGuildAssetStore`（ListDue、Claim、Reschedule、毒行、Finalize、ResolveManually、最老未决、清理、ListApplied） | 后台写用新的 `BackgroundTx`（§7.3） |
-| 纯规则 | `asset/AssetOpDecisions`（Decide、FinalStatus、NextAttemptMs、ApplyRpcOf、counterRefund、StatusToRecord）；`service/EconomyTables`（校验、MaxBuyCount、查表）；xm-common `GameDay` | 纯函数整表单测 |
-| 通道客户端 | `asset/AssetOpSigner`（用 xm-api 共用件）、`asset/AssetOpCaller`（定位、调用、换节点、重查、翻转）、`asset/AssetOpLoop`（Tick、claim、processOne、settle） | 照 `go/shared/assetop` 写；放 xm-guild，交易接入时再抽（Q4） |
-| 定位 | xm-discovery `location/SceneAssetLocator` + `PlayerLocationDirectory.findHolderAsync` + `NodeDirectory` 单条读 | §4.7 |
+| 纯规则 | `asset/AssetOpDecisions`（Decide、FinalStatus、NextAttemptMs、ApplyRpcOf、counterRefund、StatusToRecord）；`service/EconomyTables`（校验、MaxBuyCount、查表）；game-common `GameDay` | 纯函数整表单测 |
+| 通道客户端 | `asset/AssetOpSigner`（用 game-api 共用件）、`asset/AssetOpCaller`（定位、调用、换节点、重查、翻转）、`asset/AssetOpLoop`（Tick、claim、processOne、settle） | 照 `go/shared/assetop` 写；放 game-guild，交易接入时再抽（Q4） |
+| 定位 | game-discovery `location/SceneAssetLocator` + `PlayerLocationDirectory.findHolderAsync` + `NodeDirectory` 单条读 | §4.7 |
 | 账本读端 | `PersistedLedgerReader`（读 `player_state.data`，解出 `asset_ledger`，交共享分类器） | §4.9；Q1 / Q3 |
 | 服务 | `service/GuildEconomyService`（五个 RPC）；`service/EconomyViews`（视图与最近结果） | §3 |
 | 推送 | `push/GuildPushes` 增加 9 / 10 / 13 | §5 |
 | 钩子 | `MemberExitHooks.accelerateDonationDeadlines` | §2.9 |
-| 内部查询 | xm-api `GuildInternalService.listAppliedAssetOpsSince`（group `guild`），xm-guild 提供 | §7.11；Q7 |
-| 人工终结 | xm-guild 内 CLI 主类 `asset/fix/AssetOpFixMain`（list / resolve；前置、退出码、审计行照搬） | §7.10 |
-| scene 提供方 | xm-scene `asset/SceneAssetOpProvider implements SceneAssetOpService` | §4.6 |
+| 内部查询 | game-api `GuildInternalService.listAppliedAssetOpsSince`（group `guild`），game-guild 提供 | §7.11；Q7 |
+| 人工终结 | game-guild 内 CLI 主类 `asset/fix/AssetOpFixMain`（list / resolve；前置、退出码、审计行照搬） | §7.10 |
+| scene 提供方 | game-scene `asset/SceneAssetOpProvider implements SceneAssetOpService` | §4.6 |
 
-### 7.2 表 proto（`xm-guild/src/main/proto/xm/guild/guild_tables.proto` 追加）
+### 7.2 表 proto（`game-guild/src/main/proto/game/guild/guild_tables.proto` 追加）
 
 - 字段号、`primary_key`、`unique_key = "player_id,stream,stream_epoch,seq"`（→ `uk_guild_asset_op`）、`index = "status,next_attempt_ms;guild_id,op_id;player_id,stream,stream_epoch,status,seq"`
   （→ idx_0/1/2，**顺序不能变**）、`GuildDailyCounterRow` 的 `index = "period_key"`、TiDB 三个选项，全部照抄 `guild_db.proto:96-197`；message 声明顺序 = 锁序。
 - pbmysql 类型映射与 Go 逐字相同：枚举 → `int NOT NULL DEFAULT 0`、`bytes` → MEDIUMBLOB（可空）、`string` → MEDIUMTEXT（可空）、`uint64` → `bigint unsigned NOT NULL DEFAULT 0`
-  （`xm-pbmysql/.../TableSchema.java:60-75`；键列里的 string / bytes 才特殊处理，`:228-236`，本批的键列都是整数 / 枚举）。
+  （`game-pbmysql/.../TableSchema.java:60-75`；键列里的 string / bytes 才特殊处理，`:228-236`，本批的键列都是整数 / 枚举）。
 - Java 测试复刻 `asset_tables_shape_test.go`（索引名、枚举列是 int、Q 无二级索引）与 `TestAssetOpColumnsCoverEveryProtoField`（28 列清单 = proto 字段序）。
 
 ### 7.3 仓储与事务
@@ -1025,7 +1025,7 @@ public interface SceneAssetOpService {
 
 | Java 组件 | 对应基线 | 要点 |
 |---|---|---|
-| `AssetOpSigner` | `auth.go:57-67`、`:151-162` | 读 `XM_ASSET_OP_SECRET_GUILD`，去空白后 ≥ 32 字节；caller 恒 `"guild"`；**通道开启时缺失即拒启**；每次发包克隆并现签；密钥值不进日志 |
+| `AssetOpSigner` | `auth.go:57-67`、`:151-162` | 读 `GAME_ASSET_OP_SECRET_GUILD`，去空白后 ≥ 32 字节；caller 恒 `"guild"`；**通道开启时缺失即拒启**；每次发包克隆并现签；密钥值不进日志 |
 | `AssetOpCaller.deliver(rpc, request)` | `caller.go:73-229` | 本地合成 NOT_HERE；**只有换了节点**才重调；100 / 200 / 400 ms 重查；翻转检测；单次 `min(800 ms, 剩余)` |
 | `AssetOpDecisions` | `decide.go`；`types.go:114-187` | 整表单测照 `decide_test.go` |
 | `AssetOpLoop` | `reconcile.go` | 缺省值与区间完全照 §0.6；settle 700 ms 从 OpBudget 切出、不随取消；27007 粘性；最老未决每 30 s；令牌 = `SecureRandom.nextLong()` 再把最低位置 1 |
@@ -1033,7 +1033,7 @@ public interface SceneAssetOpService {
 
 ### 7.6 配置项
 
-**xm-guild `xm.guild.asset-op.*`**（键与缺省照 §0.6；Spring 属性缺省值，`enabled` 缺省 false = fail-closed，本机切片 yaml 设 true）
+**game-guild `game.guild.asset-op.*`**（键与缺省照 §0.6；Spring 属性缺省值，`enabled` 缺省 false = fail-closed，本机切片 yaml 设 true）
 
 | 项 | 缺省 | 校验 |
 |---|---|---|
@@ -1046,7 +1046,7 @@ public interface SceneAssetOpService {
 | 交叉校验 | — | `lease + reconcile-interval < GuildRule.asset_op_deadline_seconds`；`asset_op_retry_base_ms ≤ max-backoff`（开启时） |
 | 代码常量（不开放） | 同步预算 2500 / 尾巴 1000 / 下限 300 ms；单次调用 800 ms；重查 100/200/400；settle 700；AwaitDurable 500；FreshAttemptLimit 3；守卫 16 / 512；清理 500 / 100 ms / 20 / 2 s / 8 d；离线读 300 ms | §0.7 |
 
-**xm-scene**：`xm.scene.asset-rpc-port`（缺省 21100，同机多实例必须覆盖）、`xm.scene.asset-op-max-inflight`（缺省 256）；`XM_DUBBO_SECRET` 变成必填；`XM_ASSET_OP_SECRET_GUILD` 照旧。
+**game-scene**：`game.scene.asset-rpc-port`（缺省 21100，同机多实例必须覆盖）、`game.scene.asset-op-max-inflight`（缺省 256）；`GAME_DUBBO_SECRET` 变成必填；`GAME_ASSET_OP_SECRET_GUILD` 照旧。
 
 ### 7.7 启动 / 关停顺序（照 `guild.go:85-393`）
 
@@ -1060,8 +1060,8 @@ public interface SceneAssetOpService {
 
 ### 7.8 本机脚本（`tools/local/start-slice.sh`）
 
-- `XM_ASSET_OP_SECRET_GUILD` 没设时生成本机随机值写进 `run/xm-asset-op-secret-guild`（权限 600，先例 `run/xm-admin-token` / `run/xm-gm-admin-secret`，`:24-39`），**同一个值**传给 xm-scene 与 xm-guild。
-- 第 6 行的 `XM_DUBBO_SECRET` 读者名单补上 xm-scene。启动顺序里 xm-guild 先于 xm-scene（`:47-59`）无妨：循环找不到节点只会本地 NOT_HERE、退避。
+- `GAME_ASSET_OP_SECRET_GUILD` 没设时生成本机随机值写进 `run/game-asset-op-secret-guild`（权限 600，先例 `run/game-admin-token` / `run/game-gm-admin-secret`，`:24-39`），**同一个值**传给 game-scene 与 game-guild。
+- 第 6 行的 `GAME_DUBBO_SECRET` 读者名单补上 game-scene。启动顺序里 game-guild 先于 game-scene（`:47-59`）无妨：循环找不到节点只会本地 NOT_HERE、退避。
 
 ### 7.9 `GuildReject` / `GuildTips`
 
@@ -1071,12 +1071,12 @@ public interface SceneAssetOpService {
 
 ### 7.10 人工终结 CLI
 
-- 必须复用 xm-guild 的 `JdbcGuildAssetStore.resolveManually`（与自动终结同一 terminate，DRY）与缓存失效器，所以放在 xm-guild 内作为第二个主类（`java -cp` 或 Spring Boot `PropertiesLauncher -Dloader.main=…`，非 web、不暴露 Dubbo、不启动循环）。
+- 必须复用 game-guild 的 `JdbcGuildAssetStore.resolveManually`（与自动终结同一 terminate，DRY）与缓存失效器，所以放在 game-guild 内作为第二个主类（`java -cp` 或 Spring Boot `PropertiesLauncher -Dloader.main=…`，非 web、不暴露 Dubbo、不启动循环）。
 - 只连 MySQL 与 Redis；不推送；子命令、前置条件、`-txlog-checked` 核对清单、审计行格式、退出码 0/1/2/3 全部照搬 §2.12。若采纳 E12，核对清单第 0 步可简化为「last_outcome = 0 即 scene 真回了 UNKNOWN」。
 
 ### 7.11 内部查询
 
-- xm-api `GuildInternalService.listAppliedAssetOpsSince(ListAppliedAssetOpsSinceRequest) → CompletableFuture<…Response>`（Java 自有 `xm.api` 消息，形状同 `guild_internal.proto`；先例：资产通道也没复用同步来的内部 proto，`xm-api/.../asset_op.proto:1-4`）。
+- game-api `GuildInternalService.listAppliedAssetOpsSince(ListAppliedAssetOpsSinceRequest) → CompletableFuture<…Response>`（Java 自有 `game.api` 消息，形状同 `guild_internal.proto`；先例：资产通道也没复用同步来的内部 proto，`game-api/.../asset_op.proto:1-4`）。
 - 入参上限、排序、游标、limit+1、普通读、LEFT JOIN 全部照基线；错误语义改成应答内结果码 `OK / INVALID_ARGUMENT / UNAVAILABLE / RETENTION_REJECTED（带 cutoff_ms 字段）/ ERROR`（E11）。
 - Spring 缺省值让 `terminal-retention` 恒为 30 d（基线 AssetOp 整段缺失时为 0 → Unavailable），所以 Java 通道关闭时内部查询照常可用（无客户端可见影响）。
 - PARITY 注明「Java 无消费方，随 7.2 回档接入」。
@@ -1102,17 +1102,17 @@ public interface SceneAssetOpService {
 
 | 指标 | 标签 | 对应 |
 |---|---|---|
-| `xm_guild_economy_requests_total` | `rpc`、`result`（集合同基线，去掉 Java 不存在的 denied / unavailable） | `guild_economy_requests_total`（4.4 的 `xm_guild_requests_seconds{method,result}` 照常） |
-| `xm_guild_asset_sync_skipped_total` | `kind` | 同名基线 |
-| `xm_guild_asset_orphans_total` | `kind`、`what` | `guild_asset_orphan_total` |
-| `xm_guild_asset_cleanup_deleted_total` | `table` | 同名 |
-| `xm_guild_internal_list_applied_total`、`xm_guild_internal_list_applied_rows` | `result` | 同名 |
-| `xm_guild_assetop_*` | 与基线 `assetop_*` 全集相同的名字与 label（`rpc_seconds` 用 Timer） | `assetop_*` |
-| `xm_guild_scene_resolve_total` | `result` = found / not_online / lease / logged_out / node_unknown / no_rpc_port / error | `scenenode_resolve_total` |
-| `xm_scene_asset_ops_total`、`xm_scene_asset_ops_inflight`（xm-scene） | `rpc`、`outcome`（含 overloaded / error） | Java 增项（E13） |
+| `game_guild_economy_requests_total` | `rpc`、`result`（集合同基线，去掉 Java 不存在的 denied / unavailable） | `guild_economy_requests_total`（4.4 的 `game_guild_requests_seconds{method,result}` 照常） |
+| `game_guild_asset_sync_skipped_total` | `kind` | 同名基线 |
+| `game_guild_asset_orphans_total` | `kind`、`what` | `guild_asset_orphan_total` |
+| `game_guild_asset_cleanup_deleted_total` | `table` | 同名 |
+| `game_guild_internal_list_applied_total`、`game_guild_internal_list_applied_rows` | `result` | 同名 |
+| `game_guild_assetop_*` | 与基线 `assetop_*` 全集相同的名字与 label（`rpc_seconds` 用 Timer） | `assetop_*` |
+| `game_guild_scene_resolve_total` | `result` = found / not_online / lease / logged_out / node_unknown / no_rpc_port / error | `scenenode_resolve_total` |
+| `game_scene_asset_ops_total`、`game_scene_asset_ops_inflight`（game-scene） | `rpc`、`outcome`（含 overloaded / error） | Java 增项（E13） |
 | `executor_*{name="guild-asset-settle" \| "guild-asset-worker"}` | Micrometer 标准 | 同 friend |
 
-- `architecture.md` §11 的指标总表补 guild 经济与 scene 资产两组；告警建议：`xm_guild_assetop_pending_oldest_age_seconds > 600`、`unknown_total` / `outcome_flip_total` / `partial_total` 出现即告警、`orphans_total` 持续上升。
+- `architecture.md` §11 的指标总表补 guild 经济与 scene 资产两组；告警建议：`game_guild_assetop_pending_oldest_age_seconds > 600`、`unknown_total` / `outcome_flip_total` / `partial_total` 出现即告警、`orphans_total` 持续上升。
 
 ---
 
@@ -1153,11 +1153,11 @@ public interface SceneAssetOpService {
 7. **把同步投递放进 guild-worker 阻塞**：16 线程 × 2.5 s，scene 一慢整个帮会服务排队（§7.4；Q5）。
 8. **settle 用请求 Deadline**：请求预算跑满后终局写不回、下一轮重投；settle 必须自带 700 ms 且不随取消。
 9. **回档（7.2）会让已 durable 的结局从 `player_state` 里消失**：在回档闸接入 `ListAppliedAssetOpsSince` 之前，Java 不得提供回档入口（I4 与 fail-closed）；离线读账本（E8）也依赖这一点。
-   **已兑现（2026-10-05，批次 7.2b，提交 `7dff75c`）**：回档入口 `POST /admin/rollbacks`（xm-data）与帮会检查同批上线。`GuildDivergenceGate` 经 Dubbo 调 `listAppliedAssetOpsSince`，
-   只认 `LIST_APPLIED_RESULT_OK`；没装配（`xm.dubbo.guild-url` 为空）、非 OK、调用失败或超时、超预算、游标不前进、返回块外玩家、过滤后超过 10000 行一律 `check_failed`，放行无效、零写入；
+   **已兑现（2026-10-05，批次 7.2b，提交 `7dff75c`）**：回档入口 `POST /admin/rollbacks`（game-data）与帮会检查同批上线。`GuildDivergenceGate` 经 Dubbo 调 `listAppliedAssetOpsSince`，
+   只认 `LIST_APPLIED_RESULT_OK`；没装配（`game.dubbo.guild-url` 为空）、非 OK、调用失败或超时、超预算、游标不前进、返回块外玩家、过滤后超过 10000 行一律 `check_failed`，放行无效、零写入；
    保留期拒绝用 `cutoff_ms` 钳位重查一次，钳不到的玩家记不可证明。检查在沉降之后、第一笔写之前；写后复查在释放归属之前，发现新终结的指令 → 作业 `DIVERGED_AFTER_WRITE`。
    见 `data-ops-spec.md` §4.6.1 / §13.1，PARITY「GM 回档」行。
-10. **xm-guild 依赖 xm-player-store 会带进 `PlayerStoreAutoConfiguration`（MyBatis）**（`xm-player-store/.../PlayerStoreAutoConfiguration.java`）：要么排除自动配置，要么把只读类放在不触发它的位置（Q3）。
+10. **game-guild 依赖 game-player-store 会带进 `PlayerStoreAutoConfiguration`（MyBatis）**（`game-player-store/.../PlayerStoreAutoConfiguration.java`）：要么排除自动配置，要么把只读类放在不触发它的位置（Q3）。
 11. **4.4 若在派发层统一检查归属区**：经济五个号要豁免（§0.2）。
 12. **Spring 缺省值与 Go「整段缺失 = 零值」不同**：`asset-op.enabled` 必须显式缺省 false；保留期等缺省值在关闭时也有值（§7.11，无客户端可见影响）。
 
@@ -1184,7 +1184,7 @@ public interface SceneAssetOpService {
 
 1. 分区一写 `deliverNow` 在 `economy_logic.go:419-456`：`:419-436` 是 `syncBudgetFor / clampSyncBudget`，`deliverNow` 本身在 `:438-456`。
 2. 分区一 E2 写「位置记录状态为 o 或 l 时有 scene_node_id」并按此定位：Java 断线即写回并释放归属（`PARITY.md:87` 有意差异 ①），`l` 状态下没有任何节点持有该玩家，应本地 NOT_HERE。采用分区二的处理。
-3. 分区一 E4 建议把规范串挪到 xm-common：xm-common 不依赖 xm-api（`xm-common/pom.xml` 只依赖 xm-proto），而 `AssetOpRequest` 在 xm-api。改为 xm-api（同分区二）。
+3. 分区一 E4 建议把规范串挪到 game-common：game-common 不依赖 game-api（`game-common/pom.xml` 只依赖 game-proto），而 `AssetOpRequest` 在 game-api。改为 game-api（同分区二）。
 4. 分区一说「锁序回归六组」：实际 `TestEconomyLockOrder_*` 有 7 个（`economy_repo_test.go:2023`、`:2110`、`:2307`、`:2383`、`:2425`、`:2498`、`:2596`），另有 `TestReserveDonation_FirstSeqRowCreatorsSerializeOnMember`（`:2206`）。
 5. 分区一说内部查询「不占消息号」与 `guild_internal.proto:20` 注释「占消息号」矛盾：以生成物为准（基线 `message_id.go`、Java `message_id.txt` 都没有它的号）；注释陈旧，列入 §9.1 第 16 条。
 6. 分区一的 SQL 编号 E1–E46 与有意差异 E1–E15 撞号：本稿 SQL 改按表字母并接续 guild-spec §1.9（G11–G15、M12–M16、O1–O22、Q1–Q5、C1–C7），差异用 E1 起。
@@ -1202,18 +1202,18 @@ public interface SceneAssetOpService {
 | 编号 | 差异 | 理由 | 客户端可见？ | 两版同改？ |
 |---|---|---|---|---|
 | E1 | **传输**：scene 新增 Dubbo Triple 异步提供方 `SceneAssetOpService`（debit / abortDebit / credit），`register = false`，调用方按节点直连 URL，`retries = 0`、单次 800 ms；scene 显式在途上限（缺省 256），回调切出逻辑线程 | Java 服务间统一用 Dubbo（`architecture.md` §4.1）；基线是同步 gRPC、scene 线程阻塞在 `future.get()`、poller 隐式限流 | 否 | 否 |
-| E2 | **定位**：`xm:location:{pid}`（只认 `o`；`l` / `x` / 缺失 → 本地 NOT_HERE；损坏 / 键不符 / Redis 错 → 故障）+ Redis `NodeDirectory<SceneNodeInfo>` 新增 `rpc_host / rpc_port`（0 = 不提供）；代替 `player:{id}:location` + etcd `grpcEndpoint` 镜像 | Java 的发现源本来就是 Redis 目录（`architecture.md` §6）；定位错只会得到 NOT_HERE，正确性在 scene 账本 | 否 | 否 |
-| E3 | **鉴权两层**：请求体 HMAC + Dubbo 调用方 MAC（`XM_DUBBO_SECRET`） | Java 的 Dubbo 端口无法只绑本机；基线端口 insecure、只靠请求体 HMAC | 否 | 否 |
-| E4 | **密钥环境变量** `XM_ASSET_OP_SECRET_GUILD`（scene 侧 2.9 已是这个名字） | 两版各自的环境变量命名空间（基线 `MMORPG_ASSET_OP_SECRET_GUILD`） | 否 | 否 |
-| E5 | **规范串单一出处**挪到 xm-api，scene 验签与 guild 签名共用，golden 两侧钉 | 两份实现分叉 = 验签失败 → UNKNOWN → 行卡死（`assetop/auth.go:116-117`） | 否 | 否 |
-| E6 | **op_id 来自 xm-guild 的全服雪花**（`NodeTypes.GUILD` 租约，与 guild_id 共用生成器；租约无效 / 时钟回拨 / 返回 0 → 14008）；基线只用号段、禁止回退 snowflake | Java 没有号段服务（D8）；雪花 63 位、随时间单调（`xm-common/.../id/Snowflake.java:17-72`），清理「按 op_id 取老行」反而精确；correlation_id 在流水里时间有序 | 否（op_id 只当 uint64 展示） | 否 |
+| E2 | **定位**：`game:location:{pid}`（只认 `o`；`l` / `x` / 缺失 → 本地 NOT_HERE；损坏 / 键不符 / Redis 错 → 故障）+ Redis `NodeDirectory<SceneNodeInfo>` 新增 `rpc_host / rpc_port`（0 = 不提供）；代替 `player:{id}:location` + etcd `grpcEndpoint` 镜像 | Java 的发现源本来就是 Redis 目录（`architecture.md` §6）；定位错只会得到 NOT_HERE，正确性在 scene 账本 | 否 | 否 |
+| E3 | **鉴权两层**：请求体 HMAC + Dubbo 调用方 MAC（`GAME_DUBBO_SECRET`） | Java 的 Dubbo 端口无法只绑本机；基线端口 insecure、只靠请求体 HMAC | 否 | 否 |
+| E4 | **密钥环境变量** `GAME_ASSET_OP_SECRET_GUILD`（scene 侧 2.9 已是这个名字） | 两版各自的环境变量命名空间（基线 `MMORPG_ASSET_OP_SECRET_GUILD`） | 否 | 否 |
+| E5 | **规范串单一出处**挪到 game-api，scene 验签与 guild 签名共用，golden 两侧钉 | 两份实现分叉 = 验签失败 → UNKNOWN → 行卡死（`assetop/auth.go:116-117`） | 否 | 否 |
+| E6 | **op_id 来自 game-guild 的全服雪花**（`NodeTypes.GUILD` 租约，与 guild_id 共用生成器；租约无效 / 时钟回拨 / 返回 0 → 14008）；基线只用号段、禁止回退 snowflake | Java 没有号段服务（D8）；雪花 63 位、随时间单调（`game-common/.../id/Snowflake.java:17-72`），清理「按 op_id 取老行」反而精确；correlation_id 在流水里时间有序 | 否（op_id 只当 uint64 展示） | 否 |
 | E7 | **durable 介质 = MySQL `player_state` 围栏写提交成功**（2.9 已如此，登记在资产通道行） | Java 没有 Redis 存档层 | 否 | 否 |
-| E8 | **离线读已落盘账本：Java 接线**，xm-guild 直读 MySQL `player_state.asset_ledger`，分类与 scene 共用（基线帮会未接线） | 介质就是 durable 本身，无需中转；离线玩家已记账的行可提前终结、不再一直占次数；路线图把 asset-op-ledger-read 排在 4.5（`roadmap.md:36`） | 否（只影响「结算中」持续时长） | 否（mmorpg 可选接线） |
+| E8 | **离线读已落盘账本：Java 接线**，game-guild 直读 MySQL `player_state.asset_ledger`，分类与 scene 共用（基线帮会未接线） | 介质就是 durable 本身，无需中转；离线玩家已记账的行可提前终结、不再一直占次数；路线图把 asset-op-ledger-read 排在 4.5（`roadmap.md:36`） | 否（只影响「结算中」持续时长） | 否（mmorpg 可选接线） |
 | E9 | 同步投递标记用显式参数 `DeliveryOrigin`，代替 ctx 值 | Java 没有 ctx | 否 | 否 |
 | E10 | **重投退避启用 ±20% 抖动**（基线 `Loop.Rand` 未设 → 不抖动） | 配表与代码注释的设计意图；scene 恢复后同一批行不在同一毫秒一起重投 | 否 | 否（mmorpg 可选：给 Loop.Rand 赋值） |
-| E11 | **`ListAppliedAssetOpsSince`**：xm-api 类型化 Dubbo 接口，错误语义改为应答内结果码 + `cutoff_ms` 字段，不解析 message 前缀；4.5 只交付提供方与测试，消费方随 7.2 | Dubbo 异常类型不够细，解析字符串是脆弱的跨服务契约（`guild_divergence.go:43-46`、`:222-241`） | 否 | 否 |
+| E11 | **`ListAppliedAssetOpsSince`**：game-api 类型化 Dubbo 接口，错误语义改为应答内结果码 + `cutoff_ms` 字段，不解析 message 前缀；4.5 只交付提供方与测试，消费方随 7.2 | Dubbo 异常类型不够细，解析字符串是脆弱的跨服务契约（`guild_divergence.go:43-46`、`:222-241`） | 否 | 否 |
 | E12 | **传输失败时 Reschedule 不覆盖 `last_outcome / last_reason / durable`**（只推进 attempts、next_attempt_ms、清租约）；本地 NOT_HERE 与 scene 真实答复照常覆盖 | 让 assetopfix 的「last_outcome = UNKNOWN」前置可信（基线作者在 `assetopfix/main.go:62-67` 明确想要这一修法）；27007 粘性自然保留 | 否（PENDING 视图在断连期间保留上一个真实原因，而不是清成 0） | 否（mmorpg 可选） |
-| E13 | scene 侧新增资产通道指标 `xm_scene_asset_ops_*` | 可观测性（基线 scene 侧只有日志） | 否 | 否 |
+| E13 | scene 侧新增资产通道指标 `game_scene_asset_ops_*` | 可观测性（基线 scene 侧只有日志） | 否 | 否 |
 | E14 | **重连租约期间**（`l`）资产操作一律本地 NOT_HERE，玩家上线后再投 | 3.3 已登记的差异（Java 断线即写回释放、不复用内存实例）的推论；基线租约内实体还在、可以应用 | 否（到账时机） | 否 |
 
 ### 10.2 列出但不建议首批采纳（或需要两版同改）
@@ -1228,17 +1228,17 @@ public interface SceneAssetOpService {
 ### 10.3 待拍板 / 开放问题
 
 1. **Q1（E8）离线读账本**：Java 先接线（推荐），还是与基线一致不启用、只交付读端？
-2. **Q2 scene 资产 RPC 端口**：固定配置 `xm.scene.asset-rpc-port`（推荐，缺省 21100，同机多实例覆盖，同 link-port 惯例），还是 `-1` 自动选、从导出 URL 回填目录？
-3. **Q3 持久化账本分类器放哪里**：(a) 把 `AssetOpLedger` 的只读部分（restore / validate / classify / isPartial / rejectionReason）下沉到 xm-player-store（它拥有状态 proto），流号合法性改成常量集合，
-   在 xm-scene 测试里与 `AssetStream` 枚举对拍；xm-guild 依赖 xm-player-store 时排除 `PlayerStoreAutoConfiguration`（推荐）。(b) 在 xm-guild 另写只读镜像、与 scene 共用用例表。(c) 新建共享模块。
-4. **Q4 调用方库**：先放 xm-guild、交易接入时再抽（推荐），还是现在做共享模块？
+2. **Q2 scene 资产 RPC 端口**：固定配置 `game.scene.asset-rpc-port`（推荐，缺省 21100，同机多实例覆盖，同 link-port 惯例），还是 `-1` 自动选、从导出 URL 回填目录？
+3. **Q3 持久化账本分类器放哪里**：(a) 把 `AssetOpLedger` 的只读部分（restore / validate / classify / isPartial / rejectionReason）下沉到 game-player-store（它拥有状态 proto），流号合法性改成常量集合，
+   在 game-scene 测试里与 `AssetStream` 枚举对拍；game-guild 依赖 game-player-store 时排除 `PlayerStoreAutoConfiguration`（推荐）。(b) 在 game-guild 另写只读镜像、与 scene 共用用例表。(c) 新建共享模块。
+4. **Q4 调用方库**：先放 game-guild、交易接入时再抽（推荐），还是现在做共享模块？
 5. **Q5 同步投递线程模型**：异步链（推荐，§7.4），还是保持阻塞、把 guild-worker 扩到能承受「并发捐献 × 2.5 s」？
 6. **Q6（E6）op_id 发号源**：复用 `NodeTypes.GUILD` 雪花（推荐），还是为 op_id 另起一个 `NodeTypes`？（guild-spec §6.6 留到 4.5 定。）
 7. **Q7（E11）内部查询**：4.5 交付类型化接口 + 仓储（推荐，接口小、不变量可测），还是只交付仓储与测试、接口随 7.2？
 8. **Q8（E12）**是否采纳、是否同步建议给 mmorpg？
 9. **Q9 scene 在途上限缺省值**：256 是否合适（需 ≥ 副本数 × Workers + 同步投递并发）；超限回「过载」还是排队等待？推荐直接失败（调用方会重投）。
 10. **Q10 Workers 缺省 8 的理由**在 Java 不再成立（scene 没有 poller 限制，限流改由 scene 在途上限承担）：保持 8（推荐，与基线对拍），还是放宽？
-11. **Q11 assetopfix 的形态**：xm-guild 内第二个主类（推荐），还是放到 xm-data 运维面做成带令牌的 HTTP 接口（偏离基线裁决 D4）？
+11. **Q11 assetopfix 的形态**：game-guild 内第二个主类（推荐），还是放到 game-data 运维面做成带令牌的 HTTP 接口（偏离基线裁决 D4）？
 
 ---
 
@@ -1253,7 +1253,7 @@ public interface SceneAssetOpService {
   `counterRefund` 是唯一退款规则（`economy_repo_test.go:279`）、`StatusToRecord`（`:84`）、carryPartialReason（照 `decide_test.go`、`reconcile_test.go`）。
 - **视图与映射**：`orderViewOf`、`resultOfOrder`、`donationRejectTip`、`donationViewOf`（payload 解不开只缺两字段）、`shopOrderViewOf`、`recentResults`（窗口、上限 5、keep）、`exceptPlayer`、
   令牌非 0、`clampSyncBudget` / `syncBudgetFor`（`economy_logic_test.go:949-1197`）；`economyTip` / `GuildTips.forReject` 整表（`:844`）。
-- **签名**：规范串 golden（与 `auth_test.go` 的 `TestCanonicalGolden`、Java 现有 `AssetOpAuthTest` 同输入，搬到 xm-api 后两侧各钉一次）；`;u=;p=` 篡改失败；每次发包重签。
+- **签名**：规范串 golden（与 `auth_test.go` 的 `TestCanonicalGolden`、Java 现有 `AssetOpAuthTest` 同输入，搬到 game-api 后两侧各钉一次）；`;u=;p=` 篡改失败；每次发包重签。
 - **内部查询边界**：保留期判定与下溢（`guild_internal_server_test.go:170-204`）；入参校验顺序与文案（`:84`）。
 
 ### 11.2 服务与调用方单测（假 Store / 假定位 / 假提供方 / 假时钟）
@@ -1266,9 +1266,9 @@ public interface SceneAssetOpService {
 - **`AssetOpLoopTest`**（照 `reconcile_test.go`、`reconcile_budget_test.go`、`reconcile_manual_test.go`）：过截止改发 Abort；settle 在父预算耗尽 / 取消后仍可用；租约丢失只计数；
   离线读只在 attempts ≥ 3 且 Local 时发生、读到未见不终结、读到 APPLIED 直接终结；27007 粘性；流号非法按 Alert；Tick 并发不超过 Workers；毒行跳过；E12 的「传输失败不覆盖 last_outcome」。
 - **`SceneAssetLocatorTest`**（照 `locator_test.go` 改成 Java 状态）：`o` / `l` / `x` / 缺失 / 损坏 / 键不符 / Redis 错 / 目录缺节点 / `rpc_port = 0` / 同号新实例。
-- **scene 提供方**：未就绪回失败 future；超过在途上限回过载并计数；逻辑线程关闭后失败；回调不在逻辑线程上；`register = false`；缺 `XM_DUBBO_SECRET` 时暴露失败。
+- **scene 提供方**：未就绪回失败 future；超过在途上限回过载并计数；逻辑线程关闭后失败；回调不在逻辑线程上；`register = false`；缺 `GAME_DUBBO_SECRET` 时暴露失败。
 
-### 11.3 真 MySQL（`-Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306`，缺省跳过）
+### 11.3 真 MySQL（`-Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306`，缺省跳过）
 
 - **建表**：pbmysql 生成的 Q / O / C DDL 与 Go 逐字相同（`uk_guild_asset_op`、idx_0/1/2、`idx_guild_daily_counter_0`）；表形状（`asset_tables_shape_test.go:21`）；28 列清单。
 - **语句形状**：锁定语句 EXPLAIN 为 PRIMARY 点查（`economy_lock_plan_mysql_test.go:97`）；候选读无锁定子句（`economy_repo_test.go:232`）；O22 无锁、不开事务、EXPLAIN key ∈ {idx_0, idx_2}。
@@ -1281,19 +1281,19 @@ public interface SceneAssetOpService {
 - **内部查询**：G1–G6、G5b（只返回 APPLIED / PARTIAL、since 严格、按 op_id 翻页、zone 过滤保留已解散帮、看得到人工终结与 Store 终结的行，`asset_op_divergence_repo_test.go:167-371`）。
 - **Java 增项**：`lease_token ≥ 2^63` 与 `op_id` 大值全流程；`useAffectedRows` 缺失时 C1 自检报错（防回归）；E12 的 Reschedule 变体；离线读账本（造 `player_state` 行：absent / 坏 blob / 无 asset_ledger / 已应用 / 已拒绝 / 部分发放 / 旧纪元）。
 
-### 11.4 真 Redis（`-Dxm.it.redis=redis://127.0.0.1:6379`）
+### 11.4 真 Redis（`-Dgame.it.redis=redis://127.0.0.1:6379`）
 
 - `findHolderAsync` 的各状态与乱序写；`NodeDirectory` 单条异步读与 TTL 过期；`rpc_host / rpc_port` 发布与摘除。
 
-### 11.5 跨进程端到端（真 Redis + MySQL + xm-scene + xm-guild）
+### 11.5 跨进程端到端（真 Redis + MySQL + game-scene + game-guild）
 
 - 照基线 `assetop/scene_smoke_test.go`：每次一个新纪元；扣 100、发 100；余额不足 27000；跳号 5000 → UNKNOWN；验签错 27008；durable 的最终确认；同 seq 重放只读答复。
-- 强杀 xm-guild 于同步投递之后、落库之前 → 重启后循环用同一 seq 重投，资金只加一次（基线 robot 的「可选手动项」）。
+- 强杀 game-guild 于同步投递之后、落库之前 → 重启后循环用同一 seq 重投，资金只加一次（基线 robot 的「可选手动项」）。
 - scene 停服期间的 PENDING：摘目录后本地 NOT_HERE → 玩家离线 → attempts ≥ 3 时离线读账本终结（E8）。
 
-### 11.6 robot `guild-economy`（xm-robot 新增 `GuildEconomyScenario`，`RobotOptions.Scenario` 加 `GUILD_ECONOMY`）
+### 11.6 robot `guild-economy`（game-robot 新增 `GuildEconomyScenario`，`RobotOptions.Scenario` 加 `GUILD_ECONOMY`）
 
-- 前置：xm-guild `asset-op.enabled = true`、两侧注入同一个 `XM_ASSET_OP_SECRET_GUILD`、`XM_RUN_MODE = dev`（GM 加币 37 放行，`PARITY.md:57`）。
+- 前置：game-guild `asset-op.enabled = true`、两侧注入同一个 `GAME_ASSET_OP_SECRET_GUILD`、`GAME_RUN_MODE = dev`（GM 加币 37 放行，`PARITY.md:57`）。
 - 账号用 run-tag 新账号（guild-spec D18），每次都是基线的 **full** 模式（计数按玩家、按游戏日，新账号恒为 0）；期望值写死，照 `guild_economy_smoke.go:63-101`：
   1. A 建帮（Lv1、资金 0、上限 30），B 申请、A 批准；A 读捐献页（3 个选项、无结算中）与商店（11 件）；
   2. GM 给 A 加 300000 银两、100 灵石；A 大捐 → 资金 12000、A 帮贡 120（结算中就轮询捐献页，至多 10 s）；再大捐 → 24000；第三次 → 14024、资金不变；

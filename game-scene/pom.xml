@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>game-scene</artifactId>
+    <name>game-scene</name>
+    <description>场景节点（Spring Boot + Netty）：gate 节点链路服务端，单逻辑线程拥有全部场景与玩家状态</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-proto</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-table</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-net</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-player-store</artifactId>
+        </dependency>
+        <!-- 资产审计：流水格式与 topic 规格；Kafka 生产者在审计线程上 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-audit</artifactId>
+        </dependency>
+        <!-- 回合制战斗（6.3）：快照的技能可施放过滤与战斗配表指纹与引擎共用一份实现（engine-spec D7、§10.1） -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-battle-engine</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- 通用资产通道的跨进程入口：按节点导出的 Dubbo Triple 提供方（SceneAssetOpService，register = false，编程式导出，
+             启停排进 SceneNode 的顺序；不用 dubbo-spring-boot-starter，见 asset/SceneAssetRpcServer）。 -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+
+        <!-- 可观测性（architecture.md §11）：业务端口仍是 Netty 节点链路；这里的 Tomcat 只挂 actuator 管理端点（health / prometheus），
+             端口与绑定地址见 application.yaml 的 server.*。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <!-- 测试里也用它校验导出的 Prometheus 指标名（runtime 依赖在测试类路径上）。 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 资产通道提供方测试起真 Dubbo 提供方与调用方：调用方鉴权过滤器只从环境变量读密钥，这里给一个仅测试用的假值
+                 （不是任何环境的真密钥；先例 game-gateway/pom.xml） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <environmentVariables>
+                        <GAME_DUBBO_SECRET>game-scene-unit-test-only</GAME_DUBBO_SECRET>
+                    </environmentVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.game.scene.SceneApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

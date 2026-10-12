@@ -4,7 +4,7 @@
 > - 基线：mmorpg `26ceb70ca`（`D:\work\mmorpg`，浅稀疏克隆，`git rev-list --count HEAD` 为 1，没有历史），与 `contract/SOURCE.properties:4` 相同。
 > - 客户端：mmorpg-client `a8577c7`（`D:\work\mmorpg-client`，只检出 `Assets/Scripts`、`Tests`、`Docs`）。
 > - Java：HEAD `aa8b5b5` 加工作区。5.2–5.5、6.2–6.4、7.1a、7.2 正在工作区里实现（`git status` 有大量 `M` / `??`），它们的规格按权威设计看待。
->   本文引用的 `SceneWorld.java`、`.github/workflows/*.yml`、`tools/TestReport.java`、`xm-battle/**` 行号都按**工作区**计；5.2 / 7.1a 入库后要重新定位。
+>   本文引用的 `SceneWorld.java`、`.github/workflows/*.yml`、`tools/TestReport.java`、`game-battle/**` 行号都按**工作区**计；5.2 / 7.1a 入库后要重新定位。
 >
 > **盘点 id**：contract-change-report（`docs/porting/inventory/tools.md:218-228`，Java 版新增）、navmesh-bake-and-query（`tools.md:302-312`）、
 > navmesh-queries（`inventory/combat.md:149-158`）。连带：contract-sync（`tools.md:206-216`）、message-id-allocation（`:182-192`）、
@@ -21,24 +21,24 @@
 
 | 问题 | 结论 |
 |---|---|
-| 契约闸放在哪 | **构建期契约面锁定测试**。新模块 `xm-contract-check` 用 protoc 产出的描述符渲染「契约面」，与仓库里提交的 `contract/SURFACE.txt` 比较。<br>不在 ContractSync 里手写 proto 解析器。理由：`clean install` 本来就是同步后、提交前的强制步骤（AGENTS §4、§5），在这里拦已经是提交前的闸；描述符是精确的，手写解析器需要再做一层 protoc 交叉校验才可信 |
+| 契约闸放在哪 | **构建期契约面锁定测试**。新模块 `game-contract-check` 用 protoc 产出的描述符渲染「契约面」，与仓库里提交的 `contract/SURFACE.txt` 比较。<br>不在 ContractSync 里手写 proto 解析器。理由：`clean install` 本来就是同步后、提交前的强制步骤（AGENTS §4、§5），在这里拦已经是提交前的闸；描述符是精确的，手写解析器需要再做一层 protoc 交叉校验才可信 |
 | 比什么 | 消息号（号 ↔ 服务.方法 ↔ 请求 / 应答 ↔ 可见性）、契约 proto 的类型 / 字段 / reserved / 枚举值 / 服务、帧根、事件号、tip 码与文案、operator 枚举、具名常量、表 schema（含 cfg 选项和 pending 字段）、表数据（manifest 加逐行指纹）、导航网格文件指纹 |
 | 怎么判 | 三级：BREAK / WARN / INFO。可见性也分三级：C（客户端可见）/ J（Java 生产代码在用）/ I（内部），I 级降一级判。**任何差异都要重锁；BREAK 还必须在 `contract/ACCEPTED_BREAKS.txt` 里按「目标 mmorpg 提交 + 变更 id」显式放行** |
 | 号位复用 | Java 侧墓碑账本 `contract/RETIRED.txt`，只增不减。上游删方法后号会被新方法捡走（H1），开发期删字段可以不写 reserved（H3），只比相邻两份契约面发现不了 |
 | CI | build job 的 `mvnw verify` 跑锁定测试；随后逐个复核本次推送里改过契约面的提交（防手改锁文件、防删账本）；漂移 workflow 加分级报告，仍然只报告 |
-| 导航实现 | **自研 `xm-navmesh`（只依赖 JDK）：读取同步来的 UE5 double 布局 MSET `.bin`，移植上游 Detour 查询子集（findNearestPoly、raycast 及其依赖）**。不做格子导航：编辑实测网格比客户端位图多出 48.05 m²、凹角最多偏 0.225 m，评审又测出整体平移 +1 cm（§2.5），而且三张节庆图的位图根本不在 mmorpg 里 |
+| 导航实现 | **自研 `game-navmesh`（只依赖 JDK）：读取同步来的 UE5 double 布局 MSET `.bin`，移植上游 Detour 查询子集（findNearestPoly、raycast 及其依赖）**。不做格子导航：编辑实测网格比客户端位图多出 48.05 m²、凹角最多偏 0.225 m，评审又测出整体平移 +1 cm（§2.5），而且三张节庆图的位图根本不在 mmorpg 里 |
 | 导航数据 | ContractSync 新增受管目录 `config-data/navmesh/`：只同步被 `BaseScene.nav_bin_file` 引用的 6 个 `.bin`（4 份不同几何），加一份 ContractSync 生成的 `navmesh.properties`（sha256、tile 数）。同步时做结构校验，失败不写入 |
 | 接入点 | 与基线逐个对应的 3 处运行时调用（进场落位、移动上行裁决、帧外推夹持）加启动探针。FindPath、dtCrowd 不移植（基线没有调用方） |
-| 失败策略 | 导航数据缺失 / 损坏 / 出生点探针失败 → **scene 启动失败**；`xm.scene.nav-enabled=false` 整体关闭（回到现在的 MoveGuard 口径）。仓库里的数据由构建期测试保证 |
+| 失败策略 | 导航数据缺失 / 损坏 / 出生点探针失败 → **scene 启动失败**；`game.scene.nav-enabled=false` 整体关闭（回到现在的 MoveGuard 口径）。仓库里的数据由构建期测试保证 |
 | 第三方 | 不新增依赖。buf 11,474 star、recastnavigation 7,943、recast4j 292，都不到 2 万（§5） |
-| 分批 | 7.5a 契约闸（M–L）→ 7.5b 导航数据同步 + xm-navmesh（L）→ 7.5c xm-scene 接入、robot、部署与文档（M）。7.5a 依赖 7.1a 入库，7.5c 依赖 5.2 入库 |
+| 分批 | 7.5a 契约闸（M–L）→ 7.5b 导航数据同步 + game-navmesh（L）→ 7.5c game-scene 接入、robot、部署与文档（M）。7.5a 依赖 7.1a 入库，7.5c 依赖 5.2 入库 |
 
 ### 0.2 范围
 
 **做**
 
 - 契约变更报告与兼容性闸：渲染、比较、判级、放行、账本、CI 复核、漂移分级报告（§1、§4.1）。
-- 导航网格：ContractSync 同步网格文件（§4.2）；`xm-navmesh` 读取器与查询（§4.3）；xm-scene 的进场吸附、移动射线夹持、外推夹持（§4.4）。
+- 导航网格：ContractSync 同步网格文件（§4.2）；`game-navmesh` 读取器与查询（§4.3）；game-scene 的进场吸附、移动射线夹持、外推夹持（§4.4）。
 - 文档、PARITY、部署清单（§4.6）。
 
 **不做**
@@ -46,7 +46,7 @@
 - 烘焙器：mmorpg 是唯一生产者，Java 只消费产物（N-D9）。
 - FindPath / findStraightPath / dtCrowd：基线没有调用方（N-D2）。
 - 任意两个 mmorpg 提交之间的离线比较、在 mmorpg CI 里跑 Java 的检查（§8 CQ11）。
-- Java 自有 proto（`xm-api`、`xm-audit`、`xm-data` 的 `xm.*` 包）的兼容性检查（§8 CQ9）。
+- Java 自有 proto（`game-api`、`game-audit`、`game-data` 的 `game.*` 包）的兼容性检查（§8 CQ9）。
 - contract-tamper-check 中 TableConstants 与 `.pb` 字节级防手改的部分：`.pb` 有 manifest sha 兜底，TableConstants 仍只靠 `--check`（C-D7）。
 
 ### 0.3 本机约束与证据来源
@@ -68,7 +68,7 @@
 | # | 分歧 | 裁决 | 依据 |
 |---|---|---|---|
 | 1 | 契约闸位置：ContractSync 里手写解析器 + 同步前闸（分区 A）vs 构建期锁定测试（分区 C） | **构建期锁定测试**，保留 A 的规则表、可见性模型、账本、放行文件和 CI 逐提交复核 | 描述符精确，省掉约 400 行解析器及其交叉校验；同步后、提交前必须 `clean install`（AGENTS §4、§5），闸在这里生效。理由与代价见 §4.1.1、§6.1 |
-| 2 | 放行方式：放行文件（A）vs `-Dxm.contract.accept=…` 加锁文件头（C） | **放行文件**，键 = 目标提交 + 变更 id；重锁时每条 BREAK 都必须有放行（「少一项」失败）；多余的放行行判 WARN（评审把「多一项」从失败改为 WARN，§1.10） | 文件留痕、CI 可复核；命令行参数不留痕 |
+| 2 | 放行方式：放行文件（A）vs `-Dgame.contract.accept=…` 加锁文件头（C） | **放行文件**，键 = 目标提交 + 变更 id；重锁时每条 BREAK 都必须有放行（「少一项」失败）；多余的放行行判 WARN（评审把「多一项」从失败改为 WARN，§1.10） | 文件留痕、CI 可复核；命令行参数不留痕 |
 | 3 | 客户端可见的根：服务带 `OptionIsClientProtocolService` 或 `OptionIsPlayerService`（A）vs 只看前者（C） | **两者之一即可，另加帧根** | `ScenePlayerSync` 只标了 `OptionIsPlayerService`，却下发 66 等属性同步（mmorpg `proto/scene/player_state_attribute_sync.proto:67-69`）。会多算 `SceneScenePlayer`（`s2s_player_scene.proto:34-41`），但 Java gate 按这个 option 路由（`architecture.md:23`），本来就是 J 级，同级判，不影响结论 |
 | 4 | 导航实现：用位图做格子导航（分区 B）vs 移植 Detour 子集读 `.bin`（C） | **移植 Detour 子集** | B 的前提「网格与位图格线重合到 ≤1 cm」不成立：编辑实测网格多 48.05 m²、最远偏 0.225 m（§2.5）。≤1 cm 只对体素化成立（`navmesh_baker.cpp:114-119`），轮廓简化（`:406`，1.3 体素）会填凹角；而且网格相对位图整体平移 +1 cm，低坐标一侧的墙比位图缩进 1 cm（评审复核，§2.5）。另外三张节庆图的位图不在 mmorpg 里，B 要先改 mmorpg 才能开工 |
 | 5 | 导航数据坏了：启动失败（B）vs 逐行 fail-open（C，同基线） | **启动失败 + 构建期数据测试 + 整体开关** | Java 配表加载 fail-closed；基线逐行 fail-open 是为了挡旧的 UE 占位 bin（`navigation.cpp:62-65`），Java 在同步和构建两道就挡住了；静默放行等于在该场景关掉防穿墙 |
@@ -87,12 +87,12 @@
 
 | 产物 | 上游怎么产生 | Java 落点 | 消费者 |
 |---|---|---|---|
-| `proto/**`（113 个文件，etcd 不同步，`ContractSync.java:58-60`） | 人写。字段号规则只靠约定：**上线后**不复用、删字段写 `reserved`；**开发期已删字段可以复用**，只要重生成并完整编译所有模块（mmorpg `AGENTS.md:44`） | `xm-proto/src/main/proto/proto/**` | 客户端（C#）、Go robot、Java 全部进程 |
-| `proto/message_id.txt`（244 行） | protogen 发号：已有的键保留原号（`service_register_info.go:174-187`）；新键先填 [0, 方法总数) 内的空洞，再往后追加（`:189-207`）；写回时只写当前还存在的方法（`:148-167`） | `xm-proto/src/main/resources/contract/message_id.txt` | 客户端把号编进代码（`mmorpg-client/Assets/Scripts/Net/MessageIds.cs`）；Java 运行时按「服务裸名 + 方法」解析（`MessageIdRegistry.java:28-39`） |
+| `proto/**`（113 个文件，etcd 不同步，`ContractSync.java:58-60`） | 人写。字段号规则只靠约定：**上线后**不复用、删字段写 `reserved`；**开发期已删字段可以复用**，只要重生成并完整编译所有模块（mmorpg `AGENTS.md:44`） | `game-proto/src/main/proto/proto/**` | 客户端（C#）、Go robot、Java 全部进程 |
+| `proto/message_id.txt`（244 行） | protogen 发号：已有的键保留原号（`service_register_info.go:174-187`）；新键先填 [0, 方法总数) 内的空洞，再往后追加（`:189-207`）；写回时只写当前还存在的方法（`:148-167`） | `game-proto/src/main/resources/contract/message_id.txt` | 客户端把号编进代码（`mmorpg-client/Assets/Scripts/Net/MessageIds.cs`）；Java 运行时按「服务裸名 + 方法」解析（`MessageIdRegistry.java:28-39`） |
 | `proto/event_id.txt`（49 行） | protogen 发号；删除的事件写墓碑 `N=reserved:<名>`（`internal/message_id.go:17-26`） | 同上目录 | Java 没有消费者（`tools.md:200`） |
-| tip 枚举 proto + `tip_text.json` | 导表器按段发号：已发的号原样保留（`core/generators/enum_gen.py:414-426`） | `xm-table/src/main/proto/tip/`、`config-data/tables/tip_text.json` | 客户端按码查文案；Java 用生成的枚举 |
-| operator 枚举 | 导表器的号池；state 文件坏了就从 1 重新发号（fail-open，`tools.md:120`） | `xm-table/src/main/proto/operator/` | Java 只参与编译 |
-| 权威表 schema | 人写；字段号是 wire 契约，删字段写 `reserved`（mmorpg `data/AGENTS.md:82-85`、`:94`） | `xm-table/src/main/proto/*_table.proto`。非服务端列（`ContractSync.java:421-443`）和导表产物里还没有的字段（`:342-391`）被改写成 `reserved` | Java 编译期生成 `ConfigTables` |
+| tip 枚举 proto + `tip_text.json` | 导表器按段发号：已发的号原样保留（`core/generators/enum_gen.py:414-426`） | `game-table/src/main/proto/tip/`、`config-data/tables/tip_text.json` | 客户端按码查文案；Java 用生成的枚举 |
+| operator 枚举 | 导表器的号池；state 文件坏了就从 1 重新发号（fail-open，`tools.md:120`） | `game-table/src/main/proto/operator/` | Java 只参与编译 |
+| 权威表 schema | 人写；字段号是 wire 契约，删字段写 `reserved`（mmorpg `data/AGENTS.md:82-85`、`:94`） | `game-table/src/main/proto/*_table.proto`。非服务端列（`ContractSync.java:421-443`）和导表产物里还没有的字段（`:342-391`）被改写成 `reserved` | Java 编译期生成 `ConfigTables` |
 | 表数据 `.pb` + `manifest.json` | 导表器产出；`version` 只在内容摘要变化时加 1（`core/manifest.py:50-56`、`:168-175`） | `config-data/tables/` | Java 加载时校验 sha256 和行数 |
 | 导航网格 `data/scene_nav_bin/*.bin` | `tools/navmesh_baker`（§2） | 目前**不同步**（`tools.md:309`）；本批新增 `config-data/navmesh/` | C++ scene；本批起 Java scene |
 
@@ -123,9 +123,9 @@
 - 漂移 workflow 只列不一致的文件名，只报告不判红（`contract-drift.yml:48-71`；deploy-ci-spec `:1033` Q5）。
 - 消息号被复用时 `MessageIdRegistry` 按新表解析，没有任何一步能发现（`tools.md:228`）。
 - 方法被删的兜底是各模块用真注册表解析自己号的单测（gate、login、friend、guild、team、trade、battle、robot、scene 都有，`MessageIdRegistry.loadFromClasspath()` 出现在它们的测试里）；
-  **xm-chat 没有**，只在启动时解析（`ChatConfiguration.java:22-23`、`ChatDispatcher.java:55-56`）。
+  **game-chat 没有**，只在启动时解析（`ChatConfiguration.java:22-23`、`ChatDispatcher.java:55-56`）。
 - **Java 自己的线路和存储也用到 mmorpg 的「内部」消息**：6.2 起 `contracts.kafka.BattleResultEvent` 的字节进 Java 的 Kafka `match-results`（battle-node-spec `:150`、match-spec `:585`），
-  也写进 Redis `xm:battle:activity-result:<id>` 保留 7 天（scene-battle-spec `:548`）；`xm-battle` 已经 import 它（`xm-battle/.../port/BattleResultSink.java:3`）。
+  也写进 Redis `game:battle:activity-result:<id>` 保留 7 天（scene-battle-spec `:548`）；`game-battle` 已经 import 它（`game-battle/.../port/BattleResultSink.java:3`）。
   滚动升级时新旧进程互读这些字节，所以这类消息的线格式对 Java 同样是契约（J 级）。
 
 ### 1.5 比较对象：契约面
@@ -136,7 +136,7 @@
 样例（数据取自 `26ceb70ca`，节选）：
 
 ```
-# 由 xm-contract-check 重锁生成，不要手改（AGENTS §1）。两版共享契约里每个「号」的含义。
+# 由 game-contract-check 重锁生成，不要手改（AGENTS §1）。两版共享契约里每个「号」的含义。
 format=1
 
 [msgid]          # 号 键 服务.方法 请求 应答 服务标记
@@ -204,7 +204,7 @@ bind 1 main_scene.bin spawn=180,200,0
 | 级 | 定义 |
 |---|---|
 | **C** 客户端可见 | 根：①服务带 `OptionIsClientProtocolService` **或** `OptionIsPlayerService` 时，其全部方法的请求 / 应答类型；②帧根（`MessageContent`、`ClientRequest`、`ClientTokenVerifyRequest/Response`、`GateTokenPayload`）。从根沿字段类型递归求闭包。tip 码一律 C |
-| **J** Java 在用 | Java 生产代码（`xm-*/src/main/java/**`）引用的契约生成类，反查为 proto 全名后求闭包，去掉已属 C 的部分。反查表就是契约面 `[proto.type]` 的 Java 类名列（渲染时由描述符精确算出：java_package + multiple_files + 嵌套），所以 CI 复核不需要描述符；通配 import 按整包算。表 schema、operator、常量、导航网格一律 J |
+| **J** Java 在用 | Java 生产代码（`game-*/src/main/java/**`）引用的契约生成类，反查为 proto 全名后求闭包，去掉已属 C 的部分。反查表就是契约面 `[proto.type]` 的 Java 类名列（渲染时由描述符精确算出：java_package + multiple_files + 嵌套），所以 CI 复核不需要描述符；通配 import 按整包算。表 schema、operator、常量、导航网格一律 J |
 | **I** 内部 | 其余 |
 
 - J 与 C 同级判，**I 降一级**（BREAK → WARN → INFO）：Java 不与 C++/Go 混部（`architecture.md:27`），I 级的线格式只有 mmorpg 自己在意。
@@ -244,7 +244,7 @@ bind 1 main_scene.bin spawn=180,200,0
 | | `field-added` | 新号 | INFO | |
 | 枚举值 | `enum-renumber` / `enum-reuse` | 同名换值 / 退役值被别的名字占用 | BREAK | |
 | | `enum-rename` / `enum-removed` / `enum-added` | | WARN / WARN / INFO | |
-| 类型与帧 | `frame-root:<消息>` | 帧根消失 | BREAK | xm-net / gate 帧编解码 |
+| 类型与帧 | `frame-root:<消息>` | 帧根消失 | BREAK | game-net / gate 帧编解码 |
 | | `type-moved:<旧>→<新>` | 一个类型消失、同时出现结构等价的新全名 | WARN | Java 包名随 package 变（`ContractSync.java:556-575`） |
 | | `type-removed` / `type-added` / `file-moved` | | WARN / INFO / INFO | |
 | | `oneof-membership:<消息>#<号>` | 已有字段移进 / 移出已有 oneof | BREAK | 目前全仓 0 个 oneof，规则先定 |
@@ -308,7 +308,7 @@ bind 1 main_scene.bin spawn=180,200,0
 
 ### 1.11 不比什么
 
-- 不是同步产物的契约：帧字节由 xm-net 的 golden 单测管；HTTP JSON 形状来自手写 DTO。
+- 不是同步产物的契约：帧字节由 game-net 的 golden 单测管；HTTP JSON 形状来自手写 DTO。
 - 与含义无关的：注释、import、注入的 java option、建表用 option、文件顺序。
 - tip 段：Java 没有段元数据（`tools.md:98-108`）。mmorpg 出 `tip_meta.json` 后再加 `tip-segment` 规则。
 
@@ -335,7 +335,7 @@ bind 1 main_scene.bin spawn=180,200,0
 
 ### 2.2 数据文件与表
 
-- BaseScene schema：`id=1, nav_bin_file=2, spawn_x/y/z=3/4/5`，出生点用服务器 Z-up 坐标（`data/schema/basescene_table.proto:17-22`）。Java 已同步，`nav_bin_file` 是服务端可读列（`xm-table/src/main/proto/basescene_table.proto:21`）。
+- BaseScene schema：`id=1, nav_bin_file=2, spawn_x/y/z=3/4/5`，出生点用服务器 Z-up 坐标（`data/schema/basescene_table.proto:17-22`）。Java 已同步，`nav_bin_file` 是服务端可读列（`game-table/src/main/proto/basescene_table.proto:21`）。
 - 21 行（`generated/tables/basescene.json`）：
 
   | 场景配置 | `nav_bin_file` | 出生点（服务器） |
@@ -482,12 +482,12 @@ bind 1 main_scene.bin spawn=180,200,0
 
 ## 4 Java 设计
 
-### 4.1 契约闸：`xm-contract-check`
+### 4.1 契约闸：`game-contract-check`
 
 #### 4.1.1 为什么放在构建期
 
 - ContractSync 是 JDK 单文件、零依赖程序，构建之前运行，classpath 上没有 protobuf-java，旧侧也没有描述符集。要在同步前判级，只能手写 proto 解析器，再用构建期的 protoc 交叉校验来证明它没解析错——两份实现做同一件事。
-- 构建期能直接读 protoc 产出的描述符：xm-proto 已经输出带 imports 和自定义 option 的 `contract/contract.desc`（`xm-proto/pom.xml:41-44`），xm-table 输出 `config-tables.binpb`（`xm-table/pom.xml:23`、`:58`）。
+- 构建期能直接读 protoc 产出的描述符：game-proto 已经输出带 imports 和自定义 option 的 `contract/contract.desc`（`game-proto/pom.xml:41-44`），game-table 输出 `config-tables.binpb`（`game-table/pom.xml:23`、`:58`）。
 - 「旧侧」就是仓库里提交的 `contract/SURFACE.txt`，不需要重建旧提交。
 - 同步后必须 `clean install`，构建与测试通过才能提交（AGENTS §4、§5），锁定测试在这里失败就是提交前的闸。仓库工作区虽已被同步改写，但没提交，`git checkout` 即可撤回。
 - 顺带收益：没有 mmorpg 的机器上手改同步来的 proto / 表 schema，渲染结果与锁不一致，构建会失败（覆盖 contract-tamper-check 的 proto / 表部分）。
@@ -496,11 +496,11 @@ bind 1 main_scene.bin spawn=180,200,0
 
 | 项 | 内容 |
 |---|---|
-| 模块 | `xm-contract-check`（包 `com.game.contract.check`），根 pom 里排在 `xm-table` 之后；依赖 xm-proto、xm-table、xm-table-codegen（读 cfg 选项的 `TableSchemaReader`）。**不被任何进程模块依赖**，不进镜像 |
+| 模块 | `game-contract-check`（包 `com.game.contract.check`），根 pom 里排在 `game-table` 之后；依赖 game-proto、game-table、game-table-codegen（读 cfg 选项的 `TableSchemaReader`）。**不被任何进程模块依赖**，不进镜像 |
 | `SurfaceRenderer` | 描述符 → 契约面文本。proto 部分复用 `MessageIdRegistry` 取「生成类自带描述符」的做法（`MessageIdRegistry.java:166-195`，改为包内可见或抽出工具类）以拿到解析过的自定义 option；表部分用 `TableSchemaReader`；tip / operator 来自表描述符集；常量反射读 `com.game.table.TableConstants`；事件号、消息号读 classpath 上的 txt；表行与导航指纹读 `config-data/` |
 | `SurfaceDiff` | 两份契约面 + 两份账本 → `List<Finding>`，实现 §1.6–§1.9。**只依赖 JDK**（CI 复核直接用 `target/classes` 跑） |
 | `Acceptances` | 解析放行文件，§1.10 |
-| `JavaRefs` | 扫描 `xm-*/src/main/java/**` 的 import 与全限定名，按渲染器给出的「Java 类名 → proto 全名」反查 J 级根 |
+| `JavaRefs` | 扫描 `game-*/src/main/java/**` 的 import 与全限定名，按渲染器给出的「Java 类名 → proto 全名」反查 J 级根 |
 | `ContractGate` | 命令行入口（CI 复核）：`--old-surface --new-surface --old-retired --new-retired --old-source --new-source --old-accepts --accepts --java-src --annotate --out`；目标提交取 `--new-source` 的 `mmorpg.commit`；退出码 0 = 无未放行 BREAK，2 = 用法或输入错误，3 = 有未放行 BREAK。<br>**`ContractGate`、`SurfaceDiff`、`Acceptances`、`JavaRefs` 不得引用任何 protobuf 类型**（包括方法签名与字段）：CI 复核的 classpath 只有 `target/classes`，引用了就会 `NoClassDefFoundError`。由一个单测在不含 protobuf-java 的隔离类加载器里跑一遍 `ContractGate` 来守住（§9.1） |
 | `ContractSurfaceTest` | 锁定测试，三种模式见下 |
 | 提交的文件 | `contract/SURFACE.txt`、`contract/RETIRED.txt`（重锁产物，不许手改）、`contract/ACCEPTED_BREAKS.txt`（人写，只追加） |
@@ -509,16 +509,16 @@ bind 1 main_scene.bin spawn=180,200,0
 
 | 模式 | 触发 | 行为 |
 |---|---|---|
-| 校验（缺省，`mvnw verify` 每次都跑） | — | 渲染 → 与 `SURFACE.txt` 逐行比较。一致就通过；不一致就失败，打印前 20 条分级结果、报告路径 `xm-contract-check/target/contract-report.md` 和重锁命令 |
-| 重锁 | `-Dxm.contract.relock=true` | 判级 → 校验放行（§1.10：每条 BREAK 都有放行；多余放行行判 WARN）→ 通过才写 `SURFACE.txt` 与 `RETIRED.txt`，并在报告末尾给出 PARITY 版本基线行草稿。<br>本地重锁看不到旧的 `SOURCE.properties`（测试不依赖 git），所以 `surface-format-with-sync` 只能由 CI 复核判；本地只报 `surface-format` INFO |
-| 只报告 | `-Dxm.contract.report=<绝对路径>` | 判级、写报告，差异本身不让测试失败（渲染出错仍失败）。漂移 workflow 用，路径给 `$GITHUB_WORKSPACE/drift-report.md`（surefire 的工作目录是模块目录，相对路径会落进 `xm-contract-check/`） |
+| 校验（缺省，`mvnw verify` 每次都跑） | — | 渲染 → 与 `SURFACE.txt` 逐行比较。一致就通过；不一致就失败，打印前 20 条分级结果、报告路径 `game-contract-check/target/contract-report.md` 和重锁命令 |
+| 重锁 | `-Dgame.contract.relock=true` | 判级 → 校验放行（§1.10：每条 BREAK 都有放行；多余放行行判 WARN）→ 通过才写 `SURFACE.txt` 与 `RETIRED.txt`，并在报告末尾给出 PARITY 版本基线行草稿。<br>本地重锁看不到旧的 `SOURCE.properties`（测试不依赖 git），所以 `surface-format-with-sync` 只能由 CI 复核判；本地只报 `surface-format` INFO |
+| 只报告 | `-Dgame.contract.report=<绝对路径>` | 判级、写报告，差异本身不让测试失败（渲染出错仍失败）。漂移 workflow 用，路径给 `$GITHUB_WORKSPACE/drift-report.md`（surefire 的工作目录是模块目录，相对路径会落进 `game-contract-check/`） |
 
 #### 4.1.3 日常流程
 
 ```bash
 java tools/ContractSync.java --mmorpg ../mmorpg            # 同步（不变）
-./mvnw -B -pl xm-contract-check -am clean test -Dtest=ContractSurfaceTest \
-       -Dsurefire.failIfNoSpecifiedTests=false -Dxm.contract.relock=true
+./mvnw -B -pl game-contract-check -am clean test -Dtest=ContractSurfaceTest \
+       -Dsurefire.failIfNoSpecifiedTests=false -Dgame.contract.relock=true
 #   必须带 clean（AGENTS §4）：渲染器按描述符去加载生成类，同步删掉或改名的类型留下的旧类不清掉，会让渲染与真实契约不一致
 #   有未放行的 BREAK：失败并列出；在 contract/ACCEPTED_BREAKS.txt 写理由（或放弃这次同步：git checkout 受管路径）后重跑
 ./mvnw -B clean install                                    # 全量构建（AGENTS §4）
@@ -538,8 +538,8 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: |
-          if [ ! -f xm-contract-check/target/classes/com/game/contract/check/ContractGate.class ]; then
-            echo "::error title=契约兼容性复核没跑::xm-contract-check 没编译出来（看上一步的构建错误）"; exit 1
+          if [ ! -f game-contract-check/target/classes/com/game/contract/check/ContractGate.class ]; then
+            echo "::error title=契约兼容性复核没跑::game-contract-check 没编译出来（看上一步的构建错误）"; exit 1
           fi
           if [[ ! "$BASE" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then BASE=$(git rev-parse HEAD^); fi
           rc=0
@@ -553,7 +553,7 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
             git show "$c^:contract/ACCEPTED_BREAKS.txt" > ".cb/$c/old-accepts" 2>/dev/null || : > ".cb/$c/old-accepts"
             git show "$c^:contract/SOURCE.properties"  > ".cb/$c/old-source"
             git show "$c:contract/SOURCE.properties"   > ".cb/$c/new-source"
-            java -cp xm-contract-check/target/classes com.game.contract.check.ContractGate \
+            java -cp game-contract-check/target/classes com.game.contract.check.ContractGate \
                  --old-surface ".cb/$c/old-SURFACE.txt" --new-surface ".cb/$c/new-SURFACE.txt" \
                  --old-retired ".cb/$c/old-RETIRED.txt" --new-retired ".cb/$c/new-RETIRED.txt" \
                  --old-source ".cb/$c/old-source" --new-source ".cb/$c/new-source" \
@@ -585,12 +585,12 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
 | field-retype:.BattleStateS2C#4 | C | uint64 action_deadline_ms | uint32 … | 64→32 收窄 | 已放行：… |
 ### WARN …  ### INFO …（C 级新方法列入「Java 待做」）
 ### Java 引用粗查（仅提示，以 clean install 为准）
-- MethodA 出现在 xm-guild/…/GuildDispatcher.java:112、xm-robot/…/GuildScenario.java:203
+- MethodA 出现在 game-guild/…/GuildDispatcher.java:112、game-robot/…/GuildScenario.java:203
 ### PARITY 版本基线行草稿
 | 0.1.0-SNAPSHOT | `3f1e0d2c9` | YYYY-MM-DD | 契约同步到 mmorpg HEAD：… |
 ```
 
-引用粗查：对 BREAK / WARN 涉及的方法名和类型简单名，在 `xm-*/src/main/java` 与 `xm-robot/src` 里找出现位置，每项最多 5 处，用来提示该重点跑哪些模块和 robot 场景。
+引用粗查：对 BREAK / WARN 涉及的方法名和类型简单名，在 `game-*/src/main/java` 与 `game-robot/src` 里找出现位置，每项最多 5 处，用来提示该重点跑哪些模块和 robot 场景。
 
 #### 4.1.6 ContractSync 的配套改动（小）
 
@@ -598,7 +598,7 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
   渲染器据此把描述符里的 `reserved` 区分成 `pending` / `owner=` / 普通 reserved。改动点：`syncTableSchemas`（`ContractSync.java:237-267`）、`alignWithProduct`（`:342-391`）、`stripNonServerFields`（`:421-443`）把签名带出来。
 - 同步时新增 fail-closed 校验：`message_id.txt` 的行格式、号和键重复，口径同 `MessageIdRegistry.java:262-290`；表主键必须是 `uint32 id = 1`（行指纹依赖它，不满足就同步失败并说明）。
 - 同步完成后打印 §4.1.3 的重锁命令。
-- xm-table 把描述符集同时输出到 classpath（例如 `${project.build.outputDirectory}/table-descriptors/config-tables.binpb`），让 `xm-contract-check` 不依赖相邻模块的 `target/` 路径。
+- game-table 把描述符集同时输出到 classpath（例如 `${project.build.outputDirectory}/table-descriptors/config-tables.binpb`），让 `game-contract-check` 不依赖相邻模块的 `target/` 路径。
 
 ### 4.2 导航数据同步（ContractSync）
 
@@ -608,7 +608,7 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
   ContractSync 是零依赖程序，读 JSON 只能用正则（与现有的 `manifestValue` 同法，`ContractSync.java:407-411`）：按 `"nav_bin_file"\s*:\s*"([^"]*)"` 取值，
   另数 `"id"` 行，取到的个数必须等于 manifest 里 BaseScene 的 `rows`（当前 21），不等就同步失败，防止导表器换了 JSON 排版后正则少取。
   Java 运行时读的是 `basescene.pb`，不是 JSON；两者出自同一次导出，一致性由构建期测试 G1 兜底：它按 `.pb` 解析出的 21 行逐行注册导航（§9.2.3）。
-- 结构校验（fail-closed，任何一条失败都不写入）：文件存在、≥ 96 B；magic、文件版本 1；`numTiles ≥ 1`；逐个 tile 记录 `tileRef ≠ 0`、`dataSize > 0`，累加后恰好到文件尾；tile 头 `u16 version == 7`、`layer == 0`、`offMeshConCount == 0`。深度校验由 `xm-navmesh` 的读取器在构建期测试里做（§4.3）。
+- 结构校验（fail-closed，任何一条失败都不写入）：文件存在、≥ 96 B；magic、文件版本 1；`numTiles ≥ 1`；逐个 tile 记录 `tileRef ≠ 0`、`dataSize > 0`，累加后恰好到文件尾；tile 头 `u16 version == 7`、`layer == 0`、`offMeshConCount == 0`。深度校验由 `game-navmesh` 的读取器在构建期测试里做（§4.3）。
 - 复制用 `Files.copy`（不走 `copyText`）；`normalized()` 把 `.bin` 当二进制（现在只认 `.pb`，`:661-668`）；`.gitattributes` 加 `*.bin binary`（现在只有 `*.pb`、`*.jar`）。
 - ContractSync 生成 `config-data/navmesh/navmesh.properties`：
 
@@ -623,10 +623,10 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
   运行时据此校验 sha256（与表数据的 manifest 校验同理）。`SOURCE.properties` 加 `navmesh.files=6`。
 - CI 稀疏目录（`ci.yml:92-97`、`contract-drift.yml:37-42`）加 `data/scene_nav_bin`。deploy-ci-spec `:988` 第 12 条已预见这类改动：漏改时 contract job 会因「目录不存在」报红。
 - 镜像：`.dockerignore` 加 `!config-data/navmesh`（现在只放行 `config-data/tables`，`.dockerignore:6`）；Dockerfile 在 `COPY config-data/tables/`（`deploy/docker/Dockerfile:39`）旁加 `COPY config-data/navmesh/ ./config-data/navmesh/`。
-  这与 deploy-ci-spec §3.7「表数据烤进镜像」同理；`xm.nav-dir` 缺省值相对 WORKDIR `/app`，不用改配置；临时换数据时用 `XM_NAV_DIR` 覆盖（Spring 宽松绑定），口径同 `XM_TABLE_DIR`。
+  这与 deploy-ci-spec §3.7「表数据烤进镜像」同理；`game.nav-dir` 缺省值相对 WORKDIR `/app`，不用改配置；临时换数据时用 `GAME_NAV_DIR` 覆盖（Spring 宽松绑定），口径同 `GAME_TABLE_DIR`。
   Dockerfile 文件头和 `.dockerignore` 头注释里「只放行 … 与 config-data/tables」的说法要一并改。
 
-### 4.3 `xm-navmesh`（新纯库模块，`com.game.navmesh`，只依赖 JDK）
+### 4.3 `game-navmesh`（新纯库模块，`com.game.navmesh`，只依赖 JDK）
 
 | 类 | 职责 |
 |---|---|
@@ -635,7 +635,7 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
 | `NavMeshQuery` | 无状态，只移植**基线用到的子集**：`queryPolygons`（`calcTileLoc` 选 tile；BV 量化重叠，含夹到 tile 包围盒、`& 0xfffe` / `\| 1` 规则）、`closestPointOnPoly`（多边形内取 detail 三角形高度，外取最近边）、`findNearestPoly`、`raycast`（沿多边形链走 portal，含部分 portal 判定；没撞墙时 t = 极大值；不设途经多边形上限，N-D6）。不移植 findPath、findStraightPath、crowd、off-mesh 连接 |
 | `NavScratch` | 调用方持有的可复用缓冲（候选 polyRef 数组、raycast 途经表、多边形顶点暂存）：库内部的查询不分配。scene 只有一个逻辑线程，由 `SceneWorld` 持有一份。门面（§4.4.1）返回 `Optional` / `MoveCheck` 这类小对象照常分配，每条移动本来就新建 `Vec3`，不必为它们做对象池 |
 
-- 坐标：库在 Detour 空间（Unity Y-up）工作，不知道服务器坐标；换轴在 xm-scene 的门面里做。
+- 坐标：库在 Detour 空间（Unity Y-up）工作，不知道服务器坐标；换轴在 game-scene 的门面里做。
 - `findNearestPoly` 的距离度量有两种写法：老版本用纯三维距离，新版本对「点在多边形正上方」做爬升修正。UE5 用的是哪种读不到源码。
   **本批数据是平地（y ≡ 0）**：两种写法选出的多边形可能不同，但落点相同。正上方的多边形，落点就是投影点；其它候选的落点距离只会更大，相等时落点重合。
   评审补充：UE4 公开源码里的 `findNearestPoly` 是老写法，即纯三维距离、多一个可选的 `referencePt` 参数、候选放在固定 128 个的数组里（`queryPolygons(..., 128)`）。
@@ -651,7 +651,7 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
 - 来源纪律：按上游 recastnavigation（zlib 许可）的算法实现，配合 §2.3 的数据事实；**不抄 UE 修改过的源码**；由 Detour 派生的文件保留 zlib 声明（§8 NQ3）。
 - 规模：主代码约 1.3k 行，测试约 0.8k 行（L）。
 
-### 4.4 xm-scene 接入（新包 `com.game.scene.nav`，领域对象 + 服务，不用 ECS 命名）
+### 4.4 game-scene 接入（新包 `com.game.scene.nav`，领域对象 + 服务，不用 ECS 命名）
 
 #### 4.4.1 门面与注册表
 
@@ -659,10 +659,10 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
   - `Optional<Vec3> snap(Vec3 p)`；
   - `MoveCheck validateMove(Vec3 from, Vec3 to)`，`MoveCheck` 是密封类型：`Passed(end)`（吸附后的终点）/ `Blocked(hit)`（回缩后再吸附的撞墙点，吸附不上取吸附后的起点；查询失败也归此类）/ `StartOffMesh`。逐行照搬 `nav_query.cpp:86-149`，包括「raycast 通过但终点吸附失败按 t=1 撞墙」。
 - `SceneNavigations`：启动时随 `ConfigTables` 构建（`SceneNodeConfiguration`，与 `ConfigTables.load` 同处）。
-  - 读 `xm.nav-dir`（缺省 `config-data/navmesh`，与 `xm.table-dir` 同级、同样相对仓库根）下的 `navmesh.properties`，按 BaseScene 每行 `nav_bin_file` 的**文件名部分**解析，同名只加载一次，校验 sha256。
+  - 读 `game.nav-dir`（缺省 `config-data/navmesh`，与 `game.table-dir` 同级、同样相对仓库根）下的 `navmesh.properties`，按 BaseScene 每行 `nav_bin_file` 的**文件名部分**解析，同名只加载一次，校验 sha256。
   - 每一行用 `SceneTables.spawnPoint(id)`（`ConfigSceneTables.java:62-70`）探针一次。
   - **任何失败都让启动失败**（文件缺失、sha 不符、读取器拒绝、探针吸不上），日志带配置号、文件、出生点。`nav_bin_file` 为空的行没有导航（数据层面的显式放行，同基线 `navigation.cpp:101-104`）。
-  - `xm.scene.nav-enabled=false`：整体关闭，所有场景无导航，行为回到现在的 MoveGuard 口径。
+  - `game.scene.nav-enabled=false`：整体关闭，所有场景无导航，行为回到现在的 MoveGuard 口径。
 - `Scene` 在创建时（`SceneWorld.java:245`，唯一构造点）按配置号取得 `SceneNavigation`（可空），移动时不再查表。副本和镜像（5.3）按配置号自然获得导航。
 - 注入方式（评审补充）：导航挂在 `SceneTables` 上，加一个缺省方法 `default Optional<SceneNavigation> navigation(int sceneConfigId) { return Optional.empty(); }`，
   由 `ConfigSceneTables` 覆盖。不要给 `SceneWorld` 的构造器加参数：测试里有 29 处 `new SceneWorld(`，各种 `SceneTables` 替身也不用改。
@@ -721,10 +721,10 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
 
 | 指标 | 类型 | label | 说明 |
 |---|---|---|---|
-| `xm_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid（不变） | 口径改为：accepted = 水平位置未变（高度可能被吸附）；clamped = 水平位置被改（额度或导航）但偏差 ≤ 0.5 m；corrected = 回了 137 |
-| `xm_scene_nav_verdicts_total` | Counter | `verdict`=passed / blocked / guided / respawned | 导航场景的移动上行裁决，每条恰好一次 |
-| `xm_scene_nav_extrapolation_stops_total` | Counter | — | 外推被夹住、速度清零的次数 |
-| `xm_scene_nav_configs` | Gauge | — | 已注册导航的场景配置数（启动时设定，当前 21） |
+| `game_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid（不变） | 口径改为：accepted = 水平位置未变（高度可能被吸附）；clamped = 水平位置被改（额度或导航）但偏差 ≤ 0.5 m；corrected = 回了 137 |
+| `game_scene_nav_verdicts_total` | Counter | `verdict`=passed / blocked / guided / respawned | 导航场景的移动上行裁决，每条恰好一次 |
+| `game_scene_nav_extrapolation_stops_total` | Counter | — | 外推被夹住、速度清零的次数 |
+| `game_scene_nav_configs` | Gauge | — | 已注册导航的场景配置数（启动时设定，当前 21） |
 
 纠偏日志保持 debug（现状）；启动时每份网格打一条 INFO（文件、tile 数、orig），每个配置一条「已注册」。
 
@@ -751,29 +751,29 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
 
 | 批 | 内容 | 规模 | 前置 |
 |---|---|---|---|
-| 7.5a | `xm-contract-check`、`SURFACE.txt` / `RETIRED.txt` 引导重锁、`ACCEPTED_BREAKS.txt`（只有文件头）、ContractSync 的 §4.1.6 改动、ci.yml 复核步骤、contract-drift.yml 分级报告、xm-chat 补真注册表单测 | M–L（约 1.6k 行 + 0.9k 行测试） | 7.1a 入库（改同一批 workflow） |
-| 7.5b | ContractSync 同步导航（§4.2）、`xm-navmesh`、`.gitattributes`、CI 稀疏目录；重锁出 `navmesh-added` INFO | L | 7.5a |
-| 7.5c | xm-scene 接入（§4.4）、`navwall`、`.dockerignore` / Dockerfile、文档与 PARITY | M | 7.5b；`SceneWorld` / `MoveGuard` 的在途改动全部入库：5.2（交出进场）、5.5（排空改派）、6.3（备战停步、战斗在途丢弃移动，scene-battle-spec D5） |
+| 7.5a | `game-contract-check`、`SURFACE.txt` / `RETIRED.txt` 引导重锁、`ACCEPTED_BREAKS.txt`（只有文件头）、ContractSync 的 §4.1.6 改动、ci.yml 复核步骤、contract-drift.yml 分级报告、game-chat 补真注册表单测 | M–L（约 1.6k 行 + 0.9k 行测试） | 7.1a 入库（改同一批 workflow） |
+| 7.5b | ContractSync 同步导航（§4.2）、`game-navmesh`、`.gitattributes`、CI 稀疏目录；重锁出 `navmesh-added` INFO | L | 7.5a |
+| 7.5c | game-scene 接入（§4.4）、`navwall`、`.dockerignore` / Dockerfile、文档与 PARITY | M | 7.5b；`SceneWorld` / `MoveGuard` 的在途改动全部入库：5.2（交出进场）、5.5（排空改派）、6.3（备战停步、战斗在途丢弃移动，scene-battle-spec D5） |
 
 **文档**
 
 - `AGENTS.md` §1：受管清单加 `config-data/navmesh/**`；写明「`contract/SURFACE.txt`、`contract/RETIRED.txt` 是重锁产物，不许手改；破坏性契约变更在 `contract/ACCEPTED_BREAKS.txt` 登记理由（人写、只追加）」。
   §4：同步后先跑重锁命令再 `clean install`；报告里有 C 级变更时跑引用粗查列出的 robot 场景。
-- `architecture.md`：§1 边界清单加「导航网格数据（同步产物）」与「同步后过契约闸」；§2 模块表加 `xm-navmesh`、`xm-contract-check`；§5 线程模型加「网格不可变、跨线程共享，查询只在逻辑线程」；§11 加 §4.4.6 的指标并改 `xm_scene_moves_total` 的口径说明。
+- `architecture.md`：§1 边界清单加「导航网格数据（同步产物）」与「同步后过契约闸」；§2 模块表加 `game-navmesh`、`game-contract-check`；§5 线程模型加「网格不可变、跨线程共享，查询只在逻辑线程」；§11 加 §4.4.6 的指标并改 `game_scene_moves_total` 的口径说明。
 - `tech-stack.md`：两行（§5）。
 - `docs/reference/mmorpg-client-contract-scene.md:69`、`-movement.md:366`、`-aoi.md:211`、`:377-379`：「Java 没有导航网格」改为现状。
 - `docs/porting/roadmap.md:95` 更新状态；`docs/design/config-tables.md` 补一句导航数据同步。
-- `xm-robot/README.md`：`navwall` 用法。
-- 配置与测试装配（评审补充）：`SceneNodeProperties` 加 `navDir`（`xm.nav-dir`，缺省 `config-data/navmesh`），`SceneSettings` 加 `navEnabled`。
-  凡是用真实 `config-data` 装配 scene 的测试与工具，都要同时给 `xm.nav-dir=../config-data/navmesh`，与现有的 `xm.table-dir=../config-data/tables` 成对出现，否则启动 fail-closed。
+- `game-robot/README.md`：`navwall` 用法。
+- 配置与测试装配（评审补充）：`SceneNodeProperties` 加 `navDir`（`game.nav-dir`，缺省 `config-data/navmesh`），`SceneSettings` 加 `navEnabled`。
+  凡是用真实 `config-data` 装配 scene 的测试与工具，都要同时给 `game.nav-dir=../config-data/navmesh`，与现有的 `game.table-dir=../config-data/tables` 成对出现，否则启动 fail-closed。
   `tools/local/start-slice.sh` 从仓库根启动，缺省相对路径即可，不用改。
 
 **PARITY**
 
 | 功能 | mmorpg 位置 | Java 模块 | 状态 | 备注 |
 |---|---|---|---|---|
-| 契约变更报告与兼容性闸（新增） | 无对应（mmorpg 只有事件号墓碑与导表器 tip 轴自检） | xm-contract-check、tools/ContractSync.java、.github/workflows | 不适用（Java 版专有工具） | 有意差异 C-D1–C-D8；**mmorpg 待做**：message_id 墓碑与确定性发号（§8 CQ4） |
-| 导航网格查询：进场吸附 / 移动射线夹持 / 外推夹持（新增） | `cpp/libs/services/scene/spatial/system/{navigation,nav_query,recast,scene_spawn,movement}.cpp`、`cpp/nodes/scene/handler/rpc/player/player_movement_handler.cpp` | xm-navmesh、xm-scene、tools/ContractSync.java | 已对齐（行为有意不同，协议不变） | N-D1–N-D12；**跨语言金样待 mmorpg**（§9.2.4） |
+| 契约变更报告与兼容性闸（新增） | 无对应（mmorpg 只有事件号墓碑与导表器 tip 轴自检） | game-contract-check、tools/ContractSync.java、.github/workflows | 不适用（Java 版专有工具） | 有意差异 C-D1–C-D8；**mmorpg 待做**：message_id 墓碑与确定性发号（§8 CQ4） |
+| 导航网格查询：进场吸附 / 移动射线夹持 / 外推夹持（新增） | `cpp/libs/services/scene/spatial/system/{navigation,nav_query,recast,scene_spawn,movement}.cpp`、`cpp/nodes/scene/handler/rpc/player/player_movement_handler.cpp` | game-navmesh、game-scene、tools/ContractSync.java | 已对齐（行为有意不同，协议不变） | N-D1–N-D12；**跨语言金样待 mmorpg**（§9.2.4） |
 | 导航网格烘焙（新增） | `tools/navmesh_baker` | — | 不适用（mmorpg 单一生产者，Java 同步产物） | |
 | 移动位移校验（更新，`PARITY.md:45`） | | | | 「高度取上报值」改为「无导航场景如此；有导航场景先按额度截断、再射线夹持，高度取网格」 |
 
@@ -790,15 +790,15 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
 | 契约破坏性检查 | **自写**（JDK + 已有的 protobuf-java） | bufbuild/buf **11,474** | 不到 2 万；只懂 proto，不懂 message_id、tip、表数据、导航；是 Go 二进制，CI 要另装 |
 | 描述符读取 | protobuf-java（已是依赖，与 protoc 同版本，`tech-stack.md` 版本约束） | protocolbuffers/protobuf **72,096** | 已在用 |
 | 测试 | JUnit 5 / AssertJ（Spring Boot 管理） | — | 已在用 |
-| 导航查询 | **自研 `xm-navmesh`**（只依赖 JDK） | recastnavigation/recastnavigation **7,943**（zlib，C++）；recast4j/recast4j **292**（Java 移植）；ikpil/DotRecast **948**（C#）；libgdx/gdx-ai **1,304**（只有通用图寻路）；jMonkeyEngine **4,321** | 全部不到 2 万。recast4j 另有硬伤：按上游 float 布局、要 `DNAV` 魔数，读不了 UE5 double MSET；JNI 调 C++ 要私有的 ue5navmesh、每平台编原生库、原生崩溃带走 JVM，JDK 21 的 FFM 还是预览特性 |
+| 导航查询 | **自研 `game-navmesh`**（只依赖 JDK） | recastnavigation/recastnavigation **7,943**（zlib，C++）；recast4j/recast4j **292**（Java 移植）；ikpil/DotRecast **948**（C#）；libgdx/gdx-ai **1,304**（只有通用图寻路）；jMonkeyEngine **4,321** | 全部不到 2 万。recast4j 另有硬伤：按上游 float 布局、要 `DNAV` 魔数，读不了 UE5 double MSET；JNI 调 C++ 要私有的 ue5navmesh、每平台编原生库、原生崩溃带走 JVM，JDK 21 的 FFM 还是预览特性 |
 | 导航数据 | 同步 mmorpg 烘焙产物 | 位图格子导航（自研）| 见 §0.4 裁决 4、§2.5 |
 
 `tech-stack.md` 新增两行：
 
 | 用途 | 选用 | star | 落选（star） | 说明 |
 |---|---|---|---|---|
-| 契约破坏性检查 | 自写（xm-contract-check，protobuf-java 读描述符） | — | buf (11.5K) | 要同时覆盖消息号、tip、表、导航，buf 不到 2 万也不覆盖 |
-| 导航网格查询 | 自研 xm-navmesh（只依赖 JDK，算法按上游 recastnavigation 的 zlib 实现） | — | recastnavigation (7.9K)、recast4j (0.3K)、gdx-ai (1.3K) | 读 mmorpg 烘焙的 UE5 double MSET；只移植基线用到的查询子集 |
+| 契约破坏性检查 | 自写（game-contract-check，protobuf-java 读描述符） | — | buf (11.5K) | 要同时覆盖消息号、tip、表、导航，buf 不到 2 万也不覆盖 |
+| 导航网格查询 | 自研 game-navmesh（只依赖 JDK，算法按上游 recastnavigation 的 zlib 实现） | — | recastnavigation (7.9K)、recast4j (0.3K)、gdx-ai (1.3K) | 读 mmorpg 烘焙的 UE5 double MSET；只移植基线用到的查询子集 |
 
 ---
 
@@ -818,7 +818,7 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
 9. **annotation 每步最多显示约 10 条**：先汇总再输出。
 10. **漂移报告需要 Maven 构建**：比原来慢几分钟；上游出现 codegen 不认识的写法时构建失败，按漂移报告处理，不判红。
 11. **CRLF**：两个锁文件写 LF，读取时先归一；`.gitattributes` 的 `* text=auto eol=lf` 已覆盖。
-12. **CI 复核与构建失败叠加**：`-fae verify` 下 xm-contract-check 本身编译失败时，复核步骤先检查 `ContractGate.class` 是否存在，不存在就输出一条明确的 `::error` 退出，
+12. **CI 复核与构建失败叠加**：`-fae verify` 下 game-contract-check 本身编译失败时，复核步骤先检查 `ContractGate.class` 是否存在，不存在就输出一条明确的 `::error` 退出，
     不让 `NoClassDefFoundError` 挤占 annotation 名额（§4.1.4）。
 13. **表达式列参数错位**：上游调换 `cfg_expr_param` 的顺序后，Java 照常编译、结果静默错误。由 `table-expr-params` BREAK 拦住（§1.8）。
 
@@ -835,7 +835,7 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
 8. **位图与网格的差**：凹角最多差 0.225 m，此外整体平移 +1 cm（§2.5）。凹角只影响异常输入的夹持位置。
    合法客户端可能站进低坐标一侧那条 1 cm 带子，服务器裁决点与它相差 < 0.06 m，不回 137。客户端在高坐标一侧和凹角里拿到不可走的进场点时会自己挪开（§3.5）。
 9. **文件名部分冲突**：两个不同路径同名时同步失败（§4.2）。
-10. **导航关闭开关**：`xm.scene.nav-enabled=false` 让所有场景回到无导航口径（无撞墙夹持）。只用于止血，打 WARN。
+10. **导航关闭开关**：`game.scene.nav-enabled=false` 让所有场景回到无导航口径（无撞墙夹持）。只用于止血，打 WARN。
 
 ---
 
@@ -862,7 +862,7 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
 | N-D2 | 不移植 FindPath、dtCrowd | 有 API 没调用方；crowd 是坏桩（`scene_crowd.cpp:23`、`:62-64`） | 不实现 | YAGNI；实时怪物要先在 mmorpg 设计（`combat.md:147`） | 否 |
 | N-D3 | 导航数据 fail-closed | 逐行 fail-open（`navigation.cpp:44-46`、`:62-65`、`:73`）；加载器把截断文件当成功（`recast.cpp:77-78`、`:90`） | 同步、构建、启动三道校验，任何失败启动不了；有整体开关 | 与配表加载一致；静默放行等于关掉防穿墙 | 部署正确时否 |
 | N-D4 | 网格不可变、跨线程共享 | `thread_local` 管理器，只在启动线程加载（`scene_nav.h:24-27`） | 一份不可变 `NavMesh` | Java 惯用；消除多线程下看不到导航的隐患 | 否 |
-| N-D5 | 文件解析路径 | `GetDataRootDir() + nav_bin_file`（`navigation.cpp:105`） | 文件名部分，在 `xm.nav-dir` 下解析 | Java 自己的目录组织（AGENTS §1） | 否 |
+| N-D5 | 文件解析路径 | `GetDataRootDir() + nav_bin_file`（`navigation.cpp:105`） | 文件名部分，在 `game.nav-dir` 下解析 | Java 自己的目录组织（AGENTS §1） | 否 |
 | N-D6 | raycast 不设途经多边形上限 | 256，注释说溢出按「从起点被挡」（`nav_query.cpp:21-23`、`:104-109`） | 不设上限 | 受 24 m 额度和每帧 ≤0.5 m 外推约束，不可能接近 256；上游的溢出本来也不算失败 | 否 |
 | N-D7 | 换图落点沿用 D10（已登记） | 跨节点 / 跨登录时坐标在目标网格上就保留（`scene_spawn.cpp:114-128`） | 存档配置号 ≠ 目标就落出生点 | 5.2 D10、`PARITY.md:91` ⑦ | 是（已登记） |
 | N-D8 | 非有限值和越界输入在导航之前丢弃（已登记） | 照收，NaN 会进 Detour | 丢弃 | PARITY 移动行 ①⑥ | 是（已登记） |
@@ -889,7 +889,7 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
 | CQ6 | 账本要不要用 mmorpg 全部历史播种 | **不要** | Java 从没对着更早的编号发布过；本地 mmorpg 是浅克隆 |
 | CQ7 | 事件号要不要拦 | **现在 WARN** | Java 没有消费者；等 Java 引入事件号消费者时升到 BREAK |
 | CQ8 | 表数据删行要不要拦 | **不拦，WARN** | 策划改表的常态；存量引用由各功能的加载期校验处理 |
-| CQ9 | Java 自有 proto（`xm.*` 包）要不要纳入 | **7.5 不纳入** | 它们不是两版共享契约；Java 进程间滚动升级的兼容性另行设计 |
+| CQ9 | Java 自有 proto（`game.*` 包）要不要纳入 | **7.5 不纳入** | 它们不是两版共享契约；Java 进程间滚动升级的兼容性另行设计 |
 | CQ10 | 要不要按盘点建 `contract/CHANGES.md` | **不建** | C-D6 |
 | CQ11 | 是否支持「任意两个 mmorpg 提交」离线比较、在 mmorpg CI 里跑 Java 的检查 | **不做** | 需要两份 mmorpg 加 Java 构建；漂移报告已覆盖「上游 HEAD vs 已记录」 |
 | CQ12 | 漂移报告是否分级 | **分级，仍然只报告** | 提前看到「上游复用了号 N」 |
@@ -920,7 +920,7 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
 
 ### 9.1 契约闸
 
-**单元测试（`xm-contract-check`）**
+**单元测试（`game-contract-check`）**
 
 - 渲染器：用 `DescriptorProtos` 在代码里构造文件描述符，覆盖 message（含嵌套）、enum、service、map、optional、reserved（号、区间、名字）、自定义 option，断言渲染行；名字解析（同包、外层作用域、全名、嵌套遮蔽）；`pending` / `owner=` 行按 `SOURCE.properties` 区分。
 - 比较器：§1.8 每条规则至少一正一反（约 50 条），夹具就是最小的契约面文本和账本；§1.9 类型矩阵逐格。
@@ -951,7 +951,7 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
   | f | 手改 `SURFACE.txt` 让它与描述符一致却不放行（模拟绕过） | 本地构建通过、CI 复核报未放行 BREAK |
   | g | 手改同步来的一个 proto 字段名 | 锁定测试失败（防手改） |
 
-- 历史回放（本机一次，只读，worktree 在 scratch）：对改过 `contract/SOURCE.properties` 的四个提交 `723067f`、`e02b39d`、`7ab4d9b`、`3a52935` 各拷入 `xm-contract-check` 渲染契约面（`3a52935` 之前没有权威表 schema 与 `TableSchemaReader`，只比 proto / 消息号 / 事件号），相邻两两比较。期望：
+- 历史回放（本机一次，只读，worktree 在 scratch）：对改过 `contract/SOURCE.properties` 的四个提交 `723067f`、`e02b39d`、`7ab4d9b`、`3a52935` 各拷入 `game-contract-check` 渲染契约面（`3a52935` 之前没有权威表 schema 与 `TableSchemaReader`，只比 proto / 消息号 / 事件号），相邻两两比较。期望：
   `723067f` → `e02b39d` 只有 INFO（msgid-added 239–243、guild_internal / match_internal 两个文件的类型，`PARITY.md:15`）；`e02b39d` → `7ab4d9b` 只有 `NodeInfo` 字段 11 `client_endpoint` 新增（I 级 INFO，`PARITY.md:16`）。出现任何 BREAK / WARN 逐条解释。
 
 **CI**
@@ -969,7 +969,7 @@ star 为 2026-10-05 GitHub API 实测（编辑复核）。
 - 结构校验反例（scratch 里的假 mmorpg 目录）：截断、magic 错、版本错、`dataSize` 之和不到文件尾、引用的文件缺失、两个路径同名 → 同步失败、仓库不变。
 - 用新稀疏目录做一次干净检出（deploy-ci-spec V5 的办法）后 `--check` 退出码 0，证明 6 个稀疏目录刚好够用。
 
-#### 9.2.2 `xm-navmesh` 单元测试
+#### 9.2.2 `game-navmesh` 单元测试
 
 - 读取器正反例：真实 4 份几何读取成功；截断、magic / 文件版本 / tile 版本错、`dataSize` 不符、下标越界、off-mesh 连接、`flags == 0`、layer ≠ 0 一律拒绝。
 - 数据自证（Java 自算，只证明自洽）：tile 数 61 / 34 / 40 / 45；头部参数（orig、32 m、maxTiles 128 / 64、bvQuant 4、walkable 1.8 / 0 / 0.35）；多边形面积 24860.250 / 9099.500 / 8889.750 / 9197.281 m²；
@@ -1027,7 +1027,7 @@ Java 参数化测试：布尔结果与类别完全相同，坐标误差 ≤ 1e-9
 
 #### 9.2.6 性能
 
-`ViewCrowdBenchmarkTest`（`-Dxm.bench=true`）在真实网格下跑 1000 / 2000 人：均值增量 ≤ 5 ms、p99 仍在 50 ms 内（§4.4.7）。
+`ViewCrowdBenchmarkTest`（`-Dgame.bench=true`）在真实网格下跑 1000 / 2000 人：均值增量 ≤ 5 ms、p99 仍在 50 ms 内（§4.4.7）。
 同时输出撞墙停下次数与平均移动人数；移动人数比无导航那次少 10% 以上时，按 §4.4.7 调整人群后重跑，否则结论不可比。
 
 ### 9.3 robot
@@ -1098,9 +1098,9 @@ Java 参数化测试：布尔结果与类别完全相同，坐标误差 ≤ 1e-9
 - 客户端：`GameClient.cs:1834-1863`、`TianyongPaintedCity.cs:87-95`、`:289`、`FestivalRegionMap.cs:22`、`WorldCoordinateConverter.cs:28-32`、`TianyongNavigationGrid.cs:163-167`、`Net/MessageIds.cs`。
 - Java：
   - `ContractSync.java:58-75`、`:99-107`、`:128-139`、`:237-267`、`:342-405`、`:421-443`、`:556-575`、`:626-668`；`contract/SOURCE.properties:4`；
-  - `MessageIdRegistry.java:28-39`、`:166-195`、`:262-290`；`xm-proto/pom.xml:41-44`；`xm-table/pom.xml:23`、`:58`；
+  - `MessageIdRegistry.java:28-39`、`:166-195`、`:262-290`；`game-proto/pom.xml:41-44`；`game-table/pom.xml:23`、`:58`；
   - `SceneWorld.java:245`、`:724`、`:764-774`、`:846`、`:1242-1275`、`:1313-1336`；`MoveGuard.java:5-25`；`ConfigSceneTables.java:62-70`；`MovementRules` 的常量；
-  - `ChatConfiguration.java:22-23`、`ChatDispatcher.java:55-56`（xm-chat 确实没有真注册表单测）；`BattleResultSink.java:3`；
+  - `ChatConfiguration.java:22-23`、`ChatDispatcher.java:55-56`（game-chat 确实没有真注册表单测）；`BattleResultSink.java:3`；
   - `PARITY.md:15`、`:16`、`:45`、`:91`；`architecture.md:17`、`:23`、`:27`、`:581-582`；`.dockerignore:6`、`Dockerfile:39`；
   - `ci.yml:16`、`:31-61`、`:63-114`、`:92-97`；`contract-drift.yml:37-42`、`:48-71`；`MoveAssertions.java:214-251`。
 - 数据：文件字节数、md5 与 git blob；main 头部参数（61 tile、orig、1.8 / 0 / 0.35 / 4、32 m、maxTiles 128、maxPolys 2^20、首个 tileRef `1<<27`）；
@@ -1132,13 +1132,13 @@ Java 参数化测试：布尔结果与类别完全相同，坐标误差 ≤ 1e-9
 5. **`[proto.file]` syntax、`google.protobuf.*` 不渲染**（§1.5、§1.8 `file-syntax`）。
 6. **重锁命令要带 `clean`**（AGENTS §4，§4.1.3）；只报告模式的报告路径用绝对路径（§4.1.2）；本地重锁看不到 `surface-format-with-sync`，只由 CI 判（§4.1.2、§6.1 #5）。
    放行文件只追加的破坏报 `accept-removed` WARN，复核为此多读一份旧放行文件（§4.1.4）。
-7. **ContractSync 读 `basescene.json` 只能用正则**：加行数核对，并说明运行时读 `.pb`、由 G1 兜底一致性（§4.2）。镜像侧补 `XM_NAV_DIR` 与 Dockerfile / `.dockerignore` 注释（§4.2）。
+7. **ContractSync 读 `basescene.json` 只能用正则**：加行数核对，并说明运行时读 `.pb`、由 G1 兜底一致性（§4.2）。镜像侧补 `GAME_NAV_DIR` 与 Dockerfile / `.dockerignore` 注释（§4.2）。
 8. **`findNearestPoly`**：UE4 公开源码是老写法，纯三维距离，最多 128 个候选（按记忆，未核实）。实现改取老写法，平地上与新写法落点逐位相同。
    另补候选遍历顺序与并列规则、link 构造顺序、portal 字节量化（误差约 4.7 cm）（§3.2、§4.3、NQ8）。
 9. **垂直阈值精确化**：z < 4.1 必吸附、4.1–4.6 看叶节点、≥ 4.6 必不吸附。金样向量加 4.09 / 4.59、公共边、贴墙穿接缝、离墙 0.03 m（§3.2、§9.2.4）。
 10. **暴力裁判在 tile 接缝上误报**：评审在蓬莱 +x 196.01 实际踩到，裁判要用闭多边形或无邻接边求交（§9.2.2、§9.2.3）。
 11. **客户端进场兜底**（`TianyongMapRuntime.cs:197-222`）：服务器进场点在位图上不可走时，客户端自己挪开并上报（§3.5、§6.2 #8）。
-12. **测试装配**：导航挂在 `SceneTables` 的缺省方法上，29 处 `new SceneWorld(` 与各替身零改动；凡用真实 `config-data` 装配 scene 的地方成对给 `xm.nav-dir`（§4.4.1、§4.6）。
+12. **测试装配**：导航挂在 `SceneTables` 的缺省方法上，29 处 `new SceneWorld(` 与各替身零改动；凡用真实 `config-data` 装配 scene 的地方成对给 `game.nav-dir`（§4.4.1、§4.6）。
 13. **7.5c 的前置**补上 5.5 与 6.3，它们同样在改 `SceneWorld`（§4.6）。
 14. **帧预算复测的人群可比性**：+x 墙离出生点 16 m，与基准半径 15 m 相当（§4.4.7、§9.2.6）。
 15. **robot**：

@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>game-data</artifactId>
+    <name>game-data</name>
+    <description>审计与运维数据服务（Spring Boot）：消费资产流水、玩家快照等审计 topic、幂等落 MySQL（game）；带令牌的运维接口（查询、全服产出封禁）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-audit</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 运维面发号：LeaseGatedSnowflake / Snowflake（租约在 NodeTypes.SCENE_GUID 全服池上，见 OpsIds） -->
+            <groupId>com.game</groupId>
+            <artifactId>game-common</artifactId>
+        </dependency>
+        <dependency>
+            <!-- gate 排空运维接口读 gate 目录（game.api.GateNodeInfo） -->
+            <groupId>com.game</groupId>
+            <artifactId>game-api</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 区服目录 / 白名单 / 登录公告的运维接口（表由 game-gateway 建，这里只读写） -->
+            <groupId>com.game</groupId>
+            <artifactId>game-gateway-store</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 玩家数据：game.storage.PlayerState（快照详情 / 差异 / 回收估算 / 回档）、已落盘账本规则（账本差集）与归属协议
+                 （批次 7.2b：夺权 / 续约 / 释放 / 带围栏写，PlayerStore 由 DataConfiguration 自己定义，自动装配在 DataApplication 里排除） -->
+            <groupId>com.game</groupId>
+            <artifactId>game-player-store</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 回档的帮会资产闸：GuildInternalService 的 Dubbo 调用方（编程式引用 + game-api 的 IsolatedDubboModule，同 game-scene；
+                 不引入 dubbo-spring-boot-starter，只读与 dry-run 的进程不起 Dubbo）。game-api 对 dubbo 是 optional，这里显式依赖 -->
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 运维作业表（ops_job / ops_job_event / ops_job_player / ops_active / recall_source / audit_replay_line）：
+                 形状由 proto 决定的表一律接 pbmysql（roadmap 阶段 4 起的约定） -->
+            <groupId>com.game</groupId>
+            <artifactId>game-pbmysql</artifactId>
+        </dependency>
+        <dependency>
+            <!-- 快照详情把 player_state 转成 JSON（JsonFormat）：protobuf 本身的一部分，版本由根 BOM 管理 -->
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java-util</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter</artifactId>
+            <exclusions>
+                <!-- 连接池用 Druid（与 game-player-store 同口径） -->
+                <exclusion>
+                    <groupId>com.zaxxer</groupId>
+                    <artifactId>HikariCP</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <configuration>
+                    <!-- 只编译本模块的运维作业表定义（import game-pbmysql 的选项定义）；不扫描全部项目依赖：game-player-store / game-audit
+                         的 proto 已随各自的 jar 生成好类，这里不重复生成（同 game-trade / game-guild 的写法） -->
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
+                    </sourceDirectories>
+                    <ignoreProjectDependencies>true</ignoreProjectDependencies>
+                    <importDependencies>
+                        <importDependency>
+                            <groupId>com.google.protobuf</groupId>
+                            <artifactId>protobuf-java</artifactId>
+                            <version>${protobuf.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                        <importDependency>
+                            <groupId>com.game</groupId>
+                            <artifactId>game-pbmysql</artifactId>
+                            <version>${project.version}</version>
+                            <dependencyResolutionDepth>DIRECT</dependencyResolutionDepth>
+                        </importDependency>
+                    </importDependencies>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.game.data.DataApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

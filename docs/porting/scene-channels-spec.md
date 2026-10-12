@@ -1,9 +1,9 @@
 # 主世界多频道（批次 5.1）移植统一规格：场景实例登记、频道铺设、进场选频道、扩缩容 / 再平衡 / 孤儿清理
 
 > **基线**：mmorpg `26ceb70ca`，与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。Java 侧以 `571b194` 为准。
-> 写作时工作区里有批次 4.5（帮会经济）未提交的改动，其中与本批相关的是：`xm-api/src/main/proto/xm/api/node_directory.proto`
-> （`SceneNodeInfo` 已追加 `rpc_host = 7; rpc_port = 8`）、`xm-discovery/.../NodeDirectory.java`（新增 `findAsync`）、
-> `xm-api/.../DubboGroups.java`（新增 `SCENE_ASSET`）、`xm-api/.../asset/{IsolatedDubboModule,SceneAssetOpClients}.java`（未跟踪）、
+> 写作时工作区里有批次 4.5（帮会经济）未提交的改动，其中与本批相关的是：`game-api/src/main/proto/game/api/node_directory.proto`
+> （`SceneNodeInfo` 已追加 `rpc_host = 7; rpc_port = 8`）、`game-discovery/.../NodeDirectory.java`（新增 `findAsync`）、
+> `game-api/.../DubboGroups.java`（新增 `SCENE_ASSET`）、`game-api/.../asset/{IsolatedDubboModule,SceneAssetOpClients}.java`（未跟踪）、
 > `tools/local/start-slice.sh`。这些文件的行号按当前工作区给出，提交后可能漂移，所以引用时同时写出类名 / 方法名。
 >
 > **路径怎么读**
@@ -18,9 +18,9 @@
 >   在 `cpp/libs/services/scene/player/system/`；`config.cpp` 在 `cpp/libs/engine/config/`；`node.cpp` 在 `cpp/libs/engine/core/node/system/node/`；
 >   `etcd_manager.cpp` 在 `cpp/libs/engine/core/node/system/etcd/`。
 > - proto 用 mmorpg 行号：`proto/scene_manager/scene_node_service.proto`、`proto/scene/{scene,scene_info,player_scene}.proto`。
->   `message_id.txt` 指 `xm-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
+>   `message_id.txt` 指 `game-proto/src/main/resources/contract/message_id.txt`（**号 N 在第 N+1 行**）。
 > - 以 `go/`、`cpp/`、`proto/`、`robot/`、`generated/`、`deploy/`、`docs/design/world-channel-*.md`、`PROGRESS.md` 开头的路径在 `D:\work\mmorpg` 下；
->   以 `xm-`、`docs/`（上一条除外）、`tools/`、`config-data/`、`contract/`、`PARITY.md`、`AGENTS.md` 开头的路径在 `D:\work\xuanming-server-mmo` 下。
+>   以 `game-`、`docs/`（上一条除外）、`tools/`、`config-data/`、`contract/`、`PARITY.md`、`AGENTS.md` 开头的路径在 `D:\work\xuanming-server-mmo` 下。
 >
 > **本稿的来历**：由两份分区稿合并而成——基线分区稿（算法、数据、客户端可见效果、robot 覆盖）与 Java 分区稿（现状、缺口、设计、测试）。
 > 两份稿子之间、以及它们与代码、inventory、设计稿不一致的地方都回到代码重新核对过，更正集中在 §7.3。Java 设计在分区稿基础上做了几处简化与收紧
@@ -446,7 +446,7 @@ gRPC `scene_node_service.cpp:68-125`（旧入口 `scene_handler.cpp:926-976` 同
    （`player_scene_handler.cpp:185-206`；`player_scene.proto:28-31`）。
 3. **63 EnterScene**（`message_id.txt:64`；`EnterSceneC2SRequest{SceneInfoComp scene_info}`，`player_scene.proto:13-16`）的同步拒绝顺序：副本节点 3004 → 战斗在途 3023 →
    换场景在途 3014 → 三个 id 全 0 → 3005 → 镜像分支 → `scene_id` 等于当前 → 3008 → 缺会话 3005 → 无 SM 1003（`player_scene_handler.cpp:45-149`；tip 定义
-   `xm-table/src/main/proto/tip/scene_error_tip.proto:20-58`、`common_error_tip.proto:18`）。通过后把 `scene_id` 与 `scene_config_id` 原样发给 SM（`:151-166`）。
+   `game-table/src/main/proto/tip/scene_error_tip.proto:20-58`、`common_error_tip.proto:18`）。通过后把 `scene_id` 与 `scene_config_id` 原样发给 SM（`:151-166`）。
    - **只带 `scene_config_id`**：SM 在全 zone 该图活频道里（包括当前这个，已算上自己一人）预占最少者——挑回原频道走「同落点重连」，退还预占、重新路由，节点幂等早退，**客户端收不到任何 79**，
      63 应答只是「已受理」（`enterscenelogic.go:626-646`；`docs/reference/mmorpg-client-contract-scene.md:248-250`）；挑到别的 → 旧场景旁人收到 51，本人收到新 79 与 21，跨节点先经 5.2 换手。
    - **带 `scene_id`**：等于当前 → 3008；否则按 §2.4，可进排空频道。
@@ -474,7 +474,7 @@ gRPC `scene_node_service.cpp:68-125`（旧入口 `scene_handler.cpp:926-976` 同
 
 ## 3 Java 现状与差距
 
-### 3.1 场景创建与发号（xm-scene）
+### 3.1 场景创建与发号（game-scene）
 
 - **节点号与雪花**：节点号在 `[1, Snowflake.MAX_WORKER=1023]` 按 (`scene`, zone) 占用，TTL 15 s（`SceneNode.java:116-119`、`:217-220`；`NodeIdLease.java:81-102`）；
   `new Snowflake(nodeId)`（`SceneNode.java:221`）以 `snowflake::nextId` 交给 `SceneWorld` 当**场景号与实体号**的发号器（`:257-264`；`SceneWorld.java:105-106`）；
@@ -491,19 +491,19 @@ gRPC `scene_node_service.cpp:68-125`（旧入口 `scene_handler.cpp:926-976` 同
 - 内容：`SceneNodeInfo{zone_id, node_id, instance_id, link_host, link_port, scenes[], rpc_host=7, rpc_port=8}`（后两者是 4.5 在途字段）；
   `SceneEntry{scene_id, scene_config_id, player_count}`（`node_directory.proto:22-41`）。身份启动时组好、场景列表每次发布时在逻辑线程上取快照（`SceneNode.java:332-344`）。
 - 周期与 TTL：`scheduleWithFixedDelay` 每 5 s，条目 TTL 15 s（`SceneDirectoryPublisher.java:26-27`、`:46-71`）；没有「立即发布」入口。
-- 存储：`RMapCache`，键 `xm:nodes:scene:{zone}`、字段节点号；`list` 读整份、单条解析失败只跳过（`NodeDirectory.java:45-47` `publish`、`:77-87` `list`、`:89-92`；`RedisKeys.java:28-31`）。
+- 存储：`RMapCache`，键 `game:nodes:scene:{zone}`、字段节点号；`list` 读整份、单条解析失败只跳过（`NodeDirectory.java:45-47` `publish`、`:77-87` `list`、`:89-92`；`RedisKeys.java:28-31`）。
 - 停服先摘条目（`SceneNode.java:409-424` `release`；`SceneDirectoryPublisher.java:73-92`）；租约丢失只停发布不删条目、停监听、拒绝新进场，在场玩家继续服务（`SceneNode.java:542-557`；`SceneWorld.java:890-893`）。
 - 其他读者：gate 按节点号连 scene（`GateNode.java:169-172`；`NettyLinkConnector.java:49-60`）；gateway 区服健康探测（`ZoneHealthProbe.java:76`）。
 
 ### 3.3 进游戏的分配链
 
-1. **xm-login**（`EnterGameHandler.java:205-241`）：`AssignSceneRequest{zone_id, player_id}`，有本 zone 位置记录时带 `preferred_scene_config_id / node_id / scene_id`，读位置失败只带存档地图；
-   调用外再套 5 s 超时（`:243-255`；`xm-login/src/main/resources/application.yaml:92`）。
-2. **xm-scene-manager**（`SceneDirectoryProvider.java:68-81`）：Dubbo 业务线程上同步算，提供方超时 3000 ms（`xm-scene-manager/src/main/resources/application.yaml:61-68`）；
-   指标 `xm.scene_manager.assign{result=ok|no_scene|bad_request|rejected|error}`，8 个固定桶（`SceneDirectoryProvider.java:32-66`）。
+1. **game-login**（`EnterGameHandler.java:205-241`）：`AssignSceneRequest{zone_id, player_id}`，有本 zone 位置记录时带 `preferred_scene_config_id / node_id / scene_id`，读位置失败只带存档地图；
+   调用外再套 5 s 超时（`:243-255`；`game-login/src/main/resources/application.yaml:92`）。
+2. **game-scene-manager**（`SceneDirectoryProvider.java:68-81`）：Dubbo 业务线程上同步算，提供方超时 3000 ms（`game-scene-manager/src/main/resources/application.yaml:61-68`）；
+   指标 `game.scene_manager.assign{result=ok|no_scene|bad_request|rejected|error}`，8 个固定桶（`SceneDirectoryProvider.java:32-66`）。
 3. **规则 `SceneAssigner.assign`**（`SceneAssigner.java:55-94`）：zone = 0 → 3005；只用可用节点（节点号非 0、zone 相符、链路地址非空且端口合法，`:131-145`）；
    原实例（节点号与场景号都对上）直接用、不看人数（`:64-69`、`:96-112`）；期望地图是世界图且有承载 → 用它，否则默认图（`:70-79`；默认 = World 第一行，可用
-   `xm.scene-manager.default-world-config-id` 覆盖，`WorldSceneConfigs.java:44-57`；`SceneManagerProperties.java:12-13`）；人数最少胜，并列取节点号小、再并列取场景号小，全部无符号
+   `game.scene-manager.default-world-config-id` 覆盖，`WorldSceneConfigs.java:44-57`；`SceneManagerProperties.java:12-13`）；人数最少胜，并列取节点号小、再并列取场景号小，全部无符号
    （`:114-129`、`:151-165`）；一个没有 → 3000（`:37-42`、`:80-84`）。**不预占**（`:29-30`）。
 4. **login 处理结果**：Dubbo 失败 → 应答内 3023（`EnterGameHandler.java:260-266`）；业务拒绝 → scene-manager 的 tip 原样放进应答（`:267-271`），即「没有场景」时客户端收到应答内 3000。
    基线所有进场失败都是 EnterGame 已受理后经 gate 推 23 `{3023}`（`entergamelogic.go:425-436`、`:456-462`）。这是 5.1 之前就有的差异，PARITY 没有登记；5.1 会让它更常出现（Q6）。
@@ -549,13 +549,13 @@ gRPC `scene_node_service.cpp:68-125`（旧入口 `scene_handler.cpp:926-976` 同
 | 进场预占 | Lua 原子比较 + INCR，成对 DECR（§2.2、§2.3） | 不预占 | 软预占（§4.11，D7） |
 | 死节点上的频道 | 懒改派 / urgent 迁移，过再入屏障（§2.2、§1.6） | 节点 TTL 15 s 后从目录消失，别的节点本来就有同图场景 | 宽限期后删记录、重铺容量；玩家侧随 5.5（D12） |
 | 63 只带当前地图 | 全 zone 挑最少，可能跳频道（§2.6） | 一律不动 | 本节点挑最少，可能跳频道（§4.12） |
-| 指标 | `world_autoscale_total`、`rebalance_*`、`is_leader`…（§6.1） | 只有 `xm_scene_manager_assign_seconds`（`architecture.md:762`） | §6.2，不带 zone 标签 |
+| 指标 | `world_autoscale_total`、`rebalance_*`、`is_leader`…（§6.1） | 只有 `game_scene_manager_assign_seconds`（`architecture.md:762`） | §6.2，不带 zone 标签 |
 
 ### 3.7 工作区里在途的 4.5 改动与 5.1 的关系
 
 - `SceneNodeInfo` 已追加 `rpc_host = 7; rpc_port = 8`（`node_directory.proto:30-34`），**5.1 新字段从 9 起编号**。
-- 4.5 给 xm-scene 加 Dubbo Triple 提供方（`SceneAssetOpService`，`register=false`、group `scene-asset`，`xm-api/.../SceneAssetOpService.java:7-27`；`DubboGroups.java` 工作区版本），
-  调用方客户端缓存 `SceneAssetOpClients` 与独立模型 `IsolatedDubboModule` 在 `xm-api/.../asset/`；本机脚本已把 `XM_DUBBO_SECRET` 注入 xm-scene、端口 `xm.scene.asset-rpc-port` 21100
+- 4.5 给 game-scene 加 Dubbo Triple 提供方（`SceneAssetOpService`，`register=false`、group `scene-asset`，`game-api/.../SceneAssetOpService.java:7-27`；`DubboGroups.java` 工作区版本），
+  调用方客户端缓存 `SceneAssetOpClients` 与独立模型 `IsolatedDubboModule` 在 `game-api/.../asset/`；本机脚本已把 `GAME_DUBBO_SECRET` 注入 game-scene、端口 `game.scene.asset-rpc-port` 21100
   （`tools/local/start-slice.sh:5-7`、`:76`）。本稿推荐的拉取模型不需要它；Q2 若选推送，就在同一个端口上再导出 `SceneChannelService`，并改 `DubboGroups.SCENE_ASSET` 注释「同一端口上不会有别的服务」。
 
 ---
@@ -565,16 +565,16 @@ gRPC `scene_node_service.cpp:68-125`（旧入口 `scene_handler.cpp:926-976` 同
 ### 4.1 总体与职责
 
 ```
-            ┌──────────────── xm-scene-manager（N 副本）────────────────────────────┐
+            ┌──────────────── game-scene-manager（N 副本）────────────────────────────┐
  login ─Dubbo─►│ 数据面（每个副本）：SceneDirectoryService.assign                        │
-            │   读：节点目录（排除 draining）；写：软预占 Lua（xm:world:{z:N}:resv:*）   │
+            │   读：节点目录（排除 draining）；写：软预占 Lua（game:world:{z:N}:resv:*）   │
             │ 控制面（每个 zone 的领导者，线程 scene-manager-world）：                   │
             │   每 5 s：只读 Lua 取快照 + 读目录 → WorldChannelPlanner（纯函数）       │
             │   → 一段「令牌 + 版本号 CAS」Lua 原子写计划、INCR ver                    │
             └───────────────────────────┬────────────────────────────────────────┘
-                                        │ Redis：xm:world:{z:N}:{ch,desired,cooldown,ver,leader}
+                                        │ Redis：game:world:{z:N}:{ch,desired,cooldown,ver,leader}
                                         ▼ （scene 每秒 GET ver，变了才读整张计划）
-            ┌──────────────── xm-scene（每节点）───────────────────────────────────┐
+            ┌──────────────── game-scene（每节点）───────────────────────────────────┐
             │ scene-sched：ChannelPlanFollower 拉计划 → 投递逻辑线程                    │
             │ 逻辑线程：applyChannelPlan（建 / 标排空）→ drainStep（同节点改派 / 空了销毁）│
             │ 目录：SceneEntry.draining、applied_plan_version，应用后立即补发一次       │
@@ -587,34 +587,34 @@ gRPC `scene_node_service.cpp:68-125`（旧入口 `scene_handler.cpp:926-976` 同
   （Redis 阻塞 I/O 可在其上），领导锁续期另起一个调度线程——一拍再慢也不拖住续期，补上基线「慢 RPC 让锁过期」的风险（`world_init.go:95-101`）。
 - **不需要 scene-manager → scene 的 RPC**（D3）：节点自己拉计划，旧领导者的「晚到推送」这类问题不存在；节点到 scene-manager 也不需要可达。
 
-### 4.2 Redis 键（全部经 `RedisKeys` 生成，前缀 `xm:`）
+### 4.2 Redis 键（全部经 `RedisKeys` 生成，前缀 `game:`）
 
-一个 zone 的频道键共用 hash tag `{z:<zone>}`，多键 Lua 在 Cluster 下同槽（与 `xm:{team}:*`、`xm:guild:{g:<id>}:*` 同一惯例，`RedisKeys.java:138-221`）。
+一个 zone 的频道键共用 hash tag `{z:<zone>}`，多键 Lua 在 Cluster 下同槽（与 `game:{team}:*`、`game:guild:{g:<id>}:*` 同一惯例，`RedisKeys.java:138-221`）。
 
 | 方法（新增） | 键 | 类型 / TTL | 写者 | 读者 |
 |---|---|---|---|---|
-| `worldChannels(zone)` | `xm:world:{z:<zone>}:ch` | HASH：字段 = scene_id 无符号十进制，值 = `xm.api.WorldChannel` pb；无 TTL | 领导者（围栏 Lua） | 领导者、scene（拉取） |
-| `worldDesired(zone)` | `xm:world:{z:<zone>}:desired` | HASH：conf → 期望频道数；无 TTL；首次 HSETNX 播种（同 `world_autoscale.go:87-92`） | 领导者 | 领导者 |
-| `worldCooldown(zone)` | `xm:world:{z:<zone>}:cooldown` | HASH：conf → 冷却到期毫秒（Redis TIME）；过期字段由领导者顺手 HDEL | 领导者 | 领导者 |
-| `worldPlanVersion(zone)` | `xm:world:{z:<zone>}:ver` | STRING 整数，只增不减、不过期 | 围栏 Lua INCR | 领导者（CAS）、scene（变更检测） |
-| `worldLeader(zone)` | `xm:world:{z:<zone>}:leader` | STRING 令牌 `<instanceId>:<uuid>`，`SET NX PX 30000` | 竞选者 | 围栏 Lua |
-| `worldReservations(zone, sceneId)` | `xm:world:{z:<zone>}:resv:<scene_id>` | ZSET：成员 player_id 无符号十进制，分 = 到期毫秒；`PEXPIRE = 预占 TTL` | assign 的 Lua | assign 的 Lua、领导者（hash 模式择机迁移前） |
-| `worldZones()` | `xm:world:zones` | SET：zone_id；无 TTL、只增 | scene 启动时 SADD | 领导者（决定竞选哪些 zone） |
+| `worldChannels(zone)` | `game:world:{z:<zone>}:ch` | HASH：字段 = scene_id 无符号十进制，值 = `game.api.WorldChannel` pb；无 TTL | 领导者（围栏 Lua） | 领导者、scene（拉取） |
+| `worldDesired(zone)` | `game:world:{z:<zone>}:desired` | HASH：conf → 期望频道数；无 TTL；首次 HSETNX 播种（同 `world_autoscale.go:87-92`） | 领导者 | 领导者 |
+| `worldCooldown(zone)` | `game:world:{z:<zone>}:cooldown` | HASH：conf → 冷却到期毫秒（Redis TIME）；过期字段由领导者顺手 HDEL | 领导者 | 领导者 |
+| `worldPlanVersion(zone)` | `game:world:{z:<zone>}:ver` | STRING 整数，只增不减、不过期 | 围栏 Lua INCR | 领导者（CAS）、scene（变更检测） |
+| `worldLeader(zone)` | `game:world:{z:<zone>}:leader` | STRING 令牌 `<instanceId>:<uuid>`，`SET NX PX 30000` | 竞选者 | 围栏 Lua |
+| `worldReservations(zone, sceneId)` | `game:world:{z:<zone>}:resv:<scene_id>` | ZSET：成员 player_id 无符号十进制，分 = 到期毫秒；`PEXPIRE = 预占 TTL` | assign 的 Lua | assign 的 Lua、领导者（hash 模式择机迁移前） |
+| `worldZones()` | `game:world:zones` | SET：zone_id；无 TTL、只增 | scene 启动时 SADD | 领导者（决定竞选哪些 zone） |
 
-新增节点类型 `NodeTypes.SCENE_MANAGER = "scene-manager"`，作用域 0（全服），理由同 `TEAM` / `GUILD`（`NodeTypes.java:21-24`）；租约键沿用 `xm:node-id:scene-manager:0:<id>`
-与 `xm:node-id-epoch:…`（`RedisKeys.java:15-26`）。**时间源一律 Redis TIME**（同 team / gateway，`architecture.md:440`、`:528`）；Lua 里调 `TIME` 后再写已有先例（`RedisRateLimitStore.java:31`、
+新增节点类型 `NodeTypes.SCENE_MANAGER = "scene-manager"`，作用域 0（全服），理由同 `TEAM` / `GUILD`（`NodeTypes.java:21-24`）；租约键沿用 `game:node-id:scene-manager:0:<id>`
+与 `game:node-id-epoch:…`（`RedisKeys.java:15-26`）。**时间源一律 Redis TIME**（同 team / gateway，`architecture.md:440`、`:528`）；Lua 里调 `TIME` 后再写已有先例（`RedisRateLimitStore.java:31`、
 `RedissonGuildCacheRedis.java:51`）。
 
-### 4.3 内部 proto（xm-api，Java 版私有，不是同步产物）
+### 4.3 内部 proto（game-api，Java 版私有，不是同步产物）
 
-新文件 `xm-api/src/main/proto/xm/api/world_channel.proto`：
+新文件 `game-api/src/main/proto/game/api/world_channel.proto`：
 
 ```proto
 enum ChannelState { CHANNEL_STATE_UNSPECIFIED = 0; CHANNEL_ACTIVE = 1; CHANNEL_DRAINING = 2; }
 enum ChannelKind  { CHANNEL_KIND_UNSPECIFIED = 0; CHANNEL_KIND_WORLD = 1; }          // 5.3 追加副本 / 镜像
 enum DrainReason  { DRAIN_REASON_UNSPECIFIED = 0; DRAIN_SCALE_IN = 1; DRAIN_REBALANCE = 2; DRAIN_ORPHAN = 3; }
 
-// xm:world:{z:<zone>}:ch 的一个值。(scene_id, node_id) 终生不变：频道换节点 = 新建一条 + 旧的排空（D4）。
+// game:world:{z:<zone>}:ch 的一个值。(scene_id, node_id) 终生不变：频道换节点 = 新建一条 + 旧的排空（D4）。
 message WorldChannel {
   uint64 scene_id = 1;          // scene-manager 全服雪花号
   uint32 scene_config_id = 2;
@@ -634,7 +634,7 @@ message WorldChannel {
 
 ### 4.4 选主与围栏
 
-- **每个 zone 一把锁** `xm:world:{z:<zone>}:leader`（基线全局一把，`scene_manager_service.go:94-97`；D2）：竞选 `SET NX PX 30000`（值 = 本副本令牌）；续期每 10 s 一次，
+- **每个 zone 一把锁** `game:world:{z:<zone>}:leader`（基线全局一把，`scene_manager_service.go:94-97`；D2）：竞选 `SET NX PX 30000`（值 = 本副本令牌）；续期每 10 s 一次，
   Lua「值仍是我的才 PEXPIRE」；放锁 Lua「值是我的才 DEL」。写法沿用帮会排行锁（`RedissonGuildRankRedis.java:41-46`、`:150-165`；`GuildRanks.java:57-58`）。
   **不用** Redisson `RLock`（`QueueDispatcherRunner.java:39-57` 那种）：它的值是「UUID:线程号」的哈希，进不了业务 Lua 做令牌校验。
 - **有效期**：距最近一次**成功续期**（时刻取命令发出前的单调时钟）不足 2/3 TTL（20 s）才算领导者，判法与 `NodeIdLease.isValid` 相同（`NodeIdLease.java:27-33`、`:138-144`）；
@@ -654,13 +654,13 @@ message WorldChannel {
   返回 −1 → 放弃该 zone 的领导；−2 → 本拍作废、下拍重读重算（只在双领导窗口或运维手改时出现）。被改写记录的 `plan_version` 由 Java 预先填成「期望 ver + 1」。
   pb 是任意字节，脚本参数一律用 `ByteArrayCodec`（同 team，`architecture.md:438-439`）。
 - **当选**立即跑一拍（对应基线当选即 fullSync，`scene_manager_service.go:113-115`）；**停服**用属主校验 Lua 放全部 zone 锁（同 `:122-127`）；开关
-  `xm.scene-manager.world.leader-eligible`（缺省 true，false 时只做数据面，同 `config.go:80-86`）；降级时把只有领导者维护的 gauge 清零（同 `scene_manager_service.go:108-112`）。
-- **竞选哪些 zone**：每拍 `SMEMBERS xm:world:zones`，对每个 zone 未持锁就试一次 `SET NX`。
+  `game.scene-manager.world.leader-eligible`（缺省 true，false 时只做数据面，同 `config.go:80-86`）；降级时把只有领导者维护的 gauge 清零（同 `scene_manager_service.go:108-112`）。
+- **竞选哪些 zone**：每拍 `SMEMBERS game:world:zones`，对每个 zone 未持锁就试一次 `SET NX`。
 
 ### 4.5 scene_id 发号
 
 - scene-manager 启动时占一个 `NodeTypes.SCENE_MANAGER` 全服租约（作用域 0，号段 `[1, 1023]`，`Snowflake.java:18-20`；TTL 15 s）；worker = 租约号。
-  包成「租约有效才发号」：照 `SceneGuids`（`xm-scene/.../SceneGuids.java:9-38`）的写法，建议把它挪到 xm-common 共用（它只依赖 `Snowflake` 与 `BooleanSupplier`）。
+  包成「租约有效才发号」：照 `SceneGuids`（`game-scene/.../SceneGuids.java:9-38`）的写法，建议把它挪到 game-common 共用（它只依赖 `Snowflake` 与 `BooleanSupplier`）。
   发号前 `isValid()` 为假 → **跳过本拍全部新建**（fail-closed，计 `world_ticks_total{result=no_lease}`）；租约确认丢失 → 放掉全部 zone 锁、停止竞选、ERROR，等人工重启
   （对应基线 `scene_manager_service.go:250-260`，Java 不自杀，同 scene 节点丢租约的口径 `SceneNode.java:542-557`）。
 - **scene_id 与 (zone, node) 终生绑定**：频道换节点时发新号（D4）。节点用同一个节点号重启时会按计划把**同号**频道重新建出来（§4.10.5），等价于基线「节点重启后对全部频道重发 CreateScene」
@@ -741,7 +741,7 @@ message WorldChannel {
 - **预算** `rebalance.max-migrations-per-tick`：缺省 10，0 = 关闭，负数按 10（同 `:127-133`）；按**计划出的**迁移数计（Java 计划即写入，不存在「失败不占预算」，修 B9 后半）。
 - **触发**：活节点集合与上一拍不同，或距上次满 `rebalance.interval`（缺省 300 s；0 = 只按集合变化，同 `config.go:199-205`）。
 - **调试端点**（可选）：基线 `/debug/rebalance-plan`（§1.6.5）。Java 在管理端口加只读 actuator 端点 `worldchannels`（当前计划 + 待迁移列表）；管理端口缺省只绑本机、只暴露 health 与 prometheus
-  （`architecture.md:696-699`；`xm-scene-manager/src/main/resources/application.yaml:29-33`），要显式加进暴露清单。
+  （`architecture.md:696-699`；`game-scene-manager/src/main/resources/application.yaml:29-33`），要显式加进暴露清单。
 
 ### 4.9 孤儿与死节点（小结）
 
@@ -756,7 +756,7 @@ message WorldChannel {
 
 #### 4.10.1 计划跟随 `ChannelPlanFollower`（新，`scene-sched` 线程）
 
-- 每 `xm.scene.channel-plan-poll-interval`（缺省 1 s）：节点号租约 `isValid()` 为假 → 跳过（计数）；`GET ver`，与上次应用的相同 → 结束；不同 → 一段只读 Lua 一次取回 `ver` 与 `HGETALL ch`，
+- 每 `game.scene.channel-plan-poll-interval`（缺省 1 s）：节点号租约 `isValid()` 为假 → 跳过（计数）；`GET ver`，与上次应用的相同 → 结束；不同 → 一段只读 Lua 一次取回 `ver` 与 `HGETALL ch`，
   只留 `node_id == 本节点号` 的记录 → 投递逻辑线程 `world.applyChannelPlan(ver, records)` → 完成后 `publisher.requestPublishNow()`。
 - 读失败只 WARN 并计数，下一秒重试；**读失败时不应用任何东西**（尤其不把本地场景当孤儿）。
 - 节点身份 = 节点号：当前持有节点号 N 的进程承载 N 名下的频道，与实例无关（所以不需要基线 SM 侧的 `WRONG_TARGET` 一类判定）。
@@ -766,7 +766,7 @@ message WorldChannel {
 - `version ≤ appliedVersion` → 忽略（单个拉取者不会乱序，守卫只防将来改动）。
 - **ACTIVE 记录**：
   - 本地没有 → `createScene(sceneId, configId)`：两个号都不能为 0，conf 必须是本节点 World 表里的世界图（同时补上基线 gRPC 入口缺的零号检查，B12）；不满足 → 不建、ERROR、
-    计 `xm_scene_channel_plan_applies_total{result=rejected}`（领导者从目录看到它缺席，计 `world_channels{state=missing}`）。已存在但 conf 不同 → 同样拒绝。按 scene_id 幂等。
+    计 `game_scene_channel_plan_applies_total{result=rejected}`（领导者从目录看到它缺席，计 `world_channels{state=missing}`）。已存在但 conf 不同 → 同样拒绝。按 scene_id 幂等。
   - 本地有且在排空 → 改回 ACTIVE（排空超时回滚）。
 - **DRAINING 记录**：本地有 → 标排空；本地没有 → 什么也不做。
 - **本地有、计划里没有** → 按排空处理（节点侧孤儿，例如滚动升级前本地自发号建的场景）。
@@ -781,10 +781,10 @@ message WorldChannel {
 - 对每个排空中的场景里的每个在场玩家，目标按顺序取：
   1. **本节点同图** ACTIVE 场景里人数最少的（并列取场景号小的，无符号）；
   2. 没有 → **本节点默认大世界**（World 第一行）ACTIVE 场景里人数最少的（换图，落出生点）——与基线排空改派的落点规则一致（§1.9.3），只在孤儿图或 hash 模式下出现；
-  3. 都没有 → 原地不动，计 `xm_scene_channel_relocations_total{result=blocked}`（per-node 模式下不会出现）。
+  3. 都没有 → 原地不动，计 `game_scene_channel_relocations_total{result=blocked}`（per-node 模式下不会出现）。
 - 改派 = `switchScene(player, target)`（`SceneWorld.java:459-476`）：旧视野的人收到 51；本人收到 79（新 scene_id）/ 21 / 47；同图保留坐标；写位置记录；触发组队跟随钩子。
   **不存盘、不动归属**：玩家留在同一进程，owner_epoch 不变——这正是 Java 能省掉基线「存盘 → handoff 标记 → EnterScene(0,0)」（`player_lifecycle.cpp:2249-2363`）的原因。
-- 人数为 0、且没有指向它的在途进场（`pendingEnters` 的 `sceneId`，`SceneWorld.java:120`、`:985`）→ 从 `scenes` 移除、重算人数指标（`:189-197`）、计 `xm_scene_channels`。
+- 人数为 0、且没有指向它的在途进场（`pendingEnters` 的 `sceneId`，`SceneWorld.java:120`、`:985`）→ 从 `scenes` 移除、重算人数指标（`:189-197`）、计 `game_scene_channels`。
 - **6.3 预留**：战斗冻结中的玩家跳过改派，等下一次推进。
 
 #### 4.10.4 进场重定向
@@ -795,7 +795,7 @@ message WorldChannel {
 
 #### 4.10.5 启动与停服
 
-- `doStart` 里，`SceneWorld` 建好之后、链路监听之前（替换 `SceneNode.java:280-283`）：`SADD xm:world:zones <zone>` → 同步拉一次计划、经 `callOnLogic` 应用（只建 ACTIVE）→ 再起 `ChannelPlanFollower`。
+- `doStart` 里，`SceneWorld` 建好之后、链路监听之前（替换 `SceneNode.java:280-283`）：`SADD game:world:zones <zone>` → 同步拉一次计划、经 `callOnLogic` 应用（只建 ACTIVE）→ 再起 `ChannelPlanFollower`。
   拉取失败只 WARN、照常启动（不带频道），由拉取者每秒重试。新节点计划里没有它的记录 → 以零个场景启动、上报目录，领导者下一拍按覆盖规则给它铺频道。
 - 停服：`release` 第一步停 `ChannelPlanFollower`，再按现有顺序摘目录（`SceneNode.java:409-424`）。租约丢失：停 `ChannelPlanFollower`（与 `onLeaseLost` 一起，`:542-557`）。
 
@@ -808,7 +808,7 @@ message WorldChannel {
 5. **选择与预占**：候选按 (node_id, scene_id) 无符号升序排好，交给一段 Lua（键共用 `{z:<zone>}`）：
 
    ```lua
-   -- KEYS[i] = xm:world:{z:<zone>}:resv:<scene_id_i>
+   -- KEYS[i] = game:world:{z:<zone>}:resv:<scene_id_i>
    -- ARGV[1]=ttl_ms  ARGV[2]=player_id  ARGV[2+i]=目录人数_i
    local t = redis.call('TIME'); local now = t[1]*1000 + math.floor(t[2]/1000)
    local best, load
@@ -823,7 +823,7 @@ message WorldChannel {
    ```
 
    - 成员是 player_id：同一玩家重复分配（login 重试）只刷新到期时间，不重复计数。
-   - **TTL 缺省 10 s**：覆盖「login 夺权等待（缺省 3 s，`xm-login/src/main/resources/application.yaml:95`）+ 加载 + 节点下一次上报（5 s）」；节点报上新人数后、预占到期前会重复计一次，偏保守。
+   - **TTL 缺省 10 s**：覆盖「login 夺权等待（缺省 3 s，`game-login/src/main/resources/application.yaml:95`）+ 加载 + 节点下一次上报（5 s）」；节点报上新人数后、预占到期前会重复计一次，偏保守。
    - `reservation-ttl = 0` 关闭预占，退回只看目录人数。
    - 并列规则与现在 `Candidate.isBetterThan` 一致（`SceneAssigner.java:151-165`），并且是确定的（基线依赖 SMEMBERS 顺序，B13）。
    - Lua 出错按基础设施故障上抛（契约 `:25-28`）→ login 回 3023（`EnterGameHandler.java:260-266`）。
@@ -865,7 +865,7 @@ message WorldChannel {
 
 ### 4.15 需要同步修改的文档与登记
 
-- **`architecture.md`**：§2 表格（scene-manager 职责加「主世界频道编排（分 zone 领导）」，`:50`）；新增「主世界频道」小节；§6 目录新字段、`xm:world:*` 与 scene-manager 发号租约（`:506-543`）；
+- **`architecture.md`**：§2 表格（scene-manager 职责加「主世界频道编排（分 zone 领导）」，`:50`）；新增「主世界频道」小节；§6 目录新字段、`game:world:*` 与 scene-manager 发号租约（`:506-543`）；
   §9 `:667` 改为「场景号由 scene-manager 全服租约发」；§11 新指标、`:705` 的「场景只在启动时建」改写。
 - **代码注释**：`location.proto:18`、`SceneMetrics.java:27-28`、`SceneWorld.java:185-188`、`SceneAssigner.java:29-30`、`ClientRequestHandler.java:203-207`、`SceneWorld.java:229-233`。
 - **PARITY**：新增一行「主世界多频道（频道计划 / 铺设 / 扩缩容 / 再平衡 / 孤儿清理 / 进场软预占）」；更新 `PARITY.md:27`「场景分配」（预占、排空频道排除）、`:29`（63 同图跳频道、缩容 79）、
@@ -903,7 +903,7 @@ message WorldChannel {
 
 `MirrorSourceNodeLoadCap`、`MirrorDedupBySource`、`InstanceIdleTimeoutSeconds` 等属 5.3；`Agones.*` 不适用。
 
-### 5.2 Java：xm-scene-manager（`xm.scene-manager.world.*`）
+### 5.2 Java：game-scene-manager（`game.scene-manager.world.*`）
 
 | 键 | 缺省 | 对应基线 / 说明 |
 |---|---|---|
@@ -920,19 +920,19 @@ message WorldChannel {
 | `rebalance.interval` | 300s（0 = 只按节点集合变化） | `RebalanceCheckIntervalSeconds` |
 | `autoscale.enabled` / `check-interval` / `scale-out-players` / `scale-in-players` / `min-channels` / `max-channels` / `cooldown` / `drain-timeout` | false / 30s / 2000 / 100 / 1 / 16 / 120s / 300s | `WorldAutoscaleConfig`；启动校验见 §4.7 |
 
-- 原有 `xm.scene-manager.default-world-config-id` 不变（`SceneManagerProperties.java:12-13`）。
+- 原有 `game.scene-manager.default-world-config-id` 不变（`SceneManagerProperties.java:12-13`）。
 - 常量：发号租约 `NodeTypes.SCENE_MANAGER`、作用域 0、`[1, 1023]`、TTL 15 s；slot 上限 998（键 `conf*1000+slot`）。
-- 新增健康组件 `worldChannels`（不进 liveness）：对 `xm:world:zones` 里每个有活节点的 zone，每张 World 图至少 1 个「ACTIVE、节点在场、目录里已建出且未排空」的频道才 UP；
+- 新增健康组件 `worldChannels`（不进 liveness）：对 `game:world:zones` 里每个有活节点的 zone，每张 World 图至少 1 个「ACTIVE、节点在场、目录里已建出且未排空」的频道才 UP；
   本机脚本在 scene 起来之后等它就绪（scene-manager 先于 scene 启动，`tools/local/start-slice.sh:69`、`:76`）。
 
-### 5.3 Java：xm-scene
+### 5.3 Java：game-scene
 
-- `xm.scene.channel-plan-poll-interval`：缺省 1s。
-- 排空推进挂在已有的每秒任务上，不新增配置。拉取模型下 5.1 不需要 Dubbo 提供方与 `rpc-port`（若 Q2 选推送，则与 4.5 的 `xm.scene.asset-rpc-port` 合并为 `xm.scene.rpc-port`）。
+- `game.scene.channel-plan-poll-interval`：缺省 1s。
+- 排空推进挂在已有的每秒任务上，不新增配置。拉取模型下 5.1 不需要 Dubbo 提供方与 `rpc-port`（若 Q2 选推送，则与 4.5 的 `game.scene.asset-rpc-port` 合并为 `game.scene.rpc-port`）。
 
 ### 5.4 本机切片
 
-`xm.scene-manager.world.channel-count-by-config.1=16`（与基线开发配置一致，Q4）。多节点用例见 §9.6。
+`game.scene-manager.world.channel-count-by-config.1=16`（与基线开发配置一致，Q4）。多节点用例见 §9.6。
 
 ---
 
@@ -962,20 +962,20 @@ message WorldChannel {
 
 | 进程 | 指标 | 类型 | 标签 | 对应 / 说明 |
 |---|---|---|---|---|
-| scene-manager | `xm_scene_manager_world_leader_zones` | Gauge | — | 本副本领导的 zone 数，0 = 跟随者（基线 `is_leader`） |
-| scene-manager | `xm_scene_manager_world_ticks_total` | Counter | `result` = ok / not_leader / fenced / conflict / no_lease / no_nodes / error | 每 zone 每拍一次 |
-| scene-manager | `xm_scene_manager_world_tick_seconds` | Timer | — | 一拍耗时（快照 + 目录 + 规划 + 写入），固定 SLO 桶 |
-| scene-manager | `xm_scene_manager_world_channels` | Gauge | `scene_config`（受 World 表约束）、`state` = active / draining / missing | 本副本领导的各 zone 合计；降级时清零 |
-| scene-manager | `xm_scene_manager_world_autoscale_total` | Counter | `action` = scale_out / scale_in，`outcome` = ok / drained / reverted / max_reached / no_victim / error | 基线 `world_autoscale_total` |
-| scene-manager | `xm_scene_manager_rebalance_pending` | Gauge | `reason` = node_gone / better_home | node_gone = 宽限期内缺席节点上的记录数；降级时清零 |
-| scene-manager | `xm_scene_manager_rebalance_migrations_total` | Counter | `reason`、`outcome` = planned / done | done = 旧记录收尾时 |
-| scene-manager | `xm_scene_manager_assign_seconds` | Timer | 不变 | 预占 Lua 计入耗时 |
-| scene | `xm_scene_channels` | Gauge | `state` = active / draining | 基线 Agones 单元计数的替代（`scene_event_handler.cpp:30-56`） |
-| scene | `xm_scene_channel_plan_applies_total` | Counter | `result` = applied / rejected / skipped_lease | |
-| scene | `xm_scene_channel_plan_poll_failures_total` | Counter | — | 拉取读失败 |
-| scene | `xm_scene_channel_relocations_total` | Counter | `result` = same_map / default_world / blocked / enter_redirect | |
-| scene | `xm_scene_team_follow_total` | Counter | `result` 新增 `leader_scene_draining` | 现有组队跟随指标的新取值 |
-| scene | `xm_scene_players` | Gauge | `scene_config`（不变） | `architecture.md:769` |
+| scene-manager | `game_scene_manager_world_leader_zones` | Gauge | — | 本副本领导的 zone 数，0 = 跟随者（基线 `is_leader`） |
+| scene-manager | `game_scene_manager_world_ticks_total` | Counter | `result` = ok / not_leader / fenced / conflict / no_lease / no_nodes / error | 每 zone 每拍一次 |
+| scene-manager | `game_scene_manager_world_tick_seconds` | Timer | — | 一拍耗时（快照 + 目录 + 规划 + 写入），固定 SLO 桶 |
+| scene-manager | `game_scene_manager_world_channels` | Gauge | `scene_config`（受 World 表约束）、`state` = active / draining / missing | 本副本领导的各 zone 合计；降级时清零 |
+| scene-manager | `game_scene_manager_world_autoscale_total` | Counter | `action` = scale_out / scale_in，`outcome` = ok / drained / reverted / max_reached / no_victim / error | 基线 `world_autoscale_total` |
+| scene-manager | `game_scene_manager_rebalance_pending` | Gauge | `reason` = node_gone / better_home | node_gone = 宽限期内缺席节点上的记录数；降级时清零 |
+| scene-manager | `game_scene_manager_rebalance_migrations_total` | Counter | `reason`、`outcome` = planned / done | done = 旧记录收尾时 |
+| scene-manager | `game_scene_manager_assign_seconds` | Timer | 不变 | 预占 Lua 计入耗时 |
+| scene | `game_scene_channels` | Gauge | `state` = active / draining | 基线 Agones 单元计数的替代（`scene_event_handler.cpp:30-56`） |
+| scene | `game_scene_channel_plan_applies_total` | Counter | `result` = applied / rejected / skipped_lease | |
+| scene | `game_scene_channel_plan_poll_failures_total` | Counter | — | 拉取读失败 |
+| scene | `game_scene_channel_relocations_total` | Counter | `result` = same_map / default_world / blocked / enter_redirect | |
+| scene | `game_scene_team_follow_total` | Counter | `result` 新增 `leader_scene_draining` | 现有组队跟随指标的新取值 |
+| scene | `game_scene_players` | Gauge | `scene_config`（不变） | `architecture.md:769` |
 
 ---
 
@@ -1022,7 +1022,7 @@ message WorldChannel {
 4. **目录 TTL 与宽限期叠加**：节点异常退出后约 15 s 才从目录消失（`SceneDirectoryPublisher.java:27`），再过 20 s 宽限期才重铺——期间该节点的频道不可分配（assign 看不到它），玩家重连按地图落别的节点。
 5. **混版本不可用**：旧版 scene 节点不拉计划、仍自建场景（scene_id 来自本地雪花）；新 scene-manager 看不到它们的 `applied_plan_version`。**5.1 上线必须整体停服切换**（Java 版尚未对外，可接受）。
 6. **计划大小**：16 图 × 16 频道 + 覆盖 ≈ 300 条 × ~40 B ≈ 12 KB；只在版本号变化时整读。
-7. **`xm:world:zones` 只增**：退役 zone 的领导者照常竞选（成本可忽略）；要清除需运维手工 SREM。
+7. **`game:world:zones` 只增**：退役 zone 的领导者照常竞选（成本可忽略）；要清除需运维手工 SREM。
 8. **robot 的同场景假设**：`MovementScenario.java:170-177`、`SkillScenario.java:85-87` 要求两个号进同一场景；16 频道下必然失败（§9.7）。
 9. **组队跟随与改派的相互作用**：改派走 `switchScene` 会触发跟随钩子；没有 §4.13 的排空检查时，队员会被拉回排空频道、反复改派。
 
@@ -1142,7 +1142,7 @@ message WorldChannel {
 
 ### 9.3 scene-manager 单测（假 Redis 门面 / 假时钟）
 
-- **`SceneAssignerTest`**（在现有用例上补，`xm-scene-manager/src/test/.../SceneAssignerTest.java`）：排空条目被排除；原实例在排空中 → 按地图；预占改变选择；并列规则；同一玩家重复分配不重复计数；
+- **`SceneAssignerTest`**（在现有用例上补，`game-scene-manager/src/test/.../SceneAssignerTest.java`）：排空条目被排除；原实例在排空中 → 按地图；预占改变选择；并列规则；同一玩家重复分配不重复计数；
   `reservation-ttl=0` 退回现行为；Lua 异常原样上抛。
 - **`WorldLeaderLockTest`**：2/3 TTL 判有效、续期返回 0 立即降级、续期出错到期失效、停服放锁、`leader-eligible=false` 不竞选。
 - **`WorldChannelCoordinatorTest`**：写入返回 −1 放弃领导、−2 下拍重算；降级清零 gauge；当选立即跑一拍。
@@ -1157,7 +1157,7 @@ message WorldChannel {
 - **`TeamFollowServiceTest`**：队长场景排空中不跟（`leader_scene_draining`）；队长被改派后扇出。
 - **`ChannelPlanFollowerTest`**：版本不变不读整表；租约无效跳过；完成后请求立即发布目录（`SceneDirectoryPublisher.requestPublishNow` 仍受 `stopped` 约束，`SceneDirectoryPublisher.java:52-71`）。
 
-### 9.5 真 Redis（`-Dxm.it.redis=redis://127.0.0.1:6379`）
+### 9.5 真 Redis（`-Dgame.it.redis=redis://127.0.0.1:6379`）
 
 - **`WorldPlanRedisIT`**：令牌被夺后旧令牌写返回 −1、数据不变；版本号 CAS 冲突返回 −2；ver 严格递增；两个写者同时 HSETNX 只有一个生效；只读快照与并发写的一致性；pb 字节往返无损。
 - **`ChannelReservationIT`**：200 个并发分配摊到 4 个频道，差 ±1 以内；同 player_id 重复分配不重复计数；按 TIME 到期；`SCRIPT FLUSH` 后 NOSCRIPT 能重载（`architecture.md:138`）。
@@ -1166,7 +1166,7 @@ message WorldChannel {
 
 ### 9.6 本机多节点切片
 
-扩展 `tools/local/start-slice.sh`（服务清单 `:69-76`）：`XM_SCENE_NODES=3` 时三个 scene 各用不同的 `xm.scene.link-port`（21000 / 21001 / 21002）、`SERVER_PORT`（18104 / 18114 / 18124）
+扩展 `tools/local/start-slice.sh`（服务清单 `:69-76`）：`GAME_SCENE_NODES=3` 时三个 scene 各用不同的 `game.scene.link-port`（21000 / 21001 / 21002）、`SERVER_PORT`（18104 / 18114 / 18124）
 （4.5 的 `asset-rpc-port` 同样错开）；可选第二个 scene-manager 副本（Dubbo 20892、`SERVER_PORT` 18112，login 仍直连第一个，第二个只练选主）；启动后等 `worldChannels` 就绪。
 
 | 编号 | 用例 | 期望 |

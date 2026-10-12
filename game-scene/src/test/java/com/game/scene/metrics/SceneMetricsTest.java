@@ -1,0 +1,575 @@
+package com.game.scene.metrics;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import com.game.api.proto.NodeLinkFrame;
+import com.game.scene.metrics.SceneMetrics.BroadcastKind;
+import com.game.scene.metrics.SceneMetrics.LinkDrop;
+import com.game.scene.metrics.SceneMetrics.MoveResult;
+import com.game.scene.metrics.SceneMetrics.StorageOp;
+import com.game.scene.metrics.SceneMetrics.WriteResult;
+import io.micrometer.core.instrument.MockClock;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleConfig;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
+import java.time.Duration;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.junit.jupiter.api.Test;
+
+class SceneMetricsTest {
+
+    private final MockClock clock = new MockClock();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry(SimpleConfig.DEFAULT, clock);
+    private final SceneMetrics metrics = new SceneMetrics(meters);
+
+    @Test
+    void 逻辑任务_排队等待从投递起算_执行耗时从开始起算() {
+        Runnable timed = metrics.timeLogicTask(() -> clock.add(Duration.ofMillis(3)));
+        clock.add(Duration.ofMillis(40));
+
+        timed.run();
+
+        Timer wait = meters.get("game.scene.logic.task.wait").timer();
+        Timer run = meters.get("game.scene.logic.task.run").timer();
+        assertThat(wait.count()).isEqualTo(1);
+        assertThat(wait.totalTime(TimeUnit.MILLISECONDS)).isEqualTo(40);
+        assertThat(run.count()).isEqualTo(1);
+        assertThat(run.totalTime(TimeUnit.MILLISECONDS)).isEqualTo(3);
+    }
+
+    @Test
+    void 逻辑任务抛异常_执行耗时照记_异常照抛() {
+        Runnable timed = metrics.timeLogicTask(() -> {
+            clock.add(Duration.ofMillis(2));
+            throw new IllegalStateException("boom");
+        });
+
+        assertThatThrownBy(timed::run).isInstanceOf(IllegalStateException.class);
+        assertThat(meters.get("game.scene.logic.task.run").timer().count()).isEqualTo(1);
+    }
+
+    @Test
+    void 场景人数_按配置各一条Gauge_推的是绝对值() {
+        metrics.scenePlayers(1, 3);
+        metrics.scenePlayers(2, 0);
+        metrics.scenePlayers(1, 5);
+
+        assertThat(meters.find("game.scene.players").gauges()).hasSize(2);
+        assertThat(meters.get("game.scene.players").tag("scene_config", "1").gauge().value()).isEqualTo(5);
+        assertThat(meters.get("game.scene.players").tag("scene_config", "2").gauge().value()).isZero();
+    }
+
+    @Test
+    void 状态量回调由抓取时读取() {
+        AtomicInteger pending = new AtomicInteger(7);
+        AtomicInteger links = new AtomicInteger(2);
+        metrics.bindLogicQueue(pending::get);
+        metrics.bindGateLinkCount(links::get);
+
+        pending.set(11);
+
+        assertThat(meters.get("game.scene.logic.pending.tasks").gauge().value()).isEqualTo(11);
+        assertThat(meters.get("game.scene.gate.links").gauge().value()).isEqualTo(2);
+    }
+
+    @Test
+    void 存储线程池_导出标准线程池指标_名字是scene_storage() {
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(8));
+        try {
+            metrics.bindStorageExecutor(executor);
+
+            assertThat(meters.get("executor.queued").tag("name", "scene-storage").gauge().value()).isZero();
+            assertThat(meters.get("executor.queue.remaining").tag("name", "scene-storage").gauge().value()).isEqualTo(8);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * 固化 architecture.md §11 里写的 Prometheus 名字与标签：换 Micrometer 版本或改名时这里先红。
+     * 同时检查导出的标签只有本类定义的低基数维度（不会冒出 player_id / session_id 之类）。
+     */
+    @Test
+    void Prometheus导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        SceneMetrics exported = new SceneMetrics(prometheus);
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(8));
+        try {
+            exported.bindLogicQueue(() -> 0);
+            exported.bindGateLinkCount(() -> 1);
+            exported.bindStorageExecutor(executor);
+            exported.scenePlayers(1, 2);
+            exported.timeLogicTask(() -> { }).run();
+            exported.tick(TimeUnit.MILLISECONDS.toNanos(3));
+            exported.broadcast(BroadcastKind.VIEW_CHANGES, 1_000);
+            exported.move(MoveResult.ACCEPTED);
+            exported.aoiEntered(2);
+            exported.aoiLeft(1);
+            exported.storageWrite(StorageOp.SAVE, WriteResult.RELEASED, TimeUnit.MILLISECONDS.toNanos(8));
+            exported.linkFrameIn(NodeLinkFrame.BodyCase.HELLO);
+            exported.linkFrameOut(NodeLinkFrame.BodyCase.TO_CLIENT);
+            exported.linkFrameDropped(LinkDrop.LINK_GONE);
+            exported.linkReadPaused();
+
+            String text = prometheus.scrape();
+
+            assertThat(text).contains(
+                    "game_scene_players{scene_config=\"1\"} 2",
+                    "game_scene_logic_pending_tasks ",
+                    "game_scene_gate_links 1",
+                    "game_scene_logic_task_wait_seconds_count 1",
+                    "game_scene_logic_task_run_seconds_count 1",
+                    "game_scene_tick_seconds_bucket{le=\"0.05\"} 1",
+                    "game_scene_broadcast_seconds_count{kind=\"view_changes\"} 1",
+                    "game_scene_broadcast_seconds_count{kind=\"attribute_sync\"} 0",
+                    "game_scene_moves_total{result=\"accepted\"} 1",
+                    "game_scene_moves_total{result=\"invalid\"} 0",
+                    "game_scene_aoi_changes_total{change=\"enter\"} 2",
+                    "game_scene_aoi_changes_total{change=\"leave\"} 1",
+                    "game_scene_storage_writes_seconds_count{op=\"save\",result=\"released\"} 1",
+                    "game_scene_storage_writes_seconds_count{op=\"release\",result=\"fenced\"} 0",
+                    "game_scene_link_frames_total{direction=\"in\",type=\"hello\"} 1",
+                    "game_scene_link_frames_total{direction=\"out\",type=\"to_client\"} 1",
+                    "game_scene_link_dropped_total{reason=\"link_gone\"} 1",
+                    "game_scene_link_backpressure_pauses_total 1",
+                    "executor_queued_tasks{name=\"scene-storage\"}");
+            assertThat(labelNames(text, "game_scene_"))
+                    .isSubsetOf("scene_config", "kind", "result", "change", "op", "direction", "type", "reason", "le",
+                            "rpc", "outcome", "state", "event", "gate");
+        } finally {
+            executor.shutdownNow();
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 镜像 / 副本实例的指标（批次 5.3，dungeon-mirror-spec §8.2）启动即注册（初值 0），导出名与标签只有 kind / state / event / result
+     * （没有 scene_id、玩家号、节点号）；实例数是逻辑线程推的绝对值。
+     */
+    @Test
+    void 实例指标_启动即注册_导出名_标签有界() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String kind : new String[] {"mirror", "dungeon"}) {
+                for (String state : new String[] {"active", "reclaiming", "draining"}) {
+                    assertThat(before).contains("game_scene_instances{kind=\"" + kind + "\",state=\"" + state + "\"} 0");
+                }
+                for (String event : new String[] {"created", "rejected", "reclaim_started", "revived", "cascade_started",
+                        "destroyed_idle", "destroyed_cascade", "destroyed_admin"}) {
+                    assertThat(before).contains(
+                            "game_scene_instance_lifecycle_total{event=\"" + event + "\",kind=\"" + kind + "\"} 0");
+                }
+            }
+            for (String result : new String[] {"accepted", "bad_source", "bad_mirror_config", "source_draining",
+                    "not_accepting", "node_cap", "creator_cap"}) {
+                assertThat(before).contains("game_scene_mirror_requests_total{result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"created", "rejected", "error", "stale", "wrong_node", "source_moved",
+                    "create_rejected"}) {
+                assertThat(before).contains("game_scene_mirror_resolves_total{result=\"" + result + "\"} 0");
+            }
+
+            exported.instances(SceneMetrics.InstanceKind.MIRROR, 3, 1, 2);
+            exported.instanceLifecycle(SceneMetrics.InstanceKind.DUNGEON, SceneMetrics.InstanceEvent.DESTROYED_ADMIN);
+            exported.mirrorRequest(SceneMetrics.MirrorRequest.CREATOR_CAP);
+            exported.mirrorResolve(SceneMetrics.MirrorResolve.SOURCE_MOVED);
+            exported.adminRequest(SceneMetrics.ADMIN_OP_INSTANCE_CREATE, 403);
+            String after = prometheus.scrape();
+
+            assertThat(after).contains(
+                    "game_scene_instances{kind=\"mirror\",state=\"active\"} 3",
+                    "game_scene_instances{kind=\"mirror\",state=\"reclaiming\"} 1",
+                    "game_scene_instances{kind=\"mirror\",state=\"draining\"} 2",
+                    "game_scene_instance_lifecycle_total{event=\"destroyed_admin\",kind=\"dungeon\"} 1",
+                    "game_scene_mirror_requests_total{result=\"creator_cap\"} 1",
+                    "game_scene_mirror_resolves_total{result=\"source_moved\"} 1",
+                    "game_scene_admin_requests_total{op=\"instance_create\",status=\"403\"} 1");
+            assertThat(labelNames(after, "game_scene_instance")).containsOnly("kind", "state", "event");
+            assertThat(labelNames(after, "game_scene_mirror_")).containsOnly("result");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /** 存储写只登记每种写可能出现的结局：交出 / 探测的结局启动即注册，恒为 0 的组合（写回 × 租约不足等）不建。 */
+    @Test
+    void 存储写指标_交出与探测的结局启动即注册_不可能的组合不建() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            // superseded 是批次 5.4「交出并释放」多出来的结局，交出与探测都可能出现
+            for (String result : new String[] {"handed_off", "lease_too_short", "fenced", "failed", "rejected", "superseded"}) {
+                assertThat(before).contains("game_scene_storage_writes_seconds_count{op=\"handoff\",result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"handed_off", "not_committed", "lost", "rejected", "superseded"}) {
+                assertThat(before).contains("game_scene_storage_writes_seconds_count{op=\"probe\",result=\"" + result + "\"} 0");
+            }
+            assertThat(before).doesNotContain("op=\"save\",result=\"lease_too_short\"", "op=\"probe\",result=\"fenced\"",
+                    "op=\"progress\",result=\"released\"", "op=\"handoff\",result=\"saved\"",
+                    "op=\"save\",result=\"superseded\"", "op=\"release\",result=\"superseded\"", "op=\"progress\",result=\"superseded\"");
+
+            exported.storageWrite(StorageOp.HANDOFF, WriteResult.HANDED_OFF, TimeUnit.MILLISECONDS.toNanos(30));
+            exported.storageWrite(StorageOp.SAVE, WriteResult.LOST, 1);
+            String after = prometheus.scrape();
+            assertThat(after).contains("game_scene_storage_writes_seconds_count{op=\"handoff\",result=\"handed_off\"} 1");
+            assertThat(after).as("不可能的组合不记、不抛").doesNotContain("op=\"save\",result=\"lost\"");
+            for (StorageOp op : StorageOp.values()) {
+                assertThat(op.results()).as(op.name()).contains(WriteResult.REJECTED);
+            }
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /** 组队跟随的结局启动即注册（初值 0），导出名 {@code game_scene_team_follow_total{result}}（team-spec §6.10 第 8 条）。 */
+    @Test
+    void 组队跟随指标_启动即注册_导出名() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String result : new String[] {"followed", "same_scene", "not_in_team", "projection_missing",
+                    "not_member", "leader_not_on_node", "leader_scene_draining", "is_leader", "stale", "read_error"}) {
+                assertThat(before).contains("game_scene_team_follow_total{result=\"" + result + "\"} 0");
+            }
+            exported.teamFollow(SceneMetrics.TeamFollowResult.FOLLOWED);
+            assertThat(prometheus.scrape()).contains("game_scene_team_follow_total{result=\"followed\"} 1");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 资产通道（E13）：rpc × outcome 启动即注册（初值 0），导出名 {@code game_scene_asset_ops_total{rpc, outcome}} 与
+     * {@code game_scene_asset_ops_inflight}；标签只有这两个（不带 player_id / seq）。
+     */
+    @Test
+    void 资产通道指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            AtomicInteger inFlight = new AtomicInteger(3);
+            exported.bindAssetOpsInFlight(inFlight::get);
+            String before = prometheus.scrape();
+            for (String rpc : new String[] {"debit", "abort_debit", "credit"}) {
+                for (String outcome : new String[] {"applied", "rejected", "retry", "not_here", "unknown", "overloaded",
+                        "error"}) {
+                    assertThat(before).contains("game_scene_asset_ops_total{outcome=\"" + outcome + "\",rpc=\"" + rpc + "\"} 0");
+                }
+            }
+            assertThat(labelNames(before, "game_scene_asset_ops_total")).containsExactly("outcome", "rpc");
+            assertThat(before).contains("game_scene_asset_ops_inflight 3");
+            exported.assetOp(com.game.api.asset.AssetRpc.ABORT_DEBIT, SceneMetrics.AssetOpResult.OVERLOADED);
+            inFlight.set(0);
+            String after = prometheus.scrape();
+            assertThat(after).contains("game_scene_asset_ops_total{outcome=\"overloaded\",rpc=\"abort_debit\"} 1");
+            assertThat(after).contains("game_scene_asset_ops_inflight 0");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 主世界频道（批次 5.1，scene-channels-spec §6.2）：启动即注册（初值 0），导出名与标签；标签只有 state / result，
+     * 不带 zone / scene_id / 节点号。
+     */
+    @Test
+    void 主世界频道指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            assertThat(before).contains("game_scene_channels{state=\"active\"} 0", "game_scene_channels{state=\"draining\"} 0",
+                    "game_scene_channel_plan_poll_failures_total 0");
+            for (String result : new String[] {"applied", "rejected", "skipped_lease"}) {
+                assertThat(before).contains("game_scene_channel_plan_applies_total{result=\"" + result + "\"} 0");
+            }
+            for (String result : new String[] {"same_map", "default_world", "blocked", "enter_redirect"}) {
+                assertThat(before).contains("game_scene_channel_relocations_total{result=\"" + result + "\"} 0");
+            }
+
+            exported.channels(3, 1);
+            exported.channelPlanApply(SceneMetrics.ChannelPlanApply.APPLIED);
+            exported.channelPlanPollFailed();
+            exported.channelRelocation(SceneMetrics.ChannelRelocation.SAME_MAP);
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("game_scene_channels{state=\"active\"} 3", "game_scene_channels{state=\"draining\"} 1",
+                    "game_scene_channel_plan_applies_total{result=\"applied\"} 1",
+                    "game_scene_channel_plan_poll_failures_total 1",
+                    "game_scene_channel_relocations_total{result=\"same_map\"} 1");
+            assertThat(labelNames(after, "game_scene_channel")).containsExactlyInAnyOrder("state", "result");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 跨节点换图（批次 5.2，scene-handoff-spec §7.2）：启动即注册（初值 0），导出名与标签；不带 player / zone /
+     * 场景实例号 / 节点号。冻结时长与在途数一并导出。批次 5.4 起 {@code game_scene_transfers_total} 多一个 {@code reason} 标签
+     * （player = 63 跨节点换图，travel = 226 跨 zone 传送；裁决 J3），两个 reason × 全部 result 都预注册。
+     */
+    @Test
+    void 跨节点换图指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String result : new String[] {"local", "remote", "same", "rejected", "error", "stale"}) {
+                assertThat(before).contains("game_scene_switch_resolves_total{result=\"" + result + "\"} 0");
+            }
+            String[] transferResults = {"handed_off", "lease_too_short", "fenced", "aborted_in_place",
+                    "lost_unknown", "left", "taken_over", "link_gone", "superseded"};
+            for (String reason : new String[] {"player", "travel"}) {
+                for (String result : transferResults) {
+                    assertThat(before).contains(
+                            "game_scene_transfers_total{reason=\"" + reason + "\",result=\"" + result + "\"} 0");
+                }
+            }
+            assertThat(before.lines().filter(line -> line.startsWith("game_scene_transfers_total{")).count())
+                    .as("两个 reason × 九个 result，不多不少").isEqualTo(2L * transferResults.length);
+            assertThat(SceneMetrics.TransferResult.values()).hasSize(transferResults.length);
+            assertThat(SceneMetrics.TransferReason.values()).hasSize(2);
+            for (String result : new String[] {"ok", "failed"}) {
+                assertThat(before).contains("game_scene_transfer_enters_total{result=\"" + result + "\"} 0");
+            }
+            assertThat(before).contains("game_scene_transfers_in_flight 0", "game_scene_transfer_post_freeze_mutations_total 0",
+                    "game_scene_transfer_freeze_seconds_count 0",
+                    "game_scene_team_follow_total{result=\"switching\"} 0",
+                    "game_scene_channel_relocations_total{result=\"switching\"} 0",
+                    "game_scene_link_dropped_total{reason=\"write_failed\"} 0");
+
+            exported.switchResolve(SceneMetrics.SwitchResolve.REMOTE);
+            exported.transfersInFlight(1);
+            exported.transfer(SceneMetrics.TransferReason.PLAYER, SceneMetrics.TransferResult.HANDED_OFF,
+                    TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.SUPERSEDED,
+                    TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.HANDED_OFF,
+                    TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.HANDED_OFF,
+                    TimeUnit.MILLISECONDS.toNanos(40));
+            exported.transfersInFlight(0);
+            exported.transferEnter(SceneMetrics.TransferEnter.OK);
+            exported.postFreezeMutation();
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("game_scene_switch_resolves_total{result=\"remote\"} 1",
+                    "game_scene_transfers_total{reason=\"player\",result=\"handed_off\"} 1",
+                    "game_scene_transfers_total{reason=\"travel\",result=\"handed_off\"} 2",
+                    "game_scene_transfers_total{reason=\"travel\",result=\"superseded\"} 1",
+                    "game_scene_transfers_total{reason=\"player\",result=\"superseded\"} 0",
+                    "game_scene_transfer_freeze_seconds_count 4",
+                    "game_scene_transfer_freeze_seconds_bucket{le=\"0.05\"} 4",
+                    "game_scene_transfers_in_flight 0",
+                    "game_scene_transfer_enters_total{result=\"ok\"} 1",
+                    "game_scene_transfer_post_freeze_mutations_total 1");
+            assertThat(after.lines().filter(line -> line.startsWith("game_scene_transfers_total{")).count())
+                    .as("发射不新增时间序列").isEqualTo(2L * transferResults.length);
+            assertThat(labelNames(after, "game_scene_transfer")).containsExactlyInAnyOrder("reason", "result", "le");
+            assertThat(labelNames(after, "game_scene_transfers_total")).as("交出结局只有 reason 与 result 两个标签")
+                    .containsExactlyInAnyOrder("reason", "result");
+            assertThat(labelNames(after, "game_scene_transfer_freeze")).as("冻结时长不按 reason 拆").containsExactly("le");
+            assertThat(labelNames(after, "game_scene_switch")).containsExactly("result");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 跨 zone 传送的 TF7（zone-travel-spec §2.3、§7.3）：已按 handed_off 终结之后重定向帧没写出，另计 {@code transfers{travel, link_gone}}——
+     * 不动 player 那一组，也不再记冻结时长（冻结在交出提交时已结束）。
+     */
+    @Test
+    void 跨zone传送帧没写出_只另计travel的link_gone_不记冻结时长() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        SceneMetrics metrics = new SceneMetrics(registry);
+        metrics.transfer(SceneMetrics.TransferReason.TRAVEL, SceneMetrics.TransferResult.HANDED_OFF, TimeUnit.MILLISECONDS.toNanos(40));
+
+        metrics.travelLinkGone();
+        metrics.travelLinkGone();
+
+        assertThat(registry.get("game.scene.transfers").tag("reason", "travel").tag("result", "link_gone").counter().count())
+                .isEqualTo(2);
+        assertThat(registry.get("game.scene.transfers").tag("reason", "travel").tag("result", "handed_off").counter().count())
+                .isEqualTo(1);
+        assertThat(registry.get("game.scene.transfers").tag("reason", "player").tag("result", "link_gone").counter().count())
+                .isZero();
+        assertThat(registry.get("game.scene.transfer.freeze").timer().count()).as("只有那一次终结记了冻结时长").isEqualTo(1);
+    }
+
+    /** 冻结闸（scene-handoff-spec §5.9、§7.2）：入口拒绝按 kind 计，移动丢弃另在 moves{result=frozen} 里计，启动即注册。 */
+    @Test
+    void 冻结闸指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            for (String kind : new String[] {"request", "asset_op", "move"}) {
+                assertThat(before).contains("game_scene_frozen_rejections_total{kind=\"" + kind + "\"} 0");
+            }
+            assertThat(before).contains("game_scene_moves_total{result=\"frozen\"} 0");
+
+            exported.frozenRejection(SceneMetrics.FrozenRejection.REQUEST);
+            exported.frozenRejection(SceneMetrics.FrozenRejection.MOVE);
+            exported.move(MoveResult.FROZEN);
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("game_scene_frozen_rejections_total{kind=\"request\"} 1",
+                    "game_scene_frozen_rejections_total{kind=\"move\"} 1",
+                    "game_scene_frozen_rejections_total{kind=\"asset_op\"} 0",
+                    "game_scene_moves_total{result=\"frozen\"} 1");
+            assertThat(labelNames(after, "game_scene_frozen")).containsExactly("kind");
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 回合制战斗在途闸（批次 6.3，scene-battle-spec §9）：{@code game_scene_battle_gate_rejects_total{gate}} 的闸启动即注册（初值 0）、标签只有 gate；
+     * 现有指标补的取值也预建：移动 / 组队跟随 / 选目标 / 排空改派的 {@code in_battle}、组队跟随的 {@code battle_lock}。放技能补的是
+     * {@code caster_in_battle} / {@code target_in_battle} 两个取值（按两个不同的回码拆开，没有 {@code in_battle}；审计 OPS-14）。
+     * 6.3 是八个闸；批次 5.4 加第九个 {@code zone_travel}（226 被战斗在途拒回 3025，码与 63 的 3023 不同，裁决 J4）。
+     */
+    @Test
+    void 战斗在途闸指标_九个闸启动即注册_现有指标补的in_battle取值() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default", "zone_travel"};
+            for (String gate : gates) {
+                assertThat(before).contains("game_scene_battle_gate_rejects_total{gate=\"" + gate + "\"} 0");
+            }
+            assertThat(before.lines().filter(line -> line.startsWith("game_scene_battle_gate_rejects_total{")).count())
+                    .as("恰好规格列的八个闸加 5.4 的 zone_travel").isEqualTo(gates.length);
+            assertThat(SceneMetrics.BattleGate.values()).hasSize(gates.length);
+            assertThat(before).contains(
+                    "game_scene_moves_total{result=\"in_battle\"} 0",
+                    "game_scene_team_follow_total{result=\"in_battle\"} 0",
+                    "game_scene_team_follow_total{result=\"battle_lock\"} 0",
+                    "game_scene_switch_resolves_total{result=\"in_battle\"} 0",
+                    "game_scene_channel_relocations_total{result=\"in_battle\"} 0",
+                    "game_scene_skill_releases_total{result=\"caster_in_battle\"} 0",
+                    "game_scene_skill_releases_total{result=\"target_in_battle\"} 0");
+            assertThat(before).doesNotContain("game_scene_skill_releases_total{result=\"in_battle\"}");
+
+            for (SceneMetrics.BattleGate gate : SceneMetrics.BattleGate.values()) {
+                exported.battleGateReject(gate);
+            }
+            exported.battleGateReject(SceneMetrics.BattleGate.ASSET);
+            exported.move(MoveResult.IN_BATTLE);
+            exported.teamFollow(SceneMetrics.TeamFollowResult.IN_BATTLE);
+            exported.teamFollow(SceneMetrics.TeamFollowResult.BATTLE_LOCK);
+            exported.switchResolve(SceneMetrics.SwitchResolve.IN_BATTLE);
+            exported.channelRelocation(SceneMetrics.ChannelRelocation.IN_BATTLE);
+            exported.skillRelease(SceneMetrics.SkillResult.CASTER_IN_BATTLE);
+            exported.skillRelease(SceneMetrics.SkillResult.TARGET_IN_BATTLE);
+
+            String after = prometheus.scrape();
+            for (String gate : gates) {
+                assertThat(after).contains("game_scene_battle_gate_rejects_total{gate=\"" + gate + "\"} " + (gate.equals("asset") ? "2" : "1"));
+            }
+            assertThat(after).contains(
+                    "game_scene_moves_total{result=\"in_battle\"} 1",
+                    "game_scene_team_follow_total{result=\"in_battle\"} 1",
+                    "game_scene_team_follow_total{result=\"battle_lock\"} 1",
+                    "game_scene_switch_resolves_total{result=\"in_battle\"} 1",
+                    "game_scene_channel_relocations_total{result=\"in_battle\"} 1",
+                    "game_scene_skill_releases_total{result=\"caster_in_battle\"} 1",
+                    "game_scene_skill_releases_total{result=\"target_in_battle\"} 1");
+            assertThat(labelNames(after, "game_scene_battle_gate")).as("不带 player_id / battle_id / 消息号").containsExactly("gate");
+            assertThat(after.lines().filter(line -> line.startsWith("game_scene_battle_gate_rejects_total{")).count())
+                    .as("发射不新增时间序列").isEqualTo(gates.length);
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    /**
+     * 跨 zone 传送（批次 5.4，zone-travel-spec §7.2）：受理前的结局、选目标的结局、待落点写的结局全部取值启动即注册（初值 0），
+     * 「已移出、帧未发」的旅客数是一个不带标签的 gauge，「帧发出前墓碑被交叉的离开消费、帧不发」是一个不带标签的 counter（§7.3 第二条要它）；
+     * 标签只有 result，不带 player / zone / 节点号 / 目标 zone。
+     */
+    @Test
+    void 跨zone传送指标_全部取值启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            String[] requests = {"accepted", "zone_invalid", "map_invalid", "in_battle", "in_team", "busy_transfer",
+                    "busy_switch", "team_read_error", "unavailable"};
+            for (String result : requests) {
+                assertThat(before).contains("game_scene_travel_requests_total{result=\"" + result + "\"} 0");
+            }
+            assertThat(before.lines().filter(line -> line.startsWith("game_scene_travel_requests_total{")).count())
+                    .as("226 的每个出口恰好一个取值（含未装配的 unavailable）").isEqualTo(requests.length);
+            assertThat(SceneMetrics.TravelRequest.values()).hasSize(requests.length);
+            String[] resolves = {"chosen", "rejected", "error", "stale", "in_battle"};
+            for (String result : resolves) {
+                assertThat(before).contains("game_scene_travel_resolves_total{result=\"" + result + "\"} 0");
+            }
+            assertThat(SceneMetrics.TravelResolve.values()).hasSize(resolves.length);
+            assertThat(before).contains("game_scene_travel_placements_total{result=\"written\"} 0",
+                    "game_scene_travel_placements_total{result=\"failed\"} 0",
+                    "game_scene_travel_frames_pending 0",
+                    "game_scene_travel_frames_withheld_total 0");
+            assertThat(SceneMetrics.TravelPlacement.values()).hasSize(2);
+
+            exported.travelRequest(SceneMetrics.TravelRequest.ACCEPTED);
+            exported.travelRequest(SceneMetrics.TravelRequest.UNAVAILABLE);
+            exported.travelRequest(SceneMetrics.TravelRequest.UNAVAILABLE);
+            exported.travelResolve(SceneMetrics.TravelResolve.CHOSEN);
+            exported.travelPlacement(SceneMetrics.TravelPlacement.FAILED);
+            exported.travelFramesPending(3);
+            exported.travelFrameWithheld();
+
+            String after = prometheus.scrape();
+            assertThat(after).contains("game_scene_travel_requests_total{result=\"accepted\"} 1",
+                    "game_scene_travel_requests_total{result=\"unavailable\"} 2",
+                    "game_scene_travel_requests_total{result=\"in_team\"} 0",
+                    "game_scene_travel_resolves_total{result=\"chosen\"} 1",
+                    "game_scene_travel_resolves_total{result=\"error\"} 0",
+                    "game_scene_travel_placements_total{result=\"failed\"} 1",
+                    "game_scene_travel_placements_total{result=\"written\"} 0",
+                    "game_scene_travel_frames_pending 3",
+                    "game_scene_travel_frames_withheld_total 1");
+            exported.travelFramesPending(0);
+            assertThat(prometheus.scrape()).as("推的是绝对值").contains("game_scene_travel_frames_pending 0");
+            assertThat(labelNames(after, "game_scene_travel")).as("不带 player / zone / 节点号").containsExactly("result");
+            assertThat(after.lines().filter(line -> line.startsWith("game_scene_travel_requests_total{")).count())
+                    .as("发射不新增时间序列").isEqualTo(requests.length);
+        } finally {
+            prometheus.close();
+        }
+    }
+
+    private static Set<String> labelNames(String scrape, String prefix) {
+        Set<String> names = new TreeSet<>();
+        Pattern label = Pattern.compile("([a-z_]+)=\"");
+        for (String line : scrape.split("\n")) {
+            int brace = line.indexOf('{');
+            if (!line.startsWith(prefix) || brace < 0) {
+                continue;
+            }
+            Matcher m = label.matcher(line.substring(brace));
+            while (m.find()) {
+                names.add(m.group(1));
+            }
+        }
+        return names;
+    }
+}

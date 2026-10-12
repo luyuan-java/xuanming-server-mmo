@@ -8,11 +8,11 @@
 ```
 mmorpg                                     本仓库
 data/schema/*_table.proto ─┐
-data/schema/cfg_options.proto ─┤ ContractSync ─▶ xm-table/src/main/proto/        （去掉非服务端列，注入 java 选项）
-generated/code/proto/{tip,operator} ─┘                    │ protoc（xm-table 构建）
+data/schema/cfg_options.proto ─┤ ContractSync ─▶ game-table/src/main/proto/        （去掉非服务端列，注入 java 选项）
+generated/code/proto/{tip,operator} ─┘                    │ protoc（game-table 构建）
                                                           ├─▶ 行消息类 com.game.table.<Sheet>Table
                                                           └─▶ 描述符集 target/table-descriptors/config-tables.binpb
-                                                                       │ javac 注解处理器（xm-table-codegen）
+                                                                       │ javac 注解处理器（game-table-codegen）
                                                                        ▼
                                                  com.game.table.ConfigTables、<Sheet>Rows（target/generated-sources）
 generated/tables/*.pb + manifest.json ── ContractSync ─▶ config-data/tables/ ──▶ ConfigTables.load(dir)（运行时）
@@ -85,6 +85,6 @@ schema 里有、manifest 没登记的表按空表处理并告警（正常同步�
 
 - 改表结构 / 加表：先在 mmorpg 改 schema 并导表，再 `java tools/ContractSync.java --mmorpg <mmorpg>`，之后 `./mvnw clean install`。
 - CI / 提交前检查是否与 mmorpg 一致：`java tools/ContractSync.java --mmorpg <mmorpg> --check`。
-- 生成器的 schema 规则在 `xm-table-codegen` 的 `TableSchemaReader`，生成模板在 `TableSourceGenerator`。
+- 生成器的 schema 规则在 `game-table-codegen` 的 `TableSchemaReader`，生成模板在 `TableSourceGenerator`。
 - 访问器名以 protoc 实际生成的行类为准（同消息里 `x` 与 `x_count` 冲突时 protoc 会在名字后追加字段号），
   见 `ConfigTableProcessor#resolveAccessors`；找不到访问器是编译错误，不会生成调不通的代码。

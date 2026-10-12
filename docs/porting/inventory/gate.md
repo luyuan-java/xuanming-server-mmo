@@ -5,8 +5,8 @@ handler/rpc/{client_message_processor,gate_service_handler}.cpp、handler/event/
 scene_route_helper.h、rpc_replies/*）、cpp/libs/services/gate/session/**、cpp/libs/engine/session/**、cpp/libs/engine/core/{network/codec,
 network/broadcast_target_codec.h,network_utils,message_limiter,security}、node_kafka_command_filter.h / node_command_topic.h、client_endpoint.h；
 Go 侧 scene_manager/gate_redirect.go、shared/kafkautil/gate_push.go、client_rpc_router；Unity 客户端 GameClient.cs / ZoneTravelClient.cs。
-Java 侧：xm-gate（GateNode、ClientDispatcher、ClientSession、ClientPipeline、SessionRegistry、SessionIdAllocator、MessageRoutes、
-SceneEventRouter、link/*、metrics/GateMetrics）、xm-net client/*、xm-common GateTokens、xm-api node_link.proto / client_call.proto。
+Java 侧：game-gate（GateNode、ClientDispatcher、ClientSession、ClientPipeline、SessionRegistry、SessionIdAllocator、MessageRoutes、
+SceneEventRouter、link/*、metrics/GateMetrics）、game-net client/*、game-common GateTokens、game-api node_link.proto / client_call.proto。
 
 ## 概要
 C++ gate 是唯一的公网入口：muduo 单 EventLoop 上跑 ProtobufCodec 帧、HMAC 令牌握手、上行校验链（白名单 → 1KB → MessageLimiter 限频 →
@@ -14,7 +14,7 @@ GM 闸 → 战斗拒绝），再按消息号把 TCP 类消息（scene）经 mudu
 match 或（GATE_CLIENT_RPC_ROUTER=1）原包交给 client_rpc_router。下行有两条：scene 经 muduo RPC 的 SendMessageToPlayer / BroadcastToPlayers
 （带 target_player_id 身份栅栏），Go 服务与 login / scene_manager / player_locator 经 Kafka `gate-cmd_g1` 分区命令（RoutePlayer、BindSession、
 KickPlayer、RedirectToGate、LeaseExpired、PushToPlayer、BroadcastToPlayers）。进场转发有 CPP-2 欠账补发（20s 预算，超限 3023 + 34 踢线）。
-Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/scene 下行/顶号踢出/租约 fail-closed/指标，而且比基线多了握手超时与单会话排队上限；
+Java game-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/scene 下行/顶号踢出/租约 fail-closed/指标，而且比基线多了握手超时与单会话排队上限；
 缺的主要是：Kafka（或等价）命令通道与 Go 服务推送、跨 zone 重定向与票据绑定、跨节点换图的 gate 重绑、GM 指令闸与 GM 签名停机、
 可配置连接上限、全服广播。几处客户端可见差异（不发 34、链路断开直接断连、1014 的形态、在途 login 调用阻塞 scene 消息）在各条里标出。
 
@@ -29,10 +29,10 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   长度 / 校验和 / nameLen / 未知类型 / 解析失败一律清缓冲并 forceClose，不回包；dispatcher 不认识的已注册类型也 forceClose；
   handler 一旦拒绝，同一 read 里 pipeline 的剩余帧不再分发（onMessage 每帧后检查 connected）；错误日志 1/1024 采样。
 - internal: 下发统一走 codec.send（曾有裸 conn->send 导致客户端分帧错位的 bug，注释强调必须带帧）。
-- java: done — xm-net ClientFrameDecoder / ClientFrameEncoder / ClientFrames（DEFAULT_MAX_LEN=64KB，MIN_LEN=10），ClientPipeline.ACCEPTED 只收两种上行，
+- java: done — game-net ClientFrameDecoder / ClientFrameEncoder / ClientFrames（DEFAULT_MAX_LEN=64KB，MIN_LEN=10），ClientPipeline.ACCEPTED 只收两种上行，
   非法帧 metrics.invalidFrame + 采样日志 + close；ClientFramesTest 有 golden bytes。差异：C++ 攒够 14 字节才读 len，Java 4 字节即读（不可见）。
 - size: S
-- robot: 所有 robot 场景（Go robot、xm-robot SmokeScenario）
+- robot: 所有 robot 场景（Go robot、game-robot SmokeScenario）
 - hazards: typeName 末字节 Go robot 写空格、C++ 写 `\0`，解码只能剥最后 1 字节；回错误应答必须带帧。
 
 ### token-handshake — 连接令牌握手
@@ -45,11 +45,11 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   （invalid token signature / malformed token payload / token not for this gate / token not for this zone / token expired），随即 shutdown +
   forceCloseWithDelay(0.1s)；成功后重置非法包计数、存 hmac_session_key、存票据 player_id / target_zone_id；空密钥 + dev/test 时建连即 verified。
 - internal: 密钥来自 base_deploy_config gate_token_secret；令牌由 login AssignGate / scene_manager 重定向签发。
-- java: done — ClientDispatcher.onTokenVerify + xm-common GateTokens.verify（同顺序、同文案，sendThenClose）；ClientDispatcherTest「握手通过回成功_重复握手再回成功」
+- java: done — ClientDispatcher.onTokenVerify + game-common GateTokens.verify（同顺序、同文案，sendThenClose）；ClientDispatcherTest「握手通过回成功_重复握手再回成功」
   「握手失败先回原因再断开」「过期令牌与签名错误都被拒」。差异：Java 不存票据字段（见 redirect-ticket-binding；批次 5.4 起已存）、无 dev 空密钥放行（更严）、
   未握手的 ClientRequest 断开且计指标 MISSING。
 - size: S
-- robot: 全部场景的 connectAndVerify；xm-robot GameConnection
+- robot: 全部场景的 connectAndVerify；game-robot GameConnection
 - hazards: 空密钥 dev 旁路会让 verify 直接 success；C++ 的 forceCloseWithDelay 是 100ms，客户端要在关闭前读到失败应答。
 
 ### startup-security-gates — 启动安全门禁与运行模式
@@ -61,7 +61,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   prod + 空/纯空白 gate_token_secret → LOG_FATAL 拒绝启动，连接层再拒连一次（纵深）；prod + GateMaxConnections=0 或 > 131071 → 拒绝启动；
   dev/test 下 0 = 只关运维阈值，131071 硬上限仍在。
 - internal: 同一 RunMode 判据还驱动 GM 客户端指令闸。
-- java: partial — GateConfiguration 对 XM_GATE_TOKEN_SECRET / XM_NODE_LINK_SECRET / XM_DUBBO_SECRET 缺失一律启动失败（无 dev 旁路，比基线严）；
+- java: partial — GateConfiguration 对 GAME_GATE_TOKEN_SECRET / GAME_NODE_LINK_SECRET / GAME_DUBBO_SECRET 缺失一律启动失败（无 dev 旁路，比基线严）；
   没有运行模式概念，也没有连接上限配置项（见 connection-admission）。
 - size: S
 - robot: none
@@ -75,7 +75,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - behavior: 会话数 ≥ GateMaxConnections（0 时取 131071）→ setContext(无效号) + forceClose，日志 1/1024 采样，不惊动 login；session_id 生成器 node 段为 0
   → 拒连；写缓冲 > 2MB → forceClose。**基线没有握手死线**：未认证连接可无限期占槽（SECURITY.md 承认的 P0 缺口）。
 - internal: 依赖单 IO 线程（thread_local 会话表）；拒连路径必须让断线回调早退。
-- java: partial — 有握手超时（xm.gate.handshake-timeout 30s，超时断开计 HANDSHAKE_TIMEOUT）、会话号耗尽拒连（SESSION_ID_EXHAUSTED）、
+- java: partial — 有握手超时（game.gate.handshake-timeout 30s，超时断开计 HANDSHAKE_TIMEOUT）、会话号耗尽拒连（SESSION_ID_EXHAUSTED）、
   客户端写水位 1MB/2MB 越过即断（GateNode CLIENT_WATER_MARK + ClientChannelHandler.channelWritabilityChanged）、单会话排队上限 64（Java 独有）；
   缺可配置的并发连接上限（只有 131071 会话号硬上限）。
 - size: S
@@ -96,7 +96,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   按 scenePlayerId} + loginTouched||playerId≠0 时 sessionClosed；login 调用在途时等完成后再通知并带上迟到身份；ClientDispatcherTest「断线时发PlayerLeave_通知login」
   「断线时login调用在途_等调用完成后才通知login」。
 - size: M
-- robot: Go robot RapidReconnect / DisconnectDuringLogin / DisconnectDuringEnter / RapidDisconnectReconnect；xm-robot SmokeScenario（断开只关 TCP）
+- robot: Go robot RapidReconnect / DisconnectDuringLogin / DisconnectDuringEnter / RapidDisconnectReconnect；game-robot SmokeScenario（断开只关 TCP）
 - hazards: session 序号在单实例内 131071 后回绕；C++ 断线 ExitGame 若不带 player_id 会在 gate node_id 复用时踢掉别人（R13）。
 
 ### client-request-validation — 上行校验链与非法包计数
@@ -136,7 +136,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - depends on: client-request-validation, message-rate-limit, startup-security-gates（运行模式）
 - behavior: GATE_RUN_MODE 非 dev/test（含未设）时：推 23 {1006 kFeatureUnavailable}、计非法包、不转发；dev/test 放行给 scene。排在体积 / 限频之后。
 - internal: 清单用生成常量，不写字面量消息号；新增 Gm*/Debug*/Test* 客户端 RPC 必须登记。
-- java: missing — xm-gate 无 GM 清单与运行模式，这 6 个号作为 scene 域原样转发；目前安全只因 xm-scene ClientRequestHandler 对未实现方法回
+- java: missing — game-gate 无 GM 清单与运行模式，这 6 个号作为 scene 域原样转发；目前安全只因 game-scene ClientRequestHandler 对未实现方法回
   应答内 error_message{1006}（形态与基线不同：基线是 23 推送 + 计非法包）。scene 一旦实现任何 GM 方法，gate 必须先有闸。
 - size: S
 - robot: Go robot 的 currency/pet/attribute 冒烟在 dev 下使用 GM 号
@@ -156,7 +156,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   message_id，非 Empty 应答 0 字节也回包）、调用失败 23 {1003}、会话指令 BindAccount/EnterScene/CloseSession/UnbindPlayer。**差异**：坏包时
   Java login 回 ClientReply.tip_id=1014 → gate 放进信封 error_message（基线是 23 推送）；同一会话 login 在途时后续请求（含 scene 消息）排队串行（基线不串行）。
 - size: M
-- robot: Go robot NormalLogin / WrongPassword / DuplicateEnterGame / LoginLogoutCycle；xm-robot SmokeScenario
+- robot: Go robot NormalLogin / WrongPassword / DuplicateEnterGame / LoginLogoutCycle；game-robot SmokeScenario
 - hazards: C++ 响应类型 → message_id 反查表在两个方法共享响应类型时取最后一个；C++ 应答不带 id，客户端靠 message_id FIFO 匹配。
 
 ### scene-request-forward — 场景类消息转发与回包
@@ -170,7 +170,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - java: done — ClientDispatcher.forwardToScene → NodeLinkFrame.ClientForward{session_id, player_id=scenePlayerId, message_id, body, request_id}；未进场景推 23 {1003}；
   回包经 ToClient 下发。**缺口**：links.send 返回 0（LINK_UNAVAILABLE）时只记指标、不推 23 {1003}（基线会推），客户端等到超时。
 - size: M
-- robot: Go robot SkillCast / SceneSwitch / MultiRobotBehavior；xm-robot SmokeScenario（ListSkills）、MovementScenario
+- robot: Go robot SkillCast / SceneSwitch / MultiRobotBehavior；game-robot SmokeScenario（ListSkills）、MovementScenario
 - hazards: 基线 R13：gate node_id 复用后 scene 的同号 session 可能映射别的玩家，必须带 player_id。
 
 ### other-backend-routing — 其他后端的客户端 RPC 路由（含路由服模式）
@@ -239,7 +239,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - behavior: topic `gate-cmd_g1`，256 分区，partition = node_id % 256，消费端 assign 自己的分区不进 group；先按 target_gate_id（缺省回落 target_node_id）
   过滤、再按 target_instance_id 防僵尸；GateCommand{event_id, payload} 按 event_id 解码派发，payload 为空时从信封字段兜底构造事件。
   PushToPlayer：按 session_id 找会话直接下发（无玩家栅栏）；BroadcastToPlayers：session_list / bitmap（无 player_list）。生产方必须填 gate_instance_id（fail-closed）。
-- internal: Java 无 Kafka（architecture §10「Kafka 事件」首批不做）；等价物可选 Redis pub/sub（已用于 xm:owner-takeover）或 Dubbo 回调到 gate。
+- internal: Java 无 Kafka（architecture §10「Kafka 事件」首批不做）；等价物可选 Redis pub/sub（已用于 game:owner-takeover）或 Dubbo 回调到 gate。
 - java: missing — 当前只有 scene 能经链路推送；login / 未来 friend、guild、match 推不到客户端。
 - size: M
 - robot: Go friend_smoke / guild_smoke / match（battle_smoke）里的推送断言
@@ -258,9 +258,9 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   会话的 sceneId + scene 节点指向只在转发成功后才提交。
 - internal: Kafka 两个入口；gate 透传 epoch，不校验、不补默认值。
 - java: partial — 首次进场已做：login 回 EnterScene 指令（player_id, scene_node_id, scene_id, owner_epoch）→ PlayerEnter 链路帧（ClientDispatcher.enterScene）；
-  同节点换图由 xm-scene 自己完成。缺：跨节点换图 / 迁频道 / 节点下线改派时把会话重绑到新 scene 节点并以「非登录」方式进场的 gate 路径；无 enter_gs_type、home_zone_id。
+  同节点换图由 game-scene 自己完成。缺：跨节点换图 / 迁频道 / 节点下线改派时把会话重绑到新 scene 节点并以「非登录」方式进场的 gate 路径；无 enter_gs_type、home_zone_id。
 - size: M
-- robot: Go robot SceneSwitch、travel_smoke（跨节点）；xm-robot SmokeScenario（只覆盖首次进场）
+- robot: Go robot SceneSwitch、travel_smoke（跨节点）；game-robot SmokeScenario（只覆盖首次进场）
 - hazards: 同 scene_id 换节点必须也算变化，否则玩家「在线但哪里都不存在」；RebindSceneNode 不能放回转发之前。
 
 ### scene-entry-forward-retry — 进场转发补发（CPP-2）
@@ -273,7 +273,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
   节点找不到只给 3s、最多 16 次；scene 握手成功应答盖章（按连接对象）并把指向该节点的欠账提前到下一轮；客户端连接已不可用即撤销欠账；
   欠账属于另一名角色则撤销不踢；scene_id=0 直接放弃。30s 汇总日志。
 - internal: 欠账存在会话里，会话 erase 即取消；单调时钟。
-- java: partial（有意不同）— SceneLink 在建链 / 握手期间排队帧（xm.gate.link-max-queued-frames 1 万），握手 ack 后按序补发；建链失败 / 排队溢出 / 租约无效 →
+- java: partial（有意不同）— SceneLink 在建链 / 握手期间排队帧（game.gate.link-max-queued-frames 1 万），握手 ack 后按序补发；建链失败 / 排队溢出 / 租约无效 →
   onEnterUndeliverable → abandonEnter 让 login 释放归属 + 推 23 {3023}，会话回到「已登录、未进游戏」不断连（PARITY「进场异步失败后回到…」已登记）；
   没有 20s 重试预算、不发 34。SceneLinkTest「首帧触发建链_握手前排队_ack后按原顺序补发」「排队溢出的进场帧按建链失败回报」。
 - size: M
@@ -315,7 +315,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - behavior: gate 只把 Kafka 事件原样包成 124 推给客户端，不断连；客户端探测目标 gate → 新连接 ClientTokenVerify → 目标 zone 重跑 Login + EnterGame，最多 3 跳；
   目标 gate 按 target_zone_id 拒他区票据。scene_manager 按目标 zone gate 的 client_endpoint 选址、player_count 最小、同地址去重取最新。
 - internal: 票据由 scene_manager 用 GateTokenSecret 签，含 player_id / target_zone_id。
-- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片未验证）— 124 不经 Kafka：226 的经源 scene 的链路帧 `PlayerTransfer.redirect`、GO-5 的经 login 会话指令 `RedirectToGate`（`ClientDispatcher.onTravelRedirect` / `redirectByLogin`），核对绑定、校验内容（空地址 / 端口越界 / 空票据或签名 → 推 23 {3027} 断开，不推空地址的 124）、解绑、会话转 REDIRECTED（之后请求无回包）、`MessageContent{message_id = 124}` 不设 id、票据原字节；与基线不同的是 gate 在 `xm.gate.redirect-linger`（60 s）后关闭不跟随的旧连接（X8）。选址与签票在 scene-manager（`TravelRouter`：目标 gate 的通告地址、同地址只留最新、剔排空），见 sm-cross-zone-redirect。
+- java: partial（2026-10-11，批次 5.4：代码已集成、全量单测通过；双 zone 切片未验证）— 124 不经 Kafka：226 的经源 scene 的链路帧 `PlayerTransfer.redirect`、GO-5 的经 login 会话指令 `RedirectToGate`（`ClientDispatcher.onTravelRedirect` / `redirectByLogin`），核对绑定、校验内容（空地址 / 端口越界 / 空票据或签名 → 推 23 {3027} 断开，不推空地址的 124）、解绑、会话转 REDIRECTED（之后请求无回包）、`MessageContent{message_id = 124}` 不设 id、票据原字节；与基线不同的是 gate 在 `game.gate.redirect-linger`（60 s）后关闭不跟随的旧连接（X8）。选址与签票在 scene-manager（`TravelRouter`：目标 gate 的通告地址、同地址只留最新、剔排空），见 sm-cross-zone-redirect。
 - size: M（gate 侧推送 S，签票 / 选址在 scene-manager）
 - robot: Go travel_smoke、features_smoke（124 处理）、battle_smoke_cross_zone
 - hazards: 空 payload 兜底会推出空地址的 124；客户端刻意不按 token_deadline 拦截，以目标 gate 判过期为准。
@@ -385,10 +385,10 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - behavior: gate 自报 client_endpoint（与集群内 endpoint 分离），login / scene_manager 选址时优先用它，require 时缺地址跳过；player_count 用于选最空 gate。
   启动打两行 `[gate_version] version commit build_time node_type node_id zone_id`（直写 stdout）。
 - internal: etcd；Agones 外部来源。
-- java: done — GateNode.publish 每 5s 写 Redis 节点目录 GateNodeInfo{client_host=xm.advertise-host, client_port=xm.gate.advertise-port, player_count}（TTL 15s）；
+- java: done — GateNode.publish 每 5s 写 Redis 节点目录 GateNodeInfo{client_host=game.advertise-host, client_port=game.gate.advertise-port, player_count}（TTL 15s）；
   PARITY「节点客户端可达地址」已对齐（gate 部分）。版本行未做（属于 observability）。
 - size: S
-- robot: Go robot http_assign_gate；xm-robot AssignGateClient
+- robot: Go robot http_assign_gate；game-robot AssignGateClient
 - hazards: 稳定地址下崩溃重启会残留旧条目，选址需按地址去重取最新（Go DedupeNewest）；Java 目录 TTL 15s 内同样可能下发已死 gate。
 
 ### gate-scene-link — gate ↔ scene 节点链路与握手
@@ -398,7 +398,7 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 - depends on: node-registration-load-report
 - behavior: gate 主动连同 zone 的 scene（muduo RPC），握手后 scene 才挂 RpcSession；推送只在握手后的当前连接上有效。
 - internal: 服务端内部，两版各自实现。
-- java: done（Java 内部）— SceneLinkManager / SceneLink / NettyLinkConnector / LinkHellos：按需建链、每节点一条活链路带代次、LinkHello HMAC（XM_NODE_LINK_SECRET）+ lease_epoch、
+- java: done（Java 内部）— SceneLinkManager / SceneLink / NettyLinkConnector / LinkHellos：按需建链、每节点一条活链路带代次、LinkHello HMAC（GAME_NODE_LINK_SECRET）+ lease_epoch、
   zone / 节点号校验、未就绪排队、写缓冲高水位判死；SceneLinkTest 全套。
 - size: M
 - robot: 全部进场场景
@@ -462,9 +462,9 @@ Java xm-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/sce
 2. Java 同一会话 login 调用在途时 scene 消息也排队（基线不串行）：EnterGame 在途期间的移动 / 技能包会被延后，是否可接受？
 3. 坏请求体 1014：基线 gate 推 23 {1014}，Java 走信封 error_message{1014}（message_id=请求号）。客户端两种都能收口，需要定一种并登记。
 4. forwardToScene 在 links.send 返回 0 时不推 23 {1003}（基线会推），客户端只能等超时——建议直接补，属 bug 还是有意？
-5. 跨 zone 重定向、票据绑定、Go 服务推送都依赖「gate 命令通道」：Java 用 Kafka（tech-stack 已规划）还是 Redis pub/sub（已有 xm:owner-takeover）？
+5. 跨 zone 重定向、票据绑定、Go 服务推送都依赖「gate 命令通道」：Java 用 Kafka（tech-stack 已规划）还是 Redis pub/sub（已有 game:owner-takeover）？
    决定前不宜做 kick / redirect / push 的 gate 侧。
-6. GM 客户端指令闸：Java 是否引入运行模式（XM_RUN_MODE）？若永远不在客户端协议面实现 GM（走管理端口），gate 只需把 6 个号固定判 1006 + 计非法包即可对齐。
+6. GM 客户端指令闸：Java 是否引入运行模式（GAME_RUN_MODE）？若永远不在客户端协议面实现 GM（走管理端口），gate 只需把 6 个号固定判 1006 + 计非法包即可对齐。
 7. 可配置并发连接上限（GateMaxConnections）Java 是否要做（基线 prod 必填）？
 8. 基线 Kafka BroadcastToScene / BroadcastToAll handler 为空、RoutePlayer 空 payload 兜底会因 scene_id=0 直接踢线——是否需要反馈给 mmorpg 侧修。
 9. 基线 MessageLimiter max_requests 用 uint8_t（>255 截断）、整秒窗口；Java 用 int + 纳秒窗口，表值 > 255 时两版行为不同，当前表数据是否有这样的行未核对。

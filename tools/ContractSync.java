@@ -29,7 +29,7 @@ import java.util.stream.Stream;
  * 这些文件在本仓库里是<b>派生物</b>，不许手改，只能用本工具重新同步。
  *
  * <ul>
- *   <li>客户端契约 proto（{@code proto/**}）→ {@code xm-proto/src/main/proto/proto/**}：按源相对路径原样存放（import 里写死了路径），
+ *   <li>客户端契约 proto（{@code proto/**}）→ {@code game-proto/src/main/proto/proto/**}：按源相对路径原样存放（import 里写死了路径），
  *       只注入 {@code java_package} / {@code java_outer_classname} / {@code java_multiple_files}——只影响 Java 类落点，
  *       不改 descriptor 全名与线格式。Java 代码不依赖这套目录（包名按 proto package，见 architecture.md §1）。</li>
  *   <li>配置表 schema：取导表器的<b>权威 schema</b> {@code data/schema/*_table.proto} 与 option 词表 {@code cfg_options.proto}
@@ -37,7 +37,7 @@ import java.util.stream.Stream;
  *       （{@code cfg_owner} 不是 server / common）不进服务端产物，同步时改写成 {@code reserved}。
  *       表数据是导表器某次导出的产物，可能比 HEAD 的 schema 旧：以同批产出的 {@code generated/code/proto} 为准对齐，
  *       schema 新加、数据里还没有的字段改写成 reserved、还没导出的表不同步（都记进 SOURCE.properties 的 pending 项）。
- *       Java 的表访问代码由 xm-table-codegen 在编译期按这份 schema 生成，不再同步导表器产出的 Java 管理器。</li>
+ *       Java 的表访问代码由 game-table-codegen 在编译期按这份 schema 生成，不再同步导表器产出的 Java 管理器。</li>
  *   <li>tip / operator 枚举 proto（导表器由 Tip.xlsx / Operator.xlsx 生成，没有别的出处）原样复制。</li>
  *   <li>具名行 id 常量（Excel 的 constants_name 列，不进 .pb）：取导表器产出的 C++ 常量头文件，
  *       生成 {@code com.game.table.TableConstants}。</li>
@@ -65,10 +65,10 @@ public final class ContractSync {
     private static final Set<String> SERVER_OWNERS = Set.of("server", "common");
 
     /** 本工具管理的目标路径（相对仓库根），--check 逐一比对。 */
-    private static final String PROTO_OUT = "xm-proto/src/main/proto";
-    private static final String REGISTRY_OUT = "xm-proto/src/main/resources/contract";
-    private static final String TABLE_PROTO_OUT = "xm-table/src/main/proto";
-    private static final String TABLE_CONSTANTS_OUT = "xm-table/src/main/java/com/game/table/TableConstants.java";
+    private static final String PROTO_OUT = "game-proto/src/main/proto";
+    private static final String REGISTRY_OUT = "game-proto/src/main/resources/contract";
+    private static final String TABLE_PROTO_OUT = "game-table/src/main/proto";
+    private static final String TABLE_CONSTANTS_OUT = "game-table/src/main/java/com/game/table/TableConstants.java";
     private static final String TABLE_DATA_OUT = "config-data/tables";
     private static final String SOURCE_INFO_OUT = "contract/SOURCE.properties";
     private static final List<String> MANAGED = List.of(PROTO_OUT, REGISTRY_OUT, TABLE_PROTO_OUT, TABLE_CONSTANTS_OUT,
@@ -87,7 +87,7 @@ public final class ContractSync {
         Path source = Path.of(require(opts, "mmorpg")).toAbsolutePath().normalize();
         Path repo = Path.of(opts.getOrDefault("repo", ".")).toAbsolutePath().normalize();
         String commit = opts.containsKey("commit") ? opts.get("commit") : gitHead(source);
-        if (!Files.isRegularFile(repo.resolve("pom.xml")) || !Files.isDirectory(repo.resolve("xm-proto"))) {
+        if (!Files.isRegularFile(repo.resolve("pom.xml")) || !Files.isDirectory(repo.resolve("game-proto"))) {
             throw new IllegalArgumentException("--repo 不是本仓库根目录: " + repo);
         }
 

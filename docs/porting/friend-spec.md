@@ -4,9 +4,9 @@
 >
 > **路径怎么读**
 > - 以 `go/`、`proto/`、`cpp/`、`robot/`、`generated/` 开头的路径在 `D:\work\mmorpg` 下。
-> - 以 `xm-`、`docs/`、`PARITY.md`、`AGENTS.md`、`contract/` 开头的路径在 `D:\work\xuanming-server-mmo` 下。
+> - 以 `game-`、`docs/`、`PARITY.md`、`AGENTS.md`、`contract/` 开头的路径在 `D:\work\xuanming-server-mmo` 下。
 > - 以 `mmorpg-client/` 开头的路径在 `D:\work\mmorpg-client` 下。
-> - 行号对应当前工作区。Redis 键里的 `xm:` 是键前缀，不是路径。
+> - 行号对应当前工作区。Redis 键里的 `game:` 是键前缀，不是路径。
 >
 > **本稿的来历**：由三份分区规格（写路径 / 读路径与推送 / 推荐、在线目录、清理与管道）合并而成，每条结论都回到代码核对过。对三份原稿的更正见 §9.4。
 
@@ -34,18 +34,18 @@
 | Kafka | `gate-cmd_g<N>` 推送 |
 
 **Java 侧的对应**
-- 入口：gate 经 Dubbo 调 `ClientMessageService.handle(ClientCall) → CompletableFuture<ClientReply>`（`xm-api/src/main/java/com/game/api/ClientMessageService.java:34-47`）。
-  - Dubbo group 等于 proto 一级目录 `friend`（`xm-api/src/main/java/com/game/api/DubboGroups.java:3-13`）。
-- 进程：路线图规定"每个服务一个 Spring Boot 进程模块"（`docs/porting/roadmap.md:48`），所以下文按新模块 **xm-friend** 书写。
-- 表：放在 `xm_java` 库（`AGENTS.md` §3），接 pbmysql（`docs/porting/roadmap.md:50-53`）。
-- 在线状态 = `xm:presence:{id}`；推送 = `PlayerPushes`（Redis pub/sub + 玩家栅栏）。见 `docs/design/architecture.md:125-144`。
+- 入口：gate 经 Dubbo 调 `ClientMessageService.handle(ClientCall) → CompletableFuture<ClientReply>`（`game-api/src/main/java/com/game/api/ClientMessageService.java:34-47`）。
+  - Dubbo group 等于 proto 一级目录 `friend`（`game-api/src/main/java/com/game/api/DubboGroups.java:3-13`）。
+- 进程：路线图规定"每个服务一个 Spring Boot 进程模块"（`docs/porting/roadmap.md:48`），所以下文按新模块 **game-friend** 书写。
+- 表：放在 `game` 库（`AGENTS.md` §3），接 pbmysql（`docs/porting/roadmap.md:50-53`）。
+- 在线状态 = `game:presence:{id}`；推送 = `PlayerPushes`（Redis pub/sub + 玩家栅栏）。见 `docs/design/architecture.md:125-144`。
 
 ### 0.2 消息号、请求 / 应答形状、gate 限频
 
 **数据来源**
-- 消息号只能取自 `MessageIdRegistry`（同步产物 `xm-proto/src/main/resources/contract/message_id.txt:3,8,12,13,120,231,233,235,236,237,239`），不要在代码里写数字。
+- 消息号只能取自 `MessageIdRegistry`（同步产物 `game-proto/src/main/resources/contract/message_id.txt:3,8,12,13,120,231,233,235,236,237,239`），不要在代码里写数字。
 - 形状来自 `proto/friend/friend.proto`，Java 生成类在 `com.game.proto.friend`（`docs/design/architecture.md:18-21`）。
-- 限频数据在 `generated/tables/messagelimiter.json:350-410`，按会话、按消息号计。Java gate 已按同一份表限频，超频回信封 1008（`docs/design/architecture.md:351-353`；`xm-gate/src/main/java/com/game/gate/session/ClientDispatcher.java:204-211`）。
+- 限频数据在 `generated/tables/messagelimiter.json:350-410`，按会话、按消息号计。Java gate 已按同一份表限频，超频回信封 1008（`docs/design/architecture.md:351-353`；`game-gate/src/main/java/com/game/gate/session/ClientDispatcher.java:204-211`）。
 
 | 号 | 方法 | 方向 | 请求 | 应答 | gate 限频 |
 |---|---|---|---|---|---|
@@ -59,7 +59,7 @@
 | 236 | Unblock | C2S | `{target_player_id=1}`（:160-162） | `{error_message=1}` | 5/s |
 | 2 | ListBlocks | C2S | `{}`（无 reserved，:168-169） | `{error_message=1; repeated BlockEntry blocks=2}`（:177-180） | 10/s |
 | 119 | RecommendFriends | C2S | `{uint32 limit=1; repeated uint64 exclude_player_ids=2; bool online_only=3; string cursor=4; string query=5}`（:189-197） | `{error_message=1; repeated RecommendEntry candidates=2; string next_cursor=3; bool online_directory=4}`（:212-217） | **1/s** |
-| 235 | NotifyFriendEvent | **S2C** 推送 | `FriendEventS2C{FriendEventReason reason=1; uint64 by_player_id=2; int64 ts_ms=3}`（:228-240） | `Empty`（:266） | 表中没有这一条，缺省 3/s（`xm-gate/.../session/MessageLimit.java:13`） |
+| 235 | NotifyFriendEvent | **S2C** 推送 | `FriendEventS2C{FriendEventReason reason=1; uint64 by_player_id=2; int64 ts_ms=3}`（:228-240） | `Empty`（:266） | 表中没有这一条，缺省 3/s（`game-gate/.../session/MessageLimit.java:13`） |
 
 **嵌套消息**
 - `FriendEntry{uint64 friend_player_id=1; int64 since_ms=2; int64 last_active_ms=3; bool is_online=4; string name=5; uint32 level=6; uint32 class_id=7; uint32 gender=8; string appearance_id=9; uint32 zone_id=10}`（:58-69）
@@ -71,12 +71,12 @@
 
 **两条形状纪律**
 - 成功应答**不设置** `error_message`，序列化后可以是 0 字节。
-  - Java gate 按应答类型决定是否回包：只要不是 `Empty` 就一律回，哪怕 0 字节（`xm-gate/.../session/MessageRoutes.java:47-51`；`ClientDispatcher.java:336-357`）。
+  - Java gate 按应答类型决定是否回包：只要不是 `Empty` 就一律回，哪怕 0 字节（`game-gate/.../session/MessageRoutes.java:47-51`；`ClientDispatcher.java:336-357`）。
 - 客户端判成功的方式是 `tip == null || tip.Id == 0`（`mmorpg-client/Assets/Scripts/App/DevTeamInvitationDriver.cs:374-378`；`mmorpg-client/Assets/Scripts/Game/Team/TeamInvitationDirectory.cs:270-274`）。
 
 ### 0.3 tip 码表
 
-**好友段**（`generated/code/proto/tip/friend_error_tip.proto:12-30`；Java 同号在 `xm-table/src/main/proto/tip/friend_error_tip.proto:12-30`，Java 写法 `com.game.table.FriendErrorTip.friend_error.kFriendXxx_VALUE`）
+**好友段**（`generated/code/proto/tip/friend_error_tip.proto:12-30`；Java 同号在 `game-table/src/main/proto/tip/friend_error_tip.proto:12-30`，Java 写法 `com.game.table.FriendErrorTip.friend_error.kFriendXxx_VALUE`）
 
 | 码 | 枚举 | 业务含义 | 用在哪些 RPC |
 |---|---|---|---|
@@ -91,7 +91,7 @@
 | 15008 | kFriendBlockListFull | 黑名单满 | Block |
 | 15009 | kFriendTargetInboxFull | 对方收件箱满 | AddFriend |
 
-**通用段**（Java 写法 `CommonErrorTip.common_error.kXxx_VALUE`，见 `xm-table/src/main/proto/tip/common_error_tip.proto:18,22,24,28,32,40`）
+**通用段**（Java 写法 `CommonErrorTip.common_error.kXxx_VALUE`，见 `game-table/src/main/proto/tip/common_error_tip.proto:18,22,24,28,32,40`）
 
 | 码 | 枚举 | 说明 |
 |---|---|---|
@@ -176,11 +176,11 @@
 | 项 | 值 | 出处 |
 |---|---|---|
 | gate 单包上限 | 整个 ClientRequest 1 KB | `ClientDispatcher.java:70-71` |
-| gate 单会话排队上限 | 64，超出即断开 | `xm-gate/src/main/resources/application.yaml:55`；`ClientDispatcher.java:223-229` |
+| gate 单会话排队上限 | 64，超出即断开 | `game-gate/src/main/resources/application.yaml:55`；`ClientDispatcher.java:223-229` |
 | gate 的 Dubbo consumer 超时 | 5000 ms | `application.yaml:70-73` |
 | Redisson 单条命令最坏阻塞 | 4.2 s | `docs/design/architecture.md:415-417` |
 
-Java 配置建议放在 `xm.friend.*` 下，默认值照上表，启动时校验规则也照上表。
+Java 配置建议放在 `game.friend.*` 下，默认值照上表，启动时校验规则也照上表。
 
 ### 0.5 全局规则（所有 RPC 适用）
 
@@ -198,7 +198,7 @@ Java 配置建议放在 `xm.friend.*` 下，默认值照上表，启动时校验
 ### 1.1 四张表
 
 **事实源与建表方式**
-- 事实源：`proto/friend/friend_table.proto`。Java 侧已有同步副本 `xm-proto/src/main/proto/proto/friend/friend_table.proto`。
+- 事实源：`proto/friend/friend_table.proto`。Java 侧已有同步副本 `game-proto/src/main/proto/proto/friend/friend_table.proto`。
 - 建表约束：
   - proto2mysql 对 uint64 / uint32 一律生成 `NOT NULL DEFAULT 0`，主键列和 status 列也不例外（`go/friend/internal/data/friend_repo_mysql_test.go:330-342`）。
   - **四张表都没有 UNIQUE KEY**（`friend_table.proto:11-12`）。下面"守卫之后只用主键点锁"这条纪律以此为前提，见 §1.4 第 6 条。
@@ -459,15 +459,15 @@ INSERT INTO friend_capacity (player_id, friend_count, created_ms) VALUES (?, ?, 
 ### 1.7 Java 存储层落地
 
 **表与建表**
-- 表放 xm_java，表名、列、主键、二级索引、"无唯一键"都与 §1.1 一致。
-- 走 pbmysql（`docs/porting/roadmap.md:50-53`）。在建的 `xm-pbmysql` 模块的选项号与 `proto/db/proto_option.proto` 一致（`OptionTableName = 500001` 等，见 `xm-pbmysql/src/main/java/com/game/pbmysql/DescriptorOptions.java:31-55`），可以直接读同步来的 `friend_table.proto`。
+- 表放 game，表名、列、主键、二级索引、"无唯一键"都与 §1.1 一致。
+- 走 pbmysql（`docs/porting/roadmap.md:50-53`）。在建的 `game-pbmysql` 模块的选项号与 `proto/db/proto_option.proto` 一致（`OptionTableName = 500001` 等，见 `game-pbmysql/src/main/java/com/game/pbmysql/DescriptorOptions.java:31-55`），可以直接读同步来的 `friend_table.proto`。
 - 但这些 proto 属于契约同步产物，不许手改；是否让 Java 存储结构直接依赖它是待决项（§10.3）。
 
 **连接池**
 - friend 进程用**自己的 Druid 池**，会话级 RC：
   - `default-transaction-isolation: 2`，或在 URL 里加 `sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=3`；
-  - 同时加 `useAffectedRows=true`，与 xm-data 一致（`xm-data/src/main/resources/application.yaml:14-15`）。
-- login 那边是 RR（`xm-player-store/.../PlayerStore.java:154-166`），不能共用。
+  - 同时加 `useAffectedRows=true`，与 game-data 一致（`game-data/src/main/resources/application.yaml:14-15`）。
+- login 那边是 RR（`game-player-store/.../PlayerStore.java:154-166`），不能共用。
 - 本稿用到的 UPDATE 都会真改值，在 found-rows 下结果也一样，但没必要留这个坑。
 
 **事务实现**
@@ -814,7 +814,7 @@ return n
 - robot friend-smoke 第 6 步断言这里拿到**信封 tip == 1003**（`robot/friend_smoke_scenario.go:412-440`）。
 - **Java 注意**：gate 会把 235 当作客户端服务方法转给 friend（`MessageRoutes.java:35-45`）。friend 必须对 235 回 `ClientReply{tip_id=1003}`。
   - 235 的应答类型是 Empty，gate 只在 tip≠0 时回包（`ClientDispatcher.java:339-343`）。
-  - 照抄 login 派发器的默认行为会回 1006（`xm-login/.../dispatch/ClientMessageDispatcher.java:121-130`），robot 第 6 步就会失败。
+  - 照抄 login 派发器的默认行为会回 1006（`game-login/.../dispatch/ClientMessageDispatcher.java:121-130`），robot 第 6 步就会失败。
 
 ---
 
@@ -913,17 +913,17 @@ return 1
 
 ### 3.5 Java 落地
 
-**键**（经 `xm-discovery/.../RedisKeys.java` 新增方法；pid 一律用 `Long.toUnsignedString`）
+**键**（经 `game-discovery/.../RedisKeys.java` 新增方法；pid 一律用 `Long.toUnsignedString`）
 
 | 用途 | 键 |
 |---|---|
-| 好友列表 | `xm:friend:{<pid>}:list` |
-| 入站申请 | `xm:friend:{<pid>}:req` |
+| 好友列表 | `game:friend:{<pid>}:list` |
+| 入站申请 | `game:friend:{<pid>}:req` |
 | 代次键 | `<数据键>:gen` |
-| 申请配额 | `xm:friend:{<pid>}:quota` |
-| 在线目录配额 | `xm:friend:{<pid>}:dir-quota` |
+| 申请配额 | `game:friend:{<pid>}:quota` |
+| 在线目录配额 | `game:friend:{<pid>}:dir-quota` |
 
-- 同一玩家的键共用 hash tag `{<pid>}`：现在是单机 Redis（DB 12，`xm-login/src/main/resources/application.yaml:74`），这样写零成本，将来上 Cluster 也安全。
+- 同一玩家的键共用 hash tag `{<pid>}`：现在是单机 Redis（DB 12，`game-login/src/main/resources/application.yaml:74`），这样写零成本，将来上 Cluster 也安全。
 
 **脚本调用**
 - 两条 Lua 照 §3.2，用单条 `RScript.evalAsync`：遇到 NOSCRIPT 会自动重载。**不要用 RBatch**（`PlayerPresenceDirectory.java:84-89`）。
@@ -980,10 +980,10 @@ return 1
 - 失败日志每 10 s 至多一条，用原子 CAS 控制（:233-250）。
 
 **Java 对应**
-- 在线目录：`xm:presence:{id}`，值 `PlayerPresence{player_id=1, zone_id=2, gate_node_id=3, gate_instance_id=4, session_id=5, online_since_ms=6, owner_epoch=7}`（`xm-discovery/src/main/proto/xm/discovery/presence.proto:13-24`）。
+- 在线目录：`game:presence:{id}`，值 `PlayerPresence{player_id=1, zone_id=2, gate_node_id=3, gate_instance_id=4, session_id=5, online_since_ms=6, owner_epoch=7}`（`game-discovery/src/main/proto/game/discovery/presence.proto:13-24`）。
   - TTL 60 s，gate 是唯一写者：scene 确认进场后写入，场景绑定结束时删除（`docs/design/architecture.md:125-140`；`RedisKeys.java:41-47`）。
   - **没有 state 字段**：条目存在就等于在游戏里。断线即删，等价于基线把 DISCONNECTING 判为离线。
-- `last_active_ms` 用 `online_since_ms` 填：gate 在进场确认时写入时钟值（`xm-gate/.../presence/GatePresence.java:51-60`）。
+- `last_active_ms` 用 `online_since_ms` 填：gate 在进场确认时写入时钟值（`game-gate/.../presence/GatePresence.java:51-60`）。
   - robot 断言在线好友的 `last_active_ms ≠ 0`（`robot/friend_smoke_scenario.go:335-337`），所以必须填。
 - **presence 的 `zone_id` 是 gate 所在的区，不是玩家的 home zone**（GatePresence.java:54），不能拿来做区过滤或填 FriendEntry.zone_id。
 - **必须新增严格批量读**。现有 `findAll` / `findAllAsync` 有三个问题（`PlayerPresenceDirectory.java:117-170`）：
@@ -1014,7 +1014,7 @@ return 1
 - Unity 会**无条件**用 `zone_id` 覆盖本地缓存，0 也照写（`TeamInvitationDirectory.cs:183`）。
 
 **Java 对应**
-- `xm_java.player` 表直接就有 `name / level / class_id / gender / appearance_id / zone_id`，其中 zone_id 即 home zone（`xm-player-store/src/main/resources/db/xm-player-schema.sql:11-33`）。
+- `game.player` 表直接就有 `name / level / class_id / gender / appearance_id / zone_id`，其中 zone_id 即 home zone（`game-player-store/src/main/resources/db/game-player-schema.sql:11-33`）。
 - `PlayerStore` 目前只有单查 `findPlayer`（`PlayerStore.java:99-101`），需新增批量读，每批 ≤64：
 
 ```sql
@@ -1059,8 +1059,8 @@ SELECT player_id, name, level, class_id, gender, appearance_id, zone_id FROM pla
 - 封装方式：`MessageContent{message_id=235, serialized_message, id=0}` → `PushToPlayerEvent{session_id, message_content}` → `GateCommand{event_id=PushToPlayerEvent, target_gate_id, target_instance_id, payload}`（`go/friend/internal/kafka/gate_command_builder.go:28-51`）。
 
 **Java 对应**
-- 调用 `PlayerPushes.pushToPlayer(target, MessageContent{message_id=235, serialized_message=FriendEventS2C 字节, id=0})`（`xm-discovery/.../presence/PlayerPushes.java:52-58`）。
-- 通道：查 `xm:presence` → 把 `GatePush` 发布到 `xm:gate-push:{zone}:{gate}`（:97-105；`RedisKeys.java:126-132`）。gate 在会话 EventLoop 上做玩家栅栏 `!closed && !closing && presenceOnline && scenePlayerId==target` 之后才下发（`ClientDispatcher.java:559-582`）。
+- 调用 `PlayerPushes.pushToPlayer(target, MessageContent{message_id=235, serialized_message=FriendEventS2C 字节, id=0})`（`game-discovery/.../presence/PlayerPushes.java:52-58`）。
+- 通道：查 `game:presence` → 把 `GatePush` 发布到 `game:gate-push:{zone}:{gate}`（:97-105；`RedisKeys.java:126-132`）。gate 在会话 EventLoop 上做玩家栅栏 `!closed && !closing && presenceOnline && scenePlayerId==target` 之后才下发（`ClientDispatcher.java:559-582`）。
 - 指标结局映射：
 
 | PlayerPushes 结局 | outcome |
@@ -1168,7 +1168,7 @@ LIMIT ?
 - exclude 用 MyBatis `<foreach>` 拼 `NOT IN`，空列表时不拼。所有 id 按无符号绑定。
 - pivot 用 `lo + nextLong(hi − lo + 1)`（雪花 id 小于 2^63）；宽度 ≤0 时退回 lo。
 - 任一 SQL 异常 → 1003 `"recommend candidates unavailable"`，不返回部分结果。
-- 这些写法 H2 不支持，SQL 测试必须连真 MySQL（`-Dxm.it.mysql`，`AGENTS.md` §4）。
+- 这些写法 H2 不支持，SQL 测试必须连真 MySQL（`-Dgame.it.mysql`，`AGENTS.md` §4）。
 - 在线态用 `PlayerPresenceDirectory.findAllAsync`，任何失败都按离线处理。
 
 ### 5.2 在线目录（`online_only=true`）
@@ -1267,14 +1267,14 @@ LIMIT ?
 - mmorpg robot 不覆盖 online_only。
 
 **Java 落地**
-- **枚举源**：对 `xm:presence:*` 做 SCAN，算法、游标格式、4 轮、64、1024 上限、字典序、offset 与 next_cursor 规则逐条照搬。
-  - Redisson 公开 API 不暴露 SCAN 游标，可以在 Lua 里执行 `SCAN <cursor> MATCH xm:presence:* COUNT 64`，或走低层命令执行器。
+- **枚举源**：对 `game:presence:*` 做 SCAN，算法、游标格式、4 轮、64、1024 上限、字典序、offset 与 next_cursor 规则逐条照搬。
+  - Redisson 公开 API 不暴露 SCAN 游标，可以在 Lua 里执行 `SCAN <cursor> MATCH game:presence:* COUNT 64`，或走低层命令执行器。
   - Java 条目"存在、能解码、player_id 一致"就算在线。
 - **资料与 home zone**：每轮一条 `SELECT player_id, zone_id, name, class_id, gender, appearance_id, level FROM player WHERE player_id IN (…)`。
   - 调用者的 home zone 也从 player 行取：行不存在或 zone_id==0 → 1003。
   - 过滤条件照搬：trim 后 name 非空、class_id≠0、home zone 相等、匹配 query。
 - `last_active_ms = online_since_ms`。
-- **配额键** `xm:friend:{<pid>}:dir-quota`：阈值 60、窗口 60 s、fail-closed、先校验后计数，全部照搬。
+- **配额键** `game:friend:{<pid>}:dir-quota`：阈值 60、窗口 60 s、fail-closed、先校验后计数，全部照搬。
 - **每页开销**：Redis ≤4 次 SCAN + ≤4 次 MGET + 1 次 EVAL；MySQL 1 次（调用者）+ ≤4 次批查。每轮开始检查截止时刻。
 - SCAN 的成本隐患见 §9.1 第 20 条。
 
@@ -1399,7 +1399,7 @@ DELETE FROM friend_capacity WHERE player_id = ? AND friend_count = 0 AND created
 - 客户端在 EnterGame 之前发任何 friend 消息 → 会话拦截器判坏头 → **信封 1003**。
 
 **Java**
-- 身份 = `ClientCall.session.player_id`（`xm-api/src/main/proto/xm/api/client_call.proto:10-21`，player_id 在第 19 行）。
+- 身份 = `ClientCall.session.player_id`（`game-api/src/main/proto/game/api/client_call.proto:10-21`，player_id 在第 19 行）。
   - gate 在应用 EnterScene 指令时设置它，未进游戏为 0（`ClientDispatcher.java:406,699-709`）。
 - 准入按**消息号**做，不能按服务名：
   - 10 个 C2S 消息号放行；
@@ -1414,7 +1414,7 @@ DELETE FROM friend_capacity WHERE player_id = ? AND friend_count = 0 AND created
 - 为什么 friend 必须先于路由服超时：路由服如果先超时，客户端看到失败，但写已经落库，客户端一重试就撞 15003（`config.go:25-31`）。
 
 **Java**
-- gate 调后端的 Dubbo 超时是 5000 ms（`xm-gate/src/main/resources/application.yaml:70-73`）。friend 每个请求以"收到时刻 + 3500 ms"为截止时刻。
+- gate 调后端的 Dubbo 超时是 5000 ms（`game-gate/src/main/resources/application.yaml:70-73`）。friend 每个请求以"收到时刻 + 3500 ms"为截止时刻。
 - **JDBC**：
   - 每条语句 `queryTimeout = ceil(剩余秒)`；
   - `socketTimeout` ≤ 4000 ms；
@@ -1422,12 +1422,12 @@ DELETE FROM friend_capacity WHERE player_id = ? AND friend_count = 0 AND created
 - **Redisson**：一律用 async API 加 `orTimeout(剩余预算)`。同步调用最坏要阻塞 4.2 s，已超过预算（`docs/design/architecture.md:415-417`）。
   - 申请配额超时 → 按 error 处理，fail-open。
   - 目录配额超时 → 1003，fail-closed。
-- **线程**：阻塞 I/O 放在有界工作池里，照 `xm-login/.../dispatch/LoginWorkerPool.java` 的固定线程 + 有界队列 + AbortPolicy。
+- **线程**：阻塞 I/O 放在有界工作池里，照 `game-login/.../dispatch/LoginWorkerPool.java` 的固定线程 + 有界队列 + AbortPolicy。
   - 不许在 Dubbo I/O 线程上做阻塞 I/O（`AGENTS.md` §3）。
   - 队列满 → in-band 1003 应答体（照 login 的 `route.failure`，`ClientMessageDispatcher.java:104-109,183-188`）。
 - **Dubbo retries**：gate 对 friend 的 `@DubboReference` **必须显式写 `retries = 0`**，写路径不幂等。
-  - 先例：`xm-gateway/.../GatewayDubboConfiguration.java:32`、`xm-login/.../LoginConfiguration.java:78`。
-  - 现有 login 引用没有写 retries（`xm-gate/.../GateConfiguration.java:69-73`），是否一并修是待决项。
+  - 先例：`game-gateway/.../GatewayDubboConfiguration.java:32`、`game-login/.../LoginConfiguration.java:78`。
+  - 现有 login 引用没有写 retries（`game-gate/.../GateConfiguration.java:69-73`），是否一并修是待决项。
 
 ### 7.4 错误映射：基线客户端所见 → Java `ClientReply`
 
@@ -1448,7 +1448,7 @@ DELETE FROM friend_capacity WHERE player_id = ? AND friend_count = 0 AND created
 
 - 在 `DubboGroups` 加 `FRIEND = "friend"`。
 - 在 `MessageRoutes.SERVICE_BACKENDS` 加 `"ClientPlayerFriend" → DubboGroups.FRIEND`（`MessageRoutes.java:27-29`）。
-- `ClientDispatcher.dispatch` 目前把非 login / scene 域推成 23{1003}（:267-281）。要按 `callLogin` 的形状加一个通用后端分支：回调回到会话 EventLoop，`xm_gate_backend_calls_seconds` 加 `backend=friend`。
+- `ClientDispatcher.dispatch` 目前把非 login / scene 域推成 23{1003}（:267-281）。要按 `callLogin` 的形状加一个通用后端分支：回调回到会话 EventLoop，`game_gate_backend_calls_seconds` 加 `backend=friend`。
 - **不要占用会话唯一的 `inFlight` 位**。
   - login 调用在途时，该会话的所有后续请求都排队（`ClientSession.java:67`；`ClientDispatcher.java:257-265,290`）。
   - friend 最坏要 5 s；移动等 scene 消息排满 `max-pending-requests=64`（`application.yaml:55`）就会**断开连接**（`ClientDispatcher.java:223-229`）。
@@ -1479,15 +1479,15 @@ DELETE FROM friend_capacity WHERE player_id = ? AND friend_count = 0 AND created
 
 ### 8.2 Java 建议
 
-约定：一个 `FriendMetrics` 类，Micrometer，启动时注册全部组合。不以 player_id / zone 作 label（`docs/design/architecture.md:528,546-549`；`AGENTS.md` §5）。前缀随进程名，独立进程 xm-friend → `xm_friend_`。
+约定：一个 `FriendMetrics` 类，Micrometer，启动时注册全部组合。不以 player_id / zone 作 label（`docs/design/architecture.md:528,546-549`；`AGENTS.md` §5）。前缀随进程名，独立进程 game-friend → `game_friend_`。
 
 | 指标 | 类型 | label |
 |---|---|---|
-| `xm_friend_requests_seconds` | Timer（与 gate / login 同一套 SLO 桶） | `method` = ClientPlayerFriend.方法名 / unknown；`result` = ok / business_error / internal_error / overloaded / bad_request / unauthenticated / forbidden / unsupported |
-| `xm_friend_pushes_total` | Counter | `reason` = request_received / request_accepted；`outcome` = ok / offline / error |
-| `xm_friend_request_quota_total` | Counter | `outcome` = allowed / rejected / error |
-| `xm_friend_online_lookups_total` | Counter | `outcome` = ok / offline / error |
-| `xm_friend_sweep_pending_rows`、`xm_friend_sweep_idle_capacity_rows` | Gauge | `mode` = report_only / delete |
+| `game_friend_requests_seconds` | Timer（与 gate / login 同一套 SLO 桶） | `method` = ClientPlayerFriend.方法名 / unknown；`result` = ok / business_error / internal_error / overloaded / bad_request / unauthenticated / forbidden / unsupported |
+| `game_friend_pushes_total` | Counter | `reason` = request_received / request_accepted；`outcome` = ok / offline / error |
+| `game_friend_request_quota_total` | Counter | `outcome` = allowed / rejected / error |
+| `game_friend_online_lookups_total` | Counter | `outcome` = ok / offline / error |
+| `game_friend_sweep_pending_rows`、`game_friend_sweep_idle_capacity_rows` | Gauge | `mode` = report_only / delete |
 | `executor_*{name="friend-worker"}` | 线程池标准指标 | — |
 
 `result` 各取值的含义：
@@ -1500,11 +1500,11 @@ DELETE FROM friend_capacity WHERE player_id = ? AND friend_count = 0 AND created
 - unsupported：不认识的消息号。
 
 Java 增项（都是低基数，基线没有）：
-- `xm_friend_directory_quota_total{outcome}`
-- `xm_friend_cache_total{cache=list/pending, result=hit/miss/fill_skipped/fill_failed/error}`
-- `xm_friend_cache_invalidation_failures_total`
-- `xm_friend_guard_retries_total{kind=missing_row/ensure_deadlock}`
-- `xm_friend_count_underflows_total`
+- `game_friend_directory_quota_total{outcome}`
+- `game_friend_cache_total{cache=list/pending, result=hit/miss/fill_skipped/fill_failed/error}`
+- `game_friend_cache_invalidation_failures_total`
+- `game_friend_guard_retries_total{kind=missing_row/ensure_deadlock}`
+- `game_friend_count_underflows_total`
 
 ---
 
@@ -1549,12 +1549,12 @@ Java 增项（都是低基数，基线没有）：
 
 18. **随机推荐依赖优化器选 range 访问**；统计陈旧时会退化成全扫，没有运行期兜底（`recommend_repo.go:35-46`）。
 19. **在线目录配额 fail-closed**；被拒的请求也计数；非法输入不计数。它的阈值 60/分钟与 gate 对 119 的 1/s 叠加生效。
-20. **在线目录的 SCAN 成本与整个 Redis DB 的键数成正比**，不只与在线人数有关。Java 的 DB 12 装着全部 `xm:*` 键，加上 friend 自己的缓存和代次键，会让每页更容易是空页。客户端支持"空页 + 非空游标"，但体验会变差。备选方案见 §10.3。
+20. **在线目录的 SCAN 成本与整个 Redis DB 的键数成正比**，不只与在线人数有关。Java 的 DB 12 装着全部 `game:*` 键，加上 friend 自己的缓存和代次键，会让每页更容易是空页。客户端支持"空页 + 非空游标"，但体验会变差。备选方案见 §10.3。
 21. **在线目录不排除好友，也不排除任一方向的拉黑**：被我拉黑的人、拉黑了我的人都会出现（data/online_directory.go 全程不读 MySQL）。
 
 **包体与协议**
 
-22. **单包大小**：1000 条带 name / appearance 的 FriendEntry 可能超过 64 KB 帧上限（`xm-net/.../client/ClientFrames.java:34`）。MaxFriends ≤300 时正常数据量不会触发，但 LIMIT 1000 是防御值。
+22. **单包大小**：1000 条带 name / appearance 的 FriendEntry 可能超过 64 KB 帧上限（`game-net/.../client/ClientFrames.java:34`）。MaxFriends ≤300 时正常数据量不会触发，但 LIMIT 1000 是防御值。
 23. **RecommendFriendsRequest 可能超过 1 KB**：64 个 exclude（约 9–10 字节 × 64）+ 48 字节游标 + 64 个四字节 rune 的 query + 外层 ClientRequest，接近 1 KB 上限。超了 gate 回信封 1010，并计非法包（`ClientDispatcher.java:198-203`）。Unity 不发 exclude，所以影响限于 robot 和第三方客户端。
 24. **列表 LIMIT 不带 ORDER BY**：被截断时返回哪一部分取决于执行计划。入站申请通常按 from_player_id 升序，不是按申请时间（`friend_repo.go:1221-1224`）。
 
@@ -1617,7 +1617,7 @@ Java 增项（都是低基数，基线没有）：
 4. 漏了代次键由客户端驱动的永久增长（§9.1 第 12 条）。
 5. 漏了两个 Java 隐患：gate 唯一的 inFlight 位（§7.5）、uint64 绑定（§9.1 第 25 条）。
 6. 漏了 119 请求可能超过 1 KB（§9.1 第 23 条），也漏了在线目录 SCAN 在 Java 单 DB 上的成本（§9.1 第 20 条）。
-7. 原稿之间的 Redis 键名和指标前缀不一致。统一为 `xm:friend:{<pid>}:*` 与 `xm_friend_*`（§3.5、§8.2）。
+7. 原稿之间的 Redis 键名和指标前缀不一致。统一为 `game:friend:{<pid>}:*` 与 `game_friend_*`（§3.5、§8.2）。
 8. 原稿没提 presence 的 `zone_id` 是 gate 的区、不是 home zone（§4.1）。
 9. 原稿没提 Java 游标解析要防非 ASCII 数字（§5.2）。
 
@@ -1645,11 +1645,11 @@ Java 增项（都是低基数，基线没有）：
 
 | 编号 | 差异 | 理由 | 客户端可见？ | 是否需要两版同改 |
 |---|---|---|---|---|
-| D1 | 在线状态源改为 `xm:presence`：带 TTL，gate 写，没有 DISCONNECTING 状态 | Java 架构已定（`PARITY.md:54`，architecture.md §4.3）；断线即离线，与基线把 DISCONNECTING 判为离线等价 | 轻微：EnterGame 到场景确认之间的秒级窗口里，is_online 为 false | 否，已登记 |
+| D1 | 在线状态源改为 `game:presence`：带 TTL，gate 写，没有 DISCONNECTING 状态 | Java 架构已定（`PARITY.md:54`，architecture.md §4.3）；断线即离线，与基线把 DISCONNECTING 判为离线等价 | 轻微：EnterGame 到场景确认之间的秒级窗口里，is_online 为 false | 否，已登记 |
 | D2 | `last_active_ms` 用 `online_since_ms` 填 | 与基线语义（上线 / 重连时刻）相同；robot 要求非 0 | 否（语义等价） | 否 |
 | D3 | 推送走 Redis pub/sub + 玩家栅栏；`GATE_UNREACHABLE` 记 error | Java 架构已定（`PARITY.md:55`）；栅栏防止推错人 | 否 | 否，已登记；指标口径需登记 |
-| D4 | 展示资料来自 `xm_java.player` 表，不用 PlayerAllData 缓存和 data_service | Java 没有这两套组件；表里字段齐全，name 恒非空，zone_id 恒为 home zone | 是：Java 的 name / zone 更完整；level 到存盘才更新，在线玩家可能滞后；新角色 level 是 1 不是 0 | 登记 PARITY 即可 |
-| D5 | 在线目录的枚举源改为 SCAN `xm:presence:*`，home zone 取自 player 行 | 数据源变了，算法、游标、过滤与形状逐条保持 | 否（形状一致） | 登记 |
+| D4 | 展示资料来自 `game.player` 表，不用 PlayerAllData 缓存和 data_service | Java 没有这两套组件；表里字段齐全，name 恒非空，zone_id 恒为 home zone | 是：Java 的 name / zone 更完整；level 到存盘才更新，在线玩家可能滞后；新角色 level 是 1 不是 0 | 登记 PARITY 即可 |
+| D5 | 在线目录的枚举源改为 SCAN `game:presence:*`，home zone 取自 player 行 | 数据源变了，算法、游标、过滤与形状逐条保持 | 否（形状一致） | 登记 |
 | D6 | 代次键改为"失效时 `SET gen <UUID> PX 2×CacheTTL` 再 `DEL data`"，回填时比较字符串，代次缺失按 "0" | 消除 §9.1 第 12 条（永久键无界增长）和第 13 条（ABA）。唯一值不会重现，ABA 不可能发生；代次键只在超过 2×CacheTTL 没有写入时才过期，远大于单次读的耗时，过期也无害 | 否（内部） | 否（可选；不采纳就必须要求 Redis 用 noeviction） |
 | D7 | 回填单飞改为可回收、限时等待 | 基线的锁不感知超时、条目不回收（§9.1 第 11 条） | 否 | 否 |
 | D8 | gate 给 friend 域独立的在途队列 | 避免 friend 阻塞 scene、排满 64 而断线（§7.5） | 否 | 否 |
@@ -1669,9 +1669,9 @@ Java 增项（都是低基数，基线没有）：
 ### 10.3 待用户拍板的决策
 
 1. friend 四张表的事实源：
-   - 直接用同步来的 `xm-proto/.../friend/friend_table.proto` 经 pbmysql 建表——这些是契约同步产物、禁止手改，Java 存储会随 mmorpg 漂移；
+   - 直接用同步来的 `game-proto/.../friend/friend_table.proto` 经 pbmysql 建表——这些是契约同步产物、禁止手改，Java 存储会随 mmorpg 漂移；
    - 还是 Java 自有一份同形的 proto。
-2. 进程形态：独立的 xm-friend（路线图写的是"每个服务一个进程"），还是与 chat 合并成 xm-social。这决定了指标前缀。
+2. 进程形态：独立的 game-friend（路线图写的是"每个服务一个进程"），还是与 chat 合并成 game-social。这决定了指标前缀。
 3. 生产 Redis 的 `maxmemory-policy` 能否定为 noeviction 或 volatile-*；以及是否采纳 D6。
 4. gate 现有的 login Dubbo 引用要不要一并补上 `retries = 0`（`GateConfiguration.java:70`）。
 5. 是否给在线目录维护专用的在线索引（例如按区的 SET，用 SSCAN），以避免全 DB 的 SCAN 成本（§9.1 第 20 条）。

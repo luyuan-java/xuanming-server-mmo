@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.game</groupId>
+        <artifactId>xuanming-server-mmo</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>game-login</artifactId>
+    <name>game-login</name>
+    <description>登录服（Spring Boot + Dubbo 提供方）：登录、建角、进游戏、离开 / 断线；表结构 game-player-schema.sql 的唯一初始化者</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-spring-boot-starter</artifactId>
+        </dependency>
+        <!-- 只在 nacos profile 下生效（dubbo.registry.address=nacos://...）；默认配置注册中心为 N/A、走直连 URL -->
+        <dependency>
+            <groupId>org.apache.dubbo</groupId>
+            <artifactId>dubbo-nacos-spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-proto</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-table</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-discovery</artifactId>
+        </dependency>
+        <!-- 生产口令认证的 Argon2id（Argon2BytesGenerator） -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-player-store</artifactId>
+        </dependency>
+        <!-- 可观测性（architecture.md §11）：业务入口是 Dubbo；这里的 Tomcat 只挂 actuator 管理端点（health / prometheus），
+             端口与绑定地址见 application.yaml 的 server.*。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 只用于测试：存量口令迁移工具（tools/PasswordAdmin）对 MySQL 兼容模式的内存库跑真实 SQL；版本由 Spring Boot BOM 管理 -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.game.login.LoginApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

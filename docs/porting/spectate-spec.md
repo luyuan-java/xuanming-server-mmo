@@ -5,9 +5,9 @@
 > **稀疏克隆里缺的目录**（凡依赖它们的结论都标了「推导」）：`robot/config/`（`BattleSmokeConfig.validate` 不可读，只能引 `bsc.go:63-64` 的注释「配置层把非 "1v1" 拒掉」）、
 > `robot/generated/`、`bin/etc/`。Unity 客户端是另一份稀疏克隆 `D:\work\mmorpg-client` @ `a8577c7`：`Assets/Scripts/{Game/Battle,UI/Ugui/Battle,App,Net}` 已检出，
 > **`tools/` 不在**（双播放器验收脚本 `tools/run_crosszone_pair.ps1` 不可读，只读了 `DevAutoPilot.cs`）。
-> **Java（成稿时，2026-10-05）**：HEAD `9fde7d8`（5.2 `6b28e9d`、7.1a / 7.2a `37dd8dc` 已提交；本稿随 `9fde7d8` 入库）加工作区。成稿时 6.2 的 xm-battle 还在工作区（**房间侧观战已实现**，`bn-spec` Q1 已采纳），
-> 6.3 / 6.4 / 5.4 只有规格、xm-match 还没有代码。正文里引的 Java 行号是成稿时的，回写时没有逐个更新，**以类名 / 方法名为准**。
-> **状态（2026-10-08）**：6.2、6.3、6.4 已落地；**批次 6.5 已实现并集成**（先行件、六个工作包、集成、评审修正；提交见 git log「批次 6.5」）。163 / 164 是真实现，M22 已关闭；双 zone 本机切片（`XM_ZONES=2`）与 robot 的 `--visit-zone`
+> **Java（成稿时，2026-10-05）**：HEAD `9fde7d8`（5.2 `6b28e9d`、7.1a / 7.2a `37dd8dc` 已提交；本稿随 `9fde7d8` 入库）加工作区。成稿时 6.2 的 game-battle 还在工作区（**房间侧观战已实现**，`bn-spec` Q1 已采纳），
+> 6.3 / 6.4 / 5.4 只有规格、game-match 还没有代码。正文里引的 Java 行号是成稿时的，回写时没有逐个更新，**以类名 / 方法名为准**。
+> **状态（2026-10-08）**：6.2、6.3、6.4 已落地；**批次 6.5 已实现并集成**（先行件、六个工作包、集成、评审修正；提交见 git log「批次 6.5」）。163 / 164 是真实现，M22 已关闭；双 zone 本机切片（`GAME_ZONES=2`）与 robot 的 `--visit-zone`
 > 由 6.5 提前落地（lead 裁决 1），**5.4 仍未实施**（226 / 124、GO-5、X16 都不在）。正文 §0–§10 已按实现回写（标「落地」的是实现阶段定下来的口径）；类的落点、与原稿的出入、评审的发现与修正、证据与遗留见文末「实现记录（2026-10-08）」，与正文冲突时以它和代码为准。6.4 对本稿三条要求的落地情况在 §4.11 的表里。
 > 本稿由三份分区稿合并（match 侧观战盘点、跨区 1V1 盘点、Java 落地映射），分歧都回到代码核对后在 §0.4 裁决。只读编写，只改本文件。
 
@@ -28,7 +28,7 @@
 | `SC.cs` / `SP.cs` / `BC.cs` / `DAP.cs` | 客户端 `Assets/Scripts/Game/Battle/SpectateClient.cs`、`Assets/Scripts/UI/Ugui/Battle/SpectatePanel.cs`、`Assets/Scripts/Game/Battle/BattleClient.cs`、`Assets/Scripts/App/DevAutoPilot.cs` |
 
 **路径缩写（Java）**：`m-spec` / `bn-spec` / `sb-spec` / `zt-spec` / `ci-spec` = `docs/porting/` 下的 `match-spec.md`（6.4）/ `battle-node-spec.md`（6.2）/ `scene-battle-spec.md`（6.3）/
-`zone-travel-spec.md`（5.4）/ `deploy-ci-spec.md`（7.1）；`arch` = `docs/design/architecture.md`；`BRS.java` = `xm-battle/src/main/java/com/game/battle/room/BattleRoomServiceImpl.java`。
+`zone-travel-spec.md`（5.4）/ `deploy-ci-spec.md`（7.1）；`arch` = `docs/design/architecture.md`；`BRS.java` = `game-battle/src/main/java/com/game/battle/room/BattleRoomServiceImpl.java`。
 
 ---
 
@@ -37,17 +37,17 @@
 ### 0.1 结论速览
 
 - **match 侧观战只有两个客户端号**：163 WatchBattle、164 ListWatchableBattles。161 / 158 / 166 / 165 / 177(OBSERVER) 都由 battle 发出或接收，6.2 已实现。
-  match 对 battle 只调 `addObserver` / `removeObserver` 两个内部方法（`xm-api/src/main/java/com/game/api/BattleNodeService.java:54`、`:57`）。
+  match 对 battle 只调 `addObserver` / `removeObserver` 两个内部方法（`game-api/src/main/java/com/game/api/BattleNodeService.java:54`、`:57`）。
 - **客户端契约逐字节照搬**：163 的判定顺序、16004 / 16014–16019 与 9 条 `parameters[0]` 中文串（半角逗号）、成功应答只带 `battle_id`、164 的条数收口 / 排序 / 懒剔除不回填、
   `BattleWatchSummary` 的字段来源、随机选场两轮、换场与「重看同一场」的区别、「先观战后排队允许、先排队后观战拒绝」的不对称互斥、开局前清退推 166 REMOVED。
-- **Java 落地**：xm-match 新包 `com.game.match.spectate`，不新增进程、不新增第三方依赖（`tech-stack.md` 不改）。
-  - 复用 6.4 的落点记录 `xm:{match}:battle:<id>`（同时充当观战记录）、票据的只读口 `TicketReader`、`GatherHooks.beforePrepare / onStarted`、按落点直拨的 `placement.PlacementDialer`（用它自己的客户端缓存 `PlacementClients`）；
-    战斗锁（6.3）与在线目录 `xm:presence:<pid>` 经 xm-match 惯用的读口 `port.PlayerStatusReader`（`inBattle` / `presence`）读。
-  - 新增两个键 `xm:{match}:watching:<pid>`（观战标记）、`xm:{match}:watchable`（可观战索引），与票据同 tag。基线靠「先查后写 + 事后复查」拼出来的几处改成单段 Lua（落地：11 段，§4.3）。
+- **Java 落地**：game-match 新包 `com.game.match.spectate`，不新增进程、不新增第三方依赖（`tech-stack.md` 不改）。
+  - 复用 6.4 的落点记录 `game:{match}:battle:<id>`（同时充当观战记录）、票据的只读口 `TicketReader`、`GatherHooks.beforePrepare / onStarted`、按落点直拨的 `placement.PlacementDialer`（用它自己的客户端缓存 `PlacementClients`）；
+    战斗锁（6.3）与在线目录 `game:presence:<pid>` 经 game-match 惯用的读口 `port.PlayerStatusReader`（`inBattle` / `presence`）读。
+  - 新增两个键 `game:{match}:watching:<pid>`（观战标记）、`game:{match}:watchable`（可观战索引），与票据同 tag。基线靠「先查后写 + 事后复查」拼出来的几处改成单段 Lua（落地：11 段，§4.3）。
   - 观众 RPC 按落点记录里的地址**直拨**，判死规则与 6.4 的 179 共用（`placement.PlacementDialer`；6.5 给它加了带硬截止的重载，§4.8）。
   - 163 跑在虚拟线程上（在途上限 128、4.5 s 预算；处理器经 `MatchMethodHandler.executor()` 自带执行器），164 跑在 `match-worker` 上。
 - **跨区 1V1 不需要新的生产代码路径**：6.4 的排队池全局、6.2 的 battle 池全局、6.3 / 6.4 的 scene 定位按 (zone, 节点号) 区分、6.2 的推送按带 zone 的在线目录寻址，
-  组合起来天然支持跨区。6.5 交付的是不变量清单 Z1–Z12（§2.7；Z1–Z3、Z5–Z7、Z11、Z12 有组件测试钉住，Z8、Z10 靠双 zone 切片上的 robot，Z4、Z9 是既有架构的事实、没有单独的用例）、「同号节点跨 zone 碰撞」的单测 / 组件测试与寻址审计、`XM_ZONES=2` 的本机切片脚本、切片上的 robot 场景 `battle-cross-zone`、PARITY 登记。
+  组合起来天然支持跨区。6.5 交付的是不变量清单 Z1–Z12（§2.7；Z1–Z3、Z5–Z7、Z11、Z12 有组件测试钉住，Z8、Z10 靠双 zone 切片上的 robot，Z4、Z9 是既有架构的事实、没有单独的用例）、「同号节点跨 zone 碰撞」的单测 / 组件测试与寻址审计、`GAME_ZONES=2` 的本机切片脚本、切片上的 robot 场景 `battle-cross-zone`、PARITY 登记。
 - **有意差异**（§8）：客户端可见的都只出现在故障、竞态、过载或很窄的时间窗里。两处基线的「正常路径」怪癖（ready 残留回 16014、已结束的战斗留在列表里）**本批照搬**，
   登记为「两版同改候选」（§8.4），不在 Java 单边改客户端可见行为。
 
@@ -65,13 +65,13 @@
 
 | 批次 | 6.5 依赖它的 | 6.5 交给它 / 要它改的 |
 |---|---|---|
-| **6.2 battle**（工作区已实现房间侧） | `addObserver` 的判定顺序与码（`BRS.java:320-366`）、幂等分支（`:368-401`，签不出票时摘除 + 关直连 + 1003）、`removeObserver` 推 166 REMOVED（`:405-424`）、观众上限 20（`RoomConstants.java:33`）、177 有活直连时直写、否则按在线目录经 gate 回落（`BRS.java:796-800`；`PresenceLobbyAnnouncer.java`；`bn-spec` N2）、161 随直连握手下发、165 白名单 | **已做（先行件）**：`DevRoutingResolver` 的私有 `gateRouting` 挪成 xm-discovery 的 `BattleRoutings.gatePart`，观战与 dev 接口共用（§4.11）；dev `add-observer` 的接口注释写明不写 match 标记（Q14）。xm-battle 的业务代码没有改 |
+| **6.2 battle**（工作区已实现房间侧） | `addObserver` 的判定顺序与码（`BRS.java:320-366`）、幂等分支（`:368-401`，签不出票时摘除 + 关直连 + 1003）、`removeObserver` 推 166 REMOVED（`:405-424`）、观众上限 20（`RoomConstants.java:33`）、177 有活直连时直写、否则按在线目录经 gate 回落（`BRS.java:796-800`；`PresenceLobbyAnnouncer.java`；`bn-spec` N2）、161 随直连握手下发、165 白名单 | **已做（先行件）**：`DevRoutingResolver` 的私有 `gateRouting` 挪成 game-discovery 的 `BattleRoutings.gatePart`，观战与 dev 接口共用（§4.11）；dev `add-observer` 的接口注释写明不写 match 标记（Q14）。game-battle 的业务代码没有改 |
 | **6.3 scene** | `BattleLockReader.exists`（16015）；`BattleRouting.zone_id` 由 scene 填自己的 zone；确认事件按 `(zone_id, scene_node_id)` 寻址、实例不符回落定位器（`sb-spec` §7.16 :934-935）；结算首投 / 重投经 `SceneAssetLocator` 按位置记录的 zone 解析（`sb-spec` §7.15 :918）；scene 应用结算后经大厅再推一份 150（`sb-spec:333`） | 跨区 robot 的结算断言（§10.8 Z7）依赖它 |
-| **6.4 match** | xm-match 进程、163 / 164 已路由到 group match（`m-spec` §9.2）；落点记录 `BattlePlacement`（`m-spec` §4.3 :468-509）；`GatherHooks`（第 2.5 步 / 第 5 步，`m-spec` §9.6）；`MatchBudgets`；`placement.PlacementDialer` / `PlacementClients`；179 的判死规则（M16：请求确定没送达 + 同号换实例 + 原地址探测明确连不上）；6.4 期间 163 回 in-band 1006、164 回空列表（M22） | **都已做**：163 / 164 的临时处理器换成真处理器、M22 关闭、163 / 164 不再在 Dubbo 线程上当场回（`m-spec` §8.1、§9.3、§9.8、§9.9 已回写）；`created_at_ms` 取 Redis `TIME`、`player_names` 按成员顺序、`PlacementDialer` 三条是 6.4 自己做的（§4.11 的现状表） |
-| **5.4 跨 zone** | `XM_ZONES=2` 本机切片（`zt-spec` §5.13 :821-839）：xm-gate-z2（11010 / 18123，节点号也会是 1）、xm-scene-z2（21010 / 21110 / 18115）、gateway 双区播种；robot 选项 `--visit-zone`（`zt-spec` §11.11）。**落地：5.4 没有实施，这两样由 6.5 提前做了**（lead 裁决 1；只有脚本与 robot 选项，不含 5.4 的任何生产代码；与 §5.13 原设计的出入见 §10.6） | §5.13 的「共用」行（**已含 battle**）加 xm-match；`--visit-zone` 的帮助文本是「另一个区」（Q16）。**不依赖** 226 / 124、GO-5、X16。`zt-spec` §5.13 / §11.9 / §11.11 已回写 |
+| **6.4 match** | game-match 进程、163 / 164 已路由到 group match（`m-spec` §9.2）；落点记录 `BattlePlacement`（`m-spec` §4.3 :468-509）；`GatherHooks`（第 2.5 步 / 第 5 步，`m-spec` §9.6）；`MatchBudgets`；`placement.PlacementDialer` / `PlacementClients`；179 的判死规则（M16：请求确定没送达 + 同号换实例 + 原地址探测明确连不上）；6.4 期间 163 回 in-band 1006、164 回空列表（M22） | **都已做**：163 / 164 的临时处理器换成真处理器、M22 关闭、163 / 164 不再在 Dubbo 线程上当场回（`m-spec` §8.1、§9.3、§9.8、§9.9 已回写）；`created_at_ms` 取 Redis `TIME`、`player_names` 按成员顺序、`PlacementDialer` 三条是 6.4 自己做的（§4.11 的现状表） |
+| **5.4 跨 zone** | `GAME_ZONES=2` 本机切片（`zt-spec` §5.13 :821-839）：game-gate-z2（11010 / 18123，节点号也会是 1）、game-scene-z2（21010 / 21110 / 18115）、gateway 双区播种；robot 选项 `--visit-zone`（`zt-spec` §11.11）。**落地：5.4 没有实施，这两样由 6.5 提前做了**（lead 裁决 1；只有脚本与 robot 选项，不含 5.4 的任何生产代码；与 §5.13 原设计的出入见 §10.6） | §5.13 的「共用」行（**已含 battle**）加 game-match；`--visit-zone` 的帮助文本是「另一个区」（Q16）。**不依赖** 226 / 124、GO-5、X16。`zt-spec` §5.13 / §11.9 / §11.11 已回写 |
 | 5.1 / 5.2 / 5.3 / 5.5 | 无（观众没有战斗锁、不冻结，换图 / 交接 / 镜像 / 排空都不受观战影响，同基线） | 无 |
 | 7.1 CI | 整栈冒烟分期（`ci-spec` §4.5 :736-760） | 第三期之后用两 zone 覆盖文件 `two-zones.yaml` 跑 `battle-cross-zone`（Q22） |
-| 7.2 数据运维 / 7.3 合服 / 7.6 发布 | 无（观众没有锁，GM 回档等不被观战挡住，同基线；合服对 `xm:{match}:*` 不动，`zone-merge-spec.md:562`，观战键全服共用、不带 zone） | 7.6：battle 通告地址对全部 zone 可达（§2.8 第 4 条，`ops-release-spec` 已引用）、match 多副本下清扫器幂等（§4.7）、`xm_match_watchable_battles` 取 max（§6） |
+| 7.2 数据运维 / 7.3 合服 / 7.6 发布 | 无（观众没有锁，GM 回档等不被观战挡住，同基线；合服对 `game:{match}:*` 不动，`zone-merge-spec.md:562`，观战键全服共用、不带 zone） | 7.6：battle 通告地址对全部 zone 可达（§2.8 第 4 条，`ops-release-spec` 已引用）、match 多副本下清扫器幂等（§4.7）、`game_match_watchable_battles` 取 max（§6） |
 
 ### 0.4 分区稿分歧与裁决（都回到代码或现状核对过）
 
@@ -83,7 +83,7 @@
 | 4 | 复查时读战斗锁出错 | ① 改回 16004；③「读失败只记日志」 | **照搬基线**：读票出错只记日志、按无票继续；读锁出错按「有锁」处理（`pc.go:113-121` 回 `(true, err)`，`wb.go:218-222` 直接用它），自我清退并回 16014（BW2）。③ 的写法与基线不符；① 是只在 Redis 故障时可见的改动，收益小，不做 |
 | 5 | 163 的执行器 | ① `match-worker` 带 4500 ms 截止；③ 虚拟线程 + 在途上限 | **虚拟线程 + 在途上限 128**（W10、Q2）。163 最坏串两跳 3 s 的 RPC，放在 16 线程的 `match-worker` 上，一个慢 battle 节点就能把 157 / 148 / 153 挤成过载；与 6.4 gather 同一执行模式 |
 | 6 | 复查命中后的自我清退 RemoveObserver | ① 同步，预算耗尽才异步；③ 一律异步 | **一律异步、不等**：应答不依赖它的结果（基线 `removeObserver` 失败也只记日志，`sp.go:374-390`），持票 / 持锁的玩家此后发不出能与之竞争的 163（入口第 3 / 5 步就拒）。**例外**（第三轮评审补）：并发的 gather 很快失败、票被删且没加锁时，玩家可以立刻再发 163(同一场)，迟到的异步 Remove 可能摘掉这次新登记——只在竞态下可见，残余风险与理由见 §7.1 第 4 条 |
-| 7 | 可观战索引的键名 | ① `xm:{match}:spectate:active`；③ `xm:{match}:watchable` | **`xm:{match}:watchable`** |
+| 7 | 可观战索引的键名 | ① `game:{match}:spectate:active`；③ `game:{match}:watchable` | **`game:{match}:watchable`** |
 | 8 | 随机选场 | ① Lua 只在未过期成员里随机；③ 全集随机下标、Java 侧重抽 | **按分数过滤**（W8）：Java 的兜底清扫是 10 s 一轮（基线 500 ms），读路径必须自己挡住过期成员；分布与基线在存活成员上相同 |
 | 9 | 清扫间隔 | ① 5 s；③ 10 s | **10 s、可配**：读路径已按分数过滤，间隔只影响残留成员的数量 |
 | 10 | 跨区 robot 的第二个区参数 | ② 新增 `--zone-b`；③ 复用 5.4 的 `--visit-zone` | **复用 `--visit-zone`**（Q16），不增加同义选项；5.4 没合入时由 6.5 按 `zt-spec` §11.11 的名字与语义加 |
@@ -98,7 +98,7 @@
 
 - 纯函数与组件测试只依赖 6.4 的代码加替身。
 - `battle-smoke` 观战段的端到端依赖 6.3：参战者要真实冻结，打完要能结算，才能再排队（§10.7 S11）。
-- `battle-cross-zone` 需要 `XM_ZONES=2` 的切片：原计划等 5.4 §5.13，实际由 6.5 自己落地脚本那一小块（lead 裁决 1）。X16（建角取会话 zone）只影响一条可选断言（角色列表里的 zone_id），不是硬依赖（Q26）；那条断言没有实现，等 5.4。
+- `battle-cross-zone` 需要 `GAME_ZONES=2` 的切片：原计划等 5.4 §5.13，实际由 6.5 自己落地脚本那一小块（lead 裁决 1）。X16（建角取会话 zone）只影响一条可选断言（角色列表里的 zone_id），不是硬依赖（Q26）；那条断言没有实现，等 5.4。
 
 ---
 
@@ -106,7 +106,7 @@
 
 ### 1.1 协议面与归属
 
-消息号来自 `xm-proto/src/main/resources/contract/message_id.txt`（第 N+1 行是 N 号；基线 `proto/message_id.txt:159-167`、`:178`）。
+消息号来自 `game-proto/src/main/resources/contract/message_id.txt`（第 N+1 行是 N 号；基线 `proto/message_id.txt:159-167`、`:178`）。
 
 | 号 | 名 | 方向 / 通道 | 形状 | 归属 |
 |---|---|---|---|---|
@@ -325,31 +325,31 @@ match logic 里没有任何归属区引用（只有 team 模块读，`go/match/i
 |---|---|---|---|
 | Z1 | 队列键、凑单锁、注册集都不含 zone；zone 只作观测字段写进票据 | 6.4（`m-spec` §9.4） | `MatcherPortedScenarios`（6.4 已移植 `TestMatcherMixesZonesAndShortensMatchedTTL`，`cz_test.go:153`；内存与真 Redis 两个子类各跑一遍）；`QueueServiceTest`（两个 zone 的玩家进同一条队列） |
 | Z2 | JoinQueue 的 zone 取位置记录（严格读，`o` 才算），请求体的 zone 与 `SessionContext.zone_id` 都不用 | 6.4（`m-spec` §2.2 第 7–8 步） | `QueueServiceTest`：会话 zone 1、位置 zone 2 → 票据 zone 2 |
-| Z3 | gather 逐人按**位置记录的 (zone, 节点号)** 读 `xm:nodes:scene:<zone>`；Cancel 发回 Prepare 时记下的端点 | 6.4 `ScenePreparer`（`m-spec` §9.6 第 3 步、fail 行） | `ScenePreparerTest` / `CrossZoneGatherTest` 同号碰撞；真 Redis 上 `ScenePreparerRedisIntegrationTest` |
-| Z4 | battle 池 `xm:nodes:battle:0`（作用域 0） | 6.2（`NodeTypes.java:32-36`；`bn-spec` §7.10） | — |
-| Z5 | 177 / 143 / 156 / 154 / 大厅 150 都按在线目录寻址，发往带 zone 的频道 `xm:gate-push:{zone}:{gate}`，再按 gate 实例过滤 | 6.2 N2、`arch` §4.3（`RedisKeys.java:351`；`PlayerPushes.java:130`） | xm-discovery `PlayerPushesTest`、`GatePushCrossZoneIntegrationTest`（真 Redis pub/sub）；xm-battle `PresenceLobbyAnnouncerTest` 同号 |
+| Z3 | gather 逐人按**位置记录的 (zone, 节点号)** 读 `game:nodes:scene:<zone>`；Cancel 发回 Prepare 时记下的端点 | 6.4 `ScenePreparer`（`m-spec` §9.6 第 3 步、fail 行） | `ScenePreparerTest` / `CrossZoneGatherTest` 同号碰撞；真 Redis 上 `ScenePreparerRedisIntegrationTest` |
+| Z4 | battle 池 `game:nodes:battle:0`（作用域 0） | 6.2（`NodeTypes.java:32-36`；`bn-spec` §7.10） | — |
+| Z5 | 177 / 143 / 156 / 154 / 大厅 150 都按在线目录寻址，发往带 zone 的频道 `game:gate-push:{zone}:{gate}`，再按 gate 实例过滤 | 6.2 N2、`arch` §4.3（`RedisKeys.java:351`；`PlayerPushes.java:130`） | game-discovery `PlayerPushesTest`、`GatePushCrossZoneIntegrationTest`（真 Redis pub/sub）；game-battle `PresenceLobbyAnnouncerTest` 同号 |
 | Z6 | scene 用自己的 zone 填 `BattleRouting.zone_id`；确认事件按 `(zone_id, scene_node_id)` + 实例，不符回落定位器 | 6.3（`sb-spec` §7.16 :934-935） | `DubboSceneBattleEventsTest` 同号 |
 | Z7 | 结算首投 / 重投经 `SceneAssetLocator`，按位置记录的 zone 读目录 | 6.3（`sb-spec` §7.15 :918；`SceneAssetLocator.java:21-35`） | `SettlementOutboxTest`（接真的 `SceneAssetLocator`）、`SceneAssetLocatorTest` / `SceneAssetLocationIntegrationTest` 同号；robot Z7 |
-| Z8 | 每个 zone 的 gate 把 `MatchService` 转给同一组 xm-match（local 同一个 `xm.dubbo.match-url`；nacos 下 group `match` 不带 zone） | 6.4（`m-spec` §9.2） | 切片配置；robot |
+| Z8 | 每个 zone 的 gate 把 `MatchService` 转给同一组 game-match（local 同一个 `game.dubbo.match-url`；nacos 下 group `match` 不带 zone） | 6.4（`m-spec` §9.2） | 切片配置；robot |
 | Z9 | 所有 zone 共用一个 Redis | 现有架构（`RedisKeys.presence` / `playerLocation` 不带 zone，`RedisKeys.java:42-55`） | — |
 | Z10 | 评分按 player_id，全局 | 6.4（`m-spec` §5） | robot Z8 |
-| Z11 | `xm_match_gather_zone_mix_total{mode, mix}` 按快照的 `routing.zone_id` 计 | 6.4（`m-spec` §11） | `GatherPipelineTest`、`CrossZoneGatherTest`（没有单独的 `ZoneMixTest`）；robot Z10 |
+| Z11 | `game_match_gather_zone_mix_total{mode, mix}` 按快照的 `routing.zone_id` 计 | 6.4（`m-spec` §11） | `GatherPipelineTest`、`CrossZoneGatherTest`（没有单独的 `ZoneMixTest`）；robot Z10 |
 | Z12 | 观战不分 zone：索引全局；观众路由的 zone 取在线目录（gate 所在 zone） | 6.5（§4.4） | `CrossZoneGatherTest`（经真的 `SpectateGatherHooks` 与 `WatchBattleService`）、`WatchBattleServiceTest`（路由四个字段取在线目录）、`BattleRoutingsTest`；robot Z5 |
 
-**基线需要、Java 不需要的**：D11 的 gate 特判（Java gate 经 Dubbo 按服务名找 match，本来就不按 zone 过滤）；「match 每 zone 一份」（`bsc.yaml:4-5` 只是基线本地部署形态，Java 的 xm-match 全局部署）。
+**基线需要、Java 不需要的**：D11 的 gate 特判（Java gate 经 Dubbo 按服务名找 match，本来就不按 zone 过滤）；「match 每 zone 一份」（`bsc.yaml:4-5` 只是基线本地部署形态，Java 的 game-match 全局部署）。
 
 ### 2.8 Java 特有的坑：同号节点跨 zone 碰撞
 
-1. **scene / gate 的节点号按 zone 租约**：键 `xm:node-id:{type}:{zone}:{id}`（`RedisKeys.java:16-31`；`NodeTypes.java:11`、`:13`），zone 1 与 zone 2 的第一台 scene、第一台 gate 都会是 1 号
-   （`zt-spec` §5.13 :831 明写 xm-gate-z2 节点号也是 1）。任何只按 `scene_node_id` / `gate_node_id` 查目录、拼频道、拼缓存键的代码，都会把 zone 2 玩家的确认、结算、公告送到 zone 1 的同号节点。
-   实例过滤会把它**丢掉而不是送错**，结局是「锁停到 TTL」或「公告丢失」，症状不显眼；本机 `XM_ZONES=2` 天然制造这种碰撞，robot 能暴露它。
+1. **scene / gate 的节点号按 zone 租约**：键 `game:node-id:{type}:{zone}:{id}`（`RedisKeys.java:16-31`；`NodeTypes.java:11`、`:13`），zone 1 与 zone 2 的第一台 scene、第一台 gate 都会是 1 号
+   （`zt-spec` §5.13 :831 明写 game-gate-z2 节点号也是 1）。任何只按 `scene_node_id` / `gate_node_id` 查目录、拼频道、拼缓存键的代码，都会把 zone 2 玩家的确认、结算、公告送到 zone 1 的同号节点。
+   实例过滤会把它**丢掉而不是送错**，结局是「锁停到 TTL」或「公告丢失」，症状不显眼；本机 `GAME_ZONES=2` 天然制造这种碰撞，robot 能暴露它。
 2. **`BattleRouting.gate_node_id` 在 Java 不能用来寻址**（跨 zone 有歧义）。6.2 已改走在线目录（N2）；6.5 的观众路由同样取在线目录（W11），不得用它或 `SessionContext` 拼推送目标。
 3. **三种 zone 不要混用**：位置记录的 zone（所在 zone：JoinQueue、gather、结算）；在线目录的 zone（gate 的 zone：推送、观众路由）；归属区 `player.zone_id`（建角、存盘、组队）。
    稳态下前两者相等；跨 zone 传送途中不等（`zt-spec:427`）。排队期间玩家旅行到别的 zone 时，gather 重读位置：位置处于待落点就判 `no_location`、该玩家作为肇事者出局，两版结局相同。
 4. **battle 的通告地址必须对所有 zone 的客户端可达**：本机 127.0.0.1:12000；多机部署归 7.6。
 
 **落地（寻址审计）**：6.5 把 6.2 / 6.3 / 6.4 的寻址代码逐处回到代码核对了一遍（静态审计），没有发现只按节点号 / 会话号寻址的地方；清单与新增的测试钉见文末实现记录「跨区 1V1：测试钉与寻址审计」。
-本机 `XM_ZONES=2` 的切片有意让区 2 的第一台 scene / gate 也是 1 号，robot `battle-cross-zone` 在这个形态上跑。
+本机 `GAME_ZONES=2` 的切片有意让区 2 的第一台 scene / gate 也是 1 号，robot `battle-cross-zone` 在这个形态上跑。
 
 ---
 
@@ -385,13 +385,13 @@ match logic 里没有任何归属区引用（只有 team 模块读，`go/match/i
 - 注 1：基线第 2 行与第 6 行之间隔着锁检查；Java 把票据与标记放进一段只读脚本，脚本要么整体成功要么整体失败，所以「票据读成功、标记读失败、锁存在 → 16015」这种组合在 Java 不会出现。
   只在 Redis 故障时有差别（都回 16004 或 16015 之一），不单列差异。
 - 随机模式只有「记录缺失」和「房间不存在且不在建房窗口内」进入下一轮；其它拒绝当场回 16018（BW6）。落地：随机模式换下一轮之前回滚本轮标记失败 → 16004（W16）。
-- 落地（计数口径）：进了处理流程的请求恰好记一个 outcome；请求体解析失败（信封 1003）不记 `xm_match_watch_battle_total`，只进 `xm_match_requests_seconds{result="bad_request"}`。
+- 落地（计数口径）：进了处理流程的请求恰好记一个 outcome；请求体解析失败（信封 1003）不记 `game_match_watch_battle_total`，只进 `game_match_requests_seconds{result="bad_request"}`。
 
 ### 3.2 `parameters[0]` 全表（逐字节，逗号都是半角）
 
 `缺少玩家身份`、`服务器繁忙,请稍后再试`、`匹配中无法观战`、`战斗尚未结束,无法观战`、`会话不在线,无法观战`、`已在观战另一场战斗`、`当前没有可观战的战斗`、`该战斗不存在或已结束`、`该战斗当前无法观战`。
 
-tip 数值来自 `xm-table/src/main/proto/tip/match_error_tip.proto:20`（16004）、`:40-50`（16014–16019），表内文案来自 `config-data/tables/tip_text.json:70`、`:80-85`（客户端按 id 查表内文案，`parameters[0]` 另带服务端说明）。
+tip 数值来自 `game-table/src/main/proto/tip/match_error_tip.proto:20`（16004）、`:40-50`（16014–16019），表内文案来自 `config-data/tables/tip_text.json:70`、`:80-85`（客户端按 id 查表内文案，`parameters[0]` 另带服务端说明）。
 
 ### 3.3 164 ListWatchableBattles
 
@@ -410,7 +410,7 @@ tip 数值来自 `xm-table/src/main/proto/tip/match_error_tip.proto:20`（16004�
 - **基线「summary 为空 → 剔除」的对应物**：落点 HASH 在、`pb` 字段缺失（6.4 的写入是一段 Lua 同时写 `a` 与 `pb`，正常写者不会产生）或 `pb` 解析失败，一律按**损坏**处理：跳过、不剔除、计 `anomalies{corrupt_record}`。
   落地：观战读路径的损坏判据（`PlacementRecords.parse(battleId, a, pb)`）比 179 的多两条——`a` 字段缺失或与消息里的 attempt 不一致、落点键不是 HASH——也按损坏处理（W15）；这样读到的好记录的 attempt 一定等于 `a` 字段，可以直接用于 W7 的守护与公开条件。
   基线对「summary 为空」是 DEL + ZREM（`lw.go:74-77`），Java 不照搬：S_W_EVICT 的 `missing` 模式只认「落点不存在」，对一条在场但缺字段的落点 DEL 会连带毁掉 179 的定位；只在数据损坏时可见，登记为 W15。
-- **空列表也回包**：`ListWatchableBattlesResponse{}` 序列化是 0 字节，gate 按应答类型（不是 `Empty`）照常回包（`xm-api/src/main/proto/xm/api/client_call.proto:33-36`）。客户端靠这个空包把面板从「刷新中」收回（`SP.cs:101-123`）。
+- **空列表也回包**：`ListWatchableBattlesResponse{}` 序列化是 0 字节，gate 按应答类型（不是 `Empty`）照常回包（`game-api/src/main/proto/game/api/client_call.proto:33-36`）。客户端靠这个空包把面板从「刷新中」收回（`SP.cs:101-123`）。
 
 ### 3.4 换场与重看
 
@@ -472,23 +472,23 @@ Unity 客户端只在 `Phase == None` 时发 163（`SC.cs:150-156`），观战�
 | `lifecycle.InflightWatches` / `SweeperControl` | `MatchLifecycle` 停机时等在途 163、启停清扫器的两个口（§4.9） | — |
 | `dispatch.MatchMethodHandler.executor()` | 处理器可自带执行器（缺省 null = `match-worker`）；拒收走 `onOverload()`（lead 裁决 2） | — |
 | `support.MatchTip` / `MatchTips`（扩充） | 16014–16019 与 §3.2 的全部 `parameters[0]`（七个 `WATCH_*` 发生点；两条 16004 复用 `NO_IDENTITY` / `BUSY`）；`watchRejected` / `watchAccepted`；`BATTLE_ROOM_NOT_FOUND`（1004，只用来解读 battle 的应答） | `errors.go:65-84` |
-| `metrics.MatchMetrics`（扩充）、`MatchProperties.Spectate` | §6 的指标与枚举（全部标签组合启动即预建）；`xm.match.spectate.*`（§5.2） | `metrics.go:86-90` |
-| xm-discovery `com.game.discovery.battle.BattleRoutings.gatePart(PlayerPresence)` | 在线目录 → `BattleRouting` 的 gate 部分（`session_id`、`gate_node_id`、`gate_instance_id`、`zone_id`），scene 字段恒为 0 / 空 | `wb.go:133-139`；原是 `DevRoutingResolver` 的私有方法，先行件挪出、两边共用 |
+| `metrics.MatchMetrics`（扩充）、`MatchProperties.Spectate` | §6 的指标与枚举（全部标签组合启动即预建）；`game.match.spectate.*`（§5.2） | `metrics.go:86-90` |
+| game-discovery `com.game.discovery.battle.BattleRoutings.gatePart(PlayerPresence)` | 在线目录 → `BattleRouting` 的 gate 部分（`session_id`、`gate_node_id`、`gate_instance_id`、`zone_id`），scene 字段恒为 0 / 空 | `wb.go:133-139`；原是 `DevRoutingResolver` 的私有方法，先行件挪出、两边共用 |
 
-### 4.2 Redis 键（全部经 `RedisKeys` 生成，`xm:` 前缀，tag `{match}`）
+### 4.2 Redis 键（全部经 `RedisKeys` 生成，`game:` 前缀，tag `{match}`）
 
 | 键 | 类型 / TTL | 内容 | 基线 |
 |---|---|---|---|
-| `xm:{match}:watching:<pid>`（`RedisKeys.matchWatching(pid)`） | STRING，PX 360 000 | `"<battle_id 无符号十进制>:<nonce>"`，nonce 是 16 位小写十六进制，**每次抢标记**生成一个（随机模式两轮是两个值）。同值重放不续期。解析不了的值（含基线那种只有 battle_id 的旧值、battle_id 为 0）一律是脏值，按读到的原串删（W18） | `spectate:watching:{pid}`（值只有 battle_id） |
-| `xm:{match}:watchable`（`RedisKeys.matchWatchable()`） | ZSET，无 TTL | member = `Long.toUnsignedString(battle_id)`，score = `created_at_ms`（毫秒 < 2^53，double 精确） | `spectate:battles:active` |
-| `xm:{match}:battle:<id>` | 6.4 的落点 HASH（`a` = attempt，`pb` = `BattlePlacement`），360 s | 6.5 只读，加两种有条件的删除（S_W_EVICT） | `spectate:battle:{id}` |
-| 只读 | `xm:{match}:ticket:<pid>`（6.4）、`xm:presence:<pid>`、`xm:nodes:battle:0`、`RedisKeys.battleLock(pid)`（6.3；后三样经 `port.PlayerStatusReader` 与 `gather.BattleNodes`） | — | — |
+| `game:{match}:watching:<pid>`（`RedisKeys.matchWatching(pid)`） | STRING，PX 360 000 | `"<battle_id 无符号十进制>:<nonce>"`，nonce 是 16 位小写十六进制，**每次抢标记**生成一个（随机模式两轮是两个值）。同值重放不续期。解析不了的值（含基线那种只有 battle_id 的旧值、battle_id 为 0）一律是脏值，按读到的原串删（W18） | `spectate:watching:{pid}`（值只有 battle_id） |
+| `game:{match}:watchable`（`RedisKeys.matchWatchable()`） | ZSET，无 TTL | member = `Long.toUnsignedString(battle_id)`，score = `created_at_ms`（毫秒 < 2^53，double 精确） | `spectate:battles:active` |
+| `game:{match}:battle:<id>` | 6.4 的落点 HASH（`a` = attempt，`pb` = `BattlePlacement`），360 s | 6.5 只读，加两种有条件的删除（S_W_EVICT） | `spectate:battle:{id}` |
+| 只读 | `game:{match}:ticket:<pid>`（6.4）、`game:presence:<pid>`、`game:nodes:battle:0`、`RedisKeys.battleLock(pid)`（6.3；后三样经 `port.PlayerStatusReader` 与 `gather.BattleNodes`） | — | — |
 
 观战标记、可观战索引、票据、落点记录同在 `{match}` slot；战斗锁不在（6.3 拥有），所以锁检查不进脚本，靠复查兜底。
 
 落地的几条存储口径（`RedissonSpectateStore`；都只在脏数据上才看得出来）：
 - 索引成员只认**规范形**（非 0 的无符号十进制，没有符号、空白与前导零，`SpectateRules.parseMember`）；`007` 这类成员按非法成员、按**原串** ZREM（W18）。成员按字节一一对应读写，任何脏成员原样交回都摘得掉。
-- 标记值按 UTF-8 文本读写。已知限制：不是合法 UTF-8 的脏标记按值删不掉，只能等 360 s 的 TTL（期间该玩家抢标记回 16016）；xm-match 自己不写这样的值。
+- 标记值按 UTF-8 文本读写。已知限制：不是合法 UTF-8 的脏标记按值删不掉，只能等 360 s 的 TTL（期间该玩家抢标记回 16016）；game-match 自己不写这样的值。
 - 过期分界 = Redis `TIME` − 360 000 ms，分数**严格小于**分界才算过期（恰在分界上的还算活着）；选场、列表、清扫同一口径。公开时的分数按 `created_at_ms` 的有符号十进制写。
 - 落点键被占成别的类型读成「损坏」（163 回 16004、列表跳过、都不剔除）；索引键 / 标记键被占成别的类型是依赖异常。
 
@@ -526,7 +526,7 @@ KEYS 的次序：**票据在标记之前；索引在落点之前**（落点键�
 
 1. 第 1 行判身份（只认 `SessionContext.player_id`）。
 2. S_W_ENTRY → 第 2、3 行。
-3. `PlayerStatusReader.inBattle`（xm-match 惯用的读口，包着 6.3 的 `BattleLockReader.exists`）→ 第 4、5 行。
+3. `PlayerStatusReader.inBattle`（game-match 惯用的读口，包着 6.3 的 `BattleLockReader.exists`）→ 第 4、5 行。
 4. 第 7 行的旧标记（`clearPreviousMark`）：
    - 值非法 → S_W_RELEASE(读到的原串)，往下走。
    - 显式同场（请求的 battle_id ≠ 0 且等于旧场）→ 只 S_W_RELEASE、**不发** Remove；删成功后在本次请求上记一个「重看同一场」的记号（W17：从这里到 AddObserver 之间玩家仍登记在这一场，却没有标记指着它）。
@@ -539,7 +539,7 @@ KEYS 的次序：**票据在标记之前；索引在落点之前**（落点键�
 6. 选场循环（随机 2 轮、指定 1 轮）：
    - **随机**：S_W_PICK，Java 侧至多 3 挑；挑到非法成员（不是规范的无符号十进制）→ S_W_EVICT(`invalid`，按原串) 后重挑；挑不到 → 跳出循环。随机模式 `published = true`。
    - 对选中的场 S_W_READ 得到 `{published（指定模式用）, 落点（好记录的 attempt = HASH 的 a 字段）, now}`；`checkedAtMs = now`（W6）。
-   - 落点不在 → 已公开时 S_W_EVICT(`missing`)；随机 → 下一轮；指定 → 第 12 行。落点损坏 → 第 11 行（BW9，计 `xm_match_watchable_anomalies_total{reason="corrupt_record"}`）。
+   - 落点不在 → 已公开时 S_W_EVICT(`missing`)；随机 → 下一轮；指定 → 第 12 行。落点损坏 → 第 11 行（BW9，计 `game_match_watchable_anomalies_total{reason="corrupt_record"}`）。
    - 每次抢标记生成一个 nonce，S_W_ACQUIRE(`battle_id:nonce`)：
      - 抛依赖异常（结局不明）→ 尽力异步 S_W_RELEASE(本次的值) → 16004（存储另在在途命令有了结局之后再按值释放一次，§4.3）；
      - `queued` → S_W_RELEASE(本次的值)（覆盖「Redisson 重发 EVAL、首轮已写入标记、两轮之间建出票据」的情形）→ 16014。**带着「重看同一场」记号时先发一条异步的自我清退** `removeAsync(该场落点, concurrent_queue)`（W17 ①）；
@@ -557,18 +557,18 @@ KEYS 的次序：**票据在标记之前；索引在落点之前**（落点键�
 
 入口与抢占的「有没有票」在 `SpectateStore` 的脚本里判（`EXISTS` 票据键，原子性只能在脚本里做）；`TicketReader` 只用于复查——两者只在票据 HASH 损坏时结果不同（脚本算「有」，`TicketReader` 抛异常、复查按无票）。
 
-`observer_name` 取 `SessionContext.account`（`xm-api/src/main/proto/xm/api/client_call.proto:16-17`），与基线 `session.Account` 同值；它只进 battle 日志（`bn.proto:54`；Java 同步副本 `:57`），不下发客户端。
+`observer_name` 取 `SessionContext.account`（`game-api/src/main/proto/game/api/client_call.proto:16-17`），与基线 `session.Account` 同值；它只进 battle 日志（`bn.proto:54`；Java 同步副本 `:57`），不下发客户端。
 
 ### 4.5 164 的 Java 流程（`WatchableListService`，`match-worker`）
 
 S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其余一次批读落点（S_W_RECORDS，一段只读脚本；原稿写的是 `RBatch`）→ 逐条按 §3.3 判定 → 按索引次序组摘要 → 应答组好之后一批异步剔除。
 读索引失败 → `tip_id = 1003`。预算同 `match-worker` 的 4500 ms。一次请求至多三次 Redis 往返（第三次不等结果）；过期成员不读落点，没有候选时不发批读。
 
-- **批读整批失败或超时**：每一条都按「读记录出错」处理（跳过、不剔除，同基线逐条 GET 出错，`lw.go:68-73`），回已组好的列表（通常为空），**不回 1003**；`xm_match_list_watchable_total` 仍计 `ok`，另计 `xm_match_watchable_anomalies_total{reason="record_read_failed"}`。
+- **批读整批失败或超时**：每一条都按「读记录出错」处理（跳过、不剔除，同基线逐条 GET 出错，`lw.go:68-73`），回已组好的列表（通常为空），**不回 1003**；`game_match_list_watchable_total` 仍计 `ok`，另计 `game_match_watchable_anomalies_total{reason="record_read_failed"}`。
   基线没有「整批」概念，逐条失败时同样回一个变短的列表，所以这样对齐的是客户端结果而不是调用次数。批读结果里缺某一条同样按读失败跳过。
 - **剔除不阻塞应答**：需要剔除的成员收集起来，在应答组好之后异步发出（`evictAsync`：一个管道里的一批 S_W_EVICT，不等结果）。基线是同步逐条执行，剔除结果不影响本次列表内容（`lw.go:55-77` 剔除后都是 `continue`），所以不可见。
-  三种模式：非法成员 → `invalid`（按原串）；分数过期 → `stale`（连同落点一起删）；落点不在 → `missing`（只摘成员、永不删落点）。`xm_match_watchable_index_evictions_total{invalid_member / stale / missing_record}` 按**发出**的条数计（异步，等不到结果）。
-- **出口计数** `xm_match_list_watchable_total{result}`：`ok` = 回了列表（含空列表、含批读失败后变短的列表）；`error` = 读索引失败，以及流程里未预期的异常（后者原样抛给派发器、同样回信封 1003）；`overloaded` 在 `ListWatchableHandler.onOverload()` 里记。请求体解析失败不计。
+  三种模式：非法成员 → `invalid`（按原串）；分数过期 → `stale`（连同落点一起删）；落点不在 → `missing`（只摘成员、永不删落点）。`game_match_watchable_index_evictions_total{invalid_member / stale / missing_record}` 按**发出**的条数计（异步，等不到结果）。
+- **出口计数** `game_match_list_watchable_total{result}`：`ok` = 回了列表（含空列表、含批读失败后变短的列表）；`error` = 读索引失败，以及流程里未预期的异常（后者原样抛给派发器、同样回信封 1003）；`overloaded` 在 `ListWatchableHandler.onOverload()` 里记。请求体解析失败不计。
 
 ### 4.6 gather 钩子（6.4 的 `GatherHooks`，跑在 gather 的虚拟线程上）
 
@@ -583,14 +583,14 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
   不这样夹紧的话，Java 的 Redis 单命令最坏 4.2 s（§4.9）加 3 s RPC 会让单人超出公式的 3 s 项。
 - 任何异常都吞掉（两个方法都接 `Throwable`），**不影响开局**；单个成员身上的运行时异常就地归类、标记照删、继续处理后面的人。gather 随后失败，被清退的观众也不恢复（`sp_test.go:867`）。五个入口都经过这一步。
   管线在第 2.5 步之前就失败的（发号失败、没有可分配的 battle 节点）与拿不到在途许可的过载收尾不调钩子，观众不被清退、标记原样。
-- 每条标记恰好记一个结局 `xm_match_spectate_evictions_total{reason="enter_gather", result}`：`Replied`（任何 tip）→ `removed`；`Dead` 或落点不在 → `no_record`；`NotDelivered` / `Unknown` / 直拨器违约 → `rpc_failed`；读落点失败或损坏 → `read_failed`；标记值解析不了 → `invalid_mark`。
+- 每条标记恰好记一个结局 `game_match_spectate_evictions_total{reason="enter_gather", result}`：`Replied`（任何 tip）→ `removed`；`Dead` 或落点不在 → `no_record`；`NotDelivered` / `Unknown` / 直拨器违约 → `rpc_failed`；读落点失败或损坏 → `read_failed`；标记值解析不了 → `invalid_mark`。
 
 **`onStarted(placement)`**（第 5 步，6.4 补写落点之后）：S_W_PUBLISH(attempt, created_at_ms)，至多等 1 s，尽力而为、不重试；抛异常与回「没登记上」（落点不在 / 已不是这一次的 attempt）都只计 `anomalies{publish_failed}`，这一场不进列表（`gsi_test.go:463`）。
 6.4 的失败路径不调它：失败的场次永远不在索引里（`create_failed_room_alive` 保留落点但不公开）。
 
 ### 4.7 清扫（`SpectateSweeper`）
 
-单线程 `scheduleWithFixedDelay`（线程 `match-spectate-sweeper`，守护线程），缺省 10 s，每轮 `try/catch Throwable`（JDK 调度器遇异常会永久停止，`m-spec` §12.1 第 14 条）；每轮 S_W_SWEEP（摘掉的条数计 `index_evictions{sweep}`），并用 ZCARD 采样 `xm_match_watchable_battles`。
+单线程 `scheduleWithFixedDelay`（线程 `match-spectate-sweeper`，守护线程），缺省 10 s，每轮 `try/catch Throwable`（JDK 调度器遇异常会永久停止，`m-spec` §12.1 第 14 条）；每轮 S_W_SWEEP（摘掉的条数计 `index_evictions{sweep}`），并用 ZCARD 采样 `game_match_watchable_battles`。
 多实例重复执行幂等，不抢锁。不挂在 matcher 上（`m-spec` §0.3）。
 
 落地：
@@ -602,12 +602,12 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 ### 4.8 观众 RPC 的寻址与结局分类（`ObserverDialer`，基于 `PlacementDialer`）
 
 落地（`DefaultObserverDialer`）：包着 6.4 的 `placement.PlacementDialer`，用它**带硬截止的重载** `dial(placement, timeout, Deadline hardStop, call)` 按落点记录的地址直拨；引用来自直拨专用的客户端缓存 `PlacementClients`
-（按地址缓存、实例段恒为空串），不是 gather 那份 `NodeRpcClients<BattleNodeService>`。不重试、永不抛；超时与硬截止由调用方给。每次调用记一个 `xm_match_observer_rpc_total{method, result}`。
+（按地址缓存、实例段恒为空串），不是 gather 那份 `NodeRpcClients<BattleNodeService>`。不重试、永不抛；超时与硬截止由调用方给。每次调用记一个 `game_match_observer_rpc_total{method, result}`。
 
 | 结局 | 判据（直拨的结局 → 观众 RPC 的结局） | 163 | 清退路径（rewatch / enter_gather / concurrent_queue） |
 |---|---|---|---|
 | `Replied(tip)` | `Replied`：调通了（`addObserver` 的 tip 取应答的 `error_message.id`，`removeObserver` 恒为 0） | 按 tip（§4.4） | 计 `removed` |
-| `Dead` | `RoomGone`：**三条证据都在硬截止之前拿齐**——请求确定没送达（`RpcFailures` 按 Dubbo 客户端侧的异常特征判）+ 目录 `xm:nodes:battle:0` 里同号节点的 `instance_id` ≠ 落点的实例 + 对原地址的 TCP 建连探测明确被拒绝 / 不可达（M16） | 视同 1004 | 只删标记，计 `no_record` |
+| `Dead` | `RoomGone`：**三条证据都在硬截止之前拿齐**——请求确定没送达（`RpcFailures` 按 Dubbo 客户端侧的异常特征判）+ 目录 `game:nodes:battle:0` 里同号节点的 `instance_id` ≠ 落点的实例 + 对原地址的 TCP 建连探测明确被拒绝 / 不可达（M16） | 视同 1004 | 只删标记，计 `no_record` |
 | `NotDelivered` | `Unavailable(NOT_DELIVERED)`：请求确定没送达，但判不了死（目录里没这个号、同一实例、目录读失败、探测超时或连得上、硬截止已到）；另：调用方给的超时 ≤ 0（硬截止剩余不足 1 ms）时不发调用，也归这里 | 删标记 → 16018 `该战斗当前无法观战` | 只记日志，计 `rpc_failed`（标记照删） |
 | `Unknown` | `Unavailable(TIMEOUT / OTHER)`：超时，或连上之后断开、对端回了传输层错误（鉴权失败、6.2 在途超限）；直拨器违约抛异常也归这里 | **保留标记** → 16018 `该战斗当前无法观战` | 只记日志，计 `rpc_failed`（标记照删） |
 
@@ -626,7 +626,7 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 
 | 号 / 任务 | 执行器 | 预算 | 过载时 |
 |---|---|---|---|
-| 163 | **虚拟线程** `match-spectate-<n>`（每个受理的请求一条），全局在途上限 `xm.match.spectate.max-inflight`（缺省 128）；`SpectateExecutor` | 受理时刻 + `xm.match.request-budget`（缺省 4500 ms）的 `Deadline`，由派发器给；每一次 Redis 读写只等到它，两跳 battle RPC 各有更早的硬截止（§4.4、§4.8） | in-band 16004 `服务器繁忙,请稍后再试`（outcome `overloaded`） |
+| 163 | **虚拟线程** `match-spectate-<n>`（每个受理的请求一条），全局在途上限 `game.match.spectate.max-inflight`（缺省 128）；`SpectateExecutor` | 受理时刻 + `game.match.request-budget`（缺省 4500 ms）的 `Deadline`，由派发器给；每一次 Redis 读写只等到它，两跳 battle RPC 各有更早的硬截止（§4.4、§4.8） | in-band 16004 `服务器繁忙,请稍后再试`（outcome `overloaded`） |
 | 163 复查的两次读 | 虚拟线程 `match-spectate-recheck-<n>`（每请求至多两条，只活到请求截止；不占在途许可） | 请求截止 | — |
 | 163 的自我清退 | 虚拟线程 `match-spectate-evict-<n>`（`removeAsync`；不占在途许可） | 固定 3 s | — |
 | 164 | `match-worker`（只有 Redis 操作） | 4500 ms | 信封 1003（164 没有 in-band 错误字段，同 M29） |
@@ -637,13 +637,13 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 - **163 怎么接到虚拟线程上**（lead 裁决 2；原稿只写了「Dubbo 线程上 `tryAcquire`、虚拟线程上执行」，6.4 的派发器只有 inline / `match-worker` 两条路）：`MatchMethodHandler` 多一个 `default Executor executor()`（null = 共用 `match-worker`）。
   `MatchDispatcher` 每次派发读一次，把任务投到它返回的执行器上；`execute` 抛 `RejectedExecutionException`（在途已满、已关闭）与「轮到执行时预算已用完」都走该处理器的 `onOverload()`，与工作池满同一个口径。
   截止、解析失败 / 未预期异常 → 信封 1003、请求计时都不用再写一遍；179 以后要挪出工作池也能用同一个钩子。`executor()` 自己抛异常按处理器异常回信封 1003。
-- gate 调 match 的超时是 5 s（`m-spec` §9.2）；4.5 s 预算保证 match 先给出 in-band 应答。**`xm.match.request-budget` 调小时**（合法区间仍是 [500 ms, 4500 ms]，评审 R163-02）：163 的两道门槛是代码常量，
+- gate 调 match 的超时是 5 s（`m-spec` §9.2）；4.5 s 预算保证 match 先给出 in-band 应答。**`game.match.request-budget` 调小时**（合法区间仍是 [500 ms, 4500 ms]，评审 R163-02）：163 的两道门槛是代码常量，
   预算 ≤ 2200 ms 时带旧标记的换场 / 随机观战恒回 16004（旧标记最长留 360 s），≤ 1000 ms 时凡是走到登记的 163 都回 16004。不拒启，启动时打一条 WARN（各留 100 ms 余量：低于 2300 ms / 1100 ms，`WatchBattleConfiguration.budgetWarning`）；缺省值不受影响。
 - 虚拟线程上不在 `synchronized` 块内阻塞；Redisson / Dubbo 都用异步 API 加 `future.get(剩余预算)`（`m-spec` §12.1 第 13 条）。Redisson 单条命令最坏 4.2 s（`arch` §6「Redis 客户端超时」条：HEAD `9fde7d8` 与当前工作区都在 `:666-668`；`m-spec` §9.6 引的 `arch:607-609` 已过时，按节名找），
   所以 Redis 操作同样按剩余预算等；等超时而命令可能已生效时（S_W_ACQUIRE），尽力异步 S_W_RELEASE(本次的值)，再回 16004（这次释放可能被重发越过，§4.3）。
-- 线程所有权（`AGENTS.md` §3）：全部阻塞 I/O 都不在 Netty I/O 线程或场景逻辑线程上；xm-match 没有场景状态。
+- 线程所有权（`AGENTS.md` §3）：全部阻塞 I/O 都不在 Netty I/O 线程或场景逻辑线程上；game-match 没有场景状态。
 - 在途许可（`SpectateExecutor`）：Dubbo 线程上当场试拿（不阻塞、不排队），拿不到即当场回 J 行①；拿到之后起一条虚拟线程，许可在同一个 `finally` 里归还（正常返回、跑到预算到点、`RuntimeException`、`Error` 都覆盖），
-  `xm_match_spectate_inflight` 随之增减。自我清退的异步 Remove 与 164 的异步剔除不占这个许可（数量上界分别是「每次 163 至多一次」与「每次 164 至多 `limit` 条」）。`close()` 只是不再受理，不等也不打断在途请求。
+  `game_match_spectate_inflight` 随之增减。自我清退的异步 Remove 与 164 的异步剔除不占这个许可（数量上界分别是「每次 163 至多一次」与「每次 164 至多 `limit` 条」）。`close()` 只是不再受理，不等也不打断在途请求。
 - **停机序列**（lead 裁决 4；`MatchLifecycle`，日志编号「停机 n/6」）：停凑单 → 撤 Dubbo 导出 → **[排空 `match-worker`（≤ 10 s）∥ 等在途 163（≤ 5 s，辅助线程；实现不守约时再多等 1 s 后放弃）]** → 停观战清扫（当场中断，§4.7）→ 等在途 gather（≤ 10 s）→ 停评分消费 → 还租约。
   原稿要把「等在途 163」串在排空之后，那样 `SmartLifecycle.stop()` 里这几步最坏是 10 + 5 + 10 = 25 s；并行之后仍是 10 + 10 = 20 s，与 6.4 相同。
   **这 20 s 是设计预算**，取值与 `spring.lifecycle.timeout-per-shutdown-phase` 相同，但 Spring 不会拿它截断同步的 `stop()`（评审 LC-01；同 scene-drain-spec G16）；硬期限在进程外、从 SIGTERM 起算、还包含前两步：
@@ -654,8 +654,8 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 ### 4.10 跨区 1V1：Java 侧要做的事
 
 - **生产代码**：没有新路径（§2.7 每条都由 6.2 / 6.3 / 6.4 保证）。落地：6.5 没有为跨区改任何生产代码；按 §2.8 逐条核对了 6.2 / 6.3 / 6.4 的寻址代码，没有发现「只按节点号」的地方（静态审计，清单见实现记录）。
-- **切片**：`XM_ZONES=2` 由 6.5 落地（lead 裁决 1；`tools/local/start-slice.sh` / `stop-slice.sh` / `battle-crash-window.sh`，§10.6）：多起 xm-scene-z2 与 xm-gate-z2，其余进程共用。xm-gate-z2 用缺省的 `xm.dubbo.match-url`（`tri://127.0.0.1:20888`），与 zone 1 的 gate 指向同一个 xm-match；
-  区 2 在区服目录里的那一行由脚本经 xm-data 的运维接口管，**状态跟随 `XM_ZONES`**（=2 置 OPEN，=1 置维护；lead 裁决 5），不在 xm-gateway 的命令行上播种。
+- **切片**：`GAME_ZONES=2` 由 6.5 落地（lead 裁决 1；`tools/local/start-slice.sh` / `stop-slice.sh` / `battle-crash-window.sh`，§10.6）：多起 game-scene-z2 与 game-gate-z2，其余进程共用。game-gate-z2 用缺省的 `game.dubbo.match-url`（`tri://127.0.0.1:20888`），与 zone 1 的 gate 指向同一个 game-match；
+  区 2 在区服目录里的那一行由脚本经 game-data 的运维接口管，**状态跟随 `GAME_ZONES`**（=2 置 OPEN，=1 置维护；lead 裁决 5），不在 game-gateway 的命令行上播种。
 - **测试**：§10.3 的同号碰撞组件测试、§10.8 的 robot 场景。
 - **CI**：7.1b 之后加两 zone 覆盖文件 `deploy/compose/two-zones.yaml`（Q22）；本批没有做。
 
@@ -663,15 +663,15 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 
 | 对象 | 改动（原稿） | 落地（2026-10-08） |
 |---|---|---|
-| 6.4 xm-match | 从 `ticket.BattleTicketReissue` 抽出 `placement.PlacementDialer`；**`created_at_ms` 取 Redis `TIME`**（与 `deadline_ms` 同源，并入 M7；取值时刻仍在全员 Prepare 之后、写落点之前，同 `gather.go:286`；`m-spec` §9.6 第 4 步只写了「字段同 `gather.go:287-297`」，实现时核对）；落点的 `player_names` = 各成员**快照里的 `player_name`（角色名，不是账号）**，按成员顺序写（同 `gather.go:281-285`）；`GatherHooks` 的空实现换成 `SpectateGatherHooks`；`MatchClientMessageService` 把 163 派到虚拟线程、164 派到 `match-worker`；`m-spec` §8.1、§9.3、§9.9 随之改（§8.1 两行的新内容见本表下方）；停机序列（`m-spec` §9.8）在「撤 Dubbo 导出」之后加「有界等待在途 163（预算本身 ≤ 4.5 s）→ 停清扫器」；关闭 M22 | 前三条 6.4 已做（见下表）。其余 6.5 做了：钩子换成 `SpectateGatherHooks`（`MatchConfiguration.gatherHooks()` 已删）；163 经 `MatchMethodHandler.executor()` 跑在 `SpectateExecutor` 的虚拟线程上、164 跑在 `match-worker`；`InlineHandlers` 只剩 156 / 154，`MatchTips.watchUnavailable` 与 `MatchTip.FEATURE_UNAVAILABLE` 已删；停机序列按 §4.9（等 163 与排空**并行**，不是串在其后）；M22 关闭；`m-spec` 已回写。另给共享件加了：`PlacementDialer.dial` / `BattleNodes.lookup` 带 `Deadline` 的重载、`PlacementRecords`、`MatchProperties.Spectate`、`MatchLifecycle` 的两个口 |
-| 6.2 xm-battle | 不改业务。`DevRoutingResolver.gateRouting` 挪到 xm-discovery `BattleRoutings.gatePart`（6.2 没合入时由 6.2 挪，否则 6.5 挪）；dev `add-observer` 接口注释写明「不写 match 的观战标记，开局不会清退 dev 观众」（Q14） | 已做（6.5 的先行件挪的；行为不变） |
-| xm-discovery | `RedisKeys.matchWatching(pid)`、`matchWatchable()`；`BattleRoutings` | 已做 |
-| 5.4 切片 | `zt-spec` §5.13 的「共用」行加 xm-match（battle 已在该行）；`start-slice.sh` / `stop-slice.sh` 同步 | 5.4 没有实施；`XM_ZONES=2` 的脚本由 6.5 落地，连同第三个脚本 `battle-crash-window.sh`（`SliceScriptsTest` 把它与 `start-slice.sh` 逐字钉着）。`zt-spec` 已回写 |
-| xm-robot | `battle-smoke` 观战段（§10.7）；新场景 `battle-cross-zone`（§10.8）；`--visit-zone` 帮助文本 | 已做；`--visit-zone` 是 6.5 新增的选项（5.4 没合入） |
+| 6.4 game-match | 从 `ticket.BattleTicketReissue` 抽出 `placement.PlacementDialer`；**`created_at_ms` 取 Redis `TIME`**（与 `deadline_ms` 同源，并入 M7；取值时刻仍在全员 Prepare 之后、写落点之前，同 `gather.go:286`；`m-spec` §9.6 第 4 步只写了「字段同 `gather.go:287-297`」，实现时核对）；落点的 `player_names` = 各成员**快照里的 `player_name`（角色名，不是账号）**，按成员顺序写（同 `gather.go:281-285`）；`GatherHooks` 的空实现换成 `SpectateGatherHooks`；`MatchClientMessageService` 把 163 派到虚拟线程、164 派到 `match-worker`；`m-spec` §8.1、§9.3、§9.9 随之改（§8.1 两行的新内容见本表下方）；停机序列（`m-spec` §9.8）在「撤 Dubbo 导出」之后加「有界等待在途 163（预算本身 ≤ 4.5 s）→ 停清扫器」；关闭 M22 | 前三条 6.4 已做（见下表）。其余 6.5 做了：钩子换成 `SpectateGatherHooks`（`MatchConfiguration.gatherHooks()` 已删）；163 经 `MatchMethodHandler.executor()` 跑在 `SpectateExecutor` 的虚拟线程上、164 跑在 `match-worker`；`InlineHandlers` 只剩 156 / 154，`MatchTips.watchUnavailable` 与 `MatchTip.FEATURE_UNAVAILABLE` 已删；停机序列按 §4.9（等 163 与排空**并行**，不是串在其后）；M22 关闭；`m-spec` 已回写。另给共享件加了：`PlacementDialer.dial` / `BattleNodes.lookup` 带 `Deadline` 的重载、`PlacementRecords`、`MatchProperties.Spectate`、`MatchLifecycle` 的两个口 |
+| 6.2 game-battle | 不改业务。`DevRoutingResolver.gateRouting` 挪到 game-discovery `BattleRoutings.gatePart`（6.2 没合入时由 6.2 挪，否则 6.5 挪）；dev `add-observer` 接口注释写明「不写 match 的观战标记，开局不会清退 dev 观众」（Q14） | 已做（6.5 的先行件挪的；行为不变） |
+| game-discovery | `RedisKeys.matchWatching(pid)`、`matchWatchable()`；`BattleRoutings` | 已做 |
+| 5.4 切片 | `zt-spec` §5.13 的「共用」行加 game-match（battle 已在该行）；`start-slice.sh` / `stop-slice.sh` 同步 | 5.4 没有实施；`GAME_ZONES=2` 的脚本由 6.5 落地，连同第三个脚本 `battle-crash-window.sh`（`SliceScriptsTest` 把它与 `start-slice.sh` 逐字钉着）。`zt-spec` 已回写 |
+| game-robot | `battle-smoke` 观战段（§10.7）；新场景 `battle-cross-zone`（§10.8）；`--visit-zone` 帮助文本 | 已做；`--visit-zone` 是 6.5 新增的选项（5.4 没合入） |
 | `arch` | §4.24「匹配」（6.4 落地时的实际节号；本稿原写 §4.21）加「观战」小节（键、脚本、钩子、线程）；§5 线程模型加「163 虚拟线程 + 在途上限」；§11 加 §6 的指标 | 随本批的文档提交 |
 | `PARITY.md` / `roadmap.md` / 盘点 | 见 §10.11 | 同上 |
 
-**「6.4 xm-match」一行里 6.4 已做的三条要求——现状（2026-10-08，逐条回到 xm-match 的代码核对过）**
+**「6.4 game-match」一行里 6.4 已做的三条要求——现状（2026-10-08，逐条回到 game-match 的代码核对过）**
 
 | 要求 | 6.4 的落地 | 6.5 接手时注意 |
 |---|---|---|
@@ -709,13 +709,13 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 
 处理器内未预期异常（bug）两个号都回信封 1003，同 `m-spec` §9.9 第 5 条；163 已抢到的标记按值尽力释放（§3.1 J2 行）。
 
-**配置校验**：`xm.match.spectate.*` 在 `MatchProperties` 里校验（§5.2 的范围），不合法拒绝启动，同 `m-spec` §9.8 第 4 步的口径。
+**配置校验**：`game.match.spectate.*` 在 `MatchProperties` 里校验（§5.2 的范围），不合法拒绝启动，同 `m-spec` §9.8 第 4 步的口径。
 
 ---
 
 ## 5 配置与常量
 
-### 5.1 `MatchBudgets` 增补（xm-api，纯函数，单测直接引用）
+### 5.1 `MatchBudgets` 增补（game-api，纯函数，单测直接引用）
 
 | 常量 | 值 | 出处 / 说明 |
 |---|---|---|
@@ -731,14 +731,14 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 不进 `MatchBudgets` 的几个包内常量（不出现在跨进程不等式里）：`SpectateGatherHooks.PER_MEMBER_BUDGET_MS`（= `REMOVE_OBSERVER_TIMEOUT_MS`）/ `SMALL_OP_BUDGET_MS` = 1000 / `MIN_SYNC_RELEASE_MS` = 50；`SpectateSweeper.OP_BUDGET_MS` = 3000 / `STOP_TIMEOUT` = 1 s；
 `MatchLifecycle.WATCH_DRAIN_GRACE` = 1 s；`WatchBattleConfiguration.REWATCH_BUDGET_FLOOR_MS` = 2300 / `ADD_BUDGET_FLOOR_MS` = 1100（启动告警的两道门槛）；`SpectateRules.NONCE_LENGTH` = 16。
 
-### 5.2 `xm.match.spectate.*`（`xm-match/src/main/resources/application.yaml`）
+### 5.2 `game.match.spectate.*`（`game-match/src/main/resources/application.yaml`）
 
 | 配置 | 缺省 | 说明 |
 |---|---|---|
 | `sweep-interval` | 10 s | 清扫间隔（W9），> 0 且是整毫秒（≥ 1 ms），否则拒启 |
 | `max-inflight` | 128 | 163 在途上限（W10），≥ 1，否则拒启 |
 
-163 的预算沿用 6.4 的 `xm.match.request-budget`（4500 ms）。其余都是代码常量（理由同 `m-spec` §10.1：出现在跨进程不等式里）。
+163 的预算沿用 6.4 的 `game.match.request-budget`（4500 ms）。其余都是代码常量（理由同 `m-spec` §10.1：出现在跨进程不等式里）。
 落地：`request-budget` 的合法区间 [500 ms, 4500 ms] 是 6.4 冻结的，没有为 163 提高下限；低于 2300 ms / 1100 ms 时启动打一条 WARN（§4.9），不拒启。
 
 ### 5.3 数值不等式（实现与评审核对）
@@ -774,22 +774,22 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 
 | 指标 | 类型 | 标签 | 基线 |
 |---|---|---|---|
-| `xm_match_watch_battle_total` | Counter | `outcome` = ok / internal / queued / in_battle / already_watching / offline / no_battle / not_found / rejected / overloaded | `watch_battle_total`（`metrics.go:86-90`）。`overloaded` 是新增；`already_watching` **只计 16016**（基线把入口的懒清退也算进去，`wb.go:99`；W14） |
-| `xm_match_list_watchable_total` | Counter | `result` = ok / error / overloaded | 新增 |
-| `xm_match_spectate_evictions_total` | Counter | `reason` = enter_gather / rewatch / concurrent_queue；`result` = removed / no_record / invalid_mark / read_failed / rpc_failed | 新增（基线只有日志，`sp.go:307`） |
-| `xm_match_watchable_index_evictions_total` | Counter | `reason` = room_missing / dead_node / stale / missing_record / invalid_member / sweep | 新增 |
-| `xm_match_watchable_anomalies_total` | Counter | `reason` = corrupt_record / record_read_failed / publish_failed / mark_read_failed | 新增（BW9、164 读落点失败（§4.5）、`onStarted` 失败、开局清退读标记失败） |
-| `xm_match_watchable_battles` | Gauge | — | 新增（清扫时采样 ZCARD） |
-| `xm_match_observer_rpc_total` | Counter | `method` = add / remove；`result` = replied / dead / not_delivered / unknown | 新增 |
-| `xm_match_spectate_inflight` | Gauge | — | 新增（163 在途数） |
-| `xm_match_requests_seconds{method=WatchBattle / ListWatchableBattles}` | Timer | 6.4 已有 | `grpcstats` |
-| `xm_match_gather_zone_mix_total{mode, mix}` | Counter | 6.4 已有；跨区 robot 断言它 | 同名 |
+| `game_match_watch_battle_total` | Counter | `outcome` = ok / internal / queued / in_battle / already_watching / offline / no_battle / not_found / rejected / overloaded | `watch_battle_total`（`metrics.go:86-90`）。`overloaded` 是新增；`already_watching` **只计 16016**（基线把入口的懒清退也算进去，`wb.go:99`；W14） |
+| `game_match_list_watchable_total` | Counter | `result` = ok / error / overloaded | 新增 |
+| `game_match_spectate_evictions_total` | Counter | `reason` = enter_gather / rewatch / concurrent_queue；`result` = removed / no_record / invalid_mark / read_failed / rpc_failed | 新增（基线只有日志，`sp.go:307`） |
+| `game_match_watchable_index_evictions_total` | Counter | `reason` = room_missing / dead_node / stale / missing_record / invalid_member / sweep | 新增 |
+| `game_match_watchable_anomalies_total` | Counter | `reason` = corrupt_record / record_read_failed / publish_failed / mark_read_failed | 新增（BW9、164 读落点失败（§4.5）、`onStarted` 失败、开局清退读标记失败） |
+| `game_match_watchable_battles` | Gauge | — | 新增（清扫时采样 ZCARD） |
+| `game_match_observer_rpc_total` | Counter | `method` = add / remove；`result` = replied / dead / not_delivered / unknown | 新增 |
+| `game_match_spectate_inflight` | Gauge | — | 新增（163 在途数） |
+| `game_match_requests_seconds{method=WatchBattle / ListWatchableBattles}` | Timer | 6.4 已有 | `grpcstats` |
+| `game_match_gather_zone_mix_total{mode, mix}` | Counter | 6.4 已有；跨区 robot 断言它 | 同名 |
 
-- `xm_match_watchable_battles` 是**每个实例各自采样同一个全局 ZSET**：多实例部署（`ops-release-spec` Q22 生产起点 match 2 副本）时看板与告警取 `max`，不能 `sum`（同 6.4 `queue_depth` 翻倍的教训，`m-spec` §11）。
-  `xm_match_spectate_inflight` 是每实例的真实在途数，求和才有意义。
+- `game_match_watchable_battles` 是**每个实例各自采样同一个全局 ZSET**：多实例部署（`ops-release-spec` Q22 生产起点 match 2 副本）时看板与告警取 `max`，不能 `sum`（同 6.4 `queue_depth` 翻倍的教训，`m-spec` §11）。
+  `game_match_spectate_inflight` 是每实例的真实在途数，求和才有意义。
 
-**落地的取值与计数口径**（表里的八个新指标都已实现，Micrometer 名是点分的 `xm.match.watch.battle` / `xm.match.list.watchable` / `xm.match.spectate.evictions` / `xm.match.watchable.index.evictions` /
-`xm.match.watchable.anomalies` / `xm.match.watchable.battles` / `xm.match.observer.rpc` / `xm.match.spectate.inflight`；标签取值与上表逐字相同，枚举在 `MatchMetrics`，全部标签组合启动即预建）：
+**落地的取值与计数口径**（表里的八个新指标都已实现，Micrometer 名是点分的 `game.match.watch.battle` / `game.match.list.watchable` / `game.match.spectate.evictions` / `game.match.watchable.index.evictions` /
+`game.match.watchable.anomalies` / `game.match.watchable.battles` / `game.match.observer.rpc` / `game.match.spectate.inflight`；标签取值与上表逐字相同，枚举在 `MatchMetrics`，全部标签组合启动即预建）：
 
 - `watch_battle_total`：进了处理流程的请求恰好记一个。`internal` = 16004（身份缺失、依赖故障、**流程内剩余预算不够发下一跳**）与未预期异常（信封 1003）；`overloaded` = 在途已满或轮到执行时预算已用完（在 `onOverload()` 里记，没进流程）；
   `queued` = 16014 的三个出口（入口持票、抢标记时有票、复查命中票据或锁）；`already_watching` 只计 16016。请求体解析失败不计。
@@ -848,7 +848,7 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 - **6.2 租约丢失**：房间不作废、进程仍活，直拨照样能登记观众（W5 的收益）；目录里同号被别的进程接手后，直拨建连失败才判死。
 - **7.2 GM 回档**：只看战斗锁，观众不受影响。
 - **6.4 发号租约丢失（M28）**：163 / 164 不发号，照常服务；只有开局（gather 第 1 步）受影响，所以这期间不会产生新的可观战场次，开局清退钩子也不会被调用。
-- **xm-match 停机 / 崩溃**：在途 163 已抢到的标记留到 TTL（只是「可能在观战」的提示，W4 的同一口径）；停机时有界等待在途 163（至多 5 s，与排空工作池并行，§4.9），随后停清扫（当场中断）。
+- **game-match 停机 / 崩溃**：在途 163 已抢到的标记留到 TTL（只是「可能在观战」的提示，W4 的同一口径）；停机时有界等待在途 163（至多 5 s，与排空工作池并行，§4.9），随后停清扫（当场中断）。
 - **限频**：163 / 164 按缺省每秒 3 条；Unity 面板「刷新」按钮与 robot 都要按这个节奏。
 
 ---
@@ -871,7 +871,7 @@ S_W_LIST → 第一遍只凭成员与分数判「非法成员 / 过期」→ 其
 | W7 | 剔除守护 | 靠窗口判定避免删掉 D82 改写之后的记录 | 剔除时比较落点的 attempt，被改写过就不动 | 否（纵深防御） | 否 |
 | W8 | 随机选场 | 全集随机下标，挑中过期成员现场剔除，每次最多 3 挑（`sp.go:240-274`） | 一段 Lua 只在未过期区间里随机。落地：过期成员根本挑不到，所以选场不剔过期成员、也不删它的落点（基线是现场 DEL 记录 + ZREM）；过期成员只由 164 的懒剔除与清扫器摘，落点靠自己的 TTL | 只在过期成员堆积时（基线这时可能误回 16017） | 否 |
 | W9 | 兜底清扫 | 每实例每 500 ms，挂在 matcher 上 | 独立定时任务（`match-spectate-sweeper`），10 s 一轮、可配；第一轮在一个间隔之后；由 `MatchLifecycle` 启停 | 否（读路径已按分数过滤） | 否 |
-| W10 | 执行与预算 | gRPC 线程同步执行；超过 5 s → 信封 1003，后台 RPC 不取消（B-s5）；自我清退同步等 | 虚拟线程 + 在途上限 128；4.5 s 预算、每跳按剩余预算夹紧；预算不够 / 在途满回 in-band 16004；自我清退的 Remove 异步。落地：两跳 battle RPC 各有早于请求截止的硬截止（−1.2 s / −0.2 s），直拨的本地等待、目录读、探测都夹在其内（§4.8）；预算可配（`xm.match.request-budget`，[500 ms, 4500 ms]），调到 2300 ms 以下时启动告警（≤ 2200 ms 时带旧标记的换场恒回 16004，≤ 1000 ms 时凡走到登记的都回 16004，§4.9） | 只在过载 / 慢节点时：应答改为 in-band 16004 / 16018，不再是 5 s 后的信封 1003。**177 仍可能晚到**：AddObserver 超时（`Unknown`）时 battle 可能已登记并推 177，Dubbo 不取消服务端执行（同基线 B-s5）；客户端 `BattleDirectLink` 对任何完整的 177 都会建连（`mmorpg-client` `Assets/Scripts/Net/BattleDirectLink.cs:226-260`），观战相位已回 None 时帧被丢弃，参战中则走 Superseded 兜底（`BC.cs:684-693`）。W4 保留标记，让开局清退能摘掉这类观众。另有自我清退异步带来的极窄竞态（§7.1 第 4 条：并发 gather 秒败后立刻重看同一场，新登记可能被迟到的 Remove 摘掉、收到 166 REMOVED） | 否 |
+| W10 | 执行与预算 | gRPC 线程同步执行；超过 5 s → 信封 1003，后台 RPC 不取消（B-s5）；自我清退同步等 | 虚拟线程 + 在途上限 128；4.5 s 预算、每跳按剩余预算夹紧；预算不够 / 在途满回 in-band 16004；自我清退的 Remove 异步。落地：两跳 battle RPC 各有早于请求截止的硬截止（−1.2 s / −0.2 s），直拨的本地等待、目录读、探测都夹在其内（§4.8）；预算可配（`game.match.request-budget`，[500 ms, 4500 ms]），调到 2300 ms 以下时启动告警（≤ 2200 ms 时带旧标记的换场恒回 16004，≤ 1000 ms 时凡走到登记的都回 16004，§4.9） | 只在过载 / 慢节点时：应答改为 in-band 16004 / 16018，不再是 5 s 后的信封 1003。**177 仍可能晚到**：AddObserver 超时（`Unknown`）时 battle 可能已登记并推 177，Dubbo 不取消服务端执行（同基线 B-s5）；客户端 `BattleDirectLink` 对任何完整的 177 都会建连（`mmorpg-client` `Assets/Scripts/Net/BattleDirectLink.cs:226-260`），观战相位已回 None 时帧被丢弃，参战中则走 Superseded 兜底（`BC.cs:684-693`）。W4 保留标记，让开局清退能摘掉这类观众。另有自我清退异步带来的极窄竞态（§7.1 第 4 条：并发 gather 秒败后立刻重看同一场，新登记可能被迟到的 Remove 摘掉、收到 166 REMOVED） | 否 |
 | W11 | 观众路由与在线判定 | 读 `player:session`，要求 ONLINE；zone 读位置记录，读失败按 0（`wb.go:118-139`、`:269-281`） | 读在线目录，有条目才算在线；路由四个字段都取在线目录（177 也按在线目录推，路由与推送目标一致） | 否 | 否 |
 | W12 | 身份 | 会话为 0 时回落请求体（B-s9） | 只认会话（同 M3） | 只影响伪造请求 | 同 M3 |
 | W13 | 时钟 | match 本机时钟 | Redis `TIME`（并入 M7） | 只在时钟偏斜时 | 同 M7 |
@@ -893,10 +893,10 @@ M22（6.4 期间 163 回 1006、164 回空列表）随 6.5 关闭，不是差异
 | X2 | scene / gate 一律按 (zone, 节点号) 寻址；基线结算重投只按 node_id（`room.cpp:211-245`） | Java 节点号按 zone 租约，没有全局唯一性 | 否 |
 | X3 | 177 / 143 按在线目录的当前会话投递（6.2 N2） | 修掉基线「备战期间换会话，公告投到旧会话」 | 只在这个竞态里（改进） |
 | X4 | 一个 Redis（`{match}` tag），没有 MatchRedis / SharedRedis 双存储 | 6.4 已定 | 否 |
-| X5 | xm-match 全局部署一份（或多份全局实例），不按 zone 起 | 基线「每 zone 一份」只是本地部署形态（`bsc.yaml:4-5`） | 否 |
+| X5 | game-match 全局部署一份（或多份全局实例），不按 zone 起 | 基线「每 zone 一份」只是本地部署形态（`bsc.yaml:4-5`） | 否 |
 | X6 | robot 每次 run-tag 新建账号，不用固定的 robot_9003 / 9004 | 避免评分漂移与残留状态（P2-07）；「连续对局」的教训改由同一次运行打两局覆盖 | 否 |
 | X7 | robot 断言更严，并加跨区观众与第二局；做成独立场景 `battle-cross-zone`，报告一行与基线 `CROSS_ZONE_MATCH_OK` 字段相同的 note | 补 §2.5 的弱点；Java `RobotOptions` 是扁平的场景枚举 | 否 |
-| X8（落地新增） | 本机双 zone 的形态与 robot 的几处做法：基线是「每个 zone 一套部署、match 每 zone 一份」（`bsc.yaml:4-5`），robot 的 A / B 并发登录、只比两人的 gate 地址（`bsc.go:135-166`）。Java：`XM_ZONES=2` 只多起区 2 的 gate 与 scene，其余进程共用，**两个区的第一台 scene / gate 都是 1 号**；区 2 在区服目录里的状态由切片脚本跟随 `XM_ZONES` 管；robot 三个号顺序登录，「两个区的 gate 端点不同」用场景另发的 assign-gate 核对，失败行的步骤号是小写 | 同号节点是有意的（§2.8 的碰撞靠这个形态暴露）；顺序登录更保守；`StepTrack` 只认小写 | 否 |
+| X8（落地新增） | 本机双 zone 的形态与 robot 的几处做法：基线是「每个 zone 一套部署、match 每 zone 一份」（`bsc.yaml:4-5`），robot 的 A / B 并发登录、只比两人的 gate 地址（`bsc.go:135-166`）。Java：`GAME_ZONES=2` 只多起区 2 的 gate 与 scene，其余进程共用，**两个区的第一台 scene / gate 都是 1 号**；区 2 在区服目录里的状态由切片脚本跟随 `GAME_ZONES` 管；robot 三个号顺序登录，「两个区的 gate 端点不同」用场景另发的 assign-gate 核对，失败行的步骤号是小写 | 同号节点是有意的（§2.8 的碰撞靠这个形态暴露）；顺序登录更保守；`StepTrack` 只认小写 | 否 |
 
 ### 8.3 照搬的基线怪癖（PARITY 注明）
 
@@ -949,7 +949,7 @@ robot 的实测补充 E3：Java 切片上新号单人 PVE（Dungeon 1）是 7–
 
 | 问题 | 落地 |
 |---|---|
-| Q1 观战代码放哪 | 采纳：xm-match 的 `com.game.match.spectate`（16 个类，三个装配类）；共享件的改动在 `dispatch` / `lifecycle` / `placement` / `gather` / `metrics` / `support`（§4.1、实现记录） |
+| Q1 观战代码放哪 | 采纳：game-match 的 `com.game.match.spectate`（16 个类，三个装配类）；共享件的改动在 `dispatch` / `lifecycle` / `placement` / `gather` / `metrics` / `support`（§4.1、实现记录） |
 | Q2 163 的执行器 | 采纳：虚拟线程 + 在途上限 128（`SpectateExecutor`），164 留在 `match-worker`。接入方式是裁决 2：`MatchMethodHandler.executor()`，拒收走 `onOverload()`（§4.9） |
 | Q3 观众 RPC 直拨还是按目录 | 采纳：直拨，判死与 179 共用 `PlacementDialer`（三条证据）。预算口径是裁决 3：给直拨与目录读加带 `Deadline` 的重载，到点一律「没调通、不判死」（§4.8） |
 | Q4 结局不明保不保留标记 | 采纳：保留、不补发 Remove（W4）；未预期异常时的口径同此（§3.1 J2） |
@@ -960,25 +960,25 @@ robot 的实测补充 E3：Java 切片上新号单人 PVE（Dungeon 1）是 7–
 | Q9 163 的预算 | 采纳做法；数值不变（1.2 s / 0.2 s / 1.0 s），靠硬截止把直拨的本地余量与目录读夹进去（裁决 3，§4.4、§5.3）。评审后补：预算调小时的启动告警 |
 | Q10 建房窗口判定 | 采纳：做了（`SpectateRules.roomMayBeCreating`；`Dead` 与 1004 同走窗口判定） |
 | Q11 按 zone 过滤 | 采纳：不过滤 |
-| Q12 清扫间隔 | 采纳：10 s、可配（`xm.match.spectate.sweep-interval`） |
+| Q12 清扫间隔 | 采纳：10 s、可配（`game.match.spectate.sweep-interval`） |
 | Q13 复查读锁出错 | 采纳：照搬，按有锁自我清退、回 16014（BW2）；等到请求截止同此 |
 | Q14 dev `add-observer` 不写标记 | 采纳：`DevBattleController` 的接口注释写明；`bn-spec` §7.12 已补一句 |
 | Q15 dev 登记接口 | 采纳：不加（6.3 先于 6.5 落地，前提成立） |
-| Q16 跨区 robot 的参数名 | 采纳名字 `--visit-zone` / `XM_ROBOT_VISIT_ZONE`（缺省 2，≥ 1）。5.4 没有合入，这个选项由 6.5 新增（裁决 1）；只有 `battle-cross-zone` 要求它与 `--zone` 不同，帮助文本现在只写了这一种用途，5.4 的 `travel` 落地时再补 |
+| Q16 跨区 robot 的参数名 | 采纳名字 `--visit-zone` / `GAME_ROBOT_VISIT_ZONE`（缺省 2，≥ 1）。5.4 没有合入，这个选项由 6.5 新增（裁决 1）；只有 `battle-cross-zone` 要求它与 `--zone` 不同，帮助文本现在只写了这一种用途，5.4 的 `travel` 落地时再补 |
 | Q17 独立场景 | 采纳：`battle-cross-zone` |
 | Q18 跨区带观众 | 采纳：区 B 的 C 观战（Z5 / Z6） |
 | Q19 跨区用哪个 config | 采纳：`battle_config_id = 1`（`battle-smoke` 的 1V1 用 0） |
 | Q20 同 zone 优先 | 采纳：不做 |
-| Q21 两台 xm-match | 采纳：不做，随 7.6 |
+| Q21 两台 game-match | 采纳：不做，随 7.6 |
 | Q22 CI 加双 zone | **本批不做**：7.1b（整栈 compose）没有落地，`deploy/compose/` 里还没有 `stack.yaml`。前置清单①–⑤原样留给 7.1b；`ci-spec` 的端口表与 `zt-spec` §11.9 各登记了一句 |
 | Q23 Go robot 跨版本 | **没有跑**：本机没有 Go 工具链（§10.9）。验收证据是 Java robot 的 OK 行 |
 | Q24 Z7 依赖 6.3 | 6.3 已落地 → Z7 必选、没有降级 |
-| Q25 1V1 读归属区 | 采纳：不读。xm-match 主代码里用到 zone 的地方——`QueueService`、`DefaultMemberPrecheck`、`ScenePreparer` 的端点、`GatherPipeline` 的 zone 组成（都取位置记录或快照），票据的编解码，163 的观众路由（取在线目录）——没有一处是归属区 |
+| Q25 1V1 读归属区 | 采纳：不读。game-match 主代码里用到 zone 的地方——`QueueService`、`DefaultMemberPrecheck`、`ScenePreparer` 的端点、`GatherPipeline` 的 zone 组成（都取位置记录或快照），票据的编解码，163 的观众路由（取在线目录）——没有一处是归属区 |
 | Q26 等不等 X16 | 采纳：不等。Z1 的「角色列表 zone_id」断言没有实现（场景只记一条观察）；X16 未合入时从区 2 进来的新号归属区会记成 1，1V1 不读它 |
 | Q27 终局 120 s | 采纳：保持 120 s |
 | Q28 指纹跨 zone 不一致 | 采纳：跟 6.4（缺省 warn）；`CrossZoneGatherTest` 补了「两侧指纹不同」的用例（warn 照常开局、enforce 各在自己的 zone 解冻） |
 
-- **Q1 观战代码放哪？** 推荐 **xm-match 的 `com.game.match.spectate`**：与票据、落点同 tag，原子脚本只能在 match 里写；另起进程会让 W2 / W6 做不成。
+- **Q1 观战代码放哪？** 推荐 **game-match 的 `com.game.match.spectate`**：与票据、落点同 tag，原子脚本只能在 match 里写；另起进程会让 W2 / W6 做不成。
 - **Q2 163 用哪个执行器？** 推荐**虚拟线程 + 在途上限 128**，164 留在 `match-worker`。不采纳时的备选：163 进 `match-worker`，但加 4 并发的舱壁，超出直接回 16004。
 - **Q3 观众 RPC 直拨还是按目录？** 推荐**直拨，判死规则与 179 共用 `PlacementDialer`**（W5）。备选是按目录，代价是丢租约但还活着的节点上的战斗没法观战。
 - **Q4 AddObserver 结局不明时保不保留标记、要不要补发 Remove？** 推荐**保留、不补发**（W4）。
@@ -998,13 +998,13 @@ robot 的实测补充 E3：Java 切片上新号单人 PVE（Dungeon 1）是 7–
 - **Q18 跨区场景要不要带观众？** 推荐**带**（zone 2 的 C）：Java 的观众路由与 177 推送走带 zone 的在线目录、两个 zone 的 gate 同号，这是同号碰撞在观战上的唯一端到端验证点。
 - **Q19 跨区 robot 用哪个 battle_config_id？** 推荐 **1**：同基线 robot 与 Unity 客户端，并与 6.4 `battle-smoke` 第 8 步的 0 分开，两个场景并行也不会互相凑走对手。
 - **Q20 要不要同 zone 优先或按延迟加权？** 推荐**不要**：基线 D1 是用户的明确要求（`czm.md:90`）。
-- **Q21 切片要不要起两台 xm-match 复现基线的故障切换？** 推荐 **6.5 不做**（X1）；按队列加锁的多实例安全由 6.4 单测覆盖，随 7.6 再议。
-- **Q22 CI 要不要加双 zone？** 推荐**要**：7.1b 加两 zone 的整栈形态（xm-gate-z2、xm-scene-z2，端口照 `zt-spec` §5.13；思路同 `ci-spec:758` 的 `two-scenes`，但 gateway 要换参数，所以用覆盖文件而不是 profile，见前置③），在第三期之后跑 `battle-cross-zone`；本机连续绿了再加。
-  **前置**：① `ci-spec` 风险 15 / Q9（:992、:1037）——xm-battle 的通告地址一址两用。6.2 工作区已按 Q9 拆开：`xm.battle.client-advertise-host`（环境变量 `XM_BATTLE_CLIENT_ADVERTISE_HOST`，空 = 取 `xm.advertise-host`）只进票据与目录的 `client_host`，
-  `rpc_host` 仍用 `xm.advertise-host`（`xm-battle/src/main/resources/application.yaml:47-48`、`:63-65`；`BattleIdentity.java:13`）。整栈剩下的事是在 compose 里给 xm-battle 配上这个变量（宿主可达的地址），否则宿主上的 robot 连不上直连，单 zone 的 `battle-smoke` 也一样卡在这里；
-  ② xm-gate-z2 在 compose 里的 `xm.dubbo.match-url` 要指向 `tri://xm-match:20888`（本机切片的缺省 `127.0.0.1` 在容器网络里不成立），与 zone 1 的 gate 同一个值；
+- **Q21 切片要不要起两台 game-match 复现基线的故障切换？** 推荐 **6.5 不做**（X1）；按队列加锁的多实例安全由 6.4 单测覆盖，随 7.6 再议。
+- **Q22 CI 要不要加双 zone？** 推荐**要**：7.1b 加两 zone 的整栈形态（game-gate-z2、game-scene-z2，端口照 `zt-spec` §5.13；思路同 `ci-spec:758` 的 `two-scenes`，但 gateway 要换参数，所以用覆盖文件而不是 profile，见前置③），在第三期之后跑 `battle-cross-zone`；本机连续绿了再加。
+  **前置**：① `ci-spec` 风险 15 / Q9（:992、:1037）——game-battle 的通告地址一址两用。6.2 工作区已按 Q9 拆开：`game.battle.client-advertise-host`（环境变量 `GAME_BATTLE_CLIENT_ADVERTISE_HOST`，空 = 取 `game.advertise-host`）只进票据与目录的 `client_host`，
+  `rpc_host` 仍用 `game.advertise-host`（`game-battle/src/main/resources/application.yaml:47-48`、`:63-65`；`BattleIdentity.java:13`）。整栈剩下的事是在 compose 里给 game-battle 配上这个变量（宿主可达的地址），否则宿主上的 robot 连不上直连，单 zone 的 `battle-smoke` 也一样卡在这里；
+  ② game-gate-z2 在 compose 里的 `game.dubbo.match-url` 要指向 `tri://game-match:20888`（本机切片的缺省 `127.0.0.1` 在容器网络里不成立），与 zone 1 的 gate 同一个值；
   ③ **gateway 要同时播种两个区**：`seed-zones` 必须 [0] 与 [1] 一起给（Spring 列表跨来源不合并，`zt-spec:829`），而 gateway 是共用服务、不能按 profile 换参数。
-  推荐做成覆盖文件 `deploy/compose/two-zones.yaml`（`-f stack.yaml -f two-zones.yaml`，覆盖 gateway 的 seed 参数并加 xm-gate-z2 / xm-scene-z2，二者复用现有镜像、不写 `build`），
+  推荐做成覆盖文件 `deploy/compose/two-zones.yaml`（`-f stack.yaml -f two-zones.yaml`，覆盖 gateway 的 seed 参数并加 game-gate-z2 / game-scene-z2，二者复用现有镜像、不写 `build`），
   不要在单 zone 的 stack 里常驻一个 OPEN 的 2 区（没有 gate 的 OPEN 区会让按区选 gate 的场景失败）；
   ④ **模块清单漂移守卫**（`ci-spec` §4.5 第 4 步）只比对不带 profile 的 `stack.yaml` 的服务集合，z2 服务放在覆盖文件或 profile 里才不会判红；
   ⑤ `zt-spec` §11.9 把多 zone 用例（MZ1–MZ11，含故障注入）定为「手工 / IT，不进 CI」。本条只把 `battle-cross-zone`（以及 5.4 的 `travel` 场景，若 5.4 同意）放进 CI，
@@ -1023,16 +1023,16 @@ robot 的实测补充 E3：Java 切片上新号单人 PVE（Dungeon 1）是 7–
 ### 10.1 命令（`AGENTS.md` §4）
 
 ```bash
-./mvnw -B -pl xm-match -am test
-./mvnw -B -pl xm-match -am test -Dxm.it.redis=redis://127.0.0.1:6379   # Lua；本机用 D:/work/.tools 的 Redis 进程（with-backends.sh 包住），CI 用 ci-spec §4.4 的 compose infra（不用 services:）
-./mvnw -B -pl xm-battle,xm-discovery -am test                          # 同号碰撞用例
+./mvnw -B -pl game-match -am test
+./mvnw -B -pl game-match -am test -Dgame.it.redis=redis://127.0.0.1:6379   # Lua；本机用 D:/work/.tools 的 Redis 进程（with-backends.sh 包住），CI 用 ci-spec §4.4 的 compose infra（不用 services:）
+./mvnw -B -pl game-battle,game-discovery -am test                          # 同号碰撞用例
 ```
 
-动了 proto 之后先 `clean install`。测试方法名用中文。**没有运行证据时不得声称通过**：交付说明附 `-pl xm-match -am test` 与 `-Dxm.it.redis` 的结果、两个 robot 场景的 OK 行。
+动了 proto 之后先 `clean install`。测试方法名用中文。**没有运行证据时不得声称通过**：交付说明附 `-pl game-match -am test` 与 `-Dgame.it.redis` 的结果、两个 robot 场景的 OK 行。
 
 > **落地（2026-10-08）**：§10.2–§10.5 是开工前的计划，已按实际的类名订正；**测试类的实际分布、各自钉了什么、运行证据以文末实现记录「测试类清单与模块级证据」为准**。本批没有动 proto。
 > 与计划的主要出入：钩子的调用位置用例放在新类 `GatherHooksCallSiteTest`（没有改 6.4 的 `GatherPipelineTest`）；观众 RPC 的用例在 `DefaultObserverDialerTest` 与 `DirectPlacementDialerTest`；
-> 没有 `ZoneMixTest`；`PlayerPushesTest` 是本批在 xm-discovery 新建的；另有计划外的 `SpectateFlowRedisIntegrationTest`（真流程接真存储，含 JFR 钉住探测）、`ObserverRpcLoopbackTest`、`SpectateExecutorTest`、
+> 没有 `ZoneMixTest`；`PlayerPushesTest` 是本批在 game-discovery 新建的；另有计划外的 `SpectateFlowRedisIntegrationTest`（真流程接真存储，含 JFR 钉住探测）、`ObserverRpcLoopbackTest`、`SpectateExecutorTest`、
 > `WatchBattleHandlerTest` / `ListWatchableHandlerTest`、三个装配类各自的测试，以及存储的抽象契约 `SpectateStoreContract`（内存替身与真 Redis 各跑一遍）。
 
 ### 10.2 纯函数（缺省执行）
@@ -1069,7 +1069,7 @@ Java 独有：W2（入口检查之后才建出票据 → 16014、不调 AddObser
 W10（换场前剩余预算 < 2.2 s → 16004 且旧标记保留；Add 前剩余 < 1 s → 16004 且标记已回滚；在途已满 → 16004 / overloaded）；损坏落点 → 16004、计 anomalies、不剔除；
 `already_watching` 只在 16016 时计数（W14）。
 第三轮评审补：S_W_ACQUIRE 回 `queued` → 先按本次值 S_W_RELEASE 再回 16014（替身模拟「重发前首轮已写入」）；处理器内未预期异常 → 信封 1003、已抢到的标记按值释放（J2）；
-在途许可在正常 / 超时 / 异常 / 未预期异常四条出口都归还（`xm_match_spectate_inflight` 回到 0）；`Unknown` 之后同一玩家再发 163(同一场) → 只删标记、不发 Remove、Add 走幂等；
+在途许可在正常 / 超时 / 异常 / 未预期异常四条出口都归还（`game_match_spectate_inflight` 回到 0）；`Unknown` 之后同一玩家再发 163(同一场) → 只删标记、不发 Remove、Add 走幂等；
 复查时锁尚不存在（切磋的 Prepare 晚于复查）→ 照常成功（§7.1 第 16 条的既定结局，防止有人「顺手」加二次复查而改变行为）。
 
 **`WatchableListServiceTest`**：最新在前；剔除过期、缺记录、非法成员；读记录出错 / 损坏只跳过；读索引失败 → `tip_id = 1003`；不回填；摘要字段与名字顺序；`limit` 收口。
@@ -1086,16 +1086,16 @@ RPC 失败 / 超时开局照常；每人至多 3 s；`onStarted` 只在 attempt 
 **`DefaultObserverDialerTest` / `DirectPlacementDialerTest`**（落地的类名；后者另钉带硬截止的重载，`RedisBattleNodesTest` 钉带截止的 `lookup`）：四种结局的判据（建连失败 + 换实例 / 同实例 / 目录缺席 / 目录读失败；超时；连上后断开；6.2 在途超限异常）；179 与观战共用后 `BattleTicketReissueTest` 不回归。
 
 **`CrossZoneGatherTest`**（钉住 Z1–Z3、Z11、Z12）：
-- A 在 zone 1、B 在 zone 2 的位置记录，`xm:nodes:scene:1` 与 `:2` **都有 1 号节点**、实例与地址不同 → prepare 分别打到两个端点；Cancel 发回 Prepare 时的端点；
+- A 在 zone 1、B 在 zone 2 的位置记录，`game:nodes:scene:1` 与 `:2` **都有 1 号节点**、实例与地址不同 → prepare 分别打到两个端点；Cancel 发回 Prepare 时的端点；
 - CreateBattle 的两个快照 `routing.zone_id` 是 1 和 2；`gather_zone_mix_total{mix="cross"}` 加 1；
 - B 排队之后旅行到 zone 3（位置 `o`@z3）→ prepare 打到 zone 3；gather 时位置不是 `o`（`l` / `x` / 缺失）→ `no_location`、B 作为肇事者出局（`m-spec` §9.6 第 3 步）。
   「位置 `l` → 本轮跳过、保留排队」是 matcher 凑单校验的规则（M12，`m-spec:1028`），归 6.4 的 matcher 单测，不在这个 gather 用例里；
 - 观众在 zone 2、参战者在 zone 1：163 成功，观众路由的 zone = 2、gate 节点号 1。
 
-**同号碰撞（其它模块，钉住 Z5–Z7）**：`PlayerPushesTest`（xm-discovery，本批新建）/ `PresenceLobbyAnnouncerTest`：presence (zone 2, gate 1) → 发布到 `xm:gate-push:2:1` 而不是 `:1:1`；
-`DubboSceneBattleEventsTest`、`SettlementOutboxTest`（6.3）：路由 (zone 2, 节点 1) 不命中 zone 1 的 1 号节点，实例不符回落定位器；`BattleTicketsTest`（xm-common）：载荷无 zone 字段，跨实例拒绝。
-落地另补：xm-battle `ObserverTest`（观众换到另一个 zone 的同号 gate：会话号、gate 节点号都不变，只有实例与 zone 变 → 按会话变了处理）、`SceneClientSweeperTest`（按节点自己的 zone 读目录）；
-xm-discovery `SceneAssetLocatorTest`；xm-common `GateTokensTest`（zone 1 的 1 号 gate 的令牌拿到 zone 2 的 1 号 gate → `WRONG_ZONE`）。
+**同号碰撞（其它模块，钉住 Z5–Z7）**：`PlayerPushesTest`（game-discovery，本批新建）/ `PresenceLobbyAnnouncerTest`：presence (zone 2, gate 1) → 发布到 `game:gate-push:2:1` 而不是 `:1:1`；
+`DubboSceneBattleEventsTest`、`SettlementOutboxTest`（6.3）：路由 (zone 2, 节点 1) 不命中 zone 1 的 1 号节点，实例不符回落定位器；`BattleTicketsTest`（game-common）：载荷无 zone 字段，跨实例拒绝。
+落地另补：game-battle `ObserverTest`（观众换到另一个 zone 的同号 gate：会话号、gate 节点号都不变，只有实例与 zone 变 → 按会话变了处理）、`SceneClientSweeperTest`（按节点自己的 zone 读目录）；
+game-discovery `SceneAssetLocatorTest`；game-common `GateTokensTest`（zone 1 的 1 号 gate 的令牌拿到 zone 2 的 1 号 gate → `WRONG_ZONE`）。
 
 **`QueueServiceTest`（6.4，追加，Z2）**：`SessionContext.zone_id = 1`、位置记录 zone = 2 → 票据 `zone_id = 2`；位置 `l` / `x` / 缺失 → 16020。对照 `cz_test.go:108`、`:121`。
 
@@ -1104,53 +1104,53 @@ xm-discovery `SceneAssetLocatorTest`；xm-common `GateTokensTest`（zone 1 的 1
 「真装配 + 真 Triple」这一跳在 `MatchSkeletonContextTest`（评审 T-01 补），装起来的是不是真实现由 `MatchApplicationContextTest` 钉。
 
 **生命周期与配置（第三轮评审补）**：停机时撤 Dubbo 导出之后有界等待在途 163（替身让一次 163 挂在 AddObserver 上，停机不早于它的预算到点、也不无限等）、随后停清扫器；
-`xm.match.spectate.sweep-interval ≤ 0`、`max-inflight < 1` → 拒绝启动（§4.11 配置校验，`MatchPropertiesTest`）。
+`game.match.spectate.sweep-interval ≤ 0`、`max-inflight < 1` → 拒绝启动（§4.11 配置校验，`MatchPropertiesTest`）。
 
-### 10.4 真 Redis（`-Dxm.it.redis`，缺省跳过）
+### 10.4 真 Redis（`-Dgame.it.redis`，缺省跳过）
 
-- 用例类带 `@EnabledIfSystemProperty(named = "xm.it.redis", …)`，用 DB 13、开头清自己的键（同其它模块：CI 里各模块串行、共用 DB 13，`ci-spec` §4.4 第 5 步）；它会进 `TestReport --require-it-executed` 的计数（§4.4 第 6 步），整类被跳过即判红。
+- 用例类带 `@EnabledIfSystemProperty(named = "game.it.redis", …)`，用 DB 13、开头清自己的键（同其它模块：CI 里各模块串行、共用 DB 13，`ci-spec` §4.4 第 5 步）；它会进 `TestReport --require-it-executed` 的计数（§4.4 第 6 步），整类被跳过即判红。
 - 每段脚本单独验证；**每段可变脚本执行两次，结果不变**（模拟 Redisson 重发）。
 - S_W_ACQUIRE：有票 → queued；同值重放 → ok；别的值 → busy。S_W_RELEASE 只删自己的值。
 - S_W_PICK：不返回过期成员；全部过期返回空；1 万次挑选分布大致均匀；`r` 取 0 与 0.999… 的边界。
 - S_W_EVICT 四种模式；S_W_PUBLISH 的 attempt 条件；S_W_SWEEP 只摘成员不动落点。
 - 观战键、票据、落点同 slot。落地：用 Redisson 的 CRC16 在本地算槽号相等——单机 Redis 对 `CLUSTER KEYSLOT` 回「cluster support disabled」。
-- 落地（`RedissonSpectateStoreIntegrationTest` + 夹具 `SpectateRedisFixture`）：**契约用例不用生产的索引键**，每个夹具一把自己的 `xm:{match}:watchable:it:<随机>`（同槽）——索引是全局的一把键，共用 DB 13 的别的用例会公开战斗、
+- 落地（`RedissonSpectateStoreIntegrationTest` + 夹具 `SpectateRedisFixture`）：**契约用例不用生产的索引键**，每个夹具一把自己的 `game:{match}:watchable:it:<随机>`（同槽）——索引是全局的一把键，共用 DB 13 的别的用例会公开战斗、
   同库里若有活着的清扫器会摘掉过期成员，「索引此刻恰好这几个成员」只在自己的键上成立。真 Redis 拨不动 `TIME`：「恰在分界上」用把脚本里唯一的 `redis.call('TIME')` 换成固定值的副本来钉，「重放不续期」用 `PEXPIRE` 把 TTL 改短后重放来钉。
   每段可变脚本原样重发一遍后用 `DUMP` 逐字节比对存储不变。另有 `SpectateFlowRedisIntegrationTest`（真的 163 / 164 / 钩子 / 清扫器接在真的观战、落点、票据存储上）。
 - 移植 `TestSpectateRegisterLoadRemoveRoundTrip :127`、`TestPickRandomBattleNeverReturnsStaleOrGarbage :161`、`…EvictsAllBadMembersAndReportsNone :177`、`…GivesUpAfterThreeAttempts :839`。
 - 同号碰撞：`ScenePreparer` 与 `SceneAssetLocator` 在真 Redis 上重复 §10.3 的用例；移植 `TestMatcherMixesZonesAndShortensMatchedTTL`（`cz_test.go:153`）。
-  落地：`ScenePreparerRedisIntegrationTest`（xm-match）、`SceneAssetLocationIntegrationTest`（xm-discovery，多 1 例）、`GatePushCrossZoneIntegrationTest`（xm-discovery，真 Redis pub/sub：zone 2 玩家的消息 zone 1 的同号 gate 一条也收不到）；`cz_test.go:153` 6.4 已移植（`MatcherPortedScenarios`）。
+  落地：`ScenePreparerRedisIntegrationTest`（game-match）、`SceneAssetLocationIntegrationTest`（game-discovery，多 1 例）、`GatePushCrossZoneIntegrationTest`（game-discovery，真 Redis pub/sub：zone 2 玩家的消息 zone 1 的同号 gate 一条也收不到）；`cz_test.go:153` 6.4 已移植（`MatcherPortedScenarios`）。
 
 ### 10.5 Dubbo
 
-xm-match → xm-battle 的一条真 Triple 回环：带 MAC 调 `addObserver` / `removeObserver`；缺 MAC 被拒；`PlacementDialer` 区分建连失败与超时（对一个没人监听的端口、一个故意挂起的提供方各测一次）。
+game-match → game-battle 的一条真 Triple 回环：带 MAC 调 `addObserver` / `removeObserver`；缺 MAC 被拒；`PlacementDialer` 区分建连失败与超时（对一个没人监听的端口、一个故意挂起的提供方各测一次）。
 落地：`ObserverRpcLoopbackTest`（缺省执行）——缺 MAC 被拒 → `Unknown`（业务代码没执行）；没人监听的端口 → `NotDelivered`（配给定的探测结论时 → `Dead`）；挂起的提供方 → `Unknown`，硬截止早于超时时到硬截止就返回。
 Dubbo 模型上的首次调用在 `@BeforeAll` 的平台线程上预热（§4.9 的钉住点）。
 
 ### 10.6 本机切片
 
-- 单 zone：`start-slice.sh`（6.2 起 xm-battle、6.4 起 xm-match，6.3 的 scene）→ `battle-smoke`。13 个进程，缺省 `XM_ZONES=1` 的命令行与以前相同。
-- 双 zone：`XM_ZONES=2 tools/local/start-slice.sh` → `java -jar xm-robot/target/xm-robot-*.jar battle-cross-zone --zone 1 --visit-zone 2`。
-- 回归：`XM_ZONES=1` 下现有场景与 6.4 `battle-smoke` 不受影响。
+- 单 zone：`start-slice.sh`（6.2 起 game-battle、6.4 起 game-match，6.3 的 scene）→ `battle-smoke`。13 个进程，缺省 `GAME_ZONES=1` 的命令行与以前相同。
+- 双 zone：`GAME_ZONES=2 tools/local/start-slice.sh` → `java -jar game-robot/target/game-robot-*.jar battle-cross-zone --zone 1 --visit-zone 2`。
+- 回归：`GAME_ZONES=1` 下现有场景与 6.4 `battle-smoke` 不受影响。
 
-**落地的 `XM_ZONES`**（lead 裁决 1、5；`tools/local/start-slice.sh` / `stop-slice.sh` / `battle-crash-window.sh`，文本由 xm-robot 的 `SliceScriptsTest` 与 xm-gate 的 `LocalSliceOrderTest` 钉住）：
+**落地的 `GAME_ZONES`**（lead 裁决 1、5；`tools/local/start-slice.sh` / `stop-slice.sh` / `battle-crash-window.sh`，文本由 game-robot 的 `SliceScriptsTest` 与 game-gate 的 `LocalSliceOrderTest` 钉住）：
 
 | 项 | 落地 |
 |---|---|
-| 开关 | `XM_ZONES`（1 / 2，缺省 1；只有 `start-slice.sh` 读，不导出；其它值退出码 1、不起进程）。可与 `XM_SCENE_NODES=2` 同用 |
-| 新增进程（=2） | `xm-scene-z2`：`--xm.zone-id=2`，链路 21010、资产通道 21110、管理端口 18115，排在区 1 的场景节点之后，同样等主世界频道（`xm_scene_channels{state="active"} ≥ 1`）；`xm-gate-z2`：`--xm.zone-id=2`，客户端 11010、管理端口 18123，排在 xm-gate 之后。其余进程共用（含 xm-match、xm-battle）。单 zone 13 个进程，双 zone 15 个（再加 `XM_SCENE_NODES=2` 是 16 个）。区 2 的 scene / gate 节点号按 zone 租约也是 1 号——与区 1 同号是有意的（§2.8） |
-| 启动 / 停止次序 | 启动：… xm-data → xm-scene [→ xm-scene-2] → xm-scene-z2 → xm-gate → xm-gate-z2 → xm-gateway → xm-battle → 区 2 状态同步。停止是它的逆序：`stop-slice.sh` 在停 xm-gate 之前先停 xm-gate-z2、停 xm-scene-2 之前先停 xm-scene-z2；它不读 `XM_ZONES`，只看 PID 文件 |
-| 区 2 在区服目录里的那一行 | **由脚本经 xm-data 的运维接口管，状态跟随 `XM_ZONES`**（`sync_zone2_status`；令牌 `XM_ADMIN_TOKEN`，操作人头 `X-Xm-Operator: start-slice`）：=2 → `POST /admin/zones/2/open`，回 404（库里还没有区 2）就 `POST /admin/zones` 建区（名字「二区」、`sort_order` 2）；=1 → `POST /admin/zones/2/maintenance`，回 404 就什么都不做。**xm-gateway 的命令行两种形态下都不变**——没有按 `zt-spec` §5.13 原设计在命令行上给 `seed-zones[0] / [1]`：本机 JDK 启动器按 ANSI 代码页取命令行，中文区名到进程时已是「??」，而播种只在库里没有这个区时写、写了不再改 |
-| 「全部就绪」 | =2 时等 `GET /api/server-list` 里区 2 是 `OPEN` 且带 `load_level`（负载档只在 gateway 的健康探测看到该区有 gate 之后才下发，所以同时说明 xm-gate-z2 已进节点目录）；=1 且库里有区 2 时等它显示 `MAINTENANCE`；各 30 s，失败退出码 1（这时进程都已起来）。末行是「全部就绪（场景节点 N 个、区 M 个）。…」。缺省路径因此多一次 HTTP 调用，回的不是 200 / 404 时脚本以退出码 1 结束 |
-| 故障变体 `battle-crash-window.sh` | 只在区 1 上做：robot 要登录的区（`--zone N` / `--zone=N` 或 `XM_ROBOT_ZONE`）不是 1 时退出码 2。区 2 的两个实例它不杀、不重启、不检查 |
+| 开关 | `GAME_ZONES`（1 / 2，缺省 1；只有 `start-slice.sh` 读，不导出；其它值退出码 1、不起进程）。可与 `GAME_SCENE_NODES=2` 同用 |
+| 新增进程（=2） | `game-scene-z2`：`--game.zone-id=2`，链路 21010、资产通道 21110、管理端口 18115，排在区 1 的场景节点之后，同样等主世界频道（`game_scene_channels{state="active"} ≥ 1`）；`game-gate-z2`：`--game.zone-id=2`，客户端 11010、管理端口 18123，排在 game-gate 之后。其余进程共用（含 game-match、game-battle）。单 zone 13 个进程，双 zone 15 个（再加 `GAME_SCENE_NODES=2` 是 16 个）。区 2 的 scene / gate 节点号按 zone 租约也是 1 号——与区 1 同号是有意的（§2.8） |
+| 启动 / 停止次序 | 启动：… game-data → game-scene [→ game-scene-2] → game-scene-z2 → game-gate → game-gate-z2 → game-gateway → game-battle → 区 2 状态同步。停止是它的逆序：`stop-slice.sh` 在停 game-gate 之前先停 game-gate-z2、停 game-scene-2 之前先停 game-scene-z2；它不读 `GAME_ZONES`，只看 PID 文件 |
+| 区 2 在区服目录里的那一行 | **由脚本经 game-data 的运维接口管，状态跟随 `GAME_ZONES`**（`sync_zone2_status`；令牌 `GAME_ADMIN_TOKEN`，操作人头 `X-Game-Operator: start-slice`）：=2 → `POST /admin/zones/2/open`，回 404（库里还没有区 2）就 `POST /admin/zones` 建区（名字「二区」、`sort_order` 2）；=1 → `POST /admin/zones/2/maintenance`，回 404 就什么都不做。**game-gateway 的命令行两种形态下都不变**——没有按 `zt-spec` §5.13 原设计在命令行上给 `seed-zones[0] / [1]`：本机 JDK 启动器按 ANSI 代码页取命令行，中文区名到进程时已是「??」，而播种只在库里没有这个区时写、写了不再改 |
+| 「全部就绪」 | =2 时等 `GET /api/server-list` 里区 2 是 `OPEN` 且带 `load_level`（负载档只在 gateway 的健康探测看到该区有 gate 之后才下发，所以同时说明 game-gate-z2 已进节点目录）；=1 且库里有区 2 时等它显示 `MAINTENANCE`；各 30 s，失败退出码 1（这时进程都已起来）。末行是「全部就绪（场景节点 N 个、区 M 个）。…」。缺省路径因此多一次 HTTP 调用，回的不是 200 / 404 时脚本以退出码 1 结束 |
+| 故障变体 `battle-crash-window.sh` | 只在区 1 上做：robot 要登录的区（`--zone N` / `--zone=N` 或 `GAME_ROBOT_ZONE`）不是 1 时退出码 2。区 2 的两个实例它不杀、不重启、不检查 |
 
-区 2 的五个端口（21010 / 21110 / 18115 / 11010 / 18123）只由脚本经命令行参数传入；`SliceScriptsTest` 从脚本的 `ZONE2_*` 两行解析它们，并扫描每个模块的 `application*.yaml`——哪个模块的缺省端口与它们相撞，xm-robot 的测试就红（评审 XZ-1：这种冲突只在 `XM_ZONES=2` 时才暴露）。
+区 2 的五个端口（21010 / 21110 / 18115 / 11010 / 18123）只由脚本经命令行参数传入；`SliceScriptsTest` 从脚本的 `ZONE2_*` 两行解析它们，并扫描每个模块的 `application*.yaml`——哪个模块的缺省端口与它们相撞，game-robot 的测试就红（评审 XZ-1：这种冲突只在 `GAME_ZONES=2` 时才暴露）。
 
 没有落地的：`team` X1 / X2 与 `guild` 第 4 步的跨区步骤（`zt-spec` §5.13 说「顺带解锁」，归 5.4，照旧跳过）；双 zone 进 CI（Q22）。
 
 ### 10.7 robot：`battle-smoke` 观战段（替换 `m-spec` §15.5 第 10 步）
 
-- **前置**：切片带 xm-battle、xm-match、6.3 的 scene；`XM_RUN_MODE=dev`；Kafka 就绪。
+- **前置**：切片带 game-battle、game-match、6.3 的 scene；`GAME_RUN_MODE=dev`；Kafka 就绪。
 - **账号**：观战段用自己的四个新号 SA（参战）、SB（指定观战）、SC（列表 / 随机观战）、SD（第二局参战），run-tag 新建，与 6.4 的 A / B / C 互不牵连。观战段放在 6.4 各段**之前**跑。
   落地：账号是 `<prefix>bm<runTag>_w / _x / _y / _z`（SA / SB / SC / SD）；这四个号在观战段结束时就 LeaveGame 下线（SB 没来得及取消的排队票会补一条 148）。
 - **节奏**：同一会话同号请求间隔 ≥ 350 ms（每号每秒 3 条）；等 177 与 161 各 15 s、等 166 120 s（同 `bss.go:54-60`）；过渡态每 1 s 重试、上限 20 s。
@@ -1166,7 +1166,7 @@ Dubbo 模型上的首次调用在 `@BeforeAll` 的平台线程上预热（§4.9 
   **开不开自动，出手内容都一样**，区别只在回合节奏（不开自动等满 6 s，开自动全员就绪即结算）。
   **落地（评审 R-3）：预算是 30 s，不是原稿的 60 s**。原稿拿基线「同一场 PVE 开自动要打 13–21 回合」（E3）外推出 X 能活 78 s 以上；Java 切片上新号单人 PVE 实测是 **7–10 回合**，不开自动的 X 只活 42–60 s，
   60 s 的预算永远排在「X 提前结束」之后、起不到提前报警的作用。现在：S1 收到 177 到 S8 结束**合计预算 30 s**（正常约 6 s；各步的等待上限照旧，第一次超出记一条 `step=s<n>-budget` 的失败、之后照常往下跑）；
-  预算必须比「最少 7 回合 × 6 s」短一个回合以上（`SpectateSteps.SOLO_PVE_MIN_ROUNDS` / `ROUND_TIMEOUT_MS`，有用例钉住，回合时长对着 xm-battle 的常量）。
+  预算必须比「最少 7 回合 × 6 s」短一个回合以上（`SpectateSteps.SOLO_PVE_MIN_ROUNDS` / `ROUND_TIMEOUT_MS`，有用例钉住，回合时长对着 game-battle 的常量）。
   S2–S9 每步开始前看 SA 的直连，一旦出现 150 或连接已关（X 提前结束）→ `step=s<n>-x-ended-early` 并中止观战段（匹配段照常跑），报告当时的回合数——明显少于 7 回合才是表数值变了，否则预算应当已先报。
 
 | 步 | 动作 | 断言 | 对照 |
@@ -1184,7 +1184,7 @@ Dubbo 模型上的首次调用在 `@BeforeAll` 的平台线程上预热（§4.9 
 | S10 | SB 再发 163(X)；SC 发 164 | SB → `{16018, 该战斗不存在或已结束}`；列表里没有 X | `wb.go:238-254` |
 | S11 | 开局清退：SD 发 157 PVE_SOLO（战斗 Z）→ 直连、不开自动；SB 发 163(Z) → 直连收到 161；**SB 发 157 PVE_SOLO** | SB 在 Z 的直连上 10 s 内收到 166 `{battle_id = Z, outcome = 0 ONGOING, reason = 3 REMOVED}`，然后 FIN；SB 大厅收到新战斗 W 的 177(role 1) / 143。**两条连接之间不断言先后**。之后 SD、SB 都开自动打完各自的局（否则 SB 带着锁）。落地（评审 R-4）：这两局（SD 的 Z、SB 的 W）的直连 150 到了之后，观战段下线之前**再等各自的大厅 150**（结算落到 scene 才推），两局共用截止「最后一条直连 150 + 25 s」；等不到只记观察、不判失败——否则参战者在结算应用之前离场，battle 的结算发件箱要对着离线玩家重投约两分钟才放弃。SA 的 X 不等（它在 S9 就结束了） | `gather.go:228-234`；`room.cpp:897-929` |
 | S12 | 16015：在 6.4 第 9 步的切磋战斗里（切磋不建票），A、B 都开自动之前，A 发 163(0)。**注意 A 在 6.4 第 8 步打过 1V1**：那一局的 ready 票（60 s，BW1）在切磋开局时可能还没过期，而票据检查排在锁检查之前，此时回 16014。**落地（评审 R-2）分成两半**：① `s12-ready-residue`——**切磋开局之前**（第二次发起切磋之前）每 1 s 发一条 153，把 A 上一局 1V1 的 ready 票等掉，直到 NOT_QUEUED；过了「第 8 步收到 177 的时刻 + 62 s」仍是 READY，或是 QUEUED / MATCHED，记一条失败后继续；② `s12-in-battle`——切磋局里（A、B 开自动之前）A **只发一次** 163(0)，必须是 16015，再见 16014 直接失败。原稿是「在切磋局里遇 16014 每 1 s 重试到 177 + 62 s」，并论证「新号 1V1 最短 8 回合约 48 s，等得过来」——**这个论证不成立**：切磋双方带着上一局 1V1 的结算血量进场（败者复活回满、胜者残血），不开自动的切磋局可以只有 1 回合（6 s）；`step=s12-battle-ended` 已不存在 | ① 最终 NOT_QUEUED；② `{16015, 战斗尚未结束,无法观战}`。报告字段 `s12_ready_residue=0/1` 的含义随之改变：现在是「切磋开局之前的 153 见到过 READY」，不再是「163 见到过 16014」；robot 不再直接观察「ready 残留 → 16014」（BW1 由 §10.3 的组件用例钉），16014 仍由 S1（持票且有锁）与 S6（排队票）断言 | `wb.go:74-89`；`join.go:234-246` |
-| S13 | 场景末尾再抓 18113，与开头的基数相减 | `xm_match_watch_battle_total{outcome="ok"}` 增量 ≥ 4（S3、S4、S8、S11）、`not_found` ≥ 2（S7、S10）、`queued` ≥ 2（S1、S6）、`in_battle` ≥ 1（S12）；`xm_match_spectate_evictions_total{reason="enter_gather",result="removed"}` 增量 ≥ 1 | — |
+| S13 | 场景末尾再抓 18113，与开头的基数相减 | `game_match_watch_battle_total{outcome="ok"}` 增量 ≥ 4（S3、S4、S8、S11）、`not_found` ≥ 2（S7、S10）、`queued` ≥ 2（S1、S6）、`in_battle` ≥ 1（S12）；`game_match_spectate_evictions_total{reason="enter_gather",result="removed"}` 增量 ≥ 1 | — |
 
 - **输出**：沿 6.4 的 `BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… challenge_battle_id=…`，追加 `spectate_battle_id=… b_spectate_turns=… b_direct_spectate_turns=… removed_ok=1`
   （`b_*` 两个字段名同 Go，`bss.go:277-278`）以及 `s12_ready_residue=0|1`；失败 `BATTLE_SMOKE_FAIL step=s<n>-… reason=…`（步骤号小写）。
@@ -1198,16 +1198,16 @@ Dubbo 模型上的首次调用在 `@BeforeAll` 的平台线程上预热（§4.9 
 
 ### 10.8 robot：新场景 `battle-cross-zone`（`RobotOptions.Scenario.BATTLE_CROSS_ZONE`）
 
-- **入口**：`java -jar xm-robot.jar battle-cross-zone --zone 1 --visit-zone 2 [--match-admin-url http://127.0.0.1:18113]`；`--visit-zone` 缺省 2，与 `--zone` 相同 → `UsageException`（对齐 `bsc.yaml:32`）。
-  Z8 查评分要 6.4 的 `MatchAdminClient`（`--match-admin-url`，环境变量带 `XM_ADMIN_TOKEN`；`m-spec` §9.10 / §15.5），缺 token 时 FAIL `step=Z8-admin-token`，不静默跳过。
+- **入口**：`java -jar game-robot.jar battle-cross-zone --zone 1 --visit-zone 2 [--match-admin-url http://127.0.0.1:18113]`；`--visit-zone` 缺省 2，与 `--zone` 相同 → `UsageException`（对齐 `bsc.yaml:32`）。
+  Z8 查评分要 6.4 的 `MatchAdminClient`（`--match-admin-url`，环境变量带 `GAME_ADMIN_TOKEN`；`m-spec` §9.10 / §15.5），缺 token 时 FAIL `step=Z8-admin-token`，不静默跳过。
 - **账号**：`<prefix>xz<runTag>_{a,b,c}`，每轮新号（命名惯例同 `CrossNodeScenario.accountName`）。A 首登 zone 1，B、C 首登 zone 2：评分都从 1500 开始，没有 GO-5 重定向残留。
 - **时限**：开战 30 s、直连 10 s、观战 15 s、终局 120 s（同 `bss.go:54-60`、`bdc.go:51`）；节奏同 §10.7。
 
 | 步 | 动作 | 断言 | 对照 |
 |---|---|---|---|
-| Z0 | `GET /api/server-list` | 区 1、2 都 OPEN；缺区 → FAIL `step=preflight`，原因写「需要 XM_ZONES=2 切片」。不跳过：本场景就是验这件事 | `zt-spec` §11.11 T0 |
+| Z0 | `GET /api/server-list` | 区 1、2 都 OPEN；缺区 → FAIL `step=preflight`，原因写「需要 GAME_ZONES=2 切片」。不跳过：本场景就是验这件事 | `zt-spec` §11.11 T0 |
 | Z1 | 并发：A assign-gate(zone) 登录进场；B、C assign-gate(visit-zone) 登录进场 | A 与 B 的 gate 端点不同（切片里是 11000 / 11010）；X16 已合入时另断言角色列表的 `zone_id` 分别是 1 / 2 | `bsc.go:120-166` |
-| Z2 | 抓一次 18113 | 记下 `xm_match_gather_zone_mix_total{mix="cross"}`（**对 `mode` 标签求和**：`m-spec` §11 没有钉死 mode 标签的取值写法，robot 不与它耦合）与 `xm_match_watch_battle_total{outcome="ok"}` 的基数 | — |
+| Z2 | 抓一次 18113 | 记下 `game_match_gather_zone_mix_total{mix="cross"}`（**对 `mode` 标签求和**：`m-spec` §11 没有钉死 mode 标签的取值写法，robot 不与它耦合）与 `game_match_watch_battle_total{outcome="ok"}` 的基数 | — |
 | Z3 | A 发 157 `{mode = 3, config = 1, zone_id = A 的区}`；**收到 A 的回包之后** B 再发同样的 157 | 两个回包 `error_code = 0`、ticket 匹配 UUID 格式；不得出现 16000 / 16001 / 16020。这样 A 一定是锚点 | `bsc.go:244-252` |
 | Z4 | 两侧等大厅公告（30 s） | 收件箱里 177 的下标在 143 之前；两侧 battle_id 相同且非 0；两侧 177 的 `host:port` 相同；解析两张 `BattleTicketPayload`：`battle_node_id`、`battle_instance_id` 相同，`player_id` 各是自己，`role = PARTICIPANT`；143 的阵营里 A 在 0 队、B 在 1 队 | `pb.proto:135-142`；`room.cpp:609-628` |
 | Z5 | A、B 各自直连（握手 battle_id 一致、140 补拉成功），**都不开自动**；C（zone 2）发 163(该 battle_id) | C：应答 `battle_id` 正确、无 `error_message`；177(role 2) 经 zone 2 的 gate 到达 → 直连 → 161 `{observer_count = 1}` | `czm.md:4`；§2.8 |
@@ -1218,11 +1218,11 @@ Dubbo 模型上的首次调用在 `@BeforeAll` 的平台线程上预热（§4.9 
 | Z10 | 再抓 18113 | `mix="cross"` 增量 ≥ 2；`watch_battle_total{outcome="ok"}` 增量 ≥ 1（指标是全局的，只取下界） | `czm.md:267` |
 | Z11 | 三人 LeaveGame | 输出 `CROSS_ZONE_MATCH_OK battle_id=… zone_a=1 zone_b=2 a_turns=… b_turns=… a_direct_turns=… b_direct_turns=…`（字段同基线）后接 ` observer_zone=2 c_spectate_turns=… second_battle_id=…`；失败 `CROSS_ZONE_MATCH_FAIL step=Z<n>-… reason=…` | `bsc.go:16-20` |
 
-`xm-robot/README.md` 写清前置：`XM_ZONES=2`、dev 模式、两个区的 gate 都在 gateway 区服列表里。
+`game-robot/README.md` 写清前置：`GAME_ZONES=2`、dev 模式、两个区的 gate 都在 gateway 区服列表里。
 
 **落地（`BattleCrossZoneScenario` / `BattleCrossZoneChecks`；与上表的出入）**：
 
-- **选项**：`--visit-zone` / `XM_ROBOT_VISIT_ZONE`（缺省 2，必须 ≥ 1）是 6.5 新增的（5.4 没有合入）；只有 `battle-cross-zone` 要求它与 `--zone` 不同（否则参数错误、退出码 2），别的子命令不看它（`smoke --zone 2` 是正常用法）。
+- **选项**：`--visit-zone` / `GAME_ROBOT_VISIT_ZONE`（缺省 2，必须 ≥ 1）是 6.5 新增的（5.4 没有合入）；只有 `battle-cross-zone` 要求它与 `--zone` 不同（否则参数错误、退出码 2），别的子命令不看它（`smoke --zone 2` 是正常用法）。
 - **步骤号小写**：`preflight`、`z8-admin-token`、`z1-login`、`z2-baseline`、`z3-queue`、`z4-announce`、`z5-direct-watch`、`z6-fight`、`z7-lobby-end`、`z8-rating`、`z9-second-{queue, announce, direct, fight, lobby-end, rating, battle}`、`z10-metrics`、`z11-leave`。
 - **Z0 / 运维令牌**：令牌在 Z0 之后、登录之前就检查（赛前评分基数也要读），缺令牌记 `step=z8-admin-token` 失败，不白打一局、不静默跳过。
 - **Z1**：三个号**顺序**登录（上表写「并发」，那是动作不是断言；顺序更保守）。「两个区的 gate 端点不同」用的是场景自己另发的一次 assign-gate（两个客户端各一次）——`PlayerFlow` 不暴露实际连接的端点；同一个区只有自己的 gate，与「实际连接的端点不同」等价，
@@ -1239,7 +1239,7 @@ Dubbo 模型上的首次调用在 `@BeforeAll` 的平台线程上预热（§4.9 
 ### 10.9 跨版本验收（可选、不阻塞；不改 Go robot 代码）
 
 - 本机没有 Go，只在 GitHub Actions 上做可选 job（7.1b 之后，Q23）：mmorpg 的检出要包含 `robot/`（含 `robot/config/`、`robot/generated/`，本机稀疏克隆里没有）。
-- **Go `battle-smoke`**（单 zone、**全新**的整栈）：复制 `robot/etc/battle_smoke.yaml`，`gateway_addr: http://127.0.0.1:18081`；口令 = `XM_LOGIN_DEV_PASSWORD`（或把整栈口令设成配置里的 `123456`，同 `zt-spec` §11.10）；
+- **Go `battle-smoke`**（单 zone、**全新**的整栈）：复制 `robot/etc/battle_smoke.yaml`，`gateway_addr: http://127.0.0.1:18081`；口令 = `GAME_LOGIN_DEV_PASSWORD`（或把整栈口令设成配置里的 `123456`，同 `zt-spec` §11.10）；
   `robot_` 前缀在 Java 开发白名单里。期望 `BATTLE_SMOKE_OK`。B 的随机观战断言「挑中的就是 A 那一场」（`bss.go:181-184`），所以整栈上不能有别的战斗或已结束的残留场——全新整栈天然满足。
   B 收到 A 的 143 就发 163(0)、不重试（`bss.go:166-187`），而 143 在 createBattle 期间推出、公开在 gather 第 5 步之后：两版都有这个毫秒级竞态（基线同样是 `gather.go:381-389` 在建房回包之后才 ZADD），偶发 16017 → B 等 177 超时属于基线 robot 的已知脆弱点，重跑一次再判。
 - **Go `battle_smoke_cross_zone`**（两 zone 覆盖文件，Q22）：复制 `bsc.yaml` 改 `gateway_addr`，期望 `CROSS_ZONE_MATCH_OK`。固定账号 robot_9003 / 9004 在全新整栈上没有评分漂移与位置残留；
@@ -1249,28 +1249,28 @@ Dubbo 模型上的首次调用在 `@BeforeAll` 的平台线程上预热（§4.9 
 
 ### 10.10 CI
 
-- 单测与 `-Dxm.it.redis` 用例进现有 `ci.yml` / `integration.yml`（`ci-spec` §4）。落地：本批新增四个 `xm.it.redis` 门控的集成测试类（xm-match 的 `RedissonSpectateStoreIntegrationTest`、`SpectateFlowRedisIntegrationTest`、
-  `ScenePreparerRedisIntegrationTest`，xm-discovery 的 `GatePushCrossZoneIntegrationTest`），都会进 `TestReport --require-it-executed` 的计数。写本稿时观战脚本只有本机（Redis 8.10.2 单机）的运行记录；CI 的 Integration 作业用 `deploy/compose/infra.yaml` 起同一个版本的 Redis（`redis:8.10.2`），以它自己的结果为准。
-- 整栈：`battle-smoke` 随 6.4 的批次进第二期之后；`battle-cross-zone` 在两 zone 覆盖文件下、第三期之后加入（Q22）。两者都以 `ci-spec` Q9（battle 通告地址拆分）为前提：6.2 工作区已提供 `xm.battle.client-advertise-host`，compose 里配上即可（Q22）。
+- 单测与 `-Dgame.it.redis` 用例进现有 `ci.yml` / `integration.yml`（`ci-spec` §4）。落地：本批新增四个 `game.it.redis` 门控的集成测试类（game-match 的 `RedissonSpectateStoreIntegrationTest`、`SpectateFlowRedisIntegrationTest`、
+  `ScenePreparerRedisIntegrationTest`，game-discovery 的 `GatePushCrossZoneIntegrationTest`），都会进 `TestReport --require-it-executed` 的计数。写本稿时观战脚本只有本机（Redis 8.10.2 单机）的运行记录；CI 的 Integration 作业用 `deploy/compose/infra.yaml` 起同一个版本的 Redis（`redis:8.10.2`），以它自己的结果为准。
+- 整栈：`battle-smoke` 随 6.4 的批次进第二期之后；`battle-cross-zone` 在两 zone 覆盖文件下、第三期之后加入（Q22）。两者都以 `ci-spec` Q9（battle 通告地址拆分）为前提：6.2 工作区已提供 `game.battle.client-advertise-host`，compose 里配上即可（Q22）。
 
 ### 10.11 交付清单与登记
 
 > **落地（2026-10-08）**：本节是开工前的清单。下面各条的文档登记都已做（「证据」一条的最终运行结论另见实现记录末尾的「最终验证」）；出入只有差异编号的范围——随落地变成 W1–W20、X1–X8、BW1–BW10（下面写的 W1–W15、X1–X7 是开工前的范围）。实际回写的文档：
 > 本稿（正文与实现记录）；`m-spec`（§0.2 / §0.3、§8.1、§8.2、§8.6、§9.1、§9.3、§9.4、§9.6、§9.8、§9.9、§10.1、§11、§13 M22、§14 Q8、§15.5、实现记录里「给 6.5 与 4.6 的接口与义务」）；`zt-spec`（§5.13、§11.9、§11.11）；
 > `bn-spec`（§7.10、§7.12）；`ci-spec`（§2.1 端口表）；三份盘点；`PARITY.md`（新增「观战」「跨区 1V1 匹配」两行，更新「匹配」「battle 节点」「战斗票据补签 179」「本地编排」四行）；
-> `arch`（§2、§4.24、新小节 §4.24.1、§5、§6、§6.1、§7、§10、§11）；`roadmap.md`（6.5 行与 5.4 行，6.2 / 6.4 行里「留给 6.5」各补一句已落地）；仓库根 `README.md` 与 `xm-robot/README.md`。`tech-stack.md` 没有改（无新依赖）。`tools/local/*.sh` 的文件头与 `deploy/compose/env.example` 的说明随 L1 的代码提交已经写好。
+> `arch`（§2、§4.24、新小节 §4.24.1、§5、§6、§6.1、§7、§10、§11）；`roadmap.md`（6.5 行与 5.4 行，6.2 / 6.4 行里「留给 6.5」各补一句已落地）；仓库根 `README.md` 与 `game-robot/README.md`。`tech-stack.md` 没有改（无新依赖）。`tools/local/*.sh` 的文件头与 `deploy/compose/env.example` 的说明随 L1 的代码提交已经写好。
 
 - **`PARITY.md` 新增行**：
-  - 「观战（match 侧：163 / 164、观战标记、可观战索引、开局清退）」：Java 模块 xm-match、xm-discovery；状态「已对齐」；附 W1–W15、BW1–BW10；mmorpg 侧状态「已有」；
+  - 「观战（match 侧：163 / 164、观战标记、可观战索引、开局清退）」：Java 模块 game-match、game-discovery；状态「已对齐」；附 W1–W15、BW1–BW10；mmorpg 侧状态「已有」；
     「mmorpg 待做（可选）」：W2–W5（W5 与 M16 一并）、E1–E3 注释勘误；两版同改候选 C1、C2（改 mmorpg 需用户同意）。
-  - 「跨区 1V1 匹配」：状态「已对齐」；附 Z1–Z12、X1–X7、robot 场景名与 OK 行；注明 xm-match 不分 zone 部署；「mmorpg 待做（可选）」：基线 robot 补强（§2.5 的弱点）、收缩之后的跨区冒烟复验。
+  - 「跨区 1V1 匹配」：状态「已对齐」；附 Z1–Z12、X1–X7、robot 场景名与 OK 行；注明 game-match 不分 zone 部署；「mmorpg 待做（可选）」：基线 robot 补强（§2.5 的弱点）、收缩之后的跨区冒烟复验。
 - **`PARITY.md` 更新行**：6.4 的匹配行（M22 关闭）；6.2 的 battle 行（「观战 match 侧 6.5」改为已接入）。
 - **`roadmap.md:85`**：6.5 打勾、写提交号；注明 battle-spectate 的房间侧已在 6.2（Q1）。
 - **盘点 java 列**：`inventory/combat.md:264`、`scene-manager-match.md:269`、`contract-robot.md:416`、`:428` 改为 done（模块、场景名、提交号）；勘误 E3–E6 同批改。
   `contract-robot.md:292`（svc-match-service-spectate-ticket，一行同时覆盖 163 / 164 / 179）也要改：179 段随 6.4 记 done，163 / 164 段随 6.5 记 done，两批各写各的提交号（第三轮评审补，原清单漏了这一行）。
 - **`arch`**：见 §4.11。**`m-spec`**：§8.1 / §9.3 / §9.9 的 163 / 164、§9.6 第 4 步的 `created_at_ms` 来源、§15.5 第 10 步指向本稿 §10.7。**`zt-spec`**：§5.13 共用行。
 - **`tech-stack.md`**：无新依赖，不改。
-- **证据**：`-pl xm-match -am test`、`-Dxm.it.redis` 的结果；`battle-smoke`（含观战段）与 `battle-cross-zone` 的 OK 行；Go robot 跨版本验收的结果（没跑的写明原因）。没有运行证据，不写「通过」。
+- **证据**：`-pl game-match -am test`、`-Dgame.it.redis` 的结果；`battle-smoke`（含观战段）与 `battle-cross-zone` 的 OK 行；Go robot 跨版本验收的结果（没跑的写明原因）。没有运行证据，不写「通过」。
 
 ---
 
@@ -1297,7 +1297,7 @@ Java 侧 `BRS.java:320-424`、`RoomConstants.java:33`、`BattleNodeServiceImpl.j
 | R3 | §3.7 | D9 `czm.md:101` | D9 在 `:100`，`:101` 是 D10 |
 | R4 | §3.2 | 16004 的出处缺失 | 补 `match_error_tip.proto:20` |
 | R5 | §8.5 E1 | 只列了 `tbs.md:305-323` | 「gather 成功后写」实际在 `tbs.md:338`（§10.4 键表），数据流段里没有这句 |
-| R6 | §0.3、§4.10、§4.11 | 「`zt-spec` §5.13 共用行加 xm-battle、xm-match」 | `zt-spec:834` 的共用行已经含 battle，只需加 xm-match |
+| R6 | §0.3、§4.10、§4.11 | 「`zt-spec` §5.13 共用行加 game-battle、game-match」 | `zt-spec:834` 的共用行已经含 battle，只需加 game-match |
 
 **遗漏与错误的修正**
 
@@ -1316,10 +1316,10 @@ Java 侧 `BRS.java:320-424`、`RoomConstants.java:33`、`BattleNodeServiceImpl.j
 | F11 | W5 写「死节点上的场次…变成不存在或已结束」，范围说大了 | 只适用于「号已被别的进程接手」的死节点；号没被接手时仍是「当前无法观战」、不剔除，与基线相同 |
 | F12 | W10 写「不再先收信封 1003 再收 177」，不准确 | AddObserver 超时后 battle 仍可能推 177（同基线 B-s5）；补上客户端 `BattleDirectLink` 对任何完整 177 都建连、靠相位与 Superseded 收场的依据 |
 | F13 | 落点 `player_names` 的来源没写清 | 写明取快照里的 `player_name`（角色名，不是账号），同 `gather.go:281-285`；`created_at_ms` 的取值时刻仍在 Prepare 之后 |
-| F14 | 失败路径漏项：6.4 发号租约丢失、xm-match 停机 / 崩溃时的 163 | §7.2 补两条；§4.11 在停机序列里加「有界等待在途 163 → 停清扫器」，加配置校验 |
+| F14 | 失败路径漏项：6.4 发号租约丢失、game-match 停机 / 崩溃时的 163 | §7.2 补两条；§4.11 在停机序列里加「有界等待在途 163 → 停清扫器」，加配置校验 |
 | F15 | 换场 Remove 超时之后，随机模式又挑中同一场的残余风险没有写 | §7.1 第 4 条写明这个风险（与基线相同），以及不加「本轮排除旧场」的理由（会改变客户端可见的选场分布） |
-| F16 | Q22 / §10.10 没提整栈的前置条件：`ci-spec` 风险 15 / Q9（battle 通告地址一址两用），以及 xm-gate-z2 在容器网络里的 match 地址 | 补上 |
-| F17 | 跨区 robot 的 Z8 要用 6.4 的管理接口，入口没有列出 `--match-admin-url` / `XM_ADMIN_TOKEN` | §10.8 入口补上；缺 token 时 FAIL，不静默跳过 |
+| F16 | Q22 / §10.10 没提整栈的前置条件：`ci-spec` 风险 15 / Q9（battle 通告地址一址两用），以及 game-gate-z2 在容器网络里的 match 地址 | 补上 |
+| F17 | 跨区 robot 的 Z8 要用 6.4 的管理接口，入口没有列出 `--match-admin-url` / `GAME_ADMIN_TOKEN` | §10.8 入口补上；缺 token 时 FAIL，不静默跳过 |
 | F18 | §10.7 的执行顺序有歧义：说观战段在 6.4 之前，但 S12 在 6.4 第 9 步里，S13 在最后 | 写明 S0–S11、S12、S13 各在什么位置，以及 6.4 第 10 步删除 |
 
 **核对过、维持原结论的点**：W1–W14 的客户端可见性标注；BW1 / BW7 照搬（两版同改候选 C1 / C2）；跨区不需要新的生产代码路径（Z1–Z12 都能落到 6.2 / 6.3 / 6.4 的具体机制上）；没有新增第三方依赖；线程所有权符合 `AGENTS.md` §3。
@@ -1341,7 +1341,7 @@ Java 侧 `BRS.java:320-424`、`RoomConstants.java:33`、`BattleNodeServiceImpl.j
 | E-1 | §0.2、§0.3、§2.7 Z6 / Z7、§3.5、§8.5 E8 | 并行编辑中的规格行号漂移：`bn-spec` Q1 在 :1500-1503（原写 :1489-1492）、§5.5 在 :683-707、§7.10 的「代价」在 :1174（原写 :1163-1169）；`sb-spec` §7.15 寻址在 :918（原写 :917）、§7.16 回落在 :934-935 | 已改 |
 | E-2 | §4.9 | `arch` 的 Redisson 单命令 4.2 s 引的是旧行号；该段在 HEAD `:631-633`、工作区 `:666-668` | 改为按节名引用（`arch` §6「Redis 客户端超时」条），并注明 `m-spec` §9.6 的 `arch:607-609` 已过时 |
 | E-3 | §10.7 S4（源自分区稿③ W5） | **断言写错**：「大厅再收到一条 177」。大厅公告在有活直连时**经直连直写**（基线 `room.cpp:1410-1430`；Java `BRS.java:796-800`），S4 时 SB 的直连是活的，重推的 177 只会出现在直连上；按原断言 robot 会稳定失败 | S4 改为「直连上再收到一条 177、与第一条逐字节相同，大厅上没有新的 177」；§3.4 的「重看同一场」行与 §3.5 补上这条规则，并引客户端两条链路都挂 177 处理器、同局活直连时只换存票据（`BattleDirectLink.cs:226-239`）；§0.3 的 6.2 行同步 |
-| E-4 | Q22、§10.10 | 前置①写成「battle 通告地址一址两用尚未拆分」；6.2 工作区已按 `ci-spec` Q9 加了 `xm.battle.client-advertise-host`（`application.yaml:61-65`；`BattleIdentity.java:13`） | 改为「compose 里给 xm-battle 配 `XM_BATTLE_CLIENT_ADVERTISE_HOST` 即可」 |
+| E-4 | Q22、§10.10 | 前置①写成「battle 通告地址一址两用尚未拆分」；6.2 工作区已按 `ci-spec` Q9 加了 `game.battle.client-advertise-host`（`application.yaml:61-65`；`BattleIdentity.java:13`） | 改为「compose 里给 game-battle 配 `GAME_BATTLE_CLIENT_ADVERTISE_HOST` 即可」 |
 | E-5 | §4.11 给 `m-spec` §8.1 的替换行 | 多出一列「处理器内未预期异常」，与 `m-spec` §8.1 的列不一致 | 列与 `m-spec` §8.1 对齐，未预期异常改为表下一句；并写明 :841「163 / 164 在 Dubbo 线程上当场回」那条要随之删掉 163 / 164 |
 
 **复核过、维持原样的分歧裁决**：#1 / #2（BW1、BW7 照搬，C1 / C2 两版同改候选——正常路径上客户端可见，按 `AGENTS.md` §1 不单边改）；#3（W4 结局不明保留标记）；
@@ -1360,7 +1360,7 @@ Java 侧 `BRS.java:320-424`、`RoomConstants.java:33`、`BattleNodeServiceImpl.j
 客户端 `SC.cs:25-60`、`:110-215`、`:290-370`，`SP.cs:15-30`、`:85-187`，`BC.cs:685-695`，`BattleDirectLink.cs:220-260`，`DAP.cs:37-50`、`:540-547`，`BattleUiStyle.cs:28`；
 Java `BRS.java:300-426`、`:704-800`、`RoomConstants.java:33`、`BattleNodeServiceImpl.java:146-158`、`:271-300`、`BattleNodeService.java:32-57`、`BattleTicketIssuer.java:50-79`、`BattleTickets.java:45-46`（hex ASCII 签名）、
 `DevRoutingResolver.java:210-227`、`PlayerPresenceDirectory.java:145`、`presence.proto`、`RedisKeys.java:14-55`、`:351`、`NodeTypes.java:8-36`、`PlayerPushes.java:125-133`、`client_call.proto:10-40`、
-`match_error_tip.proto:20`、`:40-52`、`tip_text.json:70`、`:80-85`、`message_id.txt`、`xm-battle application.yaml:43-69`、`BattleIdentity.java:13`、`TurnBattleEngine.java:59-60`、`:473-490`、`:520-530`；
+`match_error_tip.proto:20`、`:40-52`、`tip_text.json:70`、`:80-85`、`message_id.txt`、`game-battle application.yaml:43-69`、`BattleIdentity.java:13`、`TurnBattleEngine.java:59-60`、`:473-490`、`:520-530`；
 `m-spec` :73-74、:225-240、:393、:455-510、:837-841、:960-970、:1028、:1035-1062、:1112-1122、:1142、:1224、:1451-1498，`bn-spec` :470、:683-707、:1174、:1500-1503，`sb-spec` :333、:918、:934-935，
 `zt-spec` :427、:819-842、:1166、:1201、:1212，`ci-spec` :145、:726-727、:736-760、:992、:1037，`zone-merge-spec` :562，`ops-release-spec` :794、:1231。
 
@@ -1375,19 +1375,19 @@ Java `BRS.java:300-426`、`:704-800`、`RoomConstants.java:33`、`BattleNodeServ
 | T5 | §3.3、§10.3 | 基线「记录在但 summary 为空 → DEL + ZREM」（`lw.go:74-77`）在 Java 的对应物没定义；空列表 0 字节是否回包没写 | 落点在但 `pb` 缺失 / 解析失败一律按损坏：跳过、不剔除、计 anomalies（DEL 会毁掉 179 的定位；只在数据损坏时可见）；空列表照常回 0 字节应答体（`client_call.proto:33-36`），客户端靠它收回「刷新中」 |
 | T6 | §3.4 | `DirectRoutingBattleTransport.cs` 不在 `Assets/Scripts/Net/` | 改为 `Assets/Scripts/Game/Battle/DirectRoutingBattleTransport.cs:17-19` |
 | T7 | §4.9 | 在途许可的取得 / 归还没写；`arch` 行号注记按旧 HEAD | 写明 Dubbo 线程 `tryAcquire`、虚拟线程 `finally` 归还（四条出口），异步 Remove / 异步剔除不占许可及其上界；`arch` 行号改为 HEAD `9fde7d8` 与工作区同为 `:666-668` |
-| T8 | §6 | `xm_match_watchable_battles` 是每个实例采样同一个全局 ZSET，多副本（`ops-release-spec` Q22 生产 match 2 副本）下求和会翻倍 | 写明看板取 `max`；`xm_match_spectate_inflight` 才求和 |
+| T8 | §6 | `game_match_watchable_battles` 是每个实例采样同一个全局 ZSET，多副本（`ops-release-spec` Q22 生产 match 2 副本）下求和会翻倍 | 写明看板取 `max`；`game_match_spectate_inflight` 才求和 |
 | T9 | Q22、§0.3、§4.10、§10.9、§10.10 | 双 zone 进 CI 的前置不全：① gateway 必须同时播种两个区（`zt-spec:829`：`seed-zones` [0]、[1] 一起给，Spring 列表跨来源不合并），共用的 gateway 不能按 profile 换参数；② 单 zone stack 里常驻一个 OPEN 的 2 区会让按区选 gate 的场景失败；③ 模块清单漂移守卫（`ci-spec` §4.5 第 4 步）；④ `zt-spec` §11.9 把多 zone 用例定为「不进 CI」，与本稿 Q22 说法相反；另 `application.yaml` 行号偏了（`:47`、`:61-65` → `:47-48`、`:63-65`） | 推荐改为覆盖文件 `deploy/compose/two-zones.yaml`（`-f stack.yaml -f two-zones.yaml`），列出前置③④⑤；写明只把 `battle-cross-zone`（及 5.4 同意时的 `travel`）放进 CI、故障注入仍手工，7.1b 采纳时在 `ci-spec` 与 `zt-spec` 各登记一句；全文 `--profile two-zones` 的说法同步改掉 |
 | T10 | §10.3 `CrossZoneGatherTest` | 「位置是 `l` → 本轮跳过（M12）」把 matcher 凑单校验（`m-spec:1028`）写进了 gather 用例；gather 时位置不是 `o` 是 `no_location`、该玩家作为肇事者出局（`m-spec` §9.6 第 3 步） | 拆开：gather 用例断言 `no_location`；`l` 跳过归 6.4 matcher 单测 |
 | T11 | §10.3 | 用例缺口：`Dead` 在建房窗口内不剔除；S_W_ACQUIRE 回 `queued` 时按本次值释放；J2（未预期异常 → 信封 1003 + 释放标记）；在途许可四条出口都归还；`Unknown` 后重看同一场；164 的 `RBatch` 整批失败、`pb` 缺失、剔除异步、空列表回包；停机有界等待在途 163；配置校验 | 逐条补进 `WatchBattleServiceTest` / `WatchableListServiceTest`，新增「生命周期与配置」一段 |
 | T12 | §10.7 战斗 X 的寿命 | 「不开自动能活 13 × 6 s」是拿开自动的基线回合数外推，依据没写 | 补依据：默认行动路径同时覆盖未提交玩家与挂机玩家（`TurnBattleEngine.java:520-530`），开不开自动出手内容相同，只差回合节奏，所以回合数分布可直接沿用 |
 | T13 | §10.8 Z2 | 断言 `mode="MATCH_MODE_1V1"` 与 6.4 指标标签的取值写法耦合，`m-spec` §11 并没有钉死它 | 改为按 `mix="cross"` 对 `mode` 求和 |
 | T14 | §10.11 | 漏了 `inventory/contract-robot.md:292`（svc-match-service-spectate-ticket 一行同时覆盖 163 / 164 / 179，java 列仍是 missing） | 补上：179 段随 6.4、163 / 164 段随 6.5 各记提交号 |
-| T15 | §0.3 | 没列 7.3 合服 / 7.6 发布的边界 | 并入 7.2 那一行（不加行，理由见表下「行号稳定性」一段）：合服对 `xm:{match}:*` 不动（`zone-merge-spec.md:562`）；交给 7.6 的三件事（通告地址跨 zone 可达、清扫器多副本幂等、gauge 取 max） |
+| T15 | §0.3 | 没列 7.3 合服 / 7.6 发布的边界 | 并入 7.2 那一行（不加行，理由见表下「行号稳定性」一段）：合服对 `game:{match}:*` 不动（`zone-merge-spec.md:562`）；交给 7.6 的三件事（通告地址跨 zone 可达、清扫器多副本幂等、gauge 取 max） |
 | T16 | §8.1、§3.8、§10.11 | T5 的「`pb` 缺失按损坏、不剔除」是一处有意差异，按 `AGENTS.md` 的要求必须登记 | 新增 W15（只在数据损坏时客户端可见，不建议两版同改）；§3.8 与 PARITY 附表范围改为 W1–W15 |
 
 **行号稳定性与其它规格对本稿的引用**：`ops-release-spec.md:794` 引 `spectate-spec.md:347`（§2.8 第 4 条「battle 通告地址对所有 zone 可达」）。本轮在第 347 行之前的修改都是行内替换，
 **没有增删行**，这条引用仍然有效。`ops-release-spec.md:1231` 引的 `spectate-spec.md:776` 本来就不对（在被引用时的版本里是 §9 标题前的空行），所指内容是 Q21（本轮修订后在 `:817`，行号还会随修订漂移），建议它改为按条目号「`spectate-spec` Q21」引用；
-同处 `:794` 说「`xm-battle application.yaml:47-48` 现在一址两用」已过时——6.2 工作区已按 `ci-spec` Q9 加了 `xm.battle.client-advertise-host`（`:63-65`）。两处都不在本文件，只在此登记，留给 ops-release-spec 的下一轮修订。
+同处 `:794` 说「`game-battle application.yaml:47-48` 现在一址两用」已过时——6.2 工作区已按 `ci-spec` Q9 加了 `game.battle.client-advertise-host`（`:63-65`）。两处都不在本文件，只在此登记，留给 ops-release-spec 的下一轮修订。
 
 **核对过、维持原结论的点**：§3.1 的判定顺序、码与 9 条 `parameters[0]`；BW1–BW10 照搬与 C1 / C2 两版同改候选；W1–W14 的客户端可见性标注（W10 只补了一条竞态；新增 W15，见 T16）；
 S_W_* 九段脚本都只访问 `{match}` slot 的键、可变脚本可安全重发；Redis 7.2（`ci-spec:145`）下脚本内先 `TIME` 后写按效果复制，没有确定性问题
@@ -1398,10 +1398,10 @@ S_W_* 九段脚本都只访问 `{match}` slot 的键、可变脚本可安全重�
 
 ## 实现记录（2026-10-08）
 
-范围：163 WatchBattle / 164 ListWatchableBattles 的真实现、观战标记与可观战索引（11 段 Lua）、观众 RPC 的直拨、开局前清退与开局后公开、清扫与停机（都在 xm-match 的 `spectate` 包）；跨区 1V1 的测试钉与寻址审计（只动测试）；
-双 zone 本机切片 `XM_ZONES=2`（tools/local）；robot `battle-smoke` 的观战段与新场景 `battle-cross-zone`。没有改 proto、没有新增第三方依赖、没有为跨区改任何生产代码。
+范围：163 WatchBattle / 164 ListWatchableBattles 的真实现、观战标记与可观战索引（11 段 Lua）、观众 RPC 的直拨、开局前清退与开局后公开、清扫与停机（都在 game-match 的 `spectate` 包）；跨区 1V1 的测试钉与寻址审计（只动测试）；
+双 zone 本机切片 `GAME_ZONES=2`（tools/local）；robot `battle-smoke` 的观战段与新场景 `battle-cross-zone`。没有改 proto、没有新增第三方依赖、没有为跨区改任何生产代码。
 
-过程：开工前 lead 对规格里六处没写清的地方做了裁决（双 zone 切片由 6.5 落地、163 的执行器钩子、带硬截止的直拨、停机并行、区 2 状态跟随 `XM_ZONES`、双 zone 联调暴露别的批次缺陷时谁修）→ 先行件（共享文件一次改完、冻结 `spectate` 包的接口与替身；提交 `517c99d`）→
+过程：开工前 lead 对规格里六处没写清的地方做了裁决（双 zone 切片由 6.5 落地、163 的执行器钩子、带硬截止的直拨、停机并行、区 2 状态跟随 `GAME_ZONES`、双 zone 联调暴露别的批次缺陷时谁修）→ 先行件（共享文件一次改完、冻结 `spectate` 包的接口与替身；提交 `517c99d`）→
 六个工作包各在自己的 worktree 里并行实现（W1 存储与脚本 `2213274`、W2 163 与观众 RPC `78117d6`、W3 164 / 钩子 / 清扫 `377aa8a`、X1 跨区测试钉 `37d8998`、L1 切片脚本 `3cc04de`、R robot `1f24238`）→
 集成（装配核对、真流程接真存储的集成测试、全量构建；改动分在 `ad96065` 与 `8f39377` 两个提交里——前者带着改了停机语义的 `SpectateSweeper` 与当时还没跟着改的 `SpectateSweeperTest`，单独看有一条必然失败的用例，后者才恢复全绿）→
 PARITY 登记「进行中」（`976d7ff`）→ 切片验证中修 robot 的一条断言（`a2b4a0d`）→ 六路只读评审与逐条复核（17 条发现）→ 评审修正（`0100ab3`）→ 文档（其后的提交，git log「批次 6.5」）。
@@ -1409,14 +1409,14 @@ PARITY 登记「进行中」（`976d7ff`）→ 切片验证中修 robot 的一�
 
 ### 落地的类（按模块、按包）
 
-**xm-api**（先行件）：`com.game.api.match.MatchBudgets` 新增 `ADD_OBSERVER_TIMEOUT_MS`、`WATCHING_TTL_SECONDS`、`SPECTATE_STALE_MS`、`WATCHABLE_LIST_DEFAULT / MAX`、`RANDOM_WATCH_ROUNDS`、`RANDOM_PICK_TRIES`、
+**game-api**（先行件）：`com.game.api.match.MatchBudgets` 新增 `ADD_OBSERVER_TIMEOUT_MS`、`WATCHING_TTL_SECONDS`、`SPECTATE_STALE_MS`、`WATCHABLE_LIST_DEFAULT / MAX`、`RANDOM_WATCH_ROUNDS`、`RANDOM_PICK_TRIES`、
 `WATCH_REWATCH_RESERVE_MS`、`WATCH_ADD_RESERVE_MS`、`WATCH_ADD_MIN_BUDGET_MS`、`SPECTATE_DRAIN_TIMEOUT_MS`（§5.1）。`BattleNodeService.addObserver / removeObserver` 是 6.2 已有的，没有动。
 
-**xm-discovery**（先行件）：`RedisKeys.matchWatching(playerId)` / `matchWatchable()`；新类 `com.game.discovery.battle.BattleRoutings`（`gatePart(PlayerPresence)`）。
+**game-discovery**（先行件）：`RedisKeys.matchWatching(playerId)` / `matchWatchable()`；新类 `com.game.discovery.battle.BattleRoutings`（`gatePart(PlayerPresence)`）。
 
-**xm-battle**（先行件；业务代码不变）：`admin.DevRoutingResolver` 改为调 `BattleRoutings.gatePart`；`admin.DevBattleController` 的 `add-observer` 注释写明不写 match 的观战标记。
+**game-battle**（先行件；业务代码不变）：`admin.DevRoutingResolver` 改为调 `BattleRoutings.gatePart`；`admin.DevBattleController` 的 `add-observer` 注释写明不写 match 的观战标记。
 
-**xm-match**
+**game-match**
 
 | 工作包 | 提交 | 包 | 内容 |
 |---|---|---|---|
@@ -1427,23 +1427,23 @@ PARITY 登记「进行中」（`976d7ff`）→ 切片验证中修 robot 的一�
 | 集成 | `ad96065`、`8f39377` | `spectate`、`lifecycle`、`gather` | `SpectateSweeper.stop()` 改成当场中断；`SpectateStore` / `GatherHooks` / `GatherConfiguration` / `SweeperControl` 的注释订正；新增 `SpectateFlowRedisIntegrationTest` |
 | 评审修正 | `0100ab3` | `spectate`、`placement`、`lifecycle`、`metrics` | `WatchBattleService`（重看同一场的三个出口）、`RedissonSpectateStore.acquire`（迟到重发的补释放）、`WatchBattleConfiguration.budgetWarning`；其余是注释与测试（见「评审的发现与修正」） |
 
-xm-match 进程里没有任何观战占位：163 的处理器非 inline、`executor()` 就是那个 `SpectateExecutor`；164 非 inline、`executor()` 为 null；当场回的只剩 156 / 154；十个号都有处理器（`MatchApplicationContextTest` 钉住）。
+game-match 进程里没有任何观战占位：163 的处理器非 inline、`executor()` 就是那个 `SpectateExecutor`；164 非 inline、`executor()` 为 null；当场回的只剩 156 / 154；十个号都有处理器（`MatchApplicationContextTest` 钉住）。
 三个装配类都不带条件装配；在 `spectate` 包里再新增 `@Configuration` / `@Component` 类会让上下文测试里「装配清单 = 组件扫描结果」那条用例变红，真实现的 bean 放进已有的装配类。
 
-**tools/local 与 deploy**（L1，`3cc04de`）：`start-slice.sh`（`XM_ZONES`、`ZONE2_ID` / `ZONE2_SCENE_NODE` / `ZONE2_GATE`、`start_zone2_scene` / `start_zone2_gate`、`sync_zone2_status`）、`stop-slice.sh`（区 2 的两个实例紧挨同类先停）、
-`battle-crash-window.sh`（故障变体只在区 1 上做的前置）；`deploy/compose/env.example` 的一段说明（`XM_SCENE_NODES` / `XM_ZONES` 只有 `start-slice.sh` 读，compose 不读）。
+**tools/local 与 deploy**（L1，`3cc04de`）：`start-slice.sh`（`GAME_ZONES`、`ZONE2_ID` / `ZONE2_SCENE_NODE` / `ZONE2_GATE`、`start_zone2_scene` / `start_zone2_gate`、`sync_zone2_status`）、`stop-slice.sh`（区 2 的两个实例紧挨同类先停）、
+`battle-crash-window.sh`（故障变体只在区 1 上做的前置）；`deploy/compose/env.example` 的一段说明（`GAME_SCENE_NODES` / `GAME_ZONES` 只有 `start-slice.sh` 读，compose 不读）。
 
-**xm-robot**（R，`1f24238`；评审修正 `a2b4a0d`、`0100ab3`）：新 `scenario.SpectateSteps`（163 / 164 的请求与判据、观众票、观众直连、165、各步时限 `Timing`）、`scenario.BattleCrossZoneScenario` / `BattleCrossZoneChecks`；
-`BattleSmokeScenario` / `BattleSmokeChecks` 的观战段与新编排；`RobotOptions`（`Scenario.BATTLE_CROSS_ZONE`、`--visit-zone` / `XM_ROBOT_VISIT_ZONE`）、`RobotMain` 的 `battle-cross-zone` 分支；`MatchSupport` 两行注释。
+**game-robot**（R，`1f24238`；评审修正 `a2b4a0d`、`0100ab3`）：新 `scenario.SpectateSteps`（163 / 164 的请求与判据、观众票、观众直连、165、各步时限 `Timing`）、`scenario.BattleCrossZoneScenario` / `BattleCrossZoneChecks`；
+`BattleSmokeScenario` / `BattleSmokeChecks` 的观战段与新编排；`RobotOptions`（`Scenario.BATTLE_CROSS_ZONE`、`--visit-zone` / `GAME_ROBOT_VISIT_ZONE`）、`RobotMain` 的 `battle-cross-zone` 分支；`MatchSupport` 两行注释。
 
-xm-common、xm-gate、xm-scene、xm-team、xm-login、xm-gateway 的主代码都没有改（X1 只加测试；xm-gate 的 `LocalSliceOrderTest` 没有改，它继续钉着 `SERVICES` 十三项与 `stop-slice.sh` 的清单行）。
+game-common、game-gate、game-scene、game-team、game-login、game-gateway 的主代码都没有改（X1 只加测试；game-gate 的 `LocalSliceOrderTest` 没有改，它继续钉着 `SERVICES` 十三项与 `stop-slice.sh` 的清单行）。
 
 ### 与规格原稿的出入
 
 行为上的出入都已回写进正文相应小节，这里汇总，便于对照原稿：
 
-- **依赖 5.4 的两样由 6.5 自己落地**（裁决 1）：`XM_ZONES=2` 的切片脚本与 robot 的 `--visit-zone`。连带与 `zt-spec` §5.13 原设计的出入：不在 xm-gateway 的命令行上播种两个区，区 2 的那一行由脚本经 xm-data 的运维接口建 / 改，状态跟随 `XM_ZONES`（裁决 5；§10.6）；
-  `stop-slice.sh` 的清单行没有加名字（xm-gate 的 `LocalSliceOrderTest` 逐项钉着），区 2 的实例在循环体里带上；第三个脚本 `battle-crash-window.sh` 原稿没提，也要同步。
+- **依赖 5.4 的两样由 6.5 自己落地**（裁决 1）：`GAME_ZONES=2` 的切片脚本与 robot 的 `--visit-zone`。连带与 `zt-spec` §5.13 原设计的出入：不在 game-gateway 的命令行上播种两个区，区 2 的那一行由脚本经 game-data 的运维接口建 / 改，状态跟随 `GAME_ZONES`（裁决 5；§10.6）；
+  `stop-slice.sh` 的清单行没有加名字（game-gate 的 `LocalSliceOrderTest` 逐项钉着），区 2 的实例在循环体里带上；第三个脚本 `battle-crash-window.sh` 原稿没提，也要同步。
 - **163 的接入**（裁决 2）：`MatchMethodHandler.executor()`，不是另配一条派发路径（§4.9）。
 - **预算**（裁决 3）：数值没变，靠带硬截止的直拨与目录读把原稿漏算的本地余量与额外读夹进去（§4.8、§5.3）。「不足 2.2 s 不换场」的判定挪到「读到旧场落点之后、发 Remove 之前」（§4.4 第 4 步）。
 - **停机**（裁决 4）：等在途 163 与排空工作池并行；清扫 `stop()` 当场中断（集成阶段的裁决；W3 原来是「先等当前一轮至多 1 s 再中断」，那样最坏 21 s）。`SweeperControl` 是 `start()` + `stop()`（原计划只有 `stop`）：清扫器不自己启停，由 `MatchLifecycle` 在 Dubbo 导出之后统一起。
@@ -1466,10 +1466,10 @@ xm-common、xm-gate、xm-scene、xm-team、xm-login、xm-gateway 的主代码都
 |---|---|---|---|---|
 | S65-STORE-1 | medium | 成立 | 「重看同一场」先按值删旧标记、再抢新标记，两步不是原子的：抢标记回有票（W2）时既不调 AddObserver 也不发 Remove，玩家仍登记在那一场、却已没有标记，之后的开局清退（只认标记）摘不到他。Java 独有——基线在同一交错下靠复查把他摘掉。登记前预算不足的 J 行是同一类出口 | 修（lead 裁决取做法 A，只动 `WatchBattleService`）：三个出口各有交代（W17；§7.1 第 17 条）。第三个出口「入口删旧标记失败」是修正阶段报出、lead 裁决一并改掉的（`releasePrevious(…, retryAsync = false)`）。没有取做法 B（给 S_W_ACQUIRE 加「替换旧值」的参数）：它在「重发 + 两轮之间建票」与「旧标记只剩几秒 TTL」两种情形下洞还在，且要同时改脚本、契约测试与内存替身。前两个出口新增 4 条用例（变异核对过），第三个出口由「重看同一场时删旧标记失败」「换场时删旧标记失败」两条用例钉住 |
 | S65-STORE-2 | low | 成立（机制按代码成立，没有实跑出 Redisson 的重发次序） | S_W_ACQUIRE 是可变脚本里唯一对「迟到的重发」没有守护的：163 等到截止后立刻发出的尽力释放，可能先于 Redisson 重发的那一遍到达 Redis，留下一个没人释放的标记 | 收窄（lead 裁决）：`RedissonSpectateStore.acquire` 在放弃等待而命令还在路上时，等它有了结局再按值释放一次；注释写明。不做按 nonce 的墓碑键，残余登记（§4.3） |
-| R163-01 | low | 成立 | 带硬截止的直拨没有把「发调用」这一步夹进硬截止：`NodeClientCache` 的全局锁在清扫销毁空闲引用时被占着，这段等待不受硬截止约束 | 只改注释（`PlacementDialer` / `DirectPlacementDialer` 不再写「每一步都夹在硬截止之内」）。结构性修复（锁内摘表、锁外销毁）要动 xm-api 的 `NodeRpcClients`（xm-battle 也在用），登记为遗留，归 7.6 的连接治理 |
-| R163-02 | low | 成立 | `xm.match.request-budget` 的合法区间是 [500 ms, 4500 ms]，而 163 的两道门槛是代码常量：调小之后换场 / 登记恒回 16004，没有任何启动期提示 | 只告警不拒启（lead 裁决）：`WatchBattleConfiguration.budgetWarning`，yaml 注释同步；不提高 6.4 冻结的 `MIN_REQUEST_BUDGET` |
+| R163-01 | low | 成立 | 带硬截止的直拨没有把「发调用」这一步夹进硬截止：`NodeClientCache` 的全局锁在清扫销毁空闲引用时被占着，这段等待不受硬截止约束 | 只改注释（`PlacementDialer` / `DirectPlacementDialer` 不再写「每一步都夹在硬截止之内」）。结构性修复（锁内摘表、锁外销毁）要动 game-api 的 `NodeRpcClients`（game-battle 也在用），登记为遗留，归 7.6 的连接治理 |
+| R163-02 | low | 成立 | `game.match.request-budget` 的合法区间是 [500 ms, 4500 ms]，而 163 的两道门槛是代码常量：调小之后换场 / 登记恒回 16004，没有任何启动期提示 | 只告警不拒启（lead 裁决）：`WatchBattleConfiguration.budgetWarning`，yaml 注释同步；不提高 6.4 冻结的 `MIN_REQUEST_BUDGET` |
 | LC-01 | low | 成立 | 「停清扫当场中断」「等 163 与排空并行」本身安全，但注释里引用的依据不成立：`timeout-per-shutdown-phase` 截断不了同步的 `stop()`，真正的硬期限在进程外 | 代码不改，只改 `MatchLifecycle` / `SpectateSweeper` 的注释；文档口径按 §4.9 |
-| XZ-1 | low | 未单独复核 | `SliceScriptsTest` 只拿区 2 的五个端口去比脚本里出现过的端口，各模块 `application*.yaml` 的缺省端口不在比较范围内——下一个新模块自然会取 18115，正好撞 xm-scene-z2 的管理端口，而且只在 `XM_ZONES=2` 时暴露 | 补测试：扫描每个模块的 `application*.yaml` 的端口缺省值，区 2 的五个端口改为从脚本的 `ZONE2_*` 两行解析；脚本没有改 |
+| XZ-1 | low | 未单独复核 | `SliceScriptsTest` 只拿区 2 的五个端口去比脚本里出现过的端口，各模块 `application*.yaml` 的缺省端口不在比较范围内——下一个新模块自然会取 18115，正好撞 game-scene-z2 的管理端口，而且只在 `GAME_ZONES=2` 时暴露 | 补测试：扫描每个模块的 `application*.yaml` 的端口缺省值，区 2 的五个端口改为从脚本的 `ZONE2_*` 两行解析；脚本没有改 |
 | R-1 | **high** | 成立 | `battle-smoke` 第 7 步断言 A 的第二局 PVE 必须 SIDE_A_WIN；血量随第一局的结算带进第二局，第二局阵亡是合法结果，整条场景随机失败（6.4 留下的断言，挡住本批「连跑 3 遍」的验收） | 主代码在 `a2b4a0d` 修（见「robot 场景与切片脚本的现状」）；那次提交只跑了 `BattleSmokeChecksTest`，留下 `BattleSmokeScenarioTest` 一条红用例，`0100ab3` 改正并补两条场景级用例 |
 | R-2 | low | 成立 | S12「在切磋局里等上一局 1V1 的 ready 票过期」的论证前提不成立：切磋双方带着上一局的结算血量进场，切磋局可以只有 1 回合；当时能过靠的是那局 1V1 恰好打了 29 回合 | 改编排：S12 拆成 `s12-ready-residue`（开局之前用 153 等掉）与 `s12-in-battle`（局里只发一次、必须 16015）；`FakeMatchWorld` 的 ready 残留改为按 153 的次数过期（§10.7） |
 | R-3 | low | 未单独复核 | 屏障期的 60 s 预算没有判别力：Java 切片上新号单人 PVE 实测 7–10 回合，X 不开自动只活 42–60 s，比预算短 | 预算改 30 s；新增常量与一条钉「预算 + 一个回合 ≤ 7 × 6 s」的用例；提示文案改正 |
@@ -1486,17 +1486,17 @@ xm-common、xm-gate、xm-scene、xm-team、xm-login、xm-gateway 的主代码都
 
 ### 跨区 1V1：测试钉与寻址审计
 
-X1 只动测试（主代码零改动），把 §2.7 的 Z1–Z3、Z5–Z7、Z11、Z12 与 §2.8 的同号碰撞钉在组件层（Z4、Z9 是既有架构的事实，§2.7 的表里没有单独的用例；Z8、Z10 靠切片上的 robot）。统一的碰撞拓扑照本机 `XM_ZONES=2` 的切片摆：两个 zone 各有一台 1 号 scene 与一台 1 号 gate，两台 gate 发出的第一个会话号也相同——
+X1 只动测试（主代码零改动），把 §2.7 的 Z1–Z3、Z5–Z7、Z11、Z12 与 §2.8 的同号碰撞钉在组件层（Z4、Z9 是既有架构的事实，§2.7 的表里没有单独的用例；Z8、Z10 靠切片上的 robot）。统一的碰撞拓扑照本机 `GAME_ZONES=2` 的切片摆：两个 zone 各有一台 1 号 scene 与一台 1 号 gate，两台 gate 发出的第一个会话号也相同——
 所以两个 zone 的玩家 `session_id`、`gate_node_id`、`scene_node_id` 三个号全部相等，能分开的只有 zone 与实例号。先清点 6.3 / 6.4 已有的用例，只补缺口（类名见「测试类清单」）。
 
 **寻址审计的结论**（静态，逐处回到代码；结论是「没有发现缺陷」）：
 
 1. `RedisKeys` 里带节点号的键全部带 zone（节点号租约与代次、`nodes:{type}:{zone}`、gate 排空的两个键、`gate-push:{zone}:{gate}`）。
-2. `PlayerPushes` 的频道 = (在线目录的 zone, gate 节点号)，多人分组键含 zone 与 gate 实例，`GatePush` 带 gate 实例号；`PresenceLobbyAnnouncer` 只经 `PlayerPushes`，battle 房间不拿 `routing.gate_node_id` 寻址。xm-team / xm-guild / xm-friend 与 xm-match 切磋的推送同样只经它。
+2. `PlayerPushes` 的频道 = (在线目录的 zone, gate 节点号)，多人分组键含 zone 与 gate 实例，`GatePush` 带 gate 实例号；`PresenceLobbyAnnouncer` 只经 `PlayerPushes`，battle 房间不拿 `routing.gate_node_id` 寻址。game-team / game-guild / game-friend 与 game-match 切磋的推送同样只经它。
 3. `DubboSceneBattleEvents` 按快照的 `(zone_id, scene_node_id)` 查目录、实例相符才发，否则回落定位器；`SettlementOutbox` 只经 `SceneAssetLocator`（位置记录的 zone + 节点号），快照路由的节点号只进日志。
-4. `ScenePreparer` 的端点带 zone；`Compensation` 的取消发回备战时记下的端点，不重新解析。`SceneClientSweeper`（xm-guild 的 `SceneEndpointSweeper` 同形）按地址登记、按节点自己的 zone 读目录。
+4. `ScenePreparer` 的端点带 zone；`Compensation` 的取消发回备战时记下的端点，不重新解析。`SceneClientSweeper`（game-guild 的 `SceneEndpointSweeper` 同形）按地址登记、按节点自己的 zone 读目录。
 5. `NodeRpcClients` / `NodeClientCache` / `PlacementClients` 的缓存键都是地址（加实例），不是节点号；Kafka 的 key 是 battle_id / player_id，没有按节点号分区的 topic。
-6. `session_id` 作键的地方：xm-login 的设备键含 gate 实例；xm-battle 的观众幂等判定 = 会话号 ∧ gate 节点号 ∧ gate 实例；其余是进程内的或只进日志。
+6. `session_id` 作键的地方：game-login 的设备键含 gate 实例；game-battle 的观众幂等判定 = 会话号 ∧ gate 节点号 ∧ gate 实例；其余是进程内的或只进日志。
 7. zone 隔离靠的几道闸（都有既有用例）：scene 握手拒绝别的 zone 的 gate、gate 核对 `HelloAck` 的 zone 与节点号、gate 令牌的 `target_zone_id`、login 按会话 zone 选 scene、scene-manager 每个请求带 zone。
 
 顺带确认的两处无害现象：两个 zone 的 1 号 scene 可能发出相同的实体号（只在本节点运行期内用，不进战斗快照与 Redis 键）；`GateTokens.verify` 对 `target_zone_id = 0` 的令牌不校验 zone（照搬基线；网关签发时恒填请求的 zone，只有持密钥伪造才会出现）。
@@ -1506,12 +1506,12 @@ X1 只动测试（主代码零改动），把 §2.7 的 Z1–Z3、Z5–Z7、Z11�
 
 **测试类的实际分布**（§10 是开工前的计划；方法名都是中文）
 
-- **xm-api**：`MatchBudgetsTest`（扩充：§5.3 的不等式，1 / 2 / 5 / 10 人仍是 42 / 48 / 66 / 96）。
-- **xm-discovery**：`RedisKeysMatchTest`（两个新键与票据 / 落点同槽）、`BattleRoutingsTest`、`PlayerPushesTest`（新；单推 / 按序 / 多人分组 / 踢人的频道都带 zone）、`GatePushCrossZoneIntegrationTest`（新；真 Redis pub/sub）、
+- **game-api**：`MatchBudgetsTest`（扩充：§5.3 的不等式，1 / 2 / 5 / 10 人仍是 42 / 48 / 66 / 96）。
+- **game-discovery**：`RedisKeysMatchTest`（两个新键与票据 / 落点同槽）、`BattleRoutingsTest`、`PlayerPushesTest`（新；单推 / 按序 / 多人分组 / 踢人的频道都带 zone）、`GatePushCrossZoneIntegrationTest`（新；真 Redis pub/sub）、
   `SceneAssetLocatorTest` / `SceneAssetLocationIntegrationTest`（补同号碰撞）。
-- **xm-common**：`BattleTicketsTest`（战斗票没有 zone 字段、跨实例拒绝）、`GateTokensTest`（同号 gate 跨 zone 被拒）。
-- **xm-battle**：`SettlementOutboxTest`（接真的 `SceneAssetLocator`）、`DubboSceneBattleEventsTest`、`SceneClientSweeperTest`、`PresenceLobbyAnnouncerTest`（经真的 `PlayerPushes`）、`ObserverTest`（观众换到另一个 zone 的同号 gate）；`DevRoutingResolver` 的既有测试不回归。
-- **xm-match**
+- **game-common**：`BattleTicketsTest`（战斗票没有 zone 字段、跨实例拒绝）、`GateTokensTest`（同号 gate 跨 zone 被拒）。
+- **game-battle**：`SettlementOutboxTest`（接真的 `SceneAssetLocator`）、`DubboSceneBattleEventsTest`、`SceneClientSweeperTest`、`PresenceLobbyAnnouncerTest`（经真的 `PlayerPushes`）、`ObserverTest`（观众换到另一个 zone 的同号 gate）；`DevRoutingResolver` 的既有测试不回归。
+- **game-match**
   - 共享件（先行件扩充）：`SpectateRulesTest`、`MatchTipsTest`（9 条 `parameters[0]` 逐字节）、`MatchMetricsTest`、`MatchPropertiesTest`、`MatchDispatcherTest`（执行器钩子、拒收走 `onOverload`）、`InlineHandlersTest`、`MatchClientMessageServiceTest`、
     `MatchLifecycleTest`（新次序；等 163 有界、不早不晚）、`DirectPlacementDialerTest` / `RedisBattleNodesTest`（硬截止）、`PlacementRecordsTest`、`PlacementStoreIntegrationTest`（不回归）、`MatchApplicationContextTest`（装起来的是真实现、清扫器在启动事件前后与上下文关闭后的运行状态）、
     `MatchSkeletonContextTest`（163 / 164 经真 Triple）、`MatchRpcLoopbackTest`、`LeaseLostTest`（163 / 164 在租约丢失时照常）、`TestDoublesTest`。
@@ -1523,11 +1523,11 @@ X1 只动测试（主代码零改动），把 §2.7 的 Z1–Z3、Z5–Z7、Z11�
     `SpectateSweeperTest`、`WatchableConfigurationTest`。
   - 真流程接真存储：`SpectateFlowRedisIntegrationTest`（真的 163 / 164 / 钩子 / 清扫器接在真的观战、落点、票据存储上；其中一条用 JFR 的 `jdk.VirtualThreadPinned` 事件核对这些流程在虚拟线程上等 Redis 时不钉住载体线程，带对照）。
   - 跨区：`CrossZoneGatherTest`（真 `GatherPipeline` + 真 `Compensation` + 真 `SceneAssetLocator`；观众那一条经真的 `SpectateGatherHooks` 与 `WatchBattleService`）、`ScenePreparerRedisIntegrationTest`、`ScenePreparerTest` / `QueueServiceTest`（各补几条）。
-- **xm-robot**：`SpectateStepsTest`、`BattleSmokeChecksTest`、`BattleSmokeScenarioTest`、`BattleCrossZoneChecksTest`、`BattleCrossZoneScenarioTest`、`MatchUpstreamTest`（观战文案、码常量、指标名与标签、回合时长对着 xm-match / xm-api / xm-battle 的源码钉住）、
+- **game-robot**：`SpectateStepsTest`、`BattleSmokeChecksTest`、`BattleSmokeScenarioTest`、`BattleCrossZoneChecksTest`、`BattleCrossZoneScenarioTest`、`MatchUpstreamTest`（观战文案、码常量、指标名与标签、回合时长对着 game-match / game-api / game-battle 的源码钉住）、
   `RobotOptionsTest`、`RobotMainTest`、`SliceScriptsTest`。场景用例跑在按本稿手写的假服务端 `FakeMatchWorld` 上（补了观战语义、第二个区与若干故意做错的行为）。
-- **xm-gate**：`LocalSliceOrderTest`（未改，继续钉 `start-slice.sh` 的 `SERVICES` 与 `stop-slice.sh` 的清单行）。
+- **game-gate**：`LocalSliceOrderTest`（未改，继续钉 `start-slice.sh` 的 `SERVICES` 与 `stop-slice.sh` 的清单行）。
 
-带 `xm.it.redis` 开关的新类（缺省跳过；CI 的 Integration 作业要求真跑）：xm-match 的 `RedissonSpectateStoreIntegrationTest`、`SpectateFlowRedisIntegrationTest`、`ScenePreparerRedisIntegrationTest`，xm-discovery 的 `GatePushCrossZoneIntegrationTest`。
+带 `game.it.redis` 开关的新类（缺省跳过；CI 的 Integration 作业要求真跑）：game-match 的 `RedissonSpectateStoreIntegrationTest`、`SpectateFlowRedisIntegrationTest`、`ScenePreparerRedisIntegrationTest`，game-discovery 的 `GatePushCrossZoneIntegrationTest`。
 测试约定同 6.4：Redis 集成测试用 DB 13、随机 id、只删自己的键；观战的契约用例另用自己的索引键（§10.4）。
 
 **模块级的运行证据**（都是**模块级**的运行：单个模块、`-o` 离线；本机 Windows 11、Temurin 21.0.12；Redis 8.10.2 单机；日期 2026-10-08，日志在 `D:/work/.tools/logs/`）。
@@ -1536,30 +1536,30 @@ X1 只动测试（主代码零改动），把 §2.7 的 Z1–Z3、Z5–Z7、Z11�
 
 | 模块 | 命令的其余部分（日志） | 汇总行 | 时点 |
 |---|---|---|---|
-| xm-api / xm-discovery / xm-battle / xm-match | `-pl xm-api,xm-discovery,xm-battle,xm-match test -Dxm.it.redis=redis://127.0.0.1:6379`（`m65-c0-test.log`） | xm-api `Tests run: 82, Failures: 0, Errors: 0, Skipped: 0`；xm-discovery 210 / 0 / 0 / 0；xm-match 1360 / 0 / 0 / 跳过 42；xm-battle 519 / 0 / 0 / 跳过 4（跳过的都是 MySQL / Kafka 开关的既有用例） | 先行件 |
-| xm-team / xm-gate / xm-robot | 缺省档（`m65-c0-test-dependents.log`） | xm-team 341 / 0 / 0 / 跳过 80；xm-gate 214 / 0 / 0 / 0；xm-robot 408 / 0 / 0 / 0 | 先行件（受影响的下游） |
-| xm-match | `-Dxm.it.redis=…`（`m65-w1-9.log`） | `Tests run: 1468, Failures: 0, Errors: 0, Skipped: 42` | W1 的分支 |
-| xm-match | `-Dxm.it.redis=… -Dxm.it.kafka=127.0.0.1:9092`（`m65-W2-14.log`） | `Tests run: 1496, Failures: 0, Errors: 0, Skipped: 39`（跳过的是要真 MySQL 的 `RatingStoreSqlTest`） | W2 的分支 |
-| xm-match | `-Dxm.it.redis=…`（`m65-W3-7.log`） | `Tests run: 1442, Failures: 0, Errors: 0, Skipped: 42` | W3 的分支 |
-| xm-common / xm-discovery / xm-battle / xm-match | 各自 `-Dxm.it.redis=…`（`m65-X1-6` … `m65-X1-9`） | xm-common 120 / 0 / 0 / 0；xm-discovery 224 / 0 / 0 / 0；xm-battle 527 / 0 / 0 / 跳过 4；xm-match 1380 / 0 / 0 / 跳过 42 | X1 的分支 |
-| xm-robot / xm-gate | 缺省档（`m65-L1-4.log` / `m65-L1-5.log`） | xm-robot 408 / 0 / 0 / 0；xm-gate 214 / 0 / 0 / 0 | L1 的分支（脚本另在假进程沙箱里跑过 7 个用例，不是 Maven 测试） |
-| xm-robot | 缺省档（`m65-R-11.log`） | `Tests run: 488, Failures: 0, Errors: 0, Skipped: 0` | R 的分支 |
-| xm-match | `-Dxm.it.redis=… -Dxm.it.kafka=… -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306`（`m65fix-match-full-2.log`） | `Tests run: 1727, Failures: 0, Errors: 0, Skipped: 0` | 评审修正（xm-match 那一段）之后、提交之前的工作区 |
-| xm-robot | 缺省档（`m65fix-robot-7-full.log`） | `Tests run: 502, Failures: 0, Errors: 0, Skipped: 0` | 评审修正（xm-robot 那一段）之后 |
-| xm-match / xm-robot | `-pl xm-match,xm-robot install`，带真依赖（lead 的验证记录） | xm-match 1728 条、xm-robot 502 条，0 失败 | 提交 `0100ab3`（含 lead 裁决追加的那一处） |
+| game-api / game-discovery / game-battle / game-match | `-pl game-api,game-discovery,game-battle,game-match test -Dgame.it.redis=redis://127.0.0.1:6379`（`m65-c0-test.log`） | game-api `Tests run: 82, Failures: 0, Errors: 0, Skipped: 0`；game-discovery 210 / 0 / 0 / 0；game-match 1360 / 0 / 0 / 跳过 42；game-battle 519 / 0 / 0 / 跳过 4（跳过的都是 MySQL / Kafka 开关的既有用例） | 先行件 |
+| game-team / game-gate / game-robot | 缺省档（`m65-c0-test-dependents.log`） | game-team 341 / 0 / 0 / 跳过 80；game-gate 214 / 0 / 0 / 0；game-robot 408 / 0 / 0 / 0 | 先行件（受影响的下游） |
+| game-match | `-Dgame.it.redis=…`（`m65-w1-9.log`） | `Tests run: 1468, Failures: 0, Errors: 0, Skipped: 42` | W1 的分支 |
+| game-match | `-Dgame.it.redis=… -Dgame.it.kafka=127.0.0.1:9092`（`m65-W2-14.log`） | `Tests run: 1496, Failures: 0, Errors: 0, Skipped: 39`（跳过的是要真 MySQL 的 `RatingStoreSqlTest`） | W2 的分支 |
+| game-match | `-Dgame.it.redis=…`（`m65-W3-7.log`） | `Tests run: 1442, Failures: 0, Errors: 0, Skipped: 42` | W3 的分支 |
+| game-common / game-discovery / game-battle / game-match | 各自 `-Dgame.it.redis=…`（`m65-X1-6` … `m65-X1-9`） | game-common 120 / 0 / 0 / 0；game-discovery 224 / 0 / 0 / 0；game-battle 527 / 0 / 0 / 跳过 4；game-match 1380 / 0 / 0 / 跳过 42 | X1 的分支 |
+| game-robot / game-gate | 缺省档（`m65-L1-4.log` / `m65-L1-5.log`） | game-robot 408 / 0 / 0 / 0；game-gate 214 / 0 / 0 / 0 | L1 的分支（脚本另在假进程沙箱里跑过 7 个用例，不是 Maven 测试） |
+| game-robot | 缺省档（`m65-R-11.log`） | `Tests run: 488, Failures: 0, Errors: 0, Skipped: 0` | R 的分支 |
+| game-match | `-Dgame.it.redis=… -Dgame.it.kafka=… -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306`（`m65fix-match-full-2.log`） | `Tests run: 1727, Failures: 0, Errors: 0, Skipped: 0` | 评审修正（game-match 那一段）之后、提交之前的工作区 |
+| game-robot | 缺省档（`m65fix-robot-7-full.log`） | `Tests run: 502, Failures: 0, Errors: 0, Skipped: 0` | 评审修正（game-robot 那一段）之后 |
+| game-match / game-robot | `-pl game-match,game-robot install`，带真依赖（lead 的验证记录） | game-match 1728 条、game-robot 502 条，0 失败 | 提交 `0100ab3`（含 lead 裁决追加的那一处） |
 
 **判别力核对（变异）**——都是「临时改错、跑对应用例确认失败、还原并核对」：
 
 - W2：6 处变异（结局不明改成删标记、复查两个方向写反、重看同一场也发 Remove、建房窗口改用回包后再查的「已公开」、换场的 Remove 改成异步、回滚改成「读到什么删什么」）→ `WatchBattleServiceTest` 分两遍共 17 条失败，每个变异都有对应用例。
 - W3：3 处（清退的 RPC 不再与读落点共用每人的截止；164「落点不在」改用会删落点的剔除模式；清扫每轮只接 `RuntimeException`）→ 58 条里 7 条失败，与预期一一对应。
 - X1：`Compensation` 把每个人的取消都发给第一个人的端点 → `CrossZoneGatherTest` 3 条失败；`DubboSceneBattleEvents` 查目录写死 zone 1 → 3 条失败；`BattleRoomServiceImpl` 的同会话判定去掉 gate 实例比较 → 只有新增的 `ObserverTest` 用例变红（6.2 原有的「会话变了」用例改的是会话号，抓不到这一处）。
-- 评审修正：xm-match 4 处（重看同一场的记号恒置 false、复查的读锁改为读票完成后才发、关掉 acquire 的补释放、处理器自建 4.5 s 截止）→ 129 条里 7 条失败，恰好是为 S65-STORE-1 / S65-STORE-2 / T-06 / T-07 新增或加强的用例；
-  xm-robot 去掉 `awaitReadyResidue` / `awaitSettled`、临时放一个占 18115 的 yaml，对应用例分别失败。
+- 评审修正：game-match 4 处（重看同一场的记号恒置 false、复查的读锁改为读票完成后才发、关掉 acquire 的补释放、处理器自建 4.5 s 截止）→ 129 条里 7 条失败，恰好是为 S65-STORE-1 / S65-STORE-2 / T-06 / T-07 新增或加强的用例；
+  game-robot 去掉 `awaitReadyResidue` / `awaitSettled`、临时放一个占 18115 的 yaml，对应用例分别失败。
 
 **集成提交 `8f39377` 上的全量构建**（集成阶段的记录，2026-10-08；评审修正之前的树）：
-`clean install -Dxm.it.redis=… -Dxm.it.mysql=… -Dxm.it.kafka=…` → 27 个模块 BUILD SUCCESS，9249 条用例 0 失败 0 错误，跳过 2 条
-（xm-team `TeamMatchRedisIntegrationTest` 里 1 条要拨 Redis 时钟的由内存后端那一遍覆盖；xm-scene `ViewCrowdBenchmarkTest` 缺省关闭的基准）。其中 xm-match 1715、xm-robot 494、xm-battle 527、xm-discovery 224、xm-common 120、xm-api 82。
-`java tools/TestReport.java --require-it-executed` 退出码 0：82 个 `xm.it.*` 门控的集成测试类全部真的执行了。评审修正之后的全量构建见「最终验证」。
+`clean install -Dgame.it.redis=… -Dgame.it.mysql=… -Dgame.it.kafka=…` → 27 个模块 BUILD SUCCESS，9249 条用例 0 失败 0 错误，跳过 2 条
+（game-team `TeamMatchRedisIntegrationTest` 里 1 条要拨 Redis 时钟的由内存后端那一遍覆盖；game-scene `ViewCrowdBenchmarkTest` 缺省关闭的基准）。其中 game-match 1715、game-robot 494、game-battle 527、game-discovery 224、game-common 120、game-api 82。
+`java tools/TestReport.java --require-it-executed` 退出码 0：82 个 `game.it.*` 门控的集成测试类全部真的执行了。评审修正之后的全量构建见「最终验证」。
 
 ### robot 场景与切片脚本的现状
 
@@ -1574,16 +1574,16 @@ X1 只动测试（主代码零改动），把 §2.7 的 Z1–Z3、Z5–Z7、Z11�
 **切片上的运行**（lead 的验证记录，2026-10-08；**评审修正之前**的构建——`976d7ff` 加上面那条 robot 判据修正；评审修正之后的复验见「最终验证」）：
 
 - 单 zone 切片：`battle-smoke` × 3 各 102 项、`team` 52 项、`match-activity` 6 项、`match-5v5` 5 项，全部通过。
-- 双 zone 切片（`XM_ZONES=2`，同一批包；区服列表两个区都是 OPEN）：`smoke`（区 1、区 2）、`battle-cross-zone` × 3（含一遍 `--zone 2 --visit-zone 1`）各 33 项、区 1 上的 `battle-smoke` 102 项、`team`、`match-activity`、`match-5v5`、
+- 双 zone 切片（`GAME_ZONES=2`，同一批包；区服列表两个区都是 OPEN）：`smoke`（区 1、区 2）、`battle-cross-zone` × 3（含一遍 `--zone 2 --visit-zone 1`）各 33 项、区 1 上的 `battle-smoke` 102 项、`team`、`match-activity`、`match-5v5`、
   `battle-settle` 72 项、`battle` 60 项、`rollback`、`reconnect`、`zones`，全部通过。这是 Java 版第一次真跑两个 zone；寻址审计（静态）之后没有暴露出要改别的批次生产代码的问题，没有触发 6.5a / 6.5b 的拆分。
 
 **评审修正对 robot 的改动**（S12 的两半、30 s 预算、下线前等大厅 150）在修正阶段只对着 `FakeMatchWorld` 跑通，它们在活切片上的结果以「最终验证」为准。切片上值得看的三处：S12 前半的等待（1V1 很短时约等 55 s）、
-S12 后半的 163 是否在切磋局第一回合的 6 s 内发出、xm-battle 日志里观战段不再出现「结算重投用尽（玩家离线）」。
+S12 后半的 163 是否在切磋局第一回合的 6 s 内发出、game-battle 日志里观战段不再出现「结算重投用尽（玩家离线）」。
 
 **切片脚本**：L1 的分支上只在假进程沙箱里跑过（约定不许起切片）；真切片上的首跑是上面 lead 的双 zone 记录。已知边角见「遗留」。
 
-**没有做的验证**（写本记录时）：Go robot 的跨版本验收（**本机没有 Go 工具链**）；手工项「观战中 kill xm-battle 再发 163」（号没被接手时 16018「当前无法观战」、重启换实例后 16018「不存在或已结束」并剔除，W5）；
-回到 `XM_ZONES=1` 重起后确认区 2 显示 MAINTENANCE 的记录不在上面的清单里（「最终验证」里补上了）；两台 xm-match、双 zone 进 CI。
+**没有做的验证**（写本记录时）：Go robot 的跨版本验收（**本机没有 Go 工具链**）；手工项「观战中 kill game-battle 再发 163」（号没被接手时 16018「当前无法观战」、重启换实例后 16018「不存在或已结束」并剔除，W5）；
+回到 `GAME_ZONES=1` 重起后确认区 2 显示 MAINTENANCE 的记录不在上面的清单里（「最终验证」里补上了）；两台 game-match、双 zone 进 CI。
 
 ### 遗留与残余风险
 
@@ -1605,8 +1605,8 @@ S12 后半的 163 是否在切磋局第一回合的 6 s 内发出、xm-battle �
 **164 / 钩子 / 清扫 / 停机**
 
 - 开头读全员标记超过 1 s 就整次跳过清退（标记保留，靠客户端收到参战 177 后改连兜底）；RemoveObserver 超时 / 没送达后标记照删，battle 名单里的残留随那一场结束清理。
-- 清扫器的第一轮在一个间隔之后，启动后头 10 s `xm_match_watchable_battles` 读数为 0。
-- 停机的 20 s 是设计预算、不是 Spring 的强制截断；`stop-slice.sh` 的 20 s 从 SIGTERM 起算、还包含停凑单与撤 Dubbo 导出，xm-match 最坏停机可能超过而被强杀（6.4 已登记，后果自愈）。
+- 清扫器的第一轮在一个间隔之后，启动后头 10 s `game_match_watchable_battles` 读数为 0。
+- 停机的 20 s 是设计预算、不是 Spring 的强制截断；`stop-slice.sh` 的 20 s 从 SIGTERM 起算、还包含停凑单与撤 Dubbo 导出，game-match 最坏停机可能超过而被强杀（6.4 已登记，后果自愈）。
 - 内存替身与 Redis 实现只在脏数据上的差别：`a` 字段对得上、只是 `pb` 坏了的落点，Redis 上 `dead` 剔除照删、公开照登记，替身不动；替身不模拟落点的 TTL。
 
 **测试**
@@ -1616,17 +1616,17 @@ S12 后半的 163 是否在切磋局第一回合的 6 s 内发出、xm-battle �
 - 含真实等待、机器极忙时理论上可能抖的用例：`WatchBattleServiceTest`「复查的读等到请求预算耗尽」、`WatchBattleHandlerTest`「四条出口」、`ObserverRpcLoopbackTest` 整类、`SpectateSweeperTest` 的调度与启停几条、`BattleSmokeScenarioTest`（每条把场景整条跑一遍）、
   `RedissonSpectateStoreIntegrationTest` 的一万次选场与两处 PTTL 下界断言、`GatePushCrossZoneIntegrationTest` 里「不该收到」的 300 ms 空轮询（方向安全）。
 - 观战的真 Redis 用例写本记录时只有本机的运行记录（Redis 8.10.2 单机；CI 的 Integration 作业用 `infra.yaml` 起的也是这个版本，但跑在 Linux 上）；JFR 探测那一条只在本机 Temurin 21.0.12 / Windows 上跑过，JFR 不可用时会失败而不是跳过。以 Integration 作业自己的结果为准。
-- `SliceScriptsTest` 现在读各模块的 `application*.yaml`：新模块的缺省端口若与区 2 的五个端口（21010 / 21110 / 18115 / 11010 / 18123）相撞，xm-robot 的测试会红，按提示换端口或改 `start-slice.sh` 的 `ZONE2_*`。
-  xm-robot 的 `MatchUpstreamTest` 按文本钉着 `MatchTip` 的文案、`MatchMetrics` 的指标名与枚举，改这些名字要两边一起改。
+- `SliceScriptsTest` 现在读各模块的 `application*.yaml`：新模块的缺省端口若与区 2 的五个端口（21010 / 21110 / 18115 / 11010 / 18123）相撞，game-robot 的测试会红，按提示换端口或改 `start-slice.sh` 的 `ZONE2_*`。
+  game-robot 的 `MatchUpstreamTest` 按文本钉着 `MatchTip` 的文案、`MatchMetrics` 的指标名与枚举，改这些名字要两边一起改。
 - `WatchBattleServiceTest` 偏大（按规格行号分段）；`CrossZoneGatherTest` 自带一个类内的 `ZoneScene`（既有替身 `FakeSceneBattle` 表达不了「两个 zone 各一台同号 scene」），以后别的跨区用例可以把它提到 `testing` 包。都没有做。
 
 **切片脚本**
 
-- `sync_zone2_status` 依赖 gateway 的健康探测在 30 s 内看到 xm-gate-z2；超时会明确报错、退出码 1，进程都还在。
-- 区 2 的手工状态归脚本管：每次 `XM_ZONES=1` 启动且库里有区 2 时都会把它重置为 MAINTENANCE 并覆盖文案，每次 `XM_ZONES=2` 启动都会置 OPEN；手工把区 2 设成别的状态会被覆盖。
-- `XM_ZONES=2` 且启动切片的 shell 里设了 `XM_GATE_ADVERTISE_PORT` 时，两个 gate 会通告同一个端口（脚本没有给 xm-gate-z2 单独清掉它；本机切片一般不设）。
+- `sync_zone2_status` 依赖 gateway 的健康探测在 30 s 内看到 game-gate-z2；超时会明确报错、退出码 1，进程都还在。
+- 区 2 的手工状态归脚本管：每次 `GAME_ZONES=1` 启动且库里有区 2 时都会把它重置为 MAINTENANCE 并覆盖文案，每次 `GAME_ZONES=2` 启动都会置 OPEN；手工把区 2 设成别的状态会被覆盖。
+- `GAME_ZONES=2` 且启动切片的 shell 里设了 `GAME_GATE_ADVERTISE_PORT` 时，两个 gate 会通告同一个端口（脚本没有给 game-gate-z2 单独清掉它；本机切片一般不设）。
 - `battle-crash-window.sh` 的区号按字符串比较（`--zone 01` 也被拒）；`battle-after-store` 在区 2 上本来可以做，现在一律拒绝。
-- 中文经 java 命令行被弄坏是本机（ANSI 代码页 1252）的实测，中文代码页的 Windows 与 Linux / macOS 上没有测；现在的做法在哪种环境都不依赖命令行编码。`start-slice.sh` 的 `SERVICES` 十三项里没有区 2 的实例（它们各自紧跟区 1 的同类启动）；仓库根 `README.md` 与 `xm-robot/README.md` 里「进程清单以 `SERVICES` 为准」那一句已注明 `XM_ZONES=2` 时另有这两个。
+- 中文经 java 命令行被弄坏是本机（ANSI 代码页 1252）的实测，中文代码页的 Windows 与 Linux / macOS 上没有测；现在的做法在哪种环境都不依赖命令行编码。`start-slice.sh` 的 `SERVICES` 十三项里没有区 2 的实例（它们各自紧跟区 1 的同类启动）；仓库根 `README.md` 与 `game-robot/README.md` 里「进程清单以 `SERVICES` 为准」那一句已注明 `GAME_ZONES=2` 时另有这两个。
 
 **robot**
 
@@ -1640,14 +1640,14 @@ S12 后半的 163 是否在切磋局第一回合的 6 s 内发出、xm-battle �
 
 - 正文回写之后本稿的行号整体后移：`ops-release-spec` 引的 `spectate-spec.md:347`（指 §2.8 第 4 条「battle 通告地址对所有 zone 可达」）与 `:776`（指 Q21）都已不在那两行，附录 A.3「行号稳定性」那一段的结论随之作废；
   它们不在本批改动的文件里，只登记，建议改成按条目号引用。正文里引的其它规格与 Java 源码的行号是成稿时的，没有逐个更新，以节名、类名 / 方法名为准。
-- 本批没有回写的：`ops-release-spec` 里给 6.5 预留的告警条目（A84）；`deploy-ci-spec` 的模块 / 端口 / 秘密表里仍没有 xm-match（6.4 就登记过）。
+- 本批没有回写的：`ops-release-spec` 里给 6.5 预留的告警条目（A84）；`deploy-ci-spec` 的模块 / 端口 / 秘密表里仍没有 game-match（6.4 就登记过）。
 
 ### 给 5.4 / 7.1b / 7.6 的接口与义务
 
 **给 5.4（跨 zone 传送与重定向）**
 
-- 现成可用的：`XM_ZONES=2` 的切片（xm-scene-z2 / xm-gate-z2 的实例名、端口与启停次序见 §10.6；区 2 的入口是 gateway `assign-gate {zone_id: 2}` → 127.0.0.1:11010）；脚本报「全部就绪」时区服列表里区 2 已是 OPEN；
-  robot 的 `--visit-zone` / `XM_ROBOT_VISIT_ZONE`（`RobotOptions` 记录的 `visitZoneId`）；`FakeMatchWorld` 的第二个区；同号碰撞的测试钉与寻址审计结论（上文）；`SliceScriptsTest` 的端口冲突检查。
+- 现成可用的：`GAME_ZONES=2` 的切片（game-scene-z2 / game-gate-z2 的实例名、端口与启停次序见 §10.6；区 2 的入口是 gateway `assign-gate {zone_id: 2}` → 127.0.0.1:11010）；脚本报「全部就绪」时区服列表里区 2 已是 OPEN；
+  robot 的 `--visit-zone` / `GAME_ROBOT_VISIT_ZONE`（`RobotOptions` 记录的 `visitZoneId`）；`FakeMatchWorld` 的第二个区；同号碰撞的测试钉与寻址审计结论（上文）；`SliceScriptsTest` 的端口冲突检查。
 - 5.4 要接着做的：226 / 124、GO-5、X16、归属区路由等全部生产代码（6.5 一行都没有碰）；`--visit-zone` 的帮助文本现在只写了 `battle-cross-zone` 的用途，`travel` 落地时补「travel 的目的区」；
   `battle-cross-zone` Z1 的归属区断言要 `PlayerFlow` 把角色列表里的 `zone_id`（与实际连接的 gate 地址）暴露出来；X16 合入之前，双 zone 切片上从区 2 进来的新号归属区会记成 1（`CreatePlayerHandler` 取 login 配置的 zone）；
   `team` X1 / X2 与 `guild` 第 4 步的跨区步骤照旧跳过；`zt-spec` §11.9 的 MZ 用例都没有跑。
@@ -1655,23 +1655,23 @@ S12 后半的 163 是否在切磋局第一回合的 6 s 内发出、xm-battle �
 
 **给 7.1b（整栈 compose 与 CI）**
 
-- Q22 的前置清单①–⑤原样成立、一条都没有做：compose 里给 xm-battle 配 `XM_BATTLE_CLIENT_ADVERTISE_HOST`；xm-gate-z2 的 `xm.dubbo.match-url` 指向 `tri://xm-match:20888`；两 zone 用覆盖文件 `deploy/compose/two-zones.yaml`（gateway 两个区一起播种，不在单 zone 的 stack 里常驻一个 OPEN 的 2 区）；
+- Q22 的前置清单①–⑤原样成立、一条都没有做：compose 里给 game-battle 配 `GAME_BATTLE_CLIENT_ADVERTISE_HOST`；game-gate-z2 的 `game.dubbo.match-url` 指向 `tri://game-match:20888`；两 zone 用覆盖文件 `deploy/compose/two-zones.yaml`（gateway 两个区一起播种，不在单 zone 的 stack 里常驻一个 OPEN 的 2 区）；
   z2 服务放在覆盖文件里以免模块清单漂移守卫判红；`ci-spec` 与 `zt-spec` §11.9 对「多 zone 进不进 CI」各登记一句（本批已各补一句现状）。本机切片上区 2 的端口见 `ci-spec` §2.1。
 - 可选 job：Go robot 的 `battle-smoke` 与 `battle_smoke_cross_zone` 跨版本验收（§10.9）；整栈上跑 Java 的 `battle-smoke`（观战段让它多出约 2–4 分钟）与 `battle-cross-zone`。
-- 新增的四个 `xm.it.redis` 集成测试类已在 `TestReport --require-it-executed` 的计数里；JFR 那一条要求 CI 的 JDK 带 JFR。
+- 新增的四个 `game.it.redis` 集成测试类已在 `TestReport --require-it-executed` 的计数里；JFR 那一条要求 CI 的 JDK 带 JFR。
 
-**给 7.6（发布与连接治理）**：`NodeClientCache` 的「锁内摘表、锁外销毁」（R163-01）；`xm_match_watchable_battles` 多副本取 max、`xm_match_spectate_inflight` 求和（§6）；xm-match 多副本下清扫器各跑各的、幂等；battle 的通告地址要对所有 zone 的客户端可达（§2.8 第 4 条）；
-容器宽限期公式里的 20 s 由 xm-match 停机第 3–5 步守住（§4.9）。
+**给 7.6（发布与连接治理）**：`NodeClientCache` 的「锁内摘表、锁外销毁」（R163-01）；`game_match_watchable_battles` 多副本取 max、`game_match_spectate_inflight` 求和（§6）；game-match 多副本下清扫器各跑各的、幂等；battle 的通告地址要对所有 zone 的客户端可达（§2.8 第 4 条）；
+容器宽限期公式里的 20 s 由 game-match 停机第 3–5 步守住（§4.9）。
 
 ### 最终验证（2026-10-08）
 
 在含全部评审修正的最终代码（提交 `0100ab3` 的代码；其后的收尾提交只有文档与几处注释 / 回显措辞的订正）上执行；本机 Windows 11，JDK 21.0.12；Redis 8.10.2、MySQL 8.4.11、Kafka 4.3.1 单机，与 CI 的依赖镜像同版本。
 
-**全量构建**：`./mvnw -B clean install -Dxm.it.redis=redis://127.0.0.1:6379 -Dxm.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dxm.it.kafka=127.0.0.1:9092`
-→ 27 个模块 BUILD SUCCESS，9270 条用例、0 失败、0 错误，跳过 2 条（xm-team `TeamMatchRedisIntegrationTest` 里要拨 Redis 时钟的 1 条，由内存后端那一遍覆盖；xm-scene `ViewCrowdBenchmarkTest`，缺省关闭的基准）。各模块条数：
-xm-proto 7、xm-table-codegen 18、xm-table 22、xm-net 21、xm-common 120、xm-battle-engine 2236、xm-pbmysql 127、xm-api 82、xm-discovery 224、xm-player-store 59、xm-gateway-store 10、
-xm-audit 18、xm-scene-manager 232、xm-login 170、xm-friend 84、xm-chat 10、xm-team 341、xm-guild 531、xm-trade 175、**xm-match 1728**、xm-scene 1417、xm-battle 527、xm-gate 214、
-xm-gateway 90、xm-data 305、**xm-robot 502**。`java tools/TestReport.java --require-it-executed` 退出码 0：82 个 `xm.it.*` 门控的集成测试类全部真的执行了。
+**全量构建**：`./mvnw -B clean install -Dgame.it.redis=redis://127.0.0.1:6379 -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306 -Dgame.it.kafka=127.0.0.1:9092`
+→ 27 个模块 BUILD SUCCESS，9270 条用例、0 失败、0 错误，跳过 2 条（game-team `TeamMatchRedisIntegrationTest` 里要拨 Redis 时钟的 1 条，由内存后端那一遍覆盖；game-scene `ViewCrowdBenchmarkTest`，缺省关闭的基准）。各模块条数：
+game-proto 7、game-table-codegen 18、game-table 22、game-net 21、game-common 120、game-battle-engine 2236、game-pbmysql 127、game-api 82、game-discovery 224、game-player-store 59、game-gateway-store 10、
+game-audit 18、game-scene-manager 232、game-login 170、game-friend 84、game-chat 10、game-team 341、game-guild 531、game-trade 175、**game-match 1728**、game-scene 1417、game-battle 527、game-gate 214、
+game-gateway 90、game-data 305、**game-robot 502**。`java tools/TestReport.java --require-it-executed` 退出码 0：82 个 `game.it.*` 门控的集成测试类全部真的执行了。
 收尾时订正的注释与切片脚本回显之后，另跑了 `MatchLifecycleTest`、`RedissonSpectateStoreTest`、`MatchUpstreamTest`、`SliceScriptsTest`（82 条，0 失败）。
 
 **GitHub Actions**：`976d7ff`（集成之后）与 `0100ab3`（评审修正）的 CI（构建与单测）与 Integration（真依赖）都通过。中间两个提交是红的，都不是功能缺陷：`ad96065` 见上面「过程」（`8f39377` 恢复）；
@@ -1683,18 +1683,18 @@ xm-gateway 90、xm-data 305、**xm-robot 502**。`java tools/TestReport.java --r
   - 匹配与观战：smoke(3)、**battle-smoke(103)**（观战段 S0–S13 加原匹配段；`BATTLE_SMOKE_OK`）、team(52)、match-activity(6)、match-5v5(5)；battle-smoke 与 team 换 run-tag 另各多跑 2 遍，全部通过。
   - 回归：battle(60)、battle-edge(20)、battle-settle(72)、movement(20)、currency(7)、attribute(11)、bag(11)、features(20)、skill(15)、pet(23)、token(12)、reconnect(9)、friend(26)、chat(8)、
     guild(75)、guild-economy(78)、trade(79)、audit(3)、guard(5)、rollback(19)、mirror(47)、dungeon(31)、zones(15)、killswitch(6)、queue(7)、drain(7)、ratelimit(5)。
-- **双 zone**（`XM_ZONES=2 tools/local/start-slice.sh`，多起 xm-scene-z2 与 xm-gate-z2；区服列表：区 1、区 2 都是 OPEN）：smoke(3)、`smoke --zone 2`(3)、
+- **双 zone**（`GAME_ZONES=2 tools/local/start-slice.sh`，多起 game-scene-z2 与 game-gate-z2；区服列表：区 1、区 2 都是 OPEN）：smoke(3)、`smoke --zone 2`(3)、
   **battle-cross-zone(33)** × 3（`--zone 1 --visit-zone 2` 两遍、`--zone 2 --visit-zone 1` 一遍；`CROSS_ZONE_MATCH_OK`）；区 1 上的回归 battle-smoke(103)、team(52)、match-activity(6)、match-5v5(5)、
   battle-settle(72)、battle(60)、rollback(19)、reconnect(9)、zones(15)，全部通过。
-- **单 zone 双 scene**（`XM_SCENE_NODES=2`；紧接在双 zone 之后起，区服列表里区 2 回到 MAINTENANCE——区 2 的状态跟随 `XM_ZONES`，裁决 5）：smoke(3)、cross-node(41)、battle-smoke(103)、team(52)、
+- **单 zone 双 scene**（`GAME_SCENE_NODES=2`；紧接在双 zone 之后起，区服列表里区 2 回到 MAINTENANCE——区 2 的状态跟随 `GAME_ZONES`，裁决 5）：smoke(3)、cross-node(41)、battle-smoke(103)、team(52)、
   match-activity(6)、match-5v5(5)、battle-settle(77，两个指标地址)、rollback(19)、reconnect(9)、mirror(47)、dungeon(31)、battle(60)，全部通过。
 - **评审修正对 robot 的改动在活切片上的结果**：六遍 battle-smoke 里 S12 的两半都通过（前半用 153 等到 NOT_QUEUED，后半切磋局里的 163(0) 一次就回 16015）；屏障期 30 s 的预算没有被触到。
-  「下线前等大厅 150」只保证结算**已应用**，不保证已销账：xm-battle 的日志里仍有「结算重投用尽（玩家离线），摘除；记录留给进场恢复」（WARN），三遍切片共 11 条——
+  「下线前等大厅 150」只保证结算**已应用**，不保证已销账：game-battle 的日志里仍有「结算重投用尽（玩家离线），摘除；记录留给进场恢复」（WARN），三遍切片共 11 条——
   6 条是 match-activity 的活动局（两个号打完即下线，6.4 就有），5 条是 battle-smoke 观战段 S11 的局（六遍里出现在四遍）。后者的次序是：scene 应用结算（推大厅 150）→ robot 约 3 ms 后下线 →
   销账要等落盘，发起销账的实例已经不在，记录留给下次进场恢复（进场时账本挡住重复应用，再销账）。这是 6.3 的既定路径（scene-battle-spec 的销账次序），不是缺陷；
   上面「切片上值得看的三处」里的第三条（「不再出现」）是修正阶段的预期，按这里的实测订正：等大厅 150 收窄的是「结算还没应用就下线」，不是这条 WARN。
-- **服务端日志里的 ERROR**：单 zone 那一遍四条，与 6.4 相同、都在预期内——xm-match 1 条（match-activity 的负面用例：发起人不在名单首位）、xm-battle 1 条（活动局结果重发用尽后摘除——消费方随 4.6，副本仍在 Redis）、
-  xm-guild / xm-login 各 1 条（guild、killswitch 场景的负面用例）；双 zone 与双 scene 两遍各只有 xm-match 的那 1 条。
+- **服务端日志里的 ERROR**：单 zone 那一遍四条，与 6.4 相同、都在预期内——game-match 1 条（match-activity 的负面用例：发起人不在名单首位）、game-battle 1 条（活动局结果重发用尽后摘除——消费方随 4.6，副本仍在 Redis）、
+  game-guild / game-login 各 1 条（guild、killswitch 场景的负面用例）；双 zone 与双 scene 两遍各只有 game-match 的那 1 条。
 
-**没有做的验证**（登记为遗留）：Go robot 的跨版本验收（本机没有 Go 工具链）；手工项「观战中 kill xm-battle 再发 163」（W5 判死的三条证据只有组件层的用例）；两台 xm-match；双 zone 进 CI（留给 7.1b）；
-`XM_ZONES=2` 与 `XM_SCENE_NODES=2` 同时开的形态；`battle-settle --slow` 与两个 kill -9 故障变体没有在这一批的切片上重跑（6.5 没有改那条链路的服务端代码）。
+**没有做的验证**（登记为遗留）：Go robot 的跨版本验收（本机没有 Go 工具链）；手工项「观战中 kill game-battle 再发 163」（W5 判死的三条证据只有组件层的用例）；两台 game-match；双 zone 进 CI（留给 7.1b）；
+`GAME_ZONES=2` 与 `GAME_SCENE_NODES=2` 同时开的形态；`battle-settle --slow` 与两个 kill -9 故障变体没有在这一批的切片上重跑（6.5 没有改那条链路的服务端代码）。

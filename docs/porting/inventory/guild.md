@@ -4,7 +4,7 @@
 
 ## 区域概述
 
-go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → client_rpc_router 透传会话元数据 `x-session-detail-bin` 访问 `GuildService`（28 个消息号：8、15、19、27、29、35、38、39、52、53、60、76、120、216–223、228、233、239–243），身份一律取会话、不信请求体。它独占 MySQL 库 `mmorpg_guild`（guild / guild_player_state / guild_member / guild_application / guild_player_op_seq / guild_asset_op / guild_daily_counter / guild_activity_progress），Redis 做快照缓存（带代次的 cache-aside）与区服排行 ZSET，经 Kafka gate 命令推送 `GuildChangedS2C`（220），并经通用资产通道（outbox + 重投循环 → scene `AssetDebit/AssetCredit/AssetAbortDebit`）扣货币、发物品。功能分批落地：B1/B2 建帮与成员管理和申请审批，B3b 展示名，B5 经济（捐献 / 升级 / 商店），B6a 活动（元宵灯会 / 中秋团圆）；同道历练（B6b）在 Go 里只是桩，固定回 kGuildActivityNotOpen。**Java 版目前完全没有帮会**：gate 的 `MessageRoutes.SERVICE_BACKENDS` 只有 `ClientPlayerLogin`，所以所有 GuildService 消息号都走 `ClientDispatcher` 的 default 分支，回一条 1003 kServiceUnavailable tip（xm-gate/src/main/java/com/game/gate/session/ClientDispatcher.java:253-257）。仅有的帮会相关 Java 能力是：五张帮会配表的类型化访问（xm-table 生成的 `GuildRuleRows / GuildLevelRows / GuildDonateRows / GuildShopRows / GuildActivityRows`），以及通用的按消息号限频（MessageLimiter 表同样覆盖帮会消息号）。
+go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → client_rpc_router 透传会话元数据 `x-session-detail-bin` 访问 `GuildService`（28 个消息号：8、15、19、27、29、35、38、39、52、53、60、76、120、216–223、228、233、239–243），身份一律取会话、不信请求体。它独占 MySQL 库 `mmorpg_guild`（guild / guild_player_state / guild_member / guild_application / guild_player_op_seq / guild_asset_op / guild_daily_counter / guild_activity_progress），Redis 做快照缓存（带代次的 cache-aside）与区服排行 ZSET，经 Kafka gate 命令推送 `GuildChangedS2C`（220），并经通用资产通道（outbox + 重投循环 → scene `AssetDebit/AssetCredit/AssetAbortDebit`）扣货币、发物品。功能分批落地：B1/B2 建帮与成员管理和申请审批，B3b 展示名，B5 经济（捐献 / 升级 / 商店），B6a 活动（元宵灯会 / 中秋团圆）；同道历练（B6b）在 Go 里只是桩，固定回 kGuildActivityNotOpen。**Java 版目前完全没有帮会**：gate 的 `MessageRoutes.SERVICE_BACKENDS` 只有 `ClientPlayerLogin`，所以所有 GuildService 消息号都走 `ClientDispatcher` 的 default 分支，回一条 1003 kServiceUnavailable tip（game-gate/src/main/java/com/game/gate/session/ClientDispatcher.java:253-257）。仅有的帮会相关 Java 能力是：五张帮会配表的类型化访问（game-table 生成的 `GuildRuleRows / GuildLevelRows / GuildDonateRows / GuildShopRows / GuildActivityRows`），以及通用的按消息号限频（MessageLimiter 表同样覆盖帮会消息号）。
 
 客户端（mmorpg-client `Assets/Scripts/Game/Guild/GuildClient.cs`）已经用上的：建帮 / 查询 / 申请审批 / 管理 / 公告 / 退帮 / 解散 / 排行（27）/ 捐献 / 升级 / 商店，以及 220 推送；**活动消息 239–243 和 52 GetGuildRankByGuild 目前没有客户端调用**。
 
@@ -16,8 +16,8 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - tables: MessageLimiter（帮会消息号行：读 10 次/秒、写 5 次/秒）
 - depends on: gate 路由、Dubbo 调用方鉴权、guild-storage-tx、guild-zone-isolation
 - behavior: 身份 = gate 会话 player_id，请求体里的 player_id / zone_id 对客户端调用一律忽略（不一致只打日志）。会话元数据解不开 → Unauthenticated；方法不在白名单 `ClientMethods` → PermissionDenied。gRPC 错误在路由服统一变成**带请求 id 的信封** `MessageContent{id, message_id, error_message{1003}}`。业务拒绝走响应体里的 `error_message`（14000–14031 段），故障才走 gRPC 错误（会触发客户端重连隔离）。所以写冲突、合服、名字重复等都必须回 tip，不能回错误。整请求预算 = Timeout − 500ms（3500ms）。无会话的内部调用（GM / 工具）沿用请求体字段；B2 起新增的管理 / 申请 / 经济 / 活动 RPC 对无会话调用直接 PermissionDenied。
-- internal: 新进程 xm-guild（Spring Boot + Dubbo）。gate 的 `MessageRoutes.SERVICE_BACKENDS` 加一行 `GuildService → guild`，dispatcher 加 guild 域的 Dubbo 转发（照 login 的 ClientMessageService）。白名单在 guild 侧显式登记、默认拒绝。killswitch（etcd 键热关停）、Prometheus 低基数指标（guild_economy_requests_total 等，label 不放 id）、雪花槽位申领。
-- java: missing — ClientDispatcher.java:253-257 对所有非 login / scene 域回 1003；MessageRoutes.java 的 SERVICE_BACKENDS 只有 ClientPlayerLogin；没有 xm-guild 模块。限频已通用实现（TableMessageLimits，见 PARITY「gate 按消息号限频」行）。
+- internal: 新进程 game-guild（Spring Boot + Dubbo）。gate 的 `MessageRoutes.SERVICE_BACKENDS` 加一行 `GuildService → guild`，dispatcher 加 guild 域的 Dubbo 转发（照 login 的 ClientMessageService）。白名单在 guild 侧显式登记、默认拒绝。killswitch（etcd 键热关停）、Prometheus 低基数指标（guild_economy_requests_total 等，label 不放 id）、雪花槽位申领。
+- java: missing — ClientDispatcher.java:253-257 对所有非 login / scene 域回 1003；MessageRoutes.java 的 SERVICE_BACKENDS 只有 ClientPlayerLogin；没有 game-guild 模块。限频已通用实现（TableMessageLimits，见 PARITY「gate 按消息号限频」行）。
 - size: M
 - robot: robot/guild_smoke_scenario.go 第 8 步（伪造请求体 player_id）、第 9 步（客户端发 UpdateGuildScore → 信封 1003，且分数仍为 0）
 - hazards: Java gate 现在的「不支持」回法是一条独立的 tip 推送（`message_id = tipMessageId`，**不带请求 id**，ClientDispatcher.java:681-686），而 mmorpg 路由服回的是带原请求 id / message_id 的信封。接入 guild 后，内部方法拒绝和故障都必须回信封，否则 robot 第 9 步与客户端的请求回调对不上。220 的应答类型是 Empty，Java 的 MessageRoutes.hasResponse 会把它判成「不回包」；mmorpg 里客户端发 220 会收到 1003 信封，Java 要特意保持这一行为。UpdateGuildScore 在 mmorpg 里没有任何服务端调用方（只有 robot 用来测拒绝）。
@@ -26,10 +26,10 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - mmorpg: proto/guild/guild_db.proto、go/guild/internal/data/tables.go、go/guild/internal/data/guild_manage_repo.go（inTx / retryOnDeadlock / 锁序 / 全局插入守卫）、go/guild/internal/data/server_version.go、go/schemamigrate
 - client messages: none（间接：kGuildBusyRetry 14021、kGuildIdGenUnavailable 14008）
 - tables: none
-- depends on: MySQL（Java：xm_java 库 + MyBatis + Druid）
+- depends on: MySQL（Java：game 库 + MyBatis + Druid）
 - behavior: 写冲突（死锁重试 3 次耗尽、锁等待超过 1s、子预算到期、COMMIT 结果不明）一律回 tip 14021，让玩家原地重试。帮名全服唯一（按 name_norm），一人至多一个帮（uk player_id）。
 - internal: 8 张表（列见 guild_db.proto），全部 READ COMMITTED。锁序固定：guild → guild_player_state → guild_member → guild_application → guild_player_op_seq → guild_asset_op → guild_daily_counter → guild_activity_progress。同表多行按主键升序逐行点锁。锁定读只做完整主键等值（guild_member 用 FORCE INDEX(PRIMARY)）。凡是插入或删除 guild_member 的事务，先锁该玩家的 guild_player_state 行（缺行就在事务外 INSERT IGNORE）。player_id=0 的哨兵行是全局插入守卫：建帮与审批通过都要先锁它。单次尝试的子预算 1.5s（解散 2.5s）；DSN 钉死 innodb_lock_wait_timeout=1；推送与缓存失效只在提交之后做；启动时检查数据库版本（MySQL 8.0.29+ 或 TiDB），缺表 / 缺索引就拒绝启动。
-- java: missing — 没有任何帮会表或 DDL；xm-player-store 有 MyBatis 与 Druid 的现成做法可以照搬。
+- java: missing — 没有任何帮会表或 DDL；game-player-store 有 MyBatis 与 Druid 的现成做法可以照搬。
 - size: L
 - robot: none（并发回归在 Go 单测 guild_lock_order_mysql_test.go 里）
 - hazards: 大量篇幅都是为 InnoDB 与 TiDB 的死锁做的锁序论证（唯一二级索引查重的 S next-key、删除标记记录上的 S→X 升级）。Java 实现同样的写集时，必须沿用「先锁状态行、哨兵串行化查重插入、点操作」这套纪律，否则「两个帮同时审批同一人」这种正常玩法会稳定撞出 1213。没有 Kafka 或别的异步写，所有写都是同步事务。
@@ -38,7 +38,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - mmorpg: go/guild/internal/data/guild_repo.go（GetGuild / GetPlayerGuildID / 代次 Lua 脚本）、guild_manage_repo.go（invalidateAfterCommit / VerifyPlayerGuildID / ResolvePlayerGuild）
 - client messages: none（影响 35 / 60 等全部读路径）
 - tables: none
-- depends on: guild-storage-tx、Redis（Java：Redisson，键经 RedisKeys，前缀 xm:）
+- depends on: guild-storage-tx、Redis（Java：Redisson，键经 RedisKeys，前缀 game:）
 - behavior: 刚入帮或刚被踢的玩家，最迟在下一次读时看到正确状态。客户端的 GetPlayerGuild 在两种情况下以 MySQL 复核：缓存说他没入帮，或者快照里没有他。
 - internal: 键 `guild:v2:{id}`、`player_guild:v2:{pid}`，各配一个 cache_generation 计数键。读未命中时，只有「读库前看到的代次」仍是当前代次才回填（Lua 比较后再 SET PX）；写在提交之后执行 INCR 代次 + DEL。失效失败就在后台按退避重试（约 2.1s），重试用尽计指标；同一个键的并发读做 singleflight；默认 TTL 30m。授权一律不看缓存，只看锁内的 MySQL 行。
 - java: missing
@@ -53,7 +53,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - depends on: Java 配表层 com.game.table.ConfigTables
 - behavior: 坏表拒绝启动。GuildRule[1]：application_expire_hours 1–720、每人待审上限 1–10、每帮待审上限 1–500，资产两列 > 0，activity_join_min_hours 0–720，trial_invite_ttl 10–120，cooldown 0–600。GuildLevel：id 从 1 连续；max_members 2–100 且随等级不降；max_officers < max_members 且不降；只有最后一级的 upgrade_cost_funds = 0。GuildDonate：currency_type 只能是 0 或 1；每种货币至多 2 行；contribution_gain 与 funds_gain 至少一个 > 0；daily_limit ≥ 1；min_guild_level 不超过最高级。GuildShop：三个分类各至少 1 行；item_count 在 1..max_stack 之间；cost 在 1..1e9；limit_period 为 0 时 limit_count 必须为 0。GuildActivity：同一类型的启用行档期不得重叠；奖励包非空、≤16 种物品；历练人数满足 2 ≤ min ≤ max ≤ 5；团圆阈值的生效值 = max(行值, reunion_min_online_members)，两者都为 0 拒绝启动。
 - internal: 启动时、注册节点之前执行；校验函数要写成纯函数，方便单测造坏样例。
-- java: partial — xm-table 已能按 schema 生成并加载五张帮会表（`GuildRuleRows`、`GuildLevelRows`、`GuildDonateRows`、`GuildShopRows`、`GuildActivityRows`；ConfigTablesTest.java:43-46 证明 GuildActivity 缺数据时按空表加载）。帮会专用的业务校验完全没有。
+- java: partial — game-table 已能按 schema 生成并加载五张帮会表（`GuildRuleRows`、`GuildLevelRows`、`GuildDonateRows`、`GuildShopRows`、`GuildActivityRows`；ConfigTablesTest.java:43-46 证明 GuildActivity 缺数据时按空表加载）。帮会专用的业务校验完全没有。
 - size: M
 - robot: none
 - hazards: 当前导出的 guildrule.json 只有第 1–7 列，B6 的三列（activity_join_min_hours、trial_invite_ttl_seconds、trial_invite_cooldown_seconds）在数据里缺失，读出来都是 0。若照 Go 注释的范围校验 trial_invite_ttl（10–120），现在的数据会拒绝启动。GuildActivity 没有导出数据（manifest 里没有它），所以活动在两版都只能显示为空。
@@ -65,7 +65,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - depends on: 玩家归属区（mmorpg：data_service 的 player:zone:{id}；Java：player.zone_id 列）
 - behavior: 建帮落在本人的归属区，请求体里的 zone_id 忽略。客户端只看得见、只能申请本区的帮会，别区的帮会回「不存在」14001；排行只看本区榜；查不到归属区回 14012。合服期间（`merge:in_progress:{zone}` 键存在、或者读不到）写操作回 14013，按 fail-closed 处理。解散、经济、活动在事务里再按锁住的 guild.zone_id 判一次闸门。GetPlayerGuild 不按区过滤（自己的帮永远看得见）。经济和活动的写 RPC 不查归属区：成员一定与帮会同区。
 - internal: 归属区查询有 1.5s 超时；查询失败按故障处理，映射缺失回 tip。
-- java: missing — xm-player-store 的 PlayerRow 有 zoneId 列（PlayerRow.java:11），可以直接拿来当归属区；Java 没有合服（architecture.md §10 首批不做），合服闸门暂时可以做成恒放行，但接口要留好。
+- java: missing — game-player-store 的 PlayerRow 有 zoneId 列（PlayerRow.java:11），可以直接拿来当归属区；Java 没有合服（architecture.md §10 首批不做），合服闸门暂时可以做成恒放行，但接口要留好。
 - size: S
 - robot: guild_smoke 第 1 步（伪造 zone_id）、第 4 步（别区的 C 看不到帮、查不到名次、无法申请、用同名建帮回 14010）
 - hazards: 帮名全服唯一、不分区（合服时不需要改名）。解散清榜只能用事务内读到的 zone（缓存里的 zone 在合服后会过期）。UpdateGuildScore 忽略请求里的 zone_id。
@@ -77,7 +77,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - depends on: 玩家会话目录（mmorpg：player_locator 的 `player:session:{id}`）、玩家名
 - behavior: online 与 name 都是展示字段：查不到就留 false 或空串，不让读请求失败（fail-open），名字批量查询上限 800ms。唯一例外是团圆在线人数，用严格版：任何一人读不到就整体按故障返回。
 - internal: 一次 MGET 批量取在线状态、一次批量取名字（成员 id 与帮主 id 合并后去重）。排行一页的帮主名也只批量查一次。
-- java: missing — Java 没有「玩家 → 在线会话」的 Redis 目录（RedisKeys 只有节点相关键）；玩家名在 xm-player-store 的 player.name 列，可以批量查。在线状态需要新建会话目录，或者问 gate / scene 的归属。
+- java: missing — Java 没有「玩家 → 在线会话」的 Redis 目录（RedisKeys 只有节点相关键）；玩家名在 game-player-store 的 player.name 列，可以批量查。在线状态需要新建会话目录，或者问 gate / scene 的归属。
 - size: S
 - robot: guild_smoke 第 6 步 member-names（快照里每个 name 与 leader_name 都非空）
 - hazards: Go 的 MGET 没有独立超时，locator Redis 卡住时会吃光整个请求预算；Java 实现时给在线查询加独立超时。
@@ -89,7 +89,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - depends on: guild-service-access、guild-storage-tx、guild-zone-isolation、guild-rank、guild-query（回包用 GuildInfo）
 - behavior: 帮名先 TrimSpace，再要求 1–24 个 rune、不含控制字符、NFKC 规范化后可用，否则回 14009。判重按 name_norm（NFKC → 去首尾空白 → 小写，≤48 rune），重名回 14010（全服唯一）。已在帮中回 14000（先看缓存，缓存说在帮就用 MySQL 复核）。合服回 14013，发号失败回 14008，写冲突回 14021。成功时新帮为 Lv1、资金 0、max_members = GuildLevel[1]，建帮者为帮主（role 3），回包带 GuildInfo；不推送。新帮以 0 分进全服榜和区榜。
 - internal: guild_id 来自号段（data_service biz_tag=guild），按配置可回退雪花；发号排在合服闸门与读表之后，避免白烧号。guild 行与帮主成员行同一事务写入，事务先锁全局插入守卫 S(0)、再锁 S(player)。
-- java: missing — xm-common 有雪花 ID 可以发 guild_id；xm-player-store 已有同一套名字规范化写法（角色名 name_key，见 PARITY「角色名唯一」行），可以复用。
+- java: missing — game-common 有雪花 ID 可以发 guild_id；game-player-store 已有同一套名字规范化写法（角色名 name_key，见 PARITY「角色名唯一」行），可以复用。
 - size: M
 - robot: guild_smoke 第 1、2、4 步，economy 段第 1 步
 - hazards: 旧实现曾吞掉成员行写入失败，产出「帮会存在但没有任何成员」的帮；必须一个事务里写完。撞唯一键时要分清是 uk_guild（重名）还是 uk_guild_member（已在帮）。
@@ -197,7 +197,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - depends on: gate 下行推送通道；玩家 → gate 会话目录（guild-presence-names）
 - behavior: 推送至多一次，客户端收到后只触发重新拉取；只推在线玩家，离线的计数后丢弃。13 种 kind 与收件人：MEMBER_JOINED（除审批人外全体）、MEMBER_LEFT（剩余全体）、MEMBER_KICKED（剩余成员 + 被踢者）、ROLE_CHANGED / LEADER_TRANSFERRED / ANNOUNCEMENT_CHANGED / LEVEL_UP / ACTIVITY_CHANGED（除操作者外全体）、DISBANDED（除帮主外全体）、APPLICATION_RECEIVED（长老和帮主，60s 冷却）、APPLICATION_REJECTED（申请人）、FUNDS_CHANGED（捐献在后台终结时只推本人，含拒绝 / 中止）、DELIVERY_DONE（商店或活动发奖在后台终结时只推本人）。同步投递里当场终结的不推。建帮不推。客户端处理（GuildClient.cs:186-215）：在帮时任何 kind 都重拉 GetPlayerGuild；Disbanded 弹「帮会已被帮主解散」；未入帮时收到 MemberJoined 或 ApplicationRejected 才刷新。
 - internal: 提交之后异步发送，3s 预算，失败只计指标、绝不影响 RPC 结果。mmorpg 用 MGET 读 player:session 拿到 gate 实例，再往 Kafka gate-cmd topic 发 PushToPlayer / BroadcastToPlayers。Java 需要一条从 guild 到 gate 的下行通道（例如 Dubbo 调 gate，或 Redis pub/sub 按 gate 节点分发）以及玩家 → gate 的定位。
-- java: missing — Java 的下行推送只有 scene 经节点链路发的 ToClient（xm-api node_link.proto），没有非 scene 服务推给客户端的通道，也没有 Kafka（architecture.md §10）。
+- java: missing — Java 的下行推送只有 scene 经节点链路发的 ToClient（game-api node_link.proto），没有非 scene 服务推给客户端的通道，也没有 Kafka（architecture.md §10）。
 - size: M
 - robot: guild_smoke M3（MEMBER_JOINED）、M4（APPLICATION_REJECTED）、M5（ROLE_CHANGED）、M6（MEMBER_KICKED）、M7（LEADER_TRANSFERRED）、M9（MEMBER_LEFT）；robot 等推送的预算是 5s，超时判失败
 - hazards: 推送的收件人取自事务内的快照，没有成员的帮会就不推。客户端必须能处理 kind 数值未知的情况（proto3 枚举）。100 人帮是一次广播的预算上限。
@@ -221,7 +221,7 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - depends on: guild-storage-tx、guild-asset-delivery、op_id 发号
 - behavior: 每个（玩家, 流）的 seq 单调递增，带 stream_epoch（建行时刻）。本人每条流最多 16 条未决指令，超出回 14026 且不写任何行。指令状态：PENDING → APPLIED / REJECTED / ABORTED / APPLIED_PARTIAL（数值与客户端的 GuildAssetOrderStatus 逐项相同）。对侧账在终结事务里一起完成：捐献 APPLIED → 帮会资金 += funds_delta、帮贡 total 与 balance 都 += contribution_delta；捐献 REJECTED / ABORTED → 退回今日次数；商店 REJECTED / ABORTED → 退回帮贡与限购次数；活动发奖只做状态 CAS；APPLIED_PARTIAL 只终结、转人工补偿。帮会或成员已不存在时计 orphan，不记账。今日次数用「带上限的 upsert」占用。
 - internal: op_id 来自号段（biz_tag guild_asset_op），**不允许回退雪花**。账本行 28 列（含租约令牌、last_reason、payload 是 AssetBundle 的序列化字节）。终结 = 读不可变列 → 锁对侧（guild / member / seq）→ 点锁 op 行 → `status=PENDING` 的 CAS → 记对侧账 → 退计数；提交后失效缓存并回调 OnFinalized 推送。
-- java: missing — Java 没有货币、背包或资产通道的任何代码（在 xm-scene 和 xm-player-store 里 grep 不到 asset / currency）。
+- java: missing — Java 没有货币、背包或资产通道的任何代码（在 game-scene 和 game-player-store 里 grep 不到 asset / currency）。
 - size: L
 - robot: guild_economy_smoke full 模式第 5–13 步（资金、帮贡、次数精确到数值）
 - hazards: 捐献在 scene 实际扣款成功之后才入账，扣款前取消不需要退款。商店先扣帮贡、后发货。退出、被踢、解散时把捐献截止时间提前，好让还没扣款的指令尽快中止。
@@ -364,8 +364,8 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 - tables: none
 - depends on: 本清单除活动以外的全部功能；GM 加钱 / 扣钱（economy 段）
 - behavior: 管理段：0–10 步加 M1–M10，打印 `GUILD_MGMT_OK` / `GUILD_SMOKE_OK` / `GUILD_SMOKE_FAIL step=…`；需要 5–6 个同区账号（robot_92xx）加 1 个别区账号，相邻请求间隔 300ms，同一消息号连发时再隔 1 秒（被限频的表现是不回包）。经济段：full 和 degraded 两种模式，打印 `GUILD_ECONOMY_SMOKE_OK mode=…`。
-- internal: Java 版 robot 是 xm-robot（Java 实现），需要新增帮会场景，或者确认 Go robot 能直接连 Java 版跑。
-- java: missing — xm-robot 里没有任何帮会内容（grep 无结果）。
+- internal: Java 版 robot 是 game-robot（Java 实现），需要新增帮会场景，或者确认 Go robot 能直接连 Java 版跑。
+- java: missing — game-robot 里没有任何帮会内容（grep 无结果）。
 - size: M
 - robot: 本项本身
 - hazards: 经济段依赖 GM 客户端消息给账号发货币，并读背包断言；Java 现在没有 GM 闸，也没有货币和背包。
@@ -390,6 +390,6 @@ go/guild 是一个独立的 gRPC 微服务（go-zero），客户端经 gate → 
 4. **资产通道的 Java 形态**：帮会经济与活动物品的前提是 scene 侧的货币 / 背包与 seq 账本。这属于 scene 或背包区域，需要确认归属与排期。Java 的 owner_epoch 写回围栏如何与资产账本合在同一次落盘？
 5. **归属区的真源**：Java 可以直接用 player.zone_id（建角时写入）当归属区，前提是 Java 不做合服。将来做合服时，这一列和帮会的 zone_id 要一起迁移。
 6. **排行同分顺序**：mmorpg 里没有任何服务端调用 UpdateGuildScore，全部帮会 0 分，排序完全由 Redis ZSET 对同分按 member 字典序降序决定。Java 是否需要复刻「按 guild_id 字符串降序」，还是登记为有意差异？积分来源（谁、何时给帮会加分）在 mmorpg 里也还没有定义。
-7. **guild_id 发号**：mmorpg 用 data_service 号段（可选回退雪花）。Java 用 xm-common 的雪花是否可以接受？客户端只当 uint64 用，看起来没有兼容问题。
+7. **guild_id 发号**：mmorpg 用 data_service 号段（可选回退雪花）。Java 用 game-common 的雪花是否可以接受？客户端只当 uint64 用，看起来没有兼容问题。
 8. **GuildRule 第 9 列 trial_invite_ttl_seconds 的数据是 0**：如果照 Go 注释的范围（10–120）在启动时校验，现在的数据会拒绝启动。Go 是否只在 B6b 时才校验这一列？
 9. **mmorpg 侧可能的缺陷，供对齐时判断**：(a) GetGuildRankPage 逐条 GetGuild，有 N+1 读；(b) 在线状态 MGET 没有独立超时，可能吃光整个请求预算；(c) 申请推送冷却在 Redis 出错时选择不推（偏向少推）；(d) 客户端发 220 由 guild 回 PermissionDenied、路由服再变成 1003，而 Java 的 MessageRoutes 会把 220 判成「不回包」。

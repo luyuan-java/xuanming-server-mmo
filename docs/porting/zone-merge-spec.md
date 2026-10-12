@@ -16,7 +16,7 @@
 > - `GameClient.cs` = `mmorpg-client/Assets/Scripts/Game/GameClient.cs`。
 > - Java 路径相对 `D:\work\xuanming-server-mmo`；只写类名时可在仓库里唯一定位。
 >
-> **Java 侧**：HEAD `9fde7d8`（规格文档提交；5.2 在 `6b28e9d`、7.1a / 7.2a 在 `37dd8dc` 都已提交）加工作区（5.3 副本、6.2 battle 节点、gate 限流迁入 xm-net 等未提交改动），
+> **Java 侧**：HEAD `9fde7d8`（规格文档提交；5.2 在 `6b28e9d`、7.1a / 7.2a 在 `37dd8dc` 都已提交）加工作区（5.3 副本、6.2 battle 节点、gate 限流迁入 game-net 等未提交改动），
 > 行号按工作区计。**5.4（`zone-travel-spec.md`）与 7.2b（`data-ops-spec.md`）尚未落地**（工作区里没有 `com.game.discovery.zone` 包、没有 `SelectTravelTargetRequest`、
 > 没有作业执行器），本稿把它们的规格当权威设计，依赖它们的类 / 方法标「(5.4)」「(7.2b)」。
 >
@@ -25,9 +25,9 @@
 > **本轮的基线主流程分区稿缺失（未交付）**，§1 沿用上一版内容，关键行号按 `26ceb70ca` 抽查重核。分歧都回到代码核对，裁决见 §0.7（历次）与 §0.8（本轮）。本稿只读代码，没有改任何源文件。
 >
 > **契约影响**：7.3 **不改任何客户端契约**，不需要跑 ContractSync。用到的客户端可见面全部已在同步产物里：26 `EnterGameResponse` 字段 3 `post_merge_notice_ts` / 字段 4 `force_rename_required`
-> （`xm-proto/src/main/proto/proto/login/login.proto:88-120`）、124 RedirectToGate、tip 2020 `kLoginDataSerializeFailed`（`xm-table/src/main/proto/tip/login_error_tip.proto:52`）、
+> （`game-proto/src/main/proto/proto/login/login.proto:88-120`）、124 RedirectToGate、tip 2020 `kLoginDataSerializeFailed`（`game-table/src/main/proto/tip/login_error_tip.proto:52`）、
 > 3023 `kEnterSceneFailed`（`scene_error_tip.proto:58`）、3027 `kZoneTravelTargetBusy`（`:66`）、14013 `kGuildZoneMerging`（`guild_error_tip.proto:38`；文案 `config-data/tables/tip_text.json:37`）、
-> 4020 `kTeamCrossZoneDenied`（`team_error_tip.proto:52`，robot 断言用）。新增的 `zone_merge.proto`、`SelectTravelTargetRequest.home_zone_id` 都是 xm-api 内部 proto。
+> 4020 `kTeamCrossZoneDenied`（`team_error_tip.proto:52`，robot 断言用）。新增的 `zone_merge.proto`、`SelectTravelTargetRequest.home_zone_id` 都是 game-api 内部 proto。
 
 ---
 
@@ -42,7 +42,7 @@
 | merge-cross-system-steps | `data.md:299-309` | `guild_step.go`、`trade_step.go`、`scene_hot_state.go` | 帮会 / 聚宝斋由属主改写（Dubbo 参与方）、帮会区榜从 MySQL 重建、源区频道计划由领导者退役（§4） |
 | merge-preflight-audit-unmerge | `data.md:311-320` | `preflight.go`、`audit_*.go`、`unmerge.go` | 归属静止预检、计划（dry-run）、合服后验证、按清单撤销（§5） |
 | post-merge-notice | `data.md:323-334` | `post_merge_stamp.go`、`consumePostMergeFlags` | 26 字段 3 来自 `player.merge_notice_ms`；字段 4 恒 false（§6） |
-| merge-zone-core | `inventory/tools.md:326-336` | 合服工具主流程 | xm-data 运维作业 `ZONE_MERGE` + 只用 JDK 的 CLI `tools/MergeZone.java`（§7） |
+| merge-zone-core | `inventory/tools.md:326-336` | 合服工具主流程 | game-data 运维作业 `ZONE_MERGE` + 只用 JDK 的 CLI `tools/MergeZone.java`（§7） |
 | merge-zone-audit-unmerge | `tools.md:338-348` | audit / unmerge / backfill / capability-check | 验证、撤销作业；backfill、capability-check 不适用 |
 | post-merge-login-signals | `tools.md:362-372`；`login.md:245-251` | 同 post-merge-notice | 同上 |
 | storage-placement-relocate | `tools.md:350-360` | `relocate*.go`、`placement_*.go`、`storage_audit.go` | 不适用（盘点已判） |
@@ -56,16 +56,16 @@
 2. **基线的跨系统写只有三处，全部由工具直接写别的服务的库与缓存**：步骤 3 帮会 `guild.zone_id` + `guild:v2` 缓存失效（`merge_run.go:480-523`）、步骤 3b `trade_listing.market_zone`
    （`:525-557`）、步骤 4 区榜 ZSET 合并（`:559-583`）；另有步骤 6 清场景热状态（**缺省关**，`main.go:305-306`，但 runbook 的 T-0 命令带了开关，`runbook:564`）与步骤 7 提示标记。
    好友、聊天、组队、匹配一个字节都不写（组队只做阻断式预检 P7）。顺序是「全部 zone 列先改、最后才翻归属」，撤销完全相反（`unmerge.go:9-22`）。
-3. **Java 的合服只剩「改三列、刷新派生状态、留一次性提示」**：`player.zone_id`、`guild.zone_id`、`trade_listing.market_zone`。玩家行在单库 `xm_java` 里不用搬，
+3. **Java 的合服只剩「改三列、刷新派生状态、留一次性提示」**：`player.zone_id`、`guild.zone_id`、`trade_listing.market_zone`。玩家行在单库 `game` 里不用搬，
    基线大约一半的代码（pin / copy、blob、能力标记、回填、搬库、Kafka 积压门禁）都不适用（§3、§11 D2）。
-4. **形态：xm-data 的运维作业**（`OPS_JOB_ZONE_MERGE = 7`、`OPS_JOB_ZONE_UNMERGE = 8`，追加在 `ops_tables.proto:22-36` 的 1–6 之后），复用 7.2b 的作业框架
-   （单飞 `ops_active`、心跳与清扫、幂等键、事件审计、`xm.data.ops.enabled` 写闸），另配只用 JDK 的薄壳 `tools/MergeZone.java`。**不新开 `xm-ops` 进程**（推翻 `inventory/tools.md:332`）。
+4. **形态：game-data 的运维作业**（`OPS_JOB_ZONE_MERGE = 7`、`OPS_JOB_ZONE_UNMERGE = 8`，追加在 `ops_tables.proto:22-36` 的 1–6 之后），复用 7.2b 的作业框架
+   （单飞 `ops_active`、心跳与清扫、幂等键、事件审计、`game.data.ops.enabled` 写闸），另配只用 JDK 的薄壳 `tools/MergeZone.java`。**不新开 `game-ops` 进程**（推翻 `inventory/tools.md:332`）。
 5. **清单在 MySQL，第一笔写之前落库**：pbmysql 表 `zone_merge_run`（一次合服）+ `zone_merge_item`（每个玩家 / 帮会 / 商品一行），同时承担基线清单文件（`manifest.go:3-26`）
    与 `merge:merged_into`（`merged_into.go:3-20`）的职责。玩家每批（1000 人）的改归属与清单进度**在同一个事务里**提交。
-6. **跨服务的写一律走属主**（同 7.2 Q15，`data-ops-spec.md:1109`）：xm-api 新增 Dubbo 接口 `ZoneMergeParticipantService`，xm-guild、xm-trade 各自实现。帮会按主键逐条改写
-   （属主自己的数据源：锁等待 1 s、RC，`xm-guild/src/main/resources/application.yaml:31`）、**严格**失效快照缓存，再用现成的 `GuildRanks.rebuild` 从 MySQL 重建区榜；
-   聚宝斋按主键逐条改 `market_zone`。玩家行经共享库 `PlayerStore` 由 xm-data 改。源区频道计划由 scene-manager 的**领导者**用围栏 Lua 退役，xm-data 只把 src 移出 `xm:world:zones`。
-7. **围栏**：键 `xm:{merge}:fence:<zone>`（Hash，记 run / op / src / dst / 操作人 / 时刻），src、dst 两把**在一段 Lua 里同时立**；读者只看键在不在、读失败按封锁；
+6. **跨服务的写一律走属主**（同 7.2 Q15，`data-ops-spec.md:1109`）：game-api 新增 Dubbo 接口 `ZoneMergeParticipantService`，game-guild、game-trade 各自实现。帮会按主键逐条改写
+   （属主自己的数据源：锁等待 1 s、RC，`game-guild/src/main/resources/application.yaml:31`）、**严格**失效快照缓存，再用现成的 `GuildRanks.rebuild` 从 MySQL 重建区榜；
+   聚宝斋按主键逐条改 `market_zone`。玩家行经共享库 `PlayerStore` 由 game-data 改。源区频道计划由 scene-manager 的**领导者**用围栏 Lua 退役，game-data 只把 src 移出 `game:world:zones`。
+7. **围栏**：键 `game:{merge}:fence:<zone>`（Hash，记 run / op / src / dst / 操作人 / 时刻），src、dst 两把**在一段 Lua 里同时立**；读者只看键在不在、读失败按封锁；
    参与方核对 `run` 字段。run 处于写阶段期间由 `ZoneMergeFenceKeeper` 每 10 s 续期 / 补回，半合服状态不会因 TTL 过期而失去保护（修基线 `merge_run.go:1309-1368` 的「中止后只剩 TTL」）。
 8. **合服不夺权**：`zone_id` 不在任何 `owner_epoch` 围栏 SQL 里（`PlayerMapper.java:53-138`），迟到的带围栏写回与改归属互不覆盖。判据是**归属静止**
    （清单 = src 区玩家 `owner_released = 1` 或租约早于 now − 余量）加清单玩家无在线目录 / 位置记录 / 活队伍，每批改写在同一事务里 `FOR UPDATE` 复核；dst 区玩家持有归属只报 warn。
@@ -78,12 +78,12 @@
 
 | 基线项 | 处置 | 依据 |
 |---|---|---|
-| pin / copy 玩家行、data Redis blob、共享缓存失效、go/db 能力标记、`-backfill-home-zone`、relocate / pin-placement / storage-audit | 不适用 | 单库、`zone_id NOT NULL` 建角时写入（`xm-player-schema.sql:14`）；Java 没有玩家数据缓存层（`data-ops-spec.md:578`） |
-| 基线 blob 里的 `PlayerMergeStateComp.post_merge_notice_seen_ms` | 不移植 | 只在注释里被提到、没有读写者（`proto/common/component/player_comp.proto:110-142`；`mysql_database_table.proto:121-125`；`post_merge_stamp.go:27-40`）。它随同步产物进了 `xm-proto`，**Java 代码不得引用**；Java 的玩家状态是自有 proto `xm.storage.PlayerState` |
+| pin / copy 玩家行、data Redis blob、共享缓存失效、go/db 能力标记、`-backfill-home-zone`、relocate / pin-placement / storage-audit | 不适用 | 单库、`zone_id NOT NULL` 建角时写入（`game-player-schema.sql:14`）；Java 没有玩家数据缓存层（`data-ops-spec.md:578`） |
+| 基线 blob 里的 `PlayerMergeStateComp.post_merge_notice_seen_ms` | 不移植 | 只在注释里被提到、没有读写者（`proto/common/component/player_comp.proto:110-142`；`mysql_database_table.proto:121-125`；`post_merge_stamp.go:27-40`）。它随同步产物进了 `game-proto`，**Java 代码不得引用**；Java 的玩家状态是自有 proto `game.storage.PlayerState` |
 | P3 Kafka 积压、P4 重试 / 处理中 / 死信队列 | 不适用，改为归属静止判据 | Java 写回同步且带 `owner_epoch` 围栏（`architecture.md:743` 起「玩家数据归属协议」） |
 | data_service `RemapHomeZoneForMerge`（内部消息 129） | 不移植 | 全量 SCAN、不认清单、不 CAS（`router.go:474-530`），与工具的 A2 口径矛盾；工具本身也不调它（自己做逐键 CAS，`merge_run.go:911-951`）（§10.4 B2） |
-| force_rename 打标与改名 RPC | 不做，字段 4 恒 false | 名字全服唯一（`xm-player-schema.sql:31`），基线同样不启用（`post_merge_stamp.go:69-77`；`merge_run.go:636` 传 nil；`runbook:861`） |
-| 清理玩家位置等场景热状态（基线步骤 6） | 不做 | `xm:location` / `xm:presence` 都带 TTL（`PlayerLocationDirectory.java:46-49`、`PlayerPresenceDirectory.java:39`），由预检兜住；5.3 的副本是「节点自有 + 目录登记」（`dungeon-mirror-spec.md` §6 方案 C），没有实例键；Java 唯一会永久残留的是频道计划（§4.6） |
+| force_rename 打标与改名 RPC | 不做，字段 4 恒 false | 名字全服唯一（`game-player-schema.sql:31`），基线同样不启用（`post_merge_stamp.go:69-77`；`merge_run.go:636` 传 nil；`runbook:861`） |
+| 清理玩家位置等场景热状态（基线步骤 6） | 不做 | `game:location` / `game:presence` 都带 TTL（`PlayerLocationDirectory.java:46-49`、`PlayerPresenceDirectory.java:39`），由预检兜住；5.3 的副本是「节点自有 + 目录登记」（`dungeon-mirror-spec.md` §6 方案 C），没有实例键；Java 唯一会永久残留的是频道计划（§4.6） |
 | 删除源区登录排队 / 限流键 | 不做 | src 置为 CLOSED 后准入先拒（`AssignGateService.java:205-229`），这些键不可达（YAGNI） |
 | 组队记录里的 zone 改写、管理员解散队伍 | 不做，活队伍阻断合服 | 同基线 P7（`preflight.go:270-350`）；队伍空闲 24 h 自动过期（`team-spec.md:313`） |
 | 好友 / 好友申请 / 帮会成员的审计计数 | 不做 | 基线只出 info 行（`audit_resources.go:488-592`），没有判据价值（D17） |
@@ -92,12 +92,12 @@
 
 | 子批 | 内容 | 前置 |
 |---|---|---|
-| **7.3a** 读侧与提示 | `RedisKeys.mergeFence`、`RedisZoneMergeFence` 与写侧 Lua 工具类 `ZoneMergeFences`（xm-discovery）；F1 / F2 / F4 / F5 接真实现（帮会 `MergeFence` 适配器；F4 的 `home_zone_id` 由 xm-scene 填）；`player.merge_notice_ms` 迁移与 login 消费；`RedirectOnEnter` 开关；`WorldChannelStore.unregisterZone` / `retireZone` 与 `WorldChannelCoordinator` 的退役分支；xm-data 的 `fence-drill`（dev / test）；指标 | 5.4 |
-| **7.3b** 合服 | xm-api 参与方接口与 proto；xm-guild / xm-trade 提供方；xm-data 合服作业、计划、验证、续跑 / 补扫、`abandon`、清单两表、围栏续期器（含终态清理）、`ZoneAdminController` 防护、7.2 受理的 `zone_merging` 检查；`PbMysql.insertAll`；zone 列登记表守护测试；CLI（含 `--self-test`）；robot `merge-fence-drill` / `merge-prepare` / `merge-check`；`tools/local/merge-smoke.sh` | 7.2b、7.3a |
+| **7.3a** 读侧与提示 | `RedisKeys.mergeFence`、`RedisZoneMergeFence` 与写侧 Lua 工具类 `ZoneMergeFences`（game-discovery）；F1 / F2 / F4 / F5 接真实现（帮会 `MergeFence` 适配器；F4 的 `home_zone_id` 由 game-scene 填）；`player.merge_notice_ms` 迁移与 login 消费；`RedirectOnEnter` 开关；`WorldChannelStore.unregisterZone` / `retireZone` 与 `WorldChannelCoordinator` 的退役分支；game-data 的 `fence-drill`（dev / test）；指标 | 5.4 |
+| **7.3b** 合服 | game-api 参与方接口与 proto；game-guild / game-trade 提供方；game-data 合服作业、计划、验证、续跑 / 补扫、`abandon`、清单两表、围栏续期器（含终态清理）、`ZoneAdminController` 防护、7.2 受理的 `zone_merging` 检查；`PbMysql.insertAll`；zone 列登记表守护测试；CLI（含 `--self-test`）；robot `merge-fence-drill` / `merge-prepare` / `merge-check`；`tools/local/merge-smoke.sh` | 7.2b、7.3a |
 | **7.3c** 撤销 | 撤销作业、参与方 UNMERGE 预检；robot `merge-unmerge-check`、撤销拒绝分支 | 7.3b |
 
 其他依赖：4.4 / 4.5 帮会、4.7 聚宝斋、4.3 组队、5.1 频道计划（都已交付）；5.2 交出（归属三列语义，已提交）。7.3b 依赖 7.2b 的作业执行器、`ops_active` 单飞、清扫器、
-xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除了 `PlayerStoreAutoConfiguration`）与 guild 的 Dubbo 消费端（`data-ops-spec.md:78`）。
+game-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除了 `PlayerStoreAutoConfiguration`）与 guild 的 Dubbo 消费端（`data-ops-spec.md:78`）。
 每个子批各自提交、推送、登记 PARITY（AGENTS.md §5）；mmorpg 侧标「已有」。
 
 ### 0.5 PARITY 与文档登记
@@ -111,7 +111,7 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
 - **文档**：`architecture.md` 新增「合服（批次 7.3）」小节；§7 写明「`zone_id` / `merge_notice_ms` 只有建角 INSERT 与合服 / 撤销作业写」「归属静止判据」；§4.17 帮会合服闸已生效
   （`:528`「合服闸门（4.4 恒放行）」随之改写）；§10（`:953-956`）删去「合服」；§11 补指标。`MergeFence.java:18` 的注释（引旧行号 `architecture.md:617-620`）与 `guild-spec.md:1716` D4 随 7.3a 改写。
   `db-migrations.md` 在 M8（`:204`）之后登记 `merge_notice_ms`（与 7.2b 的 `idx_player_zone` 同批时合成一条，迁移号取当时的下一个空号，§7.8）与两张 pbmysql 表；
-  `tech-stack.md` 不新增第三方依赖，只登记「xm-pbmysql 新增批量插入」与「xm-data 引入 trade 的 Dubbo 消费端」；新增运维手册 `docs/design/zone-merge.md`（§7.12 的内容）。
+  `tech-stack.md` 不新增第三方依赖，只登记「game-pbmysql 新增批量插入」与「game-data 引入 trade 的 Dubbo 消费端」；新增运维手册 `docs/design/zone-merge.md`（§7.12 的内容）。
   `RedisKeys.java:277` 的 `worldZones` 注释由「退役 zone 要运维手工 SREM」改为「退役由合服作业移出、领导者清计划」。
 - **路线图**：`roadmap.md:93` 7.3 的状态列。
 
@@ -119,17 +119,17 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
 
 | 位置 | 原说法 | 更正 |
 |---|---|---|
-| `inventory/tools.md:332`、`:344` | 新进程 `xm-ops`；键 `xm:merge:in-progress:{zone}`；整区 `UPDATE … IN 清单` | xm-data 作业；键 `xm:{merge}:fence:<zone>`；帮会 / 交易由属主改写（§7） |
+| `inventory/tools.md:332`、`:344` | 新进程 `game-ops`；键 `game:merge:in-progress:{zone}`；整区 `UPDATE … IN 清单` | game-data 作业；键 `game:{merge}:fence:<zone>`；帮会 / 交易由属主改写（§7） |
 | `inventory/tools.md:368` | 提示键 `RedisKeys.mergeNotice(pid)` + `getAndDelete` | 改为 `player.merge_notice_ms` 列（§6.3，Q3） |
 | `inventory/data.md:281` | 「可退化为事务内 `UPDATE player SET zone_id=dst WHERE zone_id=src`」 | 清单仍然必需（撤销、提示、验证都要用）：按清单分批、`AND zone_id = src`、`FOR UPDATE` 复核、残留复查 |
 | `inventory/data.md:306` | 「依赖的帮会 / 交易 / 排行榜在 Java 尚不存在」 | 4.4 / 4.5 / 4.7 已交付 |
 | `inventory/data.md:309` | 「公会名在 mmorpg 是区内唯一」 | **全服唯一**（`guild_step.go:7-15`；Java `guild_tables.proto:32`） |
 | `inventory/data.md:316` | P3 / P4 Kafka 门禁 | Java 不适用，改为归属静止（§3.3） |
 | `inventory/data.md:402` 第 6 条 | 合服在 Java 的范围待定 | 按本稿关闭 |
-| `inventory/guild.md:378` | 「按 idx_guild_0 整区改写……重建区榜」 | 基线已改为按清单主键点更新 + ZSET 合并；Java 由 xm-guild 按主键点更新 + 从 MySQL 重建 |
+| `inventory/guild.md:378` | 「按 idx_guild_0 整区改写……重建区榜」 | 基线已改为按清单主键点更新 + ZSET 合并；Java 由 game-guild 按主键点更新 + 从 MySQL 重建 |
 | `inventory/social.md:358` | 分批 `IN` 写法 | 按主键逐条（trade-spec `:1006` 已指出） |
 | `zone-travel-spec.md:441` | 世界聊天「基线按物理 zone」 | `go/chat` 的世界频道全服一条（`chat_logic.go:8-10`），两版一致，不是差异 |
-| `zone-travel-spec.md:448-449` | 建议键 `xm:merge-fence:{zone}` | `xm:{merge}:fence:<zone>`：两键 Lua 需要同槽（§2.5） |
+| `zone-travel-spec.md:448-449` | 建议键 `game:merge-fence:{zone}` | `game:{merge}:fence:<zone>`：两键 Lua 需要同槽（§2.5） |
 | `zone-travel-spec.md:463-465` | 约束 ③「预检两区无 `o` / `l` 位置记录、该区玩家全部 `owner_released = 1`」；④ 整区 `UPDATE … WHERE zone_id = src` | ③ 改为「清单（src）玩家 `owner_released = 1` 或租约早于 now − margin」，位置 / 在线目录只查清单玩家，dst 玩家持有归属只报 warn；④ 改为按清单分批、`FOR UPDATE` 复核；①②⑤⑥ 原样保留 |
 | `scene-channels-spec.md:1025`；`RedisKeys.java:277` 注释 | 退役 zone 要运维手工 SREM | 合服作业 SREM + 领导者用 `retireZone` 清计划（§4.6） |
 | `scene-channels-spec.md:1021` | NOSCRIPT 理由引 `architecture.md:138` | 现为 `architecture.md:153` |
@@ -140,21 +140,21 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
 | # | 分歧 | 裁决与核对依据 |
 |---|---|---|
 | 1 | 合服提示存哪：`player` 列 / Redis 键 90 天 TTL + GETDEL / Redis `getAndDelete`（盘点） | **`player.merge_notice_ms` 列**。`selectById` 是 `SELECT *`（`PlayerMapper.java:36-37`），EnterGame 本来就读这一行，零额外读；带围栏的写回都显式列列（`:64-100`），不会碰它；与 `zone_id` 同一条 UPDATE，没有「提示步骤只做了一半」；不带 TTL 与基线一致（`post_merge_stamp.go:119-136` 的 SET 不带过期），避免「休眠超 90 天看不到提示」这条客户端可见差异（Q3） |
-| 2 | 帮会 / 交易 / 玩家三列在 xm-data 的一个事务里改 / 由属主经 Dubbo 改 | **属主改写**。7.2 Q15 已定「直读越过服务边界」都不允许（`data-ops-spec.md:1109`），写更不行；快照缓存（`GuildCacheInvalidator.java:22-38`）与区榜锁（`GuildRanks.java:41-51`）只在 xm-guild 有一份；原子性由「围栏 + 条件更新幂等 + 清单进度」替代（Q4） |
+| 2 | 帮会 / 交易 / 玩家三列在 game-data 的一个事务里改 / 由属主经 Dubbo 改 | **属主改写**。7.2 Q15 已定「直读越过服务边界」都不允许（`data-ops-spec.md:1109`），写更不行；快照缓存（`GuildCacheInvalidator.java:22-38`）与区榜锁（`GuildRanks.java:41-51`）只在 game-guild 有一份；原子性由「围栏 + 条件更新幂等 + 清单进度」替代（Q4） |
 | 3 | 玩家改归属一个大事务 / 每批一个事务 | **每批 1000 人一个事务**，清单进度同事务（Q5） |
-| 4 | 区榜：ZSET 合并（基线） / 全量重建 / 只重建两区 | **复用 `GuildRanks.rebuild` 全量重建**：锁内、临时键带 TTL、Lua 原子换榜、重写区索引（`GuildRanks.java:222-270`），xm-guild 每次启动都在跑（`GuildConfiguration.java:269-281`），零新 Lua（Q6） |
+| 4 | 区榜：ZSET 合并（基线） / 全量重建 / 只重建两区 | **复用 `GuildRanks.rebuild` 全量重建**：锁内、临时键带 TTL、Lua 原子换榜、重写区索引（`GuildRanks.java:222-270`），game-guild 每次启动都在跑（`GuildConfiguration.java:269-281`），零新 Lua（Q6） |
 | 5 | dst 节点必须下线 / 可继续运行 | **不强制 dst 下线**：两区 MAINTENANCE / CLOSED、清单玩家归属静止、src 的 gate 与 scene 目录为空；dst 节点只报 info、dst 玩家持有只报 warn（Q7、Q26） |
-| 6 | 围栏键 `xm:merge-fence:{zone}` / `xm:{merge}:fence:<zone>` | **后者**：两把键一段 Lua，hash tag 保证将来上 Cluster 同槽（先例 `{team}` `RedisKeys.java:138-160`、`{rank}` `:187-221`） |
+| 6 | 围栏键 `game:merge-fence:{zone}` / `game:{merge}:fence:<zone>` | **后者**：两把键一段 Lua，hash tag 保证将来上 Cluster 同槽（先例 `{team}` `RedisKeys.java:138-160`、`{rank}` `:187-221`） |
 | 7 | 围栏值 JSON 串 / Hash | **Hash**：参与方要 `HGET run` 精确比较；基线用子串查找比较 run_id（`fence.go:72-85`） |
 | 8 | 清单：各参与方自记 / 中央两表 | **中央 `zone_merge_run` + `zone_merge_item`**：参与方无状态，撤销与验证只查一处 |
 | 9 | 参与方接口形状 | **list / count / preflight / rezone / finish 五个方法**（§7.7） |
-| 10 | 立围栏后的宽限 10 s / 15 s | **15 s**：login 单语句上界是 JDBC `socketTimeout=10000`（`xm-login/src/main/resources/application.yaml:21`）。这**不是**建角链的硬上界（链上有发号与多条语句），硬保证是 A8 残留并入、A10 收尾复查与 verify（Q12） |
+| 10 | 立围栏后的宽限 10 s / 15 s | **15 s**：login 单语句上界是 JDBC `socketTimeout=10000`（`game-login/src/main/resources/application.yaml:21`）。这**不是**建角链的硬上界（链上有发号与多条语句），硬保证是 A8 残留并入、A10 收尾复查与 verify（Q12） |
 | 11 | 热状态步骤缺省开 / 关（基线 `-clear-source-hot-state` 缺省 false） | **缺省开、不致命、只退役源区频道计划**：Java 要清的只有无 TTL 的计划键，前置是 src 无 scene 节点（Q18） |
 | 12 | `owner_released = 0` 且租约已过期：阻断并用 `AdminOwnership` 归一 / 算静止 | **算静止**（带 5 s 余量），每批 `FOR UPDATE` 复核（Q8；§10.1 第 6 条） |
 | 13 | dry-run：作业 / 同步 | **作业，不立围栏、不写清单、不改数据**，只留 `ops_job` 审计行 |
-| 14 | 撤销前置：只看 epoch / epoch + xm-data 直接 join `guild_member` | **epoch + 帮会参与方预检**（`join_time_ms ≥ 合服开始`，`guild_tables.proto:77`），不让 xm-data 读帮会表（Q24） |
+| 14 | 撤销前置：只看 epoch / epoch + game-data 直接 join `guild_member` | **epoch + 帮会参与方预检**（`join_time_ms ≥ 合服开始`，`guild_tables.proto:77`），不让 game-data 读帮会表（Q24） |
 | 15 | 匹配票据：阻断 / 不动 | **只报 info**：匹配池不分 zone，票据 zone 只用于观测（`queue.go:56-58`；`match-spec.md:359`、`:986`） |
-| 16 | 帮会缓存失效：新增严格变体 / 按版本化协议 | **两者合一**：`rezoneObjects` 提交后对整批调严格失效（失败抛、整批回 ERROR 由 xm-data 重试）；现有 `afterCommit` 永不抛（`GuildCacheInvalidator.java:22-38`） |
+| 16 | 帮会缓存失效：新增严格变体 / 按版本化协议 | **两者合一**：`rezoneObjects` 提交后对整批调严格失效（失败抛、整批回 ERROR 由 game-data 重试）；现有 `afterCommit` 永不抛（`GuildCacheInvalidator.java:22-38`） |
 | 17 | 删源区登录排队键 | **不做**（§0.3） |
 | 18 | 撤销只接受 APPLIED / 任意状态 | **APPLYING / APPLIED / UNMERGING 都可撤**，全部步骤带 `AND zone = dst` |
 | 19 | RedirectOnEnter「Unity 只打日志」（`config.go:198-206`、`runbook:851`） | 当前 Unity **已实现 124**（`GameClient.cs:1037-1066`）；基线文档过时（§10.4 B9）。开关仍缺省关（Q10） |
@@ -164,20 +164,20 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
 
 | # | 议题 | 分区稿 / 上一版的说法 | 回到代码核对后的裁决 |
 |---|---|---|---|
-| N1 | 源区频道计划由谁清 | 上一版与跨系统稿：xm-data `SREM` 后等领导锁过期，再自己 SCAN + DEL `xm:world:{z:<src>}:*`（含 `ver`）；Java 映射稿：领导者自己清，`ver` 保留 | **领导者清，`ver` 保留**。`RedisKeys.java:225-226` 写明计划键「只经 `WorldChannelStore` 的围栏 Lua 写」，`WorldChannelStore` 的类注释称它是 `xm:world:*` 的「唯一读写入口」、计划「只由分 zone 领导者经 `write` 改」（`WorldChannelStore.java:6-24`）。xm-data 直接 DEL 破坏单写者；`ver` 只增不减（`:249-256`），留着最稳。xm-data 只经新增的 `WorldChannelStore.unregisterZone` 做 SREM（§4.6） |
+| N1 | 源区频道计划由谁清 | 上一版与跨系统稿：game-data `SREM` 后等领导锁过期，再自己 SCAN + DEL `game:world:{z:<src>}:*`（含 `ver`）；Java 映射稿：领导者自己清，`ver` 保留 | **领导者清，`ver` 保留**。`RedisKeys.java:225-226` 写明计划键「只经 `WorldChannelStore` 的围栏 Lua 写」，`WorldChannelStore` 的类注释称它是 `game:world:*` 的「唯一读写入口」、计划「只由分 zone 领导者经 `write` 改」（`WorldChannelStore.java:6-24`）。game-data 直接 DEL 破坏单写者；`ver` 只增不减（`:249-256`），留着最稳。game-data 只经新增的 `WorldChannelStore.unregisterZone` 做 SREM（§4.6） |
 | N2 | 清单玩家在线目录怎么严格读 | 上一版：「用异步读法或新增批量异步读」；Java 映射稿：新增 `findAllStrictAsync` | **两个严格批量读都已存在**：`PlayerPresenceDirectory.findAllStrictAsync(ids, batchSize)`（`:192`，只回计数）与 `findEachStrictAsync(ids)`（`:280`，逐人 ONLINE / ABSENT / ERROR）。用后者（要样本 id）；**禁用** `findAll` / `findAllAsync`（`:121`、`:165`），它们的 `decode` 把损坏 / 不符的条目当不在线（`:323-338`，fail-open）。位置记录用已有的 `PlayerLocationDirectory.statusesAsync`（`:217`）；`find`（`:360`）是阻塞单查，不用 |
-| N3 | 参与方的锁等待 | 上一版 §10.1：「参与方锁等待 5 s」 | 参与方跑在**属主的数据源**上：xm-guild `innodb_lock_wait_timeout=1`、`socketTimeout=4000`、RC（`xm-guild/.../application.yaml:31`）；xm-trade `innodb_lock_wait_timeout=2`（`xm-trade/.../application.yaml:23`）。5 s 只适用于 xm-data 自己借出连接后 `SET SESSION` 的值（§7.5）。xm-guild 用现成 `BackgroundTx.run(attempts = 5)`，1213 / 9007 / 1205 整体重跑、退避 10 ms 起封顶 200 ms（`BackgroundTx.java:115-148`、`:222-238`），不照抄基线 200 ms→5 s |
-| N4 | xm-data 的受影响行数口径 | 上一版没提 | xm-data 连接串带 `useAffectedRows=true`、没有 `sessionVariables`、`socketTimeout=30000`（`xm-data/src/main/resources/application.yaml:16`）。合服的状态迁移都会改到列，「恰好 N 行」断言成立；`steps_done = steps_done \| bit` 这类幂等进度更新续跑时可能 0 行，统一同时写严格递增的 `updated_ms`（§3.5、§7.6） |
+| N3 | 参与方的锁等待 | 上一版 §10.1：「参与方锁等待 5 s」 | 参与方跑在**属主的数据源**上：game-guild `innodb_lock_wait_timeout=1`、`socketTimeout=4000`、RC（`game-guild/.../application.yaml:31`）；game-trade `innodb_lock_wait_timeout=2`（`game-trade/.../application.yaml:23`）。5 s 只适用于 game-data 自己借出连接后 `SET SESSION` 的值（§7.5）。game-guild 用现成 `BackgroundTx.run(attempts = 5)`，1213 / 9007 / 1205 整体重跑、退避 10 ms 起封顶 200 ms（`BackgroundTx.java:115-148`、`:222-238`），不照抄基线 200 ms→5 s |
+| N4 | game-data 的受影响行数口径 | 上一版没提 | game-data 连接串带 `useAffectedRows=true`、没有 `sessionVariables`、`socketTimeout=30000`（`game-data/src/main/resources/application.yaml:16`）。合服的状态迁移都会改到列，「恰好 N 行」断言成立；`steps_done = steps_done \| bit` 这类幂等进度更新续跑时可能 0 行，统一同时写严格递增的 `updated_ms`（§3.5、§7.6） |
 | N5 | pbmysql 能否让枚举进主键 | 上一版留作「实现前先确认」 | **允许**：主键只拒浮点与前缀索引类型，报错文案本身建议「改用整数或枚举主键」（`TableSchema.java:488-494`），ENUM 键长按 4 字节算（`:654`） |
 | N6 | 批量插入 API | 上一版：给 pbmysql 加 `insertAll` | 确认现有 API 没有批量插入（`PbMysql.java:136-331`），维持 |
 | N7 | 迁移号 | 上一版没定 | M8 在 `db-migrations.md:204`；`merge_notice_ms` 取当时的下一个空号（7.2b 先落地并占 M9 时顺延为 M10；同批则与 `idx_player_zone` 合成一条） |
 | N8 | `architecture.md` 行号 | 上一版：NOSCRIPT `:152`、`syncAll` `:654-658`、归属协议 `:672` | 现为 `:153`、`:725`、`:743`；§10「首批不做」在 `:953-956` |
 | N9 | 账号角色上限会不会被合服打破 | 未提 | 不会：上限按账号全局计数（`PlayerMapper.java:33-34`；基线同样按账号，`createplayerlogic.go:157`） |
-| N10 | `XM_ZONES=2` 切片 | 上一版：「沿用 5.4 的切片」 | 是 5.4 的交付物；`start-slice.sh` 目前只有 `XM_SCENE_NODES`（`:96-102`），7.3 的 robot 验收依赖 5.4 先落地 |
+| N10 | `GAME_ZONES=2` 切片 | 上一版：「沿用 5.4 的切片」 | 是 5.4 的交付物；`start-slice.sh` 目前只有 `GAME_SCENE_NODES`（`:96-102`），7.3 的 robot 验收依赖 5.4 先落地 |
 | N11 | 基线步骤 6 的细节 | 上一版只写「可选」 | 缺省关（`main.go:305-306`）但 runbook T-0 命令带 `-MergeClearSourceHotState`（`runbook:564`）；固定 6 把场景键**不含** `scene:{id}:agones_gs`（`scene_hot_state.go:269-279`），后者用不带 TTL 的 SET 写（`agones_binding.go:305`、`:342`），正常销毁场景时与其余场景键同一段脚本删（`scene_atomic.go:118-122`），只有热状态清理漏了它；验证不扫 `scene:{id}:*` 与 location、只报 warn（`audit_checks.go:491-524`）。登记 B16 |
 | N12 | 基线步骤 7 重跑 | 上一版只写「续跑重取时刻」 | plain SET 会给**全体清单玩家**重新打标（`post_merge_stamp.go:43-47`），开服后重跑会让已看过提示的人再看一次。登记进 B14 |
 | N13 | 严格失效的直接证据 | 上一版只说「快照存 zone」 | Java 查帮 `GuildService.java:174` 用**快照里的** `zone_id` 判「不在本区 → 14001」，与基线 `visibleIn`（`guild_logic.go:169-171`）同形；不严格失效，dst 玩家半小时内查不到合过来的帮（`GuildProperties.java:45` 快照 TTL 30 min） |
-| N14 | 基线帮会闸门的覆盖面 | 上一版只提「没配 `MergeMarkerRedis` 就失效」 | 另有：内部 / GM 路径不查闸门（`merge_run.go:502-503`）。Java xm-guild 没有内部 / GM 写入口（Dubbo 只导出客户端消息服务与只读的 `GuildInternalService.listAppliedAssetOpsSince`），这条缺口在 Java 不存在 |
+| N14 | 基线帮会闸门的覆盖面 | 上一版只提「没配 `MergeMarkerRedis` 就失效」 | 另有：内部 / GM 路径不查闸门（`merge_run.go:502-503`）。Java game-guild 没有内部 / GM 写入口（Dubbo 只导出客户端消息服务与只读的 `GuildInternalService.listAppliedAssetOpsSince`），这条缺口在 Java 不存在 |
 | N15 | 基线陈旧文档 | 未全列 | 新增 B18：runbook §3 消费者表的帮会行（`runbook:137`，写成 `checkMergeFence` + FailedPrecondition、只覆盖 CreateGuild；代码是 14013、覆盖全部客户端写，`guild_logic.go:293-320`）；`trade_step.go:50-53` 说「每行一条自动提交的点更新」（代码是显式短事务，`merge_run.go:1154-1200` 的 A15 注释）；guild / trade / team 三处 home_zone 注释说合服走 `RemapHomeZoneForMerge`（`go/guild/internal/logic/home_zone.go:19`、`go/trade/internal/logic/home_zone.go:18`、`go/match/internal/team/homezone.go:16`），工具实际不调它 |
 | N16 | `verify:guild_rank` 的误报 | 未提 | 要求 `ZCARD dst == COUNT(guild WHERE zone=dst)`（`audit_checks.go:434-489`），建帮入榜失败只记日志时会误报 block（fail-closed，但原因不在合服）。Java 先重建再核对，按构造成立（D7）。登记 B19 |
 | N17 | robot 覆盖面 | 上一版：围栏演练 + 三轮 | 合入跨系统稿的项：活队伍阻断（计划回 `team_active` 带 team id，离队后通过）、好友视图 zone、合服前后 4020 的有无、窗口内帮会写 14013（§13.6） |
@@ -328,19 +328,19 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
 
 ### 2.4 Java：归属就是一列
 
-- **权威**：`xm_java.player.zone_id INT UNSIGNED NOT NULL`（`xm-player-schema.sql:14`），只在建角时与角色行同一条 INSERT 写入（`PlayerMapper.java:40-47` 是唯一写它的语句）；
+- **权威**：`game.player.zone_id INT UNSIGNED NOT NULL`（`game-player-schema.sql:14`），只在建角时与角色行同一条 INSERT 写入（`PlayerMapper.java:40-47` 是唯一写它的语句）；
   5.4 起归属区取会话 zone（`zone-travel-spec.md:411-414`）。
-- **读者每次现读、无缓存**：组队 / 帮会 / 交易经 `PlayerHomeZones`（`xm-common/.../player/PlayerHomeZones.java:12-19`），好友经 `PlayerProfiles`（`OnlineDirectory.java:255`、`FriendService.java:321`），
+- **读者每次现读、无缓存**：组队 / 帮会 / 交易经 `PlayerHomeZones`（`game-common/.../player/PlayerHomeZones.java:12-19`），好友经 `PlayerProfiles`（`OnlineDirectory.java:255`、`FriendService.java:321`），
   login 角色列表直读这一列（`zone-travel-spec.md:415`）。改完这一列，各服务下一次请求立即看到新归属。
 - **7.3 新增的唯一写者**：合服 / 撤销作业，在围栏之下按清单分批改（§7.3 A8、§7.4 U5）。不变量 **I-Z1**：zone 列只有创建时写入与合服 / 撤销作业改写；`architecture.md` §7 写明。
   帮会 `guild.zone_id`、聚宝斋 `trade_listing.market_zone` 同理（只在建帮 / 上架时写，§4.1）。
 
 ### 2.5 Java 围栏：键、值、写侧 Lua
 
-- **键**：`RedisKeys.mergeFence(int zone)` = `xm:{merge}:fence:<zone 无符号十进制>`，DB 12。两把键共用 hash tag `{merge}`。
+- **键**：`RedisKeys.mergeFence(int zone)` = `game:{merge}:fence:<zone 无符号十进制>`，DB 12。两把键共用 hash tag `{merge}`。
 - **值**：Hash，字段 `run`（run_id 无符号十进制）、`op`（`merge` / `unmerge` / `drill`）、`src`、`dst`、`by`（操作人）、`at`（立起毫秒）、`exp`（预计到期毫秒，只给人看）。
   **读者只做 `EXISTS`**，不解析（同 `router.go:84-89`）；参与方与续期器读 `run`。
-- **写侧**（xm-discovery `com.game.discovery.zone.ZoneMergeFences`，Lua，`ByteArrayCodec`，单条 `evalAsync`；不用 Redisson 批处理——批里的 EVALSHA 遇 NOSCRIPT 不重载，`architecture.md:153`）：
+- **写侧**（game-discovery `com.game.discovery.zone.ZoneMergeFences`，Lua，`ByteArrayCodec`，单条 `evalAsync`；不用 Redisson 批处理——批里的 EVALSHA 遇 NOSCRIPT 不重载，`architecture.md:153`）：
 
 | 操作 | Lua 语义 |
 |---|---|
@@ -354,7 +354,7 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
 | `checkHolder(run, from, to)` | 只读：两把都存在且 `run` 都等于入参 → 1，否则 0（参与方用） |
 
 - **TTL**：`max(run-budget + 30 min, 1 h)`（同 `fence.go:111-114`），缺省 run-budget 30 min → 1 h。
-- **续期器** `ZoneMergeFenceKeeper`（xm-data，跑在 `data-ops-fence` 线程上，每个副本都跑，`data-ops-spec.md:849-850`），**每 `fence-check-interval`（10 s）一拍**。
+- **续期器** `ZoneMergeFenceKeeper`（game-data，跑在 `data-ops-fence` 线程上，每个副本都跑，`data-ops-spec.md:849-850`），**每 `fence-check-interval`（10 s）一拍**。
   每拍从 MySQL 读一次「状态为 APPLYING / UNMERGING 的 run」与「本副本正在执行的作业的 run」，逐个 `renew`：
   - MISSING → 先**重读该 run 的状态**仍为 APPLYING / UNMERGING（或本副本的作业仍在执行、`ops_job` 仍为 RUNNING）才 `restore` 并记 WARN；补回之后**再读一次**，已终结就立即 `release`
     ——关掉「读到 APPLYING → 作业 A10 改 APPLIED 并释放 → 本副本补回」这条竞态（补回前的空窗由残留复查兜底，§2.7）。
@@ -363,10 +363,10 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
   - **终态清理**：最近 24 h 内终结（APPLIED / UNMERGED / ABANDONED）的 run，若围栏仍由它持有（A10 / U9 / `abandon` 的释放失败）→ `releaseIfStale(run, zones, 终结时刻)`，计 `cleaned`。
 - **状态迁移一律条件更新**：作业推进 run 状态与清扫器 / `abandon` 改 ABANDONED 都写成 `UPDATE zone_merge_run SET status = :to, updated_ms = :u WHERE run_id = ? AND status = :expected`，
   影响 0 行即停止（作业 FAILED `run_busy`，不释放围栏）。否则「清扫器误判心跳超时、把 PLANNED 的 run 改成 ABANDONED 并释放围栏」与「原执行线程其实还活着、随后改 APPLYING 开写」会交错。
-- **崩溃语义**：xm-data 全部副本都挂掉时围栏最多一个 TTL（≥ 1 h）后消失。此时两区仍是 MAINTENANCE / CLOSED，网关不为它们发 gate 令牌（白名单不参与准入，`AssignGateService.java:205-229`），
+- **崩溃语义**：game-data 全部副本都挂掉时围栏最多一个 TTL（≥ 1 h）后消失。此时两区仍是 MAINTENANCE / CLOSED，网关不为它们发 gate 令牌（白名单不参与准入，`AssignGateService.java:205-229`），
   残留的 gate 令牌（600 s，`GateTokenIssuer.java:22`）与传送票据（300 s）早已过期。**但其他 OPEN 的区照常发令牌**：归属 src / dst 的玩家可以经别区的 gate 进游戏
   （EnterGame 只看会话 zone 的区服状态，F2 是唯一挡板），围栏消失后就会在半合服状态下进场。这是两版共有的暴露面（基线工具死后同样只剩 TTL），Java 的续期器把它缩到「全部副本都挂」；
-  手册要求合服期间 xm-data 至少两个副本，并对续期停摆告警（§9）。续跑时重新立围栏、等宽限、做残留复查。
+  手册要求合服期间 game-data 至少两个副本，并对续期停摆告警（§9）。续跑时重新立围栏、等宽限、做残留复查。
 
 ### 2.6 Java 读侧：5.4 检查点换成真实现
 
@@ -378,17 +378,17 @@ xm-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除�
 | F1 | login `CreatePlayer`，铸号与事务之前（5.4） | 会话 zone（新角色的归属区） | 14 {2020}，不发号、不插行 | `createplayerlogic.go:257-268` |
 | F2 | login `EnterGame` 落地路径，`findPlayer`（`EnterGameHandler.java:200`）之后、`callAssign` 与夺权之前（5.4） | `row.zone_id` | 26 {error_message 3023}，不分配、不夺权 | 26 成功后推 23 {3023}（`home_zone.go`(SM)`:176-199`） |
 | F3 | EnterGame 重定向路径 | 不查 | — | 同基线「只送连接不查」 |
-| F4 | scene-manager `selectTravelTarget` 第 3 步（5.4） | 归属区：7.3 给内部请求 `SelectTravelTargetRequest` 加 `home_zone_id`，xm-scene 填加载时的 `player.zone_id` | scene 留原地、推 23 {3027} | `enterscenelogic.go:413` → `player_lifecycle.cpp:4362-4372` |
-| F5 | xm-guild 写 RPC：事务外按请求者归属区（`GuildAccess.mergeFenceTip`，`GuildAccess.java:103-124`），事务内按锁住的 `guild.zone_id`（`MergeFence.java:33-39`） | 同左 | 14013（「zone merging」/「merge fence unreadable」，`GuildTip.java:69-74`） | `merge_fence.go:60-74` |
+| F4 | scene-manager `selectTravelTarget` 第 3 步（5.4） | 归属区：7.3 给内部请求 `SelectTravelTargetRequest` 加 `home_zone_id`，game-scene 填加载时的 `player.zone_id` | scene 留原地、推 23 {3027} | `enterscenelogic.go:413` → `player_lifecycle.cpp:4362-4372` |
+| F5 | game-guild 写 RPC：事务外按请求者归属区（`GuildAccess.mergeFenceTip`，`GuildAccess.java:103-124`），事务内按锁住的 `guild.zone_id`（`MergeFence.java:33-39`） | 同左 | 14013（「zone merging」/「merge fence unreadable」，`GuildTip.java:69-74`） | `merge_fence.go:60-74` |
 | — | 4.8 交易写侧（上架、下单、交付之前） | 卖家 / 买家归属区 | 由 4.8 定 tip | 基线 P3 硬约束（`trade_step.go:27-34`） |
 
 - 帮会接线：`GuildConfiguration.java:437` 的 `MergeFence.NONE` 换成 `zoneId -> zoneMergeFence.inProgress(zoneId)`。`GuildAccess.mergeFenceTip` 对非 NONE 已走真实路径（`:108`），
   `MergeFence.inTransaction()` 对非 NONE 已返回真实现（`MergeFence.java:34-38`），解散与 4.5 经济操作的事务内复判随之生效，不用改调用方。
-- **F4 的混版本**：`home_zone_id` 是新加的内部字段，旧版 xm-scene 不填（读作 0），而「zone 为 0 放行」会让 F4 静默失效。xm-scene 与 xm-scene-manager 必须同批上线
-  （同 5.1 的整体停服切换纪律，`scene-channels-spec.md:1023`）；scene-manager 收到 `home_zone_id = 0` 时计 `xm_merge_fence_checks_total{site="travel", result="unreadable"}` 并记 WARN，
+- **F4 的混版本**：`home_zone_id` 是新加的内部字段，旧版 game-scene 不填（读作 0），而「zone 为 0 放行」会让 F4 静默失效。game-scene 与 game-scene-manager 必须同批上线
+  （同 5.1 的整体停服切换纪律，`scene-channels-spec.md:1023`）；scene-manager 收到 `home_zone_id = 0` 时计 `game_merge_fence_checks_total{site="travel", result="unreadable"}` 并记 WARN，
   按封锁处理（23 {3027}）——Java 建角恒写非 0 的 zone，0 只可能来自旧版 scene。
-- **Java 没有「闸门未配置」与「内部写路径不查闸门」的形态**：只有一个 Redis（DB 12）；xm-guild 没有内部 / GM 写入口（§0.8 N14）。基线这两处缺口在 Java 都不存在（D18）。
-- 指标 `xm_merge_fence_checks_total{site, result}`（§9）。
+- **Java 没有「闸门未配置」与「内部写路径不查闸门」的形态**：只有一个 Redis（DB 12）；game-guild 没有内部 / GM 写入口（§0.8 N14）。基线这两处缺口在 Java 都不存在（D18）。
+- 指标 `game_merge_fence_checks_total{site, result}`（§9）。
 
 ### 2.7 Java：残余窗口（D-H4）与宽限 / 复查
 
@@ -418,13 +418,13 @@ COMMIT;
 ```
 
 - 只走主键（`EXPLAIN` 必须为 PRIMARY，§13.2）；不碰 `owner_*` 三列。`T` 是整个 run 的同一时刻（`zone_merge_run.notice_ts_ms`，首次进入玩家步骤时取、续跑沿用）。
-- 「恰好 N 行」成立：xm-data 连接带 `useAffectedRows=true`（`application.yaml:16`），而 `zone_id` 从 src 变 dst、item 从 PLANNED 变终态都会改到列（§3.5）。
+- 「恰好 N 行」成立：game-data 连接带 `useAffectedRows=true`（`application.yaml:16`），而 `zone_id` 从 src 变 dst、item 从 PLANNED 变终态都会改到列（§3.5）。
 - **改写前的提示值** `merge_notice_ms` 记进 `zone_merge_item.notice_before_ms`：链式合服 3→2 之后玩家还没领取 3→2 的提示，又跑 2→1 再撤销 2→1 时，撤销要把 3→2 的提示还给他（§7.4 U5）。
 - 完整性同基线 `complete()`（`merge_run.go:894-901`）：清单玩家全部为 MOVED / ALREADY 才标步骤完成；**任一 GONE / ELSEWHERE → 步骤不置位、作业 FAILED `manifest_incomplete`**
   （保留围栏，样本 id 进结果）。Java 没有删角色、也没有别的 zone 写者，正常为 0；真出现就是 I-Z1 被破坏，要人工查清再 `resume`。撤销（U5）里的 GONE / ELSEWHERE 只计数、不阻断。
 - **ALREADY 的含义因对象而异**：玩家的改写与 item 回写在**同一事务**里，本 run 不可能留下「行已是 dst、item 仍 PLANNED」，所以玩家的 ALREADY 只可能来自外部写者（违反 I-Z1）——
-  照样记 ALREADY（撤销时一并改回），同时出 warn `player_already_at_dst`（应为 0）。帮会 / 商品的改写在属主进程、item 回写在 xm-data，两者不同事务，ALREADY 是「参与方已提交、
-  xm-data 没来得及记」后重试的正常结局。撤销对 MOVED ∪ ALREADY 一并改回（§7.7）。
+  照样记 ALREADY（撤销时一并改回），同时出 warn `player_already_at_dst`（应为 0）。帮会 / 商品的改写在属主进程、item 回写在 game-data，两者不同事务，ALREADY 是「参与方已提交、
+  game-data 没来得及记」后重试的正常结局。撤销对 MOVED ∪ ALREADY 一并改回（§7.7）。
 
 ---
 
@@ -447,14 +447,14 @@ COMMIT;
 
 | 基线写入面 | Java 对应 | 结论 |
 |---|---|---|
-| `zone_<N>_db` 玩家行（`backfill_home_zone.go:97-99`；`merge_run.go:73-80`） | 单库 `xm_java` 的 `player` / `player_state`；`player_state` 不含 zone（`xm-player-schema.sql:37-43`） | 不搬、不拷、不做撞号预检：player / guild / listing 的 id 都是全服号，不会撞 |
+| `zone_<N>_db` 玩家行（`backfill_home_zone.go:97-99`；`merge_run.go:73-80`） | 单库 `game` 的 `player` / `player_state`；`player_state` 不含 zone（`game-player-schema.sql:37-43`） | 不搬、不拷、不做撞号预检：player / guild / listing 的 id 都是全服号，不会撞 |
 | mapping Redis `player:zone:{id}`（`main.go:7-10`） | 列 `player.zone_id` | 改归属就是一条带条件的 UPDATE（§2.8） |
 | data Redis blob、`PlayerAllData` 缓存 | 没有玩家数据缓存层（`data-ops-spec.md:578`） | 不适用 |
 | 能力标记、回填、落点、搬库 | 没有按落点选库；`zone_id` NOT NULL | 不适用 |
 | `PlayerMergeStateComp`（blob 里的休眠字段） | 无 | 不移植，Java 不引用同步来的字段（§0.3） |
-| 审计流水 / 快照里的 zone | `transaction_log.zone_id`、`player_snapshot.zone_id`（`xm-data-schema.sql:24`、`:45`）记录**所在进程**的 zone | **不改写**：历史归因；7.2 的整区回档按 `player.zone_id` 选目标，合服后照样成立，快照 zone ≠ 归属区者单列提示（`data-ops-spec.md:545-546`，7.2 D10） |
+| 审计流水 / 快照里的 zone | `transaction_log.zone_id`、`player_snapshot.zone_id`（`game-data-schema.sql:24`、`:45`）记录**所在进程**的 zone | **不改写**：历史归因；7.2 的整区回档按 `player.zone_id` 选目标，合服后照样成立，快照 zone ≠ 归属区者单列提示（`data-ops-spec.md:545-546`，7.2 D10） |
 
-另外两条「天然无冲突」：角色名全服唯一（`xm-player-schema.sql:31`），帮会名全服唯一（`guild_tables.proto:32`），所以 `force_rename` 恒为 false；
+另外两条「天然无冲突」：角色名全服唯一（`game-player-schema.sql:31`），帮会名全服唯一（`guild_tables.proto:32`），所以 `force_rename` 恒为 false；
 每账号角色上限按账号全局计数（`PlayerMapper.java:33-34`；基线同样按账号，`createplayerlogic.go:157`），合服不会让账号超限。
 
 所以 Java 的「玩家数据」步骤只剩 §2.8 的改归属与 §6.3 的提示列，本节讲它与归属协议的交互。
@@ -465,9 +465,9 @@ COMMIT;
 |---|---|---|---|
 | `player` 归属三列（权威） | 清单（src）玩家没有 `owner_released = 0 ∧ owner_lease_until ≥ now − margin` 的 | block（最多等 `quiescence-wait` 60 s；dry-run 不等） | 释放就意味着最终写回已落库（`architecture.md:743` 起「玩家数据归属协议」），等价基线 P3–P6 的意图；在线的回合制战斗、5.2 交出在途、5.4 传送在途都表现为持有 |
 | 同上，dst 玩家 | dst 区持有中的玩家数与前 20 个样本 | **warn** `dst_players_online` | dst 玩家的行不改写；他们能碰到合服对象的写入口（建角 F1、进场 F2、传送 F4、帮会 F5、4.8 交易）全被 dst 的围栏挡住。基线 P5 / P6 也只查清单玩家（`preflight.go:244-268`）。要求 dst 全员离线在多区生产里不可操作（dst 玩家可能正经 5.4 在别区游玩，合服作业又不踢人，Q16、Q26） |
-| `xm:location:<pid>` | 清单玩家 `PlayerLocationDirectory.statusesAsync`（`:217`）不是 `ONLINE` / `RECONNECT_LEASE` / `ERROR` | block（同上等待；`ERROR` 标 `INFRA:`） | 5.4 写侧约束 ③（`zone-travel-spec.md:463`）；TTL 60 s / 30 s（`PlayerLocationDirectory.java:46-49`），传送待落点 `l` 不超过票据剩余（≤ 300 s） |
-| `xm:presence:<pid>` | 清单玩家 `PlayerPresenceDirectory.findEachStrictAsync`（`:280`）全为 `ABSENT` | block（`ERROR` 标 `INFRA:`） | 防 gate 侧还挂着会话；**禁用** fail-open 的 `findAll` / `findAllAsync`（`:121`、`:165`，`decode` 把损坏条目当不在线，`:323-338`） |
-| 节点目录 | `xm:nodes:gate:<src>`、`xm:nodes:scene:<src>` 为空；dst 只报 info | block | 等价 P2；src 无 gate 才堵死 src 建角，src 无 scene 才能退役频道计划 |
+| `game:location:<pid>` | 清单玩家 `PlayerLocationDirectory.statusesAsync`（`:217`）不是 `ONLINE` / `RECONNECT_LEASE` / `ERROR` | block（同上等待；`ERROR` 标 `INFRA:`） | 5.4 写侧约束 ③（`zone-travel-spec.md:463`）；TTL 60 s / 30 s（`PlayerLocationDirectory.java:46-49`），传送待落点 `l` 不超过票据剩余（≤ 300 s） |
+| `game:presence:<pid>` | 清单玩家 `PlayerPresenceDirectory.findEachStrictAsync`（`:280`）全为 `ABSENT` | block（`ERROR` 标 `INFRA:`） | 防 gate 侧还挂着会话；**禁用** fail-open 的 `findAll` / `findAllAsync`（`:121`、`:165`，`decode` 把损坏条目当不在线，`:323-338`） |
+| 节点目录 | `game:nodes:gate:<src>`、`game:nodes:scene:<src>` 为空；dst 只报 info | block | 等价 P2；src 无 gate 才堵死 src 建角，src 无 scene 才能退役频道计划 |
 | 每批改写 | 同一事务 `FOR UPDATE` 锁行后再判归属三列 | 不符整批回滚，作业 FAILED，保留围栏 | 把「预检之后又被夺权」压到零：行锁释放前 login 的夺权 UPDATE（`PlayerMapper.java:53-58`）被阻塞，而 F2 已先于夺权拒绝 |
 
 - 实现要点：先用一条 SQL 找出两区「持有中」的玩家名单（`listHeldInZones`，走 `idx_player_zone` 后回表过滤），src 的进 block 判定、dst 的只进 warn；等待期间只按主键轮询 src 名单（每 2 s），
@@ -485,7 +485,7 @@ COMMIT;
 | 3.3 断线重连租约 | 写回已释放，但 `l` 记录留 30 s（`PlayerLocationDirectory.java:49`） | 位置检查等它过期 |
 | 5.4 传送第二条腿 | `l` 记录，TTL 为票据剩余（≤ 300 s，`zone-travel-spec.md:437`） | 超过 60 s 等待上限被拒，稍后重跑 |
 | 6.3 战斗中在线 | 持有、冻结 | 归属三列 block |
-| 6.3 战斗中断线 | scene 照常写回、释放；锁 `xm:battle:{<pid>}:lock` 与待结算 `:settlement` 留在离线玩家身上（锁是承重的，`scene-battle-spec.md:49-55`、`:546`） | 不阻断，只报 warn：按 pid 存、不带归属区，battle 是不分 zone 的全局池（`battle-node-spec.md:242`），结算按位置记录投递，合服后照常生效 |
+| 6.3 战斗中断线 | scene 照常写回、释放；锁 `game:battle:{<pid>}:lock` 与待结算 `:settlement` 留在离线玩家身上（锁是承重的，`scene-battle-spec.md:49-55`、`:546`） | 不阻断，只报 warn：按 pid 存、不带归属区，battle 是不分 zone 的全局池（`battle-node-spec.md:242`），结算按位置记录投递，合服后照常生效 |
 | 7.2 作业 | 经 `AdminOwnership` 持有归属（`data-ops-spec.md:389-405`） | 归属三列 block；另有 `ops_active` 单飞与 `zone_merging`（§3.7） |
 | 僵尸写者（`owner_released = 0` 但租约过期） | 算静止 | 每批复判；见 §10.1 第 6 条 |
 
@@ -499,13 +499,13 @@ COMMIT;
 
 ### 3.5 受影响行数的口径
 
-- **xm-data**：连接串带 `useAffectedRows=true`（`xm-data/src/main/resources/application.yaml:16`；7.2 已为 ODKU 计数加它，`data-ops-spec.md:853`），UPDATE 返回「实际改了的行数」。
+- **game-data**：连接串带 `useAffectedRows=true`（`game-data/src/main/resources/application.yaml:16`；7.2 已为 ODKU 计数加它，`data-ops-spec.md:853`），UPDATE 返回「实际改了的行数」。
   合服的状态迁移都会改到列（`status` 前进、`state` 从 PLANNED 变终态、`zone_id` 从 src 变 dst），「恰好 N 行」成立。
   **例外**是幂等进度更新（如 `steps_done = steps_done | bit` 在续跑时可能 0 行）：一律同时写严格递增的 `updated_ms = max(now, 上次 + 1)`，条件带 `status = APPLYING AND last_job_id = :job`；
   仍是 0 行就重读核对，不直接判失败。
-- **xm-guild / xm-trade**：同样 `useAffectedRows=true`（`xm-guild/.../application.yaml:31`；`xm-trade/.../application.yaml:23`）。参与方的改写条件是 `zone = from`，写入值 to ≠ from，计数精确。
-- **xm-login**：没有这个开关（`application.yaml:21`），返回匹配行数。`consumeMergeNotice` 把大于 0 的值改成 0，两种口径结果相同。
-- **共享库 `PlayerStore` 的既有方法**：`renewOwnerLeases` 的注释按「匹配行数」写（`PlayerMapper.java:132`），在 xm-data 上调用时口径不同——这是 7.2b 的事项，合服不调它。
+- **game-guild / game-trade**：同样 `useAffectedRows=true`（`game-guild/.../application.yaml:31`；`game-trade/.../application.yaml:23`）。参与方的改写条件是 `zone = from`，写入值 to ≠ from，计数精确。
+- **game-login**：没有这个开关（`application.yaml:21`），返回匹配行数。`consumeMergeNotice` 把大于 0 的值改成 0，两种口径结果相同。
+- **共享库 `PlayerStore` 的既有方法**：`renewOwnerLeases` 的注释按「匹配行数」写（`PlayerMapper.java:132`），在 game-data 上调用时口径不同——这是 7.2b 的事项，合服不调它。
 
 ### 3.6 `owner_epoch` 与撤销
 
@@ -517,7 +517,7 @@ COMMIT;
 
 | 写者 | 互斥方式 |
 |---|---|
-| 7.2 回档 / 回收 / 欠款（xm-data 夺权） | 共用 `ops_active` 单飞（`data-ops-spec.md:823`、`:829`）。**单飞只管「同时在跑」**：合服作业 FAILED、run 停在 APPLYING / UNMERGING 时单飞已空，7.2 作业可以受理。所以 7.2 作业受理时若目标玩家的 `zone_id`（整区作业为目标 zone）属于某个未终结 run 的 src / dst → 409 `zone_merging`；run 为 APPLIED 但还没开服时 7.2 对清单玩家的写会让 `owner_epoch` 前进，之后撤销按 `played_since_merge` 拒绝（预期行为，手册写明） |
+| 7.2 回档 / 回收 / 欠款（game-data 夺权） | 共用 `ops_active` 单飞（`data-ops-spec.md:823`、`:829`）。**单飞只管「同时在跑」**：合服作业 FAILED、run 停在 APPLYING / UNMERGING 时单飞已空，7.2 作业可以受理。所以 7.2 作业受理时若目标玩家的 `zone_id`（整区作业为目标 zone）属于某个未终结 run 的 src / dst → 409 `zone_merging`；run 为 APPLIED 但还没开服时 7.2 对清单玩家的写会让 `owner_epoch` 前进，之后撤销按 `played_since_merge` 拒绝（预期行为，手册写明） |
 | 5.2 交出、5.4 传送 | 要求在线；归属静止判据排除；在途的待落点 `l` 让预检等待；F4 拒新的传送（23 {3027}） |
 | login 夺权 | F2 先拒；每批 `FOR UPDATE` 兜底（行锁让夺权 UPDATE 等待，提交后围栏已经在了） |
 | scene 在线存盘 / 最终写回 / 交出 | 不写 `zone_id`；src scene 目录为空 |
@@ -541,17 +541,17 @@ COMMIT;
 
 | 表.列 | 属主 | 合服动作 | 出处 |
 |---|---|---|---|
-| `player.zone_id` | xm-player-store（共享库） | **改写**（xm-data，§2.8） | `xm-player-schema.sql:14` |
-| `guild.zone_id` | xm-guild | **改写**（参与方） | `guild_tables.proto:45`（`idx_guild_0` `:33`） |
-| `trade_listing.market_zone` | xm-trade | **改写**（参与方） | `trade_tables.proto:42`（`idx_trade_listing_0` 以它打头，`:34`） |
-| `trade_listing.seller_zone_at_listing` | xm-trade | 保留（审计原值） | `trade_tables.proto:43` |
-| `transaction_log.zone_id`、`player_snapshot.zone_id` | xm-data | 保留（所在进程 zone，历史） | `xm-data-schema.sql:24`、`:45` |
-| `zone_config.zone_id`、`zone_whitelist.zone_id` | xm-gateway 建表、xm-data 运维写 | 保留；src 的 `manual_status` 由作业改 CLOSED（§7.3 A9） | `xm-gateway-schema.sql:5-24` |
-| `zone_merge_run.src_zone / dst_zone` | xm-data（7.3 新） | 保留（合服自身记录） | §7.6 |
+| `player.zone_id` | game-player-store（共享库） | **改写**（game-data，§2.8） | `game-player-schema.sql:14` |
+| `guild.zone_id` | game-guild | **改写**（参与方） | `guild_tables.proto:45`（`idx_guild_0` `:33`） |
+| `trade_listing.market_zone` | game-trade | **改写**（参与方） | `trade_tables.proto:42`（`idx_trade_listing_0` 以它打头，`:34`） |
+| `trade_listing.seller_zone_at_listing` | game-trade | 保留（审计原值） | `trade_tables.proto:43` |
+| `transaction_log.zone_id`、`player_snapshot.zone_id` | game-data | 保留（所在进程 zone，历史） | `game-data-schema.sql:24`、`:45` |
+| `zone_config.zone_id`、`zone_whitelist.zone_id` | game-gateway 建表、game-data 运维写 | 保留；src 的 `manual_status` 由作业改 CLOSED（§7.3 A9） | `game-gateway-schema.sql:5-24` |
+| `zone_merge_run.src_zone / dst_zone` | game-data（7.3 新） | 保留（合服自身记录） | §7.6 |
 
 - 无 zone 列、合服不动的表：`player_state`；`guild_member` / `guild_application` / `guild_player_state` / 资产 outbox / 日计数（`guild_tables.proto:54-196`）；`trade_favorite`（`trade_tables.proto:61-65`）；好友四表。
 - Redis 侧带 zone 的组队记录（`team_record.proto` 的队伍 zone 与成员 zone）由活队伍阻断覆盖，不进登记表。
-- **守护测试**（xm-data `ZoneColumnRegistryTest`）：从仓库根扫描各模块 `src/main/resources/db/*.sql` 与带 `proto2mysql.table_name` 的 `src/main/proto/**/*.proto`，找出名字匹配
+- **守护测试**（game-data `ZoneColumnRegistryTest`）：从仓库根扫描各模块 `src/main/resources/db/*.sql` 与带 `proto2mysql.table_name` 的 `src/main/proto/**/*.proto`，找出名字匹配
   `(^|_)zone(_|$)` 的列；每一列必须在登记表里归为「改写」或「保留」，否则失败。基线的风险正是「表清单与真实库不一致时合服会漏表」（`inventory/tools.md:288` 一类），
   这条测试把它挡在构建期；4.6 帮会活动、4.8 交易写侧新增表时被强制做出合服决定。
 
@@ -612,53 +612,53 @@ COMMIT;
 
 ### 4.6 Java：帮会、聚宝斋、区榜、频道计划
 
-**帮会（xm-guild 实现 `ZoneMergeParticipantService`，group `guild`，`DubboGroups.java:24`）**
+**帮会（game-guild 实现 `ZoneMergeParticipantService`，group `guild`，`DubboGroups.java:24`）**
 
-- **执行线程**：全部投递到新的 `guild-maintenance` 单线程执行器、返回 future，不占 guild-worker 与 Dubbo 线程（AGENTS.md §3）。鉴权：调用方 MAC `XM_DUBBO_SECRET`（同 `GuildInternalService` 的口径）。
+- **执行线程**：全部投递到新的 `guild-maintenance` 单线程执行器、返回 future，不占 guild-worker 与 Dubbo 线程（AGENTS.md §3）。鉴权：调用方 MAC `GAME_DUBBO_SECRET`（同 `GuildInternalService` 的口径）。
 - `rezoneObjects(run, from, to, ids ≤ 500)`：先 `ZoneMergeFences.checkHolder(run, from, to)`，不成立回 `FENCE_MISSING`、零变更（同基线 `RemapHomeZoneForMerge`「没有围栏就拒绝」，`router.go:474-500`）。
-  然后每个 id 一个 `BackgroundTx.run(op, deadline, attempts = 5, body)` 短事务（xm-guild 自己的数据源：RC、`innodb_lock_wait_timeout=1`、`socketTimeout=4000`，`application.yaml:31`；
+  然后每个 id 一个 `BackgroundTx.run(op, deadline, attempts = 5, body)` 短事务（game-guild 自己的数据源：RC、`innodb_lock_wait_timeout=1`、`socketTimeout=4000`，`application.yaml:31`；
   1213 / 9007 / 1205 整体重跑，退避 10 ms 起封顶 200 ms，`BackgroundTx.java:115-148`、`:170-182`、`:222-238`）：`SELECT zone_id FROM guild WHERE guild_id = ? FOR UPDATE` →
   无行 GONE / 等于 to 为 ALREADY / 等于 from 则 `UPDATE guild SET zone_id = :to WHERE guild_id = ? AND zone_id = :from` 为 MOVED / 其他 ELSEWHERE。锁序是主键在前，与在线写者一致（同 `guild_step.go:31-37`）。
 - **严格失效**：整批改完后对 MOVED ∪ ALREADY 调新增的 `GuildCacheInvalidator.invalidateStrict(guildIds, deadline)`（与 `afterCommit` 同一套「代次换成唯一值 + 删数据键」，**失败即抛**）。
-  失败 → 整批回 `ERROR`，xm-data 重试这一批（已改的行变 ALREADY，失效再做一遍，幂等）。不能用现有 `afterCommit`：它「永不抛」、后台 3 s 后放弃（`GuildCacheInvalidator.java:22-38`），
+  失败 → 整批回 `ERROR`，game-data 重试这一批（已改的行变 ALREADY，失效再做一遍，幂等）。不能用现有 `afterCommit`：它「永不抛」、后台 3 s 后放弃（`GuildCacheInvalidator.java:22-38`），
   而快照里存着 zone（`RedisKeys.java:162-169`）、TTL 30 min（`GuildProperties.java:45`），查帮用快照 zone 判可见性（`GuildService.java:174`）——不失效就是客户端可见故障（dst 成员查不到合过来的帮，14001）。
 - `finishRezone(run, from, to)`：核对持有者 → 在 `guild-maintenance` 上执行 `GuildRanks.rebuild(...)`（与启动时同款，`GuildConfiguration.java:269-281`；锁内、等锁上限 5 s，`GuildRanks.java:222-232`、
   `GuildLimits.java:93-105`）。换榜时删除旧区榜、重写区索引，src 区榜与索引成员自然消失；全服榜内容不变。幂等，可任意重复；重建抛异常（等锁超时、锁中途失效、临时键不完整）→ 回 ERROR。
 - `preflight(MERGE)`：`SELECT COUNT(*) FROM guild a JOIN guild b ON a.name_norm = b.name_norm WHERE a.zone_id = :src AND b.zone_id = :dst` 必须为 0（契约断言，同基线 N）；
   构建期另有单测钉住 `guild_tables.proto:32` 的 `unique_key = "name_norm"`。
-- `preflight(UNMERGE, since, guildIds)`：清单帮会里 `join_time_ms ≥ since` 的成员数必须为 0（`guild_tables.proto:77`），否则 `membership_crossed`（§5.6）。清单帮会超过 1000 个时 xm-data 分页多次调用，
+- `preflight(UNMERGE, since, guildIds)`：清单帮会里 `join_time_ms ≥ since` 的成员数必须为 0（`guild_tables.proto:77`），否则 `membership_crossed`（§5.6）。清单帮会超过 1000 个时 game-data 分页多次调用，
   任一页不过即拒。`since` 取 `run.created_ms`，比围栏立起略早，只会多拒（fail-closed）。
-- `listZoneObjects` / `countZoneObjects`：走 `idx_guild_0`；`countZoneObjects` 同时回该 zone 区榜的 `ZCARD` 与是否在区索引里（供验证，xm-data 不读帮会的 Redis 键）。
-- **不用动的键**：`xm:guild:{p:<pid>}:gid`（不带 zone）、申请推送冷却、资产指令 outbox（按位置记录找 scene，与 zone 无关）。
-- **没有内部 / GM 写路径要防**：xm-guild 的 Dubbo 只导出客户端消息服务与只读的 `GuildInternalService`，基线 H7 一类缺口在 Java 不存在；残留复查只是保险。
+- `listZoneObjects` / `countZoneObjects`：走 `idx_guild_0`；`countZoneObjects` 同时回该 zone 区榜的 `ZCARD` 与是否在区索引里（供验证，game-data 不读帮会的 Redis 键）。
+- **不用动的键**：`game:guild:{p:<pid>}:gid`（不带 zone）、申请推送冷却、资产指令 outbox（按位置记录找 scene，与 zone 无关）。
+- **没有内部 / GM 写路径要防**：game-guild 的 Dubbo 只导出客户端消息服务与只读的 `GuildInternalService`，基线 H7 一类缺口在 Java 不存在；残留复查只是保险。
 
-**聚宝斋（xm-trade 实现同一接口，group `trade`，`DubboGroups.java:27`，端口 20887）**
+**聚宝斋（game-trade 实现同一接口，group `trade`，`DubboGroups.java:27`，端口 20887）**
 
-- `rezoneObjects`：先 `checkHolder(run, from, to)`，不成立回 `FENCE_MISSING`；然后在现有存储线程池上逐条短事务（xm-trade 数据源：RC、`innodb_lock_wait_timeout=2`，`application.yaml:23`）：
+- `rezoneObjects`：先 `checkHolder(run, from, to)`，不成立回 `FENCE_MISSING`；然后在现有存储线程池上逐条短事务（game-trade 数据源：RC、`innodb_lock_wait_timeout=2`，`application.yaml:23`）：
   `SELECT market_zone … FOR UPDATE` 分类 → `UPDATE trade_listing SET market_zone = :to WHERE listing_id = ? AND market_zone = :from`；1213 / 1205 整体重跑至多 5 次。`seller_zone_at_listing`、`trade_favorite` 不动。
-- xm-trade 已依赖 xm-discovery 并装配了 Redisson（listing_id 发号租约，`TradeConfiguration.java:139`），读围栏不新增依赖；这是 xm-trade 第一次读业务相关的 Redis 键，trade-spec「不存任何业务键」仍成立（只读）。
+- game-trade 已依赖 game-discovery 并装配了 Redisson（listing_id 发号租约，`TradeConfiguration.java:139`），读围栏不新增依赖；这是 game-trade 第一次读业务相关的 Redis 键，trade-spec「不存任何业务键」仍成立（只读）。
 - `finishRezone` 为空操作（4.7 没有缓存，`trade-spec.md:757`）；`preflight` 4.7 为空。
 - dev 播种 `SeedListingController`（`/admin/trade/seed-listing`，非 dev / test 回 403）不读围栏，同基线 P1；残留复查兜底。
 - **登记给 4.8 的约束**（对应基线 `trade_step.go:23-36`）：上架、下单、交付前接 F 检查点；有了缓存就在 `rezoneObjects` 里补失效；`preflight(UNMERGE)` 必须拒绝「清单商品自 `since` 起有订单」；
   新表的 zone 列进 §4.1 登记表。
 
 **区榜**：只有帮会榜，由 `finishRezone` 重建；清单里不存榜单成员、没有 `ZADD NX` 的取舍、没有「源榜为空就不写」的分支。验证改为「重建后 src 区榜不存在、dst 的 `ZCARD == count`」，按构造成立。
-匹配评分 ZSET `xm:{match}:rank:*` 全服共用，不动（`match-spec.md:986`）。
+匹配评分 ZSET `game:{match}:rank:*` 全服共用，不动（`match-spec.md:986`）。
 
 **源区频道计划退役（§7.3 A9，缺省开、不致命）**
 
-基线步骤 6 要清的东西在 Java 里大多不存在（§0.3）；唯一会永久残留的是 `xm:world:zones` 里的 src（无 TTL、只增，`RedisKeys.java:274-281`）以及 `xm:world:{z:<src>}:{ch,desired,cooldown,ver}`。
+基线步骤 6 要清的东西在 Java 里大多不存在（§0.3）；唯一会永久残留的是 `game:world:zones` 里的 src（无 TTL、只增，`RedisKeys.java:274-281`）以及 `game:world:{z:<src>}:{ch,desired,cooldown,ver}`。
 不清的话，scene-manager 的协调器会对 src 永远竞选、续期领导锁（`WorldChannelCoordinator.java:122-158`：`tick` 对 `store.zones()` 逐个 `computeIfAbsent`，`renewLeaders` 续内存表里的每个 zone，从不移除）。
 
 | 步骤 | 执行者 | 动作 |
 |---|---|---|
-| 1 | xm-data（A9） | 前置 `xm:nodes:scene:<src>` 为空（否则跳过、warn）；调新增的 `WorldChannelStore.unregisterZone(src)`（`SREM xm:world:zones src`）。`WorldChannelStore` 是 `xm:world:*` 的唯一读写入口（`WorldChannelStore.java:6-24`），xm-data 经它写，不另拼键 |
+| 1 | game-data（A9） | 前置 `game:nodes:scene:<src>` 为空（否则跳过、warn）；调新增的 `WorldChannelStore.unregisterZone(src)`（`SREM game:world:zones src`）。`WorldChannelStore` 是 `game:world:*` 的唯一读写入口（`WorldChannelStore.java:6-24`），game-data 经它写，不另拼键 |
 | 2 | scene-manager 协调器（tick 线程） | `tick` 读到的 `zones()` 里没有、但内存表里有的 zone：若本副本持锁 → 用持有的令牌调新增的 `WorldChannelStore.retireZone(zone, token)`；不持锁 → `tryAcquireLeader` 试一次，拿到就同样退役，拿不到（别的副本持有）就只移出内存表。之后移出内存表、清 gauge |
 | 3 | `retireZone` Lua（`{z:<zone>}` 同槽） | 领导锁的值是本令牌才执行：DEL `ch`、`desired`、`cooldown`，按 `ch` 里的 scene_id DEL 对应的 `resv:<scene_id>`（本来就带 TTL，顺手删、不 SCAN），最后 DEL `leader`；**`ver` 保留**（只增不减、不过期，下次重建取 max(旧值 + 1, TIME)，`RedisKeys.java:249-256`）；令牌不符返回 0、什么都不删 |
-| 4 | xm-data（A9） | 轮询 `WorldChannelStore.readPlan(src)` 频道表为空且领导锁不存在（新增只读 `leaderPresent(zone)`），上限 = 领导锁 TTL（30 s，`WorldChannelProperties.java:21`）+ 一拍（5 s）；超时只记 warn `retire_failed`、步骤位 `PLAN_RETIRED` 不置，`resume` 可重做 |
-| — | 全局 | `xm:node-id-epoch:*:<src>:*` **绝不删**（代次必须跨租约单调，`RedisKeys.java:20-26`）；`xm:location`、`xm:presence`、`xm:nodes:*:<src>`、排空 / 疏散标记、登录排队 / 限流键、推送频道不动（带 TTL 或不可达） |
+| 4 | game-data（A9） | 轮询 `WorldChannelStore.readPlan(src)` 频道表为空且领导锁不存在（新增只读 `leaderPresent(zone)`），上限 = 领导锁 TTL（30 s，`WorldChannelProperties.java:21`）+ 一拍（5 s）；超时只记 warn `retire_failed`、步骤位 `PLAN_RETIRED` 不置，`resume` 可重做 |
+| — | 全局 | `game:node-id-epoch:*:<src>:*` **绝不删**（代次必须跨租约单调，`RedisKeys.java:20-26`）；`game:location`、`game:presence`、`game:nodes:*:<src>`、排空 / 疏散标记、登录排队 / 限流键、推送频道不动（带 TTL 或不可达） |
 
-- `retireZone` 不在 Lua 里读 `xm:world:zones`（不同槽，上 Cluster 会跨槽）；「集合里已没有它」由协调器在同一拍读到的 `zones()` 保证。src 的 scene 节点在退役后又被拉起会重新 `registerZone` 并重建计划
+- `retireZone` 不在 Lua 里读 `game:world:zones`（不同槽，上 Cluster 会跨槽）；「集合里已没有它」由协调器在同一拍读到的 `zones()` 保证。src 的 scene 节点在退役后又被拉起会重新 `registerZone` 并重建计划
   （`scene-channels-spec.md:796-798` §4.10.5）——预检已要求 src 无 scene 节点，事后发生只是垃圾，verify 报 warn。
 - 全部 scene-manager 副本都在 SREM 之后才重启时，没有副本的内存表里有 src，计划键留作垃圾：健康检查跳过没有节点的 zone（`WorldChannelsHealthIndicator.java:38-46`），不影响正确性，verify 报 warn。
 - 撤销不恢复：src 的 scene 启动时会 `registerZone` 并拉取 / 重建计划。5.3 选了「节点自有 + 目录登记」，没有实例键要清。
@@ -669,7 +669,7 @@ COMMIT;
 |---|---|---|---|---|
 | 好友（`friend` / `friend_request` 等表） | 无 zone 列；**不写**；审计各出一条 info 计数行，库表查不到报 INFRA | 不写、不计数（D17） | `FriendEntry.zone_id`（`friend.proto:68`）每次读时现查归属区，自动显示 dst；在线目录只返回与调用者同归属区的玩家，合服后两区玩家互相可见 | 基线 `audit_resources.go:488-592`、`go/friend/.../friend_profiles.go:73-79`、`online_directory.go:100-108`；Java `FriendService.java:321`、`OnlineDirectory.java:255` |
 | 好友缓存 | 只存关系 | 只存关系 | — | 基线 `friend_repo.go:280-296`；Java `RedisKeys.java:78-107` |
-| 聊天 | 世界频道全服一条，私聊按玩家对 | 同；`xm:chat:{world}:log` | 无变化 | `chat_logic.go:8-15`；`RedisKeys.java:116-119` |
+| 聊天 | 世界频道全服一条，私聊按玩家对 | 同；`game:chat:{world}:log` | 无变化 | `chat_logic.go:8-15`；`RedisKeys.java:116-119` |
 | 组队 | 记录存队伍 zone 与成员 zone，**不迁移**；P7：索引 tid ≠ 0 且 `team:rec` 存在即拒，孤儿索引不阻断，读错误按拒绝；无管理员解散入口，runbook 明令不要手工 DEL `team:*` | 同口径阻断：`TeamMembershipReader.readAsync`（`:69`）一段只读 Lua 原子读索引 + 投影；投影存在即在队（记录与投影同一段脚本写、同 TTL、同删，`TeamScript.java:92-97`，所以不需要基线的 `EXISTS rec`）；`KEY_MISSING` / tid = 0 / 投影缺失（孤儿索引）放行；异常完成（损坏 / 读失败）fail-closed；不改写记录 | 合服前两区玩家组队回 4020（`team_error_tip.proto:52`）；合服后同区、可组队；新建队伍按新归属记 zone | `preflight.go:270-350`；`runbook:466-474`；`TeamMembershipReader.java:13-33`、`:80-106` |
 | 匹配票据 / 评分 | 票据有 zone_id，只用于观测；评分 ZSET 全服共用；工具不读不写 | 只报 info | — | `queue.go:56-58`；`keys.go:17`、`:70`；`match-spec.md:359`、`:986` |
 | 战斗锁 / 待结算 | — | 只报 warn（计数），理由见 §3.3 在途状态表 | — | `scene-battle-spec.md:49-55`、`:546`；`battle-node-spec.md:242` |
@@ -694,17 +694,17 @@ COMMIT;
 
 | 键 | 写者 | 合服 | 撤销 |
 |---|---|---|---|
-| `xm:{merge}:fence:<zone>`（新） | xm-data | 立 / 续 / 补回 / 释放 | 同 |
-| `xm:guild:{g:<id>}:snap(:gen)`（`RedisKeys.java:162-169`） | xm-guild | 参与方严格失效 | 同 |
-| `xm:guild:{rank}:all / zone:<z> / zones / lock / tmp:*`（`:187-221`） | xm-guild | `finishRezone` 全量重建（`:all` 内容不变） | 同 |
-| `xm:guild:{p:<pid>}:gid`、申请推送冷却 | xm-guild | 不动 | 不动 |
-| `xm:{team}:*`（`:138-160`） | xm-team | 只读（预检） | 只读 |
-| `xm:world:zones`（`:274-281`） | scene 启动时 `registerZone`；7.3 起合服作业 `unregisterZone` | SREM src | 不恢复（src 的 scene 启动时重新登记） |
-| `xm:world:{z:<src>}:{ch,desired,cooldown,leader,resv:*}` | 领导者（`WorldChannelStore`） | 领导者 `retireZone` 删除 | 不恢复 |
-| `xm:world:{z:<src>}:ver` | 领导者 | **保留** | — |
-| `xm:presence`、`xm:location`、`xm:nodes:*`（`:29`、`:45`、`:54`） | gate / scene / 节点 | 只读（预检） | 只读 |
-| `xm:node-id-epoch:*`（`:20-26`） | 节点 | **绝不删** | 同 |
-| `xm:friend:*`、`xm:chat:*`、`xm:{match}:*`、`xm:battle:{<pid>}:*`、`xm:owner-takeover`、`xm:gate-push:*`、`xm:scene-evacuating:*`、`xm:login-queue*:<z>`、`xm:rl:zone:<z>`、登录令牌 / 设备、产出封禁、热关停 | 各自 | 不动：带 TTL、不带 zone，或 src 置 CLOSED 后不可达 | 不动 |
+| `game:{merge}:fence:<zone>`（新） | game-data | 立 / 续 / 补回 / 释放 | 同 |
+| `game:guild:{g:<id>}:snap(:gen)`（`RedisKeys.java:162-169`） | game-guild | 参与方严格失效 | 同 |
+| `game:guild:{rank}:all / zone:<z> / zones / lock / tmp:*`（`:187-221`） | game-guild | `finishRezone` 全量重建（`:all` 内容不变） | 同 |
+| `game:guild:{p:<pid>}:gid`、申请推送冷却 | game-guild | 不动 | 不动 |
+| `game:{team}:*`（`:138-160`） | game-team | 只读（预检） | 只读 |
+| `game:world:zones`（`:274-281`） | scene 启动时 `registerZone`；7.3 起合服作业 `unregisterZone` | SREM src | 不恢复（src 的 scene 启动时重新登记） |
+| `game:world:{z:<src>}:{ch,desired,cooldown,leader,resv:*}` | 领导者（`WorldChannelStore`） | 领导者 `retireZone` 删除 | 不恢复 |
+| `game:world:{z:<src>}:ver` | 领导者 | **保留** | — |
+| `game:presence`、`game:location`、`game:nodes:*`（`:29`、`:45`、`:54`） | gate / scene / 节点 | 只读（预检） | 只读 |
+| `game:node-id-epoch:*`（`:20-26`） | 节点 | **绝不删** | 同 |
+| `game:friend:*`、`game:chat:*`、`game:{match}:*`、`game:battle:{<pid>}:*`、`game:owner-takeover`、`game:gate-push:*`、`game:scene-evacuating:*`、`game:login-queue*:<z>`、`game:rl:zone:<z>`、登录令牌 / 设备、产出封禁、热关停 | 各自 | 不动：带 TTL、不带 zone，或 src 置 CLOSED 后不可达 | 不动 |
 
 ---
 
@@ -764,7 +764,7 @@ COMMIT;
 
 - `POST /admin/zone-merges {dryRun: true}` → 作业 `ZONE_MERGE`（`request.dryRun = true`）：执行 §7.3 的 A1、A3、A4，**不立围栏、不写清单、不改任何数据**，只写 `ops_job` 行与事件。
   结果摘要给出 N（src 玩家数）、各计数、全部 findings（code、severity、count、≤ 20 个样本 id）、verdict（PASS / BLOCK / INFRA）。
-- CLI `MergeZone audit` 与 `MergeZone plan` 都走这个作业（不另设同步审计接口：50 万人的逐人检查不能占 Tomcat 线程）。dry-run 不需要 `xm.data.ops.enabled`（同 7.2 回档 dry-run）。
+- CLI `MergeZone audit` 与 `MergeZone plan` 都走这个作业（不另设同步审计接口：50 万人的逐人检查不能占 Tomcat 线程）。dry-run 不需要 `game.data.ops.enabled`（同 7.2 回档 dry-run）。
 - 彩排（T-7 / T-1）时两区还开着：`zone_open`、`src_nodes_alive`、`zone_not_quiescent` 必然是 block，verdict 必然 BLOCK、CLI 退出 1。手册写明彩排看的是**其余** findings 与 N；
   T-0 两区进维护、停服之后再跑一次 plan，那一次必须 PASS。
 - 基线 dry-run 写 `<path>.dryrun.json` 并需要两道拒读（A3，`manifest.go:323-346`）；Java 的计划不产生任何可被引用的清单，这类风险不存在（D3）。
@@ -841,7 +841,7 @@ verify 在 Tomcat 线程上同步执行，几条按清单 join 的 SQL（50 万�
 ### 6.2 区服列表与源区文案
 
 - 作业的退役步骤把 `zone_config.src` 改为 `manual_status = 2 CLOSED`，`maintenance_msg` 取配置模板（缺省「本区已合并至 {dst_name}（{dst} 区），请在区服列表中选择该区登录」，
-  渲染后 ≤ 256 字符，`xm-gateway-schema.sql:10`），区服列表随 CLOSED 下发（`ServerListController.java:51`），1 s 内生效（`ZoneDirectory` 快照）。
+  渲染后 ≤ 256 字符，`game-gateway-schema.sql:10`），区服列表随 CLOSED 下发（`ServerListController.java:51`），1 s 内生效（`ZoneDirectory` 快照）。
 - `ZoneAdminController` 拒绝把已退役的 src 改回 OPEN / PREVIEW（409 `zone_retired`），也拒绝在 run 未终结时打开 dst（409 `zone_merging`）（§7.11）。
 - 基线 runbook 让 src「保持维护」，Java 由作业置 CLOSED：客户端可见差异 D13。
 
@@ -864,7 +864,7 @@ verify 在 Tomcat 线程上同步执行，几条按清单 join 的 SQL（50 万�
 
 ### 6.4 RedirectOnEnter（124）
 
-- 配置 `xm.login.redirect-on-enter`，缺省 false（同基线 `login.yaml:211`）。
+- 配置 `game.login.redirect-on-enter`，缺省 false（同基线 `login.yaml:211`）。
 - 打开时，在 5.4 去向表「位置记录没有 / 墓碑」那一格（`zone-travel-spec.md:758`）新增分支：`row.zone_id ∉ {0, 当前 zone}` → `redirectToZone(row.zone_id, pid)` →
   回 `EnterGameResponse{player_id}` + `RedirectToGate` 指令，不夺权、不分配；调用失败 / 超时 / `tip ≠ 0` → 退回本 zone 首登。等价基线「首登且无在场 scene 才按归属区送回」
   （`config.go:211-215`；`homezone.go:245-275`）。
