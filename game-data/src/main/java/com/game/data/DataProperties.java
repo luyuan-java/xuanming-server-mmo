@@ -1,5 +1,6 @@
 package com.game.data;
 
+import com.game.audit.KafkaNames;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
@@ -27,7 +28,10 @@ public record DataProperties(
         @DefaultValue Recall recall,
         @DefaultValue Rollback rollback) {
 
-    /** 一个消费者的参数（各 topic 缺省值不同，所以每个 topic 一个记录类型）。 */
+    /**
+     * 一个消费者的参数（各 topic 缺省值不同，所以每个 topic 一个记录类型）。消费组的缺省值随部署命名空间（{@code <ns>-data-…}，经 {@link KafkaNames}），
+     * 所以不写在 {@code @DefaultValue} 上（注解值只能是常量），而是在紧凑构造器里把「没配」（null）换成缺省；显式配的空白照旧拒绝。
+     */
     public interface ConsumerSettings {
 
         /** 消费组。 */
@@ -47,23 +51,34 @@ public record DataProperties(
         }
     }
 
+    /** @param group 消费组；没配时缺省 {@code <ns>-data-transaction-log}（缺省命名空间下即 {@code game-data-transaction-log}） */
     public record TransactionLogConsumer(
-            @DefaultValue("game-data-transaction-log") String group,
+            String group,
             @DefaultValue("500") int maxPollRecords,
             @DefaultValue("200") int insertChunk) implements ConsumerSettings {
 
         public TransactionLogConsumer {
+            if (group == null) {
+                group = KafkaNames.of("data-transaction-log");
+            }
             ConsumerSettings.validate(group, maxPollRecords, insertChunk);
         }
     }
 
-    /** 快照单条可达约 1MB：拉取与分块都小，一条 INSERT 至多约 10MB。 */
+    /**
+     * 快照单条可达约 1MB：拉取与分块都小，一条 INSERT 至多约 10MB。
+     *
+     * @param group 消费组；没配时缺省 {@code <ns>-data-player-snapshot}（缺省命名空间下即 {@code game-data-player-snapshot}）
+     */
     public record PlayerSnapshotConsumer(
-            @DefaultValue("game-data-player-snapshot") String group,
+            String group,
             @DefaultValue("50") int maxPollRecords,
             @DefaultValue("10") int insertChunk) implements ConsumerSettings {
 
         public PlayerSnapshotConsumer {
+            if (group == null) {
+                group = KafkaNames.of("data-player-snapshot");
+            }
             ConsumerSettings.validate(group, maxPollRecords, insertChunk);
         }
     }

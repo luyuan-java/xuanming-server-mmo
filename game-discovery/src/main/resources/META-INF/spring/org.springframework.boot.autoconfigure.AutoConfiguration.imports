@@ -1,2 +1,3 @@
 com.game.discovery.RedisAutoConfiguration
 com.game.discovery.killswitch.KillSwitchAutoConfiguration
+com.game.discovery.namespace.GameNamespaceAutoConfiguration

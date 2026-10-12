@@ -1,5 +1,6 @@
 package com.game.match.rating;
 
+import com.game.audit.KafkaNames;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.match.MatchInstance;
 import com.game.match.MatchProperties;
@@ -78,11 +79,25 @@ public class RatingConfiguration {
         BattleResultIngest.Settings settings = new BattleResultIngest.Settings(rating.enabled(), kafka.topicGeneration(),
                 kafka.replicationFactor(), kafka.initTimeout());
         BattleResultIngest ingest = new BattleResultIngest(settings,
-                () -> new KafkaTopicAdmin(kafka.bootstrapServers(), "game-match-admin"),
-                BattleResultIngest.kafkaConsumers(kafka.bootstrapServers(), rating.consumerGroup(), "game-match-rating-" + instance.id()),
+                () -> new KafkaTopicAdmin(kafka.bootstrapServers(), adminClientId()),
+                BattleResultIngest.kafkaConsumers(kafka.bootstrapServers(), rating.consumerGroup(), ratingClientId(instance.id())),
                 ratingStore::apply, metrics);
         log.info("评分回流 enabled={} topic={} group={} 回合打满按平局阈值={} 覆盖={}", rating.enabled(), ingest.topic(), rating.consumerGroup(),
                 rating.drawRoundCap(), rating.drawRoundCapByConfigId());
+        if (!rating.consumerGroup().startsWith(KafkaNames.prefix())) {
+            log.warn("对局结果的消费组 {} 不以部署命名空间前缀 {} 开头：与共用同一 Kafka 的别的部署同名时会互相触发重平衡，将来按前缀配 ACL 时会授权失败",
+                    rating.consumerGroup(), KafkaNames.prefix());
+        }
         return ingest;
+    }
+
+    /** 对局结果消费者的 Kafka client.id：{@code <ns>-match-rating-<实例 id>}（缺省命名空间下即 {@code game-match-rating-<实例 id>}）。 */
+    static String ratingClientId(String instanceId) {
+        return KafkaNames.clientId("match-rating-" + instanceId);
+    }
+
+    /** 核对对局结果 topic 用的 admin 客户端的 client.id：{@code <ns>-match-admin}（缺省 {@code game-match-admin}）。 */
+    static String adminClientId() {
+        return KafkaNames.of("match-admin");
     }
 }

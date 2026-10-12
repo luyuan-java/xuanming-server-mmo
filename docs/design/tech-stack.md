@@ -35,6 +35,7 @@ star 数为 2026-09-29 GitHub API 实测（CI、本地编排、依赖镜像、�
 | 构建信息 | spring-boot-maven-plugin 的 `build-info` goal（Boot 自带） | — | git-commit-id-maven-plugin (1.7K) | commit 与契约来源由 CI / 镜像构建用 `-D` 传入（批次 7.1a，deploy-ci-spec §5） |
 | 长串行 RPC 链的并发（匹配的开局管线） | JDK 21 虚拟线程（`Thread.ofVirtual()`，JDK 自带）+ `java.util.concurrent.Semaphore` 做在途上限 | — | 有界平台线程池；`CompletableFuture` 链；响应式库（Reactor 等） | JDK 自带，不受 star 门槛约束，不加依赖。批次 6.4 的 game-match 每次开局跑在一个虚拟线程上（`VirtualThreadGatherLauncher`，全局上限 256）：一次开局是最长约 90 s 的串行调用链，平台线程池在下游卡住时会被堵满、排队还会吃掉票据 TTL 的预算，写成 future 链又失去与基线逐段对照的可读性。这是虚拟线程第一次用在服务端进程里（此前只有 game-robot 探针与测试用过）。纪律：虚拟线程里不在 `synchronized` 块内阻塞、不直接跑 JDBC（JDK 21 下驱动内部的 `synchronized` 会钉住载体线程，读评分经有界的平台线程池 `match-db`）；Redisson / Dubbo 一律用异步 API 加限时等。工作包分支上带 `-Djdk.tracePinnedThreads=short` 跑过整模块、钉住栈 0 次，集成之后没有重做这项检查。见 architecture.md §4.24、§5 |
 | ECS | 不引入，也不手写 ECS 模式（无 ≥2 万 star 的 Java ECS 库；Java 版没有 entt，按领域对象 + 服务实现） | — | Artemis-odb、Ashley（均 < 3K） | 场景用普通领域对象，见 architecture.md §5 |
+| 部署命名空间（多个游戏共用中间件时的名字隔离） | 自有的 `GameNamespace` + 唯一键工厂显式拼前缀（Redis `RedisKeys` 的 `<ns>:`、Kafka `KafkaNames` 的 `<ns>-`、JDBC URL 的 `${game.namespace:game}`）；Spring Boot 自带的 `EnvironmentPostProcessor` / `FailureAnalyzer` 做启动期定格与报错，不加依赖 | — | Redisson `NameMapper`；Spring Cloud 一类的多租户框架 | 与 Spring Session 的 `spring.session.redis.namespace`、Spring Cache 的 `key-prefix` 同构（一个配置项 → 唯一的键工厂统一加前缀）。**不用 Redisson NameMapper**：它只映射对象名，管不到 Lua 里经 ARGV 拼的键前缀与 SCAN 模式，会静默读到别的部署（本仓库有三处这样的 Lua）。见 architecture.md §6.2 |
 
 ## 传递依赖说明
 

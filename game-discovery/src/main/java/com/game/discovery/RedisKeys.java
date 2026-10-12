@@ -1,11 +1,20 @@
 package com.game.discovery;
 
+import com.game.common.GameNamespace;
 import java.util.Optional;
 
-/** Java 版 Redis 键的唯一出处。全部带 {@code game:} 前缀，与 mmorpg 的键空间隔离。 */
+/**
+ * Java 版 Redis 键与 pub/sub 频道的唯一出处。全部带 {@code <ns>:} 前缀（{@code <ns>} = 部署命名空间 {@code game.namespace}，缺省 {@code game}，
+ * 见 {@link GameNamespace}），与 mmorpg 的键空间、以及共用同一个 Redis 的别的部署隔离。下面各方法注释里的 {@code game:} 均指缺省命名空间。
+ *
+ * <p>前缀在本类初始化时从已定格的命名空间取一次（之后不可变）：Spring 进程由 EnvironmentPostProcessor 在建 bean 之前定格，
+ * 命令行工具在生成第一个键之前显式 {@link GameNamespace#set}。前缀之后的结构（节点类型、hash tag、字段名）不随命名空间变。
+ * 不用 Redisson 的 NameMapper：它管不到 Lua 里经 ARGV 拼的前缀和 SCAN 模式。
+ */
 public final class RedisKeys {
 
-    public static final String PREFIX = "game:";
+    /** 键前缀 {@code <ns>:}（缺省 {@code game:}）。类初始化时取定格值，不是编译期常量。 */
+    public static final String PREFIX = GameNamespace.get() + ":";
     /** 全服产出封禁的类别：币种（字段是币种号）。写者（game-data）与读者（scene）共用这一个出处。 */
     public static final String GAIN_BLOCK_CURRENCY = "currency";
     /** 全服产出封禁的类别：物品（字段是物品配置号）。 */

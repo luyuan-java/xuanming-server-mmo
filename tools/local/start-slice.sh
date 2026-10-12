@@ -13,13 +13,18 @@
 # GAME_BATTLE_TOKEN_SECRET 是战斗直连票据的签名密钥（只有 game-battle 读；去首尾空白后至少 32 字节、不得与 GAME_GATE_TOKEN_SECRET 相同）；
 # 没设时本脚本生成本机随机值写进 run/game-battle-token-secret。game-battle 的客户端直连面在 12000、控制面在 21200、管理端口 18112。
 # game-match（批次 6.4：排队、凑单、开局、评分、切磋、补签）的 Dubbo 在 20888（GAME_MATCH_RPC_PORT）、管理端口 18113（actuator 与 dev 管理口
-# /admin/match/dev/*，令牌同 GAME_ADMIN_TOKEN）。它的评分表在 MySQL game（启动时自建），所以也读 GAME_MYSQL_PASSWORD。
+# /admin/match/dev/*，令牌同 GAME_ADMIN_TOKEN）。它的评分表在 MySQL 库 <ns>（启动时自建），所以也读 GAME_MYSQL_PASSWORD。
 # GAME_BATTLE_RESULT_TOPIC_GENERATION 是对局结果 topic game-battle-result-g<代次> 的代次（game-battle 生产、game-match 消费，两边必须一致），缺省 1；
 # 本脚本导出后两个进程继承同一个值。topic 的分区数与预期不符时（进程会明说）换一个代次重起切片。
 # 前置：MySQL 127.0.0.1:3306、Redis 127.0.0.1:6379、Kafka 127.0.0.1:9092（资产流水：game-scene 生产、game-data 消费；对局结果：game-battle 生产、
 # game-match 消费——按 match-spec §5.4 / §9.8，Kafka 不可达不拦这两个进程启动，只是评分不更新）已就绪；已执行 ./mvnw -DskipTests install；
 # 存量库已按 docs/design/db-migrations.md 迁移到最新结构（M2 起 player 表多了 owner_released / owner_lease_until）。
 # 进程按依赖顺序启动，每个都等端口就绪再起下一个；日志在 run/logs/，PID 在 run/pids/。
+#
+# 部署命名空间 GAME_NAMESPACE（architecture.md「部署命名空间」）：Redis 键前缀 <ns>:、Kafka topic / 消费组 <ns>-、MySQL 库 <ns>。缺省 game
+# （与引入命名空间之前完全相同，本文件里的 game: / game- / 库 game 都指缺省）；本脚本导出后全部进程继承同一个值。同一套 infra 上起第二个游戏 /
+# 第二套部署时设不同的值：GAME_NAMESPACE=t1 tools/local/start-slice.sh。本脚本的端口写死、run/ 下的 PID 与秘密文件共用，
+# 同一个检出不能同时起两套（先 stop-slice.sh 停掉一套再起另一套，或用两个检出 / 两台机器各起一套、共用 infra）。
 #
 # 启动次序的一条硬约束：local profile 下静态直连（各进程 application.yaml 的 game.dubbo.*-url）的 Dubbo 提供方必须先于它的调用方启动。
 # Dubbo 3.3.6 的 Triple 客户端建引用时没连上，下一次重连排在 60 s 之后（game-gate 的 BackendReconnectTest 钉住）：调用方先起的话，
@@ -61,6 +66,11 @@ cd "$(dirname "$0")/../.."
 # 进程自身缺省 prod，部署链不设它即拒绝。要在本机验证生产行为：GAME_RUN_MODE=prod tools/local/start-slice.sh
 export GAME_RUN_MODE="${GAME_RUN_MODE:-dev}"
 echo "运行模式 GAME_RUN_MODE=$GAME_RUN_MODE"
+
+# 部署命名空间（见文件头）：显式导出缺省值，免得只给其中几个进程设了别的值（不一致不会串数据，但表现为彼此看不见：gate 找不到 scene 目录……）。
+# 取值非法（大写、空串、mysql / sys / public……）时各进程启动即失败
+export GAME_NAMESPACE="${GAME_NAMESPACE:-game}"
+echo "部署命名空间 GAME_NAMESPACE=$GAME_NAMESPACE"
 
 # 镜像 / 副本实例的空闲回收（批次 5.3，dungeon-mirror-spec §7.3）：本机切片为 robot mirror 提速，缺省把镜像空置超时调到 5s、
 # 回收宽限调到下限 10s（game-scene 进程缺省 30s / 30s，副本 300s 不动）；要按生产缺省验证就显式设这两个环境变量。

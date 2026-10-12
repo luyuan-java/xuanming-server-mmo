@@ -34,10 +34,12 @@ import org.slf4j.LoggerFactory;
  * <p>用法（同一个 jar，换主类）：
  * <pre>
  * java -cp game-guild.jar -Dloader.main=com.game.guild.asset.fix.AssetOpFixMain org.springframework.boot.loader.launch.PropertiesLauncher \
- *     [-f application.yaml] list [-min-age-min 60] [-limit 50]
+ *     [-f application.yaml] [-expect-database &lt;库名&gt;] list [-min-age-min 60] [-limit 50]
  * ... resolve -op &lt;op_id&gt; -as applied|aborted -operator &lt;名字&gt; -reason &lt;依据&gt; -confirm &lt;op_id&gt; -txlog-checked [-force]
  * </pre>
- * 配置与服务进程同一份（缺省读 jar 里的 {@code application.yaml}，环境变量 / {@code -D} 覆盖规则同 Spring Boot）。
+ * 配置与服务进程同一份（缺省读 jar 里的 {@code application.yaml}，环境变量 / {@code -D} 覆盖规则同 Spring Boot）。部署命名空间（{@code GAME_NAMESPACE}，
+ * 缓存键前缀与缺省库名）从同一份配置解析、显式定格；连上库后核对 {@code DATABASE()} 等于期望库名（缺省 = 命名空间，库名另取的部署用 {@code -expect-database}），
+ * 不一致退出 2、不连 Redis。
  *
  * <p>退出码：0 成功；1 执行出错；2 参数不合法或前置条件不满足（含缺 {@code -txlog-checked}）；3 行已不在 PENDING（被自动终结或别人抢先），本次未做任何改动。
  */
@@ -67,9 +69,12 @@ public final class AssetOpFixMain {
             assetopfix：帮会资产指令（guild_asset_op）卡死行的人工终结工具（guild-economy-spec §2.12）
 
             用法：
-              assetopfix [-f <配置 yaml>] list [-min-age-min 60] [-limit 50]
-              assetopfix [-f <配置 yaml>] resolve -op <op_id> -as applied|aborted -operator <名字> -reason <依据> \\
+              assetopfix [-f <配置 yaml>] [-expect-database <库名>] list [-min-age-min 60] [-limit 50]
+              assetopfix [-f <配置 yaml>] [-expect-database <库名>] resolve -op <op_id> -as applied|aborted -operator <名字> -reason <依据> \\
                   -confirm <op_id> -txlog-checked [-force]
+
+            部署命名空间取环境变量 GAME_NAMESPACE（缺省 game，必须与服务进程同值）；连上库后核对 DATABASE() 等于期望库名
+            （缺省 = 命名空间，库名另取的部署用 -expect-database 给出），不一致退出 2。
 
             resolve 的前置条件（任一不满足即拒绝，不改任何数据）：
               行存在且为 PENDING；创建早于 30 分钟前；
@@ -87,6 +92,21 @@ public final class AssetOpFixMain {
     @FunctionalInterface
     interface StoreOpener {
         OpenedStore open(String configPath) throws Exception;
+
+        /**
+         * 带期望库名打开（{@code -expect-database}；null = 取部署命名空间）。缺省忽略期望值、走 {@link #open(String)}（测试替身）；
+         * 生产实现 {@link AssetOpFixEnvironment#OPENER} 覆盖它。
+         */
+        default OpenedStore open(String configPath, String expectDatabase) throws Exception {
+            return open(configPath);
+        }
+    }
+
+    /** 打开 Store 前的前置条件不满足（部署命名空间非法 / 冲突、库名核对不过）：退出 2，不连 Redis、不改数据。 */
+    static final class PreconditionException extends IllegalStateException {
+        PreconditionException(String message) {
+            super(message);
+        }
     }
 
     /** 打开的 Store 与要在退出前关掉的资源。 */
@@ -98,7 +118,7 @@ public final class AssetOpFixMain {
 
     public static void main(String[] args) {
         logToStderr();
-        System.exit(run(args, System.out, System.err, AssetOpFixEnvironment::open, System::currentTimeMillis));
+        System.exit(run(args, System.out, System.err, AssetOpFixEnvironment.OPENER, System::currentTimeMillis));
     }
 
     /**
@@ -130,7 +150,7 @@ public final class AssetOpFixMain {
 
     /** 可测的入口：不调 {@code System.exit}，返回退出码。 */
     static int run(String[] args, PrintStream out, PrintStream err, StoreOpener opener, LongSupplier clockMs) {
-        Flags global = new Flags(Map.of("f", false, "h", true, "help", true));
+        Flags global = new Flags(Map.of("f", false, "expect-database", false, "h", true, "help", true));
         String error = global.parse(args, 0);
         if (error != null) {
             err.println(error);
@@ -147,17 +167,23 @@ public final class AssetOpFixMain {
             return EXIT_REJECTED;
         }
         String configPath = global.string("f");
+        String expectDatabase = global.string("expect-database");
+        if (expectDatabase != null && expectDatabase.isBlank()) {
+            err.println("-expect-database 不能为空");
+            return EXIT_REJECTED;
+        }
         String[] sub = rest.subList(1, rest.size()).toArray(String[]::new);
         // 子命令参数先于连库解析：参数写错不该先去碰数据库
         return switch (rest.getFirst()) {
             case "list" -> {
                 ListOptions o = parseList(sub, err);
-                yield o == null ? EXIT_REJECTED : withStore(opener, configPath, err, store -> runList(store, o, out, err, clockMs));
+                yield o == null ? EXIT_REJECTED
+                        : withStore(opener, configPath, expectDatabase, err, store -> runList(store, o, out, err, clockMs));
             }
             case "resolve" -> {
                 ResolveOptions o = parseResolve(sub, err);
                 yield o == null ? EXIT_REJECTED
-                        : withStore(opener, configPath, err, store -> runResolve(store, o, out, err, clockMs));
+                        : withStore(opener, configPath, expectDatabase, err, store -> runResolve(store, o, out, err, clockMs));
             }
             default -> {
                 err.println("未知子命令 \"" + rest.getFirst() + "\"");
@@ -172,10 +198,13 @@ public final class AssetOpFixMain {
         int run(GuildAssetStore store);
     }
 
-    private static int withStore(StoreOpener opener, String configPath, PrintStream err, StoreCommand command) {
+    private static int withStore(StoreOpener opener, String configPath, String expectDatabase, PrintStream err, StoreCommand command) {
         OpenedStore opened;
         try {
-            opened = opener.open(configPath);
+            opened = opener.open(configPath, expectDatabase);
+        } catch (PreconditionException e) {
+            err.println(e.getMessage());
+            return EXIT_REJECTED;
         } catch (Exception e) {
             err.println(e.getMessage() == null ? e.toString() : e.getMessage());
             return EXIT_ERROR;

@@ -10,7 +10,10 @@
 #   更新：docker buildx imagetools inspect <image:tag> 取 Digest 行替换 @sha256，推送后看 integration.yml 的 it job 是否绿。
 # - 只放依赖。基线的 etcd / Nacos / Redis Cluster / kafka-ui / topic-init 都不移植（spec §2.3）。
 # - 重置：MySQL 与 Redis 必须一起清（docker compose -f deploy/compose/infra.yaml down -v），禁止单独删 redis-data：
-#   Redis 里的 game:node-id-epoch:* 回退会让 scene 重新接受旧 gate 的链路，组队等只在 Redis 的权威数据也会和 MySQL 对不上。
+#   Redis 里的 <ns>:node-id-epoch:* 回退会让 scene 重新接受旧 gate 的链路，组队等只在 Redis 的权威数据也会和 MySQL 对不上。
+# - 多个游戏（或同一游戏的多套部署）共用这一套 infra：各自取不同的部署命名空间 GAME_NAMESPACE（缺省 game；architecture.md「部署命名空间」），
+#   Redis 键前缀 <ns>:、Kafka topic / 消费组 <ns>-、MySQL 库 <ns> 互不相同。这只是命名隔离（防误串），不是安全边界：Redis / Kafka 没有按租户的账号，
+#   要强隔离就各用一套 infra。同一个 Redis DB 里 SCAN 会扫到别的部署的键，可以再给各部署不同的 game.redis.database 减轻。
 #
 # 用法（有 Docker 的机器）：
 #   cp deploy/compose/env.example deploy/compose/.env    # 填值
@@ -23,7 +26,7 @@ services:
   mysql:
     image: mysql:8.4.11@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
     # 服务器缺省字符集 / 排序规则 / 时区与开发机本地 MySQL 的配置相同（集成测试与本机切片都在这套配置上验证过）。
-    # 镜像缺省是 utf8mb4_0900_ai_ci（不区分大小写、NO PAD）。不带 COLLATE 建的库继承服务器缺省：game（MYSQL_DATABASE、
+    # 镜像缺省是 utf8mb4_0900_ai_ci（不区分大小写、NO PAD）。不带 COLLATE 建的库继承服务器缺省：库 <ns>（缺省 game；MYSQL_DATABASE、
     # 各进程的 createDatabaseIfNotExist）与 game-data / game-player-store 集成测试的临时库都是这样建的，game-data 的建表脚本也不写
     # COLLATE（带 CHARACTER SET utf8mb4 建库的测试取字符集自己的缺省，不受影响）；db-migrations.md M1 的前提也是「库的排序规则
     # 是 utf8mb4_bin」。以 - 开头的参数由镜像入口接到 mysqld 后面，初始化阶段的临时实例同样生效。
@@ -33,8 +36,10 @@ services:
       # 各进程与集成测试用 root 连接：createDatabaseIfNotExist、schema init、pbmysql 建表、集成测试建临时库都要 CREATE 权限。
       # 生产的最小权限账号由批次 7.6 定。
       MYSQL_ROOT_PASSWORD: ${GAME_MYSQL_PASSWORD:?需要环境变量 GAME_MYSQL_PASSWORD（见 deploy/compose/env.example）}
-      # 预建库：game-team 的 JDBC URL 不带 createDatabaseIfNotExist，冷库上先起它会因库不存在失败
-      MYSQL_DATABASE: game
+      # 预建库 <ns>（部署命名空间，缺省 game）：game-team 的 JDBC URL 不带 createDatabaseIfNotExist，冷库上先起它会因库不存在失败。
+      # 只在第一次初始化数据目录时生效；第二个命名空间共用这个 MySQL 时，它的库由进程的 createDatabaseIfNotExist 建（game-login 先起）。
+      # 必须写 :-game 而不是 :-：空串会被进程按 fail-closed 拒绝
+      MYSQL_DATABASE: ${GAME_NAMESPACE:-game}
     ports:
       - "127.0.0.1:${GAME_MYSQL_HOST_PORT:-3306}:3306"
     volumes:
@@ -48,7 +53,7 @@ services:
 
   redis:
     image: redis:8.10.2@sha256:6f81e8915c60b065a524e6967e0ad1c639ba6efa84d669f823683ea04d9150ee
-    # 开 AOF：game:node-id-epoch:* 不得回退（architecture.md 节点号租约）。不设口令：端口只发布到 127.0.0.1
+    # 开 AOF：<ns>:node-id-epoch:* 不得回退（architecture.md 节点号租约）。不设口令：端口只发布到 127.0.0.1
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "127.0.0.1:${GAME_REDIS_HOST_PORT:-6379}:6379"

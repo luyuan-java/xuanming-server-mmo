@@ -8,15 +8,18 @@ import java.util.Map;
  *
  * <p>名字即使是第一代也带 {@code -g1}：裸名字一旦被 broker 自动建成默认分区数，分区契约就永久失配（mmorpg audit_topic.h 同理）；
  * 本机 broker 还不能删 topic，换分区数只能升代次。
+ *
+ * <p>基名随部署命名空间：{@code <ns>-transaction-log}、{@code <ns>-player-snapshot}（缺省 {@code game-…}，经 {@link KafkaNames}），
+ * 类初始化时从已定格的命名空间取一次；生产方与消费方经同一个函数推名，两端必须是同一个命名空间。
  */
 public final class AuditTopics {
 
-    /** 资产流水 topic 的基名。 */
-    public static final String TRANSACTION_LOG_BASE = "game-transaction-log";
+    /** 资产流水 topic 的基名 {@code <ns>-transaction-log}（缺省 {@code game-transaction-log}；不是编译期常量）。 */
+    public static final String TRANSACTION_LOG_BASE = KafkaNames.of("transaction-log");
     /** 资产流水的分区数（同 mmorpg transaction_log_topic 的 6 分区）。 */
     public static final int TRANSACTION_LOG_PARTITIONS = 6;
-    /** 玩家快照 topic 的基名。 */
-    public static final String PLAYER_SNAPSHOT_BASE = "game-player-snapshot";
+    /** 玩家快照 topic 的基名 {@code <ns>-player-snapshot}（缺省 {@code game-player-snapshot}；不是编译期常量）。 */
+    public static final String PLAYER_SNAPSHOT_BASE = KafkaNames.of("player-snapshot");
     /** 玩家快照的分区数（同 mmorpg player_snapshot_topic 的 3 分区）。 */
     public static final int PLAYER_SNAPSHOT_PARTITIONS = 3;
     /** 保留 30 天（逐 topic 显式声明，不继承 broker 默认；大小不设上限，免得消费者积压时丢审计数据）。 */

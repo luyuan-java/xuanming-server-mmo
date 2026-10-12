@@ -2,6 +2,9 @@
 # 资产通道（game.guild.asset-op.*）与 profile 无关：scene 的资产提供方 register=false，地址只来自 Redis 的 game:location 与 scene 节点目录，
 # 按节点直连（guild-economy-spec E1 / E2）；签名密钥照旧只从环境变量 GAME_ASSET_OP_SECRET_GUILD 注入。部署侧若要先关通道，
 # 用 GAME_GUILD_ASSETOP_ENABLED=false（Spring 的环境变量覆盖）而不是改这里。
+# Nacos namespace 随部署命名空间 game.namespace（GAME_NAMESPACE，architecture.md §6.2）：缺省 game 时不派生（留在 public，现状不变）；
+# 其余取值由 game-discovery 的 GameNamespaceEnvironmentPostProcessor 追加 dubbo.registry.parameters.namespace=<ns>（最低优先级）。
+# 显式覆盖：配 dubbo.registry.parameters.namespace（如 Nacos 控制台生成的 UUID），或在 GAME_NACOS_ADDR 里带 ?namespace=。
 dubbo:
   registry:
     address: nacos://${GAME_NACOS_ADDR:127.0.0.1:8848}

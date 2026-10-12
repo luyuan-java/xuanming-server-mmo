@@ -5,7 +5,7 @@
 #   GAME_ADMIN_TOKEN     运维令牌（播种接口 POST /admin/trade/seed-listing 的 X-Game-Admin-Token，与 game-data 共用）；不设则 /admin/** 一律 503
 #   GAME_MYSQL_PASSWORD  MySQL 密码（本机无密码的 root 可不设）
 #
-# 权威数据在 MySQL game 的两张聚宝斋表（trade_listing / trade_favorite，经 game-pbmysql 建表）；只读 game.player（归属区 zone_id），
+# 权威数据在 MySQL 库 <ns>（部署命名空间 game.namespace，缺省 game）的两张聚宝斋表（trade_listing / trade_favorite，经 game-pbmysql 建表）；只读 game.player（归属区 zone_id），
 # 这张表不归本服所有。Redis 只用于 listing_id 雪花租约与热关停规则，不存任何业务键（trade-spec §1.11）。
 spring:
   application:
@@ -20,7 +20,7 @@ spring:
     # 会话级 READ COMMITTED（取消收藏的自动提交 DELETE 不能落回 RR 拿间隙锁，trade-spec §1.9）；STRICT_TRANS_TABLES 同基线 DSN
     # （servicecontext.go:225-243，连接层兜底「超长文本被静默截断」）；innodb_lock_wait_timeout=2 对齐单条 SQL 上限 2000 ms（Q7；只有收藏写入会等锁）；
     # useAffectedRows 与其他服务一致；socketTimeout 4 s ≤ 整请求预算之上的余量。启动时校验 RC 与严格模式（TradeStartupChecks），不符即拒启。
-    url: "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2"
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2"
     username: ${GAME_MYSQL_USER:root}
     password: ${GAME_MYSQL_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver

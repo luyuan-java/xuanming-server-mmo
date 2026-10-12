@@ -1,8 +1,11 @@
 package com.game.guild.asset.fix;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.GameNamespace;
+import com.game.common.NamespaceDatabaseCheck;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisProperties;
+import com.game.discovery.namespace.GameNamespaceEnvironmentPostProcessor;
 import com.game.guild.GuildProperties;
 import com.game.guild.asset.GuildAssetStore;
 import com.game.guild.asset.JdbcGuildAssetStore;
@@ -56,9 +59,33 @@ final class AssetOpFixEnvironment {
     private AssetOpFixEnvironment() {
     }
 
-    /** 按配置连库与 Redis，给出 Store。 */
+    /** 生产用的打开方式（带 {@code -expect-database}）。 */
+    static final AssetOpFixMain.StoreOpener OPENER = new AssetOpFixMain.StoreOpener() {
+        @Override
+        public AssetOpFixMain.OpenedStore open(String configPath) throws Exception {
+            return AssetOpFixEnvironment.open(configPath, null);
+        }
+
+        @Override
+        public AssetOpFixMain.OpenedStore open(String configPath, String expectDatabase) throws Exception {
+            return AssetOpFixEnvironment.open(configPath, expectDatabase);
+        }
+    };
+
+    /** 按配置连库与 Redis，给出 Store（期望库名 = 部署命名空间）。 */
     static AssetOpFixMain.OpenedStore open(String configPath) throws Exception {
+        return open(configPath, null);
+    }
+
+    /**
+     * 按配置连库与 Redis，给出 Store。先从同一份配置解析部署命名空间并显式定格（之后才生成缓存键）；连上库后核对 {@code DATABASE()} 等于期望库名，
+     * 不一致抛 {@link AssetOpFixMain.PreconditionException}（不连 Redis）。
+     *
+     * @param expectDatabase 期望库名（{@code -expect-database}）；null = 取部署命名空间
+     */
+    static AssetOpFixMain.OpenedStore open(String configPath, String expectDatabase) throws Exception {
         StandardEnvironment env = load(configPath);
+        String namespace = defineNamespace(env);
         Binder binder = Binder.get(env);
         String url = env.getProperty("spring.datasource.url");
         if (url == null || url.isBlank()) {
@@ -78,14 +105,21 @@ final class AssetOpFixEnvironment {
         dataSource.setMaxActive(2);
         dataSource.setMaxWait(PING_TIMEOUT_MS);
         dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        String databaseLabel = expectDatabase == null ? namespace : expectDatabase;
+        String mismatch;
         try (Connection conn = dataSource.getConnection(PING_TIMEOUT_MS)) {
             if (!conn.isValid((int) (PING_TIMEOUT_MS / 1000))) {
                 throw new IllegalStateException("连接无效");
             }
+            mismatch = NamespaceDatabaseCheck.verify(conn, expectDatabase, namespace);
         } catch (Exception e) {
             dataSource.close();
             // 连接串带口令：只报库名与原因类别
-            throw new IllegalStateException("连接 MySQL（库 game）失败: " + e.getClass().getSimpleName(), e);
+            throw new IllegalStateException("连接 MySQL（库 " + databaseLabel + "）失败: " + e.getClass().getSimpleName(), e);
+        }
+        if (mismatch != null) {
+            dataSource.close();
+            throw new AssetOpFixMain.PreconditionException(mismatch + "；拒绝执行（没有连 Redis，没有改任何数据）");
         }
 
         RedissonClient redis;
@@ -126,6 +160,21 @@ final class AssetOpFixEnvironment {
             redis.shutdown();
             dataSource.close();
         });
+    }
+
+    /**
+     * 从同一份配置（与服务进程同口径的宽松绑定）解析部署命名空间并显式定格（{@link GameNamespace#set}），打到日志；非法或与已定格的值冲突抛
+     * {@link AssetOpFixMain.PreconditionException}。必须在生成第一个缓存键之前调用。
+     */
+    static String defineNamespace(StandardEnvironment env) {
+        String namespace = GameNamespaceEnvironmentPostProcessor.resolve(env);
+        try {
+            GameNamespace.set(namespace, "assetopfix 配置");
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            throw new AssetOpFixMain.PreconditionException(e.getMessage());
+        }
+        log.info("部署命名空间 {}={}", GameNamespace.PROPERTY, namespace);
+        return namespace;
     }
 
     /** 读配置：{@code -f} 给的 yaml 文件，缺省 classpath 的 application.yaml；系统属性与环境变量优先（StandardEnvironment 的顺序）。 */

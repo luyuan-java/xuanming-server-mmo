@@ -1,6 +1,7 @@
 package com.game.battle;
 
 import com.game.audit.AuditTopicContractException;
+import com.game.audit.KafkaNames;
 import com.game.battle.BattleTables.RowReport;
 import com.game.battle.admin.BattleAdminAuthFilter;
 import com.game.battle.admin.DevBattleBackend;
@@ -232,7 +233,7 @@ public class BattleConfiguration {
     public KafkaBattleResultSink battleResultSink(BattleResultProperties resultProps, BattleProperties props,
                                                   @Value("${game.advertise-host}") String advertiseHost, BattleMetrics battleMetrics,
                                                   ObjectProvider<KafkaBattleResultSink.Clients> clients) {
-        String clientId = "game-battle-result-" + advertiseHost + "-" + props.rpcPort();
+        String clientId = resultClientId(advertiseHost, props.rpcPort());
         KafkaBattleResultSink sink = new KafkaBattleResultSink(
                 clients.getIfAvailable(() -> KafkaBattleResultSink.Clients.kafka(resultProps.bootstrapServers(), clientId)),
                 resultProps.topicGeneration(), resultProps.replicationFactor(), resultProps.initTimeout(), battleMetrics);
@@ -245,6 +246,14 @@ public class BattleConfiguration {
         log.info("对局结果经 Kafka 发布 kafka={} topic={} client_id={} 已核对={}", resultProps.bootstrapServers(), sink.topic(), clientId,
                 sink.verified());
         return sink;
+    }
+
+    /**
+     * 对局结果生产者的 Kafka client.id：{@code <ns>-battle-result-<通告地址>-<控制面端口>}（缺省命名空间下即 {@code game-battle-result-…}；
+     * admin 客户端再加 {@code -admin}）。通告地址是部署给的值（可能是 IPv6 字面量），走不收紧字符集的 {@link KafkaNames#clientId}。
+     */
+    static String resultClientId(String advertiseHost, int rpcPort) {
+        return KafkaNames.clientId("battle-result-" + advertiseHost + "-" + rpcPort);
     }
 
     /** 要 Redis / 端口 / 节点身份的部件的工厂（测试换成假实现）。 */

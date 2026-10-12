@@ -24,7 +24,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     # connect / socket 超时给阻塞 I/O 设上界（与 game-login 同口径）：数据库卡死时存储线程不会被无限挂住，
     # 写回在重试预算内失败并记 ERROR，停服也不会卡在等写回上。
-    url: "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
     username: ${GAME_MYSQL_USER:root}
     password: ${GAME_MYSQL_PASSWORD:}
     druid:

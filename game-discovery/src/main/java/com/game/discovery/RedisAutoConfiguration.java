@@ -31,8 +31,8 @@ public class RedisAutoConfiguration {
     public RedissonClient redissonClient(RedisProperties props) {
         Config config = new Config();
         configure(config.useSingleServer(), props);
-        log.info("Redis 客户端 address={} db={} connect_timeout_ms={} timeout_ms={} retry_attempts={} retry_delay_ms={} "
-                        + "单条命令最坏阻塞≈{}ms", props.address(), props.database(), props.connectTimeoutMs(),
+        log.info("Redis 客户端 address={} db={} key_prefix={} connect_timeout_ms={} timeout_ms={} retry_attempts={} retry_delay_ms={} "
+                        + "单条命令最坏阻塞≈{}ms", props.address(), props.database(), RedisKeys.PREFIX, props.connectTimeoutMs(),
                 props.timeoutMs(), props.retryAttempts(), props.retryDelayMs(), props.worstCaseCommandMillis());
         return Redisson.create(config);
     }

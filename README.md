@@ -76,6 +76,7 @@ export GAME_GATE_TOKEN_SECRET=...     # gate 令牌共享密钥：gateway 签普
 export GAME_LOGIN_DEV_PASSWORD=...    # 开发模式登录口令
 export GAME_NODE_LINK_SECRET=...      # gate ↔ scene 链路握手密钥
 export GAME_DUBBO_SECRET=...          # Dubbo 调用方鉴权密钥（各进程读同一个值）
+# export GAME_NAMESPACE=game          # 可选：部署命名空间（缺省 game，与以前完全相同）；同一套 MySQL / Redis / Kafka 上起第二个游戏时换一个值
 tools/local/start-slice.sh            # 按依赖顺序启动 13 个进程（local profile，Dubbo 直连，不需要 Nacos）
 tools/local/stop-slice.sh             # 哪种切片都用同一条命令停（只看 PID 文件）
 
@@ -86,6 +87,11 @@ GAME_ZONES=2 tools/local/start-slice.sh         # 再起区 2 的 scene 与 gate
 > **从改名前的版本升级**（2026-10-12 起 `xm` 前缀统一改为 `game`）：先用改名前版本的 `stop-slice.sh` 停掉旧切片（新脚本只认 `run/pids/game-*.pid`；
 > 或 `for p in run/pids/xm-*.pid; do kill "$(cat "$p")"; done`），删掉 `run/xm-*`；`export` 的 `XM_*` 全部换成 `GAME_*`；
 > 本机 MySQL 库与 Redis 一起重建或一起迁移（库 `xm_java` → `game`、键前缀 `xm:` → `game:`；compose 项目名 `xuanming-java` → `game-java`，旧卷用 `docker compose -p xuanming-java -f deploy/compose/infra.yaml down -v` 清掉，见 `docs/design/db-migrations.md` M12）。新旧进程不能混跑。
+
+> **部署命名空间** `GAME_NAMESPACE`（可选，缺省 `game`）：Redis 键前缀 `<ns>:`、Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 都取它，
+> 多个游戏（或多套部署）因此能共用同一套中间件而互不串数据。缺省值下所有名字与以前逐字节相同，现有环境什么都不用改。合法值 `[a-z][a-z0-9]{0,31}`
+> （不能是 mysql / sys / public），非法即拒启；只经环境变量给，一个部署的全部进程与命令行工具必须同值，定下后不能改。
+> 这是命名隔离，不是安全边界；细节见 [architecture.md §6.2](docs/design/architecture.md)。
 
 进程清单与启动顺序以 `tools/local/start-slice.sh` 的 `SERVICES` 为准（scene-manager、login、friend、chat、match、team、guild、trade、data、scene、gate、gateway、battle；`GAME_SCENE_NODES=2` 时多起一个 scene 节点 `game-scene-2`）。
 `GAME_ZONES=2` 时在这十三项之外再起区 2 的两个实例（它们不在 `SERVICES` 里，各自紧跟区 1 的同类启动）：`game-scene-z2`（节点链路 21010、资产通道 21110、管理端口 18115）与 `game-gate-z2`（客户端 11010、管理端口 18123），其余进程两个区共用；

@@ -1,5 +1,6 @@
 package com.game.guild.store;
 
+import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.guild.rules.GuildLimits;
@@ -25,10 +26,15 @@ public final class GuildStartupChecks {
     private static final Logger log = LoggerFactory.getLogger(GuildStartupChecks.class);
 
     /**
-     * 建哨兵行的会话级命名锁（死锁复核 C1，guild_manage_repo.go:841-845）。GET_LOCK 的名字在整个 MySQL 实例内共用、不分库，所以带上库名
-     * （Java 的库是 game）；与 pbmysql 的结构同步咨询锁不同名，两者在启动期先后获取、从不嵌套。
+     * 建哨兵行的会话级命名锁（死锁复核 C1，guild_manage_repo.go:841-845）。GET_LOCK 的名字在整个 MySQL 实例内共用、不分库，所以尾段是
+     * <b>部署命名空间</b>（{@code game.namespace}，缺省 {@code game}，与缺省库名一一对应）：共用同一个 MySQL 实例的两个部署互不排队；
+     * 前段 {@code game_guild_insert_guard_init:} 是代码身份，不随命名空间变。缺省命名空间下整串与以前逐字节相同。
+     *
+     * <p>与 pbmysql 的结构同步咨询锁 {@code proto2mysql:sync:<fnv32(DATABASE())>} 口径不同：那把按运行时的实际库名，这把按命名空间——
+     * 集成测试（GuildLockOrderMysqlTest）在临时库 {@code game_guild_it_*} 上拿这个常量抢锁，按 DATABASE() 取名会让它失效。
+     * 两把锁不同名，在启动期先后获取、从不嵌套。类初始化时取已定格的命名空间（不是编译期常量）。
      */
-    public static final String INSERT_GUARD_INIT_LOCK_NAME = "game_guild_insert_guard_init:game";
+    public static final String INSERT_GUARD_INIT_LOCK_NAME = "game_guild_insert_guard_init:" + GameNamespace.get();
 
     /** GET_LOCK 的等待上限（秒），必须明显短于调用方预算（基线给整步 10 s）。 */
     static final int INSERT_GUARD_INIT_LOCK_WAIT_SECONDS = 5;

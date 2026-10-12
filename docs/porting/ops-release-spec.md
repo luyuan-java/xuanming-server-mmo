@@ -11,6 +11,10 @@
 >   `docs/reference/mmorpg-client-contract-robot.md:77`（`gate_ip / gate_port / token_*`）。
 > - **没有哪条结论因为目录缺失而定不下来。**
 >
+> **记号说明（2026-10-12 补记）**：本稿的 `<ns>` 一律指 **K8s namespace**（如 `<ns>-infra`、`mysql.<ns>-infra`），不是后来引入的**部署命名空间**
+> `game.namespace`（环境变量 `GAME_NAMESPACE`，缺省 `game`；architecture.md §6.2）。后者在本稿里写作「部署命名空间」或 `<部署命名空间>`：
+> Redis 键前缀、Kafka topic / 消费组前缀、MySQL 缺省库名都随它，文中的 `game:`、`game-*` topic、库 `game`、账号 `game_app` 都是它取缺省值时的写法。
+>
 > **Java 侧**：以 2026-10-05 的工作区为准，HEAD `9fde7d8`。已提交：5.2（`6b28e9d`）、7.1a（`37dd8dc`：三个 workflow、`deploy/compose/infra.yaml`、`deploy/docker/Dockerfile`、根 pom 的 build-info）、
 > 7.2a。工作区里未提交的并行改动：6.2（新模块 `game-battle`，根 pom 已登记）、5.3 的 scene-manager 部分（`InstanceIdIssuer`、`SceneIdAllocator`）、gate 限频重构（`game-net/.../limit`）。
 > **7.1b 还没落地**：12 个 `application.yaml` 的 actuator 暴露面仍是 `health,prometheus`；没有探针分组；通告地址等仍写死（如 `game-gate application.yaml:44`、`game-scene application.yaml:73`、`:81`）。
@@ -846,7 +850,7 @@ spec:
 | kafka | infra / StatefulSet + PVC，`fsGroup` | 1 / — | 同上 | 9092 → `kafka`（通告 headless FQDN） | minAvailable 1 | 60 s | — / 1Gi |
 
 **infra 的补充约定**（只 dev / CI / 演示）：
-- MySQL readiness 用 `mysqladmin ping --protocol=tcp`（socket 在 initdb 期间会谎报，`deploy-ci-spec.md:325-326`）；`MYSQL_DATABASE=game`（game-team 冷启动的坑，`:993`）；initdb 脚本用 Secret 里的口令建 `game_app` 并只授 §7.5 的权限——**口令同源**（修 B2 / B3），CI 就用它跑，权限不够会当场暴露。
+- MySQL readiness 用 `mysqladmin ping --protocol=tcp`（socket 在 initdb 期间会谎报，`deploy-ci-spec.md:325-326`）；`MYSQL_DATABASE=${GAME_NAMESPACE:-game}`（库名 = 部署命名空间；game-team 冷启动的坑，`:993`）；initdb 脚本用 Secret 里的口令建 `game_app` 并只授 §7.5 的权限——**口令同源**（修 B2 / B3），CI 就用它跑，权限不够会当场暴露。
 - Redis：`--appendonly yes --appendfsync everysec`、`maxmemory-policy noeviction`（里面是锁、租约、组队等权威数据），CI 也设 `--requirepass`，**每个 Java 进程都注入 `GAME_REDIS_PASSWORD`**（修 B4 那一类：preflight 逐进程核对拿到了口令）；readiness `redis-cli ping`，PONG 或 NOAUTH 都算（照基线 `redis.yaml:108-135`）。
 - Kafka：KRaft 单节点，关自动建 topic，副本因子 1，挂 PVC（`fsGroup` 取镜像运行用户 gid，CI 首轮核对，H8）；只改 replicas 不会带来冗余；探针里把 `KAFKA_HEAP_OPTS` 压小（基线 README `:1004-1008`）。
 - 镜像 digest 与 `deploy/compose/infra.yaml` 逐字相同，CI 守卫比对文件（§0.6 #25）。infra Pod 同样 `enableServiceLinks: false`。
@@ -1144,6 +1148,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | 变量 | 值 | 用在 |
 |---|---|---|
 | `GAME_RUN_MODE` | prod；CI 用 dev（要跑 GM 类 robot 场景） | 全部 |
+| `GAME_NAMESPACE`（2026-10-12 补记） | 部署命名空间，缺省 `game`；同一套托管 MySQL / Redis / Kafka 上跑多个游戏或多套环境时各取不同的值。一个环境的全部 Pod 与运维工具（AuditFallbackReplay、assetopfix）取同一个值（同一个 ConfigMap 键），定下后不改；模板写 `${GAME_NAMESPACE:-game}` | 全部 |
 | `GAME_MANAGEMENT_ADDRESS` | `0.0.0.0` | 全部 |
 | `GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` / `GAME_MYSQL_USER` | 托管地址；dev / CI 为 `mysql.<ns>-infra` / 3306；用户 `game_app` | 8 个连库进程 |
 | `GAME_REDIS_ADDRESS` | 托管地址；dev / CI 为 `redis://redis.<ns>-infra:6379` | 全部 |
@@ -1202,8 +1207,11 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 ### 7.5 MySQL 账号
 
 - 应用账号 **`game_app`**：`GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON game.* TO 'game_app'@'%'`，不给 DROP、不给全局权限。启动期建表（`spring.sql.init`、pbmysql 只扩不缩）需要 CREATE / ALTER / INDEX；
+  （2026-10-12 补记）库名与账号随部署命名空间：一般写法是 ``GRANT … ON `<库名>`.* TO '<部署命名空间>_app'@'%'``，库名缺省 = 部署命名空间；MySQL 用户名上限 32 字符，
+  所以部署命名空间不超过 28 个字符。共用一个 MySQL 实例的多个部署各用自己的账号，互相看不到对方的库——这是本轮唯一现在就能做的按租户权限隔离。Redis / Kafka 的按部署账号（Redis ACL 用户 `~<部署命名空间>:*`、Kafka PREFIXED `<部署命名空间>-` 的 ACL 与配额）是后续项：
+  它们依赖的配置项还不存在（`game.redis.*` 只有 password、没有 username；Kafka 客户端没有任何 SASL / SSL 配置）。
   pbmysql 的 `GET_LOCK` 不需要额外权限；它打印的修复语句（含 `DROP INDEX`）本来就不执行（`SchemaPlanner.java:326`）。
-- 库 `game` 由 `MYSQL_DATABASE`（dev / CI）或 DBA（生产）预建，不再依赖 `createDatabaseIfNotExist`；带这个参数的 URL 在库已存在时是否要求库级 CREATE 权限，以 CI 实测为准（C4）。
+- 库 `game`（= 部署命名空间，缺省 game）由 `MYSQL_DATABASE`（dev / CI）或 DBA（生产）预建，不再依赖 `createDatabaseIfNotExist`；带这个参数的 URL 在库已存在时是否要求库级 CREATE 权限，以 CI 实测为准（C4）。
 - 需要 DROP 的结构变更由 DBA 账号按 `db-migrations.md` 手工做。7.1 的集成测试仍用 root 建临时库，不受影响。root 只给 MySQL 容器与 initdb 用；prod 运行模式下进程用 root 一律拒启（§5.11）。
 - 巡检只读账号 `game_ro`（只有 SELECT）只在 `prod.example.yaml` 留说明，不默认启用（Q58）。
 
@@ -1325,7 +1333,7 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | Q18 | 单节点房间上限 `game.battle.max-rooms`（6.2 Q7 留给 7.6，`battle-node-spec.md:1516`） | **7.6 不加**，7.4 压测后再定 | 连接上限已兜住负载；没有数据定值 |
 | Q19 | 上不上 HPA | **7.6 不上** | gate / scene / battle 缩容必须先排空 / 疏散，HPA 绕过这一步；全局服务没有压测数据（YAGNI） |
 | Q20 | 上不上 NetworkPolicy | **上** | 修 B14；同 part-of 粗放行的维护成本低 |
-| Q21 | MySQL 账号 | **`game_app`（§7.5 权限）；prod 下用 root 拒启（两层）；infra initdb 用同一个 Secret 值建账号** | 7.1 §6.2 交来；最小权限；同源修 B3 |
+| Q21 | MySQL 账号 | **`game_app`（部署命名空间非缺省时为 `<部署命名空间>_app`；§7.5 权限）；prod 下用 root 拒启（两层）；infra initdb 用同一个 Secret 值建账号** | 7.1 §6.2 交来；最小权限；同源修 B3 |
 | Q22 | 备份 CronJob | **不移植** | infra 只给 dev / CI；生产托管 PITR；基线自己有 B9 |
 | Q23 | PriorityClass | **chart 留值、缺省空**；手册建议给 gate / scene / battle 配高优先级 | 集群级对象，托管集群常受限 |
 | Q24 | 资源怎么配 | **memory request = limit；CPU 只写 request + ActiveProcessorCount；初值见 §5.4，7.4 压测后改** | CPU limit 的 CFS 节流造成 scene 帧尾延迟；不写 memory limit 堆按节点算 |

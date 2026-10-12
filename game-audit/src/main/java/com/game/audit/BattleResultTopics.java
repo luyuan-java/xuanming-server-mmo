@@ -13,11 +13,13 @@ import java.util.Map;
  * 主人是 game-match（{@link AuditTopicInitializer.Mode#OWN}：校正保留期并读回），game-battle 只核对分区数
  * （{@link AuditTopicInitializer.Mode#CREATE_AND_VERIFY}）。两边都调 {@link #ensure}，分区数不符时的报错指向 {@value #GENERATION_ENV}
  * 而不是审计的代次变量。
+ *
+ * <p>基名随部署命名空间：{@code <ns>-battle-result}（缺省 {@code game-battle-result}，经 {@link KafkaNames}）；game-battle 与 game-match 必须同一个命名空间。
  */
 public final class BattleResultTopics {
 
-    /** topic 基名；实际名字带代次后缀（{@link #name}）。 */
-    public static final String BASE = "game-battle-result";
+    /** topic 基名 {@code <ns>-battle-result}（缺省 {@code game-battle-result}；类初始化时取定格的命名空间，不是编译期常量）；实际名字带代次后缀（{@link #name}）。 */
+    public static final String BASE = KafkaNames.of("battle-result");
     /** 分区数（同基线 match-results 的 3 分区）。key = battle_id，同一局保序即可。 */
     public static final int PARTITIONS = 3;
     /** 代次的环境变量名（缺省 1）：game-battle 与 game-match 读同一个，本机切片由 start-slice.sh 导出。 */
@@ -31,7 +33,7 @@ public final class BattleResultTopics {
     private BattleResultTopics() {
     }
 
-    /** 代次后的 topic 名：{@code game-battle-result-g<generation>}。 */
+    /** 代次后的 topic 名：{@code <ns>-battle-result-g<generation>}（缺省 {@code game-battle-result-g<generation>}）。 */
     public static String name(int generation) {
         return AuditTopics.name(BASE, generation);
     }

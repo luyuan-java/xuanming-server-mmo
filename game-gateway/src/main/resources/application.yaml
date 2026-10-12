@@ -17,10 +17,10 @@ spring:
     property-naming-strategy: SNAKE_CASE
   lifecycle:
     timeout-per-shutdown-phase: 10s
-  # 区服目录 / 白名单 / 公告（库 game；运维经 game-data 的 /admin 接口改）。口令只从环境变量读。
+  # 区服目录 / 白名单 / 公告（库 <ns> = 部署命名空间 game.namespace，缺省 game；运维经 game-data 的 /admin 接口改）。口令只从环境变量读。
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
     username: ${GAME_MYSQL_USER:root}
     password: ${GAME_MYSQL_PASSWORD:}
     druid:

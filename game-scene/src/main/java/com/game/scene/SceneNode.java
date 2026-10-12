@@ -7,6 +7,7 @@ import com.game.api.proto.SceneNodeInfo;
 import com.game.proto.BattleRouting;
 import com.game.audit.AuditProperties;
 import com.game.audit.AuditTopics;
+import com.game.audit.KafkaNames;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.common.RunMode;
 import com.game.common.id.LeaseGatedSnowflake;
@@ -776,7 +777,7 @@ public class SceneNode implements SmartLifecycle {
             log.warn("资产流水未接 Kafka（game.audit.enabled=false），只写本地日志 {}", AssetAudit.LOGGER);
             return AssetAudit.log();
         }
-        String clientId = "game-scene-audit-z" + zoneId + "-n" + nodeId;
+        String clientId = auditClientId(zoneId, nodeId);
         int generation = audit.topicGeneration();
         AuditPipeline pipeline = new AuditPipeline(
                 () -> AuditPipeline.kafkaProducer(audit.bootstrapServers(), clientId, settings.auditMaxBlock()),
@@ -794,6 +795,14 @@ public class SceneNode implements SmartLifecycle {
         log.info("资产审计就绪 kafka={} topic 代次={} topic 已核对={}", audit.bootstrapServers(), generation,
                 pipeline.verified());
         return new KafkaAssetAudit(pipeline, SceneClock.SYSTEM, zoneId);
+    }
+
+    /**
+     * 审计生产者的 Kafka client.id：{@code <ns>-scene-audit-z<zone>-n<node>}（缺省命名空间下即 {@code game-scene-audit-z<zone>-n<node>}；
+     * 核对 topic 的 admin 客户端再加 {@code -admin}）。
+     */
+    static String auditClientId(int zoneId, int nodeId) {
+        return KafkaNames.clientId("scene-audit-z" + zoneId + "-n" + nodeId);
     }
 
     /** 租约丢失回调（调度线程上，只调一次）。 */

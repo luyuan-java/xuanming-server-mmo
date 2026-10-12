@@ -1,5 +1,8 @@
 # nacos profile：Dubbo 注册到 Nacos（只做 Dubbo 注册中心，见 architecture.md §6），
 # 同时清空直连 URL，让对 scene-manager 的引用改走注册中心发现。
+# Nacos namespace 随部署命名空间 game.namespace（GAME_NAMESPACE，architecture.md §6.2）：缺省 game 时不派生（留在 public，现状不变）；
+# 其余取值由 game-discovery 的 GameNamespaceEnvironmentPostProcessor 追加 dubbo.registry.parameters.namespace=<ns>（最低优先级）。
+# 显式覆盖：配 dubbo.registry.parameters.namespace（如 Nacos 控制台生成的 UUID），或在 GAME_NACOS_ADDR 里带 ?namespace=。
 dubbo:
   registry:
     address: nacos://${GAME_NACOS_ADDR:127.0.0.1:8848}

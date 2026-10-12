@@ -282,6 +282,8 @@
 - **JDBC host 写死在 URL 串里，共 8 处**：game-login `:21`、game-friend `:19`、game-team `:19`、game-guild `:31`、game-trade `:23`、game-gateway `:22`、game-data `:15`、game-scene `:27`。
   各进程的 URL 参数各不相同：guild / trade / friend 带 `sessionVariables`，data 带 `socketTimeout=30000` 和 `useAffectedRows`，team 没有 `createDatabaseIfNotExist`。
   所以**不能**照基线那样用 `SPRING_DATASOURCE_URL` 整串覆盖（`docker-compose.login-stack.yml:124`），那样每个容器的参数会各自分叉。只把 host 和 port 换成占位符。
+  （2026-10-12 补记）URL 的**库名段**已经改成占位符 `${game.namespace:game}`（部署命名空间，architecture.md §6.2、db-migrations M13）：缺省解析后与原串逐字节相同，
+  game-match 的 URL（批次 6.4 新增，本节盘点之后）同样如此，共 9 处。
 - **Redis 地址**：11 个 yaml 都写死 `redis://127.0.0.1:6379`（如 game-scene `:76`、game-gate `:48`），没有占位符；game-battle 同样如此。
 - **Dubbo 直连 URL**：
   - game-gate 有 6 个（`:51-60`）；
@@ -311,6 +313,10 @@
      Java 只用审计这两个 topic；`__consumer_offsets` 是内部 topic，不受这个开关影响。
 3. **项目名固定为 `name: game-java`，不写 `container_name`**。基线的项目名缺省取目录名，并且写死了 `kafka` / `redis` / `mysql` 这些容器名。两版不得共享存储（architecture.md:27），只能靠项目名把卷隔开。
 4. **宿主端口可以改**：用 `GAME_MYSQL_HOST_PORT`、`GAME_REDIS_HOST_PORT`、`GAME_KAFKA_HOST_PORT`，避免与开发机上已经在跑的本地进程或基线的 compose 冲突。
+5. **多个游戏 / 多套部署共用一套 infra**（2026-10-12 补记）：各自设不同的部署命名空间 `GAME_NAMESPACE`（缺省 `game`；architecture.md §6.2）。Redis 键前缀 `<ns>:`、
+   Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 随之分开；`infra.yaml` 的 `MYSQL_DATABASE` 写 `${GAME_NAMESPACE:-game}`（只预建第一个使用者的库，其余靠
+   `createDatabaseIfNotExist`）。这只是命名隔离，Redis / Kafka 没有按租户的账号；要强隔离就各用一套 infra。整栈 `stack.yaml` 里给每个 Java 服务都写
+   `GAME_NAMESPACE: ${GAME_NAMESPACE:-game}`（不能写 `:-`，空串会被进程拒启）。
 
 ### 2.4 `deploy/compose/infra.yaml`（草图）
 
@@ -884,6 +890,7 @@ exit 0
 | `GAME_BATTLE_TOKEN_SECRET`（6.2） | battle；至少 32 字节，且不得与 gate 的密钥相同 | 拒启 | `:?` |
 | `GAME_ADMIN_TOKEN` | data、trade、battle（dev 接口）、robot | `/admin/**` 一律回 503 | `:-`（可选） |
 | `GAME_GM_ADMIN_SECRET` | gate、scene | GM 停机接口一律拒绝 | `:-`（可选） |
+| `GAME_NAMESPACE`（不是秘密，2026-10-12 补记；部署命名空间） | 全部 13 个进程，以及命令行工具 AuditFallbackReplay、assetopfix；**一个部署内必须同值**（不一致不串数据，但彼此看不见） | 缺省 `game`；非法值（大写、空串、mysql / sys / public……）拒启 | `:-game`（不能写 `:-`） |
 
 ### 6.2 注入方式
 
@@ -901,7 +908,7 @@ exit 0
 
 | # | 改什么 | 新值 | 涉及 |
 |---|---|---|---|
-| 1 | JDBC URL 的 host 和 port | `jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:3306}/game?<原参数原样保留>` | §2.2 列出的 8 处 |
+| 1 | JDBC URL 的 host 和 port | `jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:3306}/${game.namespace:game}?<原参数原样保留>`（库名段已于 2026-10-12 随部署命名空间改成占位符） | §2.2 列出的 8 处（加 game-match 共 9 处） |
 | 2 | Redis 地址 | `${GAME_REDIS_ADDRESS:redis://127.0.0.1:6379}` | 11 个 yaml，加上 game-battle |
 | 3 | 通告地址 | `${GAME_ADVERTISE_HOST:127.0.0.1}` | 9 个 yaml，加上 game-battle（compose 只给 scene / gate / battle 设值，§2.6） |
 | 4 | scene 链路绑定 | `link-bind-host: ${GAME_SCENE_LINK_BIND_HOST:127.0.0.1}` | game-scene `:81` |

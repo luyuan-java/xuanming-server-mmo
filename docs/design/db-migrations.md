@@ -1,4 +1,4 @@
-# 库表迁移记录（Java 版，库 `game`）
+# 库表迁移记录（Java 版，库 `<ns>` = 部署命名空间，缺省 `game`，见 M13）
 
 建表脚本 `game-player-store/src/main/resources/db/game-player-schema.sql` 由 game-login 启动时执行，只用
 `CREATE TABLE IF NOT EXISTS`：**新库**直接得到最新结构，**已存在的表不会被改动**。所以每次结构变更都要在这里登记一条
@@ -369,3 +369,36 @@ SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'game';   --
 ```
 
 **回滚**：回退代码，并按上面的步骤反向改回 `xm_java` / `xm:` / `XM_*`（同样两边一起）。
+
+---
+
+## M13：部署命名空间 `game.namespace`（2026-10-12；缺省 `game`，表结构与现有名字都不变，无需迁移）
+
+**原因**：同一套 MySQL / Redis / Kafka（以及 Nacos）上要跑多个游戏或多套部署（architecture.md §6.2）。新增配置项 `game.namespace`（环境变量 `GAME_NAMESPACE`，
+缺省 `game`）：MySQL 缺省库名 = `<ns>`（各 `application.yaml` 的 JDBC URL 写 `${game.namespace:game}`）、Redis 键前缀 `<ns>:`、Kafka topic / 消费组 / client.id 前缀 `<ns>-`、
+帮会建哨兵行的命名锁 `game_guild_insert_guard_init:<ns>`、compose 的 `MYSQL_DATABASE` 取 `${GAME_NAMESPACE:-game}`。
+
+**行为变化**：缺省值下**没有任何变化**——库名、每一个键名、频道、topic、消费组、client.id、锁名都与 M12 之后逐字节相同（金样测试钉住）。
+取值非法（大写、空串、首尾空白、`mysql` / `sys` / `public`……）时进程启动即失败。命令行工具 `AuditFallbackReplay` 与 assetopfix 连上库后先核对 `DATABASE()`
+等于期望库名（缺省 = 命名空间；整串覆盖了 `spring.datasource.url`、库名另取的部署用 `--expect-database` / `-expect-database` 给出），不一致退出 2、不建表不写库。
+
+**新库 / 存量库**：都无需操作。新命名空间的库由进程的 `createDatabaseIfNotExist` 建（game-team 的 URL 不带它，先起 game-login），表由各进程照常建；
+compose 的 `MYSQL_DATABASE` 只在第一次初始化数据目录时生效。按部署分账号时：``CREATE USER '<ns>_app'…; GRANT … ON `<ns>`.* TO '<ns>_app'…``（命名空间不超过 28 个字符）。
+
+**给一个已有部署改命名空间**（不提供工具；等同于搬到一个新部署，必须停掉全部进程、各中间件一起搬）：
+1. MySQL：建库 `<new>`（`CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`），按 `information_schema.tables` 生成 `RENAME TABLE <old>.<t> TO <new>.<t>;`；
+2. Redis：把全部 `<old>:*` 键改名为 `<new>:*`（hash tag 不变）；**另外**重写值里嵌着完整键名的数据——匹配队列注册集 `<ns>:{match}:index` 的成员与
+   票据 `<ns>:{match}:ticket:<pid>` 的 `queue_key` 字段（都是 `<ns>:{match}:queue:<mode>:<config>`）；不想重写就在停服前让排队清空；
+3. Kafka：旧 topic 里没消费完的流水 / 快照 / 对局结果先消费完；新 topic 由进程启动时按新名创建，消费组位点从头开始（审计落库按主键幂等，评分入账按 battle_id 幂等）；
+4. Nacos（nacos profile、新值不是 game 时）：服务注册在新的 namespace 里，先在 Nacos 上建好该 namespace（Nacos 3.x 可能要求预建）；
+5. 全部进程与命令行工具换成同一个 `GAME_NAMESPACE` 再起。
+
+**核对**：
+
+```sql
+SELECT DATABASE();                           -- 进程用的连接：等于命名空间（或部署显式给的库名）
+```
+
+启动日志里有「部署命名空间 game.namespace=<ns>（来源 …）」，Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
+
+**回滚**：回退代码即可；缺省命名空间下名字与回退前完全相同。用过非缺省命名空间的部署回退后会回到 `game` 的库与键空间（看不见 `<ns>` 下的数据），要么先按上面的步骤搬回、要么回退前不改命名空间。

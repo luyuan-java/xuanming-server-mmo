@@ -243,7 +243,7 @@ mmorpg：scene 的 `TransactionLogSystem` 发 Kafka `transaction_log_topic_g<N>`
 topic 与存储（不与 Go 混部）：
 
 - **格式与 topic**（`game-audit`）：Java 自有 proto `game.audit.TransactionLogRecord`（原因沿用 mmorpg TransactionType 的数值，
-  Java 独有的从 1001 起；时间是毫秒；`kind` 区分货币 / 物品——币种 0 是金币，只看币种分不出来）。topic `game-transaction-log-g<代次>`，
+  Java 独有的从 1001 起；时间是毫秒；`kind` 区分货币 / 物品——币种 0 是金币，只看币种分不出来）。topic `<ns>-transaction-log-g<代次>`（`<ns>` = 部署命名空间，缺省即 `game-transaction-log-g<代次>`，§6.2），
   6 分区、保留 30 天且不限大小（显式声明，不继承 broker 默认）。代次 `GAME_AUDIT_TOPIC_GENERATION` 两端必须一致；分区数是契约，
   改分区数就升代次换新 topic，绝不原地扩（会让同一玩家的键换分区、打乱顺序）。分区键 = 扣减方玩家号，否则获得方（无符号十进制），
   同一玩家的流水进同一分区、按产生顺序。
@@ -251,7 +251,7 @@ topic 与存储（不与 Go 混部）：
   保留策略校正到规格并读回。第一次核对在启动线程上同步做（契约不符才能拒绝启动）；Kafka 不可达（含地址解析不了）时最多等
   `game.audit.init-timeout`（缺省 10s）后告警并照常启动，后台每 30 秒重试；scene 在核对通过前不发送（broker 若开着自动建 topic，
   会建出默认分区数、契约永久失配），这期间的流水只进兜底日志。
-- **第三个 topic 不属于审计，但复用同一套规格件**（批次 6.4）：对局结果 `game-battle-result-g<代次>`（`BattleResultTopics`：3 分区、保留 7 天，key = battle_id，value = 契约 `BattleResultEvent`；
+- **第三个 topic 不属于审计，但复用同一套规格件**（批次 6.4）：对局结果 `<ns>-battle-result-g<代次>`（缺省 `game-battle-result-g<代次>`；`BattleResultTopics`：3 分区、保留 7 天，key = battle_id，value = 契约 `BattleResultEvent`；
   代次 `GAME_BATTLE_RESULT_TOPIC_GENERATION` 与审计的代次各管各的）。game-battle 生产（§4.22）、game-match 消费后入评分（§4.24，topic 的主人）；两端的核对、「核对通过前不发」、兜底日志与
   「可恢复故障暂停不跳过」都照本节的模式。`AuditTopicInitializer.ensure` 为它加了一个带「代次环境变量名」的重载（报错文案指向正确的变量），旧签名的行为不变。
 - **scene 生产**（`AuditPipeline`）：逻辑线程只组装不可变草稿、投进有界队列（不阻塞、不抛异常——钱包已改，处理器再失败只会让客户端
@@ -265,7 +265,7 @@ topic 与存储（不与 Go 混部）：
   库里那份是旧的）拍 LOGIN，离场 / 停服写回时拍 LOGOUT（与写回**同一份** `PlayerSave`）；失去归属的移除不写回、也不拍；
   跨节点换图的交出（源节点）与交出进场（目标节点）都不拍（不是登录 / 登出，冻结快照已在库里，§8.1）。
   `game.audit.PlayerSnapshotRecord` 带快照号（同一个雪花）、触发原因、zone、owner_epoch、等级、场景、坐标和玩法数据原样字节，
-  发 `game-player-snapshot-g<代次>`（3 分区，键 = 玩家号，保留同流水）。组装与序列化在审计线程上；序列化后超过
+  发 `<ns>-player-snapshot-g<代次>`（缺省 `game-player-snapshot-g<代次>`；3 分区，键 = 玩家号，保留同流水）。组装与序列化在审计线程上；序列化后超过
   `game.scene.snapshot-max-bytes`（缺省 1000000，须低于生产者 / broker 的 1MB 单条上限）就丢弃、记 ERROR、计 `result=oversize`。
   没被确认的只把元数据写进兜底日志（玩法数据不进日志）。快照是回档素材，丢一份不影响玩法；周期存盘不拍。
 - **game-data 消费**（`ConsumerLoop`，每个 topic 一条线程一个 KafkaConsumer）：一次拉取的记录在**一个**库事务里按位点顺序落库
@@ -304,7 +304,7 @@ topic 与存储（不与 Go 混部）：
     落库完整性闸（`ingestComplete`）随 7.2c。
   - **发号**（`OpsIds`）：快照号、作业号、回档的安全快照号与回档流水号（7.2b；回收流水号随 7.2c）必须与 scene 同取 `NodeTypes.SCENE_GUID` 全服租约池（§9）。
     租约由 `data-ops-ids` 线程在启动后后台申领、不挡启动（Redis 不可用时审计消费照常，每 10 s 重试）；租约无效时写接口回 503 `id_unavailable`；Web 服务器停下之后才交还。
-  - **运维作业表**（库 `game`，由 game-pbmysql 按 `game-data/src/main/proto/game/data/ops_tables.proto` 在启动时建表，只扩不缩）：`ops_job`（主键 job_id，唯一键
+  - **运维作业表**（库 `<ns>`，缺省 `game`，§6.2；由 game-pbmysql 按 `game-data/src/main/proto/game/data/ops_tables.proto` 在启动时建表，只扩不缩）：`ops_job`（主键 job_id，唯一键
     idem_key）、`ops_job_event`、`ops_job_player`、`ops_active`（全集群单飞槽）、`recall_source`（回收去重）、`audit_replay_line`。7.2a 只写 `ops_job`、
     `ops_job_event`（回收截断的审计）与 `audit_replay_line`，`recall_source` 只读；7.2b 起 `ops_active`、`ops_job_player` 启用，`ops_job` 加 `cancel_requested` 列
     （§4.5.1）；`recall_source` 的写入随 7.2c。`transaction_log` 新加三条索引
@@ -1011,8 +1011,8 @@ Java 版是独立进程 game-match，规格与逐条出处见 `docs/porting/matc
 - **评分存储与对局结果流**（`rating.*`）：规则照搬基线（K = 32、队伍取平均分、平局 0.5、回合打满 30 按平局、只计 1V1 / 5V5、下限 0、两位小数、新号 1500）。存储是 MySQL 两张表（game-pbmysql 启动时自建，
   db-migrations M11）：`match_rating`（每人一行，评分 × 100 与局数）、`match_rating_applied`（每局一行的入账标记）。`RatingStore.apply` 一局一笔事务：先插入账标记（撞主键 = 已入账，回滚）→
   按玩家号升序补出缺失的行并 `SELECT … FOR UPDATE` → 算 Elo → 逐人更新 → 提交；死锁 / 锁等待超时整笔重跑至多 3 次。一局要么全员落账、要么都不落账。
-  对局结果来自 Kafka topic `game-battle-result-g<代次>`（game-battle 生产，§4.22；主人是 game-match：缺就建 3 分区、核对分区数、把保留期校正到 7 天）。`BattleResultConsumer` 一条专用线程 `match-rating-consumer`，
-  消费组 `game-match-rating`，从最早位点开始、关自动提交，逐条入账成功才 `commitSync`；可恢复的库故障暂停全部分区、1 s → 30 s 退避后重试原记录、不跳过（gauge `game_match_rating_consumer_paused`）；
+  对局结果来自 Kafka topic `<ns>-battle-result-g<代次>`（缺省 `game-battle-result-g<代次>`；game-battle 生产，§4.22；主人是 game-match：缺就建 3 分区、核对分区数、把保留期校正到 7 天）。`BattleResultConsumer` 一条专用线程 `match-rating-consumer`，
+  消费组 `<ns>-match-rating`（缺省 `game-match-rating`），从最早位点开始、关自动提交，逐条入账成功才 `commitSync`；可恢复的库故障暂停全部分区、1 s → 30 s 退避后重试原记录、不跳过（gauge `game_match_rating_consumer_paused`）；
   解不出的消息与被数据库判为数据错误的局写毒丸日志 `game.match.rating.poison` 后跳过（分别计 `decode_error` / `rejected`，任何增量都该告警）。入账标记保留 30 天（`RatingCleanup`，每小时分批清）：
   必须比结果消息在 topic 里的最长寿命（保留 7 天 + 滚段周期约 7 天）活得久，否则从最早位点重放时会重复入账——改 topic 的保留期或声明 `segment.ms` 时要一起重算。
   读评分（排队与 5V5 分队）经 `JdbcRatingReader` 在有界的 `match-db` 池上执行，任何失败回落 1500、永不抛；虚拟线程里不直接跑 JDBC。评分不下发客户端。
@@ -1037,11 +1037,11 @@ Java 版是独立进程 game-match，规格与逐条出处见 `docs/porting/matc
   建的是正常房间）。鉴权同 game-trade 播种接口（`MatchAdminAuthFilter`：令牌没配 503 → 令牌不符 401 → 操作人不合法 400 → 运行模式不是 dev / test 403），每次调用写审计日志并计数。
 - **配置**（`game.match.*`）：`worker.threads` 16 / `worker.queue` 1024、`request-budget` 4500 ms（须在 [500 ms, 4500 ms]，小于 gate 调它的 5 s）、`matcher.interval` 500 ms、`matcher.lock-ttl` 10 s、
   `ticket-ttl` 6 h（须大于 96 s）、`ready-ticket-ttl` 60 s、`challenge-ttl` 60 s、`rating.enabled` true、`rating.tolerance.*` 100 / 5 / 100 / 1000 / 90、`rating.draw-round-cap` 30 与按副本的覆盖表（缺省空）、
-  `rating.consumer-group` `game-match-rating`、`pve-team-size-by-config-id` `{1: 5}`、`table-fingerprint-mode` warn（off / warn / enforce，写错拒启）、`gather-max-inflight` 256、`requeue-backoff` 2 s（[0, 60 s]）、
+  `rating.consumer-group` `<ns>-match-rating`（缺省 `game-match-rating`；yaml 写 `${game.namespace:game}-match-rating`）、`pve-team-size-by-config-id` `{1: 5}`、`table-fingerprint-mode` warn（off / warn / enforce，写错拒启）、`gather-max-inflight` 256、`requeue-backoff` 2 s（[0, 60 s]）、
   `kafka.{bootstrap-servers, topic-generation, replication-factor, init-timeout}`（`${GAME_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}` / `${GAME_BATTLE_RESULT_TOPIC_GENERATION:1}` / 1 / 10 s）；
   6.5 的 `spectate.sweep-interval` 10 s（> 0 且是整毫秒）与 `spectate.max-inflight` 128（≥ 1），不合法拒启。
   各跳超时、matched TTL 公式、补偿续期、开战锁余量、落点记录 TTL 是 `MatchBudgets` 的代码常量，不开放配置——它们出现在跨进程不等式里（battle 的确认补发窗口、scene 的锁余量、game-team 的开战锁与收尾截止），
-  改一处要连带核对，单测与启动断言直接引用。Redis 库 12，MySQL 库 `game`。
+  改一处要连带核对，单测与启动断言直接引用。Redis 库 12，MySQL 库 `<ns>`（缺省 `game`）。
 - **已知残余**（规格末尾「遗留与残余风险」）：179 在共用工作池上同步等直拨至多 3 s，battle「连得上但不应答」时并发补签能占满工作池；开局选 battle 节点时同步读目录、没有本地截止；
   157 建票结局不明后的回滚没有独立预算；非 SQL 的确定性异常会让评分消费所在分区停住；按兜底日志回灌超过 30 天的旧结果会重复入账；`RpcFailures` 的判定依赖 Dubbo 3.3.6 的异常形态（失效方向安全）；
   256 个在途开局没有压测。部署约束（后端重启后的重连、读路由、代次一致）见 §6。
@@ -1198,7 +1198,8 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
   battle 进程异常退出后条目最多留 15 s：这段时间选中它的开局，建房请求确定没有送达时按没建房补偿（不走「销毁也连不上 → 不解冻」），分不清的仍按可能已建房处理。
   **battle 丢了租约**（与 gate 不同）：在逻辑线程上关准入闸、停止发布并尽力删条目（只删仍带本实例 id 的），**不作废**在打的房间——battle 不持有权威数据，
   票据带实例 id，结算按玩家与 battle_id 寻址；房间按期限或胜负自然结束，房间数归零时打「可安全重启」，进程保持存活但不可分配。
-- **Nacos 只做 Dubbo 注册中心**（`nacos` profile）。`local` profile 下 Dubbo 用直连 URL，不需要 Nacos 服务端，
+- **Nacos 只做 Dubbo 注册中心**（`nacos` profile）。Nacos namespace 随部署命名空间：`game` 不派生（留在 public，现状不变），其余映射成同名 namespace，
+  显式配置（`dubbo.registry.parameters.namespace` 或地址里的 `?namespace=`）优先，见 §6.2。`local` profile 下 Dubbo 用直连 URL，不需要 Nacos 服务端，
   本地开发与端到端测试用它。
 - 节点号（gate 的 session 高位、雪花 worker）由 Redis 租约分配（`NodeIdLease`）：`SET NX PX` 占号，
   「值仍是本实例才续」的原子续期（每 TTL/3 一次）；号被夺或续期失败超过一个 TTL 即回调丢失，进程停止接客。
@@ -1312,9 +1313,71 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
   批次 6.5 没有新增进程模块；`start-slice.sh` 多了 `GAME_ZONES=2`（多起区 2 的 `game-scene-z2` / `game-gate-z2`，共 15 个进程，见 §6「本机双 zone 切片」），`stop-slice.sh`、`battle-crash-window.sh` 与 `env.example` 的说明同步；
   区 2 的五个端口只由脚本经命令行参数传入，game-robot 的 `SliceScriptsTest` 把各模块 `application*.yaml` 的缺省端口纳入它们的冲突检查——新模块的缺省端口撞上时测试会红。整栈的两 zone 形态（覆盖文件、gateway 两个区一起播种）随 7.1b。
 
+### 6.2 部署命名空间（多个游戏共用一套中间件）
+
+服务端要复用到别的游戏，或同一游戏起多套部署（测试服、体验服）时，常见做法是共用同一套 Redis / Kafka / MySQL（以及 Nacos）。
+**部署命名空间** `game.namespace`（环境变量 `GAME_NAMESPACE`，缺省 `game`）是共享中间件里一切名字的租户段：各部署取不同的值就互不串数据。
+缺省 `game` 时生成的每一个键名、频道、topic、消费组、client.id、库名都与引入它之前**逐字节相同**（金样测试钉住），现有部署什么都不用改。
+
+- **取值与校验**（`game-common` 的 `GameNamespace`）：`[a-z][a-z0-9]{0,31}`，且不是 `mysql` / `sys`（MySQL 系统库）/ `public`（Nacos 缺省命名空间 ID）。
+  不 trim、不转小写：空串、首尾空白、大写一律拒启（fail-closed）。这个字符集在 Redis 键、Kafka topic、MySQL 库名、K8s 标签值、Nacos namespace ID 里都合法、
+  不需要转义，`<ns>:` 与 `<ns>-` 两类前缀互不为前缀，不进 hash tag、不含 glob 元字符。按 `<ns>_app` 起 MySQL 账号时命名空间不超过 28 个字符（用户名上限 32）。
+  MySQL 关键字（如 `select`）语法上合法，但运维 SQL 要加反引号，建议避开。
+- **定格**：进程内只定一次、没有 reset。名字类（`RedisKeys`、`KafkaNames`、`AuditTopics`、`BattleResultTopics`、`GuildStartupChecks` 的锁名、`TeamMembershipReader` 的投影前缀）
+  在类初始化时（`KafkaNames` 是每次生成时）取它，定格保证类初始化时取到的与之后恒等。
+  - **Spring 进程**：game-discovery 的 `GameNamespaceEnvironmentPostProcessor`（`META-INF/spring.factories`，order 最低、排在 ConfigData 之后）在建任何 bean 之前，
+    经 `Binder` 宽松绑定读出取值（`--game.namespace`、`-Dgame.namespace`、`GAME_NAMESPACE`、`SPRING_APPLICATION_JSON`、yaml 与 profile 都认）、校验、定格，
+    并打一行「部署命名空间 game.namespace=<ns>（来源 …）」。非法或冲突抛 `InvalidGameNamespaceException`：此时日志系统尚未初始化，由 `GameNamespaceFailureAnalyzer`
+    按 Spring Boot 的 `APPLICATION FAILED TO START` 格式报告（原值、来源、合法取值）。第二道防线 `GameNamespaceAutoConfiguration` 在上下文内比对 Environment 与定格值，
+    兜住不经 SpringApplication 的上下文。13 个 Spring 进程都直接依赖 game-discovery，自动生效。Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
+  - **两条顺序约束**：`main()` 在 `SpringApplication.run` 之前不得触碰名字类；EnvironmentPostProcessor 在定格之前不得引用名字类。违反时命名空间会按系统属性 /
+    环境变量提前定格，之后 Spring 解析出不同的值就拒启（不会静默用错）。
+  - **命令行工具**：`AuditFallbackReplay` 按「系统属性 → 环境变量 `GAME_NAMESPACE` → game」解析、显式定格并打印；assetopfix 从同一份配置解析后定格。
+    两者连上库后、建表或写库之前核对 `SELECT DATABASE()` 等于期望库名（缺省 = 命名空间；库名另取的部署用 `--expect-database` / `-expect-database`），不一致退出 2。
+    PasswordAdmin 只用调用方给的整串 JDBC URL，不涉及 Redis / Kafka。game-robot 与 `tools/*.java` 不连共享中间件，不需要命名空间。
+  - **运维约定**：命名空间只经环境变量 `GAME_NAMESPACE` 注入，不写进 yaml（命令行工具读不到服务的 yaml）；一个部署的全部进程与工具必须同值；
+    compose / 部署模板写 `${GAME_NAMESPACE:-game}`，不能写 `${GAME_NAMESPACE:-}`（空串会被拒启）。
+- **跟命名空间走的**（共享中间件里的名字）：
+  - Redis 键与 pub/sub 频道：前缀 `<ns>:`，唯一出处 `RedisKeys`（`PREFIX` 一处改动覆盖全部生成方法；Lua 里经 ARGV 拼的前缀与 SCAN 模式都由它推出）。
+    Redisson 由对象名派生的内部键与频道（`redisson__timeout__set:{<ns>:…}`、`redisson_lock__channel:{<ns>:…}`）随之隔离。
+    匹配票据的 `queue_key` 字段与 `{match}:index` 的成员里嵌着完整键名，同一命名空间内自洽；`parseMatchQueue` 把别的命名空间的队列键当坏成员。
+    **不用 Redisson NameMapper**：它管不到 ARGV 前缀和 SCAN 模式，会静默读到别的部署。
+  - Kafka：topic 基名、消费组缺省值、client.id 的前缀 `<ns>-`，唯一出处 game-audit 的 `KafkaNames`（transactional.id / group.instance.id 现在没有，将来加也必须经它）。
+    显式覆盖的消费组不强制带前缀（装配处打 WARN）。
+  - MySQL 缺省库名：各 `application.yaml` 的 JDBC URL 写 `${game.namespace:game}`；整串覆盖 `spring.datasource.url` 的部署可以另取库名（此时命令行工具要给期望库名）。
+    帮会建哨兵行的命名锁 `game_guild_insert_guard_init:<ns>`（GET_LOCK 的名字整个实例共用）。compose 的 `MYSQL_DATABASE` 取 `${GAME_NAMESPACE:-game}`。
+  - Nacos：`<ns>` ≠ game、注册中心地址是 `nacos://`、没有显式配置 Nacos namespace（`dubbo.registry.parameters.namespace` 及其宽松名，或地址查询串里的 `namespace=`）
+    时，EPP 追加最低优先级的 `dubbo.registry.parameters.namespace=<ns>`；`game` 什么都不加（留在 public）。Dubbo 3.3.6 的字节码显示注册中心兼作元数据中心时
+    `putIfAbsent` 继承这个参数、兼作配置中心时 `setNamespace(registry.group)`（没配 group 时为 null，跳过），推断三者都落在 `<ns>`，**需在真 Nacos 上核对**。
+    多注册中心写法（`dubbo.registries.*`）不处理，用时必须显式配置。
+- **不跟命名空间走的**（代码身份与本机名字）：配置键前缀 `game.`、环境变量前缀 `GAME_`、Java 包 `com.game`、Maven 模块与 proto 包；指标名 `game_*`
+  （部署之间靠 Prometheus 的目标标签区分）；HTTP 运维头 `X-Game-*`；Dubbo 鉴权附件键 `game-auth-ts` / `game-auth-mac`、`game-budget-ms` 与服务分组；
+  HMAC 域分隔串 `game-login-queue`（租户之间靠不同的密钥隔离）；`spring.application.name`（注册层的隔离由 Nacos namespace 承担）；
+  十个隔离 Dubbo 模块的应用名（不配注册中心、按节点直连）；实例 id / 租约持有者 / 作业执行者的值（`game-data-<uuid>` 等，是存进去的值不是名字）；
+  键里前缀之后的结构（节点类型、hash tag、字段名）；Redis DB 号；Sa-Token 的外部键；pbmysql 的结构同步锁（已按 `DATABASE()` 区分）；表名；
+  topic 的代次后缀与分区规格；本机的 `run/` 目录、compose 项目名、K8s namespace、镜像名。
+- **边界：这是命名隔离（防误串），不是安全边界**。Redis 只有口令（`game.redis.*` 没有 username），Kafka 没有 SASL / SSL 配置，按租户的 ACL 现在配不了；
+  而且 Redis ACL 不过滤 SCAN 的结果。只有 MySQL 已有 `GAME_MYSQL_USER`，「每个部署一个账号」现在就能做。后续项：给 `game.redis` 加 username 后按
+  `~<ns>:* &<ns>:* ~redisson__*{<ns>:* &redisson_*{<ns>:*` 配 Redis 用户；给 Kafka 加安全配置后按 PREFIXED `<ns>-` 写 topic / group 的 ACL 与配额。
+  各部署的密钥必须不同（`GAME_GATE_TOKEN_SECRET`、`GAME_DUBBO_SECRET`、`GAME_NODE_LINK_SECRET`、`GAME_BATTLE_TOKEN_SECRET`、`GAME_ASSET_OP_SECRET_GUILD` 等）：
+  域分隔串与附件键不带命名空间，密钥相同时票据与调用可以在两个部署之间重放。
+- **风险与约束**：只支持单机 Redis（`useSingleServer`）；共用同一个 DB 时 SCAN（好友在线目录）会被别的部署的键稀释，可给各部署不同的 `game.redis.database`；
+  将来共用 Redis Cluster 时 `{team}` / `{match}` / `{rank}` 等 hash tag 不带命名空间，多个部署的同类热点压到同一个槽。命名空间只保证本系统的部署之间不撞键，
+  同一个 DB 里的别的应用要用不同的 DB 号或实例。各进程的命名空间不一致不会串数据，但表现为「彼此看不见」（gate 找不到 scene 目录、match 收不到对局结果）。
+  命名空间定下后不能在线改：改了就是空的键空间、空库、新 topic 与新消费组位点（迁移见 db-migrations M13，不提供工具）。共用实例的资源争用（maxmemory、Kafka 吞吐、
+  MySQL 连接数）不在命名能解决的范围内，要做容量规划。
+- **测试**：surefire 把测试 JVM 的 `game.namespace` 钉成 `game`（金样与全部现有用例在缺省命名空间里跑）；非缺省命名空间的用例打 `@Tag("namespace")`，
+  由 game-discovery / game-audit / game-data / game-match / game-guild / game-login 各自的 `namespace` 执行在另一个 fork 里钉成 `nstest` 跑（含 `-Dgame.it.*` 门控的
+  真 Redis / Kafka / MySQL 隔离用例，在 CI integration job 里执行）。跑测试不要给 mvn 传 `-Dgame.namespace`（surefire 3.2.5 让它覆盖两边的钉值，两类用例的
+  `@BeforeAll` 会直说原因）；surefire 必须 fork。game-robot 的 `NamespaceLiteralGuardTest` 常驻扫描源码，挡住写死的 `"game:…"` 键与 `"game-…"` Kafka 名字。
+- **验证同一套 infra 上的两个部署**：`start-slice.sh` 的端口写死、`run/` 共用，同一个检出不能同时起两套；先 `GAME_NAMESPACE=t1 tools/local/start-slice.sh` 跑 robot、停掉，
+  确认 `t1:*` 键、`t1-*` topic、`t1` 库出现而 `game:*` 与库 `game` 不变，再用缺省值起一套；要并行就用两个检出或两台机器、共用 infra。
+
 ## 7. 存储
 
-- MySQL 库 `game`（与 mmorpg 的库隔离）：`account`、`player`、`player_state`（各玩法的持久化数据，protobuf `game.storage.PlayerState`，与 `player` 行同事务、同围栏写入）；建表脚本在 `game-player-store/src/main/resources/db/game-player-schema.sql`
+本文各节（不止本节）的键名、topic、消费组示例里的 `game:` / `game-` / 库 `game` 均指缺省部署命名空间（§6.2）：一般地是 `<ns>:` / `<ns>-` / 库 `<ns>`。
+
+- MySQL 库 `<ns>`（部署命名空间，缺省 `game`；与 mmorpg 的库隔离）：`account`、`player`、`player_state`（各玩法的持久化数据，protobuf `game.storage.PlayerState`，与 `player` 行同事务、同围栏写入）；建表脚本在 `game-player-store/src/main/resources/db/game-player-schema.sql`
   （只 `CREATE TABLE IF NOT EXISTS`，存量库的结构变更按 [db-migrations.md](db-migrations.md) 手工迁移）。
 - **区服目录 / 白名单 / 登录公告**（`zone_config`、`zone_whitelist`、`announcement`，同库）：建表脚本在
   `game-gateway-store/src/main/resources/db/game-gateway-schema.sql`，由 game-gateway 启动时执行并按 `game.gateway.seed-zones` 播种库里没有的区；
@@ -1351,7 +1414,7 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
   按 battle_id 无符号升序写出；只登记「已应用、销账未确认」的局，稳态 0～1 条，上限 64）。两本账本都与资产在同一份记录里、随同一次带 `owner_epoch` 围栏的写落库——
   「这条指令 / 这一局已应用」与资产同生共死；各层不认识的字段原样带回，滚动升级或回滚期间旧版本不会把新段抹掉。加一段只登记字段号、不改表结构（db-migrations M10）。
   GM 回档把两本账本与货币 / 背包 / 宝宝一起算作不可拆的资产组（§4.5.1）。
-- Redis：全部键带前缀 `game:`，默认 DB 12（与 mmorpg 的开发数据隔离），键名只经 `com.game.discovery.RedisKeys` 生成；各类键在用到它的小节里说明。
+- Redis：全部键带前缀 `<ns>:`（缺省 `game:`，§6.2），默认 DB 12（与 mmorpg 的开发数据隔离），键名只经 `com.game.discovery.RedisKeys` 生成；各类键在用到它的小节里说明。
   回合制战斗的四类键——战斗锁 `game:battle:{<pid>}:lock`、待结算记录 `game:battle:{<pid>}:settlement`、已销账墓碑 `game:battle:{<pid>}:settled:<battle_id>`、
   活动结果副本 `game:battle:activity-result:<battle_id>`——见 §4.23 的键表，部署约束见 §6。
   匹配的键（批次 6.4）全部以 `game:{match}:` 开头、共用一个 hash tag——队列注册集 `index`、队列 `queue:<mode>:<config>`、评分镜像 `rank:…`、凑单锁 `lock:…`、票据 `ticket:<pid>`、

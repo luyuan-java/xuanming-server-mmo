@@ -13,7 +13,7 @@
 #   1. 切片是 tools/local/start-slice.sh 起的、正在跑（run/pids/ 里有 PID 文件），dev 运行模式（robot 要用 dev gather 与 GM 94 / 95），
 #      game-scene 的 reaper 间隔是切片缺省的 2s（battle-after-store 等的就是它；生产缺省 30s 时要多等半分钟）。
 #   2. 在**启动切片的同一个 shell**里执行，或导出同一组环境变量：GAME_MYSQL_PASSWORD、GAME_GATE_TOKEN_SECRET、GAME_LOGIN_DEV_PASSWORD、
-#      GAME_NODE_LINK_SECRET、GAME_DUBBO_SECRET，以及当时显式设过的任何一个 GAME_*（运行模式、reaper 间隔……）。重启出来的进程读的是本脚本的环境，
+#      GAME_NODE_LINK_SECRET、GAME_DUBBO_SECRET，以及当时显式设过的任何一个 GAME_*（部署命名空间 GAME_NAMESPACE、运行模式、reaper 间隔……）。重启出来的进程读的是本脚本的环境，
 #      环境不同它就和被杀的那个不是同一种配置。start-slice.sh 自己生成的四个秘密（运维令牌、GM 停机密钥、帮会资产签名密钥、战斗票据密钥）
 #      当时没设环境变量的话，本脚本从 run/ 下的文件读回同一个值；当时是从环境变量来的，这里也必须有同一个环境变量。
 #   3. 已执行 ./mvnw -DskipTests install（要 game-robot、game-scene / game-battle 的可执行 jar）。game-robot 的旧包会被拒绝，三道检查：帮助里认
@@ -101,6 +101,8 @@ done
 
 # 下面这些的缺省值与 start-slice.sh 逐个相同；启动切片时显式设过别的值，这里也要设成那个值
 export GAME_RUN_MODE="${GAME_RUN_MODE:-dev}"
+# 部署命名空间：重启出来的进程必须与还在跑的进程同一个（不同就是另一套部署，看不见彼此的 Redis 键与 topic）
+export GAME_NAMESPACE="${GAME_NAMESPACE:-game}"
 export GAME_SCENE_MIRROR_IDLE_TIMEOUT="${GAME_SCENE_MIRROR_IDLE_TIMEOUT:-5s}"
 export GAME_SCENE_INSTANCE_RECLAIM_GRACE="${GAME_SCENE_INSTANCE_RECLAIM_GRACE:-10s}"
 export GAME_SCENE_BATTLE_REAPER_INTERVAL="${GAME_SCENE_BATTLE_REAPER_INTERVAL:-2s}"

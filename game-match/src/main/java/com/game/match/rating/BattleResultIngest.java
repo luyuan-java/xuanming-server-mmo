@@ -115,7 +115,7 @@ public final class BattleResultIngest implements ResultConsumerControl {
         this.topic = BattleResultTopics.name(settings.topicGeneration());
     }
 
-    /** 消费的 topic 名（{@code game-battle-result-g<代次>}）。 */
+    /** 消费的 topic 名（{@code <ns>-battle-result-g<代次>}，缺省 {@code game-battle-result-g<代次>}）。 */
     public String topic() {
         return topic;
     }
@@ -124,7 +124,7 @@ public final class BattleResultIngest implements ResultConsumerControl {
      * 生产用的 KafkaConsumer 工厂：关自动提交（入账成功才提交）、新消费组从最早位点开始（match 晚于 battle 启动时先发的结果不能丢）、
      * 不许自动建 topic（自动建出来的是 broker 默认分区数）。同组的多个 match 实例分摊分区，每条结果只被一个实例消费。
      *
-     * @param group    消费组（{@code game.match.rating.consumer-group}，缺省 {@code game-match-rating}）
+     * @param group    消费组（{@code game.match.rating.consumer-group}，缺省 {@code <ns>-match-rating}，缺省命名空间下即 {@code game-match-rating}）
      * @param clientId Kafka 客户端标识（只进 broker 日志与客户端指标）
      */
     public static Supplier<Consumer<String, byte[]>> kafkaConsumers(String bootstrapServers, String group, String clientId) {

@@ -26,7 +26,7 @@ import java.util.Map;
  *
  * <p>用法（在仓库根目录，game-login 已打包）：
  * <pre>
- * export GAME_PASSWORD_ADMIN_JDBC_URL='jdbc:mysql://127.0.0.1:3306/game?user=...&amp;password=...'
+ * export GAME_PASSWORD_ADMIN_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名（缺省 = 部署命名空间 GAME_NAMESPACE，即 game）&gt;?user=...&amp;password=...'
  * java -cp game-login/target/game-login-0.1.0-SNAPSHOT.jar -Dloader.main=com.game.login.tools.PasswordAdmin \
  *      org.springframework.boot.loader.launch.PropertiesLauncher --account &lt;账号&gt; [--password-stdin]
  * </pre>

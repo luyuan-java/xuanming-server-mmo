@@ -15,7 +15,7 @@ spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     # useAffectedRows=true：ON DUPLICATE KEY UPDATE 的受影响行数 = 新插入的行数（重放的重复行计 0）
-    url: "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=30000&useAffectedRows=true"
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=30000&useAffectedRows=true"
     username: ${GAME_MYSQL_USER:root}
     password: ${GAME_MYSQL_PASSWORD:}
     druid:

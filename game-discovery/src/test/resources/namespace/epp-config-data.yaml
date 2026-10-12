@@ -1,0 +1,3 @@
+# GameNamespaceEnvironmentPostProcessorTest：经 ConfigData 给出的命名空间（与缺省 JVM 里已定格的 game 冲突，用来证明 EPP 排在 ConfigData 之后）
+game:
+  namespace: other

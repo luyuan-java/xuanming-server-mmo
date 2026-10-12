@@ -115,6 +115,8 @@ jobs:
         id: verify
         # 不加 -T：各模块的集成测试共用 Redis 的 DB 与同一个 broker，必须串行。
         # 测试从环境变量读 GAME_MYSQL_PASSWORD（game.it.mysql.user 缺省 root，各自建临时库）；测试用的其它密钥由各模块 surefire 配置注入。
+        # 部署命名空间：缺省执行钉成 game、六个模块的 namespace 执行钉成 nstest（根 pom 与模块 pom 的 surefire），同一次 verify 里两个命名空间并存于同一套 infra，
+        # 这就是「多个部署共用 infra」的验证（NamespaceRedisIsolationIntegrationTest 等）。这里不要加 -Dgame.namespace：它会覆盖两边的钉值。
         run: >-
           ./mvnw -B -ntp -fae verify
           -Dgame.it.redis=redis://127.0.0.1:6379

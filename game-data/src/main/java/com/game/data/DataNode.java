@@ -4,6 +4,7 @@ import com.game.audit.AuditTopicContractException;
 import com.game.audit.AuditProperties;
 import com.game.audit.AuditTopicInitializer;
 import com.game.audit.AuditTopics;
+import com.game.audit.KafkaNames;
 import com.game.audit.TopicAdmin;
 import com.game.data.consume.ConsumerLoop;
 import com.game.data.consume.ConsumerLoop.Decoder;
@@ -176,19 +177,31 @@ public final class DataNode implements SmartLifecycle {
         workers.add(worker);
         worker.thread.start();
         log.info("{} 消费者已启动 topic={} group={}", name, topic, settings.group());
+        if (!settings.group().startsWith(KafkaNames.prefix())) {
+            log.warn("{} 的消费组 {} 不以部署命名空间前缀 {} 开头：与共用同一 Kafka 的别的部署同名时会互相触发重平衡，将来按前缀配 ACL 时会授权失败",
+                    name, settings.group(), KafkaNames.prefix());
+        }
     }
 
     private Consumer<String, byte[]> newConsumer(DataProperties.ConsumerSettings settings) {
         Properties p = new Properties();
         p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, audit.bootstrapServers());
         p.put(ConsumerConfig.GROUP_ID_CONFIG, settings.group());
-        p.put(ConsumerConfig.CLIENT_ID_CONFIG, "game-data-" + settings.group());
+        p.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId(settings.group()));
         p.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         p.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "false");
         p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(settings.maxPollRecords()));
         p.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "500");
         return new KafkaConsumer<>(p, new StringDeserializer(), new ByteArrayDeserializer());
+    }
+
+    /**
+     * 审计消费者的 Kafka client.id：{@code <ns>-data-<消费组>}（缺省命名空间与缺省消费组下即 {@code game-data-game-data-transaction-log}）。
+     * 消费组可能是部署显式配的任意串，所以走不收紧字符集的 {@link KafkaNames#clientId}。
+     */
+    static String clientId(String group) {
+        return KafkaNames.clientId("data-" + group);
     }
 
     private void startRetention() {

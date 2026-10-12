@@ -56,6 +56,27 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <!-- 非缺省部署命名空间的用例（@Tag("namespace")）：另起一个 surefire 执行、新 fork 的 JVM 里把 game.namespace 钉成 nstest
+                         （命名空间进程内定格、没有 reset，只能换 JVM 切换）。缺省执行 default-test 排除这一组（根 pom）。不显式配 skip，
+                         -DskipTests 对两个执行都生效；-Dtest=X 时这里过滤成 0 条不失败。跑测试不要给 mvn 传 -Dgame.namespace（会覆盖两边的钉值）。 -->
+                    <execution>
+                        <id>namespace</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <groups>namespace</groups>
+                            <systemPropertyVariables>
+                                <game.namespace>nstest</game.namespace>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <!-- 在线目录 / 推送的 Redis 值格式 game.discovery.* -->
                 <groupId>io.github.ascopes</groupId>
                 <artifactId>protobuf-maven-plugin</artifactId>

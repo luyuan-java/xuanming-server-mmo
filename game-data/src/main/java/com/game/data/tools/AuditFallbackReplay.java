@@ -1,5 +1,7 @@
 package com.game.data.tools;
 
+import com.game.common.GameNamespace;
+import com.game.common.NamespaceDatabaseCheck;
 import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
 import com.game.data.ops.OpsIds;
@@ -33,14 +35,18 @@ import org.redisson.config.Config;
  *
  * <p>用法（在仓库根目录，game-data 已打包；只回灌<b>已轮转、不再写入</b>的日志文件）：
  * <pre>
- * export GAME_AUDIT_REPLAY_JDBC_URL='jdbc:mysql://127.0.0.1:3306/game?user=...&amp;password=...'
+ * export GAME_NAMESPACE=game        # 部署命名空间，必须与服务进程同值（缺省 game）
+ * export GAME_AUDIT_REPLAY_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名&gt;?user=...&amp;password=...'
  * java -cp game-data/target/game-data-0.1.0-SNAPSHOT.jar -Dloader.main=com.game.data.tools.AuditFallbackReplay \
  *      org.springframework.boot.loader.launch.PropertiesLauncher --file &lt;兜底日志文件&gt; [--dry-run] \
- *      [--redis redis://127.0.0.1:6379] [--redis-database 12]
+ *      [--redis redis://127.0.0.1:6379] [--redis-database 12] [--expect-database &lt;库名&gt;]
  * </pre>
  * JDBC URL（含库名与账号口令）只从环境变量读（{@code --jdbc-url-env} 可换变量名）；Redis 口令取环境变量 {@code GAME_AUDIT_REPLAY_REDIS_PASSWORD}（可不设）。
+ * 部署命名空间（Redis 键前缀，见 {@code GameNamespace}）按「系统属性 {@code game.namespace} → 环境变量 {@code GAME_NAMESPACE} → game」解析后显式定格并打印；
+ * 连上库后、建运维表之前核对 {@code SELECT DATABASE()} 等于期望库名（缺省 = 命名空间；库名另取的部署用 {@code --expect-database} 给出），不一致退出 2。
  * 文件里有 {@code tx_id=0} 的行时才连 Redis：在 {@code NodeTypes.SCENE_GUID} 全服池占一个 worker 发新号（与 scene / game-data 同池，不撞号），
- * 结束时交还。{@code --dry-run} 只解析、报告计数，不连库。退出码 0 成功、1 失败（含有解析不了的行、发号中止、库错误）、2 参数错误。
+ * 结束时交还。{@code --dry-run} 只解析、报告计数，不连库（也不做库名核对）。
+ * 退出码 0 成功、1 失败（含有解析不了的行、发号中止、库错误）、2 参数错误 / 命名空间非法 / 库名核对不过。
  */
 public final class AuditFallbackReplay {
 
@@ -48,8 +54,12 @@ public final class AuditFallbackReplay {
     static final String REDIS_PASSWORD_ENV = "GAME_AUDIT_REPLAY_REDIS_PASSWORD";
     private static final int TIMEOUT_SECONDS = 10;
 
-    /** 解析后的参数。 */
-    record Args(Path file, boolean dryRun, String urlEnv, String redis, int redisDatabase) {
+    /**
+     * 解析后的参数。
+     *
+     * @param expectDatabase 期望的库名（{@code --expect-database}）；null = 取部署命名空间
+     */
+    record Args(Path file, boolean dryRun, String urlEnv, String redis, int redisDatabase, String expectDatabase) {
     }
 
     private AuditFallbackReplay() {
@@ -66,7 +76,16 @@ public final class AuditFallbackReplay {
             args = parse(argv);
         } catch (IllegalArgumentException e) {
             err.println(e.getMessage());
-            err.println("用法：--file <兜底日志文件> [--dry-run] [--jdbc-url-env <变量名>] [--redis <地址>] [--redis-database <库号>]");
+            err.println("用法：--file <兜底日志文件> [--dry-run] [--jdbc-url-env <变量名>] [--redis <地址>] [--redis-database <库号>]"
+                    + " [--expect-database <库名>]");
+            return 2;
+        }
+        // 部署命名空间：在生成第一个名字（节点号租约的 Redis 键）之前显式定格；用 run() 注入的 env 映射，不靠 System.getenv，可测
+        String namespace;
+        try {
+            namespace = defineNamespace(env, err);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            err.println(e.getMessage());
             return 2;
         }
         byte[] content;
@@ -88,6 +107,12 @@ public final class AuditFallbackReplay {
         }
         try (Connection conn = DriverManager.getConnection(url);
              LazyIds ids = new LazyIds(args.redis(), args.redisDatabase(), env.get(REDIS_PASSWORD_ENV), err)) {
+            // 建运维表（OpsTables.sync）之前核对库名：命名空间与库必须属于同一个部署
+            String mismatch = NamespaceDatabaseCheck.verify(conn, args.expectDatabase(), namespace);
+            if (mismatch != null) {
+                err.println(mismatch);
+                return 2;
+            }
             PbMysql db = new PbMysql();
             db.register(AuditReplayLineRow.getDefaultInstance());
             OpsTables.sync(db, conn, Duration.ofMinutes(2));
@@ -105,17 +130,41 @@ public final class AuditFallbackReplay {
         }
     }
 
+    /**
+     * 解析部署命名空间（系统属性 {@code game.namespace} → env 映射里的 {@code GAME_NAMESPACE} → game）、显式定格并打印到 err。
+     *
+     * @return 命名空间
+     * @throws IllegalArgumentException 取值非法
+     * @throws IllegalStateException    进程里已定格为别的值
+     */
+    static String defineNamespace(Map<String, String> env, PrintStream err) {
+        String value = System.getProperty(GameNamespace.PROPERTY);
+        String source = "系统属性 " + GameNamespace.PROPERTY;
+        if (value == null) {
+            value = env.get(GameNamespace.ENV);
+            source = "环境变量 " + GameNamespace.ENV;
+        }
+        if (value == null) {
+            value = GameNamespace.DEFAULT;
+            source = "缺省";
+        }
+        GameNamespace.set(value, "AuditFallbackReplay（" + source + "）");
+        err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + value + "（来源 " + source + "）");
+        return value;
+    }
+
     static Args parse(List<String> argv) {
         Path file = null;
         boolean dryRun = false;
         String urlEnv = DEFAULT_URL_ENV;
         String redis = "redis://127.0.0.1:6379";
         int database = 12;
+        String expectDatabase = null;
         for (int i = 0; i < argv.size(); i++) {
             String arg = argv.get(i);
             switch (arg) {
                 case "--dry-run" -> dryRun = true;
-                case "--file", "--jdbc-url-env", "--redis", "--redis-database" -> {
+                case "--file", "--jdbc-url-env", "--redis", "--redis-database", "--expect-database" -> {
                     if (i + 1 >= argv.size()) {
                         throw new IllegalArgumentException("参数缺值：" + arg);
                     }
@@ -124,6 +173,12 @@ public final class AuditFallbackReplay {
                         case "--file" -> file = Path.of(value);
                         case "--jdbc-url-env" -> urlEnv = value;
                         case "--redis" -> redis = value;
+                        case "--expect-database" -> {
+                            if (value.isBlank()) {
+                                throw new IllegalArgumentException("--expect-database 不能为空");
+                            }
+                            expectDatabase = value;
+                        }
                         default -> {
                             try {
                                 database = Integer.parseInt(value);
@@ -139,7 +194,7 @@ public final class AuditFallbackReplay {
         if (file == null) {
             throw new IllegalArgumentException("缺少 --file");
         }
-        return new Args(file, dryRun, urlEnv, redis, database);
+        return new Args(file, dryRun, urlEnv, redis, database, expectDatabase);
     }
 
     private static void print(PrintStream out, Path file, String sha, FallbackReplayer.Stats s, boolean dryRun) {

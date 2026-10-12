@@ -2,6 +2,7 @@ package com.game.data;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.audit.AuditProperties;
+import com.game.audit.KafkaNames;
 import com.game.audit.KafkaTopicAdmin;
 import com.game.common.token.DubboCallAuth;
 import com.game.data.admin.AdminAuthFilter;
@@ -108,7 +109,12 @@ public class DataConfiguration {
                              PlayerSnapshotMapper playerSnapshot, PlatformTransactionManager transactionManager,
                              DataMetrics metrics, Clock clock) {
         return new DataNode(audit, props, transactionLog, playerSnapshot, new TransactionTemplate(transactionManager),
-                metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), "game-data-admin"), clock);
+                metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), adminClientId()), clock);
+    }
+
+    /** 核对审计 topic 用的 admin 客户端的 client.id：{@code <ns>-data-admin}（缺省 {@code game-data-admin}）。 */
+    static String adminClientId() {
+        return KafkaNames.of("data-admin");
     }
 
     @Bean
