@@ -6,7 +6,7 @@ import com.game.common.NamespaceDatabaseCheck;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
-import com.game.discovery.namespace.GameNamespaceProperties;
+import com.game.discovery.namespace.GameNamespaceBinder;
 import com.game.guild.GuildProperties;
 import com.game.guild.asset.GuildAssetStore;
 import com.game.guild.asset.JdbcGuildAssetStore;
@@ -32,10 +32,8 @@ import org.redisson.api.redisnode.RedisNodes;
 import org.redisson.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.context.properties.bind.BindException;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.env.YamlPropertySourceLoader;
-import org.springframework.core.NestedExceptionUtils;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ClassPathResource;
@@ -58,8 +56,6 @@ final class AssetOpFixEnvironment {
     static final long PING_TIMEOUT_MS = 5_000L;
     /** 提交后同步失效的预算（没有请求预算可继承）。 */
     static final long INVALIDATE_BUDGET_MS = 2_000L;
-    /** 命名空间报错里的来源。 */
-    static final String NAMESPACE_SOURCE = "assetopfix 配置（-f yaml、-D 与环境变量）";
     /** 库名核对报错里给出的应急开关写法。 */
     static final String EXPECT_DATABASE_HINT = "-expect-database <库名>";
 
@@ -173,24 +169,20 @@ final class AssetOpFixEnvironment {
     }
 
     /**
-     * 从同一份配置解析部署命名空间：与服务进程同一个绑定类型 {@link GameNamespaceProperties}、同口径的宽松绑定（{@code -f} yaml、{@code -D}、
-     * 环境变量 {@code GAME_NAMESPACE}），没配取 {@code game}；再按 {@link GameNamespace} 的规则校验（显式空串照样拒绝），打到日志。
+     * 从同一份配置解析部署命名空间：与服务进程、另外两个命令行工具同一个入口 {@link GameNamespaceBinder}（同一个绑定类型
+     * {@code GameNamespaceProperties}、同口径的宽松绑定：{@code -D game.namespace}、环境变量 {@code GAME_NAMESPACE}，再到 {@code -f} 的 yaml），
+     * 没配取 {@code game}；按 {@link GameNamespace} 的规则校验（显式空串照样拒绝），连同来源打到日志。
      * 非法抛 {@link AssetOpFixMain.PreconditionException}（退出 2，连库、连 Redis 之前）。
      */
     static GameNamespace resolveNamespace(StandardEnvironment env) {
-        GameNamespace namespace;
+        GameNamespaceBinder.Bound bound;
         try {
-            GameNamespaceProperties props = Binder.get(env).bindOrCreate("game", GameNamespaceProperties.class);
-            namespace = GameNamespace.of(props.namespace(), NAMESPACE_SOURCE);
+            bound = GameNamespaceBinder.bind(env);
         } catch (IllegalArgumentException e) {
             throw new AssetOpFixMain.PreconditionException(e.getMessage());
-        } catch (BindException e) {
-            Throwable cause = NestedExceptionUtils.getMostSpecificCause(e);
-            throw new AssetOpFixMain.PreconditionException("部署命名空间 " + GameNamespace.PROPERTY + "（环境变量 " + GameNamespace.ENV
-                    + "）绑定失败（来源 " + NAMESPACE_SOURCE + "）: " + cause.getClass().getSimpleName() + ": " + cause.getMessage());
         }
-        log.info("部署命名空间 {}={}", GameNamespace.PROPERTY, namespace);
-        return namespace;
+        log.info("部署命名空间 {}={}（来源 {}）", GameNamespace.PROPERTY, bound.namespace(), bound.origin());
+        return bound.namespace();
     }
 
     /** 读配置：{@code -f} 给的 yaml 文件，缺省 classpath 的 application.yaml；系统属性与环境变量优先（StandardEnvironment 的顺序）。 */

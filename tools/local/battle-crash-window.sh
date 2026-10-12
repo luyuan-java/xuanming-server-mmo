@@ -112,8 +112,8 @@ validate_namespace() {
 
 # 部署命名空间：重启出来的进程必须与还在跑的进程同一个。不同就是另一套部署——同一套 infra 上另有缺省 game 的部署时，以 game 重启的进程会
 # 登记进对方的 scene 目录、占对方的节点号租约、连对方的库（跨租户写入），crash-window 的结论也是假的。start-slice.sh 把切片生效的值写在
-# run/game-namespace：没设 GAME_NAMESPACE 就用它；设了而与它不同就拒绝（点名两个值）；两头都没有说明切片不是当前的 start-slice.sh 起的，同样拒绝
-# （不回落 game）。最后按与进程同一套规则校验。
+# run/game-namespace（stop-slice.sh 全部停完后删掉）：没设 GAME_NAMESPACE 就用它；设了而与它不同就拒绝（点名两个值）；两头都没有说明切片已经停掉、
+# 或不是当前的 start-slice.sh 起的，同样拒绝（不回落 game）。最后按与进程同一套规则校验。
 resolve_slice_namespace() {
   local recorded=""
   if [[ -f run/game-namespace ]]; then
@@ -121,7 +121,7 @@ resolve_slice_namespace() {
   fi
   if [[ -z "${GAME_NAMESPACE+x}" ]]; then
     if [[ ! -f run/game-namespace ]]; then
-      echo "没有环境变量 GAME_NAMESPACE，也没有 run/game-namespace：切片不是当前的 tools/local/start-slice.sh 起的；导出启动切片时的 GAME_NAMESPACE 再执行" >&2
+      echo "没有环境变量 GAME_NAMESPACE，也没有 run/game-namespace：切片已用 stop-slice.sh 停掉（停完会删这条记录），或不是当前的 tools/local/start-slice.sh 起的；切片在跑就导出启动它时的 GAME_NAMESPACE 再执行" >&2
       return 1
     fi
     GAME_NAMESPACE=$recorded

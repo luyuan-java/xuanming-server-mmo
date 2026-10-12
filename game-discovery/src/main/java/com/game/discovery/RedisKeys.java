@@ -9,8 +9,8 @@ import java.util.Optional;
  * 见 {@link GameNamespace}），与 mmorpg 的键空间、以及共用同一个 Redis 的别的部署隔离。下面各方法注释里的 {@code game:} 均指缺省命名空间。
  *
  * <p>带命名空间的不可变实例（同 Spring Session 的 {@code spring.session.redis.namespace}、Spring Cache 的 key-prefix 的做法）：Spring 进程里由
- * game-discovery 的 {@code GameNamespaceAutoConfiguration} 按校验过的 {@code game.namespace} 注册成唯一的 bean，经构造器注入给使用方；
- * 不起 Spring 的命令行工具用 {@code GameNamespace.fromEnv(System.getenv())} 取值后自己 {@code new}；测试直接构造任意命名空间的实例。
+ * game-discovery 的 {@code GameNamespaceAutoConfiguration} 按校验过的 {@code game.namespace} 注册成 bean（使用方自己定义了同类 bean 时让路），经构造器注入给使用方；
+ * 不起 Spring 的命令行工具用 {@code GameNamespaceBinder} 按服务进程同口径绑定命名空间后自己 {@code new}；测试直接构造任意命名空间的实例。
  * main 代码不得静态持有它，也不得在装配类与命令行工具之外 {@code new} 它（game-robot 的 {@code NamespaceLiteralGuardTest} 守着）。
  * 前缀之后的结构（节点类型、hash tag、字段名）不随命名空间变。不用 Redisson 的 NameMapper：它管不到 Lua 里经 ARGV 拼的前缀和 SCAN 模式。
  */

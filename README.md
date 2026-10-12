@@ -90,9 +90,11 @@ GAME_ZONES=2 tools/local/start-slice.sh         # 再起区 2 的 scene 与 gate
 
 > **部署命名空间** `GAME_NAMESPACE`（可选，缺省 `game`）：Redis 键前缀 `<ns>:`、Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 都取它，
 > 多个游戏（或多套部署）因此能共用同一套中间件而互不串数据。缺省值下所有名字与以前逐字节相同。合法值 `[a-z][a-z0-9]{0,27}`
-> （1–28 个字符，不能是 mysql / sys / public），非法即拒启（Spring Boot 的标准绑定校验报告）；只经环境变量给，一个部署的全部进程与命令行工具必须同值，定下后不能改。
-> 起切片时写 `GAME_NAMESPACE=t1 tools/local/start-slice.sh`：脚本先校验、把生效的值记进 `run/game-namespace`（`battle-crash-window.sh` 读回核对）；
-> 设成空串不会被换成 `game`，照样拒绝。**库名必须等于命名空间**：连库的服务进程与三个命令行工具（AuditFallbackReplay、assetopfix、PasswordAdmin）启动时核对 `DATABASE()`，
+> （1–28 个字符，不能是 mysql / sys / public），非法即拒启（Spring Boot 的标准绑定校验报告）；推荐经环境变量给（命令行工具与服务进程同口径绑定，
+> `-Dgame.namespace` 两边也都认），一个部署的全部进程与命令行工具必须同值，定下后不能改。
+> 起切片时写 `GAME_NAMESPACE=t1 tools/local/start-slice.sh`：脚本先校验；本检出已有切片在跑就拒绝（先 `stop-slice.sh`）；再把生效的值记进 `run/game-namespace`
+> （`battle-crash-window.sh` 读回核对，`stop-slice.sh` 停完后删掉）；设成空串不会被换成 `game`，照样拒绝。在 export 过 `GAME_NAMESPACE` 的 shell 里照样可以跑
+> `./mvnw test`（surefire 不把它传给测试进程），但不要给 mvn 传 `-Dgame.namespace`（AGENTS.md §4）。**库名必须等于命名空间**：连库的服务进程与三个命令行工具（AuditFallbackReplay、assetopfix、PasswordAdmin）启动时核对 `DATABASE()`，
 > 库名不叫 `game` 的存量环境升级前先看 [db-migrations.md M13](docs/design/db-migrations.md)。
 > nacos profile 下 Nacos namespace 不随它自动变：多个部署共用一个 Nacos 时在 `GAME_NACOS_ADDR` 里带 `?namespace=<ID>`（或用 Dubbo 的配置项 `dubbo.registry.parameters.namespace`）
 > 显式配置，并先在 Nacos 建好 ID 等于该值的命名空间；不设则落在 public（与以前相同）。环境变量 `DUBBO_REGISTRY_PARAMETERS_NAMESPACE` Dubbo 不认，别用。

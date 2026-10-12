@@ -3,6 +3,7 @@
 # 场景节点按实例名停：game-scene-2（GAME_SCENE_NODES=2 时才有）先于 game-scene；没有 PID 文件的实例跳过。
 # 区 2 的两个实例（GAME_ZONES=2 时才有，批次 6.5）紧挨着区 1 的同类先停：game-gate-z2 在 game-gate 之前，game-scene-z2 在 game-scene-2 之前
 # ——仍是启动的逆序（启动时它们各排在区 1 的同类之后）。本脚本不读 GAME_ZONES / GAME_SCENE_NODES：只看 PID 文件，哪种切片都用同一条命令停。
+# 全部停完之后删掉 start-slice.sh 记下的切片命名空间 run/game-namespace（见文件末尾）。
 #
 # game-match 最先停（批次 6.4）：它是 game-battle（建房 / 销毁 / 补签）与 game-scene（备战 / 取消）的调用方，先停它，后面的进程停下时就不会有
 # 开到一半的局——它停机时先停凑单、撤 Dubbo，再有界等在途的 gather（至多 10 s）跑完，这段时间 game-battle 与 game-scene 都还在。
@@ -41,3 +42,9 @@ for name in game-match game-battle game-gateway game-gate game-scene-2 game-scen
   esac
   stop_one "$name"
 done
+
+# 全部停完（run/pids 下没有 PID 文件了）才删切片的命名空间记录 run/game-namespace（start-slice.sh 写的）：停掉的切片不再有「生效的命名空间」，
+# battle-crash-window.sh 不会拿它去重启进程；下一次 start-slice.sh 按它自己的 GAME_NAMESPACE 重新记。还有 PID 文件（不在上面名单上的实例）就留着
+if ! compgen -G "run/pids/*.pid" > /dev/null; then
+  rm -f run/game-namespace
+fi

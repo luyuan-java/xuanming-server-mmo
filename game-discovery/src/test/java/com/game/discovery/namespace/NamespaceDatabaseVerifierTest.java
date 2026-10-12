@@ -16,16 +16,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.context.properties.bind.validation.BindValidationException;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
 
 /**
  * 连库服务的库名核对（库用 Mockito 模拟 MySQL 的连接）：DataSource 交给任何使用者之前核对 {@code DATABASE()} 等于命名空间，不一致拒启且使用者没有被创建
- * （{@code spring.sql.init} 建表、pbmysql 同步都是这样的使用者）；应急开关 {@code game.mysql.expect-database}（环境变量 {@code GAME_MYSQL_EXPECT_DATABASE}）
- * 放行偏离规格的库名；连不上库也拒启，报错不带连接串；不是 MySQL 系（测试用的 H2）跳过。
+ * （{@code spring.sql.init} 建表、pbmysql 同步都是这样的使用者）；应急开关 {@code game.mysql.expect-database}（{@link GameMysqlProperties}，环境变量
+ * {@code GAME_MYSQL_EXPECT_DATABASE} / {@code GAME_MYSQL_EXPECTDATABASE}）放行偏离规格的库名，给了空值由标准的绑定校验拒启；连不上库也拒启，报错不带连接串；
+ * 不是 MySQL 系（测试用的 H2）跳过。
  */
 class NamespaceDatabaseVerifierTest {
 
@@ -104,19 +107,36 @@ class NamespaceDatabaseVerifierTest {
             assertThat(ctx).hasFailed();
             assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("期望 game（应急开关 game.mysql.expect-database");
         });
-        runner(legacy).withPropertyValues("game.mysql.expect-database= ").run(ctx -> {
-            assertThat(ctx).hasFailed();
-            assertThat(ctx.getStartupFailure()).rootCause().isInstanceOf(IllegalStateException.class).hasMessageContaining("空值");
-        });
+        // 空值：由 GameMysqlProperties 的 @Pattern 在绑定时拒绝（Spring Boot 的标准绑定校验报告），核对器拿不到它，使用者也没被创建
+        for (String blank : new String[] {"", " "}) {
+            runner(legacy).withInitializer(ctx -> ctx.getEnvironment().getPropertySources().addFirst(
+                    new MapPropertySource("exact", Map.of("game.mysql.expect-database", blank)))).run(ctx -> {
+                        assertThat(ctx).as("[%s]", blank).hasFailed();
+                        assertThat(ctx.getStartupFailure()).as("[%s]", blank).hasRootCauseInstanceOf(BindValidationException.class);
+                        assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("expectDatabase").hasMessageContaining("不用应急开关就不要设它");
+                        assertThat(SchemaUser.CREATED).isFalse();
+                    });
+        }
+    }
+
+    private static ApplicationContextRunner withEnv(ApplicationContextRunner runner, Map<String, Object> env) {
+        return runner.withInitializer(ctx -> ctx.getEnvironment().getPropertySources().replace(
+                StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                new SystemEnvironmentPropertySource(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, env)));
     }
 
     @Test
-    void 应急开关的环境变量写法GAME_MYSQL_EXPECT_DATABASE也认() throws SQLException {
-        runner(mysql("legacy_db")).withInitializer(ctx -> ctx.getEnvironment().getPropertySources().replace(
-                        StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                        new SystemEnvironmentPropertySource(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                                Map.of("GAME_MYSQL_EXPECT_DATABASE", "legacy_db"))))
-                .run(ctx -> assertThat(ctx).hasNotFailed());
+    void 应急开关的环境变量两种写法都认_文档写法GAME_MYSQL_EXPECT_DATABASE与规范写法GAME_MYSQL_EXPECTDATABASE() throws SQLException {
+        withEnv(runner(mysql("legacy_db")), Map.of("GAME_MYSQL_EXPECT_DATABASE", "legacy_db")).run(ctx -> assertThat(ctx).hasNotFailed());
+        withEnv(runner(mysql("legacy_db")), Map.of("GAME_MYSQL_EXPECTDATABASE", "legacy_db")).run(ctx -> assertThat(ctx).hasNotFailed());
+        withEnv(runner(mysql("legacy_db")), Map.of("GAME_MYSQL_EXPECT_DATABASE", "")).run(ctx -> {
+            assertThat(ctx).as("环境变量给空值同样拒启").hasFailed();
+            assertThat(ctx.getStartupFailure()).hasRootCauseInstanceOf(BindValidationException.class);
+        });
+        withEnv(runner(mysql("game")), Map.of("GAME_MYSQL_PASSWORD", "x", "GAME_MYSQL_USER", "u")).run(ctx -> {
+            assertThat(ctx).as("同一前缀下的其它变量（口令、账号）不绑定、不影响").hasNotFailed();
+            assertThat(ctx.getBean(GameMysqlProperties.class).expectDatabase()).isNull();
+        });
     }
 
     @Test

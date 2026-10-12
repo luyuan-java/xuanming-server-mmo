@@ -36,9 +36,11 @@ class NamespaceKafkaTopicsIntegrationTest {
                     .containsEntry("nstest-transaction-log-g" + GENERATION, AuditTopics.TRANSACTION_LOG_PARTITIONS)
                     .containsEntry("nstest-player-snapshot-g" + GENERATION, AuditTopics.PLAYER_SNAPSHOT_PARTITIONS)
                     .containsEntry("nstest-battle-result-g" + GENERATION, BattleResultTopics.PARTITIONS);
-            assertThat(admin.partitionCounts(List.of(new AuditTopics(game).transactionLog(GENERATION).name(),
-                    new BattleResultTopics(game).name(GENERATION)), TIMEOUT))
-                    .as("只建本命名空间的 topic").isEmpty();
+            // 反向断言用字面量金样，不由被测代码现算：缺省命名空间的名字生成出错（算出一个不存在的名字）时，现算的名字查不到会让 isEmpty() 空洞地通过
+            List<String> defaultNamespaceTopics = List.of("game-transaction-log-g" + GENERATION, "game-battle-result-g" + GENERATION);
+            assertThat(List.of(new AuditTopics(game).transactionLog(GENERATION).name(), new BattleResultTopics(game).name(GENERATION)))
+                    .as("金样就是缺省命名空间实际生成的名字").isEqualTo(defaultNamespaceTopics);
+            assertThat(admin.partitionCounts(defaultNamespaceTopics, TIMEOUT)).as("只建本命名空间的 topic").isEmpty();
         }
     }
 }

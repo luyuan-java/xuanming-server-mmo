@@ -317,11 +317,14 @@
 3. **项目名固定为 `name: game-java`，不写 `container_name`**。基线的项目名缺省取目录名，并且写死了 `kafka` / `redis` / `mysql` 这些容器名。两版不得共享存储（architecture.md:27），只能靠项目名把卷隔开。
 4. **宿主端口可以改**：用 `GAME_MYSQL_HOST_PORT`、`GAME_REDIS_HOST_PORT`、`GAME_KAFKA_HOST_PORT`，避免与开发机上已经在跑的本地进程或基线的 compose 冲突。
 5. **多个游戏 / 多套部署共用一套 infra**（2026-10-12 补记）：各部署的进程各设不同的部署命名空间 `GAME_NAMESPACE`（缺省 `game`；architecture.md §6.2）。Redis 键前缀 `<ns>:`、
-   Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 随之分开。`infra.yaml` 的 `MYSQL_DATABASE` 写 `${GAME_NAMESPACE-game}`：只决定第一次初始化时预建哪个库
-   （没设时预建 game；共用 infra 时可设空值、什么都不预建，各部署的库靠 `createDatabaseIfNotExist` 或 DBA），不决定任何进程的命名空间。
-   这只是命名隔离，Redis / Kafka 没有按租户的账号；要强隔离就各用一套 infra。
-   - **缺省值的写法**：单租户模板（`start-slice.sh`、`infra.yaml`）写不带冒号的 `${GAME_NAMESPACE-game}`——只在没设时取 game，设了空串照原样交给进程拒启
-     （`start-slice.sh` 起进程之前就按同一套规则校验，并把生效的值记进 `run/game-namespace` 供 `battle-crash-window.sh` 读回核对）；
+   Kafka topic / 消费组 `<ns>-`、MySQL 库 `<ns>` 随之分开。共用的 infra 不属于任何部署，**不读 `GAME_NAMESPACE`**：`infra.yaml` 的 `MYSQL_DATABASE` 写
+   `${GAME_MYSQL_INIT_DATABASE-game}`，只决定第一次初始化时预建哪个库（没设时预建缺省部署的 game，#16 的 game-team 冷启动照旧兜住；只给某个部署用时设成它的 `<ns>`；
+   设空值什么都不预建，各部署的库靠 `createDatabaseIfNotExist`——game-login 先于 game-team 起——或 DBA）。以前复用 `GAME_NAMESPACE` 并拿空值当「不预建」的哨兵：
+   同一份 `.env` 里同一个变量在 infra 一节与整栈一节语义不同，而且开发者为跑 t1 切片在 shell 里导出的 `GAME_NAMESPACE` 会优先于 `.env`、决定 infra 首次初始化预建
+   哪个库（2026-10-12 评审），所以拆开。这只是命名隔离，Redis / Kafka 没有按租户的账号；要强隔离就各用一套 infra。
+   - **缺省值的写法**：单租户模板（`start-slice.sh`）写不带冒号的 `${GAME_NAMESPACE-game}`——只在没设时取 game，设了空串照原样交给进程拒启
+     （`start-slice.sh` 起进程之前就按同一套规则校验，本检出已有切片在跑就拒绝启动、不碰记录与 PID 文件，再把生效的值记进 `run/game-namespace` 供
+     `battle-crash-window.sh` 读回核对，`stop-slice.sh` 全部停完后删掉这条记录）；
      **共用 infra 的整栈模板**给每个 Java 服务写 `GAME_NAMESPACE: ${GAME_NAMESPACE:?需要 GAME_NAMESPACE}`，不给缺省值，缺省部署也显式写 game，漏设时 compose
      启动前就失败（§2.5 的 `x-java-env`）。**不要写 `${GAME_NAMESPACE:-game}`**：它把空串也换成 game，`GAME_NAMESPACE=$TENANT` 而 `TENANT` 恰好没设时，进程会以 game
      加入同一套 infra 上缺省部署的键空间、节点号租约池与库——进程侧对空串的拒启就此失效。
@@ -344,7 +347,7 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ${GAME_MYSQL_PASSWORD:?需要环境变量 GAME_MYSQL_PASSWORD}
       # 预建库：game-team 的 URL 不带 createDatabaseIfNotExist（game-team application.yaml:19），冷库上先起它会失败
-      MYSQL_DATABASE: game
+      MYSQL_DATABASE: ${GAME_MYSQL_INIT_DATABASE-game}   # 2026-10-12：预建哪个库是独立变量，不读部署命名空间（§2.3 第 5 条）
     ports: ["127.0.0.1:${GAME_MYSQL_HOST_PORT:-3306}:3306"]
     volumes: [mysql-data:/var/lib/mysql]
     healthcheck:
@@ -458,7 +461,7 @@ services:
 |---|---|---|---|---|
 | game-scene-manager | — | DUBBO | — | redis |
 | game-friend / guild / trade | — | MYSQL、DUBBO；guild 加 ASSET_OP_SECRET_GUILD；trade 加 ADMIN_TOKEN（可选） | trade 18111 | mysql、redis |
-| game-team | — | MYSQL、DUBBO | — | mysql（`game` 库由 `MYSQL_DATABASE` 预建）、redis |
+| game-team | — | MYSQL、DUBBO | — | mysql（缺省部署的 `game` 库由 `MYSQL_DATABASE` 预建，即 `GAME_MYSQL_INIT_DATABASE` 没设时；别的部署见 §8 #16）、redis |
 | game-chat | — | DUBBO | — | redis |
 | game-data | — | MYSQL、ADMIN_TOKEN（可选） | 18106 | mysql、redis、kafka |
 | game-gate | `GAME_ADVERTISE_HOST=${GAME_GATE_PUBLIC_HOST:-127.0.0.1}`；`GAME_LOGIN_URL` / `GAME_FRIEND_URL` / `GAME_CHAT_URL` / `GAME_TEAM_URL` / `GAME_GUILD_URL` / `GAME_TRADE_URL`（`tri://<服务名>:<端口>`） | DUBBO、GATE_TOKEN、NODE_LINK、GM（可选） | `${GAME_GATE_PUBLISH_IP:-127.0.0.1}:11000:11000` | game-scene、game-login、五个社交服务 |
@@ -903,7 +906,9 @@ exit 0
 | `GAME_BATTLE_TOKEN_SECRET`（6.2） | battle；至少 32 字节，且不得与 gate 的密钥相同 | 拒启 | `:?` |
 | `GAME_ADMIN_TOKEN` | data、trade、battle（dev 接口）、robot | `/admin/**` 一律回 503 | `:-`（可选） |
 | `GAME_GM_ADMIN_SECRET` | gate、scene | GM 停机接口一律拒绝 | `:-`（可选） |
-| `GAME_NAMESPACE`（不是秘密，2026-10-12 补记；部署命名空间，与镜像命名空间 `GAME_IMAGE_NAMESPACE` 无关） | 全部 13 个进程，以及命令行工具 AuditFallbackReplay、assetopfix、PasswordAdmin；**一个部署内必须同值**（不一致不串数据，但彼此看不见；连库的进程与工具还会因库名核对拒启） | 单租户缺省 `game`；非法值（大写、空串、首尾空白、超过 28 个字符、mysql / sys / public……）拒启。Nacos namespace 不由它派生（另在 `GAME_NACOS_ADDR` 里带 `?namespace=`） | 整栈 `:?`（必填，§2.3 第 5 条）；单租户模板 `-game`（不带冒号）；不写 `:-game` |
+| `GAME_NAMESPACE`（不是秘密，2026-10-12 补记；部署命名空间，与镜像命名空间 `GAME_IMAGE_NAMESPACE` 无关） | 全部 13 个进程，以及命令行工具 AuditFallbackReplay、assetopfix、PasswordAdmin；**一个部署内必须同值**（不一致不串数据，但彼此看不见；连库的进程与工具还会因库名核对拒启） | 单租户缺省 `game`；非法值（大写、空串、首尾空白、超过 28 个字符、mysql / sys / public……）拒启。Nacos namespace 不由它派生（另在 `GAME_NACOS_ADDR` 里带 `?namespace=`） | 整栈 `:?`（必填，§2.3 第 5 条）；单租户模板（`start-slice.sh`）`-game`（不带冒号）；不写 `:-game`；infra 不读它 |
+| `GAME_MYSQL_INIT_DATABASE`（不是秘密，2026-10-12 补记） | 只有 infra.yaml 的 mysql 容器（`MYSQL_DATABASE`，第一次初始化数据目录时预建的库）；共用的 infra 不属于任何部署，所以与 `GAME_NAMESPACE` 分开 | 没设 = 预建缺省部署的 `game`（#16 的 game-team 冷启动靠它）；设成某个部署的 `<ns>` 就预建它；空值 = 什么都不预建 | `-game`（不带冒号：空值就是「不预建」） |
+| `GAME_NACOS_ADDR`（不是秘密，2026-10-12 补记） | 只在 nacos profile 下：10 个用注册中心的进程（`application-nacos.yaml` 拼成 `nacos://${GAME_NACOS_ADDR}`）；compose 整栈与本机切片走 local profile，不读 | 缺省 `127.0.0.1:8848`，落在 Nacos 的 public。多个部署共用一个 Nacos 时**推荐在这里带 `?namespace=<ID>`**（如 `127.0.0.1:8848?namespace=t1`），并先建好 ID 恰好等于该值的命名空间；环境变量 `DUBBO_REGISTRY_PARAMETERS_NAMESPACE` Dubbo 3.3.6 不认（architecture.md §6.2） | 7.6 定注册中心时再进模板；compose 不用 |
 
 ### 6.2 注入方式
 
@@ -1018,7 +1023,9 @@ mmorpg 侧早就有这些东西，交付说明里写「mmorpg 已有，本批 Ja
     Docker Hub 对匿名拉取有频率限制，遇到 `toomanyrequests` 时先重跑。如果频繁出现，再考虑镜像代理，归 7.6。
 14. **失败只能通过 annotation 看到**：job 日志匿名读不到；制品要登录才能下载，只有用户看得到；Step Summary 只能在网页上看。所以每一种失败路径都必须变成 `::error`，并且总数不超过上限（§4.2、§4.8）。
 15. **game-battle 的通告地址一址两用**（§2.6）。不解决的话，6.2 在 compose 里只能二选一：要么客户端连不上，要么控制面连不上。
-16. **game-team 冷启动**：game-team 的 URL 不带 `createDatabaseIfNotExist`，靠 infra 里的 `MYSQL_DATABASE: game` 兜住。在不带 initdb 的环境（比如 7.6 的托管数据库）里，还得另外保证 login 先起来。
+16. **game-team 冷启动**：game-team 的 URL 不带 `createDatabaseIfNotExist`，靠 infra 里的 `MYSQL_DATABASE` 兜住（2026-10-12 起取 `${GAME_MYSQL_INIT_DATABASE-game}`：
+    没设时预建缺省部署的 `game`；共用 infra 的非缺省部署要么在 infra 首次初始化时让 `GAME_MYSQL_INIT_DATABASE` 等于它的 `<ns>`，要么保证 login 先于 team 起来——
+    `start-slice.sh` 就是这个次序）。在不带 initdb 的环境（比如 7.6 的托管数据库）里，还得另外保证 login 先起来。
 17. **`GAME_RUN_MODE=dev`**：stack 缺省用 dev，GM 指令和 trade 播种都是开着的。stack 是开发 / CI 用的东西，端口只发布到 127.0.0.1。要对外演示，必须改用 `GAME_RUN_MODE=prod`，并重新评估要发布哪些端口。
 18. **通过端口映射进来的客户端 IP 都是 bridge 网关**：gateway 的 IP 限流和排队会把所有宿主请求看成同一个 IP。冒烟时的 ratelimit 场景依赖这一点，所以放在最后跑（§4.5 第 9 步）。生产入口的真实 IP 由 7.6 处理（`game.gateway.rate-limit.trusted-proxies`）。
 19. **并行批次**：5.2 和 6.2 会改变 stack 的形状。漂移守卫只管模块清单；端口、秘密、依赖关系仍然要由新增模块的那一批自己登记（§0.4 的规则）。

@@ -138,7 +138,19 @@ class PasswordAdminTest {
     @Test
     void 命名空间与库名一致_打印命名空间与来源() {
         assertThat(run("s3cret\ns3cret\n", "--account", "robot_0001", "--password-stdin")).isZero();
-        assertThat(err()).contains("部署命名空间 game.namespace=" + database + "（来源 环境变量 GAME_NAMESPACE）");
+        assertThat(err()).contains("部署命名空间 game.namespace=" + database + "（来源 \"GAME_NAMESPACE\" from property source \"systemEnvironment\"）");
+    }
+
+    @Test
+    void 系统属性game_namespace与服务进程同样认_优先于环境变量() throws SQLException {
+        // 以前只认精确的环境变量，-Dgame.namespace 被静默忽略、回落到 game，只能靠库名核对兜住（评审意见）
+        int code = PasswordAdmin.run(List.of("--account", "robot_0001", "--password-stdin"),
+                Map.of(PasswordAdmin.DEFAULT_URL_ENV, url, "GAME_NAMESPACE", "fromenv"), Map.of("game.namespace", database), null,
+                stdin("s3cret\ns3cret\n"), DriverManager::getConnection, new PrintStream(out, true, StandardCharsets.UTF_8),
+                new PrintStream(err, true, StandardCharsets.UTF_8));
+        assertThat(code).isZero();
+        assertThat(err()).contains("部署命名空间 game.namespace=" + database + "（来源 \"game.namespace\" from property source \"systemProperties\"）");
+        assertThat(hashOf("robot_0001")).startsWith("$argon2id$");
     }
 
     @Test

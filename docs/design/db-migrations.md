@@ -342,7 +342,7 @@ SHOW CREATE TABLE match_rating_applied;     -- 主键 battle_id；有 KEY idx_ma
 ## M12：库改名 `xm_java` → `game`，连带 Redis 键前缀、Kafka topic 与环境变量改名（2026-10-12，`8cbba6c`）
 
 **原因**：用户要求这套服务端可复用于别的游戏，名字里不再带本游戏的缩写 `xm`。全仓的 `xm` 前缀统一改为 `game`：库 `xm_java` → `game`、库用户 `xm_app` → `game_app`；
-Redis 键前缀 `xm:` → `game:`（`RedisKeys.PREFIX`）；Kafka topic `xm-*` → `game-*`（如 `game-transaction-log-g<N>`、`game-player-snapshot-g<N>`、`game-battle-result-g<代次>`）、消费组同改；
+Redis 键前缀 `xm:` → `game:`（`RedisKeys.PREFIX`——当时的静态写法；M13 起是注入的实例方法 `prefix()`，缺省命名空间下值仍是 `game:`）；Kafka topic `xm-*` → `game-*`（如 `game-transaction-log-g<N>`、`game-player-snapshot-g<N>`、`game-battle-result-g<代次>`）、消费组同改；
 环境变量 `XM_*` → `GAME_*`；配置键 `xm.*` → `game.*`。表结构**没有任何变化**。
 
 **行为变化**：无客户端可见变化。新旧进程**不能混跑**：Dubbo 鉴权附件键、排队令牌的派生域串、节点号租约的 Redis 键（`game:node-id-epoch:*`）都随前缀改了名，
@@ -379,11 +379,12 @@ SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'game';   --
 
 **原因**：同一套 MySQL / Redis / Kafka（以及 Nacos）上要跑多个游戏或多套部署（architecture.md §6.2）。新增配置项 `game.namespace`（环境变量 `GAME_NAMESPACE`，
 缺省 `game`）：MySQL 库名 = `<ns>`（各 `application.yaml` 的 JDBC URL 写 `${game.namespace:game}`，部署只覆盖 host / port）、Redis 键前缀 `<ns>:`、
-Kafka topic / 消费组 / client.id 前缀 `<ns>-`、帮会建哨兵行的命名锁 `game_guild_insert_guard_init:<ns>`、compose 的 `MYSQL_DATABASE` 取 `${GAME_NAMESPACE-game}`。
+Kafka topic / 消费组 / client.id 前缀 `<ns>-`、帮会建哨兵行的命名锁 `game_guild_insert_guard_init:<ns>`。compose 的 infra 不读它：预建哪个库由独立变量
+`GAME_MYSQL_INIT_DATABASE` 决定（`MYSQL_DATABASE: ${GAME_MYSQL_INIT_DATABASE-game}`，没设仍预建 game，与以前相同）。
 
 **机制**（注入式，architecture.md §6.2）：`game.namespace` 由 game-discovery 的 `GameNamespaceProperties`（`@ConfigurationProperties` + `@Validated`）绑定校验，
-自动配置注册 `GameNamespace` / `RedisKeys` / `KafkaNames` 三个 bean 注入给使用方；没有进程级全局值。命令行工具 AuditFallbackReplay、PasswordAdmin 只认环境变量
-`GAME_NAMESPACE`，assetopfix 从它的 `-f` yaml 与环境变量绑定同一个属性类型。
+自动配置注册 `GameNamespace` / `RedisKeys` / `KafkaNames` 三个 bean 注入给使用方；没有进程级全局值。命令行工具 AuditFallbackReplay、PasswordAdmin、assetopfix
+经 `GameNamespaceBinder` 与服务进程同口径绑定同一个属性类型（`-Dgame.namespace` 优先于环境变量 `GAME_NAMESPACE`，assetopfix 再到它的 `-f` yaml）。
 
 **行为变化**：
 - **名字**：缺省值下库名、每一个键名、频道、topic、消费组、client.id、锁名都与 M12 之后逐字节相同（金样测试钉住）。
@@ -395,12 +396,12 @@ Kafka topic / 消费组 / client.id 前缀 `<ns>-`、帮会建哨兵行的命名
 
   按规格部署（URL 的库名段就是 `game`）的环境照常通过，什么都不用做。**库名不叫 `game` 的存量部署**（整串覆盖了 `spring.datasource.url`，或回灌 URL /
   `-f` yaml / `GAME_PASSWORD_ADMIN_JDBC_URL` 指向别的库）升级后会拒启 / 退出 2：要么把库迁成命名空间同名（推荐，下面「给一个已有部署改命名空间」的第 1 步），
-  要么应急给出期望库名——服务进程设 `GAME_MYSQL_EXPECT_DATABASE=<库名>`（`game.mysql.expect-database`，放行时打 WARN），工具加 `--expect-database <库名>`
-  （assetopfix 是 `-expect-database`）。应急开关意味着部署偏离规格，应安排迁移。
+  要么应急给出期望库名——服务进程设 `GAME_MYSQL_EXPECT_DATABASE=<库名>`（`game.mysql.expect-database`；规范写法 `GAME_MYSQL_EXPECTDATABASE` 同样认；放行时打 WARN，
+  给了空值按标准的绑定校验报告拒启），工具加 `--expect-database <库名>`（assetopfix 是 `-expect-database`）。应急开关意味着部署偏离规格，应安排迁移。
 - **消费组缺省值的出处**：game-match 的 `consumer-group` 从 yaml 挪到代码（`KafkaNames.matchRatingGroup()`，值不变）；显式配置的值照旧生效。
 
 **新库 / 存量库**：都无需改表。新命名空间的库由进程的 `createDatabaseIfNotExist` 建（game-team 的 URL 不带它，先起 game-login），表由各进程照常建；
-compose 的 `MYSQL_DATABASE` 只在第一次初始化数据目录时生效（共用 infra 时可设空值、不预建）。按部署分账号时：``CREATE USER '<ns>_app'…; GRANT … ON `<ns>`.* TO '<ns>_app'…``
+compose 的 `MYSQL_DATABASE`（取 `GAME_MYSQL_INIT_DATABASE`，没设为 game）只在第一次初始化数据目录时生效（设成空值即不预建）。按部署分账号时：``CREATE USER '<ns>_app'…; GRANT … ON `<ns>`.* TO '<ns>_app'…``
 （命名空间最长 28 个字符，账号名不超过 MySQL 的 32 字符上限）。nacos profile 下多个部署共用一个 Nacos 时，各部署在 `GAME_NACOS_ADDR` 里带 `?namespace=<ID>`（或配 `dubbo.registry.parameters.namespace`；环境变量 `DUBBO_REGISTRY_PARAMETERS_NAMESPACE` Dubbo 不认），
 并先在 Nacos 建好 **ID 恰好等于该值** 的命名空间（不自动推导，不设则与以前一样落在 public）。
 
@@ -415,7 +416,7 @@ compose 的 `MYSQL_DATABASE` 只在第一次初始化数据目录时生效（共
 3. Kafka：旧 topic 里没消费完的流水 / 快照 / 对局结果先消费完；新 topic 由进程启动时按新名创建，消费组位点从头开始（审计落库按主键幂等，评分入账按 battle_id 幂等）；
 4. Nacos（nacos profile，且这个部署要与别的部署共用 Nacos 时）：命名空间不自动跟着变，在 `GAME_NACOS_ADDR` 里带 `?namespace=<值>`（建议取 `<new>`；或配 `dubbo.registry.parameters.namespace`），
    并先在 Nacos 控制台或 OpenAPI 建好**命名空间 ID = 该值**的 namespace（显示名随意；不填 ID 会生成 UUID，对不上）。环境变量 `DUBBO_REGISTRY_PARAMETERS_NAMESPACE` 与 `parameters[namespace]` 方括号写法 Dubbo 都不认；
-5. 全部进程与命令行工具换成同一个 `GAME_NAMESPACE` 再起（只经环境变量注入）。
+5. 全部进程与命令行工具换成同一个 `GAME_NAMESPACE` 再起（推荐经环境变量给；工具与服务进程同口径绑定，给服务进程的值原样给工具）。
 
 **核对**：
 

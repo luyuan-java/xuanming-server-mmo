@@ -84,8 +84,30 @@ validate_namespace() {
 export GAME_NAMESPACE="${GAME_NAMESPACE-game}"
 validate_namespace "$GAME_NAMESPACE" || exit 1
 echo "部署命名空间 GAME_NAMESPACE=$GAME_NAMESPACE"
+
+# 本检出里已有切片在跑（run/pids/*.pid 里有活进程）就拒绝启动，在写 run/game-namespace 与任何 PID 文件之前。否则：t1 的切片正在跑时，
+# 在一个新开、没设 GAME_NAMESPACE 的 shell 里误执行本脚本，记录先被改成 game，第一个进程随后因端口冲突退出（它的 PID 文件也被覆盖），
+# 之后 battle-crash-window.sh 读到 game、以 game 重启 t1 切片的 scene / battle——跨进同一套 infra 上缺省部署的目录、租约池与库。
+# 同一个命名空间重起也一样先停（端口与 PID 文件是同一套）。
+refuse_if_slice_running() {
+  local pidfile pid running="" recorded="（没有记录）"
+  for pidfile in run/pids/*.pid; do
+    [[ -f "$pidfile" ]] || continue
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      running+=" $(basename "$pidfile" .pid)"
+    fi
+  done
+  [[ -z "$running" ]] && return 0
+  [[ -f run/game-namespace ]] && recorded="\"$(cat run/game-namespace)\""
+  echo "本检出已有切片在运行（run/pids 里的活进程：${running# }），它的部署命名空间是 $recorded（run/game-namespace），本次要起的是 \"$GAME_NAMESPACE\"。\
+拒绝启动，没有改 run/game-namespace 与 PID 文件：先 tools/local/stop-slice.sh 停掉，再按要的命名空间重起" >&2
+  return 1
+}
+refuse_if_slice_running || exit 1
+
 # 记下本切片生效的命名空间（不是秘密，照常权限）：battle-crash-window.sh 重启进程时读回核对——在新开的、没设 GAME_NAMESPACE 的 shell 里
-# 对 t1 的切片执行它，重启出来的进程也不会以 game 起来、跨进另一个部署
+# 对 t1 的切片执行它，重启出来的进程也不会以 game 起来、跨进另一个部署。stop-slice.sh 全部停完后删掉它
 mkdir -p run
 printf "%s" "$GAME_NAMESPACE" > run/game-namespace
 

@@ -7,7 +7,7 @@ import java.util.Objects;
  * （{@code <ns>} = 部署命名空间，见 {@link GameNamespace}）。缺省命名空间 {@code game} 下生成的名字与引入命名空间之前逐字节相同
  * （如 {@code game-transaction-log}、{@code game-data-admin}）。
  *
- * <p>带命名空间的不可变实例：Spring 进程里由 game-discovery 的 {@code GameNamespaceAutoConfiguration} 注册成唯一的 bean，经构造器注入给使用方
+ * <p>带命名空间的不可变实例：Spring 进程里由 game-discovery 的 {@code GameNamespaceAutoConfiguration} 注册成 bean（使用方自己定义了同类 bean 时让路），经构造器注入给使用方
  * （game-audit 的 {@code AuditTopics} / {@code BattleResultTopics} 由它构造）；测试直接构造任意命名空间的实例。放在 game-common（纯 Java、不依赖
  * kafka-clients），装配它的 game-discovery 就不必依赖 game-audit。main 代码不得静态持有它，也不得在装配类与命令行工具之外 {@code new} 它。
  *

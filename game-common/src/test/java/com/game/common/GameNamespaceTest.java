@@ -7,13 +7,11 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
-/** 部署命名空间值类型：校验表、构造即校验、{@link GameNamespace#fromEnv} 的取值规则，以及「没有进程级可变状态」。 */
+/** 部署命名空间值类型：校验表、构造即校验，以及「没有进程级可变状态」。 */
 class GameNamespaceTest {
 
     @Test
@@ -65,36 +63,6 @@ class GameNamespaceTest {
     }
 
     @Test
-    void fromEnv_有变量按原样校验_没有取缺省_不读系统属性() {
-        assertThat(GameNamespace.fromEnv(Map.of())).isEqualTo(new GameNamespace.Sourced(GameNamespace.of("game"), "缺省"));
-        GameNamespace.Sourced t1 = GameNamespace.fromEnv(Map.of("GAME_NAMESPACE", "t1"));
-        assertThat(t1.namespace().value()).isEqualTo("t1");
-        assertThat(t1.source()).isEqualTo("环境变量 GAME_NAMESPACE");
-
-        assertThatThrownBy(() -> GameNamespace.fromEnv(Map.of("GAME_NAMESPACE", ""))).as("空串照样拒，不当成没设")
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("\"\"").hasMessageContaining("环境变量 GAME_NAMESPACE");
-        assertThatThrownBy(() -> GameNamespace.fromEnv(Map.of("GAME_NAMESPACE", " game"))).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> GameNamespace.fromEnv(Map.of("GAME_NAMESPACE", "mysql"))).isInstanceOf(IllegalArgumentException.class);
-
-        Map<String, String> relaxed = new HashMap<>();
-        relaxed.put("game.namespace", "x1");
-        relaxed.put("GAME.NAMESPACE", "x2");
-        assertThat(GameNamespace.fromEnv(relaxed).namespace().value()).as("只认精确的 GAME_NAMESPACE").isEqualTo("game");
-
-        String old = System.getProperty("game.namespace");
-        System.setProperty("game.namespace", "fromprop");
-        try {
-            assertThat(GameNamespace.fromEnv(Map.of()).namespace().value()).as("不读系统属性").isEqualTo("game");
-        } finally {
-            if (old == null) {
-                System.clearProperty("game.namespace");
-            } else {
-                System.setProperty("game.namespace", old);
-            }
-        }
-    }
-
-    @Test
     void 没有进程级可变状态_静态字段全是常量() {
         for (Field f : GameNamespace.class.getDeclaredFields()) {
             if (Modifier.isStatic(f.getModifiers())) {
@@ -104,6 +72,7 @@ class GameNamespaceTest {
             }
         }
         assertThat(Arrays.stream(GameNamespace.class.getDeclaredMethods()).map(m -> m.getName()))
-                .as("没有全局取值 / 设值入口").doesNotContain("get", "set", "source");
+                .as("没有全局取值 / 设值入口；命令行工具也不另有一套只认环境变量的取值（与服务进程同口径，见 game-discovery 的 GameNamespaceBinder）")
+                .doesNotContain("get", "set", "source", "fromEnv");
     }
 }

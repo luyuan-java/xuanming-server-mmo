@@ -18,7 +18,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * 回灌工具的部署命名空间与库名核对（库用 H2）：命名空间只取 run() 注入的 env 映射里的 {@code GAME_NAMESPACE}（没设取 game），打印出来，非法值退出 2；
+ * 回灌工具的部署命名空间与库名核对（库用 H2）：命名空间与服务进程同口径绑定（run() 注入的系统属性 {@code game.namespace} 优先于环境变量
+ * {@code GAME_NAMESPACE}，没配取 game），连同来源打印出来，非法值退出 2；
  * 连上库后、建运维表之前核对 {@code DATABASE()}，期望值缺省 = 命名空间、{@code --expect-database} 覆盖；不一致退出 2、不建表、报错里不带 URL；
  * {@code --dry-run} 不做这项检查。
  */
@@ -88,10 +89,31 @@ class AuditFallbackReplayNamespaceTest {
             int code = run(List.of("--file", log.toString()), Map.of(AuditFallbackReplay.DEFAULT_URL_ENV, url, "GAME_NAMESPACE", "nstest"));
 
             assertThat(code).isEqualTo(2);
-            assertThat(err()).contains("部署命名空间 game.namespace=nstest（来源 环境变量 GAME_NAMESPACE）")
+            assertThat(err()).contains("部署命名空间 game.namespace=nstest（来源 \"GAME_NAMESPACE\" from property source \"systemEnvironment\"）")
                     .contains("game.namespace=nstest，当前连接的库 DATABASE()=" + actual).contains("期望 nstest");
             assertThat(hasTable(url, "audit_replay_line")).isFalse();
         }
+    }
+
+    @Test
+    void 系统属性game_namespace与服务进程同样认_且优先于环境变量_没配取缺省(@TempDir Path dir) throws Exception {
+        Path log = dir.resolve("fallback.log");
+        Files.writeString(log, "unrelated log line\n");
+        // 以前只认精确的环境变量 GAME_NAMESPACE，-Dgame.namespace 被静默忽略、回落到 game（评审意见）；现在与服务进程同口径
+        int code = AuditFallbackReplay.run(List.of("--file", log.toString(), "--dry-run"), Map.of("GAME_NAMESPACE", "fromenv"),
+                Map.of("game.namespace", "fromprop"), new PrintStream(out, true, StandardCharsets.UTF_8), new PrintStream(err, true, StandardCharsets.UTF_8));
+        assertThat(code).isEqualTo(0);
+        assertThat(err()).contains("部署命名空间 game.namespace=fromprop（来源 \"game.namespace\" from property source \"systemProperties\"）");
+
+        err.reset();
+        assertThat(AuditFallbackReplay.run(List.of("--file", log.toString(), "--dry-run"), Map.of(), Map.of("game.namespace", "Bad"),
+                new PrintStream(out, true, StandardCharsets.UTF_8), new PrintStream(err, true, StandardCharsets.UTF_8))).as("-D 给的非法值同样拒绝")
+                .isEqualTo(2);
+        assertThat(err()).contains("\"Bad\"").contains("systemProperties");
+
+        err.reset();
+        assertThat(run(List.of("--file", log.toString(), "--dry-run"), Map.of())).isEqualTo(0);
+        assertThat(err()).contains("部署命名空间 game.namespace=game（来源 缺省）");
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.game.login.tools;
 
 import com.game.common.GameNamespace;
 import com.game.common.NamespaceDatabaseCheck;
+import com.game.discovery.namespace.GameNamespaceBinder;
 import com.game.login.auth.Argon2id;
 import com.game.login.auth.ProductionPasswordAuthenticator;
 import java.io.BufferedReader;
@@ -28,7 +29,7 @@ import java.util.Map;
  *
  * <p>用法（在仓库根目录，game-login 已打包）：
  * <pre>
- * export GAME_NAMESPACE=game        # 部署命名空间，必须与服务进程同值（不设 = game）
+ * export GAME_NAMESPACE=game        # 部署命名空间，必须与服务进程同值（不设 = game；也可以用 -Dgame.namespace=game）
  * export GAME_PASSWORD_ADMIN_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名 = 部署命名空间&gt;?user=...&amp;password=...'
  * java -cp game-login/target/game-login-0.1.0-SNAPSHOT.jar -Dloader.main=com.game.login.tools.PasswordAdmin \
  *      org.springframework.boot.loader.launch.PropertiesLauncher --account &lt;账号&gt; [--password-stdin] [--expect-database &lt;库名&gt;]
@@ -36,7 +37,8 @@ import java.util.Map;
  * 口令从终端读两遍（不回显）；{@code --password-stdin} 从标准输入读恰好两行（批处理用）。JDBC URL（含库名与账号口令）只从环境变量读，
  * 变量名可用 {@code --jdbc-url-env} 换。
  *
- * <p>部署命名空间只取环境变量 {@code GAME_NAMESPACE}（{@link GameNamespace#fromEnv}；不设为 game，空串与非法值拒绝），打印到标准错误；
+ * <p>部署命名空间与服务进程同口径绑定（{@link GameNamespaceBinder}：{@code -Dgame.namespace} 优先于环境变量 {@code GAME_NAMESPACE}，不设为 game，
+ * 空串与非法值拒绝），连同来源打印到标准错误；
  * 连上库后、<b>读口令之前</b>核对 {@code SELECT DATABASE()} 等于期望库名（规格：库名 = 命名空间；{@code --expect-database} 只是给库名偏离规格的
  * 存量部署的应急开关），不一致退出 2、不读口令、不写库——URL 指错库时不会给另一个部署的账号设口令（与服务进程、AuditFallbackReplay、assetopfix
  * 同一套核对，{@link NamespaceDatabaseCheck}）。
@@ -62,12 +64,22 @@ public final class PasswordAdmin {
 
     public static void main(String[] args) {
         DriverManager.setLoginTimeout(TIMEOUT_SECONDS);
-        int code = run(Arrays.asList(args), System.getenv(), System.console(), System.in, DriverManager::getConnection,
+        int code = run(Arrays.asList(args), System.getenv(), System.getProperties(), System.console(), System.in, DriverManager::getConnection,
                 System.out, System.err);
         System.exit(code);
     }
 
+    /** 没有系统属性的 {@link #run(List, Map, Map, Console, InputStream, Connections, PrintStream, PrintStream)}（测试用）。 */
     static int run(List<String> args, Map<String, String> env, Console console, InputStream stdin,
+                   Connections connections, PrintStream out, PrintStream err) {
+        return run(args, env, Map.of(), console, stdin, connections, out, err);
+    }
+
+    /**
+     * @param env              环境变量（JDBC URL、部署命名空间）
+     * @param systemProperties 系统属性（部署命名空间 {@code -Dgame.namespace}）
+     */
+    static int run(List<String> args, Map<String, String> env, Map<?, ?> systemProperties, Console console, InputStream stdin,
                    Connections connections, PrintStream out, PrintStream err) {
         String account = null;
         String urlEnv = DEFAULT_URL_ENV;
@@ -120,12 +132,12 @@ public final class PasswordAdmin {
             err.println("环境变量 " + urlEnv + " 不是 JDBC URL（应以 jdbc:mysql:// 开头）");
             return 1;
         }
-        // 部署命名空间：只认环境变量（部署一律经它给值，与服务进程同值）；库名核对的期望值缺省取它
+        // 部署命名空间：与服务进程同口径绑定（-D 系统属性、环境变量，宽松绑定）；库名核对的期望值缺省取它
         GameNamespace namespace;
         try {
-            GameNamespace.Sourced sourced = GameNamespace.fromEnv(env);
-            namespace = sourced.namespace();
-            err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + namespace + "（来源 " + sourced.source() + "）");
+            GameNamespaceBinder.Bound bound = GameNamespaceBinder.bind(systemProperties, env);
+            namespace = bound.namespace();
+            err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + namespace + "（来源 " + bound.origin() + "）");
         } catch (IllegalArgumentException e) {
             err.println(e.getMessage());
             return 2;

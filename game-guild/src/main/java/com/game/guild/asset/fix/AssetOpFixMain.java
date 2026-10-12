@@ -38,7 +38,8 @@ import org.slf4j.LoggerFactory;
  * ... resolve -op &lt;op_id&gt; -as applied|aborted -operator &lt;名字&gt; -reason &lt;依据&gt; -confirm &lt;op_id&gt; -txlog-checked [-force]
  * </pre>
  * 配置与服务进程同一份（缺省读 jar 里的 {@code application.yaml}，环境变量 / {@code -D} 覆盖规则同 Spring Boot）。部署命名空间（{@code game.namespace} /
- * {@code GAME_NAMESPACE}，缓存键前缀与库名）从同一份配置按服务进程同一个绑定类型解析并校验，非法退出 2；用它构造缓存键（{@code RedisKeys}）。
+ * {@code GAME_NAMESPACE}，缓存键前缀与库名）与服务进程同口径绑定（{@code GameNamespaceBinder}：{@code -D} 系统属性、环境变量，最后是 {@code -f} 的 yaml）
+ * 并校验，非法退出 2；用它构造缓存键（{@code RedisKeys}）。
  * 连上库后核对 {@code DATABASE()} 等于期望库名（规格：库名 = 命名空间；{@code -expect-database} 只是给库名偏离规格的存量部署的应急开关），
  * 不一致退出 2、不连 Redis。
  *
@@ -74,7 +75,8 @@ public final class AssetOpFixMain {
               assetopfix [-f <配置 yaml>] [-expect-database <库名>] resolve -op <op_id> -as applied|aborted -operator <名字> -reason <依据> \\
                   -confirm <op_id> -txlog-checked [-force]
 
-            部署命名空间取环境变量 GAME_NAMESPACE（缺省 game，必须与服务进程同值；取值规则同服务进程，非法退出 2）；
+            部署命名空间与服务进程同口径绑定：-Dgame.namespace、环境变量 GAME_NAMESPACE，再到 -f 的 yaml（依次优先，缺省 game；
+            必须与服务进程同值，取值规则同服务进程，非法退出 2；生效的值与来源打在日志里）；
             连上库后核对 DATABASE() 等于期望库名（规格：库名 = 命名空间；库名偏离规格的存量部署应急时用 -expect-database 给出），
             不一致退出 2。
 

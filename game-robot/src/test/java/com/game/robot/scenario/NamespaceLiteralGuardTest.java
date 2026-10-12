@@ -25,13 +25,14 @@ import org.junit.jupiter.api.Test;
  * <ul>
  *   <li>R1：main 代码（game-robot 除外：它是客户端）的非注释行——含 Lua 文本块、日志——不出现 {@code game:}（Redis 键 / 频道写死了缺省命名空间）；</li>
  *   <li>R2：完整字面量 {@code "game-…"} 只能是登记过的代码身份（{@link #CODE_IDENTITY}）；topic / 消费组 / client.id 不得写死；</li>
- *   <li>R3：只有装配类与三个命令行工具（以及定义它们的三个类）能构造命名空间、{@code RedisKeys}、{@code KafkaNames}（{@link #CONSTRUCTION_SITES}），
+ *   <li>R3：只有装配类、命令行工具的取值入口 {@code GameNamespaceBinder}、两个自己构造键名类的命令行工具（以及定义它们的三个类）能构造命名空间、
+ *       {@code RedisKeys}、{@code KafkaNames}（{@link #CONSTRUCTION_SITES}），
  *       别处一律构造器注入；</li>
  *   <li>R4：旧的进程级全局机制（静态 get / set、NamespaceHolder、EnvironmentPostProcessor / FailureAnalyzer、spring.factories、
- *       {@code @Tag("namespace")} 与 surefire 钉值）不回来；</li>
+ *       {@code @Tag("namespace")} 与 surefire 钉值）不回来；根 pom 的 surefire 排除会改变部署行为的环境变量（测试与开发者 shell 隔离，不是钉值）；</li>
  *   <li>R5：9 个进程的 JDBC URL 按缺省命名空间解析后与以前逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
  *       registry 的 namespace（缺省行为不变：由部署显式给，{@code GAME_NACOS_ADDR} 带 {@code ?namespace=} 或 {@code dubbo.registry.parameters.namespace}）；13 个进程都直接依赖 game-discovery；</li>
- *   <li>R6：compose 预建库只在没设 {@code GAME_NAMESPACE} 时取 game。</li>
+ *   <li>R6：compose 预建哪个库由独立的 {@code GAME_MYSQL_INIT_DATABASE} 决定（没设取 game，空值 = 不预建），不读进程租户 {@code GAME_NAMESPACE}。</li>
  * </ul>
  * 切片脚本的命名空间校验与读回核对（R7）在 {@link SliceScriptsTest}。配置键 {@code game.}、环境变量 {@code GAME_}、包名、指标名、日志文案不跟命名空间走。
  */
@@ -155,18 +156,22 @@ class NamespaceLiteralGuardTest {
         return offenders;
     }
 
-    /** R3 的构造入口白名单：装配类、三个命令行工具（不起 Spring，自己取命名空间再 new），以及定义这几个类型的三个类。 */
+    /**
+     * R3 的构造入口白名单：装配类；命令行工具取命名空间的唯一入口 {@code GameNamespaceBinder}（与服务进程同一个属性类型、同口径绑定后
+     * {@code GameNamespace.of} 校验）；两个不起 Spring、拿到命名空间后自己 {@code new RedisKeys} 的命令行工具（PasswordAdmin 只取命名空间核对库名，
+     * 不构造任何名字类，不在名单上）；以及定义这几个类型的三个类。
+     */
     static final Set<String> CONSTRUCTION_SITES = Set.of(
             "game-discovery/src/main/java/com/game/discovery/namespace/GameNamespaceAutoConfiguration.java",
+            "game-discovery/src/main/java/com/game/discovery/namespace/GameNamespaceBinder.java",
             "game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java",
             "game-guild/src/main/java/com/game/guild/asset/fix/AssetOpFixEnvironment.java",
-            "game-login/src/main/java/com/game/login/tools/PasswordAdmin.java",
             "game-common/src/main/java/com/game/common/GameNamespace.java",
             "game-common/src/main/java/com/game/common/KafkaNames.java",
             "game-discovery/src/main/java/com/game/discovery/RedisKeys.java");
 
     private static final Pattern CONSTRUCTION =
-            Pattern.compile("new RedisKeys\\(|new KafkaNames\\(|new GameNamespace\\(|GameNamespace\\.of\\(|GameNamespace\\.fromEnv\\(");
+            Pattern.compile("new RedisKeys\\(|new KafkaNames\\(|new GameNamespace\\(|GameNamespace\\.of\\(");
 
     /** R3：白名单以外的非注释行里构造命名空间 / RedisKeys / KafkaNames 的。 */
     static List<String> constructionOffenders(Map<String, String> mainSources) {
@@ -209,10 +214,20 @@ class NamespaceLiteralGuardTest {
     }
 
     @Test
-    void R3_命名空间与键名类只在装配类和三个命令行工具里构造_别处构造器注入() throws IOException {
+    void R3_命名空间与键名类只在装配类和命令行工具的入口里构造_别处构造器注入() throws IOException {
         Map<String, String> sources = sources("src/main/java");
         assertThat(constructionOffenders(sources)).as("main 里不得自己 new RedisKeys / KafkaNames / GameNamespace：经构造器注入自动配置的 bean").isEmpty();
         assertThat(sources.keySet()).as("白名单文件都还在").containsAll(CONSTRUCTION_SITES);
+        // 白名单不悄悄变宽：名单上的每个文件都还在构造（定义类型的三个类除外）
+        CONSTRUCTION_SITES.stream().filter(file -> !file.startsWith("game-common/") && !file.endsWith("/RedisKeys.java")).forEach(file ->
+                assertThat(CONSTRUCTION.matcher(sources.get(file)).find()).as("%s 还在构造名字类，否则从白名单删掉", file).isTrue());
+        // 三个命令行工具取命名空间都经同一个入口（与服务进程同口径），不另写一套只认环境变量的取值
+        for (String tool : List.of("game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java",
+                "game-guild/src/main/java/com/game/guild/asset/fix/AssetOpFixEnvironment.java",
+                "game-login/src/main/java/com/game/login/tools/PasswordAdmin.java")) {
+            assertThat(sources.get(tool)).as(tool).contains("GameNamespaceBinder.bind(").doesNotContain("getenv(\"GAME_NAMESPACE\")")
+                    .doesNotContain("get(GameNamespace.ENV)");
+        }
     }
 
     @Test
@@ -288,7 +303,18 @@ class NamespaceLiteralGuardTest {
         }
         for (Path pom : poms) {
             assertThat(Files.readString(pom, StandardCharsets.UTF_8)).as("%s 不钉 game.namespace、不按 namespace 标签分 surefire 执行", root.relativize(pom))
-                    .doesNotContain("<game.namespace>").doesNotContain("<groups>namespace").doesNotContain("excludedGroups>namespace");
+                    .doesNotContain("<game.namespace>").doesNotContain("<groups>namespace").doesNotContain("excludedGroups>namespace")
+                    .doesNotContain("<GAME_NAMESPACE>");
+        }
+        // 测试与开发者 shell 隔离（不是钉值）：export 过 GAME_NAMESPACE 等变量的 shell 里跑 mvn，断言缺省行为的 Spring 上下文用例不受影响
+        assertThat(Files.readString(root.resolve("pom.xml"), StandardCharsets.UTF_8)).as("根 pom 的 surefire 排除这几个环境变量")
+                .contains("<excludedEnvironmentVariable>GAME_NAMESPACE</excludedEnvironmentVariable>")
+                .contains("<excludedEnvironmentVariable>GAME_MYSQL_EXPECT_DATABASE</excludedEnvironmentVariable>")
+                .contains("<excludedEnvironmentVariable>GAME_MYSQL_EXPECTDATABASE</excludedEnvironmentVariable>")
+                .contains("<excludedEnvironmentVariable>GAME_NACOS_ADDR</excludedEnvironmentVariable>");
+        for (Path pom : poms.subList(1, poms.size())) {
+            assertThat(Files.readString(pom, StandardCharsets.UTF_8)).as("%s 不另写 excludedEnvironmentVariables（会盖掉根 pom 的那一份）", root.relativize(pom))
+                    .doesNotContain("excludedEnvironmentVariables");
         }
     }
 
@@ -399,8 +425,19 @@ class NamespaceLiteralGuardTest {
     // ================================================================ R6：compose
 
     @Test
-    void R6_compose预建库只在没设时取game_空串不被换成game() throws IOException {
+    void R6_compose预建哪个库由独立变量决定_没设取game_空值不预建_不读进程租户GAME_NAMESPACE() throws IOException {
         String infra = Files.readString(root.resolve("deploy/compose/infra.yaml"), StandardCharsets.UTF_8);
-        assertThat(infra).contains("\n      MYSQL_DATABASE: ${GAME_NAMESPACE-game}\n").doesNotContain("${GAME_NAMESPACE:-");
+        // 共享 infra 不属于任何部署：开发者为跑 t1 切片在 shell 里导出的 GAME_NAMESPACE 不能决定 infra 首次初始化预建哪个库；
+        // 写 -game 不写 :-game：设了空值就是「不预建」（mysql 镜像自己的语义），不被换成 game
+        assertThat(infra).contains("\n      MYSQL_DATABASE: ${GAME_MYSQL_INIT_DATABASE-game}\n").doesNotContain("${GAME_MYSQL_INIT_DATABASE:-");
+        List<String> uses = new ArrayList<>();
+        for (String line : infra.split("\n", -1)) {
+            if (!line.strip().startsWith("#") && line.contains("GAME_NAMESPACE")) {
+                uses.add(line.strip());
+            }
+        }
+        assertThat(uses).as("infra.yaml 不读 GAME_NAMESPACE（它只表示进程租户）").isEmpty();
+        String env = Files.readString(root.resolve("deploy/compose/env.example"), StandardCharsets.UTF_8);
+        assertThat(env).as("env.example 列出这个变量").contains("# GAME_MYSQL_INIT_DATABASE=");
     }
 }

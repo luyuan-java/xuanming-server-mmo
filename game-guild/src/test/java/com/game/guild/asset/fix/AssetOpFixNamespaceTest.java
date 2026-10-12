@@ -16,7 +16,7 @@ import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
 
 /**
- * assetopfix 的部署命名空间：从同一份配置按服务进程的绑定类型解析（没配取 game，环境变量宽松绑定），非法值（含显式空串）是前置条件不满足
+ * assetopfix 的部署命名空间：与服务进程同口径绑定（GameNamespaceBinder：-D、环境变量宽松绑定，再到 -f 的 yaml；没配取 game），非法值（含显式空串）是前置条件不满足
  * （退出 2，连库与连 Redis 之前就拒绝）；{@code -expect-database} 不许给空串；连库失败的报错只带库名（缺省 = 命名空间），不带连接串。
  */
 class AssetOpFixNamespaceTest {
@@ -69,10 +69,27 @@ class AssetOpFixNamespaceTest {
     }
 
     @Test
+    void 系统属性优先于环境变量_与服务进程同序() {
+        StandardEnvironment env = configOnly("fromyaml");
+        env.getPropertySources().addFirst(new SystemEnvironmentPropertySource(
+                StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, Map.of("GAME_NAMESPACE", "fromenv")));
+        env.getPropertySources().addFirst(new MapPropertySource(
+                StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME, Map.of("game.namespace", "fromprop")));
+        assertThat(AssetOpFixEnvironment.resolveNamespace(env).value()).isEqualTo("fromprop");
+    }
+
+    @Test
+    void 用法文案写的取值来源与实现一致() {
+        // 实现：GameNamespaceBinder 按 StandardEnvironment 的次序绑定（-D、环境变量），-f 的 yaml 排在最后（load）
+        assertThat(AssetOpFixMain.USAGE).contains("-Dgame.namespace").contains("环境变量 GAME_NAMESPACE").contains("-f 的 yaml")
+                .doesNotContain("取环境变量 GAME_NAMESPACE（");
+    }
+
+    @Test
     void 配置给出的命名空间非法_前置条件不满足() {
         assertThatThrownBy(() -> AssetOpFixEnvironment.resolveNamespace(configOnly("Bad")))
                 .isInstanceOf(AssetOpFixMain.PreconditionException.class).hasMessageContaining("GAME_NAMESPACE").hasMessageContaining("\"Bad\"")
-                .hasMessageContaining("assetopfix 配置");
+                .as("报错带来源（属性源名）").hasMessageContaining("assetopfix-config");
         assertThatThrownBy(() -> AssetOpFixEnvironment.resolveNamespace(configOnly("")))
                 .as("显式空串不当成没配").isInstanceOf(AssetOpFixMain.PreconditionException.class).hasMessageContaining("\"\"");
         assertThatThrownBy(() -> AssetOpFixEnvironment.resolveNamespace(configOnly(" game")))

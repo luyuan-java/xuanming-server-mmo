@@ -10,6 +10,7 @@ import com.game.data.ops.pb.AuditReplayLineRow;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
+import com.game.discovery.namespace.GameNamespaceBinder;
 import com.game.pbmysql.PbMysql;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -36,15 +37,15 @@ import org.redisson.config.Config;
  *
  * <p>用法（在仓库根目录，game-data 已打包；只回灌<b>已轮转、不再写入</b>的日志文件）：
  * <pre>
- * export GAME_NAMESPACE=game        # 部署命名空间，必须与服务进程同值（缺省 game）
+ * export GAME_NAMESPACE=game        # 部署命名空间，必须与服务进程同值（缺省 game；也可以用 -Dgame.namespace=game）
  * export GAME_AUDIT_REPLAY_JDBC_URL='jdbc:mysql://127.0.0.1:3306/&lt;库名 = 部署命名空间&gt;?user=...&amp;password=...'
  * java -cp game-data/target/game-data-0.1.0-SNAPSHOT.jar -Dloader.main=com.game.data.tools.AuditFallbackReplay \
  *      org.springframework.boot.loader.launch.PropertiesLauncher --file &lt;兜底日志文件&gt; [--dry-run] \
  *      [--redis redis://127.0.0.1:6379] [--redis-database 12] [--expect-database &lt;库名&gt;]
  * </pre>
  * JDBC URL（含库名与账号口令）只从环境变量读（{@code --jdbc-url-env} 可换变量名）；Redis 口令取环境变量 {@code GAME_AUDIT_REPLAY_REDIS_PASSWORD}（可不设）。
- * 部署命名空间（Redis 键前缀，见 {@link GameNamespace}）只认环境变量 {@code GAME_NAMESPACE}（{@link GameNamespace#fromEnv}；没设取 game，设了空串照样拒绝），
- * 不读系统属性、yaml 或命令行参数——部署一律经环境变量给命名空间，工具与服务进程才保证同值；取到后打印，再自己构造 {@link RedisKeys}。
+ * 部署命名空间（Redis 键前缀，见 {@link GameNamespace}）与服务进程同口径绑定（{@link GameNamespaceBinder}：同一个属性类型、同一套宽松绑定，
+ * {@code -Dgame.namespace} 优先于环境变量 {@code GAME_NAMESPACE}；没配取 game，设了空串照样拒绝）；取到后连同来源打印，再自己构造 {@link RedisKeys}。
  * 连上库后、建运维表之前核对 {@code SELECT DATABASE()} 等于期望库名（规格：库名 = 命名空间；{@code --expect-database} 只是给库名偏离规格的存量部署的
  * 应急开关），不一致退出 2。
  * 文件里有 {@code tx_id=0} 的行时才连 Redis：在 {@code NodeTypes.SCENE_GUID} 全服池占一个 worker 发新号（与 scene / game-data 同池，不撞号），
@@ -72,10 +73,19 @@ public final class AuditFallbackReplay {
 
     public static void main(String[] args) {
         DriverManager.setLoginTimeout(TIMEOUT_SECONDS);
-        System.exit(run(Arrays.asList(args), System.getenv(), System.out, System.err));
+        System.exit(run(Arrays.asList(args), System.getenv(), System.getProperties(), System.out, System.err));
     }
 
+    /** 没有系统属性的 {@link #run(List, Map, Map, PrintStream, PrintStream)}（测试用）。 */
     static int run(List<String> argv, Map<String, String> env, PrintStream out, PrintStream err) {
+        return run(argv, env, Map.of(), out, err);
+    }
+
+    /**
+     * @param env              环境变量（JDBC URL、Redis 口令、部署命名空间）
+     * @param systemProperties 系统属性（部署命名空间 {@code -Dgame.namespace}）
+     */
+    static int run(List<String> argv, Map<String, String> env, Map<?, ?> systemProperties, PrintStream out, PrintStream err) {
         Args args;
         try {
             args = parse(argv);
@@ -83,14 +93,14 @@ public final class AuditFallbackReplay {
             err.println(e.getMessage());
             err.println("用法：--file <兜底日志文件> [--dry-run] [--jdbc-url-env <变量名>] [--redis <地址>] [--redis-database <库号>]"
                     + " [--expect-database <库名>]");
-            err.println("部署命名空间只取环境变量 " + GameNamespace.ENV + "（缺省 " + GameNamespace.DEFAULT_VALUE + "）；库名必须等于命名空间，"
-                    + "--expect-database 只是库名偏离规格的存量部署的应急开关");
+            err.println("部署命名空间与服务进程同口径：-D" + GameNamespace.PROPERTY + " 或环境变量 " + GameNamespace.ENV + "（前者优先，缺省 "
+                    + GameNamespace.DEFAULT_VALUE + "）；库名必须等于命名空间，--expect-database 只是库名偏离规格的存量部署的应急开关");
             return 2;
         }
-        // 部署命名空间：只认 run() 注入的 env 映射里的 GAME_NAMESPACE（不靠 System.getenv，可测）；非法值在连任何外部系统之前退出 2
+        // 部署命名空间：从 run() 注入的系统属性与环境变量绑定（不靠 System.getenv，可测）；非法值在连任何外部系统之前退出 2
         GameNamespace namespace;
         try {
-            namespace = resolveNamespace(env, err);
+            namespace = resolveNamespace(env, systemProperties, err);
         } catch (IllegalArgumentException e) {
             err.println(e.getMessage());
             return 2;
@@ -140,14 +150,14 @@ public final class AuditFallbackReplay {
     }
 
     /**
-     * 取部署命名空间（{@link GameNamespace#fromEnv}：env 映射里的 {@code GAME_NAMESPACE}，没设取 game）并打印到 err。
+     * 取部署命名空间（{@link GameNamespaceBinder}：与服务进程同一个属性类型、同一套宽松绑定，没配取 game）并连同来源打印到 err。
      *
      * @throws IllegalArgumentException 取值非法（含空串）
      */
-    static GameNamespace resolveNamespace(Map<String, String> env, PrintStream err) {
-        GameNamespace.Sourced sourced = GameNamespace.fromEnv(env);
-        err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + sourced.namespace() + "（来源 " + sourced.source() + "）");
-        return sourced.namespace();
+    static GameNamespace resolveNamespace(Map<String, String> env, Map<?, ?> systemProperties, PrintStream err) {
+        GameNamespaceBinder.Bound bound = GameNamespaceBinder.bind(systemProperties, env);
+        err.println("部署命名空间 " + GameNamespace.PROPERTY + "=" + bound.namespace() + "（来源 " + bound.origin() + "）");
+        return bound.namespace();
     }
 
     static Args parse(List<String> argv) {

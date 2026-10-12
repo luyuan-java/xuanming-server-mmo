@@ -187,12 +187,23 @@
                     <!-- 测试进程的总时限：某条用例无限等待（例如对永不完成的 future 调 join()）时，让构建在 30 分钟后失败，
                          而不是把 surefire 进程永远挂在那里（2026-10-06 本机实例：一个挂死的 fork 占着模块 target 一个多小时）。
                          最慢的模块（game-scene / game-data 带真依赖）本机约 3 分钟，CI 上按几倍估仍远小于此值。
-                         版本钉在此前由 Maven 缺省绑定解析出来的 3.2.5，行为不变；各模块自己的 configuration 与这里合并。 -->
+                         版本钉在此前由 Maven 缺省绑定解析出来的 3.2.5，行为不变；各模块自己的 configuration 与这里合并。
+                         excludedEnvironmentVariables：测试进程不继承开发者 shell 里会改变部署行为的几个环境变量（surefire 自带，3.0.0-M4 起；
+                         只是让测试与运行环境隔离，不给任何值）。切片调试时 export 的 GAME_NAMESPACE（哪怕就是 game）会经宽松绑定进 Spring
+                         上下文用例的 game.namespace，GAME_MYSQL_EXPECT_DATABASE（及规范写法 GAME_MYSQL_EXPECTDATABASE）进库名核对，
+                         GAME_NACOS_ADDR 进 nacos profile 的注册中心地址；断言缺省行为的用例会因此误红。-D 给 mvn 的系统属性 surefire 照样传给
+                         测试进程，排除不了：不要给 mvn 传 -Dgame.namespace（AGENTS.md §4）。 -->
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.2.5</version>
                     <configuration>
                         <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                        <excludedEnvironmentVariables>
+                            <excludedEnvironmentVariable>GAME_NAMESPACE</excludedEnvironmentVariable>
+                            <excludedEnvironmentVariable>GAME_MYSQL_EXPECT_DATABASE</excludedEnvironmentVariable>
+                            <excludedEnvironmentVariable>GAME_MYSQL_EXPECTDATABASE</excludedEnvironmentVariable>
+                            <excludedEnvironmentVariable>GAME_NACOS_ADDR</excludedEnvironmentVariable>
+                        </excludedEnvironmentVariables>
                     </configuration>
                 </plugin>
                 <plugin>

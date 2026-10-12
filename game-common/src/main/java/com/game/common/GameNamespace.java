@@ -1,7 +1,5 @@
 package com.game.common;
 
-import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -19,8 +17,9 @@ import java.util.regex.Pattern;
  *
  * <p><b>注入式，没有进程级全局值</b>：本类是不可变的值类型，构造即校验。Spring 进程里由 game-discovery 的 {@code GameNamespaceProperties}
  * （{@code @ConfigurationProperties} + {@code @Validated}，非法值由 Spring Boot 的绑定校验报告拒启）绑定，{@code GameNamespaceAutoConfiguration}
- * 注册成 bean，再由它构造 {@code RedisKeys} / {@link KafkaNames} bean 注入给使用方；不起 Spring 的命令行工具用 {@link #fromEnv} 取值后自己
- * {@code new} 名字类；测试直接构造任意命名空间的实例，同一个 JVM 里可以并存多个命名空间。
+ * 注册成 bean，再由它构造 {@code RedisKeys} / {@link KafkaNames} bean 注入给使用方；不起 Spring 的命令行工具用 game-discovery 的
+ * {@code GameNamespaceBinder} 按服务进程同口径绑定（同一个属性类型、同一套宽松绑定）后自己 {@code new} 名字类；测试直接构造任意命名空间的实例，
+ * 同一个 JVM 里可以并存多个命名空间。
  *
  * <p>合法取值 {@value #REGEX}：小写字母开头、只含小写字母与数字、1–{@value #MAX_LENGTH} 个字符，且不是 {@code mysql} / {@code sys}
  * （MySQL 系统库）/ {@code public}（Nacos 缺省命名空间 ID）。不 trim、不转小写：空串、首尾空白、大写一律拒绝（fail-closed）。
@@ -33,7 +32,7 @@ public record GameNamespace(String value) {
 
     /** 配置键（Spring 宽松绑定下也认 {@code --game.namespace}、{@code -Dgame.namespace}、{@code GAME_NAMESPACE}）。 */
     public static final String PROPERTY = "game.namespace";
-    /** 环境变量名（部署一律经它给值；不起 Spring 的命令行工具只认它，见 {@link #fromEnv}）。 */
+    /** 环境变量名（部署推荐经它给值：服务进程与命令行工具都按宽松绑定认它）。 */
     public static final String ENV = "GAME_NAMESPACE";
     /** 缺省命名空间：缺省时生成的每一个名字都与引入命名空间之前逐字节相同。 */
     public static final String DEFAULT_VALUE = "game";
@@ -79,31 +78,6 @@ public record GameNamespace(String value) {
     /** 是不是合法的命名空间（null 不合法）。 */
     public static boolean isValid(String value) {
         return value != null && PATTERN.matcher(value).matches();
-    }
-
-    /** {@link #fromEnv} 的结果：命名空间与它的来源（「环境变量 GAME_NAMESPACE」或「缺省」，供工具打印）。 */
-    public record Sourced(GameNamespace namespace, String source) {
-
-        public Sourced {
-            Objects.requireNonNull(namespace, "namespace");
-            Objects.requireNonNull(source, "source");
-        }
-    }
-
-    /**
-     * 不起 Spring 的命令行工具取命名空间：环境变量映射里有 {@value #ENV} 就按原样校验（空串照样拒绝，不当成「没设」），没有才取
-     * {@value #DEFAULT_VALUE}。不读系统属性、yaml 或命令行参数：部署一律经环境变量给命名空间，工具与服务进程才保证同值。
-     *
-     * @param env 环境变量映射（生产传 {@code System.getenv()}，测试可替换）
-     * @throws IllegalArgumentException 取值非法
-     */
-    public static Sourced fromEnv(Map<String, String> env) {
-        String value = env.get(ENV);
-        if (value == null) {
-            return new Sourced(new GameNamespace(DEFAULT_VALUE), "缺省");
-        }
-        String source = "环境变量 " + ENV;
-        return new Sourced(of(value, source), source);
     }
 
     @Override

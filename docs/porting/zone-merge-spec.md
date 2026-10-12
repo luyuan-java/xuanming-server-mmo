@@ -15,6 +15,8 @@
 >   `agones_binding.go` / `scene_atomic.go` / `enterscenelogic.go` 在 `go/scene_manager/internal/logic/`。
 > - `GameClient.cs` = `mmorpg-client/Assets/Scripts/Game/GameClient.cs`。
 > - Java 路径相对 `D:\work\xuanming-server-mmo`；只写类名时可在仓库里唯一定位。
+> - （2026-10-12 补记）文中的 Java 键 `game:…`、库 `game` 都是缺省部署命名空间下的写法，实际是 `<ns>:…`、库 `<ns>`（architecture.md §6.2）；`RedisKeys.xxx(…)`
+>   指注入的 `RedisKeys` 实例的方法（不再有静态写法）。合服作业怎么拿到命名空间见 §2.5 的补记。
 >
 > **Java 侧**：HEAD `9fde7d8`（规格文档提交；5.2 在 `6b28e9d`、7.1a / 7.2a 在 `37dd8dc` 都已提交）加工作区（5.3 副本、6.2 battle 节点、gate 限流迁入 game-net 等未提交改动），
 > 行号按工作区计。**5.4（`zone-travel-spec.md`）与 7.2b（`data-ops-spec.md`）尚未落地**（工作区里没有 `com.game.discovery.zone` 包、没有 `SelectTravelTargetRequest`、
@@ -129,7 +131,7 @@ game-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除
 | `inventory/guild.md:378` | 「按 idx_guild_0 整区改写……重建区榜」 | 基线已改为按清单主键点更新 + ZSET 合并；Java 由 game-guild 按主键点更新 + 从 MySQL 重建 |
 | `inventory/social.md:358` | 分批 `IN` 写法 | 按主键逐条（trade-spec `:1006` 已指出） |
 | `zone-travel-spec.md:441` | 世界聊天「基线按物理 zone」 | `go/chat` 的世界频道全服一条（`chat_logic.go:8-10`），两版一致，不是差异 |
-| `zone-travel-spec.md:448-449` | 建议键 `game:merge-fence:{zone}` | `game:{merge}:fence:<zone>`：两键 Lua 需要同槽（§2.5） |
+| `zone-travel-spec.md:448-449` | 建议键 `game:merge-fence:{zone}` | `<ns>:{merge}:fence:<zone>`（缺省命名空间下即 `game:{merge}:fence:<zone>`，经注入的 `RedisKeys` 生成）：两键 Lua 需要同槽（§2.5） |
 | `zone-travel-spec.md:463-465` | 约束 ③「预检两区无 `o` / `l` 位置记录、该区玩家全部 `owner_released = 1`」；④ 整区 `UPDATE … WHERE zone_id = src` | ③ 改为「清单（src）玩家 `owner_released = 1` 或租约早于 now − margin」，位置 / 在线目录只查清单玩家，dst 玩家持有归属只报 warn；④ 改为按清单分批、`FOR UPDATE` 复核；①②⑤⑥ 原样保留 |
 | `scene-channels-spec.md:1025`；`RedisKeys.java:277` 注释 | 退役 zone 要运维手工 SREM | 合服作业 SREM + 领导者用 `retireZone` 清计划（§4.6） |
 | `scene-channels-spec.md:1021` | NOSCRIPT 理由引 `architecture.md:138` | 现为 `architecture.md:153` |
@@ -337,7 +339,14 @@ game-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除
 
 ### 2.5 Java 围栏：键、值、写侧 Lua
 
-- **键**：`RedisKeys.mergeFence(int zone)` = `game:{merge}:fence:<zone 无符号十进制>`，DB 12。两把键共用 hash tag `{merge}`。
+- **键**：注入的 `RedisKeys` 实例的 `mergeFence(int zone)` = `<ns>:{merge}:fence:<zone 无符号十进制>`（`<ns>` = 部署命名空间，缺省 `game` 时即
+  `game:{merge}:fence:<zone>`），DB 12。两把键共用 hash tag `{merge}`（hash tag 不随命名空间变）；写侧 Lua 经 KEYS 收这两把键，不在脚本里拼前缀。
+  （2026-10-12 补记，部署命名空间，architecture.md §6.2）本稿写成 `game:…` 的键都指缺省命名空间下的样子，落地时一律经注入的 `RedisKeys` 生成，main 代码里
+  不得写死 `game:`（`NamespaceLiteralGuardTest` 的 R1）、不得自己 `new RedisKeys`（R3）。合服 / 撤销作业跑在 game-data 进程里：`RedisKeys` 构造器注入，
+  库名由 `NamespaceDatabaseVerifier` 在启动期核对 `DATABASE()` = 命名空间，作业本身不需要另取命名空间。薄壳 `tools/MergeZone.java` 只调 game-data 的运维接口
+  （`/admin/zone-merges`，§5.3），不连 Redis / MySQL，不涉及命名空间；以后若有直连 Redis / MySQL 的合服工具，必须与 AuditFallbackReplay、assetopfix、PasswordAdmin
+  同口径：经 game-discovery 的 `GameNamespaceBinder` 取部署命名空间、用它构造 `RedisKeys`，连库后、写任何数据之前核对 `DATABASE()`（`NamespaceDatabaseCheck`），
+  不一致退出 2。
 - **值**：Hash，字段 `run`（run_id 无符号十进制）、`op`（`merge` / `unmerge` / `drill`）、`src`、`dst`、`by`（操作人）、`at`（立起毫秒）、`exp`（预计到期毫秒，只给人看）。
   **读者只做 `EXISTS`**，不解析（同 `router.go:84-89`）；参与方与续期器读 `run`。
 - **写侧**（game-discovery `com.game.discovery.zone.ZoneMergeFences`，Lua，`ByteArrayCodec`，单条 `evalAsync`；不用 Redisson 批处理——批里的 EVALSHA 遇 NOSCRIPT 不重载，`architecture.md:153`）：

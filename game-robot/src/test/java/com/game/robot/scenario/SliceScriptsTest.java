@@ -148,11 +148,14 @@ class SliceScriptsTest {
         // start-slice.sh：只在没设时取 game → 校验（不过退出 1）→ 写 run/game-namespace，都在起第一个进程之前
         int export = startSlice.indexOf("\nexport GAME_NAMESPACE=\"${GAME_NAMESPACE-game}\"\n");
         int check = startSlice.indexOf("\nvalidate_namespace \"$GAME_NAMESPACE\" || exit 1\n");
+        int refuse = startSlice.indexOf("\nrefuse_if_slice_running || exit 1\n");
         int record = startSlice.indexOf("\nprintf \"%s\" \"$GAME_NAMESPACE\" > run/game-namespace\n");
         int processes = startSlice.indexOf("\nmkdir -p run/logs run/pids\n");
         assertThat(export).as("没设才取 game（不带冒号）").isPositive();
         assertThat(check).as("先校验").isGreaterThan(export);
-        assertThat(record).as("再记进 run/").isGreaterThan(check);
+        assertThat(refuse).as("再看本检出有没有切片在跑（有就拒绝）").isGreaterThan(check);
+        assertThat(record).as("然后才记进 run/：有切片在跑时不覆盖它的记录").isGreaterThan(refuse);
+        assertThat(startSlice.indexOf("> \"run/pids/")).as("PID 文件也在这之后才写").isGreaterThan(refuse);
         assertThat(processes).as("都在起进程之前").isGreaterThan(record);
         assertThat(startSlice).doesNotContain("${GAME_NAMESPACE:-");
 
@@ -645,6 +648,89 @@ class SliceScriptsTest {
         assertThat(stopOne).isNotNull().containsSubsequence("pidfile=\"run/pids/$name.pid\"\n", "[[ -f \"$pidfile\" ]] || return 0\n", "pid=$(cat \"$pidfile\")\n",
                 "kill \"$pid\" 2>/dev/null\n", "kill -9 \"$pid\" 2>/dev/null; }\n", "rm -f \"$pidfile\"\n");
         assertThat(stopSlice).doesNotContain("pkill").doesNotContain("killall").doesNotContain("rm -rf");
+    }
+
+    /** 在 {@code dir} 里用 bash 跑一段脚本（标准输出与标准错误合并），返回「退出码|输出」。 */
+    private static String bashIn(String bash, Path dir, String script) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(bash, "-s").directory(dir.toFile()).redirectErrorStream(true);
+        pb.environment().remove("GAME_NAMESPACE");
+        Process p = pb.start();
+        try (var stdin = p.getOutputStream()) {
+            stdin.write(script.getBytes(StandardCharsets.UTF_8));
+        }
+        String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
+        assertThat(p.waitFor(60, TimeUnit.SECONDS)).isTrue();
+        return p.exitValue() + "|" + out;
+    }
+
+    /** 跑 start-slice.sh 的 {@code refuse_if_slice_running}；{@code live} 为真时先起一个活进程写进 run/pids/game-scene.pid，结束时结束它。 */
+    private static String refuseIn(String bash, Path dir, String recorded, boolean live, boolean dead) throws Exception {
+        Path pids = dir.resolve("run/pids");
+        Files.createDirectories(pids);
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(pids)) {
+            for (Path f : files) {
+                Files.delete(f);
+            }
+        }
+        Files.deleteIfExists(dir.resolve("run/game-namespace"));
+        if (recorded != null) {
+            Files.writeString(dir.resolve("run/game-namespace"), recorded, StandardCharsets.UTF_8);
+        }
+        if (dead) {
+            // 停掉的切片留下的 PID 文件（进程早已退出）不算在跑
+            Files.writeString(pids.resolve("game-login.pid"), "999999", StandardCharsets.UTF_8);
+        }
+        String script = "set -euo pipefail\nGAME_NAMESPACE=game\n"
+                + "refuse_if_slice_running() {\n" + function(startSlice, "refuse_if_slice_running") + "}\n"
+                // 后台进程不占着本 shell 的输出管道（否则读输出要等它退出）
+                + (live ? "sleep 60 > /dev/null 2>&1 &\nLIVE=$!\necho $LIVE > run/pids/game-scene.pid\n" : "")
+                + "code=0\nrefuse_if_slice_running || code=$?\n"
+                + (live ? "kill $LIVE 2>/dev/null || true\n" : "")
+                + "exit $code\n";
+        return bashIn(bash, dir, script);
+    }
+
+    @Test
+    void 已有切片在跑时start_slice拒绝启动_不改记录与PID文件_停掉的PID文件不算(@TempDir Path dir) throws Exception {
+        String bash = bash();
+        Assumptions.assumeTrue(bash != null, "PATH 上没有可用的 bash");
+        assertThat(function(startSlice, "refuse_if_slice_running")).as("start-slice.sh 里有 refuse_if_slice_running()").isNotNull();
+
+        assertThat(refuseIn(bash, dir, null, false, false)).as("没有 PID 文件：照常").isEqualTo("0|");
+        assertThat(refuseIn(bash, dir, "t1", false, true)).as("只有停掉的切片留下的 PID 文件：照常").isEqualTo("0|");
+
+        // 评审指出的场景：t1 的切片在跑，新开的 shell 里没设 GAME_NAMESPACE（取 game）误执行 start-slice.sh
+        String refused = refuseIn(bash, dir, "t1", true, true);
+        assertThat(refused).as("有活进程：拒绝，点名两个命名空间与在跑的实例").startsWith("1|").contains("\"t1\"").contains("\"game\"")
+                .contains("game-scene").doesNotContain("game-login").contains("stop-slice.sh");
+        assertThat(Files.readString(dir.resolve("run/game-namespace"), StandardCharsets.UTF_8)).as("记录没被改").isEqualTo("t1");
+
+        assertThat(refuseIn(bash, dir, null, true, false)).as("在跑的切片没有记录（旧脚本起的）：同样拒绝").startsWith("1|").contains("（没有记录）");
+    }
+
+    @Test
+    void stop_slice全部停完后删掉命名空间记录_还有PID文件就留着(@TempDir Path dir) throws Exception {
+        String bash = bash();
+        Assumptions.assumeTrue(bash != null, "PATH 上没有可用的 bash");
+        // 记录的删除在停进程的循环之后
+        assertThat(stopSlice.indexOf("rm -f run/game-namespace")).isGreaterThan(stopSlice.indexOf("  stop_one \"$name\"\ndone\n"));
+
+        // 原样跑 stop-slice.sh：它 cd 到脚本所在目录的上两级，所以放进 <dir>/tools/local/ 下，run/ 就是 <dir>/run
+        Path script = dir.resolve("tools/local/stop-slice.sh");
+        Files.createDirectories(script.getParent());
+        Files.writeString(script, stopSlice, StandardCharsets.UTF_8);
+        Path pids = Files.createDirectories(dir.resolve("run/pids"));
+
+        Files.writeString(dir.resolve("run/game-namespace"), "t1", StandardCharsets.UTF_8);
+        Files.writeString(pids.resolve("game-chat.pid"), "999999", StandardCharsets.UTF_8);
+        assertThat(bashIn(bash, dir, "bash tools/local/stop-slice.sh\n")).startsWith("0|").contains("已停止 game-chat");
+        assertThat(dir.resolve("run/game-namespace")).as("全部停完：删掉记录").doesNotExist();
+        assertThat(pids.resolve("game-chat.pid")).doesNotExist();
+
+        Files.writeString(dir.resolve("run/game-namespace"), "t1", StandardCharsets.UTF_8);
+        Files.writeString(pids.resolve("game-other.pid"), "999999", StandardCharsets.UTF_8);
+        assertThat(bashIn(bash, dir, "bash tools/local/stop-slice.sh\n")).startsWith("0|");
+        assertThat(dir.resolve("run/game-namespace")).as("还有不在名单上的 PID 文件：记录留着").exists();
     }
 
     @Test

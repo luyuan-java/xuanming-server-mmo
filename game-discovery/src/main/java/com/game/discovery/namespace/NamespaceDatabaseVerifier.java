@@ -10,8 +10,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanPostProcessor;
-import org.springframework.boot.context.properties.bind.Binder;
-import org.springframework.core.env.Environment;
 
 /**
  * 连库的服务进程在启动期核对库名（与三个命令行工具同一套 {@link NamespaceDatabaseCheck}）：每个 {@link DataSource} bean 初始化完成、交给任何使用者
@@ -20,7 +18,9 @@ import org.springframework.core.env.Environment;
  *
  * <p>防的是「命名空间与库分属两个部署」：例如照抄了别的部署的整串 JDBC URL，{@code GAME_NAMESPACE=t1} 的进程会拿 t1 的 Redis 与 Kafka 去配 game 的库，
  * player 行、{@code owner_epoch} 围栏、运维表都写进另一个部署。规格是库名恒等于命名空间、部署只覆盖 host / port（deploy-ci-spec §2.2）；库名偏离规格的
- * 存量部署用应急开关 {@value #EXPECT_DATABASE_PROPERTY}（环境变量 {@code GAME_MYSQL_EXPECT_DATABASE}）显式给出期望库名，放行时打 WARN。
+ * 存量部署用应急开关 {@value #EXPECT_DATABASE_PROPERTY}（环境变量 {@code GAME_MYSQL_EXPECT_DATABASE}，规范写法 {@code GAME_MYSQL_EXPECTDATABASE} 同样认）
+ * 显式给出期望库名，放行时打 WARN。开关由 {@link GameMysqlProperties}（{@code @ConfigurationProperties} + {@code @Validated}）绑定校验：给了空值由
+ * Spring Boot 的标准绑定校验报告拒启，本类拿到的要么是 null（没配）、要么是不含空白的库名。
  *
  * <p>只核 MySQL 系（数据库产品名含 MySQL / MariaDB）：别的库（测试用的 H2）记 DEBUG 跳过。连不上库照样拒启（与 Druid 的 {@code initial-size}
  * 同口径：这些进程本来就在启动期连库），报错只带 SQLState 与错误码（驱动的消息里可能带连接串）。由 {@link GameNamespaceAutoConfiguration}
@@ -28,7 +28,7 @@ import org.springframework.core.env.Environment;
  */
 public class NamespaceDatabaseVerifier implements BeanPostProcessor {
 
-    /** 应急开关：库名偏离规格（≠ 命名空间）的存量部署显式给出期望库名。宽松绑定下环境变量写 {@code GAME_MYSQL_EXPECT_DATABASE}。 */
+    /** 应急开关的配置键（{@link GameMysqlProperties#expectDatabase()}）：库名偏离规格（≠ 命名空间）的存量部署显式给出期望库名。 */
     public static final String EXPECT_DATABASE_PROPERTY = "game.mysql.expect-database";
     /** 写进报错的应急开关写法。 */
     static final String OVERRIDE_HINT = EXPECT_DATABASE_PROPERTY + "（环境变量 GAME_MYSQL_EXPECT_DATABASE）";
@@ -36,15 +36,17 @@ public class NamespaceDatabaseVerifier implements BeanPostProcessor {
     private static final Logger log = LoggerFactory.getLogger(NamespaceDatabaseVerifier.class);
 
     private final ObjectProvider<GameNamespace> namespace;
-    private final Environment environment;
+    private final ObjectProvider<GameMysqlProperties> mysql;
 
     /**
-     * @param namespace   部署命名空间 bean（延迟取：本类是 BeanPostProcessor，要先于普通 bean 实例化；DataSource 经 depends-on 保证它已建好）
-     * @param environment 读应急开关
+     * 两个参数都延迟取：本类是 BeanPostProcessor，要先于普通 bean 实例化。
+     *
+     * @param namespace 部署命名空间 bean（DataSource 经 depends-on 保证它已建好）
+     * @param mysql     应急开关（{@link GameMysqlProperties}，第一次取时绑定校验）
      */
-    public NamespaceDatabaseVerifier(ObjectProvider<GameNamespace> namespace, Environment environment) {
+    public NamespaceDatabaseVerifier(ObjectProvider<GameNamespace> namespace, ObjectProvider<GameMysqlProperties> mysql) {
         this.namespace = namespace;
-        this.environment = environment;
+        this.mysql = mysql;
     }
 
     @Override
@@ -55,14 +57,10 @@ public class NamespaceDatabaseVerifier implements BeanPostProcessor {
         return bean;
     }
 
-    /** 核对一个 DataSource；不一致、应急开关给了空值或连不上抛 {@link IllegalStateException}。 */
+    /** 核对一个 DataSource；不一致或连不上抛 {@link IllegalStateException}（应急开关给了空值时，取开关就已经以绑定校验失败拒启）。 */
     void verify(DataSource dataSource, String beanName) {
         GameNamespace ns = namespace.getObject();
-        String expected = Binder.get(environment).bind(EXPECT_DATABASE_PROPERTY, String.class).orElse(null);
-        if (expected != null && expected.isBlank()) {
-            throw new IllegalStateException("DataSource " + beanName + " 的库名核对拒启：" + OVERRIDE_HINT
-                    + " 给了空值。不用应急开关就不要设它（库名规格上等于部署命名空间 " + GameNamespace.PROPERTY + "=" + ns + "）");
-        }
+        String expected = mysql.getObject().expectDatabase();
         String product;
         String actual;
         String mismatch;

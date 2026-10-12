@@ -18,6 +18,7 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
@@ -37,7 +38,9 @@ import org.springframework.core.env.SystemEnvironmentPropertySource;
 /**
  * 部署命名空间的装配：{@code game.namespace} 经 {@link GameNamespaceProperties}（{@code @Validated}）绑定与校验，注册 {@link GameNamespace} /
  * {@link RedisKeys} / {@link KafkaNames} 三个 bean；非法值由 Spring Boot 的绑定校验失败拒启（根因 {@link BindValidationException}，标准的
- * {@code APPLICATION FAILED TO START} 报告），而且在任何 DataSource 被创建之前。
+ * {@code APPLICATION FAILED TO START} 报告），而且在任何 DataSource 被创建之前。应急开关 {@link GameMysqlProperties} 同样走标准的绑定校验报告。
+ * 让路规则：{@link RedisKeys} / {@link KafkaNames} 在使用方自己定义了同类 bean 时让路，{@link GameNamespace} 不让路（另定义一个即拒启）。
+ * 断言缺省值或经 SpringApplication 给值的用例都不依赖跑测试的进程环境（见 {@code withoutProcessSources} 与命令行参数的注释）。
  */
 @ExtendWith(OutputCaptureExtension.class)
 class GameNamespaceAutoConfigurationTest {
@@ -51,6 +54,19 @@ class GameNamespaceAutoConfigurationTest {
                 .addFirst(new MapPropertySource("exact", Map.of(GameNamespace.PROPERTY, value))));
     }
 
+    /**
+     * 断言「没配」的用例自己保证没配：把进程的系统属性与环境变量换成空的（ApplicationContextRunner 的上下文带着真实的两者，开发者 shell 里
+     * export 的 GAME_NAMESPACE、给 mvn 的 -Dgame.namespace 都会经宽松绑定进来；surefire 只排除得了前者）。
+     */
+    private ApplicationContextRunner withoutProcessSources() {
+        return runner.withInitializer(ctx -> {
+            ctx.getEnvironment().getPropertySources().replace(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME,
+                    new MapPropertySource(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME, Map.of()));
+            ctx.getEnvironment().getPropertySources().replace(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                    new SystemEnvironmentPropertySource(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, Map.of()));
+        });
+    }
+
     private static boolean causedBy(Throwable failure, Class<? extends Throwable> type) {
         for (Throwable t = failure; t != null; t = t.getCause()) {
             if (type.isInstance(t)) {
@@ -62,9 +78,10 @@ class GameNamespaceAutoConfigurationTest {
 
     @Test
     void 没配取缺省game_三个bean各一个() {
-        runner.run(ctx -> {
+        withoutProcessSources().run(ctx -> {
             assertThat(ctx).hasNotFailed().hasSingleBean(GameNamespace.class).hasSingleBean(RedisKeys.class).hasSingleBean(KafkaNames.class)
-                    .hasSingleBean(GameNamespaceProperties.class).hasSingleBean(NamespaceDatabaseVerifier.class);
+                    .hasSingleBean(GameNamespaceProperties.class).hasSingleBean(GameMysqlProperties.class).hasSingleBean(NamespaceDatabaseVerifier.class);
+            assertThat(ctx.getBean(GameMysqlProperties.class).expectDatabase()).as("应急开关没配为 null").isNull();
             assertThat(ctx.getBean(GameNamespace.class).value()).isEqualTo("game");
             assertThat(ctx.getBean(RedisKeys.class).prefix()).isEqualTo("game:");
             assertThat(ctx.getBean(RedisKeys.class).namespace()).isSameAs(ctx.getBean(GameNamespace.class));
@@ -124,20 +141,80 @@ class GameNamespaceAutoConfigurationTest {
         }
     }
 
+    // 下面三例经命令行参数给值：它在 Spring Boot 的属性源里优先级最高，不会被跑测试的 shell 里的 GAME_NAMESPACE / -Dgame.namespace 盖掉
+    //（SpringApplicationBuilder.properties 给的是 default properties，优先级最低）
+
     @Test
     void 真SpringApplication_非法值输出标准的绑定校验报告(CapturedOutput output) {
         assertThatThrownBy(() -> new SpringApplicationBuilder(Minimal.class).web(WebApplicationType.NONE)
-                .properties("spring.main.banner-mode=off", "game.namespace=Bad").run().close())
+                .properties("spring.main.banner-mode=off").run("--game.namespace=Bad").close())
                 .hasRootCauseInstanceOf(BindValidationException.class);
         assertThat(output).contains("APPLICATION FAILED TO START").contains("Property: game.namespace").contains("Value: \"Bad\"")
-                .contains("Origin:").contains("Reason: " + GameNamespace.RULE);
+                .contains("Origin: \"game.namespace\" from property source \"commandLineArgs\"").contains("Reason: " + GameNamespace.RULE);
     }
 
     @Test
     void 真SpringApplication_合法值打出命名空间行(CapturedOutput output) {
         new SpringApplicationBuilder(Minimal.class).web(WebApplicationType.NONE)
-                .properties("spring.main.banner-mode=off", "game.namespace=t1").run().close();
+                .properties("spring.main.banner-mode=off").run("--game.namespace=t1").close();
         assertThat(output).contains("部署命名空间 game.namespace=t1（Redis 前缀 t1:，Kafka 前缀 t1-，MySQL 库 t1）");
+    }
+
+    @Test
+    void 真SpringApplication_应急开关给空值_同样是标准的绑定校验报告(CapturedOutput output) {
+        assertThatThrownBy(() -> new SpringApplicationBuilder(Minimal.class).web(WebApplicationType.NONE)
+                .properties("spring.main.banner-mode=off").run("--game.mysql.expect-database=").close())
+                .hasRootCauseInstanceOf(BindValidationException.class);
+        assertThat(output).contains("APPLICATION FAILED TO START").contains("Property: game.mysql.expectDatabase").contains("Value: \"\"")
+                .contains("Origin: \"game.mysql.expect-database\" from property source \"commandLineArgs\"")
+                .contains("Reason: 不用应急开关就不要设它");
+    }
+
+    // ---------------------------------------------------------------- 让路规则（Spring Boot 自动配置的惯例）
+
+    @Configuration(proxyBeanMethods = false)
+    static class OwnNameBeans {
+
+        static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("own"));
+        static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("own"));
+
+        @Bean
+        RedisKeys ownRedisKeys() {
+            return REDIS_KEYS;
+        }
+
+        @Bean
+        KafkaNames ownKafkaNames() {
+            return KAFKA_NAMES;
+        }
+    }
+
+    @Test
+    void 使用方自己定义了RedisKeys与KafkaNames_自动配置让路_只剩使用方的那一个() {
+        runner.withUserConfiguration(OwnNameBeans.class).run(ctx -> {
+            assertThat(ctx).hasNotFailed().hasSingleBean(RedisKeys.class).hasSingleBean(KafkaNames.class).hasSingleBean(GameNamespace.class);
+            assertThat(ctx.getBean(RedisKeys.class)).isSameAs(OwnNameBeans.REDIS_KEYS);
+            assertThat(ctx.getBean(KafkaNames.class)).isSameAs(OwnNameBeans.KAFKA_NAMES);
+            assertThat(ctx).doesNotHaveBean("redisKeys").doesNotHaveBean("kafkaNames");
+        });
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class SecondNamespace {
+
+        @Bean
+        GameNamespace anotherNamespace() {
+            return GameNamespace.of("other");
+        }
+    }
+
+    @Test
+    void GameNamespace不让路_另定义一个就在注入时拒启_报错点名两个bean() {
+        runner.withUserConfiguration(SecondNamespace.class).run(ctx -> {
+            assertThat(ctx).hasFailed();
+            assertThat(ctx.getStartupFailure()).hasRootCauseInstanceOf(NoUniqueBeanDefinitionException.class);
+            assertThat(ctx.getStartupFailure()).rootCause().hasMessageContaining("gameNamespace").hasMessageContaining("anotherNamespace");
+        });
     }
 
     @Configuration(proxyBeanMethods = false)

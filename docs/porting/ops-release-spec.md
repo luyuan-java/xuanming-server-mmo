@@ -1079,7 +1079,9 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 - **抓取**：每个 Java Pod 打 `prometheus.io/*` 注解（基线 Go 服务同约定，`manifests/go-svc/chat.yaml:52`）；chart 可选生成 PodMonitor（不作为依赖）。重标规则（`deploy/observability/prometheus/scrape-k8s.example.yaml`）：
   `job` ← `app.kubernetes.io/name`（**必须等于进程的 `spring.application.name`**，即公共标签 `application`，由 A12 与 CI 守卫）、`zone` ← `__meta_kubernetes_pod_label_game_zone`（全局进程没有）、`instance` ← Pod 名。
   compose 用静态目标 `game-<模块>:<管理端口>`，给出相同的 job 与 zone。抓取 15 s，规则评估 30 s（同基线 `interval: 30s`）。
-  （2026-10-12 补记）重标再加 `namespace` ← `__meta_kubernetes_namespace`（K8s 应用 namespace = 部署命名空间，§5.2 补记）；compose 的静态目标给 `namespace=<部署命名空间>`。
+  （2026-10-12 补记）重标再加 `namespace` ← `__meta_kubernetes_namespace`（一个 K8s 应用 namespace 对应一个部署命名空间，§5.2 补记）；compose 的静态目标给同名标签、
+  取同一个取值域：`namespace=<对应的 K8s 应用 namespace 名>`（compose 整栈即它的项目名，缺省 `game-java`），**不填部署命名空间**（`game` / `t1` 是另一个取值域，
+  混填会让看板、promtool 规则测试与 Loki 关联在两种环境里对不上；architecture.md §6.2「可观测性与 ID」）。
   全部告警规则的 `by (…)` 带上 `namespace`（如 A25「zone 有 gate 却没有活 scene」按 `by (namespace, zone)`，否则会被另一套部署的健康 scene 掩盖），
   规则的单元测试（promtool）同样带这个标签。
 - **口径**：进程里仍不加 zone / 实例标签（architecture §11）；zone 是**部署层**的抓取目标标签，基数等于目标数。architecture §11 补这一句（Q46）。
@@ -1170,9 +1172,9 @@ gate 与 battle 都由 values 的 `exposure.mode` 决定通告地址：
 | 变量 | 值 | 用在 |
 |---|---|---|
 | `GAME_RUN_MODE` | prod；CI 用 dev（要跑 GM 类 robot 场景） | 全部 |
-| `GAME_NAMESPACE`（2026-10-12 补记） | 部署命名空间（不是 K8s namespace，也不是镜像命名空间；对照表见 architecture.md §6.2），取值 `[a-z][a-z0-9]{0,27}`（1–28 个字符）；同一套托管 MySQL / Redis / Kafka 上跑多个游戏或多套环境时各取不同的值，一个 K8s 应用 namespace 对应一个值（§5.2 补记）。一个环境的全部 Pod 与运维工具（AuditFallbackReplay、assetopfix、PasswordAdmin）取同一个值（同一个 ConfigMap 键，只经环境变量注入），定下后不改。K8s / Helm 没有 shell 式缺省值，Helm 的 `default` 也把空值当没设：chart 的 values 键 `gameNamespace` **必填**（模板用 `required`，缺省部署也显式写 `game`），漏设即渲染失败，不静默落进缺省部署。库名恒等于它（服务启动期核对 `DATABASE()`，§7.5）；`GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` 只覆盖地址 | 全部 |
+| `GAME_NAMESPACE`（2026-10-12 补记） | 部署命名空间（不是 K8s namespace，也不是镜像命名空间；对照表见 architecture.md §6.2），取值 `[a-z][a-z0-9]{0,27}`（1–28 个字符）；同一套托管 MySQL / Redis / Kafka 上跑多个游戏或多套环境时各取不同的值，一个 K8s 应用 namespace 对应一个值（§5.2 补记）。一个环境的全部 Pod 与运维工具（AuditFallbackReplay、assetopfix、PasswordAdmin）取同一个值（同一个 ConfigMap 键，经环境变量注入；工具与服务进程同口径绑定，`-Dgame.namespace` 两边也都认），定下后不改。K8s / Helm 没有 shell 式缺省值，Helm 的 `default` 也把空值当没设：chart 的 values 键 `gameNamespace` **必填**（模板用 `required`，缺省部署也显式写 `game`），漏设即渲染失败，不静默落进缺省部署。库名恒等于它（服务启动期核对 `DATABASE()`，§7.5）；`GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` 只覆盖地址 | 全部 |
 | `GAME_MANAGEMENT_ADDRESS` | `0.0.0.0` | 全部 |
-| `GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` / `GAME_MYSQL_USER` | 托管地址；dev / CI 为 `mysql.<k8s-ns>-infra` / 3306；用户 `game_app` | 8 个连库进程 |
+| `GAME_MYSQL_HOST` / `GAME_MYSQL_PORT` / `GAME_MYSQL_USER` | 托管地址；dev / CI 为 `mysql.<k8s-ns>-infra` / 3306；用户 `game_app` | 9 个连库进程（data、friend、gateway、guild、login、match、scene、team、trade；2026-10-12 补记：原写 8 个，漏了批次 6.4 的 game-match，M13 与库名核对覆盖的都是这 9 个） |
 | `GAME_REDIS_ADDRESS` | 托管地址；dev / CI 为 `redis://redis.<k8s-ns>-infra:6379` | 全部 |
 | `GAME_KAFKA_BOOTSTRAP_SERVERS`、`GAME_AUDIT_REPLICATION_FACTOR` | prod ≥3 个 broker、3；dev / CI `kafka.<k8s-ns>-infra:9092`、1 | scene、data |
 | `GAME_*_URL` | Service 名（§5.3） | 各 Dubbo 调用方 |
