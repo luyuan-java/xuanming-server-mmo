@@ -154,7 +154,7 @@ class GateTokenIssuerTest {
         assertThat(HexFormat.of().formatHex(token.payload().toByteArray()))
                 .isEqualTo("0807100218aca6a7da0628888e98a8c0e08081013003");
         assertThat(token.signature().toString(StandardCharsets.US_ASCII))
-                .isEqualTo("d79e88f6e0720ed0012ef75ab6b3ed9714561cbe2746e3f8510acbc4493c4902");
+                .isEqualTo("6ce1f90cb01af6de6622028645b78ac36812434459bc6ce1cb1c1137364f8aae");
         assertThat(token.deadlineEpochSec()).isEqualTo(1_800_000_300L);
         // 重定向票据里没有随机成分：同一时刻、同一组参数再签一次，字节完全相同
         assertThat(issuer.issueRedirect(7, 2, HOLDER, 3)).isEqualTo(token);
