@@ -1,4 +1,4 @@
--- docs/design/db-migrations.md M8 的迁移语句（与文档逐字相同；GameDataMysqlIntegrationTest 用它把 M8 之前的库迁到新结构再与新建库比对）。
+-- docs/design/db-migrations.md M8 的迁移语句（与文档逐字相同；DataMysqlIntegrationTest 用它把 M8 之前的库迁到新结构再与新建库比对）。
 ALTER TABLE transaction_log
     ADD KEY idx_txlog_item (kind, item_config_id, time_ms),
     ADD KEY idx_txlog_currency (kind, currency_type, time_ms),

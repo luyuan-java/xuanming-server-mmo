@@ -231,7 +231,7 @@ ALTER TABLE player_snapshot
     ADD COLUMN note     VARCHAR(256) NOT NULL DEFAULT '' COMMENT '直写的备注（原因 / 事件 / 作业号）';
 ```
 
-**核对**：迁移后 `SHOW CREATE TABLE transaction_log` / `player_snapshot` 与新库逐字相同（`GameDataMysqlIntegrationTest` 用迁移前的建表脚本
+**核对**：迁移后 `SHOW CREATE TABLE transaction_log` / `player_snapshot` 与新库逐字相同（`DataMysqlIntegrationTest` 用迁移前的建表脚本
 `game-data/src/test/resources/db/game-data-schema-before-m8.sql` + 上面的语句（`db/game-data-migration-m8.sql`）对拍）。
 
 ```sql
@@ -270,7 +270,7 @@ game-data 按 `zone_id = ? AND player_id > ? ORDER BY player_id LIMIT 500` 分�
 ALTER TABLE player ADD KEY idx_player_zone (zone_id);
 ```
 
-**核对**：迁移后 `SHOW CREATE TABLE player` 与新库逐字相同（`GameDataMysqlIntegrationTest` 用迁移前的建表脚本
+**核对**：迁移后 `SHOW CREATE TABLE player` 与新库逐字相同（`DataMysqlIntegrationTest` 用迁移前的建表脚本
 `game-data/src/test/resources/db/game-player-schema-before-m9.sql` + 上面的语句（`db/game-player-migration-m9.sql`）对拍，并 EXPLAIN 按区分页走 `idx_player_zone`）。
 
 ```sql

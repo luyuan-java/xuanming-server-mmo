@@ -50,7 +50,7 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
  * </ul>
  */
 @EnabledIfSystemProperty(named = "game.it.mysql", matches = ".+")
-class GameDataMysqlIntegrationTest {
+class DataMysqlIntegrationTest {
 
     private static DriverManagerDataSource database(String name) {
         return new DriverManagerDataSource(DataSqlFixture.MYSQL_URL + "/" + name

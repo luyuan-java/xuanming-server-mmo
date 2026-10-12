@@ -1,4 +1,4 @@
--- docs/design/db-migrations.md M9 之前的 game-player-store 建表脚本（git HEAD 945c590 原样；GameDataMysqlIntegrationTest 用它 + M9 迁移与新建库比对）。
+-- docs/design/db-migrations.md M9 之前的 game-player-store 建表脚本（git HEAD 945c590 原样；DataMysqlIntegrationTest 用它 + M9 迁移与新建库比对）。
 -- Java 版账号 / 玩家表（库 game，与 mmorpg 的库隔离）。启动时由 Spring SQL init 执行，必须幂等。
 -- CREATE TABLE IF NOT EXISTS 不会改动已存在的表：结构变更对存量库要手工迁移，步骤见 docs/design/db-migrations.md。
 

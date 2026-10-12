@@ -1367,10 +1367,10 @@ Java 用 T-G1 钉住，基线有 `client_message_processor.cpp:874-886` 的白�
 - [x] 构建与相关模块单测：§13.1 的 `-pl game-player-store,game-scene,game-login,game-data install`（带三个 IT 开关）BUILD SUCCESS、0 失败；§13.2 评审修复之后
       `-pl game-data test`（带三个 IT 开关）187 个用例、0 失败。
 - [x] 已有的 IT 跑过并留记录：上面两次运行都带 `-Dgame.it.mysql` / `-Dgame.it.redis` / `-Dgame.it.kafka`（SQL 用例连真 MySQL、`useAffectedRows=true` 的连接串；
-      `GameDataMysqlIntegrationTest` 含 M9 迁移等价与 `idx_player_zone` 的 EXPLAIN）。
+      `DataMysqlIntegrationTest` 含 M9 迁移等价与 `idx_player_zone` 的 EXPLAIN）。
 - [x] §12.3–§12.5 里点名给 7.2b 的几条 IT（2026-10-05 登记时还没有用例，**2026-10-06 已补**，逐条回到代码核对过，见 §13.4）：§12.3 的「§4.8 整个事务」失败注入
-      （`RollbackWriterSqlTest`）与 MyBatis / pbmysql 同一条连接同一个事务（`GameDataMysqlIntegrationTest`、`RollbackWriterSqlTest`）、login 与运维同时抢同一名玩家
-      （`GameDataMysqlIntegrationTest`）；§12.4 的让出请求发布与位置墓碑的真 Redis 语义（`AdminOwnershipRedisIntegrationTest`、`RedisTakeoverRequestsTest`）；
+      （`RollbackWriterSqlTest`）与 MyBatis / pbmysql 同一条连接同一个事务（`DataMysqlIntegrationTest`、`RollbackWriterSqlTest`）、login 与运维同时抢同一名玩家
+      （`DataMysqlIntegrationTest`）；§12.4 的让出请求发布与位置墓碑的真 Redis 语义（`AdminOwnershipRedisIntegrationTest`、`RedisTakeoverRequestsTest`）；
       §12.5 的「LOGOUT 快照经 Kafka 落库后被回档按时刻选中」往返（`RollbackKafkaRoundTripIntegrationTest`）。
 - [x] robot `rollback` 场景 10 项与回归场景（`smoke` `reconnect` `currency` `bag` `pet` `guild-economy` `audit`）在本机单节点切片上全过（§13.1）。
 - [ ] robot 相对 §12.6 的缺口（2026-10-05 登记：没有走按 `targetTimeMs` 选 LOGOUT 快照、没有核对持有期间登录回 2005、没有「回档后差异接口无差异」、没有按 `preSnapshotId` 撤销、
@@ -1482,7 +1482,7 @@ lead 2026-10-05 裁决：**一律以实现为准，回写正文**（规格是 7.
   按时刻选源排除安全快照且同毫秒取号大的、快照属于别人 404、多人 PARTIAL、幂等 / 写开关 / dry-run、ops_busy、沉降期间取消、按 preSnapshotId 撤销）、
   `ZoneRollbackSqlTest`（T-Z1：开放区 409、一律 kick 与没有快照的两类、一人夺不到全部释放零写入、空区、规模 422）、`RollbackAdminControllerTest`、
   `OpsWriteGateTest`（写开关打开缺 `GAME_DUBBO_SECRET` 拒启、缺省值、越界拒启）；
-  `GameDataMysqlIntegrationTest` 加 M9 迁移等价与 `idx_player_zone` 的 EXPLAIN；`AdminAuthFilterTest` 补新路径。
+  `DataMysqlIntegrationTest` 加 M9 迁移等价与 `idx_player_zone` 的 EXPLAIN；`AdminAuthFilterTest` 补新路径。
 - `-pl game-player-store,game-scene,game-login,game-data install -Dgame.it.mysql=... -Dgame.it.redis=... -Dgame.it.kafka=...`：BUILD SUCCESS（game-player-store 55、
   game-login 170、game-scene 835（跳过 1）、game-data 172，0 失败）；资产组改为按描述符计算之后 game-data 单模块带同样的 IT 开关重跑 173 个用例、0 失败。
 - 本机单节点切片（slice-run.sh）：`smoke` `reconnect` `currency` `bag` `pet` `guild-economy` `audit` `rollback` 全部通过；game-data 0 条 ERROR。
@@ -1634,7 +1634,7 @@ lead 2026-10-05 裁决：**一律以实现为准，回写正文**（规格是 7.
   `ZoneRollbackSqlTest` 补整区下的帮会分歧、`check_failed`、第二块检查失败谁也不写。
 - 真依赖：`AdminOwnershipRedisIntegrationTest`（让出请求的字节与 login 发的相同、每次重试重发、位置墓碑按 (epoch, 序号) 盖过旧记录而不抹掉更新的进场，§12.4）、
   `RedisTakeoverRequestsTest`、`RollbackKafkaRoundTripIntegrationTest`（scene 的 LOGOUT 快照经 Kafka 落库后被回档按时刻选中、写回的字节与快照一致，§12.5）、
-  `GameDataMysqlIntegrationTest`（同一事务里两套映射同一条连接、login 与运维同时抢同一名玩家每轮恰好一方夺到，§12.3）。
+  `DataMysqlIntegrationTest`（同一事务里两套映射同一条连接、login 与运维同时抢同一名玩家每轮恰好一方夺到，§12.3）。
 - `DataMetricsPrometheusTest`（两个 Timer 的导出名是 `game_data_ops_job_seconds` / `game_data_rollback_guild_check_seconds`、逐玩家结局的固定集合、两个 Gauge 装配时就在）、
   `OpsLifecycleOrderTest`（停机次序，§7.4）。
 
@@ -1642,7 +1642,7 @@ lead 2026-10-05 裁决：**一律以实现为准，回写正文**（规格是 7.
 
 - `ZoneSnapshotService`：备注过长时拼上的 `job:<作业号>` 被列宽截掉。现在截的是备注、保住作业号（`noteWithJob`，上限 `NOTE_MAX = 256`，不在代理对中间下刀）。
 - `PersistedPlayerMapper`：区号（`INT UNSIGNED`）按无符号绑定与读取（`UnsignedIntTypeHandler`）。此前 ≥ 2^31 的区号被当成负数发给数据库，整区回档与维护前快照一行也查不到；
-  `GameDataMysqlIntegrationTest` 加了一条真 MySQL 用例。
+  `DataMysqlIntegrationTest` 加了一条真 MySQL 用例。
 
 **新增的包内接缝**：`OpsJobRunner` 多一个包私有构造器，末参 `resultRetryBudget` 让「RESULT 一直写不进」的用例不必等满 30 s；公开构造器恒传 30 s，生产行为不变。
 
@@ -1653,7 +1653,7 @@ lead 2026-10-05 裁决：**一律以实现为准，回写正文**（规格是 7.
 回收逆转检查里 TX_BATCH_RECALL(19) 这一原因、获得方方向的行不算逆转、超过 100 条时的截断没有专门用例（17 / 19 的写入方随 7.2c）。
 
 **模块级证据**（同上的命令前缀，2026-10-06）：补齐之后缺省 H2 的整模块 `Tests run: 304, Failures: 0, Errors: 0, Skipped: 24`（`d72b-8.log`），
-加 `-Dgame.it.mysql` / `-Dgame.it.redis` / `-Dgame.it.kafka` 的整模块 `Tests run: 304, Failures: 0, Errors: 0, Skipped: 0`（`d72b-9.log`）。之后 `GameDataMysqlIntegrationTest`（当时名 `XmDataMysqlIntegrationTest`）
+加 `-Dgame.it.mysql` / `-Dgame.it.redis` / `-Dgame.it.kafka` 的整模块 `Tests run: 304, Failures: 0, Errors: 0, Skipped: 0`（`d72b-9.log`）。之后 `DataMysqlIntegrationTest`（当时名 `XmDataMysqlIntegrationTest`）
 又加了上面那条无符号区号的用例，整模块的条数以最终验证为准。
 
 #### 最终验证（2026-10-06）
@@ -1661,7 +1661,7 @@ lead 2026-10-05 裁决：**一律以实现为准，回写正文**（规格是 7.
 与批次 6.3 的收尾同一次执行（本机 Windows 11，JDK 21.0.12；Redis 8.10.2、MySQL 8.4.11、Kafka 4.3.1 单机），完整记录见 scene-battle-spec 末尾的「最终验证（2026-10-06）」。与本稿有关的部分：
 
 - **全量构建**（`./mvnw -B clean install`，带 `-Dgame.it.redis` / `-Dgame.it.mysql` / `-Dgame.it.kafka`）：26 个模块 BUILD SUCCESS，7096 条用例 0 失败 0 错误；
-  其中 game-data 305 条、0 跳过（比 13.4 的模块级证据多 1 条：`GameDataMysqlIntegrationTest` 的无符号区号用例）。
+  其中 game-data 305 条、0 跳过（比 13.4 的模块级证据多 1 条：`DataMysqlIntegrationTest` 的无符号区号用例）。
 - **robot `rollback`**（19 项，含 2026-10-06 追加的差异接口无差异、按 `preSnapshotId` 撤销、LOGOUT 快照经 Kafka 落库后按时刻回档、运维持有期间进游戏回 2005）：
   本机单 scene 切片与双 scene 切片（`GAME_SCENE_NODES=2`）上各跑一遍，19 项全部通过。`audit`（3 项）、`guard`（5 项）同次通过。
 - 帮会联动、整区回档与 `/admin/zone-snapshots` 仍不在 robot 场景里（由 `RollbackJobSqlTest` / `ZoneRollbackSqlTest` / `ZoneSnapshotSqlTest` 覆盖）。
