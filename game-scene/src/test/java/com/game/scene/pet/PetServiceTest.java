@@ -20,16 +20,20 @@ import com.game.scene.world.WorldTestAccess;
 import com.game.table.ConfigTables;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.random.RandomGenerator;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * 宝宝服务（基线 PetSystem），配表用正式表（宝宝池 4：维度 401 体质 / 402 灵力 / 403 力量 / 404 敏捷，每级 5 点，
- * 30 级起洗点 300 金币；改名 200 金币；可携带 10 只）。资质随机数固定取区间下限：灵狐（种类 1）= 8000 / 10000 / 7000 / 11000。
+ * 30 级起洗点 300 金币；改名 200 金币；可携带 22 只）。资质随机数固定取区间下限：灵狐（种类 1）= 8000 / 10000 / 7000 / 11000。
  */
 class PetServiceTest {
 
@@ -135,7 +139,7 @@ class PetServiceTest {
         PetListInfo list = service.buildList(player);
         assertThat(list.getPetsList()).isEmpty();
         assertThat(list.getActivePetId()).isZero();
-        assertThat(list.getMaxPets()).isEqualTo(10);
+        assertThat(list.getMaxPets()).isEqualTo(22);
         assertThat(list.getRenameCostGold()).isEqualTo(200);
     }
 
@@ -171,7 +175,7 @@ class PetServiceTest {
     @Test
     void 发放拒绝码_种类缺失26001_槽位满26002_号源不可用26016且不留半只() {
         assertThat(service.grant(player, 99).tip()).isEqualTo(26001);
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 22; i++) {
             grant(1);
         }
         assertThat(service.grant(player, 1).tip()).isEqualTo(26002);
@@ -183,6 +187,37 @@ class PetServiceTest {
     }
 
     // ------------------------------------------------------------------ 出战
+
+    static IntStream publishedPetKinds() {
+        return IntStream.rangeClosed(1, 22);
+    }
+
+    @ParameterizedTest(name = "正式宠物种类 {0} 发放、出战、战斗快照与重登")
+    @MethodSource("publishedPetKinds")
+    void 全部正式种类身份技能贯穿发放出战快照和存档(int petTableId) {
+        setLevel(30);
+        long petId = grant(petTableId);
+        assertThat(service.summon(player, petId)).isZero();
+        PetInfo pet = info(petId);
+        assertThat(pet.getPetTableId()).isEqualTo(petTableId);
+        assertThat(pet.getModelId()).isEqualTo(1000 + petTableId);
+        assertThat(pet.getIsActive()).isTrue();
+        assertThat(pet.getName()).isEqualTo(tables.pet(petTableId).getName());
+        assertThat(service.buildBattleSnapshot(player)).singleElement().satisfies(snapshot -> {
+            assertThat(snapshot.getPetId()).isEqualTo(petId);
+            assertThat(snapshot.getOwnerPlayerId()).isEqualTo(PLAYER);
+            assertThat(snapshot.getPetTableId()).isEqualTo(petTableId);
+            assertThat(snapshot.getPetName()).isEqualTo(pet.getName());
+            assertThat(snapshot.getSkillTableIdsList())
+                    .isEqualTo(petTableId == 2 || petTableId == 3 ? List.of() : List.of(14));
+            assertThat(snapshot.getBaseAttributes().getHealth()).isEqualTo(pet.getDerived().getMaxHealth());
+            assertThat(snapshot.getBaseAttributes().getMana()).isEqualTo(pet.getDerived().getMaxMana());
+        });
+        ScenePlayer reloaded = WorldTestAccess.player(PLAYER, player.level(), WorldTestAccess.persistentState(player));
+        service.initializeOnLoad(reloaded);
+        assertThat(service.buildList(reloaded)).isEqualTo(service.buildList(player));
+        assertThat(service.buildBattleSnapshot(reloaded)).isEqualTo(service.buildBattleSnapshot(player));
+    }
 
     @Test
     void 出战与收回_同时只能一只_重复召唤26004_主人等级不够26003_没有出战再收回26005() {

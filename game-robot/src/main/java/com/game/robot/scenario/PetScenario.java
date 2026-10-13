@@ -48,7 +48,7 @@ import java.util.Optional;
  * 宝宝系统端到端（对应 mmorpg robot pet_smoke，Java 用新号、另加改名 / 洗点扣费检查）：181 列表、187 GM 发放、183 出战、185 收回、
  * 186 加点、182 洗点、188 自动加点、189 改名、184 主人升级推送。需要 dev 运行模式（GM 方法放行）。
  * <ol>
- *   <li>新号列表为空（可携带 10、改名 200 金币）→ 发放灵狐（种类 1）：1 级、总点 5、四个维度都属宝宝池 4、资质在表区间内、成长率 = 资质均值、满血；</li>
+ *   <li>新号列表为空（可携带 22、改名 200 金币）→ 发放灵狐（种类 1）：1 级、总点 5、四个维度都属宝宝池 4、资质在表区间内、成长率 = 资质均值、满血；</li>
  *   <li>池隔离：角色面板里没有宝宝池与宝宝维度；发放不存在的种类 26001；金猊（种类 3，要主人 10 级）出战 26003；</li>
  *   <li>GM 设 30 级：先收到 184 再收到 175 应答、宝宝 30 级、总点 +145；</li>
  *   <li>洗点没分配过 26015 → 自动加点只算不落（建议增量和 = 剩余点）→ 按建议加点、剩余归零、气血上限变大 → 重发 26015、减点 26010、
@@ -123,8 +123,8 @@ public final class PetScenario {
             GameConnection c = player.connection();
 
             PetListInfo empty = list(c);
-            report.check(empty.getPetsCount() == 0 && empty.getMaxPets() == 10 && empty.getRenameCostGold() == 200,
-                    "新号列表为空，可携带 10、改名 200 金币", empty.toString().replace('\n', ' '), REF);
+            report.check(empty.getPetsCount() == 0 && empty.getMaxPets() == 22 && empty.getRenameCostGold() == 200,
+                    "新号列表为空，可携带 22、改名 200 金币", empty.toString().replace('\n', ' '), REF);
 
             pause();
             GmGrantPetResponse granted = c.call(grant, GmGrantPetRequest.newBuilder().setPetTableId(1).build(),

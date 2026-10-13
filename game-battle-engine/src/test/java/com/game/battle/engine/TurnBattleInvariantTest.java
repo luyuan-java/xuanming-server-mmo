@@ -530,6 +530,7 @@ class TurnBattleInvariantTest {
             }
             if (checker != null) {
                 checker.afterCollection(accepted);
+                checker.recordPetDefaults(before, accepted);
             }
             long drawsBefore = engine.rngDrawsForTest();
             TurnResultS2C result = engine.resolveCurrentRound();
@@ -617,6 +618,36 @@ class TurnBattleInvariantTest {
 
         void beginRound(BattleStateS2C before) {
             roundStart = before;
+        }
+
+        /**
+         * 行动账也包含服务器替宝宝选择的行动；它不是客户端提交。用结算前快照与纯校验器重建输入，
+         * 不读取引擎的待执行列表，也不根据执行结果倒推，故目标失效后的普攻回退仍能检查 RNG 消耗。
+         */
+        void recordPetDefaults(BattleStateS2C before, Map<Long, BattleAction> accepted) {
+            BattleContext input = new BattleContext(scenario.data(), scenario.request().getMatchMode(), 0);
+            for (BattleActorState actor : before.getActorsList()) {
+                input.units().add(new BattleUnit(actor.toBuilder()));
+            }
+            ActionChecks prerequisites = new ActionChecks(input, new ItemLedger(input, scenario.request()));
+            for (BattleActorState pet : before.getActorsList()) {
+                if (pet.getActorType() != eBattleActorType.BATTLE_ACTOR_TYPE_PET || !active(pet)) {
+                    continue;
+                }
+                var target = before.getActorsList().stream()
+                        .filter(candidate -> active(candidate) && candidate.getTeamIndex() != pet.getTeamIndex())
+                        .findFirst();
+                if (target.isEmpty()) {
+                    continue;
+                }
+                BattleUnit actor = input.findActor(pet.getActorId());
+                pet.getSkillTableIdsList().stream()
+                        .map(skill -> BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                                .setSkillTableId(skill).setTargetId(target.get().getActorId()).build())
+                        .filter(action -> prerequisites.checkActionPrerequisites(actor, action) == SUCCESS)
+                        .findFirst().ifPresent(action -> accepted.put(pet.getActorId(), action));
+            }
+            assertThat(input.rng().draws()).as("核账校验也不能消费随机数").isZero();
         }
 
         void submitted(long playerId, int verdict, boolean ready) {
