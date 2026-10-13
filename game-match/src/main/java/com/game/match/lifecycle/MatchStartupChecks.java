@@ -131,9 +131,9 @@ public final class MatchStartupChecks {
                     + " 不一致（battle 的确认补发窗口按后者核对）");
         }
         int teamLock = teamLockSeconds.applyAsInt(MatchBudgets.MAX_TEAM_SIZE);
-        if (teamLock > MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS) {
-            violations.add(MatchBudgets.MAX_TEAM_SIZE + " 人的开战锁 " + teamLock + " s 超过 game-team EndMatch 的截止 "
-                    + MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS + " s");
+        if (teamLock > MatchBudgets.MAX_TEAM_LOCK_SECONDS) {
+            violations.add(MatchBudgets.MAX_TEAM_SIZE + " 人的开战锁 " + teamLock + " s 超过契约上限 MAX_TEAM_LOCK_SECONDS = "
+                    + MatchBudgets.MAX_TEAM_LOCK_SECONDS + " s（game-team 会按传输失败拒绝开战）");
         }
         return violations;
     }

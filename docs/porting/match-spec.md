@@ -97,7 +97,7 @@
 | 补签判死 | ② 只直拨落点记录里的地址，不采纳 6.2 Q14；③ 采纳 Q14：目录里同号节点实例不符即回 1005 | **合并**：先直拨记录地址；只有直拨**建连失败**（超时不算）、且目录里同号节点已换实例才回 1005（§4.3）。理由：6.2 丢租约后进程仍活着、房间不作废（`bn-spec` §7.10、Q4），单看目录会把活着的房间判死；只直拨又拿不到「节点已被别的进程接手」的正面证据（`rbt.go:98-104`）。**落地时又收紧一步**（评审 G-4）：「建连失败」在实现里是「请求确定没有送达」，它比「原地址连不上」宽（连接刚断、还没重连上时也成立），所以判死前对原地址再做一次 TCP 建连探测，明确被拒绝 / 不可达才回 1005（§4.3 第 5 行） |
 | 整队开战的 ticket id | ② 由 game-team 每人生成一个 UUID；③ 全队共用 lock_token | **game-team 每人一个 UUID**。基线就是每人一个 UUID（`tb.go:106-109`）；而且 JoinQueue 回 16001 时会把现有 ticket id 回给客户端（`join.go:133-140`），用 lock_token 会把开战锁令牌外泄、全队同号，是客户端可见差异。③ 说「team 的票不回给客户端」与代码不符 |
 | 整队的跨进程方法集 | ② 5 个方法（teamSize 单独一个）；③ 4 个方法（人数检查与预检合成一次） | **4 个方法**（§7.5）：人数检查与逐成员预检合成一次调用，顺序与基线 `tsvc.go:371-381` 一致，少一次往返 |
-| runTeamGather 的超时 | ② 等于开战锁时长；③ 静态 120 s | **等于开战锁时长**（5 人 101 s）。比 gather 加补偿的最坏 91 s 长；EndMatch 的 110 s 单调截止从 gather 结束才起算（`tstore.go:454-461`），不受影响 |
+| runTeamGather 的超时 | ② 等于开战锁时长；③ 静态 120 s | **等于开战锁时长**（5 人 101 s）。比 gather 加补偿的最坏 91 s 长；EndMatch 的单调截止从 gather 结束才起算（2026-10-12 起 = 锁时长 + 3.2 s，原固定 110 s，`tstore.go:454-461`），不受影响 |
 | 回合打满的阈值 | ② ③ 都主张按引擎回合上限推导（Dungeon 行有 `time_limit` 时换算，否则 30） | **不采纳，保持基线**：基线 yaml 的覆盖表是注释掉的（`yaml:122-124`），有效阈值对所有配置恒为 30；而引擎对 Dungeon 1 的上限是 300 回合（`engine-spec:280-282`）。按引擎推导会让 Dungeon 1 上 30–299 回合分出的胜负从「平局」变成「胜负」，两版评分分叉。改法登记为两版同改的开放问题（§14 Q5） |
 | 评分取整 | ② HALF_EVEN；③ HALF_UP | **HALF_EVEN，作用于 double 的精确十进制值**：基线用 Lua `string.format("%.2f", next)`（`rating.go:77`），即 C printf 对精确二进制值舍入，恰好打平（如 x.125）时取偶。`new BigDecimal(double).setScale(2, HALF_EVEN)` 与之逐位一致 |
 | 结果消费失败 | ② 可恢复故障暂停重试、不跳过；③ 照基线重试 3 次后跳过 | **可恢复故障不跳过**（同 game-data `ConsumerLoop`，`arch` §4.5）。基线跳过（`consumer.go:132-150`）是因为 Redis 两层写有「部分入账」状态；Java 一个事务恰好一次，没有理由丢一局 |
@@ -919,7 +919,7 @@ public interface MatchTeamService {
   名单与票号对不上时回 `{ok = false, outcome = "internal"}`，票据不动。
 
 **应答枚举的首值一律 `UNSPECIFIED`**（lead 裁决三）：`TeamMatchCheckResult`（`OK = 1 … INTERNAL = 7`）、`TeamTicketsStatus`。future 异常完成与 `UNSPECIFIED` / 不认识的枚举值都按传输失败；
-`checkTeamMatch` 回 `OK` 时调用方还要校验 zones 覆盖名单里每个人、`lock_ttl_seconds` 在 [1, 110]（防两边版本不一时开战锁比 EndMatch 的截止还长），不满足同样按传输失败。
+`checkTeamMatch` 回 `OK` 时调用方还要校验 zones 覆盖名单里每个人、`lock_ttl_seconds` 在 [1, 110]（契约上限 `MAX_TEAM_LOCK_SECONDS`，限制一把锁占住收尾线程与长挂调用多久；2026-10-12 起 EndMatch 截止由锁时长推出，不再靠这个上限保证），不满足同样按传输失败。
 
 **`checkTeamMatch` 的判定次序**（`team.MatchTeamServiceImpl`）：副本未配置 → 超员 → 名单不合法（空 / 含 0 / 重复 → INTERNAL）→ 逐成员预检（读锁失败 → MEMBER_IN_BATTLE）→ **发号租约无效 → INTERNAL**。
 租约判在人数与成员预检之后：只拦本来会放行的请求，前面几种拒绝的可见结果不因租约而变。工作池过载、排队超预算、到达时预算已过期也回 INTERNAL。整队与活动的建票、回滚共用 `team.GroupTickets`。
@@ -964,11 +964,11 @@ public interface MatchTeamService {
   4. 回 STARTING 视图（加锁那次提交构建的）；
   5. 拿到 `runTeamGather` 的 future 后挂回调，在有界执行器 `team-match-end` 上记 `game_team_matches_total{success | gather_failed | gather_unknown}` 并执行 `finishMatch(ok, tip = nil)`。
      落地：定性与计数在 gather 的回调线程上做，只把 `finishMatch` 投到 `team-match-end`；本进程已开始停机且结果是异常完成时不投（§7.5）。
-- EndMatch 的 110 s 单调截止与退避、`pushMatchView`、`releaseLockInBackground`、`settleUnconfirmedLock` 按基线移植（`tsvc.go:501-600`、`tstore.go:452-561`）。
+- EndMatch 的单调截止（2026-10-12 起由锁时长推出 = 锁时长 + 3.2 s，原 110 s）与退避、`pushMatchView`、`releaseLockInBackground`、`settleUnconfirmedLock` 按基线移植（`tsvc.go:501-600`、`tstore.go:452-561`）。
 - **落地补充**：
   - 第 1 步的 4030 另含：game-match 回 `INTERNAL`、`result` 是 `UNSPECIFIED` 或不认识的值、空应答、锁时长不在 [1, 110] 秒、zones 不全。加锁之前的拒绝都用本轮 S_READ 的同源视图；加锁之后的失败用自由读，请求预算已用完时不带视图。
   - 第 2 步最多 3 轮（`MATCH_START_ROUNDS`），耗尽回 4029。第 3 步「结果不明」（传输失败 / `EXPIRED` / `UNSPECIFIED`）的退票用独立 3 s 预算（`RELEASE_TICKETS_BUDGET_MS`）。
-  - `team-match-end`（`game.team.match-end-threads = 4`、`game.team.match-end-queue-capacity = 1024`，启动校验必须为正）：加锁之后的收尾都在它上面跑，一次收尾最坏阻塞 110 s；
+  - `team-match-end`（`game.team.match-end-threads = 4`、`game.team.match-end-queue-capacity = 1024`，启动校验必须为正）：加锁之后的收尾都在它上面跑，一次收尾最坏阻塞锁时长 + 3.2 s（原 110 s）；
     关闭次序是请求池 → 收尾池 → 推送池，各等 10 s，等不完的清锁被中断即停（`EndMatchStop.INTERRUPTED`，Java 独有），锁靠自然过期；队列满时放弃这次收尾并记 ERROR。
   - 指标：一次 211 恰好计一次 `game_team_matches_total`——同步拒绝按 tip 定性，建票 `FAILED` 计 `ticket_failed`，建票结果不明计 `internal`，已受理的在 gather 结果到达时计 `success / gather_failed / gather_unknown`。
   - 未配置的副本仍回 4027，但现在由 game-match 的 `pve-team-size-by-config-id` 决定（组队人数配置不在 game-team）。
@@ -1291,7 +1291,7 @@ record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 - **Redis 单条命令的最坏耗时**：Java 缺省配置是 4.2 s（`arch:607-609`），基线按 3 s 算。落点记录写入在外层 6.1 s 截止之内，公式里的 `spectateRecordWriteWorst = 6.1 s` 不变。
   其余 Redis 小操作（读位置、推进 ready）仍算在公式的 10 s 余量里，同 `queue.go:351-354` 的口径：超支的后果只是 matched 票先于 gather 过期，玩家可以重排，不会串局。
 - **启动断言**：`RedisProperties.worstCaseCommandMillis() ≤ 6100`，各跳 Dubbo 超时 ≤ 3 / 5 / 3 / 3 s，否则拒绝启动。这样 42 / 48 / 66 / 96 与基线逐字相同，单测钉住这组数。
-  落地（`lifecycle.MatchStartupChecks`）：备战 / 取消 / 销毁 / 补签 / 清退观众各跳在 (0, 3000] ms、建房在 (0, 5000] ms；另补两条——matched TTL 表必须等于 42 / 48 / 54 / 60 / 66 / 96、5 人开战锁 ≤ 110 s
+  落地（`lifecycle.MatchStartupChecks`）：备战 / 取消 / 销毁 / 补签 / 清退观众各跳在 (0, 3000] ms、建房在 (0, 5000] ms；另补两条——matched TTL 表必须等于 42 / 48 / 54 / 60 / 66 / 96、5 人开战锁 ≤ 110 s（契约上限 `MAX_TEAM_LOCK_SECONDS`）
   （各跳都没超上限也可能有人把某一跳改小了）。全部违规拼进一条异常，一次列全。
 - **备战 / 取消调用的超时保持 3 s（裁决，2026-10-06，与 6.3 对齐时定）**：scene 侧一次备战要等一条写锁脚本的结局，Java 缺省配置下最坏 4.2 s，大于这里的 3 s——
   scene-battle-spec 的评审稿曾据此要求「match 的备战调用同样 ≥ 5 s」，审计也按那句话报过本稿「只对齐了一半」。裁决是**本稿不改**：数值表、matched TTL 公式与 §10.3 的跨进程不等式整表不动；
@@ -1511,7 +1511,7 @@ Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停
 | 不等式 | 数值 | 出处 |
 |---|---|---|
 | battle 确认补发窗口 ≥ 最长 matched TTL + scene 锁余量 | 180 ≥ 96 + 60 | `bn-spec` §4.8、§10.4 |
-| game-team EndMatch 单调截止 ≥ 最长开战锁 | 110 ≥ 101 | `tstore.go:454-461` |
+| game-team EndMatch 单调截止 ≥ 开战锁 | 锁时长 + 3.2 ≥ 锁时长（2026-10-12 起由构造保证，原 110 ≥ 101） | `tstore.go` `endMatchDeadline` |
 | 开战锁 ≥ matched TTL + 补偿窗口 | 101 ≥ 66 + 25 | `tb.go:60-66` |
 | `runTeamGather` 调用方超时 ≥ gather + 补偿最坏 | 101 ≥ 91 | §7.5 |
 | 落点记录 TTL ≥ 战斗最长时限 | 360 ≥ 300 | `spectate.go:53-59` |
@@ -1527,7 +1527,7 @@ Java 沿用全仓的约定（同 scene-manager 5.1）：进程不退出、只停
 
 | 不等式 | 数值 | 钉在哪 |
 |---|---|---|
-| matched TTL 表 = 42 / 48 / 54 / 60 / 66 / 96；5 人开战锁 ≤ EndMatch 截止 | 101 ≤ 110 | `MatchStartupChecks`（启动拒启）；`MatchBudgetsTest`；game-team `TeamBudgetConstraintTest` |
+| matched TTL 表 = 42 / 48 / 54 / 60 / 66 / 96；5 人开战锁 ≤ 契约上限 `MAX_TEAM_LOCK_SECONDS` | 101 ≤ 110 | `MatchStartupChecks`（启动拒启）；`MatchBudgetsTest`；game-team `TeamBudgetConstraintTest` |
 | Redis 单条命令最坏耗时 ≤ 落点写入的外层截止 | ≤ 6100 ms | `MatchStartupChecks` |
 | `checkTeamMatch` 回的 `lock_ttl_seconds` 在 [1, 110] | — | game-team `MatchTeamBattle`（不满足按传输失败） |
 | 凑单停机余量 ≥ 2 × 弹组每次尝试的预算 | 5 s ≥ 2 × 2.5 s | `MatcherConfigurationTest` |

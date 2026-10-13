@@ -214,7 +214,7 @@
 | `teamRPCBudget` | 3500 ms | `server.go:24` | |
 | `pushBatchBudget` | 3 s | `notify.go:37` | 推送和 scene 信号整批共用 |
 | `matchStartRounds` | 3 | `service.go:68` | |
-| `endMatchRoundTimeout` / `endMatchMaxDuration` | 2 s / 110 s | `store.go:453`、`:461` | 110 s 必须 ≥ 5 人锁时长 101 s（`store.go:454-460`） |
+| `endMatchRoundTimeout` / `endMatchMaxDuration` | 2 s / 110 s | `store.go:453`、`:461` | 110 s 必须 ≥ 5 人锁时长 101 s（`store.go:454-460`）。**2026-10-12 两版同批改**：截止改为由锁时长推出 = 锁时长 + 2 s + 1.2 s（基线 `endMatchDeadline`，Java `TeamStore.endMatchDeadlineMs`） |
 | EndMatch 退避 | 50 ms 起翻倍，上限 1 s，±20% | `store.go:463-465`、`:686-689` | |
 | 开战锁时长 | `matchedTicketTTLFor(n) + compensationTicketTTLFor(n) + 10` 秒，其中 `compensation(n) = n×3 + 10`；5 人 = 66 + 25 + 10 = 101 s | `team_battle.go:31`、`:60-66`；`queue.go:367-386` | 绝对截止 = 本轮 S_READ 的 nowMs + 时长×1000（`service.go:384`） |
 | `teamTicketRollbackBudget` | 3 s | `team_battle.go:26-28` | |
@@ -512,7 +512,7 @@ Store 本身无可变状态，可以并发共享；正确性全靠 ver CAS 与 L
   - `{-2}` → Retry，同时做修复（修复成功的记入 Repairs）；
   - `{-1}` / `{-3}` 不可能出现，出现即 error。
 - **`EndMatch`**（:537-585）：
-  - 每轮新建 2 s 的 ctx；进程内单调时钟超过 110 s → `EndMatchDeadline`。
+  - 每轮新建 2 s 的 ctx；进程内单调时钟超过截止（原 110 s；2026-10-12 起为锁时长 + 3.2 s）→ `EndMatchDeadline`。
   - 本轮报错 → 记 `LastErr`，退避后重试。
   - 有修复 → 立即重读；冲突 → `Conflicts++` 后退避。
   - **没有 3 次上限**：锁期间队外玩家的申请、被邀请会持续让 ver+1（:537-538）。
@@ -532,7 +532,7 @@ Store 本身无可变状态，可以并发共享；正确性全靠 ver CAS 与 L
 | ReadFree | 3 次 | `ErrUnstableRead`，服务层回 4029 |
 | ReadMembers | 3 次 | `ErrMembersChanged`，放弃这次推送 |
 | StartTeamMatch 整轮 | 3 轮，且受请求 ctx 约束（`service.go:350`） | 4029 |
-| EndMatch | 110 s 单调时钟；每轮 2 s；退避 50 ms → 1 s，±20% | `EndMatchDeadline`，锁靠自然过期 |
+| EndMatch | 单调时钟截止 = 锁时长 + 3.2 s（2026-10-12 前为固定 110 s）；每轮 2 s；退避 50 ms → 1 s，±20% | `EndMatchDeadline`，锁靠自然过期 |
 | 推送 + scene 信号 | 每批 3 s，独立 ctx（`notify.go:76`） | 剩余收件人记 error |
 | home zone | 1500 ms，嵌在请求 ctx 内（`homezone.go:31-33`、`:60-61`） | 4030 |
 
@@ -1460,7 +1460,7 @@ Java 现状：
   （game-match 不在时本进程照常启动，211 回 4030）、直连 `game.dubbo.match-url`（缺省 `tri://127.0.0.1:20888`，nacos profile 置空走注册中心）。
 - **调用纪律**：前三个方法每跳的调用级超时 = min(3000 ms, 剩余请求预算)，**同一个值**经附件 `game-budget-ms` 带给 game-match 作它的本地截止（带整请求的剩余预算时，迟到的建票会在本端已判「结果不明」并回滚之后照常写票）；
   剩余预算 ≤ 0 时不发。`runTeamGather` 的调用级超时 = `lock_ttl_seconds × 1000`，不带预算附件，另加晚 2 s 的本地兜底。应答枚举的 `UNSPECIFIED`、不认识的值、空应答、future 异常完成一律按传输失败；
-  `checkTeamMatch` 回 OK 时还要校验 zones 覆盖名单、锁时长在 [1, 110] 秒。
+  `checkTeamMatch` 回 OK 时还要校验 zones 覆盖名单、锁时长在 [1, 110] 秒（契约上限 `MatchBudgets.MAX_TEAM_LOCK_SECONDS`）。
 
 **2. 预检顺序与分工**
 
@@ -1479,10 +1479,10 @@ Java 现状：
 
 **4. EndMatch 与收尾**
 
-- `TeamStore.endMatch`：110 s 单调截止（`MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS`）、每轮 2 s 的独立预算、50 ms 起翻倍到 1 s 的退避加 ±20% 抖动；终止原因 `EndMatchStop`（`RELEASED / RECORD_MISSING / TOKEN_MISMATCH / LOCK_EXPIRED / DEADLINE`，
+- `TeamStore.endMatch`：单调截止由锁时长推出（`TeamStore.endMatchDeadlineMs` = 锁时长 + 2 s + 1.2 s；2026-10-12 前为固定 110 s 的 `MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS`，已改名 `MAX_TEAM_LOCK_SECONDS`、只作锁时长的契约上限）、每轮 2 s 的独立预算、50 ms 起翻倍到 1 s 的退避加 ±20% 抖动；终止原因 `EndMatchStop`（`RELEASED / RECORD_MISSING / TOKEN_MISMATCH / LOCK_EXPIRED / DEADLINE`，
   另有 Java 独有的 `INTERRUPTED`：停机时等不完的清锁被中断即停，锁靠自然过期）。
 - `TeamService.finishMatch`：清锁提交成功 → 按提交推全员（含发起人）MATCH_ENDED / MATCH_FAILED；没有提交（锁已被清 / 重新加锁 / 自然过期 / 截止）→ 仍尽力给当前队员推一次当前视图与结果原因（`TeamPushes.publishMatchView` → `pushMatchView`），保证客户端不停在 STARTING。
-- 收尾都在新增的有界线程池 `team-match-end` 上跑（`game.team.match-end-threads = 4`、`game.team.match-end-queue-capacity = 1024`，启动校验必须为正）；一次收尾最坏阻塞 110 s；队列满时放弃这次收尾并记 ERROR，锁靠自然过期。
+- 收尾都在新增的有界线程池 `team-match-end` 上跑（`game.team.match-end-threads = 4`、`game.team.match-end-queue-capacity = 1024`，启动校验必须为正）；一次收尾最坏阻塞锁时长 + 3.2 s（5 人 104.2 s，契约上限的锁 113.2 s；2026-10-12 前为 110 s）；队列满时放弃这次收尾并记 ERROR，锁靠自然过期。
   关闭次序：请求池 → 收尾池 → 推送池，各等 10 s。gather 的回调在 Dubbo 的线程上只做定性、计数与投递。
 - **gather 结果不明**（game-match 中途退出、网络分区、调用超时）：计 `gather_unknown`，按失败收尾（推 MATCH_FAILED），**不退票**——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈。
 - **本进程优雅停机时**（`TeamShutdown`：`ContextClosedEvent` 监听器，次序排在 Dubbo 的监听器之前，置一个停机标志）：之后才异常完成的 gather 结果只计 `gather_unknown`、记 WARN，不清锁、不推 MATCH_FAILED，

@@ -1,6 +1,5 @@
 package com.game.team.store;
 
-import com.game.api.match.MatchBudgets;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.discovery.RedisKeys;
@@ -51,7 +50,7 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * <p><b>整队开战</b>（基线 store.go:449-689，team-spec §1.7.6）：开战锁用 {@link #commitMatchLock} 钉版本提交（不走 {@link #mutate} 的
- * 「重读重算」）；清锁用 {@link #endMatch}（后台、自带 110 s 单调截止与退避，不受任何请求预算约束）或单轮的 {@link #releaseMatchLockOnce}。
+ * 「重读重算」）；清锁用 {@link #endMatch}（后台、自带由锁时长推出的单调截止与退避，不受任何请求预算约束）或单轮的 {@link #releaseMatchLockOnce}。
  * 钉版本提交「报错」或「没有提交」都可能已经落盘（Redisson 会重发 EVAL），调用方必须按 token 确认（match-spec §12.1 第 9 条）。
  */
 public final class TeamStore {
@@ -75,16 +74,12 @@ public final class TeamStore {
 
     /** EndMatch 每一轮（S_READ + 会话读 + S_COMMIT）的独立预算，不继承任何请求预算（store.go:453）。 */
     public static final long END_MATCH_ROUND_TIMEOUT_MS = 2_000;
-    /**
-     * EndMatch 的进程内单调截止（store.go:454-461）：必须 ≥ 最长的开战锁（5 人 101 s，{@code MatchBudgets.teamMatchLockSeconds}），否则 Redis
-     * 持续故障时循环先于锁截止放弃，全队停在 STARTING 直到锁自然过期。EndMatch 在锁提交之后才启动，剩余锁时长不超过 101 s；110 s 另留出
-     * 一轮 {@link #END_MATCH_ROUND_TIMEOUT_MS} 加最大退避的余量（{@code TeamBudgetConstraintTest} 钉住这条不等式）。
-     */
-    public static final long END_MATCH_MAX_DURATION_MS = MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS * 1000L;
     /** EndMatch 冲突 / 故障的退避：50 ms 起翻倍、上限 1 s、±20% 均匀抖动（store.go:462-465）。 */
     public static final long END_MATCH_BACKOFF_INITIAL_MS = 50;
     public static final long END_MATCH_BACKOFF_MAX_MS = 1_000;
     public static final double END_MATCH_BACKOFF_JITTER = 0.2;
+    /** 一次退避最长等多久（毫秒）= 退避上限上浮到抖动上沿（{@link #jittered} 的系数 &lt; 1 + 抖动）：1200。 */
+    public static final long END_MATCH_MAX_BACKOFF_MS = (long) Math.ceil(END_MATCH_BACKOFF_MAX_MS * (1 + END_MATCH_BACKOFF_JITTER));
 
     /** 建队专用的 expectedVer 哨兵：记录必须不存在（scripts.go:51-52）。 */
     static final String NEW_TEAM_VERSION = "new";
@@ -124,7 +119,7 @@ public final class TeamStore {
             Thread.sleep(millis);
         }
 
-        /** {@link #endMatch} 截止用的单调时钟（纳秒；测试用来拨快 110 s 的截止）。 */
+        /** {@link #endMatch} 截止用的单调时钟（纳秒；测试用来拨快单调截止）。 */
         default long nanoTime() {
             return System.nanoTime();
         }
@@ -330,6 +325,22 @@ public final class TeamStore {
     }
 
     /**
+     * {@link #endMatch} 的进程内单调截止（毫秒），由这把锁的时长推出（基线 store.go {@code endMatchDeadline}，2026-10-12 两版同批改）：
+     * EndMatch 在锁提交之后才启动，剩余锁时长不超过 {@code lockTtlSeconds}；截止必须不早于锁截止，否则 Redis 持续故障时循环先于锁放弃，
+     * 全队停在 STARTING 直到锁自然过期。再加一轮 {@link #END_MATCH_ROUND_TIMEOUT_MS} 与一次最长退避 {@link #END_MATCH_MAX_BACKOFF_MS} 的余量。
+     * 与锁同源：不另设一个只能靠不等式测试与锁时长对齐的固定截止。
+     *
+     * @param lockTtlSeconds 这把锁加锁时用的时长（秒）
+     * @throws IllegalArgumentException {@code lockTtlSeconds < 1}
+     */
+    public static long endMatchDeadlineMs(int lockTtlSeconds) {
+        if (lockTtlSeconds < 1) {
+            throw new IllegalArgumentException("开战锁时长必须 ≥ 1 s: " + lockTtlSeconds);
+        }
+        return lockTtlSeconds * 1000L + END_MATCH_ROUND_TIMEOUT_MS + END_MATCH_MAX_BACKOFF_MS;
+    }
+
+    /**
      * 清开战锁的专用循环（store.go:537-585，team-spec §1.7.6）。不复用 {@link #mutate} 的 3 次冲突上限：锁期间队外玩家的申请 / 被邀请
      * 持续让 ver+1，数量不受本队控制，3 次就放弃会让全员停在 STARTING 直到锁过期。
      *
@@ -339,20 +350,23 @@ public final class TeamStore {
      *   <li>否则按 expectedVer = ver 提交清锁；{@code {0}} → 退避后回第 1 步；{@code {-2}} → 修复后<b>立即</b>回第 1 步；
      *       本轮报错 → 记 {@code lastError}、退避后重试。</li>
      * </ol>
-     * 截止：锁自己的截止时间（每轮用 nowMs 判）+ 进程内单调时钟 {@link #END_MATCH_MAX_DURATION_MS} 兜底；每轮一个独立的
+     * 截止：锁自己的截止时间（每轮用 nowMs 判）+ 进程内单调时钟 {@link #endMatchDeadlineMs}{@code (lockTtlSeconds)} 兜底；每轮一个独立的
      * {@link #END_MATCH_ROUND_TIMEOUT_MS} 预算。
      *
-     * <p>同步阻塞直到结局（最坏 110 s），调用方放在后台执行器（{@code team-match-end}）上，<b>不得</b>在请求工作线程上调；
-     * 不推送、不打指标（服务层按结果处理）。退避被中断（停机）→ {@link EndMatchStop#INTERRUPTED}，线程的中断标志保持置位。从不抛依赖故障。
+     * <p>同步阻塞直到结局（最坏 = 锁时长 + 3.2 s；锁时长受契约上限 {@code MatchBudgets.MAX_TEAM_LOCK_SECONDS} 约束），调用方放在后台执行器
+     * （{@code team-match-end}）上，<b>不得</b>在请求工作线程上调；不推送、不打指标（服务层按结果处理）。退避被中断（停机）→
+     * {@link EndMatchStop#INTERRUPTED}，线程的中断标志保持置位。从不抛依赖故障。
      *
-     * @param ok       开局是否成功（清锁提交的 Reason：MATCH_ENDED / MATCH_FAILED）
-     * @param sessions 清锁决策的惰性转让与 {@code {-2}} 修复用（null 视为 {@link SessionLoader#NONE}）
+     * @param ok             开局是否成功（清锁提交的 Reason：MATCH_ENDED / MATCH_FAILED）
+     * @param lockTtlSeconds 这把锁加锁时用的时长（秒，≥ 1；{@code checkTeamMatch} 回包的 {@code lock_ttl_seconds}），单调截止由它推出
+     * @param sessions       清锁决策的惰性转让与 {@code {-2}} 修复用（null 视为 {@link SessionLoader#NONE}）
+     * @throws IllegalArgumentException {@code lockTtlSeconds < 1}（调用方缺陷）
      */
-    public EndMatchResult endMatch(long teamId, String token, boolean ok, SessionLoader sessions) {
+    public EndMatchResult endMatch(long teamId, String token, boolean ok, int lockTtlSeconds, SessionLoader sessions) {
+        long maxNanos = TimeUnit.MILLISECONDS.toNanos(endMatchDeadlineMs(lockTtlSeconds));
         List<CommitResult> repairs = new ArrayList<>();
         int conflicts = 0;
         DependencyException lastError = null;
-        long maxNanos = TimeUnit.MILLISECONDS.toNanos(END_MATCH_MAX_DURATION_MS);
         long start = hooks.nanoTime();
         long backoff = END_MATCH_BACKOFF_INITIAL_MS;
         while (true) {

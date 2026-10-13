@@ -3,6 +3,7 @@ package com.game.team.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.api.match.MatchBudgets;
 import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
@@ -368,6 +369,8 @@ class TeamStoreTest {
     // ================================================================ 整队开战：钉版本提交与 EndMatch（store.go:449-689，team-spec §1.7.6）
 
     private static final long LOCK_MS = 83_000;
+    /** 与 {@link #LOCK_MS} 同一把锁的时长（秒）：EndMatch 的截止由它推出。 */
+    private static final int LOCK_TTL_SECONDS = (int) (LOCK_MS / 1000);
 
     /** 带开战锁的两人队（锁截止 = NOW + 83 s，名单队长在前）。 */
     private static TeamRecord locked(String token) {
@@ -528,20 +531,20 @@ class TeamStoreTest {
         TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
 
         redis.onEval = (s, k, a) -> read(null, NOW, 0, null);
-        assertThat(store.endMatch(TID, "tok", true, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.RECORD_MISSING);
+        assertThat(store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.RECORD_MISSING);
 
         redis.onEval = (s, k, a) -> read(null, NOW, 8, locked("other"));
-        EndMatchResult mismatch = store.endMatch(TID, "tok", true, SessionLoader.NONE);
+        EndMatchResult mismatch = store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE);
         assertThat(mismatch.stop()).as("锁已被清或已重新加锁").isEqualTo(EndMatchStop.TOKEN_MISMATCH);
         assertThat(mismatch.commit()).isNull();
         redis.onEval = (s, k, a) -> read(null, NOW, 8, team(A, B));
-        assertThat(store.endMatch(TID, "tok", true, SessionLoader.NONE).stop()).as("记录上没有锁").isEqualTo(EndMatchStop.TOKEN_MISMATCH);
-        assertThat(store.endMatch(TID, null, true, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.TOKEN_MISMATCH);
+        assertThat(store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE).stop()).as("记录上没有锁").isEqualTo(EndMatchStop.TOKEN_MISMATCH);
+        assertThat(store.endMatch(TID, null, true, LOCK_TTL_SECONDS, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.TOKEN_MISMATCH);
 
         // now == 截止 算已过期（基线 TestMatchLockActiveBoundary）
         TeamRecord expiring = locked("tok").toBuilder().setMatchLockExpireAtMs(NOW).build();
         redis.onEval = (s, k, a) -> read(null, NOW, 8, expiring);
-        assertThat(store.endMatch(TID, "tok", false, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.LOCK_EXPIRED);
+        assertThat(store.endMatch(TID, "tok", false, LOCK_TTL_SECONDS, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.LOCK_EXPIRED);
 
         assertThat(redis.count(TeamScript.COMMIT)).as("停止分支不写").isZero();
         assertThat(redis.calls).as("S_READ 的玩家位传 0：每次只读一轮").hasSize(5).containsOnly(TeamScript.READ);
@@ -568,7 +571,7 @@ class TeamStoreTest {
             return commits.getAndIncrement() < 6 ? List.of(0L) : committed(18);
         };
 
-        EndMatchResult res = store.endMatch(TID, "tok", true, SessionLoader.NONE);
+        EndMatchResult res = store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE);
 
         assertThat(res.stop()).isEqualTo(EndMatchStop.RELEASED);
         assertThat(res.conflicts()).as("6 次冲突都熬过去了（mutate 的 3 次上限不适用）").isEqualTo(6);
@@ -587,7 +590,7 @@ class TeamStoreTest {
 
         // ok = false → MATCH_FAILED
         redis.onEval = (s, k, a) -> s == TeamScript.READ ? read(null, NOW, 20, locked("tok")) : committed(21);
-        assertThat(store.endMatch(TID, "tok", false, SessionLoader.NONE).commit().decision().reason())
+        assertThat(store.endMatch(TID, "tok", false, LOCK_TTL_SECONDS, SessionLoader.NONE).commit().decision().reason())
                 .isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED);
     }
 
@@ -613,7 +616,7 @@ class TeamStoreTest {
             };
         };
 
-        EndMatchResult res = store.endMatch(TID, "tok", false, SessionLoader.NONE);
+        EndMatchResult res = store.endMatch(TID, "tok", false, LOCK_TTL_SECONDS, SessionLoader.NONE);
 
         assertThat(res.stop()).isEqualTo(EndMatchStop.RELEASED);
         assertThat(res.repairs()).hasSize(1);
@@ -625,31 +628,63 @@ class TeamStoreTest {
     }
 
     @Test
-    void EndMatch_Redis持续故障_到110秒的单调截止放弃_锁留给自然过期() {
+    void EndMatch_Redis持续故障_到由锁时长推出的单调截止放弃_锁留给自然过期() {
         FakeRedis redis = new FakeRedis();
         MatchHooks hooks = new MatchHooks();
         TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         redis.onEval = (s, k, a) -> new RuntimeException("redis down");
-        // 单调时钟每问一次走 25 s：起点 0，25 / 50 / 75 / 100 s 各跑一轮，125 s 时越过 110 s
+        // 锁 83 s → 截止 83 + 2 + 1.2 = 86.2 s。单调时钟每问一次走 25 s：起点 0，25 / 50 / 75 s 各跑一轮，100 s 时越过截止
+        assertThat(TeamStore.endMatchDeadlineMs(LOCK_TTL_SECONDS)).isEqualTo(86_200);
         AtomicInteger asked = new AtomicInteger();
         hooks.clock = () -> TimeUnit.SECONDS.toNanos(25L * asked.getAndIncrement());
 
-        EndMatchResult res = store.endMatch(TID, "tok", true, SessionLoader.NONE);
+        EndMatchResult res = store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE);
 
         assertThat(res.stop()).isEqualTo(EndMatchStop.DEADLINE);
         assertThat(res.commit()).isNull();
         assertThat(res.lastError()).hasRootCauseMessage("redis down");
-        assertThat(redis.count(TeamScript.READ)).isEqualTo(4);
-        assertThat(hooks.sleeps).hasSize(4);
+        assertThat(redis.count(TeamScript.READ)).isEqualTo(3);
+        assertThat(hooks.sleeps).hasSize(3);
         assertBackoff(hooks.sleeps);
-        assertThat(TeamStore.END_MATCH_MAX_DURATION_MS).isEqualTo(110_000);
 
-        // 恰好到截止（110 s）就放弃：一轮都不跑
+        // 恰好到截止就放弃：一轮都不跑
         redis.calls.clear();
         AtomicInteger asked2 = new AtomicInteger();
-        hooks.clock = () -> asked2.getAndIncrement() == 0 ? 0 : TimeUnit.MILLISECONDS.toNanos(TeamStore.END_MATCH_MAX_DURATION_MS);
-        assertThat(store.endMatch(TID, "tok", true, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.DEADLINE);
+        hooks.clock = () -> asked2.getAndIncrement() == 0 ? 0
+                : TimeUnit.MILLISECONDS.toNanos(TeamStore.endMatchDeadlineMs(LOCK_TTL_SECONDS));
+        assertThat(store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE).stop()).isEqualTo(EndMatchStop.DEADLINE);
         assertThat(redis.calls).isEmpty();
+    }
+
+    @Test
+    void EndMatch_单调截止跟随这把锁的时长_Redis持续故障时坚持过锁截止_过了截止不再重试() {
+        // 回归（2026-10-12，与基线同批）：原先截止固定 110 s，与锁时长只靠不等式测试对齐，锁落在 (106.8, 110] s 时最后一轮清锁会被截掉；
+        // 1 s 的锁则要白等到 110 s。现在截止由锁时长推出，任何锁时长下都成立：
+        // 故障期间至少坚持到「锁时长 + 一轮预算 + 最长退避」，过了它不再发起新的一轮
+        int[] locks = {1, MatchBudgets.teamMatchLockSeconds(1), MatchBudgets.teamMatchLockSeconds(MatchBudgets.MAX_TEAM_SIZE),
+                MatchBudgets.MAX_TEAM_LOCK_SECONDS};
+        for (int lockTtl : locks) {
+            FakeRedis redis = new FakeRedis();
+            MatchHooks hooks = new MatchHooks();
+            TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
+            redis.onEval = (s, k, a) -> new RuntimeException("redis down");
+            // 假时钟只随退避推进（每轮失败立即返回，时间全花在退避上）：不读墙钟、不真睡
+            hooks.clock = () -> TimeUnit.MILLISECONDS.toNanos(hooks.sleeps.stream().mapToLong(Long::longValue).sum());
+
+            EndMatchResult res = store.endMatch(TID, "tok", true, lockTtl, SessionLoader.NONE);
+
+            long deadlineMs = TeamStore.endMatchDeadlineMs(lockTtl);
+            long elapsedMs = hooks.sleeps.stream().mapToLong(Long::longValue).sum();
+            assertThat(res.stop()).as("锁 %d s", lockTtl).isEqualTo(EndMatchStop.DEADLINE);
+            assertThat(res.lastError()).as("锁 %d s", lockTtl).hasRootCauseMessage("redis down");
+            assertThat(elapsedMs).as("锁 %d s：故障期间坚持过锁截止与余量", lockTtl)
+                    .isGreaterThanOrEqualTo(lockTtl * 1000L).isGreaterThanOrEqualTo(deadlineMs);
+            assertThat(elapsedMs).as("锁 %d s：过了截止不再重试（最后一次退避至多 %d ms）", lockTtl, TeamStore.END_MATCH_MAX_BACKOFF_MS)
+                    .isLessThan(deadlineMs + TeamStore.END_MATCH_MAX_BACKOFF_MS);
+        }
+        assertThat(TeamStore.END_MATCH_MAX_BACKOFF_MS).as("1 s 上浮 20%").isEqualTo(1_200);
+        assertThat(TeamStore.endMatchDeadlineMs(MatchBudgets.MAX_TEAM_LOCK_SECONDS)).as("契约上限的锁：110 + 2 + 1.2 s").isEqualTo(113_200);
+        assertThatThrownBy(() -> TeamStore.endMatchDeadlineMs(0)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -658,12 +693,12 @@ class TeamStoreTest {
         MatchHooks hooks = new MatchHooks();
         TeamStore store = new TeamStore(redis, REDIS_KEYS, hooks);
         redis.onEval = (s, k, a) -> FakeRedis.NEVER;
-        // 起点与第一次检查都是 0：跑一轮（真等 2 s 的轮预算）；之后时钟跳过截止
+        // 起点与第一次检查都是 0：跑一轮（真等 2 s 的轮预算）；之后时钟跳到截止
         AtomicInteger asked = new AtomicInteger();
-        hooks.clock = () -> asked.getAndIncrement() < 2 ? 0 : TimeUnit.SECONDS.toNanos(111);
+        hooks.clock = () -> asked.getAndIncrement() < 2 ? 0 : TimeUnit.MILLISECONDS.toNanos(TeamStore.endMatchDeadlineMs(LOCK_TTL_SECONDS));
         long started = System.nanoTime();
 
-        EndMatchResult res = store.endMatch(TID, "tok", true, SessionLoader.NONE);
+        EndMatchResult res = store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE);
 
         long waited = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
         assertThat(res.stop()).isEqualTo(EndMatchStop.DEADLINE);
@@ -684,7 +719,7 @@ class TeamStoreTest {
         EndMatchResult res;
         boolean interrupted;
         try {
-            res = store.endMatch(TID, "tok", true, SessionLoader.NONE);
+            res = store.endMatch(TID, "tok", true, LOCK_TTL_SECONDS, SessionLoader.NONE);
         } finally {
             interrupted = Thread.interrupted(); // 读出并清掉，别带进后面的用例
         }

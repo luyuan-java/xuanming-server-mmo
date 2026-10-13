@@ -17,7 +17,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param pushThreads         推送线程数（缺省 4）
  * @param pushQueueCapacity   推送队列上限（缺省 1024；满了整批放弃，记 error）
  * @param matchEndThreads     整队开战收尾（清开战锁、退票）的线程数（缺省 4；一次收尾通常是一两次 Redis 往返，Redis 持续故障时
- *                            一个任务最坏占线程 110 s）
+ *                            一个任务最坏占线程锁时长 + 3.2 s，5 人 104.2 s）
  * @param matchEndQueueCapacity 整队开战收尾队列上限（缺省 1024；满了放弃这次收尾并记 ERROR，开战锁靠自然过期）
  */
 @ConfigurationProperties("game.team")

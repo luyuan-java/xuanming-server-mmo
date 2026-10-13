@@ -106,14 +106,14 @@ class MatchBudgetsTest {
     }
 
     @Test
-    void 跨进程不等式_确认补发窗口_EndMatch截止_落点TTL() {
+    void 跨进程不等式_确认补发窗口_开战锁契约上限_落点TTL() {
         assertThat(MatchBudgets.MAX_MATCHED_TTL_SECONDS + SCENE_LOCK_MARGIN_SECONDS)
                 .as("battle 确认补发窗口 ≥ 最长 matched TTL + scene 锁余量（180 ≥ 96 + 60）")
                 .isLessThanOrEqualTo(BATTLE_CONFIRM_WINDOW_SECONDS);
-        assertThat(MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS).isEqualTo(110);
+        assertThat(MatchBudgets.MAX_TEAM_LOCK_SECONDS).isEqualTo(110);
         assertThat(MatchBudgets.teamMatchLockSeconds(MatchBudgets.MAX_TEAM_SIZE))
-                .as("game-team EndMatch 单调截止 ≥ 最长开战锁（110 ≥ 101）")
-                .isLessThanOrEqualTo(MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS);
+                .as("最长开战锁不超过契约上限（101 ≤ 110）：game-team 才会接受")
+                .isLessThanOrEqualTo(MatchBudgets.MAX_TEAM_LOCK_SECONDS);
         assertThat(MatchBudgets.BATTLE_MAX_DURATION_SECONDS).isEqualTo(300);
         assertThat(MatchBudgets.PLACEMENT_TTL_SECONDS).as("落点记录 TTL ≥ 战斗最长时限（360 ≥ 300）").isEqualTo(360)
                 .isGreaterThanOrEqualTo(MatchBudgets.BATTLE_MAX_DURATION_SECONDS);

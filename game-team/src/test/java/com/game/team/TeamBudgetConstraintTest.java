@@ -9,26 +9,23 @@ import com.game.team.store.TeamStore;
 import org.junit.jupiter.api.Test;
 
 /**
- * game-team 一侧的跨进程数值不等式（match-spec §10.3；基线 {@code go/match/internal/team/store.go:454-461} 只能把 110 写死在注释里，
- * Java 直接引用 game-api 的 {@link MatchBudgets}，改任何一跳的超时这里就会红）。
+ * game-team 一侧的跨进程数值不等式（match-spec §10.3；Java 直接引用 game-api 的 {@link MatchBudgets}，改任何一跳的超时这里就会红）。
+ *
+ * <p>2026-10-12 起 EndMatch 的截止由这把锁的时长推出（{@link TeamStore#endMatchDeadlineMs}，与基线 {@code store.go endMatchDeadline} 同批改），
+ * 「截止 ≥ 锁时长 + 一轮 + 最长退避」由构造保证；这里核对的是对<b>每一个</b>可能的锁时长都成立，而不是只对最长的那一把。
  */
 class TeamBudgetConstraintTest {
 
     @Test
-    void EndMatch的单调截止盖得住最长的开战锁_还留得出一轮清锁加最大退避() {
-        int longestLock = 0;
-        for (int n = 1; n <= TeamLimits.CAPACITY; n++) {
-            longestLock = Math.max(longestLock, MatchBudgets.teamMatchLockSeconds(n));
-        }
-        assertThat(longestLock).as("5 人的开战锁").isEqualTo(101).isEqualTo(MatchBudgets.teamMatchLockSeconds(5));
-        assertThat(MatchBudgets.teamMatchLockSeconds(5)).isLessThanOrEqualTo(MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS);
-        assertThat(TeamStore.END_MATCH_MAX_DURATION_MS).as("截止取自 MatchBudgets，不另写一份数字")
-                .isEqualTo(MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS * 1000L).isEqualTo(110_000);
+    void EndMatch的单调截止对每一把可接受的锁都盖得住_还留得出一轮清锁加最长退避() {
+        assertThat(MatchBudgets.teamMatchLockSeconds(TeamLimits.CAPACITY)).as("5 人的开战锁").isEqualTo(101);
         // EndMatch 在锁提交之后才启动：Redis 持续故障时循环必须比锁活得久，否则全队停在 STARTING 直到锁自然过期。
-        // 余量至少容得下再跑一轮（2 s）加一次最大退避（1 s + 20%）
+        // 余量至少容得下再跑一轮（2 s）加一次最长退避（1 s + 20%）
         double oneMoreRound = TeamStore.END_MATCH_ROUND_TIMEOUT_MS
                 + TeamStore.END_MATCH_BACKOFF_MAX_MS * (1 + TeamStore.END_MATCH_BACKOFF_JITTER);
-        assertThat((double) TeamStore.END_MATCH_MAX_DURATION_MS).isGreaterThanOrEqualTo(longestLock * 1000L + oneMoreRound);
+        for (int lock = 1; lock <= MatchTeamBattle.MAX_LOCK_TTL_SECONDS; lock++) {
+            assertThat((double) TeamStore.endMatchDeadlineMs(lock)).as("锁 %d s", lock).isGreaterThanOrEqualTo(lock * 1000L + oneMoreRound);
+        }
     }
 
     @Test
@@ -37,8 +34,8 @@ class TeamBudgetConstraintTest {
     }
 
     @Test
-    void 可接受的开战锁时长上限就是EndMatch的截止_gather的调用级超时盖得住gather加补偿的最坏耗时() {
-        assertThat(MatchTeamBattle.MAX_LOCK_TTL_SECONDS).isEqualTo(MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS);
+    void 可接受的开战锁时长上限就是契约上限_gather的调用级超时盖得住gather加补偿的最坏耗时() {
+        assertThat(MatchTeamBattle.MAX_LOCK_TTL_SECONDS).isEqualTo(MatchBudgets.MAX_TEAM_LOCK_SECONDS);
         for (int n = 1; n <= TeamLimits.CAPACITY; n++) {
             int lock = MatchBudgets.teamMatchLockSeconds(n);
             assertThat(lock).as("%d 人：game-match 给的锁时长在可接受范围内", n).isBetween(1, MatchTeamBattle.MAX_LOCK_TTL_SECONDS);

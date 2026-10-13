@@ -6,7 +6,7 @@ package com.game.api.match;
  * game-match（gather、票据 TTL、6.5 的观战）、game-team（开战锁、EndMatch 截止）、game-battle（确认补发窗口的单测）都引用同一份。
  *
  * <p><b>这些值不开放配置</b>（基线是 yaml 可调的）：它们出现在跨进程不等式里（{@link #MAX_MATCHED_TTL_SECONDS} + scene 锁余量 ≤ battle 确认补发窗口、
- * {@link #teamMatchLockSeconds} ≤ {@link #TEAM_END_MATCH_DEADLINE_SECONDS} 等，§10.3），而且备战期限在 PrepareBattle 时就下发给了 scene、事后改不了——
+ * {@link #teamMatchLockSeconds} ≤ {@link #MAX_TEAM_LOCK_SECONDS} 等，§10.3），而且备战期限在 PrepareBattle 时就下发给了 scene、事后改不了——
  * 改任何一跳都要重算整张表并核对那几条不等式（§12.1 第 3 条）。数值与基线逐个相同：1 / 2 / 3 / 4 / 5 / 10 人的 matched TTL 是
  * 42 / 48 / 54 / 60 / 66 / 96 s（客户端在 match 实例崩溃时可见：MATCHED 最长保持这么久）。
  *
@@ -73,8 +73,15 @@ public final class MatchBudgets {
     /** 落点记录的 TTL = 战斗最长时限 + 60 s。 */
     public static final int PLACEMENT_TTL_SECONDS = BATTLE_MAX_DURATION_SECONDS + 60;
 
-    /** game-team EndMatch 的单调截止（从 gather 结束起算）：必须 ≥ 最长的开战锁（{@link #teamMatchLockSeconds}(5) = 101）。 */
-    public static final int TEAM_END_MATCH_DEADLINE_SECONDS = 110;
+    /**
+     * 开战锁时长的契约上限（秒）：game-match 只给出不超过它的锁（{@code MatchStartupChecks} 启动时核对最长的 5 人锁 = 101），game-team 收到更长的锁
+     * 按传输失败处理（{@code MatchTeamService#checkTeamMatch} 的契约）。它限制的是一把锁最多占住 game-team 的收尾线程（{@code team-match-end}）
+     * 与 {@code runTeamGather} 长挂调用多久；取值沿用原来的 110，两边版本并存时可接受的范围不变。
+     *
+     * <p>game-team EndMatch 的单调截止<b>不</b>由它决定，而是由这把锁的实际时长推出（{@code TeamStore.endMatchDeadlineMs} = 锁时长 + 一轮清锁预算
+     * + 最长退避），构造上就不会先于锁放弃（2026-10-12，与基线同批改为跟随锁时长）。
+     */
+    public static final int MAX_TEAM_LOCK_SECONDS = 110;
 
     /**
      * 整请求预算的缺省值（毫秒）：gate 调 match 的 Dubbo 超时 5 s − 500（基线 zrpc 5000 − 500）。{@code game-budget-ms} 附件缺失时提供方按它算本地截止。

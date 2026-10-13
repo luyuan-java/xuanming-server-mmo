@@ -49,10 +49,11 @@ public final class MatchTeamBattle implements TeamBattlePort {
     public static final long HOP_TIMEOUT_MS = 3_000;
 
     /**
-     * 可接受的开战锁时长上限（秒）= EndMatch 的单调截止。game-match 给出更长的锁（两边版本不一）时拒绝开战（4030）：
-     * 锁比 EndMatch 的截止还长，Redis 持续故障时清锁循环会先于锁放弃，违反 match-spec §10.3 的不等式。
+     * 可接受的开战锁时长上限（秒）= 契约上限 {@link MatchBudgets#MAX_TEAM_LOCK_SECONDS}。game-match 给出更长的锁（两边版本不一，或应答不可信）
+     * 时拒绝开战（4030）：它限制一把锁最多占住收尾线程与 {@link #runTeamGather} 长挂调用多久。EndMatch 的截止由这把锁的实际时长推出
+     * （{@code TeamStore.endMatchDeadlineMs}），不靠这个上限保证。
      */
-    public static final int MAX_LOCK_TTL_SECONDS = MatchBudgets.TEAM_END_MATCH_DEADLINE_SECONDS;
+    public static final int MAX_LOCK_TTL_SECONDS = MatchBudgets.MAX_TEAM_LOCK_SECONDS;
 
     /** {@link #runTeamGather} 的本地兜底相对调用级超时的余量（毫秒）。 */
     static final long GATHER_GUARD_MS = 2_000;

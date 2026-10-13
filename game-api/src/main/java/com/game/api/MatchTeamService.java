@@ -39,7 +39,7 @@ public interface MatchTeamService {
      * 这一条判在人数与成员预检<b>之后</b>：只拦本来会放行的请求，{@code DUNGEON_NOT_OPEN} / {@code SIZE_EXCEEDED} / 三种成员拒绝的可见结果
      * 不因租约而变（比照 JoinQueue 的 PVE_SOLO 前置检查）。工作池过载、排队超预算也回 {@code INTERNAL}。
      * {@code OK} 时附每人的 zone 与开战锁时长；<b>调用方要校验</b> zones 覆盖名单里每个人、{@code lock_ttl_seconds} 在
-     * [1, {@link com.game.api.match.MatchBudgets#TEAM_END_MATCH_DEADLINE_SECONDS}]，不满足按传输失败处理。
+     * [1, {@link com.game.api.match.MatchBudgets#MAX_TEAM_LOCK_SECONDS}]，不满足按传输失败处理。
      */
     CompletableFuture<TeamMatchCheckReply> checkTeamMatch(TeamMatchCheckRequest request);
 

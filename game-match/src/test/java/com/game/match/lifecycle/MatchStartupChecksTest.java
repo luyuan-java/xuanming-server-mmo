@@ -118,11 +118,11 @@ class MatchStartupChecksTest {
     }
 
     @Test
-    void 开战锁超过game_team的EndMatch截止_拒绝() {
+    void 开战锁超过契约上限_拒绝() {
         List<String> violations = MatchStartupChecks.ttlTableViolations(MatchBudgets::matchedTicketTtlSeconds, n -> 111);
 
-        assertThat(violations).singleElement().asString().contains("5 人的开战锁 111 s").contains("110 s");
-        assertThat(MatchStartupChecks.ttlTableViolations(MatchBudgets::matchedTicketTtlSeconds, n -> 110)).as("恰好等于截止：通过").isEmpty();
+        assertThat(violations).singleElement().asString().contains("5 人的开战锁 111 s").contains("MAX_TEAM_LOCK_SECONDS = 110 s");
+        assertThat(MatchStartupChecks.ttlTableViolations(MatchBudgets::matchedTicketTtlSeconds, n -> 110)).as("恰好等于契约上限：通过").isEmpty();
     }
 
     // ================================================================ 合在一起

@@ -82,7 +82,7 @@ import org.slf4j.LoggerFactory;
  *   <li>回包视图与推送视图一律同源构建（{@link TeamViews}），失败回包的视图取调用者自己的一次自由读；
  *       只有服务端自己读失败时才不带视图（客户端靠「有没有视图」区分「服务端读失败」与「你不在队」）；</li>
  *   <li>线程：所有 RPC 方法都阻塞（Redis 等待、MySQL、调 game-match 的前三个方法），只在 {@code team-worker} 工作线程上调用（AGENTS.md §3）；
- *       整队开战加锁之后的收尾（清锁、退票，最坏阻塞 110 s）一律投到有界执行器 {@code team-match-end}，不占工作线程、不受请求预算约束；
+ *       整队开战加锁之后的收尾（清锁、退票，最坏阻塞锁时长 + 3.2 s，见 TeamStore.endMatchDeadlineMs）一律投到有界执行器 {@code team-match-end}，不占工作线程、不受请求预算约束；
  *       本类无可变状态，线程安全。</li>
  * </ul>
  */
@@ -123,7 +123,7 @@ public final class TeamService {
      * @param homeZones home zone 查询（game-common 的 {@code PlayerHomeZones}：缺项或 0 → 4019，抛异常 → 4030）
      * @param teamIds   team_id 发号（{@code TeamIds::nextId}；抛异常或返回 0 → CreateTeam 回 4030 + 空视图）
      * @param battle    整队开战的票据域端口（生产为 {@code MatchTeamBattle}：调 game-match）
-     * @param matchEnd  整队开战加锁之后的收尾执行器（{@code team-match-end}，有界；任务会阻塞，最坏 110 s；拒收时抛
+     * @param matchEnd  整队开战加锁之后的收尾执行器（{@code team-match-end}，有界；任务会阻塞，最坏锁时长 + 3.2 s；拒收时抛
      *                  {@link RejectedExecutionException}，本类记 ERROR 后放弃这次收尾，开战锁靠自然过期）
      * @param cfg       规则配置（{@code game.team.allow-cross-zone}）
      * @param stopping  本进程是否已经开始停机（生产为 {@code TeamShutdown::stopping}）：之后异常完成的 gather 不再清锁、不推送
@@ -430,7 +430,9 @@ public final class TeamService {
             }
 
             String token = UUID.randomUUID().toString();
-            long expireAtMs = snap.nowMs() + check.lockTtlSeconds() * 1000L;
+            // 锁时长只取这一次：加锁用它，之后每条清锁路径的 EndMatch 截止也由它推出（TeamStore.endMatchDeadlineMs）
+            int lockTtlSeconds = check.lockTtlSeconds();
+            long expireAtMs = snap.nowMs() + lockTtlSeconds * 1000L;
             PinnedResult lock;
             try {
                 lock = store.commitMatchLock(snap, caller, token, roster, expireAtMs, sessions, deadline);
@@ -438,7 +440,7 @@ public final class TeamService {
                 log.error("[team] StartTeamMatch 开战锁提交故障 player={} team={}: {}", u(caller), u(snap.teamId()), e.toString());
                 // 结果未知：EVAL 可能已在 Redis 执行、只是回复超时 / 断连。按 token 后台清锁（锁没写入时只读不写不推），
                 // 否则锁白挂到自然过期，期间全队的名单操作都回 4023
-                releaseLockInBackground(snap.teamId(), token);
+                releaseLockInBackground(snap.teamId(), token, lockTtlSeconds);
                 return matchReject(caller, TeamTips.INTERNAL, 0, null, deadline);
             }
             pushes.publish(caller, pinnedCommits(lock.repairs(), lock.commit()));
@@ -450,7 +452,7 @@ public final class TeamService {
                 metrics.commitRetry(TeamMethods.START_TEAM_MATCH);
                 // 「未提交」不等于没写入：同一段 EVAL 被重发、第一次已落锁时第二次回 {0}。重来之前按 token 确认一次，
                 // 否则下一轮会被自己的锁挡成 4023
-                settleUnconfirmedLock(snap.teamId(), token, deadline);
+                settleUnconfirmedLock(snap.teamId(), token, lockTtlSeconds, deadline);
                 continue;
             }
             return launchMatch(caller, configId, lock.commit(), token, check, deadline);
@@ -470,6 +472,7 @@ public final class TeamService {
     private TeamResponse launchMatch(long caller, int configId, CommitResult lock, String token, TeamBattlePort.Check check,
                                      Deadline deadline) {
         long teamId = lock.teamId();
+        int lockTtlSeconds = check.lockTtlSeconds(); // 与加锁同一个值：gather 的调用级超时与清锁截止都由它推出
         List<Long> roster = List.copyOf(lock.decision().record().getMatchLockRosterList());
         // 每人一个 UUID（match-spec §0.5）：建票回包丢失时凭它退票；JoinQueue 的 16001 会把票号回给客户端，所以不能用锁令牌
         Map<Long, String> ticketIds = new LinkedHashMap<>();
@@ -483,7 +486,7 @@ public final class TeamService {
             // 补偿不继承请求预算：后台清锁，结果推全员（含发起人）。回包里的视图可能仍是 STARTING，客户端按 (epoch, version) 排序，
             // 随后到达的 MATCH_FAILED 视图版本更新。推给队员的 MATCH_FAILED 带同一个原因
             TipInfoMessage tip = tipOf(TeamTips.MEMBER_NOT_READY, failed.playerId());
-            inBackground("建票失败后清锁", teamId, () -> finishMatch(teamId, token, false, roster, tip));
+            inBackground("建票失败后清锁", teamId, () -> finishMatch(teamId, token, lockTtlSeconds, false, roster, tip));
             return respond(caller, TeamTips.MEMBER_NOT_READY, failed.playerId(), deadline);
         }
         if (tickets instanceof TeamBattlePort.Tickets.Unknown unknown) {
@@ -492,7 +495,7 @@ public final class TeamService {
             // 迟到的建票可能已经执行：先按本次的票号退票，再清锁。gather 还没发出，所以可以退（match-spec §7.5）
             inBackground("建票结果不明后的退票与清锁", teamId, () -> {
                 battle.releaseTeamTickets(ticketIds, Deadline.after(RELEASE_TICKETS_BUDGET_MS));
-                finishMatch(teamId, token, false, roster, null);
+                finishMatch(teamId, token, lockTtlSeconds, false, roster, null);
             });
             return respond(caller, TeamTips.INTERNAL, 0, deadline);
         }
@@ -500,11 +503,11 @@ public final class TeamService {
         log.info("[team] 整队开战已受理 team={} config={} roster={}", u(teamId), Integer.toUnsignedString(configId), us(roster));
         CompletionStage<TeamBattlePort.Gather> gather;
         try {
-            gather = battle.runTeamGather(configId, teamId, roster, ticketIds, check.lockTtlSeconds());
+            gather = battle.runTeamGather(configId, teamId, roster, ticketIds, lockTtlSeconds);
         } catch (RuntimeException e) {
             gather = CompletableFuture.failedFuture(e);
         }
-        // 回调在 Dubbo 的线程上触发（stage 已完成时就在本线程上）：只定性、计数与投递，清锁（阻塞、最坏 110 s）在 team-match-end 上。
+        // 回调在 Dubbo 的线程上触发（stage 已完成时就在本线程上）：只定性、计数与投递，清锁（阻塞、最坏锁时长 + 3.2 s）在 team-match-end 上。
         // 计数放在投递之前：执行器已满放弃收尾时，这次 211 仍然恰好计一次
         gather.whenComplete((result, error) -> {
             boolean ok = error == null && result != null && result.ok();
@@ -528,20 +531,21 @@ public final class TeamService {
                 log.info("[team] 整队 gather 失败 team={} outcome={}", u(teamId), result.outcome());
             }
             // gather 失败拿不到要告诉玩家的具体原因：tip 留空
-            inBackground("gather 收尾", teamId, () -> finishMatch(teamId, token, ok, roster, null));
+            inBackground("gather 收尾", teamId, () -> finishMatch(teamId, token, lockTtlSeconds, ok, roster, null));
         });
         return resp;
     }
 
     /**
-     * 清开战锁并推结果（service.go:497-523），在 {@code team-match-end} 上执行，不受任何请求预算约束（阻塞，最坏 110 s）。
+     * 清开战锁并推结果（service.go:497-523），在 {@code team-match-end} 上执行，不受任何请求预算约束（阻塞，最坏锁时长 + 3.2 s）。
      * 清锁提交成功 → 按提交推全员（含发起人）MATCH_ENDED / MATCH_FAILED；没有提交（锁已被清 / 重新加锁 / 自然过期 / 截止）→
      * 仍尽力给当前队员推一次当前视图与结果原因，保证客户端不停在 STARTING。
      *
-     * @param tip 结果推送的原因（{@code TeamSnapshotS2C.tip}，可为 null）；只随结果推送下发，不进存储
+     * @param lockTtlSeconds 加锁时用的锁时长（秒），EndMatch 的截止由它推出（{@link TeamStore#endMatchDeadlineMs}）
+     * @param tip            结果推送的原因（{@code TeamSnapshotS2C.tip}，可为 null）；只随结果推送下发，不进存储
      */
-    void finishMatch(long teamId, String token, boolean ok, List<Long> roster, TipInfoMessage tip) {
-        EndMatchResult res = store.endMatch(teamId, token, ok, sessions);
+    void finishMatch(long teamId, String token, int lockTtlSeconds, boolean ok, List<Long> roster, TipInfoMessage tip) {
+        EndMatchResult res = store.endMatch(teamId, token, ok, lockTtlSeconds, sessions);
         pushes.publish(0, pinnedCommits(res.repairs(), res.commit() == null ? null : res.commit().withPushTip(tip)));
         switch (res.stop()) {
             case RELEASED -> {
@@ -563,10 +567,12 @@ public final class TeamService {
      * 开战锁提交结果未知时的后台补偿（service.go:525-542）：按 token 清锁（EndMatch，ok = false）。与 {@link #finishMatch} 不同，
      * <b>没有清锁提交就不推送</b>——锁可能根本没写入，给全队推 MATCH_FAILED 等于凭空多出一场从没开始过的开战。锁没写入时 EndMatch
      * 读到 token 不符即停止，不写。
+     *
+     * @param lockTtlSeconds 这次加锁（可能已落盘）用的锁时长（秒）
      */
-    private void releaseLockInBackground(long teamId, String token) {
+    private void releaseLockInBackground(long teamId, String token, int lockTtlSeconds) {
         inBackground("结果未知的开战锁按 token 清除", teamId, () -> {
-            EndMatchResult res = store.endMatch(teamId, token, false, sessions);
+            EndMatchResult res = store.endMatch(teamId, token, false, lockTtlSeconds, sessions);
             if (res.commit() != null) {
                 log.info("[team] 结果未知的开战锁已按 token 清除 team={}", u(teamId));
             }
@@ -582,14 +588,16 @@ public final class TeamService {
      * 开战锁提交没拿到「已提交」时，用请求预算按 token 同步确认一轮（service.go:544-566）：锁不在 / token 不符 / 已过期 → 只读不写
      * （常见情形：预检期间真有别的提交）；锁在（同一段 EVAL 被重发、第一次已落锁）→ 钉版本清掉并推送。同步确认不了（故障或清锁冲突）
      * 就交给后台补偿。
+     *
+     * @param lockTtlSeconds 这次加锁（可能已落盘）用的锁时长（秒），转后台补偿时交给 EndMatch
      */
-    private void settleUnconfirmedLock(long teamId, String token, Deadline deadline) {
+    private void settleUnconfirmedLock(long teamId, String token, int lockTtlSeconds, Deadline deadline) {
         LockRelease release;
         try {
             release = store.releaseMatchLockOnce(teamId, token, sessions, deadline);
         } catch (DependencyException e) {
             log.error("[team] 确认未提交的开战锁失败，转后台清锁 team={}: {}", u(teamId), e.toString());
-            releaseLockInBackground(teamId, token);
+            releaseLockInBackground(teamId, token, lockTtlSeconds);
             return;
         }
         if (release.stop() != null) {
@@ -601,7 +609,7 @@ public final class TeamService {
         }
         pushes.publish(0, pinnedCommits(pinned.repairs(), pinned.commit()));
         if (pinned.commit() == null) {
-            releaseLockInBackground(teamId, token);
+            releaseLockInBackground(teamId, token, lockTtlSeconds);
         }
     }
 

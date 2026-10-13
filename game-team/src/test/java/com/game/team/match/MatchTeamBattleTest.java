@@ -133,9 +133,9 @@ class MatchTeamBattleTest {
         match.lockTtlSeconds = 0;
         assertThat(battle.checkTeamMatch(1, ROSTER, budget()).code()).as("没有锁时长").isEqualTo(TeamTips.INTERNAL);
         match.lockTtlSeconds = MatchTeamBattle.MAX_LOCK_TTL_SECONDS + 1;
-        assertThat(battle.checkTeamMatch(1, ROSTER, budget()).code()).as("锁比 EndMatch 的截止还长").isEqualTo(TeamTips.INTERNAL);
+        assertThat(battle.checkTeamMatch(1, ROSTER, budget()).code()).as("锁超过契约上限").isEqualTo(TeamTips.INTERNAL);
         match.lockTtlSeconds = MatchTeamBattle.MAX_LOCK_TTL_SECONDS;
-        assertThat(battle.checkTeamMatch(1, ROSTER, budget()).ok()).as("恰好等于截止可以").isTrue();
+        assertThat(battle.checkTeamMatch(1, ROSTER, budget()).ok()).as("恰好等于契约上限可以").isTrue();
         match.lockTtlSeconds = 1;
         assertThat(battle.checkTeamMatch(1, ROSTER, budget()).lockTtlSeconds()).isEqualTo(1);
 

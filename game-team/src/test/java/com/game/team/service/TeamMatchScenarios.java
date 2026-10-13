@@ -149,7 +149,7 @@ abstract class TeamMatchScenarios {
                         TeamTips.INTERNAL, 0, 1, "internal"),
                 new Rejection("应答全默认值（result 缺失）绝不读成通过", 1, (f, t) -> f.match.checkReply =
                         r -> done(TeamMatchCheckReply.getDefaultInstance()), TeamTips.INTERNAL, 0, 1, "internal"),
-                new Rejection("通过但开战锁时长比 EndMatch 的截止还长", 1, (f, t) -> f.match.lockTtlSeconds = 111, TeamTips.INTERNAL, 0, 1,
+                new Rejection("通过但开战锁时长超过契约上限 MAX_TEAM_LOCK_SECONDS", 1, (f, t) -> f.match.lockTtlSeconds = 111, TeamTips.INTERNAL, 0, 1,
                         "internal"));
         for (Rejection c : cases) {
             fresh();
@@ -833,7 +833,7 @@ abstract class TeamMatchScenarios {
 
         // token 不符（锁已被清或重新加锁）：停止、不写，仍给队员推一次当前视图（锁仍有效 → STARTING）
         State before = fx.state(tid, t[1], t[2]);
-        svc.finishMatch(tid, "tok-B", true, roster, null);
+        svc.finishMatch(tid, "tok-B", LOCK_SECONDS, true, roster, null);
         assertThat(fx.state(tid, t[1], t[2])).isEqualTo(before);
         Map<Long, TeamSnapshotS2C> current = byReason(fx.takePushes(), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_ENDED);
         assertThat(current.keySet()).containsExactlyInAnyOrderElementsOf(roster);
@@ -841,17 +841,17 @@ abstract class TeamMatchScenarios {
             assertThat(s.getTeam().getMatchState()).isEqualTo(TeamMatchState.TEAM_MATCH_STATE_STARTING);
             assertThat(s.getTeam().getVersion()).isEqualTo(lock.commit().version());
         }
-        assertThat(fx.store.endMatch(tid, "tok-B", true, fx.sessions).stop()).isEqualTo(EndMatchStop.TOKEN_MISMATCH);
+        assertThat(fx.store.endMatch(tid, "tok-B", true, LOCK_SECONDS, fx.sessions).stop()).isEqualTo(EndMatchStop.TOKEN_MISMATCH);
 
         // 记录不存在：停止、不写
-        EndMatchResult missing = fx.store.endMatch(fx.unusedTid(), "tok-A", true, fx.sessions);
+        EndMatchResult missing = fx.store.endMatch(fx.unusedTid(), "tok-A", true, LOCK_SECONDS, fx.sessions);
         assertThat(missing.stop()).isEqualTo(EndMatchStop.RECORD_MISSING);
         assertThat(missing.commit()).isNull();
         assertThat(fx.state(tid, t[1], t[2])).isEqualTo(before);
 
         // 锁已按 Redis 时钟过期：停止、不写（要拨时钟：只在内存后端上验）
         if (fx.backend.advance(LOCK_SECONDS * 1000L)) {
-            EndMatchResult expired = fx.store.endMatch(tid, "tok-A", false, fx.sessions);
+            EndMatchResult expired = fx.store.endMatch(tid, "tok-A", false, LOCK_SECONDS, fx.sessions);
             assertThat(expired.stop()).isEqualTo(EndMatchStop.LOCK_EXPIRED);
             assertThat(expired.commit()).isNull();
             assertThat(fx.state(tid, t[1], t[2])).isEqualTo(before);
@@ -868,15 +868,17 @@ abstract class TeamMatchScenarios {
         PinnedResult lock = fx.store.commitMatchLock(snap, t[1], "tok-A", roster, snap.nowMs() + LOCK_SECONDS * 1000L, fx.sessions,
                 deadline());
         State before = fx.state(tid, t[1], t[2]);
-        // 清锁的每一轮读都失败（Redis 持续故障）；单调时钟每问一次走 30 s：起点 0，第 4 次检查（120 s）越过 110 s 的截止
+        // 清锁的每一轮读都失败（Redis 持续故障）；单调时钟每问一次走 30 s：起点 0，30 / 60 s 各跑一轮，
+        // 第 3 次检查（90 s）越过截止（锁 83 s + 一轮 2 s + 最长退避 1.2 s = 86.2 s）
         fx.evalOverride.set((script, keys) -> script == TeamScript.READ ? broken("redis down") : null);
         AtomicInteger asked = new AtomicInteger();
         fx.nanoTime = () -> TimeUnit.SECONDS.toNanos(30L * asked.getAndIncrement());
 
-        svc.finishMatch(tid, "tok-A", false, roster, null);
+        svc.finishMatch(tid, "tok-A", LOCK_SECONDS, false, roster, null);
 
         fx.evalOverride.set((script, keys) -> null);
-        assertThat(fx.sleeps).as("0 / 30 / 60 / 90 s 各跑一轮失败并退避，120 s 时放弃").hasSize(3);
+        assertThat(TeamStore.endMatchDeadlineMs(LOCK_SECONDS)).isEqualTo(86_200);
+        assertThat(fx.sleeps).as("30 / 60 s 各跑一轮失败并退避，90 s 时放弃").hasSize(2);
         assertThat(fx.state(tid, t[1], t[2])).as("没清掉：锁留给自然过期").isEqualTo(before);
         Map<Long, TeamSnapshotS2C> current = byReason(fx.takePushes(), TeamChangeReason.TEAM_CHANGE_REASON_MATCH_FAILED);
         assertThat(current.keySet()).containsExactlyInAnyOrder(t[1], t[2]);

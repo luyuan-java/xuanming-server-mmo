@@ -12,7 +12,7 @@ public enum EndMatchStop {
     TOKEN_MISMATCH,
     /** 锁按 Redis 时钟已自然过期，不写（token 字段可能还留着，等下次加锁覆盖）。 */
     LOCK_EXPIRED,
-    /** 进程内单调截止（110 s）耗尽仍未提交（持续冲突或 Redis 故障），锁靠自然过期。 */
+    /** 进程内单调截止（锁时长 + 一轮预算 + 最长退避，见 {@link TeamStore#endMatchDeadlineMs}）耗尽仍未提交（持续冲突或 Redis 故障），锁靠自然过期。 */
     DEADLINE,
     /** 退避等待被中断（进程正在停机），锁靠自然过期。Java 独有：基线进程退出不等 EndMatch（team-spec §5.2），这里只是把它表达出来。 */
     INTERRUPTED

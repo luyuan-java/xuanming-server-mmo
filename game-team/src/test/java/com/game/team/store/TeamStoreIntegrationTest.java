@@ -763,6 +763,8 @@ class TeamStoreIntegrationTest {
     // ================================================================ 批次 6.4：开战锁钉版本提交与 EndMatch（team-spec §1.7.6）
 
     private static final long LOCK_MS = 60_000;
+    /** 与 {@link #LOCK_MS} 同一把锁的时长（秒）：EndMatch 的截止由它推出。 */
+    private static final int LOCK_TTL_SECONDS = (int) (LOCK_MS / 1000);
 
     private PinnedResult lock(Snapshot snap, long caller, String token) {
         return fx.store.commitMatchLock(snap, caller, token, TeamRules.matchRoster(snap.record()), snap.nowMs() + LOCK_MS,
@@ -808,7 +810,7 @@ class TeamStoreIntegrationTest {
         fx.assertUnchanged(before);
 
         // 清锁：三个字段清空，版本再加一
-        EndMatchResult end = fx.store.endMatch(tid, "tok-1", true, fx.sessions);
+        EndMatchResult end = fx.store.endMatch(tid, "tok-1", true, LOCK_TTL_SECONDS, fx.sessions);
         assertThat(end.stop()).isEqualTo(EndMatchStop.RELEASED);
         assertThat(end.commit().version()).isEqualTo(ver0 + 2);
         assertThat(end.commit().decision().reason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_MATCH_ENDED);
@@ -906,7 +908,7 @@ class TeamStoreIntegrationTest {
         fx.hset(idx(p13), TeamRedisFields.TID, u(o3));
         fx.hset(idx(p14), TeamRedisFields.TID, u(o4));
 
-        EndMatchResult end = fx.store.endMatch(endTid, "tok-end", false, fx.sessions);
+        EndMatchResult end = fx.store.endMatch(endTid, "tok-end", false, LOCK_TTL_SECONDS, fx.sessions);
 
         assertThat(end.stop()).isEqualTo(EndMatchStop.RELEASED);
         assertThat(end.repairs()).hasSize(1);
@@ -935,7 +937,7 @@ class TeamStoreIntegrationTest {
             }
         });
 
-        EndMatchResult end = fx.store.endMatch(tid, "tok", true, fx.sessions);
+        EndMatchResult end = fx.store.endMatch(tid, "tok", true, LOCK_TTL_SECONDS, fx.sessions);
 
         assertThat(end.stop()).isEqualTo(EndMatchStop.RELEASED);
         assertThat(end.conflicts()).as("超过 mutate 的 3 次上限也不放弃").isEqualTo(outsiders.size());
@@ -961,7 +963,7 @@ class TeamStoreIntegrationTest {
         assertThat(lock(fx.store.read(p1, tid, fx.deadline()), p1, "tok-A").commit()).isNotNull();
 
         TeamRedisFixture.KeyState before = fx.state();
-        EndMatchResult mismatch = fx.store.endMatch(tid, "tok-B", true, fx.sessions);
+        EndMatchResult mismatch = fx.store.endMatch(tid, "tok-B", true, LOCK_TTL_SECONDS, fx.sessions);
         assertThat(mismatch.stop()).isEqualTo(EndMatchStop.TOKEN_MISMATCH);
         assertThat(mismatch.commit()).isNull();
         fx.assertUnchanged(before);
@@ -969,13 +971,13 @@ class TeamStoreIntegrationTest {
         // 真 Redis 拨不动时钟：把记录里的锁截止改写成「此刻」（ver 不变），之后任何一次 S_READ 的 TIME 都 ≥ 它，即已过期
         fx.writeRecord(tid, fx.loadRecord(tid).toBuilder().setMatchLockExpireAtMs(fx.nowMs()).build());
         before = fx.state();
-        EndMatchResult expired = fx.store.endMatch(tid, "tok-A", false, fx.sessions);
+        EndMatchResult expired = fx.store.endMatch(tid, "tok-A", false, LOCK_TTL_SECONDS, fx.sessions);
         assertThat(expired.stop()).isEqualTo(EndMatchStop.LOCK_EXPIRED);
         assertThat(expired.commit()).isNull();
         fx.assertUnchanged(before);
         assertThat(fx.loadRecord(tid).getMatchLockToken()).as("过期的锁不写：token 残留，按时钟无效").isEqualTo("tok-A");
 
-        assertThat(fx.store.endMatch(fx.tid(9499), "tok-A", true, fx.sessions).stop()).isEqualTo(EndMatchStop.RECORD_MISSING);
+        assertThat(fx.store.endMatch(fx.tid(9499), "tok-A", true, LOCK_TTL_SECONDS, fx.sessions).stop()).isEqualTo(EndMatchStop.RECORD_MISSING);
         assertThat(sleeps).as("停止分支不退避").isEmpty();
 
         PinnedResult relocked = lock(fx.store.read(p1, tid, fx.deadline()), p1, "tok-C");
