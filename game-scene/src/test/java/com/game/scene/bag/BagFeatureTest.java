@@ -12,11 +12,17 @@ import com.game.player.store.state.PlayerState;
 import com.game.proto.BagInfo;
 import com.game.proto.BagItemInfo;
 import com.game.proto.BagSlotInfo;
+import com.game.proto.EquipItemRequest;
+import com.game.proto.EquipItemResponse;
 import com.game.proto.GetBagRequest;
 import com.game.proto.GetBagResponse;
+import com.game.proto.GmGrantItemRequest;
+import com.game.proto.GmGrantItemResponse;
 import com.game.proto.MessageContent;
 import com.game.proto.SortBagRequest;
 import com.game.proto.SortBagResponse;
+import com.game.proto.UnequipItemRequest;
+import com.game.proto.UnequipItemResponse;
 import com.game.scene.audit.AssetAudit.Reason;
 import com.game.scene.audit.GainAnomalyDetector;
 import com.game.scene.metrics.SceneMetrics;
@@ -248,6 +254,38 @@ class BagFeatureTest {
         world.onPlayerLeave(LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER).setVoluntary(true)
                 .build());
         assertThat(repo.saves().getLast().state().hasBag()).isFalse();
+    }
+
+    /**
+     * 批次 0.3（契约同步到 mmorpg 73b852f3）新增的 EquipItem / UnequipItem / GmGrantItem（GM 指令，夹具是 dev 放行）Java 还没实现
+     * （PARITY「装备属性系统」行，Java 待做）：走分发入口的缺省处理——回显请求号、应答内 {@code error_message{1006}}、不带 bag / equipment，
+     * 背包与装备栏都不动。实现时把这条换成真实用例。
+     */
+    @Test
+    void 装备穿脱与GM发物品尚未实现_回应答内1006_背包不动() throws Exception {
+        start(null);
+        give(BagType.INVENTORY, Map.of(1, 1L));
+        BagInfo before = getBag(0).getBag();
+        long item = before.getItems(0).getItemId();
+
+        MessageContent equip = call("EquipItem", EquipItemRequest.newBuilder().setItemId(item).build());
+        MessageContent unequip = call("UnequipItem", UnequipItemRequest.newBuilder().setItemId(item).build());
+        MessageContent grant = call("GmGrantItem", GmGrantItemRequest.newBuilder().setConfigId(1).setCount(1).build());
+
+        assertThat(List.of(equip, unequip, grant)).allSatisfy(reply -> assertThat(reply.getId()).isEqualTo(7L));
+        EquipItemResponse equipped = EquipItemResponse.parseFrom(equip.getSerializedMessage());
+        assertThat(equipped.getErrorMessage().getId()).isEqualTo(1006);
+        assertThat(equipped.hasBag()).isFalse();
+        assertThat(equipped.hasEquipment()).isFalse();
+        UnequipItemResponse unequipped = UnequipItemResponse.parseFrom(unequip.getSerializedMessage());
+        assertThat(unequipped.getErrorMessage().getId()).isEqualTo(1006);
+        assertThat(unequipped.hasBag()).isFalse();
+        assertThat(unequipped.hasEquipment()).isFalse();
+        GmGrantItemResponse granted = GmGrantItemResponse.parseFrom(grant.getSerializedMessage());
+        assertThat(granted.getErrorMessage().getId()).isEqualTo(1006);
+        assertThat(granted.hasBag()).isFalse();
+        assertThat(getBag(0).getBag()).as("人物背包不动").isEqualTo(before);
+        assertThat(getBag(2).getBag().getItemsList()).as("装备栏仍是空的").isEmpty();
     }
 
     @Test

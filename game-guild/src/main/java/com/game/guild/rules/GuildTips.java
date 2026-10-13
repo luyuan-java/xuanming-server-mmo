@@ -8,13 +8,15 @@ import java.util.Set;
  * 帮会的 tip 码（基线 go/guild/internal/constants/constants.go:62-136，guild-spec §0.4）与仓储拒绝 → 答复的映射（§2.7 mapWriteErr）。
  *
  * <p>码值只能取自导表生成的 {@code GuildErrorTip.guild_error} / {@code CommonErrorTip.common_error}，不许手写数字（同基线
- * constants_test.go TestNoHandWrittenTipCodes；Java 侧由 {@code GuildTipsTest} 扫描本文件钉住）。帮会段 14000–14031 全部列出：
- * 4.4 发 14000–14021，14022–14031 是 4.5 的经济段（guild-economy-spec §0.4）。活动段 tip 码在 Java 契约里不存在（guild-spec §0.4 末尾）。
+ * constants_test.go TestNoHandWrittenTipCodes；Java 侧由 {@code GuildTipsTest} 扫描本文件钉住）。帮会段 14000–14041 全部列出：
+ * 4.4 发 14000–14021，14022–14031 是 4.5 的经济段（guild-economy-spec §0.4），14032–14041 是 4.6 的活动段（批次 0.3 契约同步到
+ * mmorpg 73b852f3 才进 Java 契约；4.6 落地前只有常量，没有发生点）。
  * 经济事务的哨兵经 {@link #forReject} 映射（基线 economyTip 先认经济哨兵、余下交 mapWriteErr，economy_logic.go:313-344）；
  * 通道关闭（14026）、配表缺行（故障）、op_id 发号失败（14008）是服务层的答复，不经 {@link GuildReject}（§7.9）。
  *
- * <p>故障分类：基线由 Tip.xlsx 的 fault 列生成（go/shared/generated/tip/faults.go:60），帮会段只有 14008 是故障（发号器坏了，
- * 指标计 {@code fault}，仍以 in-band 回客户端）。Java 的配置表没有 fault 列，所以这里写死 {@link #FAULTS} = {14008}，并用测试钉住。
+ * <p>故障分类：基线由 Tip.xlsx 的 fault 列生成（go/shared/generated/tip/faults.go:61-62），帮会段是 14008（发号器坏了）与 4.6 的
+ * 14041（历练调 match 失败）两个故障（指标计 {@code fault}，仍以 in-band 回客户端）。Java 的配置表没有 fault 列，所以这里写死
+ * {@link #FAULTS} = {14008, 14041}，并用测试钉住。
  *
  * <p>每个 tip 的英文原因串在 {@link GuildTip}（按发生点列出）。
  */
@@ -64,6 +66,29 @@ public final class GuildTips {
     public static final int SHOP_LIMIT = GuildErrorTip.guild_error.kGuildShopLimit_VALUE;
     public static final int CONTRIBUTION_INSUFFICIENT = GuildErrorTip.guild_error.kGuildContributionInsufficient_VALUE;
 
+    // ---- 帮会段：4.6 活动段（guild_error_tip.proto:76-94；批次 0.3 随契约同步进来，Java 的 4.6 还没落地，暂无发生点） ----
+
+    /** 活动行不存在 / 未启用 / 不在档期 / 不是该类型当前选中的行（基线 ErrActivityNotOpen）。 */
+    public static final int ACTIVITY_NOT_OPEN = GuildErrorTip.guild_error.kGuildActivityNotOpen_VALUE;
+    /** 本人本游戏日参与次数已用完。 */
+    public static final int ACTIVITY_ALREADY_CLAIMED = GuildErrorTip.guild_error.kGuildActivityAlreadyClaimed_VALUE;
+    /** 中秋团圆未锁存且满足入帮时长的在线成员不足阈值。 */
+    public static final int ACTIVITY_THRESHOLD_NOT_REACHED = GuildErrorTip.guild_error.kGuildActivityThresholdNotReached_VALUE;
+    /** 历练名单不合法（人数越界、重复、不含发起人、有人离线 / 在战斗 / 不在本帮）。 */
+    public static final int TRIAL_TEAM_INVALID = GuildErrorTip.guild_error.kGuildTrialTeamInvalid_VALUE;
+    /** 帮会等级低于活动的 min_guild_level。 */
+    public static final int ACTIVITY_LEVEL_TOO_LOW = GuildErrorTip.guild_error.kGuildActivityLevelTooLow_VALUE;
+    /** 入帮未满 GuildRule.activity_join_min_hours 小时。 */
+    public static final int ACTIVITY_JOIN_TOO_RECENT = GuildErrorTip.guild_error.kGuildActivityJoinTooRecent_VALUE;
+    /** 历练邀请房间不存在 / 已过期 / 已结束，或调用者不在名单里。 */
+    public static final int TRIAL_INVITE_EXPIRED = GuildErrorTip.guild_error.kGuildTrialInviteExpired_VALUE;
+    /** 有人婉拒或发起人取消，房间已解散。 */
+    public static final int TRIAL_INVITE_DECLINED = GuildErrorTip.guild_error.kGuildTrialInviteDeclined_VALUE;
+    /** 同一发起人两次建房间隔不足 GuildRule.trial_invite_cooldown_seconds。 */
+    public static final int TRIAL_INVITE_COOLDOWN = GuildErrorTip.guild_error.kGuildTrialInviteCooldown_VALUE;
+    /** match 不可用 / 超时 / 出错，或剩余预算不够调它：活动段唯一的 in-band 故障码。 */
+    public static final int TRIAL_SERVICE_BUSY = GuildErrorTip.guild_error.kGuildTrialServiceBusy_VALUE;
+
     // ---- 通用段（tip_text.json） ----
 
     /** 信封故障：依赖故障、处理器异常、无会话、请求体非法、上行 8 / 220（§7.3）。 */
@@ -73,8 +98,8 @@ public final class GuildTips {
     /** 契约里没有的消息号（信封；§7.3）。 */
     public static final int MESSAGE_ID_NOT_FOUND = CommonErrorTip.common_error.kMessageIdNotFound_VALUE;
 
-    /** 帮会段内的 in-band 故障码集合（基线 faults.go:60 只有 GuildIdGenUnavailable）。 */
-    public static final Set<Integer> FAULTS = Set.of(ID_GEN_UNAVAILABLE);
+    /** 帮会段内的 in-band 故障码集合（基线 faults.go:61-62：GuildIdGenUnavailable 与 4.6 的 GuildTrialServiceBusy）。 */
+    public static final Set<Integer> FAULTS = Set.of(ID_GEN_UNAVAILABLE, TRIAL_SERVICE_BUSY);
 
     /** 故障答复（ErrLeaderMismatch / ErrGuildLevelConfigMissing）的基线 gRPC 文案（guild_manage_logic.go:325）。 */
     public static final String INCONSISTENT_REASON = "guild data or configuration is inconsistent";

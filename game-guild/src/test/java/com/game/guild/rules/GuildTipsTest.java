@@ -67,6 +67,16 @@ class GuildTipsTest {
         codes.put("SHOP_LEVEL_TOO_LOW", GuildTips.SHOP_LEVEL_TOO_LOW);
         codes.put("SHOP_LIMIT", GuildTips.SHOP_LIMIT);
         codes.put("CONTRIBUTION_INSUFFICIENT", GuildTips.CONTRIBUTION_INSUFFICIENT);
+        codes.put("ACTIVITY_NOT_OPEN", GuildTips.ACTIVITY_NOT_OPEN);
+        codes.put("ACTIVITY_ALREADY_CLAIMED", GuildTips.ACTIVITY_ALREADY_CLAIMED);
+        codes.put("ACTIVITY_THRESHOLD_NOT_REACHED", GuildTips.ACTIVITY_THRESHOLD_NOT_REACHED);
+        codes.put("TRIAL_TEAM_INVALID", GuildTips.TRIAL_TEAM_INVALID);
+        codes.put("ACTIVITY_LEVEL_TOO_LOW", GuildTips.ACTIVITY_LEVEL_TOO_LOW);
+        codes.put("ACTIVITY_JOIN_TOO_RECENT", GuildTips.ACTIVITY_JOIN_TOO_RECENT);
+        codes.put("TRIAL_INVITE_EXPIRED", GuildTips.TRIAL_INVITE_EXPIRED);
+        codes.put("TRIAL_INVITE_DECLINED", GuildTips.TRIAL_INVITE_DECLINED);
+        codes.put("TRIAL_INVITE_COOLDOWN", GuildTips.TRIAL_INVITE_COOLDOWN);
+        codes.put("TRIAL_SERVICE_BUSY", GuildTips.TRIAL_SERVICE_BUSY);
         return codes;
     }
 
@@ -111,12 +121,16 @@ class GuildTipsTest {
         }
     }
 
-    /** 基线 fault 列只有 GuildIdGenUnavailable 标 1（faults.go:60）；Java 没有 fault 列，这里钉住写死的集合 = {14008}。 */
+    /**
+     * 基线 fault 列只有 GuildIdGenUnavailable 与 4.6 的 GuildTrialServiceBusy 标 1（faults.go:61-62）；Java 没有 fault 列，这里钉住写死的
+     * 集合 = {14008, 14041}。现有发生点（{@link GuildTip}）里只有 14008 是故障，14041 要等 4.6 才有发生点。
+     */
     @Test
-    void 只有发号器不可用是故障() {
+    void 只有发号器不可用与历练服务繁忙是故障() {
         guildCodes().forEach((name, code) ->
-                assertThat(GuildTips.isFault(code)).as("%s = %d 的 fault 分类", name, code).isEqualTo(name.equals("ID_GEN_UNAVAILABLE")));
-        assertThat(GuildTips.FAULTS).containsExactly(14008);
+                assertThat(GuildTips.isFault(code)).as("%s = %d 的 fault 分类", name, code)
+                        .isEqualTo(name.equals("ID_GEN_UNAVAILABLE") || name.equals("TRIAL_SERVICE_BUSY")));
+        assertThat(GuildTips.FAULTS).containsExactlyInAnyOrder(14008, 14041);
         assertThat(GuildTips.isFault(GuildTips.OK)).isFalse();
         assertThat(GuildTips.isFault(GuildTips.SERVICE_UNAVAILABLE)).as("信封 1003 另计 internal_error").isFalse();
         for (GuildTip tip : GuildTip.values()) {

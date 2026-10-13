@@ -50,7 +50,7 @@ public enum GuildTip {
     ROLE_NOT_ASSIGNABLE(GuildTips.NO_PERMISSION, "role not assignable"),
     /** GetGuildRankByGuild 查不到名次（guild_logic.go:654-656）。 */
     NOT_RANKED(GuildTips.NOT_RANKED, "guild not ranked"),
-    /** 建帮发号失败（guild_logic.go:328-340）。帮会段唯一的 in-band 故障码（{@link GuildTips#FAULTS}）。 */
+    /** 建帮发号失败（guild_logic.go:328-340）。4.4 / 4.5 里唯一的 in-band 故障码（{@link GuildTips#FAULTS}；另一个 14041 属 4.6，还没有发生点）。 */
     ID_GENERATOR_UNAVAILABLE(GuildTips.ID_GEN_UNAVAILABLE, "id generator unavailable"),
     /**
      * 4.5：资产指令 op_id 发号失败（发号器未接线 / 出错 / 返回 0，economy_logic.go:386-401；guild-economy-spec §2.2、E6）。
@@ -177,7 +177,7 @@ public enum GuildTip {
         return proto;
     }
 
-    /** 是否是 in-band 故障（只有 14008：建帮发号与 4.5 的 op_id 发号；指标计 {@code fault}，见 {@link GuildTips#isFault}）。 */
+    /** 是否是 in-band 故障（现有发生点里只有 14008：建帮发号与 4.5 的 op_id 发号；指标计 {@code fault}，见 {@link GuildTips#isFault}）。 */
     public boolean fault() {
         return GuildTips.isFault(code);
     }

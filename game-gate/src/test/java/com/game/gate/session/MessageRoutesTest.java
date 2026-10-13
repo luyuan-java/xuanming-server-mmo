@@ -67,6 +67,25 @@ class MessageRoutesTest {
     }
 
     @Test
+    void 契约新增的装备穿脱与GM发物品照常路由到scene_GmGrantItem按名字是GM指令_同批发号的内部方法不可路由() {
+        // 批次 0.3（契约同步到 mmorpg 73b852f3）：SceneBagClientPlayer 末尾追加 EquipItem / UnequipItem / GmGrantItem。Java 的 scene 还没实现
+        // （分发入口回应答内 1006，BagFeatureTest 钉住），gate 照常按玩家服务转给 scene；GmGrantItem 按名字前缀是 GM 指令，prod 由 gate 的 GM 闸拒。
+        for (String name : List.of("EquipItem", "UnequipItem", "GmGrantItem")) {
+            MessageRoute route = routes.clientRoute(registry.requireId("SceneBagClientPlayer", name));
+            assertThat(route).as(name).isNotNull();
+            assertThat(route.domain()).as(name).isEqualTo(ClientDispatcher.DOMAIN_SCENE);
+            assertThat(route.hasResponse()).as(name).isTrue();
+            assertThat(route.directOnly()).as(name).isFalse();
+            assertThat(route.gm()).as(name).isEqualTo(name.equals("GmGrantItem"));
+        }
+        // 同批发号的三个内部服务方法（GuildInternal / MatchInternal / DataService）没标客户端协议服务，客户端发来按不认识的号处理
+        for (String[] m : new String[][] {{"GuildInternal", "ListAppliedAssetOpsSince"}, {"MatchInternal", "StartActivityBattle"},
+                {"DataService", "GetPlayerAssetOpLedger"}}) {
+            assertThat(routes.clientRoute(registry.requireId(m[0], m[1]))).as(m[0] + "." + m[1]).isNull();
+        }
+    }
+
+    @Test
     void 现行契约里的客户端服务都有去向_没有落到缺省分支的_后端表里的服务名契约里都有() {
         // 6.4 把 MatchService 接进来之后契约里已经没有「未接入」的客户端服务了：原来这里有一条取真样本的用例
         // （「Java版未接入的客户端服务路由到unsupported」），按它自己的说明删掉，缺省分支由下一条用例用假想的服务名钉住。

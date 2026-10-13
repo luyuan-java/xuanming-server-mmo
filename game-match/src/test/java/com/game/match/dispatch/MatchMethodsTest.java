@@ -75,7 +75,11 @@ class MatchMethodsTest {
     }
 
     @Test
-    void 活动开战不在消息号表里_客户端够不到() {
-        assertThat(REGISTRY.idOf("MatchInternal", "StartActivityBattle")).isEmpty();
+    void 活动开战是内部服务_有消息号也不是客户端服务_客户端够不到() {
+        // 契约同步到 mmorpg 73b852f3（批次 0.3）后 message_id.txt 给它发了号；客户端够不着靠的是服务没标客户端协议服务 / 玩家服务
+        // （gate 白名单只收客户端服务，MessageRoutesTest 钉住它不可路由），不是「没有号」
+        MessageMethod method = REGISTRY.byId(REGISTRY.requireId("MatchInternal", "StartActivityBattle")).orElseThrow();
+        assertThat(method.clientService()).as(method.key()).isFalse();
+        assertThat(method.playerService()).as(method.key()).isFalse();
     }
 }
