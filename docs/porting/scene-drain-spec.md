@@ -1,5 +1,54 @@
 # 场景排空 / 节点疏散、死节点判定与接管（批次 5.5）移植统一规格：从 mmorpg 基线到 Java 版
 
+> ## 基线复核（2026-10-12，mmorpg `73b852f3`）
+>
+> 批次 0.3 增量盘点时按 topology-login 领域逐条核对了本稿引用的基线（出处 `docs/porting/inventory/delta-20261010.md` §6）。**正文没有改写**；正文与本节冲突时以本节为准，5.5 开工前按本节改正文。
+>
+> **基线指针**：下文的「基线 `26ceb70ca`」在 mmorpg 整理后的历史里已不存在，代码等价点是 **`e8e6ed1c2`**（2026-09-30）——本稿引用的基线行号在它上面逐个吻合（PARITY 0.3 行说的 `4493b3c9f` 只是消息号表相同，
+> 行号对不上：同两函数在 2127 / 2290，`kDrainBudget` 在 782）。新基线 `73b852f3`；mmorpg 完整克隆在 `D:\luyuan\xuanming-server-mmo-cpp`（`D:\work\mmorpg` 已不存在）。完整克隆里有 `bin/`：`bin/etc/base_deploy_config.yaml` 的 `NodeTTLSeconds: 180`（第 6 行）、`HealthCheckInterval: 1`（第 28 行），
+> `e8e6ed1c2` 与 `73b852f3` 相同，与正文从 barrier.md 引的值一致。
+> 头部写的 Java HEAD `aa8b5b5` 与「5.2 在途」都已过时：5.1–5.3、6.1–6.5 已提交，5.4 代码已集成（`zone-travel-spec.md` 实现记录）。
+>
+> **仍然成立**（代码没改，只有行号漂移）：两个入口与抄票据、`EnterScene(0,0)` 落默认大世界、刻意不带 request_id、每票至多发一次；SIGTERM / GM 签名停机只存盘不改派；`DestroyScene` 先排空再销毁、应答一律 Empty；
+> SM 侧改派处理（§1.4 第 1–5 步）与 `DestroyScene` 的全部驱动方（§1.5；`orphan_cleanup.go` 只在 `deleteOrphanChannel` 末尾多删两把切线键，:156-199 不受影响）；死节点判定、`death_at`、推迟摘除、再入屏障 20 s、
+> 死节点接管（§2.1–§2.6）；失租只重注册；gate 侧链路丢失处理（§3.1）；隐患 B2、B4–B14（B8 / B9 见下面第 3 条的补充）。GO-3（死节点号被新进程复用后永不接管）仍「本轮不落」。
+>
+> **已经变了**（都来自 CPP-3：落码 `05f91f4b2`（10-08 每小时自动保存，设计文档里记作 `a9569db98a`）、对抗审查修正 `d49739faa`、收尾补正 `dacec28b1`；**三者都未编译、未测试**——HEAD 上 C++ scene 库因装备生成物缺失编不过，
+> `cross_zone_test` 第 14 节 RelocateConfirm* 47 例与 runbook v2.7 场景 V1–V5 都没跑过；设计 mmorpg `docs/design/cross-zone-scene-travel.md` §13.8）：
+>
+> 1. **改派失败有了收尾**（改 §0.1 末句、§0.5「改派失败」行、§1.1「发改派」行、§1.4 第 6 步、§1.8、§1.9 B1）：改派从「发完即忘」变成「登记 → 确认 → 收口」。新文件 `relocate_confirm.h`（待确认表，
+>    `kSettleAfterCallDeadline` 5 s、`kSmSettleWindow` 15 s、`kReplyWaitBudget` 30 s、`kLandingBudget` 60 s、`kVerifyBudget` 10 s、`kMaxTracked` 8192）；`SendEmergencyRelocateEnterScene` 现在带关联号、先登记再发（仍不带 request_id、仍是 `EnterScene(0,0)`）；
+>    应答 / 传输失败只触发核实（挂在 `DispatchEnterSceneReply` / `DispatchEnterSceneTransportFailure` 的「实体已不在」分支）→ 只读脚本核实 location → 没生效就按票据里的 (会话, gate 实例) 直推 23 `{3023}` 再 34 `KickPlayer{reason=3023}`；
+>    没有 SM、或被拒且拒绝码在落点写之前（白名单 1 / 4 / 5 / 8 / 17 / 18 / 20 / 21）可以提前或盲踢；结局不明（成功应答、传输失败、7 / 19 / 3、更早请求结局未定）在 settle（≥ 15 s）之前不读、读不到就放弃不踢（`gave_up_unverified`）；
+>    踢之前按核实读到的 owner_epoch 兜底补写凭证；1 s 定时器与 Redis 重连回调里扫表，30 s 一行 `[RelocateConfirm]` 汇总。**B1 改读为「基线已修（未编译），残余是 `gave_up_unverified` 与 `push_gate_gone`」**。
+> 2. **票据作废规则**（改 §1.1「抄票据」「写标记」两行、§1.9 B3）：本次退出期间客户端已断线、或实体当前会话已不是发票时那一条，就不发改派（交给 A1′ 按第一次退出原因写或不写释放标记）；
+>    进场路由把玩家带回本节点时，没派发的票据作废（`cancelled_on_reentry`），例外是整节点疏散中、同一条有效会话、且被打断的那次退出没记过客户端断线（`dacec28b1` 加的第四个条件，票据保留）；
+>    被废黜销毁时丢票、不踢。`PlayerExitIntentComp` 新增 `sceneIdAtExit`、`clientDisconnected`（粘性置位）。**B3 改读为「基线已修（未编译）」**；B2（疏散期间没有准入闸）仍成立——CPP-3 残余里写明「疏散开始后才路由到本节点的新进场没有票据」。
+> 3. **收敛与停机谓词**（改 §1.2、§0.5「节点号被别的进程占用」行、§2.7「失去身份」段、§2.8 B8 / B9）：`IsEmergencyRelocateDrained` 加「待确认表清空」，§1.2 的谓词由四项变五项；`main.cpp` 的停机 drain 谓词加
+>    `relocate_confirms == 0`（第一次只剩这张表时逐条打积压清单）。`kDrainBudget` / `kShutdownDrainBudget` 仍各 15 s，所以**失去身份的节点最长约 30 s 才退出**（冲突 drain 15 s + 停机 drain 15 s，两道都到期才放弃条目、不踢；
+>    此前典型约 15 s）。B8 / B9 补一句：Go 的 `CppNodeDrainBudget` 仍按 15 s 镜像、`SceneReentryBarrier` 仍 20 s，而 C++ 实际退出可到约 30 s。另外「确认阶段只读 Redis、只推 gate」不完全成立：疏散中被同会话进场留下的票据，
+>    在停机阶段还会做一次 owner_epoch 条件写的改派标记。
+> 4. **基线测试**（改 §2.9 末条、§11.1）：`BeginSceneDrain` 现在有直接驱动它的 ECS 用例（第 14 节里 15 个），`BeginEmergencyRelocateAll` 仍然没有；全部没跑过。
+> 5. **3028**（`d970a050f`，不是 CPP-3）：玩家自己发的 63 在选目标 / 建场景调用失败、一个 SM 都没有时改推 23 `{3028}`（原 1003）。改派走的不是这条路（改派失败一律 3023），但 §5.11 定码时要一并对照（见下）。
+> 6. **切线预检**（`2a203a3a4`）：`enterscenelogic.go` 第 2b 段只对 `client_channel_pick && scene_id ≠ 0` 的请求做人数上限 / 冷却预检，改派请求不置位，不受约束。
+>
+> **行号漂移**（以函数名为准；`e8e6ed1c2` → `73b852f3`）：`player_lifecycle.cpp` `EnqueueRelocateTicket` 2149 → 2924、`BeginEmergencyRelocateAll` 2186 → 2961、`BeginSceneDrain` 2207 → 2982、`IsEmergencyRelocateDrained` 2233 → 3008、
+> `DispatchEmergencyRelocate` 2249 → 3031、`SendEmergencyRelocateEnterScene` 2331 → 3264、`HandleExitGameNode` 1900 → 2635、`FinishExitAfterPersist` 2055 → 2804、LOGOUT 快照 1988 → 2737、DV-6 3928 → 5083；
+> `main.cpp` exitAllPlayers 124 → 133、`SetOnConflictShutdown` 246 → 273、`SetConflictDrainComplete` 255 → 282；`scene_handler.cpp` +13（退出闸 493 → 506、DestroyScene 926 → 939）；
+> `enterscenelogic.go` 第 430 行之后 +22（`samePhysicalNode` 494 → 516、`resolveSceneForEnter` 1267 → 1289、`defaultWorldConfID` 1292 → 1314、`playerLocationOwnerDead` / `Gone` 877 → 899、920 → 942）；
+> `node.cpp`（`kDrainBudget` 仍在 883）、`etcd_service.cpp`、`world_init.go`、`load_reporter.go`、`reentry_barrier.go`、gate 侧各文件行号不变。
+>
+> **对 Java 设计的影响**：
+> - **§5 的设计不变**：Java 疏散走 5.2 交出事务改派，交出前失败原地留下、不推 tip、按玩家退避，不存在「先销毁实体再改派」造成的哑会话，**不移植待确认表**（落地时补进 §5.13 的不移植清单）。
+>   5.4 不受影响（226 / 124 链路在 CPP-3 里只多了「实体已不在」分支的认领钩子，交出、取证、判定表、`ConcludeHandoffAfterMarkSent` 一行没动）。
+> - **§0.5 末行、§5.11、§9.1 E3 要改登记**：E3 原写「基线改派失败变哑会话（B1）」「两版同改：mmorpg 可选」，现在基线的失败出口是核实后 23 `{3023}` + 34 断线，Java 是原地留下不推 tip——**变成客户端可见的有意差异**，5.5 落地时进 PARITY。
+>   §5.11 定码时对照：基线改派失败统一用 3023，Java 原稿「预算到期没处可去」用 1003，二选一并写明理由。
+> - **§8.1 与 §10 Q18**：「建议进 PARITY mmorpg 待做（可选）」的清单去掉 B1、B3（基线已修，残余见上）；其余照旧。
+> - **§5.4.4 收敛谓词**：Java 照原稿（并入 `transferWritesPending` / `travelFramesPending`，冲突 / 停服共用 15 s 预算）；基线「约 30 s 才退出」是基线自己的残余，Java 不跟，也不移植再入屏障（§5.13）。
+> - **与 5.6（玩家主动切线，2026-10-12 新增批次）的边界**：疏散 / 排空改派与基线一样不受 5.6 的人数上限与切线冷却约束（预检只对玩家自己发的 scene_id > 0 的 63 生效）；5.6 可以排在 5.5 之前，
+>   5.5 选目标时读 5.6 的线号 / 目录不是必需的。
+> - 下文所有基线行号按上表换算；`D:\work\mmorpg` 读作 `D:\luyuan\xuanming-server-mmo-cpp`。
+
 > **盘点 id**：scene-drain-relocate（`docs/porting/inventory/scene-core.md:256-266`）、sm-dead-node-recovery（`docs/porting/inventory/scene-manager-match.md:154-164`）、
 > scene-node-loss-handling（`docs/porting/inventory/gate.md:337-347`）。路线图 `docs/porting/roadmap.md:75`。
 >

@@ -1578,3 +1578,24 @@ D1 去掉 `SceneWorld` 里 withheld 的计数调用（两条失败）；E1 换�
 
 **还没有做。** 本节写成时（2026-10-11）唯一的运行证据是上面的本机离线全量构建；双 zone 切片、robot 端到端、Go robot 跨实现验收与真依赖的集成测试做完后，在这里补记命令、环境、各场景的检查项数与结论，
 并把 PARITY「跨 zone 传送（226）与重定向（124）」「归属区映射」两行改为「已对齐」（先例：6.5 的 `976d7ff` → `775f991`）。
+
+## 基线后续修正（2026-10-12 复核，mmorpg `73b852f3`）
+
+批次 0.3 增量盘点时核对了 GO-2 与 CPP-3 在旧基线之后的改动（出处 `docs/porting/inventory/delta-20261010.md` §6 的 d10-go2-followups、d10-zone-travel-main-chain、d10-cpp3-*）。
+**结论：5.4 的 Java 代码不需要跟改**；下面只记基线指针、行号与文档层面的更新，正文不改写，收尾（MZ1–MZ18 跑完、改 ✅）时按这里更新引用。
+
+- **基线指针**：头部写的 `26ceb70ca` 在 mmorpg 整理后的历史里已不存在，代码等价点是 `e8e6ed1c2`（2026-09-30）；新基线 `73b852f3`。头部的 `D:\work\mmorpg` 读作 `D:\luyuan\xuanming-server-mmo-cpp`
+  （`travel.md` = `docs/design/cross-zone-scene-travel.md`、`runbook.md` = `docs/ops/cross-zone-failure-test-runbook.md` 路径不变）。
+- **GO-2**：根治的代码本体（`luaRollbackPlayerPlacement`、`planRouteRollback`、`classifyRollbackReply`、`kLuaJudgeTravelOutcome`、`JudgeTravelOutcomeReply`、`HandleTravelMarkWriteRejected`、`PlayerLocation.rollback_receipt = 7`、
+  `EnterSceneResponse.owner_epoch_after_rollback = 5`）在 `e8e6ed1c2` 里已经有了，之后没改。增量只有：告警 `SceneManagerEnterSceneRollbackRedisError` 的表达式并入 `outcome=plan_error`（`1d831acb5`，
+  `deploy/k8s/scene-manager-alerts.yaml`）；`owner_epoch.go` / `owner_epoch_test.go` / `player_lifecycle.{h,cpp}` 只改注释；`travel.md` §13.7 按合并后的 HEAD 复核、runbook v2.6 重写 B3a–B3d 与「GO-2 专属验收点」7 条。
+  Java 5.2 / 5.4 用一笔「交出并释放」的 MySQL 事务（X1，`HandOffMode.RELEASE`，E → E+1 且 `owner_released = 1`），没有回滚、epoch 只进不退，不需要跟（scene-handoff-spec 已登记「回滚回执采纳导致双持在 Java 不存在」）。
+  告警表达式的变化只影响 ops-release-spec §4.2 基线表第 16 条（7.6）。
+- **CPP-3**（`05f91f4b2` / `d49739faa` / `dacec28b1`，未编译未测试）：改的是疏散 / 排空改派，226 / 124 链路只多了「实体已不在」分支里的认领钩子（`ClaimRelocateEnterSceneReply` / `ClaimRelocateTransportFailure`），
+  交出、取证、判定表、`ConcludeHandoffAfterMarkSent` 一行没动；`travel_freeze_cap.h`、`handoff_mark_withdraw.h` 不变。归 5.5，见 scene-drain-spec 文首「基线复核」。
+- **主链路零行为改动**：`RequestZoneTravel` / `StartTravelHandoff` / `HandleTravelMarkWriteRejected` / `ResolveTravelOutcome` / `JudgeTravelOutcomeReply` / `ConcludeHandoffAfterMarkSent` 内容不变，
+  行号整体后移约 1140–1155（2745 → 3885、2818 → 3958、3454 → 4609、3610 → 4765、3688 → 4843、4218 → 5373）；EnterScene 3.2 步只改注释（`1d831acb5`）；gate（`gate_event_handler`、`client_message_processor`）、
+  login（`entergamelogic.go`、`homezone.go`）、scene_manager 的 `gate_redirect.go` / `home_zone.go` / `changesceneutil.go`、`robot/travel_smoke_scenario.go`、`robot/pkg/redirect.go` 都不变；`enterscenelogic.go` 第 430 行之后整体 +22
+  （插入了玩家主动切线的预检 2b 段，只对 `client_channel_pick` 置位的请求生效，226 / 124 不置位）；`travel.md` +421 / −150 行，行号按节名重取。
+- **3028**（`d970a050f`）：普通换图的传输失败改推 3028，跨 zone 226 的失败码 3027 不变，gate 通用失败桥仍回 1003——5.4 不受影响（Java 的 5.2 D12 / 5.3 D9 随 5.6 改）。
+- **跨实现验收**：Go robot `travel_smoke` 没改，§11.10 的口径不变；但基线自身的 travel-smoke 至今没有绿色记录，mmorpg 本机 10-08 还进不了游戏，§11.10 暂时没有对端。runbook v2.6 / v2.7 的 B3a–B3d「scene_manager / Redis / 源 scene / 客户端四行对照」写法可以给 §11.9 的 MZ 用例参考。
