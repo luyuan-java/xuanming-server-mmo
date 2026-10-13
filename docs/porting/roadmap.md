@@ -41,7 +41,7 @@
 | 2.7 | buff 核心与效果、运行时属性重算位与战斗状态（66 combat_state_flags）、死亡 / 复活、新号初始化与登录回满（当前气血 / 法力持久化） | realtime-buff-core、realtime-buff-effects、actor-attribute-calculator、death-revive、new-player-init-and-revive | ✅ `f368901`（当前气血 / 法力落 player_state.vitals、加载复活；实时 buff / 属性重算位 / 66 combat_state_flags 基线线上不可达，两版都未生效、登记不移植；结算复活与 0 血拒绝开战随 6.3——6.3 已做） |
 | 2.8 | 宝宝系统；robot pet-smoke | pet-system-core | ✅ `6ff0e34`（写闸随 5.2 / 6.3，战斗接缝随 6.3——写闸（交出冻结 1005、战斗在途 26008）与战斗接缝都已随 5.2 / 6.3 接上；交易原语随聚宝斋资产托管） |
 | 2.9 | 通用资产通道（跨服务发放 / 扣除，幂等账本）、补缴债务（加币先抵扣） | asset-channel、asset-op-channel、asset-op-ledger-read、currency-debt-clawback | ✅ `eab1952`（scene 侧：账本 / 验签 / 扣发 / durable / 进程内入口、接管守卫；补缴欠款两版都休眠。跨进程传输与调用方 asset-channel、已落盘账本查询 asset-op-ledger-read 随 4.5 帮会经济） |
-| 2.10 | 移动广播 133 `ActorMoveS2C` + 同场景瞬移原语（2026-10-12 新增）：134 / 132 / 131 被接受之后、战斗或冻结中收到 131、挂机停推清速、离场 / 被接管 / 停服前清速时，向互相可见且有会话的玩家（不含自己）发 133（entity = 场景实体号，位置取 `MoveGuard` 截断后的权威值）；服务器主动瞬移：给本人发 130 TeleportS2C（reason 5）、清速、`MoveGuard` 锚点重置到落点、显式重建可见性（旧观察者 64、新观察者创建、本人旧视野销毁），落位等待 3 s / 3 m 丢弃瞬移前的过期上报；改 `docs/reference/mmorpg-client-contract-movement.md` §10；重估 `ViewCrowdBenchmarkTest` 口径；robot movement 加 133 断言 | d10-move-broadcast-133、d10-teleport-within-scene | 待做。**建议下一批**：mmorpg 核实客户端只注册了 133 / 135 的处理器、没有 66 的 proto 类与处理器，Java 现在只靠 66 广播移动，远端玩家在真客户端上不动——这是 Java 现存的客户端可见缺口；不依赖组队、不依赖 mmorpg 生成物；4.3b 依赖它。基线 `9199d217d` 未编译，移植以 mmorpg 最终可工作的版本为准 |
+| 2.10 | 移动广播 133 `ActorMoveS2C` + 同场景瞬移原语（2026-10-12 新增）：Java 现在经 66 告诉旁人「在动 / 停了」的地方都改发 133，发给互相可见且有会话的玩家（不含自己），entity = 场景实体号——`SceneWorld#applyMove`（134 / 132 / 131 被接受之后，位置取 `MoveGuard` 截断后的权威值）、`integrate` 挂机停推清速、`haltForBattle`（战斗在途收到 131、备战停步 D5、迟到确认 / 进场恢复挂冻结）、`haltForFreeze`（5.2 跨节点换图 / 5.4 跨 zone 传送冻结时停步）；`ScenePlayer#markFullStateForNewWatcher`（新观察者补发朝向 / 速度）改走 133 或明确交给下一条 133；离场 / 被接管 / 停服前与同节点换场景时的 `stopMotion` 不需要 133（实体随即销毁、旁人收到 51，停服时全员一起下线）；服务器主动瞬移：给本人发 130 TeleportS2C（reason 5）、清速、`MoveGuard` 锚点重置到落点、显式重建可见性（旧观察者 64、新观察者创建、本人旧视野销毁），落位等待 3 s / 3 m 丢弃瞬移前的过期上报；改 `docs/reference/mmorpg-client-contract-movement.md` 的 §0 / §2 / §6 / §10（并注明客户端没有 66 的处理器）；重估 `ViewCrowdBenchmarkTest` 口径；robot movement 加 133 断言 | d10-move-broadcast-133、d10-teleport-within-scene | 待做。**建议下一批**：mmorpg 核实客户端只注册了 133 / 135 的处理器、没有 66 的 proto 类与处理器，Java 现在只靠 66 广播移动，远端玩家在真客户端上不动——这是 Java 现存的客户端可见缺口；不依赖组队、不依赖 mmorpg 生成物；4.3b 依赖它。基线 `9199d217d` 未编译，移植以 mmorpg 最终可工作的版本为准 |
 | 2.11 | 装备属性系统 scene 侧（2026-10-12 新增）：物品实例 equip 段（`BagItemState` 加段、保留 presence；存档 / 5.2 交接 / 5.4 / 7.2 快照都靠它）、新铸时掷蓝 / 粉 / 黄属性（掉落、任务、资产通道、GM 全部入口；还原与搬运不重掷）、带 equip 不堆叠、搬运原语；穿 249 / 脱 246 / GM 发物 247（拒绝码用 equip_error 段：战斗中 28007、冻结中 28008——在途闸与交出冻结闸要显式声明）；191 展示字段与 `equip_slots`；属性面板 `bonus` / `combat` 与重算（装备加成现算不落库、穿脱按比例保持气血 / 法力、速度镜像含装备）；robot `equip`（对照基线 equip-smoke 9 步） | d10-equip-instance-bag、d10-equip-rpcs、d10-equip-attribute-panel | 待做；**前置 0.4**（基线导表与全量 proto-gen），与 6.7 同批或紧随。基线 `10cca6b66` 整批未编译、未导表、没有任何测试证据；不要照搬基线残余（equipment-attributes.md §8：重登窗口内可穿脱回血、入包整份信任 equip 段、Item 行被删的装备卡在槽里） |
 
 ## 阶段 3：登录与网关补全
@@ -114,13 +114,16 @@
 
 ## 建议顺序（2026-10-12，增量盘点之后）
 
-在途的 5.4（双 zone 切片、robot 端到端与跨实现验收）照旧收尾；新开的批次建议按下面的顺序，理由都来自 [inventory/delta-20261010.md](inventory/delta-20261010.md)：
+在途的 5.4（双 zone 切片、robot 端到端与跨实现验收）照旧收尾；新开的批次建议按下面的顺序，理由都来自 [inventory/delta-20261010.md](inventory/delta-20261010.md)。
+前四条按「现在的客户端上已经看得见的问题」排（客户端以 mmorpg-client origin/main 为准，本机未推送的不算）：
 
 1. **2.10 移动广播 133 + 同场景瞬移**——修的是 Java 现存的客户端可见缺口（客户端没有 66 的处理器，远端玩家不动），只动 game-scene，不依赖 mmorpg 生成物，4.3b 依赖它。
-2. **6.6 PVE 人数档**——基线 match 侧是这批增量里运行证据最强的（Go 7 个包实跑），客户端已带人数档面板，Java 不跟会静默排错队列；一并跟改 6.1 / 6.2 / 6.4。
-3. **4.6a → 4.6b 帮会活动**——契约阻塞已解除，客户端已调用活动号、正把 Java 的 1006 显示在活动页上；周边（6.3 活动结果通道、6.4 StartActivityBattle）都已就位。
-4. **5.6 玩家主动切线 + 3028**——客户端线路面板已在客户端 main，基线 Go 侧有定向测试；可在 5.5 之前做。
-5. **4.3b 组队跟随 v1.1**——紧随 2.10。
+2. **4.6a → 4.6b 帮会活动**——客户端活动页已推送（origin/main `de41479f`），现在就在调活动号，Java 回的 in-band 1006 直接显示在活动页上；契约阻塞已解除，周边（6.3 活动结果通道、6.4 StartActivityBattle）都已就位。
+3. **5.6 玩家主动切线 + 3028**——客户端线路面板已推送（origin/main `b6e30f36`，43 已带 `with_channel_directory`），Java 不读这个开关、31 不附目录，面板拿不到线路、切不了线；
+   3028 客户端与 1003 同样当「结果未知」，改码本身看不出差别。基线 Go 侧有定向测试；可在 5.5 之前做。
+4. **6.6 PVE 人数档**——现在没有客户端可见影响：客户端 origin/main 建 157 时不设 `team_size`（恒 0 = 取上限，`BattleClient.cs` 281 行），Java 现在的排队与基线一致；
+   人数档面板只在客户端本机 main `537c2bad`（未推送），面板发出之后 Java 不跟才会把选 2–4 人档的玩家静默排进满员队列，所以要赶在面板发出之前做。基线 match 侧是这批增量里运行证据最强的（Go 7 个包实跑）；一并跟改 6.1 / 6.2 / 6.4。
+5. **4.3b 组队跟随 v1.1**——紧随 2.10（客户端走路跟随也还在客户端本机 main，未推送）。
 6. **7.2d 回档闸加固**——小批、独立，修两处 Java 现存的同类缺陷，随时可以插进来（建议在 2.10 之后尽早做）。
 7. **4.1c 好友推荐**——等 mmorpg 真库证据或以 Java 真库用例定稿。
 8. **0.4 → 2.11 + 6.7 装备属性**——等 mmorpg 完成导表、全量 proto-gen 与编译验证（目前整批没有任何运行证据，基线 C++ 主干就卡在它的生成物上）。

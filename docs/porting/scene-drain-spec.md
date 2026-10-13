@@ -29,7 +29,8 @@
 >    此前典型约 15 s）。B8 / B9 补一句：Go 的 `CppNodeDrainBudget` 仍按 15 s 镜像、`SceneReentryBarrier` 仍 20 s，而 C++ 实际退出可到约 30 s。另外「确认阶段只读 Redis、只推 gate」不完全成立：疏散中被同会话进场留下的票据，
 >    在停机阶段还会做一次 owner_epoch 条件写的改派标记。
 > 4. **基线测试**（改 §2.9 末条、§11.1）：`BeginSceneDrain` 现在有直接驱动它的 ECS 用例（第 14 节里 15 个），`BeginEmergencyRelocateAll` 仍然没有；全部没跑过。
-> 5. **3028**（`d970a050f`，不是 CPP-3）：玩家自己发的 63 在选目标 / 建场景调用失败、一个 SM 都没有时改推 23 `{3028}`（原 1003）。改派走的不是这条路（改派失败一律 3023），但 §5.11 定码时要一并对照（见下）。
+> 5. **3028**（`d970a050f`，不是 CPP-3）：玩家自己发的 63，EnterScene 传输失败与镜像 CreateScene 传输失败改推 23 `{3028}`（原 23 `{1003}`）；一个 SM 都没注册时改为在 63 应答里回 3028
+>    （原在应答里回 1003，不是推 23）；镜像分支没有 SM 仍在应答里回 3005，没有变。改派走的不是这条路（改派失败一律 3023），但 §5.11 定码时要一并对照（见下）。
 > 6. **切线预检**（`2a203a3a4`）：`enterscenelogic.go` 第 2b 段只对 `client_channel_pick && scene_id ≠ 0` 的请求做人数上限 / 冷却预检，改派请求不置位，不受约束。
 >
 > **行号漂移**（以函数名为准；`e8e6ed1c2` → `73b852f3`）：`player_lifecycle.cpp` `EnqueueRelocateTicket` 2149 → 2924、`BeginEmergencyRelocateAll` 2186 → 2961、`BeginSceneDrain` 2207 → 2982、`IsEmergencyRelocateDrained` 2233 → 3008、
