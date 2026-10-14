@@ -565,25 +565,25 @@ class TurnBattleTraceTest {
         data.addMonster(7010).setHealth(100000).setStrength(1).setSpeed(12);
         data.setDungeonMonsters(DUNGEON_CONFIG, 7010);
         CreateBattleRequest.Builder request = request(battleId, PVE_SOLO, 7);
-        addPlayer(request, PLAYER_A, 0, 1000, 1000, 0, 10, 0, 240);
+        addPlayer(request, PLAYER_A, 0, 10000, 10000, 0, 10, 0, 240);
         return TestBattles.start(request, data);
     }
 
-    // G-STALE（MaxRoundsFallsBack 第一段，test.cpp:1379-1383）【派生】：30 回合，每回合 11 × 1560/1570 × 0.5 = 5.47 → 6，A 剩 820
+    // G-STALE（MaxRoundsFallsBack 第一段，test.cpp:1379-1383）【派生】：300 回合，每回合 11 × 1560/1570 × 0.5 = 5.47 → 6，A 剩 8200
     @Test
-    void 轨迹_打满30回合() {
+    void 轨迹_打满300回合() {
         TurnBattleEngine engine = tankEngine(9060);
         int rounds = 0;
-        while (engine.outcome() == BATTLE_OUTCOME_ONGOING && rounds < 60) {
+        while (engine.outcome() == BATTLE_OUTCOME_ONGOING && rounds <= BattleConstants.DEFAULT_MAX_ROUNDS) {
             engine.submitAction(PLAYER_A, action(BATTLE_ACTION_DEFEND));
             engine.resolveCurrentRound();
             rounds++;
         }
-        assertThat(rounds).isEqualTo(30);
+        assertThat(rounds).isEqualTo(300);
         assertThat(engine.outcome()).isEqualTo(BATTLE_OUTCOME_SIDE_B_WIN);
         BattleSettlementData settlement = engine.buildSettlement(PLAYER_A);
-        assertThat(settlement.getHealth()).isEqualTo(820);
-        assertThat(settlement.getTotalRounds()).isEqualTo(30);
+        assertThat(settlement.getHealth()).isEqualTo(8200);
+        assertThat(settlement.getTotalRounds()).isEqualTo(300);
     }
 
     // G-FALLBACK（MonsterRowWithoutStats，test.cpp:1096-1128）【派生】：A 剩 865（怪物出手 9 次，每次 15）

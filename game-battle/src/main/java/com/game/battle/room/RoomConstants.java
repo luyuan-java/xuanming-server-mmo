@@ -9,7 +9,7 @@ import com.game.battle.engine.BattleConstants;
 final class RoomConstants {
 
     /**
-     * match 没填（或填了已过去的）整场期限时的兜底：(回合上限 30 + 2 回合余量) × 6000 = 192000 ms（基线 {@code room.cpp:559-567}）。
+     * match 没填（或填了已过去的）整场期限时的兜底：(回合上限 300 + 2 回合余量) × 6000 = 1812000 ms（基线 {@code room.cpp:559-567}）。
      * 房间是纯内存对象，没有期限的房间在玩家全部掉线后会靠回合超时空转到打满，兜底保证任何房间的生存期有界。
      */
     static final long DEFAULT_DEADLINE_MS = (BattleConstants.DEFAULT_MAX_ROUNDS + 2L) * BattleConstants.ROUND_DURATION_MS;

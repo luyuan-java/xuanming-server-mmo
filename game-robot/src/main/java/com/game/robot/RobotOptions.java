@@ -539,7 +539,7 @@ public record RobotOptions(
                 + "148 不回包（错票不动、原票取消）→ PVE_SOLO 受理后大厅先 177 后 143、expire_at_ms ≈ 发起时刻 + 300 s → 179 补签与 177 逐字节相同、"
                 + "非成员与不存在的局 1005 → 凭补签的票直连、战斗中再排 16000、挂机打到 150 后 FIN → 立即再排（16000 按过渡态重试、不得 16001）"
                 + "打第二局、旧局补签 1005 → 1V1（A 先受理是锚点：A 在 0 队、B 在 1 队）打完后经 --match-admin-url 查评分（games 各 + 1；"
-                + "胜负且不满 30 回合 |Δ| = 16，平局或打满 Δ = 0）→ 切磋 16007 / 156 / 16011 / 16013 / 拒绝只推发起者 / 16012 / "
+                + "胜负且不满 300 回合 |Δ| = 16，平局或打满 Δ = 0）→ 切磋 16007 / 156 / 16011 / 16013 / 拒绝只推发起者 / 16012 / "
                 + "再发起之前先用 153 等 A 上一局 1V1 的 ready 票据过期（它在时 163 回 16014；至多等到收到 177 后 62 s）/ 接受后 154 与"
                 + "同一局的 177、143 / 16009 / 切磋局里发一次 163(0) 回 16015 / 16008 → "
                 + "game-match 的匹配与观战指标；结尾写 BATTLE_SMOKE_OK battle_id=… a_turns=… a_direct_turns=… pvp_battle_id=… "
@@ -550,7 +550,7 @@ public record RobotOptions(
                 + "A 经 --zone、B 与 C 经 --visit-zone 登录，两个区的 gate 端点不同 → A 发 157 {1V1, config = 1} 受理之后 B 再发（A 是锚点）→ "
                 + "两侧先 177 后 143、同一个 battle_id、两张票的地址与签发节点实例相同、A 在 0 队 B 在 1 队 → 各自直连，--visit-zone 的 C 发 163 "
                 + "观战（177 role = 2 → 161）→ 都开自动打到 150：两侧同一个终局、直连回合数 ≥ 1、大厅上没有 139，C 收 158 与 166 FINISHED → "
-                + "两侧各等大厅 150（结算回到了各自区的 scene）→ 经 --match-admin-url 查评分（games 各 + 1；胜负且不满 30 回合 |Δ| = 16）→ "
+                + "两侧各等大厅 150（结算回到了各自区的 scene）→ 经 --match-admin-url 查评分（games 各 + 1；胜负且不满 300 回合 |Δ| = 16）→ "
                 + "立即再排打第二局（16000 重试、不得 16001）→ 指标 gather_zone_mix{mix=\"cross\"} 至少 + 2；1 号配置的 1V1 队列全服共享，"
                 + "收尾给 A、B 各发一条 148；结尾写 CROSS_ZONE_MATCH_OK battle_id=… zone_a=… zone_b=… a_turns=… b_turns=… a_direct_turns=… "
                 + "b_direct_turns=… observer_zone=… c_spectate_turns=… second_battle_id=… 或 CROSS_ZONE_MATCH_FAIL step=… reason=…\n");

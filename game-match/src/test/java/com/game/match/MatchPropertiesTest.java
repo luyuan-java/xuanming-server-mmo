@@ -45,7 +45,7 @@ class MatchPropertiesTest {
         assertThat(p.challengeTtl()).isEqualTo(Duration.ofSeconds(60));
         assertThat(p.rating().enabled()).isTrue();
         assertThat(p.rating().tolerance()).isEqualTo(new MatchProperties.Tolerance(100, 5, 100, 1000, 90));
-        assertThat(p.rating().drawRoundCap()).isEqualTo(30);
+        assertThat(p.rating().drawRoundCap()).isEqualTo(300);
         assertThat(p.rating().drawRoundCapByConfigId()).isEmpty();
         assertThat(p.rating().consumerGroup()).as("没配：由装配处取注入的 KafkaNames 给的 <ns>-match-rating（金样见 rating.MatchKafkaNamesGoldenTest）").isNull();
         assertThat(p.pveTeamSizeByConfigId()).containsExactly(Map.entry(1, 5));
@@ -263,13 +263,13 @@ class MatchPropertiesTest {
     }
 
     @Test
-    void 回合打满阈值_缺省30_0是关闭_覆盖值为0视为没配() {
+    void 回合打满阈值_缺省300_0是关闭_覆盖值为0视为没配() {
         MatchProperties.Rating defaults = new MatchProperties.Rating(null, null, null, null, null);
         MatchProperties.Rating overridden = new MatchProperties.Rating(null, null, 30, Map.of(1, 300, 2, 0), null);
         MatchProperties.Rating off = new MatchProperties.Rating(null, null, 0, Map.of(3, 50), null);
 
-        assertThat(defaults.drawRoundCapFor(0)).isEqualTo(30);
-        assertThat(defaults.drawRoundCapFor(1)).as("缺省不覆盖：对所有副本都是 30（照搬基线）").isEqualTo(30);
+        assertThat(defaults.drawRoundCapFor(0)).isEqualTo(300);
+        assertThat(defaults.drawRoundCapFor(1)).as("缺省不覆盖：对所有副本都是 300（照搬基线）").isEqualTo(300);
         assertThat(overridden.drawRoundCapFor(1)).isEqualTo(300);
         assertThat(overridden.drawRoundCapFor(2)).as("覆盖值 0 = 没配，回到全局值").isEqualTo(30);
         assertThat(overridden.drawRoundCapFor(7)).isEqualTo(30);

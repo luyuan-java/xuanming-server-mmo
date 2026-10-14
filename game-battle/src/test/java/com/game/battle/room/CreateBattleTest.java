@@ -189,12 +189,12 @@ class CreateBattleTest {
     }
 
     @Test
-    void 期限为0或已过去时取now加192秒_票据与确认同值() throws Exception {
+    void 期限为0或已过去时取now加1812秒_票据与确认同值() throws Exception {
         h.create(h.pve(1012, A).setDeadlineMs(0));
         h.create(h.pve(1013, B).setDeadlineMs(h.now()));
         h.create(h.pve(1014, C).setDeadlineMs(h.now() + 50_000));
 
-        long fallback = h.now() + 192_000;
+        long fallback = h.now() + 1_812_000;
         assertThat(expireOf(A)).isEqualTo(fallback);
         assertThat(expireOf(B)).as("等于 now 也算已过去").isEqualTo(fallback);
         assertThat(expireOf(C)).isEqualTo(h.now() + 50_000);

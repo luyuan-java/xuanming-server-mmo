@@ -463,10 +463,10 @@ class TurnBattleRoundTest {
 
     private static Stalemate playStalemate(MemoryBattleData data, long battleId) {
         CreateBattleRequest.Builder request = request(battleId, PVE_SOLO, 7);
-        addPlayer(request, PLAYER_A, 0, 1000, 1000, 0, 10, 0, 240);
+        addPlayer(request, PLAYER_A, 0, 10000, 10000, 0, 10, 0, 240);
         TurnBattleEngine engine = TestBattles.start(request, data);
         int rounds = 0;
-        while (engine.outcome() == BATTLE_OUTCOME_ONGOING && rounds < 60) {
+        while (engine.outcome() == BATTLE_OUTCOME_ONGOING && rounds <= BattleConstants.DEFAULT_MAX_ROUNDS) {
             engine.submitAction(PLAYER_A, action(BATTLE_ACTION_DEFEND));
             engine.resolveCurrentRound();
             rounds++;
@@ -476,9 +476,9 @@ class TurnBattleRoundTest {
 
     // 基线 MaxRoundsFallsBackToDefaultAndAttackerLosesOnTimeout（test.cpp:1352-1398）【C++ 断言】
     @Test
-    void 回合上限缺行或为0时回退30回合_打满进攻方判负() {
+    void 回合上限缺行或为0时回退300回合_打满进攻方判负() {
         int tankMonster = 7010;
-        // 副本缺行 → 默认 30 回合
+        // 副本缺行 → 默认 300 回合
         Stalemate missingRow = playStalemate(tankData(tankMonster), 9060);
         assertThat(missingRow.rounds()).isEqualTo(BattleConstants.DEFAULT_MAX_ROUNDS);
         assertThat(missingRow.outcome()).isEqualTo(BATTLE_OUTCOME_SIDE_B_WIN);

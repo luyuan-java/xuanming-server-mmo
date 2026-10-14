@@ -67,8 +67,8 @@ final class BattleSmokeChecks {
     static final long CHALLENGE_TTL_MS = 60_000;
     /** 核对服务端时刻的容差（robot 与切片同机，时钟一致；留给 gather 耗时与调度抖动，§15.5 第 4 步）。 */
     static final long CLOCK_SLACK_MS = 5_000;
-    /** 回合打满按平局的阈值（§5.5：对所有 config 恒为 30）。 */
-    static final int RATING_DRAW_ROUND_CAP = 30;
+    /** 回合打满按平局的阈值（§5.5：缺省对所有 config 恒为 300）。 */
+    static final int RATING_DRAW_ROUND_CAP = 300;
     /** K = 32：两边赛前同分时胜负局的 |Δ| = 16.00（centi）。 */
     static final long EVEN_DELTA_CENTI = 1_600;
     /** K 本身（centi）：赛前不同分时 |Δ| 的上界。 */

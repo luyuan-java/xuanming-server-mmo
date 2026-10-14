@@ -32,7 +32,7 @@ public final class FakeBattleData implements BattleData {
     public static final int SKILL_NUKE = 103;
     public static final int ITEM_POTION = 301;
     public static final int COOLDOWN_GROUP = 9;
-    /** 没有行的副本：兜底怪、回合上限 30。 */
+    /** 没有行的副本：兜底怪、回合上限 300。 */
     public static final int DUNGEON_NONE = 7;
     /** 第 0 只怪的 actor_id。 */
     public static final long MONSTER_ID = BattleConstants.MONSTER_ACTOR_ID_BASE;

@@ -498,7 +498,7 @@ class TurnBattleInvariantTest {
         Run out = new Run();
         int resolved = 0;
         for (int round = 1; engine.outcome() == eBattleOutcome.BATTLE_OUTCOME_ONGOING; round++) {
-            assertThat(round).as("回合上限保证收场").isLessThanOrEqualTo(40);
+            assertThat(round).as("回合上限保证收场").isLessThanOrEqualTo(scenario.maxRounds());
             BattleStateS2C before = engine.buildStateSnapshot();
             if (checker != null) {
                 checker.beginRound(before);

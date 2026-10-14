@@ -37,7 +37,7 @@ class RatingConfigurationTest {
 
     private static MatchProperties props(boolean ratingEnabled) {
         return new MatchProperties(null, null, null, null, null, null,
-                new MatchProperties.Rating(ratingEnabled, null, null, Map.of(7, 300), null), null, null, null, null,
+                new MatchProperties.Rating(ratingEnabled, null, null, Map.of(7, 600), null), null, null, null, null,
                 new MatchProperties.Kafka(DEAD_KAFKA, 9644, null, Duration.ofSeconds(1)), null);
     }
 
@@ -89,12 +89,12 @@ class RatingConfigurationTest {
             RatingStore store = context.getBean(RatingStore.class);
 
             RatingStore.Result capped = store.apply(
-                    EloRulesTest.event(MatchModes.ONE_V_ONE, B_WIN, List.of(1L), List.of(2L)).setBattleId(1).setTotalRounds(30).build());
+                    EloRulesTest.event(MatchModes.ONE_V_ONE, B_WIN, List.of(1L), List.of(2L)).setBattleId(1).setTotalRounds(300).build());
             RatingStore.Result overridden = store.apply(EloRulesTest.event(MatchModes.ONE_V_ONE, B_WIN, List.of(3L), List.of(4L)).setBattleId(2)
-                    .setTotalRounds(30).setBattleConfigId(7).build());
+                    .setTotalRounds(300).setBattleConfigId(7).build());
 
-            assertThat(capped.roundCapDraw()).as("缺省阈值 30").isTrue();
-            assertThat(overridden.roundCapDraw()).as("副本 7 覆盖成 300").isFalse();
+            assertThat(capped.roundCapDraw()).as("缺省阈值 300").isTrue();
+            assertThat(overridden.roundCapDraw()).as("副本 7 覆盖成 600：300 回合还没打满").isFalse();
         });
     }
 

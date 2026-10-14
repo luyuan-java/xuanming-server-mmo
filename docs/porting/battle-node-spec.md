@@ -192,7 +192,7 @@
 
 ### 2.4 期限与票据寿命
 
-- `room.deadlineMs` = 请求里的 `deadline_ms`；但当 `deadline_ms ≤ now` 时（不只是「没填」），取 `now + (30 + 2) × 6000 = now + 192000`（`room.cpp:559-567`）。
+- `room.deadlineMs` = 请求里的 `deadline_ms`；但当 `deadline_ms ≤ now` 时（不只是「没填」），取 `now + (300 + 2) × 6000 = now + 1812000`（`room.cpp:559-567`；2026-10-13 随缺省回合数同步调整）。
 - 生产里 match 填 `gather 起点 + BattleMaxDurationSeconds × 1000`，缺省 300 s（`gather.go:219`；`config.go:55-58`；`go/match/etc/match_service.yaml:57`）。
   - 这个值在逐人 PrepareBattle **之前**就算好了，所以房间实际剩余时长 = 300 s − gather 已耗时间。
 - **票据寿命 = 房间寿命**：同一张票在期限内可以反复重连；房间销毁后，挂接一步（§3.4 第 5 步）必然失败（`pb_player:131-134`）。
@@ -441,7 +441,7 @@
 | 3 | 指纹不一致，且模式为 enforce | 1006 kFeatureUnavailable，`parameters[0] = "battle table fingerprint mismatch: node=<本节点指纹> request=<request.table_fingerprint>"` | 无 | `:523-534` |
 | 4 | 引擎初始化失败 | 1002 kInvalidTableData | 无（房间是局部对象，随返回析构） | `:536-548` |
 | 5 | — | 抄 `routingByPlayer` | 纯计算 | `:550-553` |
-| 6 | `deadline_ms ≤ now` | `deadlineMs = now + 192000`，必须在签票之前落到房间上 | 纯计算 | `:555-567` |
+| 6 | `deadline_ms ≤ now` | `deadlineMs = now + 1812000`，必须在签票之前落到房间上 | 纯计算 | `:555-567` |
 | 7 | 按 player_id 升序为每个参战者预签；任一人签不出 | 1003 kServiceUnavailable | **无**（「没有建房、没有推送、没有确认事件」） | `:569-585` |
 | 8 | 插表 | `onCreated` 恰好一次。返回 nullptr（不可达的程序缺陷）时按幂等命中处理：回 OK、不填错误 | — | `:587-595` |
 
@@ -549,10 +549,10 @@ roundTimer.RunAfter(windowMs) → ResolveRound(battleId)
 - **照常发结算与结果事件**（DRAW）。
 
 **与回合上限的关系**：
-- 引擎回合上限 = `RoundsFromMilliseconds(Dungeon.time_limit × 1000)`，缺省 30（engine-spec §1）。
+- 引擎回合上限 = `RoundsFromMilliseconds(Dungeon.time_limit × 1000)`，缺省 300（engine-spec §1）。
 - 现行 Dungeon 表的 `time_limit` 只有 1800 / 3600 两种，对应 300 / 600 回合。
 - 300 s 期限内最多打 50 回合（手动）或约 150 回合（全自动），远够不到上限。所以对现有 PVE 副本，「打满回合判 B 胜」不可达，整场期限就是实际的上限。
-- 没有 Dungeon 行时（例如 PVP 填 0，缺省 30 回合），回合上限可能先于期限触发。
+- 没有 Dungeon 行时（例如 PVP 填 0，缺省 300 回合），正常按 2 / 6 s 回合窗口推进时同样会先到 match 的 300 s 期限；全员提前提交行动可加快推进，仍可能先触发回合上限。
 
 ### 4.6 正常收尾 `FinishBattle(room, outcome, spectateReason)`（`room.cpp:1130-1221`）
 
@@ -1339,7 +1339,7 @@ message BattleNodeInfo {
 | 常量 | 值 | 来源 / 联动 |
 |---|---|---|
 | 回合窗口 | 6000 ms；装填时全员就绪为 2000 ms | `BattleConstants.ROUND_DURATION_MS` / `AUTO_ROUND_INTERVAL_MS`（`BattleConstants.java:18`、`:34`） |
-| 缺省整场期限 | (30 + 2) × 6000 = 192000 ms | `BattleConstants.DEFAULT_MAX_ROUNDS`（`:20`）；`room.cpp:563-564` |
+| 缺省整场期限 | (300 + 2) × 6000 = 1812000 ms | `BattleConstants.DEFAULT_MAX_ROUNDS`（`:20`）；`room.cpp:563-564` |
 | 确认补发 | 每 10 s 一次，共 17 次（窗口 180 s） | 必须 ≥ match 最长 matched TTL（96 s）+ scene 锁余量（60 s）；配单测（§10.4） |
 | 每房观众上限 | 20 | `room.cpp:64` |
 | 单条 `ClientRequest` 上限 | 1024 B | `edge.h:53` |
@@ -1354,7 +1354,7 @@ message BattleNodeInfo {
 | 名称 | 值 | 出处 | 作用 / 归属 |
 |---|---|---|---|
 | kRoundDurationMs / kAutoRoundIntervalMs | 6000 / 2000 ms | `consts.h:15`、`:35` | 回合窗口 |
-| kDefaultMaxRounds | 30 | `consts.h:18` | 引擎缺省回合上限；节点期限兜底 |
+| kDefaultMaxRounds | 300 | `consts.h:18` | 引擎缺省回合上限；节点期限兜底（2026-10-13 两版同步调整） |
 | kMaxBattleTeamSize | 5 | `consts.h:30` | 每房 ≤ 10 名参战者 |
 | BattleMaxDurationSeconds | 300 s | `config.go:55-58`；`match_service.yaml:57` | match 填的期限 |
 | kConfirmResendWindowMs / IntervalSec | 180000 ms / 10 s | `room.cpp:267-268` | 确认补发 |
@@ -1626,7 +1626,7 @@ message BattleNodeInfo {
 
 | 测试类 | 用例 |
 |---|---|
-| `CreateBattleTest` | 幂等：第二次内容不同也回 OK，`battle_id` 回填，**零新出站**、没有新计时器、hooks 不触发。`battle_id = 0` / 没有玩家 → 1005。缺 gate 或 scene 实例 → 1005，且排在指纹之前（同时指纹不符也回 1005）。enforce 指纹不符 → 1006。引擎 `Rejected`（队伍超编、只有一边）→ 1002。签票失败（注入会抛异常的签名器）→ 1003，表为空、`onCreated` 未触发、零出站、零计时器。`deadline_ms` 为 0 或已过去 → 房间期限 = now + 192000，票据 `expire_at_ms` 与确认 `deadline_ms` 都等于它；`deadline_ms > now` 时照用原值。成功：出站序列严格为 `[177(p1), 143(p1), confirm(p1), 177(p2), …]`（无符号升序）；177 与 143 进同一次 `LobbyAnnouncer` 调用；143 `round_index = 1`、`action_deadline_ms = now + 6000`、`self_items` 只有本人、他人冷却为空；177 的 host / port 是通告值，role = 1；`onCreated` 恰好一次 |
+| `CreateBattleTest` | 幂等：第二次内容不同也回 OK，`battle_id` 回填，**零新出站**、没有新计时器、hooks 不触发。`battle_id = 0` / 没有玩家 → 1005。缺 gate 或 scene 实例 → 1005，且排在指纹之前（同时指纹不符也回 1005）。enforce 指纹不符 → 1006。引擎 `Rejected`（队伍超编、只有一边）→ 1002。签票失败（注入会抛异常的签名器）→ 1003，表为空、`onCreated` 未触发、零出站、零计时器。`deadline_ms` 为 0 或已过去 → 房间期限 = now + 1812000，票据 `expire_at_ms` 与确认 `deadline_ms` 都等于它；`deadline_ms > now` 时照用原值。成功：出站序列严格为 `[177(p1), 143(p1), confirm(p1), 177(p2), …]`（无符号升序）；177 与 143 进同一次 `LobbyAnnouncer` 调用；143 `round_index = 1`、`action_deadline_ms = now + 6000`、`self_items` 只有本人、他人冷却为空；177 的 host / port 是通告值，role = 1；`onCreated` 恰好一次 |
 | `RoundTimerTest` | 6 s 到期结算：每个参战者一条 139（裁剪过）、观众一条 158；新截止 = 结算时刻 + 6000。全员提交 → 当场结算，**旧窗口原到期时刻不再结算一次**（回合号只加 1）。开挂机造成翻转 → 当场结算，下一窗口 2000 ms。全自动时重复开挂机不结算；关挂机不结算，当前 2 s 窗口不变、下一窗口 6 s。全自动房间里挂机玩家提交合法行动 → 当场结算（钉住 B2）。只剩宝宝（空真）→ 2 s 节奏。结束回合：139 `action_deadline_ms = 0`，`action_order = lastActionOrder()`；随后 150 与结算端口逐人交替（R6），观众 166 FINISHED，关闭，结果事件；`onRemoved` 恰好一次；之后推进时间，没有任何回调执行 |
 | `BattleDeadlineTest` | 期限到：没有 139；150 的 outcome 与 `settlement.outcome` 都是 DRAW，经验、金币为 0，`items_consumed` 保留；结算端口收到 DRAW；观众 166 `{ABORTED, DRAW}`；结果事件 DRAW、`winner_team_index = 0`；房间删除。期限只剩 1 ms → 立即收尾。期限与回合窗口同时到期：先执行者生效，另一个查不到房间、什么也不做 |
 | `ConfirmResendTest` | 每人 18 条：t = 0 首发，t = 10 … 170 s 补 17 次，t = 180 s 停表；t = 35 s 结束后不再补发；每条带房间期限 |

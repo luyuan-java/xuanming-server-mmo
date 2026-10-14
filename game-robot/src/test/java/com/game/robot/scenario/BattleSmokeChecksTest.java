@@ -21,7 +21,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * 匹配各场景的纯判据（match-spec §15.5）：评分 Δ（胜负且不满 30 回合 |Δ| = 16，平局或打满 0）、157 的受理 / 拒绝形状、tip 文案逐字节、
+ * 匹配各场景的纯判据（match-spec §15.5）：评分 Δ（胜负且不满 300 回合 |Δ| = 16，平局或打满 0）、157 的受理 / 拒绝形状、tip 文案逐字节、
  * 服务端时刻的窗口、分队、切磋推送。每条都给出「对的过、错的不过」两面。
  */
 class BattleSmokeChecksTest {
@@ -39,15 +39,15 @@ class BattleSmokeChecksTest {
     // ---------------------------------------------------------------- 评分
 
     @Test
-    void 评分增量_胜负且不满30回合是正负16_平局或打满是0() {
+    void 评分增量_胜负且不满300回合是正负16_平局或打满是0() {
         assertThat(BattleSmokeChecks.evenDeltaCenti(A_WIN, 1)).isEqualTo(1_600);
-        assertThat(BattleSmokeChecks.evenDeltaCenti(A_WIN, 29)).isEqualTo(1_600);
-        assertThat(BattleSmokeChecks.evenDeltaCenti(B_WIN, 29)).isEqualTo(-1_600);
-        assertThat(BattleSmokeChecks.evenDeltaCenti(A_WIN, 30)).as("打满 30 回合按平局").isZero();
-        assertThat(BattleSmokeChecks.evenDeltaCenti(B_WIN, 30)).as("引擎打满一律判 B 胜，评分按平局").isZero();
-        assertThat(BattleSmokeChecks.evenDeltaCenti(B_WIN, 300)).isZero();
+        assertThat(BattleSmokeChecks.evenDeltaCenti(A_WIN, 299)).isEqualTo(1_600);
+        assertThat(BattleSmokeChecks.evenDeltaCenti(B_WIN, 299)).isEqualTo(-1_600);
+        assertThat(BattleSmokeChecks.evenDeltaCenti(A_WIN, 300)).as("打满 300 回合按平局").isZero();
+        assertThat(BattleSmokeChecks.evenDeltaCenti(B_WIN, 300)).as("引擎打满一律判 B 胜，评分按平局").isZero();
+        assertThat(BattleSmokeChecks.evenDeltaCenti(B_WIN, 301)).isZero();
         assertThat(BattleSmokeChecks.evenDeltaCenti(DRAW, 1)).isZero();
-        assertThat(BattleSmokeChecks.RATING_DRAW_ROUND_CAP).isEqualTo(30);
+        assertThat(BattleSmokeChecks.RATING_DRAW_ROUND_CAP).isEqualTo(300);
         assertThatThrownBy(() -> BattleSmokeChecks.evenDeltaCenti(eBattleOutcome.BATTLE_OUTCOME_ONGOING, 1))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(BattleSmokeChecks.rated(A_WIN)).isTrue();
@@ -57,7 +57,7 @@ class BattleSmokeChecksTest {
     }
 
     @Test
-    void 两个新号1V1_A胜且不满30回合_A加16_B减16_games各加1() {
+    void 两个新号1V1_A胜且不满300回合_A加16_B减16_games各加1() {
         List<Rating> before = List.of(rating(1, 150_000, 0), rating(BIG, 150_000, 0));
         assertThat(BattleSmokeChecks.ratingProblem(before, List.of(rating(1, 151_600, 1), rating(BIG, 148_400, 1)), List.of(0, 1), A_WIN, 5))
                 .isNull();
@@ -66,18 +66,18 @@ class BattleSmokeChecksTest {
     }
 
     @Test
-    void 平局或打满30回合_两人的增量都是0_但games照样各加1() {
+    void 平局或打满300回合_两人的增量都是0_但games照样各加1() {
         List<Rating> before = List.of(rating(1, 150_000, 3), rating(2, 150_000, 7));
         List<Rating> unchanged = List.of(rating(1, 150_000, 4), rating(2, 150_000, 8));
         assertThat(BattleSmokeChecks.ratingProblem(before, unchanged, List.of(0, 1), DRAW, 5)).isNull();
-        assertThat(BattleSmokeChecks.ratingProblem(before, unchanged, List.of(0, 1), B_WIN, 30)).isNull();
-        assertThat(BattleSmokeChecks.ratingProblem(before, unchanged, List.of(0, 1), A_WIN, 31)).isNull();
+        assertThat(BattleSmokeChecks.ratingProblem(before, unchanged, List.of(0, 1), B_WIN, 300)).isNull();
+        assertThat(BattleSmokeChecks.ratingProblem(before, unchanged, List.of(0, 1), A_WIN, 301)).isNull();
 
         // 打满了却照胜负加了分
-        assertThat(BattleSmokeChecks.ratingProblem(before, List.of(rating(1, 148_400, 4), rating(2, 151_600, 8)), List.of(0, 1), B_WIN, 30))
+        assertThat(BattleSmokeChecks.ratingProblem(before, List.of(rating(1, 148_400, 4), rating(2, 151_600, 8)), List.of(0, 1), B_WIN, 300))
                 .contains("Δ = -16.00", "期望 0.00", "Δ = +16.00");
-        // 不满 30 回合的胜负局却没动分
-        assertThat(BattleSmokeChecks.ratingProblem(before, unchanged, List.of(0, 1), A_WIN, 29)).contains("期望 +16.00", "期望 -16.00");
+        // 不满 300 回合的胜负局却没动分
+        assertThat(BattleSmokeChecks.ratingProblem(before, unchanged, List.of(0, 1), A_WIN, 299)).contains("期望 +16.00", "期望 -16.00");
     }
 
     @Test

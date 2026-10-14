@@ -24,7 +24,7 @@ import com.game.table.SkillTable;
  *       buff 220：驱散(35)，dispel_tag {poison_tag}；buff 230：无限，immune_tag {poison_tag}；
  *       buff 240：按损血回血(42)，12 s，间隔 6 s，回血定值 25；</li>
  *   <li>SkillPermission 第 1 行（沉默）：[1000, 7005, 7005, 1000, 1000, 1000]；</li>
- *   <li>副本 7（{@link #DUNGEON_CONFIG}）在标准表里<strong>没有行</strong>：回合上限缺省 30，怪物是兜底怪（300 hp、str 5、armor 24、speed 60）。</li>
+ *   <li>副本 7（{@link #DUNGEON_CONFIG}）在标准表里<strong>没有行</strong>：回合上限缺省 300，怪物是兜底怪（300 hp、str 5、armor 24、speed 60）。</li>
  * </ul>
  */
 final class TestTables {

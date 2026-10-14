@@ -56,7 +56,7 @@ class ConfirmWindowConstraintTest {
     void 计次与基线窗口等价_首发加17次补发() {
         assertThat(RoomConstants.CONFIRM_RESENDS).isEqualTo(17);
         assertThat(RoomConstants.CONFIRM_RESEND_INTERVAL_MS).isEqualTo(10_000);
-        assertThat(RoomConstants.DEFAULT_DEADLINE_MS).as("(30 + 2) × 6000").isEqualTo(192_000);
+        assertThat(RoomConstants.DEFAULT_DEADLINE_MS).as("(300 + 2) × 6000").isEqualTo(1_812_000);
         assertThat(RoomConstants.MAX_OBSERVERS_PER_ROOM).isEqualTo(20);
     }
 }

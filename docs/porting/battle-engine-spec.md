@@ -143,7 +143,7 @@ Java 的做法：
 | 常量 | 值 | 行 | 用途 / 备注 |
 |---|---|---|---|
 | kRoundDurationMs | 6000 | :15 | 时间换回合 |
-| kDefaultMaxRounds | 30 | :18 | 回合上限的缺省值 |
+| kDefaultMaxRounds | 300 | :18 | 回合上限的缺省值（2026-10-13 两版同步调整） |
 | kMatchModePveSolo / PveTeam | 4 / 5 | :22-23 | 判定 PVE（`engine.cpp:1312-1315`）。其余值一律按非 PVE 处理，包括 0、1 = 5V5、3 = 1V1、6 = 切磋（`game-proto/src/main/proto/proto/match/match_service.proto:56-62`） |
 | kMaxBattleTeamSize | 5 | :30 | 每队玩家上限 |
 | kAutoRoundIntervalMs | 2000 | :35 | 只有节点用 |
@@ -229,7 +229,7 @@ Java 的做法：
 | `itemUseCounts`（:224） | PVP 下每人已用道具次数 | `HashMap<Long, Integer>`，只做查找 |
 | `rng`（:226） | `std::mt19937_64` | 自写 `MersenneTwister64`（§8） |
 | `roundIndex = 1`（:227） | 正在收集的回合号 | `int`（uint32） |
-| `maxRounds = 30`（:228） | 回合上限 | `int` |
+| `maxRounds = 300`（:228） | 回合上限 | `int` |
 | `outcome`（:229） | 胜负 | `eBattleOutcome` |
 | `nextBuffInstanceId = 1`（:230） | 局内 buff 实例号，自增 | `long`，无符号比较，允许回绕 |
 | `initialized`（:231） | 一次性闸 | 不需要：工厂只产出初始化成功的实例（D1） |
@@ -277,7 +277,7 @@ C++ 把每个单位的状态直接放在 `BattleActorState` proto 里（`engine.
 2. `battle_id == 0` 或没有玩家，返回 false（`:47-49`）。
 3. **队伍人数**：只统计 `team_index ≤ 1` 的快照，任一队超过 5 人就打 ERROR 并返回 false（`:53-67`）。宝宝不计入。
 4. 拷贝请求；`rng.seed(request.seed())`，种子是完整的 uint64；`roundIndex = 1`；`outcome = ONGOING`（`:69-72`）。
-5. **回合上限**：`FindDungeon(battle_config_id)` 查到行、且 `time_limit > 0` 时，`maxRounds = RoundsFromMilliseconds((uint64) time_limit × 1000)`；否则为 30（`:75-79`）。
+5. **回合上限**：`FindDungeon(battle_config_id)` 查到行、且 `time_limit > 0` 时，`maxRounds = RoundsFromMilliseconds((uint64) time_limit × 1000)`；否则为 300（`:75-79`；2026-10-13 两版同步调整）。
    - Java 写成 `Integer.toUnsignedLong(timeLimit) * 1000L`，不会溢出。
    - 真表：Dungeon 1 / 3 是 1800 s，即 300 回合；Dungeon 2 是 3600 s，即 600 回合。
 6. `InitPlayers`，失败返回 false（`:81-83`，§1.5）。
@@ -1718,7 +1718,7 @@ public final class TurnBattleEngine {
 | FledPlayerOnWinningTeam（1210-1259） | 21 / 5 | A：exp 40、gold 20，`defeated = [7006]`；B：`fled`，defeated 为空，exp 与 gold 为 0 |
 | DeadPlayerOnWinningTeam（1263-1312） | 33 / 5；B 1/1 | A：exp 60、gold 30，`defeated = [7007]`；B：`is_dead`，defeated 为空，exp 与 gold 为 0 |
 | EveryQualifyingMember（1316-1348） | 7 / 5 | A、B 各得 exp 80、gold 40 |
-| MaxRoundsFallsBack（1352-1398） | 7 / 4；副本缺行 / time_limit 0 / time_limit 12 | 分别打 30 / 30 / 2 回合，都判 SIDE_B_WIN |
+| MaxRoundsFallsBack（1352-1398） | 7 / 4；副本缺行 / time_limit 0 / time_limit 12 | 分别打 300 / 300 / 2 回合，都判 SIDE_B_WIN（2026-10-13 同步调整；玩家血量须足以打满） |
 | PresentationGroupId（1412-1446） | 1 / 3；A spd120，B spd240 | 出手序 [B, A]；事件依次为 ATTACK、DAMAGE、ATTACK、DAMAGE；同组同 id、跨组不同 id、id 不为 0；`hit_index` 全为 0；MISS 0 个；DAMAGE 2 个 |
 | FormationSlot（1449-1466） | 1 / 5 | A = 0，B = 1，怪 = 0 |
 | ManaCost（1470-1509） | 1 / 4；101 耗蓝 `{1: 30}`；A mana 100/100 | MANA {A→A, 101, value 30, mana_after 70}，与 SKILL 同组，只有 1 条；快照 mana 70；下一回合放 102 时 MANA = 0 |
@@ -1845,7 +1845,7 @@ public final class TurnBattleEngine {
 - **G-TIMEOUT**：Timeout，种子 1。A→M0 伤害 14，怪剩 286；M0→A 伤害 15，A 剩 985；2 抽。
 - **G-KILLALL**：KillingAllMonsters。DAMAGE 300（984.85 封顶）。
 - **G-PRES**：PresentationGroupId。双方各 9 伤（`30 × 1560/1570 × 0.3 = 8.942675159235668`），都剩 991；组号正好是 1 和 2。
-- **G-STALE**：MaxRoundsFallsBack 第一段。30 回合，A 剩 820（每回合 6 伤）。
+- **G-STALE**：MaxRoundsFallsBack 第一段。300 回合，Java 测试 A 初始 10000 血、剩 8200（每回合 6 伤；2026-10-13 调整）。
 - **G-FALLBACK**：MonsterRowWithoutStats。A 剩 865。
 - **G-MONTAB**：MonsterAttributesFromTable。正好 **7 回合**（每刀 29，6 × 29 = 174 < 200）。
 

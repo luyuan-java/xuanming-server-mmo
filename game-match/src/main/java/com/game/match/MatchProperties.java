@@ -162,10 +162,10 @@ public record MatchProperties(
      *
      * @param enabled                 是否消费对局结果更新评分（缺省 true）。关掉后评分停在已有值（新号 1500），凑单退化为纯等待序；评分镜像照常维护
      * @param tolerance               凑单的评分容差曲线（{@link Tolerance}）
-     * @param drawRoundCap            「回合打满按平局」的阈值（缺省 30；<b>0 = 关闭这条判定</b>，同基线 {@code cfg.go:139-149}）：
+     * @param drawRoundCap            「回合打满按平局」的阈值（缺省 300；<b>0 = 关闭这条判定</b>，同基线 {@code cfg.go:139-149}）：
      *                                {@code total_rounds ≥} 它的胜负结果按平局结算
      * @param drawRoundCapByConfigId  按副本覆盖阈值（缺省空；值为 0 视为没配，同基线 {@code cfg.go:177-189}）。照搬基线：缺省不配，
-     *                                阈值对所有副本都是 30，不按引擎的回合上限推导（§5.5）
+     *                                阈值对所有副本都是 300，不按引擎的回合上限推导（§5.5）
      * @param consumerGroup           结果 topic 的消费组（多个 match 实例同组分摊分区）。没配（null 或空白）记为 null，由装配处取注入的
      *                                {@code KafkaNames#matchRatingGroup()}（{@code <ns>-match-rating}，缺省命名空间下即 {@code game-match-rating}）；
      *                                配了只去首尾空白，不强制带 {@code <ns>-} 前缀（装配处打 WARN）
@@ -177,7 +177,7 @@ public record MatchProperties(
             enabled = enabled == null || enabled;
             tolerance = tolerance == null ? new Tolerance(null, null, null, null, null) : tolerance;
             if (drawRoundCap == null) {
-                drawRoundCap = 30;
+                drawRoundCap = 300;
             } else if (drawRoundCap < 0) {
                 throw new IllegalArgumentException("game.match.rating.draw-round-cap 不能为负（0 = 关闭）: " + drawRoundCap);
             }

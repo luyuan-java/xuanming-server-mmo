@@ -17,7 +17,7 @@ public final class BattleConstants {
     /** 一回合等效的挂钟毫秒数：rounds = max(1, ceil(ms / 6000))（{@code constants.h:15}）。 */
     public static final long ROUND_DURATION_MS = 6000;
     /** {@code DungeonTable.time_limit} 为 0（或查不到副本行）时的回合上限（{@code constants.h:18}）。 */
-    public static final int DEFAULT_MAX_ROUNDS = 30;
+    public static final int DEFAULT_MAX_ROUNDS = 300;
 
     // ---- 匹配模式（镜像 MatchMode；只有这两个值算 PVE，其余一律非 PVE） ----
 

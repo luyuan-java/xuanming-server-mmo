@@ -130,7 +130,7 @@ public final class TurnBattleEngine {
 
         TurnBattleEngine engine = new TurnBattleEngine(request, data);
 
-        // 回合上限：副本行存在且 time_limit（uint32 秒）> 0 时按毫秒换回合，否则 30（engine.cpp:74-79）
+        // 回合上限：副本行存在且 time_limit（uint32 秒）> 0 时按毫秒换回合，否则 300（engine.cpp:74-79）
         Optional<DungeonTable> dungeonRow = data.dungeon(request.getBattleConfigId());
         if (dungeonRow.isPresent() && dungeonRow.get().getTimeLimit() != 0) {
             engine.maxRounds = BattleRules.roundsFromMillis(Integer.toUnsignedLong(dungeonRow.get().getTimeLimit()) * 1000L);
