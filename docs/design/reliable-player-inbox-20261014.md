@@ -32,10 +32,10 @@ Java 的当前状态单列在文末，以本次查看的源码与既有设计文
 
 ### 2.3 去重靠序号或幂等键，确认要排在持久化之后
 
-- Telegram 的判断规则：本地序号加上本次条数正好等于新序号才应用，偏小说明是重复，偏大说明中间缺了消息。
+- Telegram 的判断规则：`local_pts + pts_count == pts` 才应用；`local_pts + pts_count > pts` 是已处理的重复，`local_pts + pts_count < pts` 表示缺口。
 - 微信 seqsvr 给每个用户分配单调递增的序号，允许跳号，当作版本水位用。
-- 发送方生成的幂等键要按具体服务核对保留规则。原文把 Telegram 的 `random_id` 和 Stripe 的 Idempotency-Key 一起归为「窗口有限」，此处订正：Telegram 当前官方文档明确服务端的 `random_id` 去重记录不会过期；有限窗口不能泛化到 Telegram。Stripe 至少保留 24 小时的规则仍按该产品 API 语义理解。来源：[Telegram Updates — Message ID generation](https://core.telegram.org/api/updates)。
-- AWS 的 outbox 示例用 SQS FIFO 去重，窗口只有 5 分钟，所以接收端仍然要自己做持久去重。
+- 发送方生成的幂等键要按具体服务核对保留规则。原文把 Telegram 的 `random_id` 和 Stripe 的 Idempotency-Key 一起归为「窗口有限」，此处订正：Telegram 当前官方文档明确服务端的 `random_id` 去重记录不会过期；有限窗口不能泛化到 Telegram。[Stripe API v1](https://docs.stripe.com/api/idempotent_requests) 的规则是至少 24 小时后可清理。来源：[Telegram Updates — Message ID generation](https://core.telegram.org/api/updates)。
+- AWS 的 outbox 示例用 SQS FIFO 去重，[官方去重间隔](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/FIFO-key-terms.html)只有 5 分钟，所以接收端仍然要自己做持久去重。
 - Cloudflare Durable Objects 的 output gate 在写入确认持久化前扣住对外消息（包括回包）。这一保证的边界是其存储与 output gate 语义。来源：[Durable Objects glossary — Output gates](https://developers.cloudflare.com/durable-objects/reference/glossary/)。
 
 ### 2.4 旧节点还能不能写，由存储在提交那一刻判断
@@ -50,7 +50,7 @@ Java 的当前状态单列在文末，以本次查看的源码与既有设计文
 
 - 保留期限：原文记录 WhatsApp 未送达消息最多保存 30 天；Iris「大约一周」来自 [2014 年设计](https://engineering.fb.com/2014/10/09/production-engineering/building-mobile-first-infrastructure-for-messenger/)，而 [Meta 2018 年存储迁移文章](https://engineering.fb.com/2018/06/26/core-infra/migrating-messenger-storage-to-optimize-performance/) 描述为数周。后者说明参数随实现演进，不能把一周当作当前统一保证。
 - 补发窗口：Ably 是 2 分钟，Discord 断线重连后的补发窗口是「几分钟」。
-- 超窗后退回全量重建：Discord 回 Invalid Session 后客户端重新 Identify；Telegram 返回 `differenceTooLong` 后重新拉该消息箱状态；FCM 离线消息超过 100 条会全部丢弃，并通知应用全量同步；LINE 落后太多时全量同步，并定期交换摘要做对账。
+- 超窗后退回全量重建：[Discord Invalid Session](https://github.com/discord/discord-api-docs/blob/main/developers/events/gateway-events.mdx) 的 `d=false` 表示不可恢复，需要重新 Identify，`d=true` 则可能 Resume；Telegram 返回 `differenceTooLong` 后重新拉该消息箱状态；[FCM Android 非折叠待发消息](https://firebase.google.com/docs/cloud-messaging/customize-messages/collapsible-message-types)超过 100 条会全部丢弃，并通知应用全量同步；LINE 落后太多时全量同步，并定期交换摘要做对账。
 
 上述时长和条数是各产品快照，不能直接成为本项目的参数。应用应明确保存多久、最大未决数、消费者最大落后、增量失效条件、全量恢复入口及异常告警。
 
