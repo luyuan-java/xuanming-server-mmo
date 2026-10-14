@@ -244,7 +244,7 @@ public final class TurnBattleEngine {
     /**
      * 宝宝入场（{@code InitPets}，{@code engine.cpp:178-238}；规格 §1.6）：局内序号跨所有快照全局递增（先按快照、再按快照内顺序），
      * actor_id = 宝宝号段 + 序号，真实 pet_id 另存。pet_id 为 0 拒；同一只宝宝（按 pet_id）已入场拒；快照自带的 owner_player_id
-     * 非 0 且不等于所在快照的玩家拒（归属只认所在快照）。与主人同队、恒为挂机、技能<strong>不过滤</strong>，不建结算条目。
+     * 非 0 且不等于所在快照的玩家拒（归属只认所在快照）。与主人同队、恒为挂机，技能按玩家相同规则过滤，不建结算条目。
      *
      * @return 拒绝原因；全部成功返回 null
      */
@@ -289,8 +289,13 @@ public final class TurnBattleEngine {
                         .setDefense(pet.getDefense())
                         .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()))
                         // 宝宝没有客户端行动权：标挂机，由默认行动路径代打，也不卡 allPlayersReady（engine.cpp:228-230）
-                        .setIsAuto(true)
-                        .addAllSkillTableIds(pet.getSkillTableIdsList());
+                        .setIsAuto(true);
+                for (int skillTableId : pet.getSkillTableIdsList()) {
+                    Optional<SkillTable> skillRow = ctx.data().skill(skillTableId);
+                    if (skillRow.isPresent() && BattleRules.isTurnBattleCastableSkill(skillRow.get())) {
+                        actor.addSkillTableIds(skillTableId);
+                    }
+                }
                 ctx.units().add(new BattleUnit(actor));
             }
         }
@@ -517,15 +522,36 @@ public final class TurnBattleEngine {
 
     /**
      * 按单位插入序，给每个存活、未逃、还没有行动的单位补一条「普攻，目标 0」（{@code FillDefaultActions}，{@code engine.cpp:673-687}）：
-     * 覆盖未提交的玩家、挂机玩家、全部怪物与宝宝，也包括被眩晕的单位（执行时被跳过）。不耗随机数。
+     * 玩家与怪物仍用普攻；宝宝按快照技能顺序尝试首个通过原校验链的技能，目标按单位插入序取存活敌方。
+     * 没有可用技能则普攻，也包括被眩晕的单位（执行时被跳过）。选技能与目标不耗随机数。
      */
     private void fillDefaultActions() {
         for (BattleUnit unit : ctx.units()) {
             if (!unit.isActive()) {
                 continue;
             }
-            pendingActions.putIfAbsent(unit.actorId(), DEFAULT_ACTION);
+            if (!pendingActions.containsKey(unit.actorId())) {
+                pendingActions.put(unit.actorId(), unit.isPet() ? defaultPetAction(unit) : DEFAULT_ACTION);
+            }
         }
+    }
+
+    private BattleAction defaultPetAction(BattleUnit pet) {
+        long[] targets = ctx.collectAliveEnemyIds(pet);
+        if (targets.length == 0) {
+            return DEFAULT_ACTION;
+        }
+        for (int skillTableId : pet.state().getSkillTableIdsList()) {
+            BattleAction action = BattleAction.newBuilder()
+                    .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                    .setSkillTableId(skillTableId)
+                    .setTargetId(targets[0])
+                    .build();
+            if (checks.checkActionPrerequisites(pet, action) == ActionChecks.SUCCESS) {
+                return action;
+            }
+        }
+        return DEFAULT_ACTION;
     }
 
     /** 回合开始时存活未逃的单位，按 {@link #TURN_ORDER} 排序（{@code BuildTurnOrder}，{@code engine.cpp:689-711}）。 */

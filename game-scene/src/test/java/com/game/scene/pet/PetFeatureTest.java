@@ -179,7 +179,7 @@ class PetFeatureTest {
                 .findFirst().orElseThrow();
         PetListInfo pets = PetListChangedS2C.parseFrom(push.getSerializedMessage()).getPets();
         assertThat(pets.getPetsList()).isEmpty();
-        assertThat(pets.getMaxPets()).isEqualTo(10);
+        assertThat(pets.getMaxPets()).isEqualTo(22);
         assertThat(pets.getRenameCostGold()).isEqualTo(200);
     }
 

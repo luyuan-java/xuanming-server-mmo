@@ -295,7 +295,7 @@ class PetBattleSnapshotTest {
 
     /**
      * 技能 = 种类自带 ∪ 实例已学：先种类（表序，跳过 0）、后已学（实例里的次序，跳过 0、跳过种类已有的、已学里重复的只留第一个）。
-     * <b>不做可施放过滤</b>（B4）：正式技能表里 3 是持续施法、4 是开关，玩家快照会剔除它们，宝宝快照照带（引擎只让宝宝普攻）；
+     * <b>不做可施放过滤</b>（B4）：正式技能表里 3 是持续施法、4 是开关，宝宝快照照带，由战斗引擎入场统一过滤；
      * 表里查不到的技能号（22、9_999）也照带。
      */
     @Test
@@ -362,6 +362,7 @@ class PetBattleSnapshotTest {
                 .setPhysicalAttack(28)
                 .setMagicAttack(33)
                 .setDefense(36)
+                .addSkillTableIds(14)
                 .build());
 
         assertThat(service.recall(player)).isZero();
