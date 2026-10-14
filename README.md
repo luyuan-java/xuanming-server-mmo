@@ -33,6 +33,7 @@ Redis（Redisson）：节点目录 / 节点号租约 / 玩家在线目录与推�
 - **battle**：回合制战斗房间。客户端凭票据直连 game-battle，不经 gate（大厅连接上的战斗上行由 gate 当场拒绝）；确认与结算经 Dubbo 发给 scene，结算先落 Redis 再投递，未销账的定时重投；打完的对局结果发到 Kafka。
 - **data**：scene 把资产流水与玩家快照发到 Kafka，game-data 消费后幂等落库，并提供带令牌的运维接口（流水查询、GM 快照与差异、回档）。
 - 详细设计：[docs/design/architecture.md](docs/design/architecture.md)；选型与理由：[docs/design/tech-stack.md](docs/design/tech-stack.md)。
+- 重要玩家消息调研与双版本对照：[持久收件箱、接收端拉取与迁移窗口（2026-10-14）](docs/design/reliable-player-inbox-20261014.md)。
 
 ## 模块
 
