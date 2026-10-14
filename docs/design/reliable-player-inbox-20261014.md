@@ -14,13 +14,15 @@ Java 的当前状态单列在文末，以本次查看的源码与既有设计文
 
 这里的「收件箱」是职责，可以由业务库、资产指令账本、战斗待结算记录承担，不要求再建设一套通用消息存储。推送、缓存和迁移期间的路由只能改善延迟，不能单独承担重要业务的可靠性。
 
+这句话是本仓库采纳的架构建议，不是所有公司的唯一实现：Iris 推送实际更新，Temporal Signal 本身就是持久业务输入。两者支持的是「可靠性锚定稳定身份和持久进度」，不能据此断言它们的所有推送都只是提醒、所有接收方都只用拉取。
+
 ## 2. 大厂的共同做法（用户调研快照）
 
 ### 2.1 收件箱按人存，不按位置存
 
-- Meta Messenger 的 Iris 是一条按用户全序排列的更新队列，每个消费者（手机端、存储层）各有一个指针，投递成功才前移。手机离线时指针停住，新消息照常入队。
+- Meta Messenger 的 Iris 是一条按用户全序排列的更新队列，每个消费者（手机端、存储层）各有一个指针，投递成功才前移。手机离线时指针停住，新消息照常入队。来源：[Meta 2014 Iris 设计](https://engineering.fb.com/2014/10/09/production-engineering/building-mobile-first-infrastructure-for-messenger/)。
 - Telegram 给每个消息箱一个自增序号 `pts`。
-- Temporal 按 Workflow Id 把 signal 写进持久历史，发送方不需要知道 worker 在哪台机器上。
+- Temporal 按 Workflow Id 把 signal 写进持久历史，发送方不需要知道 worker 在哪台机器上。来源：[Temporal Workflow message passing](https://docs.temporal.io/develop/go/workflows/message-passing)。
 
 ### 2.2 推送只是提醒，准确数据靠接收方按进度拉
 
@@ -34,19 +36,19 @@ Java 的当前状态单列在文末，以本次查看的源码与既有设计文
 - 微信 seqsvr 给每个用户分配单调递增的序号，允许跳号，当作版本水位用。
 - 发送方生成的幂等键要按具体服务核对保留规则。原文把 Telegram 的 `random_id` 和 Stripe 的 Idempotency-Key 一起归为「窗口有限」，此处订正：Telegram 当前官方文档明确服务端的 `random_id` 去重记录不会过期；有限窗口不能泛化到 Telegram。Stripe 至少保留 24 小时的规则仍按该产品 API 语义理解。来源：[Telegram Updates — Message ID generation](https://core.telegram.org/api/updates)。
 - AWS 的 outbox 示例用 SQS FIFO 去重，窗口只有 5 分钟，所以接收端仍然要自己做持久去重。
-- Cloudflare Durable Objects 的做法是：写入在确认持久化之前，所有对外发出的消息（包括回包）都先扣住。
+- Cloudflare Durable Objects 的 output gate 在写入确认持久化前扣住对外消息（包括回包）。这一保证的边界是其存储与 output gate 语义。来源：[Durable Objects glossary — Output gates](https://developers.cloudflare.com/durable-objects/reference/glossary/)。
 
 ### 2.4 旧节点还能不能写，由存储在提交那一刻判断
 
 - Orleans 默认的位置目录只保证最终一致，官方承认集群不稳定时偶尔会出现同一实体的两个实例。Akka 的单写者也依赖脑裂处理正确。所以不能把「同一时刻只有一个持有者」当作无需校验的前提。
-- 真正起作用的是 fencing（围栏）：Kleppmann 提出的 fencing token、Google Chubby 的 sequencer、Kafka 生产者 epoch（新实例启动时 epoch 加 1，旧实例再写会被拒）。
+- 真正起作用的是 fencing（围栏）：Kleppmann 提出的 fencing token、Google Chubby 的 sequencer。Kafka 的对应例子需限定为复用同一 `transactional.id` 的事务生产者：新实例初始化事务后，旧实例会被围栏拒绝；不能泛化为任意普通生产者一重启都能排斥旧实例。来源：[Kafka 4.3 KafkaProducer](https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html)。
 - 有些公司还加时间或流程约束：微信 seqsvr 旧节点 N 秒读不到配置就自己停止服务，新节点等 N 秒后才接管；Discord 在 2026 年 3 月语音故障之后加准入检查，交接没完成就不允许缩容（原文事故结论，待独立复核）。
 
 围栏必须由存储在提交时执行；「请求里有 epoch」或应用层提前比过一次，不等于最终写入带围栏。交接、续租、排空和停机还需要各自的安全条件与失败恢复路径。
 
 ### 2.5 每条链路都有上限，超出后有明确退路
 
-- 保留期限：WhatsApp 未送达消息最多保存 30 天，Iris 队列后端大约保留一周。
+- 保留期限：原文记录 WhatsApp 未送达消息最多保存 30 天；Iris「大约一周」来自 [2014 年设计](https://engineering.fb.com/2014/10/09/production-engineering/building-mobile-first-infrastructure-for-messenger/)，而 [Meta 2018 年存储迁移文章](https://engineering.fb.com/2018/06/26/core-infra/migrating-messenger-storage-to-optimize-performance/) 描述为数周。后者说明参数随实现演进，不能把一周当作当前统一保证。
 - 补发窗口：Ably 是 2 分钟，Discord 断线重连后的补发窗口是「几分钟」。
 - 超窗后退回全量重建：Discord 回 Invalid Session 后客户端重新 Identify；Telegram 返回 `differenceTooLong` 后重新拉该消息箱状态；FCM 离线消息超过 100 条会全部丢弃，并通知应用全量同步；LINE 落后太多时全量同步，并定期交换摘要做对账。
 
@@ -61,15 +63,15 @@ Java 的当前状态单列在文末，以本次查看的源码与既有设计文
 
 ## 3. 迁移窗口里的在途消息（用户调研快照）
 
-原文归纳三种路径：都在内存里，都可能丢。下列框架默认值和使用状态依赖版本，采用前应再次核对。
+原文归纳以下三种迁移路由路径，强调其中的转发 / 缓冲可能丢失。这里讨论的是路由层，不包括另外配置的持久队列；例如 Akka 启用 `DurableProducerQueue` 的可靠投递不能一并概括为「纯内存」。下列框架默认值和使用状态依赖版本，采用前应再次核对。
 
 | 做法 | 代表 | 原文记录的关键参数 / 语义 |
 |---|---|---|
 | 拒收，让发送方刷新位置后重试 | Dapr、Service Fabric | Service Fabric 官方说明为尽力而为，会出现重复 |
-| 旧节点有限次数转发 | Orleans | 默认最多转发 2 次，超出后退回调用方 |
-| 路由层缓冲 | Akka Cluster Sharding | 默认缓冲上限 10 万条，满了直接丢弃；交接时还会主动丢掉一段缓冲，避免乱序 |
+| 旧节点有限次数转发 | Orleans | 默认最多转发 2 次，超出后退回调用方；来源：[SiloMessagingOptions 源码](https://github.com/dotnet/orleans/blob/main/src/Orleans.Runtime/Configuration/Options/SiloMessagingOptions.cs) |
+| 路由层缓冲 | Akka Cluster Sharding | 默认缓冲上限 10 万条，作用域是每个 ShardRegion；满了直接丢弃，交接时还会主动丢掉一段缓冲，避免乱序；来源：[Cluster Sharding](https://doc.akka.io/libraries/akka-core/current/typed/cluster-sharding.html) |
 
-这一层只负责让消息尽快到达，可靠性由持久收件箱及恢复消费提供。原文还记录：Orleans 默认最多投递一次（at-most-once），而且不去重；Akka Reliable Delivery 模块官方写明「暂不建议在生产中使用」。本次核对的 [Akka Reliable Delivery 当前文档](https://doc.akka.io/libraries/akka-core/current/typed/reliable-delivery.html)（页面版本 2.10.24）仍有该提示；它是该版本状态，不能作为所有后续版本的长期结论。
+这一层只负责让消息尽快到达，可靠性由持久收件箱及恢复消费提供。[Orleans 投递保证](https://learn.microsoft.com/en-us/dotnet/orleans/implementation/messaging-delivery-guarantees)说明默认最多投递一次（at-most-once），不提供应用层持久去重保证；显式重试还需考虑重复执行。原文还记录 Akka Reliable Delivery 模块官方写明「暂不建议在生产中使用」；本次核对的 [Akka Reliable Delivery 当前文档](https://doc.akka.io/libraries/akka-core/current/typed/reliable-delivery.html)（页面版本 2.10.24）仍有该提示。它是该版本状态，不能作为所有后续版本的长期结论。
 
 ## 4. 与上一轮方案的差别
 
