@@ -233,7 +233,7 @@ class MatchClientMessageServiceTest {
     }
 
     private static SessionContext session(long playerId) {
-        return SessionContext.newBuilder().setGateNodeId(3).setGateInstanceId("gate-a").setSessionId(21).setZoneId(1).setAccount("acc-21")
+        return SessionContext.newBuilder().setGateNodeId(3).setGateInstanceId(FakePlayerStatus.GATE_INSTANCE).setSessionId(FakePlayerStatus.sessionIdOf(playerId)).setZoneId(1).setAccount("acc-21")
                 .setPlayerId(playerId).build();
     }
 

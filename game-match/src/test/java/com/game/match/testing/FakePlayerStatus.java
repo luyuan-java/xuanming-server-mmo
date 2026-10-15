@@ -38,10 +38,18 @@ public final class FakePlayerStatus implements PlayerStatusReader {
 
     // ---------------------------------------------------------------- 预置
 
+    /** {@link #online} 预置的在线条目所在的 gate 实例。经处理器走 157 的用例,会话要按它和 {@link #sessionIdOf} 构造(跨会话栅栏会比对)。 */
+    public static final String GATE_INSTANCE = "gate-inst-1";
+
+    /** {@link #online} 预置的在线条目的会话号:玩家号低 31 位。 */
+    public static int sessionIdOf(long playerId) {
+        return (int) (playerId & 0x7FFF_FFFF);
+    }
+
     /** 在游戏里：在线目录有条目（gate 节点 1、会话号 = 玩家号低 31 位），位置 ONLINE 指向 (zone, scene 节点)。 */
     public FakePlayerStatus online(long playerId, int zoneId, int sceneNodeId) {
         presences.put(playerId, PlayerPresence.newBuilder().setPlayerId(playerId).setZoneId(zoneId).setGateNodeId(1)
-                .setGateInstanceId("gate-inst-1").setSessionId((int) (playerId & 0x7FFF_FFFF)).setOwnerEpoch(1).build());
+                .setGateInstanceId(GATE_INSTANCE).setSessionId(sessionIdOf(playerId)).setOwnerEpoch(1).build());
         return location(playerId, zoneId, sceneNodeId);
     }
 

@@ -1,10 +1,12 @@
 package com.game.match.queue;
 
 import com.game.api.match.MatchBudgets;
+import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
+import com.game.discovery.proto.PlayerPresence;
 import com.game.match.MatchProperties;
 import com.game.match.gather.GatherLauncher;
 import com.game.match.gather.GatherPlan;
@@ -137,6 +139,19 @@ public final class QueueService {
      *                 {@code party_member_ids} 已废弃（多于 1 人只记一条日志）
      */
     public JoinQueueResponse join(long playerId, JoinQueueRequest request, Deadline d) {
+        return join(playerId, null, request, d);
+    }
+
+    /**
+     * 客户端 157 的入口:同 {@link #join(long, JoinQueueRequest, Deadline)},另带发起会话的身份,做跨会话栅栏
+     * (mmorpg docs/design/client-request-ordering.md §6.3 / O13)。gate 只在同一个会话内保序:玩家断线重连(可能换了 gate)之后,
+     * 旧会话上还在途的 157 与新会话上的 148 互不排序,旧的 157 晚落地会让玩家在新会话里「取消成功、实际仍在排队」。
+     */
+    public JoinQueueResponse join(SessionContext caller, JoinQueueRequest request, Deadline d) {
+        return join(caller.getPlayerId(), caller, request, d);
+    }
+
+    private JoinQueueResponse join(long playerId, SessionContext caller, JoinQueueRequest request, Deadline d) {
         int mode = request.getModeValue();
         int configId = request.getBattleConfigId();
         // 1 身份
@@ -187,6 +202,24 @@ public final class QueueService {
         }
         if (location.status() != LocationStatus.ONLINE || location.location() == null) {
             return rejected(mode, JoinOutcome.NOT_IN_SCENE, MatchTip.JOIN_NOT_IN_SCENE);
+        }
+        // 跨会话栅栏(见 join(SessionContext, …)):在线目录记着玩家此刻在哪个 gate 实例的哪个会话上,重连之后换成新会话。
+        // 只在「目录有条目且不是发起这次请求的会话」时拒:条目由 gate 在 scene 确认进场之后异步写入,刚进场就点匹配时可能还没写到,
+        // 缺席按放行处理(上面已要求位置 ONLINE),不误拒刚进场的玩家。不原子(目录与票据不在同一处),只缩小跨会话窗口,
+        // 剩余靠票据 TTL、153 权威查询与客户端重连后回源兜底。
+        if (caller != null) {
+            Optional<PlayerPresence> presence;
+            try {
+                presence = players.presence(playerId, d);
+            } catch (Deadline.DependencyException e) {
+                log.error("[match] JoinQueue 读在线目录失败 player={}: {}", id(playerId), why(e));
+                return rejected(mode, JoinOutcome.INTERNAL, MatchTip.BUSY);
+            }
+            if (presence.isPresent() && supersededBy(caller, presence.get())) {
+                log.info("[match] JoinQueue 来自已被取代的会话,拒绝 player={} request_session={} current_session={}", id(playerId),
+                        Integer.toUnsignedString(caller.getSessionId()), Integer.toUnsignedString(presence.get().getSessionId()));
+                return rejected(mode, JoinOutcome.NOT_IN_SCENE, MatchTip.JOIN_NOT_IN_SCENE);
+            }
         }
         int zoneId = location.location().getZoneId();
         // Java 的闸：租约已丢失时凑单永久停摆，任何模式都不再收票
@@ -369,5 +402,11 @@ public final class QueueService {
 
     private static String id(long playerId) {
         return Long.toUnsignedString(playerId);
+    }
+
+    /** 在线目录里的当前会话不是发起这次请求的会话(重连换了会话号,或换了 gate 进程实例)。 */
+    private static boolean supersededBy(SessionContext caller, PlayerPresence current) {
+        return current.getSessionId() != caller.getSessionId()
+                || !current.getGateInstanceId().equals(caller.getGateInstanceId());
     }
 }

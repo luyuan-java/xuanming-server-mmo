@@ -537,6 +537,9 @@ mmorpg：`go/friend`（go-zero gRPC，经 client_rpc_router 转发）。Java 版
   （`@DubboReference` 对 `handle` 显式 `retries = 0`：写路径不幂等）。gate 给每个后端域一条**按会话的在途队列**：
   同一会话的好友请求之间仍串行（写后读读到新值），但不占 login / scene 的在途位——好友最坏 5 s 的调用不会让移动等消息排满
   `max-pending-requests` 而断线（mmorpg 的 C++ gate 路由模式本来就不按会话串行）。
+  〔2026-10-14 更正:按域各一条队列已改为 login 以外全部后端共用一条**会话后端 lane**(`ClientSession.backendQueue`),
+  跨域同样按到达顺序逐条发出;仍不占 login / scene 的在途位。理由与 C++ 侧的对应改动见 mmorpg
+  `docs/design/client-request-ordering.md`(O3,§10),对账见 PARITY「客户端请求按会话保序」行。〕
 - **准入**（`FriendDispatcher`，按消息号）：10 个 C2S 方法放行；上行 235（`NotifyFriendEvent` 是服务端推送）与会话还没绑定玩家
   （`player_id = 0`）回信封 1003（基线是会话拦截器拒绝、路由服翻成信封 1003）；请求体解析失败回信封 1003；工作队列满 / 处理器异常回
   in-band 1003。「我」只取会话里的 `player_id`，入口挡住目标为 0 / 自己（否则落到存储层的非法玩家对、变成 1003 假告警）。

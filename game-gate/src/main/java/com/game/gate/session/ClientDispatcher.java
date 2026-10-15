@@ -48,6 +48,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -103,6 +104,19 @@ public final class ClientDispatcher {
     static final int TIP_ENTER_SCENE_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
     /** 跨 zone 传送受理后未成（3027，基线 {@code genericFailTip}）：重定向载荷非法时推这个码后断开。 */
     static final int TIP_ZONE_TRAVEL_FAILED = SceneErrorTip.scene_error.kZoneTravelTargetBusy_VALUE;
+
+    /**
+     * 会话后端 lane 的排队 + 在途总上限:超过就回带请求 id 的信封 1008、不断连、不计非法包。
+     * 与 C++ 版 gate 路由 lane 同值同形(mmorpg cpp/nodes/gate/handler/rpc/client_request_lane.h kMaxLaneDepth,
+     * client-request-ordering.md O6)。正常客户端按功能单飞,排到 32 条只可能是在刷。
+     */
+    static final int MAX_BACKEND_LANE_DEPTH = 32;
+    /**
+     * 会话后端 lane 的排队等待上限:超过就不再发出,回带请求 id 的信封 1003(明确「没有执行」,客户端重试安全)。
+     * 不变式:gate 调后端的超时(5 s)+ 本值 + 1 s ≤ 客户端请求超时 15 s(client-request-ordering.md §5.2 I4)。
+     * 与 C++ 版 kMaxLaneWait 同值。
+     */
+    static final long MAX_BACKEND_LANE_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     private static final ClientTokenVerifyResponse VERIFY_OK = ClientTokenVerifyResponse.newBuilder().setSuccess(true).build();
 
@@ -339,9 +353,8 @@ public final class ClientDispatcher {
             s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
             return;
         }
-        ClientMessageService backend = backends.get(route.domain());
-        if (backend != null) {
-            enqueueBackend(s, route, request, backend);
+        if (backends.containsKey(route.domain())) {
+            enqueueBackend(s, route, request);
             return;
         }
         if (s.pending.size() >= limits.maxPendingRequests()) {
@@ -411,28 +424,39 @@ public final class ClientDispatcher {
     // ================================================================ login 以外的后端（friend ……）
 
     /**
-     * 入该后端自己的队列（基线 C++ gate 路由模式本就不按会话串行这些域）：同一后端的请求仍串行（写后读看得到自己的写），
-     * 但不占会话唯一的 {@link ClientSession#inFlight}，不阻塞 login / scene。队列满（与会话上限同值）断开。
+     * 入会话后端 lane（{@link ClientSession#backendQueue}）：login 以外的全部后端域共用一条，按到达顺序逐条发出，
+     * 上一条完成才发下一条，跨域同样保序（C++ 版 client-request-ordering.md O3；以前按域各一条、域之间并发）。
+     * 不占会话唯一的 {@link ClientSession#inFlight}，不阻塞 login / scene。
+     * 排队 + 在途达到 {@link #MAX_BACKEND_LANE_DEPTH} 回带请求 id 的信封 1008,不断连、不计非法包(与 C++ 版同形;
+     * 以前是满 64 断连,会把大厅连接一起拆掉)。
      */
-    private void enqueueBackend(ClientSession s, MessageRoute route, ClientRequest request, ClientMessageService backend) {
-        ArrayDeque<BackendPending> queue = s.backendQueues.computeIfAbsent(route.domain(), d -> new ArrayDeque<>());
-        if (queue.size() >= limits.maxPendingRequests()) {
-            log.warn("会话 {} 后端待处理请求超限，断开 session={} pending={} message_id={}", route.domain(), sid(s),
-                    queue.size(), request.getMessageId());
-            countRequest(route, RequestResult.OVERFLOW);
-            metrics.disconnected(DisconnectReason.PENDING_OVERFLOW);
-            closeNow(s);
+    private void enqueueBackend(ClientSession s, MessageRoute route, ClientRequest request) {
+        ArrayDeque<BackendPending> queue = s.backendQueue;
+        int depth = queue.size() + (s.backendInFlight ? 1 : 0);
+        if (depth >= MAX_BACKEND_LANE_DEPTH) {
+            log.debug("会话后端 lane 已满,回 1008 session={} depth={} message_id={} domain={}", sid(s), depth,
+                    request.getMessageId(), route.domain());
+            countRequest(route, RequestResult.LANE_FULL);
+            s.send(envelopeError(request, TIP_RATE_LIMIT_EXCEEDED));
             return;
         }
-        queue.add(new BackendPending(route, request, context(s)));
-        drainBackend(s, route.domain(), backend);
+        queue.add(new BackendPending(route, request, context(s), nanoClock.getAsLong()));
+        drainBackend(s);
     }
 
-    private void drainBackend(ClientSession s, String domain, ClientMessageService backend) {
-        ArrayDeque<BackendPending> queue = s.backendQueues.get(domain);
-        while (queue != null && !queue.isEmpty() && !s.backendInFlight.contains(domain) && !s.closing && !s.closed
-                && !s.redirected) {
+    private void drainBackend(ClientSession s) {
+        ArrayDeque<BackendPending> queue = s.backendQueue;
+        while (!queue.isEmpty() && !s.backendInFlight && !s.closing && !s.closed && !s.redirected) {
             BackendPending next = queue.poll();
+            if (nanoClock.getAsLong() - next.enqueuedAtNanos() > MAX_BACKEND_LANE_WAIT_NANOS) {
+                // 排队太久:不再发出(客户端的 15 s 请求超时快到了,发出去也来不及回),明确回「没有执行」。
+                countRequest(next.route(), RequestResult.QUEUE_EXPIRED);
+                s.send(envelopeError(next.request(), TIP_SERVICE_UNAVAILABLE));
+                continue;
+            }
+            String domain = next.route().domain();
+            // 入队时已确认该域有后端（onRequest 的 backends.containsKey）;装配后 backends 不再变。
+            ClientMessageService backend = backends.get(domain);
             countRequest(next.route(), RequestResult.FORWARDED);
             callBackend(s, domain, backend, next.request(), next.session());
         }
@@ -451,7 +475,7 @@ public final class ClientDispatcher {
                 .setBody(request.getBody())
                 .setRequestId(request.getId())
                 .build();
-        s.backendInFlight.add(domain);
+        s.backendInFlight = true;
         Timer.Sample sample = metrics.startTimer();
         CompletableFuture<ClientReply> future;
         try {
@@ -464,13 +488,13 @@ public final class ClientDispatcher {
         }
         future.whenComplete((reply, error) -> {
             metrics.backendCallCompleted(domain, sample, error == null && reply != null);
-            s.execute(() -> onBackendCompleted(s, domain, backend, request, reply, error));
+            s.execute(() -> onBackendCompleted(s, domain, request, reply, error));
         });
     }
 
-    private void onBackendCompleted(ClientSession s, String domain, ClientMessageService backend, ClientRequest request,
-                                    ClientReply reply, Throwable error) {
-        s.backendInFlight.remove(domain);
+    private void onBackendCompleted(ClientSession s, String domain, ClientRequest request, ClientReply reply,
+                                    Throwable error) {
+        s.backendInFlight = false;
         if (s.closing || s.closed) {
             // 连接已断：不再向客户端发送；断线流程不等这些后端（会话可能已释放），什么都不用补
             return;
@@ -485,7 +509,7 @@ public final class ClientDispatcher {
             // 已重定向之前转出、之后才回来的应答也照常下发（zone-travel-spec §5.7：合规客户端已在换连接，无害）
             replyToClient(s, request, reply);
         }
-        drainBackend(s, domain, backend);
+        drainBackend(s);
     }
 
     private void callLogin(ClientSession s, ClientRequest request) {
@@ -532,8 +556,11 @@ public final class ClientDispatcher {
             return;
         }
         if (error != null || reply == null) {
+            // 与后端失败同形:带请求 id 的信封 1003,客户端当场按请求 id 对上失败,不用等 15 s 超时。
+            // 以前推 23 {1003} 不带 id(对齐 C++ 基线的失败桥);C++ 版 gate 路由 lane 起失败回执一律带 id,两版同批改
+            // (mmorpg client-request-ordering.md §4.7)。
             log.warn("login 调用失败 session={} message_id={} 原因={}", sid(s), request.getMessageId(), rootCause(error).toString());
-            sendTip(s, TIP_SERVICE_UNAVAILABLE);
+            s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
         } else {
             // 先回应答、再执行指令：登录期重定向（RedirectToGate）的 26 应答因此恒先于 124。
             // 已重定向之前转出、之后才回来的应答照常下发，其中的指令由 applyDirectives 一律忽略
@@ -1346,7 +1373,7 @@ public final class ClientDispatcher {
     }
 
     /**
-     * 丢弃还没处理的排队请求（login / scene 的会话队列与各后端队列），逐个计去向（每个请求在 gate 只计一次）：
+     * 丢弃还没处理的排队请求（login / scene 的会话队列与会话后端 lane），逐个计去向（每个请求在 gate 只计一次）：
      * 会话关闭时计 {@code dropped}，会话转入已重定向时计 {@code redirected}。
      */
     private void discardPending(ClientSession s, RequestResult result) {
@@ -1354,12 +1381,10 @@ public final class ClientDispatcher {
             countRequest(p.route(), result);
         }
         s.pending.clear();
-        for (ArrayDeque<BackendPending> queue : s.backendQueues.values()) {
-            for (BackendPending p : queue) {
-                countRequest(p.route(), result);
-            }
-            queue.clear();
+        for (BackendPending p : s.backendQueue) {
+            countRequest(p.route(), result);
         }
+        s.backendQueue.clear();
     }
 
     /** 信封错误：{@code MessageContent{message_id=请求号, id=请求 id, error_message{tip}}}（C++ 同形，客户端按 message_id 对上请求）。 */

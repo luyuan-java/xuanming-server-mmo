@@ -56,7 +56,8 @@ public final class QueueHandlers {
         @Override
         public Reply handle(SessionContext session, ByteString body, Deadline deadline) throws InvalidProtocolBufferException {
             JoinQueueRequest request = JoinQueueRequest.parseFrom(body);
-            return Reply.body(service.join(session.getPlayerId(), request, deadline));
+            // 带上发起会话的身份:QueueService 据此挡住重连之后旧会话迟到的 157(mmorpg client-request-ordering.md §6.3 / O13)。
+            return Reply.body(service.join(session, request, deadline));
         }
 
         /** 过载时请求体没有解析过，模式未知：指标的 mode 记 unknown。 */

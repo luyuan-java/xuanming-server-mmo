@@ -74,7 +74,9 @@ class QueueHandlersTest {
 
     private static ClientCall call(String method, long sessionPlayer, ByteString body) {
         return ClientCall.newBuilder().setMessageId(id(method)).setRequestId(9).setBody(body)
-                .setSession(SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst").setSessionId(5).setAccount("acc")
+                // 会话按 FakePlayerStatus.online 的在线条目约定构造:157 的跨会话栅栏会比对会话号与 gate 实例。
+                .setSession(SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId(FakePlayerStatus.GATE_INSTANCE)
+                        .setSessionId(FakePlayerStatus.sessionIdOf(sessionPlayer)).setAccount("acc")
                         .setPlayerId(sessionPlayer))
                 .build();
     }

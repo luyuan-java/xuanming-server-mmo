@@ -275,14 +275,20 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void login调用失败推23服务不可用_并继续处理后续请求() {
+    void login调用失败回带请求id的信封1003_并继续处理后续请求() {
+        // 与后端失败同形(mmorpg client-request-ordering.md §4.7):客户端按请求 id 当场对上失败,不用等 15 s 超时。
+        // 以前推 23 {1003},不带请求 id。
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, LOGIN_MSG, "x"));
         ch.writeInbound(request(2, LOGIN_MSG, "y"));
         login.fail(new RuntimeException("超时"));
         ch.runPendingTasks();
 
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        MessageContent failed = ch.readOutbound();
+        assertThat(failed.getMessageId()).isEqualTo(LOGIN_MSG);
+        assertThat(failed.getId()).isEqualTo(1);
+        assertThat(failed.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(failed.getSerializedMessage()).as("没有业务回包").isEmpty();
         assertThat(login.calls).hasSize(2);
         assertThat(ch.isOpen()).isTrue();
     }
@@ -529,7 +535,7 @@ class ClientDispatcherTest {
         assertThat(session().illegalPackets).as("合法协议号，不计非法包").isZero();
         assertThat(ch.isOpen()).as("不断连").isTrue();
         assertThat(session().pending).as("不进待处理队列").isEmpty();
-        assertThat(session().backendQueues).as("不进任何后端队列").isEmpty();
+        assertThat(session().backendQueue).as("不进会话后端 lane").isEmpty();
         assertThat(links.sent).as("已在场景里也不转给 scene").hasSize(framesBefore);
         assertThat(login.calls).as("只有进场那一次").hasSize(1);
         assertThat(friend.calls).isEmpty();
@@ -653,7 +659,7 @@ class ClientDispatcherTest {
 
         assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
         assertThat(friend.calls).as("不转给 friend 后端").isEmpty();
-        assertThat(session().backendQueues).isEmpty();
+        assertThat(session().backendQueue).isEmpty();
         assertThat(requests("friend", BATTLE_VIA_BACKEND_MSG, "battle_rejected")).isEqualTo(1);
         assertThat(requests("friend", BATTLE_VIA_BACKEND_MSG, "forwarded")).isZero();
 
@@ -827,21 +833,27 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 帮会调用在途不阻塞好友与login() {
+    void 帮会调用在途时好友排在后面_login照常发() {
+        // 会话后端 lane（C++ 版 client-request-ordering.md O3）：login 以外的后端跨域同样按到达顺序逐条发出，
+        // 上一条完成才发下一条；login / scene 不在这条 lane 上，照常发。
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, GUILD_NOTIFY_MSG, "slow"));
         ch.writeInbound(request(2, FRIEND_MSG, "f"));
         ch.writeInbound(request(3, LOGIN_MSG, "l"));
-        assertThat(friend.calls).as("guild 调用没回来，friend 照常发").hasSize(1);
+        assertThat(friend.calls).as("guild 调用没回来，friend 排在后面不发").isEmpty();
         assertThat(login.calls).as("guild 调用没回来，login 照常发").hasSize(1);
-        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
         ch.runPendingTasks();
-        assertThat(List.of(((MessageContent) ch.readOutbound()).getMessageId(), ((MessageContent) ch.readOutbound()).getMessageId()))
-                .containsExactlyInAnyOrder(FRIEND_MSG, LOGIN_MSG);
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(LOGIN_MSG);
+        assertThat(friend.calls).as("login 回来不影响后端 lane").isEmpty();
+
         guild.complete(ClientReply.newBuilder().setTipId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build());
         ch.runPendingTasks();
         assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(GUILD_NOTIFY_MSG);
+        assertThat(friend.calls).as("guild 完成之后才发 friend").hasSize(1);
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(FRIEND_MSG);
     }
 
     // ================================================================ 聚宝斋（trade-spec §5.2、§9.4）
@@ -885,7 +897,9 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 聚宝斋调用在途不阻塞login_scene_好友与帮会() {
+    void 聚宝斋调用在途时其余后端按到达顺序排在后面_login与scene照常() {
+        // 会话后端 lane（C++ 版 client-request-ordering.md O3）：trade → friend → guild 跨域按到达顺序逐条发出；
+        // 以前按域各一条队列、域之间并发，「取消匹配 → 接受帮会历练」这类跨服务因果对会乱序。
         EmbeddedChannel ch = enteredScene();
         int framesBefore = links.sent.size();
         ch.writeInbound(request(2, TRADE_MSG, "slow"));
@@ -894,22 +908,93 @@ class ClientDispatcherTest {
         ch.writeInbound(request(5, GUILD_NOTIFY_MSG, "g"));
         ch.writeInbound(request(6, LOGIN_MSG, "l"));
         assertThat(links.sent).as("trade 调用没回来，scene 照常转发").hasSize(framesBefore + 1);
-        assertThat(friend.calls).as("trade 调用没回来，friend 照常发").hasSize(1);
-        assertThat(guild.calls).as("trade 调用没回来，guild 照常发").hasSize(1);
         assertThat(login.calls).as("trade 调用没回来，login 照常发（进场那次 + 这次）").hasSize(2);
-        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
-        guild.complete(ClientReply.newBuilder().setTipId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build());
+        assertThat(friend.calls).as("trade 调用没回来，friend 排在后面").isEmpty();
+        assertThat(guild.calls).as("trade 调用没回来，guild 排在后面").isEmpty();
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
         ch.runPendingTasks();
-        assertThat(List.of(((MessageContent) ch.readOutbound()).getMessageId(), ((MessageContent) ch.readOutbound()).getMessageId(),
-                ((MessageContent) ch.readOutbound()).getMessageId()))
-                .containsExactlyInAnyOrder(FRIEND_MSG, GUILD_NOTIFY_MSG, LOGIN_MSG);
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(LOGIN_MSG);
+
         assertThat(trade.calls).hasSize(1);
         trade.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("trade-resp")).build());
         ch.runPendingTasks();
         MessageContent reply = ch.readOutbound();
         assertThat(reply.getMessageId()).isEqualTo(TRADE_MSG);
         assertThat(reply.getId()).isEqualTo(2);
+        assertThat(friend.calls).as("trade 完成之后才发 friend").hasSize(1);
+        assertThat(guild.calls).as("friend 还没完成,guild 继续排着").isEmpty();
+
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("friend-resp")).build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(FRIEND_MSG);
+        assertThat(guild.calls).as("friend 完成之后才发 guild").hasSize(1);
+        guild.complete(ClientReply.newBuilder().setTipId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build());
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(GUILD_NOTIFY_MSG);
+    }
+
+    /** 会话后端 lane 的专用装配:friend 限频放宽到每秒 100 条(默认 3 条会先于 lane 上限挡住),单调时钟可拨。 */
+    private ClientDispatcher laneDispatcher(AtomicLong nanos) {
+        return new ClientDispatcher(new GateIdentity(GATE_NODE, "gate-uuid", ZONE), tokens,
+                InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES, TIP_MSG, login, Map.of("friend", friend), links, registry,
+                new GateLimits(4, 3, Duration.ZERO,
+                        MessageLimits.of(Map.of(FRIEND_MSG, new MessageLimit(100, Duration.ofSeconds(1))))),
+                metrics, PresenceRecorder.NONE, nanos::get);
+    }
+
+    @Test
+    void 会话后端lane满回带请求id的信封1008_不断连_不计非法包() {
+        // mmorpg client-request-ordering.md O6:排队 + 在途达到 32 回 1008;以前后端队列满 64 直接断连。
+        AtomicLong nanos = new AtomicLong();
+        EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, laneDispatcher(nanos)));
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
+        ch.readOutbound();
+
+        for (int i = 1; i <= ClientDispatcher.MAX_BACKEND_LANE_DEPTH; i++) {
+            ch.writeInbound(request(i, FRIEND_MSG, "f" + i));
+        }
+        assertThat(friend.calls).as("1 条在途,其余排队").hasSize(1);
+        assertThat((Object) ch.readOutbound()).as("没满之前不回任何拒绝").isNull();
+
+        ch.writeInbound(request(ClientDispatcher.MAX_BACKEND_LANE_DEPTH + 1, FRIEND_MSG, "overflow"));
+        MessageContent rejected = ch.readOutbound();
+        assertThat(rejected.getMessageId()).isEqualTo(FRIEND_MSG);
+        assertThat(rejected.getId()).isEqualTo(ClientDispatcher.MAX_BACKEND_LANE_DEPTH + 1);
+        assertThat(rejected.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_RATE_LIMIT_EXCEEDED).isEqualTo(1008);
+        assertThat(ch.isOpen()).as("不断连").isTrue();
+        assertThat(session().illegalPackets).as("不计非法包").isZero();
+        assertThat(requests("friend", FRIEND_MSG, "lane_full")).isEqualTo(1);
+        assertThat(friend.calls).hasSize(1);
+    }
+
+    @Test
+    void 会话后端lane排队超过5秒不再发出_回带请求id的信封1003() {
+        // mmorpg client-request-ordering.md O6 / §5.2 I4:排队等待 + 后端超时不能拖过客户端的 15 s 请求超时。
+        AtomicLong nanos = new AtomicLong();
+        EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, laneDispatcher(nanos)));
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
+        ch.readOutbound();
+
+        ch.writeInbound(request(1, FRIEND_MSG, "slow"));
+        ch.writeInbound(request(2, FRIEND_MSG, "queued"));
+        assertThat(friend.calls).hasSize(1);
+
+        nanos.addAndGet(ClientDispatcher.MAX_BACKEND_LANE_WAIT_NANOS + 1);
+        friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
+        ch.runPendingTasks();
+
+        MessageContent first = ch.readOutbound();
+        assertThat(first.getId()).isEqualTo(1);
+        assertThat(first.hasErrorMessage()).isFalse();
+        MessageContent expired = ch.readOutbound();
+        assertThat(expired.getMessageId()).isEqualTo(FRIEND_MSG);
+        assertThat(expired.getId()).isEqualTo(2);
+        assertThat(expired.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(friend.calls).as("排队超时的那条不发出").hasSize(1);
+        assertThat(requests("friend", FRIEND_MSG, "queue_expired")).isEqualTo(1);
+
+        ch.writeInbound(request(3, FRIEND_MSG, "fresh"));
+        assertThat(friend.calls).as("新到的请求照常发出").hasSize(2);
     }
 
     @Test

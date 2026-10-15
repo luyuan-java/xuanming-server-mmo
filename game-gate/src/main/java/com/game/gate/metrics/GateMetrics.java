@@ -108,8 +108,18 @@ public final class GateMetrics {
         BATTLE_REJECTED,
         /** 命中热关停规则：回信封 1003（同基线经路由服看到的形状），不转发、不计非法包。 */
         KILLED,
-        /** 会话排队请求超限：断开。 */
+        /** 会话排队请求超限（login / scene 队列）：断开。 */
         OVERFLOW,
+        /**
+         * 会话后端 lane 满（排队 + 在途达到 {@code ClientDispatcher.MAX_BACKEND_LANE_DEPTH}）：回带请求 id 的信封 1008，
+         * 不断连、不计非法包（与 C++ 版 gate 路由 lane 同形，mmorpg client-request-ordering.md O6）。
+         */
+        LANE_FULL,
+        /**
+         * 在会话后端 lane 里排队超过 {@code ClientDispatcher.MAX_BACKEND_LANE_WAIT_NANOS}：不再发出，回带请求 id 的信封 1003，
+         * 明确「没有执行」，客户端重试安全（mmorpg client-request-ordering.md O6 / §5.2 不变式 I4）。
+         */
+        QUEUE_EXPIRED,
         /** 会话已在关闭，排队中或迟到的请求被丢弃。 */
         DROPPED,
         /**
