@@ -247,13 +247,20 @@ public final class AttributeScenario {
         GameConnection c = player.connection();
         int mark = c.inbox().size();
         long id = c.send(gmSetLevel, GmSetPlayerLevelRequest.newBuilder().setLevel(30).build());
-        Optional<Received> tip = c.await(mark, r -> r.messageId() == sendTip, requestTimeout);
-        int tipId = tip.isEmpty() ? -1 : tip.get().parse(TipInfoMessage.parser()).getId();
-        Optional<Received> reply = c.await(mark, r -> r.messageId() == gmSetLevel && r.requestId() == id, observeTimeout);
+        // gate 的 GM 闸 2026-10-15 起回带请求 id 的信封 1006（原为推 23 {1006}；mmorpg client-request-ordering.md O6）：
+        // 这条请求唯一的回执就是这条信封，没转发由「等级不变」证明
+        Optional<Received> rejected = c.await(mark, r -> r.messageId() == gmSetLevel && r.requestId() == id, requestTimeout);
+        int tipId = rejected.map(Received::envelopeTipId).orElse(-1);
         AttributePanelInfo after = panel(c);
-        report.check(tipId == TIP_FEATURE_UNAVAILABLE && reply.isEmpty() && after.getLevel() == 1 && c.isOpen(),
-                "生产模式 GM 设等级（175）：gate 推 23 {1006}、不转发、等级不变",
-                "23 tip=" + tipId + " 应答=" + reply.isPresent() + " level=" + after.getLevel(), REF);
+        boolean oldShapePush = c.inbox().snapshot(mark).stream().anyMatch(r -> r.messageId() == sendTip && r.requestId() == 0
+                && isTip(r.parseOrNull(TipInfoMessage.parser()), TIP_FEATURE_UNAVAILABLE));
+        report.check(tipId == TIP_FEATURE_UNAVAILABLE && !oldShapePush && after.getLevel() == 1 && c.isOpen(),
+                "生产模式 GM 设等级（175）：gate 回带请求 id 的信封 1006、不转发、等级不变",
+                "信封 tip=" + tipId + " 旧形状 23 推送=" + oldShapePush + " level=" + after.getLevel(), REF);
+    }
+
+    private static boolean isTip(TipInfoMessage tip, int tipId) {
+        return tip != null && tip.getId() == tipId;
     }
 
     /** 切方案的结果：{@code hitCooldown} = 第一次撞上了冷却（25008）、等过之后才切成。 */
