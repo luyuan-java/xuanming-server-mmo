@@ -19,6 +19,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.options.OptionalOptions;
 import org.redisson.client.codec.StringCodec;
 
 /**
@@ -127,7 +128,8 @@ public final class RedissonTicketStore implements TicketStore {
 
     private JoinResult join(String what, List<Object> keys, Deadline d, String ticketId, int mode, int configId, int zoneId, long ratingCenti,
                             long ttlMs, long playerId) {
-        List<Object> reply = evalList(what, TicketScripts.JOIN, keys, d, ticketId, Integer.toString(mode), Integer.toUnsignedString(configId),
+        // 客户端 157 的提交点:不重发(见 CLIENT_WRITE_SCRIPT)。
+        List<Object> reply = evalListOnce(what, TicketScripts.JOIN, keys, d, ticketId, Integer.toString(mode), Integer.toUnsignedString(configId),
                 Integer.toUnsignedString(zoneId), Long.toString(ratingCenti), Long.toString(ttlMs), TicketCodec.member(playerId));
         long code = integerAt(reply, 0, what);
         String detail = textAt(reply, 1, what);
@@ -185,7 +187,8 @@ public final class RedissonTicketStore implements TicketStore {
     public boolean cancel(long playerId, String ticketId, QueueRef queue, Deadline d) {
         new TicketRef(playerId, ticketId);
         Objects.requireNonNull(queue, "queue");
-        return evalInteger("取消排队", TicketScripts.CANCEL, List.of(ticketKey(playerId), queue.queueKey(redisKeys), queue.rankKey(redisKeys)), d, ticketId,
+        // 客户端 148 的提交点(以及 157 入队失败的回滚):不重发(见 CLIENT_WRITE_SCRIPT)。回滚失败只留下一张孤儿票,下次 157 自愈。
+        return evalIntegerOnce("取消排队", TicketScripts.CANCEL, List.of(ticketKey(playerId), queue.queueKey(redisKeys), queue.rankKey(redisKeys)), d, ticketId,
                 TicketCodec.member(playerId)) == 1;
     }
 
@@ -406,6 +409,29 @@ public final class RedissonTicketStore implements TicketStore {
 
     private List<Object> evalList(String what, String lua, List<Object> keys, Deadline d, Object... args) {
         return await(what, d, () -> redis.getScript(StringCodec.INSTANCE).<List<Object>>evalAsync(RScript.Mode.READ_WRITE, lua,
+                RScript.ReturnType.MULTI, keys, args));
+    }
+
+    /**
+     * 客户端请求路径上的写(157 建票 / 入队、148 取消)用的脚本句柄:编解码同上,但<b>不让 Redisson 在响应超时后原样重发</b>。
+     *
+     * <p>为什么:gate 对同一会话的后端请求单飞,上一条观察到完成(含 5 s 超时)才发下一条(mmorpg client-request-ordering.md O3)。
+     * 原先 {@code retry-attempts = 1},单条命令最坏 (1 + 1) × timeout + delay ≈ 4.2 s 才放弃,截止前最后发出的那条写经重发,
+     * 最晚可在 gate 已放行下一条之后数秒才执行 ——「加入 → 取消」会执行成「取消(没票、回成功)→ 加入」,玩家看到取消成功却仍在排队。
+     * 关掉重发之后,截止前发出的写至多在一个 timeout 内落定;超时按依赖故障回 16004,客户端按结果未知处理(先查 153)。
+     * 凑单、gather、补偿这些后台路径不受影响,仍走带重发的 {@link #evalInteger} / {@link #evalList}:它们的脚本按票号 CAS、可重放,
+     * 重发只会更稳,也不存在「客户端已经放行下一条」的问题。
+     */
+    private static final OptionalOptions CLIENT_WRITE_SCRIPT = OptionalOptions.defaults().codec(StringCodec.INSTANCE).retryAttempts(0);
+
+    private long evalIntegerOnce(String what, String lua, List<Object> keys, Deadline d, Object... args) {
+        Long reply = await(what, d, () -> redis.getScript(CLIENT_WRITE_SCRIPT).<Long>evalAsync(RScript.Mode.READ_WRITE, lua,
+                RScript.ReturnType.INTEGER, keys, args));
+        return reply;
+    }
+
+    private List<Object> evalListOnce(String what, String lua, List<Object> keys, Deadline d, Object... args) {
+        return await(what, d, () -> redis.getScript(CLIENT_WRITE_SCRIPT).<List<Object>>evalAsync(RScript.Mode.READ_WRITE, lua,
                 RScript.ReturnType.MULTI, keys, args));
     }
 

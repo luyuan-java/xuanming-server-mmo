@@ -9,6 +9,7 @@ import com.game.common.GameNamespace;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
+import com.game.discovery.proto.PlayerPresence;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchDispatcher;
 import com.game.match.dispatch.MatchMethodHandler;
@@ -127,6 +128,45 @@ class QueueHandlersTest {
 
         assertThat(reply.getTipId()).isZero();
         assertThat(JoinQueueResponse.parseFrom(reply.getBody())).isEqualTo(JoinQueueResponse.newBuilder().setQueueTicket("ticket-1").build());
+        assertThat(store.queueMembers(Q_1V1)).containsExactly("1001");
+    }
+
+    @Test
+    void 排队_来自已被取代的会话_inband16020_不建票不入队() throws Exception {
+        // 跨会话栅栏(mmorpg client-request-ordering.md §6.3 / O13):玩家已在新会话上重连,在线目录的会话号换了;
+        // 旧会话上迟到的 157 不得建票,否则玩家会在新会话里「取消成功、实际仍在排队」。
+        players.online(A, 1, 7);
+        players.presence(A, PlayerPresence.newBuilder().setPlayerId(A).setZoneId(1).setGateNodeId(1)
+                .setGateInstanceId(FakePlayerStatus.GATE_INSTANCE).setSessionId(FakePlayerStatus.sessionIdOf(A) + 1).setOwnerEpoch(2).build());
+
+        ClientReply reply = send(dispatcher, call(MatchMethods.JOIN_QUEUE, A, join1v1()));
+
+        assertThat(reply.getTipId()).as("业务拒绝在应答体里,不走信封").isZero();
+        assertThat(JoinQueueResponse.parseFrom(reply.getBody()).getErrorCode()).isEqualTo(16020);
+        assertThat(store.ticketOf(A)).isEmpty();
+        assertThat(store.queueMembers(Q_1V1)).isEmpty();
+    }
+
+    @Test
+    void 排队_换了gate进程实例的会话同样被拒() throws Exception {
+        players.online(A, 1, 7);
+        players.presence(A, PlayerPresence.newBuilder().setPlayerId(A).setZoneId(1).setGateNodeId(1)
+                .setGateInstanceId("gate-inst-restarted").setSessionId(FakePlayerStatus.sessionIdOf(A)).setOwnerEpoch(2).build());
+
+        ClientReply reply = send(dispatcher, call(MatchMethods.JOIN_QUEUE, A, join1v1()));
+
+        assertThat(JoinQueueResponse.parseFrom(reply.getBody()).getErrorCode()).isEqualTo(16020);
+        assertThat(store.ticketOf(A)).isEmpty();
+    }
+
+    @Test
+    void 排队_在线目录还没写到_照常受理() throws Exception {
+        // 在线目录由 gate 在 scene 确认进场之后异步写入:刚进场就点匹配时可能还没有条目,缺席按放行(位置已要求 ONLINE)。
+        players.location(A, 1, 7);
+
+        ClientReply reply = send(dispatcher, call(MatchMethods.JOIN_QUEUE, A, join1v1()));
+
+        assertThat(JoinQueueResponse.parseFrom(reply.getBody()).getErrorCode()).isZero();
         assertThat(store.queueMembers(Q_1V1)).containsExactly("1001");
     }
 
