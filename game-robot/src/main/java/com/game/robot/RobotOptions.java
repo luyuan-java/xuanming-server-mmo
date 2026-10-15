@@ -195,7 +195,7 @@ public record RobotOptions(
         EXPECT_JUMP("expect-jump", "GAME_ROBOT_EXPECT_JUMP", "auto",
                 "movement 跳跃检查的期望：auto（纠偏或 fail-open 都接受）/ correct（必须回 137）/ accept（必须原样接受）"),
         EXPECT_GM("expect-gm", "GAME_ROBOT_EXPECT_GM", "allow",
-                "currency / attribute：服务端运行模式的期望：allow（dev / test，GM 指令生效）/ deny（prod，gate 推 23 {1006} 且不转发）"),
+                "currency / attribute：服务端运行模式的期望：allow（dev / test，GM 指令生效）/ deny（prod，gate 回带请求 id 的信封 1006 且不转发）"),
         DATA_URL("data-url", "GAME_ROBOT_DATA_URL", "http://127.0.0.1:18106", "audit / guard / zones / queue / drain / killswitch：game-data 管理端口（运维接口）"),
         SCENE_METRICS_URL("scene-metrics-url", "GAME_ROBOT_SCENE_METRICS_URL", "http://127.0.0.1:18104",
                 "audit / guard：game-scene 管理端口（抓指标）；battle-settle 可给逗号分隔的多个地址（双 scene 切片的两个节点，按节点之和判定）"),

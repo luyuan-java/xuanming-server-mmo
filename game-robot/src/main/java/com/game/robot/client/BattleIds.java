@@ -17,7 +17,7 @@ import com.game.contract.MessageIdRegistry;
  * @param spectateState      161：观众握手后首帧
  * @param spectateEnd        166：观战结束
  * @param battleAssigned     177：落点分配（大厅公告，带票）
- * @param sendTip            23：gate 推的 tip（大厅上发战斗上行回 {@code {1003}}）
+ * @param sendTip            23：gate 推的 tip（2026-10-15 起大厅上发战斗上行改回带请求 id 的信封 1003，不再是 23）
  * @param notWhitelisted     157（MatchService.JoinQueue）：合法的契约号但不在直连面的上行白名单里（battle-edge 用它测信封 1005）
  */
 public record BattleIds(

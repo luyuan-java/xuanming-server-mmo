@@ -29,7 +29,7 @@ import java.util.Optional;
  * <ul>
  *   <li><b>allow</b>（dev / test）：加钻石 500（37）→ 扣 120（49）→ 超扣回 27000 → 封金币（94）后加金币回 27005 → 解封（95）
  *       → 未知币种回 1005；断开重登，余额与封禁状态（这里已解封）按离场写回恢复。</li>
- *   <li><b>deny</b>（prod）：发 37，gate 推 23 {1006} 且没有 37 的应答；随后查余额仍为 0（没转发到 scene），连接仍在。</li>
+ *   <li><b>deny</b>（prod）：发 37，gate 回带请求 id 的信封 1006（2026-10-15 起，原为推 23 {1006}），没有 37 的业务应答；随后查余额仍为 0（没转发到 scene），连接仍在。</li>
  * </ul>
  * 消息号按「服务 + 方法」从契约解析，不写死。
  */
@@ -154,13 +154,20 @@ public final class CurrencyScenario {
         GameConnection c = player.connection();
         int mark = c.inbox().size();
         long id = c.send(gmAdd, add(DIAMOND, 500));
-        Optional<Received> tip = c.await(mark, r -> r.messageId() == sendTip, requestTimeout);
-        int tipId = tip.isEmpty() ? -1 : tipIdOf(tip.get());
-        report.check(tipId == TIP_FEATURE_UNAVAILABLE, "生产模式发 GM 加币（37）：gate 推 23 {1006}",
-                tip.isEmpty() ? "没有收到 23" + c.describeSince(mark) : "23 tip=" + tipId, REF);
-        Optional<Received> reply = c.await(mark, r -> r.messageId() == gmAdd && r.requestId() == id, observeTimeout);
-        report.check(reply.isEmpty(), "生产模式 GM 指令不转发（没有 37 的应答）",
-                reply.isEmpty() ? observeTimeout.toMillis() + " ms 内没有应答" : "收到了应答", REF);
+        // gate 的 GM 闸 2026-10-15 起回带请求 id 的信封 1006（原为推 23 {1006}；mmorpg client-request-ordering.md O6）
+        Optional<Received> rejected = c.await(mark, r -> r.messageId() == gmAdd && r.requestId() == id, requestTimeout);
+        int tipId = rejected.map(Received::envelopeTipId).orElse(-1);
+        report.check(tipId == TIP_FEATURE_UNAVAILABLE, "生产模式发 GM 加币（37）：gate 回带请求 id 的信封 1006",
+                rejected.isEmpty() ? "没有收到 37 的信封" + c.describeSince(mark) : "信封 tip=" + tipId, REF);
+        // 观察窗口内这条请求只该有那一条信封：再来一条（业务应答）就说明被转发了
+        c.await(mark, r -> false, observeTimeout);
+        long repliesForRequest = c.inbox().snapshot(mark).stream()
+                .filter(r -> r.messageId() == gmAdd && r.requestId() == id).count();
+        boolean pushedOldShape = c.inbox().snapshot(mark).stream().anyMatch(r -> r.messageId() == sendTip && r.requestId() == 0
+                && Optional.ofNullable(r.parseOrNull(TipInfoMessage.parser())).map(TipInfoMessage::getId).orElse(-1)
+                        == TIP_FEATURE_UNAVAILABLE);
+        report.check(repliesForRequest == 1 && !pushedOldShape, "生产模式 GM 指令不转发（37 只有那条信封、没有业务应答，也不推 23）",
+                "37 回执数=" + repliesForRequest + " 23 推送=" + pushedOldShape, REF);
         GetCurrencyListResponse after = list(c);
         report.check(after.getCurrency().getValuesList().stream().allMatch(v -> v == 0) && c.isOpen(),
                 "被拒后余额不变、连接仍在", "values=" + after.getCurrency().getValuesList() + " open=" + c.isOpen(), REF);
@@ -185,9 +192,5 @@ public final class CurrencyScenario {
 
     private static int tipOf(boolean present, TipInfoMessage tip) {
         return present ? tip.getId() : -1;
-    }
-
-    private static int tipIdOf(Received received) throws RobotException {
-        return received.parse(TipInfoMessage.parser()).getId();
     }
 }

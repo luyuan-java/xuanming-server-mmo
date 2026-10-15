@@ -670,7 +670,7 @@ public final class GuildEconomyScenario {
         return response.getBag();
     }
 
-    /** GM 加货币（37）：只在 dev / test 运行模式放行；生产模式 gate 推 23 {1006} 且不转发，表现为等不到应答。 */
+    /** GM 加货币（37）：只在 dev / test 运行模式放行；生产模式 gate 回带请求 id 的信封 1006 且不转发（2026-10-15 起；原为推 23 {1006}、表现为等不到应答）。 */
     private GmAddCurrencyResponse gmAdd(GuildScenario.Bot bot, int currencyType, long amount) throws RobotException {
         try {
             return bot.call(gmAdd, GmAddCurrencyRequest.newBuilder().setCurrencyType(currencyType).setAmount(amount).build(),
@@ -689,7 +689,7 @@ public final class GuildEconomyScenario {
         }
     }
 
-    private static final String GM_HINT = "（GM 指令要 GAME_RUN_MODE=dev 放行；生产模式 gate 推 23 {1006} 且不转发）";
+    private static final String GM_HINT = "（GM 指令要 GAME_RUN_MODE=dev 放行；生产模式 gate 回信封 1006 且不转发）";
 
     // ================================================================ 推送
 
