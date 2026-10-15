@@ -361,7 +361,7 @@
   - `BattleClientPlayer` 不在 `SERVICE_BACKENDS` 里（`MessageRoutes`）；
   - 6.2 时走 `ClientDispatcher` 的「未接入的域」分支，回 23 `{1003}`——结果相同，但排在热关停与待处理队列之后。
   - **批次 6.3 起改为当场拒绝**（scene-battle-spec §7.19，D12）：`MessageRoute.directOnly`（`MessageRoutes.DIRECT_ONLY_SERVICES = {"BattleClientPlayer"}`，12 个号）；
-    `ClientDispatcher.onRequest` 在 GM 闸之后、热关停之前当场推 23 `{1003}`，计 `game_gate_client_requests_total{result="battle_rejected"}`（12 条序列装配时预建），
+    `ClientDispatcher.onRequest` 在 GM 闸之后、热关停之前当场回带请求 id 的信封 1003（2026-10-15 起，原为推 23 `{1003}`；scene-battle-spec D12 修订），计 `game_gate_client_requests_total{result="battle_rejected"}`（12 条序列装配时预建），
     不进待处理队列、不计非法包、不断连；战斗上行不再计 `result=unsupported`。体积与限频排在它之前，被拒的战斗号照样占限频额度（同基线）。
 
 ### 3.8 参考客户端依赖的判据
@@ -1685,7 +1685,7 @@ message BattleNodeInfo {
 
 - `MessageRoutesTest`：`BattleClientPlayer` 的 12 个方法全部路由到 `unsupported`。
   （6.3 起改为钉 `directOnly`：恰好是这 12 个号、其余客户端路由都不是，并与基线节点类型回落的近似判据圈出同一组号；域仍是 `unsupported`、只作指标标签。）
-- `ClientDispatcherTest`：大厅上发 140 / 149 / 162 / 165 → 推 23 `{1003}`，不计非法包、不断连。
+- `ClientDispatcherTest`：大厅上发 140 / 149 / 162 / 165 → 带请求 id 的信封 1003（2026-10-15 起，原为推 23 `{1003}`），不计非法包、不断连。
   （6.3 起分两处：真实契约的 12 个号在 `BattleUplinkRejectedTest`；手写路由的闸序——login 在途时当场回、队列满不因它断连、热关停规则对战斗号无效、计 `battle_rejected`——在 `ClientDispatcherTest`「战斗上行」一节。）
 - `GatePushSubscriberTest`：`MessageBatch` 在同一个会话任务里按序下发；任一条损坏整条丢弃；玩家栅栏对每条都生效；实例不符整条丢弃。
 

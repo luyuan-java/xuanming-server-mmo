@@ -785,7 +785,7 @@ Java 版是独立进程 game-battle，规格与逐条出处见 `docs/porting/bat
 客户端可见的部分（帧、握手、闸门顺序、拒绝串、tip、时限、推送与线上顺序）与基线逐字节相同：
 
 - **两条连接**：大厅连接（gate）承载登录、scene、match（含补签 179），只接收大厅公告 177 / 143 的回落，**不承载任何战斗上行**——gate 对 `BattleClientPlayer`
-  的 12 个号一律推 23 {1003}、不计非法包、不断连（`MessageRoutes.SERVICE_BACKENDS` 永不加入它；批次 6.3 起由 `MessageRoute.directOnly` 在 GM 闸之后、
+  的 12 个号一律回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}）、不计非法包、不断连（`MessageRoutes.SERVICE_BACKENDS` 永不加入它；批次 6.3 起由 `MessageRoute.directOnly` 在 GM 闸之后、
   热关停与待处理队列之前当场拒绝，回到基线的位置，§4.23）。battle 直连每局一条，参战与观战共用一个槽，承载握手、
   四条战斗 RPC（149 提交行动 / 140 拉状态 / 162 自动战斗 / 165 退出观战）与全部战斗帧（139 / 150 / 158 / 161 / 166）；没有活直连的战斗帧直接丢弃、不回落 gate。
 - **线程**：一条 `battle-logic` 线程（单线程 `NioEventLoopGroup`）既是直连面唯一的 Netty I/O EventLoop，又独占全部房间、直连会话状态（是否已验证、限频器、

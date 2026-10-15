@@ -107,7 +107,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - client messages: 54 GetCurrencyList (C2S)、37 GmAddCurrency (C2S, GM)、49 GmDeductCurrency (C2S, GM)、94 GmBlockCurrency (C2S, GM)、95 GmUnblockCurrency (C2S, GM)
 - tables: Currency（类型 / 上限）
 - depends on: player 数据层（CurrencyComp 持久化）、交易流水（transaction_log）、跨 zone 冻结
-- behavior: 54 回 CurrencyComp{values[], blocked_types[], debts[]}；GM 四条在 prod（GATE_RUN_MODE 未设）由 gate 回 23{1006} 并计非法包，scene 另有 SCENE_RUN_MODE 二道闸；加币被封禁类型 kAssetBlocked、超上限 kCurrencyMax、扣币不足 kAssetCurrencyInsufficient、冻结 kAssetFrozen；有欠款（debts）时加币自动先还债；流水记 TX_GM_GRANT / TX_GM_DEDUCT
+- behavior: 54 回 CurrencyComp{values[], blocked_types[], debts[]}；GM 四条在 prod（GATE_RUN_MODE 未设）由 gate 回带请求 id 的信封 1006（2026-10-15 起，原为 23{1006}）并计非法包，scene 另有 SCENE_RUN_MODE 二道闸；加币被封禁类型 kAssetBlocked、超上限 kCurrencyMax、扣币不足 kAssetCurrencyInsufficient、冻结 kAssetFrozen；有欠款（debts）时加币自动先还债；流水记 TX_GM_GRANT / TX_GM_DEDUCT
 - internal: 交易流水 / 异常检测、owner_epoch 写回、补缴债务
 - java: missing — scene `ClientRequestHandler.replyUnavailable` 对 54/37/49/94/95 一律回 1006；无货币组件与持久化列
 - size: M

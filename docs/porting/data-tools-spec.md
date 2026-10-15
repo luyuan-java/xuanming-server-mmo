@@ -763,7 +763,7 @@ currency-crash-window（`inventory/tools.md:470-480`，基线 `tools/scripts/cur
 1. **进场**（还没在游戏里时）：assign-gate（遇到 429 / 100 按 `retry_after` 退避，不计失败，截止 30 s）→ TCP → 握手 → 48 →（第一次）14 → 26。撞 2005 退避重试，200 ms 起、封顶 1.6 s、截止 40 s（大于 30 s 租约）。不复用 `PlayerFlow` 的「4 次 × 1 s」（`PlayerFlow.java:45-47`），理由同 `scene-drain-spec.md:1310`。等 79 和自己的 21。
 2. **DS1 / DS8**：位置载体有效时比对自己 21 的位置；发 54 比对钻石与金币。
 3. **移动**：134 → 132（250 ms 后，1 条）→ 131，目标为本轮编码位置。收到 137 就以服务端位置为准，本轮位置载体记为无效（DS3 跳过本轮）。
-4. **加币**：GM 37 钻石 + 1；第 1 轮再给金币加 `f_p`。等应答；超时记入不确定带。gate 推 23 `{1006}`（prod）→ 整次运行 UNVERIFIED(`currency_gm_denied`)、**立即停止再发 37**（每条被拒的 GM 指令都计 gate 非法包，累计 50 个断连，`GateProperties.java:18`），提示改用 `--currency off`。应答 tip 27003（冻结中，`CurrencyFeature.java:36-38`）或运维全服封禁获取的拒绝是「确定没生效」，不进不确定带、本轮重发一次；仍拒就记 UNVERIFIED。
+4. **加币**：GM 37 钻石 + 1；第 1 轮再给金币加 `f_p`。等应答；超时记入不确定带。gate 回带请求 id 的信封 1006（prod；2026-10-15 起，原为推 23 `{1006}`）→ 整次运行 UNVERIFIED(`currency_gm_denied`)、**立即停止再发 37**（每条被拒的 GM 指令都计 gate 非法包，累计 50 个断连，`GateProperties.java:18`），提示改用 `--currency off`。应答 tip 27003（冻结中，`CurrencyFeature.java:36-38`）或运维全服封禁获取的拒绝是「确定没生效」，不进不确定带、本轮重发一次；仍拒就记 UNVERIFIED。
 5. **换节点**（`--switch-scene` 命中的轮次）：63 `{scene_id}`，等 79（另一节点）和自己的 21，坐标应不变。
 6. **屏障**：发 54。同一会话的请求按序到达 scene 逻辑线程，而 131 本身不回包，所以 54 既当屏障，又核对内存中的余额。
 7. **在线存盘**（`--online-save` 命中的轮次）：等 `save-interval + 2 s`，读导出包，核对 DS10。
@@ -946,7 +946,7 @@ java -jar game-robot.jar stress --count 200 --ramp-interval-ms 50 --duration 10m
    - 登录排队（`--count` 超过区服 `capacity` 时）；
    - gate 非法包阈值 50（超频、运行模式拒绝的 GM 指令都算），到阈值断连；
    - robot 必须按 `retry_after` 退避，必须关闭被取代的连接。
-8. **GM 运行模式**：prod 下 37 被拒（23 `{1006}`），data-stress 必须显式 `--currency off`，否则判 UNVERIFIED。
+8. **GM 运行模式**：prod 下 37 被拒（带请求 id 的信封 1006；2026-10-15 前为 23 `{1006}`），data-stress 必须显式 `--currency off`，否则判 UNVERIFIED。
 9. **应答丢失后的重试**：已提交的最终写回在重试时会因为 `owner_released = 1` 而得到 0 行，被记成 fenced（`StoragePlayerRepository.java:51-53`、`:304-327`；`PlayerStore.saveStateAndRelease:252`）。内容其实已经落库，只是分类失真。所以 DS5 在 calm 下判 0，在注入下不作失败判据；故障注入单测要钉住「内容不丢、不重复」。另一类合法的 fenced 是 `op=progress`：离场不等在途的在线存盘，后者晚到就被围栏拒（`SceneWorld.java:96-97`），DS5 因此不把它算进判据。
 10. **快照与落盘的字节比较**：LOGOUT 快照与最终写回是同一份 `PlayerSave`（`architecture.md:206-207`），但两路各自序列化，map 字段的顺序不能保证逐字节相同。DS9 先比 sha256，不等再比解码后的 JSON 树。
 11. **多 scene 节点**：robot 必须抓全部节点的指标，否则 DS5 会漏算。
