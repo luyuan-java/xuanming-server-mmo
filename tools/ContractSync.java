@@ -52,6 +52,8 @@ import java.util.stream.Stream;
  * java tools/ContractSync.java --mmorpg ../mmorpg              # 同步
  * java tools/ContractSync.java --mmorpg ../mmorpg --check      # 只检查本仓库是否与 mmorpg 一致（CI 用），不一致退出码 1
  * java tools/ContractSync.java --mmorpg snapshot/ --commit 26ceb70ca   # 源目录不是 git 工作树时显式给 commit
+ * # friend 单域刷新：完整既有契约基线快照，仅替换 friend 两源；commit 为基线，partial-source-commit 为实际源 HEAD
+ * java tools/ContractSync.java --mmorpg snapshot/ --commit BASE_SHA --partial-source-commit SOURCE_SHA
  * </pre>
  */
 public final class ContractSync {
@@ -96,6 +98,21 @@ public final class ContractSync {
         int exitCode = 0;
         try {
             Map<String, String> info = sync(source, scratch, commit);
+            if (opts.containsKey("partial-source-commit")) {
+                // friend 单域同步：基线快照承载其他契约，不能把真实源 HEAD 冒充全量同步版本。
+                String actual = require(opts, "partial-source-commit");
+                if (!actual.matches("[0-9a-fA-F]{40}")) {
+                    throw new IllegalArgumentException("--partial-source-commit 必须是真实的 40 位源提交号");
+                }
+                info.put("partial.scope", "friend");
+                info.put("partial.source.dirty", "true");
+                info.put("partial.source.commit", actual);
+                info.put("partial.source.paths", "proto/friend/friend.proto,proto/friend/friend_table.proto");
+                for (String name : List.of("friend.proto", "friend_table.proto")) {
+                    info.put("partial.source.sha256." + name, sha256(source.resolve("proto/friend/" + name)));
+                }
+                writeSourceInfo(scratch.resolve(SOURCE_INFO_OUT), info);
+            }
             if (opts.containsKey("check")) {
                 List<String> diffs = compare(scratch, repo);
                 if (diffs.isEmpty()) {

@@ -473,7 +473,7 @@ class QueueServiceTest {
      * 请求体自称 9，位置记录（玩家所在的 scene）在 zone 2——跨 zone 传送途中就是这个样子。票据只认位置记录。
      */
     @Test
-    void 会话与在线目录在zone1_位置记录在zone2_票据记zone2_全程不读在线目录() throws Exception {
+    void 会话与在线目录在zone1_位置记录在zone2_票据记zone2_在线目录只做会话栅栏() throws Exception {
         players.presence(A, PlayerPresence.newBuilder().setPlayerId(A).setZoneId(1).setGateNodeId(1).setGateInstanceId("gate-z1-inst")
                 .setSessionId((1 << 17) | 1).setOwnerEpoch(1).build());
         players.location(A, 2, 1);
@@ -486,7 +486,8 @@ class QueueServiceTest {
         JoinQueueResponse response = JoinQueueResponse.parseFrom(((MatchMethodHandler.Reply.Body) reply).bytes());
         assertBytes(response, JoinQueueResponse.newBuilder().setQueueTicket("ticket-1").build());
         assertThat(store.ticketOf(A).orElseThrow().zoneId()).as("zone 取位置记录：不是会话的 1，也不是请求体的 9").isEqualTo(2);
-        assertThat(players.reads).as("157 只读战斗锁与位置记录，不读在线目录").containsExactly("lock:1001", "location:1001");
+        assertThat(players.reads).as("157 读战斗锁与位置记录；在线目录只用来复核发起会话（跨会话栅栏），zone 不取它")
+                .containsExactly("lock:1001", "location:1001", "presence:1001");
     }
 
     @Test

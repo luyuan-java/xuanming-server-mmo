@@ -16,7 +16,7 @@ import java.util.List;
 public interface FriendStore {
 
     /** 发申请的结局。好友数满的两个值按「角色」命名：申请人（sender）满 / 接收方满，由上层分别映射 tip。 */
-    enum AddResult { OK, BLOCKED, ALREADY_FRIENDS, ALREADY_SENT, TOO_MANY_PENDING, TARGET_INBOX_FULL, SENDER_FULL, RECEIVER_FULL }
+    enum AddResult { OK, BLOCKED, ALREADY_FRIENDS, TOO_MANY_PENDING, TARGET_INBOX_FULL, SENDER_FULL, RECEIVER_FULL }
 
     /** 同意申请的结局。SENDER_FULL = 原申请人好友满，ACCEPTOR_FULL = 我（接受者）好友满。 */
     enum AcceptResult { OK, NO_PENDING, BLOCKED, SENDER_FULL, ACCEPTOR_FULL }
@@ -27,12 +27,20 @@ public interface FriendStore {
 
     enum BlockResult { OK, BLOCK_LIST_FULL }
 
+    /** 申请受理结果；重复 pending 复用同一非零 ID，created 只在新代次成立时为 true。 */
+    record AddOutcome(AddResult result, long requestId, boolean created) { }
+
+    /** 处理申请的结果；from 来自权威申请行，changed 只在首次 pending 转终态时为 true。 */
+    record AcceptOutcome(AcceptResult result, long fromPlayerId, boolean changed) { }
+
+    record RejectOutcome(RejectResult result, long fromPlayerId, boolean changed) { }
+
     /** 好友边（列表读）。 */
     record FriendEdge(long friendPlayerId, long sinceMs) {
     }
 
     /** 入站待处理申请（列表读）；status 恒为 1。 */
-    record PendingRequest(long fromPlayerId, long toPlayerId, long requestTimeMs, int status) {
+    record PendingRequest(long fromPlayerId, long toPlayerId, long requestTimeMs, int status, long requestId) {
     }
 
     record BlockEdge(long blockedPlayerId, long sinceMs) {
@@ -40,15 +48,15 @@ public interface FriendStore {
 
     /**
      * 发申请（守卫事务，补双方容量行——补行是自动提交的，被拒时也已补上，同基线）。
-     * 检查优先级：拉黑 &gt; 已是好友 &gt; 已申请 &gt; 出站满 &gt; 入站满 &gt; 我满 &gt; 对方满；通过后 upsert 待处理行。
+     * 检查优先级：拉黑 &gt; 已是好友 &gt; 重复 pending 成功复用 ID &gt; 出站满 &gt; 入站满 &gt; 我满 &gt; 对方满；通过后 upsert 待处理行。
      */
-    AddResult addRequest(long from, long to, Deadline deadline);
+    AddOutcome addRequest(long from, long to, Deadline deadline);
 
-    /** 同意 {@code from} 发给 {@code me} 的申请：两个方向的待处理都置已同意、双向插边并各自计数 +1。 */
-    AcceptResult accept(long from, long me, Deadline deadline);
+    /** 按非零 requestId 同意发给会话玩家 me 的申请（忽略兼容参数 fromHint）：同事务终结双向 pending、插双向边并更新计数；仅已同意的同代次可成功重放。 */
+    AcceptOutcome accept(long requestId, long me, long fromHint, Deadline deadline);
 
-    /** 拒绝（单条 CAS，不拿守卫）。 */
-    RejectResult reject(long from, long me, Deadline deadline);
+    /** 按非零 requestId 拒绝（忽略兼容参数 fromHint，完整玩家对 + 代次 CAS，不拿容量守卫）；仅已拒绝的同代次可成功重放且 changed=false。 */
+    RejectOutcome reject(long requestId, long me, long fromHint, Deadline deadline);
 
     /** 删除好友（不是好友 / 删自己都是 {@link RemoveResult#NOT_FRIENDS}，上层回成功）。 */
     RemoveResult remove(long me, long target, Deadline deadline);

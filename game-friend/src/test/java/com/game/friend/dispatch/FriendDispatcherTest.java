@@ -49,18 +49,18 @@ class FriendDispatcherTest {
     private FriendDispatcher dispatcher(Executor executor, FriendStore.AddResult addResult) {
         FriendStore store = new FriendStore() {
             @Override
-            public AddResult addRequest(long from, long to, Deadline deadline) {
-                return addResult;
+            public AddOutcome addRequest(long from, long to, Deadline deadline) {
+                return new AddOutcome(addResult, addResult == AddResult.OK ? 123 : 0, true);
             }
 
             @Override
-            public AcceptResult accept(long from, long me, Deadline deadline) {
-                return AcceptResult.OK;
+            public AcceptOutcome accept(long requestId, long me, long from, Deadline deadline) {
+                return new AcceptOutcome(AcceptResult.OK, from, true);
             }
 
             @Override
-            public RejectResult reject(long from, long me, Deadline deadline) {
-                return RejectResult.OK;
+            public RejectOutcome reject(long requestId, long me, long from, Deadline deadline) {
+                return new RejectOutcome(RejectResult.OK, from, true);
             }
 
             @Override
@@ -156,9 +156,9 @@ class FriendDispatcherTest {
         assertThat(AddFriendResponse.parseFrom(reply.getBody()).hasErrorMessage()).isFalse();
         assertThat(requests("AddFriend", "ok")).isEqualTo(1);
 
-        FriendDispatcher rejected = dispatcher(Runnable::run, FriendStore.AddResult.ALREADY_SENT);
+        FriendDispatcher rejected = dispatcher(Runnable::run, FriendStore.AddResult.BLOCKED);
         reply = rejected.dispatch(call(ADD, 5, body)).join();
-        assertThat(AddFriendResponse.parseFrom(reply.getBody()).getErrorMessage().getId()).isEqualTo(15003);
+        assertThat(AddFriendResponse.parseFrom(reply.getBody()).getErrorMessage().getId()).isEqualTo(15007);
         assertThat(requests("AddFriend", "business_error")).isEqualTo(1);
 
         // 依赖故障：应答体里的 1003 计 internal_error

@@ -2,6 +2,11 @@ package com.game.friend.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.friend.store.FriendStore.AcceptResult;
@@ -35,6 +40,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,6 +64,7 @@ class JdbcFriendStoreMysqlTest {
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"
             + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=5";
     private static final String DATABASE = "game_friend_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    private static final java.util.concurrent.atomic.AtomicLong REQUEST_IDS = new java.util.concurrent.atomic.AtomicLong(10000);
     private static final FriendLimits LIMITS = new FriendLimits(200, 50, 200, 200);
 
     private static DruidDataSource dataSource;
@@ -111,6 +118,10 @@ class JdbcFriendStoreMysqlTest {
     }
 
     private JdbcFriendStore store(FriendLimits limits) {
+        return store(limits, REQUEST_IDS::incrementAndGet);
+    }
+
+    private JdbcFriendStore store(FriendLimits limits, java.util.function.LongSupplier ids) {
         return new JdbcFriendStore(dataSource, limits, System::currentTimeMillis, 10, new JdbcFriendStore.Events() {
             @Override
             public void guardRetry(String kind) {
@@ -121,22 +132,62 @@ class JdbcFriendStoreMysqlTest {
             public void countUnderflow() {
                 underflows.incrementAndGet();
             }
-        });
+        }, ids);
+    }
+
+    private static long requestId(JdbcFriendStore store, long from, long to) {
+        try {
+            List<Long> rows = query("SELECT request_id FROM friend_request WHERE from_player_id = "
+                    + Long.toUnsignedString(from) + " AND to_player_id = " + Long.toUnsignedString(to));
+            return rows.isEmpty() ? 0 : rows.get(0);
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static AcceptResult accept(JdbcFriendStore store, long from, long to, Deadline deadline) {
+        return store.accept(requestId(store, from, to), to, from, deadline).result();
+    }
+
+    private static RejectResult reject(JdbcFriendStore store, long from, long to, Deadline deadline) {
+        return store.reject(requestId(store, from, to), to, from, deadline).result();
     }
 
     // ================================================================ 业务规则
 
     @Test
+    void 旧申请表扩展列与普通索引_保留历史记录并按需补号() throws SQLException {
+        exec("ALTER TABLE friend_request DROP INDEX idx_friend_request_2, DROP COLUMN request_id");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms)"
+                + " VALUES (91,92,123,1,456)");
+        PbMysql upgraded = new PbMysql();
+        upgraded.register(FriendRequestRow.getDefaultInstance());
+        try (Connection c = dataSource.getConnection()) {
+            upgraded.syncAll(c);
+        }
+        assertThat(query("SELECT request_id FROM friend_request WHERE from_player_id=91 AND to_player_id=92"))
+                .containsExactly(0L);
+        assertThat(query("SELECT non_unique FROM information_schema.statistics WHERE table_schema='" + DATABASE
+                + "' AND table_name='friend_request' AND index_name='idx_friend_request_2'"))
+                .containsExactly(1L);
+        assertThat(store(LIMITS).pendingRequests(92, 10, d())).singleElement().satisfies(row -> {
+            assertThat(row.requestId()).isNotZero();
+            assertThat(row.requestTimeMs()).isEqualTo(123);
+        });
+        assertThat(updatedMsOf(91, 92)).isEqualTo(456);
+    }
+
+    @Test
     void 申请_同意_双向收敛_计数与列表() throws SQLException {
         JdbcFriendStore s = store(LIMITS);
-        assertThat(s.addRequest(1, 2, d())).isEqualTo(AddResult.OK);
-        assertThat(s.addRequest(1, 2, d())).isEqualTo(AddResult.ALREADY_SENT);
+        assertThat(s.addRequest(1, 2, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(1, 2, d()).result()).isEqualTo(AddResult.OK);
         // 对方也向我申请：不自动成为好友，双方各挂一条
-        assertThat(s.addRequest(2, 1, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(2, 1, d()).result()).isEqualTo(AddResult.OK);
         assertThat(s.pendingRequests(2, 100, d())).extracting(FriendStore.PendingRequest::fromPlayerId).containsExactly(1L);
         assertThat(s.pendingRequests(1, 100, d())).extracting(FriendStore.PendingRequest::fromPlayerId).containsExactly(2L);
 
-        assertThat(s.accept(1, 2, d())).isEqualTo(AcceptResult.OK);
+        assertThat(accept(s, 1, 2, d())).isEqualTo(AcceptResult.OK);
         // 反向 pending 一并置已同意：1 的收件箱里不留孤儿
         assertThat(s.pendingRequests(1, 100, d())).isEmpty();
         assertThat(s.pendingRequests(2, 100, d())).isEmpty();
@@ -146,24 +197,24 @@ class JdbcFriendStoreMysqlTest {
         assertThat(capacity(1)).isEqualTo(1);
         assertThat(capacity(2)).isEqualTo(1);
         // 第二个同意：事务外前置就是 NO_PENDING
-        assertThat(s.accept(2, 1, d())).isEqualTo(AcceptResult.NO_PENDING);
-        assertThat(s.addRequest(1, 2, d())).isEqualTo(AddResult.ALREADY_FRIENDS);
+        assertThat(accept(s, 2, 1, d())).isEqualTo(AcceptResult.OK);
+        assertThat(s.addRequest(1, 2, d()).result()).isEqualTo(AddResult.ALREADY_FRIENDS);
         assertInvariants();
     }
 
     @Test
     void 没有申请的同意不补容量行_拒绝后可以重新申请且刷新申请时间() throws Exception {
         JdbcFriendStore s = store(LIMITS);
-        assertThat(s.accept(7, 8, d())).isEqualTo(AcceptResult.NO_PENDING);
+        assertThat(accept(s, 7, 8, d())).isEqualTo(AcceptResult.NO_PENDING);
         assertThat(countRows("friend_capacity")).isZero();
 
-        assertThat(s.addRequest(7, 8, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(7, 8, d()).result()).isEqualTo(AddResult.OK);
         long first = s.pendingRequests(8, 10, d()).get(0).requestTimeMs();
-        assertThat(s.reject(7, 8, d())).isEqualTo(RejectResult.OK);
-        assertThat(s.reject(7, 8, d())).isEqualTo(RejectResult.NO_PENDING);
+        assertThat(reject(s, 7, 8, d())).isEqualTo(RejectResult.OK);
+        assertThat(reject(s, 7, 8, d())).isEqualTo(RejectResult.OK);
         assertThat(s.pendingRequests(8, 10, d())).isEmpty();
         Thread.sleep(5);
-        assertThat(s.addRequest(7, 8, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(7, 8, d()).result()).isEqualTo(AddResult.OK);
         assertThat(s.pendingRequests(8, 10, d()).get(0).requestTimeMs()).isGreaterThan(first);
         assertThat(updatedMsOf(7, 8)).isPositive(); // 凡改 status 的语句都写 updated_ms
         assertInvariants();
@@ -188,21 +239,21 @@ class JdbcFriendStoreMysqlTest {
     void 拉黑_删边取消申请_双向都拒_同意拿到无申请_解除不恢复好友() throws SQLException {
         JdbcFriendStore s = store(LIMITS);
         befriend(s, 10, 11);
-        assertThat(s.addRequest(10, 12, d())).isEqualTo(AddResult.OK);
-        assertThat(s.addRequest(12, 10, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(10, 12, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(12, 10, d()).result()).isEqualTo(AddResult.OK);
 
         assertThat(s.block(10, 11, d())).isEqualTo(BlockResult.OK);
         assertThat(s.friends(10, 10, d())).isEmpty();
         assertThat(capacity(10)).isZero();
         assertThat(capacity(11)).isZero();
         // 拉黑两个方向都拒（同码、不泄露是谁拉黑了谁）
-        assertThat(s.addRequest(10, 11, d())).isEqualTo(AddResult.BLOCKED);
-        assertThat(s.addRequest(11, 10, d())).isEqualTo(AddResult.BLOCKED);
+        assertThat(s.addRequest(10, 11, d()).result()).isEqualTo(AddResult.BLOCKED);
+        assertThat(s.addRequest(11, 10, d()).result()).isEqualTo(AddResult.BLOCKED);
 
         assertThat(s.block(12, 10, d())).isEqualTo(BlockResult.OK);
         // 拉黑把两个方向的 pending 都置成终态：之后去同意拿到的是 NO_PENDING（不是 BLOCKED）
-        assertThat(s.accept(12, 10, d())).isEqualTo(AcceptResult.NO_PENDING);
-        assertThat(s.accept(10, 12, d())).isEqualTo(AcceptResult.NO_PENDING);
+        assertThat(accept(s, 12, 10, d())).isEqualTo(AcceptResult.NO_PENDING);
+        assertThat(accept(s, 10, 12, d())).isEqualTo(AcceptResult.NO_PENDING);
         // 重复拉黑幂等；单向：A 拉黑了 B 不影响 B 拉黑 A
         assertThat(s.block(12, 10, d())).isEqualTo(BlockResult.OK);
         assertThat(s.block(10, 12, d())).isEqualTo(BlockResult.OK);
@@ -212,7 +263,7 @@ class JdbcFriendStoreMysqlTest {
         s.unblock(10, 11, d());
         assertThat(s.blocks(10, 10, d())).extracting(FriendStore.BlockEdge::blockedPlayerId).containsExactly(12L);
         assertThat(s.friends(10, 10, d())).isEmpty(); // 不恢复好友
-        assertThat(s.addRequest(10, 11, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(10, 11, d()).result()).isEqualTo(AddResult.OK);
         assertInvariants();
     }
 
@@ -228,33 +279,33 @@ class JdbcFriendStoreMysqlTest {
     @Test
     void 检查优先级_拉黑优先于已申请() {
         JdbcFriendStore s = store(LIMITS);
-        assertThat(s.addRequest(30, 31, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(30, 31, d()).result()).isEqualTo(AddResult.OK);
         s.block(31, 30, d());
-        assertThat(s.addRequest(30, 31, d())).isEqualTo(AddResult.BLOCKED);
+        assertThat(s.addRequest(30, 31, d()).result()).isEqualTo(AddResult.BLOCKED);
     }
 
     @Test
     void 出站_入站_好友数上限_满的角色映射() {
         JdbcFriendStore pending = store(new FriendLimits(200, 2, 200, 200));
-        assertThat(pending.addRequest(40, 41, d())).isEqualTo(AddResult.OK);
-        assertThat(pending.addRequest(40, 42, d())).isEqualTo(AddResult.OK);
-        assertThat(pending.addRequest(40, 43, d())).isEqualTo(AddResult.TOO_MANY_PENDING);
+        assertThat(pending.addRequest(40, 41, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(pending.addRequest(40, 42, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(pending.addRequest(40, 43, d()).result()).isEqualTo(AddResult.TOO_MANY_PENDING);
 
         JdbcFriendStore inbox = store(new FriendLimits(200, 50, 2, 200));
-        assertThat(inbox.addRequest(51, 50, d())).isEqualTo(AddResult.OK);
-        assertThat(inbox.addRequest(52, 50, d())).isEqualTo(AddResult.OK);
-        assertThat(inbox.addRequest(53, 50, d())).isEqualTo(AddResult.TARGET_INBOX_FULL);
+        assertThat(inbox.addRequest(51, 50, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(inbox.addRequest(52, 50, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(inbox.addRequest(53, 50, d()).result()).isEqualTo(AddResult.TARGET_INBOX_FULL);
 
         JdbcFriendStore full = store(new FriendLimits(1, 50, 200, 200));
         befriend(full, 60, 61);
-        assertThat(full.addRequest(60, 62, d())).isEqualTo(AddResult.SENDER_FULL);
-        assertThat(full.addRequest(62, 60, d())).isEqualTo(AddResult.RECEIVER_FULL);
+        assertThat(full.addRequest(60, 62, d()).result()).isEqualTo(AddResult.SENDER_FULL);
+        assertThat(full.addRequest(62, 60, d()).result()).isEqualTo(AddResult.RECEIVER_FULL);
         // 同意：原申请人满 → SENDER_FULL，我（接受者）满 → ACCEPTOR_FULL
         JdbcFriendStore loose = store(LIMITS);
-        assertThat(loose.addRequest(60, 63, d())).isEqualTo(AddResult.OK);
-        assertThat(loose.addRequest(64, 61, d())).isEqualTo(AddResult.OK);
-        assertThat(full.accept(60, 63, d())).isEqualTo(AcceptResult.SENDER_FULL);
-        assertThat(full.accept(64, 61, d())).isEqualTo(AcceptResult.ACCEPTOR_FULL);
+        assertThat(loose.addRequest(60, 63, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(loose.addRequest(64, 61, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(accept(full, 60, 63, d())).isEqualTo(AcceptResult.SENDER_FULL);
+        assertThat(accept(full, 64, 61, d())).isEqualTo(AcceptResult.ACCEPTOR_FULL);
     }
 
     @Test
@@ -262,7 +313,7 @@ class JdbcFriendStoreMysqlTest {
         JdbcFriendStore s = store(LIMITS);
         befriend(s, 70, 71);
         exec("DELETE FROM friend_capacity WHERE player_id = 70");
-        assertThat(s.addRequest(70, 72, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(70, 72, d()).result()).isEqualTo(AddResult.OK);
         assertThat(capacity(70)).isEqualTo(1);
         assertInvariants();
     }
@@ -272,10 +323,10 @@ class JdbcFriendStoreMysqlTest {
         JdbcFriendStore s = store(LIMITS);
         long big = -5L;              // 18446744073709551611
         long bigger = Long.MIN_VALUE; // 9223372036854775808
-        assertThat(s.addRequest(big, bigger, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(big, bigger, d()).result()).isEqualTo(AddResult.OK);
         assertThat(s.pendingRequests(bigger, 10, d())).singleElement()
                 .satisfies(r -> assertThat(r.fromPlayerId()).isEqualTo(big));
-        assertThat(s.accept(big, bigger, d())).isEqualTo(AcceptResult.OK);
+        assertThat(accept(s, big, bigger, d())).isEqualTo(AcceptResult.OK);
         assertThat(s.friends(big, 10, d())).extracting(FriendEdge::friendPlayerId).containsExactly(bigger);
         assertThat(s.friends(bigger, 10, d())).extracting(FriendEdge::friendPlayerId).containsExactly(big);
         try (Connection c = dataSource.getConnection(); Statement st = c.createStatement();
@@ -289,9 +340,148 @@ class JdbcFriendStoreMysqlTest {
     @Test
     void 非法玩家对抛参数异常() {
         JdbcFriendStore s = store(LIMITS);
-        assertThatThrownBy(() -> s.addRequest(0, 1, d())).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> s.accept(5, 5, d())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> s.addRequest(0, 1, d()).result()).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> s.addRequest(5, 5, d())).isInstanceOf(IllegalArgumentException.class);
         assertThat(s.remove(5, 5, d())).isEqualTo(RemoveResult.NOT_FRIENDS);
+    }
+
+    @Test
+    void 申请代次_重放不改ID时间_终态重发换号_旧操作无副作用() throws SQLException {
+        JdbcFriendStore s = store(LIMITS);
+        FriendStore.AddOutcome first = s.addRequest(101, 102, d());
+        long originalTime = s.pendingRequests(102, 10, d()).getFirst().requestTimeMs();
+        assertThat(first.requestId()).isNotZero();
+        assertThat(first.created()).isTrue();
+        FriendStore.AddOutcome replay = s.addRequest(101, 102, d());
+        assertThat(replay.requestId()).isEqualTo(first.requestId());
+        assertThat(replay.created()).isFalse();
+        assertThat(s.pendingRequests(102, 10, d()).getFirst().requestTimeMs()).isEqualTo(originalTime);
+        assertThat(s.reject(first.requestId(), 102, 0, d()).changed()).isTrue();
+        assertThat(s.reject(first.requestId(), 102, 0, d()).changed()).isFalse();
+        assertThat(s.accept(first.requestId(), 102, 0, d()).result()).isEqualTo(AcceptResult.NO_PENDING);
+        FriendStore.AddOutcome next = s.addRequest(101, 102, d());
+        assertThat(next.requestId()).isNotZero().isNotEqualTo(first.requestId());
+        assertThat(s.accept(first.requestId(), 102, 101, d()).result()).isEqualTo(AcceptResult.NO_PENDING);
+        assertThat(s.reject(first.requestId(), 102, 101, d()).result()).isEqualTo(RejectResult.NO_PENDING);
+        assertThat(s.pendingRequests(102, 10, d())).singleElement().satisfies(q -> assertThat(q.requestId()).isEqualTo(next.requestId()));
+        assertThat(s.friends(101, 10, d())).isEmpty();
+        assertThat(capacity(101)).isZero();
+        assertInvariants();
+    }
+
+    @Test
+    void 同意只认代次与会话接收方_忽略兼容from_同代重放不重复计数() throws SQLException {
+        JdbcFriendStore s = store(LIMITS);
+        long id = s.addRequest(111, 112, d()).requestId();
+        assertThat(s.accept(0, 112, 111, d()).result()).isEqualTo(AcceptResult.NO_PENDING);
+        assertThat(s.accept(id, 113, 113, d()).result()).isEqualTo(AcceptResult.NO_PENDING);
+        assertThat(s.reject(id, 113, 999999, d()).result()).isEqualTo(RejectResult.NO_PENDING);
+        assertThat(s.accept(id, 112, 112, d()).changed()).isTrue();
+        var repeated = s.accept(id, 112, 999999, d());
+        assertThat(repeated.result()).isEqualTo(AcceptResult.OK);
+        assertThat(repeated.changed()).isFalse();
+        assertThat(s.reject(id, 112, 0, d()).result()).isEqualTo(RejectResult.NO_PENDING);
+        assertThat(capacity(111)).isEqualTo(1);
+        assertThat(capacity(112)).isEqualTo(1);
+        s.remove(111, 112, d());
+        long next = s.addRequest(111, 112, d()).requestId();
+        assertThat(next).isNotEqualTo(id);
+        assertThat(s.accept(id, 112, 0, d()).result()).isEqualTo(AcceptResult.NO_PENDING);
+        assertThat(s.reject(next, 112, 112, d()).changed()).isTrue();
+        assertThat(s.reject(next, 112, 999999, d()).result()).isEqualTo(RejectResult.OK);
+        assertInvariants();
+    }
+
+    @Test
+    void 旧零ID申请安全补号保留时间_非零ID不轮换_号源失败不影响既有重放() throws SQLException {
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (121,122,123,1,456)");
+        JdbcFriendStore s = store(LIMITS);
+        var row = s.pendingRequests(122, 10, d()).getFirst();
+        assertThat(row.requestId()).isNotZero();
+        assertThat(row.requestTimeMs()).isEqualTo(123);
+        assertThat(updatedMsOf(121, 122)).isEqualTo(456);
+        JdbcFriendStore unavailable = store(LIMITS, () -> { throw new IllegalStateException("号源失败"); });
+        assertThat(unavailable.addRequest(121, 122, d()).requestId()).isEqualTo(row.requestId());
+        assertThat(unavailable.pendingRequests(122, 10, d()).getFirst().requestId()).isEqualTo(row.requestId());
+        assertThatThrownBy(() -> unavailable.addRequest(123, 124, d())).isInstanceOf(IllegalStateException.class);
+        assertThat(unavailable.pendingRequests(124, 10, d())).isEmpty();
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (125,126,789,1,888)");
+        var migrated = s.addRequest(125, 126, d());
+        assertThat(migrated.created()).isFalse();
+        assertThat(migrated.requestId()).isNotZero();
+        assertThat(s.pendingRequests(126, 10, d()).getFirst().requestTimeMs()).isEqualTo(789);
+        assertInvariants();
+    }
+
+    @Test
+    void 旧记录补号期间其他申请被同意_返回整页新快照而非拼接旧pending() throws SQLException {
+        JdbcFriendStore s = store(LIMITS);
+        JdbcFriendStore concurrent = store(LIMITS);
+        long acceptedDuringMigration = concurrent.addRequest(142, 140, d()).requestId();
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (141,140,1,1,1)");
+        java.util.concurrent.atomic.AtomicBoolean changed = new java.util.concurrent.atomic.AtomicBoolean();
+        s.afterEnsureForTest(() -> {
+            if (changed.compareAndSet(false, true)) {
+                assertThat(concurrent.accept(acceptedDuringMigration, 140, 142, d()).changed()).isTrue();
+            }
+        });
+        assertThat(s.pendingRequests(140, 10, d())).singleElement().satisfies(row -> {
+            assertThat(row.fromPlayerId()).isEqualTo(141);
+            assertThat(row.requestId()).isNotZero();
+        });
+        assertThat(changed).isTrue();
+        assertInvariants();
+    }
+
+    @Test
+    void 重复申请ID冲突必须拒绝_不能任选一条处理() throws SQLException {
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms,request_id) VALUES (131,132,1,1,1,777),(133,132,1,1,1,777)");
+        JdbcFriendStore s = store(LIMITS);
+        assertThatThrownBy(() -> s.accept(777, 132, 0, d())).isInstanceOf(FriendStoreException.class).hasMessageContaining("重复");
+        assertThatThrownBy(() -> s.reject(777, 132, 0, d())).isInstanceOf(FriendStoreException.class).hasMessageContaining("重复");
+        assertThat(s.pendingRequests(132, 10, d())).hasSize(2);
+        assertThat(s.friends(132, 10, d())).isEmpty();
+    }
+
+    @Test
+    void 同意在第二次计数更新失败_申请双向边计数全部回滚_可重新处理() throws SQLException {
+        JdbcFriendStore normal = store(LIMITS);
+        long id = normal.addRequest(151, 152, d()).requestId();
+        normal.addRequest(152, 151, d());
+        AtomicInteger increments = new AtomicInteger();
+        DataSource failing = mock(DataSource.class);
+        when(failing.getConnection()).thenAnswer(ignored -> {
+            Connection actual = dataSource.getConnection();
+            Connection connection = mock(Connection.class, delegatesTo(actual));
+            doAnswer(call -> {
+                String sql = call.getArgument(0);
+                PreparedStatement actualStatement = actual.prepareStatement(sql);
+                if (!JdbcFriendStore.INCREMENT_COUNT.equals(sql)) {
+                    return actualStatement;
+                }
+                PreparedStatement statement = mock(PreparedStatement.class, delegatesTo(actualStatement));
+                doAnswer(update -> {
+                    if (increments.incrementAndGet() == 2) {
+                        throw new SQLException("注入第二个计数更新失败");
+                    }
+                    return actualStatement.executeUpdate();
+                }).when(statement).executeUpdate();
+                return statement;
+            }).when(connection).prepareStatement(anyString());
+            return connection;
+        });
+        JdbcFriendStore broken = new JdbcFriendStore(failing, LIMITS, System::currentTimeMillis, 10,
+                JdbcFriendStore.Events.NONE, REQUEST_IDS::incrementAndGet);
+        assertThatThrownBy(() -> broken.accept(id, 152, 0, d())).isInstanceOf(FriendStoreException.class);
+        assertThat(increments).hasValue(2);
+        assertThat(normal.pendingRequests(151, 10, d())).hasSize(1);
+        assertThat(normal.pendingRequests(152, 10, d())).hasSize(1);
+        assertThat(normal.friends(151, 10, d())).isEmpty();
+        assertThat(normal.friends(152, 10, d())).isEmpty();
+        assertThat(capacity(151)).isZero();
+        assertThat(capacity(152)).isZero();
+        assertThat(normal.accept(id, 152, 0, d()).changed()).isTrue();
+        assertInvariants();
     }
 
     // ================================================================ 并发（全程不得出现 1213）
@@ -303,8 +493,8 @@ class JdbcFriendStoreMysqlTest {
         List<Callable<Object>> distinct = new ArrayList<>();
         for (int i = 0; i < 16; i++) {
             long from = 1000 + i;
-            same.add(() -> s.addRequest(from, 999, d()));
-            distinct.add(() -> s.addRequest(from, 2000 + from, d()));
+            same.add(() -> s.addRequest(from, 999, d()).result());
+            distinct.add(() -> s.addRequest(from, 2000 + from, d()).result());
         }
         assertThat(runConcurrently(same)).containsOnly(AddResult.OK);
         assertThat(runConcurrently(distinct)).containsOnly(AddResult.OK);
@@ -319,7 +509,7 @@ class JdbcFriendStoreMysqlTest {
             if (i % 2 == 0) {
                 befriend(s, 3000, 3100 + i);
             } else {
-                s.addRequest(3100 + i, 3000, d());
+                s.addRequest(3100 + i, 3000, d()).result();
             }
         }
         List<Callable<Object>> tasks = new ArrayList<>();
@@ -339,13 +529,13 @@ class JdbcFriendStoreMysqlTest {
         for (int round = 0; round < 8; round++) {
             long a = 4000 + round * 2L;
             long b = a + 1;
-            s.addRequest(a, b, d());
-            List<Callable<Object>> tasks = List.of(() -> s.block(b, a, d()), () -> s.accept(a, b, d()));
+            s.addRequest(a, b, d()).result();
+            List<Callable<Object>> tasks = List.of(() -> s.block(b, a, d()), () -> accept(s, a, b, d()));
             runConcurrently(tasks);
             long c = 5000 + round * 2L;
             long d = c + 1;
-            s.addRequest(c, d, d());
-            runConcurrently(List.of(() -> s.addRequest(d, c, d()), () -> s.accept(c, d, d())));
+            s.addRequest(c, d, d()).result();
+            runConcurrently(List.of(() -> s.addRequest(d, c, d()).result(), () -> accept(s, c, d, d())));
         }
         assertInvariants();
     }
@@ -356,8 +546,8 @@ class JdbcFriendStoreMysqlTest {
         List<Callable<Object>> tasks = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
             long from = 6100 + i;
-            assertThat(s.addRequest(from, 6000, d())).isEqualTo(AddResult.OK);
-            tasks.add(() -> s.accept(from, 6000, d()));
+            assertThat(s.addRequest(from, 6000, d()).result()).isEqualTo(AddResult.OK);
+            tasks.add(() -> accept(s, from, 6000, d()));
         }
         List<Object> results = runConcurrently(tasks);
         assertThat(results.stream().filter(AcceptResult.OK::equals).count()).isEqualTo(3);
@@ -369,11 +559,11 @@ class JdbcFriendStoreMysqlTest {
     @Test
     void 并发_预置交叉pending_两个不相干的pair并发Add() throws Exception {
         JdbcFriendStore s = store(LIMITS);
-        assertThat(s.addRequest(7001, 7002, d())).isEqualTo(AddResult.OK);
-        assertThat(s.addRequest(7003, 7004, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(7001, 7002, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(7003, 7004, d()).result()).isEqualTo(AddResult.OK);
         for (int round = 0; round < 5; round++) {
-            runConcurrently(List.of(() -> s.addRequest(7002, 7003, d()), () -> s.addRequest(7004, 7001, d()),
-                    () -> s.addRequest(7003, 7002, d()), () -> s.addRequest(7001, 7004, d())));
+            runConcurrently(List.of(() -> s.addRequest(7002, 7003, d()).result(), () -> s.addRequest(7004, 7001, d()).result(),
+                    () -> s.addRequest(7003, 7002, d()).result(), () -> s.addRequest(7001, 7004, d()).result()));
         }
         assertInvariants();
     }
@@ -389,8 +579,8 @@ class JdbcFriendStoreMysqlTest {
             }
             ExecutorService pool = Executors.newFixedThreadPool(2);
             try {
-                Future<AddResult> a = pool.submit(() -> s.addRequest(8001, 8000, d()));
-                Future<AddResult> b = pool.submit(() -> s.addRequest(8002, 8000, d()));
+                Future<AddResult> a = pool.submit(() -> s.addRequest(8001, 8000, d()).result());
+                Future<AddResult> b = pool.submit(() -> s.addRequest(8002, 8000, d()).result());
                 Thread.sleep(300); // 让两个 ensure 都排到回收的行锁后面
                 reclaim.commit();
                 assertThat(a.get(30, TimeUnit.SECONDS)).isEqualTo(AddResult.OK);
@@ -433,7 +623,7 @@ class JdbcFriendStoreMysqlTest {
         befriend(s, 8200, 8201);
         long created = createdMs(8200);
         Thread.sleep(5);
-        assertThat(s.addRequest(8200, 8202, d())).isEqualTo(AddResult.OK); // ensure 遇到已有行：ODKU 什么都不改
+        assertThat(s.addRequest(8200, 8202, d()).result()).isEqualTo(AddResult.OK); // ensure 遇到已有行：ODKU 什么都不改
         assertThat(createdMs(8200)).isEqualTo(created);
         Thread.sleep(5);
         assertThat(s.remove(8200, 8201, d())).isEqualTo(RemoveResult.REMOVED);
@@ -449,12 +639,12 @@ class JdbcFriendStoreMysqlTest {
                 deleteCapacity(8300);
             }
         });
-        assertThat(once.addRequest(8300, 8301, d())).isEqualTo(AddResult.OK);
+        assertThat(once.addRequest(8300, 8301, d()).result()).isEqualTo(AddResult.OK);
         assertThat(retries.get("missing_row")).hasValue(1);
 
         JdbcFriendStore always = store(LIMITS);
         always.afterEnsureForTest(() -> deleteCapacity(8310));
-        assertThatThrownBy(() -> always.addRequest(8310, 8311, d())).isInstanceOf(FriendStoreException.class)
+        assertThatThrownBy(() -> always.addRequest(8310, 8311, d()).result()).isInstanceOf(FriendStoreException.class)
                 .hasMessageContaining("重试用尽");
         assertThat(query("SELECT from_player_id FROM friend_request WHERE from_player_id = 8310")).isEmpty();
     }
@@ -462,16 +652,16 @@ class JdbcFriendStoreMysqlTest {
     @Test
     void 同意_守卫之内发现拉黑回BLOCKED_申请行不动_反向pending的updated_ms也写() throws SQLException {
         JdbcFriendStore s = store(LIMITS);
-        assertThat(s.addRequest(8400, 8401, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(8400, 8401, d()).result()).isEqualTo(AddResult.OK);
         exec("INSERT INTO friend_block (player_id, blocked_player_id, since_ms) VALUES (8401, 8400, 1)"); // 绕过 Block 直写
-        assertThat(s.accept(8400, 8401, d())).isEqualTo(AcceptResult.BLOCKED);
+        assertThat(accept(s, 8400, 8401, d())).isEqualTo(AcceptResult.BLOCKED);
         assertThat(query("SELECT status FROM friend_request WHERE from_player_id = 8400 AND to_player_id = 8401"))
                 .containsExactly(1L);
 
-        assertThat(s.addRequest(8410, 8411, d())).isEqualTo(AddResult.OK);
-        assertThat(s.addRequest(8411, 8410, d())).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(8410, 8411, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(s.addRequest(8411, 8410, d()).result()).isEqualTo(AddResult.OK);
         exec("UPDATE friend_request SET updated_ms = 0 WHERE from_player_id = 8411 AND to_player_id = 8410");
-        assertThat(s.accept(8410, 8411, d())).isEqualTo(AcceptResult.OK);
+        assertThat(accept(s, 8410, 8411, d())).isEqualTo(AcceptResult.OK);
         assertThat(query("SELECT status FROM friend_request WHERE from_player_id = 8411 AND to_player_id = 8410"))
                 .containsExactly(2L);
         assertThat(updatedMsOf(8411, 8410)).isPositive();
@@ -481,8 +671,8 @@ class JdbcFriendStoreMysqlTest {
     void 预算用完不再写() throws SQLException {
         JdbcFriendStore s = store(LIMITS);
         Deadline expired = Deadline.after(0);
-        assertThatThrownBy(() -> s.addRequest(8500, 8501, expired)).isInstanceOf(FriendStoreException.class);
-        assertThatThrownBy(() -> s.reject(8500, 8501, expired)).isInstanceOf(FriendStoreException.class);
+        assertThatThrownBy(() -> s.addRequest(8500, 8501, expired).result()).isInstanceOf(FriendStoreException.class);
+        assertThatThrownBy(() -> s.reject(1, 8501, 8500, expired)).isInstanceOf(FriendStoreException.class);
         assertThat(countRows("friend_capacity")).isZero();
         assertThat(countRows("friend_request")).isZero();
     }
@@ -500,9 +690,9 @@ class JdbcFriendStoreMysqlTest {
             tasks.add(() -> {
                 for (int i = 0; i < 12; i++) {
                     age(a, b); // 让这一对的容量行可被回收，逼出「守卫缺行 → 重补」
-                    assertThat(s.addRequest(a, b, d())).isEqualTo(AddResult.OK);
+                    assertThat(s.addRequest(a, b, d()).result()).isEqualTo(AddResult.OK);
                     age(a, b);
-                    assertThat(s.accept(a, b, d())).isEqualTo(AcceptResult.OK);
+                    assertThat(accept(s, a, b, d())).isEqualTo(AcceptResult.OK);
                     age(a, b);
                     assertThat(s.remove(a, b, d())).isEqualTo(RemoveResult.REMOVED);
                     age(a, b);
@@ -574,6 +764,8 @@ class JdbcFriendStoreMysqlTest {
         assertPointLookup(JdbcFriendStore.LOCK_EDGE, 16, 1L, 2L);
         assertPointLookup(JdbcFriendStore.LOCK_REQUEST, 16, 1L, 4L);
         assertPointLookup(JdbcFriendStore.UPDATE_REQUEST_STATUS, 16, 3, 1L, 1L, 4L, 1);
+        assertPointLookup(JdbcFriendStore.UPDATE_REQUEST_GENERATION_STATUS, 16, 3, 1L, 1L, 4L, 1L, 1);
+        assertPointLookup(JdbcFriendStore.BACKFILL_REQUEST_ID, 16, 1L, 1L, 4L, 1);
         assertPointLookup(JdbcFriendStore.DELETE_EDGE, 16, 1L, 2L);
         assertPointLookup(JdbcFriendStore.DECREMENT_COUNT, 8, 1L, 1L);
         // 清理的逐行删也是按完整主键（提交点复核条件只是附加过滤）
@@ -582,7 +774,8 @@ class JdbcFriendStoreMysqlTest {
     }
 
     private static void assertPointLookup(String sql, int keyLen, Object... args) throws SQLException {
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement("EXPLAIN " + sql)) {
+        // 服务端默认 EXPLAIN 格式可变；断言 key / key_len 前显式要求传统表格格式。
+        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement("EXPLAIN FORMAT=TRADITIONAL " + sql)) {
             for (int i = 0; i < args.length; i++) {
                 ps.setObject(i + 1, args[i]);
             }
@@ -603,8 +796,8 @@ class JdbcFriendStoreMysqlTest {
     // ================================================================ 工具
 
     private static void befriend(JdbcFriendStore s, long a, long b) {
-        assertThat(s.addRequest(a, b, d())).isEqualTo(AddResult.OK);
-        assertThat(s.accept(a, b, d())).isEqualTo(AcceptResult.OK);
+        assertThat(s.addRequest(a, b, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(accept(s, a, b, d())).isEqualTo(AcceptResult.OK);
     }
 
     /** 同时起跑（屏障），收集结果；任何异常（含 1213 → FriendStoreException）都让测试失败。 */

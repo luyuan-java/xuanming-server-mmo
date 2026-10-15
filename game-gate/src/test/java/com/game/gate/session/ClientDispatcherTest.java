@@ -1014,6 +1014,10 @@ class ClientDispatcherTest {
 
             ch.writeInbound(request(2, FRIEND_MSG, "f"));
             assertThat(friend.calls).as("只关聚宝斋").hasSize(1);
+            // 会话后端 lane 单飞：先让好友有结论，聚宝斋才轮得到
+            friend.complete(ClientReply.getDefaultInstance());
+            ch.runPendingTasks();
+            ch.readOutbound();
 
             killSwitch.setRules(Map.of());
             ch.writeInbound(request(3, TRADE_MSG, "b"));

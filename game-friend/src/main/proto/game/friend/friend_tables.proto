@@ -32,7 +32,7 @@ message FriendEdgeRow {
 message FriendRequestRow {
   option (proto2mysql.table_name) = "friend_request";
   option (proto2mysql.primary_key) = "from_player_id,to_player_id";
-  option (proto2mysql.index) = "to_player_id,status;status,updated_ms";
+  option (proto2mysql.index) = "to_player_id,status;status,updated_ms;request_id";
   option (proto2mysql.tidb_nonclustered_pk) = true;
   option (proto2mysql.tidb_shard_row_id_bits) = 4;
   option (proto2mysql.tidb_pre_split_regions) = 4;
@@ -42,6 +42,7 @@ message FriendRequestRow {
   uint64 request_time_ms = 3;  // 最近一次发起的时刻（复用终态行重新申请时刷新）
   uint32 status = 4;
   uint64 updated_ms = 5;       // 状态最后一次变更的时刻：凡改 status 的语句都在同一句里写它
+  uint64 request_id = 6;       // 一次申请的身份；终态重发换号，0 仅为待补号的旧记录。
 }
 
 // 容量守卫行：friend_count 是权威好友数，与 friend 表边数同事务同增同减；写路径先锁双方的这一行（升序）。

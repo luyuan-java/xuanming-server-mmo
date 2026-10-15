@@ -2,6 +2,10 @@ package com.game.friend;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.common.token.DubboCallAuth;
+import com.game.common.id.LeaseGatedSnowflake;
+import com.game.common.id.Snowflake;
+import com.game.discovery.NodeIdLease;
+import com.game.discovery.NodeTypes;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory;
@@ -32,7 +36,14 @@ import com.game.pbmysql.PbMysql;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.ResultSet;
+import java.util.Locale;
+import org.springframework.beans.factory.annotation.Value;
 import java.time.Duration;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import javax.sql.DataSource;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
@@ -66,7 +77,7 @@ public class FriendConfiguration {
      * 四张表经 game-pbmysql 建表 / 只扩不缩地同步（在一条自动提交的连接上，整轮持咨询锁）；结构漂移即启动失败，由人工迁移。
      */
     @Bean
-    public PbMysql friendTables(DataSource dataSource) throws SQLException {
+    public PbMysql friendTables(DataSource dataSource, @Value("${game.friend.require-tidb:false}") boolean requireTiDb) throws SQLException {
         PbMysql db = new PbMysql();
         db.register(FriendEdgeRow.getDefaultInstance());
         db.register(FriendRequestRow.getDefaultInstance());
@@ -74,6 +85,7 @@ public class FriendConfiguration {
         db.register(FriendBlockRow.getDefaultInstance());
         try (Connection c = dataSource.getConnection()) {
             c.setAutoCommit(true);
+            verifyFriendDatabase(c, requireTiDb);
             // 连接串的 socketTimeout（4 s）是给请求流量的；结构同步要等 30 s 的咨询锁、跑 DDL，这条连接上临时放宽，用完还原
             int socketTimeout = c.getNetworkTimeout();
             c.setNetworkTimeout(Runnable::run, (int) SCHEMA_SYNC_NETWORK_TIMEOUT.toMillis());
@@ -89,12 +101,53 @@ public class FriendConfiguration {
         return db;
     }
 
+    /** prod 只接受同一 TiDB 事务域；开发环境允许 MySQL，但 TiDB 连接必须使用悲观事务。 */
+    static void verifyFriendDatabase(Connection connection, boolean requireTiDb) throws SQLException {
+        String version;
+        try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery("SELECT VERSION()")) {
+            if (!rows.next()) {
+                throw new SQLException("无法确认好友权威库类型");
+            }
+            version = rows.getString(1);
+        }
+        boolean tidb = version != null && version.toLowerCase(Locale.ROOT).contains("tidb");
+        if (requireTiDb && !tidb) {
+            throw new SQLException("game.friend.require-tidb=true，但好友权威库不是 TiDB");
+        }
+        if (tidb) {
+            try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery("SELECT @@tidb_txn_mode")) {
+                if (!rows.next() || !"pessimistic".equalsIgnoreCase(rows.getString(1))) {
+                    throw new SQLException("好友容量守卫要求 tidb_txn_mode=pessimistic");
+                }
+            }
+        }
+    }
+
     /** {@code friendTables} 参数只为保证「表同步完成之后才有存储」。 */
     @Bean
     public FriendStore friendStore(DataSource dataSource, PbMysql friendTables, FriendProperties props,
-                                   FriendMetrics metrics) {
+                                   FriendMetrics metrics, LeaseGatedSnowflake friendRequestIds) {
         return new JdbcFriendStore(dataSource, props.limits(), System::currentTimeMillis,
-                (int) Math.max(1, props.queryTimeout().toSeconds()), metrics);
+                (int) Math.max(1, props.queryTimeout().toSeconds()), metrics,
+                () -> friendRequestIds.tryNext().orElseThrow(() -> new IllegalStateException("好友申请号源不可用")));
+    }
+
+    @Bean(destroyMethod = "shutdownNow")
+    public ScheduledExecutorService friendLeaseScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("friend-request-lease").daemon(true).factory());
+    }
+
+    /** 申请 ID 在全部好友副本间唯一；全服 scope=0，失租时仅新代次发号失败。 */
+    @Bean(destroyMethod = "close")
+    public NodeIdLease friendRequestLease(RedissonClient redis, RedisKeys keys, ScheduledExecutorService friendLeaseScheduler) {
+        return NodeIdLease.acquire(redis, keys, friendLeaseScheduler, NodeTypes.FRIEND_REQUEST, 0, 1, Snowflake.MAX_WORKER,
+                UUID.randomUUID().toString(), Duration.ofSeconds(15),
+                () -> log.error("好友申请号源租约丢失，停止创建新代次，需重启本进程"));
+    }
+
+    @Bean
+    public LeaseGatedSnowflake friendRequestIds(NodeIdLease friendRequestLease) {
+        return new LeaseGatedSnowflake(new Snowflake(friendRequestLease.nodeId()), friendRequestLease::isValid);
     }
 
     @Bean

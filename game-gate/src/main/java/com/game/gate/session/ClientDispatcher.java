@@ -67,8 +67,10 @@ import org.slf4j.LoggerFactory;
  *   <li>未知 / 非客户端消息号不回包，计非法包；整包超过 1KB 回 {@code MessageContent.error_message=1010}，计非法包；</li>
  *   <li>按消息号限频（C++ MessageLimiter：MessageLimiter 表，缺省每秒 3 条）：超频回
  *       {@code MessageContent.error_message=1008}，计非法包，不转发；</li>
- *   <li>后端不可用、玩家不在场景、Java 版尚未实现的后端域：推 23 {@code TipInfoMessage{1003}}
- *       （不用「信封错误 + 空 body」：robot 不读信封错误，会把空 body 当成功，见 login 契约「Java 必须做到」第 4 条）；</li>
+ *   <li>后端（login 与 friend / match 等）调用失败或超时、热关停、会话后端 lane 满（1008）或排队超时：回带请求 id 的信封错误
+ *       （与 C++ gate 路由 lane 同形，mmorpg client-request-ordering.md §4.7，2026-10-14 两版同批改），客户端按请求 id 当场对上失败；
+ *       mmorpg 的 Go robot 同批改为读信封错误（以前只解 body，会把空 body 当成功）；</li>
+ *   <li>玩家不在场景、Java 版尚未实现的后端域：推 23 {@code TipInfoMessage{1003}}（与 C++ 找不到目标节点时同形）；</li>
  *   <li>战斗服务 {@code BattleClientPlayer} 的 12 个号（{@link MessageRoute#directOnly()}）：GM 闸之后当场推 23 {1003}，
  *       不计非法包、不断连、不过热关停、不排在途请求之后（基线 {@code :937-950}；scene-battle-spec §2.5、§7.19，D12）；</li>
  *   <li>应答 {@code MessageContent.message_id} = 请求号、{@code id} = 请求 id；{@code error_message} 只在 tip≠0 时出现；</li>

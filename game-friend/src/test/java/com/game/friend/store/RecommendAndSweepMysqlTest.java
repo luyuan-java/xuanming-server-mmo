@@ -109,9 +109,9 @@ class RecommendAndSweepMysqlTest {
         edge(me, 27);                                     // 27 已是我的好友
         exec("INSERT INTO friend_block VALUES (1, 21, 1)"); // 我拉黑 21
         exec("INSERT INTO friend_block VALUES (22, 1, 1)"); // 22 拉黑我
-        exec("INSERT INTO friend_request VALUES (1, 23, 1, 1, 1)"); // 我发给 23 的 pending
-        exec("INSERT INTO friend_request VALUES (24, 1, 1, 1, 1)"); // 24 发给我的 pending
-        exec("INSERT INTO friend_request VALUES (1, 26, 1, 3, 1)"); // 已拒绝的申请不排除
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (1, 23, 1, 1, 1)"); // 我发给 23 的 pending
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (24, 1, 1, 1, 1)"); // 24 发给我的 pending
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (1, 26, 1, 3, 1)"); // 已拒绝的申请不排除
         List<Candidate> got = recommend(0).mutual(me, List.of(25L), 20, d());
         assertThat(got.get(0)).isEqualTo(new Candidate(20, 2));
         assertThat(got).extracting(Candidate::playerId).containsExactlyInAnyOrder(20L, 26L);
@@ -138,10 +138,10 @@ class RecommendAndSweepMysqlTest {
     @Test
     void 清理终态申请_report_only只数_delete删过期终态_pending与未过期不动() throws SQLException {
         long now = 100 * DAY;
-        exec("INSERT INTO friend_request VALUES (1, 2, 1, 2, " + (now - 8 * DAY) + ")"); // 已同意、过期
-        exec("INSERT INTO friend_request VALUES (3, 4, 1, 3, " + (now - 9 * DAY) + ")"); // 已拒绝、过期
-        exec("INSERT INTO friend_request VALUES (5, 6, 1, 1, " + (now - 9 * DAY) + ")"); // pending 永不清
-        exec("INSERT INTO friend_request VALUES (7, 8, 1, 3, " + (now - 1 * DAY) + ")"); // 未过期
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (1, 2, 1, 2, " + (now - 8 * DAY) + ")"); // 已同意、过期
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (3, 4, 1, 3, " + (now - 9 * DAY) + ")"); // 已拒绝、过期
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (5, 6, 1, 1, " + (now - 9 * DAY) + ")"); // pending 永不清
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (7, 8, 1, 3, " + (now - 1 * DAY) + ")"); // 未过期
         SweepStore s = new SweepStore(dataSource, 10);
         assertThat(s.sweepTerminalRequests("report_only", 7, 1000, now, () -> true)).isEqualTo(SweepStore.Result.ok(2, 0));
         assertThat(s.sweepTerminalRequests("bogus", 7, 1000, now, () -> true)).isEqualTo(SweepStore.Result.ok(2, 0));
@@ -153,7 +153,7 @@ class RecommendAndSweepMysqlTest {
     @Test
     void 清理终态申请_updated_ms为0时只数不删() throws SQLException {
         long now = 100 * DAY;
-        exec("INSERT INTO friend_request VALUES (1, 2, 1, 2, 0)");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (1, 2, 1, 2, 0)");
         SweepStore s = new SweepStore(dataSource, 10);
         assertThat(s.sweepTerminalRequests("delete", 7, 1000, now, () -> true)).isEqualTo(SweepStore.Result.ok(1, 0));
         assertThat(requestKeys()).containsExactly("1-2");
@@ -202,9 +202,9 @@ class RecommendAndSweepMysqlTest {
     @Test
     void 终态申请_有updated_ms为0的行时整轮只数不删_连带别的过期行() throws SQLException {
         long now = 100 * DAY;
-        exec("INSERT INTO friend_request VALUES (1, 2, 1, 2, 0)");
-        exec("INSERT INTO friend_request VALUES (3, 4, 1, 3, " + (now - 8 * DAY) + ")");
-        exec("INSERT INTO friend_request VALUES (5, 6, 1, 2, " + (now - 9 * DAY) + ")");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (1, 2, 1, 2, 0)");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (3, 4, 1, 3, " + (now - 8 * DAY) + ")");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (5, 6, 1, 2, " + (now - 9 * DAY) + ")");
         SweepStore.Result r = new SweepStore(dataSource, 10).sweepTerminalRequests("delete", 7, 1000, now, () -> true);
         assertThat(r).isEqualTo(SweepStore.Result.ok(3, 0));
         assertThat(requestKeys()).containsExactly("1-2", "3-4", "5-6");
@@ -213,8 +213,8 @@ class RecommendAndSweepMysqlTest {
     @Test
     void 预算用完停在行与行之间_带回已删行数() throws SQLException {
         long now = 100 * DAY;
-        exec("INSERT INTO friend_request VALUES (1, 2, 1, 2, " + (now - 8 * DAY) + ")");
-        exec("INSERT INTO friend_request VALUES (3, 4, 1, 3, " + (now - 8 * DAY) + ")");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (1, 2, 1, 2, " + (now - 8 * DAY) + ")");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (3, 4, 1, 3, " + (now - 8 * DAY) + ")");
         SweepStore s = new SweepStore(dataSource, 10);
         SweepStore.Result none = s.sweepTerminalRequests("delete", 7, 1000, now, () -> false);
         assertThat(none.seen()).isEqualTo(2);
@@ -237,7 +237,7 @@ class RecommendAndSweepMysqlTest {
     @Test
     void 清理一轮_两段都跑_合法模式每轮刷Gauge含0() throws SQLException {
         long now = System.currentTimeMillis();
-        exec("INSERT INTO friend_request VALUES (1, 2, 1, 3, " + (now - 9 * DAY) + ")");
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (1, 2, 1, 3, " + (now - 9 * DAY) + ")");
         exec("INSERT INTO friend_capacity VALUES (1, 0, " + (now - 9 * DAY) + ")");
         java.util.Map<String, Long> pending = new java.util.HashMap<>();
         java.util.Map<String, Long> idle = new java.util.HashMap<>();

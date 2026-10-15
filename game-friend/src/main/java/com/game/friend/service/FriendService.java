@@ -6,7 +6,6 @@ import com.game.discovery.presence.PlayerPushes;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.friend.cache.FriendCache;
 import com.game.friend.metrics.FriendMetrics;
-import com.game.friend.metrics.FriendMetrics.CacheKind;
 import com.game.friend.metrics.FriendMetrics.PushOutcome;
 import com.game.friend.metrics.FriendMetrics.PushReason;
 import com.game.common.player.PlayerProfiles;
@@ -14,7 +13,9 @@ import com.game.common.player.PlayerProfiles.Profile;
 import com.game.friend.quota.FriendRequestQuota;
 import com.game.friend.store.FriendStore;
 import com.game.friend.store.FriendStore.AcceptResult;
-import com.game.friend.store.FriendStore.AddResult;
+import com.game.friend.store.FriendStore.AcceptOutcome;
+import com.game.friend.store.FriendStore.AddOutcome;
+import com.game.friend.store.FriendStore.RejectOutcome;
 import com.game.friend.store.FriendStore.BlockEdge;
 import com.game.friend.store.FriendStore.BlockResult;
 import com.game.friend.store.FriendStore.FriendEdge;
@@ -141,17 +142,16 @@ public final class FriendService {
             return AddFriendResponse.newBuilder().setErrorMessage(
                     tip(CommonErrorTip.common_error.kRateLimitExceeded_VALUE, "too many friend requests, retry later")).build();
         }
-        AddResult result;
+        AddOutcome outcome;
         try {
-            result = store.addRequest(me, target, deadline);
+            outcome = store.addRequest(me, target, deadline);
         } catch (RuntimeException e) {
             return AddFriendResponse.newBuilder().setErrorMessage(fault("AddFriend", e)).build();
         }
-        TipInfoMessage rejected = switch (result) {
+        TipInfoMessage rejected = switch (outcome.result()) {
             case OK -> null;
             case BLOCKED -> tip(FriendErrorTip.friend_error.kFriendBlocked_VALUE, "cannot send friend request");
             case ALREADY_FRIENDS -> tip(FriendErrorTip.friend_error.kFriendAlreadyFriends_VALUE, "already friends");
-            case ALREADY_SENT -> tip(FriendErrorTip.friend_error.kFriendRequestAlreadySent_VALUE, "request already sent");
             case TOO_MANY_PENDING -> tip(FriendErrorTip.friend_error.kFriendTooManyPending_VALUE, "too many pending friend requests");
             case TARGET_INBOX_FULL -> tip(FriendErrorTip.friend_error.kFriendTargetInboxFull_VALUE, "target inbox full");
             // 申请人（我）满 → 15002，接收方满 → 15004；与 AcceptFriend 的映射相反（spec §0.3）
@@ -161,32 +161,31 @@ public final class FriendService {
         if (rejected != null) {
             return AddFriendResponse.newBuilder().setErrorMessage(rejected).build();
         }
+        if (!outcome.created()) {
+            return AddFriendResponse.newBuilder().setRequestId(outcome.requestId()).build();
+        }
         // 申请行落在接收者的收件箱里，只失效 req(target)
         cache.invalidateAfterCommit(List.of(redisKeys.friendPending(target)), deadline);
         push(target, FriendEventReason.FRIEND_EVENT_REASON_REQUEST_RECEIVED, me);
         log.info("[friend] AddFriend ok from={} to={}", Long.toUnsignedString(me), Long.toUnsignedString(target));
-        return AddFriendResponse.getDefaultInstance();
+        return AddFriendResponse.newBuilder().setRequestId(outcome.requestId()).build();
     }
 
     // ================================================================ AcceptFriend（238）
 
     public AcceptFriendResponse acceptFriend(long me, AcceptFriendRequest request, Deadline deadline) {
-        long from = request.getFromPlayerId();
-        if (from == 0) {
-            return AcceptFriendResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "from_player_id required")).build();
+        long requestId = request.getRequestId();
+        if (requestId == 0) {
+            return AcceptFriendResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "request_id required")).build();
         }
-        if (from == me) {
-            return AcceptFriendResponse.newBuilder()
-                    .setErrorMessage(tip(INVALID_PARAMETER, "cannot accept your own request")).build();
-        }
-        AcceptResult result;
+        AcceptOutcome outcome;
         try {
-            // 接受者永远是会话里的 me：不能由请求体指定，否则客户端可以替别人通过申请
-            result = store.accept(from, me, deadline);
+            // 接受者永远是会话里的 me；旧 from 字段忽略，原申请人由 requestId 对应的权威行裁决。
+            outcome = store.accept(requestId, me, 0, deadline);
         } catch (RuntimeException e) {
             return AcceptFriendResponse.newBuilder().setErrorMessage(fault("AcceptFriend", e)).build();
         }
-        TipInfoMessage rejected = switch (result) {
+        TipInfoMessage rejected = switch (outcome.result()) {
             case OK -> null;
             case NO_PENDING -> tip(FriendErrorTip.friend_error.kFriendNoPendingRequest_VALUE, "no pending friend request");
             case BLOCKED -> tip(FriendErrorTip.friend_error.kFriendBlocked_VALUE, "cannot accept friend request");
@@ -197,6 +196,10 @@ public final class FriendService {
         if (rejected != null) {
             return AcceptFriendResponse.newBuilder().setErrorMessage(rejected).build();
         }
+        if (!outcome.changed()) {
+            return AcceptFriendResponse.getDefaultInstance();
+        }
+        long from = outcome.fromPlayerId();
         // req(from) 不能漏：反向 pending 落在 from 的收件箱里
         cache.invalidateAfterCommit(List.of(redisKeys.friendList(from), redisKeys.friendList(me),
                 redisKeys.friendPending(me), redisKeys.friendPending(from)), deadline);
@@ -208,30 +211,25 @@ public final class FriendService {
     // ================================================================ RejectFriend（232）
 
     public RejectFriendResponse rejectFriend(long me, RejectFriendRequest request, Deadline deadline) {
-        long from = request.getFromPlayerId();
-        if (from == 0) {
-            return RejectFriendResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "from_player_id required")).build();
+        long requestId = request.getRequestId();
+        if (requestId == 0) {
+            return RejectFriendResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "request_id required")).build();
         }
-        if (from == me) {
-            return RejectFriendResponse.newBuilder()
-                    .setErrorMessage(tip(INVALID_PARAMETER, "cannot reject your own request")).build();
-        }
-        RejectResult result;
+        RejectOutcome outcome;
         try {
-            result = store.reject(from, me, deadline);
+            outcome = store.reject(requestId, me, 0, deadline);
         } catch (RuntimeException e) {
             return RejectFriendResponse.newBuilder().setErrorMessage(fault("RejectFriend", e)).build();
         }
-        if (result == RejectResult.NO_PENDING) {
-            return RejectFriendResponse.newBuilder().setErrorMessage(
-                    tip(FriendErrorTip.friend_error.kFriendNoPendingRequest_VALUE, "no pending friend request")).build();
+        if (outcome.result() == RejectResult.NO_PENDING) {
+            return RejectFriendResponse.newBuilder().setErrorMessage(tip(FriendErrorTip.friend_error.kFriendNoPendingRequest_VALUE,
+                    "no pending friend request")).build();
         }
-        cache.invalidateAfterCommit(List.of(redisKeys.friendPending(me)), deadline);
-        // 刻意不推送：避免社交尴尬，也不暴露拒绝方刚刚在线
+        if (outcome.changed()) {
+            cache.invalidateAfterCommit(List.of(redisKeys.friendPending(me)), deadline);
+        }
         return RejectFriendResponse.getDefaultInstance();
     }
-
-    // ================================================================ RemoveFriend（11）
 
     public RemoveFriendResponse removeFriend(long me, RemoveFriendRequest request, Deadline deadline) {
         long target = request.getTargetPlayerId();
@@ -298,8 +296,8 @@ public final class FriendService {
         List<FriendEdge> edges;
         StrictLookup online;
         try {
-            edges = cache.load(CacheKind.LIST, redisKeys.friendList(me), FriendEdge.class, deadline,
-                    () -> store.friends(me, listLimit, deadline));
+            // 关系是权威结果；失效失败的旧缓存不能被成功返回。展示资料与在线投影另行补全。
+            edges = store.friends(me, listLimit, deadline);
             online = onlineStatuses(edges, deadline);
         } catch (RuntimeException e) {
             return GetFriendListResponse.newBuilder().setErrorMessage(fault("GetFriendList", e)).build();
@@ -356,8 +354,8 @@ public final class FriendService {
     public GetPendingRequestsResponse getPendingRequests(long me, GetPendingRequestsRequest request, Deadline deadline) {
         List<PendingRequest> pending;
         try {
-            pending = cache.load(CacheKind.PENDING, redisKeys.friendPending(me), PendingRequest.class, deadline,
-                    () -> store.pendingRequests(me, listLimit, deadline));
+            // 直接 SQL；旧缓存不带代次且可能陈旧，不能参与申请处理或权威列表。
+            pending = store.pendingRequests(me, listLimit, deadline);
         } catch (RuntimeException e) {
             return GetPendingRequestsResponse.newBuilder().setErrorMessage(fault("GetPendingRequests", e)).build();
         }
@@ -365,7 +363,7 @@ public final class FriendService {
         for (PendingRequest row : pending) {
             response.addRequests(FriendRequest.newBuilder()
                     .setFromPlayerId(row.fromPlayerId()).setToPlayerId(row.toPlayerId())
-                    .setRequestTimeMs(row.requestTimeMs())
+                    .setRequestTimeMs(row.requestTimeMs()).setRequestId(row.requestId())
                     .setStatusValue(row.status())); // 恒为 1，数值原样转换（同基线）
         }
         return response.build();

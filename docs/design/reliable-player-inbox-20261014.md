@@ -105,13 +105,15 @@ Java 的当前状态单列在文末，以本次查看的源码与既有设计文
 
 原文建议：**不再新建一个通用投递器**，避免和资产通道、结算发件箱形成第三份重复实现；先补第 1–3 项，再完善超窗恢复及对账。该排序属于原文对 C++/Go 版的建议，Java 应按下一节真实差异安排。
 
+> 2026-10-15 收窄修订（两版同口径）：用户在 mmorpg 侧拍板新建独立的玩家收件箱服务（mmorpg `docs/design/player-inbox-service.md` v1.0，其 D1）。上一段结论收窄为：资产、结算、邮件保持原分工，不新建能投任意消息的通用投递器；只有「没有任何持久渠道、不是资产、改的是 scene 持有状态」的玩家待办按域进入收件箱。第一个域是 GM 处置（封锁 / 解封货币获取、挂补缴欠款）。Java 版按设计 §12 同切片实现（新模块 `game-inbox`，scene 侧 `InboxHooks`；欠款改走收件箱，不再走离线编辑），状态见 PARITY.md「玩家持久收件箱 v1」一行，目前 Java 待做。
+
 ## 6. Java 仓库落点与当前状态
 
 本次核对基于 `e8b9e0d` 工作区，初始无本地改动；只查看代码和文档，不表示重新执行过其中测试。现有详细设计仍以 [architecture.md](architecture.md)、[zone-travel-spec.md](../porting/zone-travel-spec.md)、[guild-economy-spec.md](../porting/guild-economy-spec.md)、[scene-battle-spec.md](../porting/scene-battle-spec.md) 为准。
 
 | 主题 | 本仓库证据 | 本次核对结论 |
 |---|---|---|
-| 资产业务变更与持久待办 | [JdbcEconomyStore](../../game-guild/src/main/java/com/game/guild/store/JdbcEconomyStore.java) 的 `reserveDonation` / `reserveShopOrder`；[JdbcGuildAssetStore](../../game-guild/src/main/java/com/game/guild/asset/JdbcGuildAssetStore.java) | 帮会预留事务同时变更业务账并插入 `guild_asset_op`；后者按玩家 / 流保存，后台领取、重排及终结有条件写守卫，无需另造通用投递器 |
+| 资产业务变更与持久待办 | [JdbcEconomyStore](../../game-guild/src/main/java/com/game/guild/store/JdbcEconomyStore.java) 的 `reserveDonation` / `reserveShopOrder`；[JdbcGuildAssetStore](../../game-guild/src/main/java/com/game/guild/asset/JdbcGuildAssetStore.java) | 帮会预留事务同时变更业务账并插入 `guild_asset_op`；后者按玩家 / 流保存，后台领取、重排及终结有条件写守卫，无需另造通用投递器（2026-10-15：资产仍走此通道；非资产的 GM 处置改由收件箱承接，见 §5 末的收窄修订） |
 | 资产幂等与持久确认 | [AssetOpService](../../game-scene/src/main/java/com/game/scene/asset/AssetOpService.java)、[AssetOpLedger](../../game-scene/src/main/java/com/game/scene/asset/AssetOpLedger.java)、[PersistedAssetLedger](../../game-player-store/src/main/java/com/game/player/store/asset/PersistedAssetLedger.java) | 按 stream / epoch / seq 分类并记录结局；`durable` 以最近确认的落库快照为准，调用方复查到 `durable=true` 后终结；Java 玩家存储路径是 MySQL，不能复用原文「仅 Redis 落盘」判断 |
 | 战斗结算持久记录与进场恢复 | [SettlementOutbox](../../game-battle/src/main/java/com/game/battle/outbox/SettlementOutbox.java)、[SettlementRetryRules](../../game-battle/src/main/java/com/game/battle/outbox/SettlementRetryRules.java)、[BattleRedis](../../game-discovery/src/main/java/com/game/discovery/battle/BattleRedis.java)、[SceneWorld](../../game-scene/src/main/java/com/game/scene/world/SceneWorld.java) 的 `battle.onEntered` | 先尝试持久存储，再按玩家定位投递并有限重投；Redis 提供按玩家读取待结算，进场恢复已有入口。落 Redis 失败时，代码仍会投一次并报告 `NOT_DURABLE`，明确存在丢失可能，不能称为无条件可靠 |
 | MySQL 提交时围栏 | [PlayerMapper](../../game-player-store/src/main/java/com/game/player/store/PlayerMapper.java)、[PlayerStore](../../game-player-store/src/main/java/com/game/player/store/PlayerStore.java) 的 `saveStateHeld` / `saveStateAndRelease` / `handOffOwnership` | 玩家行写回和交出 SQL 的 `WHERE` 带 `owner_epoch` 及释放状态；玩法状态与玩家行在同一事务写。C++/Go 快照缺口 2 不适用于这一 Java 路径 |

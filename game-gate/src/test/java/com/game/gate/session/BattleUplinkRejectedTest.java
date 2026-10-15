@@ -88,7 +88,8 @@ class BattleUplinkRejectedTest {
         assertThat(session.illegalPackets).as("合法协议号，不计非法包").isZero();
         assertThat(ch.isOpen()).as("不断连").isTrue();
         assertThat(session.pending).as("不进待处理队列").isEmpty();
-        assertThat(session.backendQueues).as("不进任何后端队列").isEmpty();
+        assertThat(session.backendQueue).as("不进会话后端 lane").isEmpty();
+        assertThat(session.backendInFlight).isFalse();
         assertThat(session.inFlight).isFalse();
         assertThat(login.calls).as("不转给 login").isEmpty();
         assertThat(friend.calls).as("不转给任何后端").isEmpty();
@@ -263,7 +264,8 @@ class BattleUplinkRejectedTest {
         }
 
         assertThat(rogue.calls).as("大厅连接不能成为绕过直连票据的第二条战斗通路").isEmpty();
-        assertThat(session().backendQueues).isEmpty();
+        assertThat(session().backendQueue).isEmpty();
+        assertThat(session().backendInFlight).isFalse();
         assertThat(requestCounters("forwarded")).isEmpty();
         assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(12);
     }

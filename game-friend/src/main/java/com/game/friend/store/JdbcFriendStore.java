@@ -57,16 +57,21 @@ public final class JdbcFriendStore implements FriendStore {
     // S4 / S5 / S6：守卫之后的主键点锁
     static final String LOCK_BLOCK = "SELECT 1 FROM friend_block WHERE player_id = ? AND blocked_player_id = ? FOR UPDATE";
     static final String LOCK_EDGE = "SELECT 1 FROM friend WHERE player_id = ? AND friend_player_id = ? FOR UPDATE";
-    static final String LOCK_REQUEST = "SELECT status FROM friend_request WHERE from_player_id = ? AND to_player_id = ? FOR UPDATE";
+    static final String LOCK_REQUEST = "SELECT status, request_id, request_time_ms FROM friend_request WHERE from_player_id = ? AND to_player_id = ? FOR UPDATE";
     // S7 / S8：出站 / 入站待处理计数（事务内普通读）
     static final String COUNT_OUTGOING = "SELECT COUNT(*) FROM friend_request WHERE from_player_id = ? AND status = ?";
     static final String COUNT_INCOMING = "SELECT COUNT(*) FROM friend_request WHERE to_player_id = ? AND status = ?";
     // S9：申请 upsert（VALUES() 为 TiDB 可移植）
-    static final String UPSERT_REQUEST = "INSERT INTO friend_request (from_player_id, to_player_id, request_time_ms, status, updated_ms)"
-            + " VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE status = VALUES(status),"
+    static final String UPSERT_REQUEST = "INSERT INTO friend_request (from_player_id, to_player_id, request_time_ms, status, updated_ms, request_id)"
+            + " VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE request_id = VALUES(request_id), status = VALUES(status),"
             + " request_time_ms = VALUES(request_time_ms), updated_ms = VALUES(updated_ms)";
-    // S10：同意的事务外前置
-    static final String PENDING_EXISTS = "SELECT 1 FROM friend_request WHERE from_player_id = ? AND to_player_id = ? AND status = ?";
+    // 非锁定定位只用于取得守卫的玩家对；请求身份必须在守卫内再按完整主键复核。非唯一索引读两条，碰撞即拒绝。
+    static final String FIND_REQUEST = "SELECT from_player_id, to_player_id, status, request_id, request_time_ms"
+            + " FROM friend_request WHERE request_id = ? LIMIT 2";
+    static final String UPDATE_REQUEST_GENERATION_STATUS = "UPDATE friend_request SET status = ?, updated_ms = ?"
+            + " WHERE from_player_id = ? AND to_player_id = ? AND request_id = ? AND status = ?";
+    static final String BACKFILL_REQUEST_ID = "UPDATE friend_request SET request_id = ?"
+            + " WHERE from_player_id = ? AND to_player_id = ? AND request_id = 0 AND status = ?";
     // S11 / S12 / S15 / S22：带 updated_ms 的状态 CAS
     static final String UPDATE_REQUEST_STATUS = "UPDATE friend_request SET status = ?, updated_ms = ?"
             + " WHERE from_player_id = ? AND to_player_id = ? AND status = ?";
@@ -90,7 +95,7 @@ public final class JdbcFriendStore implements FriendStore {
     // S24 / S25 / S26：列表读（ORDER BY 与索引同序：不引入 filesort，截断结果确定）
     static final String LIST_FRIENDS = "SELECT friend_player_id, since_ms FROM friend WHERE player_id = ?"
             + " ORDER BY friend_player_id LIMIT ?";
-    static final String LIST_PENDING = "SELECT from_player_id, to_player_id, request_time_ms, status FROM friend_request"
+    static final String LIST_PENDING = "SELECT from_player_id, to_player_id, request_time_ms, status, request_id FROM friend_request"
             + " WHERE to_player_id = ? AND status = ? ORDER BY from_player_id LIMIT ?";
     static final String LIST_BLOCKS = "SELECT blocked_player_id, since_ms FROM friend_block WHERE player_id = ?"
             + " ORDER BY blocked_player_id LIMIT ?";
@@ -115,6 +120,7 @@ public final class JdbcFriendStore implements FriendStore {
     private final DataSource dataSource;
     private final FriendLimits limits;
     private final LongSupplier nowMs;
+    private final LongSupplier requestIds;
     private final int queryTimeoutCapSeconds;
     private final Events events;
     /** 测试缝：补完容量行、开守卫事务之前调用（模拟回收在这个窗口删掉容量行）。 */
@@ -124,7 +130,8 @@ public final class JdbcFriendStore implements FriendStore {
      * @param queryTimeoutCapSeconds 每条语句查询超时的上限（秒）；实际取它与剩余预算（向上取整）的较小者
      */
     public JdbcFriendStore(DataSource dataSource, FriendLimits limits, LongSupplier nowMs, int queryTimeoutCapSeconds,
-                           Events events) {
+                           Events events, LongSupplier requestIds) {
+        this.requestIds = requestIds;
         this.dataSource = dataSource;
         this.limits = limits;
         this.nowMs = nowMs;
@@ -142,84 +149,147 @@ public final class JdbcFriendStore implements FriendStore {
 
     // ================================================================ 写路径
 
-    @Override
-    public AddResult addRequest(long from, long to, Deadline deadline) {
-        AddResult rejected = guarded(from, to, deadline, (db, counts, now) -> {
-            if (blockedEitherWay(db, from, to)) {
-                return AddResult.BLOCKED;
-            }
-            if (exists(db, LOCK_EDGE, from, to) || exists(db, LOCK_EDGE, to, from)) {
-                return AddResult.ALREADY_FRIENDS;
-            }
-            Integer status = lockedRequestStatus(db, from, to);
-            if (status != null && status == STATUS_PENDING) {
-                // 不刷新时间：防反复点击把自己顶到对方列表最前面
-                return AddResult.ALREADY_SENT;
-            }
-            if (limits.maxPendingRequests() > 0 && count(db, COUNT_OUTGOING, uid(from), STATUS_PENDING)
-                    >= limits.maxPendingRequests()) {
-                return AddResult.TOO_MANY_PENDING;
-            }
-            if (limits.maxIncomingRequests() > 0 && count(db, COUNT_INCOMING, uid(to), STATUS_PENDING)
-                    >= limits.maxIncomingRequests()) {
-                return AddResult.TARGET_INBOX_FULL;
-            }
-            if (limits.maxFriends() > 0) {
-                if (counts.get(from) >= limits.maxFriends()) {
-                    return AddResult.SENDER_FULL;
-                }
-                if (counts.get(to) >= limits.maxFriends()) {
-                    return AddResult.RECEIVER_FULL;
-                }
-            }
-            update(db, UPSERT_REQUEST, uid(from), uid(to), now, STATUS_PENDING, now);
-            return null;
-        });
-        return rejected == null ? AddResult.OK : rejected;
-    }
+    private record RequestRow(long from, long to, int status, long requestId, long requestTimeMs) { }
+
+    private record AddAttempt(AddOutcome outcome, boolean needsId) { }
+
+    private record BackfillAttempt(PendingRequest row, boolean needsId) { }
 
     @Override
-    public AcceptResult accept(long from, long me, Deadline deadline) {
-        checkPair(from, me);
-        // 事务外前置：没有这条待处理就不补容量行（防无申请的调用制造容量空行）
-        if (!autocommitExists(deadline, PENDING_EXISTS, uid(from), uid(me), STATUS_PENDING)) {
-            return AcceptResult.NO_PENDING;
+    public AddOutcome addRequest(long from, long to, Deadline deadline) {
+        long candidate = 0;
+        for (;;) {
+            final long allocated = candidate;
+            AddAttempt attempt = guardedWrite(from, to, deadline, (db, counts, now) -> {
+                if (blockedEitherWay(db, from, to)) {
+                    return rollback(new AddAttempt(new AddOutcome(AddResult.BLOCKED, 0, false), false));
+                }
+                if (exists(db, LOCK_EDGE, from, to) || exists(db, LOCK_EDGE, to, from)) {
+                    return rollback(new AddAttempt(new AddOutcome(AddResult.ALREADY_FRIENDS, 0, false), false));
+                }
+                RequestRow current = lockedRequest(db, from, to);
+                if (current != null && current.status() == STATUS_PENDING) {
+                    if (current.requestId() != 0) {
+                        return commit(new AddAttempt(new AddOutcome(AddResult.OK, current.requestId(), false), false));
+                    }
+                    if (allocated == 0) {
+                        return rollback(new AddAttempt(null, true));
+                    }
+                    backfillRequestId(db, allocated, from, to);
+                    return commit(new AddAttempt(new AddOutcome(AddResult.OK, allocated, false), false));
+                }
+                AddResult rejection = null;
+                if (limits.maxPendingRequests() > 0 && count(db, COUNT_OUTGOING, uid(from), STATUS_PENDING)
+                        >= limits.maxPendingRequests()) {
+                    rejection = AddResult.TOO_MANY_PENDING;
+                } else if (limits.maxIncomingRequests() > 0 && count(db, COUNT_INCOMING, uid(to), STATUS_PENDING)
+                        >= limits.maxIncomingRequests()) {
+                    rejection = AddResult.TARGET_INBOX_FULL;
+                } else if (limits.maxFriends() > 0 && counts.get(from) >= limits.maxFriends()) {
+                    rejection = AddResult.SENDER_FULL;
+                } else if (limits.maxFriends() > 0 && counts.get(to) >= limits.maxFriends()) {
+                    rejection = AddResult.RECEIVER_FULL;
+                }
+                if (rejection != null) {
+                    return rollback(new AddAttempt(new AddOutcome(rejection, 0, false), false));
+                }
+                if (allocated == 0) {
+                    return rollback(new AddAttempt(null, true));
+                }
+                update(db, UPSERT_REQUEST, uid(from), uid(to), now, STATUS_PENDING, now, uid(allocated));
+                return commit(new AddAttempt(new AddOutcome(AddResult.OK, allocated, true), false));
+            });
+            if (!attempt.needsId()) {
+                return attempt.outcome();
+            }
+            // 纯判定事务已回滚、全部锁已释放；号源将来即便需远程领段，也不把网络 I/O 留在锁内。
+            candidate = nextRequestId(deadline);
         }
-        AcceptResult rejected = guarded(from, me, deadline, (db, counts, now) -> {
-            // 没有这一步，「拉黑删边」与「同意插边」可以交错出「既是好友又被拉黑」
-            if (blockedEitherWay(db, from, me)) {
-                return AcceptResult.BLOCKED;
-            }
-            Integer status = lockedRequestStatus(db, from, me);
-            if (status == null || status != STATUS_PENDING) {
-                return AcceptResult.NO_PENDING;
-            }
-            if (limits.maxFriends() > 0) {
-                if (counts.get(from) >= limits.maxFriends()) {
-                    return AcceptResult.SENDER_FULL;
-                }
-                if (counts.get(me) >= limits.maxFriends()) {
-                    return AcceptResult.ACCEPTOR_FULL;
-                }
-            }
-            if (update(db, UPDATE_REQUEST_STATUS, STATUS_ACCEPTED, now, uid(from), uid(me), STATUS_PENDING) != 1) {
-                return AcceptResult.NO_PENDING;
-            }
-            // 反向收敛：对方也向我申请过时一并置已同意（0 行是常态），否则 from 的收件箱里留孤儿 pending
-            update(db, UPDATE_REQUEST_STATUS, STATUS_ACCEPTED, now, uid(me), uid(from), STATUS_PENDING);
-            insertEdge(db, from, me, now);
-            insertEdge(db, me, from, now);
-            return null;
-        });
-        return rejected == null ? AcceptResult.OK : rejected;
     }
 
     @Override
-    public RejectResult reject(long from, long me, Deadline deadline) {
-        checkPair(from, me);
-        int rows = autocommitUpdate(deadline, UPDATE_REQUEST_STATUS, STATUS_REJECTED, nowMs.getAsLong(), uid(from), uid(me),
-                STATUS_PENDING);
-        return rows == 0 ? RejectResult.NO_PENDING : RejectResult.OK;
+    public AcceptOutcome accept(long requestId, long me, long fromHint, Deadline deadline) {
+        RequestRow located = findRequest(requestId, me, deadline);
+        if (located == null) {
+            return new AcceptOutcome(AcceptResult.NO_PENDING, 0, false);
+        }
+        return guardedWrite(located.from(), me, deadline, (db, counts, now) -> {
+            RequestRow current = lockedRequest(db, located.from(), me);
+            if (current == null || current.requestId() != requestId) {
+                return rollback(new AcceptOutcome(AcceptResult.NO_PENDING, located.from(), false));
+            }
+            if (current.status() != STATUS_PENDING) {
+                return current.status() == STATUS_ACCEPTED
+                        ? commit(new AcceptOutcome(AcceptResult.OK, current.from(), false))
+                        : rollback(new AcceptOutcome(AcceptResult.NO_PENDING, current.from(), false));
+            }
+            if (blockedEitherWay(db, current.from(), me)) {
+                return rollback(new AcceptOutcome(AcceptResult.BLOCKED, current.from(), false));
+            }
+            if (limits.maxFriends() > 0 && counts.get(current.from()) >= limits.maxFriends()) {
+                return rollback(new AcceptOutcome(AcceptResult.SENDER_FULL, current.from(), false));
+            }
+            if (limits.maxFriends() > 0 && counts.get(me) >= limits.maxFriends()) {
+                return rollback(new AcceptOutcome(AcceptResult.ACCEPTOR_FULL, current.from(), false));
+            }
+            if (update(db, UPDATE_REQUEST_GENERATION_STATUS, STATUS_ACCEPTED, now, uid(current.from()), uid(me),
+                    uid(requestId), STATUS_PENDING) != 1) {
+                return rollback(new AcceptOutcome(AcceptResult.NO_PENDING, current.from(), false));
+            }
+            update(db, UPDATE_REQUEST_STATUS, STATUS_ACCEPTED, now, uid(me), uid(current.from()), STATUS_PENDING);
+            insertEdge(db, current.from(), me, now);
+            insertEdge(db, me, current.from(), now);
+            return commit(new AcceptOutcome(AcceptResult.OK, current.from(), true));
+        });
+    }
+
+    @Override
+    public RejectOutcome reject(long requestId, long me, long fromHint, Deadline deadline) {
+        RequestRow located = findRequest(requestId, me, deadline);
+        if (located == null) {
+            return new RejectOutcome(RejectResult.NO_PENDING, 0, false);
+        }
+        int rows = autocommitUpdate(deadline, UPDATE_REQUEST_GENERATION_STATUS, STATUS_REJECTED, nowMs.getAsLong(),
+                uid(located.from()), uid(me), uid(requestId), STATUS_PENDING);
+        if (rows == 1) {
+            return new RejectOutcome(RejectResult.OK, located.from(), true);
+        }
+        // 同一代次已拒绝可以重放成功；已同意或旧 ID 已轮换则拒绝，绝不触碰新代次。
+        RequestRow current = findRequest(requestId, me, deadline);
+        return new RejectOutcome(current != null && current.status() == STATUS_REJECTED ? RejectResult.OK : RejectResult.NO_PENDING,
+                located.from(), false);
+    }
+
+    private void backfillRequestId(Db db, long id, long from, long to) throws SQLException {
+        if (update(db, BACKFILL_REQUEST_ID, uid(id), uid(from), uid(to), STATUS_PENDING) != 1) {
+            throw new SQLException("守卫内旧申请补号未更新恰好一行");
+        }
+    }
+
+    private long nextRequestId(Deadline deadline) {
+        requireBudget(deadline, "申请发号");
+        long id = requestIds.getAsLong();
+        if (id == 0) {
+            throw new FriendStoreException("申请发号器不可用，不使用零 ID");
+        }
+        return id;
+    }
+
+    private RequestRow findRequest(long requestId, long me, Deadline deadline) {
+        if (requestId == 0 || me == 0) {
+            return null;
+        }
+        List<RequestRow> rows = query(deadline, FIND_REQUEST,
+                rs -> new RequestRow(readUid(rs, 1), readUid(rs, 2), rs.getInt(3), readUid(rs, 4), rs.getLong(5)),
+                uid(requestId));
+        if (rows.size() > 1) {
+            throw new FriendStoreException("好友申请 ID 重复，拒绝处理");
+        }
+        if (rows.isEmpty()) {
+            return null;
+        }
+        RequestRow row = rows.get(0);
+        return row.to() == me && row.from() != me ? row : null;
     }
 
     @Override
@@ -284,9 +354,54 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public List<PendingRequest> pendingRequests(long me, int limit, Deadline deadline) {
+        List<PendingRequest> rows = readPending(me, limit, deadline);
+        boolean migrated = false;
+        // 列表游标已关闭再补号；补号会跨多个事务，完成后必须整页重新读，不能拼接不同提交点的状态。
+        for (PendingRequest row : rows) {
+            if (row.requestId() == 0) {
+                backfillRequest(row.fromPlayerId(), me, deadline);
+                migrated = true;
+            }
+        }
+        if (migrated) {
+            rows = readPending(me, limit, deadline);
+        }
+        if (rows.stream().anyMatch(row -> row.requestId() == 0)) {
+            throw new FriendStoreException("补号后仍出现零 ID 待处理申请，拒绝返回混合版本列表");
+        }
+        return rows;
+    }
+
+    private List<PendingRequest> readPending(long me, int limit, Deadline deadline) {
         return query(deadline, LIST_PENDING,
-                rs -> new PendingRequest(readUid(rs, 1), readUid(rs, 2), rs.getLong(3), rs.getInt(4)),
+                rs -> new PendingRequest(readUid(rs, 1), readUid(rs, 2), rs.getLong(3), rs.getInt(4), readUid(rs, 5)),
                 uid(me), STATUS_PENDING, limit);
+    }
+
+    private PendingRequest backfillRequest(long from, long to, Deadline deadline) {
+        long candidate = 0;
+        for (;;) {
+            final long allocated = candidate;
+            BackfillAttempt attempt = guardedWrite(from, to, deadline, (db, counts, now) -> {
+                RequestRow row = lockedRequest(db, from, to);
+                if (row == null || row.status() != STATUS_PENDING) {
+                    return rollback(new BackfillAttempt(null, false));
+                }
+                if (row.requestId() == 0 && allocated == 0) {
+                    return rollback(new BackfillAttempt(null, true));
+                }
+                long id = row.requestId();
+                if (id == 0) {
+                    backfillRequestId(db, allocated, from, to);
+                    id = allocated;
+                }
+                return commit(new BackfillAttempt(new PendingRequest(from, to, row.requestTimeMs(), STATUS_PENDING, id), false));
+            });
+            if (!attempt.needsId()) {
+                return attempt.row();
+            }
+            candidate = nextRequestId(deadline);
+        }
     }
 
     @Override
@@ -309,7 +424,25 @@ public final class JdbcFriendStore implements FriendStore {
         }
     }
 
+    private record GuardedResult<R>(R value, boolean commit) { }
+
+    @FunctionalInterface
+    private interface ReturningGuardedBody<R> {
+        GuardedResult<R> run(Db db, Map<Long, Long> counts, long nowMs) throws SQLException;
+    }
+
+    private static <R> GuardedResult<R> commit(R value) { return new GuardedResult<>(value, true); }
+
+    private static <R> GuardedResult<R> rollback(R value) { return new GuardedResult<>(value, false); }
+
     private <R> R guarded(long a, long b, Deadline deadline, GuardedBody<R> body) {
+        return guardedWrite(a, b, deadline, (db, counts, now) -> {
+            R rejected = body.run(db, counts, now);
+            return rejected == null ? commit(null) : rollback(rejected);
+        });
+    }
+
+    private <R> R guardedWrite(long a, long b, Deadline deadline, ReturningGuardedBody<R> body) {
         checkPair(a, b);
         long[] ids = ascending(a, b);
         for (int attempt = 1; ; attempt++) {
@@ -326,8 +459,8 @@ public final class JdbcFriendStore implements FriendStore {
                 try {
                     Db db = new Db(c, deadline);
                     Map<Long, Long> counts = lockCapacityRows(db, ids);
-                    R rejected = body.run(db, counts, nowMs.getAsLong());
-                    if (rejected != null) {
+                    GuardedResult<R> result = body.run(db, counts, nowMs.getAsLong());
+                    if (!result.commit()) {
                         c.rollback();
                     } else {
                         // 过了预算就不提交：gate 已经判超时，客户端看到的是失败
@@ -335,7 +468,7 @@ public final class JdbcFriendStore implements FriendStore {
                         c.commit();
                     }
                     finished = true;
-                    return rejected;
+                    return result.value();
                 } catch (CapacityRowMissing e) {
                     c.rollback();
                     finished = true;
@@ -411,9 +544,9 @@ public final class JdbcFriendStore implements FriendStore {
         return exists(db, LOCK_BLOCK, a, b) || exists(db, LOCK_BLOCK, b, a);
     }
 
-    private Integer lockedRequestStatus(Db db, long from, long to) throws SQLException {
+    private RequestRow lockedRequest(Db db, long from, long to) throws SQLException {
         try (PreparedStatement ps = prepare(db, LOCK_REQUEST, uid(from), uid(to)); ResultSet rs = ps.executeQuery()) {
-            return rs.next() ? rs.getInt(1) : null;
+            return rs.next() ? new RequestRow(from, to, rs.getInt(1), readUid(rs, 2), rs.getLong(3)) : null;
         }
     }
 

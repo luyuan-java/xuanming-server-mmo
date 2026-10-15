@@ -1,0 +1,4 @@
+# 生产好友权威表必须处于同一 TiDB 事务域；此门禁不代表整游已满足跨地域强一致。
+game:
+  friend:
+    require-tidb: true

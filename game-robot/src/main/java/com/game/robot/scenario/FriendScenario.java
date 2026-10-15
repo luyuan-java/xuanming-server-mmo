@@ -47,10 +47,10 @@ import java.util.Optional;
  * 好友端到端（对应 mmorpg robot friend_smoke_scenario.go，三个机器人经 gate → game-friend）：
  * <ol>
  *   <li>A 加 B：受理，B 收到推送 235 {REQUEST_RECEIVED, by = A, ts_ms ≠ 0}；</li>
- *   <li>B 的入站申请里有 A（PENDING，权威拉取路径）；A 重发 → 15003；加自己 → 15000、目标为 0 → 1005；</li>
+ *   <li>B 的入站申请里有 A（PENDING，权威拉取路径）；A 重发 → 成功且复用 request_id；加自己 → 15000、目标为 0 → 1005；</li>
  *   <li>B 同意：A 收到 235 {REQUEST_ACCEPTED, by = B}；双方好友列表互见，A 看到 B 在线、last_active_ms ≠ 0、名字非空；</li>
  *   <li>C 拉黑 A：C 的黑名单有 A；A→C、C→A 的申请都回 15007（同一个中性码）；</li>
- *   <li>Java 增项：C 加 B → B 拒绝 → 再拒 15005，B 的入站申请里不再有 C；</li>
+ *   <li>Java 增项：C 加 B → B 拒绝 → 同代再拒幂等成功，B 的入站申请里不再有 C；</li>
  *   <li>推荐：limit 50 钳到 ≤ 20、不含自己 / 好友 / 拉黑的人；exclude 65 条 → 1005；在线目录按编号翻页找到在线的 B、非法游标 → 1005；</li>
  *   <li>A 经 gate 上行 235 → 拿不到业务回包，信封 tip = 1003；</li>
  *   <li>清理：A 删 B（之后 A 的列表里没有 B——写后立刻读到新值）、C 解除拉黑 A。</li>
@@ -65,7 +65,6 @@ public final class FriendScenario {
     private static final Duration CALL_SPACING = Duration.ofMillis(250);
     /** 推荐（119）gate 限频 1 次 / 秒。 */
     private static final Duration RECOMMEND_SPACING = Duration.ofMillis(1100);
-    private static final int ALREADY_SENT = FriendErrorTip.friend_error.kFriendRequestAlreadySent_VALUE;
     private static final int BLOCKED = FriendErrorTip.friend_error.kFriendBlocked_VALUE;
     private static final int NO_PENDING = FriendErrorTip.friend_error.kFriendNoPendingRequest_VALUE;
     private static final int CANNOT_ADD_SELF = FriendErrorTip.friend_error.kFriendCannotAddSelf_VALUE;
@@ -140,7 +139,7 @@ public final class FriendScenario {
             int mark = cb.inbox().size();
             AddFriendResponse added = call(ca, add, AddFriendRequest.newBuilder().setTargetPlayerId(idb).build(),
                     AddFriendResponse.parser());
-            report.check(tipOf(added.getErrorMessage()) == 0, "A 加 B 受理", "tip=" + tipOf(added.getErrorMessage()), REF);
+            report.check(tipOf(added.getErrorMessage()) == 0 && added.getRequestId() != 0, "A 加 B 受理且有申请代次", "tip=" + tipOf(added.getErrorMessage()), REF);
             Optional<FriendEventS2C> received = awaitPush(cb, mark, FriendEventReason.FRIEND_EVENT_REASON_REQUEST_RECEIVED, ida);
             report.check(received.isPresent() && received.get().getTsMs() > 0, "B 收到 235 申请推送（by = A、ts_ms ≠ 0）",
                     received.map(e -> "ts_ms=" + e.getTsMs()).orElse("10 s 内没收到" + cb.describeSince(mark)), REF);
@@ -150,11 +149,13 @@ public final class FriendScenario {
                     GetPendingRequestsResponse.parser());
             Optional<FriendRequest> fromA = inbox.getRequestsList().stream().filter(r -> r.getFromPlayerId() == ida).findFirst();
             report.check(fromA.isPresent() && fromA.get().getStatus() == FriendRequestStatus.FRIEND_REQUEST_PENDING
-                            && fromA.get().getToPlayerId() == idb && fromA.get().getRequestTimeMs() > 0,
+                            && fromA.get().getToPlayerId() == idb && fromA.get().getRequestTimeMs() > 0
+                            && fromA.get().getRequestId() == added.getRequestId(),
                     "B 的入站申请里有 A（PENDING）", inbox.getRequestsCount() + " 条", REF);
-            expectTip(report, "A 重发申请 → 15003", ALREADY_SENT,
-                    call(ca, add, AddFriendRequest.newBuilder().setTargetPlayerId(idb).build(), AddFriendResponse.parser())
-                            .getErrorMessage());
+            AddFriendResponse replay = call(ca, add, AddFriendRequest.newBuilder().setTargetPlayerId(idb).build(),
+                    AddFriendResponse.parser());
+            report.check(tipOf(replay.getErrorMessage()) == 0 && replay.getRequestId() == added.getRequestId(),
+                    "A 重发 pending 成功且代次不变", "request_id=" + Long.toUnsignedString(replay.getRequestId()), REF);
             expectTip(report, "加自己 → 15000", CANNOT_ADD_SELF,
                     call(ca, add, AddFriendRequest.newBuilder().setTargetPlayerId(ida).build(), AddFriendResponse.parser())
                             .getErrorMessage());
@@ -163,7 +164,7 @@ public final class FriendScenario {
 
             // 3. B 同意，A 收到推送，双方互见
             mark = ca.inbox().size();
-            AcceptFriendResponse accepted = call(cb, accept, AcceptFriendRequest.newBuilder().setFromPlayerId(ida).build(),
+            AcceptFriendResponse accepted = call(cb, accept, AcceptFriendRequest.newBuilder().setRequestId(added.getRequestId()).build(),
                     AcceptFriendResponse.parser());
             report.check(tipOf(accepted.getErrorMessage()) == 0, "B 同意 A", "tip=" + tipOf(accepted.getErrorMessage()), REF);
             Optional<FriendEventS2C> acceptedPush = awaitPush(ca, mark, FriendEventReason.FRIEND_EVENT_REASON_REQUEST_ACCEPTED, idb);
@@ -198,17 +199,28 @@ public final class FriendScenario {
                     call(cc, add, AddFriendRequest.newBuilder().setTargetPlayerId(ida).build(), AddFriendResponse.parser())
                             .getErrorMessage());
 
-            // 5. 拒绝
-            call(cc, add, AddFriendRequest.newBuilder().setTargetPlayerId(idb).build(), AddFriendResponse.parser());
-            RejectFriendResponse rejected = call(cb, reject, RejectFriendRequest.newBuilder().setFromPlayerId(idc).build(),
+            // 5. 拒绝与代次隔离：旧 ID 不得同意或拒绝终态后新发的申请。
+            AddFriendResponse cAdded = call(cc, add, AddFriendRequest.newBuilder().setTargetPlayerId(idb).build(), AddFriendResponse.parser());
+            long cRequestId = cAdded.getRequestId();
+            RejectFriendResponse rejected = call(cb, reject, RejectFriendRequest.newBuilder().setRequestId(cRequestId).build(),
                     RejectFriendResponse.parser());
-            report.check(tipOf(rejected.getErrorMessage()) == 0, "B 拒绝 C 的申请", "tip=" + tipOf(rejected.getErrorMessage()), REF);
-            expectTip(report, "再拒一次 → 15005", NO_PENDING,
-                    call(cb, reject, RejectFriendRequest.newBuilder().setFromPlayerId(idc).build(), RejectFriendResponse.parser())
-                            .getErrorMessage());
+            report.check(cRequestId != 0 && tipOf(rejected.getErrorMessage()) == 0, "B 按代次拒绝 C 的申请", "tip=" + tipOf(rejected.getErrorMessage()), REF);
+            expectTip(report, "同一代次再次拒绝幂等成功", 0,
+                    call(cb, reject, RejectFriendRequest.newBuilder().setRequestId(cRequestId).build(), RejectFriendResponse.parser()).getErrorMessage());
+            AddFriendResponse cResent = call(cc, add, AddFriendRequest.newBuilder().setTargetPlayerId(idb).build(), AddFriendResponse.parser());
+            report.check(cResent.getRequestId() != 0 && cResent.getRequestId() != cRequestId,
+                    "终态重发生成新代次", "request_id=" + Long.toUnsignedString(cResent.getRequestId()), REF);
+            expectTip(report, "迟到的旧代次同意被拒", NO_PENDING,
+                    call(cb, accept, AcceptFriendRequest.newBuilder().setRequestId(cRequestId).build(), AcceptFriendResponse.parser()).getErrorMessage());
+            expectTip(report, "迟到的旧代次拒绝被拒", NO_PENDING,
+                    call(cb, reject, RejectFriendRequest.newBuilder().setRequestId(cRequestId).build(), RejectFriendResponse.parser()).getErrorMessage());
+            GetPendingRequestsResponse afterStale = call(cb, pending, GetPendingRequestsRequest.getDefaultInstance(), GetPendingRequestsResponse.parser());
+            report.check(afterStale.getRequestsList().stream().anyMatch(q -> q.getRequestId() == cResent.getRequestId()),
+                    "旧操作不影响新代次 pending", "requests=" + afterStale.getRequestsCount(), REF);
+            call(cb, reject, RejectFriendRequest.newBuilder().setRequestId(cResent.getRequestId()).build(), RejectFriendResponse.parser());
             GetPendingRequestsResponse afterReject = call(cb, pending, GetPendingRequestsRequest.getDefaultInstance(),
                     GetPendingRequestsResponse.parser());
-            report.check(afterReject.getRequestsList().stream().noneMatch(r -> r.getFromPlayerId() == idc),
+            report.check(afterReject.getRequestsList().stream().noneMatch(q -> q.getFromPlayerId() == idc),
                     "拒绝之后 B 的入站申请里没有 C", afterReject.getRequestsCount() + " 条", REF);
 
             // 6. 推荐（弱断言：内容取决于全库数据）：limit = 50 被钳到 ≤ 20；不推自己、已是好友的 B、有拉黑关系的 C
@@ -284,9 +296,16 @@ public final class FriendScenario {
     private void preclean(GameConnection ca, GameConnection cb, GameConnection cc, long ida, long idb, long idc)
             throws RobotException {
         call(ca, remove, RemoveFriendRequest.newBuilder().setTargetPlayerId(idb).build(), RemoveFriendResponse.parser());
-        call(cb, reject, RejectFriendRequest.newBuilder().setFromPlayerId(ida).build(), RejectFriendResponse.parser());
-        call(ca, reject, RejectFriendRequest.newBuilder().setFromPlayerId(idb).build(), RejectFriendResponse.parser());
-        call(cb, reject, RejectFriendRequest.newBuilder().setFromPlayerId(idc).build(), RejectFriendResponse.parser());
+        for (GameConnection receiver : List.of(ca, cb, cc)) {
+            GetPendingRequestsResponse requests = call(receiver, pending, GetPendingRequestsRequest.getDefaultInstance(),
+                    GetPendingRequestsResponse.parser());
+            for (FriendRequest request : requests.getRequestsList()) {
+                if (request.getFromPlayerId() == ida || request.getFromPlayerId() == idb || request.getFromPlayerId() == idc) {
+                    call(receiver, reject, RejectFriendRequest.newBuilder().setRequestId(request.getRequestId()).build(),
+                            RejectFriendResponse.parser());
+                }
+            }
+        }
         call(cc, unblock, UnblockRequest.newBuilder().setTargetPlayerId(ida).build(), UnblockResponse.parser());
     }
 

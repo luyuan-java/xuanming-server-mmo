@@ -136,8 +136,8 @@ class FriendServiceTest {
     void 发申请_超配额1008_不碰存储_被拒的尝试也计数() {
         quotaLimit = 1;
         FriendService s = service();
-        store.add = FriendStore.AddResult.ALREADY_SENT;
-        assertThat(s.addFriend(ME, add(200), deadline()).getErrorMessage().getId()).isEqualTo(15003);
+        store.add = FriendStore.AddResult.BLOCKED;
+        assertThat(s.addFriend(ME, add(200), deadline()).getErrorMessage().getId()).isEqualTo(15007);
         assertThat(s.addFriend(ME, add(200), deadline()).getErrorMessage())
                 .isEqualTo(tip(1008, "too many friend requests, retry later"));
         assertThat(store.calls).hasSize(1);
@@ -164,7 +164,7 @@ class FriendServiceTest {
         FriendService s = service();
         Map<FriendStore.AddResult, Integer> expected = Map.of(
                 FriendStore.AddResult.BLOCKED, 15007, FriendStore.AddResult.ALREADY_FRIENDS, 15001,
-                FriendStore.AddResult.ALREADY_SENT, 15003, FriendStore.AddResult.TOO_MANY_PENDING, 15006,
+                FriendStore.AddResult.TOO_MANY_PENDING, 15006,
                 FriendStore.AddResult.TARGET_INBOX_FULL, 15009, FriendStore.AddResult.SENDER_FULL, 15002,
                 FriendStore.AddResult.RECEIVER_FULL, 15004);
         expected.forEach((result, code) -> {
@@ -193,9 +193,10 @@ class FriendServiceTest {
     void 同意_入口校验_拒绝码映射_成功失效四个键再推给原申请人() throws Exception {
         FriendService s = service();
         assertThat(s.acceptFriend(ME, AcceptFriendRequest.getDefaultInstance(), deadline()).getErrorMessage())
-                .isEqualTo(tip(1005, "from_player_id required"));
-        assertThat(s.acceptFriend(ME, accept(ME), deadline()).getErrorMessage())
-                .isEqualTo(tip(1005, "cannot accept your own request"));
+                .isEqualTo(tip(1005, "request_id required"));
+        store.changed = false;
+        assertThat(s.acceptFriend(ME, accept(ME), deadline()).hasErrorMessage()).isFalse();
+        store.changed = true;
         Map<FriendStore.AcceptResult, Integer> expected = Map.of(FriendStore.AcceptResult.NO_PENDING, 15005,
                 FriendStore.AcceptResult.BLOCKED, 15007, FriendStore.AcceptResult.SENDER_FULL, 15004,
                 FriendStore.AcceptResult.ACCEPTOR_FULL, 15002);
@@ -205,7 +206,7 @@ class FriendServiceTest {
         });
         store.accept = FriendStore.AcceptResult.OK;
         assertThat(s.acceptFriend(ME, accept(200), deadline()).hasErrorMessage()).isFalse();
-        assertThat(store.calls).last().isEqualTo("accept:200->100");
+        assertThat(store.calls).last().isEqualTo("accept:123->100");
         assertThat(events).containsExactly("invalidate:" + REDIS_KEYS.friendList(200), "invalidate:" + REDIS_KEYS.friendList(ME),
                 "invalidate:" + REDIS_KEYS.friendPending(ME), "invalidate:" + REDIS_KEYS.friendPending(200), "push:200");
         assertThat(FriendEventS2C.parseFrom(pushed.get(0).getSerializedMessage()).getReason())
@@ -215,8 +216,9 @@ class FriendServiceTest {
     @Test
     void 拒绝_无申请15005不失效_成功只失效自己收件箱不推送() {
         FriendService s = service();
-        assertThat(s.rejectFriend(ME, reject(ME), deadline()).getErrorMessage())
-                .isEqualTo(tip(1005, "cannot reject your own request"));
+        store.changed = false;
+        assertThat(s.rejectFriend(ME, reject(ME), deadline()).hasErrorMessage()).isFalse();
+        store.changed = true;
         store.reject = FriendStore.RejectResult.NO_PENDING;
         assertThat(s.rejectFriend(ME, reject(200), deadline()).getErrorMessage())
                 .isEqualTo(tip(15005, "no pending friend request"));
@@ -267,7 +269,7 @@ class FriendServiceTest {
     // ================================================================ 读
 
     @Test
-    void 好友列表_在线态现取_资料补全_缓存命中后不再回源() {
+    void 好友列表_权威关系每次读SQL_在线与资料另行补全() {
         store.friends = List.of(new FriendStore.FriendEdge(200, 10), new FriendStore.FriendEdge(300, 20));
         online.put(200L, PlayerPresence.newBuilder().setPlayerId(200).setOnlineSinceMs(999).build());
         profiles.put(200L, new Profile(200, "alice", 12, 3, 1, "ap", 7));
@@ -279,7 +281,7 @@ class FriendServiceTest {
                 .setZoneId(7).build());
         assertThat(friends.get(1)).isEqualTo(FriendEntry.newBuilder().setFriendPlayerId(300).setSinceMs(20).build());
         s.getFriendList(ME, GetFriendListRequest.getDefaultInstance(), deadline());
-        assertThat(store.calls).containsExactly("friends:100");
+        assertThat(store.calls).containsExactly("friends:100", "friends:100");
         assertThat(registry.get("game.friend.online.lookups").tag("outcome", "ok").counter().count()).isEqualTo(2);
         assertThat(registry.get("game.friend.online.lookups").tag("outcome", "offline").counter().count()).isEqualTo(2);
     }
@@ -302,13 +304,14 @@ class FriendServiceTest {
 
     @Test
     void 入站申请与黑名单列表() {
-        store.pending = List.of(new FriendStore.PendingRequest(200, ME, 55, 1));
+        store.pending = List.of(new FriendStore.PendingRequest(200, ME, 55, 1, 123));
         store.blocks = List.of(new FriendStore.BlockEdge(300, 66));
         FriendService s = service();
         var pending = s.getPendingRequests(ME, GetPendingRequestsRequest.getDefaultInstance(), deadline()).getRequests(0);
         assertThat(pending.getFromPlayerId()).isEqualTo(200);
         assertThat(pending.getToPlayerId()).isEqualTo(ME);
         assertThat(pending.getRequestTimeMs()).isEqualTo(55);
+        assertThat(pending.getRequestId()).isEqualTo(123);
         assertThat(pending.getStatus()).isEqualTo(FriendRequestStatus.FRIEND_REQUEST_PENDING);
         var blocks = s.listBlocks(ME, ListBlocksRequest.getDefaultInstance(), deadline()).getBlocksList();
         assertThat(blocks).singleElement().satisfies(b -> {
@@ -316,6 +319,44 @@ class FriendServiceTest {
             assertThat(b.getSinceMs()).isEqualTo(66);
         });
         assertThat(onlineCalls).isZero(); // 黑名单刻意不带在线状态
+    }
+
+    @Test
+    void 重复申请与重复终结不重复推送或失效_仍回原申请ID() {
+        FriendService service = service();
+        store.created = false;
+        var replay = service.addFriend(ME, add(200), deadline());
+        assertThat(replay.hasErrorMessage()).isFalse();
+        assertThat(replay.getRequestId()).isEqualTo(123);
+        store.changed = false;
+        assertThat(service.acceptFriend(ME, accept(200), deadline()).hasErrorMessage()).isFalse();
+        assertThat(service.rejectFriend(ME, reject(200), deadline()).hasErrorMessage()).isFalse();
+        assertThat(events).isEmpty();
+    }
+
+    @Test
+    void 只有申请ID也能处理_零ID不能由from字段绕过() {
+        FriendService service = service();
+        assertThat(service.acceptFriend(ME, AcceptFriendRequest.newBuilder().setFromPlayerId(200).build(), deadline())
+                .getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(service.rejectFriend(ME, RejectFriendRequest.newBuilder().setFromPlayerId(200).build(), deadline())
+                .getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(store.calls).isEmpty();
+        assertThat(service.acceptFriend(ME, AcceptFriendRequest.newBuilder().setRequestId(123).build(), deadline())
+                .hasErrorMessage()).isFalse();
+        assertThat(pushedTo).containsExactly(200L);
+    }
+
+    @Test
+    void 旧缓存不能作为好友关系与申请权威返回_SQL失败就拒绝() {
+        cacheRedis.values.put(REDIS_KEYS.friendList(ME), "[{\"friend_player_id\":200,\"since_ms\":1}]");
+        cacheRedis.values.put(REDIS_KEYS.friendPending(ME), "[{\"from_player_id\":200,\"to_player_id\":100,\"request_time_ms\":1,\"status\":1}]");
+        FriendService service = service();
+        assertThat(service.getFriendList(ME, GetFriendListRequest.getDefaultInstance(), deadline()).getFriendsList()).isEmpty();
+        assertThat(service.getPendingRequests(ME, GetPendingRequestsRequest.getDefaultInstance(), deadline()).getRequestsList()).isEmpty();
+        store.fail = true;
+        assertThat(service.getFriendList(ME, GetFriendListRequest.getDefaultInstance(), deadline()).getErrorMessage().getId()).isEqualTo(1003);
+        assertThat(service.getPendingRequests(ME, GetPendingRequestsRequest.getDefaultInstance(), deadline()).getErrorMessage().getId()).isEqualTo(1003);
     }
 
     // ================================================================ 工具
@@ -329,11 +370,11 @@ class FriendServiceTest {
     }
 
     private static AcceptFriendRequest accept(long from) {
-        return AcceptFriendRequest.newBuilder().setFromPlayerId(from).build();
+        return AcceptFriendRequest.newBuilder().setFromPlayerId(from).setRequestId(123).build();
     }
 
     private static RejectFriendRequest reject(long from) {
-        return RejectFriendRequest.newBuilder().setFromPlayerId(from).build();
+        return RejectFriendRequest.newBuilder().setFromPlayerId(from).setRequestId(123).build();
     }
 
     private static RemoveFriendRequest remove(long target) {
@@ -344,6 +385,8 @@ class FriendServiceTest {
     static final class StubStore implements FriendStore {
         final List<String> calls = new ArrayList<>();
         boolean fail;
+        boolean created = true;
+        boolean changed = true;
         AddResult add = AddResult.OK;
         AcceptResult accept = AcceptResult.OK;
         RejectResult reject = RejectResult.OK;
@@ -361,21 +404,21 @@ class FriendServiceTest {
         }
 
         @Override
-        public AddResult addRequest(long from, long to, Deadline deadline) {
+        public AddOutcome addRequest(long from, long to, Deadline deadline) {
             call("add:" + from + "->" + to);
-            return add;
+            return new AddOutcome(add, add == AddResult.OK ? 123 : 0, created);
         }
 
         @Override
-        public AcceptResult accept(long from, long me, Deadline deadline) {
-            call("accept:" + from + "->" + me);
-            return accept;
+        public AcceptOutcome accept(long requestId, long me, long from, Deadline deadline) {
+            call("accept:" + requestId + "->" + me);
+            return new AcceptOutcome(accept, 200, changed);
         }
 
         @Override
-        public RejectResult reject(long from, long me, Deadline deadline) {
-            call("reject:" + from + "->" + me);
-            return reject;
+        public RejectOutcome reject(long requestId, long me, long from, Deadline deadline) {
+            call("reject:" + requestId + "->" + me);
+            return new RejectOutcome(reject, 200, changed);
         }
 
         @Override

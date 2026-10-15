@@ -455,7 +455,7 @@ robot_smoke 不走这条路，只有 `use_http_login: true` 时才用。
 1. [ ] 消息号固定为 48 / 14 / 26 / 17 / 58（以及 127、23、34、79、77、124）。proto 全名固定为 `loginpb.*`；`TipInfoMessage`、`AccountSimplePlayer`、`MessageContent`、`GameKickPlayerRequest` 不带包名。
 2. [ ] 应答 `MessageContent.message_id` 必须等于请求的 message_id（48、14、26）。`id` 回填请求 id（按路由模式的做法，机器人不校验这个值）。
 3. [ ] 业务错误**只**写进应答体的 `error_message`（字段 1），并且应答体不能为空。**成功时应答体里不能出现 `error_message` 字段**，id=0 也不行。
-4. [ ] 下游故障时可以推 msg 23 `{id:1003}`。不要只回一个带信封错误、body 为空的 `MessageContent`，机器人会把它当成功。
+4. [ ] 下游故障（login 调用失败 / 超时、会话后端 lane 排队超时）回**带请求 id 的信封错误** `MessageContent{id=请求 id, message_id=请求号, error_message={id:1003}}`，body 为空；lane 满回同形的 1008。2026-10-14 起两版同批改（mmorpg `docs/design/client-request-ordering.md` §4.7）。原先这里写的是「推 msg 23 `{id:1003}`，不要只回带信封错误的空 body」，理由是机器人不读信封错误、会把空 body 当成功。现在 mmorpg Go robot 的 `sendAndRecvTimeout` 已同批改为信封错误非 0 即返回错误，Java robot 的 `GameConnection.call` 本来就检查 `envelopeTipId`。
 5. [ ] 开发认证：auth_type 为 `""` 或 `"password"` 时，要求账号首尾无空白、以 `robot_` 或 `dev_` 开头，口令等于环境变量 `LOGIN_DEV_PASSWORD_SHARED_SECRET`（smoke 用 `<robot 冒烟配置里的开发口令>`）。失败返回 2000。
 6. [ ] 支持 `auth_type:"access_token"`：账号从 token 解析，忽略请求里的 account，**不重新签 token**。口令登录成功要签 43 字符的 access/refresh token，过期时间为 Unix 秒（2h / 30d）。
 7. [ ] Login 成功返回账号下全部角色，按建角顺序排列（`players[0]` 是最早建的角色），填 `player_id / class_id / gender / zone_id / name / appearance_id`。新账号返回空列表，不报错。

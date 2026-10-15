@@ -231,8 +231,9 @@ class MatchBackendForwardingTest {
     }
 
     @Test
-    void match调用在途不阻塞login_scene与别的后端() {
-        // match 的 gather 入口最坏要等 4.5 s 的请求预算：这段时间同一会话的登录链路、场景消息、好友消息照常走
+    void match调用在途不阻塞login与scene_好友排在match之后() {
+        // match 的 gather 入口最坏要等 4.5 s 的请求预算：这段时间同一会话的登录链路、场景消息照常走；
+        // login 以外的后端共用一条会话 lane（mmorpg client-request-ordering.md Q1(a)），好友消息排在在途的 match 后面
         EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
         enterGame(ch);
         ch.writeInbound(request(1, ids.requireId("MatchService", "JoinQueue"), "join"));
@@ -242,10 +243,14 @@ class MatchBackendForwardingTest {
         ch.writeInbound(request(3, ids.requireId("SceneSkillClientPlayer", "ListSkills"), "skills"));
         ch.writeInbound(request(4, ids.requireId("ClientPlayerLogin", "LeaveGame"), "leave"));
 
-        assertThat(friend.calls).as("好友后端不等 match").hasSize(1);
+        assertThat(friend.calls).as("好友排在在途的 match 之后（会话后端 lane 跨域保序）").isEmpty();
         assertThat(links.sent).as("scene 不等 match（进场帧 + 这一条）").hasSize(2);
         assertThat(login.calls).as("login 不等 match（进游戏 + 这一条）").hasSize(2);
         assertThat(match.calls).as("match 自己仍只有一条在途").hasSize(1);
+
+        match.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        assertThat(friend.calls).as("match 有结论后轮到好友").hasSize(1);
     }
 
     @Test
