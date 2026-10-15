@@ -265,7 +265,7 @@ class TradeScenarioTest {
     void 只有不带请求号的23_1003才算gate不可达() {
         int sendTip = 23;
         assertThat(TradeScenario.Bot.isUnavailableTip(received(sendTip, 0, tip(TIP_SERVICE_UNAVAILABLE)), sendTip)).isTrue();
-        assertThat(TradeScenario.Bot.isUnavailableTip(received(sendTip, 0, tip(1006)), sendTip)).as("23 {1006} 是 GM 闸").isFalse();
+        assertThat(TradeScenario.Bot.isUnavailableTip(received(sendTip, 0, tip(1006)), sendTip)).as("23 {1006} 不是服务不可达推送").isFalse();
         assertThat(TradeScenario.Bot.isUnavailableTip(received(sendTip, 5, tip(TIP_SERVICE_UNAVAILABLE)), sendTip)).isFalse();
         assertThat(TradeScenario.Bot.isUnavailableTip(received(196, 0, tip(TIP_SERVICE_UNAVAILABLE)), sendTip)).isFalse();
         assertThat(TradeScenario.Bot.envelopeHint(TIP_SERVICE_UNAVAILABLE)).contains("game-trade 不在");

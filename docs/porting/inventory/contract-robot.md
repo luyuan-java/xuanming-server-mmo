@@ -310,10 +310,10 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 
 ### contract-gate-client-gates — gate 客户端消息闸（白名单 / 体积 / 限频 / 非法包 / GM 闸 / 战斗号拒绝）
 - mmorpg: `cpp/nodes/gate/handler/rpc/client_message_processor.cpp` DispatchClientRpcMessage、`gate_security.h`、`gate_gm_client_messages.h`、`gate_router_mode.h`；scene 二道 GM 闸 `cpp/nodes/scene/handler/rpc/player/player_gm_guard.h`、`scene_handler.cpp` ProcessClientPlayerMessage
-- client messages: 全部上行；拒绝时下发 23（1008 超频、1010 超长、1006 GM 被拒、kServiceUnavailable 战斗号 / 无后端）
+- client messages: 全部上行；拒绝时回带请求 id 的信封（1008 超频、1010 超长；2026-10-15 起 1006 GM 被拒、kServiceUnavailable 战斗号也是信封），无后端仍下发 23 kServiceUnavailable
 - tables: MessageLimiter
 - depends on: client-frame-handshake、MessageIdRegistry
-- behavior: 未验证令牌即发包 → 断开；消息号不存在 / 非客户端协议 → 不回包、计非法包，达阈值（默认 50）断开；体积超限回 1010 计非法包；按消息号限频回 1008 计非法包；GM 六条（37/49/94/95/175/187）在 GATE_RUN_MODE 非 dev/test 时回 23{1006} 并计非法包；BattleClientPlayer 号回 23{kServiceUnavailable} 不计非法包不断连；scene 对退出中的玩家只放行 ExitGame，其余回 1006
+- behavior: 未验证令牌即发包 → 断开；消息号不存在 / 非客户端协议 → 不回包、计非法包，达阈值（默认 50）断开；体积超限回 1010 计非法包；按消息号限频回 1008 计非法包；GM 六条（37/49/94/95/175/187）在 GATE_RUN_MODE 非 dev/test 时回带请求 id 的信封 1006（2026-10-15 起，原为 23{1006}）并计非法包；BattleClientPlayer 号回带请求 id 的信封 kServiceUnavailable（2026-10-15 起，原为 23{kServiceUnavailable}）不计非法包不断连；scene 对退出中的玩家只放行 ExitGame，其余回 1006
 - internal: 运行模式环境变量（GATE_RUN_MODE / SCENE_RUN_MODE / BATTLE_RUN_MODE）
 - java: partial — 白名单 / 体积 / 限频 / 非法包阈值已做（`game-gate/.../session/MessageRoutes.java`、`TableMessageLimits.java`、`GateProperties.illegalPacketThreshold`、`GateMetrics`）；战斗号与未接入服务回 kServiceUnavailable（`ClientDispatcher.dispatch` default 分支）；GM 号目前因 scene 未实现而回 1006（等效拒绝），**一旦实现任何 Gm* 处理器必须先补运行模式闸**
 - size: S

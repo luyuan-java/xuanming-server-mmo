@@ -98,10 +98,10 @@ public final class GateMetrics {
         OVERSIZED,
         /** 按消息号超频：回 1008，计非法包。 */
         RATE_LIMITED,
-        /** GM 类指令而运行模式不是 dev / test：推 23 {1006}，计非法包，不转发。 */
+        /** GM 类指令而运行模式不是 dev / test：回带请求 id 的信封 1006（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6），计非法包，不转发。 */
         GM_REJECTED,
         /**
-         * 只走客户端直连的号（战斗服务 {@code BattleClientPlayer} 的 12 个号）发到了大厅连接上：GM 闸之后当场推 23 {1003}，
+         * 只走客户端直连的号（战斗服务 {@code BattleClientPlayer} 的 12 个号）发到了大厅连接上：GM 闸之后当场回带请求 id 的信封 1003（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6），
          * 不计非法包、不断连、不进待处理队列、不过热关停（scene-battle-spec §7.19，D12）。正常客户端不会发，持续增长说明有
          * 旧客户端或误走大厅的战斗上行。这 12 个时间序列在装配时预建（{@link GateMetrics#registerRequest}）。
          */

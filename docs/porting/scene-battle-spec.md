@@ -69,7 +69,7 @@
 - **修掉的基线残留（多数只在故障路径上可见）**：进场恢复完成前结算回 DEFERRED（D20）；FIGHTING 判废加 10 s 宽限、判废前先查本局待结算记录（D21）；
   探测出错不再当成已销账（D15）；单槽覆盖丢奖消失（D13）。
 - **宝宝参战**：快照与结算回写逐项照基线（死宝宝不参战、技能不过滤、按现算上限夹、阵亡回满、推一次 184）。
-- **gate 拒绝战斗上行**：Java 已对齐（23 `{1003}`）；6.3 把拒绝提前到 GM 闸之后、热关停与待处理队列之前，回到基线位置（D12，`MessageRoute.directOnly`，§7.19）。
+- **gate 拒绝战斗上行**：Java 已对齐（2026-10-15 起两版都回带请求 id 的信封 1003，原为 23 `{1003}`）；6.3 把拒绝提前到 GM 闸之后、热关停与待处理队列之前，回到基线位置（D12，`MessageRoute.directOnly`，§7.19）。
 - **异步次序没有保证**：Java 的每条脚本各自异步，Redis 上谁先执行、回调谁先回到逻辑线程都不定（§1.8）。实现为此加了三道防线：进场恢复的代际号与
   「本实例已销账集合」（D32）、锁复核的单调（D30）、只删备战锁的删除入口（D31）。
 - **验收**：6.2 管理口加 `POST /admin/battle/dev/gather`（dev / test 专用）：经 `SceneBattleService` 真实备战、取 scene 出的快照、建房（`origin = DEV_GATHER`），
@@ -323,7 +323,7 @@ Redisson 不保证这一点（`PARITY.md:91` 记过 NOSCRIPT 重发时命令被�
 ### 2.5 gate 拒绝战斗上行（`gate_cmp.cpp:937-950`）
 
 - **前置闸顺序**：会话存在 → 已过令牌校验（`:858-863`，否则断连）→ 消息号在白名单（`:874-886`，计非法包）→ 体积与限频（`:888-889`）→ GM 闸（`:909-933`）→ **战斗拒绝**（`:944-950`）。
-- **战斗拒绝**：`targetNodeType == BattleNodeService` 的号一律回 23 `TipInfoMessage{1003 kServiceUnavailable}`；不计非法包、不断连，逐条只打 DEBUG；直连与路由两种模式都拦。
+- **战斗拒绝**：`targetNodeType == BattleNodeService` 的号一律回带请求 id 的信封 `MessageContent{id, message_id, error_message={1003 kServiceUnavailable}}`（2026-10-15 起，原为 23 `TipInfoMessage{1003}`，见 D12 修订）；不计非法包、不断连，逐条只打 DEBUG；直连与路由两种模式都拦。
   范围是 `BattleClientPlayer` 服务的全部 12 个号：139 / 140 / 143 / 144 / 149 / 150 / 158 / 161 / 162 / 165 / 166 / 177（`player_battle.proto:185-203`；`message_id.txt`）。
 - **时序**：当场发出，不排在其他在途请求之后。
 - **`targetNodeType` 的来源**（实现时核对；§7.19 原稿曾把它当成方法的 `OptionFileDefaultNode`，不对）：基线 gate 的节点类型来自 protogen `NodeServiceForCpp` 的三级回落——
@@ -513,7 +513,7 @@ pending 每人一槽，battle 无条件 SET。下一局如果在上一局销账�
 | 结算应用（本次新应用） | 184（有宝宝条目时，一次）→ 150 `BattleEndS2C{battle_id, outcome, settlement=引擎原值}`，同一条 gate 链路 FIFO；账本命中的不推 |
 | 结算回写气血 | 不推 170 / 66（同基线 Q-h）；面板 167 / 181 主动拉取可见 |
 | 在途闸 | 63 → 3023（先于 3014）；134 / 132 静默丢；131 只清速度；168 / 172 / 174 / 171 / 169 / 175 → 25011；183 / 185 / 186 / 182 / 189 / 187 → 26008；192 → 1005；84 → 7004，打在途目标 → 7002；资产通道 RETRY 27002（帮会捐献等表现为稍后重试）；173 / 188 / 37 / 49 / 94 / 95 / 194 / 195 与只读入口照常 |
-| 大厅连接发战斗号 | 12 个号都回 23 `{1003}`，不断连 |
+| 大厅连接发战斗号 | 12 个号都回带请求 id 的信封 1003（2026-10-15 起，原为 23 `{1003}`，见 scene-battle-spec D12 修订），不断连 |
 | 队伍视图 | `TeamMemberView.in_battle` 在锁存在期间为 true（6.3 起；之前恒 false） |
 | 冻结解除时刻 | 结算应用即解；作废：PREPARING 在备战期限后 ≤ 30 s，FIGHTING 在期限 + 10 s 后 ≤ 30 s（D21） |
 
@@ -1221,8 +1221,8 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
   - `ClientDispatcher.onRequest` 的闸序：关闭中 / 未握手 → 白名单 → 体积 → 限频 → GM 闸 → **直连闸（新）** → 热关停 → 后端队列 / 待处理队列，与基线 `gate_cmp.cpp:858-950` 逐段相同。
     直连闸当场回带请求 id 的信封 1003（`MessageContent{id, message_id = 请求号, error_message = {1003}}`，body 为空；2026-10-15 起，原为推 23 `{1003}`，见 D12 的修订）、计 `game_gate_client_requests_total{result="battle_rejected"}`、return：不进待处理队列与后端队列、不计非法包、不断连、不调热关停的计数，逐条只打 DEBUG。
   - 由闸序得出的行为：被拒的战斗号照样占限频额度（超频回信封 1008、超长回 1010，都计非法包，同基线）；热关停规则（`BattleClientPlayer/<Method>`、`BattleClientPlayer/*`、`*`）对 gate 上的战斗号
-    没有可见效果，客户端始终收到 23 `{1003}`；直连闸不看 `domain`，即使有人把战斗服务错接到某个后端，请求也到不了后端——「6.4 接入 `MatchService` 后 `BattleClientPlayer` 仍被拒」由此保证；
-    Notify 号（应答类型 Empty）发上来同样回 23 `{1003}`；GM 闸在前，契约里若以后出现 GM 名字的战斗方法，生产模式下它先被 GM 闸按非法包拒（同基线次序）。
+    没有可见效果，客户端始终收到带请求 id 的信封 1003（2026-10-15 起，原为 23 `{1003}`，见 scene-battle-spec D12 修订）；直连闸不看 `domain`，即使有人把战斗服务错接到某个后端，请求也到不了后端——「6.4 接入 `MatchService` 后 `BattleClientPlayer` 仍被拒」由此保证；
+    Notify 号（应答类型 Empty）发上来同样回带请求 id 的信封 1003；GM 闸在前，契约里若以后出现 GM 名字的战斗方法，生产模式下它先被 GM 闸按非法包拒（同基线次序）。
   - 指标：战斗上行不再计 `result=unsupported`（看板或告警若按 `unsupported` 统计过战斗上行，需要改口径）；`route` 标签仍是 `unsupported`（战斗路由的域没有改），
     `method = BattleClientPlayer.<方法名>`；这 12 条 `battle_rejected` 序列在装配时预建为 0（`GateMetrics.registerRequest`），是 gate 请求计数器里唯一预建的一组。
 
@@ -1713,7 +1713,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 
 ### 13.6 gate
 
-`ClientDispatcherTest`：12 个战斗号都回 23 `{1003}`；不计非法包、不断连；login 在途时当场回（不排队）；热关停了某个战斗方法时仍回 23 `{1003}`；6.4 把 `MatchService` 接入后 `BattleClientPlayer` 仍被拒。
+`ClientDispatcherTest`：12 个战斗号都回带请求 id 的信封 1003（2026-10-15 起，原为 23 `{1003}`）；不计非法包、不断连；login 在途时当场回（不排队）；热关停了某个战斗方法时仍由战斗闸先拒（同一个信封 1003，不计 killed）；6.4 把 `MatchService` 接入后 `BattleClientPlayer` 仍被拒。
 （6.2 已计划一条钉住用例，本批补齐。）
 
 ### 13.7 跨进程
@@ -1727,7 +1727,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 
 1. **准备**：A、B 登录进同一场景。A 用 GM 187 领宝宝并 183 出战；194 接任务 12；记下 54 金币、191 背包、167 气血、181 宝宝。
    本场景用到的 battle_id 由 robot 按「毫秒时间戳 × 1000 + 序号」现取，保证 X1 < X2 < … 且跨次运行不重复（D13 的局序依赖 battle_id 随时间递增，§10.4）。
-2. **gate 拒绝**：A 在大厅连接上发 149 / 140 / 162 / 165 → 每条都收到 23 `{1003}`，连接不断。
+2. **gate 拒绝**：A 在大厅连接上发 149 / 140 / 162 / 165 → 每条都收到带请求 id 的信封 1003（2026-10-15 起，原为 23 `{1003}`），连接不断。
 3. **只备战**：`gather{PREPARE_ONLY, X1, deadline = now + 300 s, prepare_deadline = now + 60 s, [A]}` → 200。快照核对：player_id、level ≥ 1、speed > 0、max_health > 0；
    routing 的 scene 节点与实例、gate 实例非空；指纹 `^[0-9a-f]{32}$`；items 都是 `battle_usable`；pets 只有一只、`owner = A`；技能都可施放。
 4. **在途闸**（PREPARING）：63（同节点另一场景）→ 3023；168 → 25011；185 → 26008；187 → 26008；192 → 1005；84 → 7004；**B 对 A 放 84 → 7002**；173 照常回建议；194 接任务 13 成功；

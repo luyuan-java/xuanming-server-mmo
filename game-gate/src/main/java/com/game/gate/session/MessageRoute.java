@@ -12,7 +12,7 @@ package com.game.gate.session;
  * @param gm          GM 类指令（方法名 Gm* / Debug* / Test*）：运行模式不是 dev / test 时 gate 直接拒绝
  * @param rpcPath     热关停规则匹配用的方法全路径 {@code /proto 包.服务名/方法名}（如 {@code /friendpb.ClientPlayerFriend/AddFriend}）
  * @param directOnly  只走客户端直连、gate 永不中继的号（{@link MessageRoutes#DIRECT_ONLY_SERVICES}，现在只有战斗服务
- *                    {@code BattleClientPlayer} 的 12 个号）：gate 在 GM 闸之后当场推 23 {1003}，不看 {@code domain}、
+ *                    {@code BattleClientPlayer} 的 12 个号）：gate 在 GM 闸之后当场回带请求 id 的信封 1003（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6），不看 {@code domain}、
  *                    不过热关停、不进任何队列（scene-battle-spec §2.5、§7.19，D12）
  */
 public record MessageRoute(int messageId, String domain, boolean hasResponse, String method, boolean gm, String rpcPath,

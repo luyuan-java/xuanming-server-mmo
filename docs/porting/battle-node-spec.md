@@ -356,7 +356,7 @@
 
 ### 3.7 gate 对战斗上行
 
-- 大厅连接上发 `BattleClientPlayer` 服务的任何号（含 Notify 号），都回 23 `{1003}`，不计非法包、不断连（`gate_cmp.cpp:937-949`）。
+- 大厅连接上发 `BattleClientPlayer` 服务的任何号（含 Notify 号），都回带请求 id 的信封 1003（mmorpg 2026-10-15 起，原为 23 `{1003}`；基线 `client_message_processor.cpp` 的 battle 拒绝，原出处 `gate_cmp.cpp:937-949`），不计非法包、不断连。
 - Java 已对齐（`combat.md:329-339`）：
   - `BattleClientPlayer` 不在 `SERVICE_BACKENDS` 里（`MessageRoutes`）；
   - 6.2 时走 `ClientDispatcher` 的「未接入的域」分支，回 23 `{1003}`——结果相同，但排在热关停与待处理队列之后。
@@ -1428,7 +1428,7 @@ message BattleNodeInfo {
 11. **139 的 `action_deadline_ms` 是下一回合的截止**（先装填再广播）；分出胜负时为 0。
 12. **GetBattleState 对非成员回空状态**（battle_id 0），不回错误码。
 13. **Dubbo 线程不碰房间**；调用方引用 `retries = 0`。
-14. **gate 永远不路由 `BattleClientPlayer`**：只回 23 `{1003}`，不计非法包、不断连。
+14. **gate 永远不路由 `BattleClientPlayer`**：只回带请求 id 的信封 1003（2026-10-15 起，原为 23 `{1003}`），不计非法包、不断连。
 15. **关闭后清掉 Channel 引用**（`AGENTS.md:38`）：槽位立刻摘除；detach 按引用相等比较。
 16. **无符号**：player_id 名单、team 分组、fled / dead 排序都用无符号比较（怪物与宝宝的 actor_id 在 long 里是负数，engine-spec §1）。
 
@@ -1704,7 +1704,7 @@ message BattleNodeInfo {
 **场景 `battle`**（6.2 版：基线 battle-smoke 去掉 match 的部分；账号 A、B、C；前置：切片带 game-battle，dev 模式）：
 
 1. **登录**：A、B、C 登录进场。
-2. **gate 拒绝**：A 在大厅发 149 → 收到 23 `{1003}`；随后正常请求仍有应答（没断连）。
+2. **gate 拒绝**：A 在大厅发 149 → 收到带请求 id 的信封 1003（2026-10-15 起，原为 23 `{1003}`）；随后正常请求仍有应答（没断连）。
 3. **PVE 建房**：dev create，A 单人，`match_mode = 4`，`battle_config_id = 1`（Dungeon 1，怪物 1、2），固定 seed，`deadline_ms = now + 300000`。
    - 快照数值给高，保证能打赢；routing 留空由接口补全。
    - 期望 `admission = ADMITTED`，`error_message = 0`。

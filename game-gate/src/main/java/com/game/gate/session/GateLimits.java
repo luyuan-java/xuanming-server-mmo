@@ -10,7 +10,7 @@ import java.time.Duration;
  * @param illegalPacketThreshold 非法包（未知消息号、超长、超频、运行模式不放行的 GM 指令）累计到此数断开；0 表示不断开（C++ GATE_ILLEGAL_PACKET_THRESHOLD，默认 50）
  * @param handshakeTimeout       连上后多久内必须完成令牌握手，超时断开；0 表示不限
  * @param messageLimits          按消息号的发送频率上限（C++ MessageLimiter；生产取 MessageLimiter 表，缺省每秒 3 条）
- * @param gmCommandsAllowed      放行 GM 类客户端指令（运行模式 dev / test）；否则推 23 {1006}、计非法包、不转发（C++ GATE_RUN_MODE）
+ * @param gmCommandsAllowed      放行 GM 类客户端指令（运行模式 dev / test）；否则回带请求 id 的信封 1006（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6）、计非法包、不转发（C++ GATE_RUN_MODE）
  * @param redirectLinger         已重定向的会话（推过 124 RedirectToGateNotify，批次 5.4）最多再留多久：客户端在此之内没有自己断开，
  *                               gate 到点直接关（不推 tip）。不得短于 {@link #MIN_REDIRECT_LINGER}——客户端要先连上目标 gate、验完票才关旧连接
  *                               （探测 5 s + 验票 10 s），留得太短会把还在路上的客户端提前踢掉（{@code game.gate.redirect-linger}，缺省 60 s）

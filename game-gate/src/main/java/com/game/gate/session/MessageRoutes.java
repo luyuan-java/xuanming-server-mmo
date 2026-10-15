@@ -15,7 +15,7 @@ import java.util.Set;
  * <p>路由按服务语义决定，<b>不看 proto 文件所在目录</b>（mmorpg 会整理目录，见 architecture.md §1）：
  * <ul>
  *   <li>{@link #DIRECT_ONLY_SERVICES} 里的服务只走客户端直连，gate 永不中继：路由标 {@link MessageRoute#directOnly()}，
- *       dispatcher 在 GM 闸之后当场推 23 {1003}，先于下面各条的分派（域照常按下面的规则算，只用作指标标签）；</li>
+ *       dispatcher 在 GM 闸之后当场回带请求 id 的信封 1003（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6），先于下面各条的分派（域照常按下面的规则算，只用作指标标签）；</li>
  *   <li>标了 {@code OptionIsPlayerService} 的服务由玩家所在的 scene 处理；</li>
  *   <li>其余客户端服务查 {@link #SERVICE_BACKENDS}（服务裸名 → 后端 Dubbo group）；</li>
  *   <li>表里没有的是 Java 版尚未实现的服务，路由到 {@link #BACKEND_UNSUPPORTED}，由 dispatcher 回「服务不可用」。
@@ -33,8 +33,8 @@ public interface MessageRoutes {
 
     /**
      * 只走客户端直连、gate 永不中继的客户端服务（服务裸名）。现在只有战斗服务 {@code BattleClientPlayer}：它的 12 个号
-     * （139 / 140 / 143 / 144 / 149 / 150 / 158 / 161 / 162 / 165 / 166 / 177，含各 Notify 号）在大厅连接上一律当场推
-     * 23 {1003}，不计非法包、不断连（基线 {@code client_message_processor.cpp:937-950} 按 {@code targetNodeType == BattleNodeService}
+     * （139 / 140 / 143 / 144 / 149 / 150 / 158 / 161 / 162 / 165 / 166 / 177，含各 Notify 号）在大厅连接上一律当场回
+     * 带请求 id 的信封 1003（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6），不计非法包、不断连（基线 {@code client_message_processor.cpp:937-950} 按 {@code targetNodeType == BattleNodeService}
      * 判定；scene-battle-spec §2.5、§7.19，D12）。
      *
      * <p>Java 按服务裸名判定，不照搬基线的判据。基线的 {@code targetNodeType} 由 protogen {@code NodeServiceForCpp} 的三级回落派生
@@ -63,7 +63,7 @@ public interface MessageRoutes {
      *
      * <p><b>{@code BattleClientPlayer} 永远不许加进来</b>（inventory combat.md gate-battle-uplink-reject；battle-node-spec §3.1、§3.7）：
      * 战斗上行（140 / 149 / 162 / 165）与战斗帧只走客户端到 game-battle 的直连，大厅连接上发这个服务的任何号（含 Notify 号）都由
-     * {@link #DIRECT_ONLY_SERVICES} 当场拒绝 → 推 23 {1003}、不计非法包、不断连（基线 {@code client_message_processor.cpp:937-949}）。
+     * {@link #DIRECT_ONLY_SERVICES} 当场拒绝 → 回带请求 id 的信封 1003（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6）、不计非法包、不断连（基线 {@code client_message_processor.cpp:937-949}）。
      * 把它接到某个后端会让大厅连接成为绕过直连票据（身份只来自票据）的第二条战斗通路；即使误加，直连闸排在后端分派之前，
      * 请求也到不了后端（{@code ClientDispatcherTest} 钉住）。{@code MessageRoutesTest} 与 {@code BattleUplinkRejectedTest} 钉住这一点。
      */

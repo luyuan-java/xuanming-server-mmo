@@ -98,12 +98,12 @@ Java 代码不得依赖这套目录，具体做法：
   经 `ClientDispatcher.context` 带进**每一个**转 login 与转后端域的调用、断线通知与放弃归属（`sessionlessContext` 不带，只用于打日志）；gate 只存不判，持票者校验在 login（2011）。普通 gate 令牌的持票者为 0。
   `SessionDirective` 加 `redirect_to_gate = 5`（`RedirectToGate{ZoneRedirect redirect}`）：login 的登录期重定向 GO-5 用它，gate **先回 EnterGame 应答、再执行指令**（推 124、会话转 REDIRECTED），所以 26 恒先于 124；
   会话已断 / 正在断时迟到的指令什么都不发、计 `redirects{login, stale}`。
-- **gate 调 login 的超时与 login 的预算**：gate 的 Dubbo 消费端超时 5 s（`dubbo.consumer.timeout`），到点推 23 {1003}；**超时之后迟到的应答被 Dubbo 消费端直接丢弃，到不了 gate**（gate 的迟到处理只管「会话已断 / 正在断」时回来的应答）。
+- **gate 调 login 的超时与 login 的预算**：gate 的 Dubbo 消费端超时 5 s（`dubbo.consumer.timeout`），到点回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}；mmorpg client-request-ordering.md §4.7）；**超时之后迟到的应答被 Dubbo 消费端直接丢弃，到不了 gate**（gate 的迟到处理只管「会话已断 / 正在断」时回来的应答）。
   所以 login 的 EnterGame 按 `game.login.enter-game-budget`（缺省 4 s，必须为正，批次 5.4）收紧整条链：等 scene-manager（签票、分配）的本地兜底取 `scene-assign-timeout` 与剩余预算中较小的，
   夺权截止取 `owner-claim-wait` 与预算截止中较早的，用完就不再调用（回 3023）、不再夺权（回 2005），免得在 gate 放弃之后才夺到一个无人持有的归属（§7 第 4 步）。预算从 login 处理器开始算，不含派发层的排队时间。
 - 失败分层（客户端契约）：**业务错误写进应答体自己的 `error_message`**（放在 `ClientReply.body` 里）；
   `ClientReply.tip_id` 只表示传输层失败（消息号不认识、请求体解析失败），gate 放进 `MessageContent.error_message`；
-  调用本身失败（超时 / 后端不可用）：login 推 23 `{1003}`；friend / chat / team / guild / trade / match 等后端域回带请求 id 的信封 1003（同基线路由服 forwardlogic，客户端当场按信封错误处理，不必等自己的请求超时）。
+  调用本身失败（超时 / 后端不可用）：login 与 friend / chat / team / guild / trade / match 等后端域一样回带请求 id 的信封 1003（login 自 2026-10-15 起，原为推 23 `{1003}`）（同基线路由服 forwardlogic，客户端当场按信封错误处理，不必等自己的请求超时）。
 - 是否回包由 gate 按契约里该方法的应答类型决定，不看 body 是否为空：非 `Empty` 应答一律回包（哪怕 0 字节），
   `Empty` 应答只在 `tip_id≠0` 时回包；会话指令无论回不回包都执行。
 - 服务对服务的调用用各自的类型化接口（如 `SceneDirectoryService`——批次 5.4 加 `selectTravelTarget`（源 scene 给 226 调）与 `redirectToZone`（login 给 GO-5 调），都是异步、业务拒绝走 `tip_id`、基础设施失败以异常完成；`AccountLoginService`：game-gateway 的 HTTP 登录 / 刷新令牌调 game-login，
@@ -222,7 +222,7 @@ mmorpg 用 `player_locator` 会话键 + Kafka gate 命令 topic（`PushToPlayer`
 缺省设 dev（同基线 `start_game.ps1`），`GAME_RUN_MODE=prod` 可在本机验证生产行为。
 - **GM 指令的判据**（`MessageMethod.gmCommand()`）：方法名以 `Gm` / `Debug` / `Test` 开头、紧跟一个大写字母。按名字而不是号表：
   新加的 GM 方法不需要任何人记得登记。
-  - **第一道锁在 gate**（`ClientDispatcher`，排在体积与限频之后，被拒的包照样占限频额度）：推 23 `{1006}`、计非法包（到阈值断开）、
+  - **第一道锁在 gate**（`ClientDispatcher`，排在体积与限频之后，被拒的包照样占限频额度）：回带请求 id 的信封 1006（2026-10-15 起，原为推 23 `{1006}`；mmorpg client-request-ordering.md O6）、计非法包（到阈值断开）、
     不转发；计入 `game_gate_client_requests_total{result="gm_rejected"}`，逐条只打 DEBUG（防日志放大）。
   - **第二道锁在 scene 分发入口**：GM 方法在 scene 的运行模式不放行时回应答内 `error_message{1006}`、不调处理器（打 WARN——
     走到这里说明 gate 与 scene 的运行模式不一致，或有人绕开了 gate）。
@@ -935,7 +935,7 @@ mmorpg：scene 的 `battle/system/player_battle.{h,cpp}`（PrepareBattle / Cance
   没被消费就重发、30 次用尽。销账方是 4.6 的帮会活动消费方与巡检器，两版现在都不存在。批次 6.4 起发布走真实的 Kafka 传输（§4.22），game-match 也提供了活动开战的 match 侧与 dev / test 管理口（§4.24）：
   dev / test 环境里能开出活动局、事件真的进 topic，只是没有人销账，重发用尽后摘除（记一条 ERROR）、副本留到 TTL；生产上调用方（game-guild）还没有，整条通道仍不可达。
   4.6 的消费方必须按 battle_id 幂等，并把不认识的 (guild, activity) 当终态销账。
-- **gate 拒绝战斗上行**（game-gate）：`MessageRoute.directOnly`（按服务裸名 `BattleClientPlayer` 置位，12 个号）在 `ClientDispatcher` 里排在 GM 闸之后、热关停之前：当场推 23 {1003}，
+- **gate 拒绝战斗上行**（game-gate）：`MessageRoute.directOnly`（按服务裸名 `BattleClientPlayer` 置位，12 个号）在 `ClientDispatcher` 里排在 GM 闸之后、热关停之前：当场回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}），
   不进待处理队列与后端队列、不计非法包、不断连，计 `result=battle_rejected`。闸序与基线逐段相同；被拒的战斗号照样占限频额度。
 - **配置**：`game.scene.battle-rpc-max-inflight` 256、`game.scene.battle.reaper-interval` 30 s（0 < 值 ≤ 30 s，本机切片调到 2 s）；`game.battle.scene-rpc-timeout` 5 s、`game.battle.outbox-drain-timeout` 3 s（§4.22）。
   跨进程数值（锁余量 60 s、应用后保持 180 s、重投 10 s × 12、宽限 10 s、墓碑 600 s、发件箱条目上限 10 min、账本容量 64）都是 `BattleRedis` 的代码常量，不开放配置，约束关系由单测钉住。

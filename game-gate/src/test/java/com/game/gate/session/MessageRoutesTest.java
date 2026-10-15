@@ -298,7 +298,7 @@ class MessageRoutesTest {
     @Test
     void 战斗服务12个号全部标directOnly_域仍是unsupported_永不进后端表() {
         // combat.md gate-battle-uplink-reject；battle-node-spec §3.7 / §13.7；scene-battle-spec §2.5 / §7.19（D12）：战斗上行只走
-        // game-battle 直连，大厅连接上发 BattleClientPlayer 的任何号（含 Notify 号）都由直连闸当场回 23 {1003}。
+        // game-battle 直连，大厅连接上发 BattleClientPlayer 的任何号（含 Notify 号）都由直连闸当场回带请求 id 的信封 1003（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6）。
         // 摘掉 directOnly 或把它接进任何后端都会让这里失败。
         List<String> methods = List.of("NotifyTurnResult", "GetBattleState", "NotifyBattleStart", "NotifyBattleReconnect",
                 "SubmitBattleAction", "NotifyBattleEnd", "NotifySpectateTurnResult", "NotifySpectateState", "SetAutoBattle",
