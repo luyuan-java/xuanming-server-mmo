@@ -1,4 +1,5 @@
 # 好友服务（friend）移植统一规格：从 mmorpg 基线到 Java 版
+> **2026-10-15 首批当前语义**：两版已追加独立申请 request_id，接受/拒绝按非零ID与会话接收者裁决，保留的from字段忽略；重复pending成功返回同号/原时间，终态重发换号，同操作终态幂等且不重复通知；旧零ID在守卫下补齐，领号在事务外，补号完成后整页SQL重读。权威好友/申请列表直接SQL，生产校验真实TiDB并固定每连接RC+pessimistic。以下按from操作、重复申请必拒与旧缓存权威的历史口径在冲突处由本条覆盖。客户端契约已正规局部同步，保留其他域基线及真实来源哈希，未冒充全仓同步。Java0.1.0-SNAPSHOT验证与未验项目见PARITY末行；MySQL/Redis上一快照已通过，最终from兼容语义15项服务单测通过，Java真TiDB及最终完整真库受Docker停止影响未执行。完整全球同服/容量与端到端不因此标完成。
 
 > **基线**：mmorpg `26ceb70`，与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。上次契约同步之后，`go/friend` 和 `proto/friend` 都没有改动。
 >

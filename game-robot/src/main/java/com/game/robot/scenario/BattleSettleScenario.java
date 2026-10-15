@@ -457,12 +457,14 @@ public final class BattleSettleScenario {
             int messageId = uplinks[i];
             int mark = a.mark();
             long requestId = a.connection().send(messageId, bodies.get(i));
-            Optional<Received> tip = a.connection().await(mark, r -> BattleSupport.lobbyTip(r, battleIds.sendTip()) >= 0, requestTimeout);
+            Optional<Received> rejected = a.connection().await(mark,
+                    r -> BattleSupport.lobbyRejection(r, messageId, requestId) >= 0, requestTimeout);
             boolean noReply = a.connection().inbox().snapshot(mark).stream()
-                    .noneMatch(r -> r.messageId() == messageId && r.requestId() == requestId);
-            report.check(tip.isPresent() && BattleSupport.lobbyTip(tip.get(), battleIds.sendTip()) == TIP_SERVICE_UNAVAILABLE && noReply,
-                    "第 2 步 大厅上发 " + messageId + " → gate 推 23 {1003}、不回应答",
-                    tip.map(r -> "tip=" + BattleSupport.lobbyTip(r, battleIds.sendTip())).orElse("没有收到 23" + a.connection().describeSince(mark)),
+                    .noneMatch(r -> r.messageId() == messageId && r.requestId() == requestId && r.envelopeTipId() == 0);
+            report.check(rejected.isPresent()
+                            && BattleSupport.lobbyRejection(rejected.get(), messageId, requestId) == TIP_SERVICE_UNAVAILABLE && noReply,
+                    "第 2 步 大厅上发 " + messageId + " → gate 回带请求 id 的信封 1003、没有业务应答",
+                    rejected.map(r -> "tip=" + r.envelopeTipId()).orElse("没有收到 " + messageId + " 的信封" + a.connection().describeSince(mark)),
                     "scene-battle-spec §7.19");
         }
         ListSkillsResponse skills = flow.listSkills(a.player);

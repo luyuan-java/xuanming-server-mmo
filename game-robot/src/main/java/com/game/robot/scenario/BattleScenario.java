@@ -180,15 +180,17 @@ public final class BattleScenario {
     private void lobbyRejectsBattleUplink(LobbyBot a) throws RobotException {
         int mark = a.mark();
         long requestId = a.connection().send(ids.submitAction(), SubmitBattleActionRequest.newBuilder().setBattleId(1).build());
-        Optional<Received> tip = a.connection().await(mark, r -> BattleSupport.lobbyTip(r, ids.sendTip()) >= 0, requestTimeout);
-        report.check(tip.isPresent() && BattleSupport.lobbyTip(tip.get(), ids.sendTip()) == TIP_SERVICE_UNAVAILABLE,
-                "第 2 步 大厅上发 149 → gate 推 23 {1003}", tip.map(r -> "tip=" + BattleSupport.lobbyTip(r, ids.sendTip()))
-                        .orElse("没有收到 23" + a.connection().describeSince(mark)), "battle-node-spec §3.7");
+        Optional<Received> rejected = a.connection().await(mark,
+                r -> BattleSupport.lobbyRejection(r, ids.submitAction(), requestId) >= 0, requestTimeout);
+        report.check(rejected.isPresent()
+                        && BattleSupport.lobbyRejection(rejected.get(), ids.submitAction(), requestId) == TIP_SERVICE_UNAVAILABLE,
+                "第 2 步 大厅上发 149 → gate 回带请求 id 的信封 1003", rejected.map(r -> "tip=" + r.envelopeTipId())
+                        .orElse("没有收到 149 的信封" + a.connection().describeSince(mark)), "battle-node-spec §3.7");
         flow.listSkills(a.player);
         boolean noReply = a.connection().inbox().snapshot(mark).stream()
-                .noneMatch(r -> r.messageId() == ids.submitAction() && r.requestId() == requestId);
-        report.check(a.connection().isOpen() && noReply, "第 2 步 拒绝后不断连、不回 149 的应答，正常请求（ListSkills）照常应答",
-                "open=" + a.connection().isOpen() + " 149 应答=" + !noReply, "battle-node-spec §3.7");
+                .noneMatch(r -> r.messageId() == ids.submitAction() && r.requestId() == requestId && r.envelopeTipId() == 0);
+        report.check(a.connection().isOpen() && noReply, "第 2 步 拒绝后不断连、没有 149 的业务应答（只有那条信封），正常请求（ListSkills）照常应答",
+                "open=" + a.connection().isOpen() + " 149 业务应答=" + !noReply, "battle-node-spec §3.7");
     }
 
     // ---------------------------------------------------------------- PVE

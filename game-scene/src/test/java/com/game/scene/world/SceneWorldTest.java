@@ -1,6 +1,7 @@
 package com.game.scene.world;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
@@ -608,6 +609,49 @@ class SceneWorldTest {
     private void enter(long linkId, int sessionId, long playerId, long sceneId, long epoch) {
         world.onPlayerEnter(linkId, enterFrame(sessionId, playerId, sceneId, epoch));
         repo.completeAll();
+    }
+
+    @Test
+    void actor发号抛异常_拒入释放归属且保留同会话旧实例() {
+        assertActorMintFailureKeepsSessionOccupant(true);
+    }
+
+    @Test
+    void actor发号返回零_拒入释放归属且保留同会话旧实例() {
+        assertActorMintFailureKeepsSessionOccupant(false);
+    }
+
+    private void assertActorMintFailureKeepsSessionOccupant(boolean throwFailure) {
+        List<Long> captured = new ArrayList<>();
+        AtomicLong ids = new AtomicLong(1000);
+        world = new SceneWorld(new FakeSceneTables(), IDS, sink, repo, () -> {
+            long value = ids.incrementAndGet();
+            if (value <= 1002) {
+                return value;
+            }
+            if (throwFailure) {
+                throw new IllegalStateException("模拟雪花时钟回拨");
+            }
+            return 0;
+        }, clock, new SceneMetrics(meters), PlayerInitializer.NONE,
+                (save, cause) -> captured.add(save.playerId()));
+        scene = world.createScene(1);
+        repo.putNewPlayer(1001, 1);
+        enter(LINK, 11, 1001, scene.sceneId(), 1);
+        ScenePlayer previous = world.playerBySession(new SessionKey(LINK, 11));
+        sink.clear();
+        repo.putNewPlayer(1002, 1);
+        world.onPlayerEnter(LINK, enterFrame(11, 1002, scene.sceneId(), 1));
+
+        // 修复前 nextId 位于异常处理之外，且先移除旧玩家：这里抛异常并丢掉旧实例。
+        assertThatCode(repo::completeAll).doesNotThrowAnyException();
+        assertThat(sink.results()).containsExactly(new EnterResult(LINK, 11, 1002, 1, ENTER_FAILED));
+        assertThat(sink.to(LINK, 11)).isEmpty();
+        assertThat(repo.releases()).containsExactly(new Release(1002, 1));
+        assertThat(repo.saves()).isEmpty();
+        assertThat(captured).containsExactly(1001L);
+        assertThat(world.playerBySession(new SessionKey(LINK, 11))).isSameAs(previous);
+        assertThat(world.playerByEntity(previous.entity())).isSameAs(previous);
     }
 
     @Test

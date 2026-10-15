@@ -182,6 +182,32 @@ class BagTest {
         assertThat(configsBySlot(bag)).containsExactly(2, 10, 11);
     }
 
+    @Test
+    void 实例序按uint64比较序号_跨符号位仍先灌较早的堆() {
+        Bag bag = new Bag(BagType.INVENTORY, 2);
+        put(bag, 1, 10, 998, 1, 0);
+        put(bag, 2, 10, 998, Long.MIN_VALUE, 1);
+
+        // acquire_seq 是 uint64；修复前高位为 1 的较晚序号被当负数排在最前。
+        AddResult result = add(bag, 10, 1);
+        assertThat(result.ok()).isTrue();
+        assertThat(result.written().get(0).guids()).containsExactly(1L);
+        assertThat(bag.item(1).size()).isEqualTo(999);
+        assertThat(bag.item(2).size()).isEqualTo(998);
+    }
+
+    @Test
+    void 实例序平局按uint64比较guid_高位身份不抢较早的堆() {
+        Bag bag = new Bag(BagType.INVENTORY, 2);
+        put(bag, 1, 10, 998, 7, 0);
+        put(bag, Long.MIN_VALUE, 10, 998, 7, 1);
+
+        AddResult result = add(bag, 10, 1);
+        assertThat(result.ok()).isTrue();
+        assertThat(result.written().get(0).guids()).containsExactly(1L);
+        assertThat(bag.item(Long.MIN_VALUE).size()).isEqualTo(998);
+    }
+
     // ------------------------------------------------------------------ 铸号（一次铸齐，铸不出零写入）
 
     @Test

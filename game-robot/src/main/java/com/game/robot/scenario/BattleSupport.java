@@ -114,6 +114,17 @@ final class BattleSupport {
         return null;
     }
 
+    /**
+     * 大厅上某条请求被 gate 闸门拒绝的信封（以请求号为 message_id、带请求 id、信封错误非 0）里的 tip；不是这条请求的信封为 -1。
+     * gate 的战斗闸与 GM 闸 2026-10-15 起回这个形状（原为 23 推送；mmorpg client-request-ordering.md O6，两版同批）。
+     */
+    static int lobbyRejection(Received r, int messageId, long requestId) {
+        if (r.messageId() != messageId || r.requestId() != requestId || r.envelopeTipId() == 0) {
+            return -1;
+        }
+        return r.envelopeTipId();
+    }
+
     /** 大厅上 23 tip 的 id（推送形状）；不是 23 或解析失败为 -1。 */
     static int lobbyTip(Received r, int sendTip) {
         if (r.messageId() != sendTip || r.requestId() != 0) {

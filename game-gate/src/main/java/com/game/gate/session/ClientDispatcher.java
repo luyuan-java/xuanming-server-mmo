@@ -71,8 +71,9 @@ import org.slf4j.LoggerFactory;
  *       （与 C++ gate 路由 lane 同形，mmorpg client-request-ordering.md §4.7，2026-10-14 两版同批改），客户端按请求 id 当场对上失败；
  *       mmorpg 的 Go robot 同批改为读信封错误（以前只解 body，会把空 body 当成功）；</li>
  *   <li>玩家不在场景、Java 版尚未实现的后端域：推 23 {@code TipInfoMessage{1003}}（与 C++ 找不到目标节点时同形）；</li>
- *   <li>战斗服务 {@code BattleClientPlayer} 的 12 个号（{@link MessageRoute#directOnly()}）：GM 闸之后当场推 23 {1003}，
- *       不计非法包、不断连、不过热关停、不排在途请求之后（基线 {@code :937-950}；scene-battle-spec §2.5、§7.19，D12）；</li>
+ *   <li>战斗服务 {@code BattleClientPlayer} 的 12 个号（{@link MessageRoute#directOnly()}）：GM 闸之后当场回带请求 id 的信封 1003，
+ *       不计非法包、不断连、不过热关停、不排在途请求之后（基线 {@code :937-950}；scene-battle-spec §2.5、§7.19，D12）；
+ *       GM 闸拒绝同样回带请求 id 的信封 1006。两者 2026-10-15 起由 23 推送改为信封（mmorpg client-request-ordering.md O6，两版同批）；</li>
  *   <li>应答 {@code MessageContent.message_id} = 请求号、{@code id} = 请求 id；{@code error_message} 只在 tip≠0 时出现；</li>
  *   <li>进场景失败（scene 回 3023、建链失败、链路层已关）：推 23 {3023}，会话回到「已登录、未进游戏」（玩家绑定清零），
  *       客户端可在同一连接上重试 EnterGame 或回选角建角（login 契约 §6.3）；</li>
@@ -322,12 +323,14 @@ public final class ClientDispatcher {
             return;
         }
         if (route.gm() && !limits.gmCommandsAllowed()) {
-            // GM 闸第一道锁（C++ ClassifyGmClientMessage，排在体积 / 限频之后）：推 23 {1006}、计非法包、不转发。
+            // GM 闸第一道锁（C++ ClassifyGmClientMessage，排在体积 / 限频之后）：回带请求 id 的信封 1006、计非法包、不转发。
+            // 2026-10-15 起由 23 {1006} 改为信封（mmorpg client-request-ordering.md O6，两版同批）：这道闸排在后端 lane 之前，
+            // 回执可能先于更早排队请求的应答到达，不带 id 的 23 会被客户端当成别的请求的失败。
             // scene 入口按同一判据还有第二道锁，防绕开 gate 直连链路端口。
             // 逐条只打 DEBUG（同基线：拒绝发生在踢线阈值之前，逐条 WARN 会让这道闸本身成为日志放大面）；
             // 趋势看指标 game_gate_client_requests_total{result="gm_rejected"}，踢线有 WARN
             log.debug("运行模式不允许 GM 指令，拒绝 session={} method={}", sid(s), route.method());
-            s.send(tip(TIP_FEATURE_UNAVAILABLE));
+            s.send(envelopeError(request, TIP_FEATURE_UNAVAILABLE));
             countRequest(route, RequestResult.GM_REJECTED);
             registerIllegal(s, "gm_rejected", request.getMessageId());
             return;
@@ -335,13 +338,15 @@ public final class ClientDispatcher {
         if (route.directOnly()) {
             // 战斗上行只走客户端到 game-battle 的直连，gate 永不中继（基线 client_message_processor.cpp:937-950；
             // scene-battle-spec §2.5、§7.19，D12）。位置与基线相同：体积 / 限频 / GM 闸之后、按域分派之前——
-            // 所以排在热关停之前（热关停了某个战斗方法时客户端看到的仍是 23 {1003}，不是信封 1003），
+            // 所以排在热关停之前（热关停了某个战斗方法时这里先拒，客户端看到的是本闸的信封 1003），
             // 也不进待处理队列（login 调用在途时当场回；队列满了不因它断连）。
+            // 回执是带请求 id 的信封 1003（2026-10-15 起，原为 23 {1003}；mmorpg client-request-ordering.md O6，两版同批，
+            // D12 已同步修订）：理由同 GM 闸。
             // 合法协议号（旧客户端或误走大厅）：不计非法包、不断连——踢线会把大厅连接一起拆掉。逐条只打 DEBUG，
             // 趋势看指标 game_gate_client_requests_total{result="battle_rejected"}
             log.debug("拒绝经 gate 的战斗消息（战斗只走客户端直连） session={} message_id={} method={}", sid(s),
                     request.getMessageId(), route.method());
-            sendTip(s, TIP_SERVICE_UNAVAILABLE);
+            s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
             countRequest(route, RequestResult.BATTLE_REJECTED);
             return;
         }

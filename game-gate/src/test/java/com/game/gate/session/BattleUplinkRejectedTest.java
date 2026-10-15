@@ -37,7 +37,7 @@ import org.junit.jupiter.api.Test;
 /**
  * 战斗上行在大厅连接上当场被拒的钉住测试（批次 6.2 建，6.3 按 D12 补齐；inventory combat.md gate-battle-uplink-reject；
  * battle-node-spec §3.7、§13.7；scene-battle-spec §2.5、§7.19、§13.6）：大厅连接上发 {@code BattleClientPlayer} 的任何号
- * （140 / 149 / 162 / 165 与各 Notify 号，共 12 个）都当场回 23 {1003}，不计非法包、不断连、不转发——战斗上行只走 game-battle
+ * （140 / 149 / 162 / 165 与各 Notify 号，共 12 个）都当场回带请求 id 的信封 1003（2026-10-15 起，原为 23 {1003}；mmorpg client-request-ordering.md O6），不计非法包、不断连、不转发——战斗上行只走 game-battle
  * 直连（身份只来自票据）。「当场」指基线的位置（{@code client_message_processor.cpp:937-950}）：体积 / 限频 / GM 闸之后、
  * 按域分派之前，所以不受热关停影响、不排在在途的 login 调用之后、待处理队列满了也不因它断连。
  *
@@ -73,15 +73,15 @@ class BattleUplinkRejectedTest {
     private final AtomicLong nanos = new AtomicLong(1);
 
     @Test
-    void 大厅上发战斗服务的每个号_都推23的1003_不计非法包不断连不转发() {
+    void 大厅上发战斗服务的每个号_都回带id的信封1003_不计非法包不断连不转发() {
         EmbeddedChannel ch = verified(16, STRICT, Map.of("friend", friend));
         assertThat(battle).extracting(MessageMethod::messageId)
                 .containsExactly(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177);
 
         long requestId = 1;
         for (MessageMethod method : battle) {
-            ch.writeInbound(request(requestId++, method.messageId(), "battle"));
-            expectTip1003(ch, method.key());
+            ch.writeInbound(request(requestId, method.messageId(), "battle"));
+            expectRejected(ch, method.key(), requestId++, method.messageId());
         }
 
         ClientSession session = session();
@@ -121,7 +121,7 @@ class BattleUplinkRejectedTest {
 
         MessageMethod submit = method("SubmitBattleAction");
         ch.writeInbound(request(1, submit.messageId(), "action"));
-        expectTip1003(ch, submit.key());
+        expectRejected(ch, submit.key(), 1, submit.messageId());
 
         assertThat(rejected(submit)).isEqualTo(1);
         assertThat(meters.find("game.gate.client.requests").counters()).as("计在预建的那条上，没有新序列").hasSize(12);
@@ -142,8 +142,8 @@ class BattleUplinkRejectedTest {
 
         long requestId = 10;
         for (MessageMethod method : battle) {
-            ch.writeInbound(request(requestId++, method.messageId(), "battle"));
-            expectTip1003(ch, method.key() + "（login 还没回来）");
+            ch.writeInbound(request(requestId, method.messageId(), "battle"));
+            expectRejected(ch, method.key() + "（login 还没回来）", requestId++, method.messageId());
             assertThat(session.pending).as(method.key() + " 不进队列").hasSize(1)
                     .allSatisfy(p -> assertThat(p.request().getMessageId()).isEqualTo(listSkills));
         }
@@ -151,7 +151,7 @@ class BattleUplinkRejectedTest {
         assertThat(login.calls).hasSize(1);
         assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(12);
 
-        // login 回来：先回它自己的应答，再轮到排队的 scene 请求（没进场景 → 23 {1003}）；战斗 tip 不会再发第二遍
+        // login 回来：先回它自己的应答，再轮到排队的 scene 请求（没进场景 → 23 {1003}）；战斗拒绝不会再发第二遍
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
         ch.runPendingTasks();
         MessageContent reply = ch.readOutbound();
@@ -176,8 +176,8 @@ class BattleUplinkRejectedTest {
 
         long requestId = 10;
         for (MessageMethod method : battle) {
-            ch.writeInbound(request(requestId++, method.messageId(), "battle"));
-            expectTip1003(ch, method.key() + "（队列已满）");
+            ch.writeInbound(request(requestId, method.messageId(), "battle"));
+            expectRejected(ch, method.key() + "（队列已满）", requestId++, method.messageId());
             assertThat(ch.isOpen()).as(method.key() + " 不触发溢出断连").isTrue();
         }
 
@@ -196,7 +196,7 @@ class BattleUplinkRejectedTest {
     }
 
     @Test
-    void 热关停命中战斗方法时_仍推23的1003_不是信封1003_不计killed_不记短路() {
+    void 热关停命中战斗方法时_仍由战斗闸先拒_回本闸的信封1003_不计killed_不记短路() {
         KillSwitch killSwitch = new KillSwitch(-1, System::nanoTime);
         List<String> blocked = new ArrayList<>();
         killSwitch.onBlocked(blocked::add);
@@ -209,18 +209,18 @@ class BattleUplinkRejectedTest {
             // 精确规则：运维只关了 SubmitBattleAction（§7.19 的原话「热关停了某个战斗方法」）
             killSwitch.setRules(Map.of("BattleClientPlayer/SubmitBattleAction", DENY));
             assertThat(killSwitch.blocked(routes.clientRoute(submit.messageId()).rpcPath())).as("规则确实命中").isPresent();
-            ch.writeInbound(request(requestId++, submit.messageId(), "action"));
-            expectTip1003(ch, "精确规则 " + submit.key());
+            ch.writeInbound(request(requestId, submit.messageId(), "action"));
+            expectRejected(ch, "精确规则 " + submit.key(), requestId++, submit.messageId());
 
-            // 服务通配、全局规则：12 个号都命中，12 个号都仍是 23 {1003}
+            // 服务通配、全局规则：12 个号都命中，12 个号都仍由战斗闸先拒（不经热关停）
             for (String key : List.of("BattleClientPlayer/*", "*")) {
                 nanos.addAndGet(Duration.ofSeconds(1).toNanos());
                 killSwitch.setRules(Map.of(key, DENY));
                 for (MessageMethod method : battle) {
                     assertThat(killSwitch.blocked(routes.clientRoute(method.messageId()).rpcPath()))
                             .as("规则 " + key + " 命中 " + method.key()).isPresent();
-                    ch.writeInbound(request(requestId++, method.messageId(), "battle"));
-                    expectTip1003(ch, "规则 " + key + " 下的 " + method.key());
+                    ch.writeInbound(request(requestId, method.messageId(), "battle"));
+                    expectRejected(ch, "规则 " + key + " 下的 " + method.key(), requestId++, method.messageId());
                 }
             }
 
@@ -259,8 +259,8 @@ class BattleUplinkRejectedTest {
 
         long requestId = 1;
         for (MessageMethod method : battle) {
-            ch.writeInbound(request(requestId++, method.messageId(), "battle"));
-            expectTip1003(ch, method.key());
+            ch.writeInbound(request(requestId, method.messageId(), "battle"));
+            expectRejected(ch, method.key(), requestId++, method.messageId());
         }
 
         assertThat(rogue.calls).as("大厅连接不能成为绕过直连票据的第二条战斗通路").isEmpty();
@@ -285,8 +285,8 @@ class BattleUplinkRejectedTest {
 
         long requestId = 10;
         for (MessageMethod method : battle) {
-            ch.writeInbound(request(requestId++, method.messageId(), "battle"));
-            expectTip1003(ch, method.key());
+            ch.writeInbound(request(requestId, method.messageId(), "battle"));
+            expectRejected(ch, method.key(), requestId++, method.messageId());
         }
         assertThat(links.sent).as("没有一帧 ClientForward").hasSize(1);
         assertThat(session().sceneNodeId).as("场景绑定不受影响").isEqualTo(7);
@@ -305,7 +305,7 @@ class BattleUplinkRejectedTest {
         MessageMethod submit = method("SubmitBattleAction");
         for (int i = 1; i <= 3; i++) {
             ch.writeInbound(request(i, submit.messageId(), "action"));
-            expectTip1003(ch, "窗口内第 " + i + " 条");
+            expectRejected(ch, "窗口内第 " + i + " 条", i, submit.messageId());
         }
 
         ch.writeInbound(request(4, submit.messageId(), "action"));
@@ -317,7 +317,7 @@ class BattleUplinkRejectedTest {
 
         nanos.addAndGet(Duration.ofSeconds(1).toNanos());
         ch.writeInbound(request(5, submit.messageId(), "action"));
-        expectTip1003(ch, "窗口滑过后");
+        expectRejected(ch, "窗口滑过后", 5, submit.messageId());
 
         ch.writeInbound(ClientRequest.newBuilder().setId(6).setMessageId(submit.messageId())
                 .setBody(ByteString.copyFrom(new byte[ClientDispatcher.MAX_REQUEST_BYTES])).build());
@@ -374,6 +374,21 @@ class BattleUplinkRejectedTest {
 
     private static ClientRequest request(long id, int messageId, String body) {
         return ClientRequest.newBuilder().setId(id).setMessageId(messageId).setBody(ByteString.copyFromUtf8(body)).build();
+    }
+
+    /**
+     * 下一帧出站恰好是战斗闸的拒绝回执：带请求 id、以请求号为 message_id 的信封 1003，body 为空，且后面没有别的帧。
+     * 2026-10-15 起由 23 推送改为信封（mmorpg client-request-ordering.md O6，两版同批）：这道闸排在待处理队列与后端 lane 之前，
+     * 回执可能先于更早请求的应答到达，客户端要靠 id 对上是哪一条被拒。
+     */
+    private static void expectRejected(EmbeddedChannel ch, String what, long requestId, int messageId) {
+        MessageContent envelope = ch.readOutbound();
+        assertThat(envelope).as(what).isNotNull();
+        assertThat(envelope.getMessageId()).as(what + "：以请求号为 message_id 的信封，不是 23 推送").isEqualTo(messageId);
+        assertThat(envelope.getId()).as(what + "：带请求 id").isEqualTo(requestId);
+        assertThat(envelope.getErrorMessage().getId()).as(what).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).isEqualTo(1003);
+        assertThat(envelope.getSerializedMessage()).as(what + "：body 为空").isEmpty();
+        assertThat((Object) ch.readOutbound()).as(what + "：只有一帧").isNull();
     }
 
     /** 下一帧出站恰好是 23 {@code TipInfoMessage{1003}}（推送形状：id 不填、不带信封错误、没有参数），且后面没有别的帧。 */

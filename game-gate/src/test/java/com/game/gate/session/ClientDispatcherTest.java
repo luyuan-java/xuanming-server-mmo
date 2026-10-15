@@ -517,20 +517,19 @@ class ClientDispatcherTest {
     // ================================================================ 战斗上行当场拒绝（scene-battle-spec §2.5、§7.19、§13.6，D12）
 
     @Test
-    void 战斗上行_当场推23的1003_不计非法包不断连不转发_计battle_rejected() {
+    void 战斗上行_当场回带id的信封1003_不计非法包不断连不转发_计battle_rejected() {
         EmbeddedChannel ch = enteredScene();
         int framesBefore = links.sent.size();
         // 非法包阈值是 3：发 5 条，只要有一条计了非法包连接就会断
         for (int i = 0; i < 4; i++) {
             ch.writeInbound(request(10 + i, BATTLE_MSG, "action"));
-            MessageContent tip = ch.readOutbound();
-            assertThat(tip.getId()).as("推送形状：不带请求 id").isZero();
-            assertThat(tipOf(tip)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).isEqualTo(1003);
+            assertThat(envelopeTipOf(ch.readOutbound(), 10 + i, BATTLE_MSG))
+                    .isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).isEqualTo(1003);
             assertThat((Object) ch.readOutbound()).as("只有一帧").isNull();
         }
-        // Notify 号（应答类型 Empty）发上来同样回 tip：不因为「无应答」被吞掉
+        // Notify 号（应答类型 Empty）发上来同样回信封：不因为「无应答」被吞掉
         ch.writeInbound(request(20, BATTLE_NOTIFY_MSG, "notify"));
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+        assertThat(envelopeTipOf(ch.readOutbound(), 20, BATTLE_NOTIFY_MSG)).isEqualTo(1003);
 
         assertThat(session().illegalPackets).as("合法协议号，不计非法包").isZero();
         assertThat(ch.isOpen()).as("不断连").isTrue();
@@ -560,14 +559,14 @@ class ClientDispatcherTest {
 
         ch.writeInbound(request(3, BATTLE_MSG, "action"));
 
-        assertThat(tipOf(ch.readOutbound())).as("login 还没回来，战斗 tip 已经发出").isEqualTo(1003);
+        assertThat(envelopeTipOf(ch.readOutbound(), 3, BATTLE_MSG)).as("login 还没回来，战斗拒绝已经发出").isEqualTo(1003);
         assertThat(session().pending).as("队列里仍只有那条 scene 请求").hasSize(1)
                 .allSatisfy(p -> assertThat(p.request().getMessageId()).isEqualTo(SCENE_MSG));
         assertThat(session().inFlight).isTrue();
         assertThat(login.calls).hasSize(1);
         assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(1);
 
-        // login 完成：先回它自己的应答，再处理排队的 scene 请求（没进场景 → 23 {1003}）；战斗 tip 不会再发第二次
+        // login 完成：先回它自己的应答，再处理排队的 scene 请求（没进场景 → 23 {1003}）；战斗拒绝不会再发第二次
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
         ch.runPendingTasks();
         MessageContent reply = ch.readOutbound();
@@ -590,7 +589,7 @@ class ClientDispatcherTest {
 
         for (int i = 0; i < 10; i++) {
             ch.writeInbound(request(100 + i, BATTLE_MSG, "action"));
-            assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+            assertThat(envelopeTipOf(ch.readOutbound(), 100 + i, BATTLE_MSG)).isEqualTo(1003);
         }
 
         assertThat(ch.isOpen()).as("战斗上行不占队列，队列满了也不因它断连").isTrue();
@@ -609,7 +608,7 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 战斗上行_热关停命中时仍推23的1003_不是信封1003_不计killed_不记短路() {
+    void 战斗上行_热关停命中时仍由战斗闸先拒_回本闸的信封1003_不计killed_不记短路() {
         KillSwitch killSwitch = new KillSwitch(-1, System::nanoTime);
         List<String> blocked = new ArrayList<>();
         killSwitch.onBlocked(blocked::add);
@@ -625,18 +624,14 @@ class ClientDispatcherTest {
 
                 ch.writeInbound(request(7, BATTLE_MSG, "action"));
 
-                MessageContent tip = ch.readOutbound();
-                assertThat(tip.getMessageId()).as("23 推送，不是以请求号为 message_id 的信封").isEqualTo(TIP_MSG);
-                assertThat(tip.getId()).isZero();
-                assertThat(tip.hasErrorMessage()).as("不是信封错误").isFalse();
-                assertThat(tipOf(tip)).isEqualTo(1003);
+                assertThat(envelopeTipOf(ch.readOutbound(), 7, BATTLE_MSG)).as("战斗闸的信封，先于热关停").isEqualTo(1003);
                 assertThat((Object) ch.readOutbound()).isNull();
             }
             assertThat(blocked).as("没有记成热关停短路").isEmpty();
             assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "killed")).isZero();
             assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(2);
 
-            // 对照：同一份全局规则下普通请求回的是带请求 id 的信封 1003，并记一次短路
+            // 对照：同一份全局规则下普通请求被热关停短路（同样是带请求 id 的信封 1003，但记一次短路）
             killSwitch.setRules(Map.of("*", new KillSwitch.Rule(true, "止血", 0)));
             ch.writeInbound(request(8, FRIEND_MSG, "f"));
             MessageContent envelope = ch.readOutbound();
@@ -657,7 +652,7 @@ class ClientDispatcherTest {
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, BATTLE_VIA_BACKEND_MSG, "action"));
 
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+        assertThat(envelopeTipOf(ch.readOutbound(), 1, BATTLE_VIA_BACKEND_MSG)).isEqualTo(1003);
         assertThat(friend.calls).as("不转给 friend 后端").isEmpty();
         assertThat(session().backendQueue).isEmpty();
         assertThat(requests("friend", BATTLE_VIA_BACKEND_MSG, "battle_rejected")).isEqualTo(1);
@@ -681,7 +676,7 @@ class ClientDispatcherTest {
 
         // 生产模式下 GM 名字的号先被 GM 闸拦：1006 + 非法包，轮不到直连闸
         ch.writeInbound(request(7, BATTLE_GM_MSG, "gm"));
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(1006);
+        assertThat(envelopeTipOf(ch.readOutbound(), 7, BATTLE_GM_MSG)).isEqualTo(1006);
         assertThat(session().illegalPackets).isEqualTo(2);
         assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "oversized")).isEqualTo(1);
         assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_GM_MSG, "gm_rejected")).isEqualTo(1);
@@ -696,7 +691,7 @@ class ClientDispatcherTest {
         devCh.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
         devCh.readOutbound();
         devCh.writeInbound(request(1, BATTLE_GM_MSG, "gm"));
-        assertThat(tipOf(devCh.readOutbound())).isEqualTo(1003);
+        assertThat(envelopeTipOf(devCh.readOutbound(), 1, BATTLE_GM_MSG)).isEqualTo(1003);
         assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_GM_MSG, "battle_rejected")).isEqualTo(1);
         assertThat(devCh.isOpen()).isTrue();
     }
@@ -1946,13 +1941,13 @@ class ClientDispatcherTest {
     // ================================================================ 按消息号限频（C++ MessageLimiter）
 
     @Test
-    void 生产模式拒绝GM指令_推23的1006_计非法包_不转发() {
+    void 生产模式拒绝GM指令_回带id的信封1006_计非法包_不转发() {
         EmbeddedChannel ch = enteredScene();
         int framesBefore = links.sent.size();
 
         ch.writeInbound(request(5, GM_MSG, "gm"));
 
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(1006);
+        assertThat(envelopeTipOf(ch.readOutbound(), 5, GM_MSG)).isEqualTo(1006);
         assertThat(links.sent).as("不转发给 scene").hasSize(framesBefore);
         assertThat(requests("scene", GM_MSG, "gm_rejected")).isEqualTo(1);
         assertThat(session().illegalPackets).isEqualTo(1);
@@ -2194,6 +2189,19 @@ class ClientDispatcherTest {
     private ClientTokenVerifyRequest verifyRequest(int gateNodeId, long expire) {
         ByteString payload = payload(gateNodeId, expire);
         return ClientTokenVerifyRequest.newBuilder().setPayload(payload).setSignature(tokens.sign(payload)).build();
+    }
+
+    /**
+     * 出站帧是带请求 id 的信封错误（以请求号为 message_id、body 为空），返回信封里的 tip。
+     * 战斗闸与 GM 闸的拒绝 2026-10-15 起是这个形状（原为 23 推送；mmorpg client-request-ordering.md O6）。
+     */
+    private static int envelopeTipOf(Object outbound, long requestId, int messageId) {
+        MessageContent content = (MessageContent) outbound;
+        assertThat(content).isNotNull();
+        assertThat(content.getMessageId()).as("以请求号为 message_id 的信封，不是 23 推送").isEqualTo(messageId);
+        assertThat(content.getId()).as("带请求 id").isEqualTo(requestId);
+        assertThat(content.getSerializedMessage()).as("body 为空").isEmpty();
+        return content.getErrorMessage().getId();
     }
 
     private static int tipOf(Object outbound) {

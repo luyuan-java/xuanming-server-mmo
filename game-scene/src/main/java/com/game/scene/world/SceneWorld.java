@@ -1379,6 +1379,16 @@ public final class SceneWorld {
             }
         }
 
+        // actor 发号可能因时钟回拨失败：在移除旧实例或修改 AOI 前拒入并释放本次归属。
+        final long actorEntity;
+        try {
+            actorEntity = nextId();
+        } catch (RuntimeException e) {
+            log.error("玩家 actor 发号失败 player={}", playerId, e);
+            failEnter(key, playerId, epoch, transfer, "玩家 actor 发号失败");
+            return;
+        }
+
         // 同一会话上挂着另一个玩家（gate 复用会话换角色）：按正常离开处理，它自己的 epoch 仍有效，写回并释放。
         // 它若正冻结在交出中：写回与在途交出谁先提交都安全（写回先 → 交出被围栏拒；交出先 → 写回被拒、结局出来时释放新 epoch），
         // removePlayer 会把那次换图标成「已移出」，结局只做收尾。
@@ -1421,7 +1431,7 @@ public final class SceneWorld {
             }
         }
 
-        ScenePlayer player = new ScenePlayer(playerId, nextId(), key, epoch, data.classId(),
+        ScenePlayer player = new ScenePlayer(playerId, actorEntity, key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime());
         player.setName(data.name());

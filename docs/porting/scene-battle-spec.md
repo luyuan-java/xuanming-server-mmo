@@ -1219,7 +1219,7 @@ message BattleLedgerEntry { uint64 battle_id = 1; uint64 applied_at_ms = 2; }  /
     合成判据圈出的号必须等于 `directOnly` 的 12 个号；并钉住「前两级不命中且文件没写 option」的客户端服务清单（现在恰为 Login / Friend / Guild 三个）——
     mmorpg 以后新增这类服务时用例先失败，由人去 mmorpg 生成物确认它是不是 `BattleNodeService`。残余盲区：option 与目录自相矛盾的文件测不出，属 mmorpg 自身错配。
   - `ClientDispatcher.onRequest` 的闸序：关闭中 / 未握手 → 白名单 → 体积 → 限频 → GM 闸 → **直连闸（新）** → 热关停 → 后端队列 / 待处理队列，与基线 `gate_cmp.cpp:858-950` 逐段相同。
-    直连闸当场推 23 `{1003}`、计 `game_gate_client_requests_total{result="battle_rejected"}`、return：不进待处理队列与后端队列、不计非法包、不断连、不调热关停的计数，逐条只打 DEBUG。
+    直连闸当场回带请求 id 的信封 1003（`MessageContent{id, message_id = 请求号, error_message = {1003}}`，body 为空；2026-10-15 起，原为推 23 `{1003}`，见 D12 的修订）、计 `game_gate_client_requests_total{result="battle_rejected"}`、return：不进待处理队列与后端队列、不计非法包、不断连、不调热关停的计数，逐条只打 DEBUG。
   - 由闸序得出的行为：被拒的战斗号照样占限频额度（超频回信封 1008、超长回 1010，都计非法包，同基线）；热关停规则（`BattleClientPlayer/<Method>`、`BattleClientPlayer/*`、`*`）对 gate 上的战斗号
     没有可见效果，客户端始终收到 23 `{1003}`；直连闸不看 `domain`，即使有人把战斗服务错接到某个后端，请求也到不了后端——「6.4 接入 `MatchService` 后 `BattleClientPlayer` 仍被拒」由此保证；
     Notify 号（应答类型 Empty）发上来同样回 23 `{1003}`；GM 闸在前，契约里若以后出现 GM 名字的战斗方法，生产模式下它先被 GM 闸按非法包拒（同基线次序）。
@@ -1547,7 +1547,7 @@ gate 的 `battle_rejected` 持续增长（旧客户端或误走大厅的战斗�
 | D9 | 已 FIGHTING 的补发确认 | 幂等忽略 | 首次续期未成功时再发一次 | 自愈；否则锁停在备战 TTL、早于战斗结束过期 | 否 | 否 |
 | D10 | 重建复核 | 两条路径都两次往返 | 迟到确认一段 Lua；登录重建保留复核（复核脚本单调，见 D30） | 单键原子 | 否 | 否 |
 | D11 | 战斗闸的缺省 | 每个系统自己判 | `BattlePolicy` 显式声明，缺省 REJECT 1005 | 新入口默认 fail-closed（`combat.md:327`） | 否（现有方法不变） | 否 |
-| D12 | gate 拒绝战斗上行的位置与判据 | GM 闸之后、分派之前，当场回；按 `targetNodeType == BattleNodeService` 判（protogen 的服务名 → package → 目录名回落） | 位置同基线（6.3 已落地：`MessageRoute.directOnly`，GM 闸之后、热关停之前当场推 23 `{1003}`，不进队列；6.3 之前排在热关停与待处理队列之后）；判据按服务裸名 `BattleClientPlayer`（现行契约上与基线圈出同一组 12 个号，单测守等价，§7.19）；计 `battle_rejected`、不再计 `unsupported` | 回到基线时序；Java 不许依赖 proto 目录（`AGENTS.md` §1） | 6.3 之后与基线相同（之前的边角：热关停时回包形状、login 在途时 tip 到达时刻） | 否 |
+| D12 | gate 拒绝战斗上行的位置与判据 | GM 闸之后、分派之前，当场回；按 `targetNodeType == BattleNodeService` 判（protogen 的服务名 → package → 目录名回落） | 位置同基线（6.3 已落地：`MessageRoute.directOnly`，GM 闸之后、热关停之前当场推 23 `{1003}`，不进队列；6.3 之前排在热关停与待处理队列之后）；**2026-10-15 修订：回执形状由 23 `{1003}` 改为带请求 id 的信封 1003，GM 闸的 23 `{1006}` 同步改为信封 1006**（mmorpg `docs/design/client-request-ordering.md` O6，两版同批：这两道闸排在会话队列与后端 lane 之前，回执可能先于更早请求的应答到达，不带 id 的 23 会被客户端当成别的请求的失败）；判据按服务裸名 `BattleClientPlayer`（现行契约上与基线圈出同一组 12 个号，单测守等价，§7.19）；计 `battle_rejected`、不再计 `unsupported` | 回到基线时序；Java 不许依赖 proto 目录（`AGENTS.md` §1） | 6.3 之后与基线相同（之前的边角：热关停时回包形状、login 在途时 tip 到达时刻） | 否 |
 | D13 | 待结算记录 | 每人单槽、无条件覆盖；坏记录无条件 DEL | 每局一个 Hash 字段；进场按 battle_id 升序应用、遇延后即停；坏字段单独删（按字段名原始字节）；字段名只认规范的无符号十进制，`"05"` 这类写法按坏字段删（§7.2） | 消除覆盖丢奖（`gap.md:332-333`）；销账按规范串删不到非规范字段，当合法记录应用会每次进场重发 | 仅故障路径：以前被覆盖的那一局能到账 | 可选 |
 | D14 | 结算寻址 | 首投按快照路由；重投节点号、实例留空 | 首投与重投都按位置记录 + 目录，带实例 id 围栏 | 一条路径；保住实例围栏 | 否 | 否 |
 | D15 | 探测出错 / 没问到结论 | 结算：当已销账；活动结果：当仍在 | 一律本轮跳过、不计次。实现把同一口径推到底：回整数的脚本得到空回复一律异常完成（含 `PREPARE_LOCK`）；battle 两个发件箱的探测 / 定位 / 落库结果为 null、端口返回 null future 都按出错（`probe_error` / `locate_error` / `not_durable`） | 基线缺陷 F1，两通道统一；没问到结论不能当成任何一种结论 | 否（只影响延迟） | 可选 |

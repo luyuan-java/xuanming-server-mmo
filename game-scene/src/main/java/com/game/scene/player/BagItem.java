@@ -9,8 +9,8 @@ import java.util.Comparator;
  */
 public final class BagItem {
 
-    /** 实例序：入包先后，平局按 guid（无符号）。并堆、合并分组、淘汰都按它（基线依赖 EnTT 遍历序，未定义）。 */
-    static final Comparator<BagItem> ACQUIRE_ORDER = Comparator.comparingLong(BagItem::acquireSeq)
+    /** 实例序：入包先后，平局按 guid；两者均按 uint64 无符号比较，与 C++ 并堆、合并和淘汰同口径。 */
+    static final Comparator<BagItem> ACQUIRE_ORDER = Comparator.comparing(BagItem::acquireSeq, Long::compareUnsigned)
             .thenComparing(BagItem::guid, Long::compareUnsigned);
 
     private final long guid;
