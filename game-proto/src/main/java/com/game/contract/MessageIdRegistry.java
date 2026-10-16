@@ -19,11 +19,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 /**
  * 消息号注册表：{@code message_id.txt}（唯一真源）↔ 服务方法 ↔ 请求 / 应答类型。
@@ -294,4 +296,24 @@ public final class MessageIdRegistry {
                     if (ids.containsKey(id) || !reservedIds.add(id)) {
                         throw new IllegalStateException("message_id.txt 消息号重复: " + id);
                     }
-          
+                    continue;
+                }
+                if (reservedIds.contains(id) || ids.putIfAbsent(id, key) != null) {
+                    throw new IllegalStateException("message_id.txt 消息号重复: " + id);
+                }
+                if (seenKeys.putIfAbsent(key, id) != null) {
+                    throw new IllegalStateException("message_id.txt 方法重复: " + key);
+                }
+            }
+        }
+        return ids;
+    }
+
+    private static InputStream open(ClassLoader loader, String resource) {
+        InputStream in = loader.getResourceAsStream(resource);
+        if (in == null) {
+            throw new IllegalStateException("classpath 上缺少 " + resource + "（先跑 tools/ContractSync.java 并构建 game-proto）");
+        }
+        return in;
+    }
+}

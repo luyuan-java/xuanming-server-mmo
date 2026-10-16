@@ -96,6 +96,30 @@ class MessageIdRegistryTest {
                 .hasMessageContaining("方法重复");
     }
 
+    @Test
+    void 墓碑只占号_不进注册表() throws Exception {
+        assertThat(MessageIdRegistry.parseMessageIds(stream("0=AB\n1=reserved:CD\n2=EF\n")))
+                .containsExactly(java.util.Map.entry(0, "AB"), java.util.Map.entry(2, "EF"));
+    }
+
+    @Test
+    void 墓碑与活号或墓碑同号即拒绝_墓碑缺原名即拒绝() {
+        assertThatThrownBy(() -> MessageIdRegistry.parseMessageIds(stream("1=AB\n1=reserved:CD\n")))
+                .hasMessageContaining("消息号重复");
+        assertThatThrownBy(() -> MessageIdRegistry.parseMessageIds(stream("1=reserved:CD\n1=AB\n")))
+                .hasMessageContaining("消息号重复");
+        assertThatThrownBy(() -> MessageIdRegistry.parseMessageIds(stream("1=reserved:AB\n1=reserved:CD\n")))
+                .hasMessageContaining("消息号重复");
+        assertThatThrownBy(() -> MessageIdRegistry.parseMessageIds(stream("1=reserved:\n")))
+                .hasMessageContaining("墓碑缺原名");
+    }
+
+    @Test
+    void 墓碑名与重新出现的同名活方法可以并存() throws Exception {
+        assertThat(MessageIdRegistry.parseMessageIds(stream("1=reserved:AB\n2=AB\n")))
+                .containsExactly(java.util.Map.entry(2, "AB"));
+    }
+
     private static ByteArrayInputStream stream(String s) {
         return new ByteArrayInputStream(s.getBytes(StandardCharsets.UTF_8));
     }
