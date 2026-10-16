@@ -13,6 +13,7 @@
 // message 的声明顺序就是全库表间锁序（tables.go:15-21）：G guild < S guild_player_state < M guild_member < A guild_application；
 // 4.5 / 4.6 依次在本文件末尾追加 Q guild_player_op_seq(5) < O guild_asset_op(6) < C guild_daily_counter(7) < P guild_activity_progress(8)
 // （字段号照抄 guild_db.proto:96-228，含三个枚举、uk_guild_asset_op 与三组索引；guild-spec §1.4、§6.2）。
+// 2026-10-15 在 C 之后追加 R guild_client_request（客户端幂等键的去重记录，理由见该 message 的注释）。
 // 任何事务都不得在持有靠后表的行锁之后回头去锁靠前的表（两个登记例外见 JdbcGuildStore 类注释）。
 syntax = "proto3";
 
@@ -205,4 +206,30 @@ message GuildDailyCounterRow {
   uint32 used_count = 5;       // 含结算中的占用；REJECTED / ABORTED 时退回
   uint64 updated_ms = 6;
   // 追加区：从 7 起。计数一律用带上限的 upsert 改写，不得「锁不存在的行再插入」（guild_db.proto:196）。
+}
+
+// R：客户端幂等键的去重记录（2026-10-15；形状照抄 mmorpg guild_db.proto 的 GuildClientRequestRecord，GuildTablesTest 对拍）。
+// DonateToGuild / BuyGuildShopGoods 的 client_request_id（非 0）写成指令时，在同一个预留事务里插一行 (玩家, 键) → op_id；
+// 重发凭它找回首次那笔指令，不再发号、不再扣。另起一张表的理由：guild_asset_op 已有 uk_guild_asset_op（每表至多一个唯一键），
+// 且存量行与旧客户端的新行都是 0，(player_id, client_request_id) 上的唯一键会把它们判成重复。
+//
+// 锁序：排在 C 之后（Java 尚无 P / T / W；mmorpg 那边排在全序末尾 W 之后）。写者只有两类，两种排法对它们是同一个相对次序：
+//   - 捐献 / 兑换预留：锁本人成员行 M 之后普通读本表复核（读到 = 首次已提交，整体回滚），事务最后（O、C、扣帮贡之后）插新行；
+//     同一玩家的插入者都先持他唯一的那一行 M，同一 (p, 键) 在途的插入者至多一个；
+//   - 清理：普通读过期候选 → 逐行短事务「主键点锁 → 带 created_ms 复核的点删」，不持别的锁。
+// 寿命：created_ms 早于 now − terminal-retention 的行由清理删掉（与终态指令同一个保留期，同一轮里先删本表）。
+// idx_guild_client_request_0 (created_ms)：清理按创建时刻范围取候选。
+message GuildClientRequestRow {
+  option (proto2mysql.table_name) = "guild_client_request";
+  option (proto2mysql.primary_key) = "player_id,client_request_id";
+  option (proto2mysql.index) = "created_ms";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 player_id = 1;
+  uint64 client_request_id = 2;  // DonateToGuildRequest / BuyGuildShopGoodsRequest.client_request_id，非 0
+  uint64 op_id = 3;              // 首次写成的 guild_asset_op.op_id；种类与参数以那一行为准，本表不重复存
+  uint64 created_ms = 4;         // = 那一行的 created_ms（预留事务的 now）；清理按它判龄
+  // 追加区：从 5 起。
 }

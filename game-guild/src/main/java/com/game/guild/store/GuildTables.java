@@ -2,6 +2,7 @@ package com.game.guild.store;
 
 import com.game.guild.store.pb.GuildApplicationRow;
 import com.game.guild.store.pb.GuildAssetOpRow;
+import com.game.guild.store.pb.GuildClientRequestRow;
 import com.game.guild.store.pb.GuildDailyCounterRow;
 import com.game.guild.store.pb.GuildMemberRow;
 import com.game.guild.store.pb.GuildPlayerOpSeqRow;
@@ -30,24 +31,28 @@ public final class GuildTables {
     public static final String ASSET_OP = "guild_asset_op";
     /** guild_daily_counter（C，锁序位置 7）。 */
     public static final String DAILY_COUNTER = "guild_daily_counter";
+    /** guild_client_request（R，客户端幂等键的去重记录，排在 C 之后；2026-10-15）。 */
+    public static final String CLIENT_REQUEST = "guild_client_request";
 
     /**
-     * 表名，顺序即全库表间锁序 G &lt; S &lt; M &lt; A &lt; Q &lt; O &lt; C（tables.go:15-21）。4.6 往后追加 P。
+     * 表名，顺序即全库表间锁序 G &lt; S &lt; M &lt; A &lt; Q &lt; O &lt; C &lt; R（tables.go:15-21；R 只由捐献 / 兑换预留在事务最后插入、
+     * 由清理单行点删，见 guild_tables.proto）。4.6 往后追加 P。
      * 手写 SQL 里的表名字面量必须与这里（= guild_tables.proto 的 table_name）一致，GuildTablesTest 钉住。
      */
     public static final List<String> NAMES = List.of("guild", "guild_player_state", "guild_member", "guild_application",
-            PLAYER_OP_SEQ, ASSET_OP, DAILY_COUNTER);
+            PLAYER_OP_SEQ, ASSET_OP, DAILY_COUNTER, CLIENT_REQUEST);
 
     /** 与 {@link #NAMES} 一一对应的表消息原型。 */
     public static final List<Message> PROTOTYPES = List.of(GuildRow.getDefaultInstance(),
             GuildPlayerStateRow.getDefaultInstance(), GuildMemberRow.getDefaultInstance(),
             GuildApplicationRow.getDefaultInstance(), GuildPlayerOpSeqRow.getDefaultInstance(),
-            GuildAssetOpRow.getDefaultInstance(), GuildDailyCounterRow.getDefaultInstance());
+            GuildAssetOpRow.getDefaultInstance(), GuildDailyCounterRow.getDefaultInstance(),
+            GuildClientRequestRow.getDefaultInstance());
 
     private GuildTables() {
     }
 
-    /** 登记了全部七张表的 pbmysql 实例（不碰库）。 */
+    /** 登记了全部八张表的 pbmysql 实例（不碰库）。 */
     public static PbMysql registry() {
         PbMysql db = new PbMysql();
         for (Message prototype : PROTOTYPES) {

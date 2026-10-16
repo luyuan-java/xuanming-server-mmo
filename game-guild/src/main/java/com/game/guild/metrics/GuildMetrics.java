@@ -157,10 +157,11 @@ public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, G
     /**
      * 经济 RPC 的结果（{@code game_guild_economy_requests_total{result}}，economy_logic.go:93-118）。写 RPC 成功时按视图状态计（applied / pending / …），
      * 读 RPC 成功计 ok，升级 expected_level 不符计 unchanged；故障计 error（基线的 denied / unavailable 在 Java 不存在）。
+     * 客户端幂等键（捐献 / 兑换的 client_request_id）：重发拿回了首次结果计 replayed，同一个键换了参数被拒计 request_conflict。
      */
     public enum EconomyResult {
         OK, UNCHANGED, APPLIED, PENDING, REJECTED, ABORTED, APPLIED_PARTIAL, LIMIT, INSUFFICIENT, PENDING_GUARD, BUSY_RETRY,
-        FENCE, NOT_MEMBER, LEVEL, RANK, NOT_FOUND, DISABLED, ID_UNAVAILABLE, OTHER_REJECT, ERROR;
+        FENCE, NOT_MEMBER, LEVEL, RANK, NOT_FOUND, DISABLED, ID_UNAVAILABLE, OTHER_REJECT, ERROR, REPLAYED, REQUEST_CONFLICT;
 
         public String label() {
             return tagValue(this);

@@ -457,6 +457,130 @@ class JdbcEconomyStoreMysqlTest {
         assertThat(recorder.lockWaits).isEmpty();
     }
 
+    // ================================================================ 客户端幂等键（guild_client_request；mmorpg client_request_repo_test.go）
+
+    private static DonationReserve withKey(DonationReserve d, long key) {
+        return new DonationReserve(d.opId(), d.playerId(), d.guildId(), d.donateId(), d.minGuildLevel(), d.contributionGain(),
+                d.fundsGain(), d.dailyLimit(), d.periodKey(), d.deadlineMs(), d.leaseUntilMs(), d.leaseToken(), d.nowMs(), d.payload(),
+                d.fence(), key);
+    }
+
+    private static ShopReserve withKey(ShopReserve s, long key) {
+        return new ShopReserve(s.opId(), s.playerId(), s.guildId(), s.goodsId(), s.count(), s.requiredGuildLevel(), s.cost(),
+                s.limitCount(), s.periodKey(), s.leaseUntilMs(), s.leaseToken(), s.nowMs(), s.payload(), s.fence(), key);
+    }
+
+    /** (player, key) 去重记录指向的 op_id；没有记录回 null。 */
+    private static Long clientRequestOp(long player, long key) throws SQLException {
+        return db.queryU64("SELECT op_id FROM guild_client_request WHERE player_id = ? AND client_request_id = ?", player, key);
+    }
+
+    /**
+     * 同一个键的第二次预留在锁内读到首次的去重记录 → CLIENT_REQUEST_REPLAYED，整体回滚（第二个 op_id 不落行、seq 不前进、次数不再占）；
+     * clientRequest 读回首次那一整行；键按玩家隔离；键 0 不碰库（TestReserveDonation_ClientRequestReplayedRollsBack）。
+     */
+    @Test
+    void 幂等键_捐献重发整体回滚并读回首次() throws SQLException {
+        long guildId = 7971, leader = 8971, donor = 8972, key = 0xC0FFEEL;
+        seedGuild(guildId, 2, leader, Map.of(donor, GuildRoles.MEMBER));
+
+        DonationReserve first = withKey(donation(9_970_001, donor, guildId, NOW), key);
+        econ.reserveDonation(first, roomy()).orThrow();
+        assertThat(clientRequestOp(donor, key)).as("写成指令就必须同事务写去重记录").isEqualTo(first.opId());
+        assertThat(db.queryU64("SELECT created_ms FROM guild_client_request WHERE player_id = ? AND client_request_id = ?", donor, key))
+                .as("created_ms = 预留事务的 now").isEqualTo(NOW);
+
+        DonationReserve retry = withKey(donation(9_970_002, donor, guildId, NOW + 5), key);
+        assertThat(econ.reserveDonation(retry, roomy()).rejection()).isEqualTo(GuildReject.CLIENT_REQUEST_REPLAYED);
+        assertThat(opExists(db, retry.opId())).as("重发不能留下第二行指令").isFalse();
+        assertThat(counterUsed(db, donor, COUNTER_DONATE, 1, DAY_KEY)).as("次数只因首次占一次").isEqualTo(1);
+        assertThat(nextSeq(db, donor, DEBIT)).as("seq 只因首次前进").isEqualTo(2);
+
+        EconomyStore.ClientRequestHit hit = econ.clientRequest(donor, key, roomy()).orElseThrow();
+        assertThat(hit.opId()).isEqualTo(first.opId());
+        GuildAssetOpRow row = hit.op().orElseThrow();
+        assertThat(row.getKind()).isEqualTo(GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE);
+        assertThat(row.getGuildId()).isEqualTo(guildId);
+        assertThat(row.getRefId()).isEqualTo(1);
+        assertThat(econ.clientRequest(leader, key, roomy())).as("键按玩家隔离").isEmpty();
+        assertThat(econ.clientRequest(donor, 0, roomy())).as("键 0 不查").isEmpty();
+        recorder.assertNoDeadlocks("幂等键重发");
+    }
+
+    /**
+     * 首次兑换把帮贡扣到不够第二份；同一个键的重发必须回 CLIENT_REQUEST_REPLAYED（锁内复核排在余额判断之前），不能回帮贡不足；
+     * 同一个键拿去捐献（跨方法复用）同样被认出来（TestReserveShopOrder_ClientRequestCheckedBeforeBalance）。
+     */
+    @Test
+    void 幂等键_兑换复核在余额之前_跨方法共用键空间() throws SQLException {
+        long guildId = 7972, leader = 8973, buyer = 8974, key = 77;
+        seedGuild(guildId, 2, leader, Map.of(buyer, GuildRoles.MEMBER));
+        setContribution(db, guildId, buyer, 300, 300);
+
+        ShopReserve first = withKey(shopOrder(9_970_101, buyer, guildId, 2, 300, 5, NOW), key);
+        assertThat(econ.reserveShopOrder(first, roomy()).orThrow().balanceAfter()).isZero();
+
+        ShopReserve retry = withKey(shopOrder(9_970_102, buyer, guildId, 2, 300, 5, NOW + 5), key);
+        assertThat(econ.reserveShopOrder(retry, roomy()).rejection()).as("余额已为 0，复核必须先于余额判断")
+                .isEqualTo(GuildReject.CLIENT_REQUEST_REPLAYED);
+        assertThat(opExists(db, retry.opId())).isFalse();
+        assertThat(contribution(db, guildId, buyer)).as("帮贡只扣一次").containsExactly(300, 0);
+
+        DonationReserve crossMethod = withKey(donation(9_970_103, buyer, guildId, NOW + 6), key);
+        assertThat(econ.reserveDonation(crossMethod, roomy()).rejection()).as("同一玩家两个方法共用键空间")
+                .isEqualTo(GuildReject.CLIENT_REQUEST_REPLAYED);
+        assertThat(opExists(db, crossMethod.opId())).isFalse();
+        assertThat(clientRequestOp(buyer, key)).isEqualTo(first.opId());
+    }
+
+    /** 被拒绝的预留不留去重记录（同一个键重发会重新判定）；键 0 的预留照常成功、也不写记录。 */
+    @Test
+    void 幂等键_被拒与键0不写去重记录() throws SQLException {
+        long guildId = 7973, leader = 8975, donor = 8976, key = 4242;
+        seedGuild(guildId, 2, leader, Map.of(donor, GuildRoles.MEMBER));
+
+        econ.reserveDonation(donation(9_970_201, donor, guildId, NOW, 3), roomy()).orThrow();
+        econ.reserveDonation(donation(9_970_202, donor, guildId, NOW + 1, 3), roomy()).orThrow();
+        assertThat(db.count("SELECT COUNT(*) FROM guild_client_request")).as("键 0 不写去重记录").isZero();
+
+        econ.reserveDonation(withKey(donation(9_970_203, donor, guildId, NOW + 2, 3), key), roomy()).orThrow();
+        assertThat(econ.reserveDonation(withKey(donation(9_970_204, donor, guildId, NOW + 3, 3), key + 1), roomy()).rejection())
+                .isEqualTo(GuildReject.DONATE_LIMIT);
+        assertThat(clientRequestOp(donor, key + 1)).as("被拒绝的预留整体回滚，去重记录也不能留下").isNull();
+        assertThat(db.count("SELECT COUNT(*) FROM guild_client_request")).isEqualTo(1);
+    }
+
+    /**
+     * 同一个键 10 路并发预留（各自不同的 op_id，模拟重发时首次仍在途）恰好成功一次，其余都是 CLIENT_REQUEST_REPLAYED——成员行把它们排成一列，
+     * 后到者在锁内读到先到者的记录（TestReserveDonation_ClientRequestConcurrentSameKeyAppliesOnce）。
+     */
+    @Test
+    void 幂等键_同键并发只成功一次() throws SQLException {
+        long guildId = 7974, leader = 8977, donor = 8978, opBase = 9_970_300, key = 990_001;
+        seedGuild(guildId, 2, leader, Map.of(donor, GuildRoles.MEMBER));
+        List<Callable<TxOutcome<?>>> calls = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            DonationReserve in = withKey(donation(opBase + i, donor, guildId, NOW), key);
+            calls.add(() -> econ.reserveDonation(in, roomy()));
+        }
+        @SuppressWarnings("unchecked")
+        List<GuildMysqlFixture.Result> r = GuildMysqlFixture.concurrently(calls.toArray(new Callable[0]));
+        int winners = 0;
+        for (GuildMysqlFixture.Result result : r) {
+            if (result.ok()) {
+                winners++;
+            } else {
+                assertThat(result.reject()).as("输家只能被去重记录挡下，不能是写冲突或内部错误")
+                        .isEqualTo(GuildReject.CLIENT_REQUEST_REPLAYED);
+            }
+        }
+        assertThat(winners).as("同一个键恰好写成一笔").isEqualTo(1);
+        assertThat(EconomyFixtures.opCountInRange(db, opBase, opBase + 9)).isEqualTo(1);
+        assertThat(counterUsed(db, donor, COUNTER_DONATE, 1, DAY_KEY)).isEqualTo(1);
+        assertThat(opExists(db, clientRequestOp(donor, key))).as("去重记录指向那唯一一行").isTrue();
+        recorder.assertNoDeadlocks("同键并发预留");
+    }
+
     // ================================================================ T-U 升级
 
     /**

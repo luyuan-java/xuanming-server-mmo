@@ -769,13 +769,31 @@ APPLIED 显示成功并重拉背包；PENDING 且 reason = 27000 显示「余额
 
 | 场景 | 结果 |
 |---|---|
-| 同一请求重复点击捐献 | 每次新 op_id、新 seq：各占一次每日次数，到上限回 14024（不是幂等写；靠次数上限兜） |
+| 同一请求重复点击捐献 | 每次新 op_id、新 seq：各占一次每日次数，到上限回 14024（不是幂等写；靠次数上限兜）。带 `client_request_id` 的重发见 §3.8 |
 | 升级重复点击（同 expected_level） | 第二次 staleView：不扣钱、回最新 GuildInfo、result unchanged |
 | 同一 seq 重投（同步 + 循环、多副本） | scene 只读答复已见结局；Finalize CAS 只成功一次 |
 | 重查期间 scene 换节点 | 新节点 NOT_HERE / 账本 RETRY → 按「没等到」处理，不算翻转 |
 | 落库失败（settle 超时） | 行仍 PENDING，租约到期后循环再投同一 seq，scene 只读答复 |
 | 人工终结与循环同时下手 | 同一把 `status = PENDING` CAS，只有一个赢家；输家不做对侧账 |
 | 回读失败 | 视图显示 PENDING（行已提交，最终会被循环终结） |
+
+### 3.8 客户端幂等键 `client_request_id`（2026-10-15 追加；两版同批）
+
+事实源：mmorpg `docs/design/guild-phase2/05-economy.md` 顶部「客户端幂等键」覆盖块（基线 `economy_logic.go` 的 `withClientRequest`、
+`economy_repo.go` 的 `checkClientRequestTx` / `insertClientRequestTx` / `ClientRequest`、`asset_store.go` 的去重记录清理）。Java 落点：
+
+- 协议：`DonateToGuildRequest.client_request_id = 2`、`BuyGuildShopGoodsRequest.client_request_id = 3`（uint64；0 = 旧客户端，不去重）。经 ContractSync 同步。
+- 表：`guild_client_request`（R，PK `(player_id, client_request_id)`，`idx_guild_client_request_0 (created_ms)`，列 `op_id`、`created_ms`），
+  在 `guild_tables.proto` 的 C 之后追加；DDL 与同步来的 `GuildClientRequestRecord` 逐字节相同（`GuildTablesTest`）。
+- 仓储（`JdbcEconomyStore`）：T-D / T-S 锁住本人成员行之后普通读 R1 复核（兑换排在余额判断之前），读到回 `GuildReject.CLIENT_REQUEST_REPLAYED`；
+  事务最后 R2 插去重记录（撞 1062 同样回该拒绝）；读 `clientRequest`（R1 + O9 两次主键点查）。
+- 服务（`GuildEconomyService.withClientRequest`）：三道检查——前置之前先查（命中直接回首次那笔指令的当前视图，不发号、不跑前置）；
+  事务内复核（`Attempt.raced`）；没写成指令（业务拒绝或 raced）再查一次，以首次结果为准，raced 而事后查不到按故障抛（信封 1003）。
+  同一个键换了方法 / 选项 / 商品 / 份数（count 0 与 1 视为同一参数），或记录指向的指令行已不在 → in-band 1005（`GuildTip.CLIENT_REQUEST_CONFLICT` /
+  `CLIENT_REQUEST_ORPHANED`），不写入。指标 result 新增 `replayed` / `request_conflict`。
+- 寿命：清理按 `created_ms < now − terminal-retention` 删去重记录，与终态行同一个截止、排在它之前（`CleanupTable.CLIENT_REQUEST`）。
+- 与基线的一处差异：`GuildTips.forReject(CLIENT_REQUEST_REPLAYED)` 回 14021「忙，请重试」（基线 mapWriteErr 遇到未知哨兵按故障）。两边的经济服务都在
+  映射之前拦下它，别的写事务不产生它，所以这条只在「漏拦」时才可见；Java 取 14021 是为了让 `GuildReject` 整表映射保持全是业务码。
 
 ---
 

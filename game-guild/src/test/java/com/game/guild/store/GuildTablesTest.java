@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.guild.store.pb.GuildApplicationRow;
 import com.game.guild.store.pb.GuildAssetOpRow;
+import com.game.guild.store.pb.GuildClientRequestRow;
 import com.game.guild.store.pb.GuildDailyCounterRow;
 import com.game.guild.store.pb.GuildMemberRow;
 import com.game.guild.store.pb.GuildPlayerOpSeqRow;
@@ -12,6 +13,7 @@ import com.game.guild.store.pb.GuildRow;
 import com.game.pbmysql.PbMysql;
 import com.game.proto.guild.GuildApplicationRecord;
 import com.game.proto.guild.GuildAssetOpRecord;
+import com.game.proto.guild.GuildClientRequestRecord;
 import com.game.proto.guild.GuildDailyCounterRecord;
 import com.game.proto.guild.GuildMemberRecord;
 import com.game.proto.guild.GuildPlayerOpSeqRecord;
@@ -101,13 +103,32 @@ class GuildTablesTest {
     @Test
     void 登记顺序就是表间锁序() {
         assertThat(GuildTables.NAMES).containsExactly("guild", "guild_player_state", "guild_member", "guild_application",
-                "guild_player_op_seq", "guild_asset_op", "guild_daily_counter");
+                "guild_player_op_seq", "guild_asset_op", "guild_daily_counter", "guild_client_request");
         PbMysql db = GuildTables.registry();
         List<String> registered = GuildTables.PROTOTYPES.stream().map(m -> db.schema(m).tableName()).toList();
         assertThat(registered).isEqualTo(GuildTables.NAMES);
         assertThat(GuildTables.PLAYER_OP_SEQ).isEqualTo(db.schema(GuildPlayerOpSeqRow.class).tableName());
         assertThat(GuildTables.ASSET_OP).isEqualTo(db.schema(GuildAssetOpRow.class).tableName());
         assertThat(GuildTables.DAILY_COUNTER).isEqualTo(db.schema(GuildDailyCounterRow.class).tableName());
+        assertThat(GuildTables.CLIENT_REQUEST).isEqualTo(db.schema(GuildClientRequestRow.class).tableName());
+    }
+
+    /**
+     * 客户端幂等键的去重表（2026-10-15）：与同步来的 guild_db.proto 的 GuildClientRequestRecord 逐字节相同；主键就是去重判据
+     * (player_id, client_request_id)，清理按 created_ms 取候选，没有唯一键。
+     */
+    @Test
+    void 去重表与同步来的guild_db逐字节相同() {
+        PbMysql java = GuildTables.registry();
+        PbMysql go = new PbMysql();
+        go.register(GuildClientRequestRecord.getDefaultInstance());
+
+        String sql = ddl(java, GuildClientRequestRow.class);
+        assertThat(sql).isEqualTo(ddl(go, GuildClientRequestRecord.class));
+        assertThat(sql).contains("PRIMARY KEY (`player_id`,`client_request_id`) /*T![clustered_index] NONCLUSTERED */")
+                .contains("INDEX `idx_guild_client_request_0` (`created_ms`)")
+                .contains("`op_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:3'")
+                .doesNotContain("UNIQUE");
     }
 
     /** 4.5 资产三表（guild-economy-spec §7.2、§11.3「建表」）：与同步来的 guild_db.proto 的三张 Record 逐字节相同。 */

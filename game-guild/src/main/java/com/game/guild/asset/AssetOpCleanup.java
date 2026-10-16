@@ -64,8 +64,9 @@ public final class AssetOpCleanup {
     void runOnce() {
         try {
             GuildAssetStore.CleanupReport report = store.cleanupOnce(clockMs.getAsLong(), terminalRetention, counterRetention);
-            if (report.assetOpsDeleted() > 0 || report.countersDeleted() > 0) {
-                log.info("[GuildAsset] 清理一轮：终态指令行 {}，计数行 {}", report.assetOpsDeleted(), report.countersDeleted());
+            if (report.assetOpsDeleted() > 0 || report.countersDeleted() > 0 || report.clientRequestsDeleted() > 0) {
+                log.info("[GuildAsset] 清理一轮：终态指令行 {}，计数行 {}，幂等键去重记录 {}", report.assetOpsDeleted(),
+                        report.countersDeleted(), report.clientRequestsDeleted());
             }
         } catch (Throwable t) {
             log.error("[GuildAsset] 清理出错（本轮作废，下一轮照常）", t);

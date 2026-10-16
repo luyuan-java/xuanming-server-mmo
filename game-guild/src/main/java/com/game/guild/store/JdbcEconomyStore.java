@@ -27,7 +27,8 @@ import java.util.Optional;
  * <ul>
  *   <li>T-D / T-S：G 普通读（只提供 zone 与等级）→ M 本人成员行 X → Q(p, stream) 缺行时在成员行锁之下建（死锁复核 C2）→ Q FOR UPDATE →
  *       本纪元未决行<b>普通读</b>（RC 语句级快照，不加锁）→ 插新 O 行 → C 带上限 upsert（只写请求开头 start 所在周期的行）→（T-S）回到已锁的
- *       M 行扣帮贡（同一行再次 UPDATE 不算新加锁）；</li>
+ *       M 行扣帮贡（同一行再次 UPDATE 不算新加锁）。带客户端幂等键时：M 之后先普通读 R 复核去重记录，事务最后插 R 新行
+ *       （guild_client_request，排在 C 之后；同一玩家的插入者都先持他唯一的那一行 M，同一 (p, 键) 在途的插入者至多一个）；</li>
  *   <li>T-U：G FOR UPDATE → M 操作者 X；</li>
  *   <li>离帮 / 被踢 / 解散的提前截止（{@link #accelerateDonationDeadlines}，O 钩子）：候选普通读 → 按 op_id 无符号升序逐行「O2 主键点锁 →
  *       O3 带复核点改」。</li>
@@ -139,6 +140,19 @@ public final class JdbcEconomyStore implements EconomyStore {
     static final String SELECT_SHOP_USAGE = "SELECT ref_id, period_key, used_count FROM guild_daily_counter"
             + " WHERE player_id = ? AND counter_kind = ? AND period_key IN (?, ?)";
 
+    // ---------------------------------------------------------------- R：guild_client_request（客户端幂等键的去重记录）
+    /**
+     * R1：去重记录的<b>普通读</b>（完整主键等值，不带锁定子句）。事务前查重（{@link #clientRequest}）与事务内复核共用：事务内它排在锁住本人
+     * 成员行之后，同一玩家的插入者都在那把锁上串行，RC 语句级快照看得见前一个持锁者已提交的行（与 Q1 / ensureSeqRowTx 同一条守卫论证）。
+     */
+    static final String SELECT_CLIENT_REQUEST = "SELECT `op_id` FROM guild_client_request"
+            + " WHERE `player_id` = ? AND `client_request_id` = ?";
+    /** R2：T-D / T-S 的最后一步登记 (玩家, 键) → op_id；created_ms = 预留事务的 now（= 指令行的 created_ms），清理按它判龄。 */
+    static final String INSERT_CLIENT_REQUEST = "INSERT INTO guild_client_request"
+            + " (`player_id`, `client_request_id`, `op_id`, `created_ms`) VALUES (?, ?, ?, ?)";
+    /** O9：按主键读一整行指令（重发时装配首次结果）。 */
+    static final String SELECT_ASSET_OP_BY_ID = "SELECT " + AssetOpColumns.COLUMNS + " FROM guild_asset_op WHERE `op_id` = ?";
+
     /** AllocateSeq 的结果：纪元 + 流水号，两个一起才能唯一定位一笔业务。 */
     record SeqAlloc(long epoch, long seq) {
     }
@@ -174,6 +188,9 @@ public final class JdbcEconomyStore implements EconomyStore {
             if (t.one(JdbcGuildStore.LOCK_MEMBER_ROLE, rs -> GuildJdbc.u32(rs, 1), in.guildId(), in.playerId()) == null) {
                 return TxOutcome.reject(GuildReject.NOT_MEMBER);
             }
+            if (clientRequestApplied(t, in.playerId(), in.clientRequestId())) {
+                return TxOutcome.reject(GuildReject.CLIENT_REQUEST_REPLAYED);
+            }
             ensureSeqRowTx(t, in.playerId(), STREAM_GUILD_DEBIT, in.nowMs());
             SeqAlloc alloc = allocateSeq(t, in.playerId(), STREAM_GUILD_DEBIT, in.nowMs());
             if (alloc == null) {
@@ -207,6 +224,9 @@ public final class JdbcEconomyStore implements EconomyStore {
                     in.nowMs())) {
                 return TxOutcome.reject(GuildReject.DONATE_LIMIT);
             }
+            if (!insertClientRequest(t, in.playerId(), in.clientRequestId(), in.opId(), in.nowMs())) {
+                return TxOutcome.reject(GuildReject.CLIENT_REQUEST_REPLAYED);
+            }
             return TxOutcome.ok(new Reserved(alloc.seq(), alloc.epoch()));
         });
     }
@@ -239,6 +259,10 @@ public final class JdbcEconomyStore implements EconomyStore {
             Long balance = t.one(LOCK_MEMBER_BALANCE, rs -> GuildJdbc.u64(rs, 1), in.guildId(), in.playerId());
             if (balance == null) {
                 return TxOutcome.reject(GuildReject.NOT_MEMBER);
+            }
+            // 去重复核排在余额判断之前：首次刚把帮贡扣到不够第二份，放在后面重发会被误拒成「帮贡不足」
+            if (clientRequestApplied(t, in.playerId(), in.clientRequestId())) {
+                return TxOutcome.reject(GuildReject.CLIENT_REQUEST_REPLAYED);
             }
             if (Long.compareUnsigned(balance, in.cost()) < 0) {
                 return TxOutcome.reject(GuildReject.CONTRIBUTION_INSUFFICIENT);
@@ -278,6 +302,9 @@ public final class JdbcEconomyStore implements EconomyStore {
             // 行已锁、余额已判，这条理论上必中；不中说明锁内读到的行在写的时候变了，不能提交一份「扣了个寂寞」的订单
             if (t.update(DEBIT_CONTRIBUTION, in.cost(), in.guildId(), in.playerId(), in.cost()) != 1) {
                 return TxOutcome.reject(GuildReject.CONTRIBUTION_INSUFFICIENT);
+            }
+            if (!insertClientRequest(t, in.playerId(), in.clientRequestId(), in.opId(), in.nowMs())) {
+                return TxOutcome.reject(GuildReject.CLIENT_REQUEST_REPLAYED);
             }
             return TxOutcome.ok(new ShopReserved(in.guildId(), alloc.seq(), alloc.epoch(), balance - in.cost()));
         });
@@ -388,6 +415,20 @@ public final class JdbcEconomyStore implements EconomyStore {
         return tx.read(readBudget(deadline), db -> db.list(SELECT_RECENT_OPS, AssetOpColumns::scan, playerId, stream, limit));
     }
 
+    @Override
+    public Optional<ClientRequestHit> clientRequest(long playerId, long clientRequestId, Deadline deadline) {
+        if (clientRequestId == 0) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(tx.read(readBudget(deadline), db -> {
+            Long opId = db.one(SELECT_CLIENT_REQUEST, rs -> GuildJdbc.u64(rs, 1), playerId, clientRequestId);
+            if (opId == null) {
+                return null;
+            }
+            return new ClientRequestHit(opId, Optional.ofNullable(db.one(SELECT_ASSET_OP_BY_ID, AssetOpColumns::scan, opId)));
+        }));
+    }
+
     // ================================================================ 离帮 / 被踢 / 解散提前截止（O 钩子）
 
     /**
@@ -454,6 +495,35 @@ public final class JdbcEconomyStore implements EconomyStore {
                     + Integer.toUnsignedString(stream) + "): epoch must be positive (nowMs=0)");
         }
         t.update(ENSURE_SEQ_ROW, playerId, stream, nowMs, nowMs);
+    }
+
+    /**
+     * T-D / T-S 事务内、<b>已持本人成员行 X 锁之后</b>复核去重记录（checkClientRequestTx）：R1 普通读到 = 首次请求已提交。键 0（旧客户端）不查。
+     * 必须排在任何「会被首次请求改变判定」的步骤（兑换的余额判断、seq 守卫、计数上限）之前，否则重发会被误拒，拿不回首次结果。
+     */
+    static boolean clientRequestApplied(GuildJdbc t, long playerId, long clientRequestId) throws SQLException {
+        return clientRequestId != 0 && t.exists(SELECT_CLIENT_REQUEST, playerId, clientRequestId);
+    }
+
+    /**
+     * T-D / T-S 的最后一步：R2 登记去重记录（insertClientRequestTx），与指令行、计数、扣帮贡同一个事务提交或回滚。键 0 不写、回 true。
+     * 撞主键（1062）回 false：InnoDB 对未提交的同键插入是等它结束而不是报 1062，报 1062 说明对方已提交——首次确实已写成。正常走不到这里
+     * （{@link #clientRequestApplied} 在同一把成员行锁之下刚查过），出现即守卫被破坏；宁可整体回滚、让服务回读首次结果，也不提交第二笔。
+     */
+    static boolean insertClientRequest(GuildJdbc t, long playerId, long clientRequestId, long opId, long nowMs)
+            throws SQLException {
+        if (clientRequestId == 0) {
+            return true;
+        }
+        try {
+            t.update(INSERT_CLIENT_REQUEST, playerId, clientRequestId, opId, nowMs);
+            return true;
+        } catch (SQLException e) {
+            if (GuildSqlErrors.isDuplicateKey(e)) {
+                return false;
+            }
+            throw e;
+        }
     }
 
     /**

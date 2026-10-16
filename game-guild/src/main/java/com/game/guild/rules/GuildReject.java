@@ -67,7 +67,12 @@ public enum GuildReject {
      * 未决守卫拒绝（assetop ErrTooManyPending，types.go:234-246）：本纪元未决行数 ≥ 16 或跨度 ≥ 512。是 scene 1024 位账本窗口正确性证明的
      * 一部分，不是故障：回 14026、记 INFO（economy_logic.go:337-340）。
      */
-    TOO_MANY_PENDING("assetop: too many pending ops for player stream");
+    TOO_MANY_PENDING("assetop: too many pending ops for player stream"),
+    /**
+     * 捐献 / 兑换预留在锁住本人成员行之后读到同一 (玩家, client_request_id) 的去重记录：首次请求已经写成了指令（基线
+     * data.ErrClientRequestReplayed）。事务已回滚、什么都没写；不是业务拒绝也不是故障——经济服务在映射之前拦下它，按去重记录回首次结果。
+     */
+    CLIENT_REQUEST_REPLAYED("guild client request already applied");
 
     private final String sentinel;
 

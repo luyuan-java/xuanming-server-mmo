@@ -150,7 +150,13 @@ public enum GuildTip {
     // ---- 通用段 ----
 
     /** Java 自有（D13）：4.5 / 4.6 的经济、活动 10 个号在 4.4 期间回 in-band 1006，写进各自应答的 error_message。 */
-    FEATURE_UNAVAILABLE(GuildTips.FEATURE_UNAVAILABLE, "guild feature unavailable");
+    FEATURE_UNAVAILABLE(GuildTips.FEATURE_UNAVAILABLE, "guild feature unavailable"),
+    /** 捐献 / 兑换的 client_request_id 复用了却换了参数或方法（基线 economy_logic.go clientRequestMismatch）：不写、不带视图。 */
+    CLIENT_REQUEST_CONFLICT(GuildTips.INVALID_PARAMETER, "client_request_id reused with different parameters"),
+    /**
+     * 去重记录在、它指向的指令行不在（人工删库，或清理让去重记录晚了一轮）：给不出首次结果，也绝不重新执行（基线同上）。
+     */
+    CLIENT_REQUEST_ORPHANED(GuildTips.INVALID_PARAMETER, "client request record outlived its op");
 
     private final int code;
     private final String reason;

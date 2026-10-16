@@ -31,7 +31,8 @@ class GuildTipsTest {
     /** 段声明之外的 int 常量（不是 tip 码）。 */
     private static final Set<String> SEGMENT_CONSTANTS = Set.of("SEGMENT_BASE", "SEGMENT_WIDTH");
     /** 取自通用段的码。 */
-    private static final Set<String> COMMON_CODES = Set.of("SERVICE_UNAVAILABLE", "FEATURE_UNAVAILABLE", "MESSAGE_ID_NOT_FOUND");
+    private static final Set<String> COMMON_CODES = Set.of("SERVICE_UNAVAILABLE", "FEATURE_UNAVAILABLE", "MESSAGE_ID_NOT_FOUND",
+            "INVALID_PARAMETER");
 
     private static Map<String, Integer> guildCodes() {
         Map<String, Integer> codes = new LinkedHashMap<>();
@@ -115,7 +116,9 @@ class GuildTipsTest {
         assertThat(GuildTips.SERVICE_UNAVAILABLE).isEqualTo(CommonErrorTip.common_error.kServiceUnavailable.getNumber());
         assertThat(GuildTips.FEATURE_UNAVAILABLE).isEqualTo(CommonErrorTip.common_error.kFeatureUnavailable.getNumber());
         assertThat(GuildTips.MESSAGE_ID_NOT_FOUND).isEqualTo(CommonErrorTip.common_error.kMessageIdNotFound.getNumber());
-        for (int common : new int[] {GuildTips.SERVICE_UNAVAILABLE, GuildTips.FEATURE_UNAVAILABLE, GuildTips.MESSAGE_ID_NOT_FOUND}) {
+        assertThat(GuildTips.INVALID_PARAMETER).isEqualTo(CommonErrorTip.common_error.kInvalidParameter.getNumber()).isEqualTo(1005);
+        for (int common : new int[] {GuildTips.SERVICE_UNAVAILABLE, GuildTips.FEATURE_UNAVAILABLE, GuildTips.MESSAGE_ID_NOT_FOUND,
+                GuildTips.INVALID_PARAMETER}) {
             assertThat(GuildTips.isGuildCode(common)).isFalse();
             assertThat(seen).doesNotContainKey(common);
         }
@@ -234,6 +237,9 @@ class GuildTipsTest {
         want.put(GuildTip.SHOP_LIMIT, new Object[] {14030, "shop purchase limit reached"});
         want.put(GuildTip.CONTRIBUTION_INSUFFICIENT, new Object[] {14031, "contribution insufficient"});
         want.put(GuildTip.FEATURE_UNAVAILABLE, new Object[] {1006, "guild feature unavailable"});
+        // 客户端幂等键（mmorpg 05-economy.md 顶部「客户端幂等键」覆盖块；基线 economy_logic.go clientRequestMismatch 的原因串）
+        want.put(GuildTip.CLIENT_REQUEST_CONFLICT, new Object[] {1005, "client_request_id reused with different parameters"});
+        want.put(GuildTip.CLIENT_REQUEST_ORPHANED, new Object[] {1005, "client request record outlived its op"});
 
         assertThat(want.keySet()).as("每个 GuildTip 都要登记").isEqualTo(EnumSet.allOf(GuildTip.class));
         want.forEach((tip, w) -> {
@@ -281,6 +287,8 @@ class GuildTipsTest {
         want.put(GuildReject.MAX_LEVEL, tip(GuildTip.MAX_LEVEL, MappingRepair.NONE));
         want.put(GuildReject.FUNDS_INSUFFICIENT, tip(GuildTip.FUNDS_INSUFFICIENT, MappingRepair.NONE));
         want.put(GuildReject.TOO_MANY_PENDING, tip(GuildTip.TOO_MANY_PENDING, MappingRepair.NONE));
+        // 经济服务在映射之前拦下它；漏到映射时回「忙，请重试」，客户端带同一个键重发会在事务前的查重里拿到首次结果
+        want.put(GuildReject.CLIENT_REQUEST_REPLAYED, tip(GuildTip.WRITE_CONFLICT, MappingRepair.NONE));
 
         assertThat(want.keySet()).as("每个 GuildReject 都要登记").isEqualTo(EnumSet.allOf(GuildReject.class));
         want.forEach((reject, reply) ->
