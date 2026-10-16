@@ -143,6 +143,18 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
     /** C7：计数行带范围复核点删。 */
     static final String CLEANUP_COUNTER = "DELETE FROM guild_daily_counter"
             + " WHERE player_id = ? AND counter_kind = ? AND ref_id = ? AND period_key = ? AND period_key BETWEEN ? AND ?";
+    /** R3：客户端幂等键去重记录的过期候选（created_ms 早于截止，走 idx_guild_client_request_0；按创建时刻升序）。 */
+    static final String LIST_CLEANUP_CLIENT_REQUESTS = "SELECT `player_id`, `client_request_id` FROM guild_client_request"
+            + " WHERE `created_ms` < ? ORDER BY `created_ms` ASC LIMIT ?";
+    /**
+     * R4：去重记录清理点锁（完整主键等值 + FOR UPDATE，Point_Get 快路径；复核条件留在点删里）。本表别的写者只有预留插新行（created_ms = 请求的 now，
+     * 远在截止之后），行集合不相交；点锁只为让多个副本的清理排队。
+     */
+    static final String LOCK_CLEANUP_CLIENT_REQUEST = "SELECT `op_id` FROM guild_client_request"
+            + " WHERE `player_id` = ? AND `client_request_id` = ? FOR UPDATE";
+    /** R5：去重记录带 created_ms 复核点删。 */
+    static final String CLEANUP_CLIENT_REQUEST = "DELETE FROM guild_client_request"
+            + " WHERE `player_id` = ? AND `client_request_id` = ? AND `created_ms` < ?";
 
     // ---------------------------------------------------------------- O22：回档检查（拼接；只拼结构，值全走占位符）
     static final String APPLIED_OPS_SELECT = "SELECT o.`op_id`, o.`player_id`, o.`guild_id`, o.`stream`, o.`kind`, o.`status`,"
@@ -532,7 +544,10 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
 
         List<RuntimeException> errors = new ArrayList<>();
         long ops = 0;
+        long clientRequests = 0;
         if (opCutoffMs > 0) {
+            // 去重记录排在终态行之前、同一个截止（见接口注释）
+            clientRequests = cleanupInBatches(CleanupTable.CLIENT_REQUEST, () -> cleanupClientRequestsBatch(opCutoffMs), errors);
             ops = cleanupInBatches(CleanupTable.ASSET_OP, () -> cleanupTerminalOpsBatch(opCutoffMs), errors);
         }
         long counters = cleanupInBatches(CleanupTable.DAILY_COUNTER,
@@ -541,13 +556,13 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
                 () -> cleanupCountersBatch(GuildLimits.WEEK_KEY_FLOOR, cutoffs.weekKey()), errors);
         if (!errors.isEmpty()) {
             DependencyException failure = new DependencyException("guild asset cleanup failed (deleted ops=" + ops
-                    + " counters=" + counters + ")", errors.getFirst());
+                    + " counters=" + counters + " client_requests=" + clientRequests + ")", errors.getFirst());
             for (int i = 1; i < errors.size(); i++) {
                 failure.addSuppressed(errors.get(i));
             }
             throw failure;
         }
-        return new CleanupReport(ops, counters);
+        return new CleanupReport(ops, counters, clientRequests);
     }
 
     /**
@@ -621,6 +636,31 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
             }
         }
         return new Batch(opIds.size(), deleted, null);
+    }
+
+    /** 客户端幂等键去重记录的主键。 */
+    private record ClientRequestKey(long playerId, long clientRequestId) {
+    }
+
+    /** 普通读至多 500 个 created_ms 早于截止的去重记录主键（按创建时刻升序），逐行短事务点锁 + 点删并复核（基线 cleanupClientRequestsBatch）。 */
+    private Batch cleanupClientRequestsBatch(long cutoffMs) {
+        List<ClientRequestKey> keys;
+        try {
+            keys = tx.autocommit(Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS), db -> db.list(LIST_CLEANUP_CLIENT_REQUESTS,
+                    rs -> new ClientRequestKey(GuildJdbc.u64(rs, 1), GuildJdbc.u64(rs, 2)), cutoffMs, GuildLimits.CLEANUP_BATCH_SIZE));
+        } catch (RuntimeException e) {
+            return new Batch(0, 0, e);
+        }
+        long deleted = 0;
+        for (ClientRequestKey k : keys) {
+            try {
+                deleted += cleanupDelete(LOCK_CLEANUP_CLIENT_REQUEST, new Object[] {k.playerId(), k.clientRequestId()},
+                        CLEANUP_CLIENT_REQUEST, k.playerId(), k.clientRequestId(), cutoffMs);
+            } catch (RuntimeException e) {
+                return new Batch(keys.size(), deleted, e);
+            }
+        }
+        return new Batch(keys.size(), deleted, null);
     }
 
     /**

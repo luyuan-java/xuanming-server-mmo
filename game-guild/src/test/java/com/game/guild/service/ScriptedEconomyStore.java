@@ -5,6 +5,7 @@ import com.game.guild.store.EconomyStore;
 import com.game.guild.store.GuildStore.ZoneFence;
 import com.game.guild.store.TxOutcome;
 import com.game.guild.store.pb.GuildAssetOpRow;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -35,6 +36,13 @@ public final class ScriptedEconomyStore implements EconomyStore {
     volatile RuntimeException readFailure;
     /** 非 null 时 opState 抛它（回读失败）。 */
     volatile RuntimeException opStateFailure;
+    /**
+     * 客户端幂等键的去重记录：键 → 依次作答的结果（每次 clientRequest 取队首；只剩一个时一直回它）。没登记的键 = 没有去重记录。
+     * 用队列是为了写「第 1 道查不到、第 3 道查到」这类并发窗口的用例。
+     */
+    final Map<Long, ArrayDeque<Optional<ClientRequestHit>>> clientRequests = new HashMap<>();
+    /** 非 null 时 clientRequest 抛它（查重失败）。 */
+    volatile RuntimeException clientRequestFailure;
 
     // ---- 写脚本 ----
     public Function<DonationReserve, TxOutcome<Reserved>> donate;
@@ -150,5 +158,25 @@ public final class ScriptedEconomyStore implements EconomyStore {
     public List<GuildAssetOpRow> recentOps(long playerId, int stream, int limit, Deadline deadline) {
         maybeFail("recentOps " + stream + " " + limit);
         return recent.getOrDefault(stream, List.of());
+    }
+
+    @Override
+    public Optional<ClientRequestHit> clientRequest(long playerId, long clientRequestId, Deadline deadline) {
+        journal.accept("economy.clientRequest " + Long.toUnsignedString(clientRequestId));
+        RuntimeException e = clientRequestFailure;
+        if (e != null) {
+            throw e;
+        }
+        ArrayDeque<Optional<ClientRequestHit>> answers = clientRequests.get(clientRequestId);
+        if (answers == null || answers.isEmpty()) {
+            return Optional.empty();
+        }
+        return answers.size() > 1 ? answers.poll() : answers.peek();
+    }
+
+    /** 登记一个键的作答序列（见 {@link #clientRequests}）。 */
+    @SafeVarargs
+    final void clientRequestAnswers(long clientRequestId, Optional<ClientRequestHit>... answers) {
+        clientRequests.put(clientRequestId, new ArrayDeque<>(List.of(answers)));
     }
 }

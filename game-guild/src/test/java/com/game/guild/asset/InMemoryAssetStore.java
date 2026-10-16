@@ -222,7 +222,7 @@ public class InMemoryAssetStore implements GuildAssetStore {
     @Override
     public CleanupReport cleanupOnce(long nowMs, Duration terminalRetention, Duration counterRetention) {
         journal.add("cleanup");
-        return new CleanupReport(0, 0);
+        return new CleanupReport(0, 0, 0);
     }
 
     @Override

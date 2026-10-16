@@ -612,11 +612,34 @@ class JdbcGuildAssetStoreMysqlTest {
                 throw new AssertionError(e);
             }
         });
-        assertThat(report).isEqualTo(new CleanupReport(3, 2));
+        assertThat(report).isEqualTo(new CleanupReport(3, 2, 0));
         assertThat(events.cleaned).isEqualTo(Map.of(CleanupTable.ASSET_OP, 3L, CleanupTable.DAILY_COUNTER, 2L));
         // 再跑一轮：没有可删的了
-        assertThat(store.cleanupOnce(NOW, Duration.ofDays(30), Duration.ofDays(30))).isEqualTo(new CleanupReport(0, 0));
+        assertThat(store.cleanupOnce(NOW, Duration.ofDays(30), Duration.ofDays(30))).isEqualTo(new CleanupReport(0, 0, 0));
         background.assertNoDeadlocks("清理");
+    }
+
+    /**
+     * 客户端幂等键的去重记录按 created_ms 与终态行同一个截止删（TestCleanupOnce_DeletesExpiredClientRequests）：与它指向的指令状态无关
+     * （PENDING 指令永不删，它的记录照样过期）；保留期内的不动；删除计入 cleanup 指标。
+     */
+    @Test
+    void 清理过期的幂等键去重记录() throws SQLException {
+        long player = 8979, oldMs = NOW - 31 * DAY_MS, recentMs = NOW - DAY_MS;
+        insertOp(db, shopRecord(9_970_401, player, oldMs, 1).setCreatedMs(oldMs).setUpdatedMs(oldMs).build());
+        db.exec("INSERT INTO guild_client_request (player_id, client_request_id, op_id, created_ms) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+                player, 1L, 9_970_401L, oldMs, player, 2L, 9_970_402L, recentMs);
+
+        CleanupReport report = store.cleanupOnce(NOW, Duration.ofDays(30), Duration.ofDays(30));
+
+        assertThat(report).isEqualTo(new CleanupReport(0, 0, 1));
+        assertThat(db.count("SELECT COUNT(*) FROM guild_client_request WHERE player_id = ? AND client_request_id = ?", player, 1L))
+                .as("保留期外的去重记录要删，即使它指向的指令仍 PENDING").isZero();
+        assertThat(db.count("SELECT COUNT(*) FROM guild_client_request WHERE player_id = ? AND client_request_id = ?", player, 2L))
+                .as("保留期内的去重记录不动").isEqualTo(1);
+        assertThat(opExists(db, 9_970_401)).as("PENDING 指令永不删").isTrue();
+        assertThat(events.cleaned).isEqualTo(Map.of(CleanupTable.CLIENT_REQUEST, 1L));
+        background.assertNoDeadlocks("清理去重记录");
     }
 
     /** 清理分批：一批候选满 500 才取下一批（按候选数而不是删除数判），跨批全部删光。 */

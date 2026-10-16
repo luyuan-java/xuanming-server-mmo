@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.proto.AssetBundle;
+import com.game.api.proto.AssetCurrency;
 import com.game.api.proto.AssetStream;
 import com.game.common.deadline.Deadline;
 import com.game.common.time.GameDay;
@@ -17,6 +18,7 @@ import com.game.guild.asset.AssetOpStatus;
 import com.game.guild.asset.DeliveryOrigin;
 import com.game.guild.rules.GuildReject;
 import com.game.guild.rules.GuildTip;
+import com.game.guild.store.EconomyStore;
 import com.game.guild.store.EconomyStore.OpState;
 import com.game.guild.store.EconomyStore.Reserved;
 import com.game.guild.store.EconomyStore.ShopReserved;
@@ -44,6 +46,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
@@ -549,5 +552,145 @@ class GuildEconomyServiceTest {
         assertThat(resp.getPendingOrdersList()).extracting(v -> v.getOpId()).containsExactly(1L);
         assertThat(resp.getContributionBalance()).isEqualTo(440);
         assertThat(resp.getNextWeeklyResetMs()).isEqualTo(GameDay.nextWeeklyResetMillis(NOW));
+    }
+
+    // ================================================================ 客户端幂等键（基线 client_request_test.go + economy_flow 的 ClientRequest 用例）
+
+    static final long KEY = 0xD0_0001L;
+    static final long FIRST_OP = 77_001;
+
+    private DonateToGuildResponse donateWithKey(int donateId) {
+        return economy.donateToGuild(ME, DonateToGuildRequest.newBuilder().setDonateId(donateId).setClientRequestId(KEY).build(), d())
+                .join();
+    }
+
+    /** 首次那笔捐献的指令行：选项 1（银两 10000、帮贡 10、资金 1000），状态由用例给。 */
+    private static GuildAssetOpRow firstDonation(GuildAssetOpStatus status) {
+        return GuildAssetOpRow.newBuilder().setOpId(FIRST_OP).setPlayerId(ME).setGuildId(G)
+                .setKind(GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE).setStatus(status).setRefId(1).setRefCount(1)
+                .setContributionDelta(10).setFundsDelta(1000).setCreatedMs(NOW - 5_000)
+                .setPayload(AssetBundle.newBuilder().addCurrencies(AssetCurrency.newBuilder()
+                        .setCurrencyType(0).setAmount(10_000)).build().toByteString())
+                .build();
+    }
+
+    private static Optional<EconomyStore.ClientRequestHit> hit(GuildAssetOpRow row) {
+        return Optional.of(new EconomyStore.ClientRequestHit(row.getOpId(), Optional.of(row)));
+    }
+
+    @Test
+    void 幂等键_首次已提交就直接回首次结果_不走前置不发号() {
+        noMint();
+        f.economyStore.clientRequestAnswers(KEY, hit(firstDonation(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED)));
+
+        DonateToGuildResponse resp = donateWithKey(1);
+
+        assertThat(resp.hasErrorMessage()).isFalse();
+        assertThat(resp.getDonation().getOpId()).as("重发回首次那笔指令").isEqualTo(FIRST_OP);
+        assertThat(resp.getDonation().getStatus()).as("视图是指令的当前状态").isEqualTo(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED);
+        assertThat(resp.getDonation().getCostAmount()).isEqualTo(10_000);
+        assertThat(resp.getDonation().getCreatedMs()).isEqualTo(NOW - 5_000);
+        assertThat(resp.getGuild().getGuildId()).as("本人仍在帮：GuildInfo 必填").isEqualTo(G);
+        assertThat(f.journal).noneMatch(j -> j.startsWith("economy.reserveDonation"));
+        assertThat(channel.ops).as("重发不再投递").isEmpty();
+        assertThat(economyCount("donate", "replayed")).isEqualTo(1);
+    }
+
+    @Test
+    void 幂等键_换了参数或跨方法回1005_指令不在也回1005_都不写() {
+        noMint();
+        f.economyStore.clientRequestAnswers(KEY, hit(firstDonation(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED)));
+
+        DonateToGuildResponse otherOption = donateWithKey(2);
+        assertThat(otherOption.getErrorMessage()).isEqualTo(GuildTip.CLIENT_REQUEST_CONFLICT.proto());
+        assertThat(otherOption.getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(otherOption.hasDonation()).as("冲突不带视图：客户端不能把它当成第二笔已成功").isFalse();
+
+        BuyGuildShopGoodsResponse crossMethod = economy.buyGuildShopGoods(ME, BuyGuildShopGoodsRequest.newBuilder().setGoodsId(101)
+                .setClientRequestId(KEY).build(), d()).join();
+        assertThat(crossMethod.getErrorMessage()).isEqualTo(GuildTip.CLIENT_REQUEST_CONFLICT.proto());
+        assertThat(crossMethod.hasOrder()).isFalse();
+
+        f.economyStore.clientRequestAnswers(KEY, Optional.of(new EconomyStore.ClientRequestHit(FIRST_OP, Optional.empty())));
+        assertThat(donateWithKey(1).getErrorMessage()).as("去重记录在、指令行不在：绝不重新执行")
+                .isEqualTo(GuildTip.CLIENT_REQUEST_ORPHANED.proto());
+
+        assertThat(f.journal).noneMatch(j -> j.startsWith("economy.reserve"));
+        assertThat(economyCount("donate", "request_conflict")).isEqualTo(2);
+        assertThat(economyCount("buy_shop_goods", "request_conflict")).isEqualTo(1);
+    }
+
+    @Test
+    void 幂等键_事务内撞上首次_第三道拿首次结果() {
+        f.economyStore.clientRequestAnswers(KEY, Optional.empty(), hit(firstDonation(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING)));
+        f.economyStore.donate = in -> TxOutcome.reject(GuildReject.CLIENT_REQUEST_REPLAYED);
+
+        DonateToGuildResponse resp = donateWithKey(1);
+
+        assertThat(resp.hasErrorMessage()).isFalse();
+        assertThat(resp.getDonation().getOpId()).isEqualTo(FIRST_OP);
+        assertThat(resp.getDonation().getStatus()).isEqualTo(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING);
+        assertThat(f.economyStore.donations).hasSize(1);
+        assertThat(f.economyStore.donations.getFirst().clientRequestId()).as("键必须进预留事务").isEqualTo(KEY);
+        assertThat(channel.ops).isEmpty();
+        assertThat(economyCount("donate", "replayed")).isEqualTo(1);
+    }
+
+    @Test
+    void 幂等键_事务内撞上首次而事后查不到_按故障抛_绝不重新执行() {
+        f.economyStore.donate = in -> TxOutcome.reject(GuildReject.CLIENT_REQUEST_REPLAYED);
+
+        assertThatThrownBy(() -> donateWithKey(1)).isInstanceOf(GuildFaultException.class);
+
+        assertThat(f.economyStore.donations).as("只预留过一次").hasSize(1);
+        assertThat(channel.ops).isEmpty();
+        assertThat(economyCount("donate", "error")).isEqualTo(1);
+    }
+
+    @Test
+    void 幂等键_业务拒绝而首次恰已提交_以首次结果为准() {
+        f.economyStore.clientRequestAnswers(KEY, Optional.empty(), hit(firstDonation(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED)));
+        f.economyStore.donate = in -> TxOutcome.reject(GuildReject.DONATE_LIMIT);
+
+        DonateToGuildResponse resp = donateWithKey(1);
+
+        assertThat(resp.hasErrorMessage()).as("不能回次数已满：那一次正是首次占的").isFalse();
+        assertThat(resp.getDonation().getOpId()).isEqualTo(FIRST_OP);
+        assertThat(economyCount("donate", "replayed")).isEqualTo(1);
+        assertThat(economyCount("donate", "limit")).isZero();
+    }
+
+    @Test
+    void 幂等键_查重失败交给事务复核_键0一次都不查() {
+        reserveDonationOk();
+        f.economyStore.clientRequestFailure = new Deadline.DependencyException("mysql down");
+        assertThat(donateWithKey(1).getDonation().getOpId()).isNotZero();
+        assertThat(f.economyStore.donations.getFirst().clientRequestId()).isEqualTo(KEY);
+
+        f.economyStore.clientRequestFailure = null;
+        f.journal.clear();
+        donate(1, d());
+        assertThat(f.journal).noneMatch(j -> j.startsWith("economy.clientRequest"));
+        assertThat(f.economyStore.donations.get(1).clientRequestId()).as("旧客户端：键 0").isZero();
+    }
+
+    @Test
+    void 兑换_幂等重发回首次那单_count为0与1是同一请求_余额直读() {
+        noMint();
+        GuildAssetOpRow first = GuildAssetOpRow.newBuilder().setOpId(FIRST_OP).setPlayerId(ME).setGuildId(G)
+                .setKind(GuildAssetOpKind.GUILD_ASSET_OP_KIND_SHOP).setStatus(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED)
+                .setRefId(101).setRefCount(1).setContributionDelta(30).setCreatedMs(NOW - 5_000).build();
+        f.economyStore.clientRequestAnswers(KEY, hit(first));
+
+        BuyGuildShopGoodsResponse resp = economy.buyGuildShopGoods(ME, BuyGuildShopGoodsRequest.newBuilder().setGoodsId(101)
+                .setClientRequestId(KEY).build(), d()).join();
+
+        assertThat(resp.hasErrorMessage()).isFalse();
+        assertThat(resp.getOrder().getOpId()).isEqualTo(FIRST_OP);
+        assertThat(resp.getOrder().getCount()).isEqualTo(1);
+        assertThat(resp.getOrder().getCostContribution()).isEqualTo(30);
+        assertThat(resp.getContributionBalance()).as("余额直读 MySQL").isEqualTo(440);
+        assertThat(f.journal).noneMatch(j -> j.startsWith("economy.reserveShopOrder"));
+        assertThat(economyCount("buy_shop_goods", "replayed")).isEqualTo(1);
     }
 }

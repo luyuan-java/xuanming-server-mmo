@@ -268,41 +268,169 @@ public final class GuildEconomyService {
         return new Answer<>(resp.build(), EconomyResult.OK);
     }
 
+    // ================================================================ 客户端幂等键（mmorpg 05-economy.md 顶部「客户端幂等键」覆盖块）
+
+    /**
+     * 一次不带去重的捐献 / 兑换尝试的结局：{@code written} 非 null = 已写成指令（future 由 {@link #onWorker} 完成并计指标）；
+     * {@code raced} = 预留事务在锁内撞上了首次请求（CLIENT_REQUEST_REPLAYED，什么都没写）；否则 {@code rejected} 是没写行的业务拒绝（未计指标）。
+     */
+    private record Attempt<T>(CompletableFuture<T> written, Answer<T> rejected, boolean raced) {
+        static <T> Attempt<T> written(CompletableFuture<T> future) {
+            return new Attempt<>(future, null, false);
+        }
+
+        static <T> Attempt<T> rejected(T response, EconomyResult result) {
+            return new Attempt<>(null, new Answer<>(response, result), false);
+        }
+
+        static <T> Attempt<T> raced() {
+            return new Attempt<>(null, null, true);
+        }
+    }
+
+    /**
+     * 捐献与兑换共用的幂等包装（基线 economy_logic.go withClientRequest）。{@code key == 0}（旧客户端）原样执行 {@code once}。
+     * 同一玩家的同一个非 0 键至多写成一笔指令；重发（超时 / 信封 1003 / 断线重连后带同一个键）回首次那笔指令的<b>当前</b>视图，不再发号、不再扣。
+     * 三道检查，少一道都会在某个窗口里重复执行或答非所问：
+     * <ol>
+     *   <li>前置之前先查（{@code replay}）：首次已提交就直接按它答复——哪怕玩家此后已离帮、帮会已解散、资产通道已关，那笔指令也确实发生了；</li>
+     *   <li>预留事务在锁住本人成员行之后复核（CLIENT_REQUEST_REPLAYED → {@link Attempt#raced}）：首次与重发并发在途时，成员行把两者排成一列；</li>
+     *   <li>本次没写成指令（业务拒绝或 raced）就再查一次：首次恰在第 1 道之后提交时，重发会被预判（帮贡不足、次数已满……）挡在事务之外，
+     *       以首次结果为准。raced 而事后查不到（查询失败）按故障抛（信封 1003，客户端带同一个键重发），绝不重新执行。</li>
+     * </ol>
+     * {@code replay} 返回 null = 没有可用的去重记录（含查询失败：交给事务里的第 2 道兜底，不会因此重复执行）。全部在 guild-worker 上调用。
+     */
+    private <T> CompletableFuture<T> withClientRequest(EconomyRpc rpc, long key, Supplier<Answer<T>> replay,
+                                                       Supplier<Attempt<T>> once) {
+        try {
+            if (key != 0) {
+                Answer<T> first = replay.get();
+                if (first != null) {
+                    return done(rpc, first.response(), first.result());
+                }
+            }
+            Attempt<T> attempt = once.get();
+            if (attempt.written() != null) {
+                return attempt.written();
+            }
+            if (key != 0) {
+                Answer<T> first = replay.get();
+                if (first != null) {
+                    return done(rpc, first.response(), first.result());
+                }
+            }
+            if (attempt.raced()) {
+                // 锁内读到了去重记录，事后却查不到：既给不出首次结果，也绝不能重新执行
+                throw new GuildFaultException("guild client request applied, replay unavailable");
+            }
+            return done(rpc, attempt.rejected().response(), attempt.rejected().result());
+        } catch (RuntimeException e) {
+            metrics.economyRequest(rpc, EconomyResult.ERROR);
+            throw e;
+        }
+    }
+
+    /**
+     * 查 (me, key) 的去重记录（基线 clientRequestHit）。查询失败只记日志、回空：预留事务在成员行锁之下还会复核（第 2 道），放行不会重复执行。
+     */
+    private Optional<EconomyStore.ClientRequestHit> clientRequestHit(long me, long key, Deadline deadline) {
+        try {
+            return store.clientRequest(me, key, deadline);
+        } catch (RuntimeException e) {
+            log.error("[GuildEconomy] read client request failed, leaving it to the transaction recheck (player={} client_request_id={}): {}",
+                    Long.toUnsignedString(me), Long.toUnsignedString(key), e.toString());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 同一个键却换了请求（另一个方法、另一个选项 / 商品 / 份数），或去重记录指向的指令行已不在（基线 clientRequestMismatch）。都回 1005、不写入：
+     * 前者是客户端复用了键（缺陷），按首次结果答复玩家会以为第二个请求成功了；后者给不出首次结果，也绝不能重新执行。
+     *
+     * @param refCount 捐献恒 1；兑换是归一后的份数（{@link #shopBuyCount}）
+     * @return null = 参数一致，可以按首次结果答复
+     */
+    private static GuildTip clientRequestMismatch(EconomyStore.ClientRequestHit hit, GuildAssetOpKind kind, int refId,
+                                                  int refCount) {
+        if (hit.op().isEmpty()) {
+            log.error("[GuildEconomy] client request record points at a missing op, refusing without re-executing (op_id={})",
+                    Long.toUnsignedString(hit.opId()));
+            return GuildTip.CLIENT_REQUEST_ORPHANED;
+        }
+        GuildAssetOpRow row = hit.op().get();
+        if (row.getKind() != kind || row.getRefId() != refId || row.getRefCount() != refCount) {
+            log.error("[GuildEconomy] client_request_id reused with different parameters, refusing (player={} first op_id={} kind={}"
+                            + " ref={} count={}; now kind={} ref={} count={})", Long.toUnsignedString(row.getPlayerId()),
+                    Long.toUnsignedString(hit.opId()), row.getKind(), Integer.toUnsignedString(row.getRefId()),
+                    Integer.toUnsignedString(row.getRefCount()), kind, Integer.toUnsignedString(refId),
+                    Integer.toUnsignedString(refCount));
+            return GuildTip.CLIENT_REQUEST_CONFLICT;
+        }
+        return null;
+    }
+
     // ================================================================ DonateToGuild（53）
 
     /**
-     * 捐献（donateToGuild，economy_logic.go:703-810）。判定顺序（命中即返回；没写行的拒绝都不带视图）：前置 → 通道关闭 14026 → 选项不存在 14027 →
-     * 缓存预判等级 14029 → GuildRule 缺行（故障）→ 令牌 → 发号（14008）→ 预留事务 → 同步投递 → 回读。
+     * 捐献（donateToGuild，economy_logic.go:703-810；幂等包装见 {@link #withClientRequest}）。判定顺序（命中即返回；没写行的拒绝都不带视图）：
+     * 幂等键查首次结果 → 前置 → 通道关闭 14026 → 选项不存在 14027 → 缓存预判等级 14029 → GuildRule 缺行（故障）→ 令牌 → 发号（14008）→
+     * 预留事务（带键时同事务写去重记录）→ 同步投递 → 回读。
      */
     public CompletableFuture<DonateToGuildResponse> donateToGuild(long me, DonateToGuildRequest request, Deadline deadline) {
-        Answer<DonateToGuildResponse> early;
-        try {
-            long start = clockMs.getAsLong();
-            Prelude p = economyCaller(me, deadline);
-            if (p.tip() != null) {
-                early = new Answer<>(donateTip(p.tip()), EconomyResult.NOT_MEMBER);
-            } else if (channel == null) {
-                early = new Answer<>(donateTip(GuildTip.ASSET_CHANNEL_DISABLED), EconomyResult.DISABLED);
-            } else {
-                return donate(me, p.guild(), request.getDonateId(), start, deadline);
-            }
-        } catch (RuntimeException e) {
-            metrics.economyRequest(EconomyRpc.DONATE, EconomyResult.ERROR);
-            throw e;
-        }
-        metrics.economyRequest(EconomyRpc.DONATE, early.result());
-        return CompletableFuture.completedFuture(early.response());
+        return withClientRequest(EconomyRpc.DONATE, request.getClientRequestId(), () -> replayDonation(me, request, deadline),
+                () -> donateOnce(me, request, deadline));
     }
 
-    private CompletableFuture<DonateToGuildResponse> donate(long me, GuildData g, int donateId, long start, Deadline deadline) {
+    /**
+     * 按去重记录找回首次那笔捐献，装配成与首次同形的回包（基线 replayDonation）。视图取指令行的<b>当前</b>状态（首次回包是 PENDING、此后已
+     * APPLIED，重发看到的就是 APPLIED）；数额取行上的值。GuildInfo 取指令绑定的帮会，本人已不在该帮时不填。null = 没有可用的首次结果。
+     */
+    private Answer<DonateToGuildResponse> replayDonation(long me, DonateToGuildRequest request, Deadline deadline) {
+        Optional<EconomyStore.ClientRequestHit> hit = clientRequestHit(me, request.getClientRequestId(), deadline);
+        if (hit.isEmpty()) {
+            return null;
+        }
+        GuildTip conflict = clientRequestMismatch(hit.get(), GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE, request.getDonateId(), 1);
+        if (conflict != null) {
+            return new Answer<>(donateTip(conflict), EconomyResult.REQUEST_CONFLICT);
+        }
+        GuildAssetOpRow row = hit.get().op().orElseThrow();
+        GuildDonationView view = EconomyViews.donationViewOf(row);
+        DonateToGuildResponse.Builder b = DonateToGuildResponse.newBuilder().setDonation(view);
+        GuildTip reject = EconomyViews.donationRejectTip(view.getStatus(), view.getReasonTipId());
+        if (reject != null) {
+            b.setErrorMessage(reject.proto());
+        }
+        GuildInfo guild = freshGuildInfo(row.getGuildId(), me, deadline);
+        if (guild != null) {
+            b.setGuild(guild);
+        }
+        return new Answer<>(b.build(), EconomyResult.REPLAYED);
+    }
+
+    /** 不带去重的捐献流程（加幂等键之前的 donateToGuild 本体）。 */
+    private Attempt<DonateToGuildResponse> donateOnce(long me, DonateToGuildRequest request, Deadline deadline) {
+        long start = clockMs.getAsLong();
+        Prelude p = economyCaller(me, deadline);
+        if (p.tip() != null) {
+            return Attempt.rejected(donateTip(p.tip()), EconomyResult.NOT_MEMBER);
+        }
+        if (channel == null) {
+            return Attempt.rejected(donateTip(GuildTip.ASSET_CHANNEL_DISABLED), EconomyResult.DISABLED);
+        }
+        return donate(me, p.guild(), request.getDonateId(), request.getClientRequestId(), start, deadline);
+    }
+
+    private Attempt<DonateToGuildResponse> donate(long me, GuildData g, int donateId, long clientRequestId, long start,
+                                                  Deadline deadline) {
         GuildDonateTable row = tables.donateOption(donateId);
         if (row == null) {
             // 客户端的选项来自捐献页，查不到只可能是热更删了行或请求被篡改：按拒绝答复
-            return done(EconomyRpc.DONATE, donateTip(GuildTip.DONATE_OPTION_NOT_FOUND), EconomyResult.NOT_FOUND);
+            return Attempt.rejected(donateTip(GuildTip.DONATE_OPTION_NOT_FOUND), EconomyResult.NOT_FOUND);
         }
         // 缓存预判只为省一次发号与事务；事务内按 MySQL 的 level 复核
         if (Integer.compareUnsigned(g.level(), row.getMinGuildLevel()) < 0) {
-            return done(EconomyRpc.DONATE, donateTip(GuildTip.GUILD_LEVEL_TOO_LOW), EconomyResult.LEVEL);
+            return Attempt.rejected(donateTip(GuildTip.GUILD_LEVEL_TOO_LOW), EconomyResult.LEVEL);
         }
         OptionalLong deadlineAfter = tables.assetOpDeadlineMs();
         if (deadlineAfter.isEmpty()) {
@@ -316,15 +444,18 @@ public final class GuildEconomyService {
         long token = AssetOpDecisions.leaseToken(tokens);
         long opId = mintOpId(me);
         if (opId == 0) {
-            return done(EconomyRpc.DONATE, donateTip(GuildTip.ASSET_OP_ID_UNAVAILABLE), EconomyResult.ID_UNAVAILABLE);
+            return Attempt.rejected(donateTip(GuildTip.ASSET_OP_ID_UNAVAILABLE), EconomyResult.ID_UNAVAILABLE);
         }
         long deadlineMs = start + deadlineAfter.getAsLong();
         TxOutcome<Reserved> outcome = store.reserveDonation(new EconomyStore.DonationReserve(opId, me, g.guildId(), row.getId(),
                 row.getMinGuildLevel(), row.getContributionGain(), row.getFundsGain(), row.getDailyLimit(), GameDay.dayKey(start),
-                deadlineMs, start + insertLeaseMs, token, start, payload, access.txFence()), deadline);
+                deadlineMs, start + insertLeaseMs, token, start, payload, access.txFence(), clientRequestId), deadline);
+        if (outcome.rejection() == GuildReject.CLIENT_REQUEST_REPLAYED) {
+            return Attempt.raced();
+        }
         if (!(outcome instanceof TxOutcome.Ok<Reserved> ok)) {
             Answer<GuildTip> reply = rejectReply(me, g.guildId(), outcome.rejection(), deadline);
-            return done(EconomyRpc.DONATE, donateTip(reply.response()), reply.result());
+            return Attempt.rejected(donateTip(reply.response()), reply.result());
         }
         Reserved reserved = ok.value();
         // 同步投递用的是内存里的截止（离帮提前截止改的是库里的值且不抢租约，已在进行的同步投递照常发 Debit，§2.3）
@@ -332,12 +463,12 @@ public final class GuildEconomyService {
                 TransactionType.TX_GUILD_DONATE_VALUE, bundle, 0, deadlineMs, token, 0);
         Supplier<DonateToGuildResponse> fallback = () -> donateResponse(opId, row, start,
                 new OrderView(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0), null);
-        return onWorker(EconomyRpc.DONATE, deliverNow(op, AssetKind.DONATE, deadline), () -> {
+        return Attempt.written(onWorker(EconomyRpc.DONATE, deliverNow(op, AssetKind.DONATE, deadline), () -> {
             OrderView view = settledView(opId, deadline);
             // APPLIED 时资金与帮贡已入账、缓存已失效，重读才看得到新数字
             DonateToGuildResponse resp = donateResponse(opId, row, start, view, freshGuildInfo(g.guildId(), me, deadline));
             return new Answer<>(resp, EconomyViews.resultOfOrder(view.status()));
-        }, () -> new Answer<>(fallback.get(), EconomyResult.PENDING), deadline);
+        }, () -> new Answer<>(fallback.get(), EconomyResult.PENDING), deadline));
     }
 
     /** 捐献回包：数值取<b>配表行</b>（不是行上的值），created_ms = 请求开头的 now（economy_logic.go:793-809）。 */
@@ -469,37 +600,64 @@ public final class GuildEconomyService {
     /**
      * 兑换（buyGuildShopGoods，economy_logic.go:870-997）。流程与捐献同形，区别：GUILD_CREDIT 流、永不中止（deadline 0，物品属于玩家，背包满就等）、
      * 事务内先扣帮贡再投递；scene 永久拒绝时由终结退帮贡与限购，回包余额改为直读值。份数超过 MaxBuyCount 在<b>发号之前</b>判；
-     * {@code count > limit_count} 在事务前纯判断（发号之后，照搬 §9.1 第 4 条）。回包没有 GuildInfo。
+     * {@code count > limit_count} 在事务前纯判断（发号之后，照搬 §9.1 第 4 条）。回包没有 GuildInfo。幂等键同捐献（{@link #withClientRequest}）。
      */
     public CompletableFuture<BuyGuildShopGoodsResponse> buyGuildShopGoods(long me, BuyGuildShopGoodsRequest request,
                                                                          Deadline deadline) {
-        Answer<BuyGuildShopGoodsResponse> early;
-        try {
-            long start = clockMs.getAsLong();
-            Prelude p = economyCaller(me, deadline);
-            if (p.tip() != null) {
-                early = new Answer<>(buyTip(p.tip()), EconomyResult.NOT_MEMBER);
-            } else if (channel == null) {
-                early = new Answer<>(buyTip(GuildTip.ASSET_CHANNEL_DISABLED), EconomyResult.DISABLED);
-            } else {
-                return buy(me, p.guild(), request.getGoodsId(), request.getCount(), start, deadline);
-            }
-        } catch (RuntimeException e) {
-            metrics.economyRequest(EconomyRpc.BUY_SHOP_GOODS, EconomyResult.ERROR);
-            throw e;
-        }
-        metrics.economyRequest(EconomyRpc.BUY_SHOP_GOODS, early.result());
-        return CompletableFuture.completedFuture(early.response());
+        return withClientRequest(EconomyRpc.BUY_SHOP_GOODS, request.getClientRequestId(),
+                () -> replayShopOrder(me, request, deadline), () -> buyOnce(me, request, deadline));
     }
 
-    private CompletableFuture<BuyGuildShopGoodsResponse> buy(long me, GuildData g, int goodsId, int requestedCount, long start,
-                                                            Deadline deadline) {
+    /** 请求的份数：count = 0 是 proto 缺省值（老客户端不填份数），按 1 份处理；幂等键比对参数时用的也是归一后的值。 */
+    static int shopBuyCount(BuyGuildShopGoodsRequest request) {
+        return request.getCount() == 0 ? 1 : request.getCount();
+    }
+
+    /**
+     * 按去重记录找回首次那笔兑换（基线 replayShopOrder；视图取指令行的当前状态，同 {@link #replayDonation}）。余额一律直读 MySQL
+     * （首次回包里的「预留后余额」此刻可能已因别的兑换、退款而变）：成员行不在（已离帮）回 0，读失败也回 0 并记 ERROR——纯展示，客户端收到订单视图后
+     * 会自己重拉商店页；不能因为一个展示字段把已发生的订单报成失败。null = 没有可用的首次结果。
+     */
+    private Answer<BuyGuildShopGoodsResponse> replayShopOrder(long me, BuyGuildShopGoodsRequest request, Deadline deadline) {
+        Optional<EconomyStore.ClientRequestHit> hit = clientRequestHit(me, request.getClientRequestId(), deadline);
+        if (hit.isEmpty()) {
+            return null;
+        }
+        GuildTip conflict = clientRequestMismatch(hit.get(), GuildAssetOpKind.GUILD_ASSET_OP_KIND_SHOP, request.getGoodsId(),
+                shopBuyCount(request));
+        if (conflict != null) {
+            return new Answer<>(buyTip(conflict), EconomyResult.REQUEST_CONFLICT);
+        }
+        GuildAssetOpRow row = hit.get().op().orElseThrow();
+        GuildShopOrderView order = EconomyViews.shopOrderViewOf(row);
+        BuyGuildShopGoodsResponse.Builder resp = BuyGuildShopGoodsResponse.newBuilder().setOrder(order)
+                .setContributionBalance(refundedBalance(row.getGuildId(), me, 0, deadline));
+        if (order.getStatus() == GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_REJECTED) {
+            // 同首次回包：兑换被拒一律「已撤销」
+            resp.setErrorMessage(GuildTip.ASSET_REJECTED.proto());
+        }
+        return new Answer<>(resp.build(), EconomyResult.REPLAYED);
+    }
+
+    /** 不带去重的兑换流程（加幂等键之前的 buyGuildShopGoods 本体）。 */
+    private Attempt<BuyGuildShopGoodsResponse> buyOnce(long me, BuyGuildShopGoodsRequest request, Deadline deadline) {
+        long start = clockMs.getAsLong();
+        Prelude p = economyCaller(me, deadline);
+        if (p.tip() != null) {
+            return Attempt.rejected(buyTip(p.tip()), EconomyResult.NOT_MEMBER);
+        }
+        if (channel == null) {
+            return Attempt.rejected(buyTip(GuildTip.ASSET_CHANNEL_DISABLED), EconomyResult.DISABLED);
+        }
+        return buy(me, p.guild(), request.getGoodsId(), shopBuyCount(request), request.getClientRequestId(), start, deadline);
+    }
+
+    private Attempt<BuyGuildShopGoodsResponse> buy(long me, GuildData g, int goodsId, int count, long clientRequestId, long start,
+                                                   Deadline deadline) {
         GuildShopTable row = tables.shopGoods(goodsId);
         if (row == null) {
-            return done(EconomyRpc.BUY_SHOP_GOODS, buyTip(GuildTip.SHOP_GOODS_NOT_FOUND), EconomyResult.NOT_FOUND);
+            return Attempt.rejected(buyTip(GuildTip.SHOP_GOODS_NOT_FOUND), EconomyResult.NOT_FOUND);
         }
-        // count = 0 是 proto 缺省值（老客户端不填份数），按 1 份处理
-        int count = requestedCount == 0 ? 1 : requestedCount;
         OptionalInt maxStack = tables.itemMaxStack(row.getItemId());
         if (maxStack.isEmpty()) {
             // 启动校验保证商品引用的物品存在，运行期查不到 = 配表被错误替换，fail-closed
@@ -507,17 +665,17 @@ public final class GuildEconomyService {
                     + Integer.toUnsignedString(row.getId()) + "] missing");
         }
         if (Integer.compareUnsigned(count, EconomyTables.maxBuyCount(row, maxStack.getAsInt())) > 0) {
-            return done(EconomyRpc.BUY_SHOP_GOODS, buyTip(GuildTip.COUNT_EXCEEDS_MAX_BUY), EconomyResult.LIMIT);
+            return Attempt.rejected(buyTip(GuildTip.COUNT_EXCEEDS_MAX_BUY), EconomyResult.LIMIT);
         }
         // 以下两条是预判，只为省一次发号与事务；事务内按 MySQL 锁行复核
         if (Integer.compareUnsigned(g.level(), row.getRequiredGuildLevel()) < 0) {
-            return done(EconomyRpc.BUY_SHOP_GOODS, buyTip(GuildTip.GUILD_LEVEL_TOO_LOW), EconomyResult.LEVEL);
+            return Attempt.rejected(buyTip(GuildTip.GUILD_LEVEL_TOO_LOW), EconomyResult.LEVEL);
         }
         // cost_contribution ≤ 1e9 且 count ≤ 20（启动校验），乘积不会溢出
         long cost = row.getCostContribution() * Integer.toUnsignedLong(count);
         Answer<GuildTip> precheck = contributionPrecheck(g, me, cost, deadline);
         if (precheck != null) {
-            return done(EconomyRpc.BUY_SHOP_GOODS, buyTip(precheck.response()), precheck.result());
+            return Attempt.rejected(buyTip(precheck.response()), precheck.result());
         }
         OptionalInt periodKey = GameDay.periodKey(row.getLimitPeriod(), start);
         if (periodKey.isEmpty()) {
@@ -530,14 +688,17 @@ public final class GuildEconomyService {
         long token = AssetOpDecisions.leaseToken(tokens);
         long opId = mintOpId(me);
         if (opId == 0) {
-            return done(EconomyRpc.BUY_SHOP_GOODS, buyTip(GuildTip.ASSET_OP_ID_UNAVAILABLE), EconomyResult.ID_UNAVAILABLE);
+            return Attempt.rejected(buyTip(GuildTip.ASSET_OP_ID_UNAVAILABLE), EconomyResult.ID_UNAVAILABLE);
         }
         TxOutcome<ShopReserved> outcome = store.reserveShopOrder(new EconomyStore.ShopReserve(opId, me, g.guildId(), row.getId(),
                 count, row.getRequiredGuildLevel(), cost, row.getLimitCount(), periodKey.getAsInt(), start + insertLeaseMs, token,
-                start, bundle.toByteString(), access.txFence()), deadline);
+                start, bundle.toByteString(), access.txFence(), clientRequestId), deadline);
+        if (outcome.rejection() == GuildReject.CLIENT_REQUEST_REPLAYED) {
+            return Attempt.raced();
+        }
         if (!(outcome instanceof TxOutcome.Ok<ShopReserved> ok)) {
             Answer<GuildTip> reply = rejectReply(me, g.guildId(), outcome.rejection(), deadline);
-            return done(EconomyRpc.BUY_SHOP_GOODS, buyTip(reply.response()), reply.result());
+            return Attempt.rejected(buyTip(reply.response()), reply.result());
         }
         ShopReserved reserved = ok.value();
         // 帮贡在成员快照里：提交后失效 guild(G)（economy_repo.go:751-752）
@@ -546,7 +707,7 @@ public final class GuildEconomyService {
         AssetOp op = new AssetOp(opId, me, AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, reserved.seq(), reserved.streamEpoch(),
                 opId, TransactionType.TX_GUILD_SHOP_VALUE, bundle, 0, 0, token, 0);
         int finalCount = count;
-        return onWorker(EconomyRpc.BUY_SHOP_GOODS, deliverNow(op, AssetKind.SHOP, deadline), () -> {
+        return Attempt.written(onWorker(EconomyRpc.BUY_SHOP_GOODS, deliverNow(op, AssetKind.SHOP, deadline), () -> {
             OrderView view = settledView(opId, deadline);
             BuyGuildShopGoodsResponse.Builder resp = buyResponse(opId, row.getId(), finalCount, cost, start, view,
                     reserved.balanceAfter());
@@ -565,7 +726,7 @@ public final class GuildEconomyService {
             return new Answer<>(resp.build(), EconomyViews.resultOfOrder(view.status()));
         }, () -> new Answer<>(buyResponse(opId, row.getId(), finalCount, cost, start,
                 new OrderView(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0), reserved.balanceAfter()).build(),
-                EconomyResult.PENDING), deadline);
+                EconomyResult.PENDING), deadline));
     }
 
     private static BuyGuildShopGoodsResponse.Builder buyResponse(long opId, int goodsId, int count, long cost, long start,
@@ -612,8 +773,8 @@ public final class GuildEconomyService {
     }
 
     /**
-     * 兑换被拒 / 中止后终结已退回帮贡，余额改为直读（refundedBalance，economy_logic.go:1028-1041）：读失败回预留时的余额（偏低，纯展示）；
-     * 成员行已不在（兑换期间离帮）回 0。
+     * 兑换被拒 / 中止后终结已退回帮贡，余额改为直读（refundedBalance，economy_logic.go:1028-1041）：读失败回 {@code fallback}（兑换路径是预留时的
+     * 余额，偏低，纯展示；幂等重发 {@link #replayShopOrder} 传 0）；成员行已不在（兑换期间离帮）回 0。
      */
     private long refundedBalance(long guildId, long me, long fallback, Deadline deadline) {
         try {

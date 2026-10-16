@@ -97,6 +97,11 @@ public final class GuildTips {
     public static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
     /** 契约里没有的消息号（信封；§7.3）。 */
     public static final int MESSAGE_ID_NOT_FOUND = CommonErrorTip.common_error.kMessageIdNotFound_VALUE;
+    /**
+     * 客户端幂等键复用了却换了参数（另一个选项 / 商品 / 份数，或跨方法），或去重记录指向的指令已不在：in-band 业务拒绝、不写入
+     * （基线 economy_logic.go clientRequestMismatch；mmorpg 05-economy.md 顶部「客户端幂等键」覆盖块）。
+     */
+    public static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
 
     /** 帮会段内的 in-band 故障码集合（基线 faults.go:61-62：GuildIdGenUnavailable 与 4.6 的 GuildTrialServiceBusy）。 */
     public static final Set<Integer> FAULTS = Set.of(ID_GEN_UNAVAILABLE, TRIAL_SERVICE_BUSY);
@@ -165,6 +170,9 @@ public final class GuildTips {
             case FUNDS_INSUFFICIENT -> tip(GuildTip.FUNDS_INSUFFICIENT);
             // 守卫拒绝不是故障（再发新指令会破坏 scene 账本窗口的正确性证明）：服务记 INFO，不记 ERROR。
             case TOO_MANY_PENDING -> tip(GuildTip.TOO_MANY_PENDING);
+            // 经济服务在映射之前就拦下它（按去重记录回首次结果）；别的写事务不会产生它。万一漏到这里回「忙，请重试」：
+            // 客户端带同一个键重发，会在事务前的查重里直接拿到首次结果，不会重复执行。
+            case CLIENT_REQUEST_REPLAYED -> tip(GuildTip.WRITE_CONFLICT);
         };
     }
 

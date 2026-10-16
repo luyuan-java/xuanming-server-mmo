@@ -141,7 +141,9 @@ public interface GuildAssetStore {
     /** 清理指标的 {@code table} label（固定集合）。 */
     enum CleanupTable {
         ASSET_OP("guild_asset_op"),
-        DAILY_COUNTER("guild_daily_counter");
+        DAILY_COUNTER("guild_daily_counter"),
+        /** 客户端幂等键的去重记录（2026-10-15）。 */
+        CLIENT_REQUEST("guild_client_request");
 
         private final String label;
 
@@ -155,7 +157,7 @@ public interface GuildAssetStore {
     }
 
     /** 一轮清理删掉的行数。 */
-    record CleanupReport(long assetOpsDeleted, long countersDeleted) {
+    record CleanupReport(long assetOpsDeleted, long countersDeleted, long clientRequestsDeleted) {
     }
 
     /**
@@ -279,7 +281,10 @@ public interface GuildAssetStore {
      * 跑一轮清理（CleanupOnce，asset_store.go:1009-1040）：终态行（APPLIED / REJECTED / ABORTED，next_attempt_ms &lt; now − 保留期；
      * <b>PENDING 与 APPLIED_PARTIAL 永不删</b>）、过期日键计数行、过期周键计数行三类各自分批（每批候选 ≤ 500、批间 100 ms、至多 20 批，
      * 候选不足 500 即停），每行一个 RC 短事务「点锁 → 带复核点删」（1 次尝试、2 s 上限）。计数截止时刻 = now − max(保留期, 8 天)。
-     * 一类失败不影响另外两类；已删的行数照常经 {@link Listener#cleanupDeleted} 计。线程被中断时停止并报错。
+     * 客户端幂等键的去重记录（guild_client_request）按 created_ms 与终态行同一个截止删，并排在终态行之前：指令按终结时刻判龄、终结不早于创建，
+     * 一笔指令可删时它的去重记录早已可删（批次上限或单行失败仍可能让少量去重记录晚一轮删，那段时间重发同一个键查到记录却查不到指令行——
+     * 经济服务按 1005 拒绝、不重新执行）。
+     * 一类失败不影响其它类；已删的行数照常经 {@link Listener#cleanupDeleted} 计。线程被中断时停止并报错。
      *
      * @throws IllegalArgumentException 保留期 ≤ 0
      * @throws Deadline.DependencyException 任一类出错（其余类的错误挂在 suppressed 上）

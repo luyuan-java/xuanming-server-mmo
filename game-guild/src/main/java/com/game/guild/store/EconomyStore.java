@@ -41,12 +41,21 @@ public interface EconomyStore {
      * @param leaseToken   本请求的令牌（非 0）
      * @param payload      {@code AssetBundle{currencies:[{currency_type, cost_amount}]}} 的序列化字节（非空）
      * @param fence        事务内合服闸门；null 按 {@link ZoneFence#OPEN}
+     * @param clientRequestId 客户端幂等键；0 = 旧客户端，不查也不写去重记录（{@code guild_client_request}）
      */
     record DonationReserve(long opId, long playerId, long guildId, int donateId, int minGuildLevel, long contributionGain,
                            long fundsGain, int dailyLimit, int periodKey, long deadlineMs, long leaseUntilMs, long leaseToken,
-                           long nowMs, ByteString payload, ZoneFence fence) {
+                           long nowMs, ByteString payload, ZoneFence fence, long clientRequestId) {
         public DonationReserve {
             Objects.requireNonNull(payload, "payload");
+        }
+
+        /** 不带幂等键（旧客户端口径，clientRequestId = 0）。 */
+        public DonationReserve(long opId, long playerId, long guildId, int donateId, int minGuildLevel, long contributionGain,
+                               long fundsGain, int dailyLimit, int periodKey, long deadlineMs, long leaseUntilMs, long leaseToken,
+                               long nowMs, ByteString payload, ZoneFence fence) {
+            this(opId, playerId, guildId, donateId, minGuildLevel, contributionGain, fundsGain, dailyLimit, periodKey, deadlineMs,
+                    leaseUntilMs, leaseToken, nowMs, payload, fence, 0L);
         }
 
         /**
@@ -84,12 +93,21 @@ public interface EconomyStore {
      * @param limitCount 周期限购份数；0 = 不限购
      * @param periodKey  {@code GameDay.periodKey(limit_period, start)}；不限购时为 0（两者必须同为 0 或同非 0）
      * @param payload    {@code AssetBundle{items:[{item_id, item_count × count}]}} 的序列化字节（非空）
+     * @param clientRequestId 客户端幂等键；0 = 旧客户端，不去重（同 {@link DonationReserve#clientRequestId}）
      */
     record ShopReserve(long opId, long playerId, long guildId, int goodsId, int count, int requiredGuildLevel, long cost,
                        int limitCount, int periodKey, long leaseUntilMs, long leaseToken, long nowMs, ByteString payload,
-                       ZoneFence fence) {
+                       ZoneFence fence, long clientRequestId) {
         public ShopReserve {
             Objects.requireNonNull(payload, "payload");
+        }
+
+        /** 不带幂等键（旧客户端口径，clientRequestId = 0）。 */
+        public ShopReserve(long opId, long playerId, long guildId, int goodsId, int count, int requiredGuildLevel, long cost,
+                           int limitCount, int periodKey, long leaseUntilMs, long leaseToken, long nowMs, ByteString payload,
+                           ZoneFence fence) {
+            this(opId, playerId, guildId, goodsId, count, requiredGuildLevel, cost, limitCount, periodKey, leaseUntilMs, leaseToken,
+                    nowMs, payload, fence, 0L);
         }
 
         /** 碰库之前的入参校验（validate，economy_repo.go:629-647）；null = 合法。 */
@@ -187,13 +205,25 @@ public interface EconomyStore {
     record OpState(GuildAssetOpStatus status, int lastReason, int reasonTipId) {
     }
 
+    /**
+     * 一条客户端幂等键的去重记录与它指向的指令行（基线 data.ClientRequestHit）。
+     *
+     * @param op 指令行；空 = 去重记录在、指令行不在（人工删库，或清理让去重记录晚了一轮）——调用方不能据此重新执行，只能拒绝
+     */
+    record ClientRequestHit(long opId, Optional<GuildAssetOpRow> op) {
+        public ClientRequestHit {
+            Objects.requireNonNull(op, "op");
+        }
+    }
+
     // ================================================================ 写
 
     /**
      * 捐献预留 T-D（op = donate；ReserveDonation，economy_repo.go:521-608）：G11 普通读 zone / 等级 → 等级门槛 → 闸门 → M1 锁本人成员行 →
      * 按需建 seq 行（GUILD_DEBIT）→ 分 seq（守卫 16 / 512）→ 插 PENDING 行（28 列全写）→ 占今日次数（C1，n = 1）。
-     * 拒绝：GUILD_GONE / LEVEL_TOO_LOW / ZONE_MERGING / NOT_MEMBER / TOO_MANY_PENDING / DONATE_LIMIT / WRITE_CONFLICT。
-     * 任何拒绝都整体回滚：seq 不前进、行不落、次数不占（首次建出的 seq 行也随之回滚）。
+     * {@code clientRequestId != 0} 时：锁住成员行之后、建 seq 行之前普通读 R1 复核去重记录（读到 → CLIENT_REQUEST_REPLAYED），事务最后 R2 插去重记录。
+     * 拒绝：GUILD_GONE / LEVEL_TOO_LOW / ZONE_MERGING / NOT_MEMBER / CLIENT_REQUEST_REPLAYED / TOO_MANY_PENDING / DONATE_LIMIT / WRITE_CONFLICT。
+     * 任何拒绝都整体回滚：seq 不前进、行不落、次数不占、去重记录不写（首次建出的 seq 行也随之回滚）。
      */
     TxOutcome<Reserved> reserveDonation(DonationReserve in, Deadline deadline);
 
@@ -201,6 +231,8 @@ public interface EconomyStore {
      * 兑换预留 T-S（op = shop；ReserveShopOrder，economy_repo.go:649-754）：事务前纯判断 {@code count > limit_count}（SHOP_LIMIT，
      * 首次插入计数行时 upsert 拦不住）→ G11 → 等级 → 闸门 → M12 锁成员行读余额 → 余额不足 → 建 seq 行（GUILD_CREDIT）→ 分 seq →
      * 插 PENDING 行（deadline 0，永不中止）→ 限购时 C1（n = count）→ M13 扣帮贡（影响 ≠ 1 → CONTRIBUTION_INSUFFICIENT）。
+     * {@code clientRequestId != 0} 时：M12 之后、<b>余额判断之前</b>普通读 R1 复核去重记录（首次刚把帮贡扣到不够第二份，放在后面重发会被误拒成
+     * 「帮贡不足」），事务最后 R2 插去重记录。
      */
     TxOutcome<ShopReserved> reserveShopOrder(ShopReserve in, Deadline deadline);
 
@@ -232,6 +264,12 @@ public interface EconomyStore {
 
     /** O8：本人某条流上最新的 limit 条指令（含 PENDING），按 (stream_epoch, seq) 倒序；状态 / 时间窗 / kind / 帮会过滤由调用方做。 */
     List<GuildAssetOpRow> recentOps(long playerId, int stream, int limit, Deadline deadline);
+
+    /**
+     * R1 + O9：按 (玩家, 客户端幂等键) 查首次请求的去重记录，再按主键读它指向的整行指令（两次主键等值普通读；基线 EconomyRepo.ClientRequest）。
+     * 空 = 没有去重记录：首次请求没写成指令（被拒绝 / 还没提交），或记录已过保留期被清理。{@code clientRequestId == 0} 不碰库、恒为空。
+     */
+    Optional<ClientRequestHit> clientRequest(long playerId, long clientRequestId, Deadline deadline);
 
     private static String u(long v) {
         return Long.toUnsignedString(v);

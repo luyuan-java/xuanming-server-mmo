@@ -26,7 +26,7 @@ class GuildMetricsEconomyTest {
         assertThat(meters.find("game.guild.economy.requests").counters()).hasSize(5 * GuildMetrics.EconomyResult.values().length);
         assertThat(meters.find("game.guild.asset.sync.skipped").counters()).hasSize(2);
         assertThat(meters.find("game.guild.asset.orphans").counters()).hasSize(3);
-        assertThat(meters.find("game.guild.asset.cleanup.deleted").counters()).hasSize(2);
+        assertThat(meters.find("game.guild.asset.cleanup.deleted").counters()).hasSize(3);
         assertThat(meters.find("game.guild.internal.list.applied").counters()).hasSize(6);
         assertThat(meters.find("game.guild.assetop.rpc").counters()).hasSize(3 * 3 * RpcOutcome.values().length);
         assertThat(meters.find("game.guild.assetop.rpc.duration").timers()).hasSize(3);
