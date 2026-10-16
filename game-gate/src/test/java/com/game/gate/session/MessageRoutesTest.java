@@ -97,7 +97,7 @@ class MessageRoutesTest {
                         && !MessageRoutes.DIRECT_ONLY_SERVICES.contains(m.serviceName()))
                 .map(MessageMethod::serviceName).distinct().toList();
         assertThat(notPorted)
-                .as("契约里出现了 Java 版还没接入的客户端服务：它的号会走 dispatcher 的缺省分支（推 23 {1003}）。"
+                .as("契约里出现了 Java 版还没接入的客户端服务：它的号会走 dispatcher 的缺省分支（回带请求 id 的信封 1003）。"
                         + "这一批就要接的，照 MatchService 的做法加进 SERVICE_BACKENDS 与 GateConfiguration；留到以后的，把这条断言改成"
                         + "钉住那份清单（containsExactlyInAnyOrder），并在 PARITY.md 登记")
                 .isEmpty();

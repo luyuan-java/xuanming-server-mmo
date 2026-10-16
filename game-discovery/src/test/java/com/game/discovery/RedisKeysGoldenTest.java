@@ -36,7 +36,7 @@ class RedisKeysGoldenTest {
 
     @Test
     void 样例覆盖全部生成方法_新增方法必须补金样() {
-        assertThat(RedisKeysSamples.publicStringMethods()).as("73 个生成方法 + prefix()").hasSize(74);
+        assertThat(RedisKeysSamples.publicStringMethods()).as("76 个生成方法 + prefix()").hasSize(77);
         assertThat(RedisKeysSamples.sampledMethods()).isEqualTo(RedisKeysSamples.publicStringMethods());
     }
 

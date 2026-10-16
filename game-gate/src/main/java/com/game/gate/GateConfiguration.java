@@ -160,7 +160,7 @@ public class GateConfiguration {
 
     /**
      * login 以外的客户端消息后端表（消息域 → Dubbo 引用），交给 {@link GateNode}。它必须与 {@link MessageRoutes#SERVICE_BACKENDS} 对得上：
-     * 路由表把某个服务指到一个域、这里却没有那个域的引用时，dispatcher 会把它当成「未接入」推 23 {1003}——接入新后端时两处漏改一处
+     * 路由表把某个服务指到一个域、这里却没有那个域的引用时，dispatcher 会把它当成「未接入」回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}）——接入新后端时两处漏改一处
      * 就是这个结果，而且进程照常起来、只有发那个服务的号才看得出。所以装配时当场核对，对不上拒绝启动。
      *
      * @throws IllegalStateException 路由表里有后端域没有引用，或这里多出了路由表不认识的域

@@ -15,6 +15,7 @@ import com.game.guild.presence.PlayerNames;
 import com.game.guild.push.GuildPushes;
 import com.game.guild.push.GuildPushes.PushOutcome;
 import com.game.guild.rank.GuildRankMetrics;
+import com.game.guild.service.ExpectedGuildMetrics;
 import com.game.guild.store.GuildTxListener;
 import com.game.guild.store.GuildTxOp;
 import io.micrometer.core.instrument.Counter;
@@ -67,7 +68,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link #UNROUTED}；{@code op} 只取 {@link GuildTxOp} / {@link InvalidationOp} 的固定集合；资产通道的流号只分三档。线程安全、不抛异常。
  */
 public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, GuildRankMetrics, GuildPushes.PushMetrics,
-        OnlineStatuses.Metrics, PlayerNames.Metrics, AssetOpMetrics {
+        OnlineStatuses.Metrics, PlayerNames.Metrics, AssetOpMetrics, ExpectedGuildMetrics {
 
     static final String REQUESTS = "game.guild.requests";
     static final String PUSHES = "game.guild.pushes";
@@ -101,6 +102,8 @@ public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, G
     static final String ASSETOP_STORE_ERRORS = "game.guild.assetop.store.errors";
     static final String ASSETOP_PENDING_OLDEST_AGE = "game.guild.assetop.pending.oldest.age.seconds";
     static final String SCENE_RESOLVE = "game.guild.scene.resolve";
+    // ---- 客户端请求按会话保序（mmorpg client-request-ordering.md O14） ----
+    static final String EXPECTED_GUILD = "game.guild.expected.guild";
 
     /** 不认识的消息号（契约里没有，或有但不归 guild）。 */
     public static final String UNROUTED = "unrouted";
@@ -218,6 +221,8 @@ public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, G
     private final Map<StoreOp, Counter> storeErrors = new EnumMap<>(StoreOp.class);
     private final Map<String, AtomicLong> pendingOldestAge = new HashMap<>();
     private final Map<ResolveResult, Counter> sceneResolve = new EnumMap<>(ResolveResult.class);
+    private final Map<ExpectedGuildMetrics.Method, Map<ExpectedGuildMetrics.Outcome, Counter>> expectedGuild =
+            new EnumMap<>(ExpectedGuildMetrics.Method.class);
 
     public GuildMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -424,6 +429,17 @@ public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, G
                             + "error（error = Redis 出错或记录 / 目录条目损坏，按故障重投并告警）")
                     .tag("result", result.label()).register(registry));
         }
+        for (ExpectedGuildMetrics.Method method : ExpectedGuildMetrics.Method.values()) {
+            Map<ExpectedGuildMetrics.Outcome, Counter> byOutcome = new EnumMap<>(ExpectedGuildMetrics.Outcome.class);
+            for (ExpectedGuildMetrics.Outcome outcome : ExpectedGuildMetrics.Outcome.values()) {
+                byOutcome.put(outcome, Counter.builder(EXPECTED_GUILD)
+                        .description("带 expected_guild_id 的五个写请求（leave / disband / kick / transfer / set_role）的栅栏计数："
+                                + "absent = 客户端没带（旧客户端，按服务端查到的帮会执行）；mismatch = 操作者此刻不在预期帮会，已拒绝、未写。"
+                                + "absent 降到 0 之前，超时后晚到的旧请求仍可能作用到玩家的新帮会")
+                        .tag("method", method.label()).tag("outcome", outcome.label()).register(registry));
+            }
+            expectedGuild.put(method, byOutcome);
+        }
     }
 
     // ------------------------------------------------------------------ 请求
@@ -627,6 +643,13 @@ public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, G
 
     private static String key(String... parts) {
         return String.join("\0", parts);
+    }
+
+    // ------------------------------------------------------------------ 预期帮会栅栏
+
+    @Override
+    public void expectedGuild(ExpectedGuildMetrics.Method method, ExpectedGuildMetrics.Outcome outcome) {
+        expectedGuild.get(method).get(outcome).increment();
     }
 
     static String tagValue(Enum<?> value) {

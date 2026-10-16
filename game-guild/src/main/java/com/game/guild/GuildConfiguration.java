@@ -39,6 +39,7 @@ import com.game.guild.metrics.GuildMetrics;
 import com.game.guild.presence.OnlineStatuses;
 import com.game.guild.presence.PlayerNames;
 import com.game.guild.push.GuildPushes;
+import com.game.guild.quota.GuildApplyQuota;
 import com.game.guild.rank.GuildRanks;
 import com.game.guild.rank.RedissonGuildRankRedis;
 import com.game.guild.rules.GuildLimits;
@@ -434,11 +435,13 @@ public class GuildConfiguration {
     /**
      * 归属区读 player.zone_id（D3；game-common 的 {@link PlayerHomeZones}，与组队、聚宝斋共用，单次上限 1500 ms）。
      * 合服闸门：Java 首批不做合服（D4），恒放行；事务外与事务内的检查点照样保留。
+     * expected_guild_id 栅栏的计数记到 {@link GuildMetrics}（{@code game_guild_expected_guild_total}，mmorpg client-request-ordering.md O14）。
      */
     @Bean
-    public GuildAccess guildAccess(GuildCache cache, PlayerProfiles profiles, GuildCacheInvalidator invalidator) {
+    public GuildAccess guildAccess(GuildCache cache, PlayerProfiles profiles, GuildCacheInvalidator invalidator,
+                                   GuildMetrics metrics) {
         return new GuildAccess(cache, new PlayerHomeZones(profiles::loadStrict,
-                Duration.ofMillis(GuildLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS)), MergeFence.NONE, invalidator);
+                Duration.ofMillis(GuildLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS)), MergeFence.NONE, invalidator, metrics);
     }
 
     @Bean
@@ -457,10 +460,17 @@ public class GuildConfiguration {
     }
 
     @Bean
+    public GuildApplyQuota guildApplyQuota(RedissonClient redis, RedisKeys keys, GuildProperties props,
+                                          io.micrometer.core.instrument.MeterRegistry meters) {
+        return GuildApplyQuota.redisson(redis, keys, props.applyPerMinute(), meters);
+    }
+
+    @Bean
     public GuildManageService guildManageService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views,
-                                                 GuildPushes pushes, ApplyPushCooldown cooldown, GuildTableLookup tables) {
+                                                 GuildPushes pushes, ApplyPushCooldown cooldown, GuildTableLookup tables,
+                                                 GuildApplyQuota applicationQuota) {
         return new GuildManageService(store, cache, access, views, pushes, cooldown::tryMark, tables,
-                System::currentTimeMillis);
+                System::currentTimeMillis, applicationQuota::tryAcquire);
     }
 
     @Bean

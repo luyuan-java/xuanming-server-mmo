@@ -224,6 +224,23 @@ class GuildTxTest {
         assertThat(recorder.events).containsExactly("budget:leave");
     }
 
+    /**
+     * 请求预算（game.guild.request-budget ≤ 3.5 s，先于 gate 调 guild 的 5 s 超时到期）在体跑完之后、COMMIT 之前用完：不提交、整体回滚，
+     * 按依赖故障抛出（不计子预算、不伪装成写冲突）。这是 mmorpg client-request-ordering.md §6.1 在 Java 版的落点：gate 观察到超时、
+     * 放行同一会话的下一条请求时，这一条已经不会再提交。
+     */
+    @Test
+    void 请求预算在提交前用完_不提交_按依赖故障抛() {
+        Deadline request = Deadline.after(30);
+        assertThatThrownBy(() -> tx().run(GuildTxOp.LEAVE, request, t -> {
+            sleep(60); // 体内的写已发出，COMMIT 还没发
+            return TxOutcome.ok("late");
+        })).isInstanceOf(DependencyException.class);
+        assertThat(conn.commits).as("COMMIT 也是一条语句：请求截止之后不发").isZero();
+        assertThat(conn.rollbacks).isEqualTo(1);
+        assertThat(recorder.events).as("请求自己的截止到了，不计子预算").isEmpty();
+    }
+
     @Test
     void 查询超时按子预算到期定性() {
         TxOutcome<String> out = tx().run(GuildTxOp.TRANSFER, roomy(), t -> {

@@ -2,6 +2,7 @@ package com.game.guild;
 
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 /**
  * game-guild 业务配置（{@code game.guild.*}，guild-spec §7.12、guild-economy-spec §7.6）。缺省值同基线 go/guild（guild.yaml / config.go / 包常量）。
@@ -20,6 +21,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param workerThreads       阻塞工作线程数（MySQL / 等 Redis 都在这组线程上，不占 Dubbo 线程；缺省 16）
  * @param workerQueueCapacity 工作队列上限（缺省 1024）；满了回 in-band 14021「guild service overloaded」，不无限堆积
  * @param assetOp             资产通道与重投循环（{@code game.guild.asset-op.*}，整段缺省 = 通道关闭，fail-closed）
+ * @param applyPerMinute      每玩家固定 60 秒的申请尝试配额（缺省 10，范围 1–600；含重复刷新）
  */
 @ConfigurationProperties("game.guild")
 public record GuildProperties(
@@ -30,12 +32,14 @@ public record GuildProperties(
         Duration queryTimeout,
         Integer workerThreads,
         Integer workerQueueCapacity,
-        AssetOp assetOp) {
+        AssetOp assetOp,
+        Integer applyPerMinute) {
 
     /** 整请求预算的区间（基线 Timeout − 500 ms，Timeout ≤ 路由服 5000 − 1000）。 */
     public static final Duration MIN_REQUEST_BUDGET = Duration.ofMillis(500);
     public static final Duration MAX_REQUEST_BUDGET = Duration.ofMillis(3500);
 
+    @ConstructorBinding
     public GuildProperties {
         requestBudget = positiveOr(requestBudget, MAX_REQUEST_BUDGET, "request-budget");
         if (requestBudget.compareTo(MIN_REQUEST_BUDGET) < 0 || requestBudget.compareTo(MAX_REQUEST_BUDGET) > 0) {
@@ -59,6 +63,17 @@ public record GuildProperties(
         workerThreads = positiveOr(workerThreads, 16, "worker-threads");
         workerQueueCapacity = positiveOr(workerQueueCapacity, 1024, "worker-queue-capacity");
         assetOp = assetOp == null ? AssetOp.defaults() : assetOp;
+        applyPerMinute = applyPerMinute == null ? 10 : applyPerMinute;
+        if (applyPerMinute < 1 || applyPerMinute > 600) {
+            throw new IllegalArgumentException("game.guild.apply-per-minute 必须在 [1, 600] 内");
+        }
+    }
+
+    /** 保留现有显式构造调用；生产 Spring 只绑定完整构造器。 */
+    public GuildProperties(Duration requestBudget, Duration cacheTtl, Duration pushTimeout, Duration onlineLookupTimeout,
+                           Duration queryTimeout, Integer workerThreads, Integer workerQueueCapacity, AssetOp assetOp) {
+        this(requestBudget, cacheTtl, pushTimeout, onlineLookupTimeout, queryTimeout, workerThreads, workerQueueCapacity,
+                assetOp, null);
     }
 
     /** MySQL 单条查询超时的上限（秒，至少 1）：{@code query-timeout} 取整秒（实际再取它与剩余预算向上取整的较小者）。 */

@@ -248,7 +248,7 @@ class ClientRedirectTest {
         assertThat(requests("friend", FRIEND_MSG, "redirected")).isEqualTo(1);
         assertThat(meters.get("game.gate.client.requests").tag("route", "unknown").tag("method", "unknown")
                 .tag("result", "redirected").counter().count()).isEqualTo(5);
-        assertThat(requests("scene", SCENE_MSG, "not_in_scene")).as("不走「未进场景推 23 {1003}」").isZero();
+        assertThat(requests("scene", SCENE_MSG, "not_in_scene")).as("不走「未进场景回信封 1003」").isZero();
         assertThat(registry.get(c.sid()).illegalPackets).isZero();
     }
 

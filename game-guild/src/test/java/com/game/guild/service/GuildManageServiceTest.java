@@ -251,6 +251,44 @@ class GuildManageServiceTest {
     // ================================================================ ApplyJoinGuild（§3.11）
 
     @Test
+    void 重复刷新申请也消耗尝试配额_第十一次不碰存储也不推送() {
+        f.store.apply = g -> TxOutcome.ok(new Applied(false, List.of()));
+        ApplyJoinGuildRequest request = ApplyJoinGuildRequest.newBuilder().setGuildId(G).build();
+        for (int attempt = 0; attempt < 10; attempt++) {
+            assertThat(f.manage.applyJoinGuild(ME, request, d()).hasErrorMessage()).isFalse();
+        }
+        f.journal.clear();
+        assertThat(f.manage.applyJoinGuild(ME, request, d()).getErrorMessage().getId())
+                .isEqualTo(com.game.table.CommonErrorTip.common_error.kRateLimitExceeded_VALUE);
+        assertThat(f.called("store.")).isFalse();
+        assertThat(f.pushes).isEmpty();
+        assertThat(f.cooldownCalls).isEmpty();
+    }
+
+    @Test
+    void 参数拒绝不消费配额_仓储拒绝仍消费且换目标帮不重置() {
+        f.manage.applyJoinGuild(ME, ApplyJoinGuildRequest.getDefaultInstance(), d());
+        f.store.apply = g -> TxOutcome.reject(GuildReject.GUILD_FULL);
+        for (int attempt = 0; attempt < 10; attempt++) {
+            assertThat(f.manage.applyJoinGuild(ME, ApplyJoinGuildRequest.newBuilder().setGuildId(G + attempt).build(), d())
+                    .getErrorMessage()).isEqualTo(GuildTip.GUILD_FULL.proto());
+        }
+        f.journal.clear();
+        assertThat(f.manage.applyJoinGuild(ME, ApplyJoinGuildRequest.newBuilder().setGuildId(100).build(), d())
+                .getErrorMessage().getId()).isEqualTo(com.game.table.CommonErrorTip.common_error.kRateLimitExceeded_VALUE);
+        assertThat(f.called("store.")).isFalse();
+    }
+
+    @Test
+    void 配额阶段父预算取消不得继续仓储() {
+        f.applicationQuota = (player, deadline) -> { throw new DependencyException("父请求取消"); };
+        assertThatThrownBy(() -> f.manage.applyJoinGuild(ME, ApplyJoinGuildRequest.newBuilder().setGuildId(G).build(), d()))
+                .isInstanceOf(DependencyException.class);
+        assertThat(f.called("store.")).isFalse();
+        assertThat(f.pushes).isEmpty();
+    }
+
+    @Test
     void 申请新建行_冷却拿到才推APPLICATION_RECEIVED给审批人_申请人是actor与target() {
         f.store.apply = g -> TxOutcome.ok(new Applied(true, List.of(5L, 6L)));
         assertThat(f.manage.applyJoinGuild(ME, ApplyJoinGuildRequest.newBuilder().setGuildId(G).build(), d())

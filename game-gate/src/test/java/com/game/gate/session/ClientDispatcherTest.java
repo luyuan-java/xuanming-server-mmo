@@ -406,10 +406,10 @@ class ClientDispatcherTest {
         assertThat(links.last().frame().getPlayerLeave())
                 .isEqualTo(PlayerLeave.newBuilder().setSessionId(sid).setPlayerId(PLAYER).setVoluntary(true).build());
 
-        // 不在场景里了：scene 域消息推 1003，不再转发。
+        // 不在场景里了：scene 域消息回带请求 id 的信封 1003，不再转发。
         int framesBefore = links.sent.size();
         ch.writeInbound(request(3, SCENE_MSG, "skills"));
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(envelopeTipOf(ch.readOutbound(), 3, SCENE_MSG)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat(links.sent).hasSize(framesBefore);
 
         // 旧链路代次上迟到的下行不再发给这个会话。
@@ -479,19 +479,40 @@ class ClientDispatcherTest {
 
     // ================================================================ 其他路由与入口校验
 
+    // 「未进场景」「未接入的域」两种回执 2026-10-15 起由 23 {1003} 改为带请求 id 的信封 1003（mmorpg client-request-ordering.md O6，
+    // 两版同批）：不带 id 的 23 会被客户端当成同一会话里别的请求的失败。不计非法包、不断连不变。
+
     @Test
-    void 未进场景的scene域消息推23服务不可用() {
+    void 未进场景的scene域消息回带id的信封1003() {
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(5, SCENE_MSG, "x"));
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(envelopeTipOf(ch.readOutbound(), 5, SCENE_MSG)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat((Object) ch.readOutbound()).as("只有一帧，不另推 23").isNull();
         assertThat(links.sent).isEmpty();
+        assertThat(session().illegalPackets).as("不计非法包").isZero();
+        assertThat(ch.isOpen()).as("不断连").isTrue();
     }
 
     @Test
-    void 未接入Java版的域推23服务不可用() {
+    void 已进场景_scene链路不受理这一帧_回带id的信封1003_计link_unavailable() {
+        // 对齐 mmorpg HandleTcpNodeMessage 的「RpcClient 未挂」：确定未发出的 scene 请求当场回信封，不让客户端干等 15 s
+        EmbeddedChannel ch = enteredScene();
+        links.generation = 0;
+        ch.writeInbound(request(30, SCENE_MSG, "skills"));
+        assertThat(envelopeTipOf(ch.readOutbound(), 30, SCENE_MSG)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat((Object) ch.readOutbound()).as("只有一帧").isNull();
+        assertThat(requests("scene", SCENE_MSG, "link_unavailable")).isEqualTo(1);
+        assertThat(session().illegalPackets).as("不计非法包").isZero();
+        assertThat(ch.isOpen()).as("不断连").isTrue();
+    }
+
+    @Test
+    void 未接入Java版的域回带id的信封1003() {
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(5, UNSUPPORTED_MSG, "x"));
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(envelopeTipOf(ch.readOutbound(), 5, UNSUPPORTED_MSG)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat((Object) ch.readOutbound()).as("只有一帧，不另推 23").isNull();
+        assertThat(session().illegalPackets).as("不计非法包").isZero();
         assertThat(login.calls).isEmpty();
         assertThat(ch.isOpen()).isTrue();
         assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, UNSUPPORTED_MSG, "unsupported")).isEqualTo(1);
@@ -500,7 +521,7 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 未接入Java版的域_login在途时排队_完成后才回tip() {
+    void 未接入Java版的域_login在途时排队_完成后才回信封() {
         // 对照组：普通的未接入域仍走待处理队列（同一会话严格按到达顺序）；只有战斗号（directOnly）当场回，见下一节
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, LOGIN_MSG, "slow"));
@@ -511,7 +532,7 @@ class ClientDispatcherTest {
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
         ch.runPendingTasks();
         assertThat(((MessageContent) ch.readOutbound()).getId()).isEqualTo(1);
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(envelopeTipOf(ch.readOutbound(), 2, UNSUPPORTED_MSG)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
     }
 
     // ================================================================ 战斗上行当场拒绝（scene-battle-spec §2.5、§7.19、§13.6，D12）
@@ -566,13 +587,13 @@ class ClientDispatcherTest {
         assertThat(login.calls).hasSize(1);
         assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(1);
 
-        // login 完成：先回它自己的应答，再处理排队的 scene 请求（没进场景 → 23 {1003}）；战斗拒绝不会再发第二次
+        // login 完成：先回它自己的应答，再处理排队的 scene 请求（没进场景 → 带请求 id 的信封 1003）；战斗拒绝不会再发第二次
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
         ch.runPendingTasks();
         MessageContent reply = ch.readOutbound();
         assertThat(reply.getMessageId()).isEqualTo(LOGIN_MSG);
         assertThat(reply.getId()).isEqualTo(1);
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+        assertThat(envelopeTipOf(ch.readOutbound(), 2, SCENE_MSG)).isEqualTo(1003);
         assertThat((Object) ch.readOutbound()).isNull();
         assertThat(requests("scene", SCENE_MSG, "not_in_scene")).isEqualTo(1);
         assertThat(requests(MessageRoutes.BACKEND_UNSUPPORTED, BATTLE_MSG, "battle_rejected")).isEqualTo(1);
@@ -1214,7 +1235,7 @@ class ClientDispatcherTest {
 
         int framesBefore = links.sent.size();
         ch.writeInbound(request(9, SCENE_MSG, "x"));
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(envelopeTipOf(ch.readOutbound(), 9, SCENE_MSG)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat(links.sent).hasSize(framesBefore);
         assertThat(login.abandoned).as("scene 见过这次进场，由 scene 释放归属").isEmpty();
     }
@@ -1474,7 +1495,7 @@ class ClientDispatcherTest {
 
         assertThat(tipOf(ch.readOutbound())).isEqualTo(3023);
         ch.writeInbound(request(9, SCENE_MSG, "skills"));
-        assertThat(tipOf(ch.readOutbound())).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(envelopeTipOf(ch.readOutbound(), 9, SCENE_MSG)).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
     }
 
     @Test
@@ -2193,7 +2214,7 @@ class ClientDispatcherTest {
 
     /**
      * 出站帧是带请求 id 的信封错误（以请求号为 message_id、body 为空），返回信封里的 tip。
-     * 战斗闸与 GM 闸的拒绝 2026-10-15 起是这个形状（原为 23 推送；mmorpg client-request-ordering.md O6）。
+     * 战斗闸与 GM 闸的拒绝、「未进场景」「未接入的域」的回执 2026-10-15 起都是这个形状（原为 23 推送；mmorpg client-request-ordering.md O6）。
      */
     private static int envelopeTipOf(Object outbound, long requestId, int messageId) {
         MessageContent content = (MessageContent) outbound;

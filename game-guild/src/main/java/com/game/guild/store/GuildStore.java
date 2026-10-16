@@ -267,9 +267,11 @@ public interface GuildStore {
                                           long nowMs, Deadline deadline);
 
     /**
-     * 解散（guild_manage_repo.go:2227-2384；spec §3.6；子预算 2500 ms）。授权只看 guild.leader_id（不看 role）：不是 → RANK_TOO_LOW
-     * （服务改回 14005）；锁住 guild 行后按行里的 zone_id 调 {@code fence} → ZONE_MERGING。删全体成员行（先于删申请）、本帮申请与成员们在
-     * 别帮的申请、4.5 / 4.6 钩子、最后删 guild 行。拒绝：GUILD_GONE / RANK_TOO_LOW / ZONE_MERGING / WRITE_CONFLICT。
+     * 解散（guild_manage_repo.go:2227-2384；spec §3.6；子预算 2500 ms）。授权只看 guild.leader_id（不看 role）：不是 → 在同一把 guild 行锁下
+     * 普通读操作者的成员行，仍是成员 → RANK_TOO_LOW、已不是成员 → NOT_MEMBER（服务对旧客户端两者都回 14005，带 expected_guild_id 的
+     * NOT_MEMBER 回 14002，mmorpg client-request-ordering.md O14）；锁住 guild 行后按行里的 zone_id 调 {@code fence} → ZONE_MERGING。
+     * 删全体成员行（先于删申请）、本帮申请与成员们在别帮的申请、4.5 / 4.6 钩子、最后删 guild 行。
+     * 拒绝：GUILD_GONE / RANK_TOO_LOW / NOT_MEMBER / ZONE_MERGING / WRITE_CONFLICT。
      */
     TxOutcome<Disbanded> disbandGuild(long guildId, long actorId, long nowMs, ZoneFence fence, Deadline deadline);
 

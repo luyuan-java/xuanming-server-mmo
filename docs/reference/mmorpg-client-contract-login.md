@@ -77,6 +77,13 @@
 - `kServiceUnavailable 1003`：没有可用的 login 节点 / 路由服（client_message_processor.cpp:778-783, 830-835）。
 - `kRequestMessageParseError 1014`：请求 body 解析失败（同文件 730-735）。
 
+> 2026-10-15 订正（mmorpg `docs/design/client-request-ordering.md` O6「所有 gate 级失败回执都带请求 id」，两版同批）：上面两条已不再是 23 推送，
+> 改为带请求 id 的信封 `MessageContent{id=请求 id, message_id=请求号, error_message={id:1003 或 1014}}`，body 为空；不计非法包、不断连不变。
+> 路由模式下「没有可用的路由服」由 gate 路由 lane 回同形信封 1003；直连模式下「找不到 login 节点」「body 解析失败」由 `HandleGrpcNodeMessage` 回信封；
+> scene 类消息「会话没绑定可用 scene 节点 / RpcClient 未挂」（`HandleTcpNodeMessage`，两种模式都走）同样回信封 1003。
+> Java 版对应的「未进场景」「未接入的后端域」也同批改为信封 1003（`ClientDispatcher`）。仍是 23 推送、不带 id 的只剩直连模式的 gRPC 失败桥（§2.2 表
+> 第 3 行左列），以及进场失败 3023、被顶号 2017 这类本来就不是请求回执的推送。
+
 ---
 
 ## 3. 消息字段定义（`proto/login/login.proto`，`proto/common/base/user_accounts.proto`）

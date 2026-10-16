@@ -210,7 +210,9 @@ public final class ClientSession {
 
     /**
      * 排在后端队列里的请求，带着<b>入队时</b>的会话身份快照：排队期间会话可能离开游戏、换角色进游戏（login 的调用不排在好友后面），
-     * 按发出时的身份转发会把它当成别的角色的请求。{@code enqueuedAtNanos} 是入队时刻（单调时钟），用于排队等待上限。
+     * 按发出时的身份转发会把它当成别的角色的请求。发出时只降不升（{@code ClientDispatcher.sessionAtSend}）：快照里的玩家与会话当前
+     * 绑定的玩家不一致就按 {@code player_id = 0} 发出——排队期间 LeaveGame 成功解绑之后，也不以已离开的角色执行
+     * （mmorpg client-request-ordering.md §17）。{@code enqueuedAtNanos} 是入队时刻（单调时钟），用于排队等待上限。
      */
     record BackendPending(MessageRoute route, ClientRequest request, SessionContext session, long enqueuedAtNanos) {
     }

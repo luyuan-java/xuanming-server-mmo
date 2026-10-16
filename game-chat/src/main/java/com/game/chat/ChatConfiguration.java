@@ -33,7 +33,7 @@ public class ChatConfiguration {
     public ChatService chatService(RedissonClient redis, RedisKeys keys, ChatMetrics metrics, ChatProperties props) {
         return new ChatService(new RedissonChatStore(redis), metrics, props.maxContentBytes(), props.rateLimitPerSecond(),
                 props.historyMaxEntries(), props.historyTtl(), props.historyDefaultLimit(), props.historyMaxLimit(),
-                props.requestIdTtl(), System::currentTimeMillis, keys);
+                props.requestIdTtl(), System::currentTimeMillis, keys, props.sensitiveWords());
     }
 
     @Bean

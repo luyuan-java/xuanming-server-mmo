@@ -171,9 +171,13 @@ public final class GuildTips {
     /**
      * 解散专用：RANK_TOO_LOW 回 14005「not guild leader」（解散只有帮主能做，沿用「只有会长可以执行该操作」文案；
      * guild_logic.go:491-498 在 mapWriteErr 之前拦截），其余同 {@link #forReject}。
+     *
+     * <p>NOT_MEMBER 同样回 14005、不自愈映射：存储为 expected_guild_id（mmorpg client-request-ordering.md O14）才把「已不是本帮成员」从
+     * RANK_TOO_LOW 里分出来，带了该字段的请求在服务层先行截走；走到这里的只有旧客户端（expected = 0），答复与区分之前逐字相同。
      */
     public static RejectReply forDisbandReject(GuildReject reject) {
-        return reject == GuildReject.RANK_TOO_LOW ? tip(GuildTip.NOT_GUILD_LEADER) : forReject(reject);
+        return reject == GuildReject.RANK_TOO_LOW || reject == GuildReject.NOT_MEMBER ? tip(GuildTip.NOT_GUILD_LEADER)
+                : forReject(reject);
     }
 
     private static RejectReply tip(GuildTip tip) {

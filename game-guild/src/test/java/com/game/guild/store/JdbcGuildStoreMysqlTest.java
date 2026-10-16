@@ -671,6 +671,45 @@ class JdbcGuildStoreMysqlTest {
         assertThat(db.guildRows(g)).isZero();
     }
 
+    /**
+     * 解散区分「已不是本帮成员」与「不是帮主」（mmorpg client-request-ordering.md O14；基线 data/expected_guild_repo_test.go）：
+     * 原帮主转让并离帮、入了别帮之后，晚到的解散在同一把 guild 行锁下答 NOT_MEMBER（服务对带 expected_guild_id 的回 14002）；
+     * 仍是成员的非帮主照旧 RANK_TOO_LOW。两种拒绝都在闸门之前、整体回滚，别的帮原封不动；新帮主照常能解散。
+     */
+    @Test
+    void 解散_已离帮的原帮主答NOT_MEMBER_成员照旧RANK_TOO_LOW() throws SQLException {
+        long g = 7397, other = 7398, formerLeader = 8398, heir = 8399, member = 8400, otherLeader = 8410;
+        int zone = 6;
+        db.seedGuild(g, zone, 1, 50, formerLeader, roles(heir, GuildRoles.MEMBER, member, GuildRoles.MEMBER));
+        db.seedGuild(other, zone, 50, otherLeader);
+        // 转让 + 离帮 + 入别帮，直写 SQL（被测的只有解散这一步）
+        db.exec("UPDATE guild SET leader_id = ? WHERE guild_id = ?", heir, g);
+        db.exec("UPDATE guild_member SET role = ? WHERE guild_id = ? AND player_id = ?", GuildRoles.LEADER, g, heir);
+        db.exec("DELETE FROM guild_member WHERE guild_id = ? AND player_id = ?", g, formerLeader);
+        db.seedMember(other, formerLeader, GuildRoles.MEMBER);
+        List<Integer> fenced = new ArrayList<>();
+        GuildStore.ZoneFence recording = z -> {
+            fenced.add(z);
+            return false;
+        };
+
+        assertThat(store.disbandGuild(g, formerLeader, NOW, recording, d()).rejection()).as("已不是本帮成员")
+                .isEqualTo(GuildReject.NOT_MEMBER);
+        assertThat(store.disbandGuild(g, member, NOW, recording, d()).rejection()).as("仍是成员、只是不是帮主")
+                .isEqualTo(GuildReject.RANK_TOO_LOW);
+        assertThat(fenced).as("两种拒绝都在闸门之前").isEmpty();
+        assertThat(db.guildRows(g)).isEqualTo(1);
+        assertThat(db.guildRows(other)).isEqualTo(1);
+        assertThat(db.leaderOf(g)).isEqualTo(heir);
+        assertThat(db.roleOf(other, formerLeader)).as("别的帮里的成员行原封不动").isEqualTo(GuildRoles.MEMBER);
+        assertThat(db.memberships(heir)).isEqualTo(1);
+        assertThat(db.memberships(member)).isEqualTo(1);
+
+        assertThat(store.disbandGuild(g, heir, NOW, recording, d()).orThrow().zoneId()).as("成功路径不变").isEqualTo(zone);
+        assertThat(fenced).containsExactly(zone);
+        assertThat(db.guildRows(g)).isZero();
+    }
+
     @Test
     void 公告_回事务内完整快照_成员不能改() throws SQLException {
         long g = 7401, leader = 8401, officer = 8402, member = 8403;

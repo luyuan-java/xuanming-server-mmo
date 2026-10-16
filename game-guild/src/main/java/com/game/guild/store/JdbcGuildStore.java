@@ -586,7 +586,11 @@ public final class JdbcGuildStore implements GuildStore {
             }
             // 授权只读 MySQL 的 leader_id（不看 role；缓存在转让之后最长陈旧一个 TTL）
             if (guild.leaderId() != actorId) {
-                return TxOutcome.reject(GuildReject.RANK_TOO_LOW);
+                // 区分「仍是本帮成员、只是不是帮主」与「已不是本帮成员」（mmorpg client-request-ordering.md O14：带 expected_guild_id 的
+                // 晚到解散，预检之后才转让并离帮 → 服务回 14002）。持有 G1 行锁时成员集合稳定（给本帮增删成员的事务都先锁 guild 行），
+                // 普通读 M4 就是提交点的真相；这一支随即回滚，不取新锁、不改锁序。旧客户端两者都回 14005（GuildTips.forDisbandReject）。
+                return TxOutcome.reject(memberRoleOf(t, guildId, actorId) == null ? GuildReject.NOT_MEMBER
+                        : GuildReject.RANK_TOO_LOW);
             }
             // 事务内闸门：用行里的 zone_id（事务外那次查的是请求者归属区，有检查到使用的窗口）
             if (fenceRejects(zoneFence, guild.zoneId(), guildId)) {

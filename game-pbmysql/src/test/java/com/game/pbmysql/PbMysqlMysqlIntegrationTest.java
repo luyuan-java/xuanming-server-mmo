@@ -1,5 +1,8 @@
 package com.game.pbmysql;
 
+import static com.game.pbmysql.TableOption.withAutoIncrementKey;
+import static com.game.pbmysql.TableOption.withIndexes;
+import static com.game.pbmysql.TableOption.withPrimaryKey;
 import static com.game.pbmysql.TableOption.withTableName;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -160,6 +163,52 @@ class PbMysqlMysqlIntegrationTest {
             exec("ALTER TABLE `pbm_sync_item` DROP INDEX `idx_pbm_sync_item_0`");
             v2.syncAll(c);
             assertThat(indexNames("pbm_sync_item")).contains("idx_pbm_sync_item_0");
+        }
+    }
+
+    @Test
+    void 索引阶段失败保留已补列_修正冲突后重复同步可继续且旧行不丢() throws SQLException {
+        String table = "pbm_sync_retry";
+        PbMysql v1 = new PbMysql();
+        v1.register(SyncItemV1.getDefaultInstance(), withTableName(table));
+        PbMysql v2 = new PbMysql();
+        v2.register(SyncItemV2.getDefaultInstance(), withTableName(table));
+        try (Connection c = connect()) {
+            v1.syncAll(c);
+            v1.insert(c, SyncItemV1.newBuilder().setId(1).setOwnerId(10).setName("first").build());
+            v1.insert(c, SyncItemV1.newBuilder().setId(2).setOwnerId(20).setName("second").build());
+            // 新 code 列的默认值都是空串：唯一索引必须明确失败，不能把 DDL 的部分成功伪装成整轮成功。
+            assertThatThrownBy(() -> v2.syncAll(c)).isInstanceOf(SQLException.class)
+                    .hasMessageContaining("补齐索引失败");
+            assertThat(columnTypes(table)).containsKeys("level", "code");
+            assertThat(v1.count(c, SyncItemV1.class, null)).isEqualTo(2);
+            exec("UPDATE `" + table + "` SET `code` = CONCAT('old-', `id`)");
+            v2.syncAll(c);
+            v2.syncAll(c);
+            assertThat(indexNames(table)).containsExactlyInAnyOrder(
+                    "PRIMARY", "idx_pbm_sync_retry_0", "idx_pbm_sync_retry_1", "uk_pbm_sync_retry");
+            assertThat(v2.findOneByPk(c, SyncItemV2.newBuilder().setId(2).build()).orElseThrow())
+                    .isEqualTo(SyncItemV2.newBuilder().setId(2).setOwnerId(20).setName("second").setCode("old-2").build());
+        }
+    }
+
+    @Test
+    void 新增非主键自增列与首列索引同句_保留旧行并可重复同步() throws SQLException {
+        String table = "pbm_auto_secondary_migration";
+        PbMysql db = new PbMysql();
+        db.register(KitchenSink.getDefaultInstance(), withTableName(table), withPrimaryKey("owner_id"),
+                withAutoIncrementKey("slot"), withIndexes("slot,owner_id"));
+        try (Connection c = connect()) {
+            db.syncAll(c);
+            exec("ALTER TABLE `" + table + "` DROP INDEX `idx_" + table + "_0`, DROP COLUMN `slot`");
+            exec("INSERT INTO `" + table + "` (`owner_id`, `token`) VALUES (31, X'31')");
+            db.syncAll(c);
+            db.syncAll(c);
+            KitchenSink restored = db.findOneByPk(c, KitchenSink.newBuilder().setOwnerId(31).build()).orElseThrow();
+            assertThat(restored.getOwnerId()).isEqualTo(31);
+            assertThat(restored.getSlot()).isPositive();
+            assertThat(restored.getToken()).isEqualTo(ByteString.copyFromUtf8("1"));
+            assertThat(indexNames(table)).contains("idx_" + table + "_0");
         }
     }
 

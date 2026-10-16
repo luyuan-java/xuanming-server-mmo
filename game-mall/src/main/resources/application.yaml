@@ -1,0 +1,26 @@
+# 本版本独立部署，不与 C++/Go 版混用内部服务或密钥。
+spring:
+  application:
+    name: game-mall
+  sql:
+    init:
+      mode: never
+  datasource:
+    # 库名遵守全仓 namespace 规则；仅覆盖主机/端口，不自动创建库或导入示例数据。
+    url: "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/${game.namespace:game}?useSSL=false&characterEncoding=utf8&connectTimeout=3000&socketTimeout=6000&useAffectedRows=true"
+    username: ${GAME_MYSQL_USER:root}
+    password: ${GAME_MYSQL_PASSWORD:}
+server:
+  address: ${GAME_MALL_BIND_ADDRESS:127.0.0.1}
+  port: ${GAME_MALL_PORT:18120}
+  error:
+    include-message: never
+    include-stacktrace: never
+game:
+  run-mode: ${GAME_RUN_MODE:prod}
+  mall:
+    require-tidb: ${GAME_MALL_REQUIRE_TIDB:true}
+    gateway-secret: ${GAME_MALL_GATEWAY_SECRET:}
+    payment-secret: ${GAME_MALL_PAYMENT_SECRET:}
+    payment-subject: ${GAME_MALL_PAYMENT_SUBJECT:payment-adapter}
+    max-unpaid-orders: ${GAME_MALL_MAX_UNPAID_ORDERS:5}

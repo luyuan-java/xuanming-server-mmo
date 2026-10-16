@@ -10,6 +10,20 @@ import org.junit.jupiter.api.Test;
 /** {@code game.guild.*} 的缺省值与启动校验（guild-spec §7.12；基线 config.go:16-19）。 */
 class GuildPropertiesTest {
 
+    @Test
+    void 申请尝试配额默认十次_可绑定且严格校验() {
+        assertThat(budget(null).applyPerMinute()).isEqualTo(10);
+        org.springframework.boot.context.properties.bind.Binder binder = new org.springframework.boot.context.properties.bind.Binder(
+                new org.springframework.boot.context.properties.source.MapConfigurationPropertySource(
+                        java.util.Map.of("game.guild.apply-per-minute", "600")));
+        assertThat(binder.bind("game.guild", org.springframework.boot.context.properties.bind.Bindable.of(GuildProperties.class))
+                .get().applyPerMinute()).isEqualTo(600);
+        for (int invalid : new int[]{-1, 0, 601}) {
+            assertThatThrownBy(() -> new GuildProperties(null, null, null, null, null, null, null, null, invalid))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
     private static GuildProperties budget(Duration requestBudget) {
         return new GuildProperties(requestBudget, null, null, null, null, null, null, null);
     }

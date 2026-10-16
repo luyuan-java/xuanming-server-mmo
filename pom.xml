@@ -31,6 +31,7 @@
         <module>game-team</module>
         <module>game-guild</module>
         <module>game-trade</module>
+        <module>game-mall</module>
         <module>game-match</module>
         <module>game-scene</module>
         <module>game-battle</module>

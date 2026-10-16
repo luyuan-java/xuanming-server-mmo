@@ -16,6 +16,8 @@ import com.game.login.auth.ExternalAuthProviders;
 import com.game.login.auth.NeteaseProvider;
 import com.game.login.auth.PasswordAuthenticator;
 import com.game.login.auth.ProductionPasswordAuthenticator;
+import com.game.login.auth.PasswordFailureQuota;
+import com.game.login.auth.RedisPasswordFailureQuota;
 import com.game.login.auth.QqProvider;
 import com.game.login.auth.WeChatProvider;
 import com.game.login.auth.LoginAuthenticator;
@@ -107,7 +109,7 @@ public class LoginConfiguration {
     @Bean
     public LoginTokens loginTokens(RedissonClient redis, RedisKeys redisKeys, LoginProperties props) {
         return new RedisLoginTokens(redis, redisKeys, Clock.systemUTC(), props.accessTokenTtl(), props.refreshTokenTtl(),
-                new SecureRandom());
+                props.refreshReuseGrace(), new SecureRandom());
     }
 
     /** 每账号设备数上限（Redis）。 */
@@ -118,10 +120,19 @@ public class LoginConfiguration {
     }
 
     @Bean
+    public PasswordFailureQuota passwordFailureQuota(RedissonClient redis, RedisKeys keys,
+                                                     LoginAuthProperties auth, MeterRegistry meters) {
+        var settings = auth.password();
+        return new RedisPasswordFailureQuota(redis, keys, new RedisPasswordFailureQuota.Policy(
+                settings.failureLimit(), settings.failureWindow(), settings.failureLock()), meters);
+    }
+
+    @Bean
     public LoginAuthenticator loginAuthenticator(LoginProperties props, LoginAuthProperties auth, LoginTokens loginTokens,
                                                  PlayerStore store, ExternalAuthProviders externalAuth,
+                                                 PasswordFailureQuota passwordFailureQuota,
                                                  @Value("${GAME_LOGIN_DEV_PASSWORD:}") String devPassword) {
-        PasswordAuthenticator password = passwordAuthenticator(props, auth.password(), store, devPassword);
+        PasswordAuthenticator password = passwordAuthenticator(props, auth.password(), store, devPassword, passwordFailureQuota);
         LoginAuthenticator authenticator = new LoginAuthenticator(password, loginTokens, externalAuth.asMap());
         log.info("登录认证：口令={} 外部认证={}", password == null ? "关闭" : password.getClass().getSimpleName(),
                 authenticator.externalTypes());
@@ -133,7 +144,7 @@ public class LoginConfiguration {
      * （{@code game.login.auth.password.enabled}）互斥，同时打开拒绝启动；都没开 = 口令登录一律失败（fail-closed）。
      */
     static PasswordAuthenticator passwordAuthenticator(LoginProperties props, LoginAuthProperties.PasswordAuth production,
-                                                       PlayerStore store, String devPassword) {
+                                                       PlayerStore store, String devPassword, PasswordFailureQuota quota) {
         if (props.devMode() && production.enabled()) {
             throw new IllegalStateException("game.login.mode=dev（开发口令）与 game.login.auth.password.enabled（生产口令）不能同时打开");
         }
@@ -141,7 +152,7 @@ public class LoginConfiguration {
             log.info("生产口令认证已启用（account.password_hash 的 Argon2id，只读） KDF 并发={} 等槽={}",
                     production.kdfConcurrency(), production.kdfWait());
             return new ProductionPasswordAuthenticator(store::findAccountPassword, production.kdfConcurrency(),
-                    production.kdfWait());
+                    production.kdfWait(), quota);
         }
         if (!props.devMode()) {
             log.info("game.login.mode=prod 且没开生产口令认证：口令登录一律失败");

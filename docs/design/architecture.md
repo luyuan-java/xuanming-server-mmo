@@ -31,6 +31,7 @@ Java 代码不得依赖这套目录，具体做法：
 
 | 模块 | 类型 | 职责 |
 |---|---|---|
+| `game-mall` | 进程（2026-10-15 首批） | 按 mall 固定版本独立适配官方 SKU 订单：全局 TiDB 下单/幂等预占、可信支付/取消竞争与待交付意图；本版 namespace 库及独立源码，不跨仓依赖 C++/Go 版 mall-game jar。真实 TiDB、HTTP 与打包证据见 PARITY；P2P/聚宝斋/拍卖、渠道退款与资产交付尚未闭环，当前不能标交易完成 |
 | `game-proto` | 库（同步产物） | 客户端契约 proto；`MessageIdRegistry`（消息号 ↔ 服务 / 方法 / 请求应答类型） |
 | `game-table` | 库 | 配置表：同步来的权威 schema（`cfg_*` option）与表数据；`com.game.table.ConfigTables` 与各表 `<Sheet>Rows` 编译期生成；手写运行时 `com.game.table.load`（manifest 校验、解析）。见 [config-tables.md](config-tables.md) |
 | `game-table-codegen` | 库（编译期） | javac 注解处理器：读 protoc 描述符集，按 schema 生成类型安全的表访问代码；不进运行时 |
@@ -107,7 +108,8 @@ Java 代码不得依赖这套目录，具体做法：
 - 是否回包由 gate 按契约里该方法的应答类型决定，不看 body 是否为空：非 `Empty` 应答一律回包（哪怕 0 字节），
   `Empty` 应答只在 `tip_id≠0` 时回包；会话指令无论回不回包都执行。
 - 服务对服务的调用用各自的类型化接口（如 `SceneDirectoryService`——批次 5.4 加 `selectTravelTarget`（源 scene 给 226 调）与 `redirectToZone`（login 给 GO-5 调），都是异步、业务拒绝走 `tip_id`、基础设施失败以异常完成；`AccountLoginService`：game-gateway 的 HTTP 登录 / 刷新令牌调 game-login，
-  参数与返回值直接用客户端契约里的 loginpb 消息，调用方不重试——刷新是一次性轮换，重试会拿已作废的 refresh 再打一次）。
+  参数与返回值直接用客户端契约里的 loginpb 消息，调用方不重试——刷新是一次性轮换，只在 login 的重放宽限窗口内（缺省 30s，可配成 0）
+  对同一旧 refresh 回同一对，重试留给客户端）。
 - `ClientMessageService.abandonEnter(AbandonedEnter)`：gate 确定一条 `PlayerEnter`（`EnterScene` 指令的登录进场，或跨节点换图的交出进场）
   从未写上链路（会话已在关闭、链路层已关、建链失败——会话已关闭 / 已从会话表释放也照样通知），或收到对不上会话绑定（或内容非法）的
   `PlayerTransfer`（§4.2）时通知 login，login 带 epoch 围栏释放这次的归属（见 §7），玩家不必等租约过期。
@@ -1892,7 +1894,7 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | gate | `game_gate_sessions_active` | Gauge | — | 当前会话数（含未握手、正在收尾的） |
 | gate | `game_gate_scene_links` | Gauge | — | 到各 scene 节点的链路数（建链中 + 就绪） |
 | gate | `game_gate_handshakes_total` | Counter | `result`=ok / bad_signature / bad_payload / wrong_gate / wrong_zone / expired / timeout / missing | 令牌握手结果（missing = 没握手就发业务包） |
-| gate | `game_gate_client_requests_total` | Counter | `route`=login / scene / 其余后端域（friend / chat / team / guild / trade / match）/ unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / gm_rejected / battle_rejected / killed / overflow / dropped / redirected | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。redirected（批次 5.4）= 会话已推过 124（REDIRECTED），之后的请求与转入时还在排队的请求一律静默丢弃、不回包、不计非法包。C++ 的「非法包」= unknown_message + oversized + rate_limited + gm_rejected；限频拒绝 = rate_limited。battle_rejected（批次 6.3）= 战斗服务 `BattleClientPlayer` 的 12 个号发到了大厅连接上，GM 闸之后当场推 23 {1003}（`route`=unsupported、`method`=BattleClientPlayer.<方法名>；不计非法包、不断连，战斗上行不再计 unsupported）。这 12 条序列在装配时预建为 0，是请求计数器里唯一预建的一组；持续增长说明有旧客户端或误走大厅的战斗上行，要告警 |
+| gate | `game_gate_client_requests_total` | Counter | `route`=login / scene / 其余后端域（friend / chat / team / guild / trade / match）/ unsupported / unknown，`method`=服务.方法 / unknown，`result`=forwarded / not_in_scene / link_unavailable / unsupported / unknown_message / oversized / rate_limited / gm_rejected / battle_rejected / killed / overflow / dropped / redirected | 已握手会话上每个请求在 gate 的最终去向，恰好计一次。redirected（批次 5.4）= 会话已推过 124（REDIRECTED），之后的请求与转入时还在排队的请求一律静默丢弃、不回包、不计非法包。C++ 的「非法包」= unknown_message + oversized + rate_limited + gm_rejected；限频拒绝 = rate_limited。battle_rejected（批次 6.3）= 战斗服务 `BattleClientPlayer` 的 12 个号发到了大厅连接上，GM 闸之后当场回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}；`route`=unsupported、`method`=BattleClientPlayer.<方法名>；不计非法包、不断连，战斗上行不再计 unsupported）。这 12 条序列在装配时预建为 0，是请求计数器里唯一预建的一组；持续增长说明有旧客户端或误走大厅的战斗上行，要告警 |
 | gate | `game_gate_client_invalid_frames_total` | Counter | `reason`=invalid_length / checksum / invalid_name_len / unknown_type / parse | 解码层非法帧（随即断开） |
 | gate | `game_gate_disconnects_total` | Counter | `reason`=handshake_timeout / handshake_rejected / no_handshake / illegal_packets / pending_overflow / write_buffer_full / invalid_frame / session_id_exhausted / server_directive / kicked / scene_link_down / server_kick / transfer_failed / redirect_linger | gate 主动断开的连接（客户端自己断开、停服 / 丢租约的批量关闭不计）；transfer_failed = 跨节点换图改绑之后没能落到目标节点，或改绑指令内容非法（§8.1；源节点探测判失去时经 `PlayerKicked` 断开，计 kicked），批次 5.4 起也含重定向帧 / 重定向指令内容非法（推 23 {3027} 后断开）；redirect_linger（批次 5.4）= 已重定向的会话在 `game.gate.redirect-linger` 内没有自己断开、到点被关（不推 tip） |
 | gate | `game_gate_redirects_total` | Counter | `source`=travel / login，`result`=sent / invalid / stale / orphan | 跨 zone 重定向（推 124，批次 5.4，§8.2）的结局，2 × 4 全量预建，每条重定向帧 / 指令恰好计一次：sent（已推 124、会话转 REDIRECTED）/ invalid（内容非法，推 23 {3027} 后断开）/ stale（会话已关 / 正在关或绑定对不上；login 来源是迟到的应答或已重定向会话上又来的指令）/ orphan（路由层找不到会话，只出现在 travel）。不计进 `scene_transfers`。勾稽（zone-travel-spec §7.3）：scene `transfers{travel, handed_off}` ≈ travel 的四项之和 + `transfers{travel, link_gone}` + `travel_frames_withheld` + `travel_frames_pending`；login `enter_routes{redirect}` ≈ `{login, *}`（迟到应答除外） |

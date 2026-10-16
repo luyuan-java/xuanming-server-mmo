@@ -320,7 +320,8 @@ class GuildEconomyChannelIntegrationTest {
         GuildAccess access = wiring.guildAccess(cache, profiles, invalidator);
         GuildViews views = wiring.guildViews(presence, profiles, metrics, props, lookup, store);
         GuildService guilds = wiring.guildService(store, cache, access, views, ranks, pushes, ids, lookup);
-        GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup);
+        GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup,
+                wiring.guildApplyQuota(redis, REDIS_KEYS, props, meters));
         GuildRankService rankService = wiring.guildRankService(ranks, cache, access, views);
         pool = wiring.guildWorkerPool(props, dataSource);
         GuildEconomyService economy = wiring.guildEconomyService(economyStore, cache, access, views, economyTables, pushes,
@@ -412,6 +413,7 @@ class GuildEconomyChannelIntegrationTest {
                 keys.add(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildSnapshot(id)));
             }
             keys.add(REDIS_KEYS.guildOfPlayer(a));
+            keys.add(REDIS_KEYS.guildApplyQuota(a));
             keys.add(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildOfPlayer(a)));
             keys.add(REDIS_KEYS.guildRankAll());
             keys.add(REDIS_KEYS.guildRankZone(zone));

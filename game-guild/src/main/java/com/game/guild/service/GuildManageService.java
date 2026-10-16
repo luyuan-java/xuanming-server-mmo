@@ -8,6 +8,7 @@ import com.game.guild.rules.GuildLimits;
 import com.game.guild.rules.GuildRoles;
 import com.game.guild.rules.GuildTableRules.ApplicationRules;
 import com.game.guild.rules.GuildTip;
+import com.game.guild.service.GuildAccess.BoundGuild;
 import com.game.guild.service.GuildAccess.Membership;
 import com.game.guild.service.GuildAccess.ZoneCheck;
 import com.game.guild.service.GuildViews.MyApplication;
@@ -24,6 +25,7 @@ import com.game.proto.guild.ApplyJoinGuildResponse;
 import com.game.proto.guild.CancelGuildApplicationRequest;
 import com.game.proto.guild.CancelGuildApplicationResponse;
 import com.game.proto.guild.GuildChangeKind;
+import com.game.proto.guild.GuildInfo;
 import com.game.proto.guild.KickGuildMemberRequest;
 import com.game.proto.guild.KickGuildMemberResponse;
 import com.game.proto.guild.ListGuildApplicationsRequest;
@@ -36,6 +38,8 @@ import com.game.proto.guild.SetGuildMemberRoleRequest;
 import com.game.proto.guild.SetGuildMemberRoleResponse;
 import com.game.proto.guild.TransferGuildLeaderRequest;
 import com.game.proto.guild.TransferGuildLeaderResponse;
+import com.game.proto.TipInfoMessage;
+import com.game.table.CommonErrorTip;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +72,12 @@ public final class GuildManageService {
         boolean tryMark(long guildId, long playerId, Deadline deadline);
     }
 
+    /** 申请尝试背压，必须先于申请仓储读取；与通知冷却职责不同。 */
+    @FunctionalInterface
+    public interface ApplicationQuota {
+        boolean tryAcquire(long playerId, Deadline deadline);
+    }
+
     private final GuildStore store;
     private final GuildCache cache;
     private final GuildAccess access;
@@ -76,9 +86,16 @@ public final class GuildManageService {
     private final ApplyPushGate applyPushGate;
     private final GuildTableLookup tables;
     private final LongSupplier clockMs;
+    private final ApplicationQuota applicationQuota;
 
     public GuildManageService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views, GuildPushes pushes,
                               ApplyPushGate applyPushGate, GuildTableLookup tables, LongSupplier clockMs) {
+        this(store, cache, access, views, pushes, applyPushGate, tables, clockMs, (playerId, deadline) -> true);
+    }
+
+    public GuildManageService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views, GuildPushes pushes,
+                              ApplyPushGate applyPushGate, GuildTableLookup tables, LongSupplier clockMs,
+                              ApplicationQuota applicationQuota) {
         this.store = store;
         this.cache = cache;
         this.access = access;
@@ -87,6 +104,7 @@ public final class GuildManageService {
         this.applyPushGate = applyPushGate;
         this.tables = tables;
         this.clockMs = clockMs;
+        this.applicationQuota = java.util.Objects.requireNonNull(applicationQuota, "applicationQuota");
     }
 
     // ================================================================ SetGuildMemberRole（19）
@@ -94,6 +112,7 @@ public final class GuildManageService {
     /**
      * 任免（guild_manage_logic.go:369-401；§3.8）：clientWrite → 目标校验（14014 / 14015）→ role 只许 0 / 1（否则 14006「role not assignable」，
      * 设 3 与 2 都拒）→ operatorGuild → 事务。目标已是该角色 → 成功、不写库、不失效、不推送；确有变化才推 ROLE_CHANGED 给快照除帮主。
+     * expected_guild_id 非 0：只在该帮任免，不在该帮 → 14002 + 操作者当前帮会快照（{@link #refuseExpectedGuild}）。
      */
     public SetGuildMemberRoleResponse setGuildMemberRole(long me, SetGuildMemberRoleRequest request, Deadline deadline) {
         ZoneCheck zone = access.clientWrite(me, deadline);
@@ -109,14 +128,21 @@ public final class GuildManageService {
         if (!GuildRoles.assignableRole(request.getRole())) {
             return roleTip(GuildTip.ROLE_NOT_ASSIGNABLE);
         }
-        Membership membership = access.operatorGuild(me, deadline);
-        if (membership.rejected()) {
-            return roleTip(membership.tip());
+        long expected = request.getExpectedGuildId();
+        BoundGuild bound = access.bindExpectedGuild(me, expected, ExpectedGuildMetrics.Method.SET_ROLE, deadline);
+        if (bound.lost()) {
+            return roleRefused(refuseExpectedGuild(me, expected, ExpectedGuildMetrics.Method.SET_ROLE, false, deadline));
         }
-        long guildId = membership.guildId();
+        if (bound.rejected()) {
+            return roleTip(bound.tip());
+        }
+        long guildId = bound.guildId();
         TxOutcome<RoleChanged> outcome = store.setMemberRole(guildId, me, target, request.getRole(), tables::officerCap,
                 deadline);
         if (!(outcome instanceof TxOutcome.Ok<RoleChanged> ok)) {
+            if (GuildAccess.expectedGuildLost(expected, outcome.rejection())) {
+                return roleRefused(refuseExpectedGuild(me, expected, ExpectedGuildMetrics.Method.SET_ROLE, true, deadline));
+            }
             return roleTip(access.replyFor(me, guildId, guildId, outcome.rejection(), deadline));
         }
         RoleChanged changed = ok.value();
@@ -131,11 +157,21 @@ public final class GuildManageService {
         return SetGuildMemberRoleResponse.newBuilder().setErrorMessage(tip.proto()).build();
     }
 
+    private static SetGuildMemberRoleResponse roleRefused(ExpectedGuildRefusal refusal) {
+        SetGuildMemberRoleResponse.Builder b = SetGuildMemberRoleResponse.newBuilder().setErrorMessage(refusal.tip().proto());
+        if (refusal.currentGuild() != null) {
+            b.setGuild(refusal.currentGuild());
+        }
+        return b.build();
+    }
+
     // ================================================================ KickGuildMember（217）
 
     /**
      * 踢人（guild_manage_logic.go:403-431；§3.9）：clientWrite → 目标校验 → operatorGuild → 事务。推 MEMBER_KICKED 给快照除操作者，
      * <b>再加被踢者本人</b>（否则他的界面会一直停在「我还在帮里」）。重踢已离开的人 → 14014。
+     * expected_guild_id 非 0：只在该帮踢人，不在该帮 → 14002 + 操作者当前帮会快照；预检在存储的 G4 预读与事务外建行之前，
+     * 不在预期帮的人碰不到那个帮的任何行。
      */
     public KickGuildMemberResponse kickGuildMember(long me, KickGuildMemberRequest request, Deadline deadline) {
         ZoneCheck zone = access.clientWrite(me, deadline);
@@ -147,13 +183,20 @@ public final class GuildManageService {
         if (targetTip != null) {
             return kickTip(targetTip);
         }
-        Membership membership = access.operatorGuild(me, deadline);
-        if (membership.rejected()) {
-            return kickTip(membership.tip());
+        long expected = request.getExpectedGuildId();
+        BoundGuild bound = access.bindExpectedGuild(me, expected, ExpectedGuildMetrics.Method.KICK, deadline);
+        if (bound.lost()) {
+            return kickRefused(refuseExpectedGuild(me, expected, ExpectedGuildMetrics.Method.KICK, false, deadline));
         }
-        long guildId = membership.guildId();
+        if (bound.rejected()) {
+            return kickTip(bound.tip());
+        }
+        long guildId = bound.guildId();
         TxOutcome<Kicked> outcome = store.kickMember(guildId, me, target, clockMs.getAsLong(), deadline);
         if (!(outcome instanceof TxOutcome.Ok<Kicked> ok)) {
+            if (GuildAccess.expectedGuildLost(expected, outcome.rejection())) {
+                return kickRefused(refuseExpectedGuild(me, expected, ExpectedGuildMetrics.Method.KICK, true, deadline));
+            }
             return kickTip(access.replyFor(me, guildId, guildId, outcome.rejection(), deadline));
         }
         Kicked kicked = ok.value();
@@ -166,11 +209,20 @@ public final class GuildManageService {
         return KickGuildMemberResponse.newBuilder().setErrorMessage(tip.proto()).build();
     }
 
+    private static KickGuildMemberResponse kickRefused(ExpectedGuildRefusal refusal) {
+        KickGuildMemberResponse.Builder b = KickGuildMemberResponse.newBuilder().setErrorMessage(refusal.tip().proto());
+        if (refusal.currentGuild() != null) {
+            b.setGuild(refusal.currentGuild());
+        }
+        return b.build();
+    }
+
     // ================================================================ TransferGuildLeader（216）
 
     /**
      * 转让帮主（guild_manage_logic.go:433-457；§3.10）：clientWrite → 目标校验 → operatorGuild → 事务（原帮主按长老位余量降为长老或成员）。
      * 推 LEADER_TRANSFERRED 给快照除原帮主；回包里 actor 已是长老或成员（是长老才看得到待审数）。重放 → 14016。
+     * expected_guild_id 非 0：只转让该帮，不在该帮 → 14002 + 操作者当前帮会快照。
      */
     public TransferGuildLeaderResponse transferGuildLeader(long me, TransferGuildLeaderRequest request, Deadline deadline) {
         ZoneCheck zone = access.clientWrite(me, deadline);
@@ -182,13 +234,20 @@ public final class GuildManageService {
         if (targetTip != null) {
             return transferTip(targetTip);
         }
-        Membership membership = access.operatorGuild(me, deadline);
-        if (membership.rejected()) {
-            return transferTip(membership.tip());
+        long expected = request.getExpectedGuildId();
+        BoundGuild bound = access.bindExpectedGuild(me, expected, ExpectedGuildMetrics.Method.TRANSFER, deadline);
+        if (bound.lost()) {
+            return transferRefused(refuseExpectedGuild(me, expected, ExpectedGuildMetrics.Method.TRANSFER, false, deadline));
         }
-        long guildId = membership.guildId();
+        if (bound.rejected()) {
+            return transferTip(bound.tip());
+        }
+        long guildId = bound.guildId();
         TxOutcome<Transferred> outcome = store.transferLeader(guildId, me, target, tables::officerCap, deadline);
         if (!(outcome instanceof TxOutcome.Ok<Transferred> ok)) {
+            if (GuildAccess.expectedGuildLost(expected, outcome.rejection())) {
+                return transferRefused(refuseExpectedGuild(me, expected, ExpectedGuildMetrics.Method.TRANSFER, true, deadline));
+            }
             return transferTip(access.replyFor(me, guildId, guildId, outcome.rejection(), deadline));
         }
         Transferred transferred = ok.value();
@@ -203,11 +262,50 @@ public final class GuildManageService {
         return TransferGuildLeaderResponse.newBuilder().setErrorMessage(tip.proto()).build();
     }
 
+    private static TransferGuildLeaderResponse transferRefused(ExpectedGuildRefusal refusal) {
+        TransferGuildLeaderResponse.Builder b = TransferGuildLeaderResponse.newBuilder().setErrorMessage(refusal.tip().proto());
+        if (refusal.currentGuild() != null) {
+            b.setGuild(refusal.currentGuild());
+        }
+        return b.build();
+    }
+
+    // ================================================================ expected_guild_id 拒绝（任免 / 踢人 / 转让）
+
+    /** 「不在预期帮会」的答复：tip（14002）+ 操作者当前所在帮会的快照（不在任何帮为 null）。 */
+    private record ExpectedGuildRefusal(GuildTip tip, GuildInfo currentGuild) {
+    }
+
+    /**
+     * 回包有 guild 字段的三个方法（任免 / 踢人 / 转让）用的拒绝（mmorpg client-request-ordering.md O14；基线 expected_guild.go
+     * rejectExpectedGuildWithView）：{@link GuildAccess#rejectExpectedGuild} 计数并（事务那一支）纠正映射之后，附上操作者<b>当前</b>所在帮会的快照，
+     * 客户端据此直接纠正界面。顺序不能换：先纠正映射，再取快照。
+     *
+     * <p>快照只是展示：解析失败只记 ERROR、不附快照——拒绝本身已经由事务（或 MySQL 预检）决定，不能因为附带的读失败改成故障。
+     * 走 {@link GuildCache#resolve}：缓存说 0 或快照里没有本人时以 MySQL 复核，不把陈旧快照当成「当前帮会」回给客户端。
+     */
+    private ExpectedGuildRefusal refuseExpectedGuild(long me, long expected, ExpectedGuildMetrics.Method method,
+                                                     boolean fromTransaction, Deadline deadline) {
+        GuildTip tip = access.rejectExpectedGuild(me, expected, method, fromTransaction, deadline);
+        GuildInfo current = null;
+        try {
+            Optional<GuildSnapshot> snapshot = cache.resolve(me, deadline);
+            if (snapshot.isPresent()) {
+                current = views.guildInfo(GuildSnapshots.toData(snapshot.get()), me, deadline);
+            }
+        } catch (RuntimeException e) {
+            log.error("[guild] resolve current guild of player {} for the expected-guild reply failed, replying without a snapshot: {}",
+                    Long.toUnsignedString(me), e.toString());
+        }
+        return new ExpectedGuildRefusal(tip, current);
+    }
+
     // ================================================================ ApplyJoinGuild（218）
 
     /**
-     * 申请入帮（guild_manage_logic.go:459-505；§3.11）：clientWrite（拿到归属区）→ guild_id = 0 → 14001「guild id is zero」→ 已在帮预检
-     * （14000）→ GuildRule[1]（缺行 → 故障）→ 事务（同帮重复申请 = 刷新有效期并成功）。映射自愈的比对基准是 0（申请人按定义不在目标帮）。
+     * 申请入帮（guild_manage_logic.go:459-505；§3.11）：clientWrite（拿到归属区）→ guild_id = 0 → 14001「guild id is zero」→
+     * 申请尝试配额（超额 → 公共限流码）→ 已在帮预检（14000）→ GuildRule[1]（缺行 → 故障）→ 事务（同帮重复申请 = 刷新有效期并成功）。
+     * 映射自愈的比对基准是 0（申请人按定义不在目标帮）。
      * <b>只有新建行</b>、且冷却键拿到时才推 APPLICATION_RECEIVED（actor = target = 申请人）给事务内读到的长老与帮主。
      */
     public ApplyJoinGuildResponse applyJoinGuild(long me, ApplyJoinGuildRequest request, Deadline deadline) {
@@ -218,6 +316,11 @@ public final class GuildManageService {
         long guildId = request.getGuildId();
         if (guildId == 0) {
             return applyTip(GuildTip.APPLY_GUILD_ID_ZERO);
+        }
+        if (!applicationQuota.tryAcquire(me, deadline)) {
+            return ApplyJoinGuildResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
+                    .setId(CommonErrorTip.common_error.kRateLimitExceeded_VALUE)
+                    .addParameters("too many guild applications, retry later")).build();
         }
         if (access.alreadyInGuild(me, deadline)) {
             return applyTip(GuildTip.ALREADY_IN_GUILD);

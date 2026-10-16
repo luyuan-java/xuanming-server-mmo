@@ -11,7 +11,7 @@ import com.game.guild.rules.GuildNames;
 import com.game.guild.rules.GuildReject;
 import com.game.guild.rules.GuildRoles;
 import com.game.guild.rules.GuildTip;
-import com.game.guild.service.GuildAccess.Membership;
+import com.game.guild.service.GuildAccess.BoundGuild;
 import com.game.guild.service.GuildAccess.ZoneCheck;
 import com.game.guild.store.GuildData;
 import com.game.guild.store.GuildStore;
@@ -209,6 +209,10 @@ public final class GuildService {
      * 退帮（guild_logic.go:423-466；§3.5）：归属区 → 闸门 → operatorGuild（14002）→ 事务。事务说「不是成员 / 帮已没了」时以 MySQL 复核：
      * 复核为 0 → <b>幂等成功</b>；复核为别的帮 → 14000「guild membership changed, retry」（绝不按缓存里的旧 guild_id 去删别帮的成员行）；
      * 复核出错 → 故障。成功后推 MEMBER_LEFT（actor = target = 自己）给剩余全体。
+     *
+     * <p>expected_guild_id 非 0（mmorpg client-request-ordering.md O14）：只退该帮，operatorGuild 换成 {@link GuildAccess#bindExpectedGuild}；
+     * 预检或事务说他不在该帮 → 14002「not a member of the expected guild」、不写，<b>不</b>按上面的幂等成功处理（它回答的是「你不在该帮」，
+     * 客户端拉 GetPlayerGuild 刷新即可）。0 = 旧客户端，以上流程逐字不变。
      */
     public LeaveGuildResponse leaveGuild(long me, LeaveGuildRequest request, Deadline deadline) {
         bodyIdentity("LeaveGuild", me, request.getPlayerId());
@@ -216,14 +220,23 @@ public final class GuildService {
         if (zone.rejected()) {
             return LeaveGuildResponse.newBuilder().setErrorMessage(zone.tip().proto()).build();
         }
-        Membership membership = access.operatorGuild(me, deadline);
-        if (membership.rejected()) {
-            return LeaveGuildResponse.newBuilder().setErrorMessage(membership.tip().proto()).build();
+        long expected = request.getExpectedGuildId();
+        BoundGuild bound = access.bindExpectedGuild(me, expected, ExpectedGuildMetrics.Method.LEAVE, deadline);
+        if (bound.lost()) {
+            return LeaveGuildResponse.newBuilder().setErrorMessage(
+                    access.rejectExpectedGuild(me, expected, ExpectedGuildMetrics.Method.LEAVE, false, deadline).proto()).build();
         }
-        long guildId = membership.guildId();
+        if (bound.rejected()) {
+            return LeaveGuildResponse.newBuilder().setErrorMessage(bound.tip().proto()).build();
+        }
+        long guildId = bound.guildId();
         TxOutcome<Left> outcome = store.leaveGuild(guildId, me, clockMs.getAsLong(), deadline);
         if (!(outcome instanceof TxOutcome.Ok<Left> ok)) {
             GuildReject reject = outcome.rejection();
+            if (GuildAccess.expectedGuildLost(expected, reject)) {
+                return LeaveGuildResponse.newBuilder().setErrorMessage(
+                        access.rejectExpectedGuild(me, expected, ExpectedGuildMetrics.Method.LEAVE, true, deadline).proto()).build();
+            }
             if (reject == GuildReject.NOT_MEMBER || reject == GuildReject.GUILD_GONE) {
                 long current = cache.verifyGuildIdOf(me, guildId, deadline);
                 if (current == 0) {
@@ -248,6 +261,10 @@ public final class GuildService {
      * 解散（guild_logic.go:468-520；§3.6）：归属区 → 闸门 → operatorGuild → 事务（授权只看 guild.leader_id；事务内再判一次闸门）。
      * RANK_TOO_LOW → 14005「not guild leader」（唯一不回 14016 的地方）。提交后：失效 → 按<b>事务内读到的 zone</b> 清榜（失败只打 ERROR）→
      * 推 DISBANDED（target = 0）给解散前全体成员除帮主（只提交过申请的人不通知）。
+     *
+     * <p>expected_guild_id 非 0（mmorpg client-request-ordering.md O14）：只解散该帮；预检说不在、或事务说帮已没了（GUILD_GONE）/
+     * 他已不是成员（NOT_MEMBER：预检之后才转让并离帮，存储在同一把 guild 行锁下区分）→ 14002、不写。0 = 旧客户端，逐字不变
+     * （NOT_MEMBER 与 RANK_TOO_LOW 一样回 14005，{@link com.game.guild.rules.GuildTips#forDisbandReject}）。
      */
     public DisbandGuildResponse disbandGuild(long me, DisbandGuildRequest request, Deadline deadline) {
         bodyIdentity("DisbandGuild", me, request.getPlayerId());
@@ -255,13 +272,23 @@ public final class GuildService {
         if (zone.rejected()) {
             return DisbandGuildResponse.newBuilder().setErrorMessage(zone.tip().proto()).build();
         }
-        Membership membership = access.operatorGuild(me, deadline);
-        if (membership.rejected()) {
-            return DisbandGuildResponse.newBuilder().setErrorMessage(membership.tip().proto()).build();
+        long expected = request.getExpectedGuildId();
+        BoundGuild bound = access.bindExpectedGuild(me, expected, ExpectedGuildMetrics.Method.DISBAND, deadline);
+        if (bound.lost()) {
+            return DisbandGuildResponse.newBuilder().setErrorMessage(
+                    access.rejectExpectedGuild(me, expected, ExpectedGuildMetrics.Method.DISBAND, false, deadline).proto()).build();
         }
-        long guildId = membership.guildId();
+        if (bound.rejected()) {
+            return DisbandGuildResponse.newBuilder().setErrorMessage(bound.tip().proto()).build();
+        }
+        long guildId = bound.guildId();
         TxOutcome<Disbanded> outcome = store.disbandGuild(guildId, me, clockMs.getAsLong(), access.txFence(), deadline);
         if (!(outcome instanceof TxOutcome.Ok<Disbanded> ok)) {
+            if (GuildAccess.expectedGuildLost(expected, outcome.rejection())) {
+                return DisbandGuildResponse.newBuilder().setErrorMessage(
+                        access.rejectExpectedGuild(me, expected, ExpectedGuildMetrics.Method.DISBAND, true, deadline).proto())
+                        .build();
+            }
             return DisbandGuildResponse.newBuilder()
                     .setErrorMessage(access.disbandReplyFor(me, guildId, outcome.rejection(), deadline).proto()).build();
         }

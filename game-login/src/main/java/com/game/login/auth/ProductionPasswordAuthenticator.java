@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -46,6 +47,8 @@ public final class ProductionPasswordAuthenticator implements PasswordAuthentica
     private final Duration kdfWait;
     private final String dummyHash;
     private final KdfVerifier verifier;
+    private final PasswordFailureQuota quota;
+    private enum Verification { MATCH, MISMATCH, ABORT }
 
     /** KDF 校验（测试可换成快的实现）。 */
     @FunctionalInterface
@@ -59,13 +62,13 @@ public final class ProductionPasswordAuthenticator implements PasswordAuthentica
      * @param kdfWait     等槽上限（(0, 5 s]）
      */
     public ProductionPasswordAuthenticator(Function<String, Optional<AccountPassword>> store, int concurrency,
-                                           Duration kdfWait) {
-        this(store, concurrency, kdfWait, Argon2id::verify,
+                                           Duration kdfWait, PasswordFailureQuota quota) {
+        this(store, concurrency, kdfWait, Objects.requireNonNull(quota, "生产口令失败配额"), Argon2id::verify,
                 Argon2id.hash("invalid-account-dummy-password", new SecureRandom()));
     }
 
     ProductionPasswordAuthenticator(Function<String, Optional<AccountPassword>> store, int concurrency, Duration kdfWait,
-                                    KdfVerifier verifier, String dummyHash) {
+                                    PasswordFailureQuota quota, KdfVerifier verifier, String dummyHash) {
         if (concurrency < 1 || concurrency > MAX_KDF_CONCURRENCY) {
             throw new IllegalArgumentException("KDF 并发槽须在 1–" + MAX_KDF_CONCURRENCY + " 之间: " + concurrency);
         }
@@ -78,49 +81,74 @@ public final class ProductionPasswordAuthenticator implements PasswordAuthentica
         this.kdfWait = kdfWait;
         this.verifier = verifier;
         this.dummyHash = dummyHash;
+        this.quota = Objects.requireNonNull(quota, "生产口令失败配额");
     }
 
     @Override
     public Optional<String> authenticate(String account, String password) {
         if (!validAccount(account) || password == null || password.isEmpty()
                 || password.getBytes(StandardCharsets.UTF_8).length > Argon2id.PASSWORD_MAX_BYTES) {
-            verifyWithLimit("invalid-input-dummy-password", dummyHash);
+            verifyWithLimit("invalid-input-dummy-password", dummyHash, null);
             return Optional.empty();
         }
         Optional<AccountPassword> record;
         try {
             record = store.apply(account);
         } catch (RuntimeException e) {
-            log.warn("口令库查询失败，按认证失败处理: {}", e.toString());
+            log.warn("口令库查询失败，按认证失败处理: {}", e.getClass().getSimpleName());
             return Optional.empty();
         }
-        String encoded = record.map(AccountPassword::passwordHash).orElse(null);
-        if (encoded == null || encoded.isEmpty()) {
-            verifyWithLimit(password, dummyHash);
+        boolean known = record.isPresent();
+        String canonical = known ? record.get().account() : account;
+        if (!validAccount(canonical) || Thread.currentThread().isInterrupted()) {
             return Optional.empty();
         }
-        Boolean match = verifyWithLimit(password, encoded);
-        if (match == null) {
+        Optional<PasswordFailureQuota.Attempt> reserved;
+        try {
+            reserved = quota.begin(known ? PasswordFailureQuota.Domain.KNOWN : PasswordFailureQuota.Domain.UNKNOWN, canonical);
+        } catch (RuntimeException e) {
             return Optional.empty();
         }
-        if (!match) {
+        if (reserved.isEmpty()) return Optional.empty();
+        PasswordFailureQuota.Attempt attempt = reserved.get();
+        boolean finishAttempted = false;
+        try {
+            String encoded = record.map(AccountPassword::passwordHash).orElse(null);
+            boolean hasHash = encoded != null && !encoded.isEmpty();
+            Verification verified = verifyWithLimit(password, hasHash ? encoded : dummyHash, attempt);
+            if (verified == Verification.ABORT || (known && !hasHash)
+                    || Thread.currentThread().isInterrupted() || attempt.expired()) return Optional.empty();
+            PasswordFailureQuota.Outcome outcome = known && verified == Verification.MATCH
+                    ? PasswordFailureQuota.Outcome.SUCCESS : PasswordFailureQuota.Outcome.MISMATCH;
+            // 一旦发出完成，未知结果也不能再换成 abort；可能已经计错密或完成成功清理。
+            finishAttempted = true;
+            boolean confirmed = quota.finish(attempt, outcome);
+            return confirmed && outcome == PasswordFailureQuota.Outcome.SUCCESS
+                    && !Thread.currentThread().isInterrupted() && !attempt.expired()
+                    ? Optional.of(canonical) : Optional.empty();
+        } catch (RuntimeException e) {
+            log.warn("口令认证依赖不可用，拒绝本次认证 reason={}", e.getClass().getSimpleName());
             return Optional.empty();
+        } finally {
+            if (!finishAttempted) {
+                try { quota.finish(attempt, PasswordFailureQuota.Outcome.ABORT); }
+                catch (RuntimeException ignored) { /* 释放失败只占有限租期，不伪装错密。 */ }
+            }
         }
-        String canonical = record.get().account();
-        return canonical == null || canonical.isEmpty() ? Optional.empty() : Optional.of(canonical);
     }
 
     /**
-     * 占一个 KDF 槽跑一次校验。进不了门 / 等不到槽回 null（容量不足）；哈希串坏了（格式 / 参数策略）回 false 并再跑一次 dummy 拉平耗时。
+     * 占一个 KDF 槽跑一次校验。仅有效 PHC 的不匹配是 MISMATCH；坏哈希补 dummy 后仍是 ABORT。
      *
      * <p>门：同时在口令认证里（算 KDF + 等槽）的线程至多 {@link #ADMISSION_PER_SLOT} × 并发槽个，再来的不等、立即按容量不足失败。
      * login 工作线程池是全部登录请求共用的（建角 / 进游戏 / 令牌登录 / HTTP 登录），不设门的话一波不带凭据的口令请求
      * 就能让所有工作线程都停在等槽上（基线每个请求一个 goroutine，等槽只拖慢口令登录自己）。
      */
-    private Boolean verifyWithLimit(String password, String encoded) {
+    private Verification verifyWithLimit(String password, String encoded, PasswordFailureQuota.Attempt attempt) {
+        if (Thread.currentThread().isInterrupted() || (attempt != null && attempt.expired())) return Verification.ABORT;
         if (!admission.tryAcquire()) {
             capacityWarn("口令认证排队已满");
-            return null;
+            return Verification.ABORT;
         }
         try {
             boolean acquired;
@@ -128,18 +156,19 @@ public final class ProductionPasswordAuthenticator implements PasswordAuthentica
                 acquired = kdfSlots.tryAcquire(kdfWait.toNanos(), TimeUnit.NANOSECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return null;
+                return Verification.ABORT;
             }
             if (!acquired) {
                 capacityWarn("口令 KDF 并发槽 " + kdfWait.toMillis() + " ms 内等不到");
-                return null;
+                return Verification.ABORT;
             }
             try {
-                return verifier.verify(password, encoded);
+                if (Thread.currentThread().isInterrupted() || (attempt != null && attempt.expired())) return Verification.ABORT;
+                return verifier.verify(password, encoded) ? Verification.MATCH : Verification.MISMATCH;
             } catch (IllegalArgumentException e) {
-                log.warn("库里的口令哈希不可用（{}），按认证失败处理", e.getMessage());
+                log.warn("库里的口令哈希不可用，按认证失败处理");
                 verifier.verify(password, dummyHash);
-                return false;
+                return Verification.ABORT;
             } finally {
                 kdfSlots.release();
             }

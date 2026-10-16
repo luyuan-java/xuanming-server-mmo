@@ -31,7 +31,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - client messages: 48 ClientPlayerLoginLogin（LoginResponse 字段 3–6）; 127 ClientPlayerLoginRefreshToken (C2S/应答 RefreshTokenResponse)
 - tables: none
 - depends on: login-core
-- behavior: token 是 32 字节随机数的 base64url 编码，无填充，共 43 字符。access token 有效 2h，refresh token 有效 720h；过期时间以 Unix 秒下发。口令或第三方登录成功后签一对 token。Login{auth_type:"access_token", auth_token} 从 token 解析账号，忽略请求里的 account，不重新签。RefreshToken：refresh_token 为空、无效、已被消费或 Redis 出错一律回 2000；成功时轮换，旧 refresh 一次性作废，返回新的一对。access token 不随轮换作废。
+- behavior: token 是 32 字节随机数的 base64url 编码，无填充，共 43 字符。access token 有效 2h，refresh token 有效 720h；过期时间以 Unix 秒下发。口令或第三方登录成功后签一对 token。Login{auth_type:"access_token", auth_token} 从 token 解析账号，忽略请求里的 account，不重新签。RefreshToken：refresh_token 为空、无效、已被消费或 Redis 出错一律回 2000；成功时轮换，旧 refresh 一次性作废，返回新的一对。access token 不随轮换作废。（2026-10-15 起）例外是重放宽限窗口 `TokenConfig.RefreshReuseGrace`（缺省 30s，0 关闭，上限 60s）：窗口内同一旧 refresh 再来、且它换出的新 refresh 还没用过，原样返回同一对、不再签发。
 - internal: Redis 键：access_token:{t} 与 refresh_token:{t}，值为 JSON {account, auth_type, device_id, created_at}，带 TTL。account_refresh:{account} 是 ZSET，score 为过期秒；每次签发先清掉过期成员，再封顶 32 个，超出时淘汰最旧的并删除对应 token 键。另有 RevokeAll（删全部 refresh）。Java 可用 Redisson 实现，键统一经 RedisKeys 生成。
 - java: missing — LoginHandler 不填 3–6 字段；LoginAuthenticator 对 access_token 一律失败（回 2000）；ClientMessageDispatcher 对 127 回信封错误 1006 kFeatureUnavailable
 - size: M

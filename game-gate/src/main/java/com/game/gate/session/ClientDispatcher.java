@@ -70,7 +70,9 @@ import org.slf4j.LoggerFactory;
  *   <li>后端（login 与 friend / match 等）调用失败或超时、热关停、会话后端 lane 满（1008）或排队超时：回带请求 id 的信封错误
  *       （与 C++ gate 路由 lane 同形，mmorpg client-request-ordering.md §4.7，2026-10-14 两版同批改），客户端按请求 id 当场对上失败；
  *       mmorpg 的 Go robot 同批改为读信封错误（以前只解 body，会把空 body 当成功）；</li>
- *   <li>玩家不在场景、Java 版尚未实现的后端域：推 23 {@code TipInfoMessage{1003}}（与 C++ 找不到目标节点时同形）；</li>
+ *   <li>玩家不在场景、Java 版尚未实现的后端域：回带请求 id 的信封 1003（与 C++ {@code HandleTcpNodeMessage} 找不到场景节点、
+ *       {@code HandleGrpcNodeMessage} 找不到业务节点时同形；2026-10-15 起由 23 {@code TipInfoMessage{1003}} 改为信封，
+ *       mmorpg client-request-ordering.md O6「所有 gate 级失败回执都带请求 id」，两版同批）；不计非法包、不断连；</li>
  *   <li>战斗服务 {@code BattleClientPlayer} 的 12 个号（{@link MessageRoute#directOnly()}）：GM 闸之后当场回带请求 id 的信封 1003，
  *       不计非法包、不断连、不过热关停、不排在途请求之后（基线 {@code :937-950}；scene-battle-spec §2.5、§7.19，D12）；
  *       GM 闸拒绝同样回带请求 id 的信封 1006。两者 2026-10-15 起由 23 推送改为信封（mmorpg client-request-ordering.md O6，两版同批）；</li>
@@ -289,7 +291,7 @@ public final class ClientDispatcher {
             return;
         }
         if (s.redirected) {
-            // 已重定向（推过 124）：一切请求静默丢弃——不回包、不推 23 {1003}、不计非法包、不限频、不转发
+            // 已重定向（推过 124）：一切请求静默丢弃——不回包（也不回「未进场景」的信封 1003）、不计非法包、不限频、不转发
             // （zone-travel-spec §5.7；合规客户端此刻正在换连接，几秒内自己关闭）
             countRequest(routes.clientRoute(request.getMessageId()), RequestResult.REDIRECTED);
             return;
@@ -421,9 +423,11 @@ public final class ClientDispatcher {
             default -> {
                 // Java 版尚未实现的后端域：与 C++ 找不到目标节点时同形。战斗服务 BattleClientPlayer 到不了这里：
                 // 它在 onRequest 的直连闸（route.directOnly()）当场被拒，不进待处理队列。
+                // 回带请求 id 的信封 1003（2026-10-15 起，原为 23 {1003}；mmorpg client-request-ordering.md O6，两版同批）：
+                // 同一会话可能还有别的请求在等应答，不带 id 的 23 会被客户端当成别的请求的失败。
                 log.debug("消息域未接入 Java 版 session={} message_id={} domain={}", sid(s), p.route().messageId(), p.route().domain());
                 countRequest(p.route(), RequestResult.UNSUPPORTED);
-                sendTip(s, TIP_SERVICE_UNAVAILABLE);
+                s.send(envelopeError(p.request(), TIP_SERVICE_UNAVAILABLE));
             }
         }
     }
@@ -465,13 +469,35 @@ public final class ClientDispatcher {
             // 入队时已确认该域有后端（onRequest 的 backends.containsKey）;装配后 backends 不再变。
             ClientMessageService backend = backends.get(domain);
             countRequest(next.route(), RequestResult.FORWARDED);
-            callBackend(s, domain, backend, next.request(), next.session());
+            callBackend(s, domain, backend, next.request(), sessionAtSend(s, next));
         }
+    }
+
+    /**
+     * 排队项发出时的会话身份：只降不升（mmorpg client-request-ordering.md §17，C++ 版 router_lane.h {@code PlayerIdAtSend} 同一规则）。
+     * 入队快照里的玩家与会话当前绑定的玩家一致才保留，否则按 {@code player_id = 0} 发出：排队期间 LeaveGame 成功（UnbindPlayer）
+     * 之后不以已离开的角色执行，排队期间换了角色也不算到新角色头上；快照为 0（入队时没进游戏）的照旧为 0。其余字段原样。
+     */
+    static SessionContext sessionAtSend(SessionContext snapshot, long currentPlayerId) {
+        if (snapshot.getPlayerId() == 0 || snapshot.getPlayerId() == currentPlayerId) {
+            return snapshot;
+        }
+        return snapshot.toBuilder().setPlayerId(0).build();
+    }
+
+    private SessionContext sessionAtSend(ClientSession s, BackendPending next) {
+        SessionContext session = sessionAtSend(next.session(), s.playerId);
+        if (session != next.session()) {
+            log.debug("排队期间会话身份已变，按未进游戏发出 session={} message_id={} 入队时 player_id={} 现在 player_id={}", sid(s),
+                    next.request().getMessageId(), next.session().getPlayerId(), s.playerId);
+        }
+        return session;
     }
 
     /**
      * login 以外的客户端消息后端：与 login 同一条 Dubbo 契约（{@link ClientMessageService#handle}）。这些后端不下发会话指令，
      * 断线不等它们（断线通知只给 login）；身份取请求<b>入队时</b>的会话快照（排队期间离开游戏 / 换角色进游戏不会把它算到新角色头上），
+     * 发出时只降不升（{@link #sessionAtSend(SessionContext, long)}：离开游戏之后不再带已离开的角色），
      * 由后端按其中的玩家号判定（没进游戏的会话照常转发，由后端回它自己的码）。
      */
     private void callBackend(ClientSession s, String domain, ClientMessageService backend, ClientRequest request,
@@ -731,8 +757,9 @@ public final class ClientDispatcher {
     /** 转给会话所在的 scene；返回这个请求在 gate 的去向（记指标用）。 */
     private RequestResult forwardToScene(ClientSession s, ClientRequest request) {
         if (s.sceneNodeId == 0) {
-            // 与 C++ HandleTcpNodeMessage 找不到场景节点时同形。
-            sendTip(s, TIP_SERVICE_UNAVAILABLE);
+            // 与 C++ HandleTcpNodeMessage 找不到场景节点时同形：回带请求 id 的信封 1003（2026-10-15 起，原为 23 {1003}；
+            // mmorpg client-request-ordering.md O6，两版同批）。没有发出，客户端重试安全；应答类型为 Empty 的号同样回。
+            s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
             return RequestResult.NOT_IN_SCENE;
         }
         ClientForward forward = ClientForward.newBuilder()
@@ -743,7 +770,14 @@ public final class ClientDispatcher {
                 .setRequestId(request.getId())
                 .build();
         long gen = links.send(s.sceneNodeId, NodeLinkFrame.newBuilder().setClientForward(forward).build());
-        return gen == 0 ? RequestResult.LINK_UNAVAILABLE : RequestResult.FORWARDED;
+        if (gen == 0) {
+            // 链路层没受理这一帧（确定未发出）：回带请求 id 的信封 1003，客户端当场按请求 id 对上失败、重试安全。
+            // 以前什么都不回，客户端只能等自己的 15 s 超时；对齐 mmorpg HandleTcpNodeMessage 的「RpcClient 未挂」
+            // （client-request-ordering.md O6，2026-10-15）。应答类型为 Empty 的号同样回。
+            s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
+            return RequestResult.LINK_UNAVAILABLE;
+        }
+        return RequestResult.FORWARDED;
     }
 
     // ================================================================ scene 链路事件（已由 SceneEventRouter 投递到会话线程）

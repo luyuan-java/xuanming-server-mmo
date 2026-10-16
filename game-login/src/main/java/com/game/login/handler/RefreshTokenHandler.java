@@ -18,7 +18,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * RefreshToken（127，同 mmorpg {@code refreshtokenlogic.go}）：refresh token 轮换。不要求本连接已登录。
- * refresh token 为空、无效、已被用过、令牌存储出错一律回 2000（基线同；客户端据此走完整重登）；成功回新的一对，旧 refresh 作废。
+ * refresh token 为空、无效、已被用过（且不在重放宽限窗口内）、令牌存储出错一律回 2000（基线同；客户端据此走完整重登）；
+ * 成功回新的一对，旧 refresh 作废。宽限窗口内对同一旧 refresh 的重放回同一对（见 {@link LoginTokens#refresh}），
+ * 所以回包丢失（1003 / 超时）后客户端应拿原 token 重试，而不是直接重登。
  * HTTP {@code /api/refresh-token} 走同一个 {@link #refresh}。
  */
 public final class RefreshTokenHandler implements ClientMessageHandler<RefreshTokenRequest> {

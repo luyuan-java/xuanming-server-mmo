@@ -29,7 +29,7 @@ import java.util.OptionalInt;
  * 消息号注册表：{@code message_id.txt}（唯一真源）↔ 服务方法 ↔ 请求 / 应答类型。
  *
  * <p>消息号是客户端可见契约，由 mmorpg 的生成器发号并同步进来；本类<b>只读不发号</b>。
- * 生成器会复用空洞号，所以不能按方法名自行推号，也不能缓存旧表。
+ * 生成器会填空洞号（删掉的方法留墓碑 {@code N=reserved:原名}，墓碑号永不复用），所以不能按方法名自行推号，也不能缓存旧表。
  *
  * <p>构建方式：读 protoc 输出的 descriptor set（{@code contract/contract.desc}）枚举所有 proto 文件，
  * 按 protoc 的 Java 命名规则找到每个文件的生成类，取<b>生成类自带</b>的 {@link FileDescriptor}
@@ -43,6 +43,8 @@ public final class MessageIdRegistry {
     public static final String DESCRIPTOR_SET_RESOURCE = "contract/contract.desc";
 
     private static final String CONTRACT_PROTO_PREFIX = "proto/";
+    /** message_id.txt 墓碑行的键前缀：{@code N=reserved:原名}（与 mmorpg 生成器、event_id.txt 同一格式）。 */
+    static final String RESERVED_PREFIX = "reserved:";
     /** 服务级自定义 option 的扩展字段名（mmorpg proto 里 {@code extend google.protobuf.ServiceOptions} 的字段名）。 */
     static final String OPTION_IS_CLIENT_PROTOCOL_SERVICE = "OptionIsClientProtocolService";
     static final String OPTION_IS_PLAYER_SERVICE = "OptionIsPlayerService";
@@ -259,10 +261,17 @@ public final class MessageIdRegistry {
         return out.toString();
     }
 
-    /** 解析 {@code N=服务裸名方法名}；空行与 # 注释跳过；号或键重复即失败。 */
+    /**
+     * 解析 {@code N=服务裸名方法名}，返回活号；空行与 # 注释跳过。
+     *
+     * <p>{@code N=reserved:原名} 是墓碑（方法已删，号永不复用）：只占号、不进返回值，也不参与方法重名检查，
+     * 所以墓碑名与重新出现的同名活方法（生成器给它发新号）可以并存。号重复（活号之间、活号与墓碑、墓碑之间）
+     * 或活方法重名即失败。
+     */
     static Map<Integer, String> parseMessageIds(InputStream in) throws IOException {
         Map<Integer, String> ids = new LinkedHashMap<>();
         Map<String, Integer> seenKeys = new HashMap<>();
+        Set<Integer> reservedIds = new HashSet<>();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
             int lineNo = 0;
@@ -278,22 +287,11 @@ public final class MessageIdRegistry {
                 }
                 int id = Integer.parseInt(trimmed.substring(0, eq).strip());
                 String key = trimmed.substring(eq + 1).strip();
-                if (ids.putIfAbsent(id, key) != null) {
-                    throw new IllegalStateException("message_id.txt 消息号重复: " + id);
-                }
-                if (seenKeys.putIfAbsent(key, id) != null) {
-                    throw new IllegalStateException("message_id.txt 方法重复: " + key);
-                }
-            }
-        }
-        return ids;
-    }
-
-    private static InputStream open(ClassLoader loader, String resource) {
-        InputStream in = loader.getResourceAsStream(resource);
-        if (in == null) {
-            throw new IllegalStateException("classpath 上缺少 " + resource + "（先跑 tools/ContractSync.java 并构建 game-proto）");
-        }
-        return in;
-    }
-}
+                if (key.startsWith(RESERVED_PREFIX)) {
+                    if (key.length() == RESERVED_PREFIX.length()) {
+                        throw new IllegalStateException("message_id.txt 第 " + lineNo + " 行墓碑缺原名: " + line);
+                    }
+                    if (ids.containsKey(id) || !reservedIds.add(id)) {
+                        throw new IllegalStateException("message_id.txt 消息号重复: " + id);
+                    }
+          

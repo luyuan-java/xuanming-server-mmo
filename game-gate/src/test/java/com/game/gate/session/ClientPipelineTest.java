@@ -68,16 +68,20 @@ class ClientPipelineTest {
         assertThat(ch.isOpen()).isTrue();
     }
 
+    /** 2026-10-15 起未进场景回带请求 id 的信封 1003（原为 23 号 tip 帧；mmorpg client-request-ordering.md O6，两版同批）。 */
     @Test
-    void 握手后scene请求未进场景_收到23号tip帧() throws Exception {
+    void 握手后scene请求未进场景_收到带请求id的信封1003() throws Exception {
         EmbeddedChannel ch = channel();
         ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(verifyRequest(GATE_NODE), ' ')));
         ((ByteBuf) ch.readOutbound()).release();
 
         ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(ClientRequest.newBuilder().setId(3).setMessageId(77).build(), ' ')));
-        MessageContent tip = (MessageContent) decode(ch.readOutbound());
-        assertThat(tip.getMessageId()).isEqualTo(23);
-        assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage()).getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        MessageContent envelope = (MessageContent) decode(ch.readOutbound());
+        assertThat(envelope.getMessageId()).as("以请求号为 message_id，不是 23").isEqualTo(77);
+        assertThat(envelope.getId()).as("带请求 id").isEqualTo(3);
+        assertThat(envelope.getSerializedMessage()).as("body 为空").isEmpty();
+        assertThat(envelope.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(ch.isOpen()).isTrue();
     }
 
     @Test
@@ -113,9 +117,10 @@ class ClientPipelineTest {
 
         ClientTokenVerifyResponse verified = (ClientTokenVerifyResponse) decode(ch.readOutbound());
         assertThat(verified.getSuccess()).as("先到的握手照常通过并回包").isTrue();
-        MessageContent tip = (MessageContent) decode(ch.readOutbound());
-        assertThat(tip.getMessageId()).as("先到的请求照常处理（未进场景 → 23）").isEqualTo(23);
-        assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage()).getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        MessageContent envelope = (MessageContent) decode(ch.readOutbound());
+        assertThat(envelope.getMessageId()).as("先到的请求照常处理（未进场景 → 带请求 id 的信封 1003）").isEqualTo(77);
+        assertThat(envelope.getId()).isEqualTo(3);
+        assertThat(envelope.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat((Object) ch.readOutbound()).as("坏帧之后的帧随缓冲一起丢弃").isNull();
         assertThat(ch.isOpen()).isFalse();
         assertThat(meters.get("game.gate.client.invalid.frames").tag("reason", "checksum").counter().count()).isEqualTo(1);
@@ -153,16 +158,21 @@ class ClientPipelineTest {
     }
 
     /**
-     * 批次 5.4 先行件：生产装配走带 {@link PushMessageIds} 的新构造器（tip 与重定向通知两个号一起给）。握手与「未进场景推 tip」
+     * 批次 5.4 先行件：生产装配走带 {@link PushMessageIds} 的新构造器（tip 与重定向通知两个号一起给）。握手与 tip 推送
      * 的字节与只给 tip 号的旧构造器完全一样——tip 用的仍是 {@code tip()}，不会因为多带了一个号而发错消息号。
+     * 2026-10-15 起「未进场景」改回带请求 id 的信封（mmorpg client-request-ordering.md O6，两版同批），不再经 {@code tip()}；
+     * 这里改用仍是推送的进场失败（login 下发进场、到 scene 的链路层不可用 → 推 23 {3023}）来走 {@code tip()}。
      */
     @Test
     void 带两个推送消息号的新构造器_握手与tip推送同旧构造器_tip不会发成重定向的号() throws Exception {
         SessionRegistry sessions = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+        FakeLogin login = new FakeLogin();
+        FakeLinks links = new FakeLinks();
+        links.generation = 0; // 链路层不可用（send 返回 0）：进场失败，推 23 {3023}
         ClientDispatcher wired = new ClientDispatcher(
                 new GateIdentity(GATE_NODE, "gate-uuid", 1), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
-                id -> id == 77 ? new MessageRoute(id, "scene") : null, new PushMessageIds(23, 124), new FakeLogin(), Map.of(),
-                new FakeLinks(), sessions, new GateLimits(8, 50, Duration.ZERO, com.game.net.limit.MessageLimits.UNLIMITED,
+                id -> id == 26 ? new MessageRoute(id, "login") : null, new PushMessageIds(23, 124), login, Map.of(),
+                links, sessions, new GateLimits(8, 50, Duration.ZERO, com.game.net.limit.MessageLimits.UNLIMITED,
                         false, Duration.ofSeconds(15)), new GateMetrics(new SimpleMeterRegistry()), PresenceRecorder.NONE);
         EmbeddedChannel ch = new EmbeddedChannel(new ChannelInitializer<Channel>() {
             @Override
@@ -173,12 +183,21 @@ class ClientPipelineTest {
 
         ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(verifyRequest(GATE_NODE), ' ')));
         assertThat(((ClientTokenVerifyResponse) decode(ch.readOutbound())).getSuccess()).isTrue();
-        ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(ClientRequest.newBuilder().setId(3).setMessageId(77).build(), ' ')));
+        ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(ClientRequest.newBuilder().setId(3).setMessageId(26).build(), ' ')));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
+                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5)))
+                .build());
+        ch.runPendingTasks();
+        MessageContent reply = (MessageContent) decode(ch.readOutbound());
+        assertThat(reply.getMessageId()).as("先回 26 的应答").isEqualTo(26);
+        assertThat(reply.getId()).isEqualTo(3);
 
         MessageContent tip = (MessageContent) decode(ch.readOutbound());
         assertThat(tip.getMessageId()).isEqualTo(23);
-        assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage()).getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
-        assertThat((Object) ch.readOutbound()).as("未进场景的请求只推 tip，不会发 124").isNull();
+        assertThat(tip.getId()).as("推送形状，不带请求 id").isZero();
+        assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage()).getId()).isEqualTo(ClientDispatcher.TIP_ENTER_SCENE_FAILED);
+        assertThat((Object) ch.readOutbound()).as("进场失败只推 tip，不会发 124").isNull();
         assertThat(ch.isOpen()).isTrue();
     }
 

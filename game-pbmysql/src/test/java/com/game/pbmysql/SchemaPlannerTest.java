@@ -1,5 +1,7 @@
 package com.game.pbmysql;
 
+import static com.game.pbmysql.TableOption.withAutoIncrementKey;
+import static com.game.pbmysql.TableOption.withIndexes;
 import static com.game.pbmysql.TableOption.withPrimaryKey;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -184,7 +186,8 @@ class SchemaPlannerTest {
         Map<String, IndexMeta> online = new LinkedHashMap<>();
         online.put("IDX_PBM_SYNC_ITEM_0", SchemaPlanner.expectedIndexMeta(v2, "owner_id", false)); // 大小写不同也算同名
         Plan p = SchemaPlanner.plan(v2, aligned(v2), online, pk(v2));
-        assertThat(p.columnClauses()).containsExactly(
+        assertThat(p.columnClauses()).isEmpty();
+        assertThat(p.indexClauses()).containsExactly(
                 "ADD INDEX `idx_pbm_sync_item_1` (`level`)",
                 "ADD UNIQUE KEY `uk_pbm_sync_item` (`code`)");
 
@@ -197,7 +200,7 @@ class SchemaPlannerTest {
     }
 
     @Test
-    void 主键定义不同被拒绝_线上没有主键时补主键且新增的自增主键列挪进第二条ALTER() {
+    void 主键定义不同被拒绝_线上没有主键时新增的自增主键列与主键同句() {
         IndexMeta wrongPk = new IndexMeta(true, List.of(new IndexColumn("player_id", 1, null)));
         SchemaDriftException e = catchDrift(() -> SchemaPlanner.plan(GOLANG, aligned(GOLANG), Map.of(), wrongPk));
         assertThat(e.differences()).containsExactly(
@@ -209,10 +212,60 @@ class SchemaPlannerTest {
         Map<String, ColumnMeta> cols = aligned(account);
         cols.remove("id");
         Plan p = SchemaPlanner.plan(account, cols, Map.of(), null);
-        assertThat(p.columnClauses()).containsExactly("ADD INDEX `idx_account_0` (`name`(191))", "ADD UNIQUE KEY `uk_account` (`email`)");
+        assertThat(p.columnClauses()).isEmpty();
+        assertThat(p.indexClauses()).containsExactly("ADD INDEX `idx_account_0` (`name`(191))", "ADD UNIQUE KEY `uk_account` (`email`)");
         assertThat(p.primaryKeyClauses()).containsExactly(
                 "ADD COLUMN `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'pb:1'",
                 "ADD PRIMARY KEY (`id`)");
+    }
+
+    @Test
+    void 新普通列先建立_其上的二级索引和唯一键另阶段补齐() {
+        TableSchema v2 = TableSchema.of(SyncItemV2.getDefaultInstance());
+        Map<String, ColumnMeta> cols = aligned(v2);
+        cols.remove("level");
+        cols.remove("code");
+        Map<String, IndexMeta> indexes = declaredIndexes(v2);
+        indexes.remove(v2.indexName(1));
+        indexes.remove(v2.uniqueKeyName());
+        Plan p = SchemaPlanner.plan(v2, cols, indexes, pk(v2));
+        assertThat(p.columnClauses()).hasSize(2).allMatch(c -> c.startsWith("ADD COLUMN "));
+        assertThat(p.primaryKeyClauses()).isEmpty();
+        assertThat(p.indexClauses()).containsExactly(
+                "ADD INDEX `idx_pbm_sync_item_1` (`level`)", "ADD UNIQUE KEY `uk_pbm_sync_item` (`code`)");
+    }
+
+    @Test
+    void 新自增列以二级索引提供键时_列与该索引保持同句() {
+        TableSchema t = TableSchema.of(KitchenSink.getDefaultInstance(), withPrimaryKey("owner_id"),
+                withAutoIncrementKey("slot"), withIndexes("slot,owner_id"));
+        Map<String, ColumnMeta> cols = aligned(t);
+        cols.remove("slot");
+        Map<String, IndexMeta> indexes = declaredIndexes(t);
+        indexes.remove(t.indexName(0));
+        Plan p = SchemaPlanner.plan(t, cols, indexes, pk(t));
+        assertThat(p.columnClauses()).isEmpty();
+        assertThat(p.primaryKeyClauses()).isEmpty();
+        assertThat(p.indexClauses()).containsExactly(
+                "ADD COLUMN `slot` int unsigned NOT NULL AUTO_INCREMENT COMMENT 'pb:2'",
+                "ADD INDEX `idx_kitchen_sink_0` (`slot`,`owner_id`)");
+    }
+
+    @Test
+    void 新自增列在联合主键非首列时_提供首列键的索引也与主键同句() {
+        TableSchema t = TableSchema.of(KitchenSink.getDefaultInstance(), withAutoIncrementKey("slot"),
+                withIndexes("slot,owner_id"));
+        Map<String, ColumnMeta> cols = aligned(t);
+        cols.remove("slot");
+        Map<String, IndexMeta> indexes = declaredIndexes(t);
+        indexes.remove(t.indexName(0));
+        Plan p = SchemaPlanner.plan(t, cols, indexes, null);
+        assertThat(p.columnClauses()).isEmpty();
+        assertThat(p.indexClauses()).isEmpty();
+        assertThat(p.primaryKeyClauses()).containsExactly(
+                "ADD COLUMN `slot` int unsigned NOT NULL AUTO_INCREMENT COMMENT 'pb:2'",
+                "ADD PRIMARY KEY (`owner_id`,`slot`)",
+                "ADD INDEX `idx_kitchen_sink_0` (`slot`,`owner_id`)");
     }
 
     @Test

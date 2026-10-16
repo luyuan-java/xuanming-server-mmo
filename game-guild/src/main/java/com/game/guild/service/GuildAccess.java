@@ -14,6 +14,7 @@ import com.game.guild.store.Invalidation;
 import com.game.guild.zone.MergeFence;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,16 +65,35 @@ public final class GuildAccess {
         }
     }
 
+    /**
+     * 本次写事务绑定的帮会（{@link #bindExpectedGuild}）。三种形态：
+     * <ul>
+     *   <li>{@code lost}：预检已确认操作者此刻不在 expected_guild_id 指的帮——调用方回 {@link #rejectExpectedGuild}，不碰存储；</li>
+     *   <li>{@code tip} 非 null：业务拒绝，只来自 expected = 0 时的 {@link #operatorGuild}（不在任何帮，14002）；</li>
+     *   <li>否则 {@code guildId} 就是事务要用的帮会。</li>
+     * </ul>
+     */
+    public record BoundGuild(long guildId, GuildTip tip, boolean lost) {
+
+        public boolean rejected() {
+            return tip != null;
+        }
+    }
+
     private final GuildCache cache;
     private final HomeZones homeZones;
     private final MergeFence fence;
     private final GuildCacheInvalidator invalidator;
+    private final ExpectedGuildMetrics expectedGuildMetrics;
 
-    public GuildAccess(GuildCache cache, HomeZones homeZones, MergeFence fence, GuildCacheInvalidator invalidator) {
+    /** @param expectedGuildMetrics 预期帮会栅栏的计数（生产 {@code GuildMetrics}；未装配指标传 {@link ExpectedGuildMetrics#NONE}） */
+    public GuildAccess(GuildCache cache, HomeZones homeZones, MergeFence fence, GuildCacheInvalidator invalidator,
+                       ExpectedGuildMetrics expectedGuildMetrics) {
         this.cache = cache;
         this.homeZones = homeZones;
         this.fence = fence;
         this.invalidator = invalidator;
+        this.expectedGuildMetrics = Objects.requireNonNull(expectedGuildMetrics, "expectedGuildMetrics");
     }
 
     // ================================================================ 归属区与闸门
@@ -202,6 +222,65 @@ public final class GuildAccess {
         log.info("[guild] player {} is in no guild on recheck (cached guild {}), answering not-in-guild (resolve: {})",
                 Long.toUnsignedString(playerId), Long.toUnsignedString(cachedGuildId), cause.toString());
         return GuildTip.NOT_IN_ANY_GUILD;
+    }
+
+    // ================================================================ 预期帮会栅栏（expected_guild_id）
+
+    /**
+     * 决定本次写事务用哪个帮会（mmorpg client-request-ordering.md O14 / §6.4；基线 expected_guild.go bindExpectedGuild）。
+     * 退帮 / 解散 / 踢人 / 转让 / 任免五个写请求带上客户端发出时看到的本人帮会 {@code expected}，它<b>取代</b> operatorGuild 的结果作为事务的
+     * guild_id；事务在锁住的 guild 行与成员行上复核操作者是不是该帮成员，所以「是不是预期帮会」与写入在同一个事务里原子判定：给帮会增删成员的
+     * 事务都先锁 guild 行，复核与提交之间没人能把操作者换进 / 换出这个帮。
+     *
+     * <p>要防的事：gate 后端 lane 让同一会话的请求按到达顺序逐条发出，但上一条超时（gate 回 1003、放行下一条）之后仍可能在本服务里跑完。
+     * 客户端在这段时间里可能已经离开 G、加入了 H——迟到的请求若按「操作者此刻所在的帮」执行，就会作用到 H 上。
+     *
+     * <ul>
+     *   <li>{@code expected = 0}：旧客户端，行为与加字段之前完全相同（{@link #operatorGuild}），只计一次 absent；</li>
+     *   <li>缓存映射等于 {@code expected}：直接用它进事务（缓存陈旧由事务内的复核兜住）；</li>
+     *   <li>缓存说不一致：以 MySQL 复核（不同则顺手失效映射），仍不一致 → {@code lost}，调用方拒绝、不碰存储。</li>
+     * </ul>
+     * 为什么事务前还要预检：{@code expected} 来自客户端，直接拿去进事务等于让任何人都能对任意帮会的 guild 行加 FOR UPDATE，踢人 / 解散还会在事务外
+     * 给那个帮的成员建状态行。预检与原来的 operatorGuild 同价（缓存命中且一致时不读 MySQL）；判据仍是事务里那次复核（预检不代替提交点复核）。
+     *
+     * @throws RuntimeException 缓存 / 回源出错（原样上抛，故障）
+     */
+    public BoundGuild bindExpectedGuild(long playerId, long expected, ExpectedGuildMetrics.Method method, Deadline deadline) {
+        if (expected == 0) {
+            expectedGuildMetrics.expectedGuild(method, ExpectedGuildMetrics.Outcome.ABSENT);
+            Membership membership = operatorGuild(playerId, deadline);
+            return new BoundGuild(membership.guildId(), membership.tip(), false);
+        }
+        long cached = cache.guildIdOf(playerId, deadline);
+        if (cached == expected) {
+            return new BoundGuild(expected, null, false);
+        }
+        long current = cache.verifyGuildIdOf(playerId, cached, deadline);
+        return current == expected ? new BoundGuild(expected, null, false) : new BoundGuild(0, null, true);
+    }
+
+    /**
+     * {@code expected ≠ 0} 时，事务的这两种拒绝都意味着「操作者此刻不在 expected 帮」：锁不到本人成员行（NOT_MEMBER；解散由存储补读成员行区分）、
+     * 帮会行已不存在（GUILD_GONE）。{@code expected = 0} 恒为 false：旧路径的答复映射一个字节都不变。
+     */
+    public static boolean expectedGuildLost(long expected, GuildReject reject) {
+        return expected != 0 && (reject == GuildReject.NOT_MEMBER || reject == GuildReject.GUILD_GONE);
+    }
+
+    /**
+     * 组「不在预期帮会」的答复：计 mismatch、记 INFO（晚到的旧请求被拦下正是栅栏在起作用，不是故障），回 14002「not a member of the expected guild」。
+     * 不写、不推送。事务那一支（{@code fromTransaction}）说明缓存曾说他在 expected、MySQL 说不在：先纠正映射，调用方接着取的当前快照才读得到真相；
+     * 预检那一支已经由 {@link GuildCache#verifyGuildIdOf} 纠正过，不再重复一次回源与代次翻转。
+     */
+    public GuildTip rejectExpectedGuild(long playerId, long expected, ExpectedGuildMetrics.Method method, boolean fromTransaction,
+                                        Deadline deadline) {
+        if (fromTransaction) {
+            verifyMapping(playerId, expected, deadline);
+        }
+        expectedGuildMetrics.expectedGuild(method, ExpectedGuildMetrics.Outcome.MISMATCH);
+        log.info("[guild] {} refused: player {} is no longer in expected guild {} ({})", method.label(),
+                Long.toUnsignedString(playerId), Long.toUnsignedString(expected), fromTransaction ? "transaction" : "precheck");
+        return GuildTip.NOT_IN_EXPECTED_GUILD;
     }
 
     // ================================================================ 事务结局 → 答复

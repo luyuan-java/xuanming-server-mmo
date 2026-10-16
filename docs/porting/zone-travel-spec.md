@@ -776,7 +776,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
      客户端先关则定时器作废。定时器任务只捕获会话号，到点先查会话仍在、仍是 REDIRECTED 再关（AGENTS.md §3 回调生命周期）。
 - **`RedirectToGate` 会话指令**（login 的 GO-5，`applyDirectives`，工作树 `:483-496`）：先回 EnterGame 应答（`replyToClient` 先于 `applyDirectives`，`:454-455`）→ 执行 2、4、5 步
   （会话本就没有场景绑定）。迟到的应答（会话已断，`recordIdentity`）忽略该指令。
-- **REDIRECTED 会话**：之后的一切客户端请求静默丢弃（计 `RequestResult.REDIRECTED`），不走「未进场景推 23 {1003}」（`:588-592`）。断线照常：`sessionClosed` 通知 login 注销设备窗口；
+- **REDIRECTED 会话**：之后的一切客户端请求静默丢弃（计 `RequestResult.REDIRECTED`），不走「未进场景推 23 {1003}」（`:588-592`；2026-10-15 起这一支改为回带请求 id 的信封 1003，mmorpg client-request-ordering.md O6，REDIRECTED 会话同样不走）。断线照常：`sessionClosed` 通知 login 注销设备窗口；
   没有场景绑定，不发 `PlayerLeave`。
 - **REDIRECTED 之前已转出、之后才回来的调用**（评审补；例：传送提交时客户端恰好发了 17 LeaveGame）：login / 后端的应答**照常下发**（`replyToClient`，合规客户端已在换连接，无害），
   应答里的会话指令**一律忽略**（`applyDirectives` 遇 REDIRECTED 直接返回：会话已没有场景绑定，`UnbindPlayer` / `EnterScene` 都不能再生效；`CloseSession` 由收口定时器覆盖）。
@@ -1055,7 +1055,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 ### 8.3 scene-node-loss-handling 边界（5.5）
 
-- **基线**：节点被摘除时只把会话对该节点的绑定置无效，**连接保持**（`client_message_processor.cpp:1104-1113`）；之后的 scene 类消息回 23 {1003}，直到 SM 改派后以 `enterType = 0` 重新进场。
+- **基线**：节点被摘除时只把会话对该节点的绑定置无效，**连接保持**（`client_message_processor.cpp:1104-1113`）；之后的 scene 类消息回 23 {1003}，直到 SM 改派后以 `enterType = 0` 重新进场（2026-10-15 起基线 `HandleTcpNodeMessage` 这一支改为回带请求 id 的信封 1003，Java「未进场景」同批改，mmorpg client-request-ordering.md O6；5.5 若改为「连接保持」，照信封形状对齐）。
 - **Java 现状**：链路断开直接关闭会话（`SCENE_LINK_DOWN`），属既有差异，盘点记为「有意不同、未登记 PARITY」（`gate.md:337-350`），归 5.5 处理与登记。
 - **与 5.4 的交叉**（本批规定）：
   - PRECHECK / RESOLVING 中源链路断开 → gate 关会话 → scene 按现有离场写回并释放，迟到结果丢弃。

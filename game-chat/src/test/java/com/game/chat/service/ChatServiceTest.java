@@ -32,7 +32,7 @@ class ChatServiceTest {
     private final MemoryStore store = new MemoryStore();
     private final AtomicLong clock = new AtomicLong(1_000);
     private final ChatService service = new ChatService(store, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7),
-            20, 50, Duration.ofSeconds(60), clock::get, REDIS_KEYS);
+            20, 50, Duration.ofSeconds(60), clock::get, REDIS_KEYS, List.of());
 
     private static SendChatRequest world(String content, String requestId) {
         return SendChatRequest.newBuilder().setRequestId(requestId).setMessage(ChatMessage.newBuilder()
@@ -106,7 +106,7 @@ class ChatServiceTest {
 
         MemoryStore other = new MemoryStore();
         ChatService nstest = new ChatService(other, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7), 20, 50,
-                Duration.ofSeconds(60), clock::get, new RedisKeys(GameNamespace.of("nstest")));
+                Duration.ofSeconds(60), clock::get, new RedisKeys(GameNamespace.of("nstest")), List.of());
         assertThat(nstest.send(5, world("w", "req-ns"), 1000).toCompletableFuture().join().hasErrorMessage()).isFalse();
         assertThat(nstest.send(5, privateTo(9, "p"), 1000).toCompletableFuture().join().hasErrorMessage()).isFalse();
         assertThat(other.lists).containsOnlyKeys("nstest:chat:{world}:log", "nstest:chat:{p:5:9}:log");
@@ -126,6 +126,39 @@ class ChatServiceTest {
         assertThat(pull(5, ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE, 5, 10).getErrorMessage().getId()).isEqualTo(1005);
         assertThat(pull(5, ChatChannelType.CHAT_CHANNEL_TYPE_TEAM, 0, 10).getErrorMessage().getId()).isEqualTo(1006);
         assertThat(pull(0, ChatChannelType.CHAT_CHANNEL_TYPE_WORLD, 0, 10).getErrorMessage().getId()).isEqualTo(1005);
+    }
+
+    @Test
+    void 世界与私聊存屏蔽后正文_幂等与私聊权限保持() {
+        ChatService filtered = new ChatService(store, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7),
+                20, 50, Duration.ofSeconds(60), clock::get, REDIS_KEYS, List.of("广告", "Spam", "😀"));
+        for (ChatChannelType channel : List.of(ChatChannelType.CHAT_CHANNEL_TYPE_WORLD,
+                ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE)) {
+            SendChatRequest request = SendChatRequest.newBuilder().setRequestId("filtered-" + channel.name())
+                    .setMessage(ChatMessage.newBuilder().setChannel(channel).setTargetPlayerId(9)
+                            .setSenderPlayerId(999).setContent("  广告 Spam spam 😀  ")).build();
+            assertThat(filtered.send(5, request, 1000).toCompletableFuture().join().hasErrorMessage()).isFalse();
+            assertThat(filtered.send(5, request, 1000).toCompletableFuture().join().hasErrorMessage()).isFalse();
+            PullChatHistoryResponse history = filtered.pull(9, PullChatHistoryRequest.newBuilder().setChannel(channel)
+                    .setPeerPlayerId(5).build(), 1000).toCompletableFuture().join();
+            assertThat(history.getMessagesList()).extracting(ChatMessage::getContent).containsExactly("** **** spam *");
+            assertThat(history.getMessages(0).getSenderPlayerId()).isEqualTo(5);
+        }
+        assertThat(filtered.pull(7, PullChatHistoryRequest.newBuilder()
+                .setChannel(ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE).setPeerPlayerId(9).build(), 1000)
+                .toCompletableFuture().join().getMessagesCount()).isZero();
+    }
+
+    @Test
+    void 中文屏蔽缩小字节也不能绕过原始消息上限() {
+        ChatService filtered = new ChatService(store, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7),
+                20, 50, Duration.ofSeconds(60), clock::get, REDIS_KEYS, List.of("广"));
+        SendChatResponse response = filtered.send(5, world("广".repeat(171), "oversized-filtered"), 1000)
+                .toCompletableFuture().join();
+        assertThat(response.getErrorMessage().getId()).isEqualTo(ChatService.MESSAGE_TOO_LONG);
+        assertThat(store.lists).isEmpty();
+        assertThat(store.strings).isEmpty();
+        assertThat(store.counters).isEmpty();
     }
 
     @Test
@@ -150,7 +183,7 @@ class ChatServiceTest {
             }
         };
         ChatService s = new ChatService(holding, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7), 20, 50,
-                Duration.ofSeconds(60), clock::get, REDIS_KEYS);
+                Duration.ofSeconds(60), clock::get, REDIS_KEYS, List.of());
         CompletableFuture<SendChatResponse> reply = s.send(1, world("x", "req-held"), 1000).toCompletableFuture();
         assertThat(reply).isNotDone();
         held.complete(true);

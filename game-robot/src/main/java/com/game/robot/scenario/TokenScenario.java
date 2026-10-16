@@ -23,8 +23,9 @@ import java.util.regex.Pattern;
  * <ol>
  *   <li>HTTP {@code /api/login} 口令登录：code 0、角色列表在、两枚 43 字符 base64url 令牌、过期秒 ≈ now + 2h / 720h；错口令 401、未知区 500；</li>
  *   <li>TCP {@code Login{auth_type:"access_token"}}：账号取令牌里的（请求里的 account 忽略）、不签新令牌（字段 3–6 空），会话已绑定（建角成功）；</li>
- *   <li>127 RefreshToken 轮换：新的一对；旧 refresh 再用回 2000；HTTP {@code /api/refresh-token} 轮换成功、用过的 401、空的 401；
- *       轮换不作废旧 access（另一条连接仍能用它登录）；</li>
+ *   <li>127 RefreshToken 轮换：新的一对；宽限窗口内重放旧 refresh 回同一对，新 refresh 用过之后再重放回 2000；
+ *       HTTP {@code /api/refresh-token} 轮换成功、窗口内重放回同一对、新 refresh 用过之后重放 401、空的 401；
+ *       轮换不作废旧 access（另一条连接仍能用它登录）。要求 login 的 {@code refresh-reuse-grace} 是缺省 30s（配成 0 时重放项不成立）；</li>
  *   <li>设备数上限：同一账号处于「已登录、未进游戏」窗口的连接到 3 个后第 4 个回 2024，断开一个之后第 4 个能登录。</li>
  * </ol>
  */
@@ -131,19 +132,31 @@ public final class TokenScenario {
                 && !rotated.getRefreshToken().equals(refresh1) && !rotated.getAccessToken().equals(access1)
                 && rotated.getAccessTokenExpire() > 0;
         report.check(rotatedOk, "127 RefreshToken 轮换：新的一对", "error=" + rotated.getErrorMessage().getId(), REF);
-        RefreshTokenResponse reused = first.call(refreshToken, RefreshTokenRequest.newBuilder()
+        // login 的重放宽限窗口（缺省 30s）：窗口内同一旧 refresh 再来、且它换出的新 refresh 没用过，回同一对；本段几秒内走完
+        RefreshTokenResponse replayed = first.call(refreshToken, RefreshTokenRequest.newBuilder()
                 .setRefreshToken(refresh1).build(), RefreshTokenResponse.parser(), requestTimeout);
-        report.check(reused.getErrorMessage().getId() == TIP_ACCOUNT_NOT_FOUND, "用过的 refresh 再用回 2000（一次性）",
-                "error=" + reused.getErrorMessage().getId(), REF);
+        report.check(!replayed.hasErrorMessage() && replayed.getRefreshToken().equals(rotated.getRefreshToken())
+                        && replayed.getAccessToken().equals(rotated.getAccessToken()),
+                "宽限窗口内重放旧 refresh 回同一对（回包丢失后可安全重试）", "error=" + replayed.getErrorMessage().getId(), REF);
         JsonNode httpRotated = http.refresh(rotated.getRefreshToken());
         report.check(httpRotated.get("code").asInt() == 0 && TOKEN.matcher(text(httpRotated, "refresh_token")).matches(),
                 "HTTP /api/refresh-token 轮换成功", "code=" + httpRotated.get("code"), REF);
+        RefreshTokenResponse reused = first.call(refreshToken, RefreshTokenRequest.newBuilder()
+                .setRefreshToken(refresh1).build(), RefreshTokenResponse.parser(), requestTimeout);
+        report.check(reused.getErrorMessage().getId() == TIP_ACCOUNT_NOT_FOUND,
+                "新 refresh 用过之后再重放旧 refresh 回 2000（窗口内也不行）", "error=" + reused.getErrorMessage().getId(), REF);
+        JsonNode httpReplayed = http.refresh(rotated.getRefreshToken());
+        report.check(httpReplayed.get("code").asInt() == 0
+                        && text(httpRotated, "refresh_token").equals(text(httpReplayed, "refresh_token")),
+                "HTTP 宽限窗口内重放回同一对", "code=" + httpReplayed.get("code"), REF);
+        RefreshTokenResponse rotatedAgain = first.call(refreshToken, RefreshTokenRequest.newBuilder()
+                .setRefreshToken(text(httpRotated, "refresh_token")).build(), RefreshTokenResponse.parser(), requestTimeout);
         JsonNode httpReused = http.refresh(rotated.getRefreshToken());
         JsonNode httpEmpty = http.refresh(null);
-        report.check(httpReused.get("code").asInt() == 401 && httpEmpty.get("code").asInt() == 401
-                        && "empty_refresh_token".equals(text(httpEmpty, "message")),
-                "HTTP 用过的 refresh 回 401、空 refresh 回 401 empty_refresh_token",
-                "reused=" + httpReused.get("code") + " empty=" + httpEmpty, REF);
+        report.check(!rotatedAgain.hasErrorMessage() && httpReused.get("code").asInt() == 401
+                        && httpEmpty.get("code").asInt() == 401 && "empty_refresh_token".equals(text(httpEmpty, "message")),
+                "HTTP 新 refresh 用过之后重放回 401、空 refresh 回 401 empty_refresh_token",
+                "rotate=" + rotatedAgain.getErrorMessage().getId() + " reused=" + httpReused.get("code") + " empty=" + httpEmpty, REF);
 
         // 4. 旧 access 不随轮换作废；设备数上限
         GameConnection second = connect();

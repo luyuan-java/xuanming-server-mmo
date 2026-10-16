@@ -86,11 +86,11 @@ public final class GateMetrics {
     public enum RequestResult {
         /** 已交给后端（login 调用已发出 / scene 帧已被链路层受理）。login 调用的结果另见 {@code game.gate.backend.calls}。 */
         FORWARDED,
-        /** scene 域消息，但会话不在场景里：推 23 {1003}。 */
+        /** scene 域消息，但会话不在场景里：回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}；mmorpg client-request-ordering.md O6）。 */
         NOT_IN_SCENE,
-        /** scene 链路层不可用（帧未被受理）。 */
+        /** scene 链路层不可用（帧未被受理）：回带请求 id 的信封 1003（2026-10-15 起，原为不回任何回执；对齐 mmorpg 的「RpcClient 未挂」）。 */
         LINK_UNAVAILABLE,
-        /** Java 版尚未接入的后端域：推 23 {1003}。 */
+        /** Java 版尚未接入的后端域：回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}）。 */
         UNSUPPORTED,
         /** 消息号不存在或不属于客户端协议服务：不回包，计非法包。 */
         UNKNOWN_MESSAGE,

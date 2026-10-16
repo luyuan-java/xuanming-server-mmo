@@ -27,7 +27,10 @@ import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.config.Config;
 
-/** 连真 Redis（{@code -Dgame.it.redis=redis://127.0.0.1:6379}，缺省跳过）：签发 / 校验 / 轮换 / 封顶，DB 13，账号带随机后缀、前后清理。 */
+/**
+ * 连真 Redis（{@code -Dgame.it.redis=redis://127.0.0.1:6379}，缺省跳过）：签发 / 校验 / 轮换（含重放宽限窗口）/ 封顶，DB 13，
+ * 账号带随机后缀、前后清理。
+ */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisLoginTokensIntegrationTest {
 
@@ -36,6 +39,7 @@ class RedisLoginTokensIntegrationTest {
     private static final Instant NOW = Instant.parse("2026-10-04T00:00:00Z");
     private static final Duration ACCESS = Duration.ofHours(2);
     private static final Duration REFRESH = Duration.ofHours(720);
+    private static final Duration GRACE = Duration.ofSeconds(30);
 
     private RedissonClient redis;
     private RedisLoginTokens tokens;
@@ -47,7 +51,19 @@ class RedisLoginTokensIntegrationTest {
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(13);
         redis = Redisson.create(config);
-        tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, new SecureRandom());
+        tokens = withGrace(GRACE);
+    }
+
+    private RedisLoginTokens withGrace(Duration grace) {
+        return new RedisLoginTokens(redis, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, grace, new SecureRandom());
+    }
+
+    /** 轮换并登记要清理的键（新 access、旧 refresh 的轮换记录；新 refresh 在账号集合里，由 tearDown 清）。 */
+    private Optional<TokenPair> refresh(String refreshToken) {
+        Optional<TokenPair> pair = tokens.refresh(refreshToken);
+        touched.add(REDIS_KEYS.loginRefreshRotated(refreshToken));
+        pair.ifPresent(p -> touched.add(REDIS_KEYS.loginAccessToken(p.accessToken())));
+        return pair;
     }
 
     @AfterEach
@@ -98,13 +114,15 @@ class RedisLoginTokensIntegrationTest {
     }
 
     @Test
-    void 轮换_旧refresh一次性作废_新的一对可用_access不随之作废() {
+    void 宽限为零_轮换_旧refresh一次性作废_新的一对可用_access不随之作废() {
+        tokens = withGrace(Duration.ZERO);
         TokenPair first = issue();
-        TokenPair second = tokens.refresh(first.refreshToken()).orElseThrow();
-        touched.add(REDIS_KEYS.loginAccessToken(second.accessToken()));
+        TokenPair second = refresh(first.refreshToken()).orElseThrow();
 
         assertThat(second.refreshToken()).isNotEqualTo(first.refreshToken());
-        assertThat(tokens.refresh(first.refreshToken())).as("用过的 refresh").isEmpty();
+        assertThat(refresh(first.refreshToken())).as("用过的 refresh").isEmpty();
+        assertThat(redis.getBucket(REDIS_KEYS.loginRefreshRotated(first.refreshToken())).isExists())
+                .as("窗口为 0 不写轮换记录").isFalse();
         assertThat(tokens.validateAccess(first.accessToken())).isPresent();
         assertThat(tokens.validateAccess(second.accessToken()).orElseThrow().authType()).isEqualTo("password");
         RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
@@ -113,30 +131,94 @@ class RedisLoginTokensIntegrationTest {
     }
 
     @Test
-    void 并发轮换同一个refresh_恰好一个成功() throws Exception {
+    void 宽限为零_并发轮换同一个refresh_恰好一个成功() throws Exception {
+        tokens = withGrace(Duration.ZERO);
         TokenPair pair = issue();
+        List<Optional<TokenPair>> results = race(pair.refreshToken(), 8);
+        assertThat(results.stream().filter(Optional::isPresent).count()).isEqualTo(1);
+    }
+
+    @Test
+    void 宽限窗口内重放旧refresh_返回同一对_不再签发_记录TTL即窗口() {
+        TokenPair first = issue();
+        TokenPair second = refresh(first.refreshToken()).orElseThrow();
+
+        var record = redis.getBucket(REDIS_KEYS.loginRefreshRotated(first.refreshToken()), StringCodec.INSTANCE);
+        assertThat(record.remainTimeToLive()).isBetween(GRACE.toMillis() - 5_000, GRACE.toMillis());
+        assertThat(refresh(first.refreshToken())).as("回包丢失后拿原 token 重试").contains(second);
+        assertThat(refresh(first.refreshToken())).as("再重试一次也一样").contains(second);
+
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
+        assertThat(set.readAll()).as("没有再签发，旧 refresh 已摘掉").containsExactly(second.refreshToken());
+        assertThat(redis.getBucket(REDIS_KEYS.loginRefreshToken(first.refreshToken())).isExists()).isFalse();
+        assertThat(tokens.validateAccess(second.accessToken())).isPresent();
+        assertThat(refresh(second.refreshToken())).as("重放拿到的 refresh 照常能轮换").isPresent();
+    }
+
+    @Test
+    void 宽限窗口到期后重放旧refresh无效_新refresh不受影响() throws Exception {
+        Duration grace = Duration.ofMillis(300);
+        tokens = withGrace(grace);
+        TokenPair first = issue();
+        TokenPair second = refresh(first.refreshToken()).orElseThrow();
+
+        // 窗口靠记录的 PX 过期实现：等它真的过期（有上限的等待），不靠本地时钟判断
+        var record = redis.getBucket(REDIS_KEYS.loginRefreshRotated(first.refreshToken()), StringCodec.INSTANCE);
+        long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
+        while (record.isExists() && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat(record.isExists()).as("轮换记录按窗口过期").isFalse();
+        assertThat(refresh(first.refreshToken())).isEmpty();
+        assertThat(refresh(second.refreshToken())).as("被拒的重放不影响新 refresh").isPresent();
+    }
+
+    @Test
+    void 新refresh用过之后_窗口内重放旧refresh也无效_新refresh自己的窗口照常() {
+        TokenPair first = issue();
+        TokenPair second = refresh(first.refreshToken()).orElseThrow();
+        TokenPair third = refresh(second.refreshToken()).orElseThrow();
+
+        assertThat(redis.getBucket(REDIS_KEYS.loginRefreshRotated(first.refreshToken())).isExists()).as("仍在窗口内").isTrue();
+        assertThat(refresh(first.refreshToken())).as("合法客户端用上新 refresh 后不会再拿旧的重试").isEmpty();
+        assertThat(refresh(second.refreshToken())).contains(third);
+    }
+
+    @Test
+    void 宽限窗口内并发轮换同一个refresh_全部拿到同一对_只签发一次() throws Exception {
+        TokenPair pair = issue();
+        List<Optional<TokenPair>> results = race(pair.refreshToken(), 8);
+
+        assertThat(results).allSatisfy(r -> assertThat(r).isPresent());
+        TokenPair won = results.get(0).orElseThrow();
+        assertThat(results).allSatisfy(r -> assertThat(r).contains(won));
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
+        assertThat(set.readAll()).containsExactly(won.refreshToken());
+    }
+
+    /** n 路同时拿同一个 refresh 轮换。 */
+    private List<Optional<TokenPair>> race(String refreshToken, int n) throws Exception {
         CountDownLatch start = new CountDownLatch(1);
         List<CompletableFuture<Optional<TokenPair>>> racers = new ArrayList<>();
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < n; i++) {
             racers.add(CompletableFuture.supplyAsync(() -> {
                 try {
                     start.await();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                return tokens.refresh(pair.refreshToken());
+                return tokens.refresh(refreshToken);
             }));
         }
         start.countDown();
-        long winners = 0;
+        List<Optional<TokenPair>> results = new ArrayList<>();
         for (CompletableFuture<Optional<TokenPair>> racer : racers) {
-            Optional<TokenPair> won = racer.get();
-            if (won.isPresent()) {
-                winners++;
-                touched.add(REDIS_KEYS.loginAccessToken(won.get().accessToken()));
-            }
+            Optional<TokenPair> result = racer.get();
+            result.ifPresent(p -> touched.add(REDIS_KEYS.loginAccessToken(p.accessToken())));
+            results.add(result);
         }
-        assertThat(winners).isEqualTo(1);
+        touched.add(REDIS_KEYS.loginRefreshRotated(refreshToken));
+        return results;
     }
 
     @Test
@@ -159,7 +241,7 @@ class RedisLoginTokensIntegrationTest {
                 return now.get();
             }
         };
-        tokens = new RedisLoginTokens(redis, REDIS_KEYS, moving, ACCESS, REFRESH, new SecureRandom());
+        tokens = new RedisLoginTokens(redis, REDIS_KEYS, moving, ACCESS, REFRESH, GRACE, new SecureRandom());
         RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
         set.add(NOW.getEpochSecond() - 1, "dead-member");
         List<TokenPair> pairs = new ArrayList<>();

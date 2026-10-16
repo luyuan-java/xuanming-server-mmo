@@ -50,6 +50,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 
 /**
  * game-friend 的装配。所有依赖显式经构造参数传入业务类；这里是唯一读配置、碰外部系统的地方。
@@ -62,6 +64,16 @@ public class FriendConfiguration {
     static final Duration WORKER_DRAIN_TIMEOUT = Duration.ofSeconds(10);
     /** 结构同步连接的 socket 超时（咨询锁最多等 30 s，再加 DDL）。 */
     static final Duration SCHEMA_SYNC_NETWORK_TIMEOUT = Duration.ofMinutes(2);
+
+    /** 静态工厂避免为创建早期池策略而提前初始化整个业务装配类。 */
+    @Bean
+    static FriendConnectionPolicy friendConnectionPolicy(Environment environment,
+            @Value("${game.friend.require-tidb:false}") boolean requireTiDb) {
+        if (environment.acceptsProfiles(Profiles.of("prod")) && !requireTiDb) {
+            throw new IllegalStateException("生产好友服务不得关闭 TiDB 权威门禁");
+        }
+        return new FriendConnectionPolicy(requireTiDb);
+    }
 
     @Bean
     public MessageIdRegistry messageIdRegistry() {
@@ -118,6 +130,17 @@ public class FriendConfiguration {
             try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery("SELECT @@tidb_txn_mode")) {
                 if (!rows.next() || !"pessimistic".equalsIgnoreCase(rows.getString(1))) {
                     throw new SQLException("好友容量守卫要求 tidb_txn_mode=pessimistic");
+                }
+            }
+            if (connection.getTransactionIsolation() != Connection.TRANSACTION_READ_COMMITTED) {
+                throw new SQLException("好友强读连接必须使用 READ COMMITTED");
+            }
+            try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
+                    "SELECT @@tidb_read_consistency, @@tidb_snapshot, @@tidb_read_staleness, @@tidb_low_resolution_tso, @@tidb_replica_read")) {
+                if (!rows.next() || !"strict".equalsIgnoreCase(rows.getString(1)) || !"".equals(rows.getString(2))
+                        || !"0".equals(rows.getString(3)) || !"0".equals(rows.getString(4))
+                        || !"leader".equalsIgnoreCase(rows.getString(5))) {
+                    throw new SQLException("好友强读会话策略不符，禁止弱读、历史快照、陈旧读或低精度时间戳");
                 }
             }
         }

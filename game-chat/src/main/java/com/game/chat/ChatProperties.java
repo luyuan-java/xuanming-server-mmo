@@ -1,6 +1,8 @@
 package com.game.chat;
 
+import com.game.chat.service.SensitiveWordFilter;
 import java.time.Duration;
+import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
@@ -14,6 +16,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param historyMaxLimit     拉取上限（缺省 50；不得小于缺省值）
  * @param requestIdTtl        发言幂等键的过期（缺省 60 s）
  * @param requestBudget       整请求预算（缺省 3500 ms，须先于 gate 调后端的 5 s Dubbo 超时）
+ * @param sensitiveWords      按配置顺序屏蔽的字面词表，大小写敏感；缺省空表
  */
 @ConfigurationProperties("game.chat")
 public record ChatProperties(
@@ -24,11 +27,15 @@ public record ChatProperties(
         Integer historyDefaultLimit,
         Integer historyMaxLimit,
         Duration requestIdTtl,
-        Duration requestBudget) {
+        Duration requestBudget,
+        List<String> sensitiveWords) {
 
     public static final Duration MAX_REQUEST_BUDGET = Duration.ofMillis(4000);
 
     public ChatProperties {
+        // 在任何外部连接装配前拒绝无界或非法词表，并保留调用方不可修改的配置快照。
+        new SensitiveWordFilter(sensitiveWords);
+        sensitiveWords = sensitiveWords == null ? List.of() : List.copyOf(sensitiveWords);
         maxContentBytes = positiveOr(maxContentBytes, 512, "max-content-bytes");
         rateLimitPerSecond = positiveOr(rateLimitPerSecond, 5, "rate-limit-per-second");
         historyMaxEntries = positiveOr(historyMaxEntries, 200, "history-max-entries");

@@ -34,7 +34,7 @@ import org.springframework.core.io.ClassPathResource;
  * gate 接后端的四处必须对得上（接入一个新后端要改齐，批次 6.4 接 game-match 时补的钉子）：
  * {@link MessageRoutes#SERVICE_BACKENDS}（服务名 → 域）、{@link GateConfiguration} 里每个域一个 {@code @DubboReference}、
  * 交给 {@link GateNode} 的后端表（{@link GateConfiguration#backends}）、两份配置文件里的直连地址（local 直连、nacos 置空）。
- * 漏掉哪一处进程都照常起来，只有发那个服务的号才看得出（缺引用 / 缺后端表项 → 23 {1003}；nacos 下没置空 → 绕过注册中心去连本机）。
+ * 漏掉哪一处进程都照常起来，只有发那个服务的号才看得出（缺引用 / 缺后端表项 → 带请求 id 的信封 1003，2026-10-15 前是 23 {1003}；nacos 下没置空 → 绕过注册中心去连本机）。
  *
  * <p>只做装配层面的核对，不起 Spring 上下文、不起 Dubbo（引用在后端不在 / 晚起 / 重启时的行为由 {@code BackendReconnectTest} 用真 Triple 钉）。
  */

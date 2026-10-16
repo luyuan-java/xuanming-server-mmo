@@ -7,7 +7,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
-/** 内存版令牌（测试用）：令牌按序号生成；可设为「存储故障」让每个操作都抛异常。 */
+/**
+ * 内存版令牌（测试用）：令牌按序号生成；可设为「存储故障」让每个操作都抛异常。
+ * refresh 按重放宽限窗口为 0 的语义建模（严格一次性）；窗口内重放的语义由 {@code RedisLoginTokensIntegrationTest} 覆盖。
+ */
 public final class InMemoryLoginTokens implements LoginTokens {
 
     public final Map<String, TokenData> access = new HashMap<>();

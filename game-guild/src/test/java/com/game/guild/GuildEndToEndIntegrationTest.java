@@ -114,6 +114,7 @@ class GuildEndToEndIntegrationTest {
     private String database;
     private DruidDataSource dataSource;
     private RedissonClient redis;
+    private SimpleMeterRegistry meters;
     private ScheduledExecutorService leaseScheduler;
     private ScheduledExecutorService background;
     private NodeIdLease lease;
@@ -155,7 +156,8 @@ class GuildEndToEndIntegrationTest {
         // ---- 照 GuildConfiguration 的顺序装配 ----
         GuildConfiguration wiring = new GuildConfiguration();
         GuildProperties props = new GuildProperties(null, null, null, null, null, 4, 64, null);
-        GuildMetrics metrics = wiring.guildMetrics(new SimpleMeterRegistry());
+        meters = new SimpleMeterRegistry();
+        GuildMetrics metrics = wiring.guildMetrics(meters);
         ConfigTables tables = wiring.guildConfigTables(tableDir());
         PbMysql synced = wiring.guildTables(dataSource, tables);
         GuildTx tx = wiring.guildTx(dataSource, props, metrics);
@@ -179,7 +181,8 @@ class GuildEndToEndIntegrationTest {
         GuildAccess access = wiring.guildAccess(cache, profiles, invalidator);
         GuildViews views = wiring.guildViews(presence, profiles, metrics, props, lookup, store);
         GuildService guilds = wiring.guildService(store, cache, access, views, ranks, pushes, ids, lookup);
-        GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup);
+        GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup,
+                wiring.guildApplyQuota(redis, REDIS_KEYS, props, meters));
         GuildRankService rankService = wiring.guildRankService(ranks, cache, access, views);
         pool = wiring.guildWorkerPool(props, dataSource);
         // 4.5：资产通道关闭（props 缺省），经济服务照常装配（升级与两个读页可用，捐献 / 兑换回 14026）
@@ -202,6 +205,9 @@ class GuildEndToEndIntegrationTest {
 
     @AfterEach
     void tearDown() throws Exception {
+        if (meters != null) {
+            meters.close();
+        }
         if (pool != null) {
             pool.close();
         }
@@ -227,6 +233,7 @@ class GuildEndToEndIntegrationTest {
             }
             for (long p : List.of(a, b, c)) {
                 keys.add(REDIS_KEYS.guildOfPlayer(p));
+                keys.add(REDIS_KEYS.guildApplyQuota(p));
                 keys.add(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildOfPlayer(p)));
             }
             keys.add(REDIS_KEYS.guildRankAll());
@@ -256,6 +263,23 @@ class GuildEndToEndIntegrationTest {
         ClientReply reply = send(player, method, request);
         assertThat(reply.getTipId()).as(method + " 不该回信封").isZero();
         return parser.parseFrom(reply.getBody());
+    }
+
+    @Test
+    void 真实生产装配_申请刷新第十一次被配额拒绝_保留原待审行() throws Exception {
+        CreateGuildResponse created = call(b, GuildMethods.CREATE_GUILD,
+                CreateGuildRequest.newBuilder().setName("配额" + Long.toHexString(base & 0xFFFFF)).build(),
+                CreateGuildResponse.parser());
+        long guildId = created.getGuild().getGuildId();
+        guildIds.add(guildId);
+        ApplyJoinGuildRequest apply = ApplyJoinGuildRequest.newBuilder().setGuildId(guildId).build();
+        for (int attempt = 0; attempt < 10; attempt++) {
+            assertThat(call(a, GuildMethods.APPLY_JOIN_GUILD, apply, ApplyJoinGuildResponse.parser()).hasErrorMessage()).isFalse();
+        }
+        assertThat(call(a, GuildMethods.APPLY_JOIN_GUILD, apply, ApplyJoinGuildResponse.parser()).getErrorMessage().getId())
+                .isEqualTo(com.game.table.CommonErrorTip.common_error.kRateLimitExceeded_VALUE);
+        assertThat(call(a, GuildMethods.LIST_MY_GUILD_APPLICATIONS, null, ListMyGuildApplicationsResponse.parser())
+                .getApplicationsList()).singleElement().satisfies(row -> assertThat(row.getGuildId()).isEqualTo(guildId));
     }
 
     @Test

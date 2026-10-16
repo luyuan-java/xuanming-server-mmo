@@ -29,7 +29,8 @@ import org.slf4j.LoggerFactory;
  *       线上更宽 → 视为兼容，不收窄；</li>
  *   <li>NULL / DEFAULT / AUTO_INCREMENT 属性、同名索引的定义、主键定义与 proto 不一致 → 拒绝；</li>
  *   <li>proto 声明、线上缺的索引 / 唯一键（按名字）→ {@code ADD INDEX} / {@code ADD UNIQUE KEY}；
- *       线上没有主键 → {@code ADD PRIMARY KEY}（第二条 ALTER，带 AUTO_INCREMENT 的主键列新增一并挪过去）；</li>
+ *       线上没有主键 → {@code ADD PRIMARY KEY}；普通列先新增，再分别补主键与二级索引，
+ *       新增 AUTO_INCREMENT 列仍须与给它提供键的定义放在同一条 ALTER；</li>
  *   <li>线上多出来的列 / 索引一律不动，从不 DROP。</li>
  * </ul>
  */
@@ -53,10 +54,10 @@ final class SchemaPlanner {
     record IndexMeta(boolean unique, List<IndexColumn> columns) {
     }
 
-    /** 规划结果：第一条 ALTER（列 + 索引）、第二条 ALTER（补主键，及必须跟它同句的自增主键列）。都为空 = 结构已对齐。 */
-    record Plan(List<String> columnClauses, List<String> primaryKeyClauses) {
+    /** 按普通列、主键、二级索引分阶段；自增列与提供键的定义保持同句。全部为空表示结构已对齐。 */
+    record Plan(List<String> columnClauses, List<String> primaryKeyClauses, List<String> indexClauses) {
         boolean isEmpty() {
-            return columnClauses.isEmpty() && primaryKeyClauses.isEmpty();
+            return columnClauses.isEmpty() && primaryKeyClauses.isEmpty() && indexClauses.isEmpty();
         }
     }
 
@@ -199,17 +200,21 @@ final class SchemaPlanner {
 
         List<String> columnClauses = new ArrayList<>();
         List<String> pkClauses = new ArrayList<>();
+        List<String> indexClauses = new ArrayList<>();
         Set<String> movedAutoIncrement = new HashSet<>();
-        if (!t.primaryKey().isEmpty() && currentPk == null) {
-            // 补主键：只补「从无到有」。MySQL 要求自增列必须是键，所以新增的自增主键列要与 ADD PRIMARY KEY 同句
-            for (ColumnClause c : adds) {
-                if (c.autoIncrement() && t.primaryKey().contains(c.column())) {
-                    pkClauses.add(c.sql());
-                    movedAutoIncrement.add(c.column());
-                } else {
-                    columnClauses.add(c.sql());
-                }
+        boolean missingPrimaryKey = !t.primaryKey().isEmpty() && currentPk == null;
+        for (ColumnClause c : adds) {
+            // MySQL 要求自增列在建出的同时已有键；普通列则先落库，避免 TiDB 在同句建索引时找不到新列。
+            if (c.autoIncrement() && missingPrimaryKey && t.primaryKey().contains(c.column())) {
+                pkClauses.add(c.sql());
+                movedAutoIncrement.add(c.column());
+            } else if (c.autoIncrement()) {
+                indexClauses.add(c.sql());
+            } else {
+                columnClauses.add(c.sql());
             }
+        }
+        if (missingPrimaryKey) {
             List<String> pkCols = new ArrayList<>();
             for (String pk : t.primaryKey()) {
                 pkCols.add(t.indexColumn(pk));
@@ -220,10 +225,6 @@ final class SchemaPlanner {
             }
             pkClauses.add(pkClause);
             log.info("table {} is missing its primary key; adding {}", table, String.join(",", pkCols));
-        } else {
-            for (ColumnClause c : adds) {
-                columnClauses.add(c.sql());
-            }
         }
 
         for (String clause : missingIndexClauses(t, existingIndexes)) {
@@ -234,10 +235,10 @@ final class SchemaPlanner {
                     break;
                 }
             }
-            // 依赖尚未建出的自增主键列的索引只能放进第二条 ALTER，否则第一条先报 Error 1072
-            (dependsOnMoved ? pkClauses : columnClauses).add(clause);
+            // 自增列若不是主键首列，还需要同句的二级索引提供首列键；其余索引等普通列和主键就绪后再建。
+            (dependsOnMoved ? pkClauses : indexClauses).add(clause);
         }
-        return new Plan(List.copyOf(columnClauses), List.copyOf(pkClauses));
+        return new Plan(List.copyOf(columnClauses), List.copyOf(pkClauses), List.copyOf(indexClauses));
     }
 
     /** NULL / DEFAULT / AUTO_INCREMENT、键列形态、同名索引定义、主键定义的漂移（Go 版 validateSchemaDrift）。 */

@@ -25,6 +25,19 @@ class LoginPropertiesTest {
         assertThat(props.refreshTokenTtl()).isEqualTo(Duration.ofHours(720));
         assertThat(props.maxDevicesPerAccount()).isEqualTo(3);
         assertThat(props.deviceSessionTtl()).isEqualTo(Duration.ofMinutes(30));
+        assertThat(props.refreshReuseGrace()).as("基线 TokenConfig.RefreshReuseGrace").isEqualTo(Duration.ofSeconds(30));
+    }
+
+    @Test
+    void refresh重放宽限窗口_0到60秒() {
+        assertThat(grace(Duration.ZERO).refreshReuseGrace()).as("0 = 严格一次性").isZero();
+        assertThat(grace(Duration.ofSeconds(60)).refreshReuseGrace()).isEqualTo(Duration.ofSeconds(60));
+        assertThatThrownBy(() -> grace(Duration.ofSeconds(61))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> grace(Duration.ofSeconds(-1))).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private static LoginProperties grace(Duration refreshReuseGrace) {
+        return new LoginProperties(null, null, null, null, null, null, null, null, null, null, null, null, refreshReuseGrace);
     }
 
     @Test

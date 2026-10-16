@@ -153,6 +153,16 @@ final class SchemaSync {
             log.info("pbmysql 补主键 {}: {}", name, alter);
             awaitColumnsVisible(conn, database, name, plan.primaryKeyClauses());
         }
+        if (!plan.indexClauses().isEmpty()) {
+            String alter = "ALTER TABLE " + escapeName(name) + " " + String.join(", ", plan.indexClauses());
+            try {
+                exec(conn, alter);
+            } catch (SQLException e) {
+                throw wrap("表 " + name + " 的普通列与主键已对齐，但补齐索引失败", alter, e);
+            }
+            log.info("pbmysql 补索引 {}: {}", name, alter);
+            awaitColumnsVisible(conn, database, name, plan.indexClauses());
+        }
     }
 
     private static SQLException wrap(String what, String sql, SQLException e) {

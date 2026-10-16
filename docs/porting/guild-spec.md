@@ -1084,6 +1084,39 @@ robot 第 6 步、M3、M4。
 | 撤回 | 14018 |
 | 审批 | 14018（申请行已被删） |
 
+上表是不带 `expected_guild_id`（= 0，旧客户端）时的结果；带了的五个写请求见 §3.19。
+
+### 3.19 expected_guild_id 栅栏（客户端请求按会话保序 O14，2026-10-15 起）
+
+依据：mmorpg `docs/design/client-request-ordering.md` O14 / §6.4；基线 `go/guild/internal/logic/expected_guild.go`。客户端可见的协议改动，
+两版与客户端同批（`proto/guild/guild.proto`：`LeaveGuildRequest` / `DisbandGuildRequest` / `KickGuildMemberRequest` /
+`TransferGuildLeaderRequest` 的 2 号、`SetGuildMemberRoleRequest` 的 3 号字段 `expected_guild_id`，经 ContractSync 同步）。
+
+**要防的事**：gate 后端 lane 让同一会话的请求按到达顺序逐条发出，但上一条超时（gate 回 1003、放行下一条）之后仍可能在 guild 里跑完。
+客户端在这段时间里可能已经离开 G、加入 H——迟到的退帮 / 解散 / 踢人 / 转让 / 任免若按「操作者此刻所在的帮」执行，就作用到了 H 上。
+
+**语义**（`GuildAccess.bindExpectedGuild` / `expectedGuildLost` / `rejectExpectedGuild`）：
+- `expected_guild_id = 0`：旧客户端，行为与本节之前逐字相同（`operatorGuild`），计 `game_guild_expected_guild_total{method, outcome="absent"}`。
+- 非 0：它**取代** `operatorGuild` 的结果作为事务的 guild_id。事务前先预检（缓存映射等于它 → 直接进事务；不等 → M5 复核并顺手失效映射，
+  仍不等 → 拒绝、不碰存储——`expected` 来自客户端，不预检就等于让任何人对任意帮的 guild 行加锁、给那个帮的成员建状态行）。
+  判据是事务里那次复核：存储在锁住的 guild 行与成员行上判定，锁不到本人成员行 → `NOT_MEMBER`、帮会行不在 → `GUILD_GONE`；
+  给帮会增删成员的事务都先锁 guild 行，复核与提交之间没人能把操作者换进 / 换出这个帮。
+- 不在该帮（在别的帮、不在任何帮、该帮已解散）→ **14002**「not a member of the expected guild」（`GuildTip.NOT_IN_EXPECTED_GUILD`），
+  不写、不推送，计 `outcome="mismatch"`，记 INFO；任免 / 踢人 / 转让的回包附操作者**当前**所在帮会的快照（`GuildCache.resolve`，
+  不在任何帮不填；快照读失败只记 ERROR、不附，不把拒绝改成故障）。事务那一支先 `verifyMapping(me, expected)` 再取快照。
+- 退帮的差别：带了字段而不在该帮一律 14002，**不**按 §3.5 的幂等成功处理（它回答的是「你不在该帮」，客户端拉 GetPlayerGuild 刷新）。
+- 解散：存储在 `leader_id ≠ actor` 时于同一把 guild 行锁下普通读 M4 区分「仍是成员」（`RANK_TOO_LOW`）与「已不是成员」（`NOT_MEMBER`）。
+  带了字段的 `NOT_MEMBER` 回 14002；旧客户端两者都回 14005、不自愈映射（`GuildTips.forDisbandReject`），与区分之前逐字相同。
+- 一致：照常执行，不计数（它与 `game_guild_requests_seconds{method}` 的请求数之差就是 absent）。
+
+**提交点**（§1.6，mmorpg client-request-ordering.md §6.1）：整请求预算从受理时刻起算、含排队（缺省 3.5 s，上限 3.5 s，先于 gate 调 guild 的 5 s
+Dubbo 超时到期），`GuildTx` 在每条语句与 COMMIT 之前查子预算（≤ 请求剩余）；请求预算用完 → 不提交、整体回滚、依赖故障。gate 观察到超时时，
+这一条已经不会再提交；截止前已发出的那一次 COMMIT 撤不回来，由本节的栅栏兜。
+
+单测：`ExpectedGuildServiceTest`（五个方法一张表：0 / 一致 / 别的帮 / 不在任何帮 / 预检之后才换帮 / 事务里帮已解散 / 旧客户端解散的
+`NOT_MEMBER` 仍回 14005）、`GuildTipsTest`（新 tip 与解散映射）、`GuildTxTest#请求预算在提交前用完_不提交_按依赖故障抛`；
+真库 `JdbcGuildStoreMysqlTest#解散_已离帮的原帮主答NOT_MEMBER_成员照旧RANK_TOO_LOW`。
+
 ---
 
 ## 4 推送、在线与名字
@@ -1572,6 +1605,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 | `game_guild_profile_lookup_failures_total` | Counter | — | `guild_player_name_lookup_failed_total` |
 | `game_guild_online_lookups_total` | Counter | `outcome` = ok / timeout / error | Java 增项（基线只有日志） |
 | `game_guild_rank_ops_total` | Counter | `op` = add / remove / rebuild，`outcome` = ok / lock_timeout / error | Java 增项（基线只有日志） |
+| `game_guild_expected_guild_total` | Counter | `method` = leave / disband / kick / transfer / set_role，`outcome` = absent / mismatch；10 个组合启动即注册（§3.19） | `guild_manage_expected_guild_total` |
 | `executor_*{name="guild-worker"}` | Micrometer 标准线程池指标 | — | 同 friend |
 
 - 选 `fault` 而不是把 14008 并进 `internal_error`：基线对它单独定性（Tip 表 fault 列），合并后就看不出「发号器坏了」与「依赖故障」的区别。

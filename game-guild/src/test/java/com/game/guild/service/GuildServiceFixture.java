@@ -93,6 +93,7 @@ public final class GuildServiceFixture implements AutoCloseable {
     volatile boolean pushThrows;
     volatile boolean pushFails;
     final List<String> cooldownCalls = Collections.synchronizedList(new ArrayList<>());
+    volatile GuildManageService.ApplicationQuota applicationQuota;
 
     // ---- 配表 / 发号 / 时钟 ----
     volatile ApplicationRules rules = RULES;
@@ -172,17 +173,21 @@ public final class GuildServiceFixture implements AutoCloseable {
                 store::playerGuildId, invalidator, metrics);
         ranks = new GuildRanks(rankRedis, REDIS_KEYS, background, metrics);
         guildPushes = new GuildPushes(this::push, metrics, NOTIFY_ID, Duration.ofSeconds(3));
-        access = new GuildAccess(cache, homeZones, fence, invalidator);
+        access = new GuildAccess(cache, homeZones, fence, invalidator, metrics);
         OnlineStatuses onlineStatuses = new OnlineStatuses(this::onlineLookup, Duration.ofMillis(800), metrics);
         PlayerNames playerNames = new PlayerNames(this::nameLookup, metrics);
         views = new GuildViews(onlineStatuses, playerNames, tables, store::countLiveApplications, () -> NOW);
         guilds = new GuildService(store, cache, access, views, ranks, guildPushes, () -> guildIds.getAsLong(), tables,
                 () -> NOW);
+        Map<String, Long> quotaCounts = new java.util.concurrent.ConcurrentHashMap<>();
+        com.game.guild.quota.GuildApplyQuota quota = new com.game.guild.quota.GuildApplyQuota(
+                key -> CompletableFuture.completedFuture(quotaCounts.merge(key, 1L, Long::sum)), REDIS_KEYS, 10, meters);
+        applicationQuota = quota::tryAcquire;
         manage = new GuildManageService(store, cache, access, views, guildPushes, (g, p, d) -> {
             cooldownCalls.add(g + ":" + p);
             journal.add("cooldown " + g + " " + p);
             return cooldownAllows;
-        }, tables, () -> NOW);
+        }, tables, () -> NOW, (playerId, deadline) -> applicationQuota.tryAcquire(playerId, deadline));
         rankService = new GuildRankService(ranks, cache, access, views);
         economyStore = new ScriptedEconomyStore(journal::add);
         economy = economy(null, Runnable::run);

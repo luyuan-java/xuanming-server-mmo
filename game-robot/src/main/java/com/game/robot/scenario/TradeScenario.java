@@ -784,7 +784,8 @@ public final class TradeScenario {
 
     /**
      * 一个已进场的机器人。只在场景线程上使用；每次发送先过 {@link GuildScenario.Pacer}（{@link #REQUEST_SPACING} 间隔）。
-     * 等应答时同时盯着 23 {1003}：gate 没把聚宝斋的号路由到后端时只推 23、不回应答，立即判失败而不是干等超时（Go :646-649）。
+     * 等应答时同时盯着 23 {1003}：旧 gate 没把聚宝斋的号路由到后端时只推 23、不回应答，立即判失败而不是干等超时（Go :646-649）。
+     * 2026-10-15 起 gate 对「未接入的域」改回带请求 id 的信封 1003（mmorpg client-request-ordering.md O6，两版同批），按信封错误判失败。
      */
     static final class Bot {
 
@@ -827,6 +828,8 @@ public final class TradeScenario {
             }
             Received reply = got.get();
             if (reply.messageId() == sendTip) {
+                // 只有 2026-10-15 之前的 gate 会这样回「未接入的域」；之后的 gate 回带请求 id 的信封 1003，走下面的信封分支
+                // （mmorpg client-request-ordering.md O6）。保留这一支，对着旧 gate 跑时仍能给出可读原因。
                 throw new RobotException(name + "：发 message_id=" + messageId + " 后 gate 推了 23 {1003}、不回应答：gate 没把聚宝斋的号路由到"
                         + " game-trade（gate 版本过旧，没有 trade 后端）");
             }
@@ -855,7 +858,7 @@ public final class TradeScenario {
         static String envelopeHint(int tip) {
             if (tip == TIP_SERVICE_UNAVAILABLE) {
                 return "（请求没到 game-trade 业务逻辑：game-trade 不在 / Dubbo 调用失败或超时 / 方法被热关停 / 会话 player_id = 0 / "
-                        + "请求体解析失败；看 gate 与 game-trade 日志）";
+                        + "请求体解析失败 / gate 没把聚宝斋的号路由到 game-trade（未接入的域）；看 gate 与 game-trade 日志）";
             }
             if (tip == TIP_RATE_LIMITED) {
                 return "（gate 限频：请求太密）";

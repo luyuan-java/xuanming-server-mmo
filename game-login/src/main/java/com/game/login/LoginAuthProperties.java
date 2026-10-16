@@ -1,8 +1,10 @@
 package com.game.login;
 
 import com.game.login.auth.ProductionPasswordAuthenticator;
+import com.game.login.auth.RedisPasswordFailureQuota;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 /**
  * 认证配置（{@code game.login.auth.*}，同 mmorpg login.yaml 的 PasswordAuth / AuthProviders）。没写的一项 = 不启用（fail-closed）。
@@ -29,11 +31,21 @@ public record LoginAuthProperties(PasswordAuth password, SaToken satoken, WeChat
      * @param kdfConcurrency KDF 并发槽（缺省 2，1–8；每个占 64 MiB）
      * @param kdfWait        等槽上限（缺省 500 ms，最多 5 s）
      */
-    public record PasswordAuth(boolean enabled, Integer kdfConcurrency, Duration kdfWait) {
+    public record PasswordAuth(boolean enabled, Integer kdfConcurrency, Duration kdfWait,
+                               Integer failureLimit, Duration failureWindow, Duration failureLock) {
 
+        public PasswordAuth(boolean enabled, Integer kdfConcurrency, Duration kdfWait) {
+            this(enabled, kdfConcurrency, kdfWait, null, null, null);
+        }
+
+        @ConstructorBinding
         public PasswordAuth {
             kdfConcurrency = kdfConcurrency == null ? ProductionPasswordAuthenticator.DEFAULT_KDF_CONCURRENCY : kdfConcurrency;
             kdfWait = kdfWait == null ? ProductionPasswordAuthenticator.DEFAULT_KDF_WAIT : kdfWait;
+            failureLimit = failureLimit == null ? 5 : failureLimit;
+            failureWindow = failureWindow == null ? Duration.ofMinutes(15) : failureWindow;
+            failureLock = failureLock == null ? Duration.ofMinutes(5) : failureLock;
+            new RedisPasswordFailureQuota.Policy(failureLimit, failureWindow, failureLock);
         }
     }
 

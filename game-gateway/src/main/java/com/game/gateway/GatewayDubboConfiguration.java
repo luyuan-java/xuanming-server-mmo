@@ -25,7 +25,9 @@ public class GatewayDubboConfiguration {
 
     /**
      * game-login 的无会话登录（Dubbo group = login）。默认直连 {@code game.dubbo.login-url}，nacos profile 该值置空走注册中心。
-     * 不重试（retries = 0）：刷新令牌是一次性轮换，重试会拿已作废的 refresh 再打一次；登录重试会让客户端的一次点击变成两次认证。
+     * 不重试（retries = 0）：刷新令牌是一次性轮换，login 只在重放宽限窗口内（缺省 30s，可配成 0）对同一旧 refresh 回同一对，
+     * 窗口为 0 时网关重试会把「login 暂时不可用」变成「认证被拒」、让客户端放弃重试去重登，所以重试留给客户端；
+     * 登录重试会让客户端的一次点击变成两次认证。
      * 超时取 {@code dubbo.consumer.timeout}（3000 ms，同基线 login.grpc.timeout-ms；须小于客户端 HTTP 的 5 s，失败才能带着业务码回去）。
      */
     @Bean

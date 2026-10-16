@@ -190,6 +190,8 @@ class GuildTipsTest {
         want.put(GuildTip.APPLY_GUILD_ID_ZERO, new Object[] {14001, "guild id is zero"});
         want.put(GuildTip.NOT_IN_ANY_GUILD, new Object[] {14002, "not in any guild"});
         want.put(GuildTip.NOT_A_MEMBER, new Object[] {14002, "not a member of the guild"});
+        // expected_guild_id 栅栏（mmorpg client-request-ordering.md O14；基线 expected_guild.go rejectExpectedGuild）
+        want.put(GuildTip.NOT_IN_EXPECTED_GUILD, new Object[] {14002, "not a member of the expected guild"});
         want.put(GuildTip.GUILD_FULL, new Object[] {14003, "guild is full"});
         want.put(GuildTip.LEADER_CANT_LEAVE, new Object[] {14004, "leader cannot leave, disband or transfer instead"});
         want.put(GuildTip.NOT_GUILD_LEADER, new Object[] {14005, "not guild leader"});
@@ -328,14 +330,20 @@ class GuildTipsTest {
         }
     }
 
-    /** 解散是唯一一处 RANK_TOO_LOW 不回 14016 的地方（guild_logic.go:491-498）；其余同整表。 */
+    /**
+     * 解散是唯一一处 RANK_TOO_LOW 不回 14016 的地方（guild_logic.go:491-498）；NOT_MEMBER 是存储为 expected_guild_id 才从 RANK_TOO_LOW
+     * 里分出来的「已不是本帮成员」，旧客户端照旧回 14005、不自愈映射；其余同整表。
+     */
     @Test
     void 解散的职位不足回14005() {
         assertThat(GuildTips.forDisbandReject(GuildReject.RANK_TOO_LOW))
                 .isEqualTo(tip(GuildTip.NOT_GUILD_LEADER, MappingRepair.NONE));
+        assertThat(GuildTips.forDisbandReject(GuildReject.NOT_MEMBER))
+                .as("区分出来之前这一支就是 RANK_TOO_LOW：答复逐字不变")
+                .isEqualTo(tip(GuildTip.NOT_GUILD_LEADER, MappingRepair.NONE));
         assertThat(GuildTip.NOT_GUILD_LEADER.code()).isEqualTo(GuildTips.NOT_LEADER);
         for (GuildReject reject : GuildReject.values()) {
-            if (reject != GuildReject.RANK_TOO_LOW) {
+            if (reject != GuildReject.RANK_TOO_LOW && reject != GuildReject.NOT_MEMBER) {
                 assertThat(GuildTips.forDisbandReject(reject)).as(reject.name()).isEqualTo(GuildTips.forReject(reject));
             }
         }

@@ -11,6 +11,7 @@ import com.game.api.proto.ClientReply;
 import com.game.api.proto.EnterScene;
 import com.game.api.proto.SessionClosed;
 import com.game.api.proto.SessionDirective;
+import com.game.api.proto.UnbindPlayer;
 import com.game.common.token.GateTokens;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
@@ -45,6 +46,8 @@ import org.junit.jupiter.api.Test;
  *       后端回了信封 tip（请求体解析失败 → 1003）时照样回信封；</li>
  *   <li>game-match 不在、调用失败或超时 → 带请求号的信封 1003，10 个号都一样（含 148），不断连、不计非法包；</li>
  *   <li>同一会话的 match 请求串行（上一个有了结论才发下一个），不占 login / scene 的通道；</li>
+ *   <li>排在后端 lane 里的请求发出时身份只降不升：排队期间 LeaveGame 成功解绑、或换了角色，按 player_id = 0 发出
+ *       （mmorpg client-request-ordering.md §17）；LeaveGame 失败（结果未知）不解绑，照旧带原角色；</li>
  *   <li>10 个号都不在限频表里：每号每秒 3 条，第 4 条回信封 1008 并计非法包、不转发（§1.4）。</li>
  * </ul>
  *
@@ -285,6 +288,85 @@ class MatchBackendForwardingTest {
         ch.writeInbound(request(6, status, "s"));
         assertThat(match.calls).as("窗口滑过后照常转发").hasSize(5);
         assertThat(ch.isOpen()).isTrue();
+    }
+
+    @Test
+    void 排队期间离开游戏成功_之后才发出的后端请求按未进游戏发出_不以已离开的角色执行() {
+        // mmorpg client-request-ordering.md §17：后端请求带入队时的会话快照；login 与后端 lane 互不等待，
+        // 让好友请求排在一条慢的 match 后面，LeaveGame 在它发出之前成功解绑
+        EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
+        enterGame(ch);
+        ch.writeInbound(request(10, ids.requireId("MatchService", "JoinQueue"), "join"));
+        ch.writeInbound(request(11, ids.requireId("ClientPlayerFriend", "AddFriend"), "add"));
+        assertThat(friend.calls).as("好友排在在途的 match 之后").isEmpty();
+
+        ch.writeInbound(request(12, ids.requireId("ClientPlayerLogin", "LeaveGame"), "leave"));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setUnbindPlayer(UnbindPlayer.getDefaultInstance()))
+                .build());
+        ch.runPendingTasks();
+        assertThat(session().playerId).as("LeaveGame 成功即解绑").isZero();
+
+        match.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        assertThat(match.calls.get(0).getSession().getPlayerId()).as("在途的那条发出时还在游戏里").isEqualTo(PLAYER);
+        assertThat(friend.calls).singleElement().satisfies(call -> {
+            assertThat(call.getRequestId()).isEqualTo(11);
+            assertThat(call.getSession().getPlayerId()).as("入队快照是 PLAYER，发出时已离开游戏：按 0 发出").isZero();
+            assertThat(call.getSession().getSessionId()).as("其余会话字段原样").isEqualTo(session().sessionId());
+            assertThat(call.getSession().getGateNodeId()).isEqualTo(GATE_NODE);
+        });
+    }
+
+    @Test
+    void 排队期间离开游戏失败_结果未知不解绑_后端请求照旧带原角色() {
+        EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
+        enterGame(ch);
+        ch.writeInbound(request(10, ids.requireId("MatchService", "JoinQueue"), "join"));
+        ch.writeInbound(request(11, ids.requireId("ClientPlayerFriend", "AddFriend"), "add"));
+        ch.writeInbound(request(12, ids.requireId("ClientPlayerLogin", "LeaveGame"), "leave"));
+        login.fail(new IllegalStateException("login timeout"));
+        ch.runPendingTasks();
+        assertThat(session().playerId).as("没有 UnbindPlayer 指令就不解绑").isEqualTo(PLAYER);
+
+        match.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        assertThat(friend.calls).singleElement()
+                .satisfies(call -> assertThat(call.getSession().getPlayerId()).isEqualTo(PLAYER));
+    }
+
+    @Test
+    void 排队期间离开再进另一个角色_排着的请求既不算旧角色也不算新角色_之后入队的带新角色() {
+        long otherPlayer = PLAYER + 1;
+        EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
+        enterGame(ch);
+        int addFriend = ids.requireId("ClientPlayerFriend", "AddFriend");
+        ch.writeInbound(request(10, ids.requireId("MatchService", "JoinQueue"), "join"));
+        ch.writeInbound(request(11, addFriend, "add"));
+
+        ch.writeInbound(request(12, ids.requireId("ClientPlayerLogin", "LeaveGame"), "leave"));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setUnbindPlayer(UnbindPlayer.getDefaultInstance()))
+                .build());
+        ch.runPendingTasks();
+        ch.writeInbound(request(13, ids.requireId("ClientPlayerLogin", "EnterGame"), "enter-other"));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
+                        .setPlayerId(otherPlayer).setSceneNodeId(7).setSceneId(901).setOwnerEpoch(6)))
+                .build());
+        ch.runPendingTasks();
+        assertThat(session().playerId).isEqualTo(otherPlayer);
+
+        match.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        assertThat(friend.calls).singleElement()
+                .satisfies(call -> assertThat(call.getSession().getPlayerId()).as("快照 PLAYER、发出时 %d：按 0 发出", otherPlayer).isZero());
+
+        ch.writeInbound(request(14, addFriend, "add-2"));
+        friend.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        assertThat(friend.calls).hasSize(2);
+        assertThat(friend.calls.get(1).getSession().getPlayerId()).as("换角之后入队的请求带新角色").isEqualTo(otherPlayer);
     }
 
     // ================================================================ 工具

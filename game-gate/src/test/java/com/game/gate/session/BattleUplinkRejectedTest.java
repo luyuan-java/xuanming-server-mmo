@@ -17,9 +17,7 @@ import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.GateTokenPayload;
 import com.game.proto.MessageContent;
-import com.game.proto.TipInfoMessage;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.InvalidProtocolBufferException;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -151,14 +149,15 @@ class BattleUplinkRejectedTest {
         assertThat(login.calls).hasSize(1);
         assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(12);
 
-        // login 回来：先回它自己的应答，再轮到排队的 scene 请求（没进场景 → 23 {1003}）；战斗拒绝不会再发第二遍
+        // login 回来：先回它自己的应答，再轮到排队的 scene 请求（没进场景 → 带请求 id 的信封 1003，2026-10-15 起，原为 23 {1003}）；
+        // 战斗拒绝不会再发第二遍
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
         ch.runPendingTasks();
         MessageContent reply = ch.readOutbound();
         assertThat(reply.getMessageId()).isEqualTo(login48);
         assertThat(reply.getId()).isEqualTo(1);
         assertThat(reply.getSerializedMessage().toStringUtf8()).isEqualTo("login-resp");
-        expectTip1003(ch, "排队的 scene 请求");
+        expectRejected(ch, "排队的 scene 请求（没进场景）", 2, listSkills);
         assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(12);
         assertThat(ch.isOpen()).isTrue();
     }
@@ -377,9 +376,9 @@ class BattleUplinkRejectedTest {
     }
 
     /**
-     * 下一帧出站恰好是战斗闸的拒绝回执：带请求 id、以请求号为 message_id 的信封 1003，body 为空，且后面没有别的帧。
-     * 2026-10-15 起由 23 推送改为信封（mmorpg client-request-ordering.md O6，两版同批）：这道闸排在待处理队列与后端 lane 之前，
-     * 回执可能先于更早请求的应答到达，客户端要靠 id 对上是哪一条被拒。
+     * 下一帧出站恰好是 gate 级拒绝回执：带请求 id、以请求号为 message_id 的信封 1003，body 为空，且后面没有别的帧。
+     * 战斗闸的拒绝与「没进场景」的回执都是这个形状。2026-10-15 起两者都由 23 推送改为信封（mmorpg client-request-ordering.md O6，
+     * 两版同批）：战斗闸排在待处理队列与后端 lane 之前，回执可能先于更早请求的应答到达，客户端要靠 id 对上是哪一条被拒。
      */
     private static void expectRejected(EmbeddedChannel ch, String what, long requestId, int messageId) {
         MessageContent envelope = ch.readOutbound();
@@ -388,23 +387,6 @@ class BattleUplinkRejectedTest {
         assertThat(envelope.getId()).as(what + "：带请求 id").isEqualTo(requestId);
         assertThat(envelope.getErrorMessage().getId()).as(what).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).isEqualTo(1003);
         assertThat(envelope.getSerializedMessage()).as(what + "：body 为空").isEmpty();
-        assertThat((Object) ch.readOutbound()).as(what + "：只有一帧").isNull();
-    }
-
-    /** 下一帧出站恰好是 23 {@code TipInfoMessage{1003}}（推送形状：id 不填、不带信封错误、没有参数），且后面没有别的帧。 */
-    private static void expectTip1003(EmbeddedChannel ch, String what) {
-        MessageContent tip = ch.readOutbound();
-        assertThat(tip).as(what).isNotNull();
-        assertThat(tip.getMessageId()).as(what + "：23 推送，不是以请求号为 message_id 的信封").isEqualTo(TIP_MSG);
-        assertThat(tip.getId()).as(what + "：推送形状，id 不填").isZero();
-        assertThat(tip.hasErrorMessage()).as(what + "：不是信封错误").isFalse();
-        try {
-            assertThat(TipInfoMessage.parseFrom(tip.getSerializedMessage())).as(what)
-                    .isEqualTo(TipInfoMessage.newBuilder().setId(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).build())
-                    .extracting(TipInfoMessage::getId).isEqualTo(1003);
-        } catch (InvalidProtocolBufferException e) {
-            throw new AssertionError(what, e);
-        }
         assertThat((Object) ch.readOutbound()).as(what + "：只有一帧").isNull();
     }
 

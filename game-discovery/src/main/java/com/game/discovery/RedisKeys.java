@@ -224,6 +224,11 @@ public final class RedisKeys {
         return prefix + "guild:{g:" + Long.toUnsignedString(guildId) + "}:apply-push:" + Long.toUnsignedString(playerId);
     }
 
+    /** 入帮申请尝试配额，按玩家跨所有目标帮共享；单键 Lua，固定 60 秒窗口。 */
+    public String guildApplyQuota(long playerId) {
+        return prefix + "guild:{apply:" + Long.toUnsignedString(playerId) + "}";
+    }
+
     /**
      * 帮会全服榜 {@code game:guild:{rank}:all}（ZSET：成员 = 帮会号无符号十进制，分数 = 排行分）。排行的全部键共用 hash tag {@code {rank}}，
      * 多键 Lua 与换榜的 RENAME 在 Cluster 下同槽（guild-spec D16）。基线 {@code guild_rank}（guild_repo.go:154）。
@@ -414,9 +419,22 @@ public final class RedisKeys {
         return prefix + "login:access:" + token;
     }
 
-    /** 登录 refresh token：{@code game:login:refresh:{token}}，值同 access，TTL = refresh 有效期；一次性（轮换时原子取走）。 */
+    /** 口令失败配额 v1：域为 known / unknown，身份仅传原值 UTF-8 的完整 SHA-256，单键单槽。 */
+    public String loginPasswordFailure(String domain, String digest) {
+        return prefix + "login:password-failure-v1:{" + domain + ":" + digest + "}";
+    }
+
+    /** 登录 refresh token：{@code game:login:refresh:{token}}，值同 access，TTL = refresh 有效期；一次性（轮换时原子作废）。 */
     public String loginRefreshToken(String token) {
         return prefix + "login:refresh:" + token;
+    }
+
+    /**
+     * refresh 轮换记录：{@code game:login:refresh-rotated:{旧 token}}，值为那次轮换换出的一对（JSON），TTL = 重放宽限窗口
+     * （≤ 60s）。窗口内同一旧 token 再来、且新 refresh 仍未用过时据此返回同一对（基线 {@code refresh_rotated:{token}}）。
+     */
+    public String loginRefreshRotated(String token) {
+        return prefix + "login:refresh-rotated:" + token;
     }
 
     /** 账号的活跃 refresh token 集合：{@code game:login:account-refresh:{account}}，ZSET，成员是 token、分数是它的过期 Unix 秒。 */

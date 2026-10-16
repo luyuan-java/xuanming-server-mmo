@@ -73,12 +73,13 @@ public final class ChatService {
     private final long requestIdTtlSeconds;
     private final LongSupplier clockMs;
     private final RedisKeys keys;
+    private final SensitiveWordFilter contentFilter;
     private final SecureRandom random = new SecureRandom();
 
     /** @param keys 历史 / 幂等 / 限速键的出处（注入的 {@link RedisKeys}；键随部署命名空间） */
     public ChatService(ChatStore store, ChatMetrics metrics, int maxContentBytes, int rateLimitPerSecond,
                        int historyMaxEntries, Duration historyTtl, int historyDefaultLimit, int historyMaxLimit,
-                       Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys) {
+                       Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys, List<String> sensitiveWords) {
         this.store = store;
         this.metrics = metrics;
         this.maxContentBytes = maxContentBytes;
@@ -90,6 +91,7 @@ public final class ChatService {
         this.requestIdTtlSeconds = requestIdTtl.toSeconds();
         this.clockMs = clockMs;
         this.keys = Objects.requireNonNull(keys, "keys");
+        this.contentFilter = new SensitiveWordFilter(sensitiveWords);
     }
 
     /** 频道 → 历史键；拒绝时 key 为 null、带 tip 与结局。发言（peer = target）与拉取（peer = peer_player_id）共用。 */
@@ -149,6 +151,8 @@ public final class ChatService {
         if (content.isEmpty()) {
             return sendRejected(label, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
         }
+        // 先限制原始字节再屏蔽，不能靠中文替换为 * 绕过消息大小门禁；只存屏蔽后的正文。
+        content = contentFilter.mask(content);
         String requestId = request.getRequestId();
         if (requestId.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_ID_BYTES) {
             return sendRejected(label, INVALID_PARAMETER, Outcome.BAD_REQUEST);

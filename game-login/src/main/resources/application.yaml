@@ -102,6 +102,9 @@ game:
     # access / refresh 令牌有效期（基线 2h / 720h）；令牌存 Redis，全服共用、不分 zone。
     access-token-ttl: 2h
     refresh-token-ttl: 720h
+    # 旧 refresh 被轮换后仍可重放的宽限窗口（基线 TokenConfig.RefreshReuseGrace）：窗口内同一旧 refresh 再来、且新 refresh 还没用过，
+    # 返回同一对新令牌（回包丢失后的重试不必重新登录）。0 = 严格一次性；上限 60s，越界拒绝启动。
+    refresh-reuse-grace: 30s
     # 每账号处于「已登录（TCP Login）、未进游戏」窗口的连接上限（基线 3，超出回 2024），与一次登记的有效期（没注销干净的按它自愈）。
     max-devices-per-account: 3
     device-session-ttl: 30m

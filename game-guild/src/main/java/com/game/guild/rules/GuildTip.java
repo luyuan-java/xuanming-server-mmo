@@ -35,6 +35,11 @@ public enum GuildTip {
     NOT_IN_ANY_GUILD(GuildTips.NOT_IN_GUILD, "not in any guild"),
     /** 事务 ErrNotGuildMember、列待审时查不到本人成员行（guild_manage_logic.go:289-291、:638）。 */
     NOT_A_MEMBER(GuildTips.NOT_IN_GUILD, "not a member of the guild"),
+    /**
+     * 退帮 / 解散 / 踢人 / 转让 / 任免带的 expected_guild_id 不是操作者此刻所在的帮（mmorpg client-request-ordering.md O14；
+     * 基线 expected_guild.go rejectExpectedGuild）。不写；任免 / 踢人 / 转让的回包附操作者当前帮会快照。
+     */
+    NOT_IN_EXPECTED_GUILD(GuildTips.NOT_IN_GUILD, "not a member of the expected guild"),
 
     // ---- 14003–14012 ----
 
