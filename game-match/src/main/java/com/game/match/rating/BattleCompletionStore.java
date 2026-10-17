@@ -55,7 +55,7 @@ public final class BattleCompletionStore {
         try(Connection c=source.getConnection()) {
             c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);c.setAutoCommit(false);
             try {
-                boolean inserted=db.insertIgnore(c,candidate);
+                boolean inserted=insertCompletion(c,candidate);
                 BattleCompletionRow stored=db.findOneByPkForUpdate(c,BattleCompletionRow.newBuilder()
                         .setBattleId(event.getBattleId()).build()).orElseThrow();
                 if(stored.getFormatVersion()!=1||stored.getPlayerCount()!=candidate.getPlayerCount()
@@ -86,6 +86,15 @@ public final class BattleCompletionStore {
                 throw failed;
             }
         } catch(SQLException failed) { throw new IllegalStateException("战斗完成来源归档失败，保留消费位点",failed); }
+    }
+
+    private boolean insertCompletion(Connection c,BattleCompletionRow candidate)throws SQLException {
+        try { db.insert(c,candidate);return true; }
+        catch(SQLException conflict) {
+            // 与评分存储沿用同一重复键判据：生产 MySQL/TiDB 1062，测试 H2 SQLState 23505。
+            if(RatingSqlErrors.isDuplicateKey(conflict))return false;
+            throw conflict;
+        }
     }
 
     private static Map<Long,BattleSettlementData> validate(BattleResultConsumer.Received received) {

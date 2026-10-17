@@ -314,7 +314,7 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
         CompletableFuture<Void> acknowledged=new CompletableFuture<>();
         if(event==null){acknowledged.completeExceptionally(new IllegalArgumentException("结果事件为空"));return acknowledged;}
         try {
-            if(original==null||original.size()>960*1024||!BattleResultEvent.parseFrom(original).equals(event))
+            if(original==null||original.size()>MAX_SOURCE_BYTES||!BattleResultEvent.parseFrom(original).equals(event))
                 throw new IllegalArgumentException("结果原件与事件不一致");
         } catch(com.google.protobuf.InvalidProtocolBufferException|IllegalArgumentException invalid) {
             acknowledged.completeExceptionally(invalid);return acknowledged;

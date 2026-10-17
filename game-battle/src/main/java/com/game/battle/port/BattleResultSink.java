@@ -22,6 +22,8 @@ import com.game.proto.contracts.kafka.BattleResultEvent;
  */
 @FunctionalInterface
 public interface BattleResultSink {
+    /** 与完整来源协议约定一致，预留 Kafka 记录头开销。 */
+    int MAX_SOURCE_BYTES = 960 * 1024;
 
     /** 已固定的原始来源；重投必须使用相同字节，兼容实现仍只接不可变事件。 */
     default java.util.concurrent.CompletableFuture<Void> publishConfirmed(BattleResultEvent event,

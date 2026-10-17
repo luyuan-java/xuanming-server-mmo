@@ -740,7 +740,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         pending.inFlight=true;
         CompletableFuture<Void> acknowledged;
         try{
-            acknowledged=deps.results().publishConfirmed(pending.event,pending.original,BattleResultAssembler.isActivity(room.activityContext)
+            acknowledged=pending.original.size()>com.game.battle.port.BattleResultSink.MAX_SOURCE_BYTES
+                    ?CompletableFuture.failedFuture(new IllegalArgumentException("完成来源超过共同字节上限"))
+                    :deps.results().publishConfirmed(pending.event,pending.original,BattleResultAssembler.isActivity(room.activityContext)
                     ?com.game.battle.port.BattleResultSink.Channel.ACTIVITY:com.game.battle.port.BattleResultSink.Channel.PLAIN);
             if(acknowledged==null)acknowledged=CompletableFuture.failedFuture(new IllegalStateException("结果端口没有确认句柄"));
         }catch(RuntimeException error){acknowledged=CompletableFuture.failedFuture(error);}

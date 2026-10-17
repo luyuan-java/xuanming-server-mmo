@@ -106,8 +106,22 @@ abstract class BattleCompletionStoreCases {
     @Test void 历史格式零不伪造完整来源但夹带个人载荷拒绝()throws Exception {
         var legacy=complete(705).toBuilder().clearSettlements().setSettlementFormatVersion(0).build();
         assertEquals(BattleCompletionStore.Outcome.LEGACY,store.archive(received(legacy)));
+        assertEquals(BattleCompletionStore.Outcome.LEGACY,store.archive(new BattleResultConsumer.Received(
+                BattleResultEvent.getDefaultInstance(),ByteString.copyFrom(new byte[]{8,0}),"fixture-battle-results",0,1)));
         assertThrows(IllegalArgumentException.class,()->store.archive(received(complete(705).toBuilder().setSettlementFormatVersion(0).build())));
+        assertThrows(IllegalArgumentException.class,()->store.archive(new BattleResultConsumer.Received(
+                BattleResultEvent.getDefaultInstance(),ByteString.EMPTY,"fixture-battle-results",0,2)));
         assertEquals(0,count("match_battle_completion"));assertEquals(0,count("match_battle_player_completion"));
+    }
+    @Test void 协议未约定十人上限且超过十人的完整成员仍可归档()throws Exception {
+        var event=complete(714).toBuilder().clearTeams().clearSettlements();
+        var team=BattleResultTeam.newBuilder().setTeamIndex(0);
+        for(long player=1;player<=12;player++) {
+            team.addPlayerIds(player);event.addSettlements(complete(714).getSettlements(0).toBuilder().setPlayerId(player));
+        }
+        event.addTeams(team);
+        assertEquals(BattleCompletionStore.Outcome.ARCHIVED,store.archive(received(event.build())));
+        assertEquals(12,count("match_battle_player_completion"));
     }
     @Test void 未知版本与来源超过共同上限拒绝且零写入()throws Exception {
         assertThrows(IllegalArgumentException.class,()->store.archive(received(complete(706).toBuilder().setSettlementFormatVersion(2).build())));
