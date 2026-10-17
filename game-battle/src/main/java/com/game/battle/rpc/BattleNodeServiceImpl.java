@@ -86,6 +86,11 @@ public final class BattleNodeServiceImpl implements BattleNodeService {
     private final Semaphore permits;
     private final BattleMetrics metrics;
     private final LongSupplier nanoClock;
+    private CreationLedger creationLedger;
+    private java.util.function.LongSupplier creationClock;
+    /** 进程装配、导出之前固定；逻辑线程启动后禁止再次调用。 */
+    public BattleNodeServiceImpl withCreationLedger(CreationLedger ledger,java.util.function.LongSupplier clock){
+        this.creationLedger=ledger;this.creationClock=clock;return this;}
     private final Map<RpcMethod, AtomicLong> overloads = new EnumMap<>(RpcMethod.class);
     private final Map<String, AtomicLong> notAllocatable = Map.of(
             REASON_NOT_STARTED, new AtomicLong(), REASON_CLOSED, new AtomicLong(),
@@ -132,10 +137,15 @@ public final class BattleNodeServiceImpl implements BattleNodeService {
     @Override
     public CompletableFuture<Empty> destroyBattle(DestroyBattleRequest request) {
         return submit(RpcMethod.DESTROY_BATTLE, request, req -> {
+            if(rooms.resultCommitPending(req.getBattleId()))return Empty.getDefaultInstance();
+            if(creationLedger!=null&&!creationLedger.destroy(req,creationClock.getAsLong(),rooms.containsBattle(req.getBattleId())))return Empty.getDefaultInstance();
             rooms.destroyBattle(req);
             return Empty.getDefaultInstance();
         }, response -> RpcResult.OK);
     }
+    @Override public CompletableFuture<com.game.proto.QueryBattleCreationResponse> queryBattleCreation(com.game.proto.QueryBattleCreationRequest request){
+        return submit(RpcMethod.QUERY_BATTLE_CREATION,request,req->creationLedger==null?com.game.proto.QueryBattleCreationResponse.getDefaultInstance():
+                creationLedger.query(req,rooms.containsBattle(req.getBattleId())),response->RpcResult.OK);}
 
     @Override
     public CompletableFuture<IssueBattleTicketResponse> issueBattleTicket(IssueBattleTicketRequest request) {
@@ -189,7 +199,14 @@ public final class BattleNodeServiceImpl implements BattleNodeService {
                         result = notAllocatableResult(REASON_CLOSED_IN_LOOP);
                         outcome = RpcResult.NOT_ALLOCATABLE;
                     } else {
-                        CreateBattleResponse response = rooms.createBattle(request, origin);
+                        CreateBattleResponse response;
+                        if(creationLedger!=null && !creationLedger.admit(request,creationClock.getAsLong(),rooms.containsBattle(request.getBattleId()),rooms::containsBattle))
+                            response=CreateBattleResponse.newBuilder().setBattleId(request.getBattleId()).setErrorMessage(TipInfoMessage.newBuilder()
+                                    .setId(com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE)).build();
+                        else {
+                            response=rooms.createBattle(request,origin);
+                            if(creationLedger!=null&&response.getErrorMessage().getId()==0)creationLedger.created(request);
+                        }
                         result = CreateBattleResult.newBuilder()
                                 .setAdmission(BattleAdmission.BATTLE_ADMISSION_ADMITTED)
                                 .setResponse(response.toByteString())

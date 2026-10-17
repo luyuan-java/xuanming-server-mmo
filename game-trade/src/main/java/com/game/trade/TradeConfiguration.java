@@ -121,7 +121,9 @@ public class TradeConfiguration {
 
     @Bean
     public ListingStore listingStore(DataSource dataSource, TradeProperties props, TradeMetrics metrics, SchemaReady tradeSchemaReady) {
-        return new JdbcListingStore(connections(dataSource), props.queryTimeoutCapSeconds(), metrics);
+        // 收藏写入按请求预算留出写入预留：最晚发出 + 2 s 锁等待仍早于 gate 放行同一会话的下一条（客户端请求按会话保序）
+        return new JdbcListingStore(connections(dataSource), props.queryTimeoutCapSeconds(),
+                TradeLimits.writeReserveMillis(props.requestBudget().toMillis()), metrics);
     }
 
     // ================================================================ 第 4 步：雪花租约
@@ -197,8 +199,11 @@ public class TradeConfiguration {
     @Bean
     public TradeDispatcher tradeDispatcher(MessageIdRegistry registry, JubaozhaiService service, TradeWorkerPool tradeWorkerPool,
                                            TradeMetrics metrics, TradeProperties props, SeedListingService seeds,
-                                           SchemaReady tradeSchemaReady, DataSource dataSource) {
-        TradeDispatcher dispatcher = new TradeDispatcher(registry, service, tradeWorkerPool, metrics, props.requestBudget().toMillis());
+                                           SchemaReady tradeSchemaReady, DataSource dataSource,
+                                           org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.CommerceEngine> commerce,
+                                           org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.OfficialMallClient> mall,
+                                           HomeZones tradeHomeZones) {
+        TradeDispatcher dispatcher = new TradeDispatcher(registry, service, tradeWorkerPool, metrics, props.requestBudget().toMillis(),new com.game.trade.commerce.CommerceClientService(commerce.getIfAvailable(),tradeHomeZones,mall.getIfAvailable()));
         MarketSettings market = props.market().settings();
         log.info("trade 接管的消息号={} 市场范围={} 页长={}/{} 页码上限={} 收藏上限={} 请求预算={} 播种={}（运行模式 {}） 库={} 用户={}",
                 dispatcher.clientMessageIds(), props.market().scope(), market.defaultPageSize(), market.maxPageSize(),

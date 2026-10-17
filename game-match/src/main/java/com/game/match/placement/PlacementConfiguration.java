@@ -15,10 +15,14 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class PlacementConfiguration {
 
-    @Bean
     public PlacementStore placementStore(RedissonClient redis, RedisKeys redisKeys) {
         return new RedissonPlacementStore(redis, redisKeys);
     }
+    @Bean(name="placementStore")
+    public PlacementStore configuredPlacementStore(RedissonClient redis,RedisKeys keys,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchStore> global){
+        var projection=placementStore(redis,keys);var store=global.getIfAvailable();
+        return store==null?projection:new com.game.match.global.GlobalPlacementStore(store,projection);}
 
     /** 直拨专用的直连客户端缓存。销毁时关闭（Spring 按依赖逆序：先停用到它的补签入口）。 */
     @Bean(destroyMethod = "close")

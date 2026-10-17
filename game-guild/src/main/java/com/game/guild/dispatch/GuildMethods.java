@@ -13,7 +13,7 @@ import java.util.List;
  *       异步完成（同步投递不占工作线程）。4.4 的 in-band 1006 占位（D13）随之撤销；</li>
  *   <li>{@link #FORBIDDEN}：上行 8（UpdateGuildScore，只对内部开放）与 220（NotifyGuildChanged，推送占位）——基线会话白名单不含它们
  *       （session.go:43-78）→ PermissionDenied → 路由服信封 1003；</li>
- *   <li>{@link #PLACEHOLDERS}：4.6 活动 5 个，仍回 in-band 1006（D13），4.6 只换处理器。</li>
+ *   <li>{@link #PLACEHOLDERS}：历史名称保留给基础夹具；生产装配的 5 个活动入口由 GuildActivityService 处理。</li>
  * </ul>
  */
 public final class GuildMethods {
@@ -50,7 +50,7 @@ public final class GuildMethods {
     public static final String GET_GUILD_SHOP = "GetGuildShop";
     public static final String BUY_GUILD_SHOP_GOODS = "BuyGuildShopGoods";
 
-    // ---- 4.6 活动（仍是占位）----
+    // ---- 4.6 活动（生产使用真实 SQL 活动服务）----
     public static final String GET_GUILD_ACTIVITIES = "GetGuildActivities";
     public static final String LIGHT_GUILD_LANTERN = "LightGuildLantern";
     public static final String CLAIM_GUILD_REUNION = "ClaimGuildReunion";

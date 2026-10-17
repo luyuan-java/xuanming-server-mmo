@@ -34,6 +34,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -194,7 +195,12 @@ class MatchBackendForwardingTest {
         assertThat(envelope.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE).isEqualTo(1003);
         assertThat(envelope.getSerializedMessage()).isEmpty();
 
-        assertThat(match.calls).as("148 失败之后轮到 153").hasSize(2);
+        // future 异常完成 = 请求已交给 Dubbo、结果未知（148 可能还在 match 里跑）：回执当场给，但 153 要等到「发出 + 调用超时」才发
+        // （ClientDispatcher.BACKEND_RESULT_UNKNOWN_HOLD_NANOS）；上面代理当场抛异常的形态没发出去，不等
+        assertThat(match.calls).as("结果未知：调用超时之前不发 153").hasSize(1);
+        ch2.advanceTimeBy(ClientDispatcher.BACKEND_RESULT_UNKNOWN_HOLD_NANOS, TimeUnit.NANOSECONDS);
+        ch2.runPendingTasks();
+        assertThat(match.calls).as("148 失败、等满调用超时之后轮到 153").hasSize(2);
         assertThat(match.calls.get(1).getMessageId()).isEqualTo(153);
         match.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("state")).build());
         ch2.runPendingTasks();

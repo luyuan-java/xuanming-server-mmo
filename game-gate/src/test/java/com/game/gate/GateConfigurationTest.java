@@ -48,7 +48,7 @@ class GateConfigurationTest {
             DubboGroups.TEAM, 20885,
             DubboGroups.GUILD, 20886,
             DubboGroups.TRADE, 20887,
-            DubboGroups.MATCH, 20888));
+            DubboGroups.MATCH, 20888,DubboGroups.MAIL,20916,DubboGroups.RANK,20917));
 
     /** 只用来认「是哪一个」的后端替身。 */
     private record Named(String name) implements ClientMessageService {
@@ -77,7 +77,8 @@ class GateConfigurationTest {
         Named trade = new Named("trade");
         Named match = new Named("match");
 
-        Map<String, ClientMessageService> backends = GateConfiguration.backends(friend, chat, team, guild, trade, match);
+        Named mail=new Named("mail"),rank=new Named("rank");
+        Map<String, ClientMessageService> backends = GateConfiguration.backends(friend, chat, team, guild, trade, match,mail,rank);
 
         assertThat(backends).containsOnly(
                 Map.entry(DubboGroups.FRIEND, friend),
@@ -85,7 +86,7 @@ class GateConfigurationTest {
                 Map.entry(DubboGroups.TEAM, team),
                 Map.entry(DubboGroups.GUILD, guild),
                 Map.entry(DubboGroups.TRADE, trade),
-                Map.entry(DubboGroups.MATCH, match));
+                Map.entry(DubboGroups.MATCH, match),Map.entry(DubboGroups.MAIL,mail),Map.entry(DubboGroups.RANK,rank));
         assertThat(backends.get("match")).as("6.4：MatchService 的 10 个号转给 game-match 的引用").isSameAs(match);
         // 与路由表的关系：路由表指向的域里，除了 login（单独传给 GateNode）都必须在这张表里，也不能多
         Set<String> routed = new TreeSet<>(MessageRoutes.SERVICE_BACKENDS.values());
@@ -143,7 +144,7 @@ class GateConfigurationTest {
             }
         }
         assertThat(qualifiers).containsExactly("loginClientMessageService", "friendClientMessageService", "chatClientMessageService",
-                "teamClientMessageService", "guildClientMessageService", "tradeClientMessageService", "matchClientMessageService");
+                "teamClientMessageService", "guildClientMessageService", "tradeClientMessageService", "matchClientMessageService","mailClientMessageService","rankClientMessageService");
         // backends() 的形参次序与 gateNode 里除 login 之外的注入次序相同（两边都是 friend、chat、team、guild、trade、match）
         Method backends = Arrays.stream(GateConfiguration.class.getDeclaredMethods())
                 .filter(m -> m.getName().equals("backends")).findFirst().orElseThrow(() -> new NoSuchMethodException("backends"));

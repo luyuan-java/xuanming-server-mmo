@@ -1858,7 +1858,32 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
   Cancel guild_id=0 → 14018；Review 申请人=0 → 14018、审批自己 → 14015；Kick target=0 → 14014；普通成员列待审 → 14016；帮主退帮 → 14004；长老解散 → 14005；
   有待审时帮主的 GetPlayerGuild 里 `pending_application_count > 0`、普通成员看到 0；GetGuildRank page_size=60 回显 50、page_size=0 回显 20；上行 220 → 信封 1003、
   没有业务回包；DonateToGuild 回 in-band 1006（只在 4.4 期间，D13）。
+- **第 11 步**（2026-10-16 补齐，对应 `guild_smoke_scenario.go` 第 11 步，§3.19）：第 10 步之后 A 另建临时帮 H、B 申请获批；B 带第 1 步那个帮（已退出、已解散）的 id 作
+  `expected_guild_id` 退帮 → 14002（`NOT_IN_EXPECTED_GUILD`），B 仍是 H 的普通成员、H 仍 2 人；对照：带 H 的 id 退帮受理；A 解散 H（`GuildScenario.staleExpectedGuild`）。
 
 
 
 
+## 2026-10-16 活动五入口与跨区历练补齐（实施契约）
+
+Java原有五个活动入口均为占位。本批沿当前Go行为实现活动目录、灯会、团圆及历练邀请/响应；不把只调用match登记为闭环。个人次数复用GameDay和guild_daily_counter(ACTIVITY)，帮贡/资金、档期进度、不可丢奖励意图在同一SQL事务；物品只通过已有GUILD_CREDIT和guild_asset_op，未入队意图长期保留。
+
+历练邀请固定SQL lobby_id、活动上下文、发起人首位名单及逐人同意；SQL成员槽避免并发邀请，资格在G→M点锁下复核。全员同意后同事务保存StartActivityBattle原请求，LAUNCHING未知结局保留并按原ID/原bytes重投，不能改ID解除占用。MatchInternal仍独占全员战斗SQL占用和可信逐成员RTT校验；本域不写match票据、不接收客户端自报RTT。明确拒绝才结束邀请，成功登记battle_id；战报先到时保留原记录，待重投原请求取回并提交同一个battle_id后，再校验完整活动上下文和固定名单结算，不凭相似上下文猜测关联。
+
+结果消费使用既有BattleResultTopics独立帮会组，SQL结果收据提交后才提交位点、删除battleActivityResult；依赖错误不跳过。巡检补读原Redis结果，未确认读失败不判过期；长时间无战报的已登记局显示过期但保留晚到结算入口。奖励候选为team0减逃跑，不减阵亡；结算仍须同帮且个人日限未满，资金按每游戏日胜场上限。回滚不留下计数、资金、奖励意图半截；已提交后通知丢失由页面重拉恢复。源契约、game-api、match/scene/battle不在本批修改边界内。
+
+### 本批运行证据（2026-10-16）
+
+独立验证副本的 `game-guild/src` 与 POM 共 182 个文件逐个 SHA-256 对比主工作区，差异为 0。此前 11 模块 `clean install` 成功后，本批对 Guild 再执行 `clean package`，实际重编 136 个生产源与 78 个测试源；7 组 96 项全通过，失败、错误、跳过均为 0：规则 15、路由 1、结果消费 2、活动真 TiDB 11、资产循环 31、玩家 SQL 提交证明真 TiDB 1、经济服务 35。活动真库组包含 1 项同时连接真实 Redis，验证 SQL 结算后才按原字节 CAS 删除战报；玩家证明用独立 SQL 事务验证未提交不能终结、提交后以原 seq 恢复 partial。
+
+成品 jar 连接独立随机 TiDB 库与 Redis 命名空间启动成功，`/actuator/health` 返回 UP，`ClientMessageService`、`GuildInternalService` 均导出 Triple，21986 端口实际可连接；验证进程退出后仅清理自身数据库与键。此检查解决了此前活动装配误依赖不存在的 `MergeFence` bean：活动复用 `GuildAccess.txFence()`，遵循本版现有合服闸实现。Kafka 在本次启动夹具中明确不可用，结果消费后台等待恢复，因此启动检查只证明真实依赖下的成品装配，不证明跨区域全进程对局。
+
+证据位于 mmorpg `build/mail-rank-complete-20261015/`：`java-guild-clean-package-final-20261016.log`、`java-guild-boot-verified-20261016.log`、`java-guild-boot-verified-check-20261016.log` 及 `java-guild-final-proof-20261016.json`，构建与启动退出码均为 0。首次 partial 等待 SQL 的回归保留了原始失败日志；中间一次旧 class 导致同例再次失败，`javap` 确认增量编译未纳入新源码后，正式 clean 重编转绿，未放宽断言或生产预算。
+
+### 生产 SQL 与结果主题门禁补齐（2026-10-16，后续验收）
+
+前述 96 项和无 Kafka 的启动检查是历史批次证据。本次补齐两版启动契约：Java 在数据源初始化前复用 `RunMode`，TiDB 强读缺省开启；生产、预发和未知模式禁止显式关闭，只有明确 dev/test 可用旧 MySQL。活动开启时，处理器与后台都必须先完成同步结果主题核验：复用 `BattleResultTopics.ensureDurable` 的 VERIFY_ONLY，核对既有主题全部分区实际至少三副本、minISR 至少 2、unclean leader election 关闭；不存在、不可达、元数据不明或配置不符时拒启。帮会不创建或修改主题。生产不能以 `GLOBAL_MATCH_ENABLED=false` 绕过；明确 dev/test 的旧匹配兼容模式仍同步核对既有主题，但允许 RF1。关闭活动后不要求 Kafka 可用，普通帮会 SQL 的生产强读门禁仍生效。
+
+`ActivityStartupGateTest` 的 20 项有效首红有 17 项失败：原实现允许关闭强读、缺省不安装强会话、未核验结果主题便创建活动处理器；修复后全部转绿。最终再次 `clean package`，8 组 **116/116**，失败、错误、跳过均为 0，保留前述 12 项真实 TiDB（其中 1 项同时真实 Redis）；183 个源文件与验证副本逐一 SHA 一致。随后明确 prod、活动开启、TiDB 强读开启、全球匹配开启，连接独立三节点真实 Kafka 与真实 TiDB/Redis 启动成品：health UP、两个 Triple 提供方及 21986 实际监听通过。夹具创建自身随机命名空间的三分区 RF3 主题并读回 minISR=2/unclean=false；退出后只删除自身主题、SQL 库与 Redis 键。三节点位于同机，此证据不证明多区域故障、普通战斗个人资产结算或容量。
+
+最新证据在同一 mmorpg 构建目录：`java-guild-startup-gate-red-2-20261016.log`、`java-guild-startup-gate-green-20261016.log`、`java-guild-strict-clean-package-final-20261016.log`、`java-guild-strict-boot-verified-check-2-20261016.log`、`java-guild-strict-boot-verified-20261016.log`、`java-guild-strict-final-proof-20261016.json`。有效红测试无编译错误；首次上下文夹具问题、首次启动辅助程序 Kafka Admin 超时参数不自洽也保留原失败记录，未通过关闭产品门禁绕过。

@@ -42,6 +42,7 @@ import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -757,20 +758,47 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 好友后端调用失败回带请求id的信封1003_同一会话串行() {
-        // 同基线路由服：上游错误 / 超时翻成带请求 id 的信封 1003（不是推 23 tip 让客户端等到自己超时）
+    void 好友后端调用失败回带请求id的信封1003_结果未知时等满调用超时才放行下一条() {
+        // 同基线路由服：上游错误 / 超时翻成带请求 id 的信封 1003（不是推 23 tip 让客户端等到自己超时）。
+        // future 异常完成说明请求已交给 Dubbo、可能到了后端（断连 / 流重置时 handler 还在跑）：回执当场给，
+        // 下一条等到「发出 + 调用超时」才发，不与上一条的提交交错（mmorpg client-request-ordering.md §10 的 2026-10-16 订正）
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, FRIEND_MSG, "a"));
         ch.writeInbound(request(2, FRIEND_MSG, "b"));
         assertThat(friend.calls).as("上一个没完成不发下一个").hasSize(1);
-        friend.fail(new IllegalStateException("no provider"));
+        friend.fail(new IllegalStateException("connection reset"));
         ch.runPendingTasks();
         MessageContent reply = ch.readOutbound();
         assertThat(reply.getMessageId()).isEqualTo(FRIEND_MSG);
         assertThat(reply.getId()).isEqualTo(1);
         assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat(reply.getSerializedMessage()).as("没有业务回包").isEmpty();
-        assertThat(friend.calls).hasSize(2);
+        assertThat(friend.calls).as("结果未知：调用超时之前不放行下一条").hasSize(1);
+        assertThat(session().backendInFlight).isTrue();
+
+        ch.advanceTimeBy(ClientDispatcher.BACKEND_RESULT_UNKNOWN_HOLD_NANOS, TimeUnit.NANOSECONDS);
+        ch.runPendingTasks();
+        assertThat(friend.calls).as("等满调用超时之后放行").hasSize(2);
+        assertThat(friend.calls.get(1).getRequestId()).isEqualTo(2);
+    }
+
+    @Test
+    void 结果未知的延后放行期间断线_定时器撤销_排队项不再发出() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, FRIEND_MSG, "a"));
+        ch.writeInbound(request(2, FRIEND_MSG, "b"));
+        friend.fail(new IllegalStateException("connection reset"));
+        ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getId()).isEqualTo(1);
+        assertThat(ch.runScheduledPendingTasks()).as("挂着延后放行定时器").isPositive();
+
+        // 直接走断线流程。不用 EmbeddedChannel#close——它会顺手取消通道上的全部定时任务，测不出撤销
+        dispatcher.onDisconnected(session());
+        assertThat(ch.runScheduledPendingTasks()).as("断线流程撤销了延后放行定时器").isEqualTo(-1);
+
+        ch.advanceTimeBy(ClientDispatcher.BACKEND_RESULT_UNKNOWN_HOLD_NANOS * 2, TimeUnit.NANOSECONDS);
+        ch.runPendingTasks();
+        assertThat(friend.calls).as("断线之后排队项不再发出").hasSize(1);
     }
 
     @Test

@@ -79,7 +79,7 @@ class RecommendServiceTest {
                 return CompletableFuture.completedFuture(out);
             }
         }, "game:presence:", (ids, d) -> lookup(ids));
-        DirectoryQuota quota = new DirectoryQuota(k -> failQuota
+        DirectoryQuota quota = new DirectoryQuota((k, timeout) -> failQuota
                 ? CompletableFuture.failedFuture(new IllegalStateException("redis down"))
                 : CompletableFuture.completedFuture(quotaCount.incrementAndGet()), REDIS_KEYS, metrics);
         return new RecommendService(source, directory, quota, (ids, d) -> lookup(ids),

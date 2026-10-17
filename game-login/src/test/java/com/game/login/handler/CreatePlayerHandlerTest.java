@@ -32,6 +32,7 @@ import com.game.proto.login.CreatePlayerResponse;
 import com.game.table.LoginErrorTip;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
@@ -73,6 +74,9 @@ class CreatePlayerHandlerTest {
     /** 每次事务版建角收到的候选名。 */
     private final List<List<String>> candidates = new ArrayList<>();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    /** 请求预算用的单调时钟（纳秒），测试手动拨动、不读真实时钟：没拨动它的用例永远在预算之内。 */
+    private final long[] nanos = {1_000_000_000L};
+    private static final Duration BUDGET = CreatePlayerHandler.DEFAULT_CREATE_BUDGET;
 
     private CreatePlayerHandler handler;
 
@@ -105,7 +109,8 @@ class CreatePlayerHandlerTest {
             }
             return new CreateOutcome(CreateStatus.NAME_TAKEN, existing);
         });
-        handler = new CreatePlayerHandler(store, rules, ids, randomByte, fence, 5, new LoginMetrics(meters));
+        handler = new CreatePlayerHandler(store, rules, ids, randomByte, fence, 5, new LoginMetrics(meters),
+                session -> null, () -> nanos[0], BUDGET);
     }
 
     /**
@@ -534,5 +539,59 @@ class CreatePlayerHandlerTest {
         verify(store).createPlayer(attempted.capture());
         assertThat(attempted.getValue().getPlayerId()).isNotEqualTo(100L);
         verifyNoMoreInteractions(store);
+    }
+
+    // ---- 请求预算：提交点之前用完就不再提交（mmorpg client-request-ordering.md §6.1）----
+
+    @Test
+    void 请求预算在发号前用完_不发号不进事务_回2020_在途闸门释放() throws Exception {
+        // 快照读慢到把预算正好用完（取连接排队、数据库抖动）：gate 随时会按 5 s 超时放行同一会话的下一条请求，
+        // 这时再进事务，新角色会晚于下一条请求落库。截止当刻也算用完。
+        when(store.listPlayers(ACCOUNT)).thenAnswer(inv -> {
+            nanos[0] += BUDGET.toNanos();
+            return List.of();
+        }).thenReturn(List.of());
+
+        assertError(create(CreatePlayerRequest.newBuilder().setName("张三").build()), TIP_2020);
+
+        assertThat(events).containsExactly("fence:" + ZONE);
+        assertNothingMintedOrInserted();
+
+        // 放弃没有留下在途闸门：截止按每次 handle 重新算，预算充足的下一次照常建角。
+        assertThat(create(CreatePlayerRequest.newBuilder().setName("张三").build()).hasErrorMessage()).isFalse();
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        assertThat(playersCreated()).isEqualTo(1);
+    }
+
+    @Test
+    void 工作队列排队已耗掉预算_不发号不进事务_回2020() throws Exception {
+        // 过载（开服、连接池耗尽）时 login 工作队列积压：gate 的 5 s 从发出请求就开始走，处理器开始跑时预算可能已经没了。
+        // 截止按分发器受理的时刻算（含排队），不按处理器开始的时刻算——后者积压时本身就晚于 gate 放行。
+        CreatePlayerRequest request = CreatePlayerRequest.newBuilder().setName("张三").build();
+
+        assertError(response(handler.handle(SESSION, request, BUDGET.toNanos()).get(5, TimeUnit.SECONDS)), TIP_2020);
+        assertNothingMintedOrInserted();
+
+        // 对照：排队只耗掉预算减 1 ms，照常建角——排队时长是从预算里扣掉，不是「排过队就放弃」。
+        CreatePlayerResponse ok = response(handler.handle(SESSION, request, BUDGET.minusMillis(1).toNanos())
+                .get(5, TimeUnit.SECONDS));
+        assertThat(ok.hasErrorMessage()).isFalse();
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        assertThat(playersCreated()).isEqualTo(1);
+    }
+
+    @Test
+    void 请求预算在发号前还剩1ms_照常提交() throws Exception {
+        when(store.listPlayers(ACCOUNT)).thenAnswer(inv -> {
+            nanos[0] += BUDGET.minusMillis(1).toNanos();
+            return List.of();
+        }).thenReturn(List.of());
+
+        CreatePlayerResponse response = create(CreatePlayerRequest.newBuilder().setName("张三").build());
+
+        assertThat(response.hasErrorMessage()).isFalse();
+        assertThat(events).containsExactly("fence:" + ZONE, "mint");
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        assertThat(playersCreated()).isEqualTo(1);
     }
 }

@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -117,9 +118,11 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
     private final Duration verifyTimeout;
     private final BattleMetrics metrics;
     private final LongSupplier nanoClock;
+    private final boolean requireDurableTopic;
     private final BattleResultFallbackLog fallback = new BattleResultFallbackLog();
     private final ThreadPoolExecutor executor;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final java.util.Set<CompletableFuture<Void>> confirmations=java.util.concurrent.ConcurrentHashMap.newKeySet();
     /**
      * 护住「建生产者」与「停机时取走生产者」这两步（都很短，不含任何 Kafka I/O）：停机置位之后不会再建出新的生产者，停机之前建好的一定被停机关掉——
      * 否则停机恰好撞上一次迟迟才通过的核对时，会留下一个没人关的生产者，交给它的那条事件既等不到确认、也没有兜底行。
@@ -145,12 +148,21 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
      */
     public KafkaBattleResultSink(Clients clients, BattleResultTopics topics, int generation, short replicationFactor,
                                  Duration verifyTimeout, BattleMetrics metrics) {
-        this(clients, topics, generation, replicationFactor, verifyTimeout, metrics, QUEUE_CAPACITY, System::nanoTime);
+        this(clients, topics, generation, replicationFactor, verifyTimeout, metrics, QUEUE_CAPACITY, System::nanoTime,false);
+    }
+    public KafkaBattleResultSink(Clients clients,BattleResultTopics topics,int generation,short replicationFactor,
+                                  Duration verifyTimeout,BattleMetrics metrics,boolean requireDurableTopic){
+        this(clients,topics,generation,replicationFactor,verifyTimeout,metrics,QUEUE_CAPACITY,System::nanoTime,requireDurableTopic);
     }
 
     /** 测试用：可注入队列上限与单调时钟（纳秒）。 */
     KafkaBattleResultSink(Clients clients, BattleResultTopics topics, int generation, short replicationFactor, Duration verifyTimeout,
                           BattleMetrics metrics, int queueCapacity, LongSupplier nanoClock) {
+        this(clients,topics,generation,replicationFactor,verifyTimeout,metrics,queueCapacity,nanoClock,false);
+    }
+    KafkaBattleResultSink(Clients clients,BattleResultTopics topics,int generation,short replicationFactor,Duration verifyTimeout,
+                          BattleMetrics metrics,int queueCapacity,LongSupplier nanoClock,boolean requireDurableTopic){
+        this.requireDurableTopic=requireDurableTopic;
         this.clients = Objects.requireNonNull(clients, "clients");
         this.topics = Objects.requireNonNull(topics, "topics");
         this.generation = generation;
@@ -216,7 +228,8 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
      */
     private boolean verifyNow() {
         try (TopicAdmin admin = clients.admin()) {
-            topics.ensure(admin, generation, AuditTopicInitializer.Mode.CREATE_AND_VERIFY, replicationFactor, verifyTimeout);
+            if(requireDurableTopic)topics.ensureDurable(admin,generation,AuditTopicInitializer.Mode.CREATE_AND_VERIFY,replicationFactor,verifyTimeout);
+            else topics.ensure(admin, generation, AuditTopicInitializer.Mode.CREATE_AND_VERIFY, replicationFactor, verifyTimeout);
             synchronized (producerLock) {
                 if (closed.get()) {
                     return false;
@@ -291,15 +304,40 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
         }
     }
 
+    @Override
+    public CompletableFuture<Void> publishConfirmed(BattleResultEvent event,Channel channel){
+        return publishConfirmed(event,event==null?null:event.toByteString(),channel);
+    }
+
+    @Override
+    public CompletableFuture<Void> publishConfirmed(BattleResultEvent event,com.google.protobuf.ByteString original,Channel channel){
+        CompletableFuture<Void> acknowledged=new CompletableFuture<>();
+        if(event==null){acknowledged.completeExceptionally(new IllegalArgumentException("结果事件为空"));return acknowledged;}
+        try {
+            if(original==null||original.size()>960*1024||!BattleResultEvent.parseFrom(original).equals(event))
+                throw new IllegalArgumentException("结果原件与事件不一致");
+        } catch(com.google.protobuf.InvalidProtocolBufferException|IllegalArgumentException invalid) {
+            acknowledged.completeExceptionally(invalid);return acknowledged;
+        }
+        if(closed.get()){acknowledged.completeExceptionally(new IllegalStateException("结果生产者已关闭"));return acknowledged;}
+        confirmations.add(acknowledged);
+        acknowledged.whenComplete((ignored,error)->confirmations.remove(acknowledged));
+        Channel lane=channel==null?Channel.PLAIN:channel;
+        try{executor.execute(new SendTask(event,original,lane,acknowledged));}
+        catch(RuntimeException error){lost(event,lane,executor.isShutdown()?Reason.SHUTDOWN_DROPPED:Reason.QUEUE_FULL);acknowledged.completeExceptionally(error);}
+        return acknowledged;
+    }
+
     /** 发送线程上：序列化、发送；结局在 Kafka 回调里计。 */
-    private void send(BattleResultEvent event, Channel channel) {
+    private void send(BattleResultEvent event,com.google.protobuf.ByteString original, Channel channel,CompletableFuture<Void> acknowledged) {
         Producer<String, byte[]> current = ensureVerified() ? producer : null;
         if (current == null) {
             lost(event, channel, Reason.NOT_VERIFIED);
+            fail(acknowledged,new IllegalStateException("结果 topic 尚未通过持久策略核对"));
             return;
         }
         String key = BattleResultTopics.key(event.getBattleId());
-        ProducerRecord<String, byte[]> message = new ProducerRecord<>(topic, key, event.toByteArray());
+        ProducerRecord<String, byte[]> message = new ProducerRecord<>(topic, key, original.toByteArray());
         // 每条结局只计一次：生产者处于致命状态时 send 先把记录放进缓冲再抛异常，随后后台线程中止批次时回调还会再报一次
         AtomicBoolean settled = new AtomicBoolean();
         try {
@@ -309,20 +347,27 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
                 }
                 if (error == null) {
                     sent(channel);
+                    if(acknowledged!=null)acknowledged.complete(null);
                 } else {
                     log.warn("对局结果投递失败 battle_id={}：{}", key, error.toString());
                     lost(event, channel, Reason.DELIVERY_FAILED);
+                    fail(acknowledged,error);
                 }
             });
         } catch (RuntimeException e) {
             if (settled.compareAndSet(false, true)) {
                 log.warn("对局结果发送失败 battle_id={}：{}", key, e.toString());
                 lost(event, channel, Reason.SEND_ERROR);
+                fail(acknowledged,e);
             }
             if (e instanceof KafkaException && !(e instanceof InterruptException)) {
                 discardProducer(current, e);
             }
         }
+    }
+
+    private static void fail(CompletableFuture<Void> acknowledged,Throwable error){
+        if(acknowledged!=null)acknowledged.completeExceptionally(error);
     }
 
     /**
@@ -397,12 +442,15 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
             for (Runnable task : left) {
                 if (task instanceof SendTask pending) {
                     lost(pending.event, pending.channel, Reason.SHUTDOWN_DROPPED);
+                    fail(pending.acknowledged,new IllegalStateException("结果提交线程已停止"));
                     dropped++;
                 }
             }
             boolean stopped = awaitSendThread(CLOSE_GRACE.toNanos());
             log.error("对局结果发送线程在停机预算 {} 内没发完，排着的 {} 条结果事件写进兜底日志，发送线程已停={}", budget, dropped, stopped);
         }
+        for(var pending:confirmations)fail(pending,new IllegalStateException("结果生产者关闭前未取得确认"));
+        confirmations.clear();
         log.info("对局结果发送已关闭 topic={} 停机时丢进兜底日志={}", topic, dropped);
     }
 
@@ -423,20 +471,31 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
     /** 带着事件的任务：停机时没执行的也能逐条写兜底日志。 */
     private final class SendTask implements Runnable {
         final BattleResultEvent event;
+        final com.google.protobuf.ByteString original;
         final Channel channel;
+        final CompletableFuture<Void> acknowledged;
 
         SendTask(BattleResultEvent event, Channel channel) {
+            this(event,channel,null);
+        }
+        SendTask(BattleResultEvent event,Channel channel,CompletableFuture<Void> acknowledged){
+            this(event,event.toByteString(),channel,acknowledged);
+        }
+        SendTask(BattleResultEvent event,com.google.protobuf.ByteString original,Channel channel,CompletableFuture<Void> acknowledged){
             this.event = event;
+            this.original=original;
             this.channel = channel;
+            this.acknowledged=acknowledged;
         }
 
         @Override
         public void run() {
             try {
-                send(event, channel);
+                send(event,original, channel,acknowledged);
             } catch (RuntimeException e) {
                 log.error("对局结果处理异常 battle_id={}", BattleResultTopics.key(event.getBattleId()), e);
                 lost(event, channel, Reason.SEND_ERROR);
+                fail(acknowledged,e);
             }
         }
     }

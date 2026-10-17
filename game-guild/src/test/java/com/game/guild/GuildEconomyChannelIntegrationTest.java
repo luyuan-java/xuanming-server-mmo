@@ -317,7 +317,7 @@ class GuildEconomyChannelIntegrationTest {
         GuildRanks ranks = wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, runtime);
         ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis, REDIS_KEYS);
         GuildTableLookup lookup = wiring.guildTableLookup(tables);
-        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator);
+        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator, metrics);
         GuildViews views = wiring.guildViews(presence, profiles, metrics, props, lookup, store);
         GuildService guilds = wiring.guildService(store, cache, access, views, ranks, pushes, ids, lookup);
         GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup,

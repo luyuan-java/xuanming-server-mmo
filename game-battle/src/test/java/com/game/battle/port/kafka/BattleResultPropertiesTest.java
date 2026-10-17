@@ -77,23 +77,24 @@ class BattleResultPropertiesTest {
         PropertySource<?> source = yaml.get(0);
         assertThat(source.getProperty("game.battle.result.bootstrap-servers")).isEqualTo("${GAME_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}");
         assertThat(source.getProperty("game.battle.result.topic-generation")).isEqualTo("${GAME_BATTLE_RESULT_TOPIC_GENERATION:1}");
-        assertThat(source.getProperty("game.battle.result.replication-factor")).isEqualTo(1);
+        assertThat(source.getProperty("game.battle.result.replication-factor")).isEqualTo("${KAFKA_TOPIC_REPLICATION_FACTOR:1}");
         assertThat(source.getProperty("game.battle.result.init-timeout")).isEqualTo("10s");
 
         // 这两个变量的值本身是合法的时候，绑定结果就是它们；这里给的正是占位符里的缺省值，所以结果应与代码缺省相同
-        BattleResultProperties props = bindYaml(Map.of("GAME_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092", "GAME_BATTLE_RESULT_TOPIC_GENERATION", "1"));
+        BattleResultProperties props = bindYaml(Map.of("GAME_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092", "GAME_BATTLE_RESULT_TOPIC_GENERATION", "1",
+                "KAFKA_TOPIC_REPLICATION_FACTOR","1"));
         assertThat(props).isEqualTo(BattleResultProperties.defaults());
     }
 
     @Test
     void 配置文件把两个环境变量接到对的键上() throws Exception {
         BattleResultProperties props = bindYaml(Map.of("GAME_KAFKA_BOOTSTRAP_SERVERS", "kafka.internal:19092",
-                "GAME_BATTLE_RESULT_TOPIC_GENERATION", "4"));
+                "GAME_BATTLE_RESULT_TOPIC_GENERATION", "4","KAFKA_TOPIC_REPLICATION_FACTOR","3"));
 
         assertThat(props.bootstrapServers()).isEqualTo("kafka.internal:19092");
         assertThat(props.topicGeneration()).isEqualTo(4);
         assertThat(RESULT_TOPICS.name(props.topicGeneration())).as("与 game-match 读同一个变量，得到同一个 topic 名").isEqualTo("game-battle-result-g4");
-        assertThat(props.replicationFactor()).isEqualTo((short) 1);
+        assertThat(props.replicationFactor()).isEqualTo((short) 3);
         assertThat(props.initTimeout()).isEqualTo(Duration.ofSeconds(10));
     }
 

@@ -331,7 +331,23 @@ class PetServiceTest {
     // ------------------------------------------------------------------ 主人等级 / 加载
 
     @Test
-    void 主人升级宝宝跟着升_点数按等级换算_残血补上限增量_降级只夹() {
+    void 交易高等级宝宝换低级主人后加载保留成长且禁止越级召唤() {
+        var pet=PetEntry.newBuilder().setPetId(991).setPetTableId(1).setLevel(30).setHealth(100).setMana(30)
+                .putAllocated(403,150).build();
+        player=WorldTestAccess.player(PLAYER,10,PlayerState.newBuilder().setPets(PetState.newBuilder().addPets(pet)).build());
+        service.initializeOnLoad(player);
+        assertThat(player.pets().find(991).level()).isEqualTo(30);
+        assertThat(player.pets().find(991).allocated(403)).isEqualTo(150);
+        assertThat(service.summon(player,991)).isEqualTo(PetService.OWNER_LEVEL_NOT_ENOUGH);
+        setLevel(30);
+        assertThat(service.summon(player,991)).isZero();
+        setLevel(10);
+        assertThat(player.pets().find(991).level()).isEqualTo(30);
+        assertThat(player.pets().activePetId()).isZero();
+    }
+
+    @Test
+    void 主人升级宝宝跟着升_主人降级不削减宝宝等级和当前值() {
         long petId = grant(1);
         Pet pet = player.pets().find(petId);
         long max1 = info(petId).getDerived().getMaxHealth();
@@ -345,17 +361,19 @@ class PetServiceTest {
         assertThat(at30.getDerived().getHealth()).as("补上限增量").isEqualTo(at30.getDerived().getMaxHealth() - 100);
 
         setLevel(1);
-        assertThat(info(petId).getDerived().getHealth()).as("降级只夹").isEqualTo(info(petId).getDerived().getMaxHealth());
+        assertThat(info(petId).getLevel()).isEqualTo(30);
+        assertThat(info(petId).getDerived().getHealth()).isEqualTo(at30.getDerived().getHealth());
     }
 
     @Test
-    void 降级后已分配超总量_整池清零返还() {
+    void 主人降级后宝宝已分配点仍属于原等级实例() {
         long petId = grant(1);
         setLevel(30);
         assertThat(service.allocate(player, petId, Map.of(403, 150L))).isZero();
         setLevel(10);
-        assertThat(info(petId).getRemainingPoints()).isEqualTo(50);
-        assertThat(info(petId).getDimensionsList()).extracting(PetDimensionInfo::getAllocated).containsOnly(0);
+        assertThat(info(petId).getLevel()).isEqualTo(30);
+        assertThat(info(petId).getRemainingPoints()).isZero();
+        assertThat(player.pets().find(petId).allocated(403)).isEqualTo(150);
     }
 
     @Test

@@ -34,6 +34,15 @@ import org.slf4j.LoggerFactory;
  * </ol>
  * 收藏写入整个带重试的调用一共只有这一份上限（listing_repo.go:302-305 的 bounded 包住整个 WithTxRetry）。
  *
+ * <p><b>收藏写入的写入预留</b>（客户端请求按会话保序，mmorpg client-request-ordering.md §6.1）：收藏的两条写语句是自动提交的，发出即提交点；
+ * 发出之后库端还可能为等行锁再跑满 {@code innodb_lock_wait_timeout}（2 s）才落定。socketTimeout 只断开客户端读，撤不回已在执行的语句；
+ * JDBC 查询超时（秒粒度，最晚约在本次上限之后 1 s 内到点）靠 Connector/J 另开连接发 {@code KILL QUERY} 打断锁等待，但 KILL 本身可能发不出去
+ * 或很慢（{@code max_connections} 打满、另开连接受 connectTimeout 拖慢）。gate 对同一会话的后端请求单飞、5 s 调用超时一到就放行下一条：
+ * 不留预留时最晚约在受理后 4.5 s 加 KILL 耗时落定，KILL 发不出去时要到 5.5 s。所以收藏写入的单次上限改为
+ * {@code min(2000 ms, 请求剩余 − 写入预留)}，不够就不取连接、不发语句（预留由装配按请求预算算好，{@link TradeLimits#writeReserveMillis}）：
+ * 库端锁等待这条不依赖客户端的上界兜到受理后 4.5 s，KILL 正常时约 3.5 s。代价：缺省预算下受理后 2.5–3.5 s 才轮到的收藏写入从「照常执行」
+ * 变成 in-band 1003（依赖故障）。读与播种的 InsertListing（不经 gate）不留预留。
+ *
  * <p><b>收藏写入的有界重试</b>（listing_repo.go:288-312）：F4 用自动提交语句（会话级 RC 下与基线单语句的 RC 事务语义相同，trade-spec §5.5）；
  * 撞 1213 / 1205 / 9007（错误号沿 cause 链按 {@link SQLException#getErrorCode()} 取，不做文本匹配；asset_op_repo.go:876-895）整条重跑，
  * 共 {@value TradeLimits#FAVORITE_WRITE_ATTEMPTS} 次，两次之间退避 8–12 ms（10 ms ±20%，decide.go:144-155）；剩余预算不够退避就不再重跑。
@@ -84,23 +93,43 @@ public final class JdbcListingStore implements ListingStore {
 
     private final ConnectionSource connections;
     private final int queryTimeoutCapSeconds;
+    private final long writeReserveMillis;
     private final Events events;
     private final DoubleSupplier jitter;
     private final Sleeper sleeper;
 
     /**
-     * @param connections            取连接（按次限等；Druid 用 {@code druid::getConnection}）
-     * @param queryTimeoutCapSeconds 每条语句查询超时的上限（秒，{@code game.trade.query-timeout}）；实际取它与剩余预算（向上取整）的较小者；≤ 0 不设上限
-     * @param events                 指标回调
+     * 不留写入预留（{@code writeReserveMillis = 0}）：只给不经 gate 会话 lane 的调用方与测试夹具用；客户端路径的装配用
+     * {@link #JdbcListingStore(ConnectionSource, int, long, Events)}。
      */
     public JdbcListingStore(ConnectionSource connections, int queryTimeoutCapSeconds, Events events) {
-        this(connections, queryTimeoutCapSeconds, events, () -> ThreadLocalRandom.current().nextDouble(), Thread::sleep);
+        this(connections, queryTimeoutCapSeconds, 0, events);
+    }
+
+    /**
+     * @param connections            取连接（按次限等；Druid 用 {@code druid::getConnection}）
+     * @param queryTimeoutCapSeconds 每条语句查询超时的上限（秒，{@code game.trade.query-timeout}）；实际取它与剩余预算（向上取整）的较小者；≤ 0 不设上限
+     * @param writeReserveMillis     收藏写入的最晚发出时刻比请求截止提前多少（毫秒，≥ 0；{@link TradeLimits#writeReserveMillis}）
+     * @param events                 指标回调
+     */
+    public JdbcListingStore(ConnectionSource connections, int queryTimeoutCapSeconds, long writeReserveMillis, Events events) {
+        this(connections, queryTimeoutCapSeconds, writeReserveMillis, events, () -> ThreadLocalRandom.current().nextDouble(),
+                Thread::sleep);
     }
 
     JdbcListingStore(ConnectionSource connections, int queryTimeoutCapSeconds, Events events, DoubleSupplier jitter,
                      Sleeper sleeper) {
+        this(connections, queryTimeoutCapSeconds, 0, events, jitter, sleeper);
+    }
+
+    JdbcListingStore(ConnectionSource connections, int queryTimeoutCapSeconds, long writeReserveMillis, Events events,
+                     DoubleSupplier jitter, Sleeper sleeper) {
+        if (writeReserveMillis < 0) {
+            throw new IllegalArgumentException("写入预留不能为负: " + writeReserveMillis);
+        }
         this.connections = connections;
         this.queryTimeoutCapSeconds = queryTimeoutCapSeconds;
+        this.writeReserveMillis = writeReserveMillis;
         this.events = events;
         this.jitter = jitter;
         this.sleeper = sleeper;
@@ -175,7 +204,7 @@ public final class JdbcListingStore implements ListingStore {
     @Override
     public void insertFavorite(long playerId, long listingId, long createdMs, Deadline deadline) {
         String op = "InsertFavorite";
-        Deadline bound = bound(op, deadline);
+        Deadline bound = writeBound(op, deadline);
         Stmt stmt = ListingSql.insertFavorite(playerId, listingId, createdMs);
         for (int attempt = 1; ; attempt++) {
             try {
@@ -206,7 +235,7 @@ public final class JdbcListingStore implements ListingStore {
     @Override
     public void deleteFavorite(long playerId, long listingId, Deadline deadline) {
         String op = "DeleteFavorite";
-        Deadline bound = bound(op, deadline);
+        Deadline bound = writeBound(op, deadline);
         try {
             update(op, bound, ListingSql.deleteFavorite(playerId, listingId));
         } catch (SQLException e) {
@@ -222,6 +251,22 @@ public final class JdbcListingStore implements ListingStore {
             throw new DependencyException("超过请求预算，不再执行 trade " + op);
         }
         return Deadline.after(Math.min(TradeLimits.STORE_OP_TIMEOUT_MS, deadline.remainingMillis()));
+    }
+
+    /**
+     * 收藏写入（客户端路径，自动提交即提交点）的单次截止：{@code min(2000 ms, 请求剩余 − 写入预留)}；剩余不够预留就不取连接、不发语句
+     * （见类注释「写入预留」）。取连接、语句前检查与查询超时都按它收口，重跑也在它之内。预留为 0 时与 {@link #bound} 相同。
+     */
+    private Deadline writeBound(String op, Deadline deadline) {
+        if (deadline.expired()) {
+            throw new DependencyException("超过请求预算，不再执行 trade " + op);
+        }
+        long usable = deadline.remainingMillis() - writeReserveMillis;
+        if (writeReserveMillis > 0 && usable <= 0) {
+            throw new DependencyException("请求剩余不足写入预留 " + writeReserveMillis + " ms，不再执行 trade " + op
+                    + "（发出后可能再等行锁，落在 gate 放行的下一条之后）");
+        }
+        return Deadline.after(Math.min(TradeLimits.STORE_OP_TIMEOUT_MS, Math.max(0, usable)));
     }
 
     private <T> T select(String op, Deadline deadline, Stmt stmt, Reader<T> reader) {

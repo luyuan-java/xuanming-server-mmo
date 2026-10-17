@@ -147,6 +147,7 @@ public final class SceneAssetOpClients implements AutoCloseable {
                 case DEBIT -> service.debit(request);
                 case ABORT_DEBIT -> service.abortDebit(request);
                 case CREDIT -> service.credit(request);
+                case ACK_RECEIPT -> service.ackReceipt(request);
             };
         } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);

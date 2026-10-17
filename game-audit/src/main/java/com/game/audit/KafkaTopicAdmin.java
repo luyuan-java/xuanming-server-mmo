@@ -85,6 +85,21 @@ public final class KafkaTopicAdmin implements TopicAdmin {
     }
 
     @Override
+    public Map<String,Integer> minimumReplicaCounts(Collection<String> topics,Duration timeout){
+        try{
+            Map<String,Integer> counts=new HashMap<>();
+            for(var entry:admin.describeTopics(topics).allTopicNames().get(timeout.toMillis(),TimeUnit.MILLISECONDS).entrySet()){
+                int minimum=entry.getValue().partitions().stream().mapToInt(partition->
+                        (int)partition.replicas().stream().map(org.apache.kafka.common.Node::id).distinct().count()).min().orElse(0);
+                counts.put(entry.getKey(),minimum);
+            }
+            return counts;
+        }catch(ExecutionException error){throw unavailable("查询实际topic副本数失败",error.getCause());}
+        catch(TimeoutException error){throw unavailable("查询实际topic副本数超时",error);}
+        catch(InterruptedException error){Thread.currentThread().interrupt();throw unavailable("查询实际topic副本数被中断",error);}
+    }
+
+    @Override
     public Map<String, String> configs(String topic, Collection<String> keys, Duration timeout) {
         ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
         try {

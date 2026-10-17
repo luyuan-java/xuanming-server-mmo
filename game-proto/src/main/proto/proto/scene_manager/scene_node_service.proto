@@ -37,6 +37,8 @@ service SceneNodeGrpc {
   // 未见过的 seq 记 REJECTED 占位(reason=0);见过则回原结局。允许用于任何流。
   rpc AssetAbortDebit(AssetOpRequest) returns (AssetOpResponse) {}
   rpc AssetCredit(AssetOpRequest) returns (AssetOpResponse) {}
+  // 交易库已持久保存托管快照后释放场景收据；幂等，不改变玩家资产与原始结局。
+  rpc AssetAckReceipt(AssetOpRequest) returns (AssetOpResponse) {}
 }
 
 message ReleasePlayerRequest {

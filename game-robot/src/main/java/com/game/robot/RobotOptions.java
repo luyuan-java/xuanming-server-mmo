@@ -26,6 +26,7 @@ import com.game.robot.scenario.Match5v5Scenario;
 import com.game.robot.scenario.MatchActivityScenario;
 import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
+import com.game.robot.scenario.OrderingScenario;
 import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.RateLimitScenario;
 import com.game.robot.scenario.ReconnectScenario;
@@ -163,7 +164,13 @@ public record RobotOptions(
         /** travel 的子模式：拿到 124 不跟随，分别经两个区的入口重登；子命令写作 {@code travel-abandon}。 */
         TRAVEL_ABANDON,
         /** travel 的子模式：在访客区断线、等过 30 s 重连租约，再经出发区的入口重登；子命令写作 {@code travel-long}。 */
-        TRAVEL_LONG
+        TRAVEL_LONG,
+        /**
+         * 客户端请求按会话保序（mmorpg client-request-ordering.md §12 批次 R，对应 mmorpg robot 的 {@code mode: ordering-smoke}）；
+         * 子命令写作 {@code ordering-smoke}。帮会 / 好友 / 登录三组与 1V1 排队各自不等回包连发两条有依赖的请求，再查权威状态判断执行顺序。
+         * 结果行 {@code ORDERING_SMOKE_OK …} / {@code ORDERING_SMOKE_FAIL step=… reason=…}（{@link OrderingScenario}）。
+         */
+        ORDERING_SMOKE
     }
 
     /** 可配置项：命令行名、环境变量名、缺省值、说明。 */
@@ -418,6 +425,7 @@ public record RobotOptions(
             case MATCH_ACTIVITY -> MatchActivityScenario.accountName(prefix, runTag, "a");
             case MATCH_5V5 -> Match5v5Scenario.accountName(prefix, runTag, Match5v5Scenario.PLAYERS - 1);
             case TRAVEL, TRAVEL_ABANDON, TRAVEL_LONG -> TravelScenario.accountName(prefix, runTag, "a");
+            case ORDERING_SMOKE -> OrderingScenario.accountName(prefix, runTag, "gl");
         };
         if (longest.codePointCount(0, longest.length()) > MAX_ACCOUNT_CHARS) {
             throw new UsageException("账号 " + longest + " 超过 " + MAX_ACCOUNT_CHARS + " 个字符，缩短 --prefix / --run-tag");
@@ -434,7 +442,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar game-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|travel|travel-abandon|travel-long|team> [选项]\n");
+        out.append("用法：java -jar game-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|travel|travel-abandon|travel-long|ordering-smoke|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -481,7 +489,8 @@ public record RobotOptions(
                 + "整队开战（批次 6.4）需要切片带 game-match、game-battle 与 scene 的 SceneBattleService；结尾写 TEAM_SMOKE_OK … 或 TEAM_SMOKE_FAIL step=…\n");
         out.append("  guild     帮会核心（A / B / D / E / F 五个新号）：建帮落归属区 / 重复建帮 14000 / 本区榜 / 改公告 / 申请 → 审批 → "
                 + "各推送 / 伪造 player_id 退帮按会话受理 / 上行 8 与 220 信封 1003 / 任命长老 / 长老踢人边界 / 两次转让 / 退帮 / 解散后 "
-                + "14002 / 14007 且删申请；另钉 14009 / 14010 / 14006 / 14001 / 14018 / 14015 / 14014 / 14016 / 14004 / 14005、"
+                + "14002 / 14007 且删申请 / 第 11 步 B 进了 A 新建的临时帮 H 后带过期的 expected_guild_id（第 1 步那个已解散的帮）退帮 → 14002、"
+                + "B 仍是 H 的成员，对照：带 H 的 id 退帮受理；另钉 14009 / 14010 / 14006 / 14001 / 14018 / 14015 / 14014 / 14016 / 14004 / 14005、"
                 + "待审数只对管理者可见、榜单页长回显、DonateToGuild(0) 14027；跨区步骤（另一个新号 C 经 --visit-zone 登录、归属区是 --visit-zone："
                 + "查帮会 14001、查名次 14007、本区榜里没有、申请 14001、同名建帮 14010）按 --cross-zone 决定跑不跑，跑没跑写进报告\n");
         out.append("  guild-economy 帮会经济（A / B 两个新号）：建帮 → GM 给 A 发银两 / 灵石 → 大捐两次（资金 / 帮贡）、第三次 14024 → 灵石捐 → "
@@ -582,6 +591,13 @@ public record RobotOptions(
                 + "结尾写 TRAVEL_ABANDON_OK … 或 TRAVEL_ABANDON_FAIL step=… reason=…\n");
         out.append("  travel-long 访客区断线久等（一个新号；前置同 travel）：传送到 --visit-zone 后直接关 TCP，等 31 s（越过 30 s 的重连租约）→ "
                 + "经 --zone 的入口严格重登：落在 --zone、没有 124；结尾写 TRAVEL_LONG_OK … 或 TRAVEL_LONG_FAIL step=… reason=…\n");
+        out.append("  ordering-smoke 客户端请求按会话保序（六个新号，同 mmorpg 的 O1–O7；需要切片带 game-guild、game-friend、game-match）："
+                + "每组不等回包连发两条有依赖的请求、等回包后查权威状态 → O5 帮会 218 → 219 后帮主侧 221 里没有申请人（撤回 14018 且仍在名单、"
+                + "或任一条回 14xxx 忙 = 乱序）、5 轮 → O6 好友 238 → 11 后双方 12 互相看不到（互为好友 = 乱序，单边残留即失败）、5 轮 → "
+                + "O7 登录：每轮新连接连发 48 → 26（26 回 2007 = 乱序，2005 隔 1 s 重发，受理后等 79）、3 轮 → O1 主机器人进场、O2 153 必须 NOT_QUEUED → "
+                + "O3 157 {1V1} → 148（不带票号；148 受理不回包）后 153 仍 QUEUED = 乱序（带票号收尾）、20 轮；乱序全部跑完后汇总成一行"
+                + " ORDERING_SMOKE_FAIL step=O5-order,…，其余失败立即 ORDERING_SMOKE_FAIL step=<那一步>，全过 ORDERING_SMOKE_OK player_id=… rounds=…。"
+                + "不要与 battle-smoke 同时跑（共用 1V1 队列）；帮会 / 好友申请每人每分钟 10 次，同一 --run-tag 一分钟内最多连跑两次\n");
         out.append("必需环境变量：").append(PASSWORD_ENV).append("（开发口令，不接受命令行传入）\n");
         out.append("选项（命令行优先于环境变量）：\n");
         for (Opt opt : Opt.values()) {
@@ -612,7 +628,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / battle-cross-zone / match-activity / match-5v5 / travel / travel-abandon / travel-long）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / battle-cross-zone / match-activity / match-5v5 / travel / travel-abandon / travel-long / ordering-smoke）");
         }
     }
 

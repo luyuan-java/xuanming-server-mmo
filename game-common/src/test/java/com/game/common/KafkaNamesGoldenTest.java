@@ -25,6 +25,8 @@ class KafkaNamesGoldenTest {
         assertThat(KAFKA_NAMES.dataTransactionLogGroup()).isEqualTo("game-data-transaction-log");
         assertThat(KAFKA_NAMES.dataPlayerSnapshotGroup()).isEqualTo("game-data-player-snapshot");
         assertThat(KAFKA_NAMES.matchRatingGroup()).isEqualTo("game-match-rating");
+        assertThat(KAFKA_NAMES.guildTrialGroup()).isEqualTo("game-guild-trial");
+        assertThat(KAFKA_NAMES.guildTrialClientId("guild-1")).isEqualTo("game-guild-trial-guild-1");
         assertThat(KAFKA_NAMES.dataAdminClientId()).isEqualTo("game-data-admin");
         assertThat(KAFKA_NAMES.dataConsumerClientId("game-data-transaction-log")).isEqualTo("game-data-game-data-transaction-log");
         assertThat(KAFKA_NAMES.dataConsumerClientId("game-data-player-snapshot")).isEqualTo("game-data-game-data-player-snapshot");

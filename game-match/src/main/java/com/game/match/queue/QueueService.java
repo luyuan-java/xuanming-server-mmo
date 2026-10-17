@@ -6,6 +6,7 @@ import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory.HolderRead;
 import com.game.discovery.location.PlayerLocationDirectory.LocationStatus;
+import com.game.discovery.proto.PlayerLocation;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.match.MatchProperties;
 import com.game.match.gather.GatherLauncher;
@@ -107,6 +108,9 @@ public final class QueueService {
     private final MatchMetrics metrics;
     private final RedisKeys redisKeys;
     private final Supplier<String> ticketIds;
+    private com.game.match.global.GlobalMatchService global;
+    /** 仅在 Spring 装配时设置，服务发布后不再变化。 */
+    public QueueService withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
 
     /** 生产装配：票号是 UUIDv4（小写带连字符，同基线 {@code uuid.New().String()}）。 */
     public QueueService(MatchProperties props, PlayerStatusReader players, TicketStore tickets, TicketHealing healing, RatingReader ratings,
@@ -152,6 +156,7 @@ public final class QueueService {
     }
 
     private JoinQueueResponse join(long playerId, SessionContext caller, JoinQueueRequest request, Deadline d) {
+        if(global!=null) return caller==null ? MatchTips.joinRejected(MatchTip.NO_IDENTITY) : global.join(caller,request,d);
         int mode = request.getModeValue();
         int configId = request.getBattleConfigId();
         // 1 身份
@@ -204,9 +209,9 @@ public final class QueueService {
             return rejected(mode, JoinOutcome.NOT_IN_SCENE, MatchTip.JOIN_NOT_IN_SCENE);
         }
         // 跨会话栅栏(见 join(SessionContext, …)):在线目录记着玩家此刻在哪个 gate 实例的哪个会话上,重连之后换成新会话。
-        // 只在「目录有条目且不是发起这次请求的会话」时拒:条目由 gate 在 scene 确认进场之后异步写入,刚进场就点匹配时可能还没写到,
-        // 缺席按放行处理(上面已要求位置 ONLINE),不误拒刚进场的玩家。不原子(目录与票据不在同一处),只缩小跨会话窗口,
-        // 剩余靠票据 TTL、153 权威查询与客户端重连后回源兜底。
+        // 只在「目录条目属于当前这次进场、且不是发起这次请求的会话」时拒:条目由 gate 在 scene 确认进场之后异步写入,刚进场就点匹配时可能还没写到,
+        // 缺席按放行处理(上面已要求位置 ONLINE),不误拒刚进场的玩家;代次早于位置记录的条目是上一次进场的残留,同样按缺席(见 staleEntry)。
+        // 不原子(目录与票据不在同一处),只缩小跨会话窗口,剩余靠票据 TTL、153 权威查询与客户端重连后回源兜底。
         if (caller != null) {
             Optional<PlayerPresence> presence;
             try {
@@ -214,6 +219,13 @@ public final class QueueService {
             } catch (Deadline.DependencyException e) {
                 log.error("[match] JoinQueue 读在线目录失败 player={}: {}", id(playerId), why(e));
                 return rejected(mode, JoinOutcome.INTERNAL, MatchTip.BUSY);
+            }
+            if (presence.isPresent() && staleEntry(presence.get(), location.location())) {
+                log.info("[match] JoinQueue 在线目录条目早于位置记录(上一次进场的残留),按缺席放行 player={} request_session={} entry_session={}"
+                                + " entry_epoch={} location_epoch={}", id(playerId), Integer.toUnsignedString(caller.getSessionId()),
+                        Integer.toUnsignedString(presence.get().getSessionId()), Long.toUnsignedString(presence.get().getOwnerEpoch()),
+                        Long.toUnsignedString(location.location().getOwnerEpoch()));
+                presence = Optional.empty();
             }
             if (presence.isPresent() && supersededBy(caller, presence.get())) {
                 log.info("[match] JoinQueue 来自已被取代的会话,拒绝 player={} request_session={} current_session={}", id(playerId),
@@ -328,6 +340,11 @@ public final class QueueService {
      * @throws Deadline.DependencyException 读票或删票出错（处理器回信封 1003）
      */
     public CancelOutcome cancel(long playerId, String requestedTicket, Deadline d) {
+        return cancel(playerId, requestedTicket, "", d);
+    }
+    public CancelOutcome cancel(long playerId, String requestedTicket, String requestId, Deadline d) {
+        if(global!=null){if(d.expired())throw new Deadline.DependencyException("全球取消预算耗尽");
+            return global.store().cancel(playerId,requestedTicket,requestId)?CancelOutcome.CANCELLED:CancelOutcome.RACED;}
         if (playerId == 0) {
             return CancelOutcome.NO_IDENTITY;
         }
@@ -368,6 +385,10 @@ public final class QueueService {
      * @throws Deadline.DependencyException 读票出错（处理器回信封 1003）
      */
     public GetQueueStatusResponse status(long playerId, Deadline d) {
+        return status(playerId, "", d);
+    }
+    public GetQueueStatusResponse status(long playerId, String requestId, Deadline d) {
+        if(global!=null){if(d.expired())throw new Deadline.DependencyException("全球查票预算耗尽");return global.status(playerId, requestId);}
         if (playerId == 0) {
             return notQueued();
         }
@@ -402,6 +423,25 @@ public final class QueueService {
 
     private static String id(long playerId) {
         return Long.toUnsignedString(playerId);
+    }
+
+    /**
+     * 在线目录条目是不是上一次进场留下的残留:它的 owner_epoch <b>小于</b>位置记录的 owner_epoch。
+     *
+     * <p>依据:owner_epoch 是玩家数据归属的代次,每次夺权(login 进游戏、跨节点交出)都在库里 {@code owner_epoch + 1},按玩家单调;同一次进场里
+     * gate 写在线目录、scene 写位置记录用的是同一个值(gate 取 login 下发的 EnterScene / 交出的 to_epoch,scene 取 PlayerEnter 的 epoch)。
+     * 位置记录只收 (epoch, 序号) 更新的写,所以「条目的代次 &lt; 位置记录的代次」说明位置记录已属于更新的一次进场、条目是旧会话的:旧 gate 崩溃
+     * 没撤,或新 gate 的写入失败(续期脚本遇值不一致不覆盖,最长留到 TTL 60 s)。这时拿它比会话号会误拒合法的新会话,所以按缺席处理。
+     * 代次相等或更大(新会话的条目已写、位置记录还没跟上)时条目就是当前的,照常比会话号——旧会话迟到的 157 照样被拒。
+     *
+     * <p>代价:跨节点换图的交接窗口里(新 epoch 的位置记录已写、gate 还没以新 epoch 重登在线目录),或新 epoch 的目录写入失败时,
+     * 旧会话迟到的 157 会被放行。那属于本栅栏本来就只能缩小、不能消除的跨会话窗口;反过来不会误拒任何合法请求。
+     *
+     * <p>条目代次为 0 = 代次未知(字段缺失、旧版本或损坏的写入;gate 只在进场成功后用铸出的代次写,正常不会是 0):不据此认定残留,
+     * 照常比会话号(fail-closed,最坏退回放宽之前的口径——可能误拒,但不会放进旧会话)。
+     */
+    private static boolean staleEntry(PlayerPresence entry, PlayerLocation location) {
+        return entry.getOwnerEpoch() != 0 && Long.compareUnsigned(entry.getOwnerEpoch(), location.getOwnerEpoch()) < 0;
     }
 
     /** 在线目录里的当前会话不是发起这次请求的会话(重连换了会话号,或换了 gate 进程实例)。 */

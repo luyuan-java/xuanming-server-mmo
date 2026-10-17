@@ -32,10 +32,13 @@ public final class MatchMethods {
     public static final String LIST_WATCHABLE_BATTLES = "ListWatchableBattles";
     /** 179：战斗票据补签（请求 / 应答消息在 battle 包）。 */
     public static final String REQUEST_BATTLE_TICKET = "RequestBattleTicket";
+    public static final String GET_NETWORK_PROBE_PLAN = "GetNetworkProbePlan";
+    public static final String COMMIT_NETWORK_PROBE = "CommitNetworkProbe";
 
     /** 全部 10 个方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
-            NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET);
+            NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
+            GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE);
 
     private MatchMethods() {
     }

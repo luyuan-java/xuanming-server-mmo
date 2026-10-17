@@ -32,6 +32,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>请求预算</b>（spec §7.3）：每条语句的查询超时 = min(配置上限, 剩余预算向上取整到秒)；预算用完不再取连接、不再发语句、
  * 不再重试，守卫事务在提交前再查一次（过了就回滚）——gate 已经判超时、客户端看到失败的请求，不会在之后落库（否则重试撞「已申请」）。
+ * Reject / Unblock 的单条写同样放进显式事务、提交前查预算（{@link #singleStatementWrite}）：查询超时只能按秒向上取整，自动提交的语句
+ * 在锁等待里可以越过截止近 1 s 才自行提交，那时 gate 可能已放行同一会话的下一条（mmorpg client-request-ordering.md §6.1）。
+ * 事务外补容量行（INSERT ODKU，从不覆盖已有行，之后的每个写者都先补行）晚落地无害，仍是自动提交。
  *
  * <p>玩家号按无符号 64 位：绑定参数用 {@link #uid}，读回用 {@link #readUid}，排序用 {@link Long#compareUnsigned}。
  * 连接池须是会话级 READ COMMITTED（自动提交语句不经事务，隔离级别来自会话），{@code innodb_lock_wait_timeout} 设短。
@@ -249,7 +252,7 @@ public final class JdbcFriendStore implements FriendStore {
         if (located == null) {
             return new RejectOutcome(RejectResult.NO_PENDING, 0, false);
         }
-        int rows = autocommitUpdate(deadline, UPDATE_REQUEST_GENERATION_STATUS, STATUS_REJECTED, nowMs.getAsLong(),
+        int rows = singleStatementWrite(deadline, "拒绝申请", UPDATE_REQUEST_GENERATION_STATUS, STATUS_REJECTED, nowMs.getAsLong(),
                 uid(located.from()), uid(me), uid(requestId), STATUS_PENDING);
         if (rows == 1) {
             return new RejectOutcome(RejectResult.OK, located.from(), true);
@@ -342,7 +345,7 @@ public final class JdbcFriendStore implements FriendStore {
     @Override
     public void unblock(long me, long target, Deadline deadline) {
         checkPair(me, target);
-        autocommitUpdate(deadline, DELETE_BLOCK, uid(me), uid(target));
+        singleStatementWrite(deadline, "解除拉黑", DELETE_BLOCK, uid(me), uid(target));
     }
 
     // ================================================================ 读
@@ -604,10 +607,35 @@ public final class JdbcFriendStore implements FriendStore {
         }
     }
 
-    private int autocommitUpdate(Deadline deadline, String sql, Object... args) {
-        requireBudget(deadline, "写");
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = prepare(new Db(c, deadline), sql, args)) {
-            return ps.executeUpdate();
+    /**
+     * 一条写语句在显式 READ COMMITTED 事务里执行，提交前再查一次预算（与守卫事务同一条提交点规则），过了就回滚、抛 {@link FriendStoreException}。
+     * 不用自动提交：查询超时 = 剩余预算向上取整到秒，截止前一刻发出的语句在锁等待里还能再跑近 1 s，被驱动取消之前拿到锁就自行提交了；
+     * 取消本身要另开连接发 KILL QUERY，连接慢时更晚。放进事务后语句跑过截止只会回滚，COMMIT 只在截止之前发出。
+     */
+    private int singleStatementWrite(Deadline deadline, String what, String sql, Object... args) {
+        requireBudget(deadline, what);
+        try (Connection c = dataSource.getConnection()) {
+            boolean autoCommit = c.getAutoCommit();
+            int isolation = c.getTransactionIsolation();
+            boolean finished = false;
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            c.setAutoCommit(false);
+            try {
+                int rows;
+                try (PreparedStatement ps = prepare(new Db(c, deadline), sql, args)) {
+                    rows = ps.executeUpdate();
+                }
+                requireBudget(deadline, what + "提交");
+                c.commit();
+                finished = true;
+                return rows;
+            } finally {
+                // 同守卫事务：没走到提交（超预算、语句失败）先回滚再还原自动提交——切回 true 会隐式提交半截的事务
+                if (!finished) {
+                    rollbackQuietly(c);
+                }
+                restore(c, autoCommit, isolation);
+            }
         } catch (SQLException e) {
             throw new FriendStoreException("好友写失败", e);
         }

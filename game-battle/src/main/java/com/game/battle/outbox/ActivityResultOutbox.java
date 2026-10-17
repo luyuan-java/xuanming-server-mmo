@@ -90,14 +90,18 @@ public final class ActivityResultOutbox implements ActivityResultSink {
     /** {@link ActivityResultSink}：在 {@code battle-logic} 上调用，只把任务交给发件箱线程。 */
     @Override
     public void dispatch(BattleResultEvent event) {
+        dispatch(event,false);
+    }
+    @Override public void dispatchCommitted(BattleResultEvent event){dispatch(event,true);}
+    private void dispatch(BattleResultEvent event,boolean brokerCommitted){
         try {
-            outbox.execute(() -> onDispatch(event));
+            outbox.execute(() -> onDispatch(event,brokerCommitted));
         } catch (RejectedExecutionException e) {
             log.error("发件箱线程已停，活动局结果没有落库也没有发布 battle_id={}", Long.toUnsignedString(event.getBattleId()));
         }
     }
 
-    private void onDispatch(BattleResultEvent event) {
+    private void onDispatch(BattleResultEvent event,boolean brokerCommitted) {
         long battleId = event.getBattleId();
         byte[] payload;
         try {
@@ -119,11 +123,11 @@ public final class ActivityResultOutbox implements ActivityResultSink {
                 metrics.activity(ActivityEvent.NOT_DURABLE);
                 log.error("活动局结果落库失败，只发布一次、不登记 battle_id={}: {}", Long.toUnsignedString(battleId),
                         error != null ? error.toString() : "落库没有结论（空结果）");
-                publish(event);
+                if(!brokerCommitted)publish(event);
                 return;
             }
             metrics.activity(ActivityEvent.STORED);
-            publish(event);
+            if(!brokerCommitted)publish(event);
             entries.put(battleId, new Entry(event, clockMillis.getAsLong()));
             if (timer == null) {
                 timer = outbox.every(BattleRedis.ACTIVITY_RETRY_INTERVAL.toMillis(), this::tick);

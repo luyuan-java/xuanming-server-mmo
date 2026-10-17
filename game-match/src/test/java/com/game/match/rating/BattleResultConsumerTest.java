@@ -26,8 +26,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * 对局结果消费循环（{@code MockConsumer}；match-spec §5.3、§15.2）：坏消息跳过并提交；入账成功才提交；可恢复故障暂停、重试原记录、不跳过、不提交；
- * 数据错误写毒丸后跳过；重平衡收走分区时丢弃没提交的记录；key 不一致只打日志。
+ * 对局结果消费循环（{@code MockConsumer}；match-spec §5.3、§15.2）：全球默认只在SQL确认后提交，损坏消息及数据错误不跳过；
+ * 显式旧兼容模式保留原毒丸策略。重平衡收走分区时丢弃没提交的记录；key 不一致只打日志。
  *
  * <p>用例都在测试线程上直接调 {@code loop.run()}，能否返回全靠循环自己走到脚本里排的 {@code loop::stop}。循环的重试 / 暂停逻辑一旦回归
  * （例如暂停期间不再 poll，排好的 stop 永远轮不到），就不是失败而是空转到整个 fork 超时（30 分钟），CI 上看不出是哪一条。所以类上加<b>抢占式</b>超时：
@@ -68,13 +68,14 @@ class BattleResultConsumerTest {
         }
     }
 
-    private BattleResultConsumer loop(BattleResultConsumer.Handler handler) {
+    private BattleResultConsumer loop(BattleResultConsumer.Handler handler) {return loop(handler,BattleResultConsumer.FailurePolicy.LEGACY_REJECT_POISON);}
+    private BattleResultConsumer loop(BattleResultConsumer.Handler handler,BattleResultConsumer.FailurePolicy policy) {
         // 退避：记下时长，只做一次暂停中的 poll（推进脚本），不真的睡
         return new BattleResultConsumer(consumer, TOPIC, handler, metrics, Duration.ZERO, Duration.ofMillis(1), Duration.ofMillis(4),
                 (delay, pollWhilePaused) -> {
                     delays.add(delay);
                     pollWhilePaused.run();
-                });
+                },policy);
     }
 
     private static byte[] result(long battleId) {
@@ -135,6 +136,24 @@ class BattleResultConsumerTest {
     }
 
     // ================================================================ 正常路径
+
+    @Test void 来源处理保留收到字节位点且归档失败不推进消费位点() {
+        byte[] original=result(9001);List<BattleResultConsumer.Received> received=new ArrayList<>();
+        BattleResultConsumer.SourceHandler handler=source->{received.add(source);throw new IllegalStateException("来源 SQL 未提交");};
+        BattleResultConsumer loop=loop(handler,BattleResultConsumer.FailurePolicy.SQL_CONFIRMED);
+        assign(List.of(TP0),record(0,18,"9001",original));
+        consumer.schedulePollTask(()->{
+            original[0]=(byte)0xFF; // Kafka 缓冲被复用，已固定的 ByteString 不能跟着改变。
+            assertThat(consumer.commits).isEmpty();
+        });
+        consumer.schedulePollTask(loop::stop);
+        loop.run();
+        assertThat(received).hasSize(2);
+        assertThat(received.get(0)).isSameAs(received.get(1));
+        assertThat(received.get(0).original().toByteArray()).isEqualTo(result(9001));
+        assertThat(received.get(0).topic()).isEqualTo(TOPIC);assertThat(received.get(0).partition()).isZero();
+        assertThat(received.get(0).offset()).isEqualTo(18);assertThat(consumer.commits).isEmpty();
+    }
 
     @Test
     void 逐条入账_每条成功后立即提交它的下一个位点() {
@@ -295,6 +314,25 @@ class BattleResultConsumerTest {
 
         assertThat(delays).containsExactly(Duration.ofMillis(1), Duration.ofMillis(2), Duration.ofMillis(1), Duration.ofMillis(2));
         assertThat(consumer.commits).containsExactly(committed(TP0, 1), committed(TP0, 2));
+    }
+
+    @Test
+    void 全球SQL数据错误也保留原消息_确认入账前不推进位点(){
+        AtomicInteger attempts=new AtomicInteger();List<Long> handled=new ArrayList<>();
+        BattleResultConsumer loop=loop(event->{handled.add(event.getBattleId());if(event.getBattleId()==9001&&attempts.incrementAndGet()<3)
+            throw new RatingStore.StoreException("SQL未确认",new SQLException("schema/outbox拒绝","22003",1264));},BattleResultConsumer.FailurePolicy.SQL_CONFIRMED);
+        assign(List.of(TP0),record(0,9001),record(1,9002));
+        for(int i=0;i<2;i++)consumer.schedulePollTask(()->assertThat(consumer.commits).isEmpty());
+        consumer.schedulePollTask(loop::stop);loop.run();
+        assertThat(handled).containsExactly(9001L,9001L,9001L,9002L);assertThat(consumer.commits).containsExactly(committed(TP0,1),committed(TP0,2));
+        assertThat(rejected("MATCH_MODE_1V1")).isZero();
+    }
+    @Test
+    void 生产默认策略遇到损坏消息关闭本轮但不提交_监督器会从原位点重启(){
+        BattleResultConsumer loop=new BattleResultConsumer(consumer,TOPIC,event->{throw new AssertionError("损坏消息不能入账");},
+                metrics,Duration.ZERO,Duration.ofMillis(1),Duration.ofMillis(4));
+        assign(List.of(TP0),record(0,0,"bad",new byte[]{(byte)255}));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,loop::run);assertThat(consumer.commits).isEmpty();
     }
 
     @Test

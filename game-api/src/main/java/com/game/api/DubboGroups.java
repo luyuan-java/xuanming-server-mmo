@@ -25,6 +25,10 @@ public final class DubboGroups {
 
     /** 聚宝斋 / 交易（{@code proto/trade/...}），由 game-trade 提供。 */
     public static final String TRADE = "trade";
+    /** 邮件玩家入口及签名内部发件接口，由game-mail提供。 */
+    public static final String MAIL = "mail";
+    /** 通用排行榜玩家入口及签名内部控制接口，由game-rank提供。 */
+    public static final String RANK = "rank";
 
     /**
      * 匹配（{@code proto/match/...}，服务 {@code match.MatchService}），由 game-match 提供（批次 6.4，match-spec §9.1）。同一个 group 下有三个接口：

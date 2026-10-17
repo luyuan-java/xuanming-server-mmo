@@ -65,4 +65,29 @@ public final class BattleResultTopics {
     public void ensure(TopicAdmin admin, int generation, AuditTopicInitializer.Mode mode, short replicationFactor, Duration timeout) {
         AuditTopicInitializer.ensureLabeled(admin, List.of(spec(generation)), mode, replicationFactor, timeout, "对局结果 topic", GENERATION_ENV);
     }
+
+    /** 全球结果日志：RF1 旧 topic 必须人工迁移副本；配置/元数据不明时拒绝启用。 */
+    public void ensureDurable(TopicAdmin admin,int generation,AuditTopicInitializer.Mode mode,short replicationFactor,Duration timeout){
+        if(replicationFactor<3)throw new AuditTopicContractException("全球结果日志必须显式配置至少3副本");
+        long deadline=System.nanoTime()+timeout.toNanos();
+        Map<String,String> configs=new java.util.HashMap<>(RETENTION);
+        configs.put("min.insync.replicas","2");configs.put("unclean.leader.election.enable","false");
+        var expected=new TopicSpec(name(generation),PARTITIONS,configs);
+        AuditTopicInitializer.ensureLabeled(admin,List.of(expected),mode==AuditTopicInitializer.Mode.OWN?AuditTopicInitializer.Mode.CREATE_AND_VERIFY:mode,
+                replicationFactor,remaining(deadline),"全球对局结果 topic",GENERATION_ENV);
+        int minimum=admin.minimumReplicaCounts(List.of(expected.name()),remaining(deadline)).getOrDefault(expected.name(),0);
+        if(minimum<3)throw new AuditTopicContractException("全球结果日志实际副本不足3，须人工迁移副本，禁止自动降级");
+        var actual=admin.configs(expected.name(),configs.keySet(),remaining(deadline));
+        if(mode==AuditTopicInitializer.Mode.OWN){
+            try{if(Integer.parseInt(actual.getOrDefault("min.insync.replicas","0"))>2)
+                configs.put("min.insync.replicas",actual.get("min.insync.replicas"));}catch(NumberFormatException ignored){/* 主人校正非法值。 */}
+            admin.alterConfigs(expected.name(),configs,remaining(deadline));
+            actual=admin.configs(expected.name(),configs.keySet(),remaining(deadline));
+        }
+        int minIsr;try{minIsr=Integer.parseInt(actual.getOrDefault("min.insync.replicas","0"));}
+        catch(NumberFormatException invalid){throw new AuditTopicContractException("全球结果日志minISR配置无效");}
+        if(minIsr<2||!"false".equals(actual.get("unclean.leader.election.enable")))
+            throw new AuditTopicContractException("全球结果日志必须minISR至少2且禁止unclean leader election");
+    }
+    private static Duration remaining(long deadline){return Duration.ofNanos(Math.max(1,deadline-System.nanoTime()));}
 }

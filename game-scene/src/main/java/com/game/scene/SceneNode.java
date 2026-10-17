@@ -364,7 +364,7 @@ public class SceneNode implements SmartLifecycle {
         links = gateLinks;
         world = sceneWorld;
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
-                AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM, metrics));
+                AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM, metrics, petService::transferCapacity));
         // 资产通道的跨进程提供方：先建好（导出在接受链路之后、发布目录之前）。回写池队列无界，但同时排队的至多是在途上限条
         assetReplyExecutor = new ThreadPoolExecutor(ASSET_REPLY_THREADS, ASSET_REPLY_THREADS, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(), new DefaultThreadFactory("scene-asset-reply", true));

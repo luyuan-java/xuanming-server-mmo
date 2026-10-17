@@ -241,20 +241,23 @@ class PrepareBattleTest {
         assertThat(player.battle().freeze().deadlineMs()).isEqualTo(latest);
     }
 
-    /** R2-c 只设上界：已经过去的期限照旧放行（锁 TTL 取下限 60 s，冻结由下一轮 reaper 摘掉），不改原有行为。 */
+    /** 全球工作租约到期后，迟到备战必须在副作用前拒绝。 */
     @Test
-    void 期限已经过去_照旧放行_锁TTL取下限60秒() {
+    void 备战期限已经过去或正好到期_拒绝且零冻结零锁写入() {
         ScenePlayer player = f.enter(SESSION, PLAYER);
-        long past = f.clock.epochMillis() - 1;
-
-        CompletableFuture<PrepareBattleResponse> reply = f.battle.prepare(f.prepareRequest(PLAYER, BATTLE, past, past));
-        f.drain();
-
-        assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isZero();
-        assertThat(f.locks.last(Op.PREPARE_LOCK).longArg("ttl")).isEqualTo(60);
-        assertThat(player.inBattle()).isTrue();
-        f.reap();
-        assertThat(player.inBattle()).as("期限已过：下一轮 reaper 摘掉").isFalse();
+        for(long deadline:new long[]{f.clock.epochMillis()-1,f.clock.epochMillis()}){
+            var response=BattleFixture.done(f.battle.prepare(f.prepareRequest(PLAYER,BATTLE,deadline,deadline)));
+            assertThat(BattleFixture.tipOf(response)).isEqualTo(INVALID_PARAMETER);
+            assertThat(player.inBattle()).isFalse();assertThat(f.locks.ops()).isEmpty();
+        }
+    }
+    @Test
+    void 备战锁回包迟于原租约_清冻结并只删原局备战锁(){
+        ScenePlayer player=f.enter(SESSION,PLAYER);
+        var reply=f.battle.prepare(f.prepareRequest(PLAYER,BATTLE,f.deadline(),f.prepareDeadline()));
+        f.advance(BattleFixture.PREPARE_MILLIS+1);f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(reply))).isEqualTo(FEATURE_UNAVAILABLE);
+        assertThat(player.inBattle()).isFalse();assertThat(f.locks.lock(PLAYER)).isNull();
     }
 
     @Test

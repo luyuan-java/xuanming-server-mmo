@@ -117,7 +117,7 @@ final class EdgeTestKit {
 
     /** 按 Go robot 的写法拼一帧：短名（= 全名，这批 proto 没有 package）+ 结尾字节（robot 写空格，C++ 写 \0）。 */
     static byte[] frame(Message message, char terminator) {
-        byte[] name = (message.getDescriptorForType().getName() + terminator).getBytes(StandardCharsets.US_ASCII);
+        byte[] name = (message.getDescriptorForType().getFullName() + terminator).getBytes(StandardCharsets.US_ASCII);
         byte[] body = message.toByteArray();
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         try (DataOutputStream out = new DataOutputStream(payload)) {

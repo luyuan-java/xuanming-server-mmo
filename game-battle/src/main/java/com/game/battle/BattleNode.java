@@ -95,6 +95,8 @@ public final class BattleNode implements SmartLifecycle {
     private final BattleClock clock;
     private final BattleInfrastructure infra;
     private final String instanceId = UUID.randomUUID().toString();
+    private GlobalBattleProperties global=GlobalBattleProperties.DISABLED;
+    public BattleNode withGlobal(GlobalBattleProperties global){this.global=Objects.requireNonNull(global);return this;}
 
     // 以下在 start() 里依序创建、release() 里逆序释放；租约丢失回调与目录快照在调度线程上读取，所以都是 volatile。
     private volatile ScheduledExecutorService sched;
@@ -194,7 +196,7 @@ public final class BattleNode implements SmartLifecycle {
         replyExecutor = new ThreadPoolExecutor(REPLY_THREADS, REPLY_THREADS, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(), new DefaultThreadFactory("battle-rpc-reply", true));
         BattleNodeServiceImpl service = new BattleNodeServiceImpl(admission, logic, roomService, replyExecutor,
-                props.rpcMaxInflight(), metrics);
+                props.rpcMaxInflight(), metrics).withCreationLedger(new com.game.battle.rpc.CreationLedger(global,id),clock::epochMillis);
         provider = service;
 
         // 第 6 步：导出控制面（端口被占 / 缺 GAME_DUBBO_SECRET 拒绝启动）。准入闸还没开：此刻进来的 createBattle 回 NOT_ALLOCATABLE(not_started)
@@ -203,7 +205,7 @@ public final class BattleNode implements SmartLifecycle {
 
         // 第 7 步：绑直连端口（被占即拒启）；child group 就是逻辑线程组
         DirectEdge directEdge = infra.edge(new EdgeDependencies(props, group, roomService, tickets, id, clock,
-                tables.messageLimits(), tables.messageIds(), metrics));
+                tables.messageLimits(), tables.messageIds(), metrics,global));
         edge = directEdge;
         metrics.bindDirectConnections(() -> {
             DirectEdge e = edge;
@@ -226,6 +228,7 @@ public final class BattleNode implements SmartLifecycle {
                 .setClientHost(clientAdvertiseHost)
                 .setClientPort(props.effectiveAdvertisePort())
                 .setTableFingerprint(tables.fingerprint())
+                .setPhysicalRegion(global.physicalRegion())
                 .build();
         BattleDirectoryPublisher p = new BattleDirectoryPublisher(infra.directory(nodeId), info, this::directorySnapshot);
         publisher = p;

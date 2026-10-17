@@ -579,6 +579,24 @@ class GuildEconomyServiceTest {
     }
 
     @Test
+    void 持久旧请求尚未提交时不能对新帮首次执行() {
+        noMint();
+        var donation=economy.donateToGuild(ME,DonateToGuildRequest.newBuilder().setDonateId(1).setClientRequestId(KEY).setExpectedGuildId(G+1).build(),d()).join();
+        var order=economy.buyGuildShopGoods(ME,BuyGuildShopGoodsRequest.newBuilder().setGoodsId(101).setClientRequestId(KEY+1).setExpectedGuildId(G+1).build(),d()).join();
+        assertThat(donation.getErrorMessage()).isEqualTo(GuildTip.NOT_IN_EXPECTED_GUILD.proto());
+        assertThat(order.getErrorMessage()).isEqualTo(GuildTip.NOT_IN_EXPECTED_GUILD.proto());
+        assertThat(f.economyStore.donations).isEmpty();assertThat(f.economyStore.shopOrders).isEmpty();assertThat(channel.ops).isEmpty();
+    }
+
+    @Test
+    void 同请求号重放必须保持原预期帮会() {
+        noMint();f.economyStore.clientRequestAnswers(KEY,hit(firstDonation(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED)));
+        var donation=economy.donateToGuild(ME,DonateToGuildRequest.newBuilder().setDonateId(1).setClientRequestId(KEY).setExpectedGuildId(G+1).build(),d()).join();
+        assertThat(donation.getErrorMessage()).isEqualTo(GuildTip.CLIENT_REQUEST_CONFLICT.proto());
+        assertThat(donation.hasDonation()).isFalse();assertThat(channel.ops).isEmpty();
+    }
+
+    @Test
     void 幂等键_首次已提交就直接回首次结果_不走前置不发号() {
         noMint();
         f.economyStore.clientRequestAnswers(KEY, hit(firstDonation(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED)));

@@ -15,9 +15,11 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class ActivityConfiguration {
 
-    @Bean
     public ActivityBattleService activityBattleService(MemberPrecheck precheck, TicketStore tickets, GatherLauncher gather, MatchIds matchIds,
                                                        MatchMetrics metrics) {
         return new ActivityBattleService(precheck, tickets, gather, matchIds, metrics);
     }
+    @Bean(name="activityBattleService")
+    public ActivityBattleService configuredActivityBattleService(MemberPrecheck precheck,TicketStore tickets,GatherLauncher gather,MatchIds ids,MatchMetrics metrics,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){return activityBattleService(precheck,tickets,gather,ids,metrics).withGlobal(global.getIfAvailable());}
 }

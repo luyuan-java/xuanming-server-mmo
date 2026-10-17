@@ -212,8 +212,100 @@ class EnterGameHandlerTest {
 
         assertThat(attempts).as("每次夺权都在预算之内发起，最后一次排在预算截止上").containsExactly(Duration.ofMillis(2000),
                 Duration.ofMillis(2500), Duration.ofMillis(3000), Duration.ofMillis(3500));
-        verify(takeovers, times(4)).request(PLAYER, 4);
+        // 第 4 次夺权的结果在第 4 s（预算截止）才回来：不会再重试，也不再请持有者让出——gate 放行之后迟到的让出请求
+        // 可能踢掉客户端重试进来的新会话。前 3 次结果回来时预算都还有剩余，照常请。
+        verify(takeovers, times(3)).request(PLAYER, 4);
+        assertThat(meters.get("game.login.owner.takeover.requests").counter().count()).isEqualTo(3);
         assertThat(claims("timeout")).isEqualTo(1);
+    }
+
+    /** 退避真的耗时：计时器按延迟（再加 {@code lag}，模拟计时器晚触发、回工作线程时排队）拨动单调时钟，再交回工作线程。 */
+    private EnterGameHandler sleeping(List<Duration> delays, Duration lag) {
+        return new EnterGameHandler(store, scenes, takeovers, Runnable::run, 1, Duration.ofMillis(200), CLAIM_WAIT, metrics,
+                delay -> {
+                    delays.add(delay);
+                    return task -> {
+                        nanos.addAndGet(delay.plus(lag).toNanos());
+                        task.run();
+                    };
+                }, nanos::get);
+    }
+
+    @Test
+    void 下一次重试只能排在预算截止上_不再空等_当场回2005() throws Exception {
+        // 分配用了 2 s，夺权等待截止取预算截止（第 4 s）。退避 100 / 200 / 400 / 800 ms 之后，第 3.5 s 那次仍被持有：
+        // 下一次退避（800 ms）会被截到预算截止上，醒来时预算必然已用完、注定不夺权——不排这次重试，当场回 2005，
+        // 不白等 500 ms（那段时间一直占着在途闸门和 gate 上这条会话的队列，回包离 gate 放行也更近）。
+        List<Duration> delays = new ArrayList<>();
+        EnterGameHandler sleeping = sleeping(delays, Duration.ZERO);
+        long start = nanos.get();
+        when(scenes.assign(any())).thenAnswer(inv -> {
+            nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+            return CompletableFuture.completedFuture(ASSIGNED);
+        });
+        List<Duration> attempts = new ArrayList<>();
+        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+            attempts.add(Duration.ofNanos(nanos.get() - start));
+            return new ClaimResult.Held(4);
+        });
+
+        assertError(sleeping.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build())
+                .orTimeout(5, TimeUnit.SECONDS).join(), LoginErrorTip.login_error.kLoginInProgress_VALUE);
+
+        assertThat(delays).as("没有截到预算截止上的那次退避").containsExactly(Duration.ofMillis(100), Duration.ofMillis(200),
+                Duration.ofMillis(400), Duration.ofMillis(800));
+        assertThat(attempts).containsExactly(Duration.ofMillis(2000), Duration.ofMillis(2100), Duration.ofMillis(2300),
+                Duration.ofMillis(2700), Duration.ofMillis(3500));
+        assertThat(Duration.ofNanos(nanos.get() - start)).as("第 3.5 s 就回包，不等到预算截止").isEqualTo(Duration.ofMillis(3500));
+        verify(takeovers, times(5)).request(PLAYER, 4);
+        assertThat(claims("timeout")).isEqualTo(1);
+    }
+
+    @Test
+    void 退避醒来晚于预算截止_不再夺权() throws Exception {
+        // 每次退避醒来都比排定的晚 600 ms（计时器晚触发、回工作线程时排队）：第 3.5 s 那次之后排了 400 ms 的退避
+        // （排定在预算截止之前），实际第 4.5 s 才醒——已过预算截止，gate 随时会放行同一会话的下一条请求，
+        // 夺到的归属没人接，还可能晚于客户端的重试落库，所以不再夺权（醒来那一刻的检查）。
+        List<Duration> delays = new ArrayList<>();
+        EnterGameHandler sleeping = sleeping(delays, Duration.ofMillis(600));
+        long start = nanos.get();
+        when(scenes.assign(any())).thenAnswer(inv -> {
+            nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+            return CompletableFuture.completedFuture(ASSIGNED);
+        });
+        List<Duration> attempts = new ArrayList<>();
+        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+            attempts.add(Duration.ofNanos(nanos.get() - start));
+            return new ClaimResult.Held(4);
+        });
+
+        assertError(sleeping.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build())
+                .orTimeout(5, TimeUnit.SECONDS).join(), LoginErrorTip.login_error.kLoginInProgress_VALUE);
+
+        assertThat(delays).containsExactly(Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofMillis(400));
+        assertThat(attempts).as("第 4.5 s 醒来的那次不再夺权").containsExactly(Duration.ofMillis(2000),
+                Duration.ofMillis(2700), Duration.ofMillis(3500));
+        verify(takeovers, times(3)).request(PLAYER, 4);
+        assertThat(claims("timeout")).isEqualTo(1);
+    }
+
+    @Test
+    void 工作队列排队已耗掉预算_不分配不夺权() throws Exception {
+        // 过载时 login 工作队列积压：gate 的 5 s 从发出请求就开始走。时间预算按分发器受理的时刻算（含排队），
+        // 处理器开始跑时预算已用完就不再调 scene-manager（按调用超时回 3023）、更不夺权。
+        long budget = EnterGameHandler.DEFAULT_ENTER_BUDGET.toNanos();
+        EnterGameRequest request = EnterGameRequest.newBuilder().setPlayerId(PLAYER).build();
+
+        assertError(handler.handle(SESSION, request, budget).orTimeout(5, TimeUnit.SECONDS).join(),
+                SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
+        verify(scenes, never()).assign(any());
+        verify(store, never()).claimOwnership(anyLong());
+
+        // 对照：排队只耗掉预算减 1 ms，照常分配、夺权——排队时长是从预算里扣掉，不是「排过队就放弃」。
+        HandlerReply reply = handler.handle(SESSION, request, budget - Duration.ofMillis(1).toNanos())
+                .orTimeout(5, TimeUnit.SECONDS).join();
+        assertThat(response(reply).hasErrorMessage()).isFalse();
+        verify(store).claimOwnership(PLAYER);
     }
 
     @Test

@@ -93,6 +93,35 @@ class BattleEdgeHandlerTest {
     }
 
     // ---------------------------------------------------------------- 握手成功
+    @Test
+    void 探测逐次随机挑战_服务端单调钟取三次最大RTT_回执带原始HMAC()throws Exception{
+        var config=new com.game.battle.GlobalBattleProperties(true,2,EdgeTestKit.SECRET);
+        edge=new BattleEdgeServer(new EdgeDependencies(EdgeTestKit.props(4096,Duration.ofSeconds(10),50),unusedLogic,rooms,tickets,
+                new BattleIdentity(NODE_ID,INSTANCE,"127.0.0.1",12000),()->nowMs,MessageLimits.of(Map.of()),ids,metrics,config),nanos::get);
+        var grant=com.game.proto.match.NetworkProbeGrant.newBuilder().setPlanId("plan").setPlayerId(PLAYER).setSessionBinding("bound")
+                .setPhysicalRegion(2).setTargetNodeId(NODE_ID).setTargetInstanceId(INSTANCE).setExpiresAtMs(NOW_MS+120_000).build();
+        var ch=open();ch.writeInbound(buf(com.game.proto.match.NetworkProbeStart.newBuilder().setGrant(com.game.common.token.NetworkProbes.sign(
+                config.probeSecret(),com.game.common.token.NetworkProbes.GRANT,grant)).build()));
+        int[] delays={20,50,10};
+        for(int i=0;i<3;i++){
+            var challenge=(com.game.proto.match.NetworkProbeChallenge)readProbe(ch);assertThat(challenge.getNonce().size()).isEqualTo(32);
+            assertThat(challenge.getSampleIndex()).isEqualTo(i);nanos.addAndGet(delays[i]*1_000_000L);
+            ch.writeInbound(buf(com.game.proto.match.NetworkProbeEcho.newBuilder().setNonce(challenge.getNonce()).setSampleIndex(i).build()));
+        }
+        var complete=(com.game.proto.match.NetworkProbeComplete)readProbe(ch);
+        assertThat(com.game.common.token.NetworkProbes.verify(config.probeSecret(),com.game.common.token.NetworkProbes.RECEIPT,complete.getReceipt())).isTrue();
+        var receipt=com.game.proto.match.NetworkProbeReceipt.parseFrom(complete.getReceipt().getPayload());
+        assertThat(receipt.getRttMs()).isEqualTo(50);assertThat(receipt.getSampleCount()).isEqualTo(3);assertThat(receipt.getGrant()).isEqualTo(grant);
+        ch.finishAndReleaseAll();
+    }
+
+    private static Message readProbe(EmbeddedChannel ch)throws Exception{
+        var out=(ByteBuf)ch.readOutbound();assertThat(out).isNotNull();
+        try{int length=out.readInt();return com.game.net.client.ClientFrames.decodeBody(out.readSlice(length),Map.of(
+                com.game.proto.match.NetworkProbeChallenge.getDescriptor().getFullName(),com.game.proto.match.NetworkProbeChallenge.getDefaultInstance(),
+                com.game.proto.match.NetworkProbeComplete.getDescriptor().getFullName(),com.game.proto.match.NetworkProbeComplete.getDefaultInstance()));}
+        finally{out.release();}
+    }
 
     @Test
     void 握手成功_应答是第一帧且类型名是全名加零结尾_参战者握手后不推任何帧() {

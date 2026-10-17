@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
 
 class MallOrderStoreTest {
+    @Test void SKU缺游戏映射或总量越界一律拒绝并回滚库存(){try(var db=new MallTestDatabase()){db.sku(901,10);db.jdbc.update("DELETE FROM commerce_sku_grant WHERE sku_id=901");assertThatThrownBy(()->db.store.create("1",new MallApi.CreateOrder("unknown-sku-001",901,1))).isInstanceOf(MallException.class);assertThat(db.count("oms_order")).isZero();assertThat(db.stock(901,"lock_stock")).isZero();db.jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(901,10,4096,'玄铁')");assertThatThrownBy(()->db.store.create("1",new MallApi.CreateOrder("over-sku-001",901,2))).isInstanceOf(MallException.class);assertThat(db.count("oms_order")).isZero();assertThat(db.stock(901,"lock_stock")).isZero();}}
     private static final String BUYER = "18446744073709551615";
 
     @Test
@@ -121,11 +122,11 @@ class MallOrderStoreTest {
                 start.countDown();
                 boolean cancelled = cancel.get(10, TimeUnit.SECONDS);
                 boolean paid = pay.get(10, TimeUnit.SECONDS);
-                assertThat(cancelled ^ paid).isTrue();
-                assertThat(db.store.get(BUYER, order.orderId()).state()).isEqualTo(cancelled ? "CANCELLED" : "DELIVERY_PENDING");
+                assertThat(paid).isTrue();
+                assertThat(db.store.get(BUYER, order.orderId()).state()).isEqualTo(cancelled ? "REFUND_PENDING" : "DELIVERY_PENDING");
                 assertThat(db.stock(1, "lock_stock")).isZero();
-                assertThat(db.count("commerce_payment_receipt")).isEqualTo(db.count("commerce_delivery_intent"));
-                assertThat(db.stock(1, "stock") + db.count("commerce_payment_receipt")).isEqualTo(20);
+                assertThat(db.count("commerce_payment_receipt")).isEqualTo(db.count("commerce_delivery_intent")+db.count("commerce_refund_intent"));
+                assertThat(db.stock(1, "stock") + db.count("commerce_delivery_intent")).isEqualTo(20);
             }
         }
     }

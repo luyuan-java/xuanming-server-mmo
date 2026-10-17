@@ -35,7 +35,11 @@ public record EdgeDependencies(
         BattleClock clock,
         MessageLimits messageLimits,
         BattleMessageIds messageIds,
-        BattleMetrics metrics) {
+        BattleMetrics metrics,
+        com.game.battle.GlobalBattleProperties global) {
+    public EdgeDependencies(BattleProperties properties,EventLoopGroup logicGroup,BattleRoomService rooms,BattleTickets tickets,
+            BattleIdentity identity,BattleClock clock,MessageLimits messageLimits,BattleMessageIds messageIds,BattleMetrics metrics){
+        this(properties,logicGroup,rooms,tickets,identity,clock,messageLimits,messageIds,metrics,com.game.battle.GlobalBattleProperties.DISABLED);}
 
     public EdgeDependencies {
         Objects.requireNonNull(properties, "properties");

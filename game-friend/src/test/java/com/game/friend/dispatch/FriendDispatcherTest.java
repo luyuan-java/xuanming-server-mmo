@@ -93,13 +93,13 @@ class FriendDispatcherTest {
             }
         };
         FriendService service = new FriendService(store, new FriendCache(new InMemoryCacheRedis(), REDIS_KEYS, Duration.ofMinutes(1), metrics), REDIS_KEYS,
-                new FriendRequestQuota(k -> CompletableFuture.completedFuture(1L), REDIS_KEYS, 10, metrics), (ids, d) -> Map.of(),
+                new FriendRequestQuota((k, timeout) -> CompletableFuture.completedFuture(1L), REDIS_KEYS, 10, metrics), (ids, d) -> Map.of(),
                 ids -> CompletableFuture.completedFuture(new StrictLookup(Map.of(), 0, 0)),
                 (to, content) -> CompletableFuture.completedFuture(PlayerPushes.Outcome.OFFLINE),
                 metrics, 1000, Duration.ofMillis(100), System::currentTimeMillis, NOTIFY);
         RecommendService recommend = new RecommendService(new RecommendStore(null, 1, (lo, span) -> 0),
                 new OnlineDirectory(null, "game:presence:", (ids, d) -> Map.of()),
-                new DirectoryQuota(k -> CompletableFuture.completedFuture(1L), REDIS_KEYS, metrics), (ids, d) -> Map.of(),
+                new DirectoryQuota((k, timeout) -> CompletableFuture.completedFuture(1L), REDIS_KEYS, metrics), (ids, d) -> Map.of(),
                 ids -> CompletableFuture.completedFuture(new StrictLookup(Map.of(), 0, 0)), metrics, 10, 20, 64);
         return new FriendDispatcher(REGISTRY, service, recommend, executor, metrics, 3500);
     }

@@ -52,6 +52,7 @@
             <groupId>com.game</groupId>
             <artifactId>game-pbmysql</artifactId>
         </dependency>
+        <dependency><groupId>com.game</groupId><artifactId>game-player-store</artifactId></dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>druid-spring-boot-3-starter</artifactId>

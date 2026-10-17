@@ -47,6 +47,106 @@ public final class BagService {
         return tables;
     }
 
+    /** 多种叠加物和完整唯一实例一起规划；失败不改变玩家，成功后由资产通道在同一逻辑线程提交。 */
+    public final class PreparedTransfer {
+        private final ScenePlayer player;
+        private final com.game.scene.player.PlayerBags candidate;
+        private final java.util.List<com.game.player.store.state.BagItemState> instances;
+        private final java.util.List<Bag.Drawn> removed;
+        private final java.util.List<Bag.Written> gained;
+        private final int tip;
+        private boolean committed;
+
+        private PreparedTransfer(ScenePlayer player, com.game.scene.player.PlayerBags candidate,
+                                 java.util.List<com.game.player.store.state.BagItemState> instances,
+                                 java.util.List<Bag.Drawn> removed, java.util.List<Bag.Written> gained, int tip) {
+            this.player = player; this.candidate = candidate; this.instances = java.util.List.copyOf(instances);
+            this.removed = java.util.List.copyOf(removed); this.gained = java.util.List.copyOf(gained); this.tip = tip;
+        }
+        public int tip() { return tip; }
+        public java.util.List<com.game.player.store.state.BagItemState> instances() { return instances; }
+        public void commit(AssetAudit.Reason reason, long correlationId) {
+            if (tip != 0 || committed || !writable(player)) throw new IllegalStateException("资产背包候选不能提交");
+            player.bags().commitPrepared(candidate);
+            committed = true;
+            for (var item : removed) {
+                try { audit.itemDestroyed(player.playerId(), item.guid(), item.configId(), item.count(), reason, correlationId, ""); }
+                catch (RuntimeException failure) { transferAuditFailure(correlationId, failure); }
+            }
+            for (var item : gained) {
+                try {
+                    audit.itemGained(player.playerId(), item.guids().getFirst(), item.configId(), item.count(), reason, correlationId, "");
+                    anomalies.itemGained(player, item.configId(), item.count());
+                } catch (RuntimeException failure) { transferAuditFailure(correlationId, failure); }
+            }
+        }
+    }
+
+    public PreparedTransfer prepareDebit(ScenePlayer player, Map<Integer, Long> counts, java.util.List<Long> guidsToTake) {
+        var snapshot = player.bags().toState();
+        var candidate = com.game.scene.player.PlayerBags.restore(snapshot);
+        candidate.normalize(tables);
+        var bag = candidate.bag(BagType.INVENTORY);
+        var removed = new java.util.ArrayList<Bag.Drawn>();
+        var instances = new java.util.ArrayList<com.game.player.store.state.BagItemState>();
+        java.util.Set<Long> unique = new java.util.HashSet<>();
+        if (!writable(player)) return failedTransfer(player, REFUSED);
+        for (var entry : counts.entrySet()) {
+            var spec = tables.item(entry.getKey());
+            if (spec == null || !spec.stackable() || entry.getValue() <= 0 || bag.total(entry.getKey()) < entry.getValue()) {
+                return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
+            }
+        }
+        for (long guid : guidsToTake) {
+            var item = bag.item(guid);
+            var spec = item == null ? null : tables.item(item.configId());
+            if (!unique.add(guid) || item == null || item.size() != 1 || spec == null || spec.maxStackSize() != 1) {
+                return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
+            }
+            var raw = snapshot.getItemsList().stream().filter(stored -> stored.getItemUuid() == guid).findFirst().orElseThrow();
+            instances.add(raw.toBuilder().clearPos().clearBagType().clearAcquireSeq().build());
+        }
+        for (var entry : new TreeMap<>(counts).entrySet()) removed.addAll(bag.drainClamped(entry.getKey(), entry.getValue()));
+        for (var instance : instances) {
+            bag.takeInstance(instance.getItemUuid());
+            removed.add(new Bag.Drawn(instance.getItemUuid(), instance.getConfigId(), 1));
+        }
+        return new PreparedTransfer(player, candidate, instances, removed, java.util.List.of(), 0);
+    }
+
+    public PreparedTransfer prepareCredit(ScenePlayer player, Map<Integer, Long> counts,
+                                           java.util.List<com.game.player.store.state.BagItemState> instances) {
+        if (!writable(player)) return failedTransfer(player, REFUSED);
+        var candidate = com.game.scene.player.PlayerBags.restore(player.bags().toState());
+        candidate.normalize(tables);
+        var bag = candidate.bag(BagType.INVENTORY);
+        var gained = new java.util.ArrayList<Bag.Written>();
+        for (int config : counts.keySet()) if (globalBlocks.blocksItem(config)) return failedTransfer(player, REFUSED);
+        if (!counts.isEmpty()) {
+            var result = bag.add(counts, tables, guids);
+            if (!result.ok()) return failedTransfer(player, result.tip());
+            gained.addAll(result.written());
+        }
+        for (var instance : instances) {
+            if (globalBlocks.blocksItem(instance.getConfigId())) return failedTransfer(player, REFUSED);
+            if (candidate.toState().getItemsList().stream().anyMatch(existing -> existing.getItemUuid() == instance.getItemUuid())) return failedTransfer(player, Bag.INVALID_PARAM);
+            int tip = bag.putInstance(instance, tables);
+            if (tip != 0) return failedTransfer(player, tip);
+            gained.add(new Bag.Written(instance.getConfigId(), 1, java.util.List.of(instance.getItemUuid())));
+        }
+        return new PreparedTransfer(player, candidate, java.util.List.of(), java.util.List.of(), gained, 0);
+    }
+
+    private PreparedTransfer failedTransfer(ScenePlayer player, int tip) {
+        return new PreparedTransfer(player, null, java.util.List.of(), java.util.List.of(), java.util.List.of(), tip);
+    }
+
+    private static void transferAuditFailure(long correlationId, RuntimeException failure) {
+        // 玩家状态已原子提交，不能因旁路审计异常跳过同SQL存档的幂等账本、导致重投二次扣发。
+        org.slf4j.LoggerFactory.getLogger(BagService.class).error("资产转移审计失败，需按操作号对账 correlation={} reason={}",
+                Long.toUnsignedString(correlationId), failure.getClass().getSimpleName());
+    }
+
     /** 换上新的全服产出封禁名单（逻辑线程上调用）。 */
     public void applyGlobalBlocks(GlobalGainBlocks blocks) {
         globalBlocks = blocks;

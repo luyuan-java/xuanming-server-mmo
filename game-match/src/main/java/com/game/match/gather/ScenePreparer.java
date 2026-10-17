@@ -122,7 +122,10 @@ public final class ScenePreparer {
      *
      * @param request 备战请求（{@code player_id}、{@code battle_id}、首选 battle 节点号、两个期限）
      */
-    public Prepare prepare(PrepareBattleRequest request) {
+    public Prepare prepare(PrepareBattleRequest request) { return prepare(request,endpoint -> { }); }
+
+    /** 全球成局在出站前持久化精确端点与核对 SQL 工作租约；失败则不发送冻结。 */
+    public Prepare prepare(PrepareBattleRequest request,java.util.function.Consumer<Endpoint> beforeSend) {
         long playerId = request.getPlayerId();
         Endpoint endpoint;
         Resolution where = locate(playerId);
@@ -142,6 +145,7 @@ public final class ScenePreparer {
                 }
             }
         }
+        beforeSend.accept(endpoint);
         SceneBattleCall call = SceneBattleCall.newBuilder().setTargetInstanceId(endpoint.target().instanceId()).setPlayerId(playerId)
                 .setBody(request.toByteString()).build();
         Reply reply = invoke(endpoint, prepareTimeout, scene -> scene.prepareBattle(call), false);

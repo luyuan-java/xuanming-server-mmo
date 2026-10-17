@@ -259,7 +259,7 @@ class LeaseLostTest {
         MatchDispatcher dispatcher = dispatcher(ids);
         List<String> unaffected = List.of(MatchMethods.CANCEL_QUEUE, MatchMethods.GET_QUEUE_STATUS, MatchMethods.REQUEST_BATTLE_TICKET,
                 MatchMethods.RESPOND_CHALLENGE, MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT,
-                MatchMethods.WATCH_BATTLE, MatchMethods.LIST_WATCHABLE_BATTLES);
+                MatchMethods.WATCH_BATTLE, MatchMethods.LIST_WATCHABLE_BATTLES,MatchMethods.GET_NETWORK_PROBE_PLAN,MatchMethods.COMMIT_NETWORK_PROBE);
 
         for (String method : unaffected) {
             ClientReply reply = reply(dispatcher.dispatch(call(method, ByteString.EMPTY, 1001)));

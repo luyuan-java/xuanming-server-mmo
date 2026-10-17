@@ -33,11 +33,16 @@ public class MatcherConfiguration {
      */
     static final Duration STOP_MARGIN = Duration.ofSeconds(5);
 
-    @Bean
     public MatcherRunner matcherRunner(MatchProperties props, MatchInstance instance, MatchIds ids, MatchMetrics metrics, MetricLabels labels,
                                        PlayerStatusReader players, TicketStore ticketStore, GatherLauncher gatherLauncher,
                                        BattleNodes battleNodes, RedisKeys redisKeys) {
         QueueMatcher matcher = new QueueMatcher(ticketStore, players, gatherLauncher, battleNodes, ids, metrics, labels, props, instance, redisKeys);
         return new MatcherRunner(matcher::runRound, props.matcher().interval(), props.matcher().lockTtl().plus(STOP_MARGIN), metrics);
     }
+    @Bean(name="matcherRunner")
+    public MatcherRunner configuredMatcherRunner(MatchProperties props,MatchInstance instance,MatchIds ids,MatchMetrics metrics,MetricLabels labels,
+            PlayerStatusReader players,TicketStore tickets,GatherLauncher gather,BattleNodes nodes,RedisKeys keys,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){
+        var service=global.getIfAvailable();return service==null?matcherRunner(props,instance,ids,metrics,labels,players,tickets,gather,nodes,keys):
+                new MatcherRunner(stopping->{if(!stopping.getAsBoolean())service.round();return MatchMetrics.MatcherRound.OK;},props.matcher().interval(),props.matcher().lockTtl().plus(STOP_MARGIN),metrics);}
 }

@@ -38,6 +38,7 @@ final class MallSchemaVerifier {
 
     public void verify() throws SQLException {
         try (Connection connection = source.getConnection()) {
+            for(String table:List.of("commerce_sku_grant","commerce_order_grant","commerce_delivery_receipt","commerce_refund_intent","commerce_refund_receipt"))try(var s=connection.createStatement();var rows=s.executeQuery("SELECT * FROM "+table+" WHERE 1=0")){rows.getMetaData();}
             // 会话、存储版本与结构必须在同一条实际持有的连接上核验。
             JdbcTemplate jdbc = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
             jdbc.setQueryTimeout(5);
@@ -100,6 +101,7 @@ final class MallSchemaVerifier {
             unique(connection, "commerce_payment_receipt", List.of("channel", "transaction_id"));
             unique(connection, "commerce_payment_receipt", List.of("order_sn"));
             unique(connection, "commerce_delivery_intent", List.of("order_sn"));
+            if(indexes(connection,"commerce_delivery_intent",false).values().stream().noneMatch(cols->cols.size()>=3&&cols.subList(0,3).equals(List.of("status","created_ms","order_sn"))))throw new IllegalStateException("商城交付待办缺可恢复扫描索引");
             unique(connection, "commerce_request_nonce", List.of("caller_role", "nonce"));
             prefixIndex(connection, "commerce_request_nonce", List.of("expires_ms"));
             prefixIndex(connection, "oms_order", List.of("buyer_id", "status"));

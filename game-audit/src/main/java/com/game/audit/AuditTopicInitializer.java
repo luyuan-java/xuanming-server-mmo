@@ -28,6 +28,8 @@ public final class AuditTopicInitializer {
 
     /** 核对方式。 */
     public enum Mode {
+        /** 只核对既有 topic；不创建、不改配置。 */
+        VERIFY_ONLY,
         /** 生产方：缺就建、核对分区数。 */
         CREATE_AND_VERIFY,
         /** 消费方（topic 的主人）：另外把 topic 配置校正到规格。 */
@@ -71,6 +73,7 @@ public final class AuditTopicInitializer {
             }
         }
         if (!missing.isEmpty()) {
+            if(mode==Mode.VERIFY_ONLY)throw new AuditTopicContractException(what+"尚未由主人创建: "+missing);
             log.info("创建{} {}", what, missing);
             admin.create(missing, replicationFactor, remaining(deadline));
             existing = awaitVisible(admin, names, deadline, what);

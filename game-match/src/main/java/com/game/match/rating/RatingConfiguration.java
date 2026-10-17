@@ -51,10 +51,12 @@ public class RatingConfiguration {
         return new SchemaReady();
     }
 
-    @Bean
     public RatingStore ratingStore(DataSource dataSource, MatchProperties props, MatchMetrics metrics, SchemaReady matchRatingSchema) {
         return new RatingStore(RatingStore.connections(dataSource), props.rating()::drawRoundCapFor, metrics, System::currentTimeMillis);
     }
+    @Bean(name="ratingStore")
+    public RatingStore configuredRatingStore(DataSource dataSource,MatchProperties props,MatchMetrics metrics,SchemaReady ready,
+            ObjectProvider<com.game.match.global.RatingRankOutbox> outbox){return ratingStore(dataSource,props,metrics,ready).withCommitHook(outbox.getIfAvailable());}
 
     /** 读评分（{@link RatingReader} 的唯一实现）：自带 {@code match-db} 线程池，失败回落 1500。 */
     @Bean(destroyMethod = "close")
@@ -68,24 +70,36 @@ public class RatingConfiguration {
         return new RatingCleanup(ratingStore, System::currentTimeMillis);
     }
 
+    @Bean
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
+    public BattleCompletionStore battleCompletionStore(DataSource source, com.game.match.global.GlobalMatchStore strongSchema)
+            throws SQLException {
+        BattleCompletionStore.sync(source);
+        return new BattleCompletionStore(source);
+    }
+
     /**
-     * 对局结果的消费（{@code game.match.rating.enabled = false} 时照样提供这个 bean，{@code start()} 是空操作）。
+     * 对局结果的消费：全球模式下关闭评分仍持续归档来源；显式旧兼容模式关闭评分才停止消费。
      * 只建对象、不启动：它实现 {@code lifecycle.ResultConsumerControl}，启停由 {@code MatchLifecycle} 调它的 {@code start()} / {@code stop()}
      * （启动第 9 步；停机时在等完在途 gather 之后）。上下文里不许有第二个 {@code ResultConsumerControl}。
      * topic、消费组缺省值与两个 client.id 都由注入的 {@link KafkaNames} 给出（带部署命名空间前缀，见 {@link #kafkaIds}）。
      */
     @Bean
     public BattleResultIngest battleResultIngest(MatchProperties props, RatingStore ratingStore, MatchMetrics metrics, MatchInstance instance,
-                                                 KafkaNames kafkaNames) {
+                                                 KafkaNames kafkaNames,@org.springframework.beans.factory.annotation.Value("${game.match.global.enabled:false}")boolean global,
+                                                 ObjectProvider<BattleCompletionStore> sources) {
         MatchProperties.Kafka kafka = props.kafka();
         MatchProperties.Rating rating = props.rating();
         RatingKafkaIds ids = kafkaIds(rating, kafkaNames, instance.id());
         BattleResultIngest.Settings settings = new BattleResultIngest.Settings(rating.enabled(), kafka.topicGeneration(),
-                kafka.replicationFactor(), kafka.initTimeout());
+                kafka.replicationFactor(), kafka.initTimeout(),global);
+        BattleResultConsumer.Handler handler=global
+                ? sourceHandler(sources.getObject(),rating.enabled(),ratingStore::apply) : ratingStore::apply;
         BattleResultIngest ingest = new BattleResultIngest(settings, new BattleResultTopics(kafkaNames),
                 () -> new KafkaTopicAdmin(kafka.bootstrapServers(), ids.adminClientId()),
                 BattleResultIngest.kafkaConsumers(kafka.bootstrapServers(), ids.group(), ids.clientId()),
-                ratingStore::apply, metrics);
+                handler, metrics);
+        ingest.requireDurableTopicBeforeAdmission();
         log.info("评分回流 enabled={} topic={} group={} 回合打满按平局阈值={} 覆盖={}", rating.enabled(), ingest.topic(), ids.group(),
                 rating.drawRoundCap(), rating.drawRoundCapByConfigId());
         if (!ids.group().startsWith(kafkaNames.prefix())) {
@@ -93,6 +107,15 @@ public class RatingConfiguration {
                     ids.group(), kafkaNames.prefix());
         }
         return ingest;
+    }
+
+    /** 来源先归档，评分随后可选执行；两笔均成功才允许消费循环提交。 */
+    static BattleResultConsumer.SourceHandler sourceHandler(BattleCompletionStore source,boolean ratingEnabled,
+                                                           BattleResultConsumer.Handler rating) {
+        return received -> {
+            source.archive(received);
+            if(ratingEnabled)rating.handle(received.event());
+        };
     }
 
     /**

@@ -434,6 +434,7 @@ Java game-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/s
 
 ### legacy-gate-rpcs — 遗留 / 空实现的 gate RPC 与事件
 - mmorpg: gate_service_handler.cpp RouteNodeMessage（空）、RoutePlayerMessage（多跳路由，线性扫会话找玩家）、PlayerEnterGameNode RPC、BindSessionToGate RPC；
+  （2026-10-16 补：这四个 RPC 已于 mmorpg RpcChannel 批 7 从 proto 删除，号 41 / 74 / 42 / 56 留墓碑，见 mmorpg `docs/design/muduo-rpc-channel.md` §20。）
   gate_event_handler.cpp PlayerDisconnectedEvent / BindBattle / UnbindBattle（空）；match_event_handler.cpp、player_event_handler.cpp（空）；route_message_response_handler.cpp
 - client messages: RoutePlayerMessage 最终把内嵌 ClientRequest 当 MessageContent 下发
 - tables: none

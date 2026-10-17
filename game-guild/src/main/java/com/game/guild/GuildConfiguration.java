@@ -1,6 +1,7 @@
 package com.game.guild;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.guild.activity.GuildActivityService;
 import com.game.api.asset.SceneAssetOpClients;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.common.GameNamespace;
@@ -501,6 +502,13 @@ public class GuildConfiguration {
 
     // ================================================================ 派发
 
+    /** 既有独立核心/经济夹具的手动装配兼容；生产@Bean使用下方完整活动签名。 */
+    @Deprecated
+    public GuildDispatcher guildDispatcher(MessageIdRegistry registry,GuildService guilds,GuildManageService manage,
+            GuildRankService ranks,GuildEconomyService economy,GuildWorkerPool workers,GuildMetrics metrics,GuildProperties props){
+        return new GuildDispatcher(registry,guilds,manage,ranks,economy,workers,metrics,props.requestBudget().toMillis());
+    }
+
     /**
      * 依赖后台调度器与租约、并以数据源为参数（只为钉住销毁顺序）：Spring 按依赖逆序销毁，工作池先排空（排空中的请求还会用到失效重试调度器、
      * 发号租约、MySQL 连接池），之后它们才关。
@@ -513,12 +521,12 @@ public class GuildConfiguration {
 
     @Bean
     public GuildDispatcher guildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
-                                           GuildRankService ranks, GuildEconomyService economy,
+                                           GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
                                            @Qualifier("guildWorkerPool") GuildWorkerPool guildWorkerPool, GuildMetrics metrics,
                                            GuildProperties props) {
-        GuildDispatcher dispatcher = new GuildDispatcher(registry, guilds, manage, ranks, economy, guildWorkerPool, metrics,
+        GuildDispatcher dispatcher = new GuildDispatcher(registry, guilds, manage, ranks, economy, activities, guildWorkerPool, metrics,
                 props.requestBudget().toMillis());
-        log.info("guild 接管的消息号: C2S={} 经济={} 拒绝上行={} 4.6 占位(in-band 1006)={} 请求预算={} 缓存 TTL={} 推送上限={} 资产通道={}",
+        log.info("guild 接管的消息号: C2S={} 经济={} 拒绝上行={} 活动={} 请求预算={} 缓存 TTL={} 推送上限={} 资产通道={}",
                 dispatcher.messageIdsOf(GuildMethods.CLIENT_REQUESTS), dispatcher.messageIdsOf(GuildMethods.ECONOMY_REQUESTS),
                 dispatcher.messageIdsOf(GuildMethods.FORBIDDEN), dispatcher.messageIdsOf(GuildMethods.PLACEHOLDERS),
                 props.requestBudget(), props.cacheTtl(), props.pushTimeout(), economy.assetChannelEnabled() ? "开启" : "关闭");

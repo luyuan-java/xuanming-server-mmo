@@ -51,7 +51,12 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>整队开战</b>（基线 store.go:449-689，team-spec §1.7.6）：开战锁用 {@link #commitMatchLock} 钉版本提交（不走 {@link #mutate} 的
  * 「重读重算」）；清锁用 {@link #endMatch}（后台、自带由锁时长推出的单调截止与退避，不受任何请求预算约束）或单轮的 {@link #releaseMatchLockOnce}。
- * 钉版本提交「报错」或「没有提交」都可能已经落盘（Redisson 会重发 EVAL），调用方必须按 token 确认（match-spec §12.1 第 9 条）。
+ * 钉版本提交「报错」可能已经落盘（回复丢失），调用方必须按 token 确认（match-spec §12.1 第 9 条）；写脚本已不再由 Redisson 重发
+ * （见下一段），「没有提交」之后的按 token 确认保留作纵深防御。
+ *
+ * <p><b>写的发出</b>（客户端请求按会话保序，mmorpg docs/design/client-request-ordering.md §6.1）：所有写脚本（{@link TeamScript#writes()}）
+ * 截止已过就不发出（抛 {@link DependencyException}），发出走 {@link TeamRedis#evalWrite}（不重发、等连接不越过截止）。请求路径用请求预算，
+ * EndMatch 用每轮的独立预算——补偿与后台清锁不受请求截止约束。读脚本不受影响。
  */
 public final class TeamStore {
 
@@ -653,8 +658,19 @@ public final class TeamStore {
         }
     }
 
+    /**
+     * 读脚本走 {@link TeamRedis#eval}；写脚本截止已过就不发出，否则走 {@link TeamRedis#evalWrite}（类注释「写的发出」）。检查放在发出点而不是
+     * 各调用方：{@code {-2}} 修复的第二轮提交、自愈、续期、邀请剪除原先都没有发出前的截止检查，等结果时 {@link Deadline#await} 只是不再等，
+     * 已经交给驱动的写照样落地。
+     */
     private Object eval(TeamScript script, List<Object> keys, List<byte[]> args, Deadline deadline, String what) {
-        return await(redis.eval(script, keys, args), deadline, what);
+        if (!script.writes()) {
+            return await(redis.eval(script, keys, args), deadline, what);
+        }
+        if (deadline.expired()) {
+            throw new DependencyException(what + " 之前截止已过（没有发出）");
+        }
+        return await(redis.evalWrite(script, keys, args, deadline), deadline, what);
     }
 
     private static <T> T await(CompletionStage<T> stage, Deadline deadline, String what) {

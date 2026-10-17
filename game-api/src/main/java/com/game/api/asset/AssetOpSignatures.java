@@ -41,10 +41,13 @@ public final class AssetOpSignatures {
     public static final String CALLER_GUILD = "guild";
     /** 交易：独占 TRADE_DEBIT / TRADE_CREDIT 两条流。 */
     public static final String CALLER_TRADE = "trade";
+    /** 邮件附件：独占 SYSTEM_CREDIT，排行榜奖励经邮件结算。 */
+    public static final String CALLER_MAIL = "mail";
     /** 帮会密钥的环境变量（scene 与 game-guild 注入同一个值；基线 MMORPG_ASSET_OP_SECRET_GUILD，E4）。 */
     public static final String SECRET_ENV_GUILD = "GAME_ASSET_OP_SECRET_GUILD";
     /** 交易密钥的环境变量。 */
     public static final String SECRET_ENV_TRADE = "GAME_ASSET_OP_SECRET_TRADE";
+    public static final String SECRET_ENV_MAIL = "GAME_ASSET_OP_SECRET_MAIL";
 
     private AssetOpSignatures() {
     }
@@ -114,6 +117,38 @@ public final class AssetOpSignatures {
             out.append(Long.toUnsignedString(bundle.getItemUuids(i)));
         }
         out.append(";p=").append(Long.toUnsignedString(bundle.getPetId()));
+        if (bundle.getItemInstancesCount() > 0 || bundle.hasPetInstance()) {
+            out.append(";v2=");
+            for (var instance : bundle.getItemInstancesList()) {
+                out.append(HexFormat.of().formatHex(deterministicBytes(instance))).append(',');
+            }
+            out.append(';');
+            if (bundle.hasPetInstance()) out.append(HexFormat.of().formatHex(deterministicBytes(bundle.getPetInstance())));
+        }
+    }
+
+    /** opaque实例字节不解码重写；只对外围message确定性编码，与Go/C++签名口径一致。 */
+    private static byte[] deterministicBytes(com.google.protobuf.MessageLite message) {
+        byte[] bytes = new byte[message.getSerializedSize()];
+        var output = com.google.protobuf.CodedOutputStream.newInstance(bytes);
+        output.useDeterministicSerialization();
+        try {
+            message.writeTo(output);
+            output.checkNoSpaceLeft();
+            return bytes;
+        } catch (java.io.IOException impossible) {
+            throw new IllegalStateException("内存protobuf编码失败", impossible);
+        }
+    }
+
+    /** 与签名时间戳无关的原请求指纹，绑定完整payload及操作身份。 */
+    public static com.google.protobuf.ByteString requestDigest(AssetOpRequest request) {
+        try {
+            return com.google.protobuf.ByteString.copyFrom(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(deterministicBytes(request.toBuilder().clearAuth().build())));
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("JDK缺少SHA-256", impossible);
+        }
     }
 
     /** HMAC-SHA256(secret 的 UTF-8 字节, canonical 的 UTF-8 字节) 的小写十六进制。secret 应已经过 {@link #normalizeSecret}。 */

@@ -19,6 +19,7 @@ import com.game.proto.login.CreatePlayerRequest;
 import com.game.proto.login.CreatePlayerResponse;
 import com.game.table.LoginErrorTip;
 import com.google.protobuf.Message;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -26,6 +27,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.function.IntSupplier;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,7 +44,8 @@ import org.slf4j.LoggerFactory;
  *   <li>名字：敏感 → 2034；不合法 → 2032（parameters = [min, max]）；为空 → 服务端生成候选名（max_generate_attempts 个）；</li>
  *   <li>归属区（{@link #homeZoneRefused}）：新角色的归属区 = <b>会话所在的 zone</b>（gate 填的 {@code SessionContext.zone_id}），
  *       为 0 → 2020；合服围栏检查点 F1 判这个 zone，命中或读不到 → 2020。拒绝时不发号、不进事务；</li>
- *   <li>发号（雪花，租约无效——丢失或续期滞后——即失败）→ 失败 2020；</li>
+ *   <li>发号（雪花，租约无效——丢失或续期滞后——即失败）→ 失败 2020；发号之前请求预算已用完同样回 2020，
+ *       不发号、不进事务（见下文「请求预算」）；</li>
  *   <li>{@link PlayerStore#createPlayerWithinCap}：事务里锁账号行、重数角色（已满 → 2001）、逐个候选名插入。
  *       玩家给的名字被占：若占用者就是本账号下职业 / 性别 / 外观都相同的角色，视为上次建角应答丢失的重试，
  *       直接回当前列表（已有的那一行原样返回，归属区不变）；否则 2033。生成名全部撞名 → 2020。
@@ -50,6 +53,16 @@ import org.slf4j.LoggerFactory;
  * </ol>
  * 每账号上限由第 9 步的数据库行锁保证，多个 login 实例并发建角也突破不了；本进程的在途闸门只用于快速回 2005。
  * 成功应答不设置 {@code error_message}；失败应答的 {@code players} 为空。
+ *
+ * <p><b>请求预算</b>（{@link #DEFAULT_CREATE_BUDGET}，从分发器受理这条请求开始算，含 login 工作队列排队，见
+ * {@link ClientMessageHandler#handle(SessionContext, Message, long)}）：gate 调 login 的 Dubbo 超时
+ * （game-gate {@code dubbo.consumer.timeout}，5 s）一到就给客户端回带请求 id 的 1003、放行同一会话的下一条 login 请求，
+ * 迟到的应答被丢弃，而本处理器还在工作线程上跑。建角唯一的提交点是第 9 步的事务，所以发号之前最后看一次预算
+ * （其后的发号、造行都是纯内存操作）：用完就回 2020、不进事务，免得新角色晚于下一条请求落库
+ * （同 mmorpg createplayerlogic.go 的 abandonAfterDeadline，client-request-ordering.md §6.1；tip 也与它一致）。
+ * 已知残留：事务本身没有时限（向连接池取连接发生在事务开始时、检查之后，最多等 3 s；行锁等待与每条语句只受 socketTimeout 10 s 约束），
+ * 连接池耗尽这类过载下检查照样能通过，进了事务之后的提交仍可能晚于 gate 放行；要收紧须给 {@link PlayerStore#createPlayerWithinCap} 加带时限的事务
+ * （同 {@code PlayerStore.handOffOwnership}），不在本类。
  *
  * <p><b>归属区为什么取会话的 zone</b>：Java 的 login 不分 zone（一个 login 服务全部 zone，玩家号租约全服一份），
  * 进程自己的 {@code game.zone-id} 说明不了玩家是从哪个区进来的；会话 zone 是 gate 填的它自己的 zone，
@@ -60,6 +73,12 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
 
     private static final Logger log = LoggerFactory.getLogger(CreatePlayerHandler.class);
 
+    /**
+     * 一次建角的请求预算（见类注释「请求预算」）：取 Java 各后端的整请求预算（基线 RequestBudget 3500 ms），
+     * 比 gate 调 login 的 Dubbo 超时少 1.5 s，差值留给 gate 与 login 之间的链路往返、最后那笔事务与回包（排队已算在预算里）。
+     */
+    public static final Duration DEFAULT_CREATE_BUDGET = Duration.ofMillis(3500);
+
     private final PlayerStore store;
     private final CharacterRules rules;
     private final PlayerIdGenerator playerIds;
@@ -68,6 +87,8 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     private final int maxPlayersPerAccount;
     private final LoginMetrics metrics;
     private final Function<SessionContext, Integer> deviceRenewal;
+    private final LongSupplier nanoClock;
+    private final Duration createBudget;
     private final InFlightKeys<String> accountsInFlight = new InFlightKeys<>();
 
     /**
@@ -89,6 +110,25 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
                                IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
                                LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal) {
+        this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, System::nanoTime,
+                DEFAULT_CREATE_BUDGET);
+    }
+
+    /**
+     * 同上；请求预算与单调时钟可注入（测试用）。
+     *
+     * @param nanoClock    单调时钟（纳秒），只用于请求预算的截止判断
+     * @param createBudget 请求预算，必须为正且小于 gate 调 login 的 Dubbo 超时
+     */
+    CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                        IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
+                        LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                        LongSupplier nanoClock, Duration createBudget) {
+        if (createBudget.isNegative() || createBudget.isZero()) {
+            throw new IllegalArgumentException("建角的请求预算必须为正: " + createBudget);
+        }
+        this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
+        this.createBudget = createBudget;
         this.deviceRenewal = deviceRenewal;
         this.store = store;
         this.rules = rules;
@@ -114,8 +154,16 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         return CreatePlayerResponse.class;
     }
 
+    /** 没有经过分发器的调用（测试）：按此刻受理、没有排队。 */
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, CreatePlayerRequest request) {
+        return handle(session, request, 0);
+    }
+
+    /** 截止 = 受理时刻 + 请求预算：排队（{@code queuedNanos}）同样耗着 gate 的等待，从预算里扣掉（见类注释「请求预算」）。 */
+    @Override
+    public CompletableFuture<HandlerReply> handle(SessionContext session, CreatePlayerRequest request, long queuedNanos) {
+        long createDeadline = nanoClock.getAsLong() - queuedNanos + createBudget.toNanos();
         if (session.getSessionId() == 0) {
             return done(error(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE));
         }
@@ -132,13 +180,15 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
             return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
         }
         try {
-            return done(create(session, account, request));
+            return done(create(session, account, request, createDeadline));
         } finally {
             accountsInFlight.release(account);
         }
     }
 
-    private CreatePlayerResponse create(SessionContext session, String account, CreatePlayerRequest request) {
+    /** @param createDeadline 请求预算的截止时刻（{@link #nanoClock} 的读数） */
+    private CreatePlayerResponse create(SessionContext session, String account, CreatePlayerRequest request,
+                                        long createDeadline) {
         // 快照预检只用于快速拒绝（不持锁、不发号）；权威判定在 createPlayerWithinCap 的事务里。
         List<PlayerRow> snapshot = store.listPlayers(account);
         if (snapshot.size() >= maxPlayersPerAccount) {
@@ -210,6 +260,14 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         }
         int homeZoneId = session.getZoneId();
 
+        if (createDeadline - nanoClock.getAsLong() <= 0) {
+            // 提交点之前最后一次看预算（之后只剩纯内存的发号与造行）：用完时 gate 可能已按超时放行同一会话的下一条请求，
+            // 这时再进事务，新角色会晚于下一条请求落库。不发号、不进事务；预算短于 gate 的超时，这份 2020
+            // （「此刻建不了角，稍后重试」）仍可能送到客户端，重试安全。
+            log.warn("建角放弃：请求预算 {} 已用完，不发号、不进事务 account={} session={}", createBudget, account,
+                    session.getSessionId());
+            return error(LoginErrorTip.login_error.kLoginDataSerializeFailed_VALUE);
+        }
         long playerId;
         try {
             playerId = playerIds.nextId();

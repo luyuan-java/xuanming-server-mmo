@@ -13,10 +13,13 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class ReissueConfiguration {
 
-    @Bean
     public BattleTicketReissue battleTicketReissue(PlacementStore placements, PlacementDialer dialer, MatchMetrics metrics) {
         return new BattleTicketReissue(placements, dialer, metrics);
     }
+    @Bean(name="battleTicketReissue")
+    public BattleTicketReissue configuredBattleTicketReissue(PlacementStore placements,PlacementDialer dialer,MatchMetrics metrics,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){
+        return battleTicketReissue(placements,dialer,metrics).withGlobal(global.getIfAvailable());}
 
     @Bean
     public ReissueHandler reissueHandler(BattleTicketReissue battleTicketReissue) {

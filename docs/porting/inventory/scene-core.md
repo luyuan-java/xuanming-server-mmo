@@ -438,6 +438,7 @@ Java 版（game-scene）已有：进场与初始同步、场景内换图、移�
 
 ### node-player-route — 节点间对玩家服务的调用与多跳路由
 - mmorpg: scene_handler.cpp SendMessageToPlayer(1) / InvokePlayerService(40) / RoutePlayerStringMsg(81) / RouteNodeStringMsg(78，空桩)、UpdateSessionDetail(24)
+  （2026-10-16 补：1 / 40 / 78 / 81 已于 mmorpg RpcChannel 批 7 从 proto 删除、号留墓碑；玩家 handler 现只经 ProcessClientPlayerMessage 派发，见 mmorpg `docs/design/muduo-rpc-channel.md` §20。本节与第 29、45 行对这几个入口的描述只作留痕。）
 - client messages: 被调用的玩家服务方法的应答（经 gate 转给客户端）
 - tables: none
 - depends on: scene-client-dispatch

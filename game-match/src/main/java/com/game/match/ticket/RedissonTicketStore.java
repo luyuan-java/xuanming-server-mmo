@@ -2,6 +2,7 @@ package com.game.match.ticket;
 
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
+import com.game.match.port.RedisClientWrites;
 import com.game.match.rating.RatingReader;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -19,7 +20,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
-import org.redisson.api.options.OptionalOptions;
 import org.redisson.client.codec.StringCodec;
 
 /**
@@ -30,7 +30,8 @@ import org.redisson.client.codec.StringCodec;
  *       可以在 gather 的虚拟线程上调。</li>
  *   <li><b>失败一律 {@link Deadline.DependencyException}</b>：Redis 报错、等过了截止、回复形状不对、票据 HASH 损坏。截止在发出之前就已经用完时
  *       <b>不发</b>（什么都没写），照样抛它；等超时的那一种，命令还在路上、可能随后执行——对写方法这就是「结局不明」。</li>
- *   <li><b>单条 {@code evalAsync}，不用 RBatch</b>；编解码 {@link StringCodec}（键、参数、票据字段全是 ASCII 文本，回复里整数是 {@code Long}、
+ *   <li><b>单条脚本调用，不用 RBatch</b>（客户端请求路径上的写经 {@link RedisClientWrites#evalAsync} 发 {@code EVALSHA}、自己处理 NOSCRIPT，
+ *       其余是 {@code evalAsync}）；编解码 {@link StringCodec}（键、参数、票据字段全是 ASCII 文本，回复里整数是 {@code Long}、
  *       字符串是 {@code String}）；全部脚本以 {@link RScript.Mode#READ_WRITE} 执行（读主库，理由见 {@link TicketScripts}）。</li>
  *   <li>三个不走 Lua 的读写：注册集 {@code SMEMBERS}、队列 {@code LLEN}、抢凑单锁 {@code SET NX PX}。前两个是咨询性的读（凑单每轮都读，
  *       读到旧值只是晚一轮）；抢锁被重发时第二次会抢不到自己刚抢到的锁——只是白等一个锁 TTL，锁本来就只是效率手段。</li>
@@ -52,10 +53,19 @@ public final class RedissonTicketStore implements TicketStore {
 
     private final RedissonClient redis;
     private final RedisKeys redisKeys;
+    /** 配置的单条命令超时（{@code game.redis.timeout-ms}）：客户端写的 Redisson 超时取它与剩余预算的较小者（{@link RedisClientWrites}）。 */
+    private final Duration commandTimeout;
 
+    /** 命令超时取 {@code game.redis.timeout-ms} 的缺省值：只给直接 new 的测试用，生产装配走下一个构造器。 */
     public RedissonTicketStore(RedissonClient redis, RedisKeys redisKeys) {
+        this(redis, redisKeys, RedisClientWrites.DEFAULT_COMMAND_TIMEOUT);
+    }
+
+    /** @param commandTimeout 配置的单条命令超时（{@link RedisClientWrites#commandTimeout}），必须为正 */
+    public RedissonTicketStore(RedissonClient redis, RedisKeys redisKeys, Duration commandTimeout) {
         this.redis = Objects.requireNonNull(redis, "redis");
         this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
+        this.commandTimeout = RedisClientWrites.requireCommandTimeout(commandTimeout);
     }
 
     // ================================================================ TicketReader
@@ -106,7 +116,9 @@ public final class RedissonTicketStore implements TicketStore {
         if (mode == HealMode.ORPHAN && QueueRef.ofQueueKey(redisKeys, seen.queueKey()).isPresent()) {
             keys.add(seen.queueKey());
         }
-        return evalInteger("自愈残留票", TicketScripts.HEAL, keys, d, seen.ticketId(), mode == HealMode.READY ? HEAL_READY : HEAL_ORPHAN,
+        // 自愈只在请求路径上调（157 的第 5 步、148 删孤儿票、整队 / 活动开战的成员预检），不在凑单与 gather 里：不重发（见 evalIntegerOnce）。
+        // 脚本按票号 CAS，迟到的副本删不到新票；不重发是为了不让这次请求的写在 gate 放行下一条之后才冒出来。
+        return evalIntegerOnce("自愈残留票", TicketScripts.HEAL, keys, d, seen.ticketId(), mode == HealMode.READY ? HEAL_READY : HEAL_ORPHAN,
                 TicketCodec.member(playerId), seen.queueKey()) == 1;
     }
 
@@ -128,7 +140,7 @@ public final class RedissonTicketStore implements TicketStore {
 
     private JoinResult join(String what, List<Object> keys, Deadline d, String ticketId, int mode, int configId, int zoneId, long ratingCenti,
                             long ttlMs, long playerId) {
-        // 客户端 157 的提交点:不重发(见 CLIENT_WRITE_SCRIPT)。
+        // 客户端 157 的提交点:不重发、等连接不越过截止(见 evalListOnce)。
         List<Object> reply = evalListOnce(what, TicketScripts.JOIN, keys, d, ticketId, Integer.toString(mode), Integer.toUnsignedString(configId),
                 Integer.toUnsignedString(zoneId), Long.toString(ratingCenti), Long.toString(ttlMs), TicketCodec.member(playerId));
         long code = integerAt(reply, 0, what);
@@ -171,7 +183,10 @@ public final class RedissonTicketStore implements TicketStore {
             args.add(member.ticketId());
             args.add(Integer.toUnsignedString(member.zoneId()));
         }
-        long conflict = evalInteger("整组建票", TicketScripts.CREATE_GROUP, keys, d, args.toArray());
+        // 211 整队开战（与帮会活动开战）建票的提交点：不重发、等连接不越过截止(见 evalIntegerOnce)。带全局重发时，截止前发出的这条约 2.2 s 后
+        // 被原样重发：既可能越过 gate 放行同一会话的下一条，也可能落在 GroupTickets 收到依赖故障、当场按票号回滚之后，留下整组 matched 孤儿票
+        // （其间成员再排一律 16001，直到 matched TTL）。回滚本身是补偿，仍走带重发的 delete。
+        long conflict = evalIntegerOnce("整组建票", TicketScripts.CREATE_GROUP, keys, d, args.toArray());
         if (conflict == 0) {
             return OptionalLong.empty();
         }
@@ -187,7 +202,7 @@ public final class RedissonTicketStore implements TicketStore {
     public boolean cancel(long playerId, String ticketId, QueueRef queue, Deadline d) {
         new TicketRef(playerId, ticketId);
         Objects.requireNonNull(queue, "queue");
-        // 客户端 148 的提交点(以及 157 入队失败的回滚):不重发(见 CLIENT_WRITE_SCRIPT)。回滚失败只留下一张孤儿票,下次 157 自愈。
+        // 客户端 148 的提交点(以及 157 入队失败的回滚):不重发、等连接不越过截止(见 evalIntegerOnce)。回滚失败只留下一张孤儿票,下次 157 自愈。
         return evalIntegerOnce("取消排队", TicketScripts.CANCEL, List.of(ticketKey(playerId), queue.queueKey(redisKeys), queue.rankKey(redisKeys)), d, ticketId,
                 TicketCodec.member(playerId)) == 1;
     }
@@ -413,25 +428,27 @@ public final class RedissonTicketStore implements TicketStore {
     }
 
     /**
-     * 客户端请求路径上的写(157 建票 / 入队、148 取消)用的脚本句柄:编解码同上,但<b>不让 Redisson 在响应超时后原样重发</b>。
+     * 客户端请求路径上的写(157 建票 / 入队 / 自愈、148 取消与删孤儿票、211 / 活动开战的整组建票)按客户端写发出({@link RedisClientWrites#evalAsync}):
+     * 编解码同上,但<b>不让 Redisson 在响应超时后原样重发</b>,等连接也不越过请求截止(每次发出前按配置超时与剩余预算现取);
+     * 直接发 EVALSHA,遇 NOSCRIPT 先查截止再加载、重发,不交给 Redisson 不看截止的自动重载。
      *
      * <p>为什么:gate 对同一会话的后端请求单飞,上一条观察到完成(含 5 s 超时)才发下一条(mmorpg client-request-ordering.md O3)。
      * 原先 {@code retry-attempts = 1},单条命令最坏 (1 + 1) × timeout + delay ≈ 4.2 s 才放弃,截止前最后发出的那条写经重发,
      * 最晚可在 gate 已放行下一条之后数秒才执行 ——「加入 → 取消」会执行成「取消(没票、回成功)→ 加入」,玩家看到取消成功却仍在排队。
-     * 关掉重发之后,截止前发出的写至多在一个 timeout 内落定;超时按依赖故障回 16004,客户端按结果未知处理(先查 153)。
+     * 关掉重发之后还剩「等连接」:Redisson 不重发时用响应超时限制取连接,全局 2 s 会让截止前一刻排上的写在截止之后才发出,所以超时封顶到剩余预算(再扣一个 Redisson 定时器刻度,见 {@link RedisClientWrites});
+     * 剩余还多时照旧取配置值,不拖到截止才判响应超时,157 的回滚(同一个截止)才有预算发出。
+     * 超时按依赖故障回 16004 / 信封 1003,客户端按结果未知处理(先查 153)。
      * 凑单、gather、补偿这些后台路径不受影响,仍走带重发的 {@link #evalInteger} / {@link #evalList}:它们的脚本按票号 CAS、可重放,
      * 重发只会更稳,也不存在「客户端已经放行下一条」的问题。
      */
-    private static final OptionalOptions CLIENT_WRITE_SCRIPT = OptionalOptions.defaults().codec(StringCodec.INSTANCE).retryAttempts(0);
-
     private long evalIntegerOnce(String what, String lua, List<Object> keys, Deadline d, Object... args) {
-        Long reply = await(what, d, () -> redis.getScript(CLIENT_WRITE_SCRIPT).<Long>evalAsync(RScript.Mode.READ_WRITE, lua,
+        Long reply = await(what, d, () -> RedisClientWrites.<Long>evalAsync(redis, StringCodec.INSTANCE, d, commandTimeout, lua,
                 RScript.ReturnType.INTEGER, keys, args));
         return reply;
     }
 
     private List<Object> evalListOnce(String what, String lua, List<Object> keys, Deadline d, Object... args) {
-        return await(what, d, () -> redis.getScript(CLIENT_WRITE_SCRIPT).<List<Object>>evalAsync(RScript.Mode.READ_WRITE, lua,
+        return await(what, d, () -> RedisClientWrites.<List<Object>>evalAsync(redis, StringCodec.INSTANCE, d, commandTimeout, lua,
                 RScript.ReturnType.MULTI, keys, args));
     }
 

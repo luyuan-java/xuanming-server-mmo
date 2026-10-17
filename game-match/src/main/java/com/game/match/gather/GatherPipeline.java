@@ -136,6 +136,8 @@ public final class GatherPipeline {
     private final long readyTicketTtlMs;
     private final LongSupplier seeds;
     private final Timeouts timeouts;
+    private com.game.match.global.GlobalMatchService global;
+    public GatherPipeline withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
 
     /**
      * 生产装配。
@@ -161,6 +163,7 @@ public final class GatherPipeline {
 
     /** 跑一次 gather，阻塞到结束（成功，或失败并补偿完）。不抛异常。 */
     public GatherResult run(GatherPlan plan) {
+        if(global!=null)return global.gather(plan);
         Objects.requireNonNull(plan, "plan");
         Run run = new Run(plan);
         try {

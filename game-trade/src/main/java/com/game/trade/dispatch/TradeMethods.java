@@ -27,7 +27,8 @@ public final class TradeMethods {
     public static final String GET_MY_SHELF = "GetMyShelf";
 
     /** 客户端可发的 4 个方法（基线会话白名单 ClientMethods，session.go:40-47）。 */
-    public static final List<String> CLIENT_REQUESTS = List.of(BROWSE_LISTINGS, GET_LISTING_DETAIL, SET_FAVORITE, GET_MY_SHELF);
+    public static final List<String> COMMERCE_REQUESTS = List.of("ListOfficialSkus","CreateOfficialOrder","GetCommerceOrder","CancelCommerceOrder","ListCommerceOrders","CreatePlayerTrade","ConfirmPlayerTrade","CreateConsignment","BuyConsignment","CancelConsignment","PlaceMarketOrder","CancelMarketOrder","ListMarketOrders","GetMarketDepth","ListTradeMarkets","CreateAuctionLot","PlaceAuctionBid","GetAuctionLot","CancelAuctionLot","BrowseCommerceOffers");
+    public static final List<String> CLIENT_REQUESTS = java.util.stream.Stream.concat(List.of(BROWSE_LISTINGS,GET_LISTING_DETAIL,SET_FAVORITE,GET_MY_SHELF).stream(),COMMERCE_REQUESTS.stream()).toList();
 
     /** proto/trade/trade_admin.proto 的内部服务名。 */
     public static final String ADMIN_SERVICE = "TradeAdmin";

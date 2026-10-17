@@ -89,4 +89,18 @@ class FriendRedisIntegrationTest {
         assertThat(quota.tryAcquire(legacy, Deadline.after(3000))).isFalse();
         assertThat(redis.getBucket(legacyKey, StringCodec.INSTANCE).remainTimeToLive()).isBetween(1L, 60_000L);
     }
+
+    /**
+     * SCRIPT FLUSH 之后（与 Redis 重启 / 主从切换丢了脚本缓存同一情形）：计数写直接发 EVALSHA、自己处理 NOSCRIPT，加载后重发，照常计数——
+     * 第二次被拒说明两次都真的计上了（处理坏了或本地算的 SHA1 与 Redis 不一致时，两次都按 Redis 故障 fail-open 放行）。
+     */
+    @Test
+    void 配额脚本_SCRIPT_FLUSH之后照常计数() {
+        FriendRequestQuota quota = FriendRequestQuota.redisson(redis, REDIS_KEYS, 1, new FriendMetrics(new SimpleMeterRegistry()));
+        long player = BASE + 3;
+        redis.getScript().scriptFlush();
+        assertThat(quota.tryAcquire(player, Deadline.after(3000))).isTrue();
+        redis.getScript().scriptFlush();
+        assertThat(quota.tryAcquire(player, Deadline.after(3000))).isFalse();
+    }
 }

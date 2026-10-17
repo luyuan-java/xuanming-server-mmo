@@ -16,6 +16,10 @@
 
     <dependencies>
         <dependency>
+            <!-- 与既有Druid starter同版本，仅供权威库物理连接策略；不向无SQL的调用方传播。 -->
+            <groupId>com.alibaba</groupId><artifactId>druid</artifactId><version>${druid.version}</version><optional>true</optional>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-autoconfigure</artifactId>
         </dependency>

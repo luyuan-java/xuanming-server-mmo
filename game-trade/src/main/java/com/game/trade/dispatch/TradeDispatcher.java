@@ -104,6 +104,10 @@ public final class TradeDispatcher {
      */
     public TradeDispatcher(MessageIdRegistry registry, JubaozhaiService service, Executor executor, TradeMetrics metrics,
                            long budgetMillis) {
+        this(registry,service,executor,metrics,budgetMillis,null);
+    }
+    public TradeDispatcher(MessageIdRegistry registry, JubaozhaiService service, Executor executor, TradeMetrics metrics,
+                           long budgetMillis,com.game.trade.commerce.CommerceClientService commerce) {
         this.registry = registry;
         this.executor = executor;
         this.metrics = metrics;
@@ -117,6 +121,14 @@ public final class TradeDispatcher {
                 service::setFavorite, (request, tip) -> JubaozhaiService.rejectFavorite(request.getListingId(), tip));
         client(byId, TradeMethods.GET_MY_SHELF, GetMyShelfRequest.class, GetMyShelfResponse.class,
                 service::getMyShelf, (request, tip) -> JubaozhaiService.rejectShelf(tip));
+        for(String name:TradeMethods.COMMERCE_REQUESTS){
+            MessageMethod contract=contractOf(TradeMethods.SERVICE,name);
+            Handler<Message> handler=(me,request,deadline)->commerce==null
+                    ?com.game.trade.commerce.CommerceClientService.rejection(contract.responsePrototype(),TradeTips.FEATURE_UNAVAILABLE)
+                    :commerce.handle(name,me,request,contract.responsePrototype(),deadline);
+            byId.put(contract.messageId(),new Route(name,Kind.CLIENT,contract.requestPrototype(),handler,
+                    (request,tip)->com.game.trade.commerce.CommerceClientService.rejection(contract.responsePrototype(),tip.code())));
+        }
         MessageMethod seed = contractOf(TradeMethods.ADMIN_SERVICE, TradeMethods.SEED_LISTING);
         byId.put(seed.messageId(), new Route(TradeMethods.SEED_LISTING, Kind.FORBIDDEN, seed.requestPrototype(), null, null));
 

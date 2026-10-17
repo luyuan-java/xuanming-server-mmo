@@ -67,8 +67,17 @@ message AssetOpStreamLedgerState {
   uint64 max_seq = 6;
   // 流纪元（调用方建这本 seq 时的毫秒）；更大的纪元整条流重置。
   uint64 stream_epoch = 7;
-  // 窗口内部分发放的 seq（按升序，至多 64 条）。
+  // 窗口内部分发放的 seq（按升序，保留完整1024窗口，不按结果条数提前丢弃）。
   repeated uint64 partial_seqs = 8;
+  repeated AssetOpReceiptState receipts = 9;
+}
+
+// 与效果/结局同事务保存；snapshot_proto是Java内部AssetSnapshot原始字节。
+message AssetOpReceiptState {
+  uint64 seq = 1;
+  bytes request_digest = 2;
+  bytes snapshot_proto = 3;
+  uint64 correlation_id = 4;
 }
 
 message AssetOpRejectionState {

@@ -3,6 +3,10 @@ package com.game.trade.store;
 import com.game.pbmysql.PbMysql;
 import com.game.trade.store.pb.TradeFavoriteRow;
 import com.game.trade.store.pb.TradeListingRow;
+import com.game.trade.store.pb.TradeCommerceRow;
+import com.game.trade.store.pb.TradeCommerceGuardRow;
+import com.game.trade.store.pb.TradePlayerOpSeqRow;
+import com.game.trade.store.pb.TradeAssetOpRow;
 import com.google.protobuf.Message;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -26,10 +30,10 @@ public final class TradeTables {
     public static final String FAVORITE = "trade_favorite";
 
     /** 表名，与 {@link #PROTOTYPES} 一一对应。手写 SQL 里的表名字面量必须与这里（= trade_tables.proto 的 table_name）一致，TradeTablesTest 钉住。 */
-    public static final List<String> NAMES = List.of(LISTING, FAVORITE);
+    public static final List<String> NAMES = List.of(LISTING, FAVORITE,"trade_commerce","trade_commerce_guard","trade_player_op_seq","trade_asset_op");
 
     /** 表消息原型（登记顺序同基线 Tables()）。 */
-    public static final List<Message> PROTOTYPES = List.of(TradeListingRow.getDefaultInstance(), TradeFavoriteRow.getDefaultInstance());
+    public static final List<Message> PROTOTYPES = List.of(TradeListingRow.getDefaultInstance(), TradeFavoriteRow.getDefaultInstance(),TradeCommerceRow.getDefaultInstance(),TradeCommerceGuardRow.getDefaultInstance(),TradePlayerOpSeqRow.getDefaultInstance(),TradeAssetOpRow.getDefaultInstance());
 
     private TradeTables() {
     }

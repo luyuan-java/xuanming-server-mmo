@@ -2,6 +2,7 @@ package com.game.match.challenge;
 
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
+import com.game.discovery.RedisProperties;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
@@ -10,6 +11,7 @@ import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.port.PlayerPusher;
 import com.game.match.port.PlayerStatusReader;
+import com.game.match.port.RedisClientWrites;
 import org.redisson.api.RedissonClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -27,12 +29,12 @@ public class ChallengeConfiguration {
         return new MatchPushExecutor();
     }
 
+    /** 发起 / 消费（152 / 151 的提交点）的 Redisson 超时以配置的 {@code game.redis.timeout-ms} 封顶（{@link RedisClientWrites}）。 */
     @Bean
-    public ChallengeStore challengeStore(RedissonClient redis, RedisKeys redisKeys) {
-        return new RedissonChallengeStore(redis, redisKeys);
+    public ChallengeStore challengeStore(RedissonClient redis, RedisKeys redisKeys, RedisProperties redisProperties) {
+        return new RedissonChallengeStore(redis, redisKeys, RedisClientWrites.commandTimeout(redisProperties));
     }
 
-    @Bean
     public ChallengeService challengeService(PlayerStatusReader players, ChallengeStore challengeStore, MatchIds matchIds, PlayerPusher pusher,
                                              GatherLauncher gather, MatchMetrics metrics, MatchPushExecutor matchPushExecutor,
                                              MatchProperties props, MessageIdRegistry registry) {
@@ -41,6 +43,10 @@ public class ChallengeConfiguration {
                 registry.requireId(MatchMethods.SERVICE, MatchMethods.NOTIFY_CHALLENGE_INVITE),
                 registry.requireId(MatchMethods.SERVICE, MatchMethods.NOTIFY_CHALLENGE_RESULT));
     }
+    @Bean(name="challengeService")
+    public ChallengeService configuredChallengeService(PlayerStatusReader players,ChallengeStore store,MatchIds ids,PlayerPusher pusher,GatherLauncher gather,
+            MatchMetrics metrics,MatchPushExecutor executor,MatchProperties props,MessageIdRegistry registry,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){return challengeService(players,store,ids,pusher,gather,metrics,executor,props,registry).withGlobal(global.getIfAvailable());}
 
     /** 152 ChallengePlayer。 */
     @Bean

@@ -103,6 +103,47 @@ class KafkaBattleResultSinkTest {
                 .setTotalRounds(12).setFinishedAtMs(1_800_000_000_123L).addDeadPlayerIds(9002).build();
     }
 
+    @Test void 耐久确认只在broker回执成功后完成(){
+        kafka.autoComplete=false;started(8);
+        var acknowledged=sink.publishConfirmed(event(89001),Channel.PLAIN);
+        await().atMost(WAIT).until(()->kafka.sent().size()==1);
+        assertThat(acknowledged).isNotDone();
+        kafka.producer(0).completeNext();
+        assertThat(acknowledged).isCompletedWithValue(null);
+    }
+    @Test void 完整来源重投使用首次原始wire而不是重新序列化事件()throws Exception {
+        started(8);var event=event(77);
+        var raw=event.toByteString().concat(com.google.protobuf.ByteString.copyFrom(new byte[]{8,77}));
+        assertThat(BattleResultEvent.parseFrom(raw)).isEqualTo(event);
+        sink.publishConfirmed(event,raw,Channel.PLAIN).get(5,TimeUnit.SECONDS);
+        sink.publishConfirmed(event,raw,Channel.PLAIN).get(5,TimeUnit.SECONDS);
+        assertThat(kafka.sent()).hasSize(2);
+        assertThat(kafka.sent().get(0).value()).isEqualTo(raw.toByteArray());
+        assertThat(kafka.sent().get(1).value()).isEqualTo(raw.toByteArray());
+    }
+    @Test void 来源超共同上限或与事件不同都不能进入broker队列(){
+        started(8);var event=event(78);
+        assertThat(sink.publishConfirmed(event,com.google.protobuf.ByteString.copyFrom(new byte[960*1024+1]),Channel.PLAIN)).isCompletedExceptionally();
+        assertThat(sink.publishConfirmed(event,event(79).toByteString(),Channel.PLAIN)).isCompletedExceptionally();
+        assertThat(kafka.sent()).isEmpty();
+    }
+    @Test void 失败回执和关闭都不能冒充确认(){
+        kafka.autoComplete=false;started(8);
+        var failed=sink.publishConfirmed(event(89002),Channel.ACTIVITY);
+        await().atMost(WAIT).until(()->kafka.sent().size()==1);
+        kafka.producer(0).errorNext(new TimeoutException("投递结局未知"));
+        assertThat(failed).isCompletedExceptionally();
+        var stopped=sink.publishConfirmed(event(89003),Channel.PLAIN);
+        await().atMost(WAIT).until(()->kafka.sent().size()==2);
+        sink.close(Duration.ofMillis(20));
+        assertThat(stopped).isCompletedExceptionally();
+    }
+    @Test void 全球结果日志拒绝开发RF1配置(){
+        sink=new KafkaBattleResultSink(kafka,RESULT_TOPICS,GENERATION,(short)1,Duration.ofSeconds(1),metrics,true);
+        assertThatThrownBy(sink::start).isInstanceOf(AuditTopicContractException.class);
+        assertThat(kafka.created()).isEmpty();
+    }
+
     private static BattleResultEvent activityEvent(long battleId) {
         return event(battleId).toBuilder().setMatchMode(5).setActivityContext(BattleActivityContext.newBuilder()
                 .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_TRIAL).setGuildId(66).setActivityId(3)).build();

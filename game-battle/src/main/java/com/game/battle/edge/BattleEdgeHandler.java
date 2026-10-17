@@ -73,6 +73,11 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     private final BattleRoomService rooms;
     /** null = 还没建连，或被并发上限拒掉（从未分配会话）。 */
     private DirectSession session;
+    private com.game.proto.match.NetworkProbeGrant probeGrant;
+    private com.google.protobuf.ByteString probeNonce;
+    private int probeSamples,probeMaxRtt;
+    private long probeSent;
+    private static final java.security.SecureRandom PROBE_RANDOM=new java.security.SecureRandom();
 
     BattleEdgeHandler(BattleEdgeServer edge) {
         this.edge = edge;
@@ -217,7 +222,10 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             if (s == null || !s.acceptsFrames() || !ctx.channel().isActive()) {
                 return;
             }
-            if (msg instanceof BattleTokenVerifyRequest verify) {
+            if(msg instanceof com.game.proto.match.NetworkProbeStart start){onProbeStart(s,start);}
+            else if(msg instanceof com.game.proto.match.NetworkProbeEcho echo){onProbeEcho(s,echo);}
+            else if (msg instanceof BattleTokenVerifyRequest verify) {
+                if(probeGrant!=null){s.forceClose(null);return;}
                 onVerify(s, verify);
             } else if (msg instanceof ClientRequest request) {
                 onRequest(s, request);
@@ -228,6 +236,42 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     }
 
     // ---------------------------------------------------------------- 握手（§3.4）
+
+    private void onProbeStart(DirectSession s,com.game.proto.match.NetworkProbeStart start){
+        var deps=edge.dependencies();var config=deps.global();
+        if(s.state()!=DirectSession.State.PENDING||probeGrant!=null||!config.enabled()
+                ||!com.game.common.token.NetworkProbes.verify(config.probeSecret(),com.game.common.token.NetworkProbes.GRANT,start.getGrant())){
+            s.forceClose(null);return;
+        }
+        try{
+            var g=com.game.proto.match.NetworkProbeGrant.parseFrom(start.getGrant().getPayload());
+            if(g.getPlayerId()==0||g.getPlanId().isEmpty()||g.getSessionBinding().isEmpty()||g.getPhysicalRegion()!=config.physicalRegion()
+                    ||g.getTargetNodeId()!=deps.identity().nodeId()||!g.getTargetInstanceId().equals(deps.identity().instanceId())
+                    ||g.getExpiresAtMs()<=deps.clock().epochMillis()){s.forceClose(null);return;}
+            probeGrant=g;sendProbeChallenge(s);
+        }catch(com.google.protobuf.InvalidProtocolBufferException e){s.forceClose(null);}
+    }
+    private void sendProbeChallenge(DirectSession s){
+        byte[] nonce=new byte[32];PROBE_RANDOM.nextBytes(nonce);probeNonce=com.google.protobuf.ByteString.copyFrom(nonce);
+        probeSent=edge.nanoTime();
+        s.writeDirect(com.game.proto.match.NetworkProbeChallenge.newBuilder().setNonce(probeNonce).setSampleIndex(probeSamples).build());
+    }
+    private void onProbeEcho(DirectSession s,com.game.proto.match.NetworkProbeEcho echo){
+        if(probeGrant==null||s.state()!=DirectSession.State.PENDING||echo.getSampleIndex()!=probeSamples||!echo.getNonce().equals(probeNonce)){
+            s.forceClose(null);return;
+        }
+        long elapsed=edge.nanoTime()-probeSent;
+        if(elapsed<0||elapsed>java.util.concurrent.TimeUnit.SECONDS.toNanos(3)){s.forceClose(null);return;}
+        probeMaxRtt=Math.max(probeMaxRtt,(int)Math.max(1,(elapsed+999_999)/1_000_000));probeSamples++;
+        if(probeSamples<3){sendProbeChallenge(s);return;}
+        var deps=edge.dependencies();long now=deps.clock().epochMillis();
+        if(now>=probeGrant.getExpiresAtMs()){s.forceClose(null);return;}
+        var receipt=com.game.proto.match.NetworkProbeReceipt.newBuilder().setGrant(probeGrant).setRttMs(probeMaxRtt).setSampleCount(3)
+                .setMeasuredAtMs(now).setExpiresAtMs(probeGrant.getExpiresAtMs()).build();
+        s.writeDirect(com.game.proto.match.NetworkProbeComplete.newBuilder().setReceipt(com.game.common.token.NetworkProbes.sign(
+                deps.global().probeSecret(),com.game.common.token.NetworkProbes.RECEIPT,receipt)).build());
+        s.gracefulClose(null,HANDSHAKE_REJECT_FORCE_CLOSE_MS);
+    }
 
     private void onVerify(DirectSession s, BattleTokenVerifyRequest request) {
         if (s.state() == DirectSession.State.VERIFIED) {

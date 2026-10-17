@@ -14,6 +14,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.redisson.api.BatchOptions;
@@ -33,7 +34,10 @@ import org.slf4j.LoggerFactory;
  *   <li>轮换：先读旧 refresh，再用一段 Lua 脚本原子地「作废旧 refresh（DEL 返回 0 即已被别人轮换走）、从账号集合摘掉它、
  *       写新的一对与账号集合、写轮换记录」。轮换记录（{@link RedisKeys#loginRefreshRotated}）TTL = 重放宽限窗口：
  *       窗口内同一旧 refresh 再来（回包丢失后的重试、并发的两路），只要新 refresh 还没用过、也没被淘汰，就原样返回同一对，
- *       不再签发；窗口外或新 refresh 已不在一律无效。窗口为 0 时不写记录，严格一次性（基线 {@code token.go} Refresh）。</li>
+ *       不再签发；窗口外或新 refresh 已不在一律无效。窗口为 0 时不写记录，严格一次性（基线 {@code token.go} Refresh）。
+ *       脚本发出之前看一次调用方给的截止，已过就不发（见 {@link LoginTokens#refresh(String, BooleanSupplier)}）。
+ *       脚本沿用客户端的 Redisson 重发（不改成 {@code retryAttempts(0)}）：首发已执行时重发的 DEL 返回 0、什么都不写，转到重放判定拿回同一对，
+ *       「已轮换但回包超时」靠它在本请求内恢复；代价是首发没到 Redis 时，重发可能在截止之后才轮换（已知残留）。</li>
  *   <li>格式不对的令牌（不是 43 字符 base64url）不碰 Redis，直接无效：客户端给的任意文本不会拼进键、也不会经异常进日志。</li>
  *   <li>存储出错抛 {@link TokenStoreException}（不带原异常：Redisson 的异常消息会带命令参数，即令牌本身）。</li>
  * </ul>
@@ -143,7 +147,8 @@ public final class RedisLoginTokens implements LoginTokens {
     }
 
     @Override
-    public Optional<TokenPair> refresh(String refreshToken) {
+    public Optional<TokenPair> refresh(String refreshToken, BooleanSupplier pastDeadline) {
+        Objects.requireNonNull(pastDeadline, "pastDeadline");
         if (!wellFormed(refreshToken)) {
             return Optional.empty();
         }
@@ -169,6 +174,10 @@ public final class RedisLoginTokens implements LoginTokens {
                         pair.refreshExpireSeconds(), nowSeconds))
                 : "";
         String setKey = redisKeys.loginAccountRefresh(old.account());
+        if (pastDeadline.getAsBoolean()) {
+            // 提交点（作废 + 签发的原子脚本）之前最后看一次截止；之前的读、造令牌都没有副作用。不带令牌、不带账号：消息可能进日志。
+            throw new RotationAbandoned("请求截止已过，没有发出轮换脚本");
+        }
         Long rotated = store("轮换", () -> redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, ROTATE_SCRIPT,
                 RScript.ReturnType.INTEGER,
                 List.of(redisKeys.loginRefreshToken(refreshToken), redisKeys.loginRefreshRotated(refreshToken),

@@ -2,10 +2,12 @@ syntax = "proto3";
 option java_package = "com.game.proto.trade";
 option java_outer_classname = "TradeTradeTableOuterClass";
 option java_multiple_files = true;
+import "proto/trade/commerce.proto";
 option go_package = "trade";
 
 import "proto/db/proto_option.proto";
 import "proto/trade/jubaozhai.proto";
+import "proto/common/asset/asset_op.proto";
 
 package trade;
 
@@ -110,7 +112,8 @@ message TradeAssetOpRecord {
   option(OptionTableName) = "trade_asset_op";
   option(OptionPrimaryKey) = "op_id";
   option(OptionUniqueKey) = "player_id,stream,stream_epoch,seq";
-  // idx_trade_asset_op_0 = 重投循环领取(ListDue);idx_..._1 = 分配 seq 时数本纪元未决行(I5);
+  // idx_trade_asset_op_0 = 重投循环领取(ListDue),也是终态行清理的候选读(status, next_attempt_ms);
+  // idx_..._1 = 分配 seq 时数本纪元未决行(I5),也是落地唤醒按玩家列未决行(ListPendingByPlayer);
   // idx_..._2 = 按商品 / 订单查它的资产指令(货架与客服排障)。
   option(OptionIndex) = "status,next_attempt_ms;player_id,stream,stream_epoch,status,seq;ref_kind,ref_id";
   option(OptionTiDBNonclusteredPK) = true;
@@ -126,7 +129,7 @@ message TradeAssetOpRecord {
   TradeAssetOpStatus status = 7;
   bool durable = 8;          // 终局是否已被 scene 确认落盘(APPLIED/REJECTED 都要 durable 才终结)
   uint32 attempts = 9;
-  uint64 next_attempt_ms = 10;
+  uint64 next_attempt_ms = 10;  // 未决行:下一次投递时刻;终态行:终结时刻(终结 / 人工终结 / 放弃同写,清理按它判龄)
   uint64 deadline_ms = 11;   // 到期后改发 AssetAbortDebit;0 = 永不中止(交付类不设截止)
   uint64 lease_until_ms = 12;
   uint64 lease_token = 13;
@@ -147,6 +150,92 @@ message TradeAssetOpRecord {
   // (operator ≤64 字、reason ≤191 字)。
   string resolved_by = 22;     // 操作人;空 = 这一行不是人工终结的
   string resolve_reason = 23;  // 人工判定依据
+
+  // 此前任何一次投递请求**可能**发出的最晚时刻(毫秒),自动放弃的安全依据
+  // (docs/design/landing-recovery-sync-digest.md §6.3「last_send_ms 契约」,实现以
+  // go/shared/assetop/abandon.go 文件头为准)。不能用 updated_ms 代替:领取与本地 NOT_HERE 的重排都写 updated_ms。
+  // 维护规则(go/trade/internal/data/asset_op_repo.go):插行写 created_ms;领取的 CAS 先把旧租约折进来;
+  // 重排只在确实发过请求(非本地 NOT_HERE)时推进;毒行推迟与归还租约不动它。
+  // 存量行(加列前插入)是 0,由领取时懒初始化为 GREATEST(created_ms, updated_ms),不做单独回填。
+  uint64 last_send_ms = 24;
+  // SQL提交托管快照后才允许ACK；清理必须等业务消费和ACK均完成。
+  bytes escrow_snapshot = 25;
+  bool receipt_ack_pending = 26;
+  bool business_consumed = 27;
+}
+
+// 所有交易类型共用资产托管状态机；这张表只保存合同、托管证据与待办，绝不保存玩家余额。
+// request_key = 可信入口域 + ':' + 请求主体 + ':' + 客户端幂等号，长度上限191且逐字节比较。
+message TradeCommerceRecord {
+  option(OptionTableName) = "trade_commerce";
+  option(OptionPrimaryKey) = "commerce_id";
+  option(OptionUniqueKey) = "request_key";
+  option(OptionIndex) = "status,updated_ms; seller_player_id,commerce_id;buyer_player_id,commerce_id;kind,market_id,item_config_id,side,status,unit_price,commerce_id;kind,status,expires_ms;parent_id,status;counterparty_id,status";
+  option(OptionTiDBNonclusteredPK) = true;
+  option(OptionTiDBShardRowIDBits) = 4;
+  option(OptionTiDBPreSplitRegions) = 4;
+  uint64 commerce_id = 1;
+  string request_key = 2;
+  bytes request_digest = 3;
+  uint32 kind = 4;
+  uint32 status = 5;
+  uint64 seller_player_id = 6;
+  uint64 buyer_player_id = 7;
+  uint32 market_id = 8;
+  uint32 item_config_id = 9;
+  uint32 side = 10;
+  uint64 unit_price = 11;
+  uint32 quantity = 12;
+  uint32 filled_quantity = 13;
+  uint32 currency_type = 14;
+  uint64 expires_ms = 15;
+  uint64 created_ms = 16;
+  uint64 updated_ms = 17;
+  uint64 version = 18;
+  bytes workflow_proto = 19;
+  uint64 parent_id = 20;
+  uint64 counterparty_id = 21;
+}
+
+// 仅供同一业务SQL事务内锁定市场/竞拍序列；不存在Redis裁决或跨库事务。
+message TradeCommerceGuardRecord {
+  option(OptionTableName) = "trade_commerce_guard";
+  option(OptionPrimaryKey) = "guard_id";
+  uint64 guard_id = 1;
+}
+
+// 非表消息是持久化合同的一部分，各语言直接用生成类型，不另建平行DTO。
+message TradeCommerceWorkflow {
+  TradeAssetSelection seller_assets = 1;
+  TradeAssetSelection buyer_assets = 2;
+  bool seller_confirmed = 3;
+  bool buyer_confirmed = 4;
+  bool cancel_requested = 5;
+  repeated TradeCommerceLeg legs = 6;
+  string stage = 7;
+  uint64 minimum_increment = 8;
+  uint64 highest_bid = 9;
+  uint64 highest_bidder = 10;
+  uint64 winning_bid_id = 11;
+  uint64 parent_id = 12;
+  uint64 quantity_reserved = 13;
+  string external_order_sn = 14;
+  uint64 sku_id = 15;
+  uint32 sku_quantity = 16;
+  // 已验证的官方SKU只能由受信服务配置产生，不接受玩家提交此bundle。
+  AssetBundle official_bundle = 17;
+  string external_currency = 18;
+  uint64 external_amount = 19;
+}
+
+message TradeCommerceLeg {
+  string role = 1;
+  uint64 player_id = 2;
+  uint32 stream = 3;
+  AssetBundle bundle = 4;
+  uint64 op_id = 5;
+  AssetSnapshot snapshot = 6;
+  uint32 outcome = 7;
 }
 
 // outbox 行做的是哪一步。与 stream 不是一回事:同为 TRADE_CREDIT 流,交付买家与退回卖家
@@ -167,6 +256,10 @@ enum TradeAssetOpStatus {
   TRADE_ASSET_OP_STATUS_REJECTED = 3;         // scene 判拒(终局)
   TRADE_ASSET_OP_STATUS_ABORTED = 4;          // 中止占位(AssetAbortDebit 回 REJECTED 且 reason=0)
   TRADE_ASSET_OP_STATUS_APPLIED_PARTIAL = 5;  // 部分发放:不入账、不退款,转人工补偿(§4.33)
+  // 自动放弃(docs/design/landing-recovery-sync-digest.md §6.3):PENDING 超过 AbandonAfterDays、玩家无位置、
+  // 距最后一次可能的发送超过安全间隔、已落盘账本确认 scene 从未见过这个 seq。只能由 Abandoner.Abandon 写入。
+  // 对侧账尚未实现(P3,见 AssetOpRepo.Abandon 的 TODO),v1 只终结并留痕。库内状态,不是客户端契约。
+  TRADE_ASSET_OP_STATUS_ABANDONED = 6;
 }
 
 // ref_id 指向哪张表。

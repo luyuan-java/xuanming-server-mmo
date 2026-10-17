@@ -95,10 +95,9 @@ public final class AssetOpService {
                     Map.of(3, AssetAudit.Reason.AUCTION_SELL)),
             AssetStream.ASSET_STREAM_TRADE_CREDIT, new StreamRule(Direction.CREDIT,
                     Map.of(4, AssetAudit.Reason.AUCTION_BUY, 1, AssetAudit.Reason.TRADE)),
-            // 预留：没有合法调用方（验签一律拒）
+            // 邮件独占；GM 与榜奖必须通过邮件附件，不允许借此直发。
             AssetStream.ASSET_STREAM_SYSTEM_CREDIT, new StreamRule(Direction.CREDIT,
-                    Map.of(8, AssetAudit.Reason.SYSTEM_GRANT, 2, AssetAudit.Reason.MAIL_ATTACHMENT,
-                            9, AssetAudit.Reason.GM_GRANT)));
+                    Map.of(2, AssetAudit.Reason.MAIL_ATTACHMENT)));
 
     private final SceneWorld world;
     private final CurrencyService currency;
@@ -106,6 +105,7 @@ public final class AssetOpService {
     private final AssetOpAuth auth;
     private final SceneClock clock;
     private final SceneMetrics metrics;
+    private final java.util.function.LongSupplier petCapacity;
 
     /** 不出指标（测试用）。 */
     public AssetOpService(SceneWorld world, CurrencyService currency, BagService bags, AssetOpAuth auth,
@@ -115,12 +115,18 @@ public final class AssetOpService {
 
     public AssetOpService(SceneWorld world, CurrencyService currency, BagService bags, AssetOpAuth auth,
                           SceneClock clock, SceneMetrics metrics) {
+        this(world, currency, bags, auth, clock, metrics, () -> 1);
+    }
+
+    public AssetOpService(SceneWorld world, CurrencyService currency, BagService bags, AssetOpAuth auth,
+                          SceneClock clock, SceneMetrics metrics, java.util.function.LongSupplier petCapacity) {
         this.world = world;
         this.currency = currency;
         this.bags = bags;
         this.auth = auth;
         this.clock = clock;
         this.metrics = metrics;
+        this.petCapacity = petCapacity;
     }
 
     /** 进场景前（{@code PlayerInitializer}）：账本加载时判了损坏就大声报一次（该玩家的资产通道随之关闭，原数据不改写）。 */
@@ -147,6 +153,7 @@ public final class AssetOpService {
 
     private AssetOpResponse decide(AssetRpc rpc, AssetOpRequest request) {
         boolean abort = rpc == AssetRpc.ABORT_DEBIT;
+        boolean ack = rpc == AssetRpc.ACK_RECEIPT;
         // 1. 信封（不记账）
         if (request.getPlayerId() == 0 || request.getSeq() == 0 || request.getStreamEpoch() == 0) {
             log.warn("[AssetOp] 信封非法 rpc={} player={} seq={} epoch={}", rpc.wireName(),
@@ -160,7 +167,7 @@ public final class AssetOpService {
             return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, INVALID_BUNDLE);
         }
         // 中止收全部流（它只是给未见 seq 记一个拒绝占位），也不校验流水原因
-        if (!abort) {
+        if (!abort && !ack) {
             Direction wanted = rpc == AssetRpc.DEBIT ? Direction.DEBIT : Direction.CREDIT;
             if (rule.direction() != wanted || !rule.allowedTx().containsKey(request.getTxType())) {
                 log.warn("[AssetOp] 流方向或流水原因白名单不符 rpc={} stream={} tx_type={}", rpc.wireName(),
@@ -174,6 +181,10 @@ public final class AssetOpService {
         if (verdict != AssetOpAuth.Verdict.OK) {
             log.warn("[AssetOp] 验签失败 rpc={} verdict={} caller={} stream={} seq={}", rpc.wireName(), verdict,
                     request.getAuth().getCaller(), request.getStreamValue(), Long.toUnsignedString(request.getSeq()));
+            return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, AUTH_FAILED);
+        }
+        if (ack && (!com.game.api.asset.AssetOpSignatures.CALLER_TRADE.equals(request.getAuth().getCaller())
+                || request.getStream() != AssetStream.ASSET_STREAM_TRADE_DEBIT)) {
             return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, AUTH_FAILED);
         }
         // 2. 找人（不记账）
@@ -191,6 +202,7 @@ public final class AssetOpService {
         // 4. 分类
         int stream = request.getStreamValue();
         AssetSeqState state = ledger.classify(stream, request.getStreamEpoch(), request.getSeq());
+        if (ack) return ackReceipt(player, request, state, nowMs);
         switch (state) {
             case INVALID -> {
                 return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, INVALID_BUNDLE);
@@ -240,6 +252,11 @@ public final class AssetOpService {
         }
         // 8. 包内容（确定性失败 → 记 REJECTED，免得调用方无限重投同一个坏包）
         String why = rpc == AssetRpc.DEBIT ? validateDebit(request.getBundle()) : validateCredit(request.getBundle());
+        boolean trade = request.getStream() == AssetStream.ASSET_STREAM_TRADE_DEBIT
+                || request.getStream() == AssetStream.ASSET_STREAM_TRADE_CREDIT;
+        if (!trade && (hasInstanceFields(request.getBundle()) || rpc == AssetRpc.DEBIT && request.getBundle().getItemsCount() > 0)) {
+            why = "当前调用方无权转移实例";
+        }
         if (why != null) {
             log.warn("[AssetOp] 包内容非法 rpc={} player={} seq={} why={}", rpc.wireName(),
                     Long.toUnsignedString(request.getPlayerId()), Long.toUnsignedString(request.getSeq()), why);
@@ -263,29 +280,27 @@ public final class AssetOpService {
     }
 
     private static boolean hasInstanceFields(AssetBundle bundle) {
-        return bundle.getItemUuidsCount() > 0 || bundle.getPetId() != 0;
+        return bundle.getItemUuidsCount() > 0 || bundle.getPetId() != 0
+                || bundle.getItemInstancesCount() > 0 || bundle.hasPetInstance();
     }
 
     /** 扣款包：恰好 1 条货币、0 件物品；按实例扣（交易二期）尚未支持，记账拒绝。返回 null = 合法。 */
     static String validateDebit(AssetBundle bundle) {
-        if (hasInstanceFields(bundle)) {
-            return "debit 不支持按实例扣物 / 扣宝宝（item_uuids / pet_id）";
-        }
-        if (bundle.getCurrenciesCount() != 1 || bundle.getItemsCount() != 0) {
-            return "debit 只收恰好 1 条货币、0 件物品";
-        }
-        if (!currencyValid(bundle.getCurrencies(0))) {
-            return "debit 货币类型或数额越界";
-        }
+        if (bundle.getItemInstancesCount() > 0 || bundle.hasPetInstance()) return "扣出不能由调用方提供实例快照";
+        if (bundle.getCurrenciesCount() > 1 || bundle.getItemsCount() > 16 || bundle.getItemUuidsCount() > 8
+                || bundle.getCurrenciesCount() + bundle.getItemsCount() + bundle.getItemUuidsCount() == 0 && bundle.getPetId() == 0) return "扣出包为空或超上限";
+        if (bundle.getCurrenciesCount() == 1 && !currencyValid(bundle.getCurrencies(0))) return "debit 货币类型或数额越界";
+        var configs = new java.util.HashSet<Integer>();
+        for (var item : bundle.getItemsList()) if (item.getCount() == 0 || !configs.add(item.getConfigId())) return "扣出数量非法或配置重复";
+        var ids = new java.util.HashSet<Long>();
+        for (long id : bundle.getItemUuidsList()) if (id == 0 || !ids.add(id)) return "扣出实例身份非法或重复";
         return null;
     }
 
     /** 发放包：非空、货币 ≤ 4、物品 ≤ 16、无重复、物品在表里、数量 ≥ 1。返回 null = 合法。 */
     String validateCredit(AssetBundle bundle) {
-        if (hasInstanceFields(bundle)) {
-            return "credit 不支持按实例发物 / 发宝宝（item_uuids / pet_id）";
-        }
-        if (bundle.getCurrenciesCount() + bundle.getItemsCount() < 1) {
+        if (validateInstances(bundle) != null) return validateInstances(bundle);
+        if (bundle.getCurrenciesCount() + bundle.getItemsCount() + bundle.getItemInstancesCount() < 1 && !bundle.hasPetInstance()) {
             return "credit 包为空";
         }
         if (bundle.getCurrenciesCount() > MAX_CREDIT_CURRENCIES || bundle.getItemsCount() > MAX_CREDIT_ITEMS) {
@@ -315,10 +330,39 @@ public final class AssetOpService {
         return null;
     }
 
+    private static String validateInstances(AssetBundle bundle) {
+        if (bundle.getItemInstancesCount() > 8 || bundle.getItemUuidsCount() != bundle.getItemInstancesCount()) return "完整实例与身份数量不符";
+        var complete = com.game.api.proto.AssetSnapshot.newBuilder().addAllItems(bundle.getItemInstancesList());
+        if (bundle.hasPetInstance()) complete.setPet(bundle.getPetInstance());
+        if (complete.build().getSerializedSize() > 64 * 1024) return "完整实例快照超过64KiB";
+        var ids = new java.util.HashSet<Long>();
+        for (int i = 0; i < bundle.getItemInstancesCount(); i++) {
+            var item = bundle.getItemInstances(i);
+            if (item.getItemUuid() == 0 || item.getItemUuid() != bundle.getItemUuids(i) || !ids.add(item.getItemUuid())
+                    || item.getStackSize() != 1 || item.getInstanceProto().isEmpty() || item.getInstanceProto().size() > 16 * 1024) return "完整物品实例非法";
+            try {
+                var raw = com.game.player.store.state.BagItemState.parseFrom(item.getInstanceProto());
+                if (raw.getItemUuid() != item.getItemUuid() || raw.getConfigId() != item.getConfigId() || raw.getStackSize() != 1) return "完整物品与身份字段不符";
+            } catch (com.google.protobuf.InvalidProtocolBufferException error) { return "完整物品字节损坏"; }
+        }
+        if (bundle.hasPetInstance()) {
+            var pet = bundle.getPetInstance();
+            if (pet.getPetId() == 0 || pet.getPetId() != bundle.getPetId() || pet.getInstanceProto().isEmpty()
+                    || pet.getInstanceProto().size() > 16 * 1024) return "完整宝宝实例非法";
+            try {
+                var raw = com.game.player.store.state.PetEntry.parseFrom(pet.getInstanceProto());
+                if (raw.getPetId() != pet.getPetId() || raw.getPetTableId() != pet.getPetTableId()
+                        || !raw.getName().equals(pet.getName()) || raw.getLevel() != pet.getLevel()) return "完整宝宝与身份字段不符";
+            } catch (com.google.protobuf.InvalidProtocolBufferException error) { return "完整宝宝字节损坏"; }
+        } else if (bundle.getPetId() != 0) return "缺少完整宝宝快照";
+        return null;
+    }
+
     // ------------------------------------------------------------------ 应用
 
     private AssetOpResponse applyDebit(ScenePlayer player, AssetOpRequest request, AssetAudit.Reason reason,
                                        long nowMs) {
+        if (request.getStream() == AssetStream.ASSET_STREAM_TRADE_DEBIT) return applyTradeDebit(player, request, reason, nowMs);
         AssetCurrency c = request.getBundle().getCurrencies(0);
         int type = c.getCurrencyType();
         long amount = c.getAmount();
@@ -344,6 +388,50 @@ public final class AssetOpService {
         return applied(player, request, false, nowMs);
     }
 
+    private AssetOpResponse applyTradeDebit(ScenePlayer player, AssetOpRequest request, AssetAudit.Reason reason, long nowMs) {
+        if (request.getCorrelationId() == 0) return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);
+        var bundle = request.getBundle();
+        var counts = new java.util.TreeMap<Integer, Long>(Integer::compareUnsigned);
+        for (var item : bundle.getItemsList()) counts.put(item.getConfigId(), Integer.toUnsignedLong(item.getCount()));
+        var prepared = bags.prepareDebit(player, counts, bundle.getItemUuidsList());
+        if (prepared.tip() != 0) return rejectAndRecord(player, request, prepared.tip(), nowMs);
+        var snapshot = com.game.api.proto.AssetSnapshot.newBuilder();
+        for (var item : prepared.instances()) {
+            if (item.getSerializedSize() > 16 * 1024) return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);
+            snapshot.addItems(com.game.api.proto.AssetItemInstance.newBuilder().setItemUuid(item.getItemUuid())
+                    .setConfigId(item.getConfigId()).setStackSize(item.getStackSize()).setInstanceProto(item.toByteString()));
+        }
+        var pets = com.game.scene.player.PlayerPets.restore(player.pets().toState());
+        if (bundle.getPetId() != 0) {
+            var pet = player.pets().toState().getPetsList().stream().filter(entry -> entry.getPetId() == bundle.getPetId()).findFirst().orElse(null);
+            if (pet == null || player.pets().activePetId() == bundle.getPetId() || pet.getSerializedSize() > 16 * 1024) {
+                return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);
+            }
+            snapshot.setPet(com.game.api.proto.AssetPetInstance.newBuilder().setPetId(pet.getPetId()).setPetTableId(pet.getPetTableId())
+                    .setName(pet.getName()).setLevel(pet.getLevel()).setInstanceProto(pet.toByteString()));
+            pets.takeTransferred(pet.getPetId());
+        }
+        if (bundle.getCurrenciesCount() > 0) {
+            var amount = bundle.getCurrencies(0);
+            if (player.wallet().balance(amount.getCurrencyType()) < amount.getAmount()) return rejectAndRecord(player, request, CURRENCY_INSUFFICIENT, nowMs);
+            snapshot.setCurrency(amount);
+        }
+        var receipt = com.game.player.store.state.AssetOpReceiptState.newBuilder().setSeq(request.getSeq())
+                .setRequestDigest(com.game.api.asset.AssetOpSignatures.requestDigest(request)).setSnapshotProto(snapshot.build().toByteString())
+                .setCorrelationId(request.getCorrelationId()).build();
+        if (!player.assetLedger().canKeepReceipt(receipt)) return answer(AssetOutcome.ASSET_OUTCOME_RETRY, BLOCKED);
+        if (bundle.getCurrenciesCount() > 0) {
+            var amount = bundle.getCurrencies(0);
+            var change = currency.deduct(player, amount.getCurrencyType(), amount.getAmount(), reason, request.getCorrelationId());
+            if (!change.ok()) return answer(AssetOutcome.ASSET_OUTCOME_RETRY, change.tipId());
+        }
+        player.pets().commitPrepared(pets);
+        prepared.commit(reason, request.getCorrelationId());
+        if (!record(player, request, RecordKind.APPLIED, 0)) throw new IllegalStateException("托管效果已应用但记账失败");
+        player.assetLedger().keepReceipt(request.getStreamValue(), request.getStreamEpoch(), receipt);
+        return applied(player, request, false, nowMs).toBuilder().setSnapshot(snapshot).build();
+    }
+
     /**
      * 发放（同基线 ApplyCredit 的顺序）：货币预检（封禁 → 终局拒绝；净入账溢出 → 终局拒绝 27004，基线没有这一条）→ 物品（整批原子）→ 货币 → 结局。
      * 先物品后货币：只有物品会暂时失败（背包满），先做它就不会留下半截。已有改动后又失败记部分发放（APPLIED + partial）。
@@ -353,6 +441,21 @@ public final class AssetOpService {
         // 欠款到期按同一时刻判，预检的结论才对后面的加币成立
         long nowSeconds = nowMs / 1000;
         AssetBundle bundle = request.getBundle();
+        java.util.List<com.game.player.store.state.BagItemState> transferredItems = new java.util.ArrayList<>();
+        var transferredPets = com.game.scene.player.PlayerPets.restore(player.pets().toState());
+        if (hasInstanceFields(bundle)) {
+            try {
+                for (var instance : bundle.getItemInstancesList()) transferredItems.add(com.game.player.store.state.BagItemState.parseFrom(instance.getInstanceProto()));
+                if (bundle.hasPetInstance()) {
+                    if (transferredPets.size() >= petCapacity.getAsLong() || transferredPets.find(bundle.getPetId()) != null) {
+                        return answer(AssetOutcome.ASSET_OUTCOME_RETRY, com.game.table.PetErrorTip.pet_error.kPetSlotFull_VALUE);
+                    }
+                    transferredPets.putTransferred(com.game.player.store.state.PetEntry.parseFrom(bundle.getPetInstance().getInstanceProto()));
+                }
+            } catch (com.google.protobuf.InvalidProtocolBufferException | IllegalArgumentException error) {
+                return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);
+            }
+        }
         // (a) 货币预检：封禁与溢出都必须在任何改动之前判掉
         for (AssetCurrency c : bundle.getCurrenciesList()) {
             int tip = currency.checkAdd(player, c.getCurrencyType(), c.getAmount(), nowSeconds);
@@ -372,15 +475,19 @@ public final class AssetOpService {
         }
         boolean anyMutated = false;
         // (b) 物品：Java 的批量入包先规划后写入，要么全写要么一点不动
-        if (bundle.getItemsCount() > 0) {
+        if (bundle.getItemsCount() > 0 || hasInstanceFields(bundle)) {
             Map<Integer, Long> counts = new LinkedHashMap<>();
             for (AssetItem item : bundle.getItemsList()) {
                 counts.put(item.getConfigId(), Integer.toUnsignedLong(item.getCount()));
             }
-            Bag.AddResult result = bags.addItems(player, BagType.INVENTORY, counts, reason, request.getCorrelationId(),
-                    "");
-            if (!result.ok()) {
-                return itemsFailed(player, request, result.tip(), nowMs);
+            if (hasInstanceFields(bundle)) {
+                var prepared = bags.prepareCredit(player, counts, transferredItems);
+                if (prepared.tip() != 0) return itemsFailed(player, request, prepared.tip(), nowMs);
+                player.pets().commitPrepared(transferredPets);
+                prepared.commit(reason, request.getCorrelationId());
+            } else {
+                Bag.AddResult result = bags.addItems(player, BagType.INVENTORY, counts, reason, request.getCorrelationId(), "");
+                if (!result.ok()) return itemsFailed(player, request, result.tip(), nowMs);
             }
             anyMutated = true;
         }
@@ -483,6 +590,14 @@ public final class AssetOpService {
         AssetOpLedger ledger = player.assetLedger();
         int stream = request.getStreamValue();
         AssetOpResponse.Builder response = AssetOpResponse.newBuilder();
+        var receipt = ledger.receipt(stream, request.getStreamEpoch(), request.getSeq());
+        if (receipt != null) {
+            if (!receipt.getRequestDigest().equals(com.game.api.asset.AssetOpSignatures.requestDigest(request))) {
+                return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, INVALID_BUNDLE);
+            }
+            try { response.setSnapshot(com.game.api.proto.AssetSnapshot.parseFrom(receipt.getSnapshotProto())); }
+            catch (com.google.protobuf.InvalidProtocolBufferException error) { return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, INVALID_BUNDLE); }
+        }
         if (applied) {
             response.setOutcome(AssetOutcome.ASSET_OUTCOME_APPLIED);
             if (ledger.isPartial(stream, request.getSeq())) {
@@ -502,6 +617,23 @@ public final class AssetOpService {
             }
         }
         return response.setDurable(durable).build();
+    }
+
+    private AssetOpResponse ackReceipt(ScenePlayer player, AssetOpRequest request, AssetSeqState state, long nowMs) {
+        if (state != AssetSeqState.APPLIED || !fenced(player) || player.frozen()) {
+            return answer(AssetOutcome.ASSET_OUTCOME_RETRY, FROZEN);
+        }
+        var receipt = player.assetLedger().receipt(request.getStreamValue(), request.getStreamEpoch(), request.getSeq());
+        if (receipt != null && receipt.getCorrelationId() != request.getCorrelationId()) return answer(AssetOutcome.ASSET_OUTCOME_UNKNOWN, INVALID_BUNDLE);
+        player.assetLedger().ackReceipt(request.getStreamValue(), request.getStreamEpoch(), request.getSeq(), request.getCorrelationId());
+        world.requestSave(player);
+        boolean durable = durable(player, request, true);
+        if (durable) {
+            var stored = player.persistedState().getAssetLedger().getStreamsList().stream()
+                    .filter(stream -> stream.getStream() == request.getStreamValue()).findFirst().orElseThrow();
+            durable = stored.getReceiptsList().stream().noneMatch(saved -> saved.getSeq() == request.getSeq());
+        }
+        return AssetOpResponse.newBuilder().setOutcome(AssetOutcome.ASSET_OUTCOME_APPLIED).setDurable(durable).build();
     }
 
     /** 记账之后统一走这里：立刻请求存盘，如实回报 durable，不在调用里等落盘。 */
@@ -542,6 +674,11 @@ public final class AssetOpService {
                     Long.toUnsignedString(request.getPlayerId()), stream, Long.toUnsignedString(request.getStreamEpoch()),
                     Long.toUnsignedString(request.getSeq()), state, expectApplied);
             return false;
+        }
+        var receipt = player.assetLedger().receipt(stream, request.getStreamEpoch(), request.getSeq());
+        if (receipt != null) {
+            var stored = persisted.getAssetLedger().getStreamsList().stream().filter(entry -> entry.getStream() == stream).findFirst().orElse(null);
+            if (stored == null || stored.getReceiptsList().stream().noneMatch(receipt::equals)) return false;
         }
         return true;
     }

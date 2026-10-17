@@ -120,6 +120,7 @@ battle-smoke ×2、attribute / pet / chat / guild(+economy) / trade / team / tra
 - tables: 无
 - depends on: data_service 快照 / 回档、交易流水
 - behavior: 客户端不可见；节点路由（SceneHandler::InvokePlayerService）可达，handler 首句都是 GM 闸
+  （2026-10-16 补：`InvokePlayerService` 已于 mmorpg RpcChannel 批 7 从 proto 删除，节点路由入口不复存在，GM 闸保留作纵深防御。）
 - internal: GM 工具 → scene 节点路由 → DataService
 - java: not_applicable — Java gate 白名单只收 `clientService()` 方法（`MessageRoutes.of`），这些号到不了 scene；GM / 回档体系 Java 尚无（architecture.md §10「GM / 管理接口」首批不做）
 - size: L（若做 GM 回档；与 data_service 快照一起另立）

@@ -74,6 +74,26 @@ public final class Bag {
         return byGuid.get(guid);
     }
 
+    /** 托管已预检的非叠加实例；调用者在候选背包上操作，统一提交后才对玩家可见。 */
+    public void takeInstance(long guid) {
+        BagItem item = byGuid.get(guid);
+        if (item == null || item.size() != 1) throw new IllegalArgumentException("待托管实例不存在或数量非法");
+        remove(item);
+    }
+
+    /** 恢复既有实例，保留unknown字段；目标布局/入包序重新分配，绝不按模板重铸。 */
+    public int putInstance(com.game.player.store.state.BagItemState source, ItemCatalog catalog) {
+        var spec = catalog.item(source.getConfigId());
+        if (source.getItemUuid() == 0 || source.getItemUuid() == -1L || source.getStackSize() != 1
+                || spec == null || spec.maxStackSize() != 1 || byGuid.containsKey(source.getItemUuid()) || nextAcquireSeq == 0) {
+            return INVALID_PARAM;
+        }
+        int slot = slotForNew(spec, catalog);
+        if (slot < 0) return NO_SPACE;
+        place(new BagItem(source.getItemUuid(), source.getConfigId(), 1, nextAcquireSeq++, source.getUnknownFields()), slot);
+        return OK;
+    }
+
     /** 全部实例，按格子号升序。 */
     public List<BagItem> items() {
         List<BagItem> out = new ArrayList<>(byGuid.size());

@@ -24,6 +24,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,6 +43,10 @@ import org.slf4j.LoggerFactory;
  * </ul>
  * 每个请求按处理器方法名与上述结果计一次耗时（{@code game.login.requests}，见 {@link LoginMetrics}）。
  * 返回的 future 永不异常完成。所有处理都在 login 工作线程池上执行，调用线程（Dubbo 线程）只负责投递。
+ *
+ * <p>受理时刻在 Dubbo 线程上、投递之前取；处理器拿到的是这条请求在工作队列里排了多久
+ * （{@link ClientMessageHandler#handle(SessionContext, Message, long)}），有请求预算的处理器据此把截止算成「受理时刻 + 预算」：
+ * gate 调 login 的超时从它发出请求就开始计，积压时排队本身就可能耗掉大半等待。
  */
 public final class ClientMessageDispatcher {
 
@@ -57,6 +62,7 @@ public final class ClientMessageDispatcher {
     private final Map<Integer, Route<?>> routes;
     private final Executor executor;
     private final LoginMetrics metrics;
+    private final LongSupplier nanoClock;
 
     /**
      * @param metrics 每个请求按处理器方法名与结果计耗时
@@ -64,6 +70,17 @@ public final class ClientMessageDispatcher {
      */
     public ClientMessageDispatcher(MessageIdRegistry registry, List<? extends ClientMessageHandler<?>> handlers,
                                    Executor executor, LoginMetrics metrics) {
+        this(registry, handlers, executor, metrics, System::nanoTime);
+    }
+
+    /**
+     * 同上；量排队时长的单调时钟可注入（测试用）。
+     *
+     * @param nanoClock 单调时钟（纳秒），只用于量受理到开始处理之间的排队时长
+     */
+    ClientMessageDispatcher(MessageIdRegistry registry, List<? extends ClientMessageHandler<?>> handlers,
+                            Executor executor, LoginMetrics metrics, LongSupplier nanoClock) {
+        this.nanoClock = nanoClock;
         this.registry = registry;
         this.executor = executor;
         this.metrics = metrics;
@@ -99,9 +116,13 @@ public final class ClientMessageDispatcher {
             return CompletableFuture.completedFuture(unsupported(call));
         }
         String method = route.handler().methodName();
+        // 受理时刻在投递之前取：排队时长要算进处理器的请求预算（见类注释）。
+        long acceptedNanos = nanoClock.getAsLong();
         CompletableFuture<Outcome> outcome;
         try {
-            outcome = CompletableFuture.supplyAsync(() -> route.invoke(call), executor).thenCompose(Function.identity());
+            outcome = CompletableFuture.supplyAsync(
+                    () -> route.invoke(call, Math.max(0, nanoClock.getAsLong() - acceptedNanos)), executor)
+                    .thenCompose(Function.identity());
         } catch (RejectedExecutionException e) {
             log.warn("login 工作队列已满，拒绝请求 message_id={} {}", messageId, describe(call.getSession()));
             metrics.requestCompleted(sample, method, RequestResult.OVERLOADED);
@@ -166,7 +187,8 @@ public final class ClientMessageDispatcher {
     /** 一个消息号的派发目标。{@code prototype} 来自契约注册表，构造时已核对其类型就是 {@code R}。 */
     private record Route<R extends Message>(ClientMessageHandler<R> handler, Message prototype) {
 
-        CompletableFuture<Outcome> invoke(ClientCall call) {
+        /** @param queuedNanos 受理到开始处理之间在工作队列里排了多久（≥ 0） */
+        CompletableFuture<Outcome> invoke(ClientCall call, long queuedNanos) {
             R request;
             try {
                 request = handler.requestType().cast(prototype.getParserForType().parseFrom(call.getBody()));
@@ -176,7 +198,7 @@ public final class ClientMessageDispatcher {
                         .setTipId(CommonErrorTip.common_error.kRequestMessageParseError_VALUE)
                         .build(), RequestResult.BAD_REQUEST));
             }
-            return handler.handle(call.getSession(), request)
+            return handler.handle(call.getSession(), request, queuedNanos)
                     .thenApply(reply -> new Outcome(toClientReply(reply), resultOf(reply)));
         }
 

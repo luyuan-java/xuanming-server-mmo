@@ -178,7 +178,7 @@ class GuildEndToEndIntegrationTest {
         PlayerProfiles profiles = wiring.playerProfiles(dataSource, props);
         GuildPushes pushes = wiring.guildPushes(playerPushes, metrics, props, REGISTRY);
         GuildTableLookup lookup = wiring.guildTableLookup(tables);
-        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator);
+        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator, metrics);
         GuildViews views = wiring.guildViews(presence, profiles, metrics, props, lookup, store);
         GuildService guilds = wiring.guildService(store, cache, access, views, ranks, pushes, ids, lookup);
         GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup,

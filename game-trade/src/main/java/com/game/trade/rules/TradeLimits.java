@@ -68,6 +68,32 @@ public final class TradeLimits {
      */
     public static final int LOCK_WAIT_TIMEOUT_SECONDS = 2;
 
+    // ---- 收藏写入的落定时限（客户端请求按会话保序；mmorpg docs/design/client-request-ordering.md §6.1） ----
+
+    /**
+     * gate 调 trade 的 Dubbo 调用超时（毫秒；game-gate {@code dubbo.consumer.timeout}）。到点 gate 就放行同一会话的下一条后端请求，
+     * 不管 trade 这边是否还在跑；gate 的值改了这里要跟着改（{@link #writeReserveMillis} 由它推出）。
+     */
+    public static final long GATE_CALL_TIMEOUT_MS = 5_000L;
+
+    /**
+     * 收藏写入必须落定（提交，或被库端以 1205 中止）的最晚时刻，相对受理时刻（毫秒）。比 gate 放行早 500 ms：受理时刻本身晚于 gate 发出
+     * （网络、Dubbo 解码与线程切换），这 500 ms 是给这段差留的余量。
+     */
+    public static final long WRITE_SETTLE_HORIZON_MS = GATE_CALL_TIMEOUT_MS - 500L;
+
+    /**
+     * 收藏写入的最晚发出时刻比请求截止提前多少（毫秒）。自动提交的写语句就是提交点，发出之后库端还可能为等行锁再跑满
+     * {@link #LOCK_WAIT_TIMEOUT_SECONDS}，所以「最晚发出 + 锁等待上限」不得晚于 {@link #WRITE_SETTLE_HORIZON_MS}。JDBC 查询超时的
+     * {@code KILL QUERY} 通常更早打断锁等待，但它要另开连接、可能发不出去，这里只按库端锁等待这条不依赖客户端的上界算。
+     * 预算 3500 ms 时为 1000 ms（受理后 2.5 s 起不再发出收藏写入，改回 in-band 1003），预算不超过 2500 ms 时为 0。读不受它约束。
+     *
+     * @param requestBudgetMillis 整请求预算（{@code game.trade.request-budget}）
+     */
+    public static long writeReserveMillis(long requestBudgetMillis) {
+        return Math.max(0, requestBudgetMillis + LOCK_WAIT_TIMEOUT_SECONDS * 1000L - WRITE_SETTLE_HORIZON_MS);
+    }
+
     private TradeLimits() {
     }
 }

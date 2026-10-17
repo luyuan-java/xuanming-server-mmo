@@ -29,6 +29,8 @@ public final class MallController {
         return store.get(subject(request), orderId);
     }
 
+    @PostMapping("/api/orders/list") public java.util.List<MallApi.Order> list(HttpServletRequest request,@RequestBody DeliveryApi.OrderPage page){return store.list(subject(request),page);}
+
     @PostMapping("/api/orders/{orderId}/cancel")
     public MallApi.Order cancel(HttpServletRequest request, @PathVariable("orderId") String orderId) {
         return store.cancel(subject(request), orderId);

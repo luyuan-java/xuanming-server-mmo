@@ -190,13 +190,14 @@ class MallTiDbIntegrationTest {
                 var paid = workers.submit(() -> compete(start, () -> first.recordTrustedPayment(payment(order, transaction))));
                 var cancelled = workers.submit(() -> compete(start, () -> second.cancel(buyer, order.orderId())));
                 start.countDown();
-                assertThat(paid.get(15, TimeUnit.SECONDS) ^ cancelled.get(15, TimeUnit.SECONDS)).isTrue();
+                assertThat(paid.get(15, TimeUnit.SECONDS)).isTrue();
+                boolean cancelledFirst=cancelled.get(15,TimeUnit.SECONDS);
                 MallApi.Order actual = first.get(buyer, order.orderId());
                 int rows = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt WHERE order_sn=?", Integer.class, order.orderId());
-                assertThat(rows).isEqualTo(actual.state().equals("DELIVERY_PENDING") ? 1 : 0);
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_intent WHERE order_sn=?", Integer.class, order.orderId())).isEqualTo(rows);
-                if (rows == 1) assertThat(second.recordTrustedPayment(payment(order, transaction))).isEqualTo(actual);
-                else assertThat(second.cancel(buyer, order.orderId())).isEqualTo(actual);
+                assertThat(rows).isEqualTo(1);
+                assertThat(actual.state()).isEqualTo(cancelledFirst?"REFUND_PENDING":"DELIVERY_PENDING");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_intent WHERE order_sn=?", Integer.class, order.orderId())).isEqualTo(cancelledFirst?0:1);
+                assertThat(second.recordTrustedPayment(payment(order, transaction))).isEqualTo(actual);
             }
         }
         assertThat(stock(102, "lock_stock")).isZero();
@@ -223,7 +224,22 @@ class MallTiDbIntegrationTest {
         assertThatThrownBy(() -> otherNonce.claim("gateway", UUID.randomUUID().toString(), now + 600_000)).isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(401));
     }
 
-    private static void sku(long id, int stock) { jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (?,?,?,1250,'CNY',?,0,1)", id, id, "tidb-" + id, stock); }
+    @Test
+    void 交付意图冻结原SKU_可信持久回执可跨实例恢复_拒绝到账才走渠道退款() {
+        sku(501,10);jdbc.update("UPDATE commerce_sku_grant SET count_per_unit=2 WHERE sku_id=501");
+        var order=first.create("501",new MallApi.CreateOrder("delivery-tidb-001",501,2));
+        jdbc.update("UPDATE commerce_sku_grant SET count_per_unit=9,item_config_id=99 WHERE sku_id=501");
+        first.recordTrustedPayment(payment(order,"delivery-tidb-pay"));
+        var one=new DeliveryStore(jdbc,new DataSourceTransactionManager(pool));var two=new DeliveryStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool));
+        var intent=one.poll(100).stream().filter(v->v.orderId().equals(order.orderId())).findFirst().orElseThrow();assertThat(intent.itemConfigId()).isEqualTo(10);assertThat(intent.itemCount()).isEqualTo(4);
+        var receipt=new DeliveryApi.Receipt(order.orderId(),"9001","DELIVERED","a".repeat(64));one.receipt(receipt);two.receipt(receipt);assertThat(second.get("501",order.orderId()).state()).isEqualTo("DELIVERED");
+        assertThatThrownBy(()->two.receipt(new DeliveryApi.Receipt(order.orderId(),"9002","DELIVERED","a".repeat(64)))).isInstanceOf(MallException.class);
+        var refund=first.create("502",new MallApi.CreateOrder("delivery-tidb-002",501,1));first.recordTrustedPayment(payment(refund,"refund-tidb-pay"));one.receipt(new DeliveryApi.Receipt(refund.orderId(),"9003","REFUND_PENDING","b".repeat(64)));
+        assertThatThrownBy(()->two.refunded(new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",1,"CNY"))).isInstanceOf(MallException.class);
+        var channel=new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",refund.amountMinor(),refund.currency());one.refunded(channel);two.refunded(channel);assertThat(second.get("502",refund.orderId()).state()).isEqualTo("REFUNDED");
+    }
+
+    private static void sku(long id, int stock) { jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (?,?,?,1250,'CNY',?,0,1)", id, id, "tidb-" + id, stock);jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(?,10,1,'玄铁')",id); }
     private static int stock(long id, String column) { return jdbc.queryForObject("SELECT " + column + " FROM pms_sku_stock WHERE id=?", Integer.class, id); }
     private static MallApi.Payment payment(MallApi.Order order, String transaction) { return new MallApi.Payment(order.orderId(), "test-channel", transaction, order.amountMinor(), order.currency()); }
     private static boolean compete(CountDownLatch start, Runnable operation) throws Exception {

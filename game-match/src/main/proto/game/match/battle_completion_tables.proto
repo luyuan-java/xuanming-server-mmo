@@ -1,0 +1,30 @@
+// Java 内部的战斗完成来源归档；不与玩家账本或 C++/Go 数据库混用。
+syntax = "proto3";
+package game.match;
+import "proto2mysql/proto2mysql_option.proto";
+option java_package = "com.game.match.completion.pb";
+option java_multiple_files = true;
+option (proto2mysql.db) = true;
+
+message BattleCompletionRow {
+  option (proto2mysql.table_name) = "match_battle_completion";
+  option (proto2mysql.primary_key) = "battle_id";
+  uint64 battle_id = 1;
+  uint32 format_version = 2;
+  bytes original = 3;
+  bytes original_digest = 4;
+  string source_topic = 5;
+  uint32 source_partition = 6;
+  uint64 source_offset = 7;
+  uint32 player_count = 8;
+}
+
+// 仅归档，不注册补发、销账或自动应用任务；旧 R07 仍是唯一应用来源。
+message BattlePlayerCompletionRow {
+  option (proto2mysql.table_name) = "match_battle_player_completion";
+  option (proto2mysql.primary_key) = "battle_id,player_id";
+  uint64 battle_id = 1;
+  uint64 player_id = 2;
+  bytes original = 3;
+  bytes original_digest = 4;
+}

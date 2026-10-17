@@ -1,6 +1,8 @@
 package com.game.match.spectate;
 
 import com.game.discovery.RedisKeys;
+import com.game.discovery.RedisProperties;
+import com.game.match.port.RedisClientWrites;
 import org.redisson.api.RedissonClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,9 +18,12 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class SpectateStoreConfiguration {
 
-    /** 观战存储。索引键恒为注入的 {@code redisKeys.matchWatchable()}。 */
+    /**
+     * 观战存储。索引键恒为注入的 {@code redisKeys.matchWatchable()}；抢标记（163 的提交点）的 Redisson 超时以配置的
+     * {@code game.redis.timeout-ms} 封顶（{@link RedisClientWrites}）。
+     */
     @Bean
-    public SpectateStore spectateStore(RedissonClient redis, RedisKeys redisKeys) {
-        return new RedissonSpectateStore(redis, redisKeys);
+    public SpectateStore spectateStore(RedissonClient redis, RedisKeys redisKeys, RedisProperties redisProperties) {
+        return new RedissonSpectateStore(redis, redisKeys, RedisClientWrites.commandTimeout(redisProperties));
     }
 }

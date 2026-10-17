@@ -116,6 +116,7 @@ class AssetOpLoopTest {
     void 过了截止改发Abort_回占位拒绝终结为ABORTED() {
         AssetOp op = claimOne(InMemoryAssetStore.pending(1, 11, 1, GOLD).setDeadlineMs(NOW - 1).build());
         reply(AssetOutcome.ASSET_OUTCOME_REJECTED, true, 0);
+        ledgerRead = ledgerWith(1_700_000_000_000L, 0, 1, 0, false);
         Processed p = loop().processClaimed(op);
         assertThat(rpcs).containsExactly(AssetRpc.ABORT_DEBIT);
         assertThat(p.finalized()).isTrue();
@@ -231,6 +232,7 @@ class AssetOpLoopTest {
         op = loop().claim(1).orElse(op);
         deliveries.clear();
         reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, 0);
+        ledgerRead = ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false);
         Processed p = loop().processClaimed(op);
         assertThat(p.status()).isEqualTo(AssetOpStatus.APPLIED_PARTIAL);
         assertThat(store.row(1).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED_PARTIAL);
@@ -252,6 +254,7 @@ class AssetOpLoopTest {
     void 落库失败计store_errors_行留在PENDING() {
         AssetOp op = claimOne(InMemoryAssetStore.pending(1, 11, 1, GOLD).build());
         reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, 0);
+        ledgerRead = ledgerWith(1_700_000_000_000L, 1, 0, 0, false);
         store.failure = new Deadline.DependencyException("mysql down");
         Processed p = loop().processClaimed(op);
         assertThat(p.finalized()).isFalse();
@@ -262,9 +265,13 @@ class AssetOpLoopTest {
     // ================================================================ 离线读已落盘账本（E8）
 
     private static Read ledgerWith(long epoch, long appliedSeq, long rejectedSeq, int reason, boolean partial) {
+        return ledgerWith(1, epoch, appliedSeq, rejectedSeq, reason, partial);
+    }
+
+    private static Read ledgerWith(int stream, long epoch, long appliedSeq, long rejectedSeq, int reason, boolean partial) {
         long[] seen = new long[16];
         long[] applied = new long[16];
-        AssetOpStreamLedgerState.Builder s = AssetOpStreamLedgerState.newBuilder().setStream(1).setWatermark(0)
+        AssetOpStreamLedgerState.Builder s = AssetOpStreamLedgerState.newBuilder().setStream(stream).setWatermark(0)
                 .setStreamEpoch(epoch).setMaxSeq(Math.max(appliedSeq, rejectedSeq));
         if (appliedSeq > 0) {
             seen[0] |= 1L << (appliedSeq - 1);
@@ -284,6 +291,87 @@ class AssetOpLoopTest {
             s.addAppliedBits(applied[i]);
         }
         return new Read.Loaded(PersistedAssetLedger.restore(AssetOpLedgerState.newBuilder().addStreams(s).build()));
+    }
+
+    @Test
+    void 在线声称durable但SQL没有证据不得终结() {
+        AssetOp op=claimOne(InMemoryAssetStore.pending(81,11,1,GOLD).build());
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED,true,0);
+        ledgerRead=new Read.Absent();
+        assertThat(loop().processClaimed(op).finalized()).isFalse();
+        assertThat(store.row(81).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING);
+        assertThat(ledgerReads).hasValue(1);
+    }
+
+    @Test
+    void 在线拒绝也须SQL确认且SQL不可读只保留原操作() {
+        reply(AssetOutcome.ASSET_OUTCOME_REJECTED,true,27000);
+        ledgerRead=new Read.Failed("SQL不可用",null);
+        AssetOp op=claimOne(InMemoryAssetStore.pending(82,11,1,GOLD).build());
+        assertThat(loop().processClaimed(op).finalized()).isFalse();
+        assertThat(store.row(82).getSeq()).isEqualTo(1);
+    }
+
+    @Test
+    void 在线结局与SQL翻转不能终结() {
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED,true,0);
+        ledgerRead=ledgerWith(1_700_000_000_000L,0,1,27000,false);
+        AssetOp op=claimOne(InMemoryAssetStore.pending(83,11,1,GOLD).build());
+        assertThat(loop().processClaimed(op).finalized()).isFalse();
+        assertThat(store.row(83).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING);
+    }
+
+    @Test
+    void SQL已确认可早于在线durable且SQL的partial不会降格() {
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED,false,0);
+        ledgerRead=ledgerWith(1_700_000_000_000L,1,0,0,true);
+        AssetOp op=claimOne(InMemoryAssetStore.pending(84,11,1,GOLD).build());
+        assertThat(loop().processClaimed(op).status()).isEqualTo(AssetOpStatus.APPLIED_PARTIAL);
+    }
+
+    @Test
+    void 在线SQL证明必须匹配原流纪元和序号() {
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, 0);
+        List<Read> mismatched = List.of(ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false),
+                ledgerWith(1_800_000_000_000L, 1, 0, 0, false), ledgerWith(1_700_000_000_000L, 2, 0, 0, false));
+        long id = 85;
+        for (Read evidence : mismatched) {
+            ledgerRead = evidence;
+            AssetOp op = claimOne(InMemoryAssetStore.pending(id++, 11, 1, GOLD).build());
+            assertThat(loop().processClaimed(op).finalized()).isFalse();
+        }
+        assertThat(ledgerReads).hasValue(3);
+    }
+
+    @Test
+    void 未装SQL读端时在线durable也只能保留未决() {
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, 0);
+        AssetOp op = claimOne(InMemoryAssetStore.pending(88, 11, 1, GOLD).build());
+        var withoutSql = new AssetOpLoop(loop().config(), store, this::deliver, null, metrics, clock::get, workers,
+                Runnable::run, new Random(7), () -> 0.5);
+        assertThat(withoutSql.processClaimed(op).finalized()).isFalse();
+    }
+
+    @Test
+    void 旧服务只带partial原因码也不得降为全量终结() {
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, AssetOpDecisions.REASON_PARTIAL_APPLIED);
+        ledgerRead = ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false);
+        AssetOp op = claimOne(InMemoryAssetStore.pending(89, 11, 1, GOLD).setStream(2).build());
+        assertThat(loop().processClaimed(op).status()).isEqualTo(AssetOpStatus.APPLIED_PARTIAL);
+    }
+
+    @Test
+    void 首次partial标记在等待SQL期间持久保留重启后也不降格() {
+        reply(Delivery.answered(new AssetOpResult(AssetOutcome.ASSET_OUTCOME_APPLIED, 0, false, true, false)));
+        AssetOp op = claimOne(InMemoryAssetStore.pending(90, 11, 1, GOLD).setStream(2).build());
+        assertThat(loop().processClaimed(op).finalized()).isFalse();
+        assertThat(store.row(90).getLastReason()).isEqualTo(AssetOpDecisions.REASON_PARTIAL_APPLIED);
+        clock.addAndGet(1000);
+        ledgerRead = ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false);
+        deliveries.clear();
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, 0);
+        AssetOp recovered = loop().claim(90).orElseThrow();
+        assertThat(loop().processClaimed(recovered).status()).isEqualTo(AssetOpStatus.APPLIED_PARTIAL);
     }
 
     private AssetOp offlineOp(long opId, long seq, int attempts) {
@@ -376,6 +464,7 @@ class AssetOpLoopTest {
 
     @Test
     void Tick并发不超过workers_每行恰好处理一次() throws Exception {
+        ledgerRead = ledgerWith(1_700_000_000_000L, 1, 0, 0, false);
         for (long id = 1; id <= 20; id++) {
             store.insert(InMemoryAssetStore.pending(id, 100 + id, 1, GOLD).build());
         }
@@ -422,6 +511,7 @@ class AssetOpLoopTest {
 
     @Test
     void 同步路径_投递跑满预算后落库仍有自己的预算_终结带SYNC() throws Exception {
+        ledgerRead = ledgerWith(1_700_000_000_000L, 1, 0, 0, false);
         store.insert(InMemoryAssetStore.pending(1, 11, 1, GOLD).setLeaseToken(99).setLeaseUntilMs(NOW + 10_000).build());
         AssetOp op = new AssetOp(1, 11, 1, 1, 1_700_000_000_000L, 1, 24, GOLD, 0, NOW + 600_000, 99, 0);
         ExecutorService scene = Executors.newSingleThreadExecutor();

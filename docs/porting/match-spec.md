@@ -2395,3 +2395,12 @@ game-gateway 90、game-data 305、game-robot 408。
 
 **没有做的验证**（登记为遗留）：故障演练——停 Kafka 时 game-battle 的兜底日志与恢复、运行中重启 game-match 之后约 60 s 的重连恢复、发号租约丢失、切磋在租约无效 / 在途上限用尽时 154 的次序、刚启动完就停机；
 `battle-settle --slow` 与两个 kill -9 故障变体没有在含 game-match 的切片上重跑（6.3 收尾时跑过，6.4 没有改那条链路的服务端代码）；评审修正前的集成提交 `471243c` 上的同一套切片记录见上面的实现记录。
+
+
+## 2026-10-16 全球权威增量
+
+本批 `0.1.0-SNAPSHOT` 与 C++/Go 工作区同步：SQL 原请求历史/撤销墓碑（完整 UUID128 位整数主键）、固定物理机房与逐成员可信 RTT、区域优先/等待后跨区、全员原子占用、整队/活动/切磋稳定直接意图、精确 battle operation+instance 的创建请求与恢复、工作租约代次栅栏、RPC 前持久 scene 端点和过期备战拒绝。battle 条件撤销 `global_match_abort_if_absent` 在逻辑线程原子保留已经成功房间，确认 ABORTED 后才补偿；UNKNOWN 不伪装业务失败。源侧队伍 gather 只对 SQL 终态推最终结果。
+
+评级事务使用 native 连续 outbox 与 source 停写行锁；投榜为 RankAdminService 原生 Triple 20917/group rank，按方法签名，只有来源停止且游标到齐才允许请求封榜。客户端完整 Join/Team 原意图发包前原子落盘，取消/清除按原字符串 CAS，恢复不重新发号。
+
+对应规范与验收边界以主仓 `docs/design/cross-zone-matchmaking.md` §13 为准。本批不是旧 Redis 逻辑逐字复制：用户要求的全球权威、区域调度和未知恢复改变了存储与失败语义；旧本地兼容模式必须显式关闭全球功能，生产不允许回退。16 模块指定回归（`tests-lease-focused-6.log`）已通过：真 TiDB9/9、scene备战45/45、执行端围栏3/3；完整模块回归与最新终态补充另记。Unity匹配/Team/原子文件/Commerce文件59/59、0跳过。本机证据不能代替跨洲进程链、容量与生产灰度验收。

@@ -35,12 +35,15 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -66,6 +69,8 @@ class ClientMessageDispatcherTest {
         final Class<? extends Message> responseType;
         final Function<TipInfoMessage, Optional<Message>> failure;
         final List<R> received = new CopyOnWriteArrayList<>();
+        /** 分发器交来的排队时长（纳秒），按调用次序。 */
+        final List<Long> queued = new CopyOnWriteArrayList<>();
         Function<R, CompletableFuture<HandlerReply>> behavior = r -> CompletableFuture.completedFuture(HandlerReply.none());
 
         StubHandler(String method, Class<R> requestType, Class<? extends Message> responseType,
@@ -95,6 +100,12 @@ class ClientMessageDispatcherTest {
         public CompletableFuture<HandlerReply> handle(SessionContext session, R request) {
             received.add(request);
             return behavior.apply(request);
+        }
+
+        @Override
+        public CompletableFuture<HandlerReply> handle(SessionContext session, R request, long queuedNanos) {
+            queued.add(queuedNanos);
+            return handle(session, request);
         }
 
         @Override
@@ -164,6 +175,24 @@ class ClientMessageDispatcherTest {
         assertThat(enter.received).containsExactly(enterRequest);
         assertThat(leave.received).hasSize(1);
         assertThat(disconnect.received).hasSize(1);
+    }
+
+    @Test
+    void 排队时长从Dubbo线程受理时起算_交给处理器() {
+        // gate 调 login 的超时从它发出请求就开始走：工作队列积压的这段也要算进处理器的请求预算，
+        // 所以受理时刻在投递之前取，处理器拿到的是「受理到开始处理」之间排了多久。
+        AtomicLong nanos = new AtomicLong(1_000_000_000L);
+        List<Runnable> backlog = new ArrayList<>();
+        ClientMessageDispatcher dispatcher = new ClientMessageDispatcher(registry,
+                List.of(login, create, enter, leave, disconnect), backlog::add, metrics, nanos::get);
+
+        CompletableFuture<ClientReply> reply = dispatcher.dispatch(call(14, CreatePlayerRequest.getDefaultInstance()));
+        nanos.addAndGet(Duration.ofMillis(1200).toNanos());
+        backlog.remove(0).run();
+        reply.join();
+
+        assertThat(create.queued).containsExactly(Duration.ofMillis(1200).toNanos());
+        assertThat(create.received).hasSize(1);
     }
 
     @Test

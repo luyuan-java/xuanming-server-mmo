@@ -331,6 +331,55 @@ class JdbcListingStoreUnitTest {
         assertThat(store(3, Double.NaN).backoffMillis()).isEqualTo(8);
     }
 
+    // ================================================================ 写入预留（客户端请求按会话保序，mmorpg client-request-ordering.md §6.1）
+
+    /** 生产装配的写入预留：预算 3500 ms 时 1000 ms（{@link com.game.trade.rules.TradeLimits#writeReserveMillis}）。 */
+    private JdbcListingStore reserved(long reserveMillis) {
+        return new JdbcListingStore(jdbc, 3, reserveMillis, retries::incrementAndGet, () -> 0.5, sleeps::add);
+    }
+
+    /**
+     * 请求还没到截止、但剩余不够写入预留：收藏的两条写（自动提交即提交点）不取连接、不发语句，按依赖故障抛出。剩余不到 1000 ms 永远凑不够
+     * 1000 ms 的预留，「不发」与机器快慢无关。去掉预留时这两条会照常发出——截止前一刻发出、库端再等 2 s 行锁，就落在 gate 放行的下一条之后。
+     */
+    @Test
+    void 请求剩余不足写入预留_收藏写入不取连接不发语句() {
+        jdbc.updated(1).updated(1);
+        JdbcListingStore s = reserved(1_000);
+        assertThatThrownBy(() -> s.insertFavorite(9, 101, NOW, Deadline.after(900))).isInstanceOf(DependencyException.class)
+                .hasMessageContaining("写入预留");
+        assertThatThrownBy(() -> s.deleteFavorite(9, 101, Deadline.after(900))).isInstanceOf(DependencyException.class)
+                .hasMessageContaining("写入预留");
+        assertThat(jdbc.maxWaits).as("不取连接").isEmpty();
+        assertThat(jdbc.calls).as("不发语句").isEmpty();
+        assertThat(retries).hasValue(0);
+        assertThat(jdbc.script).as("脚本原样留着：一条都没执行").hasSize(2);
+    }
+
+    /**
+     * 剩余够预留时，收藏写入的单次上限 = min(2000 ms, 请求剩余 − 预留)：取连接与查询超时都按它收口（最晚发出 + 2 s 锁等待不晚于请求截止 + 1 s）。
+     * 读不留预留：同样只剩 500 ms 的请求，读照常发出。
+     */
+    @Test
+    void 写入预留只压缩收藏写入的单次上限_读照常按请求剩余() {
+        jdbc.updated(1).rows(new Object[] {3L});
+        JdbcListingStore s = reserved(1_000);
+        s.insertFavorite(9, 101, NOW, Deadline.after(2_500));
+        assertThat(jdbc.maxWaits.get(0)).as("写：取连接最多等「剩余 − 预留」").isBetween(1L, 1_500L);
+        assertThat(jdbc.calls.get(0).queryTimeoutSeconds()).as("写：查询超时 = ceil(剩余 − 预留)").isBetween(1, 2);
+
+        assertThat(s.countFavorites(9, Deadline.after(500))).isEqualTo(3);
+        assertThat(jdbc.calls).hasSize(2);
+        assertThat(jdbc.calls.get(0).sql()).isEqualTo(ListingSql.INSERT_FAVORITE);
+        assertThat(assertHinted(jdbc.calls.get(1), ListingSql.countFavorites(9))).as("读：提示按请求剩余").isLessThanOrEqualTo(500L);
+        assertAllReturned();
+    }
+
+    @Test
+    void 写入预留不能为负() {
+        assertThatThrownBy(() -> reserved(-1)).isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     void 错误分类() {
         assertThat(JdbcListingStore.isRetryable(FakeJdbc.sqlError(1213))).isTrue();

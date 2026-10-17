@@ -16,3 +16,5 @@ game:
     guild-url: ""
     trade-url: ""
     match-url: ""
+    mail-url: ""
+    rank-url: ""

@@ -1,5 +1,12 @@
 package com.game.guild.dispatch;
 
+import com.game.guild.activity.GuildActivityService;
+import com.game.proto.guild.GetGuildActivitiesRequest;
+import com.game.proto.guild.LightGuildLanternRequest;
+import com.game.proto.guild.ClaimGuildReunionRequest;
+import com.game.proto.guild.StartGuildTrialRequest;
+import com.game.proto.guild.RespondGuildTrialInviteRequest;
+
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
@@ -66,7 +73,7 @@ import org.slf4j.LoggerFactory;
  *   <li>会话没有绑定玩家（{@code player_id == 0}）→ 信封 1003，打 ERROR（基线 Unauthenticated；<b>与 team 不同</b>，同 friend）；</li>
  *   <li>上行 8 UpdateGuildScore / 220 NotifyGuildChanged → 信封 1003，计 forbidden（基线会话白名单 PermissionDenied；220 的应答是 Empty，
  *       但 tip ≠ 0 时 gate 照样回信封）；</li>
- *   <li>4.6 的 5 个活动号 → <b>in-band 1006</b>（写进各自应答的 error_message，D13）；4.5 的 5 个经济号已换成真实处理器（D13 对它们撤销）；</li>
+ *   <li>生产装配的 5 个活动号与 5 个经济号均进入真实处理器；旧基础夹具未注入活动依赖时保留 in-band 1006 兼容路径；</li>
  *   <li>投递到 {@code guild-worker} 有界池。队列满、或排队已超预算 → <b>in-band 14021「guild service overloaded」</b>（已拍板，代替 D11 的信封：
  *       瞬时过载不该让客户端停用帮会模块）；处理器抛异常（依赖故障、配表缺行、双存储矛盾、存储内部错误）→ <b>信封 1003</b>、记 ERROR
  *       （基线 gRPC error → 路由服信封 1003；与 friend 的 in-band 1003 不同，客户端随之进隔离）。</li>
@@ -114,7 +121,7 @@ public final class GuildDispatcher {
         CLIENT,
         /** 8 / 220：客户端不得上行，信封 1003。 */
         FORBIDDEN,
-        /** 4.6 的 5 个活动号：in-band 1006。 */
+        /** 仅基础夹具的兼容装配：没有活动依赖时回 in-band 1006；生产注册真实处理器。 */
         PLACEHOLDER
     }
 
@@ -132,6 +139,12 @@ public final class GuildDispatcher {
     public GuildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
                            GuildRankService ranks, GuildEconomyService economy, Executor executor, GuildMetrics metrics,
                            long budgetMillis) {
+        this(registry,guilds,manage,ranks,economy,null,executor,metrics,budgetMillis);
+    }
+
+    public GuildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
+                           GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
+                           Executor executor, GuildMetrics metrics, long budgetMillis) {
         this.registry = registry;
         this.executor = executor;
         this.metrics = metrics;
@@ -166,8 +179,15 @@ public final class GuildDispatcher {
         for (String method : GuildMethods.FORBIDDEN) {
             other(byId, method, Kind.FORBIDDEN);
         }
-        for (String method : GuildMethods.PLACEHOLDERS) {
-            other(byId, method, Kind.PLACEHOLDER);
+        if(activities==null){
+            // 旧切片构造器兼容；生产装配必须显式注入完整活动服务。
+            for (String method : GuildMethods.PLACEHOLDERS) other(byId, method, Kind.PLACEHOLDER);
+        }else{
+            client(byId,GuildMethods.GET_GUILD_ACTIVITIES,GetGuildActivitiesRequest.class,activities::list);
+            client(byId,GuildMethods.LIGHT_GUILD_LANTERN,LightGuildLanternRequest.class,activities::lantern);
+            client(byId,GuildMethods.CLAIM_GUILD_REUNION,ClaimGuildReunionRequest.class,activities::reunion);
+            client(byId,GuildMethods.START_GUILD_TRIAL,StartGuildTrialRequest.class,activities::start);
+            client(byId,GuildMethods.RESPOND_GUILD_TRIAL_INVITE,RespondGuildTrialInviteRequest.class,activities::respond);
         }
         Set<String> handled = new HashSet<>();
         byId.values().forEach(r -> handled.add(r.method()));

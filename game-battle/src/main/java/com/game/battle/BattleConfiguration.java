@@ -75,7 +75,7 @@ import org.springframework.core.env.Environment;
  * {@code game.battle.result.init-timeout}，之后结果事件写兜底日志，有事件要发时每 30 s 再核对一次。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({BattleProperties.class, SceneTransportProperties.class, BattleResultProperties.class})
+@EnableConfigurationProperties({BattleProperties.class, SceneTransportProperties.class, BattleResultProperties.class,GlobalBattleProperties.class})
 public class BattleConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(BattleConfiguration.class);
@@ -236,12 +236,13 @@ public class BattleConfiguration {
     @ConditionalOnMissingBean(BattleResultSink.class)
     public KafkaBattleResultSink battleResultSink(BattleResultProperties resultProps, BattleProperties props,
                                                   @Value("${game.advertise-host}") String advertiseHost, BattleMetrics battleMetrics,
-                                                  ObjectProvider<KafkaBattleResultSink.Clients> clients, KafkaNames kafkaNames) {
+                                                  ObjectProvider<KafkaBattleResultSink.Clients> clients, KafkaNames kafkaNames,
+                                                  GlobalBattleProperties global) {
         String clientId = kafkaNames.battleResultClientId(advertiseHost, props.rpcPort());
         KafkaBattleResultSink sink = new KafkaBattleResultSink(
                 clients.getIfAvailable(() -> KafkaBattleResultSink.Clients.kafka(resultProps.bootstrapServers(), clientId)),
                 new BattleResultTopics(kafkaNames), resultProps.topicGeneration(), resultProps.replicationFactor(),
-                resultProps.initTimeout(), battleMetrics);
+                resultProps.initTimeout(), battleMetrics,global.enabled());
         try {
             sink.start();
         } catch (AuditTopicContractException e) {
@@ -268,11 +269,12 @@ public class BattleConfiguration {
                                  BattleTables battleTables, BattleTickets battleTickets, LobbyAnnouncer lobby,
                                  SceneBattleEvents sceneEvents, SettlementSink settlements, ActivityResultSink activityResults,
                                  BattleResultSink results, AdmissionGate battleAdmissionGate, BattleMetrics battleMetrics,
-                                 BattleInfrastructure battleInfrastructure, DubboCallAuth battleDubboCallAuth) {
+                                 BattleInfrastructure battleInfrastructure, DubboCallAuth battleDubboCallAuth,GlobalBattleProperties global) {
         props.requireAllowedIn(battleRunMode);
+        if(battleRunMode==RunMode.PROD&&!global.enabled())throw new IllegalStateException("生产 battle 必须启用全球机房与探测门禁");
         return new BattleNode(props, battleRunMode, advertiseHost, battleTables, battleTickets,
                 new OutboundPorts(lobby, sceneEvents, settlements, activityResults, results), battleAdmissionGate, battleMetrics,
-                BattleClock.SYSTEM, battleInfrastructure);
+                BattleClock.SYSTEM, battleInfrastructure).withGlobal(global);
     }
 
     // ---------------------------------------------------------------- dev / test 管理接口（§7.12）

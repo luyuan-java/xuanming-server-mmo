@@ -28,7 +28,7 @@ spring:
     # innodb_lock_wait_timeout=1 是基线值（guild 的 1205 不重试、直接 14021，等锁更久只会吃掉预算；friend 是 3）；
     # useAffectedRows=true 等价于 Go 的 ClientFoundRows=false：申请 IODKU 自检与 4.5 / 4.6 的带上限 upsert 依赖「实际改动行数」，不带它会静默出错；
     # socketTimeout 4 s ≤ 整请求预算之上的余量。
-    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
+    url: "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
     username: ${GAME_MYSQL_USER:root}
     password: ${GAME_MYSQL_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -73,6 +73,11 @@ game:
     address: redis://127.0.0.1:6379
     database: 12
   guild:
+    activity:
+      enabled: true
+      require-tidb: true
+      match-url: ${GAME_MATCH_URL:tri://127.0.0.1:20888}
+      kafka-brokers: ${GAME_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
     # 缺省值同 mmorpg go/guild（guild-spec §7.12）；启动时校验 request-budget ∈ [500ms, 3500ms]。
     # 业务上限（申请有效期、每人 / 每帮待审数、成员与长老上限）只读配表 GuildRule / GuildLevel，不在这里配。
     request-budget: 3500ms

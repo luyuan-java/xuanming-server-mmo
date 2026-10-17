@@ -38,6 +38,7 @@ import com.game.robot.scenario.Match5v5Scenario;
 import com.game.robot.scenario.MatchActivityScenario;
 import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
+import com.game.robot.scenario.OrderingScenario;
 import com.game.robot.scenario.PetScenario;
 import com.game.robot.scenario.QueueScenario;
 import com.game.robot.scenario.RateLimitScenario;
@@ -104,7 +105,8 @@ public final class RobotMain {
                 String target = "gateway=" + options.gatewayUrl() + " zone=" + options.zoneId();
                 CheckReport report;
                 String title;
-                // 给外层脚本按子串消费的一行结论（XXX_OK … / XXX_FAIL step=… reason=…）：只有匹配类场景（批次 6.4、6.5）、team 与 travel（批次 5.4）有
+                // 给外层脚本按子串消费的一行结论（XXX_OK … / XXX_FAIL step=… reason=…）：只有匹配类场景（批次 6.4、6.5）、team、travel（批次 5.4）
+                // 与 ordering-smoke 有
                 String resultLine = null;
                 if (options.scenario() == RobotOptions.Scenario.SMOKE) {
                     title = "game-robot smoke：" + options.count() + " 个账号（前缀 " + options.accountPrefix() + "），" + target;
@@ -220,6 +222,13 @@ public final class RobotMain {
                             options.accountPrefix(), options.runTag(), options.requestTimeout());
                     title = "game-robot match-5v5：" + scenario.firstAccount() + " 等 " + Match5v5Scenario.PLAYERS + " 个账号，" + target
                             + " match-admin=" + options.matchAdminUrl();
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                    resultLine = scenario.resultLine();
+                } else if (options.scenario() == RobotOptions.Scenario.ORDERING_SMOKE) {
+                    OrderingScenario scenario = new OrderingScenario(client, flow, registry, options.password(), options.accountPrefix(),
+                            options.runTag(), options.requestTimeout(), options.enterSceneTimeout());
+                    title = "game-robot ordering-smoke：" + scenario.accountQueue() + " 等 6 个账号，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                     resultLine = scenario.resultLine();

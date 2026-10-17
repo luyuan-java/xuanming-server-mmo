@@ -82,12 +82,21 @@ message TeamTicketsRequest {
   map<uint64, uint32> zones = 4;
   // player_id → ticket id（game-team 每人生成一个 UUIDv4 小写带连字符；必须覆盖 roster 的每个人）。
   map<uint64, string> ticket_ids = 5;
+  string request_id = 6;
+  uint64 initiator_player_id = 7;
+  bytes client_request = 8; // 原 StartTeamMatchRequest；SQL 意图保存并逐字节核对。
 }
 
 message TeamTicketsReply {
   TeamTicketsStatus status = 1;
   // 只在 status = FAILED 时非 0。
   uint64 failed_player_id = 2;
+}
+
+message TeamMatchIntentQuery {
+  uint64 player_id = 1;
+  string request_id = 2;
+  bytes client_request = 3; // Start重试时核对原载荷；单纯查询可留空。
 }
 
 // ---- releaseTeamTickets：建票回包丢失时的补偿（幂等）----

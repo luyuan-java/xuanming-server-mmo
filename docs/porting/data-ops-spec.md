@@ -753,6 +753,7 @@ COMMIT;
   写类（102、106、109、110、112、113）再过 `RejectIfFrozen`（跨 zone 冻结或回合制战斗在途回 1005，`:57-82`）；`GmCreateSnapshot` 是写类但**刻意不过冻结闸**（`:150-159`）；
   读类（104、107、115、116、117）只有运行模式闸。之后全部 `TODO(P1-B)`（`:95`…`:233`），返回空应答、不设 `error_message`。
   它们只能经节点路由 `InvokePlayerService` 打进来，gate 永远不转（`:26-40` 注释）。
+  （2026-10-16 补：mmorpg RpcChannel 批 7 已把 `Scene.InvokePlayerService`（40）退役并从 proto 删除、号留墓碑，基线这条节点路由入口不复存在；见 mmorpg `docs/design/muduo-rpc-channel.md` §20.3。）
 - **基线 gate**：号不在 `IsClientMessageId` 里就打 DEBUG、计非法包，到阈值 `forceClose`，不回包（`client_message_processor.cpp:874-886`）；GM 清单只有六条，
   并写明 102–117 本来就到不了客户端、不要加进清单（`gate_gm_client_messages.h:30-46`）。
 - **Java gate**：`MessageRoutes.of` 只为 `clientService()` 的方法建路由（`MessageRoutes.java:47-58`）；`ClientDispatcher.onRequest` 查不到路由计 `UNKNOWN_MESSAGE`、

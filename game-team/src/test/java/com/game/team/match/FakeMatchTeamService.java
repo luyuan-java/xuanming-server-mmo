@@ -74,6 +74,10 @@ public final class FakeMatchTeamService implements MatchTeamService {
     public volatile Function<TeamTicketsRelease, CompletableFuture<Empty>> releaseReply = request -> done(Empty.getDefaultInstance());
     public volatile Function<TeamGatherRequest, CompletableFuture<TeamGatherReply>> gatherReply = request -> done(gathered(true, 9001));
 
+    public volatile Function<com.game.api.proto.TeamMatchIntentQuery,CompletableFuture<com.game.proto.team.TeamMatchIntent>> queryReply=
+            r->CompletableFuture.completedFuture(com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(r.getRequestId()).build());
+    @Override public CompletableFuture<com.game.proto.team.TeamMatchIntent> queryTeamMatchIntent(com.game.api.proto.TeamMatchIntentQuery request){return queryReply.apply(request);}
+
     /** 开放一个副本的组队。 */
     public FakeMatchTeamService open(int battleConfigId, int teamSize) {
         sizes.put(battleConfigId, teamSize);

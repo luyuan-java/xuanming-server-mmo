@@ -31,6 +31,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
@@ -71,6 +73,8 @@ public final class ChallengeService {
     private final int inviteMessageId;
     private final int resultMessageId;
     private final Supplier<String> nonces;
+    private com.game.match.global.GlobalMatchService global;
+    public ChallengeService withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
 
     /**
      * @param pushExecutor    {@code match-push}（测试可传 {@code Runnable::run}）
@@ -198,6 +202,20 @@ public final class ChallengeService {
         }
         long challengeId = request.getChallengeId();
 
+        if(global!=null){
+            try{
+                if(challengeId==0)return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
+                var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(3).setOwnerId(responderId).setRequestLow(challengeId).build();
+                var previous=global.store().direct(key);
+                if(previous!=null){
+                    var payload=request.toBuilder().setPlayerId(responderId).build().toByteString();
+                    if(!previous.getPayload().equals(payload))return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
+                    if(previous.getBattleId()!=0)global.launchCommitted(global.store().formation(previous.getBattleId()));
+                    return RespondChallengeResponse.getDefaultInstance();
+                }
+            }catch(RuntimeException e){return respondRejected(ChallengeResult.INTERNAL,MatchTip.BUSY);}
+        }
+
         // 先读一次，按基线的顺序回码（读失败 → 不存在 → 不是目标），再原子消费
         Optional<ChallengeRecord> seen;
         try {
@@ -212,6 +230,8 @@ public final class ChallengeService {
         if (seen.get().targetId() != responderId) {
             return respondRejected(ChallengeResult.NOT_TARGET, MatchTip.CHALLENGE_NOT_TARGET);
         }
+
+        if(global!=null)return decideGlobal(session,request,seen.get(),d);
 
         ConsumeResult consumed;
         try {
@@ -263,6 +283,30 @@ public final class ChallengeService {
                 id(responderId), Integer.toUnsignedString(record.configId()));
         metrics.challenge(ChallengeStage.RESPOND, ChallengeResult.ACCEPTED);
         return RespondChallengeResponse.getDefaultInstance();
+    }
+
+    private RespondChallengeResponse decideGlobal(SessionContext session,RespondChallengeRequest request,ChallengeRecord record,Deadline deadline){
+        long player=session.getPlayerId(),challenge=request.getChallengeId();
+        try{
+            if(deadline.expired()||record.expiresAtMs()<=global.store().now())return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
+            var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(3).setOwnerId(player).setRequestLow(challenge).build();
+            var payload=request.toBuilder().setPlayerId(player).build().toByteString();
+            if(!request.getAccept()){
+                if(!global.store().declineDirect(key,payload))return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
+                consumeGlobalProjection(challenge,player,deadline);
+                pushResult(record.challengerId(),challenge,false,player);return RespondChallengeResponse.getDefaultInstance();
+            }
+            if(lockedOrUnknown(record.challengerId(),deadline,"发起者")||lockedOrUnknown(player,deadline,"应战者"))return respondRejected(ChallengeResult.RESPONDER_BUSY,MatchTip.CHALLENGE_RESPONDER_BUSY);
+            var f=global.reserveDirect(key,payload,com.game.proto.match.MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE,record.configId(),List.of(record.challengerId(),player),Map.of(),0,null);
+            consumeGlobalProjection(challenge,player,deadline);
+            pushResult(record.challengerId(),challenge,true,player);pushResult(player,challenge,true,player);global.launchCommitted(f);
+            return RespondChallengeResponse.getDefaultInstance();
+        }catch(RuntimeException e){log.warn("切磋原意图尚未确认",e);return respondRejected(ChallengeResult.INTERNAL,MatchTip.BUSY);}
+    }
+
+    // SQL 已提交后仅清理邀请展示/冷却投影；投影失败不能把已受理的原意图伪装成拒绝。
+    private void consumeGlobalProjection(long challenge,long player,Deadline deadline){
+        try{store.consume(challenge,player,nonces.get(),deadline);}catch(RuntimeException e){log.warn("切磋原意图已提交，邀请投影等待 TTL 清理",e);}
     }
 
     // ================================================================ 内部

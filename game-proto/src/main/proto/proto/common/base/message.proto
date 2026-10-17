@@ -10,13 +10,6 @@ import "proto/common/base/common.proto";
 import "proto/common/base/session.proto";
 import "proto/common/base/tip.proto";
 
-// Routing node info
-message RoutingNodeInfo
-{
-  NodeInfo node_info = 1;  // Node info
-  uint32 message_id = 2;   // Message ID
-}
-
 // Message content
 message MessageContent
 {
@@ -108,42 +101,6 @@ message RegisterGateNodeSessionResponse
 message GateSessionDisconnectRequest
 {
   SessionDetails session_info = 1;  // Session details
-}
-
-// Route message request (bytes form)
-message RouteMessageRequest
-{
-  bytes body = 1;                               // Message body (bytes)
-  repeated RoutingNodeInfo route_nodes = 2;     // Routing node list
-  uint32 session_id = 3;                        // Session ID
-  uint64 id = 4;                                // Unique message ID
-  bool is_client = 5;                           // Whether from client
-}
-
-// Route message response (bytes form)
-message RouteMessageResponse
-{
-  bytes body = 1;                               // Message body (bytes)
-  repeated RoutingNodeInfo route_nodes = 2;     // Routing node list
-  uint32 session_id = 3;                        // Session ID
-  uint64 id = 4;                                // Unique message ID
-  bool is_client = 5;                           // Whether from client
-}
-
-// Route player message request (bytes form)
-message RoutePlayerMessageRequest
-{
-  bytes body = 1;              // Message body (bytes)
-  repeated NodeInfo node_list = 2; // Node list
-  PlayerInfoExternal player_info = 3;  // Player info
-}
-
-// Route player message response (bytes form)
-message RoutePlayerMessageResponse
-{
-  bytes body = 1;              // Message body (bytes)
-  repeated NodeInfo node_list = 2; // Node list
-  PlayerInfoExternal player_info = 3;  // Player info
 }
 
 // Register scene node request

@@ -118,7 +118,7 @@ class MessageRoutesTest {
         assertThat(MessageRoutes.SERVICE_BACKENDS.values()).as("一个服务一个后端域，没有两个服务挤在同一个域里")
                 .doesNotHaveDuplicates()
                 .containsExactlyInAnyOrder(DubboGroups.LOGIN, DubboGroups.FRIEND, DubboGroups.CHAT, DubboGroups.TEAM,
-                        DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH);
+                        DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH,DubboGroups.MAIL,DubboGroups.RANK);
     }
 
     @Test
@@ -195,7 +195,7 @@ class MessageRoutesTest {
     void 聚宝斋4个号路由到trade域_都回包_热关停键与基线同名_199不在白名单() {
         // trade-spec §0.2 / §5.2 / §9.4：ClientPlayerJubaozhai 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，
         // 196 / 197 / 198 / 200 整体转给 game-trade；应答都是带 error_message 的业务应答 → 一律回包
-        List<String> methods = List.of("BrowseListings", "GetListingDetail", "SetFavorite", "GetMyShelf");
+        List<String> methods = List.of("BrowseListings", "GetListingDetail", "SetFavorite", "GetMyShelf","ListOfficialSkus","CreateOfficialOrder","GetCommerceOrder","CancelCommerceOrder","ListCommerceOrders","CreatePlayerTrade","ConfirmPlayerTrade","CreateConsignment","BuyConsignment","CancelConsignment","PlaceMarketOrder","CancelMarketOrder","ListMarketOrders","GetMarketDepth","ListTradeMarkets","CreateAuctionLot","PlaceAuctionBid","GetAuctionLot","CancelAuctionLot","BrowseCommerceOffers");
         List<MessageMethod> jubaozhai = registry.all().stream()
                 .filter(m -> m.serviceName().equals("ClientPlayerJubaozhai")).toList();
         assertThat(jubaozhai).as("契约里 ClientPlayerJubaozhai 的方法").extracting(MessageMethod::methodName)
@@ -222,23 +222,25 @@ class MessageRoutesTest {
     }
 
     @Test
-    void 匹配服务10个号都路由到match域_148与两个推送占位不回包_热关停键与基线同名_内部服务不在白名单() {
+    void 匹配服务12个号都路由到match域_148与两个推送占位不回包_探测走同一权威域_内部服务不在白名单() {
         // match-spec §1.4 / §9.2 / §15.3：MatchService 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，10 个号整体转给
         // game-match（Dubbo group match）。148 CancelQueue 与两个推送占位 154 / 156 的应答类型是 Empty → tip 为 0 时 gate 不回包（§8.1、M4；
         // tip ≠ 0 照样回信封）；其余 7 个都带 in-band 的 error_message / error_code → 一律回包（全默认值的应答是 0 字节也要回）。
         List<String> noReply = List.of("CancelQueue", "NotifyChallengeInvite", "NotifyChallengeResult");
         List<String> replied = List.of("JoinQueue", "GetQueueStatus", "ChallengePlayer", "RespondChallenge", "WatchBattle",
-                "ListWatchableBattles", "RequestBattleTicket");
+                "ListWatchableBattles", "RequestBattleTicket", "GetNetworkProbePlan", "CommitNetworkProbe");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
         // 10 个号逐个钉住（message_id.txt；match-spec §1.4 的表）：发号漂移或增删方法时这里先失败
         assertThat(match).extracting(MessageMethod::messageId)
-                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275);
         assertThat(Map.of("CancelQueue", 148, "RespondChallenge", 151, "ChallengePlayer", 152, "GetQueueStatus", 153,
                 "NotifyChallengeResult", 154, "NotifyChallengeInvite", 156, "JoinQueue", 157, "WatchBattle", 163,
                 "ListWatchableBattles", 164, "RequestBattleTicket", 179))
                 .allSatisfy((name, id) -> assertThat(registry.requireId("MatchService", name)).as(name).isEqualTo(id));
+        assertThat(registry.requireId("MatchService","GetNetworkProbePlan")).isEqualTo(275);
+        assertThat(registry.requireId("MatchService","CommitNetworkProbe")).isEqualTo(265);
         for (MessageMethod method : match) {
             assertThat(method.clientService()).as(method.key()).isTrue();
             assertThat(method.playerService()).as(method.key() + " 不是玩家服务：走后端表，不走 scene").isFalse();
@@ -260,7 +262,7 @@ class MessageRoutesTest {
         assertThat(routes.clientRoute(179).hasResponse()).as("179 应答消息定义在 battle 包，照样回包").isTrue();
         // match 域里只有这 10 个号：别的服务（尤其是战斗服务）没有被带进来
         assertThat(routes.all().stream().filter(r -> r.domain().equals(DubboGroups.MATCH)).map(MessageRoute::messageId))
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179,265,275);
         assertThat(MessageRoutes.SERVICE_BACKENDS).containsEntry("MatchService", DubboGroups.MATCH);
 
         // MatchInternal（帮会活动开战，match_internal.proto）是内部服务：刻意没标客户端协议服务，也不在后端表里。

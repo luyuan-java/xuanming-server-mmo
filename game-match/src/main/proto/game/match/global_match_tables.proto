@@ -1,0 +1,121 @@
+// Java 内部权威票据，不与 C++/Go 共享存储格式。客户端消息只作为 bytes 负载保存。
+syntax = "proto3";
+package game.match.global;
+import "proto2mysql/proto2mysql_option.proto";
+option java_package = "com.game.match.global.pb";
+option java_multiple_files = true;
+option (proto2mysql.db) = true;
+
+message GlobalProbeProfile {
+  string plan_id = 1;
+  string session_binding = 2;
+  repeated bytes receipt_payloads = 3;
+}
+message GlobalProfileRow {
+  option (proto2mysql.table_name) = "match_global_profile";
+  option (proto2mysql.primary_key) = "player_id";
+  uint64 player_id = 1;
+  bytes payload = 2;
+  uint64 expires_ms = 3;
+}
+message GlobalTicketRow {
+  option (proto2mysql.table_name) = "match_global_ticket";
+  option (proto2mysql.primary_key) = "player_id";
+  option (proto2mysql.index) = "state,mode,config_id,team_size,enqueued_ms;formation_id";
+  uint64 player_id = 1;
+  string ticket = 2;
+  string request_id = 3;
+  uint32 mode = 4;
+  uint32 config_id = 5;
+  uint32 team_size = 6;
+  // 1 排队；2 已成组（不自动过期）；3 已建房；4 已终止。
+  uint32 state = 7;
+  uint64 enqueued_ms = 8;
+  uint64 not_before_ms = 9;
+  uint32 zone_id = 10;
+  int64 rating_centi = 11;
+  uint64 formation_id = 12;
+  bytes profile = 13;
+  uint64 expires_ms = 14;
+  uint32 selected_region = 15;
+  uint64 team_id = 16;
+}
+message GlobalMember {
+  uint64 player_id = 1;
+  string ticket = 2;
+}
+// 独立于当前票据保留请求历史。旧请求及先撤销后迟到的 Join 永远不能复活。
+message GlobalJoinIntentRow {
+  option (proto2mysql.table_name) = "match_global_join_intent";
+  option (proto2mysql.primary_key) = "player_id,request_high,request_low";
+  uint64 player_id = 1;
+  string request_id = 2;
+  bytes ticket_record = 3;
+  bool cancelled = 4;
+  uint64 request_high = 5;
+  uint64 request_low = 6;
+}
+message GlobalDirectIntentRow {
+  option (proto2mysql.table_name) = "match_global_direct_intent";
+  option (proto2mysql.primary_key) = "kind,owner_id,request_high,request_low";
+  uint32 kind = 1;
+  uint64 owner_id = 2;
+  uint64 request_high = 3;
+  uint64 request_low = 4;
+  bytes payload = 5;
+  uint64 battle_id = 6;
+}
+message GlobalFormationRow {
+  option (proto2mysql.table_name) = "match_global_formation";
+  option (proto2mysql.primary_key) = "battle_id";
+  option (proto2mysql.index) = "state,retry_ms";
+  uint64 battle_id = 1;
+  string operation_id = 2;
+  // 1 已成组待备战；2 已持久化完整建房意图；3 结局未知；4 已建房；5 已确认中止。
+  uint32 state = 3;
+  uint32 region = 4;
+  uint32 node_id = 5;
+  string instance_id = 6;
+  string host = 7;
+  uint32 port = 8;
+  uint32 mode = 9;
+  uint32 config_id = 10;
+  repeated GlobalMember members = 11;
+  bytes create_request = 12;
+  uint64 created_ms = 13;
+  uint64 deadline_ms = 14;
+  uint64 retry_ms = 15;
+  bytes activity_context = 16;
+  bool requeue_on_failure = 17;
+  // 备战端点也持久化，恢复取消不能依赖玩家当前在线位置。
+  repeated GlobalPreparedEndpoint prepared = 18;
+}
+message GlobalPreparedEndpoint {
+  uint64 player_id = 1;
+  uint32 zone_id = 2;
+  uint32 node_id = 3;
+  string host = 4;
+  uint32 port = 5;
+  string instance_id = 6;
+}
+
+// 与 RatingStore 同 Connection 提交，不另开评分/outbox 两笔事务。
+message GlobalRankSourceRow {
+  option (proto2mysql.table_name) = "match_global_rank_source";
+  option (proto2mysql.primary_key) = "source_epoch";
+  uint64 source_epoch = 1;
+  uint64 produced_cursor = 2;
+  uint64 committed_cursor = 3;
+  uint64 board_id = 4;
+  bool stopped = 5;
+}
+message GlobalRankOutboxRow {
+  option (proto2mysql.table_name) = "match_global_rank_outbox";
+  option (proto2mysql.primary_key) = "source_epoch,source_cursor";
+  option (proto2mysql.unique_key) = "request_id";
+  uint64 source_epoch = 1;
+  uint64 source_cursor = 2;
+  uint64 request_id = 3;
+  bytes entries = 4;
+  bytes payload_digest = 5;
+}

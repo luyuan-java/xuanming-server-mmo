@@ -23,10 +23,14 @@ import com.game.match.spectate.SpectateStore.Record;
 import com.game.match.spectate.SpectateStore.Scored;
 import com.game.match.spectate.SpectateStore.Snapshot;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -41,6 +45,9 @@ import org.redisson.api.RFuture;
 import org.redisson.api.RScoredSortedSet;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.options.ObjectParams;
+import org.redisson.api.options.OptionalOptions;
+import org.redisson.api.options.OptionalParams;
 import org.redisson.client.codec.ByteArrayCodec;
 import org.redisson.client.codec.Codec;
 import org.redisson.connection.CRC16;
@@ -74,6 +81,8 @@ class RedissonSpectateStoreTest {
     private final RedissonClient redis = mock(RedissonClient.class);
     private final RBatch pipeline = mock(RBatch.class);
     private final List<Codec> codecs = new CopyOnWriteArrayList<>();
+    /** 按客户端写发出的脚本句柄参数（{@code getScript(OptionalOptions)}：不重发、超时 = min(配置值, 剩余预算)）；只有抢标记走它。 */
+    private final List<OptionalOptions> clientWrites = new CopyOnWriteArrayList<>();
     private volatile RFuture<BatchResult<?>> pipelineResult = new CompletableFutureWrapper<>((BatchResult<?>) null);
     private int pipelinesExecuted;
 
@@ -83,6 +92,10 @@ class RedissonSpectateStoreTest {
         RScript script = mock(RScript.class, invocation -> answerEval(invocation.getMethod().getName(), invocation.getRawArguments(), false));
         when(redis.getScript(any(Codec.class))).thenAnswer(invocation -> {
             codecs.add(invocation.getArgument(0));
+            return script;
+        });
+        when(redis.getScript(any(OptionalOptions.class))).thenAnswer(invocation -> {
+            clientWrites.add(invocation.getArgument(0));
             return script;
         });
         RScript piped = mock(RScript.class, invocation -> answerEval(invocation.getMethod().getName(), invocation.getRawArguments(), true));
@@ -95,12 +108,13 @@ class RedissonSpectateStoreTest {
             pipelinesExecuted++;
             return pipelineResult;
         });
-        store = new RedissonSpectateStore(redis, REDIS_KEYS);
+        // 配置的命令超时故意远大于用例的剩余预算：「封顶到剩余」与「照抄配置值 / 写死 2 s」才分得开（取配置值那一侧由装配测试钉）
+        store = new RedissonSpectateStore(redis, REDIS_KEYS, Duration.ofSeconds(60));
     }
 
     @SuppressWarnings("unchecked")
     private Object answerEval(String method, Object[] raw, boolean piped) {
-        if (!method.equals("evalAsync")) {
+        if (!method.equals("evalAsync") && !method.equals("evalShaAsync")) {
             return null;
         }
         List<String> args = new ArrayList<>();
@@ -113,6 +127,14 @@ class RedissonSpectateStoreTest {
             throw new AssertionError("没有为这次脚本调用准备应答: " + evals.get(evals.size() - 1));
         }
         return reply.get();
+    }
+
+    private static String sha1(String lua) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-1").digest(lua.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new AssertionError("JDK 必须提供 Redis 脚本缓存使用的 SHA-1", impossible);
+        }
     }
 
     // ---------------------------------------------------------------- 准备应答
@@ -184,7 +206,7 @@ class RedissonSpectateStoreTest {
         assertThat(marks).as("应答里的下标 2 = KEYS 里第 2 把键 = 去重之后的第 2 名玩家").containsExactly(Map.entry(PLAYER, MARK));
         assertThat(evals).containsExactly(
                 new Eval(RScript.Mode.READ_WRITE, SpectateScripts.ENTRY, RScript.ReturnType.MULTI, List.of(TICKET_KEY, MARK_KEY), List.of(), false),
-                new Eval(RScript.Mode.READ_WRITE, SpectateScripts.ACQUIRE, RScript.ReturnType.INTEGER, List.of(TICKET_KEY, MARK_KEY),
+                new Eval(RScript.Mode.READ_WRITE, sha1(SpectateScripts.ACQUIRE), RScript.ReturnType.INTEGER, List.of(TICKET_KEY, MARK_KEY),
                         List.of(MARK, "360000"), false),
                 new Eval(RScript.Mode.READ_WRITE, SpectateScripts.RELEASE, RScript.ReturnType.INTEGER, List.of(MARK_KEY), List.of(MARK), false),
                 new Eval(RScript.Mode.READ_WRITE, SpectateScripts.MARKS, RScript.ReturnType.MULTI, List.of("game:{match}:watching:5", MARK_KEY),
@@ -262,7 +284,10 @@ class RedissonSpectateStoreTest {
         store.sweep(d());
 
         assertThat(evals).hasSize(11);
-        assertThat(codecs).hasSize(11).allSatisfy(codec -> assertThat(codec).isSameAs(ByteArrayCodec.INSTANCE));
+        // 抢标记按客户端写发出（getScript(OptionalOptions)，编解码在句柄参数里），其余十段走 getScript(ByteArrayCodec)
+        assertThat(codecs).hasSize(10).allSatisfy(codec -> assertThat(codec).isSameAs(ByteArrayCodec.INSTANCE));
+        assertThat(clientWrites).hasSize(1)
+                .allSatisfy(options -> assertThat(((OptionalParams) options).getCodec()).isSameAs(ByteArrayCodec.INSTANCE));
         int slot = slotOf(INDEX_KEY);
         for (Eval eval : evals) {
             assertThat(eval.mode()).as("只读脚本也读主库").isEqualTo(RScript.Mode.READ_WRITE);
@@ -297,6 +322,25 @@ class RedissonSpectateStoreTest {
 
         assertThat(evals.get(3).args()).as("标记值按 UTF-8 发").containsExactly(new String(b("脏值:値"), StandardCharsets.ISO_8859_1));
         assertThat(evals.get(4).args()).containsExactly("");
+    }
+
+    @Test
+    void 抢标记是163的提交点_按客户端写发出_不重发_Redisson超时不超过剩余预算_删标记照旧带重发() {
+        // mmorpg client-request-ordering.md §6.1：全局 retry-attempts = 1 会把截止前发出的抢标记在约 4 s 后原样重发，
+        // 那时 gate 已放行同一会话的下一条；等连接的超时沿用全局 2 s 也会让它在截止之后才发出
+        reply(0L).reply(1L);
+
+        // 剩余 1.5 s：小于配置的 60 s，也小于全局缺省的 2 s——写死 2 s 或照抄配置值的实现都过不了下面的上界
+        assertThat(store.acquire(PLAYER, MARK, Deadline.after(1_500))).isEqualTo(Acquire.OK);
+        store.release(PLAYER, MARK, d());
+
+        assertThat(clientWrites).as("只有抢标记按客户端写发出").hasSize(1);
+        ObjectParams params = (ObjectParams) clientWrites.get(0);
+        assertThat(params.getRetryAttempts()).as("不重发").isZero();
+        assertThat(params.getTimeout()).as("Redisson 的超时（含等连接）封顶到剩余预算").isBetween(1, 1_500);
+        assertThat(((OptionalParams) clientWrites.get(0)).getCodec()).as("编解码照旧是 ByteArrayCodec").isSameAs(ByteArrayCodec.INSTANCE);
+        assertThat(codecs).as("删标记按值删、挡得住迟到的副本，照旧走全局句柄").containsExactly(ByteArrayCodec.INSTANCE);
+        assertThat(evals).extracting(Eval::lua).containsExactly(sha1(SpectateScripts.ACQUIRE), SpectateScripts.RELEASE);
     }
 
     @Test
@@ -447,11 +491,11 @@ class RedissonSpectateStoreTest {
         assertThat(never).as("不取消在途的命令：它可能已经执行，结局不明由调用方收场").isNotCancelled();
         assertThat(evals).as("放弃等待的那一刻存储自己不发别的命令（当场的那次释放是调用方的事）").hasSize(1);
 
-        // 在途的命令随后有了结局——Redisson 重发的那一遍成功了，标记被写回，而调用方的释放早已发过：存储按值再释放一次
+        // 在途的命令随后有了结局——已经写进连接的那一条晚于截止执行成功，标记被写回，而调用方的释放早已发过：存储按值再释放一次
         reply(1L);
         never.complete(SpectateScripts.ACQUIRE_OK);
 
-        assertThat(evals).as("迟到的重发写回的标记不留给 TTL").hasSize(2);
+        assertThat(evals).as("迟到写回的标记不留给 TTL").hasSize(2);
         assertThat(evals.get(1))
                 .isEqualTo(new Eval(RScript.Mode.READ_WRITE, SpectateScripts.RELEASE, RScript.ReturnType.INTEGER, List.of(MARK_KEY), List.of(MARK), false));
         assertThat(replies).isEmpty();
@@ -472,7 +516,7 @@ class RedissonSpectateStoreTest {
         }
         assertThat(evals).hasSize(1);
 
-        // 客户端最终判这条命令失败（例如重发的那一遍也响应超时）——它仍可能已经在 Redis 上执行过：照样按值释放一次（按值删，多删无害）
+        // 客户端最终判这条命令失败（例如响应超时）——它仍可能已经在 Redis 上执行过：照样按值释放一次（按值删，多删无害）
         reply(0L);
         inflight.completeExceptionally(new IllegalStateException("Redis 响应超时"));
 

@@ -1,0 +1,114 @@
+// Java自有领域表；形状对齐本批已冻结契约，后续Java迁移独立管理。
+syntax = "proto3";
+package game.rank;
+
+import "proto2mysql/proto2mysql_option.proto";
+option java_package = "com.game.rank.store.pb";
+option java_multiple_files = true;
+option java_outer_classname = "RankTablesProto";
+option (proto2mysql.db) = true;
+
+message RankIdRow {
+  option (proto2mysql.table_name) = "rank_id_sequence";
+  option (proto2mysql.primary_key) = "sequence_key";
+  uint32 sequence_key = 1;
+  uint64 next_value = 2;
+}
+
+// SQL是写分、代次、封榜和奖励意图的唯一权威；Redis至多是可重建展示投影。
+message RankBoardRow {
+  option (proto2mysql.table_name) = "rank_board";
+  option (proto2mysql.primary_key) = "board_id";
+  option (proto2mysql.unique_key) = "board_type,scope,scope_id,period,generation";
+  uint64 board_id = 1;
+  uint32 board_type = 2;
+  uint32 scope = 3;
+  uint64 scope_id = 4;
+  string period = 5;
+  uint64 generation = 6;
+  string producer = 7;
+  uint64 source_epoch = 8;
+  uint64 committed_cursor = 9;
+  uint32 ascending = 10;
+  uint32 state = 11;
+  uint64 settlement_id = 12;
+  uint64 open_request_id = 13;
+  string open_request_hash = 14;
+  uint64 created_ms = 15;
+  uint64 sealed_ms = 16;
+  uint64 deleted_ms = 17;
+}
+message RankScoreRow {
+  option (proto2mysql.table_name) = "rank_score";
+  option (proto2mysql.primary_key) = "board_id,generation,entity_id";
+  option (proto2mysql.index) = "board_id,generation,score,achieved_ms,entity_id";
+  uint64 board_id = 1;
+  uint64 generation = 2;
+  uint64 entity_id = 3;
+  int64 score = 4;
+  uint64 achieved_ms = 5;
+  uint64 source_cursor = 6;
+}
+// 每一游标的完整请求摘要保留至本代保留窗结束，晚重试不能冒充新一批。
+message RankInputReceiptRow {
+  option (proto2mysql.table_name) = "rank_input_receipt";
+  option (proto2mysql.primary_key) = "board_id,generation,source_cursor";
+  uint64 board_id = 1;
+  uint64 generation = 2;
+  uint64 source_cursor = 3;
+  uint64 request_id = 4;
+  string request_hash = 5;
+  uint64 committed_ms = 6;
+}
+message RankSettlementRow {
+  option (proto2mysql.table_name) = "rank_settlement";
+  option (proto2mysql.primary_key) = "settlement_id";
+  option (proto2mysql.unique_key) = "board_id,generation";
+  uint64 settlement_id = 1;
+  uint64 board_id = 2;
+  uint64 generation = 3;
+  uint64 source_epoch = 4;
+  uint64 final_cursor = 5;
+  uint64 request_id = 6;
+  string request_hash = 7;
+  uint64 winner_count = 8;
+  uint64 sealed_ms = 9;
+}
+message RankSnapshotRow {
+  option (proto2mysql.table_name) = "rank_snapshot";
+  option (proto2mysql.primary_key) = "settlement_id,rank";
+  uint64 settlement_id = 1;
+  uint64 rank = 2;
+  uint64 entity_id = 3;
+  int64 score = 4;
+  uint64 achieved_ms = 5;
+}
+// 与seal及所有快照同事务插入。工作器只投MailAdmin，不直接发资产。
+message RankMailRewardRow {
+  option (proto2mysql.table_name) = "rank_mail_reward";
+  option (proto2mysql.primary_key) = "reward_id";
+  option (proto2mysql.unique_key) = "settlement_id,player_id";
+  option (proto2mysql.index) = "status,next_attempt_ms";
+  uint64 reward_id = 1;
+  uint64 settlement_id = 2;
+  uint64 player_id = 3;
+  uint64 rank = 4;
+  bytes attachments = 5;
+  uint32 status = 6;
+  uint64 mail_id = 7;
+  uint64 next_attempt_ms = 8;
+  uint64 lease_until_ms = 9;
+  uint64 lease_token = 10;
+  uint32 attempts = 11;
+  uint64 created_ms = 12;
+  uint64 updated_ms = 13;
+}
+message RankMutationRow {
+  option (proto2mysql.table_name) = "rank_mutation";
+  option (proto2mysql.primary_key) = "board_id,generation,request_id";
+  string request_hash = 1;
+  uint64 board_id = 2;
+  uint64 generation = 3;
+  uint64 request_id = 4;
+  uint64 created_ms = 5;
+}

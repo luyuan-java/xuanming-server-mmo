@@ -11,7 +11,7 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>契约：
  * <ul>
- *   <li>{@link #handle} 在 login 工作线程上被调用，可以直接做阻塞 I/O；需要等别的服务时返回组合好的 future，
+ *   <li>{@link #handle(SessionContext, Message, long)} 在 login 工作线程上被调用，可以直接做阻塞 I/O；需要等别的服务时返回组合好的 future，
  *       不得在线程里阻塞等待远程结果。</li>
  *   <li>业务失败放进应答体的 {@code error_message}（字段 1），future 正常完成；成功应答<b>绝不</b>设置
  *       {@code error_message}（哪怕是默认实例，Go 端也会解成非 nil 判为失败）。</li>
@@ -31,6 +31,19 @@ public interface ClientMessageHandler<Req extends Message> {
     Class<? extends Message> responseType();
 
     CompletableFuture<HandlerReply> handle(SessionContext session, Req request);
+
+    /**
+     * 同 {@link #handle(SessionContext, Message)}，另带这条请求在 login 工作队列里排了多久（{@code queuedNanos}，纳秒，≥ 0：
+     * 分发器在 Dubbo 线程上受理，到工作线程开始处理为止）。分发器只调本方法。
+     *
+     * <p>gate 调 login 的 Dubbo 超时从 gate 发出请求就开始计，排队同样耗掉这段等待；超时一到 gate 就放行同一会话的下一条请求。
+     * 所以有请求预算的处理器（建角、进游戏、轮换 refresh）覆写本方法，截止取「受理时刻 + 预算」（含排队），
+     * 不按开始处理的时刻算——积压时按后者算的截止本身就晚于 gate 放行。其余处理器走缺省实现，忽略排队时长。
+     * 传时长而不传受理时刻的绝对读数：处理器的单调时钟可以注入（测试用），不必与分发器的时钟是同一个。
+     */
+    default CompletableFuture<HandlerReply> handle(SessionContext session, Req request, long queuedNanos) {
+        return handle(session, request);
+    }
 
     /**
      * 以 {@code tip} 表达失败的应答体。应答类型没有 {@code error_message}（如 {@code LoginEmptyResponse}）时返回空，

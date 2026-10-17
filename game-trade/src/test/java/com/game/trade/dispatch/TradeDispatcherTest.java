@@ -100,13 +100,13 @@ class TradeDispatcherTest {
     // ================================================================ 路由与启动校验
 
     @Test
-    void 接管4个客户端号与199_契约里的ClientPlayerJubaozhai恰好就是这4个() {
+    void 接管全部商城交易客户端号与199_契约与处理器完整对齐() {
         TradeDispatcher d = dispatcher();
         Set<Integer> expected = new HashSet<>();
         for (String method : TradeMethods.CLIENT_REQUESTS) {
             expected.add(id(method));
         }
-        assertThat(expected).containsExactlyInAnyOrder(196, 197, 198, 200);
+        assertThat(expected).contains(196, 197, 198, 200).hasSize(24);
         assertThat(d.clientMessageIds()).isEqualTo(expected);
         expected.add(seedId());
         assertThat(seedId()).isEqualTo(199);
@@ -157,9 +157,13 @@ class TradeDispatcherTest {
         assertThat(favoriteBody.getFavorite()).isTrue();
         assertThat(GetMyShelfResponse.parseFrom(shelf.getBody()).hasErrorMessage()).isFalse();
 
-        for (String method : TradeMethods.CLIENT_REQUESTS) {
+        for (String method : List.of(TradeMethods.BROWSE_LISTINGS,TradeMethods.GET_LISTING_DETAIL,TradeMethods.SET_FAVORITE,TradeMethods.GET_MY_SHELF)) {
             assertThat(requests(method, "ok")).as(method).isEqualTo(1);
         }
+    }
+
+    @Test void 新交易接口关闭时有明确应答而非未实现或静默超时()throws Exception{
+        var d=dispatcher();for(String name:TradeMethods.COMMERCE_REQUESTS){var contract=REGISTRY.byId(id(name)).orElseThrow();var response=done(d.dispatch(call(name,PLAYER_A,contract.requestPrototype())));assertThat(inBandTip(response,contract.responsePrototype()).getId()).as(name).isEqualTo(TradeTips.FEATURE_UNAVAILABLE);}
     }
 
     @Test

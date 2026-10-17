@@ -78,6 +78,10 @@ class BattleConfigurationTest {
             .withPropertyValues(
                     "game.advertise-host=127.0.0.1",
                     "game.table-dir=../config-data/tables",
+                    "game.battle.global-match.enabled=true",
+                    "game.battle.result.replication-factor=3",
+                    "game.battle.global-match.physical-region=1",
+                    "game.battle.global-match.probe-secret=fixture-only-global-probe-key-00000000000000",
                     "GAME_DUBBO_SECRET=dubbo-secret-for-context-tests",
                     "GAME_ADMIN_TOKEN=",
                     "game.run-mode=prod",
@@ -94,6 +98,10 @@ class BattleConfigurationTest {
             .withPropertyValues(
                     "game.advertise-host=127.0.0.1",
                     "game.table-dir=../config-data/tables",
+                    "game.battle.global-match.enabled=true",
+                    "game.battle.result.replication-factor=3",
+                    "game.battle.global-match.physical-region=1",
+                    "game.battle.global-match.probe-secret=fixture-only-global-probe-key-00000000000000",
                     "GAME_DUBBO_SECRET=dubbo-secret-for-context-tests",
                     "GAME_ADMIN_TOKEN=",
                     BattleConfiguration.GATE_SECRET_ENV + "=" + GATE_SECRET);
@@ -399,11 +407,14 @@ class BattleConfigurationTest {
             KafkaBattleResultSink sink = ctx.getBean(KafkaBattleResultSink.class);
             assertThat(sink.topic()).isEqualTo(RESULT_TOPIC);
             assertThat(sink.verified()).isTrue();
-            assertThat(ctx.getBean(BattleResultProperties.class)).isEqualTo(BattleResultProperties.defaults());
+            var defaults=BattleResultProperties.defaults();
+            assertThat(ctx.getBean(BattleResultProperties.class)).isEqualTo(new BattleResultProperties(defaults.bootstrapServers(),
+                    defaults.topicGeneration(),(short)3,defaults.initTimeout()));
             assertThat(kafka.created()).singleElement().satisfies(created -> {
                 assertThat(created.topic()).isEqualTo(RESULT_TOPIC);
                 assertThat(created.partitions()).isEqualTo(3);
-                assertThat(created.replicationFactor()).isEqualTo((short) 1);
+                assertThat(created.replicationFactor()).isEqualTo((short) 3);
+                assertThat(created.configs()).containsEntry("min.insync.replicas","2").containsEntry("unclean.leader.election.enable","false");
             });
             MeterRegistry meters = ctx.getBean(MeterRegistry.class);
 

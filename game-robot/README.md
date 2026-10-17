@@ -424,6 +424,29 @@ java -jar game-robot/target/game-robot-0.1.0-SNAPSHOT.jar reconnect --cross-zone
   确认不了才中止，因为开战段与 S9 无从验证）；reconnect 中断后经本区入口重新进游戏，接着跑干净登出那一步。
 - trade 的跨区步骤还没有接（auto / skip 下只写观察记录），不在 5.4 的范围里；`trade --cross-zone require` 是参数错误（退出码 2），免得「该跑的没跑」看起来是绿的。
 
+**guild 第 11 步**（过期的 expected_guild_id，mmorpg client-request-ordering.md O14 / §6.4 批次 E2，guild-spec §3.19；对应 Go `guild_smoke_scenario.go` 第 11 步）：
+第 10 步解散之后，A 另建临时帮 H、B 申请并获批；B 带第 1 步那个帮（已退出、已解散）的 id 作 `expected_guild_id` 退帮 → 14002（`GuildTip.NOT_IN_EXPECTED_GUILD`），
+B 仍是 H 的普通成员、H 仍 2 人；对照：B 带 H 的 id 退帮受理、随后查自己的帮会 14002；A 解散 H。需要 game-guild 带批次 E2（不带时第 11 步回 0，失败细节里写明）。
+
+**ordering-smoke**（客户端请求按会话保序，mmorpg client-request-ordering.md §12 批次 R，对应 Go robot `mode: ordering-smoke` 的 O1–O7；六个新号
+`前缀 + od + 标签 + _q / _gl / _ga / _fa / _fr / _lg`）。前提：切片带 game-guild、game-friend、game-match；环境里没有别人在排 1V1（不要与 battle-smoke 同时跑）。
+
+```bash
+java -jar game-robot/target/game-robot-0.1.0-SNAPSHOT.jar ordering-smoke
+```
+
+每组每轮都是不等回包连发两条有依赖的请求、等回包，再查权威状态，与「后发的那条最后执行」应得的状态比较：
+
+1. O5 帮会（5 轮）：帮主建临时帮；申请人连发 218 → 219，帮主侧 221 里没有申请人 = 按序；撤回回 14018 且仍在名单、或任一条回 14xxx 忙（并发撞锁）= 乱序，补一次撤回收尾；最后解散临时帮。
+2. O6 好友（5 轮）：申请方先 234 拿 request_id；接收方连发 238 → 11，双方 12 都看不到对方 = 按序；互为好友 = 乱序，补一次删除收尾；只一方看得到 = 单边残留，立即失败。
+3. O7 登录（3 轮）：先完整登录一次拿 player_id 并断开；每轮隔 2 s 新开连接，连发 48 → 26（带已知 player_id）：26 回 2007（未登录）= 乱序；26 回 2005 隔 1 s 重发（至多 4 次）；受理后等到 79。
+4. O1 主机器人进场；O2 153 必须 NOT_QUEUED（残留不自动取消）；O3（20 轮）连发 157 `{1V1, config = 0}` → 148（不带票号），再发 153：仍 QUEUED = 乱序，带 157 回包里的票号补一次 148 收尾。
+
+各组与 O3 的乱序全部跑完后汇总成一行 `ORDERING_SMOKE_FAIL step=O5-order,…,O3-order reason=…`；登录、清场、业务拒绝、信封拒绝、超时、状态对不上任何一种执行顺序立即
+`ORDERING_SMOKE_FAIL step=<那一步>`；全过 `ORDERING_SMOKE_OK player_id=… rounds=20`。与 Go robot 的差异：148 的应答是 Empty，Java gate 受理即不回包，所以 O3 不等 148 的回包、
+只在它回了信封时失败；O7 的 2005 按 PlayerFlow 的约定重发（2005 只在会话已登录之后回，说明 26 已在 48 之后执行）。限频：每个机器人同号任意 1.1 s 内至多 3 条、
+每轮之前隔 1.1 s；帮会 / 好友申请每人每分钟 10 次，同一 `--run-tag` 一分钟内最多连跑两次。判定在 `OrderingChecks`（`OrderingChecksTest` 钉住）。
+
 **match-activity**（批次 6.4 帮会活动开战的 dev 入口，match-spec §15.5、§7.1–§7.2；账号 `前缀 + ma + 标签 + _a / _b / _c`）。真正的调用方 game-guild 随批次 4.6 接入，
 这里由 robot 经 game-match 的 dev 管理口 `POST /admin/match/dev/activity-battle`（`--match-admin-url`）调同一个实现。前提：切片带 game-match、game-battle，dev 运行模式（prod 下这个口回 403，
 robot 不切运行模式，403 由 game-match 自己的测试覆盖），运维令牌。

@@ -19,7 +19,7 @@ import org.springframework.boot.context.properties.bind.ConstructorBinding;
  *                              再按 {@code enterGameBudget} 的剩余收紧
  * @param ownerClaimWait        进游戏夺取玩家数据归属时，归属仍被上一个写者持有，最多等它释放多久（期间退避重试），之后回 2005；
  *                              截止不晚于 {@code enterGameBudget}
- * @param enterGameBudget       一次 EnterGame 从 login 处理器开始算的时间预算：等 scene-manager（签票、分配）按剩余预算收紧，
+ * @param enterGameBudget       一次 EnterGame 从 login 受理这条请求开始算（含工作队列排队）的时间预算：等 scene-manager（签票、分配）按剩余预算收紧，
  *                              用完就不再发起调用、不再夺权。必须小于 gate 调 login 的 Dubbo 超时（game-gate
  *                              {@code dubbo.consumer.timeout}，5s）：gate 到点回 1003 之后迟到的应答被丢弃，那时夺到的归属没人接，
  *                              玩家要等租约（30s）过期才能再进

@@ -26,7 +26,7 @@ public final class AssetLedgerRules {
     public static final int WINDOW_BITS = 1024;
     public static final int WINDOW_WORDS = WINDOW_BITS / 64;
     public static final int MAX_REJECTIONS = 64;
-    public static final int MAX_PARTIAL_SEQS = 64;
+    public static final int MAX_PARTIAL_SEQS = WINDOW_BITS;
     public static final long MAX_SEQ_JUMP = 1024;
     /** UINT64_MAX − 1024：watermark 超过它时 watermark + 1024 会回绕。 */
     public static final long WATERMARK_LIMIT = -1L - WINDOW_BITS;
@@ -123,6 +123,7 @@ public final class AssetLedgerRules {
     /** 同基线 ValidateAssetOpLedger；返回 null = 通过，否则是可进日志的损坏原因。 */
     public static String validate(AssetOpLedgerState state) {
         long previousStream = -1;
+        long receiptBytes = 0;
         for (int i = 0; i < state.getStreamsCount(); i++) {
             AssetOpStreamLedgerState ledger = state.getStreams(i);
             long stream = Integer.toUnsignedLong(ledger.getStream());
@@ -134,6 +135,8 @@ public final class AssetLedgerRules {
             if (reason != null) {
                 return reason;
             }
+            for (var receipt : ledger.getReceiptsList()) receiptBytes += receipt.getSerializedSize();
+            if (receiptBytes > 256 * 1024) return "实例回执总字节超过256KiB";
         }
         return null;
     }
@@ -203,6 +206,18 @@ public final class AssetLedgerRules {
             if (!testBit(applied, (int) (seq - watermark - 1))) {
                 return prefix + "partial_seqs 对应位不是 applied，seq=" + Long.toUnsignedString(seq);
             }
+        }
+        previous = 0;
+        if (ledger.getReceiptsCount() > WINDOW_BITS) return prefix + "实例回执数量越窗";
+        for (int i = 0; i < ledger.getReceiptsCount(); i++) {
+            var receipt = ledger.getReceipts(i);
+            long seq = receipt.getSeq();
+            if ((i > 0 && Long.compareUnsigned(seq, previous) <= 0) || !insideWindow(watermark, seq)
+                    || !testBit(applied, (int) (seq - watermark - 1)) || receipt.getRequestDigest().size() != 32
+                    || receipt.getSnapshotProto().size() > 64 * 1024 || receipt.getCorrelationId() == 0) {
+                return prefix + "实例回执损坏或超上限";
+            }
+            previous = seq;
         }
         return null;
     }

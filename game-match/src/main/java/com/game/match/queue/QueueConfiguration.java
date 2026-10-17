@@ -1,12 +1,14 @@
 package com.game.match.queue;
 
 import com.game.discovery.RedisKeys;
+import com.game.discovery.RedisProperties;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.gather.GatherLauncher;
 import com.game.match.id.MatchIds;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.port.PlayerStatusReader;
+import com.game.match.port.RedisClientWrites;
 import com.game.match.rating.RatingReader;
 import com.game.match.ticket.DefaultTicketHealing;
 import com.game.match.ticket.RedissonTicketStore;
@@ -28,23 +30,34 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration(proxyBeanMethods = false)
 public class QueueConfiguration {
+    @Bean public MatchMethodHandler getNetworkProbePlanHandler(org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){
+        return new com.game.match.global.ProbeHandlers.Plan(global::getIfAvailable);}
+    @Bean public MatchMethodHandler commitNetworkProbeHandler(org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){
+        return new com.game.match.global.ProbeHandlers.Commit(global::getIfAvailable);}
 
-    @Bean
-    public TicketStore ticketStore(RedissonClient redis, RedisKeys redisKeys) {
-        return new RedissonTicketStore(redis, redisKeys);
+    /** 客户端写（157 / 148、211 整队开战的整组建票）的 Redisson 超时以配置的 {@code game.redis.timeout-ms} 封顶（{@link RedisClientWrites}）。 */
+    public TicketStore ticketStore(RedissonClient redis, RedisKeys redisKeys, RedisProperties redisProperties) {
+        return new RedissonTicketStore(redis, redisKeys, RedisClientWrites.commandTimeout(redisProperties));
     }
+    @Bean(name="ticketStore")
+    public TicketStore configuredTicketStore(RedissonClient redis,RedisKeys keys,RedisProperties redisProperties,org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchStore> global){
+        var authority=global.getIfAvailable();return authority==null?ticketStore(redis,keys,redisProperties):new com.game.match.global.GlobalTicketStore(authority,keys);}
 
     @Bean
     public TicketHealing ticketHealing(TicketStore ticketStore) {
         return new DefaultTicketHealing(ticketStore);
     }
 
-    @Bean
     public QueueService queueService(MatchProperties props, PlayerStatusReader players, TicketStore ticketStore, TicketHealing ticketHealing,
                                      RatingReader ratings, GatherLauncher gather, MatchIds matchIds, MatchMetrics metrics,
                                      RedisKeys redisKeys) {
         return new QueueService(props, players, ticketStore, ticketHealing, ratings, gather, matchIds, metrics, redisKeys);
     }
+    @Bean(name="queueService")
+    public QueueService configuredQueueService(MatchProperties props,PlayerStatusReader players,TicketStore tickets,TicketHealing healing,
+            RatingReader ratings,GatherLauncher gather,MatchIds ids,MatchMetrics metrics,RedisKeys keys,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){
+        return queueService(props,players,tickets,healing,ratings,gather,ids,metrics,keys).withGlobal(global.getIfAvailable());}
 
     @Bean
     public MatchMethodHandler joinQueueHandler(QueueService queueService, MatchMetrics metrics) {

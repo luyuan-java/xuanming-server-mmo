@@ -4,8 +4,10 @@ import com.game.api.match.MatchBudgets;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.placement.PlacementRecords;
+import com.game.match.port.RedisClientWrites;
 import com.game.match.proto.BattlePlacement;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -61,16 +63,30 @@ public final class RedissonSpectateStore implements SpectateStore {
     private final RedissonClient redis;
     private final RedisKeys redisKeys;
     private final String watchableKey;
+    /** 配置的单条命令超时（{@code game.redis.timeout-ms}）：抢标记的 Redisson 超时取它与剩余预算的较小者（{@link RedisClientWrites}）。 */
+    private final Duration commandTimeout;
 
+    /** 命令超时取 {@code game.redis.timeout-ms} 的缺省值：只给直接 new 的测试用，生产装配走下一个构造器。 */
     public RedissonSpectateStore(RedissonClient redis, RedisKeys redisKeys) {
-        this(redis, redisKeys, redisKeys.matchWatchable());
+        this(redis, redisKeys, RedisClientWrites.DEFAULT_COMMAND_TIMEOUT);
+    }
+
+    /** @param commandTimeout 配置的单条命令超时（{@link RedisClientWrites#commandTimeout}），必须为正 */
+    public RedissonSpectateStore(RedissonClient redis, RedisKeys redisKeys, Duration commandTimeout) {
+        this(redis, redisKeys, redisKeys.matchWatchable(), commandTimeout);
+    }
+
+    /** 真 Redis 的集成测试用（自带索引键），命令超时取缺省值。 */
+    RedissonSpectateStore(RedissonClient redis, RedisKeys redisKeys, String watchableKey) {
+        this(redis, redisKeys, watchableKey, RedisClientWrites.DEFAULT_COMMAND_TIMEOUT);
     }
 
     /**
-     * @param watchableKey 可观战索引的键。生产恒为 {@link RedisKeys#matchWatchable()}；真 Redis 的集成测试给一把自己的键
-     *                     （以生产键为前缀，所以仍在 {@code {match}} 槽）——索引是全局的一把键，共用一台 Redis 的别的测试 / 进程里的清扫器会动它
+     * @param watchableKey   可观战索引的键。生产恒为 {@link RedisKeys#matchWatchable()}；真 Redis 的集成测试给一把自己的键
+     *                       （以生产键为前缀，所以仍在 {@code {match}} 槽）——索引是全局的一把键，共用一台 Redis 的别的测试 / 进程里的清扫器会动它
+     * @param commandTimeout 配置的单条命令超时，必须为正
      */
-    RedissonSpectateStore(RedissonClient redis, RedisKeys redisKeys, String watchableKey) {
+    private RedissonSpectateStore(RedissonClient redis, RedisKeys redisKeys, String watchableKey, Duration commandTimeout) {
         this.redis = Objects.requireNonNull(redis, "redis");
         this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         Objects.requireNonNull(watchableKey, "watchableKey");
@@ -78,6 +94,7 @@ public final class RedissonSpectateStore implements SpectateStore {
             throw new IllegalArgumentException("可观战索引的键必须以 " + redisKeys.matchWatchable() + " 开头（同一个 hash tag）: " + watchableKey);
         }
         this.watchableKey = watchableKey;
+        this.commandTimeout = RedisClientWrites.requireCommandTimeout(commandTimeout);
     }
 
     // ================================================================ 观战标记
@@ -98,9 +115,12 @@ public final class RedissonSpectateStore implements SpectateStore {
         requireNonEmptyMark(markValue);
         List<Object> keys = List.of(redisKeys.matchTicket(playerId), redisKeys.matchWatching(playerId));
         byte[][] args = {markBytes(markValue), ascii(Long.toString(MARK_TTL_MS))};
-        // 可变的几段脚本里只有这一段挡不住「迟到的重发」（标记一旦被调用方回滚，就没有东西可比）：等到截止而命令还在路上时，
-        // 调用方当场发的那次释放可能先于 Redisson 重发的那一遍到达 Redis——等在途的命令有了结局，再按值释放一次
-        long code = await("抢观战标记", d, () -> redis.getScript(ByteArrayCodec.INSTANCE).<Long>evalAsync(RScript.Mode.READ_WRITE, SpectateScripts.ACQUIRE,
+        // 可变的几段脚本里只有这一段挡不住「迟到的副本」（标记一旦被调用方回滚，就没有东西可比）：等到截止而命令还在路上时，
+        // 调用方当场发的那次释放可能先于在途的这一条到达 Redis——等在途的命令有了结局，再按值释放一次。
+        // 它是 163 的提交点（标记先于 AddObserver），按客户端写发出：不重发、等连接不越过截止、NOSCRIPT 之后先查截止再加载重发
+        // （RedisClientWrites.evalAsync）。原先带全局重发，截止前发出的一条可在约 4 s 后被原样重发、在 gate 放行同一会话的下一条之后才写下标记；
+        // 现在迟到的只剩已经写进连接的那一条，由这里的补释放兜。补释放挂在整条发出链的结局上：NOSCRIPT 之后的加载与重发也做完（或放弃）了才释放
+        long code = await("抢观战标记", d, () -> RedisClientWrites.<Long>evalAsync(redis, ByteArrayCodec.INSTANCE, d, commandTimeout, SpectateScripts.ACQUIRE,
                 RScript.ReturnType.INTEGER, keys, (Object[]) args), () -> releaseAsync(playerId, markValue));
         if (code == SpectateScripts.ACQUIRE_OK) {
             return Acquire.OK;
@@ -333,7 +353,8 @@ public final class RedissonSpectateStore implements SpectateStore {
      * 同上，另带一个「放弃之后」的收尾动作。
      *
      * @param afterAbandoned 可为 null。只在<b>放弃等待时命令还在路上</b>（等到截止、或等待被中断）这一种失败上用到：等在途的调用有了结局
-     *                       （成功或失败；Redisson 的重试到那时已经做完）之后调一次，在完成它的线程上（Redisson 的 I/O 线程）——必须不阻塞、不抛。
+     *                       （成功或失败；整条发出链——客户端写在 NOSCRIPT 之后的加载与重发——到那时已经做完）之后调一次，
+     *                       在完成它的线程上（Redisson 的 I/O 线程）——必须不阻塞、不抛。
      *                       截止已过没有发出、发不出去、异常完成、空回复都不调：那几种失败发生时已经没有在途的命令
      */
     private static <T> T await(String what, Deadline d, Supplier<? extends CompletionStage<T>> call, Runnable afterAbandoned) {

@@ -122,6 +122,15 @@ public final class ClientDispatcher {
      * 与 C++ 版 kMaxLaneWait 同值。
      */
     static final long MAX_BACKEND_LANE_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
+    /**
+     * 后端调用以<b>结果未知</b>的错误结束（请求已经交给 Dubbo、可能到了后端）时，会话后端 lane 至少等到「发出 + 本值」才放行下一条。
+     * 与 gate 调后端的 Dubbo 消费端超时同值（application.yaml {@code dubbo.consumer.timeout: 5000}，改一个要同改另一个）：
+     * 后端各自的请求预算都小于它、从受理时刻起算、提交点前查截止（PARITY「客户端请求按会话保序」逐方法核实），超时这条路径本来就要等满它；
+     * 断连、流被重置、提供方重启这类错误却会在后端 handler 还在跑时提前结束调用，立刻放行会让下一条与上一条的提交交错
+     * （mmorpg client-request-ordering.md §10 的 2026-10-16 订正）。同步抛出（请求根本没发出去）不等。
+     * C++ 版不需要这一条：gRPC 的取消沿 gate → 路由服 → 目标服务传播，目标 handler 的 ctx 随之结束，提交点前查 ctx。
+     */
+    static final long BACKEND_RESULT_UNKNOWN_HOLD_NANOS = TimeUnit.MILLISECONDS.toNanos(5000);
 
     private static final ClientTokenVerifyResponse VERIFY_OK = ClientTokenVerifyResponse.newBuilder().setSuccess(true).build();
 
@@ -391,6 +400,8 @@ public final class ClientDispatcher {
         s.cancelHandshakeTimeout();
         // 客户端先关（已重定向的会话正常就是这样收场）：收口定时器作废
         s.cancelRedirectLinger();
+        // 后端 lane 的延后放行一并作废：排队项随断线丢弃，不再发出
+        s.cancelBackendRelease();
         discardPending(s, RequestResult.DROPPED);
         // 已重定向的会话没有场景绑定，这里什么也不发
         leaveScene(s, s.leaveGameRequests > 0);
@@ -510,26 +521,32 @@ public final class ClientDispatcher {
                 .build();
         s.backendInFlight = true;
         Timer.Sample sample = metrics.startTimer();
+        long sentAtNanos = nanoClock.getAsLong();
         CompletableFuture<ClientReply> future;
+        boolean handedOff = true;
         try {
             future = backend.handle(call);
         } catch (RuntimeException e) {
             future = CompletableFuture.failedFuture(e);
+            handedOff = false;
         }
         if (future == null) {
             future = CompletableFuture.failedFuture(new IllegalStateException(domain + " 返回了 null future"));
+            handedOff = false;
         }
+        // 同步抛出 / 返回 null：请求没交给 Dubbo，失败时不必等（见 BACKEND_RESULT_UNKNOWN_HOLD_NANOS）
+        boolean mayHaveReachedBackend = handedOff;
         future.whenComplete((reply, error) -> {
             metrics.backendCallCompleted(domain, sample, error == null && reply != null);
-            s.execute(() -> onBackendCompleted(s, domain, request, reply, error));
+            s.execute(() -> onBackendCompleted(s, domain, request, reply, error, mayHaveReachedBackend, sentAtNanos));
         });
     }
 
     private void onBackendCompleted(ClientSession s, String domain, ClientRequest request, ClientReply reply,
-                                    Throwable error) {
-        s.backendInFlight = false;
+                                    Throwable error, boolean mayHaveReachedBackend, long sentAtNanos) {
         if (s.closing || s.closed) {
             // 连接已断：不再向客户端发送；断线流程不等这些后端（会话可能已释放），什么都不用补
+            s.backendInFlight = false;
             return;
         }
         if (error != null || reply == null) {
@@ -538,9 +555,31 @@ public final class ClientDispatcher {
             log.warn("{} 调用失败 session={} message_id={} 原因={}", domain, sid(s), request.getMessageId(),
                     rootCause(error).toString());
             s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
+            // 结果未知（请求可能已到后端、handler 可能还在跑）：回执照常立即给，但 lane 等到「发出 + 调用超时」才放行下一条。
+            // reply == null 且没有异常说明 handler 已经跑完（只是返回了空），不算未知。
+            long holdNanos = error != null && mayHaveReachedBackend
+                    ? sentAtNanos + BACKEND_RESULT_UNKNOWN_HOLD_NANOS - nanoClock.getAsLong() : 0;
+            if (holdNanos > 0 && s.scheduleBackendRelease(holdNanos, () -> onBackendReleaseDue(s))) {
+                log.info("{} 调用结果未知，会话后端 lane 延后 {} ms 放行 session={} message_id={} 排队={}", domain,
+                        TimeUnit.NANOSECONDS.toMillis(holdNanos), sid(s), request.getMessageId(), s.backendQueue.size());
+                return;
+            }
         } else {
             // 已重定向之前转出、之后才回来的应答也照常下发（zone-travel-spec §5.7：合规客户端已在换连接，无害）
             replyToClient(s, request, reply);
+        }
+        s.backendInFlight = false;
+        drainBackend(s);
+    }
+
+    /**
+     * 结果未知的延后放行到点（在会话所属 EventLoop 上）。直接持有会话对象而不按会话号重查：定时器只活到「发出 + 调用超时」，
+     * 断线时撤销，到点仍先看 closing / closed；持有对象本身也就不会被复用的会话号带到别的连接上。
+     */
+    private void onBackendReleaseDue(ClientSession s) {
+        s.backendInFlight = false;
+        if (s.closing || s.closed) {
+            return;
         }
         drainBackend(s);
     }

@@ -1,0 +1,53 @@
+# 每区实例都连接同一个命名空间TiDB库，禁止配置分区钱包/独立市场。
+spring:
+  application:
+    name: game-rank
+  main:
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
+    username: ${GAME_MYSQL_USER:root}
+    password: ${GAME_MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    druid:
+      initial-size: 1
+      min-idle: 1
+      max-active: 16
+      max-wait: 1000
+      default-transaction-isolation: 2
+server:
+  port: 18117
+  address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+game:
+  table-dir: config-data/tables
+  rank:
+    require-tidb: true
+    request-budget-ms: 3500
+  redis:
+    address: ${GAME_REDIS_ADDRESS:redis://127.0.0.1:6379}
+    database: 12
+dubbo:
+  application:
+    name: game-rank
+    qos-enable: false
+    serialize-check-status: STRICT
+  protocol:
+    name: tri
+    port: 20917
+    serialization: protobuf
+  registry:
+    address: N/A
+  consumer:
+    check: false
+    retries: 0
+    timeout: 3500
+  provider:
+    timeout: 3500
+    retries: 0

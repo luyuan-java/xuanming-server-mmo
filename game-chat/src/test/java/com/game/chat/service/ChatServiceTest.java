@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +32,8 @@ class ChatServiceTest {
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final MemoryStore store = new MemoryStore();
     private final AtomicLong clock = new AtomicLong(1_000);
+    /** 可拨的单调时钟（纳秒，{@link #clocked} 用）：截止由它起算；存储桩在某一步里把它拨过截止，模拟「那一步恰在截止前后返回」。 */
+    private final AtomicLong nanos = new AtomicLong(5_000_000_000L);
     private final ChatService service = new ChatService(store, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7),
             20, 50, Duration.ofSeconds(60), clock::get, REDIS_KEYS, List.of());
 
@@ -223,17 +226,81 @@ class ChatServiceTest {
         assertThat(service.clampLimit(-1)).isEqualTo(50); // uint32 的大值
     }
 
+    // ================================================================ 请求截止（mmorpg client-request-ordering.md §6.1）
+
+    private ChatService clocked(ChatStore s) {
+        return new ChatService(s, new ChatMetrics(registry), 512, 5, 200, Duration.ofDays(7), 20, 50,
+                Duration.ofSeconds(60), clock::get, REDIS_KEYS, List.of(), nanos::get);
+    }
+
+    /**
+     * 发言的提交点：限速计数回来时截止已过 → 不写历史、释放占位、回 1003。gate 在 chat 回包之后就放行同一会话的下一条，
+     * 这时再写历史就是「客户端收到 1003、换来一条后到的消息」。
+     */
+    @Test
+    void 限速返回时截止已过_不写历史_释放幂等键_回1003() {
+        MemoryStore late = new MemoryStore() {
+            @Override
+            public synchronized CompletionStage<Long> incrWithTtl(String key, long ttlSeconds, Duration timeout) {
+                // 计数已落地，回来时已越过 1000 ms 的请求截止
+                nanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(1000) + 1);
+                return super.incrWithTtl(key, ttlSeconds, timeout);
+            }
+        };
+
+        SendChatResponse r = clocked(late).send(1, world("late", "req-late"), 1000).toCompletableFuture().join();
+
+        assertThat(r.getErrorMessage().getId()).isEqualTo(ChatService.STORAGE);
+        assertThat(late.counters).as("限速那一步确实发出了（测的是写历史之前的检查）").containsKey(REDIS_KEYS.chatRateLimit(1));
+        assertThat(late.lists).as("截止之后不写历史").isEmpty();
+        assertThat(late.strings).as("占位已释放，客户端可用同一 request_id 重试")
+                .doesNotContainKey(REDIS_KEYS.chatRequestId(1, "req-late"));
+        assertThat(sends("world", "storage_error")).isEqualTo(1);
+    }
+
+    @Test
+    void 受理时预算已用完_占位限速写历史一条都不发_回1003() {
+        assertThat(clocked(store).send(1, world("x", "req-0"), 0).toCompletableFuture().join().getErrorMessage().getId())
+                .isEqualTo(ChatService.STORAGE);
+        assertThat(clocked(store).send(1, world("x", ""), 0).toCompletableFuture().join().getErrorMessage().getId())
+                .isEqualTo(ChatService.STORAGE);
+        assertThat(store.strings).isEmpty();
+        assertThat(store.counters).isEmpty();
+        assertThat(store.lists).isEmpty();
+    }
+
+    /** 三个客户端写各自收到发出时的剩余预算作超时（存储据此不重发、等连接不越过截止）。 */
+    @Test
+    void 三个客户端写的超时取发出时的剩余预算() {
+        MemoryStore slow = new MemoryStore() {
+            @Override
+            public synchronized CompletionStage<Long> incrWithTtl(String key, long ttlSeconds, Duration timeout) {
+                nanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(300)); // 限速这一步花了 300 ms
+                return super.incrWithTtl(key, ttlSeconds, timeout);
+            }
+        };
+
+        assertThat(clocked(slow).send(1, world("x", "req-t"), 1000).toCompletableFuture().join().hasErrorMessage()).isFalse();
+
+        assertThat(slow.timeouts).containsEntry("claim:" + REDIS_KEYS.chatRequestId(1, "req-t"), Duration.ofMillis(1000))
+                .containsEntry("incr:" + REDIS_KEYS.chatRateLimit(1), Duration.ofMillis(1000))
+                .containsEntry("append:" + REDIS_KEYS.chatWorldLog(), Duration.ofMillis(700));
+    }
+
     /** 内存版 ChatStore（语义同五段脚本）。 */
     static class MemoryStore implements ChatStore {
         final Map<String, String> strings = new HashMap<>();
         final Map<String, Long> counters = new HashMap<>();
         final Map<String, LinkedList<byte[]>> lists = new HashMap<>();
         final Map<String, Long> ttls = new HashMap<>();
+        /** 三个客户端写各自收到的超时（「操作:键」→ 超时），核对「超时取发出时的剩余预算」。 */
+        final Map<String, Duration> timeouts = new HashMap<>();
         boolean failAppend;
         boolean failRange;
 
         @Override
-        public synchronized CompletionStage<Boolean> claim(String key, String value, long ttlSeconds) {
+        public synchronized CompletionStage<Boolean> claim(String key, String value, long ttlSeconds, Duration timeout) {
+            timeouts.put("claim:" + key, timeout);
             if (strings.containsKey(key)) {
                 return CompletableFuture.completedFuture(false);
             }
@@ -266,14 +333,17 @@ class ChatServiceTest {
         }
 
         @Override
-        public synchronized CompletionStage<Long> incrWithTtl(String key, long ttlSeconds) {
+        public synchronized CompletionStage<Long> incrWithTtl(String key, long ttlSeconds, Duration timeout) {
+            timeouts.put("incr:" + key, timeout);
             long n = counters.merge(key, 1L, Long::sum);
             ttls.put(key, ttlSeconds);
             return CompletableFuture.completedFuture(n);
         }
 
         @Override
-        public synchronized CompletionStage<Void> append(String key, byte[] message, int maxEntries, long ttlSeconds) {
+        public synchronized CompletionStage<Void> append(String key, byte[] message, int maxEntries, long ttlSeconds,
+                                                         Duration timeout) {
+            timeouts.put("append:" + key, timeout);
             if (failAppend) {
                 return CompletableFuture.failedFuture(new IllegalStateException("redis down"));
             }

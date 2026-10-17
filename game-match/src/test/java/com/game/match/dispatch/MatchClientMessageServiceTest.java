@@ -97,11 +97,15 @@ class MatchClientMessageServiceTest {
     /** 字段 1 声明成长度前缀、长度却超出剩余字节：任何消息类型都解析不了。 */
     private static final ByteString TRUNCATED = ByteString.copyFrom(new byte[] {0x0A, 0x7F, 0x01});
 
-    private static final Map<String, Integer> IDS = Map.of(
+    private static final Map<String, Integer> IDS = new java.util.HashMap<>(Map.of(
             MatchMethods.JOIN_QUEUE, 157, MatchMethods.CANCEL_QUEUE, 148, MatchMethods.GET_QUEUE_STATUS, 153,
             MatchMethods.CHALLENGE_PLAYER, 152, MatchMethods.RESPOND_CHALLENGE, 151, MatchMethods.REQUEST_BATTLE_TICKET, 179,
             MatchMethods.NOTIFY_CHALLENGE_INVITE, 156, MatchMethods.NOTIFY_CHALLENGE_RESULT, 154,
-            MatchMethods.WATCH_BATTLE, 163, MatchMethods.LIST_WATCHABLE_BATTLES, 164);
+            MatchMethods.WATCH_BATTLE, 163, MatchMethods.LIST_WATCHABLE_BATTLES, 164));
+    static {
+        IDS.put(MatchMethods.GET_NETWORK_PROBE_PLAN,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.GET_NETWORK_PROBE_PLAN));
+        IDS.put(MatchMethods.COMMIT_NETWORK_PROBE,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.COMMIT_NETWORK_PROBE));
+    }
     private static final List<String> INLINE = List.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
@@ -209,6 +213,8 @@ class MatchClientMessageServiceTest {
         add(handlers, new Business(MatchMethods.LIST_WATCHABLE_BATTLES,
                 Reply.body(ListWatchableBattlesResponse.newBuilder().addBattles(BattleWatchSummary.newBuilder().setBattleId(164_000)).build()),
                 Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
+        add(handlers,new Business(MatchMethods.GET_NETWORK_PROBE_PLAN,Reply.body(com.game.proto.match.GetNetworkProbePlanResponse.getDefaultInstance()),Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
+        add(handlers,new Business(MatchMethods.COMMIT_NETWORK_PROBE,Reply.body(com.game.proto.match.CommitNetworkProbeResponse.getDefaultInstance()),Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
         return handlers;
     }
 
@@ -430,7 +436,10 @@ class MatchClientMessageServiceTest {
         CompletableFuture<ClientReply> watch = service.handle(call(MatchMethods.WATCH_BATTLE));
         CompletableFuture<ClientReply> list = service.handle(call(MatchMethods.LIST_WATCHABLE_BATTLES));
 
-        assertThat(List.of(join, challenge, respond, reissue, cancel, status, watch, list)).as("拒收当场应答，不等工作线程")
+        CompletableFuture<ClientReply> plan = service.handle(call(MatchMethods.GET_NETWORK_PROBE_PLAN));
+        CompletableFuture<ClientReply> commit = service.handle(call(MatchMethods.COMMIT_NETWORK_PROBE));
+
+        assertThat(List.of(join, challenge, respond, reissue, cancel, status, watch, list, plan, commit)).as("拒收当场应答，不等工作线程")
                 .allSatisfy(f -> assertThat(f).isDone());
         assertThat(watch.get().getTipId()).as("163 有 in-band 错误字段").isZero();
         WatchBattleResponse watched = WatchBattleResponse.parseFrom(watch.get().getBody());
@@ -449,7 +458,7 @@ class MatchClientMessageServiceTest {
         RequestBattleTicketResponse reissued = RequestBattleTicketResponse.parseFrom(reissue.get().getBody());
         assertInBandBusy(reissued.getErrorMessage());
         assertThat(reissued.hasAssignment()).isFalse();
-        for (CompletableFuture<ClientReply> envelope : List.of(cancel, status, list)) {
+        for (CompletableFuture<ClientReply> envelope : List.of(cancel, status, list, plan, commit)) {
             assertThat(envelope.get().getTipId()).as("148 / 153 / 164 没有 in-band 错误字段：信封").isEqualTo(1003);
             assertThat(envelope.get().getBody().isEmpty()).isTrue();
             assertThat(envelope.get().getTipParametersList()).isEmpty();
@@ -531,7 +540,8 @@ class MatchClientMessageServiceTest {
                 Runnable::run, 60_000, IDS.get(MatchMethods.NOTIFY_CHALLENGE_INVITE), IDS.get(MatchMethods.NOTIFY_CHALLENGE_RESULT));
         BattleTicketReissue reissue = new BattleTicketReissue(realPlacements, new FakePlacementDialer(new FakeBattleNode()), metrics);
         InlineHandlers inline = new InlineHandlers();
-        return List.of(new QueueHandlers.Join(queue, metrics), new QueueHandlers.Cancel(queue), new QueueHandlers.Status(queue),
+        return List.of(new com.game.match.global.ProbeHandlers.Plan(()->null),new com.game.match.global.ProbeHandlers.Commit(()->null),
+                new QueueHandlers.Join(queue, metrics), new QueueHandlers.Cancel(queue), new QueueHandlers.Status(queue),
                 new ReissueHandler(reissue), ChallengeHandlers.challengePlayer(challenge, metrics),
                 ChallengeHandlers.respondChallenge(challenge, metrics), inline.notifyChallengeInviteUplinkHandler(),
                 inline.notifyChallengeResultUplinkHandler());
@@ -601,7 +611,8 @@ class MatchClientMessageServiceTest {
         List<String> spectate = List.of(MatchMethods.WATCH_BATTLE, MatchMethods.LIST_WATCHABLE_BATTLES);
         assertThat(handlers.stream().map(MatchMethodHandler::method))
                 .containsExactlyInAnyOrderElementsOf(MatchMethods.ALL.stream().filter(method -> !spectate.contains(method)).toList());
-        assertThat(dispatcher.handledMessageIds()).containsExactly(148, 151, 152, 153, 154, 156, 157, 179);
+        assertThat(dispatcher.handledMessageIds()).containsExactlyElementsOf(MatchMethods.ALL.stream().filter(m->!spectate.contains(m))
+                .map(m->REGISTRY.requireId(MatchMethods.SERVICE,m)).sorted().toList());
         assertThat(dispatcher.unhandledMethods()).as("163 / 164 的处理器由观战包提供（这里没装）").containsExactly("ListWatchableBattles", "WatchBattle");
         assertThat(handlers.stream().filter(MatchMethodHandler::inline).map(MatchMethodHandler::method))
                 .as("不涉及 I/O、当场回的只有这两个").containsExactlyInAnyOrderElementsOf(INLINE);

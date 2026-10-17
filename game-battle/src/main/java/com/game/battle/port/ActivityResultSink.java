@@ -15,4 +15,6 @@ import com.game.proto.contracts.kafka.BattleResultEvent;
 public interface ActivityResultSink {
 
     void dispatch(BattleResultEvent event);
+    /** 结果已取得 broker 持久确认；这里只维护兼容补拉投影，失败不能重算原结果。 */
+    default void dispatchCommitted(BattleResultEvent event){dispatch(event);}
 }

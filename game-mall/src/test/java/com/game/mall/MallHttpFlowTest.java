@@ -40,6 +40,7 @@ class MallHttpFlowTest {
         assertThat(namespace.value()).isEqualTo("mallhttp");
         ready.verify();
         jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (1,1,'http-sku',1250,'CNY',10,0,1)");
+        jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(1,10,1,'玄铁')");
         String buyer = "18446744073709551615";
         String body = "{\"requestId\":\"http-request-001\",\"skuId\":1,\"quantity\":2}";
         HttpRequest request = signed("gateway", buyer, "POST", "/api/orders", body, System.currentTimeMillis());

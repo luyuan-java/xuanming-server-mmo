@@ -1,0 +1,49 @@
+syntax = "proto3";
+package game.guild.store;
+option java_package = "com.game.guild.activity.pb";
+option java_multiple_files = true;
+import "proto2mysql/proto2mysql_option.proto";
+option (proto2mysql.db) = true;
+
+// 本版自有活动表；仅追加，不与Go部署混用。业务锁序G/M/Q/O/C/P/T/W。
+message ActivityProgressRow {
+  option (proto2mysql.table_name) = "guild_activity_progress";
+  option (proto2mysql.primary_key) = "guild_id,activity_id,period_key";
+  uint64 guild_id=1; uint32 activity_id=2; uint32 period_key=3;
+  uint32 progress=4; bool threshold_reached=5; bool funds_granted=6;
+}
+message ActivitySlotRow {
+  option (proto2mysql.table_name) = "guild_activity_slot";
+  option (proto2mysql.primary_key) = "player_id";
+  uint64 player_id=1; uint64 lobby_id=2; uint64 expires_ms=3; uint64 cooldown_ms=4;
+}
+message TrialLobbyRow {
+  option (proto2mysql.table_name) = "guild_trial_lobby";
+  option (proto2mysql.primary_key) = "lobby_id";
+  option (proto2mysql.index) = "state,next_attempt_ms;guild_id";
+  uint64 lobby_id=1; uint64 guild_id=2; uint32 activity_id=3; uint32 state=4;
+  bytes view_proto=5; bytes request_proto=6;
+  uint64 next_attempt_ms=7; uint64 lease_token=8; uint64 lease_until_ms=9;
+  uint64 created_ms=10; uint64 battle_id=11;
+}
+message TrialBattleRow {
+  option (proto2mysql.table_name) = "guild_trial_battle";
+  option (proto2mysql.primary_key) = "battle_id";
+  option (proto2mysql.index) = "state,next_inspect_ms;guild_id";
+  uint64 battle_id=1; uint64 guild_id=2; uint32 activity_id=3;
+  bytes context_proto=4; uint32 state=5; uint64 created_ms=6;
+  bytes result_hash=7; bytes result_proto=8; uint64 next_inspect_ms=9;
+}
+message ActivityRewardRow {
+  option (proto2mysql.table_name) = "guild_activity_reward_owed";
+  option (proto2mysql.primary_key) = "reward_id";
+  option (proto2mysql.index) = "status,next_attempt_ms,reward_id;player_id";
+  uint64 reward_id=1; uint64 player_id=2; uint64 guild_id=3;
+  uint32 activity_id=4; uint32 period_key=5; bytes payload=6;
+  uint32 status=7; uint64 op_id=8; uint64 created_ms=9; uint64 next_attempt_ms=10;
+}
+message ActivityPoisonRow {
+  option (proto2mysql.table_name) = "guild_activity_result_poison";
+  option (proto2mysql.primary_key) = "topic,partition_id,offset_id";
+  uint32 partition_id=1; uint64 offset_id=2; bytes payload=3; string topic=4; uint64 created_ms=5;
+}

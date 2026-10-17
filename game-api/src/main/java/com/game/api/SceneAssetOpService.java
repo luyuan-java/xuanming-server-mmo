@@ -34,4 +34,9 @@ public interface SceneAssetOpService {
 
     /** 发放（*_CREDIT 流）。 */
     CompletableFuture<AssetOpResponse> credit(AssetOpRequest request);
+
+    /** 旧提供方不支持ACK时失败关闭，由原待办稍后重试。 */
+    default CompletableFuture<AssetOpResponse> ackReceipt(AssetOpRequest request) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("实例回执确认暂不可用"));
+    }
 }

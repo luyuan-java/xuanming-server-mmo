@@ -24,7 +24,7 @@ class MatchMethodsTest {
 
     @Test
     void 十个方法的消息号与规格的表一致() {
-        Map<String, Integer> expected = Map.of(
+        Map<String, Integer> expected = new java.util.HashMap<>(Map.of(
                 MatchMethods.JOIN_QUEUE, 157,
                 MatchMethods.CANCEL_QUEUE, 148,
                 MatchMethods.GET_QUEUE_STATUS, 153,
@@ -34,7 +34,9 @@ class MatchMethodsTest {
                 MatchMethods.NOTIFY_CHALLENGE_RESULT, 154,
                 MatchMethods.WATCH_BATTLE, 163,
                 MatchMethods.LIST_WATCHABLE_BATTLES, 164,
-                MatchMethods.REQUEST_BATTLE_TICKET, 179);
+                MatchMethods.REQUEST_BATTLE_TICKET, 179));
+        expected.put(MatchMethods.GET_NETWORK_PROBE_PLAN,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.GET_NETWORK_PROBE_PLAN));
+        expected.put(MatchMethods.COMMIT_NETWORK_PROBE,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.COMMIT_NETWORK_PROBE));
 
         assertThat(MatchMethods.ALL).containsExactlyInAnyOrderElementsOf(expected.keySet());
         expected.forEach((method, id) ->

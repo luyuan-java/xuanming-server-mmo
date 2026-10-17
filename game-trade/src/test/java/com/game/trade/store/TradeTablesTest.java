@@ -84,7 +84,7 @@ class TradeTablesTest {
 
     @Test
     void 登记顺序与表名() {
-        assertThat(TradeTables.NAMES).containsExactly("trade_listing", "trade_favorite");
+        assertThat(TradeTables.NAMES).containsExactly("trade_listing", "trade_favorite","trade_commerce","trade_commerce_guard","trade_player_op_seq","trade_asset_op");
         PbMysql db = TradeTables.registry();
         List<String> registered = TradeTables.PROTOTYPES.stream().map(m -> db.schema(m).tableName()).toList();
         assertThat(registered).isEqualTo(TradeTables.NAMES);

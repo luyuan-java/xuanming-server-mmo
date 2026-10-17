@@ -1,6 +1,7 @@
 package com.game.login.token;
 
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * access / refresh 令牌（同 mmorpg {@code go/login/internal/logic/pkg/token}）：
@@ -22,8 +23,29 @@ public interface LoginTokens {
     Optional<TokenData> validateAccess(String accessToken);
 
     /**
+     * 轮换，不设截止（HTTP {@code /api/refresh-token}：不走 gate 的会话 lane，没有「下一条请求」要保序）。
+     * 语义见 {@link #refresh(String, BooleanSupplier)}。
+     */
+    default Optional<TokenPair> refresh(String refreshToken) {
+        return refresh(refreshToken, () -> false);
+    }
+
+    /**
      * 轮换：refresh token 有效时作废它并签新的一对；宽限窗口内重放已轮换的旧 refresh（且新 refresh 未用过）返回同一对；
      * 无效 / 过期 / 已被用过且不在窗口内 / 新 refresh 已用过 / 空串为空。
+     *
+     * <p>{@code pastDeadline}：读到旧 refresh 之后、发出轮换（作废与签发是同一步原子写）之前看一次，为真就什么都不写，
+     * 抛 {@link RotationAbandoned}，旧 refresh 仍然有效。客户端路径传请求截止：截止之后 gate 随时会按超时放行同一会话的下一条请求，
+     * 这时再轮换会晚于它落地（mmorpg client-request-ordering.md §6.1，同 {@code token.go} Refresh 提交前查 ctx）。
+     * 重放判定（旧 refresh 已不在时）只读不写，不看截止。
      */
-    Optional<TokenPair> refresh(String refreshToken);
+    Optional<TokenPair> refresh(String refreshToken, BooleanSupplier pastDeadline);
+
+    /** 轮换在写之前因请求截止放弃：什么都没写，旧 refresh 仍然有效，调用方应回可重试的错误（不是「令牌无效」）。 */
+    final class RotationAbandoned extends RuntimeException {
+
+        public RotationAbandoned(String message) {
+            super(message, null, false, false);
+        }
+    }
 }

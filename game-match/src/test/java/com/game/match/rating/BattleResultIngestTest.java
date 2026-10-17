@@ -65,6 +65,7 @@ class BattleResultIngestTest {
     /** 内存里的 topic 管理口：记下建了什么、改了什么配置；可以让接下来的若干次调用报「连不上」。 */
     private static final class FakeAdmin implements TopicAdmin {
         final Map<String, Integer> partitions = new ConcurrentHashMap<>();
+        final Map<String, Integer> replicas = new ConcurrentHashMap<>();
         final Map<String, Map<String, String>> configs = new ConcurrentHashMap<>();
         final List<String> created = new CopyOnWriteArrayList<>();
         final List<Map<String, String>> altered = new CopyOnWriteArrayList<>();
@@ -86,11 +87,18 @@ class BattleResultIngestTest {
             return out;
         }
 
+        @Override public Map<String,Integer> minimumReplicaCounts(Collection<String> topics,Duration timeout) {
+            Map<String,Integer> out=new HashMap<>();
+            for(String topic:topics)if(replicas.containsKey(topic))out.put(topic,replicas.get(topic));
+            return out;
+        }
+
         @Override
         public void create(Collection<TopicSpec> specs, short replicationFactor, Duration timeout) {
             for (TopicSpec spec : specs) {
                 created.add(spec.name() + "/" + spec.partitions() + "/rf" + replicationFactor);
                 partitions.put(spec.name(), spec.partitions());
+                replicas.put(spec.name(),(int)replicationFactor);
                 configs.put(spec.name(), new HashMap<>(spec.configs()));
             }
         }
@@ -150,6 +158,25 @@ class BattleResultIngestTest {
 
     private static byte[] result(long battleId) {
         return BattleResultEvent.newBuilder().setBattleId(battleId).setMatchMode(MatchModes.ONE_V_ONE).build().toByteArray();
+    }
+
+    @Test void 全球关闭评分消费也不能绕过准入前耐久topic门禁(){
+        ingest=new BattleResultIngest(new BattleResultIngest.Settings(false,GENERATION,(short)1,Duration.ofSeconds(1),true),
+                new BattleResultTopics(KAFKA_NAMES),adminFactory(),consumerFactory(),handled::add,metrics);
+        assertThatThrownBy(ingest::requireDurableTopicBeforeAdmission).isInstanceOf(AuditTopicContractException.class);
+        assertThatThrownBy(ingest::start).isInstanceOf(AuditTopicContractException.class);
+        assertThat(consumers).isEmpty();assertThat(ingest.isRunning()).isFalse();
+    }
+
+    @Test void 全球关闭评分仍启动来源归档消费() {
+        admin.partitions.put(TOPIC,3);admin.replicas.put(TOPIC,3);
+        admin.configs.put(TOPIC,new HashMap<>(Map.of("min.insync.replicas","2","unclean.leader.election.enable","false")));
+        ingest=new BattleResultIngest(new BattleResultIngest.Settings(false,GENERATION,(short)3,Duration.ofSeconds(1),true),
+                new BattleResultTopics(KAFKA_NAMES),adminFactory(),consumerFactory(),handled::add,metrics,
+                Duration.ofMillis(30),Duration.ofMillis(30),Duration.ofMillis(10));
+        ingest.start();
+        await().atMost(WAIT).until(ingest::consuming);
+        assertThat(consumers).hasSize(1);assertThat(ingest.isRunning()).isTrue();
     }
 
     @Test

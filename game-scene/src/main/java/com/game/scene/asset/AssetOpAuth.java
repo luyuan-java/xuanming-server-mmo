@@ -40,7 +40,9 @@ public final class AssetOpAuth {
             new CallerRule(AssetOpSignatures.CALLER_GUILD, AssetOpSignatures.SECRET_ENV_GUILD,
                     List.of(AssetStream.ASSET_STREAM_GUILD_DEBIT, AssetStream.ASSET_STREAM_GUILD_CREDIT)),
             new CallerRule(AssetOpSignatures.CALLER_TRADE, AssetOpSignatures.SECRET_ENV_TRADE,
-                    List.of(AssetStream.ASSET_STREAM_TRADE_DEBIT, AssetStream.ASSET_STREAM_TRADE_CREDIT)));
+                    List.of(AssetStream.ASSET_STREAM_TRADE_DEBIT, AssetStream.ASSET_STREAM_TRADE_CREDIT)),
+            new CallerRule(AssetOpSignatures.CALLER_MAIL, AssetOpSignatures.SECRET_ENV_MAIL,
+                    List.of(AssetStream.ASSET_STREAM_SYSTEM_CREDIT)));
 
     private final Function<String, String> secretLookup;
     /** 已报过「密钥未配置」的调用方。 */

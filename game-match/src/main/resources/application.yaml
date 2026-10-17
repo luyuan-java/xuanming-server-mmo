@@ -77,6 +77,17 @@ game:
     address: redis://127.0.0.1:6379
     database: 12
   match:
+    rank-publisher:
+      host: ${GAME_RANK_RPC_HOST:127.0.0.1}
+      port: ${GAME_RANK_RPC_PORT:20917}
+      secret: ${RANK_PRODUCER_SECRET_MATCH:}
+    global:
+      enabled: ${GLOBAL_MATCH_ENABLED:false}
+      require-ti-db: true
+      wait-seconds: 30
+      hard-latency-ms: 180
+      profile-ttl-seconds: 120
+      probe-secret: ${MATCH_PROBE_SECRET:}
     # 工作池：客户端请求、MatchTeamService 的前三个方法、MatchInternalService 都在它上面阻塞等 Redis / MySQL；满了按各方法的「过载」应答回。
     worker:
       threads: 16
@@ -128,7 +139,7 @@ game:
     kafka:
       bootstrap-servers: ${GAME_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
       topic-generation: ${GAME_BATTLE_RESULT_TOPIC_GENERATION:1}
-      replication-factor: 1
+      replication-factor: ${KAFKA_TOPIC_REPLICATION_FACTOR:1}
       init-timeout: 10s
 
 dubbo:

@@ -4,6 +4,7 @@ import com.game.player.store.asset.AssetLedgerRules;
 import com.game.player.store.asset.AssetSeqState;
 import com.game.player.store.state.AssetOpLedgerState;
 import com.game.player.store.state.AssetOpRejectionState;
+import com.game.player.store.state.AssetOpReceiptState;
 import com.game.player.store.state.AssetOpStreamLedgerState;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.Arrays;
@@ -17,7 +18,7 @@ import java.util.TreeSet;
  *       窗口只跟着「本纪元见过的最大 seq」上滑，不做连续前缀压缩（压缩会把调用方仍未决、这边已记账的 seq 挤出窗口）；</li>
  *   <li>两组位：seen（见过）与 applied（已应用，⊆ seen）；见过未应用 = 拒绝；</li>
  *   <li>拒绝原因环至多 64 条、只收非 0 原因（中止占位不占名额），挤掉最小的；被挤掉的原因退化成 0，账务不受影响（结局只看位图）；</li>
- *   <li>部分发放名单至多 64 条，挤掉最小的；</li>
+ *   <li>部分发放标记保留整个 1024 位窗口；首次回包丢失也不能把部分发放重查成成功；</li>
  *   <li>同纪元跳号上限：seq ≤ max_seq + 1024；请求纪元更大时按空账本看，真正的整条流重置只在确定要记账时做；</li>
  *   <li>加载时校验自洽（{@link #restore}）；损坏不改写、原样带回，调用方据 {@link #invalidReason()} 关闭该玩家的资产通道（fail-closed）。</li>
  * </ul>
@@ -32,6 +33,8 @@ public final class AssetOpLedger {
     public static final int MAX_REJECTIONS = AssetLedgerRules.MAX_REJECTIONS;
     public static final int MAX_PARTIAL_SEQS = AssetLedgerRules.MAX_PARTIAL_SEQS;
     public static final long MAX_SEQ_JUMP = AssetLedgerRules.MAX_SEQ_JUMP;
+    public static final int MAX_RECEIPT_BYTES = 256 * 1024;
+    public static final int MAX_SNAPSHOT_BYTES = 64 * 1024;
 
     /** 一次结局写什么。APPLIED_PARTIAL 在位图上同 APPLIED，另把 seq 记进部分发放名单。 */
     public enum RecordKind { APPLIED, APPLIED_PARTIAL, REJECTED }
@@ -130,6 +133,36 @@ public final class AssetOpLedger {
         return s == null ? 0 : s.maxSeq;
     }
 
+    public AssetOpReceiptState receipt(int stream, long epoch, long seq) {
+        Stream state = streams.get(stream);
+        return state == null || state.epoch != epoch ? null : state.receipts.get(seq);
+    }
+
+    /** 先于任何资产副作用检查，满则等待交易库提交后的ACK腾出空间。 */
+    public boolean canKeepReceipt(AssetOpReceiptState receipt) {
+        if (receipt.getSnapshotProto().size() > MAX_SNAPSHOT_BYTES) return false;
+        long bytes = receipt.getSerializedSize();
+        for (Stream state : streams.values()) {
+            for (var existing : state.receipts.values()) bytes += existing.getSerializedSize();
+        }
+        return bytes <= MAX_RECEIPT_BYTES;
+    }
+
+    public void keepReceipt(int stream, long epoch, AssetOpReceiptState receipt) {
+        Stream state = streams.get(stream);
+        if (state == null || state.epoch != epoch || classify(stream, epoch, receipt.getSeq()) != AssetSeqState.APPLIED
+                || !canKeepReceipt(receipt)) throw new IllegalStateException("实例回执记账前置被破坏");
+        state.receipts.put(receipt.getSeq(), receipt);
+    }
+
+    /** 只删除快照，不清seen/applied位。交易库先持久保存完整snapshot后才可调用。 */
+    public void ackReceipt(int stream, long epoch, long seq, long correlationId) {
+        Stream state = streams.get(stream);
+        var receipt = receipt(stream, epoch, seq);
+        if (receipt != null && receipt.getCorrelationId() != correlationId) throw new IllegalArgumentException("回执关联号不符");
+        if (state != null && state.epoch == epoch) state.receipts.remove(seq);
+    }
+
     /** 窗口内某个被拒 seq 的原因；查不到（不在环里 / 被挤掉 / 中止占位 / 不是拒绝）回 0。 */
     public int rejectionReason(int stream, long seq) {
         Stream s = streams.get(stream);
@@ -190,10 +223,7 @@ public final class AssetOpLedger {
         }
         if (kind == RecordKind.APPLIED_PARTIAL) {
             s.partials.add(seq);
-            // 超过上限丢最小的一条（基线 §4.33）：之后重查答 partial = false；首次答复一定带 partial = true，人工补偿以当时的 ERROR 日志为准
-            while (s.partials.size() > MAX_PARTIAL_SEQS) {
-                s.partials.pollFirst();
-            }
+            // 只随位图窗口剪枝，不能按固定条数丢失仍可查询的部分结局。
         }
         if (kind == RecordKind.REJECTED && reasonTipId != 0) {
             s.rejections.put(seq, AssetOpRejectionState.newBuilder().setSeq(seq).setReasonTipId(reasonTipId).build());
@@ -256,6 +286,7 @@ public final class AssetOpLedger {
         final TreeMap<Long, AssetOpRejectionState> rejections = new TreeMap<>(Long::compareUnsigned);
         /** 部分发放的 seq，按无符号升序。 */
         final TreeSet<Long> partials = new TreeSet<>(Long::compareUnsigned);
+        final TreeMap<Long, AssetOpReceiptState> receipts = new TreeMap<>(Long::compareUnsigned);
         /** 存档里本版本不认识的字段：原样带回。 */
         private final UnknownFieldSet unknownFields;
 
@@ -279,6 +310,7 @@ public final class AssetOpLedger {
                 s.rejections.put(rejection.getSeq(), rejection);
             }
             s.partials.addAll(stored.getPartialSeqsList());
+            for (var receipt : stored.getReceiptsList()) s.receipts.put(receipt.getSeq(), receipt);
             return s;
         }
 
@@ -316,12 +348,14 @@ public final class AssetOpLedger {
             Arrays.fill(applied, 0);
             rejections.clear();
             partials.clear();
+            receipts.clear();
         }
 
         /** 窗口上滑之后，seq ≤ 新 watermark 的原因 / 部分发放条目已不可查询，删掉。 */
         void pruneAtOrBelow(long newWatermark) {
             rejections.headMap(newWatermark, true).clear();
             partials.headSet(newWatermark, true).clear();
+            receipts.headMap(newWatermark, true).clear();
         }
 
         AssetOpStreamLedgerState toState() {
@@ -337,6 +371,7 @@ public final class AssetOpLedger {
             }
             state.addAllRejections(rejections.values());
             state.addAllPartialSeqs(partials);
+            state.addAllReceipts(receipts.values());
             return state.build();
         }
     }

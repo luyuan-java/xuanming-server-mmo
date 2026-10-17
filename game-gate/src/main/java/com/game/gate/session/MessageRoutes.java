@@ -74,6 +74,8 @@ public interface MessageRoutes {
             "ClientPlayerTeam", DubboGroups.TEAM,
             "GuildService", DubboGroups.GUILD,
             "ClientPlayerJubaozhai", DubboGroups.TRADE,
+            "ClientPlayerMail", DubboGroups.MAIL,
+            "ClientPlayerRank", DubboGroups.RANK,
             "MatchService", DubboGroups.MATCH);
 
     /** 客户端可发的消息号的路由；消息号不存在或不属于客户端协议服务时返回 null。 */

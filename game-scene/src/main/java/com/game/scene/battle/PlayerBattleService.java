@@ -177,7 +177,8 @@ public final class PlayerBattleService implements BattleHooks {
         long playerId = request.getPlayerId();
         long battleId = request.getBattleId();
         long deadline = request.getDeadlineMs();
-        if (playerId == 0 || battleId == 0 || deadline == 0) {
+        long prepareDeadline = request.getPrepareDeadlineMs() != 0 ? request.getPrepareDeadlineMs() : deadline;
+        if (playerId == 0 || battleId == 0 || deadline == 0 || Long.compareUnsigned(prepareDeadline,clock.epochMillis())<=0) {
             return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
         }
         long latest = clock.epochMillis() + MAX_DEADLINE_AHEAD_MS;
@@ -214,7 +215,8 @@ public final class PlayerBattleService implements BattleHooks {
             return prepareRejected(SESSION_NOT_FOUND, Prepare.NOT_HERE);
         }
         BattlePlayerSnapshot snapshot = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route);
-        long prepareDeadline = request.getPrepareDeadlineMs() != 0 ? request.getPrepareDeadlineMs() : deadline;
+        // 快照构建后，在冻结提交点再次校验原工作代次截止。
+        if(Long.compareUnsigned(prepareDeadline,clock.epochMillis())<=0)return prepareRejected(INVALID_PARAMETER,Prepare.INVALID);
         BattleFreeze freeze = new BattleFreeze(battleId, request.getBattleNodeId(), Phase.PREPARING, deadline, prepareDeadline, true);
         freeze.setLockPending(true);
         player.battle().setFreeze(freeze);
@@ -320,7 +322,7 @@ public final class PlayerBattleService implements BattleHooks {
             reply.complete(prepareResponse(FEATURE_UNAVAILABLE));
             return;
         }
-        if (freeze.cancelRequested()) {
+        if (freeze.cancelRequested() || Long.compareUnsigned(freeze.prepareDeadlineMs(),clock.epochMillis())<=0) {
             // 写锁在途时收到的取消：写锁完成后才删（Redisson 可能把删锁排到 SET 之前，§7.6）
             clearFreeze(player, LockAction.DELETE_PREPARING);
             metrics.prepare(Prepare.CANCELLED);

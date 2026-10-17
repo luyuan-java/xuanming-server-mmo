@@ -111,6 +111,11 @@ public final class ClientSession {
     private ScheduledFuture<?> handshakeTimeout;
     /** 已重定向会话的收口定时器（{@link #redirected} 之后挂上，断线时撤销）。 */
     private ScheduledFuture<?> redirectLinger;
+    /**
+     * 会话后端 lane 的延后放行定时器：后端调用以结果未知的错误结束时挂上，到点才清 {@link #backendInFlight}、发下一条
+     * （见 {@code ClientDispatcher#BACKEND_RESULT_UNKNOWN_HOLD_NANOS}），断线时撤销。
+     */
+    private ScheduledFuture<?> backendRelease;
 
     ClientSession(int sessionId, Channel channel, String clientIp) {
         this.sessionId = sessionId;
@@ -192,6 +197,29 @@ public final class ClientSession {
         if (redirectLinger != null) {
             redirectLinger.cancel(false);
             redirectLinger = null;
+        }
+    }
+
+    /**
+     * 挂会话后端 lane 的延后放行（在本连接的 EventLoop 上到点执行）。EventLoop 已关闭（进程退出中）时不挂并返回 false：
+     * 连接会随之关闭，调用方照常立即放行即可。
+     */
+    boolean scheduleBackendRelease(long delayNanos, Runnable onDue) {
+        cancelBackendRelease();
+        try {
+            backendRelease = channel.eventLoop().schedule(onDue, delayNanos, TimeUnit.NANOSECONDS);
+            return true;
+        } catch (RejectedExecutionException e) {
+            log.debug("会话线程已关闭，不挂后端 lane 延后放行 session={}", Integer.toUnsignedString(sessionId));
+            return false;
+        }
+    }
+
+    /** 撤销延后放行（断线时；到点之后再撤销是空操作）。 */
+    void cancelBackendRelease() {
+        if (backendRelease != null) {
+            backendRelease.cancel(false);
+            backendRelease = null;
         }
     }
 

@@ -52,6 +52,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CompletableFuture;
+import java.lang.ref.WeakReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,7 +88,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         /** 未分胜负，房间还在，下一回合已装填。 */
         ONGOING,
         /** 已分胜负，房间已收尾并从表里移除。 */
-        FINISHED
+        FINISHED,
+        PENDING_RESULT
     }
 
     private final RoomDependencies deps;
@@ -126,6 +129,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     // ===================================================================================== 控制面
+    @Override public boolean containsBattle(long battleId){scheduler.assertInLoop();return rooms.find(battleId)!=null;}
+    @Override public boolean resultCommitPending(long battleId){scheduler.assertInLoop();var room=rooms.find(battleId);return room!=null&&room.pendingCompletion!=null;}
 
     @Override
     public CreateBattleResponse createBattle(CreateBattleRequest request, RoomOrigin origin) {
@@ -175,6 +180,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         // 5 抄参战名单（无符号升序）
         BattleRoom room = new BattleRoom(battleId, request.getMatchMode(), request.getBattleConfigId(), request.getActivityContext(),
                 origin, engine, deadlineMs);
+        room.requiresResultConfirmation = !request.getPlacementOperationId().isEmpty() && origin.publishesResult();
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
             room.routingByPlayer.put(snapshot.getPlayerId(), snapshot.getRouting());
         }
@@ -245,6 +251,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     @Override
     public void destroyBattle(DestroyBattleRequest request) {
         scheduler.assertInLoop();
+        if (resultCommitPending(request.getBattleId())) return;
         BattleRoom room = rooms.find(request.getBattleId());
         if (room == null) {
             log.info("DestroyBattle 幂等命中 battle_id={} reason={}", Long.toUnsignedString(request.getBattleId()), request.getReason());
@@ -274,8 +281,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 continue;
             }
             room.cancelTimers();
-            notifySpectateEndAndClose(room, eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED, eBattleOutcome.BATTLE_OUTCOME_ONGOING,
-                    Disconnect.SHUTDOWN);
+            if(room.pendingCompletion==null)
+                notifySpectateEndAndClose(room, eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED, eBattleOutcome.BATTLE_OUTCOME_ONGOING,
+                        Disconnect.SHUTDOWN);
             closeDirectConnections(room, Disconnect.SHUTDOWN);
             eraseRoom(room, RoomEnd.ABORTED);
         }
@@ -503,6 +511,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                     Long.toUnsignedString(playerId));
             return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
+        if(room.pendingCompletion!=null)return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         int validation = room.engine.validateAction(playerId, request.getAction());
         if (validation != SUCCESS) {
             if (validation == 0) {
@@ -555,6 +564,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                     Long.toUnsignedString(playerId));
             return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
+        if(room.pendingCompletion!=null)return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         // 置位前采样就绪态，判断本次置位是否造成「未就绪 → 全员就绪」的翻转
         boolean wasAllReady = room.engine.allPlayersReady();
         int result = room.engine.setActorAuto(playerId, request.getEnabled());
@@ -628,7 +638,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
      * 下一回合再回填新截止（已分胜负回填 0）→ 透传出手序 → 广播 139 / 158 → 已分胜负则收尾并删房。
      */
     RoundOutcome resolveRound(BattleRoom room, RoundTrigger trigger) {
+        if(room.pendingCompletion!=null)return RoundOutcome.PENDING_RESULT;
         long started = System.nanoTime();
+        BattleStateS2C visibleBefore=fullState(room);
         room.roundTimer.cancel();
         metrics.round(trigger);
         TurnResultS2C.Builder result = room.engine.resolveCurrentRound().toBuilder();
@@ -643,6 +655,10 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         result.setBattleId(room.battleId);
         result.getStateBuilder().setBattleId(room.battleId);
         result.clearActionOrder().addAllActionOrder(room.engine.lastActionOrder());
+        if(!ongoing&&room.requiresResultConfirmation){
+            beginResultCommit(room,outcome,eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED,result.build(),visibleBefore,RoomEnd.FINISHED);
+            metrics.roundResolve(System.nanoTime()-started);return RoundOutcome.PENDING_RESULT;
+        }
         broadcastTurnResult(room, result.build());
         if (!ongoing) {
             finishBattle(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED);
@@ -654,7 +670,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     /** 整场期限（{@code OnBattleDeadline}，{@code room.cpp:1082-1105}）：仍未分胜负就盖 DRAW；没有终局 139；观众收 ABORTED + 该 outcome。 */
     private void onBattleDeadline(BattleRoom room) {
-        if (!isCurrent(room)) {
+        if (!isCurrent(room)||room.pendingCompletion!=null) {
             return;
         }
         eBattleOutcome outcome = room.engine.outcome();
@@ -663,6 +679,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         log.warn("战斗整场超时强制收尾 battle_id={} outcome={}", Long.toUnsignedString(room.battleId), outcome);
         room.roundTimer.cancel();
+        if(room.requiresResultConfirmation){
+            beginResultCommit(room,outcome,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,null,fullState(room),RoomEnd.DEADLINE);return;
+        }
         finishBattle(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED);
         eraseRoom(room, RoomEnd.DEADLINE);
     }
@@ -701,20 +720,76 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
     }
 
+    private void beginResultCommit(BattleRoom room,eBattleOutcome outcome,eSpectateEndReason reason,
+                                   TurnResultS2C finalTurn,BattleStateS2C visibleBefore,RoomEnd endReason){
+        if(room.pendingCompletion!=null)return;
+        room.cancelTimers();room.actionDeadlineMs=0;
+        List<BattleSettlementData> settlements=new ArrayList<>();
+        for(long player:room.routingByPlayer.keySet())settlements.add(room.engine.buildSettlement(player).toBuilder()
+                .setBattleId(room.battleId).setOutcome(outcome).build());
+        BattleResultEvent event=BattleResultAssembler.assemble(room.battleId,room.matchMode,room.battleConfigId,
+                room.activityContext,outcome,settlements,clock.epochMillis()).toBuilder()
+                .addAllSettlements(settlements).setSettlementFormatVersion(1).build();
+        var pending=new BattleRoom.PendingCompletion(event,finalTurn,visibleBefore.toBuilder().setActionDeadlineMs(0).build(),reason,endReason);
+        room.pendingCompletion=pending;
+        attemptResultCommit(room,pending);
+    }
+
+    private void attemptResultCommit(BattleRoom room,BattleRoom.PendingCompletion pending){
+        if(!isCurrent(room)||room.pendingCompletion!=pending||pending.inFlight)return;
+        pending.inFlight=true;
+        CompletableFuture<Void> acknowledged;
+        try{
+            acknowledged=deps.results().publishConfirmed(pending.event,pending.original,BattleResultAssembler.isActivity(room.activityContext)
+                    ?com.game.battle.port.BattleResultSink.Channel.ACTIVITY:com.game.battle.port.BattleResultSink.Channel.PLAIN);
+            if(acknowledged==null)acknowledged=CompletableFuture.failedFuture(new IllegalStateException("结果端口没有确认句柄"));
+        }catch(RuntimeException error){acknowledged=CompletableFuture.failedFuture(error);}
+        var selfReference=new WeakReference<>(this);var roomReference=new WeakReference<>(room);
+        acknowledged.whenComplete((ignored,error)->{
+            var self=selfReference.get();if(self==null)return;
+            try{self.scheduler.execute(()->{
+                var active=selfReference.get();var target=roomReference.get();
+                if(active!=null&&target!=null)active.onResultCommit(target,pending,error);
+            });}catch(java.util.concurrent.RejectedExecutionException stopped){/* 停机无终局承诺，原 broker 结局由消费者恢复。 */}
+        });
+    }
+
+    private void onResultCommit(BattleRoom room,BattleRoom.PendingCompletion pending,Throwable error){
+        scheduler.assertInLoop();
+        if(!isCurrent(room)||room.pendingCompletion!=pending)return;
+        pending.inFlight=false;
+        if(error!=null){
+            int delaySeconds=Math.min(30,1<<Math.min(pending.failures,5));
+            if(pending.failures<Integer.MAX_VALUE)pending.failures++;
+            log.error("对局结果未取得持久确认，保留原房间与原事件，{}秒后重投 failures={}",delaySeconds,pending.failures);
+            var selfReference=new WeakReference<>(this);var roomReference=new WeakReference<>(room);
+            pending.retryTimer=scheduler.after(delaySeconds*1000L,()->{
+                var self=selfReference.get();var target=roomReference.get();
+                if(self!=null&&target!=null)self.attemptResultCommit(target,pending);
+            });return;
+        }
+        if(pending.finalTurn!=null)broadcastTurnResult(room,pending.finalTurn);
+        finishBattle(room,pending.event.getOutcome(),pending.spectateReason,pending.event);
+        eraseRoom(room,pending.endReason);
+    }
+
     /**
-     * 正常收尾（{@code FinishBattle}，{@code room.cpp:1130-1221}）：只组装与发送，不动房间表（调用方随后 {@link #eraseRoom}）。顺序固定（R6）：
+     * 正常收尾（{@code FinishBattle}，{@code room.cpp:1130-1221}）：全球模式只在 broker 确认之后调用。顺序固定（R6）：
      * 取消计时器 → 按 player_id 升序逐人「150 → 结算端口」→ 观众 166 + 关闭 → 关参战者直连 → 结果事件。
      */
     private void finishBattle(BattleRoom room, eBattleOutcome outcome, eSpectateEndReason spectateReason) {
+        finishBattle(room,outcome,spectateReason,null);
+    }
+    private void finishBattle(BattleRoom room,eBattleOutcome outcome,eSpectateEndReason spectateReason,BattleResultEvent committedEvent){
         room.cancelTimers();
         List<BattleSettlementData> settlements = new ArrayList<>(room.routingByPlayer.size());
         for (Map.Entry<Long, BattleRouting> entry : room.routingByPlayer.entrySet()) {
             long playerId = entry.getKey();
             // 强制平局路径引擎结算里还是 ONGOING：以节点判定为准统一盖章
-            BattleSettlementData settlement = room.engine.buildSettlement(playerId).toBuilder()
-                    .setOutcome(outcome)
-                    .setBattleId(room.battleId)
-                    .build();
+            BattleSettlementData settlement = committedEvent == null
+                    ? room.engine.buildSettlement(playerId).toBuilder().setOutcome(outcome).setBattleId(room.battleId).build()
+                    : committedEvent.getSettlementsList().stream().filter(value -> value.getPlayerId() == playerId)
+                            .findFirst().orElseThrow(() -> new IllegalStateException("已提交原件缺少玩家结算"));
             settlements.add(settlement);
             BattleEndS2C end = BattleEndS2C.newBuilder().setBattleId(room.battleId).setOutcome(outcome).setSettlement(settlement).build();
             outbound.pushBattleFrame(room.battleId, playerId, room.directOf(playerId), Notify.BATTLE_END, outbound.frame(Notify.BATTLE_END, end));
@@ -723,9 +798,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         notifySpectateEndAndClose(room, spectateReason, outcome, Disconnect.BATTLE_CLOSED);
         // 终局包已全部写出：关直连（应答 → FIN 由直连面保证，R3）
         closeDirectConnections(room, Disconnect.BATTLE_CLOSED);
-        BattleResultEvent event = BattleResultAssembler.assemble(room.battleId, room.matchMode, room.battleConfigId, room.activityContext,
+        BattleResultEvent event = committedEvent!=null?committedEvent:BattleResultAssembler.assemble(room.battleId, room.matchMode, room.battleConfigId, room.activityContext,
                 outcome, settlements, clock.epochMillis());
-        dispatchResult(room, event);
+        if(committedEvent==null)dispatchResult(room,event);
+        else if(BattleResultAssembler.isActivity(room.activityContext)){
+            try{deps.activityResults().dispatchCommitted(event);}catch(RuntimeException failure){log.error("已提交结果的兼容补拉投影失败",failure);}
+        }
         log.info("战斗结束 battle_id={} outcome={} players={} teams={} total_rounds={} fled={} dead={} origin={} activity_kind={}",
                 Long.toUnsignedString(room.battleId), outcome, room.routingByPlayer.size(), event.getTeamsCount(), event.getTotalRounds(),
                 event.getFledPlayerIdsCount(), event.getDeadPlayerIdsCount(), room.origin, room.activityContext.getKindValue());
@@ -780,6 +858,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     /** 全知快照 + battle_id + 当前回合截止（未裁剪：只能交给 {@link BattleViews}）。 */
     private static BattleStateS2C fullState(BattleRoom room) {
+        if(room.pendingCompletion!=null)return room.pendingCompletion.visibleBefore;
         return room.engine.buildStateSnapshot().toBuilder()
                 .setBattleId(room.battleId)
                 .setActionDeadlineMs(room.actionDeadlineMs)

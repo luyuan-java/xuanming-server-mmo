@@ -15,7 +15,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
  * {@code GAME_DUBBO_SECRET} → game-pbmysql 建表 / 只扩不缩地同步两张表 → 数据库版本与会话参数检查 → 申领 listing_id 雪花租约（{@code NodeTypes.TRADE}，
  * 作用域 0；失败拒启，Q5 / T13）→ 启动横幅 → 暴露 Dubbo。关闭时 Dubbo 先注销并等在途调用，再排空工作线程池，最后释放租约、关 Redis 与连接池。
  */
-@SpringBootApplication
+@SpringBootApplication(exclude=com.game.player.store.PlayerStoreAutoConfiguration.class)
 @ConfigurationPropertiesScan
 @EnableDubbo(scanBasePackages = "com.game.trade")
 public class TradeApplication {

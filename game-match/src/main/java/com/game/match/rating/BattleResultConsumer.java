@@ -27,11 +27,10 @@ import org.slf4j.LoggerFactory;
  * 把 {@code contracts.kafka.BattleResultEvent} 逐条交给评分入账。模式同 game-data 的 {@code ConsumerLoop}（不能直接依赖那个模块），
  * 区别是这里<b>逐条</b>处理、逐条提交（同基线）：
  * <ol>
- *   <li>解不出的消息写毒丸日志 {@value #POISON_LOGGER} 后跳过并提交（留在 topic 里只会每次重启都撞一遍）；</li>
+ *   <li>全球模式解不出的消息写毒丸日志 {@value #POISON_LOGGER}，关闭本轮并保留原位点；显式旧兼容模式才跳过并提交；</li>
  *   <li>key 与 payload 里的 battle_id 不一致只打日志，以 payload 为准；</li>
  *   <li>入账<b>成功才</b> {@code commitSync}（已入账、重复、不计分都算成功）——崩在两者之间只会重放，入账按 battle_id 幂等；</li>
- *   <li>数据错误（SQLState 22 / 23：这一条写不进去，重试无益）写毒丸日志后跳过，计
- *       {@code game_match_rating_updates_total{outcome="rejected"}}（这一局永不入账，要告警）；</li>
+ *   <li>全球模式的数据错误（含 SQLState 22 / 23）也暂停重试原记录，修正原因前不提交；显式旧兼容模式才拒绝并跳过；</li>
  *   <li><b>其余故障一律可恢复、不跳过</b>（有意差异 M19；基线重试 3 次后跳过）：暂停全部分区（继续 poll 保住组成员身份）、退避
  *       1 s → 30 s 后重试<b>原记录</b>，不提交位点；期间 {@code game_match_rating_consumer_paused = 1}（评分整体停更，排队照常）；</li>
  *   <li>重试期间这条记录所在的分区被重平衡收走：放弃它与本批里同分区的后续记录（位点没提交，新主人会重新拿到）。</li>
@@ -41,8 +40,10 @@ import org.slf4j.LoggerFactory;
  * <p>线程：{@link #run()} 独占传入的消费者（KafkaConsumer 不是线程安全的）；只有 {@link #stop()} 可以从别的线程调。
  */
 public final class BattleResultConsumer implements Runnable {
+    public enum FailurePolicy { SQL_CONFIRMED, LEGACY_REJECT_POISON }
+    private final FailurePolicy failurePolicy;
 
-    /** 毒丸日志：被跳过的消息（附完整字节的 Base64，可人工回灌）。 */
+    /** 毒丸日志：需要人工排查的消息（附受限长度的 Base64）。 */
     static final String POISON_LOGGER = "game.match.rating.poison";
     /** 毒丸日志里消息体最多带多少字节（一条 5V5 结果不到 300 字节）。 */
     static final int POISON_MAX_BYTES = 4096;
@@ -52,11 +53,31 @@ public final class BattleResultConsumer implements Runnable {
 
     /**
      * 入账一条结果（生产为 {@code ratingStore::apply}）：正常返回 = 终态（已入账 / 重复 / 不计分，各自的指标由实现记）；
-     * 抛异常 = 没入账，由本循环按 {@link RatingSqlErrors#isDataError} 分成「跳过」与「暂停重试」。
+     * 抛异常 = 没入账；全球模式保留原记录，只有显式旧兼容模式才按数据错误分类跳过。
      */
     @FunctionalInterface
     public interface Handler {
         void handle(BattleResultEvent event);
+
+        /** 旧评分实现只关心事件；来源归档实现覆盖此入口，不能重序列化代替收到的原件。 */
+        default void handle(Received received) { handle(received.event()); }
+    }
+
+    /** 消费线程固定的来源证据；ByteString 隔离 Kafka 可变缓冲。 */
+    public record Received(BattleResultEvent event, com.google.protobuf.ByteString original,
+                           String topic, int partition, long offset) {
+        public Received {
+            Objects.requireNonNull(event, "event");Objects.requireNonNull(original, "original");
+            if(topic==null||topic.isBlank()||partition<0||offset<0)throw new IllegalArgumentException("结果来源位点无效");
+        }
+    }
+
+    @FunctionalInterface
+    public interface SourceHandler extends Handler {
+        @Override void handle(Received received);
+        @Override default void handle(BattleResultEvent event) {
+            throw new IllegalArgumentException("结果来源处理必须携带收到的原始字节与位点");
+        }
     }
 
     /** 退避等待（测试可替换）。等待期间要继续 poll，所以由循环传入 poll 动作。 */
@@ -86,11 +107,16 @@ public final class BattleResultConsumer implements Runnable {
             do {
                 pollWhilePaused.run();
             } while (System.nanoTime() < until);
-        });
+        },FailurePolicy.SQL_CONFIRMED);
     }
 
     BattleResultConsumer(Consumer<String, byte[]> consumer, String topic, Handler handler, MatchMetrics metrics,
                          Duration pollTimeout, Duration retryInitial, Duration retryMax, Backoff backoff) {
+        this(consumer,topic,handler,metrics,pollTimeout,retryInitial,retryMax,backoff,FailurePolicy.SQL_CONFIRMED);
+    }
+    BattleResultConsumer(Consumer<String, byte[]> consumer,String topic,Handler handler,MatchMetrics metrics,
+                         Duration pollTimeout,Duration retryInitial,Duration retryMax,Backoff backoff,FailurePolicy policy) {
+        this.failurePolicy=Objects.requireNonNull(policy);
         this.consumer = Objects.requireNonNull(consumer, "consumer");
         this.topic = Objects.requireNonNull(topic, "topic");
         this.handler = Objects.requireNonNull(handler, "handler");
@@ -175,12 +201,15 @@ public final class BattleResultConsumer implements Runnable {
             }
             event = BattleResultEvent.parseFrom(record.value());
         } catch (InvalidProtocolBufferException e) {
-            poison.error("对局结果解不出，跳过 topic={} partition={} offset={} key={} bytes={} 错误={}", record.topic(), record.partition(),
+            poison.error("对局结果解不出 topic={} partition={} offset={} key={} bytes={} 错误={}", record.topic(), record.partition(),
                     record.offset(), record.key(), encoded(record.value()), e.getMessage());
             metrics.ratingUpdate(-1, RatingOutcome.DECODE_ERROR);
+            if(failurePolicy==FailurePolicy.SQL_CONFIRMED)throw new IllegalStateException("全球评级消息损坏，保留原位点等待恢复",e);
             return true;
         }
         String battle = Long.toUnsignedString(event.getBattleId());
+        Received received=new Received(event,com.google.protobuf.ByteString.copyFrom(record.value()),
+                record.topic(),record.partition(),record.offset());
         String key = record.key();
         if (key != null && !key.isEmpty() && !key.equals(battle)) {
             // key 的契约是 battle_id；不一致只记日志，以 payload 为准
@@ -191,10 +220,10 @@ public final class BattleResultConsumer implements Runnable {
         try {
             while (true) {
                 try {
-                    handler.handle(event);
+                    handler.handle(received);
                     return true;
                 } catch (RuntimeException e) {
-                    if (RatingSqlErrors.isDataError(e)) {
+                    if (failurePolicy==FailurePolicy.LEGACY_REJECT_POISON&&RatingSqlErrors.isDataError(e)) {
                         poison.error("对局结果被数据库拒绝，跳过 topic={} partition={} offset={} battle={} bytes={} 错误={}", record.topic(),
                                 record.partition(), record.offset(), battle, encoded(record.value()), String.valueOf(rootMessage(e)));
                         // 永久丢弃要有自己的计数：入账那一步记的 error 与可恢复故障每次重试记的是同一个标签，库抖动时分不出来

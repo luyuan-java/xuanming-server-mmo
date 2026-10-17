@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
  *   <li><b>Kafka 不可达不拒启</b>（评分是软数据，不能拖死匹配）：最多等 {@code game.match.kafka.init-timeout} 后照常启动，后台每 30 s 重试核对，
  *       通过后再起消费者；期间排队 / 凑单照常、评分停在当前值，恢复后从已提交位点（新消费组从最早）补消费，不丢结果。</li>
  *   <li>消费循环意外退出（不是停止）：5 s 后换一个新的 KafkaConsumer 重来，没提交的记录会被重新消费。</li>
- *   <li>{@code game.match.rating.enabled = false}：什么都不做（不核对 topic、不消费），评分停在已有值。</li>
+ *   <li>{@code game.match.rating.enabled = false}：全球模式仍消费并归档完整来源，只停评分；显式旧兼容模式才不消费。</li>
  * </ul>
  *
  * <p><b>启停口</b>：它就是进程的 {@link ResultConsumerControl}，只有 {@link #start()} / {@link #stop()} 两个方法，本类<b>不带任何 Spring 生命周期接口、
@@ -71,7 +71,10 @@ public final class BattleResultIngest implements ResultConsumerControl {
      * @param replicationFactor 新建 topic 的副本数
      * @param initTimeout       核对 / 创建 topic 一次的上限
      */
-    public record Settings(boolean enabled, int topicGeneration, short replicationFactor, Duration initTimeout) {
+    public record Settings(boolean enabled, int topicGeneration, short replicationFactor, Duration initTimeout,boolean requireDurability) {
+        public Settings(boolean enabled,int topicGeneration,short replicationFactor,Duration initTimeout){
+            this(enabled,topicGeneration,replicationFactor,initTimeout,false);
+        }
     }
 
     private final Settings settings;
@@ -86,6 +89,7 @@ public final class BattleResultIngest implements ResultConsumerControl {
     private final String topic;
 
     private volatile boolean running;
+    private volatile boolean durabilityVerified;
     /** 本次运行的停止信号：后台线程的等待都挂在它上面，stop() 一放就醒（不靠中断，免得打断在途的事务与消费者的关闭）。 */
     private volatile CountDownLatch stopSignal = new CountDownLatch(1);
     private volatile BattleResultConsumer loop;
@@ -122,6 +126,14 @@ public final class BattleResultIngest implements ResultConsumerControl {
     public String topic() {
         return topic;
     }
+    /** 装配阶段同步执行，早于matcher与RPC准入；即使关闭评分消费也不能绕过结果日志策略。 */
+    public void requireDurableTopicBeforeAdmission(){
+        if(!settings.requireDurability())return;
+        try(TopicAdmin admin=adminFactory.get()){
+            topics.ensureDurable(admin,settings.topicGeneration(),AuditTopicInitializer.Mode.OWN,settings.replicationFactor(),settings.initTimeout());
+            durabilityVerified=true;
+        }
+    }
 
     /**
      * 生产用的 KafkaConsumer 工厂：关自动提交（入账成功才提交）、新消费组从最早位点开始（match 晚于 battle 启动时先发的结果不能丢）、
@@ -155,7 +167,8 @@ public final class BattleResultIngest implements ResultConsumerControl {
         if (running) {
             return;
         }
-        if (!settings.enabled()) {
+        if(settings.requireDurability()&&!durabilityVerified)requireDurableTopicBeforeAdmission();
+        if (!settings.enabled()&&!settings.requireDurability()) {
             log.warn("[rating] game.match.rating.enabled=false：不消费对局结果，评分停在已有值（新号 1500），凑单退化为纯等待序");
             return;
         }
@@ -200,8 +213,9 @@ public final class BattleResultIngest implements ResultConsumerControl {
     /** @return true = 核对通过；false = Kafka 暂时不可达（稍后重试）。分区数不符抛 {@link AuditTopicContractException}。 */
     private boolean verify() {
         try (TopicAdmin admin = adminFactory.get()) {
-            topics.ensure(admin, settings.topicGeneration(), AuditTopicInitializer.Mode.OWN, settings.replicationFactor(),
-                    settings.initTimeout());
+            if(settings.requireDurability())topics.ensureDurable(admin,settings.topicGeneration(),AuditTopicInitializer.Mode.OWN,
+                    settings.replicationFactor(),settings.initTimeout());
+            else topics.ensure(admin, settings.topicGeneration(), AuditTopicInitializer.Mode.OWN, settings.replicationFactor(),settings.initTimeout());
             return true;
         } catch (AuditTopicContractException e) {
             throw e;

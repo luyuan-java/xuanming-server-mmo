@@ -1,6 +1,7 @@
 package com.game.login.token;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
@@ -128,6 +129,24 @@ class RedisLoginTokensIntegrationTest {
         RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
         assertThat(set.readAll()).containsExactly(second.refreshToken());
         assertThat(tokens.refresh("")).isEmpty();
+    }
+
+    @Test
+    void 截止已过_不发轮换脚本_旧refresh仍可用_之后照常轮换() {
+        TokenPair first = issue();
+
+        assertThatThrownBy(() -> tokens.refresh(first.refreshToken(), () -> true))
+                .isInstanceOf(LoginTokens.RotationAbandoned.class);
+
+        assertThat(redis.getBucket(REDIS_KEYS.loginRefreshToken(first.refreshToken())).isExists()).as("旧 refresh 没被作废")
+                .isTrue();
+        assertThat(redis.getBucket(REDIS_KEYS.loginRefreshRotated(first.refreshToken())).isExists()).as("没有轮换记录")
+                .isFalse();
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(REDIS_KEYS.loginAccountRefresh(account), StringCodec.INSTANCE);
+        assertThat(set.readAll()).as("账号集合里没有新 refresh").containsExactly(first.refreshToken());
+
+        // 客户端拿原 token 重试（截止之内）：照常轮换。
+        assertThat(refresh(first.refreshToken())).isPresent();
     }
 
     @Test

@@ -53,10 +53,15 @@ public final class FakePlayerStatus implements PlayerStatusReader {
         return location(playerId, zoneId, sceneNodeId);
     }
 
-    /** 位置 ONLINE（不动在线目录）。 */
+    /** 位置 ONLINE（不动在线目录），owner_epoch = 1（与 {@link #online} 预置的在线条目同代）。 */
     public FakePlayerStatus location(long playerId, int zoneId, int sceneNodeId) {
+        return location(playerId, zoneId, sceneNodeId, 1);
+    }
+
+    /** 位置 ONLINE（不动在线目录），owner_epoch 指定：157 的跨会话栅栏拿它与在线条目的代次比。 */
+    public FakePlayerStatus location(long playerId, int zoneId, int sceneNodeId, long ownerEpoch) {
         locations.put(playerId, new HolderRead(LocationStatus.ONLINE, PlayerLocation.newBuilder().setPlayerId(playerId).setZoneId(zoneId)
-                .setSceneNodeId(sceneNodeId).setSceneId(1000L + sceneNodeId).setOwnerEpoch(1).build(), null));
+                .setSceneNodeId(sceneNodeId).setSceneId(1000L + sceneNodeId).setOwnerEpoch(ownerEpoch).build(), null));
         return this;
     }
 

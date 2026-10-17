@@ -25,6 +25,8 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,7 +46,7 @@ import org.slf4j.LoggerFactory;
  * 业务结果一律 in-band（{@code TipInfoMessage{id}}，不带参数，同基线）。聊天正文不进日志。
  *
  * <p>全部方法异步、不阻塞调用线程（只发 Redis 异步命令、在回调里组下一步）；每步受整请求预算约束，释放 / 完结幂等键有独立的 1 s 上界
- * （它们发生在原请求预算可能已到期的时刻）。
+ * （它们发生在原请求预算可能已到期的时刻）。占位、限速、写历史三个写在发出前查截止（{@link #clientWrite}），过了就不发。
  */
 public final class ChatService {
 
@@ -72,6 +74,8 @@ public final class ChatService {
     private final int historyMaxLimit;
     private final long requestIdTtlSeconds;
     private final LongSupplier clockMs;
+    /** 单调时钟（纳秒）：整请求截止由它起算，每个写发出前也按它判截止。 */
+    private final LongSupplier nanoClock;
     private final RedisKeys keys;
     private final SensitiveWordFilter contentFilter;
     private final SecureRandom random = new SecureRandom();
@@ -80,6 +84,16 @@ public final class ChatService {
     public ChatService(ChatStore store, ChatMetrics metrics, int maxContentBytes, int rateLimitPerSecond,
                        int historyMaxEntries, Duration historyTtl, int historyDefaultLimit, int historyMaxLimit,
                        Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys, List<String> sensitiveWords) {
+        this(store, metrics, maxContentBytes, rateLimitPerSecond, historyMaxEntries, historyTtl, historyDefaultLimit,
+                historyMaxLimit, requestIdTtl, clockMs, keys, sensitiveWords, System::nanoTime);
+    }
+
+    /** @param nanoClock 单调时钟（纳秒，测试注入；生产是 {@link System#nanoTime()}） */
+    ChatService(ChatStore store, ChatMetrics metrics, int maxContentBytes, int rateLimitPerSecond,
+                int historyMaxEntries, Duration historyTtl, int historyDefaultLimit, int historyMaxLimit,
+                Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys, List<String> sensitiveWords,
+                LongSupplier nanoClock) {
+        this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
         this.store = store;
         this.metrics = metrics;
         this.maxContentBytes = maxContentBytes;
@@ -160,28 +174,30 @@ public final class ChatService {
         byte[] stored = ChatMessage.newBuilder()
                 .setSenderPlayerId(sender).setTargetPlayerId(target).setChannelValue(msg.getChannelValue())
                 .setContent(content).setSendTimeMs(clockMs.getAsLong()).build().toByteArray();
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
+        long deadline = nanoClock.getAsLong() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
 
         if (requestId.isEmpty()) {
             return rateLimitAndWrite(sender, label, resolved.key(), stored, null, null, deadline);
         }
         String claimKey = keys.chatRequestId(sender, requestId);
         String claimValue = CLAIM_PENDING + ":" + token();
-        return within(store.claim(claimKey, claimValue, requestIdTtlSeconds), deadline).handle((claimed, error) -> {
-            if (error != null) {
-                log.error("[chat] 幂等键 SET NX 失败 sender={}: {}", Long.toUnsignedString(sender), error.toString());
-                return sendRejected(label, STORAGE, Outcome.STORAGE_ERROR);
-            }
-            if (!Boolean.TRUE.equals(claimed)) {
-                return duplicate(claimKey, sender, label, deadline);
-            }
-            return rateLimitAndWrite(sender, label, resolved.key(), stored, claimKey, claimValue, deadline);
-        }).thenCompose(stage -> stage);
+        return clientWrite("占幂等键", deadline, timeout -> store.claim(claimKey, claimValue, requestIdTtlSeconds, timeout))
+                .handle((claimed, error) -> {
+                    if (error != null) {
+                        log.error("[chat] 幂等键 SET NX 失败 sender={}: {}", Long.toUnsignedString(sender), error.toString());
+                        return sendRejected(label, STORAGE, Outcome.STORAGE_ERROR);
+                    }
+                    if (!Boolean.TRUE.equals(claimed)) {
+                        return duplicate(claimKey, sender, label, deadline);
+                    }
+                    return rateLimitAndWrite(sender, label, resolved.key(), stored, claimKey, claimValue, deadline);
+                }).thenCompose(stage -> stage);
     }
 
     private CompletionStage<SendChatResponse> rateLimitAndWrite(long sender, Channel label, String logKey, byte[] stored,
                                                                String claimKey, String claimValue, long deadline) {
-        return within(store.incrWithTtl(keys.chatRateLimit(sender), RATE_LIMIT_WINDOW_SECONDS), deadline)
+        return clientWrite("限速计数", deadline,
+                timeout -> store.incrWithTtl(keys.chatRateLimit(sender), RATE_LIMIT_WINDOW_SECONDS, timeout))
                 .handle((count, error) -> {
                     if (error != null || count == null) {
                         log.error("[chat] 限速脚本失败 sender={}: {}", Long.toUnsignedString(sender),
@@ -193,7 +209,9 @@ public final class ChatService {
                         return releaseClaim(claimKey, claimValue)
                                 .thenCompose(v -> sendRejected(label, RATE_LIMITED, Outcome.RATE_LIMITED));
                     }
-                    return within(store.append(logKey, stored, historyMaxEntries, historyTtlSeconds), deadline)
+                    // 发言的提交点：限速那一步可能恰在截止前后返回，写历史之前再查一次（clientWrite），过了就不写、释放占位、回 1003
+                    return clientWrite("写历史", deadline,
+                            timeout -> store.append(logKey, stored, historyMaxEntries, historyTtlSeconds, timeout))
                             .handle((done, appendError) -> {
                                 if (appendError != null) {
                                     log.error("[chat] 写历史失败 sender={} key={}: {}", Long.toUnsignedString(sender), logKey,
@@ -282,7 +300,7 @@ public final class ChatService {
             return pullRejected(label, resolved.tip(), resolved.outcome());
         }
         int limit = clampLimit(request.getLimit());
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
+        long deadline = nanoClock.getAsLong() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
         return within(store.range(resolved.key(), limit), deadline).handle((raws, error) -> {
             if (error != null) {
                 log.error("[chat] 读历史失败 player={} key={}: {}", Long.toUnsignedString(self), resolved.key(), error.toString());
@@ -336,9 +354,26 @@ public final class ChatService {
         return (PullChatHistoryResponse) rejectRaw(builder, tip);
     }
 
-    private static <T> CompletableFuture<T> within(CompletionStage<T> stage, long deadlineNanos) {
-        long remaining = Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
+    private <T> CompletableFuture<T> within(CompletionStage<T> stage, long deadlineNanos) {
+        long remaining = Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - nanoClock.getAsLong()));
         return stage.toCompletableFuture().orTimeout(remaining, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 发出一个发言路径上的写（占幂等键、限速计数、写历史）：截止已过就不发，返回以 {@link TimeoutException} 失败的 stage（各步照依赖故障处理：
+     * 释放占位、回 1003）；否则把此刻的剩余预算交给存储作这一次的超时（存储不重发，等连接也不越过截止），并在截止内等结果。
+     *
+     * <p>为什么：gate 对同一会话的后端请求逐条发出，chat 回包（含截止到点回的 1003）或 gate 的 5 s 调用超时之后就放行下一条
+     * （mmorpg client-request-ordering.md §6.1）。上一步恰在截止前后返回时，不查就发出的写会落在同一会话的下一条请求之后——
+     * 写历史晚落地就是「客户端收到 1003、换来一条后到的消息」。释放 / 完结幂等键是补偿与提交后记账，不走这里，不受请求截止约束。
+     */
+    private <T> CompletableFuture<T> clientWrite(String what, long deadlineNanos, Function<Duration, CompletionStage<T>> write) {
+        long remainingNanos = deadlineNanos - nanoClock.getAsLong();
+        if (remainingNanos <= 0) {
+            return CompletableFuture.failedFuture(new TimeoutException("超过请求预算（" + what + "之前），没有发出"));
+        }
+        Duration timeout = Duration.ofMillis(Math.max(1, TimeUnit.NANOSECONDS.toMillis(remainingNanos)));
+        return within(write.apply(timeout), deadlineNanos);
     }
 
     /** 每次占位都不同的随机串（基线 crypto/rand.Text：26 个 base32 字符）。 */

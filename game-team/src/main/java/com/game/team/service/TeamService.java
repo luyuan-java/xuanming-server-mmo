@@ -175,6 +175,14 @@ public final class TeamService {
      * {@code notify_online} 且回包视图里有队伍时把当前视图推给其他在线队员（错误回包上也会触发，照搬基线，§8.1 第 12 条）。
      */
     public TeamResponse getMyTeam(long caller, GetMyTeamRequest request, Deadline deadline) {
+        var response=readMyTeam(caller,request,deadline);
+        if(battle.durableIntents()&&!request.getMatchRequestId().isEmpty()){
+            try{return response.toBuilder().setMatchIntent(battle.queryIntent(caller,request.getMatchRequestId(),com.google.protobuf.ByteString.EMPTY,deadline)).build();}
+            catch(RuntimeException e){return respond(caller,TeamTips.INTERNAL,0,deadline);}
+        }
+        return response;
+    }
+    private TeamResponse readMyTeam(long caller, GetMyTeamRequest request, Deadline deadline) {
         SelfRead self = readSelf(TeamMethods.GET_MY_TEAM, caller, deadline);
         if (self.failure() != null) {
             return self.failure();
@@ -392,6 +400,15 @@ public final class TeamService {
      * 被销毁造成的）只计 {@code gather_unknown}，不清锁、不推 MATCH_FAILED，见 {@code TeamShutdown}。
      */
     public TeamResponse startTeamMatch(long caller, StartTeamMatchRequest request, Deadline deadline) {
+        if(battle.durableIntents()){
+            try{
+                var requestUuid=UUID.fromString(request.getRequestId());
+                if((requestUuid.getMostSignificantBits()==0&&requestUuid.getLeastSignificantBits()==0)||!requestUuid.toString().equals(request.getRequestId()))return respond(caller,com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0,deadline);
+                var previous=battle.queryIntent(caller,request.getRequestId(),request.toByteString(),deadline);
+                if(previous.getBattleId()!=0)return respond(caller,TeamTips.OK,0,deadline).toBuilder().setMatchIntent(previous).build();
+            }catch(IllegalArgumentException invalid){return respond(caller,com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0,deadline);}
+            catch(RuntimeException unavailable){return respond(caller,TeamTips.INTERNAL,0,deadline);}
+        }
         int configId = request.getBattleConfigId();
         Bind bind = Bind.caller(caller, request.getExpectedTeamId());
         for (int round = 0; round < MATCH_START_ROUNDS && !deadline.expired(); round++) {
@@ -455,7 +472,7 @@ public final class TeamService {
                 settleUnconfirmedLock(snap.teamId(), token, lockTtlSeconds, deadline);
                 continue;
             }
-            return launchMatch(caller, configId, lock.commit(), token, check, deadline);
+            return launchMatch(caller, configId, lock.commit(), token, check, deadline,request);
         }
         return matchReject(caller, TeamTips.STATE_CHANGED, 0, null, deadline);
     }
@@ -470,7 +487,7 @@ public final class TeamService {
      * @param check 本轮预检的结论（每人的 zone 与锁时长）
      */
     private TeamResponse launchMatch(long caller, int configId, CommitResult lock, String token, TeamBattlePort.Check check,
-                                     Deadline deadline) {
+                                    Deadline deadline,StartTeamMatchRequest request) {
         long teamId = lock.teamId();
         int lockTtlSeconds = check.lockTtlSeconds(); // 与加锁同一个值：gather 的调用级超时与清锁截止都由它推出
         List<Long> roster = List.copyOf(lock.decision().record().getMatchLockRosterList());
@@ -479,7 +496,8 @@ public final class TeamService {
         for (long pid : roster) {
             ticketIds.put(pid, UUID.randomUUID().toString());
         }
-        TeamBattlePort.Tickets tickets = battle.createTeamTickets(configId, teamId, roster, check.zones(), ticketIds, deadline);
+        TeamBattlePort.Tickets tickets = battle.durableIntents()?battle.createDurableTickets(configId,teamId,roster,check.zones(),ticketIds,caller,request,deadline):battle.createTeamTickets(configId, teamId, roster, check.zones(), ticketIds, deadline);
+        if(battle.durableIntents()&&!(tickets instanceof TeamBattlePort.Tickets.Created))return respond(caller,TeamTips.INTERNAL,0,deadline);
         if (tickets instanceof TeamBattlePort.Tickets.Failed failed) {
             metrics.match(MatchOutcome.TICKET_FAILED);
             log.info("[team] 整队开战建票失败，释放开战锁 team={} player={}", u(teamId), u(failed.playerId()));
@@ -500,6 +518,9 @@ public final class TeamService {
             return respond(caller, TeamTips.INTERNAL, 0, deadline);
         }
         TeamResponse resp = commitResponse(caller, lock, deadline);
+        if(battle.durableIntents())try{var intent=battle.queryIntent(caller,request.getRequestId(),request.toByteString(),deadline);
+            if(intent.getBattleId()!=0)resp=resp.toBuilder().setMatchIntent(intent).build();}
+        catch(RuntimeException pending){log.debug("原队伍开局已受理，客户端按原请求补拉意图");}
         log.info("[team] 整队开战已受理 team={} config={} roster={}", u(teamId), Integer.toUnsignedString(configId), us(roster));
         CompletionStage<TeamBattlePort.Gather> gather;
         try {
@@ -510,7 +531,13 @@ public final class TeamService {
         // 回调在 Dubbo 的线程上触发（stage 已完成时就在本线程上）：只定性、计数与投递，清锁（阻塞、最坏锁时长 + 3.2 s）在 team-match-end 上。
         // 计数放在投递之前：执行器已满放弃收尾时，这次 211 仍然恰好计一次
         gather.whenComplete((result, error) -> {
-            boolean ok = error == null && result != null && result.ok();
+            final boolean ok;
+            if(battle.durableIntents()){
+                try{var finalIntent=battle.queryIntent(caller,request.getRequestId(),request.toByteString(),Deadline.after(3000));
+                    if(finalIntent.getState()!=4&&finalIntent.getState()!=5){log.info("原队伍成局仍在恢复，保留业务开战锁和原意图");return;}
+                    ok=finalIntent.getState()==4;
+                }catch(RuntimeException pending){log.warn("队伍原成局结局未知，不提前推送开战失败");return;}
+            }else ok=error==null&&result!=null&&result.ok();
             if (error != null || result == null) {
                 // game-match 中途退出、网络分区或调用超时：结果不明。不退票——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈
                 metrics.match(MatchOutcome.GATHER_UNKNOWN);

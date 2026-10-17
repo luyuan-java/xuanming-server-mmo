@@ -50,6 +50,28 @@ message AssetBundle {
   repeated AssetItem items = 2;
   repeated uint64 item_uuids = 3;
   uint64 pet_id = 4;
+  repeated AssetItemInstance item_instances = 5;
+  AssetPetInstance pet_instance = 6;
+}
+
+// 完整实例字节由scene生成并逐字节保留。展示字段仅用于交叉校验，不能按模板重铸。
+message AssetItemInstance {
+  uint64 item_uuid = 1;
+  uint32 config_id = 2;
+  uint32 stack_size = 3;
+  bytes instance_proto = 4;
+}
+message AssetPetInstance {
+  uint64 pet_id = 1;
+  uint32 pet_table_id = 2;
+  string name = 3;
+  uint32 level = 4;
+  bytes instance_proto = 5;
+}
+message AssetSnapshot {
+  repeated AssetItemInstance items = 1;
+  AssetPetInstance pet = 2;
+  AssetCurrency currency = 3;
 }
 
 // 调用方签名：HMAC-SHA256(调用方密钥, 规范串) 的小写十六进制；规范串唯一出处 com.game.api.asset.AssetOpSignatures（同基线 mmorpg-asset-op/v1）。
@@ -81,4 +103,5 @@ message AssetOpResponse {
   // 结局已经落进最近一次确认写成功的存档（调用方只在 APPLIED / REJECTED 且 durable 时终结这条 seq）。
   bool durable = 3;
   bool partial = 4;
+  AssetSnapshot snapshot = 5;
 }

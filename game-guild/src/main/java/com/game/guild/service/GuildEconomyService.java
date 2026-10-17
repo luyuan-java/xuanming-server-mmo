@@ -283,7 +283,7 @@ public final class GuildEconomyService {
             return new Attempt<>(null, new Answer<>(response, result), false);
         }
 
-        static <T> Attempt<T> raced() {
+        static <T> Attempt<T> replayRaced() {
             return new Attempt<>(null, null, true);
         }
     }
@@ -351,14 +351,15 @@ public final class GuildEconomyService {
      * @return null = 参数一致，可以按首次结果答复
      */
     private static GuildTip clientRequestMismatch(EconomyStore.ClientRequestHit hit, GuildAssetOpKind kind, int refId,
-                                                  int refCount) {
+                                                  int refCount, long expectedGuild) {
         if (hit.op().isEmpty()) {
             log.error("[GuildEconomy] client request record points at a missing op, refusing without re-executing (op_id={})",
                     Long.toUnsignedString(hit.opId()));
             return GuildTip.CLIENT_REQUEST_ORPHANED;
         }
         GuildAssetOpRow row = hit.op().get();
-        if (row.getKind() != kind || row.getRefId() != refId || row.getRefCount() != refCount) {
+        if (row.getKind() != kind || row.getRefId() != refId || row.getRefCount() != refCount
+                || expectedGuild != 0 && row.getGuildId() != expectedGuild) {
             log.error("[GuildEconomy] client_request_id reused with different parameters, refusing (player={} first op_id={} kind={}"
                             + " ref={} count={}; now kind={} ref={} count={})", Long.toUnsignedString(row.getPlayerId()),
                     Long.toUnsignedString(hit.opId()), row.getKind(), Integer.toUnsignedString(row.getRefId()),
@@ -390,7 +391,8 @@ public final class GuildEconomyService {
         if (hit.isEmpty()) {
             return null;
         }
-        GuildTip conflict = clientRequestMismatch(hit.get(), GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE, request.getDonateId(), 1);
+        GuildTip conflict = clientRequestMismatch(hit.get(), GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE, request.getDonateId(),
+                1, request.getExpectedGuildId());
         if (conflict != null) {
             return new Answer<>(donateTip(conflict), EconomyResult.REQUEST_CONFLICT);
         }
@@ -414,6 +416,9 @@ public final class GuildEconomyService {
         Prelude p = economyCaller(me, deadline);
         if (p.tip() != null) {
             return Attempt.rejected(donateTip(p.tip()), EconomyResult.NOT_MEMBER);
+        }
+        if (request.getExpectedGuildId() != 0 && request.getExpectedGuildId() != p.guild().guildId()) {
+            return Attempt.rejected(donateTip(GuildTip.NOT_IN_EXPECTED_GUILD), EconomyResult.NOT_MEMBER);
         }
         if (channel == null) {
             return Attempt.rejected(donateTip(GuildTip.ASSET_CHANNEL_DISABLED), EconomyResult.DISABLED);
@@ -451,7 +456,7 @@ public final class GuildEconomyService {
                 row.getMinGuildLevel(), row.getContributionGain(), row.getFundsGain(), row.getDailyLimit(), GameDay.dayKey(start),
                 deadlineMs, start + insertLeaseMs, token, start, payload, access.txFence(), clientRequestId), deadline);
         if (outcome.rejection() == GuildReject.CLIENT_REQUEST_REPLAYED) {
-            return Attempt.raced();
+            return Attempt.replayRaced();
         }
         if (!(outcome instanceof TxOutcome.Ok<Reserved> ok)) {
             Answer<GuildTip> reply = rejectReply(me, g.guildId(), outcome.rejection(), deadline);
@@ -624,7 +629,7 @@ public final class GuildEconomyService {
             return null;
         }
         GuildTip conflict = clientRequestMismatch(hit.get(), GuildAssetOpKind.GUILD_ASSET_OP_KIND_SHOP, request.getGoodsId(),
-                shopBuyCount(request));
+                shopBuyCount(request), request.getExpectedGuildId());
         if (conflict != null) {
             return new Answer<>(buyTip(conflict), EconomyResult.REQUEST_CONFLICT);
         }
@@ -645,6 +650,9 @@ public final class GuildEconomyService {
         Prelude p = economyCaller(me, deadline);
         if (p.tip() != null) {
             return Attempt.rejected(buyTip(p.tip()), EconomyResult.NOT_MEMBER);
+        }
+        if (request.getExpectedGuildId() != 0 && request.getExpectedGuildId() != p.guild().guildId()) {
+            return Attempt.rejected(buyTip(GuildTip.NOT_IN_EXPECTED_GUILD), EconomyResult.NOT_MEMBER);
         }
         if (channel == null) {
             return Attempt.rejected(buyTip(GuildTip.ASSET_CHANNEL_DISABLED), EconomyResult.DISABLED);
@@ -694,7 +702,7 @@ public final class GuildEconomyService {
                 count, row.getRequiredGuildLevel(), cost, row.getLimitCount(), periodKey.getAsInt(), start + insertLeaseMs, token,
                 start, bundle.toByteString(), access.txFence(), clientRequestId), deadline);
         if (outcome.rejection() == GuildReject.CLIENT_REQUEST_REPLAYED) {
-            return Attempt.raced();
+            return Attempt.replayRaced();
         }
         if (!(outcome instanceof TxOutcome.Ok<ShopReserved> ok)) {
             Answer<GuildTip> reply = rejectReply(me, g.guildId(), outcome.rejection(), deadline);

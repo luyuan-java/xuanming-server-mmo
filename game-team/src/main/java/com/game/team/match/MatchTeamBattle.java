@@ -42,6 +42,21 @@ import org.slf4j.LoggerFactory;
  * {@code RpcContext} 上、调完即清。无可变状态，线程安全。
  */
 public final class MatchTeamBattle implements TeamBattlePort {
+    public enum IntentMode { SQL_AUTHORITY, LEGACY_COMPATIBILITY }
+    private final IntentMode intentMode;
+    @Override public boolean durableIntents(){return intentMode==IntentMode.SQL_AUTHORITY;}
+    @Override public com.game.proto.team.TeamMatchIntent queryIntent(long caller,String request,com.google.protobuf.ByteString payload,Deadline deadline){
+        var query=com.game.api.proto.TeamMatchIntentQuery.newBuilder().setPlayerId(caller).setRequestId(request).setClientRequest(payload).build();
+        return call("queryTeamMatchIntent",deadline,()->match.queryTeamMatchIntent(query));
+    }
+    @Override public Tickets createDurableTickets(int config,long team,List<Long> roster,Map<Long,Integer> zones,Map<Long,String> tickets,
+            long caller,com.game.proto.team.StartTeamMatchRequest original,Deadline deadline){
+        var request=TeamTicketsRequest.newBuilder().setBattleConfigId(config).setTeamId(team).addAllRoster(roster).putAllZones(zones).putAllTicketIds(tickets)
+                .setRequestId(original.getRequestId()).setInitiatorPlayerId(caller).setClientRequest(original.toByteString()).build();
+        try{var reply=call("createTeamTickets",deadline,()->match.createTeamTickets(request));return reply.getStatus()==com.game.api.proto.TeamTicketsStatus.TEAM_TICKETS_CREATED?
+                new Tickets.Created():new Tickets.Unknown("原开局意图尚未确认");}
+        catch(RuntimeException e){return new Tickets.Unknown("原开局意图尚未确认");}
+    }
 
     private static final Logger log = LoggerFactory.getLogger(MatchTeamBattle.class);
 
@@ -61,8 +76,11 @@ public final class MatchTeamBattle implements TeamBattlePort {
     private final MatchTeamService match;
 
     /** @param match game-match 的整队开战接口（Dubbo 引用：group match、retries = 0） */
-    public MatchTeamBattle(MatchTeamService match) {
-        this.match = match;
+    public MatchTeamBattle(MatchTeamService match) { this(match,IntentMode.SQL_AUTHORITY); }
+    /** 旧 Redis 兼容模型须显式选择；生产装配始终使用默认 SQL 权威。 */
+    public MatchTeamBattle(MatchTeamService match,IntentMode intentMode) {
+        this.match = java.util.Objects.requireNonNull(match);
+        this.intentMode=java.util.Objects.requireNonNull(intentMode);
     }
 
     @Override

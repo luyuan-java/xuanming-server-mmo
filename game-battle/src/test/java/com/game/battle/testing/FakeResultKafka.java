@@ -81,6 +81,8 @@ public final class FakeResultKafka implements KafkaBattleResultSink.Clients {
     public volatile boolean autoComplete = true;
 
     private final Map<String, Integer> topics = new ConcurrentHashMap<>();
+    private final Map<String,Integer> replicaCounts = new ConcurrentHashMap<>();
+    private final Map<String,Map<String,String>> topicConfigs = new ConcurrentHashMap<>();
     private final List<Created> created = new CopyOnWriteArrayList<>();
     private final List<String> adminCalls = new CopyOnWriteArrayList<>();
     private final List<RecordingProducer> producers = new CopyOnWriteArrayList<>();
@@ -94,6 +96,7 @@ public final class FakeResultKafka implements KafkaBattleResultSink.Clients {
     /** 预置一个已存在的 topic（分区数可以故意与契约不符）。 */
     public FakeResultKafka topic(String name, int partitions) {
         topics.put(name, partitions);
+        replicaCounts.putIfAbsent(name,1);
         return this;
     }
 
@@ -244,6 +247,8 @@ public final class FakeResultKafka implements KafkaBattleResultSink.Clients {
             for (TopicSpec spec : specs) {
                 created.add(new Created(spec.name(), spec.partitions(), spec.configs(), replicationFactor));
                 topics.putIfAbsent(spec.name(), spec.partitions());
+                replicaCounts.putIfAbsent(spec.name(),(int)replicationFactor);
+                topicConfigs.putIfAbsent(spec.name(),new ConcurrentHashMap<>(spec.configs()));
             }
         }
 
@@ -251,13 +256,19 @@ public final class FakeResultKafka implements KafkaBattleResultSink.Clients {
         public Map<String, String> configs(String topic, Collection<String> keys, Duration timeout) {
             adminCalls.add("configs");
             reach();
-            return Map.of();
+            Map<String,String> result=new HashMap<>();var stored=topicConfigs.getOrDefault(topic,Map.of());
+            for(String key:keys)if(stored.containsKey(key))result.put(key,stored.get(key));return result;
         }
 
         @Override
         public void alterConfigs(String topic, Map<String, String> configs, Duration timeout) {
             adminCalls.add("alter");
             reach();
+            topicConfigs.computeIfAbsent(topic,ignored->new ConcurrentHashMap<>()).putAll(configs);
+        }
+        @Override public Map<String,Integer> minimumReplicaCounts(Collection<String> names,Duration timeout){
+            adminCalls.add("replicas");reach();Map<String,Integer> result=new HashMap<>();
+            for(String name:names)if(replicaCounts.containsKey(name))result.put(name,replicaCounts.get(name));return result;
         }
 
         @Override

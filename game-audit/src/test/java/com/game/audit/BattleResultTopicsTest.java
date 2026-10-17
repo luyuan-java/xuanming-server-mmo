@@ -27,6 +27,7 @@ class BattleResultTopicsTest {
         final List<String> created = new ArrayList<>();
         final List<Short> replicationFactors = new ArrayList<>();
         final List<Map<String, String>> alters = new ArrayList<>();
+        final Map<String,Integer> replicas = new HashMap<>();
         boolean unreachable;
 
         @Override
@@ -50,6 +51,7 @@ class BattleResultTopicsTest {
                 replicationFactors.add(replicationFactor);
                 partitions.put(spec.name(), spec.partitions());
                 configs.put(spec.name(), new HashMap<>(spec.configs()));
+                replicas.put(spec.name(),(int)replicationFactor);
             }
         }
 
@@ -74,12 +76,55 @@ class BattleResultTopicsTest {
         @Override
         public void close() {
         }
+        @Override public Map<String,Integer> minimumReplicaCounts(Collection<String> topics,Duration timeout){
+            Map<String,Integer> result=new HashMap<>();for(String topic:topics)if(replicas.containsKey(topic))result.put(topic,replicas.get(topic));return result;
+        }
     }
 
     private static final Duration TIMEOUT = Duration.ofSeconds(1);
     private static final KafkaNames KAFKA_NAMES = new KafkaNames(GameNamespace.of("game"));
     private static final BattleResultTopics BATTLE_RESULT_TOPICS = new BattleResultTopics(KAFKA_NAMES);
     private static final AuditTopics AUDIT_TOPICS = new AuditTopics(KAFKA_NAMES);
+
+    @Test void 全球结果日志拒绝RF1配置且不创建(){
+        var admin=new FakeAdmin();
+        assertThatThrownBy(()->BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.OWN,(short)1,TIMEOUT))
+                .isInstanceOf(AuditTopicContractException.class);
+        assertThat(admin.created).isEmpty();
+    }
+    @Test void 既有RF1拒绝且不擅自迁移副本或改写旧配置(){
+        var admin=new FakeAdmin();String topic=BATTLE_RESULT_TOPICS.name(1);admin.partitions.put(topic,3);admin.replicas.put(topic,1);
+        assertThatThrownBy(()->BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.OWN,(short)3,TIMEOUT))
+                .isInstanceOf(AuditTopicContractException.class).hasMessageContaining("实际副本不足");
+        assertThat(admin.created).isEmpty();assertThat(admin.alters).isEmpty();
+    }
+    @Test void 全球结果主人创建显式RF3和逐topic耐久配置(){
+        var admin=new FakeAdmin();BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.OWN,(short)3,TIMEOUT);
+        assertThat(admin.replicationFactors).containsExactly((short)3);
+        assertThat(admin.configs.get(BATTLE_RESULT_TOPICS.name(1))).containsEntry("min.insync.replicas","2")
+                .containsEntry("unclean.leader.election.enable","false");
+    }
+    @Test void 主人保留更高minISR且生产者只验证不修改(){
+        var admin=new FakeAdmin();String topic=BATTLE_RESULT_TOPICS.name(1);admin.partitions.put(topic,3);admin.replicas.put(topic,3);
+        admin.configs.put(topic,new HashMap<>(Map.of("min.insync.replicas","3","unclean.leader.election.enable","true")));
+        BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.OWN,(short)3,TIMEOUT);
+        assertThat(admin.configs.get(topic)).containsEntry("min.insync.replicas","3").containsEntry("unclean.leader.election.enable","false");
+        int mutations=admin.alters.size();BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.CREATE_AND_VERIFY,(short)3,TIMEOUT);
+        assertThat(admin.alters).hasSize(mutations);
+        admin.configs.get(topic).put("min.insync.replicas","1");
+        assertThatThrownBy(()->BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.CREATE_AND_VERIFY,(short)3,TIMEOUT))
+                .isInstanceOf(AuditTopicContractException.class);
+        assertThat(admin.alters).hasSize(mutations);
+    }
+    @Test void 只读消费方不创建未登记topic且未知副本拒启(){
+        var admin=new FakeAdmin();
+        assertThatThrownBy(()->BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.VERIFY_ONLY,(short)3,TIMEOUT))
+                .isInstanceOf(AuditTopicContractException.class);
+        assertThat(admin.created).isEmpty();
+        admin.partitions.put(BATTLE_RESULT_TOPICS.name(1),3);
+        assertThatThrownBy(()->BATTLE_RESULT_TOPICS.ensureDurable(admin,1,Mode.VERIFY_ONLY,(short)3,TIMEOUT))
+                .isInstanceOf(AuditTopicContractException.class);
+    }
 
     @Test
     void 规格钉住_名字带代次_三分区_保留七天() {

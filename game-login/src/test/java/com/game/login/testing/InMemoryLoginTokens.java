@@ -6,10 +6,13 @@ import com.game.login.token.TokenPair;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * 内存版令牌（测试用）：令牌按序号生成；可设为「存储故障」让每个操作都抛异常。
  * refresh 按重放宽限窗口为 0 的语义建模（严格一次性）；窗口内重放的语义由 {@code RedisLoginTokensIntegrationTest} 覆盖。
+ * 截止与 Redis 版同一个位置：认出旧 refresh 之后、作废与签发之前看一次，已过就什么都不动、抛
+ * {@link LoginTokens.RotationAbandoned}。
  */
 public final class InMemoryLoginTokens implements LoginTokens {
 
@@ -38,12 +41,16 @@ public final class InMemoryLoginTokens implements LoginTokens {
     }
 
     @Override
-    public synchronized Optional<TokenPair> refresh(String refreshToken) {
+    public synchronized Optional<TokenPair> refresh(String refreshToken, BooleanSupplier pastDeadline) {
         check();
-        TokenData data = refresh.remove(refreshToken);
+        TokenData data = refresh.get(refreshToken);
         if (data == null) {
             return Optional.empty();
         }
+        if (pastDeadline.getAsBoolean()) {
+            throw new LoginTokens.RotationAbandoned("请求截止已过，没有轮换（测试）");
+        }
+        refresh.remove(refreshToken);
         return Optional.of(issue(data.account(), data.authType(), data.deviceId()));
     }
 

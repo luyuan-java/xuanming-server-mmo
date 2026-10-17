@@ -61,7 +61,9 @@ public final class BattleEdgeServer implements DirectEdge {
     /** 上行只认两种类型（{@code edge.cpp:58-65}）：全名 → 默认实例。这批 proto 没有 package，全名就是裸名。 */
     static final Map<String, Message> ACCEPTED = Map.of(
             BattleTokenVerifyRequest.getDescriptor().getFullName(), BattleTokenVerifyRequest.getDefaultInstance(),
-            ClientRequest.getDescriptor().getFullName(), ClientRequest.getDefaultInstance());
+            ClientRequest.getDescriptor().getFullName(), ClientRequest.getDefaultInstance(),
+            com.game.proto.match.NetworkProbeStart.getDescriptor().getFullName(),com.game.proto.match.NetworkProbeStart.getDefaultInstance(),
+            com.game.proto.match.NetworkProbeEcho.getDescriptor().getFullName(),com.game.proto.match.NetworkProbeEcho.getDefaultInstance());
 
     /** 停机时等强关完成、等 accept 线程退出的上限（只为不无限阻塞）。 */
     private static final Duration CLOSE_WAIT = Duration.ofSeconds(2);

@@ -45,6 +45,10 @@ import java.util.OptionalInt;
  * {@code rounds}、{@code round_resolve}、{@code pushes}、{@code tickets}；{@link #roomCount()} 由装配方绑定到 {@code BattleMetrics#bindRooms}。
  */
 public interface BattleRoomService {
+    /** 固定执行实例内的房间存在性，只在逻辑线程查询。旧替身保守返回 false。 */
+    default boolean containsBattle(long battleId){return false;}
+    /** 原结果可能已提交、尚未确认时，销毁不得先宣布作废。 */
+    default boolean resultCommitPending(long battleId){return false;}
 
     // ---------------------------------------------------------------- 控制面（逻辑线程）
 

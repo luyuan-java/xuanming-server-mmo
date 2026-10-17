@@ -695,7 +695,8 @@ class EnterGameZoneTravelTest {
         assertError(enter(NORMAL, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
 
         assertThat(attempts).as("每次夺权都在预算之内发起").containsExactly(ms(3500), ms(3800));
-        verify(takeovers, times(2)).request(PLAYER, 4);
+        // 第 2 次夺权的结果在第 4.1 s 才回来、已过预算截止：不再请持有者让出（gate 放行之后迟到的让出请求可能踢掉客户端重试进来的新会话）。
+        verify(takeovers, times(1)).request(PLAYER, 4);
         assertThat(claims("timeout")).isEqualTo(1);
         assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
     }

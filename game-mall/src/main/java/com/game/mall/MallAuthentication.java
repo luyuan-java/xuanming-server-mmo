@@ -51,14 +51,14 @@ public final class MallAuthentication extends OncePerRequestFilter {
             }
             // 业务路径由容器剥离 context 与 servlet 前缀；HMAC 仍绑定完整原始 URI。
             String route = request.getPathInfo() == null ? request.getServletPath() : request.getPathInfo();
-            String role = "/internal/payments".equals(route) ? "payment" : "gateway";
-            if (route != null && route.startsWith("/internal/") && !role.equals("payment")) {
+            String role = java.util.Set.of("/internal/payments","/internal/refunds/poll","/internal/refunds/receipt").contains(route) ? "payment" : java.util.Set.of("/internal/deliveries/poll","/internal/deliveries/receipt").contains(route)?"delivery":"gateway";
+            if (route != null && route.startsWith("/internal/") && role.equals("gateway")) {
                 throw new MallException(404, "接口不存在");
             }
             String subject = singleHeader(request, "X-Commerce-Subject");
             if (role.equals("gateway")) {
                 requirePlayer(subject);
-            } else if (!properties.paymentSubject().equals(subject)) {
+            } else if (!(role.equals("delivery")?"trade".equals(subject):properties.paymentSubject().equals(subject))) {
                 throw new MallException(401, "调用方认证失败");
             }
             String timestamp = singleHeader(request, "X-Commerce-Timestamp");
@@ -67,7 +67,8 @@ public final class MallAuthentication extends OncePerRequestFilter {
             if (!timestamp.matches("[0-9]{1,15}") || !nonce.matches("[A-Za-z0-9_-]{16,128}") || !signature.matches("[0-9a-f]{64}")) {
                 throw new MallException(401, "调用方认证失败");
             }
-            String secret = role.equals("payment") ? properties.paymentSecret() : properties.gatewaySecret();
+            String secret = role.equals("payment") ? properties.paymentSecret() : role.equals("delivery")?properties.deliverySecret():properties.gatewaySecret();
+            if(secret==null||secret.getBytes(StandardCharsets.UTF_8).length<32)throw new MallException(401,"调用方认证失败");
             byte[] expected = HexFormat.of().parseHex(sign(secret, role, subject, timestamp, nonce, request.getMethod(), path, body));
             if (!MessageDigest.isEqual(expected, HexFormat.of().parseHex(signature))) {
                 throw new MallException(401, "调用方认证失败");

@@ -91,6 +91,7 @@ public final class MallOrderStore {
                 }
                 jdbc.update("INSERT INTO oms_order_item(order_sn,product_id,product_sku_id,product_sku_code,product_quantity,product_price_minor) VALUES (?,?,?,?,?,?)",
                         orderId, model.getProductId(), input.skuId(), model.getSkuCode(), input.quantity(), price);
+                if(jdbc.update("INSERT INTO commerce_order_grant(order_sn,item_config_id,count_per_unit,title) SELECT ?,item_config_id,count_per_unit,title FROM commerce_sku_grant WHERE sku_id=? AND item_config_id>0 AND count_per_unit>0 AND count_per_unit*?<=4096 AND CHAR_LENGTH(TRIM(title))>0",orderId,input.skuId(),input.quantity())!=1)throw new MallException(409,"SKU没有合法游戏交付映射或单次数量越界");
                 return view(Objects.requireNonNull(byId(orderId, false)));
             }));
         } catch (DuplicateKeyException duplicate) {
@@ -107,6 +108,11 @@ public final class MallOrderStore {
         MallAuthentication.requirePlayer(buyer);
         requireOrderId(orderId);
         return view(owned(byId(orderId, false), buyer));
+    }
+    public List<MallApi.Order> list(String buyer,DeliveryApi.OrderPage page){
+        MallAuthentication.requirePlayer(buyer);if(page==null||page.limit()<1||page.limit()>100||page.afterOrderId()==null)throw new MallException(400,"订单分页非法");
+        long after=0;if(!page.afterOrderId().isEmpty()){requireOrderId(page.afterOrderId());after=owned(byId(page.afterOrderId(),false),buyer).model().getId();}
+        return jdbc.query("SELECT * FROM oms_order WHERE buyer_id=? AND id>? ORDER BY id LIMIT ?",(row,n)->view(stored(row)),buyer,after,page.limit());
     }
 
     public MallApi.Order cancel(String buyer, String orderId) {
@@ -151,7 +157,7 @@ public final class MallOrderStore {
                 if (order.model().getPayAmount().longValueExact() != input.amountMinor() || !order.currency().equals(input.currency())) {
                     throw new MallException(409, "支付金额或币种不匹配");
                 }
-                if (order.model().getStatus() == 1) {
+                if (java.util.Set.of(1,2,5,6,7).contains(order.model().getStatus())) {
                     Integer receipts = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt WHERE order_sn=? AND channel=? AND transaction_id=? AND amount_minor=? AND currency=?",
                             Integer.class, input.orderId(), ascii(input.channel()), ascii(input.transactionId()), input.amountMinor(), input.currency());
                     if (receipts != null && receipts == 1) {
@@ -159,9 +165,8 @@ public final class MallOrderStore {
                     }
                     throw new MallException(409, "订单已记录其他支付流水");
                 }
-                if (order.model().getStatus() != 0) {
-                    throw new MallException(409, "订单已关闭，须由支付适配器处理退款");
-                }
+                if(order.model().getStatus()==4){jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES(?,?,?,?,?)",ascii(input.channel()),ascii(input.transactionId()),input.orderId(),input.amountMinor(),input.currency());jdbc.update("INSERT INTO commerce_refund_intent(order_sn,status) VALUES(?,'PENDING')",input.orderId());jdbc.update("UPDATE oms_order SET status=5 WHERE order_sn=? AND status=4",input.orderId());order.model().setStatus(5);return view(order);}
+                if (order.model().getStatus() != 0) { throw new MallException(409, "订单状态冲突"); }
                 jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES (?,?,?,?,?)",
                         ascii(input.channel()), ascii(input.transactionId()), input.orderId(), input.amountMinor(), input.currency());
                 if (jdbc.update("UPDATE pms_sku_stock SET stock=stock-?,lock_stock=lock_stock-? WHERE id=? AND stock>=? AND lock_stock>=?",
@@ -209,7 +214,11 @@ public final class MallOrderStore {
         String state = switch (order.model().getStatus()) {
             case 0 -> "AWAITING_PAYMENT";
             case 1 -> "DELIVERY_PENDING";
+            case 2 -> "DELIVERED";
             case 4 -> "CANCELLED";
+            case 5 -> "REFUND_PENDING";
+            case 6 -> "REFUNDED";
+            case 7 -> "MANUAL";
             default -> throw new MallException(503, "订单状态无法处理");
         };
         return new MallApi.Order(order.model().getOrderSn(), order.buyer(), order.skuId(), order.quantity(),

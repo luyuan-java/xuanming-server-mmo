@@ -217,6 +217,24 @@ public final class PlayerPets {
         pets.add(pet);
     }
 
+    /** 从完整存档实例接收，保留资质、已分配点、技能与未知字段。 */
+    public void putTransferred(PetEntry entry) {
+        if (entry.getPetId() == 0 || find(entry.getPetId()) != null) throw new IllegalArgumentException("宝宝实例身份冲突");
+        pets.add(Pet.of(entry));
+    }
+
+    public void takeTransferred(long petId) {
+        if (petId == 0 || activePetId == petId || !pets.removeIf(pet -> pet.petId() == petId)) {
+            throw new IllegalArgumentException("宝宝不存在或仍在出战");
+        }
+    }
+
+    public void commitPrepared(PlayerPets candidate) {
+        pets.clear();
+        pets.addAll(candidate.pets);
+        activePetId = candidate.activePetId;
+    }
+
     /** 出战中的宝宝号；0 = 未出战。 */
     public long activePetId() {
         return activePetId;

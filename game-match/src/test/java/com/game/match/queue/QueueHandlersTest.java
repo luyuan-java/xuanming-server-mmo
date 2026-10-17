@@ -170,6 +170,92 @@ class QueueHandlersTest {
         assertThat(store.queueMembers(Q_1V1)).containsExactly("1001");
     }
 
+    // ---------------------------------------------------------------- 跨会话栅栏按 owner_epoch 认残留条目
+    // 在线目录条目与位置记录都带这次进场夺得的 owner_epoch(按玩家单调,同一次进场两边同值)。条目代次小于位置记录 = 上一次进场的残留,按缺席;
+    // 不小于 = 当前这次进场的条目,照常比会话号(代次 0 = 未知,也照常比)。下面几例的旧会话 = 会话号 sessionIdOf(A),新会话 = sessionIdOf(A) + 1。
+
+    private static final int OLD_SESSION = FakePlayerStatus.sessionIdOf(A);
+    private static final int NEW_SESSION = OLD_SESSION + 1;
+
+    private static PlayerPresence presenceOf(String gateInstance, int sessionId, long ownerEpoch) {
+        return PlayerPresence.newBuilder().setPlayerId(A).setZoneId(1).setGateNodeId(1).setGateInstanceId(gateInstance).setSessionId(sessionId)
+                .setOwnerEpoch(ownerEpoch).build();
+    }
+
+    private static ClientCall joinFrom(int sessionId) {
+        return call(MatchMethods.JOIN_QUEUE, A, join1v1()).toBuilder()
+                .setSession(SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId(FakePlayerStatus.GATE_INSTANCE).setSessionId(sessionId)
+                        .setAccount("acc").setPlayerId(A))
+                .build();
+    }
+
+    @Test
+    void 排队_在线目录残留旧会话的条目_代次小于位置记录_新会话照常受理() throws Exception {
+        // PARITY「客户端请求按会话保序」的已知残留:旧 gate 崩溃没撤条目,或新 gate 写目录失败(续期脚本遇值不一致不覆盖,最长留到 TTL 60 s)。
+        // 位置记录已由新一次进场(owner_epoch 2)写下,条目还是旧会话的(owner_epoch 1):按缺席放行,不误拒合法的新会话。
+        players.location(A, 1, 7, 2);
+        players.presence(A, presenceOf("gate-inst-crashed", OLD_SESSION, 1));
+
+        ClientReply reply = send(dispatcher, joinFrom(NEW_SESSION));
+
+        assertThat(JoinQueueResponse.parseFrom(reply.getBody())).isEqualTo(JoinQueueResponse.newBuilder().setQueueTicket("ticket-1").build());
+        assertThat(store.queueMembers(Q_1V1)).containsExactly("1001");
+    }
+
+    @Test
+    void 排队_在线目录是新会话的条目_位置记录还没跟上_旧会话迟到的157_inband16020() throws Exception {
+        // gate 写目录与 scene 写位置记录之间没有先后:新会话的条目(owner_epoch 3)可能先于位置记录(还是 2)落地。条目代次更大,它就是当前的。
+        players.location(A, 1, 7, 2);
+        players.presence(A, presenceOf(FakePlayerStatus.GATE_INSTANCE, NEW_SESSION, 3));
+
+        ClientReply reply = send(dispatcher, joinFrom(OLD_SESSION));
+
+        assertThat(JoinQueueResponse.parseFrom(reply.getBody()).getErrorCode()).isEqualTo(16020);
+        assertThat(store.ticketOf(A)).isEmpty();
+        assertThat(store.queueMembers(Q_1V1)).isEmpty();
+    }
+
+    @Test
+    void 排队_条目代次与位置记录相等_不算残留_旧会话被拒_新会话受理() throws Exception {
+        // 边界:相等 = 条目与位置记录出自同一次进场(新会话进场完毕的常态),条目是当前的。按「大于」判当前会把旧会话迟到的 157 放进来。
+        players.location(A, 1, 7, 2);
+        players.presence(A, presenceOf(FakePlayerStatus.GATE_INSTANCE, NEW_SESSION, 2));
+
+        ClientReply stale = send(dispatcher, joinFrom(OLD_SESSION));
+        assertThat(JoinQueueResponse.parseFrom(stale.getBody()).getErrorCode()).isEqualTo(16020);
+        assertThat(store.ticketOf(A)).as("旧会话不得建票").isEmpty();
+
+        ClientReply current = send(dispatcher, joinFrom(NEW_SESSION));
+        assertThat(JoinQueueResponse.parseFrom(current.getBody())).isEqualTo(JoinQueueResponse.newBuilder().setQueueTicket("ticket-1").build());
+        assertThat(store.queueMembers(Q_1V1)).containsExactly("1001");
+    }
+
+    @Test
+    void 排队_位置记录缺失_哪怕在线目录是本会话的条目也回16020_不读在线目录() throws Exception {
+        // 边界:没有位置记录就没有代次可比,也说明此刻没有节点持有这名玩家——第 8 步先回 16020,栅栏(读在线目录)走不到。
+        players.presence(A, presenceOf(FakePlayerStatus.GATE_INSTANCE, OLD_SESSION, 1));
+
+        ClientReply reply = send(dispatcher, joinFrom(OLD_SESSION));
+
+        assertThat(JoinQueueResponse.parseFrom(reply.getBody()).getErrorCode()).isEqualTo(16020);
+        assertThat(store.ticketOf(A)).isEmpty();
+        assertThat(players.reads).contains("location:1001").doesNotContain("presence:1001");
+    }
+
+    @Test
+    void 排队_条目代次为0_代次未知不算残留_照常比会话号_inband16020() throws Exception {
+        // 代次 0 = 字段缺失 / 旧版本 / 损坏的写入(gate 只用铸出的代次写,正常不会是 0)。按「0 < 位置记录的 2」认成残留会把它放过去(fail-open);
+        // 代次未知时退回放宽之前的口径:会话号不同就拒。
+        players.location(A, 1, 7, 2);
+        players.presence(A, presenceOf(FakePlayerStatus.GATE_INSTANCE, NEW_SESSION, 0));
+
+        ClientReply reply = send(dispatcher, joinFrom(OLD_SESSION));
+
+        assertThat(JoinQueueResponse.parseFrom(reply.getBody()).getErrorCode()).isEqualTo(16020);
+        assertThat(store.ticketOf(A)).isEmpty();
+        assertThat(store.queueMembers(Q_1V1)).isEmpty();
+    }
+
     @Test
     void 排队_会话没绑定玩家_inband16004缺少玩家身份_请求体里的player_id不算数() throws Exception {
         players.online(VICTIM, 1, 7);

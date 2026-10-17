@@ -3,17 +3,24 @@ package com.game.login.token;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.StringCodec;
 
-/** 不连 Redis 的部分：令牌格式闸、值与轮换记录的解码、宽限窗口的取值范围、存储异常不带原消息。 */
+/** 不连 Redis 的部分：令牌格式闸、值与轮换记录的解码、宽限窗口的取值范围、存储异常不带原消息、轮换脚本前的截止检查。 */
 class RedisLoginTokensTest {
 
     private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
@@ -74,6 +81,31 @@ class RedisLoginTokensTest {
                 .contains(new TokenData("robot_1", "", "", 0));
         TokenData data = new TokenData("robot_1", "password", "", 7);
         assertThat(RedisLoginTokens.decode(RedisLoginTokens.encode(data))).contains(data);
+    }
+
+    @Test
+    void 截止已过_读到旧refresh之后不发轮换脚本() {
+        // 客户端路径的提交点是那段「作废 + 签发」的原子脚本：截止之后 gate 随时会放行同一会话的下一条请求，
+        // 这时发出去，旧 refresh 会晚于下一条请求作废。只允许发生那一次 GET，脚本、重放判定、封顶一律不碰。
+        RedissonClient redis = mock(RedissonClient.class);
+        @SuppressWarnings("unchecked")
+        RBucket<String> oldBucket = mock(RBucket.class);
+        String old = "o".repeat(43);
+        when(redis.<String>getBucket(REDIS_KEYS.loginRefreshToken(old), StringCodec.INSTANCE)).thenReturn(oldBucket);
+        when(oldBucket.get()).thenReturn(RedisLoginTokens.encode(new TokenData("robot_1", "password", "", 7)));
+        RedisLoginTokens tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2),
+                Duration.ofHours(720), Duration.ofSeconds(30), new SecureRandom());
+        List<String> checks = new ArrayList<>();
+
+        assertThatThrownBy(() -> tokens.refresh(old, () -> {
+            checks.add("deadline");
+            return true;
+        })).isInstanceOf(LoginTokens.RotationAbandoned.class).hasMessageNotContaining(old);
+
+        assertThat(checks).as("读到旧值之后看一次").containsExactly("deadline");
+        verify(redis).getBucket(REDIS_KEYS.loginRefreshToken(old), StringCodec.INSTANCE);
+        verify(oldBucket).get();
+        verifyNoMoreInteractions(redis);
     }
 
     @Test

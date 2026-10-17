@@ -80,7 +80,10 @@ import java.util.Optional;
  *       第 9 步 上行 8 → 信封 1003 且分数仍 0（Go :430-492）；</li>
  *   <li>M1–M10 管理段：重复申请只一条、未入帮列待审 14002、批准 / 拒绝推送、拒绝后再审 14018、任命长老
  *       （{@code officer_count == 1 && max_officers == 2}）与幂等任命、长老踢人边界、两次转让与降级、退帮推送（Go :494-680）；</li>
- *   <li>第 10 步 解散 → 14002 / 14007，且删掉 F 的待审申请（Go :682-704）。</li>
+ *   <li>第 10 步 解散 → 14002 / 14007，且删掉 F 的待审申请（Go :682-704）；</li>
+ *   <li>第 11 步 过期的 expected_guild_id（mmorpg client-request-ordering.md O14 / §6.4，批次 E2；Go :708-771）：A 另建临时帮 H、B 申请并获批，
+ *       B 带第 1 步那个帮（已退出、已解散）的 id 退帮 → 14002 且仍是 H 的成员、H 仍 2 人；对照：带 H 的 id 退帮受理；A 解散 H 收尾
+ *       （{@link #staleExpectedGuild}）。</li>
  * </ol>
  * Java 增项（钉住契约细节，guild-spec §11.6）：帮名为空 / 25 个汉字 / 含控制字符 → 14009；全角大写的同名 → 14010；任免 role = 2 → 14006；
  * Apply(0) → 14001；Cancel(0) → 14018；Review 申请人 0 → 14018、审批自己 → 14015；Kick(0) → 14014；普通成员列待审 → 14016；
@@ -533,6 +536,9 @@ public final class GuildScenario {
         report.check(tipOf(fApps) == 0 && fApps.getApplicationsCount() == 0, "M10 解散后 F 的待审申请清空",
                 describeTip(fApps) + " " + fApps.getApplicationsCount() + " 条", REF);
 
+        // ---- 第 11 步：迟到的退帮带着过期的 expected_guild_id，不得作用到玩家的新帮会（Go :708-771） ----
+        staleExpectedGuild(a, b, gid);
+
         report.note("guild_id=" + uid(gid) + " zone=" + zoneId + " leader=A officer=D kicked=E rejected=F（同基线 GUILD_MGMT_OK / "
                 + "GUILD_SMOKE_OK 的字段；C 只在跨区第 4 步出现）");
     }
@@ -609,6 +615,54 @@ public final class GuildScenario {
             // 不该建成：解散掉，别给下一轮留一个同名的帮
             c.call(disband, DisbandGuildRequest.getDefaultInstance(), DisbandGuildResponse.parser());
         }
+    }
+
+    // ================================================================ 第 11 步：过期的 expected_guild_id（Go :708-771）
+
+    /**
+     * 第 11 步（mmorpg client-request-ordering.md O14 / §6.4，批次 E2；guild-spec §3.19）。要钉住的窗口：gate 放行同会话下一条之后
+     * （后端回包或发出满 5 s），上一条退帮仍可能在 game-guild 里跑完——玩家这时若已换到新帮，按「此刻所在的帮」执行就会把他从新帮移出。
+     * 现有流程里没人「离开旧帮、身在新帮」，所以另建临时帮 H 来造：A 建 H、B 申请并获批；B 带第 1 步那个帮（B 第 8 步已退出、第 10 步已解散）
+     * 的 id 作 expected_guild_id 退帮 → 14002（{@code GuildTip.NOT_IN_EXPECTED_GUILD}，与 kGuildNotInGuild 同码），B 仍是 H 的普通成员、
+     * H 仍是 2 人。预期帮已不存在也是服务端列明要拒的一种，不能按旧客户端路径退回 operatorGuild。
+     * 「旧帮仍在」那一种不另造：缓存新鲜时两种在 game-guild 里走同一条预检分支（本人映射 ≠ 预期即拒），由 game-guild 的
+     * ExpectedGuildServiceTest 覆盖；这里要钉的是字段经 gate 真实带到、部署的进程确有栅栏。
+     * B 必须是普通成员：帮主本来就退不了帮，「仍在 H」会变成帮主规则的功劳，栅栏坏了也看不出来。
+     * 末尾带 H 的 id 再退一次是对照：服务端若把一切非 0 的 expected_guild_id 都拒掉，前面的拒绝断言照样会过。
+     * 中途中断留下的 H 由下一次运行的第 0 步解散（固定 run-tag 时；A 是帮主，B 若还在册会随解散离开）。
+     */
+    private void staleExpectedGuild(Bot a, Bot b, long staleGid) throws RobotException {
+        CreateGuildResponse created = a.call(create, CreateGuildRequest.newBuilder().setName("烟测栅栏" + nonce()).build(),
+                CreateGuildResponse.parser());
+        long tempGid = created.getGuild().getGuildId();
+        must(tipOf(created) == 0 && tempGid != 0 && tempGid != staleGid,
+                "第 11 步 A 另建临时帮 H（新帮，不同于第 10 步解散的 " + uid(staleGid) + "）", describe(created));
+        expect(b, apply, ApplyJoinGuildRequest.newBuilder().setGuildId(tempGid).build(), ApplyJoinGuildResponse.parser(), 0,
+                "第 11 步 B 申请 H");
+        ReviewGuildApplicationResponse reviewed = a.call(review, ReviewGuildApplicationRequest.newBuilder()
+                .setApplicantPlayerId(b.id()).setApprove(true).build(), ReviewGuildApplicationResponse.parser());
+        must(tipOf(reviewed) == 0 && roleOf(reviewed.getGuild(), b.id()) == ROLE_MEMBER,
+                "第 11 步 A 通过 B：回包快照里 B 是 H 的普通成员", describe(reviewed));
+
+        LeaveGuildResponse stale = b.call(leave, LeaveGuildRequest.newBuilder().setExpectedGuildId(staleGid).build(),
+                LeaveGuildResponse.parser());
+        report.check(tipOf(stale) == TIP_NOT_IN_GUILD,
+                "第 11 步 B 带过期的 expected_guild_id（第 1 步的帮，已解散）退帮 → " + TIP_NOT_IN_GUILD + "（不在该帮），不作用到 H",
+                describeTip(stale) + (tipOf(stale) == 0
+                        ? "：服务端忽略了 expected_guild_id（game-guild 早于批次 E2 或栅栏坏了），B 被移出了新帮" : ""), REF);
+        GetPlayerGuildResponse after = b.call(getPlayerGuild, GetPlayerGuildRequest.getDefaultInstance(), GetPlayerGuildResponse.parser());
+        GuildInfo bGuild = after.getGuild();
+        report.check(tipOf(after) == 0 && bGuild.getGuildId() == tempGid && roleOf(bGuild, b.id()) == ROLE_MEMBER
+                        && bGuild.getMembersCount() == 2,
+                "第 11 步 被拒之后 B 仍是 H 的普通成员、H 仍是 2 人",
+                describeTip(after) + (after.hasGuild() ? " " + describe(bGuild) : " 无帮会"), REF);
+
+        // 对照：带 H 的 id 退帮照常受理
+        expect(b, leave, LeaveGuildRequest.newBuilder().setExpectedGuildId(tempGid).build(), LeaveGuildResponse.parser(), 0,
+                "第 11 步 对照：B 带 H 的 id 作 expected_guild_id 退帮 → 受理");
+        expect(b, getPlayerGuild, GetPlayerGuildRequest.getDefaultInstance(), GetPlayerGuildResponse.parser(), TIP_NOT_IN_GUILD,
+                "第 11 步 对照之后 B 查自己的帮会 → 14002");
+        expect(a, disband, DisbandGuildRequest.getDefaultInstance(), DisbandGuildResponse.parser(), 0, "第 11 步 收尾：A 解散 H");
     }
 
     // ================================================================ 预清理（Go cancelAllApplications / leaveAnyGuild）

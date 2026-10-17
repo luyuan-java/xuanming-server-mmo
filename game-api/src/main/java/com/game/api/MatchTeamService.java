@@ -31,6 +31,14 @@ import java.util.concurrent.CompletableFuture;
  * </ul>
  */
 public interface MatchTeamService {
+    /**
+     * 全球 SQL 模式覆盖下述旧 Redis 补偿口径：createTeamTickets 以原 StartTeamMatch 请求号/原文提交全员和原 formation；
+     * UNKNOWN 只查 queryTeamMatchIntent，不退票、重新发号或提前推 MATCH_FAILED。终态4/5才收业务开战锁。
+     * 请求号缺失、旧服务没有该查询时失败关闭；默认方法不伪造“未找到”成功。
+     */
+    default CompletableFuture<com.game.proto.team.TeamMatchIntent> queryTeamMatchIntent(com.game.api.proto.TeamMatchIntentQuery request) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("旧匹配服务不支持可靠开局意图查询"));
+    }
 
     /**
      * 副本人数检查 + 逐成员预检（基线第 3、5 步合成一次调用，顺序不变）：先看该副本的组队人数（未配置 → {@code DUNGEON_NOT_OPEN}，

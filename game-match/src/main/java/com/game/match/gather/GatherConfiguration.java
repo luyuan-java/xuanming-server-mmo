@@ -48,7 +48,6 @@ public class GatherConfiguration {
         return new Compensation(tickets, scenePreparer, placements, metrics, props.ticketTtl().toMillis(), props.requeueBackoff().toMillis());
     }
 
-    @Bean
     public GatherPipeline gatherPipeline(MatchIds ids, BattleNodes battleNodes, RedisClock clock, GatherHooks hooks, RatingReader ratings,
                                          ScenePreparer scenePreparer, NodeCalls<BattleNodeService> battleNodeCalls, PlacementStore placements,
                                          TicketStore tickets, Compensation gatherCompensation, MatchMetrics metrics, MatchProperties props) {
@@ -56,6 +55,11 @@ public class GatherConfiguration {
         return new GatherPipeline(new GatherPipeline.Parts(ids, battleNodes, clock, hooks, ratings, scenePreparer, battleNodeCalls, placements,
                 tickets, gatherCompensation, metrics), props.tableFingerprintMode(), props.readyTicketTtl().toMillis(), seeds::nextLong);
     }
+    @Bean(name="gatherPipeline")
+    public GatherPipeline configuredGatherPipeline(MatchIds ids,BattleNodes nodes,RedisClock clock,GatherHooks hooks,RatingReader ratings,
+            ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlacementStore placements,TicketStore tickets,Compensation compensation,
+            MatchMetrics metrics,MatchProperties props,org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){
+        return gatherPipeline(ids,nodes,clock,hooks,ratings,scenes,calls,placements,tickets,compensation,metrics,props).withGlobal(global.getIfAvailable());}
 
     @Bean
     public GatherLauncher gatherLauncher(GatherPipeline gatherPipeline, MatchMetrics metrics, MatchProperties props) {

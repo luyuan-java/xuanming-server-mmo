@@ -997,6 +997,30 @@ class PlayerStoreSqlTest {
     // ================================================================ 建角上限
 
     @Test
+    void 交易原实例与收据同事务落库_新读取者恢复_旧owner拒写不覆盖_收据删除与效果同存档() {
+        long p=newPlayer(6011,"交易持久化");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        var unknown=com.google.protobuf.UnknownFieldSet.newBuilder().addField(900,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(123).build()).build();
+        var pet=com.game.player.store.state.PetEntry.newBuilder().setPetId(800).setPetTableId(1).setName("原宝宝").setLevel(30).putAllocated(1,17).setUnknownFields(unknown).build();
+        var item=com.game.player.store.state.BagItemState.newBuilder().setItemUuid(700).setConfigId(1).setStackSize(1).setUnknownFields(unknown).build();
+        var receipt=com.game.player.store.state.AssetOpReceiptState.newBuilder().setSeq(1).setCorrelationId(999).setRequestDigest(com.google.protobuf.ByteString.copyFrom(new byte[32])).setSnapshotProto(item.toByteString()).build();
+        var stream=com.game.player.store.state.AssetOpStreamLedgerState.newBuilder().setStream(3).setStreamEpoch(1).setMaxSeq(1).addReceipts(receipt);
+        for(int word=0;word<16;word++){stream.addSeenBits(word==0?1:0).addAppliedBits(word==0?1:0);}
+        var state=PlayerState.newBuilder().setBag(com.game.player.store.state.BagState.newBuilder().addItems(item)).setPets(com.game.player.store.state.PetState.newBuilder().addPets(pet)).setAssetLedger(com.game.player.store.state.AssetOpLedgerState.newBuilder().addStreams(stream)).build();
+        assertThat(store.saveStateAndRelease(save(p,1,1,20),state)).isTrue();
+        // 新的仓储对象不读scene内存，直接从生产Mapper/SQL恢复完整未知字段及同一收据。
+        PlayerStore restarted=new PlayerStore(mapper,CLOCK::get,context.getBean(PlatformTransactionManager.class));
+        assertThat(restarted.loadState(p)).isEqualTo(state);
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.saveStateHeld(save(p,1,9,0),PlayerState.getDefaultInstance())).isFalse();
+        assertThat(restarted.loadState(p)).isEqualTo(state);
+        var acked=state.toBuilder().setAssetLedger(state.getAssetLedger().toBuilder().setStreams(0,stream.clearReceipts())).build();
+        assertThat(store.saveStateHeld(save(p,2,1,21),acked)).isTrue();
+        assertThat(restarted.loadState(p)).isEqualTo(acked);
+        assertThat(restarted.loadState(p).getPets().getPets(0)).isEqualTo(pet);
+    }
+
+    @Test
     void 两个实例并发建第5个和第6个角色_账号行锁让后者看到前者提交的插入_恰好一个成功() throws Exception {
         for (int i = 0; i < 4; i++) {
             newPlayer(2000 + i, "角色" + i);
@@ -1068,7 +1092,7 @@ class PlayerStoreSqlTest {
             if (MYSQL_URL != null) {
                 // 真 MySQL：每个用例一个临时库（URL 里 createDatabaseIfNotExist），用例结束删库。
                 ds = new DriverManagerDataSource(MYSQL_URL + "/" + database
-                        + "?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true",
+                        + "?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES'",
                         System.getProperty("game.it.mysql.user", "root"),
                         System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
                 MYSQL_DATABASES.add(database);

@@ -23,6 +23,17 @@ import com.game.proto.contracts.kafka.BattleResultEvent;
 @FunctionalInterface
 public interface BattleResultSink {
 
+    /** 已固定的原始来源；重投必须使用相同字节，兼容实现仍只接不可变事件。 */
+    default java.util.concurrent.CompletableFuture<Void> publishConfirmed(BattleResultEvent event,
+            com.google.protobuf.ByteString original, Channel channel) {
+        return publishConfirmed(event, channel);
+    }
+
+    /** 全球对局提交接缝：只有 broker 的 all ACK 可以完成；不支持此能力的实现必须失败关闭。 */
+    default java.util.concurrent.CompletableFuture<Void> publishConfirmed(BattleResultEvent event, Channel channel) {
+        return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("结果端口不支持耐久确认"));
+    }
+
     /** 结果事件走的通道（指标 {@code game_battle_results_total{channel}} 的取值）。 */
     enum Channel {
         /** 普通局：房间直接发，一局一次。 */

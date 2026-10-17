@@ -283,6 +283,7 @@ public final class BattleMetrics {
     /** 控制面方法（{@code game_battle_rpc_seconds{method}}）。 */
     public enum RpcMethod {
         CREATE_BATTLE("createBattle"),
+        QUERY_BATTLE_CREATION("queryBattleCreation"),
         DESTROY_BATTLE("destroyBattle"),
         ISSUE_BATTLE_TICKET("issueBattleTicket"),
         ADD_OBSERVER("addObserver"),

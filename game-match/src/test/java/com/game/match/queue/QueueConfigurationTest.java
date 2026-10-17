@@ -5,6 +5,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.game.common.id.Snowflake;
+import com.game.discovery.RedisProperties;
 import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
@@ -41,6 +42,7 @@ class QueueConfigurationTest {
         ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
                 .withUserConfiguration(QueueConfiguration.class)
                 .withBean(RedissonClient.class, () -> redis)
+                .withBean(RedisProperties.class, () -> new RedisProperties(null, null, null, null, null, null, null))
                 .withBean(MatchProperties.class, () -> new MatchProperties(null, null, null, null, null, null, null, null, null, null, null, null, null))
                 .withBean(PlayerStatusReader.class, FakePlayerStatus::new)
                 .withBean(MatchIds.class, () -> new MatchIds(new Snowflake(7), () -> true, () -> false))
@@ -63,7 +65,7 @@ class QueueConfigurationTest {
             assertThat(context.getBean(TicketHealing.class)).isInstanceOf(DefaultTicketHealing.class);
             assertThat(context).hasSingleBean(QueueService.class);
             assertThat(context.getBeansOfType(MatchMethodHandler.class).values()).extracting(MatchMethodHandler::method)
-                    .containsExactlyInAnyOrder("JoinQueue", "CancelQueue", "GetQueueStatus");
+                    .containsExactlyInAnyOrder("JoinQueue", "CancelQueue", "GetQueueStatus", "GetNetworkProbePlan", "CommitNetworkProbe");
             assertThat(context.getBeansOfType(MatchMethodHandler.class).values()).noneMatch(MatchMethodHandler::inline);
             verifyNoInteractions(redis);
         });

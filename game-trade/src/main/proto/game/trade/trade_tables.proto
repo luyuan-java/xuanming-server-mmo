@@ -72,3 +72,41 @@ message TradeFavoriteRow {
   uint64 created_ms = 3;              // 首次收藏的时刻；重复收藏不刷新（ODKU 空更新，§1.9）
   // 追加区：从 4 起。
 }
+
+// 合同/托管待办均是本版内部SQL记录，不复制玩家钱包或背包。
+message TradeCommerceRow {
+  option (proto2mysql.table_name) = "trade_commerce";
+  option (proto2mysql.primary_key) = "commerce_id";
+  option (proto2mysql.unique_key) = "request_key";
+  option (proto2mysql.index) = "status,updated_ms;seller_player_id,commerce_id;buyer_player_id,commerce_id;kind,market_id,item_config_id,side,status,unit_price,commerce_id;kind,status,expires_ms;parent_id,status;counterparty_id,status";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+  uint64 commerce_id=1; string request_key=2; bytes request_digest=3; uint32 kind=4; uint32 status=5;
+  uint64 seller_player_id=6; uint64 buyer_player_id=7; uint32 market_id=8; uint32 item_config_id=9;
+  uint32 side=10; uint64 unit_price=11; uint32 quantity=12; uint32 filled_quantity=13; uint32 currency_type=14;
+  uint64 expires_ms=15; uint64 created_ms=16; uint64 updated_ms=17; uint64 version=18; bytes workflow_proto=19;
+  uint64 parent_id=20; uint64 counterparty_id=21;
+}
+message TradeCommerceGuardRow {
+  option (proto2mysql.table_name) = "trade_commerce_guard";
+  option (proto2mysql.primary_key) = "guard_id";
+  uint64 guard_id=1;
+}
+message TradePlayerOpSeqRow {
+  option (proto2mysql.table_name) = "trade_player_op_seq";
+  option (proto2mysql.primary_key) = "player_id,stream";
+  uint64 player_id=1; uint32 stream=2; uint64 next_seq=3; uint64 epoch=4; uint64 updated_ms=5;
+}
+message TradeAssetOpRow {
+  option (proto2mysql.table_name) = "trade_asset_op";
+  option (proto2mysql.primary_key) = "op_id";
+  option (proto2mysql.unique_key) = "player_id,stream,stream_epoch,seq";
+  option (proto2mysql.index) = "status,next_attempt_ms;player_id,stream,stream_epoch,status,seq;ref_kind,ref_id";
+  uint64 op_id=1; uint64 player_id=2; uint32 stream=3; uint64 stream_epoch=4; uint64 seq=5;
+  uint32 kind=6; uint32 status=7; bool durable=8; uint32 attempts=9; uint64 next_attempt_ms=10;
+  uint64 deadline_ms=11; uint64 lease_until_ms=12; uint64 lease_token=13; uint32 tx_type=14;
+  uint32 ref_kind=15; uint64 ref_id=16; bytes payload=17; uint32 last_outcome=18; uint32 last_reason=19;
+  uint64 created_ms=20; uint64 updated_ms=21; string resolved_by=22; string resolve_reason=23;
+  uint64 last_send_ms=24; bytes escrow_snapshot=25; bool receipt_ack_pending=26; bool business_consumed=27;
+}

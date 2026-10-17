@@ -77,13 +77,16 @@ import org.slf4j.LoggerFactory;
  * <p>线程：持票者 / 归属校验、读位置、合服围栏、夺权在工作线程上同步执行；等 scene-manager（分配、签票）与退避重试都是异步组合，
  * 完成后回到工作线程，不阻塞任何线程。在途闸门一直持有到整条异步链结束（含登录期重定向的签票）。
  *
- * <p>时间预算（{@code enterBudget}，从 {@link #handle} 开始算）：gate 调 login 有自己的 Dubbo 超时（game-gate
+ * <p>时间预算（{@code enterBudget}，从分发器受理这条请求开始算，含 login 工作队列排队，见
+ * {@link ClientMessageHandler#handle(SessionContext, Message, long)}）：gate 调 login 有自己的 Dubbo 超时（game-gate
  * {@code dubbo.consumer.timeout}，5 s），到点就向客户端推 23 {1003}，迟到的应答被 Dubbo 消费端直接丢弃、到不了 gate——
  * 这时夺到的归属没有任何节点持有，也没人代为释放，玩家要等租约（{@link PlayerStore#OWNER_LEASE}）过期才能再进。
  * 所以整条链按剩余预算收紧：等 scene-manager（签票、分配、夺权后的重新分配）的本地兜底取 {@code assignTimeout} 与剩余预算中较小的，
- * 预算用完就不再发起调用（按调用超时处理）；夺权的等待截止取 {@code claimWait} 与预算截止中较早的，分配回来时预算已用完就不夺权（2005）；
- * 夺到之后预算已用完就不再复查位置（沿用原落点）。预算必须小于 gate 的超时，差值留给链路往返、工作队列排队（预算从处理器开始算，
- * 不含排队）、最后一次夺权的 SQL 与回包。登录期重定向没成时的回落（签票 + 分配 + 夺权）因此也不会超出 gate 的等待。
+ * 预算用完就不再发起调用（按调用超时处理）；夺权的等待截止取 {@code claimWait} 与预算截止中较早的，分配回来时预算已用完就不夺权（2005），
+ * 退避醒来时预算已用完同样不再夺权，下一次重试只能排在预算截止上时不再空等、当场回 2005，
+ * 夺权结果回来时预算已用完也不再请持有者让出（见 {@link #claim}）；
+ * 夺到之后预算已用完就不再复查位置（沿用原落点）。预算必须小于 gate 的超时，差值留给链路往返、最后一次夺权的 SQL 与回包
+ * （排队已算在预算里）。登录期重定向没成时的回落（签票 + 分配 + 夺权）因此也不会超出 gate 的等待。
  *
  * <p>数据一致性：owner_epoch 在分配到场景之后才夺取，分配失败不产生夺权；夺权只在上一个写者已释放（最终写回已落库）
  * 或其租约已过期时成功（{@link PlayerStore#claimOwnership}），新写者加载到的一定是上一个写者写回后的状态。
@@ -228,9 +231,16 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return EnterGameResponse.class;
     }
 
+    /** 没有经过分发器的调用（测试）：按此刻受理、没有排队。 */
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, EnterGameRequest request) {
-        long enterDeadline = nanoClock.getAsLong() + enterBudget.toNanos();
+        return handle(session, request, 0);
+    }
+
+    /** 截止 = 受理时刻 + 时间预算：排队（{@code queuedNanos}）同样耗着 gate 的等待，从预算里扣掉（见类注释「时间预算」）。 */
+    @Override
+    public CompletableFuture<HandlerReply> handle(SessionContext session, EnterGameRequest request, long queuedNanos) {
+        long enterDeadline = nanoClock.getAsLong() - queuedNanos + enterBudget.toNanos();
         if (session.getSessionId() == 0) {
             return done(error(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE));
         }
@@ -515,13 +525,24 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     /**
      * 在工作线程上夺权一次；仍被持有就请持有者让出，退避后在工作线程上再试，直到截止时间。
      *
-     * @param deadline      夺权等待的截止（{@code claimWait} 与时间预算截止中较早的）：最后一次重试排在它上面
-     * @param enterDeadline 时间预算的截止（夺到之后是否还复查位置）
+     * @param deadline      夺权等待的截止（{@code claimWait} 与时间预算截止中较早的）：{@code claimWait} 先到时最后一次重试排在它上面；
+     *                      它就是预算截止时，不排那次注定落空的重试（醒来时预算必然已用完），当场回 2005
+     * @param enterDeadline 时间预算的截止：过了它不再夺权、不再请持有者让出，夺到之后也不再复查位置
      * @param retried       之前已经撞上过「仍被持有」（夺到时记为 {@link ClaimOutcome#WAITED}）
      */
     private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, AssignSceneRequest routed,
                                                AssignSceneResponse assigned, long deadline, long enterDeadline,
                                                Duration backoff, boolean retried) {
+        if (retried && enterDeadline - nanoClock.getAsLong() <= 0) {
+            // 退避醒来时时间预算已用完（退避排在预算截止之前，但计时器晚触发、或回工作线程时排了队，醒来已过截止）：不再夺权。
+            // 只能排在预算截止上的那次重试，排之前就放弃了（见下文）。
+            // 预算之后 gate 随时会按超时放行同一会话的下一条请求，这时夺到的归属没人接，还可能晚于客户端的重试落库
+            // （mmorpg client-request-ordering.md §6.1）。第一次夺权之前的同一检查在 afterAssign。
+            log.warn("进游戏失败：退避醒来时时间预算 {} 已用完，不再夺权 player={} session={}", enterBudget, playerId,
+                    session.getSessionId());
+            return CompletableFuture.completedFuture(new ClaimStep(
+                    error(LoginErrorTip.login_error.kLoginInProgress_VALUE), ClaimOutcome.TIMEOUT));
+        }
         ClaimResult result = store.claimOwnership(playerId);
         if (result instanceof ClaimResult.Claimed claimed) {
             ClaimOutcome outcome = retried ? ClaimOutcome.WAITED : ClaimOutcome.CLAIMED;
@@ -534,12 +555,28 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                     error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE), ClaimOutcome.NOT_FOUND));
         }
         long heldEpoch = ((ClaimResult.Held) result).ownerEpoch();
-        takeovers.request(playerId, heldEpoch);
-        metrics.takeoverRequested();
-        long remainingNanos = deadline - nanoClock.getAsLong();
+        long now = nanoClock.getAsLong();
+        if (enterDeadline - now > 0) {
+            takeovers.request(playerId, heldEpoch);
+            metrics.takeoverRequested();
+        } else {
+            // 预算用完之后不再请持有者让出：这次不会再重试；而 gate 一旦放行，客户端重试的 EnterGame 可能已在别的 login 实例上
+            // 夺到下一代归属，迟到的让出请求会把它刚进场的会话踢下线。客户端收到 2005 后重试时会自己再请一次。
+            log.info("夺权结果回来时时间预算 {} 已用完，不再请持有者让出 player={} session={} held_epoch={}", enterBudget,
+                    playerId, session.getSessionId(), heldEpoch);
+        }
+        long remainingNanos = deadline - now;
         if (remainingNanos <= 0) {
             log.warn("进游戏失败：玩家数据归属仍被持有，等待窗口内（{}，截止不晚于时间预算 {}）没等到释放 player={} session={}"
                     + " held_epoch={}", claimWait, enterBudget, playerId, session.getSessionId(), heldEpoch);
+            return CompletableFuture.completedFuture(new ClaimStep(
+                    error(LoginErrorTip.login_error.kLoginInProgress_VALUE), ClaimOutcome.TIMEOUT));
+        }
+        if (deadline - enterDeadline >= 0 && backoff.compareTo(Duration.ofNanos(remainingNanos)) >= 0) {
+            // 等待截止就是预算截止，下一次退避又会被截到它上面：醒来时预算必然已用完（方法开头的检查），这次重试注定不夺权。
+            // 与其白等到截止再回 2005（多占着在途闸门和 gate 上这条会话的队列，回包离 gate 放行也更近），不如现在就回。
+            log.warn("进游戏失败：玩家数据归属仍被持有，下一次重试只能排在时间预算 {} 的截止上，不再等 player={} session={}"
+                    + " held_epoch={}", enterBudget, playerId, session.getSessionId(), heldEpoch);
             return CompletableFuture.completedFuture(new ClaimStep(
                     error(LoginErrorTip.login_error.kLoginInProgress_VALUE), ClaimOutcome.TIMEOUT));
         }

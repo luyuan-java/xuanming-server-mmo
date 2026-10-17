@@ -97,6 +97,7 @@ class PetBattleSnapshotTest {
 
     /** 一只 5 级、401 维度加了 1 点、资质取基准的宝宝，已出战。 */
     private static Pet activePet(ScenePlayer player, int petTableId, long health, long mana) {
+        player.setLevel(5); // 本组验证五级宝宝的快照；主人先满足既有出战等级准入。
         Pet pet = new Pet(PET, petTableId, 5, 1_700_000_000L);
         pet.setAllocated(DIMENSION, 1);
         pet.setHealth(health);
@@ -304,10 +305,17 @@ class PetBattleSnapshotTest {
                 .addPets(PetEntry.newBuilder().setPetId(PET).setPetTableId(TURTLE).setLevel(5).setHealth(100).setMana(10)
                         .addAllSkillTableIds(List.of(4, 9, 0, 9_999, 3, 9, 1)))).build();
         ScenePlayer player = WorldTestAccess.player(PLAYER, 1, state);
+        player.setLevel(5);
 
         BattlePetSnapshot snapshot = service(SYNTHETIC).buildBattleSnapshot(player).get(0);
 
         assertThat(snapshot.getSkillTableIdsList()).containsExactly(3, 4, 22, 9, 9_999, 1);
+    }
+
+    @Test
+    void 主人等级不足不能用快照夹具绕过既有出战准入(){
+        ScenePlayer player=WorldTestAccess.player(PLAYER);activePet(player,TURTLE,100,10);player.setLevel(4);
+        assertThat(service(SYNTHETIC).buildBattleSnapshot(player)).isEmpty();
     }
 
     // ------------------------------------------------------------------ 多只宝宝、正式配表

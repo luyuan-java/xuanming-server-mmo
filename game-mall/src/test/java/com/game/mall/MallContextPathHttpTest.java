@@ -44,6 +44,7 @@ class MallContextPathHttpTest {
     @Test
     void 非空context及servlet前缀下网关不能伪造付款且支付密钥正常可用() throws Exception {
         jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (1,1,'context-sku',1250,'CNY',10,0,1)");
+        jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(1,10,1,'玄铁')");
         String buyer = "18446744073709551615";
         var created = call("gateway", buyer, "POST", "/api/orders", "{\"requestId\":\"context-request-001\",\"skuId\":1,\"quantity\":1}");
         assertThat(created.statusCode()).isEqualTo(200);

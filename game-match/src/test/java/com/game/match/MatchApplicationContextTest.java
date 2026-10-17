@@ -158,6 +158,7 @@ class MatchApplicationContextTest {
      */
     static final List<Class<?>> PROCESS = List.of(
             MatchConfiguration.class, MatchDispatchConfiguration.class, InlineHandlers.class, MatchClientMessageService.class,
+            com.game.match.global.GlobalMatchConfiguration.class,
             QueueConfiguration.class, MatcherConfiguration.class, GatherConfiguration.class, PlacementConfiguration.class,
             ReissueConfiguration.class, RatingConfiguration.class, ChallengeConfiguration.class, PrecheckConfiguration.class,
             ActivityConfiguration.class, MatchTeamServiceImpl.class, MatchInternalServiceImpl.class,
@@ -285,13 +286,14 @@ class MatchApplicationContextTest {
             assertThat(context).hasSingleBean(WatchBattleService.class).hasSingleBean(WatchableListService.class);
 
             MatchDispatcher dispatcher = context.getBean(MatchDispatcher.class);
-            assertThat(dispatcher.handledMessageIds()).as("契约 MatchService 的十个号").containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+            assertThat(dispatcher.handledMessageIds()).as("契约 MatchService 的全部号").containsExactlyElementsOf(MatchMethods.ALL.stream()
+                    .map(m->context.getBean(com.game.contract.MessageIdRegistry.class).requireId(MatchMethods.SERVICE,m)).sorted().toList());
             assertThat(dispatcher.unhandledMethods()).isEmpty();
 
             // 163 / 164 的处理器是观战包的真处理器（6.4 的两个临时 inline 处理器已经没有了）：163 不 inline、跑在它自己的执行器上；
             // 164 不 inline、不带执行器（= match-worker）
             List<MatchMethodHandler> handlers = List.copyOf(context.getBeansOfType(MatchMethodHandler.class).values());
-            assertThat(handlers).extracting(MatchMethodHandler::method).as("十个号各恰好一个处理器").doesNotHaveDuplicates().hasSize(10);
+            assertThat(handlers).extracting(MatchMethodHandler::method).as("全部号各恰好一个处理器").doesNotHaveDuplicates().hasSize(MatchMethods.ALL.size());
             assertThat(handlers).filteredOn(handler -> handler.method().equals(MatchMethods.WATCH_BATTLE)).singleElement().satisfies(watch -> {
                 assertThat(watch).isInstanceOf(WatchBattleHandler.class);
                 assertThat(watch.inline()).as("163 要读 Redis、调 battle：不在 Dubbo 线程上当场回").isFalse();
@@ -591,10 +593,10 @@ class MatchApplicationContextTest {
     // ================================================================ 运行模式与管理口
 
     @Test
-    void 运行模式写错_按prod并告警_不拒启(CapturedOutput output) {
+    void 运行模式写错_按prod并告警_缺全球权威时拒启(CapturedOutput output) {
         runner.withPropertyValues("game.run-mode=develop").run(context -> {
-            assertThat(context).hasNotFailed();
-            assertThat(context.getBean(RunMode.class)).isEqualTo(RunMode.PROD);
+            assertThat(context).hasFailed();
+            assertThat(rootCause(context.getStartupFailure())).hasMessageContaining("生产匹配必须启用全球 SQL 权威");
         });
         assertThat(output.getOut()).contains("game.run-mode（GAME_RUN_MODE）取值不认识，按 prod 运行");
     }
@@ -636,7 +638,8 @@ class MatchApplicationContextTest {
                 assertThat(adminStatus(context, path, null)).isEqualTo(401);
             }
         });
-        runner.withPropertyValues("GAME_ADMIN_TOKEN=tok-for-context-test", "game.run-mode=prod").run(context -> {
+        // 此处只验证管理口权限；完整生产装配缺 TiDB 权威时另有拒启断言。
+        without(com.game.match.global.GlobalMatchConfiguration.class).withPropertyValues("GAME_ADMIN_TOKEN=tok-for-context-test", "game.run-mode=prod").run(context -> {
             for (String path : List.of(rating, activity)) {
                 assertThat(adminStatus(context, path, "tok-for-context-test")).as("prod：dev 口 403 %s", path).isEqualTo(403);
                 assertThat(adminStatus(context, path, "wrong")).as("令牌仍是第一道闸").isEqualTo(401);

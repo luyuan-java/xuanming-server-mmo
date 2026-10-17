@@ -65,7 +65,7 @@ class FriendServiceTest {
     private FriendService service() {
         FriendCache cache = new FriendCache(new RecordingRedis(), REDIS_KEYS, Duration.ofMinutes(30), metrics);
         FriendRequestQuota quota = new FriendRequestQuota(
-                key -> CompletableFuture.completedFuture((long) quotaCount.incrementAndGet()), REDIS_KEYS, quotaLimit, metrics);
+                (key, timeout) -> CompletableFuture.completedFuture((long) quotaCount.incrementAndGet()), REDIS_KEYS, quotaLimit, metrics);
         return new FriendService(store, cache, REDIS_KEYS, quota, (ids, deadline) -> {
             Map<Long, Profile> out = new HashMap<>();
             ids.forEach(id -> {

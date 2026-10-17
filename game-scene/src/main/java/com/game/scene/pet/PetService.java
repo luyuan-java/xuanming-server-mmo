@@ -50,6 +50,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class PetService {
 
+    /** 资产通道接收完整宝宝时沿用同一携带量规则。 */
+    public long transferCapacity() { return tables.maxPets(); }
+
     private static final Logger log = LoggerFactory.getLogger(PetService.class);
 
     static final int OK = 0;
@@ -152,6 +155,8 @@ public final class PetService {
         for (Pet pet : pets.pets()) {
             recalculateOne(player, pet, reason, null);
         }
+        Pet active = pets.find(pets.activePetId());
+        if (active != null && ownerLevel(player) < active.level()) pets.setActivePetId(0);
     }
 
     /**
@@ -166,7 +171,8 @@ public final class PetService {
                     Long.toUnsignedString(pet.petId()), Integer.toUnsignedString(pet.petTableId()));
             return;
         }
-        long newLevel = PetRules.effectiveLevel(ownerLevel(player), Integer.toUnsignedLong(row.getLevelCap()));
+        // 成长属于实例，换低级主人/主人降级不能删除已取得等级和已分配点。
+        long newLevel = Math.max(pet.level(), PetRules.effectiveLevel(ownerLevel(player), Integer.toUnsignedLong(row.getLevelCap())));
         Derived oldDerived = previous != null ? previous : derived(pet, row);
         pet.setLevel(newLevel);
         long total = AttributeRules.totalPoints(tables.poolRule(), newLevel, 0);
@@ -283,7 +289,7 @@ public final class PetService {
         if (row == null) {
             return TABLE_ROW_MISSING;
         }
-        if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel())) {
+        if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel()) || ownerLevel(player) < pet.level()) {
             return OWNER_LEVEL_NOT_ENOUGH;
         }
         pets.setActivePetId(petId);
@@ -525,7 +531,7 @@ public final class PetService {
                     Long.toUnsignedString(pet.petId()), Integer.toUnsignedString(pet.petTableId()));
             return List.of();
         }
-        if (pet.health() == 0) {
+        if (pet.health() == 0 || ownerLevel(player) < pet.level()) {
             return List.of();
         }
         Derived derived = derived(pet, row);

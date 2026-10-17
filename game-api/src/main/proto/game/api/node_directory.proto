@@ -84,4 +84,6 @@ message BattleNodeInfo {
   uint32 connection_count = 9;
   // 本节点的战斗配表指纹（TableBattleData.fingerprint()）：match 选节点时可据此与快照指纹比对。
   string table_fingerprint = 10;
+  // 物理机房编号；0 不具备全球匹配/探测资格，与逻辑 zone 无关。
+  uint32 physical_region = 11;
 }

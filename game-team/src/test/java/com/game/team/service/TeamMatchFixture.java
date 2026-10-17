@@ -196,7 +196,8 @@ final class TeamMatchFixture {
     private final Set<Long> pids = ConcurrentHashMap.newKeySet();
     private final Set<Long> tids = ConcurrentHashMap.newKeySet();
 
-    TeamMatchFixture(Backend backend) {
+    TeamMatchFixture(Backend backend) {this(backend,MatchTeamBattle.IntentMode.LEGACY_COMPATIBILITY);}
+    TeamMatchFixture(Backend backend,MatchTeamBattle.IntentMode mode) {
         this.backend = backend;
         for (TeamScript script : TeamScript.values()) {
             evals.put(script, new AtomicInteger());
@@ -272,7 +273,7 @@ final class TeamMatchFixture {
             long tid = nextTid.incrementAndGet();
             tids.add(tid);
             return tid;
-        }, new MatchTeamBattle(match), this::runBackground, teamPushes, metrics, RuleConfig.DEFAULT, () -> stopping);
+        }, new MatchTeamBattle(match,mode), this::runBackground, teamPushes, metrics, RuleConfig.DEFAULT, () -> stopping);
         match.lockTtlSeconds = LOCK_SECONDS;
         match.zone = ZONE;
     }

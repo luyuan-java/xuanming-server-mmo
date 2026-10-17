@@ -62,6 +62,10 @@ game:
     address: redis://127.0.0.1:6379
     database: 12
   battle:
+    global-match:
+      enabled: ${GLOBAL_MATCH_ENABLED:false}
+      physical-region: ${PHYSICAL_REGION:0}
+      probe-secret: ${MATCH_PROBE_SECRET:}
     # 客户端直连面（Netty）。同机多实例各不相同。
     client-port: ${GAME_BATTLE_CLIENT_PORT:12000}
     # 直连面对客户端开放（集群外客户端按票据里的通告地址连进来）。
@@ -97,5 +101,5 @@ game:
       bootstrap-servers: ${GAME_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
       topic-generation: ${GAME_BATTLE_RESULT_TOPIC_GENERATION:1}
       # 新建 topic 的副本数（只在本进程先于 game-match 启动、topic 还不存在时用到；保留期由 game-match 校正）。
-      replication-factor: 1
+      replication-factor: ${KAFKA_TOPIC_REPLICATION_FACTOR:1}
       init-timeout: 10s

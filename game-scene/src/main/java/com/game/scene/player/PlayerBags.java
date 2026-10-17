@@ -71,6 +71,19 @@ public final class PlayerBags {
         return raw == null;
     }
 
+    /** 同一逻辑线程提交完整候选背包；实例与布局一起替换，避免多件转移只改一半。 */
+    public void commitPrepared(PlayerBags candidate) {
+        if (!candidate.normalized()) throw new IllegalArgumentException("候选背包未规整");
+        bags.clear();
+        bags.putAll(candidate.bags);
+        quarantine.clear();
+        quarantine.addAll(candidate.quarantine);
+        extraCapacities.clear();
+        extraCapacities.addAll(candidate.extraCapacities);
+        unknownFields = candidate.unknownFields;
+        raw = null;
+    }
+
     /**
      * 按配表把存档规整成四个背包（幂等）。
      *

@@ -406,6 +406,11 @@ CREATE TABLE IF NOT EXISTS `trade_favorite` (
   ODKU 之后剩下的 1213 只可能来自 purge / 首插者回滚这类 InnoDB 固有情形（`listing_repo.go:290-301`）。
 - **取消收藏**：DELETE，本身幂等，自动提交（`:314-323`）；会话级 RC（`servicecontext.go:229-235`）保证它不拿间隙锁。
 
+> 2026-10-16 订正（mmorpg `client-request-ordering.md` §6.1 同日订正注；PARITY「客户端请求按会话保序」行）：
+> - **mmorpg**：取消收藏不再自动提交，与加收藏一样走 `assetop.WithTxRetry` 的单语句 RC 事务，提交前查 ctx。原因是 go-sql-driver 在 ctx 结束时只断连接、不发 KILL，等锁的自动提交语句拿到锁后会自己提交，形成迟到写。
+> - **Java（已定，用户 2026-10-16 拍板）**：收藏写入（加 / 取消）加**写入预留**。单次上限取 min(2000, 请求剩余 − 预留)，预留 = max(0, 请求预算 + 锁等待 2000 − 4500)，缺省预算 3500 时为 1000 ms。受理后 2.5 s 起不再发收藏写，回 in-band 1003（依赖故障），保证「最晚发出 + 库端锁等待」不晚于受理后 4.5 s，早于 gate 在 5 s 放行下一条。代价是正常窗口从 3.5 s 缩到 2.5 s，只在排队或读变慢时出现。备选方案「只对收藏语句把会话级锁等待降到 1 s」不采用。实现见 `TradeLimits.writeReserveMillis`、`JdbcListingStore.writeBound`。
+> - **两版差异**：mmorpg 没有写入预留，在「受理后 2.5–3.5 s 才轮到的收藏写」这一窄窗口上两版的客户端可见行为不同：Java 回 1003，mmorpg 照常执行。
+
 ### 1.10 4.7 不建的表
 
 P2 资产通道的 `trade_player_op_seq` 与 `trade_asset_op`（`trade_table.proto:72-174`；登记在 `tables.go:25-29`）只读面不需要，也没有生产者（§4.3）。
@@ -1124,3 +1129,18 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
   - 公示中的商品可收藏：B 收藏 AN → true；「只看收藏 + 公示页签」能看到；
   - 单区范围断言（§4.10）；
   - 经 gate 发 199 无回包，且之后同一连接照常可用（只计一次非法包）。
+
+## 10 2026-10-16 交易、拍卖和商城到账续批
+
+本节覆盖前文批次4.7只读范围之后的实际代码。Java版本 `0.1.0-SNAPSHOT`；C++/Go设计事实源见其 `docs/design/jubaozhai-market.md` §15。客户端共享合同由主仓正式生成并由 ContractSync 同步，不能改生成产物。
+
+- `CommerceClientService` 注册全部24个交易客户端方法，`CommerceConfiguration` 装配强TiDB连接策略、Scene定位、可靠资产worker和SQL账本读取。每个新物理连接固定悲观事务、leader/strict读、无历史快照、无stale/低分辨率TSO；跨区域共用单SQL合同与市场，默认不接收任何未配白名单资产。
+- P2P是卖方托管→买方确认与托管→卖方最后确认；原始资产选择不可变，摘要来自受信目录与SQL已确认原件。确认15分钟超时和取消使用原件退回。完整装备和宝宝逐GUID校验后转为credit，清掉debit专用选择字段并保留完整protobuf字节。混合材料合计上限4096；partial只进人工，禁止对侧交付或全量补偿。
+- 固定寄售购买把请求ID持久绑定该合同的扣款腿。扣拒后的同请求重放不另扣，显式新请求可重试；同一商品最多32次扣款尝试。材料订单簿每材料只有一种结算币种，按价/时间/ID优先、maker价成交、退差价；部分撤单必须等已成交子合同全部终局。竞拍依赖真实冻结出价并在SQL锁内复核结束时间。
+- `game-mall` 只复用钉版mall的PMS/OMS和库存锁，新增受信SKU游戏发物映射、下单冻结映射、持久发货和退款意图及幂等回执。gateway/payment/delivery角色使用独立HMAC密钥；玩家客户端不能证明已付款。正式支付后意图可重复领取，trade依官方UUID只建一个交付合同；资产SQL证明后才回DELIVERED；终局拒绝进入退款、partial进入人工。迟到支付也保留支付事实并退款，取消后不再发游戏物品。
+- 官方订单UUID在创建、查询、取消和历史列表始终一致；列表游标先`mall:<UUID>`再游戏数字合同，游戏页排除官方内部合同。商城迁移V2仅用于旧v1升级，fresh V1已含新增表；旧未冻结SKU映射的订单不得猜补。
+- Gate新增MAIL/RANK引用和分域路由，直接连20916/20917，可由注册中心覆盖。仅允许邮件客户端5个方法和榜2个方法；通知只允许下行，管理接口仍走服务鉴权。
+
+实际验证：主仓 `build/commerce-finish-java-20261016/commerce-regression-v5.log` 的16模块反应堆成功，交易25、Mall18（含7项真TiDB）、scene39、Gate24项通过，0跳过。后补边界回归先红后绿，`commerce-boundaries-green.log` 交易27项通过（4项真TiDB），其源码快照在source-v5中仅同步了最终game-trade源码。`commerce-regression-v3.log` 的PlayerStoreSqlTest42项真TiDB通过，验证完整原实例与资产收据同事务、fresh reader恢复、旧owner epoch拒写以及ACK删除落库。
+
+交易TiDB测试人工注入源资产终局，只证明合同SQL并发和恢复，不冒充实际多进程场景到账。真实支付渠道适配器/凭证未配置，多区域Gate→scene→SQL故障切换和C++冷加载/Redis归属回退围栏仍未整体验收；本批不能登记为全球强一致上线完成，也没有两千万CCU容量结论。

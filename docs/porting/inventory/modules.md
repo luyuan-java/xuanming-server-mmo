@@ -201,7 +201,7 @@ mmorpg 的玩法模块是 scene 进程内、单线程 ECS 上的一组无状态 
 - java: done（等价）— Java gate `game-gate/.../session/MessageRoutes.java` 同样只放行标了 `OptionIsClientProtocolService` 的方法，客户端发 102–117 被 gate 拒；scene 侧无需空桩
 - size: S
 - robot: none
-- hazards: scene 的节点路由（`InvokePlayerService`）能绕过 gate 直达这些 handler，基线因此在每条前面加了 GM 闸；Java 若以后加 scene 内部 RPC 路由，同样要在 scene 侧再挡一次。
+- hazards: scene 的节点路由（`InvokePlayerService`）能绕过 gate 直达这些 handler，基线因此在每条前面加了 GM 闸；Java 若以后加 scene 内部 RPC 路由，同样要在 scene 侧再挡一次。（2026-10-16 补：基线的 `InvokePlayerService` 已于 mmorpg RpcChannel 批 7 从 proto 删除，GM 闸保留作纵深防御。）
 
 ### mission-core — 任务核心（接取门禁 / 进度 / 完成 / 链式 / 领奖位）
 - mmorpg: `cpp/libs/modules/mission/{system/mission.{h,cpp},comp/mission_comp.{h,cpp},comp/missions_config_comp.h}`、`services/scene/player/system/player_mission.{h,cpp}`（正式写入口）、`cpp/nodes/scene/handler/event/mission_event_handler.cpp`、`engine/core/utils/bit_index/bit_index_util.h`（`GetRewardAction`）；单测 `cpp/tests/missions_test/missions_test.cpp`、`cpp/tests/bag_test/player_mission_system_test.cpp`

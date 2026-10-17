@@ -279,7 +279,7 @@ class MatchSkeletonContextTest {
     void 契约的十个号都有处理器_派发表与处理器bean一一对应() {
         assertThat(handlers.orderedStream().map(MatchMethodHandler::method)).as("每个方法恰好一个处理器 bean")
                 .containsExactlyInAnyOrderElementsOf(MatchMethods.ALL);
-        assertThat(dispatcher.handledMessageIds()).containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+        assertThat(dispatcher.handledMessageIds()).containsExactlyElementsOf(MatchMethods.ALL.stream().map(this::messageId).sorted().toList());
         assertThat(dispatcher.unhandledMethods()).isEmpty();
     }
 

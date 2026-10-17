@@ -24,6 +24,10 @@ import java.util.concurrent.CompletionStage;
  * </ul>
  */
 public interface TeamBattlePort {
+    default boolean durableIntents(){return false;}
+    default com.game.proto.team.TeamMatchIntent queryIntent(long caller,String request,com.google.protobuf.ByteString payload,Deadline deadline){throw new UnsupportedOperationException("缺少可靠开局意图查询");}
+    default Tickets createDurableTickets(int config,long team,List<Long> roster,Map<Long,Integer> zones,Map<Long,String> tickets,
+            long caller,com.game.proto.team.StartTeamMatchRequest request,Deadline deadline){return createTeamTickets(config,team,roster,zones,tickets,deadline);}
 
     /**
      * {@link #checkTeamMatch} 的结论。

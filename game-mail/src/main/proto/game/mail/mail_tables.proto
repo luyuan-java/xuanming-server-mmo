@@ -1,0 +1,157 @@
+// Java自有领域表；形状对齐本批已冻结契约，后续Java迁移独立管理。
+syntax = "proto3";
+package game.mail;
+
+import "proto2mysql/proto2mysql_option.proto";
+option java_package = "com.game.mail.store.pb";
+option java_multiple_files = true;
+option java_outer_classname = "MailTablesProto";
+option (proto2mysql.db) = true;
+
+// 独立领域号源；SQL行锁分配单调ID，和任何雪花节点无交集。
+message MailIdRow {
+  option (proto2mysql.table_name) = "mail_id_sequence";
+  option (proto2mysql.primary_key) = "sequence_key";
+  uint32 sequence_key = 1;
+  uint64 next_value = 2;
+}
+
+// 独占邮箱库的权威记录；附件只保存共用AssetBundle字节，不保存背包/余额副本。
+message MailRow {
+  option (proto2mysql.table_name) = "mail_message";
+  option (proto2mysql.primary_key) = "mail_id";
+  option (proto2mysql.unique_key) = "sender_kind,request_id";
+  option (proto2mysql.index) = "owner_player_id,mail_id;kind,expire_ms;guild_id,mail_id";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+  uint64 mail_id = 1;
+  uint64 owner_player_id = 2;
+  uint64 guild_id = 3;
+  uint32 kind = 4;
+  uint32 sender_kind = 5;
+  uint64 request_id = 6;
+  string request_hash = 7;
+  string title = 8;
+  string body = 9;
+  bytes attachments = 10;
+  uint64 sent_ms = 11;
+  uint64 expire_ms = 12;
+  uint64 campaign_id = 13;
+  uint64 manifest_generation = 14;
+}
+// 有附件的系统邮件只在名单完整seal的同事务插入mail_message；导入中的活动不可见。
+message MailCampaignRow {
+  option (proto2mysql.table_name) = "mail_campaign";
+  option (proto2mysql.primary_key) = "sender_kind,campaign_id,manifest_generation";
+  option (proto2mysql.unique_key) = "sender_kind,request_id";
+  option (proto2mysql.index) = "mail_id";
+  uint32 sender_kind = 1;
+  uint64 campaign_id = 2;
+  uint64 manifest_generation = 3;
+  uint64 mail_id = 4;
+  uint64 request_id = 5;
+  string producer = 6;
+  string request_hash = 7;
+  string title = 8;
+  string body = 9;
+  bytes attachments = 10;
+  uint64 expire_ms = 11;
+  uint64 expected_recipient_count = 12;
+  uint32 expected_shard_count = 13;
+  string manifest_hash = 14;
+  uint32 state = 15;
+  uint64 created_ms = 16;
+  uint64 sealed_ms = 17;
+  uint32 kind = 18;
+  uint64 guild_id = 19;
+}
+message MailCampaignShardRow {
+  option (proto2mysql.table_name) = "mail_campaign_shard";
+  option (proto2mysql.primary_key) = "sender_kind,campaign_id,manifest_generation,shard_index";
+  uint32 sender_kind = 1;
+  uint64 campaign_id = 2;
+  uint64 manifest_generation = 3;
+  uint32 shard_index = 4;
+  string shard_hash = 5;
+  uint32 recipient_count = 6;
+}
+message MailCampaignRecipientRow {
+  option (proto2mysql.table_name) = "mail_campaign_recipient";
+  option (proto2mysql.primary_key) = "sender_kind,campaign_id,manifest_generation,player_id";
+  uint32 sender_kind = 1;
+  uint64 campaign_id = 2;
+  uint64 manifest_generation = 3;
+  uint64 player_id = 4;
+  uint32 shard_index = 5;
+}
+message MailBoxRow {
+  option (proto2mysql.table_name) = "mail_box";
+  option (proto2mysql.primary_key) = "player_id";
+  uint64 player_id = 1;
+  uint64 created_ms = 2;
+}
+// 个人行发件时创建；广播行仅在有交互时物化。pending/manual永不由到期清理删除。
+message MailStateRow {
+  option (proto2mysql.table_name) = "mail_state";
+  option (proto2mysql.primary_key) = "player_id,mail_id";
+  option (proto2mysql.index) = "mail_id,claim_state;claim_state,updated_ms";
+  uint64 player_id = 1;
+  uint64 mail_id = 2;
+  uint64 read_ms = 3;
+  uint64 deleted_ms = 4;
+  uint32 claim_state = 5;
+  uint64 current_op_id = 6;
+  uint64 claim_version = 7;
+  uint32 reason_tip_id = 8;
+  uint64 updated_ms = 9;
+}
+message MailPlayerOpSeqRow {
+  option (proto2mysql.table_name) = "mail_player_op_seq";
+  option (proto2mysql.primary_key) = "player_id,stream";
+  uint64 player_id = 1;
+  uint32 stream = 2;
+  uint64 next_seq = 3;
+  uint64 updated_ms = 4;
+  uint64 epoch = 5;
+}
+enum MailAssetOpStatus {
+  MAIL_ASSET_OP_UNSPECIFIED = 0;
+  MAIL_ASSET_OP_PENDING = 1;
+  MAIL_ASSET_OP_APPLIED = 2;
+  MAIL_ASSET_OP_REJECTED = 3;
+  MAIL_ASSET_OP_MANUAL = 4;
+  MAIL_ASSET_OP_ABANDONED = 5;
+}
+message MailAssetOpRow {
+  option (proto2mysql.table_name) = "mail_asset_op";
+  option (proto2mysql.primary_key) = "op_id";
+  option (proto2mysql.unique_key) = "player_id,stream,stream_epoch,seq";
+  option (proto2mysql.index) = "status,next_attempt_ms;player_id,stream,stream_epoch,status,seq;player_id,mail_id,claim_version";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+  uint64 op_id = 1;
+  uint64 player_id = 2;
+  uint32 stream = 3;
+  uint64 seq = 4;
+  uint64 stream_epoch = 5;
+  uint64 mail_id = 6;
+  uint64 claim_version = 7;
+  uint32 status = 8;
+  bytes payload = 9;
+  uint32 tx_type = 10;
+  uint32 attempts = 11;
+  uint64 next_attempt_ms = 12;
+  uint64 lease_until_ms = 13;
+  uint64 lease_token = 14;
+  uint32 last_outcome = 15;
+  uint32 last_reason = 16;
+  uint32 durable = 17;
+  uint32 reason_tip_id = 18;
+  uint64 created_ms = 19;
+  uint64 updated_ms = 20;
+  uint64 last_send_ms = 21;
+  string resolved_by = 22;
+  string resolve_reason = 23;
+}

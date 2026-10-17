@@ -33,8 +33,11 @@ public class RedisAutoConfiguration {
         Config config = new Config();
         configure(config.useSingleServer(), props);
         log.info("Redis 客户端 address={} db={} key_prefix={} connect_timeout_ms={} timeout_ms={} retry_attempts={} retry_delay_ms={} "
-                        + "单条命令最坏阻塞≈{}ms", props.address(), props.database(), keys.prefix(), props.connectTimeoutMs(),
-                props.timeoutMs(), props.retryAttempts(), props.retryDelayMs(), props.worstCaseCommandMillis());
+                        + "单条命令最坏阻塞≈{}ms pool_size={} min_idle={} subscription_pool_size={} 最多占连接={}",
+                props.address(), props.database(), keys.prefix(), props.connectTimeoutMs(),
+                props.timeoutMs(), props.retryAttempts(), props.retryDelayMs(), props.worstCaseCommandMillis(),
+                props.connectionPoolSize(), props.connectionMinimumIdleSize(), props.subscriptionConnectionPoolSize(),
+                props.maxConnections());
         return Redisson.create(config);
     }
 
@@ -47,6 +50,9 @@ public class RedisAutoConfiguration {
                 .setConnectTimeout(props.connectTimeoutMs())
                 .setTimeout(props.timeoutMs())
                 .setRetryAttempts(props.retryAttempts())
-                .setRetryDelay(new ConstantDelay(Duration.ofMillis(props.retryDelayMs())));
+                .setRetryDelay(new ConstantDelay(Duration.ofMillis(props.retryDelayMs())))
+                .setConnectionPoolSize(props.connectionPoolSize())
+                .setConnectionMinimumIdleSize(props.connectionMinimumIdleSize())
+                .setSubscriptionConnectionPoolSize(props.subscriptionConnectionPoolSize());
     }
 }

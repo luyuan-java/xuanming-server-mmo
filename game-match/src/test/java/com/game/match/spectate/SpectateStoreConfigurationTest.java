@@ -3,19 +3,27 @@ package com.game.match.spectate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
+import com.game.discovery.RedisProperties;
 import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.proto.BattlePlacement;
 import com.game.match.spectate.SpectateStore.Eviction;
 import com.game.match.testing.LeaseOnlyRedis;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.Test;
+import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.options.ObjectParams;
+import org.redisson.api.options.OptionalOptions;
+import org.redisson.misc.CompletableFutureWrapper;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -27,6 +35,8 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 class SpectateStoreConfigurationTest {
 
     private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+    /** {@code game.redis.*} 全取缺省。 */
+    private static final RedisProperties REDIS_PROPS = new RedisProperties(null, null, null, null, null, null, null);
 
     private static Deadline d() {
         return Deadline.after(1_000);
@@ -36,18 +46,39 @@ class SpectateStoreConfigurationTest {
     void 装配出来的是Redis实现_构造时不碰Redis() {
         RedissonClient redis = mock(RedissonClient.class);
 
-        SpectateStore store = new SpectateStoreConfiguration().spectateStore(redis, REDIS_KEYS);
+        SpectateStore store = new SpectateStoreConfiguration().spectateStore(redis, REDIS_KEYS, REDIS_PROPS);
 
         assertThat(store).isInstanceOf(RedissonSpectateStore.class);
         verifyNoInteractions(redis);
     }
 
     @Test
-    void 上下文里恰好一个观战存储_取RedissonClient与RedisKeys两个依赖_起上下文不碰Redis() {
+    void 抢标记的Redisson超时以配置的game_redis_timeout_ms封顶_不用缺省值() {
+        // 抢标记是 163 的提交点（RedisClientWrites）：超时 = min(配置值, 剩余预算)。装配若漏传配置值、退回缺省 2 s，这条会失败
+        RedissonClient redis = mock(RedissonClient.class);
+        List<OptionalOptions> clientWrites = new CopyOnWriteArrayList<>();
+        RScript script = mock(RScript.class, invocation -> invocation.getMethod().getName().equals("evalShaAsync")
+                ? new CompletableFutureWrapper<>(SpectateScripts.ACQUIRE_OK) : null);
+        when(redis.getScript(any(OptionalOptions.class))).thenAnswer(invocation -> {
+            clientWrites.add(invocation.getArgument(0));
+            return script;
+        });
+        SpectateStore store = new SpectateStoreConfiguration().spectateStore(redis, REDIS_KEYS,
+                new RedisProperties(null, null, null, null, 700, null, null));
+
+        assertThat(store.acquire(1001, "77:0123456789abcdef", Deadline.after(60_000))).isEqualTo(SpectateStore.Acquire.OK);
+
+        assertThat(clientWrites).hasSize(1);
+        assertThat(((ObjectParams) clientWrites.get(0)).getTimeout()).as("剩余预算远多于配置值：取配置的 700 ms").isEqualTo(700);
+    }
+
+    @Test
+    void 上下文里恰好一个观战存储_取RedissonClient_RedisKeys与RedisProperties三个依赖_起上下文不碰Redis() {
         RedissonClient redis = mock(RedissonClient.class);
 
         new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
-                .withBean(RedissonClient.class, () -> redis).withUserConfiguration(SpectateStoreConfiguration.class)
+                .withBean(RedissonClient.class, () -> redis).withBean(RedisProperties.class, () -> REDIS_PROPS)
+                .withUserConfiguration(SpectateStoreConfiguration.class)
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(SpectateStore.class);
                     assertThat(context.getBean(SpectateStore.class)).isInstanceOf(RedissonSpectateStore.class);
@@ -56,16 +87,20 @@ class SpectateStoreConfigurationTest {
         verifyNoInteractions(redis);
 
         new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
-                .withUserConfiguration(SpectateStoreConfiguration.class)
+                .withBean(RedisProperties.class, () -> REDIS_PROPS).withUserConfiguration(SpectateStoreConfiguration.class)
                 .run(context -> assertThat(context).as("没有 RedissonClient 就起不来：依赖是显式的，不悄悄退回占位").hasFailed());
-        new ApplicationContextRunner().withBean(RedissonClient.class, () -> redis).withUserConfiguration(SpectateStoreConfiguration.class)
+        new ApplicationContextRunner().withBean(RedissonClient.class, () -> redis).withBean(RedisProperties.class, () -> REDIS_PROPS)
+                .withUserConfiguration(SpectateStoreConfiguration.class)
                 .run(context -> assertThat(context).as("没有 RedisKeys（命名空间）也起不来：键前缀只经注入，没有缺省实例").hasFailed());
+        new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
+                .withBean(RedissonClient.class, () -> redis).withUserConfiguration(SpectateStoreConfiguration.class)
+                .run(context -> assertThat(context).as("没有 RedisProperties 也起不来：客户端写的命令超时只取配置值，不悄悄退回缺省").hasFailed());
     }
 
     @Test
     void Redis用不了_每个同步方法都抛依赖异常_不折成没有或空列表() {
         // 只应答发号租约的替身：脚本的异步口回 null、别的口也回 null——对观战存储来说就是「Redis 用不了」
-        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client, REDIS_KEYS);
+        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client, REDIS_KEYS, REDIS_PROPS);
         BattlePlacement placement = BattlePlacement.newBuilder().setBattleId(77).setAttempt(1).setCreatedAtMs(1_900_000_000_000L).build();
         Class<Deadline.DependencyException> failure = Deadline.DependencyException.class;
 
@@ -85,7 +120,7 @@ class SpectateStoreConfigurationTest {
 
     @Test
     void Redis用不了_两个尽力方法不抛() {
-        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client, REDIS_KEYS);
+        SpectateStore store = new SpectateStoreConfiguration().spectateStore(new LeaseOnlyRedis().client, REDIS_KEYS, REDIS_PROPS);
 
         assertThatCode(() -> store.releaseAsync(1001, "77:0123456789abcdef")).doesNotThrowAnyException();
         assertThatCode(() -> store.evictAsync(List.of(new Eviction.Invalid("junk"), new Eviction.Dead(77, 1)))).doesNotThrowAnyException();

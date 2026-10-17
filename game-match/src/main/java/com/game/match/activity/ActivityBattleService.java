@@ -60,6 +60,8 @@ public final class ActivityBattleService {
     private final MatchIds ids;
     private final MatchMetrics metrics;
     private final Supplier<String> ticketIds;
+    private com.game.match.global.GlobalMatchService global;
+    public ActivityBattleService withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
 
     public ActivityBattleService(MemberPrecheck precheck, TicketStore tickets, GatherLauncher gather, MatchIds ids, MatchMetrics metrics) {
         this(precheck, tickets, gather, ids, metrics, () -> UUID.randomUUID().toString());
@@ -83,6 +85,7 @@ public final class ActivityBattleService {
      * @return {@code reject = NONE} 时 {@code battle_id ≠ 0}、票据已建、gather 已异步启动
      */
     public StartActivityBattleResponse start(StartActivityBattleRequest request, Deadline d) {
+        if(global!=null)return startGlobal(request,d);
         int kind = request.getActivityContext().getKindValue(); // 没有上下文时是 0（NONE）
         List<Long> members = request.getMemberPlayerIdsList();
         int configId = request.getBattleConfigId();
@@ -99,15 +102,7 @@ public final class ActivityBattleService {
         // 2. 逐成员只读预检
         MemberPrecheck.Result checked = precheck.check(members, d);
         if (!checked.passed()) {
-            return switch (checked.reason()) {
-                case OFFLINE -> rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_OFFLINE, checked.offender());
-                case IN_BATTLE -> rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE, checked.offender());
-                case NO_LOCATION, TICKET_IN_FLIGHT ->
-                        rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_NOT_READY, checked.offender());
-                // 读失败（含读战斗锁出错）与预算用完：INTERNAL，不归咎于成员
-                case PRESENCE_READ_FAILED, LOCK_READ_FAILED, LOCATION_READ_FAILED, TICKET_READ_FAILED, DEADLINE_EXPIRED, OK ->
-                        rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0);
-            };
+            return rejectedPrecheck(kind,checked);
         }
 
         // 3. 发号
@@ -164,6 +159,30 @@ public final class ActivityBattleService {
                 Integer.toUnsignedString(configId), describe(members), checked.zones().values(), describe(request));
         metrics.activityBattle(kind, ActivityResult.STARTED);
         return StartActivityBattleResponse.newBuilder().setBattleId(battleId).build();
+    }
+
+    private StartActivityBattleResponse startGlobal(StartActivityBattleRequest request,Deadline deadline) {
+        int kind=request.getActivityContext().getKindValue();
+        if(request.getRequestId()==0||ActivityRequestValidator.invalidReason(request)!=null)return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
+        try{
+            var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(2).setOwnerId(request.getActivityContext().getGuildId()).setRequestLow(request.getRequestId()).build();
+            var old=global.store().direct(key);
+            if(old!=null){if(!old.getPayload().equals(request.toByteString()))return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
+                var f=global.store().formation(old.getBattleId());global.launchCommitted(f);return StartActivityBattleResponse.newBuilder().setBattleId(f.getBattleId()).build();}
+            var checked=precheck.check(request.getMemberPlayerIdsList(),deadline);
+            if(!checked.passed())return rejectedPrecheck(kind,checked);
+            var f=global.reserveDirect(key,request.toByteString(),com.game.proto.match.MatchMode.MATCH_MODE_PVE_TEAM_VALUE,request.getBattleConfigId(),request.getMemberPlayerIdsList(),Map.of(),0,request.getActivityContext());
+            global.launchCommitted(f);return StartActivityBattleResponse.newBuilder().setBattleId(f.getBattleId()).build();
+        }catch(RuntimeException e){log.warn("活动原意图提交结果尚未确认",e);return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL,0);}
+    }
+
+    private StartActivityBattleResponse rejectedPrecheck(int kind,MemberPrecheck.Result checked){
+        return switch(checked.reason()){
+            case OFFLINE -> rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_OFFLINE,checked.offender());
+            case IN_BATTLE -> rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE,checked.offender());
+            case NO_LOCATION,TICKET_IN_FLIGHT -> rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_NOT_READY,checked.offender());
+            default -> rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL,0);
+        };
     }
 
     /**

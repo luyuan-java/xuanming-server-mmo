@@ -71,7 +71,7 @@ game:
     # 市场参数同 mmorpg go/trade/etc/trade.yaml:91-100（trade-spec §0.6）。scope 没有代码缺省值，只认 zone / global（区分大小写），
     # 写错或漏写拒启；两种范围要各验一次时改 GAME_TRADE_MARKET_SCOPE 并重启（robot --trade-scope 与它一致）。
     market:
-      scope: ${GAME_TRADE_MARKET_SCOPE:zone}
+      scope: ${GAME_TRADE_MARKET_SCOPE:global}
       default-page-size: 20      # > 0 且 ≤ max-page-size
       max-page-size: 20
       max-page: 100              # 防深分页：OFFSET ≤ (max-page − 1) × max-page-size
@@ -81,6 +81,18 @@ game:
     query-timeout: 3s
     worker-threads: 16
     worker-queue-capacity: 1024
+    commerce:
+      enabled: ${GAME_TRADE_COMMERCE_ENABLED:false}
+      items: []
+      pets: []
+      currencies: []
+      instances: false
+      markets: []
+    mall:
+      enabled: ${GAME_TRADE_MALL_ENABLED:false}
+      url: ${GAME_TRADE_MALL_URL:http://127.0.0.1:18120}
+      gateway-secret: ${GAME_MALL_GATEWAY_SECRET:}
+      delivery-secret: ${GAME_MALL_DELIVERY_SECRET:}
 
 dubbo:
   application:

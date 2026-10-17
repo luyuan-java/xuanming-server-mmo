@@ -62,6 +62,14 @@ public final class PersistedAssetLedger {
         return invalidReason;
     }
 
+    /** 与资产和seq位图同一玩家SQL事务提交的托管回执；损坏/跨纪元不提供证据。 */
+    public com.game.player.store.state.AssetOpReceiptState receipt(int stream,long epoch,long seq) {
+        AssetOpStreamLedgerState state=streams.get(stream);
+        if(invalidReason!=null||state==null||state.getStreamEpoch()!=epoch)return null;
+        for(var receipt:state.getReceiptsList())if(receipt.getSeq()==seq)return receipt;
+        return null;
+    }
+
     /** 分类（同 {@link AssetLedgerRules#classify}）；损坏账本恒为 {@link AssetSeqState#INVALID}。 */
     public AssetSeqState classify(int stream, long epoch, long seq) {
         if (invalidReason != null) {

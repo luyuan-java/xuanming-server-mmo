@@ -79,6 +79,11 @@ public final class SceneAssetOpProvider implements SceneAssetOpService {
         return submit(AssetRpc.CREDIT, request);
     }
 
+    @Override
+    public CompletableFuture<AssetOpResponse> ackReceipt(AssetOpRequest request) {
+        return submit(AssetRpc.ACK_RECEIPT, request);
+    }
+
     /** 当前在途调用数（已占名额、还没回写）。 */
     public int inFlight() {
         return maxInFlight - permits.availablePermits();

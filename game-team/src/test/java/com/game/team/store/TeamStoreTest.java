@@ -52,6 +52,9 @@ class TeamStoreTest {
         }
 
         final List<TeamScript> calls = Collections.synchronizedList(new ArrayList<>());
+        /** 经写入口（{@link TeamRedis#evalWrite}）发出的脚本与它收到的截止；这些脚本同时也记进 {@link #calls}。 */
+        final List<TeamScript> writeCalls = Collections.synchronizedList(new ArrayList<>());
+        final List<Deadline> writeDeadlines = Collections.synchronizedList(new ArrayList<>());
         Handler onEval = (s, k, a) -> new IllegalStateException("未编排的脚本 " + s);
         java.util.function.Supplier<Object> onHget = () -> null;
 
@@ -59,6 +62,13 @@ class TeamStoreTest {
         public CompletionStage<Object> eval(TeamScript script, List<Object> keys, List<byte[]> args) {
             calls.add(script);
             return complete(onEval.reply(script, keys, args));
+        }
+
+        @Override
+        public CompletionStage<Object> evalWrite(TeamScript script, List<Object> keys, List<byte[]> args, Deadline deadline) {
+            writeCalls.add(script);
+            writeDeadlines.add(deadline);
+            return eval(script, keys, args);
         }
 
         @Override
@@ -178,6 +188,63 @@ class TeamStoreTest {
         assertThat(res.conflicts()).isEqualTo(TeamStore.COMMIT_RETRIES);
         assertThat(redis.count(TeamScript.COMMIT)).isEqualTo(3);
         assertThat(redis.count(TeamScript.READ)).isEqualTo(3);
+    }
+
+    // ================================================================ 写的发出（客户端请求按会话保序，mmorpg client-request-ordering.md §6.1）
+
+    /** 每一次写都经写入口（不被驱动重发、等连接不越过截止）发出，带的是调用方自己的截止；读不经写入口。 */
+    @Test
+    void 写脚本经写入口发出并带上调用方的截止_读脚本不经写入口() {
+        FakeRedis redis = new FakeRedis();
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
+        Deadline d = deadline();
+        redis.onEval = (s, k, a) -> s == TeamScript.READ ? read(null, NOW, 1, team(A, B)) : List.of(0L);
+        store.mutate(Bind.target(C, TID), Op.apply(C, 1), SessionLoader.NONE, RuleConfig.DEFAULT, d);
+        assertThat(redis.count(TeamScript.READ)).isEqualTo(3);
+        assertThat(redis.writeCalls).as("三次 S_COMMIT 都经写入口，S_READ 不经").containsExactly(TeamScript.COMMIT, TeamScript.COMMIT,
+                TeamScript.COMMIT);
+        assertThat(redis.writeDeadlines).as("请求自己的截止原样交给驱动").allSatisfy(w -> assertThat(w).isSameAs(d));
+
+        redis.writeCalls.clear();
+        redis.onEval = (s, k, a) -> 1L;
+        Snapshot snap = new Snapshot(A, TID, 9, TID, 3, team(A, B), 100, NOW);
+        store.touch(snap, d);
+        store.healOrphan(A, TID, d);
+        store.pruneInvite(A, TID, "1900000060000", d);
+        assertThat(redis.writeCalls).containsExactly(TeamScript.TOUCH, TeamScript.HEAL_ORPHAN, TeamScript.INVITE_PRUNE);
+    }
+
+    /**
+     * 截止已过：续期、自愈、邀请剪除与列邀请（S_INVITE_LIST 会顺手删过期项，也是写）一律不交给驱动，按依赖故障抛出。
+     * 以前这些写没有发出前的截止检查，{@link Deadline#await} 只是不再等，写照样落地——可能落在 gate 放行的下一条之后。
+     */
+    @Test
+    void 截止已过_写脚本一律不发出_按依赖故障抛() {
+        FakeRedis redis = new FakeRedis();
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
+        redis.onEval = (s, k, a) -> 1L;
+        Deadline spent = Deadline.after(0);
+        Snapshot snap = new Snapshot(A, TID, 9, TID, 3, team(A, B), 100, NOW);
+        assertThatThrownBy(() -> store.touch(snap, spent)).isInstanceOf(DependencyException.class).hasMessageContaining("没有发出");
+        assertThatThrownBy(() -> store.healOrphan(A, TID, spent)).isInstanceOf(DependencyException.class);
+        assertThatThrownBy(() -> store.pruneInvite(A, TID, "1900000060000", spent)).isInstanceOf(DependencyException.class);
+        assertThatThrownBy(() -> store.listInvites(A, spent)).isInstanceOf(DependencyException.class);
+        assertThat(redis.calls).as("一条写都没交给驱动").isEmpty();
+    }
+
+    /**
+     * 读完之后截止已过、调用者索引仍指向已删的队伍：mutate 里的自愈（S_HEAL_ORPHAN）同样不发出，整个 mutate 按依赖故障失败（服务层回 4030）。
+     * 以前只有主提交前查截止，自愈与 {@code {-2}} 修复的后续轮次会照样交给驱动。
+     */
+    @Test
+    void 截止已过_mutate里的自愈也不发出() {
+        FakeRedis redis = new FakeRedis();
+        TeamStore store = new TeamStore(redis, REDIS_KEYS);
+        redis.onEval = (s, k, a) -> s == TeamScript.READ ? read(TID, 9, 0, null) : 1L;
+        assertThatThrownBy(() -> store.mutate(Bind.caller(A, TID), Op.leave(A), SessionLoader.NONE, RuleConfig.DEFAULT,
+                Deadline.after(0))).isInstanceOf(DependencyException.class).hasMessageContaining("S_HEAL_ORPHAN");
+        assertThat(redis.count(TeamScript.HEAL_ORPHAN)).isZero();
+        assertThat(redis.calls).as("只发出了读").containsExactly(TeamScript.READ);
     }
 
     // ================================================================ 绑定 / 记录缺失 / 建队撞号

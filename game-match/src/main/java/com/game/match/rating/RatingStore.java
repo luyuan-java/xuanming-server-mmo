@@ -149,6 +149,13 @@ public final class RatingStore {
     private final MatchMetrics metrics;
     private final LongSupplier clockMs;
     private final Sleeper sleeper;
+    /** 与评分共用 Connection 的可靠事件接缝；只在装配时设置，不能另开事务。 */
+    public interface CommitHook {
+        boolean alreadyApplied(Connection c,BattleResultEvent event)throws SQLException;
+        void append(Connection c,BattleResultEvent event,Map<Long,Long> next,long stamp)throws SQLException;
+    }
+    private CommitHook commitHook;
+    public RatingStore withCommitHook(CommitHook hook){this.commitHook=hook;return this;}
 
     /**
      * @param connections     取连接
@@ -238,7 +245,9 @@ public final class RatingStore {
                     c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
                 }
                 c.setAutoCommit(false);
+                if(commitHook!=null&&commitHook.alreadyApplied(c,event)){c.rollback();finished=true;return Result.duplicate();}
                 if (!insertApplied(c, battleId, event.getMatchMode(), now)) {
+                    if(commitHook!=null)commitHook.alreadyApplied(c,event);
                     c.rollback();
                     finished = true;
                     return Result.duplicate();
@@ -259,6 +268,7 @@ public final class RatingStore {
                 }
                 long deltaACenti = settlement.deltaACenti();
                 setDelta(c, battleId, deltaACenti);
+                if(commitHook!=null)commitHook.append(c,event,settlement.nextCenti(),now);
                 c.commit();
                 finished = true;
                 log.info("[rating] 对局入账 battle={} mode={} outcome={} rounds={} 回合打满按平局={} avgA={} avgB={} deltaA={} teamA={} teamB={}",

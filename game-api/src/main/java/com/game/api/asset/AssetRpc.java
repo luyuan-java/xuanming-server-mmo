@@ -11,7 +11,9 @@ public enum AssetRpc {
     /** 中止扣款：给未见 seq 记一个拒绝占位（收全部流、不校验流水原因）。 */
     ABORT_DEBIT("abort_debit"),
     /** 发放（*_CREDIT / SYSTEM_CREDIT 流）。 */
-    CREDIT("credit");
+    CREDIT("credit"),
+    /** 交易库已持久保存扣出快照后释放回执；不改变seq结局，不占新seq。 */
+    ACK_RECEIPT("ack_receipt");
 
     private final String wireName;
 

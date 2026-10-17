@@ -564,6 +564,11 @@ public final class WatchBattleService {
     /**
      * 自我清退：RemoveObserver({@code concurrent_queue}) 发出即返回、永不抛——应答不依赖它的结果。两处用：复查命中（第 14 行），
      * 以及「重看同一场」时抢标记发现已有票据（第 13 行的 16014：旧标记已删而观众登记还在）。battle 对不在名单里的人是空操作。
+     *
+     * <p><b>迟到风险（补偿，不受请求截止约束）</b>：它多半在回包、gate 放行同一会话的下一条之后才到 battle；RemoveObserver 只带战斗号与玩家号，
+     * 不带标记或 nonce，battle 认不出它属于哪一次登记。同一会话紧接着 148 取消、再 163 重看同一场时，这条迟到的 Remove 可能排在新的 AddObserver
+     * 之后执行：标记说他在看，名单里却没有他（不推画面，再发一次 163 可恢复）。根治要让 RemoveObserver 带登记时的围栏值、battle 只摘同一次登记，
+     * 那是 battle 协议改动（两版同批），尚未做（mmorpg client-request-ordering.md §6.1 的同类残留）。
      */
     private void selfEvict(long playerId, String player, long battleId, BattlePlacement placement) {
         try {

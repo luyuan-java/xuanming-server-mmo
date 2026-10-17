@@ -6,6 +6,7 @@ import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
 import com.game.contract.MessageIdRegistry;
+import com.game.discovery.RedisProperties;
 import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
@@ -100,6 +101,12 @@ class ChallengeConfigurationTest {
         @Bean
         RedissonClient redissonClient() {
             return new LeaseOnlyRedis().client;
+        }
+
+        /** 同上（存储的命令超时取 {@code game.redis.timeout-ms}）；缺省值即可。 */
+        @Bean
+        RedisProperties redisProperties() {
+            return new RedisProperties(null, null, null, null, null, null, null);
         }
 
         @Bean

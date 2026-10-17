@@ -13,6 +13,7 @@ import com.game.api.proto.TeamTicketsRelease;
 import com.game.api.proto.TeamTicketsReply;
 import com.game.api.proto.TeamTicketsRequest;
 import com.game.api.proto.TeamTicketsStatus;
+import com.game.api.proto.TeamMatchIntentQuery;
 import com.game.common.deadline.Deadline;
 import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchWorkers;
@@ -80,6 +81,9 @@ public class MatchTeamServiceImpl implements MatchTeamService {
     private final MatchIds ids;
     private final MatchMetrics metrics;
     private final long budgetMs;
+    private com.game.match.global.GlobalMatchService global;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void configureGlobal(org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> provider) { this.global=provider.getIfAvailable(); }
 
     public MatchTeamServiceImpl(MatchWorkers workers, MatchProperties props, MemberPrecheck precheck, TicketStore tickets, GatherLauncher gather,
                                 MatchIds ids, MatchMetrics metrics) {
@@ -119,7 +123,16 @@ public class MatchTeamServiceImpl implements MatchTeamService {
             // 调用方发出时就没有预算了：不进工作池、不写任何东西
             return CompletableFuture.completedFuture(expiredOnArrival(request));
         }
-        return onWorker(d, () -> create(request, d),
+        return onWorker(d, () -> {
+            if(global==null)return create(request,d);
+            var original=parseTeamRequest(request.getClientRequest());
+            if(request.getInitiatorPlayerId()==0||request.getRequestId().isEmpty()||!original.getRequestId().equals(request.getRequestId())
+                    ||original.getExpectedTeamId()!=request.getTeamId()||original.getBattleConfigId()!=request.getBattleConfigId())return notAttempted();
+            var key=com.game.match.global.GlobalMatchStore.directUuidKey(1,request.getInitiatorPlayerId(),request.getRequestId());
+            global.reserveDirect(key,request.getClientRequest(),com.game.proto.match.MatchMode.MATCH_MODE_PVE_TEAM_VALUE,request.getBattleConfigId(),
+                    request.getRosterList(),request.getTicketIdsMap(),request.getTeamId(),null);
+            return TeamTicketsReply.newBuilder().setStatus(TeamTicketsStatus.TEAM_TICKETS_CREATED).build();
+        },
                 why -> {
                     log.warn("[match] createTeamTickets {}，什么都没写 team={}", why, Long.toUnsignedString(request.getTeamId()));
                     metrics.teamCall(TeamMethod.CREATE_TEAM_TICKETS, TeamCallResult.OVERLOADED);
@@ -131,6 +144,23 @@ public class MatchTeamServiceImpl implements MatchTeamService {
                     metrics.teamCall(TeamMethod.CREATE_TEAM_TICKETS, TeamCallResult.ERROR);
                     return notAttempted();
                 });
+    }
+    private static com.game.proto.team.StartTeamMatchRequest parseTeamRequest(com.google.protobuf.ByteString bytes){
+        try{return com.game.proto.team.StartTeamMatchRequest.parseFrom(bytes);}
+        catch(com.google.protobuf.InvalidProtocolBufferException e){throw new IllegalArgumentException("开局原请求损坏",e);}
+    }
+
+    @Override public CompletableFuture<com.game.proto.team.TeamMatchIntent> queryTeamMatchIntent(TeamMatchIntentQuery request) {
+        if(global==null)return CompletableFuture.failedFuture(new IllegalStateException("全球开局权威未启用"));
+        Deadline d=MatchRpcAttachments.deadlineFromCall(budgetMs);
+        return onWorker(d,()->{
+            var key=com.game.match.global.GlobalMatchStore.directUuidKey(1,request.getPlayerId(),request.getRequestId());
+            var original=global.store().direct(key);
+            if(original==null)return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).build();
+            if(!request.getClientRequest().isEmpty()&&!original.getPayload().equals(request.getClientRequest()))throw new IllegalArgumentException("重复开局意图参数不同");
+            var f=global.store().formation(original.getBattleId());
+            return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setBattleId(f.getBattleId()).setState(f.getState()).build();
+        },why->{throw new Deadline.DependencyException("开局查询过载");},error->{throw new Deadline.DependencyException("开局查询失败",error);});
     }
 
     /**

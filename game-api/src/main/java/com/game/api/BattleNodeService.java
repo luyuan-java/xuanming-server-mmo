@@ -40,6 +40,10 @@ import java.util.concurrent.CompletableFuture;
  * <p>调用方建议超时：createBattle 5 s；其余 3 s（基线 {@code gather.go:25-30}、{@code rbt.go:22}）。
  */
 public interface BattleNodeService {
+    /** 精确进程与创建操作的权威查询；旧实现只会返回未知，不能据此释放票据。 */
+    default CompletableFuture<com.game.proto.QueryBattleCreationResponse> queryBattleCreation(com.game.proto.QueryBattleCreationRequest request) {
+        return CompletableFuture.completedFuture(com.game.proto.QueryBattleCreationResponse.getDefaultInstance());
+    }
 
     /** 建房（含节点级准入判定）。 */
     CompletableFuture<CreateBattleResult> createBattle(CreateBattleRequest request);

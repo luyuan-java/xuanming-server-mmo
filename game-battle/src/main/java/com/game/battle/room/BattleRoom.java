@@ -1,8 +1,13 @@
 package com.game.battle.room;
 
 import com.game.battle.engine.TurnBattleEngine;
+import com.game.battle.metrics.BattleMetrics;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.BattleRouting;
+import com.game.proto.BattleStateS2C;
+import com.game.proto.TurnResultS2C;
+import com.game.proto.contracts.kafka.BattleResultEvent;
+import com.game.proto.eSpectateEndReason;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -51,6 +56,26 @@ final class BattleRoom {
     int confirmResendsLeft = RoomConstants.CONFIRM_RESENDS;
     /** 从表里移除之前置位：迟到的计时器回调据此识别出房间已死（§11 N14，配合对象身份比较）。 */
     boolean closed;
+    boolean requiresResultConfirmation;
+    PendingCompletion pendingCompletion;
+
+    /** 原结果不可改；仅逻辑线程更新尝试状态，未知不构成终局。 */
+    static final class PendingCompletion {
+        final BattleResultEvent event;
+        final com.google.protobuf.ByteString original;
+        final TurnResultS2C finalTurn;
+        final BattleStateS2C visibleBefore;
+        final eSpectateEndReason spectateReason;
+        final BattleMetrics.RoomEnd endReason;
+        int failures;
+        boolean inFlight;
+        Cancellable retryTimer = Cancellable.NONE;
+        PendingCompletion(BattleResultEvent event,TurnResultS2C finalTurn,BattleStateS2C visibleBefore,
+                          eSpectateEndReason spectateReason,BattleMetrics.RoomEnd endReason) {
+            this.event=event;this.original=event.toByteString();this.finalTurn=finalTurn;this.visibleBefore=visibleBefore;
+            this.spectateReason=spectateReason;this.endReason=endReason;
+        }
+    }
 
     BattleRoom(long battleId, int matchMode, int battleConfigId, BattleActivityContext activityContext, RoomOrigin origin,
                TurnBattleEngine engine, long deadlineMs) {
@@ -81,5 +106,6 @@ final class BattleRoom {
         roundTimer.cancel();
         battleTimer.cancel();
         confirmResendTimer.cancel();
+        if (pendingCompletion != null) pendingCompletion.retryTimer.cancel();
     }
 }

@@ -542,6 +542,9 @@ mmorpg：`go/friend`（go-zero gRPC，经 client_rpc_router 转发）。Java 版
   〔2026-10-14 更正:按域各一条队列已改为 login 以外全部后端共用一条**会话后端 lane**(`ClientSession.backendQueue`),
   跨域同样按到达顺序逐条发出;仍不占 login / scene 的在途位。理由与 C++ 侧的对应改动见 mmorpg
   `docs/design/client-request-ordering.md`(O3,§10),对账见 PARITY「客户端请求按会话保序」行。〕
+  〔2026-10-16 更正:后端调用以**结果未知**的错误结束(future 异常完成:断连、流重置、提供方重启,请求可能已到后端、handler 可能还在跑)时,
+  回执照常立即给带 id 的信封 1003,但 lane 等到「发出 + 调用超时 5 s」(`ClientDispatcher.BACKEND_RESULT_UNKNOWN_HOLD_NANOS`,与
+  `dubbo.consumer.timeout` 同值)才放行下一条,与超时路径一致;代理当场抛异常(「No provider available」,请求没发出)不等。断线撤销该定时器。〕
 - **准入**（`FriendDispatcher`，按消息号）：10 个 C2S 方法放行；上行 235（`NotifyFriendEvent` 是服务端推送）与会话还没绑定玩家
   （`player_id = 0`）回信封 1003（基线是会话拦截器拒绝、路由服翻成信封 1003）；请求体解析失败回信封 1003；工作队列满 / 处理器异常回
   in-band 1003。「我」只取会话里的 `player_id`，入口挡住目标为 0 / 自己（否则落到存储层的非法玩家对、变成 1003 假告警）。
@@ -1104,6 +1107,16 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
   切磋的备战晚于复查时玩家同时是旧场观众与新局参战者（两版相同，客户端靠改连兜底）；AddObserver 超时后 177 仍可能晚到；不是合法 UTF-8 的脏标记按值删不掉、只能等 TTL；battle 整体不可达时 163 每请求一条 ERROR，日志没有限频；
   清扫第一轮在一个间隔之后，启动后头 10 s `game_match_watchable_battles` 读数为 0。
 
+#### 4.24.2 全球结果日志的提交点（2026-10-16 续批）
+
+全球开局带 `placement_operation_id`。房间算出最终回合或整场截止 DRAW 后，固定同一份 `BattleResultEvent`、首次 `finished_at_ms` 和终局帧，经 `BattleResultSink.publishConfirmed` 等到 Kafka 逐消息 `acks=all` 成功，才发送最终 139/150、观战终态、执行个人结算出口和删房。producer 入队或 Redis 写成功都不能完成这个确认。活动局在确认后才更新 Redis 补拉投影，投影失败不改写原结果。
+
+结果未确认时，房间在原逻辑线程保留原事件与原字节，拒绝新行动；补拉与新观众只能看到上一份非终态快照。失败按 1、2、4 秒递增到 30 秒退避，继续重投原结果。UNKNOWN 不能变成另一个输赢或先宣布 ABORTED；显式销毁保留待提交房间，停机只断连、不承诺终局。创建收据的清理同时检查房间是否仍存活，原战斗期限已过也不能把待确认房间的收据清掉。
+
+`BattleResultTopics.ensureDurable` 要求显式副本数至少 3，逐分区核对不同 broker 副本的最小数，topic 级 `min.insync.replicas` 至少 2 且 `unclean.leader.election.enable=false`。match 在装配阶段同步核对，早于 matcher 和 RPC 准入，关闭评分消费也不绕过；既有 RF1 topic 拒绝启用并要求人工迁副本。生产者只有通过核对才发送；无法核对时不会以兜底日志完成全球房间的确认。部署通过 `KAFKA_TOPIC_REPLICATION_FACTOR` 显式传入副本数，单 broker 本地兼容环境不能作为全球结果耐久验收。
+
+这个提交点保护的是胜负、评级和帮会活动结果日志。消费者仍分别通过 TiDB 事务、原 battle_id 与原件摘要幂等落账，Kafka ACK 不代表跨服务同步提交。普通个人 `BattleSettlementData` 的金币、掉落、宠物与任务终值尚不在该事件载荷中，继续使用既有结算发件箱；它的完整耐久投递与玩家 SQL 收据闭环须另行验收，不能据本节声称全部战斗资产已强一致到账。多区域真实进程故障与容量验证也不由本机回归替代。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -1242,6 +1255,14 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
   低于客户端 HTTP 超时 5s（Redisson 自带默认值下可达二十多秒）。超时的命令会被原样重发一次（第一次可能已经执行），
   所以可变的 Lua 都要按「可被重放」设计（回合制战斗的脚本逐段写明了重放语义，§4.23）；等一条 Redis 脚本结局的 RPC，调用方超时要大于 4.2 s
   （`game.battle.scene-rpc-timeout` 缺省 5 s，启动时与 `RedisProperties.worstCaseCommandMillis()` 比较）。
+- Redis 客户端连接池（`game.redis.connection-pool-size` / `connection-minimum-idle-size` / `subscription-connection-pool-size`，
+  默认 64 / 24 / 50，2026-10-16 mmorpg 全局单点 P0-E 第 3 批的 Java 对齐）：`RedisAutoConfiguration.configure` 写进 Redisson 单机配置，启动日志那一行带三个生效值与「最多占连接」（命令池 + 订阅池）。
+  缺省值**与 Redisson 3.50.0 的库缺省逐个相同**（依赖 jar 的 `SingleServerConfig` 构造器核对，`RedisPropertiesTest` 钉住），所以现有行为不变；显式写出是为了让连接总账（§6.1）读配置值、
+  不随库升级漂移。没有选更小的值：Redisson 一条命令从借到连接起占着它、应答回来才归还，池上限就是本进程同时在途的命令数上限，池满时命令排队、等不到即
+  `RedisTimeoutException`（「Unable to acquire connection!」）；没有压测数据支撑收小，而总账在缺省值下离上限还远（§6.1）。最小空闲是建客户端时就建好的常驻连接，只影响总账的常驻值、不影响峰值。
+  校验：两个池上限至少 1，最小空闲在 0 与池上限之间（只把池调到 24 以下时要一并设最小空闲，否则拒启）；订阅连接的最小空闲不开放（库缺省 1）。
+  环境变量按 Spring 宽松绑定覆盖（如 `GAME_REDIS_CONNECTIONPOOLSIZE`）。只管经 `RedisAutoConfiguration` 建的客户端；另外自建 Redisson 的三处
+  （game-login 的 Sa-Token 客户端、命令行工具 AuditFallbackReplay 与 assetopfix）仍用库缺省池，总账按库缺省记它们。
 - **Redis 的部署约束**（回合制战斗落地后新增，批次 6.3）：
   - **现在是单机 Redis；上主从 / 集群之前有一件事必须先做**。驱动丢弃与判废的读（`BattleRedis` 的全部脚本）一律读主库；但 `BattleLockReader.exists / existsAll`
     是咨询性的读，走 Redisson 的普通读路由，主从部署下可能读到从库的旧值。队伍视图、组队跟随、game-match 的排队 / 切磋 / 凑单校验 / 成员预检读到旧值只是显示或排队判断晚一拍
@@ -1290,6 +1311,33 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
   关掉自动建 topic，审计 topic 由进程自建并核对（§4.5）。MySQL 预建 `game`，服务器缺省排序规则 `utf8mb4_bin`、时区 `+00:00`（与开发机相同）。
   秘密只从环境变量或不入库的 `deploy/compose/.env` 读（模板 `env.example`），必填项写成 `${VAR:?}`，缺了 compose 在启动前就失败。
   重置时 MySQL 与 Redis 必须一起清（`down -v`）：单独清 Redis 会让 `game:node-id-epoch:*` 回退（§6「防护代次」），也会让只存在 Redis 里的权威数据（组队等）与 MySQL 对不上。
+- **Redis 连接总账**（2026-10-16，mmorpg P0-E 第 3 批的 Java 对齐；按仓库当前值手算，未运行实测）。Java 没有 K8s 清单、没有部署脚本的总账闸，这里是唯一的一笔账，
+  改池参数、加进程模块或 7.1b 的 `stack.yaml` 落地时同步改。
+  - **口径**（每个 Redisson 客户端）：常驻 = 命令最小空闲 + 订阅最小空闲 = 24 + 1 = **25**；峰值 = 命令池上限 + 订阅池上限 = 64 + 50 = **114**（启动日志的「最多占连接」）。
+    每个进程经 `RedisAutoConfiguration` 只有一个客户端（单例、懒创建）；game-data 只在运维接口里经 `ObjectProvider` 取用，第一次用到之前不连 Redis。
+  - **进程**（`tools/local/start-slice.sh`，宿主上起、连 compose 的那台 Redis）：单 zone 13 个都用 Redis——scene-manager、login、friend、chat、match、team、guild、trade、data、scene、gate、gateway、battle；
+    `GAME_SCENE_NODES=2` 加 game-scene-2，`GAME_ZONES=2` 加 game-scene-z2 / game-gate-z2，最多 16 个。还没登记进切片的模块：game-mail 用 Redis（登记后 +1 个客户端），
+    game-rank / game-mall 的 main 代码不取 `RedissonClient`，不连。
+  - **另算的客户端**（都用库缺省池，每个常驻 25、峰值 114）：game-login 配了 `game.login.auth.satoken` 且它指向同一台 Redis 时多一个（缺省注释掉）；
+    命令行工具 AuditFallbackReplay、assetopfix 运行期间各一个；CI 的集成测试（`-Dgame.it.redis`）只在 CI 的 Redis 上。
+  - **合计**（一个部署）：
+
+    | 形态 | 客户端数 | 常驻 | 峰值 |
+    |---|---|---|---|
+    | 单 zone 切片 | 13 | 325 | 1482 |
+    | 双 scene + 双 zone 切片 | 16 | 400 | 1824 |
+    | 上一行 + Sa-Token + 两个工具同时在跑 | 19 | 475 | 2166 |
+
+    多个部署共用一套 infra（§6.2，各取不同的 `GAME_NAMESPACE`）时按部署数相乘：两套最大形态峰值 3648、三套 5472。
+  - **上限**：compose 的 redis 只有 `--appendonly yes`，`maxclients` 是 Redis 缺省 10000；Redis 启动时要把打开文件数升到 maxclients + 32，容器的 nofile 硬限更低时
+    会把 maxclients 降下来（日志「maxclients has been reduced to …」），生效值取决于宿主 Docker 给容器的 nofile，部署后用 `redis-cli CONFIG GET maxclients` 核对。
+    按 10000 算：一套最大形态峰值占 18%、两套 36%、三套 55%，都在 mmorpg 的 80% 告警线以下；常驻一套 4%、三套 12%。nofile 只有 1024（maxclients 约 992）的宿主上，
+    单 zone 切片的峰值（1482）已超，表现为突发时池扩张的新连接收到 `ERR max number of clients reached`。
+  - **compose 是否同批改由负责人定**（本批只列出，`infra.yaml` 未改）：
+    ① 维持现状（依赖缺省 10000 与宿主 nofile，生效值可能被静默降低）；
+    ② 显式 `--maxclients 10000` 并给 redis 服务 `ulimits.nofile` 不低于 10032，让缺省值不再被宿主压低、启动日志可核；
+    ③ 与 mmorpg 同值 `--maxclients 40000`（`deploy/docker-compose.yml` 的 redis 段），`ulimits.nofile` 不低于 40032，两版运维口径一致。
+    ②③ 都要先在 CI 的 `integration.yml` 上确认 compose 起得来（本机没有 Docker）。
 - **镜像**（7.1a 落了 Dockerfile，首次构建随 7.1b）：一个参数化的 `deploy/docker/Dockerfile` 服务全部进程模块（`--build-arg MODULE=<模块>`）。
   jar 由宿主 Maven 一次打齐，镜像里只用 Spring Boot 的 `jarmode=tools` 分层解包。基础镜像 Temurin 21 JRE（Ubuntu noble）钉 digest；
   以非 root 运行（uid / gid 10001），home 是可写的 `/home/game`（Dubbo 往 `${user.home}/.dubbo` 写缓存）。表数据单独一层烤进镜像

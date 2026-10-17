@@ -72,6 +72,15 @@ public final class KafkaNames {
         return name("match-rating");
     }
 
+    /** 帮会活动独立消费组，不能与评分组分享分区。 */
+    public String guildTrialGroup() {
+        return name("guild-trial");
+    }
+
+    public String guildTrialClientId(String instanceId) {
+        return client("guild-trial-" + instanceId);
+    }
+
     // ------------------------------------------------------------------ client.id
 
     /** game-data 的 topic 管理客户端 {@code <ns>-data-admin}。 */

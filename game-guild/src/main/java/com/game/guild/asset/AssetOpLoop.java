@@ -132,7 +132,7 @@ public final class AssetOpLoop implements AssetOpProcessor {
     private ScheduledExecutorService scheduler;
 
     /**
-     * @param ledger  离线读已落盘账本；null = 不读（长期离线玩家的行照常退避，玩家上线后由在线投递终结）
+     * @param ledger  独立读取玩家SQL账本；null 时任何在线终结候选也只能保持未决，不信远端 durable 声明
      * @param workers 循环的专用 worker 池（{@code guild-asset-worker}，线程数 = workers）
      * @param settle  同步路径的落库执行器（{@code guild-asset-settle}，有界；满了 → 行留在 PENDING 等租约到期由循环接手）
      * @param tokens  租约令牌的随机源（生产 {@link java.security.SecureRandom}）
@@ -431,6 +431,12 @@ public final class AssetOpLoop implements AssetOpProcessor {
     /** 投递之后的全部收尾（阻塞：离线读账本、终结或重排）。 */
     Processed conclude(AssetOp op, DeliveryOrigin origin, AssetRpc rpc, long nowMs, Delivery delivery) {
         Delivery d = tryPersistedLedger(op, delivery);
+        // 离线分支若已替换为SQL结局无需再读；在线答复不论尝试次数、durable真假，都须独立核验同流/纪元/序号。
+        if (d == delivery && d.answered()
+                && (d.result().outcome() == com.game.api.proto.AssetOutcome.ASSET_OUTCOME_APPLIED
+                        || d.result().outcome() == com.game.api.proto.AssetOutcome.ASSET_OUTCOME_REJECTED)) {
+            d = verifyPersistedCandidate(op, d.result());
+        }
         if (d.noAnswer()) {
             // 传输 / 定位故障：结局未知，按退避重投；不覆盖行上的答复列（E12）
             long next = AssetOpDecisions.nextAttemptMs(nowMs, op.attempts(), config.baseBackoffMs(),
@@ -459,6 +465,43 @@ public final class AssetOpLoop implements AssetOpProcessor {
                             Long.toUnsignedString(op.streamEpoch()), Integer.toUnsignedString(res.reason()));
                 }
                 yield reschedule(op, alertNextMs(nowMs), res, nowMs, AssetOpAction.ALERT);
+            }
+        };
+    }
+
+    /** 远端声明只是候选，SQL是提交证明；SQL不可读或尚未提交时只按原操作等待。 */
+    private Delivery verifyPersistedCandidate(AssetOp op, AssetOpResult remote) {
+        int waitingReason = remote.partial() ? AssetOpDecisions.REASON_PARTIAL_APPLIED : remote.reason();
+        AssetOpResult waiting = new AssetOpResult(remote.outcome(), waitingReason, false, remote.partial(), false);
+        if (ledger == null)
+            return Delivery.answered(waiting);
+        return switch (ledger.classify(op)) {
+            case Absent ignored -> {
+                metrics.ledgerRead(LedgerReadResult.ABSENT);
+                yield Delivery.answered(waiting);
+            }
+            case Unseen ignored -> {
+                metrics.ledgerRead(LedgerReadResult.UNSEEN);
+                yield Delivery.answered(waiting);
+            }
+            case Unreadable unreadable -> {
+                metrics.ledgerRead(LedgerReadResult.ERROR);
+                metrics.storeError(StoreOp.LEDGER_READ);
+                log.error("[AssetOp] 在线结局尚无可读SQL证明，保留原操作 op_id={} reason={}",
+                        Long.toUnsignedString(op.opId()), unreadable.reason());
+                yield Delivery.answered(waiting);
+            }
+            case Finalized finalized -> {
+                metrics.ledgerRead(LedgerReadResult.FINALIZED);
+                AssetOpResult committed = finalized.result();
+                if (committed.outcome() != remote.outcome()) {
+                    metrics.outcomeFlip(op.stream());
+                    yield Delivery.flipped(waiting, new AssetOutcomeFlipException("玩家SQL与在线结局冲突 op_id="
+                            + Long.toUnsignedString(op.opId()) + " stream=" + op.stream() + " seq=" + Long.toUnsignedString(op.seq())));
+                }
+                boolean partial = remote.partial() || committed.partial() || remote.reason() == AssetOpDecisions.REASON_PARTIAL_APPLIED;
+                int reason = partial ? AssetOpDecisions.REASON_PARTIAL_APPLIED : committed.reason();
+                yield Delivery.answered(new AssetOpResult(committed.outcome(), reason, true, partial, false));
             }
         };
     }

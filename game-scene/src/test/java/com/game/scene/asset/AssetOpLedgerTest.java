@@ -276,13 +276,14 @@ class AssetOpLedgerTest {
     }
 
     @Test
-    void 部分发放名单上限64_滑窗剪枝() {
+    void 首次回包丢失后超过64次部分发放仍保留直到滑窗() {
         for (long seq = 1; seq <= 70; seq++) {
             record(seq, RecordKind.APPLIED_PARTIAL);
         }
-        assertThat(stream().getPartialSeqsList()).hasSize(64);
-        assertThat(stream().getPartialSeqs(0)).isEqualTo(7);
-        assertThat(ledger.isPartial(STREAM, 1)).isFalse();
+        assertThat(stream().getPartialSeqsList()).hasSize(70);
+        assertThat(stream().getPartialSeqs(0)).isEqualTo(1);
+        assertThat(ledger.isPartial(STREAM, 1)).isTrue();
+        assertThat(AssetOpLedger.restore(ledger.toState()).isPartial(STREAM, 1)).isTrue();
         assertThat(ledger.isPartial(STREAM, 7)).isTrue();
         record(70 + BITS, RecordKind.APPLIED);
         assertThat(stream().getWatermark()).isEqualTo(70);
@@ -488,7 +489,7 @@ class AssetOpLedgerTest {
     }
 
     @Test
-    void 超过64条的原因环与部分名单判损坏() {
+    void 原因环仍限64而65条部分名单有效() {
         AssetOpStreamLedgerState.Builder rejections = raw(EPOCH, 0, 65);
         AssetOpStreamLedgerState.Builder partials = raw(EPOCH, 0, 65);
         for (int i = 0; i < 2; i++) {
@@ -501,8 +502,7 @@ class AssetOpLedgerTest {
         }
         assertThat(AssetOpLedger.validate(AssetOpLedgerState.newBuilder().addStreams(rejections).build()))
                 .contains("rejections 数量=65");
-        assertThat(AssetOpLedger.validate(AssetOpLedgerState.newBuilder().addStreams(partials).build()))
-                .contains("partial_seqs 数量=65");
+        assertThat(AssetOpLedger.validate(AssetOpLedgerState.newBuilder().addStreams(partials).build())).isNull();
     }
 
     @Test
