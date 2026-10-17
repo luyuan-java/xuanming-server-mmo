@@ -63,7 +63,7 @@ public final class BattleCompletionStore {
                         ||!stored.getOriginalDigest().equals(candidate.getOriginalDigest()))
                     throw new SQLException("同一对局的完成来源原件不同或已损坏");
                 for(var entry:settlements.entrySet()) {
-                    ByteString original=entry.getValue().toByteString();
+                    ByteString original=ByteString.copyFrom(com.game.common.token.NetworkProbes.bytes(entry.getValue()));
                     var player=BattlePlayerCompletionRow.newBuilder().setBattleId(event.getBattleId()).setPlayerId(entry.getKey())
                             .setOriginal(original).setOriginalDigest(digest(original)).build();
                     if(inserted)db.insert(c,player);
@@ -102,7 +102,7 @@ public final class BattleCompletionStore {
         }
         if(version!=1)throw new IllegalArgumentException("不支持的结算来源版本");
         if(event.getBattleId()==0||event.getOutcomeValue()<1||event.getOutcomeValue()>3
-                ||event.getSettlementsCount()<1||event.getSettlementsCount()>10)
+                ||event.getSettlementsCount()<1)
             throw new IllegalArgumentException("完成来源对局、终局或人数无效");
         Map<Long,Integer> roster=new HashMap<>();java.util.Set<Integer> teams=new java.util.HashSet<>();
         for(var team:event.getTeamsList()) {

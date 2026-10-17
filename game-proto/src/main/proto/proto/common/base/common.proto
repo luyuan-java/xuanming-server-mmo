@@ -38,11 +38,6 @@ message NodeInfo {
   uint32 physical_region = 12;
 }
 
-message NodeInfoListComp
-{
-  repeated NodeInfo node_list = 1;
-}
-
 message NetworkAddress
 {
   string ip = 1;

@@ -68,9 +68,29 @@ abstract class BattleCompletionStoreCases {
         assertEquals(1,count("match_battle_completion"));assertEquals(2,count("match_battle_player_completion"));
     }
     @Test void 个人来源写入失败回滚整局()throws Exception {
-        try(var c=data.getConnection();var s=c.createStatement()) {s.execute("ALTER TABLE match_battle_player_completion ADD CONSTRAINT fixture_reject_player CHECK (player_id <> 2)");}
-        assertThrows(RuntimeException.class,()->store.archive(received(complete(703))));
+        var inserts=new java.util.concurrent.atomic.AtomicInteger();
+        DataSource failing=proxy(DataSource.class,data,(method,args,result)->{
+            if(!method.getName().equals("getConnection"))return result;
+            return proxy(java.sql.Connection.class,(java.sql.Connection)result,(connectionMethod,connectionArgs,prepared)->{
+                if(!connectionMethod.getName().equals("prepareStatement")||!((String)connectionArgs[0]).contains("INSERT INTO `match_battle_player_completion`"))return prepared;
+                return proxy(java.sql.PreparedStatement.class,(java.sql.PreparedStatement)prepared,(statementMethod,statementArgs,updated)->updated,
+                        statementMethod->{if(statementMethod.getName().equals("executeUpdate")&&inserts.incrementAndGet()==2)throw new SQLException("第二名个人来源写入故障");});
+            });
+        });
+        assertThrows(RuntimeException.class,()->new BattleCompletionStore(failing).archive(received(complete(703))));
+        assertEquals(2,inserts.get());
         assertEquals(0,count("match_battle_completion"));assertEquals(0,count("match_battle_player_completion"));
+    }
+
+    @FunctionalInterface private interface After { Object apply(java.lang.reflect.Method method,Object[] args,Object result)throws Throwable; }
+    @FunctionalInterface private interface Before { void apply(java.lang.reflect.Method method)throws Throwable; }
+    private static <T>T proxy(Class<T> type,T delegate,After after) { return proxy(type,delegate,after,method->{}); }
+    private static <T>T proxy(Class<T> type,T delegate,After after,Before before) {
+        return type.cast(java.lang.reflect.Proxy.newProxyInstance(type.getClassLoader(),new Class<?>[]{type},(ignored,method,args)->{
+            before.apply(method);
+            try { return after.apply(method,args,method.invoke(delegate,args)); }
+            catch(java.lang.reflect.InvocationTargetException failure) { throw failure.getCause(); }
+        }));
     }
     @Test void 并发重复只保留一份完整来源()throws Exception {
         var start=new CyclicBarrier(4);var outcomes=new ArrayList<BattleCompletionStore.Outcome>();
