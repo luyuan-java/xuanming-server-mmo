@@ -1115,7 +1115,13 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
 
 `BattleResultTopics.ensureDurable` 要求显式副本数至少 3，逐分区核对不同 broker 副本的最小数，topic 级 `min.insync.replicas` 至少 2 且 `unclean.leader.election.enable=false`。match 在装配阶段同步核对，早于 matcher 和 RPC 准入，关闭评分消费也不绕过；既有 RF1 topic 拒绝启用并要求人工迁副本。生产者只有通过核对才发送；无法核对时不会以兜底日志完成全球房间的确认。部署通过 `KAFKA_TOPIC_REPLICATION_FACTOR` 显式传入副本数，单 broker 本地兼容环境不能作为全球结果耐久验收。
 
-这个提交点保护的是胜负、评级和帮会活动结果日志。消费者仍分别通过 TiDB 事务、原 battle_id 与原件摘要幂等落账，Kafka ACK 不代表跨服务同步提交。普通个人 `BattleSettlementData` 的金币、掉落、宠物与任务终值尚不在该事件载荷中，继续使用既有结算发件箱；它的完整耐久投递与玩家 SQL 收据闭环须另行验收，不能据本节声称全部战斗资产已强一致到账。多区域真实进程故障与容量验证也不由本机回归替代。
+这个提交点保护的是胜负、评级和帮会活动结果日志。消费者仍分别通过 TiDB 事务、原 battle_id 与原件摘要幂等落账，Kafka ACK 不代表跨服务同步提交。普通个人资产的完整耐久投递与玩家 SQL 收据闭环须另行实现和验收，不能据本节声称全部战斗资产已强一致到账。多区域真实进程故障与容量验证也不由本机回归替代。
+
+**2026-10-16，R07 Phase A 完成来源归档**：全球房间的 `BattleResultEvent` 新增 `settlements=12` 与 `settlement_format_version=13`（1 为完整个人来源，0 为历史结果）。房间首次固定全体 `BattleSettlementData` 和同一份原始 Kafka 字节；未知确认后重投同字节，确认后 150 与既有 R07 发件箱复用其中的个人结算，不再重算。房间和生产者均拒绝超过 960 KiB 的完整来源，拒绝期间不承诺终局。旧的无确认发布口仍由发送线程序列化。
+
+全球 match 在同一 TiDB 强会话池里用 `match_battle_completion` 与 `match_battle_player_completion` 归档收到的原始完整字节、SHA256、首个位点和全员个人来源，单笔事务提交后才允许 Kafka 位点推进；同 battle 的不同原字节即使解析语义相同也拒绝，完整重复不覆盖首个位点。格式 1 严格核对全体成员、队伍、battle_id、outcome 与 total_rounds；空原件、格式 0 夹带个人载荷、未知版本和超限原件均拒绝。非空历史格式 0 只走旧评分兼容，不补造来源。关闭评分仍运行全球来源消费；评分的 ignored 分支不能跳过归档。
+
+本阶段只归档来源，不启动 SQL 补发、销账或新的资产应用任务；旧 R07 仍是唯一应用来源，Redis 失败、分步骤应用失败、玩家 SQL 收据、归属切换与源快照版本屏障仍是后续缺口，未填写假 owner_epoch/save_seq。上线必须先使所有同组消费者支持来源归档，再启用发格式 1 的 battle；旧消费者会忽略新增字段并提交位点，不能把这种混跑当作已完成归档。后续回灌或切换消费组需要独立迁移和去重方案。
 
 ## 5. 线程模型
 

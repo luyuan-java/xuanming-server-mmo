@@ -337,7 +337,8 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
             return;
         }
         String key = BattleResultTopics.key(event.getBattleId());
-        ProducerRecord<String, byte[]> message = new ProducerRecord<>(topic, key, original.toByteArray());
+        ProducerRecord<String, byte[]> message = new ProducerRecord<>(topic, key,
+                original==null?event.toByteArray():original.toByteArray());
         // 每条结局只计一次：生产者处于致命状态时 send 先把记录放进缓冲再抛异常，随后后台线程中止批次时回调还会再报一次
         AtomicBoolean settled = new AtomicBoolean();
         try {
@@ -479,7 +480,8 @@ public final class KafkaBattleResultSink implements BattleResultSink, AutoClosea
             this(event,channel,null);
         }
         SendTask(BattleResultEvent event,Channel channel,CompletableFuture<Void> acknowledged){
-            this(event,event.toByteString(),channel,acknowledged);
+            // 旧发布口保持在发送线程序列化；全球确认口已由房间固定原字节。
+            this(event,null,channel,acknowledged);
         }
         SendTask(BattleResultEvent event,com.google.protobuf.ByteString original,Channel channel,CompletableFuture<Void> acknowledged){
             this.event = event;
