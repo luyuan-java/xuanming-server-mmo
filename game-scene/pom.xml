@@ -14,6 +14,10 @@
     <name>game-scene</name>
     <description>场景节点（Spring Boot + Netty）：gate 节点链路服务端，单逻辑线程拥有全部场景与玩家状态</description>
 
+    <properties>
+        <scene.test-source-directory>${project.basedir}/src/test/java</scene.test-source-directory>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -113,6 +117,7 @@
     </dependencies>
 
     <build>
+        <testSourceDirectory>${scene.test-source-directory}</testSourceDirectory>
         <plugins>
             <!-- 资产通道提供方测试起真 Dubbo 提供方与调用方：调用方鉴权过滤器只从环境变量读密钥，这里给一个仅测试用的假值
                  （不是任何环境的真密钥；先例 game-gateway/pom.xml） -->
@@ -141,4 +146,23 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <!-- 只在 clean test 使用 reactor classes；服务 BOOT-INF 主包不能成为默认编译依赖。 -->
+        <profile>
+            <id>asset-arrival-chain</id>
+            <properties>
+                <scene.test-source-directory>${project.basedir}/src/test/asset-arrival-chain</scene.test-source-directory>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>com.game</groupId><artifactId>game-mail</artifactId>
+                    <version>${project.version}</version><scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.game</groupId><artifactId>game-trade</artifactId>
+                    <version>${project.version}</version><scope>test</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
 </project>

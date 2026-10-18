@@ -99,7 +99,7 @@ Java 的当前状态单列在文末，以本次查看的源码与既有设计文
 | 1 | 「推送提醒 + 落地后拉取」只做一半 | `docs/design/cross-zone-scene-travel.md:94` 说明跨 zone 期间最坏约 60 秒的全局服务推送会丢、不补发，兜底为客户端每次落地后主动拉一次；原文称 Unity 这部分尚未写 | 优先补齐 |
 | 2 | MySQL 写入没有行内围栏 | `docs/design/db-write-fencing-mysql.md` 仍为待授权设计；原文的「持久确认」指 Redis 落盘，MySQL 仍可能被迟到旧数据覆盖 | 优先补齐 |
 | 3 | 进场入口没有 epoch 校验 | `cpp/nodes/scene/handler/rpc/scene_handler.cpp:178` 注释指出缺失 | 优先补齐 |
-| 4 | 通用玩家消息 RPC 会静默丢消息 | 同文件 `SendMessageToPlayer:290` 找不到人只写日志、不回「不在这里」；`MESSAGE_PRIORITY_IMPORTANT` 仅影响日志级别，重要消息不能靠它保证投递 | 通道使用约束 |
+| 4 | 通用玩家消息 RPC 会静默丢消息 | 同文件 `SendMessageToPlayer:290` 找不到人只写日志、不回「不在这里」；`MESSAGE_PRIORITY_IMPORTANT` 仅影响日志级别，重要消息不能靠它保证投递（2026-10-16 补：基线 `Scene.SendMessageToPlayer`（1）与 `IMPORTANT` 的载体 `RoutePlayerStringMsg`（81）已于 RpcChannel 批 7 从 proto 删除；结论不变） | 通道使用约束 |
 | 5 | 邮件服务未实现 | 原文称 `go/mail` 不存在；既有设计中业务库本身作为收件箱，带幂等键，方向一致 | 按业务补齐 |
 | 6 | 没有超窗退路和对账 | 原文称玩家长期离线时资产待办一直挂着，仅靠未决条数上限挡住新操作 | 完善恢复与运维 |
 

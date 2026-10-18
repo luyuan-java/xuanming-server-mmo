@@ -49,7 +49,7 @@ import org.slf4j.LoggerFactory;
  *   <li>{@link PlayerStore#createPlayerWithinCap}：事务里锁账号行、重数角色（已满 → 2001）、逐个候选名插入。
  *       玩家给的名字被占：若占用者就是本账号下职业 / 性别 / 外观都相同的角色，视为上次建角应答丢失的重试，
  *       直接回当前列表（已有的那一行原样返回，归属区不变）；否则 2033。生成名全部撞名 → 2020。
- *       账号行不存在（数据不一致）→ 2020。</li>
+ *       账号行不存在（数据不一致）→ 2020；事务没赶在请求预算截止前完成（已回滚）→ 2020。</li>
  * </ol>
  * 每账号上限由第 9 步的数据库行锁保证，多个 login 实例并发建角也突破不了；本进程的在途闸门只用于快速回 2005。
  * 成功应答不设置 {@code error_message}；失败应答的 {@code players} 为空。
@@ -60,9 +60,8 @@ import org.slf4j.LoggerFactory;
  * 迟到的应答被丢弃，而本处理器还在工作线程上跑。建角唯一的提交点是第 9 步的事务，所以发号之前最后看一次预算
  * （其后的发号、造行都是纯内存操作）：用完就回 2020、不进事务，免得新角色晚于下一条请求落库
  * （同 mmorpg createplayerlogic.go 的 abandonAfterDeadline，client-request-ordering.md §6.1；tip 也与它一致）。
- * 已知残留：事务本身没有时限（向连接池取连接发生在事务开始时、检查之后，最多等 3 s；行锁等待与每条语句只受 socketTimeout 10 s 约束），
- * 连接池耗尽这类过载下检查照样能通过，进了事务之后的提交仍可能晚于 gate 放行；要收紧须给 {@link PlayerStore#createPlayerWithinCap} 加带时限的事务
- * （同 {@code PlayerStore.handOffOwnership}），不在本类。
+ * 事务本身也按剩余预算设时限（{@link PlayerStore#createPlayerWithinCap(PlayerRow, int, List, Duration)}）：取连接的等待、行锁等待与每条语句
+ * 都算在预算里，截止在事务里到点（含语句 / 事务超时）就回滚、不提交，同样回 2020。剩下的窗口只有「截止之前开始的提交在截止之后才完成」。
  *
  * <p><b>归属区为什么取会话的 zone</b>：Java 的 login 不分 zone（一个 login 服务全部 zone，玩家号租约全服一份），
  * 进程自己的 {@code game.zone-id} 说明不了玩家是从哪个区进来的；会话 zone 是 gate 填的它自己的 zone，
@@ -105,7 +104,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     }
 
     /**
-     * @param deviceRenewal 建角前续期会话的设备数登记（{@code AccountLogin::renewDevice}）：回拒绝码（2024 / 2023）即拒绝，null 放行
+     * @param deviceRenewal 建角前续期会话的设备数登记（{@code AccountLogin::renewDevice}）：回拒绝码（2024 / 2023 / 会话已结束 2018）即拒绝，null 放行
      */
     public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
                                IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
@@ -277,7 +276,10 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         }
         PlayerRow row = newRow(playerId, account, homeZoneId, classId, gender, appearanceId);
 
-        PlayerStore.CreateOutcome outcome = store.createPlayerWithinCap(row, maxPlayersPerAccount, candidates);
+        // 事务的时限 = 剩余预算：截止在事务里到点就回滚、不提交（TIMED_OUT）。发号到这里只有纯内存操作，剩余预算按常理仍为正；
+        // 真的已到点也交给事务判（进事务即回滚、一条语句都不发），不另开分支。
+        Duration remaining = Duration.ofNanos(Math.max(1, createDeadline - nanoClock.getAsLong()));
+        PlayerStore.CreateOutcome outcome = store.createPlayerWithinCap(row, maxPlayersPerAccount, candidates, remaining);
         return switch (outcome.status()) {
             case CREATED -> {
                 metrics.playerCreated();
@@ -294,6 +296,12 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
             case NAME_TAKEN -> requested
                     ? nameTaken(account, row, outcome.existing())
                     : generatedNamesExhausted(account, candidates.size());
+            case TIMED_OUT -> {
+                // 同发号前的预算检查：gate 可能已按超时放行下一条请求，事务已回滚、新角色没有落库；号已烧掉（雪花号不复用，无害）。
+                log.warn("建角放弃：事务没赶在请求预算 {} 的截止前完成，已回滚、不提交 account={} session={} 作废 id={}",
+                        createBudget, account, session.getSessionId(), row.getPlayerId());
+                yield error(LoginErrorTip.login_error.kLoginDataSerializeFailed_VALUE);
+            }
         };
     }
 

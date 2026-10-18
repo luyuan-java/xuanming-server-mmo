@@ -70,6 +70,14 @@ public final class PersistedAssetLedger {
         return null;
     }
 
+    /** 窗口内的请求身份必须来自同一份存档；旧位图没有摘要时，不能据此终结任意载荷。 */
+    public boolean identityMatches(int stream, long epoch, long seq, long correlationId,
+                                   com.google.protobuf.ByteString requestDigest) {
+        var receipt = receipt(stream, epoch, seq);
+        return requestDigest != null && requestDigest.size() == 32 && receipt != null
+                && receipt.getCorrelationId() == correlationId && receipt.getRequestDigest().equals(requestDigest);
+    }
+
     /** 分类（同 {@link AssetLedgerRules#classify}）；损坏账本恒为 {@link AssetSeqState#INVALID}。 */
     public AssetSeqState classify(int stream, long epoch, long seq) {
         if (invalidReason != null) {

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -75,7 +76,7 @@ class EnterGameHandlerTest {
         PlayerRow row = LoginHandlerTest.row(PLAYER, ACCOUNT, "张三");
         row.setSceneConfigId(3);
         when(store.findPlayer(PLAYER)).thenReturn(Optional.of(row));
-        when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.Claimed(5));
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.Claimed(5));
         when(scenes.assign(any())).thenReturn(CompletableFuture.completedFuture(ASSIGNED));
     }
 
@@ -145,12 +146,12 @@ class EnterGameHandlerTest {
         assertError(enter(SESSION.toBuilder().setPlayerId(PLAYER).build(), PLAYER),
                 LoginErrorTip.login_error.kLoginSessionNotFound_VALUE);
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong());
+        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
     }
 
     @Test
     void 归属仍被持有_请持有者让出后退避重试_释放后夺权成功() throws Exception {
-        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
             nanos.addAndGet(Duration.ofMillis(150).toNanos());
             return new ClaimResult.Held(4);
         }).thenAnswer(inv -> {
@@ -174,20 +175,20 @@ class EnterGameHandlerTest {
 
     @Test
     void 归属在等待窗口内一直被持有_回2005_每次重试都请持有者让出() throws Exception {
-        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
             nanos.addAndGet(Duration.ofSeconds(1).toNanos());
             return new ClaimResult.Held(4);
         });
 
         assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
 
-        verify(store, times(3)).claimOwnership(PLAYER);
+        verify(store, times(3)).claimOwnership(eq(PLAYER), any(Duration.class));
         verify(takeovers, times(3)).request(PLAYER, 4);
         assertThat(backoffs).allSatisfy(delay -> assertThat(delay).isLessThanOrEqualTo(EnterGameHandler.MAX_CLAIM_BACKOFF));
         assertThat(claims("timeout")).isEqualTo(1);
 
         // 等待链结束后在途闸门已释放：下一次（持有者已释放）能进。
-        when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.Claimed(5));
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.Claimed(5));
         assertThat(response(enter(SESSION, PLAYER)).hasErrorMessage()).isFalse();
     }
 
@@ -202,7 +203,7 @@ class EnterGameHandlerTest {
             return CompletableFuture.completedFuture(ASSIGNED);
         });
         List<Duration> attempts = new ArrayList<>();
-        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
             attempts.add(Duration.ofNanos(nanos.get() - start));
             nanos.addAndGet(Duration.ofMillis(500).toNanos());
             return new ClaimResult.Held(4);
@@ -244,7 +245,7 @@ class EnterGameHandlerTest {
             return CompletableFuture.completedFuture(ASSIGNED);
         });
         List<Duration> attempts = new ArrayList<>();
-        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
             attempts.add(Duration.ofNanos(nanos.get() - start));
             return new ClaimResult.Held(4);
         });
@@ -274,7 +275,7 @@ class EnterGameHandlerTest {
             return CompletableFuture.completedFuture(ASSIGNED);
         });
         List<Duration> attempts = new ArrayList<>();
-        when(store.claimOwnership(PLAYER)).thenAnswer(inv -> {
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
             attempts.add(Duration.ofNanos(nanos.get() - start));
             return new ClaimResult.Held(4);
         });
@@ -299,13 +300,13 @@ class EnterGameHandlerTest {
         assertError(handler.handle(SESSION, request, budget).orTimeout(5, TimeUnit.SECONDS).join(),
                 SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong());
+        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
 
         // 对照：排队只耗掉预算减 1 ms，照常分配、夺权——排队时长是从预算里扣掉，不是「排过队就放弃」。
         HandlerReply reply = handler.handle(SESSION, request, budget - Duration.ofMillis(1).toNanos())
                 .orTimeout(5, TimeUnit.SECONDS).join();
         assertThat(response(reply).hasErrorMessage()).isFalse();
-        verify(store).claimOwnership(PLAYER);
+        verify(store).claimOwnership(eq(PLAYER), any(Duration.class));
     }
 
     @Test
@@ -317,7 +318,7 @@ class EnterGameHandlerTest {
         assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE);
 
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong());
+        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
     }
 
     @Test
@@ -327,7 +328,7 @@ class EnterGameHandlerTest {
                 AssignSceneResponse.newBuilder().setTipId(noScene).build()));
 
         assertError(enter(SESSION, PLAYER), noScene);
-        verify(store, never()).claimOwnership(anyLong());
+        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
         assertThat(assigns("rejected")).isEqualTo(1);
         assertThat(meters.get("game.login.owner.claims").timers()).as("分配失败不走到夺权")
                 .allSatisfy(timer -> assertThat(timer.count()).isZero());
@@ -345,7 +346,7 @@ class EnterGameHandlerTest {
         doReturn(null).when(scenes).assign(any());
         assertError(enter(SESSION, PLAYER), failed);
 
-        verify(store, never()).claimOwnership(anyLong());
+        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
         assertThat(assigns("error")).isEqualTo(3);
     }
 
@@ -373,7 +374,7 @@ class EnterGameHandlerTest {
         };
         EnterGameHandler busy = new EnterGameHandler(store, scenes, takeovers, firstOnly, 1, Duration.ofMillis(200),
                 CLAIM_WAIT, metrics, delay -> Runnable::run, nanos::get);
-        when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.Held(4));
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.Held(4));
 
         assertThatThrownBy(() -> busy.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build())
                 .orTimeout(5, TimeUnit.SECONDS).join())
@@ -382,7 +383,7 @@ class EnterGameHandlerTest {
         assertThat(claims("error")).as("异常结束的夺权链记 error").isEqualTo(1);
 
         executions.set(0);
-        when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.Claimed(5));
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.Claimed(5));
         HandlerReply reply = busy.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build())
                 .orTimeout(5, TimeUnit.SECONDS).join();
         assertThat(response(reply).hasErrorMessage()).as("闸门已释放").isFalse();
@@ -390,7 +391,7 @@ class EnterGameHandlerTest {
 
     @Test
     void 夺权时角色已不存在回2011() throws Exception {
-        when(store.claimOwnership(PLAYER)).thenReturn(new ClaimResult.NotFound());
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.NotFound());
         assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE);
         verify(takeovers, never()).request(anyLong(), anyLong());
         assertThat(claims("not_found")).isEqualTo(1);
@@ -415,11 +416,11 @@ class EnterGameHandlerTest {
 
     @Test
     void 夺权故障_future异常完成且释放闸门() throws Exception {
-        doThrow(new IllegalStateException("db down")).when(store).claimOwnership(PLAYER);
+        doThrow(new IllegalStateException("db down")).when(store).claimOwnership(eq(PLAYER), any(Duration.class));
         assertThatThrownBy(() -> enter(SESSION, PLAYER)).isInstanceOf(CompletionException.class);
         assertThat(claims("error")).as("第一次夺权就抛出也记 error").isEqualTo(1);
 
-        doReturn(new ClaimResult.Claimed(6)).when(store).claimOwnership(PLAYER);
+        doReturn(new ClaimResult.Claimed(6)).when(store).claimOwnership(eq(PLAYER), any(Duration.class));
         assertThat(enter(SESSION, PLAYER).directives().get(0).getEnterScene().getOwnerEpoch()).isEqualTo(6);
         assertThat(claims("claimed")).isEqualTo(1);
     }
@@ -526,5 +527,40 @@ class EnterGameHandlerTest {
         HandlerReply reply = enterWith(id -> reads.getAndIncrement() == 0 ? Optional.of(location(7)) : Optional.empty());
         verify(scenes, times(2)).assign(any());
         assertThat(reply.directives().get(0).getEnterScene().getSceneId()).isEqualTo(99_000_001L);
+    }
+
+    // ---- 夺权事务的时限（mmorpg client-request-ordering.md §6.1）----
+
+    @Test
+    void 夺权事务的时限是受理时刻起算的剩余预算_重试时按当时剩下的() throws Exception {
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
+            nanos.addAndGet(Duration.ofMillis(300).toNanos());
+            return new ClaimResult.Held(4);
+        }).thenReturn(new ClaimResult.Claimed(5));
+
+        HandlerReply reply = handler.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build(),
+                Duration.ofSeconds(1).toNanos()).orTimeout(5, TimeUnit.SECONDS).join();
+
+        assertThat(response(reply).hasErrorMessage()).isFalse();
+        ArgumentCaptor<Duration> timeouts = ArgumentCaptor.forClass(Duration.class);
+        verify(store, times(2)).claimOwnership(eq(PLAYER), timeouts.capture());
+        assertThat(timeouts.getAllValues()).as("预算 4 s 减排队 1 s；第二次再减第一次夺权的 300 ms（退避用同步执行器，不耗时钟）")
+                .containsExactly(Duration.ofSeconds(3), Duration.ofMillis(2700));
+    }
+
+    @Test
+    void 夺权事务没赶在预算截止前完成_已回滚_回2005_不请持有者让出_不再重试() throws Exception {
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.TimedOut());
+
+        assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
+
+        verify(store, times(1)).claimOwnership(eq(PLAYER), any(Duration.class));
+        verify(takeovers, never()).request(anyLong(), anyLong());
+        assertThat(backoffs).isEmpty();
+        assertThat(claims("timeout")).isEqualTo(1);
+
+        // 在途闸门已释放：下一次照常夺权。
+        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.Claimed(6));
+        assertThat(response(enter(SESSION, PLAYER)).hasErrorMessage()).isFalse();
     }
 }

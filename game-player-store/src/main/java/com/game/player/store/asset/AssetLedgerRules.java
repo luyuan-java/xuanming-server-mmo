@@ -213,8 +213,10 @@ public final class AssetLedgerRules {
             var receipt = ledger.getReceipts(i);
             long seq = receipt.getSeq();
             if ((i > 0 && Long.compareUnsigned(seq, previous) <= 0) || !insideWindow(watermark, seq)
-                    || !testBit(applied, (int) (seq - watermark - 1)) || receipt.getRequestDigest().size() != 32
-                    || receipt.getSnapshotProto().size() > 64 * 1024 || receipt.getCorrelationId() == 0) {
+                    || !testBit(seen, (int) (seq - watermark - 1)) || receipt.getRequestDigest().size() != 32
+                    || receipt.getSnapshotProto().size() > 64 * 1024
+                    || !receipt.getSnapshotProto().isEmpty()
+                        && (!testBit(applied, (int) (seq - watermark - 1)) || receipt.getCorrelationId() == 0)) {
                 return prefix + "实例回执损坏或超上限";
             }
             previous = seq;

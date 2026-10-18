@@ -93,14 +93,14 @@ class PersistedAssetLedgerReaderTest {
     }
 
     private PersistedAssetLedger loaded(long playerId) {
-        Read read = new PersistedAssetLedgerReader(dataSource).read(playerId);
+        Read read = new PersistedAssetLedgerReader(dataSource, PersistedAssetLedgerReader.DEFAULT_TIMEOUT, false).read(playerId);
         assertThat(read).isInstanceOf(Read.Loaded.class);
         return ((Read.Loaded) read).ledger();
     }
 
     @Test
     void 没有行是Absent() {
-        assertThat(new PersistedAssetLedgerReader(dataSource).read(42)).isEqualTo(new Read.Absent());
+        assertThat(new PersistedAssetLedgerReader(dataSource, PersistedAssetLedgerReader.DEFAULT_TIMEOUT, false).read(42)).isEqualTo(new Read.Absent());
     }
 
     @Test
@@ -137,7 +137,7 @@ class PersistedAssetLedgerReaderTest {
     @Test
     void 坏blob是读失败_不是空账本() {
         putState(42, new byte[] {(byte) 0xff, (byte) 0xff, (byte) 0xff});
-        Read read = new PersistedAssetLedgerReader(dataSource).read(42);
+        Read read = new PersistedAssetLedgerReader(dataSource, PersistedAssetLedgerReader.DEFAULT_TIMEOUT, false).read(42);
         assertThat(read).isInstanceOf(Read.Failed.class);
         assertThat(((Read.Failed) read).reason()).contains("解析失败");
     }
@@ -150,14 +150,14 @@ class PersistedAssetLedgerReaderTest {
         putState(big, PlayerState.newBuilder().setAssetLedger(AssetOpLedgerState.newBuilder().addStreams(stream()))
                 .build().toByteArray());
         assertThat(loaded(big).outcomeOf(GUILD_DEBIT, EPOCH, 3).conclusive()).isTrue();
-        assertThat(new PersistedAssetLedgerReader(dataSource).read(7)).as("低 63 位相同的另一个号").isEqualTo(new Read.Absent());
+        assertThat(new PersistedAssetLedgerReader(dataSource, PersistedAssetLedgerReader.DEFAULT_TIMEOUT, false).read(7)).as("低 63 位相同的另一个号").isEqualTo(new Read.Absent());
     }
 
     @Test
     void player_id为0与数据源故障都是读失败_从不抛异常() {
-        assertThat(new PersistedAssetLedgerReader(dataSource).read(0)).isInstanceOf(Read.Failed.class);
+        assertThat(new PersistedAssetLedgerReader(dataSource, PersistedAssetLedgerReader.DEFAULT_TIMEOUT, false).read(0)).isInstanceOf(Read.Failed.class);
         DataSource broken = new DriverManagerDataSource("jdbc:h2:mem:absent_" + UUID.randomUUID() + ";IFEXISTS=TRUE");
-        Read read = new PersistedAssetLedgerReader(broken).read(42);
+        Read read = new PersistedAssetLedgerReader(broken, PersistedAssetLedgerReader.DEFAULT_TIMEOUT, false).read(42);
         assertThat(read).isInstanceOf(Read.Failed.class);
         assertThat(((Read.Failed) read).cause()).isInstanceOf(SQLException.class);
     }
@@ -174,7 +174,7 @@ class PersistedAssetLedgerReaderTest {
             pool.setInitialSize(1);
             pool.setMaxWait(10_000);
             pool.init();
-            PersistedAssetLedgerReader reader = new PersistedAssetLedgerReader(pool, Duration.ofMillis(200));
+            PersistedAssetLedgerReader reader = new PersistedAssetLedgerReader(pool, Duration.ofMillis(200), false);
             assertThat(reader.read(42)).as("池有空闲连接时照常读").isEqualTo(new Read.Absent());
             try (Connection held = pool.getConnection()) {
                 long started = System.nanoTime();

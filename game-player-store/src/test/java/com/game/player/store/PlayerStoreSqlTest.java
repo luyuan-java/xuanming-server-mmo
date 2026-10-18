@@ -997,7 +997,7 @@ class PlayerStoreSqlTest {
     // ================================================================ 建角上限
 
     @Test
-    void 交易原实例与收据同事务落库_新读取者恢复_旧owner拒写不覆盖_收据删除与效果同存档() {
+    void 交易原实例与收据同事务落库_新读取者恢复_旧owner拒写不覆盖_ACK只清快照() {
         long p=newPlayer(6011,"交易持久化");
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
         var unknown=com.google.protobuf.UnknownFieldSet.newBuilder().addField(900,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(123).build()).build();
@@ -1014,10 +1014,12 @@ class PlayerStoreSqlTest {
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
         assertThat(store.saveStateHeld(save(p,1,9,0),PlayerState.getDefaultInstance())).isFalse();
         assertThat(restarted.loadState(p)).isEqualTo(state);
-        var acked=state.toBuilder().setAssetLedger(state.getAssetLedger().toBuilder().setStreams(0,stream.clearReceipts())).build();
+        var acked=state.toBuilder().setAssetLedger(state.getAssetLedger().toBuilder().setStreams(0,
+                stream.setReceipts(0,receipt.toBuilder().clearSnapshotProto()))).build();
         assertThat(store.saveStateHeld(save(p,2,1,21),acked)).isTrue();
         assertThat(restarted.loadState(p)).isEqualTo(acked);
         assertThat(restarted.loadState(p).getPets().getPets(0)).isEqualTo(pet);
+        assertThat(restarted.loadState(p).getAssetLedger().getStreams(0).getReceipts(0).getRequestDigest()).hasSize(32);
     }
 
     @Test
@@ -1067,6 +1069,152 @@ class PlayerStoreSqlTest {
         assertThat(store.createPlayerWithinCap(row, 5, List.of("无主")).status())
                 .isEqualTo(PlayerStore.CreateStatus.ACCOUNT_MISSING);
         assertThat(store.countPlayers("robot_nobody")).isZero();
+    }
+
+    // ================================================================ 带时限的建角 / 夺权（mmorpg client-request-ordering.md §6.1）
+
+    /** 调用方剩余的预算；测试里的单调时钟只在钩子里拨动，预算本身不会自己耗完。 */
+    private static final Duration BUDGET = Duration.ofMillis(1500);
+
+    private static PlayerRow freshRow(long playerId) {
+        PlayerRow row = new PlayerRow();
+        row.setPlayerId(playerId);
+        row.setAccount(ACCOUNT);
+        row.setZoneId(1);
+        row.setClassId(1);
+        row.setGender(1);
+        return row;
+    }
+
+    /** 在真 Mapper 外包一层：每个方法执行完（语句已在事务里发出）之后，把方法名交给 {@code afterEach}。 */
+    private PlayerMapper observed(java.util.function.Consumer<String> afterEach) {
+        return (PlayerMapper) java.lang.reflect.Proxy.newProxyInstance(PlayerMapper.class.getClassLoader(),
+                new Class<?>[] {PlayerMapper.class}, (proxy, method, args) -> {
+                    Object result;
+                    try {
+                        result = method.invoke(mapper, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                    afterEach.accept(method.getName());
+                    return result;
+                });
+    }
+
+    /** 与 Config 里同一个事务管理器、同一个数据源，只把单调时钟换成可拨动的 {@code nanos}。 */
+    private PlayerStore timedStore(PlayerMapper playerMapper, AtomicLong nanos) {
+        return new PlayerStore(playerMapper, CLOCK::get, context.getBean(PlatformTransactionManager.class), nanos::get);
+    }
+
+    @Test
+    void 带时限建角_插入已发出后调用方截止到点_回滚不提交_回TIMED_OUT_名字没被占() {
+        AtomicLong nanos = new AtomicLong();
+        PlayerStore timed = timedStore(observed(method -> {
+            if (method.equals("insertPlayer")) {
+                nanos.addAndGet(BUDGET.toNanos());
+            }
+        }), nanos);
+
+        PlayerStore.CreateOutcome outcome = timed.createPlayerWithinCap(freshRow(4001), 5, List.of("超时甲"), BUDGET);
+
+        assertThat(outcome).isEqualTo(new PlayerStore.CreateOutcome(PlayerStore.CreateStatus.TIMED_OUT, List.of()));
+        assertThat(store.findPlayer(4001)).as("插入随事务回滚").isEmpty();
+        assertThat(store.countPlayers(ACCOUNT)).isZero();
+        assertThat(store.createPlayerWithinCap(freshRow(4002), 5, List.of("超时甲")).status())
+                .as("名字与账号行锁都没留下").isEqualTo(PlayerStore.CreateStatus.CREATED);
+    }
+
+    @Test
+    void 带时限建角与夺权_拿到连接时截止已到_一条语句都不发() {
+        AtomicLong nanos = new AtomicLong();
+        List<String> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DataSourceTransactionManager slowBegin = new DataSourceTransactionManager(context.getBean(DataSource.class)) {
+            @Override
+            protected void doBegin(Object transaction, org.springframework.transaction.TransactionDefinition definition) {
+                super.doBegin(transaction, definition);
+                nanos.addAndGet(BUDGET.toNanos());   // 取连接耗完了预算（连接池最多等 3 s）
+            }
+        };
+        PlayerStore timed = new PlayerStore(observed(calls::add), CLOCK::get, slowBegin, nanos::get);
+
+        assertThat(timed.createPlayerWithinCap(freshRow(4003), 5, List.of("超时乙"), BUDGET).status())
+                .isEqualTo(PlayerStore.CreateStatus.TIMED_OUT);
+        assertThat(timed.claimOwnership(4003, BUDGET)).isEqualTo(new ClaimResult.TimedOut());
+        assertThat(calls).as("不锁账号行、不碰 player 行").isEmpty();
+        assertThat(store.countPlayers(ACCOUNT)).isZero();
+    }
+
+    @Test
+    void 带时限建角_预算内照常提交() {
+        PlayerStore timed = timedStore(observed(method -> { }), new AtomicLong());
+
+        assertThat(timed.createPlayerWithinCap(freshRow(4004), 5, List.of("准时甲"), BUDGET).status())
+                .isEqualTo(PlayerStore.CreateStatus.CREATED);
+        assertThat(store.findPlayer(4004)).map(PlayerRow::getName).contains("准时甲");
+    }
+
+    @Test
+    void 带时限夺权_夺权语句已发出后调用方截止到点_回滚_epoch不变_下一次夺权仍得第一代() {
+        long p = newPlayer(4011, "超时丙");
+        AtomicLong nanos = new AtomicLong();
+        PlayerStore timed = timedStore(observed(method -> {
+            if (method.equals("claimOwnerEpoch")) {
+                nanos.addAndGet(BUDGET.toNanos());
+            }
+        }), nanos);
+
+        assertThat(timed.claimOwnership(p, BUDGET)).isEqualTo(new ClaimResult.TimedOut());
+
+        assertThat(store.findPlayer(p).orElseThrow().getOwnerEpoch()).as("epoch 自增随事务回滚").isZero();
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+    }
+
+    @Test
+    void 带时限夺权_预算内照常夺权_仍被持有照常回Held_不存在回NotFound() {
+        long p = newPlayer(4012, "准时乙");
+        PlayerStore timed = timedStore(observed(method -> { }), new AtomicLong());
+
+        assertThat(timed.claimOwnership(p, BUDGET)).isEqualTo(new ClaimResult.Claimed(1));
+        assertThat(timed.claimOwnership(p, BUDGET)).isEqualTo(new ClaimResult.Held(1));
+        assertThat(timed.claimOwnership(424243, BUDGET)).isEqualTo(new ClaimResult.NotFound());
+    }
+
+    @Test
+    void 带时限建角_账号行锁被占超过时限_回TIMED_OUT不抛异常_什么也没写() throws Exception {
+        assertTimedOutOnHeldLock(() -> mapper.lockAccount(ACCOUNT),
+                () -> store.createPlayerWithinCap(freshRow(4021), 5, List.of("锁等甲"), Duration.ofSeconds(1)),
+                new PlayerStore.CreateOutcome(PlayerStore.CreateStatus.TIMED_OUT, List.of()));
+        assertThat(store.countPlayers(ACCOUNT)).isZero();
+    }
+
+    @Test
+    void 带时限夺权_行锁被占超过时限_回TimedOut不抛异常_没有夺权() throws Exception {
+        long p = newPlayer(4022, "锁等乙");
+        assertTimedOutOnHeldLock(() -> mapper.selectOwnerForUpdate(p), () -> store.claimOwnership(p, Duration.ofSeconds(1)),
+                new ClaimResult.TimedOut());
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+    }
+
+    /**
+     * 同 {@link #assertTimesOutOnHeldLock}，但带时限的建角 / 夺权把语句超时折成结果：{@code call} 在事务时限（1 s）附近返回
+     * {@code timedOut}，不抛异常。只在真 MySQL 上跑，理由同上。
+     */
+    private <T> void assertTimedOutOnHeldLock(Runnable lock, java.util.function.Supplier<T> call, T timedOut)
+            throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(MYSQL_URL != null, "H2 的行锁等待不受查询超时约束，需要 -Dgame.it.mysql");
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Void> holder = holdRowLock(lock, locked, release, false);
+        assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+        long started = System.nanoTime();
+        try {
+            assertThat(call.get()).isEqualTo(timedOut);
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            assertThat(elapsedMs).as("由事务时限打断，而不是 innodb_lock_wait_timeout").isBetween(900L, 4_000L);
+        } finally {
+            release.countDown();
+            holder.get(15, TimeUnit.SECONDS);
+        }
     }
 
     private static void await(CountDownLatch latch) {

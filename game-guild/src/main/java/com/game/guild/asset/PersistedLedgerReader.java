@@ -86,7 +86,8 @@ public final class PersistedLedgerReader {
             return new Unreadable("已落盘账本加载即判损坏: " + ledger.invalidReason());
         }
         PersistedAssetLedger.Outcome outcome = ledger.outcomeOf(op.stream(), op.streamEpoch(), op.seq());
-        if (!outcome.conclusive()) {
+        if (!outcome.conclusive() || !ledger.identityMatches(op.stream(), op.streamEpoch(), op.seq(), op.correlationId(),
+                com.game.api.asset.AssetOpSignatures.requestDigest(op.request()))) {
             return new Unseen();
         }
         return switch (outcome.state()) {

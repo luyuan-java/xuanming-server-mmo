@@ -1,1 +1,2 @@
 com.game.player.store.PlayerStoreAutoConfiguration
+com.game.player.store.PlayerSqlAuthorityAutoConfiguration

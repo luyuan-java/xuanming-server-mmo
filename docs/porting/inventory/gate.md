@@ -249,6 +249,7 @@ Java game-gate 已做帧/握手/会话/校验链/限频/login 与 scene 路由/s
 ### route-player-rebind — 进场路由、登录类型绑定与跨节点换图重绑
 - mmorpg: gate_event_handler.cpp RoutePlayerEventHandler / BindSessionEventHandler；scene_route_helper.h ApplyRoute / CompareSceneNode；
   gate_service_handler.cpp BindSessionToGate（RPC 版，只就地更新）；SessionInfo.homeZoneId / ownerEpoch / lastSceneRoute
+  （2026-10-16 补：RPC 版 BindSessionToGate 已于 mmorpg RpcChannel 批 7 从 proto 删除，56 号留墓碑；登录绑定唯一的写入口是 Kafka BindSession → ApplyLoginBinding，不需要对齐 RPC 版。见本文 legacy-gate-rpcs 节。）
 - client messages: 间接（79 NotifyEnterScene 由 scene 发）；EnterGame 26 / 换图请求触发
 - tables: none
 - depends on: gate-command-channel, scene-request-forward

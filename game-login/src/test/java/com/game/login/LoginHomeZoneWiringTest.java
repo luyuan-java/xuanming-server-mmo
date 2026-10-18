@@ -37,6 +37,7 @@ import com.game.proto.login.EnterGameResponse;
 import com.game.table.LoginErrorTip;
 import com.game.table.SceneErrorTip;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -76,7 +77,7 @@ class LoginHomeZoneWiringTest {
         when(rules.defaultClassId()).thenReturn(1);
         when(rules.roleNameRules()).thenReturn(new RoleNameRules(2, 12, "道友", 6, 5));
         when(store.listPlayers(ACCOUNT)).thenReturn(List.of());
-        when(store.createPlayerWithinCap(any(), anyInt(), anyList())).thenAnswer(inv -> {
+        when(store.createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class))).thenAnswer(inv -> {
             PlayerRow row = inv.getArgument(0);
             row.setName(inv.<List<String>>getArgument(2).get(0));
             return new CreateOutcome(CreateStatus.CREATED, List.of());
@@ -106,7 +107,7 @@ class LoginHomeZoneWiringTest {
         assertThat(fromZone2.hasErrorMessage()).isFalse();
         assertThat(fromZone3.hasErrorMessage()).isFalse();
         ArgumentCaptor<PlayerRow> inserted = ArgumentCaptor.forClass(PlayerRow.class);
-        verify(store, org.mockito.Mockito.times(2)).createPlayerWithinCap(inserted.capture(), anyInt(), anyList());
+        verify(store, org.mockito.Mockito.times(2)).createPlayerWithinCap(inserted.capture(), anyInt(), anyList(), any(Duration.class));
         assertThat(inserted.getAllValues()).extracting(PlayerRow::getZoneId).containsExactly(2, 3);
         assertThat(fromZone2.getPlayers(0).getPlayer().getZoneId()).isEqualTo(2);
         assertThat(fromZone3.getPlayers(0).getPlayer().getZoneId()).isEqualTo(3);
@@ -146,7 +147,7 @@ class LoginHomeZoneWiringTest {
             EnterGameResponse response = EnterGameResponse.parseFrom(reply.body().orElseThrow().toByteString());
             assertThat(response.getErrorMessage().getId()).isEqualTo(SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
             assertThat(asked).as("会话在区 2，角色的归属区是 1").containsExactly(1);
-            verify(store, never()).claimOwnership(org.mockito.ArgumentMatchers.anyLong());
+            verify(store, never()).claimOwnership(org.mockito.ArgumentMatchers.anyLong(), any(Duration.class));
         }
     }
 
@@ -170,7 +171,7 @@ class LoginHomeZoneWiringTest {
         CreatePlayerResponse refused = create(handler, sessionIn(2));
         assertThat(refused.getErrorMessage().getId()).isEqualTo(LoginErrorTip.login_error.kLoginDataSerializeFailed_VALUE);
         assertThat(refused.getPlayersList()).isEmpty();
-        verify(store, never()).createPlayerWithinCap(any(), anyInt(), anyList());
+        verify(store, never()).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
 
         CreatePlayerResponse allowed = create(handler, sessionIn(3));
         assertThat(allowed.hasErrorMessage()).isFalse();

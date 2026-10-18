@@ -25,6 +25,7 @@ import com.game.login.metrics.LoginMetrics;
 import com.game.login.testing.InMemoryLoginDevices;
 import com.game.login.testing.InMemoryLoginTokens;
 import com.game.player.store.PlayerStore;
+import com.game.table.LoginErrorTip;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
@@ -167,5 +168,40 @@ class LoginClientMessageServiceTest {
 
         assertThat(devices.of("robot_0001")).isEmpty();
         assertThat(devices.boundTo).isEmpty();
+    }
+
+    @Test
+    void 会话结束留关闭墓碑_迟到的续期被挡住_迟到的进场应答也不清墓碑() throws Exception {
+        devices.admit("robot_0001", "g/9");
+
+        service.sessionClosed(SessionClosed.newBuilder().setSession(LOGGED_IN).build()).get(5, TimeUnit.SECONDS);
+
+        assertThat(devices.closed).containsExactly("g/9");
+        assertThat(accountLogin.renewDevice(LOGGED_IN)).isEqualTo(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE);
+        assertThat(devices.of("robot_0001")).isEmpty();
+
+        // 超过 gate 等待仍在跑的 EnterGame 此刻才成功，应答带进场指令：注销照做，墓碑不动。
+        ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(26).build();
+        ClientReply entered = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
+                .setEnterScene(EnterScene.getDefaultInstance())).build();
+        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(entered));
+        service.handle(call).join();
+        assertThat(devices.closed).containsExactly("g/9");
+        assertThat(accountLogin.renewDevice(LOGGED_IN)).isEqualTo(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE);
+    }
+
+    @Test
+    void 应答带进场指令只注销不留墓碑_进场失败回到大厅后照常重新计入() {
+        devices.admit("robot_0001", "g/9");
+        ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(26).build();
+        ClientReply entered = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
+                .setEnterScene(EnterScene.getDefaultInstance())).build();
+        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(entered));
+
+        service.handle(call).join();
+
+        assertThat(devices.closed).isEmpty();
+        assertThat(accountLogin.renewDevice(LOGGED_IN)).isNull();
+        assertThat(devices.of("robot_0001")).containsExactly("g/9");
     }
 }

@@ -54,7 +54,8 @@ public final class MailDeliveryWorker implements SmartLifecycle, AutoCloseable {
         var read = ledger.read(op.player());
         if (read instanceof PersistedAssetLedgerReader.Read.Loaded loaded) {
             var proof = loaded.ledger().outcomeOf(5, op.epoch(), op.seq());
-            if (proof.conclusive()) {
+            if (proof.conclusive() && loaded.ledger().identityMatches(5, op.epoch(), op.seq(), op.id(),
+                    com.game.api.asset.AssetOpSignatures.requestDigest(op.request()))) {
                 if (response.answered() && (response.response().getOutcomeValue() == 1 || response.response().getOutcomeValue() == 2)
                         && ((proof.state() == AssetSeqState.APPLIED) != (response.response().getOutcomeValue() == 1)))
                     throw new IllegalStateException("资产SQL结局与在线结局翻转");

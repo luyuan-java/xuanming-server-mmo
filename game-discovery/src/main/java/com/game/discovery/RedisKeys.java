@@ -452,7 +452,8 @@ public final class RedisKeys {
 
     /**
      * 会话当前计在哪个账号的设备名单里：{@code game:login:device-session:{会话键}}，值为账号，TTL 同设备登记。
-     * 断线时 gate 记的账号可能是空的（登录应答没送到 gate），按它找回名单注销。
+     * 断线时 gate 记的账号可能是空的（登录应答没送到 gate），按它找回名单注销。会话结束后值为空串（关闭墓碑，TTL 60 s，
+     * 挡住迟到的登记，见 game-login {@code LoginDevices#close}）。
      */
     public String loginDeviceSession(String sessionKey) {
         return prefix + "login:device-session:" + sessionKey;

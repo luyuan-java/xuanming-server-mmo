@@ -84,7 +84,8 @@ import org.slf4j.LoggerFactory;
  * 所以整条链按剩余预算收紧：等 scene-manager（签票、分配、夺权后的重新分配）的本地兜底取 {@code assignTimeout} 与剩余预算中较小的，
  * 预算用完就不再发起调用（按调用超时处理）；夺权的等待截止取 {@code claimWait} 与预算截止中较早的，分配回来时预算已用完就不夺权（2005），
  * 退避醒来时预算已用完同样不再夺权，下一次重试只能排在预算截止上时不再空等、当场回 2005，
- * 夺权结果回来时预算已用完也不再请持有者让出（见 {@link #claim}）；
+ * 夺权结果回来时预算已用完也不再请持有者让出（见 {@link #claim}）；夺权事务本身按剩余预算设时限
+ * （{@link PlayerStore#claimOwnership(long, Duration)}），截止在事务里到点（含行锁等待、语句超时）就回滚、不夺权，回 2005；
  * 夺到之后预算已用完就不再复查位置（沿用原落点）。预算必须小于 gate 的超时，差值留给链路往返、最后一次夺权的 SQL 与回包
  * （排队已算在预算里）。登录期重定向没成时的回落（签票 + 分配 + 夺权）因此也不会超出 gate 的等待。
  *
@@ -146,7 +147,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     }
 
     /**
-     * @param deviceRenewal 进游戏前续期会话的设备数登记（{@code AccountLogin::renewDevice}）：回拒绝码（2024 / 2023）即拒绝，null 放行
+     * @param deviceRenewal 进游戏前续期会话的设备数登记（{@code AccountLogin::renewDevice}）：回拒绝码（2024 / 2023 / 会话已结束 2018）即拒绝，null 放行
      */
     public EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
                             Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
@@ -543,7 +544,17 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return CompletableFuture.completedFuture(new ClaimStep(
                     error(LoginErrorTip.login_error.kLoginInProgress_VALUE), ClaimOutcome.TIMEOUT));
         }
-        ClaimResult result = store.claimOwnership(playerId);
+        // 夺权事务的时限 = 剩余预算：截止在事务里到点就回滚、不夺权（TimedOut）。已到点（第一次夺权在 afterAssign 刚查过，
+        // 只差几条内存操作）也交给事务判：进事务即回滚、一条语句都不发。
+        Duration remaining = Duration.ofNanos(Math.max(1, enterDeadline - nanoClock.getAsLong()));
+        ClaimResult result = store.claimOwnership(playerId, remaining);
+        if (result instanceof ClaimResult.TimedOut) {
+            // gate 可能已按超时放行同一会话的下一条请求：夺到的归属没人接，还可能晚于客户端的重试落库。事务已回滚、没有夺权。
+            log.warn("进游戏失败：夺权事务没赶在时间预算 {} 的截止前完成，已回滚、没有夺权 player={} session={}", enterBudget,
+                    playerId, session.getSessionId());
+            return CompletableFuture.completedFuture(new ClaimStep(
+                    error(LoginErrorTip.login_error.kLoginInProgress_VALUE), ClaimOutcome.TIMEOUT));
+        }
         if (result instanceof ClaimResult.Claimed claimed) {
             ClaimOutcome outcome = retried ? ClaimOutcome.WAITED : ClaimOutcome.CLAIMED;
             return rerouteIfStale(playerId, routed, assigned, enterDeadline).thenApply(target -> new ClaimStep(

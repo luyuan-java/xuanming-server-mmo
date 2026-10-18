@@ -14,8 +14,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionTimedOutException;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -69,22 +72,37 @@ public class PlayerStore {
 
     private final PlayerMapper mapper;
     private final LongSupplier clockMs;
-    /** 交出与探测用编程式事务（带超时）；null = 本实例不支持交出（只用于不连库的单测）。 */
+    /** 交出、探测与带时限的建角 / 夺权用编程式事务（带超时）；null = 本实例不支持这些（只用于不连库的单测）。 */
     private final PlatformTransactionManager transactions;
+    /** 单调时钟（纳秒）：只用于带时限的建角 / 夺权在进事务时与提交前复核调用方截止。 */
+    private final LongSupplier nanoClock;
 
-    /** 不支持交出 / 探测（{@link #handOffOwnership}、{@link #probeOwnership} 抛 {@link IllegalStateException}）；只用于不连库的单测。 */
+    /**
+     * 不支持交出 / 探测 / 带时限的建角与夺权（{@link #handOffOwnership}、{@link #probeOwnership}、
+     * 带 {@code timeout} 的 {@link #createPlayerWithinCap} / {@link #claimOwnership} 抛 {@link IllegalStateException}）；只用于不连库的单测。
+     */
     public PlayerStore(PlayerMapper mapper, LongSupplier clockMs) {
         this(mapper, clockMs, null);
     }
 
     /**
-     * @param transactions 与 {@code mapper} 同一数据源的事务管理器：交出与探测要给事务设超时（语句超时由 MyBatis 从事务剩余时间推出），
-     *                     注解式事务做不到按调用给时限
+     * @param transactions 与 {@code mapper} 同一数据源的事务管理器：交出、探测与带时限的建角 / 夺权要给事务设超时
+     *                     （语句超时由 MyBatis 从事务剩余时间推出），注解式事务做不到按调用给时限
      */
     public PlayerStore(PlayerMapper mapper, LongSupplier clockMs, PlatformTransactionManager transactions) {
+        this(mapper, clockMs, transactions, System::nanoTime);
+    }
+
+    /**
+     * 同上；单调时钟可注入（测试用：让调用方截止在事务中途到点）。
+     *
+     * @param nanoClock 单调时钟（纳秒），只用于带时限的建角 / 夺权复核调用方截止
+     */
+    PlayerStore(PlayerMapper mapper, LongSupplier clockMs, PlatformTransactionManager transactions, LongSupplier nanoClock) {
         this.mapper = mapper;
         this.clockMs = clockMs;
         this.transactions = transactions;
+        this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
     }
 
     /**
@@ -159,7 +177,12 @@ public class PlayerStore {
         /** 账号下角色数已达上限。 */
         PLAYER_FULL,
         /** 账号行不存在（登录时 {@link #ensureAccount} 应已建好；这里 fail-closed）。 */
-        ACCOUNT_MISSING
+        ACCOUNT_MISSING,
+        /**
+         * 只有带时限的重载（{@link #createPlayerWithinCap(PlayerRow, int, List, Duration)}）会返回：事务没赶在调用方截止之前完成，
+         * 已回滚、什么也没写（{@code existing} 为空）。
+         */
+        TIMED_OUT
     }
 
     /**
@@ -192,6 +215,25 @@ public class PlayerStore {
      */
     @Transactional
     public CreateOutcome createPlayerWithinCap(PlayerRow row, int maxPlayers, List<String> nameCandidates) {
+        return insertWithinCap(row, maxPlayers, nameCandidates);
+    }
+
+    /**
+     * 同 {@link #createPlayerWithinCap(PlayerRow, int, List)}，但事务带时限：login 建角用，gate 按超时放行同一会话的下一条请求之后
+     * 不得再提交（mmorpg client-request-ordering.md §6.1）。时限语义见 {@link #withinDeadline}，结局多一种
+     * {@link CreateStatus#TIMED_OUT}（已回滚、什么也没写）。不得在外层事务里调用（加入外层事务时时限不生效）。
+     *
+     * @param timeout 调用方剩余的预算，必须为正
+     * @throws IllegalStateException 撞到名字以外的唯一约束（事务回滚），或本实例没有事务管理器
+     */
+    public CreateOutcome createPlayerWithinCap(PlayerRow row, int maxPlayers, List<String> nameCandidates,
+                                               Duration timeout) {
+        return withinDeadline(timeout, () -> insertWithinCap(row, maxPlayers, nameCandidates),
+                new CreateOutcome(CreateStatus.TIMED_OUT, List.of()));
+    }
+
+    /** 建角事务的主体（锁与一致性见 {@link #createPlayerWithinCap(PlayerRow, int, List)}），必须在事务里调用。 */
+    private CreateOutcome insertWithinCap(PlayerRow row, int maxPlayers, List<String> nameCandidates) {
         if (nameCandidates.isEmpty()) {
             throw new IllegalArgumentException("至少要有一个候选名");
         }
@@ -225,6 +267,13 @@ public class PlayerStore {
         /** 玩家不存在。 */
         record NotFound() implements ClaimResult {
         }
+
+        /**
+         * 只有带时限的 {@link #claimOwnership(long, Duration)} 会返回：事务没赶在调用方截止之前完成，已回滚、什么也没改——没有夺权。
+         * 不带时限的重载（运维夺权等）永远不会得到它。
+         */
+        record TimedOut() implements ClaimResult {
+        }
     }
 
     /**
@@ -233,6 +282,23 @@ public class PlayerStore {
      */
     @Transactional
     public ClaimResult claimOwnership(long playerId) {
+        return claimInTransaction(playerId);
+    }
+
+    /**
+     * 同 {@link #claimOwnership(long)}，但事务带时限：login 进游戏用，gate 按超时放行同一会话的下一条请求之后不得再夺权
+     * （夺到的归属没人接，玩家要等租约过期；mmorpg client-request-ordering.md §6.1）。时限语义见 {@link #withinDeadline}，
+     * 结局多一种 {@link ClaimResult.TimedOut}（已回滚、没有夺权）。不得在外层事务里调用（加入外层事务时时限不生效）。
+     *
+     * @param timeout 调用方剩余的预算，必须为正
+     * @throws IllegalStateException 本实例没有事务管理器
+     */
+    public ClaimResult claimOwnership(long playerId, Duration timeout) {
+        return withinDeadline(timeout, () -> claimInTransaction(playerId), new ClaimResult.TimedOut());
+    }
+
+    /** 夺权事务的主体，必须在事务里调用。 */
+    private ClaimResult claimInTransaction(long playerId) {
         long now = clockMs.getAsLong();
         if (mapper.claimOwnerEpoch(playerId, now, now + OWNER_LEASE.toMillis()) == 1) {
             Long epoch = mapper.selectOwnerEpoch(playerId);
@@ -469,10 +535,45 @@ public class PlayerStore {
         return Optional.ofNullable(transaction(timeout).execute(status -> mapper.selectOwnerForUpdate(playerId)));
     }
 
+    /**
+     * 在带时限的事务里执行 {@code work}（带时限的建角 / 夺权共用）。调用方截止 = 进入本方法时 + {@code timeout}（{@link #nanoClock}）：
+     * <ul>
+     *   <li>事务时限取 {@code timeout}（{@link #transaction}）：每条语句的 JDBC 查询超时取事务剩余时间，行锁等待也受它约束；
+     *       语句超时（{@link QueryTimeoutException}）与事务超时（{@link TransactionTimedOutException}）时事务已回滚，回 {@code timedOut}；</li>
+     *   <li>事务时限向上取整到秒、又从拿到连接才开始算，比调用方截止宽：进事务时（取连接可能等了连接池上限）与回调返回前
+     *       （提交之前）各按纳秒复核一次调用方截止，到点就 {@code setRollbackOnly}、回 {@code timedOut}——截止之后不提交；</li>
+     *   <li>剩下的窗口：截止之前已开始的提交可能在截止之后才完成（提交只受连接 socketTimeout 约束），同 {@link #handOffOwnership}。</li>
+     * </ul>
+     * 其余异常原样抛出（事务回滚）。
+     *
+     * @throws IllegalArgumentException {@code timeout} 不为正
+     * @throws IllegalStateException    本实例没有事务管理器
+     */
+    private <T> T withinDeadline(Duration timeout, Supplier<T> work, T timedOut) {
+        TransactionTemplate template = transaction(timeout);
+        long deadline = nanoClock.getAsLong() + timeout.toNanos();
+        try {
+            return template.execute(status -> {
+                if (deadline - nanoClock.getAsLong() <= 0) {
+                    status.setRollbackOnly();
+                    return timedOut;
+                }
+                T result = work.get();
+                if (deadline - nanoClock.getAsLong() <= 0) {
+                    status.setRollbackOnly();
+                    return timedOut;
+                }
+                return result;
+            });
+        } catch (QueryTimeoutException | TransactionTimedOutException e) {
+            return timedOut;
+        }
+    }
+
     /** 带时限的编程式事务（缺省传播 / 隔离级别）。 */
     private TransactionTemplate transaction(Duration timeout) {
         if (transactions == null) {
-            throw new IllegalStateException("PlayerStore 没有事务管理器，不支持交出 / 探测");
+            throw new IllegalStateException("PlayerStore 没有事务管理器，不支持交出 / 探测 / 带时限的建角与夺权");
         }
         TransactionTemplate template = new TransactionTemplate(transactions);
         template.setTimeout(timeoutSeconds(timeout));

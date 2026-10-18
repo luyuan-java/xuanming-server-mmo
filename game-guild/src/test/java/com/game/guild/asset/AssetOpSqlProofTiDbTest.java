@@ -27,6 +27,7 @@ class AssetOpSqlProofTiDbTest {
             Assumptions.assumeTrue(false, "未提供TiDB夹具");
         }
         String database = "guild_proof_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        Class.forName("com.mysql.cj.jdbc.Driver");
         var pool = new DruidDataSource();
         try {
             try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
@@ -45,7 +46,12 @@ class AssetOpSqlProofTiDbTest {
                 s.execute("CREATE TABLE player_state(player_id BIGINT UNSIGNED PRIMARY KEY,data MEDIUMBLOB NOT NULL)");
             }
             long epoch = 1_700_000_000_000L;
+            var bundle = AssetBundle.newBuilder().addItems(AssetItem.newBuilder().setConfigId(9).setCount(1)).build();
+            var proofRequest = AssetOpRequest.newBuilder().setPlayerId(7).setStreamValue(2).setStreamEpoch(epoch)
+                    .setSeq(1).setCorrelationId(1).setTxType(26).setBundle(bundle).build();
             var stream = AssetOpStreamLedgerState.newBuilder().setStream(2).setStreamEpoch(epoch).setMaxSeq(1).addPartialSeqs(1);
+            stream.addReceipts(AssetOpReceiptState.newBuilder().setSeq(1).setCorrelationId(1)
+                    .setRequestDigest(com.game.api.asset.AssetOpSignatures.requestDigest(proofRequest)));
             for (int i = 0; i < 16; i++) {
                 stream.addSeenBits(i == 0 ? 1 : 0);
                 stream.addAppliedBits(i == 0 ? 1 : 0);
@@ -54,7 +60,6 @@ class AssetOpSqlProofTiDbTest {
                     PlayerState.newBuilder().setAssetLedger(AssetOpLedgerState.newBuilder().addStreams(stream)).build().toByteArray();
             var backing = new InMemoryAssetStore();
             var clock = new AtomicLong(1_800_000_000_000L);
-            var bundle = AssetBundle.newBuilder().addItems(AssetItem.newBuilder().setConfigId(9).setCount(1)).build();
             backing.insert(InMemoryAssetStore.pending(1, 7, 1, bundle)
                             .setStream(2)
                             .setKind(GuildAssetOpKind.GUILD_ASSET_OP_KIND_ACTIVITY_REWARD)

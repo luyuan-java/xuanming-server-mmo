@@ -18,6 +18,7 @@ import com.game.player.store.PlayerStore;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
 import org.apache.dubbo.config.annotation.DubboService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,7 +67,7 @@ public class LoginClientMessageService implements ClientMessageService {
     public CompletableFuture<ClientReply> handle(ClientCall call) {
         return dispatcher.dispatch(call).thenApply(reply -> {
             if (reply.getDirectivesList().stream().anyMatch(LoginClientMessageService::leavesDeviceWindow)) {
-                leaveDeviceWindow(call.getSession());
+                onWorker(call.getSession(), accountLogin::leaveDeviceWindow);
             }
             return reply;
         });
@@ -78,8 +79,9 @@ public class LoginClientMessageService implements ClientMessageService {
     }
 
     /**
-     * 会话结束（断线或主动离开）：注销设备数登记（尽力而为，兜底是登记的有效期）。玩家数据归属由 owner_epoch 围栏 + 释放标记保护，
-     * 这里没有别的要清理；天然幂等。断线租约 / 短线重连随路线图 3.3。
+     * 会话结束（断线或主动离开）：注销设备数登记并留关闭墓碑（{@link AccountLogin#closeDeviceSession}；尽力而为，兜底是登记的有效期）——
+     * 这条会话上超过 gate 等待仍在 login 上跑的调用，迟到的登记 / 绑定被墓碑挡住，不再把已关闭的会话登记回名单。
+     * 玩家数据归属由 owner_epoch 围栏 + 释放标记保护，这里没有别的要清理；天然幂等。断线租约 / 短线重连随路线图 3.3。
      */
     @Override
     public CompletableFuture<Ack> sessionClosed(SessionClosed event) {
@@ -87,17 +89,17 @@ public class LoginClientMessageService implements ClientMessageService {
         log.info("会话结束 gate={} session={} account={} player={} voluntary={}",
                 session.getGateNodeId(), session.getSessionId(), session.getAccount(), session.getPlayerId(),
                 event.getVoluntary());
-        leaveDeviceWindow(session);
+        onWorker(session, accountLogin::closeDeviceSession);
         return CompletableFuture.completedFuture(Ack.getDefaultInstance());
     }
 
     /**
-     * 投递到工作线程注销设备（不阻塞调用方；队列满就放弃，按登记有效期自愈）。gate 记的账号为空也要注销：登录应答可能没送到 gate，
+     * 投递到工作线程更新设备登记（不阻塞调用方；队列满就放弃，按登记有效期自愈）。gate 记的账号为空也要注销：登录应答可能没送到 gate，
      * 而 login 已经登记了（按会话反查记下的账号）。
      */
-    private void leaveDeviceWindow(SessionContext session) {
+    private void onWorker(SessionContext session, Consumer<SessionContext> update) {
         try {
-            executor.execute(() -> accountLogin.leaveDeviceWindow(session));
+            executor.execute(() -> update.accept(session));
         } catch (RejectedExecutionException e) {
             log.warn("login 工作队列已满，设备数登记按有效期自愈 account={} session={}", session.getAccount(),
                     session.getSessionId());

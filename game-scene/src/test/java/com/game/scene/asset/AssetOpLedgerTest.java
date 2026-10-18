@@ -27,6 +27,41 @@ class AssetOpLedgerTest {
 
     private final AssetOpLedger ledger = AssetOpLedger.empty();
 
+    @Test
+    void 身份摘要保留整窗_ACK只清快照_预算按即将剪枝的状态计算() {
+        var digest = com.google.protobuf.ByteString.copyFrom(new byte[32]);
+        var snapshot = com.google.protobuf.ByteString.copyFrom(new byte[AssetOpLedger.MAX_SNAPSHOT_BYTES]);
+        for (long seq = 1; seq <= 4; seq++) {
+            var receipt = com.game.player.store.state.AssetOpReceiptState.newBuilder().setSeq(seq)
+                    .setCorrelationId(seq).setRequestDigest(digest).setSnapshotProto(snapshot).build();
+            assertThat(ledger.canKeepReceipt(STREAM, EPOCH, receipt)).isTrue();
+            record(seq, RecordKind.APPLIED);
+            ledger.keepReceipt(STREAM, EPOCH, receipt);
+        }
+        var extra = com.game.player.store.state.AssetOpReceiptState.newBuilder().setSeq(5)
+                .setCorrelationId(5).setRequestDigest(digest).setSnapshotProto(snapshot).build();
+        assertThat(ledger.canKeepReceipt(STREAM, EPOCH, extra)).isFalse();
+        assertThat(ledger.canKeepReceipt(STREAM, EPOCH, extra.toBuilder().setSeq(BITS + 1).build())).isTrue();
+        assertThat(ledger.canKeepReceipt(STREAM, EPOCH + 1, extra)).isTrue();
+        ledger.ackReceipt(STREAM, EPOCH, 1, 1);
+        assertThat(ledger.receipt(STREAM, EPOCH, 1).getSnapshotProto()).isEmpty();
+        assertThat(ledger.receipt(STREAM, EPOCH, 1).getRequestDigest()).isEqualTo(digest);
+        assertThat(ledger.canKeepReceipt(STREAM, EPOCH, extra)).isTrue();
+
+        var identityOnly = AssetOpLedger.empty();
+        for (int identityStream : com.game.player.store.asset.AssetLedgerRules.VALID_STREAMS) {
+            for (long seq = 1; seq <= BITS + 1; seq++) {
+                assertThat(identityOnly.record(identityStream, EPOCH, seq, RecordKind.REJECTED, 0)).isTrue();
+                identityOnly.keepReceipt(identityStream, EPOCH, extra.toBuilder().setSeq(seq).clearSnapshotProto().build());
+            }
+            assertThat(identityOnly.receipt(identityStream, EPOCH, 1)).isNull();
+            assertThat(identityOnly.classify(identityStream, EPOCH, 1)).isEqualTo(AssetSeqState.BEHIND_WINDOW);
+        }
+        assertThat(identityOnly.toState().getStreamsCount()).isEqualTo(5);
+        assertThat(identityOnly.toState().getStreamsList()).allSatisfy(stream -> assertThat(stream.getReceiptsCount()).isEqualTo(BITS));
+        assertThat(AssetOpLedger.restore(identityOnly.toState()).invalidReason()).isNull();
+    }
+
     private void record(long seq, RecordKind kind) {
         record(seq, kind, kind == RecordKind.REJECTED ? REASON : 0, EPOCH);
     }

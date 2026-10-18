@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
+import com.game.login.session.LoginDevices.Admission;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -72,14 +73,14 @@ class RedisLoginDevicesIntegrationTest {
 
     @Test
     void 窗口内三个放行_第四个拒绝且不登记_已登记的会话续期放行() {
-        assertThat(devices.admit(account, "g/1")).isTrue();
-        assertThat(devices.admit(account, "g/2")).isTrue();
-        assertThat(devices.admit(account, "g/3")).isTrue();
-        assertThat(devices.admit(account, "g/4")).isFalse();
+        assertThat(devices.admit(account, "g/1")).isEqualTo(Admission.ADMITTED);
+        assertThat(devices.admit(account, "g/2")).isEqualTo(Admission.ADMITTED);
+        assertThat(devices.admit(account, "g/3")).isEqualTo(Admission.ADMITTED);
+        assertThat(devices.admit(account, "g/4")).isEqualTo(Admission.FULL);
         assertThat(set().readAll()).containsExactlyInAnyOrder("g/1", "g/2", "g/3");
 
         now.set(now.get().plusSeconds(60));
-        assertThat(devices.admit(account, "g/1")).isTrue();
+        assertThat(devices.admit(account, "g/1")).isEqualTo(Admission.ADMITTED);
         assertThat(set().getScore("g/1")).isEqualTo((double) now.get().plus(TTL).toEpochMilli());
         assertThat(set().remainTimeToLive()).isBetween(TTL.toMillis() - 60_000, TTL.toMillis());
     }
@@ -91,7 +92,7 @@ class RedisLoginDevicesIntegrationTest {
         devices.admit(account, "g/3");
         devices.leave("g/2", account);
         devices.leave("g/9", account);
-        assertThat(devices.admit(account, "g/4")).isTrue();
+        assertThat(devices.admit(account, "g/4")).isEqualTo(Admission.ADMITTED);
     }
 
     @Test
@@ -100,9 +101,9 @@ class RedisLoginDevicesIntegrationTest {
         devices.admit(account, "g/2");
         now.set(now.get().plus(TTL).minusSeconds(1));
         devices.admit(account, "g/3");
-        assertThat(devices.admit(account, "g/4")).isFalse();
+        assertThat(devices.admit(account, "g/4")).isEqualTo(Admission.FULL);
         now.set(now.get().plusSeconds(2));
-        assertThat(devices.admit(account, "g/4")).as("g/1、g/2 已过期").isTrue();
+        assertThat(devices.admit(account, "g/4")).as("g/1、g/2 已过期").isEqualTo(Admission.ADMITTED);
         assertThat(set().readAll()).containsExactlyInAnyOrder("g/3", "g/4");
     }
 
@@ -132,5 +133,63 @@ class RedisLoginDevicesIntegrationTest {
         devices.admit(account, "g/2");
         devices.revoke(account, "g/1");
         assertThat(set().readAll()).containsExactly("g/2");
+    }
+
+    // ---------------------------------------------------------------- 关闭墓碑（迟到写，mmorpg client-request-ordering.md §6.1）
+
+    private org.redisson.api.RBucket<String> reverse(String sessionKey) {
+        return redis.getBucket(REDIS_KEYS.loginDeviceSession(sessionKey), StringCodec.INSTANCE);
+    }
+
+    @Test
+    void 会话结束按归属注销并留短期墓碑_迟到的续期与绑定都不写_离开窗口不清墓碑_别的会话不受影响() {
+        devices.admit(account, "g/1");
+        devices.bind(account, "g/1", "");
+
+        devices.close("g/1", "");
+
+        assertThat(set().contains("g/1")).as("按记下的归属注销").isFalse();
+        assertThat(reverse("g/1").get()).isEqualTo(RedisLoginDevices.CLOSED_MARKER);
+        assertThat(reverse("g/1").remainTimeToLive()).as("墓碑是短期的，不是登记的 30 分钟")
+                .isBetween(1L, LoginDevices.CLOSED_TOMBSTONE_TTL.toMillis());
+
+        assertThat(devices.admit(account, "g/1")).isEqualTo(Admission.CLOSED);
+        assertThat(devices.bind(account, "g/1", "")).isFalse();
+        devices.leave("g/1", account);
+        assertThat(devices.admit(account, "g/1")).as("迟到的进场应答走 leave，墓碑仍在").isEqualTo(Admission.CLOSED);
+        assertThat(set().contains("g/1")).isFalse();
+        assertThat(reverse("g/1").get()).isEqualTo(RedisLoginDevices.CLOSED_MARKER);
+        assertThat(reverse("g/1").remainTimeToLive()).as("续期脚本没有把墓碑续成登记的有效期")
+                .isLessThanOrEqualTo(LoginDevices.CLOSED_TOMBSTONE_TTL.toMillis());
+
+        assertThat(devices.admit(account, "g/9")).isEqualTo(Admission.ADMITTED);
+    }
+
+    @Test
+    void 登录在途时会话结束_结束时还不知道归属_迟到的绑定撤销本次登记且不记归属() {
+        // 新会话第一次登录：admit 之后、bind 之前 gate 注销了会话（gate 记的账号为空，反查键也还没写），close 找不到它计在哪个账号下。
+        assertThat(devices.admit(account, "g/2")).isEqualTo(Admission.ADMITTED);
+        devices.close("g/2", "");
+        assertThat(set().contains("g/2")).isTrue();
+
+        assertThat(devices.bind(account, "g/2", "")).isFalse();
+
+        assertThat(set().contains("g/2")).as("迟到的绑定撤销了这次登录的登记").isFalse();
+        assertThat(reverse("g/2").get()).isEqualTo(RedisLoginDevices.CLOSED_MARKER);
+    }
+
+    @Test
+    void 换号登录在途时会话结束_旧账号按gate给的账号注销_新账号的登记由迟到的绑定撤销() {
+        devices.admit(account, "g/9");
+        devices.bind(account, "g/9", "");
+        RScoredSortedSet<String> otherSet = redis.getScoredSortedSet(REDIS_KEYS.loginDevices(other), StringCodec.INSTANCE);
+        assertThat(devices.admit(other, "g/9")).isEqualTo(Admission.ADMITTED);
+
+        devices.close("g/9", account);
+        assertThat(set().contains("g/9")).isFalse();
+        assertThat(devices.bind(other, "g/9", account)).isFalse();
+
+        assertThat(otherSet.contains("g/9")).isFalse();
+        assertThat(reverse("g/9").get()).isEqualTo(RedisLoginDevices.CLOSED_MARKER);
     }
 }

@@ -87,7 +87,8 @@ class TradeAssetReceiptTest {
         var restored = AssetOpLedger.restore(player.persistedState().getAssetLedger());
         assertThat(restored.receipt(3, 1, 1).getSnapshotProto()).isEqualTo(first.getSnapshot().toByteString());
 
-        var credit = request(AssetStream.ASSET_STREAM_TRADE_CREDIT, 1, AssetBundle.newBuilder().addItemUuids(700).setPetId(800)
+        // 正式交易合同的信用腿清除了扣出选择字段，只携带由 scene 签出的完整原件。
+        var credit = request(AssetStream.ASSET_STREAM_TRADE_CREDIT, 1, AssetBundle.newBuilder()
                 .addAllItemInstances(replay.getSnapshot().getItemsList()).setPetInstance(replay.getSnapshot().getPet()).build());
         assertThat(call(AssetRpc.CREDIT, credit).getDurable()).isFalse();
         assertThat(player.bags().bag(BagType.INVENTORY).item(700)).isNotNull();
@@ -101,8 +102,16 @@ class TradeAssetReceiptTest {
         assertThat(call(AssetRpc.ACK_RECEIPT, debit).getDurable()).isFalse();
         saved();
         assertThat(call(AssetRpc.ACK_RECEIPT, debit).getDurable()).isTrue();
-        assertThat(player.assetLedger().receipt(3, 1, 1)).isNull();
+        var retained = player.assetLedger().receipt(3, 1, 1);
+        assertThat(retained.getSnapshotProto()).isEmpty();
+        assertThat(retained.getCorrelationId()).isEqualTo(debit.getCorrelationId());
+        assertThat(retained.getRequestDigest()).isEqualTo(AssetOpSignatures.requestDigest(debit));
         assertThat(player.assetLedger().classify(3, 1, 1)).isEqualTo(AssetSeqState.APPLIED);
+        assertThat(call(AssetRpc.DEBIT, debit).getDurable()).isTrue();
+        assertThat(call(AssetRpc.DEBIT, debit.toBuilder().setCorrelationId(999).build()).getOutcome())
+                .isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
+        assertThat(call(AssetRpc.ACK_RECEIPT, debit.toBuilder().setBundle(AssetBundle.getDefaultInstance()).build()).getOutcome())
+                .isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
     }
 
     @Test

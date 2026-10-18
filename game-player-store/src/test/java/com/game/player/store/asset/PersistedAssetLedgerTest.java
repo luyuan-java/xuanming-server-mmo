@@ -44,6 +44,22 @@ class PersistedAssetLedgerTest {
     }
 
     @Test
+    void 已应用和拒绝均须匹配窗口身份_旧位图不能冒充身份证明() {
+        var digest = com.google.protobuf.ByteString.copyFrom(new byte[32]);
+        var entry = com.game.player.store.state.AssetOpReceiptState.newBuilder().setSeq(2)
+                .setCorrelationId(99).setRequestDigest(digest);
+        var evidence = ledger(sample(GUILD_DEBIT).addReceipts(entry));
+        assertThat(evidence.invalidReason()).isNull();
+        assertThat(evidence.identityMatches(GUILD_DEBIT, EPOCH, 2, 99, digest)).isTrue();
+        assertThat(evidence.identityMatches(GUILD_DEBIT, EPOCH, 2, 100, digest)).isFalse();
+        assertThat(evidence.identityMatches(GUILD_DEBIT, EPOCH, 2, 99,
+                com.google.protobuf.ByteString.copyFromUtf8("x".repeat(32)))).isFalse();
+        assertThat(evidence.identityMatches(GUILD_DEBIT, EPOCH, 1, 99, digest)).isFalse();
+        assertThat(evidence.outcomeOf(GUILD_DEBIT, EPOCH, 1).conclusive()).isTrue();
+        assertThat(ledger(sample(GUILD_DEBIT).addReceipts(entry.setSnapshotProto(digest))).invalidReason()).isNotNull();
+    }
+
+    @Test
     void 已应用已拒绝是结论_部分发放与拒绝原因带出来() {
         PersistedAssetLedger l = ledger(sample(GUILD_DEBIT));
         assertThat(l.invalidReason()).isNull();

@@ -170,6 +170,41 @@ class AssetOpServiceTest {
     // ------------------------------------------------------------------ 扣款
 
     @Test
+    void 所有结局保留原请求身份_同序号更换载荷或关联号均UNKNOWN() {
+        start();
+        var applied = credit(1, gold(20));
+        assertThat(call(AssetRpc.CREDIT, applied).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        saveCompletes();
+        assertThat(call(AssetRpc.CREDIT, credit(1, gold(21))).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
+        assertThat(call(AssetRpc.CREDIT, credit(1, gold(20)).setCorrelationId(999)).getOutcome())
+                .isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
+        assertThat(call(AssetRpc.CREDIT, applied).getDurable()).isTrue();
+        assertThat(gold()).isEqualTo(20);
+
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_REJECTED);
+        saveCompletes();
+        assertThat(call(AssetRpc.DEBIT, debit(1, 10)).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
+        assertThat(call(AssetRpc.DEBIT, debit(1, 30)).getDurable()).isTrue();
+        assertThat(player.assetLedger().receipt(1, EPOCH, 1).getSnapshotProto()).isEmpty();
+    }
+
+    @Test
+    void 旧位图缺身份不能凭重投补写摘要_也不能重复应用() {
+        start();
+        assertThat(call(AssetRpc.CREDIT, credit(1, gold(20))).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        saveCompletes();
+        var state = WorldTestAccess.persistentState(player);
+        var legacy = state.toBuilder().setAssetLedger(state.getAssetLedger().toBuilder().setStreams(0,
+                state.getAssetLedger().getStreams(0).toBuilder().clearReceipts())).build();
+        start(2, legacy);
+        assertThat(player.assetLedger().invalidReason()).isNull();
+        assertThat(call(AssetRpc.CREDIT, credit(1, gold(20))).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
+        assertThat(gold()).isEqualTo(20);
+        assertThat(player.assetLedger().receipt(2, EPOCH, 1)).isNull();
+        assertThat(repo.pendingProgress()).isZero();
+    }
+
+    @Test
     void 扣款应用_落盘后重查报durable_不重扣() {
         start();
         currency.add(player, GOLD, 100, Reason.GM_GRANT);

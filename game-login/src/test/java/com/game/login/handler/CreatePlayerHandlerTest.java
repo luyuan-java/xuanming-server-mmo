@@ -92,7 +92,7 @@ class CreatePlayerHandlerTest {
         when(store.createPlayer(any())).thenReturn(CreateResult.CREATED);
         // 事务版建角按 PlayerStore 的语义用替身组合出来（锁与事务由 PlayerStoreTest / PlayerStoreSqlTest 覆盖）：
         // 数现有角色 → 满了回 PLAYER_FULL → 逐个候选名 createPlayer。
-        when(store.createPlayerWithinCap(any(), anyInt(), anyList())).thenAnswer(inv -> {
+        when(store.createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class))).thenAnswer(inv -> {
             PlayerRow row = inv.getArgument(0);
             int cap = inv.getArgument(1);
             List<String> names = inv.getArgument(2);
@@ -144,7 +144,7 @@ class CreatePlayerHandlerTest {
     /** 拒绝发生在发号之前：发号器没被调用、事务版建角没被调用、一行都没插、新建计数没动。 */
     private void assertNothingMintedOrInserted() {
         assertThat(events).doesNotContain("mint");
-        verify(store, never()).createPlayerWithinCap(any(), anyInt(), anyList());
+        verify(store, never()).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
         verify(store, never()).createPlayer(any());
         assertThat(playersCreated()).isZero();
     }
@@ -355,7 +355,7 @@ class CreatePlayerHandlerTest {
     void 上限由事务内的判定为准_预检通过但事务内已满回2001() throws Exception {
         // 另一个 login 实例在本次预检之后建了第 5 个：事务里锁账号行后重数，回 PLAYER_FULL。
         doReturn(new CreateOutcome(CreateStatus.PLAYER_FULL, List.of()))
-                .when(store).createPlayerWithinCap(any(), anyInt(), anyList());
+                .when(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
 
         assertError(create(CreatePlayerRequest.getDefaultInstance()),
                 LoginErrorTip.login_error.kLoginAccountPlayerFull_VALUE);
@@ -364,7 +364,7 @@ class CreatePlayerHandlerTest {
     @Test
     void 账号行不存在_fail_closed回2020() throws Exception {
         doReturn(new CreateOutcome(CreateStatus.ACCOUNT_MISSING, List.of()))
-                .when(store).createPlayerWithinCap(any(), anyInt(), anyList());
+                .when(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
 
         assertError(create(CreatePlayerRequest.newBuilder().setName("张三").build()),
                 LoginErrorTip.login_error.kLoginDataSerializeFailed_VALUE);
@@ -376,7 +376,7 @@ class CreatePlayerHandlerTest {
         create(CreatePlayerRequest.getDefaultInstance());
 
         ArgumentCaptor<Integer> cap = ArgumentCaptor.forClass(Integer.class);
-        verify(store, times(2)).createPlayerWithinCap(any(), cap.capture(), anyList());
+        verify(store, times(2)).createPlayerWithinCap(any(), cap.capture(), anyList(), any(Duration.class));
         assertThat(cap.getAllValues()).containsOnly(5);
         assertThat(candidates.get(0)).containsExactly("张三");
         assertThat(candidates.get(1)).hasSize(5).doesNotHaveDuplicates();
@@ -534,7 +534,7 @@ class CreatePlayerHandlerTest {
         assertThat(playersCreated()).isZero();
         // 对存储只有这三种调用：读列表、事务版建角一次、其中那一次被名字唯一键挡回的插入；没有任何改写已有行的调用。
         verify(store, atLeastOnce()).listPlayers(ACCOUNT);
-        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
         ArgumentCaptor<PlayerRow> attempted = ArgumentCaptor.forClass(PlayerRow.class);
         verify(store).createPlayer(attempted.capture());
         assertThat(attempted.getValue().getPlayerId()).isNotEqualTo(100L);
@@ -559,7 +559,7 @@ class CreatePlayerHandlerTest {
 
         // 放弃没有留下在途闸门：截止按每次 handle 重新算，预算充足的下一次照常建角。
         assertThat(create(CreatePlayerRequest.newBuilder().setName("张三").build()).hasErrorMessage()).isFalse();
-        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
         assertThat(playersCreated()).isEqualTo(1);
     }
 
@@ -576,7 +576,7 @@ class CreatePlayerHandlerTest {
         CreatePlayerResponse ok = response(handler.handle(SESSION, request, BUDGET.minusMillis(1).toNanos())
                 .get(5, TimeUnit.SECONDS));
         assertThat(ok.hasErrorMessage()).isFalse();
-        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
         assertThat(playersCreated()).isEqualTo(1);
     }
 
@@ -591,7 +591,40 @@ class CreatePlayerHandlerTest {
 
         assertThat(response.hasErrorMessage()).isFalse();
         assertThat(events).containsExactly("fence:" + ZONE, "mint");
-        verify(store).createPlayerWithinCap(any(), anyInt(), anyList());
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
         assertThat(playersCreated()).isEqualTo(1);
+    }
+
+    @Test
+    void 建角事务的时限是受理时刻起算的剩余预算_排队与快照读都扣掉() throws Exception {
+        when(store.listPlayers(ACCOUNT)).thenAnswer(inv -> {
+            nanos[0] += Duration.ofMillis(500).toNanos();
+            return List.of();
+        });
+        CreatePlayerRequest request = CreatePlayerRequest.newBuilder().setName("张三").build();
+
+        CreatePlayerResponse ok = response(handler.handle(SESSION, request, Duration.ofMillis(1000).toNanos())
+                .get(5, TimeUnit.SECONDS));
+
+        assertThat(ok.hasErrorMessage()).isFalse();
+        ArgumentCaptor<Duration> timeout = ArgumentCaptor.forClass(Duration.class);
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList(), timeout.capture());
+        assertThat(timeout.getValue()).isEqualTo(BUDGET.minusMillis(1500));
+    }
+
+    @Test
+    void 建角事务没赶在预算截止前完成_已回滚_回2020_不计新建() throws Exception {
+        // 截止在事务里到点（取连接、行锁等待、语句超时）：PlayerStore 回滚、不提交，这里与发号前的预算检查同口径回 2020。
+        doReturn(new CreateOutcome(CreateStatus.TIMED_OUT, List.of()))
+                .when(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
+
+        assertError(create(CreatePlayerRequest.newBuilder().setName("张三").build()), TIP_2020);
+
+        assertThat(events).as("号已发出（雪花号不复用，无害）").containsExactly("fence:" + ZONE, "mint");
+        assertThat(playersCreated()).isZero();
+        // 没有留下在途闸门：下一次照常进事务。
+        doReturn(new CreateOutcome(CreateStatus.CREATED, List.of()))
+                .when(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
+        assertThat(create(CreatePlayerRequest.newBuilder().setName("张三").build()).hasErrorMessage()).isFalse();
     }
 }

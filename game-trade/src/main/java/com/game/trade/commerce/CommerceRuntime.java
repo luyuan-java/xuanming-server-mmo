@@ -176,14 +176,15 @@ public final class CommerceRuntime implements AutoCloseable {
         }
         var proof = loaded.ledger();
         var outcome = proof.outcomeOf(op.getStream(), op.getStreamEpoch(), op.getSeq());
-        if (!outcome.conclusive()) {
+        if (!outcome.conclusive() || !proof.identityMatches(op.getStream(), op.getStreamEpoch(), op.getSeq(),
+                op.getOpId(), AssetOpSignatures.requestDigest(request))) {
             reschedule(op, backoff(op), budget);
             return;
         }
         var receipt = proof.receipt(op.getStream(), op.getStreamEpoch(), op.getSeq());
         if (op.getStream() == 3 && outcome.state() == AssetSeqState.APPLIED
             && (request.getBundle().getItemUuidsCount() > 0 || request.getBundle().getPetId() != 0)
-            && receipt == null) {
+            && (receipt == null || receipt.getSnapshotProto().isEmpty())) {
             reschedule(op, backoff(op), budget);
             return;
         }
@@ -208,13 +209,26 @@ public final class CommerceRuntime implements AutoCloseable {
                     + "until_"
                     + "ms=0,next_attempt_ms=?,updated_ms=? WHERE op_id=? AND status=1",
                 status, outcome.state() == AssetSeqState.APPLIED ? 1 : 2, outcome.rejectionReason(), snapshot,
-                receipt != null && status == 2, now, now, op.getOpId());
+                receipt != null && !receipt.getSnapshotProto().isEmpty() && status == 2, now, now, op.getOpId());
             return null;
         });
     }
     private void ack(TradeAssetOpRow op, Deadline budget) throws SQLException {
         try {
             var req = request(op);
+            var before = ledger.read(op.getPlayerId());
+            if (before instanceof PersistedAssetLedgerReader.Read.Loaded loaded
+                && loaded.ledger().classify(op.getStream(), op.getStreamEpoch(), op.getSeq()) == AssetSeqState.BEHIND_WINDOW
+                && op.getStatus() == 2 && op.getDurable() && !op.getEscrowSnapshot().isEmpty()) {
+                // 原业务已提交并持有完整快照；这里仅清理释放待办，不以滑出窗口证明任何新业务结局。
+                e.store.transaction(budget, c -> {
+                    CommerceStore.execute(c,
+                        "UPDATE trade_asset_op SET receipt_ack_pending=0 WHERE op_id=? AND status=2 AND durable=1",
+                        op.getOpId());
+                    return null;
+                });
+                return;
+            }
             Deadline call = Deadline.after(Math.min(1500, budget.remainingMillis() - 50));
             var answer = call.await(delivery.deliver(AssetRpc.ACK_RECEIPT, req, call), "交易收据释放");
             if (!answer.answered() || answer.response().getOutcome() != AssetOutcome.ASSET_OUTCOME_APPLIED)
@@ -222,7 +236,9 @@ public final class CommerceRuntime implements AutoCloseable {
             var read = ledger.read(op.getPlayerId());
             if (!(read instanceof PersistedAssetLedgerReader.Read.Loaded loaded)
                 || loaded.ledger().classify(op.getStream(), op.getStreamEpoch(), op.getSeq()) != AssetSeqState.APPLIED
-                || loaded.ledger().receipt(op.getStream(), op.getStreamEpoch(), op.getSeq()) != null)
+                || !loaded.ledger().identityMatches(op.getStream(), op.getStreamEpoch(), op.getSeq(), op.getOpId(),
+                    AssetOpSignatures.requestDigest(req))
+                || !loaded.ledger().receipt(op.getStream(), op.getStreamEpoch(), op.getSeq()).getSnapshotProto().isEmpty())
                 return;
             e.store.transaction(budget, c -> {
                 CommerceStore.execute(c,

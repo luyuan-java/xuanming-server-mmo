@@ -59,6 +59,7 @@ class AssetOpLoopTest {
     private final List<Long> budgets = Collections.synchronizedList(new ArrayList<>());
     private final ExecutorService workers = Executors.newFixedThreadPool(4);
     private volatile Read ledgerRead = new Read.Absent();
+    private final java.util.Map<Long, Read> ledgersByPlayer = new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicInteger ledgerReads = new AtomicInteger();
     private volatile double jitter = 0.5;
 
@@ -72,7 +73,7 @@ class AssetOpLoopTest {
                 Duration.ofMillis(2500), BASE_MS, MAX_BACKOFF, Duration.ofHours(1), 3);
         PersistedLedgerReader ledger = new PersistedLedgerReader(playerId -> {
             ledgerReads.incrementAndGet();
-            return ledgerRead;
+            return ledgersByPlayer.getOrDefault(playerId, ledgerRead);
         });
         return new AssetOpLoop(config, store, this::deliver, ledger, metrics, clock::get, workers, settle, new Random(7),
                 () -> jitter);
@@ -269,6 +270,12 @@ class AssetOpLoopTest {
     }
 
     private static Read ledgerWith(int stream, long epoch, long appliedSeq, long rejectedSeq, int reason, boolean partial) {
+        return ledgerWith(stream, epoch, appliedSeq, rejectedSeq, reason, partial, 11, 1);
+    }
+
+    /** 这些是循环调度的只读证明替身；实际到账由 scene 的独立真 TiDB 链测试验证。 */
+    private static Read ledgerWith(int stream, long epoch, long appliedSeq, long rejectedSeq, int reason, boolean partial,
+                                   long player, long correlation) {
         long[] seen = new long[16];
         long[] applied = new long[16];
         AssetOpStreamLedgerState.Builder s = AssetOpStreamLedgerState.newBuilder().setStream(stream).setWatermark(0)
@@ -290,6 +297,11 @@ class AssetOpLoopTest {
             s.addSeenBits(seen[i]);
             s.addAppliedBits(applied[i]);
         }
+        long seq = appliedSeq != 0 ? appliedSeq : rejectedSeq;
+        var request = com.game.api.proto.AssetOpRequest.newBuilder().setPlayerId(player).setStreamValue(stream)
+                .setStreamEpoch(epoch).setSeq(seq).setCorrelationId(correlation).setTxType(24).setBundle(GOLD).build();
+        s.addReceipts(com.game.player.store.state.AssetOpReceiptState.newBuilder().setSeq(seq).setCorrelationId(correlation)
+                .setRequestDigest(com.game.api.asset.AssetOpSignatures.requestDigest(request)));
         return new Read.Loaded(PersistedAssetLedger.restore(AssetOpLedgerState.newBuilder().addStreams(s).build()));
     }
 
@@ -315,7 +327,7 @@ class AssetOpLoopTest {
     @Test
     void 在线结局与SQL翻转不能终结() {
         reply(AssetOutcome.ASSET_OUTCOME_APPLIED,true,0);
-        ledgerRead=ledgerWith(1_700_000_000_000L,0,1,27000,false);
+        ledgerRead=ledgerWith(1,1_700_000_000_000L,0,1,27000,false,11,83);
         AssetOp op=claimOne(InMemoryAssetStore.pending(83,11,1,GOLD).build());
         assertThat(loop().processClaimed(op).finalized()).isFalse();
         assertThat(store.row(83).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING);
@@ -324,9 +336,22 @@ class AssetOpLoopTest {
     @Test
     void SQL已确认可早于在线durable且SQL的partial不会降格() {
         reply(AssetOutcome.ASSET_OUTCOME_APPLIED,false,0);
-        ledgerRead=ledgerWith(1_700_000_000_000L,1,0,0,true);
+        ledgerRead=ledgerWith(1,1_700_000_000_000L,1,0,0,true,11,84);
         AssetOp op=claimOne(InMemoryAssetStore.pending(84,11,1,GOLD).build());
         assertThat(loop().processClaimed(op).status()).isEqualTo(AssetOpStatus.APPLIED_PARTIAL);
+    }
+
+    @Test
+    void SQL位图没有摘要或摘要关联到另一操作时不能终结() {
+        var op = claimOne(InMemoryAssetStore.pending(91, 11, 1, GOLD).build());
+        reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, 0);
+        ledgerRead = ledgerWith(1, op.streamEpoch(), 1, 0, 0, false, 11, 999);
+        assertThat(loop().processClaimed(op).finalized()).isFalse();
+        var stream = AssetOpStreamLedgerState.newBuilder().setStream(1).setStreamEpoch(op.streamEpoch()).setMaxSeq(1);
+        for (int word = 0; word < 16; word++) stream.addSeenBits(word == 0 ? 1 : 0).addAppliedBits(word == 0 ? 1 : 0);
+        ledgerRead = new Read.Loaded(PersistedAssetLedger.restore(AssetOpLedgerState.newBuilder().addStreams(stream).build()));
+        assertThat(loop().processClaimed(op).finalized()).isFalse();
+        assertThat(store.row(91).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING);
     }
 
     @Test
@@ -355,7 +380,7 @@ class AssetOpLoopTest {
     @Test
     void 旧服务只带partial原因码也不得降为全量终结() {
         reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, AssetOpDecisions.REASON_PARTIAL_APPLIED);
-        ledgerRead = ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false);
+        ledgerRead = ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false, 11, 89);
         AssetOp op = claimOne(InMemoryAssetStore.pending(89, 11, 1, GOLD).setStream(2).build());
         assertThat(loop().processClaimed(op).status()).isEqualTo(AssetOpStatus.APPLIED_PARTIAL);
     }
@@ -367,7 +392,7 @@ class AssetOpLoopTest {
         assertThat(loop().processClaimed(op).finalized()).isFalse();
         assertThat(store.row(90).getLastReason()).isEqualTo(AssetOpDecisions.REASON_PARTIAL_APPLIED);
         clock.addAndGet(1000);
-        ledgerRead = ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false);
+        ledgerRead = ledgerWith(2, 1_700_000_000_000L, 1, 0, 0, false, 11, 90);
         deliveries.clear();
         reply(AssetOutcome.ASSET_OUTCOME_APPLIED, true, 0);
         AssetOp recovered = loop().claim(90).orElseThrow();
@@ -394,6 +419,7 @@ class AssetOpLoopTest {
 
         deliveries.clear();
         reply(Delivery.answered(AssetOpResult.localNotHere()));
+        ledgerRead = ledgerWith(1, 1_700_000_000_000L, 1, 0, 0, false, 11, 3);
         Processed p = loop().processClaimed(offlineOp(3, 1, 3));
         assertThat(ledgerReads).hasValue(1);
         assertThat(p.finalized()).isTrue();
@@ -410,7 +436,7 @@ class AssetOpLoopTest {
         assertThat(p.status()).isEqualTo(AssetOpStatus.REJECTED);
         assertThat(store.row(1).getReasonTipId()).isEqualTo(27000);
 
-        ledgerRead = ledgerWith(1_700_000_000_000L, 3, 0, 0, true);
+        ledgerRead = ledgerWith(1, 1_700_000_000_000L, 3, 0, 0, true, 11, 2);
         p = loop().processClaimed(offlineOp(2, 3, 4));
         assertThat(p.status()).isEqualTo(AssetOpStatus.APPLIED_PARTIAL);
     }
@@ -467,6 +493,7 @@ class AssetOpLoopTest {
         ledgerRead = ledgerWith(1_700_000_000_000L, 1, 0, 0, false);
         for (long id = 1; id <= 20; id++) {
             store.insert(InMemoryAssetStore.pending(id, 100 + id, 1, GOLD).build());
+            ledgersByPlayer.put(100 + id, ledgerWith(1, 1_700_000_000_000L, 1, 0, 0, false, 100 + id, id));
         }
         AtomicInteger inFlight = new AtomicInteger();
         AtomicInteger maxInFlight = new AtomicInteger();

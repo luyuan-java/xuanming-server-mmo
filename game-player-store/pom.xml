@@ -16,6 +16,11 @@
 
     <dependencies>
         <dependency>
+            <!-- 复用唯一的 TiDB 强读会话判据；本模块不复制数据库一致性策略。 -->
+            <groupId>com.game</groupId>
+            <artifactId>game-discovery</artifactId>
+        </dependency>
+        <dependency>
             <!-- 玩家状态载体 game.storage.PlayerState（Java 版自有存储格式） -->
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>

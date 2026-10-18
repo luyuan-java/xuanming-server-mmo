@@ -470,7 +470,9 @@ public final class MailStore {
     }
     /** 仓储再次按独立SQL账本分类；缺证据/窗外/旧纪元一律重排，不能凭在线durable终结。 */
     public void settle(Deadline d, Operation op, PersistedAssetLedger ledger) throws SQLException {
-        var proof = ledger == null ? null : ledger.outcomeOf(5, op.epoch, op.seq);
+        var proof = ledger == null || !ledger.identityMatches(5, op.epoch, op.seq, op.id,
+                com.game.api.asset.AssetOpSignatures.requestDigest(op.request()))
+                ? null : ledger.outcomeOf(5, op.epoch, op.seq);
         int outcome = proof == null || !proof.conclusive() ? 0 : proof.partial() ? 4 : proof.state() == AssetSeqState.APPLIED ? 1 : 2;
         int reason = proof == null ? 0 : proof.rejectionReason();
         long now = clock.getAsLong();

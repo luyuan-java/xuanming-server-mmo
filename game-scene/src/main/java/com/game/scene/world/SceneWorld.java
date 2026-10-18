@@ -1437,6 +1437,9 @@ public final class SceneWorld {
         player.setName(data.name());
         if (previous != null && previous.ownerEpoch() == epoch) {
             player.continueLocationSeq(previous.locationSeq());
+            // 顶号/同 epoch 进场会重建实例；旧快照的 SQL 仍在途，必须把唯一写槽交给新实例。
+            // 否则新实例可先提交更新账本，随后被旧快照在同一 epoch 内覆盖。
+            player.setProgressSaveInFlight(previous.progressSaveInFlight());
         }
         try {
             playerInitializer.initialize(player);
@@ -2798,6 +2801,12 @@ public final class SceneWorld {
     /** 在线存盘的结局（逻辑线程）。实例可能已经离场（离场不等在途的在线存盘），那就只清在途标记。 */
     private void onProgressSaved(ScenePlayer player, PlayerSave snapshot, ProgressResult result) {
         player.setProgressSaveInFlight(false);
+        ScenePlayer current = playersById.get(player.playerId());
+        if (current != null && current != player && current.ownerEpoch() == player.ownerEpoch()) {
+            // 写槽只在同一归属代内移交；旧 epoch 的回调不能改变新 owner 的持久化基准或在途状态。
+            player = current;
+            player.setProgressSaveInFlight(false);
+        }
         switch (result) {
             case SAVED -> {
                 player.markPersisted(snapshot);

@@ -1,6 +1,8 @@
 package com.game.player.store.asset;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.deadline.Deadline;
+import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 import com.game.player.store.state.PlayerState;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.math.BigInteger;
@@ -11,7 +13,6 @@ import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.time.Duration;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 
 /**
@@ -19,7 +20,7 @@ import javax.sql.DataSource;
  * {@code asset_op_ledger_logic.go:68-124}）：直读 {@code game.player_state} 里该玩家已提交的那份记录，解出 {@code asset_ledger}，
  * 交给 {@link PersistedAssetLedger} 分类。
  *
- * <p>为什么直读 MySQL：Java 的 durable 就是「player_state 带 owner_epoch 围栏写提交成功」（scene 判 durable 看的
+ * <p>为什么直读权威 SQL：Java 的 durable 就是「player_state 带 owner_epoch 围栏写提交成功」（scene 判 durable 看的
  * {@code persistedState} 是它的镜像，E7），没有基线那层「Redis blob 才是 durable、MySQL 可能更旧」的区别，不需要 data_service 式中转。
  *
  * <p>契约（同基线 {@code ledger_dataservice.go:17-24} 的映射）：
@@ -30,7 +31,7 @@ import javax.sql.DataSource;
  * </ul>
  * 不重试（下一次读本身就是重试，节律由调用方退避决定）。<b>阻塞 JDBC</b>：只在调用方的专用工作线程上调用，
  * 不得在 Netty I/O / 场景逻辑线程上调。单次上限缺省 300 ms（{@code svc/asset_op.go:53-56}）：Druid 连接池的取连接等待与
- * 连接的网络超时都按剩余预算设，另设 1 s 的服务端语句超时兜底（JDBC 语句超时只有秒级）。
+ * 连接的网络超时都按剩余预算设，强读会话核对与查询共享截止时刻，另设 1 s 的语句超时兜底（JDBC 语句超时只有秒级）。
  *
  * <p>本类不进 {@code PlayerStoreAutoConfiguration}：调用方（game-guild）用自己的数据源构造它，并排除那个自动装配（Q3a）。
  * 线程安全（无可变状态）。
@@ -68,6 +69,7 @@ public final class PersistedAssetLedgerReader {
 
     private final DataSource dataSource;
     private final long timeoutMillis;
+    private final boolean requireTiDb;
 
     public PersistedAssetLedgerReader(DataSource dataSource) {
         this(dataSource, DEFAULT_TIMEOUT);
@@ -77,11 +79,17 @@ public final class PersistedAssetLedgerReader {
      * @param timeout 单次读的上限（取连接 + 查询），至少 1 ms
      */
     public PersistedAssetLedgerReader(DataSource dataSource, Duration timeout) {
+        this(dataSource, timeout, true);
+    }
+
+    /** requireTiDb=false 仅供明确 dev/test 的兼容数据源；生产调用方沿用默认强读。 */
+    public PersistedAssetLedgerReader(DataSource dataSource, Duration timeout, boolean requireTiDb) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         if (timeout.isNegative() || timeout.toMillis() < 1) {
             throw new IllegalArgumentException("读已落盘账本的超时至少 1 ms: " + timeout);
         }
         this.timeoutMillis = timeout.toMillis();
+        this.requireTiDb = requireTiDb;
     }
 
     /** 读一名玩家已落盘的账本（阻塞，至多约一个超时）。从不抛异常。 */
@@ -89,22 +97,30 @@ public final class PersistedAssetLedgerReader {
         if (playerId == 0) {
             return new Read.Failed("player_id = 0", null);
         }
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        Deadline deadline = Deadline.after(timeoutMillis);
         byte[] data;
         boolean found;
         try (Connection connection = connect()) {
-            long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            long remaining = deadline.remainingMillis();
             if (remaining < 1) {
                 return new Read.Failed("取连接用完了预算 " + timeoutMillis + " ms", null);
             }
             int previousNetworkTimeout = boundNetworkTimeout(connection, (int) Math.min(remaining, Integer.MAX_VALUE));
-            try (PreparedStatement statement = connection.prepareStatement(SQL)) {
-                statement.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
-                statement.setObject(1, unsigned(playerId));
-                try (ResultSet rows = statement.executeQuery()) {
-                    found = rows.next();
-                    data = found ? rows.getBytes(1) : null;
+            try {
+                // 证明读取每次核对借出的物理会话；池内被改成 stale/snapshot 时拒绝出具终态证明。
+                if (requireTiDb) StrongTiDbConnectionPolicy.verify(connection, true, deadline);
+                remaining = deadline.remainingMillis();
+                if (remaining < 1) return new Read.Failed("强读会话核对用完了预算 " + timeoutMillis + " ms", null);
+                boundNetworkTimeout(connection, (int) Math.min(remaining, Integer.MAX_VALUE));
+                try (PreparedStatement statement = connection.prepareStatement(SQL)) {
+                    statement.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+                    statement.setObject(1, unsigned(playerId));
+                    try (ResultSet rows = statement.executeQuery()) {
+                        found = rows.next();
+                        data = found ? rows.getBytes(1) : null;
+                    }
                 }
+                if (deadline.expired()) return new Read.Failed("读 player_state 超过预算 " + timeoutMillis + " ms", null);
             } finally {
                 restoreNetworkTimeout(connection, previousNetworkTimeout);
             }

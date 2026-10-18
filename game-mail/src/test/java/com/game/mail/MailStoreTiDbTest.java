@@ -36,6 +36,8 @@ class MailStoreTiDbTest {
             Assumptions.assumeTrue(false, "未配置隔离TiDB");
         }
         database = "mail_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        // 单JVM跨模块执行时，DriverManager的首次服务发现可能来自上一个测试类加载器。
+        Class.forName("com.mysql.cj.jdbc.Driver");
         try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
             s.execute("CREATE DATABASE " + database);
         }
@@ -154,20 +156,27 @@ class MailStoreTiDbTest {
                         AssetOpResponse.newBuilder().setOutcome(AssetOutcome.ASSET_OUTCOME_APPLIED).setDurable(true).build())));
         new MailDeliveryWorker(store, delivery, new PersistedAssetLedgerReader(pool)).process(op);
         assertEquals(2, store.read(7, ReadMailRequest.newBuilder().setMailId(id).build(), budget()).getMail().getClaimStateValue());
-        long[] seq = jdbc.read(budget(),
-                s -> s.one("SELECT seq,stream_epoch FROM mail_asset_op WHERE op_id=?", r -> new long[] {r.getLong(1), r.getLong(2)}, op));
-        var stream = AssetOpStreamLedgerState.newBuilder().setStream(5).setStreamEpoch(seq[1]).setMaxSeq(seq[0]);
+        var operation = store.lease(budget(), op, System.currentTimeMillis() + 60_000, 92);
+        var stream = AssetOpStreamLedgerState.newBuilder().setStream(5).setStreamEpoch(operation.epoch()).setMaxSeq(operation.seq());
         for (int i = 0; i < 16; i++) {
-            long bit = i == (seq[0] - 1) / 64 ? 1L << ((seq[0] - 1) % 64) : 0;
+            long bit = i == (operation.seq() - 1) / 64 ? 1L << ((operation.seq() - 1) % 64) : 0;
             stream.addSeenBits(bit).addAppliedBits(bit);
         }
+        // 此用例只验证 SQL 证明判据；真实 scene 到账另见 AssetArrivalTiDbTest。
+        stream.addReceipts(AssetOpReceiptState.newBuilder().setSeq(operation.seq()).setCorrelationId(op)
+                .setRequestDigest(com.game.api.asset.AssetOpSignatures.requestDigest(operation.request())));
         var state = PlayerState.newBuilder().setAssetLedger(AssetOpLedgerState.newBuilder().addStreams(stream)).build();
         jdbc.tx(budget(), s -> {
             s.update("INSERT INTO player_state (player_id,data) VALUES (?,?)", 7, state.toByteArray());
             return null;
         });
         var restarted = new MailStore(jdbc, new AuthorityIds(jdbc, "mail_id_sequence"), value -> true, System::currentTimeMillis);
-        new MailDeliveryWorker(restarted, delivery, new PersistedAssetLedgerReader(pool)).process(op);
+        // 释放测试领取的令牌，仍用真实 settle 路径安排下一轮，不写业务成功终态。
+        store.settle(budget(), operation, null);
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).untilAsserted(() -> {
+            new MailDeliveryWorker(restarted, delivery, new PersistedAssetLedgerReader(pool)).process(op);
+            assertEquals(3, restarted.read(7, ReadMailRequest.newBuilder().setMailId(id).build(), budget()).getMail().getClaimStateValue());
+        });
         assertEquals(3, restarted.read(7, ReadMailRequest.newBuilder().setMailId(id).build(), budget()).getMail().getClaimStateValue());
         assertEquals(op, restarted.claim(7, id, budget()).getAssetOpId());
         assertEquals(1L, (long) jdbc.read(budget(), s -> s.count("SELECT COUNT(*) FROM mail_asset_op")));
@@ -199,6 +208,8 @@ class MailStoreTiDbTest {
             long bit = i == (op.seq() - 1) / 64 ? 1L << ((op.seq() - 1) % 64) : 0;
             stream.addSeenBits(bit).addAppliedBits(bit);
         }
+        stream.addReceipts(AssetOpReceiptState.newBuilder().setSeq(op.seq()).setCorrelationId(op.id())
+                .setRequestDigest(com.game.api.asset.AssetOpSignatures.requestDigest(op.request())));
         var data = PlayerState.newBuilder().setAssetLedger(AssetOpLedgerState.newBuilder().addStreams(stream)).build();
         jdbc.tx(budget(), s -> {
             s.update("INSERT INTO player_state (player_id,data) VALUES (?,?)", 7, data.toByteArray());

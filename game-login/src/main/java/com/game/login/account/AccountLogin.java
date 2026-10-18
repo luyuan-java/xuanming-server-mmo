@@ -27,7 +27,8 @@ import org.slf4j.LoggerFactory;
  *   <li><b>HTTP {@code /api/login}</b>（gateway 经 Dubbo，无会话）：认证 → 账号锁 → 取 / 建账号 → 签令牌 → 角色列表；
  *       不查设备数、不绑会话（之后客户端在 gate 上用 access token 再登录一次完成绑定）。</li>
  * </ul>
- * 失败码：认证失败 2000（不区分原因）、同一账号登录在途 2005、设备数超限 2024、设备登记出错 2023；取 / 建账号失败抛异常
+ * 失败码：认证失败 2000（不区分原因）、同一账号登录在途 2005、设备数超限 2024、设备登记出错 2023、会话已结束 2018
+ * （gate 注销会话之后才落到的迟到登录，回包送不到）；取 / 建账号失败抛异常
  * （调用方按调用失败处理）。签令牌失败不致命（基线同：登录照常成功、只是没有令牌）。access token 登录不签新令牌。
  * 阻塞（MySQL / Redis），只在 login 工作线程上调用；线程安全。
  */
@@ -123,14 +124,24 @@ public final class AccountLogin {
         }
     }
 
-    /** 设备数登记；返回拒绝码或 null。被拒时什么都不改（会话原来绑的账号的登记留着：gate 不改绑定）。 */
+    /**
+     * 设备数登记；返回拒绝码或 null。被拒时什么都不改（会话原来绑的账号的登记留着：gate 不改绑定）。
+     * 会话已结束（关闭墓碑，见 {@link LoginDevices#close}）回 2018 kLoginSessionIdNotFound：这是 gate 注销会话之后才落到的迟到调用，
+     * 回包送不到客户端，码只进日志与指标，复用「会话不存在」。
+     */
     private Integer admitDevice(String account, String deviceKey) {
         try {
-            if (!devices.admit(account, deviceKey)) {
-                log.info("账号设备数超限，拒绝 account={} session={}", account, deviceKey);
-                return LoginErrorTip.login_error.kTooManyDevices_VALUE;
-            }
-            return null;
+            return switch (devices.admit(account, deviceKey)) {
+                case ADMITTED -> null;
+                case FULL -> {
+                    log.info("账号设备数超限，拒绝 account={} session={}", account, deviceKey);
+                    yield LoginErrorTip.login_error.kTooManyDevices_VALUE;
+                }
+                case CLOSED -> {
+                    log.info("会话已结束（gate 已注销），迟到的调用不再登记设备 account={} session={}", account, deviceKey);
+                    yield LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE;
+                }
+            };
         } catch (RuntimeException e) {
             log.error("登记登录设备失败 account={} session={}: {}", account, deviceKey, e.toString());
             return LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE;
@@ -139,7 +150,7 @@ public final class AccountLogin {
 
     /**
      * 会话上的建角 / 进游戏之前续期设备登记（会话离开窗口后——进游戏失败回到大厅、离开游戏、登记过期——再在大厅里行动就重新计入）。
-     * 返回拒绝码（名单已满 2024、存储出错 2023）或 null。会话没绑账号时不做事（由调用方按 2028 处理）。
+     * 返回拒绝码（名单已满 2024、存储出错 2023、会话已结束 2018）或 null。会话没绑账号时不做事（由调用方按 2028 处理）。
      */
     public Integer renewDevice(SessionContext session) {
         String account = session.getAccount();
@@ -163,9 +174,26 @@ public final class AccountLogin {
         }
     }
 
+    /**
+     * 会话结束（gate 的 sessionClosed）：同 {@link #leaveDeviceWindow} 注销，并留关闭墓碑，挡住 gate 注销之后才落到的迟到登记
+     * （见 {@link LoginDevices#close}）。尽力而为（兜底是登记的有效期）。
+     */
+    public void closeDeviceSession(SessionContext session) {
+        String deviceKey = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
+        try {
+            devices.close(deviceKey, session.getAccount());
+        } catch (RuntimeException e) {
+            log.warn("会话结束时注销登录设备失败（按登记有效期自愈） account={} session={}: {}", session.getAccount(), deviceKey,
+                    e.toString());
+        }
+    }
+
     private void bindQuietly(String account, String deviceKey, String previous) {
         try {
-            devices.bind(account, deviceKey, previous);
+            if (!devices.bind(account, deviceKey, previous)) {
+                log.info("会话已结束（gate 已注销），不记设备归属、撤销本次登记；登录应答送不到 gate account={} session={}", account,
+                        deviceKey);
+            }
         } catch (RuntimeException e) {
             log.warn("记录设备归属失败（按登记有效期自愈） account={} session={}: {}", account, deviceKey, e.toString());
         }

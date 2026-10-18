@@ -138,20 +138,33 @@ public final class AssetOpLedger {
         return state == null || state.epoch != epoch ? null : state.receipts.get(seq);
     }
 
-    /** 先于任何资产副作用检查，满则等待交易库提交后的ACK腾出空间。 */
-    public boolean canKeepReceipt(AssetOpReceiptState receipt) {
+    /** 副作用前按本次滑窗/换纪元后的快照预算预检；身份摘要由每流1024窗口限制，不占托管快照额度。 */
+    public boolean canKeepReceipt(int stream, long epoch, AssetOpReceiptState receipt) {
         if (receipt.getSnapshotProto().size() > MAX_SNAPSHOT_BYTES) return false;
-        long bytes = receipt.getSerializedSize();
+        long bytes = receipt.getSnapshotProto().size();
         for (Stream state : streams.values()) {
-            for (var existing : state.receipts.values()) bytes += existing.getSerializedSize();
+            if (state.stream == stream && Long.compareUnsigned(epoch, state.epoch) > 0) continue;
+            long watermark = state.watermark;
+            if (state.stream == stream && Long.compareUnsigned(receipt.getSeq(), watermark + WINDOW_BITS) > 0) {
+                watermark = receipt.getSeq() - WINDOW_BITS;
+            }
+            for (var existing : state.receipts.values()) {
+                if (Long.compareUnsigned(existing.getSeq(), watermark) <= 0
+                        || state.stream == stream && existing.getSeq() == receipt.getSeq()) continue;
+                bytes += existing.getSnapshotProto().size();
+            }
         }
         return bytes <= MAX_RECEIPT_BYTES;
     }
 
     public void keepReceipt(int stream, long epoch, AssetOpReceiptState receipt) {
         Stream state = streams.get(stream);
-        if (state == null || state.epoch != epoch || classify(stream, epoch, receipt.getSeq()) != AssetSeqState.APPLIED
-                || !canKeepReceipt(receipt)) throw new IllegalStateException("实例回执记账前置被破坏");
+        AssetSeqState outcome = classify(stream, epoch, receipt.getSeq());
+        if (state == null || state.epoch != epoch
+                || outcome != AssetSeqState.APPLIED && outcome != AssetSeqState.REJECTED
+                || receipt.getRequestDigest().size() != 32
+                || !receipt.getSnapshotProto().isEmpty() && outcome != AssetSeqState.APPLIED
+                || !canKeepReceipt(stream, epoch, receipt)) throw new IllegalStateException("身份回执记账前置被破坏");
         state.receipts.put(receipt.getSeq(), receipt);
     }
 
@@ -160,7 +173,9 @@ public final class AssetOpLedger {
         Stream state = streams.get(stream);
         var receipt = receipt(stream, epoch, seq);
         if (receipt != null && receipt.getCorrelationId() != correlationId) throw new IllegalArgumentException("回执关联号不符");
-        if (state != null && state.epoch == epoch) state.receipts.remove(seq);
+        if (state != null && state.epoch == epoch && receipt != null) {
+            state.receipts.put(seq, receipt.toBuilder().clearSnapshotProto().build());
+        }
     }
 
     /** 窗口内某个被拒 seq 的原因；查不到（不在环里 / 被挤掉 / 中止占位 / 不是拒绝）回 0。 */

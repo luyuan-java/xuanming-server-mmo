@@ -1123,6 +1123,18 @@ Java 版放在 game-match 的 `com.game.match.spectate` 包，不新增进程、
 
 本阶段只归档来源，不启动 SQL 补发、销账或新的资产应用任务；旧 R07 仍是唯一应用来源，Redis 失败、分步骤应用失败、玩家 SQL 收据、归属切换与源快照版本屏障仍是后续缺口，未填写假 owner_epoch/save_seq。上线必须先使所有同组消费者支持来源归档，再启用发格式 1 的 battle；旧消费者会忽略新增字段并提交位点，不能把这种混跑当作已完成归档。后续回灌或切换消费组需要独立迁移和去重方案。
 
+**2026-10-17，重启后 Phase A 定向验收**：隔离副本从干净 `target` 执行 JDK 21、单线程 `clean install`，随后在同一份源码上补跑本机 TiDB 的随机库用例。完成来源 H2 11、真 TiDB 11、消费者 20、消费装配 20、Kafka 生产者 31、房间确认屏障 4，共 97 项实际通过，0 失败、错误或未运行；首轮未开启 TiDB 的报告另留，未计入最终通过数。969 份构建输入（原 968 份模块输入及根 pom）在主仓和隔离副本间 SHA256 全部相同，四个契约/战斗引擎/匹配/战斗 jar 与六类最终 XML 已封存于 `build/r07-source-20261016/java-r07-source-final-proof-20261017.json`。前批 4,282 项通过、313 项既有门控未运行的广测证据单列保留；其后仅 KafkaSink 延后旧发布口序列化的改动由本次定向回归覆盖，未宣称重跑广测。本轮 Java 验收仍不覆盖真实三 broker 完整战斗进程链、多区域故障、个人资产 SQL 收据或全球容量。
+
+#### 4.24.3 评分来源至奖励邮件的真实整链（2026-10-17）
+
+`game-rank` 的 `rank-mail-chain` 集成 profile 只在测试作用域依赖 `game-match`、`game-mail` 与 `game-guild` 的生产实现，专用测试源码位于 `src/test/rank-mail-chain`。普通构建仍使用 `src/test/java`；三个服务的主 jar 是带 `BOOT-INF` 的可执行包，因此集成命令固定为 `mvn -o -B -ntp -Prank-mail-chain -pl game-rank -am -Dtest=RankMailChainTiDbTest -Dsurefire.failIfNoSpecifiedTests=false clean test`，在 reactor 的 `classes` 上编译和运行，不把这些服务加进默认生产依赖。测试进程须显式设置 `MAIL_RANK_TEST_JDBC=jdbc:mysql://127.0.0.1:4000/` 与本机夹具专用 `GAME_DUBBO_SECRET`；缺失直接失败，不跳过。
+
+真实 TiDB 随机库通过原有表登记/迁移入口建表，`RatingStore` 的同一评分事务生成 `RatingRankOutbox`，经真实 Triple `RankProvider` 连续提交游标。用例核对重复评分不重复产出、源未停止或游标未齐不能封榜、停代后后续评分整笔回滚、重复投榜与封榜不增加奖励，再由实际 `RankRewardWorker` 调用 `MailProvider`。故障包装仅扣住第一次已成功提交邮件的回复；重建榜存储和工作器后，原 `reward_id`、附件、到期时间及正文摘要重投，只回原 `mail_id`。邮件通过真实 Triple `MailClientProvider` 和生产 `DomainClientDispatch` 的玩家列表入口可见，其他玩家不可见；传输 HMAC 与领域签名拒绝均实际验证。在线提醒使用明确离线的定位替身，不参与耐久证明。
+
+JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `clean test` 的 14 个 reactor 全部成功，整链 1/1 通过、0 失败/错误/跳过；另在未启用 profile 时运行默认 `clean verify`，9 个 reactor 成功、原榜 TiDB 用例 4/4 通过、0 跳过，确认普通打包没有服务测试依赖污染。2,324 份源码与 pom 输入在主仓和隔离副本间 SHA256 一致，报告及产物摘要见 `build/rank-mail-chain-20261017/java-rank-mail-chain-final-proof-20261017.json`。首轮 profile 依赖缺版本、首次夹具 protobuf 解析的受检异常编译失败均保留原日志，修正后才重跑，未修改生产逻辑或放宽门禁。
+
+本机 Triple 虽配置 `127.0.0.1`，Dubbo 3.3.6 实际监听日志是 `0.0.0.0` 的两个随机端口，客户端地址也被框架改为本机网卡地址；不能把本次证据称为严格回环监听或跨主机进程验收。服务没有注册到外部 registry，测试结束关闭引用、服务及模型，独立探针确认自身随机库和两个端口均无残留。验收到邮件持久可见为止，`mail_asset_op` 仍为零；附件领取、scene 实际资产到账、归属切换、跨区域故障与全球容量均不由本用例替代。
+
 ## 5. 线程模型
 
 - **gate**：Netty I/O 线程处理编解码与会话；同一会话的消息按到达顺序转发（会话绑定到 channel 的 EventLoop）。
@@ -2133,6 +2145,26 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | match | `game_match_observer_rpc_total` | Counter | `method`=add / remove，`result`=replied / dead / not_delivered / unknown | 发给 battle 的观众 RPC（`addObserver` / `removeObserver`）的结局，每次调用一个，异步的自我清退记在 remove：replied = 调通了（含 battle 的业务拒绝）；dead = 判死的三条证据都成立；not_delivered = 请求确定没送达但判不了死（含硬截止已到、超时 ≤ 0 时不发调用）；unknown = 超时、连上之后断开、对端回了传输层错误 |
 | match | `game_match_watchable_battles`、`game_match_spectate_inflight` | Gauge | — | 可观战索引的成员数（清扫每轮采样一次 ZCARD，含已结束不足 360 s 的场次；第一轮在一个间隔之后，所以启动后头 10 s 读数为 0，采样失败时停在上一次的读数。**每个实例各自采样同一把全服 ZSET，多实例时看板与告警取 max、不能求和**）；在途的 163 数（上限 `spectate.max-inflight`；每实例的真实值，求和才有意义） |
 | match | `executor_*{name="match-worker"}`、`{name="match-db"}`、`{name="match-push"}` | Micrometer 标准线程池指标 | — | 请求工作池（队列满见 `game_match_requests_seconds{result="overloaded"}`）/ 读评分的池 / 推送回调执行器 |
+
+### 2026-10-17 附件与交易实际到账、SQL 证明及归属围栏续批
+
+本批保持 `PlayerStore` 的玩家行围栏与 `player_state` 资产、位图及托管回执为唯一 SQL 提交点，不建立第二条资产应用源，也不把存档内账本称为永久独立收据表。玩家写库与独立账本读取复用 `StrongTiDbConnectionPolicy`：生产必须使用 TiDB strict/leader 强读，每条物理连接安装策略，借出的证明连接再次复核；旧 MySQL 只允许明确 dev/test。
+
+`PlayerSqlAuthorityAutoConfiguration` 独立于 Mapper 自动装配，`game-data` 手动创建 `PlayerStore`、邮件/交易/帮会排除原 Mapper 自动配置时仍经过同一连接策略。`game.player-store.require-tidb` 默认 `true`，明确 `game.run-mode=dev/test` 才允许关闭；现有本地 YAML 的旧 `3306` URL 必须由部署显式切到同一 TiDB 权威库，否则启动拒绝，不能把旧 MySQL 仍可连接当作全球强一致已切换。连接获取、强读会话两次核对、最终数据查询共享单调截止时刻，超预算不得出具终态证明。
+
+验收使用真实 `SceneWorld`、`AssetOpService`、异步 `StoragePlayerRepository` 与 Spring 事务 `PlayerStore`，由实际邮件、交易工作器投递并读取 SQL 后推进终态，禁止注入资产位图或业务成功状态。覆盖提交后回复丢失、换主后旧 epoch 拒写、原操作重投、同 epoch 重建实例继承在途存盘的并发顺序。仅注入配置、号源、传输故障与调度，不伪造到账；真实跨区网络和容量另验。本批不修改客户端可见契约。
+
+实现补齐两个实际接缝：同 epoch 重建玩家实例时承接旧实例的唯一在途写槽，旧回调只更新同 epoch 当前实例的持久化基准，失败后按最新脏状态重写；交易信用腿以完整原实例里的 GUID 为身份，兼容旧选择字段的交叉校验，不能要求正式 `transfer` 已清除的扣出选择字段。宝宝重复检测也按完整实例的 GUID 进行。
+
+2026-10-17 的隔离输入 `build/asset-arrival-20261017/source-inputs-tidb-04.json`（SHA256 `901B54E48EB47EB296C0CF1AC31B7D0147D829E5F006835180A6C71793CEDF0C`，2371 文件事后复核无漂移），在 JDK 21.0.12.1、真实 TiDB 8.0.11-TiDB-v8.5.2 上执行 `mvn -o -B -ntp -T1 -Passet-arrival-chain -pl game-scene -am -Dtest=AssetArrivalTiDbTest -Dsurefire.failIfNoSpecifiedTests=false -DforkCount=0 test`：4 例、0 失败/错误/跳过，4 个随机库均正常清理，复查残留 0。邮件实际增加 500 货币与 2 个道具；寄售保留原 GUID/未知扩展字段并完成买卖双侧到账，SQL 后丢回复、换主和业务对象重建不重复应用；延迟真实存储任务验证同 epoch 重建期间新增 20 资产最终与先前 10 同存，余额 130；follower 会话不得出具证明。证据见 `evidence-tidb-04/summary.json`、JUnit XML 与清理记录。因本机资源限制使用同 JVM 运行，**不称作进程重启测试**；网络入口/定位使用测试端口，未覆盖真实 Dubbo、Redis 目录和跨区域网络。
+
+身份补批 B 沿用现有 `AssetOpReceiptState` 字段，不变更 proto 或建立新表：所有流的应用、拒绝及中止占位与资产/位图同存请求摘要和关联号；ACK 只清 `snapshot_proto`，保留摘要，空快照明确表示仅身份。1024 窗口内摘要与位图一起剪枝，新纪元一起重置；滑出窗口仍是 UNKNOWN，不能称为全历史永久收据。快照总预算独立于有界摘要，副作用前按本次滑窗/换纪元后的预期状态核对，避免满额时阻止可释放旧条目的操作。
+
+Java 内部请求指纹继续使用去除整个 `auth` 后确定性 protobuf 的 SHA-256，应用和中止沿用同一指纹，重签时间不影响身份；流的调用方白名单在查账之前校验（guild=1/2，trade=3/4，mail=5）。两版内部格式及数据库不混用，不拿 Java 指纹对拍 Go/C++ 规范串。在线重投、邮件/交易/帮会的 SQL 终结、交易 ACK 均须匹配原 digest/correlation。旧存档中缺摘要的已见 seq 保留原位图，只对该操作返回 UNKNOWN/待核对，禁止根据来包回填身份或重新应用；上线前应排空旧未决，无法排空的存量按原业务记录受控核对，不能用关闭验证继续结算。旧版本 ACK 会删除摘要，混部窗口须先升级读取与结算方并暂停发起/释放，再统一切 scene；旧写者退出后恢复，回滚也须先停新操作并核对未决，不能假定旧实例保留新语义。
+
+B 补批隔离输入 `source-inputs-tidb-B-02.json`（SHA256 `BE8B9E8931204A3FBF0DA50579AF4381CD47A5A13D4D7C89C429C2607609A49E`）的 2371 文件与源码、快照两侧事后核对均无漂移。默认构建 `default-B-04.log` 的 16 模块 `verify` 成功，实际执行 13 套、255 例，0 失败/错误、4 个既有 H2 条件分支跳过；旧 A 的 4 例 XML 已从默认统计剔除并保留于明确的过期报告目录。普通 scene JAR 未混入集成测试和邮件/交易模块依赖。默认回归覆盖五流各 1025 条纯身份的窗口滑动、摘要/关联号冲突、legacy 未决、ACK 释放快照及同 epoch 旧回调成功/失败和不同 epoch 隔离。
+
+最终真实库命令 `mvn -o -B -ntp -T1 -Passet-arrival-chain -pl game-scene,game-guild -am -Dtest=AssetArrivalTiDbTest,MailStoreTiDbTest,AssetOpSqlProofTiDbTest -Dsurefire.failIfNoSpecifiedTests=false -DforkCount=0 test` 在同一 TiDB 8.5.2 上 16 模块成功：4 个 scene 实际到账场景、10 个既有 SQL 证明与 Redis 通知用例，共 14 例、0 失败/错误/跳过。Redis 使用本机已有 16379 端口及随机测试命名空间，所有随机 SQL 库事后残留 0，未清空共享 Redis。首轮驱动发现与缺少 Redis 地址的夹具失败日志保留，显式加载既有 JDBC 驱动并指定现有 Redis 后完整重跑，未跳过断言。证据在 `build/asset-arrival-20261017/evidence-tidb-B-02/`；该同 JVM 验证不代表完整进程重启、真实跨区域网络或两千万在线容量已验证。
 
 未覆盖（后续）：Druid 连接池指标（Spring Boot 只认 Hikari / DBCP2 / Tomcat 等连接池的元数据）；
 Dubbo 与 Redisson 自带指标未接入；scene 的进场加载（成功 / 失败 / 耗时）未单独计，进场失败目前只有 WARN 日志。

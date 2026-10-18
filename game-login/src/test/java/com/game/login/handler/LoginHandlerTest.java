@@ -282,4 +282,61 @@ class LoginHandlerTest {
                 .isInstanceOf(IllegalStateException.class);
         assertThat(devices.of("robot_0001")).isEmpty();
     }
+
+    // ------------------------------------------------------------------ 关闭墓碑：gate 注销会话之后才落到的迟到调用
+
+    private static String deviceKey(int sessionId) {
+        return "gate-a/" + ((1 << 17) | sessionId);
+    }
+
+    @Test
+    void 会话结束之后迟到的登录_回2018_不登记不绑定不碰存储() throws Exception {
+        devices.close(deviceKey(1), "");
+
+        HandlerReply late = handler.handle(session(1), passwordLogin("robot_0001")).join();
+
+        assertThat(response(late).getErrorMessage().getId())
+                .isEqualTo(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE);
+        assertThat(late.directives()).isEmpty();
+        assertThat(devices.of("robot_0001")).isEmpty();
+        assertThat(devices.boundTo).doesNotContainKey(deviceKey(1));
+        verify(store, never()).ensureAccount(anyString());
+    }
+
+    @Test
+    void 登录在途时会话结束_迟到的绑定不记归属_撤销本次登记_名额不被占() throws Exception {
+        // admit 之后、bind 之前 gate 注销了会话（这是新会话的第一次登录：gate 记的账号为空，close 不知道它计在哪个账号下）。
+        when(store.listPlayers("robot_0001")).thenAnswer(inv -> {
+            devices.close(deviceKey(1), "");
+            return List.of();
+        });
+
+        handler.handle(session(1), passwordLogin("robot_0001")).join();
+
+        assertThat(devices.of("robot_0001")).isEmpty();
+        assertThat(devices.boundTo).doesNotContainKey(deviceKey(1));
+        when(store.listPlayers("robot_0001")).thenReturn(List.of());
+        for (int s = 2; s <= 4; s++) {
+            assertThat(response(handler.handle(session(s), passwordLogin("robot_0001")).join()).hasErrorMessage())
+                    .as("已关闭的会话不占名额").isFalse();
+        }
+    }
+
+    @Test
+    void 会话结束之后迟到的建角或进游戏续期_回2018_不登记_离开窗口的注销不留墓碑() {
+        AccountLogin flow = new AccountLogin(LoginAuthenticator.passwordDisabled(tokens), store, tokens, devices);
+        SessionContext bound = session(1).toBuilder().setAccount("robot_0001").build();
+        assertThat(flow.renewDevice(bound)).isNull();
+
+        flow.leaveDeviceWindow(bound);
+        assertThat(flow.renewDevice(bound)).as("进场指令的注销之后回到大厅：照常重新计入").isNull();
+
+        flow.closeDeviceSession(bound);
+        assertThat(devices.of("robot_0001")).isEmpty();
+        assertThat(flow.renewDevice(bound)).isEqualTo(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE);
+        assertThat(devices.of("robot_0001")).isEmpty();
+
+        devices.broken = true;
+        flow.closeDeviceSession(bound);   // 存储故障只记日志（按登记有效期自愈），不抛
+    }
 }
