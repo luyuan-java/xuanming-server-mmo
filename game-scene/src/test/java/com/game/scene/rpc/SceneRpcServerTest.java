@@ -5,6 +5,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.DubboGroups;
 import com.game.api.SceneBattleService;
+import com.game.api.SceneInboxService;
+import com.game.api.proto.SceneInboxNotify;
+import com.game.api.proto.SceneInboxNotifyStatus;
+import com.game.scene.inbox.InboxConsumers;
+import com.game.scene.inbox.InboxService;
+import com.game.scene.inbox.InboxTransport;
+import com.game.scene.inbox.SceneInboxProvider;
+import com.game.proto.player_inbox.*;
 import com.game.api.asset.AssetOpSignatures;
 import com.game.api.asset.AssetRpc;
 import com.game.api.asset.IsolatedDubboModule;
@@ -334,6 +342,35 @@ class SceneRpcServerTest {
         assertThatThrownBy(() -> assetAfter.get(10, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class);
         try (ServerSocket rebound = new ServerSocket(port)) {
             assertThat(rebound.isBound()).as("端口已释放").isTrue();
+        }
+    }
+
+    @Test
+    void 生产同端口第三服务_提醒按实例围栏且只入逻辑队列_不代表持久确认() throws Exception {
+        InboxTransport noCalls = new InboxTransport() {
+            @Override public void fetch(FetchPlayerInboxRequest request,
+                    java.util.function.BiConsumer<FetchPlayerInboxResponse, Throwable> done) { throw new AssertionError("提醒不得同步拉取"); }
+            @Override public void ack(AckPlayerInboxRequest request,
+                    java.util.function.BiConsumer<AckPlayerInboxResponse, Throwable> done) { throw new AssertionError("提醒不得冒持久确认"); }
+        };
+        var inbox = new InboxService(InboxConsumers.gmSanction(f.currency), noCalls, f.clock,
+                new InboxService.Settings(true, 30), () -> BattleFixture.LOCAL_NODE, () -> 500);
+        inbox.attach(f.world);
+        var provider = new SceneInboxProvider(() -> inbox, BattleFixture.SCENE_INSTANCE, logicQueue::add);
+        server = SceneRpcServer.export(assetProvider(), newBattleProvider(8), provider, "127.0.0.1", port);
+        assertThat(server.exportedUrls()).hasSize(3).anySatisfy(url -> assertThat(url)
+                .contains("/com.game.api.SceneInboxService").contains("group=scene-inbox").contains("register=false"));
+        try (var clients = new NodeRpcClients<>("game-scene-test-inbox-caller", SceneInboxService.class, DubboGroups.SCENE_INBOX,
+                TIMEOUT, "test-scene-inbox-connect")) {
+            var stale = clients.call(target(), TIMEOUT, service -> service.notifyInbox(SceneInboxNotify.newBuilder()
+                    .setTargetInstanceId("old-instance").setPlayerId(PLAYER).setDomain(1).build())).get(10, TimeUnit.SECONDS);
+            assertThat(stale.getStatus()).isEqualTo(SceneInboxNotifyStatus.SCENE_INBOX_NOTIFY_NOT_HERE);
+            assertThat(logicQueue).isEmpty();
+            var accepted = clients.call(target(), TIMEOUT, service -> service.notifyInbox(SceneInboxNotify.newBuilder()
+                    .setTargetInstanceId(BattleFixture.SCENE_INSTANCE).setPlayerId(PLAYER).setDomain(1).build())).get(10, TimeUnit.SECONDS);
+            assertThat(accepted.getStatus()).isEqualTo(SceneInboxNotifyStatus.SCENE_INBOX_NOTIFY_ACCEPTED);
+            assertThat(logicQueue).hasSize(1);
+            logicQueue.remove().run(); // 玩家不在场也只丢提醒，不创造业务/存盘成功。
         }
     }
 

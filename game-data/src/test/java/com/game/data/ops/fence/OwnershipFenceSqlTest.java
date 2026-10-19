@@ -82,6 +82,24 @@ class OwnershipFenceSqlTest {
     }
 
     @Test
+    void 运维取得归属必须先完成已登记最终快照_不从旧SQL绕过待办() {
+        player(5,false,System.currentTimeMillis()+60_000);
+        PlayerRow frozen=new PlayerRow();frozen.setPlayerId(P);frozen.setOwnerEpoch(5);
+        frozen.setLevel(7);frozen.setSceneConfigId(1001);frozen.setPosX(123);
+        PlayerState state=PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(321)).build();
+        assertThat(store.registerFinalSave(frozen,state.toByteArray(),"scene-final",Duration.ofSeconds(2)).status())
+                .isEqualTo(PlayerStore.FinalSaveStatus.ACCEPTED);
+        assertThat(ownership.claim(P,false,Duration.ofSeconds(2),OwnershipFenceSqlTest::noPause))
+                .isEqualTo(new Claim.Claimed(6,false));
+        assertThat(store.loadState(P)).isEqualTo(state);
+        assertThat(store.probeFinalSave(P,5,Duration.ofSeconds(2)).status()).isEqualTo(PlayerStore.FinalSaveStatus.APPLIED);
+        boolean staleWriteAccepted = db.tx().execute(status->store.saveStateHeld(frozen,PlayerState.getDefaultInstance()));
+        assertThat(staleWriteAccepted).isFalse();
+        assertThat(owner().ownerEpoch()).isEqualTo(6);
+        ownership.releaseAll();
+    }
+
+    @Test
     void 持有中且租约有效_reject_Online_零变化_已释放_夺到_租约过期_夺到且旧写者被拒() {
         player(5, false, System.currentTimeMillis() + 60_000);
         assertThat(ownership.claim(P, false, Duration.ofSeconds(1), OwnershipFenceSqlTest::noPause))

@@ -59,15 +59,20 @@ class CurrencyFeatureTest {
     private Scene scene;
 
     private void start(RunMode mode, PlayerState state) {
+        start(mode, state, 1);
+    }
+
+    // 最终退出封闭旧代；重进场夹具显式提供独立夺权所得的新代。
+    private void start(RunMode mode, PlayerState state, long ownerEpoch) {
         FakeSceneTables tables = new FakeSceneTables();
         AtomicLong ids = new AtomicLong(5000);
         world = new SceneWorld(tables, Contracts.IDS, sink, repo, ids::incrementAndGet, new ManualClock(), SceneMetrics.noop());
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, mode,
                 List.of(new CurrencyFeature(new CurrencyService(audit))));
         scene = world.createScene(1);
-        repo.put(new PlayerData(PLAYER, 1, 3, 1, "", 1, 0, Vec3.ORIGIN, state));
+        repo.put(new PlayerData(PLAYER, ownerEpoch, 3, 1, "", 1, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
-                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(1).build());
+                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(ownerEpoch).build());
         repo.completeAll();
         sink.clear();
     }
@@ -176,7 +181,7 @@ class CurrencyFeatureTest {
         assertThat(saved.getBlockedTypesList()).containsExactly(Wallet.GOLD);
 
         sink.clear();
-        start(RunMode.DEV, save.state());
+        start(RunMode.DEV, save.state(), save.ownerEpoch() + 1);
         assertThat(balances()).containsExactly(0L, 0L, 7L);
     }
 

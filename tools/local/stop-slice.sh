@@ -35,7 +35,7 @@ stop_one() {
 }
 
 # 下面这一行的名单与次序由 game-gate 的 LocalSliceOrderTest 逐项钉着（= start-slice.sh 的 SERVICES），区 2 的实例不写进去，在循环体里带上
-for name in game-match game-battle game-gateway game-gate game-scene-2 game-scene game-data game-rank game-mail game-trade game-guild game-team game-chat game-friend game-login game-scene-manager; do
+for name in game-match game-battle game-gateway game-gate game-scene-2 game-scene game-inbox game-data game-rank game-mail game-trade game-guild game-team game-chat game-friend game-login game-scene-manager; do
   case "$name" in
     game-gate) stop_one game-gate-z2 ;;
     game-scene-2) stop_one game-scene-z2 ;;

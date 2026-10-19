@@ -254,6 +254,204 @@ public class PlayerStore {
         return new CreateOutcome(CreateStatus.NAME_TAKEN, existing);
     }
 
+
+    /** SQL 持久接管和最终应用是两种不同结局；ACCEPTED 不能代替资产 durable。 */
+    public enum FinalSaveStatus { ACCEPTED, APPLIED, FENCED, CONFLICT, TIMED_OUT, NOT_FOUND }
+    public record FinalSaveReceipt(FinalSaveStatus status,long playerId,long ownerEpoch,long saveSeq,
+                                   String sourceInstance,String payloadDigest) { }
+    public record FinalSaveKey(long playerId,long ownerEpoch) { }
+    public record SceneLoad(PlayerRow row,PlayerState state) { }
+    /** 仅 SQL 行适配，玩法仍使用原 PlayerState 字节；OPEN 不含最终快照。 */
+    public record FinalSaveRow(long playerId,long ownerEpoch,long saveSeq,int protocolVersion,String sourceInstance,
+                               String status,Long level,Long sceneConfigId,Double posX,Double posY,Double posZ,
+                               byte[] data,byte[] payloadDigest) {
+        public FinalSaveRow { data=data==null?null:data.clone();payloadDigest=payloadDigest==null?null:payloadDigest.clone(); }
+        @Override public byte[] data(){return data==null?null:data.clone();}
+        @Override public byte[] payloadDigest(){return payloadDigest==null?null:payloadDigest.clone();}
+    }
+    private static final int FINAL_SAVE_MAX_BYTES=16_777_215;
+
+    private static void requireSource(String source) {
+        if(source==null || !source.matches("[A-Za-z0-9_-]{1,64}")) throw new IllegalArgumentException("非法scene实例标识");
+    }
+    private static PlayerRow finalScalars(PlayerRow row) {
+        if(row==null || row.getPlayerId()==0 || row.getOwnerEpoch()<=0 || row.getOwnerEpoch()==Long.MAX_VALUE || row.getLevel()<0
+                || row.getLevel()>0xffff_ffffL || !Double.isFinite(row.getPosX())
+                || !Double.isFinite(row.getPosY()) || !Double.isFinite(row.getPosZ())) {
+            throw new IllegalArgumentException("非法最终玩家快照");
+        }
+        PlayerRow copy=new PlayerRow();copy.setPlayerId(row.getPlayerId());copy.setOwnerEpoch(row.getOwnerEpoch());
+        copy.setLevel(row.getLevel());copy.setSceneConfigId(row.getSceneConfigId());copy.setPosX(row.getPosX());
+        copy.setPosY(row.getPosY());copy.setPosZ(row.getPosZ());return copy;
+    }
+    /** 内容摘要不包括传输来源；source_instance 单独不可变等值认重，不允许恢复者改绑。 */
+    public static byte[] finalSaveDigest(PlayerRow row,byte[] bytes) {
+        PlayerRow snapshot=finalScalars(row);
+        if(bytes==null || bytes.length>FINAL_SAVE_MAX_BYTES) throw new IllegalArgumentException("最终玩法快照超界");
+        try {
+            var digest=java.security.MessageDigest.getInstance("SHA-256");
+            digest.update("game-final-save/v1\0".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            digest.update(java.nio.ByteBuffer.allocate(9*Long.BYTES).putLong(snapshot.getPlayerId())
+                    .putLong(snapshot.getOwnerEpoch()).putLong(1).putLong(snapshot.getLevel())
+                    .putLong(Integer.toUnsignedLong(snapshot.getSceneConfigId()))
+                    .putLong(Double.doubleToRawLongBits(snapshot.getPosX()))
+                    .putLong(Double.doubleToRawLongBits(snapshot.getPosY()))
+                    .putLong(Double.doubleToRawLongBits(snapshot.getPosZ())).putLong(bytes.length).array());
+            return digest.digest(bytes);
+        } catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
+    }
+    private static FinalSaveReceipt receipt(FinalSaveStatus status,long player,long epoch,String source,byte[] digest) {
+        return new FinalSaveReceipt(status,player,epoch,1,source,
+                digest==null?"":java.util.HexFormat.of().formatHex(digest));
+    }
+    private static FinalSaveReceipt receipt(FinalSaveStatus status,FinalSaveRow row) {
+        return receipt(status,row.playerId(),row.ownerEpoch(),row.sourceInstance(),row.payloadDigest());
+    }
+    private static PlayerRow snapshotOf(FinalSaveRow row) {
+        if(row.protocolVersion()!=1 || row.saveSeq()!=1 || row.level()==null || row.sceneConfigId()==null
+                || row.sceneConfigId()<0 || row.sceneConfigId()>0xffff_ffffL || row.posX()==null
+                || row.posY()==null || row.posZ()==null) throw new IllegalArgumentException("最终SQL快照元数据损坏");
+        PlayerRow snapshot=new PlayerRow();snapshot.setPlayerId(row.playerId());snapshot.setOwnerEpoch(row.ownerEpoch());
+        snapshot.setLevel(row.level());snapshot.setSceneConfigId((int)(long)row.sceneConfigId());
+        snapshot.setPosX(row.posX());snapshot.setPosY(row.posY());snapshot.setPosZ(row.posZ());return finalScalars(snapshot);
+    }
+    private static boolean validFinal(FinalSaveRow row) {
+        try {
+            requireSource(row.sourceInstance());
+            byte[] bytes=row.data();
+            if(bytes==null || row.payloadDigest()==null || !java.security.MessageDigest.isEqual(
+                    row.payloadDigest(),finalSaveDigest(snapshotOf(row),bytes))) return false;
+            PlayerState.parseFrom(bytes);return true;
+        } catch(IllegalArgumentException|InvalidProtocolBufferException error){return false;}
+    }
+    private static boolean sameFinal(FinalSaveRow old,PlayerRow row,byte[] bytes,byte[] digest,String source) {
+        return validFinal(old) && old.sourceInstance().equals(source)
+                && java.security.MessageDigest.isEqual(old.payloadDigest(),digest)
+                && java.util.Arrays.equals(old.data(),bytes)
+                && old.level()==row.getLevel() && old.sceneConfigId()==Integer.toUnsignedLong(row.getSceneConfigId())
+                && Double.doubleToRawLongBits(old.posX())==Double.doubleToRawLongBits(row.getPosX())
+                && Double.doubleToRawLongBits(old.posY())==Double.doubleToRawLongBits(row.getPosY())
+                && Double.doubleToRawLongBits(old.posZ())==Double.doubleToRawLongBits(row.getPosZ());
+    }
+    private static void independentFinalTransaction() {
+        if(TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("最终意图登记/完成必须各自提交，禁止加入外层事务合并两阶段");
+        }
+    }
+
+    /** 读取、同代准入绑定与快照处于同一行锁事务。OPEN 不阻止原租约到期后取得新 epoch。 */
+    public Optional<SceneLoad> loadForScene(long playerId,long expectedEpoch,String source,Duration timeout) {
+        requireSource(source);
+        return withinDeadline(timeout,()->{
+            OwnerState owner=mapper.selectOwnerForUpdate(playerId);
+            if(owner==null || owner.ownerEpoch()!=expectedEpoch || owner.released()
+                    || mapper.selectBlockingFinalEpoch(playerId)!=null) return Optional.empty();
+            FinalSaveRow admission=mapper.selectFinalSave(playerId,expectedEpoch);
+            if(admission==null) {
+                if(mapper.insertFinalAdmission(playerId,expectedEpoch,source,clockMs.getAsLong())!=1)
+                    throw new IllegalStateException("加载准入没有写入唯一行");
+            } else if(!"OPEN".equals(admission.status()) || admission.protocolVersion()!=1
+                    || !admission.sourceInstance().equals(source)) return Optional.empty();
+            PlayerRow row=mapper.selectById(playerId);
+            return row==null?Optional.empty():Optional.of(new SceneLoad(row,loadState(playerId)));
+        },Optional.empty());
+    }
+
+    /** TX1：只写完整意图，不碰 player_state。应答不明时必须以原key/digest/source重查或重投。 */
+    public FinalSaveReceipt registerFinalSave(PlayerRow row,byte[] stateBytes,String source,Duration timeout) {
+        independentFinalTransaction();requireSource(source);PlayerRow frozen=finalScalars(row);
+        byte[] bytes=Objects.requireNonNull(stateBytes,"stateBytes").clone();byte[] digest=finalSaveDigest(frozen,bytes);
+        try{PlayerState.parseFrom(bytes);}catch(InvalidProtocolBufferException error){throw new IllegalArgumentException("最终玩法快照损坏",error);}
+        return withinDeadline(timeout,()->{
+            OwnerState owner=mapper.selectOwnerForUpdate(frozen.getPlayerId());
+            if(owner==null) return receipt(FinalSaveStatus.NOT_FOUND,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest);
+            if(mapper.selectOtherBlockingFinalEpoch(frozen.getPlayerId(),frozen.getOwnerEpoch())!=null)
+                return receipt(FinalSaveStatus.CONFLICT,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest);
+            FinalSaveRow old=mapper.selectFinalSave(frozen.getPlayerId(),frozen.getOwnerEpoch());
+            if(old!=null && !"OPEN".equals(old.status())) {
+                if(!"PENDING".equals(old.status()) && !"APPLIED".equals(old.status()))
+                    return receipt(FinalSaveStatus.CONFLICT,old);
+                if(!sameFinal(old,frozen,bytes,digest,source)) return receipt(FinalSaveStatus.CONFLICT,old);
+                if("PENDING".equals(old.status()) && (owner.ownerEpoch()!=frozen.getOwnerEpoch() || owner.released()))
+                    return receipt(FinalSaveStatus.CONFLICT,old);
+                return receipt("APPLIED".equals(old.status())?FinalSaveStatus.APPLIED:FinalSaveStatus.ACCEPTED,old);
+            }
+            if(owner.ownerEpoch()!=frozen.getOwnerEpoch() || owner.released())
+                return receipt(FinalSaveStatus.FENCED,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest);
+            if(mapper.selectBlockingFinalEpoch(frozen.getPlayerId())!=null || old!=null &&
+                    (old.protocolVersion()!=1 || old.saveSeq()!=1 || !old.sourceInstance().equals(source)))
+                return receipt(FinalSaveStatus.CONFLICT,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest);
+            long now=clockMs.getAsLong();
+            int changed=old==null?mapper.insertFinalSave(frozen,bytes,digest,source,now)
+                    :mapper.registerOpenFinalSave(frozen,bytes,digest,source,now);
+            if(changed!=1) throw new IllegalStateException("最终意图未写入唯一行");
+            return receipt(FinalSaveStatus.ACCEPTED,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest);
+        },receipt(FinalSaveStatus.TIMED_OUT,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest));
+    }
+
+    /** 调用方已持有player锁；TX2与普通claim里的帮助完成共用该提交点。 */
+    private FinalSaveReceipt completeFinalInTransaction(long playerId,long epoch,OwnerState owner) {
+        FinalSaveRow row=mapper.selectFinalSave(playerId,epoch);
+        if(row==null) return receipt(FinalSaveStatus.NOT_FOUND,playerId,epoch,"",null);
+        if(mapper.selectOtherBlockingFinalEpoch(playerId,epoch)!=null)return receipt(FinalSaveStatus.CONFLICT,row);
+        if("APPLIED".equals(row.status())) return receipt(validFinal(row)?FinalSaveStatus.APPLIED:FinalSaveStatus.CONFLICT,row);
+        if(!"PENDING".equals(row.status()) || !validFinal(row)) return receipt(FinalSaveStatus.CONFLICT,row);
+        if(owner==null || owner.ownerEpoch()!=epoch || owner.released()) return receipt(FinalSaveStatus.FENCED,row);
+        PlayerRow frozen=snapshotOf(row);long now=clockMs.getAsLong();frozen.setUpdatedAt(now);
+        if(mapper.updateStateAndRelease(frozen)!=1) throw new IllegalStateException("最终应用围栏未改到唯一行");
+        mapper.upsertState(playerId,row.data(),epoch,now);
+        if(mapper.markFinalApplied(playerId,epoch,row.payloadDigest(),now)!=1)
+            throw new IllegalStateException("最终应用收据未改到唯一行");
+        return receipt(FinalSaveStatus.APPLIED,row);
+    }
+    public FinalSaveReceipt completeFinalSave(long playerId,long epoch,Duration timeout) {
+        independentFinalTransaction();
+        return withinDeadline(timeout,()->completeFinalInTransaction(playerId,epoch,mapper.selectOwnerForUpdate(playerId)),
+                receipt(FinalSaveStatus.TIMED_OUT,playerId,epoch,"",null));
+    }
+    public FinalSaveReceipt probeFinalSave(long playerId,long epoch,Duration timeout) {
+        independentFinalTransaction();
+        return withinDeadline(timeout,()->{
+            mapper.selectOwnerForUpdate(playerId);FinalSaveRow row=mapper.selectFinalSave(playerId,epoch);
+            if(row==null) return receipt(FinalSaveStatus.NOT_FOUND,playerId,epoch,"",null);
+            return receipt(validFinal(row)?("APPLIED".equals(row.status())?FinalSaveStatus.APPLIED:
+                    "PENDING".equals(row.status())?FinalSaveStatus.ACCEPTED:FinalSaveStatus.CONFLICT):FinalSaveStatus.CONFLICT,row);
+        },receipt(FinalSaveStatus.TIMED_OUT,playerId,epoch,"",null));
+    }
+    public List<FinalSaveKey> dueFinalSaves(long now,int limit) {
+        if(limit<1 || limit>32) throw new IllegalArgumentException("最终补偿批次必须在1..32");
+        return withinDeadline(Duration.ofSeconds(2),()->List.copyOf(mapper.selectDueFinalSaves(now,limit)),List.of());
+    }
+    public void postponeFinalSave(long playerId,long epoch,long next,String code,Duration timeout) {
+        if(code==null || !code.matches("[a-z_]{1,32}")) throw new IllegalArgumentException("非法最终补偿结果分类");
+        withinDeadline(timeout,()->{mapper.selectOwnerForUpdate(playerId);mapper.selectFinalSave(playerId,epoch);
+            mapper.postponeFinalSave(playerId,epoch,next,code);return true;},false);
+    }
+    /** 只回收保留期外且已有新E的OPEN/APPLIED；当前E认重收据、所有PENDING永不删除。 */
+    public int cleanRetiredFinalSaves(long cutoff,int limit,Duration timeout) {
+        if(limit<1 || limit>32)throw new IllegalArgumentException("最终收据清理批次必须在1..32");
+        independentFinalTransaction();
+        return withinDeadline(timeout,()->{
+            int removed=0;
+            for(String state:List.of("OPEN","APPLIED")) {
+                if(removed>=limit)break;
+                for(var key:mapper.selectRetiredFinalKeys(state,cutoff,limit-removed)) {
+                    OwnerState owner=mapper.selectOwnerForUpdate(key.playerId());
+                    if(owner!=null && owner.ownerEpoch()>key.ownerEpoch())
+                        removed+=mapper.deleteRetiredFinal(key.playerId(),key.ownerEpoch(),cutoff);
+                }
+            }
+            return removed;
+        },0);
+    }
+    private boolean completePendingForOwner(long playerId,OwnerState owner) {
+        // 这里只读取epoch键；损坏/未知状态同PENDING一起隔离，不能按TTL越过。
+        Long blocking=mapper.selectBlockingFinalEpoch(playerId);
+        return blocking==null || owner!=null && blocking==owner.ownerEpoch()
+                && completeFinalInTransaction(playerId,blocking,owner).status()==FinalSaveStatus.APPLIED
+                && mapper.selectBlockingFinalEpoch(playerId)==null;
+    }
+
     /** {@link #claimOwnership} 的结果。 */
     public sealed interface ClaimResult {
 
@@ -323,6 +521,7 @@ public class PlayerStore {
         return withinDeadline(timeout, () -> {
             OwnerState owner = mapper.selectOwnerForUpdate(playerId);
             if (owner == null) return new ClaimResult.NotFound();
+            if (mapper.selectBlockingFinalEpoch(playerId) != null) return new ClaimResult.Held(owner.ownerEpoch());
             long current = owner.ownerEpoch();
             if (current < 0 || current == Long.MAX_VALUE) {
                 throw new IllegalStateException("SQL 当前归属纪元无法安全递增");
@@ -340,6 +539,9 @@ public class PlayerStore {
 
     /** 夺权事务的主体，必须在事务里调用。 */
     private ClaimResult claimInTransaction(long playerId) {
+        OwnerState owner=mapper.selectOwnerForUpdate(playerId);
+        if(owner==null) return new ClaimResult.NotFound();
+        if(!completePendingForOwner(playerId,owner)) return new ClaimResult.Held(owner.ownerEpoch());
         long now = clockMs.getAsLong();
         if (mapper.claimOwnerEpoch(playerId, now, now + OWNER_LEASE.toMillis()) == 1) {
             Long epoch = mapper.selectOwnerEpoch(playerId);
@@ -360,6 +562,15 @@ public class PlayerStore {
      */
     @Transactional
     public boolean saveStateAndRelease(PlayerRow row, PlayerState state) {
+        OwnerState owner=mapper.selectOwnerForUpdate(row.getPlayerId());
+        if(owner==null || owner.ownerEpoch()!=row.getOwnerEpoch()) return false;
+        FinalSaveRow existing=mapper.selectFinalSave(row.getPlayerId(),row.getOwnerEpoch());
+        if(existing!=null) {
+            // 旧签名没有原source凭据：不能把它冒充原最终请求，尤其不能覆盖APPLIED。
+            throw new IllegalStateException("兼容最终写缺少原持久接管凭据，必须走registerFinalSave");
+        }
+        if(owner.released())return false;
+        if(mapper.selectBlockingFinalEpoch(row.getPlayerId())!=null) return false;
         row.setUpdatedAt(clockMs.getAsLong());
         if (mapper.updateStateAndRelease(row) != 1) {
             return false;
@@ -376,6 +587,9 @@ public class PlayerStore {
      */
     @Transactional
     public boolean saveStateHeld(PlayerRow row, PlayerState state) {
+        OwnerState owner=mapper.selectOwnerForUpdate(row.getPlayerId());
+        if(owner==null || owner.ownerEpoch()!=row.getOwnerEpoch() || owner.released()
+                || mapper.selectBlockingFinalEpoch(row.getPlayerId())!=null) return false;
         row.setUpdatedAt(clockMs.getAsLong());
         if (mapper.updateStateHeld(row) != 1) {
             return false;
@@ -407,7 +621,11 @@ public class PlayerStore {
      *
      * @return true 表示这次确实释放了
      */
+    @Transactional
     public boolean releaseOwnership(long playerId, long ownerEpoch) {
+        OwnerState owner=mapper.selectOwnerForUpdate(playerId);
+        if(owner==null || owner.ownerEpoch()!=ownerEpoch || owner.released()
+                || mapper.selectBlockingFinalEpoch(playerId)!=null || mapper.selectFinalSave(playerId,ownerEpoch)!=null) return false;
         return mapper.releaseOwner(playerId, ownerEpoch, clockMs.getAsLong()) == 1;
     }
 
@@ -543,6 +761,9 @@ public class PlayerStore {
         return transaction(timeout).execute(status -> {
             long playerId = frozen.getPlayerId();
             long epoch = frozen.getOwnerEpoch();
+            OwnerState locked=mapper.selectOwnerForUpdate(playerId);
+            if(!completePendingForOwner(playerId,locked))
+                throw new IllegalStateException("最终意图未完成，禁止交出归属");
             long now = clockMs.getAsLong();
             frozen.setUpdatedAt(now);
             if (mapper.updateStateAndHandOff(frozen, leaseUntil, requireLeaseAtLeast, mode.released) == 1) {

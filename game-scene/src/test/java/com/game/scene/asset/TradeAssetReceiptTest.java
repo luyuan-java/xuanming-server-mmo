@@ -115,6 +115,25 @@ class TradeAssetReceiptTest {
     }
 
     @Test
+    void 最终SQL意图持久接管不等于资产到账_没有player_state确认仍不回durable() {
+        var item=BagItemState.newBuilder().setItemUuid(700).setConfigId(1).setStackSize(1).build();
+        start(PlayerState.newBuilder().setBag(BagState.newBuilder().addItems(item)).build());
+        var debit=request(AssetStream.ASSET_STREAM_TRADE_DEBIT,1,AssetBundle.newBuilder().addItemUuids(700).build());
+        assertThat(call(AssetRpc.DEBIT,debit).getDurable()).isFalse();
+        var pendingProgress=repository.takeProgress();
+        repository.setAutoFinalRegistration(false);
+        world.onTakeoverRequested(PLAYER,1);
+        var pendingFinal=repository.takeFinalRegistration();
+        pendingFinal.complete(new PlayerRepository.FinalSaveRegistration.Durable(pendingFinal.receipt(),false));
+        assertThat(player.persistedState().getAssetLedger().getStreamsCount()).isZero();
+        assertThat(call(AssetRpc.DEBIT,debit).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_NOT_HERE);
+        assertThat(call(AssetRpc.DEBIT,debit).getDurable()).isFalse();
+        // 原周期存盘的迟到失败也不能由TX1接管凭据替代为已到账。
+        pendingProgress.complete(PlayerRepository.ProgressResult.FAILED);
+        assertThat(call(AssetRpc.DEBIT,debit).getDurable()).isFalse();
+    }
+
+    @Test
     void 同操作改载荷拒绝_超大实例在副作用前拒绝() {
         var item = BagItemState.newBuilder().setItemUuid(700).setConfigId(1).setStackSize(1).build();
         start(PlayerState.newBuilder().setBag(BagState.newBuilder().addItems(item)).build());

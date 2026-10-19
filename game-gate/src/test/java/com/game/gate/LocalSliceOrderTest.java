@@ -58,9 +58,9 @@ class LocalSliceOrderTest {
     }
 
     @Test
-    void 清单解析得对_十五个进程_gate与gateway在后段_battle最后() {
+    void 清单解析得对_十六个进程_gate与gateway在后段_battle最后() {
         assertThat(startOrder).containsExactly("game-scene-manager", "game-login", "game-friend", "game-chat", "game-match", "game-team", "game-guild",
-                "game-trade", "game-mail", "game-rank", "game-data", "game-scene", "game-gate", "game-gateway", "game-battle");
+                "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle");
         assertThat(startOrder).doesNotHaveDuplicates();
     }
 

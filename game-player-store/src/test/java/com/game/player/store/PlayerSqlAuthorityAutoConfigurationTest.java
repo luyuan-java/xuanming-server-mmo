@@ -12,6 +12,8 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.mock.env.MockEnvironment;
 
 public class PlayerSqlAuthorityAutoConfigurationTest {
@@ -59,19 +61,46 @@ public class PlayerSqlAuthorityAutoConfigurationTest {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(PlayerSqlAuthorityAutoConfiguration.class))
                 .withPropertyValues("game.run-mode=test", "game.player-store.require-tidb=false")
-                .withBean(DataSource.class, () -> {
-                    var pool = new DruidDataSource();
-                    pool.setUrl("jdbc:h2:mem:player_sql_authority_wiring;MODE=MySQL");
-                    pool.setMaxActive(1);
-                    pool.setValidationQuery("SELECT 1");
-                    pool.setConnectionInitSqls(java.util.List.of("CREATE ALIAS IF NOT EXISTS VERSION FOR "
-                            + "\"com.game.player.store.PlayerSqlAuthorityAutoConfigurationTest.legacySqlVersion\""));
-                    return pool;
-                })
+                .withBean(DataSource.class, () -> authorityDataSource(true))
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasBean("playerSqlAuthority")
                             .hasSingleBean(StrongTiDbConnectionPolicy.class).doesNotHaveBean(PlayerStore.class);
                     assertThat(((DruidDataSource) context.getBean(DataSource.class)).isInited()).isTrue();
                 });
+    }
+
+    @Test
+    void 手动数据源缺少正式最终存盘表时必须拒绝启动() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(PlayerSqlAuthorityAutoConfiguration.class))
+                .withPropertyValues("game.run-mode=test", "game.player-store.require-tidb=false")
+                .withBean(DataSource.class, () -> authorityDataSource(false))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    Throwable cause = context.getStartupFailure();
+                    while (cause.getCause() != null) cause = cause.getCause();
+                    assertThat(cause).isInstanceOf(java.sql.SQLException.class);
+                    assertThat(cause.getMessage()).containsIgnoringCase("player_final_save");
+                });
+    }
+
+    private static DruidDataSource authorityDataSource(boolean initializeSchema) {
+        var pool = new DruidDataSource();
+        pool.setUrl("jdbc:h2:mem:player_sql_authority_" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE");
+        pool.setMaxActive(1);
+        pool.setValidationQuery("SELECT 1");
+        pool.setConnectionInitSqls(java.util.List.of("CREATE ALIAS IF NOT EXISTS VERSION FOR "
+                + "\"com.game.player.store.PlayerSqlAuthorityAutoConfigurationTest.legacySqlVersion\""));
+        try {
+            // 正向装配使用唯一正式DDL；负向保留空库，验证独立于Mapper的拒启门禁。
+            if (initializeSchema) {
+                new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(pool);
+            }
+            return pool;
+        } catch (RuntimeException | Error failure) {
+            pool.close();
+            throw failure;
+        }
     }
 }

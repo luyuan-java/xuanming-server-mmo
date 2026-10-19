@@ -811,6 +811,16 @@ public final class SceneMetrics {
                 .register(registry);
     }
 
+    /** 未登记仍由本进程承担，已登记未应用只保留小凭据；均无玩家维度。 */
+    public void bindFinalSaveRecovery(IntSupplier unregistered,IntSupplier awaitingApplied,IntSupplier undelivered) {
+        Gauge.builder("game.scene.final.save.unregistered",()->unregistered.getAsInt())
+                .description("尚未取得SQL最终接管凭据的冻结快照数，非零停机必须记unclean").register(registry);
+        Gauge.builder("game.scene.final.save.awaiting.applied",()->awaitingApplied.getAsInt())
+                .description("已取得接管凭据但尚未确认player_state最终提交的本地凭据数").register(registry);
+        Gauge.builder("game.scene.final.save.undelivered.results",()->undelivered.getAsInt())
+                .description("最终结果投递失败或仍未执行的数量，独立于SQL未登记数并使停机unclean").register(registry);
+    }
+
     /** 接入本节点的 gate 链路连接数（含握手中，{@code game.scene.gate.links}）。同上，必须线程安全、不阻塞。 */
     public void bindGateLinkCount(IntSupplier links) {
         Gauge.builder(GATE_LINKS, () -> links.getAsInt())

@@ -11,8 +11,8 @@ import java.util.function.Consumer;
  * <p>契约：
  * <ul>
  *   <li>{@link #load} 的回调<b>一定在场景逻辑线程上、且不在 {@code load} 调用栈内</b>执行，且只执行一次；</li>
- *   <li>{@link #save} 是写者离开时的<b>最终写回并释放归属</b>，带 {@code owner_epoch} 围栏：epoch 已过期（被新的进场夺权）时
- *       写入被丢弃，实现只记日志；调用方不等待结果；</li>
+ *   <li>{@link #saveFinal} 是写者离开时的最终快照接管：先取得SQL待办凭据，再独立应用并释放；
+ *       未取得凭据不回成功、不因次数丢弃，失去原epoch不能改绑重放；旧void save明确拒绝；</li>
  *   <li>{@link #release} 只释放归属、不写状态（进场失败 / 取消），同样带围栏；</li>
  *   <li>{@link #saveProgress} 是在线存盘（周期存盘）：带围栏、<b>不释放</b>归属；归属已释放（最终写回已提交）时同样被拒，
  *       所以迟到的在线存盘盖不过最终写回。结果回调一定在场景逻辑线程上、不在调用栈内、恰好一次；</li>
@@ -25,8 +25,8 @@ import java.util.function.Consumer;
  *         <li>{@code RELEASE}（批次 5.4 跨 zone 传送）：新 epoch 在同一笔事务里<b>同时释放</b>，库里没有持有者，目标 zone 的 login
  *             夺权立即成功。所以 RELEASE 下任何路径都<b>不再释放新 epoch</b>（上面那条例外也不做），并多一种结局 {@code Superseded}。</li>
  *       </ul></li>
- *   <li>写对可恢复的瞬时故障（取不到连接、网络闪断、锁等待 / 语句超时）在有界时间内重试；最终失败不抛给调用方，
- *       记日志（写回 / 释放记 ERROR，带足够信息人工修复）。</li>
+ *   <li>每次阻塞写均有时限、支持取消。在线存盘/释放有限次重试；最终接管每轮有界退避，
+ *       仍未登记时保留冻结状态，停机截止明确回Unconfirmed，已登记的SQL待办持续补偿。</li>
  * </ul>
  * 同一玩家同一时刻至多一个写在途，由调用方（场景逻辑）保证。例外只有冻结中的三种，都带 (E, 未释放) 围栏、谁先提交都安全
  * （scene-handoff-spec §5.5）：冻结前已在途的在线存盘与交出并发（在线存盘先 → 交出覆盖它；交出先 → 在线存盘被拒）；停服 / 同会话换角色时
@@ -34,9 +34,51 @@ import java.util.function.Consumer;
  */
 public interface PlayerRepository {
 
+    /** 仅装配迁移期间保留旧签名；生产入口必须传预期 epoch，不得借旧加载绕过最终准入。 */
+    @Deprecated
     void load(long playerId, Consumer<LoadResult> onLoaded);
 
+    /**
+     * 同 SQL 事务检查预期 E/未释放/无最终门，并绑定本仓储的 source instance 后才读一致快照。
+     * 回调仍在逻辑线程恰好一次；调用方在提交实体时必须再核 PendingEnter 身份与本地 finalizing 票据。
+     */
+    void load(long playerId, long expectedOwnerEpoch, Consumer<LoadResult> onLoaded);
+
+    /** 迁移后不得再有运行调用；不能把无结果投队列当最终保存完成。 */
+    @Deprecated
     void save(PlayerSave save);
+
+    /**
+     * 接收一份已经冻结的唯一最终快照。瞬时登记失败时保持该逻辑请求和快照，分轮有界重试，不能静默丢弃。
+     * onRegistration 只在取得耐久凭据或终止/冲突/失去归属时在逻辑线程恰好执行一次。
+     * 停机取消尚未取得凭据的请求须回 Unconfirmed，由调用方计 unclean；已取得凭据后进程退出不撤销 SQL 待办。
+     */
+    void saveFinal(PlayerSave save, Consumer<FinalSaveRegistration> onRegistration);
+
+    /** 最终存储接管凭据，不表示资产收据已经写入 player_state 或可以回 durable=true。 */
+    record FinalSaveReceipt(long playerId, long ownerEpoch, long saveSeq, String sourceInstance,
+                            String payloadDigest) {
+        public FinalSaveReceipt {
+            Objects.requireNonNull(sourceInstance, "sourceInstance");
+            if (playerId == 0 || ownerEpoch <= 0 || saveSeq != 1
+                    || payloadDigest == null || !payloadDigest.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("非法最终存储接管凭据");
+            }
+        }
+    }
+
+    sealed interface FinalSaveRegistration {
+        /** TX1已提交；applied只表示TX2也已提交，不能代替逐操作资产收据核对。 */
+        record Durable(FinalSaveReceipt receipt, boolean applied) implements FinalSaveRegistration {
+            public Durable { Objects.requireNonNull(receipt, "receipt"); }
+        }
+        /** 原epoch已经失效；不得将原payload改绑新epoch。 */
+        record Fenced() implements FinalSaveRegistration { }
+        /** 同代另一payload/版本/来源，保留原记录并隔离，不能当正常释放。 */
+        record Conflict() implements FinalSaveRegistration { }
+        /** 取消/停机截止仍没有持久接管证明；不代表未提交，不准报成功。 */
+        record Unconfirmed() implements FinalSaveRegistration { }
+    }
 
     void release(long playerId, long ownerEpoch);
 

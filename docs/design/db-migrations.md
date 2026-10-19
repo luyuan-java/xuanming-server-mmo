@@ -429,3 +429,32 @@ Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
 
 **回滚**：回退代码即可；缺省命名空间下名字与回退前完全相同（回退也去掉了库名核对）。用过非缺省命名空间的部署回退后会回到 `game` 的库与键空间（看不见 `<ns>` 下的数据），
 要么先按上面的步骤搬回、要么回退前不改命名空间。
+
+---
+
+## M14：最终 SAVE 的 SQL 意图与同代准入（2026-10-19 实现候选，待验证/切换）
+
+唯一 schema 入口是 `game-player-store/src/main/resources/db/game-player-schema.sql` 中的 `player_final_save` CREATE。新库随 game-login 的既有初始化建立；存量库在排空窗口按同一 CREATE 扩表，不维护第二份手写 DDL，也不在请求路径临时建表。新启动的玩家权威进程通过独立 PlayerSqlAuthorityAutoConfiguration 验证表、18列类型/宽度/OPEN可空列、`(player_id, owner_epoch)` 主键、due 与 retired 两索引；缺表/旧结构拒启，game-data 自建 PlayerStore 也不豁免。
+
+表的 OPEN 只绑定一次加载的原 scene instance，允许 payload/digest/标量为空；PENDING 与 APPLIED 必须有版本1、序号1、原 protobuf bytes（MEDIUMBLOB，上限16,777,215字节）及 BINARY(32) SHA。应用代码校验完整数据与来源，不通过就保留原行。next_attempt_at/attempt_count/低基数错误分类仅决定重试，绝不改变数据义务。APPLIED 在 player_state 及释放同一事务提交；PENDING 不设清理过期值。
+
+升级前：停止接新登录/迁移/回档，排空当前 scene 并保存未完成最终写证据；停止全部旧 scene、login、data 和任何其他 PlayerStore writer/claim 入口，确认旧进程不会复活；备份玩家表、player_state、player_final_save 与原 epoch 上界；执行唯一正式 schema 扩表并核对元数据；统一启新版本后先补偿待办再开放玩家准入。不支持忽略新门禁的旧进程滚动混跑。该步骤需要运维窗口，本候选没有操作生产或本地持久库。
+
+恢复：PENDING 存在时所有新 claim/历史恢复不能从旧 player_state 继续；同锁帮助完成或等待，损坏数据先隔离人工处理。PITR 必须同点恢复 player/player_state/player_final_save，随后按既有已审计旧 epoch 上界恢复流程前进新 E；不能单删待办或只回一张表。未登记 RAM 不在 SQL 可恢复承诺内。回滚二进制前必须停止新入口、完成所有 PENDING、排空新 writer并保留现 E 的终态凭据；不能让旧二进制越过残留 PENDING。清理每轮有总上限，只删除已有更大 SQL E 且超过七天的旧 OPEN/APPLIED；当前 E 和全部 PENDING 保留。
+
+
+### 本批实现与验收边界（准备于 2026-10-19T09:04:38.793141+00:00）
+
+本批最终SAVE、运维导入围栏与InboxHooks组合接缝由root在已授权范围统一接手；准备时为工作树实现候选，待root逐文件核SHA后正规apply。源码落地与运行验收分别记录，不以当前资源不足冒完成或回退实现。
+
+- 已有真实证据：Store两夹具类26/26、0skip（C682622E…）；旧续建前13模块成功产物已封存，整体该次仍保留scene夹具首停原件。
+- 最近剩余6模块在1809448KiB可用内存门禁停止，native_started=false，未执行Java/Maven/clean（1119636B…）；不是业务测试再次失败，旧8份失败XML不得算本次结果。
+- 后续待验：剩余6模块正常clean install、新CLI3方法/原13方法共16条、Hook组合5条、当前155条严格真TiDB，以及实际宿主旧实例复活/延迟ACK故障链。默认H2/条件skip、编译/枚举与历史通过都不能替代它们。
+- M14仅完成正式schema/迁移入口源码候选；本批未执行部署或实际库迁移，未启动基础设施。TX1耐久接管凭据仍不表示逐项资产durable=true；资产确认只按player_state实际SQL回执。
+- InboxHooks原有接口/外部实现与CLI新增代码保留；生产SceneNode尚未装配InboxService的既有边界独立登记，World/Hook组合测试不能冒真实Inbox端到端验收。
+
+### 2026-10-19 root 正式工作树落地补记（未完成运行验收）
+
+统一37路径已由root正规git apply，check/apply均0；逐37最终字节SHA与已审候选相同，未修改InboxHooks接口，保留并行CLI/收件箱源。实际应用原件为C++/Go仓 `build/verification/java-canonical-37-apply-20261019T090438788234Z/root-canonical-application.json`，SHA `F03743014BE227D961CAD7F37DCA29470A2BDA42B5A238614ECFB7CEAB1930D7`。当前是工作树已实现、验收未完成；没有提交、部署、启动服务或执行M14真实库迁移。
+
+后续直接为当前Java完整源建立新快照（含并行新增代码），先生成含新Mapper公开准入规则的当前Store Jar，再按实际依赖编译受影响模块并运行CLI全16/Hook5和当前155真TiDB。旧JG2464、D136 Store Jar及其26通过/13模块成功仅绑定旧输入，不能冒当前World合并与新CLI已运行；不强制先重复旧快照六模块再重测新代码。最后验收真实宿主故障，任何编译/枚举/H2结果均不替代它。

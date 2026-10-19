@@ -219,6 +219,19 @@ public final class SceneWorld {
     private final Map<Long, ScenePlayer> playersByEntity = new HashMap<>();
     /** 已收到 PlayerEnter、正在加载存档的会话。离开 / 断链时删掉即取消，加载回来发现不在就丢弃。 */
     private final Map<SessionKey, PendingEnter> pendingEnters = new HashMap<>();
+    private record FinalKey(long playerId,long epoch) { }
+    private static final class FinalExit {
+        PlayerSave snapshot;
+        PlayerRepository.FinalSaveReceipt receipt;
+        com.game.player.store.PlayerStore.FinalSaveReceipt earlyApplied;
+        boolean applied;
+        FinalExit(PlayerSave snapshot){this.snapshot=snapshot;}
+    }
+    /** 只在逻辑线程访问；最终退出开始即不可撤销，保护SQL前已在途的同E加载。 */
+    private final Map<FinalKey,FinalExit> finalizing=new HashMap<>();
+    private final Map<FinalKey,Integer> loadsInFlight=new HashMap<>();
+    private final java.util.Set<PendingEnter> loadRequests=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
     /** 帧内视野变化的复用缓冲（只在 {@link #step()} 里用）。 */
     private final ViewChanges viewChanges = new ViewChanges();
     private boolean acceptingEnters = true;
@@ -1332,6 +1345,9 @@ public final class SceneWorld {
                     "场景不在本节点 scene_id=" + Long.toUnsignedString(enter.getSceneId()));
             return;
         }
+        if(finalizing.containsKey(new FinalKey(playerId,epoch))) {
+            failEnter(key,playerId,epoch,transfer,"该归属代已开始最终退出，禁止同代复活");return;
+        }
         PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer);
         PendingEnter replaced = pendingEnters.put(key, pending);
         if (replaced != null) {
@@ -1341,10 +1357,24 @@ public final class SceneWorld {
                 repository.release(replaced.playerId(), replaced.ownerEpoch());
             }
         }
-        repository.load(playerId, result -> onPlayerLoaded(pending, result));
+        FinalKey loadingKey=new FinalKey(playerId,epoch);
+        loadsInFlight.merge(loadingKey,1,Integer::sum);
+        loadRequests.add(pending);
+        try {repository.load(playerId,epoch,result -> onPlayerLoaded(pending,result));}
+        catch(RuntimeException failure){onPlayerLoaded(pending,new LoadResult.Failed(failure));}
     }
 
-    private void onPlayerLoaded(PendingEnter pending, LoadResult result) {
+    private void onPlayerLoaded(PendingEnter pending,LoadResult result) {
+        if(!loadRequests.remove(pending))return;
+        FinalKey key=new FinalKey(pending.playerId(),pending.ownerEpoch());
+        try{finishPlayerLoaded(pending,result);}
+        finally{
+            loadsInFlight.computeIfPresent(key,(ignored,count)->count<=1?null:count-1);
+            retireFinalExit(key);
+        }
+    }
+
+    private void finishPlayerLoaded(PendingEnter pending, LoadResult result) {
         SessionKey key = pending.session();
         long playerId = pending.playerId();
         long epoch = pending.ownerEpoch();
@@ -1366,6 +1396,10 @@ public final class SceneWorld {
             return;
         }
         PlayerData data = found.data();
+        // SQL读取后仍可能已经开始最终退出；在实体索引提交点重新校验票据，不只校验读到的E。
+        if(finalizing.containsKey(new FinalKey(playerId,epoch))) {
+            failEnter(key,playerId,epoch,transfer,"加载完成前该归属代已最终退出");return;
+        }
         if (!acceptingEnters) {
             failEnter(key, playerId, epoch, transfer, "本节点已停止接收新玩家");
             return;
@@ -1571,6 +1605,8 @@ public final class SceneWorld {
     }
 
     private void releaseClaim(long playerId, long epoch) {
+        ScenePlayer active=playersById.get(playerId);
+        if(finalizing.containsKey(new FinalKey(playerId,epoch)) || active!=null && active.ownerEpoch()==epoch) return;
         if (playerId != 0 && epoch != 0) {
             repository.release(playerId, epoch);
         }
@@ -2908,6 +2944,7 @@ public final class SceneWorld {
      * 交出结局出来后只做收尾（见 {@link #onHandedOff}）。交出结局自己的收尾先摘掉换图状态再移除，不会走到这里的标记。
      */
     private void removePlayer(ScenePlayer player, boolean save) {
+        PlayerSave finalSnapshot=save?beginFinalExit(player):null;
         PlayerSwitch sw = player.switching();
         if (sw != null && sw.phase() == SwitchPhase.FREEZING) {
             sw.detach();
@@ -2921,14 +2958,62 @@ public final class SceneWorld {
         publishPopulation(player.scene().configId());
         metrics.aoiLeft(watchers.size());
         broadcast(watchers, destroyMessage(player));
-        if (save) {
-            PlayerSave written = player.toSave();
-            repository.save(written);
-            snapshots.capture(written, PlayerSnapshots.Cause.LOGOUT);
-            // 收件箱：带写回离场时对已落盘、待确认的结局尽力补发一次确认（不等回包；交出 / 失去归属 / 写回被拒这几种收尾不补发）
-            inbox.onLeaving(this, player);
+        if (finalSnapshot!=null) snapshots.capture(finalSnapshot,PlayerSnapshots.Cause.LOGOUT);
+        // 这里只补发此前player_state已确认的资产前缀；TX1接管凭据不提升persistedState。
+        if (save) inbox.onLeaving(this, player);
+    }
+
+
+    /** 先冻结并建立墓碑，再发SQL/移出索引；持久接管以前保留唯一原快照。 */
+    private PlayerSave beginFinalExit(ScenePlayer player) {
+        FinalKey key=new FinalKey(player.playerId(),player.ownerEpoch());
+        if(finalizing.containsKey(key)) return null;
+        player.stopMotion();PlayerSave snapshot=player.toSave();FinalExit exit=new FinalExit(snapshot);
+        finalizing.put(key,exit);
+        for(var iterator=pendingEnters.entrySet().iterator();iterator.hasNext();) {
+            PendingEnter pending=iterator.next().getValue();
+            if(pending.playerId()==key.playerId() && pending.ownerEpoch()==key.epoch()) {
+                iterator.remove();
+                sink.enterResult(pending.session().linkId(),pending.session().sessionId(),key.playerId(),key.epoch(),ENTER_FAILED);
+            }
+        }
+        try {repository.saveFinal(snapshot,result->onFinalRegistered(key,exit,result));}
+        catch(RuntimeException failure) {log.error("最终接管投递异常，冻结快照保留且退出不报成功 epoch={}",key.epoch(),failure);}
+        return snapshot;
+    }
+    private void onFinalRegistered(FinalKey key,FinalExit expected,PlayerRepository.FinalSaveRegistration result) {
+        if(finalizing.get(key)!=expected) return;
+        if(result instanceof PlayerRepository.FinalSaveRegistration.Durable durable) {
+            var receipt=durable.receipt();
+            if(receipt.playerId()!=key.playerId() || receipt.ownerEpoch()!=key.epoch() || receipt.saveSeq()!=1) {
+                log.error("最终保存回执身份错误，保留冻结状态 epoch={}",key.epoch());return;
+            }
+            expected.receipt=receipt;expected.snapshot=null;expected.applied=durable.applied();
+            if(expected.earlyApplied!=null) onFinalApplied(expected.earlyApplied);
+            retireFinalExit(key);
+        } else if(result instanceof PlayerRepository.FinalSaveRegistration.Fenced) {
+            // 新代已经取得权威；旧payload绝不能改绑新E重放。
+            expected.snapshot=null;expected.applied=true;retireFinalExit(key);
+        } else {
+            log.error("最终退出尚未完成，冻结原状态保留 epoch={} result={}",key.epoch(),result.getClass().getSimpleName());
         }
     }
+    /** 独立SQL完成通知；不改变资产durable基准，也不操作新E玩家。 */
+    public void onFinalApplied(com.game.player.store.PlayerStore.FinalSaveReceipt receipt) {
+        FinalKey key=new FinalKey(receipt.playerId(),receipt.ownerEpoch());FinalExit exit=finalizing.get(key);
+        if(exit==null || receipt.status()!=com.game.player.store.PlayerStore.FinalSaveStatus.APPLIED || receipt.saveSeq()!=1) return;
+        if(exit.receipt==null){exit.earlyApplied=receipt;return;}
+        if(!exit.receipt.sourceInstance().equals(receipt.sourceInstance())
+                || !exit.receipt.payloadDigest().equals(receipt.payloadDigest())) {
+            log.error("最终SQL完成通知与接管凭据不符，不能回收墓碑 epoch={}",key.epoch());return;
+        }
+        exit.applied=true;retireFinalExit(key);
+    }
+    private void retireFinalExit(FinalKey key) {
+        FinalExit exit=finalizing.get(key);
+        if(exit!=null && exit.applied && exit.snapshot==null && !loadsInFlight.containsKey(key)) finalizing.remove(key,exit);
+    }
+    public int unconfirmedFinalExits(){return (int)finalizing.values().stream().filter(exit->exit.snapshot!=null).count();}
 
     /**
      * 回合制战斗冻结解除之后（{@code PlayerBattleService} 解冻的唯一入口调）：之前因为战斗延后的收件箱检查立即重查（mmorpg 设计 §7.3 第 4 条）。
@@ -2973,11 +3058,9 @@ public final class SceneWorld {
             if (sw != null && sw.phase() == SwitchPhase.FREEZING) {
                 sw.detach();
             }
-            player.stopMotion();
-            PlayerSave written = player.toSave();
-            repository.save(written);
-            snapshots.capture(written, PlayerSnapshots.Cause.LOGOUT);
-            // 收件箱：停服写回同样是带写回的离场，尽力补发一次已落盘结局的确认（客户端可能先于回包关掉，无害）
+            PlayerSave written=beginFinalExit(player);
+            if(written!=null) snapshots.capture(written,PlayerSnapshots.Cause.LOGOUT);
+            // 同离场路径，只确认此前已落player_state的前缀，不把最终意图登记当资产耐久。
             inbox.onLeaving(this, player);
         }
         playersById.clear();

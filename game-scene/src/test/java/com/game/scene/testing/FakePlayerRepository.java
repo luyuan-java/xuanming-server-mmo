@@ -39,6 +39,33 @@ public final class FakePlayerRepository implements PlayerRepository {
     private final Map<Long, PlayerData> rows = new HashMap<>();
     private final List<PlayerSave> saves = new ArrayList<>();
     private final List<Release> releases = new ArrayList<>();
+    private record FinalKey(long player,long epoch) { }
+    private final java.util.Set<FinalKey> closedEpochs=new java.util.HashSet<>();
+    public record PendingFinal(PlayerSave save,FinalSaveReceipt receipt,Consumer<FinalSaveRegistration> callback) {
+        public void complete(FinalSaveRegistration result){callback.accept(result);}
+    }
+    private boolean autoFinalRegistration=true;
+    private final Deque<PendingFinal> finalRegistrations=new ArrayDeque<>();
+    public void setAutoFinalRegistration(boolean enabled){autoFinalRegistration=enabled;}
+    public PendingFinal takeFinalRegistration(){return Objects.requireNonNull(finalRegistrations.poll(),"没有挂起的最终登记");}
+    @Override
+    public void load(long playerId,long expectedEpoch,Consumer<LoadResult> onLoaded) {
+        if(closedEpochs.contains(new FinalKey(playerId,expectedEpoch))) {
+            loads.add(new PendingLoad(playerId,ignored->onLoaded.accept(new LoadResult.NotFound())));
+        } else load(playerId,onLoaded);
+    }
+    @Override
+    public void saveFinal(PlayerSave save,Consumer<FinalSaveRegistration> onRegistration) {
+        saves.add(save);closedEpochs.add(new FinalKey(save.playerId(),save.ownerEpoch()));
+        com.game.player.store.PlayerRow row=new com.game.player.store.PlayerRow();
+        row.setPlayerId(save.playerId());row.setOwnerEpoch(save.ownerEpoch());row.setLevel(save.level());
+        row.setSceneConfigId(save.sceneConfigId());row.setPosX(save.position().x());row.setPosY(save.position().y());row.setPosZ(save.position().z());
+        String digest=java.util.HexFormat.of().formatHex(com.game.player.store.PlayerStore.finalSaveDigest(row,save.state().toByteArray()));
+        var receipt=new FinalSaveReceipt(save.playerId(),save.ownerEpoch(),1,"fake-sql",digest);
+        if(autoFinalRegistration)onRegistration.accept(new FinalSaveRegistration.Durable(receipt,true));
+        else finalRegistrations.add(new PendingFinal(save,receipt,onRegistration));
+    }
+
 
     @Override
     public void load(long playerId, Consumer<LoadResult> onLoaded) {

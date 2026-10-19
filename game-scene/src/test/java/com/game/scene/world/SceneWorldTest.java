@@ -320,6 +320,92 @@ class SceneWorldTest {
     }
 
     @Test
+    void 最终退出开始后_之前读旧SQL的同epoch在途进场不能复活实例() {
+        repo.putNewPlayer(1001, 3);
+        enter(LINK, 11, 1001, scene.sceneId(), 3);
+        world.onPlayerEnter(OTHER_LINK, enterFrame(22, 1001, scene.sceneId(), 3));
+        FakePlayerRepository.PendingLoad staleRead = repo.takeLoad();
+
+        world.onTakeoverRequested(1001, 3);
+        assertThat(repo.saves()).hasSize(1);
+        staleRead.complete(new PlayerRepository.LoadResult.Found(newPlayer(1001, 3)));
+
+        assertThat(world.playerBySession(new SessionKey(OTHER_LINK, 22))).isNull();
+        assertThat(world.playerCount()).as("最终快照冻结后不能由迟到加载再产生同代玩法状态").isZero();
+        assertThat(repo.saves()).as("同代只能有唯一冻结终态").hasSize(1);
+    }
+
+    @Test
+    void 最终退出开始后_新的同epoch进场也不能重开该代() {
+        repo.putNewPlayer(1001, 3);
+        enter(LINK, 11, 1001, scene.sceneId(), 3);
+        world.onTakeoverRequested(1001, 3);
+
+        enter(OTHER_LINK, 22, 1001, scene.sceneId(), 3);
+
+        assertThat(world.playerBySession(new SessionKey(OTHER_LINK, 22))).isNull();
+        assertThat(world.playerCount()).isZero();
+    }
+
+    @Test
+    void 旧epoch最终退出后_正常TTL取得的新epoch仍可进场() {
+        repo.putNewPlayer(1001, 3);
+        enter(LINK, 11, 1001, scene.sceneId(), 3);
+        world.onTakeoverRequested(1001, 3);
+        repo.putNewPlayer(1001, 4);
+
+        enter(OTHER_LINK, 22, 1001, scene.sceneId(), 4);
+
+        assertThat(world.playerBySession(new SessionKey(OTHER_LINK, 22))).isNotNull();
+        assertThat(world.playerBySession(new SessionKey(OTHER_LINK, 22)).ownerEpoch()).isEqualTo(4);
+        assertThat(world.playerCount()).isEqualTo(1);
+    }
+
+    @Test
+    void 登记没有确认时冻结保留_同代新进场拒绝但新epoch仍可恢复() {
+        repo.setAutoFinalRegistration(false);
+        repo.putNewPlayer(1001,3);
+        enter(LINK,11,1001,scene.sceneId(),3);
+        var original=world.playerById(1001);
+        original.wallet().add(0,77);
+        world.onTakeoverRequested(1001,3);
+        var finalWrite=repo.takeFinalRegistration();
+        finalWrite.complete(new PlayerRepository.FinalSaveRegistration.Unconfirmed());
+        assertThat(world.unconfirmedFinalExits()).isEqualTo(1);
+        assertThat(finalWrite.save().state().getCurrency().getBalances(0)).isEqualTo(77);
+        enter(OTHER_LINK,22,1001,scene.sceneId(),3);
+        assertThat(world.playerById(1001)).isNull();
+        repo.putNewPlayer(1001,4);
+        enter(OTHER_LINK,22,1001,scene.sceneId(),4);
+        assertThat(world.playerById(1001).ownerEpoch()).isEqualTo(4);
+        assertThat(world.unconfirmedFinalExits()).isEqualTo(1);
+    }
+
+    @Test
+    void 旧代接管完成通知只回收原墓碑_来源摘要不符或迟到不能操作新代实例() {
+        repo.setAutoFinalRegistration(false);
+        repo.putNewPlayer(1001,3);
+        enter(LINK,11,1001,scene.sceneId(),3);
+        world.onTakeoverRequested(1001,3);
+        var finalWrite=repo.takeFinalRegistration();
+        var receipt=finalWrite.receipt();
+        // TX2通知可能在TX1注册回调之前到达，仍须在拿到原凭据后精确核对。
+        world.onFinalApplied(new com.game.player.store.PlayerStore.FinalSaveReceipt(
+                com.game.player.store.PlayerStore.FinalSaveStatus.APPLIED,1001,3,1,"wrong-source",receipt.payloadDigest()));
+        finalWrite.complete(new PlayerRepository.FinalSaveRegistration.Durable(receipt,false));
+        assertThat(world.unconfirmedFinalExits()).isZero();
+        enter(OTHER_LINK,22,1001,scene.sceneId(),3);
+        assertThat(world.playerById(1001)).isNull();
+        repo.putNewPlayer(1001,4);
+        enter(OTHER_LINK,22,1001,scene.sceneId(),4);
+        var current=world.playerById(1001);
+        world.onFinalApplied(new com.game.player.store.PlayerStore.FinalSaveReceipt(
+                com.game.player.store.PlayerStore.FinalSaveStatus.APPLIED,1001,3,1,receipt.sourceInstance(),receipt.payloadDigest()));
+        assertThat(world.playerById(1001)).isSameAs(current);
+        assertThat(current.ownerEpoch()).isEqualTo(4);
+    }
+
+    @Test
     void 加载乱序返回_旧epoch不能顶替本节点上更新的实例() throws Exception {
         world.onPlayerEnter(LINK, enterFrame(11, 1001, scene.sceneId(), 1));
         world.onPlayerEnter(LINK, enterFrame(12, 1001, scene.sceneId(), 2));

@@ -43,8 +43,17 @@ final class SceneShutdown {
      * @param playersSubmitted 写回任务交给存储线程池的人数（没执行完为 0）
      * @param droppedTasks     预算用完时存储线程池里被丢弃的任务数
      */
-    record Result(boolean writeBackRan, int playersSubmitted, int droppedTasks) {
+    record Result(boolean writeBackRan, int playersSubmitted, int droppedTasks, int unregisteredFinals,
+                  int unsettledTransfers,int undeliveredFinalResults,boolean storageTerminated,
+                  boolean storageForceStopped) {
+        Result(boolean writeBackRan,int playersSubmitted,int droppedTasks) {
+            this(writeBackRan,playersSubmitted,droppedTasks,0,0,0,true,false);
+        }
+        boolean clean(){return writeBackRan && droppedTasks==0 && unregisteredFinals==0 && unsettledTransfers==0
+                && undeliveredFinalResults==0 && storageTerminated && !storageForceStopped;}
     }
+
+    private record StorageDrain(int droppedTasks,boolean terminated,boolean forceStopped) { }
 
     /**
      * 等在途交出 / 探测的结局在逻辑线程上处理完（生产实现是
@@ -74,17 +83,42 @@ final class SceneShutdown {
     static Result writeBackThenDrainStorage(ExecutorService logic, Callable<Integer> writeBack,
                                             TransferSettlement transfers, ExecutorService storage, Duration budget,
                                             IntSupplier approxPlayers, LongSupplier nanoClock) {
-        long deadline = nanoClock.getAsLong() + budget.toNanos();
-        Integer submitted = runWriteBack(logic, writeBack, budget, approxPlayers, deadline, nanoClock);
-        if (submitted != null) {
-            // 写回没执行（逻辑线程已停 / 积压到预算用完）时不等：结局送不到逻辑线程（已停时由存储线程兜底释放），或预算已无剩余
-            awaitTransfers(transfers, budget, deadline, nanoClock);
-        }
-        int dropped = drainStorage(storage, budget, deadline, nanoClock);
-        return new Result(submitted != null, submitted == null ? 0 : submitted, dropped);
+        return writeBackThenDrainStorage(logic,writeBack,transfers,TransferSettlement.NONE,storage,budget,
+                approxPlayers,nanoClock);
     }
 
-    private static void awaitTransfers(TransferSettlement transfers, Duration budget, long deadline,
+    static Result writeBackThenDrainStorage(ExecutorService logic,Callable<Integer> writeBack,
+                                            TransferSettlement transfers,TransferSettlement finalRegistrations,
+                                            ExecutorService storage,Duration budget,IntSupplier approxPlayers,
+                                            LongSupplier nanoClock) {
+        return writeBackThenDrainStorage(logic,writeBack,transfers,finalRegistrations,()->0,storage,budget,
+                approxPlayers,nanoClock);
+    }
+
+    static Result writeBackThenDrainStorage(ExecutorService logic,Callable<Integer> writeBack,
+                                            TransferSettlement transfers,TransferSettlement finalRegistrations,
+                                            IntSupplier undeliveredFinalResults,ExecutorService storage,Duration budget,
+                                            IntSupplier approxPlayers,LongSupplier nanoClock) {
+        long deadline = nanoClock.getAsLong() + budget.toNanos();
+        Integer submitted = runWriteBack(logic, writeBack, budget, approxPlayers, deadline, nanoClock);
+        int unsettled=0;
+        int unregistered=submitted==null?Math.max(1,approxPlayers.getAsInt()):0;
+        if (submitted != null) {
+            // 写回没执行（逻辑线程已停 / 积压到预算用完）时不等：结局送不到逻辑线程（已停时由存储线程兜底释放），或预算已无剩余
+            unsettled=awaitTransfers(transfers, budget, deadline, nanoClock);
+            try {unregistered=finalRegistrations.await(remaining(deadline,nanoClock));}
+            catch(InterruptedException interrupted){Thread.currentThread().interrupt();unregistered=1;}
+            if(unregistered>0)log.error("停服最终快照仍有 {} 份未取得SQL接管凭据，明确unclean；不得宣称RAM已持久化",unregistered);
+        }
+        StorageDrain drained = drainStorage(storage, budget, deadline, nanoClock);
+        // 最后一个存储任务可能在drain期间公布投递失败；必须在drain之后独立采样。
+        int undelivered=undeliveredFinalResults.getAsInt();
+        if(undelivered>0)log.error("最终SQL凭据与结果投递分别计数：仍有 {} 个结果未成功送达，停机明确unclean",undelivered);
+        return new Result(submitted != null, submitted == null ? 0 : submitted, drained.droppedTasks(),
+                unregistered,unsettled,undelivered,drained.terminated(),drained.forceStopped());
+    }
+
+    private static int awaitTransfers(TransferSettlement transfers, Duration budget, long deadline,
                                        LongSupplier nanoClock) {
         try {
             int unsettled = transfers.await(remaining(deadline, nanoClock));
@@ -92,8 +126,10 @@ final class SceneShutdown {
                 log.error("停服预算 {} 内仍有 {} 个跨节点交出 / 探测的结局没在逻辑线程上处理完，照常关存储线程池；"
                         + "其中交出若已提交，新 epoch 可能释放不了，等租约过期后可重新进入（库里是冻结快照，数据不丢）", budget, unsettled);
             }
+            return unsettled;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            return 1;
         }
     }
 
@@ -134,21 +170,24 @@ final class SceneShutdown {
         }
     }
 
-    private static int drainStorage(ExecutorService storage, Duration budget, long deadline, LongSupplier nanoClock) {
+    private static StorageDrain drainStorage(ExecutorService storage, Duration budget, long deadline, LongSupplier nanoClock) {
         storage.shutdown();
         try {
             if (storage.awaitTermination(remaining(deadline, nanoClock), TimeUnit.NANOSECONDS)) {
-                return 0;
+                return new StorageDrain(0,storage.isTerminated(),false);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
         List<Runnable> dropped = storage.shutdownNow();
-        log.error("存储任务未在 {} 内全部完成，丢弃剩余 {} 个（需人工修复）", budget, dropped.size());
+        boolean terminated=storage.isTerminated();
+        log.error("存储任务未在 {} 内确认排空，已请求强制关停；实际丢弃排队任务={} 已终止={}，停机明确unclean",
+                budget,dropped.size(),terminated);
         for (Runnable task : dropped) {
             StoragePlayerRepository.describeDropped(task).ifPresent(what -> log.error("停服丢弃：{}", what));
         }
-        return dropped.size();
+        // shutdownNow只返回排队任务；0不代表无在途SQL，也不能冒充线程池已经终止。
+        return new StorageDrain(dropped.size(),terminated,true);
     }
 
     private static long remaining(long deadline, LongSupplier nanoClock) {

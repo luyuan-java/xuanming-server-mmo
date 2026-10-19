@@ -228,6 +228,7 @@ SERVICES=(
   "game-mail 20916"         # 邮件：先等 gate 直连的 Dubbo 端口
   "game-rank 20917"         # 排行榜：先于 gate 启动
   "game-data 18106"
+  "game-inbox 20918"        # 收件箱：等待 Dubbo 就绪后，才启动各区的场景消费方
   "game-scene"              # 场景节点：起 GAME_SCENE_NODES 个实例，端口见下面的 SCENE_NODES；GAME_ZONES=2 时随后再起区 2 的 game-scene-z2
   "game-gate 11000"         # GAME_ZONES=2 时随后再起区 2 的 game-gate-z2（实例与端口见下面的 ZONE2_GATE）
   "game-gateway 18081"

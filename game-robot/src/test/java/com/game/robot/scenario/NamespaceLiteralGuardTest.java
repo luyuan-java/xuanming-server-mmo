@@ -30,8 +30,8 @@ import org.junit.jupiter.api.Test;
  *       别处一律构造器注入；</li>
  *   <li>R4：旧的进程级全局机制（静态 get / set、NamespaceHolder、EnvironmentPostProcessor / FailureAnalyzer、spring.factories、
  *       {@code @Tag("namespace")} 与 surefire 钉值）不回来；根 pom 的 surefire 排除会改变部署行为的环境变量（测试与开发者 shell 隔离，不是钉值）；</li>
- *   <li>R5：12 个进程的 JDBC URL 按缺省命名空间解析后与以前逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
- *       registry 的 namespace（缺省行为不变：由部署显式给，{@code GAME_NACOS_ADDR} 带 {@code ?namespace=} 或 {@code dubbo.registry.parameters.namespace}）；13 个进程都直接依赖 game-discovery；</li>
+ *   <li>R5：13 个进程的 JDBC URL 按缺省命名空间解析后与以前逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
+ *       registry 的 namespace（缺省行为不变：由部署显式给，{@code GAME_NACOS_ADDR} 带 {@code ?namespace=} 或 {@code dubbo.registry.parameters.namespace}）；各 Spring Boot 进程都直接依赖 game-discovery；</li>
  *   <li>R6：compose 预建哪个库由独立的 {@code GAME_MYSQL_INIT_DATABASE} 决定（没设取 game，空值 = 不预建），不读进程租户 {@code GAME_NAMESPACE}。</li>
  * </ul>
  * 切片脚本的命名空间校验与读回核对（R7）在 {@link SliceScriptsTest}。配置键 {@code game.}、环境变量 {@code GAME_}、包名、指标名、日志文案不跟命名空间走。
@@ -118,6 +118,9 @@ class NamespaceLiteralGuardTest {
             // 隔离 Dubbo 模块的应用名（不配注册中心、按节点直连）
             Map.entry("game-scene/src/main/java/com/game/scene/rpc/SceneRpcServer.java", Set.of("game-scene-asset")),
             Map.entry("game-scene/src/main/java/com/game/scene/transfer/SceneManagerSwitchTargets.java", Set.of("game-scene-switch")),
+            // 持久收件箱双方的NodeRpcClients隔离Dubbo应用名；不是Kafka topic/消费组/client.id，按文件精确登记。
+            Map.entry("game-inbox/src/main/java/com/game/inbox/InboxConfiguration.java", Set.of("game-inbox-scene")),
+            Map.entry("game-scene/src/main/java/com/game/scene/inbox/DubboInboxTransport.java", Set.of("game-scene-inbox")),
             Map.entry("game-battle/src/main/java/com/game/battle/admin/DevGatherConfiguration.java", Set.of("game-battle-dev-gather")),
             Map.entry("game-battle/src/main/java/com/game/battle/port/scene/SceneTransport.java", Set.of("game-battle-scene")),
             Map.entry("game-battle/src/main/java/com/game/battle/rpc/BattleRpcServer.java", Set.of("game-battle")),
@@ -327,7 +330,7 @@ class NamespaceLiteralGuardTest {
 
     // ================================================================ R5：yaml 与模块依赖
 
-    /** JDBC 完整模板金样：原 8 条不变，帮会已切 TiDB host/port，新补邮件、商城、排行榜；只替换库名占位符。 */
+    /** JDBC 完整模板金样：原 8 条不变，帮会已切 TiDB host/port，新补邮件、商城、排行榜与收件箱；只替换库名占位符。 */
     private static final Map<String, String> GOLDEN_JDBC_URLS = Map.ofEntries(
             Map.entry("game-data", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000"
                     + "&socketTimeout=30000&useAffectedRows=true"),
@@ -338,6 +341,9 @@ class NamespaceLiteralGuardTest {
                     + "&connectTimeout=3000&socketTimeout=10000"),
             Map.entry("game-guild", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
+            Map.entry("game-inbox", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
             Map.entry("game-login", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000"),
@@ -380,7 +386,7 @@ class NamespaceLiteralGuardTest {
     }
 
     @Test
-    void R5_十二个进程的JDBC_URL库名用命名空间占位符_缺省解析后与以前逐字节相同_别处yaml不引用命名空间() throws IOException {
+    void R5_十三个进程的JDBC_URL库名用命名空间占位符_缺省解析后与以前逐字节相同_别处yaml不引用命名空间() throws IOException {
         Map<String, String> found = new TreeMap<>();
         List<String> elsewhere = new ArrayList<>();
         applicationYamls().forEach((file, text) -> {
@@ -402,7 +408,7 @@ class NamespaceLiteralGuardTest {
             assertThat(raw.replace("${game.namespace:game}", "game")).as("%s 缺省解析后与以前逐字节相同", module)
                     .isEqualTo(GOLDEN_JDBC_URLS.get(module));
         });
-        assertThat(elsewhere).as("除 12 条 JDBC URL 之外 yaml 不引用 game.namespace：缺省值只在代码里（KafkaNames / RedisKeys）一个出处").isEmpty();
+        assertThat(elsewhere).as("除 13 条 JDBC URL 之外 yaml 不引用 game.namespace：缺省值只在代码里（KafkaNames / RedisKeys）一个出处").isEmpty();
     }
 
     @Test

@@ -70,8 +70,13 @@ class InstanceLifecycleTest {
 
     /** 新的老号对某场景发起进场（加载挂起，不完成）。 */
     private void startEnter(int sessionId, long playerId, long sceneId) {
-        f.repo.putSavedPlayer(playerId, 1, 1, SAVED);
-        f.world.onPlayerEnter(LINK, enterFrame(sessionId, playerId, sceneId, 1));
+        startEnter(sessionId, playerId, sceneId, 1);
+    }
+
+    // 最终退出封闭旧代；重进场夹具显式提供独立夺权所得的新代。
+    private void startEnter(int sessionId, long playerId, long sceneId, long ownerEpoch) {
+        f.repo.putSavedPlayer(playerId, ownerEpoch, 1, SAVED);
+        f.world.onPlayerEnter(LINK, enterFrame(sessionId, playerId, sceneId, ownerEpoch));
     }
 
     // ------------------------------------------------------------------ 8 空闲回收
@@ -203,7 +208,7 @@ class InstanceLifecycleTest {
         assertThat(mirror.playerCount()).isZero();
         f.tickSeconds(20);
 
-        startEnter(31, 1001, mirror.sceneId());
+        startEnter(31, 1001, mirror.sceneId(), 2);
         f.repo.completeAll();
 
         ScenePlayer back = f.world.playerById(1001);

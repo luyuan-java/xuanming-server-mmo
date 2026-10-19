@@ -74,6 +74,11 @@ class MissionFeatureTest {
     }
 
     private void start(PlayerState state, MissionTables tables) {
+        start(state, tables, 1);
+    }
+
+    // 最终退出封闭旧代；重进场夹具显式提供独立夺权所得的新代。
+    private void start(PlayerState state, MissionTables tables, long ownerEpoch) {
         BagService bags = new BagService(BagTables.from(MissionFixtures.SHIPPED), count -> {
             long[] out = new long[count];
             for (int i = 0; i < count; i++) {
@@ -91,9 +96,9 @@ class MissionFeatureTest {
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
                 List.of(new MissionFeature(service), new ActivityFeature(service)));
         Scene scene = world.createScene(1);
-        repo.put(new PlayerData(PLAYER, 1, 3, 1, "", 1, 0, Vec3.ORIGIN, state));
+        repo.put(new PlayerData(PLAYER, ownerEpoch, 3, 1, "", 1, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
-                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(1).build());
+                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(ownerEpoch).build());
         repo.completeAll();
         assertThat(player()).isNotNull();
         sink.clear();
@@ -351,7 +356,7 @@ class MissionFeatureTest {
         assertThat(save.state().getMission().getClaimableIdsList()).containsExactly(12);
 
         sink.clear();
-        start(save.state());
+        start(save.state(), MissionFixtures.shippedTables(), save.ownerEpoch() + 1);
         assertThat(list()).isEqualTo(before);
     }
 

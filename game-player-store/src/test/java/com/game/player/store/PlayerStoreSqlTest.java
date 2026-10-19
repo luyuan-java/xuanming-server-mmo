@@ -3,7 +3,11 @@ package com.game.player.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.alibaba.druid.pool.DruidDataSource;
+import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 import com.game.player.store.PlayerStore.ClaimResult;
+import com.game.player.store.PlayerStore.FinalSaveReceipt;
+import com.game.player.store.PlayerStore.FinalSaveStatus;
 import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.PlayerStore.HandOffResult;
 import com.game.player.store.state.BattleLedgerEntry;
@@ -52,6 +56,7 @@ class PlayerStoreSqlTest {
      * 口令取环境变量 GAME_MYSQL_PASSWORD），否则用 H2 的 MySQL 兼容模式。
      */
     private static final String MYSQL_URL = System.getProperty("game.it.mysql");
+    private static final boolean REQUIRE_TIDB = Boolean.getBoolean("game.it.require-tidb");
     private static final java.util.Queue<String> MYSQL_DATABASES = new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     private AnnotationConfigApplicationContext context;
@@ -70,12 +75,56 @@ class PlayerStoreSqlTest {
     }
 
     @AfterEach
-    void tearDown() {
-        DataSource ds = context.getBean(DataSource.class);
-        context.close();
-        for (String database = MYSQL_DATABASES.poll(); database != null; database = MYSQL_DATABASES.poll()) {
-            new JdbcTemplate(ds).execute("DROP DATABASE IF EXISTS " + database);
+    void tearDown() throws Exception {
+        if (!REQUIRE_TIDB) {
+            DataSource ds = context.getBean(DataSource.class);
+            context.close();
+            for (String database = MYSQL_DATABASES.poll(); database != null; database = MYSQL_DATABASES.poll()) {
+                new JdbcTemplate(ds).execute("DROP DATABASE IF EXISTS " + database);
+            }
+            return;
         }
+        // 初始化失败也清理已经登记的本用例库；保留首错及独立清理错误。
+        Throwable failure = null;
+        try { if (context != null) context.close(); } catch (Throwable closeFailure) { failure = closeFailure; }
+        for (String database = MYSQL_DATABASES.poll(); database != null; database = MYSQL_DATABASES.poll()) {
+            try { dropStrictDatabase(database); } catch (Throwable cleanup) {
+                if (failure == null) failure = cleanup; else failure.addSuppressed(cleanup);
+            }
+        }
+        if (failure instanceof Error error) throw error;
+        if (failure instanceof Exception exception) throw exception;
+    }
+
+    private static java.sql.Connection strictAdmin() throws java.sql.SQLException {
+        if (MYSQL_URL == null || !MYSQL_URL.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?")) {
+            throw new IllegalStateException("强TiDB回归必须显式指定本会话本机测试端口，拒绝H2或其它库");
+        }
+        var connection = java.sql.DriverManager.getConnection(MYSQL_URL.replaceAll("/$", "")
+                + "/?connectTimeout=3000&socketTimeout=10000", System.getProperty("game.it.mysql.user", "root"),
+                System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
+        try {
+            try (var statement = connection.createStatement()) { statement.execute(StrongTiDbConnectionPolicy.SESSION_SQL); }
+            StrongTiDbConnectionPolicy.verify(connection, true);
+            return connection;
+        } catch (java.sql.SQLException | RuntimeException | Error failure) {
+            try { connection.close(); } catch (java.sql.SQLException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
+    }
+
+    private static void dropStrictDatabase(String database) throws java.sql.SQLException {
+        if (!database.matches("game_it_[0-9a-f]{32}")) throw new java.sql.SQLException("拒绝清理非本用例随机库");
+        try (var connection = strictAdmin(); var statement = connection.createStatement()) {
+            statement.execute("DROP DATABASE IF EXISTS " + database);
+            try (var query = connection.prepareStatement("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?")) {
+                query.setString(1, database);
+                try (var rows = query.executeQuery()) {
+                    if (!rows.next() || rows.getInt(1) != 0) throw new java.sql.SQLException("玩家测试随机库清理后仍存在");
+                }
+            }
+        }
+        System.out.println("玩家强TiDB随机库清理并复核0=" + database);
     }
 
     private long newPlayer(long playerId, String name) {
@@ -100,6 +149,649 @@ class PlayerStoreSqlTest {
     }
 
     // ================================================================ 归属协议
+
+    private static final String FINAL_SOURCE = "00000000-0000-0000-0000-000000000001";
+    private static final String OTHER_SOURCE = "00000000-0000-0000-0000-000000000002";
+
+    private long finalSavePlayer(long id, String name) {
+        long p = newPlayer(id, name);
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        assertThat(store.loadForScene(p, 1, FINAL_SOURCE, TX_TIMEOUT)).isPresent();
+        assertThat(store.saveStateHeld(save(p, 1, 1, 1), facing(0.1))).isTrue();
+        return p;
+    }
+
+    private String finalStatus(long playerId, long epoch) {
+        return jdbc().queryForObject("SELECT status FROM player_final_save WHERE player_id = ? AND owner_epoch = ?",
+                String.class, playerId, epoch);
+    }
+
+    private byte[] stateBytes(long playerId) {
+        return jdbc().queryForObject("SELECT data FROM player_state WHERE player_id = ?",
+                (rs, ignored) -> rs.getBytes(1), playerId);
+    }
+
+    private FinalSaveReceipt registerFinal(long playerId) {
+        return store.registerFinalSave(save(playerId, 1, 2, 42.5), facing(0.9).toByteArray(), FINAL_SOURCE, TX_TIMEOUT);
+    }
+
+    @Test
+    void 最终登记先独立提交完整待办_不提前改玩法状态或冒APPLIED() {
+        long p = finalSavePlayer(1901, "终存甲");
+        FinalSaveReceipt accepted = registerFinal(p);
+
+        assertThat(accepted.status()).isEqualTo(FinalSaveStatus.ACCEPTED);
+        assertThat(accepted.playerId()).isEqualTo(p);
+        assertThat(accepted.ownerEpoch()).isEqualTo(1);
+        assertThat(accepted.saveSeq()).isEqualTo(1);
+        assertThat(accepted.sourceInstance()).isEqualTo(FINAL_SOURCE);
+        assertThat(accepted.payloadDigest()).hasSize(64);
+        assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+        assertThat(store.loadState(p)).as("TX1 只是接管，尚未到账 player_state").isEqualTo(facing(0.1));
+        assertThat(store.findPlayer(p).orElseThrow().getPosX()).isEqualTo(1);
+        assertThat(owner(p).released()).isFalse();
+
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(finalStatus(p, 1)).isEqualTo("APPLIED");
+        assertThat(store.loadState(p)).isEqualTo(facing(0.9));
+        assertThat(store.findPlayer(p).orElseThrow().getPosX()).isEqualTo(42.5);
+        assertThat(savedEpoch(p)).isEqualTo(1);
+        assertThat(owner(p).released()).isTrue();
+    }
+
+    @Test
+    void state点锁不阻最终登记_TX2等待期间SQL待办已能被独立连接读到() throws Exception {
+        long p = finalSavePlayer(1902, "终存乙");
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Void> holder = holdRowLock(() -> jdbc().queryForObject(
+                "SELECT player_id FROM player_state WHERE player_id = ? FOR UPDATE", Long.class, p), locked, release, false);
+        assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+        CompletableFuture<FinalSaveReceipt> applying = null;
+        try {
+            assertThat(registerFinal(p).status()).as("TX1 不接触被点锁的 player_state").isEqualTo(FinalSaveStatus.ACCEPTED);
+            applying = CompletableFuture.supplyAsync(() -> store.completeFinalSave(p, 1, Duration.ofSeconds(10)));
+            CompletableFuture<FinalSaveReceipt> waiting = applying;
+            assertThatThrownBy(() -> waiting.get(250, TimeUnit.MILLISECONDS))
+                    .as("完成事务受第二表锁阻挡，不能在第一表 ACK 后冒成功")
+                    .isInstanceOf(java.util.concurrent.TimeoutException.class);
+            assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+            assertThat(stateBytes(p)).containsExactly(facing(0.1).toByteArray());
+        } finally {
+            release.countDown();
+            holder.get(15, TimeUnit.SECONDS);
+            if (applying != null) {
+                assertThat(applying.get(15, TimeUnit.SECONDS).status()).isEqualTo(FinalSaveStatus.APPLIED);
+            }
+        }
+        assertThat(stateBytes(p)).containsExactly(facing(0.9).toByteArray());
+        assertThat(owner(p).released()).isTrue();
+    }
+
+    @Test
+    void state点锁导致TX2预算耗尽_原待办保持PENDING_释放锁后新事务完成() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(MYSQL_URL != null,
+                "H2 行锁等待不遵守 JDBC 查询超时，本例需要真实 MySQL/TiDB");
+        long p = finalSavePlayer(1903, "终存丙");
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Void> holder = holdRowLock(() -> jdbc().queryForObject(
+                "SELECT player_id FROM player_state WHERE player_id = ? FOR UPDATE", Long.class, p), locked, release, false);
+        assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+        try {
+            assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.ACCEPTED);
+            assertThat(store.completeFinalSave(p, 1, Duration.ofSeconds(1)).status()).isEqualTo(FinalSaveStatus.TIMED_OUT);
+            assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+            assertThat(owner(p).released()).isFalse();
+            assertThat(stateBytes(p)).containsExactly(facing(0.1).toByteArray());
+        } finally {
+            release.countDown();
+            holder.get(15, TimeUnit.SECONDS);
+        }
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(stateBytes(p)).containsExactly(facing(0.9).toByteArray());
+    }
+
+    @Test
+    void 登记提交后丢弃应答_独立Store按原键与来源认回同一凭据_只留一条待办() {
+        long p = finalSavePlayer(1904, "终存丁");
+        registerFinal(p); // 模拟调用者没有收到这个事务的结果；不冒网络故障或真进程重启。
+        PlayerStore other = new PlayerStore(mapper, CLOCK::get, context.getBean(PlatformTransactionManager.class));
+        FinalSaveReceipt probed = other.probeFinalSave(p, 1, TX_TIMEOUT);
+        FinalSaveReceipt retried = other.registerFinalSave(save(p, 1, 2, 42.5), facing(0.9).toByteArray(),
+                FINAL_SOURCE, TX_TIMEOUT);
+
+        assertThat(probed.status()).isEqualTo(FinalSaveStatus.ACCEPTED);
+        assertThat(retried).isEqualTo(probed);
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_final_save WHERE player_id = ?", Long.class, p))
+                .isEqualTo(1);
+        assertThat(other.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(other.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(other.probeFinalSave(p, 1, TX_TIMEOUT).payloadDigest()).isEqualTo(probed.payloadDigest());
+    }
+
+    @Test
+    void 同一最终键不同bytes或标量或来源明确冲突_不覆盖原凭据() {
+        long p = finalSavePlayer(1905, "终存戊");
+        FinalSaveReceipt original = registerFinal(p);
+        assertThat(store.registerFinalSave(save(p, 1, 2, 42.5), facing(8).toByteArray(), FINAL_SOURCE, TX_TIMEOUT).status())
+                .isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(store.registerFinalSave(save(p, 1, 2, 42.6), facing(0.9).toByteArray(), FINAL_SOURCE, TX_TIMEOUT).status())
+                .isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(store.registerFinalSave(save(p, 1, 2, 42.5), facing(0.9).toByteArray(), OTHER_SOURCE, TX_TIMEOUT).status())
+                .isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT)).isEqualTo(original);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(store.loadState(p)).isEqualTo(facing(0.9));
+    }
+
+    @Test
+    void 最终应用保留未知字段原bytes_重复应用不再次修改更新时间() throws Exception {
+        long p = finalSavePlayer(1906, "终存己");
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        bytes.write(facing(0.9).toByteArray());
+        com.google.protobuf.CodedOutputStream coded = com.google.protobuf.CodedOutputStream.newInstance(bytes);
+        coded.writeUInt64(18_001, 77);
+        coded.flush();
+        byte[] frozen = bytes.toByteArray();
+        assertThat(store.registerFinalSave(save(p, 1, 2, 42.5), frozen, FINAL_SOURCE, TX_TIMEOUT).status())
+                .isEqualTo(FinalSaveStatus.ACCEPTED);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        long updatedAt = store.findPlayer(p).orElseThrow().getUpdatedAt();
+        CLOCK.addAndGet(17);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(stateBytes(p)).as("直接复制冻结原字节，不能 parse/reserialize 丢掉未来字段").containsExactly(frozen);
+        assertThat(store.loadState(p).getUnknownFields().hasField(18_001)).isTrue();
+        assertThat(store.findPlayer(p).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+    }
+
+    @Test
+    void PENDING门禁拒绝在线写裸释放handoff与历史恢复_普通claim不能读旧态() {
+        long p = finalSavePlayer(1907, "终存庚");
+        registerFinal(p);
+        assertThat(store.saveStateHeld(save(p, 1, 9, 99), facing(9))).isFalse();
+        assertThatThrownBy(() -> store.saveStateAndRelease(save(p, 1, 9, 99), facing(9)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(store.releaseOwnership(p, 1)).isFalse();
+        CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() + 1);
+        assertThat(store.recoverOwnershipAfterRestore(p, 20, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
+        assertThat(owner(p).ownerEpoch()).isEqualTo(1);
+        ClaimResult result = store.claimOwnership(p);
+        if (result instanceof ClaimResult.Claimed claimed) {
+            assertThat(claimed.ownerEpoch()).isEqualTo(2);
+            assertThat(store.loadState(p)).isEqualTo(facing(0.9));
+            assertThat(finalStatus(p, 1)).isEqualTo("APPLIED");
+        } else {
+            assertThat(result).isEqualTo(new ClaimResult.Held(1));
+            assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+        }
+    }
+
+    @Test
+    void PENDING的handoff可先完成原终态但不得用迟到快照交出新代() {
+        for (HandOffMode mode : HandOffMode.values()) {
+            long p = finalSavePlayer(1920 + mode.ordinal(), "终交" + mode.ordinal());
+            registerFinal(p);
+            assertThat(handOff(p, 1, 9, 99, facing(9), mode)).isNotInstanceOf(HandOffResult.HandedOff.class);
+            assertThat(owner(p).ownerEpoch()).isEqualTo(1);
+            if (finalStatus(p, 1).equals("APPLIED")) {
+                assertThat(store.loadState(p)).isEqualTo(facing(0.9));
+            } else {
+                assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+                assertThat(store.loadState(p)).isEqualTo(facing(0.1));
+            }
+        }
+    }
+
+    @Test
+    void 无意图的兼容最终写已经释放后_迟到同E不同payload不能再覆盖() {
+        long p=newPlayer(1980,"旧签名终态");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        assertThat(store.saveStateAndRelease(save(p,1,2,42.5),facing(0.9))).isTrue();
+        assertThat(store.saveStateAndRelease(save(p,1,3,99),facing(0.2))).isFalse();
+        assertThat(stateBytes(p)).containsExactly(facing(0.9).toByteArray());
+        assertThat(owner(p).released()).isTrue();
+    }
+
+    @Test
+    void APPLIED后同E迟到兼容最终写不能盖掉终态_同payload无来源也不能冒原请求() {
+        long p = finalSavePlayer(1908, "终存辛");
+        FinalSaveReceipt accepted = registerFinal(p);
+        store.completeFinalSave(p, 1, TX_TIMEOUT);
+        List<Object> before = everything(p);
+        assertThatThrownBy(() -> store.saveStateAndRelease(save(p, 1, 9, 99), facing(9)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> store.saveStateAndRelease(save(p, 1, 2, 42.5), facing(0.9)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(store.saveStateHeld(save(p, 1, 9, 99), facing(9))).isFalse();
+        assertThat(store.registerFinalSave(save(p, 1, 2, 42.5), facing(0.9).toByteArray(), OTHER_SOURCE, TX_TIMEOUT).status())
+                .isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(everything(p)).isEqualTo(before);
+        assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).payloadDigest()).isEqualTo(accepted.payloadDigest());
+    }
+
+    @Test
+    void OPEN绑定本实例且不释放_跨实例同E加载拒绝_无最终意图仍保留原TTL接管() {
+        long p = finalSavePlayer(1909, "终存壬");
+        assertThat(finalStatus(p, 1)).isEqualTo("OPEN");
+        assertThat(store.loadForScene(p, 1, FINAL_SOURCE, TX_TIMEOUT)).isPresent();
+        assertThat(store.loadForScene(p, 1, OTHER_SOURCE, TX_TIMEOUT)).isEmpty();
+        assertThat(store.releaseOwnership(p, 1)).as("已准入实例不能被迟到login裸释放").isFalse();
+        CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis());
+        assertThat(store.claimOwnership(p)).as("恰好租约到期仍持有").isEqualTo(new ClaimResult.Held(1));
+        CLOCK.incrementAndGet();
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.loadForScene(p, 1, FINAL_SOURCE, TX_TIMEOUT)).isEmpty();
+        assertThat(store.loadForScene(p, 2, OTHER_SOURCE, TX_TIMEOUT)).isPresent();
+        assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.FENCED);
+        assertThat(owner(p).ownerEpoch()).isEqualTo(2);
+    }
+
+    @Test
+    void PENDING与APPLIED及释放后的同E均不能重新加载_新E照常准入() {
+        long p = finalSavePlayer(1910, "终存癸");
+        registerFinal(p);
+        assertThat(store.loadForScene(p, 1, FINAL_SOURCE, TX_TIMEOUT)).isEmpty();
+        store.completeFinalSave(p, 1, TX_TIMEOUT);
+        assertThat(store.loadForScene(p, 1, FINAL_SOURCE, TX_TIMEOUT)).isEmpty();
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        var loaded = store.loadForScene(p, 2, OTHER_SOURCE, TX_TIMEOUT).orElseThrow();
+        assertThat(loaded.row().getOwnerEpoch()).isEqualTo(2);
+        assertThat(loaded.row().getPosX()).isEqualTo(42.5);
+        assertThat(loaded.state()).isEqualTo(facing(0.9));
+    }
+
+    @Test
+    void 损坏或原epoch已被外部改动的PENDING不删除不改绑也不写回() {
+        long p = finalSavePlayer(1911, "终存子");
+        registerFinal(p);
+        jdbc().update("UPDATE player_final_save SET data = ? WHERE player_id = ? AND owner_epoch = 1", facing(8).toByteArray(), p);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+        assertThat(store.loadState(p)).isEqualTo(facing(0.1));
+        jdbc().update("UPDATE player_final_save SET data = ? WHERE player_id = ? AND owner_epoch = 1", facing(0.9).toByteArray(), p);
+        jdbc().update("UPDATE player SET owner_epoch = 2 WHERE player_id = ?", p);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.FENCED);
+        assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+        assertThat(jdbc().queryForObject("SELECT source_instance FROM player_final_save WHERE player_id = ? AND owner_epoch = 1",
+                String.class, p)).isEqualTo(FINAL_SOURCE);
+        assertThat(store.loadState(p)).isEqualTo(facing(0.1));
+    }
+
+    @Test
+    void 没有意图的精确探测返回NOT_FOUND_不能捏造持久凭据() {
+        long p = newPlayer(1912, "终存丑");
+        assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.NOT_FOUND);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.NOT_FOUND);
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+    }
+
+    @Test
+    void OPEN只存准入身份_不伪造最终快照或摘要() {
+        long p = finalSavePlayer(1913, "终存寅");
+        var admission = jdbc().queryForMap("SELECT status, source_instance, data, payload_digest FROM player_final_save "
+                + "WHERE player_id = ? AND owner_epoch = 1", p);
+        assertThat(admission.get("status")).isEqualTo("OPEN");
+        assertThat(admission.get("source_instance")).isEqualTo(FINAL_SOURCE);
+        assertThat(admission.get("data")).isNull();
+        assertThat(admission.get("payload_digest")).isNull();
+        assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).status()).as("OPEN 不能认成已登记最终态")
+                .isNotIn(FinalSaveStatus.ACCEPTED, FinalSaveStatus.APPLIED);
+    }
+
+    @Test
+    void 两个补偿事务竞争同一最终键_最终只应用同一份原始快照() throws Exception {
+        long p = finalSavePlayer(1914, "终存卯");
+        FinalSaveReceipt accepted = registerFinal(p);
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.CyclicBarrier start = new java.util.concurrent.CyclicBarrier(2);
+            java.util.concurrent.Future<FinalSaveReceipt> first = pool.submit(() -> {
+                start.await();
+                return store.completeFinalSave(p, 1, TX_TIMEOUT);
+            });
+            java.util.concurrent.Future<FinalSaveReceipt> second = pool.submit(() -> {
+                start.await();
+                return store.completeFinalSave(p, 1, TX_TIMEOUT);
+            });
+            assertThat(first.get(15, TimeUnit.SECONDS).status()).isEqualTo(FinalSaveStatus.APPLIED);
+            assertThat(second.get(15, TimeUnit.SECONDS).status()).isEqualTo(FinalSaveStatus.APPLIED);
+            assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).payloadDigest()).isEqualTo(accepted.payloadDigest());
+            assertThat(stateBytes(p)).containsExactly(facing(0.9).toByteArray());
+            assertThat(savedEpoch(p)).isEqualTo(1);
+            assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        } finally {
+            pool.shutdownNow();
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void 登记语句已执行但调用截止已到_整个TX1回滚_OPEN仍不是持久最终凭据() {
+        long p = finalSavePlayer(1915, "终存辰");
+        AtomicLong nanos = new AtomicLong();
+        PlayerMapper delayed = observed(method -> {
+            if (method.equals("registerOpenFinalSave")) {
+                nanos.addAndGet(BUDGET.toNanos());
+            }
+        });
+        PlayerStore timed = timedStore(delayed, nanos);
+        assertThat(timed.registerFinalSave(save(p, 1, 2, 42.5), facing(0.9).toByteArray(), FINAL_SOURCE, BUDGET).status())
+                .isEqualTo(FinalSaveStatus.TIMED_OUT);
+        assertThat(finalStatus(p, 1)).isEqualTo("OPEN");
+        assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).status()).isNotIn(FinalSaveStatus.ACCEPTED, FinalSaveStatus.APPLIED);
+        assertThat(stateBytes(p)).containsExactly(facing(0.1).toByteArray());
+        assertThat(owner(p).released()).isFalse();
+    }
+
+    @Test
+    void 登记与完成不许加入调用者外层事务_避免把两阶段重新合成一次提交() {
+        long p = finalSavePlayer(1916, "终存巳");
+        assertThatThrownBy(() -> tx.executeWithoutResult(ignored -> registerFinal(p)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(finalStatus(p, 1)).isEqualTo("OPEN");
+        registerFinal(p);
+        assertThatThrownBy(() -> tx.executeWithoutResult(ignored -> store.completeFinalSave(p, 1, TX_TIMEOUT)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+        assertThat(owner(p).released()).isFalse();
+    }
+
+    @Test
+    void 补偿延后只改调度元数据_不能删除待办改绑来源或让OPEN混入扫描() {
+        long first = finalSavePlayer(1917, "终存午");
+        long second = finalSavePlayer(1918, "终存未");
+        long open = finalSavePlayer(1919, "终存申");
+        FinalSaveReceipt original = registerFinal(first);
+        registerFinal(second);
+        assertThat(store.dueFinalSaves(CLOCK.get(), 1))
+                .containsExactly(new PlayerStore.FinalSaveKey(first, 1));
+        store.postponeFinalSave(first, 1, CLOCK.get() + 100, "sql_timeout", TX_TIMEOUT);
+        assertThat(store.dueFinalSaves(CLOCK.get(), 32))
+                .containsExactly(new PlayerStore.FinalSaveKey(second, 1));
+        assertThat(store.probeFinalSave(first, 1, TX_TIMEOUT)).isEqualTo(original);
+        assertThat(finalStatus(first, 1)).isEqualTo("PENDING");
+        assertThat(finalStatus(open, 1)).isEqualTo("OPEN");
+        assertThat(jdbc().queryForObject("SELECT attempt_count FROM player_final_save WHERE player_id = ? AND owner_epoch = 1",
+                Long.class, first)).isEqualTo(1);
+        CLOCK.addAndGet(100);
+        assertThat(store.dueFinalSaves(CLOCK.get(), 32))
+                .containsExactly(new PlayerStore.FinalSaveKey(second, 1), new PlayerStore.FinalSaveKey(first, 1));
+        assertThatThrownBy(() -> store.dueFinalSaves(CLOCK.get(), 33)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 未知NULL或宽松等值状态逐字节隔离_不能按TTL夺权恢复在线写或加载() {
+        long p=finalSavePlayer(1940,"隔离状态甲");
+        registerFinal(p);
+        // 故意破坏存量结构；启动M14本会拒启，这里证明已运行实例也不能把NULL当合法终态。
+        jdbc().execute(MYSQL_URL==null
+                ? "ALTER TABLE player_final_save ALTER COLUMN status DROP NOT NULL"
+                : "ALTER TABLE player_final_save MODIFY status VARCHAR(16) NULL");
+        CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis()+1);
+        byte[] before=stateBytes(p);
+        for(String broken:java.util.Arrays.asList("BROKEN","pending","PENDING ","open","OPEN ","applied","APPLIED ",null)) {
+            jdbc().update("UPDATE player_final_save SET status=? WHERE player_id=? AND owner_epoch=1",broken,p);
+            assertThat(store.claimOwnership(p)).as("状态="+broken).isEqualTo(new ClaimResult.Held(1));
+            assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
+            assertThat(store.recoverOwnershipAfterRestore(p,20,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
+            assertThat(store.loadForScene(p,1,FINAL_SOURCE,TX_TIMEOUT)).isEmpty();
+            assertThat(store.saveStateHeld(save(p,1,2,99),facing(9))).isFalse();
+            assertThat(store.releaseOwnership(p,1)).isFalse();
+            assertThatThrownBy(()->store.saveStateAndRelease(save(p,1,2,99),facing(9)))
+                    .isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(()->handOff(p,1,2,99,facing(9))).isInstanceOf(IllegalStateException.class);
+            assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+            assertThat(store.completeFinalSave(p,1,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+            assertThat(store.probeFinalSave(p,1,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+            assertThat(store.dueFinalSaves(CLOCK.get(),32)).isEmpty();
+            assertThat(finalStatus(p,1)).isEqualTo(broken);
+            assertThat(owner(p).ownerEpoch()).isEqualTo(1);
+            assertThat(owner(p).released()).isFalse();
+            assertThat(stateBytes(p)).containsExactly(before);
+        }
+    }
+
+    @Test
+    void 异E未知意图也阻断全部入口_大小写尾空格不能被旧终态清理删除() {
+        long p=finalSavePlayer(1941,"隔离状态乙");registerFinal(p);
+        jdbc().update("UPDATE player SET owner_epoch=2,owner_released=1,owner_lease_until=0 WHERE player_id=?",p);
+        CLOCK.addAndGet(100_000);
+        byte[] before=stateBytes(p);
+        for(String broken:List.of("BROKEN","open","OPEN ","applied","APPLIED ")) {
+            jdbc().update("UPDATE player_final_save SET status=?,applied_at=1 WHERE player_id=? AND owner_epoch=1",broken,p);
+            assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
+            assertThat(store.recoverOwnershipAfterRestore(p,20,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
+            assertThat(store.loadForScene(p,2,OTHER_SOURCE,TX_TIMEOUT)).isEmpty();
+            assertThat(store.saveStateHeld(save(p,2,2,99),facing(9))).isFalse();
+            assertThat(store.saveStateAndRelease(save(p,2,2,99),facing(9))).isFalse();
+            assertThat(store.releaseOwnership(p,2)).isFalse();
+            assertThatThrownBy(()->handOff(p,2,2,99,facing(9))).isInstanceOf(IllegalStateException.class);
+            assertThat(store.registerFinalSave(save(p,2,2,99),facing(9).toByteArray(),OTHER_SOURCE,TX_TIMEOUT).status())
+                    .isEqualTo(FinalSaveStatus.CONFLICT);
+            assertThat(store.cleanRetiredFinalSaves(CLOCK.get(),32,TX_TIMEOUT)).isZero();
+            assertThat(finalStatus(p,1)).isEqualTo(broken);
+            assertThat(owner(p).ownerEpoch()).isEqualTo(2);
+            assertThat(stateBytes(p)).containsExactly(before);
+        }
+    }
+
+    @Test
+    void 当前E合法PENDING也不能帮助完成后绕过另一代未知意图() {
+        long p=finalSavePlayer(1942,"隔离状态丙");registerFinal(p);
+        assertThat(store.completeFinalSave(p,1,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        byte[] later=facing(2).toByteArray();
+        assertThat(store.registerFinalSave(save(p,2,2,99),later,OTHER_SOURCE,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.ACCEPTED);
+        // 故障注入一个更大E的损坏记录，让合法PENDING在按epoch排序时排在前面。
+        jdbc().update("UPDATE player_final_save SET owner_epoch=3,status='BROKEN' WHERE player_id=? AND owner_epoch=1",p);
+        assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
+        assertThat(store.completeFinalSave(p,2,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(finalStatus(p,2)).isEqualTo("PENDING");
+        assertThat(finalStatus(p,3)).isEqualTo("BROKEN");
+        assertThat(owner(p).ownerEpoch()).isEqualTo(2);
+        assertThat(stateBytes(p)).containsExactly(facing(0.9).toByteArray());
+    }
+
+    @Test
+    void 真SQL_uint32高位配置完整写入读回_独立接管摘要与最终原bytes一致() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(MYSQL_URL!=null,"H2的INT UNSIGNED按有符号INT处理；高位边界须真MySQL或TiDB");
+        int offset=0;
+        for(int config:new int[]{Integer.MIN_VALUE,-1}) {
+            long p=1950+offset++;
+            PlayerRow created=freshRow(p);created.setSceneConfigId(config);
+            assertThat(store.createPlayerWithinCap(created,5,List.of("高位配置"+p)).status()).isEqualTo(PlayerStore.CreateStatus.CREATED);
+            assertThat(store.findPlayer(p).orElseThrow().getSceneConfigId()).isEqualTo(config);
+            assertThat(store.listPlayers(ACCOUNT).stream().filter(row->row.getPlayerId()==p).findFirst().orElseThrow().getSceneConfigId()).isEqualTo(config);
+            assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+            if(config==Integer.MIN_VALUE)assertThat(store.loadForScene(p,1,FINAL_SOURCE,TX_TIMEOUT)).isPresent();
+            PlayerRow frozen=save(p,1,config,42.5);byte[] bytes=facing(0.9).toByteArray();
+            assertThat(store.saveStateHeld(frozen,facing(0.1))).isTrue();
+            var accepted=store.registerFinalSave(frozen,bytes,FINAL_SOURCE,TX_TIMEOUT);
+            assertThat(accepted.status()).isEqualTo(FinalSaveStatus.ACCEPTED);
+            assertThat(jdbc().queryForObject("SELECT scene_config_id FROM player_final_save WHERE player_id=? AND owner_epoch=1",Long.class,p))
+                    .isEqualTo(Integer.toUnsignedLong(config));
+            PlayerStore independent=new PlayerStore(mapper,CLOCK::get,context.getBean(PlatformTransactionManager.class));
+            assertThat(independent.registerFinalSave(frozen,bytes,FINAL_SOURCE,TX_TIMEOUT)).isEqualTo(accepted);
+            assertThat(accepted.payloadDigest()).isEqualTo(java.util.HexFormat.of().formatHex(PlayerStore.finalSaveDigest(frozen,bytes)));
+            assertThat(independent.completeFinalSave(p,1,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+            assertThat(stateBytes(p)).containsExactly(bytes);
+            assertThat(jdbc().queryForObject("SELECT scene_config_id FROM player WHERE player_id=?",Long.class,p))
+                    .isEqualTo(Integer.toUnsignedLong(config));
+            assertThat(store.findPlayer(p).orElseThrow().getSceneConfigId()).isEqualTo(config);
+            assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+            assertThat(store.handOffOwnership(save(p,2,config,50),facing(1),CLOCK.get()+60_000,CLOCK.get(),TX_TIMEOUT))
+                    .isInstanceOf(HandOffResult.HandedOff.class);
+            assertThat(store.saveStateAndRelease(save(p,3,config,51),facing(2))).isTrue();
+            assertThat(store.findPlayer(p).orElseThrow().getSceneConfigId()).isEqualTo(config);
+            assertThat(jdbc().queryForObject("SELECT scene_config_id FROM player WHERE player_id=?",Long.class,p))
+                    .isEqualTo(Integer.toUnsignedLong(config));
+        }
+    }
+
+    @Test
+    void SQL意图状态或来源损坏不被原payload重投冒认为持久接管成功() {
+        long p = finalSavePlayer(1922, "终存酉");
+        registerFinal(p);
+        jdbc().update("UPDATE player_final_save SET status = 'BROKEN' WHERE player_id = ? AND owner_epoch = 1", p);
+        assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(stateBytes(p)).containsExactly(facing(0.1).toByteArray());
+        jdbc().update("UPDATE player_final_save SET status = 'PENDING', source_instance = 'bad source' "
+                + "WHERE player_id = ? AND owner_epoch = 1", p);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+        assertThat(stateBytes(p)).containsExactly(facing(0.1).toByteArray());
+        assertThat(owner(p).released()).isFalse();
+    }
+
+    @Test
+    void 意图版本或seq被外部改坏_保留原行并冲突不能降级认重() {
+        long p = finalSavePlayer(1923, "终存戌");
+        registerFinal(p);
+        jdbc().update("UPDATE player_final_save SET save_seq = 2 WHERE player_id = ? AND owner_epoch = 1", p);
+        assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        jdbc().update("UPDATE player_final_save SET save_seq = 1, protocol_version = 2 WHERE player_id = ? AND owner_epoch = 1", p);
+        assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
+        assertThat(stateBytes(p)).containsExactly(facing(0.1).toByteArray());
+        assertThat(owner(p).released()).isFalse();
+    }
+
+    @Test
+    void 新E已提交新状态后旧APPLIED凭据仍可核对_重探重投不重新执行旧快照() {
+        long p = finalSavePlayer(1924, "终存亥");
+        FinalSaveReceipt original = registerFinal(p);
+        store.completeFinalSave(p, 1, TX_TIMEOUT);
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.loadForScene(p, 2, OTHER_SOURCE, TX_TIMEOUT)).isPresent();
+        assertThat(store.saveStateHeld(save(p, 2, 5, 99), facing(5))).isTrue();
+        List<Object> newer = everything(p);
+        FinalSaveReceipt recognized = registerFinal(p);
+        assertThat(recognized.status()).isEqualTo(FinalSaveStatus.APPLIED);
+        assertThat(recognized.payloadDigest()).isEqualTo(original.payloadDigest());
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT)).isEqualTo(recognized);
+        assertThat(everything(p)).as("旧凭据只作认重，不再写回新一代状态").isEqualTo(newer);
+        assertThat(savedEpoch(p)).isEqualTo(2);
+    }
+
+    @Test
+    void M14共同schema门禁接受正式脚本且缺表明确拒启() throws Exception {
+        try (var connection = context.getBean(DataSource.class).getConnection()) {
+            PlayerSqlAuthorityAutoConfiguration.verifyFinalSaveSchema(connection);
+            jdbc().execute("DROP TABLE player_final_save");
+            assertThatThrownBy(() -> PlayerSqlAuthorityAutoConfiguration.verifyFinalSaveSchema(connection))
+                    .isInstanceOf(java.sql.SQLException.class);
+        }
+    }
+
+    @Test
+    void M14不能只认同名索引_游标完整列序与复合主键必须准确() throws Exception {
+        recreateFinalTable(sql -> sql.replace("KEY idx_final_save_due (status, next_attempt_at, player_id, owner_epoch)",
+                "KEY idx_final_save_due (player_id, next_attempt_at, status, owner_epoch)"));
+        try (var connection = context.getBean(DataSource.class).getConnection()) {
+            assertThatThrownBy(() -> PlayerSqlAuthorityAutoConfiguration.verifyFinalSaveSchema(connection))
+                    .isInstanceOf(IllegalStateException.class);
+        }
+        recreateFinalTable(sql -> sql.replace("PRIMARY KEY (player_id, owner_epoch)",
+                "PRIMARY KEY (owner_epoch, player_id)"));
+        try (var connection = context.getBean(DataSource.class).getConnection()) {
+            assertThatThrownBy(() -> PlayerSqlAuthorityAutoConfiguration.verifyFinalSaveSchema(connection))
+                    .isInstanceOf(IllegalStateException.class);
+        }
+    }
+
+    @Test
+    void M14必须容纳OPEN空payload且摘要长度和来源宽度不能伪兼容() throws Exception {
+        List<java.util.function.UnaryOperator<String>> incompatible = List.of(
+                sql -> sql.replaceFirst("\\bdata\\s+MEDIUMBLOB\\s+NULL", "data MEDIUMBLOB NOT NULL"),
+                sql -> sql.replace("BINARY(32) NULL", "BINARY(16) NULL"),
+                sql -> sql.replace("source_instance    VARCHAR(64)", "source_instance    VARCHAR(8)"),
+                sql -> sql.replace("next_attempt_at    BIGINT", "next_attempt_at    INT"),
+                sql -> sql.replace("pos_x              DOUBLE", "pos_x              VARCHAR(64)"));
+        for (var change : incompatible) {
+            recreateFinalTable(change);
+            try (var connection = context.getBean(DataSource.class).getConnection()) {
+                assertThatThrownBy(() -> PlayerSqlAuthorityAutoConfiguration.verifyFinalSaveSchema(connection))
+                        .isInstanceOf(IllegalStateException.class);
+            }
+        }
+    }
+
+    @Test
+    void 最终收据清理永不删除PENDING以及当前E的OPEN或APPLIED() {
+        long pending = finalSavePlayer(1930, "清理甲");
+        registerFinal(pending);
+        long applied = finalSavePlayer(1931, "清理乙");
+        registerFinal(applied);
+        store.completeFinalSave(applied, 1, TX_TIMEOUT);
+        long open = finalSavePlayer(1932, "清理丙");
+        CLOCK.addAndGet(100_000);
+
+        assertThat(store.cleanRetiredFinalSaves(CLOCK.get(), 32, TX_TIMEOUT)).isZero();
+        assertThat(finalStatus(pending, 1)).isEqualTo("PENDING");
+        assertThat(finalStatus(applied, 1)).isEqualTo("APPLIED");
+        assertThat(finalStatus(open, 1)).isEqualTo("OPEN");
+        assertThat(store.loadState(pending)).isEqualTo(facing(0.1));
+        assertThat(store.loadState(applied)).isEqualTo(facing(0.9));
+    }
+
+    @Test
+    void 旧OPEN和APPLIED只在新E成立后按总批次预算清理_清理后旧E重放被围栏拒绝() {
+        long oldOpen = finalSavePlayer(1933, "清理丁");
+        CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() + 1);
+        assertThat(store.claimOwnership(oldOpen)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.loadForScene(oldOpen, 2, OTHER_SOURCE, TX_TIMEOUT)).isPresent();
+        long oldApplied = finalSavePlayer(1934, "清理戊");
+        registerFinal(oldApplied);
+        store.completeFinalSave(oldApplied, 1, TX_TIMEOUT);
+        assertThat(store.claimOwnership(oldApplied)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.loadForScene(oldApplied, 2, OTHER_SOURCE, TX_TIMEOUT)).isPresent();
+        long cutoff = CLOCK.get() + 1;
+
+        assertThat(store.cleanRetiredFinalSaves(cutoff, 1, TX_TIMEOUT)).as("OPEN与APPLIED共用一份批次预算").isEqualTo(1);
+        assertThat(store.cleanRetiredFinalSaves(cutoff, 32, TX_TIMEOUT)).isEqualTo(1);
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch = 1", Long.class)).isZero();
+        assertThat(finalStatus(oldOpen, 2)).isEqualTo("OPEN");
+        assertThat(finalStatus(oldApplied, 2)).isEqualTo("OPEN");
+        assertThat(registerFinal(oldOpen).status()).isEqualTo(FinalSaveStatus.FENCED);
+        assertThat(registerFinal(oldApplied).status()).isEqualTo(FinalSaveStatus.FENCED);
+        assertThat(owner(oldOpen).ownerEpoch()).isEqualTo(2);
+        assertThat(owner(oldApplied).ownerEpoch()).isEqualTo(2);
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_final_save WHERE status = 'PENDING'", Long.class)).isZero();
+    }
+
+    @Test
+    void 最终收据清理保留期严格小于截止_不能清理刚达到边界的已应用收据() {
+        long p = finalSavePlayer(1935, "清理己");
+        registerFinal(p);
+        store.completeFinalSave(p, 1, TX_TIMEOUT);
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.cleanRetiredFinalSaves(CLOCK.get(), 32, TX_TIMEOUT)).isZero();
+        assertThat(finalStatus(p, 1)).isEqualTo("APPLIED");
+        assertThat(store.cleanRetiredFinalSaves(CLOCK.get() + 1, 32, TX_TIMEOUT)).isEqualTo(1);
+        assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.NOT_FOUND);
+        assertThat(store.loadState(p)).isEqualTo(facing(0.9));
+    }
+
+    /** 故意损坏从正式入口读出的单表DDL，避免另写一套能与生产漂移的测试schema。 */
+    private void recreateFinalTable(java.util.function.UnaryOperator<String> incompatible) throws java.io.IOException {
+        String schema;
+        try (var input = new ClassPathResource("db/game-player-schema.sql").getInputStream()) {
+            schema = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        int from = schema.indexOf("CREATE TABLE IF NOT EXISTS player_final_save");
+        assertThat(from).isGreaterThanOrEqualTo(0);
+        String finalTable = schema.substring(from);
+        String changed = incompatible.apply(finalTable);
+        assertThat(changed).as("每个负向案例必须真的改变正式DDL").isNotEqualTo(finalTable);
+        jdbc().execute("DROP TABLE player_final_save");
+        new ResourceDatabasePopulator(new org.springframework.core.io.ByteArrayResource(
+                changed.getBytes(java.nio.charset.StandardCharsets.UTF_8))).execute(context.getBean(DataSource.class));
+    }
 
 
     @Test
@@ -1237,7 +1929,35 @@ class PlayerStoreSqlTest {
         DataSource dataSource() {
             String database = "game_it_" + UUID.randomUUID().toString().replace("-", "");
             DataSource ds;
-            if (MYSQL_URL != null) {
+            if (REQUIRE_TIDB) {
+                // 使用同一生产策略初始化每条物理连接，建表前确认悲观RC强读，不能靠URL冒充TiDB。
+                try {
+                    MYSQL_DATABASES.add(database);
+                    try (var admin = strictAdmin(); var statement = admin.createStatement()) {
+                        statement.execute("CREATE DATABASE " + database);
+                    }
+                    System.out.println("玩家强TiDB随机库创建=" + database);
+                    var pool = new DruidDataSource();
+                    pool.setUrl(MYSQL_URL.replaceAll("/$", "") + "/" + database
+                            + "?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000");
+                    pool.setUsername(System.getProperty("game.it.mysql.user", "root"));
+                    pool.setPassword(System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
+                    pool.setMaxActive(12);
+                    pool.setMaxWait(1000);
+                    new StrongTiDbConnectionPolicy("玩家最终存盘集成", true).postProcessBeforeInitialization(pool, "fixture");
+                    try {
+                        pool.init();
+                        try (var connection = pool.getConnection()) { StrongTiDbConnectionPolicy.verify(connection, true); }
+                        new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(pool);
+                        return pool;
+                    } catch (java.sql.SQLException | RuntimeException | Error failure) {
+                        pool.close();
+                        throw failure;
+                    }
+                } catch (java.sql.SQLException failure) {
+                    throw new IllegalStateException("玩家强TiDB夹具初始化失败", failure);
+                }
+            } else if (MYSQL_URL != null) {
                 // 真 MySQL：每个用例一个临时库（URL 里 createDatabaseIfNotExist），用例结束删库。
                 ds = new DriverManagerDataSource(MYSQL_URL + "/" + database
                         + "?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES'",

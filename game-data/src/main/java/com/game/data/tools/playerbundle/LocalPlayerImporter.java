@@ -2,6 +2,7 @@ package com.game.data.tools.playerbundle;
 
 import static com.game.data.tools.playerbundle.BundleMysqlReader.bindU64;
 
+import com.game.player.store.PlayerMapper;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -109,6 +110,9 @@ final class LocalPlayerImporter {
         connection.setAutoCommit(false);
         try {
             LocalState local = readOwner(plan.playerId(), true);
+            if (hasBlockingFinalSave(plan.playerId())) {
+                throw new Refused("本地玩家存在未完成或无效的最终存盘，必须先恢复待办再导入");
+            }
             admit(local, replace, nowMs);
             String conflict = nameConflict(plan);
             if (conflict != null) {
@@ -133,24 +137,58 @@ final class LocalPlayerImporter {
     }
 
     /**
-     * 第三段（单条带条件的 UPDATE）：占位仍是自己的（epoch = E、未释放、租约 = 哨兵值）才置为已释放，玩家从此可以登录。
+     * 第三段（独立事务）：同 player → final intent 锁顺序复核占位与待办后发布。
+     * 最终存盘不只可能由当前 epoch 登记；异代或损坏待办也不能被运维发布绕过。
      *
-     * @return 是否发布成功；false = 占位已被别的导入或人工操作改动，玩家仍进不来，需要重跑
+     * @return 是否发布成功；false = 占位已变或仍有最终存盘待办，玩家继续保持不可登录
      */
     boolean publish(long playerId, long epoch, long nowMs) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement("""
-                UPDATE player SET owner_released = 1, owner_lease_until = 0, updated_at = ?
-                 WHERE player_id = ? AND owner_epoch = ? AND owner_released = 0 AND owner_lease_until = ?""")) {
-            ps.setLong(1, nowMs);
-            bindU64(ps, 2, playerId);
-            bindU64(ps, 3, epoch);
-            ps.setLong(4, IMPORT_HOLD_LEASE);
-            boolean autoCommit = connection.getAutoCommit();
-            connection.setAutoCommit(true);
+        boolean autoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            LocalState local = readOwner(playerId, true);
+            if (!local.importHold() || local.ownerEpoch() != epoch || hasBlockingFinalSave(playerId)) {
+                connection.rollback();
+                return false;
+            }
+            try (PreparedStatement ps = connection.prepareStatement("""
+                    UPDATE player SET owner_released = 1, owner_lease_until = 0, updated_at = ?
+                     WHERE player_id = ? AND owner_epoch = ? AND owner_released = 0 AND owner_lease_until = ?""")) {
+                ps.setLong(1, nowMs);
+                bindU64(ps, 2, playerId);
+                bindU64(ps, 3, epoch);
+                ps.setLong(4, IMPORT_HOLD_LEASE);
+                if (ps.executeUpdate() != 1) {
+                    connection.rollback();
+                    return false;
+                }
+            }
+            connection.commit();
+            return true;
+        } catch (SQLException | RuntimeException | Error failure) {
             try {
-                return ps.executeUpdate() == 1;
-            } finally {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+                // 不能在回滚未明的事务上通过恢复autoCommit意外提交。
+                try { connection.close(); } catch (SQLException closeFailure) { failure.addSuppressed(closeFailure); }
+            }
+            throw failure;
+        } finally {
+            if (!connection.isClosed()) {
                 connection.setAutoCommit(autoCommit);
+            }
+        }
+    }
+
+    /** 调用方已经持有 player 行锁；只投影小归属行，状态规则与所有 claim/load/release 入口同源。 */
+    private boolean hasBlockingFinalSave(long playerId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT owner_epoch FROM player_final_save WHERE player_id = ? AND "
+                        + PlayerMapper.BLOCKING_FINAL_STATUS + " ORDER BY owner_epoch LIMIT 1 FOR UPDATE")) {
+            bindU64(ps, 1, playerId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
             }
         }
     }

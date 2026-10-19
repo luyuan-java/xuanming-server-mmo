@@ -91,10 +91,11 @@ class SceneShutdownHandOffTest {
         row.setGender(1);
         row.setAppearanceId("look");
         row.setLevel(1);
-        when(store.findPlayer(PLAYER)).thenReturn(Optional.of(row));
-        when(store.loadState(PLAYER)).thenReturn(PlayerState.getDefaultInstance());
+        when(store.loadForScene(eq(PLAYER),eq(E),any(),any())).thenReturn(Optional.of(
+                new PlayerStore.SceneLoad(row,PlayerState.getDefaultInstance())));
         // 交出先提交：停服写回 E 被围栏拒
-        when(store.saveStateAndRelease(any(), any())).thenReturn(false);
+        when(store.registerFinalSave(any(),any(),any(),any())).thenReturn(
+                new PlayerStore.FinalSaveReceipt(PlayerStore.FinalSaveStatus.FENCED,PLAYER,E,1,"test-repository",""));
         when(store.releaseOwnership(anyLong(), anyLong())).thenReturn(true);
         repository = new StoragePlayerRepository(store, storage, logic, SceneMetrics.noop());
         world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repository,
@@ -107,6 +108,7 @@ class SceneShutdownHandOffTest {
     @AfterEach
     void tearDown() {
         commitGate.countDown();
+        repository.closeFinalRecovery();
         logic.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
         storage.shutdownNow();
     }
@@ -173,7 +175,7 @@ class SceneShutdownHandOffTest {
             int count = world.shutdown();
             commitGate.countDown();
             return count;
-        }, repository::awaitTransfersSettled, storage, Duration.ofSeconds(10), () -> 1, System::nanoTime);
+        }, repository::awaitTransfersSettled, repository::awaitFinalRegistered, storage, Duration.ofSeconds(10), () -> 1, System::nanoTime);
     }
 
     /** 进场（异步加载经存储线程回到逻辑线程）→ 63 指定别的节点上的场景 → 选目标回「别的节点」→ 冻结并提交交出（交出卡在闸上）。 */

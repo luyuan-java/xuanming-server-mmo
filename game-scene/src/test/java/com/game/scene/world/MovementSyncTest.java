@@ -657,6 +657,17 @@ class MovementSyncTest {
             }
 
             @Override
+            public void load(long playerId,long expectedEpoch,Consumer<LoadResult> onLoaded) {
+                inner.load(playerId,expectedEpoch,onLoaded);
+            }
+
+            @Override
+            public void saveFinal(PlayerSave save,Consumer<FinalSaveRegistration> onRegistration) {
+                onSave.accept(save);
+                inner.saveFinal(save,onRegistration);
+            }
+
+            @Override
             public void save(PlayerSave save) {
                 onSave.accept(save);
                 inner.save(save);

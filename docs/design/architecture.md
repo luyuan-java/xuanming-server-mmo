@@ -2201,3 +2201,38 @@ Java 全部 zone 共用独立的 `player` / `player_state` 权威 SQL 库，归�
 运维夺权的 `wait` 同时约束每次 SQL 尝试与重试退避：每次尝试交给 `PlayerStore.claimOwnership(player, remaining)` 自己的带时限事务，不再套外层事务。取连接或行锁等待后预算已过时，提交前复核必须回滚；预算过期后不发起新的尝试。尚未观察到 owner 的 SQL 超时返回既有 `Claim.Failed`（固定原因「运维夺权超时」），已观察到持有者后等不到释放仍返回 `Claim.Busy`。期限之前已经开始的提交仍可能在期限后才收到结果，沿用存储层既有约定，不把已提交的成功强行改判超时。
 
 故障补验从正式存储与资产入口观察结果：历史 SQL 原字节及完整实例未知字段保持；旧 ACK 存盘延迟到换主之后必须被拒，新 owner 只按原 digest/correlation 裁剪扣出快照，身份与位图保留。测试仍使用独立随机库和有限等待，不覆盖真实跨区域网络或容量；运行结果另附本轮 `PARITY.md` 记录。
+
+### 7. 最终 SAVE 的 SQL 持久接管（2026-10-19 实现候选，尚未运行验收）
+
+最终退出先在逻辑线程建立不可撤销的 `(player_id, owner_epoch)` 墓碑，冻结唯一 `PlayerSave`，取消同代在途进场；回调在提交实例前仍核原 PendingEnter 对象身份与墓碑。普通同代在线重建保留；开始最终退出后同代不再复活。SQL 加载在 player 行锁事务内检查未释放且无 PENDING，并用无 payload 的 OPEN 行绑定原 scene instance；OPEN 不阻塞正常租约超时后的新 epoch，从已确认 SQL 恢复的既有可用性语义不变。
+
+TX1 `registerFinalSave` 在 player → intent 锁序下登记原 epoch、固定序号 1/协议版本 1、来源、完整标量、原 protobuf bytes 与版本化 SHA-256；它独立 COMMIT，不触碰 player_state，因此 player_state 点锁时仍可取得持久接管凭据。来源不属于内容摘要，但独立不可变等值认重。SQL 应答不明用原 key/source/原 bytes 重投，不改绑新 epoch。登记失败时保留冻结快照，拒绝同代玩法，不回成功；停服截止仍未确认则明确 unclean。登记前强杀只能从最近确认的 SQL 快照按 TTL 恢复，不承诺尚未确认的 RAM 零丢。
+
+TX2 `completeFinalSave` 使用同一 player → intent → player_state 锁序，核原 epoch、完整摘要和原 bytes，原子写 player 标量及 player_state、saved_epoch、释放标志与 APPLIED。不能把两阶段并入外层事务。新进程在已有有界存储池补偿 SQL PENDING；每轮最多 16 键、不读整批 blob，每节点最多一个应用/终态探测任务读大 payload。单次 SQL 有 2 秒预算，登记尝试按 200ms 起指数退避至 30s 并抖动；已登记应用失败持久延后 5–6s，不依靠线程 sleep，不因次数或永久错误删除 PENDING。定时器只投递任务并支持关闭取消。停止时先最终冻结、等交出结局、等 TX1 凭据，再关存储池；未登记数与在途交出分别进入停机结果。
+
+所有 claim（含 login/运维）、在线写、旧最终写、bare release、handoff 与历史恢复都先持有 player 锁并遵守 PENDING。claim 可以在同一事务先完整应用待办再增 epoch，无法应用就保守 Held；历史恢复不跨过待办。旧 void scene save 明确失败，避免旧调用将冲突/丢失吞掉。旧 Store 兼容最终写不接受已有 OPEN/PENDING/APPLIED 凭据，也不能覆盖已释放终态。当前 E 的 APPLIED 凭据保留；仅已有更大 SQL epoch 且超过七天的旧 OPEN/APPLIED 可有界回收，PENDING 永不 TTL/按次数清除。损坏摘要/未知版本/不可解析 bytes 隔离保留，不自动改写。
+
+TX1 接管凭据不是资产到账证明。既有 AssetOpService 与 PersistedAssetLedgerReader 仍只依据 player_state 中同操作的 SQL 收据确认 durable=true；不读取 intent 当资产账本，不以最终 SAVE 的接受回调提前确认交易/邮件附件。TX2 COMMIT 之后才可能由既有 SQL 读口确认到账。
+
+部署采用 M14：先扩表，再排空全部旧写者、旧 claim 者及运维入口，最后统一启新二进制。新旧 writer 不可混跑；旧代码不会认识 PENDING，不能靠默认关闭功能提供虚假兼容。独立 PlayerSqlAuthorityAutoConfiguration 在所有玩家权威进程（含 game-data 自建 Store）校验 M14 的完整投影/类型/可空性、PK与索引。该候选未构建、未单测/真 TiDB/进程故障验收，不代表本机或生产已切换。
+
+补充 SQL 门禁：OPEN/PENDING/APPLIED 的合法状态按 ASCII 字节精确识别，大小写、尾空格、NULL 和未知状态均不能被 collation 宽松比较当成合法终态；未知与异 E 阻塞记录同样留存，并在同 player 锁下拦全部归属/写入入口，门禁只读 epoch 键。补偿扫描、认重、调度和清理使用同口径。配置号的 JDBC int API 保留 uint32 位模式，六个 Mapper 写入口在 SQL 内安全转正，两个玩家读取入口显式完整投影转回 signed int 位模式；digest 和 intent 的 SQL 原值仍按 uint32 正值核验。高位真实 SQL 回归需 MySQL/TiDB，H2 的 INT UNSIGNED 有符号模拟不冒充该证明。
+
+最终结果投递独立于SQL义务计数：先登记逻辑投递义务，再移除已持久接管/已围栏的RAM义务；拒绝、回调异常或截止仍未执行均保留未送达结果计数。停机等待覆盖已接入逻辑队列的结果，并在存储池drain后采样该独立计数，SQL已登记也不能因此伪称clean；SQL凭据不撤销，不为投递失败重写payload。ACCEPTED只登记小凭据，TX2应用统一由SQL due列表驱动；TX1应答丢失后的短间隔重认不会绕过已持久化的next_attempt_at，APPLIED只通知既有终态。
+
+
+### 本批实现与验收边界（准备于 2026-10-19T09:04:38.793141+00:00）
+
+本批最终SAVE、运维导入围栏与InboxHooks组合接缝由root在已授权范围统一接手；准备时为工作树实现候选，待root逐文件核SHA后正规apply。源码落地与运行验收分别记录，不以当前资源不足冒完成或回退实现。
+
+- 已有真实证据：Store两夹具类26/26、0skip（C682622E…）；旧续建前13模块成功产物已封存，整体该次仍保留scene夹具首停原件。
+- 最近剩余6模块在1809448KiB可用内存门禁停止，native_started=false，未执行Java/Maven/clean（1119636B…）；不是业务测试再次失败，旧8份失败XML不得算本次结果。
+- 后续待验：剩余6模块正常clean install、新CLI3方法/原13方法共16条、Hook组合5条、当前155条严格真TiDB，以及实际宿主旧实例复活/延迟ACK故障链。默认H2/条件skip、编译/枚举与历史通过都不能替代它们。
+- M14仅完成正式schema/迁移入口源码候选；本批未执行部署或实际库迁移，未启动基础设施。TX1耐久接管凭据仍不表示逐项资产durable=true；资产确认只按player_state实际SQL回执。
+- InboxHooks原有接口/外部实现与CLI新增代码保留；生产SceneNode尚未装配InboxService的既有边界独立登记，World/Hook组合测试不能冒真实Inbox端到端验收。
+
+### 2026-10-19 root 正式工作树落地补记（未完成运行验收）
+
+统一37路径已由root正规git apply，check/apply均0；逐37最终字节SHA与已审候选相同，未修改InboxHooks接口，保留并行CLI/收件箱源。实际应用原件为C++/Go仓 `build/verification/java-canonical-37-apply-20261019T090438788234Z/root-canonical-application.json`，SHA `F03743014BE227D961CAD7F37DCA29470A2BDA42B5A238614ECFB7CEAB1930D7`。当前是工作树已实现、验收未完成；没有提交、部署、启动服务或执行M14真实库迁移。
+
+后续直接为当前Java完整源建立新快照（含并行新增代码），先生成含新Mapper公开准入规则的当前Store Jar，再按实际依赖编译受影响模块并运行CLI全16/Hook5和当前155真TiDB。旧JG2464、D136 Store Jar及其26通过/13模块成功仅绑定旧输入，不能冒当前World合并与新CLI已运行；不强制先重复旧快照六模块再重测新代码。最后验收真实宿主故障，任何编译/枚举/H2结果均不替代它。

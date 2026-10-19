@@ -15,6 +15,7 @@ import com.game.scene.world.PlayerRepository.HandOffAttempts;
 import com.game.scene.world.PlayerRepository.HandOffOutcome;
 import com.game.scene.world.PlayerRepository.ProbeOutcome;
 import com.game.scene.world.PlayerRepository.ProgressResult;
+import com.game.scene.world.PlayerRepository.FinalSaveRegistration;
 import com.game.scene.world.PlayerSave;
 import com.game.scene.world.Vec3;
 import java.sql.SQLRecoverableException;
@@ -48,7 +49,8 @@ import org.springframework.transaction.TransactionTimedOutException;
  * {@link PlayerRepository} 的 MySQL 实现：{@link PlayerStore} 的阻塞调用放在有界的存储线程池上，
  * 加载结果投递回场景逻辑线程。
  *
- * <p>写（最终写回并释放 / 只释放）的失败处理：
+ * <p>最终写回由 {@link FinalSaveRecovery} 两笔独立事务持久接管及恢复，未登记快照不因重试次数或池拒绝丢弃。
+ * 下面有限次重试只适用于只释放与在线存盘：
  * <ul>
  *   <li>瞬时故障（取不到连接、网络闪断、锁等待 / 语句超时等，{@link #isTransient}）在一个截止时间内按退避 + 抖动重试，
  *       最多 {@link RetryPolicy#maxAttempts()} 次；围栏拒绝（epoch 已被夺走）不是故障，不重试；</li>
@@ -125,6 +127,8 @@ public final class StoragePlayerRepository implements PlayerRepository {
     private final LongSupplier nanoClock;
     private final LongSupplier wallClockMs;
     private final SceneMetrics metrics;
+    private final FinalSaveRecovery finalSaves;
+    private final String sourceInstance;
     private final AtomicLong writeFailures = new AtomicLong();
     /**
      * 已提交、结局还没在逻辑线程上处理完的交出 / 探测数：提交时加一，结局回调在逻辑线程上执行完（或投递被拒、兜底做完）后减一。
@@ -162,6 +166,21 @@ public final class StoragePlayerRepository implements PlayerRepository {
     public StoragePlayerRepository(PlayerStore store, ExecutorService storageExecutor, Executor logicExecutor,
                                    RetryPolicy retry, HandOffSettings handOff, Sleeper sleeper, LongUnaryOperator jitter,
                                    LongSupplier nanoClock, LongSupplier wallClockMs, SceneMetrics metrics) {
+        this(store,storageExecutor,logicExecutor,retry,handOff,sleeper,jitter,nanoClock,wallClockMs,metrics,"test-repository");
+    }
+
+    public StoragePlayerRepository(PlayerStore store,ExecutorService storageExecutor,Executor logicExecutor,
+                                   SceneMetrics metrics,HandOffSettings handOff,String sourceInstance) {
+        this(store,storageExecutor,logicExecutor,RetryPolicy.DEFAULT,handOff,Thread::sleep,
+                backoff->ThreadLocalRandom.current().nextLong(backoff/2+1),System::nanoTime,
+                System::currentTimeMillis,metrics,sourceInstance);
+    }
+
+    private StoragePlayerRepository(PlayerStore store,ExecutorService storageExecutor,Executor logicExecutor,
+                                   RetryPolicy retry,HandOffSettings handOff,Sleeper sleeper,LongUnaryOperator jitter,
+                                   LongSupplier nanoClock,LongSupplier wallClockMs,SceneMetrics metrics,String sourceInstance) {
+        this.finalSaves=new FinalSaveRecovery(store,storageExecutor,logicExecutor,sourceInstance,wallClockMs);
+        this.sourceInstance=sourceInstance;
         this.store = store;
         this.storageExecutor = storageExecutor;
         this.logicExecutor = logicExecutor;
@@ -172,6 +191,8 @@ public final class StoragePlayerRepository implements PlayerRepository {
         this.nanoClock = nanoClock;
         this.wallClockMs = wallClockMs;
         this.metrics = metrics;
+        metrics.bindFinalSaveRecovery(finalSaves::unregisteredCount,finalSaves::awaitingAppliedCount,
+                finalSaves::undeliveredResultCount);
     }
 
     /** 最终失败（丢失）的写回 / 释放次数：重试用尽、非瞬时故障、线程池拒绝（在线存盘不算：它下个周期重写；交出不算：结局交给探测）。停服时被丢弃的由调用方另计。 */
@@ -180,9 +201,15 @@ public final class StoragePlayerRepository implements PlayerRepository {
     }
 
     @Override
+    @Deprecated
     public void load(long playerId, Consumer<LoadResult> onLoaded) {
+        deliver(playerId,onLoaded,new LoadResult.Failed(new IllegalArgumentException("加载必须携带预期owner epoch")));
+    }
+
+    @Override
+    public void load(long playerId,long expectedOwnerEpoch,Consumer<LoadResult> onLoaded) {
         try {
-            storageExecutor.execute(() -> deliver(playerId, onLoaded, loadNow(playerId)));
+            storageExecutor.execute(() -> deliver(playerId, onLoaded, loadNow(playerId,expectedOwnerEpoch)));
         } catch (RejectedExecutionException e) {
             // 存储线程池已满或已关闭：按加载失败处理（进场失败，fail-closed）。仍然异步回调，保持接口契约。
             log.error("存储线程池拒绝加载任务 player={}", playerId);
@@ -190,13 +217,11 @@ public final class StoragePlayerRepository implements PlayerRepository {
         }
     }
 
-    private LoadResult loadNow(long playerId) {
+    private LoadResult loadNow(long playerId,long expectedOwnerEpoch) {
         try {
-            Optional<PlayerRow> row = store.findPlayer(playerId);
-            if (row.isEmpty()) {
-                return new LoadResult.NotFound();
-            }
-            return new LoadResult.Found(toData(row.get(), store.loadState(playerId)));
+            var loaded=store.loadForScene(playerId,expectedOwnerEpoch,sourceInstance,Duration.ofSeconds(3));
+            if(loaded.isEmpty()) return new LoadResult.NotFound();
+            return new LoadResult.Found(toData(loaded.get().row(),loaded.get().state()));
         } catch (RuntimeException e) {
             return new LoadResult.Failed(e);
         }
@@ -211,9 +236,30 @@ public final class StoragePlayerRepository implements PlayerRepository {
     }
 
     @Override
+    @Deprecated
     public void save(PlayerSave save) {
-        submit(new WriteTask(Kind.SAVE, save, save.playerId(), save.ownerEpoch(), null));
+        throw new IllegalStateException("最终保存必须使用saveFinal取得持久接管结果，不能无结果丢弃");
     }
+
+    @Override
+    public void saveFinal(PlayerSave save,Consumer<FinalSaveRegistration> onRegistration) {
+        finalSaves.submit(save,result->{
+            if(result instanceof FinalSaveRegistration.Unconfirmed || result instanceof FinalSaveRegistration.Conflict) {
+                writeFailures.incrementAndGet();
+                log.error("最终保存尚未取得可完成凭据，禁止干净退出 player={} epoch={} result={}",
+                        save.playerId(),save.ownerEpoch(),result.getClass().getSimpleName());
+            }
+            onRegistration.accept(result);
+        });
+    }
+
+    public void startFinalRecovery(java.util.concurrent.ScheduledExecutorService scheduler){finalSaves.start(scheduler);}
+    public int awaitFinalRegistered(long nanos) throws InterruptedException{return finalSaves.awaitRegistered(nanos);}
+    public int unregisteredFinalCount(){return finalSaves.unregisteredCount();}
+    public int undeliveredFinalResults(){return finalSaves.undeliveredResultCount();}
+    public void closeFinalRecovery(){finalSaves.close();}
+    public void onFinalApplied(Consumer<com.game.player.store.PlayerStore.FinalSaveReceipt> listener){finalSaves.onApplied(listener);}
+
 
     @Override
     public void release(long playerId, long ownerEpoch) {
@@ -373,8 +419,6 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
     /** 写任务的种类。 */
     private enum Kind {
-        /** 最终写回并释放归属。 */
-        SAVE,
         /** 只释放归属。 */
         RELEASE,
         /** 在线存盘（不释放），有结果回调。 */
@@ -422,7 +466,6 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
         StorageOp op() {
             return switch (kind) {
-                case SAVE -> StorageOp.SAVE;
                 case RELEASE -> StorageOp.RELEASE;
                 case PROGRESS -> StorageOp.PROGRESS;
             };
@@ -430,7 +473,6 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
         boolean apply() {
             return switch (kind) {
-                case SAVE -> store.saveStateAndRelease(toRow(save), save.state());
                 case RELEASE -> store.releaseOwnership(playerId, ownerEpoch);
                 case PROGRESS -> store.saveStateHeld(toRow(save), save.state());
             };
@@ -441,20 +483,16 @@ public final class StoragePlayerRepository implements PlayerRepository {
             metrics.storageWrite(op(), WriteResult.REJECTED, 0);
             if (kind == Kind.PROGRESS) {
                 log.warn("存储线程池拒绝在线存盘，下个周期重写 {}", describe());
-            } else if (kind == Kind.RELEASE) {
+            } else {
                 // 只释放丢失：没有数据丢失，归属等租约过期后自动可用，不需要人工修复（仍计一次写丢失）
                 writeFailures.incrementAndGet();
                 log.error("存储线程池拒绝释放任务，本次释放丢失，归属等租约过期（至多 {}）后自动可用 {}", PlayerStore.OWNER_LEASE,
                         describe());
-            } else {
-                // 线程池积压上万或已关闭。写回丢失：玩家数据回到上次落库的状态。
-                writeFailures.incrementAndGet();
-                log.error("存储线程池拒绝写任务，本次写丢失（需人工修复） {}", describe());
             }
             complete(WriteResult.REJECTED);
         }
 
-        /** 写最终失败：在线存盘只告警（下个周期按最新状态重写）；写回 / 释放记 ERROR 并计入 {@link #writeFailures()}。 */
+        /** 在线存盘只告警（下个周期按最新状态重写）；释放失败计数但不丢玩法快照。 */
         @Override
         void givenUp(String why, Throwable error) {
             if (kind == Kind.PROGRESS) {
@@ -487,7 +525,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
             if (save == null) {
                 return "释放归属 player=" + Long.toUnsignedString(playerId) + " epoch=" + ownerEpoch;
             }
-            return (kind == Kind.PROGRESS ? "在线存盘" : "玩家写回") + describeSave(save);
+            return "在线存盘" + describeSave(save);
         }
     }
 

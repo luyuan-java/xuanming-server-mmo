@@ -90,9 +90,14 @@ class SkillFeatureTest {
     }
 
     private void enter(int session, long playerId, Scene scene) {
-        repo.putNewPlayer(playerId, 1);
+        enter(session, playerId, scene, 1);
+    }
+
+    // 最终退出封闭旧代；重进场夹具显式提供独立夺权所得的新代。
+    private void enter(int session, long playerId, Scene scene, long ownerEpoch) {
+        repo.putNewPlayer(playerId, ownerEpoch);
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
-                .setSessionId(session).setPlayerId(playerId).setSceneId(scene.sceneId()).setOwnerEpoch(1).build());
+                .setSessionId(session).setPlayerId(playerId).setSceneId(scene.sceneId()).setOwnerEpoch(ownerEpoch).build());
         repo.completeAll();
     }
 
@@ -318,7 +323,7 @@ class SkillFeatureTest {
         assertThat(release(1, entity(B))).isZero();
         world.onPlayerLeave(LINK, PlayerLeave.newBuilder().setSessionId(A).setPlayerId(1001).setVoluntary(true)
                 .build());
-        enter(A, 1001, scene1);
+        enter(A, 1001, scene1, 2);
         sink.clear();
         assertThat(release(2, entity(B))).isZero();
         assertThat(release(1, entity(B))).as("冷却也清空了").isZero();

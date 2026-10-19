@@ -12,10 +12,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.game.player.store.PlayerStore.CreateResult;
 import java.sql.SQLIntegrityConstraintViolationException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -163,6 +165,8 @@ class PlayerStoreTest {
 
     @Test
     void 夺权_上一个写者已释放或租约过期才成功_新租约为现在加OWNER_LEASE() {
+        when(mapper.selectBlockingFinalEpoch(9)).thenReturn(null);
+        when(mapper.selectOwnerForUpdate(9)).thenReturn(new OwnerState(5, true, 0));
         when(mapper.claimOwnerEpoch(9, 1_000L, 1_000L + PlayerStore.OWNER_LEASE.toMillis())).thenReturn(1);
         when(mapper.selectOwnerEpoch(9)).thenReturn(6L);
 
@@ -171,6 +175,7 @@ class PlayerStoreTest {
 
     @Test
     void 夺权_仍被持有回Held带当前epoch_玩家不存在回NotFound() {
+        when(mapper.selectOwnerForUpdate(9)).thenReturn(new OwnerState(5, false, 31_000L));
         when(mapper.selectOwnerEpoch(9)).thenReturn(5L);
         assertThat(store.claimOwnership(9)).isEqualTo(new PlayerStore.ClaimResult.Held(5));
 
@@ -205,6 +210,8 @@ class PlayerStoreTest {
 
     @Test
     void 释放与写回都带epoch围栏() {
+        when(mapper.selectBlockingFinalEpoch(9)).thenReturn(null);
+        when(mapper.selectOwnerForUpdate(9)).thenReturn(new OwnerState(6, false, 31_000L));
         when(mapper.releaseOwner(9, 6, 1_000L)).thenReturn(1);
         assertThat(store.releaseOwnership(9, 6)).isTrue();
         assertThat(store.releaseOwnership(9, 5)).isFalse();
@@ -215,5 +222,78 @@ class PlayerStoreTest {
         assertThat(store.saveStateAndRelease(save, PlayerState.getDefaultInstance())).isTrue();
         assertThat(save.getUpdatedAt()).isEqualTo(1_000L);
         verify(mapper).upsertState(9, new byte[0], 6, 1_000L);
+    }
+
+    private static PlayerRow finalRow() {
+        PlayerRow row = row(9, "终态");
+        row.setOwnerEpoch(6);
+        row.setLevel(3);
+        row.setSceneConfigId(2);
+        row.setPosX(42.5);
+        return row;
+    }
+
+    @Test
+    void 最终摘要固定版本向量包含player原epoch与全部标量和原bytes() {
+        byte[] bytes = {1, 2, 3};
+        assertThat(java.util.HexFormat.of().formatHex(PlayerStore.finalSaveDigest(finalRow(), bytes)))
+                .isEqualTo("095e099fb7bac61b190e641d1cd00e44ed2b56cef80d7466f5c3a3d922ae0fed");
+        byte[] original = PlayerStore.finalSaveDigest(finalRow(), bytes);
+        for (java.util.function.Consumer<PlayerRow> change : List.<java.util.function.Consumer<PlayerRow>>of(
+                r -> r.setPlayerId(10), r -> r.setOwnerEpoch(7), r -> r.setLevel(4),
+                r -> r.setSceneConfigId(3), r -> r.setPosX(42.6), r -> r.setPosY(-0.0), r -> r.setPosZ(1))) {
+            PlayerRow different = finalRow();
+            change.accept(different);
+            assertThat(PlayerStore.finalSaveDigest(different, bytes)).isNotEqualTo(original);
+        }
+        assertThat(PlayerStore.finalSaveDigest(finalRow(), new byte[] {1, 2, 4})).isNotEqualTo(original);
+        verifyNoInteractions(mapper);
+    }
+
+    @Test
+    void 最终摘要的uint32高位配置按无符号位模式进入固定向量() {
+        PlayerRow row=finalRow();row.setSceneConfigId(Integer.MIN_VALUE);
+        assertThat(java.util.HexFormat.of().formatHex(PlayerStore.finalSaveDigest(row,new byte[]{1,2,3})))
+                .isEqualTo("6aea345f3eeee6b83ea9917debf44c32d862fe5eb24544eacb862e933e0b3c4b");
+        row.setSceneConfigId(-1);
+        assertThat(java.util.HexFormat.of().formatHex(PlayerStore.finalSaveDigest(row,new byte[]{1,2,3})))
+                .isEqualTo("307bbf270502e146b724d04393142828b5b98010d38765003a7d34328d89a165");
+        verifyNoInteractions(mapper);
+    }
+
+    @Test
+    void 最终快照非法身份越界标量或非有限坐标在SQL副作用前拒绝() {
+        for (java.util.function.Consumer<PlayerRow> invalid : List.<java.util.function.Consumer<PlayerRow>>of(
+                r -> r.setPlayerId(0), r -> r.setOwnerEpoch(0), r -> r.setOwnerEpoch(-1),
+                r -> r.setOwnerEpoch(Long.MAX_VALUE), r -> r.setLevel(-1), r -> r.setLevel(0x1_0000_0000L),
+                r -> r.setPosX(Double.NaN), r -> r.setPosY(Double.POSITIVE_INFINITY),
+                r -> r.setPosZ(Double.NEGATIVE_INFINITY))) {
+            PlayerRow row = finalRow();
+            invalid.accept(row);
+            assertThatThrownBy(() -> PlayerStore.finalSaveDigest(row, new byte[0]))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThatThrownBy(() -> PlayerStore.finalSaveDigest(finalRow(), null)).isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(mapper);
+    }
+
+    @Test
+    void 最终登记缺少来源或protobuf损坏时不碰SQL() {
+        for (String source : java.util.Arrays.asList(null, "", "scene with spaces", "x".repeat(65))) {
+            assertThatThrownBy(() -> store.registerFinalSave(finalRow(), new byte[0], source, Duration.ofSeconds(1)))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThatThrownBy(() -> store.registerFinalSave(finalRow(), new byte[] {(byte) 0xff}, "scene-1", Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(mapper);
+    }
+
+    @Test
+    void 最终登记与完成禁止缺事务管理器时伪称已提交() {
+        assertThatThrownBy(() -> store.registerFinalSave(finalRow(), new byte[0], "scene-1", Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> store.completeFinalSave(9, 6, Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalStateException.class);
+        verifyNoInteractions(mapper);
     }
 }

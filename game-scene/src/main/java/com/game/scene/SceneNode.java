@@ -50,6 +50,10 @@ import com.game.scene.currency.CurrencyService;
 import com.game.scene.discovery.SceneDirectoryPublisher;
 import com.game.scene.gainblock.GainBlockSync;
 import com.game.scene.gainblock.RedisGainBlockSource;
+import com.game.scene.inbox.DubboInboxTransport;
+import com.game.scene.inbox.InboxConsumers;
+import com.game.scene.inbox.InboxService;
+import com.game.scene.inbox.SceneInboxProvider;
 import com.game.scene.link.GateLinks;
 import com.game.scene.link.LinkIdentity;
 import com.game.scene.link.NodeLinkHandler;
@@ -103,6 +107,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -196,6 +201,9 @@ public class SceneNode implements SmartLifecycle {
     private volatile SceneAssetOpProvider assetProvider;
     private volatile ThreadPoolExecutor assetReplyExecutor;
     private volatile SceneRpcServer assetRpc;
+    private volatile DubboInboxTransport inboxTransport;
+    private volatile InboxService inboxService;
+    private volatile ScheduledFuture<?> inboxTask;
     /** 回合制战斗（批次 6.3）：逻辑线程上的业务与它的 Dubbo 提供方（与资产通道同一个端口、同一个回写池）。 */
     private volatile PlayerBattleService battleService;
     private volatile SceneBattleProvider battleProvider;
@@ -294,7 +302,7 @@ public class SceneNode implements SmartLifecycle {
                 new DefaultThreadFactory("scene-storage"), new ThreadPoolExecutor.AbortPolicy());
         metrics.bindStorageExecutor(storageExecutor);
         StoragePlayerRepository repository = new StoragePlayerRepository(playerStore, storageExecutor, logic, metrics,
-                settings.handOff());
+                settings.handOff(),instanceId);
         playerRepository = repository;
 
         GateLinks gateLinks = new GateLinks(metrics, logic);
@@ -303,6 +311,12 @@ public class SceneNode implements SmartLifecycle {
         LeaseGatedSnowflake sceneGuids = acquireSceneGuids();
         AssetAudit assetAudit = startAudit(zoneId, nodeId, settings, sceneGuids);
         CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics, SceneClock.SYSTEM);
+        // 关闭消费也装配真实服务：目录公布的是生效开关，PENDING 留在独立收件箱；运输失败不产生 SQL 持久确认。
+        DubboInboxTransport inboxClient = DubboInboxTransport.direct(settings.inbox().url(), logic);
+        inboxTransport = inboxClient;
+        InboxService inbox = new InboxService(InboxConsumers.gmSanction(currency), inboxClient, SceneClock.SYSTEM,
+                new InboxService.Settings(settings.inbox().consumerEnabled(), settings.inbox().periodicFetchMinutes()),
+                () -> nodeId, () -> ThreadLocalRandom.current().nextInt(1001));
         BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
         startGainBlockSync(currency, bags, settings);
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics);
@@ -355,14 +369,19 @@ public class SceneNode implements SmartLifecycle {
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
+                    InboxService.checkLedgerOnLoad(player);
                     // 战斗结算账本损坏时大声报一次（结算一律延后、备战一律 1006，原样保留；scene-battle-spec §7.12，D24）
                     PlayerBattleService.checkLedgerOnLoad(player);
                 }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis, redisKeys), zoneId, nodeId, logic), teamFollow,
-                crossNode, instances, battle, zoneTravel);
+                crossNode, instances, battle, zoneTravel, inbox);
+        inbox.attach(sceneWorld);
+        inboxService = inbox;
         battle.attach(sceneWorld);
         battleService = battle;
         links = gateLinks;
         world = sceneWorld;
+        repository.onFinalApplied(sceneWorld::onFinalApplied);
+        repository.startFinalRecovery(scheduler);
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
                 AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM, metrics, petService::transferCapacity));
         // 资产通道的跨进程提供方：先建好（导出在接受链路之后、发布目录之前）。回写池队列无界，但同时排队的至多是在途上限条
@@ -417,6 +436,14 @@ public class SceneNode implements SmartLifecycle {
                 log.error("回合制战斗 reaper 这一轮出错，下一轮照常", e);
             }
         }, reaperMillis, reaperMillis, TimeUnit.MILLISECONDS);
+        // 拉取、重试与 SQL 已提交账本的 ACK 检查都归同一逻辑线程；发送提醒成功不代表处置或落盘成功。
+        inboxTask = logicLoop.scheduleAtFixedRate(() -> {
+            try {
+                inbox.tick();
+            } catch (RuntimeException e) {
+                log.error("持久收件箱这一秒出错，条目保留 PENDING，下一秒照常", e);
+            }
+        }, 1, 1, TimeUnit.SECONDS);
         // 场景帧：固定周期触发，SceneTicker 按单调时钟补帧（每次最多 5 帧），帧内异常只记日志、不让定时任务停掉。
         SceneTicker ticker = new SceneTicker(sceneWorld::step, SceneClock.SYSTEM::nanoTime);
         long periodNanos = SceneTicker.STEP_NANOS;
@@ -466,7 +493,8 @@ public class SceneNode implements SmartLifecycle {
                         handshakeTimeout, maxPendingFrames, metrics));
 
         // 资产通道导出：成功之后才把 rpc 地址写进目录（调用方只从目录找它，guild-economy-spec §4.6 第 6 条）；端口被占 / 缺 GAME_DUBBO_SECRET 拒绝启动
-        SceneRpcServer rpc = SceneRpcServer.export(assetProvider, battleProvider, props.advertiseHost(), settings.assetRpcPort());
+        SceneRpcServer rpc = SceneRpcServer.export(assetProvider, battleProvider, new SceneInboxProvider(() -> inboxService, instanceId, logic),
+                props.advertiseHost(), settings.assetRpcPort());
         assetRpc = rpc;
 
         SceneNodeInfo info = SceneNodeInfo.newBuilder()
@@ -477,6 +505,7 @@ public class SceneNode implements SmartLifecycle {
                 .setLinkPort(linkPort)
                 .setRpcHost(props.advertiseHost())
                 .setRpcPort(rpc.port())
+                .setInboxConsumerEnabled(inbox.consumerEnabled())
                 .build();
         publisher = new SceneDirectoryPublisher(new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser()), info,
                 () -> callOnLogic(() -> {
@@ -618,6 +647,10 @@ public class SceneNode implements SmartLifecycle {
         if (drains != null) {
             drains.cancel(false);
         }
+        ScheduledFuture<?> inboxChecks = inboxTask;
+        if (inboxChecks != null) {
+            inboxChecks.cancel(false);
+        }
         ScheduledFuture<?> reaper = battleReaperTask;
         if (reaper != null) {
             reaper.cancel(false);
@@ -667,16 +700,20 @@ public class SceneNode implements SmartLifecycle {
             // 写回之后、关存储线程池之前等在途交出 / 探测的结局在逻辑线程上处理完：其中「释放 E+1」要赶在关池之前提交
             SceneShutdown.TransferSettlement transfers =
                     repo == null ? SceneShutdown.TransferSettlement.NONE : repo::awaitTransfersSettled;
+            SceneShutdown.TransferSettlement finals =
+                    repo == null ? SceneShutdown.TransferSettlement.NONE : repo::awaitFinalRegistered;
             SceneShutdown.Result result = SceneShutdown.writeBackThenDrainStorage(loop, () -> {
                 int count = w.shutdown();
                 g.closeAll();
                 return count;
-            }, transfers, storage, props.scene().shutdownSaveTimeout(), approxPlayers::get, System::nanoTime);
-            log.info("停服写回 已执行={} 人数={} 丢弃存储任务={}", result.writeBackRan(), result.playersSubmitted(),
-                    result.droppedTasks());
+            }, transfers, finals, repo==null?()->0:repo::undeliveredFinalResults,
+                    storage, props.scene().shutdownSaveTimeout(), approxPlayers::get, System::nanoTime);
+            log.info("停服写回 已执行={} 人数={} 丢弃存储任务={} 未登记最终快照={} 未送达最终结果={} clean={}", result.writeBackRan(),
+                    result.playersSubmitted(),result.droppedTasks(),result.unregisteredFinals(),result.undeliveredFinalResults(),result.clean());
         } else if (storage != null) {
             storage.shutdownNow();
         }
+        if(repo!=null)repo.closeFinalRecovery();
         // 资产通道反导出：在摘目录（第一步）之后、逻辑线程停之前（guild-economy-spec §4.6 第 6 条）。到这里写回都已交出去，
         // 期间到的请求只会是 NOT_HERE；反导出之后调用方连不上 = 传输失败、重投，此前已记账已落库的结局可经离线读已落盘账本终结。
         SceneRpcServer rpc = assetRpc;
@@ -690,6 +727,13 @@ public class SceneNode implements SmartLifecycle {
         if (loop != null) {
             loop.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
         }
+        // 离场只补发此前已获 SQL 回执的前缀。运输保留到存储及逻辑线程排空后，迟到回调被拒也不会把 PENDING 当成功。
+        DubboInboxTransport inboxClient = inboxTransport;
+        if (inboxClient != null) {
+            inboxClient.close();
+            inboxTransport = null;
+        }
+        inboxService = null;
         // 选目标客户端在逻辑线程停之后才关：之后不会再有新的选目标请求（迟到的结果投递被拒、丢弃）
         SceneManagerSwitchTargets targets = switchTargets;
         if (targets != null) {

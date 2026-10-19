@@ -266,4 +266,27 @@ class SceneNodePropertiesTest {
                 .isInstanceOf(BindException.class);
         assertThatThrownBy(() -> bind(Map.of("game.scene.gain-block-refresh", "500ms"))).isInstanceOf(BindException.class);
     }
+    @Test
+    void 收件箱绑定缺省关闭_可显式开启或关闭_周期和地址校验不变() {
+        assertThat(bind(Map.of()).scene().inbox().consumerEnabled()).isFalse();
+        assertThat(bind(Map.of("game.scene.inbox.consumer-enabled", "true")).scene().inbox().consumerEnabled()).isTrue();
+        assertThat(bind(Map.of("game.scene.inbox.consumer-enabled", "false")).scene().inbox().consumerEnabled()).isFalse();
+        assertThat(bind(Map.of()).scene().inbox().periodicFetchMinutes()).isEqualTo(30);
+        assertThat(bind(Map.of()).scene().inbox().url()).isEqualTo("tri://127.0.0.1:20918");
+        assertThatThrownBy(() -> bind(Map.of("game.scene.inbox.periodic-fetch-minutes", "-1"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("game.scene.inbox.periodic-fetch-minutes", "1441"))).isInstanceOf(BindException.class);
+        assertThatThrownBy(() -> bind(Map.of("game.scene.inbox.url", "http://127.0.0.1:20918"))).isInstanceOf(BindException.class);
+    }
+
+    @Test
+    void 正式application配置显式启用真实收件箱消费能力() throws Exception {
+        var sources = new org.springframework.boot.env.YamlPropertySourceLoader().load("scene",
+                new org.springframework.core.io.ClassPathResource("application.yaml"));
+        var configured = new Binder(org.springframework.boot.context.properties.source.ConfigurationPropertySources.from(sources))
+                .bindOrCreate("game.scene.inbox", SceneNodeProperties.InboxSettings.class);
+        assertThat(configured.consumerEnabled()).isTrue();
+        assertThat(configured.periodicFetchMinutes()).isEqualTo(30);
+        assertThat(configured.url()).isEqualTo("tri://127.0.0.1:20918");
+    }
+
 }

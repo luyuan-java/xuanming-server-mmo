@@ -76,6 +76,11 @@ game:
     address: redis://127.0.0.1:6379
     database: 12
   scene:
+    # git 跟踪消费能力；上游 enqueue-types 仍为空。false 可维护停用，运输不可达时保留 PENDING，不伪造持久确认。
+    inbox:
+      consumer-enabled: true
+      periodic-fetch-minutes: 30
+      url: tri://127.0.0.1:20918
     # 链路握手有共享密钥鉴权（GAME_NODE_LINK_SECRET），但链路不加密、窗口内握手可重放：默认只绑本机；
     # 多机部署改内网地址，仍要靠网络隔离保证只有 gate 能连
     link-bind-host: 127.0.0.1

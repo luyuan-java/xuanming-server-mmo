@@ -3,15 +3,29 @@ package com.game.player.store;
 import java.util.List;
 import org.apache.ibatis.annotations.Arg;
 import org.apache.ibatis.annotations.ConstructorArgs;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
-/** 账号 / 玩家表的 SQL。只被 {@link PlayerStore} 调用，业务代码不直接用。 */
+/** 账号 / 玩家表的 SQL；运维入口仅复用同源最终存盘准入谓词，业务写入仍经 {@link PlayerStore}。 */
 @Mapper
 public interface PlayerMapper {
+
+    // ASCII协议状态逐字节比较，避免部署collation放宽大小写或尾空格；不依赖数据库专有COLLATE。
+    String EXACT_OPEN = "(OCTET_LENGTH(status)=4 AND ASCII(SUBSTRING(status,1,1))=79 AND ASCII(SUBSTRING(status,2,1))=80 AND ASCII(SUBSTRING(status,3,1))=69 AND ASCII(SUBSTRING(status,4,1))=78)";
+    String EXACT_PENDING = "(OCTET_LENGTH(status)=7 AND ASCII(SUBSTRING(status,1,1))=80 AND ASCII(SUBSTRING(status,2,1))=69 AND ASCII(SUBSTRING(status,3,1))=78 AND ASCII(SUBSTRING(status,4,1))=68 AND ASCII(SUBSTRING(status,5,1))=73 AND ASCII(SUBSTRING(status,6,1))=78 AND ASCII(SUBSTRING(status,7,1))=71)";
+    String EXACT_APPLIED = "(OCTET_LENGTH(status)=7 AND ASCII(SUBSTRING(status,1,1))=65 AND ASCII(SUBSTRING(status,2,1))=80 AND ASCII(SUBSTRING(status,3,1))=80 AND ASCII(SUBSTRING(status,4,1))=76 AND ASCII(SUBSTRING(status,5,1))=73 AND ASCII(SUBSTRING(status,6,1))=69 AND ASCII(SUBSTRING(status,7,1))=68)";
+    // 全部写者/运维入口共用：未知、NULL、大小写或尾空格异常一律阻断，不读大快照。
+    String BLOCKING_FINAL_STATUS = "(status IS NULL OR NOT (" + EXACT_OPEN + " OR " + EXACT_APPLIED + "))";
+
+
+    // JDBC现有int API保留uint32位模式；SQL列始终存0..4294967295，回读先降为有符号int范围。
+    String PLAYER_COLUMNS = "player_id,account,zone_id,name,name_key,class_id,gender,appearance_id,level,"
+            + "CASE WHEN scene_config_id>2147483647 THEN CAST(scene_config_id AS DECIMAL(20,0))-4294967296 ELSE scene_config_id END AS scene_config_id,"
+            + "pos_x,pos_y,pos_z,owner_epoch,owner_released,owner_lease_until,created_at,updated_at";
 
     @Insert("INSERT IGNORE INTO account (account, created_at) VALUES (#{account}, #{createdAt})")
     int insertAccountIfAbsent(@Param("account") String account, @Param("createdAt") long createdAt);
@@ -27,13 +41,13 @@ public interface PlayerMapper {
     @Select("SELECT account FROM account WHERE account = #{account} FOR UPDATE")
     String lockAccount(@Param("account") String account);
 
-    @Select("SELECT * FROM player WHERE account = #{account} ORDER BY created_at, player_id")
+    @Select("SELECT " + PLAYER_COLUMNS + " FROM player WHERE account = #{account} ORDER BY created_at, player_id")
     List<PlayerRow> selectByAccount(@Param("account") String account);
 
     @Select("SELECT COUNT(*) FROM player WHERE account = #{account}")
     int countByAccount(@Param("account") String account);
 
-    @Select("SELECT * FROM player WHERE player_id = #{playerId}")
+    @Select("SELECT " + PLAYER_COLUMNS + " FROM player WHERE player_id = #{playerId}")
     PlayerRow selectById(@Param("playerId") long playerId);
 
     /** {@code nameKey} 只由 {@link PlayerStore#nameKey} 计算，不从行对象取（行对象不携带唯一键，调用方无从填错）。 */
@@ -41,7 +55,7 @@ public interface PlayerMapper {
             INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, appearance_id, level,
                                 scene_config_id, pos_x, pos_y, pos_z, owner_epoch, created_at, updated_at)
             VALUES (#{row.playerId}, #{row.account}, #{row.zoneId}, #{row.name}, #{nameKey}, #{row.classId},
-                    #{row.gender}, #{row.appearanceId}, #{row.level}, #{row.sceneConfigId},
+                    #{row.gender}, #{row.appearanceId}, #{row.level}, (CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),
                     #{row.posX}, #{row.posY}, #{row.posZ}, #{row.ownerEpoch}, #{row.createdAt}, #{row.updatedAt})
             """)
     int insertPlayer(@Param("row") PlayerRow row, @Param("nameKey") String nameKey);
@@ -77,9 +91,9 @@ public interface PlayerMapper {
     /** 带围栏的最终写回并释放归属：epoch 不是当前值（已被新的进场夺权）时影响 0 行。 */
     @Update("""
             UPDATE player
-               SET level = #{level}, scene_config_id = #{sceneConfigId},
+               SET level = #{level}, scene_config_id = (CASE WHEN #{sceneConfigId}<0 THEN #{sceneConfigId}+4294967296 ELSE #{sceneConfigId} END),
                    pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ}, owner_released = 1, updated_at = #{updatedAt}
-             WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch}
+             WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
     int updateStateAndRelease(PlayerRow row);
 
@@ -89,7 +103,7 @@ public interface PlayerMapper {
      */
     @Update("""
             UPDATE player
-               SET level = #{level}, scene_config_id = #{sceneConfigId},
+               SET level = #{level}, scene_config_id = (CASE WHEN #{sceneConfigId}<0 THEN #{sceneConfigId}+4294967296 ELSE #{sceneConfigId} END),
                    pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ}, updated_at = #{updatedAt}
              WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
@@ -108,7 +122,7 @@ public interface PlayerMapper {
      */
     @Update("""
             UPDATE player
-               SET level = #{row.level}, scene_config_id = #{row.sceneConfigId},
+               SET level = #{row.level}, scene_config_id = (CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),
                    pos_x = #{row.posX}, pos_y = #{row.posY}, pos_z = #{row.posZ},
                    owner_epoch = owner_epoch + 1, owner_released = #{released}, owner_lease_until = #{leaseUntil},
                    updated_at = #{row.updatedAt}
@@ -147,6 +161,70 @@ public interface PlayerMapper {
              WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
     int releaseOwner(@Param("playerId") long playerId, @Param("ownerEpoch") long ownerEpoch, @Param("now") long now);
+
+
+    /** 先锁 player 才能调用；所有写方遵守 player → final-save 的唯一锁序。 */
+    @Select("SELECT owner_epoch FROM player_final_save WHERE player_id=#{playerId} AND " + BLOCKING_FINAL_STATUS + " ORDER BY owner_epoch LIMIT 1 FOR UPDATE")
+    Long selectBlockingFinalEpoch(@Param("playerId") long playerId);
+
+    @Select("SELECT owner_epoch FROM player_final_save WHERE player_id=#{playerId} AND owner_epoch<>#{epoch} AND " + BLOCKING_FINAL_STATUS + " ORDER BY owner_epoch LIMIT 1 FOR UPDATE")
+    Long selectOtherBlockingFinalEpoch(@Param("playerId") long playerId,@Param("epoch") long epoch);
+
+    @Select("""
+            SELECT player_id, owner_epoch, save_seq, protocol_version, source_instance, status,
+                   level, scene_config_id, pos_x, pos_y, pos_z, data, payload_digest
+              FROM player_final_save WHERE player_id = #{playerId} AND owner_epoch = #{epoch} FOR UPDATE
+            """)
+    @ConstructorArgs({
+            @Arg(column="player_id", javaType=long.class), @Arg(column="owner_epoch", javaType=long.class),
+            @Arg(column="save_seq", javaType=long.class), @Arg(column="protocol_version", javaType=int.class),
+            @Arg(column="source_instance", javaType=String.class), @Arg(column="status", javaType=String.class),
+            @Arg(column="level", javaType=Long.class), @Arg(column="scene_config_id", javaType=Long.class),
+            @Arg(column="pos_x", javaType=Double.class), @Arg(column="pos_y", javaType=Double.class),
+            @Arg(column="pos_z", javaType=Double.class), @Arg(column="data", javaType=byte[].class),
+            @Arg(column="payload_digest", javaType=byte[].class)})
+    PlayerStore.FinalSaveRow selectFinalSave(@Param("playerId") long playerId, @Param("epoch") long epoch);
+
+    @Insert("""
+            INSERT INTO player_final_save (player_id,owner_epoch,save_seq,protocol_version,source_instance,status,
+                    created_at,next_attempt_at) VALUES (#{playerId},#{epoch},1,1,#{source},'OPEN',#{now},#{now})
+            """)
+    int insertFinalAdmission(@Param("playerId") long playerId,@Param("epoch") long epoch,
+                            @Param("source") String source,@Param("now") long now);
+
+    @Insert("""
+            INSERT INTO player_final_save (player_id,owner_epoch,save_seq,protocol_version,source_instance,status,
+                    level,scene_config_id,pos_x,pos_y,pos_z,data,payload_digest,created_at,next_attempt_at)
+            VALUES (#{row.playerId},#{row.ownerEpoch},1,1,#{source},'PENDING',#{row.level},(CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),
+                    #{row.posX},#{row.posY},#{row.posZ},#{data},#{digest},#{now},#{now})
+            """)
+    int insertFinalSave(@Param("row") PlayerRow row,@Param("data") byte[] data,@Param("digest") byte[] digest,
+                        @Param("source") String source,@Param("now") long now);
+
+    @Update("UPDATE player_final_save SET status='PENDING',level=#{row.level},scene_config_id=(CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),pos_x=#{row.posX},pos_y=#{row.posY},pos_z=#{row.posZ},data=#{data},payload_digest=#{digest},created_at=#{now},next_attempt_at=#{now} WHERE player_id=#{row.playerId} AND owner_epoch=#{row.ownerEpoch} AND " + EXACT_OPEN + " AND save_seq=1 AND protocol_version=1 AND source_instance=#{source}")
+    int registerOpenFinalSave(@Param("row") PlayerRow row,@Param("data") byte[] data,@Param("digest") byte[] digest,
+                             @Param("source") String source,@Param("now") long now);
+
+    @Update("UPDATE player_final_save SET status='APPLIED',applied_at=#{now},last_error_code='' WHERE player_id=#{playerId} AND owner_epoch=#{epoch} AND " + EXACT_PENDING + " AND payload_digest=#{digest}")
+    int markFinalApplied(@Param("playerId") long playerId,@Param("epoch") long epoch,
+                         @Param("digest") byte[] digest,@Param("now") long now);
+
+    @Select("SELECT player_id,owner_epoch FROM player_final_save WHERE " + EXACT_PENDING + " AND next_attempt_at <= #{now} ORDER BY next_attempt_at,player_id,owner_epoch LIMIT #{limit}")
+    @ConstructorArgs({@Arg(column="player_id",javaType=long.class),@Arg(column="owner_epoch",javaType=long.class)})
+    List<PlayerStore.FinalSaveKey> selectDueFinalSaves(@Param("now") long now,@Param("limit") int limit);
+
+    @Update("UPDATE player_final_save SET next_attempt_at=#{next},attempt_count=LEAST(attempt_count+1,9223372036854775806),last_error_code=#{code} WHERE player_id=#{playerId} AND owner_epoch=#{epoch} AND " + EXACT_PENDING)
+    int postponeFinalSave(@Param("playerId") long playerId,@Param("epoch") long epoch,
+                          @Param("next") long next,@Param("code") String code);
+
+    @Select("SELECT f.player_id,f.owner_epoch FROM player_final_save f JOIN player p ON p.player_id=f.player_id AND p.owner_epoch>f.owner_epoch WHERE f.status=#{status} AND (" + EXACT_OPEN + " OR " + EXACT_APPLIED + ") AND f.created_at < #{cutoff} AND (" + EXACT_OPEN + " OR f.applied_at < #{cutoff}) ORDER BY f.created_at,f.player_id,f.owner_epoch LIMIT #{limit}")
+    @ConstructorArgs({@Arg(column="player_id",javaType=long.class),@Arg(column="owner_epoch",javaType=long.class)})
+    List<PlayerStore.FinalSaveKey> selectRetiredFinalKeys(@Param("status") String status,
+            @Param("cutoff") long cutoff,@Param("limit") int limit);
+
+    /** 调用方已先锁player并证明owner_epoch更大；PENDING永不进入此删除入口。 */
+    @Delete("DELETE FROM player_final_save WHERE player_id=#{playerId} AND owner_epoch=#{epoch} AND created_at < #{cutoff} AND (" + EXACT_OPEN + " OR (" + EXACT_APPLIED + " AND applied_at < #{cutoff}))")
+    int deleteRetiredFinal(@Param("playerId") long playerId,@Param("epoch") long epoch,@Param("cutoff") long cutoff);
 
     /** 批量续约：只续仍由对应 epoch 持有的归属。返回匹配的行数（驱动默认 useAffectedRows=false，即 found rows）。 */
     @Update({"<script>",

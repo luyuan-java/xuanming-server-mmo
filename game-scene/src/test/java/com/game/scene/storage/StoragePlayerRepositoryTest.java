@@ -1,10 +1,13 @@
 package com.game.scene.storage;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -15,12 +18,15 @@ import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
 import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.PlayerStore.HandOffResult;
+import com.game.player.store.PlayerStore.FinalSaveReceipt;
+import com.game.player.store.PlayerStore.FinalSaveStatus;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository.HandOffAttempts;
 import com.game.scene.world.PlayerRepository.HandOffOutcome;
+import com.game.scene.world.PlayerRepository.FinalSaveRegistration;
 import com.game.scene.world.PlayerRepository.LoadResult;
 import com.game.scene.world.PlayerRepository.ProbeOutcome;
 import com.game.scene.world.PlayerRepository.ProgressResult;
@@ -37,7 +43,10 @@ import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.QueryTimeoutException;
@@ -79,17 +88,35 @@ class StoragePlayerRepositoryTest {
         row.setPosX(1.5);
         row.setPosY(2.5);
         row.setPosZ(3.5);
-        when(store.findPlayer(1001)).thenReturn(Optional.of(row));
+        when(store.loadForScene(eq(1001L), eq(6L), anyString(), any()))
+                .thenReturn(Optional.of(new PlayerStore.SceneLoad(row, PlayerState.getDefaultInstance())));
         StoragePlayerRepository repository =
                 new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
-        repository.load(1001, results::add);
+        repository.load(1001, 6, results::add);
 
         assertThat(results).isEmpty();
         logicTasks.forEach(Runnable::run);
         assertThat(results).containsExactly(new LoadResult.Found(
                 new PlayerData(1001, 6, 3, 1, "look", 4, 1, new Vec3(1.5, 2.5, 3.5))));
+        verify(store).loadForScene(eq(1001L), eq(6L), anyString(), any());
+        verify(store, never()).findPlayer(anyLong());
+        verify(store, never()).loadState(anyLong());
+    }
+
+    @Test
+    void 缺少预期epoch的旧加载入口明确失败_不能先读当前代再猜准入() {
+        StoragePlayerRepository repository =
+                new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+        List<LoadResult> results = new ArrayList<>();
+        repository.load(1001, results::add);
+        assertThat(results).isEmpty();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).singleElement().isInstanceOf(LoadResult.Failed.class);
+        verify(store, never()).loadForScene(anyLong(), anyLong(), anyString(), any());
+        verify(store, never()).findPlayer(anyLong());
+        verify(store, never()).loadState(anyLong());
     }
 
     @Test
@@ -97,14 +124,14 @@ class StoragePlayerRepositoryTest {
         PlayerRow row = new PlayerRow();
         row.setPlayerId(1001);
         row.setOwnerEpoch(6);
-        when(store.findPlayer(1001)).thenReturn(Optional.of(row));
         PlayerState state = PlayerState.newBuilder().setFacing(Facing.newBuilder().setZ(90)).build();
-        when(store.loadState(1001)).thenReturn(state);
+        when(store.loadForScene(eq(1001L), eq(6L), anyString(), any()))
+                .thenReturn(Optional.of(new PlayerStore.SceneLoad(row, state)));
         StoragePlayerRepository repository =
                 new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
-        repository.load(1001, results::add);
+        repository.load(1001, 6, results::add);
         logicTasks.forEach(Runnable::run);
 
         assertThat(results).singleElement().isInstanceOfSatisfying(LoadResult.Found.class,
@@ -121,17 +148,17 @@ class StoragePlayerRepositoryTest {
         row.setPlayerId(1001);
         row.setOwnerEpoch(6);
         row.setName("回合制玩家");
-        when(store.findPlayer(1001)).thenReturn(Optional.of(row));
         PlayerState state = PlayerState.newBuilder().setBattleLedger(com.game.player.store.state.BattleLedgerState.newBuilder()
                 .addApplied(com.game.player.store.state.BattleLedgerEntry.newBuilder().setBattleId(7).setAppliedAtMs(1_700_000_000_007L))
                 .addApplied(com.game.player.store.state.BattleLedgerEntry.newBuilder().setBattleId(0x8000_0000_0000_0001L)
                         .setAppliedAtMs(1_700_000_000_008L))).build();
-        when(store.loadState(1001)).thenReturn(state);
+        when(store.loadForScene(eq(1001L), eq(6L), anyString(), any()))
+                .thenReturn(Optional.of(new PlayerStore.SceneLoad(row, state)));
         StoragePlayerRepository repository =
                 new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
-        repository.load(1001, results::add);
+        repository.load(1001, 6, results::add);
         logicTasks.forEach(Runnable::run);
 
         assertThat(results).singleElement().isInstanceOfSatisfying(LoadResult.Found.class, found -> {
@@ -146,13 +173,14 @@ class StoragePlayerRepositoryTest {
     void 玩法数据损坏按加载失败处理() {
         PlayerRow row = new PlayerRow();
         row.setPlayerId(1001);
-        when(store.findPlayer(1001)).thenReturn(Optional.of(row));
-        when(store.loadState(1001)).thenThrow(new IllegalStateException("player_state 解析失败"));
+        row.setOwnerEpoch(6);
+        when(store.loadForScene(eq(1001L), eq(6L), anyString(), any()))
+                .thenThrow(new IllegalStateException("player_state 解析失败"));
         StoragePlayerRepository repository =
                 new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
-        repository.load(1001, results::add);
+        repository.load(1001, 6, results::add);
         logicTasks.forEach(Runnable::run);
 
         assertThat(results).singleElement().isInstanceOf(LoadResult.Failed.class);
@@ -193,14 +221,14 @@ class StoragePlayerRepositoryTest {
 
     @Test
     void 加载未命中与异常() {
-        when(store.findPlayer(1)).thenReturn(Optional.empty());
-        when(store.findPlayer(2)).thenThrow(new IllegalStateException("db down"));
+        when(store.loadForScene(eq(1L), eq(6L), anyString(), any())).thenReturn(Optional.empty());
+        when(store.loadForScene(eq(2L), eq(6L), anyString(), any())).thenThrow(new IllegalStateException("db down"));
         StoragePlayerRepository repository =
                 new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
-        repository.load(1, results::add);
-        repository.load(2, results::add);
+        repository.load(1, 6, results::add);
+        repository.load(2, 6, results::add);
         logicTasks.forEach(Runnable::run);
 
         assertThat(results).hasSize(2);
@@ -214,7 +242,7 @@ class StoragePlayerRepositoryTest {
                 new StoragePlayerRepository(store, new RejectingExecutorService(), logic, metrics);
         List<LoadResult> results = new ArrayList<>();
 
-        repository.load(1, results::add);
+        repository.load(1, 6, results::add);
 
         assertThat(results).isEmpty();
         logicTasks.forEach(Runnable::run);
@@ -222,15 +250,18 @@ class StoragePlayerRepositoryTest {
     }
 
     @Test
-    void 写回带上owner_epoch围栏字段并释放归属() {
-        when(store.saveStateAndRelease(any(), any())).thenReturn(false);
+    void 最终登记带上原epoch完整标量与冻结bytes_回执在逻辑线程明确区分持久接管和已应用() {
+        when(store.registerFinalSave(any(), any(), anyString(), any())).thenReturn(finalReceipt(FinalSaveStatus.APPLIED));
         StoragePlayerRepository repository =
                 new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+        List<FinalSaveRegistration> results = new ArrayList<>();
+        PlayerState state = PlayerState.newBuilder().setFacing(Facing.newBuilder().setX(0.5)).build();
 
-        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+        repository.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9), state), results::add);
 
         ArgumentCaptor<PlayerRow> row = ArgumentCaptor.forClass(PlayerRow.class);
-        verify(store).saveStateAndRelease(row.capture(), any());
+        ArgumentCaptor<byte[]> bytes = ArgumentCaptor.forClass(byte[].class);
+        verify(store).registerFinalSave(row.capture(), bytes.capture(), eq("test-repository"), any());
         assertThat(row.getValue().getPlayerId()).isEqualTo(1001L);
         assertThat(row.getValue().getOwnerEpoch()).isEqualTo(9L);
         assertThat(row.getValue().getLevel()).isEqualTo(4);
@@ -238,30 +269,56 @@ class StoragePlayerRepositoryTest {
         assertThat(row.getValue().getPosX()).isEqualTo(7);
         assertThat(row.getValue().getPosY()).isEqualTo(8);
         assertThat(row.getValue().getPosZ()).isEqualTo(9);
-        assertThat(repository.writeFailures()).as("围栏拒绝不是故障").isZero();
-        assertThat(writes("save", "fenced").count()).isEqualTo(1);
-        assertThat(writes("save", "failed").count()).isZero();
+        assertThat(bytes.getValue()).containsExactly(state.toByteArray());
+        assertThat(results).isEmpty();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).singleElement().isInstanceOfSatisfying(FinalSaveRegistration.Durable.class,
+                durable -> assertThat(durable.applied()).isTrue());
+        verify(store, never()).saveStateAndRelease(any(), any());
+        assertThat(repository.writeFailures()).isZero();
+        assertThat(repository.unregisteredFinalCount()).isZero();
     }
 
     @Test
-    void 回归_写回坐标非有限_改写为原点_其余照常写回并释放() {
-        when(store.saveStateAndRelease(any(), any())).thenReturn(true);
+    void 最终冻结坐标非有限明确冲突并保留_不能擅自改成原点冒保存成功() {
         StoragePlayerRepository repository =
                 new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics);
+        List<FinalSaveRegistration> results = new ArrayList<>();
 
-        // JDBC 驱动默认拒绝 NaN / ±Inf：不改写的话整条写回失败，等级 / 场景丢失、归属放不掉。
-        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, Double.NaN, Double.NEGATIVE_INFINITY)));
+        repository.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, Double.NaN, Double.NEGATIVE_INFINITY)), results::add);
 
-        ArgumentCaptor<PlayerRow> row = ArgumentCaptor.forClass(PlayerRow.class);
-        verify(store).saveStateAndRelease(row.capture(), any());
-        assertThat(row.getValue().getOwnerEpoch()).isEqualTo(9L);
-        assertThat(row.getValue().getLevel()).isEqualTo(4);
-        assertThat(row.getValue().getSceneConfigId()).isEqualTo(2);
-        assertThat(row.getValue().getPosX()).isZero();
-        assertThat(row.getValue().getPosY()).isZero();
-        assertThat(row.getValue().getPosZ()).isZero();
-        assertThat(writes("save", "released").count()).isEqualTo(1);
-        assertThat(repository.writeFailures()).isZero();
+        assertThat(results).isEmpty();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).containsExactly(new FinalSaveRegistration.Conflict());
+        assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
+        verify(store, never()).registerFinalSave(any(), any(), anyString(), any());
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
+        assertThat(repository.writeFailures()).isEqualTo(1);
+    }
+
+    private static FinalSaveReceipt finalReceipt(FinalSaveStatus status) {
+        return new FinalSaveReceipt(status, 1001, 9, 1, "test-repository", "a".repeat(64));
+    }
+
+    private final AtomicLong finalClock = new AtomicLong(1_000);
+
+    private StoragePlayerRepository finalRepository(ExecutorService executor) {
+        return new StoragePlayerRepository(store, executor, logic,
+                new StoragePlayerRepository.RetryPolicy(3, Duration.ofMillis(200), Duration.ofSeconds(5)),
+                HandOffSettings.DEFAULT,
+                millis -> { throw new AssertionError("最终接管不得在工作线程阻塞sleep重试"); },
+                backoff -> 0, () -> nanos[0], finalClock::get, metrics);
+    }
+
+    /** 捕获已有调度接缝，由测试推进一轮，绝不启动真实调度线程。 */
+    private Runnable finalRecoveryTick(StoragePlayerRepository repository) {
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ScheduledFuture<?> future = mock(ScheduledFuture.class);
+        doReturn(future).when(scheduler).scheduleWithFixedDelay(any(Runnable.class), eq(0L), eq(500L), eq(TimeUnit.MILLISECONDS));
+        repository.startFinalRecovery(scheduler);
+        ArgumentCaptor<Runnable> tick = ArgumentCaptor.forClass(Runnable.class);
+        verify(scheduler).scheduleWithFixedDelay(tick.capture(), eq(0L), eq(500L), eq(TimeUnit.MILLISECONDS));
+        return tick.getValue();
     }
 
     // ------------------------------------------------------------------ 写失败：重试与记录
@@ -283,19 +340,61 @@ class StoragePlayerRepositoryTest {
     }
 
     @Test
-    void 开事务时取不到连接_按瞬时故障重试() {
-        // 写回是 @Transactional：连接池超时在开事务时以 CannotCreateTransactionException 抛出（不是 DataAccessException），
-        // 根因是连接池自己的异常（如 Druid 的 GetConnectionTimeoutException，不带 SQL 瞬时类型）。
-        when(store.saveStateAndRelease(any(), any()))
+    void 最终登记开事务取不到连接保留冻结_下一轮以相同bytes和原epoch重新认重() {
+        when(store.registerFinalSave(any(), any(), anyString(), any()))
                 .thenThrow(new CannotCreateTransactionException("开事务失败", new IllegalStateException("连接池等待超时")))
-                .thenReturn(true);
-        StoragePlayerRepository repository = retrying(new DirectExecutorService());
+                .thenReturn(finalReceipt(FinalSaveStatus.APPLIED));
+        StoragePlayerRepository repository = finalRepository(new DirectExecutorService());
+        Runnable tick = finalRecoveryTick(repository);
+        List<FinalSaveRegistration> results = new ArrayList<>();
+        PlayerSave frozen = new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9));
 
-        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+        repository.saveFinal(frozen, results::add);
+        assertThat(results).isEmpty();
+        assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
+        verify(store, times(1)).registerFinalSave(any(), any(), anyString(), any());
+        finalClock.addAndGet(60_000);
+        tick.run();
+        logicTasks.forEach(Runnable::run);
 
-        verify(store, times(2)).saveStateAndRelease(any(), any());
+        ArgumentCaptor<byte[]> bytes = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<PlayerRow> rows = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store, times(2)).registerFinalSave(rows.capture(), bytes.capture(), eq("test-repository"), any());
+        assertThat(bytes.getAllValues()).allSatisfy(raw -> assertThat(raw).containsExactly(frozen.state().toByteArray()));
+        assertThat(rows.getAllValues()).allSatisfy(row -> assertThat(row.getOwnerEpoch()).isEqualTo(9));
+        assertThat(results).singleElement().isInstanceOf(FinalSaveRegistration.Durable.class);
         assertThat(repository.writeFailures()).isZero();
-        assertThat(writes("save", "released").count()).isEqualTo(1);
+        assertThat(repository.unregisteredFinalCount()).isZero();
+    }
+
+    @Test
+    void 最终登记应答不明不换请求_仍以原字节和来源认回同一个持久凭据() {
+        // 此处仅模拟适配器收到异常，不把mock当成真实SQL提交/网络故障证明。
+        when(store.registerFinalSave(any(), any(), anyString(), any()))
+                .thenThrow(new IllegalStateException("模拟SQL已经提交但应答未知"))
+                .thenReturn(finalReceipt(FinalSaveStatus.APPLIED));
+        StoragePlayerRepository repository = finalRepository(new DirectExecutorService());
+        Runnable tick = finalRecoveryTick(repository);
+        List<FinalSaveRegistration> results = new ArrayList<>();
+        PlayerState state = PlayerState.newBuilder().setFacing(Facing.newBuilder().setY(0.75)).build();
+        repository.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9), state), results::add);
+        assertThat(results).isEmpty();
+        assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
+        finalClock.addAndGet(60_000);
+        tick.run();
+        logicTasks.forEach(Runnable::run);
+
+        ArgumentCaptor<byte[]> bytes = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<PlayerRow> rows = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store, times(2)).registerFinalSave(rows.capture(), bytes.capture(), eq("test-repository"), any());
+        assertThat(bytes.getAllValues()).allSatisfy(raw -> assertThat(raw).containsExactly(state.toByteArray()));
+        assertThat(rows.getAllValues()).allSatisfy(row -> {
+            assertThat(row.getPlayerId()).isEqualTo(1001);
+            assertThat(row.getOwnerEpoch()).isEqualTo(9);
+        });
+        assertThat(results).singleElement().isInstanceOf(FinalSaveRegistration.Durable.class);
+        assertThat(repository.unregisteredFinalCount()).isZero();
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
     }
 
     @Test
@@ -339,57 +438,92 @@ class StoragePlayerRepositoryTest {
     }
 
     @Test
-    void 取不到连接等瞬时故障_退避重试后成功() {
-        when(store.saveStateAndRelease(any(), any()))
+    void 最终登记多次瞬时失败分轮保留_确认原凭据后才报告成功() {
+        when(store.registerFinalSave(any(), any(), anyString(), any()))
                 .thenThrow(new CannotGetJdbcConnectionException("池满"))
                 .thenThrow(new QueryTimeoutException("超时"))
-                .thenReturn(true);
-        StoragePlayerRepository repository = retrying(new DirectExecutorService());
+                .thenReturn(finalReceipt(FinalSaveStatus.APPLIED));
+        StoragePlayerRepository repository = finalRepository(new DirectExecutorService());
+        Runnable tick = finalRecoveryTick(repository);
+        List<FinalSaveRegistration> results = new ArrayList<>();
 
-        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+        repository.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)), results::add);
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            assertThat(results).isEmpty();
+            assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
+            verify(store, times(attempt)).registerFinalSave(any(), any(), anyString(), any());
+            finalClock.addAndGet(60_000);
+            tick.run();
+        }
+        logicTasks.forEach(Runnable::run);
 
-        verify(store, times(3)).saveStateAndRelease(any(), any());
-        assertThat(sleeps).containsExactly(200L, 400L);
+        verify(store, times(3)).registerFinalSave(any(), any(), eq("test-repository"), any());
+        assertThat(sleeps).as("最终接管按调度轮次退避，不占住线程sleep").isEmpty();
+        assertThat(results).singleElement().isInstanceOf(FinalSaveRegistration.Durable.class);
+        assertThat(repository.unregisteredFinalCount()).isZero();
         assertThat(repository.writeFailures()).isZero();
-        assertThat(writes("save", "released").count()).as("重试后成功只计一次").isEqualTo(1);
-        assertThat(writes("save", "released").totalTime(TimeUnit.MILLISECONDS)).as("耗时含重试等待").isEqualTo(600);
     }
 
     @Test
-    void 瞬时故障重试用尽_记一次失败() {
-        when(store.saveStateAndRelease(any(), any())).thenThrow(new CannotGetJdbcConnectionException("库挂了"));
-        StoragePlayerRepository repository = retrying(new DirectExecutorService());
+    void 最终登记超过原三次仍保留冻结_停机明确回Unconfirmed不冒已落库() {
+        when(store.registerFinalSave(any(), any(), anyString(), any())).thenThrow(new CannotGetJdbcConnectionException("库挂了"));
+        StoragePlayerRepository repository = finalRepository(new DirectExecutorService());
+        Runnable tick = finalRecoveryTick(repository);
+        List<FinalSaveRegistration> results = new ArrayList<>();
 
-        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+        repository.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)), results::add);
+        for (int next = 0; next < 3; next++) {
+            finalClock.addAndGet(60_000);
+            tick.run();
+        }
 
-        verify(store, times(3)).saveStateAndRelease(any(), any());
+        verify(store, times(4)).registerFinalSave(any(), any(), anyString(), any());
+        assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
+        assertThat(results).isEmpty();
+        assertThat(repository.writeFailures()).as("尝试耗尽不能伪称丢弃或干净退出").isZero();
+        repository.closeFinalRecovery();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).containsExactly(new FinalSaveRegistration.Unconfirmed());
+        assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
         assertThat(repository.writeFailures()).isEqualTo(1);
-        assertThat(writes("save", "failed").count()).isEqualTo(1);
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
     }
 
     @Test
-    void 非瞬时故障不重试() {
-        when(store.saveStateAndRelease(any(), any())).thenThrow(new BadSqlGrammarException("save", "UPDATE", new SQLException("列不存在")));
-        StoragePlayerRepository repository = retrying(new DirectExecutorService());
+    void 最终登记非瞬时失败停放而不丢弃_修复前仅停机给未确认结果() {
+        when(store.registerFinalSave(any(), any(), anyString(), any()))
+                .thenThrow(new BadSqlGrammarException("save", "UPDATE", new SQLException("列不存在")));
+        StoragePlayerRepository repository = finalRepository(new DirectExecutorService());
+        List<FinalSaveRegistration> results = new ArrayList<>();
 
-        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+        repository.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)), results::add);
 
-        verify(store, times(1)).saveStateAndRelease(any(), any());
+        verify(store, times(1)).registerFinalSave(any(), any(), anyString(), any());
         assertThat(sleeps).isEmpty();
+        assertThat(results).isEmpty();
+        assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
+        assertThat(repository.writeFailures()).isZero();
+        repository.closeFinalRecovery();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).containsExactly(new FinalSaveRegistration.Unconfirmed());
         assertThat(repository.writeFailures()).isEqualTo(1);
     }
 
     @Test
-    void 截止时间不够再等一次就放弃() {
-        when(store.saveStateAndRelease(any(), any())).thenAnswer(inv -> {
-            nanos[0] += Duration.ofSeconds(5).toNanos();
-            throw new CannotGetJdbcConnectionException("每次都卡满超时");
-        });
-        StoragePlayerRepository repository = retrying(new DirectExecutorService());
+    void 最终登记SQL预算耗尽没有提交证明_保留原冻结且不能裸释放() {
+        when(store.registerFinalSave(any(), any(), anyString(), any())).thenReturn(finalReceipt(FinalSaveStatus.TIMED_OUT));
+        StoragePlayerRepository repository = finalRepository(new DirectExecutorService());
+        List<FinalSaveRegistration> results = new ArrayList<>();
 
-        repository.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+        repository.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)), results::add);
 
-        verify(store, times(1)).saveStateAndRelease(any(), any());
+        verify(store, times(1)).registerFinalSave(any(), any(), eq("test-repository"), eq(Duration.ofSeconds(2)));
+        assertThat(repository.unregisteredFinalCount()).isEqualTo(1);
+        assertThat(results).isEmpty();
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
+        repository.closeFinalRecovery();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).containsExactly(new FinalSaveRegistration.Unconfirmed());
         assertThat(repository.writeFailures()).isEqualTo(1);
     }
 
@@ -406,28 +540,53 @@ class StoragePlayerRepositoryTest {
     }
 
     @Test
-    void 线程池拒绝写任务_计一次失败_停服丢弃的任务能逐条描述() {
-        StoragePlayerRepository rejecting = retrying(new RejectingExecutorService());
-        rejecting.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+    void 线程池拒绝最终登记_冻结仍被持有_关闭明确回未确认() {
+        StoragePlayerRepository rejecting = finalRepository(new RejectingExecutorService());
+        List<FinalSaveRegistration> results = new ArrayList<>();
+        rejecting.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)), results::add);
+        assertThat(rejecting.unregisteredFinalCount()).isEqualTo(1);
+        assertThat(rejecting.writeFailures()).isZero();
+        assertThat(results).isEmpty();
+        rejecting.closeFinalRecovery();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).containsExactly(new FinalSaveRegistration.Unconfirmed());
         assertThat(rejecting.writeFailures()).isEqualTo(1);
-        assertThat(writes("save", "rejected").count()).isEqualTo(1);
+        verify(store, never()).registerFinalSave(any(), any(), anyString(), any());
+    }
 
+    @Test
+    void 排队最终任务被停机取消也不丢冻结_普通释放任务仍可逐条描述() {
         List<Runnable> queued = new ArrayList<>();
-        StoragePlayerRepository queuing = retrying(new DirectExecutorService() {
+        StoragePlayerRepository queuing = finalRepository(new DirectExecutorService() {
             @Override
             public void execute(Runnable command) {
                 queued.add(command);
             }
         });
-        queuing.save(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)));
+        List<FinalSaveRegistration> results = new ArrayList<>();
+        queuing.saveFinal(new PlayerSave(1001, 9, 4, 2, new Vec3(7, 8, 9)), results::add);
         queuing.release(1002, 3);
 
         assertThat(queued).hasSize(2);
-        assertThat(StoragePlayerRepository.describeDropped(queued.get(0))).hasValueSatisfying(text -> assertThat(text)
-                .contains("1001").contains("epoch=9").contains("scene_config=2").contains("pos=(7.0,8.0,9.0)"));
+        // 最终任务由协调器持有冻结引用，不再依赖被shutdownNow丢弃的Runnable描述来找回数据。
+        queuing.closeFinalRecovery();
+        queued.get(0).run();
+        logicTasks.forEach(Runnable::run);
+        assertThat(results).containsExactly(new FinalSaveRegistration.Unconfirmed());
+        assertThat(queuing.unregisteredFinalCount()).isEqualTo(1);
+        verify(store, never()).registerFinalSave(any(), any(), anyString(), any());
         assertThat(StoragePlayerRepository.describeDropped(queued.get(1))).hasValueSatisfying(text -> assertThat(text)
                 .contains("释放").contains("1002").contains("epoch=3"));
         assertThat(StoragePlayerRepository.describeDropped(() -> { })).isEmpty();
+    }
+
+    @Test
+    void 旧void最终写入口明确拒绝_不能静默吞掉未确认结果() {
+        StoragePlayerRepository repository = finalRepository(new DirectExecutorService());
+        assertThatThrownBy(() -> repository.save(new PlayerSave(1001, 9, 4, 2, Vec3.ORIGIN)))
+                .isInstanceOf(IllegalStateException.class);
+        verify(store, never()).saveStateAndRelease(any(), any());
+        verify(store, never()).registerFinalSave(any(), any(), anyString(), any());
     }
 
     // ------------------------------------------------------------------ 交出与探测（scene-handoff-spec §5.2）

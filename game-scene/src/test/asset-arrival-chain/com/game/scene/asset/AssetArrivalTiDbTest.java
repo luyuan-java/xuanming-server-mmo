@@ -27,6 +27,9 @@ import com.game.proto.trade.*;
 import com.game.scene.audit.*;
 import com.game.scene.bag.*;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.inbox.*;
+import com.game.scene.team.TeamFollow;
+import com.game.proto.player_inbox.*;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.storage.StoragePlayerRepository;
 import com.game.scene.world.*;
@@ -76,6 +79,9 @@ class AssetArrivalTiDbTest {
     private final List<AssetOpRequest> requests = new CopyOnWriteArrayList<>();
     private PersistedAssetLedgerReader proof;
     private SceneWorld world;
+    private InboxService inbox;
+    private final InboxSqlTransport inboxTransport = new InboxSqlTransport();
+    private final AtomicInteger inboxExecutions = new AtomicInteger();
     private Scene scene;
     private AssetOpEndpoint endpoint;
 
@@ -148,13 +154,26 @@ class AssetArrivalTiDbTest {
             for (int i = 0; i < count; i++) allocated[i] = ids.incrementAndGet();
             return allocated;
         }, audit, GainAnomalyDetector.off(), SceneMetrics.noop());
-        var repository = new StoragePlayerRepository(players, storage, logic, SceneMetrics.noop());
+        var repository = new StoragePlayerRepository(players, storage, logic, SceneMetrics.noop(),
+                com.game.scene.storage.HandOffSettings.DEFAULT, "inbox-final-test");
+        var currency = new CurrencyService(audit, GainAnomalyDetector.off(), SceneMetrics.noop(), SceneClock.SYSTEM);
+        var productionInbox = InboxConsumers.gmSanction(currency);
+        var blockType = PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_CURRENCY_GAIN;
+        int domain = PlayerInboxDomain.PLAYER_INBOX_DOMAIN_SCENE_GM_SANCTION_VALUE;
+        var counted = InboxConsumers.of(Map.of(blockType, (player, payload) -> {
+            inboxExecutions.incrementAndGet();
+            return productionInbox.executor(blockType.getNumber(), domain).execute(player, payload);
+        }));
+        inbox = new InboxService(counted, inboxTransport, SceneClock.SYSTEM, new InboxService.Settings(true, 30), () -> 1, () -> 500);
         world = onLogic(() -> new SceneWorld(sceneTables,
                 SceneMessageIds.resolve(MessageIdRegistry.loadFromClasspath()), mock(ClientSink.class), repository,
                 ids::incrementAndGet, SceneClock.SYSTEM, SceneMetrics.noop(), player -> {
                     bags.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
-                }, PlayerSnapshots.NONE));
+                    InboxService.checkLedgerOnLoad(player);
+                }, PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE, CrossNodeSwitch.DISABLED, SceneInstances.DISABLED,
+                BattleHooks.NONE, ZoneTravel.DISABLED, inbox));
+        onLogic(() -> { inbox.attach(world); return null; });
         int map = sceneTables.worldSceneConfigIds().getFirst();
         scene = onLogic(() -> world.createScene(map));
         var service = new AssetOpService(world,
@@ -415,6 +434,95 @@ class AssetArrivalTiDbTest {
         assertThat(loaded).isInstanceOf(PersistedAssetLedgerReader.Read.Loaded.class);
         return ((PersistedAssetLedgerReader.Read.Loaded) loaded).ledger()
                 .receipt(request.getStreamValue(), request.getStreamEpoch(), request.getSeq());
+    }
+
+    @Test
+    void 收件箱实际效果和账本必须同笔SQL提交_延迟写期间零确认() throws Exception {
+        storage.holdNext();
+        inboxReply();
+        storage.awaitHeld();
+        assertThat(onLogic(() -> world.playerById(BUYER).wallet().isBlocked(0))).isTrue();
+        assertThat(players.loadState(BUYER).getCurrency().getBlockedTypesList()).isEmpty();
+        assertThat(players.loadState(BUYER).getInboxLedger().getCursorsCount()).isZero();
+        assertThat(inboxTransport.acks).isEmpty();
+        storage.releaseHeld();
+        storage.awaitReleased();
+        awaitInboxAck(1);
+        assertThat(players.loadState(BUYER).getCurrency().getBlockedTypesList()).containsExactly(0);
+        assertThat(players.loadState(BUYER).getInboxLedger().getCursors(0).getDecidedThroughSeq()).isEqualTo(1);
+        assertThat(inboxExecutions).hasValue(1);
+    }
+
+    @Test
+    void 收件箱最终TX1不确认_真实接管先应用意图_新主回放且旧SQL永不覆盖() throws Exception {
+        storage.holdNext();
+        inboxReply();
+        storage.awaitHeld();
+        PlayerSave latest = onLogic(() -> com.game.scene.world.InboxSnapshotTestBridge.snapshot(world.playerById(BUYER)));
+        var row = players.findPlayer(BUYER).orElseThrow();
+        row.setLevel(latest.level()); row.setSceneConfigId(latest.sceneConfigId());
+        row.setPosX(latest.position().x()); row.setPosY(latest.position().y()); row.setPosZ(latest.position().z());
+        var registered = players.registerFinalSave(row, latest.state().toByteArray(), "inbox-final-test", Duration.ofSeconds(3));
+        assertThat(registered.status()).isEqualTo(PlayerStore.FinalSaveStatus.ACCEPTED);
+        assertThat(players.loadState(BUYER).getInboxLedger().getCursorsCount()).isZero();
+        assertThat(inboxTransport.acks).isEmpty();
+        onLogic(() -> { world.onOwnershipLost(List.of(new OwnedPlayer(BUYER, 1))); return null; });
+        assertThat(players.claimOwnership(BUYER)).isEqualTo(new PlayerStore.ClaimResult.Claimed(2));
+        assertThat(players.probeFinalSave(BUYER, 1, Duration.ofSeconds(3)).status()).isEqualTo(PlayerStore.FinalSaveStatus.APPLIED);
+        enter(BUYER, 2, 202);
+        inboxReply();
+        awaitInboxAck(2);
+        assertThat(inboxExecutions).as("新主只回放实际 SQL 账本，不重复执行").hasValue(1);
+        storage.releaseHeld();
+        storage.awaitReleased();
+        onLogic(() -> null); // 排过旧 SQL 结果投递。
+        assertThat(inboxTransport.acks).hasSize(1).allSatisfy(ack -> assertThat(ack.getOwnerEpoch()).isEqualTo(2));
+        assertThat(players.findPlayer(BUYER).orElseThrow().getOwnerEpoch()).isEqualTo(2);
+        assertThat(players.loadState(BUYER).getCurrency().getBlockedTypesList()).containsExactly(0);
+    }
+
+    @Test
+    void 收件箱同epoch重连保留SQL写槽_真实回执只确认一次() throws Exception {
+        storage.holdNext();
+        inboxReply();
+        storage.awaitHeld();
+        enter(BUYER, 1, 303);
+        assertThat(inboxTransport.acks).isEmpty();
+        storage.releaseHeld();
+        storage.awaitReleased();
+        awaitInboxAck(1);
+        assertThat(inboxExecutions).hasValue(1);
+        assertThat(inboxTransport.acks).hasSize(1);
+        assertThat(players.loadState(BUYER).getCurrency().getBlockedTypesList()).containsExactly(0);
+    }
+
+    private void inboxReply() throws Exception {
+        onLogic(() -> {
+            inbox.tick();
+            var fetch = inboxTransport.fetches.stream().filter(call -> call.request().getPlayerId() == BUYER).reduce((a, b) -> b).orElseThrow();
+            fetch.callback().accept(FetchPlayerInboxResponse.newBuilder().setPlayerId(BUYER).setDomain(fetch.request().getDomain())
+                    .setCorrelationId(fetch.request().getCorrelationId()).setFence(PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_MATCH)
+                    .addItems(PlayerInboxItem.newBuilder().setSeq(1).setRequestId(101)
+                            .setMsgType(PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_CURRENCY_GAIN)
+                            .setPayload(GmCurrencyGainPayload.newBuilder().setCurrencyType(0).build().toByteString())).build(), null);
+            return null;
+        });
+    }
+
+    private void awaitInboxAck(long epoch) throws Exception {
+        await().atMost(Duration.ofSeconds(8)).pollInterval(Duration.ofMillis(20)).untilAsserted(() -> {
+            onLogic(() -> { inbox.tick(); return null; });
+            assertThat(inboxTransport.acks).hasSize(1);
+            assertThat(inboxTransport.acks.getFirst().getOwnerEpoch()).isEqualTo(epoch);
+        });
+    }
+
+    private record InboxFetch(FetchPlayerInboxRequest request, BiConsumer<FetchPlayerInboxResponse, Throwable> callback) { }
+    private static final class InboxSqlTransport implements InboxTransport {
+        final List<InboxFetch> fetches = new CopyOnWriteArrayList<>();
+        final List<AckPlayerInboxRequest> acks = new CopyOnWriteArrayList<>();
+        @Override public void fetch(FetchPlayerInboxRequest r, BiConsumer<FetchPlayerInboxResponse, Throwable> done) { fetches.add(new InboxFetch(r, done)); }
+        @Override public void ack(AckPlayerInboxRequest r, BiConsumer<AckPlayerInboxResponse, Throwable> done) { acks.add(r); }
     }
 
     @Test

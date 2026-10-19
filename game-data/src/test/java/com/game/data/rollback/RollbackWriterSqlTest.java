@@ -183,6 +183,20 @@ class RollbackWriterSqlTest {
     // ------------------------------------------------------------------ 对照：成功时四件事都在
 
     @Test
+    void 已登记最终待办不能被运维同epoch覆盖_回档四步全部回滚并保留原待办() {
+        PlayerRow frozen=new PlayerRow();frozen.setPlayerId(P);frozen.setOwnerEpoch(EPOCH);
+        frozen.setLevel(9);frozen.setSceneConfigId(1001);frozen.setPosX(321);
+        byte[] original=RollbackJobSqlTest.currentState().toByteArray();
+        assertThat(store.registerFinalSave(frozen,original,"scene-final",java.time.Duration.ofSeconds(2)).status())
+                .isEqualTo(PlayerStore.FinalSaveStatus.ACCEPTED);
+        String before=world();
+        assertThat(writer().write(JOB,"ops",P,SNAP,EPOCH,FULL)).isEqualTo(RollbackWriter.FENCE_LOST);
+        assertThat(world()).isEqualTo(before);
+        assertThat(store.probeFinalSave(P,EPOCH,java.time.Duration.ofSeconds(2)).status())
+                .isEqualTo(PlayerStore.FinalSaveStatus.ACCEPTED);
+    }
+
+    @Test
     void 对照_成功时安全快照_覆盖写_流水_明细四件事都在_并且互相对得上() throws Exception {
         assertThat(progressInTx()).isEqualTo(NOTHING_YET);
 

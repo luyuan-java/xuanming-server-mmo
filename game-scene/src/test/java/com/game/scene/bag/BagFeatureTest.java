@@ -77,6 +77,11 @@ class BagFeatureTest {
     }
 
     private boolean start(PlayerState state) {
+        return start(state, 1);
+    }
+
+    // 最终退出封闭旧代；重进场夹具显式提供独立夺权所得的新代。
+    private boolean start(PlayerState state, long ownerEpoch) {
         service = new BagService(tables, count -> {
             long[] out = new long[count];
             for (int i = 0; i < count; i++) {
@@ -90,9 +95,9 @@ class BagFeatureTest {
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
                 List.of(new BagFeature(service)));
         Scene scene = world.createScene(1);
-        repo.put(new PlayerData(PLAYER, 1, 3, 1, "", 1, 0, Vec3.ORIGIN, state));
+        repo.put(new PlayerData(PLAYER, ownerEpoch, 3, 1, "", 1, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
-                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(1).build());
+                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(ownerEpoch).build());
         repo.completeAll();
         boolean entered = player() != null;
         sink.clear();
@@ -241,7 +246,7 @@ class BagFeatureTest {
         assertThat(save.state().getBag().getItemsCount()).isEqualTo(5);
 
         sink.clear();
-        start(save.state());
+        start(save.state(), save.ownerEpoch() + 1);
         assertThat(getBag(0).getBag()).isEqualTo(inventory);
         assertThat(getBag(2).getBag()).isEqualTo(equipment);
     }

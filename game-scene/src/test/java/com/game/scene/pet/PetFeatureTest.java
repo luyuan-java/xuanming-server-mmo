@@ -75,6 +75,11 @@ class PetFeatureTest {
     }
 
     private void start(RunMode mode, PlayerState state) {
+        start(mode, state, 1);
+    }
+
+    // 最终退出封闭旧代；重进场夹具显式提供独立夺权所得的新代。
+    private void start(RunMode mode, PlayerState state, long ownerEpoch) {
         CurrencyService currency = new CurrencyService(new RecordingAssetAudit());
         AttributeService attributes = new AttributeService(AttributeTables.from(config), clock, currency);
         PetService service = new PetService(PetTables.from(config), currency, count -> {
@@ -94,9 +99,9 @@ class PetFeatureTest {
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, mode,
                 List.of(new AttributeFeature(attributes, Contracts.REGISTRY, pets::onOwnerLevelChanged), pets));
         Scene scene = world.createScene(1);
-        repo.put(new PlayerData(PLAYER, 1, 1, 1, "", 1, 0, Vec3.ORIGIN, state));
+        repo.put(new PlayerData(PLAYER, ownerEpoch, 1, 1, "", 1, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
-                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(1).build());
+                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(ownerEpoch).build());
         repo.completeAll();
         sink.clear();
     }
@@ -197,7 +202,7 @@ class PetFeatureTest {
         PlayerSave save = repo.saves().getLast();
         assertThat(save.state().getPets().getActivePetId()).isEqualTo(petId);
 
-        start(RunMode.DEV, save.state());
+        start(RunMode.DEV, save.state(), save.ownerEpoch() + 1);
         assertThat(list()).isEqualTo(before);
     }
 

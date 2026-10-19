@@ -103,6 +103,11 @@ class AttributeFeatureTest {
     }
 
     private void start(RunMode mode, int classId, int level, PlayerState state) {
+        start(mode, classId, level, state, 1);
+    }
+
+    // 最终退出封闭旧代；重进场夹具显式提供独立夺权所得的新代。
+    private void start(RunMode mode, int classId, int level, PlayerState state, long ownerEpoch) {
         AttributeService service = new AttributeService(tables, clock, new CurrencyService(audit));
         AtomicLong ids = new AtomicLong(5000);
         FakeSceneTables sceneTables = new FakeSceneTables();
@@ -112,9 +117,9 @@ class AttributeFeatureTest {
                 List.of(new AttributeFeature(service, Contracts.REGISTRY,
                         call -> levelEvents.add(sink.to(LINK, SESSION).size() + ":" + call.player().level()))));
         Scene scene = world.createScene(1);
-        repo.put(new PlayerData(PLAYER, 1, classId, 1, "", level, 0, Vec3.ORIGIN, state));
+        repo.put(new PlayerData(PLAYER, ownerEpoch, classId, 1, "", level, 0, Vec3.ORIGIN, state));
         world.onPlayerEnter(LINK, PlayerEnter.newBuilder()
-                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(1).build());
+                .setSessionId(SESSION).setPlayerId(PLAYER).setSceneId(scene.sceneId()).setOwnerEpoch(ownerEpoch).build());
         repo.completeAll();
         sink.clear();
     }
@@ -452,7 +457,7 @@ class AttributeFeatureTest {
         assertThat(stored.getLastSwitchTime()).isEqualTo(ManualClock.EPOCH_MILLIS_START / 1000);
 
         sink.clear();
-        start(RunMode.DEV, 1, save.level(), save.state());
+        start(RunMode.DEV, 1, save.level(), save.state(), save.ownerEpoch() + 1);
         assertThat(panel()).isEqualTo(before);
     }
 
@@ -467,7 +472,7 @@ class AttributeFeatureTest {
         assertThat(save.state().getVitals()).isEqualTo(Vitals.newBuilder().setHealth(100).setMana(0).build());
 
         sink.clear();
-        start(RunMode.DEV, 1, save.level(), save.state());
+        start(RunMode.DEV, 1, save.level(), save.state(), save.ownerEpoch() + 1);
         assertThat(panel().getDerived().getHealth()).isEqualTo(100);
         assertThat(panel().getDerived().getMana()).as("活着的只夹不补：0 法力仍是 0（同基线）").isZero();
     }

@@ -450,4 +450,88 @@ class PlayerBundleSqlTest {
 
         assertThat(target.playerStore(() -> NOW).loadState(PLAYER)).isEqualTo(PlayerState.getDefaultInstance());
     }
+
+    @Test
+    void 过期旧纪元已有最终待办_replace拒绝且三表不变(@TempDir Path dir) throws Exception {
+        Path file = exported(dir);
+        preparePendingLocal();
+        Map<String, List<Map<String, Object>>> before = localFinalSaveSnapshot();
+        FakeRedis redis = new FakeRedis("local-run");
+
+        assertThat(importLocal(file, redis, "--execute", "--replace")).as(err()).isEqualTo(2);
+        assertThat(err()).contains("最终存盘");
+        assertThat(redis.deleted).as("拒绝发生在Redis清理前").isEmpty();
+        assertThat(localFinalSaveSnapshot()).isEqualTo(before);
+    }
+
+    @Test
+    void 发布占位遇异代最终待办_拒绝且三表不变() throws Exception {
+        preparePendingLocal();
+        // 模拟先前旧导入器或人工操作留下的新纪元占位，旧待办仍必须阻断发布。
+        target.jdbc().update("UPDATE player SET owner_epoch = 6, owner_released = 0, owner_lease_until = ? WHERE player_id = ?",
+                LocalPlayerImporter.IMPORT_HOLD_LEASE, PLAYER);
+        Map<String, List<Map<String, Object>>> before = localFinalSaveSnapshot();
+        try (Connection connection = target.dataSource.getConnection()) {
+            assertThat(new LocalPlayerImporter(connection).publish(PLAYER, 6, NOW)).isFalse();
+        }
+        assertThat(localFinalSaveSnapshot()).isEqualTo(before);
+    }
+
+    @Test
+    void 最终意图损坏未知及非精确终态_replace全部拒绝且不读大快照(@TempDir Path dir) throws Exception {
+        Path file = exported(dir);
+        preparePendingLocal();
+        // 正式schema不允许NULL；故障夹具显式模拟外部损坏，验证SQL三值逻辑仍fail-closed。
+        target.jdbc().execute(DataSqlFixture.mysql()
+                ? "ALTER TABLE player_final_save MODIFY COLUMN status VARCHAR(16) NULL"
+                : "ALTER TABLE player_final_save ALTER COLUMN status DROP NOT NULL");
+        for (String status : java.util.Arrays.asList("PENDING", "BROKEN", "open", "OPEN ", "applied", "APPLIED ", null)) {
+            target.jdbc().update("UPDATE player_final_save SET status = ?, data = ? WHERE player_id = ?",
+                    status, new byte[] {(byte) 0xff}, PLAYER);
+            Map<String, List<Map<String, Object>>> before = localFinalSaveSnapshot();
+            err.reset();
+            FakeRedis redis = new FakeRedis("local-run");
+            assertThat(importLocal(file, redis, "--execute", "--replace")).as("status=%s: %s", status, err()).isEqualTo(2);
+            assertThat(err()).contains("最终存盘");
+            assertThat(redis.deleted).isEmpty();
+            assertThat(localFinalSaveSnapshot()).as("status=%s", status).isEqualTo(before);
+        }
+    }
+
+    private void preparePendingLocal() {
+        target.insertPlayer(PLAYER, 3, 11, 1001, 5, false, NOW - 30_000, 1000, 5000);
+        target.putState(PLAYER, state.toBuilder().setCurrency(CurrencyState.newBuilder().addBalances(321)).build().toByteArray(), 5, 5000);
+        PlayerStore store = target.playerStore(() -> NOW - 60_000);
+        String instance = "00000000-0000-0000-0000-000000000033";
+        assertThat(store.loadForScene(PLAYER, 5, instance, Duration.ofSeconds(5))).isPresent();
+        PlayerRow finalRow = store.findPlayer(PLAYER).orElseThrow();
+        finalRow.setLevel(73);
+        finalRow.setPosX(42);
+        byte[] finalBytes = state.toBuilder().setCurrency(CurrencyState.newBuilder().addBalances(999)).build().toByteArray();
+        assertThat(store.registerFinalSave(finalRow, finalBytes, instance, Duration.ofSeconds(5)).status())
+                .isEqualTo(PlayerStore.FinalSaveStatus.ACCEPTED);
+    }
+
+    private Map<String, List<Map<String, Object>>> localFinalSaveSnapshot() throws SQLException {
+        Map<String, List<Map<String, Object>>> snapshot = new LinkedHashMap<>();
+        for (String table : List.of("player", "player_state", "player_final_save")) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Map<String, Object> row : target.jdbc().queryForList("SELECT * FROM " + table + " WHERE player_id = ?", PLAYER)) {
+                Map<String, Object> normalized = new LinkedHashMap<>();
+                for (Map.Entry<String, Object> entry : row.entrySet()) {
+                    Object value = entry.getValue();
+                    if (value instanceof java.sql.Blob blob) {
+                        value = blob.getBytes(1, Math.toIntExact(blob.length()));
+                    }
+                    if (value instanceof byte[] bytes) {
+                        value = java.util.HexFormat.of().formatHex(bytes);
+                    }
+                    normalized.put(entry.getKey(), value);
+                }
+                rows.add(normalized);
+            }
+            snapshot.put(table, rows);
+        }
+        return snapshot;
+    }
 }

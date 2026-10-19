@@ -43,3 +43,30 @@ CREATE TABLE IF NOT EXISTS player_state (
     updated_at   BIGINT          NOT NULL COMMENT 'Unix 毫秒',
     PRIMARY KEY (player_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- M14 草案：最终 SAVE 的 SQL 持久接管。只通过本正式 schema 入口建表；不是审计日志。
+-- TX1 在锁住 player 后写入完整冻结快照并提交，TX2 才写 player/player_state 并置 APPLIED。
+-- PENDING 永不按次数或 TTL 删除。启用前必须排空所有不认识该门禁的旧 Java writer/claim 方。
+CREATE TABLE IF NOT EXISTS player_final_save (
+    player_id          BIGINT UNSIGNED NOT NULL,
+    owner_epoch        BIGINT UNSIGNED NOT NULL,
+    save_seq           BIGINT UNSIGNED NOT NULL COMMENT '第一版每个 epoch 只登记一次冻结终态，固定为 1',
+    protocol_version   INT UNSIGNED NOT NULL,
+    source_instance    VARCHAR(64) NOT NULL COMMENT '原 scene 实例，只作原始来源；补偿不改绑新实例或 epoch',
+    status             VARCHAR(16) NOT NULL COMMENT 'OPEN仅准入，不阻TTL；PENDING或APPLIED持久终态',
+    level              INT UNSIGNED NULL,
+    scene_config_id    INT UNSIGNED NULL,
+    pos_x              DOUBLE NULL,
+    pos_y              DOUBLE NULL,
+    pos_z              DOUBLE NULL,
+    data               MEDIUMBLOB NULL COMMENT '冻结 PlayerState 的原序列化字节，补偿直接原样写入',
+    payload_digest     BINARY(32) NULL COMMENT '协议域、player/epoch/seq、标量与原 data 的 SHA-256',
+    created_at         BIGINT NOT NULL,
+    next_attempt_at    BIGINT NOT NULL,
+    attempt_count      BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    last_error_code    VARCHAR(32) NOT NULL DEFAULT '',
+    applied_at         BIGINT NULL,
+    PRIMARY KEY (player_id, owner_epoch),
+    KEY idx_final_save_due (status, next_attempt_at, player_id, owner_epoch),
+    KEY idx_final_save_retired (status, created_at, player_id, owner_epoch)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
