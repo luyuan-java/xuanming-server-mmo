@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "version": 25,
-  "content_digest": "35871b3ef881057588085eb675908d575f2ed5fd872dc85e485287d7c587be60",
+  "content_digest": "0a0e207f22e7c3543031a576bc53bd552053a9c0c67dee09484da6e32863729b",
   "generated_at": "2026-10-13T14:07:53Z",
   "source_rev": {
     "commit": "6e212616bfbf337ef0c179cd4553cf9325da883d",
@@ -198,21 +198,21 @@
       "rows": 21,
       "source": {
         "file": "BaseScene.xlsx",
-        "size": 5508,
-        "sha256": "e3059a357a6dd2817078727fd5b5e001de353d69061be22ec0c87afd068a0e7b"
+        "size": 5519,
+        "sha256": "17142d3be150bf92041fab2523c85c1b145c5c47168af46c17c89800208073bb"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "basescene.json",
           "size": 2927,
-          "sha256": "1eac53654ef1a29b98f56f3c781e0ff4fd8a7c45c5895a597ee387110862c426"
+          "sha256": "5abbc27307221c5347a48a527dcb7725a8481815c79a8cce4c93aaa717a02485"
         },
         {
           "kind": "binary",
           "file": "basescene.pb",
           "size": 1219,
-          "sha256": "0b5edb5b943e738bea7acb31c15896e9ce4ec8ef8d4f7314f5b9b9e55927fc97"
+          "sha256": "13e645420fecc53bf95f708450906f7f683a669ab8c7f8d9c3b5cc5008b3ce39"
         }
       ]
     },

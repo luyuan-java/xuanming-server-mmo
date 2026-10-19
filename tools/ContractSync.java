@@ -3,6 +3,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -54,6 +56,10 @@ import java.util.stream.Stream;
  * java tools/ContractSync.java --mmorpg snapshot/ --commit 26ceb70ca   # 源目录不是 git 工作树时显式给 commit
  * # friend 单域刷新：完整既有契约基线快照，仅替换 friend 两源；commit 为基线，partial-source-commit 为实际源 HEAD
  * java tools/ContractSync.java --mmorpg snapshot/ --commit BASE_SHA --partial-source-commit SOURCE_SHA
+ * # 当前地图单域：保留其他已接入契约，独立记录地图来源，不冒充全量同步。
+ * java tools/ContractSync.java --mmorpg ../mmorpg --scope current-maps
+ * # CI：从两个明确提交重建完整期望树，不能拿本仓库已有产物充当期望。
+ * java tools/ContractSync.java --mmorpg baseline/ --maps-source maps/ --check
  * </pre>
  */
 public final class ContractSync {
@@ -72,9 +78,12 @@ public final class ContractSync {
     private static final String TABLE_PROTO_OUT = "game-table/src/main/proto";
     private static final String TABLE_CONSTANTS_OUT = "game-table/src/main/java/com/game/table/TableConstants.java";
     private static final String TABLE_DATA_OUT = "config-data/tables";
+    private static final String NAVIGATION_OUT = "config-data/navmesh/current_maps";
     private static final String SOURCE_INFO_OUT = "contract/SOURCE.properties";
     private static final List<String> MANAGED = List.of(PROTO_OUT, REGISTRY_OUT, TABLE_PROTO_OUT, TABLE_CONSTANTS_OUT,
             TABLE_DATA_OUT, SOURCE_INFO_OUT);
+    private static final List<String> MAP_MANAGED = List.of(TABLE_DATA_OUT + "/basescene.pb",
+            TABLE_DATA_OUT + "/manifest.json", NAVIGATION_OUT, SOURCE_INFO_OUT);
 
     private ContractSync() {
     }
@@ -97,7 +106,28 @@ public final class ContractSync {
         Path scratch = Files.createTempDirectory("contract-sync");
         int exitCode = 0;
         try {
-            Map<String, String> info = sync(source, scratch, commit);
+            boolean mapsOnly = "current-maps".equals(opts.get("scope"));
+            if (opts.containsKey("scope") && !mapsOnly) {
+                throw new IllegalArgumentException("未知同步范围: " + opts.get("scope"));
+            }
+            if (mapsOnly && (opts.containsKey("maps-source") || opts.containsKey("partial-source-commit"))) {
+                throw new IllegalArgumentException("current-maps 单域不可再指定其他覆盖源");
+            }
+            List<String> managed = new ArrayList<>(mapsOnly ? MAP_MANAGED : MANAGED);
+            Map<String, String> info;
+            if (mapsOnly) {
+                // 单域写入只保留本仓库原清单；完整 CI 检查必须走下面的双源重建路径。
+                copyText(repo.resolve(TABLE_DATA_OUT + "/manifest.json"), scratch.resolve(TABLE_DATA_OUT + "/manifest.json"));
+                info = readSourceInfo(repo.resolve(SOURCE_INFO_OUT));
+                syncCurrentMaps(source, scratch, commit, info);
+            } else {
+                if (!opts.containsKey("check") && !opts.containsKey("maps-source")
+                        && Files.isRegularFile(repo.resolve(SOURCE_INFO_OUT))
+                        && readSourceInfo(repo.resolve(SOURCE_INFO_OUT)).containsKey("maps.source.commit")) {
+                    throw new IllegalArgumentException("仓库已有独立地图来源；全量同步须显式传 --maps-source，避免覆盖地图");
+                }
+                info = sync(source, scratch, commit);
+            }
             if (opts.containsKey("partial-source-commit")) {
                 // friend 单域同步：基线快照承载其他契约，不能把真实源 HEAD 冒充全量同步版本。
                 String actual = require(opts, "partial-source-commit");
@@ -113,19 +143,26 @@ public final class ContractSync {
                 }
                 writeSourceInfo(scratch.resolve(SOURCE_INFO_OUT), info);
             }
+            if (opts.containsKey("maps-source")) {
+                Path mapsSource = Path.of(opts.get("maps-source")).toAbsolutePath().normalize();
+                String mapsCommit = opts.containsKey("maps-commit") ? opts.get("maps-commit") : gitHead(mapsSource);
+                syncCurrentMaps(mapsSource, scratch, mapsCommit, info);
+                managed.add(NAVIGATION_OUT);
+            }
             if (opts.containsKey("check")) {
-                List<String> diffs = compare(scratch, repo);
+                List<String> diffs = compare(scratch, repo, managed);
                 if (diffs.isEmpty()) {
-                    System.out.printf("契约一致：mmorpg@%s（%s）%n", commit, summary(info));
+                    System.out.printf("%s一致：全局 mmorpg@%s，地图 %s（%s）%n", mapsOnly ? "地图单域" : "契约",
+                            info.get("mmorpg.commit"), info.getOrDefault("maps.source.commit", "未覆盖"), summary(info));
                 } else {
                     System.out.println("契约与 mmorpg@" + commit + " 不一致（运行不带 --check 的同步并提交）：");
                     diffs.forEach(d -> System.out.println("  " + d));
                     exitCode = 1;
                 }
             } else {
-                install(scratch, repo);
-                System.out.printf("同步完成：mmorpg@%s（%s）%n同步后须 ./mvnw clean install（protoc 增量生成不清理改名 / 删除的类）%n",
-                        commit, summary(info));
+                install(scratch, repo, managed);
+                System.out.printf("%s同步完成：全局 mmorpg@%s，地图 %s（%s）%n同步后须 ./mvnw clean install（protoc 增量生成不清理改名 / 删除的类）%n",
+                        mapsOnly ? "地图单域" : "全量", info.get("mmorpg.commit"), info.getOrDefault("maps.source.commit", "未覆盖"), summary(info));
             }
             printPending(info);
         } finally {
@@ -175,9 +212,102 @@ public final class ContractSync {
         return info;
     }
 
+    /** 只替换地图权威源；其他表与协议仍归原基线，完整检查从两个源分别重建。 */
+    private static void syncCurrentMaps(Path source, Path out, String commit, Map<String, String> info) throws IOException {
+        if (!commit.matches("[0-9a-fA-F]{40}")) {
+            throw new IllegalArgumentException("地图来源必须是真实的 40 位提交号");
+        }
+        String sourceManifest = readText(source.resolve("generated/tables/manifest.json"));
+        String destinationManifest = readText(out.resolve(TABLE_DATA_OUT + "/manifest.json"));
+        JsonSpan sourceScene = namedTable(sourceManifest, "BaseScene");
+        JsonSpan destinationScene = namedTable(destinationManifest, "BaseScene");
+        String sourceEntry = sourceManifest.substring(sourceScene.start(), sourceScene.end());
+        String merged = destinationManifest.substring(0, destinationScene.start()) + sourceEntry
+                + destinationManifest.substring(destinationScene.end());
+        String digest = manifestContentDigest(merged);
+        merged = merged.replaceFirst("(\"content_digest\"\\s*:\\s*\")[^\"]+(\")", "$1" + digest + "$2");
+
+        Path binary = source.resolve("generated/tables/basescene.pb");
+        String binaryHash = sha256(binary);
+        boolean matched = false;
+        for (JsonSpan artifact : objectsInArray(sourceEntry, "artifacts")) {
+            String value = sourceEntry.substring(artifact.start(), artifact.end());
+            if ("binary".equals(manifestValue(value, "kind")) && "basescene.pb".equals(manifestValue(value, "file"))) {
+                matched = binaryHash.equals(manifestValue(value, "sha256"));
+            }
+        }
+        if (!matched) throw new IllegalArgumentException("地图 BaseScene.pb 与源 manifest SHA256 不一致");
+        Files.copy(binary, out.resolve(TABLE_DATA_OUT + "/basescene.pb"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        writeText(out.resolve(TABLE_DATA_OUT + "/manifest.json"), merged);
+
+        Path navigationOut = out.resolve(NAVIGATION_OUT);
+        cleanDir(navigationOut);
+        for (String map : List.of("main", "island", "village")) {
+            for (String name : List.of("source.json", "walkmask.txt")) {
+                Path target = navigationOut.resolve(map).resolve(name);
+                Files.createDirectories(target.getParent());
+                Files.copy(source.resolve("data/scene_nav_bin/current_maps").resolve(map).resolve(name), target);
+                info.put("maps." + map + "." + name + ".sha256", sha256(target));
+            }
+        }
+        info.put("maps.source.commit", commit);
+        info.put("maps.source.manifest.sha256", sha256(source.resolve("generated/tables/manifest.json")));
+        info.put("maps.table.data.commit", manifestValue(sourceManifest, "commit"));
+        info.put("maps.table.data.dirty", manifestValue(sourceManifest, "data_dirty"));
+        info.put("maps.basescene.pb.sha256", binaryHash);
+        info.put("maps.basescene.entry.sha256", sha256(sourceEntry.getBytes(StandardCharsets.UTF_8)));
+        writeSourceInfo(out.resolve(SOURCE_INFO_OUT), info);
+    }
+
+    private record JsonSpan(int start, int end) { }
+
+    /** 导表器的 JSON 数组只承载对象；按引号/转义与括号层级取边界，不能用正则截嵌套对象。 */
+    private static List<JsonSpan> objectsInArray(String json, String name) {
+        Matcher array = Pattern.compile("\"" + name + "\"\\s*:\\s*\\[").matcher(json);
+        if (!array.find()) throw new IllegalArgumentException("清单缺少数组: " + name);
+        List<JsonSpan> result = new ArrayList<>();
+        int depth = 0, start = -1;
+        boolean quoted = false, escaped = false;
+        for (int i = array.end(); i < json.length(); i++) {
+            char ch = json.charAt(i);
+            if (quoted) {
+                if (escaped) escaped = false;
+                else if (ch == '\\') escaped = true;
+                else if (ch == '"') quoted = false;
+            } else if (ch == '"') quoted = true;
+            else if (ch == '{') { if (depth++ == 0) start = i; }
+            else if (ch == '}') { if (--depth == 0) result.add(new JsonSpan(start, i + 1)); }
+            else if (ch == ']' && depth == 0) return result;
+        }
+        throw new IllegalArgumentException("清单数组未闭合: " + name);
+    }
+
+    private static JsonSpan namedTable(String manifest, String name) {
+        List<JsonSpan> found = objectsInArray(manifest, "tables").stream()
+                .filter(span -> name.equals(manifestValue(manifest.substring(span.start(), span.end()), "name"))).toList();
+        if (found.size() != 1) throw new IllegalArgumentException("清单必须有唯一的表: " + name);
+        return found.getFirst();
+    }
+
+    /** 与 mmorpg 导表器 core/manifest.py 的 _content_digest 相同，不混入时间/版本/来源。 */
+    private static String manifestContentDigest(String manifest) {
+        StringBuilder values = new StringBuilder();
+        for (JsonSpan table : objectsInArray(manifest, "tables")) {
+            String entry = manifest.substring(table.start(), table.end());
+            values.append(manifestValue(entry, "name")).append(manifestValue(entry, "rows"))
+                    .append(manifestValue(entry, "sha256")); // source 是导表器对象内的第一个 sha256
+            for (JsonSpan artifact : objectsInArray(entry, "artifacts")) {
+                String value = entry.substring(artifact.start(), artifact.end());
+                values.append(manifestValue(value, "kind")).append(manifestValue(value, "file"))
+                        .append(manifestValue(value, "sha256"));
+            }
+        }
+        return sha256(values.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
     /** 用临时目录里的结果整体替换仓库里的受管路径。 */
-    private static void install(Path scratch, Path repo) throws IOException {
-        for (String managed : MANAGED) {
+    private static void install(Path scratch, Path repo, List<String> managedPaths) throws IOException {
+        for (String managed : managedPaths) {
             Path from = scratch.resolve(managed);
             Path to = repo.resolve(managed);
             if (Files.isDirectory(from)) {
@@ -640,9 +770,9 @@ public final class ContractSync {
     // ------------------------------------------------------------------ --check
 
     /** 逐个比对受管路径：文件集合与内容（文本已统一 LF，按字节比）。 */
-    private static List<String> compare(Path expectedRoot, Path repo) throws IOException {
+    private static List<String> compare(Path expectedRoot, Path repo, List<String> managedPaths) throws IOException {
         List<String> diffs = new ArrayList<>();
-        for (String managed : MANAGED) {
+        for (String managed : managedPaths) {
             Map<String, Path> expected = snapshot(expectedRoot.resolve(managed));
             Map<String, Path> actual = snapshot(repo.resolve(managed));
             Set<String> all = new TreeSet<>(expected.keySet());
@@ -655,7 +785,8 @@ public final class ContractSync {
                     diffs.add("缺少  " + shown);
                 } else if (e == null) {
                     diffs.add("多余  " + shown);
-                } else if (!Arrays.equals(normalized(e), normalized(a))) {
+                } else if (!Arrays.equals(shown.startsWith(NAVIGATION_OUT) ? Files.readAllBytes(e) : normalized(e),
+                        shown.startsWith(NAVIGATION_OUT) ? Files.readAllBytes(a) : normalized(a))) {
                     diffs.add("不同  " + shown);
                 }
             }
@@ -738,9 +869,21 @@ public final class ContractSync {
         writeText(file, text.toString());
     }
 
+    private static Map<String, String> readSourceInfo(Path file) throws IOException {
+        Properties properties = new Properties();
+        properties.load(new StringReader(readText(file)));
+        Map<String, String> result = new TreeMap<>();
+        properties.forEach((key, value) -> result.put(key.toString(), value.toString()));
+        return result;
+    }
+
     private static String sha256(Path file) throws IOException {
+        return sha256(Files.readAllBytes(file));
+    }
+
+    private static String sha256(byte[] data) {
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file));
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(data);
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);

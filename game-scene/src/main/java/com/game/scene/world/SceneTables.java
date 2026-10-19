@@ -22,6 +22,11 @@ public interface SceneTables {
      */
     Vec3 spawnPoint(int sceneConfigId);
 
+    /** 当前地图显式装配导航；旧场景和不提供导航的测试表保留原有语义。 */
+    default SceneNavigation navigation(int sceneConfigId) {
+        return SceneNavigation.NONE;
+    }
+
     /**
      * 新玩家的初始技能（{@code skill_table_id} 列表）：Class 表<b>所有行</b>的 {@code skill} 数组按顺序拼接，
      * 跳过 0、Skill 表里不存在的 id 与重复 id。与职业无关（基线 PlayerSkillSystem::RegisterPlayer 的行为）。

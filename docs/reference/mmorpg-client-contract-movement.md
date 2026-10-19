@@ -1,5 +1,13 @@
 # 移动：客户端可见行为参考（基线 mmorpg@9c9c012b7）
 
+> **2026-10-18 当前三图导航接入：** 下述基线史料保持原样。Java 的主城、八仙岛、渔村及 BaseScene
+> 复用相同导航文件的地图现使用客户端同源 150×150 保守位图，`server=(unity.z,unity.x,unity.y)`。
+> `ContractSync` 从 mmorpg 的 `data/scene_nav_bin/current_maps` 原字节同步到 `config-data/navmesh/current_maps`。
+> `SceneWorld` 在旧存档进场、换图、三条移动上报和 20 FPS 外推时应用该导航：非法存档回新出生点，移动逐格
+> 检查整段线段并禁止斜角穿墙，遇阻退 0.05 m 并清速度；水平纠偏超过 0.5 m 仍发 137。导航夹持后更新
+> MoveGuard 锚点，不补回位移额度。平面地图高度和垂直速度归零；无本批导航的旧地图继续原规则。
+> 这批图像仍是已确认布局预览，世界边长 300 m 为本次接入参数，不代表原生 4K 整图或 5000 人容量验收。
+
 > 源码一律按 commit 读：`git -C <mmorpg> show 9c9c012b7:<路径>`，下文路径都相对 mmorpg 根目录。
 > 移动相关的契约面（`player_movement.proto`、`player_state_attribute_sync.proto`、移动 handler、`spatial/`、属性同步、
 > robot 的 AI 与 handler、MessageLimiter 数据）在 `766cb037c..9c9c012b7` 之间**没有改动**，所以本文与

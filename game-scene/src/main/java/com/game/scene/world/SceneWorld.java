@@ -1485,13 +1485,15 @@ public final class SceneWorld {
     }
 
     /**
-     * 进场落位（基线 EnsureValidEnterLocation，Java 版没有导航网格）：存档坐标属于同一场景配置、在世界范围内
+     * 进场落位：存档坐标属于同一场景配置、在世界范围内并通过该地图的导航
      * （{@link MovementRules#insideWorld}，旧版本可能写进过极端坐标）且不是 (0,0,0) 就沿用；
      * 换地图、新号或坐标无效一律落到目标场景出生点。
      */
     private Vec3 resolveEnterPosition(int targetConfigId, int savedConfigId, Vec3 saved) {
-        if (savedConfigId == targetConfigId && MovementRules.insideWorld(saved) && !saved.isOrigin()) {
-            return saved;
+        SceneNavigation navigation = tables.navigation(targetConfigId);
+        if (savedConfigId == targetConfigId && MovementRules.insideWorld(saved) && !saved.isOrigin()
+                && navigation.isWalkable(saved)) {
+            return navigation.trace(saved, saved).position();
         }
         return tables.spawnPoint(targetConfigId);
     }
@@ -1569,6 +1571,9 @@ public final class SceneWorld {
         metrics.aoiLeft(oldWatchers.size());
         broadcast(oldWatchers, destroyMessage(player));
         Vec3 at = target.configId() != from.configId() ? tables.spawnPoint(target.configId()) : player.position();
+        if (tables.navigation(target.configId()) != SceneNavigation.NONE) {
+            at = resolveEnterPosition(target.configId(), from.configId(), player.position());
+        }
         player.setPosition(at);
         player.stopMotion();
         player.moveGuard().reset(at, clock.nanoTime());
@@ -2427,10 +2432,13 @@ public final class SceneWorld {
                     player.playerId(), input.inputSeq(), input.location(), player.moveGuard().anchor());
             return;
         }
-        Vec3 accepted = admitted.get();
+        SceneNavigation navigation = tables.navigation(player.scene().configId());
+        SceneNavigation.Move move = navigation.trace(player.position(), admitted.get());
+        Vec3 accepted = move.position();
+        player.moveGuard().correctAnchor(accepted);
         player.scene().relocate(player, accepted);
         player.setRotation(input.rotation());
-        player.setVelocity(MovementRules.clampSpeed(input.velocity()));
+        player.setVelocity(move.blocked() ? Vec3.ORIGIN : navigation.velocity(MovementRules.clampSpeed(input.velocity())));
         player.markDirty(ScenePlayer.DIRTY_TRANSFORM | ScenePlayer.DIRTY_VELOCITY);
         boolean correct = MovementRules.needsCorrection(accepted, input.location());
         metrics.move(correct ? MoveResult.CORRECTED
@@ -2489,7 +2497,7 @@ public final class SceneWorld {
      * 服务器外推（基线 MovementSystem）：速度非零的玩家 {@code location += velocity × 0.05}，置 Transform 脏位。
      * 连续 {@link MovementRules#AFK_FRAMES} 帧没有任何客户端消息即停推（基线 AfkSystem）；停推时把速度清零并置脏位，
      * 让看得见它的人收到一条「停了」的 66——基线停推但不清速度，观察者的客户端按旧速度一直外推下去。
-     * 没有导航网格，不做撞墙夹持（与基线无导航场景一致）。
+     * 有导航的地图逐格检查整段位移，撞墙夹持并清速度；旧无导航场景保留原有外推规则。
      *
      * <p><b>回合制战斗在途（有战斗冻结，备战或战斗中）的玩家整个跳过</b>：不外推、不动速度、不置脏位（基线 {@code movement.cpp:49-52} 的
      * {@code exclude<InBattleComp>}：进战时的残留速度会让玩家在战斗中一路飘走，战后位置与客户端画面对不上）。Java 挂冻结时已经停步
@@ -2510,7 +2518,14 @@ public final class SceneWorld {
                 log.debug("玩家 {} 帧内无消息，停止外推 player={}", MovementRules.AFK_FRAMES, player.playerId());
                 continue;
             }
-            scene.relocate(player, player.position().plusScaled(velocity, MovementRules.STEP_SECONDS));
+            SceneNavigation.Move move = tables.navigation(scene.configId()).trace(player.position(),
+                    player.position().plusScaled(velocity, MovementRules.STEP_SECONDS));
+            scene.relocate(player, move.position());
+            if (move.blocked()) {
+                player.setVelocity(Vec3.ORIGIN);
+                player.moveGuard().correctAnchor(move.position());
+                player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+            }
             player.markDirty(ScenePlayer.DIRTY_TRANSFORM);
         }
     }

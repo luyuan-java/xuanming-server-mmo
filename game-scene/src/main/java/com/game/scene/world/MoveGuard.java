@@ -9,7 +9,8 @@ import java.util.Optional;
  * （锚点）的水平位移不超过当前额度就原样接受并扣掉这段位移；超过就把<b>水平分量</b>沿上报方向只走到额度用完的位置，
  * 额度清零——调用方按水平偏差决定是否回 137 纠偏。
  *
- * <p><b>高度不校验、原样取上报值</b>（fail-open）：Java 版没有导航网格，高度无从校验（与基线无导航场景一致）。
+ * <p><b>本类不校验高度、原样取上报值</b>：本类只管位移额度。SceneWorld 随后对声明导航的地图做贴地与整段通行校验；
+ * 无导航场景仍与基线一致。
  * 额度内的上报本来就原样接受任意高度，截断时同样取上报高度，本类对 z 没有任何规则。
  * 高度若也按比例插值，{@code z + (to.z - z) × f} 的减法会从两个有限的极端输入溢出成 ±Inf（f = 0 时再得 NaN）；
  * 坐标范围由调用方先按 {@link MovementRules#WORLD_LIMIT} 挡掉，本类仍自证输出有限（见 {@link #admit}）。
@@ -82,6 +83,11 @@ final class MoveGuard {
 
     Vec3 anchor() {
         return anchor;
+    }
+
+    /** 导航夹持后的合法位置成为下一次上报锚点；不退还额度，也不重新充满桶。 */
+    void correctAnchor(Vec3 position) {
+        this.anchor = position;
     }
 
     double allowance() {

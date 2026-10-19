@@ -1161,6 +1161,16 @@ JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `cle
   其中偶数帧 66 扇出约 8 ms）；2000 人挤在 15 m 内的极端密度下尾延迟仍贴着 50 ms 预算，真要承载需分散出生点。
   帧里不做任何阻塞 I/O（写回 / 释放都交给存储线程池）。规则与客户端可见行为见
   `docs/reference/mmorpg-client-contract-{movement,aoi}.md` 与 PARITY「移动」「视野」「属性同步」各行。
+  当前主城、八仙岛、渔村导航由 `ConfigSceneTables` 在启动时从 `game.table-dir` 兄弟目录
+  `navmesh/current_maps` 加载为不可变 `CurrentMapNavigation`；文件缺失、SHA 或出生点不符即拒启。
+  运行线程仅查内存位图：上报经位移额度后逐格检查线段，外推也走相同裁决；撞墙退至合法点并清速度。
+  同图存档不在新图可走区域时回该图出生点；无本批导航的旧图、独立副本仍保留原有坐标规则。
+  地图合同通过 `ContractSync --scope current-maps` 更新；本批地图来源为 mmorpg `fea7f5e9`，
+  原有协议及其他表仍保持 `360d56ae` 基线，两个来源分别记录在 `contract/SOURCE.properties`。
+  `--mmorpg <原基线> --maps-source <地图来源> --check` 从两个提交重建全部期望产物；CI 逐字节比较，
+  不把其他功能的协议回退到较旧的地图分支。Docker 镜像同时打包表和 `config-data/navmesh`。
+  混合清单的 `version`、`generated_at`、`source_rev` 仍描述全局基线；本批地图以 `maps.source.commit`
+  和重新计算的整份 `content_digest` 识别，不能单看清单版本 25 判断地图是否更新。
 - **scene 停服**（`SceneNode.release`）：摘目录 → 停监听 → 停接管订阅与续约 → 断开全部 gate 链路（不再有新帧进来）→
   把「写回全部在场玩家」投递到逻辑线程，**用整个停服预算**（`game.scene.shutdown-save-timeout`）等它执行完 →
   写回都交给存储线程池之后、关池之前，先等在途的跨节点交出 / 探测的结局在逻辑线程上处理完（与落库同时进行、共用剩余预算；

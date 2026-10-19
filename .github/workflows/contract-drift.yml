@@ -37,6 +37,7 @@ jobs:
           sparse-checkout: |
             proto
             data/schema
+            data/scene_nav_bin/current_maps
             generated/code/proto
             generated/tables
             cpp/generated/table/code/constants
@@ -48,14 +49,15 @@ jobs:
       - name: 对比 mmorpg main 与已记录的契约来源
         run: |
           recorded=$(sed -n 's/^mmorpg\.commit=//p' contract/SOURCE.properties)
+          maps_recorded=$(sed -n 's/^maps\.source\.commit=//p' contract/SOURCE.properties)
           latest=$(git -C .mmorpg rev-parse HEAD)
-          if [ "$latest" = "$recorded" ]; then
+          if [ "$latest" = "$recorded" ] && [ "$latest" = "$maps_recorded" ]; then
             echo "mmorpg main 仍是 $latest，无漂移" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # 用 --commit 冒充已记录的提交：SOURCE.properties 里的 commit 行于是相同，剩下的差异全是契约内容本身的变化。
           # mmorpg HEAD 的产物让同步本身抛错（例如出现没有 schema 的新表）时同样按漂移报告。
-          if java tools/ContractSync.java --mmorpg .mmorpg --commit "$recorded" --check > drift.out 2>&1; then
+          if java tools/ContractSync.java --mmorpg .mmorpg --commit "$recorded" --maps-source .mmorpg --maps-commit "$maps_recorded" --check > drift.out 2>&1; then
             echo "mmorpg 已前进到 $latest（记录的是 $recorded），但契约派生物不变，无需同步" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             cat drift.out

@@ -1,7 +1,7 @@
 # 一个 Dockerfile 服务全部 Spring Boot 进程模块（docs/porting/deploy-ci-spec.md §3）：
 #   ./mvnw -B -DskipTests package -Dgame.build.commit=<40 位 sha> -Dgame.build.contract=<SOURCE 里的 mmorpg.commit>
 #   docker build -f deploy/docker/Dockerfile --build-arg MODULE=game-gate [--build-arg GAME_BUILD_COMMIT=…] -t game-java/game-gate:<sha12> .
-# 构建上下文 = 仓库根；仓库根的 .dockerignore 只放行 game-*/target/game-*.jar 与 config-data/tables。jar 先由宿主 Maven 一次打齐
+# 构建上下文 = 仓库根；.dockerignore 只放行 Boot jar、config-data/tables 与 config-data/navmesh。jar 先由宿主 Maven 一次打齐
 # （多模块 reactor 不在容器里跑 mvn：容器里没有 ~/.m2 缓存，镜像也只在装好 JDK 的 CI 里构建）。
 #
 # 基础镜像钉 tag + index digest（多架构清单的 digest，2026-10-05 由 registry-1.docker.io 的 Docker-Content-Digest 查得；
@@ -37,6 +37,7 @@ WORKDIR /app
 COPY --from=layers /x/out/dependencies/ ./
 COPY --from=layers /x/out/spring-boot-loader/ ./
 COPY config-data/tables/ ./config-data/tables/
+COPY config-data/navmesh/ ./config-data/navmesh/
 COPY --from=layers /x/out/snapshot-dependencies/ ./
 COPY --from=layers /x/out/application/ ./
 # 堆随容器内存上限伸缩，剩下的留给 Netty 直接内存、metaspace 与线程栈；显式 G1（小 limit 下 JVM 会退化到 SerialGC）；

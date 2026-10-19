@@ -8,3 +8,7 @@
 # 二进制：配置表数据（protobuf 序列化）与 jar
 *.pb binary
 *.jar binary
+
+# 当前地图合同与客户端共用原字节 SHA，不能经换行转换。
+config-data/navmesh/current_maps/**/*.json -text
+config-data/navmesh/current_maps/**/walkmask.txt -text

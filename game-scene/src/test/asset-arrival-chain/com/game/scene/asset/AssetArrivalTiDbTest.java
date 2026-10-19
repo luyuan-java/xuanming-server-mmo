@@ -138,7 +138,10 @@ class AssetArrivalTiDbTest {
         // Surefire 从模块目录运行；同时兼容从仓库根目录单独运行，与既有场景集成夹具一致。
         Path defaultTables = Files.isDirectory(Path.of("../config-data/tables"))
                 ? Path.of("../config-data/tables") : Path.of("config-data/tables");
-        var tables = ConfigTables.load(Path.of(System.getProperty("game.asset-arrival.table-dir", defaultTables.toString())));
+        var tableDir = Path.of(System.getProperty("game.asset-arrival.table-dir", defaultTables.toString()))
+                .toAbsolutePath().normalize();
+        var tables = ConfigTables.load(tableDir);
+        var sceneTables = ConfigSceneTables.from(tables, tableDir.getParent().resolve("navmesh/current_maps"));
         var audit = AssetAudit.log();
         var bags = new BagService(BagTables.from(tables), count -> {
             long[] allocated = new long[count];
@@ -146,13 +149,13 @@ class AssetArrivalTiDbTest {
             return allocated;
         }, audit, GainAnomalyDetector.off(), SceneMetrics.noop());
         var repository = new StoragePlayerRepository(players, storage, logic, SceneMetrics.noop());
-        world = onLogic(() -> new SceneWorld(ConfigSceneTables.from(tables),
+        world = onLogic(() -> new SceneWorld(sceneTables,
                 SceneMessageIds.resolve(MessageIdRegistry.loadFromClasspath()), mock(ClientSink.class), repository,
                 ids::incrementAndGet, SceneClock.SYSTEM, SceneMetrics.noop(), player -> {
                     bags.initializeOnLoad(player);
                     AssetOpService.checkLedgerOnLoad(player);
                 }, PlayerSnapshots.NONE));
-        int map = ConfigSceneTables.from(tables).worldSceneConfigIds().getFirst();
+        int map = sceneTables.worldSceneConfigIds().getFirst();
         scene = onLogic(() -> world.createScene(map));
         var service = new AssetOpService(world,
                 new CurrencyService(audit, GainAnomalyDetector.off(), SceneMetrics.noop(), SceneClock.SYSTEM), bags,

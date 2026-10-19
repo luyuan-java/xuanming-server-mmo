@@ -19,7 +19,7 @@ class ConfigSceneTablesTest {
         Path dir = Files.isDirectory(Path.of("../config-data/tables"))
                 ? Path.of("../config-data/tables")
                 : Path.of("config-data/tables");
-        tables = ConfigSceneTables.from(ConfigTables.load(dir));
+        tables = ConfigSceneTables.from(ConfigTables.load(dir), dir.getParent().resolve("navmesh/current_maps"));
     }
 
     @Test
@@ -28,9 +28,18 @@ class ConfigSceneTablesTest {
     }
 
     @Test
-    void 首登主世界是World表第一行_出生点为180_200_0() {
+    void 首登主世界与当前地图出生点一致() {
         assertThat(tables.worldSceneConfigIds()).first().isEqualTo(1);
-        assertThat(tables.spawnPoint(1)).isEqualTo(new Vec3(180, 200, 0));
+        assertThat(tables.spawnPoint(1)).isEqualTo(new Vec3(133, 199, 0));
+        assertThat(tables.spawnPoint(2)).isEqualTo(new Vec3(173, 195, 0));
+        assertThat(tables.spawnPoint(3)).isEqualTo(new Vec3(147, 201, 0));
+        for (int id = 1; id <= 16; id++) {
+            if (id == 4) continue;
+            assertThat(tables.navigation(id).isWalkable(tables.spawnPoint(id))).isTrue();
+            assertThat(tables.navigation(id)).isInstanceOf(CurrentMapNavigation.class);
+        }
+        assertThat(tables.navigation(4)).isSameAs(SceneNavigation.NONE);
+        assertThat(tables.navigation(17)).isSameAs(SceneNavigation.NONE);
     }
 
     @Test
