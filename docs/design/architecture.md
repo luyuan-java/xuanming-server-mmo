@@ -1692,7 +1692,7 @@ JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `cle
 
 0. （可选，HTTP 登录路径）客户端 `POST /api/login` → `game-gateway` → Dubbo `AccountLoginService` → `game-login`：认证、取 / 建账号、
    签一对令牌、回角色列表（不绑会话、不查设备数）；令牌到期前 `POST /api/refresh-token` 轮换（不限流）。
-1. 客户端 `POST /api/assign-gate` → `game-gateway`：区服准入（§7）→ 按 zone 取 gate 列表，选在线人数最少者，签 `GateTokenPayload`（TTL 600s）。
+1. 客户端 `POST /api/assign-gate` → `game-gateway`：区服准入（§7）→ 按 zone 取 gate 列表，按在线人数随机二选一（2026-10-18 起，此前选在线人数最少者；`GatePicker.pick`），签 `GateTokenPayload`（TTL 600s）。
    登录排队打开时（`game.gateway.queue.enabled`）：队列空且快速通道原子占位成功才直接签，否则回 100 + 排队令牌，客户端轮询
    `POST /api/queue-status` 直到 0（带 gate 令牌）；放行由拿到 Redis 选主锁的那个 gateway 每秒按「容量 − 在线 − 未过期占位」从队头放（弹出与写放行槽同一段 Lua，按 50 个一段摊到各 gate；客户端取走放行槽后占位再留 15 s，等 gate 发布人数）。
    开服限流打开时（`game.gateway.rate-limit.enabled`，`/api/login` 与不带排队令牌的 assign-gate，在区服准入之后）：分波未开放 → 100；

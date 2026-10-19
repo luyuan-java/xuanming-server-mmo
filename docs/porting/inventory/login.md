@@ -273,7 +273,7 @@ go/login 负责账号认证、建角和进出游戏。认证方式有开发口�
 - depends on: none
 - behavior: 从 etcd 取本 zone 的 gate 候选（zone_id=0 表示 watcher 看到的任意 gate），排除标记 draining 的 gate。客户端地址按 clientendpoint.Select 选取，开启 RequireClientEndpoint 时没有客户端地址的 gate 不下发；同一 host:port 只保留 launch_time 最新的那条。按 PlayerCount 升序、NodeID 升序选负载最低的 gate。令牌 GateTokenPayload{gate_node_id, zone_id, expire_timestamp=now+10min, hmac_session_key=32 随机字节}，签名为 HMAC-SHA256 的 64 字节小写 hex。排队开启且账号已有带 gate 的会话时绕过排队。HTTP 成功时 code=0，并带 gate_ip / gate_port / token_payload / token_signature（base64）/ token_deadline。
 - internal: gateway 经 gRPC 调 login 签发；密钥来自 Secrets.GateToken.Primary。
-- java: partial — game-gateway AssignGateService / GatePicker（最低负载、过滤 draining、跳过无地址条目）/ GateTokenIssuer（10min 有效、32 字节会话密钥）
+- java: partial — game-gateway AssignGateService / GatePicker（按负载随机二选一（2026-10-18 起，此前最低负载）、过滤 draining、跳过无地址条目）/ GateTokenIssuer（10min 有效、32 字节会话密钥）
 - size: S
 - robot: robot_smoke（HTTP assign-gate）；Java SmokeScenario（AssignGateClient）
 - hazards: Java 对 zone_id=0 回 404，mmorpg 是自动选区（已登记 PARITY）。Java 令牌的 target_zone_id 填了 zone_id，而 mmorpg 填 0（客户端不解析令牌，但语义不同）。Java 没有「同地址保留最新」去重：崩溃 gate 的旧目录条目在 TTL 内仍可能被选中，客户端会被新 gate 以 node 不匹配拒绝。

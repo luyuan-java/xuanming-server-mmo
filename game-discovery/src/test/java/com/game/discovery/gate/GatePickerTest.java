@@ -109,11 +109,15 @@ class GatePickerTest {
     }
 
     @Test
-    void 默认随机源只在候选里挑() {
+    void 两参pick真的接了随机源_两台非最忙的都会被选到() {
+        // 若两参 pick 误接成常量源（如 bound -> 0），每次都是 i=0、j 顺延到 1，固定选 2 号，3 号永远不出现。
+        // 真随机下 200 次一次都抽不到 3 号的概率是 (2/3)^200 ≈ 1e-35，实际上是确定的。1 号严格最忙，永远选不中。
         List<GateNodeInfo> gates = List.of(gate(1, 30, false), gate(2, 10, false), gate(3, 20, false));
-        for (int k = 0; k < 50; k++) {
-            assertThat(GatePicker.pick(ZONE, gates).orElseThrow().getNodeId()).isIn(2, 3);
+        Map<Integer, Integer> counts = new HashMap<>();
+        for (int k = 0; k < 200; k++) {
+            counts.merge(GatePicker.pick(ZONE, gates).orElseThrow().getNodeId(), 1, Integer::sum);
         }
+        assertThat(counts).containsOnlyKeys(2, 3);
     }
 
     // ---------- 候选过滤（规则 1–3） ----------

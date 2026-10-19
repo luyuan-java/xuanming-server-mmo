@@ -638,7 +638,7 @@ game-api 的 proto 不 import 同步来的契约目录（`AGENTS.md` §1），�
    **计划读失败 → future 异常完成**（X20）。
 3. **合服围栏检查点 F4**：`ZoneMergeFence.OPEN`，7.3 接实现。
 4. **选 gate**：`GateSource.listGates(to)` → `GatePicker.pick(to, …)`：剔除 zone 不符、节点号 0、没有客户端地址的条目；**同一客户端地址只留 `started_at_ms` 最大的一条**（新增，
-   对齐 `clientendpoint.DedupeNewest`）；剔除排空中的（全部排空时忽略标记，`GatePicker.java:41-53`）；按（人数, 节点号）取最小（2026-10-18 更正：改为按人数随机二选一、同人数取第一次抽中的，对齐 mmorpg `shared/gatepick.TwoChoices`）。没有 → `TIP_NO_GATE`（scene-manager 内部码，只进日志与指标）。
+   对齐 `clientendpoint.DedupeNewest`）；剔除排空中的（全部排空时忽略标记，`GatePicker.eligible`）；按（人数, 节点号）取最小（2026-10-18 更正：改为按人数随机二选一、同人数取第一次抽中的，对齐 mmorpg `shared/gatepick.TwoChoices`）。没有 → `TIP_NO_GATE`（scene-manager 内部码，只进日志与指标）。
 5. **签票据**：`issueRedirect(gate.node_id, gate.zone_id, player_id, to)`：`{gate_node_id, zone_id = gate 的 zone, expire = now + 300, player_id, target_zone_id = to}`，
    **不填** `hmac_session_key`，`GateTokens.sign` 出 hex 签名。
 6. 返回 `{0, conf, ZoneRedirect{to, gate.node_id, gate.client_host, gate.client_port, payload, signature, expire}}`。目录读不到 → future 异常完成（scene 推 3027）。
