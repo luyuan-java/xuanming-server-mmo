@@ -1,6 +1,10 @@
 package com.game.login.handler;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.game.api.proto.SessionContext;
 import com.game.login.testing.InMemoryLoginTokens;
@@ -15,8 +19,12 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 /** 127 RefreshToken：轮换、一次性、空 / 无效 / 存储出错一律 2000；不要求本连接已登录；客户端路径轮换前查请求截止。 */
+@ExtendWith(OutputCaptureExtension.class)
 class RefreshTokenHandlerTest {
 
     private static final Duration BUDGET = RefreshTokenHandler.DEFAULT_REFRESH_BUDGET;
@@ -120,5 +128,17 @@ class RefreshTokenHandlerTest {
         assertThat(tip(abandoned)).isEqualTo(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
         assertThat(tokens.refresh).containsKey(first.refreshToken());
         assertThat(tokens.issued).isEqualTo(1);
+    }
+
+    @Test
+    void 刷新失败日志不记录异常消息和嵌套凭据(CapturedOutput output) {
+        String marker = "synthetic-refresh-credential-marker";
+        LoginTokens broken = mock(LoginTokens.class);
+        when(broken.refresh(anyString(), any())).thenThrow(new IllegalStateException("Redis key=" + marker,
+                new IllegalArgumentException("Redis command=" + marker)));
+        RefreshTokenResponse response = new RefreshTokenHandler(broken).refresh(request(marker));
+        assertThat(tip(response)).isEqualTo(LoginErrorTip.login_error.kLoginAccountNotFound_VALUE);
+        assertThat(response.getRefreshToken()).isEmpty();
+        assertThat(output.getAll()).contains("IllegalStateException").doesNotContain(marker);
     }
 }

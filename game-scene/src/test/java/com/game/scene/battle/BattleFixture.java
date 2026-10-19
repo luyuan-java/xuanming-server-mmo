@@ -199,6 +199,11 @@ public final class BattleFixture {
 
     /** @param teamFollowFactory 用别的组队跟随实现（如真的 {@code TeamFollowService}）；null = 记录型 {@link #follows} */
     public BattleFixture(Function<Wiring, TeamFollow> teamFollowFactory) {
+        this(teamFollowFactory, SceneInstances.DISABLED);
+    }
+
+    /** 镜像取号与战斗恢复的竞态使用同一个世界；默认装配仍不启用实例取号。 */
+    public BattleFixture(Function<Wiring, TeamFollow> teamFollowFactory, SceneInstances instances) {
         ItemGuids guids = count -> {
             Runnable hook = beforeItemMint;
             if (hook != null) {
@@ -238,7 +243,7 @@ public final class BattleFixture {
                     PlayerBattleService.checkLedgerOnLoad(player);
                 }, PlayerSnapshots.NONE, PlayerLocations.NONE, teamFollow,
                 new CrossNodeSwitch(LOCAL_NODE, targets, owned -> { }, Duration.ofSeconds(4), Duration.ofSeconds(30)),
-                SceneInstances.DISABLED, battle,
+                instances, battle,
                 new ZoneTravel(ZONE, travelTargets, teamChecks, Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(30)));
         // 226 的在队检查缺省经逻辑线程回「不在队」（drain 之后才回，同真实现的投递）；选目标缺省挂起
         teamChecks.replyWith(logic, call -> TeamCheck.NOT_IN_TEAM);

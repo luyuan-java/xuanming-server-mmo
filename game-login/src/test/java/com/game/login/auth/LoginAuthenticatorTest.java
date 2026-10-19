@@ -2,16 +2,23 @@ package com.game.login.auth;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.game.login.auth.LoginAuthenticator.Authenticated;
 import com.game.login.testing.InMemoryLoginTokens;
+import com.game.login.token.LoginTokens;
 import com.game.login.token.TokenPair;
 import com.game.proto.login.LoginRequest;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
+@ExtendWith(OutputCaptureExtension.class)
 class LoginAuthenticatorTest {
 
     private static final String SECRET = "unit-test-shared-secret";
@@ -95,6 +102,21 @@ class LoginAuthenticatorTest {
         assertThat(auth.externalTypes()).containsExactlyInAnyOrder("wechat", "qq");
     }
 
+    /** 渠道故障不并进 2000：原样抛给登录主流程回故障码（同 mmorpg authFailureTip）。 */
+    @Test
+    void 外部认证的渠道故障原样抛出_其余异常仍按认证失败() {
+        LoginAuthenticator auth = new LoginAuthenticator(null, tokens, Map.of(
+                "wechat", token -> {
+                    throw new AuthProviderUnavailableException("微信认证渠道侧错误 errcode=40125");
+                },
+                "satoken", token -> {
+                    throw new IllegalStateException("Sa-Token Redis 出错");
+                }));
+        assertThatThrownBy(() -> auth.authenticate(LoginRequest.newBuilder().setAuthType("wechat").setAuthToken("c").build()))
+                .isInstanceOf(AuthProviderUnavailableException.class);
+        assertThat(auth.authenticate(LoginRequest.newBuilder().setAuthType("satoken").setAuthToken("t").build())).isEmpty();
+    }
+
     @Test
     void 认证出的账号放不进账号列按失败() {
         LoginAuthenticator auth = new LoginAuthenticator(null, tokens, Map.of("satoken", Optional::of));
@@ -112,5 +134,19 @@ class LoginAuthenticatorTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new LoginAuthenticator(null, tokens, Map.of("access_token", token -> Optional.empty())))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 认证依赖异常携带令牌时只记录异常类型(CapturedOutput output) {
+        String marker = "synthetic-auth-credential-marker";
+        LoginTokens broken = mock(LoginTokens.class);
+        when(broken.validateAccess(marker)).thenThrow(new IllegalStateException("Redis key=" + marker));
+        assertThat(LoginAuthenticator.passwordDisabled(broken).authenticate(accessToken(marker, ""))).isEmpty();
+        LoginAuthenticator external = new LoginAuthenticator(null, tokens, Map.of("satoken", token -> {
+            throw new IllegalStateException("Redis command=" + token);
+        }));
+        assertThat(external.authenticate(LoginRequest.newBuilder().setAuthType("satoken")
+                .setAuthToken(marker).build())).isEmpty();
+        assertThat(output.getAll()).contains("IllegalStateException").doesNotContain(marker);
     }
 }

@@ -18,6 +18,7 @@ import com.game.login.auth.PasswordAuthenticator;
 import com.game.login.auth.ProductionPasswordAuthenticator;
 import com.game.login.auth.PasswordFailureQuota;
 import com.game.login.auth.RedisPasswordFailureQuota;
+import com.game.login.auth.OAuthPolicy;
 import com.game.login.auth.QqProvider;
 import com.game.login.auth.WeChatProvider;
 import com.game.login.auth.LoginAuthenticator;
@@ -166,24 +167,43 @@ public class LoginConfiguration {
         return new DevPasswordRule(devPassword, props.devAccountPrefixes());
     }
 
+    /** 显式允许回落 openid 的配置每次启动都告警一次：多应用下会把同一玩家分裂成多个账号，且无法事后合并。 */
+    private static void warnOpenIdFallback(String authType, boolean requireUnionId) {
+        if (!requireUnionId) {
+            log.warn("SECURITY WARNING: {} 认证 require-union-id=false，拿不到 unionid 时按 openid 建账号；"
+                    + "以后接入开放平台 / unionid 会把同一玩家分裂成两个账号", authType);
+        }
+    }
+
     /**
      * 按配置注册的外部认证（Sa-Token / 微信 / QQ / 网易）；秘密只从环境变量读，缺了拒绝启动。
      * Sa-Token 的 Redis 客户端最后建：前面的校验失败时不留下一个没人关的客户端（它的线程不是守护线程，会让启动失败的进程退不掉）。
      */
     @Bean(destroyMethod = "close")
-    public ExternalAuthProviders externalAuthProviders(LoginAuthProperties auth, RedisProperties redisProps) {
+    public ExternalAuthProviders externalAuthProviders(LoginAuthProperties auth, RedisProperties redisProps,
+                                                       LoginProperties props) {
         ExternalAuthProviders providers = new ExternalAuthProviders();
+        // 接口地址的 http 只给 dev 模式的本地假服务；生产只接受 https（请求里带着 AppSecret / access_token）
+        boolean allowHttpEndpoint = LoginProperties.MODE_DEV.equals(props.mode());
         if (auth.wechat() != null) {
             String secret = System.getenv(LoginAuthProperties.WECHAT_SECRET_ENV);
             if (secret == null || secret.isBlank()) {
                 throw new IllegalStateException("配置了微信认证但缺少环境变量 " + LoginAuthProperties.WECHAT_SECRET_ENV + "，拒绝启动");
             }
-            providers.add("wechat", new WeChatProvider(auth.wechat().appId(), secret, auth.wechat().endpoint()));
-            log.info("外部认证已注册：wechat（endpoint={}）", auth.wechat().endpoint() == null ? "生产" : auth.wechat().endpoint());
+            boolean requireUnionId = auth.wechat().requireUnionId();
+            providers.add("wechat", new WeChatProvider(auth.wechat().appId(), secret, auth.wechat().endpoint(),
+                    new OAuthPolicy(requireUnionId, true, allowHttpEndpoint)));
+            warnOpenIdFallback("wechat", requireUnionId);
+            log.info("外部认证已注册：wechat（endpoint={} require-union-id={}）",
+                    auth.wechat().endpoint() == null ? "生产" : auth.wechat().endpoint(), requireUnionId);
         }
         if (auth.qq() != null) {
-            providers.add("qq", new QqProvider(auth.qq().appId(), auth.qq().endpoint()));
-            log.info("外部认证已注册：qq（endpoint={}）", auth.qq().endpoint() == null ? "生产" : auth.qq().endpoint());
+            boolean requireUnionId = auth.qq().requireUnionId();
+            providers.add("qq", new QqProvider(auth.qq().appId(), auth.qq().endpoint(),
+                    new OAuthPolicy(requireUnionId, auth.qq().requestUnionId(), allowHttpEndpoint)));
+            warnOpenIdFallback("qq", requireUnionId);
+            log.info("外部认证已注册：qq（endpoint={} request-union-id={} require-union-id={}）",
+                    auth.qq().endpoint() == null ? "生产" : auth.qq().endpoint(), auth.qq().requestUnionId(), requireUnionId);
         }
         if (auth.netease() != null && auth.netease().enabled()) {
             providers.add("netease", new NeteaseProvider());

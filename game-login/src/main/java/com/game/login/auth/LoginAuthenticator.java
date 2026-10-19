@@ -17,7 +17,9 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code "access_token"}：{@code auth_token} 是此前签发的 access token，账号取令牌里存的账号，请求里的 {@code account} 忽略。</li>
  *   <li>{@code "satoken"} / {@code "wechat"} / {@code "qq"} / {@code "netease"}：配置了才注册（{@link ExternalAuthProvider}），
  *       {@code auth_token} → 账号；没注册的类型失败。</li>
- *   <li>任何失败（含存储 / 外部系统出错）只返回空，不区分原因：调用方统一回 2000 kLoginAccountNotFound。</li>
+ *   <li>失败只返回空，不区分原因：调用方回 2000 kLoginAccountNotFound；唯一例外是外部认证抛出的
+ *       {@link AuthProviderUnavailableException}（渠道或本服务渠道配置故障），原样抛给调用方回故障码（同 mmorpg {@code authFailureTip}）。
+ *       口令认证从不抛它：口令失败统一 2000 是有意的防账号枚举。</li>
  *   <li>认证出的账号要能落进 {@code account} 列（{@link ProductionPasswordAuthenticator#validAccount}：非空、无首尾空白、
  *       ≤ 64 码点），否则按认证失败（三方 loginId 过长时不让它在写库时变成「服务不可用」）。</li>
  * </ul>
@@ -108,7 +110,8 @@ public final class LoginAuthenticator {
             try {
                 data = tokens.validateAccess(request.getAuthToken());
             } catch (RuntimeException e) {
-                log.warn("access token 校验时令牌存储出错，按认证失败处理: {}", e.toString());
+                // 认证端口的任意实现都可能把令牌拼进异常，不输出消息或异常链。
+                log.warn("access token 校验时令牌存储出错，按认证失败处理 reason={}", e.getClass().getName());
                 return Optional.empty();
             }
             return data.map(d -> new Authenticated(d.account(), AUTH_TYPE_ACCESS_TOKEN));
@@ -119,10 +122,13 @@ public final class LoginAuthenticator {
         }
         try {
             return provider.authenticate(request.getAuthToken()).map(account -> new Authenticated(account, authType));
+        } catch (AuthProviderUnavailableException e) {
+            // 消息由本包实现给出，只带固定说明与渠道错误码，不含凭据
+            log.warn("外部认证渠道故障 auth_type={} reason={}", authType, e.getMessage());
+            throw e;
         } catch (RuntimeException e) {
-            // 只有本包实现自己抛的 IllegalStateException 打消息（只带类名 / 自己的说明）；其余异常只打类名，消息可能带凭据
-            log.warn("外部认证出错，按认证失败处理 auth_type={}: {}", authType,
-                    e instanceof IllegalStateException ? e.getMessage() : e.getClass().getName());
+            // 异常类型不能证明消息已经脱敏；端口边界一律只记类型。
+            log.warn("外部认证出错，按认证失败处理 auth_type={} reason={}", authType, e.getClass().getName());
             return Optional.empty();
         }
     }

@@ -28,9 +28,24 @@ class GuildMetricsEconomyTest {
         assertThat(meters.find("game.guild.asset.orphans").counters()).hasSize(3);
         assertThat(meters.find("game.guild.asset.cleanup.deleted").counters()).hasSize(3);
         assertThat(meters.find("game.guild.internal.list.applied").counters()).hasSize(6);
-        assertThat(meters.find("game.guild.assetop.rpc").counters()).hasSize(3 * 3 * RpcOutcome.values().length);
-        assertThat(meters.find("game.guild.assetop.rpc.duration").timers()).hasSize(3);
-        assertThat(meters.find("game.guild.assetop.requery").counters()).hasSize(9);
+        assertThat(meters.find("game.guild.assetop.rpc").counters()).hasSize(96);
+        assertThat(meters.find("game.guild.assetop.rpc.duration").timers()).hasSize(4);
+        assertThat(meters.find("game.guild.assetop.requery").counters()).hasSize(12);
+        // 回执确认也参与签名与指标；显式锁定四个入口，防止新增入口后漏预建或标签拼错。
+        for (String rpc : List.of("debit", "abort_debit", "credit", "ack_receipt")) {
+            for (String stream : List.of("guild_debit", "guild_credit", "other")) {
+                for (String outcome : List.of("unknown", "applied", "rejected", "retry", "not_here", "other", "error",
+                        "no_location")) {
+                    assertThat(meters.get("game.guild.assetop.rpc").tags("stream", stream, "rpc", rpc, "outcome", outcome)
+                            .counter().count()).as("%s/%s/%s", stream, rpc, outcome).isZero();
+                }
+            }
+            assertThat(meters.get("game.guild.assetop.rpc.duration").tag("rpc", rpc).timer().count()).as(rpc).isZero();
+            for (String result : List.of("durable", "timeout", "error")) {
+                assertThat(meters.get("game.guild.assetop.requery").tags("rpc", rpc, "result", result).counter().count())
+                        .as("%s/%s", rpc, result).isZero();
+            }
+        }
         assertThat(meters.find("game.guild.assetop.finalize").counters()).hasSize(3 * 4);
         assertThat(meters.find("game.guild.assetop.reschedule").counters()).hasSize(3 * 3);
         assertThat(meters.find("game.guild.assetop.claim").counters()).hasSize(3);

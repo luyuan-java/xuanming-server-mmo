@@ -1,6 +1,7 @@
 package com.game.login.account;
 
 import com.game.api.proto.SessionContext;
+import com.game.login.auth.AuthProviderUnavailableException;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.auth.LoginAuthenticator.Authenticated;
 import com.game.login.dispatch.InFlightKeys;
@@ -27,9 +28,11 @@ import org.slf4j.LoggerFactory;
  *   <li><b>HTTP {@code /api/login}</b>（gateway 经 Dubbo，无会话）：认证 → 账号锁 → 取 / 建账号 → 签令牌 → 角色列表；
  *       不查设备数、不绑会话（之后客户端在 gate 上用 access token 再登录一次完成绑定）。</li>
  * </ul>
- * 失败码：认证失败 2000（不区分原因）、同一账号登录在途 2005、设备数超限 2024、设备登记出错 2023、会话已结束 2018
- * （gate 注销会话之后才落到的迟到登录，回包送不到）；取 / 建账号失败抛异常
- * （调用方按调用失败处理）。签令牌失败不致命（基线同：登录照常成功、只是没有令牌）。access token 登录不签新令牌。
+ * 失败码：认证失败 2000（不区分原因）、三方渠道或本服务渠道配置故障 kLoginAuthProviderUnavailable（故障码）、
+ * 同一账号登录在途 2005、设备数超限 2024、设备登记出错 2023、会话已结束 2018
+ * （gate 注销会话之后才落到的迟到登录，回包送不到）；取 / 建账号失败抛异常（调用方按调用失败处理）。
+ * 签令牌失败：HTTP 路径回故障码 kLoginTokenIssueFailed（令牌就是这条路径的全部产出，三方 code 也已被消费，同 mmorpg）；
+ * gate 路径不致命（会话随后绑定，令牌只用于之后的静默重连）。access token 登录不签新令牌。
  * 阻塞（MySQL / Redis），只在 login 工作线程上调用；线程安全。
  */
 public final class AccountLogin {
@@ -77,7 +80,13 @@ public final class AccountLogin {
     }
 
     private Outcome login(LoginRequest request, SessionContext session) {
-        Optional<Authenticated> authenticated = authenticator.authenticate(request);
+        Optional<Authenticated> authenticated;
+        try {
+            authenticated = authenticator.authenticate(request);
+        } catch (AuthProviderUnavailableException e) {
+            log.warn("三方认证渠道故障，登录回故障码 path={} reason={}", path(session), e.getMessage());
+            return Outcome.failed(LoginErrorTip.login_error.kLoginAuthProviderUnavailable_VALUE);
+        }
         if (authenticated.isEmpty()) {
             // 不记口令 / 令牌；未认证的账号 / auth_type 是客户端任意输入，只记长度，防日志注入。
             log.info("登录认证失败 path={} auth_type_len={} account_len={}", path(session),
@@ -110,8 +119,9 @@ public final class AccountLogin {
                 throw e;
             }
             LoginResponse.Builder response = LoginResponse.newBuilder().addAllPlayers(PlayerViews.wrapAll(players));
-            if (authenticated.get().issuesTokens()) {
-                issueTokens(account, authenticated.get().authType(), response);
+            if (authenticated.get().issuesTokens()
+                    && !issueTokens(account, authenticated.get().authType(), response) && session == null) {
+                return Outcome.failed(LoginErrorTip.login_error.kLoginTokenIssueFailed_VALUE);
             }
             if (deviceKey != null) {
                 bindQuietly(account, deviceKey, session.getAccount());
@@ -207,15 +217,19 @@ public final class AccountLogin {
         }
     }
 
-    private void issueTokens(String account, String authType, LoginResponse.Builder response) {
+    /** 签发令牌写进应答；失败返回 false（是否致命由调用方按路径决定）。 */
+    private boolean issueTokens(String account, String authType, LoginResponse.Builder response) {
         try {
             TokenPair pair = tokens.issue(account, authType, "");
             response.setAccessToken(pair.accessToken())
                     .setRefreshToken(pair.refreshToken())
                     .setAccessTokenExpire(pair.accessExpireSeconds())
                     .setRefreshTokenExpire(pair.refreshExpireSeconds());
+            return true;
         } catch (RuntimeException e) {
-            log.error("签发令牌失败（登录照常成功，只是没有令牌） account={}: {}", account, e.toString());
+            // 新令牌可能已经生成并进入命令参数，异常消息同样视作凭据。
+            log.error("签发令牌失败 account={} reason={}", account, e.getClass().getName());
+            return false;
         }
     }
 

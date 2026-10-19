@@ -211,6 +211,8 @@
 
 每张表都带 `TiDBNonclusteredPK = true`、`ShardRowIDBits = 4`、`PreSplitRegions = 4`（`guild_db.proto:126-128`、`:147-149`、`:186-188`）。
 
+这里记录的是 Java 已移植的 28 列基线。mmorpg 后续追加的 `last_send_ms = 29` 是长期离线自动放弃的安全证据；对应功能仍登记在 `PARITY.md`「落地恢复：场景侧待办唤醒与超窗处置」为 Java 待做。迁移时须一起实现插行、领取、重排与租约恢复对该字段的维护，不能只补空列。两版使用独立库表；`GuildTablesTest` 仅精确排除这一项已登记的待做字段，其余列、字段号、键与索引仍与同步来的定义逐字节比较。
+
 **枚举**（`guild_db.proto:96-121`）。SQL 一律绑定生成常量，不写数字字面量（`:94`；`economy_repo.go:35`）。
 - `GuildAssetOpStatus`：UNSPECIFIED 0（留给「漏写状态列」的行，不会被当成未决领走）、PENDING 1、APPLIED 2、REJECTED 3、ABORTED 4、APPLIED_PARTIAL 5（只终结、不做对侧账、不自动清理）。
 - `GuildAssetOpKind`：UNSPECIFIED 0、DONATE 1（GUILD_DEBIT）、SHOP 2（GUILD_CREDIT）、ACTIVITY_REWARD 3（GUILD_CREDIT，4.6）。**没有退款类 kind**（用户决策 D2：离帮 / 被踢 / 解散后已扣款的捐献照记给帮会、不退款），4 号空着（`:112-113`）。

@@ -25,8 +25,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * <ul>
  *   <li><b>取得</b>：{@link PlayerStore#claimOwnership}（{@code owner_released = 1 OR owner_lease_until < now} 才 epoch 加一并持有）。
  *       夺权本身是原子判定，没有「先查在线、再动手」的 TOCTOU：在线、5.2 交出在途（E+1 被持有）都夺不到；
- *       与 5.2 的 {@code handOffOwnership}（要求 E 持有、未释放、租约够长）天然互斥。在 game-data 自己的事务模板里调用（夺权与读回 epoch
- *       同一事务，不依赖 {@code @Transactional} 代理）。<b>夺到不等于不在战斗</b>（批次 6.3）：Java 断线即写回并释放、回合制战斗在 game-battle
+ *       与 5.2 的 {@code handOffOwnership}（要求 E 持有、未释放、租约够长）天然互斥。每次用剩余预算调 PlayerStore 自己的带时限事务，
+ *       不再套外层事务，否则加入外层事务会丢失 SQL 时限。<b>夺到不等于不在战斗</b>（批次 6.3）：Java 断线即写回并释放、回合制战斗在 game-battle
  *       继续，离线玩家的战斗锁可以还在；{@code kick} 走的顶号通路也不看是否在战斗。基线的战斗闸由回档作业在夺权之后另查战斗锁
  *       （{@code com.game.data.rollback.BattleLockGate}，data-ops-spec §13.3），不在这里。</li>
  *   <li><b>在线玩家</b>：缺省拒绝（{@link Claim.Online}）；{@code kick} 时向 {@code game:owner-takeover} 发让出请求（持有 E 的 scene 带围栏写回、
@@ -94,7 +94,6 @@ public final class AdminOwnership {
     }
 
     private final PlayerStore store;
-    private final TransactionTemplate tx;
     private final TakeoverRequests takeovers;
     private final LocationTombstones tombstones;
     private final DataMetrics metrics;
@@ -106,7 +105,8 @@ public final class AdminOwnership {
     public AdminOwnership(PlayerStore store, TransactionTemplate tx, TakeoverRequests takeovers,
                           LocationTombstones tombstones, DataMetrics metrics) {
         this.store = store;
-        this.tx = tx;
+        // 保留既有装配签名；带时限夺权必须使用 PlayerStore 自有事务，不能再由此模板包裹。
+        java.util.Objects.requireNonNull(tx.getTransactionManager(), "运维事务管理器");
         this.takeovers = takeovers;
         this.tombstones = tombstones;
         this.metrics = metrics;
@@ -120,47 +120,93 @@ public final class AdminOwnership {
      * @param pauser 退避等待
      */
     public Claim claim(long playerId, boolean kick, Duration wait, Pauser pauser) {
+        if (wait == null || wait.isZero() || wait.isNegative()) throw new IllegalArgumentException("运维夺权预算必须为正");
         long deadline = System.nanoTime() + wait.toNanos();
         Duration backoff = BACKOFF_START;
         boolean kicked = false;
+        Long observedHeld = null;
         while (true) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) return timedOut(playerId, observedHeld);
             ClaimResult result;
             try {
-                result = tx.execute(status -> store.claimOwnership(playerId));
+                result = store.claimOwnership(playerId, Duration.ofNanos(remaining));
             } catch (RuntimeException e) {
                 metrics.opsClaim("error");
                 log.warn("运维夺权访问库失败 player={}：{}", Long.toUnsignedString(playerId), e.toString());
                 return new Claim.Failed(e.toString());
             }
+            if (result instanceof ClaimResult.TimedOut) return timedOut(playerId, observedHeld);
             if (result instanceof ClaimResult.Claimed claimed) {
-                held.put(playerId, claimed.ownerEpoch());
-                lost.remove(playerId);
-                metrics.fenceHeld(held.size());
-                metrics.opsClaim(kicked ? "kicked" : "claimed");
-                return new Claim.Claimed(claimed.ownerEpoch(), kicked);
+                return rememberClaim(playerId, claimed.ownerEpoch(), kicked);
             }
             if (result instanceof ClaimResult.NotFound || result == null) {
                 metrics.opsClaim("not_found");
                 return new Claim.NotFound();
             }
             long heldEpoch = ((ClaimResult.Held) result).ownerEpoch();
+            observedHeld = heldEpoch;
             if (!kick) {
                 metrics.opsClaim("online");
                 return new Claim.Online(heldEpoch);
             }
             takeovers.request(playerId, heldEpoch);
             kicked = true;
-            long remaining = deadline - System.nanoTime();
+            remaining = deadline - System.nanoTime();
             if (remaining <= 0) {
-                metrics.opsClaim("timeout");
-                log.warn("运维夺权：已请持有者让出，{} 内没等到释放 player={} held_epoch={}", wait,
-                        Long.toUnsignedString(playerId), Long.toUnsignedString(heldEpoch));
-                return new Claim.Busy(heldEpoch);
+                return timedOut(playerId, observedHeld);
             }
             Duration delay = backoff.toNanos() < remaining ? backoff : Duration.ofNanos(remaining);
             pauser.pause(delay);
             backoff = backoff.multipliedBy(2).compareTo(BACKOFF_MAX) < 0 ? backoff.multipliedBy(2) : BACKOFF_MAX;
         }
+    }
+
+    /**
+     * 历史 SQL 回退后的显式维护入口；不得以普通 claim 替代。审核上界必须独立于恢复库、覆盖所有已发纪元，
+     * 调用期间保持玩家入口、旧写者及旧发号者停用，直到全部新围栏安装完毕。缺少上界直接拒绝，绝不从回退 SQL 猜测。
+     * 只推进归属元数据，资产原字节及 saved_epoch 不变；返回后使用本门面的续约/释放生命周期。
+     *
+     * <p>阻塞 SQL，不能在外层事务、I/O 或场景线程调用。SQL 异常可能是提交应答丢失，Failed 不保证零改动；
+     * 重投见 Online 不得自行认领该纪元。本方法不自动踢人或重试发号，也不承诺恢复幂等。
+     */
+    public Claim recoverAfterRestore(long playerId, OptionalLong auditedOldEpochUpperBound, Duration timeout) {
+        if (auditedOldEpochUpperBound == null || auditedOldEpochUpperBound.isEmpty()) {
+            metrics.opsClaim("error");
+            return new Claim.Failed("缺少独立审核旧纪元上界");
+        }
+        ClaimResult result;
+        try {
+            result = store.recoverOwnershipAfterRestore(playerId, auditedOldEpochUpperBound.getAsLong(), timeout);
+        } catch (RuntimeException e) {
+            metrics.opsClaim("error");
+            // SQL/连接异常可能夹带连接串或驱动配置；维护入口只记异常类型，不透出异常消息。
+            log.warn("历史归属恢复失败 player={} type={}", Long.toUnsignedString(playerId), e.getClass().getSimpleName());
+            return new Claim.Failed("历史归属恢复失败");
+        }
+        if (result instanceof ClaimResult.Claimed claimed) return rememberClaim(playerId, claimed.ownerEpoch(), false);
+        if (result instanceof ClaimResult.Held online) {
+            metrics.opsClaim("online");
+            return new Claim.Online(online.ownerEpoch());
+        }
+        if (result instanceof ClaimResult.TimedOut) return timedOut(playerId, null);
+        metrics.opsClaim("not_found");
+        return new Claim.NotFound();
+    }
+
+    private Claim rememberClaim(long playerId, long epoch, boolean kicked) {
+        held.put(playerId, epoch);
+        lost.remove(playerId);
+        metrics.fenceHeld(held.size());
+        metrics.opsClaim(kicked ? "kicked" : "claimed");
+        return new Claim.Claimed(epoch, kicked);
+    }
+
+    private Claim timedOut(long playerId, Long heldEpoch) {
+        metrics.opsClaim("timeout");
+        log.warn("运维夺权预算已用尽 player={} held_epoch={}", Long.toUnsignedString(playerId),
+                heldEpoch == null ? "unknown" : Long.toUnsignedString(heldEpoch));
+        return heldEpoch == null ? new Claim.Failed("运维夺权超时") : new Claim.Busy(heldEpoch);
     }
 
     /** 仍由我们持有（没被续约判失去）的 epoch；不持有为空。 */

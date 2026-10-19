@@ -20,6 +20,7 @@ import org.springframework.dao.QueryTimeoutException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionTimedOutException;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -269,8 +270,8 @@ public class PlayerStore {
         }
 
         /**
-         * 只有带时限的 {@link #claimOwnership(long, Duration)} 会返回：事务没赶在调用方截止之前完成，已回滚、什么也没改——没有夺权。
-         * 不带时限的重载（运维夺权等）永远不会得到它。
+         * 带时限的夺权与历史恢复会返回：事务没赶在调用方截止之前完成，已回滚、什么也没改——没有夺权。
+         * 不带时限的重载永远不会得到它。
          */
         record TimedOut() implements ClaimResult {
         }
@@ -295,6 +296,46 @@ public class PlayerStore {
      */
     public ClaimResult claimOwnership(long playerId, Duration timeout) {
         return withinDeadline(timeout, () -> claimInTransaction(playerId), new ClaimResult.TimedOut());
+    }
+
+    /**
+     * 历史 SQL 恢复后的维护夺权；日常登录仍使用 {@link #claimOwnership}。
+     *
+     * <p>调用前必须关闭受影响玩家入口、停止旧写者与旧发号者，且审核上界须独立于被恢复的 SQL/备份保留，覆盖所有曾发出的
+     * 纪元（含交出生成的 E+1）。本方法不能证明上界来源，也不能撤销新围栏安装之前的僵尸写。缺少可靠上界时不得调用或猜 0。
+     *
+     * <p>自有事务锁住玩家后，只有已释放或租约严格过期才把纪元设为 {@code max(SQL 当前纪元, 审核上界)+1} 并持有。
+     * 只更新归属/租约元数据，{@code player_state.data} 原字节与 {@code saved_epoch} 完全不变。
+     * 时限与提交结局不明语义沿用 {@link #withinDeadline}：异常不代表未提交，重投见 Held 不得认作自己的提交。
+     *
+     * @param auditedOldEpochUpperBound 独立审核的旧纪元上界，0 到 Long.MAX_VALUE-1；已知 0 与缺少上界不同
+     * @param timeout 正的 SQL 事务预算
+     * @throws IllegalArgumentException 上界超出可安全递增的 Java long 范围
+     * @throws IllegalStateException 外层事务存在、SQL 当前纪元无法安全递增或锁定后的 CAS 未改到唯一行
+     */
+    public ClaimResult recoverOwnershipAfterRestore(long playerId, long auditedOldEpochUpperBound, Duration timeout) {
+        if (auditedOldEpochUpperBound < 0 || auditedOldEpochUpperBound == Long.MAX_VALUE) {
+            throw new IllegalArgumentException("审核旧纪元上界无法安全递增");
+        }
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("历史归属恢复不得加入外层事务");
+        }
+        return withinDeadline(timeout, () -> {
+            OwnerState owner = mapper.selectOwnerForUpdate(playerId);
+            if (owner == null) return new ClaimResult.NotFound();
+            long current = owner.ownerEpoch();
+            if (current < 0 || current == Long.MAX_VALUE) {
+                throw new IllegalStateException("SQL 当前归属纪元无法安全递增");
+            }
+            // 取锁可能等待；租约判断使用拿到锁之后的时刻，等于 now 保守地仍算持有。
+            long now = clockMs.getAsLong();
+            if (!owner.released() && owner.leaseUntil() >= now) return new ClaimResult.Held(current);
+            long next = Math.max(current, auditedOldEpochUpperBound) + 1;
+            if (mapper.recoverOwnerEpoch(playerId, current, next, now, now + OWNER_LEASE.toMillis()) != 1) {
+                throw new IllegalStateException("锁定后的历史归属恢复未改到唯一玩家行");
+            }
+            return new ClaimResult.Claimed(next);
+        }, new ClaimResult.TimedOut());
     }
 
     /** 夺权事务的主体，必须在事务里调用。 */

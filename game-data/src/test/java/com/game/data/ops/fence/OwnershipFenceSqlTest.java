@@ -1,21 +1,37 @@
 package com.game.data.ops.fence;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 import com.game.data.metrics.DataMetrics;
 import com.game.data.ops.fence.AdminOwnership.Claim;
 import com.game.data.testing.DataSqlFixture;
 import com.game.player.store.OwnerState;
+import com.game.player.store.OwnerLease;
 import com.game.player.store.PlayerRow;
+import com.game.player.store.PlayerMapper;
 import com.game.player.store.PlayerStore;
 import com.game.player.store.PlayerStore.ClaimResult;
 import com.game.player.store.PlayerStore.HandOffResult;
 import com.game.player.store.state.PlayerState;
+import com.game.player.store.state.CurrencyState;
+import com.game.player.store.state.BagState;
+import com.game.player.store.state.BagItemState;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.UnknownFieldSet;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -112,6 +128,219 @@ class OwnershipFenceSqlTest {
     void 不存在的玩家_NotFound() {
         assertThat(ownership.claim(42, true, Duration.ofSeconds(1), OwnershipFenceSqlTest::noPause))
                 .isEqualTo(new Claim.NotFound());
+    }
+
+    @Test
+    void SQL行锁拖过维护预算后不得迟到夺权_历史资产与归属原样() throws Exception {
+        assertBlockedClaimRollsBack(() -> ownership.claim(P, false, Duration.ofMillis(100), OwnershipFenceSqlTest::noPause));
+    }
+
+    @Test
+    void 历史恢复的SQL行锁拖过预算后回滚_不登记持有也不改资产() throws Exception {
+        assertBlockedClaimRollsBack(() -> ownership.recoverAfterRestore(P, OptionalLong.of(8), Duration.ofMillis(100)));
+    }
+
+    private void assertBlockedClaimRollsBack(Supplier<Claim> action) throws Exception {
+        player(5, true, 0);
+        byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
+        db.putState(P, assets, 3, 1234);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch claiming = new CountDownLatch(1);
+        // 只观察真实 SQL 的进入时刻，不替换结果。此处已进入 withinDeadline，主线程才开始计持锁故障时间。
+        PlayerMapper observed = mock(PlayerMapper.class, delegatesTo(db.playerMapper));
+        doAnswer(invocation -> {
+            claiming.countDown();
+            return db.playerMapper.claimOwnerEpoch(invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2));
+        }).when(observed).claimOwnerEpoch(anyLong(), anyLong(), anyLong());
+        doAnswer(invocation -> {
+            claiming.countDown();
+            return db.playerMapper.selectOwnerForUpdate(invocation.getArgument(0));
+        }).when(observed).selectOwnerForUpdate(anyLong());
+        store = new PlayerStore(observed, System::currentTimeMillis, db.transactionManager);
+        ownership = new AdminOwnership(store, db.tx(), (p, e) -> calls.add("takeover:" + p + ":" + e),
+                (p, e) -> CompletableFuture.completedFuture(true), new DataMetrics(new SimpleMeterRegistry()));
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var holder = executor.submit(() -> db.tx().execute(status -> {
+                db.playerMapper.selectOwnerForUpdate(P);
+                locked.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("测试行锁未释放");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+                return null;
+            }));
+            assertThat(locked.await(3, TimeUnit.SECONDS)).isTrue();
+            try {
+                var claim = executor.submit(action::get);
+                assertThat(claiming.await(3, TimeUnit.SECONDS)).isTrue();
+                // 故障注入：已有写事务持续持锁，直到维护调用的纳秒预算明确过期。
+                CompletableFuture.delayedExecutor(400, TimeUnit.MILLISECONDS).execute(release::countDown);
+                assertThat(claim.get(4, TimeUnit.SECONDS)).isEqualTo(new Claim.Failed("运维夺权超时"));
+                assertThat(owner()).isEqualTo(new OwnerState(5, true, 0));
+                assertThat(ownership.heldCount()).isZero();
+                assertStateBytes(assets, 3);
+            } finally {
+                release.countDown();
+                holder.get(3, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    void 历史零纪元恢复只推进SQL归属_资产原字节保持_复活旧写者所有入口被拒() {
+        player(0, true, 0);
+        var unknown = UnknownFieldSet.newBuilder().addField(1001, UnknownFieldSet.Field.newBuilder()
+                .addLengthDelimited(ByteString.copyFromUtf8("历史实例成长与未来字段")).build()).build();
+        var historical = PlayerState.newBuilder()
+                .setCurrency(CurrencyState.newBuilder().addBalances(918).addBalances(727))
+                .setBag(BagState.newBuilder().addItems(BagItemState.newBuilder().setItemUuid(700)
+                        .setConfigId(1).setStackSize(1).setUnknownFields(unknown)))
+                .setUnknownFields(unknown).build();
+        byte[] original = historical.toByteArray();
+        db.putState(P, original, 0, 1234);
+        PlayerRow zombie = store.findPlayer(P).orElseThrow();
+
+        assertThat(ownership.claim(P, false, Duration.ofSeconds(2), OwnershipFenceSqlTest::noPause))
+                .isEqualTo(new Claim.Claimed(1, false));
+        assertThat(ownership.claim(P, false, Duration.ofSeconds(2), OwnershipFenceSqlTest::noPause))
+                .isEqualTo(new Claim.Online(1));
+        assertThat(db.jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=?", byte[].class, P))
+                .containsExactly(original);
+        assertThat(db.jdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=?", Long.class, P)).isZero();
+        assertThat(store.loadState(P)).isEqualTo(historical);
+
+        Boolean heldSaved = db.tx().execute(s -> store.saveStateHeld(zombie, PlayerState.getDefaultInstance()));
+        Boolean releasedSaved = db.tx().execute(s -> store.saveStateAndRelease(zombie, PlayerState.getDefaultInstance()));
+        assertThat(heldSaved).isFalse();
+        assertThat(releasedSaved).isFalse();
+        assertThat(store.releaseOwnership(P, 0)).isFalse();
+        assertThat(store.renewOwnerLeases(List.of(new OwnerLease(P, 0)))).containsExactly(new OwnerLease(P, 0));
+        assertThat(store.handOffOwnership(zombie, PlayerState.getDefaultInstance(),
+                System.currentTimeMillis() + 30_000, System.currentTimeMillis(), Duration.ofSeconds(2)))
+                .isInstanceOf(HandOffResult.Fenced.class);
+        assertThat(owner().ownerEpoch()).isEqualTo(1);
+        assertThat(db.jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=?", byte[].class, P))
+                .containsExactly(original);
+        ownership.release(P);
+        assertThat(store.claimOwnership(P, Duration.ofSeconds(2))).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.loadState(P)).isEqualTo(historical);
+    }
+
+    @Test
+    void SQL归属PITR回退到零_独立审核旧纪元上界禁止复用仍存活实例的epoch() {
+        // SQL 恢复到旧备份；epoch 1 的旧实例及其上界证据独立于该备份保留，不能从回退 SQL 猜出上界。
+        player(0, true, 0);
+        long auditedOldUpperBound = 1;
+        PlayerRow zombie = new PlayerRow();
+        zombie.setPlayerId(P);
+        zombie.setOwnerEpoch(auditedOldUpperBound);
+        byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
+        db.putState(P, assets, 0, 1234);
+
+        Claim recovered = ownership.recoverAfterRestore(P, OptionalLong.of(auditedOldUpperBound), Duration.ofSeconds(2));
+        assertThat(recovered).isEqualTo(new Claim.Claimed(2, false));
+        assertThat(owner().ownerEpoch()).isGreaterThan(auditedOldUpperBound);
+        Boolean heldSaved = db.tx().execute(s -> store.saveStateHeld(zombie, PlayerState.getDefaultInstance()));
+        Boolean releasedSaved = db.tx().execute(s -> store.saveStateAndRelease(zombie, PlayerState.getDefaultInstance()));
+        assertThat(heldSaved).isFalse();
+        assertThat(releasedSaved).isFalse();
+        assertThat(store.releaseOwnership(P, auditedOldUpperBound)).isFalse();
+        assertThat(store.renewOwnerLeases(List.of(new OwnerLease(P, auditedOldUpperBound))))
+                .containsExactly(new OwnerLease(P, auditedOldUpperBound));
+        assertThat(store.handOffOwnership(zombie, PlayerState.getDefaultInstance(),
+                System.currentTimeMillis() + 30_000, System.currentTimeMillis(), Duration.ofSeconds(2)))
+                .isInstanceOf(HandOffResult.Fenced.class);
+        assertThat(db.jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=?", byte[].class, P))
+                .containsExactly(assets);
+        assertThat(db.jdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=?", Long.class, P)).isZero();
+        ownership.release(P);
+    }
+
+    @Test
+    void 历史恢复缺少或非法审核上界拒绝_已知零上界有效且SQL当前值仍须递增() {
+        player(5, true, 0);
+        byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
+        db.putState(P, assets, 3, 1234);
+        OwnerState before = owner();
+        for (OptionalLong floor : new OptionalLong[]{null, OptionalLong.empty(), OptionalLong.of(-1), OptionalLong.of(Long.MAX_VALUE)}) {
+            assertThat(ownership.recoverAfterRestore(P, floor, Duration.ofSeconds(2))).isInstanceOf(Claim.Failed.class);
+            assertThat(owner()).isEqualTo(before);
+            assertThat(ownership.heldCount()).isZero();
+            assertStateBytes(assets, 3);
+        }
+        assertThat(ownership.recoverAfterRestore(42, OptionalLong.of(0), Duration.ofSeconds(2))).isEqualTo(new Claim.NotFound());
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(0), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(6, false));
+        assertThat(ownership.epochOf(P)).hasValue(6);
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(0), Duration.ofSeconds(2))).isEqualTo(new Claim.Online(6));
+        assertStateBytes(assets, 3);
+        ownership.release(P);
+    }
+
+    @Test
+    void 历史恢复正long上界拒绝溢出_可安全抵达最大值且资产不变() {
+        player(Long.MAX_VALUE, true, 0);
+        byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
+        db.putState(P, assets, 3, 1234);
+        OwnerState before = owner();
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(1), Duration.ofSeconds(2))).isInstanceOf(Claim.Failed.class);
+        assertThat(owner()).isEqualTo(before);
+        assertThat(ownership.heldCount()).isZero();
+        assertStateBytes(assets, 3);
+
+        db.jdbc().update("UPDATE player SET owner_epoch=0 WHERE player_id=?", P);
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(Long.MAX_VALUE - 1), Duration.ofSeconds(2)))
+                .isEqualTo(new Claim.Claimed(Long.MAX_VALUE, false));
+        assertThat(owner().ownerEpoch()).isEqualTo(Long.MAX_VALUE);
+        assertStateBytes(assets, 3);
+        ownership.release(P);
+    }
+
+    @Test
+    void 历史恢复租约等于当前时刻仍持有_严格过期或已释放才可推进() {
+        long now = 1_000_000;
+        // 不用 StrictClock，精确验证 == now 的协议边界，避免真实墙钟经过导致测试偶然过期。
+        store = new PlayerStore(db.playerMapper, () -> now, db.transactionManager);
+        ownership = new AdminOwnership(store, db.tx(), (p, e) -> calls.add("takeover:" + p + ":" + e),
+                (p, e) -> CompletableFuture.completedFuture(true), new DataMetrics(new SimpleMeterRegistry()));
+        player(5, false, now);
+        byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
+        db.putState(P, assets, 3, 1234);
+        OwnerState before = owner();
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2))).isEqualTo(new Claim.Online(5));
+        assertThat(owner()).isEqualTo(before);
+        assertThat(ownership.heldCount()).isZero();
+        assertStateBytes(assets, 3);
+
+        db.jdbc().update("UPDATE player SET owner_lease_until=? WHERE player_id=?", now - 1, P);
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(10, false));
+        assertStateBytes(assets, 3);
+        ownership.release(P);
+        db.jdbc().update("UPDATE player SET owner_lease_until=? WHERE player_id=?", now + 60_000, P);
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(11, false));
+        assertStateBytes(assets, 3);
+        assertThat(calls).isEmpty();
+        ownership.release(P);
+    }
+
+    @Test
+    void 历史恢复禁止外层事务吞掉预算_归属和资产零变化() {
+        player(5, true, 0);
+        byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
+        db.putState(P, assets, 3, 1234);
+        OwnerState before = owner();
+        Claim refused = db.tx().execute(s -> ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2)));
+        assertThat(refused).isInstanceOf(Claim.Failed.class);
+        assertThat(owner()).isEqualTo(before);
+        assertThat(ownership.heldCount()).isZero();
+        assertStateBytes(assets, 3);
+    }
+
+    private void assertStateBytes(byte[] expected, long savedEpoch) {
+        assertThat(db.jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=?", byte[].class, P)).containsExactly(expected);
+        assertThat(db.jdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=?", Long.class, P)).isEqualTo(savedEpoch);
     }
 
     @Test

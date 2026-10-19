@@ -429,3 +429,11 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 - [ ] 两人走近、走远时双方的收包序列：47 / 21 / 64 / 51 各一次，没有残影；换场景和断线的收包序列。
 - [ ] 66 的字节形态：停步时 `velocity` 存在且为空；带 `entity_id`；10 Hz 限频；兴趣列表为空时保留脏位。
 - [ ] robot_smoke 冒烟回归：3 个账号，login_ok 和 enter_ok 都为 3，没有失败（robot 不发移动、不处理 66，收到的 21 / 47 / 51 / 64 都按幂等处理）。
+
+## ECS 第 6 批源码口径（2026-10-18，验证待执行）
+
+本节记录已落码的当前口径；本批未编译、未测试，未跑 ContractSync 或 --check，也未完成联机冒烟。历史基线的运行记录不能作为本批验证证据。
+
+- C++ 网络 actor 号为 `(node_id << 32) | seq`，同时在线节点间唯一、本进程内不复用；进程重启或 node_id 回收后，同前缀的 seq 会从 1 重发。Java `SceneWorld.nextId` 沿用 Snowflake。网络 actor 身份与 EnTT 句柄、player_id 是不同标识，不可相互转换；现行号源维持不变。
+- 负责人于 2026-10-16 确认客户端在换场景、重连、换节点时清空 actor 表；另外两项问题（是否只按不透明值使用、是否接受方案 B）未单独答复。本批保留现行号源，不把确认范围扩大到这两项。
+- C++ 源码已在每次实际发送 66 `ActorBaseAttributesS2C` 时补 `entity_id = PlayerGuid/player_id`，NPC 暂为 0，与 Java 既有源码口径一致；21/47 的 entity 仍是网络 actor 号。移动 133、新观察者补发等其它现存差异继续按 PARITY 跟踪，未以本条关闭。

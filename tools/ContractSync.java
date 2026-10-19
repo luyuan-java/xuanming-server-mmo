@@ -39,6 +39,8 @@ import java.util.stream.Stream;
  *       schema 新加、数据里还没有的字段改写成 reserved、还没导出的表不同步（都记进 SOURCE.properties 的 pending 项）。
  *       Java 的表访问代码由 game-table-codegen 在编译期按这份 schema 生成，不再同步导表器产出的 Java 管理器。</li>
  *   <li>tip / operator 枚举 proto（导表器由 Tip.xlsx / Operator.xlsx 生成，没有别的出处）原样复制。</li>
+ *   <li>tip 故障码表 {@code com.game.table.tip.TipFaults}（导表器由 Tip.xlsx 的 fault 列生成）原样复制，
+ *       复制前核对码名 / 码值与同批 tip proto 一致；网关据此把 login 的 in-band 故障码回 500。</li>
  *   <li>具名行 id 常量（Excel 的 constants_name 列，不进 .pb）：取导表器产出的 C++ 常量头文件，
  *       生成 {@code com.game.table.TableConstants}。</li>
  *   <li>表数据 {@code generated/tables/*.pb} + {@code manifest.json}（行数与 sha256，运行时据此校验）+ {@code tip_text.json}。</li>
@@ -71,10 +73,12 @@ public final class ContractSync {
     private static final String REGISTRY_OUT = "game-proto/src/main/resources/contract";
     private static final String TABLE_PROTO_OUT = "game-table/src/main/proto";
     private static final String TABLE_CONSTANTS_OUT = "game-table/src/main/java/com/game/table/TableConstants.java";
+    private static final String TIP_FAULTS_SOURCE = "generated/code/java/tip/TipFaults.java";
+    private static final String TIP_FAULTS_OUT = "game-table/src/main/java/com/game/table/tip/TipFaults.java";
     private static final String TABLE_DATA_OUT = "config-data/tables";
     private static final String SOURCE_INFO_OUT = "contract/SOURCE.properties";
     private static final List<String> MANAGED = List.of(PROTO_OUT, REGISTRY_OUT, TABLE_PROTO_OUT, TABLE_CONSTANTS_OUT,
-            TABLE_DATA_OUT, SOURCE_INFO_OUT);
+            TIP_FAULTS_OUT, TABLE_DATA_OUT, SOURCE_INFO_OUT);
 
     private ContractSync() {
     }
@@ -149,6 +153,8 @@ public final class ContractSync {
         int enumCount = syncTableEnums(source.resolve("generated/code/proto"), tableProtoOut);
         int constantCount = syncTableConstants(source.resolve("cpp/generated/table/code/constants"),
                 out.resolve(TABLE_CONSTANTS_OUT));
+        int tipFaultCount = syncTipFaults(source.resolve(TIP_FAULTS_SOURCE), tableProtoOut.resolve("tip"),
+                out.resolve(TIP_FAULTS_OUT));
         cleanDir(registryOut);
         copyText(source.resolve("proto/message_id.txt"), registryOut.resolve("message_id.txt"));
         copyText(source.resolve("proto/event_id.txt"), registryOut.resolve("event_id.txt"));
@@ -163,6 +169,7 @@ public final class ContractSync {
         info.put("table.schema.files", Integer.toString(tables.sheets().size()));
         info.put("table.enum.files", Integer.toString(enumCount));
         info.put("table.constants", Integer.toString(constantCount));
+        info.put("tip.faults", Integer.toString(tipFaultCount));
         info.put("table.data.files", Integer.toString(tableDataCount));
         // 表数据是导表器某一次导出的产物，可能比 mmorpg HEAD 旧（或来自脏工作树）：如实记下来源。
         info.put("table.data.commit", manifestValue(manifest, "commit"));
@@ -197,6 +204,7 @@ public final class ContractSync {
     private static String summary(Map<String, String> info) {
         return "proto=" + info.get("proto.files") + " 表schema=" + info.get("table.schema.files")
                 + " tip/operator=" + info.get("table.enum.files") + " 常量=" + info.get("table.constants")
+                + " tip故障码=" + info.get("tip.faults")
                 + " 表数据=" + info.get("table.data.files") + "（导出自 " + info.get("table.data.commit")
                 + ("true".equals(info.get("table.data.dirty")) ? "，脏工作树" : "") + "）";
     }
@@ -468,6 +476,49 @@ public final class ContractSync {
                 count++;
             }
         }
+        return count;
+    }
+
+    private static final Pattern TIP_FAULT_ROW = Pattern.compile("new Fault\\((\\d+), \"(\\w+)\", \"(\\w+)\"\\)");
+    private static final Pattern TIP_ENUM_VALUE = Pattern.compile("(?m)^\\s*k(\\w+)\\s*=\\s*(\\d+)\\s*;");
+
+    /**
+     * tip 故障码表：导表器由 Tip.xlsx 的 fault 列生成的 {@code com.game.table.tip.TipFaults}（只依赖 JDK），原样复制。
+     * 网关据此把 login 的 in-band 故障码回 500（mmorpg docs/design/tip-code-axis.md §2.10）；分类只认这张表，
+     * 本仓库不手写故障码集合。
+     *
+     * <p>复制前核对它与同批同步的 tip 枚举 proto 是同一次导表：每个故障码的码名与码值都必须在 tip proto 里存在且一致，
+     * 否则说明 mmorpg 的 Tip.xlsx 改过但只重新生成了一半。返回故障码个数。
+     */
+    private static int syncTipFaults(Path sourceFile, Path syncedTipProtoDir, Path outFile) throws IOException {
+        if (!Files.isRegularFile(sourceFile)) {
+            throw new IllegalStateException("mmorpg 缺 tip 故障码表 " + sourceFile
+                    + "（导表器 2026-10-18 起产出），先在 mmorpg 重新导表");
+        }
+        String text = readText(sourceFile);
+        if (!text.contains("package " + TABLE_JAVA_PACKAGE + ".tip;")) {
+            throw new IllegalStateException(sourceFile.getFileName() + " 不在 " + TABLE_JAVA_PACKAGE + ".tip 包里");
+        }
+        Map<String, Long> enumValues = new TreeMap<>();
+        for (Path proto : listFiles(syncedTipProtoDir, ".proto")) {
+            Matcher m = TIP_ENUM_VALUE.matcher(readText(proto));
+            while (m.find()) {
+                enumValues.put(m.group(1), Long.parseLong(m.group(2)));
+            }
+        }
+        int count = 0;
+        Matcher row = TIP_FAULT_ROW.matcher(text);
+        while (row.find()) {
+            long code = Long.parseLong(row.group(1));
+            String name = row.group(3);
+            Long declared = enumValues.get(name);
+            if (declared == null || declared != code) {
+                throw new IllegalStateException("TipFaults 的 " + row.group(2) + "." + name + "=" + code
+                        + " 与 tip proto 不一致（proto 里是 " + declared + "），mmorpg 的导表产物不是同一批");
+            }
+            count++;
+        }
+        copyText(sourceFile, outFile);
         return count;
     }
 

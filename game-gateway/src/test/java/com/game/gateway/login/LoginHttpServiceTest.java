@@ -19,13 +19,19 @@ import com.game.proto.login.LoginRequest;
 import com.game.proto.login.LoginResponse;
 import com.game.proto.login.RefreshTokenRequest;
 import com.game.proto.login.RefreshTokenResponse;
+import com.game.table.LoginErrorTip;
+import com.game.table.tip.TipFaults;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import org.apache.dubbo.rpc.RpcException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
+@ExtendWith(OutputCaptureExtension.class)
 class LoginHttpServiceTest {
 
     private static final ZoneDirectory ZONES = new ZoneDirectory(
@@ -43,6 +49,16 @@ class LoginHttpServiceTest {
     private double count(String endpoint, int code) {
         var c = meters.find(LoginHttpMetrics.NAME).tag("endpoint", endpoint).tag("code", Integer.toString(code)).counter();
         return c == null ? 0 : c.count();
+    }
+
+    @Test
+    void HTTP认证失败日志不回显Dubbo请求及嵌套凭据(CapturedOutput output) {
+        String marker = "synthetic-http-credential-marker";
+        assertThat(LoginHttpService.failureMessage("login", new RpcException(RpcException.TIMEOUT_EXCEPTION,
+                "request: password=" + marker))).isEqualTo("login_unavailable");
+        assertThat(LoginHttpService.failureMessage("refresh", new IllegalStateException("token=" + marker,
+                new IllegalArgumentException("nested=" + marker)))).isEqualTo("internal_error");
+        assertThat(output.getAll()).contains("RpcException", "IllegalStateException").doesNotContain(marker);
     }
 
     @Test
@@ -78,12 +94,41 @@ class LoginHttpServiceTest {
     }
 
     @Test
-    void login回业务错误一律401_带上游tip() {
+    void login回业务拒绝401_带上游tip() {
+        assertThat(TipFaults.isFault(LoginErrorTip.login_error.kLoginAccountNotFound_VALUE))
+                .as("前提：凭证无效不是故障码").isFalse();
         when(login.login(any())).thenReturn(CompletableFuture.completedFuture(LoginResponse.newBuilder()
                 .setErrorMessage(TipInfoMessage.newBuilder().setId(2000)).build()));
         assertThat(service.login(password(1)).join())
                 .isEqualTo(HttpLoginResponse.error(401, "upstream_err=2000"));
         assertThat(count("login", 401)).isEqualTo(1);
+    }
+
+    /** 两版同批的客户端契约（mmorpg tip-code-axis.md §2.10）：Tip.xlsx 标了 fault 的码回 500，message 仍带上游 tip。 */
+    @Test
+    void login回故障码500_带上游tip_渠道故障签发失败读Redis失败() {
+        for (int tip : List.of(LoginErrorTip.login_error.kLoginAuthProviderUnavailable_VALUE,
+                LoginErrorTip.login_error.kLoginTokenIssueFailed_VALUE,
+                LoginErrorTip.login_error.kLoginRedisError_VALUE)) {
+            when(login.login(any())).thenReturn(CompletableFuture.completedFuture(LoginResponse.newBuilder()
+                    .setErrorMessage(TipInfoMessage.newBuilder().setId(tip)).build()));
+            assertThat(service.login(password(1)).join())
+                    .as("tip=%d", tip)
+                    .isEqualTo(HttpLoginResponse.error(500, "upstream_err=" + tip));
+        }
+        assertThat(count("login", 500)).isEqualTo(3);
+        assertThat(count("login", 401)).isZero();
+    }
+
+    /** 分类只认生成表：表里每一个故障码都回 500，没有第二份清单；表不为空（列被清空会让这条退化成空转）。 */
+    @Test
+    void 故障表里每个码都回500() {
+        assertThat(TipFaults.FAULTS).isNotEmpty();
+        for (TipFaults.Fault fault : TipFaults.FAULTS) {
+            assertThat(LoginHttpService.codeForUpstreamTip("login", fault.code())).as(fault.name()).isEqualTo(500);
+        }
+        assertThat(LoginHttpService.codeForUpstreamTip("login", Integer.MAX_VALUE))
+                .as("本版本不认识的码按业务拒绝").isEqualTo(401);
     }
 
     @Test
@@ -152,6 +197,16 @@ class LoginHttpServiceTest {
                 .isEqualTo(HttpRefreshTokenResponse.error(401, "upstream_err=2000"));
         assertThat(count("refresh", 401)).isEqualTo(3);
         assertThat(count("refresh", 0)).isEqualTo(1);
+    }
+
+    @Test
+    void 刷新_上游故障码500_带上游tip() {
+        int tip = LoginErrorTip.login_error.kLoginRedisError_VALUE;
+        when(login.refreshToken(any())).thenReturn(CompletableFuture.completedFuture(RefreshTokenResponse.newBuilder()
+                .setErrorMessage(TipInfoMessage.newBuilder().setId(tip)).build()));
+        assertThat(service.refresh(new HttpRefreshTokenRequest("r1")).join())
+                .isEqualTo(HttpRefreshTokenResponse.error(500, "upstream_err=" + tip));
+        assertThat(count("refresh", 500)).isEqualTo(1);
     }
 
     @Test

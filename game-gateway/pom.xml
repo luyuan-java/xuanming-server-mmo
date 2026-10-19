@@ -27,6 +27,11 @@
             <groupId>com.game</groupId>
             <artifactId>game-common</artifactId>
         </dependency>
+        <!-- 只用 com.game.table.tip.TipFaults（Tip.xlsx fault 列的生成表）：login 的 in-band 故障码回 500；网关不加载配置表 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-table</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.game</groupId>
             <artifactId>game-api</artifactId>

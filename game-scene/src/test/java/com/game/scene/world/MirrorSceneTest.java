@@ -28,8 +28,11 @@ import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * 63 的镜像分支（批次 5.3，dungeon-mirror-spec §6.7、§6.8、§12.2 第 1–6、13、14 条）：先回 {0}、进 RESOLVING 向 scene-manager 取号、
@@ -342,6 +345,48 @@ class MirrorSceneTest {
         assertThat(a.scene()).isSameAs(f.scene(id));
     }
 
+    /** 统一覆盖成功、业务拒绝和传输失败，避免旧失败给后来已完成的换图补推提示。 */
+    static Stream<InstanceIds.Result> lateMirrorResults() {
+        return Stream.of(new InstanceIds.Result.Issued(LOCAL_NODE, 900_002),
+                new InstanceIds.Result.Refused(PARAM_ERROR), new InstanceIds.Result.Failed("取号超时"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("lateMirrorResults")
+    void 首个完成排队超过TTL_未经过其他在途闸也永久摘槽且静默丢弃(InstanceIds.Result result) {
+        f.requestMirror(a, M);
+        FakeInstanceIds.PendingCreate create = f.ids.take();
+        // 正好到截止时刻即过期；没有再次调用 switchInFlight 来代为摘槽。
+        f.clock.advanceMillis(InstanceFixture.RESOLVE_TIMEOUT.toMillis() + 1_000);
+        f.sink.clear();
+
+        create.complete(result);
+
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.NONE);
+        assertThat(a.scene()).isSameAs(f.scene(A));
+        assertThat(f.messageIds(a)).isEmpty();
+        assertThat(f.world.instanceCount()).isZero();
+        assertThat(f.resolves("stale")).isEqualTo(1);
+        f.requestMirror(a, M);
+        assertThat(f.replies(a)).containsExactly(0);
+        assertThat(f.ids.pendingCount()).isEqualTo(1);
+    }
+
+    @Test
+    void 截止前最后一毫秒_仍可正常建镜像换入() {
+        f.requestMirror(a, M);
+        FakeInstanceIds.PendingCreate create = f.ids.take();
+        f.clock.advanceMillis(InstanceFixture.RESOLVE_TIMEOUT.toMillis() + 999);
+        f.sink.clear();
+
+        long id = f.nextInstanceId();
+        create.issued(LOCAL_NODE, id);
+
+        assertThat(a.scene()).isSameAs(f.scene(id));
+        assertThat(f.messageIds(a)).containsExactly(79, 21);
+        assertThat(f.resolves("created")).isEqualTo(1);
+    }
+
     // ------------------------------------------------------------------ 4 陈旧结果
 
     @Test
@@ -358,21 +403,66 @@ class MirrorSceneTest {
         assertThat(f.lifecycle("mirror", "created")).isZero();
     }
 
-    @Test
-    void 号回来前玩家被频道排空改派走_推23的3023_不建_D6() {
+    @ParameterizedTest
+    @MethodSource("lateMirrorResults")
+    void 号回来前玩家被频道排空改派走_永久取消旧镜像且完成静默丢弃(InstanceIds.Result result) {
         f.requestMirror(a, M);
         FakeInstanceIds.PendingCreate create = f.ids.take();
         f.plan(draining(A, 1), active(B, 1), active(C, 2));   // A 转排空，两人同节点改派到 B（RESOLVING 不跳过）
         assertThat(a.scene()).isSameAs(f.scene(B));
         f.sink.clear();
 
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.NONE);
+        create.complete(result);
+
+        assertThat(f.messageIds(a)).isEmpty();
+        assertThat(f.world.instanceCount()).isZero();
+        assertThat(a.scene()).isSameAs(f.scene(B));
+        assertThat(f.resolves("stale")).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("lateMirrorResults")
+    void 权威换图后又回源频道_旧镜像完成仍静默且不复活(InstanceIds.Result result) {
+        f.requestMirror(a, M);
+        FakeInstanceIds.PendingCreate create = f.ids.take();
+        f.world.switchScene(a, f.scene(B));
+        f.world.switchScene(a, f.scene(A));
+        f.sink.clear();
+
+        create.complete(result);
+
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.NONE);
+        assertThat(a.scene()).isSameAs(f.scene(A));
+        assertThat(f.messageIds(a)).isEmpty();
+        assertThat(f.world.instanceCount()).isZero();
+        assertThat(f.resolves("stale")).isEqualTo(1);
+    }
+
+    @Test
+    void 权威本地落点不误摘普通换图槽() {
+        PlayerSwitch ordinary = new PlayerSwitch(22, 900_001, 1, Long.MAX_VALUE);
+        a.setSwitching(ordinary);
+
+        f.world.switchScene(a, f.scene(B));
+
+        assertThat(a.scene()).isSameAs(f.scene(B));
+        assertThat(a.switching()).isSameAs(ordinary);
+    }
+
+    @Test
+    void 同场景不迁移不取消镜像_正常完成仍可换入() {
+        f.requestMirror(a, M);
+        FakeInstanceIds.PendingCreate create = f.ids.take();
+        f.world.switchScene(a, f.scene(A));
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.RESOLVING);
+        f.sink.clear();
+
         long id = f.nextInstanceId();
         create.issued(LOCAL_NODE, id);
 
-        assertThat(f.pushedTips(a)).containsExactly(ENTER_FAILED);
-        assertThat(f.scene(id)).isNull();
-        assertThat(a.scene()).isSameAs(f.scene(B));
-        assertThat(f.resolves("source_moved")).isEqualTo(1);
+        assertThat(a.scene()).isSameAs(f.scene(id));
+        assertThat(f.messageIds(a)).containsExactly(79, 21);
     }
 
     @Test

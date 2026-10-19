@@ -74,17 +74,38 @@ class OAuthHttpTest {
     }
 
     @Test
+    void 非2xx按渠道故障_带状态码不带查询串() throws IOException {
+        String base = stallingServer("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+        assertThatThrownBy(() -> new OAuthHttp(Duration.ofSeconds(3)).get(base, "/x", Map.of("secret", "TOPSECRET")))
+                .isInstanceOf(AuthProviderUnavailableException.class).hasMessageContaining("502")
+                .hasMessageNotContaining("TOPSECRET");
+    }
+
+    @Test
     void 启动校验接口地址_不回显取值() {
-        assertThat(OAuthHttp.requireEndpoint("http://127.0.0.1:8080/", "微信认证")).isEqualTo("http://127.0.0.1:8080/");
-        assertThat(OAuthHttp.requireEndpoint("https://api.weixin.qq.com", "微信认证")).isNotNull();
+        assertThat(OAuthHttp.requireEndpoint("http://127.0.0.1:8080/", "微信认证", true)).isEqualTo("http://127.0.0.1:8080/");
+        assertThat(OAuthHttp.requireEndpoint("https://api.weixin.qq.com", "微信认证", false)).isNotNull();
         for (String bad : new String[]{"http://wechat_mock:8080", "ftp://host", "host:8080", "http://u:p@host",
                 "http://host/?a=1", "http://bad host"}) {
-            assertThatThrownBy(() -> OAuthHttp.requireEndpoint(bad, "微信认证")).as(bad)
+            assertThatThrownBy(() -> OAuthHttp.requireEndpoint(bad, "微信认证", true)).as(bad)
                     .isInstanceOf(IllegalArgumentException.class).hasMessageNotContaining(bad);
         }
-        assertThatThrownBy(() -> new WeChatProvider("wx", "secret", "http://wechat_mock:8080"))
+        OAuthPolicy dev = new OAuthPolicy(true, true, true);
+        assertThatThrownBy(() -> new WeChatProvider("wx", "secret", "http://wechat_mock:8080", dev))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new QqProvider("100", "http://qq_mock"))
+        assertThatThrownBy(() -> new QqProvider("100", "http://qq_mock", dev))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /** 生产（非 dev 模式）只接受 https：这个地址上的请求带着 AppSecret / access_token。 */
+    @Test
+    void 生产模式只接受https() {
+        assertThatThrownBy(() -> OAuthHttp.requireEndpoint("http://127.0.0.1:8080/", "微信认证", false))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("https");
+        assertThatThrownBy(() -> new WeChatProvider("wx", "secret", "http://127.0.0.1:18090", OAuthPolicy.PRODUCTION))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new QqProvider("100", "http://127.0.0.1:18090", OAuthPolicy.PRODUCTION))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(new QqProvider("100", "https://graph.qq.com", OAuthPolicy.PRODUCTION)).isNotNull();
     }
 }

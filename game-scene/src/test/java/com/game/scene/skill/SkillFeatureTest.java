@@ -269,6 +269,35 @@ class SkillFeatureTest {
     }
 
     @Test
+    void 零冷却技能成功后不登记零号冷却组() throws Exception {
+        start();
+        assertThat(shipped.skill(2).cooldownId()).isZero();
+        assertThat(player(A).skillState().cooldownStart(0)).isNull();
+
+        assertThat(release(2, entity(B))).isZero();
+
+        assertThat(player(A).skillState().cooldownStart(0)).isNull();
+    }
+
+    @Test
+    void 零冷却技能不污染已有正常冷却组() throws Exception {
+        start();
+        int group = shipped.skill(1).cooldownId();
+        assertThat(group).isNotZero();
+        assertThat(shipped.skill(2).cooldownId()).isZero();
+        assertThat(player(A).skillState().cooldownStart(0)).isNull();
+        assertThat(release(1, entity(B))).isZero();
+        Long started = player(A).skillState().cooldownStart(group);
+        assertThat(started).isNotNull();
+
+        clock.advanceMillis(2_000);
+        assertThat(release(2, entity(B))).isZero();
+
+        assertThat(player(A).skillState().cooldownStart(group)).isEqualTo(started);
+        assertThat(player(A).skillState().cooldownStart(0)).isNull();
+    }
+
+    @Test
     void 技能2没有前摇没有冷却_连放都成功() throws Exception {
         start();
         assertThat(release(2, entity(B))).isZero();

@@ -1,9 +1,10 @@
 // game-guild 的四张核心表 + 4.5 的资产三表（game 库），经 game-pbmysql 建表 / 补列 / 补索引（只扩展、从不删改）。guild-spec §1.2、§7.5；
 // guild-economy-spec §1.1、§7.2。
 //
-// 形状与 mmorpg proto/guild/guild_db.proto 的 GuildRecord / GuildPlayerStateRecord / GuildMemberRecord / GuildApplicationRecord
-// （及 4.5 的 GuildPlayerOpSeqRecord / GuildAssetOpRecord / GuildDailyCounterRecord）逐字段相同（表名、列、字段号、主键、唯一键、二级索引、TiDB 选项），生成的 DDL 与 Go proto2mysql 逐字节相同
-// （store 包的 GuildTablesTest 拿同步来的 com.game.proto.guild.*Record 对拍）。但这是 Java 版自己的一份：
+// 形状与已移植基线的 GuildRecord / GuildPlayerStateRecord / GuildMemberRecord / GuildApplicationRecord
+// （及 4.5 的 GuildPlayerOpSeqRecord / GuildAssetOpRecord / GuildDailyCounterRecord）逐字段相同（表名、列、字段号、主键、唯一键、二级索引、TiDB 选项）。
+// store 包的 GuildTablesTest 拿同步来的 com.game.proto.guild.*Record 对拍；只排除 PARITY.md 已登记待做的自动放弃字段 last_send_ms = 29，
+// 该字段须随完整功能迁移并维护，见 guild-economy-spec §1.1。这是 Java 版自己的一份：
 // 同步来的那份是契约产物、不许手改，Java 的库表也不该随 mmorpg 漂移（先例 game-friend/src/main/proto/game/friend/friend_tables.proto）。
 //
 // 改表纪律（guild_db.proto:11-12）：字段只追加、字段号永不复用（删字段用 reserved 占住，pbmysql 按列注释 pb:N 识别字段）；

@@ -19,6 +19,7 @@ import com.game.login.account.AccountLogin;
 import com.game.login.dispatch.HandlerReply;
 import com.game.login.testing.InMemoryLoginDevices;
 import com.game.login.testing.InMemoryLoginTokens;
+import com.game.login.token.LoginTokens;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
 import com.game.proto.AccountSimplePlayer;
@@ -28,7 +29,11 @@ import com.game.table.LoginErrorTip;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
+@ExtendWith(OutputCaptureExtension.class)
 class LoginHandlerTest {
 
     static final String SECRET = "unit-test-shared-secret";
@@ -64,6 +69,22 @@ class LoginHandlerTest {
     private LoginResponse response(HandlerReply reply) throws Exception {
         assertThat(reply.body()).isPresent();
         return LoginResponse.parseFrom(reply.body().get().toByteString());
+    }
+
+    @Test
+    void 签令牌失败只记异常类型_不泄露新令牌(CapturedOutput output) throws Exception {
+        String marker = "synthetic-issued-credential-marker";
+        LoginTokens broken = mock(LoginTokens.class);
+        when(broken.issue(anyString(), anyString(), anyString()))
+                .thenThrow(new IllegalStateException("Redis key=" + marker));
+        when(store.listPlayers("robot_0001")).thenReturn(List.of());
+        LoginHandler failingIssuer = new LoginHandler(new AccountLogin(
+                LoginAuthenticator.withDevPassword(new DevPasswordRule(SECRET, List.of("robot_")), broken),
+                store, broken, devices));
+        LoginResponse result = response(failingIssuer.handle(SESSION, passwordLogin("robot_0001")).join());
+        assertThat(result.hasErrorMessage()).isFalse();
+        assertThat(result.getAccessToken()).isEmpty();
+        assertThat(output.getAll()).contains("IllegalStateException").doesNotContain(marker);
     }
 
     @Test

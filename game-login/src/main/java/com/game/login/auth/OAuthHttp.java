@@ -20,7 +20,10 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-/** 三方 OAuth 校验共用的 HTTP GET（JDK HttpClient，整个交换 5 s 总时限同基线、响应体上限 64 KiB）。线程安全。 */
+/**
+ * 三方 OAuth 校验共用的 HTTP GET（JDK HttpClient，整个交换 5 s 总时限同基线、响应体上限 64 KiB）。线程安全。
+ * 所有失败都抛 {@link AuthProviderUnavailableException}：到这一步还没轮到解析玩家凭证（同 mmorpg {@code oauthGet}）。
+ */
 final class OAuthHttp {
 
     static final Duration TIMEOUT = Duration.ofSeconds(5);
@@ -40,37 +43,48 @@ final class OAuthHttp {
     }
 
     /**
-     * GET base + path?query，返回响应体（不看状态码，同基线：业务错误在 JSON 里）。
-     * 抛出的异常一律只带异常类名：URI 的查询串里有 code / access_token / secret，JDK 的 URI / 请求构造异常会把整条 URI 写进消息。
+     * GET base + path?query，返回 2xx 的响应体。渠道的业务拒绝（code 无效等）以 200 + JSON 错误码返回；
+     * 非 2xx 只可能是网关 / 限流 / 渠道自身故障，应答体不读（同 mmorpg {@code oauthGet}）。
+     * 抛出的异常一律只带异常类名或状态码：URI 的查询串里有 code / access_token / secret，JDK 的 URI / 请求构造异常会把整条 URI 写进消息。
      */
     String get(String base, String path, Map<String, String> query) {
         StringJoiner joined = new StringJoiner("&");
         query.forEach((k, v) -> joined.add(URLEncoder.encode(k, StandardCharsets.UTF_8) + "="
                 + URLEncoder.encode(v, StandardCharsets.UTF_8)));
         CompletableFuture<HttpResponse<byte[]>> pending = null;
+        HttpResponse<byte[]> response;
         try {
             URI uri = URI.create(trimSlash(base) + path + "?" + joined);
             HttpRequest request = HttpRequest.newBuilder(uri).timeout(timeout).GET().build();
             // 整个交换（含读响应体）一个总时限，同 Go http.Client.Timeout：JDK 的请求超时只管到响应头，
             // 响应体读到一半卡住会把 login 工作线程一直挂着
-            pending = client.sendAsync(request, responseInfo -> new LimitedBody());
-            byte[] body = pending.get(timeout.toMillis(), TimeUnit.MILLISECONDS).body();
-            return new String(body, StandardCharsets.UTF_8);
+            pending = client.sendAsync(request, responseInfo -> isSuccess(responseInfo.statusCode())
+                    ? new LimitedBody()
+                    : HttpResponse.BodySubscribers.replacing(new byte[0]));
+            response = pending.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause() == null ? e : e.getCause();
-            throw new IllegalStateException("三方认证 HTTP 请求失败: " + cause.getClass().getSimpleName());
+            throw new AuthProviderUnavailableException("三方认证 HTTP 请求失败: " + cause.getClass().getSimpleName());
         } catch (TimeoutException | RuntimeException e) {
             if (pending != null) {
                 pending.cancel(true);
             }
-            throw new IllegalStateException("三方认证 HTTP 请求失败: " + e.getClass().getSimpleName());
+            throw new AuthProviderUnavailableException("三方认证 HTTP 请求失败: " + e.getClass().getSimpleName());
         } catch (InterruptedException e) {
             if (pending != null) {
                 pending.cancel(true);
             }
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("三方认证 HTTP 请求被中断");
+            throw new AuthProviderUnavailableException("三方认证 HTTP 请求被中断");
         }
+        if (!isSuccess(response.statusCode())) {
+            throw new AuthProviderUnavailableException("三方认证 HTTP 状态 " + response.statusCode());
+        }
+        return new String(response.body(), StandardCharsets.UTF_8);
+    }
+
+    private static boolean isSuccess(int status) {
+        return status >= 200 && status < 300;
     }
 
     /** 响应体最多 {@link #MAX_BODY_BYTES}，超出取消并按失败（三方应答是几百字节的 JSON）。非阻塞，跑在 HttpClient 自己的线程上。 */
@@ -120,10 +134,11 @@ final class OAuthHttp {
     }
 
     /**
-     * 启动时校验三方接口地址：http / https、有主机名（docker 服务名带下划线时 JDK 解析不出主机，请求必然失败）。
+     * 启动时校验三方接口地址：https（{@code allowHttp} 时也接受 http，只给 dev 模式的本地假服务）、有主机名
+     * （docker 服务名带下划线时 JDK 解析不出主机，请求必然失败）。生产只接受 https：这个地址上的请求带着 AppSecret / access_token。
      * 报错不回显地址本身（可能带凭据）。
      */
-    static String requireEndpoint(String endpoint, String what) {
+    static String requireEndpoint(String endpoint, String what, boolean allowHttp) {
         URI uri;
         try {
             uri = URI.create(trimSlash(endpoint));
@@ -131,10 +146,14 @@ final class OAuthHttp {
             throw new IllegalArgumentException(what + " 地址不是合法 URI");
         }
         String scheme = uri.getScheme();
-        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))
-                || uri.getHost() == null || uri.getRawQuery() != null || uri.getRawFragment() != null
+        boolean schemeAllowed = scheme != null
+                && (scheme.equalsIgnoreCase("https") || (allowHttp && scheme.equalsIgnoreCase("http")));
+        if (!schemeAllowed) {
+            throw new IllegalArgumentException(what + " 地址只接受 https://" + (allowHttp ? " 或 http://" : "（http:// 只在 game.login.mode=dev 放行）"));
+        }
+        if (uri.getHost() == null || uri.getRawQuery() != null || uri.getRawFragment() != null
                 || uri.getRawUserInfo() != null) {
-            throw new IllegalArgumentException(what + " 地址须是 http(s)://主机[:端口][/路径]（主机名不能含下划线，不带查询串与用户信息）");
+            throw new IllegalArgumentException(what + " 地址须是 scheme://主机[:端口][/路径]（主机名不能含下划线，不带查询串与用户信息）");
         }
         return endpoint;
     }

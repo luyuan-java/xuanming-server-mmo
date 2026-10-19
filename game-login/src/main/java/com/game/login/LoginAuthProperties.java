@@ -68,17 +68,34 @@ public record LoginAuthProperties(PasswordAuth password, SaToken satoken, WeChat
     }
 
     /**
-     * @param appId    微信开放平台应用号
-     * @param endpoint 空 = 生产地址（https://api.weixin.qq.com）；可指向本地假服务
+     * @param appId          微信开放平台应用号
+     * @param endpoint       空 = 生产地址（https://api.weixin.qq.com）；可指向本地假服务（http 只在 {@code game.login.mode=dev} 放行）
+     * @param requireUnionId 缺省 true：微信没返回 unionid 就拒绝登录（故障码），不回落 openid（同 mmorpg {@code RequireUnionId}）。
+     *                       openid 按应用区分，回落后同一玩家在第二个应用里会变成另一个账号且无法合并
      */
-    public record WeChat(String appId, String endpoint) {
+    public record WeChat(String appId, String endpoint, Boolean requireUnionId) {
+
+        public WeChat {
+            requireUnionId = requireUnionId == null || requireUnionId;
+        }
     }
 
     /**
-     * @param appId    QQ 互联应用号（校验应答的 client_id）
-     * @param endpoint 空 = 生产地址（https://graph.qq.com）
+     * @param appId          QQ 互联应用号（校验应答的 client_id）
+     * @param endpoint       空 = 生产地址（https://graph.qq.com）
+     * @param requestUnionId 缺省 true：请求时带 unionid=1（应用须已申请 unionid 权限）
+     * @param requireUnionId 缺省 true，语义同 {@link WeChat#requireUnionId()}；request-union-id=false 时必须显式写 false，否则拒绝启动
      */
-    public record Qq(String appId, String endpoint) {
+    public record Qq(String appId, String endpoint, Boolean requestUnionId, Boolean requireUnionId) {
+
+        public Qq {
+            requestUnionId = requestUnionId == null || requestUnionId;
+            requireUnionId = requireUnionId == null || requireUnionId;
+            if (requireUnionId && !requestUnionId) {
+                throw new IllegalArgumentException(
+                        "game.login.auth.qq.request-union-id=false 时永远拿不到 unionid，require-union-id 必须同时显式写 false");
+            }
+        }
     }
 
     /** @param enabled 注册网易占位（恒失败，同基线） */

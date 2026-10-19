@@ -29,7 +29,13 @@ import org.redisson.client.RedisTimeoutException;
 /** 三方认证：微信 / QQ 对着本地假服务（同基线 sandbox_mock 的线上格式），Sa-Token 对着替身 Redis，网易占位。 */
 class ExternalAuthProvidersTest {
 
+    /** 本地假服务是 http，测试按 dev 模式放行；unionid 策略取生产缺省（要求 unionid）。 */
+    private static final OAuthPolicy LOCAL = new OAuthPolicy(true, true, true);
+    /** 显式允许回落 openid。 */
+    private static final OAuthPolicy LOCAL_OPENID_FALLBACK = new OAuthPolicy(false, true, true);
+
     private HttpServer server;
+    private volatile int status = 200;
     private String endpoint;
     private final List<Map<String, String>> requests = new ArrayList<>();
     private volatile String wechatBody;
@@ -59,55 +65,98 @@ class ExternalAuthProvidersTest {
             requests.add(query);
         }
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        exchange.sendResponseHeaders(200, bytes.length);
+        exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
     }
 
     @Test
-    void 微信_用code换openid_unionid优先_请求参数同基线() {
-        WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", endpoint);
+    void 微信_用code换unionid_请求参数同基线() {
+        WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", endpoint, LOCAL);
         wechatBody = "{\"access_token\":\"t\",\"openid\":\"o1\",\"unionid\":\"u1\"}";
         assertThat(wechat.authenticate("code&1")).contains("wx_u1");
         assertThat(requests.get(0)).containsEntry("appid", "wx_app").containsEntry("secret", "app-secret")
                 .containsEntry("code", "code&1").containsEntry("grant_type", "authorization_code");
+    }
+
+    @Test
+    void 微信_缺unionid缺省拒绝_显式允许才回落openid() {
         wechatBody = "{\"openid\":\"o2\"}";
-        assertThat(wechat.authenticate("c")).contains("wx_o2");
+        WeChatProvider strict = new WeChatProvider("wx_app", "app-secret", endpoint, LOCAL);
+        assertThatThrownBy(() -> strict.authenticate("c")).isInstanceOf(AuthProviderUnavailableException.class);
+        WeChatProvider fallback = new WeChatProvider("wx_app", "app-secret", endpoint, LOCAL_OPENID_FALLBACK);
+        assertThat(fallback.authenticate("c")).contains("wx_o2");
     }
 
     @Test
-    void 微信_errcode非0_openid为空_坏JSON_空code都失败() {
-        WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", endpoint);
-        wechatBody = "{\"errcode\":40029,\"errmsg\":\"invalid code\"}";
-        assertThat(wechat.authenticate("EXPIRED")).isEmpty();
-        wechatBody = "{\"openid\":\"\"}";
-        assertThat(wechat.authenticate("c")).isEmpty();
-        wechatBody = "not json";
-        assertThat(wechat.authenticate("c")).isEmpty();
+    void 微信_玩家侧errcode与空code返回空_渠道侧errcode坏应答抛渠道故障() {
+        WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", endpoint, LOCAL);
+        for (int playerSide : new int[]{40029, 40163, 42003}) {
+            wechatBody = "{\"errcode\":" + playerSide + ",\"errmsg\":\"x\"}";
+            assertThat(wechat.authenticate("EXPIRED")).as("errcode=" + playerSide).isEmpty();
+        }
         assertThat(wechat.authenticate("")).isEmpty();
-        assertThatThrownBy(() -> new WeChatProvider("wx_app", " ", endpoint)).isInstanceOf(IllegalArgumentException.class);
+        for (int providerSide : new int[]{-1, 40001, 40013, 40125, 40164, 41002, 41004, 45009, 45011}) {
+            wechatBody = "{\"errcode\":" + providerSide + ",\"errmsg\":\"x\"}";
+            assertThatThrownBy(() -> wechat.authenticate("c")).as("errcode=" + providerSide)
+                    .isInstanceOf(AuthProviderUnavailableException.class).hasMessageContaining(String.valueOf(providerSide));
+        }
+        for (String shapeBroken : new String[]{"{\"openid\":\"\"}", "not json", "[1,2]"}) {
+            wechatBody = shapeBroken;
+            assertThatThrownBy(() -> wechat.authenticate("c")).as(shapeBroken)
+                    .isInstanceOf(AuthProviderUnavailableException.class);
+        }
+        assertThatThrownBy(() -> new WeChatProvider("wx_app", " ", endpoint, LOCAL))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new WeChatProvider("wx_app", "app-secret\n", endpoint, LOCAL))
+                .as("Secret 带进的换行").isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    void QQ_用access_token取openid_剥JSONP_client_id必须是本应用() {
-        QqProvider qq = new QqProvider("100000001", endpoint);
+    void 渠道非2xx抛渠道故障_不读应答体() {
+        WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", endpoint, LOCAL);
+        QqProvider qq = new QqProvider("100000001", endpoint, LOCAL);
+        status = 502;
+        wechatBody = "{\"openid\":\"o1\",\"unionid\":\"u1\"}";
+        qqBody = "{\"client_id\":\"100000001\",\"openid\":\"o1\",\"unionid\":\"u1\"}";
+        assertThatThrownBy(() -> wechat.authenticate("c")).isInstanceOf(AuthProviderUnavailableException.class)
+                .hasMessageContaining("502");
+        assertThatThrownBy(() -> qq.authenticate("t")).isInstanceOf(AuthProviderUnavailableException.class);
+    }
+
+    @Test
+    void QQ_用access_token取unionid_剥JSONP_client_id必须是本应用() {
+        QqProvider qq = new QqProvider("100000001", endpoint, LOCAL);
         qqBody = "callback( {\"client_id\":\"100000001\",\"openid\":\"o1\",\"unionid\":\"u1\"} );";
         assertThat(qq.authenticate("tok")).contains("qq_u1");
         assertThat(requests.get(0)).containsEntry("access_token", "tok").containsEntry("unionid", "1")
                 .containsEntry("fmt", "json");
-        qqBody = "{\"client_id\":\"100000001\",\"openid\":\"o2\"}";
-        assertThat(qq.authenticate("tok")).contains("qq_o2");
-        qqBody = "{\"client_id\":\"999\",\"openid\":\"o2\"}";
-        assertThat(qq.authenticate("tok")).as("别的应用签的令牌").isEmpty();
+        qqBody = "{\"client_id\":\"999\",\"openid\":\"o2\",\"unionid\":\"u2\"}";
+        assertThat(qq.authenticate("tok")).as("别的应用签的令牌：凭证无效，不是渠道故障").isEmpty();
         qqBody = "{\"error\":100016,\"error_description\":\"access token check failed\"}";
         assertThat(qq.authenticate("INVALID")).isEmpty();
+        qqBody = "{\"client_id\":\"100000001\",\"unionid\":\"u2\"}";
+        assertThatThrownBy(() -> qq.authenticate("tok")).as("error=0 却没有 openid")
+                .isInstanceOf(AuthProviderUnavailableException.class);
     }
 
     @Test
-    void 三方服务不可达抛异常_不带查询串() {
-        WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", "http://127.0.0.1:1");
-        assertThatThrownBy(() -> wechat.authenticate("code")).isInstanceOf(IllegalStateException.class)
+    void QQ_缺unionid缺省拒绝_不请求unionid时必须显式允许回落() {
+        qqBody = "{\"client_id\":\"100000001\",\"openid\":\"o2\"}";
+        QqProvider strict = new QqProvider("100000001", endpoint, LOCAL);
+        assertThatThrownBy(() -> strict.authenticate("tok")).isInstanceOf(AuthProviderUnavailableException.class);
+
+        QqProvider noUnionId = new QqProvider("100000001", endpoint, new OAuthPolicy(false, false, true));
+        assertThat(noUnionId.authenticate("tok")).contains("qq_o2");
+        assertThat(requests.get(requests.size() - 1)).doesNotContainKey("unionid").containsEntry("fmt", "json");
+        assertThatThrownBy(() -> new OAuthPolicy(true, false, true)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 三方服务不可达抛渠道故障_不带查询串() {
+        WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", "http://127.0.0.1:1", LOCAL);
+        assertThatThrownBy(() -> wechat.authenticate("code")).isInstanceOf(AuthProviderUnavailableException.class)
                 .hasMessageNotContaining("app-secret").hasMessageNotContaining("code=");
     }
 

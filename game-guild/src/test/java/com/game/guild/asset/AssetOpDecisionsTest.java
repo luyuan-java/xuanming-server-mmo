@@ -300,7 +300,7 @@ class AssetOpDecisionsTest {
         assertThat(List.of(AssetOpAction.values()).stream().map(AssetOpAction::label))
                 .containsExactly("finalize", "await_durable", "retry", "alert");
         assertThat(List.of(AssetRpc.values()).stream().map(AssetRpc::wireName))
-                .containsExactly("debit", "abort_debit", "credit");
+                .containsExactly("debit", "abort_debit", "credit", "ack_receipt");
         assertThat(List.of(DeliveryOrigin.values())).containsExactly(DeliveryOrigin.SYNC, DeliveryOrigin.LOOP,
                 DeliveryOrigin.MANUAL);
     }

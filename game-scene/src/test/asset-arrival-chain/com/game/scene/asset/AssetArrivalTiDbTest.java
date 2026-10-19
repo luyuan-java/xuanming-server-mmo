@@ -85,7 +85,7 @@ class AssetArrivalTiDbTest {
     void start() throws Exception {
         base = System.getenv("GAME_ASSET_ARRIVAL_TEST_JDBC");
         assertThat(base).as("显式整链 profile 必须配置本机 TiDB，缺失失败而非跳过")
-                .matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):4000/?");
+                .matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?");
         base = base.replaceAll("/$", "");
         database = "asset_arrival_it_" + UUID.randomUUID().toString().replace("-", "");
         Class.forName("com.mysql.cj.jdbc.Driver");
@@ -212,6 +212,10 @@ class AssetArrivalTiDbTest {
     }
 
     private long handOff(long player) throws Exception {
+        return handOff(player, false);
+    }
+
+    private long handOff(long player, boolean discardOldInstance) throws Exception {
         var row = players.findPlayer(player).orElseThrow();
         long oldEpoch = row.getOwnerEpoch();
         var oldState = players.loadState(player);
@@ -221,6 +225,9 @@ class AssetArrivalTiDbTest {
         assertThat(players.saveStateHeld(row, PlayerState.getDefaultInstance()))
                 .as("旧 owner 的迟到写不能抹去已入库资产与账本").isFalse();
         assertThat(players.loadState(player)).isEqualTo(oldState);
+        if (discardOldInstance) {
+            onLogic(() -> { world.onOwnershipLost(List.of(new OwnedPlayer(player, oldEpoch))); return null; });
+        }
         enter(player, oldEpoch + 1, (int) (player + oldEpoch + 100));
         return oldEpoch + 1;
     }
@@ -348,6 +355,66 @@ class AssetArrivalTiDbTest {
     }
 
     @Test
+    void 旧实例的ACK存盘延迟到换主之后_拒绝旧写_新主重投只释放快照不丢身份() throws Exception {
+        var debit = AssetOpRequest.newBuilder().setPlayerId(SELLER).setStream(AssetStream.ASSET_STREAM_TRADE_DEBIT)
+                .setStreamEpoch(29).setSeq(1).setCorrelationId(29001).setTxType(3)
+                .setBundle(AssetBundle.newBuilder().addItemUuids(700)).build();
+        assertThat(tradeCall(AssetRpc.DEBIT, debit).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        await().atMost(Duration.ofSeconds(8)).untilAsserted(() -> {
+            var receipt = storedReceipt(debit);
+            assertThat(receipt).isNotNull();
+            assertThat(receipt.getSnapshotProto()).isNotEmpty();
+        });
+        await().atMost(Duration.ofSeconds(8)).untilAsserted(() ->
+                assertThat(tradeCall(AssetRpc.DEBIT, debit).getDurable()).isTrue());
+        var retained = storedReceipt(debit);
+        var oldRow = players.findPlayer(SELLER).orElseThrow();
+        var oldState = players.loadState(SELLER);
+        storage.holdNext();
+        assertThat(tradeCall(AssetRpc.ACK_RECEIPT, debit).getDurable()).isFalse();
+        storage.awaitHeld();
+
+        // SQL 里的完整回执尚未被 ACK 裁剪；新 owner 从真实提交状态接手。
+        assertThat(handOff(SELLER, true)).isEqualTo(2);
+        var loadedReceipt = onLogic(() -> world.playerById(SELLER).assetLedger().receipt(3, 29, 1));
+        assertThat(loadedReceipt).isEqualTo(retained);
+        assertThat(storedReceipt(debit)).isEqualTo(retained);
+        storage.releaseHeld();
+        storage.awaitReleased();
+        long liveEpoch = onLogic(() -> world.playerById(SELLER).ownerEpoch());
+        assertThat(liveEpoch).isEqualTo(2);
+        assertThat(players.findPlayer(SELLER).orElseThrow().getOwnerEpoch()).isEqualTo(2);
+        assertThat(storedReceipt(debit)).isEqualTo(retained);
+        assertThat(players.saveStateHeld(oldRow, oldState)).as("复活旧实例不能把 ACK 前的快照盖回去").isFalse();
+
+        var changed = debit.toBuilder().setCorrelationId(29002).build();
+        assertThat(tradeCall(AssetRpc.ACK_RECEIPT, changed).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_UNKNOWN);
+        assertThat(storedReceipt(debit)).isEqualTo(retained);
+        assertThat(tradeCall(AssetRpc.ACK_RECEIPT, debit).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        await().atMost(Duration.ofSeconds(8)).untilAsserted(() -> assertThat(storedReceipt(debit).getSnapshotProto()).isEmpty());
+        var after = storedReceipt(debit);
+        assertThat(after.getRequestDigest()).isEqualTo(retained.getRequestDigest());
+        assertThat(after.getCorrelationId()).isEqualTo(retained.getCorrelationId());
+        await().atMost(Duration.ofSeconds(8)).untilAsserted(() ->
+                assertThat(tradeCall(AssetRpc.ACK_RECEIPT, debit).getDurable()).isTrue());
+        assertThat(tradeCall(AssetRpc.DEBIT, debit).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(players.loadState(SELLER).getBag().getItemsCount()).isZero();
+        assertThat(players.loadState(SELLER).getCurrency()).isEqualTo(oldState.getCurrency());
+    }
+
+    private AssetOpResponse tradeCall(AssetRpc rpc, AssetOpRequest request) throws Exception {
+        return endpoint.submit(rpc, AssetOpSignatures.sign(rpc, request, "trade", SECRET, System.currentTimeMillis()))
+                .get(5, TimeUnit.SECONDS);
+    }
+
+    private AssetOpReceiptState storedReceipt(AssetOpRequest request) {
+        var loaded = proof.read(request.getPlayerId());
+        assertThat(loaded).isInstanceOf(PersistedAssetLedgerReader.Read.Loaded.class);
+        return ((PersistedAssetLedgerReader.Read.Loaded) loaded).ledger()
+                .receipt(request.getStreamValue(), request.getStreamEpoch(), request.getSeq());
+    }
+
+    @Test
     void 被改成副本读的物理连接不得出具SQL资产证明() throws Exception {
         try (var poisoned = new DruidDataSource()) {
             poisoned.setUrl(pool.getUrl()); poisoned.setUsername("root"); poisoned.setPassword("");
@@ -380,6 +447,10 @@ class AssetArrivalTiDbTest {
             assertThat(database).matches("asset_arrival_it_[0-9a-f]{32}");
             try (var c = DriverManager.getConnection(base + "/", "root", ""); var s = c.createStatement()) {
                 s.execute("DROP DATABASE " + database);
+                try (var query = c.prepareStatement("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?")) {
+                    query.setString(1, database);
+                    try (var rows = query.executeQuery()) { assertThat(rows.next()).isTrue(); assertThat(rows.getInt(1)).isZero(); }
+                }
             }
             System.out.println("测试随机库清理=" + database);
         }
@@ -391,11 +462,16 @@ class AssetArrivalTiDbTest {
         private final AtomicBoolean next = new AtomicBoolean();
         private final AtomicReference<Runnable> held = new AtomicReference<>();
         private final CountDownLatch captured = new CountDownLatch(1);
+        private final CompletableFuture<Void> completed = new CompletableFuture<>();
         void holdNext() { next.set(true); }
         void awaitHeld() throws InterruptedException { assertThat(captured.await(5, TimeUnit.SECONDS)).isTrue(); }
         void releaseHeld() { var task = held.getAndSet(null); if (task != null) delegate.execute(task); }
+        void awaitReleased() throws Exception { completed.get(8, TimeUnit.SECONDS); }
         @Override public void execute(Runnable command) {
-            if (next.compareAndSet(true, false)) { held.set(command); captured.countDown(); }
+            if (next.compareAndSet(true, false)) {
+                held.set(() -> { try { command.run(); } finally { completed.complete(null); } });
+                captured.countDown();
+            }
             else delegate.execute(command);
         }
         @Override public void shutdown() { delegate.shutdown(); }

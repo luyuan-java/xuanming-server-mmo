@@ -57,6 +57,20 @@ public interface PlayerMapper {
             """)
     int claimOwnerEpoch(@Param("playerId") long playerId, @Param("now") long now, @Param("leaseUntil") long leaseUntil);
 
+    /**
+     * 历史恢复专用：调用方已在同一事务 FOR UPDATE 锁住玩家，并由独立审核上界选定严格更大的新纪元。
+     * 仍在提交语句里复核原纪元与释放/过期条件；只改归属元数据，不触碰玩家资产或其 saved_epoch。
+     */
+    @Update("""
+            UPDATE player
+               SET owner_epoch = #{nextEpoch}, owner_released = 0, owner_lease_until = #{leaseUntil}, updated_at = #{now}
+             WHERE player_id = #{playerId} AND owner_epoch = #{expectedEpoch}
+               AND (owner_released = 1 OR owner_lease_until < #{now})
+            """)
+    int recoverOwnerEpoch(@Param("playerId") long playerId, @Param("expectedEpoch") long expectedEpoch,
+                          @Param("nextEpoch") long nextEpoch, @Param("now") long now,
+                          @Param("leaseUntil") long leaseUntil);
+
     @Select("SELECT owner_epoch FROM player WHERE player_id = #{playerId}")
     Long selectOwnerEpoch(@Param("playerId") long playerId);
 

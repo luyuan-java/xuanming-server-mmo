@@ -17,7 +17,12 @@ generated/code/proto/{tip,operator} ─┘                    │ protoc（game-
                                                  com.game.table.ConfigTables、<Sheet>Rows（target/generated-sources）
 generated/tables/*.pb + manifest.json ── ContractSync ─▶ config-data/tables/ ──▶ ConfigTables.load(dir)（运行时）
 cpp/generated/table/code/constants/*.h ─ ContractSync ─▶ com.game.table.TableConstants（具名行 id）
+generated/code/java/tip/TipFaults.java ─ ContractSync ─▶ com.game.table.tip.TipFaults（Tip.xlsx 的 fault 列，原样复制）
 ```
+
+- **tip 故障码表**（2026-10-18）：「哪个 tip 码是服务端内部故障」只认 mmorpg `Tip.xlsx` 的 `fault` 列，导表器生成只依赖 JDK 的
+  `TipFaults`，同步时核对码名 / 码值与同批 tip proto 一致。game-gateway 据此把 login 的 in-band 故障码回 500（其余仍 401），
+  不许在服务里手写故障码集合（mmorpg `docs/design/tip-code-axis.md` §2.9 / §2.10）。
 
 - **schema 取权威版本**：`data/schema/*_table.proto` 用 `cfg_*` option 写明了主键、二级键、多值键、索引、外键；
   导表器产出的 `generated/code/proto/*_table.proto` 是去掉这些 option 的副本，信息不全。

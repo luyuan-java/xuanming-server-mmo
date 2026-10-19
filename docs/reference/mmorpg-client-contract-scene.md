@@ -325,3 +325,12 @@ robot 不处理的推送 id 只会产生 `Unhandled message` 日志，包括 66�
 - [ ] 对 84 回 `ReleaseSkillResponse`（error_message 字段总在）；可选地广播 70 `SkillUsedS2C`。对 63 回 `EnterSceneC2SResponse`，拒绝码用 3004/3005/3008/3014/3023。robot 不等这两个应答，但也不能因此断连或崩溃。
 - [ ] proto 全名用裸名（没有 package），字段编号严格按本文和 `proto/` 原文件。
 - [ ] 时延：79 要在 EnterGame 之后 60s 内到达（最好是亚秒级）；77 的应答要在 5s 内。
+## ECS 第 6 批源码口径（2026-10-18，验证待执行）
+
+本批普通 Java 源码已落码，未编译、未测试，未跑 ContractSync 或 --check。以下为源码口径，尚无本批红绿、协议校验或跨节点冒烟通过结论。
+
+- 私有场景 `creators` 只记录创建信息，不是准入名单；同 zone 知道 scene_id 的非创建者可按号加入，组队跟入与去重复用也不因 creators 拒绝。场景存在、身份和会话归属校验仍按各自入口执行，79 保留创建时 creators。Java 没有新增末端 creators 准入；跨节点行为仍待实际验证。
+- 21/47/51、70 与 84 中的 actor 目标使用不透明网络 actor 号；66 的 entity_id 仍为 player_id，边界见 AOI 文档本批补充。
+- 拒绝码属于本次 response；成功按 tip.id == 0 判断，不依赖 error_message 是否存在。旧基线的 TLS tip 覆盖或恒物化空 tip 描述不能作为当前源码规则。
+- `cooldown_id == 0` 表示无冷却组。Java 已在 `PlayerSkillState.startCooldown` 唯一写入口对 0 早返回；两条经既有 84 处理链的测试源已新增，正常组与相位规则保留。测试尚未执行，未取得修前红或修后绿。
+- C++ 当前源码已接必要的按需技能上下文、实时伤害与 Buff 步骤；Java 尚未接入实时伤害、效果 Buff 与沉默的生产写入口。本批修零组写入与过时注释；同场景目标、冻结及 Java 84 ALLOW 的现存差异继续保留，不能写成两版实时效果已对齐。

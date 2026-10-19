@@ -1027,7 +1027,15 @@ public final class SceneWorld {
                     Long.toUnsignedString(player.playerId()), sw.token(), result);
             return;
         }
+        // RPC 结果先排入逻辑队列，调用层超时不能覆盖这段排队；认领旧槽后仍须复核同一截止时间。
+        boolean expired = clock.nanoTime() - sw.deadlineNanos() >= 0;
         player.setSwitching(null);
+        if (expired) {
+            metrics.mirrorResolve(MirrorResolve.STALE);
+            log.info("镜像取号结果处理时已过截止时间，作废这次在途、丢弃结果 player={} token={}",
+                    Long.toUnsignedString(player.playerId()), sw.token());
+            return;
+        }
         switch (result) {
             case InstanceIds.Result.Failed failed -> {
                 metrics.mirrorResolve(MirrorResolve.ERROR);
@@ -1082,6 +1090,10 @@ public final class SceneWorld {
 
     /** 号回来时复核（D6）：玩家仍在源频道、源仍是承载中的主世界频道、节点仍接客、没到上限；不满足的原因，满足为 null。 */
     private String mirrorSourceMoved(ScenePlayer player, long sourceSceneId) {
+        if (player.inBattle()) {
+            // 迟到确认可在取号期间按权威战斗锁恢复冻结，不能因镜像成功再把玩家换走。
+            return "玩家已进入回合制战斗";
+        }
         Scene current = player.scene();
         if (current.sceneId() != sourceSceneId) {
             return "玩家已不在源场景（被排空改派走了？）";
@@ -1563,6 +1575,7 @@ public final class SceneWorld {
                     Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(target.sceneId()));
             return;
         }
+        PlayerSwitch previousSwitch = player.switching();
         List<ScenePlayer> oldWatchers = from.remove(player);
         noteOccupancy(from);
         publishPopulation(from.configId());
@@ -1573,6 +1586,11 @@ public final class SceneWorld {
         player.stopMotion();
         player.moveGuard().reset(at, clock.nanoTime());
         enterScene(player, target);
+        if (previousSwitch != null && previousSwitch.purpose() == PlayerSwitch.Purpose.MIRROR_CREATE
+                && player.switching() == previousSwitch) {
+            // 权威落点已提交：旧镜像取号永久作废，后来回到源频道也不能复活；普通换图槽由各自的完成路径收口。
+            player.setSwitching(null);
+        }
         locations.entered(player);
         log.info("玩家换场景 player={} {} -> {}", Long.toUnsignedString(player.playerId()),
                 Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(target.sceneId()));

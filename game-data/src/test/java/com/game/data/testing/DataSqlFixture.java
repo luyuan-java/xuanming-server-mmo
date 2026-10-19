@@ -1,5 +1,6 @@
 package com.game.data.testing;
 
+import com.alibaba.druid.pool.DruidDataSource;
 import com.game.data.ops.OpsJobStore;
 import com.game.data.ops.OpsTables;
 import com.game.data.ops.fence.StrictClock;
@@ -11,7 +12,9 @@ import com.game.data.store.PlayerSnapshotMapper;
 import com.game.data.store.TransactionLogMapper;
 import com.game.pbmysql.PbMysql;
 import com.game.pbmysql.TableSchema;
+import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -67,8 +70,8 @@ public final class DataSqlFixture implements AutoCloseable {
     }
 
     /**
-     * 与生产同口径的 {@link PlayerStore}（严格递增时钟、同一事务管理器）。不经 Spring 代理：game-data 的调用方一律在自己的事务模板里调它
-     * （夺权、写档），{@code @Transactional} 不生效也不影响原子性。
+     * 与生产同口径的 {@link PlayerStore}（严格递增时钟、同一事务管理器）。不经 Spring 代理：普通写档由调用方事务包裹，
+     * 带时限夺权与历史恢复则使用 PlayerStore 自有事务，不能套外层事务；测试不依赖 {@code @Transactional} 代理。
      */
     public PlayerStore playerStore(LongSupplier clockMs) {
         return new PlayerStore(playerMapper, new StrictClock(clockMs), transactionManager);
@@ -79,9 +82,26 @@ public final class DataSqlFixture implements AutoCloseable {
     }
 
     public static DataSqlFixture create() throws Exception {
+        boolean strictTiDb = Boolean.getBoolean("game.it.require-tidb");
+        if (strictTiDb && (MYSQL_URL == null || !MYSQL_URL.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?"))) {
+            throw new IllegalStateException("显式强 TiDB 回归必须配置本会话本机测试端口，不能回退到 H2/MySQL");
+        }
         String database = "game_data_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         DataSource ds;
-        if (mysql()) {
+        if (strictTiDb) {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+            try (var c = strictAdmin(); var s = c.createStatement()) { s.execute("CREATE DATABASE " + database); }
+            System.out.println("强 TiDB 随机库创建=" + database);
+            var pool = new DruidDataSource();
+            pool.setUrl(MYSQL_URL.replaceAll("/$", "") + "/" + database
+                    + "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true&connectTimeout=3000&socketTimeout=10000");
+            pool.setUsername(MYSQL_USER);
+            pool.setPassword(MYSQL_PASSWORD);
+            pool.setMaxActive(4);
+            pool.setMaxWait(1000);
+            new StrongTiDbConnectionPolicy("运维恢复集成", true).postProcessBeforeInitialization(pool, "fixture");
+            ds = pool;
+        } else if (mysql()) {
             ds = new DriverManagerDataSource(MYSQL_URL + "/" + database
                     + "?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true",
                     MYSQL_USER, MYSQL_PASSWORD);
@@ -90,30 +110,61 @@ public final class DataSqlFixture implements AutoCloseable {
             h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
             ds = h2;
         }
-        new ResourceDatabasePopulator(new ClassPathResource("db/game-data-schema.sql"),
-                new ClassPathResource("db/game-player-schema.sql")).execute(ds);
-        PbMysql ops;
-        if (mysql()) {
-            ops = OpsTables.sync(ds, Duration.ofMinutes(1));
-        } else {
-            ops = OpsTables.registry();
-            try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
-                for (TableSchema t : ops.tables()) {
-                    st.execute(h2Ddl(t.createTableSql()));
+        try {
+            if (strictTiDb) {
+                ((DruidDataSource) ds).init();
+                try (var c = ds.getConnection()) { StrongTiDbConnectionPolicy.verify(c, true); }
+            }
+            new ResourceDatabasePopulator(new ClassPathResource("db/game-data-schema.sql"),
+                    new ClassPathResource("db/game-player-schema.sql")).execute(ds);
+            PbMysql ops;
+            if (mysql()) {
+                ops = OpsTables.sync(ds, Duration.ofMinutes(1));
+            } else {
+                ops = OpsTables.registry();
+                try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+                    for (TableSchema t : ops.tables()) {
+                        st.execute(h2Ddl(t.createTableSql()));
+                    }
+                }
+            }
+            SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
+            factory.setDataSource(ds);
+            org.apache.ibatis.session.Configuration configuration = new org.apache.ibatis.session.Configuration();
+            configuration.setMapUnderscoreToCamelCase(true);
+            configuration.addMapper(TransactionLogMapper.class);
+            configuration.addMapper(PlayerSnapshotMapper.class);
+            configuration.addMapper(PersistedPlayerMapper.class);
+            configuration.addMapper(PlayerMapper.class);
+            factory.setConfiguration(configuration);
+            SqlSessionFactory sessions = factory.getObject();
+            return new DataSqlFixture(database, ds, new DataSourceTransactionManager(ds), new SqlSessionTemplate(sessions), ops);
+        } catch (Exception e) {
+            if (strictTiDb) {
+                ((DruidDataSource) ds).close();
+                try { dropStrictDatabase(database); } catch (SQLException cleanup) { e.addSuppressed(cleanup); }
+            }
+            throw e;
+        }
+    }
+
+    private static Connection strictAdmin() throws SQLException {
+        return DriverManager.getConnection(MYSQL_URL.replaceAll("/$", "")
+                + "/?connectTimeout=3000&socketTimeout=10000", MYSQL_USER, MYSQL_PASSWORD);
+    }
+
+    private static void dropStrictDatabase(String database) throws SQLException {
+        if (!database.matches("game_data_it_[0-9a-f]{12}")) throw new SQLException("拒绝清理非本次夹具库名");
+        try (var c = strictAdmin(); var s = c.createStatement()) {
+            s.execute("DROP DATABASE " + database);
+            try (var check = c.prepareStatement("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?")) {
+                check.setString(1, database);
+                try (var rows = check.executeQuery()) {
+                    if (!rows.next() || rows.getInt(1) != 0) throw new SQLException("随机库清理后仍存在");
                 }
             }
         }
-        SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
-        factory.setDataSource(ds);
-        org.apache.ibatis.session.Configuration configuration = new org.apache.ibatis.session.Configuration();
-        configuration.setMapUnderscoreToCamelCase(true);
-        configuration.addMapper(TransactionLogMapper.class);
-        configuration.addMapper(PlayerSnapshotMapper.class);
-        configuration.addMapper(PersistedPlayerMapper.class);
-        configuration.addMapper(PlayerMapper.class);
-        factory.setConfiguration(configuration);
-        SqlSessionFactory sessions = factory.getObject();
-        return new DataSqlFixture(database, ds, new DataSourceTransactionManager(ds), new SqlSessionTemplate(sessions), ops);
+        System.out.println("强 TiDB 随机库清理并复核0=" + database);
     }
 
     /** pbmysql 的 MySQL DDL → H2 MySQL 模式能执行的形式（只去掉键列的字符集 / 排序规则与表尾选项）。 */
@@ -157,7 +208,10 @@ public final class DataSqlFixture implements AutoCloseable {
 
     @Override
     public void close() throws SQLException {
-        if (mysql()) {
+        if (dataSource instanceof DruidDataSource pool && Boolean.getBoolean("game.it.require-tidb")) {
+            pool.close();
+            dropStrictDatabase(database);
+        } else if (mysql()) {
             new JdbcTemplate(dataSource).execute("DROP DATABASE IF EXISTS " + database);
         } else {
             try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {

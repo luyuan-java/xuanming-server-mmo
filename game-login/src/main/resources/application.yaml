@@ -122,10 +122,13 @@ game:
     #     login-type: login
     #   wechat:                   # app secret 取环境变量 GAME_WECHAT_APP_SECRET
     #     app-id: wx...
-    #     endpoint: ""            # 空 = https://api.weixin.qq.com；可指向本地假服务
+    #     endpoint: ""            # 空 = https://api.weixin.qq.com；可指向本地假服务（http 只在 mode=dev 放行）
+    #     require-union-id: true  # 缺省 true：没返回 unionid 就拒绝登录（故障码），不回落 openid
     #   qq:
     #     app-id: "100000001"
     #     endpoint: ""            # 空 = https://graph.qq.com
+    #     request-union-id: true  # 缺省 true：请求带 unionid=1；写 false 时 require-union-id 也必须写 false
+    #     require-union-id: true
     #   netease:
     #     enabled: true           # 占位，恒失败（同基线）
 

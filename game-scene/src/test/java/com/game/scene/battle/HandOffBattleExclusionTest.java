@@ -21,9 +21,11 @@ import com.game.discovery.battle.BattleRedis;
 import com.game.proto.AllocateAttributePointsRequest;
 import com.game.proto.AllocateAttributePointsResponse;
 import com.game.proto.BattleSettlementData;
+import com.game.proto.EnterSceneC2SRequest;
 import com.game.proto.EnterSceneC2SResponse;
 import com.game.proto.MessageContent;
 import com.game.proto.PrepareBattleResponse;
+import com.game.proto.SceneInfoComp;
 import com.game.scene.asset.AssetOpAuth;
 import com.game.scene.asset.AssetOpService;
 import com.game.scene.audit.AssetAudit.Reason;
@@ -32,6 +34,7 @@ import com.game.scene.battle.PlayerBattle.Recovery;
 import com.game.scene.player.Wallet;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakeBattleLocks.Op;
+import com.game.scene.testing.FakeInstanceIds;
 import com.game.scene.testing.FakePlayerRepository.PendingHandOff;
 import com.game.scene.testing.FakeSwitchTargets.PendingSelect;
 import com.game.scene.world.PlayerData;
@@ -39,10 +42,12 @@ import com.game.scene.world.PlayerRepository.HandOffOutcome;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.scene.world.PlayerSave;
 import com.game.scene.world.Scene;
+import com.game.scene.world.SceneInstances;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SwitchPhase;
 import com.game.scene.world.WorldTestAccess;
 import com.google.protobuf.InvalidProtocolBufferException;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
@@ -176,6 +181,44 @@ class HandOffBattleExclusionTest {
         WorldTestAccess.clearSwitch(player);
         assertThat(BattleFixture.tipOf(f.prepared(PLAYER, X))).isZero();
         assertThat(player.battle().freeze().phase()).isEqualTo(Phase.PREPARING);
+    }
+
+    /** 走真实 CONFIRM 回调恢复 FIGHTING；镜像号随后回来时仍须复核，不能把战斗中的玩家换走。 */
+    @Test
+    void 镜像取号期间迟到确认重建FIGHTING_成功号回来推3023但不建不换且不摘战斗冻结() {
+        FakeInstanceIds ids = new FakeInstanceIds();
+        SceneInstances instances = new SceneInstances(BattleFixture.LOCAL_NODE, ids, Duration.ofSeconds(30),
+                Duration.ofSeconds(300), Duration.ofSeconds(30), 200, 3, Duration.ofSeconds(4), () -> { });
+        BattleFixture mirror = new BattleFixture(null, instances);
+        ScenePlayer player = mirror.enter(SESSION, PLAYER);
+        Scene source = player.scene();
+        mirror.locks.putLock(PLAYER, X, BattleFixture.BATTLE_NODE, BattleRedis.STATE_PREPARING,
+                mirror.deadline(), mirror.prepareDeadline(), 120);
+        mirror.request(player, Contracts.IDS.enterScene(), EnterSceneC2SRequest.newBuilder()
+                .setSceneInfo(SceneInfoComp.newBuilder().setMirrorConfigId(1)).build());
+        FakeInstanceIds.PendingCreate create = ids.take();
+        assertThat(player.switchPhase()).isEqualTo(SwitchPhase.RESOLVING);
+
+        mirror.confirm(PLAYER, X, mirror.deadline());
+        mirror.drain();
+
+        BattleFreeze freeze = player.battle().freeze();
+        assertThat(freeze).as("取号在途不丢弃权威战斗恢复").isNotNull();
+        assertThat(freeze.phase()).isEqualTo(Phase.FIGHTING);
+        assertThat(mirror.reconnectHints(player)).containsExactly(X);
+        mirror.sink.clear();
+
+        long mirrorId = 900_002;
+        create.issued(BattleFixture.LOCAL_NODE, mirrorId);
+
+        assertThat(player.scene()).isSameAs(source);
+        assertThat(mirror.world.sceneEntries()).noneMatch(entry -> entry.getSceneId() == mirrorId
+                || entry.getKind() == ChannelKind.CHANNEL_KIND_MIRROR);
+        assertThat(player.switchPhase()).isEqualTo(SwitchPhase.NONE);
+        assertThat(player.battle().freeze()).isSameAs(freeze);
+        assertThat(mirror.messageIds(player)).containsExactly(BattleFixture.TIP);
+        assertThat(mirror.pushedTips(player)).containsExactly(ENTER_FAILED);
+        assertThat(mirror.count("game.scene.mirror.resolves", "result", "source_moved")).isEqualTo(1);
     }
 
     /**

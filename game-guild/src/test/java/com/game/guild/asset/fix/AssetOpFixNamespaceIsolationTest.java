@@ -2,6 +2,8 @@ package com.game.guild.asset.fix;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.GameNamespace;
+import com.game.discovery.RedisKeys;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.env.MapPropertySource;
@@ -20,23 +22,32 @@ class AssetOpFixNamespaceIsolationTest {
         StandardEnvironment env = AssetOpFixEnvironment.load(null);
         env.getPropertySources().remove(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
         env.getPropertySources().remove(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME);
+        // 命名空间与连接地址是独立配置，显式测试地址避免绑定本机环境或默认数据库端口。
+        env.getPropertySources().addFirst(new MapPropertySource("test-connection", Map.of(
+                "GAME_MYSQL_HOST", "mysql.invalid", "GAME_MYSQL_PORT", "13306")));
         env.getPropertySources().addFirst(override);
         return env;
+    }
+
+    private static void assertNamespaceConfiguration(StandardEnvironment env) throws Exception {
+        assertThat(env.getProperty("spring.datasource.url")).startsWith("jdbc:mysql://mysql.invalid:13306/nstest?")
+                .doesNotContain("/game?");
+        GameNamespace namespace = AssetOpFixEnvironment.resolveNamespace(env);
+        assertThat(namespace.value()).isEqualTo("nstest");
+        assertThat(new RedisKeys(namespace).guildSnapshot(42)).isEqualTo("nstest:guild:{g:42}:snap");
     }
 
     @Test
     void 环境变量GAME_NAMESPACE同时决定库名与命名空间() throws Exception {
         StandardEnvironment env = bundledConfigWith(new SystemEnvironmentPropertySource(
                 StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, Map.of("GAME_NAMESPACE", "nstest")));
-        assertThat(env.getProperty("spring.datasource.url")).contains("3306/nstest?").doesNotContain("/game?");
-        assertThat(AssetOpFixEnvironment.resolveNamespace(env).value()).isEqualTo("nstest");
+        assertNamespaceConfiguration(env);
     }
 
     @Test
     void 系统属性game_namespace同时决定库名与命名空间() throws Exception {
         StandardEnvironment env = bundledConfigWith(new MapPropertySource(
                 StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME, Map.of("game.namespace", "nstest")));
-        assertThat(env.getProperty("spring.datasource.url")).contains("3306/nstest?").doesNotContain("/game?");
-        assertThat(AssetOpFixEnvironment.resolveNamespace(env).value()).isEqualTo("nstest");
+        assertNamespaceConfiguration(env);
     }
 }

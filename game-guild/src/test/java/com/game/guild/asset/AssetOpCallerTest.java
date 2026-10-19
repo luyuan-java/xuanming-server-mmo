@@ -32,6 +32,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -178,19 +180,30 @@ class AssetOpCallerTest {
     }
 
     @Test
-    void 定位受投递预算约束_Redis卡住时按定位超时返回_不发调用() {
-        AssetOpCaller stuck = new AssetOpCaller(playerId -> new CompletableFuture<>(), this::call, new AssetOpSigner(SECRET), timer,
+    void 定位受投递预算约束_Redis卡住时按定位超时返回_不发调用() throws Exception {
+        AtomicInteger locationReads = new AtomicInteger();
+        AssetOpCaller stuck = new AssetOpCaller(playerId -> {
+            locationReads.incrementAndGet();
+            return new CompletableFuture<>();
+        }, this::call, new AssetOpSigner(SECRET), timer,
                 clock::incrementAndGet, metrics, 800, List.of(5L));
         long start = System.nanoTime();
-        Delivery d = stuck.deliver(AssetRpc.CREDIT, request(), Deadline.after(200)).join();
+        Delivery d = stuck.deliver(AssetRpc.CREDIT, request(), Deadline.after(200)).get(2, TimeUnit.SECONDS);
         long tookMs = (System.nanoTime() - start) / 1_000_000;
 
         assertThat(d.noAnswer()).isTrue();
-        assertThat(d.error()).hasMessageContaining("定位");
+        // 业务适配统一外层投递错误；定位原因仍由共享投递器保留在 cause 中。
+        assertThat(d.error()).isInstanceOf(AssetDeliveryException.class).hasMessage("资产投递不可确认")
+                .hasCauseInstanceOf(IllegalStateException.class);
+        assertThat(d.error().getCause()).hasMessage("定位资产持有者失败");
+        assertThat(AssetOpDecisions.decide(d.result(), d.error())).isEqualTo(AssetOpAction.RETRY);
         assertThat(tookMs).as("不超过预算太多").isLessThan(1_000);
+        assertThat(locationReads.get()).isEqualTo(1);
         assertThat(sent).isEmpty();
         assertThat(stuck.deliver(AssetRpc.CREDIT, request(), Deadline.after(0)).join().noAnswer()).as("预算已用完不发 Redis 读")
                 .isTrue();
+        assertThat(locationReads.get()).as("过期预算不再发起定位").isEqualTo(1);
+        assertThat(sent).isEmpty();
     }
 
     @Test

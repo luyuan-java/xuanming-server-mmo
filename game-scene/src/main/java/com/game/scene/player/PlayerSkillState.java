@@ -41,8 +41,8 @@ public final class PlayerSkillState {
     /** 当前行为状态（基线 eActorState：0 战斗、1 跟随、2 骑乘），按编号升序遍历。 */
     private final TreeSet<Integer> actionStates = new TreeSet<>();
     /**
-     * 当前战斗状态（基线 eActorCombatState：1 沉默）→ 来源 buff 号。只有实时 buff（沉默）会写，而基线实时 buff 线上从不挂到玩家身上，
-     * 两版都恒空（PARITY「实时 buff」行）；回合制战斗的沉默在引擎内另算（路线图 6.x）。
+     * 当前战斗状态（基线 eActorCombatState：1 沉默）→ 来源 buff 号。Java 场景实时 buff 尚未启用，当前没有生产写入口；
+     * C++ 已接通实时 buff 的沉默状态直接调用，两版差异仍见 PARITY。回合制战斗的沉默在引擎内另算（路线图 6.x）。
      */
     private final TreeMap<Integer, Set<Long>> combatStates = new TreeMap<>();
 
@@ -59,6 +59,9 @@ public final class PlayerSkillState {
     }
 
     public void startCooldown(int cooldownId, long nowNanos) {
+        if (cooldownId == 0) {
+            return;
+        }
         cooldownStarts.put(cooldownId, nowNanos);
     }
 

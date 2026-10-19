@@ -18,7 +18,7 @@ import javax.sql.DataSource;
 
 /**
  * 帮会四张核心表与 4.5 资产三表的登记与建表（guild-spec §1.2、§7.5、§7.11 第 2 步；guild-economy-spec §7.7 第 2 步）。表定义是 Java 自有的 {@code game/guild/guild_tables.proto}，
- * 不依赖同步来的 guild_db.proto；DDL 与 Go proto2mysql 逐字节相同（GuildTablesTest 对拍）。
+ * 不依赖同步来的 guild_db.proto；DDL 与已移植的 Go 基线逐字节相同（GuildTablesTest 对拍，待做的自动放弃字段见 guild-economy-spec §1.1）。
  *
  * <p>与基线的差异（D2 的一部分）：pbmysql 的同步只扩不缩、会<b>补建</b>缺失的普通索引，基线 schemamigrate 遇到缺索引拒启；
  * 结构漂移（需要 MODIFY / DROP 才能对齐）同样拒启。

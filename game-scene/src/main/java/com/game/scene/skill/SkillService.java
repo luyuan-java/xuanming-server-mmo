@@ -28,9 +28,9 @@ import org.slf4j.LoggerFactory;
  * → 技能许可（SkillPermission）→ 行为互斥（ActorActionState；放技能加上「战斗」状态，永不移除）→ 战斗状态互斥 →（物品，基线空实现）。
  * 通过后广播 70，记冷却开始，通用 / 引导技能进入前摇。给施法者的顺序是 33 → 70 → 84 应答。
  *
- * <p><b>冷却、后摇、引导按设计意图生效</b>（与基线线上形态不同，见 PARITY）：基线这几样的代码都在，但线上从不给玩家挂冷却表与
- * 技能上下文，于是只有前摇这一段生效。Java 让它们都生效；技能命中（伤害、效果 buff）两版都不生效、不接——
- * 接通要先设计死亡状态 / 通知 / 复活（两版一起做）。
+ * <p><b>冷却、后摇、引导按截止时刻结算</b>。C++ 当前已通过按需写入口创建冷却表与技能上下文，并接通实时伤害与 buff 的必需步骤；
+ * Java 尚未接入技能命中的实时伤害与效果 buff。两版实时效果及死亡 / 通知 / 复活边界仍按 PARITY 跟踪，
+ * 不能沿用“两版都未生效”的旧基线说明。
  * 阶段按截止时刻在下次放技能时顺次结算（{@link #settle}），不起定时器。
  */
 public final class SkillService {
@@ -153,8 +153,8 @@ public final class SkillService {
         while (cast != null && nowNanos - cast.phaseEndsAtNanos() >= 0) {
             cast = switch (cast.phase()) {
                 // 基线对冻结的施法者在施法点早退（HandleGeneralSkillSpell / HandleChannelSkillSpell 不武装后摇与引导）；
-                // Java 不照做（scene-handoff-spec §5.9 的 84 ALLOW）：施法运行态不持久化、伤害 / buff 两版都未生效，冻结至多约 15 s，
-                // 之后实例随交出移除（目标节点上运行态清空）或原地解冻，照常结算不会与冻结快照分叉
+                // Java 仍按 scene-handoff-spec §5.9 的 84 ALLOW 推进本地相位，施法运行态不持久化；
+                // 本实现尚未接实时伤害 / buff，C++ 已有冻结拦截与实时效果，两版差异仍见 PARITY。
                 case CASTING -> cast.channelNanos() >= 0
                         ? cast.next(Phase.CHANNELING, cast.channelNanos())
                         : cast.next(Phase.RECOVERY, cast.recoveryNanos());

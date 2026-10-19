@@ -10,6 +10,7 @@ import com.game.proto.login.LoginRequest;
 import com.game.proto.login.LoginResponse;
 import com.game.proto.login.RefreshTokenRequest;
 import com.game.proto.login.RefreshTokenResponse;
+import com.game.table.tip.TipFaults;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -24,7 +25,8 @@ import org.slf4j.LoggerFactory;
  * HTTP 登录 / 刷新令牌 → game-login {@link AccountLoginService}（Dubbo）的适配（同 mmorpg Java Gateway 的 LoginService /
  * RefreshTokenService）：
  * <ul>
- *   <li>login 回业务错误（error_message）一律 401，message 带 {@code upstream_err=<tip>}（客户端重新认证）；</li>
+ *   <li>login 回业务错误（error_message）：message 带 {@code upstream_err=<tip>}；Tip.xlsx 标了 fault 的码（{@link TipFaults}，
+ *       如渠道故障、令牌签发失败、读 Redis 失败）→ 500（服务端出错，稍后重试），其余 → 401（客户端重新认证）；</li>
  *   <li>调用失败：超时 / 网络 / 没有可用的 login → 500 {@code login_unavailable}；其余异常 → 500 {@code internal_error}；</li>
  *   <li>区不在区服目录里 → 500 {@code unknown_zone}（基线按区路由 login，找不到该区的 login 同样是 5xx 一类）；
  *       区服目录读不到时跳过这项核对（基线不查区服表；登录不放人进游戏，进场仍经 assign-gate 的 fail-closed 准入）；</li>
@@ -123,8 +125,9 @@ public final class LoginHttpService {
 
     static HttpLoginResponse toHttp(LoginResponse response) {
         if (response.hasErrorMessage()) {
-            return HttpLoginResponse.error(HttpLoginResponse.CODE_AUTH_REJECTED,
-                    "upstream_err=" + Integer.toUnsignedString(response.getErrorMessage().getId()));
+            int tip = response.getErrorMessage().getId();
+            return HttpLoginResponse.error(codeForUpstreamTip("login", tip),
+                    "upstream_err=" + Integer.toUnsignedString(tip));
         }
         List<HttpLoginResponse.PlayerInfo> players = new ArrayList<>(response.getPlayersCount());
         for (AccountSimplePlayerWrapper wrapper : response.getPlayersList()) {
@@ -138,12 +141,26 @@ public final class LoginHttpService {
 
     static HttpRefreshTokenResponse toHttp(RefreshTokenResponse response) {
         if (response.hasErrorMessage()) {
-            return HttpRefreshTokenResponse.error(HttpLoginResponse.CODE_AUTH_REJECTED,
-                    "upstream_err=" + Integer.toUnsignedString(response.getErrorMessage().getId()));
+            int tip = response.getErrorMessage().getId();
+            return HttpRefreshTokenResponse.error(codeForUpstreamTip("refresh", tip),
+                    "upstream_err=" + Integer.toUnsignedString(tip));
         }
         return HttpRefreshTokenResponse.ok(emptyToNull(response.getAccessToken()),
                 emptyToNull(response.getRefreshToken()),
                 response.getAccessTokenExpire(), response.getRefreshTokenExpire());
+    }
+
+    /**
+     * login 回业务错误码时的 HTTP 业务码（同 mmorpg LoginService#httpCodeForUpstreamTip）。分类只认 Tip.xlsx 的 fault 列
+     * （ContractSync 同步来的 {@link TipFaults}），这里不另写故障码集合：故障码（渠道 / 存储故障、令牌签发失败……）→ 500，
+     * 服务端出错、客户端稍后重试；其余码与本版本不认识的新码 → 401，客户端重新认证。message 都带上游 tip。
+     */
+    static int codeForUpstreamTip(String what, int tip) {
+        if (TipFaults.isFault(tip)) {
+            log.warn("{} 回 in-band 故障码 tip={}", what, Integer.toUnsignedString(tip));
+            return HttpLoginResponse.CODE_INTERNAL;
+        }
+        return HttpLoginResponse.CODE_AUTH_REJECTED;
     }
 
     /** 同步抛出、返回 null 都归成失败的 future。 */
@@ -165,10 +182,11 @@ public final class LoginHttpService {
         if (cause instanceof RpcException rpc && (rpc.isTimeout() || rpc.isNetwork()
                 || rpc.isNoInvokerAvailableAfterFilter() || rpc.isForbidden())
                 || causedBy(cause, RejectedExecutionException.class)) {
-            log.warn("{} 调 game-login 不可用: {}", what, cause.toString());
+            // Dubbo 超时或网络异常可能包含原请求（口令、令牌），只记异常类型。
+            log.warn("{} 调 game-login 不可用 reason={}", what, cause.getClass().getName());
             return LOGIN_UNAVAILABLE;
         }
-        log.error("{} 调 game-login 出错", what, cause);
+        log.error("{} 调 game-login 出错 reason={}", what, cause.getClass().getName());
         return INTERNAL_ERROR;
     }
 

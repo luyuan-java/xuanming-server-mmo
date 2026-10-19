@@ -212,7 +212,7 @@ public final class RollbackJob implements JobBody {
             heldEpochs.forEach((player, epoch) -> d.ownership().requestTakeover(player, epoch));
             // 第二轮共用一个截止时刻（从让出请求发出时算起）：每人仍有完整的 claim-wait 等 scene 写回，而整轮至多一个 claim-wait——
             // 持有者不响应让出（发布失败、订阅断了、逻辑线程卡住但续约照常）时不会变成「在线人数 × claim-wait」，
-            // 第一轮已夺到的离线玩家也不会被长时间扣着（期间登录回 2005）。截止之后每人只再试一次（照样重发让出请求）。
+            // 第一轮已夺到的离线玩家也不会被长时间扣着（期间登录回 2005）。截止之后不再发 SQL，沿用首轮持有者记 busy，仍重发一次让出请求。
             long round2Deadline = System.nanoTime() + d.props().ops().claimWait().toNanos();
             for (Target t : online) {
                 ctx.checkpoint();
@@ -222,8 +222,15 @@ public final class RollbackJob implements JobBody {
                 if (cancelPolled(ctx)) {
                     return stopBeforeWrite(ctx, OpsJobStatus.OPS_JOB_CANCELLED, CANCELLED, Map.of("phase", "claim"));
                 }
-                Duration left = Duration.ofNanos(Math.max(0, round2Deadline - System.nanoTime()));
-                Claim claim = d.ownership().claim(t.playerId(), true, left, ctx::pause);
+                long remaining = round2Deadline - System.nanoTime();
+                Claim claim;
+                if (remaining <= 0) {
+                    long heldEpoch = heldEpochs.get(t.playerId());
+                    d.ownership().requestTakeover(t.playerId(), heldEpoch);
+                    claim = new Claim.Busy(heldEpoch);
+                } else {
+                    claim = d.ownership().claim(t.playerId(), true, Duration.ofNanos(remaining), ctx::pause);
+                }
                 JobResult stop = afterClaim(ctx, t, claim, unclaimed, planned.size());
                 if (stop != null) {
                     return stop;

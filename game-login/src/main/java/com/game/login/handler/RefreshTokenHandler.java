@@ -116,7 +116,8 @@ public final class RefreshTokenHandler implements ClientMessageHandler<RefreshTo
                     .setErrorMessage(Tips.of(CommonErrorTip.common_error.kServiceUnavailable_VALUE))
                     .build();
         } catch (RuntimeException e) {
-            log.error("刷新令牌时令牌存储出错", e);
+            // 存储异常可能携带 Redis 的令牌键，不能输出消息或嵌套异常。
+            log.error("刷新令牌时令牌存储出错 reason={}", e.getClass().getName());
             pair = Optional.empty();
         }
         if (pair.isEmpty()) {
