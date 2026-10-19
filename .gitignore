@@ -10,5 +10,6 @@ logs/
 run/
 # CI 的契约检查把 mmorpg 稀疏检出到这里（.github/workflows/ci.yml），本机照做时也不要提交
 .mmorpg/
+.mmorpg-maps/
 # compose 的秘密文件（仓库里只放模板 deploy/compose/env.example）
 deploy/compose/.env

@@ -77,7 +77,13 @@ jobs:
             exit 1
           fi
           echo "commit=$c" >> "$GITHUB_OUTPUT"
-      # mmorpg 是公开仓库，不需要令牌。稀疏目录正好是 ContractSync 读的 5 个（tools/ContractSync.java 的 sync()）：
+          m=$(sed -n 's/^maps\.source\.commit=//p' contract/SOURCE.properties)
+          if [[ ! "$m" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error file=contract/SOURCE.properties,title=地图来源::maps.source.commit 不是 40 位 sha：$m"
+            exit 1
+          fi
+          echo "maps_commit=$m" >> "$GITHUB_OUTPUT"
+      # mmorpg 是公开仓库，不需要令牌。稀疏目录覆盖 ContractSync 的协议、表与地图导航合同来源：
       # 工具以后多读别的目录时，这一步之后的 --check 会因「目录不存在」直接报红，不会悄悄通过。
       # .mmorpg 在工作区内（checkout 只能检出到工作区下），不在 --check 的受管路径里；本机照做时 .gitignore 已忽略它。
       - name: 稀疏检出 mmorpg（SOURCE 记录的提交）
@@ -95,6 +101,18 @@ jobs:
             generated/code/proto
             generated/tables
             cpp/generated/table/code/constants
+      - name: 稀疏检出地图覆盖来源（独立提交）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: luyuan-cpp/xuanming-server-mmo
+          ref: ${{ steps.src.outputs.maps_commit }}
+          path: .mmorpg-maps
+          fetch-depth: 1
+          filter: blob:none
+          persist-credentials: false
+          sparse-checkout: |
+            generated/tables
+            data/scene_nav_bin/current_maps
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
@@ -103,7 +121,7 @@ jobs:
       - name: ContractSync --check
         # mmorpg 的 .gitattributes 规定文本一律 LF：Linux 上检出的字节与 Windows 上同步的结果一致。首轮出现「不一致」先查这一点。
         run: |
-          if java tools/ContractSync.java --mmorpg .mmorpg --check > contract.out 2>&1; then
+          if java tools/ContractSync.java --mmorpg .mmorpg --maps-source .mmorpg-maps --check > contract.out 2>&1; then
             cat contract.out
             exit 0
           fi

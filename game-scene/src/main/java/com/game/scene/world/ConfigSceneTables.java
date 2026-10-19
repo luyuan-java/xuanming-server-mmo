@@ -6,8 +6,11 @@ import com.game.table.ConfigTables;
 import com.game.table.DungeonTable;
 import com.game.table.SkillRows;
 import com.game.table.WorldTable;
+import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -25,15 +28,18 @@ public final class ConfigSceneTables implements SceneTables {
     private final ConfigTables tables;
     private final List<Integer> worldSceneConfigIds;
     private final List<Integer> initialSkills;
+    private final Map<Integer, CurrentMapNavigation> navigation;
 
-    private ConfigSceneTables(ConfigTables tables, List<Integer> worldSceneConfigIds, List<Integer> initialSkills) {
+    private ConfigSceneTables(ConfigTables tables, List<Integer> worldSceneConfigIds, List<Integer> initialSkills,
+                              Map<Integer, CurrentMapNavigation> navigation) {
         this.tables = tables;
         this.worldSceneConfigIds = worldSceneConfigIds;
         this.initialSkills = initialSkills;
+        this.navigation = Map.copyOf(navigation);
     }
 
     /** World 表为空时直接失败（没有可创建的主世界）。 */
-    public static ConfigSceneTables from(ConfigTables tables) {
+    public static ConfigSceneTables from(ConfigTables tables, Path navigationRoot) {
         Set<Integer> world = new LinkedHashSet<>();
         for (WorldTable row : tables.world().all()) {
             if (row.getSceneId() != 0) {
@@ -53,7 +59,25 @@ public final class ConfigSceneTables implements SceneTables {
                 }
             }
         }
-        return new ConfigSceneTables(tables, List.copyOf(world), List.copyOf(skills));
+        Map<String, CurrentMapNavigation> loaded = new HashMap<>();
+        Map<Integer, CurrentMapNavigation> navigation = new HashMap<>();
+        for (BaseSceneTable row : tables.baseScene().all()) {
+            String nav = row.getNavBinFile().replace('\\', '/');
+            String key = switch (nav.substring(nav.lastIndexOf('/') + 1)) {
+                case "main_scene.bin" -> "main";
+                case "penglai_scene.bin" -> "island";
+                case "donghai_scene.bin" -> "village";
+                default -> null; // 独立副本、旧图与未声明本批导航的场景保留原规则。
+            };
+            if (key == null) continue;
+            CurrentMapNavigation grid = loaded.computeIfAbsent(key, k -> CurrentMapNavigation.load(navigationRoot, k));
+            Vec3 spawn = new Vec3(row.getSpawnX(), row.getSpawnY(), row.getSpawnZ());
+            if (!grid.spawn().equals(spawn)) {
+                throw new IllegalStateException("BaseScene 出生点与当前地图导航不一致: " + row.getId());
+            }
+            navigation.put(row.getId(), grid);
+        }
+        return new ConfigSceneTables(tables, List.copyOf(world), List.copyOf(skills), navigation);
     }
 
     @Override
@@ -69,6 +93,12 @@ public final class ConfigSceneTables implements SceneTables {
         }
         Vec3 spawn = new Vec3(row.get().getSpawnX(), row.get().getSpawnY(), row.get().getSpawnZ());
         return spawn.isFinite() && !spawn.isOrigin() ? spawn : DEFAULT_SPAWN;
+    }
+
+    @Override
+    public SceneNavigation navigation(int sceneConfigId) {
+        CurrentMapNavigation grid = navigation.get(sceneConfigId);
+        return grid == null ? SceneNavigation.NONE : grid;
     }
 
     @Override

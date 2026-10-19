@@ -16,10 +16,13 @@
   客户端访问的 HTTP 接口形状。这些由 `tools/ContractSync.java` 从 mmorpg 同步，**不许手改**：
   - `game-proto/src/main/proto/**`、`game-proto/src/main/resources/contract/**`
   - `game-table/src/main/proto/**`、`game-table/src/main/java/com/game/table/TableConstants.java`
-  - `config-data/tables/**`、`contract/SOURCE.properties`
+  - `config-data/tables/**`、`config-data/navmesh/current_maps/**`、`contract/SOURCE.properties`
   改契约先改 mmorpg，再运行 `java tools/ContractSync.java --mmorpg <mmorpg 根目录>` 同步，两边同批提交。
   `--check` 只比对不写入（不一致退出码 1）。配置表的 Java 访问代码不再同步，由 `game-table-codegen` 在编译期按权威 schema
   生成（见 `docs/design/config-tables.md`）。
+  当前地图允许 `--scope current-maps` 单域同步 BaseScene 与导航，保留其他已接契约；地图独立记录在 `maps.source.commit`，
+  不改全局 `mmorpg.commit`。完整检查用 `--mmorpg <全局源> --maps-source <地图源> --check` 从两个提交重建期望，
+  禁止拿本仓库现有非地图产物充当完整检查的期望。已有地图覆盖后全量写入必须显式指定 `--maps-source`。
 - **服务端内部按 Java 惯用方式实现，不照抄 C++/Go**。Java 版有自己的库表与 Redis 键空间，不与 C++/Go 服务混部。
 - **目录、模块、工具都按 Java 标准自行组织，不对应 mmorpg 的目录结构**；Java 代码不得依赖同步来的 proto 所在目录
   （包名按 proto package，路由按服务语义，见 `docs/design/architecture.md` §1）。工具也用 Java 写。

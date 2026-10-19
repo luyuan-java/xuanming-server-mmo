@@ -71,8 +71,9 @@ public class SceneNodeConfiguration {
     }
 
     @Bean
-    public SceneTables sceneTables(ConfigTables tables) {
-        return ConfigSceneTables.from(tables);
+    public SceneTables sceneTables(ConfigTables tables, SceneNodeProperties props) {
+        Path configRoot = Path.of(props.tableDir()).toAbsolutePath().normalize().getParent();
+        return ConfigSceneTables.from(tables, configRoot.resolve("navmesh/current_maps"));
     }
 
     @Bean
