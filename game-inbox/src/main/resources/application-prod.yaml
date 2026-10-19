@@ -1,0 +1,4 @@
+# 生产收件箱权威表必须处于同一 TiDB 事务域（与玩家表 / 玩家状态表同库）；装配层在 prod profile 下拒绝关闭这道门禁。
+game:
+  inbox:
+    require-tidb: true

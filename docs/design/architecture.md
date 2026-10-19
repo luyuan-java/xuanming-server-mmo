@@ -317,6 +317,9 @@ topic 与存储（不与 Go 混部）：
   - **兜底日志回灌**：离线工具 `com.game.data.tools.AuditFallbackReplay`（用法见类注释）把 scene 写进 `game.audit.fallback` 的流水行补进 `transaction_log`。
     原号的行按主键 ODKU 幂等；`tx_id=0` 的行在 `SCENE_GUID` 池占一个 worker 发新号；每行登记到 `audit_replay_line`，同一文件重跑会跳过；
     快照兜底行只有元数据，不回灌。
+  - **单玩家排障导出 / 本地复现**（2026-10-19）：离线工具 `com.game.data.tools.playerbundle.PlayerBundleExport`（只读：一个只读一致性快照里读该玩家的库行与流水 / 快照 / 运维记录，
+    每把玩家级 Redis 键一条只读脚本，口令哈希与令牌键不出库，带归属判读与来源实例身份）与 `PlayerBundleImport`（只写本机：本机地址 + 实例身份闸门，
+    三段写入以永不过期的占位租约保证中途失败时登录拿不到归属）。设计与使用手册见 [player-bundle-debug.md](player-bundle-debug.md)。
 
 #### 4.5.1 运维作业框架、离线栅栏与回档（game-data，批次 7.2b）
 
@@ -1349,7 +1352,7 @@ JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `cle
     `GAME_SCENE_NODES=2` 加 game-scene-2，`GAME_ZONES=2` 加 game-scene-z2 / game-gate-z2，最多 16 个。还没登记进切片的模块：game-mail 用 Redis（登记后 +1 个客户端），
     game-rank / game-mall 的 main 代码不取 `RedissonClient`，不连。
   - **另算的客户端**（都用库缺省池，每个常驻 25、峰值 114）：game-login 配了 `game.login.auth.satoken` 且它指向同一台 Redis 时多一个（缺省注释掉）；
-    命令行工具 AuditFallbackReplay、assetopfix 运行期间各一个；CI 的集成测试（`-Dgame.it.redis`）只在 CI 的 Redis 上。
+    命令行工具 AuditFallbackReplay、assetopfix 运行期间各一个（玩家排障导出 / 导入运行期间各一个，自设小池、至多 3 条连接）；CI 的集成测试（`-Dgame.it.redis`）只在 CI 的 Redis 上。
   - **合计**（一个部署）：
 
     | 形态 | 客户端数 | 常驻 | 峰值 |

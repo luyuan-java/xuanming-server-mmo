@@ -343,6 +343,21 @@ class PlayerBundleSqlTest {
     }
 
     @Test
+    void 不读Redis的包没有Redis来源身份_拒绝导入_缺字段的包拒绝(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("no-redis.json");
+        assertThat(export(file, null, "--skip-redis")).as(err()).isEqualTo(0);
+
+        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute")).isEqualTo(2);
+        assertThat(err()).contains("没有记录 Redis 的来源实例身份");
+        assertThat(target.playerStore(() -> NOW).findPlayer(PLAYER)).isEmpty();
+
+        Path broken = dir.resolve("broken.json");
+        Files.writeString(broken, Files.readString(exported(dir)).replace("\"name\" : \"Alice\",", ""));
+        assertThat(importLocal(broken, new FakeRedis("local-run"), "--execute")).isEqualTo(2);
+        assertThat(err()).contains("缺必需字段");
+    }
+
+    @Test
     void 包被改过_拒绝(@TempDir Path dir) throws Exception {
         Path file = exported(dir);
         String text = Files.readString(file);
@@ -403,7 +418,12 @@ class PlayerBundleSqlTest {
         PlayerStore store = target.playerStore(() -> NOW);
         assertThat(store.claimOwnership(PLAYER, Duration.ofSeconds(5))).as("占位租约永不过期：登录拿不到归属")
                 .isInstanceOf(PlayerStore.ClaimResult.Held.class);
-        assertThat(store.findPlayer(PLAYER).orElseThrow().getOwnerLeaseUntil()).isEqualTo(LocalPlayerImporter.IMPORT_HOLD_LEASE);
+        try (Connection c = target.dataSource.getConnection(); Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("SELECT owner_released, owner_lease_until FROM player WHERE player_id = 900001")) {
+            rs.next();
+            assertThat(rs.getInt(1)).isZero();
+            assertThat(rs.getLong(2)).isEqualTo(LocalPlayerImporter.IMPORT_HOLD_LEASE);
+        }
 
         // 不带 --replace 重跑：认出占位，提示加 --replace
         assertThat(importLocal(file, new FakeRedis("local-run"), "--execute")).isEqualTo(2);

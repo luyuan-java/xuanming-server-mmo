@@ -2,7 +2,6 @@ package com.game.data.tools.playerbundle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -57,13 +56,13 @@ class LocalTargetsTest {
     }
 
     @Test
-    void 实例身份_取不到或包里没有来源身份都拒绝_相同拒绝_不同放行() {
-        List<String> exported = Arrays.asList("server_uuid:aaa", "run_id:bbb");
-        assertThat(InstanceIdentity.checkNotExportSource("MySQL", null, exported)).contains("取不到实例身份");
-        assertThat(InstanceIdentity.checkNotExportSource("MySQL", "server_uuid:ccc", Arrays.asList(null, null))).contains("没有记录来源实例身份");
-        assertThat(InstanceIdentity.checkNotExportSource("MySQL", "server_uuid:aaa", exported)).contains("同一个实例");
-        assertThat(InstanceIdentity.checkNotExportSource("Redis", "run_id:bbb", exported)).contains("同一个实例");
-        assertThat(InstanceIdentity.checkNotExportSource("MySQL", "server_uuid:ccc", exported)).isNull();
+    void 实例身份_同类比对_任一侧取不到都拒绝_相同拒绝_不同放行() {
+        assertThat(InstanceIdentity.checkNotExportSource("MySQL", null, "server_uuid:aaa")).contains("取不到实例身份");
+        assertThat(InstanceIdentity.checkNotExportSource("MySQL", "server_uuid:ccc", null)).contains("没有记录 MySQL 的来源实例身份");
+        assertThat(InstanceIdentity.checkNotExportSource("Redis", "run_id:x", " ")).contains("--skip-redis");
+        assertThat(InstanceIdentity.checkNotExportSource("MySQL", "server_uuid:aaa", "server_uuid:aaa")).contains("同一个实例");
+        assertThat(InstanceIdentity.checkNotExportSource("Redis", "run_id:bbb", "run_id:bbb")).contains("同一个实例");
+        assertThat(InstanceIdentity.checkNotExportSource("MySQL", "server_uuid:ccc", "server_uuid:aaa")).isNull();
     }
 
     @Test

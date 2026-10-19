@@ -20,7 +20,7 @@ import java.util.function.LongSupplier;
 
 /**
  * 把 {@link PlayerBundleExport} 的导出包灌进<b>本地隔离环境</b>，让本地登录走 Java 版真实加载链路（login 夺权 → scene 读 {@code player} 行与
- * {@code player_state}）把这名玩家加载起来。使用手册见 {@code docs/ops/player-bundle-debug.md}。
+ * {@code player_state}）把这名玩家加载起来。使用手册见 {@code docs/design/player-bundle-debug.md}。
  *
  * <p>用法（缺省只预览，不连任何外部系统；确认写目标后加 {@code --execute}）：
  * <pre>
@@ -92,6 +92,9 @@ public final class PlayerBundleImport {
         } catch (IllegalArgumentException e) {
             err.println("导出包不能导入：" + e.getMessage());
             return 2;
+        } catch (NullPointerException e) {
+            err.println("导出包不能导入：缺必需字段（包被截断或改过）");
+            return 2;
         }
         String url = env.get(JDBC_URL_ENV);
         if (url == null || !url.startsWith("jdbc:")) {
@@ -117,8 +120,8 @@ public final class PlayerBundleImport {
         }
 
         long now = clock.getAsLong();
-        List<String> exportedIds = bundle.sources() == null ? List.of()
-                : Arrays.asList(bundle.sources().mysqlIdentity(), bundle.sources().redisIdentity());
+        String exportedMysql = bundle.sources() == null ? null : bundle.sources().mysqlIdentity();
+        String exportedRedis = bundle.sources() == null ? null : bundle.sources().redisIdentity();
         try (Connection conn = connections.mysql(url);
              PlayerRedis redis = connections.redis(args.redis(), args.redisDatabase(), env.get(REDIS_PASSWORD_ENV))) {
             String mismatch = NamespaceDatabaseCheck.verify(conn, args.expectDatabase(), namespace, EXPECT_DATABASE_HINT);
@@ -127,8 +130,8 @@ public final class PlayerBundleImport {
                 return 2;
             }
             // 闸门二：目标实例不能就是导出来源（port-forward 之后线上实例也在 127.0.0.1，只看地址拦不住）
-            String mysqlProblem = InstanceIdentity.checkNotExportSource("MySQL", connections.mysqlIdentity(conn), exportedIds);
-            String redisProblem = InstanceIdentity.checkNotExportSource("Redis", InstanceIdentity.redis(redis.infoServer()), exportedIds);
+            String mysqlProblem = InstanceIdentity.checkNotExportSource("MySQL", connections.mysqlIdentity(conn), exportedMysql);
+            String redisProblem = InstanceIdentity.checkNotExportSource("Redis", InstanceIdentity.redis(redis.infoServer()), exportedRedis);
             for (String problem : new String[] {mysqlProblem, redisProblem}) {
                 if (problem != null) {
                     err.println(problem);

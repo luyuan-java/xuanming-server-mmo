@@ -162,13 +162,14 @@ class NamespaceLiteralGuardTest {
 
     /**
      * R3 的构造入口白名单：装配类；命令行工具取命名空间的唯一入口 {@code GameNamespaceBinder}（与服务进程同一个属性类型、同口径绑定后
-     * {@code GameNamespace.of} 校验）；两个不起 Spring、拿到命名空间后自己 {@code new RedisKeys} 的命令行工具（PasswordAdmin 只取命名空间核对库名，
-     * 不构造任何名字类，不在名单上）；以及定义这几个类型的三个类。
+     * {@code GameNamespace.of} 校验）；不起 Spring、拿到命名空间后自己 {@code new RedisKeys} 的命令行工具（回灌、assetopfix，以及玩家排障导出 / 导入——
+     * 两者共用 PlayerBundleExport 里的一处构造；PasswordAdmin 只取命名空间核对库名，不构造任何名字类，不在名单上）；以及定义这几个类型的三个类。
      */
     static final Set<String> CONSTRUCTION_SITES = Set.of(
             "game-discovery/src/main/java/com/game/discovery/namespace/GameNamespaceAutoConfiguration.java",
             "game-discovery/src/main/java/com/game/discovery/namespace/GameNamespaceBinder.java",
             "game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java",
+            "game-data/src/main/java/com/game/data/tools/playerbundle/PlayerBundleExport.java",
             "game-guild/src/main/java/com/game/guild/asset/fix/AssetOpFixEnvironment.java",
             "game-common/src/main/java/com/game/common/GameNamespace.java",
             "game-common/src/main/java/com/game/common/KafkaNames.java",
@@ -225,8 +226,10 @@ class NamespaceLiteralGuardTest {
         // 白名单不悄悄变宽：名单上的每个文件都还在构造（定义类型的三个类除外）
         CONSTRUCTION_SITES.stream().filter(file -> !file.startsWith("game-common/") && !file.endsWith("/RedisKeys.java")).forEach(file ->
                 assertThat(CONSTRUCTION.matcher(sources.get(file)).find()).as("%s 还在构造名字类，否则从白名单删掉", file).isTrue());
-        // 三个命令行工具取命名空间都经同一个入口（与服务进程同口径），不另写一套只认环境变量的取值
+        // 命令行工具取命名空间都经同一个入口（与服务进程同口径），不另写一套只认环境变量的取值
         for (String tool : List.of("game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java",
+                "game-data/src/main/java/com/game/data/tools/playerbundle/PlayerBundleExport.java",
+                "game-data/src/main/java/com/game/data/tools/playerbundle/PlayerBundleImport.java",
                 "game-guild/src/main/java/com/game/guild/asset/fix/AssetOpFixEnvironment.java",
                 "game-login/src/main/java/com/game/login/tools/PasswordAdmin.java")) {
             assertThat(sources.get(tool)).as(tool).contains("GameNamespaceBinder.bind(").doesNotContain("getenv(\"GAME_NAMESPACE\")")

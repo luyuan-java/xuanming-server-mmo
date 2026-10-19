@@ -207,6 +207,8 @@ public final class SceneWorld {
     private final CrossNodeSwitch crossNode;
     private final SceneInstances instances;
     private final BattleHooks battle;
+    /** 玩家持久收件箱消费端的钩子（mmorpg player-inbox-service.md §7、§12）。 */
+    private final InboxHooks inbox;
     /** 跨 zone 传送（226，批次 5.4）的装配：本 zone 号、选目标、在队检查与三个时限。 */
     private final ZoneTravel zoneTravel;
 
@@ -318,6 +320,19 @@ public final class SceneWorld {
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
                       TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances, BattleHooks battle,
                       ZoneTravel zoneTravel) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots, locations,
+                teamFollow, crossNode, instances, battle, zoneTravel, InboxHooks.NONE);
+    }
+
+    /**
+     * @param inbox 玩家持久收件箱消费端的钩子（落地拉取、落盘后确认、离场补发确认、战斗解冻重查；{@link InboxHooks#NONE} = 不接收件箱）
+     */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
+                      TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances, BattleHooks battle,
+                      ZoneTravel zoneTravel, InboxHooks inbox) {
+        this.inbox = Objects.requireNonNull(inbox, "inbox");
         this.zoneTravel = Objects.requireNonNull(zoneTravel, "zoneTravel");
         this.battle = battle;
         this.crossNode = crossNode;
@@ -1488,6 +1503,8 @@ public final class SceneWorld {
         teamFollow.onEnteredScene(this, player);
         // 进场恢复（scene-battle-spec §7.8）：组队跟随之后（同基线组队 3.5 步在战斗 6 步之前）；同 epoch 接替旧实例时沿用它的冻结
         battle.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
+        // 收件箱落地拉取（mmorpg 设计 §7.3 第 1 条）：战斗进场恢复之后；同 epoch 接替旧实例时沿用它的运行时（不算新落地）
+        inbox.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
     }
 
     /** 两份写回内容相同（不比 owner_epoch：库里的 epoch 已被这次进场夺权改掉）。 */
@@ -2846,6 +2863,8 @@ public final class SceneWorld {
                 if (playersById.get(player.playerId()) == player) {
                     // 快路径销账（scene-battle-spec §7.12，D19）：账本条目此刻已在落库快照里的逐条销账
                     battle.onPersisted(this, player);
+                    // 收件箱：落盘之后才确认的快路径（结局此刻已在落库快照里的，确认掉）
+                    inbox.onPersisted(this, player);
                 }
             }
             case FAILED -> {
@@ -2906,7 +2925,17 @@ public final class SceneWorld {
             PlayerSave written = player.toSave();
             repository.save(written);
             snapshots.capture(written, PlayerSnapshots.Cause.LOGOUT);
+            // 收件箱：带写回离场时对已落盘、待确认的结局尽力补发一次确认（不等回包；交出 / 失去归属 / 写回被拒这几种收尾不补发）
+            inbox.onLeaving(this, player);
         }
+    }
+
+    /**
+     * 回合制战斗冻结解除之后（{@code PlayerBattleService} 解冻的唯一入口调）：之前因为战斗延后的收件箱检查立即重查（mmorpg 设计 §7.3 第 4 条）。
+     * 逻辑线程上调用。
+     */
+    public void battleFreezeCleared(ScenePlayer player) {
+        inbox.onBattleFreezeCleared(this, player);
     }
 
     private MessageContent destroyMessage(ScenePlayer player) {
@@ -2948,6 +2977,8 @@ public final class SceneWorld {
             PlayerSave written = player.toSave();
             repository.save(written);
             snapshots.capture(written, PlayerSnapshots.Cause.LOGOUT);
+            // 收件箱：停服写回同样是带写回的离场，尽力补发一次已落盘结局的确认（客户端可能先于回包关掉，无害）
+            inbox.onLeaving(this, player);
         }
         playersById.clear();
         playersBySession.clear();

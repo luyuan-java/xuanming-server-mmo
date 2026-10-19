@@ -48,7 +48,9 @@ final class RedissonPlayerRedis implements PlayerRedis {
         Config config = new Config();
         config.useSingleServer().setAddress(address).setDatabase(database)
                 .setPassword(password == null || password.isEmpty() ? null : password)
-                .setConnectionMinimumIdleSize(1).setConnectionPoolSize(2).setTimeout(5000).setRetryAttempts(1);
+                .setConnectionMinimumIdleSize(1).setConnectionPoolSize(2)
+                .setSubscriptionConnectionMinimumIdleSize(1).setSubscriptionConnectionPoolSize(1)
+                .setTimeout(5000).setRetryAttempts(1);
         return new RedissonPlayerRedis(Redisson.create(config));
     }
 

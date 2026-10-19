@@ -80,6 +80,7 @@ public record SceneNodeProperties(
      *                              超出回 OVERLOADED（零副作用），不排队进逻辑线程
      * @param battle                回合制战斗（{@code game.scene.battle.*}，scene-battle-spec §8）
      * @param travel                跨 zone 传送（批次 5.4，{@code game.scene.travel.*}，zone-travel-spec §6.2）
+     * @param inbox                 玩家持久收件箱消费端（{@code game.scene.inbox.*}，mmorpg player-inbox-service.md §3.3、§7.3、§12）
      */
     public record SceneSettings(
             @DefaultValue("127.0.0.1") String linkBindHost,
@@ -108,7 +109,8 @@ public record SceneNodeProperties(
             @DefaultValue InstanceSettings instance,
             @DefaultValue("256") int battleRpcMaxInflight,
             @DefaultValue BattleSettings battle,
-            @DefaultValue TravelSettings travel) {
+            @DefaultValue TravelSettings travel,
+            @DefaultValue InboxSettings inbox) {
 
         public SceneSettings {
             // 启动期校验（不满足即拒启）：续约周期 < M < 租约 − 续约周期，语句时限 < M
@@ -210,6 +212,29 @@ public record SceneNodeProperties(
                     || teamCheckTimeout.compareTo(MAX_TEAM_CHECK_TIMEOUT) > 0) {
                 throw new IllegalArgumentException("game.scene.travel.team-check-timeout 必须为正且不超过 "
                         + MAX_TEAM_CHECK_TIMEOUT.toSeconds() + "s: " + teamCheckTimeout);
+            }
+        }
+    }
+
+    /**
+     * 玩家持久收件箱消费端（{@code game.scene.inbox}，mmorpg player-inbox-service.md §3.3、§7.3、§12）。不满足校验拒启。
+     *
+     * @param consumerEnabled      是否消费（缺省 false）。<b>权威值在 git 跟踪的 application.yaml</b>（开关只有一个来源，mmorpg 评审 H1）；
+     *                             关闭时不拉取，启动时与之后每 5 分钟打 WARN {@code metric=inbox_consumer_disabled}；节点目录发布它，game-inbox 的写前门禁据此拒绝入箱
+     * @param periodicFetchMinutes 在线有界兜底（分钟，±20% 抖动；0 = 关闭；缺省 30，0..1440）
+     * @param url                  game-inbox 的直连地址（{@code tri://host:port}，缺省 {@code tri://127.0.0.1:20918}；只支持直连，同 scene-manager-url）
+     */
+    public record InboxSettings(
+            @DefaultValue("false") boolean consumerEnabled,
+            @DefaultValue("30") int periodicFetchMinutes,
+            @DefaultValue("tri://127.0.0.1:20918") String url) {
+
+        public InboxSettings {
+            if (periodicFetchMinutes < 0 || periodicFetchMinutes > 1440) {
+                throw new IllegalArgumentException("game.scene.inbox.periodic-fetch-minutes 必须在 0..1440 之间: " + periodicFetchMinutes);
+            }
+            if (url == null || !url.trim().startsWith("tri://")) {
+                throw new IllegalArgumentException("game.scene.inbox.url 必须是 tri://host:port: " + url);
             }
         }
     }

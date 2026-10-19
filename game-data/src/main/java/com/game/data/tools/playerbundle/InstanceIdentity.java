@@ -70,22 +70,23 @@ final class InstanceIdentity {
     }
 
     /**
-     * 闸门二：目标身份必须取得到，且不等于导出包记录的任何一个来源身份；通过返回 null，否则返回报错文本。
+     * 闸门二：目标身份与导出包记录的<b>同类</b>来源身份（库比库、Redis 比 Redis）都必须取得到，且两者不相同；通过返回 null，否则返回报错文本。
+     * 任一侧取不到都拒绝：无法证明「不是导出来源」就不写。
      *
-     * @param what      写目标的名字（MySQL / Redis）
-     * @param target    目标实例身份；null = 取不到
-     * @param exported  导出包记录的来源身份（null 元素忽略；全为 null 时同样拒绝——无从比对）
+     * @param what     写目标的名字（MySQL / Redis）
+     * @param target   目标实例身份；null = 取不到
+     * @param exported 导出包记录的同类来源身份；null = 导出时没取到（或 {@code --skip-redis} 没读 Redis）
      */
-    static String checkNotExportSource(String what, String target, List<String> exported) {
+    static String checkNotExportSource(String what, String target, String exported) {
         if (target == null) {
             return what + " 取不到实例身份（MySQL 需要 @@server_uuid，TiDB 需要 INFORMATION_SCHEMA.CLUSTER_INFO，Redis 需要 INFO server 的 run_id）："
                     + "无法证明它不是导出来源，拒绝写入";
         }
-        List<String> known = exported.stream().filter(id -> id != null && !id.isBlank()).toList();
-        if (known.isEmpty()) {
-            return "导出包没有记录来源实例身份：无法证明 " + what + " 不是导出来源，拒绝写入（用当前版本的导出工具重新导出）";
+        if (exported == null || exported.isBlank()) {
+            return "导出包没有记录 " + what + " 的来源实例身份（导出时没取到，或用了 --skip-redis）：无法证明本地 " + what
+                    + " 不是导出来源，拒绝写入；重新导出（不带 --skip-redis）";
         }
-        if (known.contains(target)) {
+        if (exported.equals(target)) {
             return what + " 与导出来源是同一个实例（身份 " + target + "）：导入只写隔离环境，检查是不是把线上 port-forward 当成了本地";
         }
         return null;

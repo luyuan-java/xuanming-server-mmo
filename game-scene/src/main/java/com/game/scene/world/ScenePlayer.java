@@ -10,6 +10,8 @@ import com.game.proto.Transform;
 import com.game.scene.asset.AssetOpLedger;
 import com.game.scene.battle.BattleLedger;
 import com.game.scene.battle.PlayerBattle;
+import com.game.scene.inbox.InboxLedger;
+import com.game.scene.inbox.PlayerInboxRuntime;
 import com.game.scene.player.GainWindows;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
@@ -77,6 +79,13 @@ public final class ScenePlayer {
     private final AssetOpLedger assetLedger;
     /** 回合制战斗结算账本（与资产同一份记录、同一次围栏写；加载时校验，损坏则原样带回，结算一律延后、备战一律 1006，scene-battle-spec §7.12）。 */
     private final BattleLedger battleLedger;
+    /**
+     * 玩家持久收件箱的消费账本（与 GM 处置的效果同一份记录、同一次围栏写；加载时校验，损坏则原样带回并停用该玩家的收件箱；
+     * mmorpg player-inbox-service.md §4.4）。
+     */
+    private final InboxLedger inboxLedger;
+    /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
+    private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
     private final PlayerBattle battle = new PlayerBattle();
     /** 角色名（存档列 player.name；战斗快照的 player_name）。 */
@@ -131,6 +140,7 @@ public final class ScenePlayer {
         this.pets = state.hasPets() ? PlayerPets.restore(state.getPets()) : PlayerPets.empty();
         this.assetLedger = state.hasAssetLedger() ? AssetOpLedger.restore(state.getAssetLedger()) : AssetOpLedger.empty();
         this.battleLedger = state.hasBattleLedger() ? BattleLedger.restore(state.getBattleLedger()) : BattleLedger.empty();
+        this.inboxLedger = state.hasInboxLedger() ? InboxLedger.restore(state.getInboxLedger()) : InboxLedger.empty();
     }
 
     public long playerId() {
@@ -348,6 +358,9 @@ public final class ScenePlayer {
         if (!battleLedger.isPristine()) {
             state.setBattleLedger(battleLedger.toState());
         }
+        if (!inboxLedger.isPristine()) {
+            state.setInboxLedger(inboxLedger.toState());
+        }
         return state.build();
     }
 
@@ -389,6 +402,21 @@ public final class ScenePlayer {
     /** 回合制战斗结算账本（逻辑线程上读写；写入只经战斗结算服务）。 */
     public BattleLedger battleLedger() {
         return battleLedger;
+    }
+
+    /** 收件箱消费账本（逻辑线程上读写；写入只经收件箱消费端）。 */
+    public InboxLedger inboxLedger() {
+        return inboxLedger;
+    }
+
+    /** 收件箱运行时状态；null = 还没在本节点落地过（或消费关闭）。 */
+    public PlayerInboxRuntime inboxRuntime() {
+        return inboxRuntime;
+    }
+
+    /** 只供收件箱消费端调用（落地时建、同 epoch 接替时转交）。 */
+    public void setInboxRuntime(PlayerInboxRuntime runtime) {
+        this.inboxRuntime = runtime;
     }
 
     /** 回合制战斗运行态（逻辑线程上读写；改冻结只经 {@code PlayerBattleService}）。 */

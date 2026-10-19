@@ -45,11 +45,11 @@
     `@ConditionalOnMissingBean`（使用方自己定义了就让路），`GameNamespace` 不让路（它就是绑定校验后的配置值，唯一来源）。
   - MySQL 库名 = `<ns>`（yaml 的 JDBC URL 写 `${game.namespace:game}`，部署只覆盖 host / port）；连库的服务进程（`NamespaceDatabaseVerifier`）与命令行工具都核对 `DATABASE()`。
     服务进程的应急开关 `game.mysql.expect-database` 同样是 `@ConfigurationProperties` + `@Validated`（`GameMysqlProperties`），不在代码里现取 Environment。
-  - 不起 Spring 的命令行工具（AuditFallbackReplay、PasswordAdmin、assetopfix）一律经 game-discovery 的 `GameNamespaceBinder` 取命名空间：与服务进程同一个
+  - 不起 Spring 的命令行工具（AuditFallbackReplay、PasswordAdmin、assetopfix、玩家排障导出 / 导入 PlayerBundleExport / PlayerBundleImport）一律经 game-discovery 的 `GameNamespaceBinder` 取命名空间：与服务进程同一个
     `GameNamespaceProperties`、同一套宽松绑定（`-Dgame.namespace` 优先于环境变量 `GAME_NAMESPACE`，assetopfix 再到它的 `-f` yaml），再自己 `new` 名字类。
     部署推荐经环境变量 `GAME_NAMESPACE` 给值、不写进 yaml；工具与服务进程拿同一个 `GAME_NAMESPACE`（或 `-Dgame.namespace`）即同值。
-  - main 代码里不得静态持有命名空间或名字类实例，也不得在装配类（`GameNamespaceAutoConfiguration`）、`GameNamespaceBinder` 与两个命令行工具（AuditFallbackReplay、
-    assetopfix）之外 `new RedisKeys` / `new KafkaNames` / `GameNamespace.of`；不得写死 `game:` 键或未登记的 `"game-…"` 名字（game-robot 的 `NamespaceLiteralGuardTest`
+  - main 代码里不得静态持有命名空间或名字类实例，也不得在装配类（`GameNamespaceAutoConfiguration`）、`GameNamespaceBinder` 与三个命令行工具入口（AuditFallbackReplay、
+    assetopfix、PlayerBundleExport——玩家排障导入共用它的那一处构造）之外 `new RedisKeys` / `new KafkaNames` / `GameNamespace.of`；不得写死 `game:` 键或未登记的 `"game-…"` 名字（game-robot 的 `NamespaceLiteralGuardTest`
     守着）。配置键 `game.`、环境变量 `GAME_`、包名、指标名不跟命名空间走。
 - **线程所有权**：scene 的场景状态只在场景逻辑线程读写；gate 的会话状态只在该连接的 EventLoop 上读写；
   阻塞 I/O（MySQL / Redis）不得在 Netty I/O 线程或场景逻辑线程上执行，结果投递回所属线程。

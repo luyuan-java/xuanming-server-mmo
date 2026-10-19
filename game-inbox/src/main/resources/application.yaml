@@ -1,0 +1,82 @@
+# game-inbox：玩家持久收件箱 v1（GM 处置域）。全服一个无状态提供方（可多副本），收件箱三张表与玩家表 / 玩家状态表在同一个部署命名空间库。
+#
+# 秘密只从环境变量注入，不写进本文件：
+#   GAME_MYSQL_PASSWORD      权威库密码
+#   GAME_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填，与 game-scene 一致；缺失即拒绝启动）
+#   GAME_INBOX_ADMIN_TOKEN   收件箱运维接口的独立口令（不与 GAME_ADMIN_TOKEN 共用；不设 = /admin/inbox/** 一律 503）
+spring:
+  application:
+    name: game-inbox
+  main:
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
+    username: ${GAME_MYSQL_USER:root}
+    password: ${GAME_MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    druid:
+      initial-size: 1
+      min-idle: 1
+      max-active: 16
+      max-wait: 1000
+      # 2 = READ COMMITTED（URL 里的会话变量是第二道保证；收件箱的锁内复读要看得见前一个持锁者已提交的行）
+      default-transaction-isolation: 2
+# 管理端口：/actuator/health、/actuator/prometheus 与运维接口 /admin/inbox/**（缺省只绑本机）
+server:
+  port: 18118
+  address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
+  tomcat:
+    threads:
+      max: 8
+      min-spare: 1
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+game:
+  inbox:
+    require-tidb: true
+    # 入箱白名单（PlayerInboxMessageType 的枚举名）。这是入箱开关的唯一来源（mmorpg 设计 §3.3），权威值就是这份 git 跟踪的文件。
+    # 缺省空 = 全部停用。v1 只放封锁 / 解封两种；列进 PLAYER_INBOX_MSG_GM_ATTACH_CURRENCY_DEBT 即拒启（欠款合并语义与撤销路径未就绪）。
+    # 打开前 scene 必须已开消费（game-scene 的 game.scene.inbox.consumer-enabled）：入箱前的写前门禁读线上 scene 节点目录，
+    # 任一节点没开就回 Disabled。上线顺序：scene 先以关消费上线（回滚下限）→ 开消费 → 再开这里（mmorpg 设计 §11.7）。
+    enqueue-types: []
+    request-budget: 3s
+    worker-threads: 8
+    worker-queue-capacity: 1024
+    # 终态行保留期（必须 > 签发窗 7d）；清理每轮最多删 500 行
+    terminal-retention: 30d
+    sweep-interval: 10m
+    notify-resend-interval: 30s
+    gauge-interval: 60s
+    # 对账（0 = 不跑）；窗口必须覆盖至少两轮间隔
+    reconcile-interval: 60m
+    reconcile-window: 24h
+    leader-ttl: 30s
+  redis:
+    address: ${GAME_REDIS_ADDRESS:redis://127.0.0.1:6379}
+    database: 12
+dubbo:
+  application:
+    name: game-inbox
+    qos-enable: false
+    serialize-check-status: STRICT
+  protocol:
+    name: tri
+    port: 20918
+    serialization: protobuf
+  registry:
+    address: N/A
+  consumer:
+    check: false
+    retries: 0
+    timeout: 3500
+  provider:
+    timeout: 3500
+    retries: 0

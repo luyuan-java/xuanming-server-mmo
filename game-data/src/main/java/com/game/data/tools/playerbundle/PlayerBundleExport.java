@@ -27,7 +27,7 @@ import java.util.function.LongSupplier;
 
 /**
  * 单玩家排障导出（只读）：把一名玩家在库里与 Redis 里的相关数据导成一份 JSON（{@link PlayerBundle}），带判读、来源实例身份、操作人与原因。
- * 使用手册见 {@code docs/ops/player-bundle-debug.md}。
+ * 使用手册见 {@code docs/design/player-bundle-debug.md}。
  *
  * <p>用法（在仓库根目录，game-data 已打包）：
  * <pre>
@@ -176,8 +176,11 @@ public final class PlayerBundleExport {
                     redisEntries.add(PlayerRedisKeys.render(specs.get(i), raw.get(i)));
                 }
             } catch (RuntimeException e) {
-                err.println("Redis 读取失败：" + e.getClass().getSimpleName() + "；可加 --skip-redis 只导库");
+                err.println("Redis 读取失败：" + e.getClass().getSimpleName() + "；可加 --skip-redis 只导库（这样的包不能导入本地）");
                 return 1;
+            }
+            if (redisIdentity == null) {
+                err.println("警告：取不到 Redis 的实例身份（INFO server 没有 run_id），导入端会拒绝用这份包写本地");
             }
         }
         List<String> readNotes = new ArrayList<>();

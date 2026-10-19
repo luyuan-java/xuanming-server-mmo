@@ -1160,6 +1160,10 @@ public final class PlayerBattleService implements BattleHooks {
             return CompletableFuture.completedFuture(null);
         }
         player.battle().setFreeze(null);
+        if (world != null) {
+            // 收件箱：之前因为战斗延后的检查立即重查（解冻在这一刻已生效，不等删锁的结局）
+            world.battleFreezeCleared(player);
+        }
         if (action == LockAction.KEEP_LOCK) {
             teamFollow.onBattleFreezeCleared(world, player);
             return CompletableFuture.completedFuture(null);
