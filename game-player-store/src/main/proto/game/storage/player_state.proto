@@ -35,6 +35,36 @@ message PlayerState {
   // 回合制战斗结算幂等账本（mmorpg BattleSettlementLedgerComp 的 Java 自有对应，scene-battle-spec §7.12）：只登记「已应用、销账未确认」的局，
   // 稳态 0~1 条，上限 64 是异常兜底。与资产同一份记录、同一次围栏写——「这一局已应用」与资产同生共死。没有这段 = 没有待销账的局。
   BattleLedgerState battle_ledger = 9;
+  // 玩家持久收件箱的消费账本（mmorpg PlayerInboxLedgerComp 的 Java 自有对应，mmorpg docs/design/player-inbox-service.md §4.4）：
+  // 每个域「按 seq 升序已处理到哪」与最近 32 条结局，与 GM 处置的效果（currency.blocked_types 等）同一份记录、同一次围栏写。
+  // 没有这段 = 从没消费过收件箱。回档不改它（与 blocked_types 同口径：处置状态不是资产，见 game-data RestoreBuilder）。
+  InboxLedgerState inbox_ledger = 10;
+}
+
+// 收件箱消费账本：每个域一条游标，按 domain 无符号升序写出（周期存盘按值比对，顺序必须确定；查找一律按 domain 字段，不靠下标）。
+message InboxLedgerState {
+  repeated InboxDomainCursorState cursors = 1;
+}
+
+// 一个域（PlayerInboxDomain）的游标。
+message InboxDomainCursorState {
+  uint32 domain = 1;
+  // 已按 seq 升序处理到这里（含）；seq 只增，0 = 这个域还没处理过任何条目。
+  uint64 decided_through_seq = 2;
+  // 最近结局环：按 seq 严格升序、都不超过 decided_through_seq，至多 32 条（超出挤掉最旧的）；重复投递时按它回放原结局。
+  repeated InboxDecisionState recent = 3;
+}
+
+// 一条已定的结局（mmorpg PlayerInboxDecision 的 Java 自有对应）。
+message InboxDecisionState {
+  uint64 seq = 1;
+  // PlayerInboxOutcome：只有 APPLIED / REJECTED / SKIPPED 进环（UNKNOWN 只确认、不入环）。
+  uint32 outcome = 2;
+  // REJECTED：消费方给的 tip id；SKIPPED：PlayerInboxVoidReason；APPLIED：0。
+  uint32 reason = 3;
+  // 回放前核对（同 seq 的 request_id 与 msg_type 都要一致），也供对账。
+  uint64 request_id = 4;
+  uint32 msg_type = 5;
 }
 
 // 回合制战斗结算账本：按 battle_id 无符号升序写出（周期存盘按值比对，顺序必须确定）。
