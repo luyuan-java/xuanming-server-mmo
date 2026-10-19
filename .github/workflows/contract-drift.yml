@@ -39,6 +39,7 @@ jobs:
             data/schema
             data/scene_nav_bin/current_maps
             generated/code/proto
+            generated/code/java/tip
             generated/tables
             cpp/generated/table/code/constants
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1

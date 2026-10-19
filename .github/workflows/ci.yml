@@ -99,6 +99,7 @@ jobs:
             proto
             data/schema
             generated/code/proto
+            generated/code/java/tip
             generated/tables
             cpp/generated/table/code/constants
       - name: 稀疏检出地图覆盖来源（独立提交）
