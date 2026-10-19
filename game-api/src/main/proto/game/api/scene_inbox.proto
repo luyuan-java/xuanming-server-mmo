@@ -1,0 +1,34 @@
+// Java 版内部契约：玩家持久收件箱的在线提醒（game-inbox → scene，com.game.api.SceneInboxService）。
+// 每个 scene 节点在资产 RPC 端口（game.scene.asset-rpc-port）上与资产通道、回合制战斗入口一并导出，group scene-inbox，register = false；
+// game-inbox 按玩家位置记录 + Redis 节点目录直连，引用 retries = 0。对应基线 Kafka scene-cmd 上的 PlayerInboxNotifyEvent
+// （mmorpg docs/design/player-inbox-service.md §6.3）：**只是提醒**，scene 收到后把这名玩家这个域的下一次检查提前，真正的条目仍由 scene 自己拉。
+// 只在 Java 版内部使用，不在两版共享的客户端契约里。
+syntax = "proto3";
+
+package game.api;
+
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+message SceneInboxNotify {
+  // 必填：调用方从节点目录读到的 scene 实例；与本进程不符 → NOT_HERE（等价基线 Kafka 的 target_instance_id 过滤，AGENTS §7 #2）。
+  string target_instance_id = 1;
+  uint64 player_id = 2;
+  // PlayerInboxDomain 的数值。
+  uint32 domain = 3;
+}
+
+enum SceneInboxNotifyStatus {
+  // 不认识 / 没填：调用方按传输失败处理。
+  SCENE_INBOX_NOTIFY_UNSPECIFIED = 0;
+  // 已投递到场景逻辑线程（玩家此刻不在本节点时 scene 丢弃，下次落地会无条件拉）。
+  SCENE_INBOX_NOTIFY_ACCEPTED = 1;
+  // target_instance_id 不是本进程（节点号已被新进程接手）。
+  SCENE_INBOX_NOTIFY_NOT_HERE = 2;
+  // 在途调用已满，没进逻辑线程、零副作用。
+  SCENE_INBOX_NOTIFY_OVERLOADED = 3;
+}
+
+message SceneInboxNotifyReply {
+  SceneInboxNotifyStatus status = 1;
+}

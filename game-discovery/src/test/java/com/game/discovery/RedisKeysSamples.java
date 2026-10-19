@@ -70,6 +70,7 @@ final class RedisKeysSamples {
                 new Sample("worldLeader", k -> k.worldLeader(1), "game:world:{z:1}:leader"),
                 new Sample("worldReservations", k -> k.worldReservations(1, 77), "game:world:{z:1}:resv:77"),
                 new Sample("worldZones", RedisKeys::worldZones, "game:world:zones"),
+                new Sample("inboxMaintenanceLeader", RedisKeys::inboxMaintenanceLeader, "game:inbox:leader"),
                 new Sample("killSwitch", RedisKeys::killSwitch, "game:killswitch"),
                 new Sample("loginQueue", k -> k.loginQueue(1), "game:login-queue:1"),
                 new Sample("loginQueueAdmitted", k -> k.loginQueueAdmitted(1), "game:login-queue-admitted:1"),

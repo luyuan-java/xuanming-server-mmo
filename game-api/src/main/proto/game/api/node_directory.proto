@@ -45,6 +45,9 @@ message SceneNodeInfo {
   // 节点用途（5.3 预留，取值沿用基线 go/scene_manager/internal/constants/scene_type.go:9-19：0 主世界、1 副本、2 跨服主世界、3 跨服副本）。
   // 5.1 恒 0，读方不按它分池（D15）。
   uint32 scene_node_type = 10;
+  // 本节点是否消费玩家持久收件箱（game.scene.inbox.consumer-enabled，git 跟踪的配置；mmorpg player-inbox-service.md §3.3）。
+  // game-inbox 入箱前的写前门禁读它：任一在线 scene 节点为 false（含不认识这个字段的旧版本节点）就拒绝入箱，不让条目停在没人消费的箱里。
+  bool inbox_consumer_enabled = 11;
 }
 
 message SceneEntry {

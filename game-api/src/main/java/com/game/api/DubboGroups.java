@@ -31,6 +31,18 @@ public final class DubboGroups {
     public static final String RANK = "rank";
 
     /**
+     * 玩家持久收件箱的消费方接口（{@link PlayerInboxService}：scene 拉取 / 确认），由 game-inbox 提供。服务对服务的类型化接口，不占消息号、gate 够不到；
+     * 不叫 {@code player_inbox}：那是契约 proto 一级目录的名字，留给（不存在的）客户端入口。
+     */
+    public static final String INBOX = "inbox";
+
+    /**
+     * scene 节点的收件箱在线提醒入口（{@link SceneInboxService}），每个 scene 节点与 {@link #SCENE_ASSET} 同一个端口各自导出、{@code register = false}，
+     * game-inbox 按玩家位置记录与节点目录直连。
+     */
+    public static final String SCENE_INBOX = "scene-inbox";
+
+    /**
      * 匹配（{@code proto/match/...}，服务 {@code match.MatchService}），由 game-match 提供（批次 6.4，match-spec §9.1）。同一个 group 下有三个接口：
      * gate 调的 {@link ClientMessageService}、game-team 调的 {@link MatchTeamService}（整队开战）、game-guild 调的 {@link MatchInternalService}
      * （帮会活动开战）；后两个是服务对服务的类型化接口，不占消息号、gate 够不到（先例 {@link #GUILD} 下的 {@link GuildInternalService}）。

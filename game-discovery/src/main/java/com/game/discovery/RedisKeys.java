@@ -325,6 +325,14 @@ public final class RedisKeys {
         return prefix + "world:zones";
     }
 
+    /**
+     * 玩家持久收件箱后台维护的领导锁 {@code game:inbox:leader}（STRING：持有者令牌 {@code <instanceId>:<uuid>}，PX = 锁 TTL，持有者续期）。
+     * 清理、提醒补发、扫描型 gauge、对账只在持有者上跑（mmorpg {@code player_inbox:maintenance:leader}，设计 §10）。全服一把，game-inbox 写。
+     */
+    public String inboxMaintenanceLeader() {
+        return prefix + "inbox:leader";
+    }
+
     private String worldZonePrefix(int zoneId) {
         return prefix + "world:{z:" + Integer.toUnsignedString(zoneId) + "}:";
     }
