@@ -143,7 +143,7 @@
 
 | 字段 | 号 | 类型 | 值 |
 |---|---|---|---|
-| `entity` | 1 | uint64 | 进视野实体在场景内的实体号（C++ 是 `entt::to_integral`，会复用，Java 用非 0 雪花号）。**不是 player_id** |
+| `entity` | 1 | uint64 | 进视野实体在场景内的实体号（C++ 为 `(node_id << 32) + seq`：同时在线的节点之间唯一、本进程内不复用，进程重启后可能重发；Java 用非 0 雪花号，跨重启唯一）。**不是 player_id** |
 | `transform` | 2 | Transform | **只拷 `location`**，`rotation` 和 `scale` 不填。没有 Transform 组件时整个字段不写 |
 | `actor_type` | 3 | enum | 玩家为 `ACTOR_TYPE_PLAYER=1`，NPC 为 `ACTOR_TYPE_NPC=2` |
 | `guid` | 4 | uint64 | `Guid` 组件，也就是玩家的 **player_id**。NPC 没有，为 0 |

@@ -197,7 +197,12 @@ class TradeScenarioTest {
         MessageIdRegistry registry = MessageIdRegistry.loadFromClasspath();
         List<MessageMethod> jubaozhai = registry.all().stream().filter(m -> m.serviceName().equals("ClientPlayerJubaozhai")).toList();
         assertThat(jubaozhai).extracting(MessageMethod::methodName)
-                .containsExactlyInAnyOrder("BrowseListings", "GetListingDetail", "SetFavorite", "GetMyShelf");
+                .containsExactlyInAnyOrder("BrowseListings", "GetListingDetail", "SetFavorite", "GetMyShelf",
+                        "ListOfficialSkus", "CreateOfficialOrder", "GetCommerceOrder", "CancelCommerceOrder", "ListCommerceOrders",
+                        "CreatePlayerTrade", "ConfirmPlayerTrade", "CreateConsignment", "BuyConsignment", "CancelConsignment",
+                        "PlaceMarketOrder", "CancelMarketOrder", "ListMarketOrders", "GetMarketDepth",
+                        "CreateAuctionLot", "PlaceAuctionBid", "GetAuctionLot", "CancelAuctionLot",
+                        "BrowseCommerceOffers", "ListTradeMarkets");
         for (MessageMethod method : jubaozhai) {
             assertThat(method.clientService()).as(method.key()).isTrue();
             Descriptors.FieldDescriptor field = method.responsePrototype().getDescriptorForType().findFieldByName("error_message");
@@ -206,6 +211,7 @@ class TradeScenarioTest {
             assertThat(field.getMessageType()).as(method.key()).isEqualTo(TipInfoMessage.getDescriptor());
         }
         MessageMethod seed = registry.byId(registry.requireId("TradeAdmin", "SeedListing")).orElseThrow();
+        assertThat(seed.messageId()).as("199 保留给内部播种协议").isEqualTo(199);
         assertThat(seed.clientService()).as("199 不是客户端协议服务：gate 丢弃").isFalse();
         assertThat(seed.requestPrototype().getDescriptorForType()).isEqualTo(SeedListingRequest.getDescriptor());
     }

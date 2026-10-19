@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Test;
  *       别处一律构造器注入；</li>
  *   <li>R4：旧的进程级全局机制（静态 get / set、NamespaceHolder、EnvironmentPostProcessor / FailureAnalyzer、spring.factories、
  *       {@code @Tag("namespace")} 与 surefire 钉值）不回来；根 pom 的 surefire 排除会改变部署行为的环境变量（测试与开发者 shell 隔离，不是钉值）；</li>
- *   <li>R5：9 个进程的 JDBC URL 按缺省命名空间解析后与以前逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
+ *   <li>R5：12 个进程的 JDBC URL 按缺省命名空间解析后与以前逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
  *       registry 的 namespace（缺省行为不变：由部署显式给，{@code GAME_NACOS_ADDR} 带 {@code ?namespace=} 或 {@code dubbo.registry.parameters.namespace}）；13 个进程都直接依赖 game-discovery；</li>
  *   <li>R6：compose 预建哪个库由独立的 {@code GAME_MYSQL_INIT_DATABASE} 决定（没设取 game，空值 = 不预建），不读进程租户 {@code GAME_NAMESPACE}。</li>
  * </ul>
@@ -122,6 +122,10 @@ class NamespaceLiteralGuardTest {
             Map.entry("game-battle/src/main/java/com/game/battle/port/scene/SceneTransport.java", Set.of("game-battle-scene")),
             Map.entry("game-battle/src/main/java/com/game/battle/rpc/BattleRpcServer.java", Set.of("game-battle")),
             Map.entry("game-guild/src/main/java/com/game/guild/GuildConfiguration.java", Set.of("game-guild-asset")),
+            // 资产与投榜客户端的隔离 Dubbo 应用名，经 IsolatedDubboModule 直连，不是 Kafka 身份或线程名。
+            Map.entry("game-mail/src/main/java/com/game/mail/MailConfiguration.java", Set.of("game-mail-asset")),
+            Map.entry("game-trade/src/main/java/com/game/trade/commerce/CommerceConfiguration.java", Set.of("game-trade-assets")),
+            Map.entry("game-match/src/main/java/com/game/match/global/RatingRankOutbox.java", Set.of("game-match-rank-outbox")),
             Map.entry("game-match/src/main/java/com/game/match/MatchConfiguration.java", Set.of("game-match-scene-battle", "game-match-battle-node")),
             Map.entry("game-match/src/main/java/com/game/match/placement/PlacementClients.java", Set.of("game-match-battle-placement")),
             Map.entry("game-data/src/main/java/com/game/data/rollback/DubboGuildInternalClient.java", Set.of("game-data-guild-check")),
@@ -320,30 +324,38 @@ class NamespaceLiteralGuardTest {
 
     // ================================================================ R5：yaml 与模块依赖
 
-    /** 引入命名空间之前 9 个进程 application.yaml 里的 JDBC URL（金样）。 */
-    private static final Map<String, String> GOLDEN_JDBC_URLS = Map.of(
-            "game-data", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000"
-                    + "&socketTimeout=30000&useAffectedRows=true",
-            "game-friend", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+    /** JDBC 完整模板金样：原 8 条不变，帮会已切 TiDB host/port，新补邮件、商城、排行榜；只替换库名占位符。 */
+    private static final Map<String, String> GOLDEN_JDBC_URLS = Map.ofEntries(
+            Map.entry("game-data", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000"
+                    + "&socketTimeout=30000&useAffectedRows=true"),
+            Map.entry("game-friend", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
-                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=3",
-            "game-gateway", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
-                    + "&connectTimeout=3000&socketTimeout=10000",
-            "game-guild", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=3"),
+            Map.entry("game-gateway", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&connectTimeout=3000&socketTimeout=10000"),
+            Map.entry("game-guild", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
-                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1",
-            "game-login", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
-                    + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000",
-            "game-match", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
+            Map.entry("game-login", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000"),
+            Map.entry("game-mail", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true"
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
+            Map.entry("game-mall", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&characterEncoding=utf8"
+                    + "&connectTimeout=3000&socketTimeout=6000&useAffectedRows=true"),
+            Map.entry("game-match", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
-                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1",
-            "game-scene", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
-                    + "&connectTimeout=3000&socketTimeout=10000",
-            "game-team", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000"
-                    + "&socketTimeout=4000",
-            "game-trade", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
+            Map.entry("game-rank", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true"
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
+            Map.entry("game-scene", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&connectTimeout=3000&socketTimeout=10000"),
+            Map.entry("game-team", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000"
+                    + "&socketTimeout=4000"),
+            Map.entry("game-trade", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
-                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2");
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2"));
 
     private static final Pattern JDBC_URL_LINE = Pattern.compile("^\\s+url:\\s+\"?(jdbc:mysql://[^\"\\s]+)\"?\\s*$");
 
@@ -365,7 +377,7 @@ class NamespaceLiteralGuardTest {
     }
 
     @Test
-    void R5_九个进程的JDBC_URL库名用命名空间占位符_缺省解析后与以前逐字节相同_别处yaml不引用命名空间() throws IOException {
+    void R5_十二个进程的JDBC_URL库名用命名空间占位符_缺省解析后与以前逐字节相同_别处yaml不引用命名空间() throws IOException {
         Map<String, String> found = new TreeMap<>();
         List<String> elsewhere = new ArrayList<>();
         applicationYamls().forEach((file, text) -> {
@@ -381,11 +393,13 @@ class NamespaceLiteralGuardTest {
         });
         assertThat(found.keySet()).containsExactlyInAnyOrderElementsOf(GOLDEN_JDBC_URLS.keySet());
         found.forEach((module, raw) -> {
-            assertThat(raw).as(module).startsWith("jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?");
+            // 全模板逐字节钉住主机/端口/参数；已切 TiDB 的服务保留环境变量，旧 8 条金样不改。
+            assertThat(raw).as(module)
+                    .isEqualTo(GOLDEN_JDBC_URLS.get(module).replace("/game?", "/${game.namespace:game}?"));
             assertThat(raw.replace("${game.namespace:game}", "game")).as("%s 缺省解析后与以前逐字节相同", module)
                     .isEqualTo(GOLDEN_JDBC_URLS.get(module));
         });
-        assertThat(elsewhere).as("除 9 条 JDBC URL 之外 yaml 不引用 game.namespace：缺省值只在代码里（KafkaNames / RedisKeys）一个出处").isEmpty();
+        assertThat(elsewhere).as("除 12 条 JDBC URL 之外 yaml 不引用 game.namespace：缺省值只在代码里（KafkaNames / RedisKeys）一个出处").isEmpty();
     }
 
     @Test

@@ -1855,7 +1855,7 @@ client     gate G1(z1)                  源 scene S(z1)                      sce
   读成员关系（`TravelTeamChecks`，`orTimeout(game.scene.travel.team-check-timeout)`，缺省 2 s，启动校验 > 0 且 ≤ 5 s）：在队 3026、读失败 / 超时 3027、复查到战斗 3025，不在队回 `{0}`（受理）后进 RESOLVING。
   延迟应答因此正常晚约 2 s（回调丢失时最坏约 4 s，见本节「超时预算」），连发两条 226 时第二条的 13000 可能先于第一条的 `{0}`（客户端按信封 `id` 配对）。另一条启动校验：`team-check-timeout + switch-resolve-timeout + transfer-lease-margin + 5 s < 60 s`。
 - **选目标**（`SceneDirectoryService.selectTravelTarget`，scene-manager `travel.TravelRouter`）：参数（3005）→ 地图预检（读目标 zone 的频道计划快照，有这张图的主世界频道 ACTIVE / DRAINING 就放行，否则 3000；读失败调用失败）→
-  合服围栏检查点 F4 → 选 gate（`GatePicker`：剔除连不上的、同地址只留最新、剔排空但全部排空时忽略、按 (人数, 节点号) 取最小；没有回内部码 3003）→ `GateTokenIssuer.issueRedirect`
+  合服围栏检查点 F4 → 选 gate（`GatePicker`：剔除连不上的、同地址只留最新、剔排空但全部排空时忽略、按人数随机二选一（2026-10-18 起，此前按 (人数, 节点号) 取最小）；没有回内部码 3003）→ `GateTokenIssuer.issueRedirect`
   （`gate_node_id`、`zone_id` = gate 的 zone、300 s、持票者、`target_zone_id` = 目标，不带会话密钥）→ `{conf, ZoneRedirect}`，地址取 gate 的客户端通告地址、票据原字节。scene 侧 `SceneManagerSwitchTargets.selectTravel`
   与 63 共用引用与连接线程（3 s、retries 0、本地兜底 `game.scene.switch-resolve-timeout` 4 s），应答残缺（含 `target_zone_id` 对不上）按失败。失败 / 拒绝 / 残缺 → 23 {3027}、留原地；选中时在战斗 → 23 {3025}。
   RESOLVING 槽过期（结果回调丢了或迟到）由作废方推 23 {3027}，每秒维护也会作废它，受理之后一定有 124 或失败 tip。

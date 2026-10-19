@@ -39,17 +39,17 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 /**
- * 大厅连接上的匹配服务（批次 6.4；match-spec §1.4、§8.1、§9.2）：{@code MatchService} 的 10 个号经 gate 中继给 game-match（Dubbo group
+ * 大厅连接上的匹配服务（批次 6.4；match-spec §1.4、§8.1、§9.2）：{@code MatchService} 的 12 个号经 gate 中继给 game-match（Dubbo group
  * {@code match}），gate 这一侧的客户端可见规则——
  * <ul>
  *   <li>请求原样转发：消息号、请求号、请求体，加上 gate 填的会话身份（后端只认它，§2.1 / M3）；没进游戏的会话照常转发，由后端回它自己的码；</li>
  *   <li>应答体原样回，带请求号；148 CancelQueue 与两个推送占位 154 / 156 的应答类型是 {@code Empty}：tip 为 0 时<b>不回包</b>（M4），
  *       后端回了信封 tip（请求体解析失败 → 1003）时照样回信封；</li>
- *   <li>game-match 不在、调用失败或超时 → 带请求号的信封 1003，10 个号都一样（含 148），不断连、不计非法包；</li>
+ *   <li>game-match 不在、调用失败或超时 → 带请求号的信封 1003，12 个号都一样（含 148），不断连、不计非法包；</li>
  *   <li>同一会话的 match 请求串行（上一个有了结论才发下一个），不占 login / scene 的通道；</li>
  *   <li>排在后端 lane 里的请求发出时身份只降不升：排队期间 LeaveGame 成功解绑、或换了角色，按 player_id = 0 发出
  *       （mmorpg client-request-ordering.md §17）；LeaveGame 失败（结果未知）不解绑，照旧带原角色；</li>
- *   <li>10 个号都不在限频表里：每号每秒 3 条，第 4 条回信封 1008 并计非法包、不转发（§1.4）。</li>
+ *   <li>12 个号都不在限频表里：每号每秒 3 条，第 4 条回信封 1008 并计非法包、不转发（§1.4）。</li>
  * </ul>
  *
  * <p>用同步进来的真实契约与真实路由表，限频取生产缺省：以后有人把 MatchService 从后端表里摘掉、改了应答类型的判定或挪动了后端分派，这里先失败。
@@ -81,11 +81,11 @@ class MatchBackendForwardingTest {
     private final AtomicLong nanos = new AtomicLong(1);
 
     @Test
-    void 十个号都转给match后端_带请求号与会话身份_应答体原样回_148与两个推送占位不回包() {
+    void 十二个号都转给match后端_带请求号与会话身份_应答体原样回_148与两个推送占位不回包() {
         EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
         enterGame(ch);
         assertThat(matchMethods).extracting(MessageMethod::messageId)
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275);
 
         long requestId = 100;
         for (MessageMethod method : matchMethods) {
@@ -122,13 +122,13 @@ class MatchBackendForwardingTest {
             }
         }
 
-        assertThat(match.calls).hasSize(10);
+        assertThat(match.calls).hasSize(matchMethods.size());
         assertThat(friend.calls).as("不串到别的后端").isEmpty();
         assertThat(login.calls).as("只有进游戏那一次").hasSize(1);
         assertThat(links.sent).as("不转给 scene（只有进场帧）").hasSize(1);
         assertThat(session().illegalPackets).isZero();
         assertThat(ch.isOpen()).isTrue();
-        assertThat(forwarded()).as("10 个号各计一次 route=match、result=forwarded").hasSize(10)
+        assertThat(forwarded()).as("12 个号各计一次 route=match、result=forwarded").hasSize(matchMethods.size())
                 .allSatisfy(c -> {
                     assertThat(c.count()).isEqualTo(1.0);
                     assertThat(c.getId().getTag("method")).startsWith("MatchService.");
@@ -177,7 +177,7 @@ class MatchBackendForwardingTest {
             ch.runPendingTasks();
             expectEnvelope1003(ch, method, requestId);
         }
-        assertThat(down.calls).as("每个号都试过一次，没有重试").isEqualTo(10);
+        assertThat(down.calls).as("每个号都试过一次，没有重试").isEqualTo(matchMethods.size());
 
         // future 异常完成的形态：换一条连接、用可控的后端
         EmbeddedChannel ch2 = verified(Map.of(DubboGroups.MATCH, match));

@@ -46,7 +46,7 @@ import org.slf4j.LoggerFactory;
  *       （X20：基线读失败放行；Java 的计划与 gate 目录在同一个 Redis，读不到计划时 gate 目录同样读不到，放行只会把失败推迟到交出之后）；</li>
  *   <li>合服围栏检查点 F4（{@link ZoneMergeFence}；7.3 之前装配的是恒放行的 {@link ZoneMergeFence#OPEN}）：命中或读不到 → {@link #TIP_ZONE_FENCED}；</li>
  *   <li>选 gate：{@link GateSource#listGates}（目录读不到 → 异常完成）→ {@link GatePicker#pick}（剔除连不上的、同一客户端地址只留最新启动的、
- *       剔除排空中的但全部排空时忽略标记、按 (人数, 节点号) 取最小）；没有 → {@link #TIP_NO_GATE}；</li>
+ *       剔除排空中的但全部排空时忽略标记、按人数随机二选一，2026-10-18 起）；没有 → {@link #TIP_NO_GATE}；</li>
  *   <li>签票据：{@link GateTokenIssuer#issueRedirect}（{@code gate_node_id}、{@code zone_id} = gate 所在 zone、有效期 300 s、持票者、
  *       {@code target_zone_id} = 目标 zone，不带会话密钥），应答带解析后的地图与 {@link ZoneRedirect}（地址取 gate 的客户端通告地址）。</li>
  * </ol>

@@ -638,7 +638,7 @@ game-api 的 proto 不 import 同步来的契约目录（`AGENTS.md` §1），�
    **计划读失败 → future 异常完成**（X20）。
 3. **合服围栏检查点 F4**：`ZoneMergeFence.OPEN`，7.3 接实现。
 4. **选 gate**：`GateSource.listGates(to)` → `GatePicker.pick(to, …)`：剔除 zone 不符、节点号 0、没有客户端地址的条目；**同一客户端地址只留 `started_at_ms` 最大的一条**（新增，
-   对齐 `clientendpoint.DedupeNewest`）；剔除排空中的（全部排空时忽略标记，`GatePicker.java:41-53`）；按（人数, 节点号）取最小。没有 → `TIP_NO_GATE`（scene-manager 内部码，只进日志与指标）。
+   对齐 `clientendpoint.DedupeNewest`）；剔除排空中的（全部排空时忽略标记，`GatePicker.java:41-53`）；按（人数, 节点号）取最小（2026-10-18 更正：改为按人数随机二选一、同人数取第一次抽中的，对齐 mmorpg `shared/gatepick.TwoChoices`）。没有 → `TIP_NO_GATE`（scene-manager 内部码，只进日志与指标）。
 5. **签票据**：`issueRedirect(gate.node_id, gate.zone_id, player_id, to)`：`{gate_node_id, zone_id = gate 的 zone, expire = now + 300, player_id, target_zone_id = to}`，
    **不填** `hmac_session_key`，`GateTokens.sign` 出 hex 签名。
 6. 返回 `{0, conf, ZoneRedirect{to, gate.node_id, gate.client_host, gate.client_port, payload, signature, expire}}`。目录读不到 → future 异常完成（scene 推 3027）。
@@ -654,7 +654,7 @@ scene-manager 新增必填密钥 `GAME_GATE_TOKEN_SECRET`，缺失即拒绝启�
 > 提供方 `SceneDirectoryProvider` 原样委托。与上文的出入与规格没写死处的取舍：
 > - **内部码**：`TIP_NO_GATE` = 3003（`kEnterNodeUnavailable`）、`TIP_ZONE_FENCED` = 3027（`kZoneTravelTargetBusy`，正是 scene 随后推给客户端的码）；scene 与 login 对任何非 0 一律同样处理，具体取值不影响它们。
 > - 第 1 步多挡 `from_zone_id == 0`（proto 注释要求非 0）；第 2 步只认主世界种类的频道记录（`ChannelKinds.isWorldChannel`），状态限 ACTIVE / DRAINING；目标 zone 不存在时计划为空 → 3000（scene 推 3027，§0.6 裁决 13）。
-> - 第 4 步的同地址去重按 `host:port` 原串、`started_at_ms` 按无符号比、缺字段当 0；**并列最大都留下**，交给 (人数, 节点号) 排序（没有依据判断哪条陈旧，保持去重前的行为）。`pick` 与 `eligible` 都经过它，
+> - 第 4 步的同地址去重按 `host:port` 原串、`started_at_ms` 按无符号比、缺字段当 0；**并列最大都留下**，交给 (人数, 节点号) 排序（2026-10-18 起改为交给随机二选一；没有依据判断哪条陈旧，保持去重前的行为）。`pick` 与 `eligible` 都经过它，
 >   gateway 的 assign-gate 与登录排队的放行循环同时生效（`AssignGateService`、`QueueDispatcher`）；`QueueCapacity.budget` 仍按原始目录求人数和（见实现记录「遗留」）。
 > - 目录 / 计划读失败与签名意外失败都以异常完成，异常只带概要（不外发 Redis 地址）；同步阻塞读、返回已完成的 future，构造后只读、线程安全。
 > - 指标名按 scene-manager 的习惯写 `game.scene_manager.travel` / `game.scene_manager.redirect`（Prometheus `game_scene_manager_travel_seconds` / `game_scene_manager_redirect_seconds`），travel 的 `result` 多一个 `fenced`（§7.2）。
@@ -1211,7 +1211,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 - `selectTravelTarget`：zone 0 / 同 zone / player 0 → `TIP_BAD_REQUEST`；want 不是世界地图 → `TIP_BAD_REQUEST`；计划里没有这张图（含 conf 0 的默认主世界）→ `TIP_NO_SCENE`；只有 DRAINING 记录 → 放行；
   目标 zone 没有 gate、或都没有客户端地址 → `TIP_NO_GATE`；排空与不排空混合 → 只挑不排空的，全部排空 → 忽略标记；同一客户端地址两条 → 只留 `started_at_ms` 大者（人数更少的陈旧条目也不选）；
-  人数相同按节点号；返回地址 = `client_host / client_port`、票据字段正确、`scene_config_id` = 解析值；计划 / 目录读失败 → future 异常；指标各 `result` 恰好计一次。
+  人数相同按节点号（2026-10-18 更正：改为随机二选一，最忙的不选、同人数不按节点号）；返回地址 = `client_host / client_port`、票据字段正确、`scene_config_id` = 解析值；计划 / 目录读失败 → future 异常；指标各 `result` 恰好计一次。
 - `redirectToZone`：不查地图；目标 zone 没有可用 scene 节点 → `TIP_NO_SCENE`；其余同上。
 - 缺 `GAME_GATE_TOKEN_SECRET` → 拒启。
 - `assign` 回归：与现在逐条一致。

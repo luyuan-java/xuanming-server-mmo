@@ -21,7 +21,7 @@ import org.springframework.mock.env.MockEnvironment;
 
 /**
  * {@code game.trade.*} 的启动校验（照基线 config_test.go:57-63、:223-229；trade-spec §9.2 TradePropertiesTest）：scope 必填且只认 zone / global、
- * 页长与上限 &gt; 0 且缺省页长 ≤ 上限、预算区间、查询超时不超过预算；并钉住 application.yaml 的取值（zone、20 / 20 / 100 / 100、3500 ms）。
+ * 页长与上限 &gt; 0 且缺省页长 ≤ 上限、预算区间、查询超时不超过预算；并钉住 application.yaml 的全球市场取值（global、20 / 20 / 100 / 100、3500 ms）。
  */
 class TradePropertiesTest {
 
@@ -81,13 +81,13 @@ class TradePropertiesTest {
         assertThatThrownBy(() -> new TradeProperties(market("zone"), null, null, null, -1)).hasMessageContaining("worker-queue-capacity");
     }
 
-    /** application.yaml 经 Spring 的绑定器（含占位符）得到的配置：钉住键名与基线取值（config_test.go:57-63）。 */
+    /** application.yaml 经 Spring 的绑定器（含占位符）得到的配置：钉住当前全球市场与其余基线取值。 */
     @Test
     void application_yaml绑定出基线取值() throws IOException {
         TradeProperties props = bindYaml(new MockEnvironment());
 
-        assertThat(props.market().scope()).isEqualTo("zone");
-        assertThat(props.market().settings()).isEqualTo(new MarketSettings(MarketScope.MARKET_SCOPE_ZONE, 20, 20, 100, 100));
+        assertThat(props.market().scope()).isEqualTo("global");
+        assertThat(props.market().settings()).isEqualTo(new MarketSettings(MarketScope.MARKET_SCOPE_GLOBAL, 20, 20, 100, 100));
         assertThat(props.requestBudget()).isEqualTo(Duration.ofMillis(3500));
         assertThat(props.queryTimeout()).isEqualTo(Duration.ofSeconds(3));
         assertThat(props.workerThreads()).isEqualTo(16);
@@ -96,6 +96,8 @@ class TradePropertiesTest {
 
     @Test
     void application_yaml的scope可由GAME_TRADE_MARKET_SCOPE覆盖_写错拒启() throws IOException {
+        MockEnvironment zone = new MockEnvironment().withProperty("GAME_TRADE_MARKET_SCOPE", "zone");
+        assertThat(bindYaml(zone).market().settings().scope()).isEqualTo(MarketScope.MARKET_SCOPE_ZONE);
         MockEnvironment global = new MockEnvironment().withProperty("GAME_TRADE_MARKET_SCOPE", "global");
         assertThat(bindYaml(global).market().settings().scope()).isEqualTo(MarketScope.MARKET_SCOPE_GLOBAL);
 

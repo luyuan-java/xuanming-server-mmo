@@ -843,14 +843,26 @@ class ClientDispatcherTest {
 
         ch.writeInbound(request(2, FRIEND_MSG, "slow"));
         ch.writeInbound(request(3, FRIEND_MSG, "queued"));
+        assertThat(friend.calls).as("第二条仍在后端 lane 排队").hasSize(1);
+        var first = friend.calls.get(0);
+        assertThat(first.getSession().getPlayerId()).as("首请求发出时仍绑定原角色").isEqualTo(PLAYER);
+
         ch.writeInbound(request(4, LEAVE_MSG, ""));
         login.complete(unbindReply()); // 好友调用还在途，login 先把玩家解绑
         ch.runPendingTasks();
+        assertThat(session().playerId).as("LeaveGame 成功即解绑原角色").isZero();
+        assertThat(friend.calls).as("login 完成不会越过在途的好友请求").hasSize(1);
 
         friend.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("r1")).build());
         ch.runPendingTasks();
         assertThat(friend.calls).hasSize(2);
-        assertThat(friend.calls.get(1).getSession().getPlayerId()).as("按入队时的身份转发").isEqualTo(PLAYER);
+        var queued = friend.calls.get(1);
+        assertThat(queued.getRequestId()).isEqualTo(3);
+        assertThat(queued.getMessageId()).isEqualTo(FRIEND_MSG);
+        assertThat(queued.getBody()).isEqualTo(ByteString.copyFromUtf8("queued"));
+        assertThat(queued.getSession().getPlayerId()).as("发出时只降不升，解绑后不再以旧角色执行").isZero();
+        assertThat(queued.getSession()).as("除 player_id 降为 0，其余入队会话字段全部保留")
+                .isEqualTo(first.getSession().toBuilder().setPlayerId(0).build());
     }
 
     @Test

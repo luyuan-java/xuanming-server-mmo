@@ -19,7 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 分配 gate：区服准入 → （排队打开时带令牌）轮询 → 开服限流 → （排队打开时）快速通道 / 入队 → 读 gate 目录 → 挑人数最少的 gate → 签令牌。
+ * 分配 gate：区服准入 → （排队打开时带令牌）轮询 → 开服限流 → （排队打开时）快速通道 / 入队 → 读 gate 目录 → 按人数随机二选一挑 gate（GatePicker，2026-10-18 起；此前取人数最少）→ 签令牌。
  *
  * <p>全部失败路径 fail-closed：区服不存在 / 不开放、目录不可达、没有可连接的 gate、排队存储出错，都不签令牌，
  * 以 {@link AssignGateResponse} 的业务码返回（HTTP 恒 200）。区服准入在一切之前，维护中的区不会触达 Redis；

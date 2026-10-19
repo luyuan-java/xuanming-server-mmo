@@ -451,8 +451,8 @@ robot_smoke 不走这条路，只有 `use_http_login: true` 时才用。
 
 - 请求 JSON 使用 snake_case：`{zone_id, account, password?, auth_type?, auth_token?, device_id?}`。
 - 应答 JSON：`{code, message, retry_after_ms, queue_pos, access_token, refresh_token, access_token_expire, refresh_token_expire}`（`robot/http_login.go:17-35`）。
-- code 含义：0 成功；100 排队；101 排队超时；401 认证被拒；429 限流（http_login.go:39-52）。
-- Java Gateway 把 login 返回的任何业务错误都映射为 401（`java/gateway_node/src/main/java/com/game/gateway/service/LoginService.java:47-50`）。
+- code 含义：0 成功；100 排队；101 排队超时；401 认证被拒；429 限流（http_login.go:39-52）；500 服务端出错（`login_unavailable` / `internal_error`，以及下一条的 in-band 故障码）。
+- Java Gateway 把 login 返回的 in-band 业务拒绝码映射为 401；2026-10-18 起，Tip.xlsx `fault` 列标为故障的码（如 2021 / 2035 / 2036）映射为 500，message 都是 `upstream_err=<tip>`，HTTP 状态仍是 200（`java/gateway_node/src/main/java/com/game/gateway/service/LoginService.java` 的 `httpCodeForUpstreamTip`；设计见 mmorpg `docs/design/tip-code-axis.md` §2.10，对齐见 `PARITY.md`「login 的 in-band 故障码在 HTTP 层回 500」行）。微信 code 一次性，收到 500 后要重新拉起授权拿新 code，不能原样重发。
 - 机器人只使用返回的 access_token，随后在 TCP 上执行 `Login{auth_type:"access_token"}`（`robot/main.go:826-852`）。
 
 ---

@@ -209,20 +209,24 @@ class GatewayHttpApiTest {
     }
 
     @Test
-    void 按人数再按节点号挑gate_排空的不选() throws Exception {
+    void 随机二选一挑gate_排空的不选_最忙的不选_票据绑定选中的那台() throws Exception {
+        // 2026-10-18 起 GatePicker.pick 是随机二选一（规则与抽样钉死的用例见 GatePickerTest）：2 号排空不参与；
+        // 5 号严格最忙，任何抽样都选不中；4 号与 3 号同人数，谁先被抽中就是谁。票据必须绑定实际选中的那台。
         when(gateSource.listGates(1)).thenReturn(List.of(
                 gate(5, 3, false), gate(2, 1, true), gate(4, 1, false), gate(3, 1, false)));
 
         JsonNode resp = assignGate("{\"zone_id\":1}");
 
         assertThat(resp.get("code").intValue()).isZero();
-        assertThat(resp.get("gate_ip").asText()).isEqualTo("10.0.0.3");
-        assertThat(resp.get("gate_port").intValue()).isEqualTo(11003);
+        int chosen = resp.get("gate_port").intValue() - 11000;
+        assertThat(chosen).isIn(3, 4);
+        assertThat(resp.get("gate_ip").asText()).isEqualTo("10.0.0." + chosen);
         ByteString payload = ByteString.copyFrom(stdBase64(resp.get("token_payload")));
         ByteString signature = ByteString.copyFrom(stdBase64(resp.get("token_signature")));
         long now = Instant.now().getEpochSecond();
-        assertThat(TOKENS.verify(payload, signature, 3, 1, now).ok()).isTrue();
-        assertThat(TOKENS.verify(payload, signature, 4, 1, now).failure()).isEqualTo(GateTokens.Failure.WRONG_GATE);
+        int other = chosen == 3 ? 4 : 3;
+        assertThat(TOKENS.verify(payload, signature, chosen, 1, now).ok()).isTrue();
+        assertThat(TOKENS.verify(payload, signature, other, 1, now).failure()).isEqualTo(GateTokens.Failure.WRONG_GATE);
     }
 
     /**

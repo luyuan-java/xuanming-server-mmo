@@ -394,11 +394,13 @@ class TravelRouterTest {
     }
 
     @Test
-    void 传送_人数相同按节点号小者() throws Exception {
+    void 传送_随机二选一_最忙的不选_同人数不按节点号() throws Exception {
+        // 2026-10-18 起 GatePicker.pick 是随机二选一（规则与抽样钉死的用例见 GatePickerTest）：7 号严格最忙，
+        // 任何抽样都选不中；9 号与 4 号同人数，谁先被抽中就是谁，不再固定取节点号小的 4 号。
         channel(TO, 501, 1, ChannelState.CHANNEL_ACTIVE);
         gates(gate(9, 5), gate(4, 5), gate(7, 6));
 
-        assertThat(travel(0).getRedirect().getGateNodeId()).isEqualTo(4);
+        assertThat(travel(0).getRedirect().getGateNodeId()).isIn(9, 4);
     }
 
     @Test

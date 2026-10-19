@@ -1020,7 +1020,7 @@ class BattleRecoveryTest {
     /**
      * 第 0 步「账本随 {@code persistentState()} 自动沿用」：旧实例应用了这一局、那笔在线存盘还没落盘（所以没销账，记录与锁都还在）时同 epoch 重进——
      * 新实例带着金币<b>和</b>账本条目一起过来，恢复读把记录带回来时命中账本：不再发奖、不推 150；库里还没有这一条，所以也不销账，
-     * 压自己的一笔存盘，落盘后才销。旧实例那笔存盘之后回来时实例已换，不替新实例销账。
+     * 新实例继承旧实例唯一的在途写槽，不让第二笔写越过旧快照；旧笔确认成功后把持久化基准交给同 epoch 的当前实例，随后才销账。
      */
     @Test
     void 同epoch重进_没落盘的账本条目随旧实例内存沿用_恢复读带回的记录不再发奖_新实例落盘后才销账() {
@@ -1053,24 +1053,31 @@ class BattleRecoveryTest {
         assertThat(f.rebuilds("login", "ledger_hit")).isEqualTo(1);
         assertThat(f.locks.ops()).as("续锁；没落盘不销账").containsExactly(Op.ENTER_READ, Op.HOLD);
         assertThat(f.acks("login", "deferred")).isEqualTo(1);
-        assertThat(f.repo.pendingProgress()).as("旧实例那一笔 + 新实例为销账压的一笔").isEqualTo(2);
+        assertThat(f.repo.pendingProgress()).as("同 epoch 继承唯一在途写槽，不能并行再写一笔").isEqualTo(1);
         assertThat(fresh.battle().recovery()).isEqualTo(Recovery.READY);
+        assertThat(f.locks.count(Op.ACK)).as("快照未确认前不能销账").isZero();
+        assertThat(f.locks.hasSettlement(PLAYER, X)).as("耐久确认前保留结算记录").isTrue();
+        assertThat(f.locks.lock(PLAYER)).as("耐久确认前保留战斗锁").isNotNull();
+        assertThat(BattleLedger.persistedHas(fresh.persistedState(), X)).as("确认前持久化基准尚无本局账本").isFalse();
 
-        // 旧实例那笔存盘先回来：实例已换，不触发销账
-        f.repo.takeProgress().complete(ProgressResult.SAVED);
+        // 同 epoch 的旧写已含金币和账本；确认后由当前实例接收持久化基准并销账，无须重复提交同一份资产。
+        var inFlight = f.repo.takeProgress();
+        assertThat(BattleLedger.persistedHas(inFlight.save().state(), X)).as("确认的原快照必须包含本局账本").isTrue();
+        assertThat(inFlight.save().state().getCurrency().getBalances(Wallet.GOLD)).as("账本与奖励同一份快照").isEqualTo(100);
+
+        inFlight.complete(ProgressResult.SAVED);
         f.drain();
-        assertThat(f.locks.count(Op.ACK)).isZero();
-        assertThat(fresh.battleLedger().has(X)).isTrue();
 
-        f.repo.takeProgress().complete(ProgressResult.SAVED);
-        f.drain();
-
+        assertThat(BattleLedger.persistedHas(fresh.persistedState(), X)).as("当前实例沿用同 epoch 已确认的持久化基准").isTrue();
+        assertThat(f.repo.pendingProgress()).as("同一笔已确认快照无需重复写入").isZero();
         assertThat(f.locks.ops()).containsExactly(Op.ENTER_READ, Op.HOLD, Op.ACK);
         assertThat(f.locks.last(Op.ACK).lastReply()).as("删记录 + 放锁").isEqualTo(3L);
         assertThat(f.locks.hasSettlement(PLAYER, X)).isFalse();
         assertThat(f.locks.lock(PLAYER)).isNull();
         assertThat(fresh.battleLedger().has(X)).isFalse();
         assertThat(f.gold(fresh)).isEqualTo(100);
+        assertThat(f.audit.currencies).as("落盘销账不会重复发奖").hasSize(1);
+        assertThat(f.battleEnds(fresh)).as("落盘销账不会再推结算").isEmpty();
     }
 
     /**

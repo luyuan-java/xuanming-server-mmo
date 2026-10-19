@@ -435,13 +435,13 @@ class SliceScriptsTest {
     void 区2的实例表_端口与别的实例都不相同_不并进区1的节点表与启动清单() throws IOException {
         assertThat(startSlice).contains("\nZONE2_ID=2\nZONE2_SCENE_NODE=\"game-scene-z2 21010 21110 18115\"\nZONE2_GATE=\"game-gate-z2 11010 18123\"\n");
 
-        // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；启动清单仍是十三项，没有区 2 的实例
+        // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；启动清单仍是十五项，没有区 2 的实例
         String nodes = block(startSlice, "SCENE_NODES");
         String services = block(startSlice, "SERVICES");
         assertThat(nodes).isNotNull().doesNotContain("z2");
         assertThat(nodes.lines().count()).isEqualTo(2);
         assertThat(services).isNotNull();
-        assertThat(matches(services, "^\\s*\"(game-[a-z0-9-]+)")).hasSize(13).doesNotContain("game-scene-z2", "game-gate-z2");
+        assertThat(matches(services, "^\\s*\"(game-[a-z0-9-]+)")).hasSize(15).doesNotContain("game-scene-z2", "game-gate-z2");
 
         // 同机多实例：区 2 新占的五个端口互不相同，也不与别的实例相撞。别的实例的端口有两个来源：
         // ① 脚本里写着的（区 1 的节点表、清单里的就绪端口、battle / match 的端口）；
@@ -456,11 +456,11 @@ class SliceScriptsTest {
         // 扫描真的扫到了东西（路径或写法变了不能悄悄变成「什么都不比」）：每个起进程的模块都有一份，脚本没提的那些端口都在
         assertThat(byFile.keySet().stream().map(file -> file.substring(0, file.indexOf('/'))).distinct())
                 .as("有 application.yaml 的模块").contains("game-login", "game-scene-manager", "game-gate", "game-scene", "game-gateway", "game-data", "game-friend",
-                        "game-chat", "game-team", "game-guild", "game-trade", "game-battle", "game-match");
+                        "game-chat", "game-team", "game-guild", "game-trade", "game-mail", "game-rank", "game-battle", "game-match");
         Set<String> configured = new LinkedHashSet<>();
         byFile.values().forEach(configured::addAll);
         // 几个锚点：脚本没提、只在 yaml 里的管理端口（字面量），以及 ${环境变量:缺省} 与带前缀的键两种写法
-        assertThat(configured).as("各模块 application*.yaml 里的缺省端口").contains("18101", "18103", "18105", "18107", "18111", "20881", "12000", "21100")
+        assertThat(configured).as("各模块 application*.yaml 里的缺省端口").contains("18101", "18103", "18105", "18107", "18111", "18116", "18117", "20881", "12000", "21100")
                 .doesNotContain("0");
 
         // 区 2 的五个端口取自脚本里的实例表（不在这里另抄一份）：scene 的链路 / 资产通道 / 管理，gate 的客户端 / 管理
@@ -633,7 +633,7 @@ class SliceScriptsTest {
     @Test
     void 停止脚本_区2的实例紧挨着区1的同类先停_清单那一行不动() {
         // game-gate 的 LocalSliceOrderTest 逐项钉着清单那一行（= 启动清单的逆序）；区 2 的两个实例在循环体里带上
-        assertThat(stopSlice).contains("\nfor name in game-match game-battle game-gateway game-gate game-scene-2 game-scene game-data game-trade game-guild game-team game-chat "
+        assertThat(stopSlice).contains("\nfor name in game-match game-battle game-gateway game-gate game-scene-2 game-scene game-data game-rank game-mail game-trade game-guild game-team game-chat "
                 + "game-friend game-login game-scene-manager; do\n"
                 + "  case \"$name\" in\n"
                 + "    game-gate) stop_one game-gate-z2 ;;\n"

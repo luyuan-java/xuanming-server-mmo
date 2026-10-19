@@ -58,9 +58,9 @@ class LocalSliceOrderTest {
     }
 
     @Test
-    void 清单解析得对_十三个进程_gate与gateway在后段_battle最后() {
+    void 清单解析得对_十五个进程_gate与gateway在后段_battle最后() {
         assertThat(startOrder).containsExactly("game-scene-manager", "game-login", "game-friend", "game-chat", "game-match", "game-team", "game-guild",
-                "game-trade", "game-data", "game-scene", "game-gate", "game-gateway", "game-battle");
+                "game-trade", "game-mail", "game-rank", "game-data", "game-scene", "game-gate", "game-gateway", "game-battle");
         assertThat(startOrder).doesNotHaveDuplicates();
     }
 
@@ -69,7 +69,7 @@ class LocalSliceOrderTest {
         Properties gateYaml = yaml("application.yaml");
         int gate = startOrder.indexOf("game-gate");
         assertThat(gate).as("game-gate 在启动清单里").isNotNegative();
-        // 路由表指向的每个域（login 与六个后端）：进程模块名 = game-<域>
+        // 路由表指向的每个域（login 与八个后端）：进程模块名 = game-<域>
         for (String group : MessageRoutes.SERVICE_BACKENDS.values()) {
             String module = "game-" + group;
             int at = startOrder.indexOf(module);

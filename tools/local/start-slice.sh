@@ -225,6 +225,8 @@ SERVICES=(
   "game-team 20885"
   "game-guild 20886"
   "game-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
+  "game-mail 20916"         # 邮件：先等 gate 直连的 Dubbo 端口
+  "game-rank 20917"         # 排行榜：先于 gate 启动
   "game-data 18106"
   "game-scene"              # 场景节点：起 GAME_SCENE_NODES 个实例，端口见下面的 SCENE_NODES；GAME_ZONES=2 时随后再起区 2 的 game-scene-z2
   "game-gate 11000"         # GAME_ZONES=2 时随后再起区 2 的 game-gate-z2（实例与端口见下面的 ZONE2_GATE）
@@ -238,7 +240,7 @@ BATTLE_CLIENT_PORT=12000
 BATTLE_MGMT_PORT=18112
 
 # game-match 的端口（与 game-match application.yaml 的缺省一致）：Dubbo（GAME_MATCH_RPC_PORT）、管理端口（actuator 与 dev 管理口 /admin/match/dev/*）。
-# game-gate（MatchService 的 10 个号）与 game-team（整队开战）按这个 Dubbo 端口直连，robot 的 --match-admin-url 缺省指着这个管理端口。
+# game-gate（MatchService 的 12 个号）与 game-team（整队开战）按这个 Dubbo 端口直连，robot 的 --match-admin-url 缺省指着这个管理端口。
 MATCH_RPC_PORT=20888
 MATCH_MGMT_PORT=18113
 
@@ -252,7 +254,7 @@ SCENE_NODES=(
 
 # 区 2 的实例（GAME_ZONES=2 才起；端口按 zone-travel-spec §5.13：避开 game-scene-2 的 21001 / 21101 / 18114 与批次 5.1 规划的 21002 / 18124）。
 # 没有并进上面的 SCENE_NODES / SERVICES：SCENE_NODES 是区 1 的节点表，battle-crash-window.sh 与它逐字相同、按「第 1 / 2 行 = 区 1 的两个节点」
-# 取用；SERVICES 的十三项与次序由 game-gate 的 LocalSliceOrderTest 钉着。区 2 的两个实例在主循环里紧跟区 1 的同类起。
+# 取用；SERVICES 的十五项与次序由 game-gate 的 LocalSliceOrderTest 钉着。区 2 的两个实例在主循环里紧跟区 1 的同类起。
 # 场景节点：实例名 节点链路 link-port 资产通道 asset-rpc-port 管理端口 server.port；gate：实例名 客户端端口 client-port 管理端口 server.port
 ZONE2_ID=2
 ZONE2_SCENE_NODE="game-scene-z2 21010 21110 18115"

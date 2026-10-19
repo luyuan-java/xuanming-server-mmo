@@ -38,6 +38,18 @@ class TradeTipsTest {
         codes.put("HOME_ZONE_UNKNOWN", TradeTips.HOME_ZONE_UNKNOWN);
         codes.put("FAVORITE_LIMIT_REACHED", TradeTips.FAVORITE_LIMIT_REACHED);
         codes.put("FEATURE_DISABLED", TradeTips.FEATURE_DISABLED);
+        codes.put("ORDER_NOT_FOUND", TradeTips.ORDER_NOT_FOUND);
+        codes.put("ORDER_STATE_CONFLICT", TradeTips.ORDER_STATE_CONFLICT);
+        codes.put("REQUEST_CONFLICT", TradeTips.REQUEST_CONFLICT);
+        codes.put("ORDER_LIMIT", TradeTips.ORDER_LIMIT);
+        codes.put("CANNOT_TRADE_SELF", TradeTips.CANNOT_TRADE_SELF);
+        codes.put("COUNTERPARTY_UNKNOWN", TradeTips.COUNTERPARTY_UNKNOWN);
+        codes.put("INSUFFICIENT_ASSET", TradeTips.INSUFFICIENT_ASSET);
+        codes.put("BID_TOO_LOW", TradeTips.BID_TOO_LOW);
+        codes.put("AUCTION_ENDED", TradeTips.AUCTION_ENDED);
+        codes.put("ASSET_DELIVERY_PENDING", TradeTips.ASSET_DELIVERY_PENDING);
+        codes.put("MANUAL_REVIEW", TradeTips.MANUAL_REVIEW);
+        codes.put("ASSET_NOT_TRADABLE", TradeTips.ASSET_NOT_TRADABLE);
         return codes;
     }
 
@@ -68,6 +80,18 @@ class TradeTipsTest {
         assertThat(TradeTips.HOME_ZONE_UNKNOWN).isEqualTo(20001);
         assertThat(TradeTips.FAVORITE_LIMIT_REACHED).isEqualTo(20002);
         assertThat(TradeTips.FEATURE_DISABLED).isEqualTo(20003);
+        assertThat(TradeTips.ORDER_NOT_FOUND).isEqualTo(20004);
+        assertThat(TradeTips.ORDER_STATE_CONFLICT).isEqualTo(20005);
+        assertThat(TradeTips.REQUEST_CONFLICT).isEqualTo(20006);
+        assertThat(TradeTips.ORDER_LIMIT).isEqualTo(20007);
+        assertThat(TradeTips.CANNOT_TRADE_SELF).isEqualTo(20008);
+        assertThat(TradeTips.COUNTERPARTY_UNKNOWN).isEqualTo(20009);
+        assertThat(TradeTips.INSUFFICIENT_ASSET).isEqualTo(20010);
+        assertThat(TradeTips.BID_TOO_LOW).isEqualTo(20011);
+        assertThat(TradeTips.AUCTION_ENDED).isEqualTo(20012);
+        assertThat(TradeTips.ASSET_DELIVERY_PENDING).isEqualTo(20013);
+        assertThat(TradeTips.MANUAL_REVIEW).isEqualTo(20014);
+        assertThat(TradeTips.ASSET_NOT_TRADABLE).isEqualTo(20015);
         assertThat(TradeTips.SERVICE_UNAVAILABLE).isEqualTo(1003);
         assertThat(TradeTips.INVALID_PARAMETER).isEqualTo(1005);
         assertThat(TradeTips.FEATURE_UNAVAILABLE).isEqualTo(CommonErrorTip.common_error.kFeatureUnavailable.getNumber());
@@ -91,14 +115,20 @@ class TradeTipsTest {
         }
     }
 
-    /** 基线 fault 列只有 kServiceUnavailable（constants_test.go:24-33、TestTipClassifier）；Java 写死 FAULTS = {1003}。 */
+    /** 本域的业务拒绝保持非故障，服务不可用保持故障；分类来源由生成 fault 列决定。 */
     @Test
-    void 只有1003是故障() {
-        assertThat(TradeTips.FAULTS).containsExactly(1003);
+    void 本域业务拒绝不算故障() {
         assertThat(TradeTips.isFault(TradeTips.SERVICE_UNAVAILABLE)).isTrue();
         assertThat(TradeTips.isFault(TradeTips.INVALID_PARAMETER)).isFalse();
         tradeCodes().forEach((name, code) -> assertThat(TradeTips.isFault(code)).as(name).isFalse());
         assertThat(TradeTips.isFault(0)).isFalse();
+    }
+
+    @Test
+    void 故障分类覆盖生成fault列的全部值() {
+        for (com.game.table.tip.TipFaults.Fault fault : com.game.table.tip.TipFaults.FAULTS) {
+            assertThat(TradeTips.isFault(fault.code())).as("生成故障码 %s", fault.name()).isTrue();
+        }
     }
 
     /** 每个码都必须直接写成生成枚举的 {@code _VALUE} 引用，不能手写数字、别名或引用其他码轴（同基线 TestNoHandWrittenTipCodes）。 */
