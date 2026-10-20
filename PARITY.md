@@ -292,3 +292,21 @@
 统一37路径已由root正规git apply，check/apply均0；逐37最终字节SHA与已审候选相同，未修改InboxHooks接口，保留并行CLI/收件箱源。实际应用原件为C++/Go仓 `build/verification/java-canonical-37-apply-20261019T090438788234Z/root-canonical-application.json`，SHA `F03743014BE227D961CAD7F37DCA29470A2BDA42B5A238614ECFB7CEAB1930D7`。当前是工作树已实现、验收未完成；没有提交、部署、启动服务或执行M14真实库迁移。
 
 后续直接为当前Java完整源建立新快照（含并行新增代码），先生成含新Mapper公开准入规则的当前Store Jar，再按实际依赖编译受影响模块并运行CLI全16/Hook5和当前155真TiDB。旧JG2464、D136 Store Jar及其26通过/13模块成功仅绑定旧输入，不能冒当前World合并与新CLI已运行；不强制先重复旧快照六模块再重测新代码。最后验收真实宿主故障，任何编译/枚举/H2结果均不替代它。
+
+### 2026-10-20 玩家包 Codex 续验
+
+0.1.0-SNAPSHOT：当前2,541文件隔离快照的31项reactor干净构建成功；所选342通过/26既有条件跳过，玩家包32与命名空间守卫9全过；真MySQL8.4.11的PlayerBundleSqlTest16/16、0skip、临时库0残留。真实适配器探针首编译因Codex参数文件格式错误退出2，未进入测试体；修正已准备但按AGENTS §10.2等待决定后再运行。Redis Lua/INFO、生产身份/TiDB只读事务与Login48→EnterGame26未验；本轮私有5容器/MySQL均已停止保留数据。证据在C++/Go仓 `build/verification/playerbundle-resume-20261020-073353275/summary.json`；没有业务源码改动或提交。
+
+### 2026-10-20 玩家包真实适配器与TiDB兼容缺陷
+
+Java 0.1.0-SNAPSHOT：修正探针参数后编译0；生产MySQL身份、源/目标Redis只读Lua与INFO/二进制值/TTL/清理、TiDB PD身份四项PASS。实际TiDB8.5.2快照入口→SELECT1失败42000/1235，四文件最小修复候选已备但未落地/运行，按AGENTS §10.2等待用户决定；不能把既有MySQL16项通过冒TiDB通过。CLI整包与登录加载仍待验，私有实例均正常停止保留数据。证据为C++/Go仓 `build/verification/playerbundle-resume-20261020-073353275/summary.json`，候选位于其 `candidate-tidb/playerbundle-tidb-readonly.patch`。
+
+另一版静态补充：C++/Go玩家包已用普通RR+固定SELECT+回滚避开TiDB READ ONLY，不需照搬本次Java候选；但其身份目前只查MySQL server_uuid，取不到时跳过该侧比较，没有Java的PD识别/未知身份拒绝。本轮未改或运行Go，不能登记两版TiDB完整安全与端到端均已验证。
+
+### 2026-10-20 玩家排障包 TiDB 修复与真实全链路验收完成
+
+Java `0.1.0-SNAPSHOT`：修复TiDB READ ONLY的42000/1235，实际版本识别后走RR＋固定SELECT＋rollback，MySQL继续JDBC只读，未开启noop；新增真实快照回归。修复后14项reactor干净构建成功，所选342通过/27条件跳过/0失败错误；真实MySQL8.4.11与TiDB8.5.2各17/17、0跳过；生产身份及两套Redis Lua/INFO/二进制值探针全过。
+
+原start-slice两边各16服务；来源货币7项与目标背包11项全过，正式导出→不同TiDB/Redis实例导入→同玩家Login48/EnterGame26/重登通过。首次导入epoch3、显式replace重导epoch4，准确三键哨兵3→0；目标二次正式导出的380钻石及整个player_state原字节SHA均与源相同，SQL/Redis错误均空。此前“候选待决策 / 冒烟待验”状态由本条补充完成；脚本首错与恢复过程原件保留。证据为C++/Go仓 `build/verification/playerbundle-resume-20261020-073353275/e2e-final-summary.json` 与 `summary.json`。
+
+另一版：Go原工具已使用RR/SELECT/回滚，无本次JDBC兼容问题，本轮只读核对、未改或运行Go；PD身份识别及未知身份拒绝差异仍存在，未声明Go的TiDB全链路通过。无客户端契约/proto改动，未提交或推送。本轮Java/MySQL及11个自有容器均已停止、无OOM，保留数据，未操作其他会话实例。

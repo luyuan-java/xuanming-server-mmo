@@ -21,11 +21,12 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.IntFunction;
 
 /**
- * 导出包的库部分：只发固定的 SELECT，全部在<b>同一个只读、可重复读事务</b>里（一个一致性快照：行、玩法数据与流水计数出自同一时刻），
+ * 导出包的库部分：只发固定的 SELECT，全部在<b>同一个可重复读事务</b>里（一个一致性快照：行、玩法数据与流水计数出自同一时刻），
  * 结束回滚。{@code account.password_hash} 不出库——SQL 里只取「是否为 NULL」。
  *
  * <p>各部分独立容错：某张表读不到（例如运维表还没建）只在 {@code errors} 里记一条，不影响其余部分；玩家行本身读失败则整体失败。
@@ -77,14 +78,18 @@ final class BundleMysqlReader {
                 errors.isEmpty() ? null : errors, limit);
     }
 
-    /** 开一个只读、可重复读的一致性快照（MySQL / TiDB 都是首条读建立读视图）。 */
-    static void beginSnapshot(Connection connection) throws SQLException {
+    /** 开一个只发 SELECT 的可重复读快照；版本取自当前连接的实际 SELECT VERSION()。 */
+    static void beginSnapshot(Connection connection, String databaseVersion) throws SQLException {
         connection.setAutoCommit(false);
         connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-        connection.setReadOnly(true);
+        // TiDB 8.5 的 READ ONLY 默认报 1235，开启 noop 也不提供只读保护；沿用 AuthorityJdbc 的 SELECT 快照模式。
+        // 只对已识别的 TiDB 避开该语法；MySQL 及版本未知时保留 JDBC 只读，任何 SQL 异常原样交给调用者。
+        if (databaseVersion == null || !databaseVersion.toLowerCase(Locale.ROOT).contains("tidb")) {
+            connection.setReadOnly(true);
+        }
     }
 
-    /** 结束快照：回滚（只读事务里本就没有写）。 */
+    /** 结束快照：回滚（事务内只有固定 SELECT）。 */
     static void endSnapshot(Connection connection) throws SQLException {
         connection.rollback();
     }

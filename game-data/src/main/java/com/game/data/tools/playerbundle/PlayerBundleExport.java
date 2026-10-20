@@ -40,7 +40,8 @@ import java.util.function.LongSupplier;
  *      [--redis redis://127.0.0.1:6379] [--redis-database 12] [--skip-redis] [--expect-database &lt;库名&gt;]
  * </pre>
  *
- * <p>只读保证：库只在一个只读、可重复读事务里发固定 SELECT，结束回滚；{@code account.password_hash} 只判是否为空、原值不出库；
+ * <p>只读保证：库只在一个可重复读事务里发固定 SELECT，结束回滚；MySQL 额外启用 JDBC 只读，TiDB 避开不支持的只读事务语法。
+ * {@code account.password_hash} 只判是否为空、原值不出库；
  * Redis 每把键一条只读脚本（TYPE / PTTL / GET / HGETALL / ZRANGE），不 SCAN，不读任何令牌键。
  * 导出文件不覆盖已有文件、不许落在 git 工作区里（防误提交），POSIX 系统上以 0600 创建。
  * 退出码 0 成功、1 失败（连不上、玩家不存在、写文件失败）、2 参数错误 / 命名空间非法 / 库名核对不过 / 输出位置不合规。
@@ -143,7 +144,7 @@ public final class PlayerBundleExport {
             database = NamespaceDatabaseCheck.currentDatabase(conn);
             mysqlVersion = version(conn);
             mysqlIdentity = connections.mysqlIdentity(conn);
-            BundleMysqlReader.beginSnapshot(conn);
+            BundleMysqlReader.beginSnapshot(conn, mysqlVersion);
             try {
                 mysql = new BundleMysqlReader(conn, json).read(args.playerId(), args.limit());
             } finally {
