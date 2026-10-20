@@ -27,6 +27,7 @@ import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
 import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingSink;
+import com.game.table.CommonErrorTip;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
@@ -369,26 +370,98 @@ class ClientRequestHandlerTest {
         assertThat(sink.to(LINK, 11)).isEmpty();
     }
 
+    // ------------------------------------------------------------------ 派发前丢弃（mmorpg client-rpc-callback.md §7 R1，2026-10-19）
+
+    /**
+     * 派发前（调处理器之前）就丢弃的请求：请求号非 0、属于客户端协议、应答不是 Empty 的，<b>恰好</b>回一个带请求号的信封 1003，
+     * 不带应答体、不进处理器；回执按转发帧自己的 (链路, 会话) 原路送回——别的链路上同号的会话、player_id 不符时会话上的玩家都不另找。
+     * 之后同一会话的正常请求照常只回一个正常应答。
+     */
     @Test
-    void 静默丢弃_未知会话_player不符_非scene域_Empty应答方法_请求体坏() {
+    void 派发前丢弃的请求响应类请求_恰好回一个带请求号的信封1003_原路回给发出请求的会话() throws Exception {
         byte[] truncated = {0x0a, 0x05};
-        forward(99, 1001, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 1);
-        forward(11, 2002, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 2);
-        forward(11, 1001, Contracts.REGISTRY.requireId("ClientPlayerLogin", "Login"), ByteString.EMPTY, 3);
+        int login = Contracts.REGISTRY.requireId("ClientPlayerLogin", "Login");
+        EnterSceneC2SRequest.Builder tooManyCreators = EnterSceneC2SRequest.newBuilder();
+        tooManyCreators.getSceneInfoBuilder().setSceneId(scene2.sceneId());
+        for (long creator = 1; creator <= RequestFieldCheck.MAX_REPEATED + 1; creator++) {
+            tooManyCreators.getSceneInfoBuilder().putCreators(creator, true);
+        }
+
+        forward(99, 1001, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 1);       // 会话不在本节点
+        forwardOn(2, 11, 1001, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 2);  // 别的链路上的同号会话
+        forward(11, 2002, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 3);       // player_id 与会话不符
+        forward(11, 1001, login, ByteString.EMPTY, 4);                                          // 客户端协议、但不归 scene
+        forward(11, 1001, IDS.releaseSkill(), ByteString.copyFrom(truncated), 5);              // 请求体解析失败
+        forward(11, 1001, IDS.enterScene(), tooManyCreators.build(), 6);                        // 字段超规模
+
+        assertThat(sink.to(LINK, 99)).singleElement().satisfies(r -> assertNotDispatched(r, IDS.listSkills(), 1));
+        assertThat(sink.to(2, 11)).as("回给发出请求的那条链路上的会话").singleElement()
+                .satisfies(r -> assertNotDispatched(r, IDS.listSkills(), 2));
+        List<MessageContent> toA = sink.to(LINK, 11);
+        assertThat(toA).extracting(MessageContent::getId).as("本链路会话 11 只收到它自己那四条的回执，每条恰好一个")
+                .containsExactly(3L, 4L, 5L, 6L);
+        assertNotDispatched(toA.get(0), IDS.listSkills(), 3);
+        assertNotDispatched(toA.get(1), login, 4);
+        assertNotDispatched(toA.get(2), IDS.releaseSkill(), 5);
+        assertNotDispatched(toA.get(3), IDS.enterScene(), 6);
+        assertThat(entitySceneOf(11)).as("63 没进处理器").isSameAs(scene1);
+        assertThat(sink.events()).as("回执之外没有别的出站").hasSize(6);
+
+        forward(11, 1001, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 7);
+        List<MessageContent> after = sink.to(LINK, 11);
+        assertThat(after).extracting(MessageContent::getId).containsExactly(3L, 4L, 5L, 6L, 7L);
+        MessageContent normal = after.getLast();
+        assertThat(normal.hasErrorMessage()).as("正常应答不受影响：没有信封错误").isFalse();
+        assertThat(ListSkillsResponse.parseFrom(normal.getSerializedMessage()).hasSkillList()).isTrue();
+    }
+
+    /**
+     * 同样的丢弃点上，以下维持不回：请求号为 0（无从关联）、应答是 Empty 的单向消息（成功本就不回，丢弃不能多出一个包）、
+     * 契约里没有的号与非客户端协议的号（同 gate 对白名单外的号）。
+     */
+    @Test
+    void 派发前丢弃_请求号为0_应答Empty_未知号与非客户端协议的号_都不回() {
+        byte[] truncated = {0x0a, 0x05};
+        int rollback = Contracts.REGISTRY.requireId("SceneRollbackClientPlayer", "GmExecuteRollback");
+
+        forward(99, 1001, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 0);
+        forward(11, 2002, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 0);
+        forward(11, 1001, IDS.releaseSkill(), ByteString.copyFrom(truncated), 0);
+
+        forward(99, 1001, IDS.moveSync(), ByteString.EMPTY, 1);
+        forward(11, 2002, IDS.sceneInfoC2S(), SceneInfoRequest.getDefaultInstance(), 2);
+        forward(11, 1001, IDS.moveSync(), ByteString.copyFrom(truncated), 3);
         forward(11, 1001, IDS.notifyEnterScene(), EnterSceneS2C.getDefaultInstance(), 4);
+
         forward(11, 1001, 999_999, ByteString.EMPTY, 5);
-        forward(11, 1001, IDS.releaseSkill(), ByteString.copyFrom(truncated), 6);
+        forward(99, 1001, 999_999, ByteString.EMPTY, 6);
+        forward(11, 1001, rollback, ByteString.EMPTY, 7);
+        forward(99, 1001, rollback, ByteString.EMPTY, 8);
 
         assertThat(sink.events()).isEmpty();
     }
 
+    /** 加载中（实例还没建好）的会话发来的请求：回信封 1003（确定没执行）；加载完成后同一会话的请求照常应答，前一条不会再补回。 */
     @Test
-    void 加载中的会话发来的消息_静默丢弃() {
+    void 加载中的会话发来的请求_回带请求号的信封1003_加载完成后照常应答() throws Exception {
         world.onPlayerEnter(LINK, enterFrame(12, 1002, scene1.sceneId(), 1));
 
         forward(12, 1002, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 1);
+        forward(12, 1002, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 0);
+        forward(12, 1002, IDS.moveSync(), ByteString.EMPTY, 2);
 
-        assertThat(sink.to(LINK, 12)).isEmpty();
+        assertThat(sink.to(LINK, 12)).as("只有请求号非 0 的请求-响应类请求回").singleElement()
+                .satisfies(r -> assertNotDispatched(r, IDS.listSkills(), 1));
+
+        repo.completeAll();
+        sink.clear();
+        forward(12, 1002, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 3);
+
+        assertThat(sink.to(LINK, 12)).singleElement().satisfies(r -> {
+            assertThat(r.getId()).isEqualTo(3L);
+            assertThat(r.hasErrorMessage()).isFalse();
+            assertThat(ListSkillsResponse.parseFrom(r.getSerializedMessage()).hasSkillList()).isTrue();
+        });
     }
 
     // ------------------------------------------------------------------ 工具
@@ -412,13 +485,31 @@ class ClientRequestHandlerTest {
     }
 
     private void forward(int sessionId, long playerId, int messageId, ByteString body, long requestId) {
-        handler.onClientForward(LINK, ClientForward.newBuilder()
+        forwardOn(LINK, sessionId, playerId, messageId, body, requestId);
+    }
+
+    private void forwardOn(long linkId, int sessionId, long playerId, int messageId, Message body, long requestId) {
+        forwardOn(linkId, sessionId, playerId, messageId, body.toByteString(), requestId);
+    }
+
+    private void forwardOn(long linkId, int sessionId, long playerId, int messageId, ByteString body, long requestId) {
+        handler.onClientForward(linkId, ClientForward.newBuilder()
                 .setSessionId(sessionId)
                 .setPlayerId(playerId)
                 .setMessageId(messageId)
                 .setBody(body)
                 .setRequestId(requestId)
                 .build());
+    }
+
+    /** 派发前丢弃的回执：信封 {@code {message_id = 请求号, id = 请求 id, error_message{1003}}}，不带应答体。 */
+    private static void assertNotDispatched(MessageContent reply, int messageId, long requestId) {
+        assertThat(reply.getMessageId()).isEqualTo(messageId);
+        assertThat(reply.getId()).isEqualTo(requestId);
+        assertThat(reply.hasErrorMessage()).as("信封错误").isTrue();
+        assertThat(reply.getErrorMessage().getId()).isEqualTo(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+        assertThat(reply.getErrorMessage().getParametersCount()).isZero();
+        assertThat(reply.getSerializedMessage().isEmpty()).as("不带应答体").isTrue();
     }
 
     private static EnterSceneC2SRequest enterSceneRequest(int configId, long sceneId, int mirrorConfigId) {

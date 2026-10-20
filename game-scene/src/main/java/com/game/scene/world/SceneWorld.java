@@ -3101,7 +3101,17 @@ public final class SceneWorld {
 
     /** 给本人下发一条消息（经它所在 gate 链路的会话）。逻辑线程上调用。 */
     public void sendTo(ScenePlayer player, MessageContent content) {
-        sink.send(player.session().linkId(), List.of(player.session().sessionId()), content);
+        sendToSession(player.session(), content);
+    }
+
+    /**
+     * 给某条 gate 链路上的某个会话下发一条消息，不要求本节点上有对应的玩家实例。只给请求分发用：派发前就丢弃的请求
+     * （会话不在本节点或还在加载、player_id 与会话不符等）此刻没有可用的实例，回执按转发帧自己的 (链路, 会话) 原路送回，
+     * 与正常应答的寻址相同（正常应答经 {@link #sendTo} 发往实例的会话，而实例正是按这个键查到的）；
+     * gate 侧照常按会话当前的场景绑定过滤（{@code ClientDispatcher.onToClient}），链路已断开时由 {@link ClientSink} 丢弃。逻辑线程上调用。
+     */
+    void sendToSession(SessionKey session, MessageContent content) {
+        sink.send(session.linkId(), List.of(session.sessionId()), content);
     }
 
     /**

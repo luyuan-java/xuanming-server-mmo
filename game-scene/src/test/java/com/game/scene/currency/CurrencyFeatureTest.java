@@ -34,6 +34,7 @@ import com.game.scene.world.PlayerSave;
 import com.game.scene.world.Scene;
 import com.game.scene.world.SceneWorld;
 import com.game.scene.world.Vec3;
+import com.game.table.CommonErrorTip;
 import com.google.protobuf.Message;
 import java.util.ArrayList;
 import java.util.List;
@@ -150,19 +151,29 @@ class CurrencyFeatureTest {
         assertThat(balances()).containsExactly(0L, 0L, 0L);
     }
 
+    /**
+     * 字段校验（同基线 ProtoFieldChecker）在分发入口、调处理器之前丢弃：不进处理器、钱包与流水不动。2026-10-19 起（mmorpg
+     * client-rpc-callback.md §7 R1，两版同批）带请求号的请求恰好回一个信封 1003（不带应答体），客户端不用等满请求超时。
+     */
     @Test
-    void 负数金额_分发入口静默丢弃不回包_同基线ProtoFieldChecker() throws Exception {
+    void 负数金额_分发入口丢弃不进处理器_回带请求号的信封1003() throws Exception {
         start(RunMode.DEV, null);
+        int gmAddCurrency = Contracts.REGISTRY.requireId("SceneCurrencyClientPlayer", "GmAddCurrency");
 
         handler.onClientForward(LINK, ClientForward.newBuilder()
                 .setSessionId(SESSION)
                 .setPlayerId(PLAYER)
-                .setMessageId(Contracts.REGISTRY.requireId("SceneCurrencyClientPlayer", "GmAddCurrency"))
+                .setMessageId(gmAddCurrency)
                 .setBody(GmAddCurrencyRequest.newBuilder().setCurrencyType(Wallet.GOLD).setAmount(-5).build().toByteString())
                 .setRequestId(1)
                 .build());
 
-        assertThat(sink.to(LINK, SESSION)).isEmpty();
+        assertThat(sink.to(LINK, SESSION)).singleElement().satisfies(reply -> {
+            assertThat(reply.getMessageId()).isEqualTo(gmAddCurrency);
+            assertThat(reply.getId()).isEqualTo(1L);
+            assertThat(reply.getErrorMessage().getId()).isEqualTo(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+            assertThat(reply.getSerializedMessage().isEmpty()).as("信封错误，不带应答体").isTrue();
+        });
         assertThat(audits).isEmpty();
         assertThat(balances()).containsExactly(0L, 0L, 0L);
     }

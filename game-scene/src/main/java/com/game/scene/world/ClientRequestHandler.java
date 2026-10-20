@@ -43,8 +43,13 @@ import org.slf4j.LoggerFactory;
  *
  * <p>规则按契约文档 §4：
  * <ul>
- *   <li>静默丢弃（不回包）：会话不在本节点或还在加载、player_id 与会话不符、消息号未知或不是 scene 的客户端服务、
- *       请求体解析失败、字段超规模或有符号整数为负（{@link RequestFieldCheck}，基线 ProtoFieldChecker）；</li>
+ *   <li>派发前丢弃（不调处理器）：会话不在本节点或还在加载、player_id 与会话不符、消息号未知或不是 scene 的客户端服务、
+ *       请求体解析失败、字段超规模或有符号整数为负（{@link RequestFieldCheck}，基线 ProtoFieldChecker）。
+ *       其中「请求-响应」类客户端请求——请求号非 0、方法属于客户端协议服务、应答类型不是 {@code Empty}——恰好回一个
+ *       带请求号的信封 {@code MessageContent{message_id = 请求号, id = 请求 id, error_message{1003}}}（{@code replyNotDispatched}），
+ *       客户端当场按请求号对上失败（确定没执行，重试安全），不用等满自己的 15 s 请求超时；其余（请求号为 0 无从关联、
+ *       应答 Empty 的单向消息、未知号与非客户端协议的号）仍静默丢弃。2026-10-19 起与 C++ 版同批（mmorpg
+ *       {@code docs/design/client-rpc-callback.md} §7 R1：C++ 版由 gate 在 scene 早退时补回同形信封）；</li>
  *   <li>GM 类指令（方法名 {@code Gm*} / {@code Debug*} / {@code Test*}）在运行模式不是 dev / test 时回应答内
  *       {@code error_message{1006}}，不调处理器——gate 是第一道锁，这里防绕开 gate 直连链路端口（基线 SCENE_RUN_MODE）；</li>
  *   <li>应答类型是 {@code Empty} 的方法（所有 Notify*、SceneInfoC2S、移动三条上行）不回包；没有处理器的这类方法静默忽略；</li>
@@ -70,6 +75,8 @@ public final class ClientRequestHandler {
     private static final Logger log = LoggerFactory.getLogger(ClientRequestHandler.class);
 
     private static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
+    /** 派发前丢弃的请求-响应类请求回的码（与 C++ gate 在 scene 早退时补回的码、Java gate 转发失败回的码同一个）。 */
+    private static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 冻结中被 {@link FreezePolicy#REJECT} 拒的方法回的码（基线各写入口冻结时回的 kInvalidParameter）。 */
     private static final int FROZEN_REJECTED = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     private static final int ENTER_PARAM_ERROR = SceneErrorTip.scene_error.kEnterSceneParamError_VALUE;
@@ -195,17 +202,20 @@ public final class ClientRequestHandler {
         ScenePlayer player = world.playerBySession(key);
         if (player == null) {
             log.debug("会话不在本节点或仍在加载，丢弃 message_id={} session={}", forward.getMessageId(), key);
+            replyNotDispatched(key, forward);
             return;
         }
         if (player.playerId() != forward.getPlayerId()) {
             log.warn("转发帧的 player_id 与会话上的玩家不符，丢弃 帧={} 会话上={} message_id={}",
                     forward.getPlayerId(), player.playerId(), forward.getMessageId());
+            replyNotDispatched(key, forward);
             return;
         }
         Optional<MessageMethod> found = registry.byId(forward.getMessageId());
         // 只有标了 OptionIsPlayerService 的客户端服务归 scene 处理（按服务语义，不看 proto 所在目录）
         if (found.isEmpty() || !found.get().playerService() || !found.get().clientService()) {
             log.warn("不是 scene 的客户端消息，丢弃 message_id={} player={}", forward.getMessageId(), player.playerId());
+            replyNotDispatched(key, forward);
             return;
         }
         MessageMethod method = found.get();
@@ -215,15 +225,17 @@ public final class ClientRequestHandler {
             request = method.requestPrototype().getParserForType().parseFrom(forward.getBody());
         } catch (InvalidProtocolBufferException e) {
             log.warn("请求体解析失败，丢弃 message_id={} player={}", forward.getMessageId(), player.playerId());
+            replyNotDispatched(key, forward);
             return;
         }
         String violation = RequestFieldCheck.violation(request);
         if (violation != null) {
             log.warn("请求字段超规模或含负数，丢弃 {} player={}：{}", method.key(), player.playerId(), violation);
+            replyNotDispatched(key, forward);
             return;
         }
         long requestId = forward.getRequestId();
-        boolean hasResponse = !(method.responsePrototype() instanceof Empty);
+        boolean hasResponse = hasResponse(method);
 
         if (method.gmCommand() && !runMode.allowsGmCommands()) {
             log.warn("运行模式不允许 GM 指令（绕过了 gate 的闸？），拒绝 {} player={}", method.key(), player.playerId());
@@ -423,6 +435,41 @@ public final class ClientRequestHandler {
         } else if (mirror) {
             world.beginMirrorCreate(player, want.getMirrorConfigId());
         }
+    }
+
+    /**
+     * 派发前丢弃的请求回执（mmorpg client-rpc-callback.md §7 R1，2026-10-19 两版同批）。只对「请求-响应」类客户端请求回，且恰好一个：
+     * <ul>
+     *   <li>请求号非 0：请求号为 0 的请求没法关联（旧 robot 的 {@code SendRequest} 发 0；回一个没有应答体的信封会被它的生成 handler
+     *       解成全零应答、看起来像受理），维持不回；</li>
+     *   <li>消息号在契约里、方法属于客户端协议服务：不认识的号无从判断应答类型，非客户端协议的号（如 96–117）客户端本就发不出来——
+     *       gate 只转客户端协议的号，走到这里的是伪造帧或两端契约不一致，同 gate 对白名单外的号一样不回；</li>
+     *   <li>应答类型不是 {@code Empty}：单向消息成功本就不回包，这里不能因为丢弃多出一个包。</li>
+     * </ul>
+     * 回执是信封错误 {@code MessageContent{message_id = 请求号, id = 请求 id, error_message{1003}}}、不带应答体，与 C++ gate 在 scene 早退时
+     * 补回的、Java gate 转发失败回的（{@code ClientDispatcher.forwardToScene}）同形。按转发帧自己的 (链路, 会话) 原路送回
+     * （{@link SceneWorld#sendToSession}），不按 player_id 另找会话：只回给发出这条请求的那个 gate 会话，player_id 不符时也一样。
+     * 丢弃点都在调处理器之前，处理器没有机会回包或转成延迟应答，所以不会与别的应答重复。
+     */
+    private void replyNotDispatched(SessionKey session, ClientForward forward) {
+        long requestId = forward.getRequestId();
+        if (requestId == 0) {
+            return;
+        }
+        Optional<MessageMethod> found = registry.byId(forward.getMessageId());
+        if (found.isEmpty() || !found.get().clientService() || !hasResponse(found.get())) {
+            return;
+        }
+        world.sendToSession(session, MessageContent.newBuilder()
+                .setMessageId(found.get().messageId())
+                .setId(requestId)
+                .setErrorMessage(tip(SERVICE_UNAVAILABLE))
+                .build());
+    }
+
+    /** 方法有没有应答：应答类型是契约里的 {@code Empty} 的方法（Notify*、43、移动三条上行）不回包。 */
+    private static boolean hasResponse(MessageMethod method) {
+        return !(method.responsePrototype() instanceof Empty);
     }
 
     /** 不能处理的方法回 {@code kFeatureUnavailable}(1006)，形态见 {@link #replyError}。 */
