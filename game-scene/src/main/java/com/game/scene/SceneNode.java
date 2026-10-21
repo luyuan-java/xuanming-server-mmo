@@ -77,6 +77,8 @@ import com.game.scene.ownership.OwnerTakeoverSubscriber;
 import com.game.scene.player.ItemGuids;
 import com.game.scene.rpc.SceneRpcServer;
 import com.game.scene.storage.StoragePlayerRepository;
+import com.game.scene.storage.TradeFreezeRecovery;
+import com.game.player.store.PlayerTradeStore;
 import com.game.scene.team.TeamFollowService;
 import com.game.scene.team.TravelTeamChecks;
 import com.game.scene.transfer.SceneManagerSwitchTargets;
@@ -167,6 +169,7 @@ public class SceneNode implements SmartLifecycle {
     private final RedissonClient redis;
     private final RedisKeys redisKeys;
     private final PlayerStore playerStore;
+    private final PlayerTradeStore playerTrades;
     private final MessageIdRegistry registry;
     private final SceneTables tables;
     private final AttributeTables attributeTables;
@@ -193,6 +196,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile ThreadPoolExecutor storageExecutor;
     /** 玩家存储（停服时关存储线程池之前，等在途交出 / 探测的结局处理完）。 */
     private volatile StoragePlayerRepository playerRepository;
+    private volatile TradeFreezeRecovery tradeFreezeRecovery;
     private volatile GateLinks links;
     private volatile SceneWorld world;
     /** 资产通道的进程内入口（跨进程传输 {@link #assetRpc} 接在它外面）。 */
@@ -237,7 +241,7 @@ public class SceneNode implements SmartLifecycle {
      * @param battleTables  回合制战斗的配表视图（指纹、技能可施放、道具 battle_usable、职业初值）
      * @param battleMetrics 回合制战斗的指标
      */
-    public SceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore,
+    public SceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore, PlayerTradeStore playerTrades,
                      MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables, BagTables bagTables,
                      MissionTables missionTables, SkillTables skillTables, PetTables petTables, NodeLinkAuth linkAuth,
                      SceneMetrics metrics, AuditProperties audit, KafkaNames kafkaNames, SceneBattleTables battleTables,
@@ -246,6 +250,7 @@ public class SceneNode implements SmartLifecycle {
         this.redis = redis;
         this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.playerStore = playerStore;
+        this.playerTrades = playerTrades;
         this.registry = registry;
         this.tables = tables;
         this.attributeTables = attributeTables;
@@ -382,6 +387,10 @@ public class SceneNode implements SmartLifecycle {
         world = sceneWorld;
         repository.onFinalApplied(sceneWorld::onFinalApplied);
         repository.startFinalRecovery(scheduler);
+        TradeFreezeRecovery tradeFreezes = new TradeFreezeRecovery(playerTrades, instanceId, storageExecutor, logic,
+                (request, drained) -> sceneWorld.drainForTrade(request.request().playerId(), request.ownerEpoch(), drained));
+        tradeFreezeRecovery = tradeFreezes;
+        tradeFreezes.start(scheduler);
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
                 AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM, metrics, petService::transferCapacity));
         // 资产通道的跨进程提供方：先建好（导出在接受链路之后、发布目录之前）。回写池队列无界，但同时排队的至多是在途上限条
@@ -675,6 +684,8 @@ public class SceneNode implements SmartLifecycle {
             server.stopAccepting();
         }
         stopGainBlockSync();
+        TradeFreezeRecovery tradeFreezes = tradeFreezeRecovery;
+        if (tradeFreezes != null) tradeFreezes.close();
         OwnerTakeoverSubscriber subscriber = takeoverSubscriber;
         if (subscriber != null) {
             subscriber.stop();

@@ -275,6 +275,44 @@ class PlayerBundleSqlTest {
     // ---------------------------------------------------------------- 导入
 
     @Test
+    void 本地replace同锁拒交易锁及坏修订_成功覆盖递增账号修订使旧登录链失效(@TempDir Path dir) throws Exception {
+        Path file = exported(dir);
+        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute")).as(err()).isEqualTo(0);
+        for (String change : List.of("trade_listing_id=101", "owner_revision=0", "owner_revision=9223372036854775807")) {
+            target.jdbc().update("UPDATE player SET trade_listing_id=0,owner_revision=1 WHERE player_id=?", PLAYER);
+            target.jdbc().update("UPDATE player SET " + change + " WHERE player_id=?", PLAYER);
+            var before = localFinalSaveSnapshot();
+            var redis = new FakeRedis("local-run"); err.reset();
+            assertThat(importLocal(file, redis, "--execute", "--replace")).as(err()).isEqualTo(2);
+            assertThat(err()).contains("交易锁").contains("修订");
+            assertThat(redis.deleted).isEmpty();
+            assertThat(localFinalSaveSnapshot()).isEqualTo(before);
+        }
+        target.jdbc().update("UPDATE player SET trade_listing_id=0,owner_revision=1 WHERE player_id=?", PLAYER);
+        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute", "--replace")).as(err()).isEqualTo(0);
+        var store = target.playerStore(() -> NOW);
+        assertThat(store.findPlayer(PLAYER).orElseThrow().getOwnerRevision()).isEqualTo(2);
+        assertThat(store.claimOwnership(PLAYER, "dev_tester", 1, Duration.ofSeconds(5))).isInstanceOf(PlayerStore.ClaimResult.NotFound.class);
+        assertThat(store.claimOwnership(PLAYER, "dev_tester", 2, Duration.ofSeconds(5))).isInstanceOf(PlayerStore.ClaimResult.Claimed.class);
+    }
+
+    @Test
+    void 本地发布占位同锁拒交易锁和坏修订_不冒充可在线恢复(@TempDir Path dir) throws Exception {
+        assertThat(importLocal(exported(dir), new FakeRedis("local-run"), "--execute")).as(err()).isEqualTo(0);
+        target.jdbc().update("UPDATE player SET owner_epoch=9,owner_released=0,owner_lease_until=? WHERE player_id=?",
+                LocalPlayerImporter.IMPORT_HOLD_LEASE, PLAYER);
+        for (String change : List.of("trade_listing_id=101", "owner_revision=0")) {
+            target.jdbc().update("UPDATE player SET trade_listing_id=0,owner_revision=1 WHERE player_id=?", PLAYER);
+            target.jdbc().update("UPDATE player SET " + change + " WHERE player_id=?", PLAYER);
+            var before = localFinalSaveSnapshot();
+            try (var connection = target.dataSource.getConnection()) {
+                assertThat(new LocalPlayerImporter(connection).publish(PLAYER, 9, NOW)).isFalse();
+            }
+            assertThat(localFinalSaveSnapshot()).isEqualTo(before);
+        }
+    }
+
+    @Test
     void 导入后_生产PlayerStore夺权并加载到逐字节相同的玩法数据(@TempDir Path dir) throws Exception {
         Path file = exported(dir);
         FakeRedis local = new FakeRedis("local-run");

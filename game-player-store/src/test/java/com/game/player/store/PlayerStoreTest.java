@@ -165,6 +165,7 @@ class PlayerStoreTest {
 
     @Test
     void 夺权_上一个写者已释放或租约过期才成功_新租约为现在加OWNER_LEASE() {
+        when(mapper.selectTradeListingId(9)).thenReturn(0L);
         when(mapper.selectBlockingFinalEpoch(9)).thenReturn(null);
         when(mapper.selectOwnerForUpdate(9)).thenReturn(new OwnerState(5, true, 0));
         when(mapper.claimOwnerEpoch(9, 1_000L, 1_000L + PlayerStore.OWNER_LEASE.toMillis())).thenReturn(1);
@@ -175,12 +176,25 @@ class PlayerStoreTest {
 
     @Test
     void 夺权_仍被持有回Held带当前epoch_玩家不存在回NotFound() {
+        when(mapper.selectTradeListingId(9)).thenReturn(0L);
         when(mapper.selectOwnerForUpdate(9)).thenReturn(new OwnerState(5, false, 31_000L));
         when(mapper.selectOwnerEpoch(9)).thenReturn(5L);
         assertThat(store.claimOwnership(9)).isEqualTo(new PlayerStore.ClaimResult.Held(5));
 
         when(mapper.selectOwnerEpoch(10)).thenReturn(null);
         assertThat(store.claimOwnership(10)).isEqualTo(new PlayerStore.ClaimResult.NotFound());
+    }
+
+    @Test
+    void 交易锁即使原写者已释放也不能夺权_缺失门禁原件拒绝() {
+        when(mapper.selectOwnerForUpdate(9)).thenReturn(new OwnerState(5, true, 0));
+        when(mapper.selectTradeListingId(9)).thenReturn(101L);
+        assertThat(store.claimOwnership(9)).isEqualTo(new PlayerStore.ClaimResult.Held(5));
+        verify(mapper, never()).claimOwnerEpoch(anyLong(), anyLong(), anyLong());
+        when(mapper.selectTradeListingId(9)).thenReturn(null);
+        assertThatThrownBy(() -> store.claimOwnership(9)).isInstanceOf(IllegalStateException.class).hasMessageContaining("交易锁");
+        assertThatThrownBy(() -> store.claimOwnership(9, "robot_0001", 0, Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

@@ -13,3 +13,6 @@ run/
 .mmorpg-maps/
 # compose 的秘密文件（仓库里只放模板 deploy/compose/env.example）
 deploy/compose/.env
+
+# build outputs
+build/

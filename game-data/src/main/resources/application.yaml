@@ -56,6 +56,11 @@ game:
     database: 12
   data:
     admin-token: ${GAME_ADMIN_TOKEN:}
+    # 仅固定商城目录命令与只读订单；签名密钥留在服务端，未配置地址不影响其他运维接口。
+    mall-admin:
+      base-url: ${GAME_DATA_MALL_ADMIN_URL:}
+      secret: ${GAME_MALL_ADMIN_SECRET:}
+      subject: ${GAME_MALL_ADMIN_SUBJECT:mall-admin}
     retention:
       # 资产流水保留期；0 = 永久保留（同 mmorpg）
       transaction-log: ${GAME_DATA_TXLOG_RETENTION:0s}

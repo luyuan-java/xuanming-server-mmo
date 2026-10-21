@@ -11,7 +11,9 @@ import java.security.MessageDigest;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * 运维接口（/admin/**）的鉴权：共享令牌（环境变量 {@code GAME_ADMIN_TOKEN}，请求头 {@value #TOKEN_HEADER}，常数时间比较）
@@ -27,6 +29,8 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
     public static final String TOKEN_HEADER = "X-Game-Admin-Token";
     public static final String OPERATOR_HEADER = "X-Game-Operator";
     static final String AUDIT_LOGGER = "game.audit.admin";
+    private static final String AUTHENTICATED = AdminAuthFilter.class.getName() + ".authenticated";
+    private record Authentication(String operator) {}
 
     private static final Logger audit = LoggerFactory.getLogger(AUDIT_LOGGER);
     /**
@@ -64,15 +68,18 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
                 status = HttpServletResponse.SC_BAD_REQUEST;
                 response.sendError(status, "缺少操作人（" + OPERATOR_HEADER + "，UTF-8，1–64 字符）");
             } else {
+                request.setAttribute(AUTHENTICATED, new Authentication(operator));
                 chain.doFilter(request, response);
                 status = response.getStatus();
             }
         } finally {
+            request.removeAttribute(AUTHENTICATED);
             audit.info("admin operator={} method={} path={} query={} remote={} status={}",
                     operator == null ? "<invalid>" : operator, request.getMethod(), printable(path),
                     printable(request.getQueryString()),
                     request.getRemoteAddr(), status);
-            metrics.adminRequest(opOf(path), Integer.toString(status));
+            String route = request.getPathInfo() == null ? request.getServletPath() : request.getPathInfo();
+            metrics.adminRequest(under(route, MallAdminController.PATH) ? "mall_catalog" : opOf(path), Integer.toString(status));
         }
     }
 
@@ -81,6 +88,7 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
      * 各子路径各归成一个，其余一律 other（任意路径不得变成标签值）。
      */
     static String opOf(String path) {
+        if (under(path, MallAdminController.PATH)) { return "mall_catalog"; }
         String known = KNOWN_OPS.get(path);
         if (known != null) {
             return known;
@@ -160,5 +168,13 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
 
     private boolean matches(String presented) {
         return presented != null && MessageDigest.isEqual(token, presented.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 控制器二次核验过滤器留下的私有类型标记，不接受任何客户端头作为认证事实。 */
+    public static String authenticatedOperator(HttpServletRequest request) {
+        if (request.getAttribute(AUTHENTICATED) instanceof Authentication authentication) {
+            return authentication.operator();
+        }
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "运维认证失败");
     }
 }

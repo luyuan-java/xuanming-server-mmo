@@ -58,6 +58,21 @@ class GlobalMatchStoreIntegrationTest {
         assertThrows(RuntimeException.class,()->store.claim(List.of(a,b),formation(102),false));
         assertEquals(1,store.ticket(1).getState());assertNull(store.formation(102));
     }
+    @Test void claimRechecksTicketExpiryAndRollsBackWholeParty()throws Exception{
+        var a=join(1);var b=join(2);
+        // 候选原票与机房回执仍有效，SQL 票据已到期；提交点不能沿用扫描时的时效判断。
+        try(var c=data.getConnection();var q=c.prepareStatement("UPDATE match_global_ticket SET expires_ms=1 WHERE player_id=?")){
+            q.setLong(1,b.getPlayerId());assertEquals(1,q.executeUpdate());
+        }
+        assertThrows(RuntimeException.class,()->store.claim(List.of(a,b),formation(103),false));
+        // ticket() 会终结过期票；只读 SQL 避免观察动作自己改变待验证状态。
+        for(var original:List.of(a,b))try(var c=data.getConnection();var q=c.prepareStatement("SELECT state,formation_id,ticket FROM match_global_ticket WHERE player_id=?")){
+            q.setLong(1,original.getPlayerId());try(var row=q.executeQuery()){
+                assertTrue(row.next());assertEquals(1,row.getInt(1));assertEquals(0,row.getLong(2));assertEquals(original.getTicket(),row.getString(3));
+            }
+        }
+        assertNull(store.formation(103));
+    }
     @Test void cancellingUnknownJoinFencesLateArrivalWithoutTouchingNewRequest()throws Exception{
         String request=UUID.randomUUID().toString();
         assertFalse(store.cancel(11,"",request));

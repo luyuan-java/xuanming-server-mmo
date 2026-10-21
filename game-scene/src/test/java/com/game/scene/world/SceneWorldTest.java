@@ -862,6 +862,49 @@ class SceneWorldTest {
         return new PlayerData(playerId, epoch, 3, 1, "", 1, 0, Vec3.ORIGIN);
     }
 
+    @Test
+    void 角色排空等待原快照持久接管和全部旧加载回调_旧任务不触碰新E() {
+        repo.setAutoFinalRegistration(false);
+        repo.putNewPlayer(1001,3); enter(LINK,11,1001,scene.sceneId(),3);
+        world.playerById(1001).wallet().add(0,77);
+        world.onPlayerEnter(OTHER_LINK,enterFrame(22,1001,scene.sceneId(),3));
+        var delayed=repo.takeLoad();
+        var acknowledgements=new java.util.concurrent.atomic.AtomicInteger();
+        world.drainForTrade(1001,3,acknowledgements::incrementAndGet);
+        assertThat(world.playerById(1001)).isNull();
+        assertThat(acknowledgements.get()).isZero();
+        var finalWrite=repo.takeFinalRegistration();
+        assertThat(finalWrite.save().state().getCurrency().getBalances(0)).isEqualTo(77);
+        finalWrite.complete(new PlayerRepository.FinalSaveRegistration.Durable(finalWrite.receipt(),false));
+        assertThat(acknowledgements.get()).as("SQL接管已到，但旧加载回调仍未排空").isZero();
+        delayed.complete(new PlayerRepository.LoadResult.Found(newPlayer(1001,3)));
+        assertThat(acknowledgements.get()).as("这里只是RAM排空ACK，实际APPLIED由SQL验证器独立裁决").isEqualTo(1);
+        assertThat(world.playerById(1001)).isNull();
+        repo.putNewPlayer(1001,4); enter(OTHER_LINK,23,1001,scene.sceneId(),4);
+        var current=world.playerById(1001);
+        world.drainForTrade(1001,3,acknowledgements::incrementAndGet);
+        assertThat(world.playerById(1001)).isSameAs(current);
+        assertThat(current.ownerEpoch()).isEqualTo(4);
+    }
+
+    @Test
+    void 尚未创建实体的OPEN加载在排空时仍登记原快照_不丢掉最后一份状态冒ACK() {
+        repo.setAutoFinalRegistration(false);
+        world.onPlayerEnter(LINK,enterFrame(11,1001,scene.sceneId(),3));
+        var delayed=repo.takeLoad();
+        var acknowledgements=new java.util.concurrent.atomic.AtomicInteger();
+        world.drainForTrade(1001,3,acknowledgements::incrementAndGet);
+        assertThat(acknowledgements.get()).isZero();
+        var state=PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(77)).build();
+        delayed.complete(new PlayerRepository.LoadResult.Found(new PlayerData(1001,3,3,1,"",2,1,Vec3.ORIGIN,state)));
+        var finalWrite=repo.takeFinalRegistration();
+        assertThat(finalWrite.save().state()).isEqualTo(state);
+        assertThat(acknowledgements.get()).isZero();
+        finalWrite.complete(new PlayerRepository.FinalSaveRegistration.Durable(finalWrite.receipt(),false));
+        assertThat(acknowledgements.get()).isEqualTo(1);
+        assertThat(world.playerById(1001)).isNull();
+    }
+
     static PlayerEnter enterFrame(int sessionId, long playerId, long sceneId, long epoch) {
         return PlayerEnter.newBuilder()
                 .setSessionId(sessionId)

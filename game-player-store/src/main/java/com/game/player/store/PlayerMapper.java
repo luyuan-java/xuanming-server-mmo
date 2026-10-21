@@ -23,7 +23,7 @@ public interface PlayerMapper {
 
 
     // JDBC现有int API保留uint32位模式；SQL列始终存0..4294967295，回读先降为有符号int范围。
-    String PLAYER_COLUMNS = "player_id,account,zone_id,name,name_key,class_id,gender,appearance_id,level,"
+    String PLAYER_COLUMNS = "player_id,account,owner_revision,trade_listing_id,zone_id,name,name_key,class_id,gender,appearance_id,level,"
             + "CASE WHEN scene_config_id>2147483647 THEN CAST(scene_config_id AS DECIMAL(20,0))-4294967296 ELSE scene_config_id END AS scene_config_id,"
             + "pos_x,pos_y,pos_z,owner_epoch,owner_released,owner_lease_until,created_at,updated_at";
 
@@ -50,6 +50,14 @@ public interface PlayerMapper {
     @Select("SELECT " + PLAYER_COLUMNS + " FROM player WHERE player_id = #{playerId}")
     PlayerRow selectById(@Param("playerId") long playerId);
 
+    /** 调用者已持player主键锁；只读交易门禁，不复制账号或资产事实源。 */
+    @Select("SELECT trade_listing_id FROM player WHERE player_id=#{playerId}")
+    Long selectTradeListingId(@Param("playerId") long playerId);
+
+    /** 旧准入E一旦封闭，即使撤单清锁也不能由迟到的PlayerEnter复活。 */
+    @Select("SELECT COUNT(*) FROM player_trade_drain WHERE player_id=#{playerId} AND owner_epoch=#{epoch}")
+    long countTradeSeals(@Param("playerId") long playerId, @Param("epoch") long epoch);
+
     /** {@code nameKey} 只由 {@link PlayerStore#nameKey} 计算，不从行对象取（行对象不携带唯一键，调用方无从填错）。 */
     @Insert("""
             INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, appearance_id, level,
@@ -67,7 +75,7 @@ public interface PlayerMapper {
     @Update("""
             UPDATE player
                SET owner_epoch = owner_epoch + 1, owner_released = 0, owner_lease_until = #{leaseUntil}, updated_at = #{now}
-             WHERE player_id = #{playerId} AND (owner_released = 1 OR owner_lease_until < #{now})
+             WHERE player_id = #{playerId} AND trade_listing_id=0 AND (owner_released = 1 OR owner_lease_until < #{now})
             """)
     int claimOwnerEpoch(@Param("playerId") long playerId, @Param("now") long now, @Param("leaseUntil") long leaseUntil);
 
@@ -78,7 +86,7 @@ public interface PlayerMapper {
     @Update("""
             UPDATE player
                SET owner_epoch = #{nextEpoch}, owner_released = 0, owner_lease_until = #{leaseUntil}, updated_at = #{now}
-             WHERE player_id = #{playerId} AND owner_epoch = #{expectedEpoch}
+             WHERE player_id = #{playerId} AND owner_epoch = #{expectedEpoch} AND trade_listing_id=0
                AND (owner_released = 1 OR owner_lease_until < #{now})
             """)
     int recoverOwnerEpoch(@Param("playerId") long playerId, @Param("expectedEpoch") long expectedEpoch,
@@ -126,7 +134,7 @@ public interface PlayerMapper {
                    pos_x = #{row.posX}, pos_y = #{row.posY}, pos_z = #{row.posZ},
                    owner_epoch = owner_epoch + 1, owner_released = #{released}, owner_lease_until = #{leaseUntil},
                    updated_at = #{row.updatedAt}
-             WHERE player_id = #{row.playerId} AND owner_epoch = #{row.ownerEpoch} AND owner_released = 0
+             WHERE player_id = #{row.playerId} AND owner_epoch = #{row.ownerEpoch} AND owner_released = 0 AND trade_listing_id=0
                AND owner_lease_until >= #{requireLeaseAtLeast}
             """)
     int updateStateAndHandOff(@Param("row") PlayerRow row, @Param("leaseUntil") long leaseUntil,

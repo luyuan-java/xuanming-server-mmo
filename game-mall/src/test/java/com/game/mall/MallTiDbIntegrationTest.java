@@ -61,6 +61,7 @@ class MallTiDbIntegrationTest {
             SpringApplication app = new SpringApplication(MallApplication.class);
             app.setWebApplicationType(WebApplicationType.NONE);
             context = app.run("--game.namespace=" + DATABASE, "--game.run-mode=prod", "--game.mall.require-tidb=true",
+                    "--game.mall.allowed-payment-channels=test-channel",
                     "--game.mall.gateway-secret=" + MallTestDatabase.GATEWAY_KEY,
                     "--game.mall.payment-secret=" + MallTestDatabase.PAYMENT_KEY,
                     "--spring.datasource.url=jdbc:mysql://127.0.0.1:4000/" + DATABASE,
@@ -230,13 +231,112 @@ class MallTiDbIntegrationTest {
         var order=first.create("501",new MallApi.CreateOrder("delivery-tidb-001",501,2));
         jdbc.update("UPDATE commerce_sku_grant SET count_per_unit=9,item_config_id=99 WHERE sku_id=501");
         first.recordTrustedPayment(payment(order,"delivery-tidb-pay"));
-        var one=new DeliveryStore(jdbc,new DataSourceTransactionManager(pool));var two=new DeliveryStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool));
+        var one=new DeliveryStore(jdbc,new DataSourceTransactionManager(pool),context.getBean(MallProperties.class));var two=new DeliveryStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool),context.getBean(MallProperties.class));
         var intent=one.poll(100).stream().filter(v->v.orderId().equals(order.orderId())).findFirst().orElseThrow();assertThat(intent.itemConfigId()).isEqualTo(10);assertThat(intent.itemCount()).isEqualTo(4);
         var receipt=new DeliveryApi.Receipt(order.orderId(),"9001","DELIVERED","a".repeat(64));one.receipt(receipt);two.receipt(receipt);assertThat(second.get("501",order.orderId()).state()).isEqualTo("DELIVERED");
         assertThatThrownBy(()->two.receipt(new DeliveryApi.Receipt(order.orderId(),"9002","DELIVERED","a".repeat(64)))).isInstanceOf(MallException.class);
         var refund=first.create("502",new MallApi.CreateOrder("delivery-tidb-002",501,1));first.recordTrustedPayment(payment(refund,"refund-tidb-pay"));one.receipt(new DeliveryApi.Receipt(refund.orderId(),"9003","REFUND_PENDING","b".repeat(64)));
         assertThatThrownBy(()->two.refunded(new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",1,"CNY"))).isInstanceOf(MallException.class);
         var channel=new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",refund.amountMinor(),refund.currency());one.refunded(channel);two.refunded(channel);assertThat(second.get("502",refund.orderId()).state()).isEqualTo("REFUNDED");
+    }
+
+    @Test
+    void 交付固定上界和同毫秒游标跨副本不漏后页_新增和终结下轮收敛() {
+        var one = new DeliveryStore(jdbc, new DataSourceTransactionManager(pool), context.getBean(MallProperties.class));
+        var two = new DeliveryStore(new JdbcTemplate(pool), new DataSourceTransactionManager(pool), context.getBean(MallProperties.class));
+        String prefix = UUID.randomUUID().toString().substring(0, 24);
+        long created = jdbc.queryForObject("SELECT COALESCE(MAX(created_ms),0)+10000 FROM commerce_delivery_intent", Long.class);
+        List<String> owned = new ArrayList<>();
+        try {
+            for (int i = 1; i <= 25; i++) {
+                String order = prefix + String.format("%012x", i);
+                owned.add(order);
+                seedDelivery(order, created);
+            }
+            String upper = owned.getLast();
+            var initial = one.poll(new DeliveryApi.Poll(1, ""));
+            assertThat(initial.entries()).hasSize(1);
+            assertThat(initial.entries().getFirst().cursor()).endsWith(":" + created + ":" + upper);
+            // 下界只排除本类其它用例的较早夹具；25 个同毫秒意图全部仍在窗口内。
+            String before = "v1:" + (created - 1) + ":ffffffff-ffff-ffff-ffff-ffffffffffff:" + created + ":" + upper;
+            var firstPage = one.poll(new DeliveryApi.Poll(20, before));
+            assertThat(firstPage.entries()).extracting(entry -> entry.intent().orderId()).containsExactlyElementsOf(owned.subList(0, 20));
+            assertThat(two.poll(new DeliveryApi.Poll(20, before))).isEqualTo(firstPage);
+            String afterTwenty = firstPage.entries().getLast().cursor();
+            assertThat(afterTwenty).isNotEmpty();
+            var originalIntent = firstPage.entries().getFirst().intent();
+            one.receipt(new DeliveryApi.Receipt(owned.get(2), "900123", "DELIVERED", "e".repeat(64)));
+
+            String appended = prefix + "00000000001a";
+            owned.add(appended);
+            seedDelivery(appended, created + 1);
+            String insertedBefore = prefix + "000000000000";
+            owned.add(insertedBefore);
+            seedDelivery(insertedBefore, created);
+            var tail = two.poll(new DeliveryApi.Poll(20, afterTwenty));
+            assertThat(tail.entries()).extracting(entry -> entry.intent().orderId()).containsExactlyElementsOf(owned.subList(20, 25));
+            assertThat(tail.entries().getLast().cursor()).isEmpty();
+            for (int i = 20; i < 25; i++)
+                one.receipt(new DeliveryApi.Receipt(owned.get(i), "9100" + i, "DELIVERED", "f".repeat(64)));
+            assertThat(two.poll(new DeliveryApi.Poll(20, afterTwenty)).entries()).isEmpty();
+            assertThat(two.poll(new DeliveryApi.Poll(20, before)).entries().stream()
+                    .map(DeliveryApi.Entry::intent).filter(intent -> intent.orderId().equals(originalIntent.orderId())).findFirst())
+                    .contains(originalIntent);
+
+            // 重启从首页重放；固定窗口结束后，后插入的旧键与新上界之外的意图都能再次扫到。
+            var restarted = new DeliveryStore(new JdbcTemplate(pool), new DataSourceTransactionManager(pool), context.getBean(MallProperties.class));
+            List<String> nextRound = new ArrayList<>();
+            String cursor = "";
+            int maxPages = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_intent WHERE status='PENDING'", Integer.class) / 20 + 2;
+            for (int page = 0; page < maxPages; page++) {
+                var polled = restarted.poll(new DeliveryApi.Poll(20, cursor));
+                if (polled.entries().isEmpty())
+                    break;
+                for (var entry : polled.entries()) nextRound.add(entry.intent().orderId());
+                cursor = polled.entries().getLast().cursor();
+                if (cursor.isEmpty()) break;
+            }
+            assertThat(cursor).isEmpty();
+            assertThat(nextRound).contains(appended, insertedBefore).doesNotContain(owned.get(2));
+            assertThat(nextRound).doesNotContainAnyElementsOf(owned.subList(20, 25));
+            assertThat(nextRound.stream().filter(owned::contains).toList()).doesNotHaveDuplicates().hasSize(21);
+        } finally {
+            for (String order : owned) {
+                jdbc.update("DELETE FROM commerce_delivery_receipt WHERE order_sn=?", order);
+                jdbc.update("DELETE FROM commerce_delivery_intent WHERE order_sn=?", order);
+                jdbc.update("DELETE FROM commerce_order_grant WHERE order_sn=?", order);
+                jdbc.update("DELETE FROM oms_order WHERE order_sn=?", order);
+            }
+        }
+    }
+
+    @Test
+    void 交付畸形游标和越界页长必须整体拒绝() {
+        var delivery = new DeliveryStore(jdbc, new DataSourceTransactionManager(pool), context.getBean(MallProperties.class));
+        String first = "00000000-0000-0000-0000-000000000001";
+        String second = "00000000-0000-0000-0000-000000000002";
+        for (String invalid : List.of(" ", "v2:1:" + first + ":2:" + second,
+                "v1:-1:" + first + ":2:" + second, "v1:01:" + first + ":2:" + second,
+                "v1:9223372036854775808:" + first + ":9223372036854775808:" + second,
+                "v1:1:ABCDEF00-0000-0000-0000-000000000001:2:" + second,
+                "v1:1:" + first + ":2:not-an-order", "v1:3:" + first + ":2:" + second,
+                "v1:2:" + second + ":2:" + first, "v1:1:" + first + ":2:" + second + ":extra", "x".repeat(257))) {
+            assertThatThrownBy(() -> delivery.poll(new DeliveryApi.Poll(20, invalid)))
+                    .isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(400));
+        }
+        for (int limit : List.of(0, 101))
+            assertThatThrownBy(() -> delivery.poll(new DeliveryApi.Poll(limit, "")))
+                    .isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(400));
+    }
+
+    /** 仅为 SQL 扫描夹具写入已冻结的原意图，不声称经过真实付款或资产到账。 */
+    private static void seedDelivery(String order, long created) {
+        new TransactionTemplate(new DataSourceTransactionManager(pool)).executeWithoutResult(status -> {
+            jdbc.update("INSERT INTO oms_order(order_sn,buyer_id,request_id,sku_id,quantity,pay_amount,currency,status,create_time_ms,payment_deadline_ms)"
+                    + " VALUES(?,'88001',?,88001,1,1250,'CNY',1,?,?)", order, order.getBytes(StandardCharsets.UTF_8), created, created + 60000);
+            jdbc.update("INSERT INTO commerce_order_grant(order_sn,item_config_id,count_per_unit,title) VALUES(?,10,1,'玄铁')", order);
+            jdbc.update("INSERT INTO commerce_delivery_intent(order_sn,buyer_id,sku_id,quantity,status,created_ms) VALUES(?,'88001',88001,1,'PENDING',?)", order, created);
+        });
     }
 
     private static void sku(long id, int stock) { jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (?,?,?,1250,'CNY',?,0,1)", id, id, "tidb-" + id, stock);jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(?,10,1,'玄铁')",id); }

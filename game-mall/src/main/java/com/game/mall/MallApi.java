@@ -13,7 +13,10 @@ public final class MallApi {
     public record CreateOrder(@NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{8,128}") String requestId,
                               @Positive long skuId, @Min(1) @Max(10000) int quantity) { }
 
-    /** 调用方必须已核验真实渠道付款；签名认证并不代表这里已经实现支付渠道。 */
+    /** 仅支付角色可跨买家查单，买家身份与金额仍由原订单返回。 */
+    public record OrderQuery(@NotBlank @Pattern(regexp = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}") String orderId) { }
+
+    /** 调用方必须已核验渠道事实；本地mock还须匹配独立原件，签名不代表真实支付渠道已接通。 */
     public record Payment(@NotBlank @Pattern(regexp = "[0-9a-f-]{36}") String orderId,
                           @NotBlank @Pattern(regexp = "[a-z][a-z0-9_-]{1,31}") String channel,
                           @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,128}") String transactionId,

@@ -12,6 +12,7 @@ import com.game.discovery.asset.ReliableAssetDelivery;
 import com.game.player.store.asset.AssetSeqState;
 import com.game.player.store.asset.PersistedAssetLedgerReader;
 import com.game.trade.store.pb.TradeAssetOpRow;
+import com.game.trade.store.pb.TradeCommerceRow;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.sql.SQLException;
 import java.util.concurrent.*;
@@ -31,6 +32,8 @@ public final class CommerceRuntime implements AutoCloseable {
         Thread.ofPlatform().daemon(true).name("trade-commerce-recovery").factory());
     private final AtomicBoolean started = new AtomicBoolean();
     private final OfficialMallClient mall;
+    // 仅由驱动 tick 的单个工作线程持有；尝试后前移、到表尾再绕回，不让离线玩家占满首页。
+    private long ackAfterOpId;
     public CommerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery, PersistedAssetLedgerReader ledger) {
         this(e, delivery, ledger, null);
     }
@@ -64,55 +67,54 @@ public final class CommerceRuntime implements AutoCloseable {
             .setBundle(AssetBundle.parseFrom(op.getPayload()))
             .build();
     }
+    /** 只由本工作线程或未启动 worker 的测试串行调用；ACK 游标不允许并发驱动。 */
     public void tick(Deadline budget) throws SQLException {
         long now = e.clock.getAsLong();
         for (var candidate :
             e.store.ops("status=1 AND next_attempt_ms<=? AND lease_until_ms<=? ORDER BY op_id LIMIT 50", now, now)) {
             if (budget.remainingMillis() < 500)
                 break;
-            var op = claim(candidate.getOpId(), budget);
-            if (op == null)
-                continue;
-            send(op, budget);
+            TradeAssetOpRow op = candidate;
+            try {
+                op = claim(candidate.getOpId(), budget);
+                if (op != null)
+                    send(op, Deadline.after(Math.min(5000, budget.remainingMillis())));
+            } catch (SQLException | RuntimeException failure) {
+                if (budget.expired() || Thread.currentThread().isInterrupted())
+                    break;
+                log.error("交易资产单行投递失败，保留原seq op_id={}", Long.toUnsignedString(candidate.getOpId()), failure);
+                if (op != null)
+                    try {
+                        reschedule(op, backoff(op), budget);
+                    } catch (SQLException | RuntimeException deferFailure) {
+                        log.error("交易资产单行推迟失败 op_id={}", Long.toUnsignedString(op.getOpId()), deferFailure);
+                    }
+            }
         }
-        for (var row : e.store.list("status IN (1,3,4,6,8) ORDER BY updated_ms,commerce_id LIMIT 100")) {
+        for (var row : e.store.due(e.clock.getAsLong(), 100)) {
             if (budget.remainingMillis() < 500)
                 break;
-            var w = CommerceEngine.workflow(row);
-            if (w.getStage().equals("bid_ready")) {
-                matching.acceptBid(row, budget);
-                continue;
+            try {
+                step(row, Deadline.after(Math.min(5000, budget.remainingMillis())));
+            } catch (SQLException | RuntimeException failure) {
+                if (budget.expired() || Thread.currentThread().isInterrupted())
+                    break;
+                deferContract(row, failure, budget);
             }
-            if (w.getStage().equals("bid_held")) {
-                var parent = e.store.get(row.getParentId());
-                if (parent != null && parent.getStatus() == SETTLED)
-                    e.store.transaction(budget, c -> {
-                        var r = e.store.lock(c, row.getCommerceId());
-                        var cw = CommerceEngine.workflow(r);
-                        if (cw.getStage().equals("bid_held")) {
-                            cw.setStage("done");
-                            e.store.save(c,
-                                r.toBuilder()
-                                    .setStatus(SETTLED)
-                                    .setWorkflowProto(cw.build().toByteString())
-                                    .setUpdatedMs(e.clock.getAsLong()));
-                            CommerceStore.execute(c,
-                                "UPDATE trade_asset_op SET business_consumed=1 WHERE ref_kind=2 AND ref_id=?",
-                                r.getCommerceId());
-                        }
-                        return null;
-                    });
-                continue;
-            }
-            e.advance(row, budget);
-            if (row.getKind() == 4 && row.getSide() != 0)
-                matching.match(row, budget);
         }
-        for (var op : e.store.ops("receipt_ack_pending=1 AND status=2 AND durable=1 ORDER BY op_id LIMIT 50")) {
+        var acks = e.store.ackDue(ackAfterOpId, 50);
+        for (var op : acks) {
             if (budget.remainingMillis() < 300)
-                break;
-            ack(op, budget);
+                return;
+            try {
+                ack(op, budget);
+            } catch (SQLException failure) {
+                log.error("交易收据ACK落库失败，原待办保留 op_id={}", Long.toUnsignedString(op.getOpId()), failure);
+            }
+            ackAfterOpId = op.getOpId();
         }
+        if (acks.size() < 50)
+            ackAfterOpId = 0;
         if (mall != null && budget.remainingMillis() > 300)
             try {
                 mall.tick(budget);
@@ -121,6 +123,71 @@ public final class CommerceRuntime implements AutoCloseable {
                     Thread.currentThread().interrupt();
                 log.error("商城交付恢复失败，原订单与资产seq保留", unknown);
             }
+    }
+    private void step(TradeCommerceRow row, Deadline budget) throws SQLException {
+        var w = CommerceEngine.workflow(row);
+        if (w.getStage().equals("bid_ready")) {
+            matching.acceptBid(row, budget);
+            return;
+        }
+        if (w.getStage().equals("bid_held")) {
+            settleHeldBid(row, budget);
+            return;
+        }
+        e.advance(row, budget);
+        if (row.getKind() == 4 && row.getSide() != 0)
+            matching.match(row, budget);
+    }
+    private void settleHeldBid(TradeCommerceRow row, Deadline budget) throws SQLException {
+        var parent = e.store.get(row.getParentId());
+        if (parent == null)
+            throw new CommerceEngine.CorruptContract("持有竞价的拍品不存在");
+        if (parent.getStatus() != SETTLED) {
+            long now = e.clock.getAsLong();
+            e.store.defer(row, Math.min(Math.max(parent.getExpiresMs(), now + 30000), now + 3600000), budget);
+            return;
+        }
+        e.store.transaction(budget, c -> {
+            var current = e.store.lock(c, row.getCommerceId());
+            if (current == null)
+                return null;
+            var w = CommerceEngine.workflow(current);
+            if (!w.getStage().equals("bid_held"))
+                return null;
+            w.setStage("done");
+            e.store.markConsumed(c, current.getCommerceId());
+            e.store.save(c, current.toBuilder().setStatus(SETTLED)
+                                .setWorkflowProto(w.build().toByteString()).setUpdatedMs(e.clock.getAsLong()));
+            return null;
+        });
+    }
+    private void deferContract(TradeCommerceRow row, Exception failure, Deadline budget) {
+        String category = failure instanceof CommerceEngine.CorruptContract ? "corrupt"
+            : failure instanceof CommerceStore.PendingBackpressure ? "too_many_pending" : "retry";
+        if (category.equals("corrupt"))
+            try {
+                if (e.store.quarantine(row, budget)) {
+                    log.error("交易合同隔离为人工 class={} commerce_id={} version={}", category,
+                        Long.toUnsignedString(row.getCommerceId()), row.getVersion(), failure);
+                    return;
+                }
+            } catch (SQLException | RuntimeException quarantineFailure) {
+                log.error("交易合同隔离失败 commerce_id={}", Long.toUnsignedString(row.getCommerceId()), quarantineFailure);
+            }
+        long base = category.equals("too_many_pending") ? 60000 : 10000;
+        long until = e.clock.getAsLong() + (long) (base * ThreadLocalRandom.current().nextDouble(0.8, 1.2));
+        try {
+            boolean deferred = e.store.defer(row, until, budget);
+            if (category.equals("too_many_pending"))
+                log.info("交易合同背压推迟 class={} commerce_id={} deferred={} until_ms={}", category,
+                    Long.toUnsignedString(row.getCommerceId()), deferred, until);
+            else
+                log.error("交易合同单行失败 class={} commerce_id={} deferred={} until_ms={}", category,
+                    Long.toUnsignedString(row.getCommerceId()), deferred, until, failure);
+        } catch (SQLException | RuntimeException deferFailure) {
+            failure.addSuppressed(deferFailure);
+            log.error("交易合同推迟失败 class={} commerce_id={}", category, Long.toUnsignedString(row.getCommerceId()), failure);
+        }
     }
     private TradeAssetOpRow claim(long id, Deadline d) throws SQLException {
         return e.store.transaction(d, c -> {
@@ -163,13 +230,19 @@ public final class CommerceRuntime implements AutoCloseable {
                                                                                             : AssetRpc.CREDIT;
         try {
             Deadline call = Deadline.after(Math.min(2500, budget.remainingMillis() - 100));
-            call.await(delivery.deliver(rpc, request, call), "交易资产投递");
+            var answer = call.await(delivery.deliver(rpc, request, call), "交易资产投递");
+            if (!answer.answered())
+                log.warn("交易资产RPC依赖失败，继续查原seq的SQL结局 op_id={}", Long.toUnsignedString(op.getOpId()), answer.error());
         } catch (RuntimeException unknown) {
             if (Thread.currentThread().isInterrupted())
                 return;
+            log.warn("交易资产RPC未知，继续查原seq的SQL结局 op_id={}", Long.toUnsignedString(op.getOpId()), unknown);
         }
         // SQL为终结证据；即使RPC丢包、离线或误报durable，也只据同事务存档确认。
         var read = ledger.read(op.getPlayerId());
+        if (read instanceof PersistedAssetLedgerReader.Read.Failed failed)
+            log.warn("交易资产SQL结局读取失败，保留原seq op_id={} reason={}",
+                Long.toUnsignedString(op.getOpId()), failed.reason(), failed.cause());
         if (!(read instanceof PersistedAssetLedgerReader.Read.Loaded loaded)) {
             reschedule(op, backoff(op), budget);
             return;
@@ -231,9 +304,17 @@ public final class CommerceRuntime implements AutoCloseable {
             }
             Deadline call = Deadline.after(Math.min(1500, budget.remainingMillis() - 50));
             var answer = call.await(delivery.deliver(AssetRpc.ACK_RECEIPT, req, call), "交易收据释放");
-            if (!answer.answered() || answer.response().getOutcome() != AssetOutcome.ASSET_OUTCOME_APPLIED)
+            if (!answer.answered()) {
+                log.warn("交易收据ACK依赖失败，原待办保留 op_id={}", Long.toUnsignedString(op.getOpId()), answer.error());
+                return;
+            }
+            if (answer.response().getOutcome() != AssetOutcome.ASSET_OUTCOME_APPLIED)
                 return;
             var read = ledger.read(op.getPlayerId());
+            if (read instanceof PersistedAssetLedgerReader.Read.Failed failed) {
+                log.warn("交易收据ACK的SQL确认失败，原待办保留 op_id={}", Long.toUnsignedString(op.getOpId()), failed.cause());
+                return;
+            }
             if (!(read instanceof PersistedAssetLedgerReader.Read.Loaded loaded)
                 || loaded.ledger().classify(op.getStream(), op.getStreamEpoch(), op.getSeq()) != AssetSeqState.APPLIED
                 || !loaded.ledger().identityMatches(op.getStream(), op.getStreamEpoch(), op.getSeq(), op.getOpId(),
@@ -246,8 +327,9 @@ public final class CommerceRuntime implements AutoCloseable {
                     op.getOpId());
                 return null;
             });
-        } catch (
-            InvalidProtocolBufferException | RuntimeException unknown) { /*同一ACK待办保留，禁止因未知结果伪造完成*/
+        } catch (InvalidProtocolBufferException | RuntimeException unknown) {
+            // 同一ACK待办保留并越过本行；下一轮绕回重试，坏载荷不能挡住其它玩家。
+            log.warn("交易收据ACK未完成 op_id={}", Long.toUnsignedString(op.getOpId()), unknown);
         }
     }
     private static long backoff(TradeAssetOpRow op) {

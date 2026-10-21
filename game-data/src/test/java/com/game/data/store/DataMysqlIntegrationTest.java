@@ -90,7 +90,7 @@ class DataMysqlIntegrationTest {
     }
 
     @Test
-    void 迁移M9之后player表与新建库逐字相同_按区列玩家走idx_player_zone() throws Exception {
+    void 迁移M9之后player表与新建库的M9形状逐字相同_按区列玩家走idx_player_zone() throws Exception {
         String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 10);
         String migrated = "game_player_mig_old_" + suffix;
         String fresh = "game_player_mig_new_" + suffix;
@@ -100,6 +100,8 @@ class DataMysqlIntegrationTest {
             new ResourceDatabasePopulator(new ClassPathResource("db/game-player-migration-m9.sql")).execute(old);
             DriverManagerDataSource now = database(fresh);
             new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(now);
+            // 本例只验M9；M15交易列由玩家权威测试独立验收，不把旧M9迁移冒称最新迁移。
+            new JdbcTemplate(now).execute("ALTER TABLE player DROP COLUMN owner_revision, DROP COLUMN trade_listing_id");
             for (String table : List.of("account", "player", "player_state")) {
                 assertThat(showCreate(old, table)).as(table).isEqualTo(showCreate(now, table));
             }

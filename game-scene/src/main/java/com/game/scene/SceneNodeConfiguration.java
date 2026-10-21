@@ -12,6 +12,7 @@ import com.game.common.token.NodeLinkAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
 import com.game.player.store.PlayerStore;
+import com.game.player.store.PlayerTradeStore;
 import com.game.scene.admin.GmShutdownController;
 import com.game.scene.admin.SceneAdminAuthFilter;
 import com.game.scene.admin.SceneAdminController;
@@ -138,13 +139,13 @@ public class SceneNodeConfiguration {
     }
 
     @Bean
-    public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore,
+    public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore, PlayerTradeStore playerTrades,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
                                BagTables bagTables, MissionTables missionTables, SkillTables skillTables,
                                PetTables petTables, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics) {
-        return new SceneNode(props, redis, redisKeys, playerStore, registry, tables, attributeTables, bagTables, missionTables,
+        return new SceneNode(props, redis, redisKeys, playerStore, playerTrades, registry, tables, attributeTables, bagTables, missionTables,
                 skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics);
     }
 

@@ -17,6 +17,7 @@ import java.security.MessageDigest;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.springframework.dao.DataAccessException;
@@ -27,6 +28,36 @@ public final class MallAuthentication extends OncePerRequestFilter {
     static final String SUBJECT = MallAuthentication.class.getName() + ".subject";
     static final String ROLE = MallAuthentication.class.getName() + ".role";
     private static final int MAX_BODY_BYTES = 16_384;
+    private static final Map<String, String> INTERNAL_ROLES = Map.ofEntries(
+            Map.entry("/internal/payments", "payment"),
+            Map.entry("/internal/payments/order-view", "payment"),
+            Map.entry("/internal/payments/skus", "payment"),
+            Map.entry("/internal/mock/pay", "payment"),
+            Map.entry("/internal/mock/reconcile", "payment"),
+            Map.entry("/internal/mock/withdraw", "payment"),
+            Map.entry("/internal/mock/withdrawals/reconcile", "payment"),
+            Map.entry("/internal/consignments/register", "delivery"),
+            Map.entry("/internal/consignments/list", "delivery"),
+            Map.entry("/internal/consignments/cancel", "delivery"),
+            Map.entry("/internal/consignments/buy", "delivery"),
+            Map.entry("/internal/consignments/orders/get", "delivery"),
+            Map.entry("/internal/consignments/orders/list", "delivery"),
+            Map.entry("/internal/consignments/orders/cancel", "delivery"),
+            Map.entry("/internal/consignments/deliveries/poll", "delivery"),
+            Map.entry("/internal/consignments/returns/poll", "delivery"),
+            Map.entry("/internal/consignments/returns/receipt", "delivery"),
+            Map.entry("/internal/consignments/incomes", "delivery"),
+            Map.entry("/internal/consignments/withdrawals/create", "delivery"),
+            Map.entry("/internal/consignments/withdrawals/get", "delivery"),
+            Map.entry("/internal/refunds/poll", "payment"),
+            Map.entry("/internal/refunds/receipt", "payment"),
+            Map.entry("/internal/deliveries/poll", "delivery"),
+            Map.entry("/internal/deliveries/receipt", "delivery"),
+            Map.entry("/internal/admin/skus/list", "admin"),
+            Map.entry("/internal/admin/skus/create", "admin"),
+            Map.entry("/internal/admin/skus/update", "admin"),
+            Map.entry("/internal/admin/skus/stock", "admin"),
+            Map.entry("/internal/admin/order-view", "admin"));
     private final MallProperties properties;
     private final MallNonceStore nonces;
 
@@ -51,15 +82,25 @@ public final class MallAuthentication extends OncePerRequestFilter {
             }
             // 业务路径由容器剥离 context 与 servlet 前缀；HMAC 仍绑定完整原始 URI。
             String route = request.getPathInfo() == null ? request.getServletPath() : request.getPathInfo();
-            String role = java.util.Set.of("/internal/payments","/internal/refunds/poll","/internal/refunds/receipt").contains(route) ? "payment" : java.util.Set.of("/internal/deliveries/poll","/internal/deliveries/receipt").contains(route)?"delivery":"gateway";
-            if (route != null && route.startsWith("/internal/") && role.equals("gateway")) {
+            String role = route == null ? null : INTERNAL_ROLES.get(route);
+            if (role == null && route != null && route.startsWith("/internal/")) {
                 throw new MallException(404, "接口不存在");
+            }
+            if (role == null) {
+                role = "gateway";
             }
             String subject = singleHeader(request, "X-Commerce-Subject");
             if (role.equals("gateway")) {
                 requirePlayer(subject);
-            } else if (!(role.equals("delivery")?"trade".equals(subject):properties.paymentSubject().equals(subject))) {
-                throw new MallException(401, "调用方认证失败");
+            } else {
+                String expectedSubject = switch (role) {
+                    case "delivery" -> "trade";
+                    case "admin" -> properties.adminSubject();
+                    default -> properties.paymentSubject();
+                };
+                if (!expectedSubject.equals(subject)) {
+                    throw new MallException(401, "调用方认证失败");
+                }
             }
             String timestamp = singleHeader(request, "X-Commerce-Timestamp");
             String nonce = singleHeader(request, "X-Commerce-Nonce");
@@ -67,7 +108,12 @@ public final class MallAuthentication extends OncePerRequestFilter {
             if (!timestamp.matches("[0-9]{1,15}") || !nonce.matches("[A-Za-z0-9_-]{16,128}") || !signature.matches("[0-9a-f]{64}")) {
                 throw new MallException(401, "调用方认证失败");
             }
-            String secret = role.equals("payment") ? properties.paymentSecret() : role.equals("delivery")?properties.deliverySecret():properties.gatewaySecret();
+            String secret = switch (role) {
+                case "payment" -> properties.paymentSecret();
+                case "delivery" -> properties.deliverySecret();
+                case "admin" -> properties.adminSecret();
+                default -> properties.gatewaySecret();
+            };
             if(secret==null||secret.getBytes(StandardCharsets.UTF_8).length<32)throw new MallException(401,"调用方认证失败");
             byte[] expected = HexFormat.of().parseHex(sign(secret, role, subject, timestamp, nonce, request.getMethod(), path, body));
             if (!MessageDigest.isEqual(expected, HexFormat.of().parseHex(signature))) {

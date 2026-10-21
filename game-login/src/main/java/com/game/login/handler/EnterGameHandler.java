@@ -287,6 +287,9 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
         }
         PlayerRow row = found.get();
+        if (row.getTradeListingId() != 0 || row.getOwnerRevision() <= 0) {
+            return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
+        }
         int zoneId = session.getZoneId() != 0 ? session.getZoneId() : defaultZoneId;
         EnterRoutes.LocationRead location = readLocation(playerId);
         EnterRoutes.Decision decision = EnterRoutes.resolveEnterRoute(zoneId, session.getTicketPlayerId(),
@@ -428,8 +431,9 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return done(error(SceneErrorTip.scene_error.kEnterSceneFailed_VALUE));
         }
         long assignStart = nanoClock.getAsLong();
+        long ownerRevision = row.getOwnerRevision();
         return callSceneManager(() -> sceneDirectory.assign(assignRequest), enterDeadline)
-                .handleAsync((assigned, failure) -> afterAssign(session, playerId, assignRequest, assigned, failure,
+                .handleAsync((assigned, failure) -> afterAssign(session, playerId, ownerRevision, assignRequest, assigned, failure,
                         assignStart, enterDeadline), executor)
                 .thenCompose(Function.identity());
     }
@@ -482,7 +486,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return future.copy().orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
     }
 
-    private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, AssignSceneRequest routed,
+    private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, long ownerRevision, AssignSceneRequest routed,
                                                         AssignSceneResponse assigned, Throwable failure, long assignStart,
                                                         long enterDeadline) {
         long assignElapsed = nanoClock.getAsLong() - assignStart;
@@ -511,7 +515,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         long deadline = claimDeadline - enterDeadline < 0 ? claimDeadline : enterDeadline;
         CompletableFuture<ClaimStep> chain;
         try {
-            chain = claim(session, playerId, routed, assigned, deadline, enterDeadline, FIRST_CLAIM_BACKOFF, false);
+            chain = claim(session, playerId, ownerRevision, routed, assigned, deadline, enterDeadline, FIRST_CLAIM_BACKOFF, false);
         } catch (RuntimeException e) {
             metrics.ownerClaimCompleted(ClaimOutcome.ERROR, nanoClock.getAsLong() - claimStart);
             throw e;
@@ -531,7 +535,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      * @param enterDeadline 时间预算的截止：过了它不再夺权、不再请持有者让出，夺到之后也不再复查位置
      * @param retried       之前已经撞上过「仍被持有」（夺到时记为 {@link ClaimOutcome#WAITED}）
      */
-    private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, AssignSceneRequest routed,
+    private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, long ownerRevision, AssignSceneRequest routed,
                                                AssignSceneResponse assigned, long deadline, long enterDeadline,
                                                Duration backoff, boolean retried) {
         if (retried && enterDeadline - nanoClock.getAsLong() <= 0) {
@@ -547,7 +551,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         // 夺权事务的时限 = 剩余预算：截止在事务里到点就回滚、不夺权（TimedOut）。已到点（第一次夺权在 afterAssign 刚查过，
         // 只差几条内存操作）也交给事务判：进事务即回滚、一条语句都不发。
         Duration remaining = Duration.ofNanos(Math.max(1, enterDeadline - nanoClock.getAsLong()));
-        ClaimResult result = store.claimOwnership(playerId, remaining);
+        ClaimResult result = store.claimOwnership(playerId, session.getAccount(), ownerRevision, remaining);
         if (result instanceof ClaimResult.TimedOut) {
             // gate 可能已按超时放行同一会话的下一条请求：夺到的归属没人接，还可能晚于客户端的重试落库。事务已回滚、没有夺权。
             log.warn("进游戏失败：夺权事务没赶在时间预算 {} 的截止前完成，已回滚、没有夺权 player={} session={}", enterBudget,
@@ -597,7 +601,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         Duration delay = backoff.compareTo(Duration.ofNanos(remainingNanos)) < 0 ? backoff : Duration.ofNanos(remainingNanos);
         Duration nextBackoff = backoff.multipliedBy(2).compareTo(MAX_CLAIM_BACKOFF) < 0
                 ? backoff.multipliedBy(2) : MAX_CLAIM_BACKOFF;
-        return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, routed, assigned, deadline,
+        return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, ownerRevision, routed, assigned, deadline,
                 enterDeadline, nextBackoff, true));
     }
 

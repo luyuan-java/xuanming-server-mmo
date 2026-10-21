@@ -110,6 +110,9 @@ final class LocalPlayerImporter {
         connection.setAutoCommit(false);
         try {
             LocalState local = readOwner(plan.playerId(), true);
+            if (local.exists() && !tradeAdmission(plan.playerId(), true)) {
+                throw new Refused("本地角色存在交易锁、账号归属修订损坏或修订耗尽，禁止覆盖");
+            }
             if (hasBlockingFinalSave(plan.playerId())) {
                 throw new Refused("本地玩家存在未完成或无效的最终存盘，必须先恢复待办再导入");
             }
@@ -147,13 +150,14 @@ final class LocalPlayerImporter {
         connection.setAutoCommit(false);
         try {
             LocalState local = readOwner(playerId, true);
-            if (!local.importHold() || local.ownerEpoch() != epoch || hasBlockingFinalSave(playerId)) {
+            if (!local.importHold() || local.ownerEpoch() != epoch || !tradeAdmission(playerId, false) || hasBlockingFinalSave(playerId)) {
                 connection.rollback();
                 return false;
             }
             try (PreparedStatement ps = connection.prepareStatement("""
                     UPDATE player SET owner_released = 1, owner_lease_until = 0, updated_at = ?
-                     WHERE player_id = ? AND owner_epoch = ? AND owner_released = 0 AND owner_lease_until = ?""")) {
+                     WHERE player_id = ? AND owner_epoch = ? AND owner_released = 0 AND owner_lease_until = ?
+                       AND trade_listing_id=0 AND owner_revision>0""")) {
                 ps.setLong(1, nowMs);
                 bindU64(ps, 2, playerId);
                 bindU64(ps, 3, epoch);
@@ -208,12 +212,25 @@ final class LocalPlayerImporter {
         }
     }
 
+    /** 仅供明确local恢复；同player锁内复核，不能借replace抹掉线上经济冻结。 */
+    private boolean tradeAdmission(long playerId, boolean replacing) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement("SELECT trade_listing_id,owner_revision FROM player WHERE player_id=? FOR UPDATE")) {
+            bindU64(ps, 1, playerId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return false;
+                long listing = rs.getLong(1); boolean missingListing = rs.wasNull();
+                long revision = rs.getLong(2); boolean missingRevision = rs.wasNull();
+                return !missingListing && !missingRevision && listing == 0 && revision > 0 && (!replacing || revision < Long.MAX_VALUE);
+            }
+        }
+    }
+
     private void writePlayer(ImportPlan plan, boolean exists, long epoch, long nowMs) throws SQLException {
         String sql = exists ? """
                 UPDATE player SET account = ?, zone_id = ?, name = ?, name_key = ?, class_id = ?, gender = ?, appearance_id = ?,
                        level = ?, scene_config_id = ?, pos_x = ?, pos_y = ?, pos_z = ?, owner_epoch = ?, owner_released = 0,
-                       owner_lease_until = ?, created_at = ?, updated_at = ?
-                 WHERE player_id = ?""" : """
+                       owner_lease_until = ?, created_at = ?, updated_at = ?, owner_revision=owner_revision+1
+                 WHERE player_id = ? AND trade_listing_id=0 AND owner_revision>0 AND owner_revision<9223372036854775807""" : """
                 INSERT INTO player (account, zone_id, name, name_key, class_id, gender, appearance_id, level, scene_config_id,
                                     pos_x, pos_y, pos_z, owner_epoch, owner_released, owner_lease_until, created_at, updated_at, player_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""";

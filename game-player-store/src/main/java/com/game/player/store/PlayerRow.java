@@ -8,6 +8,9 @@ public class PlayerRow {
 
     private long playerId;
     private String account;
+    /** 账号归属修订独立于场景owner_epoch；角色过户递增，不能用它替换存盘围栏。 */
+    private long ownerRevision = 1;
+    private long tradeListingId;
     private int zoneId;
     private String name;
     private int classId;
@@ -38,6 +41,11 @@ public class PlayerRow {
     public void setAccount(String account) {
         this.account = account;
     }
+
+    public long getOwnerRevision() { return ownerRevision; }
+    public void setOwnerRevision(long value) { ownerRevision = value; }
+    public long getTradeListingId() { return tradeListingId; }
+    public void setTradeListingId(long value) { tradeListingId = value; }
 
     public int getZoneId() {
         return zoneId;

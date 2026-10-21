@@ -28,9 +28,10 @@ import org.springframework.web.bind.annotation.RestController;
 /** 同时使用真实context与DispatcherServlet前缀，覆盖角色识别及内部forward的防御。 */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "server.servlet.context-path=/mall", "spring.mvc.servlet.path=/rpc",
-        "game.namespace=mallcontext", "game.run-mode=test", "game.mall.require-tidb=false",
+        "game.namespace=mallcontext", "game.run-mode=test", "game.mall.require-tidb=false", "game.mall.allowed-payment-channels=test-channel",
         "game.mall.gateway-secret=" + MallTestDatabase.GATEWAY_KEY,
         "game.mall.payment-secret=" + MallTestDatabase.PAYMENT_KEY,
+        "game.mall.delivery-secret=mall-test-only-delivery-key-0000003",
         "spring.datasource.url=jdbc:h2:mem:mallcontext;MODE=MySQL;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000",
         "spring.datasource.username=sa", "spring.datasource.password=",
         "spring.sql.init.mode=always", "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql"})
@@ -50,6 +51,23 @@ class MallContextPathHttpTest {
         assertThat(created.statusCode()).isEqualTo(200);
         String id = json.readTree(created.body()).get("orderId").asText();
         String payment = "{\"orderId\":\"" + id + "\",\"channel\":\"test-channel\",\"transactionId\":\"context-pay-001\",\"amountMinor\":1250,\"currency\":\"CNY\"}";
+        String orderQuery = "{\"orderId\":\"" + id + "\"}";
+        String skuQuery = "{\"afterSkuId\":0,\"limit\":1}";
+        var queried = call("payment", "payment-adapter", "POST", "/internal/payments/order-view", orderQuery);
+        assertThat(queried.statusCode()).isEqualTo(200);
+        assertThat(json.readTree(queried.body())).isEqualTo(json.readTree(created.body()));
+        var skus = call("payment", "payment-adapter", "POST", "/internal/payments/skus", skuQuery);
+        assertThat(skus.statusCode()).isEqualTo(200);
+        assertThat(json.readTree(skus.body()).at("/skus/0/skuId").asLong()).isEqualTo(1);
+        for (String route : new String[]{"/internal/payments/order-view", "/internal/payments/skus"}) {
+            String query = route.endsWith("order-view") ? orderQuery : skuQuery;
+            assertThat(call("gateway", buyer, "POST", route, query).statusCode()).isEqualTo(401);
+            assertThat(call("delivery", "trade", "POST", route, query).statusCode()).isEqualTo(401);
+            assertThat(call("payment", "payment-adapter", "POST", route, query, route).statusCode()).isEqualTo(401);
+            assertThat(call("payment", "payment-adapter", "POST", route + "/extra", query).statusCode()).isEqualTo(404);
+        }
+        assertThat(call("gateway", buyer, "POST", "/api/forward-order-view", orderQuery).statusCode()).isEqualTo(401);
+        assertThat(call("gateway", buyer, "POST", "/api/forward-skus", skuQuery).statusCode()).isEqualTo(401);
         assertThat(call("gateway", buyer, "POST", "/internal/payments", payment).statusCode()).isIn(401, 403);
         assertThat(call("gateway", buyer, "POST", "/api/forward-payment", payment).statusCode()).isIn(401, 403);
         // 选择角色只看业务路径，但验签必须继续绑定部署前缀与完整 URI。
@@ -59,6 +77,10 @@ class MallContextPathHttpTest {
         assertThat(json.readTree(call("gateway", buyer, "GET", "/api/orders/" + id, "").body()).get("state").asText()).isEqualTo("AWAITING_PAYMENT");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_intent", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_refund_intent", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM oms_order", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT stock FROM pms_sku_stock WHERE id=1", Integer.class)).isEqualTo(10);
+        assertThat(jdbc.queryForObject("SELECT lock_stock FROM pms_sku_stock WHERE id=1", Integer.class)).isEqualTo(1);
         assertThat(call("payment", "payment-adapter", "POST", "/internal/payments", payment).statusCode()).isEqualTo(200);
         assertThat(json.readTree(call("gateway", buyer, "GET", "/api/orders/" + id, "").body()).get("state").asText()).isEqualTo("DELIVERY_PENDING");
     }
@@ -71,7 +93,11 @@ class MallContextPathHttpTest {
         String rawUri = "/mall/rpc" + route;
         String timestamp = Long.toString(System.currentTimeMillis());
         String nonce = UUID.randomUUID().toString();
-        String secret = role.equals("payment") ? MallTestDatabase.PAYMENT_KEY : MallTestDatabase.GATEWAY_KEY;
+        String secret = switch (role) {
+            case "payment" -> MallTestDatabase.PAYMENT_KEY;
+            case "delivery" -> "mall-test-only-delivery-key-0000003";
+            default -> MallTestDatabase.GATEWAY_KEY;
+        };
         String signature = MallAuthentication.sign(secret, role, subject, timestamp, nonce, method, signedUri, body.getBytes(StandardCharsets.UTF_8));
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + rawUri))
                 .timeout(Duration.ofSeconds(10)).header("Content-Type", "application/json")
@@ -92,6 +118,16 @@ class MallContextPathHttpTest {
         @PostMapping("/api/forward-payment")
         void forward(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
             request.getRequestDispatcher("/rpc/internal/payments").forward(request, response);
+        }
+
+        @PostMapping("/api/forward-order-view")
+        void forwardOrder(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+            request.getRequestDispatcher("/rpc/internal/payments/order-view").forward(request, response);
+        }
+
+        @PostMapping("/api/forward-skus")
+        void forwardSkus(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+            request.getRequestDispatcher("/rpc/internal/payments/skus").forward(request, response);
         }
     }
 }

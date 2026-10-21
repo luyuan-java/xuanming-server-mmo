@@ -1,6 +1,10 @@
 package com.game.mall;
 
+import com.game.common.RunMode;
+import java.time.Clock;
 import java.util.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -12,8 +16,33 @@ import org.springframework.transaction.support.TransactionTemplate;
 public final class DeliveryStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
+    private final PaymentPolicy paymentPolicy;
+    private final RmbConsignmentStore consignments;
+    // 旧构造器仍可查询/接收游戏交付；没有渠道配置时退款默认拒绝，不能暗中允许测试渠道。
     public DeliveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
+        this(jdbc, manager, null, RunMode.PROD);
+    }
+    public DeliveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager, MallProperties properties) {
+        this(jdbc, manager, properties, RunMode.PROD);
+    }
+    public DeliveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager, MallProperties properties,
+                         @Value("${game.run-mode:prod}") String runMode) {
+        this(jdbc, manager, properties, RunMode.parse(runMode));
+    }
+    DeliveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager, MallProperties properties, RunMode runMode) {
+        this(jdbc, manager, properties, runMode, new RmbConsignmentStore(jdbc, manager, Clock.systemUTC(),
+                new RmbConsignmentProperties(), (RmbConsignmentStore.PayoutEvidenceVerifier) null));
+    }
+    @Autowired
+    public DeliveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager, MallProperties properties,
+                         @Value("${game.run-mode:prod}") String runMode, RmbConsignmentStore consignments) {
+        this(jdbc, manager, properties, RunMode.parse(runMode), consignments);
+    }
+    DeliveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager, MallProperties properties, RunMode runMode,
+                  RmbConsignmentStore consignments) {
         this.jdbc = jdbc;
+        this.consignments = consignments;
+        paymentPolicy = new PaymentPolicy(jdbc, properties, runMode);
         tx = new TransactionTemplate(manager);
         tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         tx.setTimeout(5);
@@ -32,23 +61,58 @@ public final class DeliveryStore {
             page.afterSkuId(), page.limit()));
     }
     public List<DeliveryApi.Intent> poll(int limit) {
-        if (limit < 1 || limit > 100)
+        return poll(new DeliveryApi.Poll(limit)).entries().stream().map(DeliveryApi.Entry::intent).toList();
+    }
+    private record DeliveryKey(long createdMs, String orderId) {}
+    private record PendingIntent(DeliveryApi.Intent intent, DeliveryKey key) {}
+    private static final String ORDER_ID = PaymentPolicy.ORDER;
+    /** 每轮固定上界；只读、无破坏性领取，多 worker 或重启仍按订单幂等处理。 */
+    public DeliveryApi.PollPage poll(DeliveryApi.Poll input) {
+        if (input == null || input.limit() < 1 || input.limit() > 100)
             throw new MallException(400, "交付批量非法");
-        return jdbc.query("SELECT "
+        PendingScanCursor cursor = PendingScanCursor.parse(input.cursor());
+        if (cursor == null) {
+            var highest = jdbc.query("SELECT created_ms,order_sn FROM commerce_delivery_intent WHERE status='PENDING'"
+                    + " ORDER BY created_ms DESC,order_sn DESC LIMIT 1",
+                (r, n) -> new DeliveryKey(r.getLong(1), r.getString(2)));
+            if (highest.isEmpty())
+                return new DeliveryApi.PollPage(List.of());
+            DeliveryKey upper = highest.getFirst();
+            if (upper.createdMs() < 0 || !upper.orderId().matches(ORDER_ID))
+                throw new MallException(503, "交付意图排序键损坏");
+            cursor = new PendingScanCursor(0, "", upper.createdMs(), upper.orderId());
+        }
+        var rows = jdbc.query("SELECT "
                           + "d.order_sn,d.buyer_id,d.sku_id,d.quantity,g.item_config_id,g.count_per_unit,g.title,o.pay_"
-                          + "amount,o.currency "
+                          + "amount,o.currency,d.created_ms "
                 + "FROM commerce_delivery_intent d JOIN commerce_order_grant g ON g.order_sn=d.order_sn JOIN oms_order "
                   + "o ON o.order_sn=d.order_sn "
-                + "WHERE d.status='PENDING' ORDER BY d.created_ms,d.order_sn LIMIT ?",
+                + "WHERE d.status='PENDING' AND (d.created_ms>? OR (d.created_ms=? AND d.order_sn>?))"
+                + " AND (d.created_ms<? OR (d.created_ms=? AND d.order_sn<=?))"
+                + " ORDER BY d.created_ms,d.order_sn LIMIT ?",
             (r, n)
                 -> {
                 long count = Math.multiplyExact(r.getInt(4), (long) r.getInt(6));
                 if (count < 1 || count > 4096)
                     throw new MallException(503, "已冻结的SKU游戏数量越界");
-                return new DeliveryApi.Intent(r.getString(1), r.getString(2), r.getLong(3), r.getInt(4), r.getInt(5),
+                String orderId = r.getString(1);
+                long createdMs = r.getLong(10);
+                if (createdMs < 0 || !orderId.matches(ORDER_ID))
+                    throw new MallException(503, "交付意图排序键损坏");
+                var intent = new DeliveryApi.Intent(orderId, r.getString(2), r.getLong(3), r.getInt(4), r.getInt(5),
                     (int) count, r.getString(7), r.getLong(8), r.getString(9));
+                return new PendingIntent(intent, new DeliveryKey(createdMs, orderId));
             },
-            limit);
+            cursor.afterMs(), cursor.afterMs(), cursor.afterId(),
+            cursor.upperMs(), cursor.upperMs(), cursor.upperId(), input.limit() + 1);
+        int size = Math.min(rows.size(), input.limit());
+        List<DeliveryApi.Entry> entries = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            PendingIntent row = rows.get(i);
+            entries.add(new DeliveryApi.Entry(row.intent(), i == size - 1 && rows.size() <= input.limit()
+                    ? "" : cursor.after(row.key().createdMs(), row.key().orderId())));
+        }
+        return new DeliveryApi.PollPage(entries);
     }
     public void receipt(DeliveryApi.Receipt in) {
         if (in == null || in.orderId() == null || !in.orderId().matches("[0-9a-f-]{36}") || in.tradeOrderId() == null
@@ -57,6 +121,8 @@ public final class DeliveryStore {
             || !Set.of("DELIVERED", "REFUND_PENDING", "MANUAL").contains(in.state()))
             throw new MallException(400, "交付持久回执非法");
         tx.executeWithoutResult(status -> {
+            // 与付款/取消保持OMS先锁；收入、原交付回执和终态同事务提交。
+            var orders = jdbc.queryForList("SELECT status FROM oms_order WHERE order_sn=? FOR UPDATE", in.orderId());
             var rows = jdbc.queryForList(
                 "SELECT status FROM commerce_delivery_intent WHERE order_sn=? FOR UPDATE", in.orderId());
             if (rows.size() != 1)
@@ -70,6 +136,11 @@ public final class DeliveryStore {
                     throw new MallException(409, "同一交付意图的终局发生冲突");
                 return;
             }
+            if (!"PENDING".equals(rows.getFirst().get("status"))) { throw new MallException(409, "交付意图已终结但缺原始回执"); }
+            if (orders.size() != 1 || ((Number) orders.getFirst().get("status")).intValue() != 1) {
+                throw new MallException(409, "交付订单不在已支付待交付状态");
+            }
+            consignments.delivered(in.orderId(), in.state());
             jdbc.update("INSERT INTO commerce_delivery_receipt(order_sn,trade_order_id,state,proof) VALUES(?,?,?,?)",
                 in.orderId(), in.tradeOrderId(), in.state(), in.proof());
             jdbc.update("UPDATE commerce_delivery_intent SET status=? WHERE order_sn=? AND status='PENDING'",
@@ -105,6 +176,7 @@ public final class DeliveryStore {
             if (((Number) row.get("amount_minor")).longValue() != in.amountMinor()
                 || !row.get("currency").equals(in.currency()))
                 throw new MallException(409, "退款金额币种不符");
+            paymentPolicy.refund(in);
             var prior = jdbc.queryForList(
                 "SELECT channel,transaction_id FROM commerce_refund_receipt WHERE order_sn=?", in.orderId());
             if (!prior.isEmpty()) {

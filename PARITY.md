@@ -310,3 +310,15 @@ Java `0.1.0-SNAPSHOT`：修复TiDB READ ONLY的42000/1235，实际版本识别�
 原start-slice两边各16服务；来源货币7项与目标背包11项全过，正式导出→不同TiDB/Redis实例导入→同玩家Login48/EnterGame26/重登通过。首次导入epoch3、显式replace重导epoch4，准确三键哨兵3→0；目标二次正式导出的380钻石及整个player_state原字节SHA均与源相同，SQL/Redis错误均空。此前“候选待决策 / 冒烟待验”状态由本条补充完成；脚本首错与恢复过程原件保留。证据为C++/Go仓 `build/verification/playerbundle-resume-20261020-073353275/e2e-final-summary.json` 与 `summary.json`。
 
 另一版：Go原工具已使用RR/SELECT/回滚，无本次JDBC兼容问题，本轮只读核对、未改或运行Go；PD身份识别及未知身份拒绝差异仍存在，未声明Go的TiDB全链路通过。无客户端契约/proto改动，未提交或推送。本轮Java/MySQL及11个自有容器均已停止、无OOM，保留数据，未操作其他会话实例。
+| 好友原 TiDB 事务设计复核与双副本契约回归（2026-10-20） | friend 原设计对照、friend-persistence-architecture、两个 TestTiDBFriendReplicas_* | 1c9c1e6c1 工作区增量，未提交 | game-friend | 0.1.0-SNAPSHOT | 既有事务语义已核；新增测试未运行 | 原 Go 最终为共享 TiDB 事务；两版保留容量守卫、申请代次与双边原子提交，不改成分库 RPC 补偿。Java FriendReplicasTiDBTest 使用两个生产强会话池、随机专库；Go 另核独立缓存不改变 SQL 权限读。当前仅源码与静态检查，不冒真实双区或旧测试当前验收。 |
+| 匹配到期票提交点（2026-10-20） | go/match/internal/authority/store.go、claim_expiry_test.go | 1c9c1e6c1 工作区增量，未提交 | game-match | 0.1.0-SNAPSHOT | Java已有等价拒绝；两版新增回归待跑 | Go 补持锁后以数据库时间核整张票据 expires_ms。两版直接 SQL 核到期拒绝后全组原票/占用/formation 回滚，避免 ticket API 到期清理副作用；Java不单独证明特定分支或真实锁等待。本区优先、全员等待/硬延迟与客户端契约未变。 |
+| 竞拍原请求重放及出价截止（2026-10-20） | go/trade/internal/commerce/auction.go、engine.go、engine_tidb_test.go；jubaozhai-market §15.4 | 1c9c1e6c1 工作区增量，未提交 | game-trade | 0.1.0-SNAPSHOT | 两版实现补齐；未编译未测试 | 先查完整摘要的已有请求，再按当前最高价/截止判断新出价；已受理原请求返回同合同/原seq，换金额/拍品拒绝。Go补出价合同继承拍品截止，与Java既有字段对齐。新增并发与重放真TiDB用例，暂无红/绿运行证据。 |
+| 交易恢复单行隔离与 ACK 公平/故障可见（2026-10-20） | go/trade/internal/commerce/tick_isolation.go；jubaozhai-market §15.3–15.5 | 1c9c1e6c1 工作区增量，未提交 | game-trade | 0.1.0-SNAPSHOT | Java源码补齐；两版运行待验 | Java补合同失败分类、版本CAS延期/隔离、held延期、ACK翻页与错误记录、人工/放弃终局及实例原件检查，业务终局仍需SQL或明确人工事实；调度不覆盖新业务版本。Go ACK不再吞RPC/SQL错误，继续本页后汇总。新增Runtime/HTTP、TiDB和101条ACK回归均未执行。mall固定首页20条的跨页交付饥饿另有确定缺口，预计累计30+文件待扩围；人民币寄售结算/提现、完整后台、角色过户与真实双区验收未完成。 |
+| 商城交付稳定分页与第21单公平性（2026-10-20，负责人已授权扩围） | go/trade/internal/commerce/mall.go、engine_tidb_test.go；java/mall_game；jubaozhai-market §15.5 | 1c9c1e6c1 工作区增量，未提交 | game-mall／game-trade | 0.1.0-SNAPSHOT | 两版源码及回归已补；未编译未运行 | 固定(created_ms,order_sn)扫描上界，逐项尝试后推进、尾部绕回，原Intent摘要／订单唯一键／原合同seq不变；内部poll响应变为entries包装，须同版mall/trade配套部署，当前产物未重建。新增SQL与真实HTTP夹具覆盖同毫秒、预算／中断、错误不前移、空尾页、多worker顺序重读及重启；真TiDB夹具保留前20pending，仅尾5注入SQL终局后核5单回执及25原op_id／epoch／seq，非真实scene到账。RuntimeTest10项含1项门控真库，用Skip不能冒10项全过。旧“固定首页缺口待扩围”由本行补充源码状态，真实双区和故障验收仍待执行。 |
+### 2026-10-21 商城查询、目录管理与运维页面候选（验证待执行）
+
+Java 0.1.0-SNAPSHOT：两版新增payment只读订单/SKU查询、独立admin签名的SKU条款/发布/库存差额命令及原订单查询，管理requestId摘要、原响应与业务修改同事务，旧订单金额与发物快照不随改价变化。目录V3迁移、形状守卫、坏journal完整JSON拒绝及预占/边界/并发回归已补源码，尚未编译或执行。
+
+主仓gateway_node与Java game-data已补固定五命令代理及mall-admin页面；Java管理入口保留本版token、operator、审计。代理保留原body与requestId，完整前缀HMAC、新nonce、限体/总8秒/不跳转/未知提交不重试；浏览器不含HMAC密钥、不持久保存运维令牌。当前仅主仓JS语法与定向空白静态检查，未冒页面视觉、真HTTP、真TiDB或双区通过。完整分类运营、人民币寄售收入/提现、角色冻结/过户仍在后续接线，真实渠道按负责人明确决定以后接。
+
+P0-b主仓账号角色SQL权威45路径已落候选，包括所有现有登录/建角/进场/身份补齐/工具入口；Java既有SQL账号/角色目录，不机械复制主仓新data_service目录。角色P4正在补FREEZING/FROZEN与永久listing/tx收据：未装配真实入场排空及场景SQL退出验证前确认冻结必须拒绝。两版本批均无正规生成、完整构建或运行验收。

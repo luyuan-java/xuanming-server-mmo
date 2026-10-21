@@ -23,6 +23,8 @@ public final class OfficialMallClient {
     private final OfficialMallProperties p;
     private final CommerceEngine e;
     private final ObjectMapper json;
+    // 只由 CommerceRuntime 的恢复线程推进；进程重启从头重放，SQL 请求键保持原合同和 seq。
+    private String deliveryCursor = "";
     private final HttpClient http = HttpClient.newBuilder()
                                         .connectTimeout(Duration.ofSeconds(2))
                                         .followRedirects(HttpClient.Redirect.NEVER)
@@ -188,23 +190,104 @@ public final class OfficialMallClient {
         }
     }
     public void tick(Deadline d) throws Exception {
-        for (var in : call("delivery", "trade", "POST", "/internal/deliveries/poll", Map.of("limit", 20), d)) {
+        Exception firstFailure = null;
+        var entries = deliveryPage(call("delivery", "trade", "POST", "/internal/deliveries/poll",
+            Map.of("limit", 20, "cursor", deliveryCursor), d), deliveryCursor);
+        if (entries.isEmpty()) {
+            deliveryCursor = "";
+            return;
+        }
+        for (var entry : entries) {
             if (d.remainingMillis() < 300)
                 break;
-            var r = accept(in, d);
-            String state = switch (r.getStatus()) {
-                case SETTLED -> "DELIVERED";
-                case 8 -> "REFUND_PENDING";
-                case MANUAL -> "MANUAL";
-                default -> "";
-            };
-            if (state.isEmpty())
-                continue;
-            call("delivery", "trade", "POST", "/internal/deliveries/receipt",
-                Map.of("orderId", in.path("orderId").asText(), "tradeOrderId", Long.toUnsignedString(r.getCommerceId()),
-                    "state", state, "proof",
-                    HexFormat.of().formatHex(CommerceEngine.sha(r.getWorkflowProto().toByteArray()).toByteArray())),
-                d);
+            boolean interrupted = false;
+            try {
+                // 只把原 Intent 交给 accept；分页包装绝不进入已有请求摘要。
+                deliverIntent(entry.intent(), Deadline.after(Math.min(2500, d.remainingMillis())));
+            } catch (Exception failure) {
+                if (firstFailure == null)
+                    firstFailure = failure;
+                else if (firstFailure != failure)
+                    firstFailure.addSuppressed(failure);
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    interrupted = true;
+                }
+            }
+            // 只有实际尝试过的项才能推进；失败项仍由商城保留，下轮绕回重试。
+            deliveryCursor = entry.cursor();
+            if (interrupted)
+                break;
         }
+        if (firstFailure != null)
+            throw firstFailure;
+    }
+    private record DeliveryEntry(JsonNode intent, String cursor) {}
+    private record DeliveryScan(long afterMs, String afterId, long upperMs, String upperId) {}
+    private static int compareDeliveryKey(long firstMs, String firstId, long secondMs, String secondId) {
+        int time = Long.compare(firstMs, secondMs);
+        return time == 0 ? firstId.compareTo(secondId) : time;
+    }
+    private static DeliveryScan decodeDeliveryCursor(String cursor) {
+        String uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+        String[] fields = cursor.split(":", -1);
+        if (cursor.length() > 256 || fields.length != 5 || !fields[0].equals("v1")
+            || !fields[1].matches("0|[1-9][0-9]{0,18}") || !fields[3].matches("0|[1-9][0-9]{0,18}")
+            || !fields[2].matches(uuid) || !fields[4].matches(uuid))
+            throw new IllegalStateException("商城交付页游标格式非法");
+        try {
+            var scan = new DeliveryScan(Long.parseLong(fields[1]), fields[2], Long.parseLong(fields[3]), fields[4]);
+            if (compareDeliveryKey(scan.afterMs(), scan.afterId(), scan.upperMs(), scan.upperId()) > 0)
+                throw new IllegalStateException("商城交付页游标超过扫描上界");
+            return scan;
+        } catch (NumberFormatException overflow) {
+            throw new IllegalStateException("商城交付页游标毫秒越界", overflow);
+        }
+    }
+    /** 先校验完整包装，再开始任何副作用；业务内容错误留给逐项尝试处理。 */
+    private static List<DeliveryEntry> deliveryPage(JsonNode page, String requestedCursor) {
+        if (!page.isObject() || !page.path("entries").isArray() || page.path("entries").size() > 20)
+            throw new IllegalStateException("商城交付页包装非法");
+        DeliveryScan previous = requestedCursor.isEmpty() ? null : decodeDeliveryCursor(requestedCursor);
+        List<DeliveryEntry> result = new ArrayList<>();
+        var entries = page.path("entries");
+        Set<String> orders = new HashSet<>();
+        for (int i = 0; i < entries.size(); i++) {
+            var entry = entries.get(i);
+            if (!entry.isObject() || !entry.path("intent").isObject() || !entry.path("cursor").isTextual())
+                throw new IllegalStateException("商城交付项包装非法");
+            String cursor = entry.path("cursor").textValue();
+            String order = entry.path("intent").path("orderId").asText();
+            if (!orders.add(order))
+                throw new IllegalStateException("商城交付页重复订单");
+            if (cursor.isEmpty()) {
+                if (i != entries.size() - 1)
+                    throw new IllegalStateException("商城交付页在末项前提前绕回");
+            } else {
+                DeliveryScan next = decodeDeliveryCursor(cursor);
+                if (!next.afterId().equals(order) || previous != null
+                    && (next.upperMs() != previous.upperMs() || !next.upperId().equals(previous.upperId())
+                        || compareDeliveryKey(next.afterMs(), next.afterId(), previous.afterMs(), previous.afterId()) <= 0))
+                    throw new IllegalStateException("商城交付页游标乱序或上界变化");
+                previous = next;
+            }
+            result.add(new DeliveryEntry(entry.path("intent"), cursor));
+        }
+        return result;
+    }
+    private void deliverIntent(JsonNode in, Deadline d) throws Exception {
+        var r = accept(in, d);
+        String state = switch (r.getStatus()) {
+            case SETTLED -> "DELIVERED";
+            case 8 -> "REFUND_PENDING";
+            case MANUAL -> "MANUAL";
+            default -> "";
+        };
+        if (state.isEmpty())
+            return;
+        call("delivery", "trade", "POST", "/internal/deliveries/receipt",
+            Map.of("orderId", in.path("orderId").asText(), "tradeOrderId", Long.toUnsignedString(r.getCommerceId()),
+                "state", state, "proof",
+                HexFormat.of().formatHex(CommerceEngine.sha(r.getWorkflowProto().toByteArray()).toByteArray())), d);
     }
 }

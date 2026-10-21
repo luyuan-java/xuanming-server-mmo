@@ -16,6 +16,15 @@ import java.util.function.LongSupplier;
 
 /** SQL合同与可靠资产腿的业务边界。成功只来自已提交玩家SQL账本，未知永不补发新seq。 */
 public final class CommerceEngine {
+    /** 确定的持久数据错误，只隔离这一份合同，不能每轮阻塞全服。 */
+    static final class CorruptContract extends SQLException {
+        CorruptContract(String message) {
+            super(message);
+        }
+        CorruptContract(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
     final CommerceStore store;
     final LongSupplier ids;
     final Policy policy;
@@ -54,22 +63,26 @@ public final class CommerceEngine {
         try {
             return TradeCommerceWorkflow.parseFrom(r.getWorkflowProto()).toBuilder();
         } catch (InvalidProtocolBufferException e) {
-            throw new SQLException("交易合同损坏", e);
+            throw new CorruptContract("交易合同损坏", e);
         }
     }
-    TradeCommerceRow create(long me, String request, Message input, TradeCommerceRow.Builder row,
-        TradeCommerceWorkflow.Builder w, Deadline deadline) throws SQLException {
+    /** 只重放同一玩家的完整原请求；已受理合同不依赖当前拍品等易变状态。 */
+    TradeCommerceRow priorRequest(long me, String request, Message input, Deadline deadline) throws SQLException {
         CommerceStore.active(deadline);
         if (me == 0 || request.length() < 8 || request.length() > 80)
             throw new Refusal(INVALID);
+        var prior = store.byRequest(key("player", me, request));
+        if (prior != null && !prior.getRequestDigest().equals(sha(deterministic(input))))
+            throw new Refusal(REQUEST_CONFLICT);
+        return prior;
+    }
+    TradeCommerceRow create(long me, String request, Message input, TradeCommerceRow.Builder row,
+        TradeCommerceWorkflow.Builder w, Deadline deadline) throws SQLException {
+        var prior = priorRequest(me, request, input, deadline);
+        if (prior != null)
+            return prior;
         String requestKey = key("player", me, request);
         ByteString digest = sha(deterministic(input));
-        var prior = store.byRequest(requestKey);
-        if (prior != null) {
-            if (!prior.getRequestDigest().equals(digest))
-                throw new Refusal(REQUEST_CONFLICT);
-            return prior;
-        }
         long now = clock.getAsLong();
         row.setCommerceId(ids.getAsLong())
             .setRequestKey(requestKey)
@@ -254,16 +267,13 @@ public final class CommerceEngine {
                                 || w.getStage().equals("lot_open") && w.getHighestBidder() == 0)) {
                         w.setCancelRequested(true);
                         r.setStatus(CANCEL_PENDING);
-                        CommerceStore.execute(c,
-                            "UPDATE trade_asset_op SET deadline_ms=? WHERE ref_kind=2 AND ref_id=? AND stream=3 AND "
-                                + "status=1",
-                            now, id);
+                        store.expireDebits(c, id, now);
                     } else
                         throw new Refusal(CONFLICT);
                 }
                 default -> throw new Refusal(INVALID);
             }
-            r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(now);
+            r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(clock.getAsLong());
             return store.save(c, r);
         });
     }
@@ -285,10 +295,13 @@ public final class CommerceEngine {
                     continue;
                 var rows = store.ops(c, "op_id=?", l.getOpId());
                 if (rows.size() != 1)
-                    throw new SQLException("交易资产待办丢失");
+                    throw new CorruptContract("交易资产待办丢失");
                 var op = rows.getFirst();
-                if (!op.getDurable())
+                // 终局按状态判定；人工终结与已证实未扣的放弃刻意不写 durable，不能把另一方托管永远扣住。
+                if (op.getStatus() == 1)
                     continue;
+                if (op.getStatus() < 2 || op.getStatus() > 6)
+                    throw new CorruptContract("交易资产待办状态非法");
                 if (op.getStatus() == 5) {
                     w.setStage("manual");
                     r.setStatus(MANUAL);
@@ -302,11 +315,21 @@ public final class CommerceEngine {
                         try {
                             l.setSnapshot(AssetSnapshot.parseFrom(op.getEscrowSnapshot()));
                         } catch (InvalidProtocolBufferException e) {
-                            throw new SQLException("托管快照损坏", e);
+                            throw new CorruptContract("托管快照损坏", e);
+                        }
+                    if (l.getStream() == 3 && applied(l))
+                        try {
+                            transfer(l.build());
+                        } catch (IllegalStateException corrupted) {
+                            throw new CorruptContract("已扣出托管缺少可转交原件", corrupted);
                         }
                 }
             }
-            plan(r, w, now, policy);
+            try {
+                plan(r, w, now, policy);
+            } catch (RuntimeException corrupted) {
+                throw new CorruptContract("交易合同状态自相矛盾", corrupted);
+            }
             marketBarrier(c, r, w);
             var pending = new ArrayList<>(w.getLegsBuilderList().stream().filter(l -> l.getOpId() == 0).toList());
             pending.sort((a, b) -> {
@@ -316,7 +339,7 @@ public final class CommerceEngine {
                 return cmp == 0 ? a.getRole().compareTo(b.getRole()) : cmp;
             });
             if (pending.size() > 8)
-                throw new SQLException("单步交易腿数超过8");
+                throw new CorruptContract("单步交易腿数超过8");
             for (int i = 0; i < pending.size(); i++) {
                 CommerceStore.active(d);
                 var l = pending.get(i);
@@ -342,9 +365,9 @@ public final class CommerceEngine {
                 store.enqueue(c, op);
             }
             if (w.getStage().equals("done"))
-                CommerceStore.execute(c, "UPDATE trade_asset_op SET business_consumed=1 WHERE ref_kind=2 AND ref_id=?",
-                    r.getCommerceId());
-            r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(now);
+                store.markConsumed(c, r.getCommerceId());
+            // 库时钟只裁决截止；updated_ms 是按引擎时钟扫描的调度键。
+            r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(clock.getAsLong());
             store.save(c, r);
             return null;
         });

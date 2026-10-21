@@ -15,6 +15,12 @@ import javax.sql.DataSource;
 
 /** 合同、seq及可靠待办的单SQL事务边界；表定义只来自本模块proto。 */
 public final class CommerceStore {
+    /** 未决窗口背压是可恢复等待，区别于损坏合同，不能转人工或假报失败。 */
+    static final class PendingBackpressure extends SQLException {
+        PendingBackpressure() {
+            super("交易流未决背压");
+        }
+    }
     private final DataSource source;
     public CommerceStore(DataSource source) {
         this.source = Objects.requireNonNull(source);
@@ -134,6 +140,61 @@ public final class CommerceStore {
         return query(c, TradeCommerceRow.getDefaultInstance(),
             "SELECT " + columns(TradeCommerceRow.getDefaultInstance()) + " FROM trade_commerce WHERE " + where, args);
     }
+    public List<TradeCommerceRow> due(long now, int limit) throws SQLException {
+        return list("status IN (1,3,4,6,8) AND updated_ms<=? ORDER BY updated_ms,commerce_id LIMIT ?", now, limit);
+    }
+    /** 调度不改业务版本；点锁后复核观察版本，不覆盖其它 worker 刚推进的状态。 */
+    public boolean defer(TradeCommerceRow observed, long until, Deadline deadline) throws SQLException {
+        return transaction(deadline, c -> {
+            var current = lock(c, observed.getCommerceId());
+            if (current == null || current.getVersion() != observed.getVersion())
+                return false;
+            return execute(c, "UPDATE trade_commerce SET updated_ms=? WHERE commerce_id=? AND version=?",
+                       until, current.getCommerceId(), current.getVersion()) == 1;
+        });
+    }
+    /** 只隔离自身已损坏的合同，保留资产、待办与坏原件；不发补偿。 */
+    public boolean quarantine(TradeCommerceRow observed, Deadline deadline) throws SQLException {
+        return transaction(deadline, c -> {
+            var current = lock(c, observed.getCommerceId());
+            if (current == null || current.getVersion() != observed.getVersion()
+                || current.getStatus() == CommerceRules.MANUAL)
+                return false;
+            try {
+                var workflow = CommerceEngine.workflow(current).setStage("manual");
+                save(c, current.toBuilder().setStatus(CommerceRules.MANUAL).setWorkflowProto(workflow.build().toByteString()));
+            } catch (CommerceEngine.CorruptContract corrupted) {
+                execute(c, "UPDATE trade_commerce SET status=?,version=version+1 WHERE commerce_id=? AND version=?",
+                    CommerceRules.MANUAL, current.getCommerceId(), current.getVersion());
+            }
+            return true;
+        });
+    }
+    public List<TradeAssetOpRow> ackDue(long after, int limit) throws SQLException {
+        return ops("receipt_ack_pending=1 AND status=2 AND durable=1 AND op_id>? ORDER BY op_id LIMIT ?", after, limit);
+    }
+    // TiDB RC 的二级索引写不代替主键点锁；与投递/终结统一 op_id 升序，避免旧观察覆盖新状态。
+    private List<TradeAssetOpRow> lockCommerceOps(Connection c, long commerceId) throws SQLException {
+        List<TradeAssetOpRow> locked = new ArrayList<>();
+        for (var candidate : ops(c, "ref_kind=2 AND ref_id=? ORDER BY op_id", commerceId)) {
+            var rows = ops(c, "op_id=? FOR UPDATE", candidate.getOpId());
+            if (!rows.isEmpty() && rows.getFirst().getRefKind() == 2 && rows.getFirst().getRefId() == commerceId)
+                locked.add(rows.getFirst());
+        }
+        return locked;
+    }
+    public void markConsumed(Connection c, long commerceId) throws SQLException {
+        for (var op : lockCommerceOps(c, commerceId))
+            if (!op.getBusinessConsumed())
+                execute(c, "UPDATE trade_asset_op SET business_consumed=1 WHERE op_id=? AND ref_kind=2 AND ref_id=?",
+                    op.getOpId(), commerceId);
+    }
+    public void expireDebits(Connection c, long commerceId, long now) throws SQLException {
+        for (var op : lockCommerceOps(c, commerceId))
+            if (op.getStream() == 3 && op.getStatus() == 1)
+                execute(c, "UPDATE trade_asset_op SET deadline_ms=? WHERE op_id=? AND ref_kind=2 AND ref_id=? AND stream=3 AND status=1",
+                    now, op.getOpId(), commerceId);
+    }
     public TradeCommerceRow save(Connection c, TradeCommerceRow.Builder row) throws SQLException {
         long version = row.getVersion();
         row.setVersion(version + 1);
@@ -213,7 +274,7 @@ public final class CommerceStore {
                 rs.next();
                 long first = Long.parseUnsignedLong(rs.getString(2));
                 if (rs.getInt(1) >= 16 || first != 0 && Long.compareUnsigned(seq - first, 512) >= 0)
-                    throw new SQLException("交易流未决背压");
+                    throw new PendingBackpressure();
             }
         }
         execute(c, "UPDATE trade_player_op_seq SET next_seq=?,updated_ms=? WHERE player_id=? AND stream=?", seq + 1,

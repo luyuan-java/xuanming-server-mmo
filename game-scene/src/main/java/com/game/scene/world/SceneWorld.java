@@ -230,6 +230,8 @@ public final class SceneWorld {
     /** 只在逻辑线程访问；最终退出开始即不可撤销，保护SQL前已在途的同E加载。 */
     private final Map<FinalKey,FinalExit> finalizing=new HashMap<>();
     private final Map<FinalKey,Integer> loadsInFlight=new HashMap<>();
+    /** 只在逻辑线程访问；同代所有load回调和实体都退出后才把排空交给SQL验真。 */
+    private final Map<FinalKey,List<Runnable>> tradeDrains=new HashMap<>();
     private final java.util.Set<PendingEnter> loadRequests=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     /** 帧内视野变化的复用缓冲（只在 {@link #step()} 里用）。 */
@@ -1345,7 +1347,7 @@ public final class SceneWorld {
                     "场景不在本节点 scene_id=" + Long.toUnsignedString(enter.getSceneId()));
             return;
         }
-        if(finalizing.containsKey(new FinalKey(playerId,epoch))) {
+        if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))) {
             failEnter(key,playerId,epoch,transfer,"该归属代已开始最终退出，禁止同代复活");return;
         }
         PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer);
@@ -1367,7 +1369,15 @@ public final class SceneWorld {
     private void onPlayerLoaded(PendingEnter pending,LoadResult result) {
         if(!loadRequests.remove(pending))return;
         FinalKey key=new FinalKey(pending.playerId(),pending.ownerEpoch());
-        try{finishPlayerLoaded(pending,result);}
+        try{
+            // SQL已经OPEN但尚未创建实体的加载也须产生原来源的最终快照，不能只丢回调就宣称排空。
+            if(tradeDrains.containsKey(key) && result instanceof LoadResult.Found found
+                    && found.data().ownerEpoch()==key.epoch() && !finalizing.containsKey(key)
+                    && (playersById.get(key.playerId())==null || playersById.get(key.playerId()).ownerEpoch()!=key.epoch())) {
+                beginFinalExitSnapshot(found.data().asPersisted());
+            }
+            finishPlayerLoaded(pending,result);
+        }
         finally{
             loadsInFlight.computeIfPresent(key,(ignored,count)->count<=1?null:count-1);
             retireFinalExit(key);
@@ -1397,7 +1407,7 @@ public final class SceneWorld {
         }
         PlayerData data = found.data();
         // SQL读取后仍可能已经开始最终退出；在实体索引提交点重新校验票据，不只校验读到的E。
-        if(finalizing.containsKey(new FinalKey(playerId,epoch))) {
+        if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))) {
             failEnter(key,playerId,epoch,transfer,"加载完成前该归属代已最终退出");return;
         }
         if (!acceptingEnters) {
@@ -1606,7 +1616,8 @@ public final class SceneWorld {
 
     private void releaseClaim(long playerId, long epoch) {
         ScenePlayer active=playersById.get(playerId);
-        if(finalizing.containsKey(new FinalKey(playerId,epoch)) || active!=null && active.ownerEpoch()==epoch) return;
+        if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))
+                || active!=null && active.ownerEpoch()==epoch) return;
         if (playerId != 0 && epoch != 0) {
             repository.release(playerId, epoch);
         }
@@ -2968,7 +2979,14 @@ public final class SceneWorld {
     private PlayerSave beginFinalExit(ScenePlayer player) {
         FinalKey key=new FinalKey(player.playerId(),player.ownerEpoch());
         if(finalizing.containsKey(key)) return null;
-        player.stopMotion();PlayerSave snapshot=player.toSave();FinalExit exit=new FinalExit(snapshot);
+        player.stopMotion();PlayerSave snapshot=player.toSave();
+        beginFinalExitSnapshot(snapshot);
+        return snapshot;
+    }
+    private void beginFinalExitSnapshot(PlayerSave snapshot) {
+        FinalKey key=new FinalKey(snapshot.playerId(),snapshot.ownerEpoch());
+        if(finalizing.containsKey(key)) return;
+        FinalExit exit=new FinalExit(snapshot);
         finalizing.put(key,exit);
         for(var iterator=pendingEnters.entrySet().iterator();iterator.hasNext();) {
             PendingEnter pending=iterator.next().getValue();
@@ -2979,7 +2997,6 @@ public final class SceneWorld {
         }
         try {repository.saveFinal(snapshot,result->onFinalRegistered(key,exit,result));}
         catch(RuntimeException failure) {log.error("最终接管投递异常，冻结快照保留且退出不报成功 epoch={}",key.epoch(),failure);}
-        return snapshot;
     }
     private void onFinalRegistered(FinalKey key,FinalExit expected,PlayerRepository.FinalSaveRegistration result) {
         if(finalizing.get(key)!=expected) return;
@@ -3012,6 +3029,41 @@ public final class SceneWorld {
     private void retireFinalExit(FinalKey key) {
         FinalExit exit=finalizing.get(key);
         if(exit!=null && exit.applied && exit.snapshot==null && !loadsInFlight.containsKey(key)) finalizing.remove(key,exit);
+        completeTradeDrain(key);
+    }
+
+    /** 固定(player,E)排空，不操作后来的E；SQL收据尚未落库时持久交易锁仍拦新加载。 */
+    public void drainForTrade(long playerId,long epoch,Runnable drained) {
+        Objects.requireNonNull(drained);
+        FinalKey key=new FinalKey(playerId,epoch);
+        tradeDrains.computeIfAbsent(key,ignored->new ArrayList<>()).add(drained);
+        for(var iterator=pendingEnters.entrySet().iterator();iterator.hasNext();) {
+            var pending=iterator.next().getValue();
+            if(pending.playerId()==playerId && pending.ownerEpoch()==epoch) {
+                iterator.remove();
+                sink.enterResult(pending.session().linkId(),pending.session().sessionId(),playerId,epoch,ENTER_FAILED);
+            }
+        }
+        ScenePlayer player=playersById.get(playerId);
+        if(player!=null && player.ownerEpoch()==epoch) {
+            removePlayer(player,true);
+            kick(player,ENTER_FAILED,"角色寄售排空");
+        }
+        completeTradeDrain(key);
+    }
+    private void completeTradeDrain(FinalKey key) {
+        if(loadsInFlight.containsKey(key)) return;
+        var finalExit=finalizing.get(key);
+        // 已持久接管才能登记排空ACK；SQL完成仍由存储层实际APPLIED判断，不在这里伪造。
+        if(finalExit!=null && finalExit.snapshot!=null) return;
+        ScenePlayer player=playersById.get(key.playerId());
+        if(player!=null && player.ownerEpoch()==key.epoch()) return;
+        var callbacks=tradeDrains.remove(key);
+        if(callbacks==null) return;
+        for(var callback:callbacks) {
+            try{callback.run();}
+            catch(RuntimeException failure){log.error("角色排空证明投递失败，SQL交易锁保留 epoch={}",key.epoch(),failure);}
+        }
     }
     public int unconfirmedFinalExits(){return (int)finalizing.values().stream().filter(exit->exit.snapshot!=null).count();}
 

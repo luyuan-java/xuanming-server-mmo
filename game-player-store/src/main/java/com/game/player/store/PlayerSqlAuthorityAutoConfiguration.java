@@ -33,8 +33,81 @@ public class PlayerSqlAuthorityAutoConfiguration {
             try (var connection = source.getConnection()) {
                 StrongTiDbConnectionPolicy.verify(connection, require);
                 verifyFinalSaveSchema(connection);
+                verifyTradeSchema(connection);
             }
         };
+    }
+
+    /** M15不能仅依赖CREATE IF NOT EXISTS，旧库必须显式迁移后才能启写者。 */
+    static void verifyTradeSchema(java.sql.Connection connection) throws java.sql.SQLException {
+        try (var statement = connection.prepareStatement("SELECT owner_revision,trade_listing_id FROM player WHERE 1=0");
+             var rows = statement.executeQuery()) {
+            var columns = rows.getMetaData();
+            for (int index = 1; index <= 2; index++) {
+                if (columns.getColumnType(index) != java.sql.Types.BIGINT
+                        || columns.isNullable(index) != java.sql.ResultSetMetaData.columnNoNulls)
+                    throw new IllegalStateException("M15玩家归属修订及交易锁必须为BIGINT");
+            }
+        }
+        for (var table : java.util.Map.of(
+                "player_trade_freeze", "listing_id,player_id,seller_account,owner_revision,freeze_epoch,request_digest,creation_token,status,cancel_requested,created_ms,updated_ms",
+                "player_trade_transfer", "tx_id,listing_id,player_id,seller_account,buyer_account,previous_revision,new_revision,request_digest,creation_token,status,created_ms",
+                "player_trade_drain", "listing_id,player_id,owner_epoch,proof_mode,source_instance,payload_digest,created_ms").entrySet()) {
+            try (var statement = connection.prepareStatement("SELECT " + table.getValue() + " FROM " + table.getKey() + " WHERE 1=0");
+                 var rows = statement.executeQuery()) {
+                var columns = rows.getMetaData();
+                for (int index = 1; index <= columns.getColumnCount(); index++) {
+                    String name = columns.getColumnName(index).toLowerCase(java.util.Locale.ROOT);
+                    int type = columns.getColumnType(index);
+                    boolean optionalDigest = table.getKey().equals("player_trade_drain") && name.equals("payload_digest");
+                    if (optionalDigest && columns.isNullable(index) != java.sql.ResultSetMetaData.columnNullable)
+                        throw new IllegalStateException("M15无准入证明必须允许空摘要");
+                    if (!optionalDigest && columns.isNullable(index) != java.sql.ResultSetMetaData.columnNoNulls)
+                        throw new IllegalStateException("M15交易收据列不能可空");
+                    if ((name.endsWith("_account") || name.equals("creation_token") || name.equals("source_instance")) && type != java.sql.Types.VARBINARY)
+                        throw new IllegalStateException("M15账号与创建标记必须使用VARBINARY");
+                    if ((name.equals("request_digest") || name.equals("payload_digest")) && (type != java.sql.Types.BINARY || columns.getPrecision(index) != 32))
+                        throw new IllegalStateException("M15请求摘要必须是BINARY(32)");
+                    if (name.endsWith("_account") && columns.getPrecision(index) < 256)
+                        throw new IllegalStateException("M15账号收据必须容纳64个UTF8码点");
+                    if (name.equals("creation_token") && columns.getPrecision(index) != 36)
+                        throw new IllegalStateException("M15创建标记必须容纳规范UUID");
+                    if (name.equals("status") && (type != java.sql.Types.VARCHAR || columns.getPrecision(index) < 16))
+                        throw new IllegalStateException("M15交易状态列形状非法");
+                    if (name.equals("source_instance") && columns.getPrecision(index) < 64) throw new IllegalStateException("M15来源列过窄");
+                    if (name.equals("proof_mode") && (type != java.sql.Types.VARCHAR || columns.getPrecision(index) < 32))
+                        throw new IllegalStateException("M15排空模式列非法");
+                    if (name.equals("cancel_requested") && type != java.sql.Types.TINYINT) throw new IllegalStateException("M15撤单门禁列非法");
+                    if (!name.endsWith("_account") && !java.util.Set.of("creation_token", "request_digest", "status", "source_instance", "payload_digest", "proof_mode", "cancel_requested").contains(name)
+                            && type != java.sql.Types.BIGINT) throw new IllegalStateException("M15交易标识和修订必须使用BIGINT");
+                }
+            }
+            String actual = connection.getMetaData().storesUpperCaseIdentifiers() ? table.getKey().toUpperCase(java.util.Locale.ROOT) : table.getKey();
+            var keys = new java.util.ArrayList<String>();
+            String schema;
+            try { schema = connection.getSchema(); }
+            catch (java.sql.SQLFeatureNotSupportedException unsupported) { schema = null; }
+            try (var rows = connection.getMetaData().getPrimaryKeys(connection.getCatalog(), schema, actual)) {
+                while (rows.next()) keys.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
+            }
+            String expected = table.getKey().equals("player_trade_transfer") ? "tx_id" : "listing_id";
+            if (!keys.equals(java.util.List.of(expected))) throw new IllegalStateException("M15交易收据缺少唯一主键");
+            java.util.List<String> prefix = table.getKey().equals("player_trade_freeze") ? java.util.List.of("status", "listing_id")
+                    : table.getKey().equals("player_trade_drain") ? java.util.List.of("player_id", "owner_epoch") : java.util.List.of();
+            if (!prefix.isEmpty()) {
+                var indexes = new java.util.HashMap<String, java.util.SortedMap<Short, String>>();
+                try (var rows = connection.getMetaData().getIndexInfo(connection.getCatalog(), schema, actual, false, false)) {
+                    while (rows.next()) {
+                        String name = rows.getString("INDEX_NAME"); String column = rows.getString("COLUMN_NAME");
+                        if (name != null && column != null) indexes.computeIfAbsent(name, ignored -> new java.util.TreeMap<>())
+                                .put(rows.getShort("ORDINAL_POSITION"), column.toLowerCase(java.util.Locale.ROOT));
+                    }
+                }
+                if (indexes.values().stream().map(index -> java.util.List.copyOf(index.values()))
+                        .noneMatch(columns -> columns.size() >= prefix.size() && columns.subList(0, prefix.size()).equals(prefix)))
+                    throw new IllegalStateException("M15缺少有界排空扫描或旧E封闭索引");
+            }
+        }
     }
 
     /** Mapper自动配置被game-data排除也必须执行；缺表或旧结构不能静默回退。 */

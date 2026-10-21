@@ -141,7 +141,7 @@ class EnterGameZoneTravelTest {
         row.setZoneId(HOME);
         row.setSceneConfigId(3);
         when(store.findPlayer(PLAYER)).thenReturn(Optional.of(row));
-        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.Claimed(5));
+        when(store.claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class))).thenReturn(new ClaimResult.Claimed(5));
         when(scenes.assign(any())).thenAnswer(inv -> {
             events.add("assign:" + inv.<AssignSceneRequest>getArgument(0).getZoneId());
             return CompletableFuture.completedFuture(ASSIGNED);
@@ -314,7 +314,7 @@ class EnterGameZoneTravelTest {
 
         assertThat(events).as("不续设备、不读位置、不问围栏、不分配、不签票").isEmpty();
         verify(store, never()).findPlayer(anyLong());
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         verify(scenes, never()).assign(any());
         verify(scenes, never()).redirectToZone(any());
         verifyNoInteractions(takeovers);
@@ -367,13 +367,13 @@ class EnterGameZoneTravelTest {
     void 第二条腿_持票钉住且本zone有待落点_按记录的地图落_一次夺权成功_不复查位置() throws Exception {
         // 源节点「交出并释放」之后库里 owner_released = 1：目标 zone 的夺权第一次就成功（E+2），不发让出请求。
         locations(record(G, 0, 0, 5));
-        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenReturn(new ClaimResult.Claimed(6));
+        when(store.claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class))).thenReturn(new ClaimResult.Claimed(6));
 
         assertEntered(enter(PINNED, PLAYER), 6);
 
         assertThat(assignRequests(1)).containsExactly(AssignSceneRequest.newBuilder().setZoneId(G).setPlayerId(PLAYER)
                 .setPreferredSceneConfigId(5).build());
-        verify(store, times(1)).claimOwnership(eq(PLAYER), any(Duration.class));
+        verify(store, times(1)).claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class));
         verifyNoInteractions(takeovers);
         assertThat(claims("claimed")).isEqualTo(1);
         assertThat(meters.get("game.login.owner.takeover.requests").counter().count()).isZero();
@@ -464,7 +464,7 @@ class EnterGameZoneTravelTest {
                 .setFromZoneId(G).setToZoneId(H).setPlayerId(PLAYER).build());
 
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         verifyNoInteractions(takeovers);
         assertThat(events).as("只读一次位置；重定向路径不问合服围栏（F3）").containsExactly("renew", "find", "redirect:8");
 
@@ -541,7 +541,7 @@ class EnterGameZoneTravelTest {
         assertThat(assignRequests(1)).as("回落是本 zone 首登：不带别的 zone 记录里的任何东西")
                 .containsExactly(AssignSceneRequest.newBuilder().setZoneId(G).setPlayerId(PLAYER).build());
         assertThat(events).containsExactly("renew", "find", "redirect:8", "fence:1", "assign:7");
-        verify(store, times(1)).claimOwnership(eq(PLAYER), any(Duration.class));
+        verify(store, times(1)).claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class));
         assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
         assertThat(redirectCalls(callResult)).isEqualTo(1);
         assertThat(redirectCalls("ok")).isZero();
@@ -569,7 +569,7 @@ class EnterGameZoneTravelTest {
         assertError(enter(NORMAL, PLAYER), SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
 
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
     }
 
@@ -605,12 +605,12 @@ class EnterGameZoneTravelTest {
         workers.runNext();
         assertThat(events).containsExactly("renew", "find", "redirect:8", "fence:1", "assign:7");
         assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         assertThat(result).isNotDone();
 
         // 工作线程：夺权 → 应答。
         workers.runNext();
-        verify(store, times(1)).claimOwnership(eq(PLAYER), any(Duration.class));
+        verify(store, times(1)).claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class));
         assertEntered(result.get(5, TimeUnit.SECONDS), 5);
         assertThat(workers.pending()).isZero();
     }
@@ -657,7 +657,7 @@ class EnterGameZoneTravelTest {
         assertThat(redirectCalls("ok") + redirectCalls("rejected") + redirectCalls("error")).as("没走到定结局").isZero();
         assertThat(events).containsExactly("renew", "find", "redirect:8");
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
 
         // 在途闸门已释放：同一角色下一次进游戏不回 2005。
         workers.full = false;
@@ -687,7 +687,7 @@ class EnterGameZoneTravelTest {
             return CompletableFuture.completedFuture(ASSIGNED);
         }).when(scenes).assign(any());
         List<Long> attempts = new ArrayList<>();
-        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
+        when(store.claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class))).thenAnswer(inv -> {
             attempts.add(nanos.get() - start);
             nanos.addAndGet(ms(300));
             return new ClaimResult.Held(4);
@@ -716,7 +716,7 @@ class EnterGameZoneTravelTest {
 
         assertError(enter(NORMAL, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
 
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         verifyNoInteractions(takeovers);
         assertThat(assigns("ok")).isEqualTo(1);
         assertThat(claims("timeout")).as("没发起夺权也记一次等不到").isEqualTo(1);
@@ -736,7 +736,7 @@ class EnterGameZoneTravelTest {
 
         assertThat(events).as("回落照样过围栏，但不再发起分配").containsExactly("renew", "find", "redirect:8", "fence:1");
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         assertThat(assigns("error")).as("按调用超时计").isEqualTo(1);
         assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
     }
@@ -758,7 +758,7 @@ class EnterGameZoneTravelTest {
 
         assertError(reply, SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
         assertThat(never).isNotDone();
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         assertThat(assigns("error")).isEqualTo(1);
     }
 
@@ -771,7 +771,7 @@ class EnterGameZoneTravelTest {
             nanos.addAndGet(ms(3900));
             return CompletableFuture.completedFuture(ASSIGNED);
         }).when(scenes).assign(any());
-        when(store.claimOwnership(eq(PLAYER), any(Duration.class))).thenAnswer(inv -> {
+        when(store.claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class))).thenAnswer(inv -> {
             nanos.addAndGet(ms(200));
             return new ClaimResult.Claimed(5);
         });
@@ -798,7 +798,7 @@ class EnterGameZoneTravelTest {
         assertError(enter(NORMAL, PLAYER), SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
 
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         verifyNoInteractions(takeovers);
         assertOnlyRoute(EnterRoute.FIRST);
 
@@ -813,7 +813,7 @@ class EnterGameZoneTravelTest {
         assertError(enter(NORMAL, PLAYER), SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
 
         verify(scenes, never()).assign(any());
-        verify(store, never()).claimOwnership(anyLong(), any(Duration.class));
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
     }
 
     @Test
@@ -849,7 +849,7 @@ class EnterGameZoneTravelTest {
         assertThat(requests.get(1)).isEqualTo(AssignSceneRequest.newBuilder().setZoneId(G).setPlayerId(PLAYER).build());
         assertThat(reply.directives().get(0).getEnterScene().getSceneId()).isEqualTo(77L);
         verify(scenes, never()).redirectToZone(any());
-        verify(store, times(1)).claimOwnership(eq(PLAYER), any(Duration.class));
+        verify(store, times(1)).claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class));
         assertOnlyRoute(EnterRoute.RESUME);
     }
 
@@ -879,7 +879,7 @@ class EnterGameZoneTravelTest {
 
     @Test
     void 夺权故障时_去向已计_异常照旧向上传() {
-        doThrow(new IllegalStateException("db down")).when(store).claimOwnership(eq(PLAYER), any(Duration.class));
+        doThrow(new IllegalStateException("db down")).when(store).claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class));
         locations(record(G, 0, 0, 5));
 
         CompletableFuture<HandlerReply> result =

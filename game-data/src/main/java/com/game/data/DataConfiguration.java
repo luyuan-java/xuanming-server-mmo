@@ -8,6 +8,7 @@ import com.game.common.token.DubboCallAuth;
 import com.game.data.admin.AdminAuthFilter;
 import com.game.data.gainblock.GainBlockStore;
 import com.game.data.metrics.DataMetrics;
+import com.game.data.mall.MallAdminProperties;
 import com.game.data.ops.OpsIds;
 import com.game.data.ops.OpsJobRunner;
 import com.game.data.ops.OpsJobService;
@@ -71,7 +72,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * {@link DataApplication} 排除：{@link PlayerStore} 由这里定义（严格递增时钟，见 {@link StrictClock}）。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({DataProperties.class, AuditProperties.class})
+@EnableConfigurationProperties({DataProperties.class, AuditProperties.class, MallAdminProperties.class})
 @MapperScan(basePackages = "com.game.data.store", basePackageClasses = PlayerMapper.class)
 public class DataConfiguration {
 
@@ -119,10 +120,16 @@ public class DataConfiguration {
     }
 
     @Bean
-    public FilterRegistrationBean<AdminAuthFilter> adminAuthFilter(DataProperties props, DataMetrics metrics) {
+    public FilterRegistrationBean<AdminAuthFilter> adminAuthFilter(DataProperties props, DataMetrics metrics,
+            @Value("${spring.mvc.servlet.path:}") String servletPath) {
         FilterRegistrationBean<AdminAuthFilter> registration =
                 new FilterRegistrationBean<>(new AdminAuthFilter(props.adminToken(), metrics));
         registration.addUrlPatterns("/admin/*");
+        // context由容器剥离，DispatcherServlet的自定义前缀仍属于过滤器匹配路径。
+        if (servletPath != null && !servletPath.isEmpty() && !"/".equals(servletPath)) {
+            String prefix = servletPath.replaceAll("/+$", "");
+            registration.addUrlPatterns(prefix + "/admin/*");
+        }
         return registration;
     }
 

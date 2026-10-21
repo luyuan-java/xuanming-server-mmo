@@ -150,6 +150,32 @@ class PlayerStoreSqlTest {
 
     // ================================================================ 归属协议
 
+    @Test
+    void 登录夺权在实际player锁内复核账号与原修订_旧账号和ABA旧修订均拒绝() {
+        long p = newPlayer(9001, "提交归属闸");
+        store.ensureAccount("new_owner");
+        jdbc().update("UPDATE player SET account='new_owner',owner_revision=2 WHERE player_id=?", p);
+        assertThat(store.claimOwnership(p, ACCOUNT, 1, Duration.ofSeconds(3))).isInstanceOf(ClaimResult.NotFound.class);
+        jdbc().update("UPDATE player SET account=?,owner_revision=3 WHERE player_id=?", ACCOUNT, p);
+        assertThat(store.claimOwnership(p, ACCOUNT, 1, Duration.ofSeconds(3))).isInstanceOf(ClaimResult.NotFound.class);
+        assertThat(store.findPlayer(p).orElseThrow().getOwnerEpoch()).isZero();
+        assertThat(store.claimOwnership(p, ACCOUNT, 3, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Claimed(1));
+    }
+
+    @Test
+    void 持久交易锁阻止新加载准入和所有夺权_不留下OPEN或改变玩法字节() {
+        long p = newPlayer(9002, "交易加载闸");
+        assertThat(store.claimOwnership(p, ACCOUNT, 1, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Claimed(1));
+        jdbc().update("UPDATE player SET trade_listing_id=101 WHERE player_id=?", p);
+        CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() * 2);
+        assertThat(store.claimOwnership(p, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
+        assertThat(store.recoverOwnershipAfterRestore(p, 5, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
+        assertThat(store.loadForScene(p, 1, FINAL_SOURCE, Duration.ofSeconds(3))).isEmpty();
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_final_save WHERE player_id=?", Long.class, p)).isZero();
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, p)).isZero();
+        assertThat(store.findPlayer(p).orElseThrow().getTradeListingId()).isEqualTo(101);
+    }
+
     private static final String FINAL_SOURCE = "00000000-0000-0000-0000-000000000001";
     private static final String OTHER_SOURCE = "00000000-0000-0000-0000-000000000002";
 

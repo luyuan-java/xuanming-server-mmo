@@ -67,11 +67,144 @@ class CommerceTiDbTest {
     Deadline budget() {
         return Deadline.after(10000);
     }
+    @Test
+    void 同出价并发与最高价后截止后重放_返回原合同原扣款_换载荷拒绝() throws Exception {
+        var lot = e.lot(11,
+            CreateAuctionLotRequest.newBuilder()
+                .setClientRequestId("bid-replay-lot-001")
+                .setAssets(TradeAssetSelection.newBuilder().putItems(10, 1))
+                .setCurrencyType(1)
+                .setOpeningPrice(50)
+                .setMinimumIncrement(5)
+                .setDurationMs(60000)
+                .build(),
+            budget());
+        e.advance(lot, budget());
+        complete(2);
+        e.advance(e.store.get(lot.getCommerceId()), budget());
+        var input = PlaceAuctionBidRequest.newBuilder()
+                        .setLotId(Long.toUnsignedString(lot.getCommerceId()))
+                        .setClientRequestId("bid-replay-request-001")
+                        .setAmount(50)
+                        .build();
+        var matching = new CommerceMatching(e);
+        long originalId;
+        try (var workers = Executors.newFixedThreadPool(8)) {
+            var calls = new ArrayList<Future<Long>>();
+            for (int i = 0; i < 8; i++)
+                calls.add(workers.submit(
+                    () -> matching.bid(21, lot.getCommerceId(), input, budget()).getCommerceId()));
+            originalId = calls.getFirst().get(15, TimeUnit.SECONDS);
+            for (var call : calls)
+                assertThat(call.get(15, TimeUnit.SECONDS)).isEqualTo(originalId);
+        }
+        e.advance(e.store.get(originalId), budget());
+        var debit = e.store.ops("player_id=21 AND stream=3").getFirst();
+        assertThat(debit.getDeadlineMs()).isEqualTo(lot.getExpiresMs());
+        complete(2);
+        e.advance(e.store.get(originalId), budget());
+        matching.acceptBid(e.store.get(originalId), budget());
+        assertThat(CommerceEngine.workflow(e.store.get(originalId)).getStage()).isEqualTo("bid_held");
+        // 下一笔出价必须加价，丢回执后的原请求仍只查询原合同，不再冻结资金。
+        assertThat(matching.bid(21, lot.getCommerceId(), input, budget()).getCommerceId()).isEqualTo(originalId);
+        e.store.transaction(budget(), c -> {
+            CommerceStore.execute(c, "UPDATE trade_commerce SET expires_ms=1 WHERE commerce_id=?", lot.getCommerceId());
+            return null;
+        });
+        assertThat(matching.bid(21, lot.getCommerceId(), input, budget()).getCommerceId()).isEqualTo(originalId);
+        assertThatThrownBy(
+            () -> matching.bid(21, lot.getCommerceId(), input.toBuilder().setAmount(51).build(), budget()))
+            .isInstanceOfSatisfying(CommerceRules.Refusal.class,
+                denied -> assertThat(denied.tip()).isEqualTo(CommerceRules.REQUEST_CONFLICT));
+        assertThatThrownBy(
+            () -> matching.bid(21, lot.getCommerceId(), input.toBuilder().setLotId("another-lot").build(), budget()))
+            .isInstanceOfSatisfying(CommerceRules.Refusal.class,
+                denied -> assertThat(denied.tip()).isEqualTo(CommerceRules.REQUEST_CONFLICT));
+        assertThatThrownBy(()
+                              -> matching.bid(21, lot.getCommerceId(),
+                                  input.toBuilder().setClientRequestId("bid-replay-new-late-001").build(), budget()))
+            .isInstanceOfSatisfying(CommerceRules.Refusal.class,
+                denied -> assertThat(denied.tip())
+                              .isEqualTo(com.game.table.TradeErrorTip.trade_error.kTradeAuctionEnded_VALUE));
+        assertThat(e.store.list("kind=?", CommerceRules.BID_KIND)).hasSize(1);
+        assertThat(e.store.ops("player_id=21 AND stream=3")).singleElement().satisfies(current -> {
+            assertThat(current.getOpId()).isEqualTo(debit.getOpId());
+            assertThat(current.getStreamEpoch()).isEqualTo(debit.getStreamEpoch());
+            assertThat(current.getSeq()).isEqualTo(debit.getSeq());
+        });
+    }
     void complete(int status) throws Exception {
         e.store.transaction(budget(), c -> {
             CommerceStore.execute(c, "UPDATE trade_asset_op SET status=?,durable=1 WHERE status=1", status);
             return null;
         });
+    }
+    @Test
+    void 推迟不改业务版本_旧观察不能覆盖新推进_隔离保留坏原件() throws Exception {
+        var row = e.consignment(11,
+            CreateConsignmentRequest.newBuilder().setClientRequestId("defer-cas-001")
+                .setAssets(TradeAssetSelection.newBuilder().putItems(10, 1))
+                .setCurrencyType(1).setPrice(50).setDurationMs(60000).build(), budget());
+        long now = System.currentTimeMillis();
+        assertThat(e.store.defer(row, now + 60000, budget())).isTrue();
+        assertThat(e.store.get(row.getCommerceId()).getVersion()).isEqualTo(row.getVersion());
+        assertThat(e.store.due(now, 100)).extracting(com.game.trade.store.pb.TradeCommerceRow::getCommerceId)
+            .doesNotContain(row.getCommerceId());
+        e.advance(e.store.get(row.getCommerceId()), budget());
+        assertThat(e.store.defer(row, now + 60000, budget())).isFalse();
+        assertThat(e.store.quarantine(row, budget())).isFalse();
+        var current = e.store.get(row.getCommerceId());
+        var badBytes = com.google.protobuf.ByteString.copyFrom(new byte[] {(byte) 255});
+        e.store.transaction(budget(), c -> {
+            e.store.save(c, current.toBuilder().setWorkflowProto(badBytes));
+            return null;
+        });
+        assertThat(e.store.quarantine(e.store.get(row.getCommerceId()), budget())).isTrue();
+        var quarantined = e.store.get(row.getCommerceId());
+        assertThat(quarantined.getStatus()).isEqualTo(CommerceRules.MANUAL);
+        assertThat(quarantined.getWorkflowProto()).isEqualTo(badBytes);
+        assertThat(e.store.due(System.currentTimeMillis(), 100))
+            .extracting(com.game.trade.store.pb.TradeCommerceRow::getCommerceId).doesNotContain(row.getCommerceId());
+        assertThat(e.store.ops("ref_id=?", row.getCommerceId())).singleElement()
+            .satisfies(op -> assertThat(op.getBusinessConsumed()).isFalse());
+    }
+
+    @Test
+    void 放弃扣款不靠durable推进_人工已扣实例无原件立即隔离() throws Exception {
+        var row = e.consignment(11,
+            CreateConsignmentRequest.newBuilder().setClientRequestId("abandoned-001")
+                .setAssets(TradeAssetSelection.newBuilder().putItems(10, 1))
+                .setCurrencyType(1).setPrice(50).setDurationMs(60000).build(), budget());
+        e.advance(row, budget());
+        e.store.transaction(budget(), c -> {
+            CommerceStore.execute(c, "UPDATE trade_asset_op SET status=6,durable=0 WHERE ref_id=?", row.getCommerceId());
+            return null;
+        });
+        e.advance(e.store.get(row.getCommerceId()), budget());
+        assertThat(e.store.get(row.getCommerceId()).getStatus()).isEqualTo(CommerceRules.CANCELLED);
+        assertThat(e.store.ops("stream=4")).isEmpty();
+
+        var w = TradeCommerceWorkflow.newBuilder().setStage("escrow")
+                    .setSellerAssets(TradeAssetSelection.newBuilder().addItemUuids(77));
+        var instanceRow = e.create(22, "manual-instance-001",
+            CreateConsignmentRequest.newBuilder().setClientRequestId("manual-instance-001").build(),
+            com.game.trade.store.pb.TradeCommerceRow.newBuilder().setSellerPlayerId(22)
+                .setKind(3).setStatus(3).setExpiresMs(System.currentTimeMillis() + 60000), w, budget());
+        e.advance(instanceRow, budget());
+        e.store.transaction(budget(), c -> {
+            CommerceStore.execute(c, "UPDATE trade_asset_op SET status=2,durable=0,resolved_by='test-operator' WHERE ref_id=?",
+                instanceRow.getCommerceId());
+            return null;
+        });
+        try (var runtime = new CommerceRuntime(e,
+                 org.mockito.Mockito.mock(com.game.discovery.asset.ReliableAssetDelivery.class),
+                 org.mockito.Mockito.mock(com.game.player.store.asset.PersistedAssetLedgerReader.class))) {
+            runtime.tick(budget());
+        }
+        assertThat(e.store.get(instanceRow.getCommerceId()).getStatus()).isEqualTo(CommerceRules.MANUAL);
+        assertThat(e.store.ops("stream=4")).isEmpty();
+        assertThat(e.store.ops("ref_id=?", instanceRow.getCommerceId())).singleElement()
+            .satisfies(op -> assertThat(op.getBusinessConsumed()).isFalse());
     }
     @Test
     void 寄售并发只有一个买家_新恢复者沿用原seq_双侧完成才结算() throws Exception {
@@ -184,6 +317,21 @@ class CommerceTiDbTest {
         complete(2);
         e.advance(e.store.get(row.getCommerceId()), budget());
         return row.getCommerceId();
+    }
+
+    @Test
+    void 撮合调度采用引擎时钟_数据库时钟不把新成交与父单推到未来() throws Exception {
+        long scheduleNow = 1_000_000;
+        e = new CommerceEngine(e.store, e.ids, e.policy, () -> scheduleNow);
+        long sell = openMarket(11, 2, 10, 2), buy = openMarket(22, 1, 15, 2);
+        new CommerceMatching(e).match(e.store.get(buy), budget());
+        assertThat(e.store.get(sell).getUpdatedMs()).isEqualTo(scheduleNow);
+        assertThat(e.store.get(buy).getUpdatedMs()).isEqualTo(scheduleNow);
+        var child = e.store.list("parent_id=?", buy).getFirst();
+        assertThat(child.getUpdatedMs()).isEqualTo(scheduleNow);
+        assertThat(child.getCreatedMs()).isGreaterThan(scheduleNow);
+        assertThat(e.store.due(scheduleNow, 100))
+            .extracting(com.game.trade.store.pb.TradeCommerceRow::getCommerceId).contains(child.getCommerceId());
     }
 
     @Test

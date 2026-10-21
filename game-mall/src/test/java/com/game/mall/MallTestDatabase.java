@@ -28,7 +28,12 @@ final class MallTestDatabase implements AutoCloseable {
     }
 
     static MallProperties properties() {
-        return new MallProperties(false, GATEWAY_KEY, PAYMENT_KEY, null, null);
+        return properties(false);
+    }
+    static MallProperties properties(boolean requireTidb) {
+        // 原回执夹具显式允许两条已用测试渠道；旧Properties构造器本身仍保持默认空集合和mock关闭。
+        return new MallProperties(requireTidb, GATEWAY_KEY, PAYMENT_KEY, null, null, null, null, null,
+                false, java.util.Set.of("test", "test-channel"));
     }
 
     void sku(long id, int stock) {

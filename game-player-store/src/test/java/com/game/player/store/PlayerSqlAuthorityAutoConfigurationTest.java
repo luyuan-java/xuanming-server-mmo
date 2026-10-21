@@ -103,4 +103,43 @@ public class PlayerSqlAuthorityAutoConfigurationTest {
             throw failure;
         }
     }
+
+    @Test
+    void M15旧玩家结构或非二进制收据必须拒绝启动() throws Exception {
+        for (String change : java.util.List.of("ALTER TABLE player DROP COLUMN owner_revision",
+                "ALTER TABLE player ALTER COLUMN trade_listing_id INT",
+                "ALTER TABLE player_trade_freeze ALTER COLUMN seller_account VARCHAR(64)",
+                "ALTER TABLE player_trade_transfer ALTER COLUMN request_digest BINARY(16)",
+                "ALTER TABLE player_trade_freeze ALTER COLUMN cancel_requested INT",
+                "ALTER TABLE player_trade_drain ALTER COLUMN source_instance VARCHAR(64)",
+                "ALTER TABLE player_trade_drain ALTER COLUMN payload_digest SET NOT NULL",
+                "DROP INDEX idx_trade_drain_epoch",
+                "DROP TABLE player_trade_drain",
+                "DROP TABLE player_trade_transfer")) {
+            try (var source = authorityDataSource(true)) {
+                var jdbc = new org.springframework.jdbc.core.JdbcTemplate(source);
+                try (var connection = source.getConnection()) { PlayerSqlAuthorityAutoConfiguration.verifyTradeSchema(connection); }
+                jdbc.execute(change);
+                assertThatThrownBy(() -> {
+                    try (var connection = source.getConnection()) { PlayerSqlAuthorityAutoConfiguration.verifyTradeSchema(connection); }
+                }).isInstanceOfAny(java.sql.SQLException.class, IllegalStateException.class);
+            }
+        }
+    }
+
+    @Test
+    void M15永久幂等收据不能缺主键() throws Exception {
+        try (var source = authorityDataSource(true); var connection = source.getConnection()) {
+            String constraint = null;
+            try (var keys = connection.getMetaData().getPrimaryKeys(connection.getCatalog(), connection.getSchema(), "player_trade_transfer")) {
+                if (keys.next()) constraint = keys.getString("PK_NAME");
+            }
+            assertThat(constraint).isNotNull().matches("[A-Za-z0-9_]+");
+            try (var statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE player_trade_transfer DROP CONSTRAINT " + constraint);
+            }
+            assertThatThrownBy(() -> PlayerSqlAuthorityAutoConfiguration.verifyTradeSchema(connection))
+                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("主键");
+        }
+    }
 }

@@ -26,6 +26,9 @@ public class MallDatabaseConfiguration {
     }
 
     static HikariConfig poolConfiguration(DataSourceProperties source, MallProperties properties, String runMode) {
+        if (properties.mockPaymentEnabled() && RunMode.parse(runMode) == RunMode.PROD) {
+            throw new IllegalStateException("prod禁止启用本地mock支付");
+        }
         if (RunMode.parse(runMode) == RunMode.PROD && !properties.requireTidb()) {
             throw new IllegalStateException("生产运行模式必须启用 game.mall.require-tidb");
         }
@@ -61,8 +64,9 @@ public class MallDatabaseConfiguration {
 
     @Bean
     MallOrderStore mallOrderStore(JdbcTemplate jdbc, PlatformTransactionManager manager, Clock clock,
-                                 MallProperties properties, MallSchemaVerifier mallSchemaReady) {
-        return new MallOrderStore(jdbc, manager, clock, properties);
+                                 MallProperties properties, MallSchemaVerifier mallSchemaReady,
+                                 @Value("${game.run-mode:prod}") String runMode, RmbConsignmentStore consignments) {
+        return new MallOrderStore(jdbc, manager, clock, properties, RunMode.parse(runMode), consignments);
     }
 
     @Bean

@@ -23,5 +23,15 @@ game:
     gateway-secret: ${GAME_MALL_GATEWAY_SECRET:}
     payment-secret: ${GAME_MALL_PAYMENT_SECRET:}
     delivery-secret: ${GAME_MALL_DELIVERY_SECRET:}
+    admin-secret: ${GAME_MALL_ADMIN_SECRET:}
+    admin-subject: ${GAME_MALL_ADMIN_SUBJECT:mall-admin}
     payment-subject: ${GAME_MALL_PAYMENT_SUBJECT:payment-adapter}
     max-unpaid-orders: ${GAME_MALL_MAX_UNPAID_ORDERS:5}
+    mock-payment-enabled: ${GAME_MALL_MOCK_PAYMENT_ENABLED:false}
+    allowed-payment-channels: ${GAME_MALL_ALLOWED_PAYMENT_CHANNELS:}
+    consignment:
+      notice-ms: ${GAME_MALL_CONSIGNMENT_NOTICE_MS:172800000}
+      sale-ms: ${GAME_MALL_CONSIGNMENT_SALE_MS:604800000}
+      cooling-ms: ${GAME_MALL_CONSIGNMENT_COOLING_MS:259200000}
+      fee-bps: ${GAME_MALL_CONSIGNMENT_FEE_BPS:500}
+      currencies: ${GAME_MALL_CONSIGNMENT_CURRENCIES:0}

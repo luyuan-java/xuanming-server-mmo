@@ -147,7 +147,7 @@ class LoginHomeZoneWiringTest {
             EnterGameResponse response = EnterGameResponse.parseFrom(reply.body().orElseThrow().toByteString());
             assertThat(response.getErrorMessage().getId()).isEqualTo(SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
             assertThat(asked).as("会话在区 2，角色的归属区是 1").containsExactly(1);
-            verify(store, never()).claimOwnership(org.mockito.ArgumentMatchers.anyLong(), any(Duration.class));
+            verify(store, never()).claimOwnership(org.mockito.ArgumentMatchers.anyLong(), any(String.class), org.mockito.ArgumentMatchers.anyLong(), any(Duration.class));
         }
     }
 

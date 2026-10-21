@@ -13,12 +13,17 @@ import java.sql.SQLException;
 
 /** 价格时间订单簿与最高价竞拍；guard只串行化同一市场/lot，裁决和待办同SQL提交。 */
 public final class CommerceMatching {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(CommerceMatching.class);
     private final CommerceEngine e;
     public CommerceMatching(CommerceEngine engine) {
         e = engine;
     }
     public TradeCommerceRow bid(long me, long lotId, PlaceAuctionBidRequest input, Deadline d) throws SQLException {
         var lot = e.get(me, lotId);
+        // 拍品观察在前、原请求查询在后；并发推进最高价前原出价合同必已提交，不能套用下一笔加价门槛。
+        var prior = e.priorRequest(me, input.getClientRequestId(), input, d);
+        if (prior != null)
+            return prior;
         var w = CommerceEngine.workflow(lot);
         if (lot.getKind() != 5 || !w.getStage().equals("lot_open") || lot.getExpiresMs() <= e.clock.getAsLong())
             throw new Refusal(TradeErrorTip.trade_error.kTradeAuctionEnded_VALUE);
@@ -58,13 +63,22 @@ public final class CommerceMatching {
                 }
             }
             var lot = e.store.lock(c, candidate.getParentId());
-            var lw = CommerceEngine.workflow(lot);
+            TradeCommerceWorkflow.Builder lw = null;
+            if (lot != null)
+                try {
+                    lw = CommerceEngine.workflow(lot);
+                } catch (CommerceEngine.CorruptContract corrupted) {
+                    // bid_ready 尚未成为最高价；拍品坏了不应扣住这份独立冻结资金。
+                }
             var bid = e.store.lock(c, candidate.getCommerceId());
             var bw = CommerceEngine.workflow(bid);
             if (!bw.getStage().equals("bid_ready"))
                 return null;
+            if (lw == null)
+                log.warn("拍品缺失或损坏，未被接受的出价转原币退款 bid_id={} lot_id={}",
+                    Long.toUnsignedString(bid.getCommerceId()), Long.toUnsignedString(candidate.getParentId()));
             long now = CommerceStore.sqlNow(c);
-            boolean eligible = lw.getStage().equals("lot_open") && !lw.getCancelRequested() && lot.getExpiresMs() > now
+            boolean eligible = lw != null && lw.getStage().equals("lot_open") && !lw.getCancelRequested() && lot.getExpiresMs() > now
                 && bid.getUnitPrice() >= lot.getUnitPrice()
                 && (lw.getHighestBid() == 0
                     || lw.getMinimumIncrement() <= Long.MAX_VALUE - lw.getHighestBid()
@@ -75,12 +89,20 @@ public final class CommerceMatching {
                     bid.toBuilder()
                         .setStatus(CANCEL_PENDING)
                         .setWorkflowProto(bw.build().toByteString())
-                        .setUpdatedMs(now));
+                        .setUpdatedMs(e.clock.getAsLong()));
                 return null;
             }
             if (lw.getWinningBidId() != 0) {
                 var old = e.store.lock(c, lw.getWinningBidId());
-                var ow = CommerceEngine.workflow(old);
+                if (old == null)
+                    throw new SQLException("最高价冻结合同不存在");
+                TradeCommerceWorkflow.Builder ow;
+                try {
+                    ow = CommerceEngine.workflow(old);
+                } catch (CommerceEngine.CorruptContract corrupted) {
+                    // 坏的是原最高价，不是当前出价；当前出价截止后仍须能原币退款，不能隔离错对象。
+                    throw new SQLException("原最高价冻结合同损坏", corrupted);
+                }
                 if (!ow.getStage().equals("bid_held"))
                     throw new SQLException("最高价冻结合同损坏");
                 ow.setStage("bid_refund");
@@ -88,7 +110,7 @@ public final class CommerceMatching {
                     old.toBuilder()
                         .setStatus(CANCEL_PENDING)
                         .setWorkflowProto(ow.build().toByteString())
-                        .setUpdatedMs(now));
+                        .setUpdatedMs(e.clock.getAsLong()));
             }
             lw.setHighestBid(bid.getUnitPrice())
                 .setHighestBidder(bid.getSellerPlayerId())
@@ -99,8 +121,8 @@ public final class CommerceMatching {
                 lot.toBuilder()
                     .setBuyerPlayerId(bid.getSellerPlayerId())
                     .setWorkflowProto(lw.build().toByteString())
-                    .setUpdatedMs(now));
-            e.store.save(c, bid.toBuilder().setWorkflowProto(bw.build().toByteString()).setUpdatedMs(now));
+                    .setUpdatedMs(e.clock.getAsLong()));
+            e.store.save(c, bid.toBuilder().setWorkflowProto(bw.build().toByteString()).setUpdatedMs(e.clock.getAsLong()));
             return null;
         });
     }
@@ -158,6 +180,7 @@ public final class CommerceMatching {
             int quantity =
                 Math.min(buy.getQuantity() - buy.getFilledQuantity(), sell.getQuantity() - sell.getFilledQuantity());
             long now = CommerceStore.sqlNow(c);
+            long dueNow = e.clock.getAsLong();
             var mw = TradeCommerceWorkflow.newBuilder().setStage("deliver");
             add(mw, "buyer_receive", buy.getSellerPlayerId(), 4,
                 AssetBundle.newBuilder()
@@ -188,15 +211,15 @@ public final class CommerceMatching {
                             .setQuantity(quantity)
                             .setCurrencyType(buy.getCurrencyType())
                             .setCreatedMs(now)
-                            .setUpdatedMs(now)
+                            .setUpdatedMs(dueNow)
                             .setVersion(1)
                             .setWorkflowProto(mw.build().toByteString())
                             .setParentId(buy.getCommerceId())
                             .setCounterpartyId(sell.getCommerceId())
                             .build();
             CommerceStore.insert(c, "trade_commerce", match);
-            var ar = a.toBuilder().setFilledQuantity(a.getFilledQuantity() + quantity).setUpdatedMs(now);
-            var br = b.toBuilder().setFilledQuantity(b.getFilledQuantity() + quantity).setUpdatedMs(now);
+            var ar = a.toBuilder().setFilledQuantity(a.getFilledQuantity() + quantity).setUpdatedMs(dueNow);
+            var br = b.toBuilder().setFilledQuantity(b.getFilledQuantity() + quantity).setUpdatedMs(dueNow);
             if (ar.getFilledQuantity() == ar.getQuantity())
                 ar.setStatus(DELIVERING);
             if (br.getFilledQuantity() == br.getQuantity())

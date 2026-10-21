@@ -17,6 +17,52 @@ class MallOrderStoreTest {
     private static final String BUYER = "18446744073709551615";
 
     @Test
+    void 支付只读查单保留原买家金额与既有状态_不改变库存和付款事实() {
+        try (var db = new MallTestDatabase()) {
+            db.sku(1, 10);
+            MallApi.Order order = db.store.create(BUYER, new MallApi.CreateOrder("payment-view-001", 1, 2));
+            db.jdbc.update("UPDATE pms_sku_stock SET price_minor=999 WHERE id=1");
+            assertThat(db.store.paymentOrderView(order.orderId())).isEqualTo(order);
+            assertThat(db.stock(1, "stock")).isEqualTo(10);
+            assertThat(db.stock(1, "lock_stock")).isEqualTo(2);
+            assertThat(db.count("commerce_payment_receipt")).isZero();
+            assertThat(db.count("commerce_delivery_intent")).isZero();
+
+            MallApi.Order cancelled = db.store.cancel(BUYER, order.orderId());
+            assertThat(db.store.paymentOrderView(order.orderId())).isEqualTo(cancelled);
+            MallApi.Order refundPending = db.store.recordTrustedPayment(payment(order, "ViewLatePayment"));
+            assertThat(db.store.paymentOrderView(order.orderId())).isEqualTo(refundPending);
+            assertThat(refundPending.state()).isEqualTo("REFUND_PENDING");
+            assertThat(db.stock(1, "stock")).isEqualTo(10);
+            assertThat(db.stock(1, "lock_stock")).isZero();
+            assertThat(db.count("oms_order")).isEqualTo(1);
+            assertThat(db.count("commerce_payment_receipt")).isEqualTo(1);
+            assertThat(db.count("commerce_refund_intent")).isEqualTo(1);
+            assertThat(db.count("commerce_delivery_intent")).isZero();
+        }
+    }
+
+    @Test
+    void 支付查单先拒绝非规范订单号_不存在与存储故障分别报告() {
+        try (var db = new MallTestDatabase()) {
+            for (String invalid : new String[]{null, "", " ", "ABCDEF00-0000-0000-0000-000000000001",
+                    "abcdef00-0-0-0-1", "abcdef00-0000-0000-0000-000000000001 "}) {
+                assertThatThrownBy(() -> db.store.paymentOrderView(invalid))
+                        .isInstanceOfSatisfying(MallException.class, e -> assertThat(e.status()).isEqualTo(400));
+            }
+            String missing = "abcdef00-0000-0000-0000-000000000001";
+            assertThatThrownBy(() -> db.store.paymentOrderView(missing))
+                    .isInstanceOfSatisfying(MallException.class, e -> assertThat(e.status()).isEqualTo(404));
+            assertThat(db.count("oms_order")).isZero();
+            assertThat(db.count("commerce_buyer_guard")).isZero();
+            db.jdbc.execute("DROP TABLE oms_order");
+            assertThatThrownBy(() -> db.store.paymentOrderView("bad-id"))
+                    .isInstanceOfSatisfying(MallException.class, e -> assertThat(e.status()).isEqualTo(400));
+            assertThatThrownBy(() -> db.store.paymentOrderView(missing)).isInstanceOf(DataAccessException.class);
+        }
+    }
+
+    @Test
     void 全uint64买家_价格快照_终态重放_不会重新预占() {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 10);

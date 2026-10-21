@@ -345,6 +345,8 @@ public class PlayerStore {
         return withinDeadline(timeout,()->{
             OwnerState owner=mapper.selectOwnerForUpdate(playerId);
             if(owner==null || owner.ownerEpoch()!=expectedEpoch || owner.released()
+                    || tradeLocked(playerId)
+                    || mapper.countTradeSeals(playerId, expectedEpoch) != 0
                     || mapper.selectBlockingFinalEpoch(playerId)!=null) return Optional.empty();
             FinalSaveRow admission=mapper.selectFinalSave(playerId,expectedEpoch);
             if(admission==null) {
@@ -496,6 +498,14 @@ public class PlayerStore {
         return withinDeadline(timeout, () -> claimInTransaction(playerId), new ClaimResult.TimedOut());
     }
 
+    /** 登录提交点复核原账号及原修订，阻止过户前已受理的旧异步链取得新归属。 */
+    public ClaimResult claimOwnership(long playerId, String expectedAccount, long expectedRevision, Duration timeout) {
+        if (expectedAccount == null || expectedAccount.isEmpty() || expectedRevision <= 0) {
+            throw new IllegalArgumentException("登录归属凭据缺失");
+        }
+        return withinDeadline(timeout, () -> claimInTransaction(playerId, expectedAccount, expectedRevision), new ClaimResult.TimedOut());
+    }
+
     /**
      * 历史 SQL 恢复后的维护夺权；日常登录仍使用 {@link #claimOwnership}。
      *
@@ -521,6 +531,7 @@ public class PlayerStore {
         return withinDeadline(timeout, () -> {
             OwnerState owner = mapper.selectOwnerForUpdate(playerId);
             if (owner == null) return new ClaimResult.NotFound();
+            if (tradeLocked(playerId)) return new ClaimResult.Held(owner.ownerEpoch());
             if (mapper.selectBlockingFinalEpoch(playerId) != null) return new ClaimResult.Held(owner.ownerEpoch());
             long current = owner.ownerEpoch();
             if (current < 0 || current == Long.MAX_VALUE) {
@@ -539,8 +550,25 @@ public class PlayerStore {
 
     /** 夺权事务的主体，必须在事务里调用。 */
     private ClaimResult claimInTransaction(long playerId) {
+        return claimInTransaction(playerId, null, 0);
+    }
+
+    private boolean tradeLocked(long playerId) {
+        Long listing = mapper.selectTradeListingId(playerId);
+        if (listing == null || listing < 0) throw new IllegalStateException("玩家交易锁原件缺失或损坏");
+        return listing != 0;
+    }
+
+    private ClaimResult claimInTransaction(long playerId, String expectedAccount, long expectedRevision) {
         OwnerState owner=mapper.selectOwnerForUpdate(playerId);
         if(owner==null) return new ClaimResult.NotFound();
+        if (expectedAccount != null) {
+            PlayerRow row = mapper.selectById(playerId);
+            if (row == null || !expectedAccount.equals(row.getAccount()) || expectedRevision != row.getOwnerRevision()) {
+                return new ClaimResult.NotFound();
+            }
+        }
+        if (tradeLocked(playerId)) return new ClaimResult.Held(owner.ownerEpoch());
         if(!completePendingForOwner(playerId,owner)) return new ClaimResult.Held(owner.ownerEpoch());
         long now = clockMs.getAsLong();
         if (mapper.claimOwnerEpoch(playerId, now, now + OWNER_LEASE.toMillis()) == 1) {
@@ -762,6 +790,7 @@ public class PlayerStore {
             long playerId = frozen.getPlayerId();
             long epoch = frozen.getOwnerEpoch();
             OwnerState locked=mapper.selectOwnerForUpdate(playerId);
+            if (locked != null && tradeLocked(playerId)) throw new IllegalStateException("角色交易冻结中，禁止交出归属");
             if(!completePendingForOwner(playerId,locked))
                 throw new IllegalStateException("最终意图未完成，禁止交出归属");
             long now = clockMs.getAsLong();

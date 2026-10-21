@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS account (
 CREATE TABLE IF NOT EXISTS player (
     player_id        BIGINT UNSIGNED NOT NULL,
     account          VARCHAR(64)     NOT NULL,
+    owner_revision   BIGINT NOT NULL DEFAULT 1 COMMENT '账号归属修订，独立于scene存盘围栏',
+    trade_listing_id BIGINT NOT NULL DEFAULT 0 COMMENT 'M15角色寄售锁；0表示未冻结，不设TTL',
     zone_id          INT UNSIGNED    NOT NULL,
     name             VARCHAR(64)     NOT NULL COMMENT '展示名（原样返回给客户端）',
     name_key         VARCHAR(64)     NOT NULL COMMENT '名字唯一键：NFKC + 去首尾空白 + 小写，唯一出处 PlayerStore.nameKey；全服唯一',
@@ -32,6 +34,51 @@ CREATE TABLE IF NOT EXISTS player (
     UNIQUE KEY uk_player_name_key (name_key),
     KEY idx_player_account (account),
     KEY idx_player_zone (zone_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- M15：同listing解冻和过户终态永久保存，旧请求重放不能重新冻结。
+CREATE TABLE IF NOT EXISTS player_trade_freeze (
+    listing_id BIGINT NOT NULL,
+    player_id BIGINT UNSIGNED NOT NULL,
+    seller_account VARBINARY(256) NOT NULL,
+    owner_revision BIGINT NOT NULL,
+    freeze_epoch BIGINT UNSIGNED NOT NULL,
+    request_digest BINARY(32) NOT NULL,
+    creation_token VARBINARY(36) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    cancel_requested TINYINT NOT NULL DEFAULT 0,
+    created_ms BIGINT NOT NULL,
+    updated_ms BIGINT NOT NULL,
+    PRIMARY KEY (listing_id),
+    KEY idx_trade_freeze_due (status, listing_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- 只由同库验真与原scene逻辑排空回执建立；封闭旧E的准入在解锁后也不能撤销。
+CREATE TABLE IF NOT EXISTS player_trade_drain (
+    listing_id BIGINT NOT NULL,
+    player_id BIGINT UNSIGNED NOT NULL,
+    owner_epoch BIGINT UNSIGNED NOT NULL,
+    proof_mode VARCHAR(32) NOT NULL,
+    source_instance VARBINARY(64) NOT NULL,
+    payload_digest BINARY(32) NULL,
+    created_ms BIGINT NOT NULL,
+    PRIMARY KEY (listing_id),
+    KEY idx_trade_drain_epoch (player_id, owner_epoch)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS player_trade_transfer (
+    tx_id BIGINT NOT NULL,
+    listing_id BIGINT NOT NULL,
+    player_id BIGINT UNSIGNED NOT NULL,
+    seller_account VARBINARY(256) NOT NULL,
+    buyer_account VARBINARY(256) NOT NULL,
+    previous_revision BIGINT NOT NULL,
+    new_revision BIGINT NOT NULL,
+    request_digest BINARY(32) NOT NULL,
+    creation_token VARBINARY(36) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_ms BIGINT NOT NULL,
+    PRIMARY KEY (tx_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 
 -- 玩家在线状态（各玩法的数据），protobuf game.storage.PlayerState。与 player 行在同一事务里、同一 owner_epoch 围栏下写入：

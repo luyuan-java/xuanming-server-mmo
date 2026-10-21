@@ -2,6 +2,7 @@ package com.game.mall;
 
 import com.macro.mall.model.OmsOrder;
 import com.macro.mall.model.PmsSkuStock;
+import com.game.common.RunMode;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
@@ -27,11 +28,23 @@ public final class MallOrderStore {
     private final TransactionTemplate transaction;
     private final Clock clock;
     private final int maxUnpaid;
+    private final PaymentPolicy paymentPolicy;
+    private final RmbConsignmentStore consignments;
 
     public MallOrderStore(JdbcTemplate jdbc, PlatformTransactionManager manager, Clock clock, MallProperties properties) {
+        this(jdbc, manager, clock, properties, RunMode.PROD);
+    }
+    public MallOrderStore(JdbcTemplate jdbc, PlatformTransactionManager manager, Clock clock, MallProperties properties, RunMode runMode) {
+        this(jdbc, manager, clock, properties, runMode, new RmbConsignmentStore(jdbc, manager, clock,
+                new RmbConsignmentProperties(), (RmbConsignmentStore.PayoutEvidenceVerifier) null));
+    }
+    public MallOrderStore(JdbcTemplate jdbc, PlatformTransactionManager manager, Clock clock, MallProperties properties,
+                          RunMode runMode, RmbConsignmentStore consignments) {
         this.jdbc = jdbc;
         this.clock = clock;
+        this.consignments = consignments;
         maxUnpaid = properties.maxUnpaidOrders();
+        paymentPolicy = new PaymentPolicy(jdbc, properties, runMode);
         transaction = new TransactionTemplate(manager);
         transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         transaction.setTimeout(5);
@@ -107,12 +120,89 @@ public final class MallOrderStore {
     public MallApi.Order get(String buyer, String orderId) {
         MallAuthentication.requirePlayer(buyer);
         requireOrderId(orderId);
-        return view(owned(byId(orderId, false), buyer));
+        Stored order = owned(byId(orderId, false), buyer);
+        if (order.skuId() == 0) { throw new MallException(404, "请通过原账号的寄售订单入口查询"); }
+        return view(order);
     }
+
+    public MallApi.Order createConsignment(RmbConsignmentApi.Buy input) {
+        if (input == null) { throw new MallException(400, "寄售购买参数缺失"); }
+        RmbConsignmentStore.account(input.buyerAccount()); RmbConsignmentStore.player(input.buyerPlayerId());
+        RmbConsignmentStore.player(input.listingId()); RmbConsignmentStore.request(input.requestId());
+        String prior = consignments.orderByRequest(input.buyerAccount(), input.requestId());
+        if (prior != null) { return sameConsignment(prior, input); }
+        jdbc.update("INSERT INTO commerce_buyer_guard(buyer_id) VALUES(?) ON DUPLICATE KEY UPDATE buyer_id=buyer_id", input.buyerPlayerId());
+        try {
+            return Objects.requireNonNull(transaction.execute(status -> {
+                jdbc.queryForObject("SELECT buyer_id FROM commerce_buyer_guard WHERE buyer_id=? FOR UPDATE", String.class, input.buyerPlayerId());
+                String replay = consignments.orderByRequest(input.buyerAccount(), input.requestId());
+                if (replay != null) { return sameConsignment(replay, input); }
+                if (byRequest(input.buyerPlayerId(), input.requestId()) != null) {
+                    throw new MallException(409, "请求号已用于其它订单");
+                }
+                Integer unpaid = jdbc.queryForObject("SELECT COUNT(*) FROM oms_order WHERE buyer_id=? AND status=0", Integer.class, input.buyerPlayerId());
+                if (unpaid == null || unpaid >= maxUnpaid) { throw new MallException(429, "未支付订单数量已达上限"); }
+                String orderId = UUID.randomUUID().toString();
+                var frozen = consignments.reserve(input, orderId);
+                long now = clock.millis();
+                // 寄售仍写同一OMS，sku_id=0明确区分唯一托管资产，不改PMS库存。
+                jdbc.update("INSERT INTO oms_order(order_sn,buyer_id,request_id,sku_id,quantity,pay_amount,currency,status,create_time_ms,payment_deadline_ms)"
+                    + " VALUES(?,?,?,0,1,?,'CNY',0,?,?)", orderId, input.buyerPlayerId(), ascii(input.requestId()), frozen.priceFen(), now, now + 900_000);
+                jdbc.update("INSERT INTO oms_order_item(order_sn,product_id,product_sku_id,product_sku_code,product_quantity,product_price_minor)"
+                    + " VALUES(?,0,0,?,1,?)", orderId, "consignment-" + frozen.listingId(), frozen.priceFen());
+                return view(Objects.requireNonNull(byId(orderId, false)));
+            }));
+        } catch (DuplicateKeyException conflict) {
+            String existing = consignments.orderByRequest(input.buyerAccount(), input.requestId());
+            if (existing != null) { return sameConsignment(existing, input); }
+            throw new MallException(409, "寄售购买请求冲突，请使用原请求号重试");
+        }
+    }
+    private MallApi.Order sameConsignment(String orderId, RmbConsignmentApi.Buy input) {
+        consignments.sameOrder(orderId, input);
+        Stored original = byId(orderId, false);
+        if (original == null || !original.buyer().equals(input.buyerPlayerId())) {
+            throw new MallException(409, "购买请求号的角色原件不符");
+        }
+        return view(original);
+    }
+    public MallApi.Order getConsignment(RmbConsignmentApi.OrderQuery input) {
+        if (input == null) { throw new MallException(400, "寄售订单查询参数缺失"); }
+        return view(consignmentOwned(input, false));
+    }
+    public List<MallApi.Order> listConsignments(RmbConsignmentApi.OrderPage input) {
+        if (input == null || input.afterOrderId() == null || input.limit() < 1 || input.limit() > 100) {
+            throw new MallException(400, "寄售订单分页非法");
+        }
+        RmbConsignmentStore.account(input.account());
+        long after = input.afterOrderId().isEmpty() ? 0 : consignmentOwned(new RmbConsignmentApi.OrderQuery(input.account(), input.afterOrderId()), false).model().getId();
+        return jdbc.query("SELECT o.* FROM oms_order o JOIN commerce_consignment_order c ON c.order_sn=o.order_sn "
+            + "WHERE c.buyer_account=? AND o.id>? ORDER BY o.id LIMIT ?", (row, index) -> view(stored(row)),
+            input.account().getBytes(StandardCharsets.UTF_8), after, input.limit());
+    }
+    private Stored consignmentOwned(RmbConsignmentApi.OrderQuery input, boolean lock) {
+        RmbConsignmentStore.account(input.account()); requireOrderId(input.orderId());
+        Stored original = byId(input.orderId(), lock);
+        var mapping = consignments.mapping(input.orderId());
+        if (original == null || mapping == null || !mapping.buyerAccount().equals(input.account())) {
+            throw new MallException(404, "寄售订单不存在");
+        }
+        return original;
+    }
+    /** 支付适配器核对买家与原订单条款的只读入口；调用方须在 HTTP 边界完成支付角色认证。 */
+    public MallApi.Order paymentOrderView(String orderId) {
+        requireOrderId(orderId);
+        Stored order = byId(orderId, false);
+        if (order == null) {
+            throw new MallException(404, "订单不存在");
+        }
+        return view(order);
+    }
+
     public List<MallApi.Order> list(String buyer,DeliveryApi.OrderPage page){
         MallAuthentication.requirePlayer(buyer);if(page==null||page.limit()<1||page.limit()>100||page.afterOrderId()==null)throw new MallException(400,"订单分页非法");
         long after=0;if(!page.afterOrderId().isEmpty()){requireOrderId(page.afterOrderId());after=owned(byId(page.afterOrderId(),false),buyer).model().getId();}
-        return jdbc.query("SELECT * FROM oms_order WHERE buyer_id=? AND id>? ORDER BY id LIMIT ?",(row,n)->view(stored(row)),buyer,after,page.limit());
+        return jdbc.query("SELECT * FROM oms_order WHERE buyer_id=? AND sku_id<>0 AND id>? ORDER BY id LIMIT ?",(row,n)->view(stored(row)),buyer,after,page.limit());
     }
 
     public MallApi.Order cancel(String buyer, String orderId) {
@@ -120,13 +210,25 @@ public final class MallOrderStore {
         requireOrderId(orderId);
         return Objects.requireNonNull(transaction.execute(status -> {
             Stored order = owned(byId(orderId, true), buyer);
+            if (order.skuId() == 0) { throw new MallException(404, "请通过原账号的寄售订单入口取消"); }
+            return cancelOrder(order);
+        }));
+    }
+    public MallApi.Order cancelConsignment(RmbConsignmentApi.OrderQuery input) {
+        if (input == null) { throw new MallException(400, "寄售订单取消参数缺失"); }
+        return Objects.requireNonNull(transaction.execute(status -> cancelOrder(consignmentOwned(input, true))));
+    }
+    private MallApi.Order cancelOrder(Stored order) {
+            String orderId = order.model().getOrderSn();
             if (order.model().getStatus() == 4) {
                 return view(order);
             }
             if (order.model().getStatus() != 0) {
                 throw new MallException(409, "已支付订单不能直接取消");
             }
-            if (jdbc.update("UPDATE pms_sku_stock SET lock_stock=lock_stock-? WHERE id=? AND lock_stock>=?",
+            if (order.skuId() == 0) {
+                if (!consignments.cancelled(orderId)) { throw new MallException(503, "寄售订单关联缺失"); }
+            } else if (jdbc.update("UPDATE pms_sku_stock SET lock_stock=lock_stock-? WHERE id=? AND lock_stock>=?",
                     order.quantity(), order.skuId(), order.quantity()) != 1) {
                 throw new MallException(409, "库存预占状态异常");
             }
@@ -135,7 +237,6 @@ public final class MallOrderStore {
             }
             order.model().setStatus(4);
             return view(order);
-        }));
     }
 
     public MallApi.Order recordTrustedPayment(MallApi.Payment input) {
@@ -157,6 +258,7 @@ public final class MallOrderStore {
                 if (order.model().getPayAmount().longValueExact() != input.amountMinor() || !order.currency().equals(input.currency())) {
                     throw new MallException(409, "支付金额或币种不匹配");
                 }
+                paymentPolicy.payment(input);
                 if (java.util.Set.of(1,2,5,6,7).contains(order.model().getStatus())) {
                     Integer receipts = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt WHERE order_sn=? AND channel=? AND transaction_id=? AND amount_minor=? AND currency=?",
                             Integer.class, input.orderId(), ascii(input.channel()), ascii(input.transactionId()), input.amountMinor(), input.currency());
@@ -169,7 +271,9 @@ public final class MallOrderStore {
                 if (order.model().getStatus() != 0) { throw new MallException(409, "订单状态冲突"); }
                 jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES (?,?,?,?,?)",
                         ascii(input.channel()), ascii(input.transactionId()), input.orderId(), input.amountMinor(), input.currency());
-                if (jdbc.update("UPDATE pms_sku_stock SET stock=stock-?,lock_stock=lock_stock-? WHERE id=? AND stock>=? AND lock_stock>=?",
+                if (order.skuId() == 0) {
+                    if (!consignments.paid(input.orderId())) { throw new MallException(503, "寄售订单关联缺失"); }
+                } else if (jdbc.update("UPDATE pms_sku_stock SET stock=stock-?,lock_stock=lock_stock-? WHERE id=? AND stock>=? AND lock_stock>=?",
                         order.quantity(), order.quantity(), order.skuId(), order.quantity(), order.quantity()) != 1) {
                     throw new MallException(409, "库存预占状态异常");
                 }
