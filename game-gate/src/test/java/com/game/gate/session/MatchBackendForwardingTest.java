@@ -357,8 +357,9 @@ class MatchBackendForwardingTest {
         ch.runPendingTasks();
         ch.writeInbound(request(13, ids.requireId("ClientPlayerLogin", "EnterGame"), "enter-other"));
         login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(com.game.api.proto.BindAccount.newBuilder().setAccount("fixture-original")))
                 .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
-                        .setPlayerId(otherPlayer).setSceneNodeId(7).setSceneId(901).setOwnerEpoch(6)))
+                        .setPlayerId(otherPlayer).setSceneNodeId(7).setSceneId(901).setOwnerEpoch(6).setOwnerRevision(1)))
                 .build());
         ch.runPendingTasks();
         assertThat(session().playerId).isEqualTo(otherPlayer);
@@ -421,8 +422,9 @@ class MatchBackendForwardingTest {
     private void enterGame(EmbeddedChannel ch) {
         ch.writeInbound(request(1, ids.requireId("ClientPlayerLogin", "EnterGame"), "enter"));
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("enter-resp"))
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(com.game.api.proto.BindAccount.newBuilder().setAccount("fixture-original")))
                 .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
-                        .setPlayerId(PLAYER).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5)))
+                        .setPlayerId(PLAYER).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5).setOwnerRevision(1)))
                 .build());
         ch.runPendingTasks();
         assertThat(((MessageContent) ch.readOutbound()).getId()).isEqualTo(1);

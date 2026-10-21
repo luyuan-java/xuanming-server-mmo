@@ -138,3 +138,15 @@ Java 后续优先级据此调整为：
 AuthorityJdbc的非snapshot事务统一先持meta共享锁，涵盖不带客户端actor的后台写。显式维护Freeze获取meta排他锁并将writable置0后，新的业务写必须拒绝；只读快照保持读取能力。InboxTables启动校验正式route结构和已显式初始化的meta，不补种、不自动解冻。唯一DDL为game-common资源db/game-route-authority-schema.sql，home仍是player.zone_id，不新增第二份玩家home。
 
 InboxRouteFenceTest覆盖通知CAS、全局冻结、任意片冻结/缺片、角色交易封存及删除后的写拒绝。默认H2仅为本地接口回归；正式真库必须显式传-Dinbox.it.tidb=127.0.0.1:4000 -Dinbox.it.require=1，并由本任务资源门禁先确认该TiDB归属。测试生成独占随机库、固定强读会话并验证TiDB版本，结束只删除自身库。缺真库配置不得把H2结果当真库通过。本轮尚未执行该测试或当前Java reactor构建。
+
+## 2026-10-21 原归属、完整消费准入与永久收据补充（源码，未运行验收）
+
+新入箱在同P事务第一次保存player_inbox_item.owner_account/owner_revision；同键重投只认永久原收据，判重优先于签发窗和当前玩家存在性。终态2/3/4/5均保留原唯一键、原归属和内容，不再物理删除；terminal-retention/sweep-interval仅保留配置兼容，清理不再调度。未知状态、无原owner的待办以及当前owner不等于原owner均拒绝继续；不从当前目录给旧命令补权。Native/导入/恢复/合区同P统一消费真实shard与相同完整终态集合。
+
+Fetch/Ack必须带原RoleAdmissionIdentity，并按InboxCallContract的完整方法名与scene独立密钥HMAC绑定整份请求。密钥环境变量为MMORPG_INTERNAL_SECRET_SCENE，缺失或不足32字节拒启。所有请求包括空流、无流，都先持meta/zone/P，核当前SQL owner_revision/E、未释放、未交易封存，再核player_final_save的原source_instance、save_seq1、protocol1、精确OPEN与admission_proto确定性PB原字节。签名只证明调用方，SQL已登记的完整原件才证明该次入场。
+
+Java复用既有loadForScene/player_final_save同代准入，不建第二张admission表或角色owner事实。首次正规load接收固定原PlayerEnter身份与SceneAdmissionSource，在同P原账号/revision/E核验后直接登记完整admission_proto；原行缺失raw或任一字段不同不能补填。generation采用Java原SQL E；scene/node/instance/zone/session/login_generation全部来自原请求及固定进程来源，不读当前目录重建旧caller。最终退出把OPEN变为PENDING/APPLIED后，旧场景不能继续Fetch/Ack；新持有代用自己的完整原件从持久账本恢复确认。
+
+普通/强制作废均在同P核待办原owner；强制作废在锁住原条目之后同P读取真实player_state账本，不以事务外旧账本作为修改证明。保留期不再删终态，Fetch指标只记录有限查询实际读回的候选数，最多max_items+1，不为观测COUNT永久全历史，也不称为存储引擎物理扫描数。
+
+InboxOwnerAdmissionTest与InboxRouteFenceTest共用同一隔离TiDB/H2选择，覆盖跨主旧UUID与永久终态、签名整请求/方法绑定、完整admission各字段、空raw/退出/unknown拒绝、空流/无流验权、P等待换主零投递写、强制作废同P真实证明。AssetArrivalTiDbTest首次进场改走真实完整准入，测试传输同规范签名并在真实SQL核原件；其收件箱应答仍是受控夹具，不将它冒充真实Inbox RPC。RankMailChainTiDbTest实际没有Inbox或load调用，不为它增加无关消费路径。本补充及测试源尚未编译、执行或部署。

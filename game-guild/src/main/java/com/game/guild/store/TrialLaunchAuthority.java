@@ -157,7 +157,7 @@ final class TrialLaunchAuthority {
             verifyProjection(sql,original,true);
             return original;
         }
-        com.game.common.player.MatchEntryAuthority.requireFree(sql.connection(),players,"",0,3);
+        com.game.common.player.MatchEntryAuthority.requireFreeForTrial(sql.connection(),original,3);
         byte[] raw = bytes(original);
         sql.update("INSERT INTO guild_trial_launch(request_id,battle_id,state,original_proto,request_digest,created_ms,updated_ms,cancel_receipt) VALUES(?,0,1,?,?,?,?,?)",
             u64(original.getRequestId()),raw,digest(raw),now,now,new byte[0]);

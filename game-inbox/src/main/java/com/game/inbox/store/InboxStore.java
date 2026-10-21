@@ -69,7 +69,7 @@ import org.slf4j.LoggerFactory;
  *       事务体可能被重跑，必须可重跑——一律把结果作为返回值，不往外层变量里写；</li>
  *   <li>锁顺序固定：路由meta→完整zone围栏→角色P→流行（主键 FOR UPDATE）→ 条目行（只按主键，seq 升序）→ 审计行插入。条目行一律先普通读、再按主键条件写，不做二级索引上的加锁读；</li>
  *   <li>每个事务只碰一个 (player, domain)；同一条流内天然串行，不同流之间不存在环；</li>
- *   <li>读玩家表（R）、写前门禁、在线提醒都在事务外进行，不在持有行锁时等它们。</li>
+ *   <li>写前门禁与在线提醒在事务外；消费方原准入、当前owner/E及强制证明在同P内复核，不以外部预读替代提交校验。</li>
  * </ul>
  * 业务拒绝走返回值里的 tip / 围栏结论；基础设施故障抛 {@link SQLException}（调用方回 kPlayerInboxStoreUnavailable）。线程安全（构造后只读）。
  */
@@ -678,7 +678,10 @@ public final class InboxStore {
                 + " WHERE `shard`=? AND `player_id`=? AND (`state` IS NULL OR `state` NOT IN " + InboxSql.TERMINAL_STATES + ") LIMIT ?",
                 InboxSql::item, shard, u64(playerId), Math.addExact(maximum, 1));
         if (open.size() > maximum) throw new SQLException("收件箱未终局行超过注册域上限，拒绝继续");
-        for (player_inbox_item_row row : open) InboxSql.requireOriginalOwner(row, owner);
+        for (player_inbox_item_row row : open) {
+            if (registry.domain(PlayerInboxDomain.forNumber(row.getDomain())).isEmpty()) throw new SQLException("收件箱待办域未登记，拒绝继续");
+            InboxSql.requireOriginalOwner(row, owner);
+        }
     }
 
 

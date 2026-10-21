@@ -1347,23 +1347,6 @@ public final class SceneWorld {
         long playerId = enter.getPlayerId();
         long epoch = enter.getOwnerEpoch();
         boolean transfer = enter.getTransfer();
-        if (!acceptingEnters) {
-            failEnter(key, playerId, epoch, transfer, "本节点已停止接收新玩家");
-            return;
-        }
-        if (playerId == 0 || enter.getSessionId() == 0) {
-            failEnter(key, playerId, epoch, transfer, "player_id 或 session_id 为 0");
-            return;
-        }
-        // 排空中的场景照样放行：在途进场挡住它的销毁，加载完成时改进兄弟频道（§4.10.4）
-        if (!scenes.containsKey(enter.getSceneId())) {
-            failEnter(key, playerId, epoch, transfer,
-                    "场景不在本节点 scene_id=" + Long.toUnsignedString(enter.getSceneId()));
-            return;
-        }
-        if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))) {
-            failEnter(key,playerId,epoch,transfer,"该归属代已开始最终退出，禁止同代复活");return;
-        }
         RoleAdmissionIdentity original;
         try { original = admissions == null ? null : admissions.original(enter); }
         catch (RuntimeException invalid) {
@@ -1371,12 +1354,36 @@ public final class SceneWorld {
             return;
         }
         PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer, original, enter.getAccount());
+        PendingEnter existing = pendingEnters.get(key);
+        if (original != null && existing != null && existing.playerId() == playerId && existing.ownerEpoch() == epoch
+                && (!original.equals(existing.admission()) || !enter.getAccount().equals(existing.account()))) {
+            // 原加载已在途：坏重放不能把它从本地索引赶掉，也不能释放其原OPEN。
+            failEnter(key, playerId, epoch, transfer, "同一持有代的准入原件冲突");
+            return;
+        }
+        if (!acceptingEnters) {
+            failEnter(pending, "本节点已停止接收新玩家");
+            return;
+        }
+        if (playerId == 0 || enter.getSessionId() == 0) {
+            failEnter(pending, "player_id 或 session_id 为 0");
+            return;
+        }
+        // 排空中的场景照样放行：在途进场挡住它的销毁，加载完成时改进兄弟频道（§4.10.4）
+        if (!scenes.containsKey(enter.getSceneId())) {
+            failEnter(pending,
+                    "场景不在本节点 scene_id=" + Long.toUnsignedString(enter.getSceneId()));
+            return;
+        }
+        if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))) {
+            failEnter(pending,"该归属代已开始最终退出，禁止同代复活");return;
+        }
         PendingEnter replaced = pendingEnters.put(key, pending);
         if (replaced != null) {
             log.warn("同一会话在加载完成前再次进场，只处理最新一次 player={} session={}", playerId, key);
             if (replaced.playerId() != playerId || replaced.ownerEpoch() != epoch) {
                 // 被取代的那次进场不会再有写者：释放它夺得的归属（带围栏，已被更新的夺权取代时什么也不做）。
-                repository.release(replaced.playerId(), replaced.ownerEpoch());
+                releaseClaim(replaced);
             }
         }
         FinalKey loadingKey=new FinalKey(playerId,epoch);
@@ -1422,35 +1429,35 @@ public final class SceneWorld {
         if (!(result instanceof LoadResult.Found found)) {
             if (result instanceof LoadResult.Failed failed) {
                 log.error("加载玩家数据失败 player={}", playerId, failed.error());
-                failEnter(key, playerId, epoch, transfer, "加载玩家数据失败");
+                failEnter(pending, "加载玩家数据失败");
             } else {
-                failEnter(key, playerId, epoch, transfer, "玩家不存在");
+                failEnter(pending, "玩家不存在");
             }
             return;
         }
         PlayerData data = found.data();
         // SQL读取后仍可能已经开始最终退出；在实体索引提交点重新校验票据，不只校验读到的E。
         if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))) {
-            failEnter(key,playerId,epoch,transfer,"加载完成前该归属代已最终退出");return;
+            failEnter(pending,"加载完成前该归属代已最终退出");return;
         }
         if (!acceptingEnters) {
-            failEnter(key, playerId, epoch, transfer, "本节点已停止接收新玩家");
+            failEnter(pending, "本节点已停止接收新玩家");
             return;
         }
         if (data.ownerEpoch() != epoch) {
-            failEnter(key, playerId, epoch, transfer,
+            failEnter(pending,
                     "owner_epoch 不符（库里 " + data.ownerEpoch() + "，请求 " + epoch + "），进场请求已过期");
             return;
         }
         ScenePlayer previous = playersById.get(playerId);
         if (previous != null && previous.ownerEpoch() > epoch) {
-            failEnter(key, playerId, epoch, transfer,
+            failEnter(pending,
                     "本节点已有更新归属的实例（epoch " + previous.ownerEpoch() + "），进场请求已过期");
             return;
         }
         Scene scene = scenes.get(pending.sceneId());
         if (scene == null) {
-            failEnter(key, playerId, epoch, transfer,
+            failEnter(pending,
                     "场景不在本节点 scene_id=" + Long.toUnsignedString(pending.sceneId()));
             return;
         }
@@ -1479,7 +1486,7 @@ public final class SceneWorld {
             actorEntity = nextId();
         } catch (RuntimeException e) {
             log.error("玩家 actor 发号失败 player={}", playerId, e);
-            failEnter(key, playerId, epoch, transfer, "玩家 actor 发号失败");
+            failEnter(pending, "玩家 actor 发号失败");
             return;
         }
 
@@ -1540,7 +1547,7 @@ public final class SceneWorld {
             playerInitializer.initialize(player);
         } catch (RuntimeException e) {
             log.error("玩家状态初始化失败 player={}", playerId, e);
-            failEnter(key, playerId, epoch, transfer, "玩家状态初始化失败");
+            failEnter(pending, "玩家状态初始化失败");
             return;
         }
         if (reviveOnEnter != null) {
@@ -1635,7 +1642,22 @@ public final class SceneWorld {
             metrics.transferEnter(TransferEnter.FAILED);
         }
         sink.enterResult(key.linkId(), key.sessionId(), playerId, epoch, ENTER_FAILED);
-        releaseClaim(playerId, epoch);
+        // 原件尚未构造成功的生产请求只有拒绝权，不能凭裸E终结其它准入。
+        if (admissions == null) releaseClaim(playerId, epoch);
+    }
+
+    private void failEnter(PendingEnter pending, String reason) {
+        failEnter(pending.session(), pending.playerId(), pending.ownerEpoch(), pending.transfer(), reason);
+        if (pending.admission() != null) releaseClaim(pending);
+    }
+
+    private void releaseClaim(PendingEnter pending) {
+        if (pending.admission() == null) { releaseClaim(pending.playerId(), pending.ownerEpoch()); return; }
+        ScenePlayer active = playersById.get(pending.playerId());
+        FinalKey key = new FinalKey(pending.playerId(), pending.ownerEpoch());
+        if (finalizing.containsKey(key) || tradeDrains.containsKey(key)
+                || active != null && active.ownerEpoch() == pending.ownerEpoch()) return;
+        repository.release(pending.admission(), pending.account());
     }
 
     private void releaseClaim(long playerId, long epoch) {
@@ -2688,7 +2710,7 @@ public final class SceneWorld {
         PendingEnter pending = pendingEnters.get(key);
         if (pending != null && pending.playerId() == leave.getPlayerId()) {
             pendingEnters.remove(key);
-            releaseClaim(pending.playerId(), pending.ownerEpoch());
+            releaseClaim(pending);
             if (leave.getVoluntary()) {
                 // 加载中就 LeaveGame：同样是干净登出，盖掉更早那次进场留下的位置记录（断线则留着，它就是重连租约）
                 locations.loggedOutWhileLoading(pending.playerId(), pending.ownerEpoch());
@@ -2726,7 +2748,7 @@ public final class SceneWorld {
             PendingEnter pending = it.next();
             if (pending.session().linkId() == linkId) {
                 it.remove();
-                releaseClaim(pending.playerId(), pending.ownerEpoch());
+                releaseClaim(pending);
             }
         }
         List<ScenePlayer> onLink = new ArrayList<>();
@@ -2778,7 +2800,7 @@ public final class SceneWorld {
             PendingEnter pending = it.next();
             if (pending.playerId() == playerId && pending.ownerEpoch() == ownerEpoch) {
                 it.remove();
-                releaseClaim(playerId, ownerEpoch);
+                releaseClaim(pending);
                 sink.playerKicked(pending.session().linkId(), pending.session().sessionId(), playerId, ownerEpoch,
                         KICKED_BY_ANOTHER);
                 log.info("加载中的进场被新的进游戏接管，取消并踢掉会话 player={} session={} epoch={}",
@@ -3124,7 +3146,7 @@ public final class SceneWorld {
         acceptingEnters = false;
         periodicSaveStopped = true;
         for (PendingEnter pending : pendingEnters.values()) {
-            releaseClaim(pending.playerId(), pending.ownerEpoch());
+            releaseClaim(pending);
         }
         pendingEnters.clear();
         transferTombstones.values().removeIf(tombstone -> !tombstone.redirectPending());

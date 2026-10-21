@@ -339,7 +339,8 @@ class ClientDispatcherTest {
         assertThat(links.sent).hasSize(1);
         assertThat(links.last().sceneNodeId()).isEqualTo(SCENE_NODE);
         assertThat(links.last().frame().getPlayerEnter()).isEqualTo(PlayerEnter.newBuilder()
-                .setSessionId(sessionId()).setPlayerId(PLAYER).setSceneId(900).setOwnerEpoch(5).build());
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setSceneId(900).setOwnerEpoch(5)
+                .setAccount("robot_0001").setOwnerRevision(1).setLoginGeneration(5).build());
 
         ch.writeInbound(request(3, SCENE_MSG, "skills"));
         assertThat(links.last().sceneNodeId()).isEqualTo(SCENE_NODE);
@@ -1691,7 +1692,8 @@ class ClientDispatcherTest {
                 .containsExactly(new FakeLinks.Sent(TARGET_NODE, NodeLinkFrame.newBuilder()
                         .setPlayerEnter(PlayerEnter.newBuilder()
                                 .setSessionId(sessionId()).setPlayerId(PLAYER).setSceneId(TARGET_SCENE)
-                                .setOwnerEpoch(6).setTransfer(true))
+                                .setOwnerEpoch(6).setTransfer(true)
+                                .setAccount("robot_0001").setOwnerRevision(1).setLoginGeneration(5))
                         .build()));
         assertThat((Object) ch.readOutbound()).as("改绑本身对客户端不可见").isNull();
         assertThat(presence.events).as("gap 期间不撤在线登记")
@@ -2245,7 +2247,7 @@ class ClientDispatcherTest {
     }
 
     private static EnterScene enterScene() {
-        return EnterScene.newBuilder().setPlayerId(PLAYER).setSceneNodeId(SCENE_NODE).setSceneId(900).setOwnerEpoch(5).build();
+        return EnterScene.newBuilder().setPlayerId(PLAYER).setSceneNodeId(SCENE_NODE).setSceneId(900).setOwnerEpoch(5).setOwnerRevision(1).build();
     }
 
     private static ClientReply unbindReply() {
@@ -2257,8 +2259,39 @@ class ClientDispatcherTest {
     private static ClientReply enterGameReply() {
         return ClientReply.newBuilder()
                 .setBody(ByteString.copyFromUtf8("enter-resp"))
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(BindAccount.newBuilder().setAccount("robot_0001")))
                 .addDirectives(SessionDirective.newBuilder().setEnterScene(enterScene()))
                 .build();
+    }
+
+    @Test
+    void 缺原账号或原修订的进场指令不进入scene() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(1, ENTER_GAME_MSG, "enter"));
+        login.complete(ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder().setEnterScene(enterScene())).build());
+        ch.runPendingTasks();
+        assertThat(links.sent).isEmpty();
+        ch.writeInbound(request(2, ENTER_GAME_MSG, "enter"));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(BindAccount.newBuilder().setAccount("original")))
+                .addDirectives(SessionDirective.newBuilder().setEnterScene(enterScene().toBuilder().clearOwnerRevision())).build());
+        ch.runPendingTasks();
+        assertThat(links.sent).isEmpty();
+        assertThat(session().loginGeneration).isZero();
+    }
+
+    @Test
+    void 跨scene只推进sceneE_登录代次账号修订保持原件() {
+        EmbeddedChannel ch = confirmedInGame();
+        session().account = "后续绑定不能替换原进场账号";
+        links.generation = TARGET_GEN;
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, transfer(5, 6));
+        ch.runPendingTasks();
+        PlayerEnter original = links.last().frame().getPlayerEnter();
+        assertThat(original.getOwnerEpoch()).isEqualTo(6);
+        assertThat(original.getLoginGeneration()).isEqualTo(5);
+        assertThat(original.getOwnerRevision()).isEqualTo(1);
+        assertThat(original.getAccount()).isEqualTo("robot_0001");
     }
 
     private static ByteString payload(int gateNodeId, long expire) {

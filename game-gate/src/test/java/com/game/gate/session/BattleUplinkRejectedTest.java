@@ -274,8 +274,9 @@ class BattleUplinkRejectedTest {
         EmbeddedChannel ch = verified(16, STRICT, Map.of());
         ch.writeInbound(request(1, ids.requireId("ClientPlayerLogin", "EnterGame"), "enter"));
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("enter-resp"))
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(com.game.api.proto.BindAccount.newBuilder().setAccount("fixture-original")))
                 .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
-                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5)))
+                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5).setOwnerRevision(1)))
                 .build());
         ch.runPendingTasks();
         assertThat(((MessageContent) ch.readOutbound()).getId()).isEqualTo(1);

@@ -779,12 +779,13 @@ class ClientRedirectTest {
     }
 
     private static EnterScene enterScene() {
-        return EnterScene.newBuilder().setPlayerId(PLAYER).setSceneNodeId(SCENE_NODE).setSceneId(900).setOwnerEpoch(5).build();
+        return EnterScene.newBuilder().setPlayerId(PLAYER).setSceneNodeId(SCENE_NODE).setSceneId(900).setOwnerEpoch(5).setOwnerRevision(1).build();
     }
 
     private static ClientReply enterGameReply() {
         return ClientReply.newBuilder()
                 .setBody(ByteString.copyFromUtf8("enter-resp"))
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(com.game.api.proto.BindAccount.newBuilder().setAccount("fixture-original")))
                 .addDirectives(SessionDirective.newBuilder().setEnterScene(enterScene()))
                 .build();
     }

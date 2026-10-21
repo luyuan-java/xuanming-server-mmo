@@ -2444,3 +2444,14 @@ PVE每支完整party或solo是一条SQL queue unit：每size桶资格过滤后�
 home与物理机房是两条轴：票的zone固定首次SQL player.zone_id，Team使用同P原home；修复或Claim发现当前home不同只能拒绝，不能重写旧原件。Match读取Team唯一typed SQL policy完整原件并纳自身指纹，每事务拒不同世代。allowCrossZone=false时机房投影在LIMIT前同home过滤，最终Claim全P再核组合所有unit/solo的原home集合；允许跨home才放开，仍须全员硬RTT/逐人等待。PVE人数档0默认、1即时、2至副本上限沿MatchModes单源校验。
 
 更正前节ready概述：单次ABSENT不能释放，必须先对原固定创建operation/instance落Destroy取消，再Query确认ABORTED；PRESENT/UNKNOWN继续保留。该批补充原生TiDB回归覆盖原UUID/ABA、退出正证明、九项HWM、Team/Trial入口互斥、3+2整队、取消竞争、禁止半队、F5整队重排、过期整单、原profile/home及policy变化拒绝。所有生成、编译、单测、真库与双区/多副本验收尚未执行，由主控资源门禁后统一运行；本条不宣称整批运行完成。
+
+
+## 2026-10-21 历练私有大厅与匹配提交互斥
+
+`MatchEntryAuthority` 在已持完整 route/P 的同一事务中读取既有 `guild_activity_slot` 与真实 `guild_trial_lobby`。非零 slot 只在大厅明确 state=4 时释放，expires_ms 不作为安全证明；孤儿、NULL 和未知状态拒绝。普通 Join/direct、Watch、Team 首次 launch 均通过该接缝，历练首次邀请在旧回执先返回之后、提交新大厅之前反向核匹配票与其它 launch，避免只有单向检查的提交窗口。
+
+正规历练例外不按 activity kind 直接跳过。首次 prepare 传完整 `GuildTrialLaunchOriginal`，只允许 request_id 等于真实 lobby_id、原 guild/activity/initiator/完整 roster 与 state=1 大厅一致。后续 Match 消费已持久 launch 的 state=1/原 PB/SHA，并核同一 state=2 大厅与完整名单；全员原账号修订仍由调用方在完整 P 锁下核验。缺少真实 slot 或原件时不补当前事实。
+
+Java Team 的 4/5 分别对应已确证原 F 的正常结束/失败取消，角色投影只有 state=2 才算共同终局；父记录已终局而角色仍 ACTIVE、缺父及未知状态继续阻塞。Trial 同样要求父 CLOSED3 与角色 CLOSED2 成对终局。Go 版内部状态数字不同，按实际语义对齐。
+
+补充真实 TiDB 回归源码覆盖过期/孤儿/未知大厅阻 Join、Watch、首次 Team launch，己方原大厅范围与持久原件例外，首次邀请反向互斥，以及父终局/角色 ACTIVE 不得放行。未运行生成、编译或测试，等待主控统一验证。

@@ -1,6 +1,8 @@
 package com.game.scene.testing;
 
 import com.game.player.store.PlayerStore.HandOffMode;
+import com.game.proto.common.base.RoleAdmissionIdentity;
+import com.game.common.player.SceneAdmissionAuthority;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository;
 import com.game.scene.world.PlayerSave;
@@ -40,6 +42,28 @@ public final class FakePlayerRepository implements PlayerRepository {
     private final List<PlayerSave> saves = new ArrayList<>();
     private final List<Release> releases = new ArrayList<>();
     private record FinalKey(long player,long epoch) { }
+    public record OriginalLoad(RoleAdmissionIdentity admission, String account) { }
+    private final List<OriginalLoad> originalLoads = new ArrayList<>();
+    private final Map<FinalKey, OriginalLoad> admissions = new HashMap<>();
+    public List<OriginalLoad> originalLoads() { return List.copyOf(originalLoads); }
+
+    @Override
+    public void load(RoleAdmissionIdentity original, String account, Consumer<LoadResult> onLoaded) {
+        SceneAdmissionAuthority.original(original);
+        var request = new OriginalLoad(original, account);
+        originalLoads.add(request);
+        var previous = admissions.putIfAbsent(new FinalKey(original.getPlayerId(), original.getOwnerEpoch()), request);
+        if (previous != null && !previous.equals(request)) {
+            loads.add(new PendingLoad(original.getPlayerId(), ignored -> onLoaded.accept(new LoadResult.NotFound())));
+        } else load(original.getPlayerId(), original.getOwnerEpoch(), onLoaded);
+    }
+
+    @Override
+    public void release(RoleAdmissionIdentity original, String account) {
+        var previous = admissions.get(new FinalKey(original.getPlayerId(), original.getOwnerEpoch()));
+        if (previous == null || previous.equals(new OriginalLoad(original, account)))
+            release(original.getPlayerId(), original.getOwnerEpoch());
+    }
     private final java.util.Set<FinalKey> closedEpochs=new java.util.HashSet<>();
     public record PendingFinal(PlayerSave save,FinalSaveReceipt receipt,Consumer<FinalSaveRegistration> callback) {
         public void complete(FinalSaveRegistration result){callback.accept(result);}

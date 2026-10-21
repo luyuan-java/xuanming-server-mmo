@@ -249,6 +249,14 @@ public final class StoragePlayerRepository implements PlayerRepository {
         }
     }
 
+    @Override
+    public void release(RoleAdmissionIdentity original, String expectedAccount) {
+        SceneAdmissionAuthority.original(original);
+        if (!sourceInstance.equals(original.getSceneInstanceId()) || expectedAccount == null || expectedAccount.isBlank())
+            throw new SecurityException("场景释放原来源不匹配");
+        submit(new WriteTask(original, expectedAccount));
+    }
+
     private void deliver(long playerId, Consumer<LoadResult> onLoaded, LoadResult result) {
         try {
             logicExecutor.execute(() -> onLoaded.accept(result));
@@ -450,6 +458,8 @@ public final class StoragePlayerRepository implements PlayerRepository {
     /** 一个写任务（写回 / 释放 / 在线存盘）。 */
     private final class WriteTask extends StorageTask {
 
+        private final RoleAdmissionIdentity admission;
+        private final String expectedAccount;
         private final Kind kind;
         private final PlayerSave save;
         private final long playerId;
@@ -457,11 +467,23 @@ public final class StoragePlayerRepository implements PlayerRepository {
         private final Consumer<ProgressResult> onDone;
 
         WriteTask(Kind kind, PlayerSave save, long playerId, long ownerEpoch, Consumer<ProgressResult> onDone) {
+            this.admission = null;
+            this.expectedAccount = null;
             this.kind = kind;
             this.save = save;
             this.playerId = playerId;
             this.ownerEpoch = ownerEpoch;
             this.onDone = onDone;
+        }
+
+        WriteTask(RoleAdmissionIdentity admission, String expectedAccount) {
+            this.admission = admission;
+            this.expectedAccount = expectedAccount;
+            this.kind = Kind.RELEASE;
+            this.save = null;
+            this.playerId = admission.getPlayerId();
+            this.ownerEpoch = admission.getOwnerEpoch();
+            this.onDone = null;
         }
 
         @Override
@@ -495,7 +517,8 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
         boolean apply() {
             return switch (kind) {
-                case RELEASE -> store.releaseOwnership(playerId, ownerEpoch);
+                case RELEASE -> admission == null ? store.releaseOwnership(playerId, ownerEpoch)
+                        : store.releaseSceneAdmission(admission, expectedAccount, Duration.ofSeconds(3));
                 case PROGRESS -> store.saveStateHeld(toRow(save), save.state());
             };
         }

@@ -299,6 +299,8 @@ public final class GuildActivityStore {
                 if (p == player && slot[2] > now)
                     throw new Rejected(GuildTips.TRIAL_INVITE_COOLDOWN, Long.toString((slot[2] - now + 999) / 1000));
             }
+            // 私有大厅从首次邀请就占完整名单；同P与Match/Team提交互斥，旧回执已在上方先返回。
+            com.game.common.player.MatchEntryAuthority.requireFree(s.connection(),roster,"",0,3);
             var view = GuildTrialLobbyView.newBuilder()
                                .setLobbyId(lobbyId)
                                .setInitiatorPlayerId(player)

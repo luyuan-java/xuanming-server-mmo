@@ -121,7 +121,9 @@ final class InboxOwnerAdmissionTest {
             for(var altered:List.of(original.toBuilder().setGeneration(2).build(),original.toBuilder().setLoginGeneration(14).build(),
                     original.toBuilder().setSceneNodeId("6").build(),original.toBuilder().setSceneId(102).build(),original.toBuilder().setZoneId(8).build(),
                     original.toBuilder().setSessionId(20).build(),original.toBuilder().setSceneInstanceId("other-instance").build(),
-                    original.toBuilder().setOwnerRevision(2).build(),original.toBuilder().setOwnerEpoch(2).build())){
+                    original.toBuilder().setOwnerRevision(2).build(),original.toBuilder().setOwnerEpoch(2).build(),
+                    original.toBuilder().setPlayerId(2).build(),original.toBuilder().setUnknownFields(com.google.protobuf.UnknownFieldSet.newBuilder()
+                            .addField(99,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build()).build())){
                 assertThrows(SecurityException.class,()->f.fetch(altered));assertEquals(0,f.item(601).getDeliveryCount());
             }
             f.update("UPDATE player_final_save SET admission_proto=NULL");assertThrows(SecurityException.class,()->f.fetch(original));
@@ -130,7 +132,13 @@ final class InboxOwnerAdmissionTest {
                 f.update("UPDATE player_final_save SET status=?",state);assertThrows(SecurityException.class,()->f.fetch(original));
                 assertThrows(SecurityException.class,()->f.ack(original,item.seq(),601));assertEquals(0,f.value("SELECT fence_epoch FROM player_inbox_stream"));
             }
-            f.update("UPDATE player_final_save SET status='OPEN'");assertEquals(1,f.fetch(original).getItemsCount());
+            f.update("UPDATE player_final_save SET status='OPEN'");
+            for(String change:List.of("save_seq=2","protocol_version=2","source_instance='other-instance'")){
+                f.update("UPDATE player_final_save SET "+change);assertThrows(SecurityException.class,()->f.fetch(original));
+                f.update("UPDATE player_final_save SET save_seq=1,protocol_version=1,source_instance='fixture-scene-instance'");
+            }
+            f.update("UPDATE player SET owner_released=1");assertThrows(SecurityException.class,()->f.fetch(original));f.update("UPDATE player SET owner_released=0");
+            assertEquals(1,f.fetch(original).getItemsCount());
         }
     }
 
@@ -158,6 +166,25 @@ final class InboxOwnerAdmissionTest {
             f.update("UPDATE player_final_save SET admission_proto=?",SceneAdmissionAuthority.original(identity(1,1)));
             assertEquals(PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM,f.fetch(identity(1,1)).getFence());
             assertEquals(PlayerInboxAckResult.PLAYER_INBOX_ACK_UNKNOWN_SEQ,f.ack(identity(1,1),1,801).getResults(0).getResult());
+        }
+    }
+
+    @Test void 强制作废使用同P真实账本_不能采用事务外旧证明()throws Exception{
+        try(var f=new Fixture()){
+            var first=f.enqueue(851);assertEquals(1,f.fetch(identity(1,1)).getItemsCount());
+            var decision=com.game.player.store.state.InboxDecisionState.newBuilder().setSeq(first.seq()).setRequestId(851)
+                    .setMsgType(TYPE.getNumber()).setOutcome(PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED_VALUE).build();
+            var cursor=com.game.player.store.state.InboxDomainCursorState.newBuilder().setDomain(DOMAIN.getNumber())
+                    .setDecidedThroughSeq(first.seq()).addRecent(decision).build();
+            var actual=com.game.player.store.state.InboxLedgerState.newBuilder().addCursors(cursor).build();
+            var stale=actual.toBuilder().setCursors(0,cursor.toBuilder().setRecent(0,decision.toBuilder().setRequestId(999))).build();
+            f.update("INSERT INTO player_state VALUES(1,?)",com.game.player.store.state.PlayerState.newBuilder().setInboxLedger(actual).build().toByteArray());
+            LedgerReader oldSnapshot=(d,p)->new LedgerReader.Read(true,stale);
+            var admin=new InboxAdminStore(f.base.jdbc,InboxRegistry.load(),oldSnapshot,new InboxMetrics(f.base.metrics),f.clock::get);
+            var response=admin.voidItem(budget(),new InboxAdminStore.VoidParams(1,DOMAIN,first.seq(),PlayerInboxVoidReason.PLAYER_INBOX_VOID_CANCELLED,
+                    "fixture","audit-proof","fixture",PlayerInboxVoidMode.PLAYER_INBOX_VOID_MODE_FORCE_MISMATCH));
+            assertEquals(PlayerInboxForceVoidVerdict.PLAYER_INBOX_FORCE_VOID_REQUEST_IN_LEDGER,response.getForceVerdict());
+            assertEquals(1,f.item(851).getState());assertEquals(1,f.value("SELECT open_count FROM player_inbox_stream"));
         }
     }
 

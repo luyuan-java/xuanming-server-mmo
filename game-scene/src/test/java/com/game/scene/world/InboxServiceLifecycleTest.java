@@ -41,14 +41,15 @@ class InboxServiceLifecycleTest {
     private final SceneWorld world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, new RecordingSink(), repository,
             new AtomicLong(9000)::incrementAndGet, clock, SceneMetrics.noop(), InboxService::checkLedgerOnLoad,
             PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE, CrossNodeSwitch.DISABLED, SceneInstances.DISABLED,
-            BattleHooks.NONE, ZoneTravel.DISABLED, inbox);
+            BattleHooks.NONE, ZoneTravel.DISABLED, inbox, new SceneAdmissionSource("9", "inbox-unit", 1));
     private final Scene scene = world.createScene(1);
 
     InboxServiceLifecycleTest() { inbox.attach(world); }
 
     private ScenePlayer enter(long epoch, int session, PlayerState state) {
         repository.put(new PlayerData(7, epoch, 1, 1, "", 1, 1, new Vec3(180, 200, 0), state));
-        world.onPlayerEnter(1, SceneWorldTest.enterFrame(session, 7, scene.sceneId(), epoch));
+        world.onPlayerEnter(1, SceneWorldTest.enterFrame(session, 7, scene.sceneId(), epoch).toBuilder()
+                .setAccount(" 原账号 ").setOwnerRevision(3).setLoginGeneration(epoch).build());
         repository.completeAll();
         return world.playerById(7);
     }
@@ -73,6 +74,8 @@ class InboxServiceLifecycleTest {
         repository.takeProgress().complete(PlayerRepository.ProgressResult.SAVED);
         assertThat(transport.acks).hasSize(1);
         assertThat(transport.acks.getFirst().request().getOwnerEpoch()).isEqualTo(1);
+        assertThat(transport.fetches.getFirst().request().getAdmission()).isSameAs(player.admission());
+        assertThat(transport.acks.getFirst().request().getAdmission()).isSameAs(player.admission());
         assertThat(player.persistedState().getCurrency().getBlockedTypesList()).containsExactly(0);
     }
 
@@ -104,7 +107,7 @@ class InboxServiceLifecycleTest {
     void 同epoch重连转交在途拉取_重复旧回复不再次执行() {
         ScenePlayer old = enter();
         Fetch pending = fetch();
-        ScenePlayer current = enter(1, 22, old.persistedState());
+        ScenePlayer current = enter(1, 11, old.persistedState());
         assertThat(current).isNotSameAs(old);
         pending.reply(item());
         pending.reply(item());
@@ -178,6 +181,23 @@ class InboxServiceLifecycleTest {
                 (player, payload) -> new InboxConsumers.Applied())), transport, clock,
                 new InboxService.Settings(true, 30), () -> 9, () -> 500);
         assertThat(broken.consumerEnabled()).isFalse();
+    }
+
+    @Test
+    void 只有旧加载结果没有完整准入时不发Fetch或Ack() {
+        var legacy = new SceneWorld(new FakeSceneTables(), Contracts.IDS, new RecordingSink(), repository,
+                new AtomicLong(9500)::incrementAndGet, clock, SceneMetrics.noop(), PlayerInitializer.NONE,
+                PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE, CrossNodeSwitch.DISABLED,
+                SceneInstances.DISABLED, BattleHooks.NONE, ZoneTravel.DISABLED, inbox);
+        inbox.attach(legacy);
+        Scene target = legacy.createScene(1);
+        repository.put(new PlayerData(8, 1, 1, 1, "", 1, 1, new Vec3(180, 200, 0)));
+        legacy.onPlayerEnter(1, SceneWorldTest.enterFrame(12, 8, target.sceneId(), 1));
+        repository.completeAll(); inbox.tick();
+        assertThat(transport.fetches).isEmpty();
+        assertThat(transport.acks).isEmpty();
+        assertThat(legacy.playerById(8).inboxRuntime().domain(DOMAIN).deferReason())
+                .isEqualTo(com.game.scene.inbox.PlayerInboxRuntime.DeferReason.ADMISSION_MISSING);
     }
 
     private static PlayerInboxItem item() {

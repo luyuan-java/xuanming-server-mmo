@@ -22,7 +22,8 @@ import org.slf4j.LoggerFactory;
 /**
  * 生产用的 {@link InboxTransport}：直连 {@code game.scene.inbox.url}（缺省 {@code tri://127.0.0.1:20918}，game-inbox 的 Dubbo 端口）的编程式引用
  * （game-api 的 {@link NodeRpcClients}：自己的隔离 Dubbo 模型、{@code retries = 0}——Fetch / Ack 都改服务端状态，重发会打乱投递计数与指标；
- * {@code check = false}——game-inbox 不在不影响 scene 启动；建引用不在逻辑线程上做）。调用方鉴权（{@code GAME_DUBBO_SECRET}）由 game-api 的 SPI 过滤器带上。
+ * {@code check = false}——game-inbox 不在不影响 scene 启动；建引用不在逻辑线程上做）。连接鉴权由SPI过滤器带上，
+ * 业务请求另以scene角色签完整PB；完整准入是否已登记由Inbox同P复核，签名不代替SQL授权。
  * 结果经 {@code logic} 投递回场景逻辑线程，恰好一次（本地兜底超时由 {@link NodeRpcClients#call} 给出）。线程安全。
  */
 public final class DubboInboxTransport implements InboxTransport, AutoCloseable {

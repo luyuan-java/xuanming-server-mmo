@@ -474,3 +474,9 @@ Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
 同一正式route DDL追加zone_merged_into(zone_id,target_zone,run_id,revision)，只表示源区退役，不复制player home。game-data的zone_merge.proto经ZoneMergeTables登记run/item；game-team的正规TeamPolicyRow追加typed allow_cross_zone与contract_digest，旧试验策略没有digest必须停写审核迁移，不自动补权。所有改变玩家/玩法原件的事务，包括无actor后台写和原Guild单语句claim，都在领域锁之前持meta共享锁。
 
 显式MergeZone工具持metaX证明全局owner_released=1和最终写回已终局后才置meta0并持源目标各64片；过期租约不充当排空。全服短维护期间所有zone业务写暂停。计划、审批hash、原身份/行指纹、批次CAS永久保留，完成仍保持meta0；独立显式Release携原hash、路由世代和操作者才恢复。失败/UNKNOWN不自动清冻；未写实体可按原hash显式Abort后Release，已写必须续跑原run再按原件撤销。源退役marker阻旧入口与新建/导入回源，目录写共用前缀。完整CLI顺序与恢复边界见zone-merge-spec末节；本批未执行DDL、初始化、维护、生成或任何测试。
+
+### M18：原场景准入与永久Inbox原归属收据（2026-10-21，未运行源码批）
+
+正式game-player-schema.sql在既有player_final_save增加admission_proto MEDIUMBLOB NULL，由完整loadForScene(RoleAdmissionIdentity,expectedAccount,timeout)首次同P登记确定性PB；源实例、原account/revision/E与全部入场字段固定。不存在才插入；旧OPEN缺raw、原件不同或非OPEN均拒绝，不能UPDATE补当前身份。旧四参load仅存量测试兼容，不作为生产Inbox消费准入。PlayerSqlAuthorityAutoConfiguration只读核新列类型/容量/可空性，缺列拒启。已有数据库需停新入口、正常排空原scene、审核备份与独立权威水位，再由正式schema迁移流程加列；CREATE IF NOT EXISTS不能代替已有表扩列，也未在本批执行实际迁移。
+
+共享player_inbox_item原owner_account/revision列24/25经正规PB登记同步。已有PENDING无原owner或状态未知的开发/试验行必须人工审核终结/迁移，Inbox启动与运行均拒绝静默补权。终态2/3/4/5永久保留原unique receipt，终态清理不再调度，旧保留期配置不授权物删。Fetch/Ack整请求scene签名与同P完整SQL准入原件双重核验，空流/无流也不能跳过。Native/导入/恢复与合区消费同shard/pid完整终态集合；真正权威SQL全域PITR仍须外部不可回退审计上界与恢复门禁，不能用一并回退的admission/收据自证真相。

@@ -88,6 +88,11 @@ public interface PlayerRepository {
 
     void release(long playerId, long ownerEpoch);
 
+    /** 取消完整准入时只放弃同原件的OPEN；禁止按裸E释放另一来源。 */
+    default void release(RoleAdmissionIdentity original, String expectedAccount) {
+        throw new UnsupportedOperationException("仓储未实现完整场景准入释放");
+    }
+
     void saveProgress(PlayerSave save, Consumer<ProgressResult> onDone);
 
     /**

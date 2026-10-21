@@ -549,7 +549,7 @@ public final class InboxService implements InboxHooks {
             // 拉取前已过 epoch 闸，epoch 是实例上的 final：走到这里只可能是缺陷。发 0 会被判 EPOCH_REQUIRED 并停用，不如保留队列退避再看
             state.ackFailStreak = saturatingIncrement(state.ackFailStreak);
             state.nextAckMs = now + InboxRules.backoffMs(state.ackFailStreak, jitter());
-            log.error("[PlayerInbox] Ack postponed: owner_epoch missing on a player that already fetched player_id={} domain={}",
+            log.error("[PlayerInbox] Ack postponed: original admission or owner_epoch missing player_id={} domain={}",
                     Long.toUnsignedString(playerId), state.domain);
             return;
         }

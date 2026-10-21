@@ -1490,3 +1490,16 @@ Q7 scene → scene-manager Dubbo `selectSwitchTarget`；Q8 PARITY「mmorpg 待�
 FREEZING 时资产码为 27003；FREEZING 时销账回来不改账本、冻结快照与内存一致；交出提交后目标节点进场恢复为已应用的局销账；排空改派跳过战斗中的玩家）、
 `BattleUnfreezeRecoveryTest`（走真的 5.2 交出流程：原地解冻后重跑完整恢复、按锁重建并推 144）、`PrepareBattleTest` 的过期槽用例。运行证据见 scene-battle-spec 末尾的实现记录。
 robot `battle-settle` 第 11 步（PREPARING 时 63 指向另一节点 → 3023，取消后同一条 63 跨节点成功）已写进场景；写本节时还没有在双节点切片上跑过，切片上的结论见 scene-battle-spec 末尾的「最终验证」。
+
+
+## 2026-10-21 完整场景准入与 Inbox 原件闭环
+
+生产 Gate 在首次 `EnterScene` 固定原账号、归属修订和登录夺权 E。内部 `PlayerEnter` 新增 account(6)、owner_revision(7)、login_generation(8)，跨节点交接只推进 scene E，保留首次登录 E；客户端协议不变。Java 的 `RoleAdmissionIdentity.generation` 使用既有 SQL scene 持有代 E，与 C++ 的进程局部 generation 实现不同。node、instance、zone 来自本场景进程固定配置；scene、session 来自原进场请求，不从在线目录或当前 SQL owner 补字段。
+
+`SceneWorld` 生产装配传入固定 `SceneAdmissionSource`，完整原件与原账号经仓储传给 `PlayerStore.loadForScene(original, expectedAccount, timeout)`。同一 route/P 事务核原账号、修订、E、未释放及最终存盘围栏，并在既有 `player_final_save` 的 OPEN 行保存 `admission_proto`；没有第二张准入表。相同 E 重放必须保持完整原字节，新的 session/来源不能覆盖旧原件。纯世界旧构造器仅保留测试接缝，不具有 Inbox 消费权限。
+
+实体保存原不可变 PB；本节点频道排空改派和换图不重写准入原件。Inbox Fetch/Ack 均携带它，运输边界使用共同 `InboxCallContract` 与 `ServiceCallSignatures` 对完整请求签名，scene 密钥只从 `MMORPG_INTERNAL_SECRET_SCENE` 注入，至少 32 字节；服务端同 P 核原 OPEN/raw、原账号归属及条目身份。签名不能代替已登记的准入事实，缺原件时不发消费请求。
+
+加载中取消、替换、断链、接管和停机按原 PB/账号调用 `releaseSceneAdmission`；保持原 OPEN 收据，以 owner_released 阻止旧消费。不能把裸 E 当作另一来源 OPEN 的放弃权限，本地已有同 E 活动实例也不释放。在途同 E 的冲突重放不能替换原 PendingEnter。释放复用既有 StorageTask 有界重试、错误计数和停机诊断，不在失败后降级到旧接口。
+
+回归源码覆盖 Gate 缺账号/修订与交接保原件、仓储完整接口与来源拒绝、同 E session/在途冲突及取消、Fetch/Ack 原 PB 传递和完整签名篡改。此条为实现记录；本批未执行生成、编译、单测、真库或双区验收，均由主控统一门禁后执行。

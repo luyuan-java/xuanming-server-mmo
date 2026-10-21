@@ -46,6 +46,8 @@ class TeamSqlAuthorityTiDbTest {
             s.execute("CREATE TABLE match_global_watch_request(player_id BIGINT UNSIGNED,request_id VARCHAR(36),owner_account VARCHAR(191),owner_revision BIGINT,cancelled INT,original_add BLOB,PRIMARY KEY(player_id,request_id))");
             s.execute("CREATE TABLE guild_trial_launch_role(player_id BIGINT UNSIGNED,request_id BIGINT UNSIGNED,state INT)");
             s.execute("CREATE TABLE guild_trial_launch(request_id BIGINT UNSIGNED PRIMARY KEY,state INT)");
+            s.execute("CREATE TABLE guild_activity_slot(player_id BIGINT UNSIGNED PRIMARY KEY,lobby_id BIGINT UNSIGNED,expires_ms BIGINT UNSIGNED)");
+            s.execute("CREATE TABLE guild_trial_lobby(lobby_id BIGINT UNSIGNED PRIMARY KEY,state INT,view_proto MEDIUMBLOB,guild_id BIGINT UNSIGNED,activity_id INT UNSIGNED)");
         }
         new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
         try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));}
@@ -77,6 +79,17 @@ class TeamSqlAuthorityTiDbTest {
         var leave=id(LeaveTeamRequest.newBuilder().setExpectedTeamId(10).build());var result=bound(1,"LeaveTeam",leave).mutate(Bind.caller(1,10),Op.leave(1),SessionLoader.NONE,RuleConfig.DEFAULT,budget());assertEquals(Outcome.COMMITTED,result.outcome());
         var free=store.readFree(1,budget()).snapshot();assertEquals(0,free.playerTeamId());assertEquals(2,free.playerEpoch());assertNull(store.read(1,10,budget()).record());assertEquals(1,count("team_authority"));
         assertEquals(10,first.replay(budget()).commit().teamId());assertEquals(0,store.readFree(1,budget()).snapshot().playerTeamId());
+    }
+    @Test void 私有Trial大厅即使TTL已过也阻首次Team开局_终局后才可提交原launch(){
+        player(1);bound(1,"CreateTeam",id(CreateTeamRequest.getDefaultInstance())).mutate(Bind.create(1,10),Op.create(1,10,1),SessionLoader.NONE,RuleConfig.DEFAULT,budget());
+        var request=id(StartTeamMatchRequest.newBuilder().setExpectedTeamId(10).setBattleConfigId(7).setTargetSize(5).build());
+        var start=bound(1,"StartTeamMatch",request);var snap=start.read(1,10,budget()).snapshot();
+        sqlRun("INSERT INTO guild_activity_slot VALUES(1,91,1)");sqlRun("INSERT INTO guild_trial_lobby(lobby_id,state,guild_id,activity_id) VALUES(91,1,11,3)");
+        assertThrows(RuntimeException.class,()->start.commitMatchLock(snap,1,UUID.randomUUID().toString(),List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30));
+        assertEquals(0,count("team_launch"));assertEquals(0,count("team_launch_role"));assertTrue(store.read(1,10,budget()).record().getMatchLockToken().isEmpty());
+        sqlRun("UPDATE guild_trial_lobby SET state=4 WHERE lobby_id=91");
+        assertDoesNotThrow(()->start.commitMatchLock(snap,1,UUID.randomUUID().toString(),List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30));
+        assertEquals(1,count("team_launch"));
     }
     @Test void 原账号转让_ABA_冻结在任何队伍副作用前拒绝_旧UUID不能跨归属返回(){
         player(1);var request=id(CreateTeamRequest.getDefaultInstance());var old=bound(1,"CreateTeam",request);assertEquals(Outcome.COMMITTED,old.mutate(Bind.create(1,10),Op.create(1,10,1),SessionLoader.NONE,RuleConfig.DEFAULT,budget()).outcome());

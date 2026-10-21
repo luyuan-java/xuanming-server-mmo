@@ -2,6 +2,7 @@ package com.game.player.store;
 
 import com.game.player.store.state.PlayerState;
 import com.game.common.player.SceneAdmissionAuthority;
+import com.game.common.deadline.Deadline;
 import com.game.proto.common.base.RoleAdmissionIdentity;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.sql.SQLException;
@@ -582,6 +583,8 @@ public class PlayerStore {
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("历史归属恢复不得加入外层事务");
         }
+        timeoutSeconds(timeout);
+        Deadline pendingBudget = Deadline.after(Math.max(1, timeout.toMillis()));
         return withinDeadline(timeout, () -> {
             OwnerState owner = lockedOwner(playerId);
             if (owner == null) return new ClaimResult.NotFound();
@@ -594,7 +597,7 @@ public class PlayerStore {
             // 取锁可能等待；租约判断使用拿到锁之后的时刻，等于 now 保守地仍算持有。
             long now = clockMs.getAsLong();
             if (!owner.released() && owner.leaseUntil() >= now) return new ClaimResult.Held(current);
-            if (restoreHasPendingOriginals(playerId)) return new ClaimResult.Held(current);
+            if (restoreHasPendingOriginals(playerId, pendingBudget)) return new ClaimResult.Held(current);
             long next = Math.max(current, auditedOldEpochUpperBound) + 1;
             PlayerRow original=mapper.selectById(playerId);
             if(original==null||original.getOwnerRevision()<=0||original.getOwnerRevision()==Long.MAX_VALUE)throw new IllegalStateException("SQL账号修订无法安全恢复");
@@ -618,12 +621,12 @@ public class PlayerStore {
     }
 
     // 调用者已持路由/P；升账号修订前须保留并清结所有原合同，不能使旧同意/托管静默失权。
-    private boolean restoreHasPendingOriginals(long playerId) {
+    private boolean restoreHasPendingOriginals(long playerId, Deadline budget) {
         if (routeSource == null || !TransactionSynchronizationManager.isActualTransactionActive())
             throw new IllegalStateException("历史恢复缺少同库挂起域事务");
         var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(routeSource);
         try {
-            return RolePendingFence.blocked(connection,playerId) || RolePendingFence.economicBlocked(connection,playerId);
+            return RolePendingFence.blocked(connection,playerId,budget) || RolePendingFence.economicBlocked(connection,playerId,budget);
         } catch(java.sql.SQLException failure) {
             if(failure instanceof java.sql.SQLTimeoutException || failure.getErrorCode()==1205)
                 throw new QueryTimeoutException("历史恢复挂起域校验超时",failure);

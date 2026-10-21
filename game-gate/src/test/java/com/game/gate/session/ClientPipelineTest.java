@@ -185,8 +185,9 @@ class ClientPipelineTest {
         assertThat(((ClientTokenVerifyResponse) decode(ch.readOutbound())).getSuccess()).isTrue();
         ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(ClientRequest.newBuilder().setId(3).setMessageId(26).build(), ' ')));
         login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(com.game.api.proto.BindAccount.newBuilder().setAccount("fixture-original")))
                 .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
-                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5)))
+                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5).setOwnerRevision(1)))
                 .build());
         ch.runPendingTasks();
         MessageContent reply = (MessageContent) decode(ch.readOutbound());
@@ -246,8 +247,9 @@ class ClientPipelineTest {
         ((ByteBuf) ch.readOutbound()).release();
         ch.writeInbound(Unpooled.wrappedBuffer(robotFrame(ClientRequest.newBuilder().setId(1).setMessageId(26).build(), ' ')));
         login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder().setBindAccount(com.game.api.proto.BindAccount.newBuilder().setAccount("fixture-original")))
                 .addDirectives(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
-                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5)))
+                        .setPlayerId(42).setSceneNodeId(7).setSceneId(900).setOwnerEpoch(5).setOwnerRevision(1)))
                 .build());
         ch.runPendingTasks();
         assertThat(((MessageContent) decode(ch.readOutbound())).getMessageId()).isEqualTo(26);

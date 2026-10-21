@@ -22,6 +22,7 @@ import com.game.player.store.PlayerStore.FinalSaveReceipt;
 import com.game.player.store.PlayerStore.FinalSaveStatus;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
+import com.game.proto.common.base.RoleAdmissionIdentity;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.world.PlayerData;
 import com.game.scene.world.PlayerRepository.HandOffAttempts;
@@ -63,6 +64,46 @@ class StoragePlayerRepositoryTest {
     private final Executor logic = logicTasks::add;
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final SceneMetrics metrics = new SceneMetrics(meters);
+
+    private RoleAdmissionIdentity original() {
+        return RoleAdmissionIdentity.newBuilder().setPlayerId(1001).setOwnerEpoch(6).setOwnerRevision(3)
+                .setGeneration(6).setLoginGeneration(5).setSceneNodeId("9").setSceneInstanceId("scene-original")
+                .setSceneId(23).setZoneId(1).setSessionId(11).build();
+    }
+
+    @Test
+    void 生产加载原字节原账号传新准入_拒绝时不降级裸E加载() {
+        var admission = original();
+        PlayerRow row = new PlayerRow(); row.setPlayerId(1001); row.setOwnerEpoch(6);
+        when(store.loadForScene(eq(admission), eq(" 原账号 "), any()))
+                .thenReturn(Optional.of(new PlayerStore.SceneLoad(row, PlayerState.getDefaultInstance())), Optional.empty());
+        var repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics,
+                HandOffSettings.DEFAULT, "scene-original");
+        List<LoadResult> results = new ArrayList<>();
+        repository.load(admission, " 原账号 ", results::add);
+        assertThat(results).isEmpty();
+        logicTasks.removeFirst().run();
+        assertThat(results).singleElement().isInstanceOf(LoadResult.Found.class);
+        repository.load(admission, " 原账号 ", results::add);
+        logicTasks.removeFirst().run();
+        assertThat(results.getLast()).isInstanceOf(LoadResult.NotFound.class);
+        verify(store, times(2)).loadForScene(eq(admission), eq(" 原账号 "), any());
+        verify(store, never()).loadForScene(anyLong(), anyLong(), anyString(), any());
+    }
+
+    @Test
+    void 不同source在存储调用前拒绝_原准入放弃不降级裸E() {
+        var repository = new StoragePlayerRepository(store, new DirectExecutorService(), logic, metrics,
+                HandOffSettings.DEFAULT, "scene-original");
+        var admission = original();
+        assertThatThrownBy(() -> repository.load(admission.toBuilder().setSceneInstanceId("another-scene").build(),
+                " 原账号 ", ignored -> {})).isInstanceOf(SecurityException.class);
+        when(store.releaseSceneAdmission(eq(admission), eq(" 原账号 "), any())).thenReturn(true);
+        repository.release(admission, " 原账号 ");
+        verify(store).releaseSceneAdmission(eq(admission), eq(" 原账号 "), any());
+        verify(store, never()).releaseOwnership(anyLong(), anyLong());
+        verify(store, never()).loadForScene(any(RoleAdmissionIdentity.class), anyString(), any());
+    }
 
     @Test
     void 等级列超出int的无符号值饱和到int上限_进场再压回等级上限() {

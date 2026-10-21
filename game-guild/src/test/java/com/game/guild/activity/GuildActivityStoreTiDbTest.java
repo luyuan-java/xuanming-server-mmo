@@ -314,6 +314,18 @@ class GuildActivityStoreTiDbTest {
         assertThrows(SQLException.class,()->actor(PARTNER).respond(PARTNER,accept,NOW+2,budget()));assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch_role"));
         exec("DELETE FROM team_launch_role");exec("DELETE FROM team_launch");assertEquals(2,actor(PARTNER).respond(PARTNER,accept,NOW+3,budget()).getStateValue());assertEquals(1,count("SELECT COUNT(*) FROM guild_trial_launch"));
     }
+
+    @Test
+    void 首次私有邀请就与原Join票及Team开局互斥_拒绝后不留下半大厅()throws Exception{
+        exec("INSERT INTO match_global_ticket VALUES(?,1)",PARTNER);
+        assertThrows(SQLException.class,()->start(NOW));assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_lobby"));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_activity_slot"));
+        exec("UPDATE match_global_ticket SET state=4 WHERE player_id=?",PARTNER);
+        String id=UUID.randomUUID().toString();exec("INSERT INTO team_launch VALUES(?,4)",id);exec("INSERT INTO team_launch_role VALUES(?,?,1)",PARTNER,id);
+        assertThrows(SQLException.class,()->start(NOW));assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_lobby"));
+        exec("UPDATE team_launch_role SET state=2 WHERE request_id=?",id);
+        assertEquals(1,start(NOW).getStateValue());
+    }
     @Test
     void 私有同意只记录本人_最后接受不能借当前新主补齐旧同意() throws Exception {
         var lobby = start(NOW);

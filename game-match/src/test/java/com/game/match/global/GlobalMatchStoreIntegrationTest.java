@@ -30,6 +30,8 @@ class GlobalMatchStoreIntegrationTest {
             q.execute("CREATE TABLE team_launch_role(player_id BIGINT UNSIGNED NOT NULL,request_id VARCHAR(36) NOT NULL,state INT UNSIGNED NOT NULL,owner_account VARCHAR(255) NOT NULL DEFAULT '',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,PRIMARY KEY(player_id,request_id),INDEX by_request(request_id,player_id),INDEX by_state(player_id,state,request_id))");
             q.execute("CREATE TABLE guild_trial_launch(request_id BIGINT UNSIGNED PRIMARY KEY,battle_id BIGINT UNSIGNED NOT NULL DEFAULT 0,state INT UNSIGNED NOT NULL,original_proto MEDIUMBLOB,request_digest MEDIUMBLOB,created_ms BIGINT UNSIGNED NOT NULL DEFAULT 0)");
             q.execute("CREATE TABLE guild_trial_launch_role(player_id BIGINT UNSIGNED NOT NULL,request_id BIGINT UNSIGNED NOT NULL,account VARCHAR(255) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,state INT UNSIGNED NOT NULL,PRIMARY KEY(player_id,request_id),INDEX by_request(request_id,player_id),INDEX by_state(player_id,state,request_id))");
+            q.execute("CREATE TABLE guild_activity_slot(player_id BIGINT UNSIGNED PRIMARY KEY,lobby_id BIGINT UNSIGNED,expires_ms BIGINT UNSIGNED)");
+            q.execute("CREATE TABLE guild_trial_lobby(lobby_id BIGINT UNSIGNED PRIMARY KEY,state INT,view_proto MEDIUMBLOB,guild_id BIGINT UNSIGNED,activity_id INT UNSIGNED)");
             // 正式M16唯一资源；空隔离库显式种原件，不能用缺表旁路。
             new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(data);
             com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),List.of(1,2));
@@ -38,6 +40,51 @@ class GlobalMatchStoreIntegrationTest {
         store=new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret()));
     }
     @AfterEach void close()throws Exception{if(data!=null)data.close();if(database!=null)try(var c=DriverManager.getConnection("jdbc:mysql://127.0.0.1:4000/","root","");var s=c.createStatement()){s.execute("DROP DATABASE `"+database+"`");}}
+
+    private void execute(String sql,Object...args)throws Exception{
+        try(var c=data.getConnection();var q=c.prepareStatement(sql)){for(int i=0;i<args.length;i++)q.setObject(i+1,args[i]);q.executeUpdate();}
+    }
+    private boolean entryOccupied(long player,String ownTeam,long ownTrial)throws Exception{
+        try(var c=data.getConnection()){
+            c.setAutoCommit(false);com.game.common.player.PlayerRouteAuthority.lock(c,List.of(player),3);
+            try{return com.game.common.player.MatchEntryAuthority.occupied(c,player,ownTeam,ownTrial,3);}finally{c.rollback();}
+        }
+    }
+    @Test void expiredTrialSlotStillBlocksJoinUntilRealLobbyTerminal_OrphanAndUnknownReject()throws Exception{
+        seedPlayer(1);execute("INSERT INTO guild_activity_slot VALUES(1,101,1)");
+        execute("INSERT INTO guild_trial_lobby(lobby_id,state,guild_id,activity_id) VALUES(101,1,11,3)");
+        assertTrue(entryOccupied(1,"",0));assertThrows(RuntimeException.class,()->join(1));
+        execute("UPDATE guild_trial_lobby SET state=99 WHERE lobby_id=101");assertTrue(entryOccupied(1,"",0));
+        execute("DELETE FROM guild_trial_lobby WHERE lobby_id=101");assertTrue(entryOccupied(1,"",0));
+        execute("INSERT INTO guild_trial_lobby(lobby_id,state,guild_id,activity_id) VALUES(101,4,11,3)");
+        assertFalse(entryOccupied(1,"",0));assertEquals(1,join(1).getState());
+    }
+    @Test void ownTrialExceptionRequiresPersistedOriginalAndExactRealLobbyScope()throws Exception{
+        seedPlayer(1);seedPlayer(2);
+        var original=com.game.proto.guild.GuildTrialLaunchOriginal.newBuilder().setRequestId(101).setGuildId(11).setActivityId(3)
+            .setPeriodKey(1).setGuildPeriodKey(1).setDungeonId(7).setInitiatorPlayerId(2).setCreatedMs(1)
+            .addRoster(com.game.proto.guild.GuildTrialRoleIdentity.newBuilder().setPlayerId(1).setAccount(actor(1).getAccount()).setOwnerRevision(1))
+            .addRoster(com.game.proto.guild.GuildTrialRoleIdentity.newBuilder().setPlayerId(2).setAccount(actor(2).getAccount()).setOwnerRevision(1)).build();
+        var view=com.game.proto.guild.GuildTrialLobbyView.newBuilder().setLobbyId(101).setInitiatorPlayerId(2)
+            .addMemberPlayerIds(2).addMemberPlayerIds(1).setStateValue(2).setExpireAtMs(1).build();
+        execute("INSERT INTO guild_activity_slot VALUES(1,101,1)");
+        execute("INSERT INTO guild_trial_lobby VALUES(101,2,?,11,3)",view.toByteArray());
+        assertThrows(SQLException.class,()->entryOccupied(1,"",101));
+        byte[] raw=original.toByteArray();execute("INSERT INTO guild_trial_launch(request_id,state,original_proto,request_digest) VALUES(101,1,?,?)",raw,java.security.MessageDigest.getInstance("SHA-256").digest(raw));
+        assertFalse(entryOccupied(1,"",101));assertTrue(entryOccupied(1,"",102));
+        execute("UPDATE guild_trial_lobby SET guild_id=12 WHERE lobby_id=101");assertTrue(entryOccupied(1,"",101));
+        execute("UPDATE guild_trial_lobby SET guild_id=11,view_proto=? WHERE lobby_id=101",view.toBuilder().addMemberPlayerIds(3).build().toByteArray());assertTrue(entryOccupied(1,"",101));
+        execute("UPDATE guild_trial_lobby SET view_proto=?,state=4 WHERE lobby_id=101",view.toBuilder().setStateValue(4).build().toByteArray());assertTrue(entryOccupied(1,"",101));
+    }
+    @Test void parentTeamTerminalAloneDoesNotReleaseActiveRole_OnlyCompleteKnownPair()throws Exception{
+        seedPlayer(1);String id=UUID.randomUUID().toString();execute("INSERT INTO team_launch(request_id,state) VALUES(?,4)",id);
+        execute("INSERT INTO team_launch_role(player_id,request_id,state) VALUES(1,?,1)",id);
+        assertTrue(entryOccupied(1,"",0));assertTrue(entryOccupied(1,id,0));
+        execute("UPDATE team_launch_role SET state=2");assertFalse(entryOccupied(1,"",0));
+        execute("UPDATE team_launch SET state=5");assertFalse(entryOccupied(1,"",0));
+        execute("UPDATE team_launch SET state=99");assertTrue(entryOccupied(1,"",0));
+        execute("DELETE FROM team_launch");assertTrue(entryOccupied(1,"",0));
+    }
     private GlobalTicketRow join(long player)throws Exception{
         return join(player,1,Map.of(1,30));
     }
@@ -485,8 +532,22 @@ class GlobalMatchStoreIntegrationTest {
             q.executeUpdate("INSERT INTO guild_trial_launch(request_id,state) VALUES(5110,1)");q.executeUpdate("INSERT INTO guild_trial_launch_role(player_id,request_id,account,owner_revision,state) VALUES(5111,5110,'account-5111',1,1)");
         }
         assertFalse(sql.begin(actor(5111),watchRequest(5119),budget()).original().getResponsePayload().isEmpty());assertThrows(RuntimeException.class,()->store.prepareJoin(actor(5111),joinRequest(5111),2,1,150000,"s"));
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE guild_trial_launch_role SET state=2 WHERE player_id=5111");}
+        try(var c=data.getConnection();var q=c.createStatement()){
+            // 正规终局同时提交父CLOSED和角色CLOSED；只有子投影2不能掩盖仍PREPARED的父原件。
+            c.setAutoCommit(false);q.executeUpdate("UPDATE guild_trial_launch SET state=3 WHERE request_id=5110");
+            q.executeUpdate("UPDATE guild_trial_launch_role SET state=2 WHERE player_id=5111");c.commit();
+        }
         assertDoesNotThrow(()->store.prepareJoin(actor(5111),joinRequest(5111),2,1,150000,"s"));
+    }
+
+    @Test void 私有历练大厅即使TTL已过仍阻新Watch与Join_只有真实终局放行()throws Exception{
+        var ticket=join(5121);store.cancel(actor(5121),ticket.getTicket(),ticket.getRequestId());
+        execute("INSERT INTO guild_activity_slot VALUES(5121,5120,1)");
+        execute("INSERT INTO guild_trial_lobby(lobby_id,state,guild_id,activity_id) VALUES(5120,1,11,3)");
+        assertFalse(watches().begin(actor(5121),watchRequest(5129),budget()).original().getResponsePayload().isEmpty());
+        assertThrows(RuntimeException.class,()->store.prepareJoin(actor(5121),joinRequest(5121),2,1,150000,"s"));
+        execute("UPDATE guild_trial_lobby SET state=4 WHERE lobby_id=5120");
+        assertDoesNotThrow(()->store.prepareJoin(actor(5121),joinRequest(5121),2,1,150000,"s"));
     }
     @Test void Team首次Match网络原件跨重试固定_换新profile只能安全终结原unit()throws Exception {
         var group=party(5200,5201,5202);var first=store.prepareTeam(group.key(),group.original().toByteString(),group.members(),GlobalFormationRow.getDefaultInstance());
