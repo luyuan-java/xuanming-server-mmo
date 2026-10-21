@@ -30,6 +30,9 @@ import org.slf4j.LoggerFactory;
  *   <li><b>审批通过在锁住 A(G,p) 之后才插 M(G,p)</b>（guild_manage_repo.go:2065-2081）：过期 / 跨区 / 1062 分支都要「删掉这条申请并提交」。</li>
  * </ul>
  * 同表多行按主键<b>无符号</b>升序逐行取锁（{@link Long#compareUnsigned}——有符号比较会让 ≥ 2^63 的 id 与 MySQL 主键顺序相反，推演失效）。
+ * 角色转移互锁增加真正的 player 主表首锁（不同于经济协议的周期 P 表）：客户端原会话先锁本人，审批加入先将本人和目标按无符号升序全部取锁，
+ * 再进入上述 G/S/M/A 次序。建帮和审批的成员 INSERT 不能只靠远端预检；提交时仍在同一 player 锁内拒绝冻结。
+ * 退帮、踢人和解散不在持 G 后追加别人的 player 锁；它们只解除成员约束，因而不会与冻结的 player→S 顺序成环。
  * 锁定读 / UPDATE / DELETE 只做完整主键等值的点操作：按二级条件找行先普通读（RC 语句级快照，不加锁）取候选主键、排序后逐行点锁 / 点删，
  * WHERE 带原条件作提交点复核，影响 0 行即跳过。guild_member 的锁定 SELECT / UPDATE 一律 {@code FORCE INDEX (PRIMARY)}
  * （单表 DELETE 不收索引提示，由 EXPLAIN 回归钉住它走 PRIMARY）。插或删成员行的事务（建帮、审批通过、踢人、退帮、解散）都先持有该玩家的
@@ -161,14 +164,23 @@ public final class JdbcGuildStore implements GuildStore {
 
     private final GuildTx tx;
     private final GuildTxHooks hooks;
+    @FunctionalInterface interface RoleMembershipGuard { boolean lockAvailable(GuildJdbc sql, long player) throws SQLException; }
+    private final RoleMembershipGuard roleMembershipGuard;
 
     /**
      * @param tx    事务基座（连接、语句超时上限、指标钩子都在它里面）
      * @param hooks 4.5 / 4.6 的事务钩子；4.4 传 {@link GuildTxHooks#NONE}
      */
     public JdbcGuildStore(GuildTx tx, GuildTxHooks hooks) {
+        this(tx, hooks, JdbcGuildStore::lockRoleForMembership);
+    }
+    JdbcGuildStore(GuildTx tx, GuildTxHooks hooks, RoleMembershipGuard roleMembershipGuard) {
         this.tx = Objects.requireNonNull(tx, "tx");
         this.hooks = Objects.requireNonNull(hooks, "hooks");
+        this.roleMembershipGuard = Objects.requireNonNull(roleMembershipGuard);
+    }
+    @Override public JdbcGuildStore forActor(com.game.api.proto.SessionContext actor) {
+        return new JdbcGuildStore(tx.forActor(actor), hooks, roleMembershipGuard);
     }
 
     // ================================================================ 建帮
@@ -196,7 +208,8 @@ public final class JdbcGuildStore implements GuildStore {
             return TxOutcome.reject(ensure);
         }
         return tx.run(GuildTxOp.CREATE, deadline, t -> {
-            // 全局插入守卫：事务第一把锁，状态行表内 0 最小，排在建帮者的状态行之前
+            if (!roleMembershipGuard.lockAvailable(t, leader.playerId())) return TxOutcome.reject(GuildReject.WRITE_CONFLICT);
+            // 已取player首锁；全局插入守卫是状态表第一把锁，0最小，排在建帮者状态行之前。
             lockGlobalInsertGuard(t);
             // 与「审批通过」抢同一个玩家：两者都要给他插成员行，由这把行锁串行
             lockPlayerState(t, leader.playerId());
@@ -506,7 +519,8 @@ public final class JdbcGuildStore implements GuildStore {
                 return TxOutcome.reject(ensure);
             }
         }
-        return tx.run(GuildTxOp.REVIEW, deadline, t -> {
+        return (approve ? tx.withMembershipPlayer(applicantId) : tx).run(GuildTxOp.REVIEW, deadline, t -> {
+            if (approve && !roleMembershipGuard.lockAvailable(t, applicantId)) return TxOutcome.reject(GuildReject.WRITE_CONFLICT);
             GuildRow guild = lockGuildRow(t, guildId);
             if (guild == null) {
                 return TxOutcome.reject(GuildReject.GUILD_GONE);
@@ -791,6 +805,12 @@ public final class JdbcGuildStore implements GuildStore {
     }
 
     /** M1：点锁一行成员，返回权威 role；行不存在返回 null（RC 下未命中不加锁）。 */
+    /** 新增成员取player→G→S→M；移除成员只持原actor首锁，不在G后追加目标player，无逆向等待环。 */
+    private static boolean lockRoleForMembership(GuildJdbc t, long playerId) throws SQLException {
+        Long listing = t.one("SELECT trade_listing_id FROM player WHERE player_id=? FOR UPDATE",
+            rs -> GuildJdbc.u64(rs, 1), playerId);
+        return listing != null && listing == 0;
+    }
     private static Integer lockMemberRole(GuildJdbc t, long guildId, long playerId) throws SQLException {
         return t.one(LOCK_MEMBER_ROLE, rs -> GuildJdbc.u32(rs, 1), guildId, playerId);
     }

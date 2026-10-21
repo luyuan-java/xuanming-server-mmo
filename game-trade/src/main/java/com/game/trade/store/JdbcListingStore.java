@@ -281,8 +281,13 @@ public final class JdbcListingStore implements ListingStore {
     }
 
     private int update(String op, Deadline bound, Stmt stmt) throws SQLException {
-        try (Connection c = acquire(op, bound); PreparedStatement ps = prepare(c, op, stmt, bound, false)) {
-            return ps.executeUpdate();
+        try (Connection c = acquire(op, bound)) {
+            c.setAutoCommit(false);
+            try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,(int)Math.max(1,Math.min(3,(bound.remainingMillis()+999)/1000)),true);
+                int changed;try(PreparedStatement ps=prepare(c,op,stmt,bound,false)){changed=ps.executeUpdate();}
+                if(bound.expired())throw new BudgetExpired(op);c.commit();return changed;
+            }catch(SQLException|RuntimeException failure){try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
         }
     }
 

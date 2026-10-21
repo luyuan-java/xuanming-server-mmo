@@ -29,10 +29,15 @@ import com.game.guild.store.pb.GuildAssetOpStatus;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.contracts.kafka.BattleResultTeam;
 import com.game.proto.guild.GuildTrialLobbyView;
+import com.game.proto.guild.GuildTrialLobbyConsent;
+import com.game.proto.guild.GuildTrialLaunchOriginal;
 import com.game.proto.guild.RespondGuildTrialInviteRequest;
 import com.game.proto.guild.StartGuildTrialRequest;
 import com.game.proto.match.MatchMode;
 import com.game.proto.match.StartActivityBattleResponse;
+import com.game.proto.match.CancelActivityBattleResponse;
+import com.game.discovery.serviceauth.ServiceCallSignatures;
+import java.io.ByteArrayInputStream;
 import com.game.table.ConfigTables;
 import com.game.table.GuildActivityTable;
 import com.game.table.GuildRuleTable;
@@ -103,12 +108,21 @@ class GuildActivityStoreTiDbTest {
                      TrialLobbyRow.getDefaultInstance(), TrialBattleRow.getDefaultInstance(), ActivityRewardRow.getDefaultInstance(),
                      ActivityPoisonRow.getDefaultInstance()))
             registry.register(prototype);
+        ActivityTables.registerTrialAuthority(registry);
         try (var first = pool.getConnection(); var second = pool.getConnection()) {
             StrongTiDbConnectionPolicy.verify(first, true);
             StrongTiDbConnectionPolicy.verify(second, true);
             first.setNetworkTimeout(Runnable::run, 60_000);
             registry.syncAll(first);
+            try (var statement = first.createStatement()) {
+                statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 17)");
+                statement.execute("CREATE TABLE match_global_ticket(player_id BIGINT UNSIGNED PRIMARY KEY,state INT)");
+                statement.execute("CREATE TABLE team_launch(request_id VARCHAR(36) PRIMARY KEY,state INT)");
+                statement.execute("CREATE TABLE team_launch_role(player_id BIGINT UNSIGNED,request_id VARCHAR(36),state INT)");
+            }
         }
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
+        try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(17));}
         jdbc = new AuthorityJdbc(pool);
         ids = new AtomicLong(10_000);
         tables = mock(ConfigTables.class, RETURNS_DEEP_STUBS);
@@ -183,20 +197,25 @@ class GuildActivityStoreTiDbTest {
     }
 
     private void seedMember(long guild, long player) throws SQLException {
+        exec("INSERT IGNORE INTO player(player_id,account,owner_revision) VALUES(?,?,7)",player,"account-"+Long.toUnsignedString(player));
         exec("INSERT INTO guild_member(guild_id,player_id,role,join_time_ms,last_active_ms,contribution_total,contribution_balance)"
                         + " VALUES(?,?,0,?,?,0,0)",
                 guild, player, NOW - 30 * DAY, NOW - 30 * DAY);
     }
 
+    private GuildActivityStore actor(long player) {
+        return store.forActor(com.game.api.proto.SessionContext.newBuilder().setPlayerId(player)
+                .setAccount("account-"+Long.toUnsignedString(player)).setOwnerRevision(7).build());
+    }
     private GuildTrialLobbyView start(long at) throws SQLException {
-        return store.start(PLAYER,
+        return actor(PLAYER).start(PLAYER,
                 StartGuildTrialRequest.newBuilder().setActivityId(TRIAL).addMemberPlayerIds(PLAYER).addMemberPlayerIds(PARTNER).build(), at,
                 budget());
     }
 
     private GuildActivityStore.Launch readyLaunch(long at) throws SQLException {
         var lobby = start(at);
-        store.respond(PARTNER, RespondGuildTrialInviteRequest.newBuilder().setLobbyId(lobby.getLobbyId()).setAccept(true).build(), at + 1,
+        actor(PARTNER).respond(PARTNER, RespondGuildTrialInviteRequest.newBuilder().setLobbyId(lobby.getLobbyId()).setAccept(true).build(), at + 1,
                 budget());
         var launch = store.leaseLaunch(lobby.getLobbyId(), at + 2, budget());
         assertNotNull(launch);
@@ -274,8 +293,8 @@ class GuildActivityStoreTiDbTest {
         var lobby = start(NOW);
         assertEquals(lobby.getLobbyId(), start(NOW + 1).getLobbyId());
         var accept = RespondGuildTrialInviteRequest.newBuilder().setLobbyId(lobby.getLobbyId()).setAccept(true).build();
-        var first = store.respond(PARTNER, accept, NOW + 2, budget());
-        var duplicate = store.respond(PARTNER, accept, NOW + 3, budget());
+        var first = actor(PARTNER).respond(PARTNER, accept, NOW + 2, budget());
+        var duplicate = actor(PARTNER).respond(PARTNER, accept, NOW + 3, budget());
         assertEquals(first, duplicate);
         assertEquals(2, first.getStateValue());
         assertEquals(2, first.getAcceptedPlayerIdsCount());
@@ -283,6 +302,181 @@ class GuildActivityStoreTiDbTest {
         var launch = store.leaseLaunch(lobby.getLobbyId(), NOW + 4, budget());
         assertEquals(lobby.getLobbyId(), launch.request().getRequestId());
         assertEquals(List.of(PLAYER, PARTNER), launch.request().getMemberPlayerIdsList());
+    }
+
+    @Test
+    void 已有Join票或Team原开局时最后同意不得提交半个Trial原件()throws Exception{
+        var lobby=start(NOW);byte[] original=bytes("SELECT request_proto FROM guild_trial_lobby WHERE lobby_id=?",lobby.getLobbyId());
+        var accept=RespondGuildTrialInviteRequest.newBuilder().setLobbyId(lobby.getLobbyId()).setAccept(true).build();
+        exec("INSERT INTO match_global_ticket VALUES(?,1)",PARTNER);
+        assertThrows(SQLException.class,()->actor(PARTNER).respond(PARTNER,accept,NOW+1,budget()));assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch"));assertArrayEquals(original,bytes("SELECT request_proto FROM guild_trial_lobby WHERE lobby_id=?",lobby.getLobbyId()));
+        exec("UPDATE match_global_ticket SET state=4 WHERE player_id=?",PARTNER);String request=UUID.randomUUID().toString();exec("INSERT INTO team_launch VALUES(?,1)",request);exec("INSERT INTO team_launch_role VALUES(?,?,1)",PARTNER,request);
+        assertThrows(SQLException.class,()->actor(PARTNER).respond(PARTNER,accept,NOW+2,budget()));assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch_role"));
+        exec("DELETE FROM team_launch_role");exec("DELETE FROM team_launch");assertEquals(2,actor(PARTNER).respond(PARTNER,accept,NOW+3,budget()).getStateValue());assertEquals(1,count("SELECT COUNT(*) FROM guild_trial_launch"));
+    }
+    @Test
+    void 私有同意只记录本人_最后接受不能借当前新主补齐旧同意() throws Exception {
+        var lobby = start(NOW);
+        byte[] raw = bytes("SELECT request_proto FROM guild_trial_lobby WHERE lobby_id=?",lobby.getLobbyId());
+        try (var input = new ByteArrayInputStream(raw)) {
+            var consent = GuildTrialLobbyConsent.parseDelimitedFrom(input);
+            assertEquals(lobby.getLobbyId(),consent.getLobbyId());
+            assertEquals(PLAYER,consent.getIdentity().getPlayerId());
+            assertEquals("account-7",consent.getIdentity().getAccount());
+            assertNull(GuildTrialLobbyConsent.parseDelimitedFrom(input));
+        }
+        // PENDING尚无ACTIVE；模拟先于最后同意提交的合法归属修订变化，原会话同意不得被补齐。
+        exec("UPDATE player SET owner_revision=8 WHERE player_id=?",PLAYER);
+        assertThrows(SecurityException.class,() -> actor(PARTNER).respond(PARTNER,RespondGuildTrialInviteRequest.newBuilder()
+                .setLobbyId(lobby.getLobbyId()).setAccept(true).build(),NOW+1,budget()));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch"));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch_role"));
+        assertArrayEquals(raw,bytes("SELECT request_proto FROM guild_trial_lobby WHERE lobby_id=?",lobby.getLobbyId()));
+    }
+
+    @Test
+    void 冻结先提交则最后同意回滚_已接受者同账号新修订也不能替换旧同意() throws Exception {
+        seedMember(GUILD,19);
+        var lobby = actor(PLAYER).start(PLAYER,StartGuildTrialRequest.newBuilder().setActivityId(TRIAL)
+                .addMemberPlayerIds(PLAYER).addMemberPlayerIds(PARTNER).addMemberPlayerIds(19).build(),NOW,budget());
+        var accept = RespondGuildTrialInviteRequest.newBuilder().setLobbyId(lobby.getLobbyId()).setAccept(true).build();
+        actor(PARTNER).respond(PARTNER,accept,NOW+1,budget());
+        exec("UPDATE player SET trade_listing_id=777 WHERE player_id=?",PLAYER);
+        assertThrows(SecurityException.class,() -> actor(19).respond(19,accept,NOW+2,budget()));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch"));
+        exec("UPDATE player SET trade_listing_id=0 WHERE player_id=?",PLAYER);
+        exec("UPDATE player SET owner_revision=8 WHERE player_id=?",PARTNER);
+        var changed = store.forActor(com.game.api.proto.SessionContext.newBuilder().setPlayerId(PARTNER)
+                .setAccount("account-8").setOwnerRevision(8).build());
+        assertThrows(SecurityException.class,() -> changed.respond(PARTNER,accept,NOW+3,budget()));
+        assertThrows(SecurityException.class,() -> actor(19).respond(19,accept,NOW+4,budget()));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch"));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_launch_role"));
+    }
+
+    @Test
+    void PREPARED房间丢失从永久原件恢复_结算也不依赖房间投影() throws Exception {
+        var first = readyLaunch(NOW);
+        byte[] raw = bytes("SELECT original_proto FROM guild_trial_launch WHERE request_id=?",first.lobby());
+        var original = GuildTrialLaunchOriginal.parseFrom(raw);
+        assertEquals("account-7",original.getRoster(0).getAccount());
+        assertEquals(7,original.getRoster(0).getOwnerRevision());
+        exec("DELETE FROM guild_trial_lobby WHERE lobby_id=?",first.lobby());
+        assertTrue(store.launches(budget(),NOW+10).contains(first.lobby()));
+        var rebuilt = new GuildActivityStore(jdbc,tables,ids::incrementAndGet).leaseLaunch(first.lobby(),NOW+10,budget());
+        assertNotNull(rebuilt); assertEquals(first.request(),rebuilt.request());
+        assertArrayEquals(raw,bytes("SELECT original_proto FROM guild_trial_launch WHERE request_id=?",first.lobby()));
+        store.completeLaunch(rebuilt,StartActivityBattleResponse.newBuilder().setBattleId(9101).build(),NOW+11,budget());
+        exec("DELETE FROM guild_trial_lobby WHERE lobby_id=?",first.lobby());
+        store.settle(result(rebuilt,9101,NOW+12),NOW+13,budget());
+        assertEquals(3,count("SELECT state FROM guild_trial_launch WHERE request_id=?",first.lobby()));
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_activity_reward_owed WHERE status=0"));
+    }
+
+    private GuildTrialCancellation.Verified cancelProof(GuildActivityStore.Launch launch,long battle,int state,boolean cancelled) {
+        String secret = "guild-trial-tidb-fixture-000000000000000001";
+        var signer = new GuildTrialCancellation(secret,() -> NOW);
+        var request = signer.request(launch.request());
+        var response = ServiceCallSignatures.sign(GuildTrialCancellation.METHOD + "/reply",CancelActivityBattleResponse.newBuilder()
+                .setBattleId(battle).setFormationState(state).setRequestCancelled(cancelled)
+                .setRequestDigest(ServiceCallSignatures.digest(request)).build(),"match",secret,NOW);
+        return signer.verify(request,response);
+    }
+
+    @Test
+    void 普通拒答和EXPIRED不清ACTIVE_真实签名安全中止同事务终结投影() throws Exception {
+        var launch = readyLaunch(NOW);
+        store.completeLaunch(launch,StartActivityBattleResponse.newBuilder().setRejectValue(3).build(),NOW+10,budget());
+        assertEquals(1,count("SELECT state FROM guild_trial_launch WHERE request_id=?",launch.lobby()));
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=1"));
+        store.completeCancellation(launch,cancelProof(launch,9102,3,false),NOW+11,budget());
+        store.expireBattle(9102,NOW+3_600_012,budget());
+        assertEquals(3,count("SELECT state FROM guild_trial_battle WHERE battle_id=9102"));
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=1"));
+        var proof = cancelProof(launch,9102,5,false);
+        store.completeCancellation(launch,proof,NOW+3_600_013,budget());
+        assertEquals(3,count("SELECT state FROM guild_trial_launch WHERE request_id=?",launch.lobby()));
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
+        assertArrayEquals(proof.response().toByteArray(),bytes("SELECT cancel_receipt FROM guild_trial_launch WHERE request_id=?",launch.lobby()));
+        store.completeCancellation(launch,proof,NOW+3_600_014,budget());
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+    }
+
+    @Test
+    void 签名未发出墓碑终结PREPARED_迟到成功回执不得复活() throws Exception {
+        var launch = readyLaunch(NOW);
+        store.completeCancellation(launch,cancelProof(launch,0,0,true),NOW+3,budget());
+        store.completeLaunch(launch,StartActivityBattleResponse.newBuilder().setBattleId(9103).build(),NOW+4,budget());
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_trial_battle"));
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
+        assertNull(store.leaseLaunch(launch.lobby(),NOW+2000,budget()));
+    }
+
+    @Test
+    void POISON终结原件但不发奖励_终结后欠发物与真实op各自继续保护() throws Exception {
+        var launch = readyLaunch(NOW);
+        store.completeLaunch(launch,StartActivityBattleResponse.newBuilder().setBattleId(9104).build(),NOW+3,budget());
+        store.poisonBattle(9104,"fixture",1,8,new byte[]{1},NOW+4,budget());
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+        assertEquals(4,count("SELECT state FROM guild_trial_battle WHERE battle_id=9104"));
+        // 另一局的成功结算产生owed；冻结先提交时后台不得将它变成发给新主的op。
+        var next = readyLaunch(NOW+20_000);
+        store.completeLaunch(next,StartActivityBattleResponse.newBuilder().setBattleId(9105).build(),NOW+20_003,budget());
+        store.settle(result(next,9105,NOW+20_004),NOW+20_005,budget());
+        exec("UPDATE player SET trade_listing_id=999 WHERE player_id=?",PLAYER);
+        assertEquals(1,store.enqueueRewards(NOW+20_006,budget()));
+        assertEquals(1,count("SELECT COUNT(*) FROM guild_activity_reward_owed WHERE player_id=? AND status=0",PLAYER));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_asset_op WHERE player_id=?",PLAYER));
+        exec("UPDATE player SET trade_listing_id=0 WHERE player_id=?",PLAYER);
+        assertEquals(1,store.enqueueRewards(NOW+20_007,budget()));
+        assertEquals(1,count("SELECT COUNT(*) FROM guild_asset_op WHERE player_id=? AND status=1",PLAYER));
+    }
+
+    @Test
+    void 单个失败PREPARED推进排序水位_不饿死后面的永久原件() throws Exception {
+        var first = readyLaunch(NOW);
+        seedMember(GUILD,19); seedMember(GUILD,20);
+        var second = actor(19).start(19,StartGuildTrialRequest.newBuilder().setActivityId(TRIAL)
+                .addMemberPlayerIds(19).addMemberPlayerIds(20).build(),NOW+1,budget());
+        actor(20).respond(20,RespondGuildTrialInviteRequest.newBuilder().setLobbyId(second.getLobbyId()).setAccept(true).build(),NOW+2,budget());
+        store.deferLaunch(first.lobby(),NOW+100,budget());
+        assertEquals(second.getLobbyId(),store.launches(budget(),NOW+2000).getFirst());
+    }
+
+    @Test
+    void POISON后角色修订变化不阻塞重复毒消息归档_原件和终局投影保持() throws Exception {
+        var launch = readyLaunch(NOW);
+        store.completeLaunch(launch,StartActivityBattleResponse.newBuilder().setBattleId(9106).build(),NOW+3,budget());
+        store.poisonBattle(9106,"fixture",1,8,new byte[]{1},NOW+4,budget());
+        exec("UPDATE player SET owner_revision=8 WHERE player_id=?",PLAYER);
+        var event = result(launch,9106,NOW+5);
+        assertThrows(GuildActivityStore.InvalidResult.class,() -> store.settle(event,NOW+6,budget()));
+        store.poisonBattle(9106,"fixture",1,9,event.toByteArray(),NOW+7,budget());
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_activity_result_poison"));
+        assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+    }
+
+    @Test
+    void 冻结玩家的百条owed只退避_后续玩家仍有入队机会() throws Exception {
+        store.participate(PLAYER,GUILD,1,LANTERN,0,NOW,budget());
+        byte[] payload = bytes("SELECT payload FROM guild_activity_reward_owed WHERE player_id=?",PLAYER);
+        jdbc.tx(budget(),s -> {
+            for (int index=2;index<=100;index++)
+                s.update("INSERT INTO guild_activity_reward_owed(reward_id,player_id,guild_id,activity_id,period_key,payload,status,op_id,created_ms,next_attempt_ms) VALUES(?,?,?,?,?,?,0,0,?,0)",
+                        10000L+index,PLAYER,GUILD,LANTERN,GameDay.dayKey(NOW),payload,NOW);
+            return null;
+        });
+        ids.set(2_000_000);
+        store.participate(PARTNER,GUILD,1,LANTERN,0,NOW,budget());
+        exec("UPDATE player SET trade_listing_id=999 WHERE player_id=?",PLAYER);
+        assertEquals(0,store.enqueueRewards(NOW,budget()));
+        assertEquals(1,store.enqueueRewards(NOW,budget()));
+        assertEquals(100,count("SELECT COUNT(*) FROM guild_activity_reward_owed WHERE player_id=? AND status=0",PLAYER));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_asset_op WHERE player_id=?",PLAYER));
+        assertEquals(1,count("SELECT COUNT(*) FROM guild_asset_op WHERE player_id=?",PARTNER));
     }
 
     @Test
@@ -393,18 +587,9 @@ class GuildActivityStoreTiDbTest {
         var meters = new SimpleMeterRegistry();
         var bucket = redis.<byte[]>getBucket(keys.battleActivityResult(9011), ByteArrayCodec.INSTANCE);
         try {
-            var launch = readyLaunch(NOW);
+            var launch = readyLaunch(System.currentTimeMillis());
             // runtime 使用真实当前时钟；活动日来自该时钟，避免合法战报被保留窗口隔离。
             long current = System.currentTimeMillis();
-            var context = launch.request()
-                                  .getActivityContext()
-                                  .toBuilder()
-                                  .setPeriodKey(GameDay.dayKey(current))
-                                  .setGuildPeriodKey(GameDay.dayKey(current))
-                                  .build();
-            var original = launch.request().toBuilder().setActivityContext(context).build();
-            exec("UPDATE guild_trial_lobby SET request_proto=? WHERE lobby_id=?", original.toByteArray(), launch.lobby());
-            launch = new GuildActivityStore.Launch(launch.lobby(), launch.guild(), launch.token(), original);
             var event = result(launch, 9011, current);
             bucket.set(event.toByteArray());
             var runtime = new GuildActivityRuntime(

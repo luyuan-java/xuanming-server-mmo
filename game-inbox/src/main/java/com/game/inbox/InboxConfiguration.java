@@ -5,6 +5,8 @@ import com.game.api.SceneInboxService;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.api.rpc.NodeRpcClients;
 import com.game.common.token.DubboCallAuth;
+import com.game.api.inbox.InboxCallContract;
+import com.game.discovery.serviceauth.ServiceCallSignatures;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
@@ -138,7 +140,9 @@ public class InboxConfiguration {
         } else {
             log.info("[PlayerInbox] 入箱白名单 {}；每次入箱前核对线上 scene 节点都已开消费（写前门禁）", allowed);
         }
-        return new InboxStore(jdbc, registry, allowed, players, gate, notifier, metrics, System::currentTimeMillis);
+        String secret = System.getenv(InboxCallContract.SECRET_ENV);
+        ServiceCallSignatures signatures = new ServiceCallSignatures(java.util.Map.of(InboxCallContract.CALLER, secret == null ? "" : secret), System::currentTimeMillis);
+        return new InboxStore(jdbc, registry, allowed, players, gate, notifier, metrics, System::currentTimeMillis, signatures);
     }
 
     @Bean

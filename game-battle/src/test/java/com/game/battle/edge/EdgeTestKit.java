@@ -67,7 +67,7 @@ final class EdgeTestKit {
                                            long expireAtMs, int role) {
         ByteString payload = BattleTicketPayload.newBuilder()
                 .setBattleId(battleId).setPlayerId(playerId).setBattleNodeId(nodeId).setBattleInstanceId(instance)
-                .setExpireAtMs(expireAtMs).setRoleValue(role).build().toByteString();
+                .setExpireAtMs(expireAtMs).setRoleValue(role).setSpectatorOperationId(role==OBSERVER_ROLE?"11111111-1111-4111-8111-111111111111":"").build().toByteString();
         return signed(tickets, payload);
     }
 

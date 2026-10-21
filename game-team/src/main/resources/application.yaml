@@ -4,7 +4,7 @@
 #   GAME_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填，与 game-gate 一致；缺失即拒绝启动）
 #   GAME_MYSQL_PASSWORD      MySQL 密码（本机无密码的 root 可不设）
 #
-# 权威数据全部在 Redis（game:{team}:rec / info / player / invite），只读 game.player（展示资料与 home zone，不归本服所有）。
+# 权威为同一TiDB事务域的Team表与player；Redis仅presence、推送和可丢弃投影。
 # 整队开战（211）的预检、建票与 gather 调 game-match（game.dubbo.match-url）；game-match 不在时本进程照常启动，211 回 in-band 4030。
 spring:
   application:
@@ -16,8 +16,7 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 20s
   datasource:
-    # 只读 player 表：不建库（库由 game-player-store 维护）；socketTimeout 4 s ≤ 整请求预算之上的余量。
-    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000"
+    url: "${GAME_MYSQL_URL:jdbc:mysql://127.0.0.1:4000/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000}"
     username: ${GAME_MYSQL_USER:root}
     password: ${GAME_MYSQL_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -29,7 +28,7 @@ spring:
       validation-query: SELECT 1
       test-while-idle: true
       test-on-borrow: false
-      default-read-only: true
+      default-read-only: false
 
 # 管理端点：http://127.0.0.1:18109/actuator/health 与 /actuator/prometheus。
 server:
@@ -62,6 +61,7 @@ game:
     # 整队开战调 game-match（Dubbo group match：预检 / 建票 / 退票 / gather）。nacos profile 置空走注册中心。
     match-url: tri://127.0.0.1:20888
   team:
+    require-tidb: true
     # 缺省值同 mmorpg go/match（team-spec §6.11）；启动时校验 request-budget ∈ [500ms, 3500ms]。
     allow-cross-zone: false
     request-budget: 3500ms

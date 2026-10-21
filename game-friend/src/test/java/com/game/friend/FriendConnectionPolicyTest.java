@@ -16,7 +16,6 @@ import java.util.Set;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.PropertyPlaceholderAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -38,6 +37,14 @@ class FriendConnectionPolicyTest {
                             .hasStackTraceContaining("生产好友服务不得关闭 TiDB 权威门禁"));
         }
     }
+    @Test
+    void 仅RunMode生产_缺省或拼错模式均不得绕过强库门禁() {
+        for(String mode:List.of("prod","production","release","live","typo","")) {
+            var environment=new MockEnvironment().withProperty("game.run-mode",mode).withProperty("game.friend.require-tidb","false");
+            assertThatThrownBy(()->FriendConfiguration.friendConnectionPolicy(environment)).isInstanceOf(IllegalStateException.class);
+        }
+        assertThatThrownBy(()->FriendConfiguration.friendConnectionPolicy(new MockEnvironment())).isInstanceOf(IllegalStateException.class);
+    }
 
     @Test
     void 生产拒绝无法统一初始化的池_本地MySQL不注入TiDB语句() {
@@ -49,7 +56,7 @@ class FriendConnectionPolicyTest {
         assertThatThrownBy(() -> required.postProcessBeforeInitialization(initialized, "dataSource"))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("提前初始化");
         try (DruidDataSource local = new DruidDataSource()) {
-            assertThat(FriendConfiguration.friendConnectionPolicy(new MockEnvironment(), false)
+            assertThat(FriendConfiguration.friendConnectionPolicy(new MockEnvironment().withProperty("game.run-mode","dev"), false)
                     .postProcessBeforeInitialization(local, "dataSource"))
                     .isSameAs(local);
             assertThat(local.getConnectionInitSqls()).isNullOrEmpty();
@@ -156,7 +163,7 @@ class FriendConnectionPolicyTest {
                 .withConfiguration(AutoConfigurations.of(
                         PropertyPlaceholderAutoConfiguration.class, DruidDataSourceAutoConfigure.class))
                 .withUserConfiguration(PoolProbe.class)
-                .withPropertyValues("game.friend.require-tidb=" + requireTiDb,
+                .withPropertyValues("game.run-mode=test","game.friend.require-tidb=" + requireTiDb,
                         "spring.datasource.url=" + url, "spring.datasource.username=" + user(),
                         "spring.datasource.password=" + password(), "spring.datasource.druid.initial-size=1",
                         "spring.datasource.druid.min-idle=0", "spring.datasource.druid.max-active=3",
@@ -169,9 +176,8 @@ class FriendConnectionPolicyTest {
     @Configuration(proxyBeanMethods = false)
     static class PoolProbe {
         @Bean
-        static FriendConnectionPolicy policy(Environment environment,
-                @Value("${game.friend.require-tidb:false}") boolean requireTiDb) {
-            return FriendConfiguration.friendConnectionPolicy(environment, requireTiDb);
+        static FriendConnectionPolicy policy(Environment environment) {
+            return FriendConfiguration.friendConnectionPolicy(environment);
         }
     }
 }

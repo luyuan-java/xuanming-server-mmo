@@ -25,7 +25,9 @@ class IssueTicketTest {
     private final RoomHarness h = new RoomHarness();
 
     private IssueBattleTicketResponse issue(long battleId, long playerId) {
-        return h.service().issueBattleTicket(IssueBattleTicketRequest.newBuilder().setBattleId(battleId).setPlayerId(playerId).build());
+        var request=IssueBattleTicketRequest.newBuilder().setBattleId(battleId).setPlayerId(playerId);
+        var room=h.service().room(battleId);if(room!=null&&!room.isParticipant(playerId)&&room.isObserver(playerId))request.setSpectatorOperationId(room.observerOperations.get(playerId)).setTargetInstanceId(RoomHarness.INSTANCE);
+        return h.service().issueBattleTicket(request.build());
     }
 
     @Test
@@ -54,7 +56,7 @@ class IssueTicketTest {
     @Test
     void 观众补签得到观众票_两个名单都有时参战者优先() {
         h.create(h.pvp(8003, A, B));
-        h.service().addObserver(AddObserverRequest.newBuilder().setBattleId(8003).setObserverPlayerId(C)
+        h.addObserver(AddObserverRequest.newBuilder().setBattleId(8003).setObserverPlayerId(C)
                 .setRouting(RoomHarness.observerRouting(C, 900)).build());
 
         assertThat(issue(8003, C).getAssignment().getRole()).isEqualTo(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);

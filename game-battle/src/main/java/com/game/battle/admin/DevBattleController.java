@@ -14,6 +14,7 @@ import com.game.proto.DestroyBattleRequest;
 import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.RemoveObserverRequest;
+import com.game.proto.RemoveObserverResponse;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Parser;
 import jakarta.servlet.http.HttpServletRequest;
@@ -48,7 +49,7 @@ import org.springframework.web.bind.annotation.RestController;
  *   <tr><td>{@value #DESTROY}</td><td>{@code DestroyBattleRequest}</td><td>204</td></tr>
  *   <tr><td>{@value #ISSUE_TICKET}</td><td>{@code IssueBattleTicketRequest}</td><td>200 {@code IssueBattleTicketResponse}</td></tr>
  *   <tr><td>{@value #ADD_OBSERVER}</td><td>{@code AddObserverRequest}</td><td>200 {@code AddObserverResponse}</td></tr>
- *   <tr><td>{@value #REMOVE_OBSERVER}</td><td>{@code RemoveObserverRequest}</td><td>204</td></tr>
+ *   <tr><td>{@value #REMOVE_OBSERVER}</td><td>{@code RemoveObserverRequest}</td><td>200 {@code RemoveObserverResponse}</td></tr>
  * </table>
  *
  * <p>HTTP 状态：过滤器先判令牌（没配 503、错 401、缺操作人 400）；运行模式不是 dev / test → <b>403</b>，先于解析请求体；
@@ -177,9 +178,9 @@ public class DevBattleController {
         if (parsed.rejection() != null) {
             return parsed.rejection();
         }
-        Outcome<?> outcome = call(plane -> plane.removeObserver(parsed.request()));
-        audit(http, "dev-remove-observer", parsed.request().getBattleId(), outcome.failure() == null ? "ok" : "failed");
-        return outcome.failure() != null ? outcome.failure() : ResponseEntity.noContent().build();
+        Outcome<RemoveObserverResponse> outcome = call(plane -> plane.removeObserver(parsed.request()));
+        audit(http, "dev-remove-observer", parsed.request().getBattleId(), outcome.failure() == null ? "cancelled="+outcome.value().getCancelled() : "failed");
+        return outcome.failure() != null ? outcome.failure() : protobuf(outcome.value().toByteArray());
     }
 
     // ---------------------------------------------------------------- 内部

@@ -343,7 +343,7 @@ class ChallengeServiceTest {
         ChallengeInviteS2C invite = ChallengeInviteS2C.parseFrom(pushed.body());
         assertThat(invite.getChallengeId()).isEqualTo(challengeId);
         assertThat(invite.getChallengerId()).isEqualTo(A);
-        assertThat(invite.getChallengerName()).as("账号名（会话里已认证的账号）").isEqualTo("acc-1001");
+        assertThat(invite.getChallengerName()).as("公开资料缺失时留空，禁止泄露私有登录账号").isEmpty();
         assertThat(invite.getBattleConfigId()).as("不校验，原样带上").isEqualTo(0xFFFF_FFF0);
         assertThat(invite.getExpiresAtMs()).isEqualTo(clock.peekMs() + TTL_MS);
         assertThat(Math.abs(invite.getExpiresAtMs() - System.currentTimeMillis())).as("替身时钟离本机时钟很远：证明没用本机时钟")
@@ -354,6 +354,14 @@ class ChallengeServiceTest {
         assertThat(gather.plans).as("发起不冻结任何人、不开局").isEmpty();
         assertThat(count("invite", "ok")).isEqualTo(1);
         assertThat(pushed("156", "sent")).isEqualTo(1);
+    }
+
+    @Test
+    void 邀请通知只用公开角色名_不复用登录账号()throws Exception {
+        service.withPublicNames((player,deadline)->"公开角色名");
+        var reply=challenge(A,B,1);assertThat(reply.hasErrorMessage()).isFalse();
+        var invite=ChallengeInviteS2C.parseFrom(pushes.sent.get(0).body());
+        assertThat(invite.getChallengerName()).isEqualTo("公开角色名").isNotEqualTo(session(A).getAccount());
     }
 
     @Test

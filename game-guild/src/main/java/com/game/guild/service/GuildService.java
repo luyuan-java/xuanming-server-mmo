@@ -84,6 +84,9 @@ public final class GuildService {
     }
 
     // ================================================================ CreateGuild（15）
+    public GuildService forActor(com.game.api.proto.SessionContext actor) {
+        return new GuildService(store.forActor(actor), cache, access, views, ranks, pushes, guildIds, tables, clockMs);
+    }
 
     /**
      * 建帮（guild_logic.go:193-291；§3.2）。前置：帮名（14009，先于任何外部查询）→ 归属区（覆盖请求体 zone_id）→ 闸门（放在发号之前）→

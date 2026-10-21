@@ -54,6 +54,12 @@ public class ActivityConfiguration {
             StrongTiDbConnectionPolicy.verify(connection, require);
         }
         ActivityTables.sync(source);
+        try(var connection=source.getConnection();var statement=connection.createStatement()){
+            statement.setQueryTimeout(3);
+            try(var ignored=statement.executeQuery("SELECT player_id,state FROM match_global_ticket WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,request_id,state FROM team_launch_role WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT request_id,state FROM team_launch WHERE 1=0")){}
+        }
         return new Ready();
     }
     /** 结果主题由Match管理；帮会只核验实际元数据，不抢建主题或自动迁移副本。 */

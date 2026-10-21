@@ -9,6 +9,7 @@ import com.game.proto.Empty;
 import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.RemoveObserverRequest;
+import com.game.proto.RemoveObserverResponse;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -32,7 +33,7 @@ import java.util.concurrent.CompletableFuture;
  *   <li>future <b>异常完成</b> = 传输失败（超时、断连、调用方鉴权失败、节点逻辑线程拒绝投递），结局未知：createBattle 时调用方按「可能已建」处理
  *       （发一次幂等的 destroyBattle 再补偿，基线 {@code gather.go:357-377}）。</li>
  *   <li>其余四个方法：业务错误都在应答的 {@code error_message} 里，Dubbo 层恒成功（同基线 {@code node.cpp:127-209}）。
- *       destroyBattle / removeObserver 对不存在的房间 / 观众幂等成功。</li>
+ *       destroyBattle 对不存在的房间幂等；removeObserver 必须返回原UUID与固定实例的取消证明。</li>
  *   <li>{@code issueBattleTicket} 信任调用方填的 player_id（同基线 {@code pb_node:70-76}）；安全性来自调用方 MAC（{@code GAME_DUBBO_SECRET}）+ 内网隔离。
  *       1005 只表示「这局确实没了 / 不是成员」，调用方不得在别的失败上回 1005（客户端只把 1005 判为 BattleGone，§2.7）。</li>
  * </ul>
@@ -40,6 +41,8 @@ import java.util.concurrent.CompletableFuture;
  * <p>调用方建议超时：createBattle 5 s；其余 3 s（基线 {@code gather.go:25-30}、{@code rbt.go:22}）。
  */
 public interface BattleNodeService {
+    /** 仅当前固定实例的观察；ABSENT还须原Remove取得取消证明，UNKNOWN不能当作不存在。 */
+    default CompletableFuture<com.game.proto.QueryObserverResponse> queryObserver(com.game.proto.QueryObserverRequest request){return CompletableFuture.completedFuture(com.game.proto.QueryObserverResponse.getDefaultInstance());}
     /** 精确进程与创建操作的权威查询；旧实现只会返回未知，不能据此释放票据。 */
     default CompletableFuture<com.game.proto.QueryBattleCreationResponse> queryBattleCreation(com.game.proto.QueryBattleCreationRequest request) {
         return CompletableFuture.completedFuture(com.game.proto.QueryBattleCreationResponse.getDefaultInstance());
@@ -57,6 +60,6 @@ public interface BattleNodeService {
     /** 登记观众（房间不存在 → 1004；满 20 人 → 1008；参战者 → 1005；签不出 → 1003 且保证不在名单上）。 */
     CompletableFuture<AddObserverResponse> addObserver(AddObserverRequest request);
 
-    /** 清退观众（推 166 REMOVED 并关其直连）；房间或观众不在时幂等成功。 */
-    CompletableFuture<Empty> removeObserver(RemoveObserverRequest request);
+    /** 固定原操作清退；只有cancelled+原UUID+固定实例证明才可让SQL释放watching，Empty或未知不得当成功。 */
+    CompletableFuture<RemoveObserverResponse> removeObserver(RemoveObserverRequest request);
 }

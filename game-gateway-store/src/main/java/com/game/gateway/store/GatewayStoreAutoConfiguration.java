@@ -16,7 +16,7 @@ public class GatewayStoreAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public GatewayStore gatewayStore(GatewayStoreMapper mapper, TransactionOperations transactionOperations) {
-        return new GatewayStore(mapper, transactionOperations, System::currentTimeMillis);
+    public GatewayStore gatewayStore(GatewayStoreMapper mapper, TransactionOperations transactionOperations,javax.sql.DataSource source) {
+        return new GatewayStore(mapper, transactionOperations, System::currentTimeMillis,source);
     }
 }

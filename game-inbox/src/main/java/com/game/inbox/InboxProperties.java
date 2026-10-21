@@ -16,8 +16,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param requestBudget         一次 Fetch / Ack / 运维请求的预算（≤ 3.5s：scene 的 Dubbo 调用超时是 4s）
  * @param workerThreads         Fetch / Ack 的工作池大小（阻塞 JDBC 只在这里跑）
  * @param workerQueueCapacity   工作池队列上限；满了回 StoreUnavailable（scene 退避）
- * @param terminalRetention     终态行保留期（缺省 30d），超过后由清理循环物理删除；必须大于签发窗 7d（生产方契约：遵守契约的重试不会重复入箱）
- * @param sweepInterval         两轮清理之间的间隔（每轮最多删 500 行）
+ * @param terminalRetention     旧配置兼容字段；终态原收据永久保留，此值不再授权物理删除
+ * @param sweepInterval         旧配置兼容字段；终态清理循环已停用
  * @param notifyResendInterval  提醒补发循环的间隔（设计 §6.3：30 秒一轮）
  * @param gaugeInterval         扫描型 gauge 的刷新间隔
  * @param reconcileInterval     对账间隔（缺省 60m；0 = 不跑）

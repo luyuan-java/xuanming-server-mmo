@@ -1,4 +1,11 @@
 -- V4后执行；寄售关联同一OMS订单，不建立第二套订单或玩家游戏货币余额。
+-- 旧单缺权威原身份时不推断/回填；交付保持拒绝，待受控原件核实。
+CREATE TABLE commerce_official_owner (
+  order_sn VARCHAR(36) PRIMARY KEY,
+  buyer_account VARBINARY(191) NOT NULL,
+  buyer_owner_revision VARBINARY(20) NOT NULL,
+  INDEX idx_official_owner(buyer_account,buyer_owner_revision,order_sn)
+);
 CREATE TABLE commerce_consignment (
   listing_id VARCHAR(20) PRIMARY KEY,
   seller_player_id VARCHAR(20) NOT NULL,
@@ -26,6 +33,7 @@ CREATE TABLE commerce_consignment_order (
   order_sn VARCHAR(36) PRIMARY KEY,
   listing_id VARCHAR(20) NOT NULL,
   buyer_account VARBINARY(191) NOT NULL,
+  buyer_owner_revision VARBINARY(20) NOT NULL,
   request_id VARBINARY(128) NOT NULL,
   seller_account VARBINARY(191) NOT NULL,
   escrow_reference VARCHAR(20) NOT NULL,

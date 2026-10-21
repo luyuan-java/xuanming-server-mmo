@@ -25,6 +25,13 @@ import org.junit.jupiter.api.Test;
  * 连接是 {@link Proxy} 做的假连接：只认事务控制方法，体里不发语句（直接抛构造好的 SQLException）。
  */
 class GuildTxTest {
+    private org.mockito.MockedStatic<com.game.common.player.PlayerRouteAuthority> route;
+    @org.junit.jupiter.api.BeforeEach void isolateOuterRoute()throws Exception{
+        // 本类只验事务分类；真实SQLmeta/P合同由原生数据库回归验证。
+        route=org.mockito.Mockito.mockStatic(com.game.common.player.PlayerRouteAuthority.class,org.mockito.Mockito.CALLS_REAL_METHODS);
+        route.when(()->com.game.common.player.PlayerRouteAuthority.requireMeta(org.mockito.ArgumentMatchers.any(Connection.class),org.mockito.ArgumentMatchers.anyInt(),org.mockito.ArgumentMatchers.anyBoolean())).thenAnswer(call->null);
+    }
+    @org.junit.jupiter.api.AfterEach void closeOuterRoute(){route.close();}
 
     /** 假连接：记录提交 / 回滚 / 自动提交状态；commit 依次弹出预设的错误。 */
     static final class FakeConnection {

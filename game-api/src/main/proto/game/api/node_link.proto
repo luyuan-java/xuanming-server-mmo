@@ -56,6 +56,11 @@ message PlayerEnter {
   // true = 跨节点换图的交出进场（gate 收到源节点的 PlayerTransfer 后改绑发出，owner_epoch 是交出铸出的 E+1）。
   // 目标节点据此不拍 LOGIN 快照、计交出进场指标、进场后立即续约一次归属租约；其余照普通进场处理（库里 epoch 不符同样回 3023）。
   bool transfer = 5;
+  // 已认证会话固定的原账号与归属修订；不得在scene按当前owner补齐。
+  string account = 6;
+  uint64 owner_revision = 7;
+  // 首次登录成功夺权时的原owner_epoch；跨scene交接保留，新的scene E独立递增。
+  uint64 login_generation = 8;
 }
 
 // scene → gate：进场结果。普通进场失败时 gate 解绑会话上的场景与玩家（会话回到「已登录、未进游戏」）并把 tip 发给客户端；

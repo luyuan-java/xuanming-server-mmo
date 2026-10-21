@@ -81,8 +81,8 @@ class MatchControlContractTest {
     void 字段号钉住() {
         assertFields(TeamMatchCheckRequest.getDescriptor(), "battle_config_id", 1, "roster", 2);
         assertFields(TeamMatchCheckReply.getDescriptor(), "result", 1, "offender", 2, "zones", 3, "lock_ttl_seconds", 4);
-        assertFields(TeamTicketsRequest.getDescriptor(), "battle_config_id", 1, "team_id", 2, "roster", 3, "zones", 4, "ticket_ids", 5,"request_id",6,"initiator_player_id",7,"client_request",8);
-        assertFields(com.game.api.proto.TeamMatchIntentQuery.getDescriptor(),"player_id",1,"request_id",2,"client_request",3);
+        assertFields(TeamTicketsRequest.getDescriptor(), "battle_config_id", 1, "team_id", 2, "roster", 3, "zones", 4, "ticket_ids", 5,"request_id",6,"initiator_player_id",7,"client_request",8,"owner_account",9,"owner_revision",10,"launch_original",11);
+        assertFields(com.game.api.proto.TeamMatchIntentQuery.getDescriptor(),"player_id",1,"request_id",2,"client_request",3,"owner_account",4,"owner_revision",5);
         assertFields(TeamTicketsReply.getDescriptor(), "status", 1, "failed_player_id", 2);
         assertFields(TeamTicketsRelease.getDescriptor(), "ticket_ids", 1);
         assertFields(TeamGatherRequest.getDescriptor(), "battle_config_id", 1, "team_id", 2, "roster", 3, "ticket_ids", 4);
@@ -156,11 +156,16 @@ class MatchControlContractTest {
         assertThat(StartActivityBattleResponse.getDefaultInstance().getBattleId()).isZero();
         Method method = MatchInternalService.class.getDeclaredMethod("startActivityBattle", StartActivityBattleRequest.class);
         assertThat(method.getReturnType()).isEqualTo(CompletableFuture.class);
-        assertThat(MatchInternalService.class.getDeclaredMethods()).hasSize(1);
+        assertThat(MatchInternalService.class.getDeclaredMethods()).extracting(Method::getName)
+            .containsExactlyInAnyOrder("startActivityBattle","cancelActivityBattle");
+        Method cancel=MatchInternalService.class.getDeclaredMethod("cancelActivityBattle",com.game.proto.match.CancelActivityBattleRequest.class);
+        assertThat(cancel.getGenericReturnType().getTypeName()).contains(com.game.proto.match.CancelActivityBattleResponse.class.getName());
         MatchInternalService service = request -> CompletableFuture.completedFuture(StartActivityBattleResponse.newBuilder()
                 .setReject(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE).setOffenderPlayerId(request.getMemberPlayerIds(0)).build());
         assertThat(service.startActivityBattle(StartActivityBattleRequest.newBuilder().addMemberPlayerIds(5).build()).get(1, TimeUnit.SECONDS)
                 .getOffenderPlayerId()).isEqualTo(5);
+        org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.ExecutionException.class,
+            () -> service.cancelActivityBattle(com.game.proto.match.CancelActivityBattleRequest.getDefaultInstance()).get(1,TimeUnit.SECONDS));
     }
 
     @Test

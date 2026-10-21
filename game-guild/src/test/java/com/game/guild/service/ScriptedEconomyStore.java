@@ -21,6 +21,8 @@ import java.util.function.Function;
  * 每次调用写进 journal；记下最后一次预留的入参。
  */
 public final class ScriptedEconomyStore implements EconomyStore {
+    /** 纯派发夹具的受控角色身份替身，不能视为生产SQL准入证据。 */
+    @Override public EconomyStore forActor(com.game.api.proto.SessionContext actor) { return this; }
 
     private final Consumer<String> journal;
 

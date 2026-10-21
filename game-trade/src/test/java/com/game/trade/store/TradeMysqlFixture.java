@@ -56,6 +56,9 @@ final class TradeMysqlFixture implements AutoCloseable {
         ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         TradeMysqlFixture fixture = new TradeMysqlFixture(database, ds);
         TradeTables.sync(ds, Duration.ofMinutes(1));
+        try(var c=ds.getConnection();var q=c.createStatement()){q.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");}
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(ds);
+        try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),List.of(1));}
         return fixture;
     }
 

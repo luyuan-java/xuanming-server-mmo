@@ -447,7 +447,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      */
     private boolean mergeFenced(SessionContext session, long playerId, int homeZoneId) {
         try {
-            if (fence.inProgress(homeZoneId)) {
+            if (fence.inProgress(homeZoneId)||fence.inProgress(session.getZoneId())) {
                 log.warn("进游戏拒绝：角色的归属区正在合服 player={} session={} 归属区={}", playerId, session.getSessionId(),
                         Integer.toUnsignedString(homeZoneId));
                 return true;
@@ -562,7 +562,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         if (result instanceof ClaimResult.Claimed claimed) {
             ClaimOutcome outcome = retried ? ClaimOutcome.WAITED : ClaimOutcome.CLAIMED;
             return rerouteIfStale(playerId, routed, assigned, enterDeadline).thenApply(target -> new ClaimStep(
-                    accepted(session, playerId, target, claimed.ownerEpoch()), outcome));
+                    accepted(session, playerId, target, claimed.ownerEpoch(), ownerRevision), outcome));
         }
         if (result instanceof ClaimResult.NotFound) {
             log.warn("进游戏失败：夺权时角色已不存在 player={}", playerId);
@@ -674,7 +674,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return ready;
     }
 
-    private static HandlerReply accepted(SessionContext session, long playerId, AssignSceneResponse assigned, long epoch) {
+    private static HandlerReply accepted(SessionContext session, long playerId, AssignSceneResponse assigned, long epoch, long ownerRevision) {
         log.info("进游戏受理 player={} gate={} session={} scene_node={} scene={} scene_config={} owner_epoch={}",
                 playerId, session.getGateNodeId(), session.getSessionId(), assigned.getSceneNodeId(),
                 assigned.getSceneId(), assigned.getSceneConfigId(), epoch);
@@ -684,7 +684,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                         .setPlayerId(playerId)
                         .setSceneNodeId(assigned.getSceneNodeId())
                         .setSceneId(assigned.getSceneId())
-                        .setOwnerEpoch(epoch))
+                        .setOwnerEpoch(epoch).setOwnerRevision(ownerRevision))
                 .build();
         return HandlerReply.of(response, directive);
     }

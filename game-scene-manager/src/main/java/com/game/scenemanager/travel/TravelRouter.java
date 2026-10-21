@@ -120,6 +120,7 @@ public final class TravelRouter implements TravelRouting {
     private final GateSource gates;
     private final WorldSceneConfigs worldConfigs;
     private final ZoneMergeFence fence;
+    private final com.game.common.player.HomeZones homeZones;
     private final GateTokenIssuer issuer;
     private final MeterRegistry meterRegistry;
     private final Map<TravelResult, Timer> travelTimers = new EnumMap<>(TravelResult.class);
@@ -135,11 +136,15 @@ public final class TravelRouter implements TravelRouting {
      */
     public TravelRouter(WorldChannelStore plans, SceneNodeSource scenes, GateSource gates, WorldSceneConfigs worldConfigs,
                         ZoneMergeFence fence, GateTokenIssuer issuer, MeterRegistry meterRegistry) {
+        this(plans,scenes,gates,worldConfigs,fence,issuer,meterRegistry,null);
+    }
+    public TravelRouter(WorldChannelStore plans,SceneNodeSource scenes,GateSource gates,WorldSceneConfigs worldConfigs,ZoneMergeFence fence,GateTokenIssuer issuer,MeterRegistry meterRegistry,com.game.common.player.HomeZones homeZones){
         this.plans = Objects.requireNonNull(plans, "plans");
         this.scenes = Objects.requireNonNull(scenes, "scenes");
         this.gates = Objects.requireNonNull(gates, "gates");
         this.worldConfigs = Objects.requireNonNull(worldConfigs, "worldConfigs");
         this.fence = Objects.requireNonNull(fence, "fence");
+        this.homeZones=homeZones;
         this.issuer = Objects.requireNonNull(issuer, "issuer");
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry");
         for (TravelResult result : TravelResult.values()) {
@@ -294,7 +299,8 @@ public final class TravelRouter implements TravelRouting {
     private boolean fenced(SelectTravelTargetRequest request) {
         int homeZone = 0;
         try {
-            if (fence.inProgress(homeZone)) {
+            if(homeZones!=null){homeZone=homeZones.homeZoneOf(request.getPlayerId(),com.game.common.deadline.Deadline.after(1500));if(homeZone==0)return true;}
+            if (fence.inProgress(homeZone)||homeZones!=null&&(fence.inProgress(request.getFromZoneId())||fence.inProgress(request.getToZoneId()))) {
                 log.warn("跨 zone 传送拒绝：归属区正在合服 from={} to={} player={} home={}", request.getFromZoneId(),
                         request.getToZoneId(), Long.toUnsignedString(request.getPlayerId()), homeZone);
                 return true;

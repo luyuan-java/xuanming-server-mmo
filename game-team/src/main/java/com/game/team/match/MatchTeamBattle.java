@@ -45,17 +45,29 @@ public final class MatchTeamBattle implements TeamBattlePort {
     public enum IntentMode { SQL_AUTHORITY, LEGACY_COMPATIBILITY }
     private final IntentMode intentMode;
     @Override public boolean durableIntents(){return intentMode==IntentMode.SQL_AUTHORITY;}
-    @Override public com.game.proto.team.TeamMatchIntent queryIntent(long caller,String request,com.google.protobuf.ByteString payload,Deadline deadline){
-        var query=com.game.api.proto.TeamMatchIntentQuery.newBuilder().setPlayerId(caller).setRequestId(request).setClientRequest(payload).build();
+    @Override public com.game.proto.team.TeamMatchIntent queryIntent(com.game.api.proto.SessionContext caller,String request,com.google.protobuf.ByteString payload,Deadline deadline){
+        requireOriginal(caller);
+        var query=com.game.api.proto.TeamMatchIntentQuery.newBuilder().setPlayerId(caller.getPlayerId()).setRequestId(request).setClientRequest(payload)
+                .setOwnerAccount(caller.getAccount()).setOwnerRevision(caller.getOwnerRevision()).build();
         return call("queryTeamMatchIntent",deadline,()->match.queryTeamMatchIntent(query));
     }
     @Override public Tickets createDurableTickets(int config,long team,List<Long> roster,Map<Long,Integer> zones,Map<Long,String> tickets,
-            long caller,com.game.proto.team.StartTeamMatchRequest original,Deadline deadline){
+            com.game.api.proto.SessionContext caller,com.game.proto.team.StartTeamMatchRequest original,Deadline deadline){
+        return createDurableTickets(config,team,roster,zones,tickets,caller,original,com.google.protobuf.ByteString.EMPTY,deadline);
+    }
+    @Override public Tickets createDurableTickets(int config,long team,List<Long> roster,Map<Long,Integer> zones,Map<Long,String> tickets,
+            com.game.api.proto.SessionContext caller,com.game.proto.team.StartTeamMatchRequest original,com.google.protobuf.ByteString launchOriginal,Deadline deadline){
+        requireOriginal(caller);
         var request=TeamTicketsRequest.newBuilder().setBattleConfigId(config).setTeamId(team).addAllRoster(roster).putAllZones(zones).putAllTicketIds(tickets)
-                .setRequestId(original.getRequestId()).setInitiatorPlayerId(caller).setClientRequest(original.toByteString()).build();
-        try{var reply=call("createTeamTickets",deadline,()->match.createTeamTickets(request));return reply.getStatus()==com.game.api.proto.TeamTicketsStatus.TEAM_TICKETS_CREATED?
-                new Tickets.Created():new Tickets.Unknown("原开局意图尚未确认");}
+                .setRequestId(original.getRequestId()).setInitiatorPlayerId(caller.getPlayerId()).setClientRequest(original.toByteString())
+                .setOwnerAccount(caller.getAccount()).setOwnerRevision(caller.getOwnerRevision()).setLaunchOriginal(launchOriginal).build();
+        try{var reply=call("createTeamTickets",deadline,()->match.createTeamTickets(request));return switch(reply.getStatus()){
+            case TEAM_TICKETS_CREATED -> new Tickets.Created();case TEAM_TICKETS_QUEUED -> new Tickets.Queued();default -> new Tickets.Unknown("原开局意图尚未确认");};}
         catch(RuntimeException e){return new Tickets.Unknown("原开局意图尚未确认");}
+    }
+    private static void requireOriginal(com.game.api.proto.SessionContext caller) {
+        if(caller==null||caller.getPlayerId()==0||caller.getAccount().isEmpty()||caller.getOwnerRevision()<=0)
+            throw new IllegalArgumentException("缺少队伍开局原会话身份或修订越界");
     }
 
     private static final Logger log = LoggerFactory.getLogger(MatchTeamBattle.class);

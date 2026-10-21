@@ -10,6 +10,15 @@
 spring:
   application:
     name: game-scene-manager
+  datasource:
+    # 与login/scene/data共用唯一player归属库，不能从Redis补home或合区权威。
+    url: jdbc:mysql://127.0.0.1:4000/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=5000
+    username: ${GAME_MYSQL_USER:root}
+    password: ${GAME_MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    druid:
+      max-active: 8
+      max-wait: 1500
   main:
     # 只为管理端点起一个 Servlet 容器（Tomcat）；Dubbo 端口不经过它（architecture.md §11）。
     web-application-type: servlet

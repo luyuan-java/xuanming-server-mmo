@@ -56,6 +56,8 @@ management:
       application: ${spring.application.name}
 
 game:
+  dubbo:
+    player-trade-url: ${GAME_PLAYER_TRADE_URL:tri://127.0.0.1:20881}
   # 运行模式：只有 dev / test（含别名 development / local / testing）开放播种接口，其余（含未设、写错）一律 403。进程缺省 prod；
   # 本机切片由 tools/local/start-slice.sh 设 GAME_RUN_MODE=dev。
   run-mode: ${GAME_RUN_MODE:prod}
@@ -93,6 +95,9 @@ game:
       url: ${GAME_TRADE_MALL_URL:http://127.0.0.1:18120}
       gateway-secret: ${GAME_MALL_GATEWAY_SECRET:}
       delivery-secret: ${GAME_MALL_DELIVERY_SECRET:}
+    rmb:
+      enabled: ${GAME_TRADE_RMB_ENABLED:false}
+      currencies: ${GAME_TRADE_RMB_CURRENCIES:0}
 
 dubbo:
   application:

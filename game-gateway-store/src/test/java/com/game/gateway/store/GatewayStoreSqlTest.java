@@ -30,6 +30,9 @@ class GatewayStoreSqlTest {
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         DataSource ds = h2;
         new ResourceDatabasePopulator(new ClassPathResource("db/game-gateway-schema.sql")).execute(ds);
+        new org.springframework.jdbc.core.JdbcTemplate(ds).execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL)");
+        new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql")).execute(ds);
+        try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1,2,3,4,5,6,7,8,9));}
         SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
         factory.setDataSource(ds);
         SqlSessionFactory sessions = factory.getObject();

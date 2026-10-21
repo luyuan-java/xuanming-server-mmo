@@ -130,7 +130,12 @@ class BattleTicketsTest {
     @Test
     void 参战者与观众字段合法() {
         assertThat(classify(validTicket())).isEqualTo(Verdict.OK);
-        assertThat(classify(validTicket().setRole(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER))).isEqualTo(Verdict.OK);
+        assertThat(classify(validTicket().setRole(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER).setSpectatorOperationId("11111111-1111-4111-8111-111111111111"))).isEqualTo(Verdict.OK);
+    }
+    @Test void 观战票缺失或非法原操作_参战票携观战操作都拒绝(){
+        assertThat(classify(validTicket().setRole(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER))).isEqualTo(Verdict.ROLE_INVALID);
+        assertThat(classify(validTicket().setRole(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER).setSpectatorOperationId("00000000-0000-0000-0000-000000000000"))).isEqualTo(Verdict.ROLE_INVALID);
+        assertThat(classify(validTicket().setSpectatorOperationId("11111111-1111-4111-8111-111111111111"))).isEqualTo(Verdict.ROLE_INVALID);
     }
 
     @Test
@@ -203,13 +208,13 @@ class BattleTicketsTest {
     // ---- 跨区（spectate-spec §2.2「战斗票不含 zone，只绑节点与实例」、§2.7 的 Z4）----
 
     /**
-     * 契约里的战斗票只有这六个字段，<b>没有 zone</b>：battle 是全服一份（节点号租约的作用域是 0，全服唯一），票只认「哪个节点的哪个进程」。
+     * 契约的七个字段包含原观战操作，<b>没有 zone</b>：battle全服唯一，观众票还必须绑定当前原操作。
      * 这个用例钉的是同步来的契约的形状——mmorpg 给票加字段（尤其是 zone）时这里会红，提醒回来核对 {@link BattleTickets#classify} 要不要跟着判。
      */
     @Test
-    void 票据载荷只有六个字段_没有zone() {
+    void 票据载荷七个字段包含原观战操作_没有zone() {
         assertThat(BattleTicketPayload.getDescriptor().getFields()).extracting(FieldDescriptor::getName)
-                .containsExactly("battle_id", "player_id", "battle_node_id", "battle_instance_id", "expire_at_ms", "role");
+                .containsExactly("battle_id", "player_id", "battle_node_id", "battle_instance_id", "expire_at_ms", "role","spectator_operation_id");
     }
 
     @Test

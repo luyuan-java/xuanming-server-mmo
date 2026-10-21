@@ -149,7 +149,7 @@ public final class BackgroundTx {
     }
 
     /**
-     * 事务外的自动提交语句（ListDue、Claim 的 CAS、各种读；Claim 刻意不进事务，asset_store.go:54-59）。语句挂在给定截止时刻上；
+     * 保留原单语句接口，但在短事务内持路由meta共享锁（ListDue、Claim的CAS、各种读），防维护Freeze之后迟到写入。语句挂在给定截止时刻上；
      * SQL 错误与截止用尽都是依赖故障。
      */
     public <T> T autocommit(Deadline deadline, Body<T> body) {
@@ -157,10 +157,13 @@ public final class BackgroundTx {
             throw new DependencyException("后台自动提交语句：截止时刻已过");
         }
         try (Connection c = connections.get(Math.max(1, deadline.remainingMillis()))) {
-            if (!c.getAutoCommit()) {
-                c.setAutoCommit(true);
-            }
-            return body.run(new GuildJdbc(c, deadline, queryTimeoutCapSeconds));
+            c.setAutoCommit(false);
+            try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,Math.max(1,Math.min(queryTimeoutCapSeconds,(int)((deadline.remainingMillis()+999)/1000))),true);
+                T result=body.run(new GuildJdbc(c,deadline,queryTimeoutCapSeconds));
+                if(deadline.expired())throw new GuildJdbc.BudgetExpired("COMMIT");
+                c.commit();return result;
+            }catch(SQLException|RuntimeException failure){try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
         } catch (SQLException e) {
             throw new DependencyException("后台自动提交语句失败", e);
         }
@@ -176,6 +179,7 @@ public final class BackgroundTx {
             try {
                 c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
                 c.setAutoCommit(false);
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,Math.max(1,Math.min(queryTimeoutCapSeconds,(int)((deadline.remainingMillis()+999)/1000))),true);
                 T result;
                 try {
                     result = body.run(new GuildJdbc(c, deadline, queryTimeoutCapSeconds));

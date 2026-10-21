@@ -49,6 +49,14 @@ class FriendDispatcherTest {
     private FriendDispatcher dispatcher(Executor executor, FriendStore.AddResult addResult) {
         FriendStore store = new FriendStore() {
             @Override
+            public FriendStore forActor(long playerId, String originalAccount, long originalRevision) {
+                assertThat(playerId).isNotZero();
+                assertThat(originalAccount).isEqualTo("original");
+                assertThat(originalRevision).isEqualTo(7);
+                return this; // 只隔离派发测试的 IO；真库身份断言由 JdbcFriendStoreMysqlTest 覆盖。
+            }
+
+            @Override
             public AddOutcome addRequest(long from, long to, Deadline deadline) {
                 return new AddOutcome(addResult, addResult == AddResult.OK ? 123 : 0, true);
             }
@@ -106,7 +114,8 @@ class FriendDispatcherTest {
 
     private static ClientCall call(int messageId, long playerId, ByteString body) {
         return ClientCall.newBuilder().setMessageId(messageId).setBody(body)
-                .setSession(SessionContext.newBuilder().setGateNodeId(1).setSessionId(9).setPlayerId(playerId)).build();
+                .setSession(SessionContext.newBuilder().setGateNodeId(1).setSessionId(9).setPlayerId(playerId)
+                        .setAccount("original").setOwnerRevision(7)).build();
     }
 
     private double requests(String method, String result) {
@@ -128,6 +137,23 @@ class FriendDispatcherTest {
         assertThat(d.dispatch(ClientCall.newBuilder().setMessageId(ADD).build()).join().getTipId()).isEqualTo(1003);
         assertThat(requests("NotifyFriendEvent", "forbidden")).isEqualTo(1);
         assertThat(requests("AddFriend", "unauthenticated")).isEqualTo(2);
+    }
+
+    @Test
+    void 缺原账号或原修订_含uint64高半区_在入队前拒绝() {
+        java.util.concurrent.atomic.AtomicInteger submitted = new java.util.concurrent.atomic.AtomicInteger();
+        FriendDispatcher d = dispatcher(task -> { submitted.incrementAndGet(); task.run(); }, FriendStore.AddResult.OK);
+        ClientCall valid = call(ADD, 5, AddFriendRequest.newBuilder().setTargetPlayerId(7).build().toByteString());
+        for (SessionContext session : List.of(valid.getSession().toBuilder().clearAccount().build(),
+                valid.getSession().toBuilder().clearOwnerRevision().build(),
+                valid.getSession().toBuilder().setOwnerRevision(Long.MIN_VALUE).build(),
+                valid.getSession().toBuilder().setOwnerRevision(-1).build())) {
+            ClientReply reply = d.dispatch(valid.toBuilder().setSession(session).build()).join();
+            assertThat(reply.getTipId()).isEqualTo(1003);
+            assertThat(reply.getBody()).isEmpty();
+        }
+        assertThat(submitted).hasValue(0);
+        assertThat(requests("AddFriend", "unauthenticated")).isEqualTo(4);
     }
 
     @Test

@@ -37,7 +37,7 @@ spring:
     init:
       # 表结构只由 game-login 初始化（建表语句幂等：CREATE TABLE IF NOT EXISTS）。
       mode: always
-      schema-locations: classpath:db/game-player-schema.sql
+      schema-locations: classpath:db/game-route-authority-schema.sql,classpath:db/game-player-schema.sql
       encoding: UTF-8
       continue-on-error: false
 
@@ -64,6 +64,8 @@ management:
       application: ${spring.application.name}
 
 game:
+  player-trade:
+    require-guild-exit: ${GAME_PLAYER_TRADE_REQUIRE_GUILD_EXIT:true}
   # 按方法热关停（运维止血阀）：每秒全量读 Redis 哈希 game:killswitch；失联超过 60 s 整体放行（fail-open）
   killswitch:
     enabled: true
@@ -80,6 +82,8 @@ game:
   dubbo:
     scene-manager-url: tri://127.0.0.1:20882
   login:
+    role-trade:
+      enabled: ${GAME_PLAYER_TRADE_ENABLED:false}
     # dev：启用开发口令认证（账号前缀白名单 + GAME_LOGIN_DEV_PASSWORD）；prod：关闭开发口令——生产口令（Argon2id）另由
     # game.login.auth.password.enabled 打开（见下方 auth 段），两者都没开时口令登录一律 2000（fail-closed）。
     # 生产部署必须显式改成 prod。配置缺省（不写这一项）时代码按 prod 处理。

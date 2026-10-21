@@ -67,6 +67,19 @@ class JdbcFriendStoreBudgetTest {
     }
 
     @Test
+    void 原会话请求视图拒绝空原件_高半区修订与主体替换() {
+        assertThatThrownBy(() -> store.forActor(0, "original", 7)).isInstanceOf(SecurityException.class);
+        assertThatThrownBy(() -> store.forActor(22, "", 7)).isInstanceOf(SecurityException.class);
+        assertThatThrownBy(() -> store.forActor(22, "original", 0)).isInstanceOf(SecurityException.class);
+        assertThatThrownBy(() -> store.forActor(22, "original", Long.MIN_VALUE)).isInstanceOf(SecurityException.class);
+        FriendStore original = store.forActor(22, "original", 7);
+        assertThatThrownBy(() -> original.addRequest(23, 11, Deadline.after(30_000))).isInstanceOf(SecurityException.class);
+        assertThatThrownBy(() -> original.friends(23, 100, Deadline.after(30_000))).isInstanceOf(SecurityException.class);
+        assertThat(updates).isEmpty();
+        assertThat(commits).hasValue(0);
+    }
+
+    @Test
     void 拒绝_截止前完成_提交一次() {
         queryRows.put(JdbcFriendStore.FIND_REQUEST, List.<Object[]>of(new Object[] {11L, 22L, JdbcFriendStore.STATUS_PENDING, 5L, 0L}));
 

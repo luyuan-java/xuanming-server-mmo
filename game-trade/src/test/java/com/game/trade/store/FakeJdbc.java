@@ -26,6 +26,10 @@ final class FakeJdbc implements ConnectionSource {
     }
 
     final List<Call> calls = new ArrayList<>();
+    // 维护围栏是独立协议：保留其真实调用/关闭计数，不消耗业务SQL脚本。
+    final List<Call> authorityCalls=new ArrayList<>();
+    boolean routeWritable=true;
+    int commits,rollbacks;
     final List<Long> maxWaits = new ArrayList<>();
     /** 脚本：{@code List<Object[]>}（查询的行）、{@link Integer}（写语句改动行数）或 {@link SQLException}（抛出）。 */
     final Deque<Object> script = new ArrayDeque<>();
@@ -63,6 +67,11 @@ final class FakeJdbc implements ConnectionSource {
         opened++;
         return proxy(Connection.class, (p, m, a) -> switch (m.getName()) {
             case "prepareStatement" -> statement((String) a[0]);
+            case "setAutoCommit" -> null;
+            case "commit" -> {commits++;yield null;}
+            case "rollback" -> {rollbacks++;yield null;}
+            case "getMetaData" -> proxy(java.sql.DatabaseMetaData.class,(metadata,method,args)->{
+                if(method.getName().equals("getDatabaseProductName"))return "MySQL";throw new UnsupportedOperationException(method.getName());});
             case "close" -> {
                 closed++;
                 yield null;
@@ -88,6 +97,10 @@ final class FakeJdbc implements ConnectionSource {
                 yield null;
             }
             case "executeQuery" -> {
+                if(sql.startsWith("SELECT generation,writable,fence_shards FROM route_meta")){
+                    authorityCalls.add(new Call(sql,List.copyOf(args.values()),timeout[0],true));
+                    yield resultSet(java.util.Collections.singletonList(new Object[]{"b29c911b-5b90-4158-b55b-edf23c0208d8",routeWritable?"1":"0",64}));
+                }
                 calls.add(new Call(sql, List.copyOf(args.values()), timeout[0], true));
                 yield resultSet(next());
             }

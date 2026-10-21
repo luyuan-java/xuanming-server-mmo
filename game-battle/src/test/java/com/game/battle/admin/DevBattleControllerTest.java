@@ -144,11 +144,14 @@ class DevBattleControllerTest {
     }
 
     @Test
-    void 销毁与清退观众_204() throws Exception {
+    void 销毁204_清退观众返回正式原操作证明200() throws Exception {
         assertThat(post(port, DevBattleController.DESTROY, DestroyBattleRequest.newBuilder().setBattleId(9).build().toByteArray())
                 .statusCode()).isEqualTo(204);
-        assertThat(post(port, DevBattleController.REMOVE_OBSERVER, RemoveObserverRequest.newBuilder().setBattleId(9)
-                .setObserverPlayerId(101).build().toByteArray()).statusCode()).isEqualTo(204);
+        String operation=java.util.UUID.randomUUID().toString();
+        var removed=post(port, DevBattleController.REMOVE_OBSERVER, RemoveObserverRequest.newBuilder().setBattleId(9)
+                .setObserverPlayerId(101).setSpectatorOperationId(operation).setAdmitBeforeMs(30_000).setTargetInstanceId("test-instance").build().toByteArray());
+        assertThat(removed.statusCode()).isEqualTo(200);
+        var proof=com.game.proto.RemoveObserverResponse.parseFrom(removed.body());assertThat(proof.getCancelled()).isTrue();assertThat(proof.getSpectatorOperationId()).isEqualTo(operation);assertThat(proof.getTargetInstanceId()).isEqualTo("test-instance");
         assertThat(rooms.calls).containsExactly("destroyBattle", "removeObserver");
     }
 

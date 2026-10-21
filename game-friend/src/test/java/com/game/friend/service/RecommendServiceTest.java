@@ -2,6 +2,7 @@ package com.game.friend.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.proto.SessionContext;
 import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory.StrictLookup;
@@ -32,6 +33,8 @@ class RecommendServiceTest {
     private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
 
     private static final long ME = 100;
+    private static final SessionContext SESSION = SessionContext.newBuilder().setPlayerId(ME)
+            .setAccount("original").setOwnerRevision(7).build();
 
     private final FriendMetrics metrics = new FriendMetrics(new SimpleMeterRegistry());
     private final List<List<Long>> mutualExcludes = new ArrayList<>();
@@ -39,6 +42,7 @@ class RecommendServiceTest {
     private List<Candidate> mutual = List.of();
     private List<Candidate> random = List.of();
     private boolean failMutual;
+    private boolean failIdentity;
     private boolean failOnline;
     private final Map<Long, PlayerPresence> online = new HashMap<>();
     private final Map<Long, Profile> profiles = new HashMap<>();
@@ -49,6 +53,18 @@ class RecommendServiceTest {
 
     private RecommendService service() {
         RecommendSource source = new RecommendSource() {
+            @Override
+            public RecommendSource forActor(long playerId, String originalAccount, long originalRevision) {
+                assertThat(playerId).isEqualTo(ME);
+                assertThat(originalAccount).isEqualTo("original");
+                assertThat(originalRevision).isEqualTo(7);
+                if (failIdentity) throw new SecurityException("会话已失效");
+                return this; // 仅替代候选来源，不充当 SQL 权限验证证据。
+            }
+
+            @Override
+            public void authorize(Deadline deadline) { }
+
             @Override
             public List<Candidate> mutual(long me, List<Long> exclude, int limit, Deadline deadline) throws SQLException {
                 mutualExcludes.add(List.copyOf(exclude));
@@ -98,6 +114,18 @@ class RecommendServiceTest {
         return out;
     }
 
+    @Test
+    void 原会话拒绝时推荐与在线目录均不查询关系或消耗目录配额() {
+        failIdentity = true;
+        RecommendService service = service();
+        assertThat(service.recommendFriends(SESSION, RecommendFriendsRequest.getDefaultInstance(), deadline())
+                .getErrorMessage().getId()).isEqualTo(1003);
+        assertThat(service.recommendFriends(SESSION, RecommendFriendsRequest.newBuilder().setOnlineOnly(true).build(), deadline())
+                .getErrorMessage().getId()).isEqualTo(1003);
+        assertThat(mutualExcludes).isEmpty();
+        assertThat(quotaCount).hasValue(0);
+    }
+
     private Map<Long, PlayerPresence> onlineOf(List<Long> ids) {
         Map<Long, PlayerPresence> out = new HashMap<>();
         ids.forEach(id -> {
@@ -122,13 +150,13 @@ class RecommendServiceTest {
         for (long i = 1; i <= 65; i++) {
             tooMany.addExcludePlayerIds(i);
         }
-        RecommendFriendsResponse r = service().recommendFriends(ME, tooMany.build(), deadline());
+        RecommendFriendsResponse r = service().recommendFriends(SESSION, tooMany.build(), deadline());
         assertThat(r.getErrorMessage()).isEqualTo(tip(1005, "too many exclude_player_ids"));
         assertThat(r.getOnlineDirectory()).isFalse();
         assertThat(wants).isEmpty();
         RecommendFriendsRequest exactly64 = RecommendFriendsRequest.newBuilder()
                 .addAllExcludePlayerIds(tooMany.getExcludePlayerIdsList().subList(0, 64)).build();
-        assertThat(service().recommendFriends(ME, exactly64, deadline()).hasErrorMessage()).isFalse();
+        assertThat(service().recommendFriends(SESSION, exactly64, deadline()).hasErrorMessage()).isFalse();
     }
 
     @Test
@@ -145,7 +173,7 @@ class RecommendServiceTest {
         mutual = List.of(new Candidate(1, 3), new Candidate(2, 1));
         random = List.of(new Candidate(5, 0), new Candidate(6, 0), new Candidate(7, 0));
         online.put(5L, PlayerPresence.newBuilder().setPlayerId(5).setOnlineSinceMs(777).build());
-        RecommendFriendsResponse r = service().recommendFriends(ME, RecommendFriendsRequest.newBuilder().setLimit(4)
+        RecommendFriendsResponse r = service().recommendFriends(SESSION, RecommendFriendsRequest.newBuilder().setLimit(4)
                 .addExcludePlayerIds(9).build(), deadline());
         assertThat(r.getCandidatesList()).extracting(RecommendEntry::getCandidatePlayerId).containsExactly(1L, 2L, 5L, 6L);
         assertThat(r.getCandidates(0).getMutualFriends()).isEqualTo(3);
@@ -161,18 +189,18 @@ class RecommendServiceTest {
     @Test
     void 第一级凑满就不跑第二级_任一级出错回1003不做部分降级_在线读失败按离线() {
         mutual = List.of(new Candidate(1, 1), new Candidate(2, 1));
-        assertThat(service().recommendFriends(ME, RecommendFriendsRequest.newBuilder().setLimit(2).build(), deadline())
+        assertThat(service().recommendFriends(SESSION, RecommendFriendsRequest.newBuilder().setLimit(2).build(), deadline())
                 .getCandidatesCount()).isEqualTo(2);
         assertThat(wants).containsExactly(2);
 
         failMutual = true;
-        assertThat(service().recommendFriends(ME, RecommendFriendsRequest.getDefaultInstance(), deadline()).getErrorMessage())
+        assertThat(service().recommendFriends(SESSION, RecommendFriendsRequest.getDefaultInstance(), deadline()).getErrorMessage())
                 .isEqualTo(tip(1003, "recommend candidates unavailable"));
 
         failMutual = false;
         failOnline = true;
         online.put(1L, PlayerPresence.newBuilder().setPlayerId(1).build());
-        RecommendFriendsResponse r = service().recommendFriends(ME, RecommendFriendsRequest.newBuilder().setLimit(2).build(),
+        RecommendFriendsResponse r = service().recommendFriends(SESSION, RecommendFriendsRequest.newBuilder().setLimit(2).build(),
                 deadline());
         assertThat(r.hasErrorMessage()).isFalse();
         assertThat(r.getCandidatesList()).noneMatch(RecommendEntry::getIsOnline);
@@ -181,18 +209,18 @@ class RecommendServiceTest {
     @Test
     void 在线目录_非法输入1005不占额度_配额故障1003_超额1008_都带online_directory() {
         RecommendFriendsRequest bad = RecommendFriendsRequest.newBuilder().setOnlineOnly(true).setCursor("bad").build();
-        RecommendFriendsResponse r = service().recommendFriends(ME, bad, deadline());
+        RecommendFriendsResponse r = service().recommendFriends(SESSION, bad, deadline());
         assertThat(r.getOnlineDirectory()).isTrue();
         assertThat(r.getErrorMessage()).isEqualTo(tip(1005, "invalid online directory cursor or query"));
         assertThat(quotaCount).hasValue(0);
 
         RecommendFriendsRequest ok = RecommendFriendsRequest.newBuilder().setOnlineOnly(true).build();
         failQuota = true;
-        assertThat(service().recommendFriends(ME, ok, deadline()).getErrorMessage())
+        assertThat(service().recommendFriends(SESSION, ok, deadline()).getErrorMessage())
                 .isEqualTo(tip(1003, "online directory limiter unavailable"));
         failQuota = false;
         quotaCount.set(60);
-        RecommendFriendsResponse limited = service().recommendFriends(ME, ok, deadline());
+        RecommendFriendsResponse limited = service().recommendFriends(SESSION, ok, deadline());
         assertThat(limited.getErrorMessage()).isEqualTo(tip(1008, "online directory rate limited"));
         assertThat(limited.getOnlineDirectory()).isTrue();
     }
@@ -200,14 +228,14 @@ class RecommendServiceTest {
     @Test
     void 在线目录_调用者home_zone未知回1003_成功列一页() {
         RecommendFriendsRequest ok = RecommendFriendsRequest.newBuilder().setOnlineOnly(true).build();
-        assertThat(service().recommendFriends(ME, ok, deadline()).getErrorMessage())
+        assertThat(service().recommendFriends(SESSION, ok, deadline()).getErrorMessage())
                 .isEqualTo(tip(1003, "online directory unavailable"));
 
         profiles.put(ME, new Profile(ME, "me", 1, 1, 1, "", 3));
         profiles.put(7L, new Profile(7, "seven", 9, 2, 1, "ap", 3));
         presenceValues.put("game:presence:7", PlayerPresence.newBuilder().setPlayerId(7).setOnlineSinceMs(55).build().toByteArray());
         scans.add(new OnlineDirectory.ScanPage(0, List.of("game:presence:7", "game:presence:" + ME)));
-        RecommendFriendsResponse r = service().recommendFriends(ME, ok, deadline());
+        RecommendFriendsResponse r = service().recommendFriends(SESSION, ok, deadline());
         assertThat(r.hasErrorMessage()).isFalse();
         assertThat(r.getOnlineDirectory()).isTrue();
         assertThat(r.getCandidatesList()).singleElement().satisfies(e -> {

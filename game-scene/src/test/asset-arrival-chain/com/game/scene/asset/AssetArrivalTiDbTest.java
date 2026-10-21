@@ -109,6 +109,10 @@ class AssetArrivalTiDbTest {
         pool.init();
         try (var c = pool.getConnection()) { StrongTiDbConnectionPolicy.verify(c, true); }
         new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(pool);
+        new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
+        try(var connection=pool.getConnection()) {
+            com.game.common.player.RouteAuthorityInitializer.initialize(connection,java.util.UUID.randomUUID().toString(),List.of(1));
+        }
         try (var c = pool.getConnection(); var s = c.createStatement()) {
             s.execute("CREATE TABLE guild_member (player_id BIGINT UNSIGNED PRIMARY KEY,guild_id BIGINT UNSIGNED NOT NULL)");
         }
@@ -172,7 +176,7 @@ class AssetArrivalTiDbTest {
                     AssetOpService.checkLedgerOnLoad(player);
                     InboxService.checkLedgerOnLoad(player);
                 }, PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE, CrossNodeSwitch.DISABLED, SceneInstances.DISABLED,
-                BattleHooks.NONE, ZoneTravel.DISABLED, inbox));
+                BattleHooks.NONE, ZoneTravel.DISABLED, inbox, new com.game.scene.world.SceneAdmissionSource("1","inbox-final-test",1)));
         onLogic(() -> { inbox.attach(world); return null; });
         int map = sceneTables.worldSceneConfigIds().getFirst();
         scene = onLogic(() -> world.createScene(map));
@@ -189,7 +193,7 @@ class AssetArrivalTiDbTest {
     private void enter(long player, long epoch, int session) throws Exception {
         onLogic(() -> {
             world.onPlayerEnter(1, PlayerEnter.newBuilder().setPlayerId(player).setOwnerEpoch(epoch)
-                    .setSessionId(session).setSceneId(scene.sceneId()).build());
+                    .setSessionId(session).setSceneId(scene.sceneId()).setAccount("asset_arrival").setOwnerRevision(1).setLoginGeneration(epoch).build());
             return null;
         });
         await().atMost(Duration.ofSeconds(8)).pollInterval(Duration.ofMillis(20)).until(() ->
@@ -482,11 +486,11 @@ class AssetArrivalTiDbTest {
     }
 
     @Test
-    void 收件箱同epoch重连保留SQL写槽_真实回执只确认一次() throws Exception {
+    void 收件箱同epoch原进场重投保留SQL写槽_真实回执只确认一次() throws Exception {
         storage.holdNext();
         inboxReply();
         storage.awaitHeld();
-        enter(BUYER, 1, 303);
+        enter(BUYER, 1, 22);
         assertThat(inboxTransport.acks).isEmpty();
         storage.releaseHeld();
         storage.awaitReleased();
@@ -518,11 +522,31 @@ class AssetArrivalTiDbTest {
     }
 
     private record InboxFetch(FetchPlayerInboxRequest request, BiConsumer<FetchPlayerInboxResponse, Throwable> callback) { }
-    private static final class InboxSqlTransport implements InboxTransport {
+    private final class InboxSqlTransport implements InboxTransport {
         final List<InboxFetch> fetches = new CopyOnWriteArrayList<>();
         final List<AckPlayerInboxRequest> acks = new CopyOnWriteArrayList<>();
-        @Override public void fetch(FetchPlayerInboxRequest r, BiConsumer<FetchPlayerInboxResponse, Throwable> done) { fetches.add(new InboxFetch(r, done)); }
-        @Override public void ack(AckPlayerInboxRequest r, BiConsumer<AckPlayerInboxResponse, Throwable> done) { acks.add(r); }
+        private <T extends com.google.protobuf.Message>T authorize(String method,T request,com.game.proto.common.base.RoleAdmissionIdentity original) throws Exception {
+            var signed=com.game.discovery.serviceauth.ServiceCallSignatures.sign(method,request,com.game.api.inbox.InboxCallContract.CALLER,SECRET,System.currentTimeMillis());
+            var signatures=new com.game.discovery.serviceauth.ServiceCallSignatures(Map.of(com.game.api.inbox.InboxCallContract.CALLER,SECRET),System::currentTimeMillis);
+            assertThat(signatures.verify(method,signed)).isEqualTo(com.game.api.inbox.InboxCallContract.CALLER);
+            try(var connection=pool.getConnection()){
+                connection.setAutoCommit(false);
+                try{
+                    com.game.common.player.PlayerRouteAuthority.lock(connection,List.of(original.getPlayerId()),3);
+                    com.game.common.player.SceneAdmissionAuthority.require(connection,original,3);
+                    connection.commit();
+                }catch(Exception | AssertionError failure){connection.rollback();throw failure;}
+            }
+            return signed;
+        }
+        @Override public void fetch(FetchPlayerInboxRequest r, BiConsumer<FetchPlayerInboxResponse, Throwable> done) {
+            try{fetches.add(new InboxFetch(authorize(com.game.api.inbox.InboxCallContract.FETCH,r,r.getAdmission()),done));}
+            catch(Exception failure){done.accept(null,failure);}
+        }
+        @Override public void ack(AckPlayerInboxRequest r, BiConsumer<AckPlayerInboxResponse, Throwable> done) {
+            try{acks.add(authorize(com.game.api.inbox.InboxCallContract.ACK,r,r.getAdmission()));}
+            catch(Exception failure){done.accept(null,failure);}
+        }
     }
 
     @Test

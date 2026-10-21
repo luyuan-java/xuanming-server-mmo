@@ -49,6 +49,12 @@ class RankStoreTiDbTest {
             StrongTiDbConnectionPolicy.verify(b, true);
         }
         RankTables.sync(pool);
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
+                new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
+        try(var connection=pool.getConnection();var statement=connection.createStatement()) {
+            statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL)");
+            com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));
+        }
         jdbc = new AuthorityJdbc(pool);
         store = new RankStore(jdbc, new AuthorityIds(jdbc, "rank_id_sequence"), id -> id == 1, System::currentTimeMillis);
     }

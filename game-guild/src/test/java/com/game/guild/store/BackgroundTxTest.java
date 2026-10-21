@@ -21,6 +21,12 @@ import org.junit.jupiter.api.Test;
  * COMMIT 失败的分类、截止用尽、退避与重投循环同一公式、结果不跨重跑累积、连接状态还原。
  */
 class BackgroundTxTest {
+    private org.mockito.MockedStatic<com.game.common.player.PlayerRouteAuthority> route;
+    @org.junit.jupiter.api.BeforeEach void isolateOuterRoute()throws Exception{
+        route=org.mockito.Mockito.mockStatic(com.game.common.player.PlayerRouteAuthority.class,org.mockito.Mockito.CALLS_REAL_METHODS);
+        route.when(()->com.game.common.player.PlayerRouteAuthority.requireMeta(org.mockito.ArgumentMatchers.any(Connection.class),org.mockito.ArgumentMatchers.anyInt(),org.mockito.ArgumentMatchers.anyBoolean())).thenAnswer(call->null);
+    }
+    @org.junit.jupiter.api.AfterEach void closeOuterRoute(){route.close();}
 
     private final FakeConnection conn = new FakeConnection();
     private final List<String> events = new ArrayList<>();
@@ -187,7 +193,8 @@ class BackgroundTxTest {
     void 自动提交语句_错误是依赖故障() {
         conn.autoCommit = false;
         Boolean autoCommitted = tx().autocommit(roomy(), db -> conn.autoCommit);
-        assertThat(autoCommitted).as("自动提交语句必须在自动提交连接上跑").isTrue();
+        assertThat(autoCommitted).as("后台单语句也在短事务内持meta共享锁，不能越过全局维护").isFalse();
+        assertThat(conn.commits).isEqualTo(1);
         assertThatThrownBy(() -> tx().autocommit(roomy(), db -> {
             throw code(1205);
         })).isInstanceOf(DependencyException.class);

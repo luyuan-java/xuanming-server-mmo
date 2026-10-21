@@ -35,6 +35,7 @@ public final class CommerceStore {
             c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             c.setAutoCommit(false);
             try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,(int)Math.max(1,Math.min(3,(deadline.remainingMillis()+999)/1000)),true);
                 T result = action.run(c);
                 active(deadline);
                 c.commit();
@@ -112,6 +113,39 @@ public final class CommerceStore {
             "INSERT INTO " + table + " (" + columns(row) + ") VALUES ("
                 + String.join(",", java.util.Collections.nCopies(values.size(), "?")) + ")",
             values.toArray());
+    }
+    /** 新合同/绑定买家的提交互锁：按无符号ID顺序先锁玩家；角色冻结也先取同一锁。 */
+    static void lockAssetOwners(Connection c, long... players) throws SQLException {
+        var ids = new java.util.TreeSet<Long>(Long::compareUnsigned);
+        for (long id : players) if (id != 0) ids.add(id);
+        if(!ids.isEmpty())com.game.common.player.PlayerRouteAuthority.lock(c,ids,2);
+        for (long id : ids) {
+            try (var statement = c.prepareStatement("SELECT owner_revision,trade_listing_id FROM player WHERE player_id=? FOR UPDATE")) {
+                statement.setQueryTimeout(2); bind(statement, id);
+                try (var row = statement.executeQuery()) {
+                    if (!row.next() || nativeRevision(row.getString(1)) <= 0 || !"0".equals(row.getString(2)))
+                        throw new CommerceRules.Refusal(CommerceRules.CONFLICT);
+                }
+            }
+        }
+    }
+    static com.game.proto.trade.TradeRoleIdentity roleIdentity(Connection c, long player) throws SQLException {
+        try (var s = c.prepareStatement("SELECT account,owner_revision FROM player WHERE player_id=? FOR UPDATE")) {
+            s.setQueryTimeout(2); bind(s, player);
+            try (var row = s.executeQuery()) {
+                if (!row.next() || row.getString(1) == null || row.getString(1).isEmpty())
+                    throw new CommerceRules.Refusal(CommerceRules.CONFLICT);
+                return com.game.proto.trade.TradeRoleIdentity.newBuilder().setAccount(row.getString(1))
+                    .setOwnerRevision(nativeRevision(row.getString(2))).build();
+            }
+        }
+    }
+    private static long nativeRevision(String value) {
+        try {
+            long revision = Long.parseUnsignedLong(value);
+            if (revision > 0) return revision;
+        } catch (NumberFormatException invalid) { /* 统一在业务边界拒绝未知或越界原件。 */ }
+        throw new SecurityException("Java账号归属修订超出1..LongMax，拒绝继续");
     }
     public TradeCommerceRow get(long id) throws SQLException {
         try (var c = source.getConnection()) {

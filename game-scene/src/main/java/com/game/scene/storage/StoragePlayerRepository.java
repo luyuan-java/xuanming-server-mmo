@@ -1,6 +1,8 @@
 package com.game.scene.storage;
 
 import com.game.player.store.OwnerState;
+import com.game.common.player.SceneAdmissionAuthority;
+import com.game.proto.common.base.RoleAdmissionIdentity;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
 import com.game.player.store.PlayerStore.HandOffMode;
@@ -224,6 +226,26 @@ public final class StoragePlayerRepository implements PlayerRepository {
             return new LoadResult.Found(toData(loaded.get().row(),loaded.get().state()));
         } catch (RuntimeException e) {
             return new LoadResult.Failed(e);
+        }
+    }
+
+    @Override
+    public void load(RoleAdmissionIdentity original, String expectedAccount, Consumer<LoadResult> onLoaded) {
+        SceneAdmissionAuthority.original(original);
+        if (!sourceInstance.equals(original.getSceneInstanceId()) || expectedAccount == null || expectedAccount.isBlank())
+            throw new SecurityException("场景加载原来源不匹配");
+        try {
+            storageExecutor.execute(() -> {
+                LoadResult result;
+                try {
+                    var loaded = store.loadForScene(original, expectedAccount, Duration.ofSeconds(3));
+                    result = loaded.isEmpty() ? new LoadResult.NotFound()
+                            : new LoadResult.Found(toData(loaded.get().row(), loaded.get().state()));
+                } catch (RuntimeException failure) { result = new LoadResult.Failed(failure); }
+                deliver(original.getPlayerId(), onLoaded, result);
+            });
+        } catch (RejectedExecutionException failure) {
+            deliver(original.getPlayerId(), onLoaded, new LoadResult.Failed(failure));
         }
     }
 

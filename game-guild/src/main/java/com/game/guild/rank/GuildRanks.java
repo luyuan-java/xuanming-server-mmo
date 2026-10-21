@@ -112,6 +112,7 @@ public final class GuildRanks {
     private final long pollMillis;
     private final long reserveMillis;
     private final long tmpTtlMillis;
+    private javax.sql.DataSource sqlSource;
 
     /**
      * @param keys      排行键的出处（带部署命名空间，装配方注入）
@@ -121,6 +122,8 @@ public final class GuildRanks {
         this(redis, keys, scheduler, metrics, GuildLimits.RANK_LOCK_TTL_MS, RENEW_EVERY_MS, GuildLimits.RANK_LOCK_MAX_WAIT_MS,
                 GuildLimits.RANK_LOCK_POLL_MS, GuildLimits.RANK_LOCK_REQUEST_RESERVE_MS, GuildLimits.RANK_REBUILD_TMP_TTL_MS);
     }
+    /** 生产读SQL排行，Redis继续作为推送/旧投影，不再作为维护后区榜事实。 */
+    public GuildRanks(GuildRankRedis redis,RedisKeys keys,ScheduledExecutorService scheduler,GuildRankMetrics metrics,javax.sql.DataSource source){this(redis,keys,scheduler,metrics);this.sqlSource=Objects.requireNonNull(source);}
 
     /** 单测用：可缩短锁 TTL / 续期 / 等锁上限。 */
     GuildRanks(GuildRankRedis redis, RedisKeys keys, ScheduledExecutorService scheduler, GuildRankMetrics metrics, long lockTtlMillis,
@@ -363,6 +366,7 @@ public final class GuildRanks {
      * @throws DependencyException Redis 故障或预算用完
      */
     public RankPage page(int zoneId, int page, int pageSize, Deadline deadline) {
+        if(sqlSource!=null)return sqlPage(zoneId,page,pageSize,deadline);
         String key = zoneId != 0 ? redisKeys.guildRankZone(zoneId) : redisKeys.guildRankAll();
         long p = Integer.toUnsignedLong(page);
         long size = Integer.toUnsignedLong(pageSize);
@@ -384,12 +388,41 @@ public final class GuildRanks {
      * @throws DependencyException Redis 故障或预算用完
      */
     public Optional<RankEntry> rankOf(long guildId, int zoneId, Deadline deadline) {
+        if(sqlSource!=null)return sqlRank(guildId,zoneId,deadline);
         String key = zoneId != 0 ? redisKeys.guildRankZone(zoneId) : redisKeys.guildRankAll();
         RawRank raw = deadline.await(redis.rank(key, Long.toUnsignedString(guildId)), "读名次 " + key);
         if (raw == null) {
             return Optional.empty();
         }
         return Optional.of(new RankEntry(guildId, toScore(raw.score(), key), (int) (raw.index() + 1)));
+    }
+    private java.sql.PreparedStatement sql(java.sql.Connection c,Deadline d,String query,Object...values)throws java.sql.SQLException{
+        if(d.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");var p=c.prepareStatement(query);p.setQueryTimeout((int)Math.max(1,Math.min(3,(d.remainingMillis()+999)/1000)));for(int i=0;i<values.length;i++)p.setObject(i+1,values[i]);return p;
+    }
+    private RankPage sqlPage(int zone,int page,int size,Deadline deadline){
+        long p=Integer.toUnsignedLong(page),n=Integer.toUnsignedLong(size),start=p==0?0:(p-1)*n;
+        if(n>50)throw new IllegalArgumentException("排行单页超过正式上限");
+        try(var c=sqlSource.getConnection()){
+            c.setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
+            try{long total;String where=zone==0?"":" WHERE zone_id="+Integer.toUnsignedLong(zone);
+                try(var q=sql(c,deadline,"SELECT COUNT(*) FROM guild"+where);var r=q.executeQuery()){r.next();total=r.getLong(1);}
+                var entries=new ArrayList<RankEntry>();if(p!=0&&n!=0&&Long.compareUnsigned(start,total)<0){
+                    try(var q=sql(c,deadline,"SELECT guild_id,score FROM guild"+where+" ORDER BY score DESC,CAST(guild_id AS CHAR) COLLATE utf8mb4_bin DESC LIMIT ? OFFSET ?",n,start);var r=q.executeQuery()){while(r.next())entries.add(new RankEntry(Long.parseUnsignedLong(r.getString(1)),r.getLong(2),(int)(start+entries.size()+1)));}
+                }
+                if(deadline.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");c.commit();return new RankPage(entries,total);
+            }catch(java.sql.SQLException|RuntimeException failure){try{c.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+        }catch(java.sql.SQLException failure){throw new DependencyException("帮会SQL区榜读取失败",failure);}
+    }
+    private Optional<RankEntry> sqlRank(long guild,int zone,Deadline deadline){
+        try(var c=sqlSource.getConnection()){
+            c.setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
+            try{Long score;String where=zone==0?"":" AND zone_id="+Integer.toUnsignedLong(zone);
+                try(var q=sql(c,deadline,"SELECT score FROM guild WHERE guild_id=?"+where,com.game.common.player.PlayerRouteAuthority.u64(guild));var r=q.executeQuery()){score=r.next()?r.getLong(1):null;}
+                if(score==null){c.commit();return Optional.empty();}long higher;
+                try(var q=sql(c,deadline,"SELECT COUNT(*) FROM guild WHERE (score>? OR (score=? AND CAST(guild_id AS CHAR) COLLATE utf8mb4_bin > ?))"+where,score,score,Long.toUnsignedString(guild));var r=q.executeQuery()){r.next();higher=r.getLong(1);}
+                if(deadline.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");c.commit();return Optional.of(new RankEntry(guild,score,(int)(higher+1)));
+            }catch(java.sql.SQLException|RuntimeException failure){try{c.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+        }catch(java.sql.SQLException failure){throw new DependencyException("帮会SQL名次读取失败",failure);}
     }
 
     // ------------------------------------------------------------------ 维护锁

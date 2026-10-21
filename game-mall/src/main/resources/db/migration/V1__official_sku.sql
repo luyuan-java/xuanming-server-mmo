@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS commerce_consignment_order (
   order_sn VARCHAR(36) PRIMARY KEY,
   listing_id VARCHAR(20) NOT NULL,
   buyer_account VARBINARY(191) NOT NULL,
+  buyer_owner_revision VARBINARY(20) NOT NULL,
   request_id VARBINARY(128) NOT NULL,
   seller_account VARBINARY(191) NOT NULL,
   escrow_reference VARCHAR(20) NOT NULL,
@@ -196,6 +197,13 @@ CREATE TABLE IF NOT EXISTS commerce_mock_payout (
   UNIQUE(request_id), UNIQUE(transaction_id),
   INDEX idx_mock_payout_pending(applied,withdrawal_id),
   CHECK(amount_fen>0), CHECK(successful IN (0,1)), CHECK(applied IN (0,1))
+);
+
+CREATE TABLE IF NOT EXISTS commerce_official_owner (
+  order_sn VARCHAR(36) PRIMARY KEY,
+  buyer_account VARBINARY(191) NOT NULL,
+  buyer_owner_revision VARBINARY(20) NOT NULL,
+  INDEX idx_official_owner(buyer_account,buyer_owner_revision,order_sn)
 );
 
 INSERT INTO commerce_schema_version(version,storage_contract) VALUES (1,'mall-game-official-sku-v1-minor-units');

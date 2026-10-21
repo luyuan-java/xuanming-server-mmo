@@ -1,6 +1,7 @@
 package com.game.scene.world;
 
 import com.game.player.store.PlayerStore.HandOffMode;
+import com.game.proto.common.base.RoleAdmissionIdentity;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -43,6 +44,11 @@ public interface PlayerRepository {
      * 回调仍在逻辑线程恰好一次；调用方在提交实体时必须再核 PendingEnter 身份与本地 finalizing 票据。
      */
     void load(long playerId, long expectedOwnerEpoch, Consumer<LoadResult> onLoaded);
+
+    /** 生产准入：同P登记完整原件与原账号，再返回一致快照。旧实现不得退回缺身份加载。 */
+    default void load(RoleAdmissionIdentity original, String expectedAccount, Consumer<LoadResult> onLoaded) {
+        throw new UnsupportedOperationException("仓储未实现完整场景准入");
+    }
 
     /** 迁移后不得再有运行调用；不能把无结果投队列当最终保存完成。 */
     @Deprecated

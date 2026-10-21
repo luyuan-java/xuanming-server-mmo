@@ -97,6 +97,7 @@ public final class RollbackWriter {
                         Set<RollbackSection> sections) {
         try {
             return tx.execute(status -> {
+                store.lockRoutes(List.of(playerId),List.of());
                 OwnerState owner = owners.selectOwnerForUpdate(playerId);
                 if (owner == null || owner.ownerEpoch() != epoch || owner.released()) {
                     status.setRollbackOnly();

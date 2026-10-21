@@ -26,6 +26,7 @@ import com.game.team.service.TeamMethods;
 import com.game.team.service.TeamService;
 import com.game.team.store.RedissonTeamRedis;
 import com.game.team.store.TeamStore;
+import com.game.team.store.TeamTables;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.UUID;
@@ -68,9 +69,35 @@ public class TeamConfiguration {
     }
 
     @Bean
-    public TeamStore teamStore(RedissonClient redis, RedisKeys keys) {
-        return new TeamStore(new RedissonTeamRedis(redis), keys);
+    public TeamStore teamStore(DataSource source,org.springframework.core.env.Environment environment,TeamProperties props) throws java.sql.SQLException {
+        boolean required=environment.getProperty("game.team.require-tidb",Boolean.class,true);
+        if(com.game.common.RunMode.parse(environment.getProperty("game.run-mode","prod"))==com.game.common.RunMode.PROD&&!required)throw new IllegalStateException("生产Team不得关闭TiDB强一致门禁");
+        try(var connection=source.getConnection()){com.game.discovery.sql.StrongTiDbConnectionPolicy.verify(connection,required);}
+        TeamTables.sync(source);
+        TeamTables.ensurePolicy(source,props.allowCrossZone());
+        try(var connection=source.getConnection()){com.game.common.player.PlayerRouteAuthority.verifySchema(connection);}
+        try(var connection=source.getConnection();var statement=connection.createStatement()){
+            statement.setQueryTimeout(3);
+            try(var ignored=statement.executeQuery("SELECT kind,owner_id,request_high,request_low,battle_id,owner_account,owner_revision,payload,cancelled FROM match_global_direct_intent WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT battle_id,state,host,port,node_id,instance_id FROM match_global_formation WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT unit_id,state,battle_id,team_id,launch_original,original_tickets FROM match_global_queue_unit WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,ticket,queue_unit_id,state,owner_account,owner_revision FROM match_global_ticket WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,request_high,request_low,cancelled,owner_account,owner_revision FROM match_global_join_intent WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,operation_id,owner_account,owner_revision,state,add_request FROM match_global_watching WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,request_id FROM match_global_watch_head WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,request_id,owner_account,owner_revision,cancelled,original_add FROM match_global_watch_request WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,request_id,state FROM guild_trial_launch_role WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT request_id,state FROM guild_trial_launch WHERE 1=0")){}
+            try(var ignored=statement.executeQuery("SELECT player_id,account,owner_revision,trade_listing_id FROM player WHERE 1=0")){}
+            try(var rows=statement.executeQuery("SELECT t.team_id FROM team_authority t LEFT JOIN team_launch l ON l.request_id=t.active_launch_id WHERE t.active_launch_id<>'' AND (l.request_id IS NULL OR l.active<>1) LIMIT 1")){if(rows.next())throw new IllegalStateException("Team原launch关联与有界恢复索引不符，必须停写审核迁移");}
+            try(var rows=statement.executeQuery("SELECT l.request_id FROM team_launch l LEFT JOIN team_authority t ON t.team_id=l.team_id AND t.active_launch_id=l.request_id WHERE l.active=1 AND t.team_id IS NULL LIMIT 1")){if(rows.next())throw new IllegalStateException("Team活动恢复索引缺少原业务关联，拒绝启动");}
+        }
+        return new TeamStore(source);
     }
+
+    @Bean static org.springframework.beans.factory.config.BeanPostProcessor teamConnectionPolicy(org.springframework.core.env.Environment environment){return new com.game.discovery.sql.StrongTiDbConnectionPolicy("Team",environment.getProperty("game.team.require-tidb",Boolean.class,true));}
+    @Bean(initMethod="start",destroyMethod="close")
+    public com.game.team.service.TeamLaunchRecovery teamLaunchRecovery(DataSource source,TeamService service){return new com.game.team.service.TeamLaunchRecovery(source,service);}
 
     @Bean
     public PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis, RedisKeys keys) {
@@ -193,8 +220,8 @@ public class TeamConfiguration {
     public TeamService teamService(TeamStore store, TeamSessions sessions, TeamDisplay display, PlayerProfiles profiles,
                                    TeamIds teamIds, TeamBattlePort battle,
                                    @Qualifier("teamMatchEndPool") TeamWorkerPool teamMatchEndPool, TeamPushes pushes,
-                                   TeamMetrics metrics, TeamProperties props, TeamShutdown shutdown) {
-        PlayerHomeZones homeZones = new PlayerHomeZones(profiles::loadStrict, props.homeZoneTimeout());
+                                   TeamMetrics metrics, TeamProperties props, TeamShutdown shutdown,DataSource source) {
+        PlayerHomeZones homeZones = new PlayerHomeZones(source, props.homeZoneTimeout());
         return new TeamService(store, sessions, display, homeZones, teamIds::nextId, battle, teamMatchEndPool, pushes, metrics,
                 new RuleConfig(props.allowCrossZone()), shutdown::stopping);
     }

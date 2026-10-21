@@ -2,6 +2,7 @@
 # 环境变量（秘密只从这里注入，不进仓库）：
 #   GAME_NODE_LINK_SECRET gate → scene 节点链路握手密钥（必填，须与 game-gate 一致；缺失即启动失败）
 #   GAME_DUBBO_SECRET    Dubbo 调用方鉴权密钥（必填：资产通道的 Dubbo 提供方要验调用方 MAC；须与 game-guild 等一致；缺失即启动失败）
+#   MMORPG_INTERNAL_SECRET_SCENE Inbox完整请求体的scene角色密钥（必填，至少32字节；与game-inbox保持一致）
 #   GAME_ASSET_OP_SECRET_GUILD / GAME_ASSET_OP_SECRET_TRADE
 #                      资产通道请求体签名的调用方密钥（去首尾空白后 ≥ 32 字节；须与 game-guild / 交易注入同一个值；
 #                      没配的调用方的资产请求一律验签失败，启动时报一次 ERROR）

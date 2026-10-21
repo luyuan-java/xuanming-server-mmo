@@ -31,7 +31,7 @@ class ClientActionsTest {
     private final RoomHarness h = new RoomHarness();
 
     private void observe(long battleId, long observerId) {
-        h.service().addObserver(AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerId)
+        h.addObserver(AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerId)
                 .setRouting(RoomHarness.observerRouting(observerId, 900)).build());
     }
 

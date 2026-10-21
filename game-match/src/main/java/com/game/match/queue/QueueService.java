@@ -343,8 +343,7 @@ public final class QueueService {
         return cancel(playerId, requestedTicket, "", d);
     }
     public CancelOutcome cancel(long playerId, String requestedTicket, String requestId, Deadline d) {
-        if(global!=null){if(d.expired())throw new Deadline.DependencyException("全球取消预算耗尽");
-            return global.store().cancel(playerId,requestedTicket,requestId)?CancelOutcome.CANCELLED:CancelOutcome.RACED;}
+        if(global!=null)throw new IllegalArgumentException("全球取消必须传原会话身份");
         if (playerId == 0) {
             return CancelOutcome.NO_IDENTITY;
         }
@@ -375,6 +374,12 @@ public final class QueueService {
         return CancelOutcome.CANCELLED;
     }
 
+    public CancelOutcome cancel(SessionContext session,String requestedTicket,String requestId,Deadline d) {
+        if(global==null)return cancel(session.getPlayerId(),requestedTicket,requestId,d);
+        if(d.expired())throw new Deadline.DependencyException("全球取消预算耗尽");
+        return global.store().cancel(session,requestedTicket,requestId)?CancelOutcome.CANCELLED:CancelOutcome.RACED;
+    }
+
     // ================================================================ 153 GetQueueStatus
 
     /**
@@ -388,7 +393,7 @@ public final class QueueService {
         return status(playerId, "", d);
     }
     public GetQueueStatusResponse status(long playerId, String requestId, Deadline d) {
-        if(global!=null){if(d.expired())throw new Deadline.DependencyException("全球查票预算耗尽");return global.status(playerId, requestId);}
+        if(global!=null)throw new IllegalArgumentException("全球查票必须传原会话身份");
         if (playerId == 0) {
             return notQueued();
         }
@@ -415,6 +420,12 @@ public final class QueueService {
         }
         // estimated_wait_seconds 不设（恒为 0）：等 mmorpg backlog D-11 定了两版同批改
         return GetQueueStatusResponse.newBuilder().setState(state).setQueuedSeconds((int) queuedSeconds).build();
+    }
+
+    public GetQueueStatusResponse status(SessionContext session,String requestId,Deadline d) {
+        if(global==null)return status(session.getPlayerId(),requestId,d);
+        if(d.expired())throw new Deadline.DependencyException("全球查票预算耗尽");
+        return global.status(session,requestId);
     }
 
     private static GetQueueStatusResponse notQueued() {

@@ -1,6 +1,5 @@
 package com.game.inbox.store;
 
-import static com.game.inbox.store.InboxSql.ITEM_PK;
 import static com.game.inbox.store.InboxSql.ITEM_TABLE;
 import static com.game.inbox.store.InboxSql.PENDING;
 import static com.game.inbox.store.InboxSql.STREAM_PK;
@@ -29,8 +28,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 后台循环用到的存储操作（mmorpg {@code store_maintenance.go}；设计 §6.3、§9.1、§9.3、§9.4）。全部在事务之外逐条 autocommit，不持流行锁：
- * 清理只删终态行（Ack 不改终态行，两者不会反向抢锁）；提醒清零 / 推迟都是 next_seq CAS，领导者切换期间重叠执行也无害。线程安全。
+ * 后台循环用到的存储操作（mmorpg {@code store_maintenance.go}；设计 §6.3、§9.1、§9.3、§9.4）。读不加领域锁，写先取路由/P短事务，不持流行锁：
+ * 终态原收据永久保留；提醒清零 / 推迟都是 next_seq CAS，领导者切换期间重叠执行也无害。线程安全。
  */
 public final class InboxMaintenanceStore {
 
@@ -66,37 +65,10 @@ public final class InboxMaintenanceStore {
 
     // ================================================================ 清理（设计 §9.1）
 
-    /**
-     * 删除保留期外的终态行，本轮最多 {@code budget} 行：按分片走 (shard, state, updated_ms) 索引普通读出候选，再按主键逐行带条件删除。
-     * <b>永不删除</b> PENDING 行、流行与审计行。返回本轮删除的行数。
-     *
-     * @param stop 每片前检查一次（领导权丢失 / 关停）
-     */
+    /** 旧运维调用保留为显式不删除：终态原唯一收据永久阻止跨owner重放，不受保留期或领导权TTL影响。 */
     public int sweepTerminal(long cutoffMs, int budget, java.util.function.BooleanSupplier stop) throws SQLException {
-        int deleted = 0;
-        try {
-            for (int shard = 0; shard < InboxShards.SHARD_COUNT && deleted < budget; shard++) {
-                if (stop.getAsBoolean()) {
-                    break;
-                }
-                final int s0 = shard;
-                final int limit = budget - deleted;
-                List<long[]> keys = jdbc.read(statement(), s -> s.list("SELECT `player_id`, `domain`, `seq` FROM " + ITEM_TABLE
-                                + " WHERE `shard` = ? AND `state` IN " + TERMINAL_STATES + " AND `updated_ms` < ? LIMIT ?",
-                        row -> new long[] {InboxSql.u64(row, "player_id"), InboxSql.u32(row, "domain"), InboxSql.u64(row, "seq")}, s0,
-                        u64(cutoffMs), limit));
-                for (long[] key : keys) {
-                    int n = jdbc.read(statement(), s -> s.update("DELETE FROM " + ITEM_TABLE + " WHERE " + ITEM_PK + " AND `state` IN "
-                            + TERMINAL_STATES + " AND `updated_ms` < ?", s0, u64(key[0]), u32((int) key[1]), u64(key[2]), u64(cutoffMs)));
-                    if (n == 1) {
-                        deleted++;
-                    }
-                }
-            }
-        } finally {
-            metrics.sweepDeleted(deleted);
-        }
-        return deleted;
+        metrics.sweepDeleted(0);
+        return 0;
     }
 
     // ================================================================ 提醒补发（设计 §6.3）
@@ -152,9 +124,13 @@ public final class InboxMaintenanceStore {
     /** 把一条没落定的提醒推迟到 dueMs，与清零同一个 next_seq CAS 令牌；<b>不碰 updated_ms</b>（它是退避的起算点）。 */
     boolean deferNotifyDue(NotifyDue due, long dueMs) throws SQLException {
         int shard = InboxShards.rowShard(due.playerId());
-        return jdbc.read(statement(), s -> s.update("UPDATE " + STREAM_TABLE + " SET `notify_due_ms` = ? WHERE " + STREAM_PK
+        Deadline budget = statement();
+        return jdbc.tx(budget, s -> {
+            InboxSql.lockPlayer(s, budget, due.playerId());
+            return s.update("UPDATE " + STREAM_TABLE + " SET `notify_due_ms` = ? WHERE " + STREAM_PK
                         + " AND `next_seq` = ? AND `notify_due_ms` <> 0", u64(dueMs), shard, u64(due.playerId()), u32(due.domain().getNumber()),
-                u64(due.nextSeq()))) == 1;
+                u64(due.nextSeq()));
+        }) == 1;
     }
 
     // ================================================================ 扫描型 gauge（设计 §9.4）

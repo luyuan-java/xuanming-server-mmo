@@ -42,6 +42,9 @@ public final class GuildActivityService {
         this.now = now;
         this.enabled = enabled;
     }
+    public GuildActivityService forActor(com.game.api.proto.SessionContext actor) {
+        return new GuildActivityService(store.forActor(actor), presence, locks, effects, now, enabled);
+    }
     private <T> T run(Work<T> work, java.util.function.Function<TipInfoMessage, T> reject) {
         try {
             if (!enabled)

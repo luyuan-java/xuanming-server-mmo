@@ -155,7 +155,7 @@ class OwnershipFenceSqlTest {
 
     @Test
     void 历史恢复的SQL行锁拖过预算后回滚_不登记持有也不改资产() throws Exception {
-        assertBlockedClaimRollsBack(() -> ownership.recoverAfterRestore(P, OptionalLong.of(8), Duration.ofMillis(100)));
+        assertBlockedClaimRollsBack(() -> ownership.recoverAfterRestore(P, OptionalLong.of(8), OptionalLong.of(1), Duration.ofMillis(100)));
     }
 
     private void assertBlockedClaimRollsBack(Supplier<Claim> action) throws Exception {
@@ -258,7 +258,7 @@ class OwnershipFenceSqlTest {
         byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
         db.putState(P, assets, 0, 1234);
 
-        Claim recovered = ownership.recoverAfterRestore(P, OptionalLong.of(auditedOldUpperBound), Duration.ofSeconds(2));
+        Claim recovered = ownership.recoverAfterRestore(P, OptionalLong.of(auditedOldUpperBound), OptionalLong.of(1), Duration.ofSeconds(2));
         assertThat(recovered).isEqualTo(new Claim.Claimed(2, false));
         assertThat(owner().ownerEpoch()).isGreaterThan(auditedOldUpperBound);
         Boolean heldSaved = db.tx().execute(s -> store.saveStateHeld(zombie, PlayerState.getDefaultInstance()));
@@ -284,15 +284,15 @@ class OwnershipFenceSqlTest {
         db.putState(P, assets, 3, 1234);
         OwnerState before = owner();
         for (OptionalLong floor : new OptionalLong[]{null, OptionalLong.empty(), OptionalLong.of(-1), OptionalLong.of(Long.MAX_VALUE)}) {
-            assertThat(ownership.recoverAfterRestore(P, floor, Duration.ofSeconds(2))).isInstanceOf(Claim.Failed.class);
+            assertThat(ownership.recoverAfterRestore(P, floor, OptionalLong.of(1), Duration.ofSeconds(2))).isInstanceOf(Claim.Failed.class);
             assertThat(owner()).isEqualTo(before);
             assertThat(ownership.heldCount()).isZero();
             assertStateBytes(assets, 3);
         }
-        assertThat(ownership.recoverAfterRestore(42, OptionalLong.of(0), Duration.ofSeconds(2))).isEqualTo(new Claim.NotFound());
-        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(0), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(6, false));
+        assertThat(ownership.recoverAfterRestore(42, OptionalLong.of(0), OptionalLong.of(1), Duration.ofSeconds(2))).isEqualTo(new Claim.NotFound());
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(0), OptionalLong.of(1), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(6, false));
         assertThat(ownership.epochOf(P)).hasValue(6);
-        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(0), Duration.ofSeconds(2))).isEqualTo(new Claim.Online(6));
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(0), OptionalLong.of(1), Duration.ofSeconds(2))).isEqualTo(new Claim.Online(6));
         assertStateBytes(assets, 3);
         ownership.release(P);
     }
@@ -303,13 +303,13 @@ class OwnershipFenceSqlTest {
         byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
         db.putState(P, assets, 3, 1234);
         OwnerState before = owner();
-        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(1), Duration.ofSeconds(2))).isInstanceOf(Claim.Failed.class);
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(1), OptionalLong.of(1), Duration.ofSeconds(2))).isInstanceOf(Claim.Failed.class);
         assertThat(owner()).isEqualTo(before);
         assertThat(ownership.heldCount()).isZero();
         assertStateBytes(assets, 3);
 
         db.jdbc().update("UPDATE player SET owner_epoch=0 WHERE player_id=?", P);
-        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(Long.MAX_VALUE - 1), Duration.ofSeconds(2)))
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(Long.MAX_VALUE - 1), OptionalLong.of(1), Duration.ofSeconds(2)))
                 .isEqualTo(new Claim.Claimed(Long.MAX_VALUE, false));
         assertThat(owner().ownerEpoch()).isEqualTo(Long.MAX_VALUE);
         assertStateBytes(assets, 3);
@@ -327,17 +327,17 @@ class OwnershipFenceSqlTest {
         byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
         db.putState(P, assets, 3, 1234);
         OwnerState before = owner();
-        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2))).isEqualTo(new Claim.Online(5));
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), OptionalLong.of(1), Duration.ofSeconds(2))).isEqualTo(new Claim.Online(5));
         assertThat(owner()).isEqualTo(before);
         assertThat(ownership.heldCount()).isZero();
         assertStateBytes(assets, 3);
 
         db.jdbc().update("UPDATE player SET owner_lease_until=? WHERE player_id=?", now - 1, P);
-        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(10, false));
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), OptionalLong.of(1), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(10, false));
         assertStateBytes(assets, 3);
         ownership.release(P);
         db.jdbc().update("UPDATE player SET owner_lease_until=? WHERE player_id=?", now + 60_000, P);
-        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(11, false));
+        assertThat(ownership.recoverAfterRestore(P, OptionalLong.of(9), OptionalLong.of(1), Duration.ofSeconds(2))).isEqualTo(new Claim.Claimed(11, false));
         assertStateBytes(assets, 3);
         assertThat(calls).isEmpty();
         ownership.release(P);
@@ -349,7 +349,7 @@ class OwnershipFenceSqlTest {
         byte[] assets = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(918)).build().toByteArray();
         db.putState(P, assets, 3, 1234);
         OwnerState before = owner();
-        Claim refused = db.tx().execute(s -> ownership.recoverAfterRestore(P, OptionalLong.of(9), Duration.ofSeconds(2)));
+        Claim refused = db.tx().execute(s -> ownership.recoverAfterRestore(P, OptionalLong.of(9), OptionalLong.of(1), Duration.ofSeconds(2)));
         assertThat(refused).isInstanceOf(Claim.Failed.class);
         assertThat(owner()).isEqualTo(before);
         assertThat(ownership.heldCount()).isZero();

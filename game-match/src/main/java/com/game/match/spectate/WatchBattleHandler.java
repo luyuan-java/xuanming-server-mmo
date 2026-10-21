@@ -58,7 +58,7 @@ public final class WatchBattleHandler implements MatchMethodHandler {
     @Override
     public Reply handle(SessionContext session, ByteString body, Deadline deadline) throws InvalidProtocolBufferException {
         WatchBattleRequest request = WatchBattleRequest.parseFrom(body);
-        return Reply.body(service.watch(session, request.getBattleId(), deadline));
+        return Reply.body(service.watch(session, request, deadline));
     }
 
     @Override

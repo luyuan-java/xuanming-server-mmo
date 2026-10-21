@@ -36,4 +36,18 @@ class GlobalRegionPolicyTest {
         var result=GlobalRegionPolicy.choose(List.of(ticket(1,1,1000,Map.of(1,20)),ticket(2,1,1000,Map.of(1,20))),List.of(node(1)),2000,CONFIG);
         assertEquals(1,result.members().size());
     }
+    @Test void 首选区来自完整原回执_不因机房暂离线改为跨区()throws Exception {
+        var a=ticket(1,2,1000,Map.of(1,20,2,100));var b=ticket(2,2,1000,Map.of(1,25,2,80));
+        assertEquals(1,GlobalRegionPolicy.preferred(GlobalProbeProfile.parseFrom(a.getProfile()),2000));
+        assertNull(GlobalRegionPolicy.choose(List.of(a,b),List.of(node(2)),2000,CONFIG));
+        assertEquals(2,GlobalRegionPolicy.choose(List.of(a,b),List.of(node(2)),40_000,CONFIG).node().getPhysicalRegion());
+    }
+    @Test void 评分曲线沿既有配置_关闭及终态兜底均不限分差() {
+        var a=ticket(1,2,1000,Map.of(1,20));var b=ticket(2,2,1000,Map.of(1,20)).toBuilder().setRatingCenti(170_000).build();
+        var enabled=new com.game.match.MatchProperties.Rating(true,new com.game.match.MatchProperties.Tolerance(100,5,100,1000,90),null,null,null);
+        assertFalse(GlobalRegionPolicy.ratingEligible(a,b,2000,enabled));assertTrue(GlobalRegionPolicy.ratingEligible(a,b,6000,enabled));
+        var disabled=new com.game.match.MatchProperties.Rating(false,enabled.tolerance(),null,null,null);
+        var extreme=b.toBuilder().setRatingCenti(Long.MAX_VALUE).build();
+        assertTrue(GlobalRegionPolicy.ratingEligible(a,extreme,2000,disabled));assertTrue(GlobalRegionPolicy.ratingEligible(a,extreme,91_000,enabled));
+    }
 }

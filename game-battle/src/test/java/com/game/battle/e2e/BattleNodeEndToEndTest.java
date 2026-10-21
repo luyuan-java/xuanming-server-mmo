@@ -528,8 +528,8 @@ class BattleNodeEndToEndTest {
         assertThat(addObserverTip(battleId, a)).isEqualTo(TIP_INVALID_PARAMETER);
 
         // dev 登记观众：路由留空，由接口按在线目录补全 gate 部分 → 大厅收到 177（role = OBSERVER）
-        BattleAssignedS2C assignedW = devAddObserver(battleId, watcher, 303);
-        assertThat(reissue(battle, battleId, watcher).toByteString()).as("观众补签与登记时的票逐字节相同")
+        BattleAssignedS2C assignedW = devAddObserver(battleId, watcher, 303).ticket();
+        assertThat(reissue(battle, battleId, watcher,com.game.proto.BattleTicketPayload.parseFrom(assignedW.getTokenPayload()).getSpectatorOperationId(),node.instanceId()).toByteString()).as("观众补签与登记时的票逐字节相同")
                 .isEqualTo(assignedW.toByteString());
 
         List<Frame> participantTail;
@@ -601,7 +601,7 @@ class BattleNodeEndToEndTest {
                 pve(second, System.currentTimeMillis() + 300_000, hero(a, routing(gate, 301))).toByteArray());
         admitted(CreateBattleResult.parseFrom(created2.body()));
         gate.next(a, Duration.ofSeconds(5));
-        BattleAssignedS2C stopTicket = devAddObserver(second, watcher, 303);
+        BattleAssignedS2C stopTicket = devAddObserver(second, watcher, 303).ticket();
         try (DirectClient cw = DirectClient.connectWith(stopTicket)) {
             cw.expect("verify-ok:" + second);
             cw.expect("push:" + NOTIFY_SPECTATE_STATE);
@@ -614,13 +614,16 @@ class BattleNodeEndToEndTest {
         assertThat(issueTip(second, watcher)).isEqualTo(TIP_INVALID_PARAMETER);
 
         // 同一间房再登记 → 直连 → RemoveObserver：166{REMOVED, ONGOING} → FIN
-        BattleAssignedS2C removeTicket = devAddObserver(second, watcher, 303);
+        var removing = devAddObserver(second, watcher, 303);
+        BattleAssignedS2C removeTicket=removing.ticket();
         try (DirectClient cw = DirectClient.connectWith(removeTicket)) {
             cw.expect("verify-ok:" + second);
             cw.expect("push:" + NOTIFY_SPECTATE_STATE);
             HttpResponse<byte[]> removed = admin(managementPort, ADMIN_TOKEN, DevBattleController.REMOVE_OBSERVER,
-                    RemoveObserverRequest.newBuilder().setBattleId(second).setObserverPlayerId(watcher).setReason("e2e").build().toByteArray());
-            assertThat(removed.statusCode()).isEqualTo(204);
+                    RemoveObserverRequest.newBuilder().setBattleId(second).setObserverPlayerId(watcher).setReason("e2e")
+                            .setSpectatorOperationId(removing.original().getSpectatorOperationId()).setAdmitBeforeMs(removing.original().getAdmitBeforeMs()).setTargetInstanceId(node.instanceId()).build().toByteArray());
+            assertThat(removed.statusCode()).isEqualTo(200);
+            var cancelled=com.game.proto.RemoveObserverResponse.parseFrom(removed.body());assertThat(cancelled.getCancelled()).isTrue();assertThat(cancelled.getSpectatorOperationId()).isEqualTo(removing.original().getSpectatorOperationId());assertThat(cancelled.getTargetInstanceId()).isEqualTo(node.instanceId());
             SpectateEndS2C kicked = SpectateEndS2C.parseFrom(cw.expect("push:" + NOTIFY_SPECTATE_END).content().getSerializedMessage());
             assertThat(kicked.getReason()).isEqualTo(eSpectateEndReason.SPECTATE_END_REMOVED);
             assertThat(kicked.getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_ONGOING);
@@ -645,12 +648,14 @@ class BattleNodeEndToEndTest {
         long deadline = t0 + 8_000;
         // 都不在线：大厅公告 OFFLINE（至多一次），票据经补签拿
         createAdmitted(battle, pvp(battleId, deadline, tank(a, 0, routing(gate, 401)), tank(b, 1, routing(gate, 402))));
+        String observerOperation=UUID.randomUUID().toString();
         AddObserverResponse added = battle.addObserver(AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(watcher)
+                .setSpectatorOperationId(observerOperation).setAdmitBeforeMs(System.currentTimeMillis()+30_000).setTargetInstanceId(node.instanceId())
                 .setObserverName("e2e-watcher").setRouting(routing(gate, 403)).build()).get(10, TimeUnit.SECONDS);
         assertThat(added.hasErrorMessage()).isFalse();
         BattleAssignedS2C ticketA = reissue(battle, battleId, a);
         BattleAssignedS2C ticketB = reissue(battle, battleId, b);
-        BattleAssignedS2C ticketW = reissue(battle, battleId, watcher);
+        BattleAssignedS2C ticketW = reissue(battle, battleId, watcher,observerOperation,node.instanceId());
         assertThat(List.of(ticketA, ticketB, ticketW)).allSatisfy(t -> assertThat(t.getExpireAtMs()).isEqualTo(deadline));
         assertThat(ticketW.getRole()).isEqualTo(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
 
@@ -755,7 +760,7 @@ class BattleNodeEndToEndTest {
         assertRejected(signedWith(good, p -> p.setBattleNodeId(p.getBattleNodeId() + 1).setExpireAtMs(1)), "ticket rejected: node_mismatch");
         // 参战票当观众票用（票不能换角色）→ 名单拒绝
         assertRejected(signedWith(good, p -> p.setRole(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER)),
-                "battle not found or player not in this battle");
+                "ticket rejected: role_invalid");
 
         try (DirectClient c = DirectClient.connectWith(ticket)) {
             c.expect("verify-ok:" + battleId);
@@ -836,15 +841,18 @@ class BattleNodeEndToEndTest {
 
     private int addObserverTip(long battleId, long observer) throws Exception {
         AddObserverResponse response = battle.addObserver(AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observer)
+                .setSpectatorOperationId(UUID.randomUUID().toString()).setAdmitBeforeMs(System.currentTimeMillis()+30_000).setTargetInstanceId(node.instanceId())
                 .setObserverName("e2e").setRouting(routing(gate, 999)).build()).get(10, TimeUnit.SECONDS);
         return response.getErrorMessage().getId();
     }
 
     /** dev 登记观众（路由留空，由接口按在线目录补全），返回大厅收到的观众票。 */
-    private BattleAssignedS2C devAddObserver(long battleId, long observer, int expectedSession) throws Exception {
+    private record DevObservation(BattleAssignedS2C ticket,AddObserverRequest original){}
+    private DevObservation devAddObserver(long battleId, long observer, int expectedSession) throws Exception {
+        var original=AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observer).setObserverName("e2e-watcher")
+                .setSpectatorOperationId(UUID.randomUUID().toString()).setAdmitBeforeMs(System.currentTimeMillis()+30_000).setTargetInstanceId(node.instanceId()).build();
         HttpResponse<byte[]> response = admin(managementPort, ADMIN_TOKEN, DevBattleController.ADD_OBSERVER,
-                AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observer).setObserverName("e2e-watcher")
-                        .build().toByteArray());
+                original.toByteArray());
         assertThat(response.statusCode()).as(new String(response.body(), StandardCharsets.UTF_8)).isEqualTo(200);
         assertThat(AddObserverResponse.parseFrom(response.body()).hasErrorMessage()).isFalse();
         Delivery lobby = gate.next(observer, Duration.ofSeconds(5));
@@ -854,7 +862,7 @@ class BattleNodeEndToEndTest {
         BattleAssignedS2C assigned = BattleAssignedS2C.parseFrom(lobby.contents().getFirst().getSerializedMessage());
         assertThat(assigned.getBattleId()).isEqualTo(battleId);
         assertThat(assigned.getRole()).isEqualTo(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
-        return assigned;
+        return new DevObservation(assigned,original);
     }
 
     private BattleTokenVerifyRequest signed(ByteString payload) {

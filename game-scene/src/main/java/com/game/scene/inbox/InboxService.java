@@ -415,7 +415,7 @@ public final class InboxService implements InboxHooks {
 
     /** 不会自愈的延后原因：目前只有账本损坏（加载时判定、此后不变）。 */
     private static boolean stuckDeferReason(DeferReason reason) {
-        return reason == DeferReason.LEDGER_INVALID;
+        return reason == DeferReason.LEDGER_INVALID || reason == DeferReason.ADMISSION_MISSING;
     }
 
     /** 记下延后原因并在 delayMs 之后续做。同一原因连续出现只在第一次打 INFO；不会自愈的另按节拍打 WARN（落在 [10m] 告警窗口之内）。 */
@@ -484,6 +484,7 @@ public final class InboxService implements InboxHooks {
 
     /** 返回 NONE = 放行。拉取前判一次、应用前再判一次；确认不经过它。 */
     private DeferReason checkApplyGate(ScenePlayer player, int domain) {
+        if (player.admission() == null) return DeferReason.ADMISSION_MISSING;
         if (!consumerEnabled()) {
             return DeferReason.DISABLED;
         }
@@ -544,7 +545,7 @@ public final class InboxService implements InboxHooks {
     private void sendAck(ScenePlayer player, DomainState state, long now) {
         long epoch = player.ownerEpoch();
         long playerId = player.playerId();
-        if (epoch == 0) {
+        if (epoch == 0 || player.admission() == null) {
             // 拉取前已过 epoch 闸，epoch 是实例上的 final：走到这里只可能是缺陷。发 0 会被判 EPOCH_REQUIRED 并停用，不如保留队列退避再看
             state.ackFailStreak = saturatingIncrement(state.ackFailStreak);
             state.nextAckMs = now + InboxRules.backoffMs(state.ackFailStreak, jitter());
@@ -557,6 +558,7 @@ public final class InboxService implements InboxHooks {
                 .setPlayerId(playerId)
                 .setDomainValue(state.domain)
                 .setOwnerEpoch(epoch)
+                .setAdmission(player.admission())
                 .setCorrelationId(correlationId)
                 // 只用于对端日志：服务端围栏 / Ack 异常的 ERROR 据此定位发送方（评审 L10）
                 .setSceneNodeId(sceneNodeId.getAsInt());
@@ -811,6 +813,7 @@ public final class InboxService implements InboxHooks {
                 .setPlayerId(playerId)
                 .setDomainValue(state.domain)
                 .setOwnerEpoch(epoch)
+                .setAdmission(player.admission())
                 .setCorrelationId(correlationId)
                 .setMaxItems(InboxRules.FETCH_BATCH_MAX)
                 // 账本水位：服务端据此检测收件箱库被恢复（CursorAhead）并抬号

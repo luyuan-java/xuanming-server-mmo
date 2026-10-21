@@ -1,6 +1,7 @@
 package com.game.friend;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -88,6 +89,12 @@ class FriendReplicasTiDBTest {
             FriendConfiguration.verifyFriendDatabase(second, true);
             assertThat(connectionId(first)).isNotEqualTo(connectionId(second));
             schema.syncAll(first);
+            try (var statement = first.createStatement()) {
+                statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL,"
+                        + " owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            }
+            new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(firstPool);
+            com.game.common.player.RouteAuthorityInitializer.initialize(first,UUID.randomUUID().toString(),java.util.List.of(1));
         }
     }
 
@@ -120,10 +127,41 @@ class FriendReplicasTiDBTest {
     @BeforeEach
     void emptyTables() throws SQLException {
         try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement()) {
-            for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block")) {
+            for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block", "player")) {
                 statement.execute("TRUNCATE TABLE " + table);
             }
         }
+    }
+
+    @Test
+    void 双副本共享原会话权限_过户与ABA旧请求拒绝_冻结目标关系不变() throws Exception {
+        try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO player(player_id,account,owner_revision) VALUES(3101,'original',7),(3102,'peer',3)");
+        }
+        FriendStore original = store(firstPool, LIMITS).forActor(3101, "original", 7);
+        FriendStore peer = store(secondPool, LIMITS).forActor(3102, "peer", 3);
+        long request = original.addRequest(3101, 3102, deadline()).requestId();
+        assertThat(peer.accept(request, 3102, 0, deadline()).result()).isEqualTo(AcceptResult.OK);
+        assertThat(original.friends(3101, 200, deadline())).hasSize(1);
+        for (String changed : List.of("account='next',owner_revision=8", "account='original',owner_revision=9")) {
+            try (Connection connection = secondPool.getConnection(); var statement = connection.createStatement()) {
+                statement.execute("UPDATE player SET " + changed + " WHERE player_id=3101");
+            }
+            assertThatThrownBy(() -> original.remove(3101, 3102, deadline())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.block(3101, 3102, deadline())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.friends(3101, 200, deadline())).isInstanceOf(SecurityException.class);
+            assertThat(count("SELECT COUNT(*) FROM friend")).isEqualTo(2);
+            assertThat(count("SELECT COUNT(*) FROM friend_block")).isZero();
+        }
+        FriendStore current = store(secondPool, LIMITS).forActor(3101, "original", 9);
+        assertThat(current.friends(3101, 200, deadline())).hasSize(1);
+        try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("UPDATE player SET trade_listing_id=81 WHERE player_id=3101");
+        }
+        assertThatThrownBy(() -> current.remove(3101, 3102, deadline())).isInstanceOf(SecurityException.class);
+        assertThatThrownBy(() -> peer.remove(3102, 3101, deadline())).isInstanceOf(SecurityException.class);
+        assertThat(count("SELECT COUNT(*) FROM friend")).isEqualTo(2);
+        assertInvariants();
     }
 
     @Test

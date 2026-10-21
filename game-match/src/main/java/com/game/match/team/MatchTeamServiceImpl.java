@@ -128,10 +128,9 @@ public class MatchTeamServiceImpl implements MatchTeamService {
             var original=parseTeamRequest(request.getClientRequest());
             if(request.getInitiatorPlayerId()==0||request.getRequestId().isEmpty()||!original.getRequestId().equals(request.getRequestId())
                     ||original.getExpectedTeamId()!=request.getTeamId()||original.getBattleConfigId()!=request.getBattleConfigId())return notAttempted();
-            var key=com.game.match.global.GlobalMatchStore.directUuidKey(1,request.getInitiatorPlayerId(),request.getRequestId());
-            global.reserveDirect(key,request.getClientRequest(),com.game.proto.match.MatchMode.MATCH_MODE_PVE_TEAM_VALUE,request.getBattleConfigId(),
-                    request.getRosterList(),request.getTicketIdsMap(),request.getTeamId(),null);
-            return TeamTicketsReply.newBuilder().setStatus(TeamTicketsStatus.TEAM_TICKETS_CREATED).build();
+            var result=global.reserveTeam(request);
+            if(result.getState()==5)return notAttempted();
+            return TeamTicketsReply.newBuilder().setStatus(result.getBattleId()==0&&result.getState()==2?TeamTicketsStatus.TEAM_TICKETS_QUEUED:TeamTicketsStatus.TEAM_TICKETS_CREATED).build();
         },
                 why -> {
                     log.warn("[match] createTeamTickets {}，什么都没写 team={}", why, Long.toUnsignedString(request.getTeamId()));
@@ -154,7 +153,9 @@ public class MatchTeamServiceImpl implements MatchTeamService {
         if(global==null)return CompletableFuture.failedFuture(new IllegalStateException("全球开局权威未启用"));
         Deadline d=MatchRpcAttachments.deadlineFromCall(budgetMs);
         return onWorker(d,()->{
-            var key=com.game.match.global.GlobalMatchStore.directUuidKey(1,request.getPlayerId(),request.getRequestId());
+            var key=com.game.match.global.GlobalMatchStore.directUuidKey(1,request.getPlayerId(),request.getRequestId()).toBuilder()
+                    .setOwnerAccount(request.getOwnerAccount()).setOwnerRevision(request.getOwnerRevision()).build();
+            var unit=global.store().teamIntent(key,request.getClientRequest());if(unit!=null)return unit;
             var original=global.store().direct(key);
             if(original==null)return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).build();
             if(!request.getClientRequest().isEmpty()&&!original.getPayload().equals(request.getClientRequest()))throw new IllegalArgumentException("重复开局意图参数不同");

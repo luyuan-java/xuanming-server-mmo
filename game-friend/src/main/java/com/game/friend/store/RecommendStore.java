@@ -22,7 +22,8 @@ import javax.sql.DataSource;
  *   <li>外层列一律写别名（{@code f2.friend_player_id} / {@code c.player_id}）：裸列名会先解析到子查询自己的表上，排除静默失效；</li>
  *   <li>随机兜底的派生表 LIMIT（窗口 1024 个去重玩家）就是扫描上界本身，不回绕、不越窗：结果可能少于 want（可能为空）。</li>
  * </ul>
- * <b>纯读</b>：不进事务、不加锁，结果允许轻微陈旧；绝不能被复用成 AddFriend 的前置判定。候选池只有「至少有一条好友边的玩家」。
+ * <b>纯读</b>：系统读取不进事务；客户端绑定视图在短事务首锁 P 验证原会话，关系查询仍为普通读、允许轻微陈旧。
+ * 绝不能被复用成 AddFriend 的前置判定。候选池只有「至少有一条好友边的玩家」。
  * 这些写法 H2 不支持，测试连真 MySQL。线程安全；阻塞。
  */
 public final class RecommendStore implements RecommendSource {
@@ -75,16 +76,35 @@ public final class RecommendStore implements RecommendSource {
     private final int queryTimeoutSeconds;
     /** {@code (lo, span) -> lo + [0, span)} 的随机 pivot（测试注入固定值）；span 按无符号解释。 */
     private final LongBinaryOperator pivotPicker;
+    private final FriendActor actor;
 
     public RecommendStore(DataSource dataSource, int queryTimeoutSeconds, LongBinaryOperator pivotPicker) {
+        this(dataSource, queryTimeoutSeconds, pivotPicker, null);
+    }
+
+    private RecommendStore(DataSource dataSource, int queryTimeoutSeconds, LongBinaryOperator pivotPicker, FriendActor actor) {
         this.dataSource = dataSource;
         this.queryTimeoutSeconds = queryTimeoutSeconds;
         this.pivotPicker = pivotPicker;
+        this.actor = actor;
+    }
+
+    @Override
+    public RecommendSource forActor(long playerId, String originalAccount, long originalRevision) {
+        return new RecommendStore(dataSource, queryTimeoutSeconds, pivotPicker,
+                new FriendActor(playerId, originalAccount, originalRevision));
+    }
+
+    @Override
+    public void authorize(Deadline deadline) throws SQLException {
+        if (actor == null) throw new SecurityException("外部好友推荐必须绑定原会话");
+        read(deadline, c -> null);
     }
 
     /** 好友的好友：按共同好友数降序、同数随机，至多 {@code limit} 个。参数：me × 7 → exclude… → limit。 */
     @Override
     public List<Candidate> mutual(long me, List<Long> exclude, int limit, Deadline deadline) throws SQLException {
+        if (actor != null) actor.requirePlayer(me);
         String sql = MUTUAL_BASE + excludeClause("f2.friend_player_id", exclude.size())
                 + "\nGROUP BY f2.friend_player_id\nORDER BY mutual DESC, RAND()\nLIMIT ?";
         List<Object> args = new ArrayList<>();
@@ -102,21 +122,18 @@ public final class RecommendStore implements RecommendSource {
      */
     @Override
     public List<Candidate> random(long me, List<Long> exclude, int limit, Deadline deadline) throws SQLException {
-        long lo;
-        long hi;
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = prepare(c, ID_RANGE, List.of(), deadline);
-             ResultSet rs = ps.executeQuery()) {
-            if (!rs.next()) {
-                return List.of();
+        if (actor != null) actor.requirePlayer(me);
+        long[] range = read(deadline, c -> {
+            try (PreparedStatement ps = prepare(c, ID_RANGE, List.of(), deadline); ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                Object min = rs.getObject(1);
+                Object max = rs.getObject(2);
+                return min == null || max == null ? null : new long[] {toLong(min), toLong(max)};
             }
-            Object min = rs.getObject(1);
-            Object max = rs.getObject(2);
-            if (min == null || max == null) {
-                return List.of();
-            }
-            lo = toLong(min);
-            hi = toLong(max);
-        }
+        });
+        if (range == null) return List.of();
+        long lo = range[0];
+        long hi = range[1];
         if (hi == 0) {
             return List.of();
         }
@@ -132,6 +149,7 @@ public final class RecommendStore implements RecommendSource {
 
     /** 参数：pivot → 窗口 W → me × 6 → exclude… → limit。 */
     List<Candidate> anchor(long me, List<Long> exclude, long pivot, int limit, Deadline deadline) throws SQLException {
+        if (actor != null) actor.requirePlayer(me);
         String sql = ANCHOR_BASE + excludeClause("c.player_id", exclude.size()) + "\nORDER BY c.player_id\nLIMIT ?";
         List<Object> args = new ArrayList<>();
         args.add(JdbcFriendStore.uid(pivot));
@@ -153,13 +171,43 @@ public final class RecommendStore implements RecommendSource {
     }
 
     private List<Candidate> query(String sql, List<Object> args, Deadline deadline) throws SQLException {
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = prepare(c, sql, args, deadline);
-             ResultSet rs = ps.executeQuery()) {
-            List<Candidate> out = new ArrayList<>();
-            while (rs.next()) {
-                out.add(new Candidate(JdbcFriendStore.readUid(rs, 1), (int) rs.getLong(2)));
+        return read(deadline, c -> {
+            try (PreparedStatement ps = prepare(c, sql, args, deadline); ResultSet rs = ps.executeQuery()) {
+                List<Candidate> out = new ArrayList<>();
+                while (rs.next()) out.add(new Candidate(JdbcFriendStore.readUid(rs, 1), (int) rs.getLong(2)));
+                return out;
             }
-            return out;
+        });
+    }
+
+    @FunctionalInterface
+    private interface ReadBody<T> {
+        T run(Connection connection) throws SQLException;
+    }
+
+    /** 推荐可以陈旧，原会话权限不能陈旧：读取关系的整个语句都在 P 锁内完成。 */
+    private <T> T read(Deadline deadline, ReadBody<T> body) throws SQLException {
+        FriendActor.timeout(deadline, queryTimeoutSeconds);
+        try (Connection c = dataSource.getConnection()) {
+            if (actor == null) return body.run(c);
+            boolean autoCommit = c.getAutoCommit();
+            int isolation = c.getTransactionIsolation();
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            c.setAutoCommit(false);
+            try {
+                actor.lock(c, deadline, queryTimeoutSeconds);
+                T result = body.run(c);
+                FriendActor.timeout(deadline, queryTimeoutSeconds);
+                c.commit();
+                return result;
+            } catch (SQLException | RuntimeException | Error failure) {
+                try { c.rollback(); } catch (SQLException rollback) { failure.addSuppressed(rollback); }
+                throw failure;
+            } finally {
+                // 失败路径已回滚，才可还原自动提交。
+                if (c.getAutoCommit() != autoCommit) c.setAutoCommit(autoCommit);
+                if (c.getTransactionIsolation() != isolation) c.setTransactionIsolation(isolation);
+            }
         }
     }
 

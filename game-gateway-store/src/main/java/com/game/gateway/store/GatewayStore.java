@@ -32,11 +32,24 @@ public final class GatewayStore {
     private final GatewayStoreMapper mapper;
     private final TransactionOperations tx;
     private final LongSupplier nowMs;
+    private final javax.sql.DataSource routeSource;
 
     public GatewayStore(GatewayStoreMapper mapper, TransactionOperations tx, LongSupplier nowMs) {
+        this(mapper,tx,nowMs,tx instanceof org.springframework.transaction.support.TransactionTemplate template
+            && template.getTransactionManager() instanceof org.springframework.jdbc.datasource.DataSourceTransactionManager manager?manager.getDataSource():null);
+    }
+    public GatewayStore(GatewayStoreMapper mapper, TransactionOperations tx, LongSupplier nowMs,javax.sql.DataSource routeSource) {
         this.mapper = mapper;
         this.tx = tx;
         this.nowMs = nowMs;
+        this.routeSource=routeSource;
+    }
+    private void route(int zone){
+        if(routeSource==null)return; // 只有显式Mapper/TransactionOperations无IO夹具没有真实连接；生产装配必传DataSource。
+        var c=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(routeSource);
+        try{com.game.common.player.PlayerRouteAuthority.lockConfigurationZone(c,zone,3);}
+        catch(java.sql.SQLException failure){throw new IllegalStateException("目录更新被SQL路由维护原件拒绝",failure);}
+        finally{org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(c,routeSource);}
     }
 
     // ------------------------------------------------------------------ 区服目录
@@ -55,6 +68,7 @@ public final class GatewayStore {
         checkZone(zone);
         long now = nowMs.getAsLong();
         return retryOnDeadlock(() -> tx.execute(status -> {
+            route(zone.zoneId());
             mapper.upsertZone(zone, now);
             return zone(zone.zoneId()).orElseThrow(() -> new IllegalStateException(
                     "zone_config upsert 之后同一事务内回读不到该行 zone_id=" + zone.zoneId()));
@@ -64,7 +78,7 @@ public final class GatewayStore {
     /** 启动播种：不存在才插入，已有的不动。@return 是否插入了 */
     public boolean seedZone(ZoneRow zone) {
         checkZone(zone);
-        return mapper.insertZoneIfAbsent(zone, nowMs.getAsLong()) > 0;
+        return Boolean.TRUE.equals(tx.execute(status->{route(zone.zoneId());return mapper.insertZoneIfAbsent(zone,nowMs.getAsLong())>0;}));
     }
 
     /** 覆盖已存在区服的业务列（{@code zoneId} 以路径为准，忽略 values 里的）；不存在为空，绝不插入。 */
@@ -73,6 +87,7 @@ public final class GatewayStore {
                 values.openTime(), values.recommended(), values.sortOrder(), 0, 0));
         long now = nowMs.getAsLong();
         return tx.execute(status -> {
+            route(zoneId);
             mapper.updateZone(zoneId, values, now);
             return zone(zoneId);
         });
@@ -85,6 +100,7 @@ public final class GatewayStore {
         }
         long now = nowMs.getAsLong();
         return tx.execute(txStatus -> {
+            route(zoneId);
             mapper.updateZoneStatus(zoneId, status.code(), maintenanceMsg, now);
             return zone(zoneId);
         });
@@ -92,7 +108,7 @@ public final class GatewayStore {
 
     /** @return 是否删了（不存在为 false） */
     public boolean deleteZone(int zoneId) {
-        return mapper.deleteZone(zoneId) > 0;
+        return Boolean.TRUE.equals(tx.execute(status->{route(zoneId);return mapper.deleteZone(zoneId)>0;}));
     }
 
     private static void checkZone(ZoneRow zone) {

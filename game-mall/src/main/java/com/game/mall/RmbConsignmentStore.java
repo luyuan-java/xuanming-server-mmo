@@ -50,7 +50,7 @@ public final class RmbConsignmentStore {
         tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED); tx.setTimeout(5);
         jdbc.setQueryTimeout(5);
     }
-    record Frozen(String listingId, String sellerAccount, String buyerAccount, String escrowReference,
+    record Frozen(String listingId, String sellerAccount, String buyerAccount, String buyerOwnerRevision, String escrowReference,
                   String escrowProof, long priceFen, int feeBps, long coolingMs, String title) {}
     private record Stored(RmbConsignmentApi.Listing view, String sellerAccount, String escrowReference,
                           String escrowProof, String digest) {}
@@ -64,12 +64,12 @@ public final class RmbConsignmentStore {
             || input.priceFen() < 1 || input.priceFen() > MallOrderStore.MAX_AMOUNT_MINOR || input.title() == null
             || input.title().isBlank() || input.title().length() > 128) { throw invalid(); }
         if (input.assetKind().equals("CURRENCY")) {
-            if (input.assetCurrencyType() == null || !rules.currencies().contains(input.assetCurrencyType())) { throw invalid(); }
+            if (input.assetCurrencyType() == null || !rules.getCurrencies().contains(input.assetCurrencyType())) { throw invalid(); }
         } else if (input.assetCurrencyType() != null) { throw invalid(); }
         String digest = digest(input);
         long now = clock.millis();
-        long notice = Math.addExact(now, rules.noticeMs());
-        long end = Math.addExact(notice, rules.saleMs());
+        long notice = Math.addExact(now, rules.getNoticeMs());
+        long end = Math.addExact(notice, rules.getSaleMs());
         try {
             return Objects.requireNonNull(tx.execute(status -> {
                 // listing主键和唯一托管引用共同串行化首次登记，不接管不同资产的旧listing。
@@ -78,8 +78,8 @@ public final class RmbConsignmentStore {
                     + "notice_end_ms,sale_end_ms,state,created_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'LISTED',?)"
                     + " ON DUPLICATE KEY UPDATE listing_id=listing_id", input.listingId(), input.sellerPlayerId(),
                     bytes(input.sellerAccount()), input.marketZone(), input.assetKind(), input.assetCurrencyType(),
-                    input.escrowReference(), input.escrowProof(), digest, input.title(), input.priceFen(), rules.feeBps(),
-                    rules.coolingMs(), notice, end, now);
+                    input.escrowReference(), input.escrowProof(), digest, input.title(), input.priceFen(), rules.getFeeBps(),
+                    rules.getCoolingMs(), notice, end, now);
                 var rows = listing(input.listingId(), true);
                 if (rows.isEmpty() || !rows.getFirst().digest().equals(digest)) {
                     throw new MallException(409, "寄售编号或托管引用已用于不同条款");
@@ -95,6 +95,13 @@ public final class RmbConsignmentStore {
         return new RmbConsignmentApi.Listings(jdbc.query("SELECT * FROM commerce_consignment WHERE listing_id>? "
             + "AND state IN ('LISTED','LOCKED') AND sale_end_ms>? ORDER BY listing_id LIMIT ?",
             (row, index) -> stored(row).view(), page.afterListingId(), clock.millis(), page.limit()));
+    }
+    public RmbConsignmentApi.Listing get(RmbConsignmentApi.Get input) {
+        if (input == null) { throw invalid(); }
+        player(input.listingId());
+        var rows = listing(input.listingId(), false);
+        if (rows.isEmpty()) { throw new MallException(404, "寄售不存在"); }
+        return rows.getFirst().view();
     }
 
     public RmbConsignmentApi.Listing cancel(RmbConsignmentApi.Cancel input) {
@@ -114,6 +121,7 @@ public final class RmbConsignmentStore {
     Frozen reserve(RmbConsignmentApi.Buy input, String orderId) {
         if (input == null) { throw invalid(); }
         player(input.listingId()); player(input.buyerPlayerId()); account(input.buyerAccount()); request(input.requestId());
+        CommerceIdentity.revision(input.buyerOwnerRevision());
         var value = requireListing(input.listingId());
         if (value.sellerAccount().equals(input.buyerAccount())) { throw new MallException(409, "同账号不能购买自己的角色或资产"); }
         long now = clock.millis();
@@ -123,17 +131,18 @@ public final class RmbConsignmentStore {
         if (jdbc.update("UPDATE commerce_consignment SET state='LOCKED',current_order_sn=? WHERE listing_id=? AND state='LISTED'",
                 orderId, input.listingId()) != 1) { throw new MallException(409, "寄售状态已变化"); }
         var view = value.view();
-        jdbc.update("INSERT INTO commerce_consignment_order(order_sn,listing_id,buyer_account,request_id,seller_account,escrow_reference,"
-            + "escrow_proof,fee_bps,cooling_ms) VALUES(?,?,?,?,?,?,?,?,?)", orderId, input.listingId(), bytes(input.buyerAccount()), bytes(input.requestId()),
+        jdbc.update("INSERT INTO commerce_consignment_order(order_sn,listing_id,buyer_account,buyer_owner_revision,request_id,seller_account,escrow_reference,"
+            + "escrow_proof,fee_bps,cooling_ms) VALUES(?,?,?,?,?,?,?,?,?,?)", orderId, input.listingId(), bytes(input.buyerAccount()), bytes(input.buyerOwnerRevision()), bytes(input.requestId()),
             bytes(value.sellerAccount()), value.escrowReference(), value.escrowProof(), view.feeBps(), view.coolingMs());
-        return new Frozen(view.listingId(), value.sellerAccount(), input.buyerAccount(), value.escrowReference(),
+        return new Frozen(view.listingId(), value.sellerAccount(), input.buyerAccount(), input.buyerOwnerRevision(), value.escrowReference(),
             value.escrowProof(), view.priceFen(), view.feeBps(), view.coolingMs(), view.title());
     }
 
     Frozen mapping(String orderId) {
         var rows = jdbc.query("SELECT c.*,o.pay_amount,l.title FROM commerce_consignment_order c JOIN oms_order o ON o.order_sn=c.order_sn "
             + "JOIN commerce_consignment l ON l.listing_id=c.listing_id WHERE c.order_sn=?", (row, index) -> new Frozen(
-                row.getString("listing_id"), text(row.getBytes("seller_account")), text(row.getBytes("buyer_account")),
+                row.getString("listing_id"), text(row.getBytes("seller_account")), CommerceIdentity.storedAccount(row.getBytes("buyer_account")),
+                CommerceIdentity.storedRevision(row.getBytes("buyer_owner_revision")),
                 row.getString("escrow_reference"), row.getString("escrow_proof"), row.getLong("pay_amount"),
                 row.getInt("fee_bps"), row.getLong("cooling_ms"), row.getString("title")), orderId);
         return rows.isEmpty() ? null : rows.getFirst();
@@ -145,7 +154,8 @@ public final class RmbConsignmentStore {
     }
     void sameOrder(String orderId, RmbConsignmentApi.Buy input) {
         var original = mapping(orderId);
-        if (original == null || !original.listingId().equals(input.listingId()) || !original.buyerAccount().equals(input.buyerAccount())) {
+        if (original == null || !original.listingId().equals(input.listingId()) || !original.buyerAccount().equals(input.buyerAccount())
+                || !original.buyerOwnerRevision().equals(input.buyerOwnerRevision())) {
             throw new MallException(409, "请求号已用于不同寄售或账号");
         }
     }
@@ -195,13 +205,14 @@ public final class RmbConsignmentStore {
             cursor = upper.getFirst();
         }
         record Pending(RmbConsignmentApi.Delivery intent, long createdMs) {}
-        var rows = jdbc.query("SELECT d.*,c.buyer_account,c.listing_id,c.escrow_reference,c.escrow_proof,o.pay_amount "
+        var rows = jdbc.query("SELECT d.*,c.buyer_account,c.buyer_owner_revision,c.listing_id,c.escrow_reference,c.escrow_proof,o.pay_amount "
             + "FROM commerce_delivery_intent d JOIN commerce_consignment_order c ON c.order_sn=d.order_sn "
             + "JOIN oms_order o ON o.order_sn=d.order_sn WHERE d.status='PENDING' "
             + "AND (d.created_ms>? OR (d.created_ms=? AND d.order_sn>?)) "
             + "AND (d.created_ms<? OR (d.created_ms=? AND d.order_sn<=?)) ORDER BY d.created_ms,d.order_sn LIMIT ?",
             (row, index) -> new Pending(new RmbConsignmentApi.Delivery(row.getString("order_sn"), row.getString("buyer_id"),
-                text(row.getBytes("buyer_account")), row.getString("listing_id"), row.getString("escrow_reference"),
+                CommerceIdentity.storedAccount(row.getBytes("buyer_account")), CommerceIdentity.storedRevision(row.getBytes("buyer_owner_revision")),
+                row.getString("listing_id"), row.getString("escrow_reference"),
                 row.getString("escrow_proof"), row.getLong("pay_amount")), row.getLong("created_ms")),
             cursor.afterMs(), cursor.afterMs(), cursor.afterId(), cursor.upperMs(), cursor.upperMs(), cursor.upperId(), input.limit() + 1);
         var result = new java.util.ArrayList<RmbConsignmentApi.DeliveryEntry>();
@@ -417,7 +428,7 @@ public final class RmbConsignmentStore {
     private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
     private static String text(byte[] value) { return new String(value, StandardCharsets.UTF_8); }
     static void account(String value) {
-        if (value == null || value.isEmpty() || bytes(value).length > 191 || !new String(bytes(value), StandardCharsets.UTF_8).equals(value)) { throw invalid(); }
+        CommerceIdentity.account(value);
     }
     static void player(String value) {
         try { MallAuthentication.requirePlayer(value); }

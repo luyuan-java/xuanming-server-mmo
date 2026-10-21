@@ -109,10 +109,13 @@ final class LocalPlayerImporter {
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
+            com.game.common.player.PlayerRouteAuthority.lock(connection,java.util.List.of(plan.playerId()),java.util.List.of((int)plan.zoneId()),5);
             LocalState local = readOwner(plan.playerId(), true);
             if (local.exists() && !tradeAdmission(plan.playerId(), true)) {
                 throw new Refused("本地角色存在交易锁、账号归属修订损坏或修订耗尽，禁止覆盖");
             }
+            if (com.game.player.store.RolePendingFence.blocked(connection,plan.playerId())||com.game.player.store.RolePendingFence.economicBlocked(connection,plan.playerId()))
+                throw new Refused("本地角色仍有历练ACTIVE、待发奖、未终局帮会/邮件资产或匹配在途，禁止覆盖");
             if (hasBlockingFinalSave(plan.playerId())) {
                 throw new Refused("本地玩家存在未完成或无效的最终存盘，必须先恢复待办再导入");
             }
@@ -149,8 +152,11 @@ final class LocalPlayerImporter {
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
+            com.game.common.player.PlayerRouteAuthority.lock(connection,java.util.List.of(playerId),5);
             LocalState local = readOwner(playerId, true);
-            if (!local.importHold() || local.ownerEpoch() != epoch || !tradeAdmission(playerId, false) || hasBlockingFinalSave(playerId)) {
+            if (!local.importHold() || local.ownerEpoch() != epoch || !tradeAdmission(playerId, false)
+                    || hasBlockingFinalSave(playerId)
+                    || com.game.player.store.RolePendingFence.blocked(connection,playerId)||com.game.player.store.RolePendingFence.economicBlocked(connection,playerId)) {
                 connection.rollback();
                 return false;
             }
@@ -212,15 +218,17 @@ final class LocalPlayerImporter {
         }
     }
 
-    /** 仅供明确local恢复；同player锁内复核，不能借replace抹掉线上经济冻结。 */
     private boolean tradeAdmission(long playerId, boolean replacing) throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement("SELECT trade_listing_id,owner_revision FROM player WHERE player_id=? FOR UPDATE")) {
             bindU64(ps, 1, playerId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return false;
                 long listing = rs.getLong(1); boolean missingListing = rs.wasNull();
-                long revision = rs.getLong(2); boolean missingRevision = rs.wasNull();
-                return !missingListing && !missingRevision && listing == 0 && revision > 0 && (!replacing || revision < Long.MAX_VALUE);
+                String rawRevision = rs.getString(2);
+                long revision;
+                try { revision = Long.parseUnsignedLong(rawRevision); }
+                catch (NumberFormatException invalid) { return false; }
+                return !missingListing && listing == 0 && revision > 0 && (!replacing || revision < Long.MAX_VALUE);
             }
         }
     }

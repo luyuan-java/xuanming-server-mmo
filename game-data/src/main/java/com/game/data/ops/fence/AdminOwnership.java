@@ -171,13 +171,19 @@ public final class AdminOwnership {
      * 重投见 Online 不得自行认领该纪元。本方法不自动踢人或重试发号，也不承诺恢复幂等。
      */
     public Claim recoverAfterRestore(long playerId, OptionalLong auditedOldEpochUpperBound, Duration timeout) {
+        metrics.opsClaim("error");return new Claim.Failed("历史恢复必须同时提供独立审核的账号归属修订上界；仅E入口已封闭");
+    }
+    public Claim recoverAfterRestore(long playerId,OptionalLong auditedOldEpochUpperBound,OptionalLong auditedOwnerRevisionUpperBound,Duration timeout){
         if (auditedOldEpochUpperBound == null || auditedOldEpochUpperBound.isEmpty()) {
             metrics.opsClaim("error");
             return new Claim.Failed("缺少独立审核旧纪元上界");
         }
+        if(auditedOwnerRevisionUpperBound==null||auditedOwnerRevisionUpperBound.isEmpty()){
+            metrics.opsClaim("error");return new Claim.Failed("缺少独立审核的账号归属修订上界");
+        }
         ClaimResult result;
         try {
-            result = store.recoverOwnershipAfterRestore(playerId, auditedOldEpochUpperBound.getAsLong(), timeout);
+            result = store.recoverOwnershipAfterRestore(playerId, auditedOldEpochUpperBound.getAsLong(),auditedOwnerRevisionUpperBound.getAsLong(), timeout);
         } catch (RuntimeException e) {
             metrics.opsClaim("error");
             // SQL/连接异常可能夹带连接串或驱动配置；维护入口只记异常类型，不透出异常消息。

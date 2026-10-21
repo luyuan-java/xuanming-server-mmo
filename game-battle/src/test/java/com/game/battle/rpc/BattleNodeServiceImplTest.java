@@ -39,6 +39,10 @@ import org.junit.jupiter.api.Test;
  * future 在回复执行器上完成、指标每次调用恰好一次。
  */
 class BattleNodeServiceImplTest {
+    @Test void 原观战查询同样投递逻辑线程_替身未知保持UNKNOWN而非ABSENT()throws Exception{
+        var future=service(2).queryObserver(com.game.proto.QueryObserverRequest.getDefaultInstance());assertThat(rooms.calls).isEmpty();assertThat(future.isDone()).isFalse();logic.runPending();
+        assertThat(future.get().getState()).isEqualTo(com.game.proto.ObserverAdmissionState.OBSERVER_ADMISSION_UNKNOWN);assertThat(rooms.calls).containsExactly("queryObserver");assertThat(rpcCount("queryObserver","business_error")).isEqualTo(1);
+    }
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final BattleMetrics metrics = new BattleMetrics(registry);
@@ -233,19 +237,19 @@ class BattleNodeServiceImplTest {
         CompletableFuture<Empty> destroy = service.destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(1).build());
         CompletableFuture<IssueBattleTicketResponse> ticket = service.issueBattleTicket(IssueBattleTicketRequest.getDefaultInstance());
         CompletableFuture<AddObserverResponse> observer = service.addObserver(AddObserverRequest.getDefaultInstance());
-        CompletableFuture<Empty> remove = service.removeObserver(RemoveObserverRequest.getDefaultInstance());
+        CompletableFuture<com.game.proto.RemoveObserverResponse> remove = service.removeObserver(RemoveObserverRequest.getDefaultInstance());
         assertThat(rooms.calls).as("Dubbo 线程上不碰房间").isEmpty();
         logic.runPending();
 
         assertThat(destroy.get()).isEqualTo(Empty.getDefaultInstance());
         assertThat(ticket.get().getErrorMessage().getId()).isEqualTo(1005);
         assertThat(observer.get().getErrorMessage().getId()).isEqualTo(1005);
-        assertThat(remove.get()).isEqualTo(Empty.getDefaultInstance());
+        assertThat(remove.get().getCancelled()).isFalse();
         assertThat(rooms.calls).containsExactly("destroyBattle", "issueBattleTicket", "addObserver", "removeObserver");
         assertThat(rpcCount("destroyBattle", "ok")).isEqualTo(1);
         assertThat(rpcCount("issueBattleTicket", "business_error")).isEqualTo(1);
         assertThat(rpcCount("addObserver", "business_error")).isEqualTo(1);
-        assertThat(rpcCount("removeObserver", "ok")).isEqualTo(1);
+        assertThat(rpcCount("removeObserver", "business_error")).isEqualTo(1);
         assertThat(service.inFlight()).isZero();
     }
 

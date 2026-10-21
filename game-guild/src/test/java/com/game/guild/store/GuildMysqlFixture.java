@@ -77,6 +77,9 @@ public final class GuildMysqlFixture implements AutoCloseable {
         ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         GuildMysqlFixture fixture = new GuildMysqlFixture(database, ds);
         GuildTables.sync(ds, java.time.Duration.ofMinutes(1));
+        fixture.exec("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,name VARCHAR(64) NOT NULL DEFAULT 'fixture',account VARCHAR(64) NOT NULL DEFAULT 'fixture-account',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 1,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 7)");
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(ds);
+        try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),List.of(7));}
         fixture.exec("CREATE TABLE `" + GATE_TABLE + "` (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB");
         fixture.exec("INSERT INTO `" + GATE_TABLE + "` (id) VALUES (1)");
         return fixture;
@@ -104,7 +107,9 @@ public final class GuildMysqlFixture implements AutoCloseable {
     }
 
     public JdbcGuildStore store(GuildTxListener listener, GuildTxHooks hooks) {
-        return new JdbcGuildStore(tx(listener), hooks);
+        // 旧帮会协议夹具只测 G/S/M/A；角色外部资格显式替身，不代表生产 player 锁验收。
+        // 新 RoleMembershipInterlockMysqlTest 使用生产构造和真实 player 行锁验证接缝。
+        return new JdbcGuildStore(tx(listener), hooks, (sql, player) -> true);
     }
 
     public GuildStartupChecks startup(GuildTxListener listener) {

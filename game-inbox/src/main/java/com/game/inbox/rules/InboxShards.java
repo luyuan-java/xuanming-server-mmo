@@ -13,14 +13,14 @@ package com.game.inbox.rules;
 public final class InboxShards {
 
     /** 模数（建表契约，与 mmorpg {@code inbox.ShardCount} 同值；改它等于改全部存量行的主键）。 */
-    public static final int SHARD_COUNT = 64;
+    public static final int SHARD_COUNT = com.game.common.inbox.InboxShards.SHARD_COUNT;
 
     private InboxShards() {
     }
 
     /** player_id 所在的分片：mix64(player_id) 按无符号取模 64。 */
     public static int rowShard(long playerId) {
-        return (int) Long.remainderUnsigned(mix64(playerId), SHARD_COUNT);
+        return com.game.common.inbox.InboxShards.rowShard(playerId);
     }
 
     /**
@@ -28,11 +28,6 @@ public final class InboxShards {
      * Java 的 long 乘法按 2^64 回绕，与 Go uint64 逐位相同。
      */
     public static long mix64(long x) {
-        x ^= x >>> 30;
-        x *= 0xbf58476d1ce4e5b9L;
-        x ^= x >>> 27;
-        x *= 0x94d049bb133111ebL;
-        x ^= x >>> 31;
-        return x;
+        return com.game.common.inbox.InboxShards.mix64(x);
     }
 }

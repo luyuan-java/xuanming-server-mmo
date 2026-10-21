@@ -6,6 +6,7 @@ import com.game.api.asset.MailGrants;
 import com.game.api.proto.AssetBundle;
 import com.game.api.proto.AssetOpRequest;
 import com.game.api.proto.AssetStream;
+import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.serviceauth.ServiceCallSignatures;
 import com.game.discovery.sql.AuthorityIds;
@@ -43,14 +44,26 @@ public final class MailStore {
     private final AuthorityIds ids;
     private final IntPredicate itemExists;
     private final LongSupplier clock;
+    private final long actorPlayer;
     private static final String MC = "mail_id,owner_player_id,guild_id,kind,sender_kind,request_id,request_hash,title,body,attachments,"
                                      + "sent_ms,expire_ms,campaign_id,manifest_generation";
     public MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock) {
+        this(sql, ids, itemExists, clock, 0);
+    }
+    private MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock, long actorPlayer) {
         this.sql = sql;
         this.ids = ids;
         this.itemExists = itemExists;
         this.clock = clock;
+        this.actorPlayer = actorPlayer;
     }
+    // 请求视图显式保留队列受理时的原会话；实际领域事务首锁player验证，不能从当前角色反推身份。
+    public MailStore forActor(SessionContext session) {
+        require(session != null && session.getPlayerId() != 0 && !session.getAccount().isEmpty()
+                        && session.getOwnerRevision() > 0, INVALID);
+        return new MailStore(sql.forActor(session.getPlayerId(), session.getAccount(), session.getOwnerRevision()), ids, itemExists, clock, session.getPlayerId());
+    }
+    private void requireActor(long player) { require(actorPlayer == 0 || actorPlayer == player, INVALID); }
     public static int sender(String caller) {
         return switch (caller) {
             case "admin" -> 1;
@@ -103,7 +116,7 @@ public final class MailStore {
         return b.build();
     }
     private void ensure(Deadline d, long player) throws SQLException {
-        sql.read(d, s -> {
+        sql.tx(d, s -> {
             s.update("INSERT IGNORE INTO mail_box (player_id,created_ms) VALUES (?,?)", U(player), clock.getAsLong());
             return null;
         });
@@ -305,6 +318,7 @@ public final class MailStore {
         });
     }
     public ListMailsResponse list(long player, ListMailsRequest in, Deadline d) throws SQLException {
+        requireActor(player);
         require(player != 0, INVALID);
         int limit = in.getLimit() == 0 ? 50 : Math.min(100, in.getLimit());
         require(limit > 0, INVALID);
@@ -352,6 +366,7 @@ public final class MailStore {
         return new Locked(m, state);
     }
     public ReadMailResponse read(long player, ReadMailRequest in, Deadline d) throws SQLException {
+        requireActor(player);
         require(player != 0 && in.getMailId() != 0, INVALID);
         ensure(d, player);
         return sql.tx(d, s -> {
@@ -366,6 +381,7 @@ public final class MailStore {
         });
     }
     public DeleteMailsResponse delete(long player, List<Long> ids, boolean clear, Deadline d) throws SQLException {
+        requireActor(player);
         require(player != 0 && (clear || (!ids.isEmpty() && ids.size() <= 100)), INVALID);
         ensure(d, player);
         long now = clock.getAsLong();
@@ -395,6 +411,7 @@ public final class MailStore {
         });
     }
     public MailActionResult claim(long player, long id, Deadline d) throws SQLException {
+        requireActor(player);
         require(player != 0 && id != 0, INVALID);
         ensure(d, player);
         long op = ids.next(d), now = clock.getAsLong();

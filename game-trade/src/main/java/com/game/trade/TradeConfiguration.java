@@ -163,8 +163,8 @@ public class TradeConfiguration {
 
     /** 归属区 = player.zone_id（T3；game-common 的 {@link PlayerHomeZones}，与组队、帮会共用，单次上限 1500 ms，Q6）。 */
     @Bean
-    public HomeZones tradeHomeZones(PlayerProfiles profiles) {
-        return new PlayerHomeZones(profiles::loadStrict, Duration.ofMillis(TradeLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS));
+    public HomeZones tradeHomeZones(javax.sql.DataSource dataSource) {
+        return new PlayerHomeZones(dataSource, Duration.ofMillis(TradeLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS));
     }
 
     @Bean
@@ -202,8 +202,9 @@ public class TradeConfiguration {
                                            SchemaReady tradeSchemaReady, DataSource dataSource,
                                            org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.CommerceEngine> commerce,
                                            org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.OfficialMallClient> mall,
+                                           org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.RmbConsignmentService> rmb,
                                            HomeZones tradeHomeZones) {
-        TradeDispatcher dispatcher = new TradeDispatcher(registry, service, tradeWorkerPool, metrics, props.requestBudget().toMillis(),new com.game.trade.commerce.CommerceClientService(commerce.getIfAvailable(),tradeHomeZones,mall.getIfAvailable()));
+        TradeDispatcher dispatcher = new TradeDispatcher(registry, service, tradeWorkerPool, metrics, props.requestBudget().toMillis(),new com.game.trade.commerce.CommerceClientService(commerce.getIfAvailable(),tradeHomeZones,mall.getIfAvailable(),rmb.getIfAvailable()));
         MarketSettings market = props.market().settings();
         log.info("trade 接管的消息号={} 市场范围={} 页长={}/{} 页码上限={} 收藏上限={} 请求预算={} 播种={}（运行模式 {}） 库={} 用户={}",
                 dispatcher.clientMessageIds(), props.market().scope(), market.defaultPageSize(), market.maxPageSize(),

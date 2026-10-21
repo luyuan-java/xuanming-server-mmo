@@ -29,6 +29,8 @@ message SessionContext {
   // 不认识这两个字段的旧 gate 发来的调用两者都是 0 = 按普通登录处理。
   uint64 ticket_player_id = 8;
   uint32 ticket_target_zone_id = 9;
+  // 登录提交确认的账号归属修订；随原会话原样传播，不随场景 epoch 变化或借当前SQL补填。
+  uint64 owner_revision = 10;
 }
 
 message ClientCall {
@@ -76,6 +78,7 @@ message EnterScene {
   uint64 scene_id = 3;
   // 玩家数据归属围栏：scene 写回时必须带上，旧 epoch 的写入会被拒绝。
   uint64 owner_epoch = 4;
+  uint64 owner_revision = 5;
 }
 
 // 让 gate 关闭会话（先把 tip 发给客户端，再断开）。

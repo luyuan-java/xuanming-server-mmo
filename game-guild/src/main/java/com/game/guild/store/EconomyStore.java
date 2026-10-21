@@ -29,6 +29,9 @@ import java.util.Optional;
  * （JDBC），只在 guild-worker 线程上调用。
  */
 public interface EconomyStore {
+    default EconomyStore forActor(com.game.api.proto.SessionContext actor) {
+        throw new SecurityException("帮会经济存储尚未支持原会话提交验证");
+    }
 
     // ================================================================ 入参
 

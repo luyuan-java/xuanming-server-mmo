@@ -61,6 +61,7 @@ class PlayerBundleSqlTest {
     void setUp() throws Exception {
         source = DataSqlFixture.create();
         target = DataSqlFixture.create();
+        // DataSqlFixture统一导入player-store唯一最小消费投影，不在此手写第二套DDL。
         state = PlayerState.newBuilder().setFacing(Facing.newBuilder().setX(0.5).setY(-1).setZ(2))
                 .setCurrency(CurrencyState.newBuilder().addBalances(12345).addBalances(7)).build();
         try (Connection c = source.dataSource.getConnection(); Statement st = c.createStatement()) {
@@ -294,6 +295,62 @@ class PlayerBundleSqlTest {
         assertThat(store.findPlayer(PLAYER).orElseThrow().getOwnerRevision()).isEqualTo(2);
         assertThat(store.claimOwnership(PLAYER, "dev_tester", 1, Duration.ofSeconds(5))).isInstanceOf(PlayerStore.ClaimResult.NotFound.class);
         assertThat(store.claimOwnership(PLAYER, "dev_tester", 2, Duration.ofSeconds(5))).isInstanceOf(PlayerStore.ClaimResult.Claimed.class);
+    }
+    @Test
+    void 未终局交易合同阻止导入_不改角色存档也不清Redis(@TempDir Path dir) throws Exception {
+        Path file = exported(dir);
+        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute")).as(err()).isEqualTo(0);
+        target.jdbc().update("INSERT INTO trade_commerce VALUES(101,?,0,4)", PLAYER);
+        var before = localFinalSaveSnapshot(); var redis = new FakeRedis("local-run"); err.reset();
+        assertThat(importLocal(file, redis, "--execute", "--replace")).as(err()).isEqualTo(2);
+        assertThat(err()).contains("未终局交易"); assertThat(redis.deleted).isEmpty();
+        assertThat(localFinalSaveSnapshot()).isEqualTo(before);
+        target.jdbc().update("UPDATE trade_commerce SET status=11"); err.reset();
+        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute", "--replace")).as(err()).isEqualTo(0);
+    }
+
+    @Test
+    void 历练ACTIVE待发奖和manual资产各自阻止replace及发布_终态后才放行(@TempDir Path dir) throws Exception {
+        Path file = exported(dir);
+        assertThat(importLocal(file,new FakeRedis("local-run"),"--execute")).as(err()).isEqualTo(0);
+        for (String pending : List.of(
+                "INSERT INTO team_member_authority VALUES(" + PLAYER + ",101)",
+                "INSERT INTO team_launch_role VALUES(" + PLAYER + ",101,1)",
+                "INSERT INTO team_invite_authority VALUES(" + PLAYER + ",101,9223372036854775807,1)",
+                "INSERT INTO team_application_authority VALUES(" + PLAYER + ",101,9223372036854775807,1)",
+                "INSERT INTO guild_trial_launch_role VALUES(" + PLAYER + ",101,1)",
+                "INSERT INTO guild_activity_reward_owed VALUES(102," + PLAYER + ",0)",
+                "INSERT INTO guild_asset_op VALUES(103," + PLAYER + ",5)",
+                "INSERT INTO mail_asset_op VALUES(104," + PLAYER + ",4)",
+                "INSERT INTO match_global_ticket VALUES(" + PLAYER + ",2)",
+                "INSERT INTO match_global_watching VALUES(" + PLAYER + ",4)",
+                "INSERT INTO match_global_challenge VALUES(1," + PLAYER + ",1,9223372036854775807)")) {
+            target.jdbc().update(pending);
+            var before = localFinalSaveSnapshot(); var redis = new FakeRedis("local-run"); err.reset();
+            assertThat(importLocal(file,redis,"--execute","--replace")).as(err()).isEqualTo(2);
+            assertThat(err()).contains("历练ACTIVE"); assertThat(redis.deleted).isEmpty();
+            assertThat(localFinalSaveSnapshot()).isEqualTo(before);
+            target.jdbc().update("UPDATE player SET owner_epoch=9,owner_released=0,owner_lease_until=? WHERE player_id=?",
+                    LocalPlayerImporter.IMPORT_HOLD_LEASE,PLAYER);
+            before = localFinalSaveSnapshot();
+            try (var connection = target.dataSource.getConnection()) {
+                assertThat(new LocalPlayerImporter(connection).publish(PLAYER,9,NOW)).isFalse();
+            }
+            assertThat(localFinalSaveSnapshot()).isEqualTo(before);
+            target.jdbc().update("UPDATE player SET owner_released=1,owner_lease_until=0 WHERE player_id=?",PLAYER);
+            target.jdbc().update("DELETE FROM guild_trial_launch_role");
+            target.jdbc().update("DELETE FROM guild_activity_reward_owed");
+            target.jdbc().update("DELETE FROM guild_asset_op");
+            target.jdbc().update("DELETE FROM mail_asset_op");
+            target.jdbc().update("DELETE FROM match_global_ticket");
+            target.jdbc().update("DELETE FROM match_global_challenge");
+            target.jdbc().update("DELETE FROM match_global_watching");
+            target.jdbc().update("DELETE FROM team_member_authority");
+            target.jdbc().update("DELETE FROM team_launch_role");
+            target.jdbc().update("DELETE FROM team_invite_authority");
+            target.jdbc().update("DELETE FROM team_application_authority");
+        }
+        assertThat(importLocal(file,new FakeRedis("local-run"),"--execute","--replace")).as(err()).isEqualTo(0);
     }
 
     @Test

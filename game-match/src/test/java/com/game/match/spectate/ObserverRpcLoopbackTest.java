@@ -91,9 +91,9 @@ class ObserverRpcLoopbackTest {
         }
 
         @Override
-        public CompletableFuture<Empty> removeObserver(RemoveObserverRequest request) {
+        public CompletableFuture<com.game.proto.RemoveObserverResponse> removeObserver(RemoveObserverRequest request) {
             removes.add(request);
-            return request.getBattleId() == HANGING_BATTLE ? new CompletableFuture<>() : CompletableFuture.completedFuture(Empty.getDefaultInstance());
+            return request.getBattleId() == HANGING_BATTLE ? new CompletableFuture<>() : CompletableFuture.completedFuture(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(request.getTargetInstanceId()).build());
         }
 
         @Override

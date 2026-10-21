@@ -202,7 +202,7 @@ public final class InboxMaintenance implements SmartLifecycle {
             }
             log.info("[PlayerInbox] 当选后台维护领导者：清理 / 提醒补发 / 扫描型 gauge / 对账在本副本运行");
             tally = new ReconcileRound.Tally();
-            loops.add(every(settings.sweepInterval(), settings.sweepInterval(), this::sweepRound));
+            // 终态item是永久幂等收据，不再调度物理删除。旧配置/运维方法只作兼容，不恢复删除行为。
             loops.add(every(settings.notifyInterval(), settings.notifyInterval(), this::notifyRound));
             loops.add(every(settings.gaugeInterval(), settings.gaugeInterval(), this::gaugeRound));
             if (!settings.reconcileInterval().isZero()) {

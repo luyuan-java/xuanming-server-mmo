@@ -109,8 +109,11 @@ final class E2eSupport {
     }
 
     static BattleAssignedS2C reissue(BattleNodeService battle, long battleId, long playerId) throws Exception {
+        return reissue(battle,battleId,playerId,"","");
+    }
+    static BattleAssignedS2C reissue(BattleNodeService battle,long battleId,long playerId,String operation,String instance) throws Exception {
         IssueBattleTicketResponse response = battle.issueBattleTicket(IssueBattleTicketRequest.newBuilder()
-                .setBattleId(battleId).setPlayerId(playerId).build()).get(10, TimeUnit.SECONDS);
+                .setBattleId(battleId).setPlayerId(playerId).setSpectatorOperationId(operation).setTargetInstanceId(instance).build()).get(10, TimeUnit.SECONDS);
         if (response.hasErrorMessage()) {
             throw new AssertionError("补签失败: " + response.getErrorMessage());
         }

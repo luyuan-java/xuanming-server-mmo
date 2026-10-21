@@ -21,6 +21,9 @@ import org.springframework.context.annotation.*;
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(name = "game.trade.commerce.enabled", havingValue = "true")
 public class CommerceConfiguration {
+    @org.apache.dubbo.config.annotation.DubboReference(group = com.game.api.PlayerTradeService.GROUP,
+        check = false, url = "${game.dubbo.player-trade-url:}", timeout = 3000, retries = 0)
+    private com.game.api.PlayerTradeService playerTrades;
     @Bean
     public static StrongTiDbConnectionPolicy tradeStrongSqlPolicy() {
         return new StrongTiDbConnectionPolicy("trade", true);
@@ -68,9 +71,17 @@ public class CommerceConfiguration {
         OfficialMallProperties p, CommerceEngine e, com.fasterxml.jackson.databind.ObjectMapper json) {
         return new OfficialMallClient(p, e, json);
     }
+    @Bean
+    @ConditionalOnProperty(name = "game.trade.rmb.enabled", havingValue = "true")
+    public RmbConsignmentService rmbConsignmentService(CommerceEngine engine, OfficialMallClient mall,
+            RmbConsignmentProperties properties) {
+        return new RmbConsignmentService(engine, new RmbConsignmentClient(mall),
+            new PlayerTradeClient(playerTrades, System.getenv("GAME_PLAYER_TRADE_SECRET")), properties.currencies());
+    }
     @Bean(initMethod = "start", destroyMethod = "close")
     public CommerceRuntime commerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery,
-        PersistedAssetLedgerReader ledger, org.springframework.beans.factory.ObjectProvider<OfficialMallClient> mall) {
-        return new CommerceRuntime(e, delivery, ledger, mall.getIfAvailable());
+        PersistedAssetLedgerReader ledger, org.springframework.beans.factory.ObjectProvider<OfficialMallClient> mall,
+        org.springframework.beans.factory.ObjectProvider<RmbConsignmentService> rmb) {
+        return new CommerceRuntime(e, delivery, ledger, mall.getIfAvailable(), rmb.getIfAvailable());
     }
 }

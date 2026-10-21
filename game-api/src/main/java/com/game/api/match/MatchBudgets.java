@@ -61,7 +61,7 @@ public final class MatchBudgets {
     public static final int TEAM_LOCK_MARGIN_SECONDS = 10;
 
     /** 一队的人数上限（基线 {@code kMaxBattleTeamSize}）：PVE 组队人数按它收口，活动开战名单 1..5 人。 */
-    public static final int MAX_TEAM_SIZE = 5;
+    public static final int MAX_TEAM_SIZE = com.game.common.team.TeamPolicyContract.CAPACITY;
     /** 一次 gather 的人数上限（5V5 = 10 人）：matched TTL 的最大值按它算。 */
     public static final int MAX_GATHER_PLAYERS = 10;
 

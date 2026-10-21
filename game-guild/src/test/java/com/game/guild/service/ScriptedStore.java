@@ -20,6 +20,8 @@ import java.util.function.Function;
  * 没给脚本的写一律 {@link AssertionError}（「不该碰库」本身就是断言）。每次调用把方法名与关键参数写进 {@code journal}。
  */
 public final class ScriptedStore implements GuildStore {
+    /** 纯域/派发夹具显式替代外部角色权威；原会话事务身份另由SQL用例验证。 */
+    @Override public GuildStore forActor(com.game.api.proto.SessionContext actor) { return this; }
 
     private final Consumer<String> journal;
 

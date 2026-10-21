@@ -22,7 +22,8 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li>事务外、自动提交：按玩家号升序给双方补容量行（{@link #ensureCapacityRows}：权威边数 COUNT + INSERT ODKU，绝不猜 0；
  *       遇 1213 整对重跑至多 3 遍）——放进事务会与别的事务互持新插行、抢同一接收者的行，形成插入意向锁死锁；</li>
- *   <li>READ COMMITTED 事务里第一把锁：按升序 {@code SELECT friend_count ... FOR UPDATE} 锁双方容量行（守卫）。缺行（被回收）
+ *   <li>客户端绑定视图在每个事务首先按 unsigned 升序锁双方 player 行，核原账号、原修订、未冻结；随后 READ COMMITTED
+ *       事务按升序 {@code SELECT friend_count ... FOR UPDATE} 锁双方容量行（守卫）。系统入口不带会话、保留原容量锁首位。缺行（被回收）
  *       绝不当 0 继续：回滚、回到第 1 步重补，至多 3 遍，用尽 fail-closed；</li>
  *   <li>守卫之后只用完整主键的等值点查 / 点更新（不用 OR / IN / 前缀范围：真库上会扫二级索引、锁到别的玩家对上）；</li>
  *   <li>业务拒绝回滚、成功提交；体内任何错误原样上抛、不重试（一次 1213 就是一次 1003）。没走到提交 / 回滚的事务（含 {@link Error}）
@@ -34,7 +35,7 @@ import org.slf4j.LoggerFactory;
  * 不再重试，守卫事务在提交前再查一次（过了就回滚）——gate 已经判超时、客户端看到失败的请求，不会在之后落库（否则重试撞「已申请」）。
  * Reject / Unblock 的单条写同样放进显式事务、提交前查预算（{@link #singleStatementWrite}）：查询超时只能按秒向上取整，自动提交的语句
  * 在锁等待里可以越过截止近 1 s 才自行提交，那时 gate 可能已放行同一会话的下一条（mmorpg client-request-ordering.md §6.1）。
- * 事务外补容量行（INSERT ODKU，从不覆盖已有行，之后的每个写者都先补行）晚落地无害，仍是自动提交。
+ * 事务外补容量行（INSERT ODKU，从不覆盖已有行，之后的每个写者都先补行）独立提交；客户端视图先在独立事务验证 P，系统入口仍自动提交。
  *
  * <p>玩家号按无符号 64 位：绑定参数用 {@link #uid}，读回用 {@link #readUid}，排序用 {@link Long#compareUnsigned}。
  * 连接池须是会话级 READ COMMITTED（自动提交语句不经事务，隔离级别来自会话），{@code innodb_lock_wait_timeout} 设短。
@@ -126,6 +127,8 @@ public final class JdbcFriendStore implements FriendStore {
     private final LongSupplier requestIds;
     private final int queryTimeoutCapSeconds;
     private final Events events;
+    /** null 仅用于显式系统/维护入口；客户端服务只使用 forActor 的不可变请求视图。 */
+    private final FriendActor actor;
     /** 测试缝：补完容量行、开守卫事务之前调用（模拟回收在这个窗口删掉容量行）。 */
     private volatile Runnable afterEnsure = () -> { };
 
@@ -134,12 +137,28 @@ public final class JdbcFriendStore implements FriendStore {
      */
     public JdbcFriendStore(DataSource dataSource, FriendLimits limits, LongSupplier nowMs, int queryTimeoutCapSeconds,
                            Events events, LongSupplier requestIds) {
+        this(dataSource, limits, nowMs, queryTimeoutCapSeconds, events, requestIds, null);
+    }
+
+    private JdbcFriendStore(DataSource dataSource, FriendLimits limits, LongSupplier nowMs, int queryTimeoutCapSeconds,
+                            Events events, LongSupplier requestIds, FriendActor actor) {
         this.requestIds = requestIds;
         this.dataSource = dataSource;
         this.limits = limits;
         this.nowMs = nowMs;
         this.queryTimeoutCapSeconds = queryTimeoutCapSeconds;
         this.events = events;
+        this.actor = actor;
+    }
+
+    @Override
+    public FriendStore forActor(long playerId, String originalAccount, long originalRevision) {
+        return new JdbcFriendStore(dataSource, limits, nowMs, queryTimeoutCapSeconds, events, requestIds,
+                new FriendActor(playerId, originalAccount, originalRevision));
+    }
+
+    private void requireActor(long playerId) {
+        if (actor != null) actor.requirePlayer(playerId);
     }
 
     void afterEnsureForTest(Runnable hook) {
@@ -160,6 +179,7 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public AddOutcome addRequest(long from, long to, Deadline deadline) {
+        requireActor(from);
         long candidate = 0;
         for (;;) {
             final long allocated = candidate;
@@ -212,6 +232,7 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public AcceptOutcome accept(long requestId, long me, long fromHint, Deadline deadline) {
+        requireActor(me);
         RequestRow located = findRequest(requestId, me, deadline);
         if (located == null) {
             return new AcceptOutcome(AcceptResult.NO_PENDING, 0, false);
@@ -248,11 +269,12 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public RejectOutcome reject(long requestId, long me, long fromHint, Deadline deadline) {
+        requireActor(me);
         RequestRow located = findRequest(requestId, me, deadline);
         if (located == null) {
             return new RejectOutcome(RejectResult.NO_PENDING, 0, false);
         }
-        int rows = singleStatementWrite(deadline, "拒绝申请", UPDATE_REQUEST_GENERATION_STATUS, STATUS_REJECTED, nowMs.getAsLong(),
+        int rows = singleStatementWrite(me, located.from(), deadline, "拒绝申请", UPDATE_REQUEST_GENERATION_STATUS, STATUS_REJECTED, nowMs.getAsLong(),
                 uid(located.from()), uid(me), uid(requestId), STATUS_PENDING);
         if (rows == 1) {
             return new RejectOutcome(RejectResult.OK, located.from(), true);
@@ -297,7 +319,9 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public RemoveResult remove(long me, long target, Deadline deadline) {
+        requireActor(me);
         if (me == target) {
+            if (actor != null) query(deadline, "SELECT 1", rs -> 1);
             return RemoveResult.NOT_FRIENDS;
         }
         checkPair(me, target);
@@ -314,6 +338,7 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public BlockResult block(long me, long target, Deadline deadline) {
+        requireActor(me);
         checkPair(me, target);
         if (limits.maxBlocks() > 0) {
             // 事务外快速判满（不补容量行）；已拉黑过的目标不按名额拒：重复拉黑幂等成功，还要靠下面收敛残留
@@ -344,19 +369,22 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public void unblock(long me, long target, Deadline deadline) {
+        requireActor(me);
         checkPair(me, target);
-        singleStatementWrite(deadline, "解除拉黑", DELETE_BLOCK, uid(me), uid(target));
+        singleStatementWrite(me, target, deadline, "解除拉黑", DELETE_BLOCK, uid(me), uid(target));
     }
 
     // ================================================================ 读
 
     @Override
     public List<FriendEdge> friends(long me, int limit, Deadline deadline) {
+        requireActor(me);
         return query(deadline, LIST_FRIENDS, rs -> new FriendEdge(readUid(rs, 1), rs.getLong(2)), uid(me), limit);
     }
 
     @Override
     public List<PendingRequest> pendingRequests(long me, int limit, Deadline deadline) {
+        requireActor(me);
         List<PendingRequest> rows = readPending(me, limit, deadline);
         boolean migrated = false;
         // 列表游标已关闭再补号；补号会跨多个事务，完成后必须整页重新读，不能拼接不同提交点的状态。
@@ -409,6 +437,7 @@ public final class JdbcFriendStore implements FriendStore {
 
     @Override
     public List<BlockEdge> blocks(long me, int limit, Deadline deadline) {
+        requireActor(me);
         return query(deadline, LIST_BLOCKS, rs -> new BlockEdge(readUid(rs, 1), rs.getLong(2)), uid(me), limit);
     }
 
@@ -460,7 +489,9 @@ public final class JdbcFriendStore implements FriendStore {
                 c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
                 c.setAutoCommit(false);
                 try {
+                    com.game.common.player.PlayerRouteAuthority.requireMeta(c,FriendActor.timeout(deadline,queryTimeoutCapSeconds),true);
                     Db db = new Db(c, deadline);
+                    if (actor != null) actor.lock(c, deadline, queryTimeoutCapSeconds, ids);
                     Map<Long, Long> counts = lockCapacityRows(db, ids);
                     GuardedResult<R> result = body.run(db, counts, nowMs.getAsLong());
                     if (!result.commit()) {
@@ -512,21 +543,34 @@ public final class JdbcFriendStore implements FriendStore {
      * 否则写下去的是陈旧边数），至多 3 遍，每遍之前查预算。ODKU 直接取 X 锁（INSERT IGNORE 的重复键检查取 S 锁，两个排队的 S 升 X 会互等成环）。
      */
     private void ensureCapacityRows(long[] ids, Deadline deadline) {
+        if (actor != null) {
+            // 仍在守卫事务之外独立提交；先验 P 再补行，失效会话不能留下容量副作用。
+            read(deadline, ids, db -> {
+                for (long id : ids) {
+                    long edges = count(db, COUNT_FRIENDS, uid(id));
+                    update(db, ENSURE_CAPACITY, uid(id), edges, nowMs.getAsLong());
+                }
+                return null;
+            });
+            return;
+        }
         try (Connection c = dataSource.getConnection()) {
             boolean autoCommit = c.getAutoCommit();
             int isolation = c.getTransactionIsolation();
             c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-            c.setAutoCommit(true);
+            c.setAutoCommit(false);
             try {
                 Db db = new Db(c, deadline);
                 for (long id : ids) {
                     for (int attempt = 1; ; attempt++) {
                         requireBudget(deadline, "补容量行");
                         try {
+                            com.game.common.player.PlayerRouteAuthority.requireMeta(c,FriendActor.timeout(deadline,queryTimeoutCapSeconds),true);
                             long edges = count(db, COUNT_FRIENDS, uid(id));
                             update(db, ENSURE_CAPACITY, uid(id), edges, nowMs.getAsLong());
-                            break;
+                            requireBudget(deadline,"补容量提交");c.commit();break;
                         } catch (SQLException e) {
+                            c.rollback();
                             if (!isDeadlock(e) || attempt >= ENSURE_DEADLOCK_MAX_ATTEMPTS) {
                                 throw e;
                             }
@@ -536,6 +580,7 @@ public final class JdbcFriendStore implements FriendStore {
                     }
                 }
             } finally {
+                if(!c.getAutoCommit())c.rollback();
                 restore(c, autoCommit, isolation);
             }
         } catch (SQLException e) {
@@ -597,14 +642,11 @@ public final class JdbcFriendStore implements FriendStore {
     }
 
     private boolean autocommitExists(Deadline deadline, String sql, Object... args) {
-        requireBudget(deadline, "读");
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = prepare(new Db(c, deadline), sql, args);
-             ResultSet rs = ps.executeQuery()) {
-            return rs.next();
-        } catch (SQLException e) {
-            throw new FriendStoreException("好友读失败", e);
-        }
+        return read(deadline, new long[0], db -> {
+            try (PreparedStatement ps = prepare(db, sql, args); ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        });
     }
 
     /**
@@ -612,7 +654,7 @@ public final class JdbcFriendStore implements FriendStore {
      * 不用自动提交：查询超时 = 剩余预算向上取整到秒，截止前一刻发出的语句在锁等待里还能再跑近 1 s，被驱动取消之前拿到锁就自行提交了；
      * 取消本身要另开连接发 KILL QUERY，连接慢时更晚。放进事务后语句跑过截止只会回滚，COMMIT 只在截止之前发出。
      */
-    private int singleStatementWrite(Deadline deadline, String what, String sql, Object... args) {
+    private int singleStatementWrite(long me, long target, Deadline deadline, String what, String sql, Object... args) {
         requireBudget(deadline, what);
         try (Connection c = dataSource.getConnection()) {
             boolean autoCommit = c.getAutoCommit();
@@ -621,6 +663,8 @@ public final class JdbcFriendStore implements FriendStore {
             c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             c.setAutoCommit(false);
             try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,FriendActor.timeout(deadline,queryTimeoutCapSeconds),true);
+                if (actor != null) actor.lock(c, deadline, queryTimeoutCapSeconds, me, target);
                 int rows;
                 try (PreparedStatement ps = prepare(new Db(c, deadline), sql, args)) {
                     rows = ps.executeUpdate();
@@ -643,15 +687,12 @@ public final class JdbcFriendStore implements FriendStore {
 
     /** S19：{总数, 是否已拉黑 target}。 */
     private long[] autocommitBlockQuota(Deadline deadline, long target, long me) {
-        requireBudget(deadline, "读黑名单名额");
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = prepare(new Db(c, deadline), BLOCK_QUOTA, uid(target), uid(me));
-             ResultSet rs = ps.executeQuery()) {
-            rs.next();
-            return new long[] {rs.getLong(1), rs.getLong(2)};
-        } catch (SQLException e) {
-            throw new FriendStoreException("黑名单名额读失败", e);
-        }
+        return read(deadline, new long[0], db -> {
+            try (PreparedStatement ps = prepare(db, BLOCK_QUOTA, uid(target), uid(me)); ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return new long[] {rs.getLong(1), rs.getLong(2)};
+            }
+        });
     }
 
     @FunctionalInterface
@@ -660,17 +701,43 @@ public final class JdbcFriendStore implements FriendStore {
     }
 
     private <T> List<T> query(Deadline deadline, String sql, RowMapper<T> mapper, Object... args) {
-        requireBudget(deadline, "列表读");
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = prepare(new Db(c, deadline), sql, args);
-             ResultSet rs = ps.executeQuery()) {
-            List<T> out = new ArrayList<>();
-            while (rs.next()) {
-                out.add(mapper.map(rs));
+        return read(deadline, new long[0], db -> {
+            try (PreparedStatement ps = prepare(db, sql, args); ResultSet rs = ps.executeQuery()) {
+                List<T> out = new ArrayList<>();
+                while (rs.next()) out.add(mapper.map(rs));
+                return out;
             }
-            return out;
+        });
+    }
+
+    @FunctionalInterface
+    private interface ReadBody<T> {
+        T run(Db db) throws SQLException;
+    }
+
+    /** 会话读取与补容量在同一事务持有 P；系统读取保留原自动提交语义。 */
+    private <T> T read(Deadline deadline, long[] players, ReadBody<T> body) {
+        requireBudget(deadline, "读");
+        try (Connection c = dataSource.getConnection()) {
+            if (actor == null) return body.run(new Db(c, deadline));
+            boolean autoCommit = c.getAutoCommit();
+            int isolation = c.getTransactionIsolation();
+            boolean finished = false;
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            c.setAutoCommit(false);
+            try {
+                actor.lock(c, deadline, queryTimeoutCapSeconds, players);
+                T value = body.run(new Db(c, deadline));
+                requireBudget(deadline, "读事务提交");
+                c.commit();
+                finished = true;
+                return value;
+            } finally {
+                if (!finished) rollbackQuietly(c);
+                restore(c, autoCommit, isolation);
+            }
         } catch (SQLException e) {
-            throw new FriendStoreException("好友列表读失败", e);
+            throw new FriendStoreException("好友读事务失败", e);
         }
     }
 

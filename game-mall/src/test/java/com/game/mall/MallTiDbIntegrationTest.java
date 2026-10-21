@@ -157,7 +157,7 @@ class MallTiDbIntegrationTest {
             List<Future<MallApi.Order>> replies = new ArrayList<>();
             for (int i = 0; i < 16; i++) {
                 MallOrderStore service = i % 2 == 0 ? first : second;
-                replies.add(workers.submit(() -> { assertThat(start.await(5, TimeUnit.SECONDS)).isTrue(); return service.create("18446744073709551615", new MallApi.CreateOrder("tidb-same-001", 101, 1)); }));
+                replies.add(workers.submit(() -> { assertThat(start.await(5, TimeUnit.SECONDS)).isTrue(); return service.create("18446744073709551615", new MallApi.CreateOrder("tidb-same-001", 101, 1, "fixture-account", "1")); }));
             }
             start.countDown();
             String id = replies.getFirst().get(15, TimeUnit.SECONDS).orderId();
@@ -168,7 +168,7 @@ class MallTiDbIntegrationTest {
             for (int i = 0; i < 12; i++) {
                 int index = i;
                 capped.add(workers.submit(() -> { assertThat(capStart.await(5, TimeUnit.SECONDS)).isTrue(); try {
-                    (index % 2 == 0 ? first : second).create("123", new MallApi.CreateOrder("tidb-cap-00" + index, 101, 1)); return true;
+                    (index % 2 == 0 ? first : second).create("123", new MallApi.CreateOrder("tidb-cap-00" + index, 101, 1, "fixture-account", "1")); return true;
                 } catch (MallException failure) { assertThat(failure.status()).isEqualTo(429); return false; } }));
             }
             capStart.countDown();
@@ -185,15 +185,15 @@ class MallTiDbIntegrationTest {
         try (var workers = Executors.newFixedThreadPool(2)) {
             for (int i = 0; i < 6; i++) {
                 String buyer = Integer.toString(200 + i);
-                MallApi.Order order = first.create(buyer, new MallApi.CreateOrder("tidb-race-00" + i, 102, 1));
+                MallApi.Order order = first.create(buyer, new MallApi.CreateOrder("tidb-race-00" + i, 102, 1, "fixture-account", "1"));
                 CountDownLatch start = new CountDownLatch(1);
                 String transaction = "tidb-race-pay-" + i;
                 var paid = workers.submit(() -> compete(start, () -> first.recordTrustedPayment(payment(order, transaction))));
-                var cancelled = workers.submit(() -> compete(start, () -> second.cancel(buyer, order.orderId())));
+                var cancelled = workers.submit(() -> compete(start, () -> second.cancel(buyer, owned(order.orderId()))));
                 start.countDown();
                 assertThat(paid.get(15, TimeUnit.SECONDS)).isTrue();
                 boolean cancelledFirst=cancelled.get(15,TimeUnit.SECONDS);
-                MallApi.Order actual = first.get(buyer, order.orderId());
+                MallApi.Order actual = first.get(buyer, owned(order.orderId()));
                 int rows = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt WHERE order_sn=?", Integer.class, order.orderId());
                 assertThat(rows).isEqualTo(1);
                 assertThat(actual.state()).isEqualTo(cancelledFirst?"REFUND_PENDING":"DELIVERY_PENDING");
@@ -202,15 +202,15 @@ class MallTiDbIntegrationTest {
             }
         }
         assertThat(stock(102, "lock_stock")).isZero();
-        MallApi.Order rollback = first.create("300", new MallApi.CreateOrder("tidb-rollback", 102, 1));
+        MallApi.Order rollback = first.create("300", new MallApi.CreateOrder("tidb-rollback", 102, 1, "fixture-account", "1"));
         jdbc.update("INSERT INTO commerce_delivery_intent(order_sn,buyer_id,sku_id,quantity,status,created_ms) VALUES (?,'300',102,1,'PENDING',0)", rollback.orderId());
         int before = stock(102, "stock");
         assertThatThrownBy(() -> first.recordTrustedPayment(payment(rollback, "tidb-rollback-pay"))).isInstanceOf(MallException.class);
-        assertThat(first.get("300", rollback.orderId()).state()).isEqualTo("AWAITING_PAYMENT");
+        assertThat(first.get("300", owned(rollback.orderId())).state()).isEqualTo("AWAITING_PAYMENT");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt WHERE order_sn=?", Integer.class, rollback.orderId())).isZero();
         assertThat(stock(102, "stock")).isEqualTo(before);
         assertThat(stock(102, "lock_stock")).isEqualTo(1);
-        second.cancel("300", rollback.orderId());
+        second.cancel("300", owned(rollback.orderId()));
     }
 
     @Test
@@ -228,16 +228,16 @@ class MallTiDbIntegrationTest {
     @Test
     void 交付意图冻结原SKU_可信持久回执可跨实例恢复_拒绝到账才走渠道退款() {
         sku(501,10);jdbc.update("UPDATE commerce_sku_grant SET count_per_unit=2 WHERE sku_id=501");
-        var order=first.create("501",new MallApi.CreateOrder("delivery-tidb-001",501,2));
+        var order=first.create("501",new MallApi.CreateOrder("delivery-tidb-001", 501, 2, "fixture-account", "1"));
         jdbc.update("UPDATE commerce_sku_grant SET count_per_unit=9,item_config_id=99 WHERE sku_id=501");
         first.recordTrustedPayment(payment(order,"delivery-tidb-pay"));
         var one=new DeliveryStore(jdbc,new DataSourceTransactionManager(pool),context.getBean(MallProperties.class));var two=new DeliveryStore(new JdbcTemplate(pool),new DataSourceTransactionManager(pool),context.getBean(MallProperties.class));
         var intent=one.poll(100).stream().filter(v->v.orderId().equals(order.orderId())).findFirst().orElseThrow();assertThat(intent.itemConfigId()).isEqualTo(10);assertThat(intent.itemCount()).isEqualTo(4);
-        var receipt=new DeliveryApi.Receipt(order.orderId(),"9001","DELIVERED","a".repeat(64));one.receipt(receipt);two.receipt(receipt);assertThat(second.get("501",order.orderId()).state()).isEqualTo("DELIVERED");
+        var receipt=new DeliveryApi.Receipt(order.orderId(),"9001","DELIVERED","a".repeat(64));one.receipt(receipt);two.receipt(receipt);assertThat(second.get("501",owned(order.orderId())).state()).isEqualTo("DELIVERED");
         assertThatThrownBy(()->two.receipt(new DeliveryApi.Receipt(order.orderId(),"9002","DELIVERED","a".repeat(64)))).isInstanceOf(MallException.class);
-        var refund=first.create("502",new MallApi.CreateOrder("delivery-tidb-002",501,1));first.recordTrustedPayment(payment(refund,"refund-tidb-pay"));one.receipt(new DeliveryApi.Receipt(refund.orderId(),"9003","REFUND_PENDING","b".repeat(64)));
+        var refund=first.create("502",new MallApi.CreateOrder("delivery-tidb-002", 501, 1, "fixture-account", "1"));first.recordTrustedPayment(payment(refund,"refund-tidb-pay"));one.receipt(new DeliveryApi.Receipt(refund.orderId(),"9003","REFUND_PENDING","b".repeat(64)));
         assertThatThrownBy(()->two.refunded(new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",1,"CNY"))).isInstanceOf(MallException.class);
-        var channel=new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",refund.amountMinor(),refund.currency());one.refunded(channel);two.refunded(channel);assertThat(second.get("502",refund.orderId()).state()).isEqualTo("REFUNDED");
+        var channel=new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",refund.amountMinor(),refund.currency());one.refunded(channel);two.refunded(channel);assertThat(second.get("502",owned(refund.orderId())).state()).isEqualTo("REFUNDED");
     }
 
     @Test
@@ -305,6 +305,7 @@ class MallTiDbIntegrationTest {
                 jdbc.update("DELETE FROM commerce_delivery_receipt WHERE order_sn=?", order);
                 jdbc.update("DELETE FROM commerce_delivery_intent WHERE order_sn=?", order);
                 jdbc.update("DELETE FROM commerce_order_grant WHERE order_sn=?", order);
+                jdbc.update("DELETE FROM commerce_official_owner WHERE order_sn=?", order);
                 jdbc.update("DELETE FROM oms_order WHERE order_sn=?", order);
             }
         }
@@ -335,9 +336,13 @@ class MallTiDbIntegrationTest {
             jdbc.update("INSERT INTO oms_order(order_sn,buyer_id,request_id,sku_id,quantity,pay_amount,currency,status,create_time_ms,payment_deadline_ms)"
                     + " VALUES(?,'88001',?,88001,1,1250,'CNY',1,?,?)", order, order.getBytes(StandardCharsets.UTF_8), created, created + 60000);
             jdbc.update("INSERT INTO commerce_order_grant(order_sn,item_config_id,count_per_unit,title) VALUES(?,10,1,'玄铁')", order);
+            jdbc.update("INSERT INTO commerce_official_owner(order_sn,buyer_account,buyer_owner_revision) VALUES(?,?,?)",
+                order,"fixture-account".getBytes(StandardCharsets.UTF_8),"1".getBytes(StandardCharsets.US_ASCII));
             jdbc.update("INSERT INTO commerce_delivery_intent(order_sn,buyer_id,sku_id,quantity,status,created_ms) VALUES(?,'88001',88001,1,'PENDING',?)", order, created);
         });
     }
+
+    private static MallApi.OwnedOrder owned(String orderId) { return new MallApi.OwnedOrder(orderId,"fixture-account","1"); }
 
     private static void sku(long id, int stock) { jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (?,?,?,1250,'CNY',?,0,1)", id, id, "tidb-" + id, stock);jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(?,10,1,'玄铁')",id); }
     private static int stock(long id, String column) { return jdbc.queryForObject("SELECT " + column + " FROM pms_sku_stock WHERE id=?", Integer.class, id); }

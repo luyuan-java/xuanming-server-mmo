@@ -88,10 +88,12 @@ class TradeFlowMysqlTest {
                     + " appearance_id VARCHAR(64) NOT NULL DEFAULT '', zone_id INT UNSIGNED NOT NULL DEFAULT 0)");
             st.execute("INSERT INTO player (player_id, name, zone_id) VALUES (" + Long.toUnsignedString(SELLER) + ", 'seller', " + ZONE
                     + "), (" + Long.toUnsignedString(BUYER) + ", 'buyer', " + ZONE + "), (" + Long.toUnsignedString(OTHER_ZONE)
-                    + ", 'other', " + (ZONE + 1) + "), (" + Long.toUnsignedString(NO_ZONE) + ", 'nozone', 0)");
+                    + ", 'other', " + (ZONE + 1) + ")");
         }
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
+        try(var connection=dataSource.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(ZONE,ZONE+1));}
         store = new JdbcListingStore(dataSource::getConnection, 3, metrics);
-        homeZones = new PlayerHomeZones(new PlayerProfiles(dataSource::getConnection, 3)::loadStrict,
+        homeZones = new PlayerHomeZones(dataSource,
                 Duration.ofMillis(TradeLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS));
     }
 

@@ -65,7 +65,7 @@ class MockPaymentStoreTest {
     @Test void 同请求并发与重启只扣一次_请求与订单双向绑定_冻结金额和grant不变() throws Exception {
         try (var f = fixture()) {
             f.sku(1, 10, 125);
-            var order = f.store.create("1", new MallApi.CreateOrder("mock-order-001", 1, 2));
+            var order = f.store.create("1", new MallApi.CreateOrder("mock-order-001", 1, 2, "fixture-account", "1"));
             var frozen = f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", order.orderId());
             f.jdbc.update("UPDATE pms_sku_stock SET price_minor=999,currency='USD' WHERE id=1");
             f.jdbc.update("UPDATE commerce_sku_grant SET item_config_id=20,count_per_unit=3,title='新条款' WHERE sku_id=1");
@@ -90,7 +90,7 @@ class MockPaymentStoreTest {
             var another = create(f, 2, "mock-order-002");
             rejects(409, () -> worker.pay(new MockPaymentApi.Pay(another.orderId(), command.requestId())));
             assertEquals(1, f.count("commerce_mock_transaction"));
-            assertEquals("AWAITING_PAYMENT", f.store.get("2", another.orderId()).state());
+            assertEquals("AWAITING_PAYMENT", f.store.get("2", new MallApi.OwnedOrder(another.orderId(), "fixture-account", "1")).state());
         }
     }
 
@@ -131,7 +131,7 @@ class MockPaymentStoreTest {
             rejects(503, () -> worker(f, boundary, delivery(f), nanos::get).pay(new MockPaymentApi.Pay(order.orderId(), "applied-crash-request")));
             assertEquals(0, new PaymentPolicy(f.jdbc, f.props, RunMode.TEST).required("PAYMENT", order.orderId()).applied());
             assertEquals(1, f.count("commerce_payment_receipt"));
-            assertEquals("DELIVERY_PENDING", f.store.get("1", order.orderId()).state());
+            assertEquals("DELIVERY_PENDING", f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")).state());
             assertEquals(1, worker(f).reconcile().succeeded());
             assertEquals(1, f.count("commerce_mock_transaction"));
             assertEquals(1, f.count("commerce_payment_receipt"));
@@ -144,10 +144,10 @@ class MockPaymentStoreTest {
         try (var f = fixture()) {
             f.sku(1, 10, 100);
             var original = create(f, 1, "refund-source-order");
-            f.store.cancel("1", original.orderId());
+            f.store.cancel("1", new MallApi.OwnedOrder(original.orderId(), "fixture-account", "1"));
             assertEquals("REFUND_PENDING", worker(f).pay(new MockPaymentApi.Pay(original.orderId(), "refund-source-request")).state());
             var foreign = create(f, 2, "foreign-refund-order");
-            f.store.cancel("2", foreign.orderId());
+            f.store.cancel("2", new MallApi.OwnedOrder(foreign.orderId(), "fixture-account", "1"));
             f.store.recordTrustedPayment(new MallApi.Payment(foreign.orderId(), "test", "foreign-test-payment", 100, "CNY"));
             var broken = mock(DeliveryStore.class);
             doThrow(new MallException(503, "本例退款OMS边界失败")).when(broken).refunded(any());
@@ -159,8 +159,8 @@ class MockPaymentStoreTest {
             assertEquals(0, refund.applied());
             assertEquals(0, f.count("commerce_refund_receipt"));
             assertEquals(1, worker(f).reconcile().succeeded());
-            assertEquals("REFUNDED", f.store.get("1", original.orderId()).state());
-            assertEquals("REFUND_PENDING", f.store.get("2", foreign.orderId()).state());
+            assertEquals("REFUNDED", f.store.get("1", new MallApi.OwnedOrder(original.orderId(), "fixture-account", "1")).state());
+            assertEquals("REFUND_PENDING", f.store.get("2", new MallApi.OwnedOrder(foreign.orderId(), "fixture-account", "1")).state());
             assertNull(new PaymentPolicy(f.jdbc, f.props, RunMode.TEST).find("REFUND", foreign.orderId(), false));
             assertEquals(refund.transactionId(), new PaymentPolicy(f.jdbc, f.props, RunMode.TEST).required("REFUND", original.orderId()).transactionId());
             assertEquals(1, f.count("commerce_refund_receipt"));
@@ -186,7 +186,7 @@ class MockPaymentStoreTest {
             }).when(boundary).refunded(any());
             var result = worker(f, f.store, boundary, nanos::get).reconcile();
             assertEquals(1, result.attempted()); assertEquals(1, result.failed()); assertTrue(result.budgetExhausted());
-            assertEquals("REFUNDED", f.store.get("1", order.orderId()).state());
+            assertEquals("REFUNDED", f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")).state());
             assertEquals("REFUNDED", f.jdbc.queryForObject("SELECT status FROM commerce_refund_intent WHERE order_sn=?", String.class, order.orderId()));
             assertEquals(0, new PaymentPolicy(f.jdbc, f.props, RunMode.TEST).required("REFUND", order.orderId()).applied());
             assertEquals(1, worker(f).reconcile().succeeded());
@@ -202,7 +202,7 @@ class MockPaymentStoreTest {
             var worker = worker(f);
             for (int i = 1; i <= 25; i++) {
                 var order = create(f, i, "fair-refund-order-" + i);
-                f.store.cancel(Integer.toString(i), order.orderId());
+                f.store.cancel(Integer.toString(i), new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1"));
                 worker.pay(new MockPaymentApi.Pay(order.orderId(), "fair-refund-request-" + i));
             }
             var ids = f.jdbc.queryForList("SELECT order_sn FROM commerce_mock_transaction WHERE kind='PAYMENT' ORDER BY order_sn", String.class);
@@ -261,7 +261,7 @@ class MockPaymentStoreTest {
         try (var f = fixture()) {
             f.sku(1, 5, 100);
             var order = create(f, 1, "parallel-refund-order");
-            f.store.cancel("1", order.orderId());
+            f.store.cancel("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1"));
             worker(f).pay(new MockPaymentApi.Pay(order.orderId(), "parallel-refund-request"));
             var results = parallel(() -> worker(f).reconcile(), () -> worker(f).reconcile());
             for (var result : results) {
@@ -270,7 +270,7 @@ class MockPaymentStoreTest {
             assertTrue(results.stream().mapToInt(MockPaymentApi.Reconcile::succeeded).sum() >= 1);
             assertEquals(2, f.count("commerce_mock_transaction"));
             assertEquals(1, f.count("commerce_refund_receipt"));
-            assertEquals("REFUNDED", f.store.get("1", order.orderId()).state());
+            assertEquals("REFUNDED", f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")).state());
             assertEquals(5, f.value("pms_sku_stock", "stock"));
         }
     }
@@ -287,7 +287,7 @@ class MockPaymentStoreTest {
     @Test void V3升级同一V4结构且保留冻结订单与预占_缺mock表拒启动() throws Exception {
         try (var f = fixture()) {
             f.sku(1, 5, 125);
-            var order = f.store.create("1", new MallApi.CreateOrder("mock-migration-order", 1, 2));
+            var order = f.store.create("1", new MallApi.CreateOrder("mock-migration-order", 1, 2, "fixture-account", "1"));
             var grant = f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", order.orderId());
             // 本例尚无退款数据，退回V3形状；不操作任何既有共享库。
             f.jdbc.execute("DROP TABLE commerce_mock_transaction");
@@ -296,7 +296,7 @@ class MockPaymentStoreTest {
             assertThrows(Exception.class, () -> new MallSchemaVerifier(f.source, f.props).verify());
             f.migrate("db/migration/V4__mock_payment.sql");
             new MallSchemaVerifier(f.source, f.props).verify();
-            assertEquals(order, f.store.get("1", order.orderId()));
+            assertEquals(order, f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")));
             assertEquals(grant, f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", order.orderId()));
             assertEquals(5, f.value("pms_sku_stock", "stock"));
             assertEquals(2, f.value("pms_sku_stock", "lock_stock"));
@@ -308,7 +308,7 @@ class MockPaymentStoreTest {
         return new MockPaymentTestDatabase();
     }
     private static MallApi.Order create(MockPaymentTestDatabase f, int buyer, String request) {
-        return f.store.create(Integer.toString(buyer), new MallApi.CreateOrder(request, 1, 1));
+        return f.store.create(Integer.toString(buyer), new MallApi.CreateOrder(request, 1, 1, "fixture-account", "1"));
     }
     private static DeliveryStore delivery(MockPaymentTestDatabase f) { return new DeliveryStore(f.jdbc, f.manager, f.props, RunMode.TEST); }
     // 批量契约不依赖机器墙钟快慢；专门的预算用例显式推动同一单调时钟，SQL仍有真实事务/查询超时。

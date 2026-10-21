@@ -7,6 +7,7 @@ import static org.mockito.Mockito.*;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.api.proto.AssetOpResponse;
 import com.game.api.proto.AssetOutcome;
+import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.asset.ReliableAssetDelivery;
 import com.game.discovery.sql.*;
@@ -57,6 +58,11 @@ class MailStoreTiDbTest {
                 s.execute("CREATE TABLE player_state (player_id BIGINT UNSIGNED PRIMARY KEY,data MEDIUMBLOB NOT NULL)");
             }
         }
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
+        try(var connection=pool.getConnection();var statement=connection.createStatement()){
+            statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));
+        }
         MailTables.sync(pool);
         jdbc = new AuthorityJdbc(pool);
         store = new MailStore(jdbc, new AuthorityIds(jdbc, "mail_id_sequence"), id -> id == 1, System::currentTimeMillis);
@@ -81,6 +87,50 @@ class MailStoreTiDbTest {
                 .setBody("SQL一致附件")
                 .setAttachments(MailAttachments.newBuilder().addCurrencies(MailCurrency.newBuilder().setCurrencyType(0).setAmount(500)))
                 .build();
+    }
+    private void roleOwner(String account, long revision, long listing) throws Exception {
+        jdbc.tx(budget(), s -> {
+            s.update("CREATE TABLE IF NOT EXISTS player (player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,"
+                    + "owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            s.update("INSERT INTO player(player_id,account,owner_revision,trade_listing_id) VALUES (7,?,?,?) ON DUPLICATE KEY UPDATE account=?,owner_revision=?,trade_listing_id=?",
+                    account, revision, listing, account, revision, listing);
+            return null;
+        });
+    }
+    private MailStore actor(String account, long revision) {
+        return store.forActor(SessionContext.newBuilder().setPlayerId(7).setAccount(account).setOwnerRevision(revision).build());
+    }
+    @Test
+    void transferredOrAbaMailSessionCannotReadClaimOrDeleteNewOwnersMail() throws Exception {
+        long mail = store.send("admin", 1, personal(701, 7), budget()).getMailId();
+        roleOwner("原卖家", 1, 0);
+        var original = actor("原卖家", 1);
+        assertEquals(1, original.list(7, ListMailsRequest.getDefaultInstance(), budget()).getMailsCount());
+        roleOwner("新买家", 2, 0);
+        assertThrows(SecurityException.class, () -> original.list(7, ListMailsRequest.getDefaultInstance(), budget()));
+        assertThrows(SecurityException.class, () -> original.read(7, ReadMailRequest.newBuilder().setMailId(mail).build(), budget()));
+        assertThrows(SecurityException.class, () -> original.claim(7, mail, budget()));
+        assertThrows(SecurityException.class, () -> original.delete(7, List.of(mail), false, budget()));
+        assertEquals(0L, (long) jdbc.read(budget(), s -> s.count("SELECT COUNT(*) FROM mail_asset_op")));
+        assertEquals(0L, (long) jdbc.read(budget(), s -> s.count("SELECT COUNT(*) FROM mail_state WHERE read_ms<>0 OR deleted_ms<>0")));
+        roleOwner("原卖家", 3, 0);
+        assertThrows(SecurityException.class, () -> original.claim(7, mail, budget()));
+        roleOwner("原卖家", 3, 99);
+        assertThrows(SecurityException.class, () -> actor("原卖家", 3).claim(7, mail, budget()));
+        roleOwner("原卖家", 3, 0);
+        assertEquals(1, actor("原卖家", 3).list(7, ListMailsRequest.getDefaultInstance(), budget()).getMailsCount());
+    }
+    @Test
+    void mailSessionCheckPrecedesPendingClaimReplay() throws Exception {
+        long mail = store.send("admin", 1, personal(702, 7), budget()).getMailId();
+        roleOwner("原卖家", 1, 0);
+        var original = actor("原卖家", 1);
+        long op = original.claim(7, mail, budget()).getAssetOpId();
+        assertNotEquals(0, op);
+        roleOwner("新买家", 2, 0);
+        assertThrows(SecurityException.class, () -> original.claim(7, mail, budget()));
+        assertEquals(op, actor("新买家", 2).claim(7, mail, budget()).getAssetOpId());
+        assertEquals(1L, (long) jdbc.read(budget(), s -> s.count("SELECT COUNT(*) FROM mail_asset_op")));
     }
     @Test
     void concurrentClaimHasOneOperationAndNoSqlProofCannotFinish() throws Exception {

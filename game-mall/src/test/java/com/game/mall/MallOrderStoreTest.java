@@ -13,14 +13,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
 
 class MallOrderStoreTest {
-    @Test void SKU缺游戏映射或总量越界一律拒绝并回滚库存(){try(var db=new MallTestDatabase()){db.sku(901,10);db.jdbc.update("DELETE FROM commerce_sku_grant WHERE sku_id=901");assertThatThrownBy(()->db.store.create("1",new MallApi.CreateOrder("unknown-sku-001",901,1))).isInstanceOf(MallException.class);assertThat(db.count("oms_order")).isZero();assertThat(db.stock(901,"lock_stock")).isZero();db.jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(901,10,4096,'玄铁')");assertThatThrownBy(()->db.store.create("1",new MallApi.CreateOrder("over-sku-001",901,2))).isInstanceOf(MallException.class);assertThat(db.count("oms_order")).isZero();assertThat(db.stock(901,"lock_stock")).isZero();}}
+    @Test void SKU缺游戏映射或总量越界一律拒绝并回滚库存(){try(var db=new MallTestDatabase()){db.sku(901,10);db.jdbc.update("DELETE FROM commerce_sku_grant WHERE sku_id=901");assertThatThrownBy(()->db.store.create("1",new MallApi.CreateOrder("unknown-sku-001", 901, 1, "fixture-account", "1"))).isInstanceOf(MallException.class);assertThat(db.count("oms_order")).isZero();assertThat(db.stock(901,"lock_stock")).isZero();db.jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(901,10,4096,'玄铁')");assertThatThrownBy(()->db.store.create("1",new MallApi.CreateOrder("over-sku-001", 901, 2, "fixture-account", "1"))).isInstanceOf(MallException.class);assertThat(db.count("oms_order")).isZero();assertThat(db.stock(901,"lock_stock")).isZero();}}
     private static final String BUYER = "18446744073709551615";
 
     @Test
     void 支付只读查单保留原买家金额与既有状态_不改变库存和付款事实() {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 10);
-            MallApi.Order order = db.store.create(BUYER, new MallApi.CreateOrder("payment-view-001", 1, 2));
+            MallApi.Order order = db.store.create(BUYER, new MallApi.CreateOrder("payment-view-001", 1, 2, "fixture-account", "1"));
             db.jdbc.update("UPDATE pms_sku_stock SET price_minor=999 WHERE id=1");
             assertThat(db.store.paymentOrderView(order.orderId())).isEqualTo(order);
             assertThat(db.stock(1, "stock")).isEqualTo(10);
@@ -28,7 +28,7 @@ class MallOrderStoreTest {
             assertThat(db.count("commerce_payment_receipt")).isZero();
             assertThat(db.count("commerce_delivery_intent")).isZero();
 
-            MallApi.Order cancelled = db.store.cancel(BUYER, order.orderId());
+            MallApi.Order cancelled = db.store.cancel(BUYER, new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1"));
             assertThat(db.store.paymentOrderView(order.orderId())).isEqualTo(cancelled);
             MallApi.Order refundPending = db.store.recordTrustedPayment(payment(order, "ViewLatePayment"));
             assertThat(db.store.paymentOrderView(order.orderId())).isEqualTo(refundPending);
@@ -66,7 +66,7 @@ class MallOrderStoreTest {
     void 全uint64买家_价格快照_终态重放_不会重新预占() {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 10);
-            MallApi.CreateOrder request = new MallApi.CreateOrder("request-001", 1, 2);
+            MallApi.CreateOrder request = new MallApi.CreateOrder("request-001", 1, 2, "fixture-account", "1");
             MallApi.Order first = db.store.create(BUYER, request);
             assertThat(first.buyerId()).isEqualTo(BUYER);
             assertThat(first.amountMinor()).isEqualTo(2500);
@@ -75,9 +75,9 @@ class MallOrderStoreTest {
             assertThat(db.store.create(BUYER, request)).isEqualTo(first);
             assertThat(db.count("oms_order")).isEqualTo(1);
             assertThat(db.stock(1, "lock_stock")).isEqualTo(2);
-            assertThatThrownBy(() -> db.store.get("2", first.orderId())).isInstanceOfSatisfying(MallException.class, e -> assertThat(e.status()).isEqualTo(404));
-            assertThat(db.store.cancel(BUYER, first.orderId()).state()).isEqualTo("CANCELLED");
-            assertThat(db.store.cancel(BUYER, first.orderId()).state()).isEqualTo("CANCELLED");
+            assertThatThrownBy(() -> db.store.get("2", new MallApi.OwnedOrder(first.orderId(), "fixture-account", "1"))).isInstanceOfSatisfying(MallException.class, e -> assertThat(e.status()).isEqualTo(404));
+            assertThat(db.store.cancel(BUYER, new MallApi.OwnedOrder(first.orderId(), "fixture-account", "1")).state()).isEqualTo("CANCELLED");
+            assertThat(db.store.cancel(BUYER, new MallApi.OwnedOrder(first.orderId(), "fixture-account", "1")).state()).isEqualTo("CANCELLED");
             assertThat(db.store.create(BUYER, request).state()).isEqualTo("CANCELLED");
             assertThat(db.stock(1, "lock_stock")).isZero();
             assertThatThrownBy(() -> db.store.create("018", request)).isInstanceOf(MallException.class);
@@ -89,12 +89,12 @@ class MallOrderStoreTest {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 20);
             List<MallApi.Order> orders = new ArrayList<>();
-            for (int i = 0; i < 5; i++) orders.add(db.store.create(BUYER, new MallApi.CreateOrder("pending-00" + i, 1, 1)));
-            assertThatThrownBy(() -> db.store.create(BUYER, new MallApi.CreateOrder("pending-006", 1, 1)))
+            for (int i = 0; i < 5; i++) orders.add(db.store.create(BUYER, new MallApi.CreateOrder("pending-00" + i, 1, 1, "fixture-account", "1")));
+            assertThatThrownBy(() -> db.store.create(BUYER, new MallApi.CreateOrder("pending-006", 1, 1, "fixture-account", "1")))
                     .isInstanceOfSatisfying(MallException.class, e -> assertThat(e.status()).isEqualTo(429));
-            assertThat(db.store.create(BUYER, new MallApi.CreateOrder("pending-000", 1, 1))).isEqualTo(orders.getFirst());
-            db.store.cancel(BUYER, orders.getFirst().orderId());
-            db.store.create(BUYER, new MallApi.CreateOrder("pending-006", 1, 1));
+            assertThat(db.store.create(BUYER, new MallApi.CreateOrder("pending-000", 1, 1, "fixture-account", "1"))).isEqualTo(orders.getFirst());
+            db.store.cancel(BUYER, new MallApi.OwnedOrder(orders.getFirst().orderId(), "fixture-account", "1"));
+            db.store.create(BUYER, new MallApi.CreateOrder("pending-006", 1, 1, "fixture-account", "1"));
             assertThat(db.stock(1, "lock_stock")).isEqualTo(5);
         }
     }
@@ -103,8 +103,8 @@ class MallOrderStoreTest {
     void 大小写不同的不透明请求号与渠道流水保持独立() {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 10);
-            MallApi.Order first = db.store.create(BUYER, new MallApi.CreateOrder("OpaqueAA", 1, 1));
-            MallApi.Order second = db.store.create(BUYER, new MallApi.CreateOrder("opaqueAA", 1, 1));
+            MallApi.Order first = db.store.create(BUYER, new MallApi.CreateOrder("OpaqueAA", 1, 1, "fixture-account", "1"));
+            MallApi.Order second = db.store.create(BUYER, new MallApi.CreateOrder("opaqueAA", 1, 1, "fixture-account", "1"));
             assertThat(first.orderId()).isNotEqualTo(second.orderId());
             db.store.recordTrustedPayment(payment(first, "TxA"));
             db.store.recordTrustedPayment(payment(second, "txa"));
@@ -122,7 +122,7 @@ class MallOrderStoreTest {
             List<Future<MallApi.Order>> replies = new ArrayList<>();
             for (int i = 0; i < 16; i++) replies.add(workers.submit(() -> {
                 assertThat(start.await(5, TimeUnit.SECONDS)).isTrue();
-                return db.store.create(BUYER, new MallApi.CreateOrder("same-request-001", 1, 1));
+                return db.store.create(BUYER, new MallApi.CreateOrder("same-request-001", 1, 1, "fixture-account", "1"));
             }));
             start.countDown();
             String first = replies.getFirst().get(10, TimeUnit.SECONDS).orderId();
@@ -142,7 +142,7 @@ class MallOrderStoreTest {
                 String buyer = Integer.toString(i);
                 replies.add(workers.submit(() -> {
                     assertThat(start.await(5, TimeUnit.SECONDS)).isTrue();
-                    try { db.store.create(buyer, new MallApi.CreateOrder("last-stock-001", 1, 1)); return true; }
+                    try { db.store.create(buyer, new MallApi.CreateOrder("last-stock-001", 1, 1, "fixture-account", "1")); return true; }
                     catch (MallException denied) { assertThat(denied.status()).isEqualTo(409); return false; }
                 }));
             }
@@ -161,15 +161,15 @@ class MallOrderStoreTest {
         try (var db = new MallTestDatabase(); var workers = Executors.newFixedThreadPool(2)) {
             db.sku(1, 20);
             for (int i = 0; i < 10; i++) {
-                MallApi.Order order = db.store.create(BUYER, new MallApi.CreateOrder("racing-order-00" + i, 1, 1));
+                MallApi.Order order = db.store.create(BUYER, new MallApi.CreateOrder("racing-order-00" + i, 1, 1, "fixture-account", "1"));
                 CountDownLatch start = new CountDownLatch(1);
-                Future<Boolean> cancel = workers.submit(() -> compete(start, () -> db.store.cancel(BUYER, order.orderId())));
+                Future<Boolean> cancel = workers.submit(() -> compete(start, () -> db.store.cancel(BUYER, new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1"))));
                 Future<Boolean> pay = workers.submit(() -> compete(start, () -> db.store.recordTrustedPayment(payment(order, order.orderId()))));
                 start.countDown();
                 boolean cancelled = cancel.get(10, TimeUnit.SECONDS);
                 boolean paid = pay.get(10, TimeUnit.SECONDS);
                 assertThat(paid).isTrue();
-                assertThat(db.store.get(BUYER, order.orderId()).state()).isEqualTo(cancelled ? "REFUND_PENDING" : "DELIVERY_PENDING");
+                assertThat(db.store.get(BUYER, new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")).state()).isEqualTo(cancelled ? "REFUND_PENDING" : "DELIVERY_PENDING");
                 assertThat(db.stock(1, "lock_stock")).isZero();
                 assertThat(db.count("commerce_payment_receipt")).isEqualTo(db.count("commerce_delivery_intent")+db.count("commerce_refund_intent"));
                 assertThat(db.stock(1, "stock") + db.count("commerce_delivery_intent")).isEqualTo(20);
@@ -181,8 +181,8 @@ class MallOrderStoreTest {
     void 重放支付无重复扣减_跨订单盗用流水与错金额失败() {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 10);
-            MallApi.Order first = db.store.create(BUYER, new MallApi.CreateOrder("payment-first", 1, 1));
-            MallApi.Order second = db.store.create(BUYER, new MallApi.CreateOrder("payment-second", 1, 1));
+            MallApi.Order first = db.store.create(BUYER, new MallApi.CreateOrder("payment-first", 1, 1, "fixture-account", "1"));
+            MallApi.Order second = db.store.create(BUYER, new MallApi.CreateOrder("payment-second", 1, 1, "fixture-account", "1"));
             assertThatThrownBy(() -> db.store.recordTrustedPayment(new MallApi.Payment(first.orderId(), "test-channel", "Wrong", 1, "CNY"))).isInstanceOf(MallException.class);
             assertThat(db.count("commerce_payment_receipt")).isZero();
             assertThat(db.store.recordTrustedPayment(payment(first, "TxSame")).state()).isEqualTo("DELIVERY_PENDING");
@@ -199,10 +199,10 @@ class MallOrderStoreTest {
     void 交付意图写入失败时付款收据库存状态全部回滚() {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 10);
-            MallApi.Order order = db.store.create(BUYER, new MallApi.CreateOrder("rollback-order", 1, 1));
+            MallApi.Order order = db.store.create(BUYER, new MallApi.CreateOrder("rollback-order", 1, 1, "fixture-account", "1"));
             db.jdbc.execute("DROP TABLE commerce_delivery_intent");
             assertThatThrownBy(() -> db.store.recordTrustedPayment(payment(order, "RollbackTx"))).isInstanceOf(DataAccessException.class);
-            assertThat(db.store.get(BUYER, order.orderId()).state()).isEqualTo("AWAITING_PAYMENT");
+            assertThat(db.store.get(BUYER, new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")).state()).isEqualTo("AWAITING_PAYMENT");
             assertThat(db.count("commerce_payment_receipt")).isZero();
             assertThat(db.stock(1, "stock")).isEqualTo(10);
             assertThat(db.stock(1, "lock_stock")).isEqualTo(1);

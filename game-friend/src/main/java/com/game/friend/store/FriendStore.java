@@ -15,6 +15,11 @@ import java.util.List;
  */
 public interface FriendStore {
 
+    /** 外部请求必须显式绑定原会话；未实现身份验证的存储默认拒绝，系统入口直接持有未绑定实例。 */
+    default FriendStore forActor(long playerId, String originalAccount, long originalRevision) {
+        throw new SecurityException("好友存储未实现原会话身份验证");
+    }
+
     /** 发申请的结局。好友数满的两个值按「角色」命名：申请人（sender）满 / 接收方满，由上层分别映射 tip。 */
     enum AddResult { OK, BLOCKED, ALREADY_FRIENDS, TOO_MANY_PENDING, TARGET_INBOX_FULL, SENDER_FULL, RECEIVER_FULL }
 

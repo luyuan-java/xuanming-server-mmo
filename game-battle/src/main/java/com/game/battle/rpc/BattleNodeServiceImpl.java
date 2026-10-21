@@ -21,6 +21,7 @@ import com.game.proto.Empty;
 import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.RemoveObserverRequest;
+import com.game.proto.RemoveObserverResponse;
 import com.game.proto.TipInfoMessage;
 import java.util.EnumMap;
 import java.util.Map;
@@ -158,13 +159,14 @@ public final class BattleNodeServiceImpl implements BattleNodeService {
         return submit(RpcMethod.ADD_OBSERVER, request, rooms::addObserver,
                 response -> resultOf(response.hasErrorMessage(), response.getErrorMessage()));
     }
+    @Override public CompletableFuture<com.game.proto.QueryObserverResponse> queryObserver(com.game.proto.QueryObserverRequest request){
+        return submit(RpcMethod.QUERY_OBSERVER,request,rooms::queryObserver,response->response.getState()==com.game.proto.ObserverAdmissionState.OBSERVER_ADMISSION_UNKNOWN?RpcResult.BUSINESS_ERROR:RpcResult.OK);
+    }
 
     @Override
-    public CompletableFuture<Empty> removeObserver(RemoveObserverRequest request) {
-        return submit(RpcMethod.REMOVE_OBSERVER, request, req -> {
-            rooms.removeObserver(req);
-            return Empty.getDefaultInstance();
-        }, response -> RpcResult.OK);
+    public CompletableFuture<RemoveObserverResponse> removeObserver(RemoveObserverRequest request) {
+        return submit(RpcMethod.REMOVE_OBSERVER, request, rooms::removeObserver,
+                response -> response.getCancelled()?RpcResult.OK:RpcResult.BUSINESS_ERROR);
     }
 
     // ---------------------------------------------------------------- 进程内入口（dev 管理接口）

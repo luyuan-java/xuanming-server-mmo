@@ -73,6 +73,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     private final BattleRoomService rooms;
     /** null = 还没建连，或被并发上限拒掉（从未分配会话）。 */
     private DirectSession session;
+    private BattleTicketPayload verifiedPayload;
     private com.game.proto.match.NetworkProbeGrant probeGrant;
     private com.google.protobuf.ByteString probeNonce;
     private int probeSamples,probeMaxRtt;
@@ -275,6 +276,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
 
     private void onVerify(DirectSession s, BattleTokenVerifyRequest request) {
         if (s.state() == DirectSession.State.VERIFIED) {
+            if(!rooms.currentDirect(verifiedPayload,s)){s.forceClose(Disconnect.REPLACED);return;}
             // 第 0 步：重复握手幂等（B1）：回 success 与已绑定的 battle_id，新票一个字节都不看、不重新绑定
             metrics.handshake(HandshakeResult.REPEAT);
             s.writeDirect(BattleFrames.verifyAccepted(s.battleId()));
@@ -307,13 +309,14 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         // 第 5 步：房间存在、且该玩家按票上的角色在对应名单上；重连时房间顶替旧连接（R7）。挂接期间会话仍是 PENDING，房间写不出帧（R1）
         long battleId = payload.getBattleId();
         long playerId = payload.getPlayerId();
-        OptionalInt gateSession = rooms.attachDirect(battleId, playerId, payload.getRole(), s);
+        OptionalInt gateSession = rooms.attachDirect(payload, s);
         if (gateSession.isEmpty()) {
             rejectHandshake(s, EdgeRejectReason.TICKET_NOT_IN_ROSTER, HandshakeResult.TICKET_NOT_IN_ROSTER,
                     BattleFrames.REJECT_NOT_IN_ROSTER);
             return;
         }
         s.markVerified(battleId, playerId, payload.getRole(), Integer.toUnsignedLong(gateSession.getAsInt()));
+        verifiedPayload=payload;
         metrics.handshake(HandshakeResult.OK);
         s.writeDirect(BattleFrames.verifyAccepted(battleId));
         log.info("battle 直连握手成功 battle_id={} player_id={} role={} gate_session={} peer={}",
@@ -338,6 +341,10 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             // 闸 G4：握手前一切业务消息都是不可信来源，直接关（不回应答，别给探测者放大器；不计非法包，edge.cpp:402-408）
             edge.rejectLog().record(EdgeRejectReason.REQUEST_BEFORE_VERIFY, s.peer());
             s.forceClose(Disconnect.REQUEST_BEFORE_VERIFY);
+            return;
+        }
+        if(!rooms.currentDirect(verifiedPayload,s)){
+            s.forceClose(Disconnect.REPLACED);
             return;
         }
         EdgeDependencies deps = edge.dependencies();
@@ -367,24 +374,28 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             switch (upstream) {
                 case SUBMIT_BATTLE_ACTION -> {
                     SubmitBattleActionRequest req = SubmitBattleActionRequest.parseFrom(body);
+                    if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
                     SubmitBattleActionResponse resp = rooms.submit(playerId, req);
                     response = resp;
                     businessError = resp.hasErrorMessage();
                 }
                 case GET_BATTLE_STATE -> {
                     GetBattleStateRequest req = GetBattleStateRequest.parseFrom(body);
+                    if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
                     BattleStateS2C resp = rooms.getState(playerId, req);
                     response = resp;
                     businessError = false;
                 }
                 case SET_AUTO_BATTLE -> {
                     SetAutoBattleRequest req = SetAutoBattleRequest.parseFrom(body);
+                    if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
                     SetAutoBattleResponse resp = rooms.setAuto(playerId, req);
                     response = resp;
                     businessError = resp.hasErrorMessage();
                 }
                 case STOP_WATCH_BATTLE -> {
                     StopWatchBattleRequest req = StopWatchBattleRequest.parseFrom(body);
+                    if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
                     StopWatchBattleResponse resp = rooms.stopWatch(playerId, req);
                     response = resp;
                     businessError = resp.hasErrorMessage();

@@ -81,6 +81,7 @@ public final class OpsJobService {
 
     /** 受理一个作业（见类注释）。返回 202 的应答体。 */
     public Map<String, Object> submit(Submission s) {
+        if(s.kind()==null||!java.util.Set.of(OpsJobKind.OPS_JOB_SNAPSHOT,OpsJobKind.OPS_JOB_ZONE_SNAPSHOT,OpsJobKind.OPS_JOB_ROLLBACK,OpsJobKind.OPS_JOB_RECALL,OpsJobKind.OPS_JOB_DEBT,OpsJobKind.OPS_JOB_CLAWBACK).contains(s.kind()))throw new OpsException(HttpStatus.NOT_IMPLEMENTED,"maintenance_not_implemented","此维护域尚未移植完整SQL原件、预检与恢复协议，拒绝受理");
         String hash = OpsRequests.requestHash("POST", s.path(), s.canonical());
         try {
             Optional<Map<String, Object>> replay = replay(s.kind(), s.idempotencyKey(), hash);

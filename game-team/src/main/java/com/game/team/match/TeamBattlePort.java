@@ -24,10 +24,27 @@ import java.util.concurrent.CompletionStage;
  * </ul>
  */
 public interface TeamBattlePort {
+    default Tickets createDurableTickets(int config,long team,List<Long> roster,Map<Long,Integer> zones,Map<Long,String> tickets,
+            com.game.api.proto.SessionContext caller,com.game.proto.team.StartTeamMatchRequest request,com.google.protobuf.ByteString launchOriginal,Deadline deadline){
+        if(!launchOriginal.isEmpty())throw new IllegalStateException("整队原开局核验端口尚未接入");
+        return createDurableTickets(config,team,roster,zones,tickets,caller,request,deadline);
+    }
     default boolean durableIntents(){return false;}
+    default com.game.proto.team.TeamMatchIntent queryIntent(com.game.api.proto.SessionContext caller,String request,com.google.protobuf.ByteString payload,Deadline deadline){
+        if(durableIntents())throw new IllegalStateException("可靠开局查询未接原会话");
+        return queryIntent(caller.getPlayerId(),request,payload,deadline);
+    }
+    default Tickets createDurableTickets(int config,long team,List<Long> roster,Map<Long,Integer> zones,Map<Long,String> tickets,
+            com.game.api.proto.SessionContext caller,com.game.proto.team.StartTeamMatchRequest request,Deadline deadline){
+        if(durableIntents())throw new IllegalStateException("可靠开局提交未接原会话");
+        return createDurableTickets(config,team,roster,zones,tickets,caller.getPlayerId(),request,deadline);
+    }
     default com.game.proto.team.TeamMatchIntent queryIntent(long caller,String request,com.google.protobuf.ByteString payload,Deadline deadline){throw new UnsupportedOperationException("缺少可靠开局意图查询");}
     default Tickets createDurableTickets(int config,long team,List<Long> roster,Map<Long,Integer> zones,Map<Long,String> tickets,
-            long caller,com.game.proto.team.StartTeamMatchRequest request,Deadline deadline){return createTeamTickets(config,team,roster,zones,tickets,deadline);}
+            long caller,com.game.proto.team.StartTeamMatchRequest request,Deadline deadline){
+        if(durableIntents())throw new IllegalArgumentException("可靠开局提交必须带原会话");
+        return createTeamTickets(config,team,roster,zones,tickets,deadline);
+    }
 
     /**
      * {@link #checkTeamMatch} 的结论。
@@ -59,6 +76,8 @@ public interface TeamBattlePort {
 
     /** {@link #createTeamTickets} 的结论。 */
     sealed interface Tickets {
+        /** 原launch整队单位已持久入队，尚未凑齐；不能调用逐票gather。 */
+        record Queued() implements Tickets {}
 
         /** 全员的 matched 票已建成（或同一批 id 的重放）。 */
         record Created() implements Tickets {

@@ -170,6 +170,7 @@ public class SceneNode implements SmartLifecycle {
     private final RedisKeys redisKeys;
     private final PlayerStore playerStore;
     private final PlayerTradeStore playerTrades;
+    private javax.sql.DataSource teamAuthoritySource;
     private final MessageIdRegistry registry;
     private final SceneTables tables;
     private final AttributeTables attributeTables;
@@ -266,6 +267,15 @@ public class SceneNode implements SmartLifecycle {
         this.battleMetrics = battleMetrics;
     }
 
+    /** 生产构造显式注入同一TiDB事务域；旧签名仅兼容独立场景夹具。 */
+    public SceneNode(SceneNodeProperties props,RedissonClient redis,RedisKeys redisKeys,PlayerStore playerStore,PlayerTradeStore playerTrades,
+                     MessageIdRegistry registry,SceneTables tables,AttributeTables attributeTables,BagTables bagTables,MissionTables missionTables,
+                     SkillTables skillTables,PetTables petTables,NodeLinkAuth linkAuth,SceneMetrics metrics,AuditProperties audit,KafkaNames kafkaNames,
+                     SceneBattleTables battleTables,SceneBattleMetrics battleMetrics,javax.sql.DataSource teamAuthoritySource) {
+        this(props,redis,redisKeys,playerStore,playerTrades,registry,tables,attributeTables,bagTables,missionTables,skillTables,petTables,linkAuth,metrics,audit,kafkaNames,battleTables,battleMetrics);
+        this.teamAuthoritySource=Objects.requireNonNull(teamAuthoritySource);
+    }
+
     @Override
     public synchronized void start() {
         if (running) {
@@ -334,7 +344,7 @@ public class SceneNode implements SmartLifecycle {
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
         // 组队跟随：进场 / 换场景后异步读成员关系（Redis I/O 不在逻辑线程上等），结果投递回逻辑线程（team-spec §6.10）
-        TeamMembershipReader teamMemberships = new TeamMembershipReader(redis, redisKeys);
+        TeamMembershipReader teamMemberships = teamAuthoritySource==null?new TeamMembershipReader(redis,redisKeys):new TeamMembershipReader(teamAuthoritySource,storageExecutor);
         // 6.3：与成员关系那次读并行发战斗锁 EXISTS（存在或读失败都按在途、不跟随，scene-battle-spec §7.13）
         BattleLockReader battleLocks = new BattleLockReader(redis, redisKeys);
         TeamFollowService teamFollow = new TeamFollowService(teamMemberships::readAsync, battleLocks::exists, logic, metrics);
@@ -378,7 +388,8 @@ public class SceneNode implements SmartLifecycle {
                     // 战斗结算账本损坏时大声报一次（结算一律延后、备战一律 1006，原样保留；scene-battle-spec §7.12，D24）
                     PlayerBattleService.checkLedgerOnLoad(player);
                 }, snapshots, new RedisPlayerLocations(new PlayerLocationDirectory(redis, redisKeys), zoneId, nodeId, logic), teamFollow,
-                crossNode, instances, battle, zoneTravel, inbox);
+                crossNode, instances, battle, zoneTravel, inbox,
+                new com.game.scene.world.SceneAdmissionSource(Integer.toUnsignedString(nodeId), instanceId, zoneId));
         inbox.attach(sceneWorld);
         inboxService = inbox;
         battle.attach(sceneWorld);

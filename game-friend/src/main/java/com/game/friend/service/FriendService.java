@@ -1,5 +1,7 @@
 package com.game.friend.service;
 
+import com.game.api.proto.SessionContext;
+
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory.StrictLookup;
 import com.game.discovery.presence.PlayerPushes;
@@ -70,7 +72,7 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>业务结果一律走应答体 {@code error_message}（in-band）；成功应答不设置它。</li>
  *   <li>依赖故障（MySQL / Redis / 在线目录）一律回 in-band 1003 {@code "storage unavailable"} 并打 ERROR；原始错误只进日志。</li>
- *   <li>「我」只从会话取（调用方传入 {@code me}，已保证非 0）；目标 id 来自请求体，入口挡住 0 与「自己」——
+ *   <li>「我」与原账号修订只从完整 {@code SessionContext} 取，传入不可变 Store 请求视图，在提交事务首锁 player 复核；目标 id 来自请求体，入口挡住 0 与「自己」——
  *       否则会落到存储层的非法玩家对、变成 1003 假告警。</li>
  *   <li>提交之后的失败（缓存失效、推送）不改变结果；顺序是「提交 → 失效完成 → 发起推送」，对方收到推送立即拉取时读到新值。</li>
  * </ul>
@@ -128,7 +130,8 @@ public final class FriendService {
 
     // ================================================================ AddFriend（234）
 
-    public AddFriendResponse addFriend(long me, AddFriendRequest request, Deadline deadline) {
+    public AddFriendResponse addFriend(SessionContext session, AddFriendRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         long target = request.getTargetPlayerId();
         // 顺序严格照基线：目标为 0 → 加自己 → 配额（前两步不消耗配额）
         if (target == 0) {
@@ -144,7 +147,7 @@ public final class FriendService {
         }
         AddOutcome outcome;
         try {
-            outcome = store.addRequest(me, target, deadline);
+            outcome = storeFor(session).addRequest(me, target, deadline);
         } catch (RuntimeException e) {
             return AddFriendResponse.newBuilder().setErrorMessage(fault("AddFriend", e)).build();
         }
@@ -173,7 +176,8 @@ public final class FriendService {
 
     // ================================================================ AcceptFriend（238）
 
-    public AcceptFriendResponse acceptFriend(long me, AcceptFriendRequest request, Deadline deadline) {
+    public AcceptFriendResponse acceptFriend(SessionContext session, AcceptFriendRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         long requestId = request.getRequestId();
         if (requestId == 0) {
             return AcceptFriendResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "request_id required")).build();
@@ -181,7 +185,7 @@ public final class FriendService {
         AcceptOutcome outcome;
         try {
             // 接受者永远是会话里的 me；旧 from 字段忽略，原申请人由 requestId 对应的权威行裁决。
-            outcome = store.accept(requestId, me, 0, deadline);
+            outcome = storeFor(session).accept(requestId, me, 0, deadline);
         } catch (RuntimeException e) {
             return AcceptFriendResponse.newBuilder().setErrorMessage(fault("AcceptFriend", e)).build();
         }
@@ -210,14 +214,15 @@ public final class FriendService {
 
     // ================================================================ RejectFriend（232）
 
-    public RejectFriendResponse rejectFriend(long me, RejectFriendRequest request, Deadline deadline) {
+    public RejectFriendResponse rejectFriend(SessionContext session, RejectFriendRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         long requestId = request.getRequestId();
         if (requestId == 0) {
             return RejectFriendResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "request_id required")).build();
         }
         RejectOutcome outcome;
         try {
-            outcome = store.reject(requestId, me, 0, deadline);
+            outcome = storeFor(session).reject(requestId, me, 0, deadline);
         } catch (RuntimeException e) {
             return RejectFriendResponse.newBuilder().setErrorMessage(fault("RejectFriend", e)).build();
         }
@@ -231,7 +236,8 @@ public final class FriendService {
         return RejectFriendResponse.getDefaultInstance();
     }
 
-    public RemoveFriendResponse removeFriend(long me, RemoveFriendRequest request, Deadline deadline) {
+    public RemoveFriendResponse removeFriend(SessionContext session, RemoveFriendRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         long target = request.getTargetPlayerId();
         if (target == 0) {
             return RemoveFriendResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "target_player_id required")).build();
@@ -241,7 +247,7 @@ public final class FriendService {
         }
         RemoveResult result;
         try {
-            result = store.remove(me, target, deadline);
+            result = storeFor(session).remove(me, target, deadline);
         } catch (RuntimeException e) {
             return RemoveFriendResponse.newBuilder().setErrorMessage(fault("RemoveFriend", e)).build();
         }
@@ -253,7 +259,8 @@ public final class FriendService {
 
     // ================================================================ Block（7）/ Unblock（236）
 
-    public BlockResponse block(long me, BlockRequest request, Deadline deadline) {
+    public BlockResponse block(SessionContext session, BlockRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         long target = request.getTargetPlayerId();
         if (target == 0 || target == me) {
             // 不用 15000：那个文案是「不能加自己为好友」
@@ -261,7 +268,7 @@ public final class FriendService {
         }
         BlockResult result;
         try {
-            result = store.block(me, target, deadline);
+            result = storeFor(session).block(me, target, deadline);
         } catch (RuntimeException e) {
             return BlockResponse.newBuilder().setErrorMessage(fault("Block", e)).build();
         }
@@ -276,13 +283,14 @@ public final class FriendService {
         return BlockResponse.getDefaultInstance();
     }
 
-    public UnblockResponse unblock(long me, UnblockRequest request, Deadline deadline) {
+    public UnblockResponse unblock(SessionContext session, UnblockRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         long target = request.getTargetPlayerId();
         if (target == 0 || target == me) {
             return UnblockResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER, "target_player_id invalid")).build();
         }
         try {
-            store.unblock(me, target, deadline);
+            storeFor(session).unblock(me, target, deadline);
         } catch (RuntimeException e) {
             return UnblockResponse.newBuilder().setErrorMessage(fault("Unblock", e)).build();
         }
@@ -292,12 +300,13 @@ public final class FriendService {
 
     // ================================================================ 读
 
-    public GetFriendListResponse getFriendList(long me, GetFriendListRequest request, Deadline deadline) {
+    public GetFriendListResponse getFriendList(SessionContext session, GetFriendListRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         List<FriendEdge> edges;
         StrictLookup online;
         try {
             // 关系是权威结果；失效失败的旧缓存不能被成功返回。展示资料与在线投影另行补全。
-            edges = store.friends(me, listLimit, deadline);
+            edges = storeFor(session).friends(me, listLimit, deadline);
             online = onlineStatuses(edges, deadline);
         } catch (RuntimeException e) {
             return GetFriendListResponse.newBuilder().setErrorMessage(fault("GetFriendList", e)).build();
@@ -351,11 +360,12 @@ public final class FriendService {
         return lookup;
     }
 
-    public GetPendingRequestsResponse getPendingRequests(long me, GetPendingRequestsRequest request, Deadline deadline) {
+    public GetPendingRequestsResponse getPendingRequests(SessionContext session, GetPendingRequestsRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         List<PendingRequest> pending;
         try {
             // 直接 SQL；旧缓存不带代次且可能陈旧，不能参与申请处理或权威列表。
-            pending = store.pendingRequests(me, listLimit, deadline);
+            pending = storeFor(session).pendingRequests(me, listLimit, deadline);
         } catch (RuntimeException e) {
             return GetPendingRequestsResponse.newBuilder().setErrorMessage(fault("GetPendingRequests", e)).build();
         }
@@ -369,11 +379,12 @@ public final class FriendService {
         return response.build();
     }
 
-    public ListBlocksResponse listBlocks(long me, ListBlocksRequest request, Deadline deadline) {
+    public ListBlocksResponse listBlocks(SessionContext session, ListBlocksRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         List<BlockEdge> blocks;
         try {
             // 直读、不缓存（低频且写后必须立刻可见）；刻意不带在线状态（否则拉黑任意 id 就能探测对方是否在线）
-            blocks = store.blocks(me, listLimit, deadline);
+            blocks = storeFor(session).blocks(me, listLimit, deadline);
         } catch (RuntimeException e) {
             return ListBlocksResponse.newBuilder().setErrorMessage(fault("ListBlocks", e)).build();
         }
@@ -382,6 +393,10 @@ public final class FriendService {
             response.addBlocks(BlockEntry.newBuilder().setBlockedPlayerId(row.blockedPlayerId()).setSinceMs(row.sinceMs()));
         }
         return response.build();
+    }
+
+    private FriendStore storeFor(SessionContext session) {
+        return store.forActor(session.getPlayerId(), session.getAccount(), session.getOwnerRevision());
     }
 
     // ================================================================ 推送
@@ -433,6 +448,10 @@ public final class FriendService {
 
     /** 依赖故障：打 ERROR（原始错误只进日志），回 1003。 */
     private static TipInfoMessage fault(String method, RuntimeException e) {
+        if (e instanceof SecurityException) {
+            log.warn("[friend] {} 原会话账号归属已失效", method);
+            return tip(SERVICE_UNAVAILABLE, STORAGE_UNAVAILABLE);
+        }
         log.error("[friend] {} 依赖故障: {}", method, e.toString(), e);
         return tip(SERVICE_UNAVAILABLE, STORAGE_UNAVAILABLE);
     }

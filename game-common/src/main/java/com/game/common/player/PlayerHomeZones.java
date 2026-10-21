@@ -25,6 +25,13 @@ public final class PlayerHomeZones implements HomeZones {
 
     private final BiFunction<List<Long>, Deadline, Map<Long, Profile>> loadStrict;
     private final long timeoutMillis;
+    private final javax.sql.DataSource authoritySource;
+    /** 生产SQL读侧：meta/fence/P同事务读取唯一player.zone_id。 */
+    public PlayerHomeZones(javax.sql.DataSource source,Duration timeout){
+        if(timeout.isNegative()||timeout.isZero())throw new IllegalArgumentException("归属区查询预算必须为正");
+        authoritySource=java.util.Objects.requireNonNull(source);loadStrict=null;timeoutMillis=timeout.toMillis();
+    }
+    public PlayerHomeZones(javax.sql.DataSource source){this(source,DEFAULT_TIMEOUT);}
 
     /**
      * 单次超时取 {@link #DEFAULT_TIMEOUT}。
@@ -45,11 +52,13 @@ public final class PlayerHomeZones implements HomeZones {
         }
         this.loadStrict = loadStrict;
         this.timeoutMillis = timeout.toMillis();
+        authoritySource=null;
     }
 
     @Override
     public Map<Long, Integer> homeZones(List<Long> playerIds, Deadline deadline) {
         Deadline lookup = Deadline.after(Math.min(timeoutMillis, deadline.remainingMillis()));
+        if(authoritySource!=null)return authoritative(playerIds,lookup);
         Map<Long, Integer> zones = new HashMap<>();
         for (Profile p : loadStrict.apply(playerIds, lookup).values()) {
             if (p.zoneId() != 0) {
@@ -57,5 +66,22 @@ public final class PlayerHomeZones implements HomeZones {
             }
         }
         return zones;
+    }
+    private Map<Long,Integer> authoritative(List<Long> players,Deadline budget){
+        if(players.isEmpty())return Map.of();
+        try(var connection=authoritySource.getConnection()){
+            int network=connection.getNetworkTimeout(),isolation=connection.getTransactionIsolation();boolean auto=connection.getAutoCommit();
+            if(budget.expired())throw new java.sql.SQLException("home查询预算已经耗尽");
+            connection.setNetworkTimeout(Runnable::run,(int)Math.max(1,Math.min(3000,budget.remainingMillis())));
+            connection.setTransactionIsolation(java.sql.Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);
+            try{
+                int timeout=(int)Math.max(1,Math.min(3,(budget.remainingMillis()+999)/1000));PlayerRouteAuthority.lock(connection,players,timeout);
+                var zones=new HashMap<Long,Integer>();try(var statement=connection.prepareStatement("SELECT zone_id FROM player WHERE player_id=?")){
+                    statement.setQueryTimeout(timeout);for(long player:players){statement.setObject(1,PlayerRouteAuthority.u64(player));try(var rows=statement.executeQuery()){if(rows.next()){long zone=rows.getLong(1);if(rows.wasNull()||zone==0||zone>0xffff_ffffL)throw new java.sql.SQLException("SQLhome原件无效");zones.put(player,(int)zone);}}}
+                }
+                if(budget.expired())throw new java.sql.SQLException("home查询预算已经耗尽");connection.commit();return Map.copyOf(zones);
+            }catch(java.sql.SQLException|RuntimeException failure){try{connection.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+            finally{if(!connection.isClosed()){connection.setAutoCommit(auto);connection.setTransactionIsolation(isolation);connection.setNetworkTimeout(Runnable::run,network);}}
+        }catch(java.sql.SQLException failure){throw new com.game.common.deadline.Deadline.DependencyException("SQL归属原件或维护围栏不可用",failure);}
     }
 }

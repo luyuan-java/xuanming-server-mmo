@@ -47,7 +47,7 @@ class MallContextPathHttpTest {
         jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (1,1,'context-sku',1250,'CNY',10,0,1)");
         jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(1,10,1,'玄铁')");
         String buyer = "18446744073709551615";
-        var created = call("gateway", buyer, "POST", "/api/orders", "{\"requestId\":\"context-request-001\",\"skuId\":1,\"quantity\":1}");
+        var created = call("gateway", buyer, "POST", "/api/orders", "{\"requestId\":\"context-request-001\",\"skuId\":1,\"quantity\":1,\"buyerAccount\":\"fixture-account\",\"buyerOwnerRevision\":\"1\"}");
         assertThat(created.statusCode()).isEqualTo(200);
         String id = json.readTree(created.body()).get("orderId").asText();
         String payment = "{\"orderId\":\"" + id + "\",\"channel\":\"test-channel\",\"transactionId\":\"context-pay-001\",\"amountMinor\":1250,\"currency\":\"CNY\"}";
@@ -74,7 +74,7 @@ class MallContextPathHttpTest {
         assertThat(call("payment", "payment-adapter", "POST", "/internal/payments", payment, "/internal/payments").statusCode()).isEqualTo(401);
         assertThat(call("payment", "payment-adapter", "POST", "/internal/payments", payment, "/mall/internal/payments").statusCode()).isEqualTo(401);
         assertThat(call("gateway", buyer, "POST", "/internal/unknown", "{}").statusCode()).isEqualTo(404);
-        assertThat(json.readTree(call("gateway", buyer, "GET", "/api/orders/" + id, "").body()).get("state").asText()).isEqualTo("AWAITING_PAYMENT");
+        assertThat(json.readTree(owned("gateway", buyer, id, false).body()).get("state").asText()).isEqualTo("AWAITING_PAYMENT");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_intent", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_refund_intent", Integer.class)).isZero();
@@ -82,7 +82,7 @@ class MallContextPathHttpTest {
         assertThat(jdbc.queryForObject("SELECT stock FROM pms_sku_stock WHERE id=1", Integer.class)).isEqualTo(10);
         assertThat(jdbc.queryForObject("SELECT lock_stock FROM pms_sku_stock WHERE id=1", Integer.class)).isEqualTo(1);
         assertThat(call("payment", "payment-adapter", "POST", "/internal/payments", payment).statusCode()).isEqualTo(200);
-        assertThat(json.readTree(call("gateway", buyer, "GET", "/api/orders/" + id, "").body()).get("state").asText()).isEqualTo("DELIVERY_PENDING");
+        assertThat(json.readTree(owned("gateway", buyer, id, false).body()).get("state").asText()).isEqualTo("DELIVERY_PENDING");
     }
 
     private HttpResponse<String> call(String role, String subject, String method, String route, String body) throws Exception {
@@ -129,5 +129,9 @@ class MallContextPathHttpTest {
         void forwardSkus(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
             request.getRequestDispatcher("/rpc/internal/payments/skus").forward(request, response);
         }
+    }
+    private HttpResponse<String> owned(String role, String buyer, String order, boolean cancel) throws Exception {
+        return call(role, buyer, "POST", cancel ? "/api/orders/cancel" : "/api/orders/query",
+            json.writeValueAsString(new MallApi.OwnedOrder(order, "fixture-account", "1")));
     }
 }

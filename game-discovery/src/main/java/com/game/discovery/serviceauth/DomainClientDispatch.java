@@ -2,6 +2,7 @@ package com.game.discovery.serviceauth;
 
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
+import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.google.protobuf.Message;
@@ -15,14 +16,27 @@ public final class DomainClientDispatch implements AutoCloseable {
     public interface Handler {
         Message apply(String method, long player, Message request, Deadline budget) throws Exception;
     }
+    @FunctionalInterface
+    public interface SessionHandler {
+        Message apply(String method, SessionContext session, Message request, Deadline budget) throws Exception;
+    }
     private final MessageIdRegistry registry;
     private final String service;
     private final Set<String> methods;
-    private final Handler handler;
+    private final SessionHandler handler;
     private final ToIntFunction<Throwable> error;
     private final ThreadPoolExecutor workers;
     public DomainClientDispatch(
             MessageIdRegistry registry, String service, Set<String> methods, Handler handler, ToIntFunction<Throwable> error) {
+        this(registry, service, methods,
+                (SessionHandler) (method, session, request, budget) -> handler.apply(method, session.getPlayerId(), request, budget), error);
+    }
+    public static DomainClientDispatch withSession(
+            MessageIdRegistry registry, String service, Set<String> methods, SessionHandler handler, ToIntFunction<Throwable> error) {
+        return new DomainClientDispatch(registry, service, methods, handler, error);
+    }
+    private DomainClientDispatch(
+            MessageIdRegistry registry, String service, Set<String> methods, SessionHandler handler, ToIntFunction<Throwable> error) {
         this.registry = registry;
         this.service = service;
         this.methods = Set.copyOf(methods);
@@ -46,7 +60,7 @@ public final class DomainClientDispatch implements AutoCloseable {
                 if (budget.expired())
                     throw new TimeoutException();
                 var request = contract.requestPrototype().getParserForType().parseFrom(call.getBody());
-                response = handler.apply(contract.methodName(), call.getSession().getPlayerId(), request, budget);
+                response = handler.apply(contract.methodName(), call.getSession(), request, budget);
             } catch (Exception failure) {
                 var builder = contract.responsePrototype().toBuilder();
                 var field = builder.getDescriptorForType().findFieldByName("error_message");

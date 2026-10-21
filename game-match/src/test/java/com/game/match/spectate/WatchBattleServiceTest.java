@@ -647,7 +647,7 @@ class WatchBattleServiceTest {
         assertThat(add.placement()).as("发往落点记录").isEqualTo(placement);
         assertThat(add.request().getBattleId()).isEqualTo(X);
         assertThat(add.request().getObserverPlayerId()).isEqualTo(PLAYER);
-        assertThat(add.request().getObserverName()).as("observer_name = SessionContext.account").isEqualTo("acc-1001");
+        assertThat(add.request().getObserverName()).as("缺公开名字时为空，不能泄露私有登录账号").isEmpty();
         assertThat(add.request().getRouting()).as(":294").isEqualTo(BattleRouting.newBuilder().setSessionId(4242).setGateNodeId(1)
                 .setGateInstanceId("gate-inst-z2").setZoneId(2).build());
         assertThat(add.request().getRouting().getSceneNodeId()).as("观众没有 scene 侧的状态：收不到结算").isZero();

@@ -1,6 +1,8 @@
 package com.game.inbox.store;
 
 import com.game.discovery.sql.AuthorityJdbc;
+import com.game.common.deadline.Deadline;
+import com.game.common.player.PlayerRouteAuthority;
 import com.game.inbox.rules.InboxShards;
 import com.game.proto.player_inbox.PlayerInboxItemState;
 import com.game.proto.player_inbox.player_inbox_item_row;
@@ -16,6 +18,35 @@ import java.sql.SQLException;
  */
 final class InboxSql {
 
+    // 全部写路径先持meta/完整zone围栏/P，再碰流或条目；预读玩家存在不能替代提交复核。
+    record Owner(String account, long revision, long epoch, boolean released) {}
+
+    static Owner lockPlayer(AuthorityJdbc.Session session, Deadline budget, long player) throws SQLException {
+        int timeout = (int)Math.max(1, Math.min(3, (budget.remainingMillis() + 999) / 1000));
+        PlayerRouteAuthority.lock(session.connection(), java.util.List.of(player), timeout);
+        Owner owner = session.one("SELECT account,owner_revision,owner_epoch,owner_released,trade_listing_id FROM player WHERE player_id=? FOR UPDATE", row -> {
+            if (!"0".equals(row.getString(5))) throw new SQLException("收件箱角色正在交易封存，拒绝写入");
+            String account = row.getString(1);
+            long revision, epoch;
+            try { revision=Long.parseLong(row.getString(2));epoch=Long.parseLong(row.getString(3)); }
+            catch (NumberFormatException invalid) { throw new SQLException("收件箱角色归属数字格式无效",invalid); }
+            String released = row.getString(4);
+            if (account == null || account.isEmpty() || revision <= 0 || epoch < 0 || (!"0".equals(released) && !"1".equals(released)))
+                throw new SQLException("收件箱角色归属事实缺失或越界");
+            return new Owner(account, revision, epoch, "1".equals(released));
+        }, u64(player));
+        if (owner == null) throw new SQLException("收件箱角色不存在，拒绝写入");
+        return owner;
+    }
+
+    /** 未终局条目的原归属只能核验，不能从当前目录修补或转授给新主人。 */
+    static void requireOriginalOwner(player_inbox_item_row row, Owner owner) throws SQLException {
+        if (row != null && !com.game.inbox.rules.InboxRules.terminal(row.getState())
+                && (row.getState() != PENDING || row.getOwnerRevision() <= 0
+                || row.getOwnerRevision() != owner.revision() || !row.getOwnerAccount().equals(owner.account())))
+            throw new SQLException("收件箱未终局原归属失效或状态未知，拒绝继续");
+    }
+
     static final String STREAM_TABLE = "player_inbox_stream";
     static final String ITEM_TABLE = "player_inbox_item";
     static final String AUDIT_TABLE = "player_inbox_audit";
@@ -24,7 +55,7 @@ final class InboxSql {
             + "`updated_ms`";
     static final String ITEM_COLUMNS = "`shard`,`player_id`,`domain`,`seq`,`msg_type`,`producer_kind`,`request_id`,`content_sha256`,`payload`,"
             + "`state`,`directive`,`void_reason`,`delivery_count`,`last_delivered_epoch`,`last_delivered_ms`,`outcome_reason`,"
-            + "`finalized_by`,`decided_epoch`,`issued_at_ms`,`created_ms`,`updated_ms`,`operator_name`,`note`";
+            + "`finalized_by`,`decided_epoch`,`issued_at_ms`,`created_ms`,`updated_ms`,`operator_name`,`note`,`owner_account`,`owner_revision`";
     static final String AUDIT_COLUMNS = "`shard`,`player_id`,`domain`,`seq`,`action`,`operator`,`peer_addr`,`reason`,`created_ms`,"
             + "`msg_type`,`request_id`,`issued_at_ms`,`content_sha256`,`payload`,`void_reason`";
 
@@ -112,6 +143,8 @@ final class InboxSql {
                 .setUpdatedMs(u64(row, "updated_ms"))
                 .setOperatorName(text(row, "operator_name"))
                 .setNote(text(row, "note"))
+                .setOwnerAccount(text(row, "owner_account"))
+                .setOwnerRevision(u64(row, "owner_revision"))
                 .build();
     }
 

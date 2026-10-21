@@ -77,7 +77,7 @@ class CatalogAdminHttpTest {
                 json.writeValueAsString(new CatalogAdminApi.Create(creation.requestId(), 101, originalTerms, 9))).statusCode());
 
         var orderResponse = call("gateway", "1", "/api/orders",
-                json.writeValueAsString(new MallApi.CreateOrder("http-admin-order-001", 101, 2)));
+                json.writeValueAsString(new MallApi.CreateOrder("http-admin-order-001", 101, 2, "fixture-account", "1")));
         assertEquals(200, orderResponse.statusCode(), orderResponse.body());
         JsonNode order = json.readTree(orderResponse.body());
         String orderId = order.path("orderId").asText();

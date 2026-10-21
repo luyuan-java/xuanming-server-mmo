@@ -122,6 +122,34 @@ public final class CommerceRules {
         add(w, role, to, 4, transfer(from.build()));
     }
     public static void plan(TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w, long now, Policy policy) {
+        if (r.getKind() == 6) {
+            if (w.getStage().equals("rmb_escrow")) {
+                add(w, "seller_debit", r.getSellerPlayerId(), 3, bundle(w.getSellerAssets()));
+                var debit = leg(w, "seller_debit");
+                if (!done(debit)) return;
+                if (!applied(debit)) { w.setStage("done"); r.setStatus(CANCELLED); return; }
+                if (!policy.snapshot(debit.getSnapshot())) w.setCancelRequested(true);
+                w.setStage(w.getCancelRequested() ? "rmb_return" : "rmb_register");
+                r.setStatus(w.getCancelRequested() ? CANCEL_PENDING : WAITING);
+            }
+            if (w.getStage().equals("rmb_deliver")) {
+                transferred(w, "rmb_credit", r.getBuyerPlayerId(), leg(w, "seller_debit"));
+                var credit = leg(w, "rmb_credit");
+                if (done(credit)) {
+                    w.setStage(applied(credit) ? "rmb_receipt" : "rmb_refund");
+                    r.setStatus(applied(credit) ? DELIVERING : 8);
+                }
+            }
+            if (w.getStage().equals("rmb_return")) {
+                transferred(w, "rmb_return_credit", r.getSellerPlayerId(), leg(w, "seller_debit"));
+                var credit = leg(w, "rmb_return_credit");
+                if (done(credit)) {
+                    w.setStage(applied(credit) ? "rmb_return_receipt" : "manual");
+                    r.setStatus(applied(credit) ? CANCEL_PENDING : MANUAL);
+                }
+            }
+            return;
+        }
         if (w.getStage().equals("official_deliver")) {
             add(w, "official_credit", r.getBuyerPlayerId(), 4, w.getOfficialBundle());
             var l = leg(w, "official_credit");

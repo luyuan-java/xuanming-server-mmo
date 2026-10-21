@@ -59,18 +59,40 @@ public final class TeamMembershipReader {
     /** 投影键的前缀（{@code game:{team}:info:}）：脚本里接上 tid 拼出投影键。 */
     private final String infoKeyPrefix;
     private final byte[] infoKeyPrefixBytes;
+    private final com.game.discovery.sql.AuthorityJdbc authority;
+    private final java.util.concurrent.Executor executor;
+
+    /** 生产成员关系只从SQL当前快照读取；有界存储线程承载JDBC，场景逻辑线程不阻塞。 */
+    public TeamMembershipReader(javax.sql.DataSource source,java.util.concurrent.Executor executor) {
+        this.redis=null;this.redisKeys=null;this.infoKeyPrefix=null;this.infoKeyPrefixBytes=null;
+        this.authority=new com.game.discovery.sql.AuthorityJdbc(source);this.executor=Objects.requireNonNull(executor);
+    }
 
     public TeamMembershipReader(RedissonClient redis, RedisKeys keys) {
         this.redis = redis;
         this.redisKeys = Objects.requireNonNull(keys, "keys");
         this.infoKeyPrefix = infoKeyPrefix(keys);
         this.infoKeyPrefixBytes = infoKeyPrefix.getBytes(StandardCharsets.UTF_8);
+        this.authority=null;this.executor=null;
     }
 
     /**
      * 读 {@code playerId} 此刻的成员关系。Redis 故障 / 超时 / 数据损坏时异常完成（从不同步抛出）。
      */
     public CompletableFuture<TeamMembership> readAsync(long playerId) {
+        if(authority!=null){
+            try{return CompletableFuture.supplyAsync(()->{
+                try{return authority.snapshot(com.game.common.deadline.Deadline.after(3000),sql->{
+                    com.game.common.player.PlayerRouteAuthority.lock(sql.connection(),java.util.List.of(playerId),3);
+                    var result=sql.one("SELECT m.team_id,m.epoch,t.tombstone,t.projection_proto FROM team_member_authority m LEFT JOIN team_authority t ON t.team_id=m.team_id WHERE m.player_id=?",row->{
+                        long team=row.getLong(1),epoch=row.getLong(2);if(team==0)return new TeamMembership(0,epoch,false,null);
+                        byte[] raw=row.getBytes(4);if(row.getObject(3)==null||row.getBoolean(3)||raw==null||raw.length==0)throw new java.sql.SQLException("SQL成员与队伍原件不一致");
+                        try{var info=TeamInfo.parseFrom(raw);if(info.getTeamId()!=team||!info.getMembersList().contains(playerId))throw new java.sql.SQLException("SQL队伍投影与永久成员不一致");return new TeamMembership(team,epoch,false,info);}
+                        catch(InvalidProtocolBufferException invalid){throw new java.sql.SQLException("SQL队伍投影损坏",invalid);}
+                    },com.game.discovery.sql.AuthorityJdbc.u64(playerId));return result==null?TeamMembership.KEY_MISSING:result;
+                });}catch(java.sql.SQLException failure){throw new java.util.concurrent.CompletionException(failure);}
+            },executor);}catch(RuntimeException rejected){return CompletableFuture.failedFuture(rejected);}
+        }
         try {
             return redis.getScript(ByteArrayCodec.INSTANCE).<List<Object>>evalAsync(RScript.Mode.READ_ONLY, READ,
                             RScript.ReturnType.MULTI, List.of(redisKeys.teamPlayer(playerId)), infoKeyPrefixBytes)

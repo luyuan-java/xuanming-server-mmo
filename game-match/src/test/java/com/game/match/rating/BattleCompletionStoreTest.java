@@ -8,6 +8,6 @@ class BattleCompletionStoreTest extends BattleCompletionStoreCases {
         try(var c=data.getConnection();var s=c.createStatement()) {
             for(var table:BattleCompletionStore.registry().tables())s.execute(RatingTestDatabase.h2Ddl(table.createTableSql()));
         }
-        store=new BattleCompletionStore(data);
+        RatingTestDatabase.initializeRouteAuthority(data);store=new BattleCompletionStore(data);
     }
 }

@@ -91,6 +91,11 @@ final class FakeRooms implements BattleRoomService {
 
     // ---------------------------------------------------------------- 直连面会调的
 
+    @Override public boolean currentDirect(com.game.proto.BattleTicketPayload payload,DirectLink link){
+        return payload!=null&&slots.get(payload.getPlayerId())==link
+                &&roster.contains(new Member(payload.getBattleId(),payload.getPlayerId(),payload.getRole()));
+    }
+
     @Override
     public OptionalInt attachDirect(long battleId, long playerId, eBattleTicketRole role, DirectLink link) {
         if (!roster.contains(new Member(battleId, playerId, role))) {
@@ -183,7 +188,7 @@ final class FakeRooms implements BattleRoomService {
     }
 
     @Override
-    public void removeObserver(RemoveObserverRequest request) {
+    public com.game.proto.RemoveObserverResponse removeObserver(RemoveObserverRequest request) {
         throw new UnsupportedOperationException();
     }
 }

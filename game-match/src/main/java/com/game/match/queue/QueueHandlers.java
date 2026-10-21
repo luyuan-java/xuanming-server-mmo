@@ -86,7 +86,7 @@ public final class QueueHandlers {
         public Reply handle(SessionContext session, ByteString body, Deadline deadline) throws InvalidProtocolBufferException {
             CancelQueueRequest request = CancelQueueRequest.parseFrom(body);
             try {
-                service.cancel(session.getPlayerId(), request.getQueueTicket(), request.getRequestId(), deadline);
+                service.cancel(session, request.getQueueTicket(), request.getRequestId(), deadline);
             } catch (IllegalArgumentException e) {return Reply.envelope(MatchTips.INVALID_PARAMETER);
             } catch (Deadline.DependencyException e) {
                 log.error("[match] CancelQueue 读票 / 删票失败 player={}: {}", Long.toUnsignedString(session.getPlayerId()), QueueService.why(e));
@@ -119,7 +119,7 @@ public final class QueueHandlers {
         public Reply handle(SessionContext session, ByteString body, Deadline deadline) throws InvalidProtocolBufferException {
             GetQueueStatusRequest request = GetQueueStatusRequest.parseFrom(body); // 身份只取会话；请求号仅查询撤销证据。
             try {
-                return Reply.body(service.status(session.getPlayerId(), request.getRequestId(), deadline));
+                return Reply.body(service.status(session, request.getRequestId(), deadline));
             } catch (IllegalArgumentException e) {return Reply.envelope(MatchTips.INVALID_PARAMETER);
             } catch (Deadline.DependencyException e) {
                 log.error("[match] GetQueueStatus 读票失败 player={}: {}", Long.toUnsignedString(session.getPlayerId()), QueueService.why(e));

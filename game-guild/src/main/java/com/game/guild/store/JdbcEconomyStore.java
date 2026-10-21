@@ -162,6 +162,9 @@ public final class JdbcEconomyStore implements EconomyStore {
     public JdbcEconomyStore(GuildTx tx) {
         this.tx = Objects.requireNonNull(tx, "tx");
     }
+    @Override public JdbcEconomyStore forActor(com.game.api.proto.SessionContext actor) {
+        return new JdbcEconomyStore(tx.forActor(actor));
+    }
 
     // ================================================================ T-D 捐献预留
 

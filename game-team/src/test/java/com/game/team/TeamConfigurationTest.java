@@ -79,11 +79,21 @@ class TeamConfigurationTest {
 
     private final ApplicationContextRunner base = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
-            .withUserConfiguration(TeamConfiguration.class)
+            .withUserConfiguration(FixtureConfiguration.class)
+            .withPropertyValues("game.run-mode=dev","game.team.require-tidb=false")
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withBean(RedissonClient.class, () -> fake.client)
             .withBean(DataSource.class, TeamConfigurationTest::playerTable)
             .withBean(TeamProperties.class, () -> new TeamProperties(null, null, null, null, 2, null, 1, null, 1, null));
+
+    /** 装配夹具只替换数据库schema启动I/O；物理会话策略复用StrongTiDbConnectionPolicy契约。 */
+    @org.springframework.context.annotation.Configuration(proxyBeanMethods=false)
+    static class FixtureConfiguration extends TeamConfiguration {
+        @Override @org.springframework.context.annotation.Bean
+        public com.game.team.store.TeamStore teamStore(DataSource source,org.springframework.core.env.Environment environment,TeamProperties props){return new com.game.team.store.TeamStore(source);}
+        @Override @org.springframework.context.annotation.Bean
+        public com.game.team.service.TeamLaunchRecovery teamLaunchRecovery(DataSource source,TeamService service){return mock(com.game.team.service.TeamLaunchRecovery.class);}
+    }
 
     /** 带上整队开战端口的替身（生产里它来自 {@link TeamDubboConfiguration}，那边要起 Dubbo）。 */
     private final ApplicationContextRunner runner = base

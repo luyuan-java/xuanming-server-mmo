@@ -3,6 +3,8 @@ package com.game.scene.world;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorBaseAttributesS2C;
+import com.game.proto.common.base.RoleAdmissionIdentity;
+import com.game.common.player.SceneAdmissionAuthority;
 import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorType;
 import com.game.proto.Rotation;
@@ -42,6 +44,8 @@ public final class ScenePlayer {
     private final long entity;
     private final SessionKey session;
     private final long ownerEpoch;
+    /** 本次SQL OPEN已登记的完整原件；跨本节点换图保持，绝不按当前归属重建。 */
+    private RoleAdmissionIdentity admission;
     private final int classId;
     private final int gender;
     private final String appearanceId;
@@ -157,6 +161,16 @@ public final class ScenePlayer {
 
     public long ownerEpoch() {
         return ownerEpoch;
+    }
+
+    public RoleAdmissionIdentity admission() { return admission; }
+
+    /** 仅World在加载成功、创建实体时绑定一次；其后任何替换都拒绝。 */
+    void bindAdmission(RoleAdmissionIdentity original) {
+        SceneAdmissionAuthority.original(original);
+        if (admission != null || original.getPlayerId() != playerId || original.getOwnerEpoch() != ownerEpoch
+                || original.getSessionId() != session.sessionId()) throw new SecurityException("场景实例原准入不匹配");
+        admission = original;
     }
 
     public int classId() {

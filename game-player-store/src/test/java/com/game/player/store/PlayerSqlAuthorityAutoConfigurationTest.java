@@ -95,9 +95,11 @@ public class PlayerSqlAuthorityAutoConfigurationTest {
         try {
             // 正向装配使用唯一正式DDL；负向保留空库，验证独立于Mapper的拒启门禁。
             if (initializeSchema) {
-                new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(pool);
+                new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(pool);
+                try(var routeInit=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
             }
             return pool;
+        } catch (java.sql.SQLException failure){pool.close();throw new IllegalStateException("路由原件夹具初始化失败",failure);
         } catch (RuntimeException | Error failure) {
             pool.close();
             throw failure;

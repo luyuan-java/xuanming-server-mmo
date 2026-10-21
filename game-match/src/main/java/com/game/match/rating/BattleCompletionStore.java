@@ -55,6 +55,7 @@ public final class BattleCompletionStore {
         try(Connection c=source.getConnection()) {
             c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);c.setAutoCommit(false);
             try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);
                 boolean inserted=insertCompletion(c,candidate);
                 BattleCompletionRow stored=db.findOneByPkForUpdate(c,BattleCompletionRow.newBuilder()
                         .setBattleId(event.getBattleId()).build()).orElseThrow();

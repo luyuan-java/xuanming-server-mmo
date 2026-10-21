@@ -9,11 +9,13 @@ public final class RmbConsignmentApi {
                          String assetKind, Integer assetCurrencyType, String escrowReference, String escrowProof,
                          long priceFen, String title) {}
     public record Page(String afterListingId, int limit) {}
+    public record Get(String listingId) {}
     public record Listing(String listingId, String sellerPlayerId, long marketZone, String assetKind, String title,
                           long priceFen, int feeBps, long coolingMs, long noticeEndMs, long saleEndMs,
                           String state, String phase, String orderId) {}
     public record Listings(List<Listing> listings) {}
-    public record Buy(String listingId, String buyerPlayerId, String buyerAccount, String requestId) {}
+    public record Buy(String listingId, String buyerPlayerId, String buyerAccount, String requestId,
+                      String buyerOwnerRevision) {}
     public record Cancel(String listingId, String sellerAccount) {}
     public record OrderQuery(String account, String orderId) {}
     public record OrderPage(String account, String afterOrderId, int limit) {}
@@ -26,7 +28,7 @@ public final class RmbConsignmentApi {
     public record WithdrawalQuery(String account, String withdrawalId) {}
     public record WithdrawalReceipt(String withdrawalId, String channel, String transactionId,
                                     long amountFen, String currency, boolean successful) {}
-    public record Delivery(String orderId, String buyerPlayerId, String buyerAccount, String listingId,
+    public record Delivery(String orderId, String buyerPlayerId, String buyerAccount, String buyerOwnerRevision, String listingId,
                            String escrowReference, String escrowProof, long amountFen) {}
     public record DeliveryEntry(Delivery intent, String cursor) {}
     public record Deliveries(List<DeliveryEntry> entries) {}

@@ -1,0 +1,22 @@
+// Java 内部角色交易权威契约；不占客户端消息号。结局未知只能重放原 listing/tx。
+syntax = "proto3";
+package game.api;
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+message PlayerTradeCommand {
+  enum Operation { UNSPECIFIED = 0; PROFILE = 1; BEGIN = 2; CONFIRM = 3; CANCEL = 4; TRANSFER = 5; }
+  Operation operation = 1;
+  uint64 listing_id = 2;
+  uint64 tx_id = 3;
+  uint64 player_id = 4;
+  string seller_account = 5;
+  string buyer_account = 6;
+  uint64 owner_revision = 7;
+  uint64 expires_ms = 8;
+}
+message PlayerTradeAuth { string caller = 1; uint64 timestamp_ms = 2; string nonce = 3; string signature = 4; }
+message PlayerTradeReply {
+  string code = 1; uint64 listing_id = 2; uint64 tx_id = 3; uint64 player_id = 4;
+  string seller_account = 5; string buyer_account = 6; uint64 owner_revision = 7;
+  uint64 owner_epoch = 8; string state = 9; uint32 home_zone = 10; string title = 11; string signature = 12;
+}

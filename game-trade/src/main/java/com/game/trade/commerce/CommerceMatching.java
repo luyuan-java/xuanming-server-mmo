@@ -115,6 +115,7 @@ public final class CommerceMatching {
             lw.setHighestBid(bid.getUnitPrice())
                 .setHighestBidder(bid.getSellerPlayerId())
                 .setWinningBidId(bid.getCommerceId())
+                .setBuyerIdentity(bw.getSellerIdentity())
                 .setBuyerAssets(bw.getSellerAssets());
             bw.setStage("bid_held");
             e.store.save(c,
@@ -182,6 +183,8 @@ public final class CommerceMatching {
             long now = CommerceStore.sqlNow(c);
             long dueNow = e.clock.getAsLong();
             var mw = TradeCommerceWorkflow.newBuilder().setStage("deliver");
+            mw.setSellerIdentity((sell == a ? aw : bw).getSellerIdentity())
+                .setBuyerIdentity((buy == a ? aw : bw).getSellerIdentity());
             add(mw, "buyer_receive", buy.getSellerPlayerId(), 4,
                 AssetBundle.newBuilder()
                     .addItems(ItemGrant.newBuilder().setConfigId(buy.getItemConfigId()).setCount(quantity))

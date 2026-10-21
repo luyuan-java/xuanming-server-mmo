@@ -1,9 +1,9 @@
 syntax = "proto3";
 
 // 组队权威记录的存储格式（只在 Java 版内部使用；归 game-team 所有）。
-// Redis game:{team}:rec:<team_id> 是 Hash：字段 ver = 版本号（十进制，首次 1，每次提交严格 +1），字段 pb = 本消息。
+// TiDB team_authority 保存版本与原始PB；Redis仅为提交后可丢弃投影。
 // 形状同 mmorpg proto/team/team.proto 的 TeamRecord（字段号一致），但不依赖同步来的契约 proto（team-spec D18）。
-// 所有时间字段都是 Redis TIME 口径的毫秒（唯一时钟源，team-spec §1.10），不用各实例的墙钟。
+// 所有绝对时间取 SQL CURRENT_TIMESTAMP(3)，不使用实例墙钟。
 
 package game.team;
 
@@ -21,11 +21,13 @@ message TeamRecord {
   repeated TeamApplicationRecord applications = 6;
   repeated TeamInviteRecord invites = 7;
   uint32 next_join_seq = 8;
-  // 非空 = 开战锁持有者（uuid）；过了截止即视为无锁（字段不自动清，等下次加锁覆盖或释放清空）。
+  // 非空 = 原launch持有者；SQL权威记录不因TTL释放，只有核验Match终局后清除。
   string match_lock_token = 9;
   uint64 match_lock_expire_at_ms = 10;
   // 集合语义：加锁时的开战名单；锁有效期间必等于 members 的 player_id 集合。
   repeated uint64 match_lock_roster = 11;
+  // SQL开局原件关联；非空时match_lock_expire_at_ms仅为诊断预算，不授予换名单权限。
+  string launch_request_id = 12;
 }
 
 message TeamMemberRecord {
@@ -33,6 +35,8 @@ message TeamMemberRecord {
   uint32 zone_id = 2;
   uint64 joined_at_ms = 3;
   uint32 join_seq = 4;
+  string owner_account = 5;
+  uint64 owner_revision = 6;
 }
 
 message TeamApplicationRecord {
@@ -42,6 +46,9 @@ message TeamApplicationRecord {
   // 首次申请时刻（重复申请只刷新 expire_at_ms）。
   uint64 applied_at_ms = 3;
   uint64 expire_at_ms = 4;
+  string owner_account = 5;
+  uint64 owner_revision = 6;
+  bytes consent_original = 7;
 }
 
 message TeamInviteRecord {
@@ -53,4 +60,29 @@ message TeamInviteRecord {
   // 首次邀请时刻（重复邀请只刷新 expire_at_ms 与 inviter_id）。
   uint64 invited_at_ms = 4;
   uint64 expire_at_ms = 5;
+  string owner_account = 6;
+  uint64 owner_revision = 7;
+  bytes consent_original = 8;
+}
+
+// 自有持久化表PB，统一经pbmysql登记；私有账号不进入TeamView/TeamInfo。
+message TeamAuthorityRow { uint64 team_id=1; uint64 version=2; bytes record_proto=3; bool tombstone=4; bytes projection_proto=5; string active_launch_id=6; }
+message TeamMemberAuthorityRow { uint64 player_id=1; uint64 team_id=2; uint64 epoch=3; string owner_account=4; uint64 owner_revision=5; }
+message TeamInviteAuthorityRow { uint64 invitee_id=1; uint64 team_id=2; uint64 expires_ms=3; string owner_account=4; uint64 owner_revision=5; uint64 initiator_player_id=6; }
+message TeamApplicationAuthorityRow { uint64 player_id=1; uint64 team_id=2; uint64 expires_ms=3; string owner_account=4; uint64 owner_revision=5; uint64 recipient_player_id=6; }
+message TeamLaunchRoleRow { uint64 player_id=1; string request_id=2; uint32 state=3; string owner_account=4; uint64 owner_revision=5; }
+message TeamActionRow { uint64 player_id=1; string request_id=2; string method=3; bytes request_digest=4; string owner_account=5; uint64 owner_revision=6; bytes result_proto=7; bytes response_proto=8; }
+message TeamLaunchRow { string request_id=1; uint64 team_id=2; uint64 team_version=3; string lock_token=4; uint64 actor_player_id=5; string owner_account=6; uint64 owner_revision=7; bytes request_proto=8; bytes record_proto=9; uint32 state=10; uint64 battle_id=11; uint64 updated_ms=12; bytes original_proto=13; bytes submission_proto=14; bool active=15; }
+message TeamLaunchSubmission { map<uint64,uint32> zones=1; uint32 lock_ttl_seconds=2; repeated TeamMemberAuthorityRow indexes=3; }
+message TeamPolicyRow { uint32 id=1; bytes contract=2; bool allow_cross_zone=3; bytes contract_digest=4; }
+
+// 变更回执包含重放所需的冻结快照；回包显示资料可稍后填充，领域副作用不重做。
+message TeamMutationReceipt {
+  uint32 outcome=1; uint32 code=2; uint64 param=3;
+  uint64 team_id=4; uint64 version=5; bytes before_proto=6; bytes after_proto=7;
+  uint64 caller_team_id=8; uint64 caller_epoch=9; uint64 now_ms=10;
+  repeated TeamMemberAuthorityRow indexes=11;
+  repeated uint64 joined=12; repeated uint64 kept=13; repeated uint64 left=14;
+  uint32 reason=15; uint64 actor=16; bool leader_transferred=17; bool disbanded=18;
+  repeated uint64 revoked_invitees=19; uint64 rejected_applicant=20; uint64 invited_player=21;
 }

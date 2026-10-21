@@ -1,11 +1,14 @@
 package com.game.player.store;
 
 import com.game.player.store.state.PlayerState;
+import com.game.common.player.SceneAdmissionAuthority;
+import com.game.proto.common.base.RoleAdmissionIdentity;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.sql.SQLException;
 import java.text.Normalizer;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
@@ -77,6 +80,7 @@ public class PlayerStore {
     private final PlatformTransactionManager transactions;
     /** 单调时钟（纳秒）：只用于带时限的建角 / 夺权在进事务时与提交前复核调用方截止。 */
     private final LongSupplier nanoClock;
+    private final javax.sql.DataSource routeSource;
 
     /**
      * 不支持交出 / 探测 / 带时限的建角与夺权（{@link #handOffOwnership}、{@link #probeOwnership}、
@@ -103,6 +107,7 @@ public class PlayerStore {
         this.mapper = mapper;
         this.clockMs = clockMs;
         this.transactions = transactions;
+        this.routeSource = transactions instanceof org.springframework.jdbc.datasource.DataSourceTransactionManager jdbc ? jdbc.getDataSource() : null;
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
     }
 
@@ -140,6 +145,21 @@ public class PlayerStore {
         return Optional.ofNullable(mapper.selectById(playerId));
     }
 
+    /** 外层运维事务也必须在自身首个P锁之前调用；只使用与Mapper同一Spring绑定连接。 */
+    public void lockRoutes(Collection<Long> players,List<Integer> extraZones){
+        if(transactions==null)return; // 明确无数据库的Mapper单测构造器，不是生产失败回退。
+        if(routeSource==null||!TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("玩家写入缺少同库路由事务");
+        var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(routeSource);
+        try{
+            int timeout=3;Object resource=TransactionSynchronizationManager.getResource(routeSource);
+            if(resource instanceof org.springframework.jdbc.datasource.ConnectionHolder holder&&holder.hasTimeout())timeout=Math.max(1,Math.min(timeout,holder.getTimeToLiveInSeconds()));
+            com.game.common.player.PlayerRouteAuthority.lock(connection,players,extraZones,timeout);
+        }
+        catch(java.sql.SQLException failure){if(failure instanceof java.sql.SQLTimeoutException||failure.getErrorCode()==1205)throw new QueryTimeoutException("玩家SQL路由围栏预算耗尽",failure);throw new IllegalStateException("玩家SQL路由围栏拒绝提交",failure);}
+        finally{org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection,routeSource);}
+    }
+    private OwnerState lockedOwner(long player){lockRoutes(List.of(player),List.of());return mapper.selectOwnerForUpdate(player);}
+
     public enum CreateResult {
         CREATED,
         NAME_TAKEN
@@ -151,7 +171,9 @@ public class PlayerStore {
      * @return {@link CreateResult#NAME_TAKEN}：与已有角色同名（大小写 / 全半角不敏感）
      * @throws IllegalStateException 撞到名字以外的唯一约束（主键重复 = 发号不变量被破坏），或无法判定撞的是哪个约束
      */
+    @Transactional
     public CreateResult createPlayer(PlayerRow row) {
+        lockRoutes(List.of(row.getPlayerId()), List.of(row.getZoneId()));
         long now = clockMs.getAsLong();
         row.setCreatedAt(now);
         row.setUpdatedAt(now);
@@ -238,6 +260,7 @@ public class PlayerStore {
         if (nameCandidates.isEmpty()) {
             throw new IllegalArgumentException("至少要有一个候选名");
         }
+        lockRoutes(List.of(row.getPlayerId()), List.of(row.getZoneId()));
         if (mapper.lockAccount(row.getAccount()) == null) {
             return new CreateOutcome(CreateStatus.ACCOUNT_MISSING, List.of());
         }
@@ -339,11 +362,37 @@ public class PlayerStore {
         }
     }
 
-    /** 读取、同代准入绑定与快照处于同一行锁事务。OPEN 不阻止原租约到期后取得新 epoch。 */
+    /** 新场景加载只接受调用方固定的完整原件；登记与返回快照共用同P提交点。 */
+    public Optional<SceneLoad> loadForScene(RoleAdmissionIdentity original, String expectedAccount, Duration timeout) {
+        byte[] originalBytes = SceneAdmissionAuthority.original(original);
+        if (expectedAccount == null || expectedAccount.isBlank()) throw new SecurityException("场景原账号未提供");
+        long playerId = original.getPlayerId(), expectedEpoch = original.getOwnerEpoch();
+        String source = original.getSceneInstanceId();
+        requireSource(source);
+        return withinDeadline(timeout, () -> {
+            OwnerState owner = lockedOwner(playerId);
+            if (owner == null || owner.ownerEpoch() != expectedEpoch || owner.released()
+                    || tradeLocked(playerId) || mapper.countTradeSeals(playerId, expectedEpoch) != 0
+                    || mapper.selectBlockingFinalEpoch(playerId) != null) return Optional.empty();
+            PlayerRow row = mapper.selectById(playerId);
+            if (row == null || row.getOwnerRevision() != original.getOwnerRevision()
+                    || !expectedAccount.equals(row.getAccount())) return Optional.empty();
+            FinalSaveRow admission = mapper.selectFinalSave(playerId, expectedEpoch);
+            if (admission == null) {
+                if (mapper.insertFinalAdmissionOriginal(playerId, expectedEpoch, source, originalBytes, clockMs.getAsLong()) != 1)
+                    throw new IllegalStateException("完整场景准入未写入唯一行");
+            } else if (!"OPEN".equals(admission.status()) || admission.protocolVersion() != 1 || admission.saveSeq() != 1
+                    || !source.equals(admission.sourceInstance())
+                    || !Arrays.equals(originalBytes, mapper.selectFinalAdmissionProto(playerId, expectedEpoch))) return Optional.empty();
+            return Optional.of(new SceneLoad(row, loadState(playerId)));
+        }, Optional.empty());
+    }
+
+    /** 存量同代加载兼容接缝；不登记完整原件，不能据此消费收件箱。生产scene走完整原件重载。 */
     public Optional<SceneLoad> loadForScene(long playerId,long expectedEpoch,String source,Duration timeout) {
         requireSource(source);
         return withinDeadline(timeout,()->{
-            OwnerState owner=mapper.selectOwnerForUpdate(playerId);
+            OwnerState owner=lockedOwner(playerId);
             if(owner==null || owner.ownerEpoch()!=expectedEpoch || owner.released()
                     || tradeLocked(playerId)
                     || mapper.countTradeSeals(playerId, expectedEpoch) != 0
@@ -365,7 +414,7 @@ public class PlayerStore {
         byte[] bytes=Objects.requireNonNull(stateBytes,"stateBytes").clone();byte[] digest=finalSaveDigest(frozen,bytes);
         try{PlayerState.parseFrom(bytes);}catch(InvalidProtocolBufferException error){throw new IllegalArgumentException("最终玩法快照损坏",error);}
         return withinDeadline(timeout,()->{
-            OwnerState owner=mapper.selectOwnerForUpdate(frozen.getPlayerId());
+            OwnerState owner=lockedOwner(frozen.getPlayerId());
             if(owner==null) return receipt(FinalSaveStatus.NOT_FOUND,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest);
             if(mapper.selectOtherBlockingFinalEpoch(frozen.getPlayerId(),frozen.getOwnerEpoch())!=null)
                 return receipt(FinalSaveStatus.CONFLICT,frozen.getPlayerId(),frozen.getOwnerEpoch(),source,digest);
@@ -408,13 +457,13 @@ public class PlayerStore {
     }
     public FinalSaveReceipt completeFinalSave(long playerId,long epoch,Duration timeout) {
         independentFinalTransaction();
-        return withinDeadline(timeout,()->completeFinalInTransaction(playerId,epoch,mapper.selectOwnerForUpdate(playerId)),
+        return withinDeadline(timeout,()->completeFinalInTransaction(playerId,epoch,lockedOwner(playerId)),
                 receipt(FinalSaveStatus.TIMED_OUT,playerId,epoch,"",null));
     }
     public FinalSaveReceipt probeFinalSave(long playerId,long epoch,Duration timeout) {
         independentFinalTransaction();
         return withinDeadline(timeout,()->{
-            mapper.selectOwnerForUpdate(playerId);FinalSaveRow row=mapper.selectFinalSave(playerId,epoch);
+            lockedOwner(playerId);FinalSaveRow row=mapper.selectFinalSave(playerId,epoch);
             if(row==null) return receipt(FinalSaveStatus.NOT_FOUND,playerId,epoch,"",null);
             return receipt(validFinal(row)?("APPLIED".equals(row.status())?FinalSaveStatus.APPLIED:
                     "PENDING".equals(row.status())?FinalSaveStatus.ACCEPTED:FinalSaveStatus.CONFLICT):FinalSaveStatus.CONFLICT,row);
@@ -426,7 +475,7 @@ public class PlayerStore {
     }
     public void postponeFinalSave(long playerId,long epoch,long next,String code,Duration timeout) {
         if(code==null || !code.matches("[a-z_]{1,32}")) throw new IllegalArgumentException("非法最终补偿结果分类");
-        withinDeadline(timeout,()->{mapper.selectOwnerForUpdate(playerId);mapper.selectFinalSave(playerId,epoch);
+        withinDeadline(timeout,()->{lockedOwner(playerId);mapper.selectFinalSave(playerId,epoch);
             mapper.postponeFinalSave(playerId,epoch,next,code);return true;},false);
     }
     /** 只回收保留期外且已有新E的OPEN/APPLIED；当前E认重收据、所有PENDING永不删除。 */
@@ -434,15 +483,16 @@ public class PlayerStore {
         if(limit<1 || limit>32)throw new IllegalArgumentException("最终收据清理批次必须在1..32");
         independentFinalTransaction();
         return withinDeadline(timeout,()->{
+            var candidates=new ArrayList<FinalSaveKey>();
+            for(String state:List.of("OPEN","APPLIED"))candidates.addAll(mapper.selectRetiredFinalKeys(state,cutoff,limit));
+            if(!candidates.isEmpty())lockRoutes(candidates.stream().map(FinalSaveKey::playerId).distinct().toList(),List.of());
             int removed=0;
-            for(String state:List.of("OPEN","APPLIED")) {
-                if(removed>=limit)break;
-                for(var key:mapper.selectRetiredFinalKeys(state,cutoff,limit-removed)) {
-                    OwnerState owner=mapper.selectOwnerForUpdate(key.playerId());
+                for(var key:candidates) {
+                    if(removed>=limit)break;
+                    OwnerState owner=lockedOwner(key.playerId());
                     if(owner!=null && owner.ownerEpoch()>key.ownerEpoch())
                         removed+=mapper.deleteRetiredFinal(key.playerId(),key.ownerEpoch(),cutoff);
                 }
-            }
             return removed;
         },0);
     }
@@ -507,13 +557,13 @@ public class PlayerStore {
     }
 
     /**
-     * 历史 SQL 恢复后的维护夺权；日常登录仍使用 {@link #claimOwnership}。
+     * 历史 SQL 恢复后的维护夺权；日常登录仍使用 {@link #claimOwnership}。旧仅E签名已关闭，必须使用双独立上界重载。
      *
      * <p>调用前必须关闭受影响玩家入口、停止旧写者与旧发号者，且审核上界须独立于被恢复的 SQL/备份保留，覆盖所有曾发出的
      * 纪元（含交出生成的 E+1）。本方法不能证明上界来源，也不能撤销新围栏安装之前的僵尸写。缺少可靠上界时不得调用或猜 0。
      *
      * <p>自有事务锁住玩家后，只有已释放或租约严格过期才把纪元设为 {@code max(SQL 当前纪元, 审核上界)+1} 并持有。
-     * 只更新归属/租约元数据，{@code player_state.data} 原字节与 {@code saved_epoch} 完全不变。
+     * 双上界重载同时推进账号owner_revision；{@code player_state.data} 原字节与 {@code saved_epoch} 完全不变。
      * 时限与提交结局不明语义沿用 {@link #withinDeadline}：异常不代表未提交，重投见 Held 不得认作自己的提交。
      *
      * @param auditedOldEpochUpperBound 独立审核的旧纪元上界，0 到 Long.MAX_VALUE-1；已知 0 与缺少上界不同
@@ -522,14 +572,18 @@ public class PlayerStore {
      * @throws IllegalStateException 外层事务存在、SQL 当前纪元无法安全递增或锁定后的 CAS 未改到唯一行
      */
     public ClaimResult recoverOwnershipAfterRestore(long playerId, long auditedOldEpochUpperBound, Duration timeout) {
+        throw new IllegalArgumentException("历史恢复必须同时提供独立审核的账号归属修订上界；仅E入口已封闭");
+    }
+    public ClaimResult recoverOwnershipAfterRestore(long playerId,long auditedOldEpochUpperBound,long auditedOwnerRevisionUpperBound,Duration timeout){
         if (auditedOldEpochUpperBound < 0 || auditedOldEpochUpperBound == Long.MAX_VALUE) {
             throw new IllegalArgumentException("审核旧纪元上界无法安全递增");
         }
+        if(auditedOwnerRevisionUpperBound<0||auditedOwnerRevisionUpperBound==Long.MAX_VALUE)throw new IllegalArgumentException("独立审核账号修订上界无法安全递增");
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("历史归属恢复不得加入外层事务");
         }
         return withinDeadline(timeout, () -> {
-            OwnerState owner = mapper.selectOwnerForUpdate(playerId);
+            OwnerState owner = lockedOwner(playerId);
             if (owner == null) return new ClaimResult.NotFound();
             if (tradeLocked(playerId)) return new ClaimResult.Held(owner.ownerEpoch());
             if (mapper.selectBlockingFinalEpoch(playerId) != null) return new ClaimResult.Held(owner.ownerEpoch());
@@ -540,8 +594,12 @@ public class PlayerStore {
             // 取锁可能等待；租约判断使用拿到锁之后的时刻，等于 now 保守地仍算持有。
             long now = clockMs.getAsLong();
             if (!owner.released() && owner.leaseUntil() >= now) return new ClaimResult.Held(current);
+            if (restoreHasPendingOriginals(playerId)) return new ClaimResult.Held(current);
             long next = Math.max(current, auditedOldEpochUpperBound) + 1;
-            if (mapper.recoverOwnerEpoch(playerId, current, next, now, now + OWNER_LEASE.toMillis()) != 1) {
+            PlayerRow original=mapper.selectById(playerId);
+            if(original==null||original.getOwnerRevision()<=0||original.getOwnerRevision()==Long.MAX_VALUE)throw new IllegalStateException("SQL账号修订无法安全恢复");
+            long nextRevision=Math.max(original.getOwnerRevision(),auditedOwnerRevisionUpperBound)+1;
+            if (mapper.recoverOwnerEpoch(playerId, current, original.getOwnerRevision(),nextRevision,next, now, now + OWNER_LEASE.toMillis()) != 1) {
                 throw new IllegalStateException("锁定后的历史归属恢复未改到唯一玩家行");
             }
             return new ClaimResult.Claimed(next);
@@ -559,8 +617,24 @@ public class PlayerStore {
         return listing != 0;
     }
 
+    // 调用者已持路由/P；升账号修订前须保留并清结所有原合同，不能使旧同意/托管静默失权。
+    private boolean restoreHasPendingOriginals(long playerId) {
+        if (routeSource == null || !TransactionSynchronizationManager.isActualTransactionActive())
+            throw new IllegalStateException("历史恢复缺少同库挂起域事务");
+        var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(routeSource);
+        try {
+            return RolePendingFence.blocked(connection,playerId) || RolePendingFence.economicBlocked(connection,playerId);
+        } catch(java.sql.SQLException failure) {
+            if(failure instanceof java.sql.SQLTimeoutException || failure.getErrorCode()==1205)
+                throw new QueryTimeoutException("历史恢复挂起域校验超时",failure);
+            throw new IllegalStateException("历史恢复无法确认旧合同已安全结清",failure);
+        } finally {
+            org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection,routeSource);
+        }
+    }
+
     private ClaimResult claimInTransaction(long playerId, String expectedAccount, long expectedRevision) {
-        OwnerState owner=mapper.selectOwnerForUpdate(playerId);
+        OwnerState owner=lockedOwner(playerId);
         if(owner==null) return new ClaimResult.NotFound();
         if (expectedAccount != null) {
             PlayerRow row = mapper.selectById(playerId);
@@ -590,7 +664,7 @@ public class PlayerStore {
      */
     @Transactional
     public boolean saveStateAndRelease(PlayerRow row, PlayerState state) {
-        OwnerState owner=mapper.selectOwnerForUpdate(row.getPlayerId());
+        OwnerState owner=lockedOwner(row.getPlayerId());
         if(owner==null || owner.ownerEpoch()!=row.getOwnerEpoch()) return false;
         FinalSaveRow existing=mapper.selectFinalSave(row.getPlayerId(),row.getOwnerEpoch());
         if(existing!=null) {
@@ -615,7 +689,7 @@ public class PlayerStore {
      */
     @Transactional
     public boolean saveStateHeld(PlayerRow row, PlayerState state) {
-        OwnerState owner=mapper.selectOwnerForUpdate(row.getPlayerId());
+        OwnerState owner=lockedOwner(row.getPlayerId());
         if(owner==null || owner.ownerEpoch()!=row.getOwnerEpoch() || owner.released()
                 || mapper.selectBlockingFinalEpoch(row.getPlayerId())!=null) return false;
         row.setUpdatedAt(clockMs.getAsLong());
@@ -651,10 +725,30 @@ public class PlayerStore {
      */
     @Transactional
     public boolean releaseOwnership(long playerId, long ownerEpoch) {
-        OwnerState owner=mapper.selectOwnerForUpdate(playerId);
+        OwnerState owner=lockedOwner(playerId);
         if(owner==null || owner.ownerEpoch()!=ownerEpoch || owner.released()
                 || mapper.selectBlockingFinalEpoch(playerId)!=null || mapper.selectFinalSave(playerId,ownerEpoch)!=null) return false;
         return mapper.releaseOwner(playerId, ownerEpoch, clockMs.getAsLong()) == 1;
+    }
+
+    /** 加载失败只放弃同一原件的持有代；保留OPEN原收据，不给空原件补权。 */
+    public boolean releaseSceneAdmission(RoleAdmissionIdentity original, String expectedAccount, Duration timeout) {
+        byte[] originalBytes = SceneAdmissionAuthority.original(original);
+        if (expectedAccount == null || expectedAccount.isBlank()) throw new SecurityException("场景原账号未提供");
+        return withinDeadline(timeout, () -> {
+            long playerId = original.getPlayerId(), epoch = original.getOwnerEpoch();
+            OwnerState owner = lockedOwner(playerId);
+            if (owner == null || owner.ownerEpoch() != epoch || owner.released() || tradeLocked(playerId)
+                    || mapper.selectBlockingFinalEpoch(playerId) != null) return false;
+            PlayerRow row = mapper.selectById(playerId);
+            if (row == null || row.getOwnerRevision() != original.getOwnerRevision()
+                    || !expectedAccount.equals(row.getAccount())) return false;
+            FinalSaveRow admission = mapper.selectFinalSave(playerId, epoch);
+            if (admission != null && (!"OPEN".equals(admission.status()) || admission.protocolVersion() != 1
+                    || admission.saveSeq() != 1 || !original.getSceneInstanceId().equals(admission.sourceInstance())
+                    || !Arrays.equals(originalBytes, mapper.selectFinalAdmissionProto(playerId, epoch)))) return false;
+            return mapper.releaseOwner(playerId, epoch, clockMs.getAsLong()) == 1;
+        }, false);
     }
 
     /**
@@ -674,19 +768,23 @@ public class PlayerStore {
         }
         List<OwnerLease> lost = new ArrayList<>();
         long until = clockMs.getAsLong() + OWNER_LEASE.toMillis();
+        if(transactions!=null&&TransactionSynchronizationManager.isActualTransactionActive()){
+            if(all.size()>com.game.common.player.PlayerRouteAuthority.MAX_PLAYERS)throw new IllegalArgumentException("外层事务续约必须在完整P集合上限内一次提交");
+            return all.isEmpty()?List.of():renewBatch(all,until);
+        }
         for (int from = 0; from < all.size(); from += RENEW_BATCH) {
             List<OwnerLease> batch = all.subList(from, Math.min(all.size(), from + RENEW_BATCH));
-            if (mapper.renewOwnerLeases(batch, until) >= batch.size()) {
-                continue;
-            }
-            Set<Long> stillHeld = new HashSet<>(mapper.selectStillHeld(batch));
-            for (OwnerLease lease : batch) {
-                if (!stillHeld.contains(lease.playerId())) {
-                    lost.add(lease);
-                }
+            if(transactions==null)lost.addAll(renewBatch(batch,until));
+            else {
+                lost.addAll(withinDeadline(Duration.ofSeconds(3),()->renewBatch(batch,until),batch));
             }
         }
         return lost;
+    }
+    private List<OwnerLease> renewBatch(List<OwnerLease> batch,long until){
+        lockRoutes(batch.stream().map(OwnerLease::playerId).toList(),List.of());
+        if(mapper.renewOwnerLeases(batch,until)>=batch.size())return List.of();
+        Set<Long> held=new HashSet<>(mapper.selectStillHeld(batch));return batch.stream().filter(lease->!held.contains(lease.playerId())).toList();
     }
 
     /**
@@ -789,7 +887,7 @@ public class PlayerStore {
         return transaction(timeout).execute(status -> {
             long playerId = frozen.getPlayerId();
             long epoch = frozen.getOwnerEpoch();
-            OwnerState locked=mapper.selectOwnerForUpdate(playerId);
+            OwnerState locked=lockedOwner(playerId);
             if (locked != null && tradeLocked(playerId)) throw new IllegalStateException("角色交易冻结中，禁止交出归属");
             if(!completePendingForOwner(playerId,locked))
                 throw new IllegalStateException("最终意图未完成，禁止交出归属");
@@ -805,7 +903,7 @@ public class PlayerStore {
                 }
                 return new HandOffResult.HandedOff(next);
             }
-            OwnerState owner = mapper.selectOwnerForUpdate(playerId);
+            OwnerState owner = lockedOwner(playerId);
             if (owner != null && owner.ownerEpoch() == epoch && !owner.released()) {
                 return new HandOffResult.LeaseTooShort(owner);
             }
@@ -823,7 +921,7 @@ public class PlayerStore {
      * @throws IllegalStateException 本实例没有事务管理器
      */
     public Optional<OwnerState> probeOwnership(long playerId, Duration timeout) {
-        return Optional.ofNullable(transaction(timeout).execute(status -> mapper.selectOwnerForUpdate(playerId)));
+        return Optional.ofNullable(transaction(timeout).execute(status -> lockedOwner(playerId)));
     }
 
     /**

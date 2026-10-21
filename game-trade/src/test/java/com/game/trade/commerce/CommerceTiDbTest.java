@@ -41,6 +41,13 @@ class CommerceTiDbTest {
             StrongTiDbConnectionPolicy.verify(c, true);
         }
         TradeTables.sync(pool, java.time.Duration.ofSeconds(30));
+        try (var c = pool.getConnection(); var statement = c.createStatement()) {
+            statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,account VARCHAR(64) NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            for (int player = 1; player <= 100; player++)
+                statement.execute("INSERT INTO player(player_id,owner_revision,trade_listing_id,account) VALUES(" + player + ",1,0,'fixture-account-" + player + "')");
+        }
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
+        try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));}
         AtomicLong ids = new AtomicLong(1000);
         var policy = new CommerceRules.Policy(Set.of(10), Set.of(), Set.of(1), false,
             List.of(TradeMarketView.newBuilder()
@@ -317,6 +324,121 @@ class CommerceTiDbTest {
         complete(2);
         e.advance(e.store.get(row.getCommerceId()), budget());
         return row.getCommerceId();
+    }
+    @Test
+    void 普通交易原账号修订在同SQL锁提交复核_同账号ABA不冒用旧会话或旧幂等键() throws Exception {
+        var session = com.game.api.proto.SessionContext.newBuilder().setPlayerId(11).setAccount("fixture-account-11").setOwnerRevision(1).build();
+        var input = CreateConsignmentRequest.newBuilder().setClientRequestId("actor-contract-request")
+            .setAssets(TradeAssetSelection.newBuilder().putItems(10,1)).setPrice(50).setCurrencyType(1).setDurationMs(60000).build();
+        var original = e.forActor(session).consignment(11,input,budget());
+        assertThat(CommerceEngine.workflow(original).getSellerIdentity().getOwnerRevision()).isEqualTo(1);
+        // 这里只注入已完成原合同和后续归属变化，验证提交接缝；不将其声称真实过户/资产结算验收。
+        e.store.transaction(budget(), c -> {
+            CommerceStore.execute(c,"UPDATE trade_commerce SET status=11 WHERE commerce_id=?",original.getCommerceId());
+            CommerceStore.execute(c,"UPDATE player SET account='new-owner',owner_revision=2 WHERE player_id=11"); return null;
+        });
+        assertThatThrownBy(() -> e.forActor(session).consignment(11,input.toBuilder().setClientRequestId("late-request-0002").build(),budget()))
+            .isInstanceOf(SecurityException.class);
+        e.store.transaction(budget(), c -> { CommerceStore.execute(c,"UPDATE player SET account='fixture-account-11',owner_revision=3 WHERE player_id=11"); return null; });
+        assertThatThrownBy(() -> e.forActor(session).consignment(11,input.toBuilder().setClientRequestId("late-request-0003").build(),budget()))
+            .isInstanceOf(SecurityException.class);
+        var current = e.forActor(session.toBuilder().setOwnerRevision(3).build()).consignment(11,input,budget());
+        assertThat(current.getCommerceId()).isNotEqualTo(original.getCommerceId());
+        assertThat(CommerceEngine.workflow(current).getSellerIdentity().getOwnerRevision()).isEqualTo(3);
+        assertThat(e.store.list("1=1")).hasSize(2); assertThat(e.store.ops("1=1")).isEmpty();
+    }
+
+    @Test
+    void 官方已付款意图绑定原账号修订_换主和同账号ABA只原单退款不建资产腿() throws Exception {
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        for (boolean aba : List.of(false, true)) {
+            long buyer = aba ? 23 : 22;
+            String originalAccount = "fixture-account-" + buyer;
+            var intent = json.createObjectNode().put("orderId", UUID.randomUUID().toString())
+                .put("buyerId", Long.toUnsignedString(buyer)).put("buyerAccount", originalAccount).put("buyerOwnerRevision", "1")
+                .put("skuId", 1).put("quantity", 1).put("itemConfigId", 10).put("itemCount", 1)
+                .put("amountMinor", 100).put("currency", "CNY");
+            // 独立注入归属变化来验证交付提交接缝；此用例不冒充真实角色过户验收。
+            e.store.transaction(budget(), c -> { CommerceStore.execute(c,
+                "UPDATE player SET account=?,owner_revision=? WHERE player_id=?", aba ? originalAccount : "new-owner", aba ? 3L : 2L,buyer); return null; });
+            List<com.fasterxml.jackson.databind.JsonNode> receipts = new ArrayList<>();
+            var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1",0),0);
+            server.createContext("/internal/deliveries/poll", exchange -> {
+                try (exchange) {
+                    exchange.getRequestBody().readAllBytes();
+                    var page=json.createObjectNode();var entry=page.putArray("entries").addObject();entry.set("intent",intent);entry.put("cursor","");
+                    byte[] bytes=json.writeValueAsBytes(page);exchange.sendResponseHeaders(200,bytes.length);exchange.getResponseBody().write(bytes);
+                }
+            });
+            server.createContext("/internal/deliveries/receipt", exchange -> {
+                try(exchange) { receipts.add(json.readTree(exchange.getRequestBody()));exchange.sendResponseHeaders(200,-1); }
+            });
+            server.start();
+            try {
+                var properties=new OfficialMallProperties(true,"http://127.0.0.1:"+server.getAddress().getPort(),
+                    "gateway-test-only-00000000000000001","delivery-test-only-0000000000000002");
+                new OfficialMallClient(properties,e,json).tick(budget());
+                var original=e.store.byRequest(CommerceEngine.key("official",buyer,intent.path("orderId").asText()));
+                assertThat(original.getStatus()).isEqualTo(CommerceRules.CANCELLED);
+                var workflow=CommerceEngine.workflow(original);assertThat(workflow.getStage()).isEqualTo("official_refund");
+                assertThat(workflow.getBuyerIdentity().getAccount()).isEqualTo(originalAccount);
+                assertThat(workflow.getBuyerIdentity().getOwnerRevision()).isEqualTo(1);
+                assertThat(workflow.getLegsCount()).isZero();assertThat(e.store.ops("ref_id=?",original.getCommerceId())).isEmpty();
+                // 另一副本只重放原合同与退款回执，不用当前账号重建新意图。
+                new OfficialMallClient(properties,e,json).tick(budget());
+                assertThat(receipts).hasSize(2).allMatch(value -> value.path("state").asText().equals("REFUND_PENDING")
+                    && value.path("tradeOrderId").asText().equals(Long.toUnsignedString(original.getCommerceId())));
+            } finally { server.stop(0); }
+        }
+    }
+
+    @Test
+    void 人民币意图换主先退款_原卖家退回提交再次核对持久原身份() throws Exception {
+        var json=new com.fasterxml.jackson.databind.ObjectMapper();long listingId=7001;
+        var original=TradeRmbConsignmentWorkflow.newBuilder().setSellerAccount("fixture-account-11").setSellerOwnerRevision(1)
+            .setAssetKind("ITEMS").setPriceFen(100).setEscrowReference("7001").setEscrowProof("a".repeat(64))
+            .setRegisteredListing(RmbConsignmentView.newBuilder().setListingId(listingId).setSellerPlayerId(11));
+        var workflow=TradeCommerceWorkflow.newBuilder().setStage("rmb_open").setRmb(original)
+            .addLegs(TradeCommerceLeg.newBuilder().setRole("seller_debit").setPlayerId(11).setStream(3).setOutcome(2)
+                .setBundle(com.game.proto.AssetBundle.newBuilder().addItems(com.game.proto.ItemGrant.newBuilder().setConfigId(10).setCount(1))));
+        var row=com.game.trade.store.pb.TradeCommerceRow.newBuilder().setCommerceId(listingId).setRequestKey("rmb-original-owner-fixture")
+            .setRequestDigest(com.google.protobuf.ByteString.copyFromUtf8("fixture-digest")).setKind(6).setSellerPlayerId(11)
+            .setStatus(2).setVersion(1).setWorkflowProto(workflow.build().toByteString()).build();
+        e.store.transaction(budget(), c -> { CommerceStore.insert(c,"trade_commerce",row);
+            CommerceStore.execute(c,"UPDATE player SET account='new-buyer-owner',owner_revision=2 WHERE player_id=22");return null; });
+        var intent=json.createObjectNode().put("orderId",UUID.randomUUID().toString()).put("buyerPlayerId","22")
+            .put("buyerAccount","fixture-account-22").put("buyerOwnerRevision","1").put("listingId","7001")
+            .put("escrowReference","7001").put("escrowProof","a".repeat(64)).put("amountFen",100);
+        List<com.fasterxml.jackson.databind.JsonNode> receipts=new ArrayList<>();
+        var server=com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1",0),0);
+        server.createContext("/internal/consignments/", exchange -> {
+            try(exchange) {
+                exchange.getRequestBody().readAllBytes();var page=json.createObjectNode();var entries=page.putArray("entries");
+                if(exchange.getRequestURI().getPath().equals("/internal/consignments/deliveries/poll")) {
+                    var entry=entries.addObject();entry.set("intent",intent);entry.put("cursor","");
+                }
+                byte[] bytes=json.writeValueAsBytes(page);exchange.sendResponseHeaders(200,bytes.length);exchange.getResponseBody().write(bytes);
+            }
+        });
+        server.createContext("/internal/deliveries/receipt", exchange -> {
+            try(exchange) {receipts.add(json.readTree(exchange.getRequestBody()));exchange.sendResponseHeaders(200,-1);}
+        });server.start();
+        try {
+            var http=new OfficialMallClient(new OfficialMallProperties(true,"http://127.0.0.1:"+server.getAddress().getPort(),
+                "gateway-test-only-00000000000000001","delivery-test-only-0000000000000002"),e,json);
+            var service=new RmbConsignmentService(e,new RmbConsignmentClient(http),org.mockito.Mockito.mock(PlayerTradeClient.class),Set.of(0));
+            service.poll(budget());var bound=e.store.get(listingId);
+            assertThat(CommerceEngine.workflow(bound).getStage()).isEqualTo("rmb_refund");
+            assertThat(CommerceEngine.workflow(bound).getRmb().getBuyerOwnerRevision()).isEqualTo(1);
+            assertThat(e.store.ops("ref_id=?",listingId)).isEmpty();
+            service.advance(bound,budget());assertThat(receipts).hasSize(1);
+            assertThat(receipts.getFirst().path("state").asText()).isEqualTo("REFUND_PENDING");
+            // 维护注入错误归属，原返还不能发给新主；保留rmb_return等待人工/恢复。
+            e.store.transaction(budget(), c -> {CommerceStore.execute(c,"UPDATE player SET account='new-seller-owner',owner_revision=2 WHERE player_id=11");return null;});
+            assertThatThrownBy(() -> service.advance(e.store.get(listingId),budget())).isInstanceOf(SecurityException.class);
+            assertThat(e.store.ops("ref_id=?",listingId)).isEmpty();
+            assertThat(CommerceEngine.workflow(e.store.get(listingId)).getStage()).isEqualTo("rmb_return");
+        } finally {server.stop(0);}
     }
 
     @Test

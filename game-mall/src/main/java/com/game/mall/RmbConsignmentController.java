@@ -3,6 +3,9 @@ package com.game.mall;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.cfg.CoercionAction;
+import com.fasterxml.jackson.databind.cfg.CoercionInputShape;
+import com.fasterxml.jackson.databind.type.LogicalType;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.List;
@@ -16,7 +19,11 @@ public final class RmbConsignmentController {
     private final MallOrderStore orders;
     private final ObjectMapper json;
     public RmbConsignmentController(RmbConsignmentStore consignments, MallOrderStore orders, ObjectMapper json) {
-        this.consignments = consignments; this.orders = orders; this.json = json;
+        this.consignments = consignments; this.orders = orders; this.json = json.copy();
+        this.json.coercionConfigFor(LogicalType.Textual)
+            .setCoercion(CoercionInputShape.Integer, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Float, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Boolean, CoercionAction.Fail);
     }
     @PostMapping("/internal/consignments/register")
     public RmbConsignmentApi.Listing register(HttpServletRequest request) {
@@ -25,6 +32,10 @@ public final class RmbConsignmentController {
     @PostMapping("/internal/consignments/list")
     public RmbConsignmentApi.Listings list(HttpServletRequest request) {
         return consignments.list(input(request, RmbConsignmentApi.Page.class));
+    }
+    @PostMapping("/internal/consignments/get")
+    public RmbConsignmentApi.Listing get(HttpServletRequest request) {
+        return consignments.get(input(request, RmbConsignmentApi.Get.class));
     }
     @PostMapping("/internal/consignments/cancel")
     public RmbConsignmentApi.Listing cancel(HttpServletRequest request) {

@@ -1,6 +1,8 @@
 -- Java 版账号 / 玩家表（库 game，与 mmorpg 的库隔离）。启动时由 Spring SQL init 执行，必须幂等。
 -- CREATE TABLE IF NOT EXISTS 不会改动已存在的表：结构变更对存量库要手工迁移，步骤见 docs/design/db-migrations.md。
 
+-- M16路由结构的唯一DDL源为classpath:db/game-route-authority-schema.sql；必须在本脚本前执行。
+
 CREATE TABLE IF NOT EXISTS account (
     account     VARCHAR(64)     NOT NULL,
     created_at  BIGINT          NOT NULL COMMENT 'Unix 毫秒',
@@ -100,6 +102,7 @@ CREATE TABLE IF NOT EXISTS player_final_save (
     save_seq           BIGINT UNSIGNED NOT NULL COMMENT '第一版每个 epoch 只登记一次冻结终态，固定为 1',
     protocol_version   INT UNSIGNED NOT NULL,
     source_instance    VARCHAR(64) NOT NULL COMMENT '原 scene 实例，只作原始来源；补偿不改绑新实例或 epoch',
+    admission_proto    MEDIUMBLOB NULL COMMENT '首次同P准入的完整RoleAdmissionIdentity原件；旧空记录不能补当前身份',
     status             VARCHAR(16) NOT NULL COMMENT 'OPEN仅准入，不阻TTL；PENDING或APPLIED持久终态',
     level              INT UNSIGNED NULL,
     scene_config_id    INT UNSIGNED NULL,

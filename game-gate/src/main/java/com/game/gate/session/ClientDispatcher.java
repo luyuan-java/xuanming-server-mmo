@@ -493,7 +493,7 @@ public final class ClientDispatcher {
         if (snapshot.getPlayerId() == 0 || snapshot.getPlayerId() == currentPlayerId) {
             return snapshot;
         }
-        return snapshot.toBuilder().setPlayerId(0).build();
+        return snapshot.toBuilder().setPlayerId(0).clearOwnerRevision().build();
     }
 
     private SessionContext sessionAtSend(ClientSession s, BackendPending next) {
@@ -709,9 +709,12 @@ public final class ClientDispatcher {
                 case ENTER_SCENE -> {
                     EnterScene enter = directive.getEnterScene();
                     s.playerId = enter.getPlayerId();
+                    s.ownerRevision = enter.getOwnerRevision();
+                    s.loginGeneration = enter.getOwnerEpoch();
+                    s.ownerAccount = s.account;
                     abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), "会话已在关闭");
                 }
-                case UNBIND_PLAYER -> s.playerId = 0;
+                case UNBIND_PLAYER -> { s.playerId = 0; s.ownerRevision = 0; s.loginGeneration = 0; s.ownerAccount = ""; }
                 case REDIRECT_TO_GATE -> {
                     // 登录期重定向不夺权、不绑定玩家，没有要释放的东西；连接已断，124 也无处可推
                     log.info("会话已断，忽略迟到的重定向指令 session={} target_zone={}", sid(s),
@@ -726,7 +729,8 @@ public final class ClientDispatcher {
     }
 
     private void enterScene(ClientSession s, EnterScene enter) {
-        if (enter.getPlayerId() == 0 || enter.getSceneNodeId() == 0) {
+        if (enter.getPlayerId() == 0 || enter.getSceneNodeId() == 0 || enter.getOwnerEpoch() <= 0
+                || enter.getOwnerRevision() <= 0 || s.account.isBlank()) {
             log.error("login 下发的 EnterScene 非法 session={} player_id={} scene_node_id={}",
                     sid(s), enter.getPlayerId(), enter.getSceneNodeId());
             abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), "进场指令非法");
@@ -737,6 +741,9 @@ public final class ClientDispatcher {
         // 所以正常流程里这里不在场景中。仍先让旧场景放掉旧玩家：一个会话绝不同时挂两个场景实例（防御）。
         leaveScene(s, false);
         s.playerId = enter.getPlayerId();
+        s.ownerRevision = enter.getOwnerRevision();
+        s.loginGeneration = enter.getOwnerEpoch();
+        s.ownerAccount = s.account;
         s.sceneNodeId = enter.getSceneNodeId();
         s.scenePlayerId = enter.getPlayerId();
         s.sceneOwnerEpoch = enter.getOwnerEpoch();
@@ -745,6 +752,9 @@ public final class ClientDispatcher {
                 .setPlayerId(enter.getPlayerId())
                 .setSceneId(enter.getSceneId())
                 .setOwnerEpoch(enter.getOwnerEpoch())
+                .setAccount(s.ownerAccount)
+                .setOwnerRevision(s.ownerRevision)
+                .setLoginGeneration(s.loginGeneration)
                 .build();
         long gen = links.send(enter.getSceneNodeId(), NodeLinkFrame.newBuilder().setPlayerEnter(playerEnter).build());
         if (gen == 0) {
@@ -765,6 +775,9 @@ public final class ClientDispatcher {
     private void failEnter(ClientSession s, int tipId) {
         unbindScene(s);
         s.playerId = 0;
+        s.ownerRevision = 0;
+        s.loginGeneration = 0;
+        s.ownerAccount = "";
         if (!s.closing) {
             sendTip(s, tipId);
         }
@@ -790,6 +803,9 @@ public final class ClientDispatcher {
         int sceneNodeId = s.sceneNodeId;
         leaveScene(s, true);
         s.playerId = 0;
+        s.ownerRevision = 0;
+        s.loginGeneration = 0;
+        s.ownerAccount = "";
         log.info("会话离开游戏 session={} player_id={} scene_node_id={}", sid(s), playerId, sceneNodeId);
     }
 
@@ -1019,6 +1035,9 @@ public final class ClientDispatcher {
                 .setPlayerId(s.scenePlayerId)
                 .setSceneId(transfer.getTargetSceneId())
                 .setOwnerEpoch(transfer.getToEpoch())
+                .setAccount(s.ownerAccount)
+                .setOwnerRevision(s.ownerRevision)
+                .setLoginGeneration(s.loginGeneration)
                 .setTransfer(true)
                 .build();
         long gen = links.send(targetNode, NodeLinkFrame.newBuilder().setPlayerEnter(enter).build());
@@ -1416,6 +1435,7 @@ public final class ClientDispatcher {
                 .setZoneId(identity.zoneId())
                 .setAccount(s.account)
                 .setPlayerId(s.playerId)
+                .setOwnerRevision(s.ownerRevision)
                 .setClientIp(s.clientIp())
                 .setTicketPlayerId(s.ticketPlayerId)
                 .setTicketTargetZoneId(s.ticketTargetZoneId)

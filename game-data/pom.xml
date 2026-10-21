@@ -109,6 +109,11 @@
     </dependencies>
 
     <build>
+        <testResources>
+            <testResource><directory>src/test/resources</directory></testResource>
+            <!-- 与player-store消费测试共用一份最小跨域投影；不会进入生产jar或自动初始化。 -->
+            <testResource><directory>../game-player-store/src/test/resources</directory><includes><include>db/role-pending-fence-fixture.sql</include></includes></testResource>
+        </testResources>
         <plugins>
             <plugin>
                 <groupId>io.github.ascopes</groupId>

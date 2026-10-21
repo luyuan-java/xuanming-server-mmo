@@ -170,6 +170,9 @@ public class DataConfiguration {
     public OpsJobStore opsJobStore(DataSource dataSource, @Qualifier("opsTables") PbMysql opsTables) {
         return new OpsJobStore(dataSource, opsTables);
     }
+    /** 只建合区正规原件的结构；Freeze/审批/Release只由显式维护工具执行，启动不seed或解冻。 */
+    @Bean
+    public PbMysql zoneMergeTables(DataSource dataSource)throws SQLException{return com.game.data.merge.ZoneMergeTables.sync(dataSource);}
 
     @Bean
     public TransactionLogQueryService transactionLogQueryService(TransactionLogMapper mapper, DataProperties props) {

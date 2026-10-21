@@ -103,6 +103,7 @@ public final class RatingTestDatabase implements AutoCloseable {
         RatingTestDatabase db = new RatingTestDatabase(ds, database);
         try {
             MatchRatingTables.sync(ds, Duration.ofMinutes(1));
+            initializeRouteAuthority(ds);
         } catch (SQLException | RuntimeException e) {
             db.close();
             throw new IllegalStateException("真 MySQL 上同步评分表失败", e);
@@ -121,6 +122,19 @@ public final class RatingTestDatabase implements AutoCloseable {
                 st.execute(h2Ddl(table.createTableSql()));
             }
         }
+        initializeRouteAuthority(ds);
+    }
+
+    static void initializeRouteAuthority(DataSource source)throws SQLException {
+        try(var c=source.getConnection();var statement=c.createStatement()){
+            statement.execute("CREATE TABLE IF NOT EXISTS player(player_id BIGINT PRIMARY KEY,zone_id INT NOT NULL DEFAULT 1)");
+            var resource=new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql");
+            String sql;try(var input=resource.getInputStream()){sql=new String(input.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}
+            if("H2".equals(c.getMetaData().getDatabaseProductName()))sql=sql.replaceAll("(?i)ENGINE\\s*=\\s*InnoDB[^;]*","");
+            org.springframework.jdbc.datasource.init.ScriptUtils.executeSqlScript(c,new org.springframework.core.io.support.EncodedResource(new org.springframework.core.io.ByteArrayResource(sql.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
+            try(var check=c.createStatement();var rows=check.executeQuery("SELECT COUNT(*) FROM route_meta")){rows.next();if(rows.getInt(1)!=0)return;}
+            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1));
+        }catch(java.io.IOException failure){throw new SQLException("正式路由测试DDL不可读",failure);}
     }
 
     /**

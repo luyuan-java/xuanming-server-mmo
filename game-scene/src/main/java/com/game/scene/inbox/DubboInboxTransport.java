@@ -1,6 +1,7 @@
 package com.game.scene.inbox;
 
 import com.game.api.DubboGroups;
+import com.game.api.inbox.InboxCallContract;
 import com.game.api.PlayerInboxService;
 import com.game.api.rpc.NodeRpcClients;
 import com.game.proto.player_inbox.AckPlayerInboxRequest;
@@ -36,32 +37,35 @@ public final class DubboInboxTransport implements InboxTransport, AutoCloseable 
     private final NodeRpcClients<PlayerInboxService> clients;
     private final NodeRpcClients.Target target;
     private final Executor logic;
+    private final InboxCallSigner signer;
 
-    DubboInboxTransport(NodeRpcClients<PlayerInboxService> clients, NodeRpcClients.Target target, Executor logic) {
+    DubboInboxTransport(NodeRpcClients<PlayerInboxService> clients, NodeRpcClients.Target target, Executor logic, InboxCallSigner signer) {
         this.clients = Objects.requireNonNull(clients, "clients");
         this.target = Objects.requireNonNull(target, "target");
         this.logic = Objects.requireNonNull(logic, "logic");
+        this.signer = Objects.requireNonNull(signer, "signer");
     }
 
     /** @param url {@code tri://host:port}（只支持直连，同 scene-manager 的选目标客户端） */
     public static DubboInboxTransport direct(String url, Executor logic) {
+        InboxCallSigner signer = new InboxCallSigner(System.getenv(InboxCallContract.SECRET_ENV), System::currentTimeMillis);
         URI uri = URI.create(Objects.requireNonNull(url, "url").trim());
         if (!"tri".equals(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1) {
             throw new IllegalArgumentException("game.scene.inbox.url 必须是 tri://host:port: " + url);
         }
         NodeRpcClients<PlayerInboxService> clients = new NodeRpcClients<>(APPLICATION, PlayerInboxService.class, DubboGroups.INBOX, CALL_TIMEOUT,
                 "scene-inbox-connect");
-        return new DubboInboxTransport(clients, new NodeRpcClients.Target(uri.getHost(), uri.getPort(), ""), logic);
+        return new DubboInboxTransport(clients, new NodeRpcClients.Target(uri.getHost(), uri.getPort(), ""), logic, signer);
     }
 
     @Override
     public void fetch(FetchPlayerInboxRequest request, BiConsumer<FetchPlayerInboxResponse, Throwable> onDone) {
-        call(service -> service.fetchItems(request), onDone, request.getPlayerId());
+        call(service -> service.fetchItems(signer.sign(request)), onDone, request.getPlayerId());
     }
 
     @Override
     public void ack(AckPlayerInboxRequest request, BiConsumer<AckPlayerInboxResponse, Throwable> onDone) {
-        call(service -> service.ackItems(request), onDone, request.getPlayerId());
+        call(service -> service.ackItems(signer.sign(request)), onDone, request.getPlayerId());
     }
 
     private <R> void call(Function<PlayerInboxService, CompletableFuture<R>> invocation, BiConsumer<R, Throwable> onDone, long playerId) {

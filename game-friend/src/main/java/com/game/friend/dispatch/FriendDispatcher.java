@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>10 个 C2S 方法放行；</li>
  *   <li>上行 235（{@code NotifyFriendEvent} 是服务端推送）→ 信封 1003（基线会话白名单不含它 → PermissionDenied → 路由服信封 1003）；</li>
- *   <li>会话没有绑定玩家（{@code player_id == 0}，还没进游戏）→ 信封 1003，打 ERROR（基线会话拦截器判坏头）；</li>
+ *   <li>会话未完整绑定玩家、原账号与正修订（Java 修订范围 1..Long.MAX_VALUE）→ 信封 1003；</li>
  *   <li>不认识的号 → 1013（契约里没有）或 1006（契约里有、不归 friend）。</li>
  * </ul>
  * 请求体解析失败回信封 1003（与基线客户端所见一致；login 的惯例是 1014，spec D11）。工作队列满 / 处理器异常回 in-band 1003 应答体。
@@ -61,14 +61,14 @@ public final class FriendDispatcher {
 
     @FunctionalInterface
     interface Handler<Q extends Message> {
-        Message handle(long me, Q request, Deadline deadline);
+        Message handle(SessionContext session, Q request, Deadline deadline);
     }
 
     private record Route<Q extends Message>(String method, Message requestPrototype, Message responsePrototype,
                                             Class<Q> requestType, Handler<Q> handler) {
 
-        Message invoke(long me, Message request, Deadline deadline) {
-            return handler.handle(me, requestType.cast(request), deadline);
+        Message invoke(SessionContext session, Message request, Deadline deadline) {
+            return handler.handle(session, requestType.cast(request), deadline);
         }
 
         /** 应答体：只设置 error_message（每个好友应答的字段 1）。 */
@@ -148,16 +148,16 @@ public final class FriendDispatcher {
             metrics.requestCompleted(sample, FriendMetrics.UNROUTED, RequestResult.UNSUPPORTED);
             return CompletableFuture.completedFuture(unsupported(call));
         }
-        long me = call.hasSession() ? call.getSession().getPlayerId() : 0;
-        if (me == 0) {
-            log.error("[friend] 会话没有绑定玩家（未进游戏）method={} {}", route.method(), describe(call.getSession()));
+        SessionContext session = call.getSession();
+        if (!call.hasSession() || session.getPlayerId() == 0 || session.getAccount().isEmpty() || session.getOwnerRevision() <= 0) {
+            log.warn("[friend] 会话没有完整的原账号归属身份 method={} {}", route.method(), describe(session));
             metrics.requestCompleted(sample, route.method(), RequestResult.UNAUTHENTICATED);
             return CompletableFuture.completedFuture(envelope(CommonErrorTip.common_error.kServiceUnavailable_VALUE));
         }
         Deadline deadline = Deadline.after(budgetMillis);
         CompletableFuture<ClientReply> reply = new CompletableFuture<>();
         try {
-            executor.execute(() -> reply.complete(handle(route, me, call, deadline, sample)));
+            executor.execute(() -> reply.complete(handle(route, session, call, deadline, sample)));
         } catch (RejectedExecutionException e) {
             log.warn("[friend] 工作队列已满，拒绝请求 method={} {}", route.method(), describe(call.getSession()));
             metrics.requestCompleted(sample, route.method(), RequestResult.OVERLOADED);
@@ -166,7 +166,7 @@ public final class FriendDispatcher {
         return reply;
     }
 
-    private ClientReply handle(Route<?> route, long me, ClientCall call, Deadline deadline,
+    private ClientReply handle(Route<?> route, SessionContext session, ClientCall call, Deadline deadline,
                                io.micrometer.core.instrument.Timer.Sample sample) {
         Message request;
         try {
@@ -183,7 +183,11 @@ public final class FriendDispatcher {
         }
         Message response;
         try {
-            response = route.invoke(me, request, deadline);
+            response = route.invoke(session, request, deadline);
+        } catch (SecurityException e) {
+            log.warn("[friend] 原会话账号归属已失效 method={} {}", route.method(), describe(session));
+            metrics.requestCompleted(sample, route.method(), RequestResult.UNAUTHENTICATED);
+            return route.failure(CommonErrorTip.common_error.kServiceUnavailable_VALUE, "session invalid");
         } catch (RuntimeException e) {
             log.error("[friend] {} 处理失败 {}", route.method(), describe(call.getSession()), e);
             metrics.requestCompleted(sample, route.method(), RequestResult.INTERNAL_ERROR);

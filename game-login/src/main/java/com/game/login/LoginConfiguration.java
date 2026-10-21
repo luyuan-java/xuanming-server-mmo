@@ -285,8 +285,8 @@ public class LoginConfiguration {
      * 7.3 把这个 bean 换成读 Redis 的实现（zone-merge-spec §2.6），调用方不动。
      */
     @Bean
-    public ZoneMergeFence zoneMergeFence() {
-        return ZoneMergeFence.OPEN;
+    public ZoneMergeFence zoneMergeFence(javax.sql.DataSource source,LoginWorkerPool workers) {
+        return new com.game.discovery.zone.SqlZoneMergeFence(source,workers);
     }
 
     /**

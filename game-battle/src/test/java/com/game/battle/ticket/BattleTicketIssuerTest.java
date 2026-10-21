@@ -19,6 +19,11 @@ import org.junit.jupiter.api.Test;
 
 /** 签发落点分配包（基线 {@code BuildAssignment}，{@code room.cpp:1432-1498}；battle-node-spec §2.1–§2.5、§7.5）。 */
 class BattleTicketIssuerTest {
+    @Test void 观战票缺原操作或参战票携观战操作必须拒绝(){
+        var issuer=new BattleTicketIssuer(identity,tickets,metrics);
+        assertThat(issuer.issue(99,5001,1000,eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER,TicketPath.OBSERVER)).isEmpty();
+        assertThat(issuer.issue(99,5001,1000,eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT,TicketPath.CREATE,"11111111-1111-4111-8111-111111111111")).isEmpty();
+    }
 
     private static final String SECRET = "issuer-test-ticket-secret-0123456789abcdef";
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
@@ -35,7 +40,7 @@ class BattleTicketIssuerTest {
         BattleTicketIssuer issuer = new BattleTicketIssuer(identity, tickets, metrics);
 
         BattleAssignedS2C assigned = issuer.issue(99, 5001, 1_760_000_300_000L, eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER,
-                TicketPath.OBSERVER).orElseThrow();
+                TicketPath.OBSERVER,"11111111-1111-4111-8111-111111111111").orElseThrow();
 
         assertThat(assigned.getBattleId()).isEqualTo(99);
         assertThat(assigned.getHost()).isEqualTo("battle.test");
@@ -49,6 +54,7 @@ class BattleTicketIssuerTest {
         assertThat(payload.getBattleInstanceId()).isEqualTo("instance-uuid");
         assertThat(payload.getExpireAtMs()).isEqualTo(1_760_000_300_000L);
         assertThat(payload.getRole()).isEqualTo(eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
+        assertThat(payload.getSpectatorOperationId()).isEqualTo("11111111-1111-4111-8111-111111111111");
         assertThat(assigned.getTokenSignature().toString(StandardCharsets.US_ASCII)).matches("^[0-9a-f]{64}$");
         assertThat(tickets.signatureMatches(assigned.getTokenPayload(), assigned.getTokenSignature())).isTrue();
         assertThat(BattleTickets.classify(payload, 7, "instance-uuid", 1_760_000_299_999L)).isEqualTo(BattleTickets.Verdict.OK);

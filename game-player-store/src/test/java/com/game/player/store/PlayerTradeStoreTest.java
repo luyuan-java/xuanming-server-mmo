@@ -163,7 +163,7 @@ class PlayerTradeStoreTest {
             trades.beginFreeze(third, BUDGET);
             f.clock.addAndGet(PlayerStore.OWNER_LEASE.toMillis() * 2);
             assertEquals(new PlayerStore.ClaimResult.Held(1), f.players.claimOwnership(1, BUDGET));
-            assertEquals(new PlayerStore.ClaimResult.Held(1), f.players.recoverOwnershipAfterRestore(1, 5, BUDGET));
+            assertEquals(new PlayerStore.ClaimResult.Held(1), f.players.recoverOwnershipAfterRestore(1, 5, 1, BUDGET));
             assertTrue(f.players.loadForScene(1, 1, "scene-a", BUDGET).isEmpty());
             assertEquals(0, f.count("player_final_save"));
             var row = f.row(1);
@@ -209,8 +209,27 @@ class PlayerTradeStoreTest {
             assertEquals(0, f.row(1).getTradeListingId());
         }
     }
+    @Test void 修订上界不可新上架_高半区wire值也不能被借当前SQL替换() throws Exception {
+        try (var f = new Fixture()) {
+            f.player(1, "seller"); f.sql.update("UPDATE player SET owner_revision=? WHERE player_id=1", Long.MAX_VALUE);
+            var store = f.trade(5, false);
+            refuses(Code.CONFLICT, () -> store.beginFreeze(freeze(101,1,"seller",Long.MAX_VALUE),BUDGET));
+            refuses(Code.INVALID, () -> store.beginFreeze(freeze(101,1,"seller",Long.MIN_VALUE),BUDGET));
+            assertEquals(0,f.count("player_trade_freeze")); assertEquals(0,f.row(1).getTradeListingId());
+        }
+    }
 
     private static void refuses(Code code, Executable work) { assertEquals(code, assertThrows(Failure.class, work).code()); }
+    @Test void 撤单先赢永久占据原商品号_迟到Begin不冻结_换载荷冲突() throws Exception {
+        try (var f = new Fixture()) {
+            f.player(1, "seller"); var store = f.trade(5, false); var request = freeze(101, 1, "seller", 1);
+            assertEquals(Status.UNLOCKED, store.cancelFreeze(request, BUDGET).status());
+            assertEquals(Status.UNLOCKED, store.beginFreeze(request, BUDGET).status());
+            assertEquals(0, f.row(1).getTradeListingId()); assertEquals(1, f.count("player_trade_freeze"));
+            refuses(Code.CONFLICT, () -> store.beginFreeze(freeze(101, 1, "seller", 2), BUDGET));
+            assertEquals(0, f.row(1).getTradeListingId());
+        }
+    }
     private static <T> List<T> parallel(int count, IntFunction<T> command) throws Exception {
         var executor = Executors.newFixedThreadPool(count);
         var ready = new CountDownLatch(count); var start = new CountDownLatch(1);
@@ -261,12 +280,14 @@ class PlayerTradeStoreTest {
                     new StrongTiDbConnectionPolicy("角色交易集成", true).postProcessBeforeInitialization(pool, "fixture");
                     pool.init(); source = pool;
                 }
-                new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(source);
+                new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(source);
+                try(var routeInit=source.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
                 try (var connection = source.getConnection()) {
                     if (endpoint != null) StrongTiDbConnectionPolicy.verify(connection, true);
                     PlayerSqlAuthorityAutoConfiguration.verifyTradeSchema(connection);
                 }
                 sql = new JdbcTemplate(source); manager = new DataSourceTransactionManager(source);
+                new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(source);
                 var config = new org.apache.ibatis.session.Configuration(); config.setMapUnderscoreToCamelCase(true); config.addMapper(PlayerMapper.class);
                 var factory = new SqlSessionFactoryBean(); factory.setDataSource(source); factory.setConfiguration(config);
                 mapper = new SqlSessionTemplate(factory.getObject()).getMapper(PlayerMapper.class);
@@ -282,7 +303,8 @@ class PlayerTradeStoreTest {
         }
         PlayerTradeStore trade(int max, boolean fixtureProof) {
             // 只验证SQL状态机的受控替身；不是实际scene冻结、卸载或排空证明。
-            return new PlayerTradeStore(source, manager, clock::get, max, fixtureProof ? (sql, receipt) -> true : null);
+            return new PlayerTradeStore(source, manager, clock::get, max,
+                fixtureProof ? (sql, receipt) -> true : null, (sql, request) -> {});
         }
         void player(long id, String account) {
             PlayerRow row = new PlayerRow(); row.setPlayerId(id); row.setAccount(account); row.setZoneId(7); row.setClassId(1);

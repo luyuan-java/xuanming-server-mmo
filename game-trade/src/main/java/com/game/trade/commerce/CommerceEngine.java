@@ -29,11 +29,36 @@ public final class CommerceEngine {
     final LongSupplier ids;
     final Policy policy;
     final LongSupplier clock;
+    private final com.game.api.proto.SessionContext actor;
     public CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock) {
+        this(store, ids, policy, clock, null);
+    }
+    private CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock,
+                            com.game.api.proto.SessionContext actor) {
         this.store = Objects.requireNonNull(store);
         this.ids = Objects.requireNonNull(ids);
         this.policy = Objects.requireNonNull(policy);
         this.clock = Objects.requireNonNull(clock);
+        this.actor = actor;
+    }
+    /** 每次客户端调用显式绑定原会话；共享的号源/仓储不变，不存线程局部或进程级请求状态。 */
+    CommerceEngine forActor(com.game.api.proto.SessionContext actor) {
+        if (actor == null || actor.getPlayerId() == 0 || actor.getAccount().isEmpty() || actor.getOwnerRevision() <= 0)
+            throw new Refusal(INVALID);
+        return new CommerceEngine(store, ids, policy, clock, actor);
+    }
+    com.game.api.proto.SessionContext actor() { return actor; }
+    private String playerRequestKey(long me, String request) {
+        if (actor == null) return key("player", me, request);
+        if (actor.getPlayerId() != me) throw new Refusal(INVALID);
+        return key("player:" + Long.toUnsignedString(actor.getOwnerRevision()) + ":"
+            + HexFormat.of().formatHex(sha(actor.getAccount().getBytes(StandardCharsets.UTF_8)).toByteArray()), me, request);
+    }
+    private void verifyActor(java.sql.Connection c, long me) throws SQLException {
+        if (actor != null) {
+            if (actor.getPlayerId() != me) throw new Refusal(INVALID);
+            com.game.common.player.PlayerSessionAuthority.lock(c, me, actor.getAccount(), actor.getOwnerRevision(), 2);
+        }
     }
     static ByteString sha(byte[] bytes) {
         try {
@@ -71,7 +96,7 @@ public final class CommerceEngine {
         CommerceStore.active(deadline);
         if (me == 0 || request.length() < 8 || request.length() > 80)
             throw new Refusal(INVALID);
-        var prior = store.byRequest(key("player", me, request));
+        var prior = store.byRequest(playerRequestKey(me, request));
         if (prior != null && !prior.getRequestDigest().equals(sha(deterministic(input))))
             throw new Refusal(REQUEST_CONFLICT);
         return prior;
@@ -81,7 +106,7 @@ public final class CommerceEngine {
         var prior = priorRequest(me, request, input, deadline);
         if (prior != null)
             return prior;
-        String requestKey = key("player", me, request);
+        String requestKey = playerRequestKey(me, request);
         ByteString digest = sha(deterministic(input));
         long now = clock.getAsLong();
         row.setCommerceId(ids.getAsLong())
@@ -93,6 +118,11 @@ public final class CommerceEngine {
             .setWorkflowProto(w.build().toByteString());
         try {
             return store.transaction(deadline, c -> {
+                CommerceStore.lockAssetOwners(c, row.getSellerPlayerId(), row.getBuyerPlayerId());
+                verifyActor(c, me);
+                if (row.getSellerPlayerId() != 0) w.setSellerIdentity(CommerceStore.roleIdentity(c, row.getSellerPlayerId()));
+                if (row.getBuyerPlayerId() != 0) w.setBuyerIdentity(CommerceStore.roleIdentity(c, row.getBuyerPlayerId()));
+                row.setWorkflowProto(w.build().toByteString());
                 CommerceStore.insert(c, "trade_commerce", row.build());
                 return row.build();
             });
@@ -197,6 +227,8 @@ public final class CommerceEngine {
     public TradeCommerceRow mutate(long me, long id, String action, Deadline d, String... requestId)
         throws SQLException {
         return store.transaction(d, c -> {
+            if (actor != null) verifyActor(c, me);
+            else if (action.equals("buy")) CommerceStore.lockAssetOwners(c, me);
             var current = store.lock(c, id);
             if (current == null)
                 throw new Refusal(MISSING);
@@ -248,6 +280,7 @@ public final class CommerceEngine {
                     if (w.getQuantityReserved() >= 32)
                         throw new Refusal(CONFLICT);
                     r.setBuyerPlayerId(me).setStatus(ESCROWING);
+                    w.setBuyerIdentity(CommerceStore.roleIdentity(c, me));
                     w.setBuyerAssets(TradeAssetSelection.newBuilder()
                                          .setCurrencyType(r.getCurrencyType())
                                          .setCurrencyAmount(r.getUnitPrice()))
@@ -284,6 +317,26 @@ public final class CommerceEngine {
         long[] opIds = new long[8];
         for (int i = 0; i < opIds.length; i++) opIds[i] = ids.getAsLong();
         store.transaction(d, c -> {
+            // 旧未终局合同缺少原件时隔离，禁止以恢复时的当前owner补出“原身份”。
+            if ((prior.getKind() >= 1 && prior.getKind() <= 5 || prior.getKind() == BID_KIND)
+                && (prior.getSellerPlayerId() != 0 && !pw.hasSellerIdentity()
+                    || prior.getBuyerPlayerId() != 0 && !pw.hasBuyerIdentity()))
+                throw new CorruptContract("交易合同缺少参与者原账号或归属修订");
+            if (prior.getKind() != 6 && (pw.hasSellerIdentity() || pw.hasBuyerIdentity())) {
+                CommerceStore.lockAssetOwners(c, prior.getSellerPlayerId(), prior.getBuyerPlayerId());
+                if (pw.hasSellerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getSellerPlayerId(),
+                    pw.getSellerIdentity().getAccount(), pw.getSellerIdentity().getOwnerRevision(), 2);
+                if (pw.hasBuyerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getBuyerPlayerId(),
+                    pw.getBuyerIdentity().getAccount(), pw.getBuyerIdentity().getOwnerRevision(), 2);
+            }
+            if (prior.getKind() == 6 && pw.getRmb().getCharacterPlayerId() == 0) {
+                if (Set.of("rmb_escrow", "rmb_return").contains(pw.getStage()))
+                    com.game.common.player.PlayerSessionAuthority.lock(c, prior.getSellerPlayerId(), pw.getRmb().getSellerAccount(),
+                        pw.getRmb().getSellerOwnerRevision(), 2);
+                if (pw.getStage().equals("rmb_deliver"))
+                    com.game.common.player.PlayerSessionAuthority.lock(c, prior.getBuyerPlayerId(), pw.getRmb().getBuyerAccount(),
+                        pw.getRmb().getBuyerOwnerRevision(), 2);
+            }
             var current = store.lock(c, prior.getCommerceId());
             if (current == null)
                 return null;

@@ -96,6 +96,7 @@ public final class TradeDispatcher {
     private final Executor executor;
     private final TradeMetrics metrics;
     private final long budgetMillis;
+    private final com.game.trade.commerce.CommerceClientService commerce;
 
     /**
      * @param executor     {@code trade-worker} 工作池（测试可传同步执行器）
@@ -112,6 +113,7 @@ public final class TradeDispatcher {
         this.executor = executor;
         this.metrics = metrics;
         this.budgetMillis = budgetMillis;
+        this.commerce = commerce;
         Map<Integer, Route> byId = new HashMap<>();
         client(byId, TradeMethods.BROWSE_LISTINGS, BrowseListingsRequest.class, BrowseListingsResponse.class,
                 service::browseListings, (request, tip) -> JubaozhaiService.rejectBrowse(tip));
@@ -121,7 +123,7 @@ public final class TradeDispatcher {
                 service::setFavorite, (request, tip) -> JubaozhaiService.rejectFavorite(request.getListingId(), tip));
         client(byId, TradeMethods.GET_MY_SHELF, GetMyShelfRequest.class, GetMyShelfResponse.class,
                 service::getMyShelf, (request, tip) -> JubaozhaiService.rejectShelf(tip));
-        for(String name:TradeMethods.COMMERCE_REQUESTS){
+        for(String name:java.util.stream.Stream.concat(TradeMethods.COMMERCE_REQUESTS.stream(),TradeMethods.RMB_REQUESTS.stream()).toList()){
             MessageMethod contract=contractOf(TradeMethods.SERVICE,name);
             Handler<Message> handler=(me,request,deadline)->commerce==null
                     ?com.game.trade.commerce.CommerceClientService.rejection(contract.responsePrototype(),TradeTips.FEATURE_UNAVAILABLE)
@@ -236,7 +238,9 @@ public final class TradeDispatcher {
         }
         Message response;
         try {
-            response = route.handler().handle(me, request, deadline);
+            response = (TradeMethods.RMB_REQUESTS.contains(route.method()) || TradeMethods.COMMERCE_REQUESTS.contains(route.method())) && commerce != null
+                ? commerce.handle(route.method(), session, request, contractOf(TradeMethods.SERVICE, route.method()).responsePrototype(), deadline)
+                : route.handler().handle(me, request, deadline);
             if (response == null) {
                 throw new IllegalStateException("处理器返回了空应答");
             }

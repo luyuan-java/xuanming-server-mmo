@@ -1,5 +1,21 @@
 # battle 节点（批次 6.2）移植统一规格：房间生命周期、客户端直连、票据、推送、准入
 
+## 2026-10-21 观战原操作与可证明取消增补
+
+本节覆盖旧稿中按 player_id 覆盖观众路由、Remove 返回 Empty、房间缺失即可宣布取消的语义。Add 必须带规范非零 `spectator_operation_id` UUID、固定 `target_instance_id` 和至多未来 30 秒的原 `admit_before_ms`；重试复用完整原文，不得改路由、名字、角色、房间、截止或实例。相同角色的新操作不能顶替仍在房中的旧操作。
+
+`ObserverOperationLedger` 是房间管理器级别、只在逻辑线程访问的有界账本，容量 100000。首次 Add 保存整份 PB 的确定序列化 SHA-256；同 UUID 改原文拒绝。Remove 在房间不存在时也先保留原操作墓碑，再处理房内同操作槽，只有墓碑成立且该操作已不在房内时返回正规 `RemoveObserverResponse{cancelled=true,原operation,固定instance}`。旧 Remove 不清新操作；错误实例、缺失身份、满账本及未知结果不返回成功证明。
+
+Remove 携带与原 Add 完全相同的截止；超过截止仍能移除当前同操作。截止只限制 Add 准入，绝不自动清房内观众或 Match SQL watching。已过期且不在房内的账本项才可回收；活动项过期后保留到 Remove、StopWatch 或房间结束。截止优先队列每次最多处理 128 项，不遍扫全部账本，不淘汰仍有效墓碑。逻辑时钟维护高水位，回退不能让已过窗口重新开放。进程重启生成新实例 UUID，不能证明旧实例已取消；正常 SQL 原件层永久禁止同操作改截止。
+
+StopWatch 直连退出、幂等签票失败、正常终结、销毁及停机都先记原操作取消，再摘槽、关闭直连或清房。`QueryObserver` 仅固定实例及规范原 UUID 有效时观察当前槽：同操作为 ACTIVE，无此操作为 ABSENT；错误实例或参数未知返回 UNKNOWN。ABSENT 只是观察，Match 仍须按存盘原件调用 Remove 并核正规取消证明，才可终结 SQL watching；不能把 UNKNOWN 或 Empty 当 ABSENT/成功。
+
+观众票 `BattleTicketPayload.spectator_operation_id=7` 与原准入操作绑定；参战票该字段必须空。观众补签请求同时带原操作及固定实例，房内核对当前操作后才签票。Edge 验签后把完整票据交房间再次核当前操作；旧观战票不能在同角色的新观战槽上重用。原只传 battle/player/role 的房间挂接入口拒绝观众，避免剥掉票内身份。dev 清退接口返回 200 的正规 PB 证明，调用者自行保留原操作和截止，不由管理入口代造旧原件。
+
+Java Native 冻结/删除/导入与 Match 观战准入共用 P；`match_global_watching` state 1/2/3/4、0/unknown/NULL 均阻止，只有已获取取消证明的 closed=5 放行。角色 owner 修订、原操作和固定实例由 Match SQL 保存；battle 进程内账本不从当前目录补权。
+
+新增确定时钟账本与真实房间回归源码，覆盖取消先到、房间缺失、迟到 Add、原文篡改、相反操作清退、过期活动项、容量与时钟回退、StopWatch/终局、Query 的 UNKNOWN/ACTIVE/ABSENT、票据及补签原操作绑定。此批按任务限制未生成、未编译、未运行测试/进程；测试源码与静态检查不能替代运行证据。
+
 > **基线**：mmorpg `26ceb70ca`（`D:\work\mmorpg`），与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。
 > Java 侧以 HEAD `5ef79a6` 为准。6.1 的 `game-battle-engine` 已在工作区（未提交），本稿引用它的行号以工作区为准；
 > 5.2 在 game-scene / game-gate / game-scene-manager / game-player-store 有未提交改动，本稿不依赖其中任何文件。
@@ -1773,3 +1789,6 @@ message BattleNodeInfo {
 - **`docs/reference/mmorpg-client-contract-battle.md`**（建议新增）：把 §3、§5、§2.1–§2.4、§8.4 的客户端可见部分整理成参考文档，供 robot 与后续批次引用。
 - **`tools/local/start-slice.sh` / `stop-slice.sh`**：服务清单与密钥生成（§7.2）。
 - **`docs/design/tech-stack.md`**：没有新依赖，不改。
+
+
+2026-10-21补充：forceClose排队期间，每条直连业务分发和重复握手仍核原票据、固定实例、原DirectLink引用及当前observer operation；请求battle必须等于握手绑定battle。旧连接、旧op与被顶替的同op连接均不能读取或Stop同player的新槽。新增真房间回归源码；未gen/build/test。

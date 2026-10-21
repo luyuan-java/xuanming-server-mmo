@@ -13,7 +13,14 @@ public final class AuthorityJdbc {
     @FunctionalInterface public interface Work<T>{T apply(Session session)throws SQLException;}
     @FunctionalInterface public interface Row<T>{T apply(ResultSet row)throws SQLException;}
     private final DataSource source;
+    private boolean sessionBound;
+    private long actorPlayer, actorRevision;
+    private String actorAccount;
     public AuthorityJdbc(DataSource source){this.source=Objects.requireNonNull(source);}
+    public AuthorityJdbc forActor(long player, String account, long revision) {
+        var bound = new AuthorityJdbc(source); bound.sessionBound = true;
+        bound.actorPlayer = player; bound.actorAccount = account; bound.actorRevision = revision; return bound;
+    }
     public static Object u64(long bits){return bits>=0?bits:new BigInteger(Long.toUnsignedString(bits));}
     public static long u64(ResultSet row,int column)throws SQLException{Object value=row.getObject(column);if(value instanceof Number number)return number.longValue();throw new SQLException("uint64列不可解码");}
     public <T>T read(Deadline budget,Work<T> work)throws SQLException{return execute(budget,work,false,false);}
@@ -27,6 +34,11 @@ public final class AuthorityJdbc {
                 connection.setNetworkTimeout(Runnable::run,(int)Math.max(1,Math.min(5000,budget.remainingMillis())));
                 try{
                     if(transaction){connection.setTransactionIsolation(snapshot?Connection.TRANSACTION_REPEATABLE_READ:Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);}
+                    // 无actor后台同样先持全局metaS；维护Freeze持metaX排空，不能漏过奖励/邮件/排名写。
+                    if(transaction && !snapshot) com.game.common.player.PlayerRouteAuthority.requireMeta(connection,
+                        (int)Math.max(1,Math.min(3,(budget.remainingMillis()+999)/1000)),true);
+                    if(transaction && sessionBound) com.game.common.player.PlayerSessionAuthority.lock(connection,
+                        actorPlayer, actorAccount, actorRevision, (int)Math.max(1,Math.min(3,(budget.remainingMillis()+999)/1000)));
                     // TiDB8.5默认拒START TRANSACTION READ ONLY；snapshot仅执行SELECT，不启用全局noop。
                     T result=work.apply(new Session(connection,budget));check(budget);
                     if(transaction){committing=true;connection.commit();}check(budget);return result;

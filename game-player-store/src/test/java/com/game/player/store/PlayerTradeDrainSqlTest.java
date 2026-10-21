@@ -17,7 +17,8 @@ class PlayerTradeDrainSqlTest {
     private static final Duration BUDGET = Duration.ofSeconds(5);
     private static final String SOURCE = "scene-original";
     private static PlayerTradeStore trades(PlayerTradeStoreTest.Fixture f) {
-        return new PlayerTradeStore(f.source, f.manager, f.clock::get, 5, PlayerTradeStore.sqlFreezeVerifier());
+        return new PlayerTradeStore(f.source, f.manager, f.clock::get, 5, PlayerTradeStore.sqlFreezeVerifier(),
+            (sql, request) -> {});
     }
     private static void refuses(Code code, org.junit.jupiter.api.function.Executable work) {
         assertEquals(code, assertThrows(Failure.class, work).code());

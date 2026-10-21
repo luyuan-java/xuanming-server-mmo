@@ -241,7 +241,7 @@ class GuildEconomyChannelIntegrationTest {
             st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(64) NOT NULL,"
                     + " level INT UNSIGNED NOT NULL DEFAULT 1, class_id INT UNSIGNED NOT NULL DEFAULT 0,"
                     + " gender INT UNSIGNED NOT NULL DEFAULT 0, appearance_id VARCHAR(64) NOT NULL DEFAULT '',"
-                    + " zone_id INT UNSIGNED NOT NULL) ENGINE=InnoDB");
+                    + " zone_id INT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,account VARCHAR(64) NOT NULL DEFAULT 'fixture-account',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 1) ENGINE=InnoDB");
             st.execute("CREATE TABLE player_state (player_id BIGINT UNSIGNED NOT NULL, data MEDIUMBLOB NOT NULL,"
                     + " saved_epoch BIGINT UNSIGNED NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (player_id)) ENGINE=InnoDB");
             try (PreparedStatement ps = conn.prepareStatement("INSERT INTO player (player_id, name, zone_id) VALUES (?, ?, ?)")) {
@@ -251,6 +251,8 @@ class GuildEconomyChannelIntegrationTest {
                 ps.executeUpdate();
             }
         }
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
+        try(var connection=dataSource.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(zone));}
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(10);
         redis = Redisson.create(config);
@@ -314,10 +316,10 @@ class GuildEconomyChannelIntegrationTest {
         runtime = wiring.guildAssetRuntime(props, tables, assetStore, dataSource, redis, REDIS_KEYS, metrics, settlePool, workerPool, timer,
                 clients, lease);
         assertThat(runtime.loop()).isPresent();
-        GuildRanks ranks = wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, runtime);
+        GuildRanks ranks = wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, runtime,dataSource);
         ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis, REDIS_KEYS);
         GuildTableLookup lookup = wiring.guildTableLookup(tables);
-        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator, metrics);
+        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator, metrics,dataSource);
         GuildViews views = wiring.guildViews(presence, profiles, metrics, props, lookup, store);
         GuildService guilds = wiring.guildService(store, cache, access, views, ranks, pushes, ids, lookup);
         GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup,
@@ -437,7 +439,7 @@ class GuildEconomyChannelIntegrationTest {
     private <T extends Message> T call(String method, Message request, com.google.protobuf.Parser<T> parser) throws Exception {
         ClientCall call = ClientCall.newBuilder().setMessageId(REGISTRY.requireId(GuildMethods.SERVICE, method))
                 .setBody(request == null ? ByteString.EMPTY : request.toByteString())
-                .setSession(SessionContext.newBuilder().setGateNodeId(1).setSessionId(3).setPlayerId(a)).build();
+                .setSession(SessionContext.newBuilder().setGateNodeId(1).setSessionId(3).setPlayerId(a).setAccount("fixture-account").setOwnerRevision(1)).build();
         ClientReply reply = dispatcher.dispatch(call).get(10, TimeUnit.SECONDS);
         assertThat(reply.getTipId()).as(method + " 不该回信封").isZero();
         return parser.parseFrom(reply.getBody());

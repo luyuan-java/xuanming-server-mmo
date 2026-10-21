@@ -121,6 +121,14 @@ public final class WatchBattleService {
     private final DoubleSupplier random;
     private final Supplier<String> nonces;
     private final Executor recheckThreads;
+    private GlobalWatchService global;
+    public WatchBattleService withGlobal(GlobalWatchService global){this.global=global;return this;}
+    private java.util.function.BiFunction<Long,Deadline,String> publicNames=(player,deadline)->"";
+    public WatchBattleService withPublicNames(java.util.function.BiFunction<Long,Deadline,String> names){publicNames=Objects.requireNonNull(names);return this;}
+    public WatchBattleResponse watch(SessionContext session,com.game.proto.match.WatchBattleRequest request,Deadline deadline){
+        if(global!=null){var reply=global.watch(session,request,deadline);count(reply.getErrorMessage().getId()==0?WatchOutcome.OK:WatchOutcome.INTERNAL);return reply;}
+        return watch(session,request.getBattleId(),deadline);
+    }
 
     /** 一次判定的结论：出口计数与应答。 */
     private record Verdict(WatchOutcome outcome, WatchBattleResponse response) {
@@ -178,6 +186,7 @@ public final class WatchBattleService {
      * @throws RuntimeException 只在未预期的异常（bug）时：已抢到、还没交给 battle 的标记已按值尽力释放，由派发器回信封 1003
      */
     public WatchBattleResponse watch(SessionContext session, long requestedBattleId, Deadline deadline) {
+        if(global!=null)throw new IllegalArgumentException("全球观战必须保留客户端原UUID");
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(deadline, "deadline");
         long playerId = session.getPlayerId();
@@ -358,7 +367,7 @@ public final class WatchBattleService {
             Deadline hardStop = SpectateRules.reserveBefore(d, MatchBudgets.WATCH_ADD_RESERVE_MS);
             Duration timeout = SpectateRules.hopTimeout(MatchBudgets.ADD_OBSERVER_TIMEOUT_MS, hardStop);
             AddObserverRequest request = AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(playerId).setRouting(routing)
-                    .setObserverName(session.getAccount()).build();
+                    .setObserverName(publicName(playerId,d)).build();
             Outcome outcome = observers.add(placement, request, timeout, hardStop);
 
             boolean deadNode;
@@ -681,4 +690,5 @@ public final class WatchBattleService {
         Throwable cause = e.getCause();
         return cause == null ? e.getMessage() : e.getMessage() + " <- " + cause;
     }
+    private String publicName(long player,Deadline deadline){try{String name=publicNames.apply(player,deadline);return name==null?"":name;}catch(RuntimeException failure){return "";}}
 }

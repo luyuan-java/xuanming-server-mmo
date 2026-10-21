@@ -25,7 +25,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * 角色交易的唯一SQL写面。账号归属仍在player，玩法字节、名字和home zone不复制。
- * 锁序为原UTF-8字节序账号→listing→tx→player→最终存盘；事务内禁止调用网络、Redis或场景线程。
+ * 锁序为SQL路由meta→zone围栏→player→原UTF-8字节序账号→listing→tx→最终存盘；事务内禁止调用网络、Redis或场景线程。
  * 请求提交结果不明时只以原listing/tx重放；取消和过户收据永久保留，无TTL解锁。
  */
 public final class PlayerTradeStore {
@@ -52,24 +52,36 @@ public final class PlayerTradeStore {
     @FunctionalInterface public interface FreezeVerifier {
         boolean frozen(JdbcTemplate sql, FreezeReceipt original);
     }
+    /** 已持 player 锁后的资格提交复核；生产实现必须与加入帮派共用锁序。 */
+    @FunctionalInterface public interface FreezeEligibility {
+        void check(JdbcTemplate sql, FreezeRequest request);
+    }
     private record FreezeRow(FreezeReceipt receipt, byte[] digest, byte[] token, boolean cancelling) {}
     private record TransferRow(TransferReceipt receipt, byte[] digest, byte[] token, String status) {}
     private record Owner(String account, long revision, long listing, long epoch, boolean released) {}
     private final JdbcTemplate sql;
+    private final DataSource source;
     private final PlatformTransactionManager transactions;
     private final LongSupplier millis;
     private final int maxPlayers;
     private final FreezeVerifier verifier;
+    private final FreezeEligibility eligibility;
 
     public PlayerTradeStore(DataSource source, PlatformTransactionManager transactions, LongSupplier millis,
                             int maxPlayers, FreezeVerifier verifier) {
+        this(source, transactions, millis, maxPlayers, verifier, null);
+    }
+    public PlayerTradeStore(DataSource source, PlatformTransactionManager transactions, LongSupplier millis,
+                            int maxPlayers, FreezeVerifier verifier, FreezeEligibility eligibility) {
         if (maxPlayers < 1 || maxPlayers > 10_000) throw fail(Code.INVALID, "账号角色上限非法");
         this.sql = new JdbcTemplate(source);
+        this.source=Objects.requireNonNull(source);
         this.sql.setQueryTimeout(5);
         this.transactions = Objects.requireNonNull(transactions);
         this.millis = Objects.requireNonNull(millis);
         this.maxPlayers = maxPlayers;
         this.verifier = verifier;
+        this.eligibility = eligibility;
     }
 
     public FreezeReceipt beginFreeze(FreezeRequest request, Duration timeout) {
@@ -77,6 +89,7 @@ public final class PlayerTradeStore {
         byte[] digest = digest("freeze", request.listingId(), request.playerId(), request.ownerRevision(), request.sellerAccount());
         byte[] token = ascii(UUID.randomUUID().toString());
         return transaction(timeout, () -> {
+            routeLock(request.playerId());
             lockAccounts(request.sellerAccount());
             long now = millis.getAsLong();
             sql.update("INSERT INTO player_trade_freeze(listing_id,player_id,seller_account,owner_revision,freeze_epoch,"
@@ -90,9 +103,14 @@ public final class PlayerTradeStore {
                 bound(row.receipt());
                 return row.receipt();
             }
+            if (request.ownerRevision() == Long.MAX_VALUE) throw fail(Code.CONFLICT, "账号归属修订已耗尽，不能再出售角色");
             Owner owner = owner(request.playerId());
             if (!request.sellerAccount().equals(owner.account()) || request.ownerRevision() != owner.revision()
                     || owner.listing() != 0) throw fail(Code.CONFLICT, "角色归属或交易锁已变化");
+            if (RolePendingFence.blocked(sql,request.playerId()))
+                throw fail(Code.NOT_READY,"角色仍有历练ACTIVE、待发奖、未终局帮会/邮件资产或匹配在途");
+            if (eligibility == null) throw fail(Code.NOT_READY, "角色出售资格提交验证尚未装配");
+            eligibility.check(sql, request);
             if (sql.update("UPDATE player SET trade_listing_id=?,updated_at=? WHERE player_id=? AND owner_revision=?"
                     + " AND trade_listing_id=0", request.listingId(), now, request.playerId(), request.ownerRevision()) != 1)
                 throw fail(Code.CONFLICT, "角色冻结提交冲突");
@@ -104,6 +122,7 @@ public final class PlayerTradeStore {
     public FreezeReceipt confirmFreeze(FreezeRequest request, Duration timeout) {
         validate(request);
         return transaction(timeout, () -> {
+            routeLock(request.playerId());
             lockAccounts(request.sellerAccount());
             var row = freeze(request.listingId());
             match(row, request, digest("freeze", request.listingId(), request.playerId(), request.ownerRevision(), request.sellerAccount()));
@@ -122,10 +141,19 @@ public final class PlayerTradeStore {
 
     public FreezeReceipt cancelFreeze(FreezeRequest request, Duration timeout) {
         validate(request);
+        byte[] digest = digest("freeze", request.listingId(), request.playerId(), request.ownerRevision(), request.sellerAccount());
+        byte[] token = ascii(UUID.randomUUID().toString());
         FreezeReceipt receipt = transaction(timeout, () -> {
+            routeLock(request.playerId());
             lockAccounts(request.sellerAccount());
+            long now = millis.getAsLong();
+            // Cancel 可先于未知的 Begin 抵达；原 listing 留永久撤销墓碑，迟到 Begin 只能重放 UNLOCKED。
+            sql.update("INSERT INTO player_trade_freeze(listing_id,player_id,seller_account,owner_revision,freeze_epoch,"
+                + "request_digest,creation_token,status,created_ms,updated_ms) VALUES(?,?,?,?,0,?,?,'UNLOCKED',?,?)"
+                + " ON DUPLICATE KEY UPDATE listing_id=listing_id", request.listingId(), request.playerId(),
+                utf8(request.sellerAccount()), request.ownerRevision(), digest, token, now, now);
             var row = freeze(request.listingId());
-            match(row, request, digest("freeze", request.listingId(), request.playerId(), request.ownerRevision(), request.sellerAccount()));
+            match(row, request, digest);
             if (terminal(row.receipt().status())) return row.receipt();
             bound(row.receipt());
             sql.update("UPDATE player_trade_freeze SET cancel_requested=1 WHERE listing_id=?", request.listingId());
@@ -148,6 +176,7 @@ public final class PlayerTradeStore {
                 request.sellerAccount(), request.buyerAccount());
         byte[] token = ascii(UUID.randomUUID().toString());
         return transaction(timeout, () -> {
+            routeLock(request.playerId());
             lockAccounts(request.sellerAccount(), request.buyerAccount());
             FreezeRow listing = freeze(request.listingId());
             var freezeRequest = new FreezeRequest(request.listingId(), request.playerId(), request.sellerAccount(), request.ownerRevision());
@@ -194,11 +223,24 @@ public final class PlayerTradeStore {
     }
     private Owner owner(long player) {
         var rows = sql.query("SELECT account,owner_revision,trade_listing_id,owner_epoch,owner_released FROM player WHERE player_id=? FOR UPDATE",
-                (rs, ignored) -> new Owner(rs.getString(1), rs.getLong(2), rs.getLong(3), rs.getLong(4), rs.getInt(5) == 1), player);
+                (rs, ignored) -> new Owner(rs.getString(1), revision(rs.getString(2)), rs.getLong(3), rs.getLong(4), rs.getInt(5) == 1), player);
         if (rows.size() != 1) throw fail(Code.NOT_FOUND, "角色不存在");
         var owner = rows.getFirst();
         if (owner.revision() <= 0 || owner.listing() < 0 || owner.epoch() < 0) throw fail(Code.CORRUPT, "角色归属原件损坏");
         return owner;
+    }
+    private void routeLock(long player){
+        var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(source);
+        try{com.game.common.player.PlayerRouteAuthority.lock(connection,List.of(player),5);}
+        catch(SQLException failure){throw new Failure(Code.NOT_READY,"SQL归属区维护围栏尚未开放");}
+        finally{org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection,source);}
+    }
+    private static long revision(String value) {
+        try {
+            long revision = Long.parseUnsignedLong(value);
+            if (revision > 0) return revision;
+        } catch (NumberFormatException ignored) { }
+        throw fail(Code.CORRUPT, "Java账号归属修订必须在1..LongMax，越界或耗尽拒绝继续");
     }
     private FreezeRow freeze(long listing) {
         var rows = sql.query("SELECT * FROM player_trade_freeze WHERE listing_id=? FOR UPDATE", (rs, ignored) -> {
@@ -206,7 +248,7 @@ public final class PlayerTradeStore {
             try { state = Status.valueOf(rs.getString("status")); }
             catch (IllegalArgumentException | NullPointerException corrupt) { throw fail(Code.CORRUPT, "冻结收据状态损坏"); }
             return new FreezeRow(new FreezeReceipt(rs.getLong("listing_id"), rs.getLong("player_id"), text(rs, "seller_account"),
-                    rs.getLong("owner_revision"), rs.getLong("freeze_epoch"), state), rs.getBytes("request_digest"), rs.getBytes("creation_token"), rs.getInt("cancel_requested") == 1);
+                    revision(rs.getString("owner_revision")), rs.getLong("freeze_epoch"), state), rs.getBytes("request_digest"), rs.getBytes("creation_token"), rs.getInt("cancel_requested") == 1);
         }, listing);
         if (rows.size() != 1) throw fail(Code.NOT_FOUND, "冻结原请求不存在");
         return rows.getFirst();
@@ -249,11 +291,11 @@ public final class PlayerTradeStore {
     }
     private static void match(FreezeRow row, FreezeRequest request, byte[] digest) {
         var receipt = row.receipt();
+        if (receipt.ownerEpoch() < 0 || row.digest() == null || row.digest().length != 32 || !validToken(row.token()))
+            throw fail(Code.CORRUPT, "冻结收据原件损坏");
         if (!MessageDigest.isEqual(digest, row.digest()) || receipt.listingId() != request.listingId()
                 || receipt.playerId() != request.playerId() || !receipt.sellerAccount().equals(request.sellerAccount())
                 || receipt.ownerRevision() != request.ownerRevision()) throw fail(Code.CONFLICT, "商品号已用于不同冻结请求");
-        if (receipt.ownerEpoch() < 0 || row.digest() == null || row.digest().length != 32 || !validToken(row.token()))
-            throw fail(Code.CORRUPT, "冻结收据原件损坏");
     }
     private static void validate(FreezeRequest request) {
         if (request == null || request.listingId() <= 0 || request.playerId() == 0 || request.ownerRevision() <= 0)
@@ -334,6 +376,7 @@ public final class PlayerTradeStore {
             throw fail(Code.INVALID, "排空来源非法");
         var request = task.request(); validate(request);
         return transaction(timeout, () -> {
+            routeLock(request.playerId());
             lockAccounts(request.sellerAccount());
             var listing = freeze(request.listingId());
             match(listing, request, digest("freeze", request.listingId(), request.playerId(), request.ownerRevision(), request.sellerAccount()));

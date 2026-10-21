@@ -67,4 +67,11 @@ class MatchModesTest {
         assertThat(MatchModes.queued(MatchModes.PVE_SOLO)).isFalse();
         assertThat(MatchModes.queued(MatchModes.PVP_CHALLENGE)).isFalse();
     }
+    @Test void PVE人数档默认_单人即时_逐档与uint32边界(){
+        assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,0)).isEqualTo(5);
+        for(int size=1;size<=5;size++)assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,size)).isEqualTo(size);
+        assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,6)).isZero();assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,-1)).isZero();
+        assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,0,1)).isZero();assertThat(MatchModes.requestedPlayers(MatchModes.ONE_V_ONE,5,5)).isEqualTo(2);
+    }
+
 }

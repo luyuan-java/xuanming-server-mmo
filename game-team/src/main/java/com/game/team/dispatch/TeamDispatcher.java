@@ -72,12 +72,17 @@ public final class TeamDispatcher {
     interface Handler<Q extends Message> {
         Message handle(long me, Q request, Deadline deadline);
     }
+    @FunctionalInterface
+    interface SessionHandler<Q extends Message> {
+        Message handle(SessionContext original,Q request,Deadline deadline);
+    }
 
     private record Route<Q extends Message>(String method, Message requestPrototype, Message responsePrototype,
-                                            Class<Q> requestType, Handler<Q> handler) {
+                                            Class<Q> requestType, Handler<Q> handler,SessionHandler<Q> sessionHandler) {
 
-        Message invoke(long me, Message request, Deadline deadline) {
-            return handler.handle(me, requestType.cast(request), deadline);
+        Message invoke(SessionContext original, Message request, Deadline deadline) {
+            return sessionHandler==null?handler.handle(original.getPlayerId(), requestType.cast(request), deadline)
+                    :sessionHandler.handle(original,requestType.cast(request),deadline);
         }
 
         /** in-band 应答体：只设置 error_message{id}（不带视图、不带 parameters）。 */
@@ -112,18 +117,18 @@ public final class TeamDispatcher {
         this.metrics = metrics;
         this.budgetMillis = budgetMillis;
         Map<Integer, Route<?>> byId = new HashMap<>();
-        add(byId, TeamMethods.CREATE_TEAM, CreateTeamRequest.class, service::createTeam);
-        add(byId, TeamMethods.GET_MY_TEAM, GetMyTeamRequest.class, service::getMyTeam);
-        add(byId, TeamMethods.APPLY_JOIN_TEAM, ApplyJoinTeamRequest.class, service::applyJoinTeam);
-        add(byId, TeamMethods.HANDLE_APPLICATION, HandleApplicationRequest.class, service::handleApplication);
-        add(byId, TeamMethods.INVITE_TO_TEAM, InviteToTeamRequest.class, service::inviteToTeam);
-        add(byId, TeamMethods.RESPOND_INVITE, RespondInviteRequest.class, service::respondInvite);
-        add(byId, TeamMethods.LIST_MY_INVITES, ListMyInvitesRequest.class, service::listMyInvites);
-        add(byId, TeamMethods.LEAVE_TEAM, LeaveTeamRequest.class, service::leaveTeam);
-        add(byId, TeamMethods.KICK_MEMBER, KickMemberRequest.class, service::kickMember);
-        add(byId, TeamMethods.TRANSFER_LEADER, TransferLeaderRequest.class, service::transferLeader);
-        add(byId, TeamMethods.DISBAND_TEAM, DisbandTeamRequest.class, service::disbandTeam);
-        add(byId, TeamMethods.START_TEAM_MATCH, StartTeamMatchRequest.class, service::startTeamMatch);
+        addSession(byId, TeamMethods.CREATE_TEAM, CreateTeamRequest.class, service::createTeam);
+        addSession(byId, TeamMethods.GET_MY_TEAM, GetMyTeamRequest.class, service::getMyTeam);
+        addSession(byId, TeamMethods.APPLY_JOIN_TEAM, ApplyJoinTeamRequest.class, service::applyJoinTeam);
+        addSession(byId, TeamMethods.HANDLE_APPLICATION, HandleApplicationRequest.class, service::handleApplication);
+        addSession(byId, TeamMethods.INVITE_TO_TEAM, InviteToTeamRequest.class, service::inviteToTeam);
+        addSession(byId, TeamMethods.RESPOND_INVITE, RespondInviteRequest.class, service::respondInvite);
+        addSession(byId, TeamMethods.LIST_MY_INVITES, ListMyInvitesRequest.class, service::listMyInvites);
+        addSession(byId, TeamMethods.LEAVE_TEAM, LeaveTeamRequest.class, service::leaveTeam);
+        addSession(byId, TeamMethods.KICK_MEMBER, KickMemberRequest.class, service::kickMember);
+        addSession(byId, TeamMethods.TRANSFER_LEADER, TransferLeaderRequest.class, service::transferLeader);
+        addSession(byId, TeamMethods.DISBAND_TEAM, DisbandTeamRequest.class, service::disbandTeam);
+        addSession(byId, TeamMethods.START_TEAM_MATCH, StartTeamMatchRequest.class, service::startTeamMatch);
         if (!byId.values().stream().map(Route::method).toList().containsAll(TeamMethods.REQUESTS)) {
             throw new IllegalStateException("组队 C2S 方法没有全部接管: " + TeamMethods.REQUESTS);
         }
@@ -141,7 +146,12 @@ public final class TeamDispatcher {
         if (response.getDescriptorForType().findFieldByName(ERROR_MESSAGE_FIELD) == null) {
             throw new IllegalStateException("应答类型没有 error_message 字段: " + contract.key());
         }
-        byId.put(contract.messageId(), new Route<>(method, contract.requestPrototype(), response, requestType, handler));
+        byId.put(contract.messageId(), new Route<>(method, contract.requestPrototype(), response, requestType, handler,null));
+    }
+    private <Q extends Message> void addSession(Map<Integer,Route<?>> byId,String method,Class<Q> requestType,SessionHandler<Q> handler) {
+        MessageMethod contract=contractOf(method,requestType);Message response=contract.responsePrototype();
+        if(response.getDescriptorForType().findFieldByName(ERROR_MESSAGE_FIELD)==null)throw new IllegalStateException("应答类型没有error_message字段: "+contract.key());
+        byId.put(contract.messageId(),new Route<>(method,contract.requestPrototype(),response,requestType,null,handler));
     }
 
     private void addPush(Map<Integer, PushRoute> byId, String method, Class<? extends Message> requestType) {
@@ -229,7 +239,7 @@ public final class TeamDispatcher {
         }
         Message response;
         try {
-            response = route.invoke(me, request, deadline);
+            response = route.invoke(session, request, deadline);
         } catch (RuntimeException e) {
             log.error("[team] {} 处理失败 {}", route.method(), describe(session), e);
             metrics.requestCompleted(sample, route.method(), RequestResult.INTERNAL_ERROR);

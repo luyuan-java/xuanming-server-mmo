@@ -91,6 +91,12 @@ class JdbcFriendStoreMysqlTest {
         db.register(FriendBlockRow.getDefaultInstance());
         try (Connection c = dataSource.getConnection()) {
             db.syncAll(c);
+            try (Statement st = c.createStatement()) {
+                st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL,"
+                        + " owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            }
+            new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
+            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1));
         }
     }
 
@@ -107,7 +113,7 @@ class JdbcFriendStoreMysqlTest {
 
     @BeforeEach
     void truncate() throws SQLException {
-        for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block")) {
+        for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block", "player")) {
             exec("TRUNCATE TABLE " + table);
         }
     }
@@ -794,6 +800,79 @@ class JdbcFriendStoreMysqlTest {
     }
 
     // ================================================================ 工具
+
+    @Test
+    void 原会话过户_ABA与冻结均拒绝所有关系读写_不留容量和关系副作用() throws SQLException {
+        JdbcFriendStore system = store(LIMITS);
+        exec("INSERT INTO player(player_id,account,owner_revision) VALUES (22,'original',7),(11,'peer',3)");
+        FriendStore original = system.forActor(22, "original", 7);
+        for (String change : List.of("account='new-owner',owner_revision=8", "account='original',owner_revision=9",
+                "account='original',owner_revision=7,trade_listing_id=81")) {
+            exec("UPDATE player SET " + change + " WHERE player_id=22");
+            assertThatThrownBy(() -> original.addRequest(22, 11, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.accept(123, 22, 0, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.reject(123, 22, 0, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.remove(22, 11, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.block(22, 11, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.unblock(22, 11, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.friends(22, 100, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.pendingRequests(22, 100, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.blocks(22, 100, d())).isInstanceOf(SecurityException.class);
+            for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block")) {
+                assertThat(countRows(table)).as("失效会话不能留下 " + table).isZero();
+            }
+        }
+    }
+
+    @Test
+    void 原会话正常申请同意与解除拉黑_过户后旧视图不能清除新主关系() throws SQLException {
+        JdbcFriendStore system = store(LIMITS);
+        exec("INSERT INTO player(player_id,account,owner_revision) VALUES (22,'original',7),(11,'peer',3)");
+        FriendStore original = system.forActor(22, "original", 7);
+        FriendStore peer = system.forActor(11, "peer", 3);
+        long id = peer.addRequest(11, 22, d()).requestId();
+        assertThat(original.accept(id, 22, 0, d()).result()).isEqualTo(AcceptResult.OK);
+        assertThat(original.friends(22, 100, d())).extracting(FriendEdge::friendPlayerId).containsExactly(11L);
+        assertThat(original.block(22, 11, d())).isEqualTo(BlockResult.OK);
+        assertThat(original.blocks(22, 100, d())).hasSize(1);
+        exec("UPDATE player SET account='new-owner',owner_revision=8 WHERE player_id=22");
+        assertThatThrownBy(() -> original.unblock(22, 11, d())).isInstanceOf(SecurityException.class);
+        FriendStore next = system.forActor(22, "new-owner", 8);
+        assertThat(next.blocks(22, 100, d())).hasSize(1);
+        next.unblock(22, 11, d());
+        assertThat(next.blocks(22, 100, d())).isEmpty();
+        assertInvariants();
+    }
+
+    @Test
+    void 冻结目标不能被申请或拉黑_高半区玩家号保持无符号锁序() throws SQLException {
+        JdbcFriendStore system = store(LIMITS);
+        exec("INSERT INTO player(player_id,account,owner_revision,trade_listing_id)"
+                + " VALUES (18446744073709551615,'actor',7,0),(11,'peer',3,81)");
+        FriendStore actor = system.forActor(-1, "actor", 7);
+        assertThatThrownBy(() -> actor.addRequest(-1, 11, d())).isInstanceOf(SecurityException.class);
+        assertThatThrownBy(() -> actor.block(-1, 11, d())).isInstanceOf(SecurityException.class);
+        assertThat(countRows("friend_capacity")).isZero();
+        exec("UPDATE player SET trade_listing_id=0 WHERE player_id=11");
+        assertThat(actor.addRequest(-1, 11, d()).result()).isEqualTo(AddResult.OK);
+        assertThat(system.forActor(11, "peer", 3).pendingRequests(11, 10, d()))
+                .extracting(FriendStore.PendingRequest::fromPlayerId).containsExactly(-1L);
+    }
+
+    @Test
+    void 预检后过户_最终关系事务仍复核原会话_不把容量预检当授权() throws SQLException {
+        exec("INSERT INTO player(player_id,account,owner_revision) VALUES (22,'original',7),(11,'peer',3)");
+        JdbcFriendStore original = (JdbcFriendStore) store(LIMITS).forActor(22, "original", 7);
+        original.afterEnsureForTest(() -> {
+            try { exec("UPDATE player SET account='next',owner_revision=8 WHERE player_id=22"); }
+            catch (SQLException failure) { throw new IllegalStateException(failure); }
+        });
+        assertThatThrownBy(() -> original.addRequest(22, 11, d())).isInstanceOf(SecurityException.class);
+        assertThat(countRows("friend_request")).isZero();
+        assertThat(countRows("friend")).isZero();
+        assertThat(countRows("friend_block")).isZero();
+        assertThat(store(LIMITS).forActor(22, "next", 8).pendingRequests(22, 100, d())).isEmpty();
+    }
 
     private static void befriend(JdbcFriendStore s, long a, long b) {
         assertThat(s.addRequest(a, b, d()).result()).isEqualTo(AddResult.OK);

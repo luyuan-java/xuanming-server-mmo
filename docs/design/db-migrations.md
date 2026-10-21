@@ -458,3 +458,19 @@ Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
 统一37路径已由root正规git apply，check/apply均0；逐37最终字节SHA与已审候选相同，未修改InboxHooks接口，保留并行CLI/收件箱源。实际应用原件为C++/Go仓 `build/verification/java-canonical-37-apply-20261019T090438788234Z/root-canonical-application.json`，SHA `F03743014BE227D961CAD7F37DCA29470A2BDA42B5A238614ECFB7CEAB1930D7`。当前是工作树已实现、验收未完成；没有提交、部署、启动服务或执行M14真实库迁移。
 
 后续直接为当前Java完整源建立新快照（含并行新增代码），先生成含新Mapper公开准入规则的当前Store Jar，再按实际依赖编译受影响模块并运行CLI全16/Hook5和当前155真TiDB。旧JG2464、D136 Store Jar及其26通过/13模块成功仅绑定旧输入，不能冒当前World合并与新CLI已运行；不强制先重复旧快照六模块再重测新代码。最后验收真实宿主故障，任何编译/枚举/H2结果均不替代它。
+
+### M16：唯一player归属与SQL路由围栏（2026-10-21，源码批）
+
+`player.zone_id` 仍是Java唯一home/route事实，账号、账号修订与写者E仍在同一player行；不新增player_route副本。正式私有消息为 `game-player-store/src/main/proto/game/storage/route_authority.proto`，唯一DDL为 `game-common/src/main/resources/db/game-route-authority-schema.sql`。login SQL init先执行该DDL再执行玩家DDL；建结构不播种可写meta。存量库须先显式执行同一DDL，再在停写维护窗口运行 `com.game.data.tools.InitializeRouteAuthority --initialize-from-sql-player --generation <独立记录的非零规范UUID> --zones <显式配置区号列表> --expect-database <业务库名>`；JDBC取GAME_ROUTE_INIT_JDBC，账号/密码只取GAME_MYSQL_USER/GAME_MYSQL_PASSWORD环境，不输出连接信息。此命令要求TiDB强读并核实际DATABASE，不是生产合区或全库恢复工具。
+
+初始化仅从真实SQL player.zone_id与操作者显式区号生成64片空run原件，不读Redis。已有可写世代只允许相同原件重查，缺片、换世代、非空run或已有被冻结meta均拒绝，不能借重跑初始化解除维护围栏。新库没有角色时也须显式指定可建角区号。生产启动只读核meta/列/主键，缺失拒启或拒流，不再默认OPEN。
+
+提交顺序为meta共享锁、相关zone全部64片共享锁、完整角色集合按uint64升序P锁；P后重核预读home，发生变化须回滚重开。创建和导入同时锁显式目标home；普通存盘、归属交出/恢复、Native交易、Team/Trial及原会话服务共用前缀。维护写者须独占同meta/围栏后按同序P；run未明确终结就一直封锁，没有TTL自动放行。H2夹具用更强FOR UPDATE替代共享锁语法，仅真TiDB运行才证明TiDB并发行为。
+
+历史权威恢复必须同时提供独立E上界和账号修订上界，在同一P事务推进两者。全权威库整体PITR还需独立不可回退审计/恢复门禁；当前SQL或旧备份都不能充当独立上界。仅本地开发player-bundle导入仍受原工具本机/命名空间限制，不是生产权威域恢复流程。
+
+### M17：单库合区原件与永久退役标记（2026-10-21，未运行源码批）
+
+同一正式route DDL追加zone_merged_into(zone_id,target_zone,run_id,revision)，只表示源区退役，不复制player home。game-data的zone_merge.proto经ZoneMergeTables登记run/item；game-team的正规TeamPolicyRow追加typed allow_cross_zone与contract_digest，旧试验策略没有digest必须停写审核迁移，不自动补权。所有改变玩家/玩法原件的事务，包括无actor后台写和原Guild单语句claim，都在领域锁之前持meta共享锁。
+
+显式MergeZone工具持metaX证明全局owner_released=1和最终写回已终局后才置meta0并持源目标各64片；过期租约不充当排空。全服短维护期间所有zone业务写暂停。计划、审批hash、原身份/行指纹、批次CAS永久保留，完成仍保持meta0；独立显式Release携原hash、路由世代和操作者才恢复。失败/UNKNOWN不自动清冻；未写实体可按原hash显式Abort后Release，已写必须续跑原run再按原件撤销。源退役marker阻旧入口与新建/导入回源，目录写共用前缀。完整CLI顺序与恢复边界见zone-merge-spec末节；本批未执行DDL、初始化、维护、生成或任何测试。

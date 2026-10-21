@@ -15,6 +15,7 @@
     <description>区服目录 / 白名单 / 登录公告的库表与读写（MyBatis + Druid + MySQL）：game-gateway 读（准入、区服列表、公告），game-data 运维接口写</description>
 
     <dependencies>
+        <dependency><groupId>com.game</groupId><artifactId>game-common</artifactId></dependency>
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>
             <artifactId>mybatis-spring-boot-starter</artifactId>

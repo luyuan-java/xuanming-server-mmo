@@ -50,7 +50,7 @@ game:
     request-budget: 3s
     worker-threads: 8
     worker-queue-capacity: 1024
-    # 终态行保留期（必须 > 签发窗 7d）；清理每轮最多删 500 行
+    # 旧配置兼容字段；终态原收据永久保留，不再调度物理删除
     terminal-retention: 30d
     sweep-interval: 10m
     notify-resend-interval: 30s

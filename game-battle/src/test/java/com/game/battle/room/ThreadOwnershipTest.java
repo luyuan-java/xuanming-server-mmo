@@ -35,6 +35,8 @@ class ThreadOwnershipTest {
                 () -> service.issueBattleTicket(IssueBattleTicketRequest.newBuilder().setBattleId(11001).setPlayerId(A).build()),
                 () -> service.addObserver(AddObserverRequest.newBuilder().setBattleId(11001).build()),
                 () -> service.removeObserver(RemoveObserverRequest.newBuilder().setBattleId(11001).build()),
+                () -> service.queryObserver(com.game.proto.QueryObserverRequest.getDefaultInstance()),
+                () -> service.attachDirect(com.game.proto.BattleTicketPayload.getDefaultInstance(),null),
                 () -> service.attachDirect(11001, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT, null),
                 () -> service.onDirectVerified(11001, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT),
                 () -> service.detachDirect(11001, A, null),

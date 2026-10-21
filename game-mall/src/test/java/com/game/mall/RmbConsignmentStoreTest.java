@@ -48,7 +48,7 @@ class RmbConsignmentStoreTest {
             rejects(409, () -> f.orders.createConsignment(f.buy("7777", "buyer", "22", "buy-original-request")));
             rejects(404, () -> f.orders.get("22", order.orderId()));
             rejects(404, () -> f.orders.cancel("22", order.orderId()));
-            assertTrue(f.orders.list("22", new DeliveryApi.OrderPage("", 20)).isEmpty());
+            assertTrue(f.orders.list("22", new DeliveryApi.OrderPage("", 20, "fixture-account", "1")).isEmpty());
             assertEquals(order, f.orders.getConsignment(new RmbConsignmentApi.OrderQuery("buyer", order.orderId())));
             rejects(404, () -> f.orders.getConsignment(new RmbConsignmentApi.OrderQuery("new-character-owner", order.orderId())));
             assertEquals(List.of(order), f.orders.listConsignments(new RmbConsignmentApi.OrderPage("buyer", "", 20)));
@@ -259,14 +259,16 @@ class RmbConsignmentStoreTest {
     @Test void V4升级显式补V5_保留官方订单冻结与预占_规则和金额边界拒绝() throws Exception {
         try (var f = new Fixture()) {
             f.db.sku(1, 5, 125);
-            var original = f.orders.create("1", new MallApi.CreateOrder("migration-official-order", 1, 2));
-            for (String table : List.of("commerce_mock_payout", "commerce_consignment_return", "commerce_withdrawal_receipt", "commerce_withdrawal_allocation", "commerce_withdrawal", "commerce_seller_income", "commerce_seller_guard", "commerce_consignment_order", "commerce_consignment")) {
+            var original = f.orders.create("1", new MallApi.CreateOrder("migration-official-order", 1, 2, "fixture-account", "1"));
+            for (String table : List.of("commerce_official_owner", "commerce_mock_payout", "commerce_consignment_return", "commerce_withdrawal_receipt", "commerce_withdrawal_allocation", "commerce_withdrawal", "commerce_seller_income", "commerce_seller_guard", "commerce_consignment_order", "commerce_consignment")) {
                 f.db.jdbc.execute("DROP TABLE " + table);
             }
             assertThrows(Exception.class, () -> new MallSchemaVerifier(f.db.source, f.db.props).verify());
             f.db.migrate("db/migration/V5__rmb_consignment.sql");
             new MallSchemaVerifier(f.db.source, f.db.props).verify();
-            assertEquals(original, f.orders.get("1", original.orderId()));
+            assertEquals(original, f.orders.paymentOrderView(original.orderId()));
+            rejects(503, () -> f.orders.get("1",new MallApi.OwnedOrder(original.orderId(),"fixture-account","1")));
+            assertEquals(0,f.db.count("commerce_official_owner"),"不能为V4历史订单猜测回填原账号和修订");
             assertEquals(5, f.db.value("pms_sku_stock", "stock")); assertEquals(2, f.db.value("pms_sku_stock", "lock_stock"));
             assertEquals(0, f.db.count("commerce_seller_income"));
         }
@@ -337,7 +339,7 @@ class RmbConsignmentStoreTest {
         Fixture() { provider.addBean("settlements", rmb); }
         RmbConsignmentApi.Escrow escrow(String id, long price) { return new RmbConsignmentApi.Escrow(id, "11", "seller", 1, "ITEMS", null, "9" + id, "a".repeat(64), price, "完整托管原件"); }
         RmbConsignmentApi.Listing register(String id, long price) { return rmb.register(escrow(id, price)); }
-        RmbConsignmentApi.Buy buy(String id, String account, String player, String request) { return new RmbConsignmentApi.Buy(id, player, account, request); }
+        RmbConsignmentApi.Buy buy(String id, String account, String player, String request) { return new RmbConsignmentApi.Buy(id, player, account, request, "1"); }
         MallApi.Order paid(String id, long price) { register(id, price); clock.add(1_000); var order = orders.createConsignment(buy(id, "buyer", "22", "buy-request-" + id)); return payments.pay(new MockPaymentApi.Pay(order.orderId(), "payment-request-" + id)); }
         MallApi.Order earned(String id, long price) { var order = paid(id, price); delivery.receipt(receipt(order.orderId(), "DELIVERED")); return order; }
         DeliveryApi.Receipt receipt(String order, String state) { return new DeliveryApi.Receipt(order, "9001", state, "d".repeat(64)); }

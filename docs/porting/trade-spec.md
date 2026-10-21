@@ -1144,3 +1144,15 @@ SQL 与 `Phase` 在边界上一致。**浏览没有卖家豁免**：卖家自己
 实际验证：主仓 `build/commerce-finish-java-20261016/commerce-regression-v5.log` 的16模块反应堆成功，交易25、Mall18（含7项真TiDB）、scene39、Gate24项通过，0跳过。后补边界回归先红后绿，`commerce-boundaries-green.log` 交易27项通过（4项真TiDB），其源码快照在source-v5中仅同步了最终game-trade源码。`commerce-regression-v3.log` 的PlayerStoreSqlTest42项真TiDB通过，验证完整原实例与资产收据同事务、fresh reader恢复、旧owner epoch拒写以及ACK删除落库。
 
 交易TiDB测试人工注入源资产终局，只证明合同SQL并发和恢复，不冒充实际多进程场景到账。真实支付渠道适配器/凭证未配置，多区域Gate→scene→SQL故障切换和C++冷加载/Redis归属回退围栏仍未整体验收；本批不能登记为全球强一致上线完成，也没有两千万CCU容量结论。
+
+## 11 2026-10-21 人民币托管和原会话归属提交（源码候选）
+
+本批实现普通合同、角色托管与官方订单的账号归属闭环，尚未编译或运行测试；不能复用第10节历史通过证据。真实支付渠道以后接入，本轮只使用受保护的本地mock支付、退款、提现原件。
+
+- 内部 `PlayerTradeService` 使用typed protobuf和独立密钥HMAC，签完整确定性请求与绑定原请求的回包。login-provider复用真正PlayerTradeStore；Begin/Confirm/Cancel/Transfer均保留原listing/tx与持久排空证据，不接受调用者自报冻结证明。Cancel可先于Begin写终局墓碑；迟到Begin不能复活。Java原生归属修订明确为1..Long.MAX_VALUE，首次分配为1，导入/出售达到上界显式拒绝；商城线协议保留canonical完整uint64十进制字符串，高半区不能溢出或用当前修订替换。
+- gate由登录EnterScene指令保存原owner_revision，与原账号一起传给后端。普通交易、竞价和guild客户端入口显式绑定SessionContext，不用ThreadLocal；事务在任何业务锁之前锁player并核原账号/修订/未冻结。涉及多player按无符号ID升序。建帮/审批新增成员同player锁拒冻结，之后G→S→M→A；退帮/踢人/解散不在G后追加目标player锁。native冻结持player后核真正成员与未终局交易，不用远端预检代替提交校验。
+- 新人民币合同kind6复用trade_commerce和原可靠资产腿。完整客户端Create原件与可信account/revision/zone进入摘要；角色走实际冻结排空和原请求过户，物品/宝宝/金币走真实扣出快照，失败返还原seller身份。默认只开金币，钻石可配置、绑定货币拒绝。注册HTTP未知时必须重放原注册再撤单，禁止把未知当未上架先退资产。
+- 官方OMS原账号/修订持久映射、查询/取消/列表新POST体及人民币buyer修订已从主Mall冻结源镜像。已付款意图在第一条资产操作之前同player锁复核原身份，换主或ABA且尚无op只走原单退款。Mall持久接管退款后，游戏资产合同可终止并保留原退款workflow/proof；不将资金状态假称已退款。缺历史原件不猜补。后台恢复也从持久身份复核，缺原件隔离等待处置。
+- 官方与人民币交付扫描使用固定上界游标；实际尝试项即前移，未知原单继续保留，页尾绕回。扫描预算先于离线资产重试分配。新增源码回归覆盖前20单离线后的后页、原身份换主/ABA、原卖家返还、零/高半区修订、取消先赢和真实成员互锁。SQL夹具注入的资产终局只证明交易状态机，不代表真实scene到账或双区进程验收。
+
+本批未执行生成、Maven、H2、TiDB、Redis或双区验收；由主控在资源门禁后统一运行。Trial迟到奖励原件与Mail/Friend接缝由并行专属批次收口，本节不将其尚未运行的工作记为通过。

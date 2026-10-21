@@ -1,5 +1,6 @@
 package com.game.friend.service;
 
+import com.game.api.proto.SessionContext;
 import com.game.discovery.presence.PlayerPresenceDirectory.StrictLookup;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.friend.directory.OnlineDirectory;
@@ -88,12 +89,22 @@ public final class RecommendService {
         return (int) Math.min(limit, maxLimit);
     }
 
-    public RecommendFriendsResponse recommendFriends(long me, RecommendFriendsRequest request, Deadline deadline) {
+    public RecommendFriendsResponse recommendFriends(SessionContext session, RecommendFriendsRequest request, Deadline deadline) {
+        long me = session.getPlayerId();
         if (request.getExcludePlayerIdsCount() > maxExclude) {
             return RecommendFriendsResponse.newBuilder()
                     .setErrorMessage(tip(INVALID_PARAMETER, "too many exclude_player_ids")).build();
         }
         int limit = clampLimit(request.getLimit());
+        RecommendSource source;
+        try {
+            source = store.forActor(me, session.getAccount(), session.getOwnerRevision());
+            // 在线目录只读 Redis，没有下方的关系 SQL，故在这里验证原会话。
+            if (request.getOnlineOnly()) source.authorize(deadline);
+        } catch (SQLException | RuntimeException invalid) {
+            return RecommendFriendsResponse.newBuilder()
+                    .setErrorMessage(tip(SERVICE_UNAVAILABLE, "session invalid")).build();
+        }
         if (request.getOnlineOnly()) {
             return onlineDirectory(me, request, limit, deadline);
         }
@@ -102,13 +113,13 @@ public final class RecommendService {
         List<Candidate> picked = new ArrayList<>();
         String step = "mutual";
         try {
-            for (Candidate c : store.mutual(me, exclude, limit, deadline)) {
+            for (Candidate c : source.mutual(me, exclude, limit, deadline)) {
                 picked.add(c);
                 exclude.add(c.playerId());
             }
             if (picked.size() < limit) {
                 step = "random";
-                for (Candidate c : store.random(me, exclude, limit - picked.size(), deadline)) {
+                for (Candidate c : source.random(me, exclude, limit - picked.size(), deadline)) {
                     picked.add(c);
                     exclude.add(c.playerId());
                 }

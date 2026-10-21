@@ -142,13 +142,16 @@ class GuildEndToEndIntegrationTest {
             st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(64) NOT NULL,"
                     + " level INT UNSIGNED NOT NULL DEFAULT 1, class_id INT UNSIGNED NOT NULL DEFAULT 0,"
                     + " gender INT UNSIGNED NOT NULL DEFAULT 0, appearance_id VARCHAR(64) NOT NULL DEFAULT '',"
-                    + " zone_id INT UNSIGNED NOT NULL) ENGINE=InnoDB");
+                    + " zone_id INT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,account VARCHAR(64) NOT NULL DEFAULT 'fixture-account',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 1) ENGINE=InnoDB");
             try (PreparedStatement ps = conn.prepareStatement("INSERT INTO player (player_id, name, zone_id) VALUES (?, ?, ?)")) {
                 insertPlayer(ps, a, "甲", ZONE);
                 insertPlayer(ps, b, "乙", ZONE);
-                insertPlayer(ps, c, "丙", 0);
+                insertPlayer(ps, c, "丙", ZONE);
             }
         }
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
+        try(var connection=dataSource.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(ZONE));}
+        try(var connection=dataSource.getConnection();var ps=connection.prepareStatement("UPDATE player SET zone_id=0 WHERE player_id=?")){ps.setObject(1,new BigInteger(Long.toUnsignedString(c)));ps.executeUpdate();}
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(10);
         redis = Redisson.create(config);
@@ -171,14 +174,14 @@ class GuildEndToEndIntegrationTest {
         GuildCache.CacheRedis cacheRedis = wiring.guildCacheRedis(redis);
         GuildCacheInvalidator invalidator = wiring.guildCacheInvalidator(cacheRedis, REDIS_KEYS, props, background, metrics);
         GuildCache cache = wiring.guildCache(cacheRedis, REDIS_KEYS, props, store, invalidator, metrics);
-        GuildRanks ranks = wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, CHANNEL_OFF);
+        GuildRanks ranks = wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, CHANNEL_OFF,dataSource);
         ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis, REDIS_KEYS);
         PlayerPresenceDirectory presence = wiring.playerPresenceDirectory(redis, REDIS_KEYS);
         PlayerPushes playerPushes = wiring.playerPushes(redis, REDIS_KEYS, presence);
         PlayerProfiles profiles = wiring.playerProfiles(dataSource, props);
         GuildPushes pushes = wiring.guildPushes(playerPushes, metrics, props, REGISTRY);
         GuildTableLookup lookup = wiring.guildTableLookup(tables);
-        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator, metrics);
+        GuildAccess access = wiring.guildAccess(cache, profiles, invalidator, metrics,dataSource);
         GuildViews views = wiring.guildViews(presence, profiles, metrics, props, lookup, store);
         GuildService guilds = wiring.guildService(store, cache, access, views, ranks, pushes, ids, lookup);
         GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup,
@@ -254,7 +257,7 @@ class GuildEndToEndIntegrationTest {
     private ClientReply send(long player, String method, Message request) {
         ClientCall call = ClientCall.newBuilder().setMessageId(REGISTRY.requireId(GuildMethods.SERVICE, method))
                 .setBody(request == null ? ByteString.EMPTY : request.toByteString())
-                .setSession(SessionContext.newBuilder().setGateNodeId(1).setSessionId(3).setPlayerId(player)).build();
+                .setSession(SessionContext.newBuilder().setGateNodeId(1).setSessionId(3).setPlayerId(player).setAccount("fixture-account").setOwnerRevision(1)).build();
         return dispatcher.dispatch(call).join();
     }
 
@@ -396,7 +399,7 @@ class GuildEndToEndIntegrationTest {
         GuildMetrics metrics = wiring.guildMetrics(new SimpleMeterRegistry());
         GuildTx tx = wiring.guildTx(dataSource, props, metrics);
         GuildStore store = wiring.guildStore(tx, new GuildConfiguration.SchemaReady("test"));
-        wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, CHANNEL_OFF);
+        wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, CHANNEL_OFF,dataSource);
         assertThat(redis.getScoredSortedSet(REDIS_KEYS.guildRankZone(ZONE), org.redisson.client.codec.StringCodec.INSTANCE)
                 .contains(Long.toUnsignedString(g))).isTrue();
         GetGuildRankByGuildResponse byGuild = call(a, GuildMethods.GET_GUILD_RANK_BY_GUILD,

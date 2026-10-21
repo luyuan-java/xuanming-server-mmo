@@ -108,6 +108,9 @@ public final class GuildManageService {
     }
 
     // ================================================================ SetGuildMemberRole（19）
+    public GuildManageService forActor(com.game.api.proto.SessionContext actor) {
+        return new GuildManageService(store.forActor(actor), cache, access, views, pushes, applyPushGate, tables, clockMs, applicationQuota);
+    }
 
     /**
      * 任免（guild_manage_logic.go:369-401；§3.8）：clientWrite → 目标校验（14014 / 14015）→ role 只许 0 / 1（否则 14006「role not assignable」，

@@ -11,7 +11,7 @@ import com.game.match.placement.PlacementDialer.Dial;
 import com.game.match.proto.BattlePlacement;
 import com.game.proto.AddObserverRequest;
 import com.game.proto.AddObserverResponse;
-import com.game.proto.Empty;
+import com.game.proto.RemoveObserverResponse;
 import com.game.proto.RemoveObserverRequest;
 import java.time.Duration;
 import java.util.Objects;
@@ -31,7 +31,7 @@ import org.slf4j.LoggerFactory;
  *   <caption>结局的对应（判据在 {@code DirectPlacementDialer}，这里只翻译）</caption>
  *   <tr><th>直拨</th><th>观众 RPC</th><th>含义</th></tr>
  *   <tr><td>{@code Replied(reply)}</td><td>{@link Outcome.Replied}(tip)</td><td>battle 应答了；{@code addObserver} 的 tip 取应答的 {@code error_message.id}
- *       （0 = 登记成功），{@code removeObserver} 的应答是 Empty、恒为 0</td></tr>
+ *       （0 = 登记成功），{@code removeObserver} 必须返回固定原操作与实例的取消证明；旧长参数适配只用于非全球开发接缝</td></tr>
  *   <tr><td>{@code RoomGone}</td><td>{@link Outcome.Dead}</td><td>请求确定没送达 + 目录里同号节点已换实例 + 原地址明确连不上，三条都在硬截止之前拿齐</td></tr>
  *   <tr><td>{@code Unavailable(NOT_DELIVERED)}</td><td>{@link Outcome.NotDelivered}</td><td>请求确定没送达，但判不了死（含硬截止已到）</td></tr>
  *   <tr><td>{@code Unavailable(TIMEOUT / OTHER)}</td><td>{@link Outcome.Unknown}</td><td>超时、连上之后断开、对端回了传输层错误（鉴权失败、在途超限）：
@@ -89,7 +89,7 @@ public final class DefaultObserverDialer implements ObserverDialer {
         Objects.requireNonNull(hardStop, "hardStop");
         RemoveObserverRequest request = RemoveObserverRequest.newBuilder().setBattleId(placement.getBattleId()).setObserverPlayerId(observerId)
                 .setReason(reason == null ? "" : reason).build();
-        Outcome outcome = dial(placement, timeout, hardStop, node -> node.removeObserver(request), (Empty reply) -> 0);
+        Outcome outcome = dial(placement, timeout, hardStop, node -> node.removeObserver(request), (RemoveObserverResponse reply) -> reply.getCancelled()?0:1);
         return recorded(ObserverMethod.REMOVE, placement, observerId, outcome);
     }
 

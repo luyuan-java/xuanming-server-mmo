@@ -1,15 +1,17 @@
 package com.game.api.auth;
 
-import com.game.api.PlayerTradeService.*;
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
+import com.game.api.proto.PlayerTradeAuth;
+import com.game.api.proto.PlayerTradeCommand;
+import com.game.api.proto.PlayerTradeReply;
+import com.google.protobuf.CodedOutputStream;
+import com.google.protobuf.Message;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
-/** 独立密钥、版本、caller、方法、全部 typed 正文及回复绑定；不依赖通用 Dubbo method/time MAC。 */
+/** 独立密钥、caller、方法及确定性完整 protobuf；响应绑定原请求，不能拼接另一笔交易的回复。 */
 public final class PlayerTradeSignatures {
     private final SecretKeySpec key;
     public PlayerTradeSignatures(String secret) {
@@ -17,47 +19,44 @@ public final class PlayerTradeSignatures {
             throw new IllegalArgumentException("角色交易独立密钥至少32字节");
         key = new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256");
     }
-    public Auth sign(Command command, long now, String nonce) {
-        return new Auth("trade", now, nonce, mac(request(command, now, nonce)));
+    public PlayerTradeAuth sign(PlayerTradeCommand command, long now, String nonce) {
+        return PlayerTradeAuth.newBuilder().setCaller("trade").setTimestampMs(now).setNonce(nonce)
+            .setSignature(mac(request(command, now, nonce))).build();
     }
-    public boolean verify(Command command, Auth auth, long now) {
-        return command != null && command.operation() != null && auth != null && "trade".equals(auth.caller())
-            && auth.nonce() != null && auth.nonce().matches("[0-9a-f]{32}") && auth.timestampMs() >= 0
-            && auth.timestampMs() >= now - 60_000 && auth.timestampMs() <= now + 60_000
-            && command.expiresMs() > now && command.expiresMs() <= now + 5_000
-            && equal(mac(request(command, auth.timestampMs(), auth.nonce())), auth.signature());
+    public boolean verify(PlayerTradeCommand command, PlayerTradeAuth auth, long now) {
+        return command != null && command.getOperationValue() > 0 && command.getOperationValue() <= 5
+            && auth != null && "trade".equals(auth.getCaller()) && auth.getNonce().matches("[0-9a-f]{32}")
+            && auth.getTimestampMs() > 0 && auth.getTimestampMs() >= now - 60_000
+            && auth.getTimestampMs() <= now + 60_000
+            && command.getExpiresMs() > now && command.getExpiresMs() <= now + 5_000
+            && equal(mac(request(command, auth.getTimestampMs(), auth.getNonce())), auth.getSignature());
     }
-    public Reply signReply(Command command, Auth auth, Reply reply) {
-        return new Reply(reply.code(), reply.listingId(), reply.txId(), reply.playerId(), reply.sellerAccount(),
-            reply.buyerAccount(), reply.ownerRevision(), reply.ownerEpoch(), reply.state(), reply.homeZone(), reply.title(),
-            mac(response(command, auth, reply)));
+    public PlayerTradeReply signReply(PlayerTradeCommand command, PlayerTradeAuth auth, PlayerTradeReply reply) {
+        return reply.toBuilder().setSignature(mac(response(command, auth, reply))).build();
     }
-    public boolean verifyReply(Command command, Auth auth, Reply reply) {
-        return reply != null && equal(mac(response(command, auth, reply)), reply.signature());
+    public boolean verifyReply(PlayerTradeCommand command, PlayerTradeAuth auth, PlayerTradeReply reply) {
+        return reply != null && equal(mac(response(command, auth, reply)), reply.getSignature());
     }
-    private static byte[] request(Command c, long time, String nonce) {
-        return bytes("player-trade/v1", "trade", "execute", time, nonce, c.operation().name(), c.listingId(), c.txId(),
-            c.playerId(), c.sellerAccount(), c.buyerAccount(), c.ownerRevision(), c.expiresMs());
+    private static String request(PlayerTradeCommand c, long time, String nonce) {
+        return String.join("\n", "player-trade/v1", "trade", "execute", Long.toString(time), nonce, digest(c));
     }
-    private static byte[] response(Command c, Auth a, Reply r) {
-        return bytes("player-trade/reply/v1", HexFormat.of().formatHex(request(c, a.timestampMs(), a.nonce())),
-            r.code(), r.listingId(), r.txId(), r.playerId(), r.sellerAccount(), r.buyerAccount(), r.ownerRevision(),
-            r.ownerEpoch(), r.state(), r.homeZone(), r.title());
+    private static String response(PlayerTradeCommand c, PlayerTradeAuth a, PlayerTradeReply r) {
+        return String.join("\n", "player-trade/reply/v1", request(c, a.getTimestampMs(), a.getNonce()),
+            digest(r.toBuilder().clearSignature().build()));
     }
-    private static byte[] bytes(Object... values) {
+    private static String digest(Message input) {
         try {
-            var buffer = new ByteArrayOutputStream(); var out = new DataOutputStream(buffer);
-            for (Object v : values) {
-                if (v instanceof Long n) { out.writeByte(1); out.writeLong(n); }
-                else if (v instanceof Integer n) { out.writeByte(2); out.writeInt(n); }
-                else { out.writeByte(3); byte[] raw = v == null ? new byte[0] : ((String) v).getBytes(StandardCharsets.UTF_8);
-                    out.writeInt(raw.length); out.write(raw); }
-            }
-            return buffer.toByteArray();
-        } catch (java.io.IOException impossible) { throw new IllegalStateException(impossible); }
+            byte[] bytes = new byte[input.getSerializedSize()];
+            var coded = CodedOutputStream.newInstance(bytes); coded.useDeterministicSerialization();
+            input.writeTo(coded); coded.checkNoSpaceLeft();
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (java.io.IOException | java.security.GeneralSecurityException impossible) {
+            throw new IllegalStateException(impossible);
+        }
     }
-    private String mac(byte[] bytes) {
-        try { var mac = Mac.getInstance("HmacSHA256"); mac.init(key); return HexFormat.of().formatHex(mac.doFinal(bytes)); }
+    private String mac(String value) {
+        try { var mac = Mac.getInstance("HmacSHA256"); mac.init(key);
+            return HexFormat.of().formatHex(mac.doFinal(value.getBytes(StandardCharsets.UTF_8))); }
         catch (java.security.GeneralSecurityException impossible) { throw new IllegalStateException(impossible); }
     }
     private static boolean equal(String expected, String actual) {

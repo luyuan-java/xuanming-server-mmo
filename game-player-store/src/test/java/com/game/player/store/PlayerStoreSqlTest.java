@@ -169,7 +169,7 @@ class PlayerStoreSqlTest {
         jdbc().update("UPDATE player SET trade_listing_id=101 WHERE player_id=?", p);
         CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() * 2);
         assertThat(store.claimOwnership(p, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
-        assertThat(store.recoverOwnershipAfterRestore(p, 5, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
+        assertThat(store.recoverOwnershipAfterRestore(p, 5, 1, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
         assertThat(store.loadForScene(p, 1, FINAL_SOURCE, Duration.ofSeconds(3))).isEmpty();
         assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_final_save WHERE player_id=?", Long.class, p)).isZero();
         assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, p)).isZero();
@@ -177,6 +177,73 @@ class PlayerStoreSqlTest {
     }
 
     private static final String FINAL_SOURCE = "00000000-0000-0000-0000-000000000001";
+
+    @Test
+    void 完整场景准入只在首次同P加载登记_重放不能更改原件或给空原件补权() {
+        long p = newPlayer(9004, "场景原件登记");
+        assertThat(store.claimOwnership(p, ACCOUNT, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Claimed(1));
+        var original = com.game.proto.common.base.RoleAdmissionIdentity.newBuilder()
+                .setPlayerId(p).setOwnerEpoch(1).setOwnerRevision(1).setSceneInstanceId(FINAL_SOURCE)
+                .setGeneration(7).setSceneNodeId("scene-original").setSceneId(41).setZoneId(1)
+                .setSessionId(2).setLoginGeneration(3).build();
+        assertThat(store.loadForScene(original, "other-account", TX_TIMEOUT)).isEmpty();
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_final_save WHERE player_id=?", Long.class, p)).isZero();
+        assertThat(store.loadForScene(original, ACCOUNT, TX_TIMEOUT)).isPresent();
+        assertThat(store.loadForScene(original, ACCOUNT, TX_TIMEOUT)).isPresent();
+        assertThat(store.loadForScene(original.toBuilder().setGeneration(8).build(), ACCOUNT, TX_TIMEOUT)).isEmpty();
+        assertThat(store.loadForScene(original.toBuilder().setOwnerRevision(2).build(), ACCOUNT, TX_TIMEOUT)).isEmpty();
+        assertThat(jdbc().queryForObject("SELECT admission_proto FROM player_final_save WHERE player_id=? AND owner_epoch=1",
+                byte[].class, p)).isEqualTo(com.game.common.player.SceneAdmissionAuthority.original(original));
+        jdbc().update("UPDATE player_final_save SET admission_proto=NULL WHERE player_id=?", p);
+        assertThat(store.loadForScene(original, ACCOUNT, TX_TIMEOUT)).isEmpty();
+    }
+
+    @Test
+    void 场景取消只释放完整相同原件并永久保留准入收据() {
+        long p = newPlayer(9005, "取消原件范围");
+        assertThat(store.claimOwnership(p, ACCOUNT, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Claimed(1));
+        var original = com.game.proto.common.base.RoleAdmissionIdentity.newBuilder()
+                .setPlayerId(p).setOwnerEpoch(1).setOwnerRevision(1).setSceneInstanceId(FINAL_SOURCE)
+                .setGeneration(1).setSceneNodeId("scene-original").setSceneId(41).setZoneId(1)
+                .setSessionId(2).setLoginGeneration(1).build();
+        assertThat(store.loadForScene(original, ACCOUNT, TX_TIMEOUT)).isPresent();
+        assertThat(store.releaseSceneAdmission(original.toBuilder().setSceneInstanceId(OTHER_SOURCE).build(), ACCOUNT, TX_TIMEOUT)).isFalse();
+        assertThat(store.releaseSceneAdmission(original, "other-account", TX_TIMEOUT)).isFalse();
+        assertThat(store.releaseSceneAdmission(original.toBuilder().setGeneration(2).build(), ACCOUNT, TX_TIMEOUT)).isFalse();
+        assertThat(store.releaseSceneAdmission(original, ACCOUNT, TX_TIMEOUT)).isTrue();
+        assertThat(store.releaseSceneAdmission(original, ACCOUNT, TX_TIMEOUT)).isFalse();
+        assertThat(jdbc().queryForObject("SELECT admission_proto FROM player_final_save WHERE player_id=? AND owner_epoch=1", byte[].class, p))
+                .isEqualTo(com.game.common.player.SceneAdmissionAuthority.original(original));
+    }
+
+    @Test
+    void 历史恢复保留全部在途原合同_精确终态后才同时提高纪元和归属修订() {
+        long p = newPlayer(9003, "恢复原合同闸");
+        assertThat(store.claimOwnership(p, ACCOUNT, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Claimed(1));
+        CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() * 2);
+        String[] insertions = {
+            "INSERT INTO team_launch_role VALUES (?,101,1)",
+            "INSERT INTO guild_trial_launch_role VALUES (?,102,1)",
+            "INSERT INTO player_inbox_item(shard,player_id,state) VALUES ("
+                    + com.game.common.inbox.InboxShards.rowShard(p) + ",?,1)",
+            "INSERT INTO trade_asset_op(op_id,player_id,status,receipt_ack_pending,business_consumed) VALUES (103,?,1,0,0)"
+        };
+        String[] tables = {"team_launch_role", "guild_trial_launch_role", "player_inbox_item", "trade_asset_op"};
+        for (int i = 0; i < tables.length; i++) {
+            jdbc().update(insertions[i], p);
+            assertThat(store.recoverOwnershipAfterRestore(p, 10, 20, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
+            PlayerRow unchanged = store.findPlayer(p).orElseThrow();
+            assertThat(unchanged.getOwnerEpoch()).isEqualTo(1);
+            assertThat(unchanged.getOwnerRevision()).isEqualTo(1);
+            assertThat(unchanged.getAccount()).isEqualTo(ACCOUNT);
+            jdbc().update("DELETE FROM " + tables[i] + " WHERE player_id=?", p);
+        }
+        jdbc().update("INSERT INTO player_inbox_item(shard,player_id,state) VALUES (?,?,5)",
+                com.game.common.inbox.InboxShards.rowShard(p), p);
+        jdbc().update("INSERT INTO trade_asset_op(op_id,player_id,status,receipt_ack_pending,business_consumed) VALUES (103,?,2,0,1)", p);
+        assertThat(store.recoverOwnershipAfterRestore(p, 10, 20, TX_TIMEOUT)).isEqualTo(new ClaimResult.Claimed(11));
+        assertThat(store.findPlayer(p).orElseThrow().getOwnerRevision()).isEqualTo(21);
+    }
     private static final String OTHER_SOURCE = "00000000-0000-0000-0000-000000000002";
 
     private long finalSavePlayer(long id, String name) {
@@ -340,7 +407,7 @@ class PlayerStoreSqlTest {
                 .isInstanceOf(IllegalStateException.class);
         assertThat(store.releaseOwnership(p, 1)).isFalse();
         CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() + 1);
-        assertThat(store.recoverOwnershipAfterRestore(p, 20, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
+        assertThat(store.recoverOwnershipAfterRestore(p, 20, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
         assertThat(owner(p).ownerEpoch()).isEqualTo(1);
         ClaimResult result = store.claimOwnership(p);
         if (result instanceof ClaimResult.Claimed claimed) {
@@ -560,7 +627,7 @@ class PlayerStoreSqlTest {
             jdbc().update("UPDATE player_final_save SET status=? WHERE player_id=? AND owner_epoch=1",broken,p);
             assertThat(store.claimOwnership(p)).as("状态="+broken).isEqualTo(new ClaimResult.Held(1));
             assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
-            assertThat(store.recoverOwnershipAfterRestore(p,20,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
+            assertThat(store.recoverOwnershipAfterRestore(p, 20, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
             assertThat(store.loadForScene(p,1,FINAL_SOURCE,TX_TIMEOUT)).isEmpty();
             assertThat(store.saveStateHeld(save(p,1,2,99),facing(9))).isFalse();
             assertThat(store.releaseOwnership(p,1)).isFalse();
@@ -587,7 +654,7 @@ class PlayerStoreSqlTest {
         for(String broken:List.of("BROKEN","open","OPEN ","applied","APPLIED ")) {
             jdbc().update("UPDATE player_final_save SET status=?,applied_at=1 WHERE player_id=? AND owner_epoch=1",broken,p);
             assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
-            assertThat(store.recoverOwnershipAfterRestore(p,20,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
+            assertThat(store.recoverOwnershipAfterRestore(p, 20, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
             assertThat(store.loadForScene(p,2,OTHER_SOURCE,TX_TIMEOUT)).isEmpty();
             assertThat(store.saveStateHeld(save(p,2,2,99),facing(9))).isFalse();
             assertThat(store.saveStateAndRelease(save(p,2,2,99),facing(9))).isFalse();
@@ -1952,7 +2019,7 @@ class PlayerStoreSqlTest {
     static class Config {
 
         @Bean
-        DataSource dataSource() {
+        DataSource dataSource() throws java.sql.SQLException {
             String database = "game_it_" + UUID.randomUUID().toString().replace("-", "");
             DataSource ds;
             if (REQUIRE_TIDB) {
@@ -1974,7 +2041,9 @@ class PlayerStoreSqlTest {
                     try {
                         pool.init();
                         try (var connection = pool.getConnection()) { StrongTiDbConnectionPolicy.verify(connection, true); }
-                        new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(pool);
+                        new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(pool);
+                        new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(pool);
+                try(var routeInit=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
                         return pool;
                     } catch (java.sql.SQLException | RuntimeException | Error failure) {
                         pool.close();
@@ -1995,7 +2064,9 @@ class PlayerStoreSqlTest {
                 h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
                 ds = h2;
             }
-            new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(ds);
+            new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(ds);
+            new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(ds);
+                try(var routeInit=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
             return ds;
         }
 

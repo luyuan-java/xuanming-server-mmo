@@ -72,7 +72,7 @@ class MockPaymentHttpTest {
         try {
             jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES(1,1,'mock-http-sku',125,'CNY',10,0,1)");
             jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(1,10,1,'玄铁')");
-            var created = call(http, "/api/orders", "gateway", "1", bytes(Map.of("requestId", "mock-http-order-001", "skuId", 1, "quantity", 2)));
+            var created = call(http, "/api/orders", "gateway", "1", bytes(Map.of("requestId", "mock-http-order-001", "skuId", 1, "quantity", 2, "buyerAccount", "fixture-account", "buyerOwnerRevision", "1")));
             assertEquals(200, created.statusCode(), created.body());
             String orderId = json.readTree(created.body()).path("orderId").asText();
             byte[] input = bytes(Map.of("orderId", orderId, "requestId", "mock-http-payment-001"));
@@ -118,7 +118,7 @@ class MockPaymentHttpTest {
             byte[] delivery = bytes(new DeliveryApi.Receipt(orderId, "123", "REFUND_PENDING", "a".repeat(64)));
             assertEquals(200, call(http, "/internal/deliveries/receipt", "delivery", "trade", delivery).statusCode());
             // 一个损坏的未投递付款原件与一个可恢复退款并存，失败不能吞掉后项或摘要。
-            var another = call(http, "/api/orders", "gateway", "2", bytes(Map.of("requestId", "mock-http-order-002", "skuId", 1, "quantity", 1)));
+            var another = call(http, "/api/orders", "gateway", "2", bytes(Map.of("requestId", "mock-http-order-002", "skuId", 1, "quantity", 1, "buyerAccount", "fixture-account", "buyerOwnerRevision", "1")));
             assertEquals(200, another.statusCode(), another.body());
             String badId = json.readTree(another.body()).path("orderId").asText();
             assertEquals(200, call(http, "/internal/mock/pay", "payment", "payment-adapter",

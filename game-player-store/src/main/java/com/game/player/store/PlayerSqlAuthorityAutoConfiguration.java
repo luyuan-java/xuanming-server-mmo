@@ -34,8 +34,19 @@ public class PlayerSqlAuthorityAutoConfiguration {
                 StrongTiDbConnectionPolicy.verify(connection, require);
                 verifyFinalSaveSchema(connection);
                 verifyTradeSchema(connection);
+                verifyRouteSchema(connection);
             }
         };
+    }
+    static void verifyRouteSchema(java.sql.Connection connection)throws java.sql.SQLException{
+        com.game.common.player.PlayerRouteAuthority.verifySchema(connection);
+        for(String sql:java.util.List.of("SELECT id,generation,writable,fence_shards FROM route_meta WHERE 1=0","SELECT zone_id,shard,run_id,revision FROM zone_merge_fence WHERE 1=0")){
+            try(var statement=connection.prepareStatement(sql);var rows=statement.executeQuery()){
+                var metadata=rows.getMetaData();for(int i=1;i<=metadata.getColumnCount();i++)if(metadata.isNullable(i)!=java.sql.ResultSetMetaData.columnNoNulls)throw new IllegalStateException("SQL路由围栏列不能可空");
+            }
+        }
+        // 读取小聚合，不从player补任何围栏；无效home/缺片/未知run拒启动。
+        try(var statement=connection.prepareStatement("SELECT p.zone_id FROM (SELECT DISTINCT zone_id FROM player) p LEFT JOIN zone_merge_fence f ON f.zone_id=p.zone_id GROUP BY p.zone_id HAVING p.zone_id=0 OR COUNT(f.shard)<>64 OR MIN(f.shard)<>0 OR MAX(f.shard)<>63 OR MIN(f.revision)<=0 LIMIT 1")){statement.setQueryTimeout(3);try(var rows=statement.executeQuery()){if(rows.next())throw new IllegalStateException("真实player归属区缺少完整SQL围栏原件");}}
     }
 
     /** M15不能仅依赖CREATE IF NOT EXISTS，旧库必须显式迁移后才能启写者。 */
@@ -115,7 +126,7 @@ public class PlayerSqlAuthorityAutoConfiguration {
         try (var statement=connection.prepareStatement("""
                 SELECT player_id,owner_epoch,save_seq,protocol_version,source_instance,status,
                        level,scene_config_id,pos_x,pos_y,pos_z,data,payload_digest,created_at,
-                       next_attempt_at,attempt_count,last_error_code,applied_at
+                       next_attempt_at,attempt_count,last_error_code,applied_at,admission_proto
                   FROM player_final_save WHERE 1=0
                 """); var ignored=statement.executeQuery()) {
             // 只验证投影，不读取任何玩家payload。
@@ -162,6 +173,11 @@ public class PlayerSqlAuthorityAutoConfiguration {
                 || data.size()<16_777_215L) {
             throw new IllegalStateException("player_final_save.data必须是可空的大二进制列，请执行M14迁移");
         }
+        FinalSaveColumn admission=columns.get("admission_proto");
+        if(admission==null || admission.nullability()!=java.sql.DatabaseMetaData.columnNullable
+                || (admission.type()!=java.sql.Types.LONGVARBINARY && admission.type()!=java.sql.Types.BLOB)
+                || admission.size()<com.game.common.player.SceneAdmissionAuthority.MAX_ORIGINAL_BYTES)
+            throw new IllegalStateException("player_final_save.admission_proto必须是可空的大二进制列，请执行完整原准入迁移");
         var primary=new java.util.TreeMap<Short,String>();
         try(var keys=metadata.getPrimaryKeys(connection.getCatalog(),schema,table)) {
             while(keys.next()) primary.put(keys.getShort("KEY_SEQ"),keys.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));

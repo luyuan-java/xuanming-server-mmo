@@ -39,6 +39,8 @@ import java.util.Optional;
  * <p>本接口不计任何指标：出口计数（163 / 164 / 清退 / 剔除 / 异常）由调用方按 {@code MatchMetrics} 各枚举的口径记。
  */
 public interface SpectateStore {
+    /** 全球SQL实现的清退必须拿原操作正证明，不能走旧Redis尽力删除语义。 */
+    default boolean sqlAuthority() { return false; }
 
     // ================================================================ 观战标记
 

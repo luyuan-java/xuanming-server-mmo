@@ -40,6 +40,7 @@ public final class GuildActivityRuntime implements SmartLifecycle {
     private final boolean globalMatch;
     private final MeterRegistry metrics;
     private final GuildActivityService.Effects effects;
+    private final GuildTrialCancellation cancellation;
     private volatile boolean running;
     private volatile Consumer<String, byte[]> consumer;
     private volatile GuildActivityResults resultLoop;
@@ -47,6 +48,12 @@ public final class GuildActivityRuntime implements SmartLifecycle {
     private Thread resultThread;
     public GuildActivityRuntime(GuildActivityStore store, RedissonClient redis, RedisKeys keys, KafkaNames names, String brokers,
             int generation, boolean enabled, boolean globalMatch, MeterRegistry metrics, GuildActivityService.Effects effects) {
+        this(store,redis,keys,names,brokers,generation,enabled,globalMatch,metrics,effects,
+                enabled ? GuildTrialCancellation.fromEnvironment() : null);
+    }
+    public GuildActivityRuntime(GuildActivityStore store, RedissonClient redis, RedisKeys keys, KafkaNames names, String brokers,
+            int generation, boolean enabled, boolean globalMatch, MeterRegistry metrics, GuildActivityService.Effects effects,
+            GuildTrialCancellation cancellation) {
         this.store = store;
         this.redis = redis;
         this.keys = keys;
@@ -57,6 +64,8 @@ public final class GuildActivityRuntime implements SmartLifecycle {
         this.globalMatch = globalMatch;
         this.metrics = metrics;
         this.effects = effects;
+        if (enabled && cancellation == null) throw new IllegalArgumentException("历练取消签名依赖未装配");
+        this.cancellation = cancellation;
         for (String stage : List.of("launch", "reward", "result", "recover"))
             for (String outcome : List.of("ok", "error"))
                 metrics.counter("game_guild_activity_background_total", "stage", stage, "outcome", outcome);
@@ -116,7 +125,11 @@ public final class GuildActivityRuntime implements SmartLifecycle {
             for (long id : store.launches(Deadline.after(1000), System.currentTimeMillis())) {
                 if (!running)
                     return;
-                launch(id);
+                try { launch(id); }
+                catch (Exception failure) {
+                    store.deferLaunch(id,System.currentTimeMillis(),Deadline.after(1000));
+                    failed("launch",failure);
+                }
             }
             count("launch", true);
         } catch (Exception e) {
@@ -135,8 +148,10 @@ public final class GuildActivityRuntime implements SmartLifecycle {
                         store.poison("redis-raw-activity", 0, battle.id(), raw, System.currentTimeMillis(), Deadline.after(1500));
                         bucket.compareAndSetAsync(raw, null).toCompletableFuture().get(800, TimeUnit.MILLISECONDS);
                     }
-                } else
+                } else {
                     store.expireBattle(battle.id(), System.currentTimeMillis(), Deadline.after(1000));
+                    cancel(store.battleLaunch(battle.id(),Deadline.after(1000)));
+                }
             }
             count("recover", true);
         } catch (Exception e) {
@@ -156,12 +171,25 @@ public final class GuildActivityRuntime implements SmartLifecycle {
             LOG.warn("历练开战结局未知，保留原意图重投 failure={}", unknown.getClass().getSimpleName());
         }
         store.completeLaunch(launch, response, System.currentTimeMillis(), Deadline.after(1500));
+        if (response == null || response.getRejectValue() != 0 || response.getBattleId() == 0) {
+            cancel(launch);
+        }
         if (response != null && response.getRejectValue() >= 0 && response.getRejectValue() <= 4)
             try {
                 effects.committed(launch.guild(), 0, launch.request().getMemberPlayerIdsList());
             } catch (Exception reminder) {
                 LOG.warn("开战意图已更新，提醒待页面恢复 failure={}", reminder.getClass().getSimpleName());
             }
+    }
+    private void cancel(GuildActivityStore.Launch launch) {
+        var request = cancellation.request(launch.request());
+        try {
+            var reply = MatchRpcAttachments.callWithBudget(3000,3000,() -> match.cancelActivityBattle(request))
+                    .get(3200,TimeUnit.MILLISECONDS);
+            store.completeCancellation(launch,cancellation.verify(request,reply),System.currentTimeMillis(),Deadline.after(1500));
+        } catch (Exception unknown) {
+            LOG.warn("历练取消结局未证明，保留原ACTIVE等待轮转 failure={}",unknown.getClass().getSimpleName());
+        }
     }
     public void settle(BattleResultEvent event) throws Exception {
         if (event.getActivityContext().getKindValue() != 1)
@@ -170,7 +198,7 @@ public final class GuildActivityRuntime implements SmartLifecycle {
         try {
             store.settle(event, System.currentTimeMillis(), Deadline.after(3500));
         } catch (GuildActivityStore.InvalidResult invalid) {
-            store.poison("redis-activity", 0, event.getBattleId(), event.toByteArray(), System.currentTimeMillis(), Deadline.after(1500));
+            store.poisonBattle(event.getBattleId(),"redis-activity", 0, event.getBattleId(), event.toByteArray(), System.currentTimeMillis(), Deadline.after(1500));
             poisoned = true;
             LOG.error("历练战报已持久隔离，未自动发奖 reason={}", invalid.getMessage());
         }

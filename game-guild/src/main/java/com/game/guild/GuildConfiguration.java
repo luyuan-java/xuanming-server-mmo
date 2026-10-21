@@ -264,7 +264,7 @@ public class GuildConfiguration {
                                  GuildStore store, GuildCacheInvalidator invalidator, GuildMetrics metrics) {
         return new GuildCache(guildCacheRedis, redisKeys, props.cacheTtl(),
                 (guildId, deadline) -> store.loadGuild(guildId, deadline).map(GuildSnapshots::toSnapshot).orElse(null),
-                store::playerGuildId, invalidator, metrics);
+                store::playerGuildId, invalidator, metrics,true);
     }
 
     /**
@@ -275,8 +275,8 @@ public class GuildConfiguration {
     public GuildRanks guildRanks(RedissonClient redis, RedisKeys redisKeys,
                                  @Qualifier("guildBackgroundScheduler") ScheduledExecutorService background,
                                  GuildMetrics metrics, GuildStore store, NodeIdLease guildIdLease,
-                                 GuildAssetRuntime guildAssetRuntime) {
-        GuildRanks ranks = new GuildRanks(new RedissonGuildRankRedis(redis), redisKeys, background, metrics);
+                                 GuildAssetRuntime guildAssetRuntime,DataSource source) {
+        GuildRanks ranks = new GuildRanks(new RedissonGuildRankRedis(redis), redisKeys, background, metrics,source);
         GuildRanks.RebuildResult rebuilt = ranks.rebuild(sink -> store.scanGuildScores(
                 Deadline.after(RANK_REBUILD_SCAN_BUDGET_MS),
                 row -> sink.accept(new GuildRanks.RankRow(row.guildId(), row.zoneId(), row.score()))));
@@ -440,9 +440,9 @@ public class GuildConfiguration {
      */
     @Bean
     public GuildAccess guildAccess(GuildCache cache, PlayerProfiles profiles, GuildCacheInvalidator invalidator,
-                                   GuildMetrics metrics) {
-        return new GuildAccess(cache, new PlayerHomeZones(profiles::loadStrict,
-                Duration.ofMillis(GuildLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS)), MergeFence.NONE, invalidator, metrics);
+                                   GuildMetrics metrics,DataSource source) {
+        return new GuildAccess(cache, new PlayerHomeZones(source,
+                Duration.ofMillis(GuildLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS)), zone->{try(var connection=source.getConnection()){return com.game.common.player.PlayerRouteAuthority.fenced(connection,zone,3);}}, invalidator, metrics);
     }
 
     @Bean

@@ -109,6 +109,19 @@ final class RoomHarness {
     BattleTickets tickets = BattleTickets.ofUtf8(SECRET);
     FingerprintMode fingerprintMode = FingerprintMode.WARN;
     private BattleRoomServiceImpl service;
+    private final java.util.Map<String,com.game.proto.AddObserverRequest> observerIntents=new java.util.HashMap<>();
+
+    /** 旧房间行为用例也走正式原件；相同意图复用UUID与截止，不能在被测服务里补权。 */
+    com.game.proto.AddObserverResponse addObserver(com.game.proto.AddObserverRequest request){
+        String key=Long.toUnsignedString(request.getBattleId())+":"+Long.toUnsignedString(request.getObserverPlayerId());
+        var original=observerIntents.computeIfAbsent(key,k->request.toBuilder().setSpectatorOperationId(java.util.UUID.randomUUID().toString()).setAdmitBeforeMs(now()+30_000).setTargetInstanceId(INSTANCE).build());
+        var filled=request.toBuilder().setSpectatorOperationId(original.getSpectatorOperationId()).setAdmitBeforeMs(original.getAdmitBeforeMs()).setTargetInstanceId(INSTANCE).build();
+        return service().addObserver(filled);
+    }
+    com.game.proto.RemoveObserverResponse removeObserver(com.game.proto.RemoveObserverRequest request){
+        String key=Long.toUnsignedString(request.getBattleId())+":"+Long.toUnsignedString(request.getObserverPlayerId());var original=observerIntents.get(key);
+        return service().removeObserver(request.toBuilder().setSpectatorOperationId(original==null?java.util.UUID.randomUUID().toString():original.getSpectatorOperationId()).setAdmitBeforeMs(original==null?now()+30_000:original.getAdmitBeforeMs()).setTargetInstanceId(INSTANCE).build());
+    }
 
     final LobbyAnnouncer lobby = (playerId, contents) -> log.add(new Out(Kind.LOBBY, playerId, 0, List.copyOf(contents)));
     final SceneBattleEvents sceneEvents = (routing, playerId, battleId, deadlineMs) ->
@@ -232,7 +245,7 @@ final class RoomHarness {
     /** 模拟一次成功的握手：挂接（此时连接还不是 live）→ 置为已验证 → onDirectVerified（观众推 161）。 */
     FakeLink connect(long battleId, long playerId, eBattleTicketRole role) {
         FakeLink link = new FakeLink(playerId);
-        OptionalInt session = service().attachDirect(battleId, playerId, role, link);
+        OptionalInt session = role==eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER?service().attachDirect(com.game.proto.BattleTicketPayload.newBuilder().setBattleId(battleId).setPlayerId(playerId).setRole(role).setBattleInstanceId(INSTANCE).setSpectatorOperationId(service().room(battleId).observerOperations.get(playerId)).build(),link):service().attachDirect(battleId, playerId, role, link);
         assertThat(session).as("挂接应当成功").isPresent();
         link.live = true;
         service().onDirectVerified(battleId, playerId, role);

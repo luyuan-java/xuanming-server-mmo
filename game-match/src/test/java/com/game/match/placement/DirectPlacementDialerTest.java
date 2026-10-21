@@ -487,7 +487,7 @@ class DirectPlacementDialerTest {
         }
 
         @Override
-        public CompletableFuture<com.game.proto.Empty> removeObserver(com.game.proto.RemoveObserverRequest request) {
+        public CompletableFuture<com.game.proto.RemoveObserverResponse> removeObserver(com.game.proto.RemoveObserverRequest request) {
             return delegate.removeObserver(request);
         }
     }

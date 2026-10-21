@@ -1,0 +1,23 @@
+syntax = "proto3";
+package game.storage;
+option java_package = "com.game.player.store.state";
+option java_multiple_files = true;
+
+// SQL路由围栏正规私有原件。唯一DDL见common的db/game-route-authority-schema.sql；player.zone_id仍是唯一home事实。
+message RouteMetaRow {
+  uint32 id = 1;
+  string generation = 2;
+  uint32 writable = 3;
+  uint32 fence_shards = 4;
+}
+message ZoneMergeFenceRow {
+  uint32 zone_id = 1;
+  uint32 shard = 2;
+  // 空串才开放；非空原run未显式终结始终封锁，不按租约/TTL自行恢复。
+  string run_id = 3;
+  uint64 revision = 4;
+}
+// 源区退役标记，不承载任何玩家home映射。
+message ZoneMergedIntoRow {
+  uint32 zone_id=1; uint32 target_zone=2; string run_id=3; uint64 revision=4;
+}

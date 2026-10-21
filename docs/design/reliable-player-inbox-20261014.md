@@ -130,3 +130,11 @@ Java 后续优先级据此调整为：
 4. 在交出、排空及停机流程中明确安全收敛条件，结合 [scene-handoff-spec.md](../porting/scene-handoff-spec.md)、[scene-drain-spec.md](../porting/scene-drain-spec.md) 核对在途写、待发帧及结局探测均已收口，继续复用现有资产与结算通道。
 
 以上为设计待办与审查方向，不代表本次已经实现、编译或验收。
+
+## 2026-10-21 全球合区维护与角色首锁补充（源码，未运行验收）
+
+收件箱所有写路径统一按路由meta共享锁→完整zone围栏→角色P→流/条目/审计执行。入箱前的玩家存在预检仍用于快速拒绝，实际创建流、分配序号、Fetch、Ack、普通/强制作废、终态清理、通知CAS均在提交事务内重新锁P；角色不存在或trade_listing_id非零拒绝写。不能用原有通知autocommit更新跨过合区冻结。
+
+AuthorityJdbc的非snapshot事务统一先持meta共享锁，涵盖不带客户端actor的后台写。显式维护Freeze获取meta排他锁并将writable置0后，新的业务写必须拒绝；只读快照保持读取能力。InboxTables启动校验正式route结构和已显式初始化的meta，不补种、不自动解冻。唯一DDL为game-common资源db/game-route-authority-schema.sql，home仍是player.zone_id，不新增第二份玩家home。
+
+InboxRouteFenceTest覆盖通知CAS、全局冻结、任意片冻结/缺片、角色交易封存及删除后的写拒绝。默认H2仅为本地接口回归；正式真库必须显式传-Dinbox.it.tidb=127.0.0.1:4000 -Dinbox.it.require=1，并由本任务资源门禁先确认该TiDB归属。测试生成独占随机库、固定强读会话并验证TiDB版本，结束只删除自身库。缺真库配置不得把H2结果当真库通过。本轮尚未执行该测试或当前Java reactor构建。

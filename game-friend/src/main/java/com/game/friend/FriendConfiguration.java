@@ -2,6 +2,7 @@ package com.game.friend;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.common.token.DubboCallAuth;
+import com.game.common.RunMode;
 import com.game.common.id.LeaseGatedSnowflake;
 import com.game.common.id.Snowflake;
 import com.game.discovery.NodeIdLease;
@@ -67,9 +68,12 @@ public class FriendConfiguration {
 
     /** 静态工厂避免为创建早期池策略而提前初始化整个业务装配类。 */
     @Bean
+    static FriendConnectionPolicy friendConnectionPolicy(Environment environment) {
+        return friendConnectionPolicy(environment,environment.getProperty("game.friend.require-tidb",Boolean.class,false));
+    }
     static FriendConnectionPolicy friendConnectionPolicy(Environment environment,
-            @Value("${game.friend.require-tidb:false}") boolean requireTiDb) {
-        if (environment.acceptsProfiles(Profiles.of("prod")) && !requireTiDb) {
+            boolean requireTiDb) {
+        if ((environment.acceptsProfiles(Profiles.of("prod"))||RunMode.parse(environment.getProperty("game.run-mode","prod"))==RunMode.PROD) && !requireTiDb) {
             throw new IllegalStateException("生产好友服务不得关闭 TiDB 权威门禁");
         }
         return new FriendConnectionPolicy(requireTiDb);

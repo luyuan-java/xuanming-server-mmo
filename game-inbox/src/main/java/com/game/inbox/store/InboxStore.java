@@ -11,6 +11,9 @@ import static com.game.inbox.store.InboxSql.u32;
 import static com.game.inbox.store.InboxSql.u64;
 
 import com.game.common.deadline.Deadline;
+import com.game.common.player.SceneAdmissionAuthority;
+import com.game.api.inbox.InboxCallContract;
+import com.game.discovery.serviceauth.ServiceCallSignatures;
 import com.game.discovery.sql.AuthorityJdbc;
 import com.game.discovery.sql.AuthorityJdbc.Session;
 import com.game.inbox.gate.ConsumerGate;
@@ -64,7 +67,7 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>所有事务都是 READ COMMITTED，经 {@link AuthorityJdbc#tx}（1213 / 1205 / 9007 有界重试，提交阶段的失败不重做）；
  *       事务体可能被重跑，必须可重跑——一律把结果作为返回值，不往外层变量里写；</li>
- *   <li>锁顺序固定：流行（主键 FOR UPDATE）→ 条目行（只按主键，seq 升序）→ 审计行插入。条目行一律先普通读、再按主键条件写，不做二级索引上的加锁读；</li>
+ *   <li>锁顺序固定：路由meta→完整zone围栏→角色P→流行（主键 FOR UPDATE）→ 条目行（只按主键，seq 升序）→ 审计行插入。条目行一律先普通读、再按主键条件写，不做二级索引上的加锁读；</li>
  *   <li>每个事务只碰一个 (player, domain)；同一条流内天然串行，不同流之间不存在环；</li>
  *   <li>读玩家表（R）、写前门禁、在线提醒都在事务外进行，不在持有行锁时等它们。</li>
  * </ul>
@@ -88,6 +91,8 @@ public final class InboxStore {
      */
     public record EnqueueParams(long playerId, PlayerInboxMessageType type, PlayerInboxProducerKind producer, long requestId,
                                 long issuedAtMs, byte[] payload, String operator, String note, Audit audit) {
+        public EnqueueParams { payload=payload==null?null:payload.clone(); }
+        @Override public byte[] payload(){return payload==null?null:payload.clone();}
     }
 
     /**
@@ -120,13 +125,14 @@ public final class InboxStore {
     private final Notifier notifier;
     private final InboxMetrics metrics;
     private final LongSupplier nowMs;
+    private final ServiceCallSignatures signatures;
 
     /**
      * @param allowed 入箱白名单（{@code game.inbox.enqueue-types} 解析后的结果；空 = 全部停用）
      * @param nowMs   墙钟（Unix 毫秒；seq 的时间下界、签发窗、行的时间列）
      */
     public InboxStore(AuthorityJdbc jdbc, InboxRegistry registry, Set<PlayerInboxMessageType> allowed, PlayerDirectory players,
-                      ConsumerGate gate, Notifier notifier, InboxMetrics metrics, LongSupplier nowMs) {
+                      ConsumerGate gate, Notifier notifier, InboxMetrics metrics, LongSupplier nowMs, ServiceCallSignatures signatures) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
         this.registry = Objects.requireNonNull(registry, "registry");
         registry.checkAllowlist(allowed);
@@ -136,6 +142,7 @@ public final class InboxStore {
         this.notifier = Objects.requireNonNull(notifier, "notifier");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.nowMs = Objects.requireNonNull(nowMs, "nowMs");
+        this.signatures = Objects.requireNonNull(signatures, "signatures");
     }
 
     public InboxRegistry registry() {
@@ -194,11 +201,6 @@ public final class InboxStore {
         PlayerInboxDomainSpec spec = registry.domain(domain)
                 .orElseThrow(() -> new IllegalStateException("类型 " + p.type() + " 的域 " + domain + " 没有域规格"));
 
-        // 2. 玩家存在校验
-        if (players.ownerEpoch(budget, p.playerId()).isEmpty()) {
-            return EnqueueResult.reject(InboxTips.PLAYER_NOT_FOUND);
-        }
-
         // 3. shard 与内容摘要
         int shard = InboxShards.rowShard(p.playerId());
         byte[] digest = InboxRules.contentSha256(p.type(), p.issuedAtMs(), p.payload());
@@ -207,6 +209,10 @@ public final class InboxStore {
         player_inbox_item_row existing = jdbc.read(budget, s -> readItemByRequest(s, shard, p.playerId(), p.producer(), p.requestId()));
         if (existing != null) {
             return resultForExisting(existing, digest);
+        }
+        // 永久原收据优先于当前目录存在性；删除后的旧UUID也不能变成一次新业务。
+        if (players.ownerEpoch(budget, p.playerId()).isEmpty()) {
+            return EnqueueResult.reject(InboxTips.PLAYER_NOT_FOUND);
         }
 
         // 5. 签发窗
@@ -231,7 +237,10 @@ public final class InboxStore {
         // 8. 主事务
         EnqueueResult result;
         try {
-            result = jdbc.tx(budget, s -> enqueueLocked(s, shard, domain, spec, digest, p));
+            result = jdbc.tx(budget, s -> {
+                InboxSql.Owner owner = InboxSql.lockPlayer(s, budget, p.playerId());
+                return enqueueLocked(s, shard, domain, spec, digest, p, owner);
+            });
         } catch (UniqueRace race) {
             player_inbox_item_row raced = jdbc.read(budget, s -> readItemByRequest(s, shard, p.playerId(), p.producer(), p.requestId()));
             if (raced == null) {
@@ -261,7 +270,7 @@ public final class InboxStore {
     }
 
     private EnqueueResult enqueueLocked(Session s, int shard, PlayerInboxDomain domain, PlayerInboxDomainSpec spec, byte[] digest,
-                                        EnqueueParams p) throws SQLException {
+                                        EnqueueParams p, InboxSql.Owner owner) throws SQLException {
         player_inbox_stream stream = lockStream(s, shard, p.playerId(), domain);
         if (stream == null) {
             throw new SQLException("流行在补建之后消失 player=" + Long.toUnsignedString(p.playerId()) + " domain=" + domain.getNumber());
@@ -271,6 +280,7 @@ public final class InboxStore {
         if (existing != null) {
             return resultForExisting(existing, digest);
         }
+        requireOpenOwners(s, shard, p.playerId(), owner);
         if (Integer.compareUnsigned(stream.getOpenCount(), spec.getMaxPending()) >= 0) {
             return EnqueueResult.reject(InboxTips.FULL);
         }
@@ -278,12 +288,12 @@ public final class InboxStore {
         long now = nowMs.getAsLong();
         long seq = InboxRules.nextSeq(stream.getNextSeq(), now);
         try {
-            s.update("INSERT INTO " + ITEM_TABLE + " (" + ITEM_COLUMNS + ") VALUES (" + InboxSql.placeholders(23) + ")",
+            s.update("INSERT INTO " + ITEM_TABLE + " (" + ITEM_COLUMNS + ") VALUES (" + InboxSql.placeholders(25) + ")",
                     shard, u64(p.playerId()), u32(domain.getNumber()), u64(seq), u32(p.type().getNumber()), u32(p.producer().getNumber()),
                     u64(p.requestId()), digest, p.payload(), PENDING, PlayerInboxDirective.PLAYER_INBOX_DIRECTIVE_NONE_VALUE,
                     PlayerInboxVoidReason.PLAYER_INBOX_VOID_UNSPECIFIED_VALUE, 0, u64(0), u64(0), 0,
                     PlayerInboxFinalizer.PLAYER_INBOX_FINALIZER_UNSPECIFIED_VALUE, u64(0), u64(p.issuedAtMs()), u64(now), u64(now),
-                    p.operator(), p.note() == null ? "" : p.note());
+                    p.operator(), p.note() == null ? "" : p.note(), owner.account(), u64(owner.revision()));
         } catch (SQLException e) {
             if (InboxSql.duplicateKey(e)) {
                 throw new UniqueRace();
@@ -305,7 +315,9 @@ public final class InboxStore {
         return new EnqueueResult(0, seq, true, PlayerInboxItemState.PLAYER_INBOX_ITEM_PENDING);
     }
 
-    private static EnqueueResult resultForExisting(player_inbox_item_row row, byte[] digest) {
+    private static EnqueueResult resultForExisting(player_inbox_item_row row, byte[] digest) throws SQLException {
+        if (row.getState() != PENDING && !InboxRules.terminal(row.getState()))
+            throw new SQLException("收件箱原收据状态未知，不能伪装重复成功");
         if (InboxRules.sameContent(row.getContentSha256(), digest)) {
             return new EnqueueResult(0, row.getSeq(), false, InboxRules.stateOf(row.getState()));
         }
@@ -353,8 +365,11 @@ public final class InboxStore {
         if (existing != null) {
             return;
         }
-        jdbc.tx(budget, s -> s.update("INSERT IGNORE INTO " + STREAM_TABLE + " (" + STREAM_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?)",
-                shard, u64(playerId), u32(domain.getNumber()), u64(1), u64(0), 0, u64(0), u64(now), u64(now)));
+        jdbc.tx(budget, s -> {
+            InboxSql.lockPlayer(s, budget, playerId);
+            return s.update("INSERT IGNORE INTO " + STREAM_TABLE + " (" + STREAM_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?)",
+                shard, u64(playerId), u32(domain.getNumber()), u64(1), u64(0), 0, u64(0), u64(now), u64(now));
+        });
     }
 
     // ================================================================ Fetch（设计 §7.8）
@@ -362,9 +377,8 @@ public final class InboxStore {
     /**
      * 按 seq 升序拉 PENDING 条目并推进围栏：
      * <ol start="0">
-     *   <li>快路径（不加锁）：普通读流行。不存在 → NO_STREAM（绝大多数玩家）；open_count = 0 且没有 CursorAhead → 按快照算围栏结局、直接返回空，
-     *       <b>不写任何东西</b>（围栏保护的是投递与确认，两者都走加锁路径；僵尸 scene 即使拿到条目，存盘也会被玩家表的 owner_epoch 围栏拒绝）；</li>
-     *   <li>否则开事务，流行 FOR UPDATE，判围栏；STALE / EPOCH_REQUIRED / EPOCH_AHEAD 不写直接返回；</li>
+     *   <li>核scene完整请求签名，事务先持路由/P，重核SQL完整原准入与所有未终局条目原owner；空流和无流同样核验；</li>
+     *   <li>流行 FOR UPDATE，判围栏；STALE / EPOCH_REQUIRED / EPOCH_AHEAD 不写直接返回；</li>
      *   <li>CursorAhead：consumer_decided_through ≥ next_seq → 告警并 next_seq = 水位 + 1，照常投递；</li>
      *   <li>普通读 PENDING 行：主键范围扫描、seq 升序、LIMIT max + 1；</li>
      *   <li>每一行按主键条件写 delivery_count + 1、last_delivered_epoch、last_delivered_ms（条件 state = PENDING）；</li>
@@ -374,6 +388,8 @@ public final class InboxStore {
      * @param peer 调用方地址（只进日志）
      */
     public FetchPlayerInboxResponse fetch(Deadline budget, FetchPlayerInboxRequest req, String peer) throws SQLException {
+        if (!InboxCallContract.CALLER.equals(signatures.verify(InboxCallContract.FETCH, req)))
+            throw new SecurityException("收件箱消费调用方无权访问");
         FetchPlayerInboxResponse.Builder resp = FetchPlayerInboxResponse.newBuilder()
                 .setPlayerId(req.getPlayerId()).setDomainValue(req.getDomainValue()).setCorrelationId(req.getCorrelationId());
         PlayerInboxDomain domain = req.getDomain();
@@ -389,29 +405,19 @@ public final class InboxStore {
             metrics.fetch(domainLabel, FenceRules.label(verdict), "fast");
             return resp.setFence(verdict).setErrorMessage(tip(InboxTips.EPOCH_REQUIRED)).build();
         }
-        int shard = InboxShards.rowShard(playerId);
-        player_inbox_stream snapshot = jdbc.read(budget, s -> readStream(s, shard, playerId, domain.getNumber()));
-        if (snapshot == null) {
-            metrics.fetch(domainLabel, FenceRules.label(PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM), "fast");
-            return resp.setFence(PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM).build();
-        }
-        boolean boundRead = FenceRules.needsEpochBound(reqEpoch, snapshot.getFenceEpoch());
-        long r = boundRead ? epochBound(budget, playerId) : 0;
+        if (!req.hasAdmission() || req.getAdmission().getPlayerId() != playerId || req.getAdmission().getOwnerEpoch() != reqEpoch)
+            throw new SecurityException("收件箱请求与原入场身份不一致");
         long decidedThrough = req.getConsumerDecidedThrough();
-        if (snapshot.getOpenCount() == 0 && !InboxRules.cursorAhead(snapshot.getNextSeq(), decidedThrough)) {
-            PlayerInboxFenceVerdict verdict = FenceRules.decide(reqEpoch, snapshot.getFenceEpoch(), r);
-            resp.setFence(verdict);
-            if (!FenceRules.allows(verdict)) {
-                resp.setErrorMessage(tip(FenceRules.rejectTip(verdict)));
-                reportFenceReject(budget, "Fetch", verdict, playerId, domain, reqEpoch, snapshot.getFenceEpoch(), req.getSceneNodeId(), peer);
-            }
-            metrics.fetch(domainLabel, FenceRules.label(verdict), "fast");
-            return resp.build();
-        }
-
+        int shard = InboxShards.rowShard(playerId);
         int maxItems = InboxRules.clampItems(req.getMaxItems(), InboxRules.FETCH_DEFAULT_ITEMS, InboxRules.FETCH_MAX_ITEMS);
-        FetchLocked locked = jdbc.tx(budget, s -> fetchLocked(s, shard, playerId, domain, reqEpoch, r, boundRead, decidedThrough, maxItems));
+        FetchLocked locked = jdbc.tx(budget, s -> {
+            InboxSql.Owner owner = InboxSql.lockPlayer(s, budget, playerId);
+            SceneAdmissionAuthority.require(s.connection(), req.getAdmission(), budget);
+            requireOpenOwners(s, shard, playerId, owner);
+            return fetchLocked(s, shard, playerId, domain, reqEpoch, owner.epoch(), decidedThrough, maxItems);
+        });
         resp.setFence(locked.verdict());
+        if (locked.verdict() == PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM) return resp.build();
         if (!FenceRules.allows(locked.verdict())) {
             resp.setErrorMessage(tip(FenceRules.rejectTip(locked.verdict())));
             reportFenceReject(budget, "Fetch", locked.verdict(), playerId, domain, reqEpoch, locked.lockedFence(), req.getSceneNodeId(), peer);
@@ -420,12 +426,8 @@ public final class InboxStore {
         }
         resp.addAllItems(locked.items()).setHasMore(locked.hasMore());
         metrics.fetch(domainLabel, FenceRules.label(locked.verdict()), "locked");
-        try {
-            // 扫描行数在提交之后单独数（只读、不持锁）；失败只少一个样本，不影响本次投递
-            metrics.fetchScannedRows(countScannedRows(budget, shard, playerId, domain, locked.scanBound(), locked.scanWhole()));
-        } catch (SQLException e) {
-            log.debug("[PlayerInbox] fetch_scanned_rows 样本跳过 player={}: {}", Long.toUnsignedString(playerId), e.toString());
-        }
+        // 终态永久保留后不能为指标COUNT全历史；只记录本次有限查询实际读回的候选数。
+        metrics.fetchScannedRows(locked.items().size()+(locked.hasMore()?1:0));
         if (locked.cursorAhead()) {
             metrics.cursorAhead();
             log.error("[PlayerInbox] CursorAhead player={} domain={} consumer_decided_through={} 已把 next_seq 抬到 {}："
@@ -444,25 +446,20 @@ public final class InboxStore {
     }
 
     private record FetchLocked(PlayerInboxFenceVerdict verdict, long lockedFence, List<PlayerInboxItem> items, boolean hasMore,
-                               boolean cursorAhead, long raisedTo, long scanBound, boolean scanWhole) {
+                               boolean cursorAhead, long raisedTo) {
 
         static FetchLocked rejected(PlayerInboxFenceVerdict verdict, long lockedFence) {
-            return new FetchLocked(verdict, lockedFence, List.of(), false, false, 0, 0, false);
+            return new FetchLocked(verdict, lockedFence, List.of(), false, false, 0);
         }
     }
 
-    private FetchLocked fetchLocked(Session s, int shard, long playerId, PlayerInboxDomain domain, long reqEpoch, long r, boolean boundRead,
+    private FetchLocked fetchLocked(Session s, int shard, long playerId, PlayerInboxDomain domain, long reqEpoch, long r,
                                     long decidedThrough, int maxItems) throws SQLException {
         player_inbox_stream stream = lockStream(s, shard, playerId, domain);
         if (stream == null) {
-            // 流行永不删除：快照看得见、锁内看不见只可能是库被动过
-            throw new SQLException("流行在快照之后消失 player=" + Long.toUnsignedString(playerId));
+            return FetchLocked.rejected(PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM, 0);
         }
         long lockedFence = stream.getFenceEpoch();
-        if (FenceRules.needsEpochBound(reqEpoch, lockedFence) && !boundRead) {
-            // fence 只升不降：锁内比快照小只可能是缺陷或库被动过；不在没有上界的情况下推进围栏
-            throw new SQLException("流行的 fence_epoch 在快照与加锁之间变小了 player=" + Long.toUnsignedString(playerId));
-        }
         PlayerInboxFenceVerdict verdict = FenceRules.decide(reqEpoch, lockedFence, r);
         if (!FenceRules.allows(verdict)) {
             return FetchLocked.rejected(verdict, lockedFence);
@@ -473,9 +470,6 @@ public final class InboxStore {
         List<player_inbox_item_row> pending = s.list("SELECT " + ITEM_COLUMNS + " FROM " + ITEM_TABLE
                         + " WHERE `shard` = ? AND `player_id` = ? AND `domain` = ? AND `state` = ? ORDER BY `seq` ASC LIMIT ?",
                 InboxSql::item, shard, u64(playerId), u32(domain.getNumber()), PENDING, maxItems + 1);
-        // 锁路径扫描实际走过的主键范围：读满 LIMIT 时停在最后读出那一行，没读满说明整条流都走过了
-        boolean scanWhole = pending.size() < maxItems + 1;
-        long scanBound = scanWhole ? 0 : pending.get(pending.size() - 1).getSeq();
         boolean hasMore = pending.size() > maxItems;
         if (hasMore) {
             pending = pending.subList(0, maxItems);
@@ -492,16 +486,7 @@ public final class InboxStore {
             requireOne(s.update("UPDATE " + STREAM_TABLE + " SET `fence_epoch` = ?, `next_seq` = ?, `updated_ms` = ? WHERE " + STREAM_PK,
                     u64(fence), u64(nextSeq), u64(now), shard, u64(playerId), u32(domain.getNumber())), "写围栏");
         }
-        return new FetchLocked(verdict, lockedFence, items, hasMore, cursorAhead, nextSeq, scanBound, scanWhole);
-    }
-
-    private long countScannedRows(Deadline budget, int shard, long playerId, PlayerInboxDomain domain, long bound, boolean whole)
-            throws SQLException {
-        String sql = "SELECT COUNT(*) FROM " + ITEM_TABLE + " WHERE `shard` = ? AND `player_id` = ? AND `domain` = ?";
-        if (whole) {
-            return jdbc.read(budget, s -> s.count(sql, shard, u64(playerId), u32(domain.getNumber())));
-        }
-        return jdbc.read(budget, s -> s.count(sql + " AND `seq` <= ?", shard, u64(playerId), u32(domain.getNumber()), u64(bound)));
+        return new FetchLocked(verdict, lockedFence, items, hasMore, cursorAhead, nextSeq);
     }
 
     // ================================================================ Ack（设计 §7.7、§7.8）
@@ -511,6 +496,8 @@ public final class InboxStore {
      * 最后写回 open_count、需要时写回 fence_epoch。没有流就不可能有投递过的条目：逐条回 UNKNOWN_SEQ（协议异常，消费方停用并告警）。
      */
     public AckPlayerInboxResponse ack(Deadline budget, AckPlayerInboxRequest req, String peer) throws SQLException {
+        if (!InboxCallContract.CALLER.equals(signatures.verify(InboxCallContract.ACK, req)))
+            throw new SecurityException("收件箱消费调用方无权访问");
         AckPlayerInboxResponse.Builder resp = AckPlayerInboxResponse.newBuilder()
                 .setPlayerId(req.getPlayerId()).setDomainValue(req.getDomainValue()).setCorrelationId(req.getCorrelationId());
         PlayerInboxDomain domain = req.getDomain();
@@ -526,21 +513,18 @@ public final class InboxStore {
             metrics.ack(domainLabel, FenceRules.label(verdict));
             return resp.setFence(verdict).setErrorMessage(tip(InboxTips.EPOCH_REQUIRED)).build();
         }
+        if (!req.hasAdmission() || req.getAdmission().getPlayerId() != playerId || req.getAdmission().getOwnerEpoch() != reqEpoch)
+            throw new SecurityException("收件箱请求与原入场身份不一致");
         int shard = InboxShards.rowShard(playerId);
-        player_inbox_stream snapshot = jdbc.read(budget, s -> readStream(s, shard, playerId, domain.getNumber()));
-        if (snapshot == null) {
-            resp.setFence(PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM);
-            for (PlayerInboxDecisionReport report : req.getDecisionsList()) {
-                resp.addResults(PlayerInboxAckItem.newBuilder().setSeq(report.getSeq())
-                        .setResult(com.game.proto.player_inbox.PlayerInboxAckResult.PLAYER_INBOX_ACK_UNKNOWN_SEQ));
-            }
-            reportAckResults(playerId, domain, req, resp.getResultsList(), peer);
-            return resp.build();
-        }
-        boolean boundRead = FenceRules.needsEpochBound(reqEpoch, snapshot.getFenceEpoch());
-        long r = boundRead ? epochBound(budget, playerId) : 0;
-        AckLocked locked = jdbc.tx(budget, s -> ackLocked(s, shard, playerId, domain, req, reqEpoch, r, boundRead));
+        AckLocked locked = jdbc.tx(budget, s -> {
+            InboxSql.Owner owner = InboxSql.lockPlayer(s, budget, playerId);
+            SceneAdmissionAuthority.require(s.connection(), req.getAdmission(), budget);
+            requireOpenOwners(s, shard, playerId, owner);
+            return ackLocked(s, shard, playerId, domain, req, reqEpoch, owner.epoch());
+        });
         resp.setFence(locked.verdict());
+        if (locked.verdict() == PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM)
+            return resp.addAllResults(locked.results()).build();
         if (!FenceRules.allows(locked.verdict())) {
             resp.setErrorMessage(tip(FenceRules.rejectTip(locked.verdict())));
             reportFenceReject(budget, "Ack", locked.verdict(), playerId, domain, reqEpoch, locked.lockedFence(), req.getSceneNodeId(), peer);
@@ -556,15 +540,14 @@ public final class InboxStore {
     }
 
     private AckLocked ackLocked(Session s, int shard, long playerId, PlayerInboxDomain domain, AckPlayerInboxRequest req, long reqEpoch,
-                                long r, boolean boundRead) throws SQLException {
+                                long r) throws SQLException {
         player_inbox_stream stream = lockStream(s, shard, playerId, domain);
         if (stream == null) {
-            throw new SQLException("流行在快照之后消失 player=" + Long.toUnsignedString(playerId));
+            List<PlayerInboxAckItem> absent = req.getDecisionsList().stream().map(report -> PlayerInboxAckItem.newBuilder()
+                    .setSeq(report.getSeq()).setResult(com.game.proto.player_inbox.PlayerInboxAckResult.PLAYER_INBOX_ACK_UNKNOWN_SEQ).build()).toList();
+            return new AckLocked(PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_NO_STREAM, 0, absent);
         }
         long lockedFence = stream.getFenceEpoch();
-        if (FenceRules.needsEpochBound(reqEpoch, lockedFence) && !boundRead) {
-            throw new SQLException("流行的 fence_epoch 在快照与加锁之间变小了 player=" + Long.toUnsignedString(playerId));
-        }
         PlayerInboxFenceVerdict verdict = FenceRules.decide(reqEpoch, lockedFence, r);
         if (!FenceRules.allows(verdict)) {
             return new AckLocked(verdict, lockedFence, List.of());
@@ -687,6 +670,18 @@ public final class InboxStore {
                 u64(seq));
     }
 
+    /** 多读一项即可发现损坏计数，未知状态也不能被PENDING筛选静默漏掉；上限取正规域注册表。 */
+    private void requireOpenOwners(Session s, int shard, long playerId, InboxSql.Owner owner) throws SQLException {
+        int maximum = 0;
+        for (PlayerInboxDomain registered : registry.domains()) maximum = Math.addExact(maximum, registry.domain(registered).orElseThrow().getMaxPending());
+        List<player_inbox_item_row> open = s.list("SELECT " + ITEM_COLUMNS + " FROM " + ITEM_TABLE
+                + " WHERE `shard`=? AND `player_id`=? AND (`state` IS NULL OR `state` NOT IN " + InboxSql.TERMINAL_STATES + ") LIMIT ?",
+                InboxSql::item, shard, u64(playerId), Math.addExact(maximum, 1));
+        if (open.size() > maximum) throw new SQLException("收件箱未终局行超过注册域上限，拒绝继续");
+        for (player_inbox_item_row row : open) InboxSql.requireOriginalOwner(row, owner);
+    }
+
+
     private static Map<Long, player_inbox_item_row> readItemsBySeq(Session s, int shard, long playerId, PlayerInboxDomain domain,
                                                                   List<PlayerInboxDecisionReport> reports) throws SQLException {
         List<Object> args = new ArrayList<>(3 + reports.size());
@@ -723,8 +718,11 @@ public final class InboxStore {
     static boolean clearNotifyDue(Deadline budget, AuthorityJdbc jdbc, long playerId, PlayerInboxDomain domain, long expectNextSeq)
             throws SQLException {
         int shard = InboxShards.rowShard(playerId);
-        return jdbc.read(budget, s -> s.update("UPDATE " + STREAM_TABLE + " SET `notify_due_ms` = 0 WHERE " + STREAM_PK
-                + " AND `next_seq` = ? AND `notify_due_ms` <> 0", shard, u64(playerId), u32(domain.getNumber()), u64(expectNextSeq))) == 1;
+        return jdbc.tx(budget, s -> {
+            InboxSql.lockPlayer(s, budget, playerId);
+            return s.update("UPDATE " + STREAM_TABLE + " SET `notify_due_ms` = 0 WHERE " + STREAM_PK
+                + " AND `next_seq` = ? AND `notify_due_ms` <> 0", shard, u64(playerId), u32(domain.getNumber()), u64(expectNextSeq));
+        }) == 1;
     }
 
     /** 所有条件写都在流行锁下：命中数不对只可能是缺陷或数据已矛盾，抛出让整个事务回滚（fail-closed）。 */

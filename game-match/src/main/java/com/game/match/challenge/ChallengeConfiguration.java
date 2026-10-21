@@ -46,7 +46,13 @@ public class ChallengeConfiguration {
     @Bean(name="challengeService")
     public ChallengeService configuredChallengeService(PlayerStatusReader players,ChallengeStore store,MatchIds ids,PlayerPusher pusher,GatherLauncher gather,
             MatchMetrics metrics,MatchPushExecutor executor,MatchProperties props,MessageIdRegistry registry,
-            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){return challengeService(players,store,ids,pusher,gather,metrics,executor,props,registry).withGlobal(global.getIfAvailable());}
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,javax.sql.DataSource dataSource){
+        com.game.common.player.PlayerProfiles.ConnectionSource connections=dataSource instanceof com.alibaba.druid.pool.DruidDataSource pool?pool::getConnection:wait->dataSource.getConnection();
+        var profiles=new com.game.common.player.PlayerProfiles(connections,1);
+        return challengeService(players,store,ids,pusher,gather,metrics,executor,props,registry).withGlobal(global.getIfAvailable()).withPublicNames((player,deadline)->{
+            var profile=profiles.load(java.util.List.of(player),deadline).get(player);return profile==null?"":profile.name();
+        });
+    }
 
     /** 152 ChallengePlayer。 */
     @Bean

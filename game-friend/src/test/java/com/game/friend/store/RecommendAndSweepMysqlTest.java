@@ -62,6 +62,12 @@ class RecommendAndSweepMysqlTest {
         db.register(FriendBlockRow.getDefaultInstance());
         try (Connection c = dataSource.getConnection()) {
             db.syncAll(c);
+            try (Statement st = c.createStatement()) {
+                st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL,"
+                        + " owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            }
+            new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
+            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1));
         }
     }
 
@@ -78,7 +84,7 @@ class RecommendAndSweepMysqlTest {
 
     @BeforeEach
     void truncate() throws SQLException {
-        for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block")) {
+        for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block", "player")) {
             exec("TRUNCATE TABLE " + table);
         }
     }
@@ -96,6 +102,27 @@ class RecommendAndSweepMysqlTest {
     }
 
     // ================================================================ 推荐
+
+    @Test
+    void 推荐与在线目录原件校验_过户_ABA_冻结_持久化修订越界均拒绝() throws SQLException {
+        exec("INSERT INTO player(player_id,account,owner_revision) VALUES (1,'original',7)");
+        edge(1, 10);
+        edge(10, 20);
+        RecommendSource original = recommend(0).forActor(1, "original", 7);
+        assertThat(original.mutual(1, List.of(1L), 10, d())).extracting(Candidate::playerId).containsExactly(20L);
+        original.authorize(d());
+        for (String changed : List.of("account='next',owner_revision=8", "account='original',owner_revision=9",
+                "account='original',owner_revision=7,trade_listing_id=81",
+                "account='original',owner_revision=18446744073709551615,trade_listing_id=0")) {
+            exec("UPDATE player SET " + changed + " WHERE player_id=1");
+            assertThatThrownBy(() -> original.mutual(1, List.of(1L), 10, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.random(1, List.of(1L), 10, d())).isInstanceOf(SecurityException.class);
+            assertThatThrownBy(() -> original.authorize(d())).isInstanceOf(SecurityException.class);
+        }
+        exec("UPDATE player SET account='original',owner_revision=9,trade_listing_id=0 WHERE player_id=1");
+        assertThat(recommend(0).forActor(1, "original", 9).mutual(1, List.of(1L), 10, d()))
+                .extracting(Candidate::playerId).containsExactly(20L);
+    }
 
     @Test
     void 共同好友_按共同数降序_排除五类关系与exclude() throws SQLException {

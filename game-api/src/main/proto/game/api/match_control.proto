@@ -71,6 +71,7 @@ enum TeamTicketsStatus {
   // 参数不合法（名单空 / 超 5 人 / 含 0 / 重复 / 有人缺票号）。这几种都不是哪名成员的问题，所以不回 FAILED
   // （那会让客户端看到 4026[队长]）。game-team 按结果不明处理（先 releaseTeamTickets，回 4030）。failed_player_id = 0。
   TEAM_TICKETS_EXPIRED = 3;
+  TEAM_TICKETS_QUEUED = 4; // 完整不足员单位已持久排队；调用方不能运行direct gather。
 }
 
 message TeamTicketsRequest {
@@ -85,6 +86,9 @@ message TeamTicketsRequest {
   string request_id = 6;
   uint64 initiator_player_id = 7;
   bytes client_request = 8; // 原 StartTeamMatchRequest；SQL 意图保存并逐字节核对。
+  string owner_account = 9;
+  uint64 owner_revision = 10;
+  bytes launch_original = 11; // 共享TeamLaunchOriginal完整原件；与team_launch同事务持久原字节核对。
 }
 
 message TeamTicketsReply {
@@ -97,6 +101,8 @@ message TeamMatchIntentQuery {
   uint64 player_id = 1;
   string request_id = 2;
   bytes client_request = 3; // Start重试时核对原载荷；单纯查询可留空。
+  string owner_account = 4;
+  uint64 owner_revision = 5;
 }
 
 // ---- releaseTeamTickets：建票回包丢失时的补偿（幂等）----

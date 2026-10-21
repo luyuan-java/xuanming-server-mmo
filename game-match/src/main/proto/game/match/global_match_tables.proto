@@ -10,6 +10,8 @@ message GlobalProbeProfile {
   string plan_id = 1;
   string session_binding = 2;
   repeated bytes receipt_payloads = 3;
+  string owner_account = 4;
+  uint64 owner_revision = 5;
 }
 message GlobalProfileRow {
   option (proto2mysql.table_name) = "match_global_profile";
@@ -21,14 +23,14 @@ message GlobalProfileRow {
 message GlobalTicketRow {
   option (proto2mysql.table_name) = "match_global_ticket";
   option (proto2mysql.primary_key) = "player_id";
-  option (proto2mysql.index) = "state,mode,config_id,team_size,enqueued_ms;formation_id";
+  option (proto2mysql.index) = "state,mode,config_id,team_size,enqueued_ms;formation_id;state,enqueued_ms,player_id";
   uint64 player_id = 1;
   string ticket = 2;
   string request_id = 3;
   uint32 mode = 4;
   uint32 config_id = 5;
   uint32 team_size = 6;
-  // 1 排队；2 已成组（不自动过期）；3 已建房；4 已终止。
+  // 0 原参战准入待观战退出（非空票占用）；1 排队；2 已成组（不自动过期）；3 已建房；4 已终止。
   uint32 state = 7;
   uint64 enqueued_ms = 8;
   uint64 not_before_ms = 9;
@@ -39,6 +41,135 @@ message GlobalTicketRow {
   uint64 expires_ms = 14;
   uint32 selected_region = 15;
   uint64 team_id = 16;
+  uint32 preferred_region = 17;
+  string owner_account = 18;
+  uint64 owner_revision = 19;
+  string queue_unit_id = 20; // PVE整队/单排的不可拆分匹配单位。
+}
+message GlobalQueueUnitRow {
+  option (proto2mysql.table_name) = "match_global_queue_unit";
+  option (proto2mysql.primary_key) = "unit_id";
+  option (proto2mysql.index) = "state,enqueued_ms,unit_id;team_id";
+  string unit_id = 1;
+  uint32 state = 2; // 1排队、2已成组、3已建房、4终止；终止原件永久保留。
+  uint32 mode = 3;
+  uint32 config_id = 4;
+  uint32 target_size = 5;
+  uint32 member_count = 6;
+  uint64 enqueued_ms = 7;
+  uint64 not_before_ms = 8;
+  uint64 expires_ms = 9;
+  uint32 preferred_region = 10; // 仅全员首选同区时非零。
+  repeated GlobalTicketRow original_tickets = 11;
+  bytes launch_original = 12;
+  uint64 team_id = 13;
+  uint64 battle_id = 14;
+  bytes profile_digest = 15;
+  uint32 home_zone = 16; // 真实player.zone_id全员相同才非零，绝非当前位置副本。
+}
+message GlobalQueueUnitRegionRow {
+  option (proto2mysql.table_name) = "match_global_queue_unit_region";
+  option (proto2mysql.primary_key) = "unit_id,region";
+  option (proto2mysql.index) = "region,mode,config_id,target_size,member_count,home_zone,preferred_region,enqueued_ms,unit_id;region,mode,config_id,target_size,member_count,home_zone,enqueued_ms,unit_id;region,mode,config_id,target_size,member_count,preferred_region,enqueued_ms,unit_id;region,mode,config_id,target_size,member_count,enqueued_ms,unit_id;expires_ms";
+  string unit_id = 1;
+  uint32 region = 2;
+  uint32 mode = 3;
+  uint32 config_id = 4;
+  uint32 target_size = 5;
+  uint32 member_count = 6;
+  uint32 preferred_region = 7;
+  uint64 enqueued_ms = 8;
+  uint64 not_before_ms = 9;
+  uint64 expires_ms = 10;
+  uint32 max_rtt_ms = 11;
+  bytes profile_digest = 12;
+  uint32 home_zone = 13;
+}
+// 可从原票回执重建。所有参与授权的查询必须JOIN原票校验，不能单独信任投影。
+message GlobalTicketRegionRow {
+  option (proto2mysql.table_name) = "match_global_ticket_region";
+  option (proto2mysql.primary_key) = "player_id,physical_region";
+  option (proto2mysql.index) = "physical_region,mode,config_id,team_size,preferred_region,enqueued_ms,player_id;physical_region,mode,config_id,team_size,enqueued_ms,player_id;expires_ms";
+  uint64 player_id = 1;
+  uint32 physical_region = 2;
+  string ticket = 3;
+  uint32 mode = 4;
+  uint32 config_id = 5;
+  uint32 team_size = 6;
+  uint32 preferred_region = 7;
+  uint64 enqueued_ms = 8;
+  int64 rating_centi = 9;
+  uint32 rtt_ms = 10;
+  uint64 expires_ms = 11;
+}
+message GlobalPolicyRow {
+  option (proto2mysql.table_name) = "match_global_policy";
+  option (proto2mysql.primary_key) = "policy_id";
+  uint32 policy_id = 1;
+  bytes fingerprint = 2;
+}
+// 全局观战准入不按TTL删除，原operation取消正证明之后才能closed。
+message GlobalWatchingRow {
+  option (proto2mysql.table_name) = "match_global_watching";
+  option (proto2mysql.primary_key) = "player_id";
+  option (proto2mysql.index) = "state,retry_ms,player_id";
+  uint64 player_id = 1;
+  string mark = 2;
+  string operation_id = 3;
+  string owner_account = 4;
+  uint64 owner_revision = 5;
+  // 1保留未许可Add；2原Add持久/未知；3已登记；4取消待正证明；5closed。
+  uint32 state = 6;
+  bytes add_request = 7;
+  bytes placement = 8;
+  uint64 created_ms = 9;
+  uint64 admit_before_ms = 10;
+  uint64 retry_ms = 11;
+  uint64 lease_version = 12;
+  uint64 lease_until_ms = 13;
+  uint64 expires_ms = 14; // 只触发取消，不能作为终局证明。
+}
+// 永久UUID回执与当前观战分开；重放旧UUID不能清退/复活更新的一轮。
+message GlobalWatchRequestRow {
+  option (proto2mysql.table_name) = "match_global_watch_request";
+  option (proto2mysql.primary_key) = "player_id,request_id";
+  uint64 player_id = 1;
+  string request_id = 2;
+  string owner_account = 3;
+  uint64 owner_revision = 4;
+  bytes request_payload = 5;
+  bytes response_payload = 6;
+  uint64 battle_id = 7; // 随机选场也只决定一次。
+  uint64 created_ms = 8;
+  bool cancelled = 9;
+  bytes original_add = 10; // 只许可写一次的共享AddObserverRequest完整PB。
+}
+// 最新请求头在P锁下提交；已受理的旧handler再到达不能取代新请求。
+message GlobalWatchHeadRow {
+  option (proto2mysql.table_name) = "match_global_watch_head";
+  option (proto2mysql.primary_key) = "player_id";
+  uint64 player_id = 1;
+  string request_id = 2;
+}
+// 邀请原件不放Redis；目标P锁串行冷却，接受与成局在同一SQL事务决定。
+message GlobalChallengeRow {
+  option (proto2mysql.table_name) = "match_global_challenge";
+  option (proto2mysql.primary_key) = "challenge_id";
+  option (proto2mysql.index) = "target_id,state,expires_ms;challenger_id,state,expires_ms";
+  uint64 challenge_id = 1;
+  uint64 challenger_id = 2;
+  uint64 target_id = 3;
+  uint32 config_id = 4;
+  uint64 expires_ms = 5;
+  string challenger_account = 6;
+  uint64 challenger_revision = 7;
+  string target_account = 8;
+  uint64 target_revision = 9;
+  // 1待决定；2已接受（同事务产生票据）；3拒绝。
+  uint32 state = 10;
+  bytes response_payload = 11;
+  uint64 battle_id = 12;
+  uint64 created_ms = 13;
 }
 message GlobalMember {
   uint64 player_id = 1;
@@ -48,27 +179,50 @@ message GlobalMember {
 message GlobalJoinIntentRow {
   option (proto2mysql.table_name) = "match_global_join_intent";
   option (proto2mysql.primary_key) = "player_id,request_high,request_low";
+  option (proto2mysql.index) = "admission_prepared,admission_completed,cancelled,player_id,request_high,request_low";
   uint64 player_id = 1;
   string request_id = 2;
   bytes ticket_record = 3;
   bool cancelled = 4;
   uint64 request_high = 5;
   uint64 request_low = 6;
+  string owner_account = 7;
+  uint64 owner_revision = 8;
+  bytes request_payload = 9;
+  repeated bytes observer_exits = 10; // 每项均为共享ObserverExitOriginal完整PB，不建平行结构。
+  bool admission_prepared = 11;
+  bytes admission_ticket = 12;
+  string session_binding = 13;
+  bool admission_completed = 14;
+  bytes response_payload = 15;
 }
 message GlobalDirectIntentRow {
   option (proto2mysql.table_name) = "match_global_direct_intent";
   option (proto2mysql.primary_key) = "kind,owner_id,request_high,request_low";
+  option (proto2mysql.index) = "admission_prepared,admission_completed,battle_id,kind,owner_id,request_high,request_low";
   uint32 kind = 1;
   uint64 owner_id = 2;
   uint64 request_high = 3;
   uint64 request_low = 4;
   bytes payload = 5;
   uint64 battle_id = 6;
+  bool cancelled = 7; // 仅活动kind2：原意图主键锁下持久墓碑，迟到Start不得再成局。
+  string owner_account = 8;
+  uint64 owner_revision = 9;
+  repeated bytes observer_exits = 10; // 每项均为共享ObserverExitOriginal完整PB。
+  bool admission_prepared = 11;
+  GlobalDirectStartOriginal start_original = 12;
+  bool admission_completed = 13;
+}
+message GlobalDirectStartOriginal {
+  GlobalFormationRow formation = 1;
+  repeated GlobalTicketRow tickets = 2;
+  bytes team_launch_original = 3; // 完整共享TeamLaunchOriginal，首Match准入的网络原件与退出同存，重放不可重抓。
 }
 message GlobalFormationRow {
   option (proto2mysql.table_name) = "match_global_formation";
   option (proto2mysql.primary_key) = "battle_id";
-  option (proto2mysql.index) = "state,retry_ms";
+  option (proto2mysql.index) = "state,retry_ms;state,created_ms,battle_id";
   uint64 battle_id = 1;
   string operation_id = 2;
   // 1 已成组待备战；2 已持久化完整建房意图；3 结局未知；4 已建房；5 已确认中止。

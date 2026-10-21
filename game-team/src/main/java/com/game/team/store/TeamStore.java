@@ -33,10 +33,12 @@ import org.slf4j.LoggerFactory;
 /**
  * 组队存储（基线 go/match/internal/team/store.go，team-spec §1.6-§1.10、§6.4、§6.5）。
  *
- * <p>权威数据全部在 Redis：{@code game:{team}:rec / info / player / invite} 四类键只经 {@link TeamScript} 的 Lua 写。本类负责
+ * <p>生产DataSource构造统一委托SQL权威，原会话、全员P锁、永久版本/epoch/原件和请求回执均隐藏在此接口后。
+ * 旧Redis构造仅保留脚本契约夹具；下文Lua细则只描述该适配，生产无Redis事实源或故障回退。
+ * 四类键只经 {@link TeamScript} 的 Lua 写。本类负责
  * 「读 → 调纯函数规则（{@link TeamRules}）→ CAS 提交 → 按返回值重试 / 修复」；不做推送、不打指标——这些副作用由服务层按返回值完成。
  *
- * <p><b>并发</b>：无可变状态，可被多个工作线程共享；正确性全靠 ver CAS 与 Lua 原子判定。
+ * <p><b>并发</b>：无可变状态，可被多个工作线程共享；生产正确性由同事务P锁、SQL版本CAS和永久原件保证。
  *
  * <p><b>线程</b>：所有方法都在调用线程上阻塞等待异步 Redis 结果（{@link Deadline#await}，上界是请求预算），只能在工作线程上调用，
  * 不得在 Netty I/O 线程、场景逻辑线程或 Redisson 回调线程上调用（AGENTS.md §3）。
@@ -134,6 +136,30 @@ public final class TeamStore {
     /** 本部署命名空间的键名（装配时注入）。方法里的局部变量 {@code keys} 指一次 EVAL 的 KEYS 列表，所以字段不叫 keys。 */
     private final RedisKeys redisKeys;
     private final Hooks hooks;
+    private final SqlTeamAuthority authority;
+
+    /** 生产唯一入口；Redis构造保留给既有脚本契约夹具，不作为SQL故障回退。 */
+    public TeamStore(javax.sql.DataSource source) {
+        this(null,null,Hooks.NONE,new SqlTeamAuthority(source));
+    }
+    private TeamStore(TeamRedis redis,RedisKeys keys,Hooks hooks,SqlTeamAuthority authority) {
+        this.redis=redis;this.redisKeys=keys;this.hooks=hooks;this.authority=authority;
+    }
+    public boolean sqlAuthority(){return authority!=null;}
+    public TeamStore forActor(com.game.api.proto.SessionContext actor,String method,com.google.protobuf.Message request) {
+        return authority==null?this:new TeamStore(null,null,hooks,authority.forActor(actor,method,request));
+    }
+    public MutateResult replay(com.game.common.deadline.Deadline d){return authority==null?null:authority.replay(d);}
+    public com.game.proto.team.TeamResponse replayResponse(Deadline d){return authority==null?null:authority.response(d);}
+    public void completeResponse(com.game.proto.team.TeamResponse r,Deadline d){if(authority!=null)authority.completeResponse(r,d);}
+    public CommitResult resumeLaunch(Deadline d){return authority==null?null:authority.resumeLaunch(d);}
+    public com.game.team.proto.TeamLaunchSubmission launchSubmission(Deadline d){if(authority==null)throw new IllegalStateException("仅SQL开局有提交原件");return authority.submission(d);}
+    public com.google.protobuf.ByteString launchOriginal(Deadline d){if(authority==null)throw new IllegalStateException("仅SQL开局有正规原件");return authority.original(d);}
+    public com.game.proto.team.TeamView projectMatchView(com.game.proto.team.TeamView view,Deadline d){return authority==null?view:authority.projectMatchView(view,d);}
+    public static String ticketId(String requestId,long player){return java.util.UUID.nameUUIDFromBytes((requestId+":"+Long.toUnsignedString(player)).getBytes(StandardCharsets.UTF_8)).toString();}
+    public PinnedResult commitMatchLock(Snapshot snap,long caller,String token,List<Long> roster,long expiry,SessionLoader sessions,Deadline d,Map<Long,Integer> zones,int lockSeconds){
+        return authority==null?commitMatchLock(snap,caller,token,roster,expiry,sessions,d):authority.lockMatch(snap,caller,token,roster,expiry,zones,lockSeconds,d);
+    }
 
     public TeamStore(TeamRedis redis, RedisKeys redisKeys) {
         this(redis, redisKeys, Hooks.NONE);
@@ -143,6 +169,7 @@ public final class TeamStore {
         this.redis = redis;
         this.redisKeys = Objects.requireNonNull(redisKeys, "redisKeys");
         this.hooks = hooks == null ? Hooks.NONE : hooks;
+        this.authority=null;
     }
 
     // ================================================================ 名册写
@@ -167,6 +194,7 @@ public final class TeamStore {
      * @throws DependencyException Redis / 数据 / 程序缺陷类故障（此时前几轮已落盘的修复不会回报，同基线，team-spec §8.1 第 8 条）
      */
     public MutateResult mutate(Bind bind, Op op, SessionLoader sessions, RuleConfig cfg, Deadline deadline) {
+        if(authority!=null)return authority.mutate(bind,op,sessions,cfg,deadline);
         Acc res = new Acc();
         int repairs = 0;
         while (true) {
@@ -316,6 +344,7 @@ public final class TeamStore {
      */
     public PinnedResult commitMatchLock(Snapshot snap, long caller, String token, List<Long> roster, long expireAtMs,
                                         SessionLoader sessions, Deadline deadline) {
+        if(authority!=null)throw new DependencyException("SQL开局必须同事务携带原位置/预算");
         if (snap == null || snap.record() == null || snap.version() == 0) {
             throw new DependencyException("开战锁提交缺少记录快照");
         }
@@ -422,6 +451,7 @@ public final class TeamStore {
 
     /** 清锁的一轮（store.go:594-618）：只关心记录，S_READ 的玩家位传 0（{@code game:{team}:player:0} 恒不存在，脚本只读不写）。 */
     private LockRelease releaseRound(long teamId, String token, boolean ok, SessionLoader sessions, Deadline deadline) {
+        if(authority!=null)return authority.release(teamId,token,ok,deadline);
         Snapshot snap = read(0, teamId, deadline);
         hooks.afterMatchRead(teamId);
         TeamRecord rec = snap.record();
@@ -483,6 +513,7 @@ public final class TeamStore {
      * <p>从不抛 {@link DependencyException}：故障装进结果（{@link FreeRead.Status#FAILED}），以便带出 healed。
      */
     public FreeRead readFree(long playerId, Deadline deadline) {
+        if(authority!=null)return authority.readFree(playerId,deadline);
         boolean healed = false;
         try {
             for (int i = 0; i < FREE_READ_RETRIES; i++) {
@@ -510,6 +541,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障、回复形状不对、记录解不开
      */
     public Snapshot read(long playerId, long teamId, Deadline deadline) {
+        if(authority!=null)return authority.read(playerId,teamId,deadline);
         Object raw = eval(TeamScript.READ, List.of(redisKeys.teamPlayer(playerId), redisKeys.teamRecord(teamId)), List.of(),
                 deadline, "S_READ player=" + Long.toUnsignedString(playerId) + " team=" + Long.toUnsignedString(teamId));
         return TeamReplies.parseRead(playerId, teamId, raw);
@@ -523,6 +555,7 @@ public final class TeamStore {
      * @throws DependencyException     Redis 故障、回复形状不对、记录解不开
      */
     public MembersSnapshot readMembers(long teamId, Collection<Long> knownMembers, Deadline deadline) {
+        if(authority!=null)return authority.readMembers(teamId,deadline);
         List<Long> members = knownMembers == null ? List.of() : List.copyOf(knownMembers);
         String what = "S_READ_MEMBERS team=" + Long.toUnsignedString(teamId);
         for (int i = 0; i < READ_MEMBERS_RETRIES; i++) {
@@ -570,6 +603,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障
      */
     public boolean touch(Snapshot snap, Deadline deadline) {
+        if(authority!=null)return false;
         if (snap == null || snap.record() == null) {
             return false;
         }
@@ -593,6 +627,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障
      */
     public boolean healOrphan(long playerId, long teamId, Deadline deadline) {
+        if(authority!=null)throw new DependencyException("SQL成员与原PB不一致，禁止按缓存缺失销毁永久关系");
         Object raw = eval(TeamScript.HEAL_ORPHAN, List.of(redisKeys.teamPlayer(playerId), redisKeys.teamRecord(teamId)),
                 List.of(CommitSets.ascii(Long.toUnsignedString(teamId)), TTL_ARG.clone()), deadline,
                 "S_HEAL_ORPHAN player=" + Long.toUnsignedString(playerId) + " team=" + Long.toUnsignedString(teamId));
@@ -608,6 +643,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障、回复形状不对、score 不是十进制数
      */
     public InviteList listInvites(long playerId, Deadline deadline) {
+        if(authority!=null)return authority.invites(playerId,deadline);
         Object raw = eval(TeamScript.INVITE_LIST, List.of(redisKeys.teamInvite(playerId)), List.of(), deadline,
                 "S_INVITE_LIST player=" + Long.toUnsignedString(playerId));
         return TeamReplies.parseInviteList(raw);
@@ -619,6 +655,7 @@ public final class TeamStore {
      * @throws DependencyException Redis 故障
      */
     public boolean pruneInvite(long playerId, long teamId, String score, Deadline deadline) {
+        if(authority!=null)return authority.pruneInvite(playerId,teamId,score,deadline);
         Object raw = eval(TeamScript.INVITE_PRUNE, List.of(redisKeys.teamInvite(playerId)),
                 List.of(CommitSets.ascii(Long.toUnsignedString(teamId)), score.getBytes(StandardCharsets.ISO_8859_1)),
                 deadline, "S_INVITE_PRUNE player=" + Long.toUnsignedString(playerId) + " team=" + Long.toUnsignedString(teamId));

@@ -83,5 +83,7 @@ class MatchMethodsTest {
         MessageMethod method = REGISTRY.byId(REGISTRY.requireId("MatchInternal", "StartActivityBattle")).orElseThrow();
         assertThat(method.clientService()).as(method.key()).isFalse();
         assertThat(method.playerService()).as(method.key()).isFalse();
+        var cancel=REGISTRY.byId(REGISTRY.requireId("MatchInternal","CancelActivityBattle")).orElseThrow();
+        assertThat(cancel.clientService()).as(cancel.key()).isFalse();assertThat(cancel.playerService()).as(cancel.key()).isFalse();
     }
 }

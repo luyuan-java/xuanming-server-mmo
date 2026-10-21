@@ -137,7 +137,7 @@ class CatalogAdminStoreTest {
         try (var f = new CatalogFixture()) {
             var store = admin(f);
             store.create(ACTOR, new CatalogAdminApi.Create("freeze-create-001", 1, terms(125, 10, 2, "旧玄铁"), 20));
-            var first = f.store.create("1", new MallApi.CreateOrder("frozen-order-001", 1, 2));
+            var first = f.store.create("1", new MallApi.CreateOrder("frozen-order-001", 1, 2, "fixture-account", "1"));
             var frozenGrant = f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", first.orderId());
             var frozenItem = f.jdbc.queryForMap("SELECT * FROM oms_order_item WHERE order_sn=?", first.orderId());
             assertEquals(10, ((Number) frozenGrant.get("item_config_id")).intValue());
@@ -163,11 +163,11 @@ class CatalogAdminStoreTest {
             assertEquals(20, changed.stock());
             assertEquals(2, changed.lockedStock());
             assertEquals(2, changed.revision());
-            assertEquals(first, f.store.get("1", first.orderId()));
+            assertEquals(first, f.store.get("1", new MallApi.OwnedOrder(first.orderId(), "fixture-account", "1")));
             assertEquals(frozenGrant, f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", first.orderId()));
             assertEquals(frozenItem, f.jdbc.queryForMap("SELECT * FROM oms_order_item WHERE order_sn=?", first.orderId()));
 
-            var second = f.store.create("2", new MallApi.CreateOrder("future-order-001", 1, 1));
+            var second = f.store.create("2", new MallApi.CreateOrder("future-order-001", 1, 1, "fixture-account", "1"));
             assertEquals(999, second.amountMinor());
             assertEquals("USD", second.currency());
             assertEquals(20, f.jdbc.queryForObject("SELECT item_config_id FROM commerce_order_grant WHERE order_sn=?", Integer.class, second.orderId()));
@@ -191,7 +191,7 @@ class CatalogAdminStoreTest {
         try (var f = new CatalogFixture()) {
             var store = admin(f);
             store.create(ACTOR, new CatalogAdminApi.Create("bounds-create-001", 1, terms(100, 10, 1, "库存下界"), 5));
-            f.store.create("1", new MallApi.CreateOrder("bounds-order-001", 1, 3));
+            f.store.create("1", new MallApi.CreateOrder("bounds-order-001", 1, 3, "fixture-account", "1"));
             var before = businessState(f);
             refuses(409, () -> store.adjustStock(ACTOR, new CatalogAdminApi.AdjustStock("stock-below-001", 1, 1, -3)));
             assertEquals(before, businessState(f));
@@ -361,7 +361,7 @@ class CatalogAdminStoreTest {
     @Test void H2旧V2结构执行V3后保留订单和库存_管理修订从零开始() throws Exception {
         try (var f = new MallTestDatabase()) {
             f.sku(1, 10);
-            var order = f.store.create("1", new MallApi.CreateOrder("migration-order-001", 1, 2));
+            var order = f.store.create("1", new MallApi.CreateOrder("migration-order-001", 1, 2, "fixture-account", "1"));
             var frozen = f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", order.orderId());
             // 仅在本例随机H2库重建旧V2形状，再执行真实升级脚本；不碰其他测试或运行库。
             f.jdbc.execute("DROP TABLE commerce_admin_command");
@@ -370,7 +370,7 @@ class CatalogAdminStoreTest {
             assertThrows(SQLException.class, verifier::verify);
             new ResourceDatabasePopulator(new ClassPathResource("db/migration/V3__catalog_admin.sql")).execute(f.source);
             verifier.verify();
-            assertEquals(order, f.store.get("1", order.orderId()));
+            assertEquals(order, f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")));
             assertEquals(frozen, f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", order.orderId()));
             assertEquals(10, f.stock(1, "stock"));
             assertEquals(2, f.stock(1, "lock_stock"));
@@ -382,7 +382,7 @@ class CatalogAdminStoreTest {
             assertEquals(1, updated.revision());
             assertEquals(10, updated.stock());
             assertEquals(2, updated.lockedStock());
-            assertEquals(order, f.store.get("1", order.orderId()));
+            assertEquals(order, f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")));
             assertEquals(frozen, f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", order.orderId()));
         }
     }

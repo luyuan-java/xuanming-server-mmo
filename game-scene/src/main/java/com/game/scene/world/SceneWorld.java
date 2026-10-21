@@ -10,6 +10,7 @@ import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.WorldChannel;
 import com.game.api.proto.ZoneRedirect;
+import com.game.proto.common.base.RoleAdmissionIdentity;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.state.PlayerState;
@@ -193,6 +194,8 @@ public final class SceneWorld {
     private final SceneMessageIds ids;
     private final ClientSink sink;
     private final PlayerRepository repository;
+    /** 生产固定来源；旧构造器只给不涉及SQL准入的纯世界夹具。 */
+    private final SceneAdmissionSource admissions;
     /**
      * 实体号的发号器（本节点的雪花），必须恒非 0。生产的场景号来自频道计划（scene-manager 全服租约发，D18），
      * 只有测试 / 本地入口 {@link #createScene(int)} 还用它发场景号。
@@ -347,6 +350,17 @@ public final class SceneWorld {
                       PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
                       TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances, BattleHooks battle,
                       ZoneTravel zoneTravel, InboxHooks inbox) {
+        this(tables, ids, sink, repository, idGenerator, clock, metrics, playerInitializer, snapshots, locations,
+                teamFollow, crossNode, instances, battle, zoneTravel, inbox, null);
+    }
+
+    /** 生产入口必须显式提供本进程固定准入来源；旧构造器保留纯世界测试。 */
+    public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
+                      LongSupplier idGenerator, SceneClock clock, SceneMetrics metrics,
+                      PlayerInitializer playerInitializer, PlayerSnapshots snapshots, PlayerLocations locations,
+                      TeamFollow teamFollow, CrossNodeSwitch crossNode, SceneInstances instances, BattleHooks battle,
+                      ZoneTravel zoneTravel, InboxHooks inbox, SceneAdmissionSource admissions) {
+        this.admissions = admissions;
         this.inbox = Objects.requireNonNull(inbox, "inbox");
         this.zoneTravel = Objects.requireNonNull(zoneTravel, "zoneTravel");
         this.battle = battle;
@@ -1350,7 +1364,13 @@ public final class SceneWorld {
         if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))) {
             failEnter(key,playerId,epoch,transfer,"该归属代已开始最终退出，禁止同代复活");return;
         }
-        PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer);
+        RoleAdmissionIdentity original;
+        try { original = admissions == null ? null : admissions.original(enter); }
+        catch (RuntimeException invalid) {
+            failEnter(key, playerId, epoch, transfer, "原进场身份不完整");
+            return;
+        }
+        PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer, original, enter.getAccount());
         PendingEnter replaced = pendingEnters.put(key, pending);
         if (replaced != null) {
             log.warn("同一会话在加载完成前再次进场，只处理最新一次 player={} session={}", playerId, key);
@@ -1362,7 +1382,10 @@ public final class SceneWorld {
         FinalKey loadingKey=new FinalKey(playerId,epoch);
         loadsInFlight.merge(loadingKey,1,Integer::sum);
         loadRequests.add(pending);
-        try {repository.load(playerId,epoch,result -> onPlayerLoaded(pending,result));}
+        try {
+            if (original == null) repository.load(playerId, epoch, result -> onPlayerLoaded(pending, result));
+            else repository.load(original, pending.account(), result -> onPlayerLoaded(pending, result));
+        }
         catch(RuntimeException failure){onPlayerLoaded(pending,new LoadResult.Failed(failure));}
     }
 
@@ -1506,6 +1529,7 @@ public final class SceneWorld {
                 data.gender(), data.appearanceId(), level, skills,
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime());
         player.setName(data.name());
+        if (pending.admission() != null) player.bindAdmission(pending.admission());
         if (previous != null && previous.ownerEpoch() == epoch) {
             player.continueLocationSeq(previous.locationSeq());
             // 顶号/同 epoch 进场会重建实例；旧快照的 SQL 仍在途，必须把唯一写槽交给新实例。
@@ -3223,6 +3247,7 @@ public final class SceneWorld {
     }
 
     /** @param transfer 跨节点换图的交出进场（{@code PlayerEnter.transfer}） */
-    private record PendingEnter(SessionKey session, long playerId, long sceneId, long ownerEpoch, boolean transfer) {
+    private record PendingEnter(SessionKey session, long playerId, long sceneId, long ownerEpoch, boolean transfer,
+                                RoleAdmissionIdentity admission, String account) {
     }
 }

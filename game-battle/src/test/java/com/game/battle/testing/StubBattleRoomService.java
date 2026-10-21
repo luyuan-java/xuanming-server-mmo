@@ -114,9 +114,12 @@ public final class StubBattleRoomService implements BattleRoomService {
     }
 
     @Override
-    public void removeObserver(RemoveObserverRequest request) {
+    public com.game.proto.RemoveObserverResponse removeObserver(RemoveObserverRequest request) {
         enter("removeObserver");
+        if(request.getSpectatorOperationId().isEmpty()||request.getTargetInstanceId().isEmpty())return com.game.proto.RemoveObserverResponse.getDefaultInstance();
+        return com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(request.getTargetInstanceId()).build();
     }
+    @Override public com.game.proto.QueryObserverResponse queryObserver(com.game.proto.QueryObserverRequest request){enter("queryObserver");return com.game.proto.QueryObserverResponse.getDefaultInstance();}
 
     @Override
     public OptionalInt attachDirect(long battleId, long playerId, eBattleTicketRole role, DirectLink link) {

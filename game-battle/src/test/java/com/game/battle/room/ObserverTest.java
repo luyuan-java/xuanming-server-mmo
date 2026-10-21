@@ -31,7 +31,7 @@ class ObserverTest {
     private final RoomHarness h = new RoomHarness();
 
     private AddObserverResponse add(long battleId, long observerId, BattleRouting routing) {
-        return h.service().addObserver(AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerId)
+        return h.addObserver(AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerId)
                 .setRouting(routing).setObserverName("观众" + observerId).build());
     }
 
@@ -105,18 +105,16 @@ class ObserverTest {
     }
 
     @Test
-    void 幂等但会话变了_关旧直连_重推177经gate_不推161() {
+    void 同操作更改会话被拒绝_原直连与路由不被替换() {
         h.create(h.pvp(9005, A, B));
         add(9005, C);
         FakeLink old = h.connect(9005, C, eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
         h.clearLog();
 
         BattleRouting moved = RoomHarness.observerRouting(C, 901);
-        assertThat(add(9005, C, moved).hasErrorMessage()).isFalse();
-
-        assertThat(h.trace()).containsExactly("close:5003:battle_closed", "lobby:5003:177");
-        assertThat(old.closedWith).isEqualTo(Disconnect.BATTLE_CLOSED);
-        assertThat(h.service().room(9005).routingByObserver.get(C)).isEqualTo(moved);
+        assertThat(add(9005, C, moved).getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(h.trace()).isEmpty();assertThat(old.closedWith).isNull();
+        assertThat(h.service().room(9005).routingByObserver.get(C)).isEqualTo(RoomHarness.observerRouting(C,900));
     }
 
     /**
@@ -125,7 +123,7 @@ class ObserverTest {
      * （关旧直连、刷新路由、177 经新会话重推），不能当成同会话重试把 161 写进旧直连。
      */
     @Test
-    void 观众换到另一个zone的同号gate_会话号与gate节点号都没变_只有实例与zone变了_按会话变了处理() {
+    void 同观战操作换到另一个zone同号gate也拒绝_不能凭旧意图刷新新会话() {
         h.create(h.pvp(9010, A, B));
         BattleRouting inZone1 = RoomHarness.observerRouting(C, (1 << 17) | 1);
         add(9010, C, inZone1);
@@ -135,11 +133,9 @@ class ObserverTest {
         assertThat(inZone2.getSessionId()).isEqualTo(inZone1.getSessionId());
         assertThat(inZone2.getGateNodeId()).isEqualTo(inZone1.getGateNodeId());
 
-        assertThat(add(9010, C, inZone2).hasErrorMessage()).isFalse();
-
-        assertThat(h.trace()).as("不是同会话重试（那样会是 frame:5003:177 + frame:5003:161）").containsExactly("close:5003:battle_closed", "lobby:5003:177");
-        assertThat(old.closedWith).isEqualTo(Disconnect.BATTLE_CLOSED);
-        assertThat(h.service().room(9010).routingByObserver.get(C)).as("路由刷新成 zone 2 的那台 gate").isEqualTo(inZone2);
+        assertThat(add(9010, C, inZone2).getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(h.trace()).isEmpty();assertThat(old.closedWith).isNull();
+        assertThat(h.service().room(9010).routingByObserver.get(C)).isEqualTo(inZone1);
     }
 
     @Test
@@ -168,11 +164,11 @@ class ObserverTest {
         FakeLink c = h.connect(9007, C, eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
         h.clearLog();
 
-        h.service().removeObserver(RemoveObserverRequest.newBuilder().setBattleId(9007).setObserverPlayerId(A).build());
-        h.service().removeObserver(RemoveObserverRequest.newBuilder().setBattleId(404).setObserverPlayerId(C).build());
+        h.removeObserver(RemoveObserverRequest.newBuilder().setBattleId(9007).setObserverPlayerId(A).build());
+        h.removeObserver(RemoveObserverRequest.newBuilder().setBattleId(404).setObserverPlayerId(C).build());
         assertThat(h.log).isEmpty();
 
-        h.service().removeObserver(RemoveObserverRequest.newBuilder().setBattleId(9007).setObserverPlayerId(C).setReason("queue").build());
+        h.removeObserver(RemoveObserverRequest.newBuilder().setBattleId(9007).setObserverPlayerId(C).setReason("queue").build());
 
         assertThat(h.trace()).containsExactly("frame:5003:166", "close:5003:battle_closed");
         SpectateEndS2C end = c.parsed(166, SpectateEndS2C.parser()).get(0);

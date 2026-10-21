@@ -7,6 +7,8 @@ import com.game.common.deadline.Deadline;
 import com.game.common.time.GameDay;
 import com.game.discovery.sql.AuthorityJdbc;
 import com.game.guild.activity.ActivityRules;
+import com.game.guild.activity.GuildTrialCancellation;
+import com.game.api.proto.SessionContext;
 import com.game.guild.rules.GuildTips;
 import com.game.guild.store.pb.GuildAssetOpKind;
 import com.game.guild.store.pb.GuildAssetOpRow;
@@ -45,6 +47,8 @@ public final class GuildActivityStore {
     public record Battle(long id, long guild, byte[] context, long created) {}
     private record Progress(int count, boolean reached, boolean funded) {}
     private final AuthorityJdbc sql;
+    private final AuthorityJdbc baseSql;
+    private final SessionContext actor;
     private final ConfigTables tables;
     private final LongSupplier ids;
     private final GuildStore.ZoneFence fence;
@@ -52,10 +56,19 @@ public final class GuildActivityStore {
         this(sql, tables, ids, GuildStore.ZoneFence.OPEN);
     }
     public GuildActivityStore(AuthorityJdbc sql, ConfigTables tables, LongSupplier ids, GuildStore.ZoneFence fence) {
-        this.sql = sql;
+        this(sql,tables,ids,fence,null);
+    }
+    private GuildActivityStore(AuthorityJdbc baseSql, ConfigTables tables, LongSupplier ids, GuildStore.ZoneFence fence, SessionContext actor) {
+        this.baseSql = baseSql;
+        this.actor = actor;
+        this.sql = actor == null ? baseSql : baseSql.forActor(actor.getPlayerId(),actor.getAccount(),actor.getOwnerRevision());
         this.tables = tables;
         this.ids = ids;
         this.fence = fence;
+    }
+    public GuildActivityStore forActor(com.game.api.proto.SessionContext actor) {
+        TrialLaunchAuthority.identity(actor,actor.getPlayerId());
+        return new GuildActivityStore(baseSql,tables,ids,fence,actor);
     }
     private void fence(int zone) {
         try {
@@ -88,6 +101,15 @@ public final class GuildActivityStore {
         return sql.tx(d, s -> {
             Member m = lockMember(s, guild, player);
             return work.apply(s, m);
+        });
+    }
+    private <T> T trialMemberTx(long player, Collection<Long> roster, Deadline d, MemberWork<T> work) throws SQLException {
+        TrialLaunchAuthority.identity(actor,player);
+        Long guild = baseSql.read(d,s -> s.one("SELECT guild_id FROM guild_member WHERE player_id=?",r -> u64(r,1),u64(player)));
+        if (guild == null) throw new Rejected(GuildTips.NOT_IN_GUILD);
+        return baseSql.tx(d,s -> {
+            TrialLaunchAuthority.lockPlayers(s,roster,actor); // 全员P先于G，不能先用单actor绑定事务。
+            return work.apply(s,lockMember(s,guild,player));
         });
     }
     private Member lockMember(AuthorityJdbc.Session s, long guild, long player) throws SQLException {
@@ -238,7 +260,8 @@ public final class GuildActivityStore {
         roster.addFirst(player);
         long lobbyId = id();
         var rule = tables.guildRule().find(1).orElseThrow();
-        return memberTx(player, d, (s, m) -> {
+        var consent = TrialLaunchAuthority.identity(actor,player);
+        return trialMemberTx(player, roster, d, (s, m) -> {
             if (m.guild != expectedGuild)
                 throw new Rejected(GuildTips.NOT_IN_GUILD);
             eligible(m, row, now);
@@ -263,8 +286,12 @@ public final class GuildActivityStore {
                             end(s, old, GuildTips.TRIAL_INVITE_EXPIRED);
                         else if (oldScope != null && oldScope[0] == m.guild && oldScope[1] == Integer.toUnsignedLong(row.getId())
                                 && p == player && old.getInitiatorPlayerId() == player && old.getMemberPlayerIdsList().equals(roster)
-                                && old.getStateValue() == 1)
+                                && old.getStateValue() == 1) {
+                            var originals = TrialLaunchAuthority.consents(s.one("SELECT request_proto FROM guild_trial_lobby WHERE lobby_id=?",
+                                    r -> r.getBytes(1),u64(old.getLobbyId())),old.getLobbyId());
+                            if (!consent.equals(originals.get(player))) throw new SecurityException("历练发起人原同意变更");
                             return old;
+                        }
                         else
                             throw new Rejected(GuildTips.TRIAL_TEAM_INVALID, "busy", Long.toUnsignedString(p));
                     }
@@ -284,7 +311,8 @@ public final class GuildActivityStore {
                             + "guild_trial_lobby(lobby_id,guild_id,activity_id,state,view_proto,request_proto,next_attempt_ms,lease_token,"
                               + "lease_"
                             + "until_ms,created_ms,battle_id) VALUES(?,?,?,1,?,?,0,0,0,?,0)",
-                    u64(lobbyId), u64(m.guild), row.getId(), view.toByteArray(), new byte[0], now);
+                    u64(lobbyId), u64(m.guild), row.getId(), view.toByteArray(),
+                    TrialLaunchAuthority.consentBytes(lobbyId,List.of(consent)), now);
             for (long p : sorted)
                 s.update("UPDATE guild_activity_slot SET lobby_id=?,expires_ms=?,cooldown_ms=IF(player_id=?, ?,cooldown_ms) WHERE "
                                 + "player_id=?",
@@ -293,12 +321,15 @@ public final class GuildActivityStore {
         });
     }
     public GuildTrialLobbyView respond(long player, RespondGuildTrialInviteRequest request, long now, Deadline d) throws SQLException {
-        return memberTx(player, d, (s, m) -> {
+        var expected = baseSql.read(d,s -> lobby(s,request.getLobbyId(),false));
+        if (expected == null || !expected.getMemberPlayerIdsList().contains(player)) throw new Rejected(GuildTips.TRIAL_INVITE_EXPIRED);
+        return trialMemberTx(player, expected.getMemberPlayerIdsList(), d, (s, m) -> {
             // G锁串行本帮邀请/退出；读名单后按无符号主键顺序锁所有成员，再锁房间。
             var peek = lobby(s, request.getLobbyId(), false);
             Long guild = s.one("SELECT guild_id FROM guild_trial_lobby WHERE lobby_id=?", r -> u64(r, 1), u64(request.getLobbyId()));
             if (peek == null || guild == null || guild != m.guild || !peek.getMemberPlayerIdsList().contains(player))
                 throw new Rejected(GuildTips.TRIAL_INVITE_EXPIRED);
+            if (!peek.getMemberPlayerIdsList().equals(expected.getMemberPlayerIdsList())) throw new SQLException("历练房间名单已变更");
             var sorted = new ArrayList<>(peek.getMemberPlayerIdsList());
             sorted.sort(Long::compareUnsigned);
             GuildActivityTable row = tables.guildActivity()
@@ -312,8 +343,14 @@ public final class GuildActivityStore {
             }
             var view = lobby(s, request.getLobbyId(), true);
             if (view.getStateValue() != 1) {
-                if (view.getAcceptedPlayerIdsList().contains(player))
+                if (view.getAcceptedPlayerIdsList().contains(player)) {
+                    var record = TrialLaunchAuthority.load(s,view.getLobbyId(),false);
+                    if (record == null && view.getStateValue() == 4) return view;
+                    var launchOriginal = TrialLaunchAuthority.original(record);
+                    if (!launchOriginal.getRosterList().contains(TrialLaunchAuthority.identity(actor,player)))
+                        throw new SecurityException("历练已提交原同意不符");
                     return view;
+                }
                 throw new Rejected(GuildTips.TRIAL_INVITE_EXPIRED);
             }
             if (view.getExpireAtMs() <= now)
@@ -321,6 +358,11 @@ public final class GuildActivityStore {
             if (!request.getAccept())
                 return end(s, view, GuildTips.TRIAL_INVITE_DECLINED, Long.toUnsignedString(player));
             row(3, row.getId(), now);
+            byte[] pending = s.one("SELECT request_proto FROM guild_trial_lobby WHERE lobby_id=?", r -> r.getBytes(1),u64(view.getLobbyId()));
+            var consents = TrialLaunchAuthority.consents(pending,view.getLobbyId());
+            var consent = TrialLaunchAuthority.identity(actor,player);
+            var oldConsent = consents.putIfAbsent(player,consent);
+            if (oldConsent != null && !oldConsent.equals(consent)) throw new SecurityException("历练本人原同意不可替换");
             var next = view.toBuilder();
             if (!view.getAcceptedPlayerIdsList().contains(player))
                 next.addAcceptedPlayerIds(player);
@@ -334,6 +376,7 @@ public final class GuildActivityStore {
                                       .setPeriodKey(GameDay.dayKey(now))
                                       .setGuildPeriodKey(ActivityRules.guildPeriodKey(row, now))
                                       .setInitiatorPlayerId(view.getInitiatorPlayerId())
+                                      .setLaunchRequestId(view.getLobbyId())
                                       .build();
                 var start = StartActivityBattleRequest.newBuilder()
                                     .setRequestId(view.getLobbyId())
@@ -341,13 +384,15 @@ public final class GuildActivityStore {
                                     .addAllMemberPlayerIds(view.getMemberPlayerIdsList())
                                     .setActivityContext(context)
                                     .build();
+                var original = TrialLaunchAuthority.prepare(s,start,consents,now);
+                if (!TrialLaunchAuthority.start(original).equals(start)) throw new SQLException("历练开战请求与同意原件不符");
                 next.setStateValue(2);
                 saveLobby(s, next.build(), now, start.toByteArray());
                 for (long p : sorted)
                     s.update("UPDATE guild_activity_slot SET expires_ms=? WHERE player_id=? AND lobby_id=?", Long.MAX_VALUE, u64(p),
                             u64(view.getLobbyId()));
             } else
-                saveLobby(s, next.build(), 0, new byte[0]);
+                saveLobby(s, next.build(), 0, TrialLaunchAuthority.consentBytes(view.getLobbyId(),consents.values()));
             return next.build();
         });
     }
@@ -423,73 +468,128 @@ public final class GuildActivityStore {
                 .toList();
     }
     public List<Long> launches(Deadline d, long now) throws SQLException {
-        return sql.read(d,
+        return baseSql.read(d,
                 s
-                -> s.list("SELECT lobby_id FROM guild_trial_lobby WHERE state=2 AND next_attempt_ms<=? AND lease_until_ms<=? ORDER BY "
-                                + "lobby_id LIMIT 32",
+                -> s.list("SELECT t.request_id FROM guild_trial_launch t LEFT JOIN guild_trial_lobby l ON l.lobby_id=t.request_id "
+                                + "WHERE t.state=1 AND (l.lobby_id IS NULL OR (l.state=2 AND l.next_attempt_ms<=? AND l.lease_until_ms<=?)) ORDER BY "
+                                + "t.updated_ms,t.request_id LIMIT 32",
                         r -> u64(r, 1), now, now));
     }
     public Launch leaseLaunch(long lobby, long now, Deadline d) throws SQLException {
+        var record = baseSql.read(d,s -> TrialLaunchAuthority.load(s,lobby,false));
+        if (record == null || record.getState() != 1) return null;
+        var original = TrialLaunchAuthority.original(record);
         long token = id();
-        return sql.tx(d, s -> {
+        return baseSql.tx(d, s -> {
+            TrialLaunchAuthority.lockOwners(s,original);
+            s.one("SELECT guild_id FROM guild WHERE guild_id=? FOR UPDATE",r -> u64(r,1),u64(original.getGuildId()));
+            var saved = TrialLaunchAuthority.load(s,lobby,true);
+            if (saved == null || saved.getState() != 1 || !original.equals(TrialLaunchAuthority.original(saved))) return null;
+            // 房间只是客户端投影；丢失时只凭永久原件恢复，不从当前账号、成员或配置补造同意。
+            var restored = GuildTrialLobbyView.newBuilder().setLobbyId(lobby).setInitiatorPlayerId(original.getInitiatorPlayerId())
+                    .addAllMemberPlayerIds(TrialLaunchAuthority.start(original).getMemberPlayerIdsList())
+                    .addAllAcceptedPlayerIds(TrialLaunchAuthority.start(original).getMemberPlayerIdsList()).setStateValue(2)
+                    .setExpireAtMs(original.getCreatedMs()).build();
+            s.update("INSERT IGNORE INTO guild_trial_lobby(lobby_id,guild_id,activity_id,state,view_proto,request_proto,next_attempt_ms,lease_token,lease_until_ms,created_ms,battle_id) VALUES(?,?,?,2,?,?,0,0,0,?,0)",
+                    u64(lobby),u64(original.getGuildId()),original.getActivityId(),restored.toByteArray(),
+                    TrialLaunchAuthority.start(original).toByteArray(),u64(original.getCreatedMs()));
             if (s.update("UPDATE guild_trial_lobby SET lease_token=?,lease_until_ms=? WHERE lobby_id=? AND state=2 AND next_attempt_ms<=? "
                                 + "AND lease_until_ms<=?",
                         u64(token), now + 10000, u64(lobby), now, now)
                     != 1)
                 return null;
+            s.update("UPDATE guild_trial_launch SET updated_ms=? WHERE request_id=? AND state=1",now,u64(lobby));
             return s.one("SELECT guild_id,request_proto FROM guild_trial_lobby WHERE lobby_id=?", r -> {
                 try {
-                    return new Launch(lobby, u64(r, 1), token, StartActivityBattleRequest.parseFrom(r.getBytes(2)));
+                    var request = StartActivityBattleRequest.parseFrom(r.getBytes(2));
+                    if (u64(r,1) != original.getGuildId() || !request.equals(TrialLaunchAuthority.start(original)))
+                        throw new SQLException("历练重放请求与永久原件不符");
+                    return new Launch(lobby, u64(r, 1), token, request);
                 } catch (Exception e) {
                     throw new SQLException("开战意图损坏", e);
                 }
             }, u64(lobby));
         });
     }
+    private GuildTrialLaunchOriginal launchOriginal(long request, Deadline d) throws SQLException {
+        return baseSql.read(d,s -> TrialLaunchAuthority.original(TrialLaunchAuthority.load(s,request,false)));
+    }
+    private void bindBattle(AuthorityJdbc.Session s, GuildTrialLaunchOriginal original, long battle, long now) throws SQLException {
+        if (battle == 0) throw new SQLException("历练成功缺battle_id");
+        byte[] context = TrialLaunchAuthority.start(original).getActivityContext().toByteArray();
+        s.update("INSERT IGNORE INTO guild_trial_battle(battle_id,guild_id,activity_id,context_proto,state,created_ms,result_hash,result_proto) VALUES(?,?,?,?,1,?,?,?)",
+                u64(battle),u64(original.getGuildId()),original.getActivityId(),context,now,new byte[0],new byte[0]);
+        byte[] stored = s.one("SELECT context_proto FROM guild_trial_battle WHERE battle_id=? FOR UPDATE",r -> r.getBytes(1),u64(battle));
+        if (!Arrays.equals(stored,context)) throw new SQLException("历练对局上下文冲突");
+        TrialLaunchAuthority.update(s,original,battle,false,new byte[0],now);
+        var view = lobby(s,original.getRequestId(),true);
+        if (view != null) {
+            saveLobby(s,view.toBuilder().setStateValue(3).setBattleId(battle).build(),0,TrialLaunchAuthority.start(original).toByteArray());
+            release(s,view);
+        }
+    }
     public void completeLaunch(Launch launch, StartActivityBattleResponse response, long now, Deadline d) throws SQLException {
-        sql.tx(d, s -> {
-            // G先于T，与结算保持顺序。帮会已解散仍允许终结邀请，不能改写match事务。
-            s.one("SELECT guild_id FROM guild WHERE guild_id=? FOR UPDATE", r -> u64(r, 1), u64(launch.guild));
-            Long token = s.one("SELECT lease_token FROM guild_trial_lobby WHERE lobby_id=? FOR UPDATE", r -> u64(r, 1), u64(launch.lobby));
-            if (token == null || token != launch.token)
-                return null;
-            var view = lobby(s, launch.lobby, false);
-            if (view == null || view.getStateValue() != 2)
-                return null;
-            if (response == null || response.getRejectValue() != 0 && (response.getRejectValue() < 1 || response.getRejectValue() > 4)) {
-                s.update("UPDATE guild_trial_lobby SET next_attempt_ms=?,lease_until_ms=0 WHERE lobby_id=? AND lease_token=?", now + 1000,
-                        u64(launch.lobby), u64(launch.token));
-                return null;
-            }
-            if (response.getRejectValue() != 0) {
-                int rejection = response.getRejectValue();
-                String reason = switch (rejection) {
-                    case 2 -> "offline";
-                    case 3 -> "in_battle";
-                    case 4 -> "not_ready";
-                    default -> "invalid";
-                };
-                end(s, view, rejection >= 1 && rejection <= 4 ? GuildTips.TRIAL_TEAM_INVALID : GuildTips.TRIAL_SERVICE_BUSY, reason,
-                        Long.toUnsignedString(response.getOffenderPlayerId()));
+        var original = launchOriginal(launch.lobby,d);
+        if (!launch.request.equals(TrialLaunchAuthority.start(original))) throw new SQLException("历练回执原件不符");
+        baseSql.tx(d,s -> {
+            TrialLaunchAuthority.lockOwners(s,original);
+            s.one("SELECT guild_id FROM guild WHERE guild_id=? FOR UPDATE",r -> u64(r,1),u64(original.getGuildId()));
+            var record = TrialLaunchAuthority.load(s,launch.lobby,true);
+            if (record == null || record.getState() == 3) return null;
+            Long token = s.one("SELECT lease_token FROM guild_trial_lobby WHERE lobby_id=? FOR UPDATE",r -> u64(r,1),u64(launch.lobby));
+            if (token == null || token != launch.token) return null;
+            if (response == null || response.getRejectValue() != 0 || response.getBattleId() == 0) {
+                // 普通拒答和未签formation_state都不证明安全；保留PREPARED/ACTIVE等签名Cancel。
+                s.update("UPDATE guild_trial_lobby SET next_attempt_ms=?,lease_until_ms=0 WHERE lobby_id=?",now+1000,u64(launch.lobby));
+                s.update("UPDATE guild_trial_launch SET updated_ms=? WHERE request_id=?",now,u64(launch.lobby));
                 return null;
             }
-            if (response.getBattleId() == 0)
-                throw new SQLException("match成功缺battle_id");
-            byte[] context = launch.request.getActivityContext().toByteArray();
-            s.update("INSERT IGNORE INTO "
-                            + "guild_trial_battle(battle_id,guild_id,activity_id,context_proto,state,created_ms,result_hash,result_proto) "
-                            + "VALUES(?,?,?,?,1,?,?,?)",
-                    u64(response.getBattleId()), u64(launch.guild), launch.request.getActivityContext().getActivityId(), context, now,
-                    new byte[0], new byte[0]);
-            byte[] stored = s.one(
-                    "SELECT context_proto FROM guild_trial_battle WHERE battle_id=?", r -> r.getBytes(1), u64(response.getBattleId()));
-            if (!Arrays.equals(stored, context))
-                throw new SQLException("对局上下文冲突");
-            var done = view.toBuilder().setStateValue(3).setBattleId(response.getBattleId()).build();
-            saveLobby(s, done, 0, launch.request.toByteArray());
-            release(s, view);
+            bindBattle(s,original,response.getBattleId(),now);
             return null;
         });
+    }
+    public void completeCancellation(Launch launch, GuildTrialCancellation.Verified proof, long now, Deadline d) throws SQLException {
+        var original = launchOriginal(launch.lobby,d);
+        if (proof == null || !proof.original().equals(TrialLaunchAuthority.start(original)) || !launch.request.equals(proof.original()))
+            throw new SecurityException("历练取消证明未绑定永久原请求");
+        baseSql.tx(d,s -> {
+            TrialLaunchAuthority.lockOwners(s,original);
+            s.one("SELECT guild_id FROM guild WHERE guild_id=? FOR UPDATE",r -> u64(r,1),u64(original.getGuildId()));
+            var record = TrialLaunchAuthority.load(s,launch.lobby,true);
+            if (record == null || !original.equals(TrialLaunchAuthority.original(record))) throw new SQLException("历练取消原件冲突");
+            if (record.getState() == 3) return null;
+            var reply = proof.response();
+            if (!proof.terminal()) {
+                if (reply.getBattleId() != 0) bindBattle(s,original,reply.getBattleId(),now);
+                return null;
+            }
+            TrialLaunchAuthority.update(s,original,reply.getBattleId(),true,reply.toByteArray(),now);
+            if (reply.getBattleId() != 0)
+                s.update("UPDATE guild_trial_battle SET state=4 WHERE battle_id=? AND state IN(1,3)",u64(reply.getBattleId()));
+            var view = lobby(s,launch.lobby,true);
+            if (view != null) {
+                saveLobby(s,view.toBuilder().setStateValue(4).setEndTipId(GuildTips.TRIAL_SERVICE_BUSY).build(),0,launch.request.toByteArray());
+                release(s,view);
+            }
+            return null;
+        });
+    }
+    public void deferLaunch(long request, long now, Deadline d) throws SQLException {
+        baseSql.tx(d,s -> {
+            s.update("UPDATE guild_trial_launch SET updated_ms=? WHERE request_id=? AND state=1",now,u64(request));
+            s.update("UPDATE guild_trial_lobby SET next_attempt_ms=?,lease_until_ms=0 WHERE lobby_id=? AND state=2",now+1000,u64(request));
+            return null;
+        });
+    }
+    public Launch battleLaunch(long battle, Deadline d) throws SQLException {
+        byte[] raw = baseSql.read(d,s -> s.one("SELECT context_proto FROM guild_trial_battle WHERE battle_id=?",r -> r.getBytes(1),u64(battle)));
+        if (raw == null) throw new SQLException("历练巡检对局缺失");
+        try {
+            var context = BattleActivityContext.parseFrom(raw);
+            var original = launchOriginal(context.getLaunchRequestId(),d);
+            if (!TrialLaunchAuthority.start(original).getActivityContext().equals(context)) throw new SQLException("历练巡检原件不符");
+            return new Launch(original.getRequestId(),original.getGuildId(),0,TrialLaunchAuthority.start(original));
+        } catch (com.google.protobuf.InvalidProtocolBufferException bad) { throw new SQLException("历练巡检原件损坏",bad); }
     }
     public List<Battle> unsettled(Deadline d, long now) throws SQLException {
         return sql.read(d,
@@ -503,8 +603,10 @@ public final class GuildActivityStore {
             return;
         var context = event.getActivityContext();
         if (event.getBattleId() == 0 || context.getGuildId() == 0 || context.getActivityId() == 0 || context.getPeriodKey() == 0
-                || context.getGuildPeriodKey() == 0 || event.getMatchMode() != MatchMode.MATCH_MODE_PVE_TEAM_VALUE)
+                || context.getGuildPeriodKey() == 0 || context.getLaunchRequestId() == 0 || event.getMatchMode() != MatchMode.MATCH_MODE_PVE_TEAM_VALUE)
             throw new InvalidResult("历练战报上下文不完整");
+        var original = launchOriginal(context.getLaunchRequestId(),d);
+        if (!TrialLaunchAuthority.start(original).getActivityContext().equals(context)) throw new InvalidResult("历练战报不属于永久开战原件");
         byte[] raw = event.toByteArray();
         byte[] digest;
         try {
@@ -512,21 +614,30 @@ public final class GuildActivityStore {
         } catch (Exception e) {
             throw new SQLException(e);
         }
-        byte[][] settled = sql.read(d,
+        Object[] settled = sql.read(d,
                 s
-                -> s.one("SELECT context_proto,result_hash FROM guild_trial_battle WHERE battle_id=? AND state=2",
-                        r -> new byte[][] {r.getBytes(1), r.getBytes(2)}, u64(event.getBattleId())));
+                -> s.one("SELECT context_proto,result_hash,state FROM guild_trial_battle WHERE battle_id=? AND state IN(2,4)",
+                        r -> new Object[] {r.getBytes(1), r.getBytes(2),r.getInt(3)}, u64(event.getBattleId())));
         if (settled != null) {
-            if (!Arrays.equals(settled[0], context.toByteArray()) || !Arrays.equals(settled[1], digest))
+            if ((Integer)settled[2] == 4) throw new InvalidResult("历练已永久隔离，重复结果只保留审计，不重新发奖");
+            if (!Arrays.equals((byte[])settled[0], context.toByteArray()) || !Arrays.equals((byte[])settled[1], digest))
                 throw new InvalidResult("已结算历练的重复结果变更");
             return;
         }
-        sql.tx(d, s -> {
+        baseSql.tx(d, s -> {
+            TrialLaunchAuthority.lockOwners(s,original);
             Long guild = s.one("SELECT guild_id FROM guild WHERE guild_id=? FOR UPDATE", r -> u64(r, 1), u64(context.getGuildId()));
             if (guild != null)
                 fence(s.one("SELECT zone_id FROM guild WHERE guild_id=?", r -> r.getInt(1), u64(guild)));
-            if (guild == null)
-                return null;
+            var launch = TrialLaunchAuthority.load(s,original.getRequestId(),true);
+            if (launch == null || !TrialLaunchAuthority.original(launch).equals(original) || launch.getBattleId() != event.getBattleId())
+                throw new SQLException("历练战报缺少原开战对局绑定");
+            if (launch.getState() == 3) {
+                var finished = s.one("SELECT result_hash FROM guild_trial_battle WHERE battle_id=? AND state=2",r -> r.getBytes(1),u64(event.getBattleId()));
+                if (finished != null && Arrays.equals(finished,digest)) return null;
+                throw new InvalidResult("历练原件已经终局，拒绝重新发奖");
+            }
+            TrialLaunchAuthority.verifyProjection(s,original,true);
             byte[][] before = s.one("SELECT context_proto,result_hash FROM guild_trial_battle WHERE battle_id=?",
                     r -> new byte[][] {r.getBytes(1), r.getBytes(2)}, u64(event.getBattleId()));
             if (before == null)
@@ -544,10 +655,8 @@ public final class GuildActivityStore {
                 throw new InvalidResult("历练战报超过安全计数保留窗口，需人工处理");
             // RPC未知时后台重投原request_id取回同battleID，确认后才允许结果关联。
 
-            // 多局同活动时按完整上下文与战报名单逐一匹配，不能把另一邀请借来发奖。
-            var candidates = s.list("SELECT request_proto FROM guild_trial_lobby WHERE guild_id=? AND activity_id=? AND battle_id=?",
-                    r -> r.getBytes(1), u64(context.getGuildId()), context.getActivityId(), u64(event.getBattleId()));
-            StartActivityBattleRequest start = null;
+            // 名单只取永久开战原件；客户端房间投影被清理后仍可结算同一局。
+            StartActivityBattleRequest start = TrialLaunchAuthority.start(original);
             Set<Long> team = new HashSet<>();
             int teamZeroCount = 0;
             for (var t : event.getTeamsList())
@@ -559,18 +668,8 @@ public final class GuildActivityStore {
                 }
             if (teamZeroCount != 1)
                 throw new InvalidResult("历练战报缺少唯一己方队伍");
-            for (byte[] bytes : candidates) try {
-                    var q = StartActivityBattleRequest.parseFrom(bytes);
-                    if (q.getActivityContext().equals(context) && new HashSet<>(q.getMemberPlayerIdsList()).equals(team)) {
-                        if (start != null)
-                            throw new InvalidResult("历练上下文多义");
-                        start = q;
-                    }
-                } catch (com.google.protobuf.InvalidProtocolBufferException bad) {
-                    throw new SQLException(bad);
-                }
-            if (start == null)
-                throw new InvalidResult("历练结果没有匹配的已授权开战名单");
+            if (!new HashSet<>(start.getMemberPlayerIdsList()).equals(team))
+                throw new InvalidResult("历练战报名单与永久原同意不符");
             if (start.getBattleConfigId() != event.getBattleConfigId() || event.getOutcomeValue() == 1 && event.getWinnerTeamIndex() != 0)
                 throw new InvalidResult("历练战报副本或胜方冲突");
             var row = tables.guildActivity().find(context.getActivityId()).orElse(null);
@@ -611,6 +710,7 @@ public final class GuildActivityStore {
                             + "VALUES(?,?,?,?,2,?,?,?) ON DUPLICATE KEY UPDATE "
                             + "state=2,result_hash=VALUES(result_hash),result_proto=VALUES(result_proto)",
                     u64(event.getBattleId()), u64(context.getGuildId()), context.getActivityId(), context.toByteArray(), now, digest, raw);
+            TrialLaunchAuthority.update(s,original,event.getBattleId(),true,new byte[0],now);
             return null;
         });
     }
@@ -624,7 +724,13 @@ public final class GuildActivityStore {
         for (var row : due) {
             if (d.expired())
                 break;
-            boolean queued = sql.tx(d, s -> {
+            boolean queued = baseSql.tx(d, s -> {
+                // owed与过户/导入共用P首锁。冻结先赢就保留待办；这里不捕获当前账号来替换原授权。
+                Long listing = s.one("SELECT trade_listing_id FROM player WHERE player_id=? FOR UPDATE",r -> u64(r,1),u64(row[1]));
+                if (listing == null || listing != 0) {
+                    s.update("UPDATE guild_activity_reward_owed SET next_attempt_ms=? WHERE reward_id=? AND status=0",now+1000,u64(row[0]));
+                    return false;
+                }
                 var t = jdbc(s, d);
                 t.one("SELECT player_id FROM guild_player_op_seq WHERE player_id=? AND stream=2 FOR UPDATE",
                         r -> GuildJdbc.u64(r, 1), row[1]);
@@ -677,6 +783,43 @@ public final class GuildActivityStore {
         sql.tx(d, s -> {
             s.update("INSERT IGNORE INTO guild_activity_result_poison(partition_id,offset_id,payload,topic,created_ms) VALUES(?,?,?,?,?)",
                     partition, u64(offset), payload, topic, now);
+            return null;
+        });
+    }
+    public void poisonBattle(long battle, String topic, int partition, long offset, byte[] payload, long now, Deadline d) throws SQLException {
+        byte[] contextBytes = baseSql.read(d,s -> s.one("SELECT context_proto FROM guild_trial_battle WHERE battle_id=?",r -> r.getBytes(1),u64(battle)));
+        if (contextBytes == null) throw new SQLException("历练隔离缺少已绑定对局，保留ACTIVE等待原开战恢复");
+        BattleActivityContext context;
+        try { context = BattleActivityContext.parseFrom(contextBytes); }
+        catch (com.google.protobuf.InvalidProtocolBufferException bad) { throw new SQLException("历练隔离原上下文损坏",bad); }
+        var original = launchOriginal(context.getLaunchRequestId(),d);
+        if (!TrialLaunchAuthority.start(original).getActivityContext().equals(context)) throw new SQLException("历练隔离原件不符");
+        var observed = baseSql.read(d,s -> TrialLaunchAuthority.load(s,original.getRequestId(),false));
+        if (observed != null && observed.getState() == 3) {
+            // 终局投影不可复活；角色此后可能已过户，重复毒消息只追加审计，不再以当前owner补验旧授权。
+            baseSql.tx(d,s -> {
+                var finished = TrialLaunchAuthority.load(s,original.getRequestId(),true);
+                if (finished == null || finished.getState() != 3 || finished.getBattleId() != battle
+                        || !original.equals(TrialLaunchAuthority.original(finished))) throw new SQLException("历练隔离终局原件冲突");
+                TrialLaunchAuthority.verifyProjection(s,original,false);
+                s.update("INSERT IGNORE INTO guild_activity_result_poison(partition_id,offset_id,payload,topic,created_ms) VALUES(?,?,?,?,?)",
+                        partition,u64(offset),payload,topic,now);
+                return null;
+            });
+            return;
+        }
+        baseSql.tx(d,s -> {
+            TrialLaunchAuthority.lockOwners(s,original);
+            s.one("SELECT guild_id FROM guild WHERE guild_id=? FOR UPDATE",r -> u64(r,1),u64(original.getGuildId()));
+            var launch = TrialLaunchAuthority.load(s,original.getRequestId(),true);
+            if (launch == null || launch.getBattleId() != battle || !original.equals(TrialLaunchAuthority.original(launch)))
+                throw new SQLException("历练隔离缺少同一原对局绑定");
+            s.update("INSERT IGNORE INTO guild_activity_result_poison(partition_id,offset_id,payload,topic,created_ms) VALUES(?,?,?,?,?)",
+                    partition,u64(offset),payload,topic,now);
+            if (launch.getState() != 3) {
+                TrialLaunchAuthority.update(s,original,battle,true,new byte[0],now);
+                s.update("UPDATE guild_trial_battle SET state=4 WHERE battle_id=? AND state IN(1,3)",u64(battle));
+            }
             return null;
         });
     }

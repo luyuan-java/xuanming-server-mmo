@@ -2,6 +2,8 @@ package com.game.api;
 
 import com.game.proto.match.StartActivityBattleRequest;
 import com.game.proto.match.StartActivityBattleResponse;
+import com.game.proto.match.CancelActivityBattleRequest;
+import com.game.proto.match.CancelActivityBattleResponse;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -10,7 +12,8 @@ import java.util.concurrent.CompletableFuture;
  * 契约类（{@code com.game.proto.match.*}，先例 {@link AccountLoginService}）。
  *
  * <p><b>隔离</b>：{@code match_internal.proto} 没有标客户端服务、不在消息号白名单，gate 只调 {@link ClientMessageService#handle}，客户端够不到这里；
- * 调用方鉴权靠 Dubbo 调用方 MAC（{@code GAME_DUBBO_SECRET}）。所以没有基线「带会话 metadata 调用回 PermissionDenied」那条分支。
+ * 调用方鉴权靠 Dubbo 调用方 MAC（{@code GAME_DUBBO_SECRET}）；Cancel额外对完整protobuf正文签guild，并核绑定原摘要的match回包，
+ * 独立密钥为{@code MMORPG_MATCH_INTERNAL_SECRET_GUILD}。缺装配或结果未知均不能作为取消完成证明。
  *
  * <p>契约（调用方必须知道的全部）：
  * <ul>
@@ -28,4 +31,9 @@ import java.util.concurrent.CompletableFuture;
 public interface MatchInternalService {
 
     CompletableFuture<StartActivityBattleResponse> startActivityBattle(StartActivityBattleRequest request);
+
+    /** 取消绑定完整原Start；只有已提交且battle_id=0的墓碑可确认不再开战。实现缺失必须失败。 */
+    default CompletableFuture<CancelActivityBattleResponse> cancelActivityBattle(CancelActivityBattleRequest request) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("活动取消尚未装配，原请求仍须恢复"));
+    }
 }

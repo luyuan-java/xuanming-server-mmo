@@ -33,10 +33,12 @@ public final class JdbcPlayerTables implements PlayerDirectory, LedgerReader {
 
     @Override
     public Read read(Deadline budget, long playerId) throws SQLException {
-        byte[][] data = jdbc.read(budget, s -> {
-            byte[][] found = s.one(STATE_SQL, row -> new byte[][] {row.getBytes(1)}, AuthorityJdbc.u64(playerId));
-            return found;
-        });
+        return jdbc.read(budget, s -> readLocked(s,playerId));
+    }
+
+    /** 强制作废的证明必须在同P内复读；事务外旧账本不能证明并发消费尚未落盘。 */
+    static Read readLocked(AuthorityJdbc.Session session, long playerId) throws SQLException {
+        byte[][] data = session.one(STATE_SQL, row -> new byte[][] {row.getBytes(1)}, AuthorityJdbc.u64(playerId));
         if (data == null) {
             return Read.absent();
         }

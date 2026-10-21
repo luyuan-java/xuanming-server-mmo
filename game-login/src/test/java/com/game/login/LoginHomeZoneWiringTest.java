@@ -93,13 +93,13 @@ class LoginHomeZoneWiringTest {
     }
 
     @Test
-    void 合服围栏的bean在批次7点3之前是恒放行的OPEN() {
-        assertThat(configuration.zoneMergeFence()).isSameAs(ZoneMergeFence.OPEN);
+    void 合服围栏的生产bean使用真实SQL预检() {
+        assertThat(configuration.zoneMergeFence(org.mockito.Mockito.mock(javax.sql.DataSource.class),org.mockito.Mockito.mock(com.game.login.dispatch.LoginWorkerPool.class))).isInstanceOf(com.game.discovery.zone.SqlZoneMergeFence.class);
     }
 
     @Test
     void 建角bean的归属区取会话zone_装配里没有进程zone() throws Exception {
-        CreatePlayerHandler handler = handlerWith(configuration.zoneMergeFence());
+        CreatePlayerHandler handler = handlerWith(ZoneMergeFence.OPEN);
 
         CreatePlayerResponse fromZone2 = create(handler, sessionIn(2));
         CreatePlayerResponse fromZone3 = create(handler, sessionIn(3));

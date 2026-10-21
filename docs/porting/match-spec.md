@@ -2404,3 +2404,43 @@ game-gateway 90、game-data 305、game-robot 408。
 评级事务使用 native 连续 outbox 与 source 停写行锁；投榜为 RankAdminService 原生 Triple 20917/group rank，按方法签名，只有来源停止且游标到齐才允许请求封榜。客户端完整 Join/Team 原意图发包前原子落盘，取消/清除按原字符串 CAS，恢复不重新发号。
 
 对应规范与验收边界以主仓 `docs/design/cross-zone-matchmaking.md` §13 为准。本批不是旧 Redis 逻辑逐字复制：用户要求的全球权威、区域调度和未知恢复改变了存储与失败语义；旧本地兼容模式必须显式关闭全球功能，生产不允许回退。16 模块指定回归（`tests-lease-focused-6.log`）已通过：真 TiDB9/9、scene备战45/45、执行端围栏3/3；完整模块回归与最新终态补充另记。Unity匹配/Team/原子文件/Commerce文件59/59、0跳过。本机证据不能代替跨洲进程链、容量与生产灰度验收。
+
+## 2026-10-21 活动开战未知结果的安全取消（源码候选）
+
+Java global活动新增 `CancelActivityBattle`，直接使用共享protobuf请求与响应。提供方先核完整原Start正文的guild HMAC；独立密钥只读 `MMORPG_MATCH_INTERNAL_SECRET_GUILD`，方法 `/match.MatchInternal/CancelActivityBattle`。可信回包以caller match签 `/reply`，并带清auth后的原请求摘要。缺密钥、缺全局SQL装配、工作池拒收、预算到期或SQL结局未知都只能异常完成，不能被调用方视为已取消。
+
+取消和 `reserveDirect` 在同一个 `(kind=2,owner_id,request_high,request_low)` 主键锁内裁决。没有成局时写原payload与 `GlobalDirectIntentRow.cancelled=7` 墓碑；迟到Start、直接reserve和重启重放均拒复活。已成局时不取消战斗，只返回固定battle_id和真实formation_state(1..5)。Start重放也带真实formation_state；调用方不能把“当前查不到”或“成局state”单独当安全释放依据。原payload不同一律拒绝，不以当前角色、名单或活动上下文补填。
+
+本批新增provider正文篡改/回包绑定/缺装配失败回归和TiDB取消先赢、重启及并发单赢家源码；内部服务与新取消消息都不进入客户端路由。仅做静态UTF8/空白/diff检查，未执行生成、编译或测试；真实TiDB与RPC运行由主控统一验收。
+
+全局Start与Cancel同时要求activity_context.launch_request_id非0且等于request_id；旧非global活动夹具保留既有规则。遭持久取消的Start只回INTERNAL，不能以Start负答当取消证明，调用方必须核签Cancel原摘要回执。
+
+## 2026-10-21 全球逻辑权威审计续批（源码候选，未编译、未运行）
+
+全球 Match 的 plan/commit/join/cancel/status 保留 gate 原账号及 owner_revision；探测 binding 用明确选择的 SessionContext protobuf 字节摘要，profile 与票均保存原身份。实际事务首锁 player，再锁原 profile/票/请求历史；全员 Claim 先 unsigned player 升序。Join 与 Cancel 的永久意图和先撤销墓碑也保存原身份，缺原件或跨账号、归属修订及 ABA 不可复用旧 UUID。直接 Team 开战和补拉显式经 TeamDispatcher → TeamService → TeamBattlePort → MatchTeamBattle → 正规内部 RPC 传播原件，direct intent 同存原身份，未从当前 owner 补权。
+
+原来 Java 只在 LIMIT256 页内、且只试前32个锚点凑组，会把后页同区伙伴误判为不足。现在全局锚点稳定 keyset 每轮32个，peer 查询先用机房/lane 索引完成原票 JOIN、首选区、逐人等待、硬 RTT、有效期、评分等资格过滤，再 LIMIT 到所需人数。先尝试整批本区，再在逐人等满后跨区；只前移实际尝试项。首选区取完整有效回执的最小 RTT，同值按无符号机房号；临时缺席节点不改首选区。Claim 仍重核原 profile 字节、原身份、本区/逐人跨区等待与现行 RTT。评分复用既有 Tolerance 配置，启停、曲线和终态兜底不另硬编码。
+
+每票最多16条机房投影，与 Join、续测、Claim、Cancel、失败回队和终态同事务维护；后台每轮修32原票、删64过期索引，首轮修复完成之前禁跨区。修复游标仅在 SQL 提交成功后前移。明确过期的 queued 票在原票锁下转终态；新空占位明确 state4，精确识别的旧空占位可转换，其余未知 state 继续拒绝。ready 原票有独立稳定游标，每轮至多提交2个恢复工作并共享既有16许可；只有原固定 battle operation/instance 明确 ABSENT/ABORTED，才释放同原成局名单的精确票。活房与 UNKNOWN 不放行，前几张长期未知票不挡后续离线票。
+
+生产挑战邀请原件迁至 match_global_challenge，首次新邀请在 unsigned 双方 P 锁内捕获并固定目标归属，发起者始终用原会话。相同发起者/config/双方身份重推复用原邀请，不刷新期限；其他邀请占坑明确拒绝。接受/拒绝按原双方身份复核，按 P → invitation → direct → ticket → 新 formation 提交，接受和全员占用没有跨事务空窗。推送失败保留原 TTL，重试不改名单/config。通知只取公开角色名，依赖失败留空，禁止把私有登录账号填入 challenger_name。Redis 只用于在线路由、展示和明确开发兼容路径。单行 policy HMAC 指纹校验 normalized wait/hard/profileTTL、评分全部曲线参数、PVE 人数与挑战 TTL；不存密钥明文，副本策略不同拒启，调整必须停全部副本受控变更。
+
+好友补齐 game.run-mode=prod、未配置及未知模式的 TiDB 门禁，并在早期池 BPP 直接读 Environment，不能只依赖 Spring prod profile。Trade/Mall/Friend/Mail 的既有 SQL 原件、player 首锁、版本/租约及幂等接缝沿当前源码复核；Mail 与 Trial/Native pending fence 由对应专属批维护。另查出 TeamStore 仍以 Redis 记录/成员/开战锁作权威，已交专属 Team SQL 迁移批，不把本段 Actor 传播误报为全队伍强一致完成。
+
+参考旧 Go 仓 D:/luyuan/xuanming-server 的真实 trade_repo.go、friend_repo.go、matchmaker/internal/data/match.go：旧 trade/match 仍为 Redis WATCH/CAS 原件，不能机械复制后宣称满足此次 TiDB 全球强一致要求；friend 的成对/玩家提交锁及回执重放校验是需要保留的行为边界。本批仅核源码、UTF8/空白/diff 与清单哈希；新增确定性源码回归和真 TiDB 场景尚未运行，后续完整生成、Maven、真库与双区结果由主控逐项登记。
+2026-10-21 后续安全更正：单次 QueryBattleCreation=ABSENT 不构成可释放证明，可能仍有在途 Create。Ready 回收现先向原 operation 与固定 instance 发条件 Destroy/Cancel，复查只接受 ABORTED 原墓碑；取消或复查未知均保留原票。对应 GlobalReadyRecoveryTest 加取消回包后仍 ABSENT 不释放断言。此前27路径manifest为历史快照，后续批源码哈希覆盖该文件，不以静态记录冒充运行验证。
+
+
+## 2026-10-21 观战原请求、不可拆队补位与提交互斥收口（仅源码，待统一验收）
+
+全球观战以客户端原UUID永久保存请求正文、原账号/修订、固定Add、回执及取消证明；当前head只决定新请求，不替旧操作补权。Add许可先落SQL，固定operation/instance/原截止；只有对应Remove的cancelled正证明才能关闭watching，Query ABSENT、TTL或传输成功均不算。恢复按每个state索引各取8再合并8、固定高水位、2在途推进。补票从同P原参战票或原watch/history/head取op，通知只用公开角色名。Battle执行端及每包旧连接/op校验由独立批维护，不能用本段静态阅读替代其运行验收。
+
+Join、挑战、活动先在完整route/P内保存原请求、原owner、原profile与固定观战退出原件；非空pending0占位排斥新观战和其它参战。未许可Add的旧head/history与新意图同事务关闭，已许可Add只沿原件取消。Join/活动/挑战各自原件重试不捕获当前新watch；独立500ms恢复固定HWM/keyset8、各2在途，UNKNOWN保留。原profile失效也须等退出正证明，再安全终结原票，不能换新profile续旧意图。挑战接受先state4待续与全员pending0同事务，最后同全P提交成局/接受state2。活动额外核guild永久launch摘要、完整确定Start与原全员ACTIVE身份。
+
+整队首次Team原launch已固定退出原件；首次Match接收又保存网络原件与直接开战的固定F，未知重试不重取profile或换节点。Team/Trial原ACTIVE角色投影与匹配票共用MatchEntryAuthority提交检查，填补launch落库至Match票落库的空窗；首次Team/Trial提交也在全P核无原票，双向互斥。每条新请求与终态恢复都先取全局metaS，再完整zone围栏与unsigned全P；Match本域后台修复、租约、policy、归档、评级与投榜写也受同维护屏障。
+
+PVE每支完整party或solo是一条SQL queue unit：每size桶资格过滤后最多5个候选，总至多25，以精确装箱凑目标人数，绝不拆队。单位保存完整票/原TeamLaunch/profile；所有机房交集取全员最大RTT，每人都等满才跨物理机房。本区1秒/跨区2秒共享预算，固定keyset只推进实际尝试项；首次投影修复完成前不跨区。只有固定F5正证明才能整单重排，保留UUID/ticket/原owner/名册/最初enqueue/profile，原票回queued且SQLnow+1秒notBefore；满员直开失败终止。任一成员主动撤、过期/离线维护均整单取消；先取消后Start留永久unit/D/Join墓碑。
+
+home与物理机房是两条轴：票的zone固定首次SQL player.zone_id，Team使用同P原home；修复或Claim发现当前home不同只能拒绝，不能重写旧原件。Match读取Team唯一typed SQL policy完整原件并纳自身指纹，每事务拒不同世代。allowCrossZone=false时机房投影在LIMIT前同home过滤，最终Claim全P再核组合所有unit/solo的原home集合；允许跨home才放开，仍须全员硬RTT/逐人等待。PVE人数档0默认、1即时、2至副本上限沿MatchModes单源校验。
+
+更正前节ready概述：单次ABSENT不能释放，必须先对原固定创建operation/instance落Destroy取消，再Query确认ABORTED；PRESENT/UNKNOWN继续保留。该批补充原生TiDB回归覆盖原UUID/ABA、退出正证明、九项HWM、Team/Trial入口互斥、3+2整队、取消竞争、禁止半队、F5整队重排、过期整单、原profile/home及policy变化拒绝。所有生成、编译、单测、真库与双区/多副本验收尚未执行，由主控资源门禁后统一运行；本条不宣称整批运行完成。

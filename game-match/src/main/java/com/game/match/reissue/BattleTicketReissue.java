@@ -57,6 +57,9 @@ public final class BattleTicketReissue {
     private final MatchMetrics metrics;
     private com.game.match.global.GlobalMatchService global;
     public BattleTicketReissue withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
+    public RequestBattleTicketResponse reissue(com.game.api.proto.SessionContext actor,long battle,Deadline deadline){
+        return global==null?reissue(actor.getPlayerId(),battle,deadline):global.reissue(actor,battle,deadline);
+    }
 
     public BattleTicketReissue(PlacementStore placements, PlacementDialer dialer, MatchMetrics metrics) {
         this.placements = Objects.requireNonNull(placements, "placements");
@@ -72,7 +75,7 @@ public final class BattleTicketReissue {
      * @param deadline 本次请求的截止
      */
     public RequestBattleTicketResponse reissue(long playerId, long battleId, Deadline deadline) {
-        if(global!=null)return global.reissue(playerId,battleId);
+        if(global!=null)throw new SecurityException("全球补票不能丢弃原会话");
         String battle = Long.toUnsignedString(battleId);
         if (playerId == 0) {
             log.warn("[reissue] 补签缺少会话身份 battle_id={}", battle);

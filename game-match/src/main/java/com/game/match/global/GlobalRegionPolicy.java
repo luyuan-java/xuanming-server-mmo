@@ -1,6 +1,9 @@
 package com.game.match.global;
 
 import com.game.api.proto.BattleNodeInfo;
+import com.game.match.MatchProperties;
+import com.game.match.matcher.Tolerance;
+import com.game.match.support.MatchModes;
 import com.game.match.global.pb.*;
 import com.game.proto.match.NetworkProbeReceipt;
 import java.util.*;
@@ -15,7 +18,8 @@ public final class GlobalRegionPolicy {
             if(r.getGrant().getPhysicalRegion()!=0 && r.getGrant().getPlanId().equals(profile.getPlanId())
                     && r.getGrant().getSessionBinding().equals(profile.getSessionBinding()) && r.getSampleCount()>=3
                     && r.getRttMs()>0 && r.getRttMs()<=hard && r.getExpiresAtMs()>now && r.getMeasuredAtMs()<=now
-                    && r.getMeasuredAtMs()<=r.getGrant().getExpiresAtMs()) result.put(r.getGrant().getPhysicalRegion(),r.getRttMs());
+                    && r.getMeasuredAtMs()<=r.getGrant().getExpiresAtMs() && r.getExpiresAtMs()<=r.getGrant().getExpiresAtMs()
+                    && r.getGrant().getExpiresAtMs()>now) result.put(r.getGrant().getPhysicalRegion(),r.getRttMs());
         } catch(com.google.protobuf.InvalidProtocolBufferException e) { return Map.of(); }
         return result;
     }
@@ -25,21 +29,40 @@ public final class GlobalRegionPolicy {
                         .thenComparing((a,b)->Integer.compareUnsigned(a.getKey(),b.getKey())))
                 .map(Map.Entry::getKey).orElse(0);
     }
+    /** 首选区取完整有效profile，不随当前在线节点或hard阈值改变。 */
+    public static int preferred(GlobalProbeProfile profile,long now) {
+        var values=latencies(profile,now,Integer.MAX_VALUE);
+        return preferred(values,values.keySet());
+    }
+    public static long ratingTolerance(GlobalTicketRow anchor,long now,MatchProperties.Rating rating) {
+        return Tolerance.of(rating.tolerance()).anchorCenti(rating.enabled()&&MatchModes.rated(anchor.getMode()),Math.max(0,(now-anchor.getEnqueuedMs())/1000));
+    }
+    public static boolean ratingEligible(GlobalTicketRow anchor,GlobalTicketRow member,long now) {
+        return ratingEligible(anchor,member,now,new MatchProperties.Rating(null,null,null,null,null));
+    }
+    public static boolean ratingEligible(GlobalTicketRow anchor,GlobalTicketRow member,long now,MatchProperties.Rating rating) {
+        return Tolerance.within(anchor.getRatingCenti(),member.getRatingCenti(),ratingTolerance(anchor,now,rating));
+    }
+    public static Map<Integer,BattleNodeInfo> nodes(List<BattleNodeInfo> nodes) {
+        Map<Integer,BattleNodeInfo> result=new TreeMap<>(Integer::compareUnsigned);
+        for(var node:nodes)if(node.getAccepting()&&node.getPhysicalRegion()!=0&&!node.getInstanceId().isBlank()
+                &&!node.getRpcHost().isBlank()&&node.getRpcPort()!=0)result.merge(node.getPhysicalRegion(),node,
+                (a,b)->Integer.compareUnsigned(a.getRoomCount(),b.getRoomCount())<=0?a:b);
+        return result;
+    }
     public static boolean sameLane(GlobalTicketRow a,GlobalTicketRow b) {
         return a.getMode()==b.getMode() && a.getConfigId()==b.getConfigId() && a.getTeamSize()==b.getTeamSize();
     }
     public record Choice(List<GlobalTicketRow> members,BattleNodeInfo node) { public Choice { members=List.copyOf(members); } }
     public static Choice choose(List<GlobalTicketRow> candidates,List<BattleNodeInfo> nodes,long now,GlobalMatchProperties config) {
-        Map<Integer,BattleNodeInfo> byRegion=new TreeMap<>(Integer::compareUnsigned);
-        for(var node:nodes) if(node.getAccepting()&&node.getPhysicalRegion()!=0&&!node.getInstanceId().isBlank()
-                && !node.getRpcHost().isBlank()&&node.getRpcPort()!=0) byRegion.merge(node.getPhysicalRegion(),node,
-                (a,b)->Integer.compareUnsigned(a.getRoomCount(),b.getRoomCount())<=0?a:b);
+        var byRegion=nodes(nodes);
         Map<Long,Map<Integer,Integer>> rtts=new HashMap<>();
         for(var row:candidates) try {rtts.put(row.getPlayerId(),latencies(GlobalProbeProfile.parseFrom(row.getProfile()),now,config.hardLatencyMs()));}
         catch(com.google.protobuf.InvalidProtocolBufferException e){rtts.put(row.getPlayerId(),Map.of());}
         for(int pass=0;pass<2;pass++) for(var anchor:candidates.stream().limit(32).toList()) {
             if(anchor.getState()!=1||anchor.getNotBeforeMs()>now||anchor.getExpiresMs()<=now||anchor.getTeamSize()<1||anchor.getTeamSize()>10) continue;
-            int preferred=preferred(rtts.getOrDefault(anchor.getPlayerId(),Map.of()),byRegion.keySet());
+            int preferred;
+            try{preferred=preferred(GlobalProbeProfile.parseFrom(anchor.getProfile()),now);}catch(com.google.protobuf.InvalidProtocolBufferException e){continue;}
             for(var region:byRegion.keySet()) {
                 if(pass==0&&region!=preferred)continue;
                 if(!rtts.getOrDefault(anchor.getPlayerId(),Map.of()).containsKey(region)
@@ -51,10 +74,11 @@ public final class GlobalRegionPolicy {
                     if(row.getPlayerId()==anchor.getPlayerId())continue;
                     if(!sameLane(anchor,row)||row.getState()!=1||row.getNotBeforeMs()>now||row.getExpiresMs()<=now)continue;
                     var latency=rtts.getOrDefault(row.getPlayerId(),Map.of());
-                    if(!latency.containsKey(region)||(pass==0&&preferred(latency,byRegion.keySet())!=region)
+                    int rowPreferred;
+                    try{rowPreferred=preferred(GlobalProbeProfile.parseFrom(row.getProfile()),now);}catch(com.google.protobuf.InvalidProtocolBufferException e){continue;}
+                    if(!latency.containsKey(region)||(pass==0&&rowPreferred!=region)
                             ||(pass==1&&now-row.getEnqueuedMs()<config.waitSeconds()*1000L))continue;
-                    long tolerance=(100+Math.min(900,Math.max(0,(now-anchor.getEnqueuedMs())/1000)*10))*100;
-                    if((anchor.getMode()==1||anchor.getMode()==3)&&Math.abs(row.getRatingCenti()-anchor.getRatingCenti())>tolerance)continue;
+                    if(!ratingEligible(anchor,row,now))continue;
                     members.add(row);
                 }
                 if(members.size()==anchor.getTeamSize()&&members.stream().anyMatch(t->t.getPlayerId()==anchor.getPlayerId()))

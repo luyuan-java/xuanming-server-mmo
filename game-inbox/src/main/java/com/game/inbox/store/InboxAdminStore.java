@@ -122,11 +122,13 @@ public final class InboxAdminStore {
         record Outcome(VoidAction action, PlayerInboxItemState state) {
         }
         Outcome outcome = jdbc.tx(budget, s -> {
+            InboxSql.Owner owner = InboxSql.lockPlayer(s, budget, p.playerId());
             player_inbox_stream stream = InboxStore.lockStream(s, shard, p.playerId(), p.domain());
             if (stream == null) {
                 return new Outcome(VoidAction.NOT_FOUND, PlayerInboxItemState.PLAYER_INBOX_ITEM_UNSPECIFIED);
             }
             player_inbox_item_row row = InboxStore.readItem(s, shard, p.playerId(), p.domain().getNumber(), p.seq());
+            InboxSql.requireOriginalOwner(row, owner);
             VoidAction action = InboxRules.decideVoid(row);
             long now = nowMs.getAsLong();
             PlayerInboxItemState state;
@@ -180,8 +182,8 @@ public final class InboxAdminStore {
     /**
      * 强制模式（mode = FORCE_MISMATCH，评审 M1，PARITY 第 ① 条）：终结一条被 scene 回放核对判 MISMATCH、因而永久停用该域的已投递行。
      * <ol>
-     *   <li>事务外读该玩家<b>已落盘</b>的账本（不在持有行锁时等它）；读失败抛（回 StoreUnavailable，可重试），不改任何状态；</li>
-     *   <li>开事务锁流行，按主键复读行：不存在 / 已是终态沿用普通模式的结论；仍 PENDING 时按 {@link LedgerProofs#proveNeverExecuted} 判定。
+     *   <li>持路由/P核原owner，锁流行、按主键复读条目，再在同P读取该玩家<b>已落盘</b>账本；读失败不改任何状态；</li>
+     *   <li>不存在 / 已是终态沿用普通模式结论；仍 PENDING 时按 {@link LedgerProofs#proveNeverExecuted} 判定。
      *       证明成立才以「仍 PENDING、已投递、request_id 不变」为条件改 VOIDED（finalized_by = ADMIN、void_reason = 请求的原因），open_count − 1，
      *       同事务写审计 FORCE_VOID（reason = note）；不成立 → ItemStateConflict + force_verdict，行不变、不写审计。</li>
      * </ol>
@@ -194,23 +196,25 @@ public final class InboxAdminStore {
         if (text != 0) {
             return resp.setErrorMessage(tip(text)).build();
         }
-        LedgerReader.Read read = ledgers.read(budget, p.playerId());
-        InboxLedgerState ledger = read.found() ? read.ledger() : null;
         int shard = InboxShards.rowShard(p.playerId());
         record Outcome(VoidAction action, ForceVoidProof proof, PlayerInboxItemState state, long requestId) {
         }
         Outcome outcome = jdbc.tx(budget, s -> {
+            InboxSql.Owner owner = InboxSql.lockPlayer(s, budget, p.playerId());
             player_inbox_stream stream = InboxStore.lockStream(s, shard, p.playerId(), p.domain());
             if (stream == null) {
                 return new Outcome(VoidAction.NOT_FOUND, null, PlayerInboxItemState.PLAYER_INBOX_ITEM_UNSPECIFIED, 0);
             }
             player_inbox_item_row row = InboxStore.readItem(s, shard, p.playerId(), p.domain().getNumber(), p.seq());
+            InboxSql.requireOriginalOwner(row, owner);
             if (row == null) {
                 return new Outcome(VoidAction.NOT_FOUND, null, PlayerInboxItemState.PLAYER_INBOX_ITEM_UNSPECIFIED, 0);
             }
             if (row.getState() != PENDING) {
                 return new Outcome(VoidAction.TERMINAL, null, InboxRules.stateOf(row.getState()), row.getRequestId());
             }
+            LedgerReader.Read read = JdbcPlayerTables.readLocked(s,p.playerId());
+            InboxLedgerState ledger = read.found() ? read.ledger() : null;
             ForceVoidProof proof = LedgerProofs.proveNeverExecuted(row, ledger);
             if (proof.verdict() != PlayerInboxForceVoidVerdict.PLAYER_INBOX_FORCE_VOID_PROVEN) {
                 return new Outcome(VoidAction.FORCE_REFUSED, proof, PlayerInboxItemState.PLAYER_INBOX_ITEM_PENDING, row.getRequestId());

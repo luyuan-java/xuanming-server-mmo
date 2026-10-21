@@ -882,3 +882,34 @@ verify 在 Tomcat 线程上同步执行，几条按清单 join 的 SQL（50 万�
 - **在 Java 里它对合服几乎没有用处**（写进手册）：src 被作业置 CLOSED、`ZoneAdminController` 拒绝重开，源区 gate 也已停掉，没有人还能「从源区进来」；开关打开后的实际效果是通用的
   「首登送回归属区」。另一个两版共有的性质：重定向票据不经过 assign-gate 的区服准入，归属区处于维护态（且有 scene 节点）时照样会被送过去——合服窗口内由目标 gate 上的 F2 兜住（26 {3023}），
   窗口外的普通维护会被绕过（基线 scene_manager 的跨区重定向同样不看区服状态）。这也是缺省关的理由之一。
+
+### 2026-10-21 SQL权威前缀源码切片
+
+实际源码核对：home唯一写者是PlayerStore建角与LocalPlayerImporter显式本地导入；业务快照RollbackWriter不改home，历史AdminOwnership恢复只推进围栏。尚未实现MergeZone/UnmergeZone、永久run/item清单、完整P7预检及恢复的合区维护作业；OPS作业域拒绝未知/未实现kind，不能据本段声称7.3已移植。
+
+已新增同库route_meta与64片zone_merge_fence，生产Login/SceneManager/Guild读侧使用SQL，Team/Trial/Native/导入/恢复提交按meta→zone全部64片→全P锁。player.zone_id保持唯一归属事实，不抄Go双物理表搬运；原件初始化只从真实player+显式配置区号，服务启动与缺行请求都不从Redis补权。现有合区围栏接口的OPEN仅留在明确legacy测试构造，生产不装配它。后续真正合区作业必须持同SQL原run/全片锁、有界批次CAS、同P预检以及可恢复清单，未知/失败保留围栏。
+
+本批未执行生成、编译、测试、工具初始化或维护操作；静态源码检查不等于真TiDB运行验证。
+
+### 2026-10-21 单库 SQL 合区维护原件
+
+本节追加实际移植契约，覆盖以上尚未落地的 Redis 围栏、物理搬表与非原子参与方 RPC 方案。Java 的唯一 home 是同库 `player.zone_id`，合区只 CAS 改该列、推进写者 E；账号与 owner_revision 保持原件，业务快照、资产账本、交易合同、收据不复制、不回退。帮会 `guild.zone_id` 与商品 `trade_listing.market_zone` 在同一数据库按正规清单迁移；商品上架时原区不改。
+
+正规维护原件为 `zone_merge_run`、`zone_merge_item` 和 `zone_merged_into`。run UUID 固定源/目标、操作种类、路由世代、原 run、计划数量与 SHA-256 链；item 的正规私有 protobuf 固定原玩家账号/revision/E、实体行完整原指纹。计划按 kind/无符号实体号有界分页，审批必须带精确计划 hash。每批核同 run 的 128 片永久围栏、原目录维护态及原 owner，再把实体 CAS 和 item 进度同事务提交；失败、取消请求、进程退出均不清围栏，不用 TTL 证明结束。
+
+这是维护入口，绝不由普通服务初始化、从 Redis 补元数据或自动解冻。执行前要求显式冻结 SQL meta 并排空现有写者；原件缺失、SQL 表不全、未知状态、manual 待办或 owner 未真正 released 均拒绝。合区不以租约过期替代最终写回。合区终结保留源区退役 marker；正常建角、导入、进场与写者在同 meta/fence 前缀拒绝源区，目录不能重开退役区。
+
+撤销是一个新 run，引用原已完成 run 与精确 marker，仅把原迁入清单改回，不触碰目标原住民。原迁入玩家必须仍是原账号/revision、E 恰等于迁后 E；重新登录、过户或其它写者 E 前进后拒绝撤销，不提供 force。撤销仍推进 E，不复活旧 scene 写者。所有清单和审批永久保留；全权威 SQL 本身被历史回退仍必须使用外部独立审计与恢复门禁，不能靠同一份回退元数据证明当前真相。
+
+维护采用全服短停写：先停准入、正常排空scene，再Freeze持metaX检查**全局**owner_released=1及无未决final-save，活owner则整事务拒绝、meta保持1；绝不先冻结再要求被冻住的正常释放路径排空。成功后meta0同时暂停第三zone业务写，消除第三zone actor改源帮会的缺口。每批最多16实体、30秒总预算；运行失败只回滚本批，原run和围栏保留。审批hash绑定正规PB原件链与全部源/目标守卫，源玩家数量必须等于明确expected值；实体CAS同时核完整行摘要和原leader/seller的账号/revision/E。合区保持revision，稳定LISTED托管可搬市场home；身份覆盖/历史恢复则由同一RolePendingFence经济守卫拒绝活寄售，不能借提升revision使它失权。
+
+工具入口是game-data的 `com.game.data.tools.MergeZone`（只显式调用，不自动循环、不由服务后台启动）。使用已正式生成、构建的game-data jar，按现有PropertiesLauncher方式指定loader.main。连接只取GAME_ZONE_MERGE_JDBC、GAME_MYSQL_USER、GAME_MYSQL_PASSWORD；命名空间取同一GameNamespaceBinder，实际DATABASE必须相等或显式给 --expect-database。工具先核真TiDB/强读与全部P7列，不从DSN猜业务域、不安装/启动依赖。完整顺序：
+
+1. `freeze --run <新非零UUID> --source <src> --target <dst> --expected-players <精确人数> --operator <操作者>`；两区必须已在SQL目录维护或关闭，且所有64片均已独立初始化。
+2. 反复显式 `plan --run <原UUID>`，每次只推进一批；直到state2/phase4，保存输出hash和generation到独立工单。未知提交先 `read --run <原UUID>`，不换UUID。
+3. `approve --run <原UUID> --hash <原完整hash> --operator <审批者>`。这是带权限SQL维护账号的显式审批记录，不声称仅凭自由文本operator证明两人认证。
+4. 反复显式 `apply --run <原UUID> --hash <原hash>`，再 `finish --run <原UUID> --hash <原hash>`；未完成清单finish拒绝，成功state5仍不解冻。
+5. 审核原件与后置结果后 `release --run <原UUID> --hash <原hash> --generation <独立保留的原generation> --operator <审批者>`。只CAS释放自己128片并恢复同世代meta；源marker仍拒旧源入口。该指令不是初始化工具的修复/解冻兼容分支。
+6. 未写任何实体时可 `abort --run <原UUID> --hash <当前原hash> --operator <审批者>`，再按相同hash显式release。已写实体禁止abort；只能续跑原run。撤销是新freeze，加 `--original-run <原已完成并释放的正向UUID>`、交换source/target、expected填原迁入人数，再走同一计划审批流程；原字节或任何原owner/E已变则保留冻结拒绝，不能force。
+
+生产Guild快照/映射与区榜读SQL原件，Redis继续作为投影，不要求合区期间改一份跨副本缓存真相；Gateway目录写持meta/zone前缀，退役源不能被启动seed或普通admin重开。Login同时核真实home和入口zone，避免旧源session在合区后绕过退役标记。新增回归源码为ZoneMergeSqlAuthorityTiDbTest，含正反迁移、失败留冻、P7未知/manual、完整字节CAS、ABA与meta共享锁并发；尚未执行。

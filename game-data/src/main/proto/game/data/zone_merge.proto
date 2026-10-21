@@ -1,0 +1,36 @@
+// 单库维护原件；home仍只存player.zone_id，不复制角色目录或合同。
+syntax = "proto3";
+package game.data.merge;
+option java_package = "com.game.data.merge.pb";
+option java_multiple_files = true;
+import "proto2mysql/proto2mysql_option.proto";
+option (proto2mysql.db) = true;
+
+message ZoneMergeRunRow {
+  option (proto2mysql.table_name) = "zone_merge_run";
+  option (proto2mysql.primary_key) = "run_id";
+  option (proto2mysql.index) = "state,created_ms;source_zone,created_ms;target_zone,created_ms";
+  string run_id=1; uint32 mode=2; uint32 source_zone=3; uint32 target_zone=4;
+  string generation=5; string original_run_id=6;
+  // 1计划中/2待审批/3已审批/4执行中/5完成待显式解冻/6已解冻/7未写实体的中止。
+  uint32 state=7; uint32 phase=8; uint64 cursor_id=9;
+  uint64 item_count=10; bytes plan_hash=11; string requested_by=12;
+  string approved_by=13; string released_by=14; uint64 created_ms=15;
+  uint64 updated_ms=16; uint64 expected_players=17; bytes initial_hash=18;
+}
+message ZoneMergeEntityOriginal {
+  // 1迁移玩家/2只读玩家守卫/3迁移帮会/4迁移市场商品/5只读帮会/6只读商品。
+  uint32 kind=1; uint64 entity_id=2; uint32 from_zone=3; uint32 to_zone=4;
+  string owner_account=5; uint64 owner_revision=6; uint64 owner_epoch=7;
+  bytes row_digest=8;
+  // 玩家本人，或实体原leader/seller的P；账号/revision/E均来自首次同P锁快照。
+  uint64 authority_player_id=9;
+}
+message ZoneMergeItemRow {
+  option (proto2mysql.table_name) = "zone_merge_item";
+  option (proto2mysql.primary_key) = "run_id,kind,entity_id";
+  option (proto2mysql.index) = "run_id,state,kind,entity_id";
+  string run_id=1; uint32 kind=2; uint64 entity_id=3;
+  bytes original_proto=4; uint32 state=5; // 1计划/2已核并提交，永不物理清理。
+  bytes after_digest=6; uint64 after_epoch=7;
+}

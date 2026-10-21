@@ -46,11 +46,12 @@ public class GlobalMatchConfiguration {
         if(RunMode.parse(mode)==RunMode.PROD&&(!props.enabled()||!props.requireTiDb()))
             throw new IllegalStateException("生产匹配必须启用全球 SQL 权威与 TiDB 强读");return new Object();}
     @Bean @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
-    GlobalMatchStore globalMatchStore(DataSource source,GlobalMatchProperties config)throws java.sql.SQLException{return new GlobalMatchStore(source,config);}
+    GlobalMatchStore globalMatchStore(DataSource source,GlobalMatchProperties config,MatchProperties properties)throws java.sql.SQLException{return new GlobalMatchStore(source,config,properties);}
     @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     RatingRankOutbox ratingRankOutbox(DataSource source,GlobalRankProperties config,GlobalMatchStore schema){return new RatingRankOutbox(source,config);}
-    @Bean(destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
+    @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     GlobalMatchService globalMatchService(GlobalMatchStore store,GlobalMatchProperties config,MatchProperties props,NodeDirectory<BattleNodeInfo> directory,
-            MatchIds ids,RatingReader ratings,ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlayerStatusReader players,PlacementStore projections,GatherHooks hooks){
-        return new GlobalMatchService(store,config,props,directory,ids,ratings,scenes,calls,players,projections,hooks);}
+            MatchIds ids,RatingReader ratings,ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlayerStatusReader players,PlacementStore projections,GatherHooks hooks,
+            com.game.match.spectate.SqlSpectateStore spectators){
+        return new GlobalMatchService(store,config,props,directory,ids,ratings,scenes,calls,players,projections,hooks).withSpectators(spectators);}
 }

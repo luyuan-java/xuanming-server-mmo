@@ -30,6 +30,7 @@ import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.MessageContent;
 import com.game.proto.RemoveObserverRequest;
+import com.game.proto.RemoveObserverResponse;
 import com.game.proto.SetAutoBattleRequest;
 import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.SpectateEndS2C;
@@ -101,6 +102,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     private final BattleOutbound outbound;
     private final AtomicInteger roomCount = new AtomicInteger();
     private final RoomTable<BattleRoom> rooms;
+    private final ObserverOperationLedger observerOperations;
 
     public BattleRoomServiceImpl(RoomDependencies deps) {
         this.deps = Objects.requireNonNull(deps, "deps");
@@ -110,6 +112,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         this.fingerprints = new FingerprintGuard(deps.fingerprintMode(), deps.tableFingerprint(), metrics);
         this.issuer = new BattleTicketIssuer(deps.identity(), deps.tickets(), metrics);
         this.outbound = new BattleOutbound(deps.messageIds(), deps.lobby(), metrics);
+        this.observerOperations=new ObserverOperationLedger(deps.identity().instanceId(),clock::epochMillis,ObserverOperationLedger.DEFAULT_CAPACITY);
         this.rooms = new RoomTable<>(new RoomHooks() {
             @Override
             public void onCreated(long battleId) {
@@ -129,6 +132,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     // ===================================================================================== 控制面
+    @Override public com.game.proto.QueryObserverResponse queryObserver(com.game.proto.QueryObserverRequest request){
+        scheduler.assertInLoop();if(!observerOperations.queryValid(request))return com.game.proto.QueryObserverResponse.getDefaultInstance();
+        var room=rooms.find(request.getBattleId());boolean active=room!=null&&room.isObserver(request.getObserverPlayerId())&&request.getSpectatorOperationId().equals(room.observerOperations.get(request.getObserverPlayerId()));
+        return com.game.proto.QueryObserverResponse.newBuilder().setState(active?com.game.proto.ObserverAdmissionState.OBSERVER_ADMISSION_ACTIVE:com.game.proto.ObserverAdmissionState.OBSERVER_ADMISSION_ABSENT)
+                .setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(observerOperations.instance()).build();
+    }
     @Override public boolean containsBattle(long battleId){scheduler.assertInLoop();return rooms.find(battleId)!=null;}
     @Override public boolean resultCommitPending(long battleId){scheduler.assertInLoop();var room=rooms.find(battleId);return room!=null&&room.pendingCompletion!=null;}
 
@@ -294,6 +303,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         scheduler.assertInLoop();
         IssueBattleTicketResponse.Builder response = IssueBattleTicketResponse.newBuilder();
         long playerId = request.getPlayerId();
+        if(!request.getTargetInstanceId().isEmpty()&&!deps.identity().instanceId().equals(request.getTargetInstanceId()))return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         if (playerId == 0) {
             // 0 只可能是 match 漏填：参数错误，不是 1012
             log.warn("IssueBattleTicket 请求缺少 player_id battle_id={}", Long.toUnsignedString(request.getBattleId()));
@@ -307,15 +317,18 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         eBattleTicketRole role;
         if (room.isParticipant(playerId)) {
+            if(!request.getSpectatorOperationId().isEmpty())return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
             role = eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT;
         } else if (room.isObserver(playerId)) {
+            if(!deps.identity().instanceId().equals(request.getTargetInstanceId())||request.getSpectatorOperationId().isEmpty()
+                    ||!request.getSpectatorOperationId().equals(room.observerOperations.get(playerId)))return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
             role = eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER;
         } else {
             log.warn("IssueBattleTicket 玩家不在此战斗 battle_id={} player_id={}", Long.toUnsignedString(room.battleId),
                     Long.toUnsignedString(playerId));
             return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
-        Optional<BattleAssignedS2C> assigned = issuer.issue(room.battleId, playerId, room.deadlineMs, role, TicketPath.REISSUE);
+        Optional<BattleAssignedS2C> assigned = issuer.issue(room.battleId, playerId, room.deadlineMs, role, TicketPath.REISSUE,request.getSpectatorOperationId());
         if (assigned.isEmpty()) {
             return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         }
@@ -330,40 +343,54 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         AddObserverResponse.Builder response = AddObserverResponse.newBuilder();
         long battleId = request.getBattleId();
         long observerId = request.getObserverPlayerId();
+        try{
+            if(!observerOperations.begin(request))return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+        }catch(ObserverOperationLedger.Full full){return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();}
+        catch(IllegalArgumentException invalid){return response.setErrorMessage(tip(INVALID_PARAMETER)).build();}
         BattleRoom room = rooms.find(battleId);
         if (room == null) {
+            observerOperations.cancelKnown(request.getSpectatorOperationId());
             // 1004 是 match 懒剔除观战索引的信号，不能换 tip
             log.info("AddObserver 房间不存在 battle_id={} observer={}", Long.toUnsignedString(battleId), Long.toUnsignedString(observerId));
             return response.setErrorMessage(tip(ENTITY_IS_NULL)).build();
         }
         if (observerId == 0 || request.getRouting().getGateInstanceId().isEmpty()) {
+            observerOperations.cancelKnown(request.getSpectatorOperationId());
             log.error("AddObserver 参数非法 battle_id={} observer={} gate_instance_id={}", Long.toUnsignedString(battleId),
                     Long.toUnsignedString(observerId), request.getRouting().getGateInstanceId());
             return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
         // 单槽互斥：参战者不能观战自己这局
         if (room.isParticipant(observerId)) {
+            observerOperations.cancelKnown(request.getSpectatorOperationId());
             log.warn("AddObserver 观众是参战者 battle_id={} observer={}", Long.toUnsignedString(battleId), Long.toUnsignedString(observerId));
             return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
 
         BattleRouting existing = room.routingByObserver.get(observerId);
         if (existing != null) {
+            if(!request.getSpectatorOperationId().equals(room.observerOperations.get(observerId))){
+                observerOperations.cancelKnown(request.getSpectatorOperationId());return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+            }
             return addExistingObserver(room, observerId, existing, request, response);
         }
 
         // 满员判定排在幂等之后（room.cpp:865-871）
         if (room.routingByObserver.size() >= RoomConstants.MAX_OBSERVERS_PER_ROOM) {
+            observerOperations.cancelKnown(request.getSpectatorOperationId());
             log.info("AddObserver 观众已满 battle_id={} observer={} cap={}", Long.toUnsignedString(battleId),
                     Long.toUnsignedString(observerId), RoomConstants.MAX_OBSERVERS_PER_ROOM);
             return response.setErrorMessage(tip(RATE_LIMIT_EXCEEDED)).build();
         }
         // fail-closed：登记之前签票，签不出不登记
         Optional<BattleAssignedS2C> assigned = issuer.issue(battleId, observerId, room.deadlineMs,
-                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER);
+                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER,request.getSpectatorOperationId());
         if (assigned.isEmpty()) {
+            observerOperations.cancelKnown(request.getSpectatorOperationId());
             return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         }
+        observerOperations.activate(request.getSpectatorOperationId());
+        room.observerOperations.put(observerId,request.getSpectatorOperationId());
         room.routingByObserver.put(observerId, request.getRouting());
         room.observerNames.put(observerId, request.getObserverName());
         // 只推落点分配；观战首帧随直连握手下发（此刻观众一定还没有直连）
@@ -380,10 +407,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         boolean sameSession = existing.getSessionId() == routing.getSessionId()
                 && existing.getGateNodeId() == routing.getGateNodeId()
                 && existing.getGateInstanceId().equals(routing.getGateInstanceId());
+        if(!sameSession||!existing.equals(routing))return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         Optional<BattleAssignedS2C> assigned = issuer.issue(room.battleId, observerId, room.deadlineMs,
-                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER);
+                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER,request.getSpectatorOperationId());
         if (assigned.isEmpty()) {
             // match 收到任何错误都会删观战标记：房间侧必须同步摘除并关直连
+            cancelObserverOperation(room,observerId);
             room.routingByObserver.remove(observerId);
             room.observerNames.remove(observerId);
             closeDirectOf(room, observerId, Disconnect.BATTLE_CLOSED);
@@ -391,33 +420,26 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                     Long.toUnsignedString(observerId), sameSession);
             return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         }
-        if (sameSession) {
-            // 同会话重试：重推落点分配；有活直连时再推观战快照（否则丢弃，握手时补）
-            log.info("AddObserver 幂等命中，重推落点分配 battle_id={} observer={}", Long.toUnsignedString(room.battleId),
-                    Long.toUnsignedString(observerId));
-            pushAssignment(room, observerId, assigned.get());
-            pushSpectateState(room, observerId);
-            return response.build();
-        }
-        log.info("AddObserver 幂等命中但会话已变，刷新路由 battle_id={} observer={} old_session_id={} new_session_id={}",
-                Long.toUnsignedString(room.battleId), Long.toUnsignedString(observerId), Integer.toUnsignedString(existing.getSessionId()),
-                Integer.toUnsignedString(routing.getSessionId()));
-        room.routingByObserver.put(observerId, routing);
-        room.observerNames.put(observerId, request.getObserverName());
-        // 旧客户端实例已不在：它的直连可能半开，先关掉，让分配包回落到新会话；首帧随新直连握手下发，这里不推
-        closeDirectOf(room, observerId, Disconnect.BATTLE_CLOSED);
+        // 同一原操作重试：路由和名字不可改变；重推落点并给活直连补快照。
+        log.info("AddObserver 幂等命中，重推落点分配 battle_id={} observer={}", Long.toUnsignedString(room.battleId),
+                Long.toUnsignedString(observerId));
         pushAssignment(room, observerId, assigned.get());
+        pushSpectateState(room, observerId);
         return response.build();
     }
 
     @Override
-    public void removeObserver(RemoveObserverRequest request) {
+    public RemoveObserverResponse removeObserver(RemoveObserverRequest request) {
         scheduler.assertInLoop();
+        try{observerOperations.cancel(request);}
+        catch(IllegalArgumentException|ObserverOperationLedger.Full rejected){return RemoveObserverResponse.getDefaultInstance();}
         BattleRoom room = rooms.find(request.getBattleId());
         long observerId = request.getObserverPlayerId();
-        if (room == null || !room.isObserver(observerId)) {
-            return;
+        var proof=RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(observerOperations.instance()).build();
+        if (room == null || !room.isObserver(observerId)||!request.getSpectatorOperationId().equals(room.observerOperations.get(observerId))) {
+            observerOperations.detached(request.getSpectatorOperationId());return proof;
         }
+        cancelObserverOperation(room,observerId);
         // 被动清退：先告知原因再关直连（没有直连时丢弃，战斗帧不回落）
         SpectateEndS2C end = SpectateEndS2C.newBuilder()
                 .setBattleId(room.battleId)
@@ -431,12 +453,47 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         closeDirectOf(room, observerId, Disconnect.BATTLE_CLOSED);
         log.info("RemoveObserver 完成 battle_id={} observer={} reason={}", Long.toUnsignedString(room.battleId),
                 Long.toUnsignedString(observerId), request.getReason());
+        return proof;
+    }
+
+    private void cancelObserverOperation(BattleRoom room,long player){
+        String operation=room.observerOperations.get(player);
+        if(operation==null||!observerOperations.cancelKnown(operation))throw new IllegalStateException("房内观众缺少原操作，拒绝无证明清退");
+        // 墓碑先写，随后才摘槽；已过截止仍能清理当前同操作。
+        room.observerOperations.remove(player);observerOperations.detached(operation);
     }
 
     // ===================================================================================== 直连面
 
+    @Override public boolean currentDirect(com.game.proto.BattleTicketPayload payload,DirectLink link){
+        scheduler.assertInLoop();
+        if(payload==null||link==null||!deps.identity().instanceId().equals(payload.getBattleInstanceId()))return false;
+        var room=rooms.find(payload.getBattleId());
+        if(room==null||room.directByPlayer.get(payload.getPlayerId())!=link)return false;
+        return switch(payload.getRole()){
+            case BATTLE_TICKET_ROLE_OBSERVER -> room.isObserver(payload.getPlayerId())&&!payload.getSpectatorOperationId().isEmpty()
+                    &&payload.getSpectatorOperationId().equals(room.observerOperations.get(payload.getPlayerId()));
+            case BATTLE_TICKET_ROLE_PARTICIPANT -> room.routingByPlayer.containsKey(payload.getPlayerId())&&payload.getSpectatorOperationId().isEmpty();
+            default -> false;
+        };
+    }
+
     @Override
     public OptionalInt attachDirect(long battleId, long playerId, eBattleTicketRole role, DirectLink link) {
+        scheduler.assertInLoop();
+        if(role==eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER)return OptionalInt.empty();
+        return attachDirectChecked(battleId,playerId,role,link);
+    }
+    @Override public OptionalInt attachDirect(com.game.proto.BattleTicketPayload payload,DirectLink link){
+        scheduler.assertInLoop();
+        if(!deps.identity().instanceId().equals(payload.getBattleInstanceId()))return OptionalInt.empty();
+        if(payload.getRole()==eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER){
+            var room=rooms.find(payload.getBattleId());
+            if(room==null||payload.getSpectatorOperationId().isEmpty()||!payload.getSpectatorOperationId().equals(room.observerOperations.get(payload.getPlayerId())))return OptionalInt.empty();
+        }else if(!payload.getSpectatorOperationId().isEmpty())return OptionalInt.empty();
+        return attachDirectChecked(payload.getBattleId(),payload.getPlayerId(),payload.getRole(),link);
+    }
+    private OptionalInt attachDirectChecked(long battleId,long playerId,eBattleTicketRole role,DirectLink link){
         scheduler.assertInLoop();
         BattleRoom room = rooms.find(battleId);
         if (room == null || link == null) {
@@ -592,6 +649,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if (room == null || !room.isObserver(playerId)) {
             return response.build();
         }
+        cancelObserverOperation(room,playerId);
         // 主动退出不推 166；应答由直连面在本方法返回后写出，之后才 FIN（O8）
         room.routingByObserver.remove(playerId);
         room.observerNames.remove(playerId);
@@ -813,6 +871,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     /** 观众收 166 后关其直连，然后清空观众表（{@code room.cpp:1297-1325}）；166 每次只构造一帧。 */
     private void notifySpectateEndAndClose(BattleRoom room, eSpectateEndReason reason, eBattleOutcome outcome, Disconnect disconnect) {
+        for(long observer:List.copyOf(room.observerOperations.keySet()))cancelObserverOperation(room,observer);
         if (room.routingByObserver.isEmpty()) {
             return;
         }
@@ -840,6 +899,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     /** 关房间里剩下的全部直连（按 player_id 升序；先清槽再关）。 */
     private void closeDirectConnections(BattleRoom room, Disconnect reason) {
+        for(long observer:List.copyOf(room.observerOperations.keySet()))cancelObserverOperation(room,observer);
         if (room.directByPlayer.isEmpty()) {
             return;
         }
@@ -852,6 +912,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     /** 置 closed 后经唯一删除口移除（恰好一次 onRemoved），计房间结局。 */
     private void eraseRoom(BattleRoom room, RoomEnd reason) {
+        for(long observer:List.copyOf(room.observerOperations.keySet()))cancelObserverOperation(room,observer);
         room.closed = true;
         if (rooms.find(room.battleId) == room && rooms.erase(room.battleId)) {
             metrics.roomEnd(reason);

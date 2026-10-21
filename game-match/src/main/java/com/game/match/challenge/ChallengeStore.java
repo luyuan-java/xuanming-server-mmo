@@ -5,7 +5,8 @@ import java.util.Optional;
 
 /**
  * 切磋邀请的存储（match-spec §6.3）：一条邀请 = 一条记录（按 challenge_id）+ 目标身上的一个「待应答」占坑（按目标玩家，一个人同时只能挂一条邀请）。
- * 生产实现是 Redis（{@link RedissonChallengeStore}：三段 Lua，三类键都在 {@code {match}} 一个槽里）；组件测试用内存实现，两者跑同一套契约测试。
+ * 显式开发兼容实现是 Redis（{@link RedissonChallengeStore}：三段 Lua，三类键都在 {@code {match}} 一个槽里）；组件测试用内存实现。
+ * 全球生产由GlobalMatchStore的SQL原邀请取代此权威路径，不能从Redis旧快照恢复原件。
  *
  * <p>与基线（{@code chl.go:119-155}、{@code :199-228}、{@code :291-302}）的差别都在原子性上：发起是一段脚本（占坑 + 写记录 + 设 TTL），
  * 不再有「占了坑、记录没写成」的中间态；消费是一段脚本（核对目标 + 删记录 + 摘占坑 + 留墓碑），两条并发的接受只有一条拿到记录

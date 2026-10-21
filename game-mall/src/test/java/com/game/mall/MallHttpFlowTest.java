@@ -43,7 +43,7 @@ class MallHttpFlowTest {
         jdbc.update("INSERT INTO pms_sku_stock(id,product_id,sku_code,price_minor,currency,stock,lock_stock,published) VALUES (1,1,'http-sku',1250,'CNY',10,0,1)");
         jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(1,10,1,'玄铁')");
         String buyer = "18446744073709551615";
-        String body = "{\"requestId\":\"http-request-001\",\"skuId\":1,\"quantity\":2}";
+        String body = "{\"requestId\":\"http-request-001\",\"skuId\":1,\"quantity\":2,\"buyerAccount\":\"fixture-account\",\"buyerOwnerRevision\":\"1\"}";
         HttpRequest request = signed("gateway", buyer, "POST", "/api/orders", body, System.currentTimeMillis());
         var first = send(request);
         assertThat(first.statusCode()).isEqualTo(200);
@@ -102,15 +102,15 @@ class MallHttpFlowTest {
         assertThat(call("gateway", buyer, "POST", "/internal/payments", payment).statusCode()).isEqualTo(401);
         assertThat(call("payment", "payment-adapter", "POST", "/internal/payments", payment).statusCode()).isEqualTo(200);
         assertThat(call("payment", "payment-adapter", "POST", "/internal/payments", payment).statusCode()).isEqualTo(200);
-        assertThat(call("gateway", buyer, "POST", "/api/orders/" + id + "/cancel", "").statusCode()).isEqualTo(409);
-        assertThat(json.readTree(call("gateway", buyer, "GET", "/api/orders/" + id, "").body()).get("state").asText()).isEqualTo("DELIVERY_PENDING");
+        assertThat(owned("gateway", buyer, id, true).statusCode()).isEqualTo(409);
+        assertThat(json.readTree(owned("gateway", buyer, id, false).body()).get("state").asText()).isEqualTo("DELIVERY_PENDING");
         assertThat(json.readTree(call("payment", "payment-adapter", "POST", "/internal/payments/order-view", orderQuery).body()))
-                .isEqualTo(json.readTree(call("gateway", buyer, "GET", "/api/orders/" + id, "").body()));
+                .isEqualTo(json.readTree(owned("gateway", buyer, id, false).body()));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt", Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM commerce_delivery_intent WHERE order_sn=?", String.class, id)).isEqualTo("PENDING");
         String cancelledId = json.readTree(call("gateway", buyer, "POST", "/api/orders", body.replace("001", "002")).body()).get("orderId").asText();
-        assertThat(call("gateway", buyer, "POST", "/api/orders/" + cancelledId + "/cancel", "").statusCode()).isEqualTo(200);
-        assertThat(call("gateway", buyer, "POST", "/api/orders/" + cancelledId + "/cancel", "").statusCode()).isEqualTo(200);
+        assertThat(owned("gateway", buyer, cancelledId, true).statusCode()).isEqualTo(200);
+        assertThat(owned("gateway", buyer, cancelledId, true).statusCode()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT lock_stock FROM pms_sku_stock WHERE id=1", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT stock FROM pms_sku_stock WHERE id=1", Integer.class)).isEqualTo(8);
         for (String invalid : new String[]{"0", "01", "18446744073709551616", "-1"}) {
@@ -150,5 +150,9 @@ class MallHttpFlowTest {
 
     private HttpResponse<String> send(HttpRequest request) throws Exception {
         return http.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+    private HttpResponse<String> owned(String role, String buyer, String order, boolean cancel) throws Exception {
+        return call(role, buyer, "POST", cancel ? "/api/orders/cancel" : "/api/orders/query",
+            json.writeValueAsString(new MallApi.OwnedOrder(order, "fixture-account", "1")));
     }
 }

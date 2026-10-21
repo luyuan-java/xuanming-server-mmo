@@ -59,9 +59,10 @@ public class MailConfiguration {
     }
     @Bean(destroyMethod = "close")
     DomainClientDispatch clientDispatch(MailStore store) {
-        return new DomainClientDispatch(MessageIdRegistry.loadFromClasspath(), "ClientPlayerMail",
+        return DomainClientDispatch.withSession(MessageIdRegistry.loadFromClasspath(), "ClientPlayerMail",
                 Set.of("ListMails", "ReadMail", "ClaimMailAttachments", "DeleteMails", "ClearReadMails"),
-                (method, player, request, budget) -> MailProvider.client(store, method, player, request, budget), MailProvider::error);
+                (method, session, request, budget) -> MailProvider.client(
+                        store.forActor(session), method, session.getPlayerId(), request, budget), MailProvider::error);
     }
     @Bean
     MailNotifications notifications(

@@ -311,6 +311,24 @@ class ClientDispatcherTest {
     }
 
     @Test
+    void 登录原账号和归属修订随会话转发_解绑后修订归零() {
+        EmbeddedChannel ch=verified();ch.writeInbound(request(1,ENTER_GAME_MSG,"enter"));
+        login.complete(ClientReply.newBuilder()
+            .addDirectives(SessionDirective.newBuilder().setBindAccount(BindAccount.newBuilder().setAccount(" 原账号 ")))
+            .addDirectives(SessionDirective.newBuilder().setEnterScene(enterScene().toBuilder().setOwnerRevision(7))).build());
+        ch.runPendingTasks();ch.readOutbound();
+        ch.writeInbound(request(2,TRADE_MSG,"original"));
+        var original=trade.calls.getFirst().getSession();
+        assertThat(original.getAccount()).isEqualTo(" 原账号 ");assertThat(original.getOwnerRevision()).isEqualTo(7);
+        trade.complete(ClientReply.getDefaultInstance());ch.runPendingTasks();ch.readOutbound();
+        ch.writeInbound(request(3,LEAVE_MSG,""));login.complete(unbindReply());ch.runPendingTasks();
+        ch.writeInbound(request(4,TRADE_MSG,"after-unbind"));
+        var unbound=trade.calls.getLast().getSession();
+        assertThat(unbound.getAccount()).isEqualTo(" 原账号 ");assertThat(unbound.getPlayerId()).isZero();
+        assertThat(unbound.getOwnerRevision()).isZero();assertThat(original.getOwnerRevision()).isEqualTo(7);
+    }
+
+    @Test
     void EnterScene发PlayerEnter并绑定场景_之后scene域消息转成ClientForward() {
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(1, ENTER_GAME_MSG, "x"));

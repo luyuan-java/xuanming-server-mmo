@@ -11,7 +11,10 @@ public final class MallApi {
     private MallApi() { }
 
     public record CreateOrder(@NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{8,128}") String requestId,
-                              @Positive long skuId, @Min(1) @Max(10000) int quantity) { }
+                              @Positive long skuId, @Min(1) @Max(10000) int quantity,
+                              @jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Size(min=1,max=191) String buyerAccount,
+                              @NotBlank String buyerOwnerRevision) { }
+    public record OwnedOrder(String orderId, String buyerAccount, String buyerOwnerRevision) { }
 
     /** 仅支付角色可跨买家查单，买家身份与金额仍由原订单返回。 */
     public record OrderQuery(@NotBlank @Pattern(regexp = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}") String orderId) { }

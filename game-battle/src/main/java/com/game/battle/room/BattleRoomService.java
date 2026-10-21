@@ -10,6 +10,7 @@ import com.game.proto.GetBattleStateRequest;
 import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.RemoveObserverRequest;
+import com.game.proto.RemoveObserverResponse;
 import com.game.proto.SetAutoBattleRequest;
 import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.StopWatchBattleRequest;
@@ -45,6 +46,14 @@ import java.util.OptionalInt;
  * {@code rounds}、{@code round_resolve}、{@code pushes}、{@code tickets}；{@link #roomCount()} 由装配方绑定到 {@code BattleMetrics#bindRooms}。
  */
 public interface BattleRoomService {
+    /** 每次直连上行重核原连接和原操作；关闭排队尚未执行也不能使用被替换的槽。 */
+    default boolean currentDirect(com.game.proto.BattleTicketPayload payload,DirectLink link){return false;}
+    default com.game.proto.QueryObserverResponse queryObserver(com.game.proto.QueryObserverRequest request){return com.game.proto.QueryObserverResponse.getDefaultInstance();}
+    /** 已验签的完整票据；生产实现还须核当前观战操作，不能把旧票换成同角色新槽。 */
+    default OptionalInt attachDirect(com.game.proto.BattleTicketPayload payload,DirectLink link){
+        if(payload.getRole()==eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER&&payload.getSpectatorOperationId().isEmpty())return OptionalInt.empty();
+        return attachDirect(payload.getBattleId(),payload.getPlayerId(),payload.getRole(),link);
+    }
     /** 固定执行实例内的房间存在性，只在逻辑线程查询。旧替身保守返回 false。 */
     default boolean containsBattle(long battleId){return false;}
     /** 原结果可能已提交、尚未确认时，销毁不得先宣布作废。 */
@@ -76,8 +85,8 @@ public interface BattleRoomService {
     /** 登记观众（§5.5，Q1 放进 6.2）：判定顺序 1004 → 1005 → 1005 → 幂等重签 / 重推 → 1008（满 20）→ 新观众签票、登记、推 177。 */
     AddObserverResponse addObserver(AddObserverRequest request);
 
-    /** 清退观众（§5.5）：推 166 {REMOVED, ONGOING}、摘除、关直连；房间或观众不在时什么也不做。 */
-    void removeObserver(RemoveObserverRequest request);
+    /** 原UUID/固定实例取消：先写管理器墓碑，再清原操作槽；房间不存在也留墓碑，未知不回成功证明。 */
+    RemoveObserverResponse removeObserver(RemoveObserverRequest request);
 
     // ---------------------------------------------------------------- 直连面（逻辑线程）
 

@@ -424,7 +424,7 @@ class GatherHooksCallSiteTest {
         }
 
         @Override
-        public CompletableFuture<Empty> removeObserver(RemoveObserverRequest request) {
+        public CompletableFuture<com.game.proto.RemoveObserverResponse> removeObserver(RemoveObserverRequest request) {
             return delegate.removeObserver(request);
         }
     }

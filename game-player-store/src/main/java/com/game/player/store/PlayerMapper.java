@@ -23,7 +23,7 @@ public interface PlayerMapper {
 
 
     // JDBC现有int API保留uint32位模式；SQL列始终存0..4294967295，回读先降为有符号int范围。
-    String PLAYER_COLUMNS = "player_id,account,owner_revision,trade_listing_id,zone_id,name,name_key,class_id,gender,appearance_id,level,"
+    String PLAYER_COLUMNS = "player_id,account,owner_revision,trade_listing_id,CASE WHEN zone_id>2147483647 THEN CAST(zone_id AS DECIMAL(20,0))-4294967296 ELSE zone_id END AS zone_id,name,name_key,class_id,gender,appearance_id,level,"
             + "CASE WHEN scene_config_id>2147483647 THEN CAST(scene_config_id AS DECIMAL(20,0))-4294967296 ELSE scene_config_id END AS scene_config_id,"
             + "pos_x,pos_y,pos_z,owner_epoch,owner_released,owner_lease_until,created_at,updated_at";
 
@@ -62,7 +62,7 @@ public interface PlayerMapper {
     @Insert("""
             INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, appearance_id, level,
                                 scene_config_id, pos_x, pos_y, pos_z, owner_epoch, created_at, updated_at)
-            VALUES (#{row.playerId}, #{row.account}, #{row.zoneId}, #{row.name}, #{nameKey}, #{row.classId},
+            VALUES (#{row.playerId}, #{row.account}, (CASE WHEN #{row.zoneId}<0 THEN #{row.zoneId}+4294967296 ELSE #{row.zoneId} END), #{row.name}, #{nameKey}, #{row.classId},
                     #{row.gender}, #{row.appearanceId}, #{row.level}, (CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),
                     #{row.posX}, #{row.posY}, #{row.posZ}, #{row.ownerEpoch}, #{row.createdAt}, #{row.updatedAt})
             """)
@@ -85,11 +85,13 @@ public interface PlayerMapper {
      */
     @Update("""
             UPDATE player
-               SET owner_epoch = #{nextEpoch}, owner_released = 0, owner_lease_until = #{leaseUntil}, updated_at = #{now}
+               SET owner_epoch = #{nextEpoch}, owner_revision=#{nextRevision}, owner_released = 0, owner_lease_until = #{leaseUntil}, updated_at = #{now}
              WHERE player_id = #{playerId} AND owner_epoch = #{expectedEpoch} AND trade_listing_id=0
+               AND owner_revision=#{expectedRevision}
                AND (owner_released = 1 OR owner_lease_until < #{now})
             """)
     int recoverOwnerEpoch(@Param("playerId") long playerId, @Param("expectedEpoch") long expectedEpoch,
+                          @Param("expectedRevision") long expectedRevision,@Param("nextRevision") long nextRevision,
                           @Param("nextEpoch") long nextEpoch, @Param("now") long now,
                           @Param("leaseUntil") long leaseUntil);
 
@@ -199,6 +201,18 @@ public interface PlayerMapper {
             """)
     int insertFinalAdmission(@Param("playerId") long playerId,@Param("epoch") long epoch,
                             @Param("source") String source,@Param("now") long now);
+
+    /** 只在已锁P且核原调用身份的新load中登记；旧空准入不允许UPDATE补权。 */
+    @Insert("""
+            INSERT INTO player_final_save (player_id,owner_epoch,save_seq,protocol_version,source_instance,status,
+                    admission_proto,created_at,next_attempt_at)
+            VALUES (#{playerId},#{epoch},1,1,#{source},'OPEN',#{admission},#{now},#{now})
+            """)
+    int insertFinalAdmissionOriginal(@Param("playerId") long playerId,@Param("epoch") long epoch,
+                                     @Param("source") String source,@Param("admission") byte[] admission,@Param("now") long now);
+
+    @Select("SELECT admission_proto FROM player_final_save WHERE player_id=#{playerId} AND owner_epoch=#{epoch} FOR UPDATE")
+    byte[] selectFinalAdmissionProto(@Param("playerId") long playerId,@Param("epoch") long epoch);
 
     @Insert("""
             INSERT INTO player_final_save (player_id,owner_epoch,save_seq,protocol_version,source_instance,status,

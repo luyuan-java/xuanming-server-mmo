@@ -37,10 +37,11 @@ public final class TeamRules {
     // ================================================================ 只读辅助（视图与存储层也用）
 
     /**
-     * 开战锁是否有效（rules.go:184-187）：{@code token 非空 && now < expire}；{@code now == expire} 已无效。
-     * 锁自然过期后字段不清，等下次加锁覆盖或释放清空（team-spec §1.2 第 8 条）。
+     * SQL原launch关联非空时始终有效，由持久Match终局证明释放；TTL只限制单跳预算。
+     * 旧Redis夹具没有launch关联，保留原token+TTL契约供旧脚本测试。
      */
     public static boolean matchLockActive(TeamRecordOrBuilder rec, long nowMs) {
+        if(rec!=null&&!rec.getLaunchRequestId().isEmpty())return true;
         return rec != null && !rec.getMatchLockToken().isEmpty()
                 && Long.compareUnsigned(nowMs, rec.getMatchLockExpireAtMs()) < 0;
     }
@@ -389,6 +390,7 @@ public final class TeamRules {
      * 转给其余成员里在线且 join_seq 最小的；没有在线成员不转。UNKNOWN / PRESENT 不触发（fail-closed）。
      */
     private static boolean lazyTransferLeader(TeamRecord.Builder rec, Map<Long, SessionState> sessions) {
+        if(!rec.getLaunchRequestId().isEmpty())return false;
         long leader = rec.getLeaderId();
         if (findMember(rec, leader) == null || SessionState.of(sessions, leader) != SessionState.ABSENT) {
             return false;

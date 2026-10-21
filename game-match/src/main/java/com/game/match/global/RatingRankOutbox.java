@@ -69,8 +69,7 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
             var response=call(s->s.openRankGeneration(sign(RankAdminService.OPEN_METHOD,request)));
             if(response.getErrorMessage().getId()!=0||response.getBoardId()==0)throw new IllegalStateException("评级榜代次打开被拒");
             board=response.getBoardId();
-            try(var c=source.getConnection();var p=c.prepareStatement("UPDATE match_global_rank_source SET board_id=? WHERE source_epoch=1 AND board_id=0")){
-                p.setObject(1,PbMysql.uint64(board));p.executeUpdate();}
+            mutate("UPDATE match_global_rank_source SET board_id=? WHERE source_epoch=1 AND board_id=0",board);
         }
         for(int sent=0;sent<16&&committed<guard.getProducedCursor();sent++){
             GlobalRankOutboxRow out;
@@ -78,16 +77,23 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
             var request=SubmitRankScoresRequest.parseFrom(out.getEntries()).toBuilder().setBoardId(board).build();
             var response=call(s->s.submitRankScores(sign(RankAdminService.SUBMIT_METHOD,request)));
             if(response.getErrorMessage().getId()!=0||response.getCommittedCursor()!=request.getSourceCursor())throw new IllegalStateException("评级榜尚未确认连续游标");
-            try(var c=source.getConnection();var p=c.prepareStatement("UPDATE match_global_rank_source SET committed_cursor=? WHERE source_epoch=1 AND committed_cursor=?")){
-                p.setObject(1,PbMysql.uint64(request.getSourceCursor()));p.setObject(2,PbMysql.uint64(committed));p.executeUpdate();}
+            mutate("UPDATE match_global_rank_source SET committed_cursor=? WHERE source_epoch=1 AND committed_cursor=?",request.getSourceCursor(),committed);
             committed=request.getSourceCursor();
+        }
+    }
+    private void mutate(String sql,long...values)throws SQLException {
+        try(var c=source.getConnection()){
+            c.setAutoCommit(false);try{
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);
+                try(var p=c.prepareStatement(sql)){p.setQueryTimeout(3);for(int i=0;i<values.length;i++)p.setObject(i+1,PbMysql.uint64(values[i]));p.executeUpdate();}c.commit();
+            }catch(SQLException|RuntimeException failure){try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
         }
     }
     /** 这行锁与 append 相同；回包为真实最终游标，停写后不会再产生本代 outbox。 */
     public long stopSource()throws SQLException{
         try(var c=source.getConnection()){
             c.setAutoCommit(false);
-            try{var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();db.insertIgnore(c,key);
+            try{com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();db.insertIgnore(c,key);
                 var row=db.findOneByPkForUpdate(c,key).orElseThrow();db.updateByPk(c,row.toBuilder().setStopped(true).build());c.commit();return row.getProducedCursor();}
             catch(Exception e){c.rollback();throw e;}
         }

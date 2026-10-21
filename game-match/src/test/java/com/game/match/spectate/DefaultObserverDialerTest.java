@@ -70,7 +70,7 @@ class DefaultObserverDialerTest {
         final List<RemoveObserverRequest> removes = new CopyOnWriteArrayList<>();
         final List<String> threads = new CopyOnWriteArrayList<>();
         final List<CompletableFuture<AddObserverResponse>> addScript = new ArrayList<>();
-        final List<CompletableFuture<Empty>> removeScript = new ArrayList<>();
+        final List<CompletableFuture<com.game.proto.RemoveObserverResponse>> removeScript = new ArrayList<>();
 
         synchronized ScriptedBattle nextAddTip(int tip) {
             addScript.add(CompletableFuture.completedFuture(AddObserverResponse.newBuilder()
@@ -84,8 +84,8 @@ class DefaultObserverDialerTest {
             return hanging;
         }
 
-        synchronized CompletableFuture<Empty> nextRemoveHangs() {
-            CompletableFuture<Empty> hanging = new CompletableFuture<>();
+        synchronized CompletableFuture<com.game.proto.RemoveObserverResponse> nextRemoveHangs() {
+            CompletableFuture<com.game.proto.RemoveObserverResponse> hanging = new CompletableFuture<>();
             removeScript.add(hanging);
             return hanging;
         }
@@ -97,10 +97,10 @@ class DefaultObserverDialerTest {
         }
 
         @Override
-        public synchronized CompletableFuture<Empty> removeObserver(RemoveObserverRequest request) {
+        public synchronized CompletableFuture<com.game.proto.RemoveObserverResponse> removeObserver(RemoveObserverRequest request) {
             removes.add(request);
             threads.add(Thread.currentThread().getName() + (Thread.currentThread().isVirtual() ? "|virtual" : "|platform"));
-            return removeScript.isEmpty() ? CompletableFuture.completedFuture(Empty.getDefaultInstance()) : removeScript.remove(0);
+            return removeScript.isEmpty() ? CompletableFuture.completedFuture(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(request.getTargetInstanceId()).build()) : removeScript.remove(0);
         }
 
         @Override
@@ -422,7 +422,7 @@ class DefaultObserverDialerTest {
 
     @Test
     void removeAsync_发出即返回_在自己的虚拟线程上跑_battle应答之后future才完成_超时固定3秒() throws Exception {
-        CompletableFuture<Empty> hanging = battle.nextRemoveHangs();
+        CompletableFuture<com.game.proto.RemoveObserverResponse> hanging = battle.nextRemoveHangs();
 
         long startedNanos = System.nanoTime();
         CompletableFuture<Outcome> future = dialer.removeAsync(PLACEMENT, OBSERVER, SpectateRules.REASON_CONCURRENT_QUEUE);
@@ -439,7 +439,7 @@ class DefaultObserverDialerTest {
         assertThat(calls.calls).singleElement().satisfies(call -> assertThat(call.timeout().toMillis())
                 .as("固定 3 s（MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS），不随 163 的剩余预算收短").isBetween(2_000L, 3_000L));
 
-        hanging.complete(Empty.getDefaultInstance());
+        hanging.complete(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).build());
 
         assertThat(future.get(10, TimeUnit.SECONDS)).isEqualTo(new Outcome.Replied(0));
         assertThat(count("remove", "replied")).isEqualTo(1.0);

@@ -122,10 +122,12 @@ class BattleNodeShutdownEndToEndTest {
         long battleId = nextBattleId();
         createAdmitted(battle, pvp(battleId, System.currentTimeMillis() + 300_000, tank(a, 0, routing(gate, 601)),
                 tank(b, 1, routing(gate, 602))));
+        String observerOperation=UUID.randomUUID().toString();
         assertThat(battle.addObserver(AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(watcher)
+                .setSpectatorOperationId(observerOperation).setAdmitBeforeMs(System.currentTimeMillis()+30_000).setTargetInstanceId(node.instanceId())
                 .setRouting(routing(gate, 603)).build()).get(10, TimeUnit.SECONDS).hasErrorMessage()).isFalse();
         BattleAssignedS2C ticketA = reissue(battle, battleId, a);
-        BattleAssignedS2C ticketW = reissue(battle, battleId, watcher);
+        BattleAssignedS2C ticketW = reissue(battle, battleId, watcher,observerOperation,node.instanceId());
         NodeDirectory<BattleNodeInfo> directory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.BATTLE, BattleNodeInfo.parser());
         assertThat(directory.list(0)).anySatisfy(info -> {
             assertThat(info.getInstanceId()).isEqualTo(node.instanceId());

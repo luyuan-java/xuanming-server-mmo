@@ -54,6 +54,13 @@ public final class MatchModes {
         return 0;
     }
 
+    /** PVE人数档只有这一条规则：0用副本上限，其余须处于1..上限；uint32高半区不会变成负数放行。 */
+    public static int requestedPlayers(int mode,int maximum,int requested){
+        if(mode!=PVE_TEAM)return requiredPlayers(mode,maximum);
+        if(maximum<1||maximum>com.game.api.match.MatchBudgets.MAX_TEAM_SIZE)return 0;
+        return requested==0?maximum:Integer.compareUnsigned(requested,maximum)<=0?requested:0;
+    }
+
     /** 评分模式（只有 1V1 与 5V5）：凑单看评分容差、对局结果入账 Elo。PVE、切磋、活动一律不计分。 */
     public static boolean rated(int mode) {
         return mode == ONE_V_ONE || mode == FIVE_V_FIVE;

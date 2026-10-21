@@ -1,5 +1,6 @@
 package com.game.team.service;
 
+import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.common.player.HomeZones;
@@ -146,6 +147,47 @@ public final class TeamService {
 
     // ================================================================ RPC
 
+    /** 每次RPC创建不可变的原身份视图；不使用ThreadLocal，也不从当前SQL归属补原会话。 */
+    private TeamService forActor(SessionContext original,String method,com.google.protobuf.Message request) {
+        return new TeamService(store.forActor(original,method,request),sessions,display,homeZones,teamIds,battle,matchEnd,pushes,metrics,cfg,stopping);
+    }
+    @FunctionalInterface private interface OriginalCall { TeamResponse apply(TeamService service); }
+    private TeamResponse originalCall(SessionContext original,String method,com.google.protobuf.Message request,Deadline deadline,OriginalCall call) {
+        try {
+            var bound=forActor(original,method,request);
+            if(!store.sqlAuthority())return call.apply(bound);
+            var previous=bound.store.replayResponse(deadline);if(previous!=null)return previous;
+            var mutation=bound.store.replay(deadline);
+            TeamResponse result;
+            if(mutation!=null){
+                int code=switch(mutation.outcome()){
+                    case COMMITTED,UNCHANGED->TeamTips.OK;
+                    case NOT_BOUND,RECORD_MISSING->method.equals(TeamMethods.LEAVE_TEAM)?TeamTips.OK:TeamTips.NO_TEAM;
+                    case REJECTED->mutation.code();
+                };
+                result=mutation.commit()!=null?bound.commitResponse(original.getPlayerId(),mutation.commit(),deadline)
+                        :bound.snapshotResponse(original.getPlayerId(),code,mutation.param(),mutation.snapshot(),deadline);
+            }else result=call.apply(bound);
+            // 请求已超时/依赖未知时不把故障永久封为业务结局，重试从同事务变更回执或launch恢复。
+            if(!deadline.expired()&&result.getErrorMessage().getId()!=TeamTips.INTERNAL)bound.store.completeResponse(result,deadline);
+            return result;
+        }catch(IllegalArgumentException invalid){return TeamResponse.newBuilder().setErrorMessage(tipOf(com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0)).build();}
+        catch(SecurityException|DependencyException unavailable){return TeamResponse.newBuilder().setErrorMessage(tipOf(TeamTips.INTERNAL,0)).build();}
+    }
+    public TeamResponse createTeam(SessionContext a,CreateTeamRequest q,Deadline d){return originalCall(a,TeamMethods.CREATE_TEAM,q,d,s->s.createTeam(a.getPlayerId(),q,d));}
+    public TeamResponse applyJoinTeam(SessionContext a,ApplyJoinTeamRequest q,Deadline d){return originalCall(a,TeamMethods.APPLY_JOIN_TEAM,q,d,s->s.applyJoinTeam(a.getPlayerId(),q,d));}
+    public TeamResponse handleApplication(SessionContext a,HandleApplicationRequest q,Deadline d){return originalCall(a,TeamMethods.HANDLE_APPLICATION,q,d,s->s.handleApplication(a.getPlayerId(),q,d));}
+    public TeamResponse inviteToTeam(SessionContext a,InviteToTeamRequest q,Deadline d){return originalCall(a,TeamMethods.INVITE_TO_TEAM,q,d,s->s.inviteToTeam(a.getPlayerId(),q,d));}
+    public TeamResponse respondInvite(SessionContext a,RespondInviteRequest q,Deadline d){return originalCall(a,TeamMethods.RESPOND_INVITE,q,d,s->s.respondInvite(a.getPlayerId(),q,d));}
+    public TeamResponse leaveTeam(SessionContext a,LeaveTeamRequest q,Deadline d){return originalCall(a,TeamMethods.LEAVE_TEAM,q,d,s->s.leaveTeam(a.getPlayerId(),q,d));}
+    public TeamResponse kickMember(SessionContext a,KickMemberRequest q,Deadline d){return originalCall(a,TeamMethods.KICK_MEMBER,q,d,s->s.kickMember(a.getPlayerId(),q,d));}
+    public TeamResponse transferLeader(SessionContext a,TransferLeaderRequest q,Deadline d){return originalCall(a,TeamMethods.TRANSFER_LEADER,q,d,s->s.transferLeader(a.getPlayerId(),q,d));}
+    public TeamResponse disbandTeam(SessionContext a,DisbandTeamRequest q,Deadline d){return originalCall(a,TeamMethods.DISBAND_TEAM,q,d,s->s.disbandTeam(a.getPlayerId(),q,d));}
+    public ListMyInvitesResponse listMyInvites(SessionContext a,ListMyInvitesRequest q,Deadline d){
+        try{return forActor(a,TeamMethods.LIST_MY_INVITES,q).listMyInvites(a.getPlayerId(),q,d);}
+        catch(SecurityException|DependencyException invalid){return ListMyInvitesResponse.newBuilder().setErrorMessage(tipOf(TeamTips.INTERNAL,0)).build();}
+    }
+
     /** CreateTeam（214，service.go:113-134）：已在队回 4003 + 当前视图（重放语义：客户端把 4003 且 leader 是自己当成功）。 */
     public TeamResponse createTeam(long caller, CreateTeamRequest request, Deadline deadline) {
         SelfRead self = readSelf(TeamMethods.CREATE_TEAM, caller, deadline);
@@ -175,9 +217,16 @@ public final class TeamService {
      * {@code notify_online} 且回包视图里有队伍时把当前视图推给其他在线队员（错误回包上也会触发，照搬基线，§8.1 第 12 条）。
      */
     public TeamResponse getMyTeam(long caller, GetMyTeamRequest request, Deadline deadline) {
+        return getMyTeam(caller,null,request,deadline);
+    }
+    public TeamResponse getMyTeam(SessionContext caller,GetMyTeamRequest request,Deadline deadline) {
+        try{return forActor(caller,TeamMethods.GET_MY_TEAM,request).getMyTeam(caller.getPlayerId(),caller,request,deadline);}
+        catch(SecurityException|DependencyException invalid){return TeamResponse.newBuilder().setErrorMessage(tipOf(TeamTips.INTERNAL,0)).build();}
+    }
+    private TeamResponse getMyTeam(long caller,SessionContext original,GetMyTeamRequest request,Deadline deadline) {
         var response=readMyTeam(caller,request,deadline);
         if(battle.durableIntents()&&!request.getMatchRequestId().isEmpty()){
-            try{return response.toBuilder().setMatchIntent(battle.queryIntent(caller,request.getMatchRequestId(),com.google.protobuf.ByteString.EMPTY,deadline)).build();}
+            try{return response.toBuilder().setMatchIntent(battle.queryIntent(original,request.getMatchRequestId(),com.google.protobuf.ByteString.EMPTY,deadline)).build();}
             catch(RuntimeException e){return respond(caller,TeamTips.INTERNAL,0,deadline);}
         }
         return response;
@@ -400,11 +449,34 @@ public final class TeamService {
      * 被销毁造成的）只计 {@code gather_unknown}，不清锁、不推 MATCH_FAILED，见 {@code TeamShutdown}。
      */
     public TeamResponse startTeamMatch(long caller, StartTeamMatchRequest request, Deadline deadline) {
+        return startTeamMatch(caller,null,request,deadline);
+    }
+    public TeamResponse startTeamMatch(SessionContext caller,StartTeamMatchRequest request,Deadline deadline) {
+        // Start在Match落终局前不封完整response；每次用同launch补拉真实状态。
+        try{return forActor(caller,TeamMethods.START_TEAM_MATCH,request).startTeamMatch(caller.getPlayerId(),caller,request,deadline);}
+        catch(IllegalArgumentException invalid){return TeamResponse.newBuilder().setErrorMessage(tipOf(com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0)).build();}
+        catch(SecurityException|DependencyException invalid){return TeamResponse.newBuilder().setErrorMessage(tipOf(TeamTips.INTERNAL,0)).build();}
+    }
+    private TeamResponse startTeamMatch(long caller,SessionContext original,StartTeamMatchRequest request,Deadline deadline) {
+        if(store.sqlAuthority()){
+            var originalLaunch=store.resumeLaunch(deadline);
+            if(originalLaunch!=null){
+                var intent=battle.queryIntent(original,request.getRequestId(),request.toByteString(),deadline);
+                if(intent.getState()==4||intent.getState()==5){
+                    var release=store.releaseMatchLockOnce(originalLaunch.teamId(),originalLaunch.decision().record().getMatchLockToken(),sessions,deadline);
+                    if(release.pinned()!=null&&release.pinned().commit()!=null){pushes.publish(0,List.of(release.pinned().commit()));return commitResponse(caller,release.pinned().commit(),deadline).toBuilder().setMatchIntent(intent).build();}
+                    if(release.stop()==EndMatchStop.RECORD_MISSING||release.stop()==EndMatchStop.TOKEN_MISMATCH)return respond(caller,TeamTips.OK,0,deadline).toBuilder().setMatchIntent(intent).build();
+                    return respond(caller,TeamTips.INTERNAL,0,deadline);
+                }
+                var submission=store.launchSubmission(deadline);
+                return launchMatch(caller,original,request.getBattleConfigId(),originalLaunch,originalLaunch.decision().record().getMatchLockToken(),TeamBattlePort.Check.passed(submission.getZonesMap(),submission.getLockTtlSeconds()),deadline,request);
+            }
+        }
         if(battle.durableIntents()){
             try{
                 var requestUuid=UUID.fromString(request.getRequestId());
                 if((requestUuid.getMostSignificantBits()==0&&requestUuid.getLeastSignificantBits()==0)||!requestUuid.toString().equals(request.getRequestId()))return respond(caller,com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0,deadline);
-                var previous=battle.queryIntent(caller,request.getRequestId(),request.toByteString(),deadline);
+                var previous=battle.queryIntent(original,request.getRequestId(),request.toByteString(),deadline);
                 if(previous.getBattleId()!=0)return respond(caller,TeamTips.OK,0,deadline).toBuilder().setMatchIntent(previous).build();
             }catch(IllegalArgumentException invalid){return respond(caller,com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0,deadline);}
             catch(RuntimeException unavailable){return respond(caller,TeamTips.INTERNAL,0,deadline);}
@@ -452,7 +524,7 @@ public final class TeamService {
             long expireAtMs = snap.nowMs() + lockTtlSeconds * 1000L;
             PinnedResult lock;
             try {
-                lock = store.commitMatchLock(snap, caller, token, roster, expireAtMs, sessions, deadline);
+                lock = store.commitMatchLock(snap, caller, token, roster, expireAtMs, sessions, deadline,check.zones(),lockTtlSeconds);
             } catch (DependencyException e) {
                 log.error("[team] StartTeamMatch 开战锁提交故障 player={} team={}: {}", u(caller), u(snap.teamId()), e.toString());
                 // 结果未知：EVAL 可能已在 Redis 执行、只是回复超时 / 断连。按 token 后台清锁（锁没写入时只读不写不推），
@@ -472,7 +544,7 @@ public final class TeamService {
                 settleUnconfirmedLock(snap.teamId(), token, lockTtlSeconds, deadline);
                 continue;
             }
-            return launchMatch(caller, configId, lock.commit(), token, check, deadline,request);
+            return launchMatch(caller, original,configId, lock.commit(), token, check, deadline,request);
         }
         return matchReject(caller, TeamTips.STATE_CHANGED, 0, null, deadline);
     }
@@ -486,7 +558,7 @@ public final class TeamService {
      * @param token 开战锁令牌（清锁凭它确认）
      * @param check 本轮预检的结论（每人的 zone 与锁时长）
      */
-    private TeamResponse launchMatch(long caller, int configId, CommitResult lock, String token, TeamBattlePort.Check check,
+    private TeamResponse launchMatch(long caller,SessionContext original,int configId, CommitResult lock, String token, TeamBattlePort.Check check,
                                     Deadline deadline,StartTeamMatchRequest request) {
         long teamId = lock.teamId();
         int lockTtlSeconds = check.lockTtlSeconds(); // 与加锁同一个值：gather 的调用级超时与清锁截止都由它推出
@@ -494,9 +566,15 @@ public final class TeamService {
         // 每人一个 UUID（match-spec §0.5）：建票回包丢失时凭它退票；JoinQueue 的 16001 会把票号回给客户端，所以不能用锁令牌
         Map<Long, String> ticketIds = new LinkedHashMap<>();
         for (long pid : roster) {
-            ticketIds.put(pid, UUID.randomUUID().toString());
+            ticketIds.put(pid, store.sqlAuthority()?TeamStore.ticketId(request.getRequestId(),pid):UUID.randomUUID().toString());
         }
-        TeamBattlePort.Tickets tickets = battle.durableIntents()?battle.createDurableTickets(configId,teamId,roster,check.zones(),ticketIds,caller,request,deadline):battle.createTeamTickets(configId, teamId, roster, check.zones(), ticketIds, deadline);
+        TeamBattlePort.Tickets tickets = battle.durableIntents()?battle.createDurableTickets(configId,teamId,roster,check.zones(),ticketIds,original,request,store.sqlAuthority()?store.launchOriginal(deadline):com.google.protobuf.ByteString.EMPTY,deadline):battle.createTeamTickets(configId, teamId, roster, check.zones(), ticketIds, deadline);
+        if(tickets instanceof TeamBattlePort.Tickets.Queued){
+            var response=commitResponse(caller,lock,deadline);
+            try{response=response.toBuilder().setMatchIntent(battle.queryIntent(original,request.getRequestId(),request.toByteString(),deadline)).build();}
+            catch(RuntimeException unknown){log.debug("整队单位已持久排队，原意图查询下次恢复");}
+            pushes.publishMatchView(teamId,roster,TeamChangeReason.TEAM_CHANGE_REASON_MATCH_QUEUED,null);return response;
+        }
         if(battle.durableIntents()&&!(tickets instanceof TeamBattlePort.Tickets.Created))return respond(caller,TeamTips.INTERNAL,0,deadline);
         if (tickets instanceof TeamBattlePort.Tickets.Failed failed) {
             metrics.match(MatchOutcome.TICKET_FAILED);
@@ -518,7 +596,7 @@ public final class TeamService {
             return respond(caller, TeamTips.INTERNAL, 0, deadline);
         }
         TeamResponse resp = commitResponse(caller, lock, deadline);
-        if(battle.durableIntents())try{var intent=battle.queryIntent(caller,request.getRequestId(),request.toByteString(),deadline);
+        if(battle.durableIntents())try{var intent=battle.queryIntent(original,request.getRequestId(),request.toByteString(),deadline);
             if(intent.getBattleId()!=0)resp=resp.toBuilder().setMatchIntent(intent).build();}
         catch(RuntimeException pending){log.debug("原队伍开局已受理，客户端按原请求补拉意图");}
         log.info("[team] 整队开战已受理 team={} config={} roster={}", u(teamId), Integer.toUnsignedString(configId), us(roster));
@@ -530,10 +608,10 @@ public final class TeamService {
         }
         // 回调在 Dubbo 的线程上触发（stage 已完成时就在本线程上）：只定性、计数与投递，清锁（阻塞、最坏锁时长 + 3.2 s）在 team-match-end 上。
         // 计数放在投递之前：执行器已满放弃收尾时，这次 211 仍然恰好计一次
-        gather.whenComplete((result, error) -> {
+        gather.whenComplete((result, error) -> inBackground("gather结局核验",teamId,() -> {
             final boolean ok;
             if(battle.durableIntents()){
-                try{var finalIntent=battle.queryIntent(caller,request.getRequestId(),request.toByteString(),Deadline.after(3000));
+                try{var finalIntent=battle.queryIntent(original,request.getRequestId(),request.toByteString(),Deadline.after(3000));
                     if(finalIntent.getState()!=4&&finalIntent.getState()!=5){log.info("原队伍成局仍在恢复，保留业务开战锁和原意图");return;}
                     ok=finalIntent.getState()==4;
                 }catch(RuntimeException pending){log.warn("队伍原成局结局未知，不提前推送开战失败");return;}
@@ -558,8 +636,8 @@ public final class TeamService {
                 log.info("[team] 整队 gather 失败 team={} outcome={}", u(teamId), result.outcome());
             }
             // gather 失败拿不到要告诉玩家的具体原因：tip 留空
-            inBackground("gather 收尾", teamId, () -> finishMatch(teamId, token, lockTtlSeconds, ok, roster, null));
-        });
+            finishMatch(teamId, token, lockTtlSeconds, ok, roster, null);
+        }));
         return resp;
     }
 
@@ -574,6 +652,9 @@ public final class TeamService {
     void finishMatch(long teamId, String token, int lockTtlSeconds, boolean ok, List<Long> roster, TipInfoMessage tip) {
         EndMatchResult res = store.endMatch(teamId, token, ok, lockTtlSeconds, sessions);
         pushes.publish(0, pinnedCommits(res.repairs(), res.commit() == null ? null : res.commit().withPushTip(tip)));
+        if(store.sqlAuthority()&&res.stop()!=EndMatchStop.RELEASED){
+            log.info("[team] 原开局尚未提交可证明终局，继续保留名单和恢复待办");return;
+        }
         switch (res.stop()) {
             case RELEASED -> {
                 return;
@@ -774,7 +855,7 @@ public final class TeamService {
         }
         Map<Long, MemberDisplay> dc = c.indexes().get(caller).teamId() != 0
                 ? display.load(TeamViews.rosterIds(c.decision().record()), deadline) : TeamViews.noDisplay();
-        TeamView view = TeamViews.viewFromCommit(c, caller, dc).orElseThrow();
+        TeamView view = store.projectMatchView(TeamViews.viewFromCommit(c, caller, dc).orElseThrow(),deadline);
         return TeamResponse.newBuilder().setTeam(view).build();
     }
 
@@ -805,7 +886,7 @@ public final class TeamService {
         }
         Map<Long, MemberDisplay> dc = snap.playerTeamId() != 0
                 ? display.load(TeamViews.rosterIds(snap.record()), deadline) : TeamViews.noDisplay();
-        return TeamViews.viewFromSnapshot(snap, dc);
+        return TeamViews.viewFromSnapshot(snap, dc).map(view->store.projectMatchView(view,deadline));
     }
 
     /** 调用者自由读；失败时带现成的失败回包（4029 / 4030，不带视图；service.go:736-743）。 */

@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *       notify、reconcile.rounds、reconcile.ledger.reads、consumer.gate（同 mmorpg）。</li>
  *   <li>扫描型 gauge（只由领导者产出，卸任时归零；告警与看板一律 {@code max()}）：open.items、oldest.open.age.seconds、delivered.unacked、
  *       delivered.unacked.oldest.seconds、delivered.unacked.stale、max.delivery.count、notify.backlog、reconcile.inconsistent.rows。</li>
- *   <li>分布：fetch.scanned.rows（锁路径实际走过的行数）。</li>
+ *   <li>分布：fetch.scanned.rows（有限查询实际读回的候选数，最多max_items+1；不代表存储引擎物理扫描数）。</li>
  * </ul>
  */
 public final class InboxMetrics {

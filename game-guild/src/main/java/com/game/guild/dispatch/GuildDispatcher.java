@@ -94,13 +94,13 @@ public final class GuildDispatcher {
 
     @FunctionalInterface
     interface Handler<Q extends Message> {
-        Message handle(long me, Q request, Deadline deadline);
+        Message handle(SessionContext session, Q request, Deadline deadline);
     }
 
     /** 异步处理器：同步部分在工作线程上跑（可以抛异常 = 故障），返回的 future 完成时才回包。 */
     @FunctionalInterface
     interface AsyncHandler<Q extends Message> {
-        CompletableFuture<? extends Message> handle(long me, Q request, Deadline deadline);
+        CompletableFuture<? extends Message> handle(SessionContext session, Q request, Deadline deadline);
     }
 
     /** 一个号的契约与处置。{@code handler} 只在 {@link Kind#CLIENT} 上非空。 */
@@ -150,32 +150,32 @@ public final class GuildDispatcher {
         this.metrics = metrics;
         this.budgetMillis = budgetMillis;
         Map<Integer, Route> byId = new HashMap<>();
-        client(byId, GuildMethods.CREATE_GUILD, CreateGuildRequest.class, guilds::createGuild);
-        client(byId, GuildMethods.GET_GUILD, GetGuildRequest.class, guilds::getGuild);
-        client(byId, GuildMethods.GET_PLAYER_GUILD, GetPlayerGuildRequest.class, guilds::getPlayerGuild);
-        client(byId, GuildMethods.LEAVE_GUILD, LeaveGuildRequest.class, guilds::leaveGuild);
-        client(byId, GuildMethods.DISBAND_GUILD, DisbandGuildRequest.class, guilds::disbandGuild);
-        client(byId, GuildMethods.SET_ANNOUNCEMENT, SetAnnouncementRequest.class, guilds::setAnnouncement);
-        client(byId, GuildMethods.SET_GUILD_MEMBER_ROLE, SetGuildMemberRoleRequest.class, manage::setGuildMemberRole);
-        client(byId, GuildMethods.KICK_GUILD_MEMBER, KickGuildMemberRequest.class, manage::kickGuildMember);
-        client(byId, GuildMethods.TRANSFER_GUILD_LEADER, TransferGuildLeaderRequest.class, manage::transferGuildLeader);
-        client(byId, GuildMethods.APPLY_JOIN_GUILD, ApplyJoinGuildRequest.class, manage::applyJoinGuild);
+        client(byId, GuildMethods.CREATE_GUILD, CreateGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).createGuild(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.GET_GUILD, GetGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).getGuild(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.GET_PLAYER_GUILD, GetPlayerGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).getPlayerGuild(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.LEAVE_GUILD, LeaveGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).leaveGuild(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.DISBAND_GUILD, DisbandGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).disbandGuild(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.SET_ANNOUNCEMENT, SetAnnouncementRequest.class, (session, request, deadline) -> guilds.forActor(session).setAnnouncement(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.SET_GUILD_MEMBER_ROLE, SetGuildMemberRoleRequest.class, (session, request, deadline) -> manage.forActor(session).setGuildMemberRole(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.KICK_GUILD_MEMBER, KickGuildMemberRequest.class, (session, request, deadline) -> manage.forActor(session).kickGuildMember(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.TRANSFER_GUILD_LEADER, TransferGuildLeaderRequest.class, (session, request, deadline) -> manage.forActor(session).transferGuildLeader(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.APPLY_JOIN_GUILD, ApplyJoinGuildRequest.class, (session, request, deadline) -> manage.forActor(session).applyJoinGuild(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.CANCEL_GUILD_APPLICATION, CancelGuildApplicationRequest.class,
-                manage::cancelGuildApplication);
+                (session, request, deadline) -> manage.forActor(session).cancelGuildApplication(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.LIST_MY_GUILD_APPLICATIONS, ListMyGuildApplicationsRequest.class,
-                manage::listMyGuildApplications);
+                (session, request, deadline) -> manage.forActor(session).listMyGuildApplications(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.LIST_GUILD_APPLICATIONS, ListGuildApplicationsRequest.class,
-                manage::listGuildApplications);
+                (session, request, deadline) -> manage.forActor(session).listGuildApplications(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.REVIEW_GUILD_APPLICATION, ReviewGuildApplicationRequest.class,
-                manage::reviewGuildApplication);
-        client(byId, GuildMethods.GET_GUILD_RANK, GetGuildRankRequest.class, ranks::getGuildRank);
-        client(byId, GuildMethods.GET_GUILD_RANK_BY_GUILD, GetGuildRankByGuildRequest.class, ranks::getGuildRankByGuild);
+                (session, request, deadline) -> manage.forActor(session).reviewGuildApplication(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.GET_GUILD_RANK, GetGuildRankRequest.class, (session, request, deadline) -> ranks.getGuildRank(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.GET_GUILD_RANK_BY_GUILD, GetGuildRankByGuildRequest.class, (session, request, deadline) -> ranks.getGuildRankByGuild(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.GET_GUILD_DONATE_OPTIONS, GetGuildDonateOptionsRequest.class,
-                economy::getGuildDonateOptions);
-        clientAsync(byId, GuildMethods.DONATE_TO_GUILD, DonateToGuildRequest.class, economy::donateToGuild);
-        client(byId, GuildMethods.UPGRADE_GUILD, UpgradeGuildRequest.class, economy::upgradeGuild);
-        client(byId, GuildMethods.GET_GUILD_SHOP, GetGuildShopRequest.class, economy::getGuildShop);
-        clientAsync(byId, GuildMethods.BUY_GUILD_SHOP_GOODS, BuyGuildShopGoodsRequest.class, economy::buyGuildShopGoods);
+                (session, request, deadline) -> economy.forActor(session).getGuildDonateOptions(session.getPlayerId(), request, deadline));
+        clientAsync(byId, GuildMethods.DONATE_TO_GUILD, DonateToGuildRequest.class, (session, request, deadline) -> economy.forActor(session).donateToGuild(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.UPGRADE_GUILD, UpgradeGuildRequest.class, (session, request, deadline) -> economy.forActor(session).upgradeGuild(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.GET_GUILD_SHOP, GetGuildShopRequest.class, (session, request, deadline) -> economy.forActor(session).getGuildShop(session.getPlayerId(), request, deadline));
+        clientAsync(byId, GuildMethods.BUY_GUILD_SHOP_GOODS, BuyGuildShopGoodsRequest.class, (session, request, deadline) -> economy.forActor(session).buyGuildShopGoods(session.getPlayerId(), request, deadline));
         for (String method : GuildMethods.FORBIDDEN) {
             other(byId, method, Kind.FORBIDDEN);
         }
@@ -183,11 +183,11 @@ public final class GuildDispatcher {
             // 旧切片构造器兼容；生产装配必须显式注入完整活动服务。
             for (String method : GuildMethods.PLACEHOLDERS) other(byId, method, Kind.PLACEHOLDER);
         }else{
-            client(byId,GuildMethods.GET_GUILD_ACTIVITIES,GetGuildActivitiesRequest.class,activities::list);
-            client(byId,GuildMethods.LIGHT_GUILD_LANTERN,LightGuildLanternRequest.class,activities::lantern);
-            client(byId,GuildMethods.CLAIM_GUILD_REUNION,ClaimGuildReunionRequest.class,activities::reunion);
-            client(byId,GuildMethods.START_GUILD_TRIAL,StartGuildTrialRequest.class,activities::start);
-            client(byId,GuildMethods.RESPOND_GUILD_TRIAL_INVITE,RespondGuildTrialInviteRequest.class,activities::respond);
+            client(byId,GuildMethods.GET_GUILD_ACTIVITIES,GetGuildActivitiesRequest.class,(session, request, deadline) -> activities.forActor(session).list(session.getPlayerId(), request, deadline));
+            client(byId,GuildMethods.LIGHT_GUILD_LANTERN,LightGuildLanternRequest.class,(session, request, deadline) -> activities.forActor(session).lantern(session.getPlayerId(), request, deadline));
+            client(byId,GuildMethods.CLAIM_GUILD_REUNION,ClaimGuildReunionRequest.class,(session, request, deadline) -> activities.forActor(session).reunion(session.getPlayerId(), request, deadline));
+            client(byId,GuildMethods.START_GUILD_TRIAL,StartGuildTrialRequest.class,(session, request, deadline) -> activities.forActor(session).start(session.getPlayerId(), request, deadline));
+            client(byId,GuildMethods.RESPOND_GUILD_TRIAL_INVITE,RespondGuildTrialInviteRequest.class,(session, request, deadline) -> activities.forActor(session).respond(session.getPlayerId(), request, deadline));
         }
         Set<String> handled = new HashSet<>();
         byId.values().forEach(r -> handled.add(r.method()));
@@ -329,7 +329,7 @@ public final class GuildDispatcher {
         }
         CompletableFuture<? extends Message> response;
         try {
-            response = route.handler().handle(me, request, deadline);
+            response = route.handler().handle(session, request, deadline);
             if (response == null) {
                 throw new IllegalStateException("处理器返回了空的 future");
             }

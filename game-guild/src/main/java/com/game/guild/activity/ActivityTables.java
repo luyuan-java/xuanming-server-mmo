@@ -2,6 +2,9 @@ package com.game.guild.activity;
 
 import com.game.guild.activity.pb.*;
 import com.game.pbmysql.PbMysql;
+import com.game.pbmysql.TableOption;
+import com.game.proto.guild.GuildTrialLaunchRecord;
+import com.game.proto.guild.GuildTrialLaunchRoleRecord;
 import java.sql.SQLException;
 import javax.sql.DataSource;
 
@@ -16,7 +19,17 @@ public final class ActivityTables {
         sql.register(TrialBattleRow.getDefaultInstance());
         sql.register(ActivityRewardRow.getDefaultInstance());
         sql.register(ActivityPoisonRow.getDefaultInstance());
+        registerTrialAuthority(sql);
         return sql;
+    }
+    /** 主契约私有消息不依赖本版表proto；显式代码选项复用既有PB映射，不手写并行表结构。 */
+    public static void registerTrialAuthority(PbMysql sql) {
+        sql.register(GuildTrialLaunchRecord.getDefaultInstance(),TableOption.withTableName("guild_trial_launch"),
+                TableOption.withPrimaryKey("request_id"),TableOption.withIndexes("state,updated_ms","battle_id"),
+                TableOption.withTiDBNonclusteredPK(),TableOption.withTiDBShardRowIDBits(4),TableOption.withTiDBPreSplitRegions(4));
+        sql.register(GuildTrialLaunchRoleRecord.getDefaultInstance(),TableOption.withTableName("guild_trial_launch_role"),
+                TableOption.withPrimaryKey("player_id","request_id"),TableOption.withIndexes("request_id,player_id"),
+                TableOption.withTiDBNonclusteredPK(),TableOption.withTiDBShardRowIDBits(4),TableOption.withTiDBPreSplitRegions(4));
     }
     public static PbMysql sync(DataSource dataSource) throws SQLException {
         var sql = registry();

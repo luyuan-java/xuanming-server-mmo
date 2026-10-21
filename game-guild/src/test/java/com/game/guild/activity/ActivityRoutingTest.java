@@ -18,6 +18,7 @@ class ActivityRoutingTest {
     @Test
     void 五个活动契约实际进入处理器而非功能占位() throws Exception {
         var activities = mock(GuildActivityService.class);
+        when(activities.forActor(any())).thenReturn(activities); // 本例只测派发；SQL身份验证有独立回归。
         when(activities.list(eq(7L), any(), any())).thenReturn(GetGuildActivitiesResponse.getDefaultInstance());
         when(activities.lantern(eq(7L), any(), any())).thenReturn(LightGuildLanternResponse.getDefaultInstance());
         when(activities.reunion(eq(7L), any(), any())).thenReturn(ClaimGuildReunionResponse.getDefaultInstance());

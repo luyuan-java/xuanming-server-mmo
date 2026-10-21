@@ -149,6 +149,10 @@ public final class GuildEconomyService {
     }
 
     /** 资产通道是否开启（启动日志用）。 */
+    public GuildEconomyService forActor(com.game.api.proto.SessionContext actor) {
+        return new GuildEconomyService(store.forActor(actor), cache, access, views, tables, pushes, metrics, opIds,
+            tokens, channel, Duration.ofMillis(insertLeaseMs), workers, clockMs);
+    }
     public boolean assetChannelEnabled() {
         return channel != null;
     }

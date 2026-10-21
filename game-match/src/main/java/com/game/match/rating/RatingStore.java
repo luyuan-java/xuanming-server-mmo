@@ -245,6 +245,7 @@ public final class RatingStore {
                     c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
                 }
                 c.setAutoCommit(false);
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,APPLY_STATEMENT_TIMEOUT_SECONDS,true);
                 if(commitHook!=null&&commitHook.alreadyApplied(c,event)){c.rollback();finished=true;return Result.duplicate();}
                 if (!insertApplied(c, battleId, event.getMatchMode(), now)) {
                     if(commitHook!=null)commitHook.alreadyApplied(c,event);
@@ -405,14 +406,13 @@ public final class RatingStore {
      */
     public int deleteAppliedBefore(long beforeMs, int limit) {
         try (Connection c = connections.get(APPLY_CONNECTION_WAIT_MS)) {
-            if (!c.getAutoCommit()) {
-                c.setAutoCommit(true);
-            }
-            try (PreparedStatement ps = prepare(c, SQL_DELETE_APPLIED, APPLY_STATEMENT_TIMEOUT_SECONDS)) {
-                ps.setLong(1, beforeMs);
-                ps.setInt(2, limit);
-                return ps.executeUpdate();
-            }
+            c.setAutoCommit(false);
+            try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,APPLY_STATEMENT_TIMEOUT_SECONDS,true);
+                int changed;try (PreparedStatement ps = prepare(c, SQL_DELETE_APPLIED, APPLY_STATEMENT_TIMEOUT_SECONDS)) {
+                    ps.setLong(1,beforeMs);ps.setInt(2,limit);changed=ps.executeUpdate();
+                }c.commit();return changed;
+            }catch(SQLException|RuntimeException failure){try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
         } catch (SQLException e) {
             throw new StoreException("清理入账标记失败", e);
         }

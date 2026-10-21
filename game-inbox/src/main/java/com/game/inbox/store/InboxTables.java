@@ -42,7 +42,11 @@ public final class InboxTables {
                 connection.setNetworkTimeout(Runnable::run, 120_000);
                 connection.setAutoCommit(true);
                 db.syncAll(connection);
+                com.game.common.player.PlayerRouteAuthority.verifySchema(connection);
+                try (var required=connection.prepareStatement("SELECT admission_proto,source_instance,protocol_version,save_seq,status FROM player_final_save WHERE 1=0");
+                     var ignored=required.executeQuery()) { }
                 checkRowShards(connection);
+                checkOwnerOriginals(connection);
             } finally {
                 connection.setNetworkTimeout(Runnable::run, timeout);
             }
@@ -79,6 +83,17 @@ public final class InboxTables {
                 throw new IllegalStateException(table + " 有 " + bad + " 组 (shard, player_id) 的 shard 不等于 mix64(player_id) % 64（第一组 shard="
                         + firstShard + " player_id=" + Long.toUnsignedString(firstPlayer) + "，应为 " + InboxShards.rowShard(firstPlayer)
                         + "）：这些行对按玩家的读写全部不可见、会破坏幂等。一次性的开发 / 测试库清空收件箱三张表后重来；别处停下上报，不要删行（mmorpg 设计 §4.2，评审 L5）");
+            }
+        }
+    }
+
+    /** 旧开发行必须经审核迁移或终结；启动不从当前player回填尚未完成的历史命令。 */
+    static void checkOwnerOriginals(Connection connection) throws SQLException {
+        try (var statement=connection.prepareStatement("SELECT 1 FROM "+InboxSql.ITEM_TABLE
+                +" WHERE state IS NULL OR state NOT IN(1,2,3,4,5) OR (state=1 AND (owner_revision IS NULL OR owner_revision=0 OR owner_account IS NULL OR OCTET_LENGTH(owner_account)=0)) LIMIT 1")) {
+            statement.setQueryTimeout(3);
+            try(var rows=statement.executeQuery()) {
+                if(rows.next()) throw new SQLException("收件箱存在无原owner的待办或未知状态；拒绝启动，禁止自动补当前归属");
             }
         }
     }

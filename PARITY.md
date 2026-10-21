@@ -322,3 +322,24 @@ Java 0.1.0-SNAPSHOT：两版新增payment只读订单/SKU查询、独立admin签
 主仓gateway_node与Java game-data已补固定五命令代理及mall-admin页面；Java管理入口保留本版token、operator、审计。代理保留原body与requestId，完整前缀HMAC、新nonce、限体/总8秒/不跳转/未知提交不重试；浏览器不含HMAC密钥、不持久保存运维令牌。当前仅主仓JS语法与定向空白静态检查，未冒页面视觉、真HTTP、真TiDB或双区通过。完整分类运营、人民币寄售收入/提现、角色冻结/过户仍在后续接线，真实渠道按负责人明确决定以后接。
 
 P0-b主仓账号角色SQL权威45路径已落候选，包括所有现有登录/建角/进场/身份补齐/工具入口；Java既有SQL账号/角色目录，不机械复制主仓新data_service目录。角色P4正在补FREEZING/FROZEN与永久listing/tx收据：未装配真实入场排空及场景SQL退出验证前确认冻结必须拒绝。两版本批均无正规生成、完整构建或运行验收。
+
+### 2026-10-21 好友原会话归属围栏（源码候选，未编译、未运行）
+
+`game-friend` 全部客户端入口保留 `SessionContext` 原账号/owner_revision，显式绑定不可变 Store 视图。关系读写与容量补建在同一 SQL 事务首锁 P 校验原件及未冻结状态；涉及双方时先 unsigned P 升序，再原容量/主键锁。旧会话过户、账号 ABA、冻结一律拒绝，不能用当前角色修订补齐原件。Java native 修订限定 `1..Long.MAX_VALUE`，wire uint64 高半区显式拒绝。推荐关系读及 Redis 在线目录也须验证原会话；系统 sweep 保留既有语义。对应主仓账号权威与角色交易围栏，不改客户端好友协议或 tip。已补接口、真 MySQL 与 TiDB 双副本源码回归；本批未编译、未运行，不宣称真库或双区验收通过。详见 `docs/porting/friend-spec.md` 末节。
+| 人民币托管、原会话归属与官方OMS原身份（2026-10-21源码续批） | 主仓trade/commerce、PlayerTrade、Mall frozen owner25；Trial独立续批 | 工作区候选，主控统一生成/验证 | game-api/common/discovery/player-store/login/gate/guild/trade/mall/data | 0.1.0-SNAPSHOT | 源码已落，未编译、未测试 | 原账号与owner_revision显式经gate传递并在player首锁下提交复核，新增成员互锁；角色真实排空/typed HMAC与Cancel先赢墓碑；RMB kind6持久托管、原快照返还、mock OMS/退款/提现及固定上界分页；官方OMS原身份25源已镜像，paid intent换主且无op时只原单退款。Java native修订1..LongMax显式耗尽，Mall wire完整uint64字符串。细节及未验边界见docs/porting/trade-spec.md §11；源码/静态不替代H2、TiDB、真实scene与双区运行，Trial/Mail/Friend另由专属批次登记。 |
+
+| 活动开战未知结果安全取消（2026-10-21源码） | proto/match/match_internal.proto与match_authority.cancelled7 | 工作区候选，主控统一生成验证 | game-api、game-match（GlobalDirectIntentRow独立源7） | 0.1.0-SNAPSHOT | 源码已落，未编译、未测试 | 同原PK提交完整Start墓碑，迟到Start/Reserve拒复活；已成局只回原battle和真实formation_state。Cancel完整正文签guild、回复签match并绑定原摘要；未装配/超时/SQL未知不发成功证明。接口/SQL并发与重启回归源已补，见docs/porting/match-spec.md末节；Trial原件由专属批次接续，未用静态证据替代运行。 |
+
+### 2026-10-21 邮件原会话角色目录围栏（源码候选，未编译、未运行）
+
+主仓 go/mail 与本版 game-mail 同批补齐：原 SessionContext 的账号、owner_revision 和 player 保留到实际 SQL 事务，先全局角色行 P 核原件与未冻结状态，再邮箱守卫、状态、seq 与 op；旧领取重试也不能跳过归属检查。Java DomainClientDispatch.withSession 传递完整原件，MailStore.forActor 使用既有 AuthorityJdbc 首锁接缝，列表与守卫补建同样受保护。新增过户、账号 ABA、冻结及领取幂等重放回归源码；主控尚未运行本轮 Maven、真 TiDB 或真实双区验收，不复用历史邮件绿灯充当当前证据。版本仍为 0.1.0-SNAPSHOT，主仓 1c9c1e6c1 工作区增量，未提交。
+| 全球逻辑权威审计续批（2026-10-21源码） | main Match owner/profile/region/policy/challenge 同批；Team SQL专属续批 | 工作区候选，主控统一生成验证 | game-match、game-team原actor链、game-api、game-friend | 0.1.0-SNAPSHOT | 源码已落，未编译、未测试 | 原会话/Join墓碑/direct原身份在P首锁复核；完整资格region索引避免跨页假不足，复用可配置评分；SQL邀请原件及同事务接受；离线ready稳定游标恢复；好友RunMode生产强TiDB。Team Redis全域权威缺口交专属批，不误报全逻辑完成。细节及新回归边界见docs/porting/match-spec.md末节。 |
+
+
+- 2026-10-21源码补充：Java已接同SQL route_meta/64片zone fence→全P前缀，home仍唯一player.zone_id；显式初始化、缺原件拒绝、双独立上界历史恢复已补源码。合区/撤销作业及永久run/item清单和完整P7仍是未移植缺口；不可将原OPEN占位或本批静态检查称作7.3完成。未gen/build/test。
+
+- 2026-10-21后续源码补齐：单库MergeZone正反作业已落正规永久run/item/审批hash/16实体批次CAS及P7 guard；显式Freeze必须先证明全局真实释放，整个namespace短维护，完成不自动解冻，需原hash+generation显式Release。zone_merged_into永久源退役且player.zone_id仍唯一home；保持owner_revision推进E，逆作业核原迁入完整行与原owner/E，不能复活旧写者或历史合同。Guild生产快照/映射/区榜改SQL强读，Gateway目录写也持meta前缀。Team/Match策略共用typed原SQL contract，观战每包核原conn/op，Trial授权集合按unsigned规范化不借下标授权。该条只补齐实现状态；所有生成、编译、真库、跨副本/双区运行与故障验证仍待root执行，不能记为运行验收完成。
+
+
+
+- 2026-10-21 Match源码收口：全球Watch永久UUID/history/head及固定Add/Remove正证明；Join/挑战/活动原观战退出与pending0、独立有界恢复；Team首Match固定profile/F及Team/Trial入场同P互斥；PVE完整queue unit装箱、F5整队重排/整单取消；Team typed原policy与原SQLhome资格在LIMIT前及提交点复核。Match/评级/来源归档/投榜、Commerce/Listing/Friend写基座补metaS；Trade生产home读真实SQL，相关原生夹具复用唯一M16资源。详见docs/porting/match-spec.md末节与忽略目录内精确manifest。只报告源码/静态状态，未gen/build/test/真库/双区验收；Inbox scene原入场身份另由专属批继续，不把本条等同全部任务完成。

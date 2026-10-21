@@ -114,7 +114,8 @@ class CommerceRuntimeTest {
     void 商城重复依赖错误不挡后续已提交交付回执_页末仍报告原失败() throws Exception {
         var json = new com.fasterxml.jackson.databind.ObjectMapper();
         var valid = json.createObjectNode().put("orderId", "00112233-4455-6677-8899-aabbccddeeff")
-                        .put("buyerId", "22").put("itemConfigId", 10).put("itemCount", 1);
+                        .put("buyerId", "22").put("buyerAccount", "fixture-account-22").put("buyerOwnerRevision", "1")
+                        .put("itemConfigId", 10).put("itemCount", 1);
         var stored = row(100, "done").toBuilder().setStatus(CommerceRules.SETTLED)
                          .setRequestDigest(CommerceEngine.sha(json.writeValueAsBytes(valid))).build();
         var dependencyFailure = new SQLException("测试商城合同库不可用");
@@ -299,6 +300,12 @@ class CommerceRuntimeTest {
                     com.game.discovery.sql.StrongTiDbConnectionPolicy.verify(connection, true);
                 }
                 com.game.trade.store.TradeTables.sync(pool, java.time.Duration.ofSeconds(30));
+                try (var connection = pool.getConnection(); var sql = connection.createStatement()) {
+                    sql.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,account VARCHAR(64) NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+                    for (var intent : intents) sql.execute("INSERT INTO player(player_id,owner_revision,trade_listing_id,account) VALUES(" + intent.path("buyerId").asText() + ",1,0,'" + intent.path("buyerAccount").asText() + "')");
+                }
+                new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
+                try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));}
                 var real = new CommerceEngine(new CommerceStore(pool), new AtomicLong(10000)::incrementAndGet,
                     engine.policy, System::currentTimeMillis);
                 try (var server = new MallHttp(json, request -> request.path("cursor").asText().isEmpty()
@@ -380,7 +387,8 @@ class CommerceRuntimeTest {
         List<com.fasterxml.jackson.databind.node.ObjectNode> result = new ArrayList<>();
         for (int i = 1; i <= count; i++)
             result.add(json.createObjectNode().put("orderId", "10000000-0000-0000-0000-" + String.format("%012x", i))
-                .put("buyerId", Integer.toString(5000 + i)).put("skuId", 17).put("quantity", 1)
+                .put("buyerId", Integer.toString(5000 + i)).put("buyerAccount", "fixture-account-" + (5000 + i))
+                .put("buyerOwnerRevision", "1").put("skuId", 17).put("quantity", 1)
                 .put("itemConfigId", 10).put("itemCount", 1).put("title", "玄铁").put("amountMinor", 1250).put("currency", "CNY"));
         return result;
     }

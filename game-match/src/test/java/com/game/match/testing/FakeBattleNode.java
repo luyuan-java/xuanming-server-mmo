@@ -232,9 +232,9 @@ public final class FakeBattleNode implements BattleNodeService {
     }
 
     @Override
-    public CompletableFuture<Empty> removeObserver(RemoveObserverRequest request) {
+    public CompletableFuture<com.game.proto.RemoveObserverResponse> removeObserver(RemoveObserverRequest request) {
         removeObservers.add(request);
-        return CompletableFuture.completedFuture(Empty.getDefaultInstance());
+        return CompletableFuture.completedFuture(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(request.getTargetInstanceId()).build());
     }
 
     private static boolean isSuccess(CreateBattleResult result) {

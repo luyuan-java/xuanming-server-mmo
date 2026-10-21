@@ -61,7 +61,7 @@ class JdbcListingStoreUnitTest {
 
     private void assertAllReturned() {
         assertThat(jdbc.closed).as("连接都要归还").isEqualTo(jdbc.opened);
-        assertThat(jdbc.statementsClosed).as("语句都要关闭").isEqualTo(jdbc.calls.size());
+        assertThat(jdbc.statementsClosed).as("语句都要关闭").isEqualTo(jdbc.calls.size()+jdbc.authorityCalls.size());
     }
 
     // ================================================================ 读：语句原文与单次上限
@@ -392,4 +392,10 @@ class JdbcListingStoreUnitTest {
         assertThat(JdbcListingStore.errorCode(new RuntimeException(new SQLException("x", "HY000", 0, FakeJdbc.sqlError(1205)))))
                 .isEqualTo(1205);
     }
+    @Test void 全服维护冻结在业务写前拒绝_不把围栏失败当收藏成功(){
+        jdbc.routeWritable=false;jdbc.updated(1);
+        assertThatThrownBy(()->store().deleteFavorite(1,2,d())).isInstanceOf(DependencyException.class);
+        assertThat(jdbc.calls).isEmpty();assertThat(jdbc.authorityCalls).hasSize(1);assertThat(jdbc.commits).isZero();assertThat(jdbc.rollbacks).isEqualTo(1);assertAllReturned();
+    }
+
 }

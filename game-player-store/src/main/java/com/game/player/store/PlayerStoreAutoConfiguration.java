@@ -23,6 +23,22 @@ public class PlayerStoreAutoConfiguration {
     public PlayerTradeStore.FreezeVerifier playerTradeFreezeVerifier() {
         return PlayerTradeStore.sqlFreezeVerifier();
     }
+    @Bean
+    @ConditionalOnMissingBean(PlayerTradeStore.FreezeEligibility.class)
+    public PlayerTradeStore.FreezeEligibility playerTradeFreezeEligibility(
+            @Value("${game.player-trade.require-guild-exit:true}") boolean requireGuildExit) {
+        return (sql, request) -> {
+            // 所有合同新建/绑定买家均先持 player 锁；未知资产腿不能在角色过户后交给新账号。
+            if (RolePendingFence.economicBlocked(sql,request.playerId(),request.listingId()))
+                throw new PlayerTradeStore.Failure(PlayerTradeStore.Code.NOT_READY, "角色仍有未终局交易资产合同");
+            if (!requireGuildExit) return;
+            // player 锁在前；guild 的建帮/审批加入也先锁同一 player，再取 G/S/M。
+            // 不存在 S 行时不推断离帮：player 已排斥全部未来加入者，RC 读成员原件即可裁决。
+            sql.queryForList("SELECT player_id FROM guild_player_state WHERE player_id=? FOR UPDATE", request.playerId());
+            if (!sql.queryForList("SELECT guild_id FROM guild_member WHERE player_id=?", request.playerId()).isEmpty())
+                throw new PlayerTradeStore.Failure(PlayerTradeStore.Code.CONFLICT, "角色出售前必须离帮");
+        };
+    }
 
     /** 列名 player_id → 属性 playerId。 */
     @Bean
@@ -42,7 +58,9 @@ public class PlayerStoreAutoConfiguration {
     @ConditionalOnMissingBean
     public PlayerTradeStore playerTradeStore(DataSource source, PlatformTransactionManager transactionManager,
             @Value("${game.login.max-players-per-account:5}") int maxPlayers,
-            ObjectProvider<PlayerTradeStore.FreezeVerifier> verifier) {
-        return new PlayerTradeStore(source, transactionManager, System::currentTimeMillis, maxPlayers, verifier.getIfAvailable());
+            ObjectProvider<PlayerTradeStore.FreezeVerifier> verifier,
+            ObjectProvider<PlayerTradeStore.FreezeEligibility> eligibility) {
+        return new PlayerTradeStore(source, transactionManager, System::currentTimeMillis, maxPlayers,
+            verifier.getIfAvailable(), eligibility.getIfAvailable());
     }
 }

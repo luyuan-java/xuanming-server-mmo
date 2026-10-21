@@ -16,13 +16,39 @@ public final class CommerceClientService {
     private final CommerceEngine engine;
     private final HomeZones homes;
     private final OfficialMallClient mall;
+    private final RmbConsignmentService rmb;
     public CommerceClientService(CommerceEngine engine, HomeZones homes) {
         this(engine, homes, null);
     }
     public CommerceClientService(CommerceEngine engine, HomeZones homes, OfficialMallClient mall) {
+        this(engine, homes, mall, null);
+    }
+    public CommerceClientService(CommerceEngine engine, HomeZones homes, OfficialMallClient mall, RmbConsignmentService rmb) {
         this.engine = engine;
         this.homes = homes;
         this.mall = mall;
+        this.rmb = rmb;
+    }
+    public Message handle(String method, com.game.api.proto.SessionContext session, Message input, Message prototype, Deadline d) {
+        try {
+            if (!RmbConsignmentService.METHODS.contains(method)) {
+                if (engine == null) return rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
+                var authorized = new CommerceClientService(engine.forActor(session), homes, mall, rmb);
+                return authorized.handle(method, session.getPlayerId(), input, prototype, d);
+            }
+            if (rmb == null) return rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
+            return rmb.client(method, session, input, d);
+        }
+        catch (Refusal denied) { return rejection(prototype, denied.tip()); }
+        catch (OfficialMallClient.HttpFailure failure) {
+            return rejection(prototype, switch (failure.status()) { case 400 -> INVALID; case 404 -> MISSING;
+                case 409 -> CONFLICT; default -> com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE; });
+        }
+        catch (IllegalArgumentException invalid) { return rejection(prototype, INVALID); }
+        catch (Exception unknown) {
+            if (unknown instanceof InterruptedException) Thread.currentThread().interrupt();
+            return rejection(prototype, com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+        }
     }
     public Message handle(String method, long me, Message input, Message prototype, Deadline d) {
         if (engine == null)
@@ -35,7 +61,7 @@ public final class CommerceClientService {
                     && ((CancelCommerceOrderRequest) input).getOrderId().contains("-")) {
                 if (mall == null)
                     return rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
-                return mall.client(method, me, input, d);
+                return mall.client(method, engine.actor(), input, d);
             }
             return switch (method) {
                 case "CreatePlayerTrade" -> {
@@ -64,7 +90,7 @@ public final class CommerceClientService {
                     String after = in.getCursor();
                     if (mall != null && (after.isEmpty() || after.startsWith("mall:"))) {
                         String previous = after.startsWith("mall:") ? after.substring(5) : "";
-                        var official = mall.list(me, previous, limit(in.getLimit(), 100), d);
+                        var official = mall.list(engine.actor(), previous, limit(in.getLimit(), 100), d);
                         if (!official.isEmpty()) {
                             out.addAllOrders(official).setNextCursor("mall:" + official.getLast().getOrderId());
                             yield out.build();

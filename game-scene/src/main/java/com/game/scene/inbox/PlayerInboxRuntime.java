@@ -25,7 +25,7 @@ public final class PlayerInboxRuntime {
     /** 延后原因（{@code metric=inbox_deferred reason=}，取值同 mmorpg；Java 没有异步退出期与「找不到收件箱节点」，exiting / no_node 不会出现）。 */
     public enum DeferReason {
         NONE, DISABLED, FROZEN, HANDOFF, EXITING, EPOCH_ZERO, LEDGER_INVALID, IN_BATTLE, NO_NODE, TRANSPORT, UNIMPLEMENTED, STALE_OWNER,
-        SERVER_ERROR, EXECUTOR_DEFER;
+        SERVER_ERROR, EXECUTOR_DEFER, ADMISSION_MISSING;
 
         public String label() {
             return name().toLowerCase(Locale.ROOT);

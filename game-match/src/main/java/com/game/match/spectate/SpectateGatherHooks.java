@@ -89,6 +89,12 @@ public final class SpectateGatherHooks implements GatherHooks {
 
     @Override
     public void beforePrepare(List<Long> members) {
+        if(store.sqlAuthority()) {
+            // SQL许可在提交点已与票据互斥；强模式清退不能吞故障或凭空删guard。
+            var marks=store.marksOf(members,Deadline.after(smallOpBudgetMs));
+            for(var mark:marks.entrySet())store.release(mark.getKey(),mark.getValue(),Deadline.after(perMemberBudgetMs));
+            return;
+        }
         try {
             evictSpectators(members);
         } catch (Throwable t) { // 清退永不阻断开局：任何意外都只记日志

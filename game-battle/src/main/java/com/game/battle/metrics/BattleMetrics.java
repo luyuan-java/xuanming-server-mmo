@@ -287,6 +287,7 @@ public final class BattleMetrics {
         DESTROY_BATTLE("destroyBattle"),
         ISSUE_BATTLE_TICKET("issueBattleTicket"),
         ADD_OBSERVER("addObserver"),
+        QUERY_OBSERVER("queryObserver"),
         REMOVE_OBSERVER("removeObserver");
 
         private final String label;

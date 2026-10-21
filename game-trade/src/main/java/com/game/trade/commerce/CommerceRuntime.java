@@ -32,6 +32,7 @@ public final class CommerceRuntime implements AutoCloseable {
         Thread.ofPlatform().daemon(true).name("trade-commerce-recovery").factory());
     private final AtomicBoolean started = new AtomicBoolean();
     private final OfficialMallClient mall;
+    private final RmbConsignmentService rmb;
     // 仅由驱动 tick 的单个工作线程持有；尝试后前移、到表尾再绕回，不让离线玩家占满首页。
     private long ackAfterOpId;
     public CommerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery, PersistedAssetLedgerReader ledger) {
@@ -39,11 +40,16 @@ public final class CommerceRuntime implements AutoCloseable {
     }
     public CommerceRuntime(
         CommerceEngine e, ReliableAssetDelivery delivery, PersistedAssetLedgerReader ledger, OfficialMallClient mall) {
+        this(e, delivery, ledger, mall, null);
+    }
+    public CommerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery, PersistedAssetLedgerReader ledger,
+                           OfficialMallClient mall, RmbConsignmentService rmb) {
         this.e = e;
         this.matching = new CommerceMatching(e);
         this.delivery = delivery;
         this.ledger = ledger;
         this.mall = mall;
+        this.rmb = rmb;
     }
     public void start() {
         if (started.compareAndSet(false, true))
@@ -69,6 +75,22 @@ public final class CommerceRuntime implements AutoCloseable {
     }
     /** 只由本工作线程或未启动 worker 的测试串行调用；ACK 游标不允许并发驱动。 */
     public void tick(Deadline budget) throws SQLException {
+        if (rmb != null && budget.remainingMillis() > 500) {
+            try { rmb.poll(Deadline.after(Math.min(2500, budget.remainingMillis()))); }
+            catch (Exception unknown) {
+                if (unknown instanceof InterruptedException) Thread.currentThread().interrupt();
+                log.error("人民币寄售扫描失败，原游标与合同保留", unknown);
+            }
+        }
+        // 扫描预算先于离线资产重试分配；首页慢玩家不能耗尽后页订单的准入机会。
+        if (mall != null && budget.remainingMillis() > 500)
+            try {
+                mall.tick(Deadline.after(Math.min(2500, budget.remainingMillis())));
+            } catch (Exception unknown) {
+                if (unknown instanceof InterruptedException)
+                    Thread.currentThread().interrupt();
+                log.error("商城交付恢复失败，原订单与资产seq保留", unknown);
+            }
         long now = e.clock.getAsLong();
         for (var candidate :
             e.store.ops("status=1 AND next_attempt_ms<=? AND lease_until_ms<=? ORDER BY op_id LIMIT 50", now, now)) {
@@ -115,16 +137,18 @@ public final class CommerceRuntime implements AutoCloseable {
         }
         if (acks.size() < 50)
             ackAfterOpId = 0;
-        if (mall != null && budget.remainingMillis() > 300)
-            try {
-                mall.tick(budget);
-            } catch (Exception unknown) {
-                if (unknown instanceof InterruptedException)
-                    Thread.currentThread().interrupt();
-                log.error("商城交付恢复失败，原订单与资产seq保留", unknown);
-            }
     }
     private void step(TradeCommerceRow row, Deadline budget) throws SQLException {
+        if (row.getKind() == 6) {
+            if (rmb == null) throw new SQLException("人民币寄售恢复未装配");
+            try { rmb.advance(row, budget); }
+            catch (SQLException failure) { throw failure; }
+            catch (Exception failure) {
+                if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+                throw new SQLException("人民币寄售原合同保留，等待恢复", failure);
+            }
+            return;
+        }
         var w = CommerceEngine.workflow(row);
         if (w.getStage().equals("bid_ready")) {
             matching.acceptBid(row, budget);

@@ -59,6 +59,12 @@ public final class ClientSession {
      * 它随 {@code SessionContext.player_id} 发给 login，login 据此拒绝已在游戏里的会话再次进游戏 / 建角。
      */
     long playerId;
+    /** 原进游戏指令的账号归属修订；只随player绑定清理，换场景不改写。 */
+    long ownerRevision;
+    /** 本次登录成功的原SQL夺权E；只随玩家绑定清理，跨scene交接保持。 */
+    long loginGeneration;
+    /** 首次进场时固定的原账号，后续转场不得读取可能重新绑定的登录账号补权。 */
+    String ownerAccount = "";
     /**
      * 所在 scene 节点；0 = 不在场景里。以下四个「场景绑定」字段与 {@link #transferEntering} 同生同灭（{@code unbindScene} 一起清）。
      * 绑定的建立有两个入口：login 的 EnterScene 指令（进游戏），以及源 scene 的 PlayerTransfer（跨节点换图改绑）。

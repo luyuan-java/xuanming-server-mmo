@@ -41,7 +41,7 @@ class RoundTimerTest {
     private final RoomHarness h = new RoomHarness();
 
     private void addObserver(long battleId, long observerId) {
-        assertThat(h.service().addObserver(AddObserverRequest.newBuilder()
+        assertThat(h.addObserver(AddObserverRequest.newBuilder()
                 .setBattleId(battleId)
                 .setObserverPlayerId(observerId)
                 .setRouting(RoomHarness.observerRouting(observerId, 900))

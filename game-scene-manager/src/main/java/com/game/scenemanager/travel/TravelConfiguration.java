@@ -41,9 +41,13 @@ public class TravelConfiguration {
 
     /** 合服围栏的读侧（检查点 F4）：批次 7.3 之前没有合服，恒放行；7.3 换成读 Redis 的实现，不动 {@link TravelRouter}。 */
     @Bean
-    public ZoneMergeFence zoneMergeFence() {
-        return ZoneMergeFence.OPEN;
+    public ZoneMergeFence zoneMergeFence(javax.sql.DataSource source,@org.springframework.beans.factory.annotation.Qualifier("routeFenceExecutor") java.util.concurrent.Executor executor) {
+        return new com.game.discovery.zone.SqlZoneMergeFence(source,executor);
     }
+    @Bean(destroyMethod="shutdownNow")
+    public java.util.concurrent.ExecutorService routeFenceExecutor(){return new java.util.concurrent.ThreadPoolExecutor(2,2,0,java.util.concurrent.TimeUnit.MILLISECONDS,new java.util.concurrent.ArrayBlockingQueue<>(64),Thread.ofPlatform().name("route-fence-",0).daemon(true).factory(),new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());}
+    @Bean static com.game.discovery.sql.StrongTiDbConnectionPolicy sceneRouteConnectionPolicy(){return new com.game.discovery.sql.StrongTiDbConnectionPolicy("scene-route",true);}
+    @Bean public org.springframework.beans.factory.InitializingBean routeSqlAuthority(javax.sql.DataSource source){return ()->{try(var connection=source.getConnection()){com.game.discovery.sql.StrongTiDbConnectionPolicy.verify(connection,true);com.game.common.player.PlayerRouteAuthority.verifySchema(connection);}};}
 
     /** 重定向票据的签发器：缺 gate 令牌密钥即拒绝启动（见类注释）。 */
     @Bean
@@ -59,8 +63,8 @@ public class TravelConfiguration {
     @Bean
     public TravelRouting travelRouting(WorldChannelStore worldChannelStore, SceneNodeSource sceneNodeSource, GateSource gateSource,
                                        WorldSceneConfigs worldSceneConfigs, ZoneMergeFence zoneMergeFence,
-                                       GateTokenIssuer gateTokenIssuer, MeterRegistry meterRegistry) {
+                                       GateTokenIssuer gateTokenIssuer, MeterRegistry meterRegistry,javax.sql.DataSource source) {
         return new TravelRouter(worldChannelStore, sceneNodeSource, gateSource, worldSceneConfigs, zoneMergeFence,
-                gateTokenIssuer, meterRegistry);
+                gateTokenIssuer, meterRegistry,new com.game.common.player.PlayerHomeZones(source));
     }
 }

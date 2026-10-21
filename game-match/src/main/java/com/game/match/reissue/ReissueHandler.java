@@ -39,7 +39,7 @@ public final class ReissueHandler implements MatchMethodHandler {
     @Override
     public Reply handle(SessionContext session, ByteString body, Deadline deadline) throws InvalidProtocolBufferException {
         RequestBattleTicketRequest request = RequestBattleTicketRequest.parseFrom(body);
-        return Reply.body(reissue.reissue(session.getPlayerId(), request.getBattleId(), deadline));
+        return Reply.body(reissue.reissue(session, request.getBattleId(), deadline));
     }
 
     @Override

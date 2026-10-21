@@ -117,8 +117,8 @@ class RpcFailuresLoopbackTest {
         }
 
         @Override
-        public CompletableFuture<Empty> removeObserver(RemoveObserverRequest request) {
-            return CompletableFuture.completedFuture(Empty.getDefaultInstance());
+        public CompletableFuture<com.game.proto.RemoveObserverResponse> removeObserver(RemoveObserverRequest request) {
+            return CompletableFuture.completedFuture(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(request.getTargetInstanceId()).build());
         }
     }
 

@@ -76,6 +76,17 @@ public final class GuildTx {
     private final LongSupplier backoffMillis;
     private final Sleeper sleeper;
     private volatile CommitHook commitHook = c -> { };
+    private com.game.api.proto.SessionContext actor;
+    private long[] extraPlayers = new long[0];
+    public GuildTx forActor(com.game.api.proto.SessionContext actor) {
+        var bound = new GuildTx(connections, queryTimeoutCapSeconds, listener, budgets, backoffMillis, sleeper);
+        bound.actor = java.util.Objects.requireNonNull(actor); bound.extraPlayers = extraPlayers.clone();
+        bound.commitHook = commitHook; return bound;
+    }
+    GuildTx withMembershipPlayer(long player) {
+        if (actor == null) return this;
+        var bound = forActor(actor); bound.extraPlayers = new long[] { player }; return bound;
+    }
 
     /**
      * @param connections            取连接（按次限等，Druid {@code getConnection(long)}；见 PlayerProfiles.ConnectionSource）
@@ -172,6 +183,25 @@ public final class GuildTx {
             try {
                 c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
                 c.setAutoCommit(false);
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,Math.max(1,Math.min(queryTimeoutCapSeconds,(int)((sub.remainingMillis()+999)/1000))),true);
+                if (actor != null) {
+                    var players = new java.util.TreeSet<Long>(Long::compareUnsigned);
+                    players.add(actor.getPlayerId()); for (long extra : extraPlayers) players.add(extra);
+                    com.game.common.player.PlayerRouteAuthority.lock(c,players,Math.max(1,Math.min(queryTimeoutCapSeconds,(int)((sub.remainingMillis()+999)/1000))));
+                    for (long player : players) {
+                        if (player == actor.getPlayerId())
+                            com.game.common.player.PlayerSessionAuthority.lock(c, player, actor.getAccount(),
+                                actor.getOwnerRevision(), Math.max(1, Math.min(queryTimeoutCapSeconds, (int)((sub.remainingMillis()+999)/1000))));
+                        else {
+                            try (var ps = c.prepareStatement("SELECT trade_listing_id FROM player WHERE player_id=? FOR UPDATE")) {
+                                ps.setQueryTimeout(1); ps.setObject(1, new java.math.BigInteger(Long.toUnsignedString(player)));
+                                try (var row = ps.executeQuery()) {
+                                    if (!row.next() || !"0".equals(row.getString(1))) throw new SecurityException("入帮角色正处于冻结或不存在");
+                                }
+                            }
+                        }
+                    }
+                }
                 TxOutcome<T> outcome;
                 try {
                     outcome = body.run(new GuildJdbc(c, sub, queryTimeoutCapSeconds));

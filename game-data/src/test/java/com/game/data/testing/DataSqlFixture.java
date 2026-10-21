@@ -116,7 +116,9 @@ public final class DataSqlFixture implements AutoCloseable {
                 try (var c = ds.getConnection()) { StrongTiDbConnectionPolicy.verify(c, true); }
             }
             new ResourceDatabasePopulator(new ClassPathResource("db/game-data-schema.sql"),
-                    new ClassPathResource("db/game-player-schema.sql")).execute(ds);
+                    new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(ds);
+            new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(ds);
+            try(var routeInit=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,4,7,9,11));}
             PbMysql ops;
             if (mysql()) {
                 ops = OpsTables.sync(ds, Duration.ofMinutes(1));

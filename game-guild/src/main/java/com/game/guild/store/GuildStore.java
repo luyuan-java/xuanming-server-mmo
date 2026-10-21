@@ -31,6 +31,9 @@ import java.util.function.Consumer;
  * 线程安全；全部方法阻塞（JDBC），只在 guild-worker 线程上调用；每条语句挂在请求预算（事务里是子预算）上。
  */
 public interface GuildStore {
+    default GuildStore forActor(com.game.api.proto.SessionContext actor) {
+        throw new SecurityException("帮会存储尚未支持原会话提交验证");
+    }
 
     // ================================================================ 入参
 

@@ -107,6 +107,15 @@ class RankMailChainTiDbTest {
             StrongTiDbConnectionPolicy.verify(first, true);
             StrongTiDbConnectionPolicy.verify(second, true);
         }
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
+                new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
+        try(var connection=pool.getConnection();var statement=connection.createStatement()) {
+            statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARCHAR(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,zone_id INT UNSIGNED NOT NULL)");
+            try(var insert=connection.prepareStatement("INSERT INTO player VALUES(?,'local-fixture',1,0,1)")) {
+                for(long player:List.of(WINNER,OTHER)){insert.setLong(1,player);insert.executeUpdate();}
+            }
+            com.game.common.player.RouteAuthorityInitializer.initialize(connection,java.util.UUID.randomUUID().toString(),List.of(1));
+        }
         // 所有领域表均走原来的登记/迁移入口；guild_member 是邮箱可见性查询的真实依赖。
         new GlobalMatchStore(pool, new GlobalMatchProperties(true, true, 30, 180, 120, RANK_SECRET));
         MatchRatingTables.sync(pool, Duration.ofSeconds(60));
@@ -178,7 +187,7 @@ class RankMailChainTiDbTest {
         var request = ListMailsRequest.newBuilder().setLimit(10).build();
         var response = mailbox.handle(ClientCall.newBuilder()
                 .setSession(SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("local-fixture-gate")
-                        .setSessionId(1).setZoneId(1).setPlayerId(player).setAccount("local-fixture"))
+                        .setSessionId(1).setZoneId(1).setPlayerId(player).setAccount("local-fixture").setOwnerRevision(1))
                 .setMessageId(MessageIdRegistry.loadFromClasspath().requireId("ClientPlayerMail", "ListMails"))
                 .setRequestId(1).setBody(request.toByteString()).build()).get(8, TimeUnit.SECONDS);
         assertEquals(0, response.getTipId());

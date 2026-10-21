@@ -74,11 +74,16 @@ class RmbConsignmentHttpTest {
             var signed = request("/internal/consignments/register", "delivery", input);
             var registered = http.send(signed, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, registered.statusCode(), registered.body());
+            var detail = call(http, "/internal/consignments/get", "delivery", bytes(new RmbConsignmentApi.Get("1001")));
+            assertEquals(200, detail.statusCode(), detail.body());
+            assertEquals(json.readTree(registered.body()), json.readTree(detail.body()));
+            assertEquals(404, call(http, "/internal/consignments/get", "delivery", bytes(new RmbConsignmentApi.Get("9999"))).statusCode());
+            assertEquals(401, call(http, "/internal/consignments/get", "gateway", bytes(new RmbConsignmentApi.Get("1001"))).statusCode());
             assertEquals(409, http.send(signed, HttpResponse.BodyHandlers.ofString()).statusCode());
             assertEquals(200, call(http, "/internal/consignments/register", "delivery", input).statusCode());
             assertEquals(409, call(http, "/internal/consignments/buy", "delivery",
-                    bytes(new RmbConsignmentApi.Buy("1001", "22", "seller-account", "self-account-request"))).statusCode());
-            var buy = new RmbConsignmentApi.Buy("1001", "22", "original-buyer-account", "http-buy-request");
+                    bytes(new RmbConsignmentApi.Buy("1001", "22", "seller-account", "self-account-request", "1"))).statusCode());
+            var buy = new RmbConsignmentApi.Buy("1001", "22", "original-buyer-account", "http-buy-request", "1");
             var purchased = call(http, "/internal/consignments/buy", "delivery", bytes(buy));
             assertEquals(200, purchased.statusCode(), purchased.body());
             String order = json.readTree(purchased.body()).path("orderId").asText();
@@ -87,17 +92,22 @@ class RmbConsignmentHttpTest {
             assertEquals(101, json.readTree(purchased.body()).path("amountMinor").asLong());
             assertEquals(0, json.readTree(purchased.body()).path("skuId").asLong());
             assertEquals(409, call(http, "/internal/consignments/buy", "delivery",
-                    bytes(new RmbConsignmentApi.Buy("1001", "23", "original-buyer-account", buy.requestId()))).statusCode());
+                    bytes(new RmbConsignmentApi.Buy("1001", "23", "original-buyer-account", buy.requestId(), "1"))).statusCode());
             assertEquals(404, call(http, "/internal/consignments/orders/get", "delivery", bytes(new RmbConsignmentApi.OrderQuery("new-character-owner", order))).statusCode());
             assertEquals(200, call(http, "/internal/consignments/orders/get", "delivery", bytes(new RmbConsignmentApi.OrderQuery("original-buyer-account", order))).statusCode());
             byte[] payment = bytes(new MockPaymentApi.Pay(order, "http-mock-payment"));
             assertEquals(401, call(http, "/internal/mock/pay", "delivery", payment).statusCode());
             assertEquals(200, call(http, "/internal/mock/pay", "payment", payment).statusCode());
             assertEquals(0, count("commerce_seller_income"));
+            var officialPending = call(http, "/internal/deliveries/poll", "delivery", bytes(new DeliveryApi.Poll(20, "")));
+            assertEquals(200, officialPending.statusCode(), officialPending.body());
+            assertTrue(json.readTree(officialPending.body()).path("entries").isEmpty());
             var pending = call(http, "/internal/consignments/deliveries/poll", "delivery", bytes(new DeliveryApi.Poll(20, "")));
             assertEquals(200, pending.statusCode(), pending.body());
             assertEquals(order, json.readTree(pending.body()).at("/entries/0/intent/orderId").asText());
             assertEquals("9001", json.readTree(pending.body()).at("/entries/0/intent/escrowReference").asText());
+            assertEquals("original-buyer-account", json.readTree(pending.body()).at("/entries/0/intent/buyerAccount").asText());
+            assertEquals("1", json.readTree(pending.body()).at("/entries/0/intent/buyerOwnerRevision").asText());
             var delivered = bytes(new DeliveryApi.Receipt(order, "7001", "DELIVERED", "b".repeat(64)));
             assertEquals(200, call(http, "/internal/deliveries/receipt", "delivery", delivered).statusCode());
             assertEquals(200, call(http, "/internal/deliveries/receipt", "delivery", delivered).statusCode());

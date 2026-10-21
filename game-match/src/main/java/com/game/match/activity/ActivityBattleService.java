@@ -163,17 +163,45 @@ public final class ActivityBattleService {
 
     private StartActivityBattleResponse startGlobal(StartActivityBattleRequest request,Deadline deadline) {
         int kind=request.getActivityContext().getKindValue();
-        if(request.getRequestId()==0||ActivityRequestValidator.invalidReason(request)!=null)return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
+        if(request.getRequestId()==0||request.getActivityContext().getLaunchRequestId()!=request.getRequestId()
+            ||ActivityRequestValidator.invalidReason(request)!=null)return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
         try{
             var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(2).setOwnerId(request.getActivityContext().getGuildId()).setRequestLow(request.getRequestId()).build();
             var old=global.store().direct(key);
-            if(old!=null){if(!old.getPayload().equals(request.toByteString()))return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
-                var f=global.store().formation(old.getBattleId());global.launchCommitted(f);return StartActivityBattleResponse.newBuilder().setBattleId(f.getBattleId()).build();}
+            if(old!=null){if(old.getCancelled())return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL,0);
+                if(!old.getPayload().equals(request.toByteString()))return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
+                var f=old.getBattleId()!=0?global.store().formation(old.getBattleId()):global.reserveDirect(key,request.toByteString(),com.game.proto.match.MatchMode.MATCH_MODE_PVE_TEAM_VALUE,request.getBattleConfigId(),request.getMemberPlayerIdsList(),Map.of(),0,request.getActivityContext());global.launchCommitted(f);return globalReply(f);}
             var checked=precheck.check(request.getMemberPlayerIdsList(),deadline);
             if(!checked.passed())return rejectedPrecheck(kind,checked);
             var f=global.reserveDirect(key,request.toByteString(),com.game.proto.match.MatchMode.MATCH_MODE_PVE_TEAM_VALUE,request.getBattleConfigId(),request.getMemberPlayerIdsList(),Map.of(),0,request.getActivityContext());
-            global.launchCommitted(f);return StartActivityBattleResponse.newBuilder().setBattleId(f.getBattleId()).build();
+            global.launchCommitted(f);return globalReply(f);
         }catch(RuntimeException e){log.warn("活动原意图提交结果尚未确认",e);return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL,0);}
+    }
+
+    private static StartActivityBattleResponse globalReply(com.game.match.global.pb.GlobalFormationRow formation) {
+        if(formation==null||formation.getBattleId()==0||formation.getState()<1||formation.getState()>5)
+            throw new IllegalStateException("活动成局原件或状态缺失");
+        return StartActivityBattleResponse.newBuilder().setBattleId(formation.getBattleId()).setFormationState(formation.getState()).build();
+    }
+
+    public com.game.proto.match.CancelActivityBattleResponse cancel(com.game.proto.match.CancelActivityBattleRequest request,Deadline d) {
+        if(global==null)throw new IllegalStateException("活动取消需要SQL权威；旧内存模式不能证明迟到请求已被阻止");
+        if(d.expired()||Thread.currentThread().isInterrupted())throw new IllegalStateException("活动取消预算结束");
+        var original=request.getOriginal();
+        if(!request.hasOriginal()||original.getRequestId()==0||original.getActivityContext().getLaunchRequestId()!=original.getRequestId()
+            ||ActivityRequestValidator.invalidReason(original)!=null)
+            throw new IllegalArgumentException("活动取消缺少完整有效原请求");
+        var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(2)
+            .setOwnerId(original.getActivityContext().getGuildId()).setRequestLow(original.getRequestId()).build();
+        var decision=global.store().cancelActivity(key,original.toByteString());
+        var response=com.game.proto.match.CancelActivityBattleResponse.newBuilder().setBattleId(decision.getBattleId())
+            .setRequestCancelled(decision.getCancelled()).setRequestDigest(com.game.discovery.serviceauth.ServiceCallSignatures.digest(request));
+        if(decision.getBattleId()!=0) {
+            var formation=global.store().formation(decision.getBattleId());
+            if(formation==null||formation.getState()<1||formation.getState()>5)throw new IllegalStateException("原活动成局状态未知，保留待恢复");
+            response.setFormationState(formation.getState());
+        } else if(!decision.getCancelled())throw new IllegalStateException("活动取消未取得持久墓碑");
+        return response.build();
     }
 
     private StartActivityBattleResponse rejectedPrecheck(int kind,MemberPrecheck.Result checked){

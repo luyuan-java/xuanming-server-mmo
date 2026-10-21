@@ -106,7 +106,7 @@ class TradeDispatcherTest {
         for (String method : TradeMethods.CLIENT_REQUESTS) {
             expected.add(id(method));
         }
-        assertThat(expected).contains(196, 197, 198, 200).hasSize(24);
+        assertThat(expected).contains(196, 197, 198, 200).hasSize(35);
         assertThat(d.clientMessageIds()).isEqualTo(expected);
         expected.add(seedId());
         assertThat(seedId()).isEqualTo(199);

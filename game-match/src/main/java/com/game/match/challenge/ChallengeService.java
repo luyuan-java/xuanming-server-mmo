@@ -44,11 +44,9 @@ import org.slf4j.LoggerFactory;
  * 切磋（场景发起 PK）：152 ChallengePlayer 与 151 RespondChallenge（match-spec §6；基线 {@code go/match/internal/logic/challengelogic.go}）。
  * 客户端可见行为逐条照搬——判定顺序、tip 码、{@code parameters[0]} 的中文串、156 / 154 的字段与先后——差别只在存储的原子性与时钟：
  * <ul>
- *   <li>发起（占坑 + 写记录）与消费（核对目标 + 删记录 + 摘占坑）各是一段原子脚本（{@link ChallengeStore}）。两条并发的接受只有一条拿到记录，
- *       另一条回 16012「切磋邀请已过期」，不会开两次 gather（修基线 G8，M17）。</li>
- *   <li>{@code expires_at_ms} 与过期判定都用 Redis 时间，不用本机时钟（M7）。</li>
- *   <li>身份只取 {@code SessionContext.player_id}，请求体里的 {@code player_id} 忽略（M3）；{@code challenger_name} 是会话里已认证的账号名
- *       （同基线「一期用账号名占位」）。</li>
+ *   <li>全球生产路径以SQL邀请原件、双方原归属和原请求决定为权威；接受与全员成局同事务。显式开发兼容路径才使用{@link ChallengeStore}原子脚本。</li>
+ *   <li>{@code expires_at_ms} 与过期判定取权威存储时钟：全球SQL、开发兼容Redis，均不用实例墙钟。</li>
+ *   <li>身份保留{@code SessionContext}原账号与修订，请求体里的{@code player_id}忽略；通知的{@code challenger_name}只取公开角色名，缺失留空。</li>
  * </ul>
  *
  * <p><b>发起时只做咨询性检查，不冻结任何人</b>；应战时对双方的战斗锁再查一遍，冻结发生在之后的 gather（由 scene 的备战写锁保证不串局）。
@@ -74,7 +72,12 @@ public final class ChallengeService {
     private final int resultMessageId;
     private final Supplier<String> nonces;
     private com.game.match.global.GlobalMatchService global;
-    public ChallengeService withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
+    private java.util.function.BiFunction<Long,Deadline,String> publicNames=(player,deadline)->"";
+    public ChallengeService withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;global.challengeNotifications(result->{
+        if(result.getState()==2){pushResult(result.getChallengerId(),result.getChallengeId(),true,result.getTargetId());pushResult(result.getTargetId(),result.getChallengeId(),true,result.getTargetId());}
+        else if(result.getState()==3)pushResult(result.getChallengerId(),result.getChallengeId(),false,result.getTargetId());
+    });return this;}
+    public ChallengeService withPublicNames(java.util.function.BiFunction<Long,Deadline,String> names){this.publicNames=Objects.requireNonNull(names);return this;}
 
     /**
      * @param pushExecutor    {@code match-push}（测试可传 {@code Runnable::run}）
@@ -152,7 +155,12 @@ public final class ChallengeService {
 
         InviteResult invited;
         try {
-            invited = store.invite(challengeId, challengerId, targetId, configId, challengeTtlMs, d);
+            if(global==null)invited = store.invite(challengeId, challengerId, targetId, configId, challengeTtlMs, d);
+            else {
+                var original=global.store().invite(session,challengeId,targetId,configId,challengeTtlMs);
+                if(original==null)invited=new InviteResult.Pending();
+                else {challengeId=original.getChallengeId();invited=new InviteResult.Created(original.getExpiresMs());}
+            }
         } catch (Deadline.DependencyException e) {
             // 结局不明：脚本可能已经占了坑。尽力清一次（只摘值等于本 id 的占坑），清不掉靠 TTL
             log.error("[challenge] 写切磋记录失败 challenge={} target={}", id(challengeId), id(targetId), e);
@@ -166,7 +174,7 @@ public final class ChallengeService {
         ChallengeInviteS2C invite = ChallengeInviteS2C.newBuilder()
                 .setChallengeId(challengeId)
                 .setChallengerId(challengerId)
-                .setChallengerName(session.getAccount())
+                .setChallengerName(publicName(challengerId,d))
                 .setBattleConfigId(configId)
                 .setExpiresAtMs(created.expiresAtMs())
                 .build();
@@ -202,19 +210,7 @@ public final class ChallengeService {
         }
         long challengeId = request.getChallengeId();
 
-        if(global!=null){
-            try{
-                if(challengeId==0)return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
-                var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(3).setOwnerId(responderId).setRequestLow(challengeId).build();
-                var previous=global.store().direct(key);
-                if(previous!=null){
-                    var payload=request.toBuilder().setPlayerId(responderId).build().toByteString();
-                    if(!previous.getPayload().equals(payload))return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
-                    if(previous.getBattleId()!=0)global.launchCommitted(global.store().formation(previous.getBattleId()));
-                    return RespondChallengeResponse.getDefaultInstance();
-                }
-            }catch(RuntimeException e){return respondRejected(ChallengeResult.INTERNAL,MatchTip.BUSY);}
-        }
+        if(global!=null)return decideGlobal(session,request,d);
 
         // 先读一次，按基线的顺序回码（读失败 → 不存在 → 不是目标），再原子消费
         Optional<ChallengeRecord> seen;
@@ -230,8 +226,6 @@ public final class ChallengeService {
         if (seen.get().targetId() != responderId) {
             return respondRejected(ChallengeResult.NOT_TARGET, MatchTip.CHALLENGE_NOT_TARGET);
         }
-
-        if(global!=null)return decideGlobal(session,request,seen.get(),d);
 
         ConsumeResult consumed;
         try {
@@ -285,28 +279,19 @@ public final class ChallengeService {
         return RespondChallengeResponse.getDefaultInstance();
     }
 
-    private RespondChallengeResponse decideGlobal(SessionContext session,RespondChallengeRequest request,ChallengeRecord record,Deadline deadline){
+    private RespondChallengeResponse decideGlobal(SessionContext session,RespondChallengeRequest request,Deadline deadline){
         long player=session.getPlayerId(),challenge=request.getChallengeId();
         try{
-            if(deadline.expired()||record.expiresAtMs()<=global.store().now())return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
-            var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(3).setOwnerId(player).setRequestLow(challenge).build();
-            var payload=request.toBuilder().setPlayerId(player).build().toByteString();
-            if(!request.getAccept()){
-                if(!global.store().declineDirect(key,payload))return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
-                consumeGlobalProjection(challenge,player,deadline);
-                pushResult(record.challengerId(),challenge,false,player);return RespondChallengeResponse.getDefaultInstance();
-            }
-            if(lockedOrUnknown(record.challengerId(),deadline,"发起者")||lockedOrUnknown(player,deadline,"应战者"))return respondRejected(ChallengeResult.RESPONDER_BUSY,MatchTip.CHALLENGE_RESPONDER_BUSY);
-            var f=global.reserveDirect(key,payload,com.game.proto.match.MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE,record.configId(),List.of(record.challengerId(),player),Map.of(),0,null);
-            consumeGlobalProjection(challenge,player,deadline);
-            pushResult(record.challengerId(),challenge,true,player);pushResult(player,challenge,true,player);global.launchCommitted(f);
+            if(deadline.expired()||challenge==0)return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
+            var original=global.store().invitation(session,challenge);
+            if(original.getState()==1&&request.getAccept()&&(lockedOrUnknown(original.getChallengerId(),deadline,"发起者")||lockedOrUnknown(player,deadline,"应战者")))
+                return respondRejected(ChallengeResult.RESPONDER_BUSY,MatchTip.CHALLENGE_RESPONDER_BUSY);
+            var result=global.decideChallenge(session,request,deadline);
+            if(result.getState()==4)return respondRejected(ChallengeResult.INTERNAL,MatchTip.BUSY);
+            if(result.getState()==3)pushResult(result.getChallengerId(),challenge,false,player);
+            if(result.getState()==2){pushResult(result.getChallengerId(),challenge,true,player);pushResult(player,challenge,true,player);global.launchCommitted(global.store().formation(result.getBattleId()));}
             return RespondChallengeResponse.getDefaultInstance();
         }catch(RuntimeException e){log.warn("切磋原意图尚未确认",e);return respondRejected(ChallengeResult.INTERNAL,MatchTip.BUSY);}
-    }
-
-    // SQL 已提交后仅清理邀请展示/冷却投影；投影失败不能把已受理的原意图伪装成拒绝。
-    private void consumeGlobalProjection(long challenge,long player,Deadline deadline){
-        try{store.consume(challenge,player,nonces.get(),deadline);}catch(RuntimeException e){log.warn("切磋原意图已提交，邀请投影等待 TTL 清理",e);}
     }
 
     // ================================================================ 内部
@@ -395,6 +380,7 @@ public final class ChallengeService {
 
     /** 清理记录与占坑（尽力而为，用请求剩余的预算）：清不掉只影响 TTL 之内对同一目标再次发起。 */
     private void cleanup(long challengeId, long targetId, Deadline d) {
+        if(global!=null)return; // SQL邀请保留原TTL；丢回复/推送失败可复用原件重推。
         try {
             store.delete(challengeId, targetId, d);
         } catch (Deadline.DependencyException e) {
@@ -414,5 +400,10 @@ public final class ChallengeService {
 
     private static String id(long value) {
         return Long.toUnsignedString(value);
+    }
+    private String publicName(long player,Deadline deadline) {
+        if(deadline.expired())return "";
+        try{return Objects.requireNonNullElse(publicNames.apply(player,Deadline.after(Math.max(1,Math.min(1000,deadline.remainingMillis())))),"");}
+        catch(RuntimeException unavailable){log.debug("切磋公开角色名暂缺");return "";}
     }
 }

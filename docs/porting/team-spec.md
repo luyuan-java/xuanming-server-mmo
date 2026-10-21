@@ -1,5 +1,21 @@
 # 组队服务（team）移植统一规格：从 mmorpg 基线到 Java 版
 
+## 2026-10-21 全球 SQL 权威增补（覆盖下文旧 Redis 事实源与自然过期语义）
+
+本轮用户已授权两版服务器、客户端及全部必要范围。生产 `TeamStore(DataSource)` 以同一 TiDB 事务域的记录为唯一真相，现有 `mutate/readFree/readMembers/commitMatchLock/endMatch` 接口隐藏 SQL 锁序、原身份验证、版本 CAS、限额与重放。旧 Redis 构造只用于原脚本契约夹具，生产配置不装配它，也不在 SQL 故障时回退。Redis presence 仍供在线显示与惰性规则使用，读取失败为 UNKNOWN；它不授予成员关系或账号权限。
+
+`TeamTables` 经既有 pbmysql 登记七表，定义来自自有 `team_record.proto`：`team_authority` 保存完整 PB、严格递增版本、SQL 投影和解散墓碑；`team_member_authority` 保存每角色唯一归属及永不删除的 epoch 墓碑；`team_invite_authority` 和 `team_application_authority` 是同事务的私有同意索引；`team_action` 保存原角色、方法、请求 UUID、摘要和冻结结果；`team_launch` 保存不可变开局；`team_launch_role` 记录每个原角色的在途开局。完整名单最多 5、每队申请/邀请各 10、每目标未过期邀请最多 10。版本与 epoch 耗尽拒绝，解散不删除版本行。
+
+所有客户端 CRUD 保留 `SessionContext` 的原账号和 owner revision。写请求使用主契约稳定 `request_id`；同 UUID 换方法、原文或账号修订均拒绝，连接序号不充当业务意图。预读有界参与者后，先按 uint64 升序锁全部 player(P)，核发起原会话及旧成员原件，再锁 Team、成员/同意索引、请求或 launch。版本或参与者变化退回事务外重读，拿到 Team 锁后不得补 P。加入者的申请/邀请保存正规 TeamConsentOriginal（发起人与接收人原账号修订），在同 P 下核验双方，不能用当前目录给旧邀请补权。包括已离队的原发起人/接收人也纳入有界锁集合；最多 46 个不同角色。角色冻结、删除和导入在同 P 下拒绝非零成员关系、未终结 launch role、双方有效申请/邀请；缺表、NULL、未知状态拒绝。
+
+开局在锁名单的同一事务保存主契约 `TeamLaunchOriginal` 的确定字节：原 actor、锁提交版本、token、完整 Start 请求、显式 roster_order、各成员原账号修订和固定 ticket、原预检 zones、预算及 SQL 时刻。固定 ticket 由原 UUID 与角色号确定；重启恢复必须复用这些原件。`launch_request_id` 非空时不会因 TTL 或读取旧快照换队长/名单；TTL 只约束传输和工作预算。恢复器每轮读取最多 32 项，按 updated_ms/request_id 公平轮转，单项失败保留原件。
+
+`MatchTeamBattle` 把正规原件带入 `TeamTicketsRequest.launch_original`，Match 必须在同 P → Team → launch → direct → tickets → formation 顺序核原字节与当前名单。全球补位以不可拆分队伍为一个有界 unit，按人数桶选择并精确装箱；不能把队员逐个送入单排队列。此接缝由 Match 域实现，不能用直接开关代替其完整实现。Team 清锁还会直接核同 SQL 域的原 UUID、原 actor、原 Start payload 与真实 formation 4/5；负答、未知、TTL、进程退出均没有释放权限。
+
+场景跟随与跨区在队判定经 `TeamMembershipReader(DataSource, executor)` 从 SQL 同快照读永久索引与投影，并交给有界存储线程；旧 Redis 投影、缓存丢失或历史导入不能改变成员关系。SQL 索引与原件不一致时拒绝，不按孤儿缓存自愈删除永久关系。生产 Druid 每个物理连接复用 `StrongTiDbConnectionPolicy`，启动核同域 player 和 Match 所需列，未满足即拒启。
+
+新增 `TeamSqlAuthorityTiDbTest` 源码覆盖永久墓碑、原身份/ABA/冻结、UUID 重放、私有邀请、上限、开局未知与终局证明、全员反向并发及场景 SQL 读取；这些是未执行的测试源码。按本批限制未生成、未构建、未运行测试或进程，静态检查不等于运行证据。
+
 > **基线**：mmorpg `26ceb70ca`，与 `contract/SOURCE.properties:4` 的 `mmorpg.commit` 相同。Java 侧以 `acc5684` 为准。
 > 写作时工作区里有一批未提交的「热关停」改动，涉及 `game-gate/.../session/ClientDispatcher.java`、`MessageRoutes.java`、
 > `game-discovery/.../RedisKeys.java`、`game-gate/src/main/resources/application.yaml` 等文件。这些文件的行号按当前工作区给出，提交后可能小幅漂移，所以引用时同时写出方法名。
@@ -2062,3 +2078,19 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
   - A 上行 213 → 收不到任何回包；
   - D 拒绝不存在的邀请 → 幂等成功；RespondInvite(team_id=0) → 4013。
 - **输出**：沿用 `CheckReport`，在报告里引用 PARITY「组队」行。
+
+### 2026-10-21 后续SQL路由、补位与观战退出源码对齐
+
+Team所有完整参与角色先经同库meta/zone64片/P前缀。创建、申请与邀请提交时重核SQLhome，当前账号修订与同意原件不从缓存补。硬规则唯一源移至common.team.TeamPolicyContract；TeamLimits引用六项常量，Team SQL singleton policy固定实际allowCrossZone与同一硬规则指纹，后启动副本不同规则拒绝覆盖。
+
+不足员开局作为完整原launch单位入Match队列，正规QUEUED回包不走旧逐票gather；TeamView排队态、目标人数、原入队时刻和副本从同SQL单位派生，显示态不写入TeamRecord。首次原Start在全P内调用共用ObserverExitAuthority，捕获固定旧watch/head/typedAdd/固定RPC实例，并关闭原head尚未许可Add的永久回执后与launch一次提交。重放只读永久exits，Match只取消固定列表，获原Remove正证明后才推进，不抓后来观战。
+
+名册变动先纯判定原业务合法性，再在原P/Team/launch事务复用唯一TeamQueueAuthority取消原完整单位；早于迟到Start也留永久closed unit、direct和join墓碑。forming/built拒绝拆队；unit1/2或原件不符都保留原锁。清业务锁只认原D+exact unit4/battle0/cancelled，或当前同单位真实formation4/5，不能因旧F5清重新排队单位。完整生产建表/Matcher装箱测试由Match域负责，Team集成夹具仅声明此跨域协议访问列，不将其称作完整Match证据。
+
+team_launch.active(私有字段15)是有界恢复索引投影，与team_authority.active_launch_id同事务维护；Match修改阶段不清该索引，Team核正证明清业务锁时才清。恢复按active/updated/request索引轮转，覆盖prepared、queued、forming与终局待清，不遍扫永久历史。启动核两关联一致；本项目未上线，旧试验库须停写审核真实SQL原件后迁移该投影，不能从Redis补。
+
+本批所有证据仍是源码与静态检查：未正式生成、编译、测试、运行维护或启动进程。最终清单覆盖前版Team清单中的同路径hash，历史清单保留。
+
+SQL策略的正规typed投影为team_policy.allow_cross_zone与contract_digest，原contract逐字绑定唯一common TeamPolicyContract硬规则。Team与Match共用TeamPolicyAuthority读取并核SHA-256与规范bytes，缺失typed列/错误摘要不能猜配置或启动覆盖；Match装箱最终按同一actual allowCrossZone核SQL home。私有Trial roster是按player无符号规范化的授权集合，发起者身份由独立initiator字段与本人原同意证明，不依赖repeated下标。
+
+首次原Start在保存原回执之后、写任何新launch之前，同完整P调用唯一MatchEntryAuthority.requireFree，拒绝未终局票或另一域活动launch；重放不重捕watch或当前home。TeamLaunchOriginal与恢复submission的zones固定为本事务SQL player.zone_id，MemberPrecheck的在线位置区仅作完整性预检，不能覆盖home。恢复每轮最多选两项，以两个独立在途任务和每项三秒预算推进；SQL touch轮转UNKNOWN原件，不清业务锁，也不串行等待三十二次RPC。

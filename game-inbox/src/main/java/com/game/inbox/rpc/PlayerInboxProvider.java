@@ -50,6 +50,11 @@ public final class PlayerInboxProvider implements PlayerInboxService, AutoClosea
         submit(response, () -> {
             try {
                 response.complete(store.fetch(Deadline.after(budgetMs), request, peer));
+            } catch (SecurityException denied) {
+                log.warn("[PlayerInbox] Fetch原场景准入被拒 domain={} scene_node_id={}", request.getDomainValue(), Integer.toUnsignedString(request.getSceneNodeId()));
+                response.complete(FetchPlayerInboxResponse.newBuilder().setPlayerId(request.getPlayerId()).setDomainValue(request.getDomainValue())
+                        .setCorrelationId(request.getCorrelationId()).setFence(com.game.proto.player_inbox.PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_STALE)
+                        .setErrorMessage(TipInfoMessage.newBuilder().setId(InboxTips.STALE_OWNER)).build());
             } catch (Exception e) {
                 log.error("[PlayerInbox] Fetch 失败 player={} domain={} scene_node_id={} peer={}", Long.toUnsignedString(request.getPlayerId()),
                         request.getDomainValue(), Integer.toUnsignedString(request.getSceneNodeId()), peer, e);
@@ -66,6 +71,11 @@ public final class PlayerInboxProvider implements PlayerInboxService, AutoClosea
         submit(response, () -> {
             try {
                 response.complete(store.ack(Deadline.after(budgetMs), request, peer));
+            } catch (SecurityException denied) {
+                log.warn("[PlayerInbox] Ack原场景准入被拒 domain={} scene_node_id={}", request.getDomainValue(), Integer.toUnsignedString(request.getSceneNodeId()));
+                response.complete(AckPlayerInboxResponse.newBuilder().setPlayerId(request.getPlayerId()).setDomainValue(request.getDomainValue())
+                        .setCorrelationId(request.getCorrelationId()).setFence(com.game.proto.player_inbox.PlayerInboxFenceVerdict.PLAYER_INBOX_FENCE_STALE)
+                        .setErrorMessage(TipInfoMessage.newBuilder().setId(InboxTips.STALE_OWNER)).build());
             } catch (Exception e) {
                 log.error("[PlayerInbox] Ack 失败 player={} domain={} scene_node_id={} peer={}", Long.toUnsignedString(request.getPlayerId()),
                         request.getDomainValue(), Integer.toUnsignedString(request.getSceneNodeId()), peer, e);

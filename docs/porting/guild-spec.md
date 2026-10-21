@@ -1887,3 +1887,13 @@ Java原有五个活动入口均为占位。本批沿当前Go行为实现活动�
 `ActivityStartupGateTest` 的 20 项有效首红有 17 项失败：原实现允许关闭强读、缺省不安装强会话、未核验结果主题便创建活动处理器；修复后全部转绿。最终再次 `clean package`，8 组 **116/116**，失败、错误、跳过均为 0，保留前述 12 项真实 TiDB（其中 1 项同时真实 Redis）；183 个源文件与验证副本逐一 SHA 一致。随后明确 prod、活动开启、TiDB 强读开启、全球匹配开启，连接独立三节点真实 Kafka 与真实 TiDB/Redis 启动成品：health UP、两个 Triple 提供方及 21986 实际监听通过。夹具创建自身随机命名空间的三分区 RF3 主题并读回 minISR=2/unclean=false；退出后只删除自身主题、SQL 库与 Redis 键。三节点位于同机，此证据不证明多区域故障、普通战斗个人资产结算或容量。
 
 最新证据在同一 mmorpg 构建目录：`java-guild-startup-gate-red-2-20261016.log`、`java-guild-startup-gate-green-20261016.log`、`java-guild-strict-clean-package-final-20261016.log`、`java-guild-strict-boot-verified-check-2-20261016.log`、`java-guild-strict-boot-verified-20261016.log`、`java-guild-strict-final-proof-20261016.json`。有效红测试无编译错误；首次上下文夹具问题、首次启动辅助程序 Kafka Admin 超时参数不自洽也保留原失败记录，未通过关闭产品门禁绕过。
+
+### 2026-10-21 历练原同意与角色交易互锁（实现设计，尚未运行）
+
+角色可过户后，历练建房与每人接受必须从自己的 SessionContext 冻结原账号/owner_revision，私有 GuildTrialLobbyConsent 标准 PB 流保存在 SQL 房间的 request_proto（仅 PENDING）；客户端 GuildTrialLobbyView 仍只含玩家号。重复本人接受只允许同一原件；不能从当前 SQL 补齐旧同意。最后一人接受时先按 uint64 升序锁全员 P，再锁 G/M，逐项核原同意账号、修订、未冻结、成员资格，同事务提交 GuildTrialLaunchOriginal 永久原件、PREPARED launch 和 ACTIVE 逐角色投影，之后才按 lobbyID 原 request 发 Match。Trial 保留不可变 actor 与未绑定 AuthorityJdbc 专用事务，以保证全员 P 顺序；其余活动仍复用既有 AuthorityJdbc.forActor。
+
+launch 原件和摘要不可改写；SQL PREPARED 不因邀请 TTL、客户端结束或帮会解散删除。后台按 updated_ms/request_id 有界公平轮转重投原 Start，并对未知/拒答调用绑定完整 Start 的 Cancel。只信经 MMORPG_MATCH_INTERNAL_SECRET_GUILD 核签的 match 回复，方法 /match.MatchInternal/CancelActivityBattle/reply，且 request_digest 等于本次清 auth 的 Cancel 摘要。仅 request_cancelled=true 且 battle=0，或 formation_state=5 可同事务落 cancel_receipt、TERMINAL 并清 ACTIVE；未签 Start formation_state 不能单独证明安全。其它带 battle 的回执只能绑定原 launch 等实际结果。
+
+结果结算与 POISON 均先读永久 launch 原件，再全员 P 升序验证原账号修订，再 G（可已删除）及 launch/投影/原战斗锁，严格核 roster、活动上下文、battle 与 launch request。缺原件拒绝，不能静默跳奖或解除投影。有效 SETTLED/POISON 同事务终结 launch 与 ACTIVE；EXPIRED 仍允许迟到结果，始终保留 ACTIVE。奖励 owed 与资产 op 延续原可靠投递并在角色冻结/维护 guard 阻止提前过户；帮会解散只影响是否能追加帮会内奖励，不删除 launch 原件。
+
+新增表沿现有 PbMysql 用主契约私有消息及 TableOption 登记，不手改共享生成产物、不另造并行 PB。角色 Begin 与受控 Import 在已持 P 时拒绝 ACTIVE 投影，不以 requireGuildExit 关闭跳过该检查。重置只在既有显式本地维护路径加入新表；运行 worker 不按 TTL 清持久 launch/ACTIVE。测试覆盖原同意/ABA/冻结、提交顺序、未知结果、已签取消/伪签/换原件、结果重放/过期/解散、角色维护拒绝及正常终局释放。本轮源码与静态证据分别登记，生成、编译、真实 TiDB、双区均由主控统一验证。

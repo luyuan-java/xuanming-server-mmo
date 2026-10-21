@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
  * 签发落点分配包 {@code BattleAssignedS2C}（基线 {@code BuildAssignment}，{@code room.cpp:1432-1498}；battle-node-spec §2.1–§2.5、§7.5）。
  *
  * <ol>
- *   <li>payload 填 {@code {battle_id, player_id, battle_node_id = 租约节点号, battle_instance_id = 实例 UUID, expire_at_ms = 房间期限, role}}；</li>
+ *   <li>payload 填房间、角色、固定节点实例、房间期限、role；观众额外填原spectator_operation_id，参战者必须空；</li>
  *   <li>只调一次 {@code toByteString()}，<b>同一份字节</b>既拿去签名、又放进 {@code token_payload}；</li>
  *   <li>地址取通告地址（{@link BattleIdentity#advertiseHost()} / {@link BattleIdentity#advertisePort()}，Java 总有值，§11 N6）。</li>
  * </ol>
@@ -49,7 +49,14 @@ public final class BattleTicketIssuer {
      */
     public Optional<BattleAssignedS2C> issue(long battleId, long playerId, long expireAtMs, eBattleTicketRole role,
                                              TicketPath path) {
+        return issue(battleId,playerId,expireAtMs,role,path,"");
+    }
+    public Optional<BattleAssignedS2C> issue(long battleId,long playerId,long expireAtMs,eBattleTicketRole role,TicketPath path,String spectatorOperation) {
         try {
+            if(role==eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER){
+                var operation=java.util.UUID.fromString(spectatorOperation);
+                if(!operation.toString().equals(spectatorOperation)||(operation.getMostSignificantBits()==0&&operation.getLeastSignificantBits()==0))throw new IllegalArgumentException("观众签票必须绑定原操作");
+            }else if(spectatorOperation==null||!spectatorOperation.isEmpty())throw new IllegalArgumentException("参战票不得携观战操作");
             ByteString payload = BattleTicketPayload.newBuilder()
                     .setBattleId(battleId)
                     .setPlayerId(playerId)
@@ -57,6 +64,7 @@ public final class BattleTicketIssuer {
                     .setBattleInstanceId(identity.instanceId())
                     .setExpireAtMs(expireAtMs)
                     .setRole(role)
+                    .setSpectatorOperationId(spectatorOperation)
                     .build()
                     .toByteString();
             ByteString signature = tickets.sign(payload);

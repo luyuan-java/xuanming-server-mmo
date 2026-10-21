@@ -41,6 +41,8 @@ final class BattleRoom {
     final NavigableMap<Long, BattleRouting> routingByObserver = new TreeMap<>(Long::compareUnsigned);
     /** observer_id → 名字（日志用）。 */
     final Map<Long, String> observerNames = new HashMap<>();
+    /** 原观战操作号；新操作不得覆盖仍在房内的旧操作。 */
+    final Map<Long,String> observerOperations=new HashMap<>();
     /** player_id → 已验证直连，参战与观战共用一个槽（单槽互斥）。 */
     final NavigableMap<Long, DirectLink> directByPlayer = new TreeMap<>(Long::compareUnsigned);
 

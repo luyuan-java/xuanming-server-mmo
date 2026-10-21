@@ -93,6 +93,12 @@ public final class BattleTickets {
                 && role != eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER_VALUE) {
             return Verdict.ROLE_INVALID;
         }
+        String operation=payload.getSpectatorOperationId();
+        if(role==eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT_VALUE&&!operation.isEmpty())return Verdict.ROLE_INVALID;
+        if(role==eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER_VALUE){
+            try{var id=java.util.UUID.fromString(operation);if(!id.toString().equals(operation)||(id.getMostSignificantBits()==0&&id.getLeastSignificantBits()==0))return Verdict.ROLE_INVALID;}
+            catch(IllegalArgumentException invalid){return Verdict.ROLE_INVALID;}
+        }
         return Verdict.OK;
     }
 

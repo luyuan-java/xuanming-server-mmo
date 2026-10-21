@@ -52,6 +52,15 @@ import org.springframework.core.env.MapPropertySource;
  * 装配齐全时容器按构造器注入把 Dubbo 提供方建出来，两个新 RPC 经它走到 {@link TravelRouter}。不起 Dubbo、不连 Redis（替身）。
  */
 class TravelConfigurationTest {
+    /** 本例只验装配，不把mock数据源当真库证据；SQL锁与缺原件在PlayerRouteAuthoritySqlTest覆盖。 */
+    @org.springframework.context.annotation.Configuration(proxyBeanMethods=false)
+    static class FixtureConfiguration extends TravelConfiguration{
+        @Override @org.springframework.context.annotation.Bean public org.springframework.beans.factory.InitializingBean routeSqlAuthority(javax.sql.DataSource source){return ()->{};}
+    }
+    private static javax.sql.DataSource routeDataSource(){
+        var source=mock(com.alibaba.druid.pool.DruidDataSource.class);var connection=mock(java.sql.Connection.class);var metadata=mock(java.sql.DatabaseMetaData.class);
+        try{org.mockito.Mockito.when(source.getConnection()).thenReturn(connection);org.mockito.Mockito.when(connection.getMetaData()).thenReturn(metadata);org.mockito.Mockito.when(metadata.getDatabaseProductName()).thenReturn("H2");}catch(java.sql.SQLException failure){throw new AssertionError(failure);}return source;
+    }
 
     private static final SelectTravelTargetRequest TRAVEL = SelectTravelTargetRequest.newBuilder()
             .setFromZoneId(1).setToZoneId(2).setPlayerId(42).build();
@@ -63,7 +72,8 @@ class TravelConfigurationTest {
     /** 选路装配的全部上游依赖（Redis 客户端是替身：构造 gate 目录读取面不碰 Redis，本测试也不调它）。 */
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
-            .withUserConfiguration(TravelConfiguration.class)
+            .withUserConfiguration(FixtureConfiguration.class)
+            .withBean(javax.sql.DataSource.class,TravelConfigurationTest::routeDataSource)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(WorldChannelStore.class, FakeWorldChannelStore::new)
             .withBean(SceneNodeSource.class, () -> NO_NODES)
@@ -143,7 +153,7 @@ class TravelConfigurationTest {
                     .hasSingleBean(GateSource.class).hasSingleBean(ZoneMergeFence.class);
             assertThat(ctx.getBean(TravelRouting.class)).isInstanceOf(TravelRouter.class);
             assertThat(ctx.getBean(GateSource.class)).isInstanceOf(RedisGateSource.class);
-            assertThat(ctx.getBean(ZoneMergeFence.class)).as("批次 7.3 之前没有合服").isSameAs(ZoneMergeFence.OPEN);
+            assertThat(ctx.getBean(ZoneMergeFence.class)).isInstanceOf(com.game.discovery.zone.SqlZoneMergeFence.class);
         });
     }
 
@@ -166,7 +176,8 @@ class TravelConfigurationTest {
     void 容器能按构造器注入建出场景目录提供方_两个新RPC经它走到选路() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
-                .withUserConfiguration(TravelConfiguration.class)
+                .withUserConfiguration(FixtureConfiguration.class)
+                .withBean(javax.sql.DataSource.class,TravelConfigurationTest::routeDataSource)
                 .withInitializer(secret("s"))
                 .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
                 .withBean(WorldChannelStore.class, FakeWorldChannelStore::new)

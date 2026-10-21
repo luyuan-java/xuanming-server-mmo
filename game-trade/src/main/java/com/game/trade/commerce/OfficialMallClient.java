@@ -20,6 +20,11 @@ import javax.crypto.spec.SecretKeySpec;
 
 /** Mall官方库存与游戏资产之间的可信接缝；HTTP未知时原订单与seq原样保留。 */
 public final class OfficialMallClient {
+    static final class HttpFailure extends IllegalStateException {
+        private final int status;
+        HttpFailure(int status) { super("商城HTTP请求失败：" + status); this.status = status; }
+        int status() { return status; }
+    }
     private final OfficialMallProperties p;
     private final CommerceEngine e;
     private final ObjectMapper json;
@@ -38,7 +43,7 @@ public final class OfficialMallClient {
             || base.getRawQuery() != null || base.getFragment() != null || !Set.of("", "/").contains(base.getPath()))
             throw new IllegalArgumentException("商城HTTP地址非法");
     }
-    private JsonNode call(String role, String subject, String method, String path, Object input, Deadline d)
+    JsonNode call(String role, String subject, String method, String path, Object input, Deadline d)
         throws Exception {
         CommerceStore.active(d);
         byte[] body = input == null ? new byte[0] : json.writeValueAsBytes(input);
@@ -65,11 +70,14 @@ public final class OfficialMallClient {
             if (raw.length > 262144)
                 throw new IllegalStateException("商城应答越界");
             if (response.statusCode() != 200)
-                throw new IllegalStateException("商城HTTP请求失败：" + response.statusCode());
+                throw new HttpFailure(response.statusCode());
             return raw.length == 0 ? json.createObjectNode() : json.readTree(raw);
         }
     }
-    public Message client(String method, long player, Message input, Deadline d) throws Exception {
+    public Message client(String method, com.game.api.proto.SessionContext actor, Message input, Deadline d) throws Exception {
+        if (actor == null || actor.getPlayerId() == 0 || actor.getAccount().isEmpty() || actor.getOwnerRevision() <= 0)
+            throw new Refusal(INVALID);
+        long player = actor.getPlayerId();
         String subject = Long.toUnsignedString(player);
         if (method.equals("ListOfficialSkus")) {
             var in = (ListOfficialSkusRequest) input;
@@ -96,22 +104,26 @@ public final class OfficialMallClient {
         if (method.equals("CreateOfficialOrder")) {
             var in = (CreateOfficialOrderRequest) input;
             order = call("gateway", subject, "POST", "/api/orders",
-                Map.of("requestId", in.getClientRequestId(), "skuId", in.getSkuId(), "quantity", in.getQuantity()), d);
+                Map.of("requestId", in.getClientRequestId(), "skuId", in.getSkuId(), "quantity", in.getQuantity(),
+                    "buyerAccount",actor.getAccount(),"buyerOwnerRevision",Long.toUnsignedString(actor.getOwnerRevision())), d);
         } else {
             String id = method.equals("GetCommerceOrder") ? ((GetCommerceOrderRequest) input).getOrderId()
                                                           : ((CancelCommerceOrderRequest) input).getOrderId();
             if (!id.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))
                 throw new Refusal(INVALID);
             boolean cancel = method.equals("CancelCommerceOrder");
-            order = call(
-                "gateway", subject, cancel ? "POST" : "GET", "/api/orders/" + id + (cancel ? "/cancel" : ""), null, d);
+            order = call("gateway", subject, "POST", cancel ? "/api/orders/cancel" : "/api/orders/query",
+                Map.of("orderId",id,"buyerAccount",actor.getAccount(),"buyerOwnerRevision",Long.toUnsignedString(actor.getOwnerRevision())), d);
         }
         return answer(order, player);
     }
-    public List<CommerceOrderView> list(long player, String after, int limit, Deadline d) throws Exception {
+    public List<CommerceOrderView> list(com.game.api.proto.SessionContext actor, String after, int limit, Deadline d) throws Exception {
+        if (actor == null || actor.getPlayerId() == 0 || actor.getAccount().isEmpty() || actor.getOwnerRevision() <= 0)
+            throw new Refusal(INVALID);
+        long player = actor.getPlayerId();
         List<CommerceOrderView> result = new ArrayList<>();
         for (var node : call("gateway", Long.toUnsignedString(player), "POST", "/api/orders/list",
-                 Map.of("afterOrderId", after, "limit", limit), d))
+                 Map.of("afterOrderId", after, "limit", limit,"buyerAccount",actor.getAccount(),"buyerOwnerRevision",Long.toUnsignedString(actor.getOwnerRevision())), d))
             result.add(answer(node, player).getOrder());
         return result;
     }
@@ -143,6 +155,9 @@ public final class OfficialMallClient {
     }
     private TradeCommerceRow accept(JsonNode in, Deadline d) throws Exception {
         long player = Long.parseUnsignedLong(in.path("buyerId").asText());
+        String account = RmbConsignmentClient.text(in,"buyerAccount"), rawRevision = RmbConsignmentClient.text(in,"buyerOwnerRevision");
+        long revision = CommerceClientService.id(rawRevision);
+        if (account.isEmpty()) throw new Refusal(INVALID);
         String order = in.path("orderId").asText();
         int config = in.path("itemConfigId").asInt(), count = in.path("itemCount").asInt();
         if (player == 0 || !order.matches("[0-9a-f-]{36}") || config <= 0 || count < 1 || count > 4096)
@@ -163,6 +178,7 @@ public final class OfficialMallClient {
                            .setSkuQuantity(in.path("quantity").asInt())
                            .setExternalAmount(in.path("amountMinor").asLong())
                            .setExternalCurrency(in.path("currency").asText())
+                           .setBuyerIdentity(TradeRoleIdentity.newBuilder().setAccount(account).setOwnerRevision(revision))
                            .setOfficialBundle(AssetBundle.newBuilder().addItems(
                                ItemGrant.newBuilder().setConfigId(config).setCount(count)));
         var row = TradeCommerceRow.newBuilder()
@@ -179,8 +195,14 @@ public final class OfficialMallClient {
                       .build();
         try {
             return e.store.transaction(d, c -> {
-                CommerceStore.insert(c, "trade_commerce", row);
-                return row;
+                var accepted = row.toBuilder();
+                try { com.game.common.player.PlayerSessionAuthority.lock(c,player,account,revision,2); }
+                catch (SecurityException ownershipChanged) {
+                    // 尚未发任何资产op，原身份已失效的已付款意图只能原单退款，不给当前新主。
+                    accepted.setStatus(8).setWorkflowProto(workflow.setStage("official_refund").build().toByteString());
+                }
+                CommerceStore.insert(c, "trade_commerce", accepted.build());
+                return accepted.build();
             });
         } catch (java.sql.SQLException raced) {
             var stored = e.store.byRequest(key);
@@ -222,7 +244,7 @@ public final class OfficialMallClient {
         if (firstFailure != null)
             throw firstFailure;
     }
-    private record DeliveryEntry(JsonNode intent, String cursor) {}
+    record DeliveryEntry(JsonNode intent, String cursor) {}
     private record DeliveryScan(long afterMs, String afterId, long upperMs, String upperId) {}
     private static int compareDeliveryKey(long firstMs, String firstId, long secondMs, String secondId) {
         int time = Long.compare(firstMs, secondMs);
@@ -245,7 +267,7 @@ public final class OfficialMallClient {
         }
     }
     /** 先校验完整包装，再开始任何副作用；业务内容错误留给逐项尝试处理。 */
-    private static List<DeliveryEntry> deliveryPage(JsonNode page, String requestedCursor) {
+    static List<DeliveryEntry> deliveryPage(JsonNode page, String requestedCursor) {
         if (!page.isObject() || !page.path("entries").isArray() || page.path("entries").size() > 20)
             throw new IllegalStateException("商城交付页包装非法");
         DeliveryScan previous = requestedCursor.isEmpty() ? null : decodeDeliveryCursor(requestedCursor);
@@ -280,6 +302,7 @@ public final class OfficialMallClient {
         String state = switch (r.getStatus()) {
             case SETTLED -> "DELIVERED";
             case 8 -> "REFUND_PENDING";
+            case CANCELLED -> CommerceEngine.workflow(r).getStage().equals("official_refund") ? "REFUND_PENDING" : "";
             case MANUAL -> "MANUAL";
             default -> "";
         };
@@ -289,5 +312,17 @@ public final class OfficialMallClient {
             Map.of("orderId", in.path("orderId").asText(), "tradeOrderId", Long.toUnsignedString(r.getCommerceId()),
                 "state", state, "proof",
                 HexFormat.of().formatHex(CommerceEngine.sha(r.getWorkflowProto().toByteArray()).toByteArray())), d);
+        if (r.getStatus() == 8) {
+            // Mall已持久接管原款退款。游戏资产合同终止，无后续credit；资金状态仍由Mall展示为退款中。
+            // 保留原workflow原字节，重放时生成相同REFUND_PENDING/proof，不伪造已退款事实。
+            e.store.transaction(d, c -> {
+                var current=e.store.lock(c,r.getCommerceId());
+                if(current != null && current.getStatus() == 8 && current.getWorkflowProto().equals(r.getWorkflowProto())) {
+                    e.store.markConsumed(c,current.getCommerceId());
+                    e.store.save(c,current.toBuilder().setStatus(CANCELLED).setUpdatedMs(e.clock.getAsLong()));
+                }
+                return null;
+            });
+        }
     }
 }
